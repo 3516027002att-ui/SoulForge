@@ -146,7 +146,7 @@ export async function runMapDocument10kScaleSmoke(): Promise<void> {
     assert.equal(importResult.transaction.operations.length, 1);
   }
 
-  // Test duplicate delta rejection (Section 4: fake duplicate capability removed)
+  // Test template-backed duplicate translation and malformed-name refusal.
   const duplicateDelta: BlenderDeltaImport = {
     schemaVersion: 1,
     mapId: 'm10_00_00_00',
@@ -156,14 +156,23 @@ export async function runMapDocument10kScaleSmoke(): Promise<void> {
       {
         stableKey: firstPart.stableKey,
         action: 'duplicate',
+        name: 'm10_template_duplicate',
         position: [200, 10, -30]
       }
     ]
   };
   const duplicateResult = importBlenderDeltaToTransaction(doc, duplicateDelta);
-  assert.equal(duplicateResult.ok, false, 'Duplicate delta must be rejected as unsupported');
-  if (!duplicateResult.ok) {
-    assert.match(duplicateResult.error, /MAP_DUPLICATE_UNSUPPORTED/, 'Error must contain MAP_DUPLICATE_UNSUPPORTED code');
+  assert.equal(duplicateResult.ok, true, 'Template-backed Part duplicate must translate to a MapEditTransaction');
+  if (duplicateResult.ok) {
+    assert.equal(duplicateResult.transaction.operations[0]?.kind, 'duplicate');
+  }
+  const malformedDuplicate = importBlenderDeltaToTransaction(doc, {
+    ...duplicateDelta,
+    mutations: [{ stableKey: firstPart.stableKey, action: 'duplicate' }]
+  });
+  assert.equal(malformedDuplicate.ok, false, 'Duplicate without a new name must be rejected');
+  if (!malformedDuplicate.ok) {
+    assert.match(malformedDuplicate.error, /MAP_DUPLICATE_NAME_REQUIRED/);
   }
 
   // Test multi-op batch transaction validation (Section 3: single batch atomic commit)

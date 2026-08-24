@@ -128,4 +128,46 @@ describe('ACTION Continuous Sampler & De Boor Spline Tests', () => {
     // FLVER bone 2 unmapped in HKX, retains FLVER reference pose [0, 0, 3]
     assert.deepEqual(flverPose[2]?.translation, [0, 0, 3]);
   });
+
+  it('root motion 保留 native reference-frame 数据，additive clip 仍不得伪装成 absolute pose', () => {
+    const base: TaeAnimationClipData = {
+      animId: 300,
+      motionAnimId: 300,
+      animationType: 'Interleaved',
+      duration: 1,
+      frameCount: 1,
+      frameDuration: 1,
+      transformTrackCount: 1,
+      hkxBoneCount: 1,
+      hkxBoneNames: ['Root'],
+      hkxReferencePose: [{ translation: [0, 0, 0], rotation: [0, 0, 0, 1], scale: [1, 1, 1] }],
+      trackToHkxBone: [0],
+      interleavedTransforms: [{ translation: [0, 0, 0], rotation: [0, 0, 0, 1], scale: [1, 1, 1] }]
+    };
+    const rootMotionClip = {
+      ...base,
+      hasExtractedMotion: true,
+      extractedMotion: {
+        frameType: 1,
+        up: [0, 1, 0, 0] as [number, number, number, number],
+        forward: [0, 0, 1, 0] as [number, number, number, number],
+        duration: 1,
+        frameCount: 2,
+        samples: [
+          { raw: [0, 0, 0, 0], translation: [0, 0, 0], rotationAngle: 0 },
+          { raw: [2, 4, 6, 0.5], translation: [2, 4, 6], rotationAngle: 0.5 }
+        ]
+      }
+    } satisfies TaeAnimationClipData;
+    const rootMotionSampler = new ActionContinuousSampler(rootMotionClip);
+    assert.deepEqual(rootMotionSampler.sampleExtractedMotion(0.5, false), {
+      raw: [1, 2, 3, 0.25],
+      translation: [1, 2, 3],
+      rotationAngle: 0.25
+    });
+    assert.throws(
+      () => new ActionContinuousSampler({ ...base, blendHint: 1 }),
+      /non-absolute blend hint/
+    );
+  });
 });

@@ -26,6 +26,23 @@ export type MsbBridgeMutation =
       modelIndex?: number;
     }
   | {
+      kind: 'duplicate_part' | 'create_part';
+      partName: string;
+      newName: string;
+      posX?: number;
+      posY?: number;
+      posZ?: number;
+      rotX?: number;
+      rotY?: number;
+      rotZ?: number;
+      scaleX?: number;
+      scaleY?: number;
+      scaleZ?: number;
+      modelName?: string;
+      modelIndex?: number;
+      entityId?: number;
+    }
+  | {
       kind: 'set_property' | 'set_entity_id';
       partName: string;
       entityId: number;
@@ -76,6 +93,7 @@ function serializeMsbMutation(m: MsbBridgeMutation): Record<string, unknown> {
   if ('modelName' in m && m.modelName !== undefined) item.modelName = m.modelName;
   if ('modelIndex' in m && m.modelIndex !== undefined) item.modelIndex = m.modelIndex;
   if ('entityId' in m && m.entityId !== undefined) item.entityId = m.entityId;
+  if ('newName' in m && m.newName !== undefined) item.newName = m.newName;
   return item;
 }
 

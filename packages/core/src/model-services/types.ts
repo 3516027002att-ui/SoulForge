@@ -4,6 +4,8 @@
  */
 
 import type { RagRetrieveResult } from '@soulforge/shared';
+import type { CompletionEvidence } from '../semantic/types.js';
+import type { ModelProviderCapabilityState } from './providerCapabilities.js';
 
 export type ModelServiceProtocol = 'openai-compatible' | 'openai-responses' | 'anthropic-compatible';
 
@@ -116,6 +118,19 @@ export interface ModelServiceConfig {
   hasCredential: boolean;
   createdAt: string;
   updatedAt: string;
+  /** Explicit service declaration; absence is unknown, never an automatic probe result. */
+  capabilities?: ModelProviderCapabilities;
+}
+
+export interface ModelProviderCapabilities {
+  /** Each true/false is an explicit declaration; omitted means unknown. */
+  tools?: boolean;
+  vision?: boolean;
+  reasoningEffort?: boolean;
+  topP?: boolean;
+  topK?: boolean;
+  temperature?: boolean;
+  maxTokens?: boolean;
 }
 
 export interface ModelServiceCredentialRef {
@@ -188,6 +203,8 @@ export interface ModelCompleteRequest {
   topK?: number;
   /** 思考强度；off/未配置不下发。 */
   thinkingLevel?: ModelThinkingLevel;
+  /** Explicitly declared/resolved provider capabilities; unsupported fields must be omitted. */
+  capabilities?: ModelProviderCapabilities;
   signal?: AbortSignal;
   /** Per-request timeout in milliseconds. When elapsed, the request is aborted. */
   timeoutMs?: number;
@@ -231,6 +248,8 @@ export type ModelListResult =
 
 export interface ModelServiceAdapter {
   readonly protocol: ModelServiceProtocol;
+  /** Effective adapter baseline and its provenance/policy. */
+  readonly capabilityState?: ModelProviderCapabilityState;
   complete(request: ModelCompleteRequest): Promise<ModelCompleteResult>;
   stream(request: ModelCompleteRequest): AsyncGenerator<StreamEvent, void, undefined>;
   /**
@@ -396,6 +415,19 @@ export interface RolloutSessionMeta {
   protocol: ModelServiceProtocol;
   permissionMode: AgentPermissionMode;
   model?: string;
+  appCommitSha?: string;
+  systemPromptVersion?: string;
+  systemPromptHash?: string;
+  toolRegistryVersion?: string;
+  resolverVersion?: string;
+  semanticIndexRevision?: string;
+  ragRevision?: string;
+  workspaceRevision?: string;
+  taskType?: string;
+  providerCapabilities?: ModelProviderCapabilities;
+  /** Effective baseline policy/provenance; distinguishes config from fail-closed. */
+  providerCapabilityState?: ModelProviderCapabilityState;
+  reasoningConfig?: ModelSamplingOptions;
 }
 
 export type RolloutItem =
@@ -464,7 +496,7 @@ export interface AgentRunRequest {
   executeTool: (
     call: ToolCall,
     contextOverride?: Record<string, unknown>
-  ) => Promise<{ ok: boolean; content: string; code?: string }>;
+  ) => Promise<{ ok: boolean; content: string; code?: string; completionEvidence?: CompletionEvidence[] }>;
   maxSteps?: number;
   signal?: AbortSignal;
   /** Per-LLM-call timeout in milliseconds. */
@@ -544,6 +576,15 @@ export interface AgentRunRequest {
     retrieve: (query: string) => Promise<RagRetrieveResult>;
     maxHits?: number;
   };
+  /** Original external goal; never derive RAG from retry/compaction messages. */
+  externalTaskGoal?: string;
+  /** Current semantic subgoal, if the host has one. */
+  currentSubgoal?: string;
+  /** Main-owned current workspace revision for ephemeral evidence filtering. */
+  workspaceRevision?: string;
+  /** Host-verifiable completion predicates. Model prose cannot satisfy these. */
+  completionContract?: import('../semantic/types.js').CompletionContract;
+  providerCapabilities?: ModelProviderCapabilities;
 }
 
 export interface AgentRunResult {
@@ -587,6 +628,8 @@ export interface AgentRunResult {
       code?: 'insufficient_evidence' | 'CONTEXT_LIMIT_EXCEEDED' | 'CONTEXT_CANCELLED' | 'CONTEXT_TIMEOUT';
     }>;
   };
+  taskModel?: import('../semantic/types.js').TaskModel;
+  completion?: import('../semantic/types.js').CompletionEvaluation;
 }
 
 // ---------------------------------------------------------------------------
@@ -630,11 +673,16 @@ export interface ContextBrokerOptions {
   /** Assembly timeout in milliseconds. */
   timeoutMs?: number;
   signal?: AbortSignal;
+  /** Current workspace revision; sources carrying another sourceRevision are stale. */
+  currentSourceRevision?: string;
 }
 
 export interface ContextSectionRecord {
   kind: ContextEvidenceKind;
   uri?: string;
+  identity?: string;
+  sourceRevision?: string;
+  coverageStatus?: string;
   excerptLength: number;
   sourceBytes: number;
   truncated: boolean;

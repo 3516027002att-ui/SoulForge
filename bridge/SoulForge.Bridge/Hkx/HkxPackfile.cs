@@ -84,6 +84,8 @@ internal sealed class HkxPackfile
     public Section DataSection { get; }
     public Dictionary<uint, string> ClassNamesByOffset { get; } = new();
 
+    private delegate bool FixupReader(ReadOnlySpan<byte> span, int index);
+
     public HkxPackfile(Header header, Section classSection, Section typeSection, Section dataSection, Dictionary<uint, string> classNames)
     {
         PackfileHeader = header;
@@ -122,6 +124,11 @@ internal sealed class HkxPackfile
             Flags = BinaryPrimitives.ReadInt32LittleEndian(bytes.AsSpan(56, 4))
         };
 
+        if (header.Endian != 0)
+            throw new NotSupportedException($"HKX endian mode {header.Endian} is not supported; only little-endian packfiles are authoritative.");
+        if (header.PointerSize != 8)
+            throw new NotSupportedException($"HKX pointer size {header.PointerSize} is not supported by the Sekiro reader; expected 8.");
+
         if (header.SectionCount < 3)
             throw new InvalidDataException($"HKX section count is {header.SectionCount}, expected at least 3.");
 
@@ -136,8 +143,15 @@ internal sealed class HkxPackfile
         int curHeaderOffset = sectionHeaderOffset;
         for (int i = 0; i < header.SectionCount; i++)
         {
-            if (curHeaderOffset + 0x30 > bytes.Length)
+            // Sekiro's DS3/Havok packfile section header is 0x40 bytes:
+            // 20 bytes of tag/padding, seven offsets, and four reserved
+            // uint32 values.  Advancing by 0x30 shifts every section after
+            // the first and makes all fixups look valid but point elsewhere.
+            if (curHeaderOffset < 0 || curHeaderOffset + 0x40 > bytes.Length)
                 throw new InvalidDataException($"HKX truncated while reading section header {i}.");
+
+            if (bytes[curHeaderOffset + 19] != 0xFF)
+                throw new InvalidDataException($"HKX section {i} has an invalid section-header separator.");
 
             var sec = new Section
             {
@@ -152,69 +166,19 @@ internal sealed class HkxPackfile
                 EndOffset = BinaryPrimitives.ReadUInt32LittleEndian(bytes.AsSpan(curHeaderOffset + 0x2C, 4))
             };
 
-            int dataSize = (int)(sec.LocalFixupsOffset != 0xFFFFFFFF
-                ? sec.LocalFixupsOffset
-                : (sec.GlobalFixupsOffset != 0xFFFFFFFF
-                    ? sec.GlobalFixupsOffset
-                    : (sec.VirtualFixupsOffset != 0xFFFFFFFF
-                        ? sec.VirtualFixupsOffset
-                        : (sec.EndOffset != 0xFFFFFFFF ? sec.EndOffset : 0))));
+            int absStart = ToIntOffset(sec.AbsoluteDataStart, $"section {i} data start");
+            int dataSize = ToSectionOffset(sec.LocalFixupsOffset, sec.GlobalFixupsOffset,
+                sec.VirtualFixupsOffset, sec.ExportsOffset, sec.EndOffset, $"section {i} data");
+            RequireFileRange(bytes, absStart, dataSize, $"section {i} data");
+            sec.SectionData = new byte[dataSize];
+            Array.Copy(bytes, absStart, sec.SectionData, 0, dataSize);
 
-            int absStart = (int)sec.AbsoluteDataStart;
-            if (absStart + dataSize <= bytes.Length && dataSize > 0)
-            {
-                sec.SectionData = new byte[dataSize];
-                Array.Copy(bytes, absStart, sec.SectionData, 0, dataSize);
-            }
-
-            // Read Local Fixups
-            if (sec.LocalFixupsOffset != 0xFFFFFFFF && sec.LocalFixupsOffset != sec.GlobalFixupsOffset)
-            {
-                int p = (int)(absStart + sec.LocalFixupsOffset);
-                while (p + 8 <= bytes.Length)
-                {
-                    uint src = BinaryPrimitives.ReadUInt32LittleEndian(bytes.AsSpan(p, 4));
-                    uint dst = BinaryPrimitives.ReadUInt32LittleEndian(bytes.AsSpan(p + 4, 4));
-                    p += 8;
-                    if (src == 0xFFFFFFFF) break;
-                    sec.LocalFixups.Add(new LocalFixup { Src = src, Dst = dst });
-                    sec.LocalFixupMap[src] = dst;
-                }
-            }
-
-            // Read Global Fixups
-            if (sec.GlobalFixupsOffset != 0xFFFFFFFF && sec.GlobalFixupsOffset != sec.VirtualFixupsOffset)
-            {
-                int p = (int)(absStart + sec.GlobalFixupsOffset);
-                while (p + 12 <= bytes.Length)
-                {
-                    uint src = BinaryPrimitives.ReadUInt32LittleEndian(bytes.AsSpan(p, 4));
-                    uint secIdx = BinaryPrimitives.ReadUInt32LittleEndian(bytes.AsSpan(p + 4, 4));
-                    uint dst = BinaryPrimitives.ReadUInt32LittleEndian(bytes.AsSpan(p + 8, 4));
-                    p += 12;
-                    if (src == 0xFFFFFFFF) break;
-                    sec.GlobalFixups.Add(new GlobalFixup { Src = src, DstSectionIndex = secIdx, Dst = dst });
-                }
-            }
-
-            // Read Virtual Fixups
-            if (sec.VirtualFixupsOffset != 0xFFFFFFFF && sec.VirtualFixupsOffset != sec.ExportsOffset)
-            {
-                int p = (int)(absStart + sec.VirtualFixupsOffset);
-                while (p + 12 <= bytes.Length)
-                {
-                    uint src = BinaryPrimitives.ReadUInt32LittleEndian(bytes.AsSpan(p, 4));
-                    uint secIdx = BinaryPrimitives.ReadUInt32LittleEndian(bytes.AsSpan(p + 4, 4));
-                    uint nameOff = BinaryPrimitives.ReadUInt32LittleEndian(bytes.AsSpan(p + 8, 4));
-                    p += 12;
-                    if (src == 0xFFFFFFFF) break;
-                    sec.VirtualFixups.Add(new VirtualFixup { Src = src, SectionIndex = secIdx, NameOffset = nameOff });
-                    sec.VirtualFixupMap[src] = nameOff;
-                }
-            }
+            ReadLocalFixups(bytes, sec, absStart, sec.LocalFixupsOffset, sec.GlobalFixupsOffset);
+            ReadGlobalFixups(bytes, sec, absStart, sec.GlobalFixupsOffset, sec.VirtualFixupsOffset);
+            ReadVirtualFixups(bytes, sec, absStart, sec.VirtualFixupsOffset, sec.ExportsOffset);
 
             sections.Add(sec);
-            curHeaderOffset += 0x30;
+            curHeaderOffset += 0x40;
         }
 
         var classSec = sections[0];
@@ -226,30 +190,18 @@ internal sealed class HkxPackfile
         if (classSec.SectionData.Length > 0)
         {
             int p = 0;
-            while (p < classSec.SectionData.Length)
+            while (p + 5 <= classSec.SectionData.Length)
             {
-                uint strOffset = (uint)p;
-                if (p + 4 > classSec.SectionData.Length) break;
-                // In Havok packfiles, classname entries typically start with 4-byte signature or 1 byte pad
-                if (classSec.SectionData[p] == 0)
-                {
-                    p++;
-                    continue;
-                }
-                // Skip 4-byte signature and 1-byte separator if present
-                int nameStart = p;
-                if (p + 5 < classSec.SectionData.Length && (classSec.SectionData[p + 4] == 0x09 || classSec.SectionData[p + 4] == 0x00))
-                {
-                    nameStart = p + 5;
-                }
+                if (classSec.SectionData[p] == 0xFF)
+                    break;
+                int nameStart = p + 5;
                 int nullPos = Array.IndexOf(classSec.SectionData, (byte)0, nameStart);
-                if (nullPos < 0) nullPos = classSec.SectionData.Length;
-                int len = nullPos - nameStart;
-                if (len > 0)
-                {
-                    string className = Encoding.ASCII.GetString(classSec.SectionData, nameStart, len);
-                    classNamesByOffset[strOffset] = className;
-                }
+                if (nullPos < 0)
+                    throw new InvalidDataException("HKX __classnames__ contains an unterminated class name.");
+                if (classSec.SectionData[p + 4] != 0x09)
+                    throw new InvalidDataException($"HKX __classnames__ entry at 0x{p:X} has an invalid separator.");
+                classNamesByOffset[(uint)nameStart] = Encoding.ASCII.GetString(
+                    classSec.SectionData, nameStart, nullPos - nameStart);
                 p = nullPos + 1;
             }
         }
@@ -265,5 +217,128 @@ internal sealed class HkxPackfile
                 return name;
         }
         return null;
+    }
+
+    private static int ToSectionOffset(
+        uint local,
+        uint global,
+        uint virtualOffset,
+        uint exports,
+        uint end,
+        string label)
+    {
+        uint[] candidates = { local, global, virtualOffset, exports, end };
+        foreach (uint candidate in candidates)
+        {
+            if (candidate != 0xFFFFFFFF)
+            {
+                if (candidate > int.MaxValue)
+                    throw new InvalidDataException($"HKX {label} offset {candidate} exceeds the supported range.");
+                return (int)candidate;
+            }
+        }
+        throw new InvalidDataException($"HKX {label} has no section-data boundary.");
+    }
+
+    private static int ToIntOffset(uint value, string label)
+    {
+        if (value > int.MaxValue)
+            throw new InvalidDataException($"HKX {label} offset {value} exceeds the supported range.");
+        return (int)value;
+    }
+
+    private static void RequireFileRange(byte[] bytes, int offset, int length, string label)
+    {
+        if (offset < 0 || length < 0 || (ulong)offset + (ulong)length > (ulong)bytes.Length)
+            throw new InvalidDataException($"HKX {label} is outside the input file.");
+    }
+
+    private static void ReadLocalFixups(
+        byte[] bytes,
+        Section section,
+        int absoluteStart,
+        uint start,
+        uint end)
+    {
+        ReadFixupRange(bytes, absoluteStart, start, end, 8, "local", (span, _) =>
+        {
+            uint src = BinaryPrimitives.ReadUInt32LittleEndian(span.Slice(0, 4));
+            if (src == 0xFFFFFFFF) return false;
+            uint dst = BinaryPrimitives.ReadUInt32LittleEndian(span.Slice(4, 4));
+            section.LocalFixups.Add(new LocalFixup { Src = src, Dst = dst });
+            section.LocalFixupMap[src] = dst;
+            return true;
+        });
+    }
+
+    private static void ReadGlobalFixups(
+        byte[] bytes,
+        Section section,
+        int absoluteStart,
+        uint start,
+        uint end)
+    {
+        ReadFixupRange(bytes, absoluteStart, start, end, 12, "global", (span, _) =>
+        {
+            uint src = BinaryPrimitives.ReadUInt32LittleEndian(span.Slice(0, 4));
+            if (src == 0xFFFFFFFF) return false;
+            section.GlobalFixups.Add(new GlobalFixup
+            {
+                Src = src,
+                DstSectionIndex = BinaryPrimitives.ReadUInt32LittleEndian(span.Slice(4, 4)),
+                Dst = BinaryPrimitives.ReadUInt32LittleEndian(span.Slice(8, 4))
+            });
+            return true;
+        });
+    }
+
+    private static void ReadVirtualFixups(
+        byte[] bytes,
+        Section section,
+        int absoluteStart,
+        uint start,
+        uint end)
+    {
+        ReadFixupRange(bytes, absoluteStart, start, end, 12, "virtual", (span, _) =>
+        {
+            uint src = BinaryPrimitives.ReadUInt32LittleEndian(span.Slice(0, 4));
+            if (src == 0xFFFFFFFF) return false;
+            uint nameOffset = BinaryPrimitives.ReadUInt32LittleEndian(span.Slice(8, 4));
+            section.VirtualFixups.Add(new VirtualFixup
+            {
+                Src = src,
+                SectionIndex = BinaryPrimitives.ReadUInt32LittleEndian(span.Slice(4, 4)),
+                NameOffset = nameOffset
+            });
+            section.VirtualFixupMap[src] = nameOffset;
+            return true;
+        });
+    }
+
+    private static void ReadFixupRange(
+        byte[] bytes,
+        int absoluteStart,
+        uint start,
+        uint end,
+        int recordSize,
+        string label,
+        FixupReader readRecord)
+    {
+        if (start == 0xFFFFFFFF || end == 0xFFFFFFFF || end < start)
+            return;
+        uint length = end - start;
+        if (length % (uint)recordSize != 0)
+            throw new InvalidDataException($"HKX {label} fixup range has a partial record.");
+        if (start > int.MaxValue || length > int.MaxValue)
+            throw new InvalidDataException($"HKX {label} fixup range exceeds the supported address space.");
+        int rangeStart = checked(absoluteStart + (int)start);
+        RequireFileRange(bytes, rangeStart, (int)length, $"HKX {label} fixups");
+        int count = (int)length / recordSize;
+        for (int i = 0; i < count; i++)
+        {
+            var span = bytes.AsSpan(rangeStart + i * recordSize, recordSize);
+            if (!readRecord(span, i))
+                break;
+        }
     }
 }

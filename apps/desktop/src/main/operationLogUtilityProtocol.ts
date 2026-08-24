@@ -114,9 +114,10 @@ export interface OperationLogUtilityPayloadMap {
   replaceRagChunks: { chunks: RagChunk[] };
   loadRagChunks: Record<string, never>;
   searchRagChunks: { query: string; limit?: number };
-  replaceRagEmbeddings: { entries: Array<{ chunkId: string; model: string; vector: Float32Array }> };
+  replaceRagEmbeddings: { entries: Array<{ chunkId: string; model: string; vector: Float32Array; sourceRevision: string }> };
   loadRagEmbeddings: Record<string, never>;
   ragEmbeddingModel: Record<string, never>;
+  ragEmbeddingSourceRevision: Record<string, never>;
   replaceReferences: { references: ReferenceEdge[] };
   loadReferences: Record<string, never>;
   replaceDiagnostics: { diagnostics: Array<Omit<PersistedDiagnostic, 'workspaceId'>> };
@@ -189,6 +190,7 @@ export interface OperationLogUtilityResultMap {
   replaceRagEmbeddings: null;
   loadRagEmbeddings: Record<string, number[]>;
   ragEmbeddingModel: string | null;
+  ragEmbeddingSourceRevision: string | null;
   replaceReferences: null;
   loadReferences: ReferenceEdge[];
   replaceDiagnostics: null;

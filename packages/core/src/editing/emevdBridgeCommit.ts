@@ -16,6 +16,8 @@ export interface EmevdBridgeMutationRequest {
   mutation: EmevdEditorMutation | EmevdBridgeNativeMutation;
   /** Optional global instruction index when applying args from Bridge sample indices. */
   instructionIndex?: number;
+  /** Native Oodle root required when sourcePath is a KRAK-wrapped DCX. */
+  oodleRuntimeRoot?: string;
   timeoutMs?: number;
 }
 
@@ -82,6 +84,8 @@ export interface EmevdBridgeBatchRequest {
   allowedRoots: string[];
   writableRoots: string[];
   mutations: EmevdBridgeNativeMutation[];
+  /** Native Oodle root required when sourcePath is a KRAK-wrapped DCX. */
+  oodleRuntimeRoot?: string;
   timeoutMs?: number;
 }
 
@@ -96,6 +100,7 @@ export async function commitEmevdMutationViaBridge(
     sourcePath: request.sourcePath,
     allowedRoots: request.allowedRoots,
     writableRoots: request.writableRoots,
+    ...(request.oodleRuntimeRoot !== undefined ? { oodleRuntimeRoot: request.oodleRuntimeRoot } : {}),
     ...(request.timeoutMs !== undefined ? { timeoutMs: request.timeoutMs } : {}),
     commandOptions
   });
@@ -118,6 +123,7 @@ export async function commitEmevdBatchViaBridge(
     sourcePath: request.sourcePath,
     allowedRoots: request.allowedRoots,
     writableRoots: request.writableRoots,
+    ...(request.oodleRuntimeRoot !== undefined ? { oodleRuntimeRoot: request.oodleRuntimeRoot } : {}),
     ...(request.timeoutMs !== undefined ? { timeoutMs: request.timeoutMs } : {}),
     commandOptions
   });
@@ -127,6 +133,7 @@ async function runEmevdWriteCommand(input: {
   sourcePath: string;
   allowedRoots: string[];
   writableRoots: string[];
+  oodleRuntimeRoot?: string;
   timeoutMs?: number;
   commandOptions: Record<string, unknown>;
 }): Promise<EmevdBridgeCommitResult> {
@@ -143,6 +150,7 @@ async function runEmevdWriteCommand(input: {
     filePath: input.sourcePath,
     allowedRoots: input.allowedRoots,
     writableRoots: input.writableRoots,
+    ...(input.oodleRuntimeRoot !== undefined ? { oodleRuntimeRoot: input.oodleRuntimeRoot } : {}),
     timeoutMs: input.timeoutMs ?? 120_000,
     commandOptions: input.commandOptions
   });

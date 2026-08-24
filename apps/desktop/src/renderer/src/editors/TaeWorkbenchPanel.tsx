@@ -13,9 +13,11 @@
  * 右栏是只读 3D 预览（S17）：
  * `read-chrbnd-flver-preview`（已登记进 AdvertisedCommands）从 overlay 或原版
  * chr/<id>.chrbnd.dcx 取伴生 FLVER，renderer 按 meshIndex=0..meshCount-1 循环读齐
- * 全部网格拼成完整模型（问题4-A），挂进现有 FlverViewer 画网格。两边都没有
- * chrbnd 时给可行动空态（去「开始」页挂原版）；动画播放未接入，空态明说
- * 「模型已挂，动画播放未接入」，不假装在播。不要时间轴图、不要 64 KiB 条。
+ * 全部网格拼成完整模型（问题4-A），挂进现有 FlverViewer 画网格。动画 clip
+ * 由 Bridge 解析后经 ActionContinuousSampler 连续采样，再以真实骨骼位姿驱动
+ * FlverViewer；两边都没有 chrbnd 时仍给可行动空态（去「开始」页挂原版）。
+ * 含 root motion 或非 absolute blend hint 的 clip 会由 Bridge/采样器明确拒绝，
+ * 不伪装成普通 absolute pose。不要时间轴图、不要 64 KiB 条。
  *
  * ── 事件参数体未解码是刻意边界 ──
  *

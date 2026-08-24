@@ -6,6 +6,7 @@ import type {
   ModelServiceConfig,
   ModelServiceProtocol
 } from './types.js';
+import type { ModelProviderCapabilityPolicy } from './providerCapabilities.js';
 
 export interface ConfiguredModelServiceAdapterOptions {
   config?: ModelServiceConfig | null;
@@ -82,6 +83,11 @@ export function createConfiguredModelServiceAdapter(
     baseUrl: endpoint.toString().replace(/\/$/, ''),
     apiKey,
     model: config.model.trim(),
+    // Configured production calls must not infer optional support from the
+    // protocol name. Missing fields remain unknown and are suppressed by the
+    // adapter; only explicit config/request declarations enable them.
+    capabilityPolicy: 'explicit-or-fail-closed' as ModelProviderCapabilityPolicy,
+    ...(config.capabilities ? { capabilities: config.capabilities } : {}),
     ...(options.fetchImpl ? { fetchImpl: options.fetchImpl } : {})
   };
   let adapter: ModelServiceAdapter;

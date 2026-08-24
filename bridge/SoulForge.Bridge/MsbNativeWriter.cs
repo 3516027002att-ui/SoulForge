@@ -119,8 +119,29 @@ internal static class MsbNativeWriter
             patches.Add(ParsePatch(options));
         }
         if (patches.Count == 0) throw new InvalidDataException("MSB writer 需要至少一条 mutation。");
+        var reservedNewNames = new HashSet<string>(StringComparer.Ordinal);
         foreach (var patch in patches)
         {
+            if (patch.Kind is "duplicate_part" or "create_part")
+            {
+                var templateMatches = document.Parts.Count(item => item.Name == patch.PartName);
+                if (templateMatches != 1)
+                    throw new InvalidDataException($"MSB part 模板必须唯一：{patch.PartName}; matches={templateMatches}。");
+                if (string.IsNullOrWhiteSpace(patch.NewName) || patch.NewName == patch.PartName)
+                    throw new InvalidDataException($"{patch.Kind} 需要与模板不同的非空 newName。");
+                if (document.Parts.Any(item => item.Name == patch.NewName)
+                    || document.Regions.Any(item => item.Name == patch.NewName)
+                    || document.Events.Any(item => item.Name == patch.NewName)
+                    || document.Models.Any(item => item.Name == patch.NewName))
+                    throw new InvalidDataException($"MSB newName 已被占用：{patch.NewName}。");
+                if (!reservedNewNames.Add(patch.NewName))
+                    throw new InvalidDataException($"MSB 同一批 mutation 重复声明 newName：{patch.NewName}。");
+                if (patch.ModelName is not null && !document.Models.Any(item => item.Name == patch.ModelName))
+                    throw new InvalidDataException($"MSB model 不存在：{patch.ModelName}");
+                if (patch.ModelIndex is not null && (patch.ModelIndex < 0 || patch.ModelIndex >= document.Models.Count))
+                    throw new InvalidDataException($"MSB modelIndex 越界：{patch.ModelIndex}");
+                continue;
+            }
             var matches = patch.Kind switch
             {
                 "set_region_position" or "set_region_transform" or "delete_region" => document.Regions.Count(item => item.Name == patch.PartName),
@@ -188,6 +209,43 @@ internal static class MsbNativeWriter
                 continue;
             }
 
+            if (patch.Kind is "duplicate_part" or "create_part")
+            {
+                var source = reread.Parts.FirstOrDefault(part => part.Name == patch.PartName)
+                    ?? throw new InvalidDataException($"MSB template part 重读后缺失：{patch.PartName}。");
+                var clone = reread.Parts.FirstOrDefault(part => part.Name == patch.NewName)
+                    ?? throw new InvalidDataException($"MSB cloned part 重读后缺失：{patch.NewName}。");
+                if (clone.TypeId != source.TypeId)
+                    throw new InvalidDataException($"MSB cloned part subtype 不一致：{patch.NewName}。");
+                VerifyClonedPart(reread, source, clone, patch);
+                continue;
+            }
+
+            if (patch.Kind is "set_property" or "set_entity_id")
+            {
+                if (patch.EntityId is null)
+                    throw new InvalidDataException("MSB set_property 缺少 entityId。");
+                var partEntity = reread.Parts.FirstOrDefault(p => p.Name == patch.PartName);
+                if (partEntity is not null)
+                {
+                    if (partEntity.EntityId != patch.EntityId.Value)
+                        throw new InvalidDataException("MSB part entityId 未按预期更新。");
+                    continue;
+                }
+                var regionEntity = reread.Regions.FirstOrDefault(r => r.Name == patch.PartName);
+                if (regionEntity is not null)
+                {
+                    if (regionEntity.EntityId != patch.EntityId.Value)
+                        throw new InvalidDataException("MSB region entityId 未按预期更新。");
+                    continue;
+                }
+                var eventEntity = reread.Events.FirstOrDefault(e => e.Name == patch.PartName)
+                    ?? throw new InvalidDataException($"MSB mutation 后找不到 event {patch.PartName}。");
+                if (eventEntity.EventId != patch.EntityId.Value)
+                    throw new InvalidDataException("MSB eventId 未按预期更新。");
+                continue;
+            }
+
             var part = reread.Parts.FirstOrDefault(p => p.Name == patch.PartName)
                 ?? throw new InvalidDataException($"MSB mutation 后找不到 part {patch.PartName}。");
             if (patch.PosX is not null && Math.Abs(part.PosX - patch.PosX.Value) > 0.0001f)
@@ -211,6 +269,48 @@ internal static class MsbNativeWriter
         }
     }
 
+    private static void VerifyClonedPart(
+        MsbNativeDocument reread,
+        MsbPart source,
+        MsbPart clone,
+        MsbPatch patch)
+    {
+        var expectedModelIndex = patch.ModelIndex
+            ?? (patch.ModelName is not null
+                ? reread.Models.FirstOrDefault(model => model.Name == patch.ModelName)?.Offset is int
+                    ? reread.Models.ToList().FindIndex(model => model.Name == patch.ModelName)
+                    : throw new InvalidDataException($"MSB cloned part model 重读后缺失：{patch.ModelName}")
+                : source.ModelIndex);
+        if (clone.ModelIndex != expectedModelIndex)
+            throw new InvalidDataException($"MSB cloned part model 未按预期复制：{patch.NewName}。");
+        if (clone.EntityId != (patch.EntityId ?? source.EntityId))
+            throw new InvalidDataException($"MSB cloned part entityId 未按预期复制：{patch.NewName}。");
+
+        var expected = new[]
+        {
+            patch.PosX ?? source.PosX,
+            patch.PosY ?? source.PosY,
+            patch.PosZ ?? source.PosZ,
+            patch.RotX ?? source.RotX,
+            patch.RotY ?? source.RotY,
+            patch.RotZ ?? source.RotZ,
+            patch.ScaleX ?? source.ScaleX,
+            patch.ScaleY ?? source.ScaleY,
+            patch.ScaleZ ?? source.ScaleZ
+        };
+        var actual = new[]
+        {
+            clone.PosX, clone.PosY, clone.PosZ,
+            clone.RotX, clone.RotY, clone.RotZ,
+            clone.ScaleX, clone.ScaleY, clone.ScaleZ
+        };
+        for (var i = 0; i < expected.Length; i++)
+        {
+            if (Math.Abs(expected[i] - actual[i]) > 0.0001f)
+                throw new InvalidDataException($"MSB cloned part transform 未按预期复制：{patch.NewName}。");
+        }
+    }
+
     private static async Task AtomicWriteAsync(string outputPath, byte[] bytes, CancellationToken cancellationToken)
     {
         var directory = Path.GetDirectoryName(outputPath) ?? throw new InvalidDataException("outputPath 没有父目录。");
@@ -230,7 +330,9 @@ internal static class MsbNativeWriter
 
     private static MsbPatch ParsePatch(JsonElement item)
     {
-        var kind = RequiredString(item, item.TryGetProperty("kind", out _) ? "kind" : "mutation").ToLowerInvariant();
+        var kind = RequiredString(item, item.TryGetProperty("kind", out _) ? "kind" : "mutation")
+            .Trim()
+            .ToLowerInvariant();
         var partName = RequiredString(item, item.TryGetProperty("partName", out _) ? "partName" : "name");
         return new MsbPatch(
             kind,
@@ -246,7 +348,8 @@ internal static class MsbNativeWriter
             OptionalFloat(item, "scaleZ"),
             OptionalString(item, "modelName") ?? OptionalString(item, "newModelName"),
             OptionalInt(item, "modelIndex"),
-            OptionalInt(item, "entityId"));
+            OptionalInt(item, "entityId"),
+            OptionalString(item, "newName"));
     }
 
     private static void RequireHash(JsonElement options, string field, string actual, string label)

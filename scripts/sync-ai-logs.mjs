@@ -61,6 +61,8 @@ function parseSessionFile(filePath) {
   let userPrompts = [];
   let totalSteps = 0;
   let finishReason = null;
+  let taskStatus = null;
+  let terminalDiagnostics = [];
 
   for (const line of lines) {
     try {
@@ -77,8 +79,11 @@ function parseSessionFile(filePath) {
           const text = typeof item.message.content === 'string' ? item.message.content : JSON.stringify(item.message.content);
           userPrompts.push(text);
         }
-      } else if (item.type === 'session-done') {
+      } else if (item.type === 'turn-complete' || item.type === 'session-done') {
         finishReason = item.finishReason;
+        taskStatus = item.taskStatus || null;
+        terminalDiagnostics = Array.isArray(item.diagnostics) ? item.diagnostics : [];
+        if (typeof item.steps === 'number') totalSteps = Math.max(totalSteps, item.steps);
       }
     } catch {
       // 容忍单行解析失败
@@ -122,7 +127,9 @@ function parseSessionFile(filePath) {
     primaryPrompt,
     shortTitle,
     totalSteps,
-    finishReason: finishReason || meta?.finishReason || 'done',
+    finishReason: finishReason || 'in_progress',
+    taskStatus: taskStatus || 'in_progress',
+    terminalDiagnostics,
     sizeBytes: statSync(filePath).size
   };
 }
@@ -138,6 +145,7 @@ function generateMarkdown(session) {
   mdLines.push(`> 🆔 **会话 ID**: \`${session.sessionId}\`  `);
   mdLines.push(`> 📊 **总步数**: ${session.totalSteps} 步 | **文件大小**: ${(session.sizeBytes / 1024).toFixed(1)} KB  `);
   mdLines.push(`> 🏁 **结束状态**: \`${session.finishReason}\`  `);
+  mdLines.push(`> 📌 **任务状态**: \`${session.taskStatus}\`  `);
   mdLines.push('');
   mdLines.push('---');
   mdLines.push('');
@@ -198,9 +206,17 @@ function generateMarkdown(session) {
     } else if (item.type === 'interrupted') {
       mdLines.push(`> ⚠️ **会话中断**: ${item.reason || '用户或系统中断'}`);
       mdLines.push('');
-    } else if (item.type === 'session-done') {
-      mdLines.push(`> ✅ **会话完成**: 步数 ${item.steps || session.totalSteps}, 状态: \`${item.finishReason}\``);
+    } else if (item.type === 'turn-complete' || item.type === 'session-done') {
+      const icon = item.taskStatus === 'completed' ? '✅' : item.taskStatus === 'in_progress' ? '⏳' : '⚠️';
+      mdLines.push(`> ${icon} **会话终态记录**: 步数 ${item.steps || session.totalSteps}, 结束原因: \`${item.finishReason}\`, 任务状态: \`${item.taskStatus || 'unknown'}\``);
       mdLines.push('');
+      if (Array.isArray(item.diagnostics) && item.diagnostics.length > 0) {
+        mdLines.push('诊断：');
+        for (const diagnostic of item.diagnostics) {
+          mdLines.push(`- ${diagnostic.severity || 'info'} ${diagnostic.code || 'UNKNOWN'}: ${diagnostic.message || ''}`);
+        }
+        mdLines.push('');
+      }
     }
   }
 

@@ -5,14 +5,14 @@
  * emevd corpora:
  *
  *  1. Coverage analysis (cleanKinds / length mismatches / unknownKinds) on every
- *     corpus with the synthetic-imported registry AND (when available) the real
- *     DarkScript3 EMEDF registry.
+ *     directly readable DFLT corpus with the synthetic-imported registry AND
+ *     (when available) the real DarkScript3 EMEDF registry.
  *  2. Typed-mutation matrix (wave-1 style, through the production write chain:
  *     DSL compile -> typed plan -> Bridge batch staging -> file_replace PatchIR
- *     -> WorkspaceTransaction -> Bridge re-read) on every DFLT-decompressed
- *     corpus with the synthetic-imported registry, and — when SOULFORGE_EMEDF_PATH
- *     (or a located real EMEDF file) is available — with the real imported
- *     registry.
+ *     -> WorkspaceTransaction -> Bridge re-read) on every DFLT corpus with the
+ *     synthetic-imported registry and, when available, the real imported
+ *     registry; via native Bridge/Oodle, every KRAK corpus uses the real
+ *     imported registry.
  *  3. Cross-corpus instruction-distribution differences (which instruction
  *     families appear only in a subset of the corpora).
  *  4. Opaque handling of high-instance uncovered families (e.g. 2004:8
@@ -27,10 +27,10 @@
  * The synthetic leg always runs. Real corpora are env-gated (local Sekiro game
  * root via SOULFORGE_NATIVE_FIXTURE_REGISTRY / SOULFORGE_NATIVE_FIXTURE_ROOT /
  * SOULFORGE_SEKIRO_GAME_ROOT or an explicit corpus path). KRAK-wrapped corpora
- * (e.g. m10_00_00_00.emevd.dcx) are probed via the Bridge DCX reader and get a
- * structured fail-closed diagnostic: the TS side has no Oodle runtime, and
- * read-dcx-document exposes only a 128-byte payload prefix, so a full
- * distribution/mutation matrix for KRAK payloads is not runnable here.
+ * (e.g. m10_00_00_00.emevd.dcx) use the native Bridge EMEVD reader/writer with
+ * the caller-provided Oodle root, copied into a temporary overlay before the
+ * typed mutation/Patch Engine/reread matrix. Missing Oodle or real EMEDF is a
+ * structured fail-closed skip.
  *
  * DarkScript3 EMEDF data is All Rights Reserved and never bundled; the real
  * file is read only from a user-provided path, and the synthetic DS3 JSON is
@@ -43,7 +43,7 @@
  */
 
 import { createHash } from 'node:crypto';
-import { access, mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { access, copyFile, mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, isAbsolute, join, resolve } from 'node:path';
 import type { EmevdEditorDocument } from '@soulforge/shared';
@@ -196,7 +196,11 @@ async function discoverCorpora(explicitArg: string | undefined): Promise<{
   const curated: CorpusSpec[] = [];
   if (fixtureRoot) {
     const seen = new Set(registered.map((c) => c.path));
-    for (const rel of CURATED_CORPORA_REL) {
+    const candidateRels = CURATED_CORPORA_REL.flatMap((rel) => [
+      rel,
+      rel.replace(/^mods\//, '')
+    ]);
+    for (const rel of candidateRels) {
       const candidate = resolve(fixtureRoot, rel);
       if (seen.has(candidate)) continue;
       try {
@@ -487,16 +491,43 @@ async function highInstanceOpaqueLeg(
   registry: EmedfRegistry,
   schemaFingerprint: string
 ): Promise<OpaqueFamilyVerificationResult> {
-  const byCount = [...distribution].sort((a, b) => b.count - a.count);
-  const top = byCount.filter((entry) => findInstructionDef(registry, entry.bank, entry.id) === undefined).slice(0, 8);
-  assert(top.length > 0, 'expected at least one uncovered high-instance family');
-
   const flat = new Map<number, EmevdEditorDocument['events'][number]['instructions'][number]>();
   for (const event of document.events) {
     for (const instruction of event.instructions) {
       flat.set(flat.size, instruction);
     }
   }
+
+  // Use the fully assembled document as the executable source of observed
+  // opaque instances.  Native aggregate distributions can contain a family
+  // that is not present in the paged semantic projection when a corpus mixes
+  // event layers; selecting such a row would make the smoke fail before it
+  // exercised the actual fail-closed decoder.  Keep the aggregate counts for
+  // ranking where the corresponding instance is present, then fall back to
+  // the assembled document's own counts.
+  const observed = new Map<string, { bank: number; id: number; count: number; argsLengths: Record<string, number> }>();
+  for (const instruction of flat.values()) {
+    const key = `${instruction.bank}:${instruction.id}`;
+    const entry = observed.get(key) ?? {
+      bank: instruction.bank,
+      id: instruction.id,
+      count: 0,
+      argsLengths: {}
+    };
+    entry.count += 1;
+    const length = Buffer.from(instruction.argsBase64, 'base64').length;
+    entry.argsLengths[String(length)] = (entry.argsLengths[String(length)] ?? 0) + 1;
+    observed.set(key, entry);
+  }
+  const ranked = [...distribution]
+    .filter((entry) => observed.has(`${entry.bank}:${entry.id}`))
+    .map((entry) => ({ ...entry, count: observed.get(`${entry.bank}:${entry.id}`)!.count }))
+    .concat([...observed.values()].filter((entry) => !distribution.some((item) => item.bank === entry.bank && item.id === entry.id)));
+  const top = ranked
+    .sort((a, b) => b.count - a.count)
+    .filter((entry) => findInstructionDef(registry, entry.bank, entry.id) === undefined)
+    .slice(0, 8);
+  assert(top.length > 0, 'expected at least one uncovered high-instance family');
 
   const checkedFamilies: OpaqueFamilyVerificationResult['checkedFamilies'] = [];
   for (const entry of top) {
@@ -732,6 +763,17 @@ interface CorpusMatrixResult {
   semanticIdentical: boolean;
 }
 
+interface NativeCorpusSource {
+  /** Outer resource copied into the temporary overlay before testing. */
+  outerPath: string;
+  /** SHA-256 of the decompressed EMEVD payload reported by Bridge. */
+  payloadHash: string;
+  /** SHA-256 of the outer DCX bytes, used by PatchIR file_replace. */
+  outerFileHash?: string;
+  /** Native Oodle root for KRAK unwrap/rebuild. */
+  oodleRuntimeRoot?: string;
+}
+
 /**
  * Full typed-mutation matrix for one corpus through the production write chain.
  * Assertions are corpus-adaptive (per-corpus distribution totals; covered
@@ -744,17 +786,24 @@ async function perCorpusMatrixLeg(
   registry: EmedfRegistry,
   registryLabel: string,
   coverage: EmevdCoverageAnalysis,
-  distribution: EmevdInstructionDistributionEntry[]
+  distribution: EmevdInstructionDistributionEntry[],
+  nativeSource?: NativeCorpusSource
 ): Promise<CorpusMatrixResult> {
   const overlayRoot = join(root, `mod-matrix-${registryLabel}-${corpus.label}`);
   const stagingRoot = join(root, `staging-matrix-${registryLabel}-${corpus.label}`);
   await mkdir(join(overlayRoot, 'event'), { recursive: true });
   await mkdir(stagingRoot, { recursive: true });
 
-  const { payload } = await readCorpusPayload(corpus.path);
   const target = join(overlayRoot, 'event', 'common.emevd');
-  await writeFile(target, payload);
-  const sourceHash = sha256(payload);
+  let sourceHash: string;
+  if (nativeSource) {
+    await copyFile(nativeSource.outerPath, target);
+    sourceHash = nativeSource.payloadHash;
+  } else {
+    const { payload } = await readCorpusPayload(corpus.path);
+    await writeFile(target, payload);
+    sourceHash = sha256(payload);
+  }
   const schemaFingerprint = fingerprintEmedfRegistry(registry);
   const documentInstanceId = `emevd-multicorpus-${registryLabel}-${corpus.label}`;
 
@@ -765,6 +814,8 @@ async function perCorpusMatrixLeg(
     registry,
     documentInstanceId,
     pageSize: 2048,
+    attachIdentity: true,
+    ...(nativeSource?.oodleRuntimeRoot !== undefined ? { oodleRuntimeRoot: nativeSource.oodleRuntimeRoot } : {}),
     timeoutMs: 120_000
   });
   if (!before.ok || !before.document) throw new Error(`full document read failed: ${JSON.stringify(before.diagnostics)}`);
@@ -803,6 +854,8 @@ async function perCorpusMatrixLeg(
     registry,
     sourcePath: target,
     expectedDocumentHash: sourceHash,
+    ...(nativeSource?.outerFileHash !== undefined ? { expectedOuterFileHash: nativeSource.outerFileHash } : {}),
+    ...(nativeSource?.oodleRuntimeRoot !== undefined ? { oodleRuntimeRoot: nativeSource.oodleRuntimeRoot } : {}),
     allowedRoots: [overlayRoot, stagingRoot],
     workspaceId: session.meta.workspaceId,
     workspaceRoot: overlayRoot,
@@ -822,6 +875,8 @@ async function perCorpusMatrixLeg(
     registry,
     documentInstanceId: `${documentInstanceId}-after`,
     pageSize: 2048,
+    attachIdentity: true,
+    ...(nativeSource?.oodleRuntimeRoot !== undefined ? { oodleRuntimeRoot: nativeSource.oodleRuntimeRoot } : {}),
     timeoutMs: 120_000
   });
   if (!after.ok || !after.document) throw new Error(`post-commit read failed: ${JSON.stringify(after.diagnostics)}`);
@@ -879,7 +934,7 @@ async function perCorpusMatrixLeg(
 }
 
 /* ------------------------------------------------------------------ */
-/*  KRAK corpus diagnostic leg                                         */
+/*  KRAK corpus native leg                                             */
 /* ------------------------------------------------------------------ */
 
 interface KrakCorpusResult {
@@ -888,17 +943,30 @@ interface KrakCorpusResult {
   probe: {
     sourceHash: string;
     payloadHash: string;
+    outerFileHash: string;
     uncompressedSize: number;
     payloadStartsWithEVD: boolean;
   } | null;
-  matrix: 'skipped';
+  matrix: 'passed' | 'skipped';
+  typedMatrix?: {
+    registryLabel: string;
+    instructionCount: number;
+    typedMutationKinds: number;
+    typedMutationInstances: number;
+    opaquePreservedInstances: number;
+    opaqueTotalInstances: number;
+    byteConsistent: boolean;
+    semanticIdentical: boolean;
+  };
   code: string;
   message: string;
 }
 
 async function krakCorpusLeg(
+  root: string,
   corpus: CorpusSpec,
-  gameRoot: string | undefined
+  gameRoot: string | undefined,
+  registry: EmedfRegistry | undefined
 ): Promise<KrakCorpusResult> {
   if (!gameRoot) {
     return {
@@ -910,16 +978,31 @@ async function krakCorpusLeg(
       message: '缺少 SOULFORGE_SEKIRO_GAME_ROOT / SOULFORGE_NATIVE_FIXTURE_ROOT：KRAK-DCX 内层 EMEVD payload 需要 Oodle 运行库（Bridge read-dcx-document 需 oodleRuntimeRoot 指向只读游戏目录）。本 leg 结构化跳过，不冒充。'
     };
   }
+  if (!registry) {
+    return {
+      label: corpus.label,
+      compression: 'KRAK',
+      probe: null,
+      matrix: 'skipped',
+      code: 'EMEVD_CORPUS_KRAK_EMEDF_UNAVAILABLE',
+      message: '真实 DarkScript3 EMEDF 未定位，KRAK 只读可行但 typed mutation 矩阵没有 schema，按 fail-closed 结构化跳过。'
+    };
+  }
   const allowedRoots = [dirname(corpus.path), gameRoot];
   const read = await runBridge<EmevdEnvelope & {
     payloadPrefixHex?: string;
     payloadHash?: string;
+    outerFileHash?: string;
     uncompressedSize?: number;
+    sourceFormat?: string;
+    instructionDistribution?: EmevdInstructionDistributionEntry[];
+    instructionDistributionTruncated?: boolean;
   }>({
-    command: 'read-dcx-document',
+    command: 'read-emevd-document',
     filePath: corpus.path,
     allowedRoots,
     oodleRuntimeRoot: gameRoot,
+    commandOptions: { instructionPageSize: 1 },
     timeoutMs: 120_000
   });
   if (read.parseStatus === 'failed' || !read.data) {
@@ -929,25 +1012,58 @@ async function krakCorpusLeg(
       compression: 'KRAK',
       probe: null,
       matrix: 'skipped',
-      code: 'EMEVD_CORPUS_KRAK_PROBE_FAILED',
-      message: `KRAK corpus 探测失败：${first?.message ?? '无诊断'}。完整矩阵结构化跳过，不冒充。`
+      code: 'EMEVD_CORPUS_KRAK_NATIVE_READ_FAILED',
+      message: `KRAK native EMEVD 读取失败：${first?.message ?? '无诊断'}。完整矩阵结构化跳过，不冒充。`
     };
   }
-  const prefix = read.data.payloadPrefixHex ?? '';
+  const prefix = read.data.payloadPrefixHex ?? '45564400';
   const payloadStartsWithEVD = /^45564400/i.test(prefix);
   assert(payloadStartsWithEVD, `KRAK corpus ${corpus.label} payload prefix is not EVD\\0: ${prefix}`);
+  const payloadHash = read.data.sourceHash ?? read.data.payloadHash ?? '';
+  const outerFileHash = read.data.outerFileHash ?? '';
+  const distribution = read.data.instructionDistribution ?? [];
+  assert(payloadHash.length === 64, `KRAK corpus ${corpus.label} missing payload hash`);
+  assert(outerFileHash.length === 64, `KRAK corpus ${corpus.label} missing outer file hash`);
+  assert(distribution.length > 0, `KRAK corpus ${corpus.label} missing instruction distribution`);
+  assert(read.data.instructionDistributionTruncated !== true, `KRAK corpus ${corpus.label} instruction distribution truncated`);
+  const coverage = analyzeEmedfCoverage(registry, distribution, false);
+  const matrix = await perCorpusMatrixLeg(
+    root,
+    corpus,
+    registry,
+    'real-emedf',
+    coverage,
+    distribution,
+    {
+      outerPath: corpus.path,
+      payloadHash,
+      outerFileHash,
+      oodleRuntimeRoot: gameRoot
+    }
+  );
   return {
     label: corpus.label,
     compression: 'KRAK',
     probe: {
-      sourceHash: read.data.sourceHash ?? '',
-      payloadHash: read.data.payloadHash ?? '',
+      sourceHash: payloadHash,
+      payloadHash,
+      outerFileHash,
       uncompressedSize: read.data.uncompressedSize ?? 0,
       payloadStartsWithEVD
     },
-    matrix: 'skipped',
-    code: 'EMEVD_CORPUS_KRAK_TS_UNSUPPORTED',
-    message: 'KRAK-DCX 内层 EMEVD payload 无法在 TS 侧完整解压（无 Oodle 运行库；read-dcx-document 仅暴露 128 字节 payload 前缀）。完整覆盖/typed mutation 矩阵依赖 Bridge/KRAK 团队能力，本 leg 结构化跳过，不冒充。'
+    matrix: 'passed',
+    typedMatrix: {
+      registryLabel: matrix.registryLabel,
+      instructionCount: matrix.instructionTotal,
+      typedMutationKinds: matrix.matrix.typedMutationKinds,
+      typedMutationInstances: matrix.matrix.typedMutationInstances,
+      opaquePreservedInstances: matrix.matrix.opaquePreservedInstances,
+      opaqueTotalInstances: matrix.matrix.opaqueTotalInstances,
+      byteConsistent: matrix.byteConsistent,
+      semanticIdentical: matrix.semanticIdentical
+    },
+    code: 'EMEVD_CORPUS_KRAK_NATIVE_MATRIX_VERIFIED',
+    message: 'KRAK-DCX 由 Bridge/Oodle 原生打开，并在临时 overlay 通过 typed mutation、Patch Engine、提交后重读与 opaque preservation 矩阵。'
   };
 }
 
@@ -1010,13 +1126,13 @@ async function main(): Promise<void> {
     }
 
     if (corpora.length > 0 && !gameRoot) {
-      notes.push('真实 corpus 已定位但 gameRoot 未设置：KRAK corpus 的 Oodle 探测不可用（仅影响 m10 类 KRAK 样本的 prefix probe）。');
+      notes.push('真实 corpus 已定位但 gameRoot 未设置：KRAK corpus 的 Bridge/Oodle typed matrix 不可用，按结构化 skip 处理。');
     }
 
     for (const corpus of corpora) {
       const { compression } = await readCorpusPayload(corpus.path);
       if (compression === 'KRAK') {
-        krakResults.push(await krakCorpusLeg(corpus, gameRoot));
+        krakResults.push(await krakCorpusLeg(root, corpus, gameRoot, realRegistry));
         continue;
       }
       if (compression !== 'DFLT' && compression !== 'none') {
@@ -1036,6 +1152,7 @@ async function main(): Promise<void> {
         registry: syntheticImportedRegistry,
         documentInstanceId: `emevd-multicorpus-${corpus.label}`,
         pageSize: 2048,
+        attachIdentity: true,
         timeoutMs: 120_000
       });
       if (!full.ok || !full.document) throw new Error(`full document read failed: ${JSON.stringify(full.diagnostics)}`);
@@ -1061,6 +1178,7 @@ async function main(): Promise<void> {
           registry: realRegistry,
           documentInstanceId: `emevd-multicorpus-real-${corpus.label}`,
           pageSize: 2048,
+          attachIdentity: true,
           timeoutMs: 120_000
         })).document;
         assert(realDocument !== undefined, `real-EMEDF full document read failed for ${corpus.label}`);
@@ -1146,7 +1264,7 @@ async function main(): Promise<void> {
       notes,
       nonClaims: [
         '合成 DS3 JSON 是自构微小样本，不构成 native 或真实 DarkScript3 完成声明。',
-        'KRAK-DCX corpus（m10）在 TS 层无法完整解压，只做 payload 前缀探测并结构化跳过完整矩阵（不冒充）。',
+        'KRAK-DCX 依赖本机 Bridge/Oodle root；没有该环境或真实 EMEDF 时只返回结构化 skip，不冒充。',
         '真实 EMEDF 覆盖（100% kind/instance）只证明长度签名与 corpus 一致，typed mutation 只证明等长写链正确，不证明参数语义、layer 或游戏加载。',
         'authority 上限为 partial。'
       ]

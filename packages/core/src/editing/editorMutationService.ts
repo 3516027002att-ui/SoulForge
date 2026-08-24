@@ -33,6 +33,7 @@ import type {
 import { stageBridgeOutput, type BridgeStagingDiagnostic } from './bridgeStaging.js';
 import type { SaveRawResourceResult } from './saveRawResource.js';
 import type { NativeDocumentLocator } from './nativeDocumentLocator.js';
+import type { ExecutePatchIrOptions } from '../patch/durablePatchCommit.js';
 
 // ---------------------------------------------------------------------------
 // §14.4 locator → 编辑器能力（DOCSTORE-04）
@@ -78,7 +79,7 @@ const READ_OPS_BY_LEAF: Record<string, readonly ReadOperationId[]> = {
   gparam: ['page-banks', 'page-groups'],
   fmg: ['page-entries', 'read-source'],
   emevd: ['read-outline', 'read-source'],
-  msb: ['page-entries', 'read-preview'],
+  msb: ['page-entries', 'read-preview', 'read-properties'],
   flver: ['read-preview'],
   tpf: ['read-preview'],
   mtd: ['read-properties'],
@@ -173,6 +174,7 @@ export interface RawReplaceCommitPort {
     newContentBase64: string;
     title: string;
     confirmation?: ConfirmationReceipt;
+    semanticChecks?: ExecutePatchIrOptions['semanticChecks'];
   }): Promise<SaveRawResourceResult>;
 }
 
@@ -198,6 +200,8 @@ export interface NativeMutationRequest<T extends { ok: boolean }> {
   /** 确认对话框里显示的动作名，例如「提交 FMG 变更」。 */
   confirmActionLabel: string;
   confirmExtraSubjects?: string[];
+  /** 提交后的原生重读在同一 Durable Transaction 内执行，失败则自动还原。 */
+  semanticChecks?: ExecutePatchIrOptions['semanticChecks'];
 }
 
 export type NativeMutationOutcome =
@@ -270,7 +274,8 @@ export async function applyNativeMutation<T extends { ok: boolean }>(
     file: request.file,
     expectedHash: request.expectedHash,
     newContentBase64,
-    title: request.title
+    title: request.title,
+    ...(request.semanticChecks ? { semanticChecks: request.semanticChecks } : {})
   });
 
   if (!result.ok && result.requiresConfirmation && ports.confirm) {
@@ -287,7 +292,8 @@ export async function applyNativeMutation<T extends { ok: boolean }>(
       expectedHash: request.expectedHash,
       newContentBase64,
       title: request.title,
-      confirmation
+      confirmation,
+      ...(request.semanticChecks ? { semanticChecks: request.semanticChecks } : {})
     });
   }
 

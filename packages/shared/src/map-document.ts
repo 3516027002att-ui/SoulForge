@@ -279,6 +279,27 @@ export type MapEditOperation =
       newModelName: string;
     }
   | {
+      kind: 'duplicate';
+      target: string;
+      newName: string;
+      position?: [number, number, number] | undefined;
+      rotation?: [number, number, number] | undefined;
+      scale?: [number, number, number] | undefined;
+      modelName?: string | undefined;
+      entityId?: number | undefined;
+    }
+  | {
+      kind: 'create';
+      template: string;
+      newName: string;
+      entityKind: 'part';
+      position?: [number, number, number] | undefined;
+      rotation?: [number, number, number] | undefined;
+      scale?: [number, number, number] | undefined;
+      modelName?: string | undefined;
+      entityId?: number | undefined;
+    }
+  | {
       kind: 'delete';
       target: string;
     };
@@ -335,11 +356,28 @@ export function validateMapTransaction(
 
   const sceneGraph = new MapSceneGraph(doc);
   const deletedTargets = new Set<string>();
+  const reservedNewNames = new Set<string>();
+  const workingKinds = new Map<string, MapEntityKind>([
+    ...doc.models.map((entity) => [entity.name, entity.kind] as const),
+    ...doc.parts.map((entity) => [entity.name, entity.kind] as const),
+    ...doc.regions.map((entity) => [entity.name, entity.kind] as const),
+    ...doc.events.map((entity) => [entity.name, entity.kind] as const),
+    ...doc.routes.map((entity) => [entity.name, entity.kind] as const)
+  ]);
+  const pendingNames = new Set<string>();
+  const canonicalTarget = (target: string): string => sceneGraph.findEntity(target)?.name ?? target;
+  const wasDeleted = (target: string): boolean => deletedTargets.has(target) || deletedTargets.has(canonicalTarget(target));
+  const resolveWorkingEntity = (target: string): { name: string; kind: MapEntityKind; pending: boolean } | undefined => {
+    const initial = sceneGraph.findEntity(target);
+    const name = initial?.name ?? target;
+    const kind = workingKinds.get(name);
+    return kind ? { name, kind, pending: pendingNames.has(name) } : undefined;
+  };
 
   for (const op of transaction.operations) {
     switch (op.kind) {
       case 'set_transform': {
-        if (deletedTargets.has(op.target)) {
+        if (wasDeleted(op.target)) {
           diagnostics.push({
             severity: 'error',
             code: 'MAP_ENTITY_NOT_FOUND',
@@ -348,7 +386,11 @@ export function validateMapTransaction(
           });
           break;
         }
-        const entity = sceneGraph.findEntity(op.target);
+        const entity = resolveWorkingEntity(op.target);
+        if (!op.position && !op.rotation && !op.scale) {
+          diagnostics.push({ severity: 'error', code: 'MAP_TRANSFORM_EMPTY', message: `变换操作没有任何字段: ${op.target}`, target: op.target });
+          break;
+        }
         if (!entity) {
           diagnostics.push({
             severity: 'error',
@@ -367,8 +409,16 @@ export function validateMapTransaction(
         break;
       }
       case 'batch_transform': {
+        if (op.targets.length === 0) {
+          diagnostics.push({ severity: 'error', code: 'MAP_BATCH_EMPTY', message: '批量变换至少需要一个目标。' });
+          break;
+        }
+        if (!op.positionDelta && !op.rotationDelta && !op.scaleDelta) {
+          diagnostics.push({ severity: 'error', code: 'MAP_BATCH_DELTA_EMPTY', message: '批量变换没有任何变化量。' });
+          break;
+        }
         for (const target of op.targets) {
-          if (deletedTargets.has(target)) {
+          if (wasDeleted(target)) {
             diagnostics.push({
               severity: 'error',
               code: 'MAP_ENTITY_NOT_FOUND',
@@ -377,7 +427,7 @@ export function validateMapTransaction(
             });
             continue;
           }
-          const entity = sceneGraph.findEntity(target);
+          const entity = resolveWorkingEntity(target);
           if (!entity) {
             diagnostics.push({
               severity: 'error',
@@ -385,12 +435,19 @@ export function validateMapTransaction(
               message: `批量变换目标不存在: ${target}`,
               target
             });
+          } else if (entity.kind !== 'part' && entity.kind !== 'region') {
+            diagnostics.push({
+              severity: 'error',
+              code: 'MAP_ENTITY_NOT_TRANSFORMABLE',
+              message: `实体类型 ${entity.kind} 不支持批量变换: ${target}`,
+              target
+            });
           }
         }
         break;
       }
       case 'set_property': {
-        if (deletedTargets.has(op.target)) {
+        if (wasDeleted(op.target)) {
           diagnostics.push({
             severity: 'error',
             code: 'MAP_ENTITY_NOT_FOUND',
@@ -399,7 +456,7 @@ export function validateMapTransaction(
           });
           break;
         }
-        const entity = sceneGraph.findEntity(op.target);
+        const entity = resolveWorkingEntity(op.target);
         if (!entity) {
           diagnostics.push({
             severity: 'error',
@@ -427,7 +484,7 @@ export function validateMapTransaction(
         break;
       }
       case 'change_model': {
-        if (deletedTargets.has(op.target)) {
+        if (wasDeleted(op.target)) {
           diagnostics.push({
             severity: 'error',
             code: 'MAP_PART_NOT_FOUND',
@@ -436,8 +493,8 @@ export function validateMapTransaction(
           });
           break;
         }
-        const part = sceneGraph.findPart(op.target);
-        if (!part) {
+        const part = resolveWorkingEntity(op.target);
+        if (!part || part.kind !== 'part') {
           diagnostics.push({
             severity: 'error',
             code: 'MAP_PART_NOT_FOUND',
@@ -457,8 +514,111 @@ export function validateMapTransaction(
         }
         break;
       }
+      case 'duplicate': {
+        const source = resolveWorkingEntity(op.target);
+        validateNewEntityName(doc, op.newName, diagnostics, op.target, workingKinds.keys());
+        reserveNewEntityName(op.newName, reservedNewNames, diagnostics, op.target);
+        if (!source) {
+          diagnostics.push({
+            severity: 'error',
+            code: 'MAP_ENTITY_NOT_FOUND',
+            message: `复制模板实体不存在: ${op.target}`,
+            target: op.target
+          });
+        } else if (source.pending) {
+          diagnostics.push({
+            severity: 'error',
+            code: 'MAP_DUPLICATE_UNSUPPORTED',
+            message: '当前 native template contract 不允许在同一批次复制刚创建的 pending Part',
+            target: op.target
+          });
+        } else if (source.kind !== 'part') {
+          diagnostics.push({
+            severity: 'error',
+            code: 'MAP_DUPLICATE_UNSUPPORTED',
+            message: `当前 native template contract 只允许复制 Part，收到: ${source.kind}`,
+            target: op.target
+          });
+        }
+        if (op.modelName !== undefined && !doc.models.some((model) => model.name === op.modelName)) {
+          diagnostics.push({
+            severity: 'error',
+            code: 'MAP_MODEL_NOT_IN_MANIFEST',
+            message: `复制后的模型 ${op.modelName} 不在当前地图 Model 声明表中`,
+            target: op.target
+          });
+        }
+        if (op.entityId !== undefined && !Number.isInteger(op.entityId)) {
+          diagnostics.push({
+            severity: 'error',
+            code: 'MAP_PROPERTY_VALUE_INVALID',
+            message: '复制后的 entityId 必须是整数',
+            target: op.target
+          });
+        }
+        if (source?.kind === 'part' && !source.pending && !workingKinds.has(op.newName)) {
+          workingKinds.set(op.newName, 'part');
+          pendingNames.add(op.newName);
+        }
+        break;
+      }
+      case 'create': {
+        const template = resolveWorkingEntity(op.template);
+        validateNewEntityName(doc, op.newName, diagnostics, op.template, workingKinds.keys());
+        reserveNewEntityName(op.newName, reservedNewNames, diagnostics, op.template);
+        if (op.entityKind !== 'part') {
+          diagnostics.push({
+            severity: 'error',
+            code: 'MAP_CREATE_UNSUPPORTED',
+            message: `当前 native template contract 只允许创建 Part，收到: ${op.entityKind}`,
+            target: op.template
+          });
+        } else if (!template) {
+          diagnostics.push({
+            severity: 'error',
+            code: 'MAP_ENTITY_NOT_FOUND',
+            message: `创建模板实体不存在: ${op.template}`,
+            target: op.template
+          });
+        } else if (template.pending) {
+          diagnostics.push({
+            severity: 'error',
+            code: 'MAP_CREATE_UNSUPPORTED',
+            message: '当前 native template contract 不允许从同一批次刚创建的 pending Part 再创建',
+            target: op.template
+          });
+        } else if (template.kind !== 'part') {
+          diagnostics.push({
+            severity: 'error',
+            code: 'MAP_CREATE_UNSUPPORTED',
+            message: `创建模板必须是 Part，收到: ${template.kind}`,
+            target: op.template
+          });
+        }
+        if (op.modelName !== undefined && !doc.models.some((model) => model.name === op.modelName)) {
+          diagnostics.push({
+            severity: 'error',
+            code: 'MAP_MODEL_NOT_IN_MANIFEST',
+            message: `创建后的模型 ${op.modelName} 不在当前地图 Model 声明表中`,
+            target: op.template
+          });
+        }
+        if (op.entityId !== undefined && !Number.isInteger(op.entityId)) {
+          diagnostics.push({
+            severity: 'error',
+            code: 'MAP_PROPERTY_VALUE_INVALID',
+            message: '创建后的 entityId 必须是整数',
+            target: op.template
+          });
+        }
+        if (template?.kind === 'part' && !template.pending && !workingKinds.has(op.newName)) {
+          workingKinds.set(op.newName, 'part');
+          pendingNames.add(op.newName);
+        }
+        break;
+      }
       case 'delete': {
-        if (deletedTargets.has(op.target)) {
+        if (wasDeleted(op.target)) {
           diagnostics.push({
             severity: 'error',
             code: 'MAP_ENTITY_NOT_FOUND',
@@ -467,7 +627,7 @@ export function validateMapTransaction(
           });
           break;
         }
-        const entity = sceneGraph.findEntity(op.target);
+        const entity = resolveWorkingEntity(op.target);
         if (!entity) {
           diagnostics.push({
             severity: 'error',
@@ -476,7 +636,17 @@ export function validateMapTransaction(
             target: op.target
           });
         } else {
-          deletedTargets.add(op.target);
+          if (entity.pending) {
+            diagnostics.push({
+              severity: 'error',
+              code: 'MAP_OPERATION_UNSUPPORTED',
+              message: '同一事务中创建的 pending Part 不能再被 delete；请提交单一净变更事务',
+              target: op.target
+            });
+            break;
+          }
+          deletedTargets.add(entity.name);
+          workingKinds.delete(entity.name);
           if (entity.kind === 'region') {
             const referencingEvents = sceneGraph.queryEventsReferencingRegion(entity.name);
             if (referencingEvents.length > 0) {
@@ -525,8 +695,11 @@ export interface BlenderSceneExport {
 export interface BlenderMutationDto {
   stableKey: string;
   action: 'modify' | 'duplicate' | 'delete' | 'create';
+  entityKind?: 'part' | 'region' | undefined;
+  templateStableKey?: string | undefined;
   name?: string | undefined;
   modelName?: string | undefined;
+  entityId?: number | undefined;
   position?: [number, number, number] | undefined;
   rotation?: [number, number, number] | undefined;
   scale?: [number, number, number] | undefined;
@@ -608,6 +781,13 @@ export function importBlenderDeltaToTransaction(
   for (const mut of delta.mutations) {
     switch (mut.action) {
       case 'modify': {
+        if (mut.name !== undefined) {
+          return {
+            ok: false,
+            conflict: false,
+            error: `MAP_NAME_UNSUPPORTED: Blender 名称修改尚未接入原生 MSB 字段 (${mut.stableKey})`
+          };
+        }
         if (mut.position || mut.rotation || mut.scale) {
           operations.push({
             kind: 'set_transform',
@@ -624,19 +804,69 @@ export function importBlenderDeltaToTransaction(
             newModelName: mut.modelName
           });
         }
+        if (!mut.position && !mut.rotation && !mut.scale && !mut.modelName) {
+          return {
+            ok: false,
+            conflict: false,
+            error: `MAP_MODIFY_EMPTY: Blender modify 没有可写字段 (${mut.stableKey})`
+          };
+        }
         break;
       }
       case 'duplicate': {
-        return {
-          ok: false,
-          conflict: false,
-          error: `MAP_DUPLICATE_UNSUPPORTED: 不支持复制实体操作 (${mut.stableKey})`
-        };
+        if (!mut.name) {
+          return { ok: false, conflict: false, error: `MAP_DUPLICATE_NAME_REQUIRED: duplicate 必须提供新名称 (${mut.stableKey})` };
+        }
+        const source = new MapSceneGraph(doc).findEntity(mut.stableKey);
+        if (!source || source.kind !== 'part' || (mut.entityKind !== undefined && mut.entityKind !== 'part')) {
+          return {
+            ok: false,
+            conflict: false,
+            error: `MAP_DUPLICATE_UNSUPPORTED: 当前 native template contract 只允许复制 Part (${mut.stableKey})`
+          };
+        }
+        operations.push({
+          kind: 'duplicate',
+          target: mut.stableKey,
+          newName: mut.name,
+          ...(mut.position ? { position: mut.position } : {}),
+          ...(mut.rotation ? { rotation: mut.rotation } : {}),
+          ...(mut.scale ? { scale: mut.scale } : {}),
+          ...(mut.modelName ? { modelName: mut.modelName } : {}),
+          ...(mut.entityId !== undefined ? { entityId: mut.entityId } : {})
+        });
+        break;
       }
       case 'delete': {
         operations.push({
           kind: 'delete',
           target: mut.stableKey
+        });
+        break;
+      }
+      case 'create': {
+        const templateKey = mut.templateStableKey ?? mut.stableKey;
+        if (!mut.name) {
+          return { ok: false, conflict: false, error: `MAP_CREATE_NAME_REQUIRED: create 必须提供新名称 (${templateKey})` };
+        }
+        const template = new MapSceneGraph(doc).findEntity(templateKey);
+        if (!template || template.kind !== 'part' || (mut.entityKind !== undefined && mut.entityKind !== 'part')) {
+          return {
+            ok: false,
+            conflict: false,
+            error: `MAP_CREATE_UNSUPPORTED: 当前 native template contract 只允许从 Part 模板创建 (${templateKey})`
+          };
+        }
+        operations.push({
+          kind: 'create',
+          template: templateKey,
+          newName: mut.name,
+          entityKind: 'part',
+          ...(mut.position ? { position: mut.position } : {}),
+          ...(mut.rotation ? { rotation: mut.rotation } : {}),
+          ...(mut.scale ? { scale: mut.scale } : {}),
+          ...(mut.modelName ? { modelName: mut.modelName } : {}),
+          ...(mut.entityId !== undefined ? { entityId: mut.entityId } : {})
         });
         break;
       }
@@ -654,6 +884,58 @@ export function importBlenderDeltaToTransaction(
   };
 
   return { ok: true, transaction };
+}
+
+function validateNewEntityName(
+  doc: MapDocument,
+  newName: string,
+  diagnostics: MapTransactionValidationResult['diagnostics'],
+  target: string,
+  workingNames?: Iterable<string>
+): void {
+  if (!newName.trim() || newName !== newName.trim() || newName.includes('\0')) {
+    diagnostics.push({
+      severity: 'error',
+      code: 'MAP_NEW_NAME_INVALID',
+      message: '新实体名称不能为空且不能包含 NUL',
+      target
+    });
+    return;
+  }
+  const occupied = [
+    ...doc.models,
+    ...doc.parts,
+    ...doc.regions,
+    ...doc.events,
+    ...doc.routes
+  ].some((entity) => entity.name === newName);
+  const occupiedInWorkingState = workingNames !== undefined
+    && [...workingNames].some((name) => name === newName);
+  if (occupied || occupiedInWorkingState) {
+    diagnostics.push({
+      severity: 'error',
+      code: 'MAP_NEW_NAME_CONFLICT',
+      message: `新实体名称已存在: ${newName}`,
+      target
+    });
+  }
+}
+
+function reserveNewEntityName(
+  name: string,
+  reserved: Set<string>,
+  diagnostics: MapTransactionValidationResult['diagnostics'],
+  target: string
+): void {
+  if (reserved.has(name)) {
+    diagnostics.push({
+      severity: 'error',
+      code: 'MAP_NEW_NAME_CONFLICT',
+      message: `同一事务中重复声明新实体名称: ${name}`,
+      target
+    });
+  }
+  reserved.add(name);
 }
 
 /**

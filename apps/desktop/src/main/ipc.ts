@@ -37,6 +37,8 @@ import {
   listRolloutSessions,
   loadRolloutSession,
   runAgentSession,
+  createTaskModel,
+  revisionForFiles,
   disposeBridgeDaemonPool,
   commitEmevdMutationViaBridge,
   fingerprintEmedfRegistry,
@@ -74,6 +76,8 @@ import {
   commitTpfTextureReplaceViaBridge,
   type GparamFieldSetMutation,
   commitParamMutationViaBridge,
+  loadTrustedParamDefinition,
+  setParamFields,
   commitMsbMutationViaBridge,
   type MsbBridgeMutation,
   readFmgDocumentViaBridge,
@@ -107,8 +111,14 @@ import {
   validateContainer,
   isDeferredPreviewEditor,
   buildNativeDocumentLocator,
+  executeMapTransaction,
+  loadMapDocument,
+  nativeEditSessionFromContext,
+  mutationCapabilityForLocator,
   EditorDocumentStore,
   type EditorDocumentDataSource,
+  type EditorDocumentDataSourceContext,
+  type EditorMutationApplyOutcome,
   type EditorMutationApplyPort,
   type NativeDocumentLocator,
   type NativeMutationOutcome,
@@ -119,8 +129,10 @@ import {
   type ResourceCapabilityMatrix,
   type RagCorpus,
   type ToolContext,
+  type ModelProviderCapabilities,
   type ToolDescriptor,
   type ToolResult,
+  type CanonicalEntity,
   WorkspaceIndex,
   type WorkspaceSession,
   type ScriptContainerEntryEvidence,
@@ -157,11 +169,6 @@ import {
   mergeCiteHits,
   type Citation,
   type MapEditTransaction,
-  validateMapTransaction,
-  buildCanonicalMapDocument,
-  MapSceneGraph,
-  type MapPartEntity,
-  type MapRegionEntity
 } from '@soulforge/shared';
 import { prepareBridgeRoots, type BridgeRootSession, type PrepareBridgeRootsResult } from './bridgeRoots.js';
 import type {
@@ -182,6 +189,7 @@ import type {
   EmevdEditorDocument,
   IndexedFile,
   ParamDefDocument,
+  MapDocument,
   GparamDocument,
   ReadOperationId,
   RagChunkFamily,
@@ -217,6 +225,7 @@ import { renderEmevdDarkScriptAsync } from './emevdDarkScriptWorkerHost.js';
 import { EmevdOpenSlots } from './emevdOpenSlots.js';
 import { EmevdSourceTokens } from './emevdSourceTokens.js';
 import { OperationLogUtilityClient } from './operationLogUtilityClient.js';
+import { MemoryManager } from './memoryManager.js';
 import { clearRecentPath, readRecentPath, writeRecentPath } from './recentPaths.js';
 import { executeRecoveryCleanup } from './recoveryCleanup.js';
 import { ModelServiceCredentialVault } from './modelServiceCredentials.js';
@@ -1269,24 +1278,1147 @@ const directorySelections = new Map<string, DirectorySelectionRecord>();
 
 let editorDocumentStore: EditorDocumentStore | null = null;
 
+interface EditorDocumentSourceResolution {
+  readonly file: IndexedFile;
+  readonly tableId: string;
+  readonly leafFormat: string;
+  readonly entryIndex?: number;
+  readonly entryName?: string;
+}
+
+function resolveEditorDocumentSource(
+  context: EditorDocumentDataSourceContext | undefined
+): EditorDocumentSourceResolution | null {
+  if (!context) return null;
+  const file = indexedFiles.find((item) => item.sourceUri === context.locator.outerSourceUri);
+  if (!file || context.locator.outerSourceUri !== file.sourceUri) return null;
+
+  // A nested binder has more than one child identity.  The current Bridge
+  // leaf-read commands accept one confirmed BND4 index, so refusing a nested
+  // stack is safer than collapsing two identities into one guessed path.
+  const entryLayers = context.locator.layers.filter((layer) => layer.entry !== null);
+  if (entryLayers.length > 1) return null;
+  const leafLayer = [...context.locator.layers]
+    .reverse()
+    .find((layer) => !['dcx-dflt', 'dcx-krak', 'bnd4'].includes(layer.formatId));
+  const leafFormat = leafLayer?.formatId ?? context.locator.layers.at(-1)?.formatId;
+  if (!leafFormat) return null;
+  const entry = entryLayers[0]?.entry;
+  return {
+    file,
+    tableId: context.locator.leafDocumentStableId,
+    leafFormat,
+    ...(entry?.entryIndex !== undefined ? { entryIndex: entry.entryIndex } : {}),
+    ...(entry?.entryName ? { entryName: entry.entryName } : {})
+  };
+}
+
+function productionEditorCapabilities(
+  locator: NativeDocumentLocator,
+  _base: ReturnType<typeof mutationCapabilityForLocator>
+): ReturnType<typeof mutationCapabilityForLocator> {
+  const leafFormat = [...locator.layers]
+    .reverse()
+    .find((layer) => !['dcx-dflt', 'dcx-krak', 'bnd4'].includes(layer.formatId))?.formatId;
+  switch (leafFormat) {
+    case 'param':
+      return {
+        readOperations: ['page-tables', 'page-rows', 'page-fields', 'read-properties'],
+        writeOperations: ['param-field-set', 'param-row-upsert', 'param-row-delete']
+      };
+    case 'fmg':
+      return {
+        readOperations: ['page-entries', 'read-source'],
+        writeOperations: ['fmg-entry-upsert', 'fmg-entry-delete']
+      };
+    case 'emevd':
+      return { readOperations: ['read-outline'], writeOperations: [] };
+    case 'msb':
+      return {
+        readOperations: ['page-entries', 'read-preview', 'read-properties'],
+        writeOperations: ['map-entity-upsert', 'map-entity-delete']
+      };
+    default:
+      return { readOperations: [], writeOperations: [] };
+  }
+}
+
+function editorPageOffset(cursor: string | null): number | null {
+  if (cursor === null) return 0;
+  if (!/^\d+$/.test(cursor)) return null;
+  const value = Number(cursor);
+  return Number.isSafeInteger(value) && value >= 0 ? value : null;
+}
+
+function editorPageWindow<T>(
+  values: readonly T[],
+  cursor: string | null,
+  limit: number
+): { items: T[]; nextCursor: string | null; totalKnown: number } | null {
+  const offset = editorPageOffset(cursor);
+  if (offset === null || !Number.isSafeInteger(limit) || limit <= 0) return null;
+  const items = values.slice(offset, offset + limit);
+  return {
+    items,
+    nextCursor: offset + items.length < values.length ? String(offset + items.length) : null,
+    totalKnown: values.length
+  };
+}
+
+function editorCanonicalEntity(input: {
+  identity: string;
+  sourceUri: string;
+  revision: string;
+  kind: CanonicalEntity['kind'];
+  displayName: string;
+  address?: string;
+}): CanonicalEntity {
+  return {
+    identity: input.identity,
+    sourceUri: input.sourceUri,
+    revision: input.revision,
+    ...(input.address ? { address: input.address } : {}),
+    kind: input.kind,
+    displayName: input.displayName,
+    epistemic: 'observed'
+  };
+}
+
+function observeEditorCanonical(
+  context: EditorDocumentDataSourceContext,
+  sourceRevision: string,
+  entities: readonly CanonicalEntity[]
+): void {
+  const index = activeIndex;
+  const source = resolveEditorDocumentSource(context);
+  if (!index || !source || !source.file.sha256 || sourceRevision.length === 0) return;
+  const revision = `native:${sourceRevision}`;
+  const documentId = `editor:${context.documentHandle}`;
+  const input = {
+    documentId,
+    sourceUri: source.file.sourceUri,
+    baseRevision: source.file.sha256,
+    revision,
+    observation: {
+      kind: 'canonical-read' as const,
+      sourceUri: source.file.sourceUri,
+      revision
+    },
+    entities,
+    removedIdentities: [] as string[]
+  };
+  const existing = index.getDirtyCanonicalDocument(documentId);
+  const result = existing
+    ? index.updateDirtyCanonicalDocument(documentId, existing.revision, input)
+    : index.registerDirtyCanonicalDocument(input);
+  if (!result.ok) {
+    // A stale indexed file is a real concurrency diagnostic.  The editor read
+    // remains usable, but it must not silently promote an observation into the
+    // semantic resolver.
+    process.stderr.write(`[SoulForge editor canonical] ${result.code}: ${result.diagnostics.join('; ')}\n`);
+  }
+}
+
+function editorFmgEntities(
+  sourceUri: string,
+  revision: string,
+  tableId: string,
+  entries: readonly { id: number; text: string }[]
+): CanonicalEntity[] {
+  return [
+    editorCanonicalEntity({
+      identity: `param-text:${sourceUri}:${tableId}`,
+      sourceUri,
+      revision,
+      kind: 'resource',
+      displayName: tableId
+    }),
+    ...entries.map((entry) => editorCanonicalEntity({
+      identity: `text-entry:${sourceUri}:${tableId}:${entry.id}`,
+      sourceUri,
+      revision,
+      kind: 'text_entry',
+      displayName: entry.text.slice(0, 160),
+      address: String(entry.id)
+    }))
+  ];
+}
+
+function editorParamEntities(
+  sourceUri: string,
+  revision: string,
+  tableId: string,
+  typeName: string,
+  rows: readonly { id: number; name?: string }[]
+): CanonicalEntity[] {
+  return [
+    editorCanonicalEntity({
+      identity: `param:${sourceUri}:${tableId}`,
+      sourceUri,
+      revision,
+      kind: 'param',
+      displayName: typeName
+    }),
+    ...rows.map((row) => editorCanonicalEntity({
+      identity: `param-row:${sourceUri}:${tableId}:${row.id}`,
+      sourceUri,
+      revision,
+      kind: 'param_row',
+      displayName: row.name ?? String(row.id),
+      address: String(row.id)
+    }))
+  ];
+}
+
+function editorParamTableName(source: EditorDocumentSourceResolution): string {
+  const name = source.entryName ?? source.tableId;
+  return basename(name.replaceAll('\\', '/')).replace(/\.param$/i, '');
+}
+
+function editorParamEnumLabel(
+  definition: ParamDefDocument,
+  fieldId: string,
+  value: number | string | boolean | readonly number[] | null
+): string | null {
+  const field = definition.fields.find((candidate) => candidate.id === fieldId);
+  if (!field?.enumRef || typeof value !== 'number') return null;
+  const enumDef = definition.enums?.find((candidate) => candidate.id === field.enumRef);
+  return enumDef?.values.find((candidate) => candidate.value === value)?.label ?? null;
+}
+
+function editorParamScalar(value: unknown): null | boolean | number | string | readonly number[] {
+  if (value === null || typeof value === 'boolean' || typeof value === 'number' || typeof value === 'string') {
+    return value;
+  }
+  if (Array.isArray(value) && value.every((item) => typeof item === 'number' && Number.isFinite(item))) {
+    return value as number[];
+  }
+  return null;
+}
+
+function editorParamMutationValue(
+  value: null | boolean | number | string | readonly number[],
+  sourceUri: string
+): { ok: true; value: number | string | boolean } | { ok: false; code: string } {
+  if (value === null || Array.isArray(value)) {
+    process.stderr.write(`[SoulForge editor PARAM] scalar-only field rejected for ${sourceUri}\n`);
+    return { ok: false, code: 'EDITOR_PARAM_SCALAR_REQUIRED' };
+  }
+  return { ok: true, value: value as number | string | boolean };
+}
+
+function editorMapEntities(
+  sourceUri: string,
+  revision: string,
+  document: MapDocument
+): CanonicalEntity[] {
+  const entities: CanonicalEntity[] = [editorCanonicalEntity({
+    identity: `map:${sourceUri}:${document.mapId}`,
+    sourceUri,
+    revision,
+    kind: 'map',
+    displayName: document.mapId
+  })];
+  const add = (
+    items: readonly { stableKey: string; name: string; address: string; kind: CanonicalEntity['kind'] }[]
+  ): void => {
+    for (const item of items) {
+      entities.push(editorCanonicalEntity({
+        identity: item.stableKey,
+        sourceUri,
+        revision,
+        kind: item.kind,
+        displayName: item.name,
+        address: item.address
+      }));
+    }
+  };
+  add(document.models.map((item) => ({ ...item, kind: 'map_entity' as const })));
+  add(document.parts.map((item) => ({ ...item, kind: 'map_entity' as const })));
+  add(document.regions.map((item) => ({ ...item, kind: 'map_region' as const })));
+  add(document.events.map((item) => ({ ...item, kind: 'event' as const })));
+  add(document.routes.map((item) => ({ ...item, kind: 'map_entity' as const })));
+  return entities;
+}
+
+function editorMapVector(
+  value: null | boolean | number | string | readonly number[]
+): [number, number, number] | null {
+  if (!Array.isArray(value) || value.length !== 3 || value.some((item) => typeof item !== 'number' || !Number.isFinite(item))) {
+    return null;
+  }
+  return [value[0]!, value[1]!, value[2]!];
+}
+
+async function refreshEditorIndexedFile(file: IndexedFile): Promise<IndexedFile | null> {
+  try {
+    const fileStat = await stat(file.absolutePath);
+    const next: IndexedFile = {
+      ...file,
+      size: fileStat.size,
+      mtimeMs: fileStat.mtimeMs,
+      sha256: await sha256FileNow(file.absolutePath)
+    };
+    indexedFiles = indexedFiles.map((item) => item.sourceUri === file.sourceUri ? next : item);
+    activeIndex?.upsertFile(next);
+    return next;
+  } catch (error) {
+    process.stderr.write(`[SoulForge editor canonical] committed file refresh failed: ${error instanceof Error ? error.message : String(error)}\n`);
+    return null;
+  }
+}
+
+async function clearEditorCanonicalAfterCommit(
+  context: EditorDocumentDataSourceContext,
+  nextFile: IndexedFile
+): Promise<void> {
+  const index = activeIndex;
+  if (!index || !nextFile.sha256) return;
+  const documentId = `editor:${context.documentHandle}`;
+  const current = index.getDirtyCanonicalDocument(documentId);
+  if (!current) return;
+  const result = index.clearDirtyCanonicalDocument({
+    documentId,
+    expectedRevision: current.revision,
+    mode: 'committed',
+    authoritativeRevision: nextFile.sha256
+  });
+  if (!result.ok) {
+    process.stderr.write(`[SoulForge editor canonical] committed clear failed: ${result.code}: ${result.diagnostics.join('; ')}\n`);
+  }
+}
+
+async function rereadEditorParamCanonical(
+  context: EditorDocumentDataSourceContext,
+  source: EditorDocumentSourceResolution,
+  file: IndexedFile,
+  session: WorkspaceSession
+): Promise<boolean> {
+  const roots = await verifiedReadRoots(session, dirname(file.absolutePath));
+  if (roots.diagnostics.length > 0) return false;
+  const reread = await readParamDocumentViaBridge({
+    sourcePath: file.absolutePath,
+    allowedRoots: roots.allowedRoots,
+    ...(source.entryIndex !== undefined ? { entryIndex: source.entryIndex } : {}),
+    includeAllPayloads: true,
+    maxRows: 200_000,
+    maxFrameBytes: 64 * 1024 * 1024
+  });
+  if (!reread.ok || !reread.data || reread.data.rowCount !== reread.data.rows.length) return false;
+  observeEditorCanonical(
+    context,
+    reread.data.sourceHash,
+    editorParamEntities(
+      file.sourceUri,
+      reread.data.sourceHash,
+      source.tableId,
+      reread.data.typeName,
+      reread.data.rows
+    )
+  );
+  return true;
+}
+
 /**
- * 惰性创建文档仓库。分页数据源与写链是骨架：由后续卡（PARAM-10B、TEXT-20B
- * 等）接入真实实现；未接入的查询/写入如实返回 capability-blocked /
- * mutation-rejected，不假装成功。
+ * Patch Engine 提交后的最小原生确认。该回调只做 Bridge 权威重读，不触碰
+ * dirty/index/RAG 投影；它运行在 Durable Transaction 的 afterCommit 边界内，
+ * 失败时由事务层还原字节，避免调用方在物理已写后再返回普通 rejected。
+ */
+async function verifyEditorParamPostCommit(
+  source: EditorDocumentSourceResolution,
+  session: WorkspaceSession,
+  rowId: number,
+  expectPresent: boolean
+): Promise<Diagnostic[]> {
+  const roots = await verifiedReadRoots(session, dirname(source.file.absolutePath));
+  if (roots.diagnostics.length > 0) {
+    return [{
+      severity: 'error',
+      code: 'EDITOR_PARAM_POSTCOMMIT_REREAD_FAILED',
+      message: 'PARAM 提交后无法准备 Bridge 权威重读。',
+      sourceUri: source.file.sourceUri,
+      details: roots.diagnostics
+    }];
+  }
+  const reread = await readParamDocumentViaBridge({
+    sourcePath: source.file.absolutePath,
+    allowedRoots: roots.allowedRoots,
+    ...(source.entryIndex !== undefined ? { entryIndex: source.entryIndex } : {}),
+    includeAllPayloads: true,
+    maxRows: 200_000,
+    maxFrameBytes: 64 * 1024 * 1024
+  });
+  if (!reread.ok || !reread.data || reread.data.rowCount !== reread.data.rows.length) {
+    return [{
+      severity: 'error',
+      code: 'EDITOR_PARAM_POSTCOMMIT_REREAD_FAILED',
+      message: 'PARAM 提交后 Bridge 权威重读失败。',
+      sourceUri: source.file.sourceUri,
+      details: reread.ok ? reread.diagnostics : reread.diagnostics
+    }];
+  }
+  const present = reread.data.rows.some((row) => row.id === rowId);
+  if (present !== expectPresent) {
+    return [{
+      severity: 'error',
+      code: 'EDITOR_PARAM_POSTCOMMIT_POSTCONDITION_FAILED',
+      message: expectPresent
+        ? `PARAM 行 ${rowId} 提交后不存在。`
+        : `PARAM 行 ${rowId} 删除后仍存在。`,
+      sourceUri: source.file.sourceUri,
+      details: { rowId, expectPresent, present }
+    }];
+  }
+  return [];
+}
+
+async function verifyEditorFmgPostCommit(
+  source: EditorDocumentSourceResolution,
+  session: WorkspaceSession,
+  entryId: number,
+  expectPresent: boolean
+): Promise<Diagnostic[]> {
+  const roots = await verifiedReadRoots(session, dirname(source.file.absolutePath));
+  if (roots.diagnostics.length > 0) {
+    return [{
+      severity: 'error',
+      code: 'EDITOR_FMG_POSTCOMMIT_REREAD_FAILED',
+      message: 'FMG 提交后无法准备 Bridge 权威重读。',
+      sourceUri: source.file.sourceUri,
+      details: roots.diagnostics
+    }];
+  }
+  const reread = await readFmgDocumentViaBridge({
+    sourcePath: source.file.absolutePath,
+    allowedRoots: roots.allowedRoots,
+    ...(source.entryIndex !== undefined ? { entryIndex: source.entryIndex } : {})
+  });
+  if (!reread.ok || !reread.data) {
+    return [{
+      severity: 'error',
+      code: 'EDITOR_FMG_POSTCOMMIT_REREAD_FAILED',
+      message: 'FMG 提交后 Bridge 权威重读失败。',
+      sourceUri: source.file.sourceUri,
+      details: reread.diagnostics
+    }];
+  }
+  const present = reread.data.entries.some((entry) => entry.id === entryId);
+  if (present !== expectPresent) {
+    return [{
+      severity: 'error',
+      code: 'EDITOR_FMG_POSTCOMMIT_POSTCONDITION_FAILED',
+      message: expectPresent
+        ? `FMG 条目 ${entryId} 提交后不存在。`
+        : `FMG 条目 ${entryId} 删除后仍存在。`,
+      sourceUri: source.file.sourceUri,
+      details: { entryId, expectPresent, present }
+    }];
+  }
+  return [];
+}
+
+async function commitEditorContainerParamRowDelete(
+  source: EditorDocumentSourceResolution,
+  session: WorkspaceSession,
+  rowId: number
+): Promise<EditorMutationApplyOutcome> {
+  if (source.entryIndex === undefined) return { kind: 'rejected', code: 'EDITOR_PARAM_ENTRY_REQUIRED' };
+  const containerHash = source.file.sha256 ?? await sha256FileNow(source.file.absolutePath);
+  const unpacked = await unpackContainerParamChild({
+    containerPath: source.file.absolutePath,
+    containerUri: source.file.sourceUri,
+    containerHash,
+    entry: { index: source.entryIndex }
+  });
+  if (!unpacked.ok) {
+    return { kind: 'rejected', code: unpacked.diagnostics[0]?.code ?? 'EDITOR_PARAM_UNPACK_FAILED' };
+  }
+  const storage = durableStoragePaths(session.meta.workspaceId);
+  const stage = await verifiedStageRoots(session, storage, 'EDITOR_PARAM_STAGING_PREPARE_FAILED');
+  if (stage.diagnostics.length > 0) return { kind: 'rejected', code: 'EDITOR_PARAM_STAGING_PREPARE_FAILED' };
+  const operationLog = await ensureActiveOperationLog(session);
+  const paramStage = await stageBridgeOutput({
+    stagingRoot: storage.stagingRoot,
+    prefix: 'editor-param-row',
+    fileName: `${basename(unpacked.child.name)}.delete`,
+    allowedRoots: () => [...stage.allowedRoots],
+    write: async (context) => {
+      const written = await runBridge<Record<string, unknown>>({
+        command: 'write-param',
+        filePath: unpacked.child.absolutePath,
+        allowedRoots: context.allowedRoots,
+        writableRoots: context.writableRoots,
+        timeoutMs: 120_000,
+        commandOptions: {
+          outputPath: context.outputPath,
+          expectedDocumentHash: unpacked.child.storedContentHash || await sha256FileNow(unpacked.child.absolutePath),
+          mutation: 'delete',
+          id: rowId
+        }
+      });
+      return {
+        ok: written.parseStatus !== 'failed'
+          && written.diagnostics.some((diagnostic) => diagnostic.code === 'PARAM_STAGING_WRITE_VERIFIED'),
+        diagnostics: written.diagnostics
+      };
+    }
+  });
+  if (!paramStage.ok || !paramStage.bytes) {
+    return { kind: 'rejected', code: paramStage.result?.diagnostics[0]?.code ?? 'EDITOR_PARAM_ROW_STAGE_FAILED' };
+  }
+  const outcome = await applyNativeMutation({
+    file: source.file,
+    sourceUri: source.file.sourceUri,
+    expectedHash: containerHash,
+    stagingRoot: storage.stagingRoot,
+    allowedRoots: () => [...stage.allowedRoots],
+    stagingPrefix: 'editor-param-bnd',
+    stagingFileName: `${basename(source.file.relativePath)}.row-delete.repacked`,
+    stageWrite: async (context) => {
+      const written = await runBridge<Record<string, unknown>>({
+        command: 'write-bnd4',
+        filePath: source.file.absolutePath,
+        resourceUri: source.file.sourceUri,
+        allowedRoots: context.allowedRoots,
+        writableRoots: context.writableRoots,
+        timeoutMs: 180_000,
+        ...(session.layers.baseRoot ? { oodleRuntimeRoot: session.layers.baseRoot } : {}),
+        commandOptions: {
+          outputPath: context.outputPath,
+          mutation: 'replace',
+          expectedContainerHash: containerHash,
+          entryIndex: source.entryIndex,
+          expectedChildHash: unpacked.child.storedContentHash || await sha256FileNow(unpacked.child.absolutePath),
+          contentBase64: paramStage.bytes!.toString('base64')
+        }
+      });
+      return {
+        ok: written.parseStatus !== 'failed'
+          && written.diagnostics.some((diagnostic) => diagnostic.code === 'BND4_STAGING_WRITE_VERIFIED'),
+        diagnostics: written.diagnostics
+      };
+    },
+    semanticChecks: {
+      afterCommit: () => verifyEditorParamPostCommit(source, session, rowId, false)
+    },
+    title: `EditorDocument PARAM row delete ${rowId}`,
+    confirmActionLabel: '提交编辑器 PARAM 行删除'
+  }, { commit: sessionCommitPort(session, operationLog, storage) });
+  if (outcome.status === 'cancelled') return { kind: 'cancelled' };
+  if (outcome.status !== 'committed' || !outcome.result.ok) {
+    return {
+      kind: 'rejected',
+      code: outcome.status === 'failed'
+        ? (outcome.diagnostics[0]?.code ?? 'EDITOR_PARAM_ROW_DELETE_FAILED')
+        : (outcome.result.diagnostics[0]?.code ?? 'EDITOR_PARAM_ROW_DELETE_FAILED')
+    };
+  }
+  return { kind: 'committed', operationId: outcome.result.opId ?? `editor-param-${randomUUID()}` };
+}
+
+/**
+ * 惰性创建 owner-bound 文档仓库。
+ *
+ * 这里的 adapter 只接纳 Bridge-confirmed locator，并把 loose/单层 BND4
+ * child 交给现有 native read/write helpers；不认识的 query 或嵌套容器保持
+ * capability-blocked。所有成功写入仍走 stage → Bridge → Patch Engine，
+ * 写后刷新 indexed hash，再重读 canonical snapshot。
  */
 function ensureEditorDocumentStore(): EditorDocumentStore {
   if (editorDocumentStore) return editorDocumentStore;
-  const skeletonDataSource: EditorDocumentDataSource = {
-    loadPage: async () => ({ items: null, nextCursor: null, totalKnown: null }),
-    readContent: async () => null
+  const productionDataSource: EditorDocumentDataSource = {
+    loadPage: async (query, cursor, limit, context) => {
+      const source = resolveEditorDocumentSource(context);
+      if (!source || !activeSession) return { items: null, nextCursor: null, totalKnown: null };
+      const offset = editorPageOffset(cursor);
+      if (offset === null) return { items: null, nextCursor: null, totalKnown: null };
+      const roots = await verifiedReadRoots(activeSession, dirname(source.file.absolutePath));
+      if (roots.diagnostics.length > 0) return { items: null, nextCursor: null, totalKnown: null };
+
+      if (query.kind === 'fmg-entries' && source.leafFormat === 'fmg') {
+        const result = await readFmgDocumentViaBridge({
+          sourcePath: source.file.absolutePath,
+          allowedRoots: roots.allowedRoots,
+          ...(source.entryIndex !== undefined ? { entryIndex: source.entryIndex } : {}),
+          ...(activeSession.layers.baseRoot ? { timeoutMs: 120_000 } : {})
+        });
+        if (!result.ok || !result.data || query.tableId !== source.tableId) {
+          return { items: null, nextCursor: null, totalKnown: null };
+        }
+        observeEditorCanonical(
+          context!,
+          result.data.sourceHash,
+          editorFmgEntities(source.file.sourceUri, result.data.sourceHash, source.tableId, result.data.entries)
+        );
+        const search = query.search.trim().toLowerCase();
+        const values = result.data.entries
+          .filter((entry) => search.length === 0
+            || String(entry.id).includes(search)
+            || entry.text.toLowerCase().includes(search))
+          .map((entry) => ({
+            kind: 'fmg-entry' as const,
+            tableId: source.tableId,
+            entryId: String(entry.id),
+            preview: entry.text.slice(0, 240),
+            change: 'none' as const
+          }));
+        const page = editorPageWindow(values, cursor, limit);
+        return page === null
+          ? { items: null, nextCursor: null, totalKnown: null }
+          : page;
+      }
+
+      if (query.kind === 'param-tables' && source.leafFormat === 'param') {
+        const result = await readParamDocumentViaBridge({
+          sourcePath: source.file.absolutePath,
+          allowedRoots: roots.allowedRoots,
+          ...(source.entryIndex !== undefined ? { entryIndex: source.entryIndex } : {}),
+          maxRows: 1
+        });
+        if (!result.ok || !result.data) return { items: null, nextCursor: null, totalKnown: null };
+        const tableName = result.data.typeName;
+        if (query.search.trim().length > 0
+          && !tableName.toLowerCase().includes(query.search.trim().toLowerCase())) {
+          return { items: [], nextCursor: null, totalKnown: 0 };
+        }
+        observeEditorCanonical(
+          context!,
+          result.data.sourceHash,
+          [editorCanonicalEntity({
+            identity: `param:${source.file.sourceUri}:${source.tableId}`,
+            sourceUri: source.file.sourceUri,
+            revision: result.data.sourceHash,
+            kind: 'param',
+            displayName: tableName
+          })]
+        );
+        return {
+          items: [{ kind: 'param-table', tableId: source.tableId, name: tableName, localizedName: null }],
+          nextCursor: null,
+          totalKnown: 1
+        };
+      }
+
+      if (query.kind === 'param-rows' && source.leafFormat === 'param') {
+        if (query.tableId !== source.tableId) return { items: null, nextCursor: null, totalKnown: null };
+        const result = await readParamDocumentViaBridge({
+          sourcePath: source.file.absolutePath,
+          allowedRoots: roots.allowedRoots,
+          ...(source.entryIndex !== undefined ? { entryIndex: source.entryIndex } : {}),
+          maxRows: offset + limit
+        });
+        if (!result.ok || !result.data) return { items: null, nextCursor: null, totalKnown: null };
+        const search = query.search.trim().toLowerCase();
+        const values = result.data.rows
+          .filter((row) => search.length === 0
+            || String(row.id).includes(search)
+            || (row.name ?? '').toLowerCase().includes(search))
+          .map((row) => ({
+            kind: 'param-row' as const,
+            tableId: source.tableId,
+            rowId: String(row.id),
+            name: row.name ?? null,
+            change: 'none' as const
+          }));
+        if (result.data.rowCount === result.data.rows.length) {
+          observeEditorCanonical(
+            context!,
+            result.data.sourceHash,
+            editorParamEntities(source.file.sourceUri, result.data.sourceHash, source.tableId, result.data.typeName, result.data.rows)
+          );
+        }
+        const page = editorPageWindow(values, cursor, limit);
+        return page === null
+          ? { items: null, nextCursor: null, totalKnown: null }
+          : { ...page, totalKnown: result.data.rowCount };
+      }
+
+      if (query.kind === 'param-fields' && source.leafFormat === 'param') {
+        if (query.tableId !== source.tableId) return { items: null, nextCursor: null, totalKnown: null };
+        const rowId = Number(query.rowId);
+        if (!Number.isSafeInteger(rowId)) return { items: null, nextCursor: null, totalKnown: null };
+        const result = await readParamDocumentViaBridge({
+          sourcePath: source.file.absolutePath,
+          allowedRoots: roots.allowedRoots,
+          ...(source.entryIndex !== undefined ? { entryIndex: source.entryIndex } : {}),
+          rowIds: [rowId],
+          maxRows: 1,
+          maxFrameBytes: 8 * 1024 * 1024
+        });
+        if (!result.ok || !result.data) return { items: null, nextCursor: null, totalKnown: null };
+        const row = result.data.rows.find((candidate) => candidate.id === rowId);
+        if (!row || typeof row.dataBase64 !== 'string' || row.dataBase64.length === 0) {
+          return { items: [], nextCursor: null, totalKnown: 0 };
+        }
+        const definition = await loadTrustedParamDefinition(result.data.typeName, result.data.rowDataSize);
+        if (!definition.ok) return { items: null, nextCursor: null, totalKnown: null };
+        const decoded = decodeRowFields(Buffer.from(row.dataBase64, 'base64'), definition.document);
+        const values = definition.document.fields.map((field) => {
+          const decodedField = decoded.find((candidate) => candidate.fieldId === field.id);
+          const value = editorParamScalar(decodedField?.value ?? null);
+          return {
+            kind: 'param-field' as const,
+            tableId: source.tableId,
+            rowId: query.rowId,
+            fieldId: field.id,
+            name: field.name,
+            value,
+            compareValue: value,
+            enumLabel: editorParamEnumLabel(definition.document, field.id, value),
+            valueType: field.type,
+            description: field.description ?? null,
+            editable: value !== null
+          };
+        });
+        const page = editorPageWindow(values, cursor, limit);
+        return page === null
+          ? { items: null, nextCursor: null, totalKnown: null }
+          : page;
+      }
+
+      if (query.kind === 'event-outline' && source.leafFormat === 'emevd' && source.entryIndex === undefined) {
+        const full = await readFullEmevdDocument({
+          filePath: source.file.absolutePath,
+          allowedRoots: roots.allowedRoots,
+          resourceUri: source.file.sourceUri,
+          registry: getEmevdRegistry().registry,
+          cachePolicy: 'bypass',
+          ...(activeSession.layers.baseRoot ? { oodleRuntimeRoot: activeSession.layers.baseRoot } : {})
+        });
+        if (!full.ok || !full.outline) return { items: null, nextCursor: null, totalKnown: null };
+        if (full.sourceHash && full.document) {
+          observeEditorCanonical(
+            context!,
+            full.sourceHash,
+            full.document.events.map((event) => editorCanonicalEntity({
+              identity: `event:${source.file.sourceUri}:${event.eventId}`,
+              sourceUri: source.file.sourceUri,
+              revision: full.sourceHash!,
+              kind: 'event',
+              displayName: `Event ${event.eventId}`,
+              address: String(event.eventId)
+            }))
+          );
+        }
+        const search = query.search.trim().toLowerCase();
+        const values = full.outline.events
+          .filter((event) => search.length === 0
+            || String(event.eventId).includes(search)
+            || event.eventUri.toLowerCase().includes(search))
+          .map((event) => ({
+            kind: 'event-outline' as const,
+            eventId: event.eventUri,
+            displayName: `Event ${event.eventId}`,
+            startLine: 0,
+            endLine: event.instructionCount
+          }));
+        const page = editorPageWindow(values, cursor, limit);
+        return page === null
+          ? { items: null, nextCursor: null, totalKnown: null }
+          : { ...page, totalKnown: values.length };
+      }
+
+      if (query.kind === 'properties' && source.leafFormat === 'msb') {
+        const result = await readMsbDocumentViaBridge({
+          sourcePath: source.file.absolutePath,
+          allowedRoots: roots.allowedRoots,
+          ...(source.entryIndex !== undefined ? { entryIndex: source.entryIndex } : {}),
+          ...(activeSession.layers.baseRoot ? { oodleRuntimeRoot: activeSession.layers.baseRoot } : {})
+        });
+        if (!result.ok || !result.data) return { items: null, nextCursor: null, totalKnown: null };
+        const mapId = basename(source.file.relativePath).replace(/\.msb(?:\.dcx)?$/i, '');
+        const match = (kind: string, offset: number | undefined): boolean =>
+          offset !== undefined && query.targetStableId === `${kind}:${mapId}:offset-${offset.toString(16)}`;
+        const properties: Array<{
+          kind: 'property'; targetStableId: string; groupId: string | null; propertyId: string;
+          label: string; value: null | boolean | number | string | readonly number[];
+          compareValue: null | boolean | number | string | readonly number[]; editable: boolean;
+        }> = [];
+        const part = result.data.parts.find((item) => match('part', item.nativeOffset));
+        const region = result.data.regions.find((item) => match('region', item.nativeOffset));
+        if (part) {
+          const target = query.targetStableId;
+          properties.push(
+            { kind: 'property', targetStableId: target, groupId: 'transform', propertyId: 'position', label: 'Position', value: [part.posX, part.posY, part.posZ], compareValue: [part.posX, part.posY, part.posZ], editable: true },
+            { kind: 'property', targetStableId: target, groupId: 'transform', propertyId: 'rotation', label: 'Rotation', value: [part.rotX ?? 0, part.rotY ?? 0, part.rotZ ?? 0], compareValue: [part.rotX ?? 0, part.rotY ?? 0, part.rotZ ?? 0], editable: true },
+            { kind: 'property', targetStableId: target, groupId: 'transform', propertyId: 'scale', label: 'Scale', value: [part.scaleX ?? 1, part.scaleY ?? 1, part.scaleZ ?? 1], compareValue: [part.scaleX ?? 1, part.scaleY ?? 1, part.scaleZ ?? 1], editable: true }
+          );
+        } else if (region) {
+          const target = query.targetStableId;
+          properties.push(
+            { kind: 'property', targetStableId: target, groupId: 'transform', propertyId: 'position', label: 'Position', value: [region.posX, region.posY, region.posZ], compareValue: [region.posX, region.posY, region.posZ], editable: true },
+            { kind: 'property', targetStableId: target, groupId: 'transform', propertyId: 'rotation', label: 'Rotation', value: [region.rotX ?? 0, region.rotY ?? 0, region.rotZ ?? 0], compareValue: [region.rotX ?? 0, region.rotY ?? 0, region.rotZ ?? 0], editable: true }
+          );
+        }
+        const page = editorPageWindow(properties, cursor, limit);
+        return page === null
+          ? { items: null, nextCursor: null, totalKnown: null }
+          : page;
+      }
+
+      return { items: null, nextCursor: null, totalKnown: null };
+    },
+    readContent: async (query, context) => {
+      const source = resolveEditorDocumentSource(context);
+      if (!source || !activeSession) return null;
+      const roots = await verifiedReadRoots(activeSession, dirname(source.file.absolutePath));
+      if (roots.diagnostics.length > 0) return null;
+      if (query.kind === 'fmg-content' && source.leafFormat === 'fmg' && query.tableId === source.tableId) {
+        const result = await readFmgDocumentViaBridge({
+          sourcePath: source.file.absolutePath,
+          allowedRoots: roots.allowedRoots,
+          ...(source.entryIndex !== undefined ? { entryIndex: source.entryIndex } : {})
+        });
+        if (!result.ok || !result.data) return null;
+        observeEditorCanonical(
+          context!,
+          result.data.sourceHash,
+          editorFmgEntities(source.file.sourceUri, result.data.sourceHash, source.tableId, result.data.entries)
+        );
+        const entry = result.data.entries.find((item) => String(item.id) === query.entryId);
+        return entry
+          ? { kind: 'fmg-content', tableId: source.tableId, entryId: query.entryId, text: entry.text }
+          : null;
+      }
+      if (query.kind === 'event-source' && source.leafFormat === 'emevd' && source.entryIndex === undefined) {
+        // The native document is authoritative for the event outline, but it
+        // is not a DarkScript source file.  Returning one comment per event
+        // here would make a renderer believe it had editable source while
+        // silently discarding every instruction and parameter.  Until the
+        // canonical DarkScript disassembler is wired into this boundary,
+        // report the capability as unavailable instead of fabricating source.
+        return null;
+      }
+      return null;
+    }
   };
-  const skeletonApplyPort: EditorMutationApplyPort = {
-    apply: async () => ({ kind: 'rejected', code: 'WRITE_CHAIN_NOT_CONNECTED' })
+
+  const productionApplyPort: EditorMutationApplyPort = {
+    apply: async (mutation, context): Promise<EditorMutationApplyOutcome> => {
+      const source = resolveEditorDocumentSource(context);
+      const session = activeSession;
+      if (!source || !session || !context) {
+        return { kind: 'rejected', code: 'EDITOR_NATIVE_SOURCE_UNAVAILABLE' };
+      }
+      const gameBlocked = rejectNonSekiroNativeWrite(source.file.sourceUri, source.file);
+      if (gameBlocked) return { kind: 'rejected', code: 'NATIVE_WRITE_GAME_UNSUPPORTED' };
+
+      if (mutation.kind === 'param-field-set'
+        || mutation.kind === 'param-row-upsert'
+        || mutation.kind === 'param-row-delete') {
+        if (source.leafFormat !== 'param' || mutation.tableId !== source.tableId) {
+          return { kind: 'rejected', code: 'EDITOR_PARAM_SOURCE_UNAVAILABLE' };
+        }
+        const rowId = Number(mutation.rowId);
+        if (!Number.isSafeInteger(rowId)) return { kind: 'rejected', code: 'EDITOR_PARAM_ROW_ID_INVALID' };
+
+        const fieldEdits: Array<{ fieldId: string; value: number | string | boolean }> = [];
+        if (mutation.kind === 'param-field-set') {
+          const value = editorParamMutationValue(mutation.value, source.file.sourceUri);
+          if (!value.ok) return { kind: 'rejected', code: value.code };
+          fieldEdits.push({ fieldId: mutation.fieldId, value: value.value });
+        } else if (mutation.kind === 'param-row-upsert') {
+          if (mutation.fields.length === 0) return { kind: 'rejected', code: 'EDITOR_PARAM_FIELDS_REQUIRED' };
+          for (const field of mutation.fields) {
+            const value = editorParamMutationValue(field.value, source.file.sourceUri);
+            if (!value.ok) return { kind: 'rejected', code: value.code };
+            fieldEdits.push({ fieldId: field.fieldId, value: value.value });
+          }
+        }
+
+        const currentHash = await sha256FileNow(source.file.absolutePath);
+        if (source.file.sha256 && source.file.sha256 !== currentHash) {
+          return { kind: 'rejected', code: 'EDITOR_PARAM_SOURCE_STALE' };
+        }
+
+        if (mutation.kind === 'param-row-delete' && source.entryIndex !== undefined) {
+          const deleted = await commitEditorContainerParamRowDelete(source, session, rowId);
+          if (deleted.kind !== 'committed') return deleted;
+          const nextFile = await refreshEditorIndexedFile(source.file);
+          if (!nextFile) return { kind: 'rejected', code: 'EDITOR_PARAM_POSTCOMMIT_REINDEX_FAILED' };
+          await clearEditorCanonicalAfterCommit(context, nextFile);
+          if (!await rereadEditorParamCanonical(context, source, nextFile, session)) {
+            return { kind: 'rejected', code: 'EDITOR_PARAM_POSTCOMMIT_REREAD_FAILED' };
+          }
+          return deleted;
+        }
+
+        if (source.entryIndex !== undefined && !source.entryName) {
+          return { kind: 'rejected', code: 'EDITOR_PARAM_ENTRY_NAME_UNAVAILABLE' };
+        }
+
+        let operationId: string | undefined;
+        if (source.entryIndex !== undefined) {
+          const storage = durableStoragePaths(session.meta.workspaceId);
+          const operationLog = await ensureActiveOperationLog(session);
+          const edit = nativeEditSessionFromContext({
+            session,
+            operationLog,
+            backupBaseDir: storage.backupBaseDir,
+            recoveryDir: storage.recoveryDir,
+            stagingRoot: storage.stagingRoot,
+            commitPort: sessionCommitPort(session, operationLog, storage)
+          });
+          const result = await setParamFields({
+            edit,
+            containerPath: source.file.absolutePath,
+            edits: fieldEdits.map((field) => ({
+              table: editorParamTableName(source),
+              rowId,
+              fieldId: field.fieldId,
+              value: field.value
+            })),
+            semanticChecks: {
+              afterCommit: () => verifyEditorParamPostCommit(source, session, rowId, true)
+            }
+          });
+          if (!result.ok) {
+            return { kind: 'rejected', code: result.error.code || 'EDITOR_PARAM_WRITE_FAILED' };
+          }
+          operationId = result.operationIds.at(-1);
+        } else {
+          let bridgeMutation: { kind: 'upsert'; id: number; dataBase64: string } | { kind: 'delete'; id: number };
+          if (mutation.kind === 'param-row-delete') {
+            bridgeMutation = { kind: 'delete', id: rowId };
+          } else {
+            const roots = await verifiedReadRoots(session, dirname(source.file.absolutePath));
+            if (roots.diagnostics.length > 0) return { kind: 'rejected', code: 'EDITOR_PARAM_READ_PREPARE_FAILED' };
+            const read = await readParamDocumentViaBridge({
+              sourcePath: source.file.absolutePath,
+              allowedRoots: roots.allowedRoots,
+              rowIds: [rowId],
+              maxRows: 1,
+              maxFrameBytes: 8 * 1024 * 1024
+            });
+            if (!read.ok || !read.data) return { kind: 'rejected', code: 'EDITOR_PARAM_READ_FAILED' };
+            const row = read.data.rows.find((candidate) => candidate.id === rowId);
+            if (!row || typeof row.dataBase64 !== 'string' || row.dataBase64.length === 0) {
+              return { kind: 'rejected', code: 'EDITOR_PARAM_ROW_NOT_FOUND' };
+            }
+            const definition = await loadTrustedParamDefinition(read.data.typeName, read.data.rowDataSize);
+            if (!definition.ok) return { kind: 'rejected', code: definition.error.code };
+            let bytes: Buffer<ArrayBufferLike> = Buffer.from(row.dataBase64, 'base64');
+            if (bytes.length !== read.data.rowDataSize) return { kind: 'rejected', code: 'EDITOR_PARAM_ROW_WIDTH_INVALID' };
+            for (const field of fieldEdits) {
+              const encoded = encodeFieldMutation(bytes, definition.document, field.fieldId, field.value);
+              if (!encoded.ok) return { kind: 'rejected', code: encoded.code };
+              bytes = encoded.next;
+            }
+            bridgeMutation = { kind: 'upsert', id: rowId, dataBase64: bytes.toString('base64') };
+          }
+          const storage = durableStoragePaths(session.meta.workspaceId);
+          const stage = await verifiedStageRoots(session, storage, 'EDITOR_PARAM_STAGING_PREPARE_FAILED');
+          if (stage.diagnostics.length > 0) return { kind: 'rejected', code: 'EDITOR_PARAM_STAGING_PREPARE_FAILED' };
+          const operationLog = await ensureActiveOperationLog(session);
+          const outcome = await applyNativeMutation({
+            file: source.file,
+            sourceUri: source.file.sourceUri,
+            expectedHash: currentHash,
+            stagingRoot: storage.stagingRoot,
+            allowedRoots: () => [...stage.allowedRoots],
+            stagingPrefix: 'editor-param',
+            stagingFileName: `${basename(source.file.relativePath)}.document.param`,
+            stageWrite: (stageContext) => commitParamMutationViaBridge({
+              sourcePath: source.file.absolutePath,
+              outputPath: stageContext.outputPath,
+              expectedDocumentHash: currentHash,
+              allowedRoots: stageContext.allowedRoots,
+              writableRoots: stageContext.writableRoots,
+              mutation: bridgeMutation
+            }),
+            semanticChecks: {
+              afterCommit: () => verifyEditorParamPostCommit(
+                source,
+                session,
+                rowId,
+                mutation.kind !== 'param-row-delete'
+              )
+            },
+            title: `EditorDocument PARAM ${mutation.kind} ${rowId}`,
+            confirmActionLabel: '提交编辑器 PARAM 变更'
+          }, { commit: sessionCommitPort(session, operationLog, storage) });
+          if (outcome.status === 'cancelled') return { kind: 'cancelled' };
+          if (outcome.status !== 'committed' || !outcome.result.ok) {
+            return {
+              kind: 'rejected',
+              code: outcome.status === 'failed'
+                ? (outcome.diagnostics[0]?.code ?? 'EDITOR_PARAM_WRITE_FAILED')
+                : (outcome.result.diagnostics[0]?.code ?? 'EDITOR_PARAM_WRITE_FAILED')
+            };
+          }
+          operationId = outcome.result.opId;
+        }
+
+        const nextFile = await refreshEditorIndexedFile(source.file);
+        if (!nextFile) return { kind: 'rejected', code: 'EDITOR_PARAM_POSTCOMMIT_REINDEX_FAILED' };
+        await clearEditorCanonicalAfterCommit(context, nextFile);
+        if (!await rereadEditorParamCanonical(context, source, nextFile, session)) {
+          return { kind: 'rejected', code: 'EDITOR_PARAM_POSTCOMMIT_REREAD_FAILED' };
+        }
+        return { kind: 'committed', operationId: operationId ?? `editor-param-${randomUUID()}` };
+      }
+
+      if (mutation.kind === 'map-entity-upsert' || mutation.kind === 'map-entity-delete') {
+        if (source.leafFormat !== 'msb' || source.entryIndex !== undefined) {
+          return { kind: 'rejected', code: 'EDITOR_MAP_SOURCE_UNAVAILABLE' };
+        }
+        const currentFileHash = await sha256FileNow(source.file.absolutePath);
+        if (source.file.sha256 && source.file.sha256 !== currentFileHash) {
+          return { kind: 'rejected', code: 'EDITOR_MAP_SOURCE_STALE' };
+        }
+        const storage = durableStoragePaths(session.meta.workspaceId);
+        const operationLog = await ensureActiveOperationLog(session);
+        const edit = nativeEditSessionFromContext({
+          session,
+          operationLog,
+          backupBaseDir: storage.backupBaseDir,
+          recoveryDir: storage.recoveryDir,
+          stagingRoot: storage.stagingRoot,
+          commitPort: sessionCommitPort(session, operationLog, storage)
+        });
+        const loaded = await loadMapDocument(edit, source.file.absolutePath);
+        if (!loaded.ok) return { kind: 'rejected', code: loaded.error.code };
+        const operations: MapEditTransaction['operations'] = [];
+        if (mutation.kind === 'map-entity-delete') {
+          operations.push({ kind: 'delete', target: mutation.entityStableId });
+        } else {
+          if (mutation.fields.length === 0) return { kind: 'rejected', code: 'EDITOR_MAP_FIELDS_REQUIRED' };
+          for (const field of mutation.fields) {
+            if (field.fieldId === 'position' || field.fieldId === 'rotation' || field.fieldId === 'scale') {
+              const vector = editorMapVector(field.value);
+              if (!vector) return { kind: 'rejected', code: 'EDITOR_MAP_VECTOR_INVALID' };
+              operations.push({ kind: 'set_transform', target: mutation.entityStableId, [field.fieldId]: vector });
+            } else if (field.fieldId === 'modelName') {
+              if (typeof field.value !== 'string' || field.value.length === 0) {
+                return { kind: 'rejected', code: 'EDITOR_MAP_MODEL_INVALID' };
+              }
+              operations.push({ kind: 'change_model', target: mutation.entityStableId, newModelName: field.value });
+            } else if (field.fieldId === 'entityId') {
+              if (typeof field.value !== 'number' || !Number.isSafeInteger(field.value)) {
+                return { kind: 'rejected', code: 'EDITOR_MAP_ENTITY_ID_INVALID' };
+              }
+              operations.push({ kind: 'set_property', target: mutation.entityStableId, property: 'entityId', value: field.value });
+            } else {
+              return { kind: 'rejected', code: 'EDITOR_MAP_FIELD_UNSUPPORTED' };
+            }
+          }
+        }
+        const transaction: MapEditTransaction = {
+          id: `editor-map-${randomUUID()}`,
+          mapId: loaded.doc.mapId,
+          baseRevision: loaded.doc.revision,
+          description: `EditorDocument MSB ${mutation.kind}`,
+          author: 'human',
+          operations,
+          timestamp: Date.now()
+        };
+        const committed = await executeMapTransaction(edit, source.file.absolutePath, transaction);
+        if (!committed.ok) return { kind: 'rejected', code: committed.error?.code ?? 'EDITOR_MAP_WRITE_FAILED' };
+        const nextFile = await refreshEditorIndexedFile(source.file);
+        if (!nextFile) return { kind: 'rejected', code: 'EDITOR_MAP_POSTCOMMIT_REINDEX_FAILED' };
+        await clearEditorCanonicalAfterCommit(context, nextFile);
+        const reread = await loadMapDocument(edit, nextFile.absolutePath);
+        if (!reread.ok) return { kind: 'rejected', code: 'EDITOR_MAP_POSTCOMMIT_REREAD_FAILED' };
+        observeEditorCanonical(
+          context,
+          reread.doc.revision,
+          editorMapEntities(nextFile.sourceUri, reread.doc.revision, reread.doc)
+        );
+        return {
+          kind: 'committed',
+          operationId: committed.operationId ?? committed.transactionId
+        };
+      }
+
+      if (mutation.kind !== 'fmg-entry-upsert' && mutation.kind !== 'fmg-entry-delete') {
+        return { kind: 'rejected', code: 'EDITOR_NATIVE_MUTATION_UNSUPPORTED' };
+      }
+      if (source.leafFormat !== 'fmg' || mutation.tableId !== source.tableId) {
+        return { kind: 'rejected', code: 'EDITOR_NATIVE_SOURCE_UNAVAILABLE' };
+      }
+      const currentFileHash = await sha256FileNow(source.file.absolutePath);
+      if (source.file.sha256 && source.file.sha256 !== currentFileHash) {
+        return { kind: 'rejected', code: 'EDITOR_FMG_SOURCE_STALE' };
+      }
+      const storage = durableStoragePaths(session.meta.workspaceId);
+      const stage = await verifiedStageRoots(session, storage, 'EDITOR_FMG_STAGING_PREPARE_FAILED');
+      if (stage.diagnostics.length > 0) return { kind: 'rejected', code: 'EDITOR_FMG_STAGING_PREPARE_FAILED' };
+      const operationLog = await ensureActiveOperationLog(session);
+      const expectedHash = currentFileHash;
+      const bridgeMutation = mutation.kind === 'fmg-entry-delete'
+        ? { kind: 'delete' as const, id: Number(mutation.entryId) }
+        : { kind: 'upsert' as const, id: Number(mutation.entryId), text: mutation.text };
+      if (!Number.isSafeInteger(bridgeMutation.id)) return { kind: 'rejected', code: 'EDITOR_FMG_ENTRY_ID_INVALID' };
+      const outcome = await applyNativeMutation({
+        file: source.file,
+        sourceUri: source.file.sourceUri,
+        expectedHash,
+        stagingRoot: storage.stagingRoot,
+        allowedRoots: () => [...stage.allowedRoots],
+        stagingPrefix: 'editor-fmg',
+        stagingFileName: `${basename(source.file.relativePath)}.document.mut.fmg`,
+        stageWrite: (stageContext) => commitFmgMutationViaBridge({
+          sourcePath: source.file.absolutePath,
+          outputPath: stageContext.outputPath,
+          expectedDocumentHash: expectedHash,
+          allowedRoots: stageContext.allowedRoots,
+          writableRoots: stageContext.writableRoots,
+          mutation: bridgeMutation,
+          ...(source.entryIndex !== undefined ? { entryIndex: source.entryIndex } : {}),
+          ...(session.layers.baseRoot ? { oodleRuntimeRoot: session.layers.baseRoot } : {})
+        }),
+        semanticChecks: {
+          afterCommit: () => verifyEditorFmgPostCommit(
+            source,
+            session,
+            bridgeMutation.id,
+            mutation.kind !== 'fmg-entry-delete'
+          )
+        },
+        title: `EditorDocument FMG ${mutation.kind} ${mutation.entryId}`,
+        confirmActionLabel: '提交编辑器文本变更'
+      }, { commit: sessionCommitPort(session, operationLog, storage) });
+      if (outcome.status === 'cancelled') return { kind: 'cancelled' };
+      if (outcome.status !== 'committed' || !outcome.result.ok) {
+        return {
+          kind: 'rejected',
+          code: outcome.status === 'failed'
+            ? (outcome.diagnostics[0]?.code ?? 'EDITOR_FMG_WRITE_FAILED')
+            : (outcome.result.diagnostics[0]?.code ?? 'EDITOR_FMG_WRITE_FAILED')
+        };
+      }
+      const nextFile = await refreshEditorIndexedFile(source.file);
+      if (!nextFile) return { kind: 'rejected', code: 'EDITOR_FMG_POSTCOMMIT_REINDEX_FAILED' };
+      await clearEditorCanonicalAfterCommit(context, nextFile);
+      let rereadOk = false;
+      const rereadRoots = await verifiedReadRoots(session, dirname(nextFile.absolutePath));
+      if (rereadRoots.diagnostics.length === 0) {
+        const reread = await readFmgDocumentViaBridge({
+          sourcePath: nextFile.absolutePath,
+          allowedRoots: rereadRoots.allowedRoots,
+          ...(source.entryIndex !== undefined ? { entryIndex: source.entryIndex } : {})
+        });
+        if (reread.ok && reread.data) {
+          rereadOk = true;
+          observeEditorCanonical(
+            context,
+            reread.data.sourceHash,
+            editorFmgEntities(nextFile.sourceUri, reread.data.sourceHash, source.tableId, reread.data.entries)
+          );
+        }
+      }
+      if (!rereadOk) return { kind: 'rejected', code: 'EDITOR_FMG_POSTCOMMIT_REREAD_FAILED' };
+      return {
+        kind: 'committed',
+        operationId: outcome.result.opId ?? `editor-fmg-${randomUUID()}`
+      };
+    }
   };
   editorDocumentStore = new EditorDocumentStore({
     ttlMs: 30 * 60_000,
-    dataSource: skeletonDataSource,
-    applyPort: skeletonApplyPort
+    dataSource: productionDataSource,
+    applyPort: productionApplyPort,
+    capabilityResolver: productionEditorCapabilities
   });
   return editorDocumentStore;
 }
@@ -1347,6 +2479,7 @@ const operationLogUtility = new OperationLogUtilityClient(
   sqliteNativeBindingPath
 );
 const modelServiceVault = new ModelServiceCredentialVault(app.getPath('userData'));
+const memoryManager = new MemoryManager(app.getPath('userData'));
 
 const toolRegistry = createDefaultToolRegistry();
 // P0 authority: renderer cannot elevate this value. Persistent per-model-service
@@ -1651,10 +2784,16 @@ function currentToolContext(): ToolContext {
   return {
     workspaceIndex: activeIndex,
     mode: activeAiMode,
+    memoryStore: memoryManager.getStore(activeSession?.meta.workspaceId),
     ...(activeRag ? { rag: activeRag } : {}),
     ...(activeSession ? { session: activeSession } : {}),
     ...(activeOperationLog ? { operationLogStore: activeOperationLog } : {}),
-    ...(storage ? { backupBaseDir: storage.backupBaseDir, recoveryDir: storage.recoveryDir } : {})
+    ...(storage ? { backupBaseDir: storage.backupBaseDir, recoveryDir: storage.recoveryDir } : {}),
+    onIndexUpdated: async () => {
+      if (!activeIndex || !activeSession) return;
+      const database = await ensureActiveOperationLog(activeSession);
+      await refreshRagAfterAnalyze(database, activeIndex);
+    }
   };
 }
 
@@ -1671,6 +2810,13 @@ async function refreshRagAfterScan(
   database: OperationLogUtilityClient,
   index: WorkspaceIndex
 ): Promise<void> {
+  await persistActiveRag(database, await reconcileRagWithIndex(database, index));
+}
+
+async function reconcileRagWithIndex(
+  database: OperationLogUtilityClient,
+  index: WorkspaceIndex
+): Promise<RagCorpus> {
   const catalog = buildRagCorpus(index);
   const persisted = createRagCorpus({
     workspaceId: index.workspaceId,
@@ -1678,7 +2824,11 @@ async function refreshRagAfterScan(
     chunks: await database.loadRagChunks(),
     references: await database.loadReferences()
   });
-  await persistActiveRag(database, mergeCatalogAndPersisted(catalog, persisted));
+  return mergeCatalogAndPersisted(catalog, persisted);
+}
+
+function isRagCurrentForIndex(corpus: RagCorpus, index: WorkspaceIndex): boolean {
+  return corpus.coverage?.sourceRevision === revisionForFiles(index.getFiles());
 }
 
 async function refreshRagAfterAnalyze(
@@ -2176,31 +3326,33 @@ function electronConfirmationPort(event: IpcMainInvokeEvent): WriteConfirmationP
 function sessionCommitPort(
   session: WorkspaceSession,
   operationLog: OperationLogUtilityClient,
-  storage: { backupBaseDir: string; recoveryDir: string }
+  storage: { backupBaseDir: string; recoveryDir: string },
+  autoConfirm = true
 ): RawReplaceCommitPort {
   return {
     commit: (input) => {
       // 工作台按钮就是确认。S29 拆掉了弹窗，但 file_replace 对 parambnd 等
       // 打包格式仍要一张 receipt；不补的话新建/删行会停在
       // EDIT_CONFIRMATION_REQUIRED（Files Mode raw/high-risk…）。
-      const confirmation = input.confirmation ?? createConfirmationReceipt({
-        subjects: [
-          'MAIN_WORKBENCH_COMMIT',
-          input.file.sourceUri,
-          'ALL_RISKS',
-          ...(activeWorkspaceSessionId ? [`WORKSPACE_SESSION:${activeWorkspaceSessionId}`] : []),
-          `TITLE:${input.title}`
-        ],
-        riskLevel: 'high',
-        sourceUri: input.file.sourceUri,
-        note: '工作台提交视为已确认'
-      });
+      const confirmation = input.confirmation ?? (autoConfirm ? createConfirmationReceipt({
+          subjects: [
+            'MAIN_WORKBENCH_COMMIT',
+            input.file.sourceUri,
+            'ALL_RISKS',
+            ...(activeWorkspaceSessionId ? [`WORKSPACE_SESSION:${activeWorkspaceSessionId}`] : []),
+            `TITLE:${input.title}`
+          ],
+          riskLevel: 'high',
+          sourceUri: input.file.sourceUri,
+          note: '工作台提交视为已确认'
+        }) : undefined);
       return saveRawReplace({
         file: input.file,
         expectedHash: input.expectedHash,
         newContentBase64: input.newContentBase64,
         title: input.title,
-        confirmation,
+        ...(confirmation ? { confirmation } : {}),
+        ...(input.semanticChecks ? { semanticChecks: input.semanticChecks } : {}),
         session,
         operationLog,
         backupBaseDir: storage.backupBaseDir,
@@ -5091,6 +6243,107 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
     return { ok: false, reason: 'none' as const, message: `没有找到 ${stem} 的模型（chrbnd）。` };
   });
 
+  const refreshMapCatalogAfterCommit = async (session: WorkspaceSession): Promise<Diagnostic[]> => {
+    const database = await ensureActiveOperationLog(session);
+    const result = await scanWorkspace({
+      workspaceRoot: session.layers.overlayRoot,
+      game: session.meta.game
+    });
+    indexedFiles = result.files;
+    if (!activeIndex || activeIndex.workspaceId !== session.meta.workspaceId) {
+      activeIndex = new WorkspaceIndex(session.meta.workspaceId);
+    }
+    activeIndex.setFiles(result.files);
+    await database.replaceFiles(result.files);
+    await refreshRagAfterAnalyze(database, activeIndex);
+    return result.diagnostics;
+  };
+
+  const runMapTransaction = async (
+    event: IpcMainInvokeEvent,
+    sourceUri: string,
+    expectedHash: string,
+    transaction: MapEditTransaction
+  ): Promise<RendererSaveResult> => {
+    const file = indexedFiles.find((item) => item.sourceUri === sourceUri);
+    const session = activeSession;
+    if (!file || !session) {
+      return {
+        ok: false,
+        changedFiles: [],
+        diagnostics: [{
+          severity: 'error',
+          code: 'MSB_WRITE_NO_SESSION',
+          message: '需要已打开的工作区才能写入 MSB。',
+          sourceUri
+        }]
+      };
+    }
+    const gameBlocked = rejectNonSekiroNativeWrite(sourceUri, file);
+    if (gameBlocked) return gameBlocked;
+    if (expectedHash.length === 0 || transaction.baseRevision.length === 0) {
+      return {
+        ok: false,
+        changedFiles: [],
+        diagnostics: [{
+          severity: 'error',
+          code: 'MAP_TRANSACTION_REVISION_REQUIRED',
+          message: 'MSB 事务必须携带当前 baseRevision；缺失时拒绝写入。',
+          sourceUri
+        }]
+      };
+    }
+
+    const storage = durableStoragePaths(session.meta.workspaceId);
+    const stage = await verifiedStageRoots(session, storage, 'MSB_STAGING_PREPARE_FAILED');
+    if (stage.diagnostics.length > 0) {
+      return { ok: false, changedFiles: [], diagnostics: stage.diagnostics };
+    }
+    const operationLog = await ensureActiveOperationLog(session);
+    const edit = nativeEditSessionFromContext({
+      session,
+      operationLog,
+      backupBaseDir: storage.backupBaseDir,
+      recoveryDir: storage.recoveryDir,
+      stagingRoot: storage.stagingRoot,
+      commitPort: sessionCommitPort(session, operationLog, storage, false),
+      confirmationPort: electronConfirmationPort(event)
+    });
+    const result = await executeMapTransaction(edit, file.absolutePath, transaction);
+    if (!result.ok) {
+      return {
+        ok: false,
+        changedFiles: [],
+        diagnostics: [{
+          severity: 'error',
+          code: result.error?.code ?? 'MAP_TRANSACTION_FAILED',
+          message: result.error?.message ?? 'MapEditTransaction 执行失败。',
+          sourceUri
+        }]
+      };
+    }
+
+    try {
+      const scanDiagnostics = await refreshMapCatalogAfterCommit(session);
+      return {
+        ok: true,
+        changedFiles: [sourceUri],
+        diagnostics: sanitizeDiagnostics(scanDiagnostics)
+      };
+    } catch (error) {
+      return {
+        ok: false,
+        changedFiles: [sourceUri],
+        diagnostics: [{
+          severity: 'error',
+          code: 'MAP_INDEX_REFRESH_FAILED',
+          message: `MSB 已通过 Patch Engine 提交并完成 native reread，但 WorkspaceIndex/RAG 刷新失败：${error instanceof Error ? error.message : String(error)}`,
+          sourceUri
+        }]
+      };
+    }
+  };
+
   handle(
     'resource.applyMsbMutation',
     async (
@@ -5105,61 +6358,85 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
         posY?: number;
         posZ?: number;
         rotX?: number;
+        rotY?: number;
+        rotZ?: number;
         scaleX?: number;
         scaleY?: number;
         scaleZ?: number;
       }
     ): Promise<RendererSaveResult> => {
       const file = indexedFiles.find((item) => item.sourceUri === sourceUri);
-      if (!file || !activeSession) {
+      if (!file) {
         return {
           ok: false,
           changedFiles: [],
           diagnostics: [{
             severity: 'error',
-            code: 'MSB_WRITE_NO_SESSION',
-            message: '需要已打开的工作区才能写入 MSB。',
+            code: 'RESOURCE_NOT_INDEXED',
+            message: 'MSB 资源尚未在当前工作区索引中。',
             sourceUri
           }]
         };
       }
-      const gameBlocked = rejectNonSekiroNativeWrite(sourceUri, file);
-      if (gameBlocked) return gameBlocked;
-      // S36 开闸：msb 不再延期，write-msb 写链经 applyNativeMutation →
-      // Patch Engine 提交（备份/确认/回滚元数据与其余语义编辑器同一范式）。
-      const storage = durableStoragePaths(activeSession.meta.workspaceId);
-      const stage = await verifiedStageRoots(activeSession, storage, 'MSB_STAGING_PREPARE_FAILED');
-      if (stage.diagnostics.length > 0) {
-        return {
-          ok: false,
-          changedFiles: [],
-          diagnostics: stage.diagnostics
-        };
+      const vector = (
+        label: string,
+        values: [number | undefined, number | undefined, number | undefined]
+      ): { value?: [number, number, number]; diagnostic?: Diagnostic } => {
+        const present = values.filter((value) => value !== undefined).length;
+        if (present === 0) return {};
+        if (present !== 3 || values.some((value) => !Number.isFinite(value))) {
+          return {
+            diagnostic: {
+              severity: 'error',
+              code: 'MSB_LEGACY_PARTIAL_TRANSFORM_UNSUPPORTED',
+              message: `旧 MSB mutation 的 ${label} 必须提供完整的 x/y/z 三元组；已拒绝部分字段写入。`,
+              sourceUri
+            }
+          };
+        }
+        return { value: values as [number, number, number] };
+      };
+
+      const operations: MapEditTransaction['operations'] = [];
+      if (mutation.kind === 'delete_part' || mutation.kind === 'delete_region' || mutation.kind === 'delete_event') {
+        operations.push({ kind: 'delete', target: mutation.partName });
+      } else {
+        const position = vector('position', [mutation.posX, mutation.posY, mutation.posZ]);
+        const rotation = vector('rotation', [mutation.rotX, mutation.rotY, mutation.rotZ]);
+        const scale = vector('scale', [mutation.scaleX, mutation.scaleY, mutation.scaleZ]);
+        const diagnostic = position.diagnostic ?? rotation.diagnostic ?? scale.diagnostic;
+        if (diagnostic) return { ok: false, changedFiles: [], diagnostics: [diagnostic] };
+        if (!position.value && !rotation.value && !scale.value) {
+          return {
+            ok: false,
+            changedFiles: [],
+            diagnostics: [{
+              severity: 'error',
+              code: 'MAP_TRANSFORM_EMPTY',
+              message: '旧 MSB mutation 没有任何完整变换字段。',
+              sourceUri
+            }]
+          };
+        }
+        operations.push({
+          kind: 'set_transform',
+          target: mutation.partName,
+          ...(position.value ? { position: position.value } : {}),
+          ...(rotation.value ? { rotation: rotation.value } : {}),
+          ...(scale.value ? { scale: scale.value } : {})
+        });
       }
-      const operationLog = await ensureActiveOperationLog(activeSession);
-      const outcome = await applyNativeMutation({
-        file,
-        sourceUri,
-        expectedHash,
-        stagingRoot: storage.stagingRoot,
-        allowedRoots: () => [...stage.allowedRoots],
-        stagingPrefix: 'msb',
-        stagingFileName: `${basename(file.relativePath)}.mut.msb`,
-        stageWrite: (context) => commitMsbMutationViaBridge({
-          sourcePath: file.absolutePath,
-          outputPath: context.outputPath,
-          expectedDocumentHash: expectedHash,
-          allowedRoots: context.allowedRoots,
-          writableRoots: context.writableRoots,
-          mutation
-        }),
-        title: `MSB mutation ${mutation.kind} ${mutation.partName}`,
-        confirmActionLabel: '提交 MSB 变更'
-      }, {
-        confirm: electronConfirmationPort(event),
-        commit: sessionCommitPort(activeSession, operationLog, storage)
+
+      const mapId = basename(file.relativePath).replace(/\.msb(?:\.dcx)?$/i, '');
+      return runMapTransaction(event, sourceUri, expectedHash, {
+        id: `tx-legacy-msb-${randomUUID()}`,
+        mapId,
+        baseRevision: expectedHash,
+        description: `兼容旧 MSB mutation ${mutation.kind} ${mutation.partName}`,
+        author: 'human',
+        operations,
+        timestamp: Date.now()
       });
-      return toSaveResultFromOutcome(outcome, indexedFiles);
     }
   );
 
@@ -5170,201 +6447,7 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
       sourceUri: string,
       expectedHash: string,
       transaction: MapEditTransaction
-    ): Promise<RendererSaveResult> => {
-      const file = indexedFiles.find((item) => item.sourceUri === sourceUri);
-      if (!file || !activeSession) {
-        return {
-          ok: false,
-          changedFiles: [],
-          diagnostics: [{
-            severity: 'error',
-            code: 'MSB_WRITE_NO_SESSION',
-            message: '需要已打开的工作区才能写入 MSB。',
-            sourceUri
-          }]
-        };
-      }
-      const gameBlocked = rejectNonSekiroNativeWrite(sourceUri, file);
-      if (gameBlocked) return gameBlocked;
-
-      const roots = await verifiedReadRoots(activeSession, dirname(file.absolutePath));
-      if (roots.diagnostics.length > 0) return { ok: false, changedFiles: [], diagnostics: roots.diagnostics };
-      const docResult = await readMsbDocumentViaBridge({
-        sourcePath: file.absolutePath,
-        allowedRoots: roots.allowedRoots,
-        ...(activeSession?.layers.baseRoot ? { oodleRuntimeRoot: activeSession.layers.baseRoot } : {})
-      });
-      if (!docResult.ok || !docResult.data) {
-        return {
-          ok: false,
-          changedFiles: [],
-          diagnostics: sanitizeDiagnostics(asBasicDiagnostics(docResult.diagnostics))
-        };
-      }
-
-      const mapDoc = buildCanonicalMapDocument({
-        sourceUri,
-        sourcePath: file.relativePath,
-        game: file.game,
-        revision: expectedHash,
-        models: docResult.data.models,
-        parts: docResult.data.parts.map((p) => ({
-          name: p.name,
-          typeId: p.typeId ?? 0,
-          modelIndex: p.modelIndex,
-          posX: p.posX,
-          posY: p.posY,
-          posZ: p.posZ,
-          rotX: p.rotX,
-          rotY: p.rotY,
-          rotZ: p.rotZ,
-          scaleX: p.scaleX,
-          scaleY: p.scaleY,
-          scaleZ: p.scaleZ
-        })),
-        regions: docResult.data.regions?.map((r) => ({
-          name: r.name,
-          typeId: r.typeId ?? 0,
-          posX: r.posX,
-          posY: r.posY,
-          posZ: r.posZ,
-          rotX: r.rotX,
-          rotY: r.rotY,
-          rotZ: r.rotZ,
-          scaleX: r.scaleX,
-          scaleY: r.scaleY,
-          scaleZ: r.scaleZ
-        }))
-      });
-
-      const validation = validateMapTransaction(mapDoc, transaction);
-      if (!validation.valid) {
-        return {
-          ok: false,
-          changedFiles: [],
-          diagnostics: validation.diagnostics.map((d) => ({
-            severity: d.severity,
-            code: d.code,
-            message: d.message,
-            sourceUri
-          }))
-        };
-      }
-
-      const sceneGraph = new MapSceneGraph(mapDoc);
-      const mutations: MsbBridgeMutation[] = [];
-      for (const op of transaction.operations) {
-        if (op.kind === 'set_transform') {
-          const entity = sceneGraph.findEntity(op.target);
-          if (entity) {
-            if (entity.kind === 'part') {
-              mutations.push({
-                kind: 'set_part_transform',
-                partName: entity.name,
-                ...(op.position ? { posX: op.position[0], posY: op.position[1], posZ: op.position[2] } : {}),
-                ...(op.rotation ? { rotX: op.rotation[0], rotY: op.rotation[1], rotZ: op.rotation[2] } : {}),
-                ...(op.scale ? { scaleX: op.scale[0], scaleY: op.scale[1], scaleZ: op.scale[2] } : {})
-              });
-            } else if (entity.kind === 'region') {
-              mutations.push({
-                kind: 'set_region_transform',
-                partName: entity.name,
-                ...(op.position ? { posX: op.position[0], posY: op.position[1], posZ: op.position[2] } : {}),
-                ...(op.rotation ? { rotX: op.rotation[0], rotY: op.rotation[1], rotZ: op.rotation[2] } : {}),
-                ...(op.scale ? { scaleX: op.scale[0], scaleY: op.scale[1], scaleZ: op.scale[2] } : {})
-              });
-            }
-          }
-        } else if (op.kind === 'batch_transform') {
-          for (const target of op.targets) {
-            const entity = sceneGraph.findEntity(target);
-            if (entity && 'transform' in entity) {
-              const t = (entity as MapPartEntity | MapRegionEntity).transform;
-              const posX = op.positionDelta ? t.position[0] + op.positionDelta[0] : undefined;
-              const posY = op.positionDelta ? t.position[1] + op.positionDelta[1] : undefined;
-              const posZ = op.positionDelta ? t.position[2] + op.positionDelta[2] : undefined;
-              const rotX = op.rotationDelta ? t.rotation[0] + op.rotationDelta[0] : undefined;
-              const rotY = op.rotationDelta ? t.rotation[1] + op.rotationDelta[1] : undefined;
-              const rotZ = op.rotationDelta ? t.rotation[2] + op.rotationDelta[2] : undefined;
-              const scaleX = op.scaleDelta ? t.scale[0] + op.scaleDelta[0] : undefined;
-              const scaleY = op.scaleDelta ? t.scale[1] + op.scaleDelta[1] : undefined;
-              const scaleZ = op.scaleDelta ? t.scale[2] + op.scaleDelta[2] : undefined;
-              mutations.push({
-                kind: entity.kind === 'part' ? 'set_part_transform' : 'set_region_transform',
-                partName: entity.name,
-                ...(posX !== undefined ? { posX } : {}),
-                ...(posY !== undefined ? { posY } : {}),
-                ...(posZ !== undefined ? { posZ } : {}),
-                ...(rotX !== undefined ? { rotX } : {}),
-                ...(rotY !== undefined ? { rotY } : {}),
-                ...(rotZ !== undefined ? { rotZ } : {}),
-                ...(scaleX !== undefined ? { scaleX } : {}),
-                ...(scaleY !== undefined ? { scaleY } : {}),
-                ...(scaleZ !== undefined ? { scaleZ } : {})
-              });
-            }
-          }
-        } else if (op.kind === 'change_model') {
-          const part = sceneGraph.findPart(op.target);
-          if (part) {
-            mutations.push({
-              kind: 'change_model',
-              partName: part.name,
-              modelName: op.newModelName
-            });
-          }
-        } else if (op.kind === 'delete') {
-          const entity = sceneGraph.findEntity(op.target);
-          if (entity) {
-            if (entity.kind === 'part') {
-              mutations.push({ kind: 'delete_part', partName: entity.name });
-            } else if (entity.kind === 'region') {
-              mutations.push({ kind: 'delete_region', partName: entity.name });
-            } else if (entity.kind === 'event') {
-              mutations.push({ kind: 'delete_event', partName: entity.name });
-            }
-          }
-        }
-      }
-
-      if (mutations.length === 0) {
-        return { ok: true, changedFiles: [], diagnostics: [] };
-      }
-
-      const storage = durableStoragePaths(activeSession.meta.workspaceId);
-      const stage = await verifiedStageRoots(activeSession, storage, 'MSB_STAGING_PREPARE_FAILED');
-      if (stage.diagnostics.length > 0) {
-        return {
-          ok: false,
-          changedFiles: [],
-          diagnostics: stage.diagnostics
-        };
-      }
-      const operationLog = await ensureActiveOperationLog(activeSession);
-      const outcome = await applyNativeMutation({
-        file,
-        sourceUri,
-        expectedHash,
-        stagingRoot: storage.stagingRoot,
-        allowedRoots: () => [...stage.allowedRoots],
-        stagingPrefix: 'msb',
-        stagingFileName: `${basename(file.relativePath)}.mut.msb`,
-        stageWrite: (context) => commitMsbMutationViaBridge({
-          sourcePath: file.absolutePath,
-          outputPath: context.outputPath,
-          expectedDocumentHash: expectedHash,
-          allowedRoots: context.allowedRoots,
-          writableRoots: context.writableRoots,
-          mutations
-        }),
-        title: `MSB transaction [${transaction.id}] (${mutations.length} 项修改)`,
-        confirmActionLabel: '提交 MSB 事务'
-      }, {
-        confirm: electronConfirmationPort(event),
-        commit: sessionCommitPort(activeSession, operationLog, storage)
-      });
-      return toSaveResultFromOutcome(outcome, indexedFiles);
-    }
+    ): Promise<RendererSaveResult> => runMapTransaction(event, sourceUri, expectedHash, transaction)
   );
 
   handle(
@@ -10341,6 +11424,7 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
         contextWindowTokens?: number;
         thinkingLevel?: 'off' | 'none' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max';
         embeddingModel?: string;
+        capabilities?: ModelProviderCapabilities;
       }
     ) => {
       // apiKey is accepted once for encryption; never returned in the response DTO.
@@ -10360,7 +11444,8 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
         ...(saved.maxTokens !== undefined ? { maxTokens: saved.maxTokens } : {}),
         ...(saved.contextWindowTokens !== undefined ? { contextWindowTokens: saved.contextWindowTokens } : {}),
         ...(saved.thinkingLevel !== undefined ? { thinkingLevel: saved.thinkingLevel } : {}),
-        ...(saved.embeddingModel !== undefined ? { embeddingModel: saved.embeddingModel } : {})
+        ...(saved.embeddingModel !== undefined ? { embeddingModel: saved.embeddingModel } : {}),
+        ...(saved.capabilities ? { capabilities: saved.capabilities } : {})
       };
     }
   );
@@ -10381,7 +11466,8 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
   /**
    * 为当前工作区语料生成 embedding 向量索引（POST /v1/embeddings，分批）。
    * 服务配置必须含 embeddingModel（仅 openai-compatible 支持，Anthropic 无
-   * embedding API）。按批失败降级：坏批跳过不阻塞整体，返回失败批数。
+   * embedding API）。任一批失败都会清空旧向量并返回失败；不允许用部分
+   * 向量索引继续回答完整语料的问题。
    */
   handle('rag.embed', async (_event, input: { configId: string }): Promise<
     | { ok: true; embedded: number; failed: number; model: string; dim: number }
@@ -10423,17 +11509,21 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
       return { ok: false, error: { code: 'MODEL_SERVICE_UNCONFIGURED', message: '模型服务凭据不可解密。' } };
     }
     const database = await ensureActiveOperationLog(activeSession);
-    const corpus = activeRag ?? createRagCorpus({
-      workspaceId: activeIndex.workspaceId,
-      builtAt: new Date().toISOString(),
-      chunks: await database.loadRagChunks(),
-      references: await database.loadReferences()
-    });
+    const corpus = activeRag && isRagCurrentForIndex(activeRag, activeIndex)
+      ? activeRag
+      : await reconcileRagWithIndex(database, activeIndex);
     if (corpus.chunks.length === 0) {
       return { ok: false, error: { code: 'INSUFFICIENT_CORPUS', message: '语料为空：先扫描并分析工作区。' } };
     }
 
-    const entries: Array<{ chunkId: string; model: string; vector: Float32Array }> = [];
+    const sourceRevision = corpus.coverage?.sourceRevision;
+    if (!sourceRevision) {
+      return {
+        ok: false,
+        error: { code: 'RAG_SOURCE_REVISION_REQUIRED', message: '当前语料没有可验证的 sourceRevision，拒绝生成可持久化向量索引。' }
+      };
+    }
+    const entries: Array<{ chunkId: string; model: string; vector: Float32Array; sourceRevision: string }> = [];
     let failed = 0;
     for (let start = 0; start < corpus.chunks.length; start += EMBED_BATCH_SIZE) {
       const batch = corpus.chunks.slice(start, start + EMBED_BATCH_SIZE);
@@ -10451,9 +11541,19 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
       for (let i = 0; i < batch.length; i += 1) {
         const vector = result.vectors[i];
         const chunk = batch[i];
-        if (!vector || !chunk) continue;
-        entries.push({ chunkId: chunk.chunkId, model: stored.embeddingModel, vector });
+        if (!vector || !chunk) {
+          failed += 1;
+          continue;
+        }
+        entries.push({ chunkId: chunk.chunkId, model: stored.embeddingModel, vector, sourceRevision });
       }
+    }
+    if (failed > 0 || entries.length !== corpus.chunks.length) {
+      await database.replaceRagEmbeddings([]);
+      return {
+        ok: false,
+        error: { code: 'EMBEDDING_PARTIAL_FAILED', message: `Embedding 仅生成 ${entries.length}/${corpus.chunks.length} 个向量，旧索引已清空。` }
+      };
     }
     await database.replaceRagEmbeddings(entries);
     return {
@@ -10484,17 +11584,19 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
     if (!activeIndex) {
       return { ok: false, code: 'WORKSPACE_REQUIRED', message: '先打开 Mod 工作区。' };
     }
-    const corpus = activeRag ?? createRagCorpus({
-      workspaceId: activeIndex.workspaceId,
-      builtAt: new Date().toISOString(),
-      chunks: await database.loadRagChunks(),
-      references: await database.loadReferences()
-    });
+    const corpus = activeRag && isRagCurrentForIndex(activeRag, activeIndex)
+      ? activeRag
+      : await reconcileRagWithIndex(database, activeIndex);
 
     // 向量侧（可选）：索引模型与服务配置的 embeddingModel 一致才启用。
     let vectors: HybridVectorSource | undefined;
     const indexedModel = await database.ragEmbeddingModel();
-    if (indexedModel && typeof options.configId === 'string' && options.configId !== '') {
+    const indexedRevision = await database.ragEmbeddingSourceRevision();
+    if (indexedModel
+      && indexedRevision
+      && corpus.coverage?.sourceRevision === indexedRevision
+      && typeof options.configId === 'string'
+      && options.configId !== '') {
       const stored = (await modelServiceVault.listConfigs()).find((config) => config.id === options.configId);
       if (stored?.embeddingModel === indexedModel) {
         const apiKey = await modelServiceVault.resolveApiKey(stored.id);
@@ -10776,7 +11878,8 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
       model: stored.model,
       hasCredential: true as const,
       createdAt: stored.createdAt,
-      updatedAt: stored.updatedAt
+      updatedAt: stored.updatedAt,
+      ...(stored.capabilities ? { capabilities: stored.capabilities } : {})
     };
     // 采样/能力参数来自服务配置（vault），renderer 无法伪造：保存时落盘，运行
     // 时由 main 读取下发。缺失字段 = 该次调用用 provider 默认值。
@@ -10828,7 +11931,12 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
     const bridge = createAgentToolBridge({
       registry: toolRegistry,
       context: { ...currentToolContext(), mode },
-      requireTextLookupBeforeStructuredDiscovery: /(?:boss|npc|enemy|elite|item|drop|角色|敌人|怪|精英|物品|道具|掉落|红点|忍杀|技能|鬼刑部|形部)/iu.test(request.prompt)
+      externalTaskGoal: request.prompt,
+      // Natural-language discovery always goes through ResolverWorkflowState's
+      // text-first gate. Precise canonical addresses are exempted by that
+      // state machine; a keyword regex here would silently leave other entity
+      // names on the guessing path.
+      requireTextLookupBeforeStructuredDiscovery: true
     });
 
     // AI 回滚接通：rollback_operation 走与 UI 操作级回滚完全相同的通道 ——
@@ -10839,10 +11947,10 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
     // 「确认这一次具体回滚」——双重防线，回滚是高危险不可逆操作。
     {
       const rawExecuteTool = bridge.executeTool;
-      bridge.executeTool = async (call) => {
+      bridge.executeTool = async (call, contextOverride) => {
         if (call.name === 'commit_patch' || call.name === 'mutate_param_fields'
           || call.name === 'mutate_fmg_entries' || call.name === 'apply_emevd_dsl') {
-          if (!activeSession || !activeOperationLog) return rawExecuteTool(call);
+          if (!activeSession || !activeOperationLog) return rawExecuteTool(call, contextOverride);
           const storage = durableStoragePaths(activeSession.meta.workspaceId);
           const confirmation = createConfirmationReceipt({
             subjects: [
@@ -10855,6 +11963,7 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
             note: 'Agent 审批卡通过后签发的写入回执'
           });
           return rawExecuteTool(call, {
+            ...contextOverride,
             session: activeSession,
             operationLogStore: activeOperationLog,
             backupBaseDir: storage.backupBaseDir,
@@ -10862,7 +11971,7 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
             confirmation
           });
         }
-        if (call.name !== 'rollback_operation') return rawExecuteTool(call);
+        if (call.name !== 'rollback_operation') return rawExecuteTool(call, contextOverride);
         let input: Record<string, unknown> = {};
         try {
           input = call.argumentsJson.trim() === '' ? {} : JSON.parse(call.argumentsJson);
@@ -10899,6 +12008,7 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
           };
         }
         return rawExecuteTool(call, {
+          ...contextOverride,
           session: activeSession,
           operationLogStore: activeOperationLog,
           backupBaseDir: storage.backupBaseDir,
@@ -10923,6 +12033,8 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
     // T6-2：系统提示由 main 读入并装配（renderer 不拼）。选区作为可选元数据
     // 附在系统提示里供模型参考，不是默认任务对象，也不自动写进 prompt 文本。
     const systemPromptParts = [readSystemPrompt() ?? ''];
+    const memoryPrompt = memoryManager.getFormattedMemoryForSystemPrompt(activeSession?.meta.workspaceId);
+    if (memoryPrompt.trim().length > 0) systemPromptParts.push(memoryPrompt);
     if (request.selection) {
       systemPromptParts.push(
         `用户当前选区（仅可选元数据，不是默认任务对象）：${request.selection.label}（${request.selection.resourceKind}）。`
@@ -10961,6 +12073,25 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
       );
     }
     const systemPrompt = systemPromptParts.filter((part) => part.trim().length > 0).join('\n\n');
+
+    // Rollout metadata is assembled in main from effective runtime state, not
+    // renderer claims.  Missing workspace/RAG revisions stay absent rather
+    // than being replaced by a fake "fresh" marker.
+    const taskModel = createTaskModel(request.prompt);
+    const workspaceRevision = activeIndex
+      ? revisionForFiles(activeIndex.getFiles())
+      : undefined;
+    const semanticIndexRevision = activeIndex
+      ? createHash('sha256').update(JSON.stringify({
+          files: workspaceRevision ?? null,
+          stats: activeIndex.getStats()
+        })).digest('hex').slice(0, 24)
+      : undefined;
+    const toolRegistryVersion = createHash('sha256').update(JSON.stringify(
+      bridge.tools.map((tool) => ({ name: tool.name, schema: tool.parametersJsonSchema }))
+    )).digest('hex').slice(0, 24);
+    const systemPromptVersion = createHash('sha256').update(systemPrompt || 'missing-system-prompt').digest('hex').slice(0, 24);
+    const providerCapabilities: ModelProviderCapabilities | undefined = modelConfig.capabilities;
 
     const sessionId = randomUUID();
     const controller = new AbortController();
@@ -11178,6 +12309,15 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
           }
         : {}),
       ...(resumeFrom ? { resumeFrom } : {}),
+      ...(providerCapabilities ? { providerCapabilities } : {}),
+      completionContract: taskModel.completionContract,
+      appCommitSha: process.env.SOULFORGE_APP_COMMIT_SHA ?? 'uncommitted',
+      systemPromptVersion,
+      toolRegistryVersion,
+      resolverVersion: 'semantic-resolver-v1',
+      ...(semanticIndexRevision ? { semanticIndexRevision } : {}),
+      ...(activeRag?.coverage?.sourceRevision ? { ragRevision: activeRag.coverage.sourceRevision } : {}),
+      ...(workspaceRevision ? { workspaceRevision } : {}),
       onEvent: (event) => sendAgentEvent(sessionId, event)
     }).then((result) => {
       activeAgentRuns.delete(sessionId);

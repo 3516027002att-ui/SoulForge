@@ -4,7 +4,12 @@
  * Connects renderer / desktop to Bridge for loading real HKX animations and sampling poses.
  */
 
-import type { BridgeResult, TaeAnimationClipData, BoneTransformData } from '@soulforge/shared';
+import type {
+  BridgeResult,
+  TaeAnimationClipData,
+  BoneTransformData,
+  ExtractedMotionSampleData
+} from '@soulforge/shared';
 import { runBridge } from '../bridge/runBridge.js';
 
 export interface LoadTaeAnimationClipOptions {
@@ -34,6 +39,7 @@ export interface SampledPoseResponse {
   timeSeconds: number;
   duration: number;
   boneCount: number;
+  extractedMotion?: ExtractedMotionSampleData | null | undefined;
   sampledPose: BoneTransformData[];
 }
 

@@ -28,6 +28,7 @@ import type { NativeDocumentLocator } from '../editing/nativeDocumentLocator.js'
 import {
   EditorDocumentStore,
   type EditorDocumentDataSource,
+  type EditorDocumentDataSourceContext,
   type EditorMutationApplyPort
 } from '../editing/editorDocumentStore.js';
 
@@ -66,11 +67,12 @@ function paramRowItem(id: string): EditorPageItemDto {
 }
 
 /** 内存数据源：只支持 param 文档的三种查询；其余 query kind 返回 null（未接通）。 */
-function memoryDataSource(): EditorDocumentDataSource {
+function memoryDataSource(contexts: EditorDocumentDataSourceContext[] = []): EditorDocumentDataSource {
   const tables = [paramTableItem('t1'), paramTableItem('t2'), paramTableItem('t3')];
   const rows = [paramRowItem('r1'), paramRowItem('r2')];
   return {
-    loadPage: async (query, cursor, limit) => {
+    loadPage: async (query, cursor, limit, context) => {
+      if (context) contexts.push(context);
       if (query.kind === 'param-tables') {
         return { items: tables, nextCursor: null, totalKnown: tables.length };
       }
@@ -86,13 +88,16 @@ function memoryDataSource(): EditorDocumentDataSource {
   };
 }
 
-function recordingApplyPort(responses: Array<ReturnType<typeof committedOutcome> | { kind: 'cancelled' } | { kind: 'rejected'; code: string }>): EditorMutationApplyPort & { calls: EditorMutation[] } {
+function recordingApplyPort(responses: Array<ReturnType<typeof committedOutcome> | { kind: 'cancelled' } | { kind: 'rejected'; code: string }>): EditorMutationApplyPort & { calls: EditorMutation[]; contexts: EditorDocumentDataSourceContext[] } {
   const calls: EditorMutation[] = [];
+  const contexts: EditorDocumentDataSourceContext[] = [];
   let index = 0;
   return {
     calls,
-    apply: async (mutation: EditorMutation) => {
+    contexts,
+    apply: async (mutation: EditorMutation, context) => {
       calls.push(mutation);
+      if (context) contexts.push(context);
       const response = responses[Math.min(index, responses.length - 1)] ?? committedOutcome(`op-${index}`);
       index += 1;
       return response;
@@ -111,8 +116,9 @@ function paramFieldMutation(): EditorMutation {
 async function main(): Promise<void> {
   // ── A. param 文档的基本路径 ──
   {
+    const dataSourceContexts: EditorDocumentDataSourceContext[] = [];
     const store = new EditorDocumentStore({
-      dataSource: memoryDataSource(),
+      dataSource: memoryDataSource(dataSourceContexts),
       applyPort: recordingApplyPort([])
     });
     const opened = await store.open('owner-a', buildLocator('param'));
@@ -156,6 +162,8 @@ async function main(): Promise<void> {
       check('page/items', page.value.items.length === 3, `期望 3 项，实际 ${page.value.items.length}`);
       check('page/queryKind', page.value.queryKind === 'param-tables', 'queryKind 必须回显');
       check('page/totalKnown', page.value.totalKnown === 3, 'totalKnown 必须由数据源提供');
+      check('page/context-locator', dataSourceContexts[0]?.locator.locatorId === 'locator:param-none-sample:rev-1', '生产数据源边界必须收到 main-only locator');
+      check('page/context-revision', dataSourceContexts[0]?.expectedRevision === value.revision, '数据源上下文必须绑定当前 expected revision');
     }
 
     // bounded page：数据源返回超过 limit → 整页拒绝。
@@ -226,6 +234,8 @@ async function main(): Promise<void> {
       check('apply/revision-bumped', applied.value.revision === 'rev:1', `revision 应推进到 rev:1，实际 ${applied.value.revision}`);
       check('apply/committed-state', applied.value.transactionState.kind === 'committed', `transactionState 应为 committed，实际 ${JSON.stringify(applied.value.transactionState)}`);
       check('apply/port-called', applyPort.calls.length === 1 && applyPort.calls[0]?.kind === 'param-field-set', 'apply 端口必须收到 mutation');
+      check('apply/context-locator', applyPort.contexts[0]?.locator.locatorId === 'locator:param-none-sample:rev-1', '写端口必须收到 main-only locator');
+      check('apply/context-revision', applyPort.contexts[0]?.expectedRevision === applyOpen.value.revision, '写端口上下文必须使用提交前 revision');
     }
 
     // stale revision：用旧 revision 再 apply → stale-revision。

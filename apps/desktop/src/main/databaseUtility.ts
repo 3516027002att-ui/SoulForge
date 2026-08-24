@@ -160,6 +160,8 @@ async function dispatch(request: OperationLogUtilityRequest): Promise<unknown> {
     }
     case 'ragEmbeddingModel':
       return requireWorkspaceDataRepository().ragEmbeddingModel();
+    case 'ragEmbeddingSourceRevision':
+      return requireWorkspaceDataRepository().ragEmbeddingSourceRevision();
     case 'replaceReferences':
       requireWorkspaceDataRepository().replaceReferences(request.payload.references);
       return null;

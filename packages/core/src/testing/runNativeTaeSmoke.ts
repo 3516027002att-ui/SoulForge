@@ -5,8 +5,11 @@
  * Authority: candidate — read-only, no writer or game-load verification.
  */
 import { runBridge, disposeBridgeDaemonPool } from '../bridge/runBridge.js';
+import { readTaeEventTemplateFile } from '../tae/taeEventTemplate.js';
 import { nativeFixtureRoleRegistered, resolveNativeFixture } from './nativeFixtureRegistry.js';
 import { classifyChildExtract, reportInfrastructureFailure } from './nativeFixtureExtract.js';
+import { existsSync } from 'node:fs';
+import { join } from 'node:path';
 
 interface TaeEnvelope {
   format: string;
@@ -24,23 +27,64 @@ interface TaeEnvelope {
     groupCount: number;
     timesCount: number;
     hkxName?: string;
+    events?: Array<{ parameterDecoded?: boolean }>;
   }>;
+}
+
+function templateCandidates(gameRoot: string | undefined): string[] {
+  const candidates = [process.env.SOULFORGE_TAE_TEMPLATE_PATH?.trim() ?? ''];
+  if (gameRoot) {
+    candidates.push(join(gameRoot, '..', 'tools', 'DSAnimStudio-4.9.9[Build 4999]', 'Res', 'TAE.Template.SDT.xml'));
+  }
+  candidates.push('D:\\mystream\\Sekiro Shadows Die Twice\\tools\\DSAnimStudio-4.9.9[Build 4999]\\Res\\TAE.Template.SDT.xml');
+  return [...new Set(candidates.filter(Boolean))];
+}
+
+async function loadTemplateLayouts(gameRoot: string | undefined): Promise<{
+  source: string | null;
+  layouts: Record<string, Array<{ name: string; kind: string; slotSize: number }>>;
+}> {
+  for (const candidate of templateCandidates(gameRoot)) {
+    if (!existsSync(candidate)) continue;
+    const parsed = await readTaeEventTemplateFile(candidate);
+    if (!parsed.ok || parsed.byEventTypeId.size === 0) continue;
+    return {
+      source: candidate,
+      layouts: Object.fromEntries(
+        [...parsed.byEventTypeId.entries()].map(([eventTypeId, definition]) => [
+          String(eventTypeId),
+          definition.fields.map((field) => ({
+            name: field.name,
+            kind: field.kind,
+            slotSize: field.slotSize
+          }))
+        ])
+      )
+    };
+  }
+  return { source: null, layouts: {} };
 }
 
 async function main(): Promise<void> {
   const explicitPath = process.argv[2]?.trim();
-  // TAE 属 V0.6 只读预览族，本机 registry 未登记 tae-primary 是合法状态，应诚实跳过。
-  // 与 runNativeEsdSmoke 同款：只放行「未登记」；一旦登记，样本损坏/哈希不符/越界仍失败关闭。
-  if (!explicitPath && !(await nativeFixtureRoleRegistered('tae-primary'))) {
+  const gameRoot = process.env.SOULFORGE_SEKIRO_GAME_ROOT?.trim();
+  const discoveredPath = gameRoot ? join(gameRoot, 'chr', 'c0000.anibnd.dcx') : undefined;
+  const registryRegistered = await nativeFixtureRoleRegistered('tae-primary');
+  // A configured read-only game root is sufficient for the real TAE read leg;
+  // the registry remains the stronger hash-locked path when it is available.
+  if (!explicitPath && !discoveredPath && !registryRegistered) {
     console.log(JSON.stringify({
       ok: true,
-      status: 'skipped',
-      message: 'tae-primary not registered in native fixture registry (TAE read-only preview family).'
+      status: 'NOT_RUN_ENVIRONMENTAL',
+      message: '未提供 TAE 原版路径；请设置 SOULFORGE_SEKIRO_GAME_ROOT 或显式传入 c0000.anibnd.dcx。'
     }));
     return;
   }
+  if (!explicitPath && discoveredPath && !existsSync(discoveredPath)) {
+    throw new Error(`SOULFORGE_SEKIRO_GAME_ROOT 中缺少 ${discoveredPath}。`);
+  }
   const source = await resolveNativeFixture(
-    process.argv[2],
+    explicitPath ?? discoveredPath,
     'tae-primary',
     '../../mods/chr/c0000.anibnd.dcx'
   );
@@ -88,11 +132,15 @@ async function main(): Promise<void> {
   }
 
   const oodleRuntimeRoot = process.env.SOULFORGE_OODLE_RUNTIME_ROOT || 'D:/mystream/Sekiro Shadows Die Twice/Sekiro';
+  const template = await loadTemplateLayouts(gameRoot ?? oodleRuntimeRoot);
   const result = await runBridge<TaeEnvelope>({
     command: 'read-tae-document',
     filePath: taePath,
     allowedRoots: [taePath.replace(/[/\\][^/\\]+$/, ''), oodleRuntimeRoot],
     oodleRuntimeRoot,
+    ...(Object.keys(template.layouts).length > 0
+      ? { commandOptions: { templateLayouts: template.layouts } }
+      : {}),
     timeoutMs: 120_000
   });
 
@@ -106,6 +154,13 @@ async function main(): Promise<void> {
   if (data.totalEventCount <= 0) throw new Error('no events found');
   if (!data.sourceHash) throw new Error('missing source hash');
 
+  const decodedEvents = data.animations?.flatMap((animation) => animation.events ?? [])
+    .filter((event) => event.parameterDecoded === true).length ?? 0;
+  const observedEvents = data.animations?.flatMap((animation) => animation.events ?? []).length ?? 0;
+  if (template.source && observedEvents > 0 && decodedEvents === 0) {
+    throw new Error('TAE template was loaded but no observed event parameter decoded');
+  }
+
   console.log(JSON.stringify({
     ok: true,
     message: `TAE native 读取验证通过（${data.animationCount} animations, ${data.totalEventCount} events）`,
@@ -116,6 +171,10 @@ async function main(): Promise<void> {
     eventTypes: data.eventTypes?.slice(0, 20),
     authority: data.authority,
     sourceSize: data.sourceSize,
+    templateSource: template.source,
+    templateEventTypeCount: Object.keys(template.layouts).length,
+    observedEventCount: observedEvents,
+    decodedEventCount: decodedEvents,
     sampleAnimations: data.animations?.slice(0, 5)
   }, null, 2));
 }

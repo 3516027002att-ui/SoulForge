@@ -18,6 +18,7 @@
  */
 import {
   AnthropicCompatibleAdapter,
+  createConfiguredModelServiceAdapter,
   OpenAiCompatibleAdapter,
   OpenAiResponsesAdapter
 } from '../model-services/index.js';
@@ -25,7 +26,8 @@ import type {
   ChatMessage,
   ModelCompleteRequest,
   ModelCompleteResult,
-  ModelServiceAdapter
+  ModelServiceAdapter,
+  ModelServiceConfig
 } from '../model-services/types.js';
 import {
   migrateThinkingLevel,
@@ -132,6 +134,194 @@ async function main(): Promise<void> {
     })
   }), { ...baseRequest, thinkingLevel: 'off' }, 'openai off');
 
+  // 2-A. Explicitly negotiated capability negatives must suppress optional
+  // fields instead of assuming every OpenAI-compatible endpoint is official.
+  await completeAndCheck(new OpenAiCompatibleAdapter({
+    baseUrl: 'http://127.0.0.1:3000',
+    apiKey: 'k',
+    model: 'model-a',
+    fetchImpl: captureFetch((body) => {
+      expect(body.tools === undefined, 'capabilities.tools=false omits tools');
+      expect(body.reasoning_effort === undefined, 'capabilities.reasoningEffort=false omits reasoning');
+      expect(body.temperature === undefined, 'capabilities.temperature=false omits temperature');
+      expect(body.top_p === undefined, 'capabilities.topP=false omits top_p');
+      expect(body.max_tokens === undefined, 'capabilities.maxTokens=false omits max_tokens');
+    })
+  }), {
+    ...baseRequest,
+    tools: [{ name: 'probe', description: 'probe', parametersJsonSchema: { type: 'object' } }],
+    temperature: 0.7,
+    topP: 0.9,
+    maxTokens: 2048,
+    thinkingLevel: 'high',
+    capabilities: {
+      tools: false,
+      reasoningEffort: false,
+      temperature: false,
+      topP: false,
+      maxTokens: false
+    }
+  }, 'openai explicit capability negatives');
+
+  // 2-B. Production factory path: an absent declaration is not treated as
+  // official OpenAI support. The strict adapter omits every optional field and
+  // exposes the fail-closed provenance for audit/debugging.
+  const factoryFailClosed = createConfiguredModelServiceAdapter({
+    config: {
+      id: 'strict-factory',
+      displayName: 'strict factory',
+      protocol: 'openai-compatible',
+      baseUrl: 'http://127.0.0.1:3000',
+      model: 'model-a',
+      hasCredential: true,
+      createdAt: '2026-08-24T00:00:00.000Z',
+      updatedAt: '2026-08-24T00:00:00.000Z'
+    } satisfies ModelServiceConfig,
+    apiKey: 'k',
+    fetchImpl: captureFetch((body) => {
+      expect(body.tools === undefined, 'factory missing tools capability fails closed');
+      expect(body.temperature === undefined, 'factory missing temperature capability fails closed');
+      expect(body.top_p === undefined, 'factory missing topP capability fails closed');
+      expect(body.max_tokens === undefined, 'factory missing maxTokens capability fails closed');
+      expect(body.reasoning_effort === undefined, 'factory missing reasoning capability fails closed');
+      const message = (body.messages as Array<{ content?: unknown }>)[0];
+      expect(typeof message?.content === 'string', 'factory missing vision capability omits image parts');
+    })
+  });
+  if (!factoryFailClosed.ok) throw new Error('strict factory configuration unexpectedly rejected');
+  expect(
+    factoryFailClosed.adapter.capabilityState?.policy === 'explicit-or-fail-closed',
+    'configured factory enables explicit-or-fail-closed policy'
+  );
+  expect(
+    factoryFailClosed.adapter.capabilityState?.sources.tools === 'fail-closed',
+    'missing factory capability is labeled fail-closed, not negotiated'
+  );
+  await completeAndCheck(factoryFailClosed.adapter, {
+    ...baseRequest,
+    messages: [{
+      role: 'user',
+      content: 'hi',
+      images: [{ mediaType: 'image/png', dataBase64: 'AAAA' }]
+    }],
+    tools: [{ name: 'probe', description: 'probe', parametersJsonSchema: { type: 'object' } }],
+    temperature: 0.7,
+    topP: 0.9,
+    maxTokens: 2048,
+    thinkingLevel: 'high'
+  }, 'factory fail-closed capabilities');
+
+  // 2-C. The same fail-closed policy is protocol independent. Direct adapter
+  // construction opts into it explicitly here; direct adapters without the
+  // policy retain legacy mapping for compatibility-only callers.
+  await completeAndCheck(new OpenAiResponsesAdapter({
+    baseUrl: 'http://127.0.0.1:3000',
+    apiKey: 'k',
+    model: 'model-a',
+    capabilityPolicy: 'explicit-or-fail-closed',
+    fetchImpl: captureFetch((body) => {
+      expect(body.tools === undefined, 'responses missing tools capability fails closed');
+      expect(body.reasoning === undefined, 'responses missing reasoning capability fails closed');
+      expect(body.temperature === undefined, 'responses missing temperature capability fails closed');
+      expect(body.max_output_tokens === undefined, 'responses missing maxTokens capability fails closed');
+      expect(body.top_p === undefined, 'responses missing topP capability fails closed');
+      const input = (body.input as Array<{ content?: unknown }>)[0];
+      expect(Array.isArray(input?.content) === false, 'responses missing vision capability omits image parts');
+    })
+  }), {
+    ...baseRequest,
+    messages: [{
+      role: 'user',
+      content: 'hi',
+      images: [{ mediaType: 'image/png', dataBase64: 'AAAA' }]
+    }],
+    tools: [{ name: 'probe', description: 'probe', parametersJsonSchema: { type: 'object' } }],
+    temperature: 0.7,
+    topP: 0.9,
+    maxTokens: 2048,
+    thinkingLevel: 'high'
+  }, 'responses fail-closed capabilities');
+
+  await completeAndCheck(new AnthropicCompatibleAdapter({
+    baseUrl: 'http://127.0.0.1:3000',
+    apiKey: 'k',
+    model: 'model-b',
+    capabilityPolicy: 'explicit-or-fail-closed',
+    fetchImpl: captureFetch((body) => {
+      expect(body.tools === undefined, 'anthropic missing tools capability fails closed');
+      expect(body.output_config === undefined, 'anthropic missing reasoning capability fails closed');
+      expect(body.temperature === undefined, 'anthropic missing temperature capability fails closed');
+      expect(body.top_p === undefined, 'anthropic missing topP capability fails closed');
+      expect(body.top_k === undefined, 'anthropic missing topK capability fails closed');
+      expect(body.max_tokens === 1024, 'anthropic required max_tokens remains protocol-required');
+      const message = (body.messages as Array<{ content?: unknown }>)[0];
+      expect(typeof message?.content === 'string', 'anthropic missing vision capability omits image parts');
+    })
+  }), {
+    ...baseRequest,
+    messages: [{
+      role: 'user',
+      content: 'hi',
+      images: [{ mediaType: 'image/png', dataBase64: 'AAAA' }]
+    }],
+    tools: [{ name: 'probe', description: 'probe', parametersJsonSchema: { type: 'object' } }],
+    temperature: 0.7,
+    topP: 0.9,
+    topK: 5,
+    thinkingLevel: 'high'
+  }, 'anthropic fail-closed capabilities');
+
+  // 2-D. Explicit config is a declaration, not an automatic probe result;
+  // true fields are allowed while an explicit false remains suppressed.
+  const configuredFactory = createConfiguredModelServiceAdapter({
+    config: {
+      id: 'configured-factory',
+      displayName: 'configured factory',
+      protocol: 'openai-compatible',
+      baseUrl: 'http://127.0.0.1:3000',
+      model: 'model-a',
+      hasCredential: true,
+      createdAt: '2026-08-24T00:00:00.000Z',
+      updatedAt: '2026-08-24T00:00:00.000Z',
+      capabilities: {
+        tools: true,
+        vision: true,
+        reasoningEffort: false,
+        temperature: true,
+        topP: true,
+        maxTokens: true
+      }
+    } satisfies ModelServiceConfig,
+    apiKey: 'k',
+    fetchImpl: captureFetch((body) => {
+      expect(body.tools !== undefined, 'explicit config tools=true is honored');
+      expect(body.temperature === 0.7, 'explicit config temperature=true is honored');
+      expect(body.top_p === 0.9, 'explicit config topP=true is honored');
+      expect(body.max_tokens === 2048, 'explicit config maxTokens=true is honored');
+      expect(body.reasoning_effort === undefined, 'explicit config reasoningEffort=false is honored');
+      const message = (body.messages as Array<{ content?: unknown }>)[0];
+      expect(Array.isArray(message?.content), 'explicit config vision=true is honored');
+    })
+  });
+  if (!configuredFactory.ok) throw new Error('explicit capability factory configuration rejected');
+  expect(
+    configuredFactory.adapter.capabilityState?.sources.tools === 'explicit-config',
+    'explicit config provenance is preserved'
+  );
+  await completeAndCheck(configuredFactory.adapter, {
+    ...baseRequest,
+    messages: [{
+      role: 'user',
+      content: 'hi',
+      images: [{ mediaType: 'image/png', dataBase64: 'AAAA' }]
+    }],
+    tools: [{ name: 'probe', description: 'probe', parametersJsonSchema: { type: 'object' } }],
+    temperature: 0.7,
+    topP: 0.9,
+    maxTokens: 2048,
+    thinkingLevel: 'high'
+  }, 'factory explicit capabilities');
+
   // 3. OpenAI Responses：max → reasoning.effort max；medium → reasoning.effort medium；
   //    maxTokens → max_output_tokens。
   await completeAndCheck(new OpenAiResponsesAdapter({
@@ -219,6 +409,7 @@ async function main(): Promise<void> {
     nonClaims: [
       'Mock-fetch body mapping does not prove any real provider accepts these fields.',
       'No network request was made; provider-side validation is outside this smoke.',
+      'Configured production adapters do not auto-probe; absent capability declarations are fail-closed.',
       'Model-specific support for some effort levels remains model-dependent; the UI shows the full official ladder.'
     ]
   }, null, 2));

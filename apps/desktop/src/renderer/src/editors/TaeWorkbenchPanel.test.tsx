@@ -191,7 +191,8 @@ describe('TaeWorkbenchPanel 初始结构（挂载即有的四栏骨架）', () =
     );
     assert.match(source, /FlverViewer/);
     assert.match(source, /tae-preview-host/);
-    assert.match(source, /模型已挂，动画播放未接入/);
+    assert.match(source, /ActionContinuousSampler/);
+    assert.match(source, /root motion/);
     assert.doesNotMatch(source, /本夜不挂/);
     assert.doesNotMatch(source, /见底部日志/);
   });
@@ -205,8 +206,9 @@ describe('TaeWorkbenchPanel 初始结构（挂载即有的四栏骨架）', () =
     assert.match(panelSource, /FlverViewer/);
     assert.match(panelSource, /tae-preview__viewport/);
     assert.match(panelSource, /data-testid="tae-preview-viewport"/);
-    // 模型挂上但动画还不能播：明说「未接入」，不假装在播。
-    assert.match(panelSource, /模型已挂，动画播放未接入/);
+    // 模型与真实采样器均已接线；含 root motion 的 clip 必须拒绝伪装播放。
+    assert.match(panelSource, /ActionContinuousSampler/);
+    assert.match(panelSource, /root motion/);
     // 无「见底部日志」推诿句；「预览不可用」不再是必须空态（有可行动错误句时才有）。
     assert.doesNotMatch(panelSource, /见底部日志/);
     assert.doesNotMatch(panelSource, /本夜不挂/);

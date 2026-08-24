@@ -115,6 +115,8 @@ export async function commitFmgMutationsViaBridge(
 export async function readFmgDocumentViaBridge(input: {
   sourcePath: string;
   allowedRoots: string[];
+  /** Bridge-confirmed BND4 child index; omitted for loose FMG. */
+  entryIndex?: number;
   timeoutMs?: number;
 }): Promise<{
   ok: boolean;
@@ -135,7 +137,8 @@ export async function readFmgDocumentViaBridge(input: {
     command: 'read-fmg-document',
     filePath: input.sourcePath,
     allowedRoots: input.allowedRoots,
-    timeoutMs: input.timeoutMs ?? 60_000
+    timeoutMs: input.timeoutMs ?? 60_000,
+    ...(input.entryIndex !== undefined ? { commandOptions: { entryIndex: input.entryIndex } } : {})
   });
   if (result.parseStatus === 'failed' || !result.data?.sourceHash) {
     return {

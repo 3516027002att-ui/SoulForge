@@ -35,6 +35,12 @@ export function resolvePartModelName(
   return undefined;
 }
 
+/** 与 main 的 loadMapDocument 保持同一份 mapId 派生规则，供 human transaction 使用。 */
+export function deriveMapIdFromSourcePath(sourcePath: string): string {
+  const basename = sourcePath.replace(/\\/g, '/').split('/').pop() ?? sourcePath;
+  return basename.replace(/\.msb(?:\.dcx)?$/i, '');
+}
+
 /** 左栏 Map Object List 里的实体分类。 */
 type MsbEntityKind = 'msb-model' | 'msb-event' | 'msb-part' | 'msb-region';
 
@@ -108,7 +114,7 @@ export function MsbScenePanel(props: MsbScenePanelProps): ReactElement {
     try {
       const transaction: MapEditTransaction = {
         id: `tx-gizmo-${Date.now()}`,
-        mapId: props.sourcePath,
+        mapId: deriveMapIdFromSourcePath(props.sourcePath),
         baseRevision: props.revision,
         description: `Human Gizmo 调整 Part [${partName}] 变换`,
         author: 'human',

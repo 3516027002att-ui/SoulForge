@@ -26,6 +26,12 @@ export interface SplineQuatCurveData {
 }
 
 export interface TransformSplineTrackData {
+  positionStaticMask?: number | undefined;
+  positionSplineMask?: number | undefined;
+  rotationHasStatic?: boolean | undefined;
+  rotationHasSpline?: boolean | undefined;
+  scaleStaticMask?: number | undefined;
+  scaleSplineMask?: number | undefined;
   staticPosition: [number, number, number];
   staticRotation: [number, number, number, number];
   staticScale: [number, number, number];
@@ -42,11 +48,33 @@ export interface SplineBlockData {
   tracks: TransformSplineTrackData[];
 }
 
+export interface ExtractedMotionSampleData {
+  raw: [number, number, number, number];
+  translation: [number, number, number];
+  rotationAngle: number;
+}
+
+export interface ExtractedMotionData {
+  frameType: number;
+  up: [number, number, number, number];
+  forward: [number, number, number, number];
+  duration: number;
+  frameCount: number;
+  samples: ExtractedMotionSampleData[];
+}
+
 export interface TaeAnimationClipData {
   animId: number;
   motionAnimId: number;
   sourceContainer?: string | undefined;
+  /** Native HKX container family used by Bridge: packfile or TAG0 tagfile. */
+  sourceFormat?: 'packfile' | 'tagfile' | string | undefined;
   animationType: 'SplineCompressed' | 'Interleaved' | string;
+  /** Bridge 发现 hkaAnimation.extractedMotion 时保留的完整 native reference-frame 数据。 */
+  hasExtractedMotion?: boolean | undefined;
+  extractedMotion?: ExtractedMotionData | undefined;
+  /** Havok binding blend hint；非零表示 additive/非 absolute pose。 */
+  blendHint?: number | undefined;
   duration: number;
   frameCount: number;
   frameDuration: number;
@@ -66,6 +94,7 @@ export class ActionContinuousSampler {
 
   constructor(clip: TaeAnimationClipData) {
     this.clip = clip;
+    validateClipShape(clip);
   }
 
   public get duration(): number {
@@ -84,7 +113,15 @@ export class ActionContinuousSampler {
    * Samples the continuous pose in HKX bone order.
    */
   public sampleHkxPose(timeSeconds: number, loop = true): BoneTransformData[] {
+    if (!Number.isFinite(timeSeconds)) {
+      throw new Error(`ACTION sample time must be finite, got ${timeSeconds}.`);
+    }
     const boneCount = this.clip.hkxBoneCount;
+    if (!Number.isInteger(boneCount) || boneCount <= 0
+      || this.clip.hkxReferencePose.length !== boneCount) {
+      throw new Error(
+        `HKX reference pose count mismatch: expected ${boneCount}, got ${this.clip.hkxReferencePose.length}.`);
+    }
     const pose: BoneTransformData[] = new Array(boneCount);
 
     // 1. Initialize with reference pose
@@ -97,11 +134,7 @@ export class ActionContinuousSampler {
           scale: [ref.scale[0], ref.scale[1], ref.scale[2]]
         };
       } else {
-        pose[i] = {
-          translation: [0, 0, 0],
-          rotation: [0, 0, 0, 1],
-          scale: [1, 1, 1]
-        };
+        throw new Error(`HKX reference pose is missing bone ${i}; refusing to fabricate identity pose.`);
       }
     }
 
@@ -114,17 +147,64 @@ export class ActionContinuousSampler {
       } else {
         t = Math.max(0, Math.min(timeSeconds, duration));
       }
-    } else {
-      t = 0;
     }
 
-    if (this.clip.animationType === 'Interleaved' && this.clip.interleavedTransforms) {
+    if (this.clip.animationType === 'Interleaved') {
       this.sampleInterleaved(t, pose);
-    } else if (this.clip.splineBlocks && this.clip.splineBlocks.length > 0) {
+    } else if (this.clip.animationType === 'SplineCompressed') {
       this.sampleSpline(t, pose);
+    } else {
+      throw new Error(`Unsupported ACTION animation type: ${this.clip.animationType}.`);
     }
 
     return pose;
+  }
+
+  /**
+   * Samples the extracted reference-frame stream without applying it to the
+   * in-place bone pose. This keeps root translation and rotation available to
+   * the game/renderer integration layer.
+   */
+  public sampleExtractedMotion(
+    timeSeconds: number,
+    loop = true
+  ): ExtractedMotionSampleData | undefined {
+    const motion = this.clip.extractedMotion;
+    if (!motion) return undefined;
+    if (!Number.isFinite(timeSeconds)) {
+      throw new Error(`Extracted-motion sample time must be finite, got ${timeSeconds}.`);
+    }
+    if (!Number.isFinite(motion.duration) || motion.duration <= 0
+      || !Number.isInteger(motion.frameCount) || motion.frameCount <= 0
+      || motion.samples.length !== motion.frameCount) {
+      throw new Error('Extracted-motion payload has an invalid frame/duration contract.');
+    }
+    if (motion.frameCount === 1) return copyExtractedMotionSample(motion.samples[0]!);
+
+    let t = timeSeconds;
+    if (loop) {
+      t %= motion.duration;
+      if (t < 0) t += motion.duration;
+    } else {
+      t = Math.max(0, Math.min(t, motion.duration));
+    }
+    const frame = t / motion.duration * (motion.frameCount - 1);
+    const frame0 = Math.max(0, Math.min(Math.floor(frame), motion.frameCount - 1));
+    const frame1 = Math.max(0, Math.min(Math.ceil(frame), motion.frameCount - 1));
+    const alpha = Math.max(0, Math.min(frame - frame0, 1));
+    const a = motion.samples[frame0]!;
+    const b = motion.samples[frame1]!;
+    const raw: [number, number, number, number] = [
+      a.raw[0] + (b.raw[0] - a.raw[0]) * alpha,
+      a.raw[1] + (b.raw[1] - a.raw[1]) * alpha,
+      a.raw[2] + (b.raw[2] - a.raw[2]) * alpha,
+      a.raw[3] + (b.raw[3] - a.raw[3]) * alpha
+    ];
+    return {
+      raw,
+      translation: [raw[0], raw[1], raw[2]],
+      rotationAngle: raw[3]
+    };
   }
 
   /**
@@ -139,7 +219,18 @@ export class ActionContinuousSampler {
     const hkxPose = this.sampleHkxPose(timeSeconds, loop);
     const map = this.clip.hkxToFlverBoneMap;
 
-    const result: BoneTransformData[] = new Array(flverBoneCount);
+    if (!Number.isInteger(flverBoneCount) || flverBoneCount < 0) {
+      throw new Error(`Invalid FLVER bone count: ${flverBoneCount}.`);
+    }
+    if (!map || map.length !== this.clip.hkxBoneCount) {
+      throw new Error(
+        `HKX-to-FLVER map count mismatch: expected ${this.clip.hkxBoneCount}, got ${map?.length ?? 0}.`);
+    }
+    if (flverReferencePose && flverReferencePose.length !== flverBoneCount) {
+      throw new Error(
+        `FLVER reference pose count mismatch: expected ${flverBoneCount}, got ${flverReferencePose.length}.`);
+    }
+    const result: Array<BoneTransformData | undefined> = new Array(flverBoneCount);
     for (let i = 0; i < flverBoneCount; i++) {
       const ref = flverReferencePose?.[i];
       if (ref) {
@@ -148,34 +239,42 @@ export class ActionContinuousSampler {
           rotation: [ref.rotation[0], ref.rotation[1], ref.rotation[2], ref.rotation[3]],
           scale: [ref.scale[0], ref.scale[1], ref.scale[2]]
         };
-      } else {
-        result[i] = {
-          translation: [0, 0, 0],
-          rotation: [0, 0, 0, 1],
-          scale: [1, 1, 1]
-        };
       }
     }
 
-    if (map) {
-      for (let hkxBone = 0; hkxBone < map.length && hkxBone < hkxPose.length; hkxBone++) {
-        const flverBone = map[hkxBone];
-        if (flverBone !== undefined && flverBone >= 0 && flverBone < flverBoneCount) {
-          result[flverBone] = hkxPose[hkxBone]!;
-        }
+    for (let hkxBone = 0; hkxBone < map.length; hkxBone++) {
+      const flverBone = map[hkxBone];
+      if (flverBone === undefined || flverBone < 0 || flverBone >= flverBoneCount) {
+        throw new Error(`HKX-to-FLVER map contains invalid target at HKX bone ${hkxBone}.`);
       }
+      result[flverBone] = hkxPose[hkxBone]!;
     }
 
-    return result;
+    const missing = result.findIndex((value) => value === undefined);
+    if (missing >= 0) {
+      throw new Error(
+        `FLVER bone ${missing} has no HKX mapping; a real FLVER bind/reference pose is required.`);
+    }
+    return result as BoneTransformData[];
   }
 
   private sampleInterleaved(time: number, pose: BoneTransformData[]): void {
     const numFrames = this.clip.frameCount;
     const numTracks = this.clip.transformTrackCount;
     const transforms = this.clip.interleavedTransforms;
-    if (!transforms || numFrames <= 0 || numTracks <= 0) return;
+    if (!transforms || numFrames <= 0 || numTracks <= 0) {
+      throw new Error('Interleaved ACTION payload is incomplete.');
+    }
+    if (transforms.length !== numFrames * numTracks) {
+      throw new Error(
+        `Interleaved transform count mismatch: expected ${numFrames * numTracks}, got ${transforms.length}.`);
+    }
+    if (this.clip.trackToHkxBone.length !== numTracks) {
+      throw new Error(
+        `Interleaved track map count mismatch: expected ${numTracks}, got ${this.clip.trackToHkxBone.length}.`);
+    }
 
-    const frameDuration = this.clip.frameDuration > 0 ? this.clip.frameDuration : (1 / 30);
+    const frameDuration = this.clip.frameDuration;
     const framePos = time / frameDuration;
 
     let frame0 = Math.floor(framePos);
@@ -185,61 +284,111 @@ export class ActionContinuousSampler {
     frame1 = Math.max(0, Math.min(frame1, numFrames - 1));
     const alpha = Math.max(0, Math.min(framePos - frame0, 1));
 
-    for (let t = 0; t < numTracks && t < this.clip.trackToHkxBone.length; t++) {
+    for (let t = 0; t < numTracks; t++) {
       const boneIdx = this.clip.trackToHkxBone[t];
-      if (boneIdx === undefined || boneIdx < 0 || boneIdx >= pose.length) continue;
+      if (boneIdx === undefined || boneIdx < 0 || boneIdx >= pose.length) {
+        throw new Error(`Interleaved track ${t} has an invalid HKX bone target.`);
+      }
 
       const idx0 = frame0 * numTracks + t;
       const idx1 = frame1 * numTracks + t;
 
-      if (idx0 < transforms.length && idx1 < transforms.length) {
-        const t0 = transforms[idx0]!;
-        const t1 = transforms[idx1]!;
-
-        const pos = lerpVector3(t0.translation, t1.translation, alpha);
-        const rot = slerpQuaternion(t0.rotation, t1.rotation, alpha);
-        const scale = lerpVector3(t0.scale, t1.scale, alpha);
-
-        pose[boneIdx] = { translation: pos, rotation: rot, scale };
+      const t0 = transforms[idx0];
+      const t1 = transforms[idx1];
+      if (!t0 || !t1) {
+        throw new Error(`Interleaved transform payload is missing frame data for track ${t}.`);
       }
+
+      const pos = lerpVector3(t0.translation, t1.translation, alpha);
+      const rot = slerpQuaternion(t0.rotation, t1.rotation, alpha);
+      const scale = lerpVector3(t0.scale, t1.scale, alpha);
+
+      pose[boneIdx] = { translation: pos, rotation: rot, scale };
     }
   }
 
   private sampleSpline(time: number, pose: BoneTransformData[]): void {
     const blocks = this.clip.splineBlocks;
     const numTracks = this.clip.transformTrackCount;
-    if (!blocks || blocks.length === 0 || numTracks <= 0) return;
+    if (!blocks || blocks.length === 0 || numTracks <= 0) {
+      throw new Error('Spline ACTION payload is incomplete.');
+    }
+    if (this.clip.trackToHkxBone.length !== numTracks) {
+      throw new Error(
+        `Spline track map count mismatch: expected ${numTracks}, got ${this.clip.trackToHkxBone.length}.`);
+    }
 
-    const frameDuration = this.clip.frameDuration > 0 ? this.clip.frameDuration : (1 / 30);
+    const frameDuration = this.clip.frameDuration;
     const frame = time / frameDuration;
-    const maxFramesPerBlock = this.clip.maxFramesPerBlock ?? 256;
+    const maxFramesPerBlock = this.clip.maxFramesPerBlock;
+    if (blocks.length > 1 && (typeof maxFramesPerBlock !== 'number'
+      || !Number.isInteger(maxFramesPerBlock) || maxFramesPerBlock <= 0)) {
+      throw new Error('Spline ACTION payload is missing a valid maxFramesPerBlock value.');
+    }
 
     let blockIdx = 0;
     let blockFrame = frame;
-    if (maxFramesPerBlock > 0 && blocks.length > 1) {
-      blockIdx = Math.max(0, Math.min(Math.floor(frame / maxFramesPerBlock), blocks.length - 1));
-      blockFrame = frame - (blockIdx * maxFramesPerBlock);
+    if (blocks.length > 1) {
+      const framesPerBlock = maxFramesPerBlock as number;
+      blockIdx = Math.max(0, Math.min(Math.floor(frame / framesPerBlock), blocks.length - 1));
+      blockFrame = frame - (blockIdx * framesPerBlock);
     }
 
     const block = blocks[blockIdx];
-    if (!block || !block.tracks) return;
+    if (!block || !block.tracks || block.tracks.length !== numTracks) {
+      throw new Error(
+        `Spline block track count mismatch: expected ${numTracks}, got ${block?.tracks?.length ?? 0}.`);
+    }
 
-    for (let t = 0; t < numTracks && t < this.clip.trackToHkxBone.length; t++) {
+    for (let t = 0; t < numTracks; t++) {
       const boneIdx = this.clip.trackToHkxBone[t];
-      if (boneIdx === undefined || boneIdx < 0 || boneIdx >= pose.length) continue;
+      if (boneIdx === undefined || boneIdx < 0 || boneIdx >= pose.length) {
+        throw new Error(`Spline track ${t} has an invalid HKX bone target.`);
+      }
 
       const track = block.tracks[t];
-      if (!track) continue;
+      if (!track) throw new Error(`Spline track ${t} is missing.`);
 
-      const px = track.positionX ? evaluateBSpline(track.positionX, blockFrame) : track.staticPosition[0];
-      const py = track.positionY ? evaluateBSpline(track.positionY, blockFrame) : track.staticPosition[1];
-      const pz = track.positionZ ? evaluateBSpline(track.positionZ, blockFrame) : track.staticPosition[2];
+      const hasChannelMetadata = track.positionStaticMask !== undefined
+        || track.positionSplineMask !== undefined
+        || track.rotationHasStatic !== undefined
+        || track.rotationHasSpline !== undefined
+        || track.scaleStaticMask !== undefined
+        || track.scaleSplineMask !== undefined;
+      const positionStaticMask = track.positionStaticMask ?? 0;
+      const positionSplineMask = track.positionSplineMask ?? 0;
+      const scaleStaticMask = track.scaleStaticMask ?? 0;
+      const scaleSplineMask = track.scaleSplineMask ?? 0;
+      const px = resolveScalarChannel(track.positionX, (positionStaticMask & 0x01) !== 0,
+        (positionSplineMask & 0x01) !== 0, track.staticPosition[0], pose[boneIdx]!.translation[0], blockFrame,
+        hasChannelMetadata);
+      const py = resolveScalarChannel(track.positionY, (positionStaticMask & 0x02) !== 0,
+        (positionSplineMask & 0x02) !== 0, track.staticPosition[1], pose[boneIdx]!.translation[1], blockFrame,
+        hasChannelMetadata);
+      const pz = resolveScalarChannel(track.positionZ, (positionStaticMask & 0x04) !== 0,
+        (positionSplineMask & 0x04) !== 0, track.staticPosition[2], pose[boneIdx]!.translation[2], blockFrame,
+        hasChannelMetadata);
 
-      const rot = track.rotation ? evaluateBSplineQuat(track.rotation, blockFrame) : track.staticRotation;
+      let rot: [number, number, number, number];
+      if (track.rotation) {
+        rot = evaluateBSplineQuat(track.rotation, blockFrame);
+      } else if (!hasChannelMetadata || (track.rotationHasStatic ?? false)) {
+        rot = track.staticRotation;
+      } else if (track.rotationHasSpline ?? false) {
+        throw new Error('HKX rotation channel declares a spline but contains no curve data.');
+      } else {
+        rot = pose[boneIdx]!.rotation;
+      }
 
-      const sx = track.scaleX ? evaluateBSpline(track.scaleX, blockFrame) : track.staticScale[0];
-      const sy = track.scaleY ? evaluateBSpline(track.scaleY, blockFrame) : track.staticScale[1];
-      const sz = track.scaleZ ? evaluateBSpline(track.scaleZ, blockFrame) : track.staticScale[2];
+      const sx = resolveScalarChannel(track.scaleX, (scaleStaticMask & 0x01) !== 0,
+        (scaleSplineMask & 0x01) !== 0, track.staticScale[0], pose[boneIdx]!.scale[0], blockFrame,
+        hasChannelMetadata);
+      const sy = resolveScalarChannel(track.scaleY, (scaleStaticMask & 0x02) !== 0,
+        (scaleSplineMask & 0x02) !== 0, track.staticScale[1], pose[boneIdx]!.scale[1], blockFrame,
+        hasChannelMetadata);
+      const sz = resolveScalarChannel(track.scaleZ, (scaleStaticMask & 0x04) !== 0,
+        (scaleSplineMask & 0x04) !== 0, track.staticScale[2], pose[boneIdx]!.scale[2], blockFrame,
+        hasChannelMetadata);
 
       pose[boneIdx] = {
         translation: [px, py, pz],
@@ -250,8 +399,23 @@ export class ActionContinuousSampler {
   }
 }
 
+function resolveScalarChannel(
+  curve: SplineCurveData | undefined,
+  hasStaticValue: boolean,
+  hasSplineValue: boolean,
+  staticValue: number,
+  referenceValue: number,
+  parameter: number,
+  hasChannelMetadata: boolean
+): number {
+  if (curve) return evaluateBSpline(curve, parameter);
+  if (!hasChannelMetadata || hasStaticValue) return staticValue;
+  if (hasSplineValue) throw new Error('HKX spline channel declares a curve but contains no curve data.');
+  return referenceValue;
+}
+
 export function evaluateBSpline(curve: SplineCurveData, t: number): number {
-  if (curve.controlPoints.length === 0) return 0;
+  if (curve.controlPoints.length === 0) throw new Error('HKX scalar spline has no control points.');
   if (curve.controlPoints.length === 1) return curve.controlPoints[0]!;
 
   const degree = curve.degree;
@@ -259,17 +423,21 @@ export function evaluateBSpline(curve: SplineCurveData, t: number): number {
   const cp = curve.controlPoints;
   const n = cp.length;
 
-  const tMin = knots[degree] ?? 0;
-  const tMax = knots[n] ?? tMin;
+  const expectedKnots = n + degree + 1;
+  if (degree < 0 || degree > 3 || knots.length !== expectedKnots) {
+    throw new Error(`HKX scalar spline shape is invalid: degree=${degree}, knots=${knots.length}, controlPoints=${n}.`);
+  }
+  const tMin = knots[degree]!;
+  const tMax = knots[n]!;
   const clampedT = Math.max(tMin, Math.min(t, tMax));
 
   let k = degree;
   for (let i = degree; i < n; i++) {
-    if (clampedT >= (knots[i] ?? 0) && clampedT < (knots[i + 1] ?? 0)) {
+    if (clampedT >= knots[i]! && clampedT < knots[i + 1]!) {
       k = i;
       break;
     }
-    if (clampedT >= (knots[i + 1] ?? 0)) {
+    if (clampedT >= knots[i + 1]!) {
       k = i;
     }
   }
@@ -277,25 +445,28 @@ export function evaluateBSpline(curve: SplineCurveData, t: number): number {
   const d = new Float32Array(degree + 1);
   for (let j = 0; j <= degree; j++) {
     const cpIdx = k - degree + j;
-    d[j] = (cpIdx >= 0 && cpIdx < n) ? cp[cpIdx]! : 0;
+    if (cpIdx < 0 || cpIdx >= n) {
+      throw new Error(`HKX scalar spline control-point index ${cpIdx} is outside 0..${n - 1}.`);
+    }
+    d[j] = cp[cpIdx]!;
   }
 
   for (let r = 1; r <= degree; r++) {
     for (let j = degree; j >= r; j--) {
       const knotIdx = k - degree + j;
-      const knotLeft = knots[knotIdx] ?? 0;
-      const knotRight = knots[knotIdx + degree - r + 1] ?? 0;
+      const knotLeft = knots[knotIdx]!;
+      const knotRight = knots[knotIdx + degree - r + 1]!;
       const denom = knotRight - knotLeft;
       const alpha = Math.abs(denom) > 1e-6 ? (clampedT - knotLeft) / denom : 0;
       d[j] = (1 - alpha) * d[j - 1]! + alpha * d[j]!;
     }
   }
 
-  return d[degree] ?? 0;
+  return d[degree]!;
 }
 
 export function evaluateBSplineQuat(curve: SplineQuatCurveData, t: number): [number, number, number, number] {
-  if (curve.controlPoints.length === 0) return [0, 0, 0, 1];
+  if (curve.controlPoints.length === 0) throw new Error('HKX quaternion spline has no control points.');
   if (curve.controlPoints.length === 1) return normalizeQuaternion(curve.controlPoints[0]!);
 
   const degree = curve.degree;
@@ -303,17 +474,21 @@ export function evaluateBSplineQuat(curve: SplineQuatCurveData, t: number): [num
   const cp = curve.controlPoints;
   const n = cp.length;
 
-  const tMin = knots[degree] ?? 0;
-  const tMax = knots[n] ?? tMin;
+  const expectedKnots = n + degree + 1;
+  if (degree < 0 || degree > 3 || knots.length !== expectedKnots) {
+    throw new Error(`HKX quaternion spline shape is invalid: degree=${degree}, knots=${knots.length}, controlPoints=${n}.`);
+  }
+  const tMin = knots[degree]!;
+  const tMax = knots[n]!;
   const clampedT = Math.max(tMin, Math.min(t, tMax));
 
   let k = degree;
   for (let i = degree; i < n; i++) {
-    if (clampedT >= (knots[i] ?? 0) && clampedT < (knots[i + 1] ?? 0)) {
+    if (clampedT >= knots[i]! && clampedT < knots[i + 1]!) {
       k = i;
       break;
     }
-    if (clampedT >= (knots[i + 1] ?? 0)) {
+    if (clampedT >= knots[i + 1]!) {
       k = i;
     }
   }
@@ -321,20 +496,35 @@ export function evaluateBSplineQuat(curve: SplineQuatCurveData, t: number): [num
   const d: Array<[number, number, number, number]> = new Array(degree + 1);
   for (let j = 0; j <= degree; j++) {
     const cpIdx = k - degree + j;
-    d[j] = (cpIdx >= 0 && cpIdx < n) ? [...cp[cpIdx]!] : [0, 0, 0, 1];
+    if (cpIdx < 0 || cpIdx >= n) {
+      throw new Error(`HKX quaternion spline control-point index ${cpIdx} is outside 0..${n - 1}.`);
+    }
+    d[j] = [...cp[cpIdx]!];
   }
 
   for (let r = 1; r <= degree; r++) {
     for (let j = degree; j >= r; j--) {
       const knotIdx = k - degree + j;
-      const knotLeft = knots[knotIdx] ?? 0;
-      const knotRight = knots[knotIdx + degree - r + 1] ?? 0;
+      const knotLeft = knots[knotIdx]!;
+      const knotRight = knots[knotIdx + degree - r + 1]!;
       const denom = knotRight - knotLeft;
       const alpha = Math.abs(denom) > 1e-6 ? (clampedT - knotLeft) / denom : 0;
 
       const q0 = d[j - 1]!;
-      const q1 = d[j]!;
-      d[j] = slerpQuaternion(q0, q1, alpha);
+      let q1 = d[j]!;
+      // Havok evaluates quaternion control points as a four-component
+      // shortest-arc spline and normalizes only the completed result. Slerp
+      // changes the compressed curve and therefore is reserved for interleaved
+      // keyframe interpolation.
+      if (q0[0] * q1[0] + q0[1] * q1[1] + q0[2] * q1[2] + q0[3] * q1[3] < 0) {
+        q1 = [-q1[0], -q1[1], -q1[2], -q1[3]];
+      }
+      d[j] = [
+        q0[0] + (q1[0] - q0[0]) * alpha,
+        q0[1] + (q1[1] - q0[1]) * alpha,
+        q0[2] + (q1[2] - q0[2]) * alpha,
+        q0[3] + (q1[3] - q0[3]) * alpha
+      ];
     }
   }
 
@@ -395,9 +585,85 @@ function slerpQuaternion(
 
 function normalizeQuaternion(q: [number, number, number, number]): [number, number, number, number] {
   const lenSq = q[0] * q[0] + q[1] * q[1] + q[2] * q[2] + q[3] * q[3];
-  if (lenSq === 0) return [0, 0, 0, 1];
+  if (!Number.isFinite(lenSq) || lenSq <= 1e-12) {
+    throw new Error('ACTION quaternion is non-finite or zero-length.');
+  }
   const invLen = 1 / Math.sqrt(lenSq);
   return [q[0] * invLen, q[1] * invLen, q[2] * invLen, q[3] * invLen];
+}
+
+function validateClipShape(clip: TaeAnimationClipData): void {
+  if (clip.hasExtractedMotion === true && !clip.extractedMotion) {
+    throw new Error('ACTION clip marks extracted root motion but omits its native reference-frame payload.');
+  }
+  if (clip.extractedMotion) {
+    const motion = clip.extractedMotion;
+    if (!Number.isInteger(motion.frameType) || motion.frameType < 0 || motion.frameType > 2
+      || !Number.isFinite(motion.duration) || motion.duration <= 0
+      || !Number.isInteger(motion.frameCount) || motion.frameCount <= 0
+      || motion.samples.length !== motion.frameCount) {
+      throw new Error('ACTION extracted-motion payload has an invalid reference-frame shape.');
+    }
+    for (const sample of motion.samples) {
+      if (!sample || sample.raw.length !== 4 || sample.translation.length !== 3
+        || !sample.raw.every(Number.isFinite)
+        || !sample.translation.every(Number.isFinite)
+        || !Number.isFinite(sample.rotationAngle)) {
+        throw new Error('ACTION extracted-motion sample contains invalid components.');
+      }
+    }
+  }
+  if (clip.blendHint !== undefined && (!Number.isInteger(clip.blendHint) || clip.blendHint !== 0)) {
+    throw new Error(
+      `ACTION clip uses unsupported non-absolute blend hint ${clip.blendHint}; refusing to sample it as an absolute pose.`
+    );
+  }
+  if (!Number.isFinite(clip.duration) || clip.duration <= 0) {
+    throw new Error(`ACTION clip duration must be positive and finite, got ${clip.duration}.`);
+  }
+  if (!Number.isInteger(clip.frameCount) || clip.frameCount <= 0) {
+    throw new Error(`ACTION clip frameCount must be a positive integer, got ${clip.frameCount}.`);
+  }
+  if (!Number.isFinite(clip.frameDuration) || clip.frameDuration <= 0) {
+    throw new Error(`ACTION clip frameDuration must be positive and finite, got ${clip.frameDuration}.`);
+  }
+  if (!Number.isInteger(clip.transformTrackCount) || clip.transformTrackCount <= 0) {
+    throw new Error(`ACTION transformTrackCount must be a positive integer, got ${clip.transformTrackCount}.`);
+  }
+  if (!Number.isInteger(clip.hkxBoneCount) || clip.hkxBoneCount <= 0) {
+    throw new Error(`ACTION hkxBoneCount must be a positive integer, got ${clip.hkxBoneCount}.`);
+  }
+  if (clip.hkxBoneNames.length !== clip.hkxBoneCount) {
+    throw new Error(
+      `HKX bone-name count mismatch: expected ${clip.hkxBoneCount}, got ${clip.hkxBoneNames.length}.`);
+  }
+  if (clip.hkxReferencePose.length !== clip.hkxBoneCount) {
+    throw new Error(
+      `HKX reference pose count mismatch: expected ${clip.hkxBoneCount}, got ${clip.hkxReferencePose.length}.`);
+  }
+  if (clip.trackToHkxBone.length !== clip.transformTrackCount) {
+    throw new Error(
+      `HKX track map count mismatch: expected ${clip.transformTrackCount}, got ${clip.trackToHkxBone.length}.`);
+  }
+  const usedBones = new Set<number>();
+  for (const [track, bone] of clip.trackToHkxBone.entries()) {
+    if (!Number.isInteger(bone) || bone < 0 || bone >= clip.hkxBoneCount || usedBones.has(bone)) {
+      throw new Error(`HKX track ${track} has an invalid or duplicate bone target ${bone}.`);
+    }
+    usedBones.add(bone);
+  }
+  if (clip.hkxToFlverBoneMap && clip.hkxToFlverBoneMap.length !== clip.hkxBoneCount) {
+    throw new Error(
+      `HKX-to-FLVER map count mismatch: expected ${clip.hkxBoneCount}, got ${clip.hkxToFlverBoneMap.length}.`);
+  }
+}
+
+function copyExtractedMotionSample(sample: ExtractedMotionSampleData): ExtractedMotionSampleData {
+  return {
+    raw: [...sample.raw] as [number, number, number, number],
+    translation: [...sample.translation] as [number, number, number],
+    rotationAngle: sample.rotationAngle
+  };
 }
 
 /**

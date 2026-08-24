@@ -48,6 +48,13 @@ export interface EmevdEnvelopePage {
   instructionPage?: number;
   instructionPageSize?: number;
   instructionPageCount?: number;
+  instructionDistribution?: Array<{
+    bank: number;
+    id: number;
+    count: number;
+    argsLengths: Record<string, number>;
+  }>;
+  instructionDistributionTruncated?: boolean;
   events?: Array<{
     id: number;
     instructionCount: number;

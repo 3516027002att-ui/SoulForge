@@ -180,7 +180,7 @@ export class OperationLogUtilityClient implements OperationLogStore {
     return this.request('loadRagChunks', {});
   }
 
-  async replaceRagEmbeddings(entries: Array<{ chunkId: string; model: string; vector: Float32Array }>): Promise<void> {
+  async replaceRagEmbeddings(entries: Array<{ chunkId: string; model: string; vector: Float32Array; sourceRevision: string }>): Promise<void> {
     await this.request('replaceRagEmbeddings', { entries }).then(() => undefined);
   }
 
@@ -195,6 +195,10 @@ export class OperationLogUtilityClient implements OperationLogStore {
 
   ragEmbeddingModel(): Promise<string | null> {
     return this.request('ragEmbeddingModel', {});
+  }
+
+  ragEmbeddingSourceRevision(): Promise<string | null> {
+    return this.request('ragEmbeddingSourceRevision', {});
   }
 
   searchRagChunks(query: string, limit?: number): Promise<RagChunk[]> {

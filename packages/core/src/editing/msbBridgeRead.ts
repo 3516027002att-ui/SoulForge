@@ -81,6 +81,8 @@ export interface MsbBridgeDocument {
 export async function readMsbDocumentViaBridge(input: {
   sourcePath: string;
   allowedRoots: string[];
+  /** Bridge-confirmed BND4 child index; omitted for loose MSB/DCX. */
+  entryIndex?: number;
   timeoutMs?: number;
   maxParts?: number;
   maxRegions?: number;
@@ -113,6 +115,7 @@ export async function readMsbDocumentViaBridge(input: {
     filePath: input.sourcePath,
     allowedRoots: input.allowedRoots,
     timeoutMs: input.timeoutMs ?? 120_000,
+    ...(input.entryIndex !== undefined ? { commandOptions: { entryIndex: input.entryIndex } } : {}),
     ...(input.oodleRuntimeRoot ? { oodleRuntimeRoot: input.oodleRuntimeRoot } : {})
   });
   if (result.parseStatus === 'failed' || !result.data?.sourceHash) {

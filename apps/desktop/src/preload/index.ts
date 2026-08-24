@@ -826,6 +826,15 @@ const api = {
     maxTokens?: number;
     contextWindowTokens?: number;
     thinkingLevel?: ModelThinkingLevel;
+    capabilities?: {
+      tools?: boolean;
+      vision?: boolean;
+      reasoningEffort?: boolean;
+      topP?: boolean;
+      topK?: boolean;
+      temperature?: boolean;
+      maxTokens?: boolean;
+    };
   }>> => ipcRenderer.invoke('modelService.list'),
   getProviderUsageSummary: (): Promise<{
     calls: number;
@@ -877,6 +886,15 @@ const api = {
     maxTokens?: number;
     contextWindowTokens?: number;
     thinkingLevel?: ModelThinkingLevel;
+    capabilities?: {
+      tools?: boolean;
+      vision?: boolean;
+      reasoningEffort?: boolean;
+      topP?: boolean;
+      topK?: boolean;
+      temperature?: boolean;
+      maxTokens?: boolean;
+    };
   }): Promise<{
     id: string;
     displayName: string;
@@ -892,6 +910,15 @@ const api = {
     maxTokens?: number;
     contextWindowTokens?: number;
     thinkingLevel?: ModelThinkingLevel;
+    capabilities?: {
+      tools?: boolean;
+      vision?: boolean;
+      reasoningEffort?: boolean;
+      topP?: boolean;
+      topK?: boolean;
+      temperature?: boolean;
+      maxTokens?: boolean;
+    };
   }> => ipcRenderer.invoke('modelService.upsert', input),
   deleteModelService: (configId: string): Promise<{ ok: true }> =>
     ipcRenderer.invoke('modelService.delete', configId),

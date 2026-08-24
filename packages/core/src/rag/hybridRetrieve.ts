@@ -39,7 +39,7 @@ export function retrieveEvidenceHybrid(
   options: RagRetrieveOptions & { vectors?: HybridVectorSource }
 ): RagRetrieveResult {
   const lexical = retrieveEvidence(corpus, query, options);
-  if (!lexical.ok) return lexical;
+  if (!lexical.ok && lexical.code !== 'insufficient_evidence') return lexical;
   const vectorSource = options.vectors;
   if (!vectorSource
     || vectorSource.vectors.size === 0
@@ -53,7 +53,8 @@ export function retrieveEvidenceHybrid(
 
   const vectorScored: Array<{ chunkId: string; similarity: number }> = [];
   const scanAll = vectorSource.vectors.size <= VECTOR_FULL_SCAN_LIMIT;
-  const vectorTargets = scanAll ? corpus.chunks : lexical.hits.map((hit) => hit.chunk);
+  const lexicalHits = lexical.ok ? lexical.hits : [];
+  const vectorTargets = scanAll ? corpus.chunks : lexicalHits.map((hit) => hit.chunk);
   for (const chunk of vectorTargets) {
     const vector = vectorSource.vectors.get(chunk.chunkId);
     if (!vector) continue;
@@ -71,7 +72,7 @@ export function retrieveEvidenceHybrid(
     similarity: number | undefined;
     lexicalHit: RagHit | undefined;
   }>();
-  lexical.hits.forEach((hit, rank) => {
+  lexicalHits.forEach((hit, rank) => {
     fused.set(hit.chunk.chunkId, {
       chunkId: hit.chunk.chunkId,
       rrf: 1 / (RRF_K + rank + 1),
@@ -116,15 +117,29 @@ export function retrieveEvidenceHybrid(
   }
 
   if (hits.length === 0) return lexical;
+  const coverage = lexical.ok
+    ? lexical.stats.coverage
+    : lexical.coverage ?? {
+      status: 'FOUND' as const,
+      scope: 'rag',
+      indexed: corpus.chunks.length,
+      expected: corpus.chunks.length,
+      successful: corpus.chunks.length,
+      failed: 0,
+      completenessRatio: 1,
+      resultCount: hits.length
+    };
   return {
     ok: true,
-    query: lexical.query,
+    query,
     hits,
     stats: {
-      scanned: lexical.stats.scanned,
+      scanned: lexical.ok ? lexical.stats.scanned : vectorTargets.length,
       matched: fused.size,
-      expanded: lexical.stats.expanded,
-      truncated: fused.size > hits.length
+      expanded: lexical.ok ? lexical.stats.expanded : 0,
+      truncated: fused.size > hits.length,
+      coverage,
+      retrievalMode: scanAll ? 'hybrid_rrf' : 'lexical_rerank'
     }
   };
 }

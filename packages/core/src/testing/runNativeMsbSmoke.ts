@@ -5,6 +5,7 @@
  * S19: read/write 直接走 .msb.dcx（Bridge 原生解 DCX），TS 侧不再 decompressDfltDcx。
  */
 import { mkdir, readFile } from 'node:fs/promises';
+import { existsSync } from 'node:fs';
 import { withSmokeWorkspace } from './harness/smokeWorkspace.js';
 import { dirname, join } from 'node:path';
 import { runBridge, disposeBridgeDaemonPool } from '../bridge/runBridge.js';
@@ -108,8 +109,26 @@ function main(): Promise<void> {
 }
 
 async function mainInWorkspace(root: string): Promise<void> {
+  const explicitPath = process.argv[2]?.trim();
+  const gameRoot = process.env.SOULFORGE_SEKIRO_GAME_ROOT?.trim();
+  const discoveredPath = gameRoot ? join(gameRoot, 'map', 'mapstudio', 'm10_00_00_00.msb.dcx') : undefined;
+  const registryConfigured = Boolean(
+    process.env.SOULFORGE_NATIVE_FIXTURE_REGISTRY?.trim()
+      && process.env.SOULFORGE_NATIVE_FIXTURE_ROOT?.trim()
+  );
+  if (!explicitPath && !discoveredPath && !registryConfigured) {
+    console.log(JSON.stringify({
+      ok: true,
+      status: 'NOT_RUN_ENVIRONMENTAL',
+      message: '未提供 MSB 原版路径；请设置 SOULFORGE_SEKIRO_GAME_ROOT 或显式传入 m10_00_00_00.msb.dcx。'
+    }));
+    return;
+  }
+  if (!explicitPath && discoveredPath && !existsSync(discoveredPath)) {
+    throw new Error(`SOULFORGE_SEKIRO_GAME_ROOT 中缺少 ${discoveredPath}。`);
+  }
   const sourceDcx = await resolveNativeFixture(
-    process.argv[2],
+    explicitPath ?? discoveredPath,
     'msb-primary',
     '../../mods/map/mapstudio/m10_00_00_00.msb.dcx'
   );

@@ -39,6 +39,25 @@ check('tools/read_fmg', names.has('read_fmg_entries'));
 check('tools/mutate_fmg', names.has('mutate_fmg_entries'));
 check('tools/read_emevd', names.has('read_emevd_outline'));
 check('tools/apply_emevd', names.has('apply_emevd_dsl'));
+check('tools/read_tae', names.has('read_tae_events'));
+check('tools/mutate_tae', names.has('mutate_tae_event_times'));
+check('tools/read_msb', names.has('read_msb_parts'));
+check('tools/mutate_msb', names.has('mutate_msb_part_transform'));
+check('tools/execute_map_transaction', names.has('execute_map_transaction'));
+
+const createGateProbe = await registry.run(
+  'execute_map_transaction',
+  {
+    file: 'map/mapstudio/m10_00_00_00.msb.dcx',
+    operations: [{ kind: 'create', template: 'm000010_1077', newName: 'm000010_1077_agent_create', entityKind: 'part' }]
+  },
+  { mode: 'fullPermission', workspaceIndex: new WorkspaceIndex('ws'), explicitCreate: true } as ToolContext
+);
+check(
+  'create/template-tool-not-legacy-blocked',
+  createGateProbe.ok === false && createGateProbe.error?.code === 'WORKSPACE_REQUIRED',
+  JSON.stringify(createGateProbe.error)
+);
 
 const plan = { mode: 'plan', workspaceIndex: new WorkspaceIndex('ws') } as ToolContext;
 for (const tool of ['mutate_fmg_entries', 'apply_emevd_dsl'] as const) {

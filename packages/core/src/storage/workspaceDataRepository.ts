@@ -151,8 +151,8 @@ FROM background_jobs WHERE workspace_id = ? ORDER BY created_at DESC, job_id`).a
     const insert = this.database.prepare(`
 INSERT INTO rag_chunks (
  chunk_id, workspace_id, source_uri, symbol_uri, family, title, body,
- numeric_ids_json, relative_path, resource_kind, confidence, content_hash, created_at
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`);
+ numeric_ids_json, relative_path, resource_kind, confidence, content_hash, source_revision, created_at
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`);
     const insertFts = this.database.prepare(`
 INSERT INTO rag_chunks_fts (chunk_id, title, body) VALUES (?, ?, ?)`);
     const insertTrigram = this.database.prepare(`
@@ -171,7 +171,7 @@ INSERT INTO rag_chunks_fts_trigram (chunk_id, title, body) VALUES (?, ?, ?)`);
           chunk.chunkId, this.workspaceId, chunk.sourceUri, chunk.symbolUri, chunk.family,
           chunk.title, chunk.body, JSON.stringify(chunk.numericIds),
           chunk.relativePath ?? null, chunk.resourceKind ?? null, chunk.confidence ?? null,
-          chunk.contentHash, createdAt
+          chunk.contentHash, chunk.sourceRevision ?? null, createdAt
         );
         insertFts.run(chunk.chunkId, chunk.title, chunk.body);
         insertTrigram.run(chunk.chunkId, chunk.title, chunk.body);
@@ -184,7 +184,7 @@ INSERT INTO rag_chunks_fts_trigram (chunk_id, title, body) VALUES (?, ?, ?)`);
 SELECT chunk_id AS chunkId, workspace_id AS workspaceId, source_uri AS sourceUri,
  symbol_uri AS symbolUri, family, title, body, numeric_ids_json AS numericIdsJson,
  relative_path AS relativePath, resource_kind AS resourceKind, confidence,
- content_hash AS contentHash
+ content_hash AS contentHash, source_revision AS sourceRevision
 FROM rag_chunks WHERE workspace_id = ? ORDER BY family, title, chunk_id`)
       .all(this.workspaceId);
     return rows.map(hydrateRagChunk);
@@ -200,7 +200,7 @@ FROM rag_chunks WHERE workspace_id = ? ORDER BY family, title, chunk_id`)
 SELECT c.chunk_id AS chunkId, c.workspace_id AS workspaceId, c.source_uri AS sourceUri,
  c.symbol_uri AS symbolUri, c.family, c.title, c.body, c.numeric_ids_json AS numericIdsJson,
  c.relative_path AS relativePath, c.resource_kind AS resourceKind, c.confidence,
- c.content_hash AS contentHash
+ c.content_hash AS contentHash, c.source_revision AS sourceRevision
 FROM rag_chunks c
 JOIN rag_chunks_fts x ON x.chunk_id = c.chunk_id
 WHERE c.workspace_id = ? AND rag_chunks_fts MATCH ? ORDER BY rank LIMIT ?`;
@@ -218,7 +218,7 @@ WHERE c.workspace_id = ? AND rag_chunks_fts MATCH ? ORDER BY rank LIMIT ?`;
 SELECT c.chunk_id AS chunkId, c.workspace_id AS workspaceId, c.source_uri AS sourceUri,
  c.symbol_uri AS symbolUri, c.family, c.title, c.body, c.numeric_ids_json AS numericIdsJson,
  c.relative_path AS relativePath, c.resource_kind AS resourceKind, c.confidence,
- c.content_hash AS contentHash
+ c.content_hash AS contentHash, c.source_revision AS sourceRevision
 FROM rag_chunks c
 JOIN rag_chunks_fts_trigram x ON x.chunk_id = c.chunk_id
 WHERE c.workspace_id = ? AND rag_chunks_fts_trigram MATCH ? ORDER BY rank LIMIT ?`)
@@ -231,7 +231,7 @@ WHERE c.workspace_id = ? AND rag_chunks_fts_trigram MATCH ? ORDER BY rank LIMIT 
 SELECT chunk_id AS chunkId, workspace_id AS workspaceId, source_uri AS sourceUri,
  symbol_uri AS symbolUri, family, title, body, numeric_ids_json AS numericIdsJson,
  relative_path AS relativePath, resource_kind AS resourceKind, confidence,
- content_hash AS contentHash
+ content_hash AS contentHash, source_revision AS sourceRevision
 FROM rag_chunks
 WHERE workspace_id = ? AND (title LIKE ? OR body LIKE ?)
 ORDER BY family, title LIMIT ?`).all(this.workspaceId, needle, needle, boundedLimit);
@@ -242,17 +242,19 @@ ORDER BY family, title LIMIT ?`).all(this.workspaceId, needle, needle, boundedLi
    * 整体替换该 workspace 的 chunk 向量（embed 时先删后插）。
    * 向量只按 chunkId 关联；语料 replaceRagChunks 后旧的向量行会被 FK 级联删除。
    */
-  replaceRagEmbeddings(entries: Array<{ chunkId: string; model: string; vector: Float32Array }>): void {
+  replaceRagEmbeddings(entries: Array<{ chunkId: string; model: string; vector: Float32Array; sourceRevision: string }>): void {
     const insert = this.database.prepare(`
-INSERT OR REPLACE INTO rag_embeddings (chunk_id, workspace_id, model, dim, vector, created_at)
-VALUES (?, ?, ?, ?, ?, ?)`);
+INSERT OR REPLACE INTO rag_embeddings (chunk_id, workspace_id, model, dim, vector, source_revision, created_at)
+VALUES (?, ?, ?, ?, ?, ?, ?)`);
     const createdAt = new Date().toISOString();
     this.database.transaction(() => {
       this.database.prepare('DELETE FROM rag_embeddings WHERE workspace_id = ?').run(this.workspaceId);
       for (const entry of entries) {
         insert.run(
           entry.chunkId, this.workspaceId, entry.model, entry.vector.length,
-          Buffer.from(entry.vector.buffer, entry.vector.byteOffset, entry.vector.byteLength), createdAt
+          Buffer.from(entry.vector.buffer, entry.vector.byteOffset, entry.vector.byteLength),
+          entry.sourceRevision,
+          createdAt
         );
       }
     }).immediate();
@@ -281,10 +283,23 @@ SELECT model FROM rag_embeddings WHERE workspace_id = ? LIMIT 1`)
     return row?.model ?? null;
   }
 
+  /** Source revision shared by every stored vector, or null when absent/mixed. */
+  ragEmbeddingSourceRevision(): string | null {
+    const row = this.database.prepare<[
+      string
+    ], { sourceRevision: string | null; vectorCount: number; revisionCount: number }>(`
+SELECT MIN(source_revision) AS sourceRevision,
+       COUNT(*) AS vectorCount,
+       COUNT(DISTINCT source_revision) AS revisionCount
+FROM rag_embeddings WHERE workspace_id = ?`).get(this.workspaceId);
+    if (!row || row.vectorCount === 0 || row.revisionCount !== 1 || !row.sourceRevision) return null;
+    return row.sourceRevision;
+  }
+
   replaceReferences(references: readonly ReferenceEdge[]): void {    const insert = this.database.prepare(`
 INSERT INTO reference_edges (
- id, workspace_id, from_uri, to_uri, kind, confidence, reason, evidence_json
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`);
+ id, workspace_id, from_uri, to_uri, kind, confidence, reason, evidence_json, source_revision
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`);
     this.database.transaction(() => {
       this.database.prepare('DELETE FROM reference_edges WHERE workspace_id = ?').run(this.workspaceId);
       for (const [index, edge] of references.entries()) {
@@ -296,7 +311,8 @@ INSERT INTO reference_edges (
           edge.kind,
           edge.confidence,
           edge.reason,
-          JSON.stringify(edge.evidence)
+          JSON.stringify(edge.evidence),
+          edge.sourceRevision ?? null
         );
       }
     }).immediate();
@@ -304,7 +320,8 @@ INSERT INTO reference_edges (
 
   loadReferences(): ReferenceEdge[] {
     const rows = this.database.prepare<[string], Record<string, unknown>>(`
-SELECT from_uri AS fromUri, to_uri AS toUri, kind, confidence, reason, evidence_json AS evidenceJson
+SELECT from_uri AS fromUri, to_uri AS toUri, kind, confidence, reason, evidence_json AS evidenceJson,
+ source_revision AS sourceRevision
 FROM reference_edges WHERE workspace_id = ? ORDER BY from_uri, to_uri, kind`)
       .all(this.workspaceId);
     return rows.map((row) => ({
@@ -313,7 +330,8 @@ FROM reference_edges WHERE workspace_id = ? ORDER BY from_uri, to_uri, kind`)
       kind: String(row.kind) as ReferenceEdge['kind'],
       confidence: String(row.confidence) as ReferenceConfidence,
       reason: String(row.reason),
-      evidence: parseJson(String(row.evidenceJson), 'reference evidence')
+      evidence: parseJson(String(row.evidenceJson), 'reference evidence'),
+      ...(row.sourceRevision ? { sourceRevision: String(row.sourceRevision) } : {})
     }));
   }
 
@@ -335,6 +353,7 @@ interface RagChunkRow {
   resourceKind: string | null;
   confidence: string | null;
   contentHash: string;
+  sourceRevision: string | null;
 }
 
 function hydrateRagChunk(row: RagChunkRow): RagChunk {
@@ -348,6 +367,7 @@ function hydrateRagChunk(row: RagChunkRow): RagChunk {
     body: row.body,
     numericIds: parseJson(row.numericIdsJson, 'rag numeric ids'),
     contentHash: row.contentHash,
+    ...(row.sourceRevision ? { sourceRevision: row.sourceRevision } : {}),
     ...(row.relativePath ? { relativePath: row.relativePath } : {}),
     ...(row.resourceKind ? { resourceKind: row.resourceKind as ResourceKind } : {}),
     ...(row.confidence ? { confidence: row.confidence as ReferenceConfidence } : {})

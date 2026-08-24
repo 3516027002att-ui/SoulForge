@@ -475,7 +475,7 @@ function compilePairedEvent(
       return !op || op.instructionIndex !== np.instructionIndex || op.targetStartByte !== np.targetStartByte || op.sourceStartByte !== np.sourceStartByte || op.byteCount !== np.byteCount || (op.unkId ?? 0) !== np.unkId;
     });
 
-  if (paramsChanged && (newParameters.length > 0 || oldParams.length > 0)) {
+  if (!blocked && paramsChanged && (newParameters.length > 0 || oldParams.length > 0)) {
     operations.push({
       kind: 'set_event_parameters',
       eventAnchor,
@@ -622,6 +622,49 @@ function compileAddedEvent(
     localNodeId: `new-event-${parsed.eventId}`,
     sourceFingerprint: ''
   };
+  const newParameters: Array<{
+    instructionIndex: number;
+    targetStartByte: number;
+    sourceStartByte: number;
+    byteCount: number;
+    unkId: number;
+  }> = [];
+
+  let parameterLayoutBlocked = false;
+  encodable.forEach((entry, instructionIndex) => {
+    const layout = getInstructionArgLayout(entry.def);
+    for (let i = 0; i < entry.call.args.length; i++) {
+      const arg = entry.call.args[i]!;
+      if (typeof arg.value === 'string') {
+        const m = /^X(\d+)_(\d+)$/.exec(arg.value);
+        if (m) {
+          const src = Number(m[1]);
+          const cnt = Number(m[2]);
+          const l = layout[i];
+          if (!l || typeof l.targetStartByte !== 'number') {
+            add(error(
+              'EMEVD_PARAMETER_TARGET_OFFSET_UNRESOLVED',
+              `新增事件指令 ${entry.call.name} 参数无法解析 targetStartByte，禁止写入。`,
+              arg.span,
+              { resourceUri }
+            ));
+            parameterLayoutBlocked = true;
+            return;
+          }
+          newParameters.push({
+            instructionIndex,
+            targetStartByte: l.targetStartByte,
+            sourceStartByte: src,
+            byteCount: cnt,
+            unkId: 0
+          });
+        }
+      }
+    }
+  });
+
+  if (parameterLayoutBlocked) return;
+
   operations.push({
     kind: 'insert_event',
     eventId: parsed.eventId,
@@ -643,45 +686,6 @@ function compileAddedEvent(
       targetPreconditionHash: '',
       sourceSpan: entry.call.span
     });
-  });
-
-  const newParameters: Array<{
-    instructionIndex: number;
-    targetStartByte: number;
-    sourceStartByte: number;
-    byteCount: number;
-    unkId: number;
-  }> = [];
-
-  encodable.forEach((entry, instructionIndex) => {
-    const layout = getInstructionArgLayout(entry.def);
-    for (let i = 0; i < entry.call.args.length; i++) {
-      const arg = entry.call.args[i]!;
-      if (typeof arg.value === 'string') {
-        const m = /^X(\d+)_(\d+)$/.exec(arg.value);
-        if (m) {
-          const src = Number(m[1]);
-          const cnt = Number(m[2]);
-          const l = layout[i];
-          if (!l || typeof l.targetStartByte !== 'number') {
-            add(error(
-              'EMEVD_PARAMETER_TARGET_OFFSET_UNRESOLVED',
-              `新增事件指令 ${entry.call.name} 参数无法解析 targetStartByte，禁止写入。`,
-              arg.span,
-              { resourceUri }
-            ));
-            return;
-          }
-          newParameters.push({
-            instructionIndex,
-            targetStartByte: l.targetStartByte,
-            sourceStartByte: src,
-            byteCount: cnt,
-            unkId: 0
-          });
-        }
-      }
-    }
   });
 
   if (newParameters.length > 0) {

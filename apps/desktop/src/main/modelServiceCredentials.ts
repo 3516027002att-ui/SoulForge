@@ -8,7 +8,7 @@ import { randomUUID } from 'node:crypto';
 import { mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { migrateThinkingLevel } from '@soulforge/core';
-import type { ModelThinkingLevel } from '@soulforge/core';
+import type { ModelProviderCapabilities, ModelThinkingLevel } from '@soulforge/core';
 
 export interface StoredModelServiceConfig {
   id: string;
@@ -34,6 +34,8 @@ export interface StoredModelServiceConfig {
    * 配置后 workspace 语料可生成向量索引，检索走 RRF 混合（lexical + 向量）。
    */
   embeddingModel?: string;
+  /** Explicitly negotiated/verified provider capabilities; absent is unknown. */
+  capabilities?: ModelProviderCapabilities;
 }
 
 const THINKING_LEVELS: ReadonlySet<string> = new Set([
@@ -66,7 +68,8 @@ function isStoredConfig(value: unknown): value is StoredModelServiceConfig {
     && (value.thinkingLevel === undefined
       || (typeof value.thinkingLevel === 'string' && THINKING_LEVELS.has(value.thinkingLevel)))
     && (value.embeddingModel === undefined
-      || (typeof value.embeddingModel === 'string' && value.embeddingModel.trim() !== ''));
+      || (typeof value.embeddingModel === 'string' && value.embeddingModel.trim() !== ''))
+    && (value.capabilities === undefined || isCapabilities(value.capabilities));
 }
 
 interface VaultFile {
@@ -78,6 +81,13 @@ interface VaultFile {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function isCapabilities(value: unknown): value is ModelProviderCapabilities {
+  if (!isRecord(value)) return false;
+  return Object.entries(value).every(([key, item]) =>
+    ['tools', 'vision', 'reasoningEffort', 'topP', 'topK', 'temperature', 'maxTokens'].includes(key)
+      && typeof item === 'boolean');
 }
 
 function isCanonicalBase64(value: string): boolean {
@@ -172,6 +182,7 @@ export class ModelServiceCredentialVault {
     contextWindowTokens?: number;
     thinkingLevel?: StoredModelServiceConfig['thinkingLevel'];
     embeddingModel?: string;
+    capabilities?: ModelProviderCapabilities;
   }): Promise<StoredModelServiceConfig> {
     if (!this.isEncryptionAvailable()) {
       throw new Error('MODEL_SERVICE_SAFE_STORAGE_UNAVAILABLE');
@@ -197,7 +208,8 @@ export class ModelServiceCredentialVault {
       ...(input.thinkingLevel !== undefined ? { thinkingLevel: input.thinkingLevel } : {}),
       ...(input.embeddingModel !== undefined && input.embeddingModel.trim() !== ''
         ? { embeddingModel: input.embeddingModel.trim() }
-        : {})
+        : {}),
+      ...(input.capabilities ? { capabilities: { ...input.capabilities } } : {})
     };
     if (input.apiKey !== undefined) {
       if (!input.apiKey) {

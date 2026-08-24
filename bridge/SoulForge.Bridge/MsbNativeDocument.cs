@@ -301,12 +301,10 @@ internal sealed class MsbNativeDocument
         //    同样的模型/部件/区域/事件/路线集合」，也就是 **parser 的自洽性**，
         //    不是 writer 的无损性。
         //
-        // MSB 没有 writer（V0.6 延期，全仓无 write-msb 落盘路径），所以这里
-        // 不存在可比的重建产物。保持现状是诚实的，但 ByteIdentical 字段名会让
-        // 读者误以为它证明了写回无损，故显式传 false 并让语义项承载结论。
-        //
-        // 若将来接入 MSB writer，这里必须改成 Rebuild() 的真实产物再比较；
-        // 那时 ByteIdentical 才有意义。
+        // write-msb 由 MsbNativeWriter 在独立 Patch staging 中调用；这里仍只做
+        // parser self-consistency 检查，不凭源字节拷贝冒充 writer 的无损重建。
+        // ByteIdentical 因而保持 false，真正的 writer byte-preservation 由
+        // native writer smoke 对 staged raw payload 的实体前缀逐项比较。
         var rebuilt = SourceBytes.ToArray();
         var reparsed = Read(rebuilt);
         var modelsEqual = reparsed.Models.Count == Models.Count
@@ -352,6 +350,7 @@ internal sealed class MsbNativeDocument
         var deletedPartOffsets = new HashSet<long>();
         var deletedRegionOffsets = new HashSet<long>();
         var deletedEventOffsets = new HashSet<long>();
+        var pendingPartEntries = new List<byte[]>();
 
         foreach (var patch in patches)
         {
@@ -436,6 +435,12 @@ internal sealed class MsbNativeDocument
                     }
                     break;
                 }
+                case "duplicate_part":
+                case "create_part":
+                {
+                    pendingPartEntries.Add(BuildPartClone(patch, rebuilt));
+                    break;
+                }
                 case "set_property":
                 case "set_entity_id":
                 {
@@ -498,9 +503,27 @@ internal sealed class MsbNativeDocument
             }
         }
 
-        // Batch rewrite param offset tables once per family
-        if (deletedPartOffsets.Count > 0)
-            BatchRemoveEntriesFromParam(rebuilt, Params["PARTS_PARAM_ST"], deletedPartOffsets);
+        // Batch rewrite param offset tables once per family.  Part duplicate/create
+        // is template-backed: the complete native entry is copied first, then the
+        // PARTS table is extended once.  Unknown subtype payload remains byte-for-byte
+        // inside the copied entry; only the name relative pointer and explicitly
+        // requested authoritative fields are changed.
+        var partsParam = Params["PARTS_PARAM_ST"];
+        if (pendingPartEntries.Count > 0)
+        {
+            var remainingPartOffsets = partsParam.EntryOffsets
+                .Where(offset => !deletedPartOffsets.Contains(offset))
+                .ToArray();
+            rebuilt = AppendEntriesToParam(
+                rebuilt,
+                partsParam,
+                remainingPartOffsets,
+                pendingPartEntries);
+        }
+        else if (deletedPartOffsets.Count > 0)
+        {
+            BatchRemoveEntriesFromParam(rebuilt, partsParam, deletedPartOffsets);
+        }
         if (deletedRegionOffsets.Count > 0)
             BatchRemoveEntriesFromParam(rebuilt, Params["POINT_PARAM_ST"], deletedRegionOffsets);
         if (deletedEventOffsets.Count > 0)
@@ -508,6 +531,165 @@ internal sealed class MsbNativeDocument
 
         return rebuilt;
     }
+
+    private byte[] BuildPartClone(MsbPatch patch, byte[] currentBytes)
+    {
+        var source = Parts.SingleOrDefault(part => part.Name == patch.PartName)
+            ?? throw new InvalidDataException($"MSB part 模板不存在：{patch.PartName}");
+        GuardRegisteredPart(source);
+        var newName = patch.NewName?.Trim();
+        if (string.IsNullOrWhiteSpace(newName))
+            throw new InvalidDataException($"{patch.Kind} 需要非空 newName。");
+        if (newName.Contains('\0'))
+            throw new InvalidDataException("MSB part newName 不能包含 NUL。");
+
+        var partsParam = Params["PARTS_PARAM_ST"];
+        var sourceEnd = FindEntryEnd(partsParam, source.Offset);
+        var sourceLength = checked(sourceEnd - source.Offset);
+        var nameBytes = Encoding.Unicode.GetBytes(newName + "\0");
+        var clonedLength = Align8(checked(sourceLength + nameBytes.Length));
+        var cloned = new byte[clonedLength];
+        // Clone the current working bytes, not the immutable source snapshot.
+        // Earlier mutations in the same transaction (model/entity/transform)
+        // must be visible to a later template-backed duplicate.
+        Buffer.BlockCopy(currentBytes, source.Offset, cloned, 0, sourceLength);
+
+        // Keep every original relative payload pointer valid.  The new name is
+        // appended after the copied entry rather than inserted into its subtype
+        // data, so opaque references and unknown fields remain untouched.
+        WriteInt64(cloned, NameRelOffset, sourceLength);
+        nameBytes.AsSpan().CopyTo(cloned.AsSpan(sourceLength));
+
+        if (patch.ModelName is not null)
+        {
+            var modelIndex = Models.ToList().FindIndex(model => model.Name == patch.ModelName);
+            if (modelIndex < 0)
+                throw new InvalidDataException($"MSB model 不存在：{patch.ModelName}");
+            WriteInt32(cloned, PartModelIndexOffset, modelIndex);
+        }
+        else if (patch.ModelIndex is not null)
+        {
+            if (patch.ModelIndex.Value < 0 || patch.ModelIndex.Value >= Models.Count)
+                throw new InvalidDataException($"MSB modelIndex 越界：{patch.ModelIndex.Value}");
+            WriteInt32(cloned, PartModelIndexOffset, patch.ModelIndex.Value);
+        }
+
+        if (patch.PosX is not null) WriteFloat(cloned, PartTransformOffset, patch.PosX.Value);
+        if (patch.PosY is not null) WriteFloat(cloned, PartTransformOffset + 4, patch.PosY.Value);
+        if (patch.PosZ is not null) WriteFloat(cloned, PartTransformOffset + 8, patch.PosZ.Value);
+        if (patch.RotX is not null) WriteFloat(cloned, PartRotationOffset, patch.RotX.Value);
+        if (patch.RotY is not null) WriteFloat(cloned, PartRotationOffset + 4, patch.RotY.Value);
+        if (patch.RotZ is not null) WriteFloat(cloned, PartRotationOffset + 8, patch.RotZ.Value);
+        if (patch.ScaleX is not null) WriteFloat(cloned, PartScaleOffset, patch.ScaleX.Value);
+        if (patch.ScaleY is not null) WriteFloat(cloned, PartScaleOffset + 4, patch.ScaleY.Value);
+        if (patch.ScaleZ is not null) WriteFloat(cloned, PartScaleOffset + 8, patch.ScaleZ.Value);
+        if (patch.EntityId is not null) WriteInt32(cloned, 0x0C, patch.EntityId.Value);
+        return cloned;
+    }
+
+    private byte[] AppendEntriesToParam(
+        byte[] target,
+        MsbParam param,
+        IReadOnlyList<long> existingOffsets,
+        IReadOnlyList<byte[]> additions)
+    {
+        if (additions.Count == 0)
+            return target;
+        var insertAt = param.NextOffset > 0
+            ? checked((int)param.NextOffset)
+            : target.Length;
+        if (insertAt < 0 || insertAt > target.Length)
+            throw new InvalidDataException($"MSB {param.Name} append 位置越界：0x{insertAt:X}。");
+
+        var successorParams = Params.Values
+            .Where(candidate => candidate.Offset >= insertAt)
+            .OrderBy(candidate => candidate.Offset)
+            .ToArray();
+        if (successorParams.Any(candidate => candidate.EntryOffsets.Length > 0))
+        {
+            throw new NotSupportedException(
+                $"MSB {param.Name} append 需要移动非空后继 param，拒绝在未知绝对引用下重排：{string.Join(",", successorParams.Select(candidate => candidate.Name))}。");
+        }
+
+        var allOffsets = existingOffsets.Concat(
+            additions.Select((_, index) => (long)(insertAt + additions.Take(index).Sum(entry => entry.Length)))).ToArray();
+        var firstEntry = existingOffsets.Count > 0 ? checked((int)existingOffsets[0]) : insertAt;
+        var tableEnd = checked(param.Offset + ParamHeaderSize + (allOffsets.Length + 1) * sizeof(long));
+        var paramNameBytes = Encoding.Unicode.GetBytes(param.Name + "\0");
+        var relocateParamName = tableEnd > param.NameOffset
+            && param.NameOffset + paramNameBytes.Length > param.Offset;
+        var relocatedNameBytes = relocateParamName ? Align8(paramNameBytes.Length) : 0;
+        var totalBytes = checked(additions.Sum(entry => entry.Length) + relocatedNameBytes);
+        var rebuilt = new byte[checked(target.Length + totalBytes)];
+        Buffer.BlockCopy(target, 0, rebuilt, 0, insertAt);
+        var addedOffsets = new List<long>(additions.Count);
+        var cursor = insertAt;
+        foreach (var addition in additions)
+        {
+            addedOffsets.Add(cursor);
+            Buffer.BlockCopy(addition, 0, rebuilt, cursor, addition.Length);
+            cursor += addition.Length;
+        }
+        var relocatedNameOffset = cursor;
+        if (relocateParamName)
+            paramNameBytes.AsSpan().CopyTo(rebuilt.AsSpan(cursor));
+        cursor += relocatedNameBytes;
+        Buffer.BlockCopy(target, insertAt, rebuilt, cursor, target.Length - insertAt);
+
+        if (tableEnd > firstEntry)
+        {
+            throw new InvalidDataException(
+                $"MSB {param.Name} offset table 没有足够的原生空隙扩展：requiredEnd=0x{tableEnd:X}, firstEntry=0x{firstEntry:X}。");
+        }
+
+        WriteInt32(rebuilt, param.Offset, param.Version);
+        WriteInt32(rebuilt, param.Offset + 4, allOffsets.Length + 1);
+        WriteInt64(
+            rebuilt,
+            param.Offset + 8,
+            relocateParamName
+                ? relocatedNameOffset
+                : ShiftAbsolute(param.NameOffset, insertAt, totalBytes));
+        for (var i = 0; i < allOffsets.Length; i++)
+            WriteInt64(rebuilt, param.Offset + ParamHeaderSize + i * sizeof(long), allOffsets[i]);
+        var shiftedNext = param.NextOffset > 0 ? checked(param.NextOffset + totalBytes) : 0;
+        WriteInt64(rebuilt, param.Offset + ParamHeaderSize + allOffsets.Length * sizeof(long), shiftedNext);
+
+        foreach (var successor in successorParams)
+        {
+            var shiftedOffset = checked(successor.Offset + totalBytes);
+            WriteInt32(rebuilt, shiftedOffset, successor.Version);
+            WriteInt32(rebuilt, shiftedOffset + 4, successor.EntryOffsets.Length + 1);
+            WriteInt64(rebuilt, shiftedOffset + 8, ShiftAbsolute(successor.NameOffset, insertAt, totalBytes));
+            WriteInt64(
+                rebuilt,
+                shiftedOffset + ParamHeaderSize + successor.EntryOffsets.Length * sizeof(long),
+                successor.NextOffset > 0
+                    ? checked(successor.NextOffset + totalBytes)
+                    : 0);
+        }
+
+        return rebuilt;
+    }
+
+    private int FindEntryEnd(MsbParam param, int offset)
+    {
+        var next = param.EntryOffsets
+            .Where(candidate => candidate > offset)
+            .OrderBy(candidate => candidate)
+            .Select(candidate => candidate)
+            .FirstOrDefault();
+        if (next <= offset)
+            next = param.NextOffset > 0 ? param.NextOffset : SourceBytes.Length;
+        if (next <= offset || next > SourceBytes.Length)
+            throw new InvalidDataException($"MSB {param.Name} entry boundary 无效：0x{offset:X} → 0x{next:X}。");
+        return checked((int)next);
+    }
+
+    private static long ShiftAbsolute(long offset, int insertAt, int delta)
+        => offset > 0 && offset >= insertAt ? checked(offset + delta) : offset;
+
+    private static int Align8(int value) => checked((value + 7) & ~7);
 
     private static void GuardRegisteredPart(MsbPart part)
     {
@@ -737,7 +919,8 @@ internal sealed record MsbPatch(
     float? ScaleZ,
     string? ModelName = null,
     int? ModelIndex = null,
-    int? EntityId = null);
+    int? EntityId = null,
+    string? NewName = null);
 internal sealed record MsbRoundTripReport(
     bool ByteIdentical,
     bool SemanticIdentical,

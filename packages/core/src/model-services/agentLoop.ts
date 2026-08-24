@@ -13,6 +13,7 @@
  * - threshold-triggered context compaction replacing history in place
  */
 
+import { createHash } from 'node:crypto';
 import type { ModelServiceAdapter } from './types.js';
 import type {
   AgentEvent,
@@ -43,6 +44,10 @@ import {
 } from './retryPolicy.js';
 import { estimateContextTokens, isContextOverflowDiagnostic, runCompaction } from './contextCompactor.js';
 import { APPROVAL_DECISIONS_DENYING } from './types.js';
+import { applyCompletionEvidence, evaluateCompletionContract } from '../semantic/completion.js';
+import { NoProgressTracker } from '../semantic/progress.js';
+import { createTaskModel, resolveExternalTaskGoal } from '../semantic/taskModel.js';
+import type { CompletionContract, CompletionEvidence, CoverageStatus } from '../semantic/types.js';
 
 /** 连续工具调用失败上限门禁：达到该阈值时自动终止循环以防死循环。 */
 export const MAX_CONSECUTIVE_TOOL_FAILURES = 10;
@@ -364,6 +369,11 @@ export async function runAgentToolLoop(
     ? null
     : Math.max(1, Math.trunc(request.maxSteps));
   const messages: ChatMessage[] = [...request.messages];
+  const taskModel = createTaskModel(request.externalTaskGoal ?? lastUserMessageText(request.messages));
+  // The production session host injects TaskModel's default contract.  Keep
+  // the lower-level loop opt-in so protocol/RAG callers can exercise the
+  // adapter kernel without being mistaken for a completed user task.
+  let activeCompletionContract: CompletionContract | undefined = request.completionContract;
   const diagnostics: AgentRunResult['diagnostics'] = [];
   const toolAudit: AgentRunResult['audit']['toolCalls'] = [];
   const retriesAudit: NonNullable<AgentRunResult['audit']['retries']> = [];
@@ -379,7 +389,10 @@ export async function runAgentToolLoop(
       .map((tool) => [tool.name, tool.permissionLevel])
   );
   const broker = request.contextBroker;
-  const brokerOptions = request.contextBrokerOptions;
+  const brokerOptions = {
+    ...(request.contextBrokerOptions ?? {}),
+    ...(request.workspaceRevision ? { currentSourceRevision: request.workspaceRevision } : {})
+  };
   const contextAssemblies: NonNullable<AgentRunResult['audit']['contextAssemblies']> = [];
   const evidenceQueue: ContextEvidenceSource[] = [];
   const emit = (event: AgentEvent): void => {
@@ -403,7 +416,31 @@ export async function runAgentToolLoop(
   let totalOutputTokens = 0;
   let lastInputTokens: number | undefined;
   let compactionWindows = 0;
-  const initialUserQuery = lastUserMessageText(request.messages);
+  const progressTracker = new NoProgressTracker();
+  let replanRequested = false;
+  let replanCount = 0;
+  const maxReplans = 2;
+  const externalTaskGoal = resolveExternalTaskGoal({
+    externalTaskGoal: request.externalTaskGoal ?? taskModel.externalTaskGoal,
+    ...(request.currentSubgoal ? { currentSubgoal: request.currentSubgoal } : {}),
+    fallbackMessages: request.messages
+  });
+  // The generated resolver subgoal is an internal planning label, not a
+  // user-facing retrieval query.  Use an explicitly supplied subgoal when a
+  // host has one; otherwise begin from the external goal and switch only when
+  // a structured tool result declares the next subgoal.
+  let activeSubgoal = request.currentSubgoal ?? externalTaskGoal;
+  let activeSubgoalId = taskModel.subgoals.find((subgoal) => subgoal.goal === activeSubgoal)?.subgoalId
+    ?? taskModel.subgoals[0]?.subgoalId
+    ?? 'root';
+  taskModel.currentSubgoal = activeSubgoal;
+  const markSubgoalActive = (subgoalId: string): void => {
+    for (const subgoal of taskModel.subgoals) {
+      if (subgoal.subgoalId === subgoalId) subgoal.status = 'active';
+      else if (subgoal.status === 'active') subgoal.status = 'resolved';
+    }
+  };
+  markSubgoalActive(activeSubgoalId);
 
   // Approval gate. Defaults to the write-capable levels when a host provides
   // the callback without naming levels — the levels that can reach staging,
@@ -559,7 +596,7 @@ export async function runAgentToolLoop(
     // and inject as a separate [rag-evidence] channel. No hits or an
     // empty query injects nothing — a failed search must not poison the turn.
     if (request.ragSearch) {
-      const ragQuery = initialUserQuery || lastUserMessageText(messages);
+      const ragQuery = activeSubgoal.trim() || externalTaskGoal;
       if (ragQuery.trim().length > 0) {
         const ragResult = await request.ragSearch.retrieve(ragQuery);
         if (ragResult.ok && ragResult.hits.length > 0) {
@@ -610,6 +647,7 @@ export async function runAgentToolLoop(
               messages: callMessages,
               tools: request.tools,
               ...samplingFields,
+              ...(request.providerCapabilities ? { capabilities: request.providerCapabilities } : {}),
               ...(request.signal ? { signal: request.signal } : {}),
               ...(request.timeoutMs != null ? { timeoutMs: request.timeoutMs } : {})
             },
@@ -620,6 +658,7 @@ export async function runAgentToolLoop(
             messages: callMessages,
             tools: request.tools,
             ...samplingFields,
+            ...(request.providerCapabilities ? { capabilities: request.providerCapabilities } : {}),
             ...(request.signal ? { signal: request.signal } : {}),
             ...(request.timeoutMs != null ? { timeoutMs: request.timeoutMs } : {})
           });
@@ -941,6 +980,8 @@ export async function runAgentToolLoop(
     const orderedResults: Array<ChatMessage | undefined> = new Array(planned.length);
     const orderedAudit: Array<AgentRunResult['audit']['toolCalls'][number] | undefined> =
       new Array(planned.length);
+    const orderedCompletionEvidence: Array<readonly CompletionEvidence[] | undefined> =
+      new Array(planned.length);
     const evidenceAdditions: ContextEvidenceSource[] = [];
     let toolPhaseCancelled = false;
     let cursor = 0;
@@ -990,7 +1031,11 @@ export async function runAgentToolLoop(
             throw new Error('AGENT_LOOP_INTERNAL: 批次包含非执行条目。');
           }
           const modeOverride = currentMode === 'full' ? 'fullPermission' : currentMode;
-          return request.executeTool(batchEntry.call, { mode: modeOverride });
+          return request.executeTool(batchEntry.call, {
+            mode: modeOverride,
+            taskKind: taskModel.kind,
+            explicitCreate: taskModel.explicitCreate
+          });
         })
       );
       settled.forEach((result, position) => {
@@ -998,6 +1043,15 @@ export async function runAgentToolLoop(
         const batchEntry = planned[index]!;
         if (batchEntry.kind !== 'execute') return;
         const redactedContent = redactSecrets(result.content);
+        const subgoalUpdate = readSubgoalUpdate(redactedContent);
+        if (subgoalUpdate) {
+          const previousSubgoalId = activeSubgoalId;
+          activeSubgoal = subgoalUpdate.goal;
+          activeSubgoalId = subgoalUpdate.subgoalId ?? `dynamic:${fingerprintText(activeSubgoal)}`;
+          taskModel.currentSubgoal = activeSubgoal;
+          markSubgoalActive(activeSubgoalId);
+          if (activeSubgoalId !== previousSubgoalId) progressTracker.reset(previousSubgoalId);
+        }
         orderedResults[index] = {
           role: 'tool',
           toolCallId: batchEntry.call.id,
@@ -1008,12 +1062,16 @@ export async function runAgentToolLoop(
           ok: result.ok,
           ...(result.code ? { code: result.code } : {})
         };
+        orderedCompletionEvidence[index] = result.completionEvidence;
         // Feed executed tool results into the broker evidence queue for the
         // next model call. Only redacted text and the tool name are retained.
         evidenceAdditions.push({
           kind: 'toolResult',
           uri: batchEntry.call.name,
-          text: redactedContent
+          text: redactedContent,
+          ...(request.workspaceRevision
+            ? { meta: { sourceRevision: request.workspaceRevision } }
+            : {})
         });
         if (batchEntry.call.name === 'switch_mode' && result.ok) {
           try {
@@ -1023,6 +1081,29 @@ export async function runAgentToolLoop(
             }
           } catch {
             // ignore
+          }
+        }
+        // Param discovery failures have their own semantic failure budget
+        // below.  Do not let the generic no-progress replan fire first after
+        // three identical error payloads; changing rowIds must be allowed to
+        // reach the six-failure guard and produce its structured diagnosis.
+        const isParamDiscoveryFailure = !result.ok
+          && (batchEntry.call.name === 'search_param_rows' || batchEntry.call.name === 'read_param_fields');
+        if (SEMANTIC_PROGRESS_TOOLS.has(batchEntry.call.name) && !isParamDiscoveryFailure) {
+          const coverageStatus = readCoverageStatus(redactedContent);
+          const progress = progressTracker.observe({
+            subgoalId: activeSubgoalId,
+            result: redactedContent,
+            candidateIds: collectProgressIds(redactedContent),
+            ...(coverageStatus ? { coverageStatus } : {})
+          });
+          if (progress.action === 'REPLAN') {
+            replanRequested = true;
+            diagnostics.push({
+              severity: 'warning',
+              code: 'AGENT_REPLAN_REQUIRED',
+              message: progress.reason ?? '当前子目标没有新的信息增益，已要求重新规划。'
+            });
           }
         }
         emit({
@@ -1049,6 +1130,10 @@ export async function runAgentToolLoop(
       messages.push(message);
       toolAudit.push(auditEntry);
       recordMessage(steps, message);
+      const completionEvidence = orderedCompletionEvidence[index];
+      if (activeCompletionContract && completionEvidence && completionEvidence.length > 0) {
+        activeCompletionContract = applyCompletionEvidence(activeCompletionContract, completionEvidence);
+      }
       if (auditEntry.ok) {
         consecutiveIdenticalToolFailures = 0;
         lastFailedToolSignature = null;
@@ -1102,6 +1187,29 @@ export async function runAgentToolLoop(
       });
       break;
     }
+    if (replanRequested) {
+      replanCount += 1;
+      if (replanCount > maxReplans) {
+        finishReason = 'partial';
+        diagnostics.push({
+          severity: 'warning',
+          code: 'AGENT_REPLAN_EXHAUSTED',
+          message: `同一子目标已重规划 ${maxReplans} 次仍无新的权威信息，任务按 partial 结束。`
+        });
+        break;
+      }
+      const replanMessage: ChatMessage = {
+        role: 'system',
+        content: '[agent-replan] 当前子目标连续得到相同结果且没有信息增益。请重新制定 QueryPlan，'
+          + '不得重复等价查询或猜测新的 ID；如果覆盖不足，请返回结构化 unresolved/coverage 状态。'
+      };
+      messages.push(replanMessage);
+      recordMessage(steps, replanMessage);
+      progressTracker.reset(activeSubgoalId);
+      replanRequested = false;
+      finishReason = 'tool_use';
+      continue;
+    }
     if (toolPhaseCancelled) {
       finishReason = 'cancelled';
       recordInterrupted();
@@ -1122,6 +1230,18 @@ export async function runAgentToolLoop(
       code: 'AGENT_MAX_STEPS_REACHED',
       message: `Agent 达到 ${maxSteps} 步上限，任务按 partial 结束。`
     });
+  }
+
+  const completion = activeCompletionContract
+    ? evaluateCompletionContract(activeCompletionContract)
+    : undefined;
+  if (completion && finishReason === 'stop' && completion.status !== 'succeeded') {
+    finishReason = completion.status === 'blocked' ? 'error' : 'partial';
+    diagnostics.push(...completion.diagnostics.map((message) => ({
+      severity: completion.status === 'blocked' ? 'error' as const : 'warning' as const,
+      code: completion.status === 'blocked' ? 'COMPLETION_CONTRACT_BLOCKED' : 'COMPLETION_CONTRACT_INCOMPLETE',
+      message
+    })));
   }
 
   const audit: AgentRunResult['audit'] = {
@@ -1176,6 +1296,105 @@ export async function runAgentToolLoop(
     steps,
     finishReason,
     diagnostics,
-    audit
+    audit,
+    taskModel,
+    ...(completion ? { completion } : {})
   };
+}
+
+const SEMANTIC_PROGRESS_TOOLS = new Set([
+  'retrieve_evidence',
+  'search_text_entries',
+  'search_param_rows',
+  'search_events',
+  'search_map_entities',
+  'search_tae_events',
+  'read_param_fields',
+  'read_fmg_entries',
+  'read_emevd_outline',
+  'read_msb_parts'
+]);
+
+function collectProgressIds(content: string): string[] {
+  try {
+    const parsed: unknown = JSON.parse(content);
+    const ids: string[] = [];
+    const visit = (value: unknown, depth: number): void => {
+      if (depth > 5 || value === null || typeof value !== 'object') return;
+      if (Array.isArray(value)) {
+        for (const item of value.slice(0, 128)) visit(item, depth + 1);
+        return;
+      }
+      for (const [key, child] of Object.entries(value as Record<string, unknown>)) {
+        if (typeof child === 'string' && /(?:^id$|Id$|uri|address|sourceUri|chunkId)/i.test(key)) ids.push(`${key}:${child}`);
+        else visit(child, depth + 1);
+      }
+    };
+    visit(parsed, 0);
+    return [...new Set(ids)].slice(0, 128);
+  } catch {
+    return [];
+  }
+}
+
+function readSubgoalUpdate(content: string): { goal: string; subgoalId?: string } | undefined {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(content) as unknown;
+  } catch {
+    return undefined;
+  }
+  const visit = (value: unknown, depth: number): { goal: string; subgoalId?: string } | undefined => {
+    if (depth > 5 || value === null || typeof value !== 'object') return undefined;
+    if (Array.isArray(value)) {
+      for (const item of value.slice(0, 64)) {
+        const found = visit(item, depth + 1);
+        if (found) return found;
+      }
+      return undefined;
+    }
+    for (const [key, child] of Object.entries(value as Record<string, unknown>)) {
+      if (!/^(?:currentSubgoal|nextSubgoal|subgoal)$/i.test(key)) {
+        const nested = visit(child, depth + 1);
+        if (nested) return nested;
+        continue;
+      }
+      if (typeof child === 'string' && child.trim() !== '') return { goal: child.trim() };
+      if (child && typeof child === 'object' && !Array.isArray(child)) {
+        const record = child as Record<string, unknown>;
+        if (typeof record.goal === 'string' && record.goal.trim() !== '') {
+          return {
+            goal: record.goal.trim(),
+            ...(typeof record.subgoalId === 'string' && record.subgoalId.trim() !== ''
+              ? { subgoalId: record.subgoalId.trim() }
+              : {})
+          };
+        }
+      }
+    }
+    return undefined;
+  };
+  return visit(parsed, 0);
+}
+
+function fingerprintText(value: string): string {
+  return createHash('sha256').update(value).digest('hex').slice(0, 16);
+}
+
+function readCoverageStatus(content: string): CoverageStatus | undefined {
+  try {
+    const parsed: unknown = JSON.parse(content);
+    const coverage = parsed && typeof parsed === 'object' && !Array.isArray(parsed)
+      ? (parsed as Record<string, unknown>).coverage
+      : undefined;
+    const value = coverage && typeof coverage === 'object' && !Array.isArray(coverage)
+      ? (coverage as Record<string, unknown>).status
+      : undefined;
+    return typeof value === 'string' && [
+      'FOUND', 'NOT_FOUND_WITH_COMPLETE_COVERAGE', 'NOT_INDEXED', 'PARTIALLY_INDEXED',
+      'PARSE_FAILED', 'STALE', 'SOURCE_UNAVAILABLE'
+    ].includes(value) ? value as CoverageStatus : undefined;
+  } catch {
+    return undefined;
+  }
 }

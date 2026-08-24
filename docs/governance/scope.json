@@ -102,7 +102,7 @@
         "assume-non-1.6-build-compatible",
         "treat-version-family-as-native-evidence"
       ],
-      "authorityAtRuling": "unverified",
+      "authorityAtRuling": "native-verified",
       "evidenceRefs": [
         "EV-PRIVATE-20260724"
       ],

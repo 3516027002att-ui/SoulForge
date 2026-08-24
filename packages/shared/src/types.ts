@@ -156,6 +156,8 @@ export interface ReferenceEdge {
   confidence: ReferenceConfidence;
   reason: string;
   evidence: ReferenceEvidence[];
+  /** Revision of the source projection that produced this edge. */
+  sourceRevision?: string;
 }
 
 export type PatchMode = 'plan' | 'normal' | 'fullPermission';

@@ -15,6 +15,12 @@ import type {
 } from './types.js';
 import { resolveOpenAiReasoningEffort } from './types.js';
 import {
+  createModelProviderCapabilityState,
+  resolveModelProviderCapabilityState,
+  type ModelProviderCapabilityPolicy,
+  type ModelProviderCapabilityState
+} from './providerCapabilities.js';
+import {
   classifyFetchError,
   classifyHttpError,
   classifyParseError,
@@ -29,6 +35,8 @@ export interface OpenAiCompatibleAdapterOptions {
   apiKey: string;
   model: string;
   fetchImpl?: typeof fetch;
+  capabilities?: import('./types.js').ModelProviderCapabilities;
+  capabilityPolicy?: ModelProviderCapabilityPolicy;
 }
 
 export class OpenAiCompatibleAdapter implements ModelServiceAdapter {
@@ -37,16 +45,30 @@ export class OpenAiCompatibleAdapter implements ModelServiceAdapter {
   private readonly apiKey: string;
   private readonly model: string;
   private readonly fetchImpl: typeof fetch;
+  private readonly configuredCapabilities: import('./types.js').ModelProviderCapabilities | undefined;
+  private readonly capabilityPolicy: ModelProviderCapabilityPolicy;
+  readonly capabilityState: ModelProviderCapabilityState;
 
   constructor(options: OpenAiCompatibleAdapterOptions) {
     this.baseUrl = normalizeServiceBaseUrl(options.baseUrl);
     this.apiKey = options.apiKey;
     this.model = options.model;
     this.fetchImpl = options.fetchImpl ?? fetch;
+    this.configuredCapabilities = options.capabilities;
+    this.capabilityPolicy = options.capabilityPolicy ?? 'legacy-defaults';
+    this.capabilityState = createModelProviderCapabilityState({
+      ...(options.capabilities ? { configured: options.capabilities } : {}),
+      policy: this.capabilityPolicy
+    });
   }
 
   async complete(request: ModelCompleteRequest): Promise<ModelCompleteResult> {
-    const body = buildChatBody(this.model, request, false);
+    const capabilities = resolveModelProviderCapabilityState({
+      ...(request.capabilities ? { request: request.capabilities } : {}),
+      ...(this.configuredCapabilities ? { configured: this.configuredCapabilities } : {}),
+      policy: this.capabilityPolicy
+    });
+    const body = buildChatBody(this.model, request, false, capabilities.capabilities);
     const { signal, cleanup } = createRequestSignal(request.signal, request.timeoutMs);
     let response: Response;
     try {
@@ -154,7 +176,13 @@ export class OpenAiCompatibleAdapter implements ModelServiceAdapter {
   }
 
   async *stream(request: ModelCompleteRequest): AsyncGenerator<StreamEvent, void, undefined> {
-    const body = buildChatBody(this.model, request, true);    const { signal, cleanup } = createRequestSignal(request.signal, request.timeoutMs);
+    const capabilities = resolveModelProviderCapabilityState({
+      ...(request.capabilities ? { request: request.capabilities } : {}),
+      ...(this.configuredCapabilities ? { configured: this.configuredCapabilities } : {}),
+      policy: this.capabilityPolicy
+    });
+    const body = buildChatBody(this.model, request, true, capabilities.capabilities);
+    const { signal, cleanup } = createRequestSignal(request.signal, request.timeoutMs);
     let response: Response;
     try {
       response = await this.fetchImpl(`${this.baseUrl}/v1/chat/completions`, {
@@ -269,16 +297,23 @@ export class OpenAiCompatibleAdapter implements ModelServiceAdapter {
   }
 }
 
-function buildChatBody(model: string, request: ModelCompleteRequest, stream: boolean): Record<string, unknown> {
-  const reasoningEffort = resolveOpenAiReasoningEffort(request.thinkingLevel);
+function buildChatBody(
+  model: string,
+  request: ModelCompleteRequest,
+  stream: boolean,
+  capabilities: ModelProviderCapabilityState['capabilities']
+): Record<string, unknown> {
+  const reasoningEffort = capabilities.reasoningEffort === false
+    ? undefined
+    : resolveOpenAiReasoningEffort(request.thinkingLevel);
   return {
     model,
     stream,
-    messages: request.messages.map(toOpenAiMessage),
-    ...(request.tools?.length ? { tools: request.tools.map(toOpenAiTool) } : {}),
-    ...(request.temperature !== undefined ? { temperature: request.temperature } : {}),
-    ...(request.maxTokens !== undefined ? { max_tokens: request.maxTokens } : {}),
-    ...(request.topP !== undefined ? { top_p: request.topP } : {}),
+    messages: request.messages.map((message) => toOpenAiMessage(message, capabilities.vision)),
+    ...(request.tools?.length && capabilities.tools ? { tools: request.tools.map(toOpenAiTool) } : {}),
+    ...(request.temperature !== undefined && capabilities.temperature ? { temperature: request.temperature } : {}),
+    ...(request.maxTokens !== undefined && capabilities.maxTokens ? { max_tokens: request.maxTokens } : {}),
+    ...(request.topP !== undefined && capabilities.topP ? { top_p: request.topP } : {}),
     // topK 不下发：OpenAI Chat Completions 协议无 top_k 字段，官方 API 传了会 400；
     // 兼容服务里也只有 Anthropic 协议映射 top_k（UI 已标注「仅 Anthropic 生效」）。
     // reasoning_effort：官方值原样下发（off → undefined → 字段缺席），禁止折档。
@@ -294,7 +329,7 @@ function listModelsError(diagnostic: {
   return { ok: false, error: { code: diagnostic.code, message: diagnostic.message } };
 }
 
-function toOpenAiMessage(message: ChatMessage): Record<string, unknown> {
+function toOpenAiMessage(message: ChatMessage, visionAllowed: boolean): Record<string, unknown> {
   if (message.role === 'tool') {
     return {
       role: 'tool',
@@ -303,7 +338,7 @@ function toOpenAiMessage(message: ChatMessage): Record<string, unknown> {
     };
   }
   // 多模态：user 消息带图像时 content 用 parts 数组（data URL 内联）。
-  if (message.role === 'user' && message.images && message.images.length > 0) {
+  if (message.role === 'user' && message.images && message.images.length > 0 && visionAllowed) {
     return {
       role: 'user',
       content: [

@@ -24,6 +24,7 @@ import type { OperationLogStore } from '../patch/operationLog.js';
 import { evaluateRawWriterGate } from '../patch/writerContract.js';
 import { decodeStrictBase64, StrictBase64Error } from '../util/base64.js';
 import type { WorkspaceSession } from '../workspace/workspaceSession.js';
+import type { ExecutePatchIrOptions } from '../patch/durablePatchCommit.js';
 
 export type SaveRawResourceResult = SaveTextResourceResult & {
   kind?: 'raw_file_replace' | 'raw_byte_range';
@@ -40,6 +41,7 @@ export interface SaveRawReplaceOptions {
   backupBaseDir?: string;
   recoveryDir?: string;
   title?: string;
+  semanticChecks?: ExecutePatchIrOptions['semanticChecks'];
 }
 
 export interface SaveRawByteRangeOptions {
@@ -160,7 +162,8 @@ export async function saveRawReplace(options: SaveRawReplaceOptions): Promise<Sa
     ...(options.operationLog ? { operationLog: options.operationLog } : {}),
     ...(options.confirmation ? { confirmation: options.confirmation } : {}),
     ...(options.backupBaseDir ? { backupBaseDir: options.backupBaseDir } : {}),
-    ...(options.recoveryDir ? { recoveryDir: options.recoveryDir } : {})
+    ...(options.recoveryDir ? { recoveryDir: options.recoveryDir } : {}),
+    ...(options.semanticChecks ? { semanticChecks: options.semanticChecks } : {})
   });
 
   return {

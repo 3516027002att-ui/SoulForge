@@ -7,11 +7,14 @@
  */
 
 import { randomUUID } from 'node:crypto';
+import { createHash } from 'node:crypto';
 import { runAgentToolLoop, redactSecrets } from './agentLoop.js';
 import { FileRolloutStorage, newRolloutFilePath } from './fileRolloutStorage.js';
 import { RolloutRecorder } from './rolloutRecorder.js';
 import type { ResumedRollout } from './rolloutRecorder.js';
 import { estimateContextTokens } from './contextCompactor.js';
+import { createTaskModel } from '../semantic/taskModel.js';
+import type { CompletionEvidence } from '../semantic/types.js';
 import type {
   AgentEvent,
   AgentPermissionMode,
@@ -44,14 +47,18 @@ export interface AgentSessionRunParams {
   apiKey: string;
   prompt: string;
   /**
-   * Optional system prompt prepended ahead of every message in this run. Only
-   * injected when no `role === 'system'` message already exists (a resumed
-   * session may carry one from an earlier run).
+   * Current system prompt for this run. Resume strips prior system messages and
+   * installs this prompt so an old system contract cannot survive silently.
    */
   systemPrompt?: string;
   permissionMode: AgentPermissionMode;
   tools: ToolDefinition[];
-  executeTool: (call: ToolCall) => Promise<{ ok: boolean; content: string; code?: string }>;
+  executeTool: (call: ToolCall, contextOverride?: Record<string, unknown>) => Promise<{
+    ok: boolean;
+    content: string;
+    code?: string;
+    completionEvidence?: CompletionEvidence[];
+  }>;
   signal?: AbortSignal;
   streaming?: boolean;
   /**
@@ -88,6 +95,17 @@ export interface AgentSessionRunParams {
    */
   userImages?: readonly ChatMessageImage[];
   onEvent?: (event: AgentEvent) => void;
+  externalTaskGoal?: string;
+  currentSubgoal?: string;
+  completionContract?: import('./types.js').AgentRunRequest['completionContract'];
+  providerCapabilities?: import('./types.js').ModelProviderCapabilities;
+  appCommitSha?: string;
+  systemPromptVersion?: string;
+  toolRegistryVersion?: string;
+  resolverVersion?: string;
+  semanticIndexRevision?: string;
+  ragRevision?: string;
+  workspaceRevision?: string;
 }
 
 export interface AgentSessionRunResult {
@@ -98,6 +116,9 @@ export interface AgentSessionRunResult {
 
 export async function runAgentSession(params: AgentSessionRunParams): Promise<AgentSessionRunResult> {
   const sessionId = params.sessionId ?? randomUUID();
+  const taskModel = createTaskModel(params.externalTaskGoal ?? params.prompt);
+  const completionContract = params.completionContract
+    ?? taskModel.completionContract;
   const startedAt = new Date();
   const rolloutPath = newRolloutFilePath(params.sessionsDir, sessionId, startedAt);
   const storage = new FileRolloutStorage(rolloutPath);
@@ -108,6 +129,20 @@ export async function runAgentSession(params: AgentSessionRunParams): Promise<Ag
     protocol: params.config.protocol,
     permissionMode: params.permissionMode,
     ...(params.config.model ? { model: params.config.model } : {})
+    ,...(params.appCommitSha ? { appCommitSha: params.appCommitSha } : {})
+    ,...(params.systemPromptVersion ? { systemPromptVersion: params.systemPromptVersion } : {})
+    ,...(params.systemPrompt ? { systemPromptHash: createHash('sha256').update(params.systemPrompt).digest('hex') } : {})
+    ,...(params.toolRegistryVersion ? { toolRegistryVersion: params.toolRegistryVersion } : {})
+    ,...(params.resolverVersion ? { resolverVersion: params.resolverVersion } : {})
+    ,...(params.semanticIndexRevision ? { semanticIndexRevision: params.semanticIndexRevision } : {})
+    ,...(params.ragRevision ? { ragRevision: params.ragRevision } : {})
+    ,...(params.workspaceRevision ? { workspaceRevision: params.workspaceRevision } : {})
+    ,taskType: taskModel.kind
+    ,...(params.providerCapabilities ?? params.config.capabilities
+      ? { providerCapabilities: params.providerCapabilities ?? params.config.capabilities } : {})
+    ,...(params.adapter.capabilityState
+      ? { providerCapabilityState: params.adapter.capabilityState } : {})
+    ,...(params.sampling ? { reasoningConfig: params.sampling } : {})
   });
   let providerCallIndex = 0;
   const usagePersistenceErrors: string[] = [];
@@ -183,11 +218,8 @@ export async function runAgentSession(params: AgentSessionRunParams): Promise<Ag
 
   const messages: ChatMessage[] = [];
   const systemPrompt = params.systemPrompt;
-  const resumedMessages = params.resumeFrom ? params.resumeFrom.messages : [];
-  const hasResumedSystem = resumedMessages.some((message) => message.role === 'system');
-  if (hasResumedSystem) {
-    messages.push(...resumedMessages);
-  } else if (systemPrompt !== undefined && systemPrompt.length > 0) {
+  const resumedMessages = params.resumeFrom ? params.resumeFrom.messages.filter((message) => message.role !== 'system') : [];
+  if (systemPrompt !== undefined && systemPrompt.length > 0) {
     messages.push({ role: 'system', content: systemPrompt });
     messages.push(...resumedMessages);
   } else {
@@ -227,6 +259,12 @@ export async function runAgentSession(params: AgentSessionRunParams): Promise<Ag
     ...(params.compaction ? { compaction: params.compaction } : {}),
     ...(params.sampling ? { sampling: params.sampling } : {}),
     ...(params.ragSearch ? { ragSearch: params.ragSearch } : {}),
+    externalTaskGoal: params.externalTaskGoal ?? params.prompt,
+    ...(params.currentSubgoal ? { currentSubgoal: params.currentSubgoal } : {}),
+    ...(params.workspaceRevision ? { workspaceRevision: params.workspaceRevision } : {}),
+    ...(completionContract ? { completionContract } : {}),
+    ...(params.providerCapabilities ?? params.config.capabilities
+      ? { providerCapabilities: params.providerCapabilities ?? params.config.capabilities } : {}),
     ...(params.requestApproval ? { requestApproval: params.requestApproval } : {}),
     ...(params.resolveApprovalDiff ? { resolveApprovalDiff: params.resolveApprovalDiff } : {}),
     ...(params.approvalRequiredLevels

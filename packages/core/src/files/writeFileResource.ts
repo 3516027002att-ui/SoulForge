@@ -394,6 +394,7 @@ export async function commitFilePatch(input: {
   confirmation?: ConfirmationReceipt;
   backupBaseDir?: string;
   recoveryDir?: string;
+  semanticChecks?: ExecutePatchIrOptions['semanticChecks'];
 }): Promise<TransactionCommitCompatResult & { diagnostics: Diagnostic[] }> {
   const needsConfirm = input.patch.operations.some(
     (op) =>
@@ -426,7 +427,8 @@ export async function commitFilePatch(input: {
     ...(input.workspaceRoot ? { workspaceRoot: input.workspaceRoot } : {}),
     ...(input.operationLog ? { operationLog: input.operationLog } : {}),
     ...(input.backupBaseDir ? { backupBaseDir: input.backupBaseDir } : {}),
-    ...(input.recoveryDir ? { recoveryDir: input.recoveryDir } : {})
+    ...(input.recoveryDir ? { recoveryDir: input.recoveryDir } : {}),
+    ...(input.semanticChecks ? { semanticChecks: input.semanticChecks } : {})
   });
 }
 

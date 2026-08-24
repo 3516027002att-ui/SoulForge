@@ -248,7 +248,18 @@ async function main(): Promise<void> {
       model: 'fake-gpt',
       hasCredential: true,
       createdAt: new Date().toISOString(),
-      updatedAt: new Date().toISOString()
+      updatedAt: new Date().toISOString(),
+      // The local fake endpoint explicitly declares the optional fields this
+      // contract test exercises. The configured production factory must not
+      // infer these capabilities from the OpenAI-compatible protocol name.
+      capabilities: {
+        tools: true,
+        vision: true,
+        reasoningEffort: true,
+        topP: true,
+        temperature: true,
+        maxTokens: true
+      }
     };
     const anthropicConfig: ModelServiceConfig = {
       id: 'cfg-anthropic',
@@ -258,7 +269,18 @@ async function main(): Promise<void> {
       model: 'fake-claude',
       hasCredential: true,
       createdAt: new Date().toISOString(),
-      updatedAt: new Date().toISOString()
+      updatedAt: new Date().toISOString(),
+      // See the OpenAI fixture above: capability declarations are explicit
+      // test evidence, not a protocol-based inference.
+      capabilities: {
+        tools: true,
+        vision: true,
+        reasoningEffort: true,
+        topP: true,
+        topK: true,
+        temperature: true,
+        maxTokens: true
+      }
     };
 
     const openaiResolution = createConfiguredModelServiceAdapter({

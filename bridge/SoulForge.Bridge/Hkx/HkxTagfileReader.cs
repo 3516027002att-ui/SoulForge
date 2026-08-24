@@ -1,361 +1,614 @@
 // MIT License
 // Copyright (c) 2026 SoulForge Authors
-// Clean-room parser for Havok 2014 Tagfiles (TAG0) and Compendiums (TCM0).
-// References: TagTools (MIT) by blueskythlikesclouds and LibXenoverse (MIT) by Olganix.
+// ACTION projection for Havok 2014 TAG0 files.
+//
+// Havoc is the sole TAG0/TCRF object decoder. This adapter only projects the
+// decoded, typed object graph into the checked Hkx* models used by the common
+// animation sampler; it does not parse TAG0 bytes a second time.
 
-using System.Buffers.Binary;
+using System.IO;
 using System.Numerics;
-using System.Text;
+using Havoc.IO.Tagfile.Binary;
+using Havoc.Objects;
 
 namespace SoulForge.Bridge.Hkx;
 
-internal sealed class HkxTagfileReader
+internal static class HkxTagfileReader
 {
-    public sealed class TagType
-    {
-        public string Name { get; set; } = string.Empty;
-        public TagType? Parent { get; set; }
-        public int Flags { get; set; }
-        public int SubTypeFlags { get; set; }
-        public int ByteSize { get; set; }
-        public int Alignment { get; set; }
-        public List<TagMember> Members { get; } = new();
-    }
-
-    public sealed class TagMember
-    {
-        public string Name { get; set; } = string.Empty;
-        public int Flags { get; set; }
-        public int ByteOffset { get; set; }
-        public TagType? MemberType { get; set; }
-    }
-
-    public sealed class TagItem
-    {
-        public TagType? ItemType { get; set; }
-        public bool IsPointer { get; set; }
-        public int DataOffset { get; set; }
-        public int Count { get; set; }
-    }
-
-    public byte[] Data { get; }
-    public List<TagType?> Types { get; private set; } = new();
-    public List<TagItem> Items { get; } = new();
-    public byte[] DataPayload { get; private set; } = Array.Empty<byte>();
-
-    public HkxTagfileReader(byte[] data)
-    {
-        Data = data;
-    }
-
     public static HkxAnimationContainer ReadTagfile(byte[] tagfileBytes, byte[]? compendiumBytes = null)
     {
-        var reader = new HkxTagfileReader(tagfileBytes);
-        HkxTagfileReader? compendiumReader = null;
-        if (compendiumBytes != null && compendiumBytes.Length > 0)
+        if (tagfileBytes is null || tagfileBytes.Length == 0)
+            throw new InvalidDataException("HKX tagfile is empty.");
+        if (compendiumBytes is null || compendiumBytes.Length == 0)
+            throw new InvalidDataException("HKX tagfile requires its referenced compendium; none was supplied.");
+
+        var root = HkBinaryTagfileReader.Read(new MemoryStream(tagfileBytes), compendiumBytes);
+        var objects = FlattenObjects(root).ToArray();
+        var classes = objects
+            .OfType<HkClass>()
+            .ToArray();
+
+        var animationClasses = classes
+            .Where(static value => value.Type.Name is "hkaSplineCompressedAnimation"
+                or "hkaInterleavedUncompressedAnimation")
+            .ToArray();
+        var skeletonClasses = classes
+            .Where(static value => value.Type.Name == "hkaSkeleton")
+            .ToArray();
+        var bindingClasses = classes
+            .Where(static value => value.Type.Name == "hkaAnimationBinding")
+            .ToArray();
+
+        var unsupportedActionClasses = classes
+            .Where(static value => value.Type.Name.StartsWith("hka", StringComparison.Ordinal))
+            .Select(static value => value.Type.Name)
+            .Where(static name => name is not "hkaAnimationContainer"
+                and not "hkaAnnotationTrack"
+                and not "hkaAnimationBinding"
+                and not "hkaSkeleton"
+                and not "hkaBone"
+                and not "hkaDefaultAnimatedReferenceFrame"
+                and not "hkaSplineCompressedAnimation"
+                and not "hkaInterleavedUncompressedAnimation")
+            .Distinct(StringComparer.Ordinal)
+            .OrderBy(static name => name, StringComparer.Ordinal)
+            .ToArray();
+        if (unsupportedActionClasses.Length > 0)
+            throw new NotSupportedException(
+                $"HKX TAG0 ACTION projection encountered unsupported Havok classes: {string.Join(", ", unsupportedActionClasses)}.");
+
+        var animationsByClass = new Dictionary<HkClass, HkxAnimation>(ReferenceEqualityComparer.Instance);
+        var animations = new List<HkxAnimation>(animationClasses.Length);
+        foreach (var animationClass in animationClasses)
         {
-            compendiumReader = new HkxTagfileReader(compendiumBytes);
-            compendiumReader.Parse();
+            var animation = ReadAnimation(animationClass);
+            animationsByClass.Add(animationClass, animation);
+            animations.Add(animation);
         }
 
-        reader.Parse(compendiumReader);
-        return reader.ExtractAnimationContainer();
-    }
+        var bindings = new List<HkxAnimationBinding>(bindingClasses.Length);
+        foreach (var bindingClass in bindingClasses)
+            bindings.Add(ReadBinding(bindingClass, animationsByClass));
 
-    public void Parse(HkxTagfileReader? compendium = null)
-    {
-        if (Data.Length < 8)
-            throw new InvalidDataException($"HKX tagfile length {Data.Length} is too short.");
-
-        int offset = 0;
-        uint rootHeader = BinaryPrimitives.ReadUInt32BigEndian(Data.AsSpan(offset, 4));
-        int rootSize = (int)(rootHeader & 0x3FFFFFFF);
-        string rootSig = Encoding.ASCII.GetString(Data, offset + 4, 4);
-        offset += 8;
-
-        if (rootSig is not "TAG0" and not "TCM0")
-            throw new InvalidDataException($"Invalid Tagfile root signature: '{rootSig}', expected 'TAG0' or 'TCM0'.");
-
-        int rootEnd = Math.Min(Data.Length, offset - 8 + rootSize);
-
-        while (offset + 8 <= rootEnd)
+        var skeletons = skeletonClasses.Select(ReadSkeleton).ToArray();
+        if (animations.Count == 0 && bindings.Count == 0 && skeletons.Length == 0)
         {
-            uint chunkHeader = BinaryPrimitives.ReadUInt32BigEndian(Data.AsSpan(offset, 4));
-            int chunkSize = (int)(chunkHeader & 0x3FFFFFFF);
-            string sig = Encoding.ASCII.GetString(Data, offset + 4, 4);
-            int chunkDataOffset = offset + 8;
-            int chunkEnd = Math.Min(rootEnd, offset + chunkSize);
-
-            if (chunkSize < 8) break;
-
-            if (sig == "DATA")
-            {
-                int dataLen = chunkSize - 8;
-                DataPayload = new byte[dataLen];
-                Array.Copy(Data, chunkDataOffset, DataPayload, 0, dataLen);
-            }
-            else if (sig == "TYPE")
-            {
-                ParseTypeChunk(chunkDataOffset, chunkEnd);
-            }
-            else if (sig == "TCRF")
-            {
-                if (compendium != null)
-                {
-                    Types = compendium.Types;
-                }
-            }
-            else if (sig == "INDX")
-            {
-                ParseIndexChunk(chunkDataOffset, chunkEnd);
-            }
-
-            offset = chunkEnd;
-        }
-    }
-
-    private void ParseTypeChunk(int startOffset, int endOffset)
-    {
-        int offset = startOffset;
-        var typeStrings = new List<string>();
-        var fieldStrings = new List<string>();
-
-        while (offset + 8 <= endOffset)
-        {
-            uint subHeader = BinaryPrimitives.ReadUInt32BigEndian(Data.AsSpan(offset, 4));
-            int subSize = (int)(subHeader & 0x3FFFFFFF);
-            string subSig = Encoding.ASCII.GetString(Data, offset + 4, 4);
-            int subDataOffset = offset + 8;
-            int subEnd = Math.Min(endOffset, offset + subSize);
-
-            if (subSig == "TSTR")
-            {
-                int len = subSize - 8;
-                if (len > 0 && subDataOffset + len <= Data.Length)
-                {
-                    var rawStr = Encoding.ASCII.GetString(Data, subDataOffset, len);
-                    typeStrings = rawStr.Split('\0').ToList();
-                }
-            }
-            else if (subSig is "TNAM" or "TNA1")
-            {
-                int p = subDataOffset;
-                int typeCount = ReadPacked(Data, ref p);
-                Types = new List<TagType?>(new TagType?[typeCount]);
-
-                for (int i = 1; i < typeCount; i++)
-                {
-                    int nameIdx = ReadPacked(Data, ref p);
-                    string name = (nameIdx >= 0 && nameIdx < typeStrings.Count) ? typeStrings[nameIdx] : string.Empty;
-                    var t = new TagType { Name = name };
-
-                    int templateCount = ReadPacked(Data, ref p);
-                    for (int j = 0; j < templateCount; j++)
-                    {
-                        ReadPacked(Data, ref p); // template name
-                        ReadPacked(Data, ref p); // template value
-                    }
-                    Types[i] = t;
-                }
-            }
-            else if (subSig == "FSTR")
-            {
-                int len = subSize - 8;
-                if (len > 0 && subDataOffset + len <= Data.Length)
-                {
-                    var rawStr = Encoding.ASCII.GetString(Data, subDataOffset, len);
-                    fieldStrings = rawStr.Split('\0').ToList();
-                }
-            }
-            else if (subSig is "TBOD" or "TBDY")
-            {
-                int p = subDataOffset;
-                while (p < subEnd)
-                {
-                    int typeIndex = ReadPacked(Data, ref p);
-                    if (typeIndex == 0) continue;
-                    if (typeIndex >= Types.Count) break;
-
-                    var typ = Types[typeIndex];
-                    if (typ == null) continue;
-
-                    int parentIdx = ReadPacked(Data, ref p);
-                    if (parentIdx >= 0 && parentIdx < Types.Count) typ.Parent = Types[parentIdx];
-
-                    typ.Flags = ReadPacked(Data, ref p);
-                    if ((typ.Flags & 0x01) != 0) typ.SubTypeFlags = ReadPacked(Data, ref p);
-                    if ((typ.Flags & 0x02) != 0 && (typ.SubTypeFlags & 0x0F) >= 6) ReadPacked(Data, ref p);
-                    if ((typ.Flags & 0x04) != 0) ReadPacked(Data, ref p); // version
-                    if ((typ.Flags & 0x08) != 0)
-                    {
-                        typ.ByteSize = ReadPacked(Data, ref p);
-                        typ.Alignment = ReadPacked(Data, ref p);
-                    }
-                    if ((typ.Flags & 0x10) != 0) ReadPacked(Data, ref p); // abstract
-                    if ((typ.Flags & 0x20) != 0) // members
-                    {
-                        int memberCount = ReadPacked(Data, ref p);
-                        for (int m = 0; m < memberCount; m++)
-                        {
-                            int nameIdx = ReadPacked(Data, ref p);
-                            int flags = ReadPacked(Data, ref p);
-                            int byteOffset = ReadPacked(Data, ref p);
-                            int memberTypeIdx = ReadPacked(Data, ref p);
-
-                            string memberName = (nameIdx >= 0 && nameIdx < fieldStrings.Count) ? fieldStrings[nameIdx] : string.Empty;
-                            TagType? memberType = (memberTypeIdx >= 0 && memberTypeIdx < Types.Count) ? Types[memberTypeIdx] : null;
-
-                            typ.Members.Add(new TagMember
-                            {
-                                Name = memberName,
-                                Flags = flags,
-                                ByteOffset = byteOffset,
-                                MemberType = memberType
-                            });
-                        }
-                    }
-                    if ((typ.Flags & 0x40) != 0) // interfaces
-                    {
-                        int ifaceCount = ReadPacked(Data, ref p);
-                        for (int k = 0; k < ifaceCount; k++)
-                        {
-                            ReadPacked(Data, ref p);
-                            ReadPacked(Data, ref p);
-                        }
-                    }
-                }
-            }
-
-            offset = subEnd;
-        }
-    }
-
-    private void ParseIndexChunk(int startOffset, int endOffset)
-    {
-        int offset = startOffset;
-        while (offset + 8 <= endOffset)
-        {
-            uint subHeader = BinaryPrimitives.ReadUInt32BigEndian(Data.AsSpan(offset, 4));
-            int subSize = (int)(subHeader & 0x3FFFFFFF);
-            string subSig = Encoding.ASCII.GetString(Data, offset + 4, 4);
-            int subDataOffset = offset + 8;
-            int subEnd = Math.Min(endOffset, offset + subSize);
-
-            if (subSig == "ITEM")
-            {
-                int p = subDataOffset;
-                while (p + 12 <= subEnd)
-                {
-                    uint flag = BinaryPrimitives.ReadUInt32LittleEndian(Data.AsSpan(p, 4));
-                    uint dataOffset = BinaryPrimitives.ReadUInt32LittleEndian(Data.AsSpan(p + 4, 4));
-                    uint count = BinaryPrimitives.ReadUInt32LittleEndian(Data.AsSpan(p + 8, 4));
-                    p += 12;
-
-                    int typeIdx = (int)(flag & 0x00FFFFFF);
-                    bool isPtr = (flag & 0x10000000) != 0;
-                    var itemType = (typeIdx >= 0 && typeIdx < Types.Count) ? Types[typeIdx] : null;
-
-                    Items.Add(new TagItem
-                    {
-                        ItemType = itemType,
-                        IsPointer = isPtr,
-                        DataOffset = (int)dataOffset,
-                        Count = (int)count
-                    });
-                }
-            }
-
-            offset = subEnd;
-        }
-    }
-
-    public HkxAnimationContainer ExtractAnimationContainer()
-    {
-        var skeletons = new List<HkxSkeleton>();
-        var animations = new List<HkxAnimation>();
-        var bindings = new List<HkxAnimationBinding>();
-
-        // If items are present, find animation, skeleton, and binding items
-        foreach (var item in Items)
-        {
-            if (item.ItemType == null) continue;
-            string typeName = item.ItemType.Name;
-
-            if (typeName == "hkaSkeleton")
-            {
-                var skel = ExtractSkeleton(item);
-                if (skel != null) skeletons.Add(skel);
-            }
-            else if (typeName == "hkaAnimationBinding")
-            {
-                var binding = ExtractBinding(item);
-                if (binding != null) bindings.Add(binding);
-            }
-            else if (typeName is "hkaSplineCompressedAnimation" or "hkaInterleavedUncompressedAnimation" or "hkaAnimation")
-            {
-                var anim = ExtractAnimation(item);
-                if (anim != null) animations.Add(anim);
-            }
-        }
-
-        foreach (var b in bindings)
-        {
-            if (b.Animation == null && animations.Count > 0)
-            {
-                b.Animation = animations[0];
-            }
+            var typeNames = objects
+                .Select(static value => value.Type.Name)
+                .Distinct(StringComparer.Ordinal)
+                .OrderBy(static name => name, StringComparer.Ordinal)
+                .ToArray();
+            throw new NotSupportedException(
+                $"HKX TAG0 object decode succeeded but contains no ACTION skeleton, binding, or supported animation: {string.Join(", ", typeNames)}.");
         }
 
         return new HkxAnimationContainer
         {
+            SourceFormat = "tagfile",
             Skeletons = skeletons,
             Animations = animations,
             Bindings = bindings
         };
     }
 
-    private HkxSkeleton? ExtractSkeleton(TagItem item)
+    private static HkxAnimation ReadAnimation(HkClass animationClass)
     {
-        // Tagfile skeleton extraction
-        return new HkxSkeleton
+        string className = animationClass.Type.Name;
+        int typeValue = ReadInt(RequiredField(animationClass, "type"), $"{className}.type");
+        float duration = ReadFloat(RequiredField(animationClass, "duration"), $"{className}.duration");
+        int numberOfTransformTracks = ReadInt(
+            RequiredField(animationClass, "numberOfTransformTracks"),
+            $"{className}.numberOfTransformTracks");
+        int numberOfFloatTracks = ReadInt(
+            RequiredField(animationClass, "numberOfFloatTracks"),
+            $"{className}.numberOfFloatTracks");
+        ValidateAnimationBase(className, duration, numberOfTransformTracks, numberOfFloatTracks);
+        var extractedMotion = ReadExtractedMotion(
+            TryField(animationClass, "extractedMotion"),
+            $"{className}.extractedMotion");
+
+        if (className == "hkaSplineCompressedAnimation")
         {
-            Name = "SekiroSkeleton",
-            Bones = Array.Empty<HkxBone>(),
-            ParentIndices = Array.Empty<short>(),
-            Transforms = Array.Empty<BoneTransform>()
+            if (typeValue != (int)HkxAnimationType.SplineCompressed)
+                throw new InvalidDataException(
+                    $"{className}.type is {typeValue}, expected {(int)HkxAnimationType.SplineCompressed} for the Havok enum.");
+            return ReadSplineAnimation(animationClass, duration, numberOfTransformTracks, numberOfFloatTracks, extractedMotion);
+        }
+
+        if (className == "hkaInterleavedUncompressedAnimation")
+        {
+            if (typeValue != (int)HkxAnimationType.Interleaved)
+                throw new InvalidDataException(
+                    $"{className}.type is {typeValue}, expected {(int)HkxAnimationType.Interleaved} for the Havok enum.");
+            return ReadInterleavedAnimation(animationClass, duration, numberOfTransformTracks, numberOfFloatTracks, extractedMotion);
+        }
+
+        throw new NotSupportedException($"未支持的 HKX TAG0 动画类型：{className} (type={typeValue})。");
+    }
+
+    private static HkxSplineCompressedAnimation ReadSplineAnimation(
+        HkClass animationClass,
+        float duration,
+        int numberOfTransformTracks,
+        int numberOfFloatTracks,
+        HkxExtractedMotion? extractedMotion)
+    {
+        string className = animationClass.Type.Name;
+        int numFrames = ReadInt(RequiredField(animationClass, "numFrames"), $"{className}.numFrames");
+        int numBlocks = ReadInt(RequiredField(animationClass, "numBlocks"), $"{className}.numBlocks");
+        int maxFramesPerBlock = ReadInt(
+            RequiredField(animationClass, "maxFramesPerBlock"),
+            $"{className}.maxFramesPerBlock");
+        int maskAndQuantizationSize = ReadInt(
+            RequiredField(animationClass, "maskAndQuantizationSize"),
+            $"{className}.maskAndQuantizationSize");
+        float blockDuration = ReadFloat(RequiredField(animationClass, "blockDuration"), $"{className}.blockDuration");
+        float blockInverseDuration = ReadFloat(
+            RequiredField(animationClass, "blockInverseDuration"),
+            $"{className}.blockInverseDuration");
+        float frameDuration = ReadFloat(RequiredField(animationClass, "frameDuration"), $"{className}.frameDuration");
+        int endian = ReadInt(RequiredField(animationClass, "endian"), $"{className}.endian");
+
+        if (endian != 0)
+            throw new NotSupportedException($"{className} uses unsupported endian marker {endian}; only little-endian TAG0 data is verified.");
+        if (numFrames <= 0 || numBlocks <= 0 || maxFramesPerBlock <= 0 || maskAndQuantizationSize <= 0)
+            throw new InvalidDataException(
+                $"{className} has invalid block metadata: frames={numFrames}, blocks={numBlocks}, max={maxFramesPerBlock}, maskBytes={maskAndQuantizationSize}.");
+        if (!float.IsFinite(blockDuration) || !float.IsFinite(blockInverseDuration)
+            || !float.IsFinite(frameDuration) || frameDuration <= 0f)
+            throw new InvalidDataException($"{className} has non-finite block or frame timing.");
+        if (numberOfFloatTracks != 0)
+            throw new NotSupportedException("HKX float animation tracks are not yet wired into the ACTION clip contract.");
+
+        var blockOffsets = ReadUInt32Array(RequiredField(animationClass, "blockOffsets"), $"{className}.blockOffsets");
+        var floatBlockOffsets = ReadUInt32Array(
+            RequiredField(animationClass, "floatBlockOffsets"),
+            $"{className}.floatBlockOffsets");
+        var transformOffsets = ReadUInt32Array(
+            RequiredField(animationClass, "transformOffsets"),
+            $"{className}.transformOffsets");
+        var floatOffsets = ReadUInt32Array(RequiredField(animationClass, "floatOffsets"), $"{className}.floatOffsets");
+        var data = ReadByteArray(RequiredField(animationClass, "data"), $"{className}.data");
+
+        if (blockOffsets.Length != numBlocks)
+            throw new InvalidDataException(
+                $"{className} block-offset count mismatch: expected={numBlocks}, actual={blockOffsets.Length}.");
+        if (transformOffsets.Length != 0 && transformOffsets.Length != numberOfTransformTracks)
+            throw new InvalidDataException(
+                $"{className} transform-offset count mismatch: expected 0 or {numberOfTransformTracks}, actual={transformOffsets.Length}.");
+        if (floatOffsets.Length != 0)
+            throw new InvalidDataException($"{className} contains float offsets although it declares no float tracks.");
+        ValidateOffsets(blockOffsets, data.Length, $"{className}.blockOffsets", requireFirstZero: true);
+        // Havok stores a terminal float-block offset even when the float-track
+        // array is empty. It is still validated rather than silently ignored.
+        ValidateOffsets(floatBlockOffsets, data.Length, $"{className}.floatBlockOffsets", requireFirstZero: false);
+        ValidateExtractedMotion(extractedMotion, duration, numFrames, className);
+
+        var animation = new HkxSplineCompressedAnimation
+        {
+            AnimationType = HkxAnimationType.SplineCompressed,
+            Duration = duration,
+            NumberOfTransformTracks = numberOfTransformTracks,
+            NumberOfFloatTracks = numberOfFloatTracks,
+            HasExtractedMotion = extractedMotion is not null,
+            ExtractedMotion = extractedMotion,
+            NumFrames = numFrames,
+            NumBlocks = numBlocks,
+            MaxFramesPerBlock = maxFramesPerBlock,
+            MaskAndQuantizationSize = maskAndQuantizationSize,
+            BlockDuration = blockDuration,
+            BlockInverseDuration = blockInverseDuration,
+            FrameDuration = frameDuration,
+            BlockOffsets = blockOffsets,
+            FloatBlockOffsets = floatBlockOffsets,
+            TransformOffsets = transformOffsets,
+            FloatOffsets = floatOffsets,
+            Data = data
+        };
+        animation.Blocks = HkxAnimationReader.ParseSplineBlocks(animation);
+        return animation;
+    }
+
+    private static HkxInterleavedAnimation ReadInterleavedAnimation(
+        HkClass animationClass,
+        float duration,
+        int numberOfTransformTracks,
+        int numberOfFloatTracks,
+        HkxExtractedMotion? extractedMotion)
+    {
+        if (numberOfFloatTracks > 0)
+            throw new NotSupportedException("HKX float animation tracks are not yet wired into the ACTION clip contract.");
+        var transformObjects = ReadArray(RequiredField(animationClass, "transforms"), $"{animationClass.Type.Name}.transforms");
+        if (transformObjects.Count == 0 || transformObjects.Count % numberOfTransformTracks != 0)
+            throw new InvalidDataException(
+                $"{animationClass.Type.Name} transform count is not divisible by its track count: transforms={transformObjects.Count}, tracks={numberOfTransformTracks}.");
+        int numFrames = transformObjects.Count / numberOfTransformTracks;
+        float frameDuration = numFrames > 1 ? duration / (numFrames - 1) : duration;
+        if (!float.IsFinite(frameDuration) || frameDuration <= 0f)
+            throw new InvalidDataException($"{animationClass.Type.Name} has an invalid frame duration.");
+        ValidateExtractedMotion(extractedMotion, duration, numFrames, animationClass.Type.Name);
+        return new HkxInterleavedAnimation
+        {
+            AnimationType = HkxAnimationType.Interleaved,
+            Duration = duration,
+            NumberOfTransformTracks = numberOfTransformTracks,
+            NumberOfFloatTracks = numberOfFloatTracks,
+            HasExtractedMotion = extractedMotion is not null,
+            ExtractedMotion = extractedMotion,
+            NumFrames = numFrames,
+            FrameDuration = frameDuration,
+            Transforms = transformObjects
+                .Select((value, index) => ReadQsTransform(value, $"{animationClass.Type.Name}.transforms[{index}]"))
+                .ToArray()
         };
     }
 
-    private HkxAnimationBinding? ExtractBinding(TagItem item)
+    private static HkxAnimationBinding ReadBinding(
+        HkClass bindingClass,
+        IReadOnlyDictionary<HkClass, HkxAnimation> animationsByClass)
     {
+        var animationObject = Unwrap(RequiredField(bindingClass, "animation"));
+        if (animationObject is not HkClass animationClass)
+            throw new InvalidDataException($"{bindingClass.Type.Name}.animation is not an explicit Havok animation object.");
+        if (!animationsByClass.TryGetValue(animationClass, out var animation))
+            throw new InvalidDataException(
+                $"{bindingClass.Type.Name}.animation points to unsupported or unindexed type '{animationClass.Type.Name}'.");
+
+        var transformTrackToBoneIndices = ReadIntArray(
+            RequiredField(bindingClass, "transformTrackToBoneIndices"),
+            $"{bindingClass.Type.Name}.transformTrackToBoneIndices");
+        var floatTrackToSlotIndices = ReadIntArray(
+            RequiredField(bindingClass, "floatTrackToFloatSlotIndices"),
+            $"{bindingClass.Type.Name}.floatTrackToFloatSlotIndices");
+        var partitionIndices = ReadIntArray(
+            RequiredField(bindingClass, "partitionIndices"),
+            $"{bindingClass.Type.Name}.partitionIndices");
+        if (transformTrackToBoneIndices.Count != animation.NumberOfTransformTracks)
+            throw new InvalidDataException(
+                $"{bindingClass.Type.Name} transform map count mismatch: binding={transformTrackToBoneIndices.Count}, animation={animation.NumberOfTransformTracks}.");
+        if (floatTrackToSlotIndices.Count != animation.NumberOfFloatTracks)
+            throw new InvalidDataException(
+                $"{bindingClass.Type.Name} float map count mismatch: binding={floatTrackToSlotIndices.Count}, animation={animation.NumberOfFloatTracks}.");
+
+        int blendHint = ReadInt(RequiredField(bindingClass, "blendHint"), $"{bindingClass.Type.Name}.blendHint");
+        if (blendHint is not 0 and not 1)
+            throw new NotSupportedException(
+                $"{bindingClass.Type.Name} uses unsupported blend hint {blendHint}; only NORMAL (0) and ADDITIVE (1) are defined by Havok.");
         return new HkxAnimationBinding
         {
-            OriginalSkeletonName = string.Empty,
-            TransformTrackToBoneIndices = Array.Empty<int>()
+            OriginalSkeletonName = ReadOptionalString(TryField(bindingClass, "originalSkeletonName")),
+            TransformTrackToBoneIndices = transformTrackToBoneIndices,
+            FloatTrackToFloatSlotIndices = floatTrackToSlotIndices,
+            PartitionIndices = partitionIndices,
+            BlendHint = blendHint,
+            Animation = animation
         };
     }
 
-    private HkxAnimation? ExtractAnimation(TagItem item)
+    private static HkxSkeleton ReadSkeleton(HkClass skeletonClass)
     {
-        return null;
+        string name = ReadOptionalString(TryField(skeletonClass, "name"));
+        var parentIndices = ReadIntArray(RequiredField(skeletonClass, "parentIndices"), $"{skeletonClass.Type.Name}.parentIndices");
+        var boneObjects = ReadArray(RequiredField(skeletonClass, "bones"), $"{skeletonClass.Type.Name}.bones");
+        var poseObjects = ReadArray(RequiredField(skeletonClass, "referencePose"), $"{skeletonClass.Type.Name}.referencePose");
+        if (boneObjects.Count == 0)
+            throw new InvalidDataException($"hkaSkeleton '{name}' has no bones.");
+        if (parentIndices.Count != boneObjects.Count || poseObjects.Count != boneObjects.Count)
+            throw new InvalidDataException(
+                $"hkaSkeleton '{name}' count mismatch: parents={parentIndices.Count}, bones={boneObjects.Count}, pose={poseObjects.Count}.");
+
+        var bones = boneObjects.Select((value, index) => ReadBone(value, $"{skeletonClass.Type.Name}.bones[{index}]")).ToArray();
+        var transforms = poseObjects.Select((value, index) => ReadQsTransform(value, $"{skeletonClass.Type.Name}.referencePose[{index}]")).ToArray();
+        for (int i = 0; i < parentIndices.Count; i++)
+        {
+            int parent = parentIndices[i];
+            if (parent < -1 || parent >= bones.Length)
+                throw new InvalidDataException($"hkaSkeleton '{name}' has invalid parent index {parent} at bone {i}.");
+        }
+        return new HkxSkeleton
+        {
+            Name = name,
+            Bones = bones,
+            ParentIndices = parentIndices.Select(static value => checked((short)value)).ToArray(),
+            Transforms = transforms
+        };
     }
 
-    public static int ReadPacked(ReadOnlySpan<byte> buf, ref int offset)
+    private static HkxBone ReadBone(IHkObject value, string label)
     {
-        if (offset >= buf.Length) return 0;
-        byte b0 = buf[offset++];
-        if ((b0 & 0x80) == 0) return b0;
-        if (offset >= buf.Length) return b0 & 0x7F;
-        byte b1 = buf[offset++];
-        if ((b0 & 0x40) == 0) return ((b0 & 0x3F) << 8) | b1;
-        if (offset >= buf.Length) return ((b0 & 0x3F) << 8) | b1;
-        byte b2 = buf[offset++];
-        if ((b0 & 0x20) == 0) return ((b0 & 0x1F) << 16) | (b1 << 8) | b2;
-        if (offset >= buf.Length) return ((b0 & 0x1F) << 16) | (b1 << 8) | b2;
-        byte b3 = buf[offset++];
-        if ((b0 & 0x10) == 0) return ((b0 & 0x0F) << 24) | (b1 << 16) | (b2 << 8) | b3;
-        if (offset >= buf.Length) return ((b0 & 0x0F) << 24) | (b1 << 16) | (b2 << 8) | b3;
-        byte b4 = buf[offset++];
-        return (b1 << 24) | (b2 << 16) | (b3 << 8) | b4;
+        if (Unwrap(value) is not HkClass boneClass)
+            throw new InvalidDataException($"{label} is not an hkaBone class.");
+        string name = ReadOptionalString(TryField(boneClass, "name"));
+        var lockValue = TryField(boneClass, "lockTranslation");
+        bool lockTranslation = lockValue is not null && ReadInt(lockValue, $"{label}.lockTranslation") != 0;
+        return new HkxBone { Name = name, LockTranslation = lockTranslation };
+    }
+
+    private static BoneTransform ReadQsTransform(IHkObject value, string label)
+    {
+        if (Unwrap(value) is not HkClass transformClass)
+            throw new InvalidDataException($"{label} is not an hkQsTransform class.");
+        var translation = ReadVector4Components(
+            RequiredField(transformClass, "translation"),
+            $"{label}.translation");
+        var rotationValues = ReadComponents(RequiredField(transformClass, "rotation"), 4, $"{label}.rotation");
+        var scale = ReadVector4Components(RequiredField(transformClass, "scale"), $"{label}.scale");
+        var rotation = new Quaternion(rotationValues[0], rotationValues[1], rotationValues[2], rotationValues[3]);
+        ValidateFinite(translation, $"{label}.translation");
+        ValidateFinite(scale, $"{label}.scale");
+        if (!float.IsFinite(rotation.X) || !float.IsFinite(rotation.Y)
+            || !float.IsFinite(rotation.Z) || !float.IsFinite(rotation.W)
+            || rotation.LengthSquared() <= 1e-12f)
+            throw new InvalidDataException($"{label}.rotation is non-finite or zero-length.");
+        return new BoneTransform(
+            new Vector3(translation[0], translation[1], translation[2]),
+            Quaternion.Normalize(rotation),
+            new Vector3(scale[0], scale[1], scale[2]));
+    }
+
+    private static float[] ReadVector4Components(IHkObject value, string label)
+    {
+        // hkQsTransform stores translation and scale as hkVector4.  The W
+        // component is part of the native representation even though the
+        // editor's local-pose model projects only XYZ; validate it before the
+        // deliberate projection so malformed data cannot become a silent pose.
+        return ReadComponents(value, 4, label);
+    }
+
+    private static float[] ReadComponents(IHkObject value, int expectedCount, string label)
+    {
+        var values = ReadArray(value, label);
+        if (values.Count != expectedCount)
+            throw new InvalidDataException($"{label} expected {expectedCount} components, got {values.Count}.");
+        return values.Select((item, index) => ReadFloat(item, $"{label}[{index}]")).ToArray();
+    }
+
+    private static HkxExtractedMotion? ReadExtractedMotion(IHkObject? value, string label)
+    {
+        var unwrapped = Unwrap(value);
+        if (unwrapped is null)
+            return null;
+        if (unwrapped is not HkClass referenceFrame)
+            throw new InvalidDataException($"{label} is not a Havok reference-frame class.");
+        if (referenceFrame.Type.Name != "hkaDefaultAnimatedReferenceFrame")
+            throw new NotSupportedException(
+                $"{label} uses unsupported reference-frame class '{referenceFrame.Type.Name}'.");
+
+        int frameType = ReadInt(RequiredField(referenceFrame, "frameType"), $"{label}.frameType");
+        if (frameType is < 0 or > 2)
+            throw new NotSupportedException($"{label}.frameType={frameType} is unsupported.");
+        var upValues = ReadComponents(RequiredField(referenceFrame, "up"), 4, $"{label}.up");
+        var forwardValues = ReadComponents(RequiredField(referenceFrame, "forward"), 4, $"{label}.forward");
+        float duration = ReadFloat(RequiredField(referenceFrame, "duration"), $"{label}.duration");
+        if (duration <= 0f)
+            throw new InvalidDataException($"{label}.duration must be positive.");
+
+        var sampleObjects = ReadArray(
+            RequiredField(referenceFrame, "referenceFrameSamples"),
+            $"{label}.referenceFrameSamples");
+        if (sampleObjects.Count == 0)
+            throw new InvalidDataException($"{label}.referenceFrameSamples is empty.");
+        var samples = sampleObjects.Select((sample, index) =>
+        {
+            var values = ReadComponents(sample, 4, $"{label}.referenceFrameSamples[{index}]");
+            return new HkxReferenceFrameSample(new Vector4(values[0], values[1], values[2], values[3]));
+        }).ToArray();
+
+        return new HkxExtractedMotion
+        {
+            FrameType = frameType,
+            Up = new Vector4(upValues[0], upValues[1], upValues[2], upValues[3]),
+            Forward = new Vector4(forwardValues[0], forwardValues[1], forwardValues[2], forwardValues[3]),
+            Duration = duration,
+            Samples = samples
+        };
+    }
+
+    private static void ValidateExtractedMotion(
+        HkxExtractedMotion? extractedMotion,
+        float animationDuration,
+        int frameCount,
+        string animationClassName)
+    {
+        if (extractedMotion is null)
+            return;
+        if (extractedMotion.Samples.Length != frameCount)
+            throw new InvalidDataException(
+                $"{animationClassName}.extractedMotion sample count mismatch: "
+                + $"samples={extractedMotion.Samples.Length}, animationFrames={frameCount}.");
+        if (MathF.Abs(extractedMotion.Duration - animationDuration) > MathF.Max(1e-3f, animationDuration * 1e-3f))
+            throw new InvalidDataException(
+                $"{animationClassName}.extractedMotion duration mismatch: "
+                + $"motion={extractedMotion.Duration}, animation={animationDuration}.");
+    }
+
+    private static void ValidateAnimationBase(string className, float duration, int numberOfTransformTracks, int numberOfFloatTracks)
+    {
+        if (!float.IsFinite(duration) || duration <= 0f)
+            throw new InvalidDataException($"{className} has invalid duration {duration}.");
+        if (numberOfTransformTracks <= 0 || numberOfFloatTracks < 0)
+            throw new InvalidDataException(
+                $"{className} has invalid track counts: transforms={numberOfTransformTracks}, floats={numberOfFloatTracks}.");
+    }
+
+    private static void ValidateOffsets(IReadOnlyList<uint> offsets, int dataLength, string label, bool requireFirstZero)
+    {
+        if (offsets.Count == 0)
+            return;
+        if (requireFirstZero && offsets[0] != 0)
+            throw new InvalidDataException($"{label} must begin at data offset 0, got {offsets[0]}.");
+        uint previous = 0;
+        for (int i = 0; i < offsets.Count; i++)
+        {
+            uint current = offsets[i];
+            if (i > 0 && current < previous)
+                throw new InvalidDataException($"{label} is not monotonic at index {i}: {previous} -> {current}.");
+            if (current > dataLength)
+                throw new InvalidDataException($"{label}[{i}]={current} exceeds data length {dataLength}.");
+            previous = current;
+        }
+    }
+
+    private static IHkObject RequiredField(HkClass value, string name)
+    {
+        var field = TryField(value, name);
+        return field ?? throw new InvalidDataException($"{value.Type.Name} has no required field '{name}'.");
+    }
+
+    private static IHkObject? TryField(HkClass value, string name)
+    {
+        var matches = value.Value.Where(pair => pair.Key.Name == name).Select(pair => pair.Value).ToArray();
+        if (matches.Length > 1)
+            throw new InvalidDataException($"{value.Type.Name} has ambiguous field '{name}' ({matches.Length} entries).");
+        return matches.Length == 0 ? null : matches[0];
+    }
+
+    private static IHkObject? Unwrap(IHkObject? value)
+    {
+        var current = value;
+        while (current is HkPtr pointer)
+            current = pointer.Value;
+        return current;
+    }
+
+    private static IReadOnlyList<IHkObject> ReadArray(IHkObject value, string label)
+    {
+        var unwrapped = Unwrap(value);
+        if (unwrapped is null)
+            return Array.Empty<IHkObject>();
+        if (unwrapped is not HkArray array)
+            throw new InvalidDataException($"{label} is {unwrapped.Type.Name}, expected hkArray.");
+        return array.Value ?? Array.Empty<IHkObject>();
+    }
+
+    private static IReadOnlyList<int> ReadIntArray(IHkObject value, string label)
+    {
+        return ReadArray(value, label).Select((item, index) => ReadInt(item, $"{label}[{index}]")).ToArray();
+    }
+
+    private static uint[] ReadUInt32Array(IHkObject value, string label)
+    {
+        return ReadArray(value, label).Select((item, index) =>
+        {
+            long number = ReadInt64(item, $"{label}[{index}]");
+            if (number < 0 || number > uint.MaxValue)
+                throw new InvalidDataException($"{label}[{index}]={number} is outside uint32 range.");
+            return (uint)number;
+        }).ToArray();
+    }
+
+    private static byte[] ReadByteArray(IHkObject value, string label)
+    {
+        return ReadArray(value, label).Select((item, index) =>
+        {
+            long number = ReadInt64(item, $"{label}[{index}]");
+            if (number < 0 || number > byte.MaxValue)
+                throw new InvalidDataException($"{label}[{index}]={number} is outside byte range.");
+            return (byte)number;
+        }).ToArray();
+    }
+
+    private static string ReadOptionalString(IHkObject? value)
+    {
+        var unwrapped = Unwrap(value);
+        if (unwrapped is null)
+            return string.Empty;
+        if (unwrapped is not HkString text)
+            throw new InvalidDataException($"{unwrapped.Type.Name} is not a Havok string.");
+        return text.Value ?? string.Empty;
+    }
+
+    private static int ReadInt(IHkObject value, string label)
+    {
+        long result = ReadInt64(value, label);
+        if (result < int.MinValue || result > int.MaxValue)
+            throw new InvalidDataException($"{label}={result} is outside int32 range.");
+        return (int)result;
+    }
+
+    private static long ReadInt64(IHkObject value, string label)
+    {
+        var unwrapped = Unwrap(value);
+        if (unwrapped is null)
+            throw new InvalidDataException($"{label} is null.");
+        try
+        {
+            return unwrapped.Value switch
+            {
+                sbyte signedByte => signedByte,
+                byte unsignedByte => unsignedByte,
+                short signedShort => signedShort,
+                ushort unsignedShort => unsignedShort,
+                int signedInt => signedInt,
+                uint unsignedInt => checked((long)unsignedInt),
+                long signedLong => signedLong,
+                ulong unsignedLong => checked((long)unsignedLong),
+                bool boolean => boolean ? 1L : 0L,
+                _ => throw new InvalidDataException($"{label} has unsupported primitive value type '{unwrapped.Value.GetType().Name}'.")
+            };
+        }
+        catch (OverflowException ex)
+        {
+            throw new InvalidDataException($"{label} is outside int64 range.", ex);
+        }
+    }
+
+    private static float ReadFloat(IHkObject value, string label)
+    {
+        var unwrapped = Unwrap(value);
+        if (unwrapped is null)
+            throw new InvalidDataException($"{label} is null.");
+        float result;
+        try
+        {
+            result = unwrapped.Value switch
+            {
+                float single => single,
+                double doubleValue => checked((float)doubleValue),
+                Half half => (float)half,
+                _ => throw new InvalidDataException($"{label} has unsupported primitive value type '{unwrapped.Value.GetType().Name}'.")
+            };
+        }
+        catch (OverflowException ex)
+        {
+            throw new InvalidDataException($"{label} is outside float range.", ex);
+        }
+        if (!float.IsFinite(result))
+            throw new InvalidDataException($"{label} is non-finite.");
+        return result;
+    }
+
+    private static void ValidateFinite(IReadOnlyList<float> values, string label)
+    {
+        if (values.Any(value => !float.IsFinite(value)))
+            throw new InvalidDataException($"{label} contains a non-finite component.");
+    }
+
+    private static IEnumerable<IHkObject> FlattenObjects(IHkObject root)
+    {
+        var seen = new HashSet<IHkObject>(ReferenceEqualityComparer.Instance);
+        return Flatten(root, seen);
+    }
+
+    private static IEnumerable<IHkObject> Flatten(IHkObject? value, ISet<IHkObject> seen)
+    {
+        if (value is null || !seen.Add(value))
+            yield break;
+        yield return value;
+        switch (value)
+        {
+            case HkClass hkClass:
+                foreach (var child in hkClass.Value.Values.SelectMany(child => Flatten(child, seen)))
+                    yield return child;
+                break;
+            case HkPtr pointer:
+                foreach (var child in Flatten(pointer.Value, seen))
+                    yield return child;
+                break;
+            case HkArray array when array.Value is not null:
+                foreach (var child in array.Value.SelectMany(item => Flatten(item, seen)))
+                    yield return child;
+                break;
+        }
     }
 }

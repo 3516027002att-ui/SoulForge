@@ -22,6 +22,12 @@ import {
   type ModelServiceDiagnostic
 } from './errorClassification.js';
 import { normalizeServiceBaseUrl } from './baseUrlJoin.js';
+import {
+  createModelProviderCapabilityState,
+  resolveModelProviderCapabilityState,
+  type ModelProviderCapabilityPolicy,
+  type ModelProviderCapabilityState
+} from './providerCapabilities.js';
 
 export interface AnthropicCompatibleAdapterOptions {
   baseUrl: string;
@@ -29,6 +35,8 @@ export interface AnthropicCompatibleAdapterOptions {
   model: string;
   fetchImpl?: typeof fetch;
   apiVersion?: string;
+  capabilities?: import('./types.js').ModelProviderCapabilities;
+  capabilityPolicy?: ModelProviderCapabilityPolicy;
 }
 
 export class AnthropicCompatibleAdapter implements ModelServiceAdapter {
@@ -38,6 +46,9 @@ export class AnthropicCompatibleAdapter implements ModelServiceAdapter {
   private readonly model: string;
   private readonly fetchImpl: typeof fetch;
   private readonly apiVersion: string;
+  private readonly configuredCapabilities: import('./types.js').ModelProviderCapabilities | undefined;
+  private readonly capabilityPolicy: ModelProviderCapabilityPolicy;
+  readonly capabilityState: ModelProviderCapabilityState;
 
   constructor(options: AnthropicCompatibleAdapterOptions) {
     this.baseUrl = normalizeServiceBaseUrl(options.baseUrl);
@@ -45,10 +56,21 @@ export class AnthropicCompatibleAdapter implements ModelServiceAdapter {
     this.model = options.model;
     this.fetchImpl = options.fetchImpl ?? fetch;
     this.apiVersion = options.apiVersion ?? '2023-06-01';
+    this.configuredCapabilities = options.capabilities;
+    this.capabilityPolicy = options.capabilityPolicy ?? 'legacy-defaults';
+    this.capabilityState = createModelProviderCapabilityState({
+      ...(options.capabilities ? { configured: options.capabilities } : {}),
+      policy: this.capabilityPolicy
+    });
   }
 
   async complete(request: ModelCompleteRequest): Promise<ModelCompleteResult> {
-    const body = buildMessagesBody(this.model, request, false);
+    const capabilities = resolveModelProviderCapabilityState({
+      ...(request.capabilities ? { request: request.capabilities } : {}),
+      ...(this.configuredCapabilities ? { configured: this.configuredCapabilities } : {}),
+      policy: this.capabilityPolicy
+    });
+    const body = buildMessagesBody(this.model, request, false, capabilities.capabilities);
     const { signal, cleanup } = createRequestSignal(request.signal, request.timeoutMs);
     let response: Response;
     try {
@@ -167,7 +189,12 @@ export class AnthropicCompatibleAdapter implements ModelServiceAdapter {
     // (text_delta / input_json_delta / tool_use), message_delta (stop_reason +
     // output usage), message_stop, and error. Cancellation / timeout / network
     // failures classify exactly like the non-stream path.
-    const body = buildMessagesBody(this.model, request, true);
+    const capabilities = resolveModelProviderCapabilityState({
+      ...(request.capabilities ? { request: request.capabilities } : {}),
+      ...(this.configuredCapabilities ? { configured: this.configuredCapabilities } : {}),
+      policy: this.capabilityPolicy
+    });
+    const body = buildMessagesBody(this.model, request, true, capabilities.capabilities);
     const { signal, cleanup } = createRequestSignal(request.signal, request.timeoutMs);
     let response: Response;
     try {
@@ -343,7 +370,12 @@ function classifyAnthropicStreamError(error: { type?: string; message?: string }
   return { severity: 'error', code: 'MODEL_SERVICE_STREAM_FAILED', message };
 }
 
-function buildMessagesBody(model: string, request: ModelCompleteRequest, stream: boolean): Record<string, unknown> {
+function buildMessagesBody(
+  model: string,
+  request: ModelCompleteRequest,
+  stream: boolean,
+  capabilities: ModelProviderCapabilityState['capabilities']
+): Record<string, unknown> {
   let system: string | undefined;
   const messages: Array<Record<string, unknown>> = [];
   for (const message of request.messages) {
@@ -377,7 +409,7 @@ function buildMessagesBody(model: string, request: ModelCompleteRequest, stream:
       continue;
     }
     // 多模态：user 消息带图像时 content 用 parts（base64 source）。
-    if (message.role === 'user' && message.images && message.images.length > 0) {
+    if (message.role === 'user' && message.images && message.images.length > 0 && capabilities.vision) {
       messages.push({
         role: 'user',
         content: [
@@ -395,7 +427,9 @@ function buildMessagesBody(model: string, request: ModelCompleteRequest, stream:
 
   // 2026 官方 effort：走 output_config.effort。off/未配置 → 不下发，也不要再自动塞
   // thinking.budget_tokens（预算数字不是 effort UI）。none/minimal 是 OpenAI 专有档。
-  const effort = resolveAnthropicEffort(request.thinkingLevel);
+  const effort = capabilities.reasoningEffort === false
+    ? undefined
+    : resolveAnthropicEffort(request.thinkingLevel);
 
   return {
     model,
@@ -403,10 +437,10 @@ function buildMessagesBody(model: string, request: ModelCompleteRequest, stream:
     max_tokens: request.maxTokens ?? DEFAULT_MAX_TOKENS,
     messages,
     ...(system ? { system } : {}),
-    ...(request.tools?.length ? { tools: request.tools.map(toAnthropicTool) } : {}),
-    ...(request.temperature !== undefined ? { temperature: request.temperature } : {}),
-    ...(request.topP !== undefined ? { top_p: request.topP } : {}),
-    ...(request.topK !== undefined ? { top_k: request.topK } : {}),
+    ...(request.tools?.length && capabilities.tools ? { tools: request.tools.map(toAnthropicTool) } : {}),
+    ...(request.temperature !== undefined && capabilities.temperature ? { temperature: request.temperature } : {}),
+    ...(request.topP !== undefined && capabilities.topP ? { top_p: request.topP } : {}),
+    ...(request.topK !== undefined && capabilities.topK ? { top_k: request.topK } : {}),
     ...(effort !== undefined ? { output_config: { effort } } : {})
   };
 }

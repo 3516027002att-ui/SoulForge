@@ -85,7 +85,7 @@
  * - session cancellation leaves a durable interrupted marker
  * - no open Mod workspace: workspace-backed tools fail cleanly with
  *   WORKSPACE_REQUIRED while workspace-free tools keep running; the session
- *   host injects systemPrompt only when the history has no system message
+ *   host replaces stale systemPrompt entries on resume
  *
  * All cases use local fake HTTP servers or injected fetch failures.
  * No real provider credentials or network access required.
@@ -1290,15 +1290,24 @@ async function main(): Promise<void> {
     passed++;
   }
 
-  // --- Case 23: single oversized section fails closed with CONTEXT_LIMIT_EXCEEDED ---
+  // --- Case 23: a single oversized section is excerpted before global budgeting ---
   {
     const broker = createContextBroker();
     const big = await broker.assemble(
-      [{ kind: 'readFile', uri: 'file:///ws/huge.txt', text: 'y'.repeat(5000) }],
+      [{
+        kind: 'readFile',
+        uri: 'file:///ws/huge.txt',
+        text: 'y'.repeat(5000),
+        meta: { identity: 'huge', sourceRevision: 'rev-1', coverageStatus: 'FOUND' }
+      }],
       { maxBytes: 1000 }
     );
-    if (big.ok || big.code !== 'CONTEXT_LIMIT_EXCEEDED') {
-      throw new Error('Case 23: oversized section must fail closed with CONTEXT_LIMIT_EXCEEDED.');
+    if (!big.ok || big.sections.length !== 1 || !big.sections[0]!.truncated) {
+      throw new Error('Case 23: oversized section must be bounded into one truncated evidence section.');
+    }
+    if (big.totalBytes > 1000 || !big.context.includes('identity=huge')
+      || !big.context.includes('revision=rev-1') || !big.context.includes('coverage=FOUND')) {
+      throw new Error('Case 23: bounded evidence must preserve metadata and stay within the global byte budget.');
     }
     passed++;
   }
@@ -3038,7 +3047,15 @@ async function main(): Promise<void> {
         prompt: 'first question',
         permissionMode: 'normal',
         tools: [{ name: 'read_h', description: 'r', parametersJsonSchema: { type: 'object' } }],
-        executeTool: async () => ({ ok: true, content: 'h-result' }),
+        executeTool: async () => ({
+          ok: true,
+          content: 'h-result',
+          completionEvidence: [{
+            kind: 'postconditions_verified' as const,
+            key: 'read-facts',
+            evidenceIds: ['smoke:read_h']
+          }]
+        }),
         recordProviderUsage: async (sample) => { providerUsage.push(sample); },
         onEvent: (event) => {
           events.push(event);
@@ -3075,6 +3092,7 @@ async function main(): Promise<void> {
         permissionMode: 'normal',
         tools: [],
         executeTool: async () => ({ ok: false, content: 'unused' }),
+        completionContract: { taskId: 'smoke:resume', predicates: [] },
         recordProviderUsage: async (sample) => { providerUsage.push(sample); },
         resumeFrom: resumed
       });
@@ -3227,7 +3245,7 @@ async function main(): Promise<void> {
 
   // --- Case 59: no open Mod workspace — workspace-backed tools fail cleanly
   // --- with WORKSPACE_REQUIRED, workspace-free tools keep running; the session
-  // --- host injects systemPrompt only when the history lacks a system message ---
+  // --- host replaces stale systemPrompt entries on resume ---
   {
     const base = await mkdtemp(join(tmpdir(), 'soulforge-agent-wsnull-'));
     try {
@@ -3294,7 +3312,8 @@ async function main(): Promise<void> {
         systemPrompt: '你是测试助手。',
         permissionMode: 'normal',
         tools: [],
-        executeTool: async () => ({ ok: false, content: 'unused' })
+        executeTool: async () => ({ ok: false, content: 'unused' }),
+        completionContract: { taskId: 'smoke:system-fresh', predicates: [] }
       });
       if (fresh.run.finishReason !== 'stop') throw new Error(`Case 59: fresh run ${fresh.run.finishReason}`);
       const freshMessages = seen[0]?.messages ?? [];
@@ -3305,7 +3324,8 @@ async function main(): Promise<void> {
         throw new Error('Case 59: user prompt missing after system injection.');
       }
 
-      // resume 旧会话已带 system：新 systemPrompt 不得重复注入，保留原 system 在最前。
+      // resume 旧会话已带 system：当前 systemPrompt 必须替换旧 policy，不能
+      // 让旧 runtime contract 继续支配新版本。
       const seen2: ModelCompleteRequest[] = [];
       const resumedWithSystem: ResumedRollout = {
         meta: null,
@@ -3338,13 +3358,14 @@ async function main(): Promise<void> {
         permissionMode: 'normal',
         tools: [],
         executeTool: async () => ({ ok: false, content: 'unused' }),
+        completionContract: { taskId: 'smoke:system-resume', predicates: [] },
         resumeFrom: resumedWithSystem
       });
       if (resumed.run.finishReason !== 'stop') throw new Error(`Case 59: resume run ${resumed.run.finishReason}`);
       const resumedMessages = seen2[0]?.messages ?? [];
-      const systemCount = resumedMessages.filter((message) => message.role === 'system').length;
-      if (systemCount !== 1 || resumedMessages[0]?.content !== '旧 system。') {
-        throw new Error(`Case 59: resumed system message must be kept and not duplicated, got ${JSON.stringify(resumedMessages)}`);
+      const systemMessages = resumedMessages.filter((message) => message.role === 'system');
+      if (systemMessages.length !== 1 || systemMessages[0]?.content !== '新 system。') {
+        throw new Error(`Case 59: resumed system policy must be replaced exactly once, got ${JSON.stringify(resumedMessages)}`);
       }
       if (!resumedMessages.some((message) => message.role === 'user' && message.content === '新问题。')) {
         throw new Error('Case 59: resumed run must include the new user prompt.');

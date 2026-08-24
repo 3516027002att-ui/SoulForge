@@ -16,6 +16,15 @@ internal sealed class BridgeCommandService
     // 配合：全分辨率 PNG 的 base64 会超 bridge 帧上限，预览受界下采样到该边长。
     private const int PreviewMaxDimension = 512;
 
+    // Havoc's TAG0 object reader materializes a per-request object graph but
+    // currently mutates internal non-concurrent collections while resolving
+    // references.  BridgeDaemonClient permits two concurrent requests, so an
+    // ACTION request must serialize the native HKX resolve boundary or two
+    // simultaneous clip reads can corrupt the reader and surface as a generic
+    // BRIDGE_REQUEST_FAILED.  The gate covers packfile too: this keeps both
+    // native HKX families on one checked production boundary.
+    private static readonly SemaphoreSlim ActionHkxReadGate = new(1, 1);
+
     public async Task<BridgeResult<object>> ExecuteAsync(
         string rawCommand,
         string file,
@@ -132,8 +141,9 @@ internal sealed class BridgeCommandService
                 var includePayload = optionsIsObject
                     && options.TryGetProperty("includePayload", out var includeEl)
                     && includeEl.ValueKind == JsonValueKind.True;
+                var payloadLimitBytes = OptionInt("payloadLimitBytes", 512 * 1024);
                 return BridgeResult<object>.Partial(file, GuessKindFromPath(file), diagnostics,
-                    document.ToEnvelope(roundTrip, includePayload));
+                    document.ToEnvelope(roundTrip, includePayload, payloadLimitBytes));
             }
             catch (Exception ex) when (ex is InvalidDataException or NotSupportedException or InvalidOperationException or IOException)
             {
@@ -188,7 +198,12 @@ internal sealed class BridgeCommandService
         {
             try
             {
-                var document = FmgNativeDocument.Read(NativeLeafPayload.Resolve(file, oodleRuntimeRoot, ".fmg"));
+                var entryIndex = optionsIsObject ? OptionInt("entryIndex", -1) : -1;
+                var document = FmgNativeDocument.Read(NativeLeafPayload.Resolve(
+                    file,
+                    oodleRuntimeRoot,
+                    entryIndex >= 0 ? entryIndex : null,
+                    ".fmg"));
                 var roundTrip = document.VerifyRoundTrip();
                 var diagnostics = new[]
                 {
@@ -263,7 +278,13 @@ internal sealed class BridgeCommandService
         {
             try
             {
-                var document = ParamNativeDocument.ReadFile(file);
+                var entryIndex = optionsIsObject ? OptionInt("entryIndex", -1) : -1;
+                var sourceBytes = entryIndex >= 0
+                    ? NativeLeafPayload.Resolve(file, oodleRuntimeRoot, entryIndex, ".param")
+                    : null;
+                var document = sourceBytes is null
+                    ? ParamNativeDocument.ReadFile(file)
+                    : ParamNativeDocument.Read(sourceBytes);
                 var roundTrip = document.VerifyRoundTrip();
                 var diagnostics = new[]
                 {
@@ -552,7 +573,10 @@ internal sealed class BridgeCommandService
         {
             try
             {
-                var document = MsbNativeDocument.Read(NativeLeafPayload.Resolve(file, oodleRuntimeRoot));
+                var entryIndex = optionsIsObject ? OptionInt("entryIndex", -1) : -1;
+                var document = entryIndex >= 0
+                    ? MsbNativeDocument.Read(NativeLeafPayload.Resolve(file, oodleRuntimeRoot, entryIndex, ".msb"))
+                    : MsbNativeDocument.Read(NativeLeafPayload.Resolve(file, oodleRuntimeRoot));
                 var roundTrip = document.VerifyRoundTrip();
                 var diagnostics = new[]
                 {
@@ -925,8 +949,8 @@ internal sealed class BridgeCommandService
                         .ToArray();
                 }
 
-                var (skeleton, animation, binding, motionAnimId, sourceContainer) =
-                    ResolveTaeAnimationContext(file, animId, oodleRuntimeRoot);
+                var (skeleton, animation, binding, motionAnimId, sourceContainer, sourceFormat) =
+                    await ResolveTaeAnimationContextSerializedAsync(file, animId, oodleRuntimeRoot, cancellationToken);
 
                 var (trackToHkxBone, _) = ActionAnimationSemantics.ValidateTrackBinding(
                     binding.TransformTrackToBoneIndices,
@@ -940,8 +964,23 @@ internal sealed class BridgeCommandService
                     hkxToFlverMap = ActionAnimationSemantics.BuildHkxToFlverBoneMap(hkxBoneNames, flverBoneNames);
                 }
 
-                int frameCount = animation is HkxSplineCompressedAnimation sc ? sc.NumFrames : (animation is HkxInterleavedAnimation ia ? ia.NumFrames : 0);
-                float frameDuration = animation is HkxSplineCompressedAnimation scf ? scf.FrameDuration : (animation is HkxInterleavedAnimation iaf ? iaf.FrameDuration : (1f / 30f));
+                int frameCount;
+                float frameDuration;
+                if (animation is HkxSplineCompressedAnimation splineAnimation)
+                {
+                    frameCount = splineAnimation.NumFrames;
+                    frameDuration = splineAnimation.FrameDuration;
+                }
+                else if (animation is HkxInterleavedAnimation interleavedAnimation)
+                {
+                    frameCount = interleavedAnimation.NumFrames;
+                    frameDuration = interleavedAnimation.FrameDuration;
+                }
+                else
+                {
+                    throw new NotSupportedException(
+                        $"ACTION clip contract does not support animation type {animation.AnimationType}." );
+                }
 
                 var hkxRefTransforms = skeleton.Transforms.Select(t => new
                 {
@@ -957,7 +996,23 @@ internal sealed class BridgeCommandService
                         "TAE_ANIMATION_CLIP_READ",
                         $"TAE 动画 clip 已成功读取：animId={animId} (motionAnimId={motionAnimId}) tracks={animation.NumberOfTransformTracks} bones={skeleton.Bones.Count} duration={animation.Duration:F2}s。",
                         BridgeResult<object>.MakeSourceUri(file),
-                        new { animId, motionAnimId, sourceContainer, duration = animation.Duration, frameCount, frameDuration })
+                        new { animId, motionAnimId, sourceContainer, sourceFormat, duration = animation.Duration, frameCount, frameDuration })
+                };
+
+                var extractedMotion = animation.ExtractedMotion;
+                object? extractedMotionData = extractedMotion is null ? null : new
+                {
+                    frameType = extractedMotion.FrameType,
+                    up = new[] { extractedMotion.Up.X, extractedMotion.Up.Y, extractedMotion.Up.Z, extractedMotion.Up.W },
+                    forward = new[] { extractedMotion.Forward.X, extractedMotion.Forward.Y, extractedMotion.Forward.Z, extractedMotion.Forward.W },
+                    duration = extractedMotion.Duration,
+                    frameCount = extractedMotion.Samples.Length,
+                    samples = extractedMotion.Samples.Select(sample => new
+                    {
+                        raw = new[] { sample.Raw.X, sample.Raw.Y, sample.Raw.Z, sample.Raw.W },
+                        translation = new[] { sample.Translation.X, sample.Translation.Y, sample.Translation.Z },
+                        rotationAngle = sample.RotationAngle
+                    }).ToArray()
                 };
 
                 object? splineBlocksData = null;
@@ -971,6 +1026,12 @@ internal sealed class BridgeCommandService
                     {
                         tracks = b.Tracks.Select(t => new
                         {
+                            positionStaticMask = t.PositionStaticMask,
+                            positionSplineMask = t.PositionSplineMask,
+                            rotationHasStatic = t.RotationHasStatic,
+                            rotationHasSpline = t.RotationHasSpline,
+                            scaleStaticMask = t.ScaleStaticMask,
+                            scaleSplineMask = t.ScaleSplineMask,
                             staticPosition = new[] { t.StaticPosition.X, t.StaticPosition.Y, t.StaticPosition.Z },
                             staticRotation = new[] { t.StaticRotation.X, t.StaticRotation.Y, t.StaticRotation.Z, t.StaticRotation.W },
                             staticScale = new[] { t.StaticScale.X, t.StaticScale.Y, t.StaticScale.Z },
@@ -999,7 +1060,11 @@ internal sealed class BridgeCommandService
                     animId,
                     motionAnimId,
                     sourceContainer = Path.GetFileName(sourceContainer),
+                    sourceFormat,
                     animationType = animation.AnimationType.ToString(),
+                    blendHint = binding.BlendHint,
+                    hasExtractedMotion = animation.HasExtractedMotion,
+                    extractedMotion = extractedMotionData,
                     duration = animation.Duration,
                     frameCount,
                     frameDuration,
@@ -1017,6 +1082,14 @@ internal sealed class BridgeCommandService
             catch (TaeEntryMissingException)
             {
                 return BridgeResult<object>.Failed(file, "action", "TAE_ANIBND_NO_TAE_ENTRY", "anibnd 容器内未找到 TAE 魔数条目。");
+            }
+            catch (NotSupportedException ex) when (ex.Message.Contains("extracted root motion", StringComparison.OrdinalIgnoreCase)
+                || ex.Message.Contains("extractedMotion", StringComparison.OrdinalIgnoreCase))
+            {
+                return BridgeResult<object>.Unsupported(
+                    file,
+                    "action",
+                    $"ACTION_ROOT_MOTION_UNSUPPORTED: {ex.Message}");
             }
             catch (Exception ex) when (ex is InvalidDataException or NotSupportedException or IOException)
             {
@@ -1045,11 +1118,22 @@ internal sealed class BridgeCommandService
                         .ToArray();
                 }
 
-                var (skeleton, animation, binding, motionAnimId, sourceContainer) =
-                    ResolveTaeAnimationContext(file, animId, oodleRuntimeRoot);
+                var (skeleton, animation, binding, motionAnimId, sourceContainer, sourceFormat) =
+                    await ResolveTaeAnimationContextSerializedAsync(file, animId, oodleRuntimeRoot, cancellationToken);
 
                 var sampler = new HkxContinuousSampler(skeleton, animation, binding);
                 var hkxPose = sampler.SampleLocalPose(timeSeconds, loop);
+                object? sampledExtractedMotion = null;
+                if (animation.ExtractedMotion is not null)
+                {
+                    var sample = sampler.SampleExtractedMotion(timeSeconds, loop);
+                    sampledExtractedMotion = new
+                    {
+                        raw = new[] { sample.Raw.X, sample.Raw.Y, sample.Raw.Z, sample.Raw.W },
+                        translation = new[] { sample.Translation.X, sample.Translation.Y, sample.Translation.Z },
+                        rotationAngle = sample.RotationAngle
+                    };
+                }
 
                 var hkxBoneNames = skeleton.Bones.Select(b => b.Name).ToArray();
 
@@ -1057,44 +1141,23 @@ internal sealed class BridgeCommandService
                 {
                     var hkxToFlver = ActionAnimationSemantics.BuildHkxToFlverBoneMap(hkxBoneNames, flverBoneNames);
 
-                    // Build FLVER default reference pose
-                    var flverRefPose = new BoneTransform[flverBoneNames.Length];
                     BoneTransform[]? explicitFlverRef = null;
-                    if (optionsIsObject && options.TryGetProperty("flverReferencePose", out var refPoseEl) && refPoseEl.ValueKind == JsonValueKind.Array)
+                    if (optionsIsObject
+                        && options.TryGetProperty("flverReferencePose", out var refPoseEl))
                     {
-                        var explicitList = new List<BoneTransform>();
-                        foreach (var item in refPoseEl.EnumerateArray())
-                        {
-                            var pos = Vector3.Zero;
-                            var rot = Quaternion.Identity;
-                            var scale = Vector3.One;
-                            if (item.TryGetProperty("translation", out var tEl) && tEl.ValueKind == JsonValueKind.Array)
-                            {
-                                var arr = tEl.EnumerateArray().Select(v => (float)v.GetDouble()).ToArray();
-                                if (arr.Length >= 3) pos = new Vector3(arr[0], arr[1], arr[2]);
-                            }
-                            if (item.TryGetProperty("rotation", out var rEl) && rEl.ValueKind == JsonValueKind.Array)
-                            {
-                                var arr = rEl.EnumerateArray().Select(v => (float)v.GetDouble()).ToArray();
-                                if (arr.Length == 4) rot = new Quaternion(arr[0], arr[1], arr[2], arr[3]);
-                                else if (arr.Length == 3)
-                                {
-                                    rot = Quaternion.CreateFromYawPitchRoll(arr[1], arr[0], arr[2]);
-                                }
-                            }
-                            if (item.TryGetProperty("scale", out var sEl) && sEl.ValueKind == JsonValueKind.Array)
-                            {
-                                var arr = sEl.EnumerateArray().Select(v => (float)v.GetDouble()).ToArray();
-                                if (arr.Length >= 3) scale = new Vector3(arr[0], arr[1], arr[2]);
-                            }
-                            explicitList.Add(new BoneTransform(pos, rot, scale));
-                        }
-                        explicitFlverRef = explicitList.ToArray();
+                        explicitFlverRef = ReadFlverReferencePose(refPoseEl, flverBoneNames.Length);
                     }
+
+                    // A FLVER bone outside the HKX name map has no valid pose
+                    // source in this command unless the caller supplies the
+                    // real FLVER bind/reference pose.  Do not replace it with
+                    // identity/zero/one: that makes a visually plausible but
+                    // semantically false skeleton.
+                    var flverRefPose = new BoneTransform[flverBoneNames.Length];
 
                     for (int fi = 0; fi < flverBoneNames.Length; fi++)
                     {
-                        if (explicitFlverRef != null && fi < explicitFlverRef.Length)
+                        if (explicitFlverRef != null)
                         {
                             flverRefPose[fi] = explicitFlverRef[fi];
                         }
@@ -1107,7 +1170,9 @@ internal sealed class BridgeCommandService
                             }
                             else
                             {
-                                flverRefPose[fi] = new BoneTransform(Vector3.Zero, Quaternion.Identity, Vector3.One);
+                                throw new NotSupportedException(
+                                    $"FLVER bone '{flverBoneNames[fi]}' is not present in the HKX skeleton; "
+                                    + "a real flverReferencePose entry is required for unmapped bones.");
                             }
                         }
                     }
@@ -1132,9 +1197,11 @@ internal sealed class BridgeCommandService
                     {
                         animId,
                         motionAnimId,
+                        sourceFormat,
                         timeSeconds,
                         duration = animation.Duration,
                         boneCount = flverOutput.Length,
+                        extractedMotion = sampledExtractedMotion,
                         sampledPose = flverOutput
                     });
                 }
@@ -1158,9 +1225,11 @@ internal sealed class BridgeCommandService
                     {
                         animId,
                         motionAnimId,
+                        sourceFormat,
                         timeSeconds,
                         duration = animation.Duration,
                         boneCount = hkxOutput.Length,
+                        extractedMotion = sampledExtractedMotion,
                         sampledPose = hkxOutput
                     });
                 }
@@ -1168,6 +1237,14 @@ internal sealed class BridgeCommandService
             catch (TaeEntryMissingException)
             {
                 return BridgeResult<object>.Failed(file, "action", "TAE_ANIBND_NO_TAE_ENTRY", "anibnd 容器内未找到 TAE 魔数条目。");
+            }
+            catch (NotSupportedException ex) when (ex.Message.Contains("extracted root motion", StringComparison.OrdinalIgnoreCase)
+                || ex.Message.Contains("extractedMotion", StringComparison.OrdinalIgnoreCase))
+            {
+                return BridgeResult<object>.Unsupported(
+                    file,
+                    "action",
+                    $"ACTION_ROOT_MOTION_UNSUPPORTED: {ex.Message}");
             }
             catch (Exception ex) when (ex is InvalidDataException or NotSupportedException or IOException)
             {
@@ -2599,7 +2676,70 @@ internal sealed class BridgeCommandService
         return buffer;
     }
 
-    private static (HkxSkeleton Skeleton, HkxAnimation Animation, HkxAnimationBinding Binding, long MotionAnimId, string SourceContainerPath)
+    private static BoneTransform[] ReadFlverReferencePose(JsonElement value, int expectedCount)
+    {
+        if (value.ValueKind != JsonValueKind.Array)
+            throw new InvalidDataException("flverReferencePose 必须是与 FLVER 骨骼顺序一致的数组。");
+
+        var entries = value.EnumerateArray().ToArray();
+        if (entries.Length != expectedCount)
+            throw new InvalidDataException(
+                $"flverReferencePose 数量必须为 {expectedCount}，实际为 {entries.Length}；禁止用缺省姿态补齐。");
+
+        var result = new BoneTransform[entries.Length];
+        for (var index = 0; index < entries.Length; index++)
+        {
+            var entry = entries[index];
+            if (entry.ValueKind != JsonValueKind.Object)
+                throw new InvalidDataException($"flverReferencePose[{index}] 必须是对象。");
+
+            var translation = ReadRequiredJsonFloats(entry, "translation", 3, index);
+            var rotationValues = ReadRequiredJsonFloats(entry, "rotation", 4, index);
+            var scale = ReadRequiredJsonFloats(entry, "scale", 3, index);
+            var rotation = new Quaternion(
+                rotationValues[0], rotationValues[1], rotationValues[2], rotationValues[3]);
+            var lengthSquared = rotation.LengthSquared();
+            if (!float.IsFinite(lengthSquared) || lengthSquared <= 1e-12f)
+                throw new InvalidDataException(
+                    $"flverReferencePose[{index}].rotation 必须是有限且非零的四元数。");
+
+            result[index] = new BoneTransform(
+                new Vector3(translation[0], translation[1], translation[2]),
+                Quaternion.Normalize(rotation),
+                new Vector3(scale[0], scale[1], scale[2]));
+        }
+        return result;
+    }
+
+    private static float[] ReadRequiredJsonFloats(
+        JsonElement entry,
+        string propertyName,
+        int expectedCount,
+        int index)
+    {
+        if (!entry.TryGetProperty(propertyName, out var value) || value.ValueKind != JsonValueKind.Array)
+            throw new InvalidDataException(
+                $"flverReferencePose[{index}].{propertyName} 必须是 {expectedCount} 分量数组。");
+
+        var result = new float[expectedCount];
+        var values = value.EnumerateArray().ToArray();
+        if (values.Length != expectedCount)
+            throw new InvalidDataException(
+                $"flverReferencePose[{index}].{propertyName} 必须有 {expectedCount} 个分量，实际为 {values.Length}。");
+        for (var component = 0; component < values.Length; component++)
+        {
+            if (!values[component].TryGetDouble(out var number))
+                throw new InvalidDataException(
+                    $"flverReferencePose[{index}].{propertyName}[{component}] 不是数字。");
+            result[component] = (float)number;
+            if (!float.IsFinite(result[component]))
+                throw new InvalidDataException(
+                    $"flverReferencePose[{index}].{propertyName}[{component}] 不是有限数字。");
+        }
+        return result;
+    }
+
+    private static (HkxSkeleton Skeleton, HkxAnimation Animation, HkxAnimationBinding Binding, long MotionAnimId, string SourceContainerPath, string SourceFormat)
         ResolveTaeAnimationContext(string file, long animId, string? oodleRuntimeRoot)
     {
         var (document, _) = OpenTaeDocument(file, oodleRuntimeRoot);
@@ -2622,10 +2762,12 @@ internal sealed class BridgeCommandService
             }
         }
 
-        byte[]? animHkxBytes = null;
+        var primaryPath = Path.GetFullPath(file);
+        var animationCandidates = new List<(string Path, byte[] Bytes, int Priority)>();
         byte[]? skeletonHkxBytes = null;
         byte[]? compendiumBytes = null;
         string foundContainer = file;
+        var searchDiagnostics = new List<string>();
 
         foreach (var path in searchPaths)
         {
@@ -2660,61 +2802,96 @@ internal sealed class BridgeCommandService
                     }
                 }
 
-                // Check for target animation entry
-                if (animHkxBytes == null)
+                // Check for target animation entry.  Keep every match until the
+                // search is complete: a companion with the same logical ID is
+                // not permission to pick the first directory entry.  The
+                // primary/explicit container has precedence, but ambiguity at
+                // the same priority must fail closed.
+                int matchIdx = -1;
+                try
                 {
-                    int matchIdx = -1;
-                    try
-                    {
-                        matchIdx = ActionAnimationSemantics.ResolveAnimationBinderEntryIndex(
-                            bnd4.Entries.Select(e => (e.Index, (long)e.Id)).ToArray(),
-                            motionAnimId);
-                    }
-                    catch
-                    {
-                        matchIdx = -1;
-                    }
-
-                    if (matchIdx >= 0)
-                    {
-                        var raw = bnd4.GetStoredBytes(matchIdx);
-                        if (raw.Length >= 4 && raw.AsSpan(0, 4).SequenceEqual("DCX\0"u8))
-                            raw = DcxNativeDocument.Read(raw, oodleRuntimeRoot).Payload;
-                        animHkxBytes = raw;
-                        foundContainer = path;
-                    }
+                    matchIdx = ActionAnimationSemantics.ResolveAnimationBinderEntryIndex(
+                        bnd4.Entries.Select(e => (e.Index, (long)e.Id)).ToArray(),
+                        motionAnimId);
+                }
+                catch (InvalidDataException ex) when (ex.Message.Contains("contains no animation entry", StringComparison.Ordinal))
+                {
+                    searchDiagnostics.Add($"{Path.GetFileName(path)}: {ex.Message}");
+                    matchIdx = -1;
+                }
+                catch (InvalidDataException ex) when (ex.Message.Contains("identity is ambiguous", StringComparison.Ordinal))
+                {
+                    throw new InvalidDataException(
+                        $"ACTION_HKX_ANIMATION_ID_AMBIGUOUS: {Path.GetFileName(path)} 中 motion ID {motionAnimId} 对应多个 HKX 条目；拒绝按位置猜测。",
+                        ex);
                 }
 
-                if (animHkxBytes != null && skeletonHkxBytes != null && compendiumBytes != null) break;
+                if (matchIdx >= 0)
+                {
+                    var raw = bnd4.GetStoredBytes(matchIdx);
+                    if (raw.Length >= 4 && raw.AsSpan(0, 4).SequenceEqual("DCX\0"u8))
+                        raw = DcxNativeDocument.Read(raw, oodleRuntimeRoot).Payload;
+                    var priority = string.Equals(Path.GetFullPath(path), primaryPath, StringComparison.OrdinalIgnoreCase)
+                        ? 0
+                        : 1;
+                    animationCandidates.Add((path, raw, priority));
+                }
             }
-            catch
+            catch (Exception ex) when ((ex is InvalidDataException or NotSupportedException or IOException)
+                && !ex.Message.StartsWith("ACTION_HKX_", StringComparison.Ordinal))
             {
-                // Continue searching other files
+                searchDiagnostics.Add($"{Path.GetFileName(path)}: {ex.Message}");
             }
         }
 
-        if (animHkxBytes == null)
+        if (animationCandidates.Count == 0)
         {
-            throw new InvalidDataException($"未能在 ANIBND 容器中找到动画 ID {animId}（motion ID {motionAnimId}）的 HKX 条目。");
+            string details = searchDiagnostics.Count == 0 ? string.Empty : $" 检索诊断：{string.Join(" | ", searchDiagnostics)}";
+            throw new InvalidDataException($"未能在 ANIBND 容器中找到动画 ID {animId}（motion ID {motionAnimId}）的 HKX 条目。{details}");
         }
+
+        var preferredPriority = animationCandidates.Min(candidate => candidate.Priority);
+        var preferredCandidates = animationCandidates
+            .Where(candidate => candidate.Priority == preferredPriority)
+            .ToArray();
+        if (preferredCandidates.Length != 1)
+        {
+            var candidates = string.Join(", ", preferredCandidates.Select(candidate => Path.GetFileName(candidate.Path)));
+            throw new InvalidDataException(
+                $"ACTION_HKX_COMPANION_AMBIGUOUS: motion ID {motionAnimId} 在同一解析优先级命中 {preferredCandidates.Length} 个 HKX 容器（{candidates}）；拒绝选择首个 companion。" );
+        }
+
+        var selectedAnimation = preferredCandidates[0];
+        var animHkxBytes = selectedAnimation.Bytes;
+        foundContainer = selectedAnimation.Path;
 
         var animContainer = HkxAnimationReader.ReadContainer(animHkxBytes, compendiumBytes);
-        if (animContainer.Animations.Count == 0)
+        if (animContainer.Animations.Count != 1)
         {
-            // If animation HKX doesn't produce an animation directly (e.g. tagfile compendium), throw structured message
-            throw new InvalidDataException($"HKX 中未包含有效的动画数据。");
+            throw new InvalidDataException(
+                $"HKX 动画容器必须唯一解析出一条目标动画，实际为 {animContainer.Animations.Count} 条；拒绝按位置猜测。");
         }
 
-        var animation = animContainer.Animations[0];
-        HkxSkeleton? skeleton = animContainer.Skeletons.Count > 0 ? animContainer.Skeletons[0] : null;
+        var animation = animContainer.Animations.Single();
+        var bindingCandidates = animContainer.Bindings
+            .Where(candidate => ReferenceEquals(candidate.Animation, animation))
+            .ToArray();
+        if (bindingCandidates.Length != 1)
+        {
+            throw new InvalidDataException(
+                $"HKX 目标动画需要唯一绑定，匹配到 {bindingCandidates.Length} 条；拒绝按位置猜测。");
+        }
+        var binding = bindingCandidates[0];
+
+        HkxSkeleton? skeleton = SelectSkeleton(
+            animContainer.Skeletons,
+            binding.OriginalSkeletonName,
+            "动画 HKX");
 
         if (skeleton == null && skeletonHkxBytes != null)
         {
             var skelContainer = HkxAnimationReader.ReadContainer(skeletonHkxBytes, compendiumBytes);
-            if (skelContainer.Skeletons.Count > 0)
-            {
-                skeleton = skelContainer.Skeletons[0];
-            }
+            skeleton = SelectSkeleton(skelContainer.Skeletons, binding.OriginalSkeletonName, "骨骼 HKX");
         }
 
         if (skeleton == null)
@@ -2722,13 +2899,48 @@ internal sealed class BridgeCommandService
             throw new InvalidDataException($"未能获取动画所需的骨骼 (hkaSkeleton) 数据。");
         }
 
-        HkxAnimationBinding? binding = animContainer.Bindings.Count > 0 ? animContainer.Bindings[0] : null;
-        if (binding == null)
-        {
-            // If binding is missing from animation HKX, fallback to 1:1 if track count matches skeleton
-            throw new InvalidDataException($"HKX 中未包含有效的动画绑定 (hkaAnimationBinding) 数据。");
-        }
+        return (skeleton, animation, binding, motionAnimId, foundContainer, animContainer.SourceFormat);
+    }
 
-        return (skeleton, animation, binding, motionAnimId, foundContainer);
+    private static async Task<(HkxSkeleton Skeleton, HkxAnimation Animation, HkxAnimationBinding Binding, long MotionAnimId, string SourceContainerPath, string SourceFormat)>
+        ResolveTaeAnimationContextSerializedAsync(
+            string file,
+            long animId,
+            string? oodleRuntimeRoot,
+            CancellationToken cancellationToken)
+    {
+        await ActionHkxReadGate.WaitAsync(cancellationToken);
+        try
+        {
+            return ResolveTaeAnimationContext(file, animId, oodleRuntimeRoot);
+        }
+        finally
+        {
+            ActionHkxReadGate.Release();
+        }
+    }
+
+    private static HkxSkeleton? SelectSkeleton(
+        IReadOnlyList<HkxSkeleton> skeletons,
+        string expectedName,
+        string sourceLabel)
+    {
+        if (skeletons.Count == 0)
+            return null;
+        if (!string.IsNullOrWhiteSpace(expectedName))
+        {
+            var named = skeletons
+                .Where(skeleton => string.Equals(skeleton.Name, expectedName, StringComparison.Ordinal))
+                .ToArray();
+            if (named.Length == 1)
+                return named.Single();
+            if (named.Length > 1)
+                throw new InvalidDataException(
+                    $"{sourceLabel} 中骨骼名 '{expectedName}' 出现 {named.Length} 次，身份有歧义。");
+        }
+        if (skeletons.Count == 1)
+            return skeletons.Single();
+        throw new InvalidDataException(
+            $"{sourceLabel} 中有 {skeletons.Count} 条骨骼且无法按绑定名唯一解析；拒绝按位置猜测。");
     }
 }

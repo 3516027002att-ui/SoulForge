@@ -9,6 +9,27 @@ namespace SoulForge.Bridge.Hkx;
 
 public readonly record struct BoneTransform(Vector3 Translation, Quaternion Rotation, Vector3 Scale);
 
+/// <summary>
+/// One native hkaDefaultAnimatedReferenceFrame sample. Havok stores the
+/// translation components in XYZ and the reference-frame rotation component
+/// in W. Keep the raw vector so a consumer can apply the game's coordinate and
+/// reference-frame convention without losing information at this boundary.
+/// </summary>
+public readonly record struct HkxReferenceFrameSample(Vector4 Raw)
+{
+    public Vector3 Translation => new(Raw.X, Raw.Y, Raw.Z);
+    public float RotationAngle => Raw.W;
+}
+
+public sealed class HkxExtractedMotion
+{
+    public int FrameType { get; init; }
+    public Vector4 Up { get; init; }
+    public Vector4 Forward { get; init; }
+    public float Duration { get; init; }
+    public HkxReferenceFrameSample[] Samples { get; init; } = Array.Empty<HkxReferenceFrameSample>();
+}
+
 public enum HkxAnimationType
 {
     Unknown = 0,
@@ -16,7 +37,8 @@ public enum HkxAnimationType
     Mirrored = 2,
     SplineCompressed = 3,
     QuantizedCompressed = 4,
-    PredictiveCompressed = 5
+    PredictiveCompressed = 5,
+    ReferencePose = 6
 }
 
 public sealed class HkxBone
@@ -39,17 +61,28 @@ public abstract class HkxAnimation
     public float Duration { get; init; }
     public int NumberOfTransformTracks { get; init; }
     public int NumberOfFloatTracks { get; init; }
+    public bool HasExtractedMotion { get; init; }
+    public HkxExtractedMotion? ExtractedMotion { get; init; }
 }
 
 public sealed class HkxAnimationBinding
 {
     public string OriginalSkeletonName { get; init; } = string.Empty;
     public IReadOnlyList<int> TransformTrackToBoneIndices { get; init; } = Array.Empty<int>();
+    public IReadOnlyList<int> FloatTrackToFloatSlotIndices { get; init; } = Array.Empty<int>();
+    public IReadOnlyList<int> PartitionIndices { get; init; } = Array.Empty<int>();
+    public int BlendHint { get; init; }
     public HkxAnimation? Animation { get; set; }
 }
 
 public sealed class HkxAnimationContainer
 {
+    /// <summary>
+    /// Native HKX container family used for this object graph.  This is part of
+    /// the production evidence boundary: a TAG0 decode must not be reported as
+    /// if it came from the packfile reader (or vice versa).
+    /// </summary>
+    public string SourceFormat { get; init; } = string.Empty;
     public IReadOnlyList<HkxSkeleton> Skeletons { get; init; } = Array.Empty<HkxSkeleton>();
     public IReadOnlyList<HkxAnimation> Animations { get; init; } = Array.Empty<HkxAnimation>();
     public IReadOnlyList<HkxAnimationBinding> Bindings { get; init; } = Array.Empty<HkxAnimationBinding>();
@@ -90,6 +123,16 @@ public sealed class TransformSplineTrack
     public byte PositionMask { get; set; }
     public byte RotationMask { get; set; }
     public byte ScaleMask { get; set; }
+
+    // These masks preserve the distinction between an explicitly encoded channel and
+    // a channel which is absent from the compressed track.  An absent channel must
+    // inherit the skeleton reference pose; zero/identity/one are not valid substitutes.
+    public byte PositionStaticMask { get; set; }
+    public byte PositionSplineMask { get; set; }
+    public bool RotationHasStatic { get; set; }
+    public bool RotationHasSpline { get; set; }
+    public byte ScaleStaticMask { get; set; }
+    public byte ScaleSplineMask { get; set; }
 
     public Vector3 StaticPosition { get; set; }
     public Quaternion StaticRotation { get; set; }

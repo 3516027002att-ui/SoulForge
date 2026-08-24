@@ -1248,7 +1248,7 @@ npm run build
 
 <!-- SOULFORGE_PROJECTION_BEGIN:command-index -->
 
-全部 201 条已登记验证命令按层级列出。层级顺序即执行顺序（先快后慢，早失败早停）。
+全部 203 条已登记验证命令按层级列出。层级顺序即执行顺序（先快后慢，早失败早停）。
 
 一次跑完某一层：`node scripts/verify.mjs --tier <层级>`；跑全部：`npm run verify:all`。
 
@@ -1277,7 +1277,7 @@ npm run test:verify-entrypoint
 npm run verify:audit
 ~~~
 
-**unit**（70 条）
+**unit**（71 条）
 
 ~~~powershell
 npm run test
@@ -1340,6 +1340,7 @@ npm run test:resource-index-diagnostics
 npm run test:s40-live
 npm run test:scene-asset-inventory
 npm run test:scene-draw-list
+npm run test:semantic-convergence
 npm run test:subprocess-control
 npm run test:three-scene-functional
 npm run test:three-scene-module
@@ -1409,7 +1410,7 @@ npm run test:upgrade-recovery
 npm run test:writer-failure-matrix
 ~~~
 
-**native**（49 条）
+**native**（50 条）
 
 ~~~powershell
 npm run bridge:verify:bnd4-transaction
@@ -1436,6 +1437,7 @@ npm run bridge:verify:tpf
 npm run bridge:verify:tpf-multi
 npm run bridge:verify:tpf-writer
 npm run probe:behavior-headers
+npm run test:action-native-differential
 npm run test:bridge-exit-hygiene
 npm run test:corpus-manifest
 npm run test:emevd-corpus-matrix

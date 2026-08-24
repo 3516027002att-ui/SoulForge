@@ -54,6 +54,20 @@ export interface PageEditorDocumentRequestLike {
   readonly limit: number;
 }
 
+/**
+ * Main-only context supplied to a production data/write adapter.
+ *
+ * The renderer still receives only the opaque handle.  Keeping the locator on
+ * this injected boundary lets the main process resolve the actual source and
+ * route the operation through Bridge/Patch Engine without leaking an absolute
+ * path into the renderer-facing DTOs.
+ */
+export interface EditorDocumentDataSourceContext {
+  readonly documentHandle: string;
+  readonly expectedRevision: string;
+  readonly locator: NativeDocumentLocator;
+}
+
 export interface EditorDocumentDataSource {
   /**
    * 加载一页。返回 items=null 表示该 query kind 没有数据源（capability
@@ -62,13 +76,17 @@ export interface EditorDocumentDataSource {
   loadPage(
     query: EditorPageQuery,
     cursor: string | null,
-    limit: number
+    limit: number,
+    context?: EditorDocumentDataSourceContext
   ): Promise<{
     items: readonly EditorPageItemDto[] | null;
     nextCursor: string | null;
     totalKnown: number | null;
   }>;
-  readContent(query: EditorContentQuery): Promise<EditorContentValue | null>;
+  readContent(
+    query: EditorContentQuery,
+    context?: EditorDocumentDataSourceContext
+  ): Promise<EditorContentValue | null>;
 }
 
 export type EditorMutationApplyOutcome =
@@ -77,7 +95,10 @@ export type EditorMutationApplyOutcome =
   | { kind: 'rejected'; code: string };
 
 export interface EditorMutationApplyPort {
-  apply(mutation: EditorMutation): Promise<EditorMutationApplyOutcome>;
+  apply(
+    mutation: EditorMutation,
+    context?: EditorDocumentDataSourceContext
+  ): Promise<EditorMutationApplyOutcome>;
 }
 
 export interface EditorDocumentStoreOptions {
@@ -85,6 +106,11 @@ export interface EditorDocumentStoreOptions {
   readonly now?: () => number;
   readonly dataSource: EditorDocumentDataSource;
   readonly applyPort: EditorMutationApplyPort;
+  /** Production adapters may expose only the operations they actually route. */
+  readonly capabilityResolver?: (
+    locator: NativeDocumentLocator,
+    base: ReturnType<typeof mutationCapabilityForLocator>
+  ) => { readOperations: readonly ReadOperationId[]; writeOperations: readonly WriteOperationId[] };
 }
 
 interface OpenDocumentRecord {
@@ -131,20 +157,35 @@ export class EditorDocumentStore implements EditorDocumentStoreContract {
   private readonly now: () => number;
   private readonly dataSource: EditorDocumentDataSource;
   private readonly applyPort: EditorMutationApplyPort;
+  private readonly capabilityResolver: EditorDocumentStoreOptions['capabilityResolver'];
 
   constructor(options: EditorDocumentStoreOptions) {
     this.ttlMs = options.ttlMs ?? 30 * 60_000;
     this.now = options.now ?? (() => Date.now());
     this.dataSource = options.dataSource;
     this.applyPort = options.applyPort;
+    this.capabilityResolver = options.capabilityResolver;
   }
 
   private revisionOf(record: OpenDocumentRecord): string {
     return `rev:${record.revision}`;
   }
 
+  private contextOf(record: OpenDocumentRecord): EditorDocumentDataSourceContext {
+    return {
+      documentHandle: record.handle,
+      expectedRevision: this.revisionOf(record),
+      locator: record.locator
+    };
+  }
+
+  private capabilitiesOf(record: OpenDocumentRecord): ReturnType<typeof mutationCapabilityForLocator> {
+    const base = mutationCapabilityForLocator(record.locator);
+    return this.capabilityResolver ? this.capabilityResolver(record.locator, base) : base;
+  }
+
   private toOpenValue(record: OpenDocumentRecord): OpenEditorDocumentValue {
-    const { readOperations, writeOperations } = mutationCapabilityForLocator(record.locator);
+    const { readOperations, writeOperations } = this.capabilitiesOf(record);
     return {
       documentHandle: record.handle,
       revision: this.revisionOf(record),
@@ -205,11 +246,16 @@ export class EditorDocumentStore implements EditorDocumentStoreContract {
     const record = resolved.value;
     if (request.expectedRevision !== this.revisionOf(record)) return fail('stale-revision', false);
 
-    const { readOperations } = mutationCapabilityForLocator(record.locator);
+    const { readOperations } = this.capabilitiesOf(record);
     const requiredOperation = readOperationForQuery(request.query.kind);
     if (!readOperations.includes(requiredOperation)) return fail('capability-blocked', false);
 
-    const loaded = await this.dataSource.loadPage(request.query, request.cursor, request.limit);
+    const loaded = await this.dataSource.loadPage(
+      request.query,
+      request.cursor,
+      request.limit,
+      this.contextOf(record)
+    );
     if (loaded.items === null) return fail('capability-blocked', false);
     if (loaded.items.length > request.limit) return fail('invalid-request', false);
 
@@ -240,11 +286,11 @@ export class EditorDocumentStore implements EditorDocumentStoreContract {
     const record = resolved.value;
     if (request.expectedRevision !== this.revisionOf(record)) return fail('stale-revision', false);
 
-    const { readOperations } = mutationCapabilityForLocator(record.locator);
+    const { readOperations } = this.capabilitiesOf(record);
     const requiredOperation = READ_OPERATION_FOR_CONTENT[request.query.kind];
     if (!readOperations.includes(requiredOperation)) return fail('capability-blocked', false);
 
-    const content = await this.dataSource.readContent(request.query);
+    const content = await this.dataSource.readContent(request.query, this.contextOf(record));
     if (content === null) return fail('capability-blocked', false);
     return ok(content);
   }
@@ -258,12 +304,12 @@ export class EditorDocumentStore implements EditorDocumentStoreContract {
     const record = resolved.value;
     if (request.expectedRevision !== this.revisionOf(record)) return fail('stale-revision', false);
 
-    const { writeOperations } = mutationCapabilityForLocator(record.locator);
+    const { writeOperations } = this.capabilitiesOf(record);
     if (!writeOperations.includes(request.mutation.kind as WriteOperationId)) {
       return fail('capability-blocked', false);
     }
 
-    const outcome = await this.applyPort.apply(request.mutation);
+    const outcome = await this.applyPort.apply(request.mutation, this.contextOf(record));
     if (outcome.kind === 'cancelled') return fail('cancelled', false);
     if (outcome.kind === 'rejected') return fail('mutation-rejected', false);
 

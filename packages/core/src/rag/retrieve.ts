@@ -32,7 +32,11 @@ export function retrieveEvidence(
     return {
       ok: false,
       code: 'insufficient_evidence',
-      message: '没有可检索的工作区证据。先打开 Mod 工作区并完成扫描或分析。'
+      message: '没有可检索的工作区证据。先打开 Mod 工作区并完成扫描或分析。',
+      coverage: {
+        status: 'SOURCE_UNAVAILABLE', scope: 'rag', indexed: 0, expected: 0,
+        successful: 0, failed: 0, completenessRatio: 0, resultCount: 0
+      }
     };
   }
 
@@ -65,7 +69,8 @@ export function retrieveEvidence(
     return {
       ok: false,
       code: 'insufficient_evidence',
-      message: `查询「${trimmed}」没有命中已索引的事件、地图、参数、文本或文件。`
+      message: `查询「${trimmed}」没有命中已索引的事件、地图、参数、文本或文件。`,
+      coverage: coverageForResult(corpus, candidates.length, 0)
     };
   }
 
@@ -77,8 +82,37 @@ export function retrieveEvidence(
       scanned: candidates.length,
       matched: scored.length,
       expanded: Math.max(0, expanded.length - primary.length),
-      truncated
+      truncated,
+      coverage: coverageForResult(corpus, candidates.length, expanded.length)
+      ,retrievalMode: 'lexical'
     }
+  };
+}
+
+function coverageForResult(corpus: RagCorpus, indexed: number, resultCount: number) {
+  const base = corpus.coverage ?? {
+    status: 'FOUND' as const,
+    scope: 'rag',
+    indexed: corpus.chunks.length,
+    expected: corpus.chunks.length,
+    successful: corpus.chunks.length,
+    failed: 0,
+    completenessRatio: corpus.chunks.length > 0 ? 1 : 0,
+    resultCount: 0
+  };
+  const complete = base.status === 'FOUND'
+    && base.failed === 0
+    && (base.partial ?? 0) === 0
+    && base.completenessRatio >= 1;
+  return {
+    ...base,
+    indexed,
+    resultCount,
+    status: resultCount > 0
+      ? 'FOUND'
+      : complete
+        ? 'NOT_FOUND_WITH_COMPLETE_COVERAGE'
+        : base.status
   };
 }
 

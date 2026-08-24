@@ -20,7 +20,8 @@ import type {
 } from '@soulforge/shared';
 import { toLegacyDiagnostic } from '@soulforge/shared';
 import {
-  createWorkspaceTransaction
+  createWorkspaceTransaction,
+  type WorkspaceTransaction
 } from '../transactions/workspaceTransaction.js';
 import { createScaffoldValidators } from '../validators/index.js';
 import type { WorkspaceSession } from '../workspace/workspaceSession.js';
@@ -62,6 +63,21 @@ export interface ExecutePatchIrOptions {
     afterHash?: string;
     inverse: PatchIrOperation;
   }>;
+  /**
+   * Additional domain patches that must share this exact WorkspaceTransaction.
+   * The primary patch remains the operation-log identity; all operations are
+   * staged, validated and committed together.
+   */
+  additionalPatches?: readonly PatchIR[];
+  /**
+   * Optional semantic boundary checks. They run before the restore point is
+   * created and after the bytes have been committed, while the same durable
+   * transaction remains available for rollback.
+   */
+  semanticChecks?: {
+    beforeCommit?: (transaction: WorkspaceTransaction) => Promise<Diagnostic[]>;
+    afterCommit?: () => Promise<Diagnostic[]>;
+  };
 }
 
 export interface TransactionCommitCompatResult {
@@ -78,6 +94,22 @@ export async function executePatchIrThroughTransaction(
   options: ExecutePatchIrOptions = {}
 ): Promise<TransactionCommitCompatResult> {
   const opId = patch.patchId || randomUUID();
+  const additionalPatches = options.additionalPatches ?? [];
+  const transactionPatch: PatchIR = additionalPatches.length === 0
+    ? patch
+    : {
+        ...patch,
+        operations: [
+          ...patch.operations,
+          ...additionalPatches.flatMap((candidate) => candidate.operations)
+        ],
+        affectedResources: [
+          ...new Set([
+            ...patch.affectedResources,
+            ...additionalPatches.flatMap((candidate) => candidate.affectedResources)
+          ])
+        ]
+      };
   const store: OperationLogStore = options.operationLog ?? getDefaultOperationLogStore();
   const workspaceRoot = options.workspaceRoot
     ?? options.session?.layers.overlayRoot;
@@ -97,7 +129,7 @@ export async function executePatchIrThroughTransaction(
   // Session boundary checks.
   const preDiagnostics: Diagnostic[] = [];
   if (options.session) {
-    for (const op of patch.operations) {
+    for (const op of transactionPatch.operations) {
       if (!op.targetPath) continue;
       const writable = await options.session.resolveWritablePathSecure(op.targetPath, 'overlay');
       if (!writable.ok) preDiagnostics.push(...writable.diagnostics);
@@ -143,7 +175,7 @@ export async function executePatchIrThroughTransaction(
   // Caller-provided changes (e.g. synthetic replace) take precedence.
   let capturedResourceEntryChanges = options.resourceEntryChanges ?? [];
   if (capturedResourceEntryChanges.length === 0) {
-    const inverseCapture = await captureNativeBnd4ResourceEntryChanges(patch.operations, workspaceRoot);
+    const inverseCapture = await captureNativeBnd4ResourceEntryChanges(transactionPatch.operations, workspaceRoot);
     if (inverseCapture.diagnostics.some((item) => item.severity === 'error')) {
       await tryUpdateStatus(store, opId, 'failed', {
         diagnostics: inverseCapture.diagnostics
@@ -213,7 +245,7 @@ export async function executePatchIrThroughTransaction(
         transactionId: tx.transactionId,
         opId,
         phase: 'pending',
-        state: { operationCount: patch.operations.length },
+        state: { operationCount: transactionPatch.operations.length },
         createdAt: now,
         updatedAt: now
       });
@@ -232,7 +264,7 @@ export async function executePatchIrThroughTransaction(
     }
   }
 
-  const added = tx.addPatch({ ...patch, patchId: opId });
+  const added = tx.addPatch({ ...transactionPatch, patchId: opId });
   if (!added.ok) {
     const phaseDiagnostics = added.diagnostics.map(toLegacyDiagnostic);
     const logDiagnostic = await tryUpdateStatus(store, opId, 'failed', {
@@ -248,7 +280,7 @@ export async function executePatchIrThroughTransaction(
 
 
   const stagingJournalError = await transitionJournal(
-    store, tx.transactionId, 'pending', 'staging', { operationCount: patch.operations.length }
+    store, tx.transactionId, 'pending', 'staging', { operationCount: transactionPatch.operations.length }
   );
   if (stagingJournalError) {
     await tryUpdateStatus(store, opId, 'failed', { diagnostics: [stagingJournalError] }, 'journal_staging');
@@ -334,6 +366,32 @@ export async function executePatchIrThroughTransaction(
     };
   }
 
+  if (options.semanticChecks?.beforeCommit) {
+    const semanticDiagnostics = await runSemanticCheck(
+      () => options.semanticChecks!.beforeCommit!(tx),
+      'SEMANTIC_PRECOMMIT_CHECK_FAILED'
+    );
+    if (semanticDiagnostics.some((item) => item.severity === 'error')) {
+      const diagnostics = [
+        ...semanticDiagnostics,
+        ...(await tx.discardStaging()).map(toLegacyDiagnostic)
+      ];
+      const logDiagnostic = await tryUpdateStatus(store, opId, 'failed', {
+        diagnostics
+      }, 'semantic_precommit');
+      await transitionJournal(store, tx.transactionId, 'validating', 'failed', {
+        phase: 'semantic_precommit',
+        diagnostics
+      });
+      return {
+        opId,
+        backupRoot: '',
+        changedFiles: [],
+        diagnostics: logDiagnostic ? [...diagnostics, logDiagnostic] : diagnostics
+      };
+    }
+  }
+
 
   const backingUpJournalError = await transitionJournal(
     store, tx.transactionId, 'validating', 'backing_up', { validated: true }
@@ -388,7 +446,7 @@ export async function executePatchIrThroughTransaction(
       createdAt: new Date().toISOString()
     };
     await writeFile(recoveryPath, `${JSON.stringify(recoveryPayload, null, 2)}\n`, 'utf8');
-    const fileRecords = await buildFileRecords(patch, committed.restorePoint.files);
+    const fileRecords = await buildFileRecords(transactionPatch, committed.restorePoint.files);
     const logDiagnostic = await tryUpdateStatus(store, opId, 'recovery_required', {
       recoveryPath,
       recoveryReason: 'Transaction commit or automatic rollback did not restore every target.',
@@ -423,7 +481,30 @@ export async function executePatchIrThroughTransaction(
     };
   }
 
-  const fileRecords = await buildFileRecords(patch, committed.restorePoint.files);
+  if (options.semanticChecks?.afterCommit) {
+    const semanticDiagnostics = await runSemanticCheck(
+      options.semanticChecks.afterCommit,
+      'SEMANTIC_POSTCOMMIT_CHECK_FAILED'
+    );
+    if (semanticDiagnostics.some((item) => item.severity === 'error')) {
+      return rollbackAfterSemanticCheck({
+        store,
+        opId,
+        transaction: tx,
+        committed: {
+          transactionId: committed.transactionId,
+          committedPaths: committed.committedPaths,
+          restorePoint: committed.restorePoint
+        },
+        transactionPatch,
+        diagnostics: [...diagnostics, ...semanticDiagnostics],
+        ...(options.recoveryDir ? { recoveryDir: options.recoveryDir } : {})
+      });
+    }
+    diagnostics.push(...semanticDiagnostics);
+  }
+
+  const fileRecords = await buildFileRecords(transactionPatch, committed.restorePoint.files);
   const operation = createCommittedOperationRecord({
     proposal: {
       opId,
@@ -431,7 +512,7 @@ export async function executePatchIrThroughTransaction(
       title: patch.title,
       author,
       mode,
-      changes: patch.operations.map((op) => ({
+      changes: transactionPatch.operations.map((op) => ({
         targetUri: op.targetUri,
         targetPath: op.targetPath ?? '',
         kind: op.kind === 'text_edit' || op.kind === 'file_replace' ? 'text' : 'binary',
@@ -654,6 +735,99 @@ async function buildFileRecords(
     });
   }
   return records;
+}
+
+async function runSemanticCheck(
+  check: () => Promise<Diagnostic[]>,
+  code: string
+): Promise<Diagnostic[]> {
+  try {
+    return await check();
+  } catch (error) {
+    return [{
+      severity: 'error',
+      code,
+      message: error instanceof Error ? error.message : '语义事务检查失败。'
+    }];
+  }
+}
+
+type CommittedWorkspaceTransaction = {
+  transactionId: string;
+  committedPaths: string[];
+  restorePoint: NonNullable<Awaited<ReturnType<WorkspaceTransaction['commit']>>['restorePoint']>;
+};
+
+async function rollbackAfterSemanticCheck(input: {
+  store: OperationLogStore;
+  opId: string;
+  transaction: WorkspaceTransaction;
+  committed: CommittedWorkspaceTransaction;
+  transactionPatch: PatchIR;
+  diagnostics: Diagnostic[];
+  recoveryDir?: string;
+}): Promise<TransactionCommitCompatResult> {
+  const rolledBack = await input.transaction.rollback();
+  const diagnostics = [
+    ...input.diagnostics,
+    ...rolledBack.diagnostics.map(toLegacyDiagnostic)
+  ];
+  if (rolledBack.ok) {
+    await transitionJournal(
+      input.store,
+      input.committed.transactionId,
+      ['backing_up', 'replacing'],
+      'rolled_back',
+      { reason: 'semantic_postcommit_check_failed' }
+    );
+    const logDiagnostic = await tryUpdateStatus(input.store, input.opId, 'rolled_back', {
+      diagnostics
+    }, 'semantic_postcommit_rollback');
+    return {
+      opId: input.opId,
+      backupRoot: input.committed.restorePoint.root,
+      changedFiles: [],
+      diagnostics: logDiagnostic ? [...diagnostics, logDiagnostic] : diagnostics
+    };
+  }
+
+  const recoveryDir = input.recoveryDir ?? defaultRecoveryDirectory();
+  await mkdir(recoveryDir, { recursive: true });
+  const recoveryPath = join(recoveryDir, `${input.opId}.recovery.json`);
+  const recoveryPayload = {
+    status: 'recovery_required',
+    opId: input.opId,
+    transactionId: input.committed.transactionId,
+    backupRoot: input.committed.restorePoint.root,
+    committedPaths: input.committed.committedPaths,
+    restorePointFiles: input.committed.restorePoint.files,
+    files: await buildFileRecords(input.transactionPatch, input.committed.restorePoint.files),
+    diagnostics,
+    createdAt: new Date().toISOString()
+  };
+  await writeFile(recoveryPath, `${JSON.stringify(recoveryPayload, null, 2)}\n`, 'utf8');
+  await transitionJournal(
+    input.store,
+    input.committed.transactionId,
+    ['backing_up', 'replacing'],
+    'recovery_required',
+    { recoveryPath, reason: 'semantic_postcommit_check_failed' }
+  );
+  const logDiagnostic = await tryUpdateStatus(input.store, input.opId, 'recovery_required', {
+    recoveryPath,
+    recoveryReason: '语义提交后检查失败且自动回滚未完整成功。',
+    backupRoot: input.committed.restorePoint.root,
+    files: recoveryPayload.files,
+    transactionId: input.committed.transactionId,
+    diagnostics
+  }, 'semantic_postcommit_recovery');
+  return {
+    opId: input.opId,
+    backupRoot: input.committed.restorePoint.root,
+    changedFiles: input.committed.committedPaths,
+    diagnostics: logDiagnostic ? [...diagnostics, logDiagnostic] : diagnostics,
+    recoveryPath
+  };
 }
 
 async function tryUpdateStatus(

@@ -17,7 +17,7 @@ import { MemoryOperationLogStore, type OperationLogStore } from '../patch/operat
 import { createConfirmationReceipt } from '../patch/writerContract.js';
 import { openWorkspaceSession, type WorkspaceSession } from '../workspace/workspaceSession.js';
 import { saveRawReplace } from './saveRawResource.js';
-import type { RawReplaceCommitPort } from './editorMutationService.js';
+import type { RawReplaceCommitPort, WriteConfirmationPort } from './editorMutationService.js';
 
 export interface NativeEditSession {
   session: WorkspaceSession;
@@ -27,6 +27,7 @@ export interface NativeEditSession {
   recoveryDir: string;
   oodleRuntimeRoot?: string;
   commitPort: RawReplaceCommitPort;
+  confirmationPort?: WriteConfirmationPort;
   allowedRoots(): string[];
   mintReceipt(sourceUri: string, title: string): ConfirmationReceipt;
   indexFile(absolutePath: string, kind?: ResourceKind): Promise<IndexedFile>;
@@ -46,9 +47,11 @@ export function nativeEditSessionFromContext(input: {
   recoveryDir: string;
   stagingRoot?: string;
   confirmation?: ConfirmationReceipt;
+  confirmationPort?: WriteConfirmationPort;
+  commitPort?: RawReplaceCommitPort;
 }): NativeEditSession {
   const stagingRoot = input.stagingRoot ?? join(input.backupBaseDir, '..', 'staging');
-  const commitPort: RawReplaceCommitPort = {
+  const defaultCommitPort: RawReplaceCommitPort = {
     commit: (request) => {
       const confirmation = request.confirmation
         ?? input.confirmation
@@ -59,6 +62,7 @@ export function nativeEditSessionFromContext(input: {
         newContentBase64: request.newContentBase64,
         title: request.title,
         confirmation,
+        ...(request.semanticChecks ? { semanticChecks: request.semanticChecks } : {}),
         session: input.session,
         operationLog: input.operationLog,
         backupBaseDir: input.backupBaseDir,
@@ -77,7 +81,8 @@ export function nativeEditSessionFromContext(input: {
     backupBaseDir: input.backupBaseDir,
     recoveryDir: input.recoveryDir,
     ...(probedOodleRoot ? { oodleRuntimeRoot: probedOodleRoot } : {}),
-    commitPort,
+    commitPort: input.commitPort ?? defaultCommitPort,
+    ...(input.confirmationPort ? { confirmationPort: input.confirmationPort } : {}),
     allowedRoots: () => [
       input.session.layers.overlayRoot,
       ...(input.session.layers.baseRoot ? [input.session.layers.baseRoot] : []),
@@ -114,6 +119,7 @@ export async function openNativeEditSession(
         newContentBase64: input.newContentBase64,
         title: input.title,
         confirmation,
+        ...(input.semanticChecks ? { semanticChecks: input.semanticChecks } : {}),
         session,
         operationLog,
         backupBaseDir: storage.backupBaseDir,

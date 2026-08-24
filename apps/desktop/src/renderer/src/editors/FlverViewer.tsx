@@ -42,7 +42,8 @@ export interface FlverViewerProps {
   /**
    * 问题4-A：chrbnd 里 FLVER 的**全部网格**（renderer 按 meshIndex=0..meshCount-1
    * 循环读取后拼齐）。提供时把每个网格都投进同一个语义场景，相机框全覆盖；
-   * 不播动画、不做假播放头。externalMeshData 只用于单网格回退。
+   * externalMeshData 只用于单网格回退；externalPose 是真实 ACTION 采样位姿，
+   * 不在 renderer 内猜测或补齐缺失骨骼。
    */
   externalMeshes?: Array<{
     positionsBase64: string;

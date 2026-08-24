@@ -133,8 +133,14 @@ VALUES (?, ?, ?, ?, ?)`).run('ws-embed', workspace.root, 'sekiro', now, now);
     };
     repository.replaceRagChunks([probe]);
     const vector = new Float32Array([0.1, 0.2, 0.3, 0.4]);
-    repository.replaceRagEmbeddings([{ chunkId: probe.chunkId, model: 'embed-model', vector }]);
+    repository.replaceRagEmbeddings([{
+      chunkId: probe.chunkId,
+      model: 'embed-model',
+      vector,
+      sourceRevision: 'fixture-revision-1'
+    }]);
     expect(repository.ragEmbeddingModel() === 'embed-model', 'embedding model recorded');
+    expect(repository.ragEmbeddingSourceRevision() === 'fixture-revision-1', 'embedding source revision recorded');
     const loaded = repository.loadRagEmbeddings().get(probe.chunkId);
     expect(loaded !== undefined, 'vector loaded back');
     if (loaded) {

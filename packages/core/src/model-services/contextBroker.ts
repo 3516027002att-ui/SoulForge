@@ -93,7 +93,24 @@ function hasContent(source: ContextEvidenceSource): boolean {
 }
 
 function sectionBytes(header: string, excerpt: string): number {
-  return header.length + excerpt.length + 1;
+  return Buffer.byteLength(header, 'utf8') + Buffer.byteLength(excerpt, 'utf8') + 1;
+}
+
+function utf8Bytes(value: string): number {
+  return Buffer.byteLength(value, 'utf8');
+}
+
+function truncateUtf8(value: string, maxBytes: number): string {
+  if (maxBytes <= 0) return '';
+  if (utf8Bytes(value) <= maxBytes) return value;
+  let low = 0;
+  let high = value.length;
+  while (low < high) {
+    const middle = Math.ceil((low + high) / 2);
+    if (utf8Bytes(value.slice(0, middle)) <= maxBytes) low = middle;
+    else high = middle - 1;
+  }
+  return value.slice(0, low).replace(/[\uD800-\uDBFF]$/, '');
 }
 
 function buildHeader(
@@ -109,7 +126,15 @@ function buildHeader(
   ].join(',');
   const flagPart = flags ? ` ${flags}` : '';
   const uriPart = source.uri ? ` uri=${source.uri}` : '';
-  return `-- evidence=${source.kind}${uriPart} (sourceBytes=${sourceBytes} excerpt=${excerptLength}${flagPart}) --`;
+  const identity = safeMetaString(source.meta?.identity ?? source.meta?.address);
+  const revision = safeMetaString(source.meta?.sourceRevision ?? source.meta?.revision);
+  const coverage = safeMetaString(source.meta?.coverageStatus ?? source.meta?.coverage);
+  const facts = [
+    identity ? ` identity=${identity}` : '',
+    revision ? ` revision=${revision}` : '',
+    coverage ? ` coverage=${coverage}` : ''
+  ].join('');
+  return `-- evidence=${source.kind}${uriPart}${facts} (sourceBytes=${sourceBytes} excerpt=${excerptLength}${flagPart}) --`;
 }
 
 function makeSectionRecord(
@@ -119,6 +144,9 @@ function makeSectionRecord(
   truncated: boolean,
   redacted: boolean
 ): ContextSectionRecord {
+  const identity = safeMetaString(source.meta?.identity ?? source.meta?.address);
+  const sourceRevision = safeMetaString(source.meta?.sourceRevision ?? source.meta?.revision);
+  const coverageStatus = safeMetaString(source.meta?.coverageStatus ?? source.meta?.coverage);
   const record: ContextSectionRecord = {
     kind: source.kind as ContextEvidenceKind,
     excerptLength,
@@ -127,7 +155,27 @@ function makeSectionRecord(
     redacted
   };
   if (source.uri !== undefined) record.uri = source.uri;
+  if (identity) record.identity = identity;
+  if (sourceRevision) record.sourceRevision = sourceRevision;
+  if (coverageStatus) record.coverageStatus = coverageStatus;
   return record;
+}
+
+function safeMetaString(value: unknown): string | undefined {
+  if (typeof value !== 'string' && typeof value !== 'number' && typeof value !== 'boolean') return undefined;
+  const text = String(value);
+  return text.length > 160 ? `${text.slice(0, 160)}…` : text;
+}
+
+function ranking(source: ContextEvidenceSource, position: number): [number, string, number, number] {
+  const authority = typeof source.meta?.authorityRank === 'number' && Number.isFinite(source.meta.authorityRank)
+    ? source.meta.authorityRank : 0;
+  const relevance = typeof source.meta?.relevanceScore === 'number' && Number.isFinite(source.meta.relevanceScore)
+    ? source.meta.relevanceScore : 0;
+  const updated = safeMetaString(source.meta?.updatedAt ?? source.meta?.recordedAt) ?? '';
+  const kindRank = source.kind === 'readFile' || source.kind === 'resourceGraph' ? 3
+    : source.kind === 'diagnostics' || source.kind === 'patchPlan' ? 2 : 1;
+  return [authority + kindRank, updated, relevance, -position];
 }
 
 type ContextBrokerFailureCode = Extract<ContextBrokerResult, { ok: false }>['code'];
@@ -159,7 +207,23 @@ export function createContextBroker(): ContextBroker {
               : '上下文装配超时。');
         }
 
-        const valid = sources.filter(hasContent);
+        let staleOmitted = 0;
+        const valid = sources
+          .filter(hasContent)
+          .filter((source) => {
+            const expected = options?.currentSourceRevision;
+            const revision = source.meta?.sourceRevision;
+            if (!expected || revision === undefined || String(revision) === expected) return true;
+            staleOmitted += 1;
+            return false;
+          })
+          .map((source, position) => ({ source, position }))
+          .sort((left, right) => {
+            const a = ranking(left.source, left.position);
+            const b = ranking(right.source, right.position);
+            return b[0] - a[0] || b[1].localeCompare(a[1]) || b[2] - a[2] || b[3] - a[3];
+          })
+          .map((entry) => entry.source);
         if (valid.length === 0) {
           return failureResult('insufficient_evidence', '没有可装配的工作区证据。');
         }
@@ -168,7 +232,7 @@ export function createContextBroker(): ContextBroker {
         const sections: ContextSectionRecord[] = [];
         let totalBytes = 0;
         let usedEntries = 0;
-        let omitted = 0;
+        let omitted = staleOmitted;
 
         for (const source of valid) {
           if (usedEntries >= maxEntries) {
@@ -213,28 +277,56 @@ export function createContextBroker(): ContextBroker {
 
           const redacted = redactSecrets(raw);
           const redactionHappened = redacted !== raw;
-          // A single oversized section cannot be honestly squeezed in — fail closed.
-          if (redacted.length > maxBytes) {
-            return failureResult(
-              'CONTEXT_LIMIT_EXCEEDED',
-              `证据片段 ${source.uri ?? source.kind} 原始 ${redacted.length} 字节超过 context 上限 ${maxBytes} 字节。`
+          const rawBytes = source.sourceBytes ?? utf8Bytes(raw);
+          const redactedBytes = utf8Bytes(redacted);
+          // Large evidence is excerpted before the global budget is applied.
+          // This preserves useful authoritative metadata for a large document
+          // instead of turning the whole source into a hard failure.
+          const requestedExcerpt = redacted.slice(0, Math.min(excerptLength, redacted.length));
+          const remaining = Math.max(0, maxBytes - totalBytes);
+          let excerpt = truncateUtf8(requestedExcerpt, remaining);
+          let truncated = excerpt.length < redacted.length || utf8Bytes(excerpt) < redactedBytes;
+          let header = buildHeader(
+            source, utf8Bytes(excerpt), rawBytes, truncated, redactionHappened
+          );
+          let bytes = sectionBytes(header, excerpt);
+
+          // Header metadata shares the same hard budget. Shrink the excerpt to
+          // the largest valid UTF-8 prefix that still fits after the header.
+          if (bytes > remaining && remaining > 0) {
+            let low = 0;
+            let high = utf8Bytes(excerpt);
+            let best = '';
+            while (low <= high) {
+              const middle = Math.floor((low + high) / 2);
+              const candidate = truncateUtf8(excerpt, middle);
+              const candidateHeader = buildHeader(
+                source, utf8Bytes(candidate), rawBytes, true, redactionHappened
+              );
+              const candidateBytes = sectionBytes(candidateHeader, candidate);
+              if (candidateBytes <= remaining) {
+                best = candidate;
+                low = middle + 1;
+              } else {
+                high = middle - 1;
+              }
+            }
+            excerpt = best;
+            truncated = true;
+            header = buildHeader(
+              source, utf8Bytes(excerpt), rawBytes, truncated, redactionHappened
             );
+            bytes = sectionBytes(header, excerpt);
           }
 
-          const excerpt = redacted.slice(0, Math.min(excerptLength, maxBytes));
-          const truncated = excerpt.length < redacted.length;
-          const header = buildHeader(
-            source, excerpt.length, raw.length, truncated, redactionHappened
-          );
-          const bytes = sectionBytes(header, excerpt);
-          if (totalBytes + bytes > maxBytes) {
+          if (bytes > remaining || excerpt.length === 0) {
             omitted += 1;
             continue;
           }
           parts.push(header, excerpt);
           totalBytes += bytes;
           sections.push(makeSectionRecord(
-            source, excerpt.length, raw.length, truncated, redactionHappened
+            source, utf8Bytes(excerpt), rawBytes, truncated, redactionHappened
           ));
           usedEntries += 1;
         }

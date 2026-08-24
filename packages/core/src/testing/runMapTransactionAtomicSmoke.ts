@@ -50,6 +50,18 @@ export async function runMapTransactionAtomicSmoke(): Promise<void> {
           const buf = Buffer.from(req.newContentBase64, 'base64');
           const { writeFile } = await import('node:fs/promises');
           await writeFile(mapFile, buf);
+          const semanticDiagnostics = req.semanticChecks?.afterCommit
+            ? await req.semanticChecks.afterCommit()
+            : [];
+          if (semanticDiagnostics.some((diagnostic) => diagnostic.severity === 'error')) {
+            return {
+              ok: false,
+              file: req.file,
+              changedFiles: [],
+              diagnostics: semanticDiagnostics,
+              error: 'MAP_POSTCOMMIT_FAILED'
+            };
+          }
           return {
             ok: true,
             receipt: mintNativeEditReceipt(req.file.sourceUri, req.title),
@@ -178,20 +190,81 @@ export async function runMapTransactionAtomicSmoke(): Promise<void> {
     assert.equal(mixedResult.ok, true, 'Valid mixed transaction must succeed');
     assert.equal(commitCount, 1, 'Exact 1 commit must occur for multi-op transaction');
 
-    console.log('[Smoke] Case 6: Multiple deletes in same family (testing batch offset table rebuild)...');
+    console.log('[Smoke] Case 6: Template-backed duplicate/create uses one transaction and reread identities...');
     const reread1 = await loadMapDocument(editSession, mapFile);
     assert.equal(reread1.ok, true);
     if (!reread1.ok) return;
 
+    const template = reread1.doc.parts.find((part) =>
+      reread1.doc.parts.filter((candidate) => candidate.name === part.name).length === 1);
+    assert.ok(template, 'Need a unique native Part template');
+    const duplicateName = `${template.name}_SF_DUP`;
+    const createName = `${template.name}_SF_CREATE`;
+    const duplicatePosition: [number, number, number] = [
+      template.transform.position[0] + 1,
+      template.transform.position[1] + 2,
+      template.transform.position[2] + 3
+    ];
+    const createPosition: [number, number, number] = [
+      template.transform.position[0] - 1,
+      template.transform.position[1] - 2,
+      template.transform.position[2] - 3
+    ];
+    const alternateModel = reread1.doc.models.find((model) => model.name !== template.modelName);
+    assert.ok(alternateModel, 'Need an alternate declared model for ordered create composition');
+    const duplicateCreateTx: MapEditTransaction = {
+      id: 'tx-template-duplicate-create',
+      mapId: 'm10_00_00_00',
+      baseRevision: reread1.doc.revision,
+      description: 'Template-backed Part duplicate/create',
+      author: 'agent',
+      operations: [
+        { kind: 'duplicate', target: template.name, newName: duplicateName, position: duplicatePosition },
+        { kind: 'set_transform', target: duplicateName, position: [11, 22, 33] },
+        { kind: 'set_property', target: duplicateName, property: 'entityId', value: 2000999 },
+        { kind: 'create', template: template.name, newName: createName, entityKind: 'part', position: createPosition },
+        { kind: 'change_model', target: createName, newModelName: alternateModel.name }
+      ],
+      timestamp: Date.now()
+    };
+    const duplicateCreateResult = await executeMapTransaction(editSession, mapFile, duplicateCreateTx);
+    if (!duplicateCreateResult.ok) {
+      console.error('[Smoke] Case 6 failed with error:', JSON.stringify(duplicateCreateResult.error, null, 2));
+    }
+    assert.equal(duplicateCreateResult.ok, true, 'Template-backed duplicate/create must commit atomically');
+    assert.equal(commitCount, 2, 'Exact 2 commits after mixed + duplicate/create transactions');
+    assert.deepEqual(
+      (duplicateCreateResult.createdEntities ?? []).map((entity) => entity.name).sort(),
+      [createName, duplicateName].sort(),
+      'Created identities must come from authoritative reread'
+    );
+    assert.ok(
+      (duplicateCreateResult.createdEntities ?? []).every((entity) => !entity.stableKey.startsWith('pending:')),
+      'Created stable keys must not be locally fabricated pending keys'
+    );
+    const rereadAfterCreate = await loadMapDocument(editSession, mapFile);
+    assert.equal(rereadAfterCreate.ok, true);
+    if (!rereadAfterCreate.ok) return;
+    const duplicatePart = rereadAfterCreate.doc.parts.find((part) => part.name === duplicateName);
+    const createdPart = rereadAfterCreate.doc.parts.find((part) => part.name === createName);
+    assert.deepEqual(duplicatePart?.transform.position, [11, 22, 33], 'Ordered transform on a pending duplicate must reach native clone');
+    assert.equal(duplicatePart?.entityId, 2000999, 'Ordered property update on a pending duplicate must reach native clone');
+    assert.equal(createdPart?.modelName, alternateModel.name, 'Ordered model update on a pending create must reach native clone');
+
+    console.log('[Smoke] Case 7: Multiple deletes in same family (testing batch offset table rebuild)...');
+    const reread2 = await loadMapDocument(editSession, mapFile);
+    assert.equal(reread2.ok, true);
+    if (!reread2.ok) return;
+
     const deleteBatchTx: MapEditTransaction = {
       id: 'tx-delete-batch',
       mapId: 'm10_00_00_00',
-      baseRevision: reread1.doc.revision,
+      baseRevision: reread2.doc.revision,
       description: 'Delete 2 parts in one transaction',
       author: 'human',
       operations: [
         { kind: 'delete', target: 'm000010_1077' },
-        { kind: 'delete', target: reread1.doc.parts[1]!.name }
+        { kind: 'delete', target: reread2.doc.parts[1]!.name }
       ],
       timestamp: Date.now()
     };
@@ -200,7 +273,7 @@ export async function runMapTransactionAtomicSmoke(): Promise<void> {
       console.error('[Smoke] Case 6 failed with error:', JSON.stringify(deleteResult.error, null, 2));
     }
     assert.equal(deleteResult.ok, true, 'Batch delete must succeed and rebuild param tables without corruption');
-    assert.equal(commitCount, 2, 'Exact 2 commits after 2 transactions');
+    assert.equal(commitCount, 3, 'Exact 3 commits after 3 transactions');
 
     console.log('[Smoke] All Atomic MapEditTransaction Invariants PASSED.');
   });

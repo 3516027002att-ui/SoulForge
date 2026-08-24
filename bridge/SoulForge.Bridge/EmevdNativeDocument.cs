@@ -354,6 +354,7 @@ internal sealed class EmevdNativeDocument
         var totalInstr = builds.Sum(b => b.Instructions.Count);
         if (totalInstr > MaxInstructions)
             throw new InvalidDataException($"指令数 {totalInstr} 超过上限。");
+        ValidateEventParameterLayouts(builds);
         var totalParams = builds.Sum(b => b.Parameters.Count);
 
         // Linked files + strings from original
@@ -522,6 +523,53 @@ internal sealed class EmevdNativeDocument
         // Validate by reparse
         _ = Read(bytes);
         return bytes;
+    }
+
+    /// <summary>
+    /// Validate the native substitution layout before serializing it. The
+    /// parameter table stores offsets, not typed arguments, so a structurally
+    /// valid EMEVD can still contain a binding that would copy past the target
+    /// instruction's argument bank. Never emit such a mutation and rely on a
+    /// reread to discover it later.
+    /// </summary>
+    private static void ValidateEventParameterLayouts(IReadOnlyList<EmevdEventBuild> builds)
+    {
+        for (var eventIndex = 0; eventIndex < builds.Count; eventIndex++)
+        {
+            var b = builds[eventIndex];
+            for (var parameterIndex = 0; parameterIndex < b.Parameters.Count; parameterIndex++)
+            {
+                var p = b.Parameters[parameterIndex];
+                if (p.InstructionIndex < 0 || p.InstructionIndex >= b.Instructions.Count)
+                {
+                    throw new InvalidDataException(
+                        $"EMEVD 事件 {b.Id} 参数[{parameterIndex}] instructionIndex {p.InstructionIndex} 越界（0..{b.Instructions.Count - 1}）。");
+                }
+                if (p.TargetStartByte < 0)
+                {
+                    throw new InvalidDataException(
+                        $"EMEVD 事件 {b.Id} 参数[{parameterIndex}] targetStartByte 不能为负数：{p.TargetStartByte}。");
+                }
+                if (p.SourceStartByte < 0)
+                {
+                    throw new InvalidDataException(
+                        $"EMEVD 事件 {b.Id} 参数[{parameterIndex}] sourceStartByte 不能为负数：{p.SourceStartByte}。");
+                }
+                if (p.ByteCount <= 0)
+                {
+                    throw new InvalidDataException(
+                        $"EMEVD 事件 {b.Id} 参数[{parameterIndex}] byteCount 必须为正数：{p.ByteCount}。");
+                }
+
+                var instruction = b.Instructions[checked((int)p.InstructionIndex)];
+                var targetEnd = checked(p.TargetStartByte + (long)p.ByteCount);
+                if (targetEnd > instruction.Args.Length)
+                {
+                    throw new InvalidDataException(
+                        $"EMEVD 事件 {b.Id} 参数[{parameterIndex}] 目标范围 [{p.TargetStartByte}, {targetEnd}) 超出指令 {p.InstructionIndex} args 长度 {instruction.Args.Length}。");
+                }
+            }
+        }
     }
 
     public byte[] ApplyMutations(IReadOnlyList<EmevdPatch> patches)

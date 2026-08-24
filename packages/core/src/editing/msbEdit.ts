@@ -204,42 +204,41 @@ export async function setMsbPartTransform(input: {
 
   const file = await input.edit.indexFile(resolved.path, 'map');
   const expectedHash = file.sha256 || await sha256Of(resolved.path);
-  // 本图块一次调用只写一个 part（避跨容器哈希串扰），多 part 逐条提交。
+  // 一个 MapEditTransaction 必须对应一次 staging/write/commit；逐 part
+  // 提交会让第二次写入看到已变更的基线，也无法保证跨 part 原子性。
   const after: MsbPartSnapshot[] = [];
-  for (const mutation of mutations) {
-    const outcome = await applyNativeMutation({
-      file: { ...file, sha256: expectedHash },
-      sourceUri: file.sourceUri,
-      expectedHash,
-      stagingRoot: input.edit.stagingRoot,
-      allowedRoots: () => [...input.edit.allowedRoots()],
-      stagingPrefix: 'msb',
-      stagingFileName: `${basename(resolved.path)}.mut.msb`,
-      stageWrite: (context) => commitMsbMutationViaBridge({
-        sourcePath: resolved.path,
-        outputPath: context.outputPath,
-        expectedDocumentHash: expectedHash,
-        allowedRoots: context.allowedRoots,
-        writableRoots: context.writableRoots,
-        mutation,
-        timeoutMs: 120_000
-      }),
-      title: `MSB transform ${mutation.partName} in ${basename(resolved.path)}`,
-      confirmActionLabel: '提交 MSB part 变换'
-    }, { commit: input.edit.commitPort });
-    if (outcome.status !== 'committed' || !outcome.result.ok) {
-      const diagnostics = outcome.status === 'failed'
-        ? outcome.diagnostics
-        : outcome.status === 'committed'
-          ? outcome.result.diagnostics
-          : [{ severity: 'error' as const, code: 'MSB_WRITE_CANCELLED', message: '写入被取消。', sourceUri: file.sourceUri }];
-      return {
-        ok: false,
-        error: { code: diagnostics[0]?.code ?? 'MSB_WRITE_FAILED', message: diagnostics[0]?.message ?? 'MSB 写入失败。' },
-        diagnostics,
-        before
-      };
-    }
+  const outcome = await applyNativeMutation({
+    file: { ...file, sha256: expectedHash },
+    sourceUri: file.sourceUri,
+    expectedHash,
+    stagingRoot: input.edit.stagingRoot,
+    allowedRoots: () => [...input.edit.allowedRoots()],
+    stagingPrefix: 'msb',
+    stagingFileName: `${basename(resolved.path)}.mut.msb`,
+    stageWrite: (context) => commitMsbMutationViaBridge({
+      sourcePath: resolved.path,
+      outputPath: context.outputPath,
+      expectedDocumentHash: expectedHash,
+      allowedRoots: context.allowedRoots,
+      writableRoots: context.writableRoots,
+      mutations,
+      timeoutMs: 120_000
+    }),
+    title: `MSB transform transaction in ${basename(resolved.path)}`,
+    confirmActionLabel: '提交 MSB part 变换'
+  }, { commit: input.edit.commitPort });
+  if (outcome.status !== 'committed' || !outcome.result.ok) {
+    const diagnostics = outcome.status === 'failed'
+      ? outcome.diagnostics
+      : outcome.status === 'committed'
+        ? outcome.result.diagnostics
+        : [{ severity: 'error' as const, code: 'MSB_WRITE_CANCELLED', message: '写入被取消。', sourceUri: file.sourceUri }];
+    return {
+      ok: false,
+      error: { code: diagnostics[0]?.code ?? 'MSB_WRITE_FAILED', message: diagnostics[0]?.message ?? 'MSB 写入失败。' },
+      diagnostics,
+      before
+    };
   }
   const reread = await readMsbDocumentViaBridge({
     sourcePath: resolved.path,
@@ -269,24 +268,32 @@ export async function setMsbPartTransform(input: {
       }
     }
   } else {
-    // 读回失败：以「要写的值 + 未变的旧值」合成 after，不吞异常、如实标注。
-    for (const mutation of mutations) {
-      const old = before.find((item) => item.name === mutation.partName);
-      after.push({
-        address: formatMapAddress({ block: resolved.mapId, name: mutation.partName }),
-        name: mutation.partName,
-        typeId: old?.typeId ?? 0,
-        mapId: resolved.mapId,
-        posX: mutation.posX ?? old?.posX ?? 0,
-        posY: mutation.posY ?? old?.posY ?? 0,
-        posZ: mutation.posZ ?? old?.posZ ?? 0,
-        ...(mutation.rotX !== undefined ? { rotX: mutation.rotX } : old?.rotX !== undefined ? { rotX: old.rotX } : {}),
-        ...(mutation.rotY !== undefined ? { rotY: mutation.rotY } : old?.rotY !== undefined ? { rotY: old.rotY } : {}),
-        ...(mutation.rotZ !== undefined ? { rotZ: mutation.rotZ } : old?.rotZ !== undefined ? { rotZ: old.rotZ } : {}),
-        ...(mutation.scaleX !== undefined ? { scaleX: mutation.scaleX } : old?.scaleX !== undefined ? { scaleX: old.scaleX } : {}),
-        ...(mutation.scaleY !== undefined ? { scaleY: mutation.scaleY } : old?.scaleY !== undefined ? { scaleY: old.scaleY } : {}),
-        ...(mutation.scaleZ !== undefined ? { scaleZ: mutation.scaleZ } : old?.scaleZ !== undefined ? { scaleZ: old.scaleZ } : {})
-      });
+    return {
+      ok: false,
+      error: { code: 'MSB_REREAD_FAILED', message: 'MSB 提交后重读失败，不能把合成值当作写回事实。' },
+      diagnostics: asDiagnostics(reread.diagnostics),
+      before
+    };
+  }
+  const missing = mutations.map((mutation) => mutation.partName)
+    .filter((name) => !after.some((part) => part.name === name));
+  if (missing.length > 0) {
+    return {
+      ok: false,
+      error: { code: 'MSB_POSTCONDITION_FAILED', message: `写回后缺少 Part：${missing.join(', ')}` },
+      diagnostics: [],
+      before
+    };
+  }
+  for (const mutation of mutations) {
+    const snapshot = after.find((part) => part.name === mutation.partName);
+    if (!snapshot || !snapshotMatchesMutation(snapshot, mutation)) {
+      return {
+        ok: false,
+        error: { code: 'MSB_POSTCONDITION_FAILED', message: `Part ${mutation.partName} 的变换未按请求写回。` },
+        diagnostics: [],
+        before
+      };
     }
   }
   return {
@@ -308,6 +315,15 @@ function hasAnyTransform(edit: MsbPartTransformEdit): boolean {
 function hasRotScale(edit: MsbPartTransformEdit): boolean {
   return edit.rotX !== undefined || edit.rotY !== undefined || edit.rotZ !== undefined
     || edit.scaleX !== undefined || edit.scaleY !== undefined || edit.scaleZ !== undefined;
+}
+
+function snapshotMatchesMutation(snapshot: MsbPartSnapshot, mutation: MsbTransformMutation): boolean {
+  const pairs: Array<[number | undefined, number | undefined]> = [
+    [mutation.posX, snapshot.posX], [mutation.posY, snapshot.posY], [mutation.posZ, snapshot.posZ],
+    [mutation.rotX, snapshot.rotX], [mutation.rotY, snapshot.rotY], [mutation.rotZ, snapshot.rotZ],
+    [mutation.scaleX, snapshot.scaleX], [mutation.scaleY, snapshot.scaleY], [mutation.scaleZ, snapshot.scaleZ]
+  ];
+  return pairs.every(([expected, actual]) => expected === undefined || (actual !== undefined && Math.abs(expected - actual) <= 0.001));
 }
 
 async function resolveMsbFile(

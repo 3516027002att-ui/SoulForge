@@ -16,6 +16,12 @@ import type {
 } from './types.js';
 import { resolveOpenAiReasoningEffort } from './types.js';
 import {
+  createModelProviderCapabilityState,
+  resolveModelProviderCapabilityState,
+  type ModelProviderCapabilityPolicy,
+  type ModelProviderCapabilityState
+} from './providerCapabilities.js';
+import {
   classifyFetchError,
   classifyHttpError,
   classifyParseError,
@@ -30,6 +36,8 @@ export interface OpenAiResponsesAdapterOptions {
   apiKey: string;
   model: string;
   fetchImpl?: typeof fetch;
+  capabilities?: import('./types.js').ModelProviderCapabilities;
+  capabilityPolicy?: ModelProviderCapabilityPolicy;
 }
 
 export class OpenAiResponsesAdapter implements ModelServiceAdapter {
@@ -39,16 +47,30 @@ export class OpenAiResponsesAdapter implements ModelServiceAdapter {
   private readonly apiKey: string;
   private readonly model: string;
   private readonly fetchImpl: typeof fetch;
+  private readonly configuredCapabilities: import('./types.js').ModelProviderCapabilities | undefined;
+  private readonly capabilityPolicy: ModelProviderCapabilityPolicy;
+  readonly capabilityState: ModelProviderCapabilityState;
 
   constructor(options: OpenAiResponsesAdapterOptions) {
     this.baseUrl = normalizeServiceBaseUrl(options.baseUrl);
     this.apiKey = options.apiKey;
     this.model = options.model;
     this.fetchImpl = options.fetchImpl ?? fetch;
+    this.configuredCapabilities = options.capabilities;
+    this.capabilityPolicy = options.capabilityPolicy ?? 'legacy-defaults';
+    this.capabilityState = createModelProviderCapabilityState({
+      ...(options.capabilities ? { configured: options.capabilities } : {}),
+      policy: this.capabilityPolicy
+    });
   }
 
   async complete(request: ModelCompleteRequest): Promise<ModelCompleteResult> {
-    const body = buildResponsesBody(this.model, request, false);
+    const capabilities = resolveModelProviderCapabilityState({
+      ...(request.capabilities ? { request: request.capabilities } : {}),
+      ...(this.configuredCapabilities ? { configured: this.configuredCapabilities } : {}),
+      policy: this.capabilityPolicy
+    });
+    const body = buildResponsesBody(this.model, request, false, capabilities.capabilities);
     const { signal, cleanup } = createRequestSignal(request.signal, request.timeoutMs);
     let response: Response;
     try {
@@ -127,7 +149,12 @@ export class OpenAiResponsesAdapter implements ModelServiceAdapter {
   }
 
   async *stream(request: ModelCompleteRequest): AsyncGenerator<StreamEvent, void, undefined> {
-    const body = buildResponsesBody(this.model, request, true);
+    const capabilities = resolveModelProviderCapabilityState({
+      ...(request.capabilities ? { request: request.capabilities } : {}),
+      ...(this.configuredCapabilities ? { configured: this.configuredCapabilities } : {}),
+      policy: this.capabilityPolicy
+    });
+    const body = buildResponsesBody(this.model, request, true, capabilities.capabilities);
     const { signal, cleanup } = createRequestSignal(request.signal, request.timeoutMs);
     let response: Response;
     try {
@@ -321,19 +348,22 @@ interface ResponsesStreamEvent {
 function buildResponsesBody(
   model: string,
   request: ModelCompleteRequest,
-  stream: boolean
+  stream: boolean,
+  capabilities: ModelProviderCapabilityState['capabilities']
 ): Record<string, unknown> {
-  const reasoningEffort = resolveOpenAiReasoningEffort(request.thinkingLevel);
+  const reasoningEffort = capabilities.reasoningEffort === false
+    ? undefined
+    : resolveOpenAiReasoningEffort(request.thinkingLevel);
   return {
     model,
     stream,
-    input: request.messages.map(toResponsesInputItem),
-    ...(request.tools?.length
+    input: request.messages.map((message) => toResponsesInputItem(message, capabilities.vision)),
+    ...(request.tools?.length && capabilities.tools
       ? { tools: request.tools.map(toResponsesTool) }
       : {}),
-    ...(request.temperature !== undefined ? { temperature: request.temperature } : {}),
-    ...(request.maxTokens !== undefined ? { max_output_tokens: request.maxTokens } : {}),
-    ...(request.topP !== undefined ? { top_p: request.topP } : {}),
+    ...(request.temperature !== undefined && capabilities.temperature ? { temperature: request.temperature } : {}),
+    ...(request.maxTokens !== undefined && capabilities.maxTokens ? { max_output_tokens: request.maxTokens } : {}),
+    ...(request.topP !== undefined && capabilities.topP ? { top_p: request.topP } : {}),
     // Responses API 的思考档位走 reasoning.effort；要可见的思考摘要时带 summary=auto。
     // topK 协议无此字段不下发。
     ...(reasoningEffort !== undefined ? { reasoning: { effort: reasoningEffort, summary: 'auto' } } : {})
@@ -348,7 +378,7 @@ function listModelsError(diagnostic: {
   return { ok: false, error: { code: diagnostic.code, message: diagnostic.message } };
 }
 
-function toResponsesInputItem(message: ChatMessage): Record<string, unknown> {
+function toResponsesInputItem(message: ChatMessage, visionAllowed: boolean): Record<string, unknown> {
   if (message.role === 'tool') {
     return {
       type: 'function_call_output',
@@ -375,7 +405,7 @@ function toResponsesInputItem(message: ChatMessage): Record<string, unknown> {
     };
   }
   // 多模态：user 消息带图像时 content 用 input_* parts（data URL 内联）。
-  if (message.role === 'user' && message.images && message.images.length > 0) {
+  if (message.role === 'user' && message.images && message.images.length > 0 && visionAllowed) {
     return {
       type: 'message',
       role: 'user',

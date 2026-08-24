@@ -577,6 +577,33 @@ CREATE INDEX IF NOT EXISTS idx_rag_embeddings_workspace_model
   ON rag_embeddings(workspace_id, model);
 `
   }
+  ,{
+    id: 10,
+    name: 'v0_5_rag_source_revisions',
+    sql: '',
+    addColumns: [
+      { table: 'rag_chunks', column: 'source_revision', definition: 'TEXT' }
+    ],
+    sqlAfterColumns: `
+CREATE INDEX IF NOT EXISTS idx_rag_chunks_workspace_source_revision
+  ON rag_chunks(workspace_id, source_uri, source_revision);
+    `
+  }
+  ,{
+    id: 11,
+    name: 'v0_5_rag_reference_and_embedding_revisions',
+    sql: '',
+    addColumns: [
+      { table: 'reference_edges', column: 'source_revision', definition: 'TEXT' },
+      { table: 'rag_embeddings', column: 'source_revision', definition: 'TEXT' }
+    ],
+    sqlAfterColumns: `
+CREATE INDEX IF NOT EXISTS idx_reference_edges_workspace_source_revision
+  ON reference_edges(workspace_id, source_revision);
+CREATE INDEX IF NOT EXISTS idx_rag_embeddings_workspace_source_revision
+  ON rag_embeddings(workspace_id, source_revision);
+`
+  }
 ];
 
 export const APP_DB_MIGRATIONS: readonly SqlMigration[] = [

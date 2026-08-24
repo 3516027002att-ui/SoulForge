@@ -188,6 +188,7 @@ export async function commitProposedFileWrite(input: {
   confirmation?: ConfirmationReceipt;
   backupBaseDir?: string;
   recoveryDir?: string;
+  semanticChecks?: import('../patch/durablePatchCommit.js').ExecutePatchIrOptions['semanticChecks'];
 }): Promise<TransactionCommitCompatResult> {
   if (input.proposal.diagnostics.some((d) => d.severity === 'error')) {
     return {
@@ -213,6 +214,7 @@ export async function commitProposedFileWrite(input: {
     ...(input.operationLog ? { operationLog: input.operationLog } : {}),
     ...(input.confirmation ? { confirmation: input.confirmation } : {}),
     ...(input.backupBaseDir ? { backupBaseDir: input.backupBaseDir } : {}),
-    ...(input.recoveryDir ? { recoveryDir: input.recoveryDir } : {})
+    ...(input.recoveryDir ? { recoveryDir: input.recoveryDir } : {}),
+    ...(input.semanticChecks ? { semanticChecks: input.semanticChecks } : {})
   });
 }

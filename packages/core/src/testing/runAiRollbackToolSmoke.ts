@@ -25,7 +25,7 @@ import { MemoryOperationLogStore } from '../patch/operationLog.js';
 import { createConfirmationReceipt } from '../patch/writerContract.js';
 import { createDefaultToolRegistry } from '../ai/toolRegistry.js';
 import { openWorkspaceSession } from '../workspace/workspaceSession.js';
-import type { WorkspaceIndex } from '../indexing/workspaceIndex.js';
+import { WorkspaceIndex } from '../indexing/workspaceIndex.js';
 
 const failures: string[] = [];
 let checks = 0;
@@ -68,8 +68,9 @@ async function mainInWorkspace(root: string): Promise<void> {
   const opId = committed.opId;
 
   const registry = createDefaultToolRegistry();
-  // 工具只判 workspaceIndex 是否为空，不访问字段；smoke 无索引装置，用最小假体。
-  const fakeIndex = {} as WorkspaceIndex;
+  // 回滚成功后生产工具会刷新恢复文件的 live revision 并重建引用图，
+  // 因此 smoke 也必须提供真实的空索引，而不是只满足类型的空对象假体。
+  const fakeIndex = new WorkspaceIndex(session.meta.workspaceId);
 
   // 1. 缺生产上下文：干净失败，且不产生任何写。
   const noContext = await registry.run(

@@ -12,12 +12,20 @@
  * Authority: native-verified（偏移表驱动全枚举 + 源字节原位补丁写回，per-type 内层载荷保持无损）。
  */
 import { mkdir, readFile, readdir, stat, writeFile } from 'node:fs/promises';
-import { join } from 'node:path';
+import { existsSync } from 'node:fs';
+import { dirname, join, resolve } from 'node:path';
 import { decompressDfltDcx } from '../util/dcxDflt.js';
 import { runBridge, disposeBridgeDaemonPool } from '../bridge/runBridge.js';
 import { resolveNativeFixture } from './nativeFixtureRegistry.js';
 import { createSmokeWorkspace } from './harness/smokeWorkspace.js';
-import { isRegisteredMsbType } from '@soulforge/shared';
+import { isRegisteredMsbType, type BridgeResult } from '@soulforge/shared';
+
+const DEFAULT_BRIDGE = 'D:/Repository/SoulForge/bridge/SoulForge.Bridge/bin/Debug/net10.0/win-x64/SoulForge.Bridge.exe';
+const bridgeExecutablePath = resolve(process.env.SOULFORGE_BRIDGE_EXE ?? DEFAULT_BRIDGE);
+
+async function runNativeBridge<T = unknown>(options: Parameters<typeof runBridge>[0]): Promise<BridgeResult<T>> {
+  return runBridge<T>({ ...options, bridgeExecutablePath });
+}
 
 interface MsbEnvelope {
   sourceHash: string;
@@ -46,6 +54,11 @@ interface MsbEnvelope {
   roundTrip?: { semanticIdentical: boolean; byteIdentical: boolean };
 }
 
+interface DcxEnvelope {
+  compressionFormat?: string;
+  payloadBase64?: string | null;
+}
+
 const close = (a: number, b: number) => Math.abs(a - b) < 0.001;
 
 function assertPartEqual(actual: MsbEnvelope['parts'][number], expected: MsbEnvelope['parts'][number], label: string): void {
@@ -61,7 +74,68 @@ function assertRegionEqual(actual: MsbEnvelope['regions'][number], expected: Msb
   }
 }
 
+function readPartsParam(bytes: Buffer): { entryOffsets: number[]; nextOffset: number } {
+  let paramOffset = 0x10;
+  const visited = new Set<number>();
+  while (paramOffset > 0 && paramOffset + 0x10 <= bytes.length && !visited.has(paramOffset)) {
+    visited.add(paramOffset);
+    const offsetCount = bytes.readInt32LE(paramOffset + 4);
+    const nameOffset = Number(bytes.readBigInt64LE(paramOffset + 8));
+    const name = readUtf16(bytes, nameOffset);
+    const nextOffset = Number(bytes.readBigInt64LE(paramOffset + 0x10 + (offsetCount - 1) * 8));
+    if (name === 'PARTS_PARAM_ST') {
+      return {
+        entryOffsets: Array.from({ length: offsetCount - 1 }, (_, index) =>
+          Number(bytes.readBigInt64LE(paramOffset + 0x10 + index * 8))),
+        nextOffset
+      };
+    }
+    if (nextOffset <= paramOffset || nextOffset >= bytes.length) break;
+    paramOffset = nextOffset;
+  }
+  throw new Error('无法在 raw MSB 中定位 PARTS_PARAM_ST');
+}
+
+function nextPartOffset(
+  bytes: Buffer,
+  parts: MsbEnvelope['parts'],
+  offset: number,
+  fallbackNextOffset?: number
+): number {
+  const next = parts.map((part) => part.offset).filter((candidate) => candidate > offset).sort((a, b) => a - b)[0]
+    ?? fallbackNextOffset;
+  if (next === undefined || next <= offset || next > bytes.length) {
+    throw new Error(`无法计算 MSB part entry boundary: offset=${offset}, next=${next}`);
+  }
+  return next;
+}
+
+function readUtf16(bytes: Buffer, offset: number): string {
+  if (offset < 0 || offset + 1 >= bytes.length) throw new Error(`UTF-16 offset 越界: ${offset}`);
+  let end = offset;
+  while (end + 1 < bytes.length && (bytes[end] !== 0 || bytes[end + 1] !== 0)) end += 2;
+  return bytes.subarray(offset, end).toString('utf16le');
+}
+
 async function main(): Promise<void> {
+  const explicitPath = process.argv[2]?.trim();
+  const gameRoot = process.env.SOULFORGE_SEKIRO_GAME_ROOT?.trim();
+  const discoveredPath = gameRoot ? join(gameRoot, 'map', 'mapstudio', 'm11_00_00_00.msb.dcx') : undefined;
+  const registryConfigured = Boolean(
+    process.env.SOULFORGE_NATIVE_FIXTURE_REGISTRY?.trim()
+      && process.env.SOULFORGE_NATIVE_FIXTURE_ROOT?.trim()
+  );
+  if (!explicitPath && !discoveredPath && !registryConfigured) {
+    console.log(JSON.stringify({
+      ok: true,
+      status: 'NOT_RUN_ENVIRONMENTAL',
+      message: '未提供 MSB writer 原版路径；请设置 SOULFORGE_SEKIRO_GAME_ROOT 或显式传入 m11_00_00_00.msb.dcx。'
+    }));
+    return;
+  }
+  if (!explicitPath && discoveredPath && !existsSync(discoveredPath)) {
+    throw new Error(`SOULFORGE_SEKIRO_GAME_ROOT 中缺少 ${discoveredPath}。`);
+  }
   const workspace = await createSmokeWorkspace('msb-writer');
   const root = workspace.root;
   await mkdir(root, { recursive: true });
@@ -70,15 +144,43 @@ async function main(): Promise<void> {
   try {
 
       const sourceDcx = await resolveNativeFixture(
-        process.argv[2],
+        explicitPath ?? discoveredPath,
         'msb-primary',
         '../../mods/map/mapstudio/m11_00_00_00.msb.dcx'
       );
-      const payload = decompressDfltDcx(await readFile(sourceDcx));
+      const sourceBytes = await readFile(sourceDcx);
+      const sourceMagic = sourceBytes.subarray(0, 4).toString('ascii');
+      let payload: Buffer;
+      if (sourceMagic !== 'DCX\0') {
+        payload = sourceBytes;
+      } else {
+        const compression = sourceBytes.length >= 0x1c
+          ? sourceBytes.subarray(0x18, 0x1c).toString('ascii')
+          : '';
+        if (compression === 'DFLT') {
+          payload = decompressDfltDcx(sourceBytes);
+        } else {
+          const oodleRuntimeRoot = process.env.SOULFORGE_OODLE_RUNTIME_ROOT
+            || (sourceDcx.includes('Sekiro') ? 'D:/mystream/Sekiro Shadows Die Twice/Sekiro' : undefined);
+          const extracted = await runNativeBridge<DcxEnvelope>({
+            command: 'read-dcx-document',
+            filePath: sourceDcx,
+            allowedRoots: [root, dirname(sourceDcx), ...(oodleRuntimeRoot ? [oodleRuntimeRoot] : [])],
+            ...(oodleRuntimeRoot ? { oodleRuntimeRoot } : {}),
+            maxFrameBytes: 32 * 1024 * 1024,
+            timeoutMs: 180_000,
+            commandOptions: { includePayload: true, payloadLimitBytes: 64 * 1024 * 1024 }
+          });
+          if (extracted.parseStatus === 'failed' || !extracted.data?.payloadBase64) {
+            throw new Error(`MSB KRAK payload extraction failed: ${JSON.stringify(extracted.diagnostics)}`);
+          }
+          payload = Buffer.from(extracted.data.payloadBase64, 'base64');
+        }
+      }
       const msbPath = join(root, 'm11.msb');
       await writeFile(msbPath, payload);
 
-      const read = await runBridge<MsbEnvelope>({
+      const read = await runNativeBridge<MsbEnvelope>({
         command: 'read-msb-document',
         filePath: msbPath,
         allowedRoots: [root],
@@ -131,7 +233,7 @@ async function main(): Promise<void> {
       }
 
       const staged = join(staging, 'm11.mut.msb');
-      const written = await runBridge({
+      const written = await runNativeBridge({
         command: 'write-msb',
         filePath: msbPath,
         allowedRoots: [root, staging],
@@ -147,7 +249,7 @@ async function main(): Promise<void> {
         throw new Error(`MSB 批量写回失败: ${JSON.stringify(written.diagnostics)}`);
       }
 
-      const after = await runBridge<MsbEnvelope>({
+      const after = await runNativeBridge<MsbEnvelope>({
         command: 'read-msb-document',
         filePath: staged,
         allowedRoots: [staging],
@@ -221,6 +323,124 @@ async function main(): Promise<void> {
         throw new Error('写回后 route 表变化');
       }
 
+      // ---- template-backed duplicate/create：复制完整 native entry ----
+      // 只改 name relative pointer；entry 原始前缀（包括 subtype data、references、
+      // model 与未知字节）必须保持一致。新名称追加在 clone entry 尾部，避免移动
+      // 未知 payload 内部的相对引用。
+      const templatePart = orig.parts.find((part) => isRegisteredMsbType('part', part.typeId)
+        && orig.parts.filter((candidate) => candidate.name === part.name).length === 1);
+      if (!templatePart) throw new Error('m11 fixture 缺少 template-backed duplicate/create part 样本');
+      const duplicateName = `${templatePart.name}_sf_dup`;
+      const createName = `${templatePart.name}_sf_create`;
+      const duplicatePath = join(staging, 'm11.duplicate-create.msb');
+      const duplicated = await runNativeBridge<MsbEnvelope>({
+        command: 'write-msb',
+        filePath: msbPath,
+        allowedRoots: [root, staging],
+        writableRoots: [staging],
+        timeoutMs: 180_000,
+        commandOptions: {
+          outputPath: duplicatePath,
+          expectedDocumentHash: orig.sourceHash,
+          mutations: [
+            { kind: 'duplicate_part', partName: templatePart.name, newName: duplicateName },
+            { kind: 'create_part', partName: templatePart.name, newName: createName }
+          ]
+        }
+      });
+      if (!duplicated.diagnostics.some((d) => d.code === 'MSB_STAGING_WRITE_VERIFIED')) {
+        throw new Error(`MSB template duplicate/create 写回失败: ${JSON.stringify(duplicated.diagnostics)}`);
+      }
+      const duplicateRead = await runNativeBridge<MsbEnvelope>({
+        command: 'read-msb-document',
+        filePath: duplicatePath,
+        allowedRoots: [staging],
+        timeoutMs: 180_000
+      });
+      if (duplicateRead.parseStatus === 'failed' || !duplicateRead.data) {
+        throw new Error(`duplicate/create 后 MSB 重读失败: ${JSON.stringify(duplicateRead.diagnostics)}`);
+      }
+      const duplicatedDoc = duplicateRead.data;
+      if (duplicatedDoc.partCount !== orig.partCount + 2
+        || !duplicatedDoc.parts.some((part) => part.name === duplicateName)
+        || !duplicatedDoc.parts.some((part) => part.name === createName)) {
+        throw new Error(`duplicate/create 后实体计数或名称不符: ${JSON.stringify({ before: orig.partCount, after: duplicatedDoc.partCount, duplicateName, createName })}`);
+      }
+      for (const newName of [duplicateName, createName]) {
+        const clone = duplicatedDoc.parts.find((part) => part.name === newName)!;
+        if (clone.typeId !== templatePart.typeId || clone.modelIndex !== templatePart.modelIndex) {
+          throw new Error(`template-backed ${newName} subtype/model 未保留`);
+        }
+      }
+      const duplicateBytes = await readFile(duplicatePath);
+      const sourcePartEnd = nextPartOffset(payload, orig.parts, templatePart.offset);
+      const sourcePartBytes = payload.subarray(templatePart.offset, sourcePartEnd);
+      const duplicateParam = readPartsParam(duplicateBytes);
+      for (const newName of [duplicateName, createName]) {
+        const clone = duplicatedDoc.parts.find((part) => part.name === newName)!;
+        const cloneEnd = nextPartOffset(duplicateBytes, duplicatedDoc.parts, clone.offset, duplicateParam.nextOffset);
+        const cloneBytes = duplicateBytes.subarray(clone.offset, cloneEnd);
+        if (cloneBytes.length < sourcePartBytes.length) {
+          throw new Error(`template-backed ${newName} entry 被截断`);
+        }
+        for (let i = 8; i < sourcePartBytes.length; i++) {
+          if (cloneBytes[i] !== sourcePartBytes[i]) {
+            throw new Error(`template-backed ${newName} 未保留 native entry payload，relative=${i}`);
+          }
+        }
+      }
+
+      // The clone must observe earlier mutations in the same ApplyMutations
+      // working state, not the immutable source snapshot.
+      const orderedCloneName = `${templatePart.name}_sf_ordered`;
+      const orderedPath = join(staging, 'm11.ordered-template-clone.msb');
+      const orderedPosition = {
+        x: templatePart.posX + 2,
+        y: templatePart.posY - 2,
+        z: templatePart.posZ + 1
+      };
+      const ordered = await runNativeBridge<MsbEnvelope>({
+        command: 'write-msb',
+        filePath: msbPath,
+        allowedRoots: [root, staging],
+        writableRoots: [staging],
+        timeoutMs: 180_000,
+        commandOptions: {
+          outputPath: orderedPath,
+          expectedDocumentHash: orig.sourceHash,
+          mutations: [
+            {
+              kind: 'set_part_transform',
+              partName: templatePart.name,
+              posX: orderedPosition.x,
+              posY: orderedPosition.y,
+              posZ: orderedPosition.z
+            },
+            { kind: 'duplicate_part', partName: templatePart.name, newName: orderedCloneName }
+          ]
+        }
+      });
+      if (!ordered.diagnostics.some((d) => d.code === 'MSB_STAGING_WRITE_VERIFIED')) {
+        throw new Error(`ordered template clone 写回失败: ${JSON.stringify(ordered.diagnostics)}`);
+      }
+      const orderedRead = await runNativeBridge<MsbEnvelope>({
+        command: 'read-msb-document',
+        filePath: orderedPath,
+        allowedRoots: [staging],
+        timeoutMs: 180_000
+      });
+      const orderedSource = orderedRead.data?.parts.find((part) => part.name === templatePart.name);
+      const orderedClone = orderedRead.data?.parts.find((part) => part.name === orderedCloneName);
+      if (orderedRead.parseStatus === 'failed' || !orderedSource || !orderedClone
+        || !close(orderedSource.posX, orderedPosition.x)
+        || !close(orderedSource.posY, orderedPosition.y)
+        || !close(orderedSource.posZ, orderedPosition.z)
+        || !close(orderedClone.posX, orderedPosition.x)
+        || !close(orderedClone.posY, orderedPosition.y)
+        || !close(orderedClone.posZ, orderedPosition.z)) {
+        throw new Error(`ordered template clone 未继承 working state: ${JSON.stringify({ orderedSource, orderedClone, orderedPosition, diagnostics: orderedRead.diagnostics })}`);
+      }
+
       // ---- 未注册实体守卫 fail-closed ----
       const unregisteredPart = orig.parts.find((p) => p.typeId === 0
         && orig.parts.filter((o) => o.name === p.name).length === 1)!;
@@ -230,7 +450,7 @@ async function main(): Promise<void> {
       patchedPartBytes.writeUInt32LE(99, unregisteredPart.offset + 0x08); // part type@+0x08
       const partPatchPath = join(staging, 'm11.unregistered-part.msb');
       await writeFile(partPatchPath, patchedPartBytes);
-      const partPatchRead = await runBridge<MsbEnvelope>({
+      const partPatchRead = await runNativeBridge<MsbEnvelope>({
         command: 'read-msb-document',
         filePath: partPatchPath,
         allowedRoots: [staging],
@@ -240,7 +460,7 @@ async function main(): Promise<void> {
       if (partPatchRead.parseStatus === 'failed' || !patchedPart || patchedPart.typeId !== 99) {
         throw new Error(`未注册 part 补丁未能被解析为 typeId=99: ${JSON.stringify(partPatchRead.diagnostics)}`);
       }
-      const partGuard = await runBridge({
+      const partGuard = await runNativeBridge({
         command: 'write-msb',
         filePath: partPatchPath,
         allowedRoots: [staging],
@@ -262,7 +482,7 @@ async function main(): Promise<void> {
       patchedRegionBytes.writeUInt32LE(99, unregisteredRegion.offset + 0x08); // region type@+0x08
       const regionPatchPath = join(staging, 'm11.unregistered-region.msb');
       await writeFile(regionPatchPath, patchedRegionBytes);
-      const regionPatchRead = await runBridge<MsbEnvelope>({
+      const regionPatchRead = await runNativeBridge<MsbEnvelope>({
         command: 'read-msb-document',
         filePath: regionPatchPath,
         allowedRoots: [staging],
@@ -272,7 +492,7 @@ async function main(): Promise<void> {
       if (regionPatchRead.parseStatus === 'failed' || !patchedRegion || patchedRegion.typeId !== 99) {
         throw new Error(`未注册 region 补丁未能被解析为 typeId=99: ${JSON.stringify(regionPatchRead.diagnostics)}`);
       }
-      const regionGuard = await runBridge({
+      const regionGuard = await runNativeBridge({
         command: 'write-msb',
         filePath: regionPatchPath,
         allowedRoots: [staging],
@@ -302,7 +522,7 @@ async function main(): Promise<void> {
       }
 
       const deletePath = join(staging, 'm11.delete.msb');
-      const deleted = await runBridge<MsbEnvelope>({
+      const deleted = await runNativeBridge<MsbEnvelope>({
         command: 'write-msb',
         filePath: msbPath,
         allowedRoots: [root, staging],
@@ -321,7 +541,7 @@ async function main(): Promise<void> {
       if (!deleted.diagnostics.some((d) => d.code === 'MSB_STAGING_WRITE_VERIFIED')) {
         throw new Error(`MSB delete 批量写回失败: ${JSON.stringify(deleted.diagnostics)}`);
       }
-      const delAfter = await runBridge<MsbEnvelope>({
+      const delAfter = await runNativeBridge<MsbEnvelope>({
         command: 'read-msb-document',
         filePath: deletePath,
         allowedRoots: [staging],
@@ -389,7 +609,7 @@ async function main(): Promise<void> {
       }
 
       // ---- delete 失败注入：唯一性规则与未注册守卫 fail-closed ----
-      const nonexistentDelete = await runBridge({
+      const nonexistentDelete = await runNativeBridge({
         command: 'write-msb',
         filePath: msbPath,
         allowedRoots: [root, staging],
@@ -409,7 +629,7 @@ async function main(): Promise<void> {
       const dupPart = orig.parts.find((p) => orig.parts.filter((o) => o.name === p.name).length > 1);
       let duplicateNameDelete: string | null = null;
       if (dupPart) {
-        const dupDelete = await runBridge({
+        const dupDelete = await runNativeBridge({
           command: 'write-msb',
           filePath: msbPath,
           allowedRoots: [root, staging],
@@ -428,7 +648,7 @@ async function main(): Promise<void> {
         duplicateNameDelete = dupPart.name;
       }
 
-      const partDeleteGuard = await runBridge({
+      const partDeleteGuard = await runNativeBridge({
         command: 'write-msb',
         filePath: partPatchPath,
         allowedRoots: [staging],
@@ -444,7 +664,7 @@ async function main(): Promise<void> {
       if (!partDeleteGuard.diagnostics.some((d) => d.code === 'MSB_UNREGISTERED_ENTITY_TYPE')) {
         throw new Error(`未注册 part delete 未 fail-closed: ${JSON.stringify(partDeleteGuard.diagnostics)}`);
       }
-      const regionDeleteGuard = await runBridge({
+      const regionDeleteGuard = await runNativeBridge({
         command: 'write-msb',
         filePath: regionPatchPath,
         allowedRoots: [staging],
@@ -466,7 +686,7 @@ async function main(): Promise<void> {
       // 源 before-image 必须字节可恢复（哈希不变）。
       const corruptedPath = join(staging, 'm11.corrupted.msb');
       await writeFile(corruptedPath, payload.subarray(0, 0x40));
-      const reopen = await runBridge<MsbEnvelope>({
+      const reopen = await runNativeBridge<MsbEnvelope>({
         command: 'read-msb-document',
         filePath: corruptedPath,
         allowedRoots: [staging],
@@ -475,7 +695,7 @@ async function main(): Promise<void> {
       if (reopen.parseStatus !== 'failed' || !reopen.diagnostics.some((d) => d.code === 'MSB_DOCUMENT_READ_FAILED')) {
         throw new Error(`reopen failure 未结构化失败: ${JSON.stringify(reopen.diagnostics)}`);
       }
-      const beforeImageCheck = await runBridge<MsbEnvelope>({
+      const beforeImageCheck = await runNativeBridge<MsbEnvelope>({
         command: 'read-msb-document',
         filePath: msbPath,
         allowedRoots: [root],
@@ -489,7 +709,7 @@ async function main(): Promise<void> {
       // ---- fail-closed 不残留半成品 ----
       // expectedDocumentHash 篡改 → 写入前即失败，outputPath 不得产生文件。
       const hashMismatchPath = join(staging, 'm11.hash-mismatch.msb');
-      const hashBad = await runBridge({
+      const hashBad = await runNativeBridge({
         command: 'write-msb',
         filePath: msbPath,
         allowedRoots: [root, staging],
@@ -513,7 +733,7 @@ async function main(): Promise<void> {
       // outputPath 损坏（父路径是文件）→ C# 侧 IOException fail-closed，无半成品。
       const blockedParent = join(staging, 'blocked-as-file');
       await writeFile(blockedParent, Buffer.from('x'));
-      const blockedWrite = await runBridge({
+      const blockedWrite = await runNativeBridge({
         command: 'write-msb',
         filePath: msbPath,
         allowedRoots: [root, staging],
@@ -536,7 +756,7 @@ async function main(): Promise<void> {
 
       console.log(JSON.stringify({
         ok: true,
-        message: 'MSB writer 全覆盖往返通过：全部实体字节级无损，delete/upsert 与未注册编辑 fail-closed',
+        message: 'MSB writer 全覆盖往返通过：全部实体字节级无损，template duplicate/create、delete 与未注册编辑 fail-closed',
         authority: 'native-verified',
         partTypesCovered: partTypes,
         regionTypesCovered: regionTypes,
@@ -570,6 +790,13 @@ async function main(): Promise<void> {
             unregisteredPartDelete: 'MSB_UNREGISTERED_ENTITY_TYPE',
             unregisteredRegionDelete: 'MSB_UNREGISTERED_ENTITY_TYPE'
           }
+        },
+        templateDuplicateCreate: {
+          source: templatePart.name,
+          duplicate: duplicateName,
+          create: createName,
+          nativeEntryPrefixPreserved: true,
+          rereadVerified: true
         },
         reopenFailure: {
           structuredFailure: true,

@@ -25,6 +25,7 @@ import {
 } from '@soulforge/shared';
 import type { WorkspaceIndex } from '../indexing/workspaceIndex.js';
 import { attachLookupIndex } from './lookupIndex.js';
+import { sourceRevisionForFile, sourceRevisionForFiles } from '../semantic/sourceRevision.js';
 
 const MAX_BODY_CHARS = 1_800;
 const MAX_INSTRUCTIONS = 24;
@@ -57,11 +58,57 @@ export function buildRagCorpus(index: WorkspaceIndex, now = new Date().toISOStri
     for (const entry of msgExport.entries) chunks.push(textEntryChunk(index.workspaceId, entry));
   }
 
+  // Every projected symbol inherits the revision of its native source.  A
+  // persisted symbol without this match is never allowed to survive a catalog
+  // rebuild, even when sourceUri is unchanged.
+  const sourceByUri = new Map(index.getFiles().map((file) => [
+    file.sourceUri,
+    sourceRevisionForFile(file)
+  ]));
+  for (const chunk of chunks) {
+    const revision = sourceByUri.get(chunk.sourceUri);
+    if (revision) chunk.sourceRevision = revision;
+  }
+
+  const files = index.getFiles();
+  const failed = files.filter((file) => file.parseStatus === 'failed' || file.parseStatus === 'unsupported').length;
+  const partial = files.filter((file) => file.parseStatus === 'partial').length;
+  const pending = files.filter((file) => file.parseStatus === 'unparsed').length;
+  const successful = Math.max(0, files.length - failed - partial - pending);
+  const coverageSourceRevision = sourceRevisionForFiles(files);
+
+  const sourceBySymbolUri = new Map(chunks
+    .filter((chunk) => chunk.sourceRevision)
+    .map((chunk) => [chunk.symbolUri, chunk.sourceRevision!]));
+  const references = index.listReferences().map((edge) => {
+    const revisions = [...new Set([
+      sourceBySymbolUri.get(edge.fromUri) ?? sourceByUri.get(edge.fromUri),
+      sourceBySymbolUri.get(edge.toUri) ?? sourceByUri.get(edge.toUri)
+    ].filter((value): value is string => typeof value === 'string'))].sort();
+    return revisions.length > 0 ? { ...edge, sourceRevision: revisions.join('|') } : edge;
+  });
+
   return createRagCorpus({
     workspaceId: index.workspaceId,
     builtAt: now,
     chunks,
-    references: index.listReferences()
+    references,
+    coverage: {
+      status: files.length === 0
+        ? 'SOURCE_UNAVAILABLE'
+        : failed > 0 || partial > 0 || pending > 0 ? 'PARTIALLY_INDEXED' : 'FOUND',
+      scope: 'rag',
+      indexed: chunks.length,
+      expected: files.length,
+      successful,
+      failed,
+      ...(partial > 0 ? { partial } : {}),
+      ...(coverageSourceRevision
+        ? { sourceRevision: coverageSourceRevision }
+        : {}),
+      completenessRatio: files.length === 0 ? 0 : successful / files.length,
+      resultCount: 0
+    }
   });
 }
 
@@ -70,6 +117,7 @@ export function createRagCorpus(input: {
   builtAt: string;
   chunks: readonly RagChunk[];
   references?: readonly ReferenceEdge[];
+  coverage?: RagCorpus['coverage'];
 }): RagCorpus {
   const byFamily = emptyFamilyCounts();
   for (const chunk of input.chunks) byFamily[chunk.family] += 1;
@@ -78,26 +126,77 @@ export function createRagCorpus(input: {
     builtAt: input.builtAt,
     chunks: [...input.chunks],
     references: [...(input.references ?? [])],
-    stats: { total: input.chunks.length, byFamily }
+    stats: { total: input.chunks.length, byFamily },
+    coverage: input.coverage ?? {
+      // A caller that only supplies chunks has not proven source coverage.
+      // buildRagCorpus supplies the live scan coverage explicitly; persisted
+      // or synthetic corpora must remain non-complete until a live source is
+      // reconciled.
+      status: input.chunks.length > 0 ? 'NOT_INDEXED' : 'SOURCE_UNAVAILABLE',
+      scope: 'rag',
+      indexed: input.chunks.length,
+      expected: input.chunks.length,
+      successful: 0,
+      failed: 0,
+      completenessRatio: 0,
+      resultCount: 0
+    }
   };
   attachLookupIndex(corpus);
   return corpus;
 }
 
 export function mergeCatalogAndPersisted(catalog: RagCorpus, persisted: RagCorpus): RagCorpus {
-  const liveSources = new Set(catalog.chunks.map((chunk) => chunk.sourceUri));
+  const liveSources = new Map(catalog.chunks
+    .filter((chunk) => chunk.family === 'file' && chunk.sourceRevision)
+    .map((chunk) => [chunk.sourceUri, chunk.sourceRevision!]));
   const keptSymbols = persisted.chunks.filter(
-    (chunk) => chunk.family !== 'file' && liveSources.has(chunk.sourceUri)
+    (chunk) => chunk.family !== 'file'
+      && liveSources.get(chunk.sourceUri) !== undefined
+      && chunk.sourceRevision !== undefined
+      && liveSources.get(chunk.sourceUri) === chunk.sourceRevision
   );
-  const keptUris = new Set(keptSymbols.map((chunk) => chunk.symbolUri));
+  const mergedSymbols = [
+    ...catalog.chunks.filter((chunk) => chunk.family !== 'file'),
+    ...keptSymbols.filter((chunk) => !catalog.chunks.some((live) => live.symbolUri === chunk.symbolUri))
+  ];
+  const currentRevisions = new Map<string, string>();
+  for (const chunk of [...catalog.chunks, ...keptSymbols]) {
+    if (chunk.sourceRevision) currentRevisions.set(chunk.symbolUri, chunk.sourceRevision);
+    if (chunk.sourceRevision) currentRevisions.set(chunk.sourceUri, chunk.sourceRevision);
+  }
+  const keptUris = new Set([
+    ...catalog.chunks.map((chunk) => chunk.symbolUri),
+    ...mergedSymbols.map((chunk) => chunk.symbolUri)
+  ]);
+  const isFreshPersistedReference = (edge: ReferenceEdge): boolean => {
+    if (!edge.sourceRevision) return false;
+    const revisions = [...new Set([
+      currentRevisions.get(edge.fromUri),
+      currentRevisions.get(edge.toUri)
+    ].filter((value): value is string => typeof value === 'string'))].sort();
+    return revisions.length > 0 && revisions.join('|') === edge.sourceRevision;
+  };
   const keptReferences = persisted.references.filter(
-    (edge) => keptUris.has(edge.fromUri) || keptUris.has(edge.toUri)
+    (edge) => (keptUris.has(edge.fromUri) || keptUris.has(edge.toUri)) && isFreshPersistedReference(edge)
   );
+  const references = deduplicateReferences([...catalog.references, ...keptReferences]);
   return createRagCorpus({
     workspaceId: catalog.workspaceId,
     builtAt: catalog.builtAt,
-    chunks: [...catalog.chunks.filter((chunk) => chunk.family === 'file'), ...keptSymbols],
-    references: keptReferences
+    chunks: [...catalog.chunks.filter((chunk) => chunk.family === 'file'), ...mergedSymbols],
+    references,
+    coverage: catalog.coverage
+  });
+}
+
+function deduplicateReferences(edges: readonly ReferenceEdge[]): ReferenceEdge[] {
+  const seen = new Set<string>();
+  return edges.filter((edge) => {
+    const key = `${edge.fromUri}|${edge.toUri}|${edge.kind}|${edge.sourceRevision ?? ''}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
   });
 }
 
@@ -312,7 +411,7 @@ function makeChunk(input: {
   title: string;
   body: string;
   numericIds: number[];
-  sourceRevision?: number;
+  sourceRevision?: string;
   sourceHash?: string;
   relativePath?: string;
   resourceKind?: ResourceKind;

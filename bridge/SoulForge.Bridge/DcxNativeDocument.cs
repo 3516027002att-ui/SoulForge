@@ -139,8 +139,14 @@ internal sealed class DcxNativeDocument
         return rebuilt;
     }
 
-    public object ToEnvelope(DcxRoundTripReport report, bool includePayload = false)
+    public object ToEnvelope(
+        DcxRoundTripReport report,
+        bool includePayload = false,
+        int payloadLimitBytes = 512 * 1024)
     {
+        var effectivePayloadLimit = payloadLimitBytes is > 0 and <= 64 * 1024 * 1024
+            ? payloadLimitBytes
+            : 512 * 1024;
         object? nested = null;
         bool? nestedDcxRebuildVerified = null;
         if (Payload.AsSpan(0, Math.Min(Payload.Length, 4)).SequenceEqual("BND4"u8))
@@ -172,7 +178,7 @@ internal sealed class DcxNativeDocument
         unknownDataPolicy = "source-header-and-trailing-bytes-preserved",
         // 只有显式请求且 payload 不超过帧预算（512KB raw ≈ 700KB base64）才返回，
         // 防止大 DCX（如 parambnd ~10MB）把 envelope 撑爆帧上限。
-        payloadBase64 = includePayload && Payload.Length <= 512 * 1024
+        payloadBase64 = includePayload && Payload.Length <= effectivePayloadLimit
             ? Convert.ToBase64String(Payload)
             : null,
         roundTrip = report,

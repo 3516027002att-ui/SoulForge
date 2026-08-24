@@ -10,6 +10,7 @@ import { createHash } from 'node:crypto';
 import { mkdtemp, mkdir, readFile, writeFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
+import { existsSync } from 'node:fs';
 import { runBridge, disposeBridgeDaemonPool } from '../bridge/runBridge.js';
 import { decompressDfltDcx } from '../util/dcxDflt.js';
 import {
@@ -47,8 +48,26 @@ function hashOf(buffer: Buffer): string {
 }
 
 async function main(): Promise<void> {
+  const explicitPath = process.argv[2]?.trim();
+  const gameRoot = process.env.SOULFORGE_SEKIRO_GAME_ROOT?.trim();
+  const discoveredPath = gameRoot ? join(gameRoot, 'event', 'common.emevd.dcx') : undefined;
+  const registryConfigured = Boolean(
+    process.env.SOULFORGE_NATIVE_FIXTURE_REGISTRY?.trim()
+      && process.env.SOULFORGE_NATIVE_FIXTURE_ROOT?.trim()
+  );
+  if (!explicitPath && !discoveredPath && !registryConfigured) {
+    console.log(JSON.stringify({
+      ok: true,
+      status: 'NOT_RUN_ENVIRONMENTAL',
+      message: '未提供 EMEVD 原版路径；请设置 SOULFORGE_SEKIRO_GAME_ROOT 或显式传入 common.emevd.dcx。'
+    }));
+    return;
+  }
+  if (!explicitPath && discoveredPath && !existsSync(discoveredPath)) {
+    throw new Error(`SOULFORGE_SEKIRO_GAME_ROOT 中缺少 ${discoveredPath}。`);
+  }
   const sourceDcx = await resolveNativeFixture(
-    process.argv[2],
+    explicitPath ?? discoveredPath,
     'emevd-primary',
     '../../mods/event/common.emevd.dcx'
   );

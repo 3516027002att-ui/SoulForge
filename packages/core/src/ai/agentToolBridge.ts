@@ -26,6 +26,8 @@
 
 import type { ToolCall, ToolDefinition as AgentToolDefinition } from '../model-services/types.js';
 import { toolInputShapeToJsonSchema, type ToolContext, type ToolRegistry } from './toolRegistry.js';
+import { ResolverWorkflowState } from '../semantic/resolverState.js';
+import type { CompletionEvidence } from '../semantic/types.js';
 
 export interface AgentToolBridgeOptions {
   registry: ToolRegistry;
@@ -36,6 +38,8 @@ export interface AgentToolBridgeOptions {
    * models that ignore the documented workflow receive a structured denial.
    */
   requireTextLookupBeforeStructuredDiscovery?: boolean;
+  /** Original user goal used to allow precise-address reads without text search. */
+  externalTaskGoal?: string;
 }
 
 export interface AgentToolBridge {
@@ -48,12 +52,13 @@ export interface AgentToolBridge {
   executeTool: (
     call: ToolCall,
     contextOverride?: Partial<ToolContext>
-  ) => Promise<{ ok: boolean; content: string; code?: string }>;
+  ) => Promise<{ ok: boolean; content: string; code?: string; completionEvidence?: CompletionEvidence[] }>;
 }
 
 const PARALLEL_SAFE_LEVELS = new Set(['read', 'analyze']);
 const TEXT_DISCOVERY_TOOLS = new Set(['search_text_entries', 'read_fmg_entries', 'retrieve_evidence']);
 const STRUCTURED_DISCOVERY_TOOLS = new Set([
+  'resolve_canonical_entities',
   'search_resources',
   'search_param_rows',
   'read_param_fields',
@@ -71,6 +76,7 @@ const STRUCTURED_DISCOVERY_TOOLS = new Set([
  */
 export const MAX_BOUNDED_TOOL_RESULT_CHARS = 8_192;
 const BOUNDED_DISCOVERY_TOOLS = new Set([
+  'resolve_canonical_entities',
   'search_resources',
   'search_events',
   'search_map_entities',
@@ -85,6 +91,17 @@ const BOUNDED_DISCOVERY_TOOLS = new Set([
 ]);
 const SUMMARY_ARRAY_LIMIT = 16;
 const SUMMARY_STRING_LIMIT = 320;
+const INDEX_REFRESH_MUTATION_TOOLS = new Set([
+  'commit_patch',
+  'commit_semantic_change_set',
+  'mutate_param_fields',
+  'mutate_fmg_entries',
+  'apply_emevd_dsl',
+  'mutate_tae_event_times',
+  'mutate_msb_part_transform',
+  'batch_transform_map_objects',
+  'import_map_from_blender'
+]);
 
 function summarizeToolValue(value: unknown, depth = 0): unknown {
   if (depth > 4) return typeof value === 'string' ? value.slice(0, SUMMARY_STRING_LIMIT) : '[depth-limited]';
@@ -162,7 +179,7 @@ function boundedToolContent(name: string, data: unknown): string {
 
 export function createAgentToolBridge(options: AgentToolBridgeOptions): AgentToolBridge {
   const { registry, context } = options;
-  let textLookupAttempted = false;
+  const resolverState = new ResolverWorkflowState(options.externalTaskGoal);
   const tools: AgentToolDefinition[] = registry.list().map((descriptor) => ({
     name: descriptor.name,
     description: descriptor.description,
@@ -176,7 +193,7 @@ export function createAgentToolBridge(options: AgentToolBridgeOptions): AgentToo
   const executeTool = async (
     call: ToolCall,
     contextOverride?: Partial<ToolContext>
-  ): Promise<{ ok: boolean; content: string; code?: string }> => {
+  ): Promise<{ ok: boolean; content: string; code?: string; completionEvidence?: CompletionEvidence[] }> => {
     let input: unknown = {};
     try {
       input = call.argumentsJson.trim() === '' ? {} : JSON.parse(call.argumentsJson);
@@ -190,10 +207,10 @@ export function createAgentToolBridge(options: AgentToolBridgeOptions): AgentToo
         })
       };
     }
-    if (TEXT_DISCOVERY_TOOLS.has(call.name)) textLookupAttempted = true;
+    const discoveryTool = TEXT_DISCOVERY_TOOLS.has(call.name) || STRUCTURED_DISCOVERY_TOOLS.has(call.name);
     if (
       options.requireTextLookupBeforeStructuredDiscovery === true
-      && !textLookupAttempted
+      && !resolverState.canProceedToStructuredDiscovery()
       && STRUCTURED_DISCOVERY_TOOLS.has(call.name)
     ) {
       return {
@@ -208,19 +225,53 @@ export function createAgentToolBridge(options: AgentToolBridgeOptions): AgentToo
         })
       };
     }
+    if (discoveryTool) {
+      const cached = resolverState.getCachedDiscovery(call.name, input);
+      if (cached) return cached;
+    }
+    let indexUpdated = false;
     const effectiveContext: ToolContext = { ...context, ...contextOverride };
+    if (effectiveContext.onIndexUpdated) {
+      const onIndexUpdated = effectiveContext.onIndexUpdated;
+      effectiveContext.onIndexUpdated = async () => {
+        await onIndexUpdated();
+        indexUpdated = true;
+      };
+    }
     const result = await registry.run(call.name, input, effectiveContext);
     if (effectiveContext.mode && effectiveContext.mode !== context.mode) {
       context.mode = effectiveContext.mode;
     }
-    if (result.ok) {
-      return { ok: true, content: boundedToolContent(call.name, result.data) };
+    const completionEvidence = result.ok
+      ? [
+          ...(result.completionEvidence ?? []),
+          ...(INDEX_REFRESH_MUTATION_TOOLS.has(call.name) && indexUpdated
+            ? [
+                { kind: 'index_refreshed' as const, evidenceIds: [`tool:${call.name}:index`] },
+                { kind: 'rag_refreshed' as const, evidenceIds: [`tool:${call.name}:rag`] }
+              ]
+            : [])
+        ]
+      : [];
+    const response = result.ok
+      ? {
+          ok: true,
+          content: boundedToolContent(call.name, result.data),
+          ...(completionEvidence.length > 0 ? { completionEvidence } : {})
+        }
+      : {
+          ok: false,
+          code: result.error?.code ?? 'TOOL_FAILED',
+          content: JSON.stringify(result.error ?? { code: 'TOOL_FAILED', message: '工具执行失败。' })
+        };
+    if (discoveryTool) {
+      resolverState.rememberDiscovery(call.name, input, response);
+    } else if (result.ok) {
+      // A successful mutation can change the canonical source revision.  A
+      // prior query must not survive that boundary and feed stale evidence.
+      resolverState.invalidateDiscoveryCache();
     }
-    return {
-      ok: false,
-      code: result.error?.code ?? 'TOOL_FAILED',
-      content: JSON.stringify(result.error ?? { code: 'TOOL_FAILED', message: '工具执行失败。' })
-    };
+    return response;
   };
 
   return { tools, executeTool };

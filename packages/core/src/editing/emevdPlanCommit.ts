@@ -45,6 +45,8 @@ export interface EmevdPlanCommitRequest {
    * must compare against the on-disk .dcx bytes — never the payload hash.
    */
   expectedOuterFileHash?: string;
+  /** Native Oodle root required when sourcePath is a KRAK-wrapped DCX. */
+  oodleRuntimeRoot?: string;
   allowedRoots: string[];
   timeoutMs?: number;
 }
@@ -427,6 +429,7 @@ export async function stageEmevdPlanViaBridge(
       allowedRoots: context.allowedRoots,
       writableRoots: context.writableRoots,
       mutations: converted.mutations,
+      ...(request.oodleRuntimeRoot !== undefined ? { oodleRuntimeRoot: request.oodleRuntimeRoot } : {}),
       ...(request.timeoutMs !== undefined ? { timeoutMs: request.timeoutMs } : {})
     })
   });
@@ -522,6 +525,8 @@ export function buildEmevdFileReplacePatch(input: {
 
 export interface EmevdReopenValidatorInput {
   allowedRoots: string[];
+  /** Native Oodle root required when reopening a KRAK-wrapped DCX. */
+  oodleRuntimeRoot?: string;
   timeoutMs?: number;
 }
 
@@ -549,6 +554,7 @@ export function createEmevdReopenValidator(
           command: 'read-emevd-document',
           filePath: committedPath,
           allowedRoots: input.allowedRoots,
+          ...(input.oodleRuntimeRoot !== undefined ? { oodleRuntimeRoot: input.oodleRuntimeRoot } : {}),
           timeoutMs: input.timeoutMs ?? 120_000
         });
         if (envelope.parseStatus === 'failed') {
@@ -658,6 +664,7 @@ export async function commitEmevdPlanViaPatchEngine(
     // Bridge reopen 验证挂在事务的 after_commit 上：重开失败即自动回滚到 before-image。
     appendValidators: [createEmevdReopenValidator({
       allowedRoots: request.allowedRoots,
+      ...(request.oodleRuntimeRoot !== undefined ? { oodleRuntimeRoot: request.oodleRuntimeRoot } : {}),
       ...(request.timeoutMs !== undefined ? { timeoutMs: request.timeoutMs } : {})
     })]
   });
@@ -680,6 +687,7 @@ export async function commitEmevdPlanViaPatchEngine(
     command: 'read-emevd-document',
     filePath: request.sourcePath,
     allowedRoots: request.allowedRoots,
+    ...(request.oodleRuntimeRoot !== undefined ? { oodleRuntimeRoot: request.oodleRuntimeRoot } : {}),
     timeoutMs: request.timeoutMs ?? 120_000
   });
   const sourceFormat = staged.result.sourceFormat ?? 'emevd';

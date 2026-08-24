@@ -113,6 +113,8 @@ export async function commitParamMutationsViaBridge(
 export async function readParamDocumentViaBridge(input: {
   sourcePath: string;
   allowedRoots: string[];
+  /** Bridge-confirmed BND4 child index; omitted for loose PARAM. */
+  entryIndex?: number;
   timeoutMs?: number;
   maxRows?: number;
   /** When set, Bridge returns only these rows with payloads. */
@@ -148,6 +150,7 @@ export async function readParamDocumentViaBridge(input: {
     timeoutMs: input.timeoutMs ?? 60_000,
     ...(input.maxFrameBytes !== undefined ? { maxFrameBytes: input.maxFrameBytes } : {}),
     commandOptions: {
+      ...(input.entryIndex !== undefined ? { entryIndex: input.entryIndex } : {}),
       ...(input.rowIds && input.rowIds.length > 0 ? { rowIds: input.rowIds } : {}),
       ...(input.includeAllPayloads ? { includeAllPayloads: true } : {})
     }

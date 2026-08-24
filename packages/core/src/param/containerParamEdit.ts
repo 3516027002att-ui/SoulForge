@@ -19,6 +19,7 @@ import {
 } from '../editing/paramBridgeCommit.js';
 import { stageBridgeOutput } from '../editing/bridgeStaging.js';
 import type { NativeEditSession } from '../editing/nativeEditSession.js';
+import type { ExecutePatchIrOptions } from '../patch/durablePatchCommit.js';
 import { applyParamFieldMutation } from './paramFieldMutation.js';
 import { decodeRowFields } from './paramdefLayout.js';
 import { importPinnedSmithboxSdtParamMetadata } from './smithboxParamMetadataSource.js';
@@ -67,6 +68,7 @@ export type ParamSetResult =
       before: ParamFieldSnapshot[];
       after: ParamFieldSnapshot[];
       changedTables: string[];
+      operationIds: string[];
       diagnostics: Diagnostic[];
     }
   | { ok: false; error: ParamEditFailure; diagnostics: Diagnostic[]; before?: ParamFieldSnapshot[] };
@@ -244,6 +246,7 @@ export async function setParamFields(input: {
   edit: NativeEditSession;
   edits: ParamFieldEdit[];
   containerPath?: string;
+  semanticChecks?: ExecutePatchIrOptions['semanticChecks'];
 }): Promise<ParamSetResult> {
   if (input.edits.length === 0) {
     return { ok: false, error: { code: 'PARAM_EDIT_EMPTY', message: '没有要写入的字段。' }, diagnostics: [] };
@@ -258,6 +261,7 @@ export async function setParamFields(input: {
   const before: ParamFieldSnapshot[] = [];
   const after: ParamFieldSnapshot[] = [];
   const changedTables: string[] = [];
+  const operationIds: string[] = [];
   const diagnostics: Diagnostic[] = [];
   let containerHash = file.sha256 ?? await sha256Of(container.path);
 
@@ -331,13 +335,15 @@ export async function setParamFields(input: {
       unpackedPath: loaded.unpackedPath,
       unpackedHash: loaded.sourceHash,
       mutations,
-      title: `PARAM set ${mutations.length} row(s) in ${loaded.tableName}`
+      title: `PARAM set ${mutations.length} row(s) in ${loaded.tableName}`,
+      ...(input.semanticChecks ? { semanticChecks: input.semanticChecks } : {})
     });
     if (!committed.ok) {
       return { ok: false, error: committed.error, diagnostics: [...diagnostics, ...committed.diagnostics], before };
     }
     diagnostics.push(...committed.diagnostics);
     changedTables.push(loaded.tableName);
+    if (committed.operationId) operationIds.push(committed.operationId);
     containerHash = committed.nextContainerHash;
     file.sha256 = containerHash;
     const refreshed = entries.entries.find((item) => item.index === loaded.entry.index);
@@ -350,6 +356,7 @@ export async function setParamFields(input: {
     before,
     after,
     changedTables,
+    operationIds,
     diagnostics
   };
 }
@@ -364,8 +371,9 @@ async function commitTableMutations(input: {
   unpackedHash: string;
   mutations: Array<{ kind: 'upsert'; id: number; dataBase64: string }>;
   title: string;
+  semanticChecks?: ExecutePatchIrOptions['semanticChecks'];
 }): Promise<
-  | { ok: true; nextContainerHash: string; diagnostics: Diagnostic[] }
+  | { ok: true; nextContainerHash: string; operationId?: string; diagnostics: Diagnostic[] }
   | { ok: false; error: ParamEditFailure; diagnostics: Diagnostic[] }
 > {
   const { edit } = input;
@@ -442,7 +450,8 @@ async function commitTableMutations(input: {
       };
     },
     title: input.title,
-    confirmActionLabel: '提交容器内 PARAM 字段变更'
+    confirmActionLabel: '提交容器内 PARAM 字段变更',
+    ...(input.semanticChecks ? { semanticChecks: input.semanticChecks } : {})
   }, { commit: edit.commitPort });
 
   if (outcome.status !== 'committed' || !outcome.result.ok) {
@@ -465,6 +474,7 @@ async function commitTableMutations(input: {
   return {
     ok: true,
     nextContainerHash: await sha256Of(input.containerPath),
+    ...(outcome.result.opId ? { operationId: outcome.result.opId } : {}),
     diagnostics: outcome.result.diagnostics
   };
 }
@@ -704,6 +714,19 @@ async function loadTrustedDefinition(
     };
   }
   return { ok: true, document: { ...entry.document, origin: 'imported' } };
+}
+
+/**
+ * Production editor/document adapters use the same pinned metadata gate as
+ * the Agent/CLI PARAM facade.  Keeping this lookup here prevents a second
+ * desktop-only definition loader from silently drifting from the native field
+ * writer's layout and row-width checks.
+ */
+export async function loadTrustedParamDefinition(
+  typeName: string,
+  rowDataSize: number
+): Promise<{ ok: true; document: ParamDefDocument } | { ok: false; error: ParamEditFailure }> {
+  return loadTrustedDefinition(typeName, rowDataSize);
 }
 
 async function findParamBnd(root: string): Promise<string[]> {

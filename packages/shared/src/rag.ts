@@ -36,11 +36,35 @@ export interface RagChunk {
   body: string;
   numericIds: number[];
   contentHash: string;
-  sourceRevision?: number;
+  /** Stable source revision. Persisted symbol chunks may not outlive this value. */
+  sourceRevision?: string;
   sourceHash?: string;
   relativePath?: string;
   resourceKind?: ResourceKind;
   confidence?: ReferenceConfidence;
+}
+
+export type RagCoverageStatus =
+  | 'FOUND'
+  | 'NOT_FOUND_WITH_COMPLETE_COVERAGE'
+  | 'NOT_INDEXED'
+  | 'PARTIALLY_INDEXED'
+  | 'PARSE_FAILED'
+  | 'STALE'
+  | 'SOURCE_UNAVAILABLE';
+
+export interface RagCoverage {
+  status: RagCoverageStatus;
+  scope: string;
+  indexed: number;
+  expected: number;
+  successful: number;
+  failed: number;
+  /** Source was accepted only as a partial projection; it cannot prove absence. */
+  partial?: number;
+  sourceRevision?: string;
+  completenessRatio: number;
+  resultCount: number;
 }
 
 export interface RagCorpusStats {
@@ -54,6 +78,7 @@ export interface RagCorpus {
   chunks: RagChunk[];
   references: ReferenceEdge[];
   stats: RagCorpusStats;
+  coverage?: RagCoverage;
 }
 
 export interface RagHit {
@@ -75,6 +100,8 @@ export interface RagRetrieveOk {
     matched: number;
     expanded: number;
     truncated: boolean;
+    coverage: RagCoverage;
+    retrievalMode: 'lexical' | 'lexical_rerank' | 'hybrid_rrf';
   };
 }
 
@@ -82,6 +109,7 @@ export interface RagRetrieveFailure {
   ok: false;
   code: 'insufficient_evidence' | 'INVALID_INPUT' | 'WORKSPACE_REQUIRED';
   message: string;
+  coverage?: RagCoverage;
 }
 
 export type RagRetrieveResult = RagRetrieveOk | RagRetrieveFailure;

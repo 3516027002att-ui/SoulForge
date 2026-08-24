@@ -68,6 +68,7 @@ export * from './workspace/semanticWorkspaceIndex.js';
 export * from './workspace/importLegacySemanticSnapshot.js';
 export * from './ai/evidencePackBuilder.js';
 export * from './model-services/index.js';
+export * from './semantic/index.js';
 export * from './assets/assetImport.js';
 
 
@@ -127,6 +128,7 @@ export * from './staging/index.js';
 export * from './backup/index.js';
 export * from './audit-log/index.js';
 export * from './transactions/index.js';
+export * from './semantic/patchProposalTransaction.js';
 export * from './vfs/index.js';
 export * from './tae/taeEventTemplate.js';
 export * from './action/taeAnimationBridge.js';

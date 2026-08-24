@@ -86,6 +86,9 @@ export const TIER_BY_SCRIPT = Object.freeze({
   'test:darkscript-languageservice-scale': 'unit',
   'test:animation-playback-clock': 'unit',
   'test:map-document-scale': 'unit',
+  // 语义收敛、resolver cache、partial coverage 与 change-set contract 均为
+  // 合成工作区上的确定性逻辑验证，不依赖 Bridge 或真实游戏语料。
+  'test:semantic-convergence': 'unit',
   'test:csv': 'unit',
   'test:emedf-completion-catalog': 'unit',
   'test:emevd-instruction-structural': 'unit',
@@ -456,6 +459,9 @@ export const TIER_BY_SCRIPT = Object.freeze({
   'bridge:verify:msb': 'native',
   'bridge:verify:msb-all': 'native',
   'bridge:verify:msb-writer': 'native',
+  // 真实 c0000 TAE/HKX/FLVER 采样的 TS↔C# differential smoke；无真机资源时
+  // 结构化 NOT_RUN，不把合成 fallback 冒充 native。
+  'test:action-native-differential': 'native',
   'bridge:verify:oodle': 'native',
   'bridge:verify:param': 'native',
   'bridge:verify:gparam': 'native',

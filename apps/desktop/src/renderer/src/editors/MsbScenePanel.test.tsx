@@ -21,7 +21,7 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, it } from 'node:test';
 import { renderToStaticMarkup } from 'react-dom/server';
-import { MsbScenePanel } from './MsbScenePanel.js';
+import { deriveMapIdFromSourcePath, MsbScenePanel } from './MsbScenePanel.js';
 
 function resolvePartModelName(
   part: { modelIndex?: number },
@@ -47,6 +47,13 @@ function render(overrides: Record<string, unknown> = {}): string {
     />
   );
 }
+
+describe('Human Map transaction identity', () => {
+  it('uses the same basename mapId as the native loader', () => {
+    assert.equal(deriveMapIdFromSourcePath('map/mapstudio/m10_00_00_00.msb.dcx'), 'm10_00_00_00');
+    assert.equal(deriveMapIdFromSourcePath('map\\mapstudio\\m11_00_00_00.msb'), 'm11_00_00_00');
+  });
+});
 
 describe('MsbScenePanel 初始结构（挂载即有的三栏骨架）', () => {
   it('工作台根的可访问名是「MSB 地图工作台」', () => {

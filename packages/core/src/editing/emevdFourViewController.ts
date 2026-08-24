@@ -460,6 +460,8 @@ export interface EmevdDslPlanSubmitRequest {
    * source is a .dcx, the file_replace precondition compares against these.
    */
   expectedOuterFileHash?: string;
+  /** Native Oodle root required when sourcePath is a KRAK-wrapped DCX. */
+  oodleRuntimeRoot?: string;
   allowedRoots: string[];
   workspaceId: string;
   /** Overlay root; the commit target must stay inside it. */
@@ -541,6 +543,7 @@ export async function submitEmevdDslPlanViaFourView(
     ...(input.expectedOuterFileHash !== undefined
       ? { expectedOuterFileHash: input.expectedOuterFileHash }
       : {}),
+    ...(input.oodleRuntimeRoot !== undefined ? { oodleRuntimeRoot: input.oodleRuntimeRoot } : {}),
     allowedRoots: input.allowedRoots,
     workspaceId: input.workspaceId,
     workspaceRoot: input.workspaceRoot,
