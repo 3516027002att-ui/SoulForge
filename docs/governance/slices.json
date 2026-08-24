@@ -984,7 +984,7 @@
     {
       "sliceId": "W-REL-D-GAMELOAD-01",
       "targetRelease": "V0.5",
-      "lifecycle": "active",
+      "lifecycle": "ready",
       "authority": "candidate",
       "authorityCap": "candidate",
       "authorityCapNote": "cap=candidate；真实游戏内加载确认前 authority 保持 candidate",
@@ -1022,16 +1022,7 @@
       "declaresUnfrozenValidation": true
     }
   ],
-  "activeClaims": [
-    {
-      "sliceId": "W-REL-D-GAMELOAD-01",
-      "claimId": "claim-w-rel-d-gameload-01-20260814",
-      "owner": "claude-code",
-      "claimedAt": "2026-08-14T04:27:22.409Z",
-      "heartbeatAt": "2026-08-14T04:27:22.409Z",
-      "recoveryTrigger": "检查 runScriptContainerLoadPreflightSmoke 相关写进程与工作树改动；无相关写进程则 release 回 ready"
-    }
-  ],
+  "activeClaims": [],
   "invariants": [
     "authority 不得高于 authorityCap；unverified 表示尚无所需证据，不是绕过 cap 的高等级。",
     "completed 只表示该切片完成，不表示整条路线或 Gate 完成。",

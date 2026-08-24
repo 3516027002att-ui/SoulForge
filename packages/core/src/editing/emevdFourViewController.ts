@@ -26,6 +26,7 @@ import {
   commitEmevdPlanViaPatchEngine,
   type EmevdPlanCommitResult
 } from './emevdPlanCommit.js';
+import { readFullEmevdDocumentViaBridge } from './emevdFullDocument.js';
 
 export interface EmevdFourViewState {
   document: EmevdEditorDocument;
@@ -299,7 +300,8 @@ export function applyEmevdPlanToDocument(
       case 'insert_instruction': return 3;
       case 'delete_event': return 4;
       case 'set_event_rest_behavior': return 5;
-      case 'set_event_id': return 6;
+      case 'set_event_parameters': return 6;
+      case 'set_event_id': return 7;
       default: return 7;
     }
   };
@@ -343,6 +345,18 @@ export function applyEmevdPlanToDocument(
         return { ok: false, code: 'EMEVD_PLAN_ANCHOR_NOT_FOUND', message: '计划引用的事件锚不存在。' };
       }
       events[index] = { ...events[index]!, restBehavior: operation.after };
+    } else if (operation.kind === 'set_event_parameters') {
+      const index = findEventIndex(operation.eventAnchor, operation.eventId);
+      if (index < 0) {
+        return { ok: false, code: 'EMEVD_PLAN_ANCHOR_NOT_FOUND', message: '计划引用的事件锚不存在。' };
+      }
+      events[index] = {
+        ...events[index]!,
+        parameters: operation.parameters.map((parameter) => ({
+          ...parameter,
+          unkId: parameter.unkId ?? 0
+        }))
+      };
     } else if (operation.kind === 'set_instruction_arg') {
       const eventIndex = events.findIndex(
         (event) => event.anchor && formatEmevdAnchor('event', event.anchor) === operation.eventAnchor
@@ -389,7 +403,7 @@ export function applyEmevdPlanToDocument(
       }
       const instructions = [...event.instructions];
       instructions.splice(instrIndex, 1);
-      events[eventIndex] = { ...event, instructions };
+      events[eventIndex] = { ...event, instructions: reindexEmevdInstructions(event.eventUri, instructions) };
     } else if (operation.kind === 'insert_event') {
       if (events.some((event) => event.eventId === operation.eventId)) {
         return { ok: false, code: 'EMEVD_EVENT_ID_DUPLICATE', message: '计划产生重复事件 ID。' };
@@ -416,7 +430,7 @@ export function applyEmevdPlanToDocument(
         argsBase64: operation.argsBase64,
         unknown: false
       });
-      events[eventIndex] = { ...event, instructions };
+      events[eventIndex] = { ...event, instructions: reindexEmevdInstructions(event.eventUri, instructions) };
     } else if (operation.kind === 'delete_event') {
       const eventIndex = findEventIndex(operation.eventAnchor, operation.eventId);
       if (eventIndex < 0) {
@@ -445,6 +459,16 @@ export function applyEmevdPlanToDocument(
       ]
     }
   };
+}
+
+function reindexEmevdInstructions(
+  eventUri: string,
+  instructions: EmevdEditorDocument['events'][number]['instructions']
+): EmevdEditorDocument['events'][number]['instructions'] {
+  return instructions.map((instruction, index) => ({
+    ...instruction,
+    instructionUri: `${eventUri}/instr/${index}`
+  }));
 }
 
 export interface EmevdDslPlanSubmitRequest {
@@ -560,20 +584,92 @@ export async function submitEmevdDslPlanViaFourView(
     return { ok: false, plan: compiled.plan, commit, diagnostics: commit.diagnostics };
   }
 
-  const applied = applyEmevdPlanToDocument(input.document, compiled.plan, input.registry);
-  if (!applied.ok) {
+  // The committed native artifact is the only canonical next document. A
+  // local plan simulation can miss parameter-table installation, instruction
+  // URI reindexing, layer details, or native writer normalization. Reopen the
+  // exact committed outer resource through the normal full-document path and
+  // attach fresh identity to that result before exposing it to the renderer.
+  const canonical = await readFullEmevdDocumentViaBridge({
+    filePath: input.sourcePath,
+    allowedRoots: input.allowedRoots,
+    resourceUri: input.document.resourceUri,
+    registry: input.registry,
+    ...(input.document.documentInstanceId !== undefined
+      ? { documentInstanceId: input.document.documentInstanceId }
+      : {}),
+    pageSize: 8192,
+    cachePolicy: 'bypass',
+    attachIdentity: true,
+    ...(input.oodleRuntimeRoot !== undefined ? { oodleRuntimeRoot: input.oodleRuntimeRoot } : {}),
+    timeoutMs: input.timeoutMs ?? 120_000
+  });
+  if (!canonical.ok || !canonical.document) {
     return {
       ok: false,
       plan: compiled.plan,
       commit,
-      diagnostics: [{ severity: 'error', code: applied.code, message: applied.message }]
+      diagnostics: [
+        ...commit.diagnostics,
+        {
+          severity: 'error',
+          code: 'EMEVD_CANONICAL_REREAD_FAILED',
+          message: '提交成功但无法从 committed EMEVD 重建 canonical nextDocument。'
+        },
+        ...canonical.diagnostics.map((diagnostic) => ({
+          severity: diagnostic.severity,
+          code: diagnostic.code,
+          message: diagnostic.message
+        }))
+      ]
     };
   }
+
+  const expectedCanonicalHash = (commit.sourceFormat === 'dcx'
+    ? commit.outerFileHash ?? commit.outputHash
+    : commit.outputHash)?.toLowerCase();
+  const actualCanonicalHash = (commit.sourceFormat === 'dcx'
+    ? canonical.outerFileHash
+    : canonical.sourceHash)?.toLowerCase();
+  if (expectedCanonicalHash && actualCanonicalHash !== expectedCanonicalHash) {
+    return {
+      ok: false,
+      plan: compiled.plan,
+      commit,
+      diagnostics: [
+        ...commit.diagnostics,
+        {
+          severity: 'error',
+          code: 'EMEVD_CANONICAL_REREAD_HASH_MISMATCH',
+          message: `canonical nextDocument 哈希与 committed artifact 不一致（期望 ${expectedCanonicalHash}，实际 ${actualCanonicalHash ?? ''}）。`
+        }
+      ]
+    };
+  }
+
+  const nextDocument: EmevdEditorDocument = {
+    ...canonical.document,
+    revision: input.document.revision + 1,
+    diagnostics: [
+      ...canonical.document.diagnostics,
+      {
+        severity: 'info',
+        code: 'EMEVD_CANONICAL_REREAD',
+        message: 'nextDocument 来自 committed EMEVD 的 Bridge canonical reread。'
+      }
+    ]
+  };
   return {
     ok: true,
     plan: compiled.plan,
-    nextDocument: applied.document,
+    nextDocument,
     commit,
-    diagnostics: commit.diagnostics
+    diagnostics: [
+      ...commit.diagnostics,
+      ...canonical.diagnostics.map((diagnostic) => ({
+        severity: diagnostic.severity,
+        code: diagnostic.code,
+        message: diagnostic.message
+      }))
+    ]
   };
 }

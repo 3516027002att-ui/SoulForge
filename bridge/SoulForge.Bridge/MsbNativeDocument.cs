@@ -465,10 +465,8 @@ internal sealed class MsbNativeDocument
                     var evIdx = Events.ToList().FindIndex(e => e.Name == patch.PartName);
                     if (evIdx >= 0)
                     {
-                        var ev = Events[evIdx];
-                        GuardRegisteredEvent(ev);
-                        WriteInt32(rebuilt, ev.Offset + 0x08, patch.EntityId.Value);
-                        break;
+                        throw new InvalidDataException(
+                            $"MSB entityId 属性不支持 Event：{patch.PartName}；Event +0x08 是 eventId，不能按通用 entityId 写入。");
                     }
                     throw new InvalidDataException($"MSB 目标实体不存在：{patch.PartName}");
                 }

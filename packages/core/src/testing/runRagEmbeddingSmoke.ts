@@ -7,7 +7,7 @@ import { join } from 'node:path';
 import type { RagChunk, RagCorpus } from '@soulforge/shared';
 import { cosineSimilarity, fetchEmbeddings } from '../model-services/embeddingClient.js';
 import { createRagCorpus } from '../rag/chunkBuilder.js';
-import { retrieveEvidenceHybrid } from '../rag/hybridRetrieve.js';
+import { retrieveEvidenceHybrid, retrieveEvidenceHybridAsync } from '../rag/hybridRetrieve.js';
 import { retrieveEvidence } from '../rag/retrieve.js';
 import { openWorkspaceDatabase } from '../storage/sqliteDatabase.js';
 import { WorkspaceDataRepository } from '../storage/workspaceDataRepository.js';
@@ -129,7 +129,8 @@ VALUES (?, ?, ?, ?, ?)`).run('ws-embed', workspace.root, 'sekiro', now, now);
       title: 'Goods 1',
       body: '狼的义手',
       numericIds: [1],
-      contentHash: 'probe-hash'
+      contentHash: 'probe-hash',
+      sourceRevision: 'fixture-source-revision-1'
     };
     repository.replaceRagChunks([probe]);
     const vector = new Float32Array([0.1, 0.2, 0.3, 0.4]);
@@ -147,6 +148,12 @@ VALUES (?, ?, ?, ?, ?)`).run('ws-embed', workspace.root, 'sekiro', now, now);
       const third = loaded[2] ?? 0;
       expect(loaded.length === 4 && Math.abs(third - 0.3) < 1e-7, 'float32 roundtrip exact');
     }
+    const changedProbe = { ...probe, body: 'changed content', contentHash: 'probe-hash-2', sourceRevision: 'fixture-source-revision-2' };
+    repository.replaceRagChunks([changedProbe]);
+    const reloadedChunk = repository.loadRagChunks()[0];
+    expect(reloadedChunk?.contentHash === 'probe-hash-2', 'chunk content hash roundtrip after source change');
+    expect(reloadedChunk?.sourceRevision === 'fixture-source-revision-2', 'chunk source revision roundtrip after source change');
+    expect(repository.loadRagEmbeddings().size === 0, 'source/content change invalidates old embeddings');
     // 语料重建后向量被 FK 级联清掉（孤儿向量不得残留）。
     repository.replaceRagChunks([]);
     expect(repository.loadRagEmbeddings().size === 0, 'cascade deletes orphan vectors');
@@ -193,6 +200,67 @@ VALUES (?, ?, ?, ?, ?)`).run('ws-embed', workspace.root, 'sekiro', now, now);
         === lexicalOnly.hits.map((hit) => hit.chunk.chunkId).join(','), 'no vectors -> identical to lexical');
     }
 
+    const malformedVectors = new Map<string, Float32Array>([
+      ['rag:event:event1000', new Float32Array([1, 0])], // dimension mismatch
+      ['rag:map_entity:entity1100800', new Float32Array([Number.NaN, 0, 0])],
+      ['rag:text_entry:goods1000', new Float32Array([Number.POSITIVE_INFINITY, 0, 0])]
+    ]);
+    const malformed = retrieveEvidenceHybrid(corpus, 'unseen semantic query', {
+      vectors: { vectors: malformedVectors, queryVector: new Float32Array([1, 0, 0]) },
+      limit: 1
+    });
+    expect(!malformed.ok && malformed.code === 'insufficient_evidence', 'dimension and NaN/Infinity vectors are skipped');
+    const invalidQuery = retrieveEvidenceHybrid(corpus, 'unseen semantic query', {
+      vectors: { vectors, queryVector: new Float32Array([Number.NaN, 0, 0]) },
+      limit: 1
+    });
+    expect(!invalidQuery.ok && invalidQuery.code === 'insufficient_evidence', 'non-finite query vector disables vector retrieval');
+
+    // --- 5. 大语料的 independent vector-only recall ---
+    // 目标故意放在 2048 之后，且 query 词法完全不出现在目标块中；
+    // 如果退化成只给 lexicalHits 打分，这个目标必然丢失。
+    const largeChunks: RagChunk[] = [];
+    const largeVectors = new Map<string, Float32Array>();
+    for (let index = 0; index < 3_000; index += 1) {
+      const chunkId = `rag:text_entry:large-${index}`;
+      largeChunks.push(makeChunk(
+        chunkId,
+        `msg://Large/${index}`,
+        'text_entry',
+        `Filler ${index}`,
+        `filler corpus row ${index}`,
+        []
+      ));
+      largeVectors.set(chunkId, new Float32Array([0, 1, 0]));
+    }
+    const targetId = 'rag:text_entry:vector-only-target';
+    largeChunks.push(makeChunk(
+      targetId,
+      'msg://Large/vector-only-target',
+      'text_entry',
+      'Latent target',
+      'semantic target content',
+      []
+    ));
+    largeVectors.set(targetId, new Float32Array([1, 0, 0]));
+    const largeCorpus = createRagCorpus({
+      workspaceId: 'ws-embed-large',
+      builtAt: new Date().toISOString(),
+      chunks: largeChunks
+    });
+    const largeVectorOptions = { vectors: { vectors: largeVectors, queryVector: new Float32Array([1, 0, 0]) }, limit: 1 };
+    const largeHybrid = retrieveEvidenceHybrid(largeCorpus, 'descriptive query unseen', largeVectorOptions);
+    expect(largeHybrid.ok, 'large corpus vector-only recall returns a result');
+    if (largeHybrid.ok) {
+      expect(largeHybrid.hits[0]?.chunk.chunkId === targetId, 'large corpus lexical miss reaches vector target');
+      expect(largeHybrid.hits[0]?.vectorScore === 1, 'large corpus target keeps exact vector score');
+      expect(largeHybrid.stats.retrievalMode === 'hybrid_rrf', 'large corpus uses explicit hybrid mode');
+      expect(largeHybrid.stats.scanned === 3_001, 'large corpus reports exact vector scan cost');
+    }
+    const largeHybridAsync = await retrieveEvidenceHybridAsync(largeCorpus, 'descriptive query unseen', largeVectorOptions);
+    expect(largeHybridAsync.ok && largeHybridAsync.hits[0]?.chunk.chunkId === targetId,
+      'async production scan preserves large corpus vector-only recall');
+
     console.log(JSON.stringify({
       ok: true,
       message: 'workspace RAG embedding smoke: ok',
@@ -202,7 +270,7 @@ VALUES (?, ?, ?, ?, ?)`).run('ws-embed', workspace.root, 'sekiro', now, now);
       storage: 'rag_embeddings float32 BLOB, cascade on chunk rebuild',
       nonClaims: [
         'Mock responses do not prove any real embedding provider is available.',
-        'Vector similarity is not native-verified; it only re-ranks lexical evidence.'
+        'Vector similarity is not native-verified; large-corpus mode is bounded top-K exact scan, not ANN.'
       ]
     }, null, 2));
   });

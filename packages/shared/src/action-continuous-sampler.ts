@@ -66,6 +66,9 @@ export interface ExtractedMotionData {
 export interface TaeAnimationClipData {
   animId: number;
   motionAnimId: number;
+  sourceHash?: string | undefined;
+  animationContainerHash?: string | undefined;
+  skeletonContainerHash?: string | undefined;
   sourceContainer?: string | undefined;
   /** Native HKX container family used by Bridge: packfile or TAG0 tagfile. */
   sourceFormat?: 'packfile' | 'tagfile' | string | undefined;
@@ -83,6 +86,19 @@ export interface TaeAnimationClipData {
   hkxBoneNames: string[];
   hkxReferencePose: BoneTransformData[];
   trackToHkxBone: number[];
+  binding?: {
+    originalSkeletonName: string;
+    blendHint: number;
+    transformTrackToBoneIndices: number[];
+    floatTrackToFloatSlotIndices: number[];
+    partitionIndices: number[];
+    animationIdentity: { motionAnimId: number; animationType: string };
+  } | undefined;
+  skeleton?: {
+    name: string;
+    boneCount: number;
+    boneNames: string[];
+  } | undefined;
   hkxToFlverBoneMap?: number[] | undefined;
   interleavedTransforms?: BoneTransformData[] | undefined;
   splineBlocks?: SplineBlockData[] | undefined;

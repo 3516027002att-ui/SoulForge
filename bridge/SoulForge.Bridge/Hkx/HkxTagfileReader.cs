@@ -176,6 +176,9 @@ internal static class HkxTagfileReader
         if (transformOffsets.Length != 0 && transformOffsets.Length != numberOfTransformTracks)
             throw new InvalidDataException(
                 $"{className} transform-offset count mismatch: expected 0 or {numberOfTransformTracks}, actual={transformOffsets.Length}.");
+        if (transformOffsets.Length != 0)
+            throw new NotSupportedException(
+                "HKX TAG0 spline transformOffsets is non-empty; Sekiro target corpus and the mature sequential block decoder do not verify per-track offset semantics.");
         HkxAnimationReader.ValidateBlockRelativeOffsets(
             blockOffsets, floatBlockOffsets, data.Length, numBlocks, className);
         if (blockOffsets.Length > 0 && blockOffsets[0] != 0)

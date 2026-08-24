@@ -68,6 +68,57 @@ export async function runMapDocument10kScaleSmoke(): Promise<void> {
     events
   });
 
+  // A duplicate display name is only ambiguous as a bare alias. Exact
+  // stableKey/id/address identity must still resolve to its one entity.
+  const duplicateNameDoc = buildCanonicalMapDocument({
+    sourceUri: doc.sourceUri,
+    sourcePath: doc.sourcePath,
+    game: doc.game,
+    revision: doc.revision,
+    models,
+    parts: [
+      { ...parts[0]!, name: 'duplicate_part', nativeOffset: 0x900000 },
+      { ...parts[1]!, name: 'duplicate_part', nativeOffset: 0x900080 }
+    ],
+    regions: [],
+    events: []
+  });
+  const duplicateGraph = new MapSceneGraph(duplicateNameDoc);
+  const duplicateParts = duplicateGraph.findEntityCandidates('duplicate_part');
+  assert.equal(duplicateParts.length, 2, 'Duplicate bare names must expose all candidates');
+  assert.equal(duplicateGraph.findEntity('duplicate_part'), undefined, 'Duplicate bare name must not auto-select');
+  assert.equal(duplicateGraph.findEntity(duplicateParts[0]!.stableKey)?.stableKey, duplicateParts[0]!.stableKey,
+    'Exact stableKey must resolve despite duplicate display name');
+  assert.equal(duplicateGraph.findEntity(duplicateParts[1]!.id)?.stableKey, duplicateParts[1]!.stableKey,
+    'Exact id must resolve despite duplicate display name');
+  const exactIdentityValidation = validateMapTransaction(duplicateNameDoc, {
+    id: 'map-duplicate-alias',
+    mapId: duplicateNameDoc.mapId,
+    baseRevision: duplicateNameDoc.revision,
+    description: 'duplicate alias identity regression',
+    author: 'agent',
+    timestamp: Date.now(),
+    operations: [{
+      kind: 'set_transform',
+      target: duplicateParts[0]!.stableKey,
+      position: [11, 12, 13]
+    }]
+  });
+  assert.equal(exactIdentityValidation.valid, true,
+    'Exact stableKey must not be rejected as a duplicate-name ambiguity');
+  const bareNameValidation = validateMapTransaction(duplicateNameDoc, {
+    id: 'map-duplicate-bare-name',
+    mapId: duplicateNameDoc.mapId,
+    baseRevision: duplicateNameDoc.revision,
+    description: 'duplicate bare name regression',
+    author: 'agent',
+    timestamp: Date.now(),
+    operations: [{ kind: 'set_transform', target: 'duplicate_part', position: [11, 12, 13] }]
+  });
+  assert.equal(bareNameValidation.valid, false, 'Duplicate bare name must fail closed');
+  assert.equal(bareNameValidation.diagnostics.some((item) => item.code === 'MAP_ENTITY_AMBIGUOUS'), true,
+    'Duplicate bare name must return structured ambiguity');
+
   assert.equal(doc.parts.length, totalParts, '10k parts must be loaded completely without truncation');
   assert.equal(doc.regions.length, totalRegions, '1500 regions must be loaded');
   assert.equal(doc.events.length, totalEvents, '500 events must be loaded');

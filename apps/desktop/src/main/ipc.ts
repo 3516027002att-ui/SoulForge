@@ -20,7 +20,7 @@ import {
   isAllowedEndpoint,
   OpenAiCompatibleAdapter,
   AnthropicCompatibleAdapter,
-  retrieveEvidenceHybrid,
+  retrieveEvidenceHybridAsync,
   type HybridVectorSource,
   createDefaultToolRegistry,
   createConfirmationReceipt,
@@ -2801,9 +2801,12 @@ async function persistActiveRag(
   database: OperationLogUtilityClient,
   corpus: RagCorpus
 ): Promise<void> {
-  activeRag = corpus;
   await database.replaceRagChunks(corpus.chunks);
   await database.replaceReferences(corpus.references);
+  // Switch the in-memory snapshot only after both durable projections have
+  // succeeded; otherwise a failed persistence could expose a new RAG view
+  // while SQLite still contains the previous one.
+  activeRag = corpus;
 }
 
 async function refreshRagAfterScan(
@@ -6311,14 +6314,25 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
     });
     const result = await executeMapTransaction(edit, file.absolutePath, transaction);
     if (!result.ok) {
+      const committedButVerificationFailed = result.status === 'committed-but-verification-failed'
+        && result.committed === true;
       return {
         ok: false,
-        changedFiles: [],
+        changedFiles: committedButVerificationFailed ? [sourceUri] : [],
         diagnostics: [{
           severity: 'error',
           code: result.error?.code ?? 'MAP_TRANSACTION_FAILED',
           message: result.error?.message ?? 'MapEditTransaction 执行失败。',
-          sourceUri
+          sourceUri,
+          details: {
+            status: result.status ?? 'failed',
+            committed: result.committed ?? false,
+            verification: result.verification ?? 'not-run',
+            changedResource: result.changedResource ?? sourceUri,
+            rollbackAvailable: result.rollbackAvailable ?? false,
+            ...(result.operationId ? { operationId: result.operationId } : {}),
+            ...(result.error?.details !== undefined ? { core: result.error.details } : {})
+          }
         }]
       };
     }
@@ -11616,7 +11630,7 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
       }
     }
 
-    return retrieveEvidenceHybrid(corpus, query, {
+    return retrieveEvidenceHybridAsync(corpus, query, {
       ...(options.limit != null && options.limit > 0 ? { limit: Math.trunc(options.limit) } : {}),
       ...(options.expandReferences === undefined ? {} : { expandReferences: options.expandReferences === true }),
       ...(options.families && options.families.length > 0 ? { families: options.families } : {}),

@@ -431,6 +431,11 @@ export async function executeMapTransaction(
   ok: boolean;
   transactionId: string;
   appliedOperations: number;
+  status?: 'committed' | 'committed-but-verification-failed' | 'failed' | 'cancelled';
+  committed?: boolean;
+  verification?: 'passed' | 'failed' | 'not-run';
+  changedResource?: string;
+  rollbackAvailable?: boolean;
   operationId?: string;
   revision?: string;
   createdEntities?: Array<{ name: string; stableKey: string; address: string; kind: 'part' }>;
@@ -518,6 +523,12 @@ export async function executeMapTransaction(
   const mutations: MsbBridgeMutation[] = [];
   type PendingPartMutation = Extract<MsbBridgeMutation, { kind: 'duplicate_part' | 'create_part' }>;
   const pendingPartMutations = new Map<string, PendingPartMutation>();
+  const touched = {
+    parts: new Set<string>(),
+    regions: new Set<string>(),
+    events: new Set<string>(),
+    routes: new Set<string>()
+  };
   let appliedOperations = 0;
 
   for (const op of operations) {
@@ -525,6 +536,7 @@ export async function executeMapTransaction(
       case 'set_transform': {
         const part = workingParts.get(op.target);
         if (part) {
+          touched.parts.add(part.name);
           if (op.position) part.transform.position = [...op.position];
           if (op.rotation) part.transform.rotation = [...op.rotation];
           if (op.scale) part.transform.scale = [...op.scale];
@@ -551,6 +563,7 @@ export async function executeMapTransaction(
         }
         const region = workingRegions.get(op.target);
         if (region) {
+          touched.regions.add(region.name);
           if (op.position) region.transform.position = [...op.position];
           if (op.rotation) region.transform.rotation = [...op.rotation];
           if (op.scale) region.transform.scale = [...op.scale];
@@ -581,6 +594,7 @@ export async function executeMapTransaction(
         for (const target of op.targets) {
           const part = workingParts.get(target);
           if (part) {
+            touched.parts.add(part.name);
             if (op.positionDelta) {
               part.transform.position[0] += op.positionDelta[0];
               part.transform.position[1] += op.positionDelta[1];
@@ -618,6 +632,7 @@ export async function executeMapTransaction(
           }
           const region = workingRegions.get(target);
           if (region) {
+            touched.regions.add(region.name);
             if (op.positionDelta) {
               region.transform.position[0] += op.positionDelta[0];
               region.transform.position[1] += op.positionDelta[1];
@@ -662,6 +677,7 @@ export async function executeMapTransaction(
         if (op.property === 'entityId' && typeof op.value === 'number') {
           const part = workingParts.get(op.target);
           if (part) {
+            touched.parts.add(part.name);
             part.entityId = op.value;
             const pending = pendingPartMutations.get(part.name);
             if (pending) pending.entityId = op.value;
@@ -671,15 +687,9 @@ export async function executeMapTransaction(
           }
           const region = workingRegions.get(op.target);
           if (region) {
+            touched.regions.add(region.name);
             region.entityId = op.value;
             mutations.push({ kind: 'set_property', partName: region.name, entityId: op.value });
-            appliedOperations += 1;
-            break;
-          }
-          const event = workingEvents.get(op.target);
-          if (event) {
-            event.eventId = op.value;
-            mutations.push({ kind: 'set_property', partName: event.name, entityId: op.value });
             appliedOperations += 1;
             break;
           }
@@ -707,6 +717,7 @@ export async function executeMapTransaction(
             error: { code: 'MAP_PART_NOT_FOUND', message: `修改模型目标 Part 未找到或已被删除: ${op.target}` }
           };
         }
+        touched.parts.add(part.name);
         part.modelName = op.newModelName;
         const pending = pendingPartMutations.get(part.name);
         if (pending) pending.modelName = op.newModelName;
@@ -768,6 +779,7 @@ export async function executeMapTransaction(
           ...(op.entityId === undefined ? {} : { entityId: op.entityId })
         };
         workingParts.set(op.newName, clone);
+        touched.parts.add(op.newName);
         const pending: PendingPartMutation = {
           kind: op.kind === 'duplicate' ? 'duplicate_part' : 'create_part',
           partName: template.name,
@@ -791,24 +803,28 @@ export async function executeMapTransaction(
       }
       case 'delete': {
         if (workingParts.has(op.target)) {
+          touched.parts.add(op.target);
           workingParts.delete(op.target);
           mutations.push({ kind: 'delete_part', partName: op.target });
           appliedOperations += 1;
           break;
         }
         if (workingRegions.has(op.target)) {
+          touched.regions.add(op.target);
           workingRegions.delete(op.target);
           mutations.push({ kind: 'delete_region', partName: op.target });
           appliedOperations += 1;
           break;
         }
         if (workingEvents.has(op.target)) {
+          touched.events.add(op.target);
           workingEvents.delete(op.target);
           mutations.push({ kind: 'delete_event', partName: op.target });
           appliedOperations += 1;
           break;
         }
         if (workingRoutes.has(op.target)) {
+          touched.routes.add(op.target);
           workingRoutes.delete(op.target);
           mutations.push({ kind: 'delete_route', partName: op.target });
           appliedOperations += 1;
@@ -871,7 +887,8 @@ export async function executeMapTransaction(
           workingParts,
           workingRegions,
           workingEvents,
-          workingRoutes
+          workingRoutes,
+          touched
         );
         postCommitDocument = checked.document;
         createdEntities = checked.createdEntities;
@@ -888,14 +905,41 @@ export async function executeMapTransaction(
       : outcome.status === 'committed'
         ? outcome.result.diagnostics
         : [{ severity: 'error' as const, code: 'MSB_WRITE_CANCELLED', message: '写入被取消。', sourceUri: fileEntry.sourceUri }];
+    const result = outcome.status === 'committed' ? outcome.result : undefined;
+    const verificationFailed = Boolean(result && diagnostics.some((diagnostic) =>
+      diagnostic.code === 'SEMANTIC_POSTCOMMIT_CHECK_FAILED'
+      || diagnostic.code === 'MAP_POSTCONDITION_FAILED'
+      || diagnostic.code === 'MAP_REREAD_FAILED'
+    ));
+    const committedBeforeVerification = Boolean(result && (
+      result.changedFiles.length > 0
+      || result.backupRoot
+      || verificationFailed
+    ));
     return {
       ok: false,
       transactionId: transaction.id,
       appliedOperations: 0,
+      ...(verificationFailed && committedBeforeVerification ? {
+        status: 'committed-but-verification-failed' as const,
+        committed: true,
+        verification: 'failed' as const,
+        changedResource: fileEntry.sourceUri,
+        rollbackAvailable: Boolean(result?.backupRoot)
+      } : {}),
       error: {
         code: diagnostics[0]?.code ?? 'MSB_WRITE_FAILED',
         message: diagnostics[0]?.message ?? 'MSB 写入失败。',
-        details: diagnostics
+        details: {
+          diagnostics,
+          ...(verificationFailed && committedBeforeVerification ? {
+            committed: true,
+            verification: 'failed',
+            changedResource: fileEntry.sourceUri,
+            rollbackAvailable: Boolean(result?.backupRoot),
+            operationId: result?.opId
+          } : {})
+        }
       }
     };
   }
@@ -920,6 +964,11 @@ export async function executeMapTransaction(
     ok: true,
     transactionId: transaction.id,
     appliedOperations,
+    status: 'committed',
+    committed: true,
+    verification: 'passed',
+    changedResource: fileEntry.sourceUri,
+    rollbackAvailable: Boolean(outcome.result.backupRoot),
     ...(outcome.result.opId ? { operationId: outcome.result.opId } : {}),
     revision: reread.revision,
     ...(createdEntities.length > 0 ? { createdEntities } : {})
@@ -939,7 +988,13 @@ async function verifyMapPostCommit(
   workingParts: ReadonlyMap<string, MapPartEntity>,
   workingRegions: ReadonlyMap<string, MapRegionEntity>,
   workingEvents: ReadonlyMap<string, MapDocument['events'][number]>,
-  workingRoutes: ReadonlyMap<string, MapDocument['routes'][number]>
+  workingRoutes: ReadonlyMap<string, MapDocument['routes'][number]>,
+  touched: {
+    parts: ReadonlySet<string>;
+    regions: ReadonlySet<string>;
+    events: ReadonlySet<string>;
+    routes: ReadonlySet<string>;
+  }
 ): Promise<MapPostCommitVerification> {
   const reread = await loadMapDocument(edit, file);
   if (!reread.ok) {
@@ -965,16 +1020,16 @@ async function verifyMapPostCommit(
     });
   };
 
-  for (const [name, expectedPart] of workingParts) {
+  for (const name of touched.parts) {
+    const expectedPart = workingParts.get(name);
     const actual = reread.sceneGraph.findPart(name);
+    if (!expectedPart) {
+      if (actual) fail(`删除 Part ${name} 后仍存在`);
+      continue;
+    }
     if (!actual) {
       fail(`写回后缺少 Part: ${name}`);
       continue;
-    }
-    if (Math.abs(actual.transform.position[0] - expectedPart.transform.position[0]) > 0.001 ||
-        Math.abs(actual.transform.position[1] - expectedPart.transform.position[1]) > 0.001 ||
-        Math.abs(actual.transform.position[2] - expectedPart.transform.position[2]) > 0.001) {
-      fail(`Part ${name} 坐标写回后与预期不符`);
     }
     if (expectedPart.modelName && actual.modelName !== expectedPart.modelName) {
       fail(`Part ${name} 模型写回后与预期不符`);
@@ -987,45 +1042,40 @@ async function verifyMapPostCommit(
     }
   }
 
-  for (const [name, expectedRegion] of workingRegions) {
+  for (const name of touched.regions) {
+    const expectedRegion = workingRegions.get(name);
     const actual = reread.sceneGraph.findRegion(name);
+    if (!expectedRegion) {
+      if (actual) fail(`删除 Region ${name} 后仍存在`);
+      continue;
+    }
     if (!actual || transformMismatch(actual, expectedRegion)
       || (expectedRegion.entityId !== undefined && actual.entityId !== expectedRegion.entityId)) {
       fail(`Region ${name} 写回后与预期不符`);
     }
   }
 
-  for (const [name, expectedEvent] of workingEvents) {
+  for (const name of touched.events) {
+    const expectedEvent = workingEvents.get(name);
     const actual = reread.sceneGraph.findEvent(name);
+    if (!expectedEvent) {
+      if (actual) fail(`删除 Event ${name} 后仍存在`);
+      continue;
+    }
     if (!actual || (expectedEvent.eventId !== undefined && actual.eventId !== expectedEvent.eventId)) {
       fail(`Event ${name} 写回后与预期不符`);
     }
   }
 
-  for (const part of original.parts) {
-    if (!workingParts.has(part.name) && reread.sceneGraph.findPart(part.name)) {
-      fail(`删除 Part ${part.name} 后仍存在`);
-    }
-  }
-  for (const region of original.regions) {
-    if (!workingRegions.has(region.name) && reread.sceneGraph.findRegion(region.name)) {
-      fail(`删除 Region ${region.name} 后仍存在`);
-    }
-  }
-  for (const event of original.events) {
-    if (!workingEvents.has(event.name) && reread.sceneGraph.findEvent(event.name)) {
-      fail(`删除 Event ${event.name} 后仍存在`);
-    }
-  }
-  for (const route of original.routes) {
-    if (!workingRoutes.has(route.name) && reread.doc.routes.some((candidate) => candidate.name === route.name)) {
-      fail(`删除 Route ${route.name} 后仍存在`);
+  for (const name of touched.routes) {
+    if (!workingRoutes.has(name) && reread.doc.routes.some((candidate) => candidate.name === name)) {
+      fail(`删除 Route ${name} 后仍存在`);
     }
   }
 
   const originalPartNames = new Set(original.parts.map((part) => part.name));
   const createdEntities = reread.doc.parts
-    .filter((part) => !originalPartNames.has(part.name))
+    .filter((part) => touched.parts.has(part.name) && !originalPartNames.has(part.name))
     .map((part) => ({
       name: part.name,
       stableKey: part.stableKey,

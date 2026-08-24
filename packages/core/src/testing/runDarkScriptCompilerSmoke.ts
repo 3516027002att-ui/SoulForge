@@ -300,6 +300,38 @@ function main(): void {
     fail(`多参数 targetStartByte 不正确: ${JSON.stringify(multiParamSetOp.parameters)}`);
   }
 
+  // 4b. X width 必须与 EMEDF target arg 宽度一致；不能把 X0_8 静默
+  // 写进实际 4-byte 参数，也不能让 native Int32 截断超大 width。
+  const widthMismatchSource = paramSource.replace(
+    'InitializeEvent(0, 77770001, X0_4);',
+    'InitializeEvent(0, 77770001, X0_8);'
+  );
+  const widthMismatchResult = compileEmevdDarkScript({ ...paramReq, sourceText: widthMismatchSource }, paramEventDoc, emedf);
+  if (widthMismatchResult.ok || !widthMismatchResult.diagnostics.some((item) => item.code === 'EMEVD_PARAMETER_WIDTH_MISMATCH')) {
+    fail(`X width mismatch 必须被拒绝: ${JSON.stringify(widthMismatchResult.diagnostics)}`);
+  }
+  const overflowWidthSource = paramSource.replace(
+    'InitializeEvent(0, 77770001, X0_4);',
+    'InitializeEvent(0, 77770001, X0_999999999999999999999999);'
+  );
+  const overflowWidthResult = compileEmevdDarkScript({ ...paramReq, sourceText: overflowWidthSource }, paramEventDoc, emedf);
+  if (overflowWidthResult.ok || !overflowWidthResult.diagnostics.some((item) => item.code === 'EMEVD_PARAMETER_SYMBOL_INVALID')) {
+    fail(`X width overflow 必须被拒绝: ${JSON.stringify(overflowWidthResult.diagnostics)}`);
+  }
+
+  // 4c. 无法编码的新增行即使带 X-like 参数，也不能污染旧 parameter table。
+  const blockedInsertSource = paramSource.replace(
+    '    EndEvent();',
+    '    UnknownInstruction(X0_8);\n    EndEvent();'
+  );
+  const blockedInsertResult = compileEmevdDarkScript({ ...paramReq, sourceText: blockedInsertSource }, paramEventDoc, emedf);
+  if (blockedInsertResult.ok) {
+    fail('无法编码的插入必须 fail-closed');
+  }
+  if (!blockedInsertResult.diagnostics.some((item) => item.code === 'DARKSCRIPT_LINE_UNDECODED')) {
+    fail(`blocked insert 缺少结构化诊断: ${JSON.stringify(blockedInsertResult.diagnostics)}`);
+  }
+
   // 5. 修改 X 符号（X0_4 -> X16_4）
   const modSymbolSource = paramSource.replaceAll('X0_4', 'X16_4');
   const modSymbolResult = compileEmevdDarkScript({ ...paramReq, sourceText: modSymbolSource }, paramEventDoc, emedf);

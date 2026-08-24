@@ -148,10 +148,15 @@ internal static class MsbNativeWriter
                 "delete_event" => document.Events.Count(item => item.Name == patch.PartName),
                 "delete_route" => document.Routes.Count(item => item.Name == patch.PartName),
                 "set_property" or "set_entity_id" => document.Parts.Count(item => item.Name == patch.PartName)
-                    + document.Regions.Count(item => item.Name == patch.PartName)
-                    + document.Events.Count(item => item.Name == patch.PartName),
+                    + document.Regions.Count(item => item.Name == patch.PartName),
                 _ => document.Parts.Count(item => item.Name == patch.PartName),
             };
+            if (patch.Kind is "set_property" or "set_entity_id"
+                && document.Events.Any(item => item.Name == patch.PartName))
+            {
+                throw new InvalidDataException(
+                    $"MSB entityId 属性不支持 Event：{patch.PartName}；Event +0x08 是 eventId，不能按通用 entityId 写入。");
+            }
             if (matches != 1)
                 throw new InvalidDataException($"MSB mutation target must resolve uniquely: {patch.PartName}; matches={matches}.");
         }
@@ -241,11 +246,10 @@ internal static class MsbNativeWriter
                         throw new InvalidDataException("MSB region entityId 未按预期更新。");
                     continue;
                 }
-                var eventEntity = reread.Events.FirstOrDefault(e => e.Name == patch.PartName)
-                    ?? throw new InvalidDataException($"MSB mutation 后找不到 event {patch.PartName}。");
-                if (eventEntity.EventId != patch.EntityId.Value)
-                    throw new InvalidDataException("MSB eventId 未按预期更新。");
-                continue;
+                if (reread.Events.Any(e => e.Name == patch.PartName))
+                    throw new InvalidDataException(
+                        $"MSB entityId 属性不支持 Event：{patch.PartName}；不能把 eventId 当作 entityId 验证。");
+                throw new InvalidDataException($"MSB mutation 后找不到支持 entityId 的实体 {patch.PartName}。");
             }
 
             var part = reread.Parts.FirstOrDefault(p => p.Name == patch.PartName)

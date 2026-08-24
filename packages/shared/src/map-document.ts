@@ -88,11 +88,7 @@ export class MapSceneGraph {
   private readonly entityById = new Map<string, MapEntity>();
   private readonly entityByStableKey = new Map<string, MapEntity>();
   private readonly entityByAddress = new Map<string, MapEntity>();
-  private readonly entityByName = new Map<string, MapEntity>();
-  private readonly partsByName = new Map<string, MapPartEntity>();
-  private readonly regionsByName = new Map<string, MapRegionEntity>();
-  private readonly modelsByName = new Map<string, MapModelEntity>();
-  private readonly eventsByName = new Map<string, MapEventEntity>();
+  private readonly entitiesByName = new Map<string, MapEntity[]>();
   private readonly entityByEntityId = new Map<number, MapEntity[]>();
   private readonly partsByModelName = new Map<string, MapPartEntity[]>();
   private readonly eventsByReferencedRegion = new Map<string, MapEventEntity[]>();
@@ -108,16 +104,14 @@ export class MapSceneGraph {
       this.entityById.set(model.id, model);
       this.entityByStableKey.set(model.stableKey, model);
       this.entityByAddress.set(model.address, model);
-      if (!this.entityByName.has(model.name)) this.entityByName.set(model.name, model);
-      this.modelsByName.set(model.name, model);
+      this.indexName(model);
     }
 
     for (const part of this.document.parts) {
       this.entityById.set(part.id, part);
       this.entityByStableKey.set(part.stableKey, part);
       this.entityByAddress.set(part.address, part);
-      if (!this.entityByName.has(part.name)) this.entityByName.set(part.name, part);
-      this.partsByName.set(part.name, part);
+      this.indexName(part);
 
       if (part.entityId !== undefined && part.entityId > 0) {
         const list = this.entityByEntityId.get(part.entityId) ?? [];
@@ -135,8 +129,7 @@ export class MapSceneGraph {
       this.entityById.set(region.id, region);
       this.entityByStableKey.set(region.stableKey, region);
       this.entityByAddress.set(region.address, region);
-      if (!this.entityByName.has(region.name)) this.entityByName.set(region.name, region);
-      this.regionsByName.set(region.name, region);
+      this.indexName(region);
 
       if (region.entityId !== undefined && region.entityId > 0) {
         const list = this.entityByEntityId.get(region.entityId) ?? [];
@@ -149,8 +142,7 @@ export class MapSceneGraph {
       this.entityById.set(event.id, event);
       this.entityByStableKey.set(event.stableKey, event);
       this.entityByAddress.set(event.address, event);
-      if (!this.entityByName.has(event.name)) this.entityByName.set(event.name, event);
-      this.eventsByName.set(event.name, event);
+      this.indexName(event);
 
       if (event.referencedRegionName) {
         const list = this.eventsByReferencedRegion.get(event.referencedRegionName) ?? [];
@@ -168,51 +160,56 @@ export class MapSceneGraph {
       this.entityById.set(route.id, route);
       this.entityByStableKey.set(route.stableKey, route);
       this.entityByAddress.set(route.address, route);
-      if (!this.entityByName.has(route.name)) this.entityByName.set(route.name, route);
+      this.indexName(route);
     }
+  }
+
+  private indexName(entity: MapEntity): void {
+    const list = this.entitiesByName.get(entity.name) ?? [];
+    list.push(entity);
+    this.entitiesByName.set(entity.name, list);
   }
 
   public getDocument(): MapDocument {
     return this.document;
   }
 
+  /**
+   * Returns exact identity matches first; a name is usable only when it is
+   * unique across the complete MSB entity graph.
+   */
+  public findEntityCandidates(identifier: string): MapEntity[] {
+    const exact = this.entityById.get(identifier)
+      ?? this.entityByStableKey.get(identifier)
+      ?? this.entityByAddress.get(identifier);
+    return exact ? [exact] : [...(this.entitiesByName.get(identifier) ?? [])];
+  }
+
+  public isNameAmbiguous(name: string): boolean {
+    return (this.entitiesByName.get(name)?.length ?? 0) > 1;
+  }
+
   public findEntity(identifier: string): MapEntity | undefined {
-    return (
-      this.entityById.get(identifier) ||
-      this.entityByStableKey.get(identifier) ||
-      this.entityByAddress.get(identifier) ||
-      this.partsByName.get(identifier) ||
-      this.regionsByName.get(identifier) ||
-      this.modelsByName.get(identifier) ||
-      this.eventsByName.get(identifier) ||
-      this.entityByName.get(identifier)
-    );
+    const candidates = this.findEntityCandidates(identifier);
+    return candidates.length === 1 ? candidates[0] : undefined;
   }
 
   public findPart(identifier: string): MapPartEntity | undefined {
-    const direct = this.partsByName.get(identifier);
-    if (direct) return direct;
     const entity = this.findEntity(identifier);
     return entity && entity.kind === 'part' ? entity : undefined;
   }
 
   public findRegion(identifier: string): MapRegionEntity | undefined {
-    const direct = this.regionsByName.get(identifier);
-    if (direct) return direct;
     const entity = this.findEntity(identifier);
     return entity && entity.kind === 'region' ? entity : undefined;
   }
 
   public findModel(identifier: string): MapModelEntity | undefined {
-    const direct = this.modelsByName.get(identifier);
-    if (direct) return direct;
     const entity = this.findEntity(identifier);
     return entity && entity.kind === 'model' ? entity : undefined;
   }
 
   public findEvent(identifier: string): MapEventEntity | undefined {
-    const direct = this.eventsByName.get(identifier);
-    if (direct) return direct;
     const entity = this.findEntity(identifier);
     return entity && entity.kind === 'event' ? entity : undefined;
   }
@@ -367,12 +364,39 @@ export function validateMapTransaction(
   const pendingNames = new Set<string>();
   const canonicalTarget = (target: string): string => sceneGraph.findEntity(target)?.name ?? target;
   const wasDeleted = (target: string): boolean => deletedTargets.has(target) || deletedTargets.has(canonicalTarget(target));
+  const isAmbiguousTarget = (target: string): boolean => {
+    // Exact id/stableKey/address resolution is authoritative even when the
+    // resolved entity shares its display name with another entity. Only the
+    // bare name alias is ambiguous in that case.
+    return sceneGraph.isNameAmbiguous(target);
+  };
   const resolveWorkingEntity = (target: string): { name: string; kind: MapEntityKind; pending: boolean } | undefined => {
+    if (isAmbiguousTarget(target)) return undefined;
     const initial = sceneGraph.findEntity(target);
     const name = initial?.name ?? target;
     const kind = workingKinds.get(name);
     return kind ? { name, kind, pending: pendingNames.has(name) } : undefined;
   };
+
+  for (const op of transaction.operations) {
+    const targets = op.kind === 'batch_transform'
+      ? op.targets
+      : op.kind === 'create'
+        ? [op.template]
+        : op.kind === 'duplicate'
+          ? [op.target]
+          : [op.target];
+    for (const target of targets) {
+      if (isAmbiguousTarget(target)) {
+        diagnostics.push({
+          severity: 'error',
+          code: 'MAP_ENTITY_AMBIGUOUS',
+          message: `目标实体标识不唯一；请使用唯一 stableKey/id，且该 native writer 当前不接受重名实体: ${target}`,
+          target
+        });
+      }
+    }
+  }
 
   for (const op of transaction.operations) {
     switch (op.kind) {
@@ -470,6 +494,13 @@ export function validateMapTransaction(
               severity: 'error',
               code: 'MAP_PROPERTY_UNSUPPORTED',
               message: `不支持的属性修改: ${op.property}，当前仅支持权威字段 entityId`,
+              target: op.target
+            });
+          } else if (entity.kind !== 'part' && entity.kind !== 'region') {
+            diagnostics.push({
+              severity: 'error',
+              code: 'MAP_PROPERTY_UNSUPPORTED',
+              message: `实体类型 ${entity.kind} 不支持 entityId 写入；Event 的 +0x08 是 eventId，不是通用 entityId`,
               target: op.target
             });
           } else if (typeof op.value !== 'number' || !Number.isInteger(op.value)) {

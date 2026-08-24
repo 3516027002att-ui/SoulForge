@@ -377,6 +377,9 @@ internal static class HkxAnimationReader
         if (transformOffsets.Length != 0 && transformOffsets.Length != numTracks)
             throw new InvalidDataException(
                 $"hkaSplineCompressedAnimation transform-offset count mismatch: expected 0 or {numTracks}, actual={transformOffsets.Length}.");
+        if (transformOffsets.Length != 0)
+            throw new NotSupportedException(
+                "HKX spline transformOffsets is non-empty; Sekiro target corpus and the mature sequential block decoder do not verify per-track offset semantics.");
         ValidateBlockRelativeOffsets(blockOffsets, floatBlockOffsets, animationData.Length,
             numBlocks, "hkaSplineCompressedAnimation");
         if (animationData.Length == 0)
@@ -481,51 +484,18 @@ internal static class HkxAnimationReader
             if (maskReader.Position > maskEnd)
                 throw new InvalidDataException($"HKX spline block {blockIndex} mask region is truncated.");
 
+            if (animation.TransformOffsets.Length != 0)
+                throw new NotSupportedException(
+                    "HKX spline transformOffsets is non-empty; refusing to reinterpret it as track byte offsets.");
+
             var tracks = new TransformSplineTrack[animation.NumberOfTransformTracks];
-            if (animation.TransformOffsets.Length == 0)
-            {
-                var reader = new CheckedReader(animation.Data, maskEnd, blockEnd);
-                for (int trackIndex = 0; trackIndex < masks.Length; trackIndex++)
-                    tracks[trackIndex] = ReadTransformTrack(reader, masks[trackIndex], trackIndex);
-                reader.Align(16);
-                if (reader.Position != blockEnd)
-                    throw new InvalidDataException(
-                        $"HKX spline block {blockIndex} has an unparsed transform payload: cursor={reader.Position}, end={blockEnd}.");
-            }
-            else
-            {
-                var trackStarts = new int[masks.Length];
-                for (int trackIndex = 0; trackIndex < masks.Length; trackIndex++)
-                {
-                    ulong relativeBytes = (ulong)animation.TransformOffsets[trackIndex] * 4UL;
-                    if (relativeBytes > int.MaxValue)
-                        throw new InvalidDataException($"HKX spline track {trackIndex} offset overflows the reader.");
-                    int trackStart = checked(blockStart + (int)relativeBytes);
-                    if (trackStart < maskEnd || trackStart >= blockEnd)
-                        throw new InvalidDataException(
-                            $"HKX spline track {trackIndex} offset {trackStart} is outside block {blockIndex}.");
-                    trackStarts[trackIndex] = trackStart;
-                }
-
-                for (int trackIndex = 0; trackIndex < masks.Length; trackIndex++)
-                {
-                    int nextStart = blockEnd;
-                    for (int other = 0; other < trackStarts.Length; other++)
-                    {
-                        if (trackStarts[other] > trackStarts[trackIndex])
-                            nextStart = Math.Min(nextStart, trackStarts[other]);
-                    }
-                    var reader = new CheckedReader(animation.Data, trackStarts[trackIndex], nextStart);
-                    tracks[trackIndex] = ReadTransformTrack(reader, masks[trackIndex], trackIndex);
-                    reader.Align(4);
-                    if (reader.Position > nextStart)
-                        throw new InvalidDataException(
-                            $"HKX spline track {trackIndex} overlaps the next transform offset.");
-                }
-
-                int maxTrackEnd = tracks.Length == 0 ? maskEnd : trackStarts.Max();
-                _ = maxTrackEnd;
-            }
+            var reader = new CheckedReader(animation.Data, maskEnd, blockEnd);
+            for (int trackIndex = 0; trackIndex < masks.Length; trackIndex++)
+                tracks[trackIndex] = ReadTransformTrack(reader, masks[trackIndex], trackIndex);
+            reader.Align(16);
+            if (reader.Position != blockEnd)
+                throw new InvalidDataException(
+                    $"HKX spline block {blockIndex} has an unparsed transform payload: cursor={reader.Position}, end={blockEnd}.");
 
             blocks[blockIndex] = new SplineBlock { Tracks = tracks };
         }

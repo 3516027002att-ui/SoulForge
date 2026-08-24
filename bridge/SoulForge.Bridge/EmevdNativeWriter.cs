@@ -322,8 +322,10 @@ internal static class EmevdNativeWriter
                         RequiredLong(p, "instructionIndex"),
                         RequiredLong(p, "targetStartByte"),
                         RequiredLong(p, "sourceStartByte"),
-                        (int)RequiredLong(p, "byteCount"),
-                        (int)(p.TryGetProperty("unkId", out var unk) && unk.ValueKind == JsonValueKind.Number ? unk.GetInt64() : 0)));
+                        RequiredInt32(p, "byteCount"),
+                        p.TryGetProperty("unkId", out var unk) && unk.ValueKind == JsonValueKind.Number
+                            ? RequiredInt32(p, "unkId")
+                            : 0));
                 }
             }
             return new EmevdPatch(kind, eventId, null, null, null, null, null, null, parameters);
@@ -353,6 +355,14 @@ internal static class EmevdNativeWriter
         => options.TryGetProperty(field, out var value) && value.ValueKind == JsonValueKind.Number
             ? value.GetInt64()
             : throw new InvalidDataException($"options.{field} 是必填整数。");
+
+    private static int RequiredInt32(JsonElement options, string field)
+    {
+        var value = RequiredLong(options, field);
+        if (value < int.MinValue || value > int.MaxValue)
+            throw new InvalidDataException($"options.{field} 超出 Int32 范围。");
+        return (int)value;
+    }
 
     private static long? OptionalUInt32(JsonElement options, string field)
     {

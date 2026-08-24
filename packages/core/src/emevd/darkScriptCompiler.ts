@@ -441,14 +441,33 @@ function compilePairedEvent(
   for (const instr of finalInstructions) {
     for (const arg of instr.args) {
       if (typeof arg.value === 'string') {
-        const m = /^X(\d+)_(\d+)$/.exec(arg.value);
-        if (m) {
-          const src = Number(m[1]);
-          const cnt = Number(m[2]);
+        const symbol = parseEventParameterSymbol(arg.value);
+        if (symbol?.ok === false) {
+          add(error(
+            symbol.code,
+            `指令 ${instr.call?.name ?? instr.id} 的事件参数 ${arg.value} 无效：${symbol.message}`,
+            instr.call?.span ?? parsed.span,
+            { resourceUri, targetAnchor: eventAnchor }
+          ));
+          blocked = true;
+          continue;
+        }
+        if (symbol?.ok === true) {
+          const { sourceStartByte: src, byteCount: cnt } = symbol;
           if (arg.targetStartByte === undefined || Number.isNaN(arg.targetStartByte)) {
             add(error(
               'EMEVD_PARAMETER_TARGET_OFFSET_UNRESOLVED',
               `指令 ${instr.call?.name ?? instr.id} 的参数 ${arg.name} 无法解析 targetStartByte，禁止写入。`,
+              instr.call?.span ?? parsed.span,
+              { resourceUri, targetAnchor: eventAnchor }
+            ));
+            blocked = true;
+            continue;
+          }
+          if (arg.byteCount === undefined || cnt !== arg.byteCount) {
+            add(error(
+              'EMEVD_PARAMETER_WIDTH_MISMATCH',
+              `事件参数 ${arg.value} 的 byteCount=${cnt} 与 EMEDF 目标参数宽度 ${arg.byteCount ?? 'unknown'} 不一致，禁止写入。`,
               instr.call?.span ?? parsed.span,
               { resourceUri, targetAnchor: eventAnchor }
             ));
@@ -575,6 +594,33 @@ function getInstructionArgLayout(def: EmedfInstructionDef): Array<{ name: string
   return layout;
 }
 
+type EventParameterSymbolResult =
+  | { ok: true; sourceStartByte: number; byteCount: number }
+  | { ok: false; code: 'EMEVD_PARAMETER_SYMBOL_INVALID'; message: string }
+  | undefined;
+
+/**
+ * Parse the DarkScript event-parameter spelling without allowing a value that
+ * the Bridge/native writer would later truncate or wrap. The source offset is
+ * a signed 64-bit field in EMEVD, while byteCount is a native Int32 field.
+ */
+function parseEventParameterSymbol(value: string): EventParameterSymbolResult {
+  const match = /^X(\d+)_(\d+)$/.exec(value);
+  if (!match) return undefined;
+  const sourceStartByte = Number(match[1]);
+  const byteCount = Number(match[2]);
+  if (!Number.isSafeInteger(sourceStartByte) || sourceStartByte < 0) {
+    return { ok: false, code: 'EMEVD_PARAMETER_SYMBOL_INVALID', message: 'sourceStartByte 必须是非负安全整数。' };
+  }
+  if (!Number.isSafeInteger(byteCount) || byteCount <= 0 || byteCount > 0x7fff_ffff) {
+    return { ok: false, code: 'EMEVD_PARAMETER_SYMBOL_INVALID', message: 'byteCount 必须在 1..Int32.MaxValue 范围内。' };
+  }
+  if (sourceStartByte > Number.MAX_SAFE_INTEGER - byteCount) {
+    return { ok: false, code: 'EMEVD_PARAMETER_SYMBOL_INVALID', message: 'sourceStartByte + byteCount 溢出安全整数范围。' };
+  }
+  return { ok: true, sourceStartByte, byteCount };
+}
+
 /** 一个 shape 行对应事件指令列表里的指令（wait-for = 谓词们 + anchor）。 */
 function itemInstructions(item: DarkScriptEventItem): EmevdEditorDocument['events'][number]['instructions'][number][] {
   if (item.kind === 'wait-for') {
@@ -636,10 +682,19 @@ function compileAddedEvent(
     for (let i = 0; i < entry.call.args.length; i++) {
       const arg = entry.call.args[i]!;
       if (typeof arg.value === 'string') {
-        const m = /^X(\d+)_(\d+)$/.exec(arg.value);
-        if (m) {
-          const src = Number(m[1]);
-          const cnt = Number(m[2]);
+        const symbol = parseEventParameterSymbol(arg.value);
+        if (symbol?.ok === false) {
+          add(error(
+            symbol.code,
+            `新增事件指令 ${entry.call.name} 的事件参数 ${arg.value} 无效：${symbol.message}`,
+            arg.span,
+            { resourceUri }
+          ));
+          parameterLayoutBlocked = true;
+          continue;
+        }
+        if (symbol?.ok === true) {
+          const { sourceStartByte: src, byteCount: cnt } = symbol;
           const l = layout[i];
           if (!l || typeof l.targetStartByte !== 'number') {
             add(error(
@@ -650,6 +705,16 @@ function compileAddedEvent(
             ));
             parameterLayoutBlocked = true;
             return;
+          }
+          if (cnt !== l.byteCount) {
+            add(error(
+              'EMEVD_PARAMETER_WIDTH_MISMATCH',
+              `新增事件指令 ${entry.call.name} 的事件参数 ${arg.value} 宽度 ${cnt} 与 EMEDF 参数宽度 ${l.byteCount} 不一致，禁止写入。`,
+              arg.span,
+              { resourceUri }
+            ));
+            parameterLayoutBlocked = true;
+            continue;
           }
           newParameters.push({
             instructionIndex,

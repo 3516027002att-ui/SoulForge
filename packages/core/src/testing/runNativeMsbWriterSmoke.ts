@@ -547,6 +547,24 @@ async function main(): Promise<void> {
         throw new Error('m11 fixture 缺少唯一名的 part/region/event/route 删除样本');
       }
 
+      const eventEntityIdGuard = await runNativeBridge({
+        command: 'write-msb',
+        filePath: msbPath,
+        allowedRoots: [root, staging],
+        writableRoots: [staging],
+        timeoutMs: 180_000,
+        commandOptions: {
+          outputPath: join(staging, 'm11.event-entity-id-guard.msb'),
+          expectedDocumentHash: orig.sourceHash,
+          mutation: 'set_property',
+          partName: uniqueEvent.name,
+          entityId: (uniqueEvent.eventId ?? 0) + 1
+        }
+      });
+      if (!eventEntityIdGuard.diagnostics.some((d) => d.code === 'MSB_STAGING_WRITE_FAILED')) {
+        throw new Error(`Event entityId 写入未 fail-closed: ${JSON.stringify(eventEntityIdGuard.diagnostics)}`);
+      }
+
       const deletePath = join(staging, 'm11.delete.msb');
       const deleted = await runNativeBridge<MsbEnvelope>({
         command: 'write-msb',
@@ -825,6 +843,7 @@ async function main(): Promise<void> {
           siblingsByteIdentical: true,
           failClosed: {
             nonexistent: 'MSB_STAGING_WRITE_FAILED',
+            eventEntityId: 'MSB_STAGING_WRITE_FAILED',
             duplicateName: duplicateNameDelete ?? 'fixture-无同名样本',
             unregisteredPartDelete: 'MSB_UNREGISTERED_ENTITY_TYPE',
             unregisteredRegionDelete: 'MSB_UNREGISTERED_ENTITY_TYPE'

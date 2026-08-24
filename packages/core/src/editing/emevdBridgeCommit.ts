@@ -275,6 +275,19 @@ function buildMutationPayload(
       instructionIndex: m.instructionIndex
     };
   }
+  if ('kind' in m && m.kind === 'set_event_parameters') {
+    return {
+      mutation: 'set_event_parameters',
+      eventId: m.eventId,
+      parameters: m.parameters.map((parameter) => ({
+        instructionIndex: parameter.instructionIndex,
+        targetStartByte: parameter.targetStartByte,
+        sourceStartByte: parameter.sourceStartByte,
+        byteCount: parameter.byteCount,
+        unkId: parameter.unkId ?? 0
+      }))
+    };
+  }
   throw new Error(`EMEVD_BRIDGE_MUTATION_UNSUPPORTED: ${(m as { kind: string }).kind}`);
 }
 

@@ -486,6 +486,9 @@ export const TIER_BY_SCRIPT = Object.freeze({
   // 以下三条本轮从孤儿状态接线，均以 resolveNativeFixture 读真机 corpus，
   // 缺环境时各自诚实跳过（实测已确认），故归 native。
   'test:emevd-multi-corpus-matrix': 'native',
+  // EMEVD X 参数绑定的真实插入/前缀删除/新 X/宽度拒绝 golden；依赖真实
+  // Sekiro common.emevd.dcx、DarkScript3 EMEDF 与 Bridge KRAK canonical reread。
+  'test:emevd-x-binding-golden': 'native',
   'test:native-corpus-writeback': 'native',
   'test:param-field-write-matrix': 'native',
   'test:emevd-imported-coverage': 'native',

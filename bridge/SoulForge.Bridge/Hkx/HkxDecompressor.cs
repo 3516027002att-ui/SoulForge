@@ -135,12 +135,12 @@ internal static class HkxDecompressor
             | ((ulong)data[3] << 24)
             | ((ulong)data[4] << 32);
 
-        // ThreeComp40 stores 12-bit components around the 2049 center. The
-        // two high bits are the omitted-component index and the following bit
-        // is the omitted-component sign; they are not part of c2.
-        int c0 = (int)(packed & 0xFFF) - 2049;
-        int c1 = (int)((packed >> 12) & 0xFFF) - 2049;
-        int c2 = (int)((packed >> 24) & 0xFFF) - 2049;
+        // ThreeComp40 stores three 12-bit components in the low 36 bits.
+        // The center is the mature decoder's 2047 (not 2049); bits 36..37
+        // select the omitted component and bit 38 stores its sign.
+        int c0 = (int)(packed & 0xFFF) - 2047;
+        int c1 = (int)((packed >> 12) & 0xFFF) - 2047;
+        int c2 = (int)((packed >> 24) & 0xFFF) - 2047;
         int omitted = (int)((packed >> 36) & 0x3);
         var values = new[] { c0 * 0.000345436f, c1 * 0.000345436f, c2 * 0.000345436f };
         bool negative = ((packed >> 38) & 1) != 0;

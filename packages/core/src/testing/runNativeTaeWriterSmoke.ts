@@ -259,11 +259,16 @@ function byteDiffRegions(source: Buffer, output: Buffer): Array<{ start: number;
   return regions;
 }
 
-async function readTae(path: string, allowedRoots: string[]): Promise<TaeEnvelope> {
+async function readTae(
+  path: string,
+  allowedRoots: string[],
+  oodleRuntimeRoot?: string
+): Promise<TaeEnvelope> {
   const result = await runBridge<TaeEnvelope>({
     command: TAE_READ_COMMAND,
     filePath: path,
     allowedRoots,
+    ...(oodleRuntimeRoot ? { oodleRuntimeRoot } : {}),
     timeoutMs: 120_000
   });
   if (result.parseStatus === 'failed' || !result.data?.sourceHash) {
@@ -278,13 +283,15 @@ async function writeTae(
   writableRoots: string[],
   outputPath: string,
   expectedDocumentHash: string,
-  mutations: TaeMutation[]
+  mutations: TaeMutation[],
+  oodleRuntimeRoot?: string
 ): Promise<BridgeResult<WriteEnvelope>> {
   return runBridge<WriteEnvelope>({
     command: TAE_WRITE_COMMAND,
     filePath: sourcePath,
     allowedRoots,
     writableRoots,
+    ...(oodleRuntimeRoot ? { oodleRuntimeRoot } : {}),
     timeoutMs: 120_000,
     commandOptions: { outputPath, expectedDocumentHash, mutations }
   });
@@ -630,6 +637,8 @@ async function corpusLeg(explicitPath: string | undefined): Promise<void> {
     const root = workspace.root;
     const staging = join(root, 'staging');
     await mkdir(staging, { recursive: true });
+    const oodleRuntimeRoot = process.env.SOULFORGE_OODLE_RUNTIME_ROOT?.trim()
+      || process.env.SOULFORGE_SEKIRO_GAME_ROOT?.trim();
 
     const source = await resolveNativeFixture(
       explicitPath,
@@ -648,6 +657,7 @@ async function corpusLeg(explicitPath: string | undefined): Promise<void> {
         filePath: source,
         allowedRoots: [source.replace(/[/\\][^/\\]+$/, '')],
         writableRoots: [tmpDir],
+        ...(oodleRuntimeRoot ? { oodleRuntimeRoot } : {}),
         commandOptions: { childPath: 'tae/a00.tae', outputPath: taePath },
         timeoutMs: 180_000
       });
@@ -671,7 +681,7 @@ async function corpusLeg(explicitPath: string | undefined): Promise<void> {
     // allowedRoots 内，而 registry 源（游戏 mod 目录）与临时 staging 是两个根。
     const srcInStaging = join(staging, 'source.tae');
     await writeFile(srcInStaging, await readFile(taePath));
-    const doc = await readTae(srcInStaging, [staging]);
+    const doc = await readTae(srcInStaging, [staging], oodleRuntimeRoot);
     const allowed = new Set(['candidate', 'partial', 'fixture-confirmed']);
     if (doc.authority === undefined || !allowed.has(doc.authority)) {
       throw new Error(`真实语料 authority 应属于 ${[...allowed].join('/')}，实际 ${doc.authority}`);
@@ -691,7 +701,7 @@ async function corpusLeg(explicitPath: string | undefined): Promise<void> {
       const outPath = join(staging, 'out.tae');
       const write = await writeTae(srcInStaging, [staging], [staging], outPath, doc.sourceHash!, [
         { mutation: 'insert-event', animId: anim.animId, templateEventIndex: 0, startTime: newStart, endTime: newStart + 0.5 }
-      ]);
+      ], oodleRuntimeRoot);
       if (write.parseStatus === 'failed') {
         // 该动画被 fail-closed block（布局不连续等）：换下一个动画。
         continue;
@@ -702,7 +712,7 @@ async function corpusLeg(explicitPath: string | undefined): Promise<void> {
       if (!write.diagnostics.some((d) => d.code === TAE_STAGING_WRITE_VERIFIED)) {
         throw new Error(`真实语料 write 未发 ${TAE_STAGING_WRITE_VERIFIED}：${JSON.stringify(write.diagnostics)}`);
       }
-      const reopened = await readTae(outPath, [staging]);
+      const reopened = await readTae(outPath, [staging], oodleRuntimeRoot);
       const targetAnim = reopened.animations?.find((a) => a.animId === anim.animId);
       if ((targetAnim?.eventCount ?? 0) !== (anim.eventCount ?? 0) + 1) {
         throw new Error(

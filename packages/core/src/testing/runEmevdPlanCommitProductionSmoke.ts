@@ -785,22 +785,30 @@ async function nativeChain(root: string, fixturePathArg: string | undefined): Pr
     '../../mods/event/common.emevd.dcx'
   );
   const dcxBytes = await readFile(sourceDcx);
-  const payload = decompressDfltDcx(dcxBytes);
-  const target = join(overlayRoot, 'event', 'common.emevd');
-  await writeFile(target, payload);
-  const sourceHash = hashOf(payload);
+  const target = join(overlayRoot, 'event', 'common.emevd.dcx');
+  // Keep the real outer bytes intact.  Sekiro's installed common.emevd.dcx is
+  // KRAK on this machine; decompression and re-wrapping here would bypass the
+  // Bridge/DCX authority and would turn a production smoke into a DFLT test.
+  await writeFile(target, dcxBytes);
+  const sourceOuterHash = hashOf(dcxBytes);
+  const oodleRuntimeRoot = process.env.SOULFORGE_OODLE_RUNTIME_ROOT?.trim()
+    || process.env.SOULFORGE_SEKIRO_GAME_ROOT?.trim();
 
   const envelope = await runBridge<EmevdEnvelope>({
     command: 'read-emevd-document',
     filePath: target,
-    allowedRoots: [overlayRoot, stagingRoot],
+    allowedRoots: [overlayRoot, stagingRoot, ...(oodleRuntimeRoot ? [oodleRuntimeRoot] : [])],
+    ...(oodleRuntimeRoot ? { oodleRuntimeRoot } : {}),
     timeoutMs: 120_000
   });
   if (envelope.parseStatus === 'failed' || !envelope.data) {
     throw new Error(`native EMEVD read failed: ${JSON.stringify(envelope.diagnostics)}`);
   }
-  if (envelope.data.sourceHash !== sourceHash) {
-    throw new Error(`native source hash mismatch: ${envelope.data.sourceHash} vs ${sourceHash}`);
+  if (envelope.data.sourceFormat !== 'dcx') {
+    throw new Error(`native sourceFormat must stay dcx, got ${envelope.data.sourceFormat}`);
+  }
+  if (envelope.data.outerFileHash !== sourceOuterHash) {
+    throw new Error(`native outer hash mismatch: ${envelope.data.outerFileHash} vs ${sourceOuterHash}`);
   }
   const targetEvent = envelope.data.events.find((e) => e.id !== 0 && e.instructionCount !== 0)
     ?? envelope.data.events.find((e) => e.id !== 0)
@@ -833,11 +841,13 @@ event ${formatEmevdAnchor('event', event.anchor)} {
     document,
     registry,
     sourcePath: target,
-    expectedDocumentHash: sourceHash,
-    allowedRoots: [overlayRoot, stagingRoot],
+    expectedDocumentHash: envelope.data.sourceHash,
+    expectedOuterFileHash: sourceOuterHash,
+    allowedRoots: [overlayRoot, stagingRoot, ...(oodleRuntimeRoot ? [oodleRuntimeRoot] : [])],
     workspaceId: session.meta.workspaceId,
     workspaceRoot: overlayRoot,
     stagingRoot,
+    ...(oodleRuntimeRoot ? { oodleRuntimeRoot } : {}),
     title: 'emevd plan native smoke'
   });
   if (!submitted.ok || !submitted.commit) {
@@ -852,7 +862,8 @@ event ${formatEmevdAnchor('event', event.anchor)} {
   const after = await runBridge<EmevdEnvelope>({
     command: 'read-emevd-document',
     filePath: target,
-    allowedRoots: [overlayRoot, stagingRoot],
+    allowedRoots: [overlayRoot, stagingRoot, ...(oodleRuntimeRoot ? [oodleRuntimeRoot] : [])],
+    ...(oodleRuntimeRoot ? { oodleRuntimeRoot } : {}),
     timeoutMs: 120_000
   });
   if (after.parseStatus === 'failed') throw new Error('native post-commit read failed');
@@ -869,8 +880,8 @@ event ${formatEmevdAnchor('event', event.anchor)} {
   if (after.data!.instructionCount !== envelope.data.instructionCount) {
     throw new Error('native instruction count changed unexpectedly');
   }
-  if (!submitted.nextDocument?.diagnostics.some((d) => d.code === 'EMEVD_PLAN_APPLIED')) {
-    throw new Error('native nextDocument must show EMEVD_PLAN_APPLIED');
+  if (!submitted.nextDocument?.diagnostics.some((d) => d.code === 'EMEVD_CANONICAL_REREAD')) {
+    throw new Error('native nextDocument must come from canonical Bridge reread');
   }
   return 1;
 }

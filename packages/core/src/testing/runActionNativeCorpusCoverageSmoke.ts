@@ -40,19 +40,40 @@ interface CoverageRow {
   animId: number;
   filePath?: string;
   status: 'payload' | 'unsupported' | 'failed';
-  animationType?: string;
-  sourceFormat?: string;
-  frameCount?: number;
-  duration?: number;
-  trackCount?: number;
-  boneCount?: number;
+  sourceHash?: string | undefined;
+  animationContainerHash?: string | undefined;
+  skeletonContainerHash?: string | undefined;
+  motionAnimId?: number | undefined;
+  animationType?: string | undefined;
+  type?: string | undefined;
+  sourceFormat?: string | undefined;
+  frameCount?: number | undefined;
+  duration?: number | undefined;
+  trackCount?: number | undefined;
+  boneCount?: number | undefined;
+  track?: { count: number; trackToHkxBone: number[] } | undefined;
+  skeleton?: TaeAnimationClipData['skeleton'] | undefined;
+  binding?: TaeAnimationClipData['binding'] | undefined;
+  timestamps?: Array<{ label: string; timeSeconds: number; loop: boolean }> | undefined;
+  bones?: string[] | undefined;
+  errors?: unknown;
+  oracle?: { source: string; status: 'BLOCKED'; reason: string } | undefined;
   hasExtractedMotion?: boolean;
   rootMotionSampled?: boolean;
   movingBones?: number;
+  dynamicPositionTracks?: number;
+  dynamicRotationTracks?: number;
+  dynamicScaleTracks?: number;
   quantization?: string;
   diagnosticCodes: string[];
   error?: string;
 }
+
+const ACTION_ORACLE = {
+  source: 'PredatorCZ/HavokLib mature hkaSplineCompressedAnimation semantics',
+  status: 'BLOCKED' as const,
+  reason: '本次 coverage 未执行独立成熟 oracle 的真实 quantization quaternion differential；合成 probe 已移除。'
+};
 
 /**
  * Real-corpus ACTION coverage probe.
@@ -81,11 +102,15 @@ export async function runActionNativeCorpusCoverageSmoke(): Promise<void> {
 
   if (!existsSync(bridgeExecutablePath)) {
     console.log(JSON.stringify({
-      ok: true,
-      status: 'NOT_RUN_ENVIRONMENTAL',
+      ok: false,
+      status: 'BLOCKED',
+      authority: 'partial',
       message: 'ACTION corpus coverage 未运行：缺少 Debug Bridge 可执行文件。',
       mode,
-      bridgeExecutablePath
+      bridgeExecutablePath,
+      source: defaultFilePath,
+      errors: ['ACTION_REAL_FIXTURE_OR_BRIDGE_MISSING'],
+      oracle: ACTION_ORACLE
     }));
     return;
   }
@@ -153,6 +178,7 @@ export async function runActionNativeCorpusCoverageSmoke(): Promise<void> {
       payloadCount: payloadRows.length,
       unsupportedCount: unsupportedRows.length,
       failedCount: failedRows.length,
+      blockedCount: failedRows.length + unsupportedRows.length,
       animationTypes,
       sourceFormats,
       rootMotionPayloads,
@@ -166,6 +192,8 @@ export async function runActionNativeCorpusCoverageSmoke(): Promise<void> {
         error: container.error
       })),
       failureCodes,
+      oracle: ACTION_ORACLE,
+      blockedSamples: [...unsupportedRows, ...failedRows].slice(0, 12),
       unsupportedSamples: unsupportedRows.slice(0, 12),
       failedSamples: failedRows.slice(0, 12),
       nonClaims: [
@@ -266,6 +294,8 @@ function inspectClipResult(
       animId,
       status: 'unsupported',
       diagnosticCodes,
+      errors: result.diagnostics,
+      oracle: ACTION_ORACLE,
       error: result.diagnostics[0]?.message ?? `Bridge parseStatus=${result.parseStatus}`
     };
   }
@@ -274,6 +304,8 @@ function inspectClipResult(
       animId,
       status: 'failed',
       diagnosticCodes,
+      errors: result.diagnostics,
+      oracle: ACTION_ORACLE,
       error: result.diagnostics[0]?.message ?? 'Bridge 返回 failed 但没有诊断。'
     };
   }
@@ -315,12 +347,24 @@ function inspectClipResult(
       return {
         animId,
         status: 'unsupported',
+        motionAnimId: clip.motionAnimId,
+        sourceHash: clip.sourceHash,
+        animationContainerHash: clip.animationContainerHash,
+        skeletonContainerHash: clip.skeletonContainerHash,
         animationType: clip.animationType,
+        type: clip.animationType,
         sourceFormat: clip.sourceFormat,
         frameCount: clip.frameCount,
         duration: clip.duration,
         trackCount: clip.transformTrackCount,
         boneCount: clip.hkxBoneCount,
+        track: { count: clip.transformTrackCount, trackToHkxBone: clip.trackToHkxBone },
+        skeleton: clip.skeleton,
+        binding: clip.binding,
+        timestamps: [],
+        bones: clip.hkxBoneNames,
+        errors: result.diagnostics,
+        oracle: ACTION_ORACLE,
         hasExtractedMotion: clip.hasExtractedMotion === true,
         diagnosticCodes: [...diagnosticCodes, 'ACTION_ADDITIVE_UNSUPPORTED'],
         error: `ACTION clip blendHint=${clip.blendHint} 目前只允许显式 unsupported，禁止按 absolute pose 播放。`
@@ -350,19 +394,46 @@ function inspectClipResult(
           : 0
       );
     }, 0);
+    const splineRows = clip.animationType === 'SplineCompressed'
+      ? ((clip.splineBlocks ?? []).flatMap((block) => block.tracks ?? []))
+      : [];
+    const dynamicPositionTracks = splineRows.filter((track) =>
+      track.positionX || track.positionY || track.positionZ).length;
+    const dynamicRotationTracks = splineRows.filter((track) => track.rotation).length;
+    const dynamicScaleTracks = splineRows.filter((track) =>
+      track.scaleX || track.scaleY || track.scaleZ).length;
 
     return {
       animId,
       status: 'payload',
+      sourceHash: clip.sourceHash,
+      animationContainerHash: clip.animationContainerHash,
+      skeletonContainerHash: clip.skeletonContainerHash,
+      motionAnimId: clip.motionAnimId,
       animationType: clip.animationType,
+      type: clip.animationType,
       sourceFormat: clip.sourceFormat,
       frameCount: clip.frameCount,
       duration: clip.duration,
       trackCount: clip.transformTrackCount,
       boneCount: clip.hkxBoneCount,
+      track: { count: clip.transformTrackCount, trackToHkxBone: clip.trackToHkxBone },
+      skeleton: clip.skeleton,
+      binding: clip.binding,
+      timestamps: [0, 0.25, 0.5, 0.75, 1].map((fraction) => ({
+        label: fraction === 0 ? 't=0' : fraction === 1 ? 't=end' : `t=${fraction * 100}%`,
+        timeSeconds: clip.duration * fraction,
+        loop: false
+      })),
+      bones: clip.hkxBoneNames,
+      errors: { nativeDifferential: 'not-run-in-coverage' },
+      oracle: ACTION_ORACLE,
       hasExtractedMotion: clip.hasExtractedMotion === true,
       rootMotionSampled,
       movingBones,
+      dynamicPositionTracks,
+      dynamicRotationTracks,
+      dynamicScaleTracks,
       quantization: clip.animationType === 'SplineCompressed'
         ? [...new Set((nativeClip.splineBlocks ?? []).flatMap((block) =>
           (block.tracks ?? []).map((track) => String(track.rotationQuantization ?? 'missing'))))].sort().join(',')
@@ -374,6 +445,8 @@ function inspectClipResult(
       animId,
       status: 'failed',
       diagnosticCodes,
+      errors: [error instanceof Error ? error.message : String(error)],
+      oracle: ACTION_ORACLE,
       error: `PAYLOAD_CONTRACT: ${error instanceof Error ? error.message : String(error)}`
     };
   }
