@@ -327,59 +327,42 @@ async function main(): Promise<void> {
       // 只改 name relative pointer；entry 原始前缀（包括 subtype data、references、
       // model 与未知字节）必须保持一致。新名称追加在 clone entry 尾部，避免移动
       // 未知 payload 内部的相对引用。
-      const templatePart = orig.parts.find((part) => isRegisteredMsbType('part', part.typeId)
-        && orig.parts.filter((candidate) => candidate.name === part.name).length === 1);
-      if (!templatePart) throw new Error('m11 fixture 缺少 template-backed duplicate/create part 样本');
-      const duplicateName = `${templatePart.name}_sf_dup`;
-      const createName = `${templatePart.name}_sf_create`;
-      const duplicatePath = join(staging, 'm11.duplicate-create.msb');
-      const duplicated = await runNativeBridge<MsbEnvelope>({
-        command: 'write-msb',
-        filePath: msbPath,
-        allowedRoots: [root, staging],
-        writableRoots: [staging],
-        timeoutMs: 180_000,
-        commandOptions: {
-          outputPath: duplicatePath,
-          expectedDocumentHash: orig.sourceHash,
-          mutations: [
-            { kind: 'duplicate_part', partName: templatePart.name, newName: duplicateName },
-            { kind: 'create_part', partName: templatePart.name, newName: createName }
-          ]
+      const templateParts = partTypes.map((typeId) => orig.parts.find((part) => part.typeId === typeId
+        && isRegisteredMsbType('part', part.typeId)
+        && orig.parts.filter((candidate) => candidate.name === part.name).length === 1));
+      if (templateParts.some((part): part is undefined => part === undefined)) {
+        throw new Error(`m11 fixture 缺少每种注册 Part type 的 template-backed 样本: ${JSON.stringify(partTypes)}`);
+      }
+      const templates = templateParts as Array<NonNullable<typeof templateParts[number]>>;
+      const templatePart = templates[0]!;
+      const duplicateNames = templates.map((part) => `${part.name}_sf_dup_t${part.typeId}`);
+      const createNames = templates.map((part) => `${part.name}_sf_create_t${part.typeId}`);
+      // m11 的 PARTS table 只有有限原生空隙；把每种 subtype 分开写入独立
+      // overlay，仍然逐一验证 duplicate/create，但不把多个大 entry 错误地
+      // 累加成一个超出 native gap 的伪失败。
+      const verifyTemplateClone = async (outputPath: string, newName: string, template: MsbEnvelope['parts'][number]) => {
+        const cloneRead = await runNativeBridge<MsbEnvelope>({
+          command: 'read-msb-document',
+          filePath: outputPath,
+          allowedRoots: [staging],
+          timeoutMs: 180_000
+        });
+        if (cloneRead.parseStatus === 'failed' || !cloneRead.data) {
+          throw new Error(`template-backed ${newName} 后 MSB 重读失败: ${JSON.stringify(cloneRead.diagnostics)}`);
         }
-      });
-      if (!duplicated.diagnostics.some((d) => d.code === 'MSB_STAGING_WRITE_VERIFIED')) {
-        throw new Error(`MSB template duplicate/create 写回失败: ${JSON.stringify(duplicated.diagnostics)}`);
-      }
-      const duplicateRead = await runNativeBridge<MsbEnvelope>({
-        command: 'read-msb-document',
-        filePath: duplicatePath,
-        allowedRoots: [staging],
-        timeoutMs: 180_000
-      });
-      if (duplicateRead.parseStatus === 'failed' || !duplicateRead.data) {
-        throw new Error(`duplicate/create 后 MSB 重读失败: ${JSON.stringify(duplicateRead.diagnostics)}`);
-      }
-      const duplicatedDoc = duplicateRead.data;
-      if (duplicatedDoc.partCount !== orig.partCount + 2
-        || !duplicatedDoc.parts.some((part) => part.name === duplicateName)
-        || !duplicatedDoc.parts.some((part) => part.name === createName)) {
-        throw new Error(`duplicate/create 后实体计数或名称不符: ${JSON.stringify({ before: orig.partCount, after: duplicatedDoc.partCount, duplicateName, createName })}`);
-      }
-      for (const newName of [duplicateName, createName]) {
-        const clone = duplicatedDoc.parts.find((part) => part.name === newName)!;
-        if (clone.typeId !== templatePart.typeId || clone.modelIndex !== templatePart.modelIndex) {
+        const clone = cloneRead.data.parts.find((part) => part.name === newName);
+        if (cloneRead.data.partCount !== orig.partCount + 1 || !clone) {
+          throw new Error(`template-backed ${newName} 实体计数或名称不符`);
+        }
+        if (clone.typeId !== template.typeId || clone.modelIndex !== template.modelIndex) {
           throw new Error(`template-backed ${newName} subtype/model 未保留`);
         }
-      }
-      const duplicateBytes = await readFile(duplicatePath);
-      const sourcePartEnd = nextPartOffset(payload, orig.parts, templatePart.offset);
-      const sourcePartBytes = payload.subarray(templatePart.offset, sourcePartEnd);
-      const duplicateParam = readPartsParam(duplicateBytes);
-      for (const newName of [duplicateName, createName]) {
-        const clone = duplicatedDoc.parts.find((part) => part.name === newName)!;
-        const cloneEnd = nextPartOffset(duplicateBytes, duplicatedDoc.parts, clone.offset, duplicateParam.nextOffset);
-        const cloneBytes = duplicateBytes.subarray(clone.offset, cloneEnd);
+        const outputBytes = await readFile(outputPath);
+        const sourcePartEnd = nextPartOffset(payload, orig.parts, template.offset);
+        const sourcePartBytes = payload.subarray(template.offset, sourcePartEnd);
+        const outputParam = readPartsParam(outputBytes);
+        const cloneEnd = nextPartOffset(outputBytes, cloneRead.data.parts, clone.offset, outputParam.nextOffset);
+        const cloneBytes = outputBytes.subarray(clone.offset, cloneEnd);
         if (cloneBytes.length < sourcePartBytes.length) {
           throw new Error(`template-backed ${newName} entry 被截断`);
         }
@@ -388,6 +371,47 @@ async function main(): Promise<void> {
             throw new Error(`template-backed ${newName} 未保留 native entry payload，relative=${i}`);
           }
         }
+      };
+      for (const [index, template] of templates.entries()) {
+        const duplicatePath = join(staging, `m11.duplicate-t${template.typeId}.msb`);
+        const duplicated = await runNativeBridge<MsbEnvelope>({
+          command: 'write-msb',
+          filePath: msbPath,
+          allowedRoots: [root, staging],
+          writableRoots: [staging],
+          timeoutMs: 180_000,
+          commandOptions: {
+            outputPath: duplicatePath,
+            expectedDocumentHash: orig.sourceHash,
+            mutation: 'duplicate_part',
+            partName: template.name,
+            newName: duplicateNames[index]!
+          }
+        });
+        if (!duplicated.diagnostics.some((d) => d.code === 'MSB_STAGING_WRITE_VERIFIED')) {
+          throw new Error(`MSB template duplicate ${template.name} 写回失败: ${JSON.stringify(duplicated.diagnostics)}`);
+        }
+        await verifyTemplateClone(duplicatePath, duplicateNames[index]!, template);
+
+        const createPath = join(staging, `m11.create-t${template.typeId}.msb`);
+        const created = await runNativeBridge<MsbEnvelope>({
+          command: 'write-msb',
+          filePath: msbPath,
+          allowedRoots: [root, staging],
+          writableRoots: [staging],
+          timeoutMs: 180_000,
+          commandOptions: {
+            outputPath: createPath,
+            expectedDocumentHash: orig.sourceHash,
+            mutation: 'create_part',
+            partName: template.name,
+            newName: createNames[index]!
+          }
+        });
+        if (!created.diagnostics.some((d) => d.code === 'MSB_STAGING_WRITE_VERIFIED')) {
+          throw new Error(`MSB template create ${template.name} 写回失败: ${JSON.stringify(created.diagnostics)}`);
+        }
+        await verifyTemplateClone(createPath, createNames[index]!, template);
       }
 
       // The clone must observe earlier mutations in the same ApplyMutations
@@ -510,15 +534,17 @@ async function main(): Promise<void> {
         throw new Error(`未注册 region 类型未 fail-closed: ${JSON.stringify(regionGuard.diagnostics)}`);
       }
 
-      // ---- delete mutation: part/region/event 批量删除 + 重读验证 ----
+      // ---- delete mutation: part/region/event/route 批量删除 + 重读验证 ----
       const uniquePart = orig.parts.find((p) => isRegisteredMsbType('part', p.typeId)
         && orig.parts.filter((o) => o.name === p.name).length === 1);
       const uniqueRegion = orig.regions.find((r) => isRegisteredMsbType('region', r.typeId)
         && orig.regions.filter((o) => o.name === r.name).length === 1);
       const uniqueEvent = orig.events.find((e) => isRegisteredMsbType('event', e.typeId)
         && orig.events.filter((o) => o.name === e.name).length === 1);
-      if (!uniquePart || !uniqueRegion || !uniqueEvent) {
-        throw new Error('m11 fixture 缺少唯一名的 part/region/event 删除样本');
+      const uniqueRoute = orig.routes.find((route) => isRegisteredMsbType('route', route.typeId)
+        && orig.routes.filter((candidate) => candidate.name === route.name).length === 1);
+      if (!uniquePart || !uniqueRegion || !uniqueEvent || !uniqueRoute) {
+        throw new Error('m11 fixture 缺少唯一名的 part/region/event/route 删除样本');
       }
 
       const deletePath = join(staging, 'm11.delete.msb');
@@ -534,7 +560,8 @@ async function main(): Promise<void> {
           mutations: [
             { kind: 'delete_part', partName: uniquePart.name },
             { kind: 'delete_region', partName: uniqueRegion.name },
-            { kind: 'delete_event', partName: uniqueEvent.name }
+            { kind: 'delete_event', partName: uniqueEvent.name },
+            { kind: 'delete_route', partName: uniqueRoute.name }
           ]
         }
       });
@@ -553,15 +580,16 @@ async function main(): Promise<void> {
       const delDoc = delAfter.data;
       if (delDoc.parts.some((p) => p.name === uniquePart.name)
         || delDoc.regions.some((r) => r.name === uniqueRegion.name)
-        || delDoc.events.some((e) => e.name === uniqueEvent.name)) {
+        || delDoc.events.some((e) => e.name === uniqueEvent.name)
+        || delDoc.routes.some((route) => route.name === uniqueRoute.name)) {
         throw new Error('delete 后重读仍存在目标实体');
       }
       if (delDoc.partCount !== orig.partCount - 1 || delDoc.regionCount !== orig.regionCount - 1
-        || delDoc.eventCount !== orig.eventCount - 1) {
-        throw new Error(`delete 后计数未按预期: before=${JSON.stringify({ p: orig.partCount, r: orig.regionCount, e: orig.eventCount })} after=${JSON.stringify({ p: delDoc.partCount, r: delDoc.regionCount, e: delDoc.eventCount })}`);
+        || delDoc.eventCount !== orig.eventCount - 1 || delDoc.routeCount !== orig.routeCount - 1) {
+        throw new Error(`delete 后计数未按预期: before=${JSON.stringify({ p: orig.partCount, r: orig.regionCount, e: orig.eventCount, route: orig.routeCount })} after=${JSON.stringify({ p: delDoc.partCount, r: delDoc.regionCount, e: delDoc.eventCount, route: delDoc.routeCount })}`);
       }
-      if (delDoc.modelCount !== orig.modelCount || delDoc.routeCount !== orig.routeCount) {
-        throw new Error('delete 后 model/route 计数变化');
+      if (delDoc.modelCount !== orig.modelCount || delDoc.routeCount !== orig.routeCount - 1) {
+        throw new Error('delete 后 model 计数或 route 删除计数不符');
       }
 
       // 其余实体字节级不变（以 nativeOffset 为稳定身份）。
@@ -599,13 +627,22 @@ async function main(): Promise<void> {
           throw new Error(`delete 后 event ${ev.name} 身份/字段变化`);
         }
       }
+      const delRouteByOffset = new Map(delDoc.routes.map((route) => [route.offset, route]));
+      for (const route of orig.routes) {
+        if (route.name === uniqueRoute.name) continue;
+        const stagedRoute = delRouteByOffset.get(route.offset);
+        if (!stagedRoute) throw new Error(`delete 后 route 丢失: offset=${route.offset} name=${route.name}`);
+        if (stagedRoute.name !== route.name || stagedRoute.typeId !== route.typeId || stagedRoute.id !== route.id) {
+          throw new Error(`delete 后 route ${route.name} 身份/字段变化`);
+        }
+      }
       if (JSON.stringify(delDoc.models.map((e) => [e.name, e.offset, e.typeId]))
         !== JSON.stringify(orig.models.map((e) => [e.name, e.offset, e.typeId]))) {
         throw new Error('delete 后 model 表变化');
       }
       if (JSON.stringify(delDoc.routes.map((e) => [e.name, e.offset, e.typeId, e.id]))
-        !== JSON.stringify(orig.routes.map((e) => [e.name, e.offset, e.typeId, e.id]))) {
-        throw new Error('delete 后 route 表变化');
+        !== JSON.stringify(orig.routes.filter((e) => e.name !== uniqueRoute.name).map((e) => [e.name, e.offset, e.typeId, e.id]))) {
+        throw new Error('delete 后未删除的 route 表发生变化');
       }
 
       // ---- delete 失败注入：唯一性规则与未注册守卫 fail-closed ----
@@ -777,11 +814,13 @@ async function main(): Promise<void> {
           part: uniquePart.name,
           region: uniqueRegion.name,
           event: uniqueEvent.name,
+          route: uniqueRoute.name,
           rereadVerified: true,
           countsAfter: {
             parts: delDoc.partCount,
             regions: delDoc.regionCount,
-            events: delDoc.eventCount
+            events: delDoc.eventCount,
+            routes: delDoc.routeCount
           },
           siblingsByteIdentical: true,
           failClosed: {
@@ -792,9 +831,9 @@ async function main(): Promise<void> {
           }
         },
         templateDuplicateCreate: {
-          source: templatePart.name,
-          duplicate: duplicateName,
-          create: createName,
+          sources: templates.map((template) => ({ name: template.name, typeId: template.typeId })),
+          duplicate: duplicateNames,
+          create: createNames,
           nativeEntryPrefixPreserved: true,
           rereadVerified: true
         },

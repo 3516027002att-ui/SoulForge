@@ -1026,6 +1026,9 @@ internal sealed class BridgeCommandService
                     {
                         tracks = b.Tracks.Select(t => new
                         {
+                            positionQuantization = t.PositionQuantization,
+                            rotationQuantization = t.RotationQuantization,
+                            scaleQuantization = t.ScaleQuantization,
                             positionStaticMask = t.PositionStaticMask,
                             positionSplineMask = t.PositionSplineMask,
                             rotationHasStatic = t.RotationHasStatic,
@@ -1063,6 +1066,8 @@ internal sealed class BridgeCommandService
                     sourceFormat,
                     animationType = animation.AnimationType.ToString(),
                     blendHint = binding.BlendHint,
+                    floatTrackCount = animation.NumberOfFloatTracks,
+                    floatTrackToFloatSlot = binding.FloatTrackToFloatSlotIndices,
                     hasExtractedMotion = animation.HasExtractedMotion,
                     extractedMotion = extractedMotionData,
                     duration = animation.Duration,
@@ -1075,6 +1080,18 @@ internal sealed class BridgeCommandService
                     trackToHkxBone,
                     hkxToFlverBoneMap = hkxToFlverMap,
                     splineBlocks = splineBlocksData,
+                    splineBlockOffsets = animation is HkxSplineCompressedAnimation spline
+                        ? spline.BlockOffsets
+                        : null,
+                    splineFloatBlockOffsets = animation is HkxSplineCompressedAnimation splineWithFloats
+                        ? splineWithFloats.FloatBlockOffsets
+                        : null,
+                    splineTransformOffsets = animation is HkxSplineCompressedAnimation splineWithTransforms
+                        ? splineWithTransforms.TransformOffsets
+                        : null,
+                    splineFloatOffsets = animation is HkxSplineCompressedAnimation splineWithFloatOffsets
+                        ? splineWithFloatOffsets.FloatOffsets
+                        : null,
                     interleavedTransforms = interleavedTransformsData,
                     maxFramesPerBlock
                 });
@@ -1090,6 +1107,13 @@ internal sealed class BridgeCommandService
                     file,
                     "action",
                     $"ACTION_ROOT_MOTION_UNSUPPORTED: {ex.Message}");
+            }
+            catch (NotSupportedException ex)
+            {
+                return BridgeResult<object>.Unsupported(
+                    file,
+                    "action",
+                    $"ACTION_HKX_CAPABILITY_UNSUPPORTED: {ex.Message}");
             }
             catch (Exception ex) when (ex is InvalidDataException or NotSupportedException or IOException)
             {

@@ -48,7 +48,7 @@ export type MsbBridgeMutation =
       entityId: number;
     }
   | {
-      kind: 'delete_part' | 'delete_region' | 'delete_event';
+      kind: 'delete_part' | 'delete_region' | 'delete_event' | 'delete_route';
       partName: string;
     };
 

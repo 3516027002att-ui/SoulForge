@@ -1,4 +1,4 @@
-import { existsSync } from 'node:fs';
+import { existsSync, readdirSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import assert from 'node:assert/strict';
 import {
@@ -23,8 +23,22 @@ interface TaeEnvelope {
   animations?: TaeAnimationSummary[];
 }
 
+interface CorpusContainer {
+  filePath: string;
+  status: 'tae' | 'empty' | 'failed';
+  animationCount: number;
+  animations: TaeAnimationSummary[];
+  diagnosticCodes: string[];
+  error?: string;
+}
+
+interface ClipTarget extends TaeAnimationSummary {
+  filePath: string;
+}
+
 interface CoverageRow {
   animId: number;
+  filePath?: string;
   status: 'payload' | 'unsupported' | 'failed';
   animationType?: string;
   sourceFormat?: string;
@@ -35,6 +49,7 @@ interface CoverageRow {
   hasExtractedMotion?: boolean;
   rootMotionSampled?: boolean;
   movingBones?: number;
+  quantization?: string;
   diagnosticCodes: string[];
   error?: string;
 }
@@ -53,59 +68,52 @@ interface CoverageRow {
  * native writer or game-load claim.
  */
 export async function runActionNativeCorpusCoverageSmoke(): Promise<void> {
-  const explicitPath = process.argv[2]?.trim();
+  const mode = parseMode();
+  const explicitPath = process.argv.slice(2).find((value) => !value.startsWith('--'))?.trim();
   const gameRoot = resolve(process.env.SOULFORGE_SEKIRO_GAME_ROOT ?? DEFAULT_GAME_ROOT);
-  const filePath = resolve(explicitPath ?? join(gameRoot, 'chr', 'c0000.anibnd.dcx'));
   const bridgeExecutablePath = resolve(
     process.env.SOULFORGE_BRIDGE_EXE ?? DEFAULT_BRIDGE
   );
+  const defaultFilePath = resolve(explicitPath ?? join(gameRoot, 'chr', 'c0000.anibnd.dcx'));
+  const maxFiles = boundedEnvInt('SOULFORGE_ACTION_MAX_FILES', 137, 1, 1000);
+  const maxClips = boundedEnvInt('SOULFORGE_ACTION_MAX_CLIPS', 16_384, 1, 100_000);
+  const representativesPerFile = boundedEnvInt('SOULFORGE_ACTION_REPRESENTATIVES_PER_FILE', 3, 1, 32);
 
-  if (!existsSync(filePath) || !existsSync(bridgeExecutablePath)) {
+  if (!existsSync(bridgeExecutablePath)) {
     console.log(JSON.stringify({
       ok: true,
       status: 'NOT_RUN_ENVIRONMENTAL',
-      message: 'ACTION corpus coverage 未运行：缺少 c0000.anibnd.dcx 或 Debug Bridge 可执行文件。',
-      filePath,
+      message: 'ACTION corpus coverage 未运行：缺少 Debug Bridge 可执行文件。',
+      mode,
       bridgeExecutablePath
     }));
     return;
   }
 
-  const bridgeOptions = {
-    bridgeExecutablePath,
-    allowedRoots: [...new Set([dirname(filePath), gameRoot])],
-    oodleRuntimeRoot: process.env.SOULFORGE_OODLE_RUNTIME_ROOT ?? gameRoot,
-    timeoutMs: 120_000,
-    maxFrameBytes: MAX_FRAME_BYTES
-  };
-
   try {
-    const envelopeResult = await runBridge<TaeEnvelope>({
-      ...bridgeOptions,
-      command: 'read-tae-document',
-      filePath
-    });
-    const envelope = requireData(envelopeResult, 'read-tae-document');
-    assert.equal(envelope.format, 'TAE');
-    assert.equal(envelope.animationCount, envelope.animations?.length ?? 0);
-    const animations = envelope.animations ?? [];
-    assert.ok(animations.length > 0, '真实 TAE corpus 必须有 animation identity。');
-
-    const identities = new Set<number>();
-    for (const animation of animations) {
-      assert.ok(Number.isInteger(animation.animId), `非法 animation ID: ${animation.animId}`);
-      assert.ok(!identities.has(animation.animId), `TAE animation ID 重复: ${animation.animId}`);
-      identities.add(animation.animId);
-    }
-
-    const rows = await mapWithConcurrency(animations, 2, async (animation): Promise<CoverageRow> => {
+    const files = mode === 'single'
+      ? [defaultFilePath]
+      : readdirSync(join(gameRoot, 'chr'), { withFileTypes: true })
+        .filter((entry) => entry.isFile() && entry.name.toLowerCase().endsWith('.anibnd.dcx'))
+        .map((entry) => resolve(join(gameRoot, 'chr', entry.name)))
+        .sort((a, b) => a.localeCompare(b))
+        .slice(0, maxFiles);
+    const containers = await mapWithConcurrency(files, 2, (filePath) => readContainer(filePath, gameRoot, bridgeExecutablePath));
+    const taeContainers = containers.filter((container) => container.status === 'tae');
+    const nonEmptyAnimations = taeContainers.flatMap((container) => container.animations.map((animation) => ({
+      ...animation,
+      filePath: container.filePath
+    })));
+    const targets = selectTargets(nonEmptyAnimations, mode, representativesPerFile, maxClips);
+    const rows = await mapWithConcurrency(targets, 2, async (target): Promise<CoverageRow> => {
       const result = await runBridge<TaeAnimationClipData>({
-        ...bridgeOptions,
+        ...bridgeOptions(target.filePath, gameRoot, bridgeExecutablePath),
         command: 'read-tae-animation-clip',
-        filePath,
-        commandOptions: { animId: animation.animId }
+        filePath: target.filePath,
+        commandOptions: { animId: target.animId }
       });
-      return inspectClipResult(animation.animId, result);
+      const row = inspectClipResult(target.animId, result);
+      return { ...row, filePath: target.filePath };
     });
 
     const payloadRows = rows.filter((row) => row.status === 'payload');
@@ -127,12 +135,21 @@ export async function runActionNativeCorpusCoverageSmoke(): Promise<void> {
       throw new Error(`ACTION clip payload contract invalid: ${JSON.stringify(invalidPayloadRows.slice(0, 5))}`);
     }
 
+    const scanTruncated = nonEmptyAnimations.length > targets.length || files.length >= maxFiles;
     console.log(JSON.stringify({
       ok: true,
-      status: failedRows.length > 0 || unsupportedRows.length > 0 ? 'partial' : 'PASS',
+      status: failedRows.length > 0 || unsupportedRows.length > 0 || scanTruncated ? 'partial' : 'PASS',
       authority: 'partial',
-      source: filePath,
-      animationCount: animations.length,
+      mode,
+      source: mode === 'single' ? defaultFilePath : join(gameRoot, 'chr'),
+      filesDiscovered: files.length,
+      containersWithTae: taeContainers.length,
+      containersEmpty: containers.filter((container) => container.status === 'empty').length,
+      containerFailures: containers.filter((container) => container.status === 'failed').length,
+      animationIdentitiesDiscovered: nonEmptyAnimations.length,
+      selectedClipCount: targets.length,
+      selectedClipCap: maxClips,
+      scanTruncated,
       payloadCount: payloadRows.length,
       unsupportedCount: unsupportedRows.length,
       failedCount: failedRows.length,
@@ -140,6 +157,14 @@ export async function runActionNativeCorpusCoverageSmoke(): Promise<void> {
       sourceFormats,
       rootMotionPayloads,
       movingBoneSamples: payloadRows.filter((row) => (row.movingBones ?? 0) >= 2).length,
+      quantization: countBy(payloadRows, (row) => row.quantization ?? 'missing'),
+      containers: containers.map((container) => ({
+        file: container.filePath,
+        status: container.status,
+        animationCount: container.animationCount,
+        diagnosticCodes: container.diagnosticCodes,
+        error: container.error
+      })),
       failureCodes,
       unsupportedSamples: unsupportedRows.slice(0, 12),
       failedSamples: failedRows.slice(0, 12),
@@ -152,6 +177,83 @@ export async function runActionNativeCorpusCoverageSmoke(): Promise<void> {
   } finally {
     await disposeBridgeDaemonPool();
   }
+}
+
+function parseMode(): 'single' | 'representative' | 'full' {
+  const value = process.argv.find((arg) => arg.startsWith('--mode='))?.slice('--mode='.length)
+    ?? process.env.SOULFORGE_ACTION_CORPUS_MODE
+    ?? 'single';
+  if (value === 'representative' || value === 'full' || value === 'single') return value;
+  throw new Error(`未知 ACTION corpus mode: ${value}`);
+}
+
+function boundedEnvInt(name: string, fallback: number, min: number, max: number): number {
+  const parsed = Number.parseInt(process.env[name] ?? '', 10);
+  return Number.isInteger(parsed) ? Math.min(max, Math.max(min, parsed)) : fallback;
+}
+
+function bridgeOptions(filePath: string, gameRoot: string, bridgeExecutablePath: string) {
+  return {
+    bridgeExecutablePath,
+    allowedRoots: [...new Set([dirname(filePath), gameRoot])],
+    oodleRuntimeRoot: process.env.SOULFORGE_OODLE_RUNTIME_ROOT ?? gameRoot,
+    timeoutMs: 120_000,
+    maxFrameBytes: MAX_FRAME_BYTES
+  };
+}
+
+async function readContainer(filePath: string, gameRoot: string, bridgeExecutablePath: string): Promise<CorpusContainer> {
+  if (!existsSync(filePath)) {
+    return { filePath, status: 'failed', animationCount: 0, animations: [], diagnosticCodes: ['FILE_NOT_FOUND'], error: '文件不存在。' };
+  }
+  const result = await runBridge<TaeEnvelope>({
+    ...bridgeOptions(filePath, gameRoot, bridgeExecutablePath),
+    command: 'read-tae-document',
+    filePath
+  });
+  const diagnosticCodes = result.diagnostics.map((diagnostic) => diagnostic.code);
+  if (result.data && result.parseStatus !== 'failed' && result.parseStatus !== 'unsupported') {
+    const envelope = result.data;
+    assert.equal(envelope.format, 'TAE');
+    assert.equal(envelope.animationCount, envelope.animations?.length ?? 0);
+    const animations = envelope.animations ?? [];
+    const identities = new Set<number>();
+    for (const animation of animations) {
+      assert.ok(Number.isInteger(animation.animId), `非法 animation ID: ${animation.animId}`);
+      assert.ok(!identities.has(animation.animId), `TAE animation ID 重复: ${animation.animId}`);
+      identities.add(animation.animId);
+    }
+    return { filePath, status: 'tae', animationCount: animations.length, animations, diagnosticCodes };
+  }
+  if (diagnosticCodes.includes('TAE_ANIBND_NO_TAE_ENTRY')) {
+    return { filePath, status: 'empty', animationCount: 0, animations: [], diagnosticCodes };
+  }
+  return {
+    filePath,
+    status: 'failed',
+    animationCount: 0,
+    animations: [],
+    diagnosticCodes,
+    error: result.diagnostics[0]?.message ?? `read-tae-document parseStatus=${result.parseStatus}`
+  };
+}
+
+function selectTargets(
+  animations: ClipTarget[],
+  mode: 'single' | 'representative' | 'full',
+  representativesPerFile: number,
+  maxClips: number
+): ClipTarget[] {
+  const sorted = [...animations].sort((a, b) => a.filePath.localeCompare(b.filePath) || a.animId - b.animId);
+  if (mode !== 'representative') return sorted.slice(0, maxClips);
+  const byFile = new Map<string, ClipTarget[]>();
+  for (const animation of sorted) byFile.set(animation.filePath, [...(byFile.get(animation.filePath) ?? []), animation]);
+  const selected: ClipTarget[] = [];
+  for (const fileAnimations of byFile.values()) {
+    const indexes = new Set([0, Math.floor((fileAnimations.length - 1) / 2), fileAnimations.length - 1]);
+    for (const index of [...indexes].sort((a, b) => a - b).slice(0, representativesPerFile)) selected.push(fileAnimations[index]!);
+  }
+  return selected.slice(0, maxClips);
 }
 
 function inspectClipResult(
@@ -178,6 +280,9 @@ function inspectClipResult(
 
   const clip = result.data;
   try {
+    const nativeClip = clip as unknown as {
+      splineBlocks?: Array<{ tracks?: Array<{ rotationQuantization?: number }> }>;
+    };
     assert.ok(clip.sourceFormat === 'packfile' || clip.sourceFormat === 'tagfile', 'sourceFormat 缺失或未知');
     assert.ok(clip.animationType === 'SplineCompressed' || clip.animationType === 'Interleaved', 'animationType 未进入已支持 clip contract');
     assert.ok(Number.isInteger(clip.frameCount) && clip.frameCount > 0, 'frameCount 无效');
@@ -258,6 +363,10 @@ function inspectClipResult(
       hasExtractedMotion: clip.hasExtractedMotion === true,
       rootMotionSampled,
       movingBones,
+      quantization: clip.animationType === 'SplineCompressed'
+        ? [...new Set((nativeClip.splineBlocks ?? []).flatMap((block) =>
+          (block.tracks ?? []).map((track) => String(track.rotationQuantization ?? 'missing'))))].sort().join(',')
+        : 'interleaved',
       diagnosticCodes
     };
   } catch (error) {
@@ -268,13 +377,6 @@ function inspectClipResult(
       error: `PAYLOAD_CONTRACT: ${error instanceof Error ? error.message : String(error)}`
     };
   }
-}
-
-function requireData<T>(result: BridgeResult<T>, label: string): T {
-  if (!result.data || result.parseStatus === 'failed' || result.parseStatus === 'unsupported') {
-    throw new Error(`${label} failed: ${JSON.stringify(result.diagnostics)}`);
-  }
-  return result.data;
 }
 
 async function mapWithConcurrency<T, R>(

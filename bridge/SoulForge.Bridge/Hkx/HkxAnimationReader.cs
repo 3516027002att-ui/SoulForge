@@ -377,8 +377,8 @@ internal static class HkxAnimationReader
         if (transformOffsets.Length != 0 && transformOffsets.Length != numTracks)
             throw new InvalidDataException(
                 $"hkaSplineCompressedAnimation transform-offset count mismatch: expected 0 or {numTracks}, actual={transformOffsets.Length}.");
-        if (floatBlockOffsets.Length != 0 || floatOffsets.Length != 0)
-            throw new InvalidDataException("HKX float offset arrays are present although the clip declares no float tracks.");
+        ValidateBlockRelativeOffsets(blockOffsets, floatBlockOffsets, animationData.Length,
+            numBlocks, "hkaSplineCompressedAnimation");
         if (animationData.Length == 0)
             throw new InvalidDataException("hkaSplineCompressedAnimation data array is empty.");
         ValidateExtractedMotion(extractedMotion, duration, numFrames, "hkaSplineCompressedAnimation");
@@ -532,6 +532,41 @@ internal static class HkxAnimationReader
         return blocks;
     }
 
+    internal static void ValidateBlockRelativeOffsets(
+        IReadOnlyList<uint> blockOffsets,
+        IReadOnlyList<uint> floatBlockOffsets,
+        int dataLength,
+        int numBlocks,
+        string label)
+    {
+        if (blockOffsets.Count != numBlocks)
+            throw new InvalidDataException($"{label}.blockOffsets count {blockOffsets.Count} does not match numBlocks {numBlocks}.");
+        if (floatBlockOffsets.Count != 0 && floatBlockOffsets.Count > numBlocks + 1)
+            throw new InvalidDataException($"{label}.floatBlockOffsets has {floatBlockOffsets.Count} entries; expected at most {numBlocks + 1}.");
+        uint previousBlockOffset = 0;
+        for (int i = 0; i < blockOffsets.Count; i++)
+        {
+            uint current = blockOffsets[i];
+            if (i > 0 && current < previousBlockOffset)
+                throw new InvalidDataException($"{label}.blockOffsets is not monotonic at index {i}: {previousBlockOffset} -> {current}.");
+            if (current >= dataLength)
+                throw new InvalidDataException($"{label}.blockOffsets[{i}]={current} is outside data length {dataLength}.");
+            previousBlockOffset = current;
+        }
+
+        // Havok's float-block offsets are relative to each block. They are not
+        // a stream-global list and therefore must not be compared for monotonicity
+        // across blocks. Empty float-track arrays may still carry these offsets;
+        // preserve and report them instead of treating their presence as success
+        // or as malformed data.
+        for (int i = 0; i < floatBlockOffsets.Count; i++)
+        {
+            if (floatBlockOffsets[i] > dataLength)
+                throw new InvalidDataException(
+                    $"{label}.floatBlockOffsets[{i}]={floatBlockOffsets[i]} exceeds data length {dataLength}.");
+        }
+    }
+
     private static TransformMask ReadTransformMask(CheckedReader reader, int trackIndex)
     {
         byte packedQuantization = reader.ReadByte();
@@ -569,6 +604,9 @@ internal static class HkxAnimationReader
     {
         var track = new TransformSplineTrack
         {
+            PositionQuantization = mask.PositionQuantization,
+            RotationQuantization = mask.RotationQuantization,
+            ScaleQuantization = mask.ScaleQuantization,
             PositionMask = mask.Position,
             RotationMask = mask.Rotation,
             ScaleMask = mask.Scale,

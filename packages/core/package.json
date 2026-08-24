@@ -15,6 +15,8 @@
     "test:animation-playback-clock": "tsc -b ../shared . && node dist/testing/runAnimationPlaybackClockSmoke.js",
     "test:action-native-differential": "tsc -b ../shared . && node dist/testing/runActionNativeDifferentialSmoke.js",
     "test:action-corpus-coverage": "tsc -b ../shared . && node dist/testing/runActionNativeCorpusCoverageSmoke.js",
+    "test:action-corpus-coverage:chr": "tsc -b ../shared . && node dist/testing/runActionNativeCorpusCoverageSmoke.js --mode=representative",
+    "test:action-corpus-coverage:chr:full": "tsc -b ../shared . && node dist/testing/runActionNativeCorpusCoverageSmoke.js --mode=full",
     "test:semantic-convergence": "tsc -b ../shared . && node dist/testing/runSemanticConvergenceSmoke.js",
     "test:ai-conformance": "tsc -b ../shared . && node dist/testing/runAiConformanceSmoke.js",
     "test:ai-fake-loop": "tsc -b ../shared . && node dist/testing/runAiFakeLoopSmoke.js",

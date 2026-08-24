@@ -120,6 +120,9 @@ public sealed class SplineBlock
 
 public sealed class TransformSplineTrack
 {
+    public byte PositionQuantization { get; set; }
+    public byte RotationQuantization { get; set; }
+    public byte ScaleQuantization { get; set; }
     public byte PositionMask { get; set; }
     public byte RotationMask { get; set; }
     public byte ScaleMask { get; set; }

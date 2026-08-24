@@ -350,6 +350,7 @@ internal sealed class MsbNativeDocument
         var deletedPartOffsets = new HashSet<long>();
         var deletedRegionOffsets = new HashSet<long>();
         var deletedEventOffsets = new HashSet<long>();
+        var deletedRouteOffsets = new HashSet<long>();
         var pendingPartEntries = new List<byte[]>();
 
         foreach (var patch in patches)
@@ -498,6 +499,15 @@ internal sealed class MsbNativeDocument
                     deletedEventOffsets.Add(ev.Offset);
                     break;
                 }
+                case "delete_route":
+                {
+                    var index = Routes.ToList().FindIndex(route => route.Name == patch.PartName);
+                    if (index < 0) throw new InvalidDataException($"MSB route 不存在：{patch.PartName}");
+                    var route = Routes[index];
+                    GuardRegisteredRoute(route);
+                    deletedRouteOffsets.Add(route.Offset);
+                    break;
+                }
                 default:
                     throw new InvalidDataException($"未知或尚未支持的 MSB mutation：{patch.Kind}。");
             }
@@ -528,6 +538,8 @@ internal sealed class MsbNativeDocument
             BatchRemoveEntriesFromParam(rebuilt, Params["POINT_PARAM_ST"], deletedRegionOffsets);
         if (deletedEventOffsets.Count > 0)
             BatchRemoveEntriesFromParam(rebuilt, Params["EVENT_PARAM_ST"], deletedEventOffsets);
+        if (deletedRouteOffsets.Count > 0)
+            BatchRemoveEntriesFromParam(rebuilt, Params["ROUTE_PARAM_ST"], deletedRouteOffsets);
 
         return rebuilt;
     }
@@ -707,6 +719,12 @@ internal sealed class MsbNativeDocument
     {
         if (!MsbEntityTypeRegistry.EventTypes.Contains(ev.TypeId))
             throw new MsbUnregisteredEntityException("event", ev.Name, ev.TypeId);
+    }
+
+    private static void GuardRegisteredRoute(MsbRoute route)
+    {
+        if (!MsbEntityTypeRegistry.RouteTypes.Contains(route.TypeId))
+            throw new MsbUnregisteredEntityException("route", route.Name, route.TypeId);
     }
 
     /// <summary>

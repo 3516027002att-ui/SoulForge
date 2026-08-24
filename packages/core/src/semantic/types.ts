@@ -169,7 +169,12 @@ export interface ResolvedFact<T = unknown> {
   provenance: string;
   evidenceIds: string[];
   revision: string;
-  epistemic: Exclude<EpistemicState, 'hypothesized'>;
+  /**
+   * Preserve the evidence state all the way to the result renderer.  A weak
+   * diagnosis is allowed to remain a hypothesis; coercing it to `derived`
+   * would make an unverified conclusion look like a resolved fact.
+   */
+  epistemic: EpistemicState;
   confidence: 'high' | 'medium' | 'low';
 }
 

@@ -476,6 +476,11 @@ export const TIER_BY_SCRIPT = Object.freeze({
   // 未配置时诚实跳过。与 bridge:verify:flver-multi 同源语料，归 native。
   'bridge:verify:flver-writer': 'native',
   'bridge:verify:tae': 'native',
+  // ACTION 真实 chr 语料 coverage：single 默认验证 c0000，代表性/全量模式
+  // 扫描 chr 容器；unsupported/failed 保持 partial，不提升 native authority。
+  'test:action-corpus-coverage': 'native',
+  'test:action-corpus-coverage:chr': 'native',
+  'test:action-corpus-coverage:chr:full': 'native',
   'bridge:verify:tpf': 'native',
   'test:emevd-corpus-matrix': 'native',
   // 以下三条本轮从孤儿状态接线，均以 resolveNativeFixture 读真机 corpus，
@@ -526,6 +531,7 @@ export const TIER_BY_SCRIPT = Object.freeze({
   'test:me3-sekiro-session': 'native',
   'probe:behavior-headers': 'native',
   'test:verify-map-action-open': 'native',
+  'test:map-native-convergence': 'native',
 
   // ---- release：打包、安装器、可复现构建。慢 ----
   build: 'release',

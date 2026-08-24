@@ -404,8 +404,12 @@ function factsForEntities(entities: readonly CanonicalEntity[]): ResolvedFact[] 
     provenance: entity.sourceSymbolUri ?? entity.sourceUri,
     evidenceIds: [entity.sourceSymbolUri ?? entity.identity],
     revision: entity.revision,
-    epistemic: entity.epistemic === 'hypothesized' ? 'derived' : entity.epistemic,
-    confidence: entity.epistemic === 'observed' ? 'high' : 'medium'
+    epistemic: entity.epistemic,
+    confidence: entity.epistemic === 'observed'
+      ? 'high'
+      : entity.epistemic === 'derived'
+        ? 'medium'
+        : 'low'
   }));
 }
 

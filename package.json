@@ -83,6 +83,8 @@
     "test:animation-playback-clock": "npm run test:animation-playback-clock -w @soulforge/core",
     "test:action-native-differential": "npm run test:action-native-differential -w @soulforge/core",
     "test:action-corpus-coverage": "npm run test:action-corpus-coverage -w @soulforge/core",
+    "test:action-corpus-coverage:chr": "npm run test:action-corpus-coverage:chr -w @soulforge/core",
+    "test:action-corpus-coverage:chr:full": "npm run test:action-corpus-coverage:chr:full -w @soulforge/core",
     "test:semantic-convergence": "npm run test:semantic-convergence -w @soulforge/core",
     "test:map-document-scale": "npm run test:map-document-scale -w @soulforge/core",
     "test:verify-map-action-open": "node scripts/verify-map-action-open.mjs",

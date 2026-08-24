@@ -275,6 +275,36 @@ export async function runMapTransactionAtomicSmoke(): Promise<void> {
     assert.equal(deleteResult.ok, true, 'Batch delete must succeed and rebuild param tables without corruption');
     assert.equal(commitCount, 3, 'Exact 3 commits after 3 transactions');
 
+    console.log('[Smoke] Case 8: Route delete uses the same native transaction boundary...');
+    const reread3 = await loadMapDocument(editSession, mapFile);
+    assert.equal(reread3.ok, true);
+    if (!reread3.ok) return;
+    const routeToDelete = reread3.doc.routes.find((route) =>
+      reread3.doc.routes.filter((candidate) => candidate.name === route.name).length === 1);
+    assert.ok(routeToDelete, 'Need a unique native Route for delete coverage');
+    const routeDeleteTx: MapEditTransaction = {
+      id: 'tx-delete-route',
+      mapId: 'm10_00_00_00',
+      baseRevision: reread3.doc.revision,
+      description: 'Delete one Route through the unified map transaction',
+      author: 'agent',
+      operations: [{ kind: 'delete', target: routeToDelete.name }],
+      timestamp: Date.now()
+    };
+    const routeDeleteResult = await executeMapTransaction(editSession, mapFile, routeDeleteTx);
+    if (!routeDeleteResult.ok) {
+      console.error('[Smoke] Case 8 failed with error:', JSON.stringify(routeDeleteResult.error, null, 2));
+    }
+    assert.equal(routeDeleteResult.ok, true, 'Route delete must use the native transaction path');
+    assert.equal(commitCount, 4, 'Exact 4 commits after route delete');
+    const rereadAfterRouteDelete = await loadMapDocument(editSession, mapFile);
+    assert.equal(rereadAfterRouteDelete.ok, true);
+    if (!rereadAfterRouteDelete.ok) return;
+    assert.equal(rereadAfterRouteDelete.doc.routes.some((route) => route.name === routeToDelete.name), false,
+      'Deleted Route must be absent after authoritative reread');
+    assert.equal(rereadAfterRouteDelete.doc.routes.length, reread3.doc.routes.length - 1,
+      'Route count must decrease exactly once');
+
     console.log('[Smoke] All Atomic MapEditTransaction Invariants PASSED.');
   });
 }

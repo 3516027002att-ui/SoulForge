@@ -513,6 +513,7 @@ export async function executeMapTransaction(
     }
   }]));
   const workingEvents = new Map(loaded.doc.events.map((e) => [e.name, { ...e }]));
+  const workingRoutes = new Map(loaded.doc.routes.map((route) => [route.name, { ...route }]));
 
   const mutations: MsbBridgeMutation[] = [];
   type PendingPartMutation = Extract<MsbBridgeMutation, { kind: 'duplicate_part' | 'create_part' }>;
@@ -807,6 +808,12 @@ export async function executeMapTransaction(
           appliedOperations += 1;
           break;
         }
+        if (workingRoutes.has(op.target)) {
+          workingRoutes.delete(op.target);
+          mutations.push({ kind: 'delete_route', partName: op.target });
+          appliedOperations += 1;
+          break;
+        }
         return {
           ok: false,
           transactionId: transaction.id,
@@ -863,7 +870,8 @@ export async function executeMapTransaction(
           loaded.doc,
           workingParts,
           workingRegions,
-          workingEvents
+          workingEvents,
+          workingRoutes
         );
         postCommitDocument = checked.document;
         createdEntities = checked.createdEntities;
@@ -930,7 +938,8 @@ async function verifyMapPostCommit(
   original: MapDocument,
   workingParts: ReadonlyMap<string, MapPartEntity>,
   workingRegions: ReadonlyMap<string, MapRegionEntity>,
-  workingEvents: ReadonlyMap<string, MapDocument['events'][number]>
+  workingEvents: ReadonlyMap<string, MapDocument['events'][number]>,
+  workingRoutes: ReadonlyMap<string, MapDocument['routes'][number]>
 ): Promise<MapPostCommitVerification> {
   const reread = await loadMapDocument(edit, file);
   if (!reread.ok) {
@@ -1006,6 +1015,11 @@ async function verifyMapPostCommit(
   for (const event of original.events) {
     if (!workingEvents.has(event.name) && reread.sceneGraph.findEvent(event.name)) {
       fail(`删除 Event ${event.name} 后仍存在`);
+    }
+  }
+  for (const route of original.routes) {
+    if (!workingRoutes.has(route.name) && reread.doc.routes.some((candidate) => candidate.name === route.name)) {
+      fail(`删除 Route ${route.name} 后仍存在`);
     }
   }
 

@@ -176,12 +176,10 @@ internal static class HkxTagfileReader
         if (transformOffsets.Length != 0 && transformOffsets.Length != numberOfTransformTracks)
             throw new InvalidDataException(
                 $"{className} transform-offset count mismatch: expected 0 or {numberOfTransformTracks}, actual={transformOffsets.Length}.");
-        if (floatOffsets.Length != 0)
-            throw new InvalidDataException($"{className} contains float offsets although it declares no float tracks.");
-        ValidateOffsets(blockOffsets, data.Length, $"{className}.blockOffsets", requireFirstZero: true);
-        // Havok stores a terminal float-block offset even when the float-track
-        // array is empty. It is still validated rather than silently ignored.
-        ValidateOffsets(floatBlockOffsets, data.Length, $"{className}.floatBlockOffsets", requireFirstZero: false);
+        HkxAnimationReader.ValidateBlockRelativeOffsets(
+            blockOffsets, floatBlockOffsets, data.Length, numBlocks, className);
+        if (blockOffsets.Length > 0 && blockOffsets[0] != 0)
+            throw new InvalidDataException($"{className}.blockOffsets must begin at data offset 0, got {blockOffsets[0]}.");
         ValidateExtractedMotion(extractedMotion, duration, numFrames, className);
 
         var animation = new HkxSplineCompressedAnimation

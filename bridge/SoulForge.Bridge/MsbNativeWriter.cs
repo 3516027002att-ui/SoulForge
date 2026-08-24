@@ -146,6 +146,7 @@ internal static class MsbNativeWriter
             {
                 "set_region_position" or "set_region_transform" or "delete_region" => document.Regions.Count(item => item.Name == patch.PartName),
                 "delete_event" => document.Events.Count(item => item.Name == patch.PartName),
+                "delete_route" => document.Routes.Count(item => item.Name == patch.PartName),
                 "set_property" or "set_entity_id" => document.Parts.Count(item => item.Name == patch.PartName)
                     + document.Regions.Count(item => item.Name == patch.PartName)
                     + document.Events.Count(item => item.Name == patch.PartName),
@@ -161,14 +162,15 @@ internal static class MsbNativeWriter
     {
         foreach (var patch in patches)
         {
-            if (patch.Kind is "delete_part" or "delete_region" or "delete_event")
+            if (patch.Kind is "delete_part" or "delete_region" or "delete_event" or "delete_route")
             {
                 // 删除后重读必须确认目标已从对应家族消失。
                 var stillPresent = patch.Kind switch
                 {
                     "delete_part" => reread.Parts.Any(p => p.Name == patch.PartName),
                     "delete_region" => reread.Regions.Any(r => r.Name == patch.PartName),
-                    _ => reread.Events.Any(e => e.Name == patch.PartName),
+                    "delete_event" => reread.Events.Any(e => e.Name == patch.PartName),
+                    _ => reread.Routes.Any(route => route.Name == patch.PartName),
                 };
                 if (stillPresent)
                     throw new InvalidDataException($"MSB delete 后目标仍存在：{patch.PartName}。");
