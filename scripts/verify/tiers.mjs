@@ -27,7 +27,6 @@ export const TIER_BY_SCRIPT = Object.freeze({
   'test:release-scope-fixtures': 'governance',
   'test:release-scope-proposal': 'governance',
   'test:v06-deferral-index': 'governance',
-  'test:verify-map-action-open': 'governance',
   'handoff:fingerprint': 'governance',
   // 交接书投影退化门禁。--check 只答「markdown 是否等于当前 JSON 的投影」，
   // 它抓手改表格，抓不住投影器自身退化——那类改动会让 --check 与生成同时
@@ -519,6 +518,7 @@ export const TIER_BY_SCRIPT = Object.freeze({
   // 不会在公共 CI 上误启动游戏，故归 native 而非 unit/release。
   'test:me3-sekiro-session': 'native',
   'probe:behavior-headers': 'native',
+  'test:verify-map-action-open': 'native',
 
   // ---- release：打包、安装器、可复现构建。慢 ----
   build: 'release',
