@@ -27,6 +27,7 @@ export const TIER_BY_SCRIPT = Object.freeze({
   'test:release-scope-fixtures': 'governance',
   'test:release-scope-proposal': 'governance',
   'test:v06-deferral-index': 'governance',
+  'test:verify-map-action-open': 'governance',
   'handoff:fingerprint': 'governance',
   // 交接书投影退化门禁。--check 只答「markdown 是否等于当前 JSON 的投影」，
   // 它抓手改表格，抓不住投影器自身退化——那类改动会让 --check 与生成同时
@@ -80,6 +81,9 @@ export const TIER_BY_SCRIPT = Object.freeze({
   'test:rag': 'unit',
   'test:emevd-stable-identity': 'unit',
   'test:emevd-dark-script-compiler': 'unit',
+  'test:emevd-dark-script-compiler-s14': 'unit',
+  'test:emevd-session-cache': 'unit',
+  'test:map-transaction-atomic': 'unit',
   'test:darkscript-languageservice-scale': 'unit',
   'test:animation-playback-clock': 'unit',
   'test:map-document-scale': 'unit',
