@@ -119,11 +119,13 @@ async function mainInWorkspace(root: string): Promise<void> {
   // TS 不再先 decompressDfltDcx 再喂裸 .msb。这条链必须能开 mods 里的 DFLT 图。
   const msbPath = sourceDcx;
   const fixtureDir = dirname(sourceDcx);
+  const oodleRoot = process.env.SOULFORGE_OODLE_RUNTIME_ROOT || (sourceDcx.includes('Sekiro') ? 'D:/mystream/Sekiro Shadows Die Twice/Sekiro' : undefined);
 
   const read = await runBridge<MsbEnvelope>({
     command: 'read-msb-document',
     filePath: msbPath,
-    allowedRoots: [root, fixtureDir],
+    allowedRoots: [root, fixtureDir, ...(oodleRoot ? [oodleRoot] : [])],
+    ...(oodleRoot ? { oodleRuntimeRoot: oodleRoot } : {}),
     timeoutMs: 120_000
   });
   if (read.parseStatus === 'failed' || !read.data) {
@@ -214,8 +216,9 @@ async function mainInWorkspace(root: string): Promise<void> {
   const written = await runBridge({
     command: 'write-msb',
     filePath: msbPath,
-    allowedRoots: [root, staging, fixtureDir],
+    allowedRoots: [root, staging, fixtureDir, ...(oodleRoot ? [oodleRoot] : [])],
     writableRoots: [staging],
+    ...(oodleRoot ? { oodleRuntimeRoot: oodleRoot } : {}),
     timeoutMs: 120_000,
     commandOptions: {
       outputPath: staged,
@@ -240,7 +243,8 @@ async function mainInWorkspace(root: string): Promise<void> {
   const after = await runBridge<MsbEnvelope>({
     command: 'read-msb-document',
     filePath: staged,
-    allowedRoots: [staging],
+    allowedRoots: [staging, ...(oodleRoot ? [oodleRoot] : [])],
+    ...(oodleRoot ? { oodleRuntimeRoot: oodleRoot } : {}),
     timeoutMs: 120_000
   });
   const updated = after.data?.parts.find((p) => p.name === part.name);
@@ -282,8 +286,9 @@ async function mainInWorkspace(root: string): Promise<void> {
   const writtenRegion = await runBridge({
     command: 'write-msb',
     filePath: msbPath,
-    allowedRoots: [root, staging, fixtureDir],
+    allowedRoots: [root, staging, fixtureDir, ...(oodleRoot ? [oodleRoot] : [])],
     writableRoots: [staging],
+    ...(oodleRoot ? { oodleRuntimeRoot: oodleRoot } : {}),
     timeoutMs: 120_000,
     commandOptions: {
       outputPath: stagedRegion,
@@ -302,7 +307,8 @@ async function mainInWorkspace(root: string): Promise<void> {
   const afterRegion = await runBridge<MsbEnvelope>({
     command: 'read-msb-document',
     filePath: stagedRegion,
-    allowedRoots: [staging],
+    allowedRoots: [staging, ...(oodleRoot ? [oodleRoot] : [])],
+    ...(oodleRoot ? { oodleRuntimeRoot: oodleRoot } : {}),
     timeoutMs: 120_000
   });
   const updatedRegion = afterRegion.data?.regions?.find((r) => r.name === region.name);
@@ -328,8 +334,9 @@ async function mainInWorkspace(root: string): Promise<void> {
   const writtenTransform = await runBridge({
     command: 'write-msb',
     filePath: msbPath,
-    allowedRoots: [root, staging, fixtureDir],
+    allowedRoots: [root, staging, fixtureDir, ...(oodleRoot ? [oodleRoot] : [])],
     writableRoots: [staging],
+    ...(oodleRoot ? { oodleRuntimeRoot: oodleRoot } : {}),
     timeoutMs: 120_000,
     commandOptions: {
       outputPath: stagedTransform,
@@ -352,7 +359,8 @@ async function mainInWorkspace(root: string): Promise<void> {
   const afterTransform = await runBridge<MsbEnvelope>({
     command: 'read-msb-document',
     filePath: stagedTransform,
-    allowedRoots: [staging],
+    allowedRoots: [staging, ...(oodleRoot ? [oodleRoot] : [])],
+    ...(oodleRoot ? { oodleRuntimeRoot: oodleRoot } : {}),
     timeoutMs: 120_000
   });
   const updatedTransform = afterTransform.data?.parts.find((p) => p.name === part.name);

@@ -196,4 +196,50 @@ internal static class HkxDecompressor
             _ => Quaternion.Normalize(new Quaternion(c0, c1, c2, c3))
         };
     }
+
+    public static Quaternion UnpackThreeComp24(ReadOnlySpan<byte> data)
+    {
+        if (data.Length < 3) return Quaternion.Identity;
+        uint packed = (uint)data[0] | ((uint)data[1] << 8) | ((uint)data[2] << 16);
+        int omitted = (int)((packed >> 22) & 0x3);
+        const float range = 0.70710678118f;
+        float c0 = (((packed & 0x7F) / 127.0f) * 2f - 1f) * range;
+        float c1 = ((((packed >> 7) & 0x7F) / 127.0f) * 2f - 1f) * range;
+        float c2 = ((((packed >> 14) & 0xFF) / 255.0f) * 2f - 1f) * range;
+        float sumSq = c0 * c0 + c1 * c1 + c2 * c2;
+        float c3 = MathF.Sqrt(Math.Max(0f, 1f - sumSq));
+
+        return omitted switch
+        {
+            0 => Quaternion.Normalize(new Quaternion(c3, c0, c1, c2)),
+            1 => Quaternion.Normalize(new Quaternion(c0, c3, c1, c2)),
+            2 => Quaternion.Normalize(new Quaternion(c0, c1, c3, c2)),
+            _ => Quaternion.Normalize(new Quaternion(c0, c1, c2, c3))
+        };
+    }
+
+    public static Quaternion UnpackStraight16(ReadOnlySpan<byte> data)
+    {
+        if (data.Length < 2) return Quaternion.Identity;
+        short s = BinaryPrimitives.ReadInt16LittleEndian(data.Slice(0, 2));
+        float x = (((s & 0xF) / 15.0f) * 2f - 1f);
+        float y = ((((s >> 4) & 0xF) / 15.0f) * 2f - 1f);
+        float z = ((((s >> 8) & 0xF) / 15.0f) * 2f - 1f);
+        float w = ((((s >> 12) & 0xF) / 15.0f) * 2f - 1f);
+        var q = new Quaternion(x, y, z, w);
+        return q.LengthSquared() > 1e-6f ? Quaternion.Normalize(q) : Quaternion.Identity;
+    }
+
+    public static Quaternion UnpackUncompressedQuat(ReadOnlySpan<byte> data)
+    {
+        if (data.Length < 16) return Quaternion.Identity;
+        float x = BinaryPrimitives.ReadSingleLittleEndian(data.Slice(0, 4));
+        float y = BinaryPrimitives.ReadSingleLittleEndian(data.Slice(4, 4));
+        float z = BinaryPrimitives.ReadSingleLittleEndian(data.Slice(8, 4));
+        float w = BinaryPrimitives.ReadSingleLittleEndian(data.Slice(12, 4));
+        if (!float.IsFinite(x) || !float.IsFinite(y) || !float.IsFinite(z) || !float.IsFinite(w))
+            return Quaternion.Identity;
+        var q = new Quaternion(x, y, z, w);
+        return q.LengthSquared() > 1e-6f ? Quaternion.Normalize(q) : Quaternion.Identity;
+    }
 }

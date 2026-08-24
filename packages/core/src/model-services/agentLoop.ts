@@ -403,6 +403,7 @@ export async function runAgentToolLoop(
   let totalOutputTokens = 0;
   let lastInputTokens: number | undefined;
   let compactionWindows = 0;
+  const initialUserQuery = lastUserMessageText(request.messages);
 
   // Approval gate. Defaults to the write-capable levels when a host provides
   // the callback without naming levels — the levels that can reach staging,
@@ -508,13 +509,15 @@ export async function runAgentToolLoop(
       }
     }
 
+    const ephemeralMessages: ChatMessage[] = [];
+
     // Context Broker: assemble accumulated workspace evidence into a bounded,
     // redacted fragment injected before the model call. No evidence is
     // surfaced structurally as insufficient_evidence instead of failing silently.
     if (broker) {
       const assembled = await broker.assemble(evidenceQueue, brokerOptions);
       if (assembled.ok) {
-        messages.push({ role: 'system', content: assembled.context });
+        ephemeralMessages.push({ role: 'system', content: assembled.context });
         diagnostics.push({
           severity: 'info',
           code: 'CONTEXT_BROKER_ASSEMBLED',
@@ -540,7 +543,7 @@ export async function runAgentToolLoop(
           ...(assembled.code ? { code: assembled.code } : {})
         });
         if (assembled.code === 'insufficient_evidence') {
-          messages.push({
+          ephemeralMessages.push({
             role: 'system',
             content: JSON.stringify({
               ok: false,
@@ -552,11 +555,11 @@ export async function runAgentToolLoop(
       }
     }
 
-    // RAG auto-search: retrieve workspace evidence from the most recent user
-    // message and inject as a separate [rag-evidence] channel. No hits or an
+    // RAG auto-search: retrieve workspace evidence from the initial user query
+    // and inject as a separate [rag-evidence] channel. No hits or an
     // empty query injects nothing — a failed search must not poison the turn.
     if (request.ragSearch) {
-      const ragQuery = lastUserMessageText(messages);
+      const ragQuery = initialUserQuery || lastUserMessageText(messages);
       if (ragQuery.trim().length > 0) {
         const ragResult = await request.ragSearch.retrieve(ragQuery);
         if (ragResult.ok && ragResult.hits.length > 0) {
@@ -566,7 +569,7 @@ export async function runAgentToolLoop(
             `-- hit ${index + 1} (score=${hit.score}, family=${hit.chunk.family}, uri=${hit.chunk.symbolUri}) --`,
             hit.excerpt
           ].join('\n'));
-          messages.push({
+          ephemeralMessages.push({
             role: 'system',
             content: `[rag-evidence query="${ragQuery.replaceAll('"', '\\"')}" hits=${ragHits.length}]\n${ragLines.join('\n')}`
           });
@@ -597,13 +600,14 @@ export async function runAgentToolLoop(
       ...(request.sampling?.topK !== undefined ? { topK: request.sampling.topK } : {}),
       ...(request.sampling?.thinkingLevel !== undefined ? { thinkingLevel: request.sampling.thinkingLevel } : {})
     };
+    const callMessages = [...messages, ...ephemeralMessages];
     for (;;) {
       attempt += 1;
       completion = request.streaming
         ? await collectStreamCompletion(
             adapter,
             {
-              messages,
+              messages: callMessages,
               tools: request.tools,
               ...samplingFields,
               ...(request.signal ? { signal: request.signal } : {}),
@@ -613,7 +617,7 @@ export async function runAgentToolLoop(
             (text) => emit({ type: 'agent-thinking-delta', step: steps, text })
           )
         : await adapter.complete({
-            messages,
+            messages: callMessages,
             tools: request.tools,
             ...samplingFields,
             ...(request.signal ? { signal: request.signal } : {}),

@@ -422,3 +422,5 @@ export function eulerXYZToQuaternion(
 
   return normalizeQuaternion([qx, qy, qz, qw]);
 }
+
+export const flverEulerToQuaternion = eulerXYZToQuaternion;

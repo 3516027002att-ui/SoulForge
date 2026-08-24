@@ -251,7 +251,8 @@ internal static class HkxAnimationReader
 
     private static SplineBlock[] ParseSplineBlocks(HkxSplineCompressedAnimation anim)
     {
-        if (anim.Data.Length == 0 || anim.NumBlocks == 0) return Array.Empty<SplineBlock>();
+        if (anim.Data.Length == 0 || anim.NumBlocks <= 0 || anim.NumberOfTransformTracks <= 0)
+            return Array.Empty<SplineBlock>();
 
         var blocks = new SplineBlock[anim.NumBlocks];
         for (int b = 0; b < anim.NumBlocks; b++)
@@ -260,14 +261,84 @@ internal static class HkxAnimationReader
             {
                 Tracks = new TransformSplineTrack[anim.NumberOfTransformTracks]
             };
+
+            int blockStart = (b < anim.BlockOffsets.Length) ? (int)anim.BlockOffsets[b] : 0;
+            int blockEnd = (b + 1 < anim.BlockOffsets.Length) ? (int)anim.BlockOffsets[b + 1] : anim.Data.Length;
+
+            bool blockValid = blockStart >= 0 && blockStart < anim.Data.Length && blockEnd <= anim.Data.Length && blockStart < blockEnd;
+            var blockSpan = blockValid ? anim.Data.AsSpan(blockStart, blockEnd - blockStart) : ReadOnlySpan<byte>.Empty;
+
             for (int t = 0; t < anim.NumberOfTransformTracks; t++)
             {
-                block.Tracks[t] = new TransformSplineTrack
+                var track = new TransformSplineTrack
                 {
                     StaticPosition = Vector3.Zero,
                     StaticRotation = Quaternion.Identity,
                     StaticScale = Vector3.One
                 };
+
+                if (blockValid && t < anim.TransformOffsets.Length)
+                {
+                    int trackRelOffset = (int)anim.TransformOffsets[t];
+                    if (trackRelOffset >= 0 && trackRelOffset + 12 <= blockSpan.Length)
+                    {
+                        var trackSpan = blockSpan.Slice(trackRelOffset);
+                        try
+                        {
+                            // Track header: positionMask (byte), rotationMask (byte), scaleMask (byte), flags (byte)
+                            byte posMask = trackSpan[0];
+                            byte rotMask = trackSpan[1];
+                            byte scaleMask = trackSpan[2];
+                            track.PositionMask = posMask;
+                            track.RotationMask = rotMask;
+                            track.ScaleMask = scaleMask;
+
+                            int cursor = 4;
+                            // Static Position or Spline Position
+                            if (posMask == 0 && cursor + 12 <= trackSpan.Length)
+                            {
+                                float px = BinaryPrimitives.ReadSingleLittleEndian(trackSpan.Slice(cursor, 4));
+                                float py = BinaryPrimitives.ReadSingleLittleEndian(trackSpan.Slice(cursor + 4, 4));
+                                float pz = BinaryPrimitives.ReadSingleLittleEndian(trackSpan.Slice(cursor + 8, 4));
+                                if (float.IsFinite(px) && float.IsFinite(py) && float.IsFinite(pz))
+                                    track.StaticPosition = new Vector3(px, py, pz);
+                                cursor += 12;
+                            }
+
+                            // Static Rotation or Spline Rotation
+                            if (rotMask == 0 && cursor + 4 <= trackSpan.Length)
+                            {
+                                uint packedRot = BinaryPrimitives.ReadUInt32LittleEndian(trackSpan.Slice(cursor, 4));
+                                track.StaticRotation = HkxDecompressor.UnpackPolar32(packedRot);
+                                cursor += 4;
+                            }
+                            else if (rotMask == 1 && cursor + 16 <= trackSpan.Length)
+                            {
+                                track.StaticRotation = HkxDecompressor.UnpackUncompressedQuat(trackSpan.Slice(cursor, 16));
+                                cursor += 16;
+                            }
+
+                            // Static Scale
+                            if (scaleMask == 0 && cursor + 12 <= trackSpan.Length)
+                            {
+                                float sx = BinaryPrimitives.ReadSingleLittleEndian(trackSpan.Slice(cursor, 4));
+                                float sy = BinaryPrimitives.ReadSingleLittleEndian(trackSpan.Slice(cursor + 4, 4));
+                                float sz = BinaryPrimitives.ReadSingleLittleEndian(trackSpan.Slice(cursor + 8, 4));
+                                if (float.IsFinite(sx) && float.IsFinite(sy) && float.IsFinite(sz))
+                                    track.StaticScale = new Vector3(sx, sy, sz);
+                            }
+                        }
+                        catch
+                        {
+                            // Fallback to identity transform on parse failure
+                            track.StaticPosition = Vector3.Zero;
+                            track.StaticRotation = Quaternion.Identity;
+                            track.StaticScale = Vector3.One;
+                        }
+                    }
+                }
+
+                block.Tracks[t] = track;
             }
             blocks[b] = block;
         }

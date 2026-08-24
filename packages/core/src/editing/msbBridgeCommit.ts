@@ -26,6 +26,11 @@ export type MsbBridgeMutation =
       modelIndex?: number;
     }
   | {
+      kind: 'set_property' | 'set_entity_id';
+      partName: string;
+      entityId: number;
+    }
+  | {
       kind: 'delete_part' | 'delete_region' | 'delete_event';
       partName: string;
     };
@@ -38,6 +43,7 @@ export interface MsbBridgeCommitRequest {
   writableRoots: string[];
   mutation?: MsbBridgeMutation | undefined;
   mutations?: MsbBridgeMutation[] | undefined;
+  oodleRuntimeRoot?: string | undefined;
   timeoutMs?: number | undefined;
 }
 
@@ -69,6 +75,7 @@ function serializeMsbMutation(m: MsbBridgeMutation): Record<string, unknown> {
   }
   if ('modelName' in m && m.modelName !== undefined) item.modelName = m.modelName;
   if ('modelIndex' in m && m.modelIndex !== undefined) item.modelIndex = m.modelIndex;
+  if ('entityId' in m && m.entityId !== undefined) item.entityId = m.entityId;
   return item;
 }
 
@@ -97,6 +104,7 @@ export async function commitMsbMutationViaBridge(
     filePath: request.sourcePath,
     allowedRoots: request.allowedRoots,
     writableRoots: request.writableRoots,
+    ...(request.oodleRuntimeRoot ? { oodleRuntimeRoot: request.oodleRuntimeRoot } : {}),
     timeoutMs: request.timeoutMs ?? 120_000,
     commandOptions
   });

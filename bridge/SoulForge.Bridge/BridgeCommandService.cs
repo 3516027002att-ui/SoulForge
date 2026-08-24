@@ -1059,16 +1059,56 @@ internal sealed class BridgeCommandService
 
                     // Build FLVER default reference pose
                     var flverRefPose = new BoneTransform[flverBoneNames.Length];
+                    BoneTransform[]? explicitFlverRef = null;
+                    if (optionsIsObject && options.TryGetProperty("flverReferencePose", out var refPoseEl) && refPoseEl.ValueKind == JsonValueKind.Array)
+                    {
+                        var explicitList = new List<BoneTransform>();
+                        foreach (var item in refPoseEl.EnumerateArray())
+                        {
+                            var pos = Vector3.Zero;
+                            var rot = Quaternion.Identity;
+                            var scale = Vector3.One;
+                            if (item.TryGetProperty("translation", out var tEl) && tEl.ValueKind == JsonValueKind.Array)
+                            {
+                                var arr = tEl.EnumerateArray().Select(v => (float)v.GetDouble()).ToArray();
+                                if (arr.Length >= 3) pos = new Vector3(arr[0], arr[1], arr[2]);
+                            }
+                            if (item.TryGetProperty("rotation", out var rEl) && rEl.ValueKind == JsonValueKind.Array)
+                            {
+                                var arr = rEl.EnumerateArray().Select(v => (float)v.GetDouble()).ToArray();
+                                if (arr.Length == 4) rot = new Quaternion(arr[0], arr[1], arr[2], arr[3]);
+                                else if (arr.Length == 3)
+                                {
+                                    rot = Quaternion.CreateFromYawPitchRoll(arr[1], arr[0], arr[2]);
+                                }
+                            }
+                            if (item.TryGetProperty("scale", out var sEl) && sEl.ValueKind == JsonValueKind.Array)
+                            {
+                                var arr = sEl.EnumerateArray().Select(v => (float)v.GetDouble()).ToArray();
+                                if (arr.Length >= 3) scale = new Vector3(arr[0], arr[1], arr[2]);
+                            }
+                            explicitList.Add(new BoneTransform(pos, rot, scale));
+                        }
+                        explicitFlverRef = explicitList.ToArray();
+                    }
+
                     for (int fi = 0; fi < flverBoneNames.Length; fi++)
                     {
-                        int hkxIdx = Array.IndexOf(hkxBoneNames, flverBoneNames[fi]);
-                        if (hkxIdx >= 0 && hkxIdx < skeleton.Transforms.Count)
+                        if (explicitFlverRef != null && fi < explicitFlverRef.Length)
                         {
-                            flverRefPose[fi] = skeleton.Transforms[hkxIdx];
+                            flverRefPose[fi] = explicitFlverRef[fi];
                         }
                         else
                         {
-                            flverRefPose[fi] = new BoneTransform(Vector3.Zero, Quaternion.Identity, Vector3.One);
+                            int hkxIdx = Array.IndexOf(hkxBoneNames, flverBoneNames[fi]);
+                            if (hkxIdx >= 0 && hkxIdx < skeleton.Transforms.Count)
+                            {
+                                flverRefPose[fi] = skeleton.Transforms[hkxIdx];
+                            }
+                            else
+                            {
+                                flverRefPose[fi] = new BoneTransform(Vector3.Zero, Quaternion.Identity, Vector3.One);
+                            }
                         }
                     }
 
@@ -2566,12 +2606,15 @@ internal sealed class BridgeCommandService
         var references = SekiroTaeMotionReferenceReader.ReadAll(document);
         long motionAnimId = ActionAnimationSemantics.ResolveMotionAnimationId(references, animId);
 
-        // Search for the HKX animation entry in the primary file and companion ANIBNDs
+        // Search for the HKX animation entry in the primary file and companion ANIBNDs scoped to character prefix
         var searchPaths = new List<string> { file };
         var dir = Path.GetDirectoryName(file);
         if (!string.IsNullOrEmpty(dir) && Directory.Exists(dir))
         {
-            var companions = Directory.EnumerateFiles(dir, "*.anibnd.dcx", SearchOption.TopDirectoryOnly);
+            var fileName = Path.GetFileName(file);
+            var prefix = fileName.Split('_')[0].Split('.')[0];
+            var pattern = string.IsNullOrEmpty(prefix) ? "*.anibnd.dcx" : $"{prefix}*.anibnd.dcx";
+            var companions = Directory.EnumerateFiles(dir, pattern, SearchOption.TopDirectoryOnly);
             foreach (var comp in companions)
             {
                 if (!searchPaths.Contains(comp, StringComparer.OrdinalIgnoreCase))

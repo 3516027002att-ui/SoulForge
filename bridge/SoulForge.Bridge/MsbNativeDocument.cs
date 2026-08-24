@@ -220,7 +220,8 @@ internal sealed class MsbNativeDocument
             var scaleX = ReadFloat(source, t + 28);
             var scaleY = ReadFloat(source, t + 32);
             var scaleZ = ReadFloat(source, t + 36);
-            regions.Add(new MsbRegion(off, name, typeId, posX, posY, posZ, rotX, rotY, rotZ, scaleX, scaleY, scaleZ));
+            var entityId = ReadInt32(source, off + 0x0C);
+            regions.Add(new MsbRegion(off, name, typeId, posX, posY, posZ, rotX, rotY, rotZ, scaleX, scaleY, scaleZ, entityId));
         }
         return regions;
     }
@@ -266,7 +267,8 @@ internal sealed class MsbNativeDocument
             var scaleX = ReadFloat(source, off + PartScaleOffset);
             var scaleY = ReadFloat(source, off + PartScaleOffset + 4);
             var scaleZ = ReadFloat(source, off + PartScaleOffset + 8);
-            parts.Add(new MsbPart(off, name, typeId, modelIndex, posX, posY, posZ, rotX, rotY, rotZ, scaleX, scaleY, scaleZ));
+            var entityId = ReadInt32(source, off + 0x0C);
+            parts.Add(new MsbPart(off, name, typeId, modelIndex, posX, posY, posZ, rotX, rotY, rotZ, scaleX, scaleY, scaleZ, entityId));
         }
         return parts;
     }
@@ -347,6 +349,10 @@ internal sealed class MsbNativeDocument
     public byte[] ApplyMutations(IReadOnlyList<MsbPatch> patches)
     {
         var rebuilt = SourceBytes.ToArray();
+        var deletedPartOffsets = new HashSet<long>();
+        var deletedRegionOffsets = new HashSet<long>();
+        var deletedEventOffsets = new HashSet<long>();
+
         foreach (var patch in patches)
         {
             switch (patch.Kind)
@@ -430,13 +436,43 @@ internal sealed class MsbNativeDocument
                     }
                     break;
                 }
+                case "set_property":
+                case "set_entity_id":
+                {
+                    if (patch.EntityId is null) throw new InvalidDataException("set_property/set_entity_id 需要 entityId。");
+                    var partIdx = Parts.ToList().FindIndex(p => p.Name == patch.PartName);
+                    if (partIdx >= 0)
+                    {
+                        var part = Parts[partIdx];
+                        GuardRegisteredPart(part);
+                        WriteInt32(rebuilt, part.Offset + 0x0C, patch.EntityId.Value);
+                        break;
+                    }
+                    var regIdx = Regions.ToList().FindIndex(r => r.Name == patch.PartName);
+                    if (regIdx >= 0)
+                    {
+                        var reg = Regions[regIdx];
+                        GuardRegisteredRegion(reg);
+                        WriteInt32(rebuilt, reg.Offset + 0x0C, patch.EntityId.Value);
+                        break;
+                    }
+                    var evIdx = Events.ToList().FindIndex(e => e.Name == patch.PartName);
+                    if (evIdx >= 0)
+                    {
+                        var ev = Events[evIdx];
+                        GuardRegisteredEvent(ev);
+                        WriteInt32(rebuilt, ev.Offset + 0x08, patch.EntityId.Value);
+                        break;
+                    }
+                    throw new InvalidDataException($"MSB 目标实体不存在：{patch.PartName}");
+                }
                 case "delete_part":
                 {
                     var index = Parts.ToList().FindIndex(p => p.Name == patch.PartName);
                     if (index < 0) throw new InvalidDataException($"MSB part 不存在：{patch.PartName}");
                     var part = Parts[index];
                     GuardRegisteredPart(part);
-                    RemoveEntryFromParam(rebuilt, Params["PARTS_PARAM_ST"], part.Offset);
+                    deletedPartOffsets.Add(part.Offset);
                     break;
                 }
                 case "delete_region":
@@ -445,7 +481,7 @@ internal sealed class MsbNativeDocument
                     if (index < 0) throw new InvalidDataException($"MSB region 不存在：{patch.PartName}");
                     var region = Regions[index];
                     GuardRegisteredRegion(region);
-                    RemoveEntryFromParam(rebuilt, Params["POINT_PARAM_ST"], region.Offset);
+                    deletedRegionOffsets.Add(region.Offset);
                     break;
                 }
                 case "delete_event":
@@ -454,13 +490,22 @@ internal sealed class MsbNativeDocument
                     if (index < 0) throw new InvalidDataException($"MSB event 不存在：{patch.PartName}");
                     var ev = Events[index];
                     GuardRegisteredEvent(ev);
-                    RemoveEntryFromParam(rebuilt, Params["EVENT_PARAM_ST"], ev.Offset);
+                    deletedEventOffsets.Add(ev.Offset);
                     break;
                 }
                 default:
                     throw new InvalidDataException($"未知或尚未支持的 MSB mutation：{patch.Kind}。");
             }
         }
+
+        // Batch rewrite param offset tables once per family
+        if (deletedPartOffsets.Count > 0)
+            BatchRemoveEntriesFromParam(rebuilt, Params["PARTS_PARAM_ST"], deletedPartOffsets);
+        if (deletedRegionOffsets.Count > 0)
+            BatchRemoveEntriesFromParam(rebuilt, Params["POINT_PARAM_ST"], deletedRegionOffsets);
+        if (deletedEventOffsets.Count > 0)
+            BatchRemoveEntriesFromParam(rebuilt, Params["EVENT_PARAM_ST"], deletedEventOffsets);
+
         return rebuilt;
     }
 
@@ -483,34 +528,24 @@ internal sealed class MsbNativeDocument
     }
 
     /// <summary>
-    /// 从 param 偏移表删除一个条目（软删除）。
-    ///
-    /// MSB 各 param 头为固定 0x10 字节 + offsetCount 个 int64 偏移表
-    /// （末位为下一 param 的绝对偏移 nextParamOffset）。删除 = 从偏移表
-    /// 移除该条目偏移、offsetCount-1、表尾 8 字节前移；条目字节本身留在
-    /// 原绝对偏移处（SoulsFormats 同样不自动压缩/重连 sibling 名引用，
-    /// 删除后目标只是不再被官方 param 表引用）。其他条目偏移全部不变，
-    /// 因此无损。
+    /// 从 param 偏移表批量删除指定条目（软删除）。
+    /// 单个 batch 只重建一次偏移表，杜绝多次删除时使用旧索引覆盖的问题。
     /// </summary>
-    private static void RemoveEntryFromParam(byte[] target, MsbParam param, int entryOffsetToRemove)
+    private static void BatchRemoveEntriesFromParam(byte[] target, MsbParam param, HashSet<long> offsetsToRemove)
     {
         var oldCount = param.EntryOffsets.Length;
-        var index = Array.IndexOf(param.EntryOffsets, (long)entryOffsetToRemove);
-        if (index < 0)
-            throw new InvalidDataException($"MSB param {param.Name} 中找不到待删除条目偏移 0x{entryOffsetToRemove:X}。");
-        var newCount = oldCount - 1;
+        var remaining = param.EntryOffsets.Where(off => !offsetsToRemove.Contains(off)).ToArray();
+        var newCount = remaining.Length;
+        if (newCount == oldCount) return;
+
         WriteInt32(target, param.Offset, param.Version);
         WriteInt32(target, param.Offset + 4, newCount + 1);
         WriteInt64(target, param.Offset + 8, param.NameOffset);
-        var cursor = 0;
-        for (var i = 0; i < oldCount; i++)
+        for (var i = 0; i < newCount; i++)
         {
-            if (i == index) continue;
-            WriteInt64(target, param.Offset + ParamHeaderSize + cursor * 8, param.EntryOffsets[i]);
-            cursor++;
+            WriteInt64(target, param.Offset + ParamHeaderSize + i * 8, remaining[i]);
         }
         WriteInt64(target, param.Offset + ParamHeaderSize + newCount * 8, param.NextOffset);
-        // 压缩后表尾空出 8 字节，清零避免外部读取器把残留旧偏移当成有效条目。
         var freedStart = param.Offset + ParamHeaderSize + (newCount + 1) * 8;
         var oldEnd = param.Offset + ParamHeaderSize + (oldCount + 1) * 8;
         for (var i = freedStart; i < oldEnd; i++) target[i] = 0;
@@ -544,7 +579,8 @@ internal sealed class MsbNativeDocument
             p.RotZ,
             p.ScaleX,
             p.ScaleY,
-            p.ScaleZ
+            p.ScaleZ,
+            entityId = p.EntityId
         }).ToArray(),
         regions = Regions.Select(r => new
         {
@@ -559,7 +595,8 @@ internal sealed class MsbNativeDocument
             r.RotZ,
             r.ScaleX,
             r.ScaleY,
-            r.ScaleZ
+            r.ScaleZ,
+            entityId = r.EntityId
         }).ToArray(),
         events = Events.Select(e => new
         {
@@ -658,7 +695,8 @@ internal sealed record MsbPart(
     float RotZ,
     float ScaleX,
     float ScaleY,
-    float ScaleZ);
+    float ScaleZ,
+    int EntityId = 0);
 internal sealed record MsbRegion(
     int Offset,
     string Name,
@@ -671,7 +709,8 @@ internal sealed record MsbRegion(
     float RotZ,
     float ScaleX,
     float ScaleY,
-    float ScaleZ);
+    float ScaleZ,
+    int EntityId = 0);
 internal sealed record MsbMapEvent(
     int Offset,
     string Name,

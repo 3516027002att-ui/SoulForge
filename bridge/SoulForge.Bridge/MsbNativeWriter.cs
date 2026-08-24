@@ -123,8 +123,11 @@ internal static class MsbNativeWriter
         {
             var matches = patch.Kind switch
             {
-                "set_region_position" or "delete_region" => document.Regions.Count(item => item.Name == patch.PartName),
+                "set_region_position" or "set_region_transform" or "delete_region" => document.Regions.Count(item => item.Name == patch.PartName),
                 "delete_event" => document.Events.Count(item => item.Name == patch.PartName),
+                "set_property" or "set_entity_id" => document.Parts.Count(item => item.Name == patch.PartName)
+                    + document.Regions.Count(item => item.Name == patch.PartName)
+                    + document.Events.Count(item => item.Name == patch.PartName),
                 _ => document.Parts.Count(item => item.Name == patch.PartName),
             };
             if (matches != 1)

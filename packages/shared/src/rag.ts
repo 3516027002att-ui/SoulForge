@@ -36,6 +36,8 @@ export interface RagChunk {
   body: string;
   numericIds: number[];
   contentHash: string;
+  sourceRevision?: number;
+  sourceHash?: string;
   relativePath?: string;
   resourceKind?: ResourceKind;
   confidence?: ReferenceConfidence;

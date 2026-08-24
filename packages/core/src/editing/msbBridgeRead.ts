@@ -22,6 +22,7 @@ export interface MsbBridgePart {
   scaleX?: number;
   scaleY?: number;
   scaleZ?: number;
+  entityId?: number;
 }
 
 export interface MsbBridgeRegion {
@@ -37,6 +38,7 @@ export interface MsbBridgeRegion {
   scaleX?: number;
   scaleY?: number;
   scaleZ?: number;
+  entityId?: number;
 }
 
 export interface MsbBridgeModel {
@@ -147,7 +149,8 @@ export async function readMsbDocumentViaBridge(input: {
     ...(p.rotZ !== undefined ? { rotZ: Number(p.rotZ) } : {}),
     ...(p.scaleX !== undefined ? { scaleX: Number(p.scaleX) } : {}),
     ...(p.scaleY !== undefined ? { scaleY: Number(p.scaleY) } : {}),
-    ...(p.scaleZ !== undefined ? { scaleZ: Number(p.scaleZ) } : {})
+    ...(p.scaleZ !== undefined ? { scaleZ: Number(p.scaleZ) } : {}),
+    ...(p.entityId !== undefined ? { entityId: Number(p.entityId) } : {})
   }));
   const regions = (result.data.regions ?? []).slice(0, maxRegions).map((r) => ({
     name: String(r.name ?? ''),
@@ -161,7 +164,8 @@ export async function readMsbDocumentViaBridge(input: {
     ...(r.rotZ !== undefined ? { rotZ: Number(r.rotZ) } : {}),
     ...(r.scaleX !== undefined ? { scaleX: Number(r.scaleX) } : {}),
     ...(r.scaleY !== undefined ? { scaleY: Number(r.scaleY) } : {}),
-    ...(r.scaleZ !== undefined ? { scaleZ: Number(r.scaleZ) } : {})
+    ...(r.scaleZ !== undefined ? { scaleZ: Number(r.scaleZ) } : {}),
+    ...(r.entityId !== undefined ? { entityId: Number(r.entityId) } : {})
   }));
   const events = (result.data.events ?? []).slice(0, maxEvents).map((event) => ({
     name: String(event.name ?? ''),

@@ -57,12 +57,14 @@ async function main(): Promise<void> {
     mkdirSync(tmpDir, { recursive: true });
     taePath = join(tmpDir, 'soulforge-tae-smoke-a00.tae');
 
+    const oodleRuntimeRoot = process.env.SOULFORGE_OODLE_RUNTIME_ROOT || 'D:/mystream/Sekiro Shadows Die Twice/Sekiro';
     const extract = await runBridge<{ contentSize?: number }>({
       command: 'extract-bnd4-child',
       filePath: source,
-      allowedRoots: [source.replace(/[/\\][^/\\]+$/, '')],
+      allowedRoots: [source.replace(/[/\\][^/\\]+$/, ''), oodleRuntimeRoot],
       writableRoots: [tmpDir],
       commandOptions: { childPath: 'tae/a00.tae', outputPath: taePath },
+      oodleRuntimeRoot,
       timeoutMs: 120_000
     });
     // 「缺语料」与「环境/基础设施坏了」必须区分（硬约束 7）。判定逻辑与理由见
@@ -85,10 +87,12 @@ async function main(): Promise<void> {
     }
   }
 
+  const oodleRuntimeRoot = process.env.SOULFORGE_OODLE_RUNTIME_ROOT || 'D:/mystream/Sekiro Shadows Die Twice/Sekiro';
   const result = await runBridge<TaeEnvelope>({
     command: 'read-tae-document',
     filePath: taePath,
-    allowedRoots: [taePath.replace(/[/\\][^/\\]+$/, '')],
+    allowedRoots: [taePath.replace(/[/\\][^/\\]+$/, ''), oodleRuntimeRoot],
+    oodleRuntimeRoot,
     timeoutMs: 120_000
   });
 
