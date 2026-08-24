@@ -7,7 +7,7 @@
  * against the TypeScript decompressor for the payload hash when DFLT.
  */
 import { createHash } from 'node:crypto';
-import { mkdtemp, mkdir, readFile, writeFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, readFile, writeFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { runBridge, disposeBridgeDaemonPool } from '../bridge/runBridge.js';
@@ -367,6 +367,7 @@ async function main(): Promise<void> {
       addDeleteEventCycleVerified: true
     }, null, 2));
   } finally {
+    await rm(root, { recursive: true, force: true });
     await disposeBridgeDaemonPool();
   }
 }
