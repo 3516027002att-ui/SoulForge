@@ -75,6 +75,7 @@ import {
   type GparamFieldSetMutation,
   commitParamMutationViaBridge,
   commitMsbMutationViaBridge,
+  type MsbBridgeMutation,
   readFmgDocumentViaBridge,
   readParamDocumentViaBridge,
   readMsbDocumentViaBridge,
@@ -154,7 +155,13 @@ import {
   decodeCiteHits,
   formatCitationLabel,
   mergeCiteHits,
-  type Citation
+  type Citation,
+  type MapEditTransaction,
+  validateMapTransaction,
+  buildCanonicalMapDocument,
+  MapSceneGraph,
+  type MapPartEntity,
+  type MapRegionEntity
 } from '@soulforge/shared';
 import { prepareBridgeRoots, type BridgeRootSession, type PrepareBridgeRootsResult } from './bridgeRoots.js';
 import type {
@@ -234,6 +241,11 @@ let activeRag: RagCorpus | null = null;
 let activeSession: WorkspaceSession | null = null;
 let activeOperationLog: OperationLogUtilityClient | null = null;
 let activeWorkspaceSessionId: string | null = null;
+/** Prevent duplicate rollback dialogs/transactions while one request is in flight. */
+const activeRollbackRequests = new Set<string>();
+/** Provider configs may omit contextWindowTokens; keep compaction fail-safe by default. */
+const DEFAULT_AGENT_CONTEXT_WINDOW_TOKENS = 500_000;
+const AGENT_CONTEXT_COMPACTION_RATIO = 0.8;
 /** 当前 overlay 的显示 label：remountBase 重建 session 时沿用（scan 时登记）。 */
 let activeOverlayLabel = '';
 /**
@@ -1424,8 +1436,6 @@ export interface AiAgentRunRequest {
    * left the session running until the user cancelled it by hand.
    */
   timeoutMs?: number;
-  /** Step ceiling. The loop's own default is 8 when unset. */
-  maxSteps?: number;
   /** Total output token budget across all steps; the loop stops when exceeded. */
   maxTotalOutputTokens?: number;
   /**
@@ -4672,6 +4682,102 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
     }
   );
 
+  handle(
+    'resource.readTaeAnimationClip',
+    async (
+      _event,
+      sourceUri: string,
+      animId: number,
+      flverBoneNames?: string[]
+    ): Promise<{
+      ok: boolean;
+      sourceUri?: string;
+      relativePath?: string;
+      data?: Record<string, unknown>;
+      diagnostics: Array<{ severity: string; code: string; message: string; sourceUri?: string }>;
+    }> => {
+      const file = indexedFiles.find((item) => item.sourceUri === sourceUri);
+      if (!file || !activeSession) {
+        return { ok: false, diagnostics: [{ severity: 'error' as const, code: 'RESOURCE_NOT_INDEXED', message: '资源未索引或工作区未打开，无法读取 TAE 动画。', sourceUri }] };
+      }
+      const roots = await verifiedReadRoots(activeSession, dirname(file.absolutePath));
+      if (roots.diagnostics.length > 0) return { ok: false, diagnostics: roots.diagnostics };
+      const overlayParent = dirname(activeSession.layers.overlayRoot);
+      const effectiveBase = activeSession.layers.baseRoot?.trim()
+        ?? (existsSync(join(overlayParent, 'sekiro.exe')) || existsSync(join(overlayParent, 'parts')) ? overlayParent : null);
+      if (effectiveBase && !roots.allowedRoots.includes(effectiveBase)) roots.allowedRoots.push(effectiveBase);
+
+      const result = await runBridge<Record<string, unknown>>({
+        command: 'read-tae-animation-clip',
+        filePath: file.absolutePath,
+        allowedRoots: roots.allowedRoots,
+        timeoutMs: 120_000,
+        ...(effectiveBase ? { oodleRuntimeRoot: effectiveBase } : {}),
+        commandOptions: { animId, ...(flverBoneNames?.length ? { flverBoneNames } : {}) }
+      });
+      if (result.parseStatus === 'failed' || !result.data) {
+        return { ok: false, sourceUri, diagnostics: result.diagnostics };
+      }
+
+      return {
+        ok: true,
+        sourceUri,
+        relativePath: file.relativePath,
+        data: result.data,
+        diagnostics: result.diagnostics
+      };
+    }
+  );
+
+  handle(
+    'resource.sampleTaeAnimationPose',
+    async (
+      _event,
+      sourceUri: string,
+      animId: number,
+      timeSeconds: number,
+      flverBoneNames?: string[],
+      loop?: boolean
+    ): Promise<{
+      ok: boolean;
+      sourceUri?: string;
+      relativePath?: string;
+      data?: Record<string, unknown>;
+      diagnostics: Array<{ severity: string; code: string; message: string; sourceUri?: string }>;
+    }> => {
+      const file = indexedFiles.find((item) => item.sourceUri === sourceUri);
+      if (!file || !activeSession) {
+        return { ok: false, diagnostics: [{ severity: 'error' as const, code: 'RESOURCE_NOT_INDEXED', message: '资源未索引或工作区未打开，无法采样 TAE 动画位姿。', sourceUri }] };
+      }
+      const roots = await verifiedReadRoots(activeSession, dirname(file.absolutePath));
+      if (roots.diagnostics.length > 0) return { ok: false, diagnostics: roots.diagnostics };
+      const overlayParent = dirname(activeSession.layers.overlayRoot);
+      const effectiveBase = activeSession.layers.baseRoot?.trim()
+        ?? (existsSync(join(overlayParent, 'sekiro.exe')) || existsSync(join(overlayParent, 'parts')) ? overlayParent : null);
+      if (effectiveBase && !roots.allowedRoots.includes(effectiveBase)) roots.allowedRoots.push(effectiveBase);
+
+      const result = await runBridge<Record<string, unknown>>({
+        command: 'sample-tae-animation-pose',
+        filePath: file.absolutePath,
+        allowedRoots: roots.allowedRoots,
+        timeoutMs: 120_000,
+        ...(effectiveBase ? { oodleRuntimeRoot: effectiveBase } : {}),
+        commandOptions: { animId, timeSeconds, loop: loop ?? true, ...(flverBoneNames?.length ? { flverBoneNames } : {}) }
+      });
+      if (result.parseStatus === 'failed' || !result.data) {
+        return { ok: false, sourceUri, diagnostics: result.diagnostics };
+      }
+
+      return {
+        ok: true,
+        sourceUri,
+        relativePath: file.relativePath,
+        data: result.data,
+        diagnostics: result.diagnostics
+      };
+    }
+  );
+
   handle('resource.readEsdDocument', async (_event, sourceUri: string) => {
     const file = indexedFiles.find((item) => item.sourceUri === sourceUri);
     if (!file) {
@@ -5049,6 +5155,210 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
         }),
         title: `MSB mutation ${mutation.kind} ${mutation.partName}`,
         confirmActionLabel: '提交 MSB 变更'
+      }, {
+        confirm: electronConfirmationPort(event),
+        commit: sessionCommitPort(activeSession, operationLog, storage)
+      });
+      return toSaveResultFromOutcome(outcome, indexedFiles);
+    }
+  );
+
+  handle(
+    'resource.executeMapTransaction',
+    async (
+      event,
+      sourceUri: string,
+      expectedHash: string,
+      transaction: MapEditTransaction
+    ): Promise<RendererSaveResult> => {
+      const file = indexedFiles.find((item) => item.sourceUri === sourceUri);
+      if (!file || !activeSession) {
+        return {
+          ok: false,
+          changedFiles: [],
+          diagnostics: [{
+            severity: 'error',
+            code: 'MSB_WRITE_NO_SESSION',
+            message: '需要已打开的工作区才能写入 MSB。',
+            sourceUri
+          }]
+        };
+      }
+      const gameBlocked = rejectNonSekiroNativeWrite(sourceUri, file);
+      if (gameBlocked) return gameBlocked;
+
+      const roots = await verifiedReadRoots(activeSession, dirname(file.absolutePath));
+      if (roots.diagnostics.length > 0) return { ok: false, changedFiles: [], diagnostics: roots.diagnostics };
+      const docResult = await readMsbDocumentViaBridge({
+        sourcePath: file.absolutePath,
+        allowedRoots: roots.allowedRoots,
+        ...(activeSession?.layers.baseRoot ? { oodleRuntimeRoot: activeSession.layers.baseRoot } : {})
+      });
+      if (!docResult.ok || !docResult.data) {
+        return {
+          ok: false,
+          changedFiles: [],
+          diagnostics: sanitizeDiagnostics(asBasicDiagnostics(docResult.diagnostics))
+        };
+      }
+
+      const mapDoc = buildCanonicalMapDocument({
+        sourceUri,
+        sourcePath: file.relativePath,
+        game: file.game,
+        revision: expectedHash,
+        models: docResult.data.models,
+        parts: docResult.data.parts.map((p) => ({
+          name: p.name,
+          typeId: p.typeId ?? 0,
+          modelIndex: p.modelIndex,
+          posX: p.posX,
+          posY: p.posY,
+          posZ: p.posZ,
+          rotX: p.rotX,
+          rotY: p.rotY,
+          rotZ: p.rotZ,
+          scaleX: p.scaleX,
+          scaleY: p.scaleY,
+          scaleZ: p.scaleZ
+        })),
+        regions: docResult.data.regions?.map((r) => ({
+          name: r.name,
+          typeId: r.typeId ?? 0,
+          posX: r.posX,
+          posY: r.posY,
+          posZ: r.posZ,
+          rotX: r.rotX,
+          rotY: r.rotY,
+          rotZ: r.rotZ,
+          scaleX: r.scaleX,
+          scaleY: r.scaleY,
+          scaleZ: r.scaleZ
+        }))
+      });
+
+      const validation = validateMapTransaction(mapDoc, transaction);
+      if (!validation.valid) {
+        return {
+          ok: false,
+          changedFiles: [],
+          diagnostics: validation.diagnostics.map((d) => ({
+            severity: d.severity,
+            code: d.code,
+            message: d.message,
+            sourceUri
+          }))
+        };
+      }
+
+      const sceneGraph = new MapSceneGraph(mapDoc);
+      const mutations: MsbBridgeMutation[] = [];
+      for (const op of transaction.operations) {
+        if (op.kind === 'set_transform') {
+          const entity = sceneGraph.findEntity(op.target);
+          if (entity) {
+            if (entity.kind === 'part') {
+              mutations.push({
+                kind: 'set_part_transform',
+                partName: entity.name,
+                ...(op.position ? { posX: op.position[0], posY: op.position[1], posZ: op.position[2] } : {}),
+                ...(op.rotation ? { rotX: op.rotation[0], rotY: op.rotation[1], rotZ: op.rotation[2] } : {}),
+                ...(op.scale ? { scaleX: op.scale[0], scaleY: op.scale[1], scaleZ: op.scale[2] } : {})
+              });
+            } else if (entity.kind === 'region') {
+              mutations.push({
+                kind: 'set_region_transform',
+                partName: entity.name,
+                ...(op.position ? { posX: op.position[0], posY: op.position[1], posZ: op.position[2] } : {}),
+                ...(op.rotation ? { rotX: op.rotation[0], rotY: op.rotation[1], rotZ: op.rotation[2] } : {}),
+                ...(op.scale ? { scaleX: op.scale[0], scaleY: op.scale[1], scaleZ: op.scale[2] } : {})
+              });
+            }
+          }
+        } else if (op.kind === 'batch_transform') {
+          for (const target of op.targets) {
+            const entity = sceneGraph.findEntity(target);
+            if (entity && 'transform' in entity) {
+              const t = (entity as MapPartEntity | MapRegionEntity).transform;
+              const posX = op.positionDelta ? t.position[0] + op.positionDelta[0] : undefined;
+              const posY = op.positionDelta ? t.position[1] + op.positionDelta[1] : undefined;
+              const posZ = op.positionDelta ? t.position[2] + op.positionDelta[2] : undefined;
+              const rotX = op.rotationDelta ? t.rotation[0] + op.rotationDelta[0] : undefined;
+              const rotY = op.rotationDelta ? t.rotation[1] + op.rotationDelta[1] : undefined;
+              const rotZ = op.rotationDelta ? t.rotation[2] + op.rotationDelta[2] : undefined;
+              const scaleX = op.scaleDelta ? t.scale[0] + op.scaleDelta[0] : undefined;
+              const scaleY = op.scaleDelta ? t.scale[1] + op.scaleDelta[1] : undefined;
+              const scaleZ = op.scaleDelta ? t.scale[2] + op.scaleDelta[2] : undefined;
+              mutations.push({
+                kind: entity.kind === 'part' ? 'set_part_transform' : 'set_region_transform',
+                partName: entity.name,
+                ...(posX !== undefined ? { posX } : {}),
+                ...(posY !== undefined ? { posY } : {}),
+                ...(posZ !== undefined ? { posZ } : {}),
+                ...(rotX !== undefined ? { rotX } : {}),
+                ...(rotY !== undefined ? { rotY } : {}),
+                ...(rotZ !== undefined ? { rotZ } : {}),
+                ...(scaleX !== undefined ? { scaleX } : {}),
+                ...(scaleY !== undefined ? { scaleY } : {}),
+                ...(scaleZ !== undefined ? { scaleZ } : {})
+              });
+            }
+          }
+        } else if (op.kind === 'change_model') {
+          const part = sceneGraph.findPart(op.target);
+          if (part) {
+            mutations.push({
+              kind: 'change_model',
+              partName: part.name,
+              modelName: op.newModelName
+            });
+          }
+        } else if (op.kind === 'delete') {
+          const entity = sceneGraph.findEntity(op.target);
+          if (entity) {
+            if (entity.kind === 'part') {
+              mutations.push({ kind: 'delete_part', partName: entity.name });
+            } else if (entity.kind === 'region') {
+              mutations.push({ kind: 'delete_region', partName: entity.name });
+            } else if (entity.kind === 'event') {
+              mutations.push({ kind: 'delete_event', partName: entity.name });
+            }
+          }
+        }
+      }
+
+      if (mutations.length === 0) {
+        return { ok: true, changedFiles: [], diagnostics: [] };
+      }
+
+      const storage = durableStoragePaths(activeSession.meta.workspaceId);
+      const stage = await verifiedStageRoots(activeSession, storage, 'MSB_STAGING_PREPARE_FAILED');
+      if (stage.diagnostics.length > 0) {
+        return {
+          ok: false,
+          changedFiles: [],
+          diagnostics: stage.diagnostics
+        };
+      }
+      const operationLog = await ensureActiveOperationLog(activeSession);
+      const outcome = await applyNativeMutation({
+        file,
+        sourceUri,
+        expectedHash,
+        stagingRoot: storage.stagingRoot,
+        allowedRoots: () => [...stage.allowedRoots],
+        stagingPrefix: 'msb',
+        stagingFileName: `${basename(file.relativePath)}.mut.msb`,
+        stageWrite: (context) => commitMsbMutationViaBridge({
+          sourcePath: file.absolutePath,
+          outputPath: context.outputPath,
+          expectedDocumentHash: expectedHash,
+          allowedRoots: context.allowedRoots,
+          writableRoots: context.writableRoots,
+          mutations
+        }),
+        title: `MSB transaction [${transaction.id}] (${mutations.length} 项修改)`,
+        confirmActionLabel: '提交 MSB 事务'
       }, {
         confirm: electronConfirmationPort(event),
         commit: sessionCommitPort(activeSession, operationLog, storage)
@@ -9752,10 +10062,14 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
         .filter((entry) => entry.status === 'committed' && entry.inverseOfOpId)
         .map((entry) => entry.inverseOfOpId!)
     );
-    return history.map((entry) => toRendererHistoryEntry(
-      reversedOperationIds.has(entry.opId) ? { ...entry, status: 'rolled_back' } : entry,
-      indexedFiles
-    ));
+    // 逆事务属于实现细节，不作为第二条逻辑历史展示；原操作保留并标记为
+    // rolled_back。这样 UI 不会给 inverseOfOpId/rollbackScope 再渲染回滚按钮。
+    return history
+      .filter((entry) => !entry.inverseOfOpId && !entry.rollbackScope)
+      .map((entry) => toRendererHistoryEntry(
+        reversedOperationIds.has(entry.opId) ? { ...entry, status: 'rolled_back' } : entry,
+        indexedFiles
+      ));
   });
 
   handle('operation.rollback', async (_event, opId: string): Promise<RollbackOperationIpcResult> => {
@@ -9785,6 +10099,33 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
         }]
       };
     }
+    if (sourceOperation.inverseOfOpId || sourceOperation.rollbackScope) {
+      return {
+        ok: false,
+        opId,
+        restoredFiles: [],
+        diagnostics: [{
+          severity: 'error',
+          code: 'ROLLBACK_OF_ROLLBACK_FORBIDDEN',
+          message: '逆向事务不能再次回滚；请回滚原始逻辑操作。'
+        }]
+      };
+    }
+    const rollbackKey = `operation:${opId}`;
+    if (activeRollbackRequests.has(rollbackKey)) {
+      return {
+        ok: false,
+        opId,
+        restoredFiles: [],
+        diagnostics: [{
+          severity: 'warning',
+          code: 'ROLLBACK_IN_PROGRESS',
+          message: '该操作的回滚请求正在处理中，请勿重复提交。'
+        }]
+      };
+    }
+    activeRollbackRequests.add(rollbackKey);
+    try {
     const confirmation = await requestWriteConfirmation({
       event: _event,
       resourceLabel: sourceOperation.title,
@@ -9825,6 +10166,9 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
       }),
       diagnostics: sanitizeDiagnostics(result.diagnostics)
     };
+    } finally {
+      activeRollbackRequests.delete(rollbackKey);
+    }
   });
 
   handle('operation.rollbackFile', async (_event, opId: string, targetUri: string): Promise<RollbackOperationIpcResult> => {
@@ -9854,6 +10198,18 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
         }]
       };
     }
+    if (sourceOperation.inverseOfOpId || sourceOperation.rollbackScope) {
+      return {
+        ok: false,
+        opId,
+        restoredFiles: [],
+        diagnostics: [{
+          severity: 'error',
+          code: 'ROLLBACK_OF_ROLLBACK_FORBIDDEN',
+          message: '逆向事务不能再次回滚；请回滚原始逻辑操作。'
+        }]
+      };
+    }
     const fileRecord = sourceOperation.files.find((file) => file.targetUri === targetUri);
     if (!fileRecord) {
       return {
@@ -9867,6 +10223,21 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
         }]
       };
     }
+    const rollbackKey = `file:${opId}:${targetUri}`;
+    if (activeRollbackRequests.has(rollbackKey)) {
+      return {
+        ok: false,
+        opId,
+        restoredFiles: [],
+        diagnostics: [{
+          severity: 'warning',
+          code: 'ROLLBACK_IN_PROGRESS',
+          message: '该文件的回滚请求正在处理中，请勿重复提交。'
+        }]
+      };
+    }
+    activeRollbackRequests.add(rollbackKey);
+    try {
     const confirmation = await requestWriteConfirmation({
       event: _event,
       resourceLabel: `${sourceOperation.title} · ${targetUri}`,
@@ -9908,6 +10279,9 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
       }),
       diagnostics: sanitizeDiagnostics(result.diagnostics)
     };
+    } finally {
+      activeRollbackRequests.delete(rollbackKey);
+    }
   });
 
   handle('ai.tools', async () => toolRegistry.list());
@@ -9930,6 +10304,22 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
 
   // Model service configs — renderer receives DTO without secrets.
   handle('modelService.list', async () => modelServiceVault.listConfigs());
+
+  handle('modelService.usageSummary', async () => {
+    await operationLogUtility.openAppDatabase(join(app.getPath('userData'), 'app.db'));
+    const summary = await operationLogUtility.providerUsageSummary();
+    return {
+      ...summary,
+      ...(summary.latestSession
+        ? {
+            latestSession: {
+              ...summary.latestSession,
+              active: activeAgentRuns.has(summary.latestSession.sessionId)
+            }
+          }
+        : {})
+    };
+  });
 
   handle('modelService.encryptionAvailable', async () => modelServiceVault.isEncryptionAvailable());
 
@@ -10229,7 +10619,12 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
    * ownerId 用于窗口销毁时只取消该窗口发起的运行——多窗口下 A 窗口关闭
    * 不得杀掉 B 窗口正在跑的会话。
    */
-  const activeAgentRuns = new Map<string, { controller: AbortController; ownerId: number }>();
+  const activeAgentRuns = new Map<string, {
+    controller: AbortController;
+    ownerId: number;
+    serviceId: string;
+    model: string;
+  }>();
   /**
    * main 签发的 opaque 资源引用 token 注册表（AGENT-60C / S10）。key = token 串，
    * value = 签发作用域（webContents.id）+ tokenId；引用框选（S10）额外带 main
@@ -10398,10 +10793,32 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
           : {})
     };
     const contextWindowTokens = stored.contextWindowTokens;
+    const effectiveAutoCompactTokenLimit = request.autoCompactTokenLimit != null
+      && request.autoCompactTokenLimit > 0
+      ? Math.trunc(request.autoCompactTokenLimit)
+      : Math.max(
+        1,
+        Math.trunc(
+          (contextWindowTokens != null && contextWindowTokens > 0
+            ? contextWindowTokens
+            : DEFAULT_AGENT_CONTEXT_WINDOW_TOKENS) * AGENT_CONTEXT_COMPACTION_RATIO
+        )
+      );
     const adapterResult = createConfiguredModelServiceAdapter({ config: modelConfig, apiKey });
     if (!adapterResult.ok) {
       const diagnostic = adapterResult.diagnostics[0];
       return { ok: false, error: { code: diagnostic?.code ?? 'MODEL_SERVICE_INVALID', message: diagnostic?.message ?? '模型服务配置无效。' } };
+    }
+    try {
+      await operationLogUtility.openAppDatabase(join(app.getPath('userData'), 'app.db'));
+    } catch (error) {
+      return {
+        ok: false,
+        error: {
+          code: 'PROVIDER_USAGE_STORAGE_UNAVAILABLE',
+          message: `provider token 用量数据库不可用，未发起模型请求：${error instanceof Error ? error.message : String(error)}`
+        }
+      };
     }
     const mode: ToolContext['mode'] = request.mode === 'normal' || request.mode === 'fullPermission'
       ? request.mode
@@ -10410,7 +10827,8 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
     // 需要工作区的工具干净失败，不整次拒绝（T6）。
     const bridge = createAgentToolBridge({
       registry: toolRegistry,
-      context: { ...currentToolContext(), mode }
+      context: { ...currentToolContext(), mode },
+      requireTextLookupBeforeStructuredDiscovery: /(?:boss|npc|enemy|elite|item|drop|角色|敌人|怪|精英|物品|道具|掉落|红点|忍杀|技能|鬼刑部|形部)/iu.test(request.prompt)
     });
 
     // AI 回滚接通：rollback_operation 走与 UI 操作级回滚完全相同的通道 ——
@@ -10546,7 +10964,12 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
 
     const sessionId = randomUUID();
     const controller = new AbortController();
-    activeAgentRuns.set(sessionId, { controller, ownerId: _event.sender.id });
+    activeAgentRuns.set(sessionId, {
+      controller,
+      ownerId: _event.sender.id,
+      serviceId: stored.id,
+      model: stored.model
+    });
     sendAgentEvent(sessionId, { type: 'session-accepted', mode });
 
     const permissionMode = mode === 'fullPermission' ? 'full' : mode;
@@ -10690,6 +11113,16 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
       permissionMode,
       tools: bridge.tools,
       executeTool: bridge.executeTool,
+      recordProviderUsage: async (sample) => {
+        await operationLogUtility.recordProviderUsage({
+          eventId: `${sessionId}:${sample.callIndex}`,
+          sessionId,
+          serviceId: stored.id,
+          protocol: stored.protocol,
+          model: stored.model,
+          ...sample
+        });
+      },
       signal: controller.signal,
       requestApproval,
       resolveApprovalDiff,
@@ -10702,17 +11135,13 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
       ...(request.timeoutMs != null && request.timeoutMs > 0
         ? { timeoutMs: Math.trunc(request.timeoutMs) }
         : {}),
-      ...(request.maxSteps != null && request.maxSteps > 0
-        ? { maxSteps: Math.trunc(request.maxSteps) }
-        : {}),
       ...(request.maxTotalOutputTokens != null && request.maxTotalOutputTokens > 0
         ? { maxTotalOutputTokens: Math.trunc(request.maxTotalOutputTokens) }
         : {}),
-      ...(request.autoCompactTokenLimit != null && request.autoCompactTokenLimit > 0
-        ? { compaction: { autoCompactTokenLimit: Math.trunc(request.autoCompactTokenLimit) } }
-        : contextWindowTokens != null && contextWindowTokens > 0
-          ? { compaction: { autoCompactTokenLimit: Math.trunc(contextWindowTokens) } }
-          : {}),
+      // Always arm compaction. Missing provider metadata uses the same 500K
+      // default shown in settings and compacts at 80%; an explicit request
+      // override remains exact for deterministic callers/tests.
+      compaction: { autoCompactTokenLimit: effectiveAutoCompactTokenLimit },
       ...(Object.keys(sampling).length > 0 ? { sampling } : {}),
       ...(request.useRagSearch === true
         ? {

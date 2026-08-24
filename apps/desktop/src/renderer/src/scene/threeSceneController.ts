@@ -87,6 +87,11 @@ export interface FlverSceneHandle extends ThreeSceneHandle {
   setScene: (scene: FlverSemanticScene) => void;
   setActiveAnimationClip?: (clip: AuthoritativeAnimationClip | null) => void;
   setPlaybackTime?: (time: number) => void;
+  setPose?: (pose: Array<{
+    translation: [number, number, number];
+    rotation: [number, number, number, number] | [number, number, number];
+    scale?: [number, number, number] | undefined;
+  }>) => void;
 }
 
 /** 未压缩 RGBA 纹理投影输入（typed bytes，不含渲染器对象）。 */
@@ -392,9 +397,7 @@ export async function mountFlverScene(input: {
           }
         }
         activeSkeleton.update();
-        return;
       }
-
       // 消费权威动画采样位姿（Havok Spline / De Boor 采样结果）
       const poses = sampleAuthoritativePose(activeClip, time, true);
       if (!poses) return;
@@ -406,6 +409,34 @@ export async function mountFlverScene(input: {
         bone.position.set(pose.p[0], pose.p[1], pose.p[2]);
         bone.quaternion.set(pose.q[0], pose.q[1], pose.q[2], pose.q[3]);
         bone.scale.set(pose.s[0], pose.s[1], pose.s[2]);
+      }
+      activeSkeleton.update();
+    },
+    setPose: (pose) => {
+      if (!activeSkeleton || activeBones.length === 0 || !pose || pose.length === 0) return;
+      for (let i = 0; i < activeBones.length && i < pose.length; i++) {
+        const transform = pose[i];
+        const bone = activeBones[i];
+        if (!transform || !bone) continue;
+
+        bone.position.set(transform.translation[0], transform.translation[1], transform.translation[2]);
+        if (transform.rotation.length === 4) {
+          bone.quaternion.set(
+            transform.rotation[0],
+            transform.rotation[1],
+            transform.rotation[2],
+            transform.rotation[3]
+          );
+        } else {
+          bone.rotation.set(
+            transform.rotation[0],
+            transform.rotation[1],
+            transform.rotation[2]
+          );
+        }
+        if (transform.scale) {
+          bone.scale.set(transform.scale[0], transform.scale[1], transform.scale[2]);
+        }
       }
       activeSkeleton.update();
     },

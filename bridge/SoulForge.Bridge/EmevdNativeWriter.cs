@@ -203,6 +203,30 @@ internal static class EmevdNativeWriter
                 if (ev.InstructionCount != before.InstructionCount - deletes + inserts)
                     throw new InvalidDataException("EMEVD delete_instruction 后指令数与预期不一致。");
             }
+            else if (patch.Kind == "set_event_parameters")
+            {
+                var targetId = ResolveFinalId(patch.EventId, renameMap);
+                var ev = reread.Events.FirstOrDefault(e => e.Id == targetId);
+                if (ev is null) throw new InvalidDataException("EMEVD set_event_parameters 后找不到事件。");
+                var expectedParams = patch.Parameters ?? new List<EmevdParameter>();
+                var actualParams = reread.GetEventParameters(ev);
+                if (actualParams.Count != expectedParams.Count)
+                    throw new InvalidDataException($"EMEVD set_event_parameters 参数数量不匹配：预期 {expectedParams.Count}，实际 {actualParams.Count}。");
+                for (var i = 0; i < expectedParams.Count; i++)
+                {
+                    var exp = expectedParams[i];
+                    var actual = actualParams[i];
+                    if (actual.InstructionIndex != exp.InstructionIndex
+                        || actual.TargetStartByte != exp.TargetStartByte
+                        || actual.SourceStartByte != exp.SourceStartByte
+                        || actual.ByteCount != exp.ByteCount
+                        || actual.UnkId != exp.UnkId)
+                    {
+                        throw new InvalidDataException(
+                            $"EMEVD parameter[{i}] 不匹配: 预期(instr={exp.InstructionIndex}, target={exp.TargetStartByte}, src={exp.SourceStartByte}, byteCount={exp.ByteCount}, unkId={exp.UnkId})，实际(instr={actual.InstructionIndex}, target={actual.TargetStartByte}, src={actual.SourceStartByte}, byteCount={actual.ByteCount}, unkId={actual.UnkId})。");
+                    }
+                }
+            }
         }
     }
 
@@ -284,6 +308,25 @@ internal static class EmevdNativeWriter
             var eventId = RequiredLong(item, "eventId");
             var index = RequiredLong(item, "instructionIndex");
             return new EmevdPatch(kind, eventId, null, null, index);
+        }
+
+        if (kind is "set_event_parameters")
+        {
+            var eventId = RequiredLong(item, "eventId");
+            var parameters = new List<EmevdParameter>();
+            if (item.TryGetProperty("parameters", out var paramsEl) && paramsEl.ValueKind == JsonValueKind.Array)
+            {
+                foreach (var p in paramsEl.EnumerateArray())
+                {
+                    parameters.Add(new EmevdParameter(
+                        RequiredLong(p, "instructionIndex"),
+                        RequiredLong(p, "targetStartByte"),
+                        RequiredLong(p, "sourceStartByte"),
+                        (int)RequiredLong(p, "byteCount"),
+                        (int)(p.TryGetProperty("unkId", out var unk) && unk.ValueKind == JsonValueKind.Number ? unk.GetInt64() : 0)));
+                }
+            }
+            return new EmevdPatch(kind, eventId, null, null, null, null, null, null, parameters);
         }
 
         var eventIdRequired = RequiredLong(item, "eventId");

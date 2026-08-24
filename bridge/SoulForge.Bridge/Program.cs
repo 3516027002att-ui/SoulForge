@@ -39,7 +39,13 @@ try
     }
     else
     {
-        result = await service.ExecuteAsync(args[0], args[1], CancellationToken.None, configuredOodleRoot);
+        JsonElement options = default;
+        if (args.Length > 2 && args[2].TrimStart().StartsWith("{"))
+        {
+            using var doc = JsonDocument.Parse(args[2]);
+            options = doc.RootElement.Clone();
+        }
+        result = await service.ExecuteAsync(args[0], args[1], CancellationToken.None, configuredOodleRoot, options);
     }
 
     Console.Out.WriteLine(JsonSerializer.Serialize(result, jsonOptions));

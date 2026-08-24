@@ -46,8 +46,9 @@ export interface RollbackResourceEntryOptions extends RollbackOperationOptions {
  *
  * The original operation record is immutable. The inverse transaction repeats
  * the normal staging, validation, backup, atomic replace, reread and durable log
- * path, and records `inverseOfOpId`. This also makes an inverse transaction
- * independently reversible without rewriting history.
+ * path, and records `inverseOfOpId`. Inverse transactions are deliberately
+ * terminal: allowing a rollback of a rollback would create an unbounded
+ * inverse chain and make the logical operation history ambiguous.
  */
 export async function rollbackOperation(options: RollbackOperationOptions): Promise<RollbackOperationResult> {
   return rollbackSelected(options, 'operation');
@@ -64,6 +65,13 @@ export async function rollbackResourceEntry(
 ): Promise<RollbackOperationResult> {
   const record = await options.store.get(options.opId);
   if (!record) return fail(options.opId, 'OPERATION_NOT_FOUND', `找不到操作 ${options.opId}。`);
+  if (record.inverseOfOpId || record.rollbackScope) {
+    return fail(
+      options.opId,
+      'ROLLBACK_OF_ROLLBACK_FORBIDDEN',
+      '逆向事务不能再次回滚；请回滚原始逻辑操作。'
+    );
+  }
   if (record.status !== 'committed') return fail(options.opId, 'OPERATION_NOT_COMMITTED', '只有已提交操作可以回滚。');
   if (!options.store.listResourceEntryChanges) {
     return fail(options.opId, 'RESOURCE_ENTRY_INVERSE_STORE_UNAVAILABLE', '当前操作日志不支持资源条目逆操作。');
@@ -147,6 +155,13 @@ async function rollbackSelected(
 ): Promise<RollbackOperationResult> {
   const record = await options.store.get(options.opId);
   if (!record) return fail(options.opId, 'OPERATION_NOT_FOUND', `找不到操作 ${options.opId}。`);
+  if (record.inverseOfOpId || record.rollbackScope) {
+    return fail(
+      options.opId,
+      'ROLLBACK_OF_ROLLBACK_FORBIDDEN',
+      '逆向事务不能再次回滚；请回滚原始逻辑操作。'
+    );
+  }
 
   const selectedFiles = scope === 'operation'
     ? record.files

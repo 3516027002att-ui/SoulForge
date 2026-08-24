@@ -30,7 +30,7 @@
  * 层级，避免同一页面出现两套标题层级。
  */
 
-import { useCallback, useEffect, useRef, useState, type ReactElement, type ReactNode } from 'react';
+import React, { useCallback, useEffect, useRef, useState, type ReactElement, type ReactNode } from 'react';
 
 /** 一栏的内容与元信息。 */
 export interface WorkbenchColumnSpec {

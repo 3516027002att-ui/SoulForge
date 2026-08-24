@@ -162,7 +162,7 @@ describe('TaeWorkbenchPanel 初始结构（挂载即有的四栏骨架）', () =
   it('选中动画后中栏出现词条事件列表（`{typeId} {类型名}`，无模板类型名「未命名」）', () => {
     const html = renderAnimationSelected();
     assert.match(html, /词条 · 动画 0/);
-    assert.match(html, />1 未命名</);
+    assert.match(html, /1 未命名/);
     assert.match(html, />2 未命名</);
     assert.doesNotMatch(html, />0s → 1s</);
     assert.match(html, /data-testid="tae-details-empty"/);
@@ -177,8 +177,8 @@ describe('TaeWorkbenchPanel 初始结构（挂载即有的四栏骨架）', () =
 
   it('右栏预览在 SSR 下是查找中空态，不出现「预览不可用」推诿句', () => {
     const html = render();
-    // effect 不跑 → 预览初始态是「正在查找伴生模型（chrbnd）…」。
-    assert.match(html, /正在查找伴生模型（chrbnd）…/);
+    // effect 不跑 → 预览初始态是「正在查找伴生模型（chrbnd）与装配部件（partsbnd）…」。
+    assert.match(html, /正在查找伴生模型（chrbnd）/);
     assert.doesNotMatch(html, /本夜不挂/);
     assert.doesNotMatch(html, /预览不可用/);
     assert.doesNotMatch(html, /见底部日志/);

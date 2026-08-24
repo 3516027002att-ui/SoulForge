@@ -1044,7 +1044,7 @@ export function createDefaultToolRegistry(): ToolRegistry {
 
   registry.register({
     name: 'query_map_objects',
-    description: 'Query all semantic map objects (Parts, Regions, Models, Events) by modelName, entityId, kind, or name. Does not truncate.',
+    description: 'Query semantic map objects (Parts, Regions, Models, Events) by modelName, entityId, kind, or name. Results are bounded; use returned IDs/cursors for follow-up pages.',
     permission: 'read',
     permissionLevel: 'read',
     inputSchema: {

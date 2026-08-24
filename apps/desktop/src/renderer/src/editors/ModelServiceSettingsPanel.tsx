@@ -63,6 +63,11 @@ function parseOptionalNumber(raw: string): number | undefined {
 
 /** upsertModelService 的输入类型（renderer 只走 bridge，不碰文件系统/凭据文件）。 */
 type ModelServiceUpsertInput = Parameters<SoulForgeApi['upsertModelService']>[0];
+type ProviderUsageSummaryDto = Awaited<ReturnType<SoulForgeApi['getProviderUsageSummary']>>;
+
+function formatTokenCount(value: number): string {
+  return new Intl.NumberFormat('zh-CN').format(value);
+}
 
 /** 表单字段快照：debounce 触发时与卸载 flush 时从 ref 读，避免闭包抓到旧值。 */
 interface FormSnapshot {
@@ -104,6 +109,7 @@ export interface ModelServiceSettingsPanelProps {
 export function ModelServiceSettingsPanel({ onCancel }: ModelServiceSettingsPanelProps = {}): ReactElement {
   const bridge = getRendererBridge();
   const [rows, setRows] = useState<ModelServiceDto[]>([]);
+  const [usageSummary, setUsageSummary] = useState<ProviderUsageSummaryDto | null>(null);
   const [encryptionOk, setEncryptionOk] = useState(false);
   const [displayName, setDisplayName] = useState('模型服务');
   const [protocol, setProtocol] = useState<'openai-compatible' | 'openai-responses' | 'anthropic-compatible'>('openai-compatible');
@@ -167,18 +173,34 @@ export function ModelServiceSettingsPanel({ onCancel }: ModelServiceSettingsPane
       setStatus(describeBridgeAbsence('模型服务管理'));
       return;
     }
-    const [list, available] = await Promise.all([
+    const [list, available, usage] = await Promise.all([
       bridge.listModelServices(),
-      bridge.modelServiceEncryptionAvailable()
+      bridge.modelServiceEncryptionAvailable(),
+      bridge.getProviderUsageSummary()
     ]);
     setRows(list);
     setEncryptionOk(available);
+    setUsageSummary(usage);
+  }
+
+  async function refreshUsage(): Promise<void> {
+    if (!bridge) return;
+    setUsageSummary(await bridge.getProviderUsageSummary());
   }
 
   useEffect(() => {
     void refresh().catch((error: unknown) => {
       setStatus(error instanceof Error ? error.message : '加载模型服务失败');
     });
+  }, []);
+
+  // 设置抽屉打开期间持续刷新，运行中的会话每完成一次 provider 请求后即可看到
+  // 最新上下文长度；不会触发模型调用，也不读取会话正文。
+  useEffect(() => {
+    const timer = setInterval(() => {
+      void refreshUsage().catch(() => undefined);
+    }, 3_000);
+    return () => clearInterval(timer);
   }, []);
 
   /**
@@ -399,6 +421,34 @@ export function ModelServiceSettingsPanel({ onCancel }: ModelServiceSettingsPane
           加密存储：{encryptionOk ? '可用（safeStorage）' : '不可用'}
         </span>
       </header>
+      <section className="stack gap" aria-label="模型 token 用量">
+        <div className="row gap">
+          <strong>历史总用量</strong>
+          <button type="button" className="btn btn--ghost btn--sm" onClick={() => void refreshUsage()}>
+            刷新用量
+          </button>
+        </div>
+        {usageSummary ? (
+          <>
+            <p className="muted">
+              provider 已报告输入 {formatTokenCount(usageSummary.totalInputTokens)} token，
+              输出 {formatTokenCount(usageSummary.totalOutputTokens)} token，
+              合计 {formatTokenCount(usageSummary.totalInputTokens + usageSummary.totalOutputTokens)} token；
+              请求 {formatTokenCount(usageSummary.calls)} 次（返回 usage {formatTokenCount(usageSummary.reportedCalls)} 次）。
+            </p>
+            {usageSummary.latestSession && (
+              <p className="muted">
+                {usageSummary.latestSession.active ? '当前会话' : '最近会话'}上下文：
+                {formatTokenCount(usageSummary.latestSession.currentContextTokens)} token
+                （{usageSummary.latestSession.contextSource === 'provider' ? 'provider 报告' : '本地估算'}），
+                本会话输入 {formatTokenCount(usageSummary.latestSession.totalInputTokens)} / 输出 {formatTokenCount(usageSummary.latestSession.totalOutputTokens)} token。
+              </p>
+            )}
+          </>
+        ) : (
+          <p className="muted">正在读取 provider usage…</p>
+        )}
+      </section>
       <div className="stack gap">
         {/* S25：字段顺序照 010517 的信息结构——协议 → 地址 → 模型 → 名称 → 密钥 →
             高级 → 页脚。每个 label 独占一行（CSS 竖排），控件 100% 宽。 */}
@@ -622,6 +672,17 @@ export function ModelServiceSettingsPanel({ onCancel }: ModelServiceSettingsPane
             {row.model}
             {' · '}
             凭据：{row.hasCredential ? '已配置' : '未配置'}
+            {usageSummary?.byService.find((usage) => usage.serviceId === row.id) && (() => {
+              const usage = usageSummary.byService.find((entry) => entry.serviceId === row.id)!;
+              return (
+                <>
+                  {' · '}
+                  <span className="muted">
+                    历史输入 {formatTokenCount(usage.totalInputTokens)} / 输出 {formatTokenCount(usage.totalOutputTokens)} token
+                  </span>
+                </>
+              );
+            })()}
             {row.embeddingModel && (
               <>
                 {' · '}

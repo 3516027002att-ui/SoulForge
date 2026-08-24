@@ -131,7 +131,7 @@ import {
   DEFAULT_SUMMARY_PREFIX
 } from '../model-services/contextCompactor.js';
 import { createDefaultToolRegistry, ToolRegistry, validateToolInput, type ToolContext } from '../ai/toolRegistry.js';
-import { createAgentToolBridge } from '../ai/agentToolBridge.js';
+import { createAgentToolBridge, MAX_BOUNDED_TOOL_RESULT_CHARS } from '../ai/agentToolBridge.js';
 import {
   FileRolloutStorage,
   listRolloutSessions,
@@ -147,6 +147,7 @@ import type {
   ContextEvidenceSource,
   ModelCompleteRequest,
   ModelServiceConfig,
+  ProviderUsageSample,
   ToolCall,
   ModelServiceAdapter,
   ToolDefinition
@@ -444,7 +445,7 @@ async function runScriptedMatrix(
 
 async function main(): Promise<void> {
   let passed = 0;
-  const total = 61;
+  const total = 63;
 
   // --- Case 1: HTTP 429 rate limit ---
   {
@@ -2786,6 +2787,65 @@ async function main(): Promise<void> {
     if (badJson.ok || badJson.code !== 'TOOL_INPUT_INVALID') {
       throw new Error('Case 54: invalid JSON must surface as TOOL_INPUT_INVALID.');
     }
+    const boundedRegistry = new ToolRegistry();
+    boundedRegistry.register({
+      name: 'search_resources',
+      description: 'bounded search',
+      permission: 'read',
+      permissionLevel: 'read',
+      run: () => ({
+        ok: true,
+        data: {
+          nextCursor: 'page-2',
+          items: Array.from({ length: 400 }, (_item, index) => ({
+            id: `resource-${index}`,
+            sourceUri: `file://resource-${index}.param`,
+            description: 'x'.repeat(900)
+          }))
+        }
+      })
+    });
+    boundedRegistry.register({
+      name: 'read_emevd_outline',
+      description: 'bounded EMEVD outline',
+      permission: 'read',
+      permissionLevel: 'read',
+      inputSchema: { file: 'string' },
+      run: () => ({
+        ok: true,
+        data: {
+          file: 'm10_00_00_00.emevd.dcx',
+          nextCursor: 'event-page-2',
+          events: Array.from({ length: 300 }, (_item, index) => ({ eventId: 1000 + index, instructionCount: 20 }))
+        }
+      })
+    });
+    const boundedBridge = createAgentToolBridge({
+      registry: boundedRegistry,
+      context: { workspaceIndex: {} as never, mode: 'normal' }
+    });
+    const bounded = await boundedBridge.executeTool({
+      id: 'bounded-search',
+      name: 'search_resources',
+      argumentsJson: '{"query":"npc"}'
+    });
+    if (!bounded.ok || bounded.content.length > MAX_BOUNDED_TOOL_RESULT_CHARS
+      || !bounded.content.includes('"truncated":true')
+      || !bounded.content.includes('page-2')
+      || !bounded.content.includes('resource-0')) {
+      throw new Error(`Case 54: discovery result must be bounded with IDs/cursor: ${bounded.content.length}`);
+    }
+    const boundedEmevd = await boundedBridge.executeTool({
+      id: 'bounded-emevd',
+      name: 'read_emevd_outline',
+      argumentsJson: '{"file":"m10_00_00_00.emevd.dcx"}'
+    });
+    if (!boundedEmevd.ok || boundedEmevd.content.length > MAX_BOUNDED_TOOL_RESULT_CHARS
+      || !boundedEmevd.content.includes('"truncated":true')
+      || !boundedEmevd.content.includes('event-page-2')
+      || !boundedEmevd.content.includes('eventId')) {
+      throw new Error(`Case 54: EMEVD outline must be bounded with event IDs/cursor: ${boundedEmevd.content.length}`);
+    }
     // 声明的字段名与类型必须到达模型。此前投影是不带 properties 的空壳,
     // 模型只能猜字段名,猜错拿到的 INVALID_INPUT 又不含正确名字。
     const declaredSchema = byName.get('schema_thing')?.parametersJsonSchema as
@@ -2849,6 +2909,56 @@ async function main(): Promise<void> {
     passed++;
   }
 
+  // --- Case 54b: the documented text-first discovery order is enforced by
+  // --- the runtime bridge, then unlocks structured discovery after a text
+  // --- lookup attempt.  Prompt instruction-following alone is insufficient.
+  {
+    const registry = new ToolRegistry();
+    registry.register({
+      name: 'search_text_entries',
+      description: 'text',
+      permission: 'read',
+      permissionLevel: 'read',
+      inputSchema: { query: 'string' },
+      run: () => ({ ok: true, data: [{ id: 902012, text: '鬼庭形部雅孝' }] })
+    });
+    registry.register({
+      name: 'read_param_fields',
+      description: 'param',
+      permission: 'read',
+      permissionLevel: 'read',
+      inputSchema: { table: 'string', rowId: 'number' },
+      run: () => ({ ok: true, data: { rowId: 50800000 } })
+    });
+    const bridge = createAgentToolBridge({
+      registry,
+      context: { workspaceIndex: {} as never, mode: 'normal' },
+      requireTextLookupBeforeStructuredDiscovery: true
+    });
+    const premature = await bridge.executeTool({
+      id: 'param-first',
+      name: 'read_param_fields',
+      argumentsJson: '{"table":"NpcParam","rowId":50800000}'
+    });
+    if (premature.ok || premature.code !== 'TEXT_LOOKUP_REQUIRED') {
+      throw new Error(`Case 54b: param-first call must be denied, got ${JSON.stringify(premature)}`);
+    }
+    const text = await bridge.executeTool({
+      id: 'text-first',
+      name: 'search_text_entries',
+      argumentsJson: '{"query":"鬼庭形部雅孝"}'
+    });
+    const param = await bridge.executeTool({
+      id: 'param-after-text',
+      name: 'read_param_fields',
+      argumentsJson: '{"table":"NpcParam","rowId":50800000}'
+    });
+    if (!text.ok || !param.ok || !param.content.includes('50800000')) {
+      throw new Error('Case 54b: text lookup must unlock structured discovery.');
+    }
+    passed++;
+  }
+
   // --- Case 56: file rollout storage — append-only roundtrip, flush, close,
   // --- Codex-style sessions/YYYY/MM/DD path layout ---
   {
@@ -2902,16 +3012,23 @@ async function main(): Promise<void> {
                 toolCalls: [{ id: 'call-h', name: 'read_h', argumentsJson: '{"p":"a"}' }]
               },
               finishReason: 'tool_use',
+              usage: { inputTokens: 10, outputTokens: 2 },
               diagnostics: []
             };
           }
-          return { message: { role: 'assistant', content: 'host-done' }, finishReason: 'stop', diagnostics: [] };
+          return {
+            message: { role: 'assistant', content: 'host-done' },
+            finishReason: 'stop',
+            usage: { inputTokens: turn * 10, outputTokens: turn + 1 },
+            diagnostics: []
+          };
         },
         async *stream() {
           throw new Error('unused');
         }
       };
       const events: AgentEvent[] = [];
+      const providerUsage: ProviderUsageSample[] = [];
       const config = makeConfig(9, 'openai-compatible');
       const first = await runAgentSession({
         sessionsDir: base,
@@ -2922,6 +3039,7 @@ async function main(): Promise<void> {
         permissionMode: 'normal',
         tools: [{ name: 'read_h', description: 'r', parametersJsonSchema: { type: 'object' } }],
         executeTool: async () => ({ ok: true, content: 'h-result' }),
+        recordProviderUsage: async (sample) => { providerUsage.push(sample); },
         onEvent: (event) => {
           events.push(event);
         }
@@ -2939,6 +3057,14 @@ async function main(): Promise<void> {
       if (!loaded.messages.some((message) => message.content === 'first question')) {
         throw new Error('Case 57: user prompt must be recorded.');
       }
+      if (loaded.providerUsage?.calls !== 2
+        || loaded.providerUsage.totalInputTokens !== 30
+        || loaded.providerUsage.totalOutputTokens !== 5
+        || providerUsage.length !== 2
+        || providerUsage[1]?.currentContextTokens !== 20
+        || providerUsage[1]?.contextSource !== 'provider') {
+        throw new Error(`Case 57: provider usage persistence wrong: ${JSON.stringify({ loaded: loaded.providerUsage, providerUsage })}`);
+      }
       const { ok: _loadedOk, path: _loadedPath, ...resumed } = loaded;
       const second = await runAgentSession({
         sessionsDir: base,
@@ -2949,6 +3075,7 @@ async function main(): Promise<void> {
         permissionMode: 'normal',
         tools: [],
         executeTool: async () => ({ ok: false, content: 'unused' }),
+        recordProviderUsage: async (sample) => { providerUsage.push(sample); },
         resumeFrom: resumed
       });
       if (second.run.finishReason !== 'stop') throw new Error(`Case 57: resume run ${second.run.finishReason}`);
@@ -2961,10 +3088,104 @@ async function main(): Promise<void> {
       ) {
         throw new Error('Case 57: resumed history must seed the next run.');
       }
+      if (Number(providerUsage.length) !== 3 || providerUsage[2]?.inputTokens !== 30) {
+        throw new Error('Case 57: follow-up provider call usage missing.');
+      }
       passed++;
     } finally {
       await rm(base, { recursive: true, force: true });
     }
+  }
+
+  // --- Case 60: production default has no fixed step/tool-call ceiling.  A
+  // --- deterministic 70-tool sequence must pass the former 64-step boundary
+  // --- and finish normally; explicit maxSteps remains test-only injection.
+  {
+    let calls = 0;
+    const adapter: ModelServiceAdapter = {
+      protocol: 'openai-compatible',
+      listModels: fakeListModels,
+      async complete() {
+        calls += 1;
+        if (calls <= 70) {
+          return {
+            message: {
+              role: 'assistant',
+              content: '',
+              toolCalls: [{ id: `long-${calls}`, name: 'read_long', argumentsJson: `{\"index\":${calls}}` }]
+            },
+            finishReason: 'tool_use',
+            diagnostics: []
+          };
+        }
+        return { message: { role: 'assistant', content: 'done' }, finishReason: 'stop', diagnostics: [] };
+      },
+      async *stream() { throw new Error('unused'); }
+    };
+    const result = await runAgentToolLoop(adapter, {
+      config: makeConfig(9, 'openai-compatible'),
+      apiKey: 'sk-test',
+      messages: [{ role: 'user', content: 'long task' }],
+      tools: [{ name: 'read_long', description: 'r', parametersJsonSchema: { type: 'object' } }],
+      permissionMode: 'normal',
+      executeTool: async () => ({ ok: true, content: 'ok' })
+    });
+    if (result.finishReason !== 'stop' || result.steps !== 71 || calls !== 71
+      || result.diagnostics.some((diagnostic) => diagnostic.code === 'AGENT_MAX_STEPS_REACHED')) {
+      throw new Error(`Case 60: unbounded default stopped early: ${JSON.stringify({ calls, steps: result.steps, finish: result.finishReason })}`);
+    }
+
+    // 同一 Param 表不断换 rowId 仍是同一个语义失败：不能靠改行号绕过
+    // 死循环预算。该序列在 6 次失败后应以结构化诊断停止。
+    let semanticCalls = 0;
+    const semanticAdapter: ModelServiceAdapter = {
+      protocol: 'openai-compatible',
+      listModels: fakeListModels,
+      async complete() {
+        semanticCalls += 1;
+        return {
+          message: {
+            role: 'assistant',
+            content: '',
+            toolCalls: [{
+              id: `semantic-${semanticCalls}`,
+              name: 'read_param_fields',
+              argumentsJson: JSON.stringify({
+                table: 'NpcParam',
+                rowIds: [50000000 + semanticCalls],
+                fieldIds: ['npcType']
+              })
+            }]
+          },
+          finishReason: 'tool_use' as const,
+          diagnostics: []
+        };
+      },
+      async *stream() { throw new Error('unused'); }
+    };
+    const semanticResult = await runAgentToolLoop(semanticAdapter, {
+      config: makeConfig(9, 'openai-compatible'),
+      apiKey: 'sk-test',
+      messages: [{ role: 'user', content: 'find the npc row' }],
+      tools: [{
+        name: 'read_param_fields',
+        description: 'read param',
+        parametersJsonSchema: { type: 'object' },
+        permissionLevel: 'read',
+        supportsParallel: true
+      }],
+      permissionMode: 'normal',
+      executeTool: async () => ({
+        ok: false,
+        code: 'PARAM_ROW_NOT_FOUND',
+        content: JSON.stringify({ ok: false, error: { code: 'PARAM_ROW_NOT_FOUND', message: 'row missing' } })
+      })
+    });
+    if (semanticResult.finishReason !== 'error' || semanticCalls !== 6
+      || !semanticResult.diagnostics.some((diagnostic) => diagnostic.code === 'AGENT_SEMANTIC_TOOL_FAILURES_EXCEEDED')) {
+      throw new Error(`Case 60: semantic Param failure budget missing: ${JSON.stringify({ semanticCalls, finish: semanticResult.finishReason, diagnostics: semanticResult.diagnostics })}`);
+    }
+    passed++;
   }
 
   // --- Case 58: session cancellation — pre-aborted signal yields 'cancelled'

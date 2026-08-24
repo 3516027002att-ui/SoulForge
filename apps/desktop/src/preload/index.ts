@@ -60,7 +60,8 @@ import type {
   ScriptContainerEntryPage,
   ScriptContainerEvidence,
   ScriptEntryPlaintextView,
-  CiteHit
+  CiteHit,
+  MapEditTransaction
 } from '@soulforge/shared';
 import { EDITOR_DOCUMENT_IPC_CHANNELS, maskPathFragments } from '@soulforge/shared';
 
@@ -340,6 +341,7 @@ const api = {
     ok: boolean;
     origin: 'imported' | 'fixture';
     items: EmedfCompletionItem[];
+    enums?: Record<string, import('@soulforge/core').EmedfEnumDef>;
   }> =>
     ipcRenderer.invoke('resource.readEmedfCompletionCatalog'),
   readFmgDocument: (sourceUri: string): Promise<unknown> =>
@@ -382,6 +384,12 @@ const api = {
   /** S17：伴生 chrbnd 的 FLVER 预览（overlay → 原版；KRAK 缺 Oodle 给可行动码）。 */
   readTaeChrbndPreview: (sourceUri: string, meshIndex: number): Promise<unknown> =>
     ipcRenderer.invoke('resource.readTaeChrbndPreview', sourceUri, meshIndex),
+  /** ACTION：读取 TAE 关联的真实 HKX 动画 Clip 数据 */
+  readTaeAnimationClip: (sourceUri: string, animId: number, flverBoneNames?: string[]): Promise<unknown> =>
+    ipcRenderer.invoke('resource.readTaeAnimationClip', sourceUri, animId, flverBoneNames),
+  /** ACTION：连续时间采样 TAE 动画位姿 */
+  sampleTaeAnimationPose: (sourceUri: string, animId: number, timeSeconds: number, flverBoneNames?: string[], loop?: boolean): Promise<unknown> =>
+    ipcRenderer.invoke('resource.sampleTaeAnimationPose', sourceUri, animId, timeSeconds, flverBoneNames, loop),
   // S23：按 modelName 在 mapbnd 容器里取 part 的 FLVER 网格（地图 viewport）。
   readMapPartMesh: (msbSourceUri: string, modelName: string): Promise<unknown> =>
     ipcRenderer.invoke('resource.readMapPartMesh', msbSourceUri, modelName),
@@ -434,6 +442,12 @@ const api = {
     }
   ): Promise<RendererSaveResult> =>
     ipcRenderer.invoke('resource.applyMsbMutation', sourceUri, expectedHash, mutation),
+  executeMapTransaction: (
+    sourceUri: string,
+    expectedHash: string,
+    transaction: MapEditTransaction
+  ): Promise<RendererSaveResult> =>
+    ipcRenderer.invoke('resource.executeMapTransaction', sourceUri, expectedHash, transaction),
   /**
    * S38：write-flver material-slot-set 写回（与 main resource.applyFlverMutation
    * 通道一致；mesh 越界 / no-op / layoutWarnings 非空由 C# 侧 fail-closed 拒绝）。
@@ -813,6 +827,41 @@ const api = {
     contextWindowTokens?: number;
     thinkingLevel?: ModelThinkingLevel;
   }>> => ipcRenderer.invoke('modelService.list'),
+  getProviderUsageSummary: (): Promise<{
+    calls: number;
+    reportedCalls: number;
+    totalInputTokens: number;
+    totalOutputTokens: number;
+    firstUsedAt: string | null;
+    lastUsedAt: string | null;
+    byService: Array<{
+      serviceId: string;
+      protocol: string;
+      model: string;
+      calls: number;
+      reportedCalls: number;
+      totalInputTokens: number;
+      totalOutputTokens: number;
+      firstUsedAt: string | null;
+      lastUsedAt: string | null;
+    }>;
+    latestSession: null | {
+      sessionId: string;
+      serviceId: string;
+      protocol: string;
+      model: string;
+      calls: number;
+      reportedCalls: number;
+      totalInputTokens: number;
+      totalOutputTokens: number;
+      firstUsedAt: string | null;
+      lastUsedAt: string | null;
+      lastCallIndex: number;
+      currentContextTokens: number;
+      contextSource: 'provider' | 'estimated';
+      active: boolean;
+    };
+  }> => ipcRenderer.invoke('modelService.usageSummary'),
   modelServiceEncryptionAvailable: (): Promise<boolean> =>
     ipcRenderer.invoke('modelService.encryptionAvailable'),
   upsertModelService: (input: {

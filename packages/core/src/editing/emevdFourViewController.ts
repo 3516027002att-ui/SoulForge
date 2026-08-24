@@ -45,6 +45,7 @@ export function createEmevdEditorDocument(input: {
     eventId: number;
     restBehavior: number;
     layer?: number;
+    parameters?: Array<{ instructionIndex: number; targetStartByte: number; sourceStartByte: number; byteCount: number; unkId?: number }>;
     instructions?: Array<{ bank: number; id: number; argsBase64?: string; unknown?: boolean }>;
   }>;
   bytesBase64?: string;
@@ -62,6 +63,7 @@ export function createEmevdEditorDocument(input: {
       eventId: event.eventId,
       restBehavior: event.restBehavior,
       layer: event.layer ?? -1,
+      parameters: event.parameters?.map((p) => ({ ...p, unkId: p.unkId ?? 0 })),
       instructions: (event.instructions ?? []).map((instr, index) => ({
         instructionUri: `${eventUri}/instr/${index}`,
         bank: instr.bank,

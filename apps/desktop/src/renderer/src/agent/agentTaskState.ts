@@ -329,7 +329,7 @@ export function extractCompletedTurnItems(
     items.push({ kind: 'user', text: goal });
   }
 
-  const showThinking = task.thinkingText.length > 0;
+  const showThinking = typeof task.thinkingText === 'string' && task.thinkingText.length > 0;
   if (showThinking) {
     items.push({
       kind: 'thinking',
@@ -653,6 +653,18 @@ export function describeRunBlocker(input: {
   if (input.configId === null) return '尚未选择模型服务：请在模型服务管理里添加并配置凭据。';
   if (input.prompt.trim() === '') return '任务描述为空：请先写清要做什么。';
   return null;
+}
+
+/**
+ * 只有正常 stop 终态才允许下一次普通发送隐式承接历史。
+ * partial/length/cancelled/error 都必须由用户显式选择继续或开始新任务，
+ * 避免步数/输出预算耗尽后再次发送时悄悄复用旧上下文。
+ */
+export function canAutoResumeAgentTask(state: AgentTaskState): boolean {
+  return state.phase === 'done'
+    && state.finishReason === 'stop'
+    && typeof state.rolloutFileName === 'string'
+    && state.rolloutFileName.length > 0;
 }
 
 function appendNarration(

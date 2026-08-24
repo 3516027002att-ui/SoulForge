@@ -79,6 +79,13 @@ export const TIER_BY_SCRIPT = Object.freeze({
   'test:ai-conformance': 'unit',
   'test:rag': 'unit',
   'test:emevd-stable-identity': 'unit',
+  'test:emevd-dark-script-compiler': 'unit',
+  'test:emevd-dark-script-compiler-s14': 'unit',
+  'test:emevd-session-cache': 'unit',
+  'test:map-transaction-atomic': 'unit',
+  'test:darkscript-languageservice-scale': 'unit',
+  'test:animation-playback-clock': 'unit',
+  'test:map-document-scale': 'unit',
   'test:csv': 'unit',
   'test:emedf-completion-catalog': 'unit',
   'test:emevd-instruction-structural': 'unit',
@@ -512,6 +519,7 @@ export const TIER_BY_SCRIPT = Object.freeze({
   // 不会在公共 CI 上误启动游戏，故归 native 而非 unit/release。
   'test:me3-sekiro-session': 'native',
   'probe:behavior-headers': 'native',
+  'test:verify-map-action-open': 'native',
 
   // ---- release：打包、安装器、可复现构建。慢 ----
   build: 'release',
@@ -557,6 +565,7 @@ export const EXCLUDED = Object.freeze({
   'verify:all': '同上（全层级别名）',
   'verify:list': '同上（只列计划，不是验证）',
   dev: '交互式开发服务器，不是验证',
+  'ai-logs:sync': '用于从 Antigravity 提取或同步真实 AI 会话日志到 testdata/ai-audit-transcripts 的离线同步工具，不是验证',
   // ⚠️ 排除理由已按实测改写（2026-08-08）。原文写的是「由 release 链按需调用」，
   // 而实测 release 层 10 条脚本（build / release:installer:manifest /
   // release:manifest / test:installer-lifecycle / test:portable-packaging-* /

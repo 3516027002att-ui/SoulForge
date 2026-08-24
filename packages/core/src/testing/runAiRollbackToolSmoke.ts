@@ -144,6 +144,41 @@ async function mainInWorkspace(root: string): Promise<void> {
   check(inverse?.author === 'ai', '逆操作 author 应为 ai');
   check(inverse?.rollbackScope === 'operation', '逆操作 scope 应为 operation');
 
+  // 逆操作是逻辑历史的终点：再次尝试回滚必须在后端被拒绝，不能生成
+  // inverse-of-inverse 链，也不能触碰已经恢复的文件。
+  const rollbackInverse = data?.inverseOpId
+    ? await registry.run(
+      'rollback_operation',
+      { opId: data.inverseOpId },
+      {
+        workspaceIndex: fakeIndex,
+        mode: 'fullPermission',
+        session,
+        operationLogStore: store,
+        backupBaseDir: join(root, 'backups'),
+        recoveryDir: join(root, 'recovery'),
+        confirmation: createConfirmationReceipt({
+          subjects: [`ROLLBACK_OPERATION:${data.inverseOpId}`],
+          riskLevel: 'high',
+          note: 'inverse rollback must be rejected'
+        })
+      }
+    )
+    : null;
+  check(!rollbackInverse?.ok, '逆操作再次回滚必须失败');
+  check(
+    rollbackInverse?.error?.code === 'ROLLBACK_OF_ROLLBACK_FORBIDDEN',
+    '逆操作再次回滚错误码应为 ROLLBACK_OF_ROLLBACK_FORBIDDEN'
+  );
+  check(await readFile(firstPath, 'utf8') === 'first-before\n', '拒绝逆回滚不得改动文件');
+  const historyAfterInverseAttempt = await store.list(session.meta.workspaceId);
+  check(historyAfterInverseAttempt.length === 2, '逆回滚拒绝后事务数量仍应限制为原操作+单个逆操作');
+  check(
+    createHash('sha256').update(await readFile(firstPath)).digest('hex')
+      === createHash('sha256').update('first-before\n').digest('hex'),
+    '回滚后的最终文件哈希必须等于原始 beforeHash'
+  );
+
   // 6. list_operations 优先用注入的 store（含上面的逆操作），缺省回退内存 store。
   const listed = await registry.run(
     'list_operations',

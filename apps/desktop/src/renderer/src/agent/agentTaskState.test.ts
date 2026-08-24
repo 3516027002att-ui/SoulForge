@@ -14,6 +14,7 @@ import { describe, it } from 'node:test';
 import {
   INITIAL_AGENT_TASK_STATE,
   approvalSeverity,
+  canAutoResumeAgentTask,
   classifyDiffLines,
   describeAgentTaskStatus,
   describeApprovalLevel,
@@ -121,6 +122,24 @@ describe('进度事件真的推进状态', () => {
     assert.equal(state.phase, 'done');
     assert.equal(state.steps, 2);
     assert.equal(state.rolloutFileName, 'rollout-0001.jsonl');
+  });
+
+  it('只有 stop 终态允许隐式承接，partial/max_steps 必须显式继续', () => {
+    const stopped = feed(
+      startAgentTask(SESSION),
+      { type: 'session-done', finishReason: 'stop', steps: 2, rolloutFileName: 'stop.jsonl' }
+    );
+    const partial = feed(
+      startAgentTask(SESSION),
+      { type: 'session-done', finishReason: 'partial', steps: 2, rolloutFileName: 'partial.jsonl' }
+    );
+    const length = feed(
+      startAgentTask(SESSION),
+      { type: 'session-done', finishReason: 'length', steps: 2, rolloutFileName: 'length.jsonl' }
+    );
+    assert.equal(canAutoResumeAgentTask(stopped), true);
+    assert.equal(canAutoResumeAgentTask(partial), false);
+    assert.equal(canAutoResumeAgentTask(length), false);
   });
 
   it('session-error 写错误码与原因，不吞异常', () => {
@@ -566,7 +585,7 @@ describe('对话时间线：口播与工具按步交织，思考可折叠', () =
       rolloutFileName: 'sessions/turn2.jsonl',
       historyItems: [{ kind: 'user' as const, text: '问题一' }, { kind: 'assistant' as const, step: 1, text: '回答一' }],
       narrations: [{ step: 1, text: '回答二' }],
-      thinkingText: '思考二'
+      thinkingText: ''
     };
 
     // 开启第三轮

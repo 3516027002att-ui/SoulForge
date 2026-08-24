@@ -125,6 +125,7 @@ import type {
 } from './agent/AgentTaskPanel.js';
 import {
   INITIAL_AGENT_TASK_STATE,
+  canAutoResumeAgentTask,
   describeRunBlocker,
   isAgentTaskActive,
   markAgentTaskCancelling,
@@ -282,6 +283,8 @@ export function App(): ReactElement {
   const [sessionMeta, setSessionMeta] = useState<RendererWorkspaceSession | null>(null);
   const [baseRootChoice, setBaseRootChoice] = useState<DirectorySelection | null>(null);
   const [operationHistory, setOperationHistory] = useState<RendererPatchHistoryEntry[]>([]);
+  const [rollbackInFlight, setRollbackInFlight] = useState<string | null>(null);
+  const rollbackInFlightRef = useRef<string | null>(null);
   const [analysis, setAnalysis] = useState<AnalyzeWorkspaceSummary | null>(null);
   const [tools, setTools] = useState<ToolDescriptor[]>([]);
   const [selectedFile, setSelectedFile] = useState<RendererIndexedFile | null>(null);
@@ -2460,6 +2463,11 @@ export function App(): ReactElement {
   }
 
   async function rollbackOp(opId: string): Promise<void> {
+    const lockKey = `operation:${opId}`;
+    if (rollbackInFlightRef.current !== null) return;
+    rollbackInFlightRef.current = lockKey;
+    setRollbackInFlight(lockKey);
+    try {
     if (!bridge) {
       announceDesktopOnly('回滚操作');
       return;
@@ -2481,10 +2489,19 @@ export function App(): ReactElement {
     }
     setStatus(`已回滚 ${result.restoredFiles.length} 个文件`);
     pushToast(`已回滚 ${result.restoredFiles.length} 个文件`);
+    } finally {
+      rollbackInFlightRef.current = null;
+      setRollbackInFlight(null);
+    }
   }
 
   /** 文件级回滚：把某次操作里的单个文件恢复到操作前状态。 */
   async function rollbackFileOp(opId: string, targetUri: string): Promise<void> {
+    const lockKey = `file:${opId}:${targetUri}`;
+    if (rollbackInFlightRef.current !== null) return;
+    rollbackInFlightRef.current = lockKey;
+    setRollbackInFlight(lockKey);
+    try {
     if (!bridge) {
       announceDesktopOnly('文件回滚');
       return;
@@ -2500,6 +2517,10 @@ export function App(): ReactElement {
       return;
     }
     pushToast(`已回滚文件（${result.restoredFiles.length} 个）`);
+    } finally {
+      rollbackInFlightRef.current = null;
+      setRollbackInFlight(null);
+    }
   }
 
   function updateMsgRow(index: number, patch: Partial<EditableMsgRow>): void {
@@ -2570,12 +2591,10 @@ export function App(): ReactElement {
       setStatus('尚未配置模型服务');
       return;
     }
-    // 自动承接：若未显式传 resumeSessionPath，且当前会话已有完成的轮次（rolloutFileName 有值），
-    // 自动承接上一轮会话作为多轮对话推进；否则作为首轮发起。
+    // 只对正常 stop 终态隐式承接。partial/max_steps/length/cancelled/error
+    // 必须由用户显式选择历史会话继续，否则普通发送从新任务开始。
     const effectiveResumePath = resumeSessionPath ?? (
-      (agentTask.phase === 'done' || agentTask.phase === 'error') && agentTask.rolloutFileName
-        ? agentTask.rolloutFileName
-        : undefined
+      canAutoResumeAgentTask(agentTask) ? agentTask.rolloutFileName! : undefined
     );
 
     setStatus('正在发起 AI 任务...');
@@ -3117,8 +3136,13 @@ export function App(): ReactElement {
                     </div>
                     {entry.status === 'committed' && (
                       <div className="audit-entry__actions">
-                        <button type="button" className="btn btn--ghost btn--sm" onClick={() => void rollbackOp(entry.opId)}>
-                          回滚
+                        <button
+                          type="button"
+                          className="btn btn--ghost btn--sm"
+                          disabled={rollbackInFlight !== null}
+                          onClick={() => void rollbackOp(entry.opId)}
+                        >
+                          {rollbackInFlight === `operation:${entry.opId}` ? '回滚中…' : '回滚'}
                         </button>
                         <details className="audit-entry__files">
                           <summary>文件级回滚（{entry.fileCount}）</summary>
@@ -3131,9 +3155,10 @@ export function App(): ReactElement {
                                 <button
                                   type="button"
                                   className="btn btn--ghost btn--sm"
+                                  disabled={rollbackInFlight !== null}
                                   onClick={() => void rollbackFileOp(entry.opId, path)}
                                 >
-                                  回滚此文件
+                                  {rollbackInFlight === `file:${entry.opId}:${path}` ? '回滚中…' : '回滚此文件'}
                                 </button>
                               )}
                             </div>
@@ -3788,6 +3813,7 @@ export function App(): ReactElement {
                 fileCount: entry.fileCount,
                 canRollback: entry.status === 'committed'
               }))}
+              rollbackBusy={rollbackInFlight !== null}
               diagnostics={(preview?.diagnostics ?? []).map((d) => ({
                 severity: d.severity,
                 code: d.code,
@@ -3796,17 +3822,7 @@ export function App(): ReactElement {
               }))}
               patchImpact={null}
               onCancelJob={() => setStatus('任务取消请求已记录；待 TaskQueue IPC。')}
-              onRollback={(opId) => {
-                if (!bridge) {
-                  announceDesktopOnly('回滚操作');
-                  return;
-                }
-                void bridge.rollbackOperation(opId).then(() => {
-                  setStatus(`已请求回滚 ${opId}`);
-                }).catch((error: unknown) => {
-                  setStatus(error instanceof Error ? error.message : '回滚失败');
-                });
-              }}
+              onRollback={(opId) => { void rollbackOp(opId); }}
             />
           )}
           {/* 删掉「空文件。」与「预览失败。」两句：它们既不说明问题也不给出动作，

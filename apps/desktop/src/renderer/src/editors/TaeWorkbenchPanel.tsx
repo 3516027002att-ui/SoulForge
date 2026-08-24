@@ -65,6 +65,10 @@ import {
   projectTaeDocumentPages,
   TAE_INVALID_TIME_RANGE,
   AnimationPlaybackClock,
+  ActionContinuousSampler,
+  eulerXYZToQuaternion,
+  type TaeAnimationClipData,
+  type BoneTransformData,
   buildTaeTimelineTracks,
   type TaeTimelineTrack,
   type TaeTimelineBlock,
@@ -866,8 +870,67 @@ export function TaeWorkbenchPanel(props: TaeWorkbenchPanelProps): ReactElement {
     await commitMutations([mutation], '事件时间已更新并重读验证。');
   }
 
-  // 计算当前选中动画的总时长（根据事件最大 endTime，或默认 2.0s）
+  // 权威动画 Clip 数据与连续采样器
+  const [activeClip, setActiveClip] = useState<TaeAnimationClipData | null>(null);
+  const [activeSampler, setActiveSampler] = useState<ActionContinuousSampler | null>(null);
+
+  useEffect(() => {
+    if (!selectedAnimation || !props.resourceUri) {
+      setActiveClip(null);
+      setActiveSampler(null);
+      return;
+    }
+    const bridge = getRendererBridge();
+    if (!bridge || typeof (bridge as any).readTaeAnimationClip !== 'function') return;
+
+    let cancelled = false;
+    const boneNames = preview.bones.map((b) => b.name);
+
+    void (async () => {
+      try {
+        const res = (await (bridge as any).readTaeAnimationClip(
+          props.resourceUri,
+          selectedAnimation.animId,
+          boneNames.length > 0 ? boneNames : undefined
+        )) as { ok?: boolean; data?: TaeAnimationClipData };
+
+        if (cancelled) return;
+        if (res.ok && res.data) {
+          setActiveClip(res.data);
+          setActiveSampler(new ActionContinuousSampler(res.data));
+        } else {
+          setActiveClip(null);
+          setActiveSampler(null);
+        }
+      } catch {
+        if (!cancelled) {
+          setActiveClip(null);
+          setActiveSampler(null);
+        }
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [props.resourceUri, selectedAnimation?.animId, preview.bones]);
+
+  // 采样 FLVER 骨骼位姿
+  const sampledPose = useMemo(() => {
+    if (!activeSampler || preview.boneCount === 0) return undefined;
+    const refPose: BoneTransformData[] = preview.bones.map((b) => ({
+      translation: b.translation,
+      rotation: eulerXYZToQuaternion(b.rotation),
+      scale: [1, 1, 1]
+    }));
+    return activeSampler.sampleFlverPose(playbackTime, preview.boneCount, refPose, isLooping);
+  }, [activeSampler, playbackTime, preview.boneCount, preview.bones, isLooping]);
+
+  // 计算当前选中动画的总时长（根据真实 clip 时长，或事件最大 endTime，或默认 2.0s）
   const animDuration = useMemo(() => {
+    if (activeClip && activeClip.duration > 0) {
+      return activeClip.duration;
+    }
     if (!selectedAnimationEvents || selectedAnimationEvents.length === 0) return 2.0;
     let max = 0;
     for (const ev of selectedAnimationEvents) {
@@ -876,7 +939,7 @@ export function TaeWorkbenchPanel(props: TaeWorkbenchPanelProps): ReactElement {
       }
     }
     return max > 0 ? Math.max(0.5, max) : 2.0;
-  }, [selectedAnimationEvents]);
+  }, [activeClip, selectedAnimationEvents]);
 
   // 权威播放时钟实例
   const clockRef = useRef<AnimationPlaybackClock>(
@@ -1105,7 +1168,7 @@ export function TaeWorkbenchPanel(props: TaeWorkbenchPanelProps): ReactElement {
         },
         {
           id: 'preview',
-          title: '动作 3D 预览',
+          title: '预览（只读）',
           initialFlex: 0.22,
           minWidth: 220,
           children: (
@@ -1132,6 +1195,7 @@ export function TaeWorkbenchPanel(props: TaeWorkbenchPanelProps): ReactElement {
                         externalMeshes={preview.meshes}
                         externalBones={preview.bones}
                         playbackTime={playbackTime}
+                        externalPose={sampledPose}
                       />
                     </div>
                   )}
@@ -1143,6 +1207,7 @@ export function TaeWorkbenchPanel(props: TaeWorkbenchPanelProps): ReactElement {
                         externalMeshes={[]}
                         externalBones={preview.bones}
                         playbackTime={playbackTime}
+                        externalPose={sampledPose}
                       />
                     </div>
                   )}

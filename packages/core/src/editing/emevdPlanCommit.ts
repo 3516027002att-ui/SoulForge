@@ -148,6 +148,7 @@ export function planToBridgeMutations(
   const insertInstructionMutations: BridgeMutationWithOrder[] = [];
   const deleteEventMutations: BridgeMutationWithOrder[] = [];
   const restBehaviorMutations: BridgeMutationWithOrder[] = [];
+  const setEventParametersMutations: BridgeMutationWithOrder[] = [];
   const eventIdMutations: BridgeMutationWithOrder[] = [];
 
   for (const operation of plan.operations) {
@@ -188,6 +189,29 @@ export function planToBridgeMutations(
           restBehavior: operation.after
         },
         order: 5
+      });
+    } else if (operation.kind === 'set_event_parameters') {
+      let eventId: number;
+      if (operation.eventAnchor === '' && insertEventIds.has(operation.eventId)) {
+        eventId = operation.eventId;
+      } else {
+        const event = eventByAnchor.get(operation.eventAnchor);
+        if (!event) {
+          return {
+            ok: false,
+            code: 'EMEVD_PLAN_ANCHOR_NOT_FOUND',
+            message: `事件锚 ${operation.eventAnchor} 在文档中未找到。`
+          };
+        }
+        eventId = event.eventId;
+      }
+      setEventParametersMutations.push({
+        mutation: {
+          kind: 'set_event_parameters',
+          eventId,
+          parameters: operation.parameters
+        },
+        order: 5.5
       });
     } else if (operation.kind === 'set_event_id') {
       const event = eventByAnchor.get(operation.eventAnchor);
@@ -336,6 +360,7 @@ export function planToBridgeMutations(
     ...insertInstructionMutations,
     ...deleteEventMutations,
     ...restBehaviorMutations,
+    ...setEventParametersMutations,
     ...eventIdMutations
   ]
     .sort((a, b) => a.order - b.order || (a.tiebreak ?? 0) - (b.tiebreak ?? 0))

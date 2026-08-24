@@ -141,6 +141,13 @@ export interface ResumedRollout {
   parseErrors: number;
   interrupted: boolean;
   compactedWindows: number;
+  providerUsage?: {
+    calls: number;
+    reportedCalls: number;
+    totalInputTokens: number;
+    totalOutputTokens: number;
+    lastContextTokens: number | null;
+  };
   /** Last durable terminal record; absent for legacy/in-progress rollouts. */
   terminal?: Extract<RolloutItem, { type: 'turn-complete' }> | null;
 }
@@ -177,6 +184,13 @@ export function parseRolloutLines(lines: string[]): ResumedRollout {
   let steps = 0;
   let rollbackKeep: number | null = null;
   let terminal: Extract<RolloutItem, { type: 'turn-complete' }> | null = null;
+  const providerUsage = {
+    calls: 0,
+    reportedCalls: 0,
+    totalInputTokens: 0,
+    totalOutputTokens: 0,
+    lastContextTokens: null as number | null
+  };
   const messages: ChatMessage[] = [];
   for (const line of lines) {
     const trimmed = line.trim();
@@ -209,6 +223,13 @@ export function parseRolloutLines(lines: string[]): ResumedRollout {
           messages.push(...item.replacementHistory);
         }
         break;
+      case 'provider-usage':
+        providerUsage.calls += 1;
+        if (item.providerReported) providerUsage.reportedCalls += 1;
+        providerUsage.totalInputTokens += item.inputTokens ?? 0;
+        providerUsage.totalOutputTokens += item.outputTokens ?? 0;
+        providerUsage.lastContextTokens = item.currentContextTokens;
+        break;
       case 'rollback-marker':
         rollbackKeep = item.keepLastUserTurns;
         break;
@@ -225,7 +246,7 @@ export function parseRolloutLines(lines: string[]): ResumedRollout {
     messages.length = 0;
     messages.push(...truncated);
   }
-  return { meta, messages, steps, parseErrors, interrupted, compactedWindows, terminal };
+  return { meta, messages, steps, parseErrors, interrupted, compactedWindows, providerUsage, terminal };
 }
 
 /** Load and parse a rollout from storage (resume entry point). */

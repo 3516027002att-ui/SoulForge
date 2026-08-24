@@ -16,6 +16,13 @@ export interface BridgeEmevdEnvelopeLike {
     instructionCount?: number;
     instructionStartIndex?: number;
     layer?: number;
+    parameters?: Array<{
+      instructionIndex: number;
+      targetStartByte: number;
+      sourceStartByte: number;
+      byteCount: number;
+      unkId: number;
+    }>;
   }>;
   instructionsSample?: Array<{
     index: number;
@@ -59,7 +66,8 @@ export function emevdEnvelopeToEditorDocument(
       eventId: event.id,
       restBehavior: event.restBehavior ?? 0,
       layer: event.layer ?? -1,
-      instructions
+      instructions,
+      ...(event.parameters ? { parameters: event.parameters } : {})
     };
   });
 

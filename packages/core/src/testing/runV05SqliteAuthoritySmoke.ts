@@ -459,7 +459,7 @@ function verifyFreshAppSchemaComplete(path: string): void {
   const db = openAppDatabase(path);
   try {
     for (const table of ['app_settings', 'app_agent_runs', 'agent_steps', 'tool_calls',
-      'outbound_context_items']) {
+      'outbound_context_items', 'provider_usage_events']) {
       assert(tableExists(db, table), `fresh app.db has ${table}`);
     }
     const columns = (db.pragma('table_info(ai_messages)') as Array<{ name?: unknown }>)
@@ -472,7 +472,8 @@ function verifyFreshAppSchemaComplete(path: string): void {
     ).all() as Array<{ name: string }>;
     const names = indexes.map((row) => row.name);
     for (const index of ['idx_ai_messages_expires', 'idx_app_agent_runs_conversation_created',
-      'idx_tool_calls_run_created']) {
+      'idx_tool_calls_run_created', 'idx_provider_usage_service_created',
+      'idx_provider_usage_session_call']) {
       assert(names.includes(index), `fresh app.db index ${index}`);
     }
     const version = Number(db.pragma('user_version', { simple: true }));

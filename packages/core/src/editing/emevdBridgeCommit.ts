@@ -46,6 +46,17 @@ export type EmevdBridgeNativeMutation =
       kind: 'delete_instruction';
       eventId: number;
       instructionIndex: number;
+    }
+  | {
+      kind: 'set_event_parameters';
+      eventId: number;
+      parameters: Array<{
+        instructionIndex: number;
+        targetStartByte: number;
+        sourceStartByte: number;
+        byteCount: number;
+        unkId?: number;
+      }>;
     };
 
 export interface EmevdBridgeCommitResult {

@@ -211,13 +211,36 @@ function cancelledRender(): RenderEmevdDarkScriptAsyncResult {
  * 导出给 darkScriptCompiler：编译器按「反汇编形状」把用户编辑后的 `$Event`
  * 文本与文档逐事件逐行对齐，必须与渲染侧共用同一份行切分与折叠判定。
  */
+export function formatEventParameters(parameters?: Array<{ sourceStartByte: number; byteCount: number }>): string[] {
+  if (!parameters || parameters.length === 0) return [];
+  const map = new Map<number, number>();
+  for (const p of parameters) {
+    if (!map.has(p.sourceStartByte)) {
+      map.set(p.sourceStartByte, p.byteCount);
+    }
+  }
+  const sorted = [...map.entries()].sort((a, b) => a[0] - b[0]);
+  return sorted.map(([sourceStartByte, byteCount]) => `X${sourceStartByte}_${byteCount}`);
+}
+
+/**
+ * Render one event into `$Event(<id>, <Default|Restart>, function(X0_4, ...) { ... });`.
+ * The event header line is NOT indented (DarkScript3 top-level style); the
+ * closing `});` is a standalone line at column 0.
+ *
+ * 导出给 darkScriptCompiler：编译器按「反汇编形状」把用户编辑后的 `$Event`
+ * 文本与文档逐事件逐行对齐，必须与渲染侧共用同一份行切分与折叠判定。
+ */
 export function renderEventLines(event: EmevdEventIr, registry: EmedfRegistry): string[] {
-  const header = `$Event(${event.eventId}, ${formatRestBehavior(event.restBehavior)}, function() {`;
+  const paramNames = formatEventParameters(event.parameters);
+  const header = paramNames.length > 0
+    ? `$Event(${event.eventId}, ${formatRestBehavior(event.restBehavior)}, function(${paramNames.join(', ')}) {`
+    : `$Event(${event.eventId}, ${formatRestBehavior(event.restBehavior)}, function() {`;
   const body: string[] = [];
 
   // Group the linear instruction stream into folded wait-blocks first, then
   // render whatever remains as ordinary calls.
-  const spans = splitIntoSpans(event.instructions, registry);
+  const spans = splitIntoSpans(event.instructions, registry, event.parameters);
   for (const span of spans) {
     if (span.kind === 'wait-block') {
       body.push(...renderWaitBlock(span));
@@ -266,6 +289,8 @@ export function renderInstructionLine(item: DecodedInstruction): string {
 
 /** Render an individual predicate or ordinary argument list entry. */
 function formatArgLiteral(arg: DecodedArg): string {
+  if (arg.parameterSymbol) return arg.parameterSymbol;
+  if (typeof arg.value === 'string') return arg.value;
   if (typeof arg.value === 'boolean') return arg.value ? 'true' : 'false';
   if (!Number.isFinite(arg.value)) throw new Error('DARKSCRIPT_RENDER_NON_FINITE_VALUE');
   return Object.is(arg.value, -0) ? '-0' : String(arg.value);
@@ -324,8 +349,12 @@ export interface DecodedInstruction {
  * /resultconditiongroup/i (e.g. `resultConditionGroup`, `resultConditionGroupId`).
  * Predicates write to the same non-MAIN group and are joined with `&&`.
  */
-export function splitIntoSpans(instructions: EmevdInstructionIr[], registry: EmedfRegistry): Span[] {
-  const decoded = instructions.map((instruction) => decodeForRender(instruction, registry));
+export function splitIntoSpans(
+  instructions: EmevdInstructionIr[],
+  registry: EmedfRegistry,
+  parameters?: EmevdEventIr['parameters']
+): Span[] {
+  const decoded = instructions.map((instruction, index) => decodeForRender(instruction, registry, index, parameters));
   const spans: Span[] = [];
   let ordinaryBuffer: DecodedInstruction[] = [];
 
@@ -529,7 +558,7 @@ export function analyzeDarkScriptEvent(
   event: EmevdEventIr,
   registry: EmedfRegistry
 ): DarkScriptEventItem[] {
-  const spans = splitIntoSpans(event.instructions, registry);
+  const spans = splitIntoSpans(event.instructions, registry, event.parameters);
   const items: DarkScriptEventItem[] = [];
   for (const span of spans) {
     if (span.kind === 'wait-block') {
@@ -600,7 +629,12 @@ function toPascalCaseUncached(name: string): string {
  * renderInstructionLine 各自解码一遍（base64 + decodeInstructionArgs），
  * 33266 条指令等于付两倍成本。
  */
-export function decodeForRender(instruction: EmevdInstructionIr, registry: EmedfRegistry): DecodedInstruction {
+export function decodeForRender(
+  instruction: EmevdInstructionIr,
+  registry: EmedfRegistry,
+  instructionIndex?: number,
+  parameters?: EmevdEventIr['parameters']
+): DecodedInstruction {
   const bank = instruction.bank;
   const id = instruction.id;
   if (instruction.unknown) {
@@ -624,6 +658,16 @@ export function decodeForRender(instruction: EmevdInstructionIr, registry: Emedf
       instruction, bank, id, name: definition.name, args: [],
       status: { kind: 'decode-failed', code: result.code }
     };
+  }
+  if (parameters && typeof instructionIndex === 'number') {
+    for (const arg of result.args) {
+      if (typeof arg.startByte === 'number') {
+        const param = parameters.find((p) => p.instructionIndex === instructionIndex && p.targetStartByte === arg.startByte);
+        if (param) {
+          arg.parameterSymbol = `X${param.sourceStartByte}_${param.byteCount}`;
+        }
+      }
+    }
   }
   return { instruction, bank, id, name: definition.name, args: result.args, status: { kind: 'ok' } };
 }

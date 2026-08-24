@@ -102,6 +102,18 @@ export type EmevdPlannedMutation =
       after: number;
     })
   | (EmevdPlannedMutationBase & {
+      kind: 'set_event_parameters';
+      eventAnchor: string;
+      eventId: number;
+      parameters: Array<{
+        instructionIndex: number;
+        targetStartByte: number;
+        sourceStartByte: number;
+        byteCount: number;
+        unkId: number;
+      }>;
+    })
+  | (EmevdPlannedMutationBase & {
       kind: 'set_instruction_arg';
       eventAnchor: string;
       instructionAnchor: string;

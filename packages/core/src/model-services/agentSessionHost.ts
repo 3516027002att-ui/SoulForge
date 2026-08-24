@@ -11,6 +11,7 @@ import { runAgentToolLoop, redactSecrets } from './agentLoop.js';
 import { FileRolloutStorage, newRolloutFilePath } from './fileRolloutStorage.js';
 import { RolloutRecorder } from './rolloutRecorder.js';
 import type { ResumedRollout } from './rolloutRecorder.js';
+import { estimateContextTokens } from './contextCompactor.js';
 import type {
   AgentEvent,
   AgentPermissionMode,
@@ -25,6 +26,7 @@ import type {
   ContextBrokerOptions,
   ModelServiceAdapter,
   ModelServiceConfig,
+  ProviderUsageSample,
   ModelSamplingOptions,
   RetryPolicyOptions,
   ToolCall,
@@ -78,6 +80,8 @@ export interface AgentSessionRunParams {
   ragSearch?: NonNullable<import('./types.js').AgentRunRequest['ragSearch']>;
   /** Prior rollout to continue from; its messages seed the new run. */
   resumeFrom?: ResumedRollout;
+  /** Persist every real provider request (including retry/compaction calls). */
+  recordProviderUsage?: (sample: ProviderUsageSample) => Promise<void>;
   /**
    * 用户随本条 prompt 提交的图像（多模态）。只挂在本轮 user 消息上下发给
    * 模型，不写入 rollout（rollout 保持文本形态）。
@@ -105,6 +109,67 @@ export async function runAgentSession(params: AgentSessionRunParams): Promise<Ag
     permissionMode: params.permissionMode,
     ...(params.config.model ? { model: params.config.model } : {})
   });
+  let providerCallIndex = 0;
+  const usagePersistenceErrors: string[] = [];
+
+  const persistUsage = async (
+    callIndex: number,
+    estimatedContextTokens: number,
+    usage?: { inputTokens?: number; outputTokens?: number }
+  ): Promise<void> => {
+    const providerReported = usage?.inputTokens !== undefined || usage?.outputTokens !== undefined;
+    const sample: ProviderUsageSample = {
+      callIndex,
+      ...(usage?.inputTokens !== undefined ? { inputTokens: usage.inputTokens } : {}),
+      ...(usage?.outputTokens !== undefined ? { outputTokens: usage.outputTokens } : {}),
+      currentContextTokens: usage?.inputTokens ?? estimatedContextTokens,
+      contextSource: usage?.inputTokens !== undefined ? 'provider' : 'estimated',
+      providerReported,
+      recordedAt: new Date().toISOString()
+    };
+    // The session rollout is the per-session durable audit source.  The
+    // desktop callback additionally indexes the same idempotent sample in
+    // app.db for fast historical totals in Settings.
+    recorder.enqueue({ type: 'provider-usage', ...sample });
+    if (!params.recordProviderUsage) return;
+    try {
+      await params.recordProviderUsage(sample);
+    } catch (error) {
+      usagePersistenceErrors.push(error instanceof Error ? error.message : String(error));
+    }
+  };
+
+  const trackedAdapter: ModelServiceAdapter = {
+    protocol: params.adapter.protocol,
+    listModels: (options) => params.adapter.listModels(options),
+    complete: async (request) => {
+      const callIndex = ++providerCallIndex;
+      const estimated = estimateContextTokens(request.messages);
+      const result = await params.adapter.complete(request);
+      await persistUsage(callIndex, estimated, result.usage);
+      return result;
+    },
+    stream: async function* (request) {
+      const callIndex = ++providerCallIndex;
+      const estimated = estimateContextTokens(request.messages);
+      let inputTokens: number | undefined;
+      let outputTokens: number | undefined;
+      try {
+        for await (const event of params.adapter.stream(request)) {
+          if (event.type === 'usage') {
+            if (event.inputTokens !== undefined) inputTokens = event.inputTokens;
+            if (event.outputTokens !== undefined) outputTokens = event.outputTokens;
+          }
+          yield event;
+        }
+      } finally {
+        await persistUsage(callIndex, estimated, {
+          ...(inputTokens !== undefined ? { inputTokens } : {}),
+          ...(outputTokens !== undefined ? { outputTokens } : {})
+        });
+      }
+    }
+  };
 
   // The loop records only messages it appends; seed the durable record with
   // any prior messages from a resumed session plus this run's user prompt so
@@ -145,7 +210,7 @@ export async function runAgentSession(params: AgentSessionRunParams): Promise<Ag
     );
   };
 
-  const run = await runAgentToolLoop(params.adapter, {
+  const run = await runAgentToolLoop(trackedAdapter, {
     config: params.config,
     apiKey: params.apiKey,
     messages,
@@ -174,6 +239,14 @@ export async function runAgentSession(params: AgentSessionRunParams): Promise<Ag
     onEvent: emit,
     rollout: recorder
   });
+
+  if (usagePersistenceErrors.length > 0) {
+    run.diagnostics.push({
+      severity: 'warning',
+      code: 'PROVIDER_USAGE_INDEX_PERSIST_FAILED',
+      message: `provider usage 已写入会话 rollout，但 app.db 索引失败 ${usagePersistenceErrors.length} 次。`
+    });
+  }
 
   await recorder.close();
   return { sessionId, rolloutPath, run };

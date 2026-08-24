@@ -312,6 +312,8 @@ function makeChunk(input: {
   title: string;
   body: string;
   numericIds: number[];
+  sourceRevision?: number;
+  sourceHash?: string;
   relativePath?: string;
   resourceKind?: ResourceKind;
   confidence?: RagChunk['confidence'];
@@ -327,6 +329,8 @@ function makeChunk(input: {
     body,
     numericIds: input.numericIds,
     contentHash: sha256(body),
+    ...(input.sourceRevision !== undefined ? { sourceRevision: input.sourceRevision } : {}),
+    ...(input.sourceHash ? { sourceHash: input.sourceHash } : {}),
     ...(input.relativePath ? { relativePath: input.relativePath } : {}),
     ...(input.resourceKind ? { resourceKind: input.resourceKind } : {}),
     ...(input.confidence ? { confidence: input.confidence } : {})

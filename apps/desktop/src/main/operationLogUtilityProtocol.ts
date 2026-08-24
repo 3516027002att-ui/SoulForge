@@ -18,7 +18,52 @@ import type {
   OperationLogStore
 } from '@soulforge/core';
 
-export const OPERATION_LOG_UTILITY_PROTOCOL = '1.2.0' as const;
+export const OPERATION_LOG_UTILITY_PROTOCOL = '1.3.0' as const;
+
+export interface ProviderUsageEventPayload {
+  eventId: string;
+  sessionId: string;
+  serviceId: string;
+  protocol: string;
+  model: string;
+  callIndex: number;
+  inputTokens?: number;
+  outputTokens?: number;
+  currentContextTokens: number;
+  contextSource: 'provider' | 'estimated';
+  providerReported: boolean;
+  recordedAt: string;
+}
+
+export interface ProviderUsageAggregate {
+  serviceId: string;
+  protocol: string;
+  model: string;
+  calls: number;
+  reportedCalls: number;
+  totalInputTokens: number;
+  totalOutputTokens: number;
+  firstUsedAt: string | null;
+  lastUsedAt: string | null;
+}
+
+export interface ProviderUsageSessionSummary extends ProviderUsageAggregate {
+  sessionId: string;
+  lastCallIndex: number;
+  currentContextTokens: number;
+  contextSource: 'provider' | 'estimated';
+}
+
+export interface ProviderUsageSummary {
+  calls: number;
+  reportedCalls: number;
+  totalInputTokens: number;
+  totalOutputTokens: number;
+  firstUsedAt: string | null;
+  lastUsedAt: string | null;
+  byService: ProviderUsageAggregate[];
+  latestSession: ProviderUsageSessionSummary | null;
+}
 
 export interface OpenWorkspaceDatabasePayload {
   appDatabasePath: string;
@@ -33,7 +78,10 @@ export interface OpenWorkspaceDatabasePayload {
 }
 
 export interface OperationLogUtilityPayloadMap {
+  openAppDatabase: { appDatabasePath: string };
   openWorkspace: OpenWorkspaceDatabasePayload;
+  recordProviderUsage: { event: ProviderUsageEventPayload };
+  providerUsageSummary: Record<string, never>;
   record: { entry: OperationLogRecord };
   get: { opId: string };
   list: { workspaceId?: string };
@@ -99,6 +147,7 @@ export interface OperationLogUtilityResponse {
 }
 
 export interface OperationLogUtilityResultMap {
+  openAppDatabase: { appReady: true };
   openWorkspace: {
     workspaceId: string;
     legacyImport: {
@@ -113,6 +162,8 @@ export interface OperationLogUtilityResultMap {
       backupPath?: string;
     };
   };
+  recordProviderUsage: null;
+  providerUsageSummary: ProviderUsageSummary;
   record: null;
   get: OperationLogRecord | undefined;
   list: OperationLogRecord[];

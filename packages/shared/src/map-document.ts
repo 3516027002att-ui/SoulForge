@@ -89,6 +89,10 @@ export class MapSceneGraph {
   private readonly entityByStableKey = new Map<string, MapEntity>();
   private readonly entityByAddress = new Map<string, MapEntity>();
   private readonly entityByName = new Map<string, MapEntity>();
+  private readonly partsByName = new Map<string, MapPartEntity>();
+  private readonly regionsByName = new Map<string, MapRegionEntity>();
+  private readonly modelsByName = new Map<string, MapModelEntity>();
+  private readonly eventsByName = new Map<string, MapEventEntity>();
   private readonly entityByEntityId = new Map<number, MapEntity[]>();
   private readonly partsByModelName = new Map<string, MapPartEntity[]>();
   private readonly eventsByReferencedRegion = new Map<string, MapEventEntity[]>();
@@ -100,29 +104,26 @@ export class MapSceneGraph {
   }
 
   private buildIndices(): void {
-    const allEntities: MapEntity[] = [
-      ...this.document.models,
-      ...this.document.parts,
-      ...this.document.regions,
-      ...this.document.events,
-      ...this.document.routes
-    ];
-
-    for (const entity of allEntities) {
-      this.entityById.set(entity.id, entity);
-      this.entityByStableKey.set(entity.stableKey, entity);
-      this.entityByAddress.set(entity.address, entity);
-      if (!this.entityByName.has(entity.name)) {
-        this.entityByName.set(entity.name, entity);
-      }
-      if (entity.entityId !== undefined && entity.entityId > 0) {
-        const list = this.entityByEntityId.get(entity.entityId) ?? [];
-        list.push(entity);
-        this.entityByEntityId.set(entity.entityId, list);
-      }
+    for (const model of this.document.models) {
+      this.entityById.set(model.id, model);
+      this.entityByStableKey.set(model.stableKey, model);
+      this.entityByAddress.set(model.address, model);
+      if (!this.entityByName.has(model.name)) this.entityByName.set(model.name, model);
+      this.modelsByName.set(model.name, model);
     }
 
     for (const part of this.document.parts) {
+      this.entityById.set(part.id, part);
+      this.entityByStableKey.set(part.stableKey, part);
+      this.entityByAddress.set(part.address, part);
+      if (!this.entityByName.has(part.name)) this.entityByName.set(part.name, part);
+      this.partsByName.set(part.name, part);
+
+      if (part.entityId !== undefined && part.entityId > 0) {
+        const list = this.entityByEntityId.get(part.entityId) ?? [];
+        list.push(part);
+        this.entityByEntityId.set(part.entityId, list);
+      }
       if (part.modelName) {
         const list = this.partsByModelName.get(part.modelName) ?? [];
         list.push(part);
@@ -130,7 +131,27 @@ export class MapSceneGraph {
       }
     }
 
+    for (const region of this.document.regions) {
+      this.entityById.set(region.id, region);
+      this.entityByStableKey.set(region.stableKey, region);
+      this.entityByAddress.set(region.address, region);
+      if (!this.entityByName.has(region.name)) this.entityByName.set(region.name, region);
+      this.regionsByName.set(region.name, region);
+
+      if (region.entityId !== undefined && region.entityId > 0) {
+        const list = this.entityByEntityId.get(region.entityId) ?? [];
+        list.push(region);
+        this.entityByEntityId.set(region.entityId, list);
+      }
+    }
+
     for (const event of this.document.events) {
+      this.entityById.set(event.id, event);
+      this.entityByStableKey.set(event.stableKey, event);
+      this.entityByAddress.set(event.address, event);
+      if (!this.entityByName.has(event.name)) this.entityByName.set(event.name, event);
+      this.eventsByName.set(event.name, event);
+
       if (event.referencedRegionName) {
         const list = this.eventsByReferencedRegion.get(event.referencedRegionName) ?? [];
         list.push(event);
@@ -141,6 +162,13 @@ export class MapSceneGraph {
         list.push(event);
         this.eventsByReferencedPart.set(event.referencedPartName, list);
       }
+    }
+
+    for (const route of this.document.routes) {
+      this.entityById.set(route.id, route);
+      this.entityByStableKey.set(route.stableKey, route);
+      this.entityByAddress.set(route.address, route);
+      if (!this.entityByName.has(route.name)) this.entityByName.set(route.name, route);
     }
   }
 
@@ -153,18 +181,40 @@ export class MapSceneGraph {
       this.entityById.get(identifier) ||
       this.entityByStableKey.get(identifier) ||
       this.entityByAddress.get(identifier) ||
+      this.partsByName.get(identifier) ||
+      this.regionsByName.get(identifier) ||
+      this.modelsByName.get(identifier) ||
+      this.eventsByName.get(identifier) ||
       this.entityByName.get(identifier)
     );
   }
 
   public findPart(identifier: string): MapPartEntity | undefined {
+    const direct = this.partsByName.get(identifier);
+    if (direct) return direct;
     const entity = this.findEntity(identifier);
     return entity && entity.kind === 'part' ? entity : undefined;
   }
 
   public findRegion(identifier: string): MapRegionEntity | undefined {
+    const direct = this.regionsByName.get(identifier);
+    if (direct) return direct;
     const entity = this.findEntity(identifier);
     return entity && entity.kind === 'region' ? entity : undefined;
+  }
+
+  public findModel(identifier: string): MapModelEntity | undefined {
+    const direct = this.modelsByName.get(identifier);
+    if (direct) return direct;
+    const entity = this.findEntity(identifier);
+    return entity && entity.kind === 'model' ? entity : undefined;
+  }
+
+  public findEvent(identifier: string): MapEventEntity | undefined {
+    const direct = this.eventsByName.get(identifier);
+    if (direct) return direct;
+    const entity = this.findEntity(identifier);
+    return entity && entity.kind === 'event' ? entity : undefined;
   }
 
   public queryPartsByModel(modelName: string): MapPartEntity[] {
@@ -220,19 +270,13 @@ export type MapEditOperation =
   | {
       kind: 'set_property';
       target: string;
-      property: string;
-      value: unknown;
+      property: 'entityId' | string;
+      value: number | string | boolean;
     }
   | {
       kind: 'change_model';
       target: string;
       newModelName: string;
-    }
-  | {
-      kind: 'duplicate';
-      sourceTarget: string;
-      newName?: string | undefined;
-      transformOffset?: [number, number, number] | undefined;
     }
   | {
       kind: 'delete';
@@ -259,6 +303,10 @@ export interface MapTransactionValidationResult {
   }>;
 }
 
+function assertNever(x: never): never {
+  throw new Error(`未处理的 MapEditOperation: ${JSON.stringify(x)}`);
+}
+
 /**
  * Validates a MapEditTransaction against a target MapDocument.
  */
@@ -267,11 +315,39 @@ export function validateMapTransaction(
   transaction: MapEditTransaction
 ): MapTransactionValidationResult {
   const diagnostics: MapTransactionValidationResult['diagnostics'] = [];
+
+  // 1. Revision / mapId check
+  if (transaction.mapId && transaction.mapId !== doc.mapId) {
+    diagnostics.push({
+      severity: 'error',
+      code: 'MAP_ID_MISMATCH',
+      message: `地图 ID 不匹配：事务为 ${transaction.mapId}，当前文档为 ${doc.mapId}`
+    });
+  }
+
+  if (transaction.baseRevision && transaction.baseRevision !== doc.revision) {
+    diagnostics.push({
+      severity: 'error',
+      code: 'MAP_TRANSACTION_STALE_REVISION',
+      message: `事务 baseRevision [${transaction.baseRevision}] 与当前文档 revision [${doc.revision}] 不一致，已过时`
+    });
+  }
+
   const sceneGraph = new MapSceneGraph(doc);
+  const deletedTargets = new Set<string>();
 
   for (const op of transaction.operations) {
     switch (op.kind) {
       case 'set_transform': {
+        if (deletedTargets.has(op.target)) {
+          diagnostics.push({
+            severity: 'error',
+            code: 'MAP_ENTITY_NOT_FOUND',
+            message: `目标实体已被前序操作删除: ${op.target}`,
+            target: op.target
+          });
+          break;
+        }
         const entity = sceneGraph.findEntity(op.target);
         if (!entity) {
           diagnostics.push({
@@ -292,6 +368,15 @@ export function validateMapTransaction(
       }
       case 'batch_transform': {
         for (const target of op.targets) {
+          if (deletedTargets.has(target)) {
+            diagnostics.push({
+              severity: 'error',
+              code: 'MAP_ENTITY_NOT_FOUND',
+              message: `批量变换目标已被前序操作删除: ${target}`,
+              target
+            });
+            continue;
+          }
           const entity = sceneGraph.findEntity(target);
           if (!entity) {
             diagnostics.push({
@@ -304,7 +389,53 @@ export function validateMapTransaction(
         }
         break;
       }
+      case 'set_property': {
+        if (deletedTargets.has(op.target)) {
+          diagnostics.push({
+            severity: 'error',
+            code: 'MAP_ENTITY_NOT_FOUND',
+            message: `属性修改目标实体已被前序操作删除: ${op.target}`,
+            target: op.target
+          });
+          break;
+        }
+        const entity = sceneGraph.findEntity(op.target);
+        if (!entity) {
+          diagnostics.push({
+            severity: 'error',
+            code: 'MAP_ENTITY_NOT_FOUND',
+            message: `属性修改目标实体不存在: ${op.target}`,
+            target: op.target
+          });
+        } else {
+          if (op.property !== 'entityId') {
+            diagnostics.push({
+              severity: 'error',
+              code: 'MAP_PROPERTY_UNSUPPORTED',
+              message: `不支持的属性修改: ${op.property}，当前仅支持权威字段 entityId`,
+              target: op.target
+            });
+          } else if (typeof op.value !== 'number' || !Number.isInteger(op.value)) {
+            diagnostics.push({
+              severity: 'error',
+              code: 'MAP_PROPERTY_VALUE_INVALID',
+              message: `entityId 属性值必须是整数，收到: ${String(op.value)}`,
+              target: op.target
+            });
+          }
+        }
+        break;
+      }
       case 'change_model': {
+        if (deletedTargets.has(op.target)) {
+          diagnostics.push({
+            severity: 'error',
+            code: 'MAP_PART_NOT_FOUND',
+            message: `修改模型目标 Part 已被前序操作删除: ${op.target}`,
+            target: op.target
+          });
+          break;
+        }
         const part = sceneGraph.findPart(op.target);
         if (!part) {
           diagnostics.push({
@@ -317,28 +448,25 @@ export function validateMapTransaction(
           const modelExists = doc.models.some((m) => m.name === op.newModelName);
           if (!modelExists) {
             diagnostics.push({
-              severity: 'warning',
+              severity: 'error',
               code: 'MAP_MODEL_NOT_IN_MANIFEST',
-              message: `模型 ${op.newModelName} 尚未在地图 Model 声明表中，将在写入时建立引用`,
+              message: `模型 ${op.newModelName} 尚未在地图 Model 声明表中，当前不支持跨地图未声明模型引用`,
               target: op.target
             });
           }
         }
         break;
       }
-      case 'duplicate': {
-        const source = sceneGraph.findEntity(op.sourceTarget);
-        if (!source) {
+      case 'delete': {
+        if (deletedTargets.has(op.target)) {
           diagnostics.push({
             severity: 'error',
-            code: 'MAP_SOURCE_NOT_FOUND',
-            message: `复制源实体不存在: ${op.sourceTarget}`,
-            target: op.sourceTarget
+            code: 'MAP_ENTITY_NOT_FOUND',
+            message: `目标实体已被重复删除: ${op.target}`,
+            target: op.target
           });
+          break;
         }
-        break;
-      }
-      case 'delete': {
         const entity = sceneGraph.findEntity(op.target);
         if (!entity) {
           diagnostics.push({
@@ -348,6 +476,7 @@ export function validateMapTransaction(
             target: op.target
           });
         } else {
+          deletedTargets.add(op.target);
           if (entity.kind === 'region') {
             const referencingEvents = sceneGraph.queryEventsReferencingRegion(entity.name);
             if (referencingEvents.length > 0) {
@@ -362,6 +491,8 @@ export function validateMapTransaction(
         }
         break;
       }
+      default:
+        assertNever(op);
     }
   }
 
@@ -379,34 +510,26 @@ export interface BlenderObjectDto {
   soulAddress: string;
   entityKind: MapEntityKind;
   name: string;
-  typeId: number;
   modelName?: string | undefined;
-  position: [number, number, number];
-  rotation: [number, number, number];
-  scale: [number, number, number];
-  entityId?: number | undefined;
-  sourceRevision: string;
+  transform: Transform3D;
 }
 
 export interface BlenderSceneExport {
   schemaVersion: 1;
   mapId: string;
-  sourceUri: string;
   revision: string;
   exportedAt: string;
   objects: BlenderObjectDto[];
 }
 
-export interface BlenderObjectMutation {
+export interface BlenderMutationDto {
   stableKey: string;
   action: 'modify' | 'duplicate' | 'delete' | 'create';
   name?: string | undefined;
-  typeId?: number | undefined;
   modelName?: string | undefined;
   position?: [number, number, number] | undefined;
   rotation?: [number, number, number] | undefined;
   scale?: [number, number, number] | undefined;
-  entityId?: number | undefined;
 }
 
 export interface BlenderDeltaImport {
@@ -414,7 +537,7 @@ export interface BlenderDeltaImport {
   mapId: string;
   baseRevision: string;
   importedAt: string;
-  mutations: BlenderObjectMutation[];
+  mutations: BlenderMutationDto[];
 }
 
 /**
@@ -429,13 +552,8 @@ export function exportMapSceneForBlender(doc: MapDocument): BlenderSceneExport {
       soulAddress: part.address,
       entityKind: 'part',
       name: part.name,
-      typeId: part.typeId,
       modelName: part.modelName,
-      position: [...part.transform.position],
-      rotation: [...part.transform.rotation],
-      scale: [...part.transform.scale],
-      ...(part.entityId !== undefined ? { entityId: part.entityId } : {}),
-      sourceRevision: doc.revision
+      transform: part.transform
     });
   }
 
@@ -445,19 +563,13 @@ export function exportMapSceneForBlender(doc: MapDocument): BlenderSceneExport {
       soulAddress: region.address,
       entityKind: 'region',
       name: region.name,
-      typeId: region.typeId,
-      position: [...region.transform.position],
-      rotation: [...region.transform.rotation],
-      scale: [...region.transform.scale],
-      ...(region.entityId !== undefined ? { entityId: region.entityId } : {}),
-      sourceRevision: doc.revision
+      transform: region.transform
     });
   }
 
   return {
     schemaVersion: 1,
     mapId: doc.mapId,
-    sourceUri: doc.sourceUri,
     revision: doc.revision,
     exportedAt: new Date().toISOString(),
     objects
@@ -470,7 +582,11 @@ export function exportMapSceneForBlender(doc: MapDocument): BlenderSceneExport {
 export function importBlenderDeltaToTransaction(
   doc: MapDocument,
   delta: BlenderDeltaImport
-): { ok: true; transaction: MapEditTransaction } | { ok: false; error: string; conflict: boolean } {
+): { ok: true; transaction: MapEditTransaction } | { ok: false; error: string; conflict?: boolean } {
+  if (delta.schemaVersion !== 1) {
+    return { ok: false, error: `不支持的 Blender Delta schemaVersion: ${delta.schemaVersion}` };
+  }
+
   if (delta.mapId !== doc.mapId) {
     return {
       ok: false,
@@ -511,13 +627,11 @@ export function importBlenderDeltaToTransaction(
         break;
       }
       case 'duplicate': {
-        operations.push({
-          kind: 'duplicate',
-          sourceTarget: mut.stableKey,
-          ...(mut.name ? { newName: mut.name } : {}),
-          ...(mut.position ? { transformOffset: mut.position } : {})
-        });
-        break;
+        return {
+          ok: false,
+          conflict: false,
+          error: `MAP_DUPLICATE_UNSUPPORTED: 不支持复制实体操作 (${mut.stableKey})`
+        };
       }
       case 'delete': {
         operations.push({

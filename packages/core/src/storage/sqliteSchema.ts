@@ -799,6 +799,38 @@ CREATE INDEX IF NOT EXISTS idx_tool_calls_run_created
 CREATE INDEX IF NOT EXISTS idx_ai_messages_expires
   ON ai_messages(expires_at);
 `
+  },
+  {
+    id: 3,
+    name: 'provider_usage_history',
+    sql: `
+PRAGMA foreign_keys = ON;
+
+-- Provider usage is intentionally independent from model_services: model
+-- credentials/configuration live in the encrypted vault, while this table is
+-- an audit-safe numeric ledger.  event_id makes retries/idempotent IPC replay
+-- harmless and one row represents one actual provider HTTP/SSE request.
+CREATE TABLE IF NOT EXISTS provider_usage_events (
+  event_id TEXT PRIMARY KEY,
+  session_id TEXT NOT NULL,
+  service_id TEXT NOT NULL,
+  protocol TEXT NOT NULL,
+  model TEXT NOT NULL,
+  call_index INTEGER NOT NULL,
+  input_tokens INTEGER,
+  output_tokens INTEGER,
+  context_tokens INTEGER NOT NULL,
+  context_source TEXT NOT NULL,
+  provider_reported INTEGER NOT NULL,
+  created_at TEXT NOT NULL,
+  UNIQUE(session_id, call_index)
+);
+
+CREATE INDEX IF NOT EXISTS idx_provider_usage_service_created
+  ON provider_usage_events(service_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_provider_usage_session_call
+  ON provider_usage_events(session_id, call_index);
+`
   }
 ];
 

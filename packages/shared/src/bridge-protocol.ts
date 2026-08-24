@@ -111,6 +111,8 @@ export type BridgeCommandName =
   | 'write-msb'
   | 'read-tae-document'
   | 'read-tae-event-params'
+  | 'read-tae-animation-clip'
+  | 'sample-tae-animation-pose'
   | 'read-chrbnd-flver-preview'
   | 'read-map-part-flver-preview'
   | 'read-tpf-document'

@@ -54,6 +54,13 @@ export interface EmevdEnvelopePage {
     instructionStartIndex?: number;
     restBehavior: number;
     layerCount?: number;
+    parameters?: Array<{
+      instructionIndex: number;
+      targetStartByte: number;
+      sourceStartByte: number;
+      byteCount: number;
+      unkId: number;
+    }>;
   }>;
   instructionsSample?: EmevdInstructionPageEntry[];
   authority?: string;
@@ -420,7 +427,8 @@ async function attemptFullEmevdRead(
       eventId: event.id,
       restBehavior: event.restBehavior,
       layer: -1,
-      instructions
+      instructions,
+      ...(event.parameters ? { parameters: event.parameters } : {})
     });
     outlineRows.push({
       eventUri,

@@ -537,7 +537,8 @@ internal static class BridgeDaemonHost
         "read-emevd-document", "write-emevd", "read-msb-document", "write-msb",
         "read-tpf-document", "export-tpf-texture", "read-tpf-texture-preview",
         "write-tpf-texture-replace", "read-tae-document",
-        "read-tae-event-params", "read-chrbnd-flver-preview",
+        "read-tae-event-params", "read-tae-animation-clip", "sample-tae-animation-pose",
+        "read-chrbnd-flver-preview",
         "read-map-part-flver-preview",
         "read-flver-document", "read-flver-mesh", "read-flver-skeleton",
         "read-flver-texture-slots", "read-flver-dummies", "read-esd-document",
@@ -671,7 +672,7 @@ internal static class BridgeDaemonHost
     }
 }
 
-internal sealed class BridgeOutboundFrameTooLargeException : Exception;
+internal sealed class BridgeOutboundFrameTooLargeException : Exception { }
 
 internal sealed class BridgeInboundFrame
 {

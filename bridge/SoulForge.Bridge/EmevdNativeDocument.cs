@@ -250,6 +250,26 @@ internal sealed class EmevdNativeDocument
             Instructions.Count);
     }
 
+    public IReadOnlyList<EmevdParameter> GetEventParameters(EmevdEvent ev)
+    {
+        var parameters = new List<EmevdParameter>();
+        if (ev.ParameterCount > 0)
+        {
+            var baseOff = checked((int)(ParametersOffset + ev.ParametersOffset));
+            for (var i = 0; i < ev.ParameterCount; i++)
+            {
+                var o = baseOff + i * ParameterSize;
+                parameters.Add(new EmevdParameter(
+                    ReadInt64(SourceBytes, o),
+                    ReadInt64(SourceBytes, o + 8),
+                    ReadInt64(SourceBytes, o + 16),
+                    ReadInt32(SourceBytes, o + 24),
+                    ReadInt32(SourceBytes, o + 28)));
+            }
+        }
+        return parameters;
+    }
+
     public byte[] RebuildEvents(IReadOnlyList<EmevdEvent> nextEvents)
     {
         if (nextEvents.Count != Events.Count)
@@ -637,8 +657,9 @@ internal sealed class EmevdNativeDocument
                     var at = checked((int)patch.InstructionIndex.Value);
                     if (at < 0 || at >= ev.Instructions.Count)
                         throw new InvalidDataException($"EMEVD 事件 {patch.EventId} 删除位置 {at} 越界（0..{ev.Instructions.Count - 1}）。");
-                    // 有事件参数挂在这条指令上时拒绝删除（孤儿参数会破坏事件语义），不静默丢掉。
-                    if (ev.Parameters.Any(p => p.InstructionIndex == at))
+                    // 有事件参数挂在这条指令上且本批不重设参数时拒绝删除（孤儿参数会破坏事件语义），不静默丢掉。
+                    var willSetParameters = patches.Any(p => p.Kind == "set_event_parameters" && p.EventId == patch.EventId);
+                    if (!willSetParameters && ev.Parameters.Any(p => p.InstructionIndex == at))
                         throw new InvalidDataException(
                             $"EMEVD 事件 {patch.EventId} 指令 {at} 仍被事件参数引用，不能删除。");
                     ev.Instructions.RemoveAt(at);
@@ -648,6 +669,17 @@ internal sealed class EmevdNativeDocument
                         if (p.InstructionIndex > at)
                             ev.Parameters[pi] = p with { InstructionIndex = p.InstructionIndex - 1 };
                     }
+                    needsGc = true;
+                    break;
+                }
+                case "set_event_parameters":
+                {
+                    var idx = builds.FindIndex(e => e.Id == patch.EventId);
+                    if (idx < 0) throw new InvalidDataException($"EMEVD 事件 ID {patch.EventId} 不存在。");
+                    if (patch.Parameters is null)
+                        throw new InvalidDataException("set_event_parameters 需要 parameters。");
+                    var cur = builds[idx];
+                    builds[idx] = cur with { Parameters = patch.Parameters.ToList() };
                     needsGc = true;
                     break;
                 }
@@ -779,6 +811,23 @@ internal sealed class EmevdNativeDocument
         {
             var e = Events[i];
             var start = e.InstructionCount > 0 ? e.InstructionsOffset / InstructionSize : -1L;
+            var eventParams = new object[e.ParameterCount];
+            if (e.ParameterCount > 0)
+            {
+                var baseOff = checked((int)(ParametersOffset + e.ParametersOffset));
+                for (var pIdx = 0; pIdx < e.ParameterCount; pIdx++)
+                {
+                    var po = baseOff + pIdx * ParameterSize;
+                    eventParams[pIdx] = new
+                    {
+                        instructionIndex = ReadInt64(SourceBytes, po),
+                        targetStartByte = ReadInt64(SourceBytes, po + 8),
+                        sourceStartByte = ReadInt64(SourceBytes, po + 16),
+                        byteCount = ReadInt32(SourceBytes, po + 24),
+                        unkId = ReadInt32(SourceBytes, po + 28)
+                    };
+                }
+            }
             projected[i] = new
             {
                 id = e.Id,
@@ -787,6 +836,7 @@ internal sealed class EmevdNativeDocument
                 instructionStartIndex = start,
                 parameterCount = e.ParameterCount,
                 parametersOffset = e.ParametersOffset,
+                parameters = eventParams,
                 restBehavior = e.RestBehavior
             };
         }
@@ -900,7 +950,8 @@ internal sealed record EmevdPatch(
     long? InstructionIndex = null,
     string? ArgsBase64 = null,
     long? Bank = null,
-    long? Id = null);
+    long? Id = null,
+    List<EmevdParameter>? Parameters = null);
 
 internal sealed record EmevdRoundTripReport(
     bool ByteIdentical,

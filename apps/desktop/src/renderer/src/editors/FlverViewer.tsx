@@ -63,6 +63,12 @@ export interface FlverViewerProps {
   }> | undefined;
   /** 动画播放时间点（驱动骨骼蒙皮动画位姿） */
   playbackTime?: number | undefined;
+  /** 真实采样骨骼位姿（由 TAE / HKX 动画驱动） */
+  externalPose?: Array<{
+    translation: [number, number, number];
+    rotation: [number, number, number, number] | [number, number, number];
+    scale?: [number, number, number] | undefined;
+  }> | undefined;
 }
 
 interface MeshData {
@@ -292,6 +298,13 @@ export function FlverViewer(props: FlverViewerProps): ReactElement {
       handleRef.current?.setPlaybackTime?.(props.playbackTime);
     }
   }, [props.playbackTime]);
+
+  // 真实动画采样位姿驱动骨骼蒙皮
+  useEffect(() => {
+    if (props.externalPose && props.externalPose.length > 0) {
+      handleRef.current?.setPose?.(props.externalPose);
+    }
+  }, [props.externalPose]);
 
   // 多网格（问题4-A）：叠加字报「全部网格 + 总顶点数」，不显示假播放头。
   const meshSummary = meshDataList && meshDataList.length > 0

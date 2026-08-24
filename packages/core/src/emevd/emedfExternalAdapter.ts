@@ -49,10 +49,15 @@ interface Ds3ClassDoc {
   instrs?: Ds3InstrDoc[];
 }
 
+interface Ds3EnumDoc {
+  name: string;
+  values?: Record<string, string>;
+}
+
 interface Ds3EmedfJson {
   unknown?: number;
   main_classes?: Ds3ClassDoc[];
-  enums?: unknown[];
+  enums?: Ds3EnumDoc[];
   darkscript?: unknown;
 }
 
@@ -104,6 +109,39 @@ export function parseDs3EmedfJson(jsonText: string): EmedfImportResult {
     };
   }
 
+  const enums: Record<string, import('./emedfSchema.js').EmedfEnumDef> = {};
+  if (Array.isArray(raw.enums)) {
+    for (const item of raw.enums) {
+      if (!item || typeof item !== 'object') continue;
+      const enumDoc = item as Ds3EnumDoc;
+      if (typeof enumDoc.name !== 'string' || !enumDoc.name.trim()) continue;
+      const rawName = enumDoc.name.trim();
+      const pascalName = sanitizeEnumName(rawName);
+      const members: import('./emedfSchema.js').EmedfEnumMember[] = [];
+      if (enumDoc.values && typeof enumDoc.values === 'object') {
+        for (const [key, val] of Object.entries(enumDoc.values)) {
+          const num = Number(key);
+          if (!Number.isFinite(num)) continue;
+          const memberLabel = typeof val === 'string' ? val.trim() : String(val);
+          const memberName = sanitizeEnumMemberName(memberLabel);
+          members.push({
+            value: num,
+            name: memberName,
+            label: memberLabel,
+          });
+        }
+      }
+      const enumDef: import('./emedfSchema.js').EmedfEnumDef = {
+        name: pascalName,
+        members,
+      };
+      enums[pascalName] = enumDef;
+      if (rawName !== pascalName) {
+        enums[rawName] = enumDef;
+      }
+    }
+  }
+
   const instructions: EmedfInstructionDef[] = [];
   const bankSet = new Set<number>();
 
@@ -139,7 +177,25 @@ export function parseDs3EmedfJson(jsonText: string): EmedfImportResult {
             type: mappedType,
           };
           if (arg.enum_name) {
-            def.description = `enum:${arg.enum_name}`;
+            const rawEnum = arg.enum_name.trim();
+            const pascalEnum = sanitizeEnumName(rawEnum);
+            def.enumName = pascalEnum;
+            def.description = `enum:${pascalEnum}`;
+          }
+          if (arg.default !== undefined && Number.isFinite(arg.default)) {
+            def.default = arg.default;
+          }
+          if (arg.min !== undefined && Number.isFinite(arg.min)) {
+            def.min = arg.min;
+          }
+          if (arg.max !== undefined && Number.isFinite(arg.max)) {
+            def.max = arg.max;
+          }
+          if (arg.increment !== undefined && Number.isFinite(arg.increment)) {
+            def.increment = arg.increment;
+          }
+          if (arg.format_string) {
+            def.formatString = arg.format_string;
           }
           if (arg.vararg === true) {
             def.vararg = true;
@@ -162,6 +218,7 @@ export function parseDs3EmedfJson(jsonText: string): EmedfImportResult {
     game: 'sekiro',
     origin: 'imported',
     instructions,
+    enums,
   };
 
   const validation = validateEmedfRegistry(registry);
@@ -235,6 +292,28 @@ function sanitizeArgName(raw: string): string {
         : word.charAt(0).toUpperCase() + word.slice(1);
     })
     .join('');
+}
+
+export function sanitizeEnumName(raw: string): string {
+  return raw
+    .replace(/[^A-Za-z0-9_ ]/g, '')
+    .split(/\s+/)
+    .filter(Boolean)
+    .map((word) => word.charAt(0).toUpperCase() + word.slice(1))
+    .join('');
+}
+
+export function sanitizeEnumMemberName(raw: string): string {
+  const sanitized = raw
+    .replace(/[^A-Za-z0-9_ ]/g, '')
+    .split(/\s+/)
+    .filter(Boolean)
+    .map((word) => word.charAt(0).toUpperCase() + word.slice(1))
+    .join('');
+  if (/^[0-9]/.test(sanitized)) {
+    return `_${sanitized}`;
+  }
+  return sanitized || 'Unknown';
 }
 
 /* ------------------------------------------------------------------ */

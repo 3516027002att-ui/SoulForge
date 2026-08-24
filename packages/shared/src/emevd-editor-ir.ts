@@ -23,14 +23,23 @@ export interface EmevdInstructionIr {
   anchor?: EmevdNodeAnchor;
 }
 
+export interface EmevdParameterIr {
+  instructionIndex: number;
+  targetStartByte: number;
+  sourceStartByte: number;
+  byteCount: number;
+  unkId: number;
+}
+
 export interface EmevdEventIr {
   eventUri: string;
   eventId: number;
   restBehavior: number;
   layer: number;
   instructions: EmevdInstructionIr[];
+  parameters?: EmevdParameterIr[] | undefined;
   /** Optional during migration; DSL compilation requires it. */
-  anchor?: EmevdNodeAnchor;
+  anchor?: EmevdNodeAnchor | undefined;
 }
 
 export interface EmevdEditorDocument {

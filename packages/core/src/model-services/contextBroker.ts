@@ -221,7 +221,7 @@ export function createContextBroker(): ContextBroker {
             );
           }
 
-          const excerpt = redacted.slice(0, excerptLength);
+          const excerpt = redacted.slice(0, Math.min(excerptLength, maxBytes));
           const truncated = excerpt.length < redacted.length;
           const header = buildHeader(
             source, excerpt.length, raw.length, truncated, redactionHappened
