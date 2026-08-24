@@ -397,6 +397,7 @@ export async function mountFlverScene(input: {
           }
         }
         activeSkeleton.update();
+        return;
       }
       // 消费权威动画采样位姿（Havok Spline / De Boor 采样结果）
       const poses = sampleAuthoritativePose(activeClip, time, true);
