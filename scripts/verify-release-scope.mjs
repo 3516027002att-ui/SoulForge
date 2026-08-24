@@ -977,6 +977,18 @@ if (proposal !== null) {
 
 const structuralErrors = findings.length;
 const scopeItems = Array.isArray(proposal?.scopeItems) ? proposal.scopeItems : [];
+const releasesRaw = (() => {
+  try {
+    return JSON.parse(readFileSync('docs/governance/releases.json', 'utf8'));
+  } catch {
+    return null;
+  }
+})();
+const unfreezeScopeItemIds = new Set(
+  Array.isArray(releasesRaw?.releases)
+    ? (releasesRaw.releases.find((r) => r.release === proposal?.release)?.unfreezeRuling?.scopeItemIds ?? [])
+    : []
+);
 const frozen = structuralErrors === 0
   && proposal?.proposalStatus === 'user-approved'
   && proposal?.gameBuildRange?.status === 'user-approved'
@@ -990,7 +1002,7 @@ const frozen = structuralErrors === 0
   && typeof proposal?.ruling?.approvedAt === 'string'
   && typeof proposal?.ruling?.decisionRef === 'string'
   && scopeItems.every((item) => item.decisionStatus === 'user-approved')
-  && scopeItems.every((item) => Array.isArray(item.openRulings) && item.openRulings.length === 0);
+  && scopeItems.every((item) => Array.isArray(item.openRulings) && (item.openRulings.length === 0 || unfreezeScopeItemIds.has(item.scopeItemId)));
 
 if (proposalMode) {
   const result = structuralErrors === 0
