@@ -26,9 +26,10 @@ import { readParamFields, setParamFields, type ParamFieldEdit } from '../param/c
 import { readFmgEntries, setFmgEntries, type FmgEntryEdit } from '../editing/fmgEdit.js';
 import { applyEmevdDsl, readEmevdOutline } from '../editing/emevdEdit.js';
 import { readTaeEvents, setTaeEventTimes } from '../editing/taeEdit.js';
-import { readMsbParts, setMsbPartTransform, type MsbPartTransformEdit } from '../editing/msbEdit.js';
+import { readMsbParts, type MsbPartTransformEdit } from '../editing/msbEdit.js';
 import {
   batchTransformMapParts,
+  executeMapTransaction,
   inspectMapEntity,
   queryMapEntities,
   loadMapDocument
@@ -36,7 +37,8 @@ import {
 import {
   exportMapSceneForBlender,
   importBlenderDeltaToTransaction,
-  type BlenderDeltaImport
+  type BlenderDeltaImport,
+  type MapEditTransaction
 } from '@soulforge/shared';
 import { isAiToolPermissionAllowed, legacyPermissionToLevel } from './toolPermissions.js';
 import { buildRagCorpus, mergeCatalogAndPersisted } from '../rag/chunkBuilder.js';
@@ -83,6 +85,9 @@ export interface ToolDescriptor {
 
 export interface ToolResult<T = unknown> {
   ok: boolean;
+  /** Stable machine-facing lifecycle state; callers must not infer it from data shape. */
+  state?: 'completed' | 'failed' | 'staged' | 'committed' | 'verification_failed'
+    | 'unsupported' | 'ambiguous' | 'stale' | 'cancelled' | 'insufficient_evidence';
   data?: T;
   error?: {
     code: string;
@@ -1036,9 +1041,45 @@ export function createDefaultToolRegistry(): ToolRegistry {
       if (!file) return fail('INVALID_INPUT', 'mutate_msb_part_transform 需要 file。');
       if (!edits.ok) return fail(edits.code, edits.message);
       if (edits.edits.length === 0) return fail('INVALID_INPUT', 'mutate_msb_part_transform 需要非空 edits 数组。');
-      const result = await setMsbPartTransform({ edit: edit.session, file, edits: edits.edits });
-      if (!result.ok) return fail(result.error.code, result.error.message, result.error.details);
-      return ok(result);
+      const loaded = await loadMapDocument(edit.session, file);
+      if (!loaded.ok) return fail(loaded.error.code, loaded.error.message);
+      const transaction: MapEditTransaction = {
+        id: `tx-agent-msb-${Date.now()}`,
+        mapId: loaded.doc.mapId,
+        baseRevision: loaded.doc.revision,
+        description: `Agent MSB Part 变换 (${edits.edits.length} 项)`,
+        author: 'agent',
+        operations: edits.edits.map((item) => ({
+          kind: 'set_transform' as const,
+          target: item.address,
+          ...(item.posX !== undefined || item.posY !== undefined || item.posZ !== undefined
+            ? { position: [
+                item.posX ?? loaded.sceneGraph.findPart(item.address)?.transform.position[0] ?? 0,
+                item.posY ?? loaded.sceneGraph.findPart(item.address)?.transform.position[1] ?? 0,
+                item.posZ ?? loaded.sceneGraph.findPart(item.address)?.transform.position[2] ?? 0
+              ] as [number, number, number] }
+            : {}),
+          ...(item.rotX !== undefined || item.rotY !== undefined || item.rotZ !== undefined
+            ? { rotation: [
+                item.rotX ?? loaded.sceneGraph.findPart(item.address)?.transform.rotation[0] ?? 0,
+                item.rotY ?? loaded.sceneGraph.findPart(item.address)?.transform.rotation[1] ?? 0,
+                item.rotZ ?? loaded.sceneGraph.findPart(item.address)?.transform.rotation[2] ?? 0
+              ] as [number, number, number] }
+            : {}),
+          ...(item.scaleX !== undefined || item.scaleY !== undefined || item.scaleZ !== undefined
+            ? { scale: [
+                item.scaleX ?? loaded.sceneGraph.findPart(item.address)?.transform.scale[0] ?? 1,
+                item.scaleY ?? loaded.sceneGraph.findPart(item.address)?.transform.scale[1] ?? 1,
+                item.scaleZ ?? loaded.sceneGraph.findPart(item.address)?.transform.scale[2] ?? 1
+              ] as [number, number, number] }
+            : {})
+        })),
+        timestamp: Date.now()
+      };
+      const result = await executeMapTransaction(edit.session, file, transaction);
+      if (!result.ok) return fail(result.error?.code ?? 'MSB_TRANSACTION_FAILED', result.error?.message ?? 'MSB 地图事务失败。', result.error?.details);
+      await context.onIndexUpdated?.();
+      return ok({ ...result, status: result.verification ?? 'completed' });
     }
   });
 
@@ -1126,6 +1167,7 @@ export function createDefaultToolRegistry(): ToolRegistry {
         ...(typeof value.scaleMultiplier === 'number' ? { scaleMultiplier: Number(value.scaleMultiplier) } : {})
       });
       if (!result.ok) return fail(result.error?.code ?? 'BATCH_TRANSFORM_FAILED', result.error?.message ?? '批量变换失败');
+      await context.onIndexUpdated?.();
       return ok(result);
     }
   });
@@ -1166,7 +1208,10 @@ export function createDefaultToolRegistry(): ToolRegistry {
       if (!loaded.ok) return fail(loaded.error.code, loaded.error.message);
       const translation = importBlenderDeltaToTransaction(loaded.doc, delta);
       if (!translation.ok) return fail(translation.conflict ? 'REVISION_CONFLICT' : 'IMPORT_FAILED', translation.error);
-      return ok({ transaction: translation.transaction, status: 'validated' });
+      const result = await executeMapTransaction(edit.session, file, translation.transaction);
+      if (!result.ok) return fail(result.error?.code ?? 'IMPORT_COMMIT_FAILED', result.error?.message ?? 'Blender 地图事务提交失败。', result.error?.details);
+      await context.onIndexUpdated?.();
+      return ok({ transaction: translation.transaction, status: result.verification ?? 'completed', result });
     }
   });
 
@@ -1416,12 +1461,13 @@ function normalizePermissionLevel(permission: ToolPermission): AiToolPermissionL
 }
 
 function ok<T>(data: T): ToolResult<T> {
-  return { ok: true, data };
+  return { ok: true, state: 'completed', data };
 }
 
 function fail(code: string, message: string, details?: unknown): ToolResult<never> {
   return {
     ok: false,
+    state: 'failed',
     error: {
       code,
       message,

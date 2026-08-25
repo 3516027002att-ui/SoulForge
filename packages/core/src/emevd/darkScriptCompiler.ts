@@ -445,10 +445,40 @@ function compilePairedEvent(
         if (m) {
           const src = Number(m[1]);
           const cnt = Number(m[2]);
-          if (arg.targetStartByte === undefined || Number.isNaN(arg.targetStartByte)) {
+          if (!Number.isSafeInteger(src) || src < 0 || !Number.isSafeInteger(cnt) || cnt <= 0) {
+            add(error(
+              'EMEVD_PARAMETER_RANGE_INVALID',
+              `指令 ${instr.call?.name ?? instr.id} 的参数 ${arg.name} X${m[1]}_${m[2]} 超出安全范围，禁止写入。`,
+              instr.call?.span ?? parsed.span,
+              { resourceUri, targetAnchor: eventAnchor }
+            ));
+            blocked = true;
+            continue;
+          }
+          if (arg.targetStartByte === undefined || !Number.isSafeInteger(arg.targetStartByte) || arg.targetStartByte < 0) {
             add(error(
               'EMEVD_PARAMETER_TARGET_OFFSET_UNRESOLVED',
               `指令 ${instr.call?.name ?? instr.id} 的参数 ${arg.name} 无法解析 targetStartByte，禁止写入。`,
+              instr.call?.span ?? parsed.span,
+              { resourceUri, targetAnchor: eventAnchor }
+            ));
+            blocked = true;
+            continue;
+          }
+          if (arg.byteCount === undefined || !Number.isSafeInteger(arg.byteCount) || arg.byteCount <= 0) {
+            add(error(
+              'EMEVD_PARAMETER_WIDTH_UNRESOLVED',
+              `指令 ${instr.call?.name ?? instr.id} 的参数 ${arg.name} 未解析出原生字节宽度，禁止写入。`,
+              instr.call?.span ?? parsed.span,
+              { resourceUri, targetAnchor: eventAnchor }
+            ));
+            blocked = true;
+            continue;
+          }
+          if (cnt !== arg.byteCount) {
+            add(error(
+              'EMEVD_PARAMETER_WIDTH_MISMATCH',
+              `指令 ${instr.call?.name ?? instr.id} 的参数 ${arg.name} 声明宽度 ${cnt} 与原生宽度 ${arg.byteCount} 不一致，禁止写入。`,
               instr.call?.span ?? parsed.span,
               { resourceUri, targetAnchor: eventAnchor }
             ));
@@ -468,6 +498,10 @@ function compilePairedEvent(
     }
   }
 
+  // 参数绑定失败时不得把已经收集的 set_event_parameters 或结构性操作
+  // 泄漏到计划中；失败关闭应返回诊断而不是 ghost mutation。
+  if (blocked) return;
+
   const oldParams = event.parameters ?? [];
   const paramsChanged = oldParams.length !== newParameters.length ||
     newParameters.some((np, idx) => {
@@ -486,8 +520,6 @@ function compilePairedEvent(
       sourceSpan: parsed.span
     });
   }
-
-  if (blocked) return;
 
   // 删除：原始文档里有、源码里没了的行（wait-for 块 = 谓词 + anchor 全部指令）。
   for (const entry of diff) {

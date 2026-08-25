@@ -17,7 +17,7 @@ import { MemoryOperationLogStore, type OperationLogStore } from '../patch/operat
 import { createConfirmationReceipt } from '../patch/writerContract.js';
 import { openWorkspaceSession, type WorkspaceSession } from '../workspace/workspaceSession.js';
 import { saveRawReplace } from './saveRawResource.js';
-import type { RawReplaceCommitPort } from './editorMutationService.js';
+import type { RawReplaceCommitPort, WriteConfirmationPort } from './editorMutationService.js';
 
 export interface NativeEditSession {
   session: WorkspaceSession;
@@ -26,6 +26,7 @@ export interface NativeEditSession {
   backupBaseDir: string;
   recoveryDir: string;
   oodleRuntimeRoot?: string;
+  confirmationPort?: WriteConfirmationPort;
   commitPort: RawReplaceCommitPort;
   allowedRoots(): string[];
   mintReceipt(sourceUri: string, title: string): ConfirmationReceipt;
@@ -46,6 +47,7 @@ export function nativeEditSessionFromContext(input: {
   recoveryDir: string;
   stagingRoot?: string;
   confirmation?: ConfirmationReceipt;
+  confirmationPort?: WriteConfirmationPort;
 }): NativeEditSession {
   const stagingRoot = input.stagingRoot ?? join(input.backupBaseDir, '..', 'staging');
   const commitPort: RawReplaceCommitPort = {
@@ -77,6 +79,7 @@ export function nativeEditSessionFromContext(input: {
     backupBaseDir: input.backupBaseDir,
     recoveryDir: input.recoveryDir,
     ...(probedOodleRoot ? { oodleRuntimeRoot: probedOodleRoot } : {}),
+    ...(input.confirmationPort ? { confirmationPort: input.confirmationPort } : {}),
     commitPort,
     allowedRoots: () => [
       input.session.layers.overlayRoot,

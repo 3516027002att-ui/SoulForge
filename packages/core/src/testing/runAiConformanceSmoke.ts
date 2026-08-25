@@ -32,7 +32,7 @@
  * - four evidence kinds (readFile / resourceGraph / diagnostics / patchPlan)
  *   assemble into bounded, redacted context with excerpt truncation
  * - no evidence returns structured insufficient_evidence
- * - a single oversized section fails closed with CONTEXT_LIMIT_EXCEEDED
+ * - a single oversized section is excerpted into the bounded context budget
  * - cancellation / timeout interrupt pending async evidence reads
  * - production multi-step propose→stage→validate→commit→re-read loop with the
  *   broker injecting cross-step evidence before each model call
@@ -1290,15 +1290,18 @@ async function main(): Promise<void> {
     passed++;
   }
 
-  // --- Case 23: single oversized section fails closed with CONTEXT_LIMIT_EXCEEDED ---
+  // --- Case 23: oversized source is excerpted before the context budget is applied ---
   {
     const broker = createContextBroker();
     const big = await broker.assemble(
       [{ kind: 'readFile', uri: 'file:///ws/huge.txt', text: 'y'.repeat(5000) }],
       { maxBytes: 1000 }
     );
-    if (big.ok || big.code !== 'CONTEXT_LIMIT_EXCEEDED') {
-      throw new Error('Case 23: oversized section must fail closed with CONTEXT_LIMIT_EXCEEDED.');
+    if (!big.ok || big.sections.length !== 1 || !big.sections[0]?.truncated) {
+      throw new Error('Case 23: oversized section must be excerpted into context.');
+    }
+    if (big.sections[0].excerptLength >= big.sections[0].sourceBytes || big.totalBytes > 1000) {
+      throw new Error('Case 23: excerpt must be bounded and marked truncated.');
     }
     passed++;
   }

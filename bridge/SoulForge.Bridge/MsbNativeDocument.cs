@@ -456,15 +456,9 @@ internal sealed class MsbNativeDocument
                         WriteInt32(rebuilt, reg.Offset + 0x0C, patch.EntityId.Value);
                         break;
                     }
-                    var evIdx = Events.ToList().FindIndex(e => e.Name == patch.PartName);
-                    if (evIdx >= 0)
-                    {
-                        var ev = Events[evIdx];
-                        GuardRegisteredEvent(ev);
-                        WriteInt32(rebuilt, ev.Offset + 0x08, patch.EntityId.Value);
-                        break;
-                    }
-                    throw new InvalidDataException($"MSB 目标实体不存在：{patch.PartName}");
+                    // Event +0x08 is eventId, not entityId. Do not silently
+                    // reinterpret an event identity mutation as an entityId write.
+                    throw new InvalidDataException($"MSB entityId 目标必须是 Part/Region：{patch.PartName}");
                 }
                 case "delete_part":
                 {

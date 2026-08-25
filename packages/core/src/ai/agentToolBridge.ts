@@ -52,7 +52,7 @@ export interface AgentToolBridge {
 }
 
 const PARALLEL_SAFE_LEVELS = new Set(['read', 'analyze']);
-const TEXT_DISCOVERY_TOOLS = new Set(['search_text_entries', 'read_fmg_entries', 'retrieve_evidence']);
+const TEXT_DISCOVERY_TOOLS = new Set(['search_text_entries', 'retrieve_evidence']);
 const STRUCTURED_DISCOVERY_TOOLS = new Set([
   'search_resources',
   'search_param_rows',
@@ -137,7 +137,7 @@ function collectStableIdentifiers(value: unknown): { ids: string[]; cursors: Rec
 }
 
 function boundedToolContent(name: string, data: unknown): string {
-  const raw = JSON.stringify(data ?? null);
+  const raw = JSON.stringify({ ok: true, state: 'completed', data: data ?? null });
   if (!BOUNDED_DISCOVERY_TOOLS.has(name) || raw.length <= MAX_BOUNDED_TOOL_RESULT_CHARS) return raw;
   const summary = summarizeToolValue(data);
   const identifiers = collectStableIdentifiers(data);
@@ -148,11 +148,13 @@ function boundedToolContent(name: string, data: unknown): string {
     data: summary,
     ...identifiers
   };
-  const encoded = JSON.stringify(summarized);
+  const encoded = JSON.stringify({ ok: true, state: 'completed', data: summarized, ...identifiers });
   if (encoded.length <= MAX_BOUNDED_TOOL_RESULT_CHARS) return encoded;
   // Never inject invalid JSON. If even the structured summary is too large,
   // retain only the stable identifiers/cursor contract.
   return JSON.stringify({
+    ok: true,
+    state: 'completed',
     summary: `工具 ${name} 输出已截断；请使用 ID/游标继续查询。`,
     truncated: true,
     originalChars: raw.length,
@@ -162,7 +164,7 @@ function boundedToolContent(name: string, data: unknown): string {
 
 export function createAgentToolBridge(options: AgentToolBridgeOptions): AgentToolBridge {
   const { registry, context } = options;
-  let textLookupAttempted = false;
+  const textLookupEvidence: string[] = [];
   const tools: AgentToolDefinition[] = registry.list().map((descriptor) => ({
     name: descriptor.name,
     description: descriptor.description,
@@ -190,11 +192,12 @@ export function createAgentToolBridge(options: AgentToolBridgeOptions): AgentToo
         })
       };
     }
-    if (TEXT_DISCOVERY_TOOLS.has(call.name)) textLookupAttempted = true;
+    const exactTarget = isExactStructuredTarget(call.name, input);
     if (
       options.requireTextLookupBeforeStructuredDiscovery === true
-      && !textLookupAttempted
       && STRUCTURED_DISCOVERY_TOOLS.has(call.name)
+      && !exactTarget
+      && !hasMatchingTextEvidence(input, textLookupEvidence)
     ) {
       return {
         ok: false,
@@ -214,14 +217,79 @@ export function createAgentToolBridge(options: AgentToolBridgeOptions): AgentToo
       context.mode = effectiveContext.mode;
     }
     if (result.ok) {
+      if (TEXT_DISCOVERY_TOOLS.has(call.name)) {
+        const evidence = extractTextEvidenceQuery(input, result.data);
+        if (evidence) textLookupEvidence.push(evidence);
+      }
       return { ok: true, content: boundedToolContent(call.name, result.data) };
     }
     return {
       ok: false,
       code: result.error?.code ?? 'TOOL_FAILED',
-      content: JSON.stringify(result.error ?? { code: 'TOOL_FAILED', message: '工具执行失败。' })
+      content: JSON.stringify({
+        ok: false,
+        state: 'failed',
+        error: result.error ?? { code: 'TOOL_FAILED', message: '工具执行失败。' }
+      })
     };
   };
 
   return { tools, executeTool };
+}
+
+function extractTextEvidenceQuery(input: unknown, data: unknown): string | undefined {
+  const query = input && typeof input === 'object' && typeof (input as Record<string, unknown>).query === 'string'
+    ? (input as Record<string, unknown>).query as string
+    : '';
+  if (!hasTextHits(data)) return undefined;
+  return query.trim().toLocaleLowerCase();
+}
+
+function hasTextHits(data: unknown): boolean {
+  if (Array.isArray(data)) return data.length > 0;
+  if (!data || typeof data !== 'object') return false;
+  const record = data as Record<string, unknown>;
+  return (Array.isArray(record.hits) && record.hits.length > 0)
+    || (Array.isArray(record.entries) && record.entries.length > 0)
+    || (Array.isArray(record.matches) && record.matches.length > 0);
+}
+
+function isExactStructuredTarget(name: string, input: unknown): boolean {
+  if (!input || typeof input !== 'object') return false;
+  const value = input as Record<string, unknown>;
+  if (name === 'read_param_fields') {
+    return typeof value.table === 'string' && asNonEmptyNumberList(value.rowIds);
+  }
+  if (name === 'read_fmg_entries') {
+    return typeof value.table === 'string' && asNonEmptyNumberList(value.ids);
+  }
+  if (name === 'read_msb_parts') {
+    return Array.isArray(value.addresses) && value.addresses.length > 0
+      && value.addresses.every((item) => typeof item === 'string' && /^(?:m\d{2}_\d{2}_\d{2}_\d{2}#|map:\/\/)/iu.test(item));
+  }
+  if (name === 'read_emevd_outline') {
+    return typeof value.file === 'string' && /\.emevd(?:\.dcx)?$/iu.test(value.file);
+  }
+  if (name === 'search_param_rows' || name === 'search_map_entities') {
+    return typeof value.query === 'string' && /^\d+$|^(?:m\d{2}_\d{2}_\d{2}_\d{2}#|map:\/\/)/iu.test(value.query.trim());
+  }
+  return false;
+}
+
+function asNonEmptyNumberList(value: unknown): boolean {
+  return Array.isArray(value) && value.length > 0 && value.every((item) => typeof item === 'number' && Number.isInteger(item));
+}
+
+function hasMatchingTextEvidence(input: unknown, evidence: readonly string[]): boolean {
+  if (evidence.length === 0 || !input || typeof input !== 'object') return false;
+  const terms = Object.entries(input as Record<string, unknown>)
+    .filter(([key, value]) => /query|name|identifier|target|region|model/i.test(key) && typeof value === 'string')
+    .map(([, value]) => normalizeEvidenceTerm(value as string))
+    .filter((value) => value.length >= 2);
+  if (terms.length === 0) return true;
+  return terms.some((term) => evidence.some((query) => query.includes(term) || term.includes(query)));
+}
+
+function normalizeEvidenceTerm(value: string): string {
+  return value.toLocaleLowerCase().replace(/[\s_#:/\\.-]+/gu, '');
 }

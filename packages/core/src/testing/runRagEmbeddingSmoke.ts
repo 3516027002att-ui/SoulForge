@@ -187,6 +187,32 @@ VALUES (?, ?, ?, ?, ?)`).run('ws-embed', workspace.root, 'sekiro', now, now);
         === lexicalOnly.hits.map((hit) => hit.chunk.chunkId).join(','), 'no vectors -> identical to lexical');
     }
 
+    // 大库回归：词法完全 miss 时，纯向量命中仍必须进入候选集。
+    const largeChunks: RagChunk[] = [];
+    const largeVectors = new Map<string, Float32Array>();
+    for (let i = 0; i < 3_000; i += 1) {
+      const chunkId = `rag:param_row:large-${i}`;
+      largeChunks.push({
+        chunkId,
+        workspaceId: 'ws-embed',
+        sourceUri: 'file://synthetic/param/large.param',
+        symbolUri: `param://Large/${i}`,
+        family: 'param_row',
+        title: `Large row ${i}`,
+        body: `semantic corpus row ${i}`,
+        numericIds: [i],
+        contentHash: `large-${i}`
+      });
+      largeVectors.set(chunkId, new Float32Array(i === 2_999 ? [1, 0] : [0, 1]));
+    }
+    const largeHybrid = retrieveEvidenceHybrid(
+      createRagCorpus({ workspaceId: 'ws-embed', builtAt: now, chunks: largeChunks }),
+      'lexical-query-with-no-hit',
+      { vectors: { vectors: largeVectors, queryVector: new Float32Array([1, 0]) }, limit: 1, expandReferences: false }
+    );
+    expect(largeHybrid.ok && largeHybrid.hits[0]?.chunk.chunkId === 'rag:param_row:large-2999',
+      'large vector index retains lexical-miss semantic hit');
+
     console.log(JSON.stringify({
       ok: true,
       message: 'workspace RAG embedding smoke: ok',

@@ -32,29 +32,34 @@ const MAX_FIELDS = 24;
 
 export function buildRagCorpus(index: WorkspaceIndex, now = new Date().toISOString()): RagCorpus {
   const chunks: RagChunk[] = [];
+  const sourceHashes = new Map(
+    index.getFiles()
+      .filter((file): file is IndexedFile & { sha256: string } => typeof file.sha256 === 'string' && file.sha256.length > 0)
+      .map((file) => [file.sourceUri, file.sha256] as const)
+  );
   for (const file of index.getFiles()) {
     chunks.push(fileChunk(index.workspaceId, file));
   }
   const symbols = index.toSymbolBundle();
   for (const eventExport of symbols.events ?? []) {
     for (const event of eventExport.events) {
-      chunks.push(eventChunk(index.workspaceId, event));
+      chunks.push(eventChunk(index.workspaceId, event, sourceHashes.get(event.sourceUri)));
     }
   }
   for (const mapExport of symbols.maps ?? []) {
-    for (const entity of mapExport.entities) chunks.push(mapEntityChunk(index.workspaceId, entity));
-    for (const region of mapExport.regions) chunks.push(mapRegionChunk(index.workspaceId, region));
+    for (const entity of mapExport.entities) chunks.push(mapEntityChunk(index.workspaceId, entity, sourceHashes.get(entity.sourceUri)));
+    for (const region of mapExport.regions) chunks.push(mapRegionChunk(index.workspaceId, region, sourceHashes.get(region.sourceUri)));
   }
   for (const taeExport of symbols.tae ?? []) {
     for (const anim of taeExport.animations) {
-      for (const event of anim.events) chunks.push(taeEventChunk(index.workspaceId, taeExport, anim, event));
+      for (const event of anim.events) chunks.push(taeEventChunk(index.workspaceId, taeExport, anim, event, sourceHashes.get(taeExport.sourceUri)));
     }
   }
   for (const paramExport of symbols.params ?? []) {
-    for (const row of paramExport.rows) chunks.push(paramRowChunk(index.workspaceId, row));
+    for (const row of paramExport.rows) chunks.push(paramRowChunk(index.workspaceId, row, sourceHashes.get(row.sourceUri)));
   }
   for (const msgExport of symbols.msgs ?? []) {
-    for (const entry of msgExport.entries) chunks.push(textEntryChunk(index.workspaceId, entry));
+    for (const entry of msgExport.entries) chunks.push(textEntryChunk(index.workspaceId, entry, sourceHashes.get(entry.sourceUri)));
   }
 
   return createRagCorpus({
@@ -86,8 +91,19 @@ export function createRagCorpus(input: {
 
 export function mergeCatalogAndPersisted(catalog: RagCorpus, persisted: RagCorpus): RagCorpus {
   const liveSources = new Set(catalog.chunks.map((chunk) => chunk.sourceUri));
+  const liveSourceHashes = new Map(
+    catalog.chunks
+      .filter((chunk) => chunk.family === 'file' && chunk.sourceHash)
+      .map((chunk) => [chunk.sourceUri, chunk.sourceHash!] as const)
+  );
   const keptSymbols = persisted.chunks.filter(
-    (chunk) => chunk.family !== 'file' && liveSources.has(chunk.sourceUri)
+    (chunk) => {
+      if (chunk.family === 'file' || !liveSources.has(chunk.sourceUri)) return false;
+      const currentHash = liveSourceHashes.get(chunk.sourceUri);
+      // 有 fingerprint 就必须一致；旧的无 fingerprint 数据只在当前 catalog
+      // 也无 fingerprint 时保留，避免把无法证明新鲜的内容伪装成新鲜。
+      return currentHash === undefined ? chunk.sourceHash === undefined : chunk.sourceHash === currentHash;
+    }
   );
   const keptUris = new Set(keptSymbols.map((chunk) => chunk.symbolUri));
   const keptReferences = persisted.references.filter(
@@ -123,11 +139,12 @@ function fileChunk(workspaceId: string, file: IndexedFile): RagChunk {
     body,
     numericIds: [],
     relativePath: file.relativePath,
-    resourceKind: file.resourceKind
+    resourceKind: file.resourceKind,
+    ...(file.sha256 ? { sourceHash: file.sha256 } : {})
   });
 }
 
-function eventChunk(workspaceId: string, event: EventSymbol): RagChunk {
+function eventChunk(workspaceId: string, event: EventSymbol, sourceHash?: string): RagChunk {
   const instructions = event.instructions.slice(0, MAX_INSTRUCTIONS).map((instruction) => {
     const args = instruction.args
       .map((arg) => `${arg.name ?? 'arg'}=${stringifyValue(arg.value)}${arg.role ? `@${arg.role}` : ''}`)
@@ -155,11 +172,12 @@ function eventChunk(workspaceId: string, event: EventSymbol): RagChunk {
       event.eventId,
       ...event.instructions.flatMap((instruction) => instruction.args.map((arg) => arg.value))
     ]),
-    resourceKind: 'event'
+    resourceKind: 'event',
+    ...(sourceHash ? { sourceHash } : {})
   });
 }
 
-function mapEntityChunk(workspaceId: string, entity: MapEntitySymbol): RagChunk {
+function mapEntityChunk(workspaceId: string, entity: MapEntitySymbol, sourceHash?: string): RagChunk {
   const block = formatMapBlock(entity.mapId) ?? entity.mapId.toLowerCase();
   const area = formatMapArea(block) || entity.areaId || '';
   const modelSuffix = entity.modelIndex !== undefined ? ` modelIndex ${entity.modelIndex}` : '';
@@ -182,11 +200,12 @@ function mapEntityChunk(workspaceId: string, entity: MapEntitySymbol): RagChunk 
     title: formatMapAddress({ block, name: entity.name }),
     body,
     numericIds: collectNumbers([entity.entityId]),
-    resourceKind: 'map'
+    resourceKind: 'map',
+    ...(sourceHash ? { sourceHash } : {})
   });
 }
 
-function mapRegionChunk(workspaceId: string, region: MapRegionSymbol): RagChunk {
+function mapRegionChunk(workspaceId: string, region: MapRegionSymbol, sourceHash?: string): RagChunk {
   const block = formatMapBlock(region.mapId) ?? region.mapId.toLowerCase();
   const area = formatMapArea(block);
   const body = [
@@ -206,7 +225,8 @@ function mapRegionChunk(workspaceId: string, region: MapRegionSymbol): RagChunk 
     title: formatMapAddress({ block, name: region.name }),
     body,
     numericIds: collectNumbers([region.entityId]),
-    resourceKind: 'map'
+    resourceKind: 'map',
+    ...(sourceHash ? { sourceHash } : {})
   });
 }
 
@@ -216,7 +236,7 @@ function mapRegionChunk(workspaceId: string, region: MapRegionSymbol): RagChunk 
  * numericIds 收 animId、eventTypeId、帧、以及所有可 Number.isFinite 的字段值
  * （SoundID 必须在）。
  */
-function taeEventChunk(workspaceId: string, taeExport: TaeExport, anim: TaeAnimSymbol, event: TaeEventSymbol): RagChunk {
+function taeEventChunk(workspaceId: string, taeExport: TaeExport, anim: TaeAnimSymbol, event: TaeEventSymbol, sourceHash?: string): RagChunk {
   const address = formatActionAddress({ chr: taeExport.chrId, animId: anim.animId, eventIndex: event.index });
   const lines = [
     `chr ${taeExport.chrId}`,
@@ -243,7 +263,8 @@ function taeEventChunk(workspaceId: string, taeExport: TaeExport, anim: TaeAnimS
       event.endFrame,
       ...numericFieldValues
     ]),
-    resourceKind: 'action'
+    resourceKind: 'action',
+    ...(sourceHash ? { sourceHash } : {})
   });
 }
 
@@ -257,7 +278,7 @@ function relativeSourcePath(sourceUri: string): string {
   return sourceUri;
 }
 
-function paramRowChunk(workspaceId: string, row: ParamRowSymbol): RagChunk {
+function paramRowChunk(workspaceId: string, row: ParamRowSymbol, sourceHash?: string): RagChunk {
   const fields = (row.fields ?? []).slice(0, MAX_FIELDS)
     .map((field) => `${field.name}=${stringifyValue(field.value)}`);
   const truncated = (row.fields?.length ?? 0) > MAX_FIELDS
@@ -281,11 +302,12 @@ function paramRowChunk(workspaceId: string, row: ParamRowSymbol): RagChunk {
       row.rowId,
       ...(row.fields ?? []).map((field) => field.value)
     ]),
-    resourceKind: 'param'
+    resourceKind: 'param',
+    ...(sourceHash ? { sourceHash } : {})
   });
 }
 
-function textEntryChunk(workspaceId: string, entry: TextEntrySymbol): RagChunk {
+function textEntryChunk(workspaceId: string, entry: TextEntrySymbol, sourceHash?: string): RagChunk {
   const body = [
     `textId ${entry.textId}`,
     entry.category ? `category ${entry.category}` : '',
@@ -300,7 +322,8 @@ function textEntryChunk(workspaceId: string, entry: TextEntrySymbol): RagChunk {
     body,
     numericIds: [entry.textId],
     resourceKind: 'msg',
-    ...(entry.confidence ? { confidence: entry.confidence } : {})
+    ...(entry.confidence ? { confidence: entry.confidence } : {}),
+    ...(sourceHash ? { sourceHash } : {})
   });
 }
 

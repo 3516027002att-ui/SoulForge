@@ -576,6 +576,19 @@ CREATE TABLE IF NOT EXISTS rag_embeddings (
 CREATE INDEX IF NOT EXISTS idx_rag_embeddings_workspace_model
   ON rag_embeddings(workspace_id, model);
 `
+  },
+  {
+    id: 10,
+    name: 'v0_5_rag_chunk_freshness',
+    sql: 'PRAGMA foreign_keys = ON;',
+    addColumns: [
+      { table: 'rag_chunks', column: 'source_revision', definition: 'INTEGER' },
+      { table: 'rag_chunks', column: 'source_hash', definition: 'TEXT' }
+    ],
+    sqlAfterColumns: `
+CREATE INDEX IF NOT EXISTS idx_rag_chunks_workspace_source_hash
+  ON rag_chunks(workspace_id, source_uri, source_hash);
+`
   }
 ];
 

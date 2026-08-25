@@ -39,24 +39,18 @@
 - 若文本未直接定位到 NpcParam，按实体所在地图区域反查（如 `m10_00_00_00`、`m11_00_00_00` 等）。
 - 用 `search_map_entities` / `read_msb_parts` 读取该地图 Npc 实体获取绑定的 `npcParamId`；或用 `search_events` 从事件指令中反查。
 
-### 4. 第四步：自创/未收录元素「直接默认新建」（Zero-Asking & Auto-Creation）
-- 如果在 FMG 文本库中确实查不到用户提到的词汇：
-  * **不要向用户发问“这是哪个 Mod 的 ID”**；
-  * **直接默认判定为用户本次需求要新建的自制元素**，自动分配安全 ID 段（如 `9000000+`）：
-    1. 在 `FMG`（`アイテム名` / `アイテム説明`）中新建词条；
-    2. 在 `EquipParamGoods` / `EquipParamWeapon` 中新建参数行；
-    3. 在 `ItemLotParam`（掉落）或 `EMEVD`（`AwardItem` 奖励）中完成挂载；
-    4. 一次性生成完整实施补丁。
+### 4. 第四步：文本未定位时的安全分支（No-Assumption）
+- FMG / RAG 没有命中时只能报告「当前证据不足」，禁止把搜索失败解释成“用户要新建”。
+- 禁止自动分配 `9000000+` 或任何其他未验证 ID，禁止自动创建 FMG、PARAM、ItemLot、EMEVD。
+- 只有用户明确要求新建自制元素，且已经确认目标表、ID 分配策略、碰撞检查和写入范围时，才可另起一次显式创建流程；创建也必须经过对应 native writer、Patch Engine、回读和回滚记录。
+- 搜索失败不能触发写入，也不能用邻近行号、固定模板或模型记忆补齐字段。
 
 ---
 
 ## 二、 引擎分层职责
 
-1. **参数层（PARAM）**：
-   - `NpcParam`：`hp`、`ninsatuNum`（红点数）、`npcType`（0=Boss/普通，2=精英怪）、`isSoulGetByBoss`（0=普通/精英，144/16=Boss）、`itemLotId_1~6`、`spEffectID0~31`。
-   - `EquipParamGoods`：道具、消耗品、素材、药品。
-   - `EquipParamWeapon`：武器、忍具、流派技。
-   - `ItemLotParam`：实体死亡掉落组。
+1. **参数层（PARAM）**：通过已登记的 Paramdex/原生字段元数据读取表、行和字段；不要把模型记忆的字段名、枚举值或相邻行当作事实。
+   - `NpcParam`、`EquipParamGoods`、`EquipParamWeapon`、`ItemLotParam` 只是可能的表类别，具体表和字段必须由当前工作区证据确认。
 2. **逻辑层（EMEVD）**：
    - 管理 Boss 战状态机（血条、雾门、处决、阶段）、Flag、直接弹窗奖励（`AwardItem`）。
    - 使用 `apply_emevd_dsl` 提交补丁。
@@ -70,23 +64,17 @@
 
 ## 三、 参数定位规范
 
-- 只狼的 `NpcParam` 行号为标准 8 位数字体，严禁按 4 位数盲猜；
+- `NpcParam` 行 ID、表布局和字段宽度必须从当前工作区的 native 读取/元数据证据确认，不能按记忆猜测或盲猜邻近行；
 - 始终通过 `search_text_entries` 文本命中 ID 或通过 `search_map_entities` 从地图实例获取真实的 `npcParamId`；
 - 禁止做无依据的相邻行号暴力穷举。
 
 ---
 
-## 四、 高频实现模板：Boss 改为精英怪
+## 四、 高频实现模板：Boss 语义变更
 
-1. **`NpcParam` 修改**：
-   - `npcType` 改为 `2`（精英怪）；
-   - `ninsatuNum` 改为所需红点忍杀数（如 `1` 或 `2`）；
-   - `isSoulGetByBoss` 改为 `0`（关闭 Boss 结算与战胜文字）。
-2. **掉落与奖励**：
-   - 普通道具掉落：配置 `ItemLotParam` 并填入 `NpcParam.itemLotId_1`；
-   - 忍具/装备/弹窗奖励：在 EMEVD 事件中编写 `AwardItem` 补丁。
-3. **Boss 事件清理（按需）**：
-   - 清理或修改 Boss 血条指令（`SetBossHpBar`）与雾门逻辑。
+1. 先读取当前 `NpcParam`、掉落表和关联 EMEVD，确认真实行、字段类型、枚举和引用关系。
+2. 只提出经过证据支持的字段变更；字段含义与数值不能来自固定模板。
+3. 经 native writer 写入后必须回读目标 PARAM/MSB/EMEVD，检查引用、事件语义和可回滚操作记录；任一证据缺失就停在 `partial`/`insufficient_evidence`。
 
 ---
 

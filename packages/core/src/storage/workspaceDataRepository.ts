@@ -151,8 +151,9 @@ FROM background_jobs WHERE workspace_id = ? ORDER BY created_at DESC, job_id`).a
     const insert = this.database.prepare(`
 INSERT INTO rag_chunks (
  chunk_id, workspace_id, source_uri, symbol_uri, family, title, body,
- numeric_ids_json, relative_path, resource_kind, confidence, content_hash, created_at
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`);
+ numeric_ids_json, relative_path, resource_kind, confidence, content_hash,
+ source_revision, source_hash, created_at
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`);
     const insertFts = this.database.prepare(`
 INSERT INTO rag_chunks_fts (chunk_id, title, body) VALUES (?, ?, ?)`);
     const insertTrigram = this.database.prepare(`
@@ -171,7 +172,7 @@ INSERT INTO rag_chunks_fts_trigram (chunk_id, title, body) VALUES (?, ?, ?)`);
           chunk.chunkId, this.workspaceId, chunk.sourceUri, chunk.symbolUri, chunk.family,
           chunk.title, chunk.body, JSON.stringify(chunk.numericIds),
           chunk.relativePath ?? null, chunk.resourceKind ?? null, chunk.confidence ?? null,
-          chunk.contentHash, createdAt
+          chunk.contentHash, chunk.sourceRevision ?? null, chunk.sourceHash ?? null, createdAt
         );
         insertFts.run(chunk.chunkId, chunk.title, chunk.body);
         insertTrigram.run(chunk.chunkId, chunk.title, chunk.body);
@@ -184,7 +185,7 @@ INSERT INTO rag_chunks_fts_trigram (chunk_id, title, body) VALUES (?, ?, ?)`);
 SELECT chunk_id AS chunkId, workspace_id AS workspaceId, source_uri AS sourceUri,
  symbol_uri AS symbolUri, family, title, body, numeric_ids_json AS numericIdsJson,
  relative_path AS relativePath, resource_kind AS resourceKind, confidence,
- content_hash AS contentHash
+ content_hash AS contentHash, source_revision AS sourceRevision, source_hash AS sourceHash
 FROM rag_chunks WHERE workspace_id = ? ORDER BY family, title, chunk_id`)
       .all(this.workspaceId);
     return rows.map(hydrateRagChunk);
@@ -200,7 +201,7 @@ FROM rag_chunks WHERE workspace_id = ? ORDER BY family, title, chunk_id`)
 SELECT c.chunk_id AS chunkId, c.workspace_id AS workspaceId, c.source_uri AS sourceUri,
  c.symbol_uri AS symbolUri, c.family, c.title, c.body, c.numeric_ids_json AS numericIdsJson,
  c.relative_path AS relativePath, c.resource_kind AS resourceKind, c.confidence,
- c.content_hash AS contentHash
+ c.content_hash AS contentHash, c.source_revision AS sourceRevision, c.source_hash AS sourceHash
 FROM rag_chunks c
 JOIN rag_chunks_fts x ON x.chunk_id = c.chunk_id
 WHERE c.workspace_id = ? AND rag_chunks_fts MATCH ? ORDER BY rank LIMIT ?`;
@@ -218,7 +219,7 @@ WHERE c.workspace_id = ? AND rag_chunks_fts MATCH ? ORDER BY rank LIMIT ?`;
 SELECT c.chunk_id AS chunkId, c.workspace_id AS workspaceId, c.source_uri AS sourceUri,
  c.symbol_uri AS symbolUri, c.family, c.title, c.body, c.numeric_ids_json AS numericIdsJson,
  c.relative_path AS relativePath, c.resource_kind AS resourceKind, c.confidence,
- c.content_hash AS contentHash
+ c.content_hash AS contentHash, c.source_revision AS sourceRevision, c.source_hash AS sourceHash
 FROM rag_chunks c
 JOIN rag_chunks_fts_trigram x ON x.chunk_id = c.chunk_id
 WHERE c.workspace_id = ? AND rag_chunks_fts_trigram MATCH ? ORDER BY rank LIMIT ?`)
@@ -231,7 +232,7 @@ WHERE c.workspace_id = ? AND rag_chunks_fts_trigram MATCH ? ORDER BY rank LIMIT 
 SELECT chunk_id AS chunkId, workspace_id AS workspaceId, source_uri AS sourceUri,
  symbol_uri AS symbolUri, family, title, body, numeric_ids_json AS numericIdsJson,
  relative_path AS relativePath, resource_kind AS resourceKind, confidence,
- content_hash AS contentHash
+ content_hash AS contentHash, source_revision AS sourceRevision, source_hash AS sourceHash
 FROM rag_chunks
 WHERE workspace_id = ? AND (title LIKE ? OR body LIKE ?)
 ORDER BY family, title LIMIT ?`).all(this.workspaceId, needle, needle, boundedLimit);
@@ -335,6 +336,8 @@ interface RagChunkRow {
   resourceKind: string | null;
   confidence: string | null;
   contentHash: string;
+  sourceRevision: number | null;
+  sourceHash: string | null;
 }
 
 function hydrateRagChunk(row: RagChunkRow): RagChunk {
@@ -348,6 +351,8 @@ function hydrateRagChunk(row: RagChunkRow): RagChunk {
     body: row.body,
     numericIds: parseJson(row.numericIdsJson, 'rag numeric ids'),
     contentHash: row.contentHash,
+    ...(row.sourceRevision !== null ? { sourceRevision: row.sourceRevision } : {}),
+    ...(row.sourceHash !== null ? { sourceHash: row.sourceHash } : {}),
     ...(row.relativePath ? { relativePath: row.relativePath } : {}),
     ...(row.resourceKind ? { resourceKind: row.resourceKind as ResourceKind } : {}),
     ...(row.confidence ? { confidence: row.confidence as ReferenceConfidence } : {})

@@ -66,6 +66,10 @@ export interface MapRouteEntity extends BaseMapEntity {
 
 export type MapEntity = MapModelEntity | MapPartEntity | MapRegionEntity | MapEventEntity | MapRouteEntity;
 
+export type MapEntityResolution =
+  | { ok: true; entity: MapEntity }
+  | { ok: false; code: 'MAP_ENTITY_NOT_FOUND' | 'MAP_ENTITY_AMBIGUOUS'; candidates: MapEntity[] };
+
 export interface MapDocument {
   sourceUri: string;
   sourcePath: string;
@@ -85,14 +89,14 @@ export interface MapDocument {
  */
 export class MapSceneGraph {
   private readonly document: MapDocument;
-  private readonly entityById = new Map<string, MapEntity>();
-  private readonly entityByStableKey = new Map<string, MapEntity>();
-  private readonly entityByAddress = new Map<string, MapEntity>();
-  private readonly entityByName = new Map<string, MapEntity>();
-  private readonly partsByName = new Map<string, MapPartEntity>();
-  private readonly regionsByName = new Map<string, MapRegionEntity>();
-  private readonly modelsByName = new Map<string, MapModelEntity>();
-  private readonly eventsByName = new Map<string, MapEventEntity>();
+  private readonly entityById = new Map<string, MapEntity[]>();
+  private readonly entityByStableKey = new Map<string, MapEntity[]>();
+  private readonly entityByAddress = new Map<string, MapEntity[]>();
+  private readonly entityByName = new Map<string, MapEntity[]>();
+  private readonly partsByName = new Map<string, MapPartEntity[]>();
+  private readonly regionsByName = new Map<string, MapRegionEntity[]>();
+  private readonly modelsByName = new Map<string, MapModelEntity[]>();
+  private readonly eventsByName = new Map<string, MapEventEntity[]>();
   private readonly entityByEntityId = new Map<number, MapEntity[]>();
   private readonly partsByModelName = new Map<string, MapPartEntity[]>();
   private readonly eventsByReferencedRegion = new Map<string, MapEventEntity[]>();
@@ -105,19 +109,19 @@ export class MapSceneGraph {
 
   private buildIndices(): void {
     for (const model of this.document.models) {
-      this.entityById.set(model.id, model);
-      this.entityByStableKey.set(model.stableKey, model);
-      this.entityByAddress.set(model.address, model);
-      if (!this.entityByName.has(model.name)) this.entityByName.set(model.name, model);
-      this.modelsByName.set(model.name, model);
+      this.addIndex(this.entityById, model.id, model);
+      this.addIndex(this.entityByStableKey, model.stableKey, model);
+      this.addIndex(this.entityByAddress, model.address, model);
+      this.addIndex(this.entityByName, model.name, model);
+      this.addIndex(this.modelsByName, model.name, model);
     }
 
     for (const part of this.document.parts) {
-      this.entityById.set(part.id, part);
-      this.entityByStableKey.set(part.stableKey, part);
-      this.entityByAddress.set(part.address, part);
-      if (!this.entityByName.has(part.name)) this.entityByName.set(part.name, part);
-      this.partsByName.set(part.name, part);
+      this.addIndex(this.entityById, part.id, part);
+      this.addIndex(this.entityByStableKey, part.stableKey, part);
+      this.addIndex(this.entityByAddress, part.address, part);
+      this.addIndex(this.entityByName, part.name, part);
+      this.addIndex(this.partsByName, part.name, part);
 
       if (part.entityId !== undefined && part.entityId > 0) {
         const list = this.entityByEntityId.get(part.entityId) ?? [];
@@ -132,11 +136,11 @@ export class MapSceneGraph {
     }
 
     for (const region of this.document.regions) {
-      this.entityById.set(region.id, region);
-      this.entityByStableKey.set(region.stableKey, region);
-      this.entityByAddress.set(region.address, region);
-      if (!this.entityByName.has(region.name)) this.entityByName.set(region.name, region);
-      this.regionsByName.set(region.name, region);
+      this.addIndex(this.entityById, region.id, region);
+      this.addIndex(this.entityByStableKey, region.stableKey, region);
+      this.addIndex(this.entityByAddress, region.address, region);
+      this.addIndex(this.entityByName, region.name, region);
+      this.addIndex(this.regionsByName, region.name, region);
 
       if (region.entityId !== undefined && region.entityId > 0) {
         const list = this.entityByEntityId.get(region.entityId) ?? [];
@@ -146,11 +150,11 @@ export class MapSceneGraph {
     }
 
     for (const event of this.document.events) {
-      this.entityById.set(event.id, event);
-      this.entityByStableKey.set(event.stableKey, event);
-      this.entityByAddress.set(event.address, event);
-      if (!this.entityByName.has(event.name)) this.entityByName.set(event.name, event);
-      this.eventsByName.set(event.name, event);
+      this.addIndex(this.entityById, event.id, event);
+      this.addIndex(this.entityByStableKey, event.stableKey, event);
+      this.addIndex(this.entityByAddress, event.address, event);
+      this.addIndex(this.entityByName, event.name, event);
+      this.addIndex(this.eventsByName, event.name, event);
 
       if (event.referencedRegionName) {
         const list = this.eventsByReferencedRegion.get(event.referencedRegionName) ?? [];
@@ -165,54 +169,74 @@ export class MapSceneGraph {
     }
 
     for (const route of this.document.routes) {
-      this.entityById.set(route.id, route);
-      this.entityByStableKey.set(route.stableKey, route);
-      this.entityByAddress.set(route.address, route);
-      if (!this.entityByName.has(route.name)) this.entityByName.set(route.name, route);
+      this.addIndex(this.entityById, route.id, route);
+      this.addIndex(this.entityByStableKey, route.stableKey, route);
+      this.addIndex(this.entityByAddress, route.address, route);
+      this.addIndex(this.entityByName, route.name, route);
     }
+  }
+
+  private addIndex<T extends MapEntity>(index: Map<string, T[]>, key: string, value: T): void {
+    const values = index.get(key) ?? [];
+    values.push(value);
+    index.set(key, values);
+  }
+
+  private resolveIndex<T extends MapEntity>(index: Map<string, T[]>, identifier: string): MapEntityResolution | undefined {
+    const candidates = index.get(identifier);
+    if (!candidates || candidates.length === 0) return undefined;
+    return candidates.length === 1
+      ? { ok: true, entity: candidates[0]! }
+      : { ok: false, code: 'MAP_ENTITY_AMBIGUOUS', candidates: [...candidates] };
   }
 
   public getDocument(): MapDocument {
     return this.document;
   }
 
+  /** Resolves exact identities first; a display-name alias is never silently overwritten. */
+  public resolveEntity(identifier: string): MapEntityResolution {
+    for (const index of [this.entityById, this.entityByStableKey, this.entityByAddress]) {
+      const result = this.resolveIndex(index, identifier);
+      if (result) return result;
+    }
+    return this.resolveIndex(this.entityByName, identifier)
+      ?? { ok: false, code: 'MAP_ENTITY_NOT_FOUND', candidates: [] };
+  }
+
   public findEntity(identifier: string): MapEntity | undefined {
-    return (
-      this.entityById.get(identifier) ||
-      this.entityByStableKey.get(identifier) ||
-      this.entityByAddress.get(identifier) ||
-      this.partsByName.get(identifier) ||
-      this.regionsByName.get(identifier) ||
-      this.modelsByName.get(identifier) ||
-      this.eventsByName.get(identifier) ||
-      this.entityByName.get(identifier)
-    );
+    const result = this.resolveEntity(identifier);
+    return result.ok ? result.entity : undefined;
   }
 
   public findPart(identifier: string): MapPartEntity | undefined {
-    const direct = this.partsByName.get(identifier);
-    if (direct) return direct;
+    const direct = this.resolveIndex(this.partsByName, identifier);
+    if (direct?.ok) return direct.entity as MapPartEntity;
+    if (direct) return undefined;
     const entity = this.findEntity(identifier);
     return entity && entity.kind === 'part' ? entity : undefined;
   }
 
   public findRegion(identifier: string): MapRegionEntity | undefined {
-    const direct = this.regionsByName.get(identifier);
-    if (direct) return direct;
+    const direct = this.resolveIndex(this.regionsByName, identifier);
+    if (direct?.ok) return direct.entity as MapRegionEntity;
+    if (direct) return undefined;
     const entity = this.findEntity(identifier);
     return entity && entity.kind === 'region' ? entity : undefined;
   }
 
   public findModel(identifier: string): MapModelEntity | undefined {
-    const direct = this.modelsByName.get(identifier);
-    if (direct) return direct;
+    const direct = this.resolveIndex(this.modelsByName, identifier);
+    if (direct?.ok) return direct.entity as MapModelEntity;
+    if (direct) return undefined;
     const entity = this.findEntity(identifier);
     return entity && entity.kind === 'model' ? entity : undefined;
   }
 
   public findEvent(identifier: string): MapEventEntity | undefined {
-    const direct = this.eventsByName.get(identifier);
-    if (direct) return direct;
+    const direct = this.resolveIndex(this.eventsByName, identifier);
+    if (direct?.ok) return direct.entity as MapEventEntity;
+    if (direct) return undefined;
     const entity = this.findEntity(identifier);
     return entity && entity.kind === 'event' ? entity : undefined;
   }
@@ -335,28 +359,54 @@ export function validateMapTransaction(
 
   const sceneGraph = new MapSceneGraph(doc);
   const deletedTargets = new Set<string>();
+  const canonicalKey = (target: string): string => {
+    const resolved = sceneGraph.resolveEntity(target);
+    return resolved.ok ? resolved.entity.stableKey : target;
+  };
+  const resolveTarget = (target: string, label: string): MapEntity | undefined => {
+    const key = canonicalKey(target);
+    if (deletedTargets.has(key)) {
+      diagnostics.push({
+        severity: 'error',
+        code: 'MAP_ENTITY_NOT_FOUND',
+        message: `${label}目标已被前序操作删除: ${target}`,
+        target
+      });
+      return undefined;
+    }
+    const result = sceneGraph.resolveEntity(target);
+    if (!result.ok) {
+      diagnostics.push({
+        severity: 'error',
+        code: result.code,
+        message: result.code === 'MAP_ENTITY_AMBIGUOUS'
+          ? `${label}目标不唯一，必须使用 stableKey 或 soulAddress: ${target}`
+          : `${label}目标不存在: ${target}`,
+        target
+      });
+      return undefined;
+    }
+    return result.entity;
+  };
+  const validateVector = (value: number[] | undefined, target: string, field: string): void => {
+    if (value && (value.length !== 3 || value.some((item) => !Number.isFinite(item)))) {
+      diagnostics.push({
+        severity: 'error',
+        code: 'MAP_TRANSFORM_VALUE_INVALID',
+        message: `${field} 必须是三个有限数值: ${target}`,
+        target
+      });
+    }
+  };
 
   for (const op of transaction.operations) {
     switch (op.kind) {
       case 'set_transform': {
-        if (deletedTargets.has(op.target)) {
-          diagnostics.push({
-            severity: 'error',
-            code: 'MAP_ENTITY_NOT_FOUND',
-            message: `目标实体已被前序操作删除: ${op.target}`,
-            target: op.target
-          });
-          break;
-        }
-        const entity = sceneGraph.findEntity(op.target);
-        if (!entity) {
-          diagnostics.push({
-            severity: 'error',
-            code: 'MAP_ENTITY_NOT_FOUND',
-            message: `目标实体不存在: ${op.target}`,
-            target: op.target
-          });
-        } else if (entity.kind !== 'part' && entity.kind !== 'region') {
+        const entity = resolveTarget(op.target, '变换');
+        validateVector(op.position, op.target, 'position');
+        validateVector(op.rotation, op.target, 'rotation');
+        validateVector(op.scale, op.target, 'scale');
+        if (entity && entity.kind !== 'part' && entity.kind !== 'region') {
           diagnostics.push({
             severity: 'error',
             code: 'MAP_ENTITY_NOT_TRANSFORMABLE',
@@ -367,22 +417,19 @@ export function validateMapTransaction(
         break;
       }
       case 'batch_transform': {
+        if (op.targets.length === 0) {
+          diagnostics.push({ severity: 'error', code: 'MAP_BATCH_TARGETS_EMPTY', message: '批量变换必须包含至少一个目标。' });
+        }
+        validateVector(op.positionDelta, 'batch_transform', 'positionDelta');
+        validateVector(op.rotationDelta, 'batch_transform', 'rotationDelta');
+        validateVector(op.scaleDelta, 'batch_transform', 'scaleDelta');
         for (const target of op.targets) {
-          if (deletedTargets.has(target)) {
+          const entity = resolveTarget(target, '批量变换');
+          if (entity && entity.kind !== 'part' && entity.kind !== 'region') {
             diagnostics.push({
               severity: 'error',
-              code: 'MAP_ENTITY_NOT_FOUND',
-              message: `批量变换目标已被前序操作删除: ${target}`,
-              target
-            });
-            continue;
-          }
-          const entity = sceneGraph.findEntity(target);
-          if (!entity) {
-            diagnostics.push({
-              severity: 'error',
-              code: 'MAP_ENTITY_NOT_FOUND',
-              message: `批量变换目标不存在: ${target}`,
+              code: 'MAP_ENTITY_NOT_TRANSFORMABLE',
+              message: `实体类型 ${entity.kind} 不支持批量变换: ${target}`,
               target
             });
           }
@@ -390,75 +437,63 @@ export function validateMapTransaction(
         break;
       }
       case 'set_property': {
-        if (deletedTargets.has(op.target)) {
+        const entity = resolveTarget(op.target, '属性修改');
+        if (op.property !== 'entityId') {
           diagnostics.push({
             severity: 'error',
-            code: 'MAP_ENTITY_NOT_FOUND',
-            message: `属性修改目标实体已被前序操作删除: ${op.target}`,
+            code: 'MAP_PROPERTY_UNSUPPORTED',
+            message: `不支持的属性修改: ${op.property}，当前仅支持权威字段 entityId`,
             target: op.target
           });
-          break;
-        }
-        const entity = sceneGraph.findEntity(op.target);
-        if (!entity) {
+        } else if (entity && entity.kind !== 'part' && entity.kind !== 'region') {
           diagnostics.push({
             severity: 'error',
-            code: 'MAP_ENTITY_NOT_FOUND',
-            message: `属性修改目标实体不存在: ${op.target}`,
+            code: 'MAP_PROPERTY_KIND_UNSUPPORTED',
+            message: `实体类型 ${entity.kind} 不允许写 entityId；仅 Part/Region 支持该字段。`,
             target: op.target
           });
-        } else {
-          if (op.property !== 'entityId') {
-            diagnostics.push({
-              severity: 'error',
-              code: 'MAP_PROPERTY_UNSUPPORTED',
-              message: `不支持的属性修改: ${op.property}，当前仅支持权威字段 entityId`,
-              target: op.target
-            });
-          } else if (typeof op.value !== 'number' || !Number.isInteger(op.value)) {
-            diagnostics.push({
-              severity: 'error',
-              code: 'MAP_PROPERTY_VALUE_INVALID',
-              message: `entityId 属性值必须是整数，收到: ${String(op.value)}`,
-              target: op.target
-            });
-          }
+        } else if (typeof op.value !== 'number' || !Number.isSafeInteger(op.value)) {
+          diagnostics.push({
+            severity: 'error',
+            code: 'MAP_PROPERTY_VALUE_INVALID',
+            message: `entityId 属性值必须是安全整数，收到: ${String(op.value)}`,
+            target: op.target
+          });
         }
         break;
       }
       case 'change_model': {
-        if (deletedTargets.has(op.target)) {
+        const entity = resolveTarget(op.target, '修改模型');
+        if (entity && entity.kind !== 'part') {
           diagnostics.push({
             severity: 'error',
             code: 'MAP_PART_NOT_FOUND',
-            message: `修改模型目标 Part 已被前序操作删除: ${op.target}`,
+            message: `修改模型目标必须是 Part: ${op.target}`,
             target: op.target
           });
-          break;
         }
-        const part = sceneGraph.findPart(op.target);
-        if (!part) {
+        const modelMatches = doc.models.filter((model) => model.name === op.newModelName);
+        if (modelMatches.length === 0) {
           diagnostics.push({
             severity: 'error',
-            code: 'MAP_PART_NOT_FOUND',
-            message: `修改模型目标 Part 不存在: ${op.target}`,
+            code: 'MAP_MODEL_NOT_IN_MANIFEST',
+            message: `模型 ${op.newModelName} 尚未在地图 Model 声明表中，当前不支持跨地图未声明模型引用`,
             target: op.target
           });
-        } else {
-          const modelExists = doc.models.some((m) => m.name === op.newModelName);
-          if (!modelExists) {
-            diagnostics.push({
-              severity: 'error',
-              code: 'MAP_MODEL_NOT_IN_MANIFEST',
-              message: `模型 ${op.newModelName} 尚未在地图 Model 声明表中，当前不支持跨地图未声明模型引用`,
-              target: op.target
-            });
-          }
+        } else if (modelMatches.length > 1) {
+          diagnostics.push({
+            severity: 'error',
+            code: 'MAP_MODEL_AMBIGUOUS',
+            message: `模型 ${op.newModelName} 在 Model 声明表中不唯一。`,
+            target: op.target
+          });
         }
         break;
       }
       case 'delete': {
-        if (deletedTargets.has(op.target)) {
+        const entity = resolveTarget(op.target, '删除');
+        if (!entity) break;
+        if (deletedTargets.has(entity.stableKey)) {
           diagnostics.push({
             severity: 'error',
             code: 'MAP_ENTITY_NOT_FOUND',
@@ -467,26 +502,25 @@ export function validateMapTransaction(
           });
           break;
         }
-        const entity = sceneGraph.findEntity(op.target);
-        if (!entity) {
+        if (entity.kind === 'model' || entity.kind === 'route') {
           diagnostics.push({
             severity: 'error',
-            code: 'MAP_ENTITY_NOT_FOUND',
-            message: `删除目标实体不存在: ${op.target}`,
+            code: 'MAP_DELETE_UNSUPPORTED',
+            message: `当前 native writer 不支持删除 ${entity.kind}。`,
             target: op.target
           });
-        } else {
-          deletedTargets.add(op.target);
-          if (entity.kind === 'region') {
-            const referencingEvents = sceneGraph.queryEventsReferencingRegion(entity.name);
-            if (referencingEvents.length > 0) {
-              diagnostics.push({
-                severity: 'warning',
-                code: 'MAP_DANGLING_REGION_REFERENCE',
-                message: `删除 Region [${entity.name}] 可能会使 ${referencingEvents.length} 个 Event 产生悬空引用`,
-                target: op.target
-              });
-            }
+          break;
+        }
+        deletedTargets.add(entity.stableKey);
+        if (entity.kind === 'region') {
+          const referencingEvents = sceneGraph.queryEventsReferencingRegion(entity.name);
+          if (referencingEvents.length > 0) {
+            diagnostics.push({
+              severity: 'warning',
+              code: 'MAP_DANGLING_REGION_REFERENCE',
+              message: `删除 Region [${entity.name}] 可能会使 ${referencingEvents.length} 个 Event 产生悬空引用`,
+              target: op.target
+            });
           }
         }
         break;

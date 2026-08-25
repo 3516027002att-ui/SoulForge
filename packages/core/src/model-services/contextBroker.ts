@@ -213,14 +213,9 @@ export function createContextBroker(): ContextBroker {
 
           const redacted = redactSecrets(raw);
           const redactionHappened = redacted !== raw;
-          // A single oversized section cannot be honestly squeezed in — fail closed.
-          if (redacted.length > maxBytes) {
-            return failureResult(
-              'CONTEXT_LIMIT_EXCEEDED',
-              `证据片段 ${source.uri ?? source.kind} 原始 ${redacted.length} 字节超过 context 上限 ${maxBytes} 字节。`
-            );
-          }
-
+          // 先脱敏、再截取摘要，不能用完整 source 的大小提前拒绝。
+          // 大文件仍然可以贡献 bounded evidence；只有摘要/头部本身无法放入
+          // 总预算时，下面的统一 budget 分支才会 fail closed。
           const excerpt = redacted.slice(0, Math.min(excerptLength, maxBytes));
           const truncated = excerpt.length < redacted.length;
           const header = buildHeader(

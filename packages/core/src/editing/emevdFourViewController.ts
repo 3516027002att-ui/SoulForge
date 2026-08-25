@@ -300,7 +300,9 @@ export function applyEmevdPlanToDocument(
       case 'delete_event': return 4;
       case 'set_event_rest_behavior': return 5;
       case 'set_event_id': return 6;
-      default: return 7;
+      // Parameters use final instruction indexes; apply after structural ops.
+      case 'set_event_parameters': return 7;
+      default: return 8;
     }
   };
   const ordered = [...plan.operations].sort((a, b) => rank(a.kind) - rank(b.kind));
@@ -426,15 +428,51 @@ export function applyEmevdPlanToDocument(
         return { ok: false, code: 'EMEVD_EVENT_LAST', message: '不能删除最后一个事件。' };
       }
       events.splice(eventIndex, 1);
+    } else if (operation.kind === 'set_event_parameters') {
+      const eventIndex = findEventIndex(operation.eventAnchor, operation.eventId);
+      const event = eventIndex >= 0 ? events[eventIndex] : undefined;
+      if (event === undefined) {
+        return { ok: false, code: 'EMEVD_PLAN_ANCHOR_NOT_FOUND', message: '计划引用的事件锚不存在。' };
+      }
+      if (operation.parameters.some((parameter) =>
+        !Number.isSafeInteger(parameter.instructionIndex)
+        || parameter.instructionIndex < 0
+        || parameter.instructionIndex >= event.instructions.length
+        || !Number.isSafeInteger(parameter.targetStartByte)
+        || parameter.targetStartByte < 0
+        || !Number.isSafeInteger(parameter.sourceStartByte)
+        || parameter.sourceStartByte < 0
+        || !Number.isSafeInteger(parameter.byteCount)
+        || parameter.byteCount <= 0
+      )) {
+        return { ok: false, code: 'EMEVD_PARAMETER_LAYOUT_INVALID', message: '事件参数绑定的指令索引或字节布局无效。' };
+      }
+      events[eventIndex] = {
+        ...event,
+        parameters: operation.parameters.map((parameter) => ({ ...parameter }))
+      };
     }
   }
+
+  // 插入/删除后重新生成所有 instruction URI，避免 UI/下一轮计划继续携带旧下标。
+  const normalizedEvents = events.map((event) => {
+    const eventUri = `${document.resourceUri}#event/${event.eventId}`;
+    return {
+      ...event,
+      eventUri,
+      instructions: event.instructions.map((instruction, index) => ({
+        ...instruction,
+        instructionUri: `${eventUri}/instr/${index}`
+      }))
+    };
+  });
 
   return {
     ok: true,
     document: {
       ...document,
       revision: document.revision + 1,
-      events,
+      events: normalizedEvents,
       diagnostics: [
         ...document.diagnostics,
         {

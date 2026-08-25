@@ -27,11 +27,6 @@ export interface HybridVectorSource {
 const RRF_K = 60;
 /** 向量侧候选上限：lexical 之外只允许这么多纯向量命中进入融合。 */
 const VECTOR_CANDIDATE_MULTIPLIER = 2;
-/**
- * 全库余弦只在小语料上跑。真实工作区上万块时，Agent 默认路径是词法倒排；
- * 大库的纯向量命中改为只给词法候选打分，避免每次查询扫完所有 embedding。
- */
-const VECTOR_FULL_SCAN_LIMIT = 2048;
 
 export function retrieveEvidenceHybrid(
   corpus: RagCorpus | null | undefined,
@@ -39,7 +34,7 @@ export function retrieveEvidenceHybrid(
   options: RagRetrieveOptions & { vectors?: HybridVectorSource }
 ): RagRetrieveResult {
   const lexical = retrieveEvidence(corpus, query, options);
-  if (!lexical.ok) return lexical;
+  if (!lexical.ok && lexical.code !== 'insufficient_evidence') return lexical;
   const vectorSource = options.vectors;
   if (!vectorSource
     || vectorSource.vectors.size === 0
@@ -52,14 +47,14 @@ export function retrieveEvidenceHybrid(
   const chunkById = new Map(corpus.chunks.map((chunk) => [chunk.chunkId, chunk]));
 
   const vectorScored: Array<{ chunkId: string; similarity: number }> = [];
-  const scanAll = vectorSource.vectors.size <= VECTOR_FULL_SCAN_LIMIT;
-  const vectorTargets = scanAll ? corpus.chunks : lexical.hits.map((hit) => hit.chunk);
-  for (const chunk of vectorTargets) {
-    const vector = vectorSource.vectors.get(chunk.chunkId);
+  // Vector candidates are independent evidence. A large index must not be
+  // reduced to lexical hits, otherwise a semantic-only match is impossible.
+  for (const [chunkId, vector] of vectorSource.vectors) {
+    if (!chunkById.has(chunkId)) continue;
     if (!vector) continue;
     const similarity = cosineSimilarity(vectorSource.queryVector, vector);
     if (similarity <= 0) continue;
-    vectorScored.push({ chunkId: chunk.chunkId, similarity });
+    vectorScored.push({ chunkId, similarity });
   }
   vectorScored.sort((a, b) => b.similarity - a.similarity);
   const vectorTop = vectorScored.slice(0, limit * VECTOR_CANDIDATE_MULTIPLIER);
@@ -71,7 +66,8 @@ export function retrieveEvidenceHybrid(
     similarity: number | undefined;
     lexicalHit: RagHit | undefined;
   }>();
-  lexical.hits.forEach((hit, rank) => {
+  const lexicalHits = lexical.ok ? lexical.hits : [];
+  lexicalHits.forEach((hit, rank) => {
     fused.set(hit.chunk.chunkId, {
       chunkId: hit.chunk.chunkId,
       rrf: 1 / (RRF_K + rank + 1),
@@ -118,12 +114,12 @@ export function retrieveEvidenceHybrid(
   if (hits.length === 0) return lexical;
   return {
     ok: true,
-    query: lexical.query,
+    query: lexical.ok ? lexical.query : query.trim(),
     hits,
     stats: {
-      scanned: lexical.stats.scanned,
+      scanned: lexical.ok ? lexical.stats.scanned : corpus.chunks.length,
       matched: fused.size,
-      expanded: lexical.stats.expanded,
+      expanded: lexical.ok ? lexical.stats.expanded : 0,
       truncated: fused.size > hits.length
     }
   };

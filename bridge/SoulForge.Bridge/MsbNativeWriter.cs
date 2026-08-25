@@ -125,9 +125,10 @@ internal static class MsbNativeWriter
             {
                 "set_region_position" or "set_region_transform" or "delete_region" => document.Regions.Count(item => item.Name == patch.PartName),
                 "delete_event" => document.Events.Count(item => item.Name == patch.PartName),
+                // entityId is a Part/Region field. Event +0x08 is eventId and
+                // must never be exposed through the entityId mutation surface.
                 "set_property" or "set_entity_id" => document.Parts.Count(item => item.Name == patch.PartName)
-                    + document.Regions.Count(item => item.Name == patch.PartName)
-                    + document.Events.Count(item => item.Name == patch.PartName),
+                    + document.Regions.Count(item => item.Name == patch.PartName),
                 _ => document.Parts.Count(item => item.Name == patch.PartName),
             };
             if (matches != 1)
@@ -185,6 +186,36 @@ internal static class MsbNativeWriter
                     ?? throw new InvalidDataException($"MSB mutation 后找不到 part {patch.PartName}。");
                 if (patch.ModelIndex is not null && partWithModel.ModelIndex != patch.ModelIndex.Value)
                     throw new InvalidDataException("MSB part modelIndex 未按预期更新。");
+                if (patch.ModelName is not null)
+                {
+                    var model = partWithModel.ModelIndex >= 0 && partWithModel.ModelIndex < reread.Models.Count
+                        ? reread.Models[partWithModel.ModelIndex]
+                        : null;
+                    if (model is null || !model.Name.Equals(patch.ModelName, StringComparison.Ordinal))
+                        throw new InvalidDataException("MSB part modelName 未按预期更新。");
+                }
+                continue;
+            }
+
+            if (patch.Kind is "set_property" or "set_entity_id")
+            {
+                if (patch.EntityId is null) throw new InvalidDataException("MSB entityId mutation 缺少 entityId。");
+                var partWithEntityId = reread.Parts.FirstOrDefault(p => p.Name == patch.PartName);
+                var regionWithEntityId = reread.Regions.FirstOrDefault(r => r.Name == patch.PartName);
+                if (partWithEntityId is not null)
+                {
+                    if (partWithEntityId.EntityId != patch.EntityId.Value)
+                        throw new InvalidDataException("MSB part entityId 未按预期更新。");
+                }
+                else if (regionWithEntityId is not null)
+                {
+                    if (regionWithEntityId.EntityId != patch.EntityId.Value)
+                        throw new InvalidDataException("MSB region entityId 未按预期更新。");
+                }
+                else
+                {
+                    throw new InvalidDataException($"MSB entityId mutation 后找不到目标：{patch.PartName}。");
+                }
                 continue;
             }
 

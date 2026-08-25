@@ -108,7 +108,7 @@ export function MsbScenePanel(props: MsbScenePanelProps): ReactElement {
     try {
       const transaction: MapEditTransaction = {
         id: `tx-gizmo-${Date.now()}`,
-        mapId: props.sourcePath,
+        mapId: props.sourcePath.split(/[\\/]/).pop()?.replace(/\.msb(?:\.dcx)?$/i, '') ?? '',
         baseRevision: props.revision,
         description: `Human Gizmo 调整 Part [${partName}] 变换`,
         author: 'human',

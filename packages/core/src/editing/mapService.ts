@@ -8,12 +8,8 @@
 import { basename } from 'node:path';
 import {
   buildCanonicalMapDocument,
-  exportMapSceneForBlender,
-  importBlenderDeltaToTransaction,
   MapSceneGraph,
   validateMapTransaction,
-  type BlenderDeltaImport,
-  type BlenderSceneExport,
   type MapDocument,
   type MapEditTransaction,
   type MapEntity,
@@ -22,7 +18,6 @@ import {
 } from '@soulforge/shared';
 import { readMsbDocumentViaBridge } from './msbBridgeRead.js';
 import type { NativeEditSession } from './nativeEditSession.js';
-import { setMsbPartTransform, type MsbPartTransformEdit } from './msbEdit.js';
 import { applyNativeMutation } from './editorMutationService.js';
 import { commitMsbMutationViaBridge, type MsbBridgeMutation } from './msbBridgeCommit.js';
 
@@ -53,6 +48,18 @@ export interface MapBatchTransformResult {
   before: Array<{ name: string; posX: number; posY: number; posZ: number }>;
   after: Array<{ name: string; posX: number; posY: number; posZ: number }>;
   error?: { code: string; message: string };
+}
+
+export interface MapTransactionResult {
+  ok: boolean;
+  transactionId: string;
+  appliedOperations: number;
+  revision?: string;
+  /** Whether Patch Engine accepted the staged payload. */
+  committed?: boolean;
+  /** Whether the post-commit native reread verified the requested state. */
+  verification?: 'passed' | 'failed' | 'not_run';
+  error?: { code: string; message: string; details?: unknown };
 }
 
 /**
@@ -235,8 +242,8 @@ export async function batchTransformMapParts(
   }
 
   const { doc, sceneGraph } = loaded;
-  const edits: MsbPartTransformEdit[] = [];
   const beforeList: Array<{ name: string; posX: number; posY: number; posZ: number }> = [];
+  const operations: MapEditTransaction['operations'] = [];
 
   for (const target of input.targets) {
     const part = sceneGraph.findPart(target);
@@ -262,21 +269,28 @@ export async function batchTransformMapParts(
     const newScaleY = part.transform.scale[1] * mult;
     const newScaleZ = part.transform.scale[2] * mult;
 
-    edits.push({
-      address: part.address,
-      posX: Math.round(newPosX * 1e4) / 1e4,
-      posY: Math.round(newPosY * 1e4) / 1e4,
-      posZ: Math.round(newPosZ * 1e4) / 1e4,
-      rotX: Math.round(newRotX * 1e4) / 1e4,
-      rotY: Math.round(newRotY * 1e4) / 1e4,
-      rotZ: Math.round(newRotZ * 1e4) / 1e4,
-      scaleX: Math.round(newScaleX * 1e4) / 1e4,
-      scaleY: Math.round(newScaleY * 1e4) / 1e4,
-      scaleZ: Math.round(newScaleZ * 1e4) / 1e4
+    operations.push({
+      kind: 'set_transform',
+      target: part.stableKey,
+      position: [
+        Math.round(newPosX * 1e4) / 1e4,
+        Math.round(newPosY * 1e4) / 1e4,
+        Math.round(newPosZ * 1e4) / 1e4
+      ],
+      rotation: [
+        Math.round(newRotX * 1e4) / 1e4,
+        Math.round(newRotY * 1e4) / 1e4,
+        Math.round(newRotZ * 1e4) / 1e4
+      ],
+      scale: [
+        Math.round(newScaleX * 1e4) / 1e4,
+        Math.round(newScaleY * 1e4) / 1e4,
+        Math.round(newScaleZ * 1e4) / 1e4
+      ]
     });
   }
 
-  if (edits.length === 0) {
+  if (operations.length === 0) {
     return {
       ok: false,
       mapId: doc.mapId,
@@ -288,12 +302,16 @@ export async function batchTransformMapParts(
     };
   }
 
-  const setResult = await setMsbPartTransform({
-    edit,
-    file,
-    edits
-  });
-
+  const transaction: MapEditTransaction = {
+    id: `tx-batch-${Date.now()}`,
+    mapId: doc.mapId,
+    baseRevision: doc.revision,
+    description: `批量变换 ${operations.length} 个地图 Part`,
+    author: 'agent',
+    operations,
+    timestamp: Date.now()
+  };
+  const setResult = await executeMapTransaction(edit, file, transaction);
   if (!setResult.ok) {
     return {
       ok: false,
@@ -302,21 +320,37 @@ export async function batchTransformMapParts(
       targets: input.targets,
       before: beforeList,
       after: [],
-      error: setResult.error
+      error: setResult.error ?? { code: 'MAP_WRITE_FAILED', message: '地图事务写入失败。' }
     };
   }
 
-  const afterList = setResult.after.map((p) => ({
-    name: p.name,
-    posX: p.posX,
-    posY: p.posY,
-    posZ: p.posZ
-  }));
+  const reread = await loadMapDocument(edit, file);
+  if (!reread.ok) {
+    return {
+      ok: false,
+      mapId: doc.mapId,
+      modifiedCount: operations.length,
+      targets: input.targets,
+      before: beforeList,
+      after: [],
+      error: reread.error
+    };
+  }
+  const afterList = operations.flatMap((operation) => {
+    if (operation.kind !== 'set_transform') return [];
+    const part = reread.sceneGraph.findPart(operation.target);
+    return part ? [{
+      name: part.name,
+      posX: part.transform.position[0],
+      posY: part.transform.position[1],
+      posZ: part.transform.position[2]
+    }] : [];
+  });
 
   return {
     ok: true,
     mapId: doc.mapId,
-    modifiedCount: setResult.mutations,
+    modifiedCount: operations.length,
     targets: input.targets,
     before: beforeList,
     after: afterList
@@ -330,16 +364,17 @@ export async function executeMapTransaction(
   edit: NativeEditSession,
   file: string,
   transaction: MapEditTransaction
-): Promise<{
-  ok: boolean;
-  transactionId: string;
-  appliedOperations: number;
-  revision?: string;
-  error?: { code: string; message: string; details?: unknown };
-}> {
+): Promise<MapTransactionResult> {
   const loaded = await loadMapDocument(edit, file);
   if (!loaded.ok) {
-    return { ok: false, transactionId: transaction.id, appliedOperations: 0, error: loaded.error };
+    return {
+      ok: false,
+      transactionId: transaction.id,
+      appliedOperations: 0,
+      committed: false,
+      verification: 'not_run',
+      error: loaded.error
+    };
   }
 
   // Preflight validation
@@ -349,6 +384,8 @@ export async function executeMapTransaction(
       ok: false,
       transactionId: transaction.id,
       appliedOperations: 0,
+      committed: false,
+      verification: 'not_run',
       error: {
         code: 'MAP_TRANSACTION_VALIDATION_FAILED',
         message: 'MapEditTransaction 校验未通过',
@@ -357,226 +394,152 @@ export async function executeMapTransaction(
     };
   }
 
-  // Working simulation state
-  const workingParts = new Map(loaded.doc.parts.map((p) => [p.name, {
-    ...p,
-    transform: {
-      position: [...p.transform.position] as [number, number, number],
-      rotation: [...p.transform.rotation] as [number, number, number],
-      scale: [...p.transform.scale] as [number, number, number]
-    }
-  }]));
-  const workingRegions = new Map(loaded.doc.regions.map((r) => [r.name, {
-    ...r,
-    transform: {
-      position: [...r.transform.position] as [number, number, number],
-      rotation: [...r.transform.rotation] as [number, number, number],
-      scale: [...r.transform.scale] as [number, number, number]
-    }
-  }]));
-  const workingEvents = new Map(loaded.doc.events.map((e) => [e.name, { ...e }]));
+  // All mutable state is keyed by canonical stableKey. Display names are only
+  // aliases and may collide across MSB families.
+  const workingParts = new Map<string, MapPartEntity>(
+    loaded.doc.parts.map((part) => [part.stableKey, cloneMapEntity(part) as MapPartEntity])
+  );
+  const workingRegions = new Map<string, MapRegionEntity>(
+    loaded.doc.regions.map((region) => [region.stableKey, cloneMapEntity(region) as MapRegionEntity])
+  );
+  const workingEvents = new Map<string, Extract<MapEntity, { kind: 'event' }>>(
+    loaded.doc.events.map((event) => [event.stableKey, cloneMapEntity(event) as Extract<MapEntity, { kind: 'event' }>])
+  );
+  const expectedEntities = new Map<string, MapEntity>();
+  const deletedKeys = new Set<string>();
 
   const mutations: MsbBridgeMutation[] = [];
+
+  const resolveWorking = (target: string): { key: string; entity: MapEntity } | undefined => {
+    const resolved = loaded.sceneGraph.resolveEntity(target);
+    if (!resolved.ok) return undefined;
+    const key = resolved.entity.stableKey;
+    const entity = resolved.entity.kind === 'part'
+      ? workingParts.get(key)
+      : resolved.entity.kind === 'region'
+        ? workingRegions.get(key)
+        : resolved.entity.kind === 'event'
+          ? workingEvents.get(key)
+          : undefined;
+    return entity ? { key, entity } : undefined;
+  };
+
+  const pushTransformMutation = (entity: MapPartEntity | MapRegionEntity): void => {
+    const base = {
+      partName: entity.name,
+      posX: entity.transform.position[0],
+      posY: entity.transform.position[1],
+      posZ: entity.transform.position[2],
+      rotX: entity.transform.rotation[0],
+      rotY: entity.transform.rotation[1],
+      rotZ: entity.transform.rotation[2],
+      scaleX: entity.transform.scale[0],
+      scaleY: entity.transform.scale[1],
+      scaleZ: entity.transform.scale[2]
+    };
+    mutations.push(entity.kind === 'part'
+      ? { kind: 'set_part_transform', ...base }
+      : { kind: 'set_region_transform', ...base });
+  };
+
+  const applyTransform = (
+    entity: MapPartEntity | MapRegionEntity,
+    operation: Extract<MapEditTransaction['operations'][number], { kind: 'set_transform' }>
+  ): void => {
+    if (operation.position) entity.transform.position = [...operation.position];
+    if (operation.rotation) entity.transform.rotation = [...operation.rotation];
+    if (operation.scale) entity.transform.scale = [...operation.scale];
+  };
+
+  const applyDelta = (
+    entity: MapPartEntity | MapRegionEntity,
+    operation: Extract<MapEditTransaction['operations'][number], { kind: 'batch_transform' }>
+  ): void => {
+    const positionDelta = operation.positionDelta;
+    const rotationDelta = operation.rotationDelta;
+    const scaleDelta = operation.scaleDelta;
+    if (positionDelta) {
+      entity.transform.position = entity.transform.position.map((value, index) => value + positionDelta[index]!) as [number, number, number];
+    }
+    if (rotationDelta) {
+      entity.transform.rotation = entity.transform.rotation.map((value, index) => value + rotationDelta[index]!) as [number, number, number];
+    }
+    if (scaleDelta) {
+      entity.transform.scale = entity.transform.scale.map((value, index) => value + scaleDelta[index]!) as [number, number, number];
+    }
+  };
 
   for (const op of transaction.operations) {
     switch (op.kind) {
       case 'set_transform': {
-        const part = workingParts.get(op.target);
-        if (part) {
-          if (op.position) part.transform.position = [...op.position];
-          if (op.rotation) part.transform.rotation = [...op.rotation];
-          if (op.scale) part.transform.scale = [...op.scale];
-          mutations.push({
-            kind: 'set_part_transform',
-            partName: part.name,
-            posX: part.transform.position[0],
-            posY: part.transform.position[1],
-            posZ: part.transform.position[2],
-            rotX: part.transform.rotation[0],
-            rotY: part.transform.rotation[1],
-            rotZ: part.transform.rotation[2],
-            scaleX: part.transform.scale[0],
-            scaleY: part.transform.scale[1],
-            scaleZ: part.transform.scale[2]
-          });
-          break;
+        const resolved = resolveWorking(op.target);
+        if (!resolved || (resolved.entity.kind !== 'part' && resolved.entity.kind !== 'region')) {
+          return mapTransactionFailure(transaction.id, 'MAP_ENTITY_NOT_FOUND', `目标实体未找到或已被删除: ${op.target}`);
         }
-        const region = workingRegions.get(op.target);
-        if (region) {
-          if (op.position) region.transform.position = [...op.position];
-          if (op.rotation) region.transform.rotation = [...op.rotation];
-          if (op.scale) region.transform.scale = [...op.scale];
-          mutations.push({
-            kind: 'set_region_transform',
-            partName: region.name,
-            posX: region.transform.position[0],
-            posY: region.transform.position[1],
-            posZ: region.transform.position[2],
-            rotX: region.transform.rotation[0],
-            rotY: region.transform.rotation[1],
-            rotZ: region.transform.rotation[2],
-            scaleX: region.transform.scale[0],
-            scaleY: region.transform.scale[1],
-            scaleZ: region.transform.scale[2]
-          });
-          break;
-        }
-        return {
-          ok: false,
-          transactionId: transaction.id,
-          appliedOperations: 0,
-          error: { code: 'MAP_ENTITY_NOT_FOUND', message: `目标实体未找到或已被删除: ${op.target}` }
-        };
+        applyTransform(resolved.entity, op);
+        pushTransformMutation(resolved.entity);
+        expectedEntities.set(resolved.key, cloneMapEntity(resolved.entity));
+        break;
       }
       case 'batch_transform': {
         for (const target of op.targets) {
-          const part = workingParts.get(target);
-          if (part) {
-            if (op.positionDelta) {
-              part.transform.position[0] += op.positionDelta[0];
-              part.transform.position[1] += op.positionDelta[1];
-              part.transform.position[2] += op.positionDelta[2];
-            }
-            if (op.rotationDelta) {
-              part.transform.rotation[0] += op.rotationDelta[0];
-              part.transform.rotation[1] += op.rotationDelta[1];
-              part.transform.rotation[2] += op.rotationDelta[2];
-            }
-            if (op.scaleDelta) {
-              part.transform.scale[0] += op.scaleDelta[0];
-              part.transform.scale[1] += op.scaleDelta[1];
-              part.transform.scale[2] += op.scaleDelta[2];
-            }
-            mutations.push({
-              kind: 'set_part_transform',
-              partName: part.name,
-              posX: part.transform.position[0],
-              posY: part.transform.position[1],
-              posZ: part.transform.position[2],
-              rotX: part.transform.rotation[0],
-              rotY: part.transform.rotation[1],
-              rotZ: part.transform.rotation[2],
-              scaleX: part.transform.scale[0],
-              scaleY: part.transform.scale[1],
-              scaleZ: part.transform.scale[2]
-            });
-            continue;
+          const resolved = resolveWorking(target);
+          if (!resolved || (resolved.entity.kind !== 'part' && resolved.entity.kind !== 'region')) {
+            return mapTransactionFailure(transaction.id, 'MAP_ENTITY_NOT_FOUND', `批量目标实体未找到或已被删除: ${target}`);
           }
-          const region = workingRegions.get(target);
-          if (region) {
-            if (op.positionDelta) {
-              region.transform.position[0] += op.positionDelta[0];
-              region.transform.position[1] += op.positionDelta[1];
-              region.transform.position[2] += op.positionDelta[2];
-            }
-            if (op.rotationDelta) {
-              region.transform.rotation[0] += op.rotationDelta[0];
-              region.transform.rotation[1] += op.rotationDelta[1];
-              region.transform.rotation[2] += op.rotationDelta[2];
-            }
-            if (op.scaleDelta) {
-              region.transform.scale[0] += op.scaleDelta[0];
-              region.transform.scale[1] += op.scaleDelta[1];
-              region.transform.scale[2] += op.scaleDelta[2];
-            }
-            mutations.push({
-              kind: 'set_region_transform',
-              partName: region.name,
-              posX: region.transform.position[0],
-              posY: region.transform.position[1],
-              posZ: region.transform.position[2],
-              rotX: region.transform.rotation[0],
-              rotY: region.transform.rotation[1],
-              rotZ: region.transform.rotation[2],
-              scaleX: region.transform.scale[0],
-              scaleY: region.transform.scale[1],
-              scaleZ: region.transform.scale[2]
-            });
-            continue;
-          }
-          return {
-            ok: false,
-            transactionId: transaction.id,
-            appliedOperations: 0,
-            error: { code: 'MAP_ENTITY_NOT_FOUND', message: `批量目标实体未找到或已被删除: ${target}` }
-          };
+          applyDelta(resolved.entity, op);
+          pushTransformMutation(resolved.entity);
+          expectedEntities.set(resolved.key, cloneMapEntity(resolved.entity));
         }
         break;
       }
       case 'set_property': {
-        if (op.property === 'entityId' && typeof op.value === 'number') {
-          const part = workingParts.get(op.target);
-          if (part) {
-            part.entityId = op.value;
-            mutations.push({ kind: 'set_property', partName: part.name, entityId: op.value });
-            break;
-          }
-          const region = workingRegions.get(op.target);
-          if (region) {
-            region.entityId = op.value;
-            mutations.push({ kind: 'set_property', partName: region.name, entityId: op.value });
-            break;
-          }
-          const event = workingEvents.get(op.target);
-          if (event) {
-            event.entityId = op.value;
-            mutations.push({ kind: 'set_property', partName: event.name, entityId: op.value });
-            break;
-          }
-          return {
-            ok: false,
-            transactionId: transaction.id,
-            appliedOperations: 0,
-            error: { code: 'MAP_ENTITY_NOT_FOUND', message: `属性修改目标实体未找到或已被删除: ${op.target}` }
-          };
+        const resolved = resolveWorking(op.target);
+        if (!resolved || (resolved.entity.kind !== 'part' && resolved.entity.kind !== 'region')) {
+          return mapTransactionFailure(transaction.id, 'MAP_ENTITY_NOT_FOUND', `属性修改目标实体未找到或已被删除: ${op.target}`);
         }
-        return {
-          ok: false,
-          transactionId: transaction.id,
-          appliedOperations: 0,
-          error: { code: 'MAP_PROPERTY_UNSUPPORTED', message: `不支持的属性修改: ${op.property}` }
-        };
+        if (op.property !== 'entityId' || typeof op.value !== 'number') {
+          return mapTransactionFailure(transaction.id, 'MAP_PROPERTY_UNSUPPORTED', `不支持的属性修改: ${op.property}`);
+        }
+        resolved.entity.entityId = op.value;
+        mutations.push({ kind: 'set_property', partName: resolved.entity.name, entityId: op.value });
+        expectedEntities.set(resolved.key, cloneMapEntity(resolved.entity));
+        break;
       }
       case 'change_model': {
-        const part = workingParts.get(op.target);
-        if (!part) {
-          return {
-            ok: false,
-            transactionId: transaction.id,
-            appliedOperations: 0,
-            error: { code: 'MAP_PART_NOT_FOUND', message: `修改模型目标 Part 未找到或已被删除: ${op.target}` }
-          };
+        const resolved = resolveWorking(op.target);
+        if (!resolved || resolved.entity.kind !== 'part') {
+          return mapTransactionFailure(transaction.id, 'MAP_PART_NOT_FOUND', `修改模型目标 Part 未找到或已被删除: ${op.target}`);
         }
-        part.modelName = op.newModelName;
+        resolved.entity.modelName = op.newModelName;
         mutations.push({
           kind: 'change_model',
-          partName: part.name,
+          partName: resolved.entity.name,
           modelName: op.newModelName
         });
+        expectedEntities.set(resolved.key, cloneMapEntity(resolved.entity));
         break;
       }
       case 'delete': {
-        if (workingParts.has(op.target)) {
-          workingParts.delete(op.target);
-          mutations.push({ kind: 'delete_part', partName: op.target });
-          break;
+        const resolved = resolveWorking(op.target);
+        if (!resolved || (resolved.entity.kind !== 'part'
+          && resolved.entity.kind !== 'region'
+          && resolved.entity.kind !== 'event')) {
+          return mapTransactionFailure(transaction.id, 'MAP_ENTITY_NOT_FOUND', `删除目标实体未找到或已被删除: ${op.target}`);
         }
-        if (workingRegions.has(op.target)) {
-          workingRegions.delete(op.target);
-          mutations.push({ kind: 'delete_region', partName: op.target });
-          break;
+        if (resolved.entity.kind === 'part') {
+          workingParts.delete(resolved.key);
+          mutations.push({ kind: 'delete_part', partName: resolved.entity.name });
+        } else if (resolved.entity.kind === 'region') {
+          workingRegions.delete(resolved.key);
+          mutations.push({ kind: 'delete_region', partName: resolved.entity.name });
+        } else {
+          workingEvents.delete(resolved.key);
+          mutations.push({ kind: 'delete_event', partName: resolved.entity.name });
         }
-        if (workingEvents.has(op.target)) {
-          workingEvents.delete(op.target);
-          mutations.push({ kind: 'delete_event', partName: op.target });
-          break;
-        }
-        return {
-          ok: false,
-          transactionId: transaction.id,
-          appliedOperations: 0,
-          error: { code: 'MAP_ENTITY_NOT_FOUND', message: `删除目标实体未找到或已被删除: ${op.target}` }
-        };
+        expectedEntities.delete(resolved.key);
+        deletedKeys.add(resolved.key);
+        break;
       }
     }
   }
@@ -586,7 +549,9 @@ export async function executeMapTransaction(
       ok: true,
       transactionId: transaction.id,
       appliedOperations: 0,
-      revision: loaded.doc.revision
+      revision: loaded.doc.revision,
+      committed: false,
+      verification: 'not_run'
     };
   }
 
@@ -614,7 +579,10 @@ export async function executeMapTransaction(
     }),
     title: `MSB transaction [${transaction.id}] (${mutations.length} mutations)`,
     confirmActionLabel: '提交 MSB 地图事务'
-  }, { commit: edit.commitPort });
+  }, {
+    ...(edit.confirmationPort ? { confirm: edit.confirmationPort } : {}),
+    commit: edit.commitPort
+  });
 
   if (outcome.status !== 'committed' || !outcome.result.ok) {
     const diagnostics = outcome.status === 'failed'
@@ -626,6 +594,8 @@ export async function executeMapTransaction(
       ok: false,
       transactionId: transaction.id,
       appliedOperations: 0,
+      committed: false,
+      verification: 'not_run',
       error: {
         code: diagnostics[0]?.code ?? 'MSB_WRITE_FAILED',
         message: diagnostics[0]?.message ?? 'MSB 写入失败。',
@@ -641,6 +611,8 @@ export async function executeMapTransaction(
       ok: false,
       transactionId: transaction.id,
       appliedOperations: transaction.operations.length,
+      committed: true,
+      verification: 'failed',
       error: {
         code: 'MAP_REREAD_FAILED',
         message: 'MSB 提交后重读失败，无法确认写回状态'
@@ -648,42 +620,51 @@ export async function executeMapTransaction(
     };
   }
 
-  // Verify all working entities match reread
-  for (const [name, expectedPart] of workingParts) {
-    const actual = reread.sceneGraph.findPart(name);
+  // Verify only touched entities, using stableKey identity rather than a
+  // potentially duplicated display name.
+  for (const key of deletedKeys) {
+    if (reread.sceneGraph.findEntity(key)) {
+      return mapTransactionFailure(
+        transaction.id,
+        'MAP_POSTCONDITION_FAILED',
+        `删除后实体仍存在: ${key}`,
+        transaction.operations.length,
+        true
+      );
+    }
+  }
+  for (const [key, expected] of expectedEntities) {
+    const actual = reread.sceneGraph.findEntity(key);
     if (!actual) {
-      return {
-        ok: false,
-        transactionId: transaction.id,
-        appliedOperations: transaction.operations.length,
-        error: { code: 'MAP_POSTCONDITION_FAILED', message: `写回后缺少 Part: ${name}` }
-      };
+      return mapTransactionFailure(
+        transaction.id,
+        'MAP_POSTCONDITION_FAILED',
+        `写回后缺少实体: ${key}`,
+        transaction.operations.length,
+        true
+      );
     }
-    if (Math.abs(actual.transform.position[0] - expectedPart.transform.position[0]) > 0.001 ||
-        Math.abs(actual.transform.position[1] - expectedPart.transform.position[1]) > 0.001 ||
-        Math.abs(actual.transform.position[2] - expectedPart.transform.position[2]) > 0.001) {
-      return {
-        ok: false,
-        transactionId: transaction.id,
-        appliedOperations: transaction.operations.length,
-        error: { code: 'MAP_POSTCONDITION_FAILED', message: `Part ${name} 坐标写回后与预期不符` }
-      };
+    if ('transform' in expected && 'transform' in actual
+      && !sameTransform(expected.transform, actual.transform)) {
+      return mapTransactionFailure(
+        transaction.id,
+        'MAP_POSTCONDITION_FAILED',
+        `实体 ${key} 变换写回后与预期不符`,
+        transaction.operations.length,
+        true
+      );
     }
-    if (expectedPart.modelName && actual.modelName !== expectedPart.modelName) {
-      return {
-        ok: false,
-        transactionId: transaction.id,
-        appliedOperations: transaction.operations.length,
-        error: { code: 'MAP_POSTCONDITION_FAILED', message: `Part ${name} 模型写回后与预期不符` }
-      };
+    if (expected.kind === 'part' && actual.kind === 'part') {
+      if (expected.modelName !== actual.modelName) {
+        return mapTransactionFailure(transaction.id, 'MAP_POSTCONDITION_FAILED', `Part ${key} 模型写回后与预期不符`, transaction.operations.length, true);
+      }
+      if (expected.entityId !== undefined && actual.entityId !== expected.entityId) {
+        return mapTransactionFailure(transaction.id, 'MAP_POSTCONDITION_FAILED', `Part ${key} entityId 写回后与预期不符`, transaction.operations.length, true);
+      }
     }
-    if (expectedPart.entityId !== undefined && actual.entityId !== expectedPart.entityId) {
-      return {
-        ok: false,
-        transactionId: transaction.id,
-        appliedOperations: transaction.operations.length,
-        error: { code: 'MAP_POSTCONDITION_FAILED', message: `Part ${name} entityId 写回后与预期不符` }
-      };
+    if (expected.kind === 'region' && actual.kind === 'region'
+      && expected.entityId !== undefined && actual.entityId !== expected.entityId) {
+      return mapTransactionFailure(transaction.id, 'MAP_POSTCONDITION_FAILED', `Region ${key} entityId 写回后与预期不符`, transaction.operations.length, true);
     }
   }
 
@@ -691,6 +672,47 @@ export async function executeMapTransaction(
     ok: true,
     transactionId: transaction.id,
     appliedOperations: transaction.operations.length,
-    revision: reread.doc.revision
+    revision: reread.doc.revision,
+    committed: true,
+    verification: 'passed'
+  };
+}
+
+function cloneMapEntity(entity: MapEntity): MapEntity {
+  if (entity.kind === 'part' || entity.kind === 'region') {
+    return {
+      ...entity,
+      transform: {
+        position: [...entity.transform.position] as [number, number, number],
+        rotation: [...entity.transform.rotation] as [number, number, number],
+        scale: [...entity.transform.scale] as [number, number, number]
+      }
+    };
+  }
+  return { ...entity };
+}
+
+function sameTransform(
+  left: MapPartEntity['transform'],
+  right: MapPartEntity['transform']
+): boolean {
+  return [...left.position, ...left.rotation, ...left.scale]
+    .every((value, index) => Math.abs(value - [...right.position, ...right.rotation, ...right.scale][index]!) <= 0.001);
+}
+
+function mapTransactionFailure(
+  transactionId: string,
+  code: string,
+  message: string,
+  appliedOperations = 0,
+  committed = false
+): MapTransactionResult {
+  return {
+    ok: false,
+    transactionId,
+    appliedOperations,
+    committed,
+    verification: committed ? 'failed' : 'not_run',
+    error: { code, message }
   };
 }

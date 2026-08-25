@@ -250,6 +250,13 @@ function buildMutationPayload(
       ...(m.eventId !== undefined ? { eventId: m.eventId } : {})
     };
   }
+  if ('kind' in m && m.kind === 'set_event_parameters') {
+    return {
+      mutation: 'set_event_parameters',
+      eventId: m.eventId,
+      parameters: m.parameters
+    };
+  }
   if ('kind' in m && m.kind === 'insert_instruction') {
     return {
       mutation: 'insert_instruction',

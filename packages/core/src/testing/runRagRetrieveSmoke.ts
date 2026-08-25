@@ -161,6 +161,18 @@ VALUES (?, ?, ?, ?, ?)`).run(index.workspaceId, workspace.root, 'sekiro', now, n
     if (!merged.chunks.some((chunk) => chunk.family === 'event')) {
       throw new Error('scan merge dropped previously analyzed event chunks');
     }
+    const stalePersisted = createRagCorpus({
+      workspaceId: index.workspaceId,
+      builtAt: reloaded.builtAt,
+      chunks: reloaded.chunks.map((chunk) => chunk.family === 'event'
+        ? { ...chunk, sourceHash: 'stale-source-hash' }
+        : chunk),
+      references: reloaded.references
+    });
+    const staleMerged = mergeCatalogAndPersisted(catalogOnly, stalePersisted);
+    if (staleMerged.chunks.some((chunk) => chunk.family === 'event')) {
+      throw new Error('scan merge retained an event chunk from a stale source hash');
+    }
     database.close();
 
     const registry = createDefaultToolRegistry();
@@ -344,6 +356,7 @@ function makeFile(relativePath: string, resourceKind: IndexedFile['resourceKind'
     formatLabel: 'EMEVD',
     size: 32,
     mtimeMs: 1,
+    sha256: 'event-source-v1',
     parseStatus: 'partial',
     diagnostics: []
   };
