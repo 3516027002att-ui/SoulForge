@@ -31,9 +31,7 @@ import type {
 import type { ModelServiceDiagnostic } from './errorClassification.js';
 import { classifyFetchError } from './errorClassification.js';
 import type { AiToolPermissionLevel } from '@soulforge/shared';
-// 权限判据的唯一权威来源。agentLoop 直接消费它而不是复写一套 plan 语义 ——
-// 两份可以各自漂移的真相比一层额外防护危险。
-import { isAiToolPermissionAllowed, maxPermissionForMode } from '../ai/toolPermissions.js';
+import { decideAiToolPermission } from '../ai/toolPermissions.js';
 import {
   DEFAULT_STREAM_MAX_RETRIES,
   MAX_RETRY_ATTEMPTS_CAP,
@@ -101,15 +99,6 @@ export function redactSecrets(text: string): string {
   return out;
 }
 
-/** 最近一条 user 消息文本（RAG 自动检索的查询串来源）。 */
-function lastUserMessageText(messages: readonly ChatMessage[]): string {
-  for (let i = messages.length - 1; i >= 0; i -= 1) {
-    const message = messages[i];
-    if (message?.role === 'user') return message.content;
-  }
-  return '';
-}
-
 export function assertNoSecretLeak(payload: unknown, apiKey: string): void {
   const serialized = JSON.stringify(payload);
   if (apiKey && serialized.includes(apiKey)) {
@@ -139,70 +128,6 @@ export const DEFAULT_APPROVAL_REQUIRED_LEVELS: readonly string[] = Object.freeze
 ]);
 
 /**
- * 单一权限判据入口。
- *
- * ── 统一前的问题(实测,2026-08-08)──
- *
- * 此前本函数在 plan 模式下用一份**按名字硬编码的白名单**,与
- * `ai/toolPermissions.ts` 的 `maxPermissionForMode` 各自表达一套 plan 语义。
- * 对 17 个生产工具逐个比对,分歧 2 个:`propose_text_patch`(propose)与
- * `validate_patch`(validate)—— 白名单拦,等级阶梯放行。
- *
- * 两套语义并存的代价不在这 2 个工具本身,而在**新增工具时无人知道该改哪边**:
- * 一个 read 等级的新工具忘记加进白名单会在 plan 模式被拒(表现为「agent 说
- * 这个工具没权限」而等级明明够),反过来一个等级被误标为 read 的写类工具只要
- * 名字在册就能进 plan 模式。这不是「两层防护」,是两个可以各自漂移的真相。
- *
- * ── 统一后 ──
- *
- * plan 模式的允许集由 `maxPermissionForMode` 唯一决定,本函数不再另立语义。
- * 白名单降级为 `PLAN_MODE_EXTRA_DENY`:一份**显式收紧**清单,只能比等级判据
- * 更严、不能更宽,且每一条都要写明为什么。
- *
- * `validate_patch` 与 `propose_text_patch` 就是这样的两条。它们在 plan 模式
- * 下被额外拒绝,依据是实测而非偏好:`validate_patch` 走
- * `dryRunPatchProposal` → `stageAndValidateProposalThroughTransaction`,
- * 需要 `workspaceRoot`、会创建暂存目录并跑校验器 —— 那是**写暂存区**,
- * 是 stage 语义的操作,而 plan 模式的承诺是只读。
- *
- * 为什么不改 `maxPermissionForMode('plan')` 的返回值:`plan → validate` 这条
- * 上限被两处已封存的 smoke 钉住(runV05FoundationSmoke:132/135 与
- * runAiToolPermissionSmoke 的 MODE_CEILINGS),它是 architecture scaffold 的
- * policy gate 契约。改它会打断已封存断言,且那一层还服务 scaffold harness,
- * 不只服务 agent loop。所以收紧发生在**离执行更近的一层**,并显式声明。
- *
- * 净效果:行为与统一前逐工具一致(实测 17/17 相同),但 plan 语义只有一个
- * 权威来源,额外限制变成一份可查、带理由、且被门禁钉住只能更严的清单。
- */
-/**
- * plan 模式下在等级判据之外**额外拒绝**的工具,附实测理由。
- *
- * 这份清单只能让 plan 模式更严,不能更宽 —— 由 test:agent-permission-unified
- * 门禁钉住。加一条就要写清「为什么这个工具的等级判据不足以拦它」。
- */
-export const PLAN_MODE_EXTRA_DENY: ReadonlyMap<string, string> = new Map([
-  [
-    'validate_patch',
-    'validate_patch 走 dryRunPatchProposal → '
-      + 'stageAndValidateProposalThroughTransaction,需要 workspaceRoot、'
-      + '会创建暂存目录并跑校验器。那是写暂存区(stage 语义),'
-      + 'plan 模式承诺只读。'
-  ],
-  [
-    'propose_text_patch',
-    'propose_text_patch 产出 PatchProposal 本身不写盘,但它是写链的入口:'
-      + 'plan 模式下放行它会让「计划」与「已准备好的写入提案」在界面上难以区分。'
-      + '与 validate_patch 一起拒绝,保持 plan 模式的边界是一条直线。'
-  ],
-  [
-    'propose_plaintext_script_edit',
-    '与 propose_text_patch 同一理由:它同样产出 PatchIR 而不写盘,同样是写链入口。'
-      + '两者在 plan 模式下的待遇必须一致 —— 一个被拒一个放行,'
-      + '「plan 模式能不能准备写入」就取决于用哪个工具,那不是一条能说清的边界。'
-  ]
-]);
-
-/**
  * 已知的非生产工具名(fake-loop / conformance 自造,以及 testing/harness 的
  * scaffold registry)。它们没有 permissionLevel 可查,故仍按名字判定。
  *
@@ -224,10 +149,7 @@ export function isToolAllowedInMode(
   toolName: string,
   mode: AgentRunRequest['permissionMode'],
   registeredTools: Set<string>,
-  /**
-   * 工具名 → permissionLevel。由调用方从注册表投影传入(bridge 已透出该字段)。
-   * 缺省时退回 NON_PRODUCTION_PLAN_ALLOW 判定,兼容既有测试调用点。
-   */
+  /** 工具名 → permissionLevel；生产 bridge 会透出该字段。 */
   toolLevels?: ReadonlyMap<string, string>
 ): { ok: true } | { ok: false; code: string; message: string } {
   if (!registeredTools.has(toolName)) {
@@ -237,44 +159,29 @@ export function isToolAllowedInMode(
       message: `工具 ${toolName} 未在注册表中。`
     };
   }
-  if (mode === 'plan') {
-    // 显式收紧清单优先:它只能让 plan 更严,理由随拒绝信息一起回给模型,
-    // 这样模型知道的是「为什么不行」而不只是「不行」。
-    const extraDenyReason = PLAN_MODE_EXTRA_DENY.get(toolName);
-    if (extraDenyReason !== undefined) {
+  const level = toolLevels?.get(toolName);
+  if (level === undefined) {
+    // 没有等级信息只允许兼容测试构造的只读工具；生产 bridge 一律带等级。
+    if (mode === 'plan' && !NON_PRODUCTION_PLAN_ALLOW.has(toolName)) {
       return {
         ok: false,
         code: 'AGENT_TOOL_DENIED_PLAN_MODE',
-        message: `计划模式不允许执行工具 ${toolName}。${extraDenyReason}`
+        message: `计划模式不允许执行工具 ${toolName}(未提供 permissionLevel,`
+          + '且不在已知的非生产只读工具清单里)。'
       };
     }
+    return { ok: true };
+  }
 
-    const level = toolLevels?.get(toolName);
-    if (level === undefined) {
-      // 没有等级信息:只可能是测试构造的工具。生产路径一律带等级
-      // (agentToolBridge 透出 permissionLevel),故这里落到名字判定不会
-      // 影响生产语义。
-      if (!NON_PRODUCTION_PLAN_ALLOW.has(toolName)) {
-        return {
-          ok: false,
-          code: 'AGENT_TOOL_DENIED_PLAN_MODE',
-          message: `计划模式不允许执行工具 ${toolName}(未提供 permissionLevel,`
-            + '且不在已知的非生产只读工具清单里)。'
-        };
-      }
-      return { ok: true };
-    }
-
-    // 等级判据是唯一权威来源。plan 模式的上限由 maxPermissionForMode 决定,
-    // 本层不另立语义 —— 那正是统一前的问题所在。
-    if (!isAiToolPermissionAllowed(level as AiToolPermissionLevel, 'plan')) {
-      return {
-        ok: false,
-        code: 'AGENT_TOOL_DENIED_PLAN_MODE',
-        message: `计划模式不允许执行工具 ${toolName}:其权限等级 ${level} `
-          + `超过 plan 模式上限 ${maxPermissionForMode('plan')}。`
-      };
-    }
+  const policyMode = mode === 'full' ? 'fullPermission' : mode;
+  const decision = decideAiToolPermission(level as AiToolPermissionLevel, policyMode);
+  if (!decision.allowed) {
+    return {
+      ok: false,
+      code: mode === 'plan' ? 'AGENT_TOOL_DENIED_PLAN_MODE' : 'AGENT_TOOL_PERMISSION_DENIED',
+      message: `工具 ${toolName} 需要 ${decision.required} 权限,`
+        + `但 ${decision.mode} 模式上限为 ${decision.ceiling}。`
+    };
   }
   return { ok: true };
 }
@@ -403,7 +310,18 @@ export async function runAgentToolLoop(
   let totalOutputTokens = 0;
   let lastInputTokens: number | undefined;
   let compactionWindows = 0;
-  const initialUserQuery = lastUserMessageText(request.messages);
+  // Retrieval must never infer its goal from durable history: an internal
+  // continuation is also allowed to be a role=user message. Production hosts
+  // capture the external prompt into taskQuery before entering the loop; when a
+  // lower-level caller omits it, fail closed by skipping automatic retrieval.
+  const initialUserQuery = request.taskQuery?.trim() ?? '';
+  if (request.ragSearch && initialUserQuery.length === 0) {
+    diagnostics.push({
+      severity: 'warning',
+      code: 'AGENT_TASK_QUERY_MISSING',
+      message: '缺少固定 external taskQuery，已跳过自动 RAG 检索；不会从 role=user 历史猜测任务。'
+    });
+  }
 
   // Approval gate. Defaults to the write-capable levels when a host provides
   // the callback without naming levels — the levels that can reach staging,
@@ -559,7 +477,7 @@ export async function runAgentToolLoop(
     // and inject as a separate [rag-evidence] channel. No hits or an
     // empty query injects nothing — a failed search must not poison the turn.
     if (request.ragSearch) {
-      const ragQuery = initialUserQuery || lastUserMessageText(messages);
+      const ragQuery = initialUserQuery;
       if (ragQuery.trim().length > 0) {
         const ragResult = await request.ragSearch.retrieve(ragQuery);
         if (ragResult.ok && ragResult.hits.length > 0) {
@@ -1016,14 +934,8 @@ export async function runAgentToolLoop(
           text: redactedContent
         });
         if (batchEntry.call.name === 'switch_mode' && result.ok) {
-          try {
-            const parsed = typeof result.content === 'string' ? JSON.parse(result.content) : result.content;
-            if (parsed?.switched && parsed?.currentMode) {
-              currentMode = parsed.currentMode;
-            }
-          } catch {
-            // ignore
-          }
+          const switchedMode = extractSwitchedAgentPermissionMode(result.content);
+          if (switchedMode) currentMode = switchedMode;
         }
         emit({
           type: 'tool-call-end',
@@ -1178,4 +1090,36 @@ export async function runAgentToolLoop(
     diagnostics,
     audit
   };
+}
+
+/**
+ * Read the production bridge's stable result envelope without coupling the
+ * loop to a particular tool-result payload shape.  `switch_mode` returns its
+ * record under `data.record`; the top-level form is retained only as a
+ * compatibility read for older adapters.  The model-facing mode
+ * `fullPermission` maps to the loop's internal `full` level.
+ */
+export function extractSwitchedAgentPermissionMode(content: unknown): AgentPermissionMode | undefined {
+  let parsed: unknown = content;
+  if (typeof content === 'string') {
+    try {
+      parsed = JSON.parse(content) as unknown;
+    } catch {
+      return undefined;
+    }
+  }
+  if (!parsed || typeof parsed !== 'object') return undefined;
+  const root = parsed as Record<string, unknown>;
+  const envelopeData = root.data && typeof root.data === 'object'
+    ? root.data as Record<string, unknown>
+    : undefined;
+  const record = envelopeData?.record && typeof envelopeData.record === 'object'
+    ? envelopeData.record as Record<string, unknown>
+    : undefined;
+  const switched = record?.switched ?? envelopeData?.switched ?? root.switched;
+  const mode = record?.currentMode ?? envelopeData?.currentMode ?? root.currentMode;
+  if (switched !== true || typeof mode !== 'string') return undefined;
+  if (mode === 'plan' || mode === 'normal') return mode;
+  if (mode === 'fullPermission' || mode === 'full') return 'full';
+  return undefined;
 }

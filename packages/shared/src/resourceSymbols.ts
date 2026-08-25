@@ -1,5 +1,8 @@
 export interface EventExport {
   mapId?: string;
+  /** Revision actually used to decode this export; never infer from the file catalog. */
+  sourceHash?: string;
+  sourceRevision?: number;
   events: EventSymbol[];
 }
 
@@ -9,6 +12,8 @@ export interface EventSymbol {
   mapId?: string;
   eventId: number;
   name?: string;
+  sourceHash?: string;
+  sourceRevision?: number;
   instructions: EventInstruction[];
   raw?: unknown;
 }
@@ -32,6 +37,8 @@ export interface EventArg {
 
 export interface MapExport {
   mapId: string;
+  sourceHash?: string;
+  sourceRevision?: number;
   entities: MapEntitySymbol[];
   regions: MapRegionSymbol[];
 }
@@ -42,6 +49,8 @@ export interface MapEntitySymbol {
   mapId: string;
   entityId?: number;
   name: string;
+  sourceHash?: string;
+  sourceRevision?: number;
   kind: 'character' | 'object' | 'asset' | 'collision' | 'mapPiece' | 'unknown';
   model?: string;
   /** FLVER 在 mapbnd 里的模型序号（read-msb-document parts[].modelIndex）。 */
@@ -60,6 +69,8 @@ export interface MapRegionSymbol {
   mapId: string;
   entityId?: number;
   name: string;
+  sourceHash?: string;
+  sourceRevision?: number;
   shape?: string;
   position?: [number, number, number];
   rotation?: [number, number, number];
@@ -69,6 +80,8 @@ export interface MapRegionSymbol {
 
 export interface ParamExport {
   paramName: string;
+  sourceHash?: string;
+  sourceRevision?: number;
   rows: ParamRowSymbol[];
 }
 
@@ -78,6 +91,8 @@ export interface ParamRowSymbol {
   paramName: string;
   rowId: number;
   rowName?: string;
+  sourceHash?: string;
+  sourceRevision?: number;
   fields?: ParamFieldSymbol[];
   raw?: unknown;
 }
@@ -90,6 +105,8 @@ export interface ParamFieldSymbol {
 
 export interface MsgExport {
   category?: string;
+  sourceHash?: string;
+  sourceRevision?: number;
   entries: TextEntrySymbol[];
 }
 
@@ -100,6 +117,8 @@ export interface TextEntrySymbol {
   textId: number;
   text: string;
   confidence?: 'high' | 'medium' | 'low';
+  sourceHash?: string;
+  sourceRevision?: number;
   raw?: unknown;
 }
 
@@ -111,6 +130,8 @@ export interface TextEntrySymbol {
 export interface TaeExport {
   chrId: string;
   sourceUri: string;
+  sourceHash?: string;
+  sourceRevision?: number;
   animations: TaeAnimSymbol[];
 }
 
@@ -135,6 +156,8 @@ export interface TaeEventSymbol {
   /** 对外帧 = Math.round(seconds * 30)。 */
   startFrame: number;
   endFrame: number;
+  sourceHash?: string;
+  sourceRevision?: number;
   /** 模板解码字段（name / value）；未解码时缺省。 */
   fields?: Array<{ name: string; value: string | number | boolean }>;
   /** 未解码参数体的有界 hex 预览（正文写 `undecoded hex=…`，不编造字段）。 */

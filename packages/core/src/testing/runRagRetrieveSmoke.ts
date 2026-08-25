@@ -22,6 +22,33 @@ function main(): Promise<void> {
       throw new Error(`RAG corpus missing families: ${JSON.stringify(corpus.stats)}`);
     }
 
+    // P0 regression: a changed file must invalidate semantic symbols before
+    // the new catalog hash reaches RAG. Otherwise old-value + new-hash would
+    // become indistinguishable from a freshly decoded symbol.
+    const changedSource = 'file://synthetic/event/common.emevd.dcx';
+    const revisionIndex = new WorkspaceIndex('workspace-rag-revision');
+    revisionIndex.setFiles([makeFile('event/common.emevd.dcx', 'event', changedSource, 'event-source-v1')]);
+    assertAccepted(ingestBridgeResult(revisionIndex, makeEventExport('event-source-v1', 'old-value')));
+    const oldRevisionCorpus = buildRagCorpus(revisionIndex);
+    if (!oldRevisionCorpus.chunks.some((chunk) => chunk.body.includes('old-value') && chunk.sourceHash === 'event-source-v1')) {
+      throw new Error('revision fixture did not create the old semantic value');
+    }
+    revisionIndex.invalidateSource(changedSource);
+    revisionIndex.setFiles([makeFile('event/common.emevd.dcx', 'event', changedSource, 'event-source-v2')]);
+    const clearedCorpus = buildRagCorpus(revisionIndex);
+    if (clearedCorpus.chunks.some((chunk) => chunk.family === 'event')) {
+      throw new Error('changed source left stale semantic symbols in WorkspaceIndex');
+    }
+    assertAccepted(ingestBridgeResult(revisionIndex, makeEventExport('event-source-v2', 'new-value')));
+    const newRevisionCorpus = buildRagCorpus(revisionIndex);
+    const newEventChunk = newRevisionCorpus.chunks.find((chunk) => chunk.family === 'event');
+    if (!newEventChunk || !newEventChunk.body.includes('new-value') || newEventChunk.sourceHash !== 'event-source-v2') {
+      throw new Error(`new semantic value did not carry its own source revision: ${JSON.stringify(newEventChunk)}`);
+    }
+    if (newRevisionCorpus.chunks.some((chunk) => chunk.body.includes('old-value') || chunk.sourceHash === 'event-source-v1')) {
+      throw new Error('old semantic value survived a source revision change');
+    }
+
     const eventHit = retrieveEvidence(corpus, '1100800');
     if (!eventHit.ok) throw new Error(`id retrieve failed: ${eventHit.message}`);
     if (!eventHit.hits.some((hit) => hit.chunk.symbolUri === 'event://m10_00_00_00/1000')) {
@@ -219,6 +246,7 @@ VALUES (?, ?, ?, ?, ?)`).run(index.workspaceId, workspace.root, 'sekiro', now, n
       config: loopConfig,
       apiKey: 'sk-rag-loop-fixture-key',
       messages: [{ role: 'user', content: 'flag 71000000 在哪个事件里使用' }],
+      taskQuery: 'flag 71000000 在哪个事件里使用',
       tools: [],
       permissionMode: 'plan',
       executeTool: async () => ({ ok: true, content: '' }),
@@ -251,6 +279,7 @@ VALUES (?, ?, ?, ?, ?)`).run(index.workspaceId, workspace.root, 'sekiro', now, n
       config: loopConfig,
       apiKey: 'sk-rag-loop-fixture-key',
       messages: [{ role: 'user', content: 'zzzxqwy 是什么' }],
+      taskQuery: 'zzzxqwy 是什么',
       tools: [],
       permissionMode: 'plan',
       executeTool: async () => ({ ok: true, content: '' }),
@@ -259,6 +288,54 @@ VALUES (?, ?, ?, ?, ?)`).run(index.workspaceId, workspace.root, 'sekiro', now, n
       }
     });
     if (missRun.finishReason !== 'stop') throw new Error(`rag miss run failed: ${missRun.finishReason}`);
+
+    // adversarial E2 regression: an internal continuation is appended as a
+    // role=user message after a tool call, but retrieval must keep using the
+    // host-captured external taskQuery.
+    const retryQueries: string[] = [];
+    let retryCalls = 0;
+    const retryAdapter: ModelServiceAdapter = {
+      protocol: 'openai-compatible',
+      async complete() {
+        retryCalls += 1;
+        if (retryCalls === 1) {
+          return {
+            message: {
+              role: 'assistant',
+              content: '',
+              toolCalls: [{ id: 'retry-tool', name: 'noop', argumentsJson: '{}' }]
+            },
+            finishReason: 'tool_use' as const,
+            diagnostics: []
+          };
+        }
+        if (retryCalls === 2) {
+          return { message: { role: 'assistant', content: '' }, finishReason: 'stop' as const, diagnostics: [] };
+        }
+        return { message: { role: 'assistant', content: 'done' }, finishReason: 'stop' as const, diagnostics: [] };
+      },
+      async *stream() { /* batch path only */ },
+      listModels: async () => ({ ok: true, models: [] })
+    };
+    const retryResult = await runAgentToolLoop(retryAdapter, {
+      config: loopConfig,
+      apiKey: 'sk-rag-loop-fixture-key',
+      messages: [{ role: 'user', content: 'external task' }],
+      taskQuery: 'external task',
+      tools: [{ name: 'noop', description: 'test', parametersJsonSchema: { type: 'object' }, permissionLevel: 'read' }],
+      permissionMode: 'plan',
+      executeTool: async () => ({ ok: true, content: 'internal retry text' }),
+      ragSearch: {
+        retrieve: async (query) => {
+          retryQueries.push(query);
+          return retrieveEvidence(corpus, query);
+        }
+      }
+    });
+    if (retryResult.finishReason !== 'stop' || retryCalls !== 3 || retryQueries.length !== 3
+      || retryQueries.some((query) => query !== 'external task')) {
+      throw new Error(`taskQuery must remain fixed across internal retry: ${JSON.stringify({ retryCalls, retryQueries, finish: retryResult.finishReason })}`);
+    }
 
     const fatChunks: RagChunk[] = [];
     for (let i = 0; i < 8_000; i += 1) {
@@ -340,7 +417,12 @@ function assertAccepted(result: { accepted: boolean; diagnostics: Array<{ code: 
   }
 }
 
-function makeFile(relativePath: string, resourceKind: IndexedFile['resourceKind'], sourceUri: string): IndexedFile {
+function makeFile(
+  relativePath: string,
+  resourceKind: IndexedFile['resourceKind'],
+  sourceUri: string,
+  sha256 = 'event-source-v1'
+): IndexedFile {
   return {
     id: sourceUri,
     workspaceId: 'workspace-rag-smoke',
@@ -356,13 +438,13 @@ function makeFile(relativePath: string, resourceKind: IndexedFile['resourceKind'
     formatLabel: 'EMEVD',
     size: 32,
     mtimeMs: 1,
-    sha256: 'event-source-v1',
+    sha256,
     parseStatus: 'partial',
     diagnostics: []
   };
 }
 
-function makeEventExport(): BridgeResult<unknown> {
+function makeEventExport(sourceHash = 'event-source-v1', eventName = 'synthetic_event_1000'): BridgeResult<unknown> {
   return {
     sourceUri: 'file://synthetic/event/common.emevd.dcx',
     sourcePath: 'event/common.emevd.dcx',
@@ -372,12 +454,14 @@ function makeEventExport(): BridgeResult<unknown> {
     diagnostics: [],
     data: {
       mapId: 'm10_00_00_00',
+      sourceHash,
+      sourceRevision: 1,
       events: [{
         uri: 'event://m10_00_00_00/1000',
         sourceUri: 'file://synthetic/event/common.emevd.dcx',
         mapId: 'm10_00_00_00',
         eventId: 1000,
-        name: 'synthetic_event_1000',
+        name: eventName,
         instructions: [{
           uri: 'event://m10_00_00_00/1000/instruction/0',
           index: 0,

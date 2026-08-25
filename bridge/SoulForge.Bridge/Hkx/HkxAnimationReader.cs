@@ -6,6 +6,7 @@
 using System.Buffers.Binary;
 using System.Numerics;
 using System.Text;
+using SoulForge.Bridge;
 
 namespace SoulForge.Bridge.Hkx;
 
@@ -37,6 +38,9 @@ internal static class HkxAnimationReader
         var skeletons = new List<HkxSkeleton>();
         var animations = new List<HkxAnimation>();
         var bindings = new List<HkxAnimationBinding>();
+        var seenSkeletonOffsets = new HashSet<int>();
+        var seenAnimationOffsets = new HashSet<int>();
+        var seenBindingOffsets = new HashSet<int>();
 
         // Look through virtual fixups to discover all instantiated objects
         foreach (var vf in dataSec.VirtualFixups)
@@ -49,28 +53,21 @@ internal static class HkxAnimationReader
 
             if (className == "hkaSkeleton")
             {
+                if (!seenSkeletonOffsets.Add(objOffset)) continue;
                 var skel = ReadSkeleton(packfile, objOffset);
                 if (skel != null) skeletons.Add(skel);
             }
             else if (className == "hkaAnimationBinding")
             {
+                if (!seenBindingOffsets.Add(objOffset)) continue;
                 var binding = ReadBinding(packfile, objOffset);
                 if (binding != null) bindings.Add(binding);
             }
             else if (className is "hkaSplineCompressedAnimation" or "hkaInterleavedUncompressedAnimation" or "hkaAnimation")
             {
+                if (!seenAnimationOffsets.Add(objOffset)) continue;
                 var anim = ReadAnimation(packfile, objOffset, className);
                 if (anim != null) animations.Add(anim);
-            }
-        }
-
-        // If bindings point to animations, associate them
-        foreach (var b in bindings)
-        {
-            if (b.Animation == null && animations.Count > 0)
-            {
-                // In standard FromSoft HKX, there is usually 1 animation per container/binding
-                b.Animation = animations[0];
             }
         }
 
@@ -102,6 +99,7 @@ internal static class HkxAnimationReader
         return new HkxSkeleton
         {
             Name = name,
+            NativeObjectOffset = offset,
             ParentIndices = parentIndices,
             Bones = bones,
             Transforms = transforms
@@ -134,6 +132,8 @@ internal static class HkxAnimationReader
 
         return new HkxAnimationBinding
         {
+            NativeObjectOffset = offset,
+            AnimationObjectOffset = animation != null ? (int)animOffset : -1,
             OriginalSkeletonName = originalSkeletonName,
             TransformTrackToBoneIndices = trackToBone,
             Animation = animation
@@ -158,16 +158,22 @@ internal static class HkxAnimationReader
         // +0x20: numberOfFloatTracks (int32)
         int numFloatTracks = BinaryPrimitives.ReadInt32LittleEndian(data.AsSpan(offset + 0x20, 4));
 
+        HkxAnimation animation;
         if (className == "hkaSplineCompressedAnimation" || animType == HkxAnimationType.SplineCompressed)
         {
-            return ReadSplineCompressedAnimation(packfile, offset, duration, numTracks, numFloatTracks);
+            animation = ReadSplineCompressedAnimation(packfile, offset, duration, numTracks, numFloatTracks);
         }
         else if (className == "hkaInterleavedUncompressedAnimation" || animType == HkxAnimationType.Interleaved)
         {
-            return ReadInterleavedAnimation(packfile, offset, duration, numTracks, numFloatTracks);
+            animation = ReadInterleavedAnimation(packfile, offset, duration, numTracks, numFloatTracks);
+        }
+        else
+        {
+            throw new NotSupportedException($"未支持的 HKX 动画类型：{className} (type={(int)animType})。");
         }
 
-        throw new NotSupportedException($"未支持的 HKX 动画类型：{className} (type={(int)animType})。");
+        animation.NativeObjectOffset = offset;
+        return animation;
     }
 
     private static HkxSplineCompressedAnimation ReadSplineCompressedAnimation(
@@ -249,101 +255,171 @@ internal static class HkxAnimationReader
         };
     }
 
-    private static SplineBlock[] ParseSplineBlocks(HkxSplineCompressedAnimation anim)
+    internal static SplineBlock[] ParseSplineBlocks(HkxSplineCompressedAnimation anim)
     {
         if (anim.Data.Length == 0 || anim.NumBlocks <= 0 || anim.NumberOfTransformTracks <= 0)
-            return Array.Empty<SplineBlock>();
+            throw new InvalidDataException("ACTION_SPLINE_DATA_MISSING: HKX spline animation has no block data.");
+        if (anim.BlockOffsets.Length != anim.NumBlocks)
+            throw new InvalidDataException($"ACTION_SPLINE_BLOCK_OFFSETS_INVALID: expected {anim.NumBlocks} block offsets, got {anim.BlockOffsets.Length}.");
 
         var blocks = new SplineBlock[anim.NumBlocks];
-        for (int b = 0; b < anim.NumBlocks; b++)
+        for (var blockIndex = 0; blockIndex < anim.NumBlocks; blockIndex++)
         {
-            var block = new SplineBlock
+            var blockStart = checked((int)anim.BlockOffsets[blockIndex]);
+            var blockEnd = blockIndex + 1 < anim.BlockOffsets.Length
+                ? checked((int)anim.BlockOffsets[blockIndex + 1])
+                : anim.Data.Length;
+            if (blockStart < 0 || blockEnd > anim.Data.Length || blockStart >= blockEnd)
+                throw new InvalidDataException($"ACTION_SPLINE_BLOCK_BOUNDS_INVALID: block={blockIndex} start={blockStart} end={blockEnd} dataLength={anim.Data.Length}.");
+
+            var blockBytes = anim.Data.AsSpan(blockStart, blockEnd - blockStart).ToArray();
+            HkxNativeAnimation.TransformTrack[] parsedTracks;
+            try
             {
-                Tracks = new TransformSplineTrack[anim.NumberOfTransformTracks]
-            };
-
-            int blockStart = (b < anim.BlockOffsets.Length) ? (int)anim.BlockOffsets[b] : 0;
-            int blockEnd = (b + 1 < anim.BlockOffsets.Length) ? (int)anim.BlockOffsets[b + 1] : anim.Data.Length;
-
-            bool blockValid = blockStart >= 0 && blockStart < anim.Data.Length && blockEnd <= anim.Data.Length && blockStart < blockEnd;
-            var blockSpan = blockValid ? anim.Data.AsSpan(blockStart, blockEnd - blockStart) : ReadOnlySpan<byte>.Empty;
-
-            for (int t = 0; t < anim.NumberOfTransformTracks; t++)
-            {
-                var track = new TransformSplineTrack
-                {
-                    StaticPosition = Vector3.Zero,
-                    StaticRotation = Quaternion.Identity,
-                    StaticScale = Vector3.One
-                };
-
-                if (blockValid && t < anim.TransformOffsets.Length)
-                {
-                    int trackRelOffset = (int)anim.TransformOffsets[t];
-                    if (trackRelOffset >= 0 && trackRelOffset + 12 <= blockSpan.Length)
-                    {
-                        var trackSpan = blockSpan.Slice(trackRelOffset);
-                        try
-                        {
-                            // Track header: positionMask (byte), rotationMask (byte), scaleMask (byte), flags (byte)
-                            byte posMask = trackSpan[0];
-                            byte rotMask = trackSpan[1];
-                            byte scaleMask = trackSpan[2];
-                            track.PositionMask = posMask;
-                            track.RotationMask = rotMask;
-                            track.ScaleMask = scaleMask;
-
-                            int cursor = 4;
-                            // Static Position or Spline Position
-                            if (posMask == 0 && cursor + 12 <= trackSpan.Length)
-                            {
-                                float px = BinaryPrimitives.ReadSingleLittleEndian(trackSpan.Slice(cursor, 4));
-                                float py = BinaryPrimitives.ReadSingleLittleEndian(trackSpan.Slice(cursor + 4, 4));
-                                float pz = BinaryPrimitives.ReadSingleLittleEndian(trackSpan.Slice(cursor + 8, 4));
-                                if (float.IsFinite(px) && float.IsFinite(py) && float.IsFinite(pz))
-                                    track.StaticPosition = new Vector3(px, py, pz);
-                                cursor += 12;
-                            }
-
-                            // Static Rotation or Spline Rotation
-                            if (rotMask == 0 && cursor + 4 <= trackSpan.Length)
-                            {
-                                uint packedRot = BinaryPrimitives.ReadUInt32LittleEndian(trackSpan.Slice(cursor, 4));
-                                track.StaticRotation = HkxDecompressor.UnpackPolar32(packedRot);
-                                cursor += 4;
-                            }
-                            else if (rotMask == 1 && cursor + 16 <= trackSpan.Length)
-                            {
-                                track.StaticRotation = HkxDecompressor.UnpackUncompressedQuat(trackSpan.Slice(cursor, 16));
-                                cursor += 16;
-                            }
-
-                            // Static Scale
-                            if (scaleMask == 0 && cursor + 12 <= trackSpan.Length)
-                            {
-                                float sx = BinaryPrimitives.ReadSingleLittleEndian(trackSpan.Slice(cursor, 4));
-                                float sy = BinaryPrimitives.ReadSingleLittleEndian(trackSpan.Slice(cursor + 4, 4));
-                                float sz = BinaryPrimitives.ReadSingleLittleEndian(trackSpan.Slice(cursor + 8, 4));
-                                if (float.IsFinite(sx) && float.IsFinite(sy) && float.IsFinite(sz))
-                                    track.StaticScale = new Vector3(sx, sy, sz);
-                            }
-                        }
-                        catch
-                        {
-                            // Fallback to identity transform on parse failure
-                            track.StaticPosition = Vector3.Zero;
-                            track.StaticRotation = Quaternion.Identity;
-                            track.StaticScale = Vector3.One;
-                        }
-                    }
-                }
-
-                block.Tracks[t] = track;
+                var parsed = HkxNativeAnimation.ReadSplineCompressedAnimByteBlock(
+                    blockBytes,
+                    anim.NumberOfTransformTracks,
+                    numBlocks: 1);
+                if (parsed.Count != 1 || parsed[0].Length != anim.NumberOfTransformTracks)
+                    throw new InvalidDataException("decoded track count does not match animation metadata");
+                parsedTracks = parsed[0];
             }
-            blocks[b] = block;
+            catch (Exception ex) when (ex is InvalidDataException or EndOfStreamException or IOException or ArgumentException)
+            {
+                throw new InvalidDataException(
+                    $"ACTION_SPLINE_BLOCK_DECODE_FAILED: block={blockIndex} start={blockStart} length={blockBytes.Length}: {ex.Message}",
+                    ex);
+            }
+
+            blocks[blockIndex] = new SplineBlock
+            {
+                Tracks = parsedTracks.Select((track, trackIndex) => ConvertSplineTrack(track, blockIndex, trackIndex)).ToArray()
+            };
         }
 
         return blocks;
+    }
+
+    private static TransformSplineTrack ConvertSplineTrack(
+        HkxNativeAnimation.TransformTrack source,
+        int blockIndex,
+        int trackIndex)
+    {
+        if (source.Mask == null)
+            throw new InvalidDataException($"ACTION_SPLINE_TRACK_MASK_MISSING: block={blockIndex} track={trackIndex}.");
+
+        var position = source.SplinePosition;
+        var scale = source.SplineScale;
+        var result = new TransformSplineTrack
+        {
+            PositionMask = BuildMask(source.Mask.PositionTypes),
+            PositionStaticMask = BuildMask(source.Mask.PositionTypes.Where(flag => IsStaticFlag(flag)).ToArray()),
+            PositionSplineMask = BuildMask(source.Mask.PositionTypes.Where(flag => !IsStaticFlag(flag)).ToArray()),
+            RotationMask = BuildMask(source.Mask.RotationTypes),
+            RotationHasStatic = source.Mask.RotationTypes.Any(IsStaticFlag),
+            RotationHasSpline = source.Mask.RotationTypes.Any(flag => !IsStaticFlag(flag)),
+            ScaleMask = BuildMask(source.Mask.ScaleTypes),
+            ScaleStaticMask = BuildMask(source.Mask.ScaleTypes.Where(flag => IsStaticFlag(flag)).ToArray()),
+            ScaleSplineMask = BuildMask(source.Mask.ScaleTypes.Where(flag => !IsStaticFlag(flag)).ToArray()),
+            PositionQuantizationType = (int)source.Mask.PositionQuantizationType,
+            RotationQuantizationType = (int)source.Mask.RotationQuantizationType,
+            ScaleQuantizationType = (int)source.Mask.ScaleQuantizationType,
+            StaticPosition = new Vector3(
+                ReadStatic(position?.ChannelX, source.StaticPosition.X, "positionX", blockIndex, trackIndex),
+                ReadStatic(position?.ChannelY, source.StaticPosition.Y, "positionY", blockIndex, trackIndex),
+                ReadStatic(position?.ChannelZ, source.StaticPosition.Z, "positionZ", blockIndex, trackIndex)),
+            StaticRotation = source.StaticRotation,
+            StaticScale = new Vector3(
+                ReadStatic(scale?.ChannelX, source.StaticScale.X, "scaleX", blockIndex, trackIndex),
+                ReadStatic(scale?.ChannelY, source.StaticScale.Y, "scaleY", blockIndex, trackIndex),
+                ReadStatic(scale?.ChannelZ, source.StaticScale.Z, "scaleZ", blockIndex, trackIndex))
+        };
+
+        if (position != null)
+        {
+            result.PositionX = ConvertScalarCurve(position, position.ChannelX, "positionX", blockIndex, trackIndex);
+            result.PositionY = ConvertScalarCurve(position, position.ChannelY, "positionY", blockIndex, trackIndex);
+            result.PositionZ = ConvertScalarCurve(position, position.ChannelZ, "positionZ", blockIndex, trackIndex);
+        }
+        if (source.SplineRotation != null)
+        {
+            var rotation = source.SplineRotation;
+            ValidateSplineShape(rotation.Knots, rotation.Channel.Values.Count, rotation.Degree, "rotation", blockIndex, trackIndex);
+            result.Rotation = new SplineQuatCurve
+            {
+                Degree = rotation.Degree,
+                Knots = rotation.Knots.Select(value => (float)value).ToArray(),
+                ControlPoints = rotation.Channel.Values.ToArray()
+            };
+        }
+        if (scale != null)
+        {
+            result.ScaleX = ConvertScalarCurve(scale, scale.ChannelX, "scaleX", blockIndex, trackIndex);
+            result.ScaleY = ConvertScalarCurve(scale, scale.ChannelY, "scaleY", blockIndex, trackIndex);
+            result.ScaleZ = ConvertScalarCurve(scale, scale.ChannelZ, "scaleZ", blockIndex, trackIndex);
+        }
+
+        return result;
+    }
+
+    private static byte BuildMask(IReadOnlyList<HkxNativeAnimation.FlagOffset> flags)
+    {
+        byte result = 0;
+        foreach (var flag in flags) result |= (byte)flag;
+        return result;
+    }
+
+    private static bool IsStaticFlag(HkxNativeAnimation.FlagOffset flag) =>
+        flag is HkxNativeAnimation.FlagOffset.StaticX
+            or HkxNativeAnimation.FlagOffset.StaticY
+            or HkxNativeAnimation.FlagOffset.StaticZ
+            or HkxNativeAnimation.FlagOffset.StaticW;
+
+    private static float ReadStatic(
+        HkxNativeAnimation.SplineChannel<float>? channel,
+        float fallback,
+        string component,
+        int blockIndex,
+        int trackIndex)
+    {
+        if (channel == null || channel.IsDynamic) return fallback;
+        if (channel.Values.Count != 1 || !float.IsFinite(channel.Values[0]))
+            throw new InvalidDataException($"ACTION_SPLINE_STATIC_VALUE_INVALID: block={blockIndex} track={trackIndex} component={component}.");
+        return channel.Values[0];
+    }
+
+    private static SplineCurve? ConvertScalarCurve(
+        HkxNativeAnimation.SplineTrackVector3 vector,
+        HkxNativeAnimation.SplineChannel<float>? channel,
+        string component,
+        int blockIndex,
+        int trackIndex)
+    {
+        if (channel == null || !channel.IsDynamic) return null;
+        ValidateSplineShape(vector.Knots, channel.Values.Count, vector.Degree, component, blockIndex, trackIndex);
+        return new SplineCurve
+        {
+            Degree = vector.Degree,
+            Knots = vector.Knots.Select(value => (float)value).ToArray(),
+            ControlPoints = channel.Values.ToArray()
+        };
+    }
+
+    private static void ValidateSplineShape(
+        IReadOnlyList<byte> knots,
+        int controlPointCount,
+        int degree,
+        string component,
+        int blockIndex,
+        int trackIndex)
+    {
+        if (degree < 0 || degree > 4 || controlPointCount <= 0 || knots.Count != controlPointCount + degree + 1)
+            throw new InvalidDataException($"ACTION_SPLINE_KNOT_VECTOR_INVALID: block={blockIndex} track={trackIndex} component={component} degree={degree} knots={knots.Count} controlPoints={controlPointCount}.");
+        for (var i = 1; i < knots.Count; i++)
+        {
+            if (knots[i] < knots[i - 1])
+                throw new InvalidDataException($"ACTION_SPLINE_KNOT_ORDER_INVALID: block={blockIndex} track={trackIndex} component={component} index={i}.");
+        }
     }
 
     private static string? ReadStringPtr(HkxPackfile packfile, uint pointerOffset)

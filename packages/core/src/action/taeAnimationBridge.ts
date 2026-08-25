@@ -10,6 +10,10 @@ import { runBridge } from '../bridge/runBridge.js';
 export interface LoadTaeAnimationClipOptions {
   filePath: string;
   animId: number;
+  /** Explicit ANIBND that contains the HKX entry for this TAE motion. */
+  animationContainerPath?: string | undefined;
+  /** Explicit ANIBND that contains skeleton.hkx when it is not in the animation container. */
+  skeletonContainerPath?: string | undefined;
   flverBoneNames?: string[] | undefined;
   oodleRuntimeRoot?: string | undefined;
   allowedRoots?: string[] | undefined;
@@ -20,6 +24,8 @@ export interface SampleTaeAnimationPoseOptions {
   filePath: string;
   animId: number;
   timeSeconds: number;
+  animationContainerPath?: string | undefined;
+  skeletonContainerPath?: string | undefined;
   loop?: boolean | undefined;
   flverBoneNames?: string[] | undefined;
   flverReferencePose?: BoneTransformData[] | undefined;
@@ -35,6 +41,8 @@ export interface SampledPoseResponse {
   duration: number;
   boneCount: number;
   sampledPose: BoneTransformData[];
+  /** False means the response contains local skeletal pose only. */
+  rootMotionSupported: false;
 }
 
 export async function loadTaeAnimationClip(
@@ -45,6 +53,8 @@ export async function loadTaeAnimationClip(
     filePath: options.filePath,
     commandOptions: {
       animId: options.animId,
+      ...(options.animationContainerPath ? { animationContainerPath: options.animationContainerPath } : {}),
+      ...(options.skeletonContainerPath ? { skeletonContainerPath: options.skeletonContainerPath } : {}),
       ...(options.flverBoneNames?.length ? { flverBoneNames: options.flverBoneNames } : {})
     },
     ...(options.oodleRuntimeRoot !== undefined ? { oodleRuntimeRoot: options.oodleRuntimeRoot } : {}),
@@ -63,6 +73,8 @@ export async function sampleTaeAnimationPose(
       animId: options.animId,
       timeSeconds: options.timeSeconds,
       loop: options.loop ?? true,
+      ...(options.animationContainerPath ? { animationContainerPath: options.animationContainerPath } : {}),
+      ...(options.skeletonContainerPath ? { skeletonContainerPath: options.skeletonContainerPath } : {}),
       ...(options.flverBoneNames?.length ? { flverBoneNames: options.flverBoneNames } : {}),
       ...(options.flverReferencePose?.length ? { flverReferencePose: options.flverReferencePose } : {})
     },

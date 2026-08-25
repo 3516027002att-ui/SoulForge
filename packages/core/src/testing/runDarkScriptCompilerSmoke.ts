@@ -338,6 +338,88 @@ function main(): void {
     fail(`新增事件参数 1 绑定错误: ${JSON.stringify(addEventSetParamsOp.parameters[1])}`);
   }
 
+  // 8. opaque 指令的隐藏 binding 必须在 no-op roundtrip 中保留，并在前插后重排。
+  const opaqueBindingDoc = createEmevdEditorDocument({
+    resourceUri: 'file://event/opaque_binding.emevd',
+    documentInstanceId: 'darkscript-opaque-binding-test',
+    events: [
+      {
+        eventId: 300,
+        restBehavior: 0,
+        parameters: [
+          {
+            instructionIndex: 1,
+            targetStartByte: 0,
+            sourceStartByte: 4,
+            byteCount: 4,
+            unkId: 17
+          }
+        ],
+        instructions: [
+          { bank: 2003, id: 1, argsBase64: '', unknown: false },
+          { bank: 9999, id: 7, argsBase64: 'AAAAAA==', unknown: true }
+        ]
+      }
+    ]
+  });
+  const opaqueSource = renderEmevdDarkScript(opaqueBindingDoc, emedf);
+  const opaqueRequest = {
+    schemaVersion: 1 as const,
+    resourceUri: opaqueBindingDoc.resourceUri,
+    documentInstanceId: opaqueBindingDoc.documentInstanceId ?? 'darkscript-opaque-binding-test',
+    baseRevision: opaqueBindingDoc.revision,
+    emedfSchemaFingerprint: fingerprintEmedfRegistry(emedf),
+    sourceText: opaqueSource,
+    mode: 'dark-script' as const
+  };
+  const opaqueNoop = compileEmevdDarkScript(opaqueRequest, opaqueBindingDoc, emedf);
+  if (!opaqueNoop.ok) fail(`opaque no-op 编译失败: ${JSON.stringify(opaqueNoop.diagnostics)}`);
+  const opaqueNoopParams = opaqueNoop.plan.operations.find((op) => op.kind === 'set_event_parameters');
+  if (opaqueNoopParams && (opaqueNoopParams.parameters.length !== 1
+    || opaqueNoopParams.parameters[0]!.instructionIndex !== 1
+    || opaqueNoopParams.parameters[0]!.targetStartByte !== 0
+    || opaqueNoopParams.parameters[0]!.sourceStartByte !== 4
+    || opaqueNoopParams.parameters[0]!.byteCount !== 4
+    || opaqueNoopParams.parameters[0]!.unkId !== 17)) {
+    fail(`opaque no-op 的参数绑定被错误改写: ${JSON.stringify(opaqueNoop.plan.operations)}`);
+  }
+  const opaqueInsertedSource = opaqueSource.replace(
+    '    EndEvent();',
+    '    WaitFixedTimeFrames(10);\n    EndEvent();'
+  );
+  const opaqueInserted = compileEmevdDarkScript({ ...opaqueRequest, sourceText: opaqueInsertedSource }, opaqueBindingDoc, emedf);
+  if (!opaqueInserted.ok) fail(`opaque 前插编译失败: ${JSON.stringify(opaqueInserted.diagnostics)}`);
+  const opaqueInsertedParams = opaqueInserted.plan.operations.find((op) => op.kind === 'set_event_parameters');
+  if (!opaqueInsertedParams || opaqueInsertedParams.kind !== 'set_event_parameters'
+    || opaqueInsertedParams.parameters.length !== 1
+    || opaqueInsertedParams.parameters[0]!.instructionIndex !== 2
+    || opaqueInsertedParams.parameters[0]!.targetStartByte !== 0
+    || opaqueInsertedParams.parameters[0]!.sourceStartByte !== 4
+    || opaqueInsertedParams.parameters[0]!.byteCount !== 4
+    || opaqueInsertedParams.parameters[0]!.unkId !== 17) {
+    fail(`opaque 前插后参数必须重排且保留字段: ${JSON.stringify(opaqueInserted.plan.operations)}`);
+  }
+
+  const opaqueDeletedSource = opaqueSource
+    .split('\n')
+    .filter((line) => !line.includes('// unknown bank=9999 id=7'))
+    .join('\n');
+  const opaqueDeleted = compileEmevdDarkScript({ ...opaqueRequest, sourceText: opaqueDeletedSource }, opaqueBindingDoc, emedf);
+  if (!opaqueDeleted.ok) fail(`opaque 指令直接删除编译失败: ${JSON.stringify(opaqueDeleted.diagnostics)}`);
+  const opaqueDeletedParams = opaqueDeleted.plan.operations.find((op) => op.kind === 'set_event_parameters');
+  if (!opaqueDeletedParams || opaqueDeletedParams.kind !== 'set_event_parameters' || opaqueDeletedParams.parameters.length !== 0) {
+    fail(`删除 opaque 指令后参数表必须清空: ${JSON.stringify(opaqueDeleted.plan.operations)}`);
+  }
+
+  // 9. 新增事件的 X 宽度不匹配必须失败关闭，不得泄漏 insert_event。
+  const invalidAddedWidthSource = `${source}\n\n$Event(201, Default, function(X0_1) {\n    InitializeEvent(X0_1, 10, 0);\n});`;
+  const invalidAddedWidth = compileEmevdDarkScript({ ...request, sourceText: invalidAddedWidthSource }, document, emedf);
+  if (invalidAddedWidth.ok) fail('新增事件 X0_1 对 s32 参数必须失败关闭');
+  if (!invalidAddedWidth.diagnostics.some((item) => item.code === 'EMEVD_PARAMETER_WIDTH_MISMATCH')) {
+    fail(`新增事件错误宽度诊断缺失: ${JSON.stringify(invalidAddedWidth.diagnostics)}`);
+  }
+  // 失败结果没有 plan；这正是“不得泄漏 insert_event/insert_instruction”的契约。
+
   process.stdout.write('darkScriptCompiler smoke: ok\n');
 }
 

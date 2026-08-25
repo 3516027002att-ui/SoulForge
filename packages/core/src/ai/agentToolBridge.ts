@@ -85,6 +85,27 @@ const BOUNDED_DISCOVERY_TOOLS = new Set([
 ]);
 const SUMMARY_ARRAY_LIMIT = 16;
 const SUMMARY_STRING_LIMIT = 320;
+const RESULT_ENVELOPE_DESCRIPTION =
+  '返回固定结果 envelope：data、pagination、truncated、identifiers；大型结果只在 data.summary 中摘要，不能按原始 typed response 解读。';
+
+export interface AgentToolResultEnvelope {
+  ok: true;
+  state: 'completed';
+  data: {
+    items: unknown[];
+    record: Record<string, unknown> | null;
+    scalar: string | number | boolean | null;
+    summary: string | null;
+  };
+  pagination: {
+    originalChars: number;
+    returnedCount: number | null;
+    totalCount: number | null;
+    cursors: Record<string, string>;
+  };
+  truncated: boolean;
+  identifiers: string[];
+}
 
 function summarizeToolValue(value: unknown, depth = 0): unknown {
   if (depth > 4) return typeof value === 'string' ? value.slice(0, SUMMARY_STRING_LIMIT) : '[depth-limited]';
@@ -127,6 +148,13 @@ function collectStableIdentifiers(value: unknown): { ids: string[]; cursors: Rec
         if (/^(?:id|.*Id|uri|sourceUri|opId|eventId|rowId|textId|tableId)$/i.test(key) && ids.length < 128) {
           ids.push(`${key}=${child}`);
         }
+      } else if (typeof child === 'number' && Number.isFinite(child)) {
+        // Native addresses commonly expose eventId/rowId/textId as numbers.
+        // Stable summary IDs must preserve them just like their string form;
+        // otherwise the final truncation branch loses the only follow-up key.
+        if (/^(?:id|.*Id|uri|sourceUri|opId|eventId|rowId|textId|tableId)$/i.test(key) && ids.length < 128) {
+          ids.push(`${key}=${child}`);
+        }
       } else {
         walk(child, depth + 1);
       }
@@ -136,30 +164,98 @@ function collectStableIdentifiers(value: unknown): { ids: string[]; cursors: Rec
   return { ids: [...new Set(ids)], cursors };
 }
 
-function boundedToolContent(name: string, data: unknown): string {
-  const raw = JSON.stringify({ ok: true, state: 'completed', data: data ?? null });
-  if (!BOUNDED_DISCOVERY_TOOLS.has(name) || raw.length <= MAX_BOUNDED_TOOL_RESULT_CHARS) return raw;
-  const summary = summarizeToolValue(data);
-  const identifiers = collectStableIdentifiers(data);
-  const summarized = {
-    summary: `工具 ${name} 输出过大，已返回摘要；请使用返回的 ID 或游标继续分页查询。`,
-    truncated: true,
-    originalChars: raw.length,
-    data: summary,
-    ...identifiers
-  };
-  const encoded = JSON.stringify({ ok: true, state: 'completed', data: summarized, ...identifiers });
-  if (encoded.length <= MAX_BOUNDED_TOOL_RESULT_CHARS) return encoded;
-  // Never inject invalid JSON. If even the structured summary is too large,
-  // retain only the stable identifiers/cursor contract.
-  return JSON.stringify({
+function normalizeEnvelopeData(
+  value: unknown,
+  summary: string | null
+): AgentToolResultEnvelope['data'] {
+  if (Array.isArray(value)) {
+    return { items: value, record: null, scalar: null, summary };
+  }
+  if (value !== null && typeof value === 'object') {
+    return { items: [], record: value as Record<string, unknown>, scalar: null, summary };
+  }
+  if (typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean') {
+    return { items: [], record: null, scalar: value, summary };
+  }
+  return { items: [], record: null, scalar: null, summary };
+}
+
+function collectionCounts(value: unknown): { returnedCount: number | null; totalCount: number | null } {
+  if (Array.isArray(value)) return { returnedCount: value.length, totalCount: value.length };
+  if (!value || typeof value !== 'object') return { returnedCount: null, totalCount: null };
+  const record = value as Record<string, unknown>;
+  const items = Array.isArray(record.items) ? record.items : undefined;
+  const returnedCount = typeof record.returnedCount === 'number'
+    ? record.returnedCount
+    : items ? items.length : null;
+  const totalCount = typeof record.totalCount === 'number' ? record.totalCount : returnedCount;
+  return { returnedCount, totalCount };
+}
+
+function createResultEnvelope(
+  data: unknown,
+  originalChars: number,
+  truncated: boolean,
+  summary: string | null,
+  identifiers = collectStableIdentifiers(data)
+): AgentToolResultEnvelope {
+  const counts = collectionCounts(data);
+  return {
     ok: true,
     state: 'completed',
-    summary: `工具 ${name} 输出已截断；请使用 ID/游标继续查询。`,
-    truncated: true,
-    originalChars: raw.length,
-    ...identifiers
-  });
+    data: normalizeEnvelopeData(data, summary),
+    pagination: {
+      originalChars,
+      ...counts,
+      cursors: identifiers.cursors
+    },
+    truncated,
+    identifiers: identifiers.ids
+  };
+}
+
+function compactIdentifiers(
+  identifiers: { ids: string[]; cursors: Record<string, string> }
+): { ids: string[]; cursors: Record<string, string> } {
+  return {
+    ids: identifiers.ids.slice(0, 24).map((id) => id.slice(0, 192)),
+    cursors: Object.fromEntries(Object.entries(identifiers.cursors).slice(0, 8)
+      .map(([key, value]) => [key, value.slice(0, 192)]))
+  };
+}
+
+function boundedToolContent(name: string, data: unknown): string {
+  const raw = JSON.stringify({ ok: true, state: 'completed', data: data ?? null });
+  const identifiers = collectStableIdentifiers(data);
+  if (!BOUNDED_DISCOVERY_TOOLS.has(name) || raw.length <= MAX_BOUNDED_TOOL_RESULT_CHARS) {
+    return JSON.stringify(createResultEnvelope(data, raw.length, false, null, identifiers));
+  }
+  const summary = summarizeToolValue(data);
+  const summaryText = `工具 ${name} 输出过大，已返回摘要；请使用返回的 ID 或游标继续分页查询。`;
+  const summarizedEnvelope = createResultEnvelope(summary, raw.length, true, summaryText, identifiers);
+  const encoded = JSON.stringify(summarizedEnvelope);
+  if (encoded.length <= MAX_BOUNDED_TOOL_RESULT_CHARS) return encoded;
+
+  // Keep the same envelope even when the identifier-rich summary itself is
+  // too large. The compact form retains the first stable follow-up keys.
+  const compact = compactIdentifiers(identifiers);
+  const compactEnvelope = createResultEnvelope(
+    null,
+    raw.length,
+    true,
+    `工具 ${name} 输出已截断；请使用 identifiers 或 pagination.cursors 继续查询。`,
+    compact
+  );
+  const compactEncoded = JSON.stringify(compactEnvelope);
+  if (compactEncoded.length <= MAX_BOUNDED_TOOL_RESULT_CHARS) return compactEncoded;
+
+  return JSON.stringify(createResultEnvelope(
+    null,
+    raw.length,
+    true,
+    `工具 ${name} 输出已截断；请继续分页查询。`,
+    { ids: [], cursors: {} }
+  ));
 }
 
 export function createAgentToolBridge(options: AgentToolBridgeOptions): AgentToolBridge {
@@ -167,7 +263,10 @@ export function createAgentToolBridge(options: AgentToolBridgeOptions): AgentToo
   const textLookupEvidence: string[] = [];
   const tools: AgentToolDefinition[] = registry.list().map((descriptor) => ({
     name: descriptor.name,
-    description: descriptor.description,
+    // Every successful result is normalized by boundedToolContent, not only
+    // discovery results.  The model must therefore receive the envelope
+    // contract for switch_mode, proposals, and mutations as well.
+    description: `${descriptor.description} ${RESULT_ENVELOPE_DESCRIPTION}`,
     parametersJsonSchema: toolInputShapeToJsonSchema(descriptor.inputSchema),
     // Carried through so the loop's approval gate can group by severity from
     // the registry's own declaration instead of guessing from the name.
@@ -269,6 +368,12 @@ function isExactStructuredTarget(name: string, input: unknown): boolean {
   }
   if (name === 'read_emevd_outline') {
     return typeof value.file === 'string' && /\.emevd(?:\.dcx)?$/iu.test(value.file);
+  }
+  if (name === 'search_events') {
+    return typeof value.file === 'string'
+      && value.file.trim().length > 0
+      && typeof value.eventId === 'number'
+      && Number.isSafeInteger(value.eventId);
   }
   if (name === 'search_param_rows' || name === 'search_map_entities') {
     return typeof value.query === 'string' && /^\d+$|^(?:m\d{2}_\d{2}_\d{2}_\d{2}#|map:\/\/)/iu.test(value.query.trim());

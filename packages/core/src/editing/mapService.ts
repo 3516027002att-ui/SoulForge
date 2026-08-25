@@ -89,17 +89,28 @@ export async function loadMapDocument(
     };
   }
 
-  const doc = buildCanonicalMapDocument({
-    sourceUri: `map://${mapId}/${basename(file)}`,
-    sourcePath: file,
-    game: 'sekiro',
-    revision: readResult.data.sourceHash || '1',
-    models: readResult.data.models,
-    parts: readResult.data.parts,
-    regions: readResult.data.regions,
-    events: readResult.data.events,
-    routes: readResult.data.routes
-  });
+  let doc: MapDocument;
+  try {
+    doc = buildCanonicalMapDocument({
+      sourceUri: `map://${mapId}/${basename(file)}`,
+      sourcePath: file,
+      game: 'sekiro',
+      revision: readResult.data.sourceHash || '1',
+      models: readResult.data.models,
+      parts: readResult.data.parts,
+      regions: readResult.data.regions,
+      events: readResult.data.events,
+      routes: readResult.data.routes
+    });
+  } catch (error) {
+    return {
+      ok: false,
+      error: {
+        code: 'MAP_NATIVE_OFFSET_REQUIRED',
+        message: error instanceof Error ? error.message : 'MSB 实体缺少 nativeOffset，已失败关闭。'
+      }
+    };
+  }
 
   const sceneGraph = new MapSceneGraph(doc);
   return { ok: true, doc, sceneGraph, filePath: resolvedPath };
@@ -426,7 +437,9 @@ export async function executeMapTransaction(
 
   const pushTransformMutation = (entity: MapPartEntity | MapRegionEntity): void => {
     const base = {
-      partName: entity.name,
+      family: entity.kind,
+      nativeOffset: entity.nativeOffset,
+      expectedName: entity.name,
       posX: entity.transform.position[0],
       posY: entity.transform.position[1],
       posZ: entity.transform.position[2],
@@ -502,7 +515,13 @@ export async function executeMapTransaction(
           return mapTransactionFailure(transaction.id, 'MAP_PROPERTY_UNSUPPORTED', `不支持的属性修改: ${op.property}`);
         }
         resolved.entity.entityId = op.value;
-        mutations.push({ kind: 'set_property', partName: resolved.entity.name, entityId: op.value });
+        mutations.push({
+          kind: 'set_property',
+          family: resolved.entity.kind,
+          nativeOffset: resolved.entity.nativeOffset,
+          expectedName: resolved.entity.name,
+          entityId: op.value
+        });
         expectedEntities.set(resolved.key, cloneMapEntity(resolved.entity));
         break;
       }
@@ -514,7 +533,9 @@ export async function executeMapTransaction(
         resolved.entity.modelName = op.newModelName;
         mutations.push({
           kind: 'change_model',
-          partName: resolved.entity.name,
+          family: 'part',
+          nativeOffset: resolved.entity.nativeOffset,
+          expectedName: resolved.entity.name,
           modelName: op.newModelName
         });
         expectedEntities.set(resolved.key, cloneMapEntity(resolved.entity));
@@ -529,13 +550,22 @@ export async function executeMapTransaction(
         }
         if (resolved.entity.kind === 'part') {
           workingParts.delete(resolved.key);
-          mutations.push({ kind: 'delete_part', partName: resolved.entity.name });
+          mutations.push({
+            kind: 'delete_part', family: 'part', nativeOffset: resolved.entity.nativeOffset,
+            expectedName: resolved.entity.name
+          });
         } else if (resolved.entity.kind === 'region') {
           workingRegions.delete(resolved.key);
-          mutations.push({ kind: 'delete_region', partName: resolved.entity.name });
+          mutations.push({
+            kind: 'delete_region', family: 'region', nativeOffset: resolved.entity.nativeOffset,
+            expectedName: resolved.entity.name
+          });
         } else {
           workingEvents.delete(resolved.key);
-          mutations.push({ kind: 'delete_event', partName: resolved.entity.name });
+          mutations.push({
+            kind: 'delete_event', family: 'event', nativeOffset: resolved.entity.nativeOffset,
+            expectedName: resolved.entity.name
+          });
         }
         expectedEntities.delete(resolved.key);
         deletedKeys.add(resolved.key);

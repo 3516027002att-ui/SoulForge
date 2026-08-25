@@ -30,6 +30,13 @@ interface EmevdEnvelope {
     restBehavior: number;
     instructionCount?: number;
     instructionStartIndex?: number;
+    parameters?: Array<{
+      instructionIndex: number;
+      targetStartByte: number;
+      sourceStartByte: number;
+      byteCount: number;
+      unkId: number;
+    }>;
   }>;
   instructionsSample?: Array<{
     index: number;
@@ -112,6 +119,46 @@ async function main(): Promise<void> {
     }
     if (!read.data.instructionsSample?.length) {
       throw new Error('missing instructionsSample');
+    }
+
+    // Real Sekiro X-binding golden: take the first event carrying native
+    // parameter bindings, submit the exact table through the production writer
+    // into staging, then reread and compare every field.  This is deliberately
+    // a no-op semantic mutation: it proves the identity/layout-preserving
+    // writer path without changing the user's game or Mod bytes.
+    const parameterEvent = read.data.events.find((event) => (event.parameters?.length ?? 0) > 0);
+    if (!parameterEvent || !parameterEvent.parameters) {
+      throw new Error('真实 Sekiro EMEVD 中没有可用于 X-binding golden 的参数事件。');
+    }
+    const stagedParameters = join(staging, 'common.parameters.emevd');
+    const writtenParameters = await runBridge({
+      command: 'write-emevd',
+      filePath: testFilePath,
+      allowedRoots: [staging, dirname(sourceDcx), oodleRuntimeRoot],
+      writableRoots: [staging],
+      oodleRuntimeRoot,
+      timeoutMs: 120_000,
+      commandOptions: {
+        outputPath: stagedParameters,
+        expectedDocumentHash: read.data.sourceHash,
+        mutation: 'set_event_parameters',
+        eventId: parameterEvent.id,
+        parameters: parameterEvent.parameters
+      }
+    });
+    if (!writtenParameters.diagnostics.some((d) => d.code === 'EMEVD_STAGING_WRITE_VERIFIED')) {
+      throw new Error(`真实 X-binding golden 写入失败: ${JSON.stringify(writtenParameters.diagnostics)}`);
+    }
+    const afterParameters = await runBridge<EmevdEnvelope>({
+      command: 'read-emevd-document',
+      filePath: stagedParameters,
+      allowedRoots: [staging, dirname(sourceDcx), oodleRuntimeRoot],
+      oodleRuntimeRoot,
+      timeoutMs: 120_000
+    });
+    const rereadParameters = afterParameters.data?.events.find((event) => event.id === parameterEvent.id)?.parameters;
+    if (JSON.stringify(rereadParameters ?? []) !== JSON.stringify(parameterEvent.parameters)) {
+      throw new Error(`真实 X-binding golden 重读不一致: ${JSON.stringify({ before: parameterEvent.parameters, after: rereadParameters })}`);
     }
 
     // 1) set_rest_behavior
@@ -364,6 +411,11 @@ async function main(): Promise<void> {
       varArgsLength: longerArgs.length,
       emedfDecoded: decoded.ok,
       emedfMutated: emedfMutated ?? null,
+      xBindingGolden: {
+        eventId: parameterEvent.id,
+        parameterCount: parameterEvent.parameters.length,
+        stagingRereadVerified: true
+      },
       addDeleteEventCycleVerified: true
     }, null, 2));
   } finally {

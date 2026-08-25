@@ -214,6 +214,7 @@ export async function runAgentSession(params: AgentSessionRunParams): Promise<Ag
     config: params.config,
     apiKey: params.apiKey,
     messages,
+    taskQuery: params.prompt,
     tools: params.tools,
     permissionMode: params.permissionMode,
     executeTool: params.executeTool,

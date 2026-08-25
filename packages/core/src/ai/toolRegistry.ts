@@ -2,10 +2,13 @@ import type {
   AiToolPermissionLevel,
   ConfirmationReceipt,
   IndexedFile,
+  MapPartEntity,
   PatchMode,
   PatchProposal,
   ReferenceEdge,
-  ResourceKind
+  ResourceKind,
+  TaeAnimSymbol,
+  TaeEventSymbol
 } from '@soulforge/shared';
 import { basename, isAbsolute, join } from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -18,6 +21,7 @@ import { assessEditRisk, evaluateWriterGate, resolveWriterContract } from '../pa
 import type { RagChunkFamily, RagCorpus } from '@soulforge/shared';
 import { RAG_CHUNK_FAMILIES } from '@soulforge/shared';
 import type { WorkspaceIndex } from '../indexing/workspaceIndex.js';
+import type { KnowledgeRefreshResult } from '../indexing/knowledgeRefresh.js';
 import { ALL_RESOURCE_KINDS } from '../workspace/resourceKinds.js';
 import { buildTextAiContext, renderTextAiPrompt } from './aiContextBuilder.js';
 import { buildPlaintextScriptEdit } from '../script/plaintextScriptEdit.js';
@@ -40,12 +44,15 @@ import {
   type BlenderDeltaImport,
   type MapEditTransaction
 } from '@soulforge/shared';
-import { isAiToolPermissionAllowed, legacyPermissionToLevel } from './toolPermissions.js';
+import { parseMapAddress } from '@soulforge/shared';
+import { decideAiToolPermission, legacyPermissionToLevel } from './toolPermissions.js';
 import { buildRagCorpus, mergeCatalogAndPersisted } from '../rag/chunkBuilder.js';
 import { retrieveEvidence } from '../rag/retrieve.js';
 import { type MemoryStore } from '../memory/memoryStore.js';
 /** @deprecated Prefer AiToolPermissionLevel. Kept for older UI labels. */
 export type ToolPermission = 'read' | 'plan' | 'write' | AiToolPermissionLevel;
+
+export type KnowledgeSourceChange = readonly string[];
 
 export interface ToolContext {
   workspaceIndex: WorkspaceIndex | null;
@@ -67,7 +74,9 @@ export interface ToolContext {
   /** 用户对本次具体写操作的确认凭据（main 原生对话框签发，绑定操作 ID）。 */
   confirmation?: ConfirmationReceipt;
   /** Persist/rebuild RAG after a live native read enriches WorkspaceIndex. */
-  onIndexUpdated?: () => Promise<void>;
+  onSemanticEvidenceUpdated?: (sourceUris?: KnowledgeSourceChange) => Promise<void>;
+  /** Invalidate and converge knowledge after a committed native write/rollback. */
+  onNativeWriteCommitted?: (changedSources: KnowledgeSourceChange) => Promise<KnowledgeRefreshResult | void>;
 }
 
 export interface ToolDescriptor {
@@ -265,8 +274,13 @@ export class ToolRegistry {
     if (!tool) return fail('TOOL_NOT_FOUND', `Unknown tool: ${name}`);
 
     const level = tool.permissionLevel ?? normalizePermissionLevel(tool.permission);
-    if (!isAiToolPermissionAllowed(level, context.mode)) {
-      return fail('TOOL_PERMISSION_DENIED', `Tool '${name}' requires ${level} permission in ${context.mode} mode.`);
+    const permissionDecision = decideAiToolPermission(level, context.mode);
+    if (!permissionDecision.allowed) {
+      return fail(
+        'TOOL_PERMISSION_DENIED',
+        `Tool '${name}' requires ${permissionDecision.required} permission in ${context.mode} mode; `
+          + `maximum is ${permissionDecision.ceiling}.`
+      );
     }
 
     const inputCheck = validateToolInput(tool.inputSchema, input);
@@ -353,15 +367,39 @@ export function createDefaultToolRegistry(): ToolRegistry {
 
   registry.register({
     name: 'search_events',
-    description: 'Search parsed event symbols.',
+    description: 'Search parsed event symbols. For exact lookup pass file + eventId; fuzzy query remains text-first gated.',
     permission: 'read',
     permissionLevel: 'read',
-    inputSchema: { query: 'string', limit: 'number?' },
+    inputSchema: { query: 'string?', file: 'string?', eventId: 'number?', limit: 'number?' },
     run: (input, context) => {
       const ws = context.workspaceIndex;
       if (ws === null) return fail('WORKSPACE_REQUIRED', '这次工具需要先打开 Mod 工作区。');
       const value = asRecord(input);
-      return ok(ws.searchEvents(asString(value.query, ''), asNumber(value.limit, 50)));
+      const file = asOptionalString(value.file);
+      const eventId = value.eventId === undefined ? undefined : asNumber(value.eventId, Number.NaN);
+      const limit = Math.max(1, Math.min(200, Math.trunc(asNumber(value.limit, 50))));
+      if (file !== undefined || eventId !== undefined) {
+        if (!file || eventId === undefined || !Number.isSafeInteger(eventId)) {
+          return fail('INVALID_INPUT', 'search_events exact lookup 需要 file 与安全整数 eventId。');
+        }
+        const indexedFile = ws.getFiles().find((candidate) => [
+          candidate.sourceUri,
+          candidate.sourcePath,
+          candidate.absolutePath,
+          candidate.relativePath
+        ].includes(file));
+        if (!indexedFile) {
+          return fail('EVENT_SOURCE_NOT_INDEXED', `事件源文件未建立索引: ${file}`);
+        }
+        const matches = ws.lookupEvents(eventId, indexedFile.sourceUri).slice(0, limit);
+        if (matches.length === 0) {
+          return fail('EVENT_NOT_FOUND', `未找到 ${file} 中的 eventId ${eventId}。`);
+        }
+        return ok(matches);
+      }
+      const query = asOptionalString(value.query)?.trim();
+      if (!query) return fail('INVALID_INPUT', 'search_events 需要 query，或 file + eventId。');
+      return ok(ws.searchEvents(query, limit));
     }
   });
 
@@ -856,18 +894,29 @@ export function createDefaultToolRegistry(): ToolRegistry {
           fields.push(field);
           rowsById.set(field.rowId, fields);
         }
+        const provenanceFor = (fields: typeof result.fields): { sourceHash?: string; sourceRevision?: number } => {
+          const hashes = new Set(fields.map((field) => field.sourceHash).filter((hash): hash is string => Boolean(hash)));
+          const revisions = new Set(fields.map((field) => field.sourceRevision).filter((revision): revision is number => revision !== undefined));
+          return {
+            ...(hashes.size === 1 ? { sourceHash: [...hashes][0] } : {}),
+            ...(revisions.size === 1 ? { sourceRevision: [...revisions][0] } : {})
+          };
+        };
+        const exportProvenance = provenanceFor(result.fields);
         context.workspaceIndex.mergeParamRows({
           paramName: table,
+          ...exportProvenance,
           rows: [...rowsById.entries()].map(([rowId, fields]) => ({
             uri: `${sourceUri}#${table}/${rowId}`,
             sourceUri,
             paramName: table,
             rowId,
+            ...provenanceFor(fields),
             fields: fields.map((field) => ({ name: field.fieldId, value: field.value }))
           }))
         });
         context.workspaceIndex.rebuildReferences();
-        await context.onIndexUpdated?.();
+        await context.onSemanticEvidenceUpdated?.([sourceUri]);
       }
       return ok(result);
     }
@@ -897,7 +946,8 @@ export function createDefaultToolRegistry(): ToolRegistry {
         ...(containerPath ? { containerPath } : {})
       });
       if (!result.ok) return fail(result.error.code, result.error.message, result.error.details);
-      return ok(result);
+      const knowledgeRefresh = await context.onNativeWriteCommitted?.([result.containerPath]);
+      return ok({ ...result, ...(knowledgeRefresh ? { knowledgeRefresh } : {}) });
     }
   });
 
@@ -935,19 +985,27 @@ export function createDefaultToolRegistry(): ToolRegistry {
       if (!result.ok) return fail(result.error.code, result.error.message, result.error.details);
       if (context.workspaceIndex && result.entries.length > 0) {
         const sourceUri = pathToFileURL(result.containerPath).href;
+        const hashes = new Set(result.entries.map((entry) => entry.sourceHash).filter((hash): hash is string => Boolean(hash)));
+        const revisions = new Set(result.entries.map((entry) => entry.sourceRevision).filter((revision): revision is number => revision !== undefined));
+        const sourceHash = hashes.size === 1 ? [...hashes][0] : undefined;
+        const sourceRevision = revisions.size === 1 ? [...revisions][0] : undefined;
         context.workspaceIndex.mergeMsgEntries({
           category: result.table,
+          ...(sourceHash ? { sourceHash } : {}),
+          ...(sourceRevision !== undefined ? { sourceRevision } : {}),
           entries: result.entries.map((entry) => ({
             uri: `${sourceUri}#${result.table}/${entry.id}`,
             sourceUri,
             category: result.table,
             textId: entry.id,
             text: entry.text,
-            confidence: 'high'
+            confidence: 'high',
+            ...(entry.sourceHash ? { sourceHash: entry.sourceHash } : {}),
+            ...(entry.sourceRevision !== undefined ? { sourceRevision: entry.sourceRevision } : {})
           }))
         });
         context.workspaceIndex.rebuildReferences();
-        await context.onIndexUpdated?.();
+        await context.onSemanticEvidenceUpdated?.([sourceUri]);
       }
       return ok(result);
     }
@@ -979,7 +1037,8 @@ export function createDefaultToolRegistry(): ToolRegistry {
         ...(lang ? { lang } : {})
       });
       if (!result.ok) return fail(result.error.code, result.error.message, result.error.details);
-      return ok(result);
+      const knowledgeRefresh = await context.onNativeWriteCommitted?.([result.containerPath]);
+      return ok({ ...result, ...(knowledgeRefresh ? { knowledgeRefresh } : {}) });
     }
   });
 
@@ -1001,14 +1060,20 @@ export function createDefaultToolRegistry(): ToolRegistry {
       if (context.workspaceIndex && result.events) {
         const indexedFile = context.workspaceIndex.getFiles().find((candidate) => candidate.absolutePath === result.filePath);
         const sourceUri = indexedFile?.sourceUri ?? result.filePath ?? file;
+        const sourceHash = result.sourceHash;
+        const sourceRevision = indexedFile?.mtimeMs;
         const mapId = basename(sourceUri).replace(/\.emevd(?:\.dcx)?$/i, '');
         context.workspaceIndex.upsertEventExport({
           mapId,
+          ...(sourceHash ? { sourceHash } : {}),
+          ...(sourceRevision !== undefined ? { sourceRevision } : {}),
           events: result.events.map((event) => ({
             uri: `${sourceUri}#event/${event.eventId}`,
             sourceUri,
             mapId,
             eventId: event.eventId,
+            ...(sourceHash ? { sourceHash } : {}),
+            ...(sourceRevision !== undefined ? { sourceRevision } : {}),
             instructions: [],
             raw: {
               authority: 'native-verified-outline',
@@ -1019,9 +1084,124 @@ export function createDefaultToolRegistry(): ToolRegistry {
           }))
         });
         context.workspaceIndex.rebuildReferences();
-        await context.onIndexUpdated?.();
+        await context.onSemanticEvidenceUpdated?.([sourceUri]);
       }
       return ok(result);
+    }
+  });
+
+  registry.register({
+    name: 'apply_emevd_dsl',
+    description: 'Compile and commit EMEVD DSL through the native Bridge four-view path. '
+      + 'The DSL is not a binary text patch; unknown/ambiguous parameter bindings fail closed.',
+    permission: 'commit',
+    permissionLevel: 'commit',
+    inputSchema: {
+      file: 'string',
+      dsl: 'string',
+      mode: 'enum:patch|dark-script?',
+      emedfPath: 'string?'
+    },
+    run: async (input, context) => {
+      const edit = requireEditSession(context, 'write');
+      if (!('session' in edit)) return edit;
+      const value = asRecord(input);
+      const file = asString(value.file);
+      const dsl = asString(value.dsl);
+      if (!file || !dsl.trim()) return fail('INVALID_INPUT', 'apply_emevd_dsl 需要 file 与非空 dsl。');
+      const mode = value.mode === 'dark-script' ? 'dark-script' : 'patch';
+      const emedfPath = asOptionalString(value.emedfPath);
+      const result = await applyEmevdDsl({
+        edit: edit.session,
+        file,
+        dsl,
+        mode,
+        ...(emedfPath ? { emedfPath } : {})
+      });
+      if (!result.ok) return fail(result.error?.code ?? 'EMEVD_DSL_FAILED', result.error?.message ?? 'EMEVD DSL 提交失败。', result.diagnostics);
+      const knowledgeRefresh = await context.onNativeWriteCommitted?.([result.filePath ?? file]);
+      return ok({ ...result, ...(knowledgeRefresh ? { knowledgeRefresh } : {}) });
+    }
+  });
+
+  registry.register({
+    name: 'read_tae_events',
+    description: 'Read native TAE event times and decoded fields by exact action address. '
+      + 'Use cXXXX#AXXXX.eN addresses; omitted addresses return the bounded native event projection.',
+    permission: 'read',
+    permissionLevel: 'read',
+    inputSchema: { file: 'string', addresses: 'array?' },
+    run: async (input, context) => {
+      if (!context.session) return ok({ file: asString(asRecord(input).file), events: [], note: 'no workspace session, guard relaxed, empty' });
+      const edit = requireEditSession(context, 'read');
+      if (!('session' in edit)) return edit;
+      const value = asRecord(input);
+      const file = asString(value.file);
+      if (!file) return fail('INVALID_INPUT', 'read_tae_events 需要 file。');
+      const addresses = value.addresses === undefined ? [] : asStringList(value.addresses);
+      const result = await readTaeEvents({
+        edit: edit.session,
+        file,
+        ...(addresses.length > 0 ? { addresses } : {})
+      });
+      if (!result.ok) return fail(result.error.code, result.error.message, result.diagnostics);
+      if (context.workspaceIndex) {
+        const sourceUri = pathToFileURL(result.filePath).href;
+        const sourceFile = context.workspaceIndex.getFile(sourceUri);
+        const sourceHash = result.sourceHash;
+        const sourceRevision = sourceFile?.mtimeMs;
+        const animations = new Map<number, TaeAnimSymbol>();
+        for (const event of result.events) {
+          const animation = animations.get(event.animId) ?? { animId: event.animId, code: event.code, events: [] as TaeEventSymbol[] };
+          animation.events.push({
+            uri: event.uri,
+            index: event.eventIndex,
+            eventTypeId: event.eventTypeId,
+            ...(event.typeName ? { typeName: event.typeName } : {}),
+            startTime: event.startTime,
+            endTime: event.endTime,
+            startFrame: event.startFrame,
+            endFrame: event.endFrame,
+            ...(sourceHash ? { sourceHash } : {}),
+            ...(sourceRevision !== undefined ? { sourceRevision } : {}),
+            ...(event.fields ? { fields: event.fields } : {}),
+            ...(event.parameterBytesHex ? { parameterBytesHex: event.parameterBytesHex } : {})
+          });
+          animations.set(event.animId, animation);
+        }
+        context.workspaceIndex.upsertTaeExport({
+          chrId: result.chrId,
+          sourceUri,
+          ...(sourceHash ? { sourceHash } : {}),
+          ...(sourceRevision !== undefined ? { sourceRevision } : {}),
+          animations: [...animations.values()]
+        });
+        context.workspaceIndex.rebuildReferences();
+        await context.onSemanticEvidenceUpdated?.([sourceUri]);
+      }
+      return ok(result);
+    }
+  });
+
+  registry.register({
+    name: 'mutate_tae_event_times',
+    description: 'Set TAE event start/end frames by exact action address through Patch Engine. '
+      + 'Ambiguous or missing native events fail closed; no filename or array-index guessing.',
+    permission: 'commit',
+    permissionLevel: 'commit',
+    inputSchema: { file: 'string', edits: 'array' },
+    run: async (input, context) => {
+      const edit = requireEditSession(context, 'write');
+      if (!('session' in edit)) return edit;
+      const value = asRecord(input);
+      const file = asString(value.file);
+      const edits = asTaeTimeEdits(value.edits);
+      if (!file) return fail('INVALID_INPUT', 'mutate_tae_event_times 需要 file。');
+      if (!edits.ok) return fail(edits.code, edits.message);
+      const result = await setTaeEventTimes({ edit: edit.session, file, edits: edits.edits });
+      if (!result.ok) return fail(result.error.code, result.error.message, result.diagnostics);
+      const knowledgeRefresh = await context.onNativeWriteCommitted?.([result.filePath]);
+      return ok({ ...result, ...(knowledgeRefresh ? { knowledgeRefresh } : {}) });
     }
   });
 
@@ -1043,34 +1223,53 @@ export function createDefaultToolRegistry(): ToolRegistry {
       if (edits.edits.length === 0) return fail('INVALID_INPUT', 'mutate_msb_part_transform 需要非空 edits 数组。');
       const loaded = await loadMapDocument(edit.session, file);
       if (!loaded.ok) return fail(loaded.error.code, loaded.error.message);
+      const canonicalEdits: Array<{ item: MsbPartTransformEdit; target: string; part: MapPartEntity }> = [];
+      for (const item of edits.edits) {
+        if (item.nativeOffset === undefined) {
+          return fail('MSB_NATIVE_OFFSET_REQUIRED', `${item.address} 写入必须携带 nativeOffset；地址/名称仅作诊断，不能作为唯一目标。`);
+        }
+        const parsed = parseMapAddress(item.address);
+        if (!parsed?.name) return fail('MSB_ADDRESS_INVALID', `无法解析 MSB part 地址：${item.address}`);
+        const resolved = loaded.sceneGraph.resolveNativeIdentity({
+          family: 'part',
+          nativeOffset: item.nativeOffset,
+          expectedName: parsed.name
+        });
+        if (!resolved.ok) return fail(resolved.code, `MSB native identity 未唯一解析：${item.address}@${item.nativeOffset}`);
+        if (resolved.entity.kind !== 'part') return fail('MSB_ENTITY_KIND_INVALID', `MSB native identity 不是 Part：${item.address}@${item.nativeOffset}`);
+        if (!MSB_TRANSFORM_FIELDS.some((field) => item[field] !== undefined)) {
+          return fail('MSB_EDIT_EMPTY', `${item.address} 没有任何要写入的变换字段。`);
+        }
+        canonicalEdits.push({ item, target: resolved.entity.stableKey, part: resolved.entity });
+      }
       const transaction: MapEditTransaction = {
         id: `tx-agent-msb-${Date.now()}`,
         mapId: loaded.doc.mapId,
         baseRevision: loaded.doc.revision,
-        description: `Agent MSB Part 变换 (${edits.edits.length} 项)`,
+        description: `Agent MSB Part 变换 (${canonicalEdits.length} 项)`,
         author: 'agent',
-        operations: edits.edits.map((item) => ({
+        operations: canonicalEdits.map(({ item, target, part }) => ({
           kind: 'set_transform' as const,
-          target: item.address,
+          target,
           ...(item.posX !== undefined || item.posY !== undefined || item.posZ !== undefined
             ? { position: [
-                item.posX ?? loaded.sceneGraph.findPart(item.address)?.transform.position[0] ?? 0,
-                item.posY ?? loaded.sceneGraph.findPart(item.address)?.transform.position[1] ?? 0,
-                item.posZ ?? loaded.sceneGraph.findPart(item.address)?.transform.position[2] ?? 0
+                item.posX ?? part.transform.position[0],
+                item.posY ?? part.transform.position[1],
+                item.posZ ?? part.transform.position[2]
               ] as [number, number, number] }
             : {}),
           ...(item.rotX !== undefined || item.rotY !== undefined || item.rotZ !== undefined
             ? { rotation: [
-                item.rotX ?? loaded.sceneGraph.findPart(item.address)?.transform.rotation[0] ?? 0,
-                item.rotY ?? loaded.sceneGraph.findPart(item.address)?.transform.rotation[1] ?? 0,
-                item.rotZ ?? loaded.sceneGraph.findPart(item.address)?.transform.rotation[2] ?? 0
+                item.rotX ?? part.transform.rotation[0],
+                item.rotY ?? part.transform.rotation[1],
+                item.rotZ ?? part.transform.rotation[2]
               ] as [number, number, number] }
             : {}),
           ...(item.scaleX !== undefined || item.scaleY !== undefined || item.scaleZ !== undefined
             ? { scale: [
-                item.scaleX ?? loaded.sceneGraph.findPart(item.address)?.transform.scale[0] ?? 1,
-                item.scaleY ?? loaded.sceneGraph.findPart(item.address)?.transform.scale[1] ?? 1,
-                item.scaleZ ?? loaded.sceneGraph.findPart(item.address)?.transform.scale[2] ?? 1
+                item.scaleX ?? part.transform.scale[0],
+                item.scaleY ?? part.transform.scale[1],
+                item.scaleZ ?? part.transform.scale[2]
               ] as [number, number, number] }
             : {})
         })),
@@ -1078,8 +1277,8 @@ export function createDefaultToolRegistry(): ToolRegistry {
       };
       const result = await executeMapTransaction(edit.session, file, transaction);
       if (!result.ok) return fail(result.error?.code ?? 'MSB_TRANSACTION_FAILED', result.error?.message ?? 'MSB 地图事务失败。', result.error?.details);
-      await context.onIndexUpdated?.();
-      return ok({ ...result, status: result.verification ?? 'completed' });
+      const knowledgeRefresh = await context.onNativeWriteCommitted?.([file]);
+      return ok({ ...result, status: result.verification ?? 'completed', ...(knowledgeRefresh ? { knowledgeRefresh } : {}) });
     }
   });
 
@@ -1167,8 +1366,8 @@ export function createDefaultToolRegistry(): ToolRegistry {
         ...(typeof value.scaleMultiplier === 'number' ? { scaleMultiplier: Number(value.scaleMultiplier) } : {})
       });
       if (!result.ok) return fail(result.error?.code ?? 'BATCH_TRANSFORM_FAILED', result.error?.message ?? '批量变换失败');
-      await context.onIndexUpdated?.();
-      return ok(result);
+      const knowledgeRefresh = await context.onNativeWriteCommitted?.([file]);
+      return ok({ ...result, ...(knowledgeRefresh ? { knowledgeRefresh } : {}) });
     }
   });
 
@@ -1210,8 +1409,13 @@ export function createDefaultToolRegistry(): ToolRegistry {
       if (!translation.ok) return fail(translation.conflict ? 'REVISION_CONFLICT' : 'IMPORT_FAILED', translation.error);
       const result = await executeMapTransaction(edit.session, file, translation.transaction);
       if (!result.ok) return fail(result.error?.code ?? 'IMPORT_COMMIT_FAILED', result.error?.message ?? 'Blender 地图事务提交失败。', result.error?.details);
-      await context.onIndexUpdated?.();
-      return ok({ transaction: translation.transaction, status: result.verification ?? 'completed', result });
+      const knowledgeRefresh = await context.onNativeWriteCommitted?.([file]);
+      return ok({
+        transaction: translation.transaction,
+        status: result.verification ?? 'completed',
+        result,
+        ...(knowledgeRefresh ? { knowledgeRefresh } : {})
+      });
     }
   });
 
@@ -1287,7 +1491,8 @@ export function createDefaultToolRegistry(): ToolRegistry {
           { opId: result.opId, diagnostics: result.diagnostics }
         );
       }
-      return ok(result);
+      const knowledgeRefresh = await context.onNativeWriteCommitted?.(result.changedFiles);
+      return ok({ ...result, ...(knowledgeRefresh ? { knowledgeRefresh } : {}) });
     }
   });
 
@@ -1349,7 +1554,8 @@ export function createDefaultToolRegistry(): ToolRegistry {
           { opId: result.opId }
         );
       }
-      return ok(result);
+      const knowledgeRefresh = await context.onNativeWriteCommitted?.(result.restoredFiles);
+      return ok({ ...result, ...(knowledgeRefresh ? { knowledgeRefresh } : {}) });
     }
   });
 
@@ -1638,6 +1844,13 @@ function asMsbTransformEdits(value: unknown): { ok: true; edits: MsbPartTransfor
       return { ok: false, code: 'INVALID_INPUT', message: '每条 edit 需要 address（格式 m11_01_00_00#c1050_0000）。' };
     }
     const edit: MsbPartTransformEdit = { address };
+    if (record.nativeOffset !== undefined) {
+      const nativeOffset = asNumber(record.nativeOffset, Number.NaN);
+      if (!Number.isSafeInteger(nativeOffset) || nativeOffset < 0) {
+        return { ok: false, code: 'INVALID_INPUT', message: `${address}.nativeOffset 必须是非负安全整数。` };
+      }
+      edit.nativeOffset = nativeOffset;
+    }
     for (const field of MSB_TRANSFORM_FIELDS) {
       if (record[field] === undefined) continue;
       const raw = record[field];

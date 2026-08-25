@@ -6,7 +6,7 @@
  *   node scripts/sf-edit.mjs fmg   read|set ...
  *   node scripts/sf-edit.mjs emevd read|apply-dsl ...
  *   node scripts/sf-edit.mjs tae   read|set --file chr/c1050.anibnd.dcx --set c1050#A0200.e0.startFrame=438
- *   node scripts/sf-edit.mjs msb   read|set --file map/m11_01_00_00/m11_01_00_00.msb.dcx --set m11_01_00_00#c1050_0000.posX=12.5
+ *   node scripts/sf-edit.mjs msb   read|set --file map/m11_01_00_00/m11_01_00_00.msb.dcx --set m11_01_00_00#c1050_0000@0x123456.posX=12.5
  */
 import { readFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
@@ -21,7 +21,7 @@ import { readMsbParts, setMsbPartTransform } from '../packages/core/dist/editing
 const PARAM_SET_RE = /^([^#]+)#(\d+)\.([A-Za-z0-9_]+)=(.*)$/u;
 const FMG_SET_RE = /^([^#]+)#(\d+)=(.*)$/u;
 const TAE_SET_RE = /^(c\d{4}#A\d+\.e\d+)\.([A-Za-z0-9_]+)=(.*)$/u;
-const MSB_SET_RE = /^(m\d{2}_\d{2}_\d{2}_\d{2}#[^.\s]+)\.([A-Za-z0-9_]+)=(.*)$/u;
+const MSB_SET_RE = /^(m\d{2}_\d{2}_\d{2}_\d{2}#[^@.\s]+)@((?:0x)?[0-9a-f]+)\.([A-Za-z0-9_]+)=(.*)$/iu;
 const TAE_SETTABLE_FIELDS = ['startFrame', 'endFrame'];
 const MSB_TRANSFORM_FIELDS = ['posX', 'posY', 'posZ', 'rotX', 'rotY', 'rotZ', 'scaleX', 'scaleY', 'scaleZ'];
 
@@ -129,15 +129,20 @@ function parseMsbSets(flags) {
   for (const raw of flagStrings(flags, 'set')) {
     const match = MSB_SET_RE.exec(raw);
     if (!match) {
-      fail('MSB_SET_SYNTAX', `无法解析 --set ${raw}，格式为 mAA_BB_CC_DD#part.posX=值`);
+      fail('MSB_SET_SYNTAX', `无法解析 --set ${raw}，格式为 mAA_BB_CC_DD#part@nativeOffset.posX=值（nativeOffset 支持十进制或 0x 十六进制）`);
       return null;
     }
-    const field = match[2];
+    const nativeOffset = Number(match[2]);
+    if (!Number.isSafeInteger(nativeOffset) || nativeOffset < 0) {
+      fail('MSB_NATIVE_OFFSET_INVALID', `--set 的 nativeOffset 必须是非负安全整数：${match[2]}`);
+      return null;
+    }
+    const field = match[3];
     if (!MSB_TRANSFORM_FIELDS.includes(field)) {
       fail('MSB_SET_FIELD_UNKNOWN', `MSB 门面只接受变换字段 ${MSB_TRANSFORM_FIELDS.join(' / ')}：${field}`);
       return null;
     }
-    edits.push({ address: match[1], [field]: Number(match[3]) });
+    edits.push({ address: match[1], nativeOffset, [field]: Number(match[4]) });
   }
   return edits;
 }
@@ -264,7 +269,7 @@ async function main() {
     const edits = parseMsbSets(flags);
     if (!edits) return;
     if (edits.length === 0) {
-      fail('MSB_EDIT_EMPTY', 'msb set 需要 --set mAA_BB_CC_DD#part.posX=值');
+      fail('MSB_EDIT_EMPTY', 'msb set 需要 --set mAA_BB_CC_DD#part@nativeOffset.posX=值');
       return;
     }
     printResult(await setMsbPartTransform({ edit, file, edits }));

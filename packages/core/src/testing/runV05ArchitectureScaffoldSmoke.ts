@@ -391,11 +391,16 @@ async function mainInWorkspace(root: string): Promise<void> {
     throw new Error('commit must be denied in plan mode without confirmation.');
   }
 
-  // Stage/validate allowed in plan; commit needs confirmation or fullPermission.
-  const stageOk = await registry.executeToolThroughPolicy('patch.stage', {}, planCtx);
-  if (!stageOk.ok) throw new Error(`stage tool failed: ${JSON.stringify(stageOk.diagnostics)}`);
-  const validateOk = await registry.executeToolThroughPolicy('patch.validate', {}, planCtx);
-  if (!validateOk.ok) throw new Error(`validate tool failed: ${JSON.stringify(validateOk.diagnostics)}`);
+  // Plan may propose, but stage and validate are mutation-adjacent operations
+  // and must be rejected by the same permission ceiling.
+  const stageDenied = await registry.executeToolThroughPolicy('patch.stage', {}, planCtx);
+  if (stageDenied.ok || stageDenied.policyDecision.kind !== 'deny') {
+    throw new Error(`stage must be denied in plan mode: ${JSON.stringify(stageDenied)}`);
+  }
+  const validateDenied = await registry.executeToolThroughPolicy('patch.validate', {}, planCtx);
+  if (validateDenied.ok || validateDenied.policyDecision.kind !== 'deny') {
+    throw new Error(`validate must be denied in plan mode: ${JSON.stringify(validateDenied)}`);
+  }
 
   const fullCtx: ScaffoldToolContext = {
     workspaceId: planCtx.workspaceId,

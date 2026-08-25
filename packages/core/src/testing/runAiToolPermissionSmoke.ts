@@ -5,7 +5,7 @@
  * testing/harness 下的 evaluatePolicyGate / maxPermissionFromMode /
  * executeToolThroughPolicy —— 那三个符号全仓**只存在于 testing 目录**，是测试
  * 装置自建的权限阶梯。生产判定走的是另一套：ai/toolPermissions.ts 的
- * isAiToolPermissionAllowed，由 ai/toolRegistry.ts:127 在每次 run 时调用。
+ * decideAiToolPermission，由 ai/toolRegistry.ts 在每次 run 时调用。
  *
  * 后果是「AI 不得抬高授权」这条安全边界在生产实现上几乎没有断言：改坏
  * maxPermissionForMode（例如让 plan 模式返回 rollback），conformance 的 58 个
@@ -19,11 +19,13 @@
  */
 import {
   AI_TOOL_PERMISSION_ORDER,
+  decideAiToolPermission,
   isAiToolPermissionAllowed,
   legacyPermissionToLevel,
   maxPermissionForMode
 } from '../ai/toolPermissions.js';
 import { ToolRegistry, type ToolContext } from '../ai/toolRegistry.js';
+import { isToolAllowedInMode } from '../model-services/agentLoop.js';
 import type { AiToolPermissionLevel } from '@soulforge/shared';
 
 const failures: string[] = [];
@@ -64,7 +66,7 @@ const MODE_CEILINGS: ReadonlyArray<readonly [
   'plan' | 'normal' | 'fullPermission',
   AiToolPermissionLevel
 ]> = [
-  ['plan', 'validate'],
+  ['plan', 'propose'],
   ['normal', 'commit'],
   ['fullPermission', 'rollback']
 ];
@@ -77,7 +79,10 @@ for (const [mode, ceiling] of MODE_CEILINGS) {
   );
 }
 
-// plan 不得提交或回滚。normal（Edit）可提交，仍不得回滚。
+// plan 允许提出提案，但不得进入 staging/validation/commit/rollback。
+check('ceiling/plan-allows-propose', isAiToolPermissionAllowed('propose', 'plan'));
+check('ceiling/plan-denies-stage', !isAiToolPermissionAllowed('stage', 'plan'));
+check('ceiling/plan-denies-validate', !isAiToolPermissionAllowed('validate', 'plan'));
 check('ceiling/plan-denies-commit', !isAiToolPermissionAllowed('commit', 'plan'));
 check('ceiling/plan-denies-rollback', !isAiToolPermissionAllowed('rollback', 'plan'));
 check('ceiling/normal-allows-commit', isAiToolPermissionAllowed('commit', 'normal'));
@@ -149,6 +154,46 @@ async function verifyRegistryGate(): Promise<void> {
     `实测 ${JSON.stringify(allowed)} commitToolRan=${commitToolRan}`
   );
 
+  const runtimeCalls = new Set<string>();
+  for (const level of ['propose', 'stage', 'validate'] as const) {
+    registry.register({
+      name: `test_${level}_tool`,
+      description: `${level}-level tool used to compare registry and loop policy.`,
+      permission: level,
+      permissionLevel: level,
+      run: async () => {
+        runtimeCalls.add(level);
+        return { ok: true, data: null };
+      }
+    });
+  }
+  const runtimeLevels = new Map<string, string>([
+    ['test_propose_tool', 'propose'],
+    ['test_stage_tool', 'stage'],
+    ['test_validate_tool', 'validate']
+  ]);
+  const runtimeRegistered = new Set(runtimeLevels.keys());
+  for (const [name, level] of runtimeLevels) {
+    const registryResult = await registry.run(name, {}, contextFor('plan'));
+    const loopResult = isToolAllowedInMode(name, 'plan', runtimeRegistered, runtimeLevels);
+    const expected = decideAiToolPermission(level as AiToolPermissionLevel, 'plan').allowed;
+    check(
+      `runtime/${level}/registry-matches-shared-predicate`,
+      registryResult.ok === expected,
+      `registry=${JSON.stringify(registryResult)} expected=${expected}`
+    );
+    check(
+      `runtime/${level}/loop-matches-shared-predicate`,
+      loopResult.ok === expected,
+      `loop=${JSON.stringify(loopResult)} expected=${expected}`
+    );
+    check(
+      `runtime/${level}/execution-side-effect`,
+      runtimeCalls.has(level) === expected,
+      `calls=${JSON.stringify([...runtimeCalls])} expected=${expected}`
+    );
+  }
+
   // 未注册工具必须报 TOOL_NOT_FOUND，而不是被权限层吞掉。
   const missing = await registry.run('no_such_tool', {}, contextFor('fullPermission'));
   check(
@@ -171,7 +216,7 @@ console.log(JSON.stringify({
     : `${failures.length} 条断言失败`,
   checks,
   coveredProductionSymbols: [
-    'ai/toolPermissions.ts: AI_TOOL_PERMISSION_ORDER / maxPermissionForMode / isAiToolPermissionAllowed / legacyPermissionToLevel',
+    'ai/toolPermissions.ts: AI_TOOL_PERMISSION_ORDER / maxPermissionForMode / decideAiToolPermission / isAiToolPermissionAllowed / legacyPermissionToLevel',
     'ai/toolRegistry.ts: ToolRegistry.run 的 TOOL_PERMISSION_DENIED 与 TOOL_NOT_FOUND 分支'
   ],
   nonClaim: '本 smoke 只验证权限判定与注册表拦截，不验证任何 AI 能力，也不声明'

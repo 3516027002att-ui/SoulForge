@@ -55,6 +55,19 @@ export interface WorkspaceIndexStats {
   references: number;
 }
 
+export interface SourceInvalidationResult {
+  sourceUris: string[];
+  removed: {
+    events: number;
+    mapEntities: number;
+    mapRegions: number;
+    paramRows: number;
+    textEntries: number;
+    taeExports: number;
+  };
+  referencesRebuilt: number;
+}
+
 export class WorkspaceIndex {
   readonly workspaceId: string;
 
@@ -75,6 +88,79 @@ export class WorkspaceIndex {
     for (const file of files) this.filesByUri.set(file.sourceUri, file);
   }
 
+  /**
+   * Remove semantic projections whose provenance points at changed sources.
+   * Replacing the file catalog alone proves only that bytes changed; it does
+   * not prove that old decoded symbols still describe the new bytes.
+   */
+  invalidateChangedSources(sourceUris: readonly string[]): SourceInvalidationResult {
+    const uniqueSources = [...new Set(sourceUris.filter((sourceUri) => sourceUri.trim().length > 0))];
+    const changedFiles = uniqueSources
+      .map((sourceUri) => findUniqueSourceFile(this.filesByUri, sourceUri))
+      .filter((file): file is IndexedFile => file !== undefined);
+    const isChangedSource = (sourceUri: string): boolean =>
+      uniqueSources.includes(sourceUri)
+      || changedFiles.some((file) => sourceUriMatchesFile(sourceUri, file));
+    const removed = {
+      events: 0,
+      mapEntities: 0,
+      mapRegions: 0,
+      paramRows: 0,
+      textEntries: 0,
+      taeExports: 0
+    };
+
+    this.eventExports = this.eventExports.flatMap((item) => {
+      const events = item.events.filter((event) => {
+        const keep = !isChangedSource(event.sourceUri);
+        if (!keep) removed.events += 1;
+        return keep;
+      });
+      return events.length > 0 ? [{ ...item, events }] : [];
+    });
+    this.mapExports = this.mapExports.flatMap((item) => {
+      const entities = item.entities.filter((entity) => {
+        const keep = !isChangedSource(entity.sourceUri);
+        if (!keep) removed.mapEntities += 1;
+        return keep;
+      });
+      const regions = item.regions.filter((region) => {
+        const keep = !isChangedSource(region.sourceUri);
+        if (!keep) removed.mapRegions += 1;
+        return keep;
+      });
+      return entities.length > 0 || regions.length > 0 ? [{ ...item, entities, regions }] : [];
+    });
+    this.paramExports = this.paramExports.flatMap((item) => {
+      const rows = item.rows.filter((row) => {
+        const keep = !isChangedSource(row.sourceUri);
+        if (!keep) removed.paramRows += 1;
+        return keep;
+      });
+      return rows.length > 0 ? [{ ...item, rows }] : [];
+    });
+    this.msgExports = this.msgExports.flatMap((item) => {
+      const entries = item.entries.filter((entry) => {
+        const keep = !isChangedSource(entry.sourceUri);
+        if (!keep) removed.textEntries += 1;
+        return keep;
+      });
+      return entries.length > 0 ? [{ ...item, entries }] : [];
+    });
+    this.taeExports = this.taeExports.filter((item) => {
+      const keep = !isChangedSource(item.sourceUri);
+      if (!keep) removed.taeExports += 1;
+      return keep;
+    });
+
+    const referencesRebuilt = uniqueSources.length > 0 ? this.rebuildReferences().edges.length : this.references.length;
+    return { sourceUris: uniqueSources, removed, referencesRebuilt };
+  }
+
+  invalidateSource(sourceUri: string): SourceInvalidationResult {
+    return this.invalidateChangedSources([sourceUri]);
+  }
+
   upsertEventExport(value: EventExport): void {
     const key = value.mapId ?? value.events[0]?.sourceUri ?? value.events[0]?.uri ?? 'unknown';
     this.eventExports = replaceByKey(this.eventExports, key, (item) => item.mapId ?? item.events[0]?.sourceUri ?? item.events[0]?.uri ?? 'unknown', value);
@@ -92,9 +178,20 @@ export class WorkspaceIndex {
   mergeParamRows(value: ParamExport): void {
     const key = value.paramName.toLowerCase();
     const existing = this.paramExports.find((item) => item.paramName.toLowerCase() === key);
-    const rows = new Map((existing?.rows ?? []).map((row) => [row.rowId, row]));
-    for (const row of value.rows) rows.set(row.rowId, row);
-    this.upsertParamExport({ paramName: value.paramName, rows: [...rows.values()] });
+    // Row IDs are only unique inside one native source.  Keying by rowId alone
+    // used to let a live read from source B overwrite source A, and could then
+    // carry source A's old semantic body under source B's hash.
+    const rows = new Map((existing?.rows ?? []).map((row) => [`${row.sourceUri}#${row.rowId}`, row]));
+    for (const row of value.rows) rows.set(`${row.sourceUri}#${row.rowId}`, row);
+    const mergedRows = [...rows.values()];
+    const sourceHashes = new Set(mergedRows.map((row) => row.sourceHash).filter((item): item is string => Boolean(item)));
+    const sourceRevisions = new Set(mergedRows.map((row) => row.sourceRevision).filter((item): item is number => item !== undefined));
+    this.upsertParamExport({
+      paramName: value.paramName,
+      ...(sourceHashes.size === 1 ? { sourceHash: [...sourceHashes][0] } : {}),
+      ...(sourceRevisions.size === 1 ? { sourceRevision: [...sourceRevisions][0] } : {}),
+      rows: mergedRows
+    });
   }
 
   upsertMsgExport(value: MsgExport): void {
@@ -106,9 +203,19 @@ export class WorkspaceIndex {
   mergeMsgEntries(value: MsgExport): void {
     const key = value.category ?? 'default';
     const existing = this.msgExports.find((item) => (item.category ?? 'default') === key);
-    const entries = new Map((existing?.entries ?? []).map((entry) => [entry.textId, entry]));
-    for (const entry of value.entries) entries.set(entry.textId, entry);
-    this.upsertMsgExport({ ...(value.category ? { category: value.category } : {}), entries: [...entries.values()] });
+    // FMG IDs are also scoped by their source container/category; never merge
+    // equal numeric IDs across source URIs under one stale export hash.
+    const entries = new Map((existing?.entries ?? []).map((entry) => [`${entry.sourceUri}#${entry.textId}`, entry]));
+    for (const entry of value.entries) entries.set(`${entry.sourceUri}#${entry.textId}`, entry);
+    const mergedEntries = [...entries.values()];
+    const sourceHashes = new Set(mergedEntries.map((entry) => entry.sourceHash).filter((item): item is string => Boolean(item)));
+    const sourceRevisions = new Set(mergedEntries.map((entry) => entry.sourceRevision).filter((item): item is number => item !== undefined));
+    this.upsertMsgExport({
+      ...(value.category ? { category: value.category } : {}),
+      ...(sourceHashes.size === 1 ? { sourceHash: [...sourceHashes][0] } : {}),
+      ...(sourceRevisions.size === 1 ? { sourceRevision: [...sourceRevisions][0] } : {}),
+      entries: mergedEntries
+    });
   }
 
   /** 照 upsertMapExport 抄：TAE 一份 anibnd 一个 TaeExport，按 sourceUri 替换。 */
@@ -183,6 +290,14 @@ export class WorkspaceIndex {
     return searchSymbols(this.eventExports.flatMap((item) => item.events), query, limit, eventSearchText);
   }
 
+  /** Exact event lookup used after the caller has resolved a source file. */
+  lookupEvents(eventId: number, sourceUri?: string): EventSymbol[] {
+    return this.eventExports
+      .flatMap((item) => item.events)
+      .filter((event) => event.eventId === eventId
+        && (sourceUri === undefined || event.sourceUri === sourceUri));
+  }
+
   searchMapEntities(query: string, limit = 100): Array<SearchResult<MapEntitySymbol | MapRegionSymbol>> {
     return searchSymbols(this.mapExports.flatMap((item) => [...item.entities, ...item.regions]), query, limit, mapSymbolSearchText);
   }
@@ -220,7 +335,7 @@ export class WorkspaceIndex {
   }
 
   getFile(uri: string): IndexedFile | undefined {
-    return this.filesByUri.get(uri);
+    return findUniqueSourceFile(this.filesByUri, uri);
   }
 
   listReferences(): ReferenceEdge[] {
@@ -338,6 +453,65 @@ function sortAndLimit<T>(results: Array<SearchResult<T>>, limit: number): Array<
 
 function normalizeSearch(value: string): string {
   return value.toLowerCase().replaceAll('_', ' ').replaceAll(':', ' ').replaceAll('/', ' ').replaceAll('\\', ' ').replaceAll('.', ' ').replaceAll('-', ' ').split(' ').filter(Boolean).join(' ');
+}
+
+/**
+ * A scanned workspace owns relative `file://...` URIs, while a live Bridge
+ * read can report an absolute `file:///C:/...` URI.  Treat both as the same
+ * source only when the indexed file proves the correspondence; comparing URI
+ * strings alone leaves stale symbols behind after a native commit.
+ */
+function sourceUriMatchesFile(sourceUri: string, file: IndexedFile): boolean {
+  const sourceKeys = sourceReferenceKeys(sourceUri);
+  const fileKeys = new Set([
+    ...sourceReferenceKeys(file.sourceUri),
+    ...sourceReferenceKeys(file.sourcePath),
+    ...sourceReferenceKeys(file.relativePath),
+    ...sourceReferenceKeys(file.absolutePath)
+  ]);
+  return [...sourceKeys].some((key) => fileKeys.has(key));
+}
+
+/**
+ * Resolve a source alias only when it identifies one indexed file.  A
+ * relative path is not enough to choose between two roots accidentally
+ * merged into one index; returning undefined keeps reads and invalidation
+ * fail-closed instead of silently selecting the first insertion.
+ */
+function findUniqueSourceFile(filesByUri: ReadonlyMap<string, IndexedFile>, sourceUri: string): IndexedFile | undefined {
+  const direct = filesByUri.get(sourceUri);
+  if (direct) return direct;
+  const matches = [...filesByUri.values()].filter((file) => sourceUriMatchesFile(sourceUri, file));
+  return matches.length === 1 ? matches[0] : undefined;
+}
+
+function sourceReferenceKeys(value: string): string[] {
+  const trimmed = value.trim();
+  if (trimmed.length === 0) return [];
+  const keys = new Set<string>();
+  const add = (candidate: string): void => {
+    const normalized = candidate
+      .replaceAll('\\', '/')
+      .replace(/^\/+([A-Za-z]:\/)/, '$1')
+      .replace(/^\.\//, '')
+      .replace(/\/+/g, '/')
+      .replace(/\/$/, '')
+      .toLowerCase();
+    if (normalized.length > 0) keys.add(normalized);
+  };
+
+  add(trimmed);
+  if (/^file:\/\//i.test(trimmed)) {
+    let pathPart = trimmed.slice('file://'.length);
+    if (/^localhost\//i.test(pathPart)) pathPart = pathPart.slice('localhost/'.length);
+    try {
+      pathPart = decodeURIComponent(pathPart);
+    } catch {
+      // Keep the encoded fallback. Diagnostics should not make invalidation fail.
+    }
+    add(pathPart);
+  }
+  return [...keys];
 }
 
 function eventSearchText(event: EventSymbol): string {

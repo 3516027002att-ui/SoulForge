@@ -9,6 +9,13 @@
 import { formatMapAddress, parseMapAddress } from './soulAddress.js';
 
 export type MapEntityKind = 'model' | 'part' | 'region' | 'event' | 'route';
+export type MapEntityFamily = MapEntityKind;
+
+export interface MapNativeIdentity {
+  family: MapEntityFamily;
+  nativeOffset: number;
+  expectedName?: string | undefined;
+}
 
 export interface Transform3D {
   position: [number, number, number];
@@ -23,8 +30,9 @@ export interface BaseMapEntity {
   mapId: string;
   name: string;
   kind: MapEntityKind;
+  family: MapEntityFamily;
   typeId: number;
-  nativeOffset?: number | undefined;
+  nativeOffset: number;
   entityId?: number | undefined;
 }
 
@@ -92,6 +100,7 @@ export class MapSceneGraph {
   private readonly entityById = new Map<string, MapEntity[]>();
   private readonly entityByStableKey = new Map<string, MapEntity[]>();
   private readonly entityByAddress = new Map<string, MapEntity[]>();
+  private readonly entityByNativeIdentity = new Map<string, MapEntity[]>();
   private readonly entityByName = new Map<string, MapEntity[]>();
   private readonly partsByName = new Map<string, MapPartEntity[]>();
   private readonly regionsByName = new Map<string, MapRegionEntity[]>();
@@ -112,6 +121,7 @@ export class MapSceneGraph {
       this.addIndex(this.entityById, model.id, model);
       this.addIndex(this.entityByStableKey, model.stableKey, model);
       this.addIndex(this.entityByAddress, model.address, model);
+      this.addIndex(this.entityByNativeIdentity, nativeIdentityKey(model.family, model.nativeOffset), model);
       this.addIndex(this.entityByName, model.name, model);
       this.addIndex(this.modelsByName, model.name, model);
     }
@@ -120,6 +130,7 @@ export class MapSceneGraph {
       this.addIndex(this.entityById, part.id, part);
       this.addIndex(this.entityByStableKey, part.stableKey, part);
       this.addIndex(this.entityByAddress, part.address, part);
+      this.addIndex(this.entityByNativeIdentity, nativeIdentityKey(part.family, part.nativeOffset), part);
       this.addIndex(this.entityByName, part.name, part);
       this.addIndex(this.partsByName, part.name, part);
 
@@ -139,6 +150,7 @@ export class MapSceneGraph {
       this.addIndex(this.entityById, region.id, region);
       this.addIndex(this.entityByStableKey, region.stableKey, region);
       this.addIndex(this.entityByAddress, region.address, region);
+      this.addIndex(this.entityByNativeIdentity, nativeIdentityKey(region.family, region.nativeOffset), region);
       this.addIndex(this.entityByName, region.name, region);
       this.addIndex(this.regionsByName, region.name, region);
 
@@ -153,6 +165,7 @@ export class MapSceneGraph {
       this.addIndex(this.entityById, event.id, event);
       this.addIndex(this.entityByStableKey, event.stableKey, event);
       this.addIndex(this.entityByAddress, event.address, event);
+      this.addIndex(this.entityByNativeIdentity, nativeIdentityKey(event.family, event.nativeOffset), event);
       this.addIndex(this.entityByName, event.name, event);
       this.addIndex(this.eventsByName, event.name, event);
 
@@ -172,6 +185,7 @@ export class MapSceneGraph {
       this.addIndex(this.entityById, route.id, route);
       this.addIndex(this.entityByStableKey, route.stableKey, route);
       this.addIndex(this.entityByAddress, route.address, route);
+      this.addIndex(this.entityByNativeIdentity, nativeIdentityKey(route.family, route.nativeOffset), route);
       this.addIndex(this.entityByName, route.name, route);
     }
   }
@@ -202,6 +216,18 @@ export class MapSceneGraph {
     }
     return this.resolveIndex(this.entityByName, identifier)
       ?? { ok: false, code: 'MAP_ENTITY_NOT_FOUND', candidates: [] };
+  }
+
+  public resolveNativeIdentity(identity: MapNativeIdentity): MapEntityResolution {
+    const result = this.resolveIndex(
+      this.entityByNativeIdentity,
+      nativeIdentityKey(identity.family, identity.nativeOffset)
+    );
+    if (!result) return { ok: false, code: 'MAP_ENTITY_NOT_FOUND', candidates: [] };
+    if (result.ok && identity.expectedName !== undefined && result.entity.name !== identity.expectedName) {
+      return { ok: false, code: 'MAP_ENTITY_NOT_FOUND', candidates: [result.entity] };
+    }
+    return result;
   }
 
   public findEntity(identifier: string): MapEntity | undefined {
@@ -543,6 +569,8 @@ export interface BlenderObjectDto {
   stableKey: string;
   soulAddress: string;
   entityKind: MapEntityKind;
+  family: MapEntityFamily;
+  nativeOffset: number;
   name: string;
   modelName?: string | undefined;
   transform: Transform3D;
@@ -559,6 +587,8 @@ export interface BlenderSceneExport {
 export interface BlenderMutationDto {
   stableKey: string;
   action: 'modify' | 'duplicate' | 'delete' | 'create';
+  family?: MapEntityFamily | undefined;
+  nativeOffset?: number | undefined;
   name?: string | undefined;
   modelName?: string | undefined;
   position?: [number, number, number] | undefined;
@@ -585,6 +615,8 @@ export function exportMapSceneForBlender(doc: MapDocument): BlenderSceneExport {
       stableKey: part.stableKey,
       soulAddress: part.address,
       entityKind: 'part',
+      family: part.family,
+      nativeOffset: part.nativeOffset,
       name: part.name,
       modelName: part.modelName,
       transform: part.transform
@@ -596,6 +628,8 @@ export function exportMapSceneForBlender(doc: MapDocument): BlenderSceneExport {
       stableKey: region.stableKey,
       soulAddress: region.address,
       entityKind: 'region',
+      family: region.family,
+      nativeOffset: region.nativeOffset,
       name: region.name,
       transform: region.transform
     });
@@ -642,21 +676,31 @@ export function importBlenderDeltaToTransaction(
   for (const mut of delta.mutations) {
     switch (mut.action) {
       case 'modify': {
+        const target = resolveBlenderTarget(doc, mut);
+        if (!target.ok) return target;
+        const operationCountBefore = operations.length;
         if (mut.position || mut.rotation || mut.scale) {
           operations.push({
             kind: 'set_transform',
-            target: mut.stableKey,
+            target: target.entity.stableKey,
             ...(mut.position ? { position: mut.position } : {}),
             ...(mut.rotation ? { rotation: mut.rotation } : {}),
             ...(mut.scale ? { scale: mut.scale } : {})
           });
         }
-        if (mut.modelName) {
+        if (mut.modelName !== undefined) {
           operations.push({
             kind: 'change_model',
-            target: mut.stableKey,
+            target: target.entity.stableKey,
             newModelName: mut.modelName
           });
+        }
+        if (operations.length === operationCountBefore) {
+          return {
+            ok: false,
+            conflict: false,
+            error: `MAP_MODIFY_EMPTY: Blender modify 未提供 position、rotation、scale 或 modelName (${mut.stableKey})`
+          };
         }
         break;
       }
@@ -668,12 +712,23 @@ export function importBlenderDeltaToTransaction(
         };
       }
       case 'delete': {
+        const target = resolveBlenderTarget(doc, mut);
+        if (!target.ok) return target;
         operations.push({
           kind: 'delete',
-          target: mut.stableKey
+          target: target.entity.stableKey
         });
         break;
       }
+      case 'create': {
+        return {
+          ok: false,
+          conflict: false,
+          error: `MAP_CREATE_UNSUPPORTED: Blender create 不支持 native MSB 实体新增 (${mut.stableKey})`
+        };
+      }
+      default:
+        return assertNeverBlenderAction(mut.action);
     }
   }
 
@@ -746,10 +801,9 @@ export function buildCanonicalMapDocument(input: {
   const mapId = input.sourcePath.split(/[/\\]/).pop()?.replace(/\.msb(\.dcx)?$/i, '') ?? 'map';
 
   const models: MapModelEntity[] = (input.models ?? []).map((m, idx) => {
+    const nativeOffset = requireNativeOffset(m.nativeOffset, 'model', m.name);
     const address = formatMapAddress({ block: mapId, name: m.name });
-    const stableKey = m.nativeOffset !== undefined
-      ? `model:${mapId}:offset-${m.nativeOffset.toString(16)}`
-      : `model:${mapId}:${m.name}:${idx}`;
+    const stableKey = `model:${mapId}:offset-${nativeOffset.toString(16)}`;
     return {
       id: stableKey,
       stableKey,
@@ -757,16 +811,16 @@ export function buildCanonicalMapDocument(input: {
       mapId,
       name: m.name,
       kind: 'model',
+      family: 'model',
       typeId: m.typeId ?? 0,
-      ...(m.nativeOffset !== undefined ? { nativeOffset: m.nativeOffset } : {})
+      nativeOffset
     };
   });
 
   const parts: MapPartEntity[] = input.parts.map((p, idx) => {
+    const nativeOffset = requireNativeOffset(p.nativeOffset, 'part', p.name);
     const address = formatMapAddress({ block: mapId, name: p.name });
-    const stableKey = p.nativeOffset !== undefined
-      ? `part:${mapId}:offset-${p.nativeOffset.toString(16)}`
-      : `part:${mapId}:${p.name}:${idx}`;
+    const stableKey = `part:${mapId}:offset-${nativeOffset.toString(16)}`;
     const modelIndex = p.modelIndex ?? 0;
     const modelName = models[modelIndex]?.name ?? (p.modelIndex !== undefined ? `model_${p.modelIndex}` : 'unknown');
 
@@ -777,6 +831,7 @@ export function buildCanonicalMapDocument(input: {
       mapId,
       name: p.name,
       kind: 'part',
+      family: 'part',
       typeId: p.typeId,
       modelIndex,
       modelName,
@@ -785,16 +840,15 @@ export function buildCanonicalMapDocument(input: {
         rotation: [p.rotX ?? 0, p.rotY ?? 0, p.rotZ ?? 0],
         scale: [p.scaleX ?? 1, p.scaleY ?? 1, p.scaleZ ?? 1]
       },
-      ...(p.nativeOffset !== undefined ? { nativeOffset: p.nativeOffset } : {}),
+      nativeOffset,
       ...(p.entityId !== undefined ? { entityId: p.entityId } : {})
     };
   });
 
   const regions: MapRegionEntity[] = (input.regions ?? []).map((r, idx) => {
+    const nativeOffset = requireNativeOffset(r.nativeOffset, 'region', r.name);
     const address = formatMapAddress({ block: mapId, name: r.name });
-    const stableKey = r.nativeOffset !== undefined
-      ? `region:${mapId}:offset-${r.nativeOffset.toString(16)}`
-      : `region:${mapId}:${r.name}:${idx}`;
+    const stableKey = `region:${mapId}:offset-${nativeOffset.toString(16)}`;
 
     return {
       id: stableKey,
@@ -803,22 +857,22 @@ export function buildCanonicalMapDocument(input: {
       mapId,
       name: r.name,
       kind: 'region',
+      family: 'region',
       typeId: r.typeId,
       transform: {
         position: [r.posX, r.posY, r.posZ],
         rotation: [r.rotX ?? 0, r.rotY ?? 0, r.rotZ ?? 0],
         scale: [r.scaleX ?? 1, r.scaleY ?? 1, r.scaleZ ?? 1]
       },
-      ...(r.nativeOffset !== undefined ? { nativeOffset: r.nativeOffset } : {}),
+      nativeOffset,
       ...(r.entityId !== undefined ? { entityId: r.entityId } : {})
     };
   });
 
   const events: MapEventEntity[] = (input.events ?? []).map((e, idx) => {
+    const nativeOffset = requireNativeOffset(e.nativeOffset, 'event', e.name);
     const address = formatMapAddress({ block: mapId, name: e.name });
-    const stableKey = e.nativeOffset !== undefined
-      ? `event:${mapId}:offset-${e.nativeOffset.toString(16)}`
-      : `event:${mapId}:${e.name}:${idx}`;
+    const stableKey = `event:${mapId}:offset-${nativeOffset.toString(16)}`;
 
     return {
       id: stableKey,
@@ -827,17 +881,17 @@ export function buildCanonicalMapDocument(input: {
       mapId,
       name: e.name,
       kind: 'event',
+      family: 'event',
       typeId: e.typeId,
       ...(e.eventId !== undefined ? { eventId: e.eventId } : {}),
-      ...(e.nativeOffset !== undefined ? { nativeOffset: e.nativeOffset } : {})
+      nativeOffset
     };
   });
 
   const routes: MapRouteEntity[] = (input.routes ?? []).map((rt, idx) => {
+    const nativeOffset = requireNativeOffset(rt.nativeOffset, 'route', rt.name);
     const address = formatMapAddress({ block: mapId, name: rt.name });
-    const stableKey = rt.nativeOffset !== undefined
-      ? `route:${mapId}:offset-${rt.nativeOffset.toString(16)}`
-      : `route:${mapId}:${rt.name}:${idx}`;
+    const stableKey = `route:${mapId}:offset-${nativeOffset.toString(16)}`;
 
     return {
       id: stableKey,
@@ -846,9 +900,10 @@ export function buildCanonicalMapDocument(input: {
       mapId,
       name: rt.name,
       kind: 'route',
+      family: 'route',
       typeId: rt.typeId,
       ...(rt.id !== undefined ? { routeId: rt.id } : {}),
-      ...(rt.nativeOffset !== undefined ? { nativeOffset: rt.nativeOffset } : {})
+      nativeOffset
     };
   });
 
@@ -867,4 +922,52 @@ export function buildCanonicalMapDocument(input: {
     routes,
     totalEntityCount
   };
+}
+
+function nativeIdentityKey(family: MapEntityFamily, nativeOffset: number): string {
+  return `${family}:${nativeOffset}`;
+}
+
+function requireNativeOffset(value: number | undefined, family: MapEntityFamily, name: string): number {
+  if (value === undefined || !Number.isSafeInteger(value) || value < 0) {
+    throw new Error(`MAP_NATIVE_OFFSET_REQUIRED: ${family} ${name} 缺少有效 nativeOffset，已失败关闭。`);
+  }
+  return value;
+}
+
+function resolveBlenderTarget(
+  doc: MapDocument,
+  mutation: BlenderMutationDto
+): { ok: true; entity: MapEntity } | { ok: false; error: string; conflict?: boolean } {
+  if (mutation.family === undefined || mutation.nativeOffset === undefined) {
+    return {
+      ok: false,
+      conflict: true,
+      error: `MAP_NATIVE_OFFSET_REQUIRED: Blender ${mutation.action} 必须携带 family + nativeOffset (${mutation.stableKey})`
+    };
+  }
+  const sceneGraph = new MapSceneGraph(doc);
+  const resolved = sceneGraph.resolveNativeIdentity({
+    family: mutation.family,
+    nativeOffset: mutation.nativeOffset
+  });
+  if (!resolved.ok) {
+    return {
+      ok: false,
+      conflict: true,
+      error: `MAP_NATIVE_IDENTITY_NOT_FOUND: ${mutation.family}@${mutation.nativeOffset}`
+    };
+  }
+  if (resolved.entity.stableKey !== mutation.stableKey) {
+    return {
+      ok: false,
+      conflict: true,
+      error: `MAP_NATIVE_IDENTITY_MISMATCH: stableKey 与 family/nativeOffset 不一致 (${mutation.stableKey})`
+    };
+  }
+  return { ok: true, entity: resolved.entity };
+}
+
+function assertNeverBlenderAction(value: never): never {
+  throw new Error(`未处理的 Blender action: ${String(value)}`);
 }

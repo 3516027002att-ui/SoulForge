@@ -765,7 +765,8 @@ async function perCorpusMatrixLeg(
     registry,
     documentInstanceId,
     pageSize: 2048,
-    timeoutMs: 120_000
+    timeoutMs: 120_000,
+    attachIdentity: true
   });
   if (!before.ok || !before.document) throw new Error(`full document read failed: ${JSON.stringify(before.diagnostics)}`);
   const distributionTotal = distribution.reduce((sum, entry) => sum + entry.count, 0);
@@ -822,7 +823,8 @@ async function perCorpusMatrixLeg(
     registry,
     documentInstanceId: `${documentInstanceId}-after`,
     pageSize: 2048,
-    timeoutMs: 120_000
+    timeoutMs: 120_000,
+    attachIdentity: true
   });
   if (!after.ok || !after.document) throw new Error(`post-commit read failed: ${JSON.stringify(after.diagnostics)}`);
   assert(after.instructionTotal === before.instructionTotal, 'instruction total changed');
@@ -1036,7 +1038,8 @@ async function main(): Promise<void> {
         registry: syntheticImportedRegistry,
         documentInstanceId: `emevd-multicorpus-${corpus.label}`,
         pageSize: 2048,
-        timeoutMs: 120_000
+        timeoutMs: 120_000,
+        attachIdentity: true
       });
       if (!full.ok || !full.document) throw new Error(`full document read failed: ${JSON.stringify(full.diagnostics)}`);
       const document = full.document;
@@ -1061,7 +1064,8 @@ async function main(): Promise<void> {
           registry: realRegistry,
           documentInstanceId: `emevd-multicorpus-real-${corpus.label}`,
           pageSize: 2048,
-          timeoutMs: 120_000
+          timeoutMs: 120_000,
+          attachIdentity: true
         })).document;
         assert(realDocument !== undefined, `real-EMEDF full document read failed for ${corpus.label}`);
         // control-flow regression with the full real EMEDF schema as well.

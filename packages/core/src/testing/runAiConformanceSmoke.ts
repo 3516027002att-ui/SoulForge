@@ -17,7 +17,7 @@
  * registry against a real temp workspace via a scripted local contract server:
  * - success propose → stage → validate → commit → re-read
  * - normal mode commit requires confirmation before it proceeds
- * - plan mode is strictly read-only at the loop level
+ * - plan mode allows read/analyze/propose but rejects stage/validate/commit
  * - validation failure blocks commit and refuses rollback structurally
  * - stale revision conflict is rejected as ORIGINAL_CHANGED_DURING_STAGING
  * - cancellation on the write path never commits
@@ -99,7 +99,7 @@ import { createServer, type Server } from 'node:http';
 import type { AddressInfo, Socket } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import type { TypedToolResult } from '@soulforge/shared';
+import type { IndexedFile, TypedToolResult } from '@soulforge/shared';
 import {
   ScaffoldToolRegistry,
   createScaffoldToolRegistry,
@@ -113,7 +113,13 @@ import {
 import {
   AnthropicCompatibleAdapter
 } from '../model-services/anthropicCompatibleAdapter.js';
-import { isToolAllowedInMode, runAgentToolLoop, assertNoSecretLeak, redactSecrets } from '../model-services/agentLoop.js';
+import {
+  extractSwitchedAgentPermissionMode,
+  isToolAllowedInMode,
+  runAgentToolLoop,
+  assertNoSecretLeak,
+  redactSecrets
+} from '../model-services/agentLoop.js';
 import { createContextBroker } from '../model-services/contextBroker.js';
 import {
   computeBackoffDelayMs,
@@ -132,6 +138,7 @@ import {
 } from '../model-services/contextCompactor.js';
 import { createDefaultToolRegistry, ToolRegistry, validateToolInput, type ToolContext } from '../ai/toolRegistry.js';
 import { createAgentToolBridge, MAX_BOUNDED_TOOL_RESULT_CHARS } from '../ai/agentToolBridge.js';
+import { WorkspaceIndex } from '../indexing/workspaceIndex.js';
 import {
   FileRolloutStorage,
   listRolloutSessions,
@@ -349,8 +356,60 @@ function listMatrixTools(registry: ScaffoldToolRegistry): ToolDefinition[] {
   return registry.listTools().map((tool) => ({
     name: tool.name,
     description: tool.description,
-    parametersJsonSchema: {}
+    parametersJsonSchema: {},
+    permissionLevel: tool.permission
   }));
+}
+
+function assertStableToolEnvelope(content: string, label: string, truncated: boolean): Record<string, unknown> {
+  let parsed: Record<string, unknown>;
+  try {
+    parsed = JSON.parse(content) as Record<string, unknown>;
+  } catch (error) {
+    throw new Error(`${label}: result must be valid JSON: ${String(error)}`);
+  }
+  const topKeys = Object.keys(parsed).sort();
+  const expectedTopKeys = ['data', 'identifiers', 'ok', 'pagination', 'state', 'truncated'];
+  if (JSON.stringify(topKeys) !== JSON.stringify(expectedTopKeys)) {
+    throw new Error(`${label}: unstable envelope keys ${JSON.stringify(topKeys)}`);
+  }
+  if (parsed.ok !== true || parsed.state !== 'completed' || parsed.truncated !== truncated) {
+    throw new Error(`${label}: invalid status fields ${JSON.stringify(parsed)}`);
+  }
+  if (!Array.isArray(parsed.identifiers)) throw new Error(`${label}: identifiers must be an array.`);
+  const data = parsed.data;
+  if (!data || typeof data !== 'object' || Array.isArray(data)) {
+    throw new Error(`${label}: data must be an object.`);
+  }
+  const dataRecord = data as Record<string, unknown>;
+  if (!Array.isArray(dataRecord.items)
+    || !Object.prototype.hasOwnProperty.call(dataRecord, 'record')
+    || !Object.prototype.hasOwnProperty.call(dataRecord, 'scalar')
+    || !Object.prototype.hasOwnProperty.call(dataRecord, 'summary')) {
+    throw new Error(`${label}: data shape is not stable.`);
+  }
+  if ((truncated && typeof dataRecord.summary !== 'string')
+    || (!truncated && dataRecord.summary !== null)) {
+    throw new Error(`${label}: summary marker does not match truncated state.`);
+  }
+  if (dataRecord.record !== null
+    && (typeof dataRecord.record !== 'object' || Array.isArray(dataRecord.record))) {
+    throw new Error(`${label}: data.record must be object or null.`);
+  }
+  const pagination = parsed.pagination;
+  if (!pagination || typeof pagination !== 'object' || Array.isArray(pagination)) {
+    throw new Error(`${label}: pagination must be an object.`);
+  }
+  const paginationRecord = pagination as Record<string, unknown>;
+  if (typeof paginationRecord.originalChars !== 'number'
+    || !('returnedCount' in paginationRecord)
+    || !('totalCount' in paginationRecord)
+    || !paginationRecord.cursors
+    || typeof paginationRecord.cursors !== 'object'
+    || Array.isArray(paginationRecord.cursors)) {
+    throw new Error(`${label}: pagination shape is not stable.`);
+  }
+  return parsed;
 }
 
 function createMatrixContext(root: string, mode: ScaffoldToolContext['mode']): ScaffoldToolContext {
@@ -852,7 +911,7 @@ async function main(): Promise<void> {
     }
   }
 
-  // --- Case 13: plan mode is strictly read-only at the loop level ---
+  // --- Case 13: plan mode permits proposals but never stages/validates/commits ---
   {
     const registry = createScaffoldToolRegistry();
     const { root, notePath } = await createMatrixWorkspace();
@@ -872,12 +931,16 @@ async function main(): Promise<void> {
       if ((await readFile(notePath, 'utf8')) !== 'original\n') {
         throw new Error('Case 13: plan mode must not modify files.');
       }
-      if (executed.length !== 1 || executed[0]!.name !== 'workspace.readFile') {
-        throw new Error(`Case 13: only read tools may execute in plan mode, got ${JSON.stringify(executed)}`);
+      if (executed.length !== 2
+        || executed[0]!.name !== 'workspace.readFile'
+        || executed[1]!.name !== 'patch.proposeTextEdit') {
+        throw new Error(`Case 13: read/propose tools may execute in plan mode, got ${JSON.stringify(executed)}`);
       }
       if (run.audit.toolCalls.length !== 3) throw new Error('Case 13: audit should record 3 tool calls.');
       const denied = run.audit.toolCalls.filter((call) => call.code === 'AGENT_TOOL_DENIED_PLAN_MODE');
-      if (denied.length !== 2) throw new Error('Case 13: propose and commit must be denied in plan mode.');
+      if (denied.length !== 1 || denied[0]!.name !== 'patch.commit') {
+        throw new Error('Case 13: only commit must be denied in plan mode.');
+      }
       const toolContents = run.messages.filter((m) => m.role === 'tool').map((m) => m.content);
       if (!toolContents.some((content) => content.includes('AGENT_TOOL_DENIED_PLAN_MODE'))) {
         throw new Error('Case 13: plan denial must be a structured tool result.');
@@ -1207,15 +1270,28 @@ async function main(): Promise<void> {
       requiredPermission: 'rollback'
     });
     if (fullRollback.kind !== 'allow') throw new Error('Case 20: fullPermission rollback must be allowed.');
-    // Loop level: plan read-only; normal keeps write tools registered and lets
-    // the policy gate + Patch Engine below decide.
-    const planCommit = isToolAllowedInMode('patch.commit', 'plan', new Set(['patch.commit', 'workspace.readFile']));
+    // Loop level consumes the same permission ladder as the registry.
+    const loopLevels = new Map<string, string>([
+      ['patch.commit', 'commit'],
+      ['workspace.readFile', 'read']
+    ]);
+    const planCommit = isToolAllowedInMode(
+      'patch.commit',
+      'plan',
+      new Set(['patch.commit', 'workspace.readFile']),
+      loopLevels
+    );
     if (planCommit.ok || planCommit.code !== 'AGENT_TOOL_DENIED_PLAN_MODE') {
       throw new Error('Case 20: agent loop must deny commit in plan mode.');
     }
-    const planRead = isToolAllowedInMode('workspace.readFile', 'plan', new Set(['patch.commit', 'workspace.readFile']));
+    const planRead = isToolAllowedInMode(
+      'workspace.readFile',
+      'plan',
+      new Set(['patch.commit', 'workspace.readFile']),
+      loopLevels
+    );
     if (!planRead.ok) throw new Error('Case 20: agent loop must allow read tools in plan mode.');
-    const normalCommitLoop = isToolAllowedInMode('patch.commit', 'normal', new Set(['patch.commit']));
+    const normalCommitLoop = isToolAllowedInMode('patch.commit', 'normal', new Set(['patch.commit']), loopLevels);
     if (!normalCommitLoop.ok) throw new Error('Case 20: normal mode keeps the write tool registered.');
     passed++;
   }
@@ -1539,12 +1615,29 @@ async function main(): Promise<void> {
     });
     if (underGranted.kind !== 'deny') throw new Error('Case 28: under-granted full mode must deny commit.');
     // Loop-level mode gating complements the policy gate.
-    const loopRegistered = new Set(['workspace.readFile', 'patch.commit']);
-    for (const writeTool of ['patch.proposeTextEdit', 'patch.stage', 'patch.validate', 'patch.commit', 'patch.rollback']) {
-      const deniedInPlan = isToolAllowedInMode(writeTool, 'plan', new Set([...loopRegistered, writeTool]));
+    const loopRegistered = new Set([
+      'workspace.readFile',
+      'patch.proposeTextEdit',
+      'patch.stage',
+      'patch.validate',
+      'patch.commit',
+      'patch.rollback'
+    ]);
+    const loopLevels = new Map<string, string>([
+      ['workspace.readFile', 'read'],
+      ['patch.proposeTextEdit', 'propose'],
+      ['patch.stage', 'stage'],
+      ['patch.validate', 'validate'],
+      ['patch.commit', 'commit'],
+      ['patch.rollback', 'rollback']
+    ]);
+    const planPropose = isToolAllowedInMode('patch.proposeTextEdit', 'plan', loopRegistered, loopLevels);
+    if (!planPropose.ok) throw new Error('Case 28: propose must be allowed in plan mode.');
+    for (const writeTool of ['patch.stage', 'patch.validate', 'patch.commit', 'patch.rollback']) {
+      const deniedInPlan = isToolAllowedInMode(writeTool, 'plan', loopRegistered, loopLevels);
       if (deniedInPlan.ok) throw new Error(`Case 28: ${writeTool} must be denied in plan mode.`);
     }
-    const readInPlan = isToolAllowedInMode('workspace.readFile', 'plan', loopRegistered);
+    const readInPlan = isToolAllowedInMode('workspace.readFile', 'plan', loopRegistered, loopLevels);
     if (!readInPlan.ok) throw new Error('Case 28: read tool must be allowed in plan mode.');
     checks += 3;
     if (checks !== 24) throw new Error(`Case 28: expected 24 matrix checks, got ${checks}`);
@@ -2784,6 +2877,32 @@ async function main(): Promise<void> {
     }
     const okCall = await bridge.executeTool({ id: 'c1', name: 'read_thing', argumentsJson: '{"q":"x"}' });
     if (!okCall.ok || !okCall.content.includes('42')) throw new Error('Case 54: ok mapping wrong.');
+    assertStableToolEnvelope(okCall.content, 'Case 54 small result', false);
+    const switchRegistry = new ToolRegistry();
+    switchRegistry.register({
+      name: 'switch_mode',
+      description: 'switch operation mode',
+      permission: 'read',
+      permissionLevel: 'read',
+      inputSchema: { mode: 'enum:plan|normal|fullPermission' },
+      run: (input, context) => {
+        const mode = (input as { mode: 'plan' | 'normal' | 'fullPermission' }).mode;
+        context.mode = mode;
+        return { ok: true, data: { switched: true, currentMode: mode } };
+      }
+    });
+    const switchBridge = createAgentToolBridge({
+      registry: switchRegistry,
+      context: { workspaceIndex: {} as never, mode: 'plan' }
+    });
+    const switched = await switchBridge.executeTool({
+      id: 'switch-full',
+      name: 'switch_mode',
+      argumentsJson: '{"mode":"fullPermission"}'
+    });
+    if (!switched.ok || extractSwitchedAgentPermissionMode(switched.content) !== 'full') {
+      throw new Error(`Case 54: switch_mode envelope must update loop mode: ${switched.content}`);
+    }
     const failCall = await bridge.executeTool({ id: 'c2', name: 'propose_thing', argumentsJson: '{"t":"y"}' });
     if (failCall.ok || failCall.code !== 'WRITE_GATE_CLOSED') throw new Error('Case 54: error mapping wrong.');
     const badJson = await bridge.executeTool({ id: 'c3', name: 'read_thing', argumentsJson: '{oops' });
@@ -2838,6 +2957,7 @@ async function main(): Promise<void> {
       || !bounded.content.includes('resource-0')) {
       throw new Error(`Case 54: discovery result must be bounded with IDs/cursor: ${bounded.content.length}`);
     }
+    assertStableToolEnvelope(bounded.content, 'Case 54 large discovery result', true);
     const boundedEmevd = await boundedBridge.executeTool({
       id: 'bounded-emevd',
       name: 'read_emevd_outline',
@@ -2848,6 +2968,81 @@ async function main(): Promise<void> {
       || !boundedEmevd.content.includes('event-page-2')
       || !boundedEmevd.content.includes('eventId')) {
       throw new Error(`Case 54: EMEVD outline must be bounded with event IDs/cursor: ${boundedEmevd.content.length}`);
+    }
+    assertStableToolEnvelope(boundedEmevd.content, 'Case 54 large EMEVD result', true);
+
+    // Exact event targets bypass text-first discovery; fuzzy event queries do not.
+    const eventSourceUri = 'file://synthetic/event/common.emevd.dcx';
+    const eventSourcePath = 'event/common.emevd.dcx';
+    const eventIndex = new WorkspaceIndex('ws-event-contract');
+    const eventFile: IndexedFile = {
+      id: eventSourceUri,
+      workspaceId: eventIndex.workspaceId,
+      sourceUri: eventSourceUri,
+      sourcePath: eventSourcePath,
+      absolutePath: eventSourcePath,
+      relativePath: eventSourcePath,
+      game: 'sekiro',
+      resourceKind: 'event',
+      extension: '.dcx',
+      compoundExtension: '.emevd.dcx',
+      formatKind: 'emevd',
+      formatLabel: 'EMEVD',
+      size: 1,
+      mtimeMs: 1,
+      sha256: 'event-contract-v1',
+      parseStatus: 'partial',
+      diagnostics: []
+    };
+    eventIndex.setFiles([eventFile]);
+    eventIndex.upsertEventExport({
+      mapId: 'm10_00_00_00',
+      sourceHash: 'event-contract-v1',
+      events: [{
+        uri: 'event://m10_00_00_00/1000',
+        sourceUri: eventSourceUri,
+        mapId: 'm10_00_00_00',
+        eventId: 1000,
+        name: 'Gyoubu start',
+        instructions: []
+      }]
+    });
+    const eventBridge = createAgentToolBridge({
+      registry: createDefaultToolRegistry(),
+      context: { workspaceIndex: eventIndex, mode: 'plan' },
+      requireTextLookupBeforeStructuredDiscovery: true
+    });
+    const eventDescriptor = eventBridge.tools.find((tool) => tool.name === 'search_events');
+    const eventSchema = eventDescriptor?.parametersJsonSchema as {
+      properties?: Record<string, { type?: string }>;
+      required?: string[];
+    } | undefined;
+    if (eventSchema?.properties?.file?.type !== 'string'
+      || eventSchema?.properties?.eventId?.type !== 'number'
+      || eventSchema.required?.includes('query')) {
+      throw new Error(`Case 54: search_events exact schema is wrong: ${JSON.stringify(eventSchema)}`);
+    }
+    if (!eventDescriptor?.description.includes('固定结果 envelope')) {
+      throw new Error('Case 54: bounded tool description must document the stable result envelope.');
+    }
+    const exactEvent = await eventBridge.executeTool({
+      id: 'exact-event',
+      name: 'search_events',
+      argumentsJson: JSON.stringify({ file: eventSourcePath, eventId: 1000 })
+    });
+    if (!exactEvent.ok) throw new Error(`Case 54: exact event lookup must bypass text-first: ${exactEvent.content}`);
+    const exactEnvelope = assertStableToolEnvelope(exactEvent.content, 'Case 54 exact event result', false);
+    const exactItems = (exactEnvelope.data as { items?: unknown[] }).items ?? [];
+    if (!exactItems.some((item) => (item as { eventId?: number }).eventId === 1000)) {
+      throw new Error(`Case 54: exact event lookup returned no event 1000: ${exactEvent.content}`);
+    }
+    const fuzzyEvent = await eventBridge.executeTool({
+      id: 'fuzzy-event',
+      name: 'search_events',
+      argumentsJson: JSON.stringify({ query: 'Gyoubu' })
+    });
+    if (fuzzyEvent.ok || fuzzyEvent.code !== 'TEXT_LOOKUP_REQUIRED') {
+      throw new Error(`Case 54: fuzzy event discovery must remain text-first gated: ${fuzzyEvent.content}`);
     }
     // 声明的字段名与类型必须到达模型。此前投影是不带 properties 的空壳,
     // 模型只能猜字段名,猜错拿到的 INVALID_INPUT 又不含正确名字。
@@ -3368,10 +3563,8 @@ async function main(): Promise<void> {
       'Anthropic 真实 SSE 只在本机确定性 contract server 上验证事件解析/取消/超时/错误分类；第三方流式事件形状差异不属于 V0.5 验收。',
       'MODEL_SERVICE_CANCELLED 区分主动取消与超时是 conformance 层的错误码语义；不影响真实 provider 行为。',
       '写矩阵只覆盖实际接线的安全写路径（scaffold text_edit + WorkspaceTransaction），不提升 native writer authority 或 Patch Engine authority。',
-      'plan 只读的权威判据是 ai/toolPermissions 的等级阶梯；agent loop 不再另立一套 plan 语义，'
-        + '而是消费同一函数并叠加一份显式收紧清单 PLAN_MODE_EXTRA_DENY（只能更严、每条带实测理由，'
-        + '由 test:agent-permission-unified 钉住）。policy gate 层仍按既有 architecture scaffold 契约'
-        + '保留 stage/validate 上限——该上限被本 smoke 与 runV05FoundationSmoke 两处断言钉住，未改动。',
+      'plan 的权威判据是 ai/toolPermissions 的等级阶梯；ToolRegistry 与 agent loop 消费同一 predicate，'
+        + 'plan 允许 read/analyze/propose，stage/validate/commit/rollback 均被拒绝。',
       'normal 模式的确认语义为：commit 被结构化拒绝，经用户确认升级后才经 Patch Engine 提交。',
       'Context Broker 是离线可测的 evidence 装配层；其真实 provider 侧接入（第三方模型上下文窗口、真实工作区索引来源）不属于 V0.5 验收。',
       'Codex 派生内核（重试退避、并行工具、流式事件、rollout、compaction）参考 openai/codex（Apache-2.0）设计重写；离线矩阵不证明与 Codex 行为逐位一致，也不提升 provider 或 native authority。',

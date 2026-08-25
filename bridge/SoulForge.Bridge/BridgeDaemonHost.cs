@@ -404,7 +404,8 @@ internal static class BridgeDaemonHost
                     requestCts.Token,
                     state.OodleRuntimeRoot,
                     payload.Options ?? default,
-                    outputPath);
+                    outputPath,
+                    state.AllowedRoots);
                 requestCts.Token.ThrowIfCancellationRequested();
                 await state.WriteAsync("progress", frame.RequestId, frame.WorkspaceSessionId, frame.ResourceUri, new
                 {

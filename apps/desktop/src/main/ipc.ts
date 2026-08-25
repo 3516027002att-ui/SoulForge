@@ -4,7 +4,7 @@ import { existsSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
 import { mkdir, readFile, stat, unlink, writeFile } from 'node:fs/promises';
 import { app, BrowserWindow, dialog, ipcMain, type IpcMainInvokeEvent, type WebContents } from 'electron';
 import { basename, dirname, join, relative, resolve, sep } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import {
   analyzeWorkspace,
   buildAiSidebarDraft,
@@ -75,7 +75,9 @@ import {
   type GparamFieldSetMutation,
   commitParamMutationViaBridge,
   commitMsbMutationViaBridge,
+  type MsbBridgeMutation,
   executeMapTransaction,
+  loadMapDocument,
   nativeEditSessionFromContext,
   readFmgDocumentViaBridge,
   readParamDocumentViaBridge,
@@ -103,6 +105,10 @@ import {
   buildRagCorpus,
   createRagCorpus,
   mergeCatalogAndPersisted,
+  refreshKnowledgeAfterCommit,
+  refreshNativeSemanticSources,
+  summarizeKnowledgeRefresh,
+  type KnowledgeRefreshResult,
   stageBridgeOutput,
   applyNativeMutation,
   validateContainer,
@@ -244,6 +250,8 @@ const DEFAULT_AGENT_CONTEXT_WINDOW_TOKENS = 500_000;
 const AGENT_CONTEXT_COMPACTION_RATIO = 0.8;
 /** 当前 overlay 的显示 label：remountBase 重建 session 时沿用（scan 时登记）。 */
 let activeOverlayLabel = '';
+
+type KnowledgeRefreshCarrier = Pick<SaveTextResourceResult, 'knowledgeRefresh'>;
 /**
  * Authoritative full EMEVD editor documents keyed by sourceUri. Assembled in
  * main via paginated Bridge reads; the renderer only ever edits DSL text and
@@ -1387,6 +1395,7 @@ export interface RollbackOperationIpcResult {
   inverseOpId?: string;
   restoredFiles: string[];
   diagnostics: Diagnostic[];
+  knowledgeRefresh?: NonNullable<SaveTextResourceResult['knowledgeRefresh']>;
 }
 
 /**
@@ -1651,7 +1660,8 @@ function currentToolContext(): ToolContext {
     ...(activeSession ? { session: activeSession } : {}),
     ...(activeOperationLog ? { operationLogStore: activeOperationLog } : {}),
     ...(storage ? { backupBaseDir: storage.backupBaseDir, recoveryDir: storage.recoveryDir } : {}),
-    onIndexUpdated: refreshActiveIndexAfterNativeWrite
+    onSemanticEvidenceUpdated: refreshActiveIndexAfterSemanticEvidence,
+    onNativeWriteCommitted: refreshActiveIndexAfterNativeWrite
   };
 }
 
@@ -1685,13 +1695,11 @@ async function refreshRagAfterAnalyze(
   await persistActiveRag(database, buildRagCorpus(index));
 }
 
-/**
- * Native Agent/UI write 后刷新文件哈希与 RAG 新鲜度。
- * 只重扫当前 overlay 的 catalog，不把刷新失败伪装成「已同步」；持久化
- * symbol chunk 会按 sourceHash 在 mergeCatalogAndPersisted 中被丢弃。
- */
-async function refreshActiveIndexAfterNativeWrite(): Promise<void> {
+async function refreshActiveIndexAfterSemanticEvidence(sourceUris: readonly string[] = []): Promise<void> {
   if (!activeSession || !activeIndex) return;
+  // Live read tools have already replaced/merged the relevant semantic export.
+  // Re-scan only refreshes the file catalog; it must not invalidate unrelated
+  // semantic data or merge a stale persisted copy over the just-read value.
   const result = await scanWorkspace({
     workspaceRoot: activeSession.layers.overlayRoot,
     game: activeSession.meta.game
@@ -1700,7 +1708,94 @@ async function refreshActiveIndexAfterNativeWrite(): Promise<void> {
   activeIndex.setFiles(result.files);
   activeIndex.rebuildReferences();
   const database = activeOperationLog ?? await ensureActiveOperationLog(activeSession);
-  await refreshRagAfterScan(database, activeIndex);
+  await refreshRagAfterAnalyze(database, activeIndex);
+  void sourceUris;
+}
+
+/**
+ * Native Agent/UI write 后刷新文件哈希与 RAG 新鲜度。
+ * 只重扫当前 overlay 的 catalog，不把刷新失败伪装成「已同步」；持久化
+ * symbol chunk 会按 sourceHash 在 mergeCatalogAndPersisted 中被丢弃。
+ */
+async function refreshActiveIndexAfterNativeWrite(
+  changedSources: readonly string[] = [],
+  carrier?: KnowledgeRefreshCarrier
+): Promise<KnowledgeRefreshResult | void> {
+  if (!activeSession || !activeIndex) return;
+  const session = activeSession;
+  const currentIndex = activeIndex;
+  const beforeFiles = currentIndex.getFiles();
+  const requestedSources = resolveKnowledgeSourceUris(changedSources, beforeFiles);
+  const result = await scanWorkspace({
+    workspaceRoot: session.layers.overlayRoot,
+    game: session.meta.game
+  });
+  const database = activeOperationLog ?? await ensureActiveOperationLog(session);
+  const output = await refreshKnowledgeAfterCommit({
+    index: currentIndex,
+    beforeFiles,
+    afterFiles: result.files,
+    requestedSources,
+    // A catalog scan cannot prove semantic truth.  Re-run the same production
+    // analyzer used by workspace.analyze so old symbols are removed first and
+    // the new source revision is only admitted after native reread/ingest.
+    reanalyze: async () => {
+      const analyzed = await analyzeWorkspace({
+        workspaceRoot: session.layers.overlayRoot,
+        ...(session.layers.baseRoot ? { oodleRuntimeRoot: session.layers.baseRoot } : {})
+      });
+      const nativeRefresh = await refreshNativeSemanticSources({
+        index: analyzed.index,
+        sourceFiles: analyzed.index.getFiles().filter((file) => requestedSources.includes(file.sourceUri)),
+        stagingRoot: durableStoragePaths(session.meta.workspaceId).stagingRoot,
+        allowedRoots: [
+          session.layers.overlayRoot,
+          ...(session.layers.baseRoot ? [session.layers.baseRoot] : [])
+        ],
+        ...(session.layers.baseRoot ? { oodleRuntimeRoot: session.layers.baseRoot } : {})
+      });
+      if (nativeRefresh.failedSources.length > 0) {
+        const detail = nativeRefresh.diagnostics.map((diagnostic) => `${diagnostic.code}: ${diagnostic.message}`).join('；');
+        throw new Error(detail || `native semantic refresh failed for ${nativeRefresh.failedSources.length} source(s)`);
+      }
+      return {
+        index: analyzed.index,
+        semanticState: nativeRefresh.partialSources.length > 0 ? 'partial' as const : 'reanalyzed' as const,
+        ...(nativeRefresh.partialSources.length > 0
+          ? { error: nativeRefresh.diagnostics.map((diagnostic) => diagnostic.message).join('；') }
+          : {})
+      };
+    },
+    persist: async (index) => {
+      activeIndex = index;
+      indexedFiles = index.getFiles();
+      await refreshRagAfterAnalyze(database, index);
+    }
+  });
+  activeIndex = output.index;
+  indexedFiles = output.index.getFiles();
+  if (carrier) carrier.knowledgeRefresh = summarizeKnowledgeRefresh(output.result);
+  return output.result;
+}
+
+function resolveKnowledgeSourceUris(sourceIds: readonly string[], files: readonly IndexedFile[]): string[] {
+  const resolved: string[] = [];
+  for (const sourceId of sourceIds) {
+    const match = files.find((file) => (
+      file.sourceUri === sourceId
+      || file.absolutePath === sourceId
+      || file.sourcePath === sourceId
+      || file.relativePath === sourceId
+    ));
+    if (match) {
+      resolved.push(match.sourceUri);
+    } else if (sourceId.startsWith('file://')) {
+      resolved.push(sourceId);
+    } else if (resolve(sourceId) === sourceId) {
+      resolved.push(pathToFileURL(sourceId).href);
+    }
+  }
+  return [...new Set(resolved)];
 }
 
 function workspaceStoragePaths(workspaceId: string): {
@@ -2194,7 +2289,7 @@ function sessionCommitPort(
   storage: { backupBaseDir: string; recoveryDir: string }
 ): RawReplaceCommitPort {
   return {
-    commit: (input) => {
+    commit: async (input) => {
       // 工作台按钮就是确认。S29 拆掉了弹窗，但 file_replace 对 parambnd 等
       // 打包格式仍要一张 receipt；不补的话新建/删行会停在
       // EDIT_CONFIRMATION_REQUIRED（Files Mode raw/high-risk…）。
@@ -2210,7 +2305,7 @@ function sessionCommitPort(
         sourceUri: input.file.sourceUri,
         note: '工作台提交视为已确认'
       });
-      return saveRawReplace({
+      const result = await saveRawReplace({
         file: input.file,
         expectedHash: input.expectedHash,
         newContentBase64: input.newContentBase64,
@@ -2221,6 +2316,11 @@ function sessionCommitPort(
         backupBaseDir: storage.backupBaseDir,
         recoveryDir: storage.recoveryDir
       });
+      // All native writers that use applyNativeMutation share this commit port.
+      // Refresh only after Patch Engine reports a committed replacement; a
+      // staged/failed write must never invalidate live evidence speculatively.
+      if (result.ok) await refreshActiveIndexAfterNativeWrite([input.file.sourceUri], result);
+      return result;
     }
   };
 }
@@ -2823,6 +2923,7 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
       });
       const index = indexedFiles.findIndex((item) => item.sourceUri === sourceUri);
       if (index >= 0) indexedFiles[index] = refreshed.file;
+      await refreshActiveIndexAfterNativeWrite([sourceUri], result);
     }
     return toRendererSaveResult(result, indexedFiles);
   });
@@ -3029,6 +3130,7 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
         });
         const index = indexedFiles.findIndex((item) => item.sourceUri === sourceUri);
         if (index >= 0) indexedFiles[index] = refreshed.file;
+        await refreshActiveIndexAfterNativeWrite([sourceUri], outcome.result);
       }
       return toSaveResultFromOutcome(outcome, indexedFiles);
     }
@@ -3449,7 +3551,7 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
       });
       const index = indexedFiles.findIndex((item) => item.sourceUri === sourceUri);
       if (index >= 0) indexedFiles[index] = preview.file;
-      return {
+      const response: RendererSaveResult = {
         ok: true,
         changedFiles: [sourceUri],
         diagnostics: [
@@ -3467,6 +3569,8 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
           }
         ]
       };
+      await refreshActiveIndexAfterNativeWrite([sourceUri], response);
+      return response;
     }
   );
 
@@ -3986,6 +4090,7 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
         for (const [cachedTableId, ref] of textTableRefs) {
           if (ref.sourceUri === sourceUri) fmgTableCache.delete(cachedTableId);
         }
+        await refreshActiveIndexAfterNativeWrite([sourceUri], outcome.result);
       }
       return toSaveResultFromOutcome(outcome, indexedFiles);
     }
@@ -5112,18 +5217,7 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
       event,
       sourceUri: string,
       expectedHash: string,
-      mutation: {
-        kind: 'set_part_position' | 'set_part_transform' | 'set_region_position'
-          | 'delete_part' | 'delete_region' | 'delete_event';
-        partName: string;
-        posX?: number;
-        posY?: number;
-        posZ?: number;
-        rotX?: number;
-        scaleX?: number;
-        scaleY?: number;
-        scaleZ?: number;
-      }
+      mutation: MsbBridgeMutation
     ): Promise<RendererSaveResult> => {
       const file = indexedFiles.find((item) => item.sourceUri === sourceUri);
       if (!file || !activeSession) {
@@ -5140,41 +5234,96 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
       }
       const gameBlocked = rejectNonSekiroNativeWrite(sourceUri, file);
       if (gameBlocked) return gameBlocked;
-      // S36 开闸：msb 不再延期，write-msb 写链经 applyNativeMutation →
-      // Patch Engine 提交（备份/确认/回滚元数据与其余语义编辑器同一范式）。
-      const storage = durableStoragePaths(activeSession.meta.workspaceId);
-      const stage = await verifiedStageRoots(activeSession, storage, 'MSB_STAGING_PREPARE_FAILED');
-      if (stage.diagnostics.length > 0) {
+      if ('partName' in mutation || !Number.isSafeInteger(mutation.nativeOffset) || mutation.nativeOffset < 0) {
         return {
           ok: false,
           changedFiles: [],
-          diagnostics: stage.diagnostics
+          diagnostics: [{
+            severity: 'error',
+            code: 'MSB_NATIVE_OFFSET_REQUIRED',
+            message: 'MSB legacy name-only mutation 已拒绝；必须携带 family + nativeOffset。',
+            sourceUri
+          }]
         };
       }
+      const storage = durableStoragePaths(activeSession.meta.workspaceId);
       const operationLog = await ensureActiveOperationLog(activeSession);
-      const outcome = await applyNativeMutation({
-        file,
-        sourceUri,
-        expectedHash,
-        stagingRoot: storage.stagingRoot,
-        allowedRoots: () => [...stage.allowedRoots],
-        stagingPrefix: 'msb',
-        stagingFileName: `${basename(file.relativePath)}.mut.msb`,
-        stageWrite: (context) => commitMsbMutationViaBridge({
-          sourcePath: file.absolutePath,
-          outputPath: context.outputPath,
-          expectedDocumentHash: expectedHash,
-          allowedRoots: context.allowedRoots,
-          writableRoots: context.writableRoots,
-          mutation
-        }),
-        title: `MSB mutation ${mutation.kind} ${mutation.partName}`,
-        confirmActionLabel: '提交 MSB 变更'
-      }, {
-        confirm: electronConfirmationPort(event),
-        commit: sessionCommitPort(activeSession, operationLog, storage)
+      const nativeEdit = nativeEditSessionFromContext({
+        session: activeSession,
+        operationLog,
+        backupBaseDir: storage.backupBaseDir,
+        recoveryDir: storage.recoveryDir,
+        confirmationPort: electronConfirmationPort(event)
       });
-      return toSaveResultFromOutcome(outcome, indexedFiles);
+      const loaded = await loadMapDocument(nativeEdit, file.absolutePath);
+      if (!loaded.ok) {
+        return {
+          ok: false,
+          changedFiles: [],
+          diagnostics: [{ severity: 'error', code: loaded.error.code, message: loaded.error.message, sourceUri }]
+        };
+      }
+      const target = `${mutation.family}:${loaded.doc.mapId}:offset-${mutation.nativeOffset.toString(16)}`;
+      let operation: MapEditTransaction['operations'][number] | null;
+      if (mutation.kind === 'delete_part' || mutation.kind === 'delete_region' || mutation.kind === 'delete_event') {
+        operation = { kind: 'delete', target };
+      } else if (mutation.kind === 'change_model' || mutation.kind === 'set_part_model') {
+        operation = mutation.modelName ? { kind: 'change_model', target, newModelName: mutation.modelName } : null;
+      } else if (mutation.kind === 'set_property' || mutation.kind === 'set_entity_id') {
+        operation = { kind: 'set_property', target, property: 'entityId', value: mutation.entityId };
+      } else if ('posX' in mutation) {
+        operation = {
+          kind: 'set_transform',
+          target,
+          ...(mutation.posX !== undefined || mutation.posY !== undefined || mutation.posZ !== undefined
+            ? { position: [mutation.posX ?? 0, mutation.posY ?? 0, mutation.posZ ?? 0] as [number, number, number] }
+            : {}),
+          ...(mutation.rotX !== undefined || mutation.rotY !== undefined || mutation.rotZ !== undefined
+            ? { rotation: [mutation.rotX ?? 0, mutation.rotY ?? 0, mutation.rotZ ?? 0] as [number, number, number] }
+            : {}),
+          ...(mutation.scaleX !== undefined || mutation.scaleY !== undefined || mutation.scaleZ !== undefined
+            ? { scale: [mutation.scaleX ?? 1, mutation.scaleY ?? 1, mutation.scaleZ ?? 1] as [number, number, number] }
+            : {})
+        };
+      } else {
+        operation = null;
+      }
+      if (!operation) {
+        return {
+          ok: false,
+          changedFiles: [],
+          diagnostics: [{ severity: 'error', code: 'MAP_MODEL_REQUIRED', message: 'change_model 必须携带 modelName。', sourceUri }]
+        };
+      }
+      const transaction: MapEditTransaction = {
+        id: `tx-legacy-msb-${Date.now()}`,
+        mapId: loaded.doc.mapId,
+        baseRevision: expectedHash || loaded.doc.revision,
+        description: `Legacy MSB mutation ${mutation.kind}`,
+        author: 'human',
+        operations: [operation],
+        timestamp: Date.now()
+      };
+      const result = await executeMapTransaction(nativeEdit, file.absolutePath, transaction);
+      if (!result.ok) {
+        return {
+          ok: false,
+          changedFiles: [],
+          diagnostics: [{
+            severity: result.verification === 'failed' ? 'error' : 'warning',
+            code: result.error?.code ?? 'MSB_TRANSACTION_FAILED',
+            message: result.error?.message ?? 'MSB 事务失败。',
+            sourceUri
+          }]
+        };
+      }
+      const response: RendererSaveResult = {
+        ok: true,
+        changedFiles: result.committed ? [sourceUri] : [],
+        diagnostics: []
+      };
+      if (result.committed) await refreshActiveIndexAfterNativeWrite([sourceUri], response);
+      return response;
     }
   );
 
@@ -5230,12 +5379,15 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
       const refreshed = await nativeEdit.indexFile(file.absolutePath, 'map');
       const index = indexedFiles.findIndex((item) => item.sourceUri === sourceUri);
       if (index >= 0) indexedFiles[index] = refreshed;
-      if (result.committed) await refreshActiveIndexAfterNativeWrite();
-      return {
+      const response: RendererSaveResult = {
         ok: true,
         changedFiles: result.committed ? [sourceUri] : [],
-        diagnostics: []
+        diagnostics: [],
+        ...(refreshed.sha256 ? { sourceHash: refreshed.sha256 } : {}),
+        sourceRevision: refreshed.mtimeMs
       };
+      if (result.committed) await refreshActiveIndexAfterNativeWrite([sourceUri], response);
+      return response;
     }
   );
 
@@ -7219,6 +7371,7 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
         paramEntryTableCache.clear();
         containerParamAllCache.clear();
         unpackedParamCache.clear();
+        await refreshActiveIndexAfterNativeWrite([containerUri], outcome.result);
       }
       return toSaveResultFromOutcome(outcome, indexedFiles);
     }
@@ -7431,6 +7584,7 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
         paramEntryTableCache.clear();
         containerParamAllCache.clear();
         unpackedParamCache.clear();
+        await refreshActiveIndexAfterNativeWrite([containerUri], outcome.result);
       }
       return toSaveResultFromOutcome(outcome, indexedFiles);
     }
@@ -7649,6 +7803,7 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
         paramPageCache.delete(containerUri);
         containerChildrenCache.clear();
         unpackedParamCache.clear();
+        await refreshActiveIndexAfterNativeWrite([containerUri], outcome.result);
       }
       return toSaveResultFromOutcome(outcome, indexedFiles);
     }
@@ -7880,6 +8035,7 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
       paramEntryTableCache.clear();
       containerParamAllCache.clear();
       unpackedParamCache.clear();
+      await refreshActiveIndexAfterNativeWrite([input.containerUri], outcome.result);
     }
     return toSaveResultFromOutcome(outcome, indexedFiles);
   };
@@ -9267,6 +9423,7 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
         paramEntryTableCache.clear();
         containerParamAllCache.clear();
         scriptContainerEntriesCache.clear();
+        await refreshActiveIndexAfterNativeWrite([containerUri], result);
       }
       return toRendererSaveResult(result, indexedFiles);
     }
@@ -9863,6 +10020,7 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
           paramEntryTableCache.clear();
           containerParamAllCache.clear();
           scriptContainerEntriesCache.clear();
+          await refreshActiveIndexAfterNativeWrite([sourceUri], result);
         }
         return toRendererSaveResult(result, indexedFiles);
       }
@@ -9921,6 +10079,7 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
         });
         const index = indexedFiles.findIndex((item) => item.sourceUri === sourceUri);
         if (index >= 0) indexedFiles[index] = refreshed.file;
+        await refreshActiveIndexAfterNativeWrite([sourceUri], result);
       }
       return toRendererSaveResult(result, indexedFiles);
     }
@@ -10028,8 +10187,7 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
       confirmation,
       ...storage
     });
-
-    return {
+    const response: RollbackOperationIpcResult = {
       ok: result.ok,
       opId: result.opId,
       ...(result.inverseOpId ? { inverseOpId: result.inverseOpId } : {}),
@@ -10038,6 +10196,10 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
       }),
       diagnostics: sanitizeDiagnostics(result.diagnostics)
     };
+    if (result.ok && result.restoredFiles.length > 0) {
+      await refreshActiveIndexAfterNativeWrite(result.restoredFiles, response);
+    }
+    return response;
     } finally {
       activeRollbackRequests.delete(rollbackKey);
     }
@@ -10141,8 +10303,7 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
       confirmation,
       ...storage
     });
-
-    return {
+    const response: RollbackOperationIpcResult = {
       ok: result.ok,
       opId: result.opId,
       ...(result.inverseOpId ? { inverseOpId: result.inverseOpId } : {}),
@@ -10151,6 +10312,10 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
       }),
       diagnostics: sanitizeDiagnostics(result.diagnostics)
     };
+    if (result.ok && result.restoredFiles.length > 0) {
+      await refreshActiveIndexAfterNativeWrite(result.restoredFiles, response);
+    }
+    return response;
     } finally {
       activeRollbackRequests.delete(rollbackKey);
     }

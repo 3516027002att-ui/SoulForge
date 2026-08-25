@@ -28,6 +28,7 @@ public sealed class HkxBone
 public sealed class HkxSkeleton
 {
     public string Name { get; init; } = string.Empty;
+    public int NativeObjectOffset { get; init; } = -1;
     public IReadOnlyList<HkxBone> Bones { get; init; } = Array.Empty<HkxBone>();
     public IReadOnlyList<short> ParentIndices { get; init; } = Array.Empty<short>();
     public IReadOnlyList<BoneTransform> Transforms { get; init; } = Array.Empty<BoneTransform>();
@@ -36,6 +37,7 @@ public sealed class HkxSkeleton
 public abstract class HkxAnimation
 {
     public HkxAnimationType AnimationType { get; init; }
+    public int NativeObjectOffset { get; set; } = -1;
     public float Duration { get; init; }
     public int NumberOfTransformTracks { get; init; }
     public int NumberOfFloatTracks { get; init; }
@@ -43,6 +45,8 @@ public abstract class HkxAnimation
 
 public sealed class HkxAnimationBinding
 {
+    public int NativeObjectOffset { get; init; } = -1;
+    public int AnimationObjectOffset { get; init; } = -1;
     public string OriginalSkeletonName { get; init; } = string.Empty;
     public IReadOnlyList<int> TransformTrackToBoneIndices { get; init; } = Array.Empty<int>();
     public HkxAnimation? Animation { get; set; }
@@ -88,8 +92,17 @@ public sealed class SplineBlock
 public sealed class TransformSplineTrack
 {
     public byte PositionMask { get; set; }
+    public byte PositionStaticMask { get; set; }
+    public byte PositionSplineMask { get; set; }
     public byte RotationMask { get; set; }
+    public bool RotationHasStatic { get; set; }
+    public bool RotationHasSpline { get; set; }
     public byte ScaleMask { get; set; }
+    public byte ScaleStaticMask { get; set; }
+    public byte ScaleSplineMask { get; set; }
+    public int PositionQuantizationType { get; set; } = -1;
+    public int RotationQuantizationType { get; set; } = -1;
+    public int ScaleQuantizationType { get; set; } = -1;
 
     public Vector3 StaticPosition { get; set; }
     public Quaternion StaticRotation { get; set; }

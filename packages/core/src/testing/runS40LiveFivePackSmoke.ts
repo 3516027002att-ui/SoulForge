@@ -522,7 +522,7 @@ async function main(): Promise<void> {
     const msbBefore = await readFile(msbPath);
     const msbRead = await runBridge<{
       sourceHash?: string;
-      parts?: Array<{ name: string; posX: number; posY: number; posZ: number }>;
+      parts?: Array<{ name: string; offset: number; posX: number; posY: number; posZ: number }>;
     }>({
       command: 'read-msb-document',
       filePath: msbPath,
@@ -553,7 +553,7 @@ async function main(): Promise<void> {
       commandOptions: {
         outputPath: msbOut,
         expectedDocumentHash: msbRead.data.sourceHash,
-        mutations: [{ kind: 'set_part_position', partName: part.name, ...moved }]
+        mutations: [{ kind: 'set_part_position', family: 'part', nativeOffset: part.offset, expectedName: part.name, ...moved }]
       }
     });
     if (!msbWrite.diagnostics.some((d) => d.code === 'MSB_STAGING_WRITE_VERIFIED')) {

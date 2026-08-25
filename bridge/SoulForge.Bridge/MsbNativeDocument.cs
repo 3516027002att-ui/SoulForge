@@ -310,28 +310,33 @@ internal sealed class MsbNativeDocument
         var rebuilt = SourceBytes.ToArray();
         var reparsed = Read(rebuilt);
         var modelsEqual = reparsed.Models.Count == Models.Count
-            && reparsed.Models.Zip(Models).All(pair => pair.First.Name == pair.Second.Name);
+            && reparsed.Models.Zip(Models).All(pair => pair.First.Offset == pair.Second.Offset
+                && pair.First.Name == pair.Second.Name);
         var partsEqual = reparsed.Parts.Count == Parts.Count
             && reparsed.Parts.Zip(Parts).All(pair =>
-                pair.First.Name == pair.Second.Name
+                pair.First.Offset == pair.Second.Offset
+                && pair.First.Name == pair.Second.Name
                 && pair.First.TypeId == pair.Second.TypeId
                 && Nearly(pair.First.PosX, pair.Second.PosX)
                 && Nearly(pair.First.PosY, pair.Second.PosY)
                 && Nearly(pair.First.PosZ, pair.Second.PosZ));
         var regionsEqual = reparsed.Regions.Count == Regions.Count
             && reparsed.Regions.Zip(Regions).All(pair =>
-                pair.First.Name == pair.Second.Name
+                pair.First.Offset == pair.Second.Offset
+                && pair.First.Name == pair.Second.Name
                 && pair.First.TypeId == pair.Second.TypeId
                 && Nearly(pair.First.PosX, pair.Second.PosX)
                 && Nearly(pair.First.PosY, pair.Second.PosY)
                 && Nearly(pair.First.PosZ, pair.Second.PosZ));
         var eventsEqual = reparsed.Events.Count == Events.Count
             && reparsed.Events.Zip(Events).All(pair =>
-                pair.First.Name == pair.Second.Name
+                pair.First.Offset == pair.Second.Offset
+                && pair.First.Name == pair.Second.Name
                 && pair.First.TypeId == pair.Second.TypeId);
         var routesEqual = reparsed.Routes.Count == Routes.Count
             && reparsed.Routes.Zip(Routes).All(pair =>
-                pair.First.Name == pair.Second.Name
+                pair.First.Offset == pair.Second.Offset
+                && pair.First.Name == pair.Second.Name
                 && pair.First.TypeId == pair.Second.TypeId);
         return new MsbRoundTripReport(
             // ByteIdentical=false：没有经 writer 重建的产物可比（见上方注释）。
@@ -360,9 +365,7 @@ internal sealed class MsbNativeDocument
                 case "set_part_position":
                 case "set_part_transform":
                 {
-                    var index = Parts.ToList().FindIndex(p => p.Name == patch.PartName);
-                    if (index < 0) throw new InvalidDataException($"MSB part 不存在：{patch.PartName}");
-                    var part = Parts[index];
+                    var part = ResolvePart(patch);
                     GuardRegisteredPart(part);
                     var baseOff = part.Offset + PartTransformOffset;
                     if (patch.Kind == "set_part_position")
@@ -390,9 +393,7 @@ internal sealed class MsbNativeDocument
                 case "set_region_position":
                 case "set_region_transform":
                 {
-                    var index = Regions.ToList().FindIndex(r => r.Name == patch.PartName);
-                    if (index < 0) throw new InvalidDataException($"MSB region 不存在：{patch.PartName}");
-                    var region = Regions[index];
+                    var region = ResolveRegion(patch);
                     GuardRegisteredRegion(region);
                     var t = region.Offset + RegionTransformOffset;
                     if (patch.Kind == "set_region_position")
@@ -420,13 +421,11 @@ internal sealed class MsbNativeDocument
                 case "set_part_model":
                 case "change_model":
                 {
-                    var index = Parts.ToList().FindIndex(p => p.Name == patch.PartName);
-                    if (index < 0) throw new InvalidDataException($"MSB part 不存在：{patch.PartName}");
-                    var part = Parts[index];
+                    var part = ResolvePart(patch);
                     GuardRegisteredPart(part);
                     if (patch.ModelIndex is null && patch.ModelName is not null)
                     {
-                        var mIdx = Models.ToList().FindIndex(m => m.Name == patch.ModelName);
+                         var mIdx = Models.ToList().FindIndex(m => m.Name == patch.ModelName);
                         if (mIdx < 0) throw new InvalidDataException($"MSB model 不存在：{patch.ModelName}");
                         WriteInt32(rebuilt, part.Offset + PartModelIndexOffset, mIdx);
                     }
@@ -440,49 +439,41 @@ internal sealed class MsbNativeDocument
                 case "set_entity_id":
                 {
                     if (patch.EntityId is null) throw new InvalidDataException("set_property/set_entity_id 需要 entityId。");
-                    var partIdx = Parts.ToList().FindIndex(p => p.Name == patch.PartName);
-                    if (partIdx >= 0)
+                    if (patch.Family == "part")
                     {
-                        var part = Parts[partIdx];
+                        var part = ResolvePart(patch);
                         GuardRegisteredPart(part);
                         WriteInt32(rebuilt, part.Offset + 0x0C, patch.EntityId.Value);
                         break;
                     }
-                    var regIdx = Regions.ToList().FindIndex(r => r.Name == patch.PartName);
-                    if (regIdx >= 0)
+                    if (patch.Family == "region")
                     {
-                        var reg = Regions[regIdx];
+                        var reg = ResolveRegion(patch);
                         GuardRegisteredRegion(reg);
                         WriteInt32(rebuilt, reg.Offset + 0x0C, patch.EntityId.Value);
                         break;
                     }
                     // Event +0x08 is eventId, not entityId. Do not silently
                     // reinterpret an event identity mutation as an entityId write.
-                    throw new InvalidDataException($"MSB entityId 目标必须是 Part/Region：{patch.PartName}");
+                    throw new InvalidDataException($"MSB entityId 目标 family 不支持：{patch.Family}");
                 }
                 case "delete_part":
                 {
-                    var index = Parts.ToList().FindIndex(p => p.Name == patch.PartName);
-                    if (index < 0) throw new InvalidDataException($"MSB part 不存在：{patch.PartName}");
-                    var part = Parts[index];
+                    var part = ResolvePart(patch);
                     GuardRegisteredPart(part);
                     deletedPartOffsets.Add(part.Offset);
                     break;
                 }
                 case "delete_region":
                 {
-                    var index = Regions.ToList().FindIndex(r => r.Name == patch.PartName);
-                    if (index < 0) throw new InvalidDataException($"MSB region 不存在：{patch.PartName}");
-                    var region = Regions[index];
+                    var region = ResolveRegion(patch);
                     GuardRegisteredRegion(region);
                     deletedRegionOffsets.Add(region.Offset);
                     break;
                 }
                 case "delete_event":
                 {
-                    var index = Events.ToList().FindIndex(e => e.Name == patch.PartName);
-                    if (index < 0) throw new InvalidDataException($"MSB event 不存在：{patch.PartName}");
-                    var ev = Events[index];
+                    var ev = ResolveEvent(patch);
                     GuardRegisteredEvent(ev);
                     deletedEventOffsets.Add(ev.Offset);
                     break;
@@ -501,6 +492,45 @@ internal sealed class MsbNativeDocument
             BatchRemoveEntriesFromParam(rebuilt, Params["EVENT_PARAM_ST"], deletedEventOffsets);
 
         return rebuilt;
+    }
+
+    internal MsbPart ResolvePart(MsbPatch patch)
+    {
+        RequireFamily(patch, "part");
+        var part = Parts.SingleOrDefault(item => item.Offset == patch.NativeOffset)
+            ?? throw new InvalidDataException($"MSB native identity 不存在：family=part nativeOffset=0x{patch.NativeOffset:X}");
+        VerifyExpectedName(part.Name, patch);
+        return part;
+    }
+
+    internal MsbRegion ResolveRegion(MsbPatch patch)
+    {
+        RequireFamily(patch, "region");
+        var region = Regions.SingleOrDefault(item => item.Offset == patch.NativeOffset)
+            ?? throw new InvalidDataException($"MSB native identity 不存在：family=region nativeOffset=0x{patch.NativeOffset:X}");
+        VerifyExpectedName(region.Name, patch);
+        return region;
+    }
+
+    internal MsbMapEvent ResolveEvent(MsbPatch patch)
+    {
+        RequireFamily(patch, "event");
+        var ev = Events.SingleOrDefault(item => item.Offset == patch.NativeOffset)
+            ?? throw new InvalidDataException($"MSB native identity 不存在：family=event nativeOffset=0x{patch.NativeOffset:X}");
+        VerifyExpectedName(ev.Name, patch);
+        return ev;
+    }
+
+    private static void RequireFamily(MsbPatch patch, string expected)
+    {
+        if (!patch.Family.Equals(expected, StringComparison.Ordinal))
+            throw new InvalidDataException($"MSB mutation family 不匹配：expected={expected} actual={patch.Family}");
+    }
+
+    private static void VerifyExpectedName(string actualName, MsbPatch patch)
+    {
+        if (patch.ExpectedName is not null && !actualName.Equals(patch.ExpectedName, StringComparison.Ordinal))
+            throw new InvalidDataException($"MSB native identity expectedName 不匹配：family={patch.Family} nativeOffset=0x{patch.NativeOffset:X} expectedName={patch.ExpectedName} actualName={actualName}");
     }
 
     private static void GuardRegisteredPart(MsbPart part)
@@ -558,11 +588,13 @@ internal sealed class MsbNativeDocument
         routeCount = Routes.Count,
         partsSectionOffset = PartsSectionOffset,
         firstPartOffset = FirstPartOffset,
-        models = Models.Select(m => new { m.Name, m.SibPath, m.TypeId, m.Offset }).ToArray(),
+        models = Models.Select(m => new { family = "model", m.Name, m.SibPath, m.TypeId, offset = m.Offset, nativeOffset = m.Offset }).ToArray(),
         parts = Parts.Select(p => new
         {
+            family = "part",
             p.Name,
-            p.Offset,
+            offset = p.Offset,
+            nativeOffset = p.Offset,
             p.TypeId,
             p.ModelIndex,
             p.PosX,
@@ -578,8 +610,10 @@ internal sealed class MsbNativeDocument
         }).ToArray(),
         regions = Regions.Select(r => new
         {
+            family = "region",
             r.Name,
-            r.Offset,
+            offset = r.Offset,
+            nativeOffset = r.Offset,
             r.TypeId,
             r.PosX,
             r.PosY,
@@ -594,15 +628,19 @@ internal sealed class MsbNativeDocument
         }).ToArray(),
         events = Events.Select(e => new
         {
+            family = "event",
             e.Name,
-            e.Offset,
+            offset = e.Offset,
+            nativeOffset = e.Offset,
             e.TypeId,
             e.EventId
         }).ToArray(),
         routes = Routes.Select(r => new
         {
+            family = "route",
             r.Name,
-            r.Offset,
+            offset = r.Offset,
+            nativeOffset = r.Offset,
             r.TypeId,
             r.Id
         }).ToArray(),
@@ -719,7 +757,9 @@ internal sealed record MsbRoute(
     int Unk0C);
 internal sealed record MsbPatch(
     string Kind,
-    string PartName,
+    string Family,
+    long NativeOffset,
+    string? ExpectedName,
     float? PosX,
     float? PosY,
     float? PosZ,

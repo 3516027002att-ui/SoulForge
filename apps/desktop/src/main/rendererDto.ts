@@ -32,6 +32,9 @@ export type RendererSaveResult = Omit<
 > & {
   changedFiles: string[];
   diagnostics: Diagnostic[];
+  /** 成功 native 写回后的新 revision，供 renderer 失效旧文档状态。 */
+  sourceHash?: string;
+  sourceRevision?: number;
 };
 
 export type RendererPatchHistoryEntry = Omit<
@@ -113,6 +116,7 @@ export function toRendererSaveResult(
     ...(result.opId ? { opId: result.opId } : {}),
     changedFiles: result.changedFiles.map((path) => pathToResourceLabel(path, files)),
     diagnostics: sanitizeDiagnostics(result.diagnostics),
+    ...(result.knowledgeRefresh ? { knowledgeRefresh: result.knowledgeRefresh } : {}),
     ...(result.graph
       ? { graph: sanitizeRendererValue(result.graph) as NonNullable<RendererSaveResult['graph']> }
       : {}),

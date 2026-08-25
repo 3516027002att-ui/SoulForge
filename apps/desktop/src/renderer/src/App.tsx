@@ -3457,6 +3457,7 @@ export function App(): ReactElement {
                 regions={msbRegions}
                 events={msbEvents}
                 sourceCounts={msbSourceCounts}
+                onRevisionChange={setMsbSourceHash}
                 openFailure={lastOpenFailure?.kind === 'msb-open-failed' ? lastOpenFailure : null}
               />
             </>

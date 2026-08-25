@@ -26,6 +26,8 @@ export interface EmevdApplyResult {
 export interface EmevdReadResult {
   ok: boolean;
   filePath?: string;
+  /** Hash from the same Bridge native read, not from a cached WorkspaceIndex file. */
+  sourceHash?: string;
   events?: Array<{ eventId: number; restBehavior: number; instructionCount: number }>;
   error?: { code: string; message: string };
   diagnostics: Diagnostic[];
@@ -61,6 +63,7 @@ export async function readEmevdOutline(input: {
   return {
     ok: true,
     filePath: resolved.path,
+    ...(full.sourceHash ? { sourceHash: full.sourceHash } : {}),
     events: full.document.events.map((event) => ({
       eventId: event.eventId,
       restBehavior: event.restBehavior,

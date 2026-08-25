@@ -578,10 +578,11 @@ internal sealed class FlverNativeDocument
             }
             else
             {
-                weights[v * 4] = 1f;
-                weights[v * 4 + 1] = 0f;
-                weights[v * 4 + 2] = 0f;
-                weights[v * 4 + 3] = 0f;
+                // A zero/invalid influence set has no canonical bind target.
+                // Do not silently pin it to bone 0; the renderer must receive
+                // a structured unsupported result and keep the asset out of
+                // the skinned playback path.
+                return null;
             }
         }
         var bytes = new byte[weights.Length * 4];
@@ -599,23 +600,41 @@ internal sealed class FlverNativeDocument
         var mesh = Meshes[meshIndex];
         var plan = BuildMeshPlan(meshIndex);
         if (plan?.BoneIndices == null || plan.VertexCount <= 0) return null;
+        if (mesh.BoneCount > 0 && mesh.BoneIndices.Count != mesh.BoneCount)
+        {
+            // A declared but truncated/invalid local palette must not be
+            // reinterpreted as global indices.
+            return null;
+        }
         var vertexCount = Math.Min(plan.VertexCount, maxVertices);
         var a = plan.BoneIndices;
         var globalIndices = new ushort[vertexCount * 4];
 
-        ushort RemapBone(int localIdx)
+        bool TryRemapBone(int localIdx, out ushort globalIndex)
         {
             if (mesh.BoneIndices.Count > 0)
             {
                 if (localIdx >= 0 && localIdx < mesh.BoneIndices.Count)
                 {
                     var g = mesh.BoneIndices[localIdx];
-                    return (ushort)(g >= 0 && g < Bones.Count ? g : (mesh.DefaultBoneIndex >= 0 && mesh.DefaultBoneIndex < Bones.Count ? mesh.DefaultBoneIndex : 0));
+                    if (g >= 0 && g < Bones.Count)
+                    {
+                        globalIndex = (ushort)g;
+                        return true;
+                    }
+                    globalIndex = 0;
+                    return false;
                 }
-                return (ushort)(mesh.DefaultBoneIndex >= 0 && mesh.DefaultBoneIndex < Bones.Count ? mesh.DefaultBoneIndex : 0);
+                globalIndex = 0;
+                return false;
             }
-            if (localIdx >= 0 && localIdx < Bones.Count) return (ushort)localIdx;
-            return (ushort)(mesh.DefaultBoneIndex >= 0 && mesh.DefaultBoneIndex < Bones.Count ? mesh.DefaultBoneIndex : 0);
+            if (localIdx >= 0 && localIdx < Bones.Count)
+            {
+                globalIndex = (ushort)localIdx;
+                return true;
+            }
+            globalIndex = 0;
+            return false;
         }
 
         for (var v = 0; v < vertexCount; v++)
@@ -643,10 +662,13 @@ internal sealed class FlverNativeDocument
                 return null;
             }
 
-            globalIndices[v * 4] = RemapBone(r0);
-            globalIndices[v * 4 + 1] = RemapBone(r1);
-            globalIndices[v * 4 + 2] = RemapBone(r2);
-            globalIndices[v * 4 + 3] = RemapBone(r3);
+            if (!TryRemapBone(r0, out globalIndices[v * 4])
+                || !TryRemapBone(r1, out globalIndices[v * 4 + 1])
+                || !TryRemapBone(r2, out globalIndices[v * 4 + 2])
+                || !TryRemapBone(r3, out globalIndices[v * 4 + 3]))
+            {
+                return null;
+            }
         }
         var bytes = new byte[globalIndices.Length * 2];
         Buffer.BlockCopy(globalIndices, 0, bytes, 0, bytes.Length);
@@ -910,7 +932,11 @@ internal sealed class FlverNativeDocument
             int vertexBufferCountInMesh = ReadInt32(source, off + 0x28);
             int vertexBufferOffset = ReadInt32(source, off + 0x2C);
 
-            var boneIndices = ReadIndexArray(source, boneOffset, boneCountInMesh, meshCount);
+            // Mesh.BoneIndices is a palette of global skeleton indices. Its
+            // bounds are the skeleton bone table, not the mesh table; using
+            // meshCount here silently discarded valid palettes whenever a
+            // mesh referenced a bone index above the number of meshes.
+            var boneIndices = ReadIndexArray(source, boneOffset, boneCountInMesh, boneCount);
             var faceSetIndices = ReadIndexArray(source, faceSetOffset, faceSetCountInMesh, faceSetCount);
             var vertexBufferIndices = ReadIndexArray(source, vertexBufferOffset, vertexBufferCountInMesh, vertexBufferCount);
 

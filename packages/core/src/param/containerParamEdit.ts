@@ -41,6 +41,9 @@ export interface ParamFieldSnapshot {
   rowId: number;
   fieldId: string;
   displayName?: string;
+  /** Provenance returned by the same native document read, never a cached index fallback. */
+  sourceHash?: string;
+  sourceRevision?: number;
   value: number | string | boolean | null;
 }
 
@@ -186,6 +189,17 @@ export async function readParamFields(input: {
   const diagnostics: Diagnostic[] = [];
   const fields: ParamFieldSnapshot[] = [];
   const missingRows: Array<{ table: string; rowId: number }> = [];
+  let sourceRevision: number | undefined;
+  try {
+    sourceRevision = (await stat(container.path)).mtimeMs;
+  } catch (error) {
+    diagnostics.push({
+      severity: 'warning',
+      code: 'PARAM_SOURCE_REVISION_UNAVAILABLE',
+      message: error instanceof Error ? error.message : '无法读取 PARAM 容器的 source revision。',
+      sourceUri: pathToFileURL(container.path).href
+    });
+  }
   const entries = await listParamEntries(input.edit, container.path);
   if (!entries.ok) return { ok: false, error: entries.error, diagnostics: entries.diagnostics };
   for (const query of input.queries) {
@@ -215,6 +229,8 @@ export async function readParamFields(input: {
           rowId,
           fieldId,
           ...(field.name && field.name !== fieldId ? { displayName: field.name } : {}),
+          sourceHash: loaded.sourceHash,
+          ...(sourceRevision !== undefined ? { sourceRevision } : {}),
           value: readFieldValue(row.dataBase64, loaded.definition, fieldId)
         });
       }

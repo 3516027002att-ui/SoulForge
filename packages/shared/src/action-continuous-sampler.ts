@@ -29,6 +29,16 @@ export interface TransformSplineTrackData {
   staticPosition: [number, number, number];
   staticRotation: [number, number, number, number];
   staticScale: [number, number, number];
+  /** Raw decoder diagnostics; the sampler does not use these masks. */
+  positionStaticMask?: number | undefined;
+  positionSplineMask?: number | undefined;
+  rotationHasStatic?: boolean | undefined;
+  rotationHasSpline?: boolean | undefined;
+  scaleStaticMask?: number | undefined;
+  scaleSplineMask?: number | undefined;
+  positionQuantizationType?: number | undefined;
+  rotationQuantizationType?: number | undefined;
+  scaleQuantizationType?: number | undefined;
   positionX?: SplineCurveData | undefined;
   positionY?: SplineCurveData | undefined;
   positionZ?: SplineCurveData | undefined;
@@ -46,7 +56,11 @@ export interface TaeAnimationClipData {
   animId: number;
   motionAnimId: number;
   sourceContainer?: string | undefined;
+  sourceHash?: string | undefined;
+  animationContainerHash?: string | undefined;
   animationType: 'SplineCompressed' | 'Interleaved' | string;
+  /** False means the clip payload contains local skeletal animation only. */
+  rootMotionSupported?: boolean | undefined;
   duration: number;
   frameCount: number;
   frameDuration: number;
@@ -56,15 +70,32 @@ export interface TaeAnimationClipData {
   hkxReferencePose: BoneTransformData[];
   trackToHkxBone: number[];
   hkxToFlverBoneMap?: number[] | undefined;
+  binding?: {
+    originalSkeletonName: string;
+    transformTrackToBoneIndices: number[];
+  } | undefined;
+  skeleton?: {
+    name: string;
+  } | undefined;
   interleavedTransforms?: BoneTransformData[] | undefined;
   splineBlocks?: SplineBlockData[] | undefined;
   maxFramesPerBlock?: number | undefined;
+  blockDuration?: number | undefined;
+  blockInverseDuration?: number | undefined;
+  splineRawPayloadBase64?: string | undefined;
+  splineMaskAndQuantizationSize?: number | undefined;
+  splineNumBlocks?: number | undefined;
+  splineBlockOffsets?: number[] | undefined;
+  splineFloatBlockOffsets?: number[] | undefined;
+  splineTransformOffsets?: number[] | undefined;
+  splineFloatOffsets?: number[] | undefined;
 }
 
 export class ActionContinuousSampler {
   private clip: TaeAnimationClipData;
 
   constructor(clip: TaeAnimationClipData) {
+    validateClip(clip);
     this.clip = clip;
   }
 
@@ -89,20 +120,12 @@ export class ActionContinuousSampler {
 
     // 1. Initialize with reference pose
     for (let i = 0; i < boneCount; i++) {
-      const ref = this.clip.hkxReferencePose[i];
-      if (ref) {
-        pose[i] = {
-          translation: [ref.translation[0], ref.translation[1], ref.translation[2]],
-          rotation: [ref.rotation[0], ref.rotation[1], ref.rotation[2], ref.rotation[3]],
-          scale: [ref.scale[0], ref.scale[1], ref.scale[2]]
-        };
-      } else {
-        pose[i] = {
-          translation: [0, 0, 0],
-          rotation: [0, 0, 0, 1],
-          scale: [1, 1, 1]
-        };
-      }
+      const ref = this.clip.hkxReferencePose[i]!;
+      pose[i] = {
+        translation: [ref.translation[0], ref.translation[1], ref.translation[2]],
+        rotation: [ref.rotation[0], ref.rotation[1], ref.rotation[2], ref.rotation[3]],
+        scale: [ref.scale[0], ref.scale[1], ref.scale[2]]
+      };
     }
 
     const duration = this.clip.duration;
@@ -118,9 +141,9 @@ export class ActionContinuousSampler {
       t = 0;
     }
 
-    if (this.clip.animationType === 'Interleaved' && this.clip.interleavedTransforms) {
+    if (this.clip.animationType === 'Interleaved') {
       this.sampleInterleaved(t, pose);
-    } else if (this.clip.splineBlocks && this.clip.splineBlocks.length > 0) {
+    } else if (this.clip.animationType === 'SplineCompressed') {
       this.sampleSpline(t, pose);
     }
 
@@ -139,22 +162,18 @@ export class ActionContinuousSampler {
     const hkxPose = this.sampleHkxPose(timeSeconds, loop);
     const map = this.clip.hkxToFlverBoneMap;
 
+    if (!flverReferencePose || flverReferencePose.length !== flverBoneCount) {
+      throw new Error(`ACTION_FLVER_REFERENCE_POSE_REQUIRED: bones=${flverBoneCount}`);
+    }
+
     const result: BoneTransformData[] = new Array(flverBoneCount);
     for (let i = 0; i < flverBoneCount; i++) {
-      const ref = flverReferencePose?.[i];
-      if (ref) {
-        result[i] = {
-          translation: [ref.translation[0], ref.translation[1], ref.translation[2]],
-          rotation: [ref.rotation[0], ref.rotation[1], ref.rotation[2], ref.rotation[3]],
-          scale: [ref.scale[0], ref.scale[1], ref.scale[2]]
-        };
-      } else {
-        result[i] = {
-          translation: [0, 0, 0],
-          rotation: [0, 0, 0, 1],
-          scale: [1, 1, 1]
-        };
-      }
+      const ref = flverReferencePose[i]!;
+      result[i] = {
+        translation: [ref.translation[0], ref.translation[1], ref.translation[2]],
+        rotation: [ref.rotation[0], ref.rotation[1], ref.rotation[2], ref.rotation[3]],
+        scale: [ref.scale[0], ref.scale[1], ref.scale[2]]
+      };
     }
 
     if (map) {
@@ -173,7 +192,7 @@ export class ActionContinuousSampler {
     const numFrames = this.clip.frameCount;
     const numTracks = this.clip.transformTrackCount;
     const transforms = this.clip.interleavedTransforms;
-    if (!transforms || numFrames <= 0 || numTracks <= 0) return;
+    if (!transforms) throw new Error('ACTION_INTERLEAVED_DATA_MISSING');
 
     const frameDuration = this.clip.frameDuration > 0 ? this.clip.frameDuration : (1 / 30);
     const framePos = time / frameDuration;
@@ -187,59 +206,87 @@ export class ActionContinuousSampler {
 
     for (let t = 0; t < numTracks && t < this.clip.trackToHkxBone.length; t++) {
       const boneIdx = this.clip.trackToHkxBone[t];
-      if (boneIdx === undefined || boneIdx < 0 || boneIdx >= pose.length) continue;
+      if (boneIdx === undefined || boneIdx < 0 || boneIdx >= pose.length) {
+        throw new Error(`ACTION_TRACK_BONE_MAPPING_INVALID: track=${t} bone=${String(boneIdx)}`);
+      }
 
       const idx0 = frame0 * numTracks + t;
       const idx1 = frame1 * numTracks + t;
 
-      if (idx0 < transforms.length && idx1 < transforms.length) {
-        const t0 = transforms[idx0]!;
-        const t1 = transforms[idx1]!;
+      const t0 = transforms[idx0]!;
+      const t1 = transforms[idx1]!;
 
-        const pos = lerpVector3(t0.translation, t1.translation, alpha);
-        const rot = slerpQuaternion(t0.rotation, t1.rotation, alpha);
-        const scale = lerpVector3(t0.scale, t1.scale, alpha);
+      const pos = lerpVector3(t0.translation, t1.translation, alpha);
+      const rot = slerpQuaternion(t0.rotation, t1.rotation, alpha);
+      const scale = lerpVector3(t0.scale, t1.scale, alpha);
 
-        pose[boneIdx] = { translation: pos, rotation: rot, scale };
-      }
+      pose[boneIdx] = { translation: pos, rotation: rot, scale };
     }
   }
 
   private sampleSpline(time: number, pose: BoneTransformData[]): void {
     const blocks = this.clip.splineBlocks;
     const numTracks = this.clip.transformTrackCount;
-    if (!blocks || blocks.length === 0 || numTracks <= 0) return;
+    if (!blocks || blocks.length === 0) throw new Error('ACTION_SPLINE_DATA_MISSING');
 
     const frameDuration = this.clip.frameDuration > 0 ? this.clip.frameDuration : (1 / 30);
     const frame = time / frameDuration;
     const maxFramesPerBlock = this.clip.maxFramesPerBlock ?? 256;
 
     let blockIdx = 0;
-    let blockFrame = frame;
-    if (maxFramesPerBlock > 0 && blocks.length > 1) {
+    let blockFrame: number;
+    if (blocks.length > 1
+      && (this.clip.blockDuration ?? 0) > 0
+      && Number.isFinite(this.clip.blockInverseDuration)
+      && (this.clip.blockInverseDuration ?? 0) > 0) {
+      blockIdx = Math.max(0, Math.min(
+        Math.floor(time * (this.clip.blockInverseDuration ?? 0)),
+        blocks.length - 1
+      ));
+      blockFrame = Math.max(0, (time - (blockIdx * (this.clip.blockDuration ?? 0))) / frameDuration);
+    } else if (maxFramesPerBlock > 0 && blocks.length > 1) {
       blockIdx = Math.max(0, Math.min(Math.floor(frame / maxFramesPerBlock), blocks.length - 1));
       blockFrame = frame - (blockIdx * maxFramesPerBlock);
+    } else {
+      blockFrame = frame;
     }
 
     const block = blocks[blockIdx];
-    if (!block || !block.tracks) return;
+    if (!block || block.tracks.length !== numTracks) throw new Error('ACTION_SPLINE_TRACK_DATA_MISSING');
 
     for (let t = 0; t < numTracks && t < this.clip.trackToHkxBone.length; t++) {
       const boneIdx = this.clip.trackToHkxBone[t];
-      if (boneIdx === undefined || boneIdx < 0 || boneIdx >= pose.length) continue;
+      if (boneIdx === undefined || boneIdx < 0 || boneIdx >= pose.length) {
+        throw new Error(`ACTION_TRACK_BONE_MAPPING_INVALID: track=${t} bone=${String(boneIdx)}`);
+      }
 
       const track = block.tracks[t];
-      if (!track) continue;
+      if (!track) throw new Error(`ACTION_SPLINE_TRACK_MISSING: track=${t}`);
 
-      const px = track.positionX ? evaluateBSpline(track.positionX, blockFrame) : track.staticPosition[0];
-      const py = track.positionY ? evaluateBSpline(track.positionY, blockFrame) : track.staticPosition[1];
-      const pz = track.positionZ ? evaluateBSpline(track.positionZ, blockFrame) : track.staticPosition[2];
+      const reference = pose[boneIdx]!;
+      const px = track.positionX
+        ? evaluateBSpline(track.positionX, blockFrame)
+        : hasMask(track.positionStaticMask, 1) ? track.staticPosition[0] : reference.translation[0];
+      const py = track.positionY
+        ? evaluateBSpline(track.positionY, blockFrame)
+        : hasMask(track.positionStaticMask, 2) ? track.staticPosition[1] : reference.translation[1];
+      const pz = track.positionZ
+        ? evaluateBSpline(track.positionZ, blockFrame)
+        : hasMask(track.positionStaticMask, 4) ? track.staticPosition[2] : reference.translation[2];
 
-      const rot = track.rotation ? evaluateBSplineQuat(track.rotation, blockFrame) : track.staticRotation;
+      const rot = track.rotation
+        ? evaluateBSplineQuat(track.rotation, blockFrame)
+        : track.rotationHasStatic ? track.staticRotation : reference.rotation;
 
-      const sx = track.scaleX ? evaluateBSpline(track.scaleX, blockFrame) : track.staticScale[0];
-      const sy = track.scaleY ? evaluateBSpline(track.scaleY, blockFrame) : track.staticScale[1];
-      const sz = track.scaleZ ? evaluateBSpline(track.scaleZ, blockFrame) : track.staticScale[2];
+      const sx = track.scaleX
+        ? evaluateBSpline(track.scaleX, blockFrame)
+        : hasMask(track.scaleStaticMask, 1) ? track.staticScale[0] : reference.scale[0];
+      const sy = track.scaleY
+        ? evaluateBSpline(track.scaleY, blockFrame)
+        : hasMask(track.scaleStaticMask, 2) ? track.staticScale[1] : reference.scale[1];
+      const sz = track.scaleZ
+        ? evaluateBSpline(track.scaleZ, blockFrame)
+        : hasMask(track.scaleStaticMask, 4) ? track.staticScale[2] : reference.scale[2];
 
       pose[boneIdx] = {
         translation: [px, py, pz],
@@ -251,7 +298,7 @@ export class ActionContinuousSampler {
 }
 
 export function evaluateBSpline(curve: SplineCurveData, t: number): number {
-  if (curve.controlPoints.length === 0) return 0;
+  validateScalarCurve(curve, t);
   if (curve.controlPoints.length === 1) return curve.controlPoints[0]!;
 
   const degree = curve.degree;
@@ -277,7 +324,8 @@ export function evaluateBSpline(curve: SplineCurveData, t: number): number {
   const d = new Float32Array(degree + 1);
   for (let j = 0; j <= degree; j++) {
     const cpIdx = k - degree + j;
-    d[j] = (cpIdx >= 0 && cpIdx < n) ? cp[cpIdx]! : 0;
+    if (cpIdx < 0 || cpIdx >= n) throw new Error(`ACTION_SPLINE_CONTROL_POINT_INDEX_INVALID: ${cpIdx}`);
+    d[j] = cp[cpIdx]!;
   }
 
   for (let r = 1; r <= degree; r++) {
@@ -295,7 +343,7 @@ export function evaluateBSpline(curve: SplineCurveData, t: number): number {
 }
 
 export function evaluateBSplineQuat(curve: SplineQuatCurveData, t: number): [number, number, number, number] {
-  if (curve.controlPoints.length === 0) return [0, 0, 0, 1];
+  validateQuatCurve(curve, t);
   if (curve.controlPoints.length === 1) return normalizeQuaternion(curve.controlPoints[0]!);
 
   const degree = curve.degree;
@@ -321,7 +369,8 @@ export function evaluateBSplineQuat(curve: SplineQuatCurveData, t: number): [num
   const d: Array<[number, number, number, number]> = new Array(degree + 1);
   for (let j = 0; j <= degree; j++) {
     const cpIdx = k - degree + j;
-    d[j] = (cpIdx >= 0 && cpIdx < n) ? [...cp[cpIdx]!] : [0, 0, 0, 1];
+    if (cpIdx < 0 || cpIdx >= n) throw new Error(`ACTION_SPLINE_QUAT_CONTROL_POINT_INDEX_INVALID: ${cpIdx}`);
+    d[j] = [...cp[cpIdx]!];
   }
 
   for (let r = 1; r <= degree; r++) {
@@ -334,11 +383,72 @@ export function evaluateBSplineQuat(curve: SplineQuatCurveData, t: number): [num
 
       const q0 = d[j - 1]!;
       const q1 = d[j]!;
-      d[j] = slerpQuaternion(q0, q1, alpha);
+      // Havok evaluates spline quaternion control points component-wise and
+      // normalizes the De Boor result; Slerp changes the native curve.
+      d[j] = normalizeQuaternion([
+        (1 - alpha) * q0[0] + alpha * q1[0],
+        (1 - alpha) * q0[1] + alpha * q1[1],
+        (1 - alpha) * q0[2] + alpha * q1[2],
+        (1 - alpha) * q0[3] + alpha * q1[3]
+      ]);
     }
   }
 
   return normalizeQuaternion(d[degree]!);
+}
+
+function hasMask(mask: number | undefined, bit: number): boolean {
+  return mask !== undefined && (mask & bit) !== 0;
+}
+
+function validateClip(clip: TaeAnimationClipData): void {
+  if (!Number.isFinite(clip.duration) || clip.duration < 0) throw new Error('ACTION_CLIP_DURATION_INVALID');
+  if (!Number.isFinite(clip.frameDuration) || clip.frameDuration <= 0) throw new Error('ACTION_CLIP_FRAME_DURATION_INVALID');
+  if (!Number.isInteger(clip.frameCount) || clip.frameCount <= 0) throw new Error('ACTION_CLIP_FRAME_COUNT_INVALID');
+  if (!Number.isInteger(clip.transformTrackCount) || clip.transformTrackCount <= 0) throw new Error('ACTION_CLIP_TRACK_COUNT_INVALID');
+  if (!Number.isInteger(clip.hkxBoneCount) || clip.hkxBoneCount <= 0) throw new Error('ACTION_CLIP_BONE_COUNT_INVALID');
+  if (clip.hkxBoneNames.length !== clip.hkxBoneCount || clip.hkxReferencePose.length !== clip.hkxBoneCount) {
+    throw new Error('ACTION_CLIP_REFERENCE_POSE_MISMATCH');
+  }
+  if (clip.trackToHkxBone.length !== clip.transformTrackCount) throw new Error('ACTION_CLIP_TRACK_MAPPING_MISMATCH');
+  const seenBones = new Set<number>();
+  for (const [track, bone] of clip.trackToHkxBone.entries()) {
+    if (!Number.isInteger(bone) || bone < 0 || bone >= clip.hkxBoneCount || seenBones.has(bone)) {
+      throw new Error(`ACTION_CLIP_TRACK_MAPPING_INVALID: track=${track} bone=${bone}`);
+    }
+    seenBones.add(bone);
+  }
+  if (clip.hkxToFlverBoneMap && clip.hkxToFlverBoneMap.length !== clip.hkxBoneCount) throw new Error('ACTION_CLIP_FLVER_MAPPING_MISMATCH');
+  if (clip.animationType === 'Interleaved') {
+    if (!clip.interleavedTransforms || clip.interleavedTransforms.length !== clip.frameCount * clip.transformTrackCount) {
+      throw new Error('ACTION_INTERLEAVED_DATA_MISMATCH');
+    }
+  } else if (clip.animationType === 'SplineCompressed') {
+    if (!clip.splineBlocks || clip.splineBlocks.length === 0 || clip.splineBlocks.some(block => block.tracks.length !== clip.transformTrackCount)) {
+      throw new Error('ACTION_SPLINE_DATA_MISMATCH');
+    }
+  } else {
+    throw new Error(`ACTION_ANIMATION_TYPE_UNSUPPORTED: ${clip.animationType}`);
+  }
+}
+
+function validateScalarCurve(curve: SplineCurveData, t: number): void {
+  if (!Number.isFinite(t) || !Number.isInteger(curve.degree) || curve.degree < 0 || curve.degree > 4 || curve.controlPoints.length === 0 || curve.knots.length !== curve.controlPoints.length + curve.degree + 1) {
+    throw new Error('ACTION_SCALAR_SPLINE_SHAPE_INVALID');
+  }
+  if (curve.knots.some((value, index) => !Number.isFinite(value) || (index > 0 && value < curve.knots[index - 1]!)) || curve.controlPoints.some(value => !Number.isFinite(value))) {
+    throw new Error('ACTION_SCALAR_SPLINE_DATA_INVALID');
+  }
+}
+
+function validateQuatCurve(curve: SplineQuatCurveData, t: number): void {
+  if (!Number.isFinite(t) || !Number.isInteger(curve.degree) || curve.degree < 0 || curve.degree > 4 || curve.controlPoints.length === 0 || curve.knots.length !== curve.controlPoints.length + curve.degree + 1) {
+    throw new Error('ACTION_QUAT_SPLINE_SHAPE_INVALID');
+  }
+  if (curve.knots.some((value, index) => !Number.isFinite(value) || (index > 0 && value < curve.knots[index - 1]!))) {
+    throw new Error('ACTION_QUAT_SPLINE_KNOTS_INVALID');
+  }
+  for (const point of curve.controlPoints) normalizeQuaternion(point);
 }
 
 function lerpVector3(a: [number, number, number], b: [number, number, number], t: number): [number, number, number] {
@@ -395,7 +505,7 @@ function slerpQuaternion(
 
 function normalizeQuaternion(q: [number, number, number, number]): [number, number, number, number] {
   const lenSq = q[0] * q[0] + q[1] * q[1] + q[2] * q[2] + q[3] * q[3];
-  if (lenSq === 0) return [0, 0, 0, 1];
+  if (!Number.isFinite(lenSq) || lenSq <= 1e-12) throw new Error('ACTION_QUATERNION_INVALID');
   const invLen = 1 / Math.sqrt(lenSq);
   return [q[0] * invLen, q[1] * invLen, q[2] * invLen, q[3] * invLen];
 }

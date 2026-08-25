@@ -11,7 +11,10 @@
  *      deselect, and the highlight is visible (emissive lift) then restored.
  *   4. FLVER scene — real mesh + rgba texture + bone/dummy markers projected from a
  *      renderer-independent semantic scene; WebGPU override path selects webgpu.
- *   5. Resource release — repeated mount/dispose leaves zero leaks; replaced scenes
+ *   5. Skinning bind pose — non-origin bind transforms capture inverse bind matrices,
+ *      retain skin attributes, and the Three.js skinning contract preserves/restores
+ *      vertices across a pose change.
+ *   6. Resource release — repeated mount/dispose leaves zero leaks; replaced scenes
  *      release their old resources; content-build failure (SCENE_ABSOLUTE_PATH_LEAK)
  *      disposes the whole mount instead of leaking.
  *
@@ -245,15 +248,57 @@ function buildFlverScene(): FlverSemanticScene {
         positions: new Float32Array([0, 0, 0, 1, 0, 0, 0, 1, 0]),
         uvs: new Float32Array([0, 0, 1, 0, 0, 1]),
         indices: new Uint16Array([0, 1, 2]),
+        skinIndices: new Uint16Array([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]),
+        skinWeights: new Float32Array([1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0]),
         vertexCount: 3,
         wireframeOverlay: true,
         texture: { kind: 'rgba', width: 4, height: 4, rgbaBytes: new Uint8Array(64).fill(128) }
       }
     ],
-    bones: [{ id: 'bone-0', name: 'root', parentIndex: -1, translation: [0, 0, 0], rotation: [0, 0, 0] }],
+    bones: [{ id: 'bone-0', name: 'root', parentIndex: -1, translation: [1, 0, 0], rotation: [0, 0, 0] }],
     dummies: [{ id: 'dummy-0', referenceId: 100, position: [0, 0, 0] }],
     bounds: { min: [0, 0, 0], max: [1, 1, 0], center: [0.5, 0.5, 0] }
   };
+}
+
+function testSkinningBindPose(record: (name: string) => void): void {
+  const root = new three.Group();
+  const bone = new three.Bone();
+  bone.position.set(1, 0, 0);
+  root.add(bone);
+  root.updateMatrixWorld(true);
+
+  const skeleton = new three.Skeleton([bone]);
+  const geometry = new three.BufferGeometry();
+  geometry.setAttribute('position', new three.Float32BufferAttribute([0, 0, 0], 3));
+  geometry.setAttribute('skinIndex', new three.Uint16BufferAttribute([0, 0, 0, 0], 4));
+  geometry.setAttribute('skinWeight', new three.Float32BufferAttribute([1, 0, 0, 0], 4));
+  const mesh = new three.SkinnedMesh(geometry, new three.MeshBasicMaterial());
+  mesh.bind(skeleton);
+
+  const bindPose = new three.Vector3(0, 0, 0);
+  mesh.applyBoneTransform(0, bindPose);
+  assert(bindPose.distanceTo(new three.Vector3(0, 0, 0)) < 1e-6, '非原点 bind pose 顶点保持原位');
+  assert(Math.abs(skeleton.boneInverses[0]!.elements[12] + 1) < 1e-6, 'inverse bind 捕获真实骨骼 world matrix');
+
+  bone.position.set(2, 0, 0);
+  root.updateMatrixWorld(true);
+  skeleton.update();
+  const posed = new three.Vector3(0, 0, 0);
+  mesh.applyBoneTransform(0, posed);
+  assert(Math.abs(posed.x - 1) < 1e-6, '骨骼位移驱动 skin vertex');
+
+  bone.position.set(1, 0, 0);
+  root.updateMatrixWorld(true);
+  skeleton.update();
+  const restored = new three.Vector3(0, 0, 0);
+  mesh.applyBoneTransform(0, restored);
+  assert(restored.distanceTo(new three.Vector3(0, 0, 0)) < 1e-6, '恢复 bind pose 后顶点回到原位');
+
+  geometry.dispose();
+  mesh.material.dispose();
+  skeleton.dispose();
+  record('skinning-bind-pose-invariant');
 }
 
 // ---------------------------------------------------------------------------
@@ -474,6 +519,7 @@ async function main(): Promise<void> {
   await testBackendResolution(record);
   await testProxyScene(record);
   await testFlverScene(record);
+  testSkinningBindPose(record);
   await testRepeatedMountUnmount(record);
   await testAbsolutePathLeakRejected(record);
 

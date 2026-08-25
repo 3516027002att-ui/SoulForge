@@ -458,6 +458,12 @@ export interface AgentRunRequest {
   /** Resolved only in main/core — never passed to renderer. */
   apiKey: string;
   messages: ChatMessage[];
+  /**
+   * Fixed external user query captured by the host at run start. Internal
+   * retry/continuation messages are durable history but must never become a
+   * new RAG query or change the task being answered.
+   */
+  taskQuery?: string;
   tools: ToolDefinition[];
   permissionMode: AgentPermissionMode;
   /** Tool executor returns tool result content or policy denial. */
@@ -533,8 +539,8 @@ export interface AgentRunRequest {
   /**
    * RAG auto-search hook (host-injected; the loop holds no corpus).
    *
-   * When present, before each model call the loop uses the most recent user
-   * message as the query, retrieves workspace evidence, and injects a
+   * When present, before each model call the loop uses the fixed taskQuery
+   * captured at run start, retrieves workspace evidence, and injects a
    * `[rag-evidence query=… hits=N]` system message (a separate channel from
    * contextBroker, which only assembles given tool-result evidence). No hits
    * or an empty query → nothing is injected. `maxHits` caps injected hits

@@ -331,6 +331,7 @@ function compilePairedEvent(
           finalInstructionIndex: currentFinalIdx++,
           bank: entry.item.instruction.bank,
           id: entry.item.instruction.id,
+          argsBase64: entry.item.instruction.argsBase64,
           source: 'opaque',
           instruction: entry.item.instruction,
           args: []
@@ -369,6 +370,7 @@ function compilePairedEvent(
           finalInstructionIndex: currentFinalIdx++,
           bank: entry.item.instruction.bank,
           id: entry.item.instruction.id,
+          argsBase64: entry.item.instruction.argsBase64,
           source: 'matched',
           call,
           instruction: entry.item.instruction,
@@ -409,6 +411,7 @@ function compilePairedEvent(
             finalInstructionIndex: currentFinalIdx++,
             bank: predItem.instruction.bank,
             id: predItem.instruction.id,
+            argsBase64: predItem.instruction.argsBase64,
             source: 'matched',
             call: predStmt,
             instruction: predItem.instruction,
@@ -421,6 +424,7 @@ function compilePairedEvent(
           finalInstructionIndex: currentFinalIdx++,
           bank: entry.item.anchor.bank,
           id: entry.item.anchor.id,
+          argsBase64: entry.item.anchor.argsBase64,
           source: 'matched',
           instruction: entry.item.anchor,
           args: []
@@ -429,78 +433,17 @@ function compilePairedEvent(
     }
   }
 
-  // 收集事件参数绑定并生成 set_event_parameters
-  const newParameters: Array<{
-    instructionIndex: number;
-    targetStartByte: number;
-    sourceStartByte: number;
-    byteCount: number;
-    unkId: number;
-  }> = [];
-
-  for (const instr of finalInstructions) {
-    for (const arg of instr.args) {
-      if (typeof arg.value === 'string') {
-        const m = /^X(\d+)_(\d+)$/.exec(arg.value);
-        if (m) {
-          const src = Number(m[1]);
-          const cnt = Number(m[2]);
-          if (!Number.isSafeInteger(src) || src < 0 || !Number.isSafeInteger(cnt) || cnt <= 0) {
-            add(error(
-              'EMEVD_PARAMETER_RANGE_INVALID',
-              `指令 ${instr.call?.name ?? instr.id} 的参数 ${arg.name} X${m[1]}_${m[2]} 超出安全范围，禁止写入。`,
-              instr.call?.span ?? parsed.span,
-              { resourceUri, targetAnchor: eventAnchor }
-            ));
-            blocked = true;
-            continue;
-          }
-          if (arg.targetStartByte === undefined || !Number.isSafeInteger(arg.targetStartByte) || arg.targetStartByte < 0) {
-            add(error(
-              'EMEVD_PARAMETER_TARGET_OFFSET_UNRESOLVED',
-              `指令 ${instr.call?.name ?? instr.id} 的参数 ${arg.name} 无法解析 targetStartByte，禁止写入。`,
-              instr.call?.span ?? parsed.span,
-              { resourceUri, targetAnchor: eventAnchor }
-            ));
-            blocked = true;
-            continue;
-          }
-          if (arg.byteCount === undefined || !Number.isSafeInteger(arg.byteCount) || arg.byteCount <= 0) {
-            add(error(
-              'EMEVD_PARAMETER_WIDTH_UNRESOLVED',
-              `指令 ${instr.call?.name ?? instr.id} 的参数 ${arg.name} 未解析出原生字节宽度，禁止写入。`,
-              instr.call?.span ?? parsed.span,
-              { resourceUri, targetAnchor: eventAnchor }
-            ));
-            blocked = true;
-            continue;
-          }
-          if (cnt !== arg.byteCount) {
-            add(error(
-              'EMEVD_PARAMETER_WIDTH_MISMATCH',
-              `指令 ${instr.call?.name ?? instr.id} 的参数 ${arg.name} 声明宽度 ${cnt} 与原生宽度 ${arg.byteCount} 不一致，禁止写入。`,
-              instr.call?.span ?? parsed.span,
-              { resourceUri, targetAnchor: eventAnchor }
-            ));
-            blocked = true;
-            continue;
-          }
-          const unkId = arg.originalParam?.unkId ?? 0;
-          newParameters.push({
-            instructionIndex: instr.finalInstructionIndex,
-            targetStartByte: arg.targetStartByte,
-            sourceStartByte: src,
-            byteCount: cnt,
-            unkId
-          });
-        }
-      }
-    }
-  }
-
-  // 参数绑定失败时不得把已经收集的 set_event_parameters 或结构性操作
-  // 泄漏到计划中；失败关闭应返回诊断而不是 ghost mutation。
-  if (blocked) return;
+  const parameterBuild = buildEventParameterBindings(
+    finalInstructions,
+    event.instructions,
+    event.parameters ?? [],
+    add,
+    resourceUri,
+    eventAnchor,
+    parsed.span
+  );
+  if (!parameterBuild.ok) return;
+  const newParameters = parameterBuild.parameters;
 
   const oldParams = event.parameters ?? [];
   const paramsChanged = oldParams.length !== newParameters.length ||
@@ -593,6 +536,278 @@ interface FinalInstructionSemantic {
   }>;
 }
 
+type EventParameterBinding = NonNullable<EmevdEditorDocument['events'][number]['parameters']>[number];
+
+interface ParameterBuildResult {
+  ok: true;
+  parameters: EventParameterBinding[];
+}
+
+interface ParameterBuildFailure {
+  ok: false;
+}
+
+/**
+ * Rebuild the native event-parameter table from the final instruction sequence.
+ * Existing instruction objects are the identity proof; inserted instructions
+ * have no preserved bindings. Explicit X bindings replace a preserved binding
+ * at the same target offset, while hidden bindings on an identity-proven
+ * instruction remain untouched.
+ */
+function buildEventParameterBindings(
+  finalInstructions: readonly FinalInstructionSemantic[],
+  originalInstructions: readonly EmevdEditorDocument['events'][number]['instructions'][number][],
+  originalParameters: readonly EventParameterBinding[],
+  add: (item: EmevdDslDiagnostic) => void,
+  resourceUri: string,
+  targetAnchor: string | undefined,
+  fallbackSpan: EmevdDslSourceSpan
+): ParameterBuildResult | ParameterBuildFailure {
+  const originalArgsLengths = new Map<number, number>();
+  for (let index = 0; index < originalInstructions.length; index += 1) {
+    const argsLength = strictBase64ByteLength(originalInstructions[index]!.argsBase64);
+    if (argsLength !== undefined) originalArgsLengths.set(index, argsLength);
+  }
+
+  let originalParametersValid = true;
+  for (const parameter of originalParameters) {
+    if (!Number.isSafeInteger(parameter.instructionIndex)
+      || parameter.instructionIndex < 0
+      || parameter.instructionIndex >= originalInstructions.length) {
+      addParameterError(
+        add,
+        'EMEVD_PARAMETER_INSTRUCTION_INDEX_INVALID',
+        `原有事件参数 instructionIndex=${String(parameter.instructionIndex)} 超出原始指令范围，禁止写入。`,
+        fallbackSpan,
+        resourceUri,
+        targetAnchor
+      );
+      originalParametersValid = false;
+      continue;
+    }
+    if (!validateParameterRange(parameter, originalArgsLengths.get(parameter.instructionIndex), add, fallbackSpan, resourceUri, targetAnchor, '原有')) {
+      originalParametersValid = false;
+    }
+  }
+
+  if (!originalParametersValid) return { ok: false };
+
+  const result: EventParameterBinding[] = [];
+  let finalParametersValid = true;
+  for (let finalIndex = 0; finalIndex < finalInstructions.length; finalIndex += 1) {
+    const instruction = finalInstructions[finalIndex]!;
+    if (instruction.finalInstructionIndex !== finalIndex || !Number.isSafeInteger(instruction.finalInstructionIndex)) {
+      addParameterError(
+        add,
+        'EMEVD_PARAMETER_INSTRUCTION_INDEX_INVALID',
+        `最终事件指令索引 ${String(instruction.finalInstructionIndex)} 不连续，禁止写入。`,
+        instruction.call?.span ?? fallbackSpan,
+        resourceUri,
+        targetAnchor
+      );
+      finalParametersValid = false;
+      continue;
+    }
+
+    const finalArgsLength = strictBase64ByteLength(instruction.argsBase64);
+    const explicitByTarget = new Map<number, { sourceStartByte: number; byteCount: number; unkId: number }>();
+    const explicitOrder: number[] = [];
+    const literalTargets = new Set<number>();
+    let instructionBlocked = false;
+
+    for (const arg of instruction.args) {
+      if (arg.targetStartByte !== undefined && typeof arg.value !== 'string') {
+        if (!Number.isSafeInteger(arg.targetStartByte) || arg.targetStartByte < 0) {
+          addParameterError(
+            add,
+            'EMEVD_PARAMETER_TARGET_OFFSET_UNRESOLVED',
+            `指令 ${instruction.call?.name ?? instruction.id} 的参数 ${arg.name} targetStartByte 无效，禁止写入。`,
+            instruction.call?.span ?? fallbackSpan,
+            resourceUri,
+            targetAnchor
+          );
+          instructionBlocked = true;
+        } else {
+          literalTargets.add(arg.targetStartByte);
+        }
+      }
+      if (typeof arg.value !== 'string') continue;
+      const match = /^X(\d+)_(\d+)$/.exec(arg.value);
+      if (!match) continue;
+      const sourceStartByte = Number(match[1]);
+      const byteCount = Number(match[2]);
+      if (!Number.isSafeInteger(sourceStartByte) || sourceStartByte < 0
+        || !Number.isSafeInteger(byteCount) || byteCount <= 0) {
+        addParameterError(
+          add,
+          'EMEVD_PARAMETER_RANGE_INVALID',
+          `指令 ${instruction.call?.name ?? instruction.id} 的参数 ${arg.name} ${arg.value} 超出安全范围，禁止写入。`,
+          instruction.call?.span ?? fallbackSpan,
+          resourceUri,
+          targetAnchor
+        );
+        instructionBlocked = true;
+        continue;
+      }
+      if (arg.targetStartByte === undefined || !Number.isSafeInteger(arg.targetStartByte) || arg.targetStartByte < 0) {
+        addParameterError(
+          add,
+          'EMEVD_PARAMETER_TARGET_OFFSET_UNRESOLVED',
+          `指令 ${instruction.call?.name ?? instruction.id} 的参数 ${arg.name} 无法解析 targetStartByte，禁止写入。`,
+          instruction.call?.span ?? fallbackSpan,
+          resourceUri,
+          targetAnchor
+        );
+        instructionBlocked = true;
+        continue;
+      }
+      if (arg.byteCount === undefined || !Number.isSafeInteger(arg.byteCount) || arg.byteCount <= 0) {
+        addParameterError(
+          add,
+          'EMEVD_PARAMETER_WIDTH_UNRESOLVED',
+          `指令 ${instruction.call?.name ?? instruction.id} 的参数 ${arg.name} 未解析出原生字节宽度，禁止写入。`,
+          instruction.call?.span ?? fallbackSpan,
+          resourceUri,
+          targetAnchor
+        );
+        instructionBlocked = true;
+        continue;
+      }
+      if (byteCount !== arg.byteCount) {
+        addParameterError(
+          add,
+          'EMEVD_PARAMETER_WIDTH_MISMATCH',
+          `指令 ${instruction.call?.name ?? instruction.id} 的参数 ${arg.name} 声明宽度 ${byteCount} 与原生宽度 ${arg.byteCount} 不一致，禁止写入。`,
+          instruction.call?.span ?? fallbackSpan,
+          resourceUri,
+          targetAnchor
+        );
+        instructionBlocked = true;
+        continue;
+      }
+      if (explicitByTarget.has(arg.targetStartByte)) {
+        addParameterError(
+          add,
+          'EMEVD_PARAMETER_DUPLICATE_TARGET',
+          `指令 ${instruction.call?.name ?? instruction.id} 的 targetStartByte=${arg.targetStartByte} 被多个 X 绑定声明，禁止写入。`,
+          instruction.call?.span ?? fallbackSpan,
+          resourceUri,
+          targetAnchor
+        );
+        instructionBlocked = true;
+        continue;
+      }
+      explicitByTarget.set(arg.targetStartByte, { sourceStartByte, byteCount, unkId: 0 });
+      explicitOrder.push(arg.targetStartByte);
+    }
+
+    const originalIndex = instruction.instruction === undefined
+      ? -1
+      : originalInstructions.indexOf(instruction.instruction);
+    const oldForInstruction = originalIndex >= 0
+      ? originalParameters.filter((parameter) => parameter.instructionIndex === originalIndex)
+      : [];
+    const oldByTarget = new Map(oldForInstruction.map((parameter) => [parameter.targetStartByte, parameter]));
+
+    for (const old of oldForInstruction) {
+      if (explicitByTarget.has(old.targetStartByte)) continue;
+      if (literalTargets.has(old.targetStartByte)) continue;
+      const remapped = { ...old, instructionIndex: finalIndex };
+      if (!validateParameterRange(remapped, finalArgsLength, add, instruction.call?.span ?? fallbackSpan, resourceUri, targetAnchor, '保留')) {
+        instructionBlocked = true;
+        continue;
+      }
+      result.push(remapped);
+    }
+
+    for (const targetStartByte of explicitOrder) {
+      const explicit = explicitByTarget.get(targetStartByte)!;
+      const old = oldByTarget.get(targetStartByte);
+      const binding: EventParameterBinding = {
+        instructionIndex: finalIndex,
+        targetStartByte,
+        sourceStartByte: explicit.sourceStartByte,
+        byteCount: explicit.byteCount,
+        unkId: old?.unkId ?? explicit.unkId
+      };
+      if (!validateParameterRange(binding, finalArgsLength, add, instruction.call?.span ?? fallbackSpan, resourceUri, targetAnchor, '显式')) {
+        instructionBlocked = true;
+        continue;
+      }
+      result.push(binding);
+    }
+
+    if (instructionBlocked) finalParametersValid = false;
+  }
+
+  if (!finalParametersValid) return { ok: false };
+  if (result.some((parameter) => !Number.isSafeInteger(parameter.instructionIndex)
+    || parameter.instructionIndex < 0
+    || parameter.instructionIndex >= finalInstructions.length)) {
+    addParameterError(
+      add,
+      'EMEVD_PARAMETER_INSTRUCTION_INDEX_INVALID',
+      '生成的事件参数 instructionIndex 超出最终指令范围，禁止写入。',
+      fallbackSpan,
+      resourceUri,
+      targetAnchor
+    );
+    return { ok: false };
+  }
+  return { ok: true, parameters: result };
+}
+
+function validateParameterRange(
+  parameter: EventParameterBinding,
+  argsLength: number | undefined,
+  add: (item: EmevdDslDiagnostic) => void,
+  span: EmevdDslSourceSpan,
+  resourceUri: string,
+  targetAnchor: string | undefined,
+  label: string
+): boolean {
+  if (isValidParameterRange(parameter, argsLength)) return true;
+  addParameterError(
+    add,
+    'EMEVD_PARAMETER_BYTE_RANGE_INVALID',
+    `${label}事件参数的 source/target 字节范围无效，禁止写入。`,
+    span,
+    resourceUri,
+    targetAnchor
+  );
+  return false;
+}
+
+function isValidParameterRange(parameter: EventParameterBinding, argsLength: number | undefined): boolean {
+  if (!Number.isSafeInteger(parameter.targetStartByte) || parameter.targetStartByte < 0) return false;
+  if (!Number.isSafeInteger(parameter.sourceStartByte) || parameter.sourceStartByte < 0) return false;
+  if (!Number.isSafeInteger(parameter.byteCount) || parameter.byteCount <= 0) return false;
+  const targetEnd = parameter.targetStartByte + parameter.byteCount;
+  const sourceEnd = parameter.sourceStartByte + parameter.byteCount;
+  if (!Number.isSafeInteger(targetEnd) || !Number.isSafeInteger(sourceEnd)) return false;
+  return argsLength !== undefined && targetEnd <= argsLength;
+}
+
+function strictBase64ByteLength(value: string | undefined): number | undefined {
+  if (value === undefined || value.length === 0) return 0;
+  if (value.length % 4 !== 0 || !/^[A-Za-z0-9+/]*={0,2}$/.test(value)) return undefined;
+  const padding = value.endsWith('==') ? 2 : value.endsWith('=') ? 1 : 0;
+  const decoded = Buffer.from(value, 'base64');
+  if (decoded.toString('base64') !== value) return undefined;
+  return (value.length / 4) * 3 - padding;
+}
+
+function addParameterError(
+  add: (item: EmevdDslDiagnostic) => void,
+  code: string,
+  message: string,
+  span: EmevdDslSourceSpan,
+  resourceUri: string,
+  targetAnchor: string | undefined
+): void {
+  add(error(code, message, span, { resourceUri, ...(targetAnchor !== undefined ? { targetAnchor } : {}) }));
+}
+
 function getInstructionArgLayout(def: EmedfInstructionDef): Array<{ name: string; targetStartByte: number; byteCount: number }> {
   let offset = 0;
   const layout: Array<{ name: string; targetStartByte: number; byteCount: number }> = [];
@@ -654,6 +869,35 @@ function compileAddedEvent(
     localNodeId: `new-event-${parsed.eventId}`,
     sourceFingerprint: ''
   };
+
+  const finalInstructions: FinalInstructionSemantic[] = encodable.map((entry, instructionIndex) => {
+    const layout = getInstructionArgLayout(entry.def);
+    return {
+      finalInstructionIndex: instructionIndex,
+      bank: entry.bank,
+      id: entry.id,
+      argsBase64: entry.argsBase64,
+      source: 'inserted',
+      call: entry.call,
+      args: entry.call.args.map((arg, argIndex) => ({
+        name: layout[argIndex]?.name ?? `arg${argIndex}`,
+        targetStartByte: layout[argIndex]?.targetStartByte,
+        byteCount: layout[argIndex]?.byteCount,
+        value: arg.value
+      }))
+    };
+  });
+  const parameterBuild = buildEventParameterBindings(
+    finalInstructions,
+    [],
+    [],
+    add,
+    resourceUri,
+    undefined,
+    parsed.span
+  );
+  if (!parameterBuild.ok) return;
+
   operations.push({
     kind: 'insert_event',
     eventId: parsed.eventId,
@@ -662,7 +906,7 @@ function compileAddedEvent(
     targetPreconditionHash: '',
     sourceSpan: parsed.span
   });
-  encodable.forEach((entry, index) => {
+  for (const [index, entry] of encodable.entries()) {
     operations.push({
       kind: 'insert_instruction',
       eventAnchor: '',
@@ -675,53 +919,14 @@ function compileAddedEvent(
       targetPreconditionHash: '',
       sourceSpan: entry.call.span
     });
-  });
+  }
 
-  const newParameters: Array<{
-    instructionIndex: number;
-    targetStartByte: number;
-    sourceStartByte: number;
-    byteCount: number;
-    unkId: number;
-  }> = [];
-
-  encodable.forEach((entry, instructionIndex) => {
-    const layout = getInstructionArgLayout(entry.def);
-    for (let i = 0; i < entry.call.args.length; i++) {
-      const arg = entry.call.args[i]!;
-      if (typeof arg.value === 'string') {
-        const m = /^X(\d+)_(\d+)$/.exec(arg.value);
-        if (m) {
-          const src = Number(m[1]);
-          const cnt = Number(m[2]);
-          const l = layout[i];
-          if (!l || typeof l.targetStartByte !== 'number') {
-            add(error(
-              'EMEVD_PARAMETER_TARGET_OFFSET_UNRESOLVED',
-              `新增事件指令 ${entry.call.name} 参数无法解析 targetStartByte，禁止写入。`,
-              arg.span,
-              { resourceUri }
-            ));
-            return;
-          }
-          newParameters.push({
-            instructionIndex,
-            targetStartByte: l.targetStartByte,
-            sourceStartByte: src,
-            byteCount: cnt,
-            unkId: 0
-          });
-        }
-      }
-    }
-  });
-
-  if (newParameters.length > 0) {
+  if (parameterBuild.parameters.length > 0) {
     operations.push({
       kind: 'set_event_parameters',
       eventAnchor: '',
       eventId: parsed.eventId,
-      parameters: newParameters,
+      parameters: parameterBuild.parameters,
       target: syntheticAnchor,
       targetPreconditionHash: '',
       sourceSpan: parsed.span

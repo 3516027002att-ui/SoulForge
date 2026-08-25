@@ -407,12 +407,27 @@ export interface SaveTextResourceResult {
   backupRoot?: string;
   changedFiles: string[];
   diagnostics: Diagnostic[];
+  /**
+   * Post-commit semantic/RAG convergence status.  This intentionally carries
+   * counts rather than source paths so it is safe to expose across the
+   * renderer boundary.
+   */
+  knowledgeRefresh?: KnowledgeRefreshSummary;
   /** Graph IR attached after successful commit (or after proposal build for review). */
   graph?: GraphPatch;
   /** Present when save was blocked because the user has not confirmed residual risk. */
   risk?: EditRiskAssessment;
   /** True when the write requires an explicit confirmation receipt before commit. */
   requiresConfirmation?: boolean;
+}
+
+export interface KnowledgeRefreshSummary {
+  status: 'converged' | 'partial' | 'invalidated' | 'failed' | 'preserved';
+  semanticState: 'reanalyzed' | 'partial' | 'empty' | 'preserved';
+  changedSourceCount: number;
+  invalidatedSourceCount: number;
+  removedSemanticCount: number;
+  error?: string;
 }
 
 /**

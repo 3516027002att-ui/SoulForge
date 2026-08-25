@@ -141,6 +141,18 @@ VALUES (?, ?, ?, ?, ?)`).run('ws-embed', workspace.root, 'sekiro', now, now);
       const third = loaded[2] ?? 0;
       expect(loaded.length === 4 && Math.abs(third - 0.3) < 1e-7, 'float32 roundtrip exact');
     }
+    // Same chunkId is not enough to reuse a vector: replacing content/source
+    // provenance deletes the old row through the chunk FK before re-embed.
+    repository.replaceRagChunks([{
+      ...probe,
+      body: '狼的义手（新 revision）',
+      contentHash: 'probe-hash-v2',
+      sourceRevision: 2,
+      sourceHash: 'source-hash-v2'
+    }]);
+    expect(repository.loadRagEmbeddings().size === 0, 'content/source revision change invalidates vector');
+    repository.replaceRagChunks([probe]);
+    repository.replaceRagEmbeddings([{ chunkId: probe.chunkId, model: 'embed-model', vector }]);
     // 语料重建后向量被 FK 级联清掉（孤儿向量不得残留）。
     repository.replaceRagChunks([]);
     expect(repository.loadRagEmbeddings().size === 0, 'cascade deletes orphan vectors');

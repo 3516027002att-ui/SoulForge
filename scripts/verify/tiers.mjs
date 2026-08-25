@@ -78,6 +78,7 @@ export const TIER_BY_SCRIPT = Object.freeze({
   test: 'unit',
   'test:ai-conformance': 'unit',
   'test:rag': 'unit',
+  'test:agent-knowledge-refresh': 'unit',
   'test:emevd-stable-identity': 'unit',
   'test:emevd-dark-script-compiler': 'unit',
   'test:emevd-dark-script-compiler-s14': 'unit',
@@ -362,10 +363,8 @@ export const TIER_BY_SCRIPT = Object.freeze({
   'test:agent-capability-wiring': 'unit',
   // plan 模式权限语义的单一来源。统一前 agentLoop 用按名字硬编码的白名单,
   // 与 toolPermissions 的 maxPermissionForMode 各表达一套 plan 语义,对 17 个
-  // 生产工具分歧 2 个。代价不在这 2 个工具,而在新增工具时无人知道改哪边:
-  // read 等级的新工具漏加白名单会被拒(等级明明够),等级误标为 read 的写类
-  // 工具只要名字在册就能进 plan。统一后等级判据是唯一权威,白名单降级为
-  // PLAN_MODE_EXTRA_DENY——只能更严、每条带实测理由,由本门禁钉住。
+  // 生产工具的 plan 判定统一消费 ai/toolPermissions 的等级 predicate；
+  // plan 上限为 propose，stage/validate 及更高等级不应进入 loop。
   // 观测真实注册表经真实 bridge 的投影结果,归 unit。
   'test:agent-permission-unified': 'unit',
   // Bridge 可选参数守卫。ExecuteAsync 的 options 默认值是 default(JsonElement)
@@ -471,6 +470,11 @@ export const TIER_BY_SCRIPT = Object.freeze({
   'bridge:verify:flver-writer': 'native',
   'bridge:verify:tae': 'native',
   'bridge:verify:tpf': 'native',
+  // ACTION/TAE 真实 ANIBND + HKX spline 采样、C#/TS differential 与 payload
+  // budget；缺 Sekiro 语料时由 smoke 结构化失败/跳过，不归 synthetic。
+  'test:action-real-corpus': 'native',
+  'test:action-mature-oracle': 'native',
+  'test:native-knowledge-refresh': 'native',
   'test:emevd-corpus-matrix': 'native',
   // 以下三条本轮从孤儿状态接线，均以 resolveNativeFixture 读真机 corpus，
   // 缺环境时各自诚实跳过（实测已确认），故归 native。

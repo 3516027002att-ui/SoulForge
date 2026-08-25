@@ -104,7 +104,7 @@ internal static class MsbNativeWriter
         };
     }
 
-    /// <summary>哈希校验 + 解析 mutations + 唯一目标解析（两条路径共用）。</summary>
+    /// <summary>哈希校验 + 解析 mutations + native identity 目标解析（两条路径共用）。</summary>
     private static List<MsbPatch> PreparePatches(MsbNativeDocument document, JsonElement options)
     {
         RequireHash(options, "expectedDocumentHash", document.SourceHash, "MSB source hash");
@@ -121,44 +121,70 @@ internal static class MsbNativeWriter
         if (patches.Count == 0) throw new InvalidDataException("MSB writer 需要至少一条 mutation。");
         foreach (var patch in patches)
         {
-            var matches = patch.Kind switch
+            switch (patch.Kind)
             {
-                "set_region_position" or "set_region_transform" or "delete_region" => document.Regions.Count(item => item.Name == patch.PartName),
-                "delete_event" => document.Events.Count(item => item.Name == patch.PartName),
-                // entityId is a Part/Region field. Event +0x08 is eventId and
-                // must never be exposed through the entityId mutation surface.
-                "set_property" or "set_entity_id" => document.Parts.Count(item => item.Name == patch.PartName)
-                    + document.Regions.Count(item => item.Name == patch.PartName),
-                _ => document.Parts.Count(item => item.Name == patch.PartName),
-            };
-            if (matches != 1)
-                throw new InvalidDataException($"MSB mutation target must resolve uniquely: {patch.PartName}; matches={matches}.");
+                case "set_region_position":
+                case "set_region_transform":
+                case "delete_region":
+                    _ = document.ResolveRegion(patch);
+                    break;
+                case "delete_event":
+                    _ = document.ResolveEvent(patch);
+                    break;
+                case "set_property":
+                case "set_entity_id":
+                    if (patch.Family == "part") _ = document.ResolvePart(patch);
+                    else if (patch.Family == "region") _ = document.ResolveRegion(patch);
+                    else throw new InvalidDataException($"MSB mutation family 不支持：{patch.Family}。");
+                    break;
+                default:
+                    _ = document.ResolvePart(patch);
+                    break;
+            }
         }
         return patches;
     }
 
     private static void VerifyMutations(MsbNativeDocument reread, List<MsbPatch> patches)
     {
-        foreach (var patch in patches)
+        // A transaction can intentionally touch one native identity more than
+        // once (for example set_transform followed by batch_transform).  The
+        // writer applies those patches in order; verification must compare the
+        // final reread against the final transform for that identity, not an
+        // intermediate state that no longer exists in the output.
+        var lastTransformIndex = new Dictionary<(string Family, long NativeOffset), int>();
+        for (var i = 0; i < patches.Count; i++)
         {
+            var patch = patches[i];
+            if (patch.Kind is "set_part_position" or "set_part_transform"
+                or "set_region_position" or "set_region_transform")
+                lastTransformIndex[(patch.Family, patch.NativeOffset)] = i;
+        }
+
+        for (var i = 0; i < patches.Count; i++)
+        {
+            var patch = patches[i];
+            if ((patch.Kind is "set_part_position" or "set_part_transform"
+                or "set_region_position" or "set_region_transform")
+                && lastTransformIndex[(patch.Family, patch.NativeOffset)] != i)
+                continue;
             if (patch.Kind is "delete_part" or "delete_region" or "delete_event")
             {
                 // 删除后重读必须确认目标已从对应家族消失。
                 var stillPresent = patch.Kind switch
                 {
-                    "delete_part" => reread.Parts.Any(p => p.Name == patch.PartName),
-                    "delete_region" => reread.Regions.Any(r => r.Name == patch.PartName),
-                    _ => reread.Events.Any(e => e.Name == patch.PartName),
+                    "delete_part" => reread.Parts.Any(p => p.Offset == patch.NativeOffset),
+                    "delete_region" => reread.Regions.Any(r => r.Offset == patch.NativeOffset),
+                    _ => reread.Events.Any(e => e.Offset == patch.NativeOffset),
                 };
                 if (stillPresent)
-                    throw new InvalidDataException($"MSB delete 后目标仍存在：{patch.PartName}。");
+                    throw new InvalidDataException($"MSB delete 后目标仍存在：family={patch.Family} nativeOffset=0x{patch.NativeOffset:X}。");
                 continue;
             }
 
             if (patch.Kind == "set_region_position" || patch.Kind == "set_region_transform")
             {
-                var region = reread.Regions.FirstOrDefault(r => r.Name == patch.PartName)
-                    ?? throw new InvalidDataException($"MSB mutation 后找不到 region {patch.PartName}。");
+                var region = reread.ResolveRegion(patch);
                 if (patch.PosX is not null && Math.Abs(region.PosX - patch.PosX.Value) > 0.0001f)
                     throw new InvalidDataException("MSB region posX 未按预期更新。");
                 if (patch.PosY is not null && Math.Abs(region.PosY - patch.PosY.Value) > 0.0001f)
@@ -182,8 +208,7 @@ internal static class MsbNativeWriter
 
             if (patch.Kind == "change_model" || patch.Kind == "set_part_model")
             {
-                var partWithModel = reread.Parts.FirstOrDefault(p => p.Name == patch.PartName)
-                    ?? throw new InvalidDataException($"MSB mutation 后找不到 part {patch.PartName}。");
+                var partWithModel = reread.ResolvePart(patch);
                 if (patch.ModelIndex is not null && partWithModel.ModelIndex != patch.ModelIndex.Value)
                     throw new InvalidDataException("MSB part modelIndex 未按预期更新。");
                 if (patch.ModelName is not null)
@@ -200,27 +225,26 @@ internal static class MsbNativeWriter
             if (patch.Kind is "set_property" or "set_entity_id")
             {
                 if (patch.EntityId is null) throw new InvalidDataException("MSB entityId mutation 缺少 entityId。");
-                var partWithEntityId = reread.Parts.FirstOrDefault(p => p.Name == patch.PartName);
-                var regionWithEntityId = reread.Regions.FirstOrDefault(r => r.Name == patch.PartName);
-                if (partWithEntityId is not null)
+                if (patch.Family == "part")
                 {
+                    var partWithEntityId = reread.ResolvePart(patch);
                     if (partWithEntityId.EntityId != patch.EntityId.Value)
                         throw new InvalidDataException("MSB part entityId 未按预期更新。");
                 }
-                else if (regionWithEntityId is not null)
+                else if (patch.Family == "region")
                 {
+                    var regionWithEntityId = reread.ResolveRegion(patch);
                     if (regionWithEntityId.EntityId != patch.EntityId.Value)
                         throw new InvalidDataException("MSB region entityId 未按预期更新。");
                 }
                 else
                 {
-                    throw new InvalidDataException($"MSB entityId mutation 后找不到目标：{patch.PartName}。");
+                    throw new InvalidDataException($"MSB entityId mutation family 不支持：{patch.Family}。");
                 }
                 continue;
             }
 
-            var part = reread.Parts.FirstOrDefault(p => p.Name == patch.PartName)
-                ?? throw new InvalidDataException($"MSB mutation 后找不到 part {patch.PartName}。");
+            var part = reread.ResolvePart(patch);
             if (patch.PosX is not null && Math.Abs(part.PosX - patch.PosX.Value) > 0.0001f)
                 throw new InvalidDataException("MSB posX 未按预期更新。");
             if (patch.PosY is not null && Math.Abs(part.PosY - patch.PosY.Value) > 0.0001f)
@@ -262,10 +286,14 @@ internal static class MsbNativeWriter
     private static MsbPatch ParsePatch(JsonElement item)
     {
         var kind = RequiredString(item, item.TryGetProperty("kind", out _) ? "kind" : "mutation").ToLowerInvariant();
-        var partName = RequiredString(item, item.TryGetProperty("partName", out _) ? "partName" : "name");
+        var family = RequiredString(item, "family").ToLowerInvariant();
+        var nativeOffset = RequiredInt64(item, "nativeOffset");
+        if (nativeOffset < 0) throw new InvalidDataException("options.nativeOffset 必须是非负整数。");
         return new MsbPatch(
             kind,
-            partName,
+            family,
+            nativeOffset,
+            OptionalString(item, "expectedName"),
             OptionalFloat(item, "posX"),
             OptionalFloat(item, "posY"),
             OptionalFloat(item, "posZ"),
@@ -301,4 +329,8 @@ internal static class MsbNativeWriter
     private static int? OptionalInt(JsonElement options, string field)
         => options.TryGetProperty(field, out var value) && value.ValueKind == JsonValueKind.Number
             ? value.GetInt32() : null;
+
+    private static long RequiredInt64(JsonElement options, string field)
+        => options.TryGetProperty(field, out var value) && value.ValueKind == JsonValueKind.Number
+            ? value.GetInt64() : throw new InvalidDataException($"options.{field} 是必填整数。");
 }

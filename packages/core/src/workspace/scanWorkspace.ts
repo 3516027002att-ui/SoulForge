@@ -1,3 +1,5 @@
+import { createHash } from 'node:crypto';
+import { createReadStream } from 'node:fs';
 import { readdir, stat } from 'node:fs/promises';
 import { join } from 'node:path';
 import type { Diagnostic, IndexedFile, ResourceKind, ScanProgress, WorkspaceScanResult } from '@soulforge/shared';
@@ -126,6 +128,19 @@ async function addIndexedFile(
   // sourceLayer 恒为 'overlay'。
   const artifactMarkers = detectArtifactMarkers({ relativePath, sourceLayer: 'overlay' });
 
+  let sha256: string;
+  try {
+    sha256 = await sha256File(absolutePath);
+  } catch (error) {
+    diagnostics.push({
+      severity: 'warning',
+      code: 'FILE_HASH_FAILED',
+      message: error instanceof Error ? error.message : 'Failed to hash file during workspace scan.',
+      details: { absolutePath }
+    });
+    return;
+  }
+
   files.push({
     id: makeStableFileId(workspaceId, relativePath),
     workspaceId,
@@ -141,12 +156,21 @@ async function addIndexedFile(
     formatLabel: fileType.formatLabel,
     size: fileStat.size,
     mtimeMs: fileStat.mtimeMs,
+    sha256,
     parseStatus: 'unparsed',
     diagnostics: [],
     ...(artifactMarkers ? { artifactMarkers } : {})
   });
 
   options.onProgress?.({ scannedFiles: files.length, currentPath: toPosixPath(relativePath) });
+}
+
+async function sha256File(filePath: string): Promise<string> {
+  const hash = createHash('sha256');
+  for await (const chunk of createReadStream(filePath)) {
+    hash.update(chunk);
+  }
+  return hash.digest('hex');
 }
 
 async function walkDirectory(

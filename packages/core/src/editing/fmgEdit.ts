@@ -25,6 +25,9 @@ export interface FmgEntrySnapshot {
   table: string;
   id: number;
   text: string;
+  /** Provenance returned by the same native catalog read. */
+  sourceHash?: string;
+  sourceRevision?: number;
 }
 
 export interface FmgEditFailure {
@@ -119,6 +122,16 @@ export async function readFmgEntries(input: {
   const resolved = await resolveFmgTable(input.edit, input.table, input.containerPath, input.lang);
   if (!resolved.ok) return resolved;
   const loaded = await loadTableEntries(input.edit, resolved);
+  let sourceRevision: number | undefined;
+  try {
+    sourceRevision = (await stat(resolved.containerPath)).mtimeMs;
+  } catch (error) {
+    loaded.diagnostics.push({
+      severity: 'warning',
+      code: 'FMG_SOURCE_REVISION_UNAVAILABLE',
+      message: error instanceof Error ? error.message : '无法读取 FMG 容器的 source revision。'
+    });
+  }
   if (!loaded.ok) return loaded;
   const entries: FmgEntrySnapshot[] = [];
   const missingIds: number[] = [];
@@ -128,7 +141,13 @@ export async function readFmgEntries(input: {
       missingIds.push(id);
       continue;
     }
-    entries.push({ table: resolved.table, id, text });
+    entries.push({
+      table: resolved.table,
+      id,
+      text,
+      ...(resolved.outerHash ? { sourceHash: resolved.outerHash } : {}),
+      ...(sourceRevision !== undefined ? { sourceRevision } : {})
+    });
   }
   if (entries.length === 0 && input.ids.length > 0) {
     return {

@@ -75,7 +75,8 @@ namespace SoulForge.Bridge
 
             public Quaternion GetValue(float frame)
             {
-                if (Channel.Values.Count == 0) return Quaternion.Identity;
+                if (Channel.Values.Count == 0)
+                    throw new InvalidDataException("ACTION_SPLINE_ROTATION_CONTROL_POINTS_MISSING");
                 if (Channel.Values.Count == 1) return Channel.Values[0];
                 return GetSinglePointQuat(FindKnotSpan(Degree, frame, Channel.Values.Count, Knots), Degree, frame, Knots, Channel.Values);
             }
@@ -201,9 +202,16 @@ namespace SoulForge.Bridge
                 byte b2 = br.ReadByte();
                 byte b3 = br.ReadByte();
 
-                PositionQuantizationType = (ScalarQuantizationType)(b0 & 3);
-                RotationQuantizationType = (RotationQuantizationType)((b0 >> 2) & 0xF);
-                ScaleQuantizationType = (ScalarQuantizationType)((b0 >> 6) & 3);
+            PositionQuantizationType = (ScalarQuantizationType)(b0 & 3);
+            RotationQuantizationType = (RotationQuantizationType)((b0 >> 2) & 0xF);
+            ScaleQuantizationType = (ScalarQuantizationType)((b0 >> 6) & 3);
+            if (PositionQuantizationType is not (ScalarQuantizationType.Bits8 or ScalarQuantizationType.Bits16) ||
+                ScaleQuantizationType is not (ScalarQuantizationType.Bits8 or ScalarQuantizationType.Bits16) ||
+                RotationQuantizationType is < RotationQuantizationType.Polar32 or > RotationQuantizationType.Uncompressed)
+            {
+                throw new NotSupportedException(
+                    $"ACTION_SPLINE_QUANTIZATION_UNSUPPORTED: position={PositionQuantizationType}, rotation={RotationQuantizationType}, scale={ScaleQuantizationType}.");
+            }
 
                 FlagOffset[] flagValues = (FlagOffset[])Enum.GetValues(typeof(FlagOffset));
                 foreach (var f in flagValues)
@@ -252,7 +260,6 @@ namespace SoulForge.Bridge
                 Sx = sx; Sy = sy; Sz = sz;
             }
 
-            public static BoneTransform Identity => new(0, 0, 0, 0, 0, 0, 1, 1, 1, 1);
         }
 
         public string Name { get; }
@@ -293,9 +300,10 @@ namespace SoulForge.Bridge
         public BoneTransform SampleTrack(int trackIndex, float frame, bool loop)
         {
             if (Blocks.Count == 0 || trackIndex < 0 || trackIndex >= TrackCount)
-                return BoneTransform.Identity;
+                throw new InvalidDataException($"ACTION_SPLINE_SAMPLE_TRACK_INVALID: track={trackIndex} trackCount={TrackCount} blocks={Blocks.Count}");
 
-            if (FrameCount <= 0) return BoneTransform.Identity;
+            if (FrameCount <= 0)
+                throw new InvalidDataException($"ACTION_SPLINE_SAMPLE_FRAME_COUNT_INVALID: frameCount={FrameCount}");
 
             while (frame < 0f) frame += FrameCount;
 
@@ -313,15 +321,18 @@ namespace SoulForge.Bridge
                 ? (clampedFrame % (FramesPerBlock - 1))
                 : 0f;
 
+            if (block < 0 || block >= Blocks.Count || trackIndex >= Blocks[block].Length)
+                throw new InvalidDataException($"ACTION_SPLINE_SAMPLE_BLOCK_INVALID: block={block} track={trackIndex}");
             var track = Blocks[block][trackIndex];
 
-            // 1. Position
+            // 1. Position.  Components absent from the native mask are not
+            // zero: SampleBone merges them with the caller's reference pose.
             float px = 0f, py = 0f, pz = 0f;
             if (track.SplinePosition != null)
             {
-                px = track.SplinePosition.GetValueX(blockFrame) ?? 0f;
-                py = track.SplinePosition.GetValueY(blockFrame) ?? 0f;
-                pz = track.SplinePosition.GetValueZ(blockFrame) ?? 0f;
+                px = track.SplinePosition.GetValueX(blockFrame) ?? track.StaticPosition.X;
+                py = track.SplinePosition.GetValueY(blockFrame) ?? track.StaticPosition.Y;
+                pz = track.SplinePosition.GetValueZ(blockFrame) ?? track.StaticPosition.Z;
             }
             else
             {
@@ -345,9 +356,9 @@ namespace SoulForge.Bridge
             float sx = 1f, sy = 1f, sz = 1f;
             if (track.SplineScale != null)
             {
-                sx = track.SplineScale.GetValueX(blockFrame) ?? 1f;
-                sy = track.SplineScale.GetValueY(blockFrame) ?? 1f;
-                sz = track.SplineScale.GetValueZ(blockFrame) ?? 1f;
+                sx = track.SplineScale.GetValueX(blockFrame) ?? track.StaticScale.X;
+                sy = track.SplineScale.GetValueY(blockFrame) ?? track.StaticScale.Y;
+                sz = track.SplineScale.GetValueZ(blockFrame) ?? track.StaticScale.Z;
             }
             else
             {
@@ -362,23 +373,51 @@ namespace SoulForge.Bridge
         public BoneTransform SampleBone(int boneIndex, float frame, bool loop, BoneTransform defaultPose)
         {
             if (boneIndex < 0 || boneIndex >= BoneToTrackMap.Length)
-                return defaultPose;
+                throw new InvalidDataException($"ACTION_SPLINE_SAMPLE_BONE_INVALID: bone={boneIndex} boneCount={BoneToTrackMap.Length}");
 
             int trackIndex = BoneToTrackMap[boneIndex];
             if (trackIndex < 0) return defaultPose;
 
-            return SampleTrack(trackIndex, frame, loop);
+            var sampled = SampleTrack(trackIndex, frame, loop);
+            var block = FramesPerBlock > 1
+                ? Math.Min(Math.Max((int)(Math.Max(0f, frame) / (FramesPerBlock - 1)), 0), Blocks.Count - 1)
+                : 0;
+            var track = Blocks[block][trackIndex];
+            var px = sampled.Px;
+            var py = sampled.Py;
+            var pz = sampled.Pz;
+            var qx = sampled.Qx;
+            var qy = sampled.Qy;
+            var qz = sampled.Qz;
+            var qw = sampled.Qw;
+            var sx = sampled.Sx;
+            var sy = sampled.Sy;
+            var sz = sampled.Sz;
+            if (!track.Mask.PositionTypes.Contains(FlagOffset.StaticX) && !track.Mask.PositionTypes.Contains(FlagOffset.SplineX)) px = defaultPose.Px;
+            if (!track.Mask.PositionTypes.Contains(FlagOffset.StaticY) && !track.Mask.PositionTypes.Contains(FlagOffset.SplineY)) py = defaultPose.Py;
+            if (!track.Mask.PositionTypes.Contains(FlagOffset.StaticZ) && !track.Mask.PositionTypes.Contains(FlagOffset.SplineZ)) pz = defaultPose.Pz;
+            if (!track.Mask.RotationTypes.Any())
+            {
+                qx = defaultPose.Qx;
+                qy = defaultPose.Qy;
+                qz = defaultPose.Qz;
+                qw = defaultPose.Qw;
+            }
+            if (!track.Mask.ScaleTypes.Contains(FlagOffset.StaticX) && !track.Mask.ScaleTypes.Contains(FlagOffset.SplineX)) sx = defaultPose.Sx;
+            if (!track.Mask.ScaleTypes.Contains(FlagOffset.StaticY) && !track.Mask.ScaleTypes.Contains(FlagOffset.SplineY)) sy = defaultPose.Sy;
+            if (!track.Mask.ScaleTypes.Contains(FlagOffset.StaticZ) && !track.Mask.ScaleTypes.Contains(FlagOffset.SplineZ)) sz = defaultPose.Sz;
+            return new BoneTransform(px, py, pz, qx, qy, qz, qw, sx, sy, sz);
         }
 
         public BoneTransform[] SampleAllBones(float frame, bool loop, IReadOnlyList<BoneTransform>? refSkeletonBones = null)
         {
-            int totalBones = refSkeletonBones != null ? refSkeletonBones.Count : BoneToTrackMap.Length;
+            if (refSkeletonBones == null)
+                throw new InvalidDataException("ACTION_SPLINE_REFERENCE_POSE_REQUIRED: SampleAllBones requires the native skeleton reference pose.");
+            int totalBones = refSkeletonBones.Count;
             var result = new BoneTransform[totalBones];
             for (int i = 0; i < totalBones; i++)
             {
-                var defaultPose = refSkeletonBones != null && i < refSkeletonBones.Count
-                    ? refSkeletonBones[i]
-                    : BoneTransform.Identity;
+                var defaultPose = refSkeletonBones[i];
                 result[i] = SampleBone(i, frame, loop, defaultPose);
             }
             return result;
@@ -394,16 +433,18 @@ namespace SoulForge.Bridge
             RotationQuantizationType.ThreeComp24 => 1,
             RotationQuantizationType.Straight16 => 2,
             RotationQuantizationType.Uncompressed => 4,
-            _ => 4
+            _ => throw new NotSupportedException($"ACTION_SPLINE_QUANTIZATION_UNSUPPORTED: rotation={qt}.")
         };
 
         private static float ReadQuantizedFloat(BinaryReaderEx bin, float min, float max, ScalarQuantizationType type)
         {
+            if (!float.IsFinite(min) || !float.IsFinite(max) || max < min)
+                throw new InvalidDataException($"ACTION_SPLINE_QUANTIZATION_RANGE_INVALID: min={min}, max={max}.");
             return type switch
             {
                 ScalarQuantizationType.Bits8 => min + (max - min) * ((float)bin.ReadByte() / 255f),
                 ScalarQuantizationType.Bits16 => min + (max - min) * ((float)bin.ReadUInt16() / 65535f),
-                _ => min
+                _ => throw new NotSupportedException($"ACTION_SPLINE_QUANTIZATION_UNSUPPORTED: scalar={type}.")
             };
         }
 
@@ -478,14 +519,22 @@ namespace SoulForge.Bridge
             return new Quaternion(array2[0], array2[1], array2[2], array2[3]);
         }
 
-        private static Quaternion ReadQuantizedQuaternion(BinaryReaderEx br, RotationQuantizationType type) => type switch
+        private static Quaternion ReadQuantizedQuaternion(BinaryReaderEx br, RotationQuantizationType type)
         {
-            RotationQuantizationType.Polar32 => ReadQuatPOLAR32(br),
-            RotationQuantizationType.ThreeComp40 => ReadQuatTHREECOMP40(br),
-            RotationQuantizationType.ThreeComp48 => ReadQuatTHREECOMP48(br),
-            RotationQuantizationType.Uncompressed => new Quaternion(br.ReadSingle(), br.ReadSingle(), br.ReadSingle(), br.ReadSingle()),
-            _ => Quaternion.Identity
-        };
+            Quaternion result = type switch
+            {
+                RotationQuantizationType.Polar32 => ReadQuatPOLAR32(br),
+                RotationQuantizationType.ThreeComp40 => ReadQuatTHREECOMP40(br),
+                RotationQuantizationType.ThreeComp48 => ReadQuatTHREECOMP48(br),
+                RotationQuantizationType.ThreeComp24 => Hkx.HkxDecompressor.UnpackThreeComp24(br.ReadBytes(3)),
+                RotationQuantizationType.Straight16 => Hkx.HkxDecompressor.UnpackStraight16(br.ReadBytes(2)),
+                RotationQuantizationType.Uncompressed => Hkx.HkxDecompressor.UnpackUncompressedQuat(br.ReadBytes(16)),
+                _ => throw new NotSupportedException($"ACTION_SPLINE_QUANTIZATION_UNSUPPORTED: rotation={type}.")
+            };
+            if (!float.IsFinite(result.X) || !float.IsFinite(result.Y) || !float.IsFinite(result.Z) || !float.IsFinite(result.W) || result.LengthSquared() <= 1e-8f)
+                throw new InvalidDataException($"ACTION_SPLINE_QUATERNION_INVALID: rotation={type}.");
+            return Quaternion.Normalize(result);
+        }
 
         private static int FindKnotSpan(int degree, float value, int cPointsSize, List<byte> knots)
         {
@@ -509,6 +558,8 @@ namespace SoulForge.Bridge
 
         private static float GetSinglePointFloat(int knotSpanIndex, int degree, float frame, List<byte> knots, List<float> cPoints)
         {
+            if (knotSpanIndex < 0 || degree < 0 || degree > 4 || cPoints.Count == 0 || knots.Count != cPoints.Count + degree + 1)
+                throw new InvalidDataException("ACTION_SPLINE_SCALAR_CURVE_INVALID");
             float[] array = { 1f, 0f, 0f, 0f, 0f };
             for (int i = 1; i <= degree && i < 5; i++)
             {
@@ -532,11 +583,15 @@ namespace SoulForge.Bridge
                     num4 += cPoints[cpIdx] * array[j];
                 }
             }
+            if (!float.IsFinite(num4))
+                throw new InvalidDataException("ACTION_SPLINE_SCALAR_SAMPLE_INVALID");
             return num4;
         }
 
         private static Quaternion GetSinglePointQuat(int knotSpanIndex, int degree, float frame, List<byte> knots, List<Quaternion> cPoints)
         {
+            if (knotSpanIndex < 0 || degree < 0 || degree > 4 || cPoints.Count == 0 || knots.Count != cPoints.Count + degree + 1)
+                throw new InvalidDataException("ACTION_SPLINE_QUATERNION_CURVE_INVALID");
             float[] array = { 1f, 0f, 0f, 0f, 0f };
             for (int i = 1; i <= degree && i < 5; i++)
             {
@@ -568,8 +623,9 @@ namespace SoulForge.Bridge
                 }
             }
             float len = result.Length();
-            if (len > 0.00001f) result = Quaternion.Normalize(result);
-            else result = Quaternion.Identity;
+            if (!float.IsFinite(len) || len <= 0.00001f)
+                throw new InvalidDataException("ACTION_SPLINE_QUATERNION_SAMPLE_INVALID");
+            result = Quaternion.Normalize(result);
             return result;
         }
 
@@ -591,7 +647,12 @@ namespace SoulForge.Bridge
             public long Position
             {
                 get => _ms.Position;
-                set => _ms.Position = value;
+                set
+                {
+                    if (value < 0 || value > _ms.Length)
+                        throw new InvalidDataException($"HKX animation cursor out of bounds: {value} (length={_ms.Length}).");
+                    _ms.Position = value;
+                }
             }
 
             public long Length => _ms.Length;
@@ -603,13 +664,19 @@ namespace SoulForge.Bridge
             public uint ReadUInt32() => _br.ReadUInt32();
             public ulong ReadUInt64() => _br.ReadUInt64();
             public float ReadSingle() => _br.ReadSingle();
-            public byte[] ReadBytes(int count) => _br.ReadBytes(count);
+            public byte[] ReadBytes(int count)
+            {
+                var result = _br.ReadBytes(count);
+                if (result.Length != count)
+                    throw new EndOfStreamException($"HKX animation data truncated: wanted {count} bytes, got {result.Length}.");
+                return result;
+            }
 
             public void Pad(int align)
             {
                 if (align <= 0) return;
                 long rem = _ms.Position % align;
-                if (rem != 0) _ms.Position += (align - rem);
+                if (rem != 0) Position += align - rem;
             }
 
             public void Dispose()
@@ -850,9 +917,9 @@ namespace SoulForge.Bridge
             float duration = 0f;
             int transformTrackCount = 0;
             int frameCount = 0;
-            int blockCount = 1;
-            int framesPerBlock = 255;
-            float frameDuration = 1f / 30f;
+            int blockCount = 0;
+            int framesPerBlock = 0;
+            float frameDuration = 0f;
             byte[]? animSplineData = null;
             int[]? trackToBoneIndices = null;
 
@@ -958,9 +1025,15 @@ namespace SoulForge.Bridge
                 }
             }
 
-            if (frameCount <= 0) return (null, $"frameCount <= 0 ({frameCount})");
-            if (transformTrackCount <= 0) return (null, $"transformTrackCount <= 0 ({transformTrackCount})");
+            if (frameCount <= 0) return (null, $"ACTION_HKX_LEGACY_METADATA_MISSING: frameCount={frameCount}");
+            if (transformTrackCount <= 0) return (null, $"ACTION_HKX_LEGACY_METADATA_MISSING: transformTrackCount={transformTrackCount}");
+            if (blockCount <= 0 || framesPerBlock <= 0 || !float.IsFinite(frameDuration) || frameDuration <= 0f)
+                return (null, $"ACTION_HKX_LEGACY_METADATA_MISSING: blocks={blockCount} framesPerBlock={framesPerBlock} frameDuration={frameDuration}");
             if (animSplineData == null) return (null, "animSplineData == null");
+            if (trackToBoneIndices == null)
+                return (null, "ACTION_HKX_BINDING_MAPPING_REQUIRED: hkaAnimationBinding.transformTrackToBoneIndices is missing.");
+            if (trackToBoneIndices.Length != transformTrackCount)
+                return (null, $"ACTION_HKX_BINDING_MAPPING_INVALID: tracks={transformTrackCount}, mapping={trackToBoneIndices.Length}.");
 
             var blocks = ReadSplineCompressedAnimByteBlock(animSplineData, transformTrackCount, blockCount);
 
@@ -973,17 +1046,18 @@ namespace SoulForge.Bridge
                 }
             }
 
-            int[] finalTrackToBone = trackToBoneIndices ?? Enumerable.Range(0, transformTrackCount).ToArray();
+            int[] finalTrackToBone = trackToBoneIndices;
             int[] finalBoneToTrack = new int[effectiveBoneCount];
             for (int i = 0; i < effectiveBoneCount; i++) finalBoneToTrack[i] = -1;
 
             for (int t = 0; t < finalTrackToBone.Length; t++)
             {
                 int b = finalTrackToBone[t];
-                if (b >= 0 && b < finalBoneToTrack.Length)
-                {
-                    finalBoneToTrack[b] = t;
-                }
+                if (b < 0 || b >= finalBoneToTrack.Length)
+                    return (null, $"ACTION_HKX_BINDING_MAPPING_INVALID: track={t}, bone={b}, boneCount={finalBoneToTrack.Length}.");
+                if (finalBoneToTrack[b] >= 0)
+                    return (null, $"ACTION_HKX_BINDING_MAPPING_AMBIGUOUS: bone={b} is mapped by tracks {finalBoneToTrack[b]} and {t}.");
+                finalBoneToTrack[b] = t;
             }
 
             return (new HkxNativeAnimation(
@@ -1009,9 +1083,9 @@ namespace SoulForge.Bridge
                 float duration = 0f;
                 int transformTrackCount = 0;
                 int frameCount = 0;
-                int blockCount = 1;
-                int framesPerBlock = 255;
-                float frameDuration = 1f / 30f;
+                int blockCount = 0;
+                int framesPerBlock = 0;
+                float frameDuration = 0f;
                 byte[]? animSplineData = null;
                 int[]? trackToBoneIndices = null;
 
@@ -1076,9 +1150,15 @@ namespace SoulForge.Bridge
 
                 TraverseHkObject(root);
 
-                if (frameCount <= 0) return (null, $"Tagfile frameCount <= 0 ({frameCount})");
-                if (transformTrackCount <= 0) return (null, $"Tagfile transformTrackCount <= 0 ({transformTrackCount})");
+                if (frameCount <= 0) return (null, $"ACTION_HKX_TAGFILE_METADATA_MISSING: frameCount={frameCount}");
+                if (transformTrackCount <= 0) return (null, $"ACTION_HKX_TAGFILE_METADATA_MISSING: transformTrackCount={transformTrackCount}");
+                if (blockCount <= 0 || framesPerBlock <= 0 || !float.IsFinite(frameDuration) || frameDuration <= 0f)
+                    return (null, $"ACTION_HKX_TAGFILE_METADATA_MISSING: blocks={blockCount} framesPerBlock={framesPerBlock} frameDuration={frameDuration}");
                 if (animSplineData == null) return (null, "Tagfile animSplineData == null");
+                if (trackToBoneIndices == null)
+                    return (null, "ACTION_HKX_BINDING_MAPPING_REQUIRED: tagfile hkaAnimationBinding.transformTrackToBoneIndices is missing.");
+                if (trackToBoneIndices.Length != transformTrackCount)
+                    return (null, $"ACTION_HKX_BINDING_MAPPING_INVALID: tagfile tracks={transformTrackCount}, mapping={trackToBoneIndices.Length}.");
 
                 var blocks = ReadSplineCompressedAnimByteBlock(animSplineData, transformTrackCount, blockCount);
 
@@ -1091,17 +1171,18 @@ namespace SoulForge.Bridge
                     }
                 }
 
-                int[] finalTrackToBone = trackToBoneIndices ?? Enumerable.Range(0, transformTrackCount).ToArray();
+                int[] finalTrackToBone = trackToBoneIndices;
                 int[] finalBoneToTrack = new int[effectiveBoneCount];
                 for (int i = 0; i < effectiveBoneCount; i++) finalBoneToTrack[i] = -1;
 
                 for (int t = 0; t < finalTrackToBone.Length; t++)
                 {
                     int b = finalTrackToBone[t];
-                    if (b >= 0 && b < finalBoneToTrack.Length)
-                    {
-                        finalBoneToTrack[b] = t;
-                    }
+                    if (b < 0 || b >= finalBoneToTrack.Length)
+                        return (null, $"ACTION_HKX_BINDING_MAPPING_INVALID: tagfile track={t}, bone={b}, boneCount={finalBoneToTrack.Length}.");
+                    if (finalBoneToTrack[b] >= 0)
+                        return (null, $"ACTION_HKX_BINDING_MAPPING_AMBIGUOUS: tagfile bone={b} is mapped by tracks {finalBoneToTrack[b]} and {t}.");
+                    finalBoneToTrack[b] = t;
                 }
 
                 return (new HkxNativeAnimation(
@@ -1118,7 +1199,7 @@ namespace SoulForge.Bridge
             }
             catch (Exception ex)
             {
-                return (null, $"Tagfile read exception: {ex.Message}");
+                return (null, $"ACTION_HKX_TAGFILE_PARSE_FAILED: {ex.Message}");
             }
         }
 

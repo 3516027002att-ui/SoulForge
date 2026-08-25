@@ -431,7 +431,9 @@ const api = {
     mutation: {
       kind: 'set_part_position' | 'set_part_transform' | 'set_region_position'
         | 'delete_part' | 'delete_region' | 'delete_event';
-      partName: string;
+      family: 'part' | 'region' | 'event';
+      nativeOffset: number;
+      expectedName?: string;
       posX?: number;
       posY?: number;
       posZ?: number;

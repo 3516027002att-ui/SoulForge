@@ -349,6 +349,10 @@ export async function mountFlverScene(input: {
             core.root.add(threeBones[i]!);
           }
         }
+        // Skeleton.calculateInverses() samples bone.matrixWorld. The bones
+        // have just been attached to the semantic root, so force their world
+        // matrices current before capturing bind-pose inverses.
+        core.root.updateMatrixWorld(true);
         skeleton = core.track(new core.three.Skeleton(threeBones));
         activeBones = threeBones;
         activeSkeleton = skeleton;
@@ -396,6 +400,7 @@ export async function mountFlverScene(input: {
             bone.scale.set(1, 1, 1);
           }
         }
+        core.root.updateMatrixWorld(true);
         activeSkeleton.update();
         return;
       }
@@ -411,6 +416,7 @@ export async function mountFlverScene(input: {
         bone.quaternion.set(pose.q[0], pose.q[1], pose.q[2], pose.q[3]);
         bone.scale.set(pose.s[0], pose.s[1], pose.s[2]);
       }
+      core.root.updateMatrixWorld(true);
       activeSkeleton.update();
     },
     setPose: (pose) => {
@@ -439,6 +445,7 @@ export async function mountFlverScene(input: {
           bone.scale.set(transform.scale[0], transform.scale[1], transform.scale[2]);
         }
       }
+      core.root.updateMatrixWorld(true);
       activeSkeleton.update();
     },
     dispose: core.disposeAll

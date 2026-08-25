@@ -127,12 +127,14 @@ interface ParsedValue<T> {
 function parseEventExport(value: unknown, sourceUri: string): ParsedValue<EventExport> {
   const diagnostics: Diagnostic[] = [];
   const record = asRecord(value);
+  const exportProvenance = sourceProvenance(record);
   const eventsRaw = record.events;
 
   if (!Array.isArray(eventsRaw)) return { diagnostics: [missingField(sourceUri, 'events')] };
 
   const events = eventsRaw.flatMap((eventRaw, index) => {
     const event = asRecord(eventRaw);
+    const eventProvenance = sourceProvenance(event, exportProvenance);
     const eventId = asNumber(event.eventId);
     const uri = asString(event.uri) || `event://${sourceUri}/${String(eventId ?? index)}`;
     const instructionsRaw = event.instructions;
@@ -148,6 +150,7 @@ function parseEventExport(value: unknown, sourceUri: string): ParsedValue<EventE
       ...(asString(event.mapId) ? { mapId: asString(event.mapId) } : {}),
       eventId,
       ...(asString(event.name) ? { name: asString(event.name) } : {}),
+      ...eventProvenance,
       instructions: Array.isArray(instructionsRaw) ? instructionsRaw.map((item, instructionIndex) => parseInstruction(item, uri, instructionIndex)) : [],
       ...(event.raw === undefined ? {} : { raw: event.raw })
     }];
@@ -156,6 +159,7 @@ function parseEventExport(value: unknown, sourceUri: string): ParsedValue<EventE
   return {
     value: {
       ...(asString(record.mapId) ? { mapId: asString(record.mapId) } : {}),
+      ...exportProvenance,
       events
     },
     diagnostics
@@ -188,14 +192,16 @@ function parseArg(value: unknown): EventExport['events'][number]['instructions']
 
 function parseMapExport(value: unknown, sourceUri: string): ParsedValue<MapExport> {
   const record = asRecord(value);
+  const exportProvenance = sourceProvenance(record);
   const mapId = asString(record.mapId);
   if (!mapId) return { diagnostics: [missingField(sourceUri, 'mapId')] };
 
   return {
     value: {
       mapId,
-      entities: Array.isArray(record.entities) ? record.entities.map((item, index) => parseMapEntity(item, sourceUri, mapId, index)) : [],
-      regions: Array.isArray(record.regions) ? record.regions.map((item, index) => parseMapRegion(item, sourceUri, mapId, index)) : []
+      ...exportProvenance,
+      entities: Array.isArray(record.entities) ? record.entities.map((item, index) => parseMapEntity(item, sourceUri, mapId, index, exportProvenance)) : [],
+      regions: Array.isArray(record.regions) ? record.regions.map((item, index) => parseMapRegion(item, sourceUri, mapId, index, exportProvenance)) : []
     },
     diagnostics: []
   };
@@ -203,13 +209,15 @@ function parseMapExport(value: unknown, sourceUri: string): ParsedValue<MapExpor
 
 function parseParamExport(value: unknown, sourceUri: string): ParsedValue<ParamExport> {
   const record = asRecord(value);
+  const exportProvenance = sourceProvenance(record);
   const paramName = asString(record.paramName);
   if (!paramName) return { diagnostics: [missingField(sourceUri, 'paramName')] };
 
   return {
     value: {
       paramName,
-      rows: Array.isArray(record.rows) ? record.rows.flatMap((item, index) => parseParamRow(item, sourceUri, paramName, index)) : []
+      ...exportProvenance,
+      rows: Array.isArray(record.rows) ? record.rows.flatMap((item, index) => parseParamRow(item, sourceUri, paramName, index, exportProvenance)) : []
     },
     diagnostics: []
   };
@@ -217,10 +225,12 @@ function parseParamExport(value: unknown, sourceUri: string): ParsedValue<ParamE
 
 function parseMsgExport(value: unknown, sourceUri: string): ParsedValue<MsgExport> {
   const record = asRecord(value);
+  const exportProvenance = sourceProvenance(record);
   return {
     value: {
       ...(asString(record.category) ? { category: asString(record.category) } : {}),
-      entries: Array.isArray(record.entries) ? record.entries.flatMap((item, index) => parseTextEntry(item, sourceUri, index)) : []
+      ...exportProvenance,
+      entries: Array.isArray(record.entries) ? record.entries.flatMap((item, index) => parseTextEntry(item, sourceUri, index, exportProvenance)) : []
     },
     diagnostics: []
   };
@@ -235,6 +245,7 @@ function parseMsgExport(value: unknown, sourceUri: string): ParsedValue<MsgExpor
  */
 function parseTaeExport(value: unknown, sourceUri: string, sourcePath: string | undefined): ParsedValue<TaeExport> {
   const record = asRecord(value);
+  const exportProvenance = sourceProvenance(record);
   const chrId = formatChrId(sourcePath ?? '') ?? formatChrId(sourceUri) ?? null;
   if (!chrId) {
     return {
@@ -282,6 +293,7 @@ function parseTaeExport(value: unknown, sourceUri: string, sourcePath: string | 
     const code = formatAnimCode(animId);
     const events: TaeEventSymbol[] = eventsRaw.map((eventRaw, eventIndex) => {
       const event = asRecord(eventRaw);
+      const eventProvenance = sourceProvenance(event, exportProvenance);
       const startTime = asNumber(event.startTime) ?? 0;
       const endTime = asNumber(event.endTime) ?? startTime;
       const eventTypeId = asNumber(event.eventTypeId);
@@ -303,6 +315,7 @@ function parseTaeExport(value: unknown, sourceUri: string, sourcePath: string | 
         endTime,
         startFrame: frameFromSeconds(startTime),
         endFrame: frameFromSeconds(endTime),
+        ...eventProvenance,
         ...(fields.length > 0 ? { fields } : {}),
         ...(asString(event.parameterBytesHex) ? { parameterBytesHex: asString(event.parameterBytesHex) } : {})
       };
@@ -317,7 +330,7 @@ function parseTaeExport(value: unknown, sourceUri: string, sourcePath: string | 
   }
 
   return {
-    value: { chrId, sourceUri, animations },
+    value: { chrId, sourceUri, ...exportProvenance, animations },
     diagnostics: []
   };
 }
@@ -330,6 +343,8 @@ function parseTaeExport(value: unknown, sourceUri: string, sourcePath: string | 
 export function mapExportFromMsbDocument(input: {
   mapId: string;
   sourceUri: string;
+  sourceHash?: string;
+  sourceRevision?: number;
   parts?: Array<{
     name?: string | number;
     typeId?: number;
@@ -362,6 +377,8 @@ export function mapExportFromMsbDocument(input: {
       uri: `map://${input.mapId}/part/${name}`,
       sourceUri: input.sourceUri,
       mapId: input.mapId,
+      ...(input.sourceHash ? { sourceHash: input.sourceHash } : {}),
+      ...(input.sourceRevision !== undefined ? { sourceRevision: input.sourceRevision } : {}),
       name,
       kind,
       ...(part.modelIndex === undefined ? {} : { modelIndex: part.modelIndex }),
@@ -377,11 +394,19 @@ export function mapExportFromMsbDocument(input: {
       uri: `map://${input.mapId}/region/${name}`,
       sourceUri: input.sourceUri,
       mapId: input.mapId,
+      ...(input.sourceHash ? { sourceHash: input.sourceHash } : {}),
+      ...(input.sourceRevision !== undefined ? { sourceRevision: input.sourceRevision } : {}),
       name,
       ...(vector3(region.posX, region.posY, region.posZ) ? { position: vector3(region.posX, region.posY, region.posZ)! } : {})
     };
   });
-  return { mapId: input.mapId, entities, regions };
+  return {
+    mapId: input.mapId,
+    ...(input.sourceHash ? { sourceHash: input.sourceHash } : {}),
+    ...(input.sourceRevision !== undefined ? { sourceRevision: input.sourceRevision } : {}),
+    entities,
+    regions
+  };
 }
 
 /** MSB part typeId → MapEntitySymbol.kind（Sekiro 通用布局；未知回落 unknown）。 */
@@ -406,8 +431,15 @@ function frameFromSeconds(seconds: number): number {
   return Number.isFinite(seconds) ? Math.round(seconds * 30) : 0;
 }
 
-function parseMapEntity(value: unknown, sourceUri: string, mapId: string, index: number): MapExport['entities'][number] {
+function parseMapEntity(
+  value: unknown,
+  sourceUri: string,
+  mapId: string,
+  index: number,
+  fallbackProvenance: SourceProvenance = {}
+): MapExport['entities'][number] {
   const record = asRecord(value);
+  const provenance = sourceProvenance(record, fallbackProvenance);
   const entityId = asNumber(record.entityId);
   const position = asVector3(record.position);
   const rotation = asVector3(record.rotation);
@@ -423,6 +455,7 @@ function parseMapEntity(value: unknown, sourceUri: string, mapId: string, index:
     mapId,
     ...(entityId === null ? {} : { entityId }),
     name,
+    ...provenance,
     kind: isMapEntityKind(record.kind) ? record.kind : 'unknown',
     ...(asString(record.model) ? { model: asString(record.model) } : {}),
     ...(asNumber(record.modelIndex) === null ? {} : { modelIndex: asNumber(record.modelIndex) as number }),
@@ -434,8 +467,15 @@ function parseMapEntity(value: unknown, sourceUri: string, mapId: string, index:
   };
 }
 
-function parseMapRegion(value: unknown, sourceUri: string, mapId: string, index: number): MapExport['regions'][number] {
+function parseMapRegion(
+  value: unknown,
+  sourceUri: string,
+  mapId: string,
+  index: number,
+  fallbackProvenance: SourceProvenance = {}
+): MapExport['regions'][number] {
   const record = asRecord(value);
+  const provenance = sourceProvenance(record, fallbackProvenance);
   const entityId = asNumber(record.entityId);
   const position = asVector3(record.position);
   const rotation = asVector3(record.rotation);
@@ -445,6 +485,7 @@ function parseMapRegion(value: unknown, sourceUri: string, mapId: string, index:
     mapId,
     ...(entityId === null ? {} : { entityId }),
     name: asString(record.name, `region_${index}`),
+    ...provenance,
     ...(asString(record.shape) ? { shape: asString(record.shape) } : {}),
     ...(position ? { position } : {}),
     ...(rotation ? { rotation } : {}),
@@ -453,8 +494,15 @@ function parseMapRegion(value: unknown, sourceUri: string, mapId: string, index:
   };
 }
 
-function parseParamRow(value: unknown, sourceUri: string, paramName: string, index: number): ParamExport['rows'][number][] {
+function parseParamRow(
+  value: unknown,
+  sourceUri: string,
+  paramName: string,
+  index: number,
+  fallbackProvenance: SourceProvenance = {}
+): ParamExport['rows'][number][] {
   const record = asRecord(value);
+  const provenance = sourceProvenance(record, fallbackProvenance);
   const rowId = asNumber(record.rowId);
   if (rowId === null) return [];
 
@@ -463,6 +511,7 @@ function parseParamRow(value: unknown, sourceUri: string, paramName: string, ind
     sourceUri: asString(record.sourceUri) || sourceUri,
     paramName,
     rowId,
+    ...provenance,
     ...(asString(record.rowName) ? { rowName: asString(record.rowName) } : {}),
     ...(Array.isArray(record.fields) ? { fields: record.fields.map(parseParamField) } : {}),
     ...(record.raw === undefined ? {} : { raw: record.raw })
@@ -478,8 +527,14 @@ function parseParamField(value: unknown): ParamFieldSymbol {
   };
 }
 
-function parseTextEntry(value: unknown, sourceUri: string, index: number): MsgExport['entries'][number][] {
+function parseTextEntry(
+  value: unknown,
+  sourceUri: string,
+  index: number,
+  fallbackProvenance: SourceProvenance = {}
+): MsgExport['entries'][number][] {
   const record = asRecord(value);
+  const provenance = sourceProvenance(record, fallbackProvenance);
   const textId = asNumber(record.textId);
   const raw = asRecord(record.raw);
   const confidence = isConfidence(record.confidence) ? record.confidence : isConfidence(raw.confidence) ? raw.confidence : undefined;
@@ -490,9 +545,24 @@ function parseTextEntry(value: unknown, sourceUri: string, index: number): MsgEx
     ...(asString(record.category) ? { category: asString(record.category) } : {}),
     textId,
     text: asString(record.text, ''),
+    ...provenance,
     ...(confidence ? { confidence } : {}),
     ...(record.raw === undefined ? {} : { raw: record.raw })
   }];
+}
+
+type SourceProvenance = { sourceHash?: string; sourceRevision?: number };
+
+function sourceProvenance(
+  record: Record<string, unknown>,
+  fallback: SourceProvenance = {}
+): SourceProvenance {
+  const sourceHash = asString(record.sourceHash) || fallback.sourceHash;
+  const sourceRevision = asNumber(record.sourceRevision) ?? fallback.sourceRevision;
+  return {
+    ...(sourceHash ? { sourceHash } : {}),
+    ...(sourceRevision !== undefined ? { sourceRevision } : {})
+  };
 }
 
 function asRecord(value: unknown): Record<string, unknown> {

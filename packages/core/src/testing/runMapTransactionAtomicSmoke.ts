@@ -158,16 +158,43 @@ export async function runMapTransactionAtomicSmoke(): Promise<void> {
     assert.equal(invalidSeqResult.ok, false, 'Transforming deleted target in same transaction must fail preflight');
     assert.equal(commitCount, 0, 'Zero commits on sequential violation');
 
-    console.log('[Smoke] Case 5: Valid multi-op mixed transaction (batch transform + property update)...');
+    console.log('[Smoke] Case 5: Operation order (set_transform then batch delta) is applied sequentially...');
+    const orderPart = loaded.doc.parts[0]!;
+    const orderedTx: MapEditTransaction = {
+      id: 'tx-ordered-transform',
+      mapId: loaded.doc.mapId,
+      baseRevision: loaded.doc.revision,
+      description: 'Set then batch delta',
+      author: 'agent',
+      operations: [
+        { kind: 'set_transform', target: orderPart.stableKey, position: [10, 20, 30] },
+        { kind: 'batch_transform', targets: [orderPart.stableKey], positionDelta: [1, 0, 0] }
+      ],
+      timestamp: Date.now()
+    };
+    const orderedResult = await executeMapTransaction(editSession, mapFile, orderedTx);
+    if (!orderedResult.ok) console.error('[Smoke] Case 5 failed with error:', JSON.stringify(orderedResult.error, null, 2));
+    assert.equal(orderedResult.ok, true, 'set_transform followed by batch_transform must commit');
+    assert.equal(commitCount, 1, 'Ordered transform must use one Patch Engine commit');
+    const orderedReread = await loadMapDocument(editSession, mapFile);
+    assert.equal(orderedReread.ok, true, 'Ordered transform must reread');
+    if (!orderedReread.ok) return;
+    const orderedPartAfter = orderedReread.sceneGraph.findEntity(orderPart.stableKey);
+    assert.equal(orderedPartAfter?.kind, 'part');
+    if (orderedPartAfter?.kind === 'part') {
+      assert.deepEqual(orderedPartAfter.transform.position, [11, 20, 30], 'batch delta must observe the preceding set_transform result');
+    }
+
+    console.log('[Smoke] Case 6: Valid multi-op mixed transaction (batch transform + property update)...');
     const validMixedTx: MapEditTransaction = {
       id: 'tx-valid-mixed',
-      mapId: 'm10_00_00_00',
-      baseRevision: loaded.doc.revision,
+      mapId: orderedReread.doc.mapId,
+      baseRevision: orderedReread.doc.revision,
       description: 'Batch transform + property update',
       author: 'agent',
       operations: [
-        { kind: 'set_transform', target: 'm000010_1077', position: [-25.0, -822.0, -18.0] },
-        { kind: 'set_property', target: 'm000010_1077', property: 'entityId', value: 1000999 }
+        { kind: 'set_transform', target: orderPart.stableKey, position: [-25.0, -822.0, -18.0] },
+        { kind: 'set_property', target: orderPart.stableKey, property: 'entityId', value: 1000999 }
       ],
       timestamp: Date.now()
     };
@@ -176,9 +203,9 @@ export async function runMapTransactionAtomicSmoke(): Promise<void> {
       console.error('[Smoke] Case 5 failed with error:', JSON.stringify(mixedResult.error, null, 2));
     }
     assert.equal(mixedResult.ok, true, 'Valid mixed transaction must succeed');
-    assert.equal(commitCount, 1, 'Exact 1 commit must occur for multi-op transaction');
+    assert.equal(commitCount, 2, 'Exact 2 commits must occur after the ordered and mixed transactions');
 
-    console.log('[Smoke] Case 6: Multiple deletes in same family (testing batch offset table rebuild)...');
+    console.log('[Smoke] Case 7: Multiple deletes in same family (testing batch offset table rebuild)...');
     const reread1 = await loadMapDocument(editSession, mapFile);
     assert.equal(reread1.ok, true);
     if (!reread1.ok) return;
@@ -190,8 +217,8 @@ export async function runMapTransactionAtomicSmoke(): Promise<void> {
       description: 'Delete 2 parts in one transaction',
       author: 'human',
       operations: [
-        { kind: 'delete', target: 'm000010_1077' },
-        { kind: 'delete', target: reread1.doc.parts[1]!.name }
+        { kind: 'delete', target: orderPart.stableKey },
+        { kind: 'delete', target: reread1.doc.parts[1]!.stableKey }
       ],
       timestamp: Date.now()
     };
@@ -200,7 +227,7 @@ export async function runMapTransactionAtomicSmoke(): Promise<void> {
       console.error('[Smoke] Case 6 failed with error:', JSON.stringify(deleteResult.error, null, 2));
     }
     assert.equal(deleteResult.ok, true, 'Batch delete must succeed and rebuild param tables without corruption');
-    assert.equal(commitCount, 2, 'Exact 2 commits after 2 transactions');
+    assert.equal(commitCount, 3, 'Exact 3 commits after 3 successful transactions');
 
     console.log('[Smoke] All Atomic MapEditTransaction Invariants PASSED.');
   });

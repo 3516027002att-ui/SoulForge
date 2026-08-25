@@ -42,6 +42,7 @@ interface SelectedEntity {
   id: string;
   label: string;
   kind: MsbEntityKind;
+  nativeOffset?: number;
 }
 
 export interface MsbScenePanelProps {
@@ -55,6 +56,8 @@ export interface MsbScenePanelProps {
   events?: MsbMapEventLike[];
   sourceCounts?: MsbSceneSourceCounts;
   maxNodes?: number;
+  /** native 提交后把 fresh revision 提升到 App，触发权威 MSB 重读。 */
+  onRevisionChange?: (sourceHash: string) => void;
   /**
    * S19 失败面：打开失败的结构化诊断（code + 人话 + 下一步）。非空时工作台
    * 显示可行动错误块（如 KRAK 缺 Oodle → 到「开始」页挂原版），不再假 0 实体。
@@ -98,9 +101,16 @@ export function MsbScenePanel(props: MsbScenePanelProps): ReactElement {
   const [isSaving, setIsSaving] = useState(false);
   const [saveStatus, setSaveStatus] = useState<string | null>(null);
 
-  const handleSavePartTransform = useCallback(async (partName: string) => {
-    const current = partsState.find((p) => p.name === partName);
-    if (!current) return;
+  const handleSavePartTransform = useCallback(async (entity: SelectedEntity) => {
+    if (entity.kind !== 'msb-part' || entity.nativeOffset === undefined) {
+      setSaveStatus('提交失败：目标缺少 nativeOffset，已失败关闭。');
+      return;
+    }
+    const current = partsState.find((p) => p.nativeOffset === entity.nativeOffset);
+    if (!current) {
+      setSaveStatus('提交失败：按 nativeOffset 找不到目标 Part。');
+      return;
+    }
     const bridge = getRendererBridge();
     if (!bridge || !props.mapResourceUri) return;
     setIsSaving(true);
@@ -110,12 +120,12 @@ export function MsbScenePanel(props: MsbScenePanelProps): ReactElement {
         id: `tx-gizmo-${Date.now()}`,
         mapId: props.sourcePath.split(/[\\/]/).pop()?.replace(/\.msb(?:\.dcx)?$/i, '') ?? '',
         baseRevision: props.revision,
-        description: `Human Gizmo 调整 Part [${partName}] 变换`,
+        description: `Human Gizmo 调整 Part [${entity.label}] 变换`,
         author: 'human',
         operations: [
           {
             kind: 'set_transform',
-            target: partName,
+            target: `part:${props.sourcePath.split(/[\\/]/).pop()?.replace(/\.msb(?:\.dcx)?$/i, '') ?? ''}:offset-${entity.nativeOffset.toString(16)}`,
             position: [current.posX, current.posY, current.posZ],
             ...(current.rotX !== undefined || current.rotY !== undefined || current.rotZ !== undefined
               ? { rotation: [current.rotX ?? 0, current.rotY ?? 0, current.rotZ ?? 0] as [number, number, number] }
@@ -131,10 +141,15 @@ export function MsbScenePanel(props: MsbScenePanelProps): ReactElement {
       if (res?.ok) {
         setSaveStatus('变换已成功提交！');
         // 重新加载权威 MapDocument
-        const reread = await (bridge.readMsbDocument?.(props.mapResourceUri) as Promise<{ ok: boolean; data?: { parts?: PartLike[] } } | undefined>);
+        const reread = await (bridge.readMsbDocument?.(props.mapResourceUri) as Promise<{
+          ok: boolean;
+          data?: { sourceHash?: string; parts?: PartLike[] };
+        } | undefined>);
         if (reread?.ok && reread.data?.parts) {
           setPartsState(reread.data.parts);
         }
+        const freshHash = reread?.data?.sourceHash ?? res.sourceHash;
+        if (freshHash && freshHash !== props.revision) props.onRevisionChange?.(freshHash);
       } else {
         setSaveStatus(`提交失败：${res?.diagnostics?.[0]?.message ?? '未知错误'}`);
       }
@@ -143,7 +158,7 @@ export function MsbScenePanel(props: MsbScenePanelProps): ReactElement {
     } finally {
       setIsSaving(false);
     }
-  }, [partsState, props.mapResourceUri, props.revision, props.sourcePath]);
+  }, [partsState, props.mapResourceUri, props.onRevisionChange, props.revision, props.sourcePath]);
 
   const [meshStatus, setMeshStatus] = useState<{ loaded: number; missing: number; total: number } | null>(null);
 
@@ -201,13 +216,16 @@ export function MsbScenePanel(props: MsbScenePanelProps): ReactElement {
       onSelect: (id) => {
         const node = sceneManifest.nodes.find((candidate) => candidate.id === id) ?? null;
         if (!node) return;
-        setSelected({ id: node.id, label: node.label, kind: node.kind });
+        setSelected({ id: node.id, label: node.label, kind: node.kind, ...(node.nativeOffset === undefined ? {} : { nativeOffset: node.nativeOffset }) });
       },
       onTransformChange: ({ id, position, rotation, scale }) => {
         // 当 Gizmo 拖动时，同步更新选中的 Part 的坐标数据
         setPartsState((prev) =>
           prev.map((p) => {
-            const isMatch = p.name === id || `msb-part:${p.name}` === id || (selected?.id === id && p.name === selected.label);
+            const node = sceneManifest.nodes.find((candidate) => candidate.id === id);
+            const isMatch = node?.nativeOffset !== undefined
+              ? p.nativeOffset === node.nativeOffset
+              : p.name === id || `msb-part:${p.name}` === id || (selected?.id === id && p.name === selected.label);
             if (!isMatch) return p;
             return {
               ...p,
@@ -579,7 +597,7 @@ export function MsbScenePanel(props: MsbScenePanelProps): ReactElement {
                     type="button"
                     className="button button--primary"
                     disabled={isSaving}
-                    onClick={() => void handleSavePartTransform(selected.label)}
+                    onClick={() => void handleSavePartTransform(selected)}
                     style={{ width: '100%', padding: '6px 12px' }}
                   >
                     {isSaving ? '正在提交…' : '提交 Part 变换到 Patch Engine'}

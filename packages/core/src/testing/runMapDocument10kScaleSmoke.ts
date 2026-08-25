@@ -86,6 +86,31 @@ export async function runMapDocument10kScaleSmoke(): Promise<void> {
   assert.equal(graph.findEntity(firstPart.stableKey), firstPart);
   assert.equal(graph.findEntity(firstPart.address), firstPart);
 
+  console.log('[Smoke] Testing duplicate display-name native identity...');
+  const duplicateDoc = buildCanonicalMapDocument({
+    sourceUri: 'game://map/duplicate-name.msb.dcx',
+    sourcePath: 'map/duplicate-name.msb.dcx',
+    game: 'sekiro',
+    revision: 'rev_duplicate_name',
+    models: [{ name: 'm000000', typeId: 0, nativeOffset: 0x10 }],
+    parts: [
+      { name: 'dup_part', typeId: 0, modelIndex: 0, posX: 1, posY: 0, posZ: 0, nativeOffset: 0x100 },
+      { name: 'dup_part', typeId: 0, modelIndex: 0, posX: 2, posY: 0, posZ: 0, nativeOffset: 0x200 }
+    ]
+  });
+  const duplicateGraph = new MapSceneGraph(duplicateDoc);
+  assert.equal(duplicateGraph.findPart('dup_part'), undefined, 'duplicate display names must not select a write target');
+  const ambiguousName = duplicateGraph.resolveEntity(duplicateDoc.parts[0]!.address);
+  assert.equal(ambiguousName.ok, false, 'duplicate soul addresses must be reported ambiguous');
+  if (!ambiguousName.ok) assert.equal(ambiguousName.code, 'MAP_ENTITY_AMBIGUOUS');
+  const secondByNative = duplicateGraph.resolveNativeIdentity({
+    family: 'part',
+    nativeOffset: duplicateDoc.parts[1]!.nativeOffset,
+    expectedName: 'dup_part'
+  });
+  assert.equal(secondByNative.ok, true, 'nativeOffset plus expectedName must resolve the intended duplicate');
+  if (secondByNative.ok) assert.equal(secondByNative.entity.nativeOffset, 0x200);
+
   console.log('[Smoke] Testing validateMapTransaction...');
   const validTx: MapEditTransaction = {
     id: 'tx-1',
@@ -133,6 +158,8 @@ export async function runMapDocument10kScaleSmoke(): Promise<void> {
       {
         stableKey: firstPart.stableKey,
         action: 'modify',
+        family: 'part',
+        nativeOffset: firstPart.nativeOffset,
         position: [120, 10, -30],
         rotation: [0, 180, 0]
       }
@@ -145,6 +172,22 @@ export async function runMapDocument10kScaleSmoke(): Promise<void> {
     assert.equal(importResult.transaction.author, 'blender');
     assert.equal(importResult.transaction.operations.length, 1);
   }
+
+  const emptyModifyDelta: BlenderDeltaImport = {
+    schemaVersion: 1,
+    mapId: 'm10_00_00_00',
+    baseRevision: 'rev_10k_init',
+    importedAt: new Date().toISOString(),
+    mutations: [{
+      stableKey: firstPart.stableKey,
+      action: 'modify',
+      family: 'part',
+      nativeOffset: firstPart.nativeOffset
+    }]
+  };
+  const emptyModifyResult = importBlenderDeltaToTransaction(doc, emptyModifyDelta);
+  assert.equal(emptyModifyResult.ok, false, 'Blender modify without fields must fail closed');
+  if (!emptyModifyResult.ok) assert.match(emptyModifyResult.error, /MAP_MODIFY_EMPTY/);
 
   // Test duplicate delta rejection (Section 4: fake duplicate capability removed)
   const duplicateDelta: BlenderDeltaImport = {
@@ -164,6 +207,25 @@ export async function runMapDocument10kScaleSmoke(): Promise<void> {
   assert.equal(duplicateResult.ok, false, 'Duplicate delta must be rejected as unsupported');
   if (!duplicateResult.ok) {
     assert.match(duplicateResult.error, /MAP_DUPLICATE_UNSUPPORTED/, 'Error must contain MAP_DUPLICATE_UNSUPPORTED code');
+  }
+
+  const createDelta: BlenderDeltaImport = {
+    schemaVersion: 1,
+    mapId: 'm10_00_00_00',
+    baseRevision: 'rev_10k_init',
+    importedAt: new Date().toISOString(),
+    mutations: [
+      {
+        stableKey: 'part:m10_00_00_00:new-part',
+        action: 'create',
+        name: 'new-part'
+      }
+    ]
+  };
+  const createResult = importBlenderDeltaToTransaction(doc, createDelta);
+  assert.equal(createResult.ok, false, 'Blender create must fail closed');
+  if (!createResult.ok) {
+    assert.match(createResult.error, /MAP_CREATE_UNSUPPORTED/, 'Create error must be explicit');
   }
 
   // Test multi-op batch transaction validation (Section 3: single batch atomic commit)

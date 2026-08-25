@@ -3,7 +3,8 @@
  *  1) 对每类已注册 part/region type 采样，在单次 write-msb 中批量应用 transform 写回，
  *     重读验证「未被修改实体字节级不变、被修改实体仅目标字段变化」（无损性）。
  *  2) delete mutation：唯一名 part/region/event 批量删除后重读确认目标消失、计数按
- *     预期减一、其余实体字节级不变；不存在/同名目标与未注册类型 delete 均 fail-closed。
+ *     预期减一、其余实体字节级不变；不存在目标与未注册类型 delete fail-closed，
+ *     同名目标按 nativeOffset 精确删除且只影响指定实体。
  *  3) reopen-failure before-image 恢复：输出损坏后 read 必须结构化失败，源 before-image
  *     哈希可恢复；expectedDocumentHash 篡改与损坏 outputPath 均不落盘、不残留临时文件。
  *  4) 未注册实体编辑守卫 fail-closed：把 part/region type 字节补丁为未注册值后
@@ -47,6 +48,18 @@ interface MsbEnvelope {
 }
 
 const close = (a: number, b: number) => Math.abs(a - b) < 0.001;
+
+function partMutation(kind: string, part: { name: string; offset: number }, fields: Record<string, unknown> = {}): Record<string, unknown> {
+  return { kind, family: 'part', nativeOffset: part.offset, expectedName: part.name, ...fields };
+}
+
+function regionMutation(kind: string, region: { name: string; offset: number }, fields: Record<string, unknown> = {}): Record<string, unknown> {
+  return { kind, family: 'region', nativeOffset: region.offset, expectedName: region.name, ...fields };
+}
+
+function eventMutation(kind: string, event: { name: string; offset: number }, fields: Record<string, unknown> = {}): Record<string, unknown> {
+  return { kind, family: 'event', nativeOffset: event.offset, expectedName: event.name, ...fields };
+}
 
 function assertPartEqual(actual: MsbEnvelope['parts'][number], expected: MsbEnvelope['parts'][number], label: string): void {
   if (actual.name !== expected.name || actual.offset !== expected.offset || actual.typeId !== expected.typeId
@@ -111,11 +124,9 @@ async function main(): Promise<void> {
         const scaleX = (sample.scaleX ?? 1) * 1.1;
         const scaleY = (sample.scaleY ?? 1) * 1.2;
         const scaleZ = (sample.scaleZ ?? 1) * 0.9;
-        mutations.push({
-          kind: 'set_part_transform',
-          partName: sample.name,
+        mutations.push(partMutation('set_part_transform', sample, {
           posX, posY, posZ, rotX, scaleX, scaleY, scaleZ
-        });
+        }));
         expectedParts.set(sample.offset, { posX, posY, posZ, rotX, scaleX, scaleY, scaleZ });
       }
       const expectedRegions = new Map<number, { posX: number; posY: number; posZ: number }>();
@@ -126,7 +137,7 @@ async function main(): Promise<void> {
         const posX = sample.posX + 1.0;
         const posY = sample.posY + 2.0;
         const posZ = sample.posZ - 1.5;
-        mutations.push({ kind: 'set_region_position', partName: sample.name, posX, posY, posZ });
+        mutations.push(regionMutation('set_region_position', sample, { posX, posY, posZ }));
         expectedRegions.set(sample.offset, { posX, posY, posZ });
       }
 
@@ -249,9 +260,9 @@ async function main(): Promise<void> {
         commandOptions: {
           outputPath: join(staging, 'm11.guarded-part.msb'),
           expectedDocumentHash: partPatchRead.data!.sourceHash,
-          mutation: 'set_part_transform',
-          partName: unregisteredPart.name,
+          ...partMutation('set_part_transform', unregisteredPart, {
           posX: 1, posY: 1, posZ: 1
+          })
         }
       });
       if (!partGuard.diagnostics.some((d) => d.code === 'MSB_UNREGISTERED_ENTITY_TYPE')) {
@@ -281,9 +292,9 @@ async function main(): Promise<void> {
         commandOptions: {
           outputPath: join(staging, 'm11.guarded-region.msb'),
           expectedDocumentHash: regionPatchRead.data!.sourceHash,
-          mutation: 'set_region_position',
-          partName: unregisteredRegion.name,
+          ...regionMutation('set_region_position', unregisteredRegion, {
           posX: 1, posY: 1, posZ: 1
+          })
         }
       });
       if (!regionGuard.diagnostics.some((d) => d.code === 'MSB_UNREGISTERED_ENTITY_TYPE')) {
@@ -312,9 +323,9 @@ async function main(): Promise<void> {
           outputPath: deletePath,
           expectedDocumentHash: orig.sourceHash,
           mutations: [
-            { kind: 'delete_part', partName: uniquePart.name },
-            { kind: 'delete_region', partName: uniqueRegion.name },
-            { kind: 'delete_event', partName: uniqueEvent.name }
+            partMutation('delete_part', uniquePart),
+            regionMutation('delete_region', uniqueRegion),
+            eventMutation('delete_event', uniqueEvent)
           ]
         }
       });
@@ -399,7 +410,9 @@ async function main(): Promise<void> {
           outputPath: join(staging, 'm11.delete-nonexistent.msb'),
           expectedDocumentHash: orig.sourceHash,
           mutation: 'delete_part',
-          partName: 'soulforge-delete-nonexistent'
+          family: 'part',
+          nativeOffset: 0,
+          expectedName: 'soulforge-delete-nonexistent'
         }
       });
       if (!nonexistentDelete.diagnostics.some((d) => d.code === 'MSB_STAGING_WRITE_FAILED')) {
@@ -408,7 +421,60 @@ async function main(): Promise<void> {
 
       const dupPart = orig.parts.find((p) => orig.parts.filter((o) => o.name === p.name).length > 1);
       let duplicateNameDelete: string | null = null;
+      let duplicateNameTransform: string | null = null;
       if (dupPart) {
+        const dupSibling = orig.parts.find((part) => part.name === dupPart.name && part.offset !== dupPart.offset);
+        if (!dupSibling) throw new Error(`同名 Part 样本缺少 sibling：${dupPart.name}`);
+
+        // 同名实体的写回也必须只命中 nativeOffset 指定的那个实体；删除
+        // 精确性不足以证明 transform lowering 没有退回 name-first 查找。
+        const duplicateTransformPath = join(staging, 'm11.duplicate-transform.msb');
+        const targetPosX = dupPart.posX + 3.25;
+        const targetPosY = dupPart.posY - 1.5;
+        const targetPosZ = dupPart.posZ + 0.875;
+        const duplicateTransform = await runBridge({
+          command: 'write-msb',
+          filePath: msbPath,
+          allowedRoots: [root, staging],
+          writableRoots: [staging],
+          timeoutMs: 60_000,
+          commandOptions: {
+            outputPath: duplicateTransformPath,
+            expectedDocumentHash: orig.sourceHash,
+            ...partMutation('set_part_position', dupPart, { posX: targetPosX, posY: targetPosY, posZ: targetPosZ })
+          }
+        });
+        if (!duplicateTransform.diagnostics.some((d) => d.code === 'MSB_STAGING_WRITE_VERIFIED')) {
+          throw new Error(`同名实体按 nativeOffset 精确 transform 写回失败: ${JSON.stringify(duplicateTransform.diagnostics)}`);
+        }
+        const duplicateTransformAfter = await runBridge<MsbEnvelope>({
+          command: 'read-msb-document',
+          filePath: duplicateTransformPath,
+          allowedRoots: [staging],
+          timeoutMs: 60_000
+        });
+        if (duplicateTransformAfter.parseStatus === 'failed' || !duplicateTransformAfter.data) {
+          throw new Error(`同名实体 transform 写回后无法重读: ${JSON.stringify(duplicateTransformAfter.diagnostics)}`);
+        }
+        const transformedTarget = duplicateTransformAfter.data.parts.find((part) => part.offset === dupPart.offset);
+        const unchangedSibling = duplicateTransformAfter.data.parts.find((part) => part.offset === dupSibling.offset);
+        if (!transformedTarget || !unchangedSibling
+          || !close(transformedTarget.posX, targetPosX)
+          || !close(transformedTarget.posY, targetPosY)
+          || !close(transformedTarget.posZ, targetPosZ)) {
+          throw new Error('同名 Part transform 未命中指定 nativeOffset');
+        }
+        if (!close(unchangedSibling.posX, dupSibling.posX)
+          || !close(unchangedSibling.posY, dupSibling.posY)
+          || !close(unchangedSibling.posZ, dupSibling.posZ)
+          || !close(unchangedSibling.rotX ?? 0, dupSibling.rotX ?? 0)
+          || !close(unchangedSibling.scaleX ?? 1, dupSibling.scaleX ?? 1)
+          || !close(unchangedSibling.scaleY ?? 1, dupSibling.scaleY ?? 1)
+          || !close(unchangedSibling.scaleZ ?? 1, dupSibling.scaleZ ?? 1)) {
+          throw new Error('同名 Part transform 错误地影响 sibling');
+        }
+        duplicateNameTransform = `${dupPart.name}@0x${dupPart.offset.toString(16)}`;
+
         const dupDelete = await runBridge({
           command: 'write-msb',
           filePath: msbPath,
@@ -418,14 +484,26 @@ async function main(): Promise<void> {
           commandOptions: {
             outputPath: join(staging, 'm11.delete-duplicate.msb'),
             expectedDocumentHash: orig.sourceHash,
-            mutation: 'delete_part',
-            partName: dupPart.name
+            ...partMutation('delete_part', dupPart)
           }
         });
-        if (!dupDelete.diagnostics.some((d) => d.code === 'MSB_STAGING_WRITE_FAILED')) {
-          throw new Error(`删除同名实体未 fail-closed: ${JSON.stringify(dupDelete.diagnostics)}`);
+        if (!dupDelete.diagnostics.some((d) => d.code === 'MSB_STAGING_WRITE_VERIFIED')) {
+          throw new Error(`同名实体按 nativeOffset 精确删除失败: ${JSON.stringify(dupDelete.diagnostics)}`);
         }
-        duplicateNameDelete = dupPart.name;
+        const duplicateAfter = await runBridge<MsbEnvelope>({
+          command: 'read-msb-document',
+          filePath: join(staging, 'm11.delete-duplicate.msb'),
+          allowedRoots: [staging],
+          timeoutMs: 60_000
+        });
+        if (duplicateAfter.parseStatus === 'failed' || !duplicateAfter.data) {
+          throw new Error(`同名实体删除后无法重读: ${JSON.stringify(duplicateAfter.diagnostics)}`);
+        }
+        if (duplicateAfter.data.parts.some((part) => part.offset === dupPart.offset)
+          || !duplicateAfter.data.parts.some((part) => part.offset !== dupPart.offset && part.name === dupPart.name)) {
+          throw new Error('同名 Part 删除错误地影响了错误目标或全部同名目标');
+        }
+        duplicateNameDelete = `${dupPart.name}@0x${dupPart.offset.toString(16)}`;
       }
 
       const partDeleteGuard = await runBridge({
@@ -437,8 +515,7 @@ async function main(): Promise<void> {
         commandOptions: {
           outputPath: join(staging, 'm11.guarded-part-delete.msb'),
           expectedDocumentHash: partPatchRead.data!.sourceHash,
-          mutation: 'delete_part',
-          partName: unregisteredPart.name
+          ...partMutation('delete_part', unregisteredPart)
         }
       });
       if (!partDeleteGuard.diagnostics.some((d) => d.code === 'MSB_UNREGISTERED_ENTITY_TYPE')) {
@@ -453,8 +530,7 @@ async function main(): Promise<void> {
         commandOptions: {
           outputPath: join(staging, 'm11.guarded-region-delete.msb'),
           expectedDocumentHash: regionPatchRead.data!.sourceHash,
-          mutation: 'delete_region',
-          partName: unregisteredRegion.name
+          ...regionMutation('delete_region', unregisteredRegion)
         }
       });
       if (!regionDeleteGuard.diagnostics.some((d) => d.code === 'MSB_UNREGISTERED_ENTITY_TYPE')) {
@@ -498,8 +574,7 @@ async function main(): Promise<void> {
         commandOptions: {
           outputPath: hashMismatchPath,
           expectedDocumentHash: '0'.repeat(64),
-          mutation: 'delete_part',
-          partName: uniquePart.name
+          ...partMutation('delete_part', uniquePart)
         }
       });
       if (!hashBad.diagnostics.some((d) => d.code === 'MSB_STAGING_WRITE_FAILED')) {
@@ -522,8 +597,7 @@ async function main(): Promise<void> {
         commandOptions: {
           outputPath: join(blockedParent, 'm11.out.msb'),
           expectedDocumentHash: orig.sourceHash,
-          mutation: 'delete_part',
-          partName: uniquePart.name
+          ...partMutation('delete_part', uniquePart)
         }
       });
       if (!blockedWrite.diagnostics.some((d) => d.code === 'MSB_STAGING_WRITE_FAILED')) {
@@ -567,6 +641,7 @@ async function main(): Promise<void> {
           failClosed: {
             nonexistent: 'MSB_STAGING_WRITE_FAILED',
             duplicateName: duplicateNameDelete ?? 'fixture-无同名样本',
+            duplicateNameTransform: duplicateNameTransform ?? 'fixture-无同名样本',
             unregisteredPartDelete: 'MSB_UNREGISTERED_ENTITY_TYPE',
             unregisteredRegionDelete: 'MSB_UNREGISTERED_ENTITY_TYPE'
           }

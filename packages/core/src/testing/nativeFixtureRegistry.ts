@@ -57,7 +57,7 @@ export async function resolveNativeFixture(
 
   const registryPath = process.env.SOULFORGE_NATIVE_FIXTURE_REGISTRY?.trim();
   const fixtureRoot = process.env.SOULFORGE_NATIVE_FIXTURE_ROOT?.trim();
-  if (!registryPath || !fixtureRoot) return resolve(legacyRelativePath);
+  if (!registryPath || !fixtureRoot) return resolveLegacyNativeFixture(legacyRelativePath);
 
   let registry: NativeFixtureRegistry;
   try {
@@ -102,6 +102,22 @@ export async function resolveNativeFixture(
     throw new Error(`NATIVE_FIXTURE_HASH_MISMATCH: testRole=${testRole} 注册哈希与文件不一致。`);
   }
   return path;
+}
+
+/**
+ * 无 registry 时仍允许既定的 smoke 命令使用只读真实游戏目录。
+ * 旧的 legacy 路径形如 ../../mods/...，相对的是仓库 dist 目录；
+ * 配置了 Sekiro 根后必须把它解释为 <gameRoot>/mods/...，否则命令会
+ * 错误地落到仓库中不存在的 mods/，并把“没有走真实语料”误报成路径错误。
+ */
+function resolveLegacyNativeFixture(legacyRelativePath: string): string {
+  const gameRoot = process.env.SOULFORGE_SEKIRO_GAME_ROOT?.trim();
+  if (!gameRoot || !/^(?:\.\.[\\/])/.test(legacyRelativePath)) {
+    return resolve(legacyRelativePath);
+  }
+
+  const gameRelativePath = legacyRelativePath.replace(/^(?:\.\.[\\/])+/, '');
+  return resolve(gameRoot, gameRelativePath);
 }
 
 async function sha256File(path: string): Promise<string> {

@@ -46,6 +46,14 @@ interface MsbEnvelope {
   roundTrip?: { semanticIdentical: boolean; byteIdentical: boolean };
 }
 
+function partMutation(kind: string, part: { name: string; offset: number }, fields: Record<string, unknown> = {}): Record<string, unknown> {
+  return { kind, family: 'part', nativeOffset: part.offset, expectedName: part.name, ...fields };
+}
+
+function regionMutation(kind: string, region: { name: string; offset: number }, fields: Record<string, unknown> = {}): Record<string, unknown> {
+  return { kind, family: 'region', nativeOffset: region.offset, expectedName: region.name, ...fields };
+}
+
 function projectNativeScene(envelope: MsbEnvelope) {
   return buildMsbSceneManifest({
     sourceUri: 'file://map/m10.msb',
@@ -223,11 +231,7 @@ async function mainInWorkspace(root: string): Promise<void> {
     commandOptions: {
       outputPath: staged,
       expectedDocumentHash: read.data.sourceHash,
-      mutation: 'set_part_position',
-      partName: part.name,
-      posX: nextX,
-      posY: nextY,
-      posZ: nextZ
+      ...partMutation('set_part_position', part, { posX: nextX, posY: nextY, posZ: nextZ })
     }
   });
   if (!written.diagnostics.some((d) => d.code === 'MSB_STAGING_WRITE_VERIFIED')) {
@@ -293,11 +297,7 @@ async function mainInWorkspace(root: string): Promise<void> {
     commandOptions: {
       outputPath: stagedRegion,
       expectedDocumentHash: read.data.sourceHash,
-      mutation: 'set_region_position',
-      partName: region.name,
-      posX: rX,
-      posY: rY,
-      posZ: rZ
+      ...regionMutation('set_region_position', region, { posX: rX, posY: rY, posZ: rZ })
     }
   });
   if (!writtenRegion.diagnostics.some((d) => d.code === 'MSB_STAGING_WRITE_VERIFIED')) {
@@ -341,15 +341,15 @@ async function mainInWorkspace(root: string): Promise<void> {
     commandOptions: {
       outputPath: stagedTransform,
       expectedDocumentHash: read.data.sourceHash,
-      mutation: 'set_part_transform',
-      partName: part.name,
-      posX: nextX,
-      posY: nextY,
-      posZ: nextZ,
-      rotX: nextRotX,
-      scaleX: nextScaleX,
-      scaleY: nextScaleY,
-      scaleZ: nextScaleZ
+      ...partMutation('set_part_transform', part, {
+        posX: nextX,
+        posY: nextY,
+        posZ: nextZ,
+        rotX: nextRotX,
+        scaleX: nextScaleX,
+        scaleY: nextScaleY,
+        scaleZ: nextScaleZ
+      })
     }
   });
   if (!writtenTransform.diagnostics.some((d) => d.code === 'MSB_STAGING_WRITE_VERIFIED')) {

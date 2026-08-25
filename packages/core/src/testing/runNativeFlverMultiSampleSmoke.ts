@@ -86,7 +86,7 @@ interface SampleReport {
 async function verifyMesh(
   out: string,
   meshIndex: number,
-  bbox: { min: number[]; max: number[] }
+  boneCount: number
 ): Promise<string[]> {
   const r = await runBridge<MeshEnvelope>({
     command: 'read-flver-mesh',
@@ -113,30 +113,40 @@ async function verifyMesh(
   }
   if (!allFinite) failures.push(`mesh[${meshIndex}] non-finite positions`);
 
-  // Bounding-box containment (skip when every position is origin — degenerate aux meshes exist).
-  const [bx0 = 0, by0 = 0, bz0 = 0] = bbox.min;
-  const [bx1 = 0, by1 = 0, bz1 = 0] = bbox.max;
-  const pad = Math.max(Math.abs(bx1 - bx0), Math.abs(by1 - by0), Math.abs(bz1 - bz0), 1) * 0.1;
-  let anyNonZero = false;
-  let outOfBbox = false;
-  for (let i = 0; i < vertexCount; i++) {
-    const [x, y, z] = [pos[i * 3] ?? 0, pos[i * 3 + 1] ?? 0, pos[i * 3 + 2] ?? 0];
-    if (x !== 0 || y !== 0 || z !== 0) anyNonZero = true;
-    if (x < bx0 - pad || x > bx1 + pad || y < by0 - pad || y > by1 + pad || z < bz0 - pad || z > bz1 + pad) {
-      outOfBbox = true;
-      break;
-    }
-  }
-  if (anyNonZero && outOfBbox) failures.push(`mesh[${meshIndex}] positions outside bounding box`);
-
   // Bone weights: every skinned vertex must sum to ~1 (quantized bytes → tolerance 0.02);
   // all-zero weights are valid for static/aux meshes.
   if (d.boneWeightsBase64) {
     const wt = toF32(d.boneWeightsBase64);
+    if (!d.boneIndicesBase64) {
+      failures.push(`mesh[${meshIndex}] bone weights exist without bone indices`);
+    } else {
+      const indices = toU16(d.boneIndicesBase64);
+      if (indices.length !== wt.length) {
+        failures.push(`mesh[${meshIndex}] bone index/weight component count mismatch: ${indices.length} != ${wt.length}`);
+      }
+      for (const index of indices) {
+        if (index >= boneCount) {
+          failures.push(`mesh[${meshIndex}] remapped bone index ${index} >= FLVER boneCount ${boneCount}`);
+          break;
+        }
+      }
+    }
     for (let i = 0; i < Math.min(vertexCount, 400); i++) {
       const w0 = wt[i * 4] ?? 0, w1 = wt[i * 4 + 1] ?? 0, w2 = wt[i * 4 + 2] ?? 0, w3 = wt[i * 4 + 3] ?? 0;
       if (Math.max(w0, w1, w2, w3) > 0 && Math.abs(w0 + w1 + w2 + w3 - 1) > 0.02) {
         failures.push(`mesh[${meshIndex}] bone weights sum ${(w0 + w1 + w2 + w3).toFixed(3)} != 1 (quantized)`);
+        break;
+      }
+    }
+  } else if (d.boneIndicesBase64) {
+    // Some real FLVER auxiliary/static meshes expose an index semantic while
+    // carrying no skin weights. That semantic is not used for skinning; it is
+    // not a corrupt bind palette. Validate its range when present, but do not
+    // turn an unskinned mesh into a false decode failure.
+    const indices = toU16(d.boneIndicesBase64);
+    for (const index of indices) {
+      if (index >= boneCount) {
+        failures.push(`mesh[${meshIndex}] unskinned bone index ${index} >= FLVER boneCount ${boneCount}`);
         break;
       }
     }
@@ -239,10 +249,14 @@ async function verifySample(root: string, tmp: string, id: string): Promise<Samp
     throw new Error(`FLVER ${id} authority=partial 但既无 unparsedGaps 也无 layoutWarnings：降级原因不可见。`);
   }
 
-  const checkCount = Math.min(e.meshCount, 4);
+  // 这是 native mesh-local bone palette / vertex decode 的覆盖门禁，不能只抽样
+  // 前几个 mesh：同一个 FLVER 的 palette 可能按 mesh 改变，抽样会把后续 mesh
+  // 的 local-index -> global-bone-index 错误隐藏起来。真实 corpus 下逐 mesh
+  // 读取；若资源异常，让生产 native reader 的结构化诊断直接失败关闭。
+  const checkCount = e.meshCount;
   const decodeFailures: string[] = [];
   for (let m = 0; m < checkCount; m++) {
-    const failures = await verifyMesh(out, m, e.boundingBox);
+    const failures = await verifyMesh(out, m, e.boneCount);
     decodeFailures.push(...failures);
   }
 

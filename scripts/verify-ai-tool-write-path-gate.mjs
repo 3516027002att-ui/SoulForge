@@ -61,8 +61,19 @@ const CONTROLLED_ENTRIES = Object.freeze([
   // setMsbPartTransform（包 write-msb），落盘均经 applyNativeMutation → Patch
   // Engine，定义在 editing/ 下，不直接写盘。
   'setTaeEventTimes',
-  'setMsbPartTransform'
+  'setMsbPartTransform',
+  // Canonical MSB map operations: these lower into MapEditTransaction and
+  // then through the Patch Engine/native reread boundary.
+  'executeMapTransaction',
+  'batchTransformMapParts'
 ]);
+
+/**
+ * Durable stores outside user Mod resources have their own controlled
+ * boundary. They must not be mistaken for a Patch Engine bypass: write_memory
+ * persists the agent memory store, not a game asset.
+ */
+const CONTROLLED_NON_MOD_ENTRIES = Object.freeze(['store.save']);
 
 /** 禁止在注册表里直接出现的写盘调用。 */
 const FORBIDDEN_WRITE_CALLS = Object.freeze([
@@ -188,7 +199,8 @@ for (const block of toolBlocks) {
   const looksWriteLike = WRITE_PERMISSIONS.has(permission);
   if (!looksWriteLike) continue;
   writeLike.push({ name, permission });
-  const usesControlled = CONTROLLED_ENTRIES.some((entry) => new RegExp(`\\b${entry}\\s*\\(`).test(body));
+  const usesControlled = CONTROLLED_ENTRIES.some((entry) => new RegExp(`\\b${entry}\\s*\\(`).test(body))
+    || (name === 'write_memory' && CONTROLLED_NON_MOD_ENTRIES.some((entry) => new RegExp(`\\b${entry}\\s*\\(`).test(body)));
   if (!usesControlled) {
     findings.push({
       code: 'AI_WRITE_TOOL_BYPASSES_PATCH_ENGINE',
@@ -217,8 +229,9 @@ report({
   status: 'passed',
   message: '生产 AI 工具注册表零直接写盘，全部写类工具经受控入口。',
   toolCount: toolBlocks.length,
-  writeLikeTools: writeLike,
-  controlledEntries: CONTROLLED_ENTRIES,
+    writeLikeTools: writeLike,
+    controlledEntries: CONTROLLED_ENTRIES,
+    controlledNonModEntries: CONTROLLED_NON_MOD_ENTRIES,
   nonClaim: '本门禁只做静态结构判定：注册表内无直接写盘调用、写类工具引用受控入口。'
     + '它不验证 Patch Engine 自身的正确性（那由事务与恢复 smoke 负责），'
     + '也不跨文件追踪受控入口的内部实现。'

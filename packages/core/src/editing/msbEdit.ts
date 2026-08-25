@@ -1,25 +1,25 @@
 /**
  * Agent / CLI MSB facade（问题 6-F）。
  *
- * 读：read-msb-document。写：只接已有 Bridge mutation —— msb_set_part_position /
- * msb_set_part_transform（write-msb），经 applyNativeMutation → Patch Engine 提交。
+ * 读：read-msb-document。写：将 part 变换 lowering 为统一的
+ * MapEditTransaction → Patch Engine → native reread 路径。
  *
  * 入参是地址字符串（m11_01_00_00#c1050_0000），内部 parseMapAddress。未解码的
  * 其他 MSB 字段不开放 set。
  */
-import { createHash } from 'node:crypto';
-import { readFile, access } from 'node:fs/promises';
+import { access } from 'node:fs/promises';
 import { basename, join, resolve } from 'node:path';
 import type { Diagnostic } from '@soulforge/shared';
 import { formatMapAddress, parseMapAddress } from '@soulforge/shared';
-import { applyNativeMutation } from './editorMutationService.js';
-import { commitMsbMutationViaBridge, type MsbBridgeMutation } from './msbBridgeCommit.js';
+import { executeMapTransaction } from './mapService.js';
 import { readMsbDocumentViaBridge } from './msbBridgeRead.js';
 import type { NativeEditSession } from './nativeEditSession.js';
 
 export interface MsbPartSnapshot {
   address: string;
   name: string;
+  family: 'part';
+  nativeOffset: number;
   typeId: number;
   mapId: string;
   posX: number;
@@ -36,6 +36,8 @@ export interface MsbPartSnapshot {
 export interface MsbPartTransformEdit {
   /** `m11_01_00_00#c1050_0000`。 */
   address: string;
+  /** Native identity is mandatory for writes; address/name is diagnostic context only. */
+  nativeOffset?: number;
   posX?: number;
   posY?: number;
   posZ?: number;
@@ -64,7 +66,9 @@ export type MsbSetResult =
 /** 只写变换变体（set_part_position / set_part_transform），不含 delete。 */
 interface MsbTransformMutation {
   kind: 'set_part_position' | 'set_part_transform';
-  partName: string;
+  family: 'part';
+  nativeOffset: number;
+  expectedName: string;
   posX?: number;
   posY?: number;
   posZ?: number;
@@ -96,6 +100,8 @@ export async function readMsbParts(input: {
   const parts = doc.data.parts.map((part) => ({
     address: formatMapAddress({ block: mapId, name: part.name }),
     name: part.name,
+    family: 'part' as const,
+    nativeOffset: requireNativeOffset(part.nativeOffset, part.name),
     typeId: part.typeId,
     mapId,
     posX: part.posX,
@@ -164,21 +170,51 @@ export async function setMsbPartTransform(input: {
     if (!parsed || !parsed.name) {
       return { ok: false, error: { code: 'MSB_ADDRESS_INVALID', message: `地址需含 part 名：${edit.address}` }, diagnostics: [] };
     }
-    const part = doc.data.parts.find((item) => item.name === parsed.name);
-    if (!part) {
-      return { ok: false, error: { code: 'MSB_PART_NOT_FOUND', message: `part 不存在：${parsed.name}（文件 ${resolved.path}）` }, diagnostics: [] };
+    if (edit.nativeOffset === undefined) {
+      return {
+        ok: false,
+        error: { code: 'MSB_NATIVE_OFFSET_REQUIRED', message: `写入目标必须携带 nativeOffset：${edit.address}` },
+        diagnostics: []
+      };
     }
+    // Native offset is the identity.  Name is only an expected-name guard and
+    // diagnostic context; finding by name first is ambiguous for legitimate
+    // duplicate MSB names and can select the wrong entity.
+    const part = doc.data.parts.find((item) => item.nativeOffset === edit.nativeOffset);
+    if (!part) {
+      return {
+        ok: false,
+        error: {
+          code: 'MSB_NATIVE_IDENTITY_NOT_FOUND',
+          message: `nativeOffset 不存在：${edit.nativeOffset}（expectedName=${parsed.name}，文件 ${resolved.path}）`
+        },
+        diagnostics: []
+      };
+    }
+    if (part.name !== parsed.name) {
+      return {
+        ok: false,
+        error: {
+          code: 'MSB_NATIVE_IDENTITY_MISMATCH',
+          message: `nativeOffset 与 expectedName 不匹配：offset=${edit.nativeOffset} expectedName=${parsed.name} actualName=${part.name}`
+        },
+        diagnostics: []
+      };
+    }
+    const nativeOffset = requireNativeOffset(part.nativeOffset, part.name);
     if (!hasAnyTransform(edit)) {
       return { ok: false, error: { code: 'MSB_EDIT_EMPTY', message: `${edit.address} 没有任何要写入的变换字段。` }, diagnostics: [] };
     }
     before.push({
       address: formatMapAddress({ block: resolved.mapId, name: part.name }),
       name: part.name,
+      family: 'part',
+      nativeOffset,
       typeId: part.typeId,
       mapId: resolved.mapId,
-      posX: part.posX,
-      posY: part.posY,
-      posZ: part.posZ,
+      posX: part.posX ?? 0,
+      posY: part.posY ?? 0,
+      posZ: part.posZ ?? 0,
       ...(part.rotX !== undefined ? { rotX: part.rotX } : {}),
       ...(part.rotY !== undefined ? { rotY: part.rotY } : {}),
       ...(part.rotZ !== undefined ? { rotZ: part.rotZ } : {}),
@@ -188,7 +224,9 @@ export async function setMsbPartTransform(input: {
     });
     const mutation: MsbTransformMutation = {
       kind: hasRotScale(edit) ? 'set_part_transform' : 'set_part_position',
-      partName: parsed.name,
+      family: 'part',
+      nativeOffset,
+      expectedName: parsed.name,
       ...(edit.posX !== undefined ? { posX: edit.posX } : {}),
       ...(edit.posY !== undefined ? { posY: edit.posY } : {}),
       ...(edit.posZ !== undefined ? { posZ: edit.posZ } : {}),
@@ -203,44 +241,48 @@ export async function setMsbPartTransform(input: {
   }
 
   const file = await input.edit.indexFile(resolved.path, 'map');
-  const expectedHash = file.sha256 || await sha256Of(resolved.path);
-  // 本图块一次调用只写一个 part（避跨容器哈希串扰），多 part 逐条提交。
-  const after: MsbPartSnapshot[] = [];
-  for (const mutation of mutations) {
-    const outcome = await applyNativeMutation({
-      file: { ...file, sha256: expectedHash },
-      sourceUri: file.sourceUri,
-      expectedHash,
-      stagingRoot: input.edit.stagingRoot,
-      allowedRoots: () => [...input.edit.allowedRoots()],
-      stagingPrefix: 'msb',
-      stagingFileName: `${basename(resolved.path)}.mut.msb`,
-      stageWrite: (context) => commitMsbMutationViaBridge({
-        sourcePath: resolved.path,
-        outputPath: context.outputPath,
-        expectedDocumentHash: expectedHash,
-        allowedRoots: context.allowedRoots,
-        writableRoots: context.writableRoots,
-        mutation,
-        timeoutMs: 120_000
-      }),
-      title: `MSB transform ${mutation.partName} in ${basename(resolved.path)}`,
-      confirmActionLabel: '提交 MSB part 变换'
-    }, { commit: input.edit.commitPort });
-    if (outcome.status !== 'committed' || !outcome.result.ok) {
-      const diagnostics = outcome.status === 'failed'
-        ? outcome.diagnostics
-        : outcome.status === 'committed'
-          ? outcome.result.diagnostics
-          : [{ severity: 'error' as const, code: 'MSB_WRITE_CANCELLED', message: '写入被取消。', sourceUri: file.sourceUri }];
+  const expectedHash = file.sha256 || doc.data.sourceHash;
+  const beforeByOffset = new Map(before.map((snapshot) => [snapshot.nativeOffset, snapshot]));
+  const transaction = {
+    id: `tx-msb-transform-${Date.now()}`,
+    mapId: resolved.mapId,
+    baseRevision: expectedHash,
+    description: `MSB transform (${mutations.length} 个 part)`,
+    author: 'human' as const,
+    operations: mutations.map((mutation) => {
+      const snapshot = beforeByOffset.get(mutation.nativeOffset);
+      if (!snapshot) throw new Error(`MSB_NATIVE_IDENTITY_NOT_FOUND: ${mutation.nativeOffset}`);
       return {
-        ok: false,
-        error: { code: diagnostics[0]?.code ?? 'MSB_WRITE_FAILED', message: diagnostics[0]?.message ?? 'MSB 写入失败。' },
-        diagnostics,
-        before
+        kind: 'set_transform' as const,
+        target: `part:${resolved.mapId}:offset-${mutation.nativeOffset.toString(16)}`,
+        ...(mutation.posX !== undefined || mutation.posY !== undefined || mutation.posZ !== undefined
+          ? { position: [mutation.posX ?? snapshot.posX, mutation.posY ?? snapshot.posY, mutation.posZ ?? snapshot.posZ] as [number, number, number] }
+          : {}),
+        ...(mutation.rotX !== undefined || mutation.rotY !== undefined || mutation.rotZ !== undefined
+          ? { rotation: [mutation.rotX ?? snapshot.rotX ?? 0, mutation.rotY ?? snapshot.rotY ?? 0, mutation.rotZ ?? snapshot.rotZ ?? 0] as [number, number, number] }
+          : {}),
+        ...(mutation.scaleX !== undefined || mutation.scaleY !== undefined || mutation.scaleZ !== undefined
+          ? { scale: [mutation.scaleX ?? snapshot.scaleX ?? 1, mutation.scaleY ?? snapshot.scaleY ?? 1, mutation.scaleZ ?? snapshot.scaleZ ?? 1] as [number, number, number] }
+          : {})
       };
-    }
+    }),
+    timestamp: Date.now()
+  };
+  const outcome = await executeMapTransaction(input.edit, resolved.path, transaction);
+  if (!outcome.ok) {
+    return {
+      ok: false,
+      error: outcome.error ?? { code: 'MSB_WRITE_FAILED', message: 'MSB 写入失败。' },
+      diagnostics: outcome.error?.details && Array.isArray(outcome.error.details)
+        ? outcome.error.details as Diagnostic[]
+        : [],
+      before
+    };
   }
+
+  // executeMapTransaction 已经完成 authoritative reread；这里再次投影
+  // 仅用于维持 facade 的 before/after 返回契约，不参与成功判定。
+  const after: MsbPartSnapshot[] = [];
   const reread = await readMsbDocumentViaBridge({
     sourcePath: resolved.path,
     allowedRoots: input.edit.allowedRoots(),
@@ -248,46 +290,50 @@ export async function setMsbPartTransform(input: {
     timeoutMs: 120_000
   });
   if (reread.ok && reread.data) {
-    for (const name of mutations.map((m) => m.partName)) {
-      const part = reread.data.parts.find((item) => item.name === name);
-      if (part) {
-        after.push({
-          address: formatMapAddress({ block: resolved.mapId, name: part.name }),
-          name: part.name,
-          typeId: part.typeId,
-          mapId: resolved.mapId,
-          posX: part.posX,
-          posY: part.posY,
-          posZ: part.posZ,
-          ...(part.rotX !== undefined ? { rotX: part.rotX } : {}),
-          ...(part.rotY !== undefined ? { rotY: part.rotY } : {}),
-          ...(part.rotZ !== undefined ? { rotZ: part.rotZ } : {}),
-          ...(part.scaleX !== undefined ? { scaleX: part.scaleX } : {}),
-          ...(part.scaleY !== undefined ? { scaleY: part.scaleY } : {}),
-          ...(part.scaleZ !== undefined ? { scaleZ: part.scaleZ } : {})
-        });
-      }
-    }
-  } else {
-    // 读回失败：以「要写的值 + 未变的旧值」合成 after，不吞异常、如实标注。
     for (const mutation of mutations) {
-      const old = before.find((item) => item.name === mutation.partName);
+      const part = reread.data.parts.find((item) => item.nativeOffset === mutation.nativeOffset);
+      if (!part) {
+        return {
+          ok: false,
+          error: { code: 'MSB_REREAD_FAILED', message: `写入后 nativeOffset ${mutation.nativeOffset} 无法读回。` },
+          diagnostics: asDiagnostics(reread.diagnostics),
+          before
+        };
+      }
+      if (part.name !== mutation.expectedName) {
+        return {
+          ok: false,
+          error: { code: 'MSB_NATIVE_IDENTITY_MISMATCH', message: `写入后 expectedName 不匹配：offset=${mutation.nativeOffset} expectedName=${mutation.expectedName} actualName=${part.name}` },
+          diagnostics: asDiagnostics(reread.diagnostics),
+          before
+        };
+      }
+      const nativeOffset = requireNativeOffset(part.nativeOffset, part.name);
       after.push({
-        address: formatMapAddress({ block: resolved.mapId, name: mutation.partName }),
-        name: mutation.partName,
-        typeId: old?.typeId ?? 0,
+        address: formatMapAddress({ block: resolved.mapId, name: part.name }),
+        name: part.name,
+        family: 'part',
+        nativeOffset,
+        typeId: part.typeId,
         mapId: resolved.mapId,
-        posX: mutation.posX ?? old?.posX ?? 0,
-        posY: mutation.posY ?? old?.posY ?? 0,
-        posZ: mutation.posZ ?? old?.posZ ?? 0,
-        ...(mutation.rotX !== undefined ? { rotX: mutation.rotX } : old?.rotX !== undefined ? { rotX: old.rotX } : {}),
-        ...(mutation.rotY !== undefined ? { rotY: mutation.rotY } : old?.rotY !== undefined ? { rotY: old.rotY } : {}),
-        ...(mutation.rotZ !== undefined ? { rotZ: mutation.rotZ } : old?.rotZ !== undefined ? { rotZ: old.rotZ } : {}),
-        ...(mutation.scaleX !== undefined ? { scaleX: mutation.scaleX } : old?.scaleX !== undefined ? { scaleX: old.scaleX } : {}),
-        ...(mutation.scaleY !== undefined ? { scaleY: mutation.scaleY } : old?.scaleY !== undefined ? { scaleY: old.scaleY } : {}),
-        ...(mutation.scaleZ !== undefined ? { scaleZ: mutation.scaleZ } : old?.scaleZ !== undefined ? { scaleZ: old.scaleZ } : {})
+        posX: part.posX,
+        posY: part.posY,
+        posZ: part.posZ,
+        ...(part.rotX !== undefined ? { rotX: part.rotX } : {}),
+        ...(part.rotY !== undefined ? { rotY: part.rotY } : {}),
+        ...(part.rotZ !== undefined ? { rotZ: part.rotZ } : {}),
+        ...(part.scaleX !== undefined ? { scaleX: part.scaleX } : {}),
+        ...(part.scaleY !== undefined ? { scaleY: part.scaleY } : {}),
+        ...(part.scaleZ !== undefined ? { scaleZ: part.scaleZ } : {})
       });
     }
+  } else {
+    return {
+      ok: false,
+      error: { code: 'MSB_REREAD_FAILED', message: `写入后无法重新读取 MSB：${resolved.path}` },
+      diagnostics: asDiagnostics(reread.diagnostics),
+      before
+    };
   }
   return {
     ok: true,
@@ -297,6 +343,13 @@ export async function setMsbPartTransform(input: {
     mutations: mutations.length,
     diagnostics: []
   };
+}
+
+function requireNativeOffset(value: number | undefined, name: string): number {
+  if (value === undefined || !Number.isSafeInteger(value) || value < 0) {
+    throw new Error(`MSB_NATIVE_OFFSET_REQUIRED: part ${name} 缺少有效 nativeOffset。`);
+  }
+  return value;
 }
 
 function hasAnyTransform(edit: MsbPartTransformEdit): boolean {
@@ -343,8 +396,4 @@ function asDiagnostics(items: Array<{ severity: string; code: string; message: s
     code: item.code,
     message: item.message
   }));
-}
-
-async function sha256Of(path: string): Promise<string> {
-  return createHash('sha256').update(await readFile(path)).digest('hex');
 }

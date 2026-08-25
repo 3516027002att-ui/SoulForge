@@ -166,11 +166,14 @@ async function runFoundationChecks(root: string): Promise<void> {
     throw new Error('Missing v0.5 SQLite migration.');
   }
 
-  if (maxPermissionForMode('plan') !== 'validate') {
-    throw new Error('Plan mode should cap at validate.');
+  if (maxPermissionForMode('plan') !== 'propose') {
+    throw new Error('Plan mode should cap at propose.');
   }
   if (!isAiToolPermissionAllowed('propose', 'plan')) {
     throw new Error('Plan mode should allow propose.');
+  }
+  if (isAiToolPermissionAllowed('stage', 'plan') || isAiToolPermissionAllowed('validate', 'plan')) {
+    throw new Error('Plan mode must deny stage and validate.');
   }
   if (isAiToolPermissionAllowed('commit', 'plan')) {
     throw new Error('Plan mode must not allow commit.');

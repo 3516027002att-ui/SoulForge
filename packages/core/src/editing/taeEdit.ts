@@ -53,7 +53,7 @@ export interface TaeEditFailure {
 }
 
 export type TaeReadResult =
-  | { ok: true; filePath: string; chrId: string; events: TaeEventSnapshot[]; diagnostics: Diagnostic[] }
+  | { ok: true; filePath: string; chrId: string; sourceHash?: string; events: TaeEventSnapshot[]; diagnostics: Diagnostic[] }
   | { ok: false; error: TaeEditFailure; diagnostics: Diagnostic[] };
 
 export type TaeSetResult =
@@ -114,7 +114,14 @@ export async function readTaeEvents(input: {
       };
     }
   }
-  return { ok: true, filePath: resolved.path, chrId, events: selected, diagnostics: envelope.diagnostics };
+  return {
+    ok: true,
+    filePath: resolved.path,
+    chrId,
+    ...(envelope.sourceHash ? { sourceHash: envelope.sourceHash } : {}),
+    events: selected,
+    diagnostics: envelope.diagnostics
+  };
 }
 
 export async function setTaeEventTimes(input: {
@@ -280,10 +287,10 @@ async function readTaeEnvelope(
   edit: NativeEditSession,
   filePath: string
 ): Promise<
-  | { ok: true; chrId: string; animations: EnvelopeAnim[]; diagnostics: Diagnostic[] }
+  | { ok: true; chrId: string; sourceHash?: string; animations: EnvelopeAnim[]; diagnostics: Diagnostic[] }
   | { ok: false; result: { ok: false; error: TaeEditFailure; diagnostics: Diagnostic[] } }
 > {
-  const result = await runBridge<{ animations?: Array<Record<string, unknown>> }>({
+  const result = await runBridge<{ sourceHash?: string; animations?: Array<Record<string, unknown>> }>({
     command: 'read-tae-document',
     filePath,
     resourceUri: pathToFileURL(filePath).href,
@@ -333,7 +340,13 @@ async function readTaeEnvelope(
       }) : []
     };
   });
-  return { ok: true, chrId, animations, diagnostics };
+  return {
+    ok: true,
+    chrId,
+    ...(result.data.sourceHash ? { sourceHash: result.data.sourceHash } : {}),
+    animations,
+    diagnostics
+  };
 }
 
 function extractChrId(filePath: string): string | null {

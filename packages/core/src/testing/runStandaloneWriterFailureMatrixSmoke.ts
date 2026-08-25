@@ -319,12 +319,14 @@ function buildMutationOptions(
       expectedDocumentHash: sourceHash
     };
   }
-  const parts = readData?.parts as Array<{ name: string; posX: number; posY: number; posZ: number }> | undefined;
+  const parts = readData?.parts as Array<{ name: string; offset: number; posX: number; posY: number; posZ: number }> | undefined;
   const part = parts?.[0];
   if (!part) throw new Error(`${spec.label}: no part target in read envelope`);
   return {
     mutation: 'set_part_position',
-    partName: part.name,
+    family: 'part',
+    nativeOffset: part.offset,
+    expectedName: part.name,
     posX: part.posX + 1,
     posY: part.posY,
     posZ: part.posZ,
