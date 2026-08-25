@@ -19,6 +19,7 @@
  */
 import * as three from 'three';
 import {
+  createFlverMesh,
   mountFlverScene,
   mountThreeProxyScene,
   resolveRendererBackend,
@@ -414,6 +415,42 @@ async function testFlverScene(record: (name: string) => void): Promise<void> {
   record('flver-scene-replace-release');
 }
 
+function testIncompleteSkinFailsClosed(record: (name: string) => void): void {
+  const bone = new three.Bone();
+  const skeleton = new three.Skeleton([bone]);
+  const base = buildFlverScene().meshes[0]!;
+  const incomplete = {
+    ...base,
+    skinIndices: new Uint16Array([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]),
+  };
+  const blocked = createFlverMesh(three, (resource) => resource, incomplete, skeleton);
+  assert(!(blocked as unknown as { isSkinnedMesh?: boolean }).isSkinnedMesh, 'skin attributes 不完整时不得创建 SkinnedMesh');
+  assertEqual(blocked.userData.skinCapability, 'blocked', '不完整 skin 必须暴露 blocked capability');
+  assertEqual(blocked.userData.skinDiagnostic?.code, 'FLVER_SKIN_ATTRIBUTES_INCOMPLETE', '不完整 skin 必须暴露结构化 diagnostic');
+
+  const complete = {
+    ...base,
+    skinIndices: new Uint16Array(12),
+    skinWeights: new Float32Array([1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0])
+  };
+  const skinned = createFlverMesh(three, (resource) => resource, complete, skeleton);
+  assert((skinned as three.SkinnedMesh).isSkinnedMesh, '合法完整 skin mapping 必须保留 SkinnedMesh');
+
+  blocked.traverse((object) => {
+    const disposable = object as unknown as { geometry?: { dispose(): void }; material?: { dispose(): void } };
+    disposable.geometry?.dispose();
+    if (Array.isArray(disposable.material)) disposable.material.forEach((material) => material.dispose());
+    else disposable.material?.dispose();
+  });
+  skinned.traverse((object) => {
+    const disposable = object as unknown as { geometry?: { dispose(): void }; material?: { dispose(): void } };
+    disposable.geometry?.dispose();
+    if (Array.isArray(disposable.material)) disposable.material.forEach((material) => material.dispose());
+    else disposable.material?.dispose();
+  });
+  record('flver-incomplete-skin-fail-closed');
+}
+
 async function testRepeatedMountUnmount(record: (name: string) => void): Promise<void> {
   let totalTracked = 0;
   for (let cycle = 0; cycle < 5; cycle++) {
@@ -474,6 +511,7 @@ async function main(): Promise<void> {
   await testBackendResolution(record);
   await testProxyScene(record);
   await testFlverScene(record);
+  testIncompleteSkinFailsClosed(record);
   await testRepeatedMountUnmount(record);
   await testAbsolutePathLeakRejected(record);
 

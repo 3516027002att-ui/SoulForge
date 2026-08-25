@@ -607,15 +607,19 @@ internal sealed class FlverNativeDocument
         {
             if (mesh.BoneIndices.Count > 0)
             {
-                if (localIdx >= 0 && localIdx < mesh.BoneIndices.Count)
-                {
-                    var g = mesh.BoneIndices[localIdx];
-                    return (ushort)(g >= 0 && g < Bones.Count ? g : (mesh.DefaultBoneIndex >= 0 && mesh.DefaultBoneIndex < Bones.Count ? mesh.DefaultBoneIndex : 0));
-                }
-                return (ushort)(mesh.DefaultBoneIndex >= 0 && mesh.DefaultBoneIndex < Bones.Count ? mesh.DefaultBoneIndex : 0);
+                if (localIdx < 0 || localIdx >= mesh.BoneIndices.Count)
+                    throw new FlverSkinMappingException(
+                        $"FLVER mesh[{meshIndex}] 顶点 skin index={localIdx} 超出 bone palette 范围 0..{mesh.BoneIndices.Count - 1}；拒绝回退 defaultBoneIndex={mesh.DefaultBoneIndex}。");
+                var g = mesh.BoneIndices[localIdx];
+                if (g < 0 || g >= Bones.Count || g > ushort.MaxValue)
+                    throw new FlverSkinMappingException(
+                        $"FLVER mesh[{meshIndex}] bone palette[{localIdx}]={g} 超出全局骨骼范围 0..{Bones.Count - 1}；拒绝回退 defaultBoneIndex={mesh.DefaultBoneIndex}。");
+                return (ushort)g;
             }
-            if (localIdx >= 0 && localIdx < Bones.Count) return (ushort)localIdx;
-            return (ushort)(mesh.DefaultBoneIndex >= 0 && mesh.DefaultBoneIndex < Bones.Count ? mesh.DefaultBoneIndex : 0);
+            if (localIdx < 0 || localIdx >= Bones.Count || localIdx > ushort.MaxValue)
+                throw new FlverSkinMappingException(
+                    $"FLVER mesh[{meshIndex}] 顶点全局 skin index={localIdx} 超出骨骼范围 0..{Bones.Count - 1}；拒绝回退 defaultBoneIndex={mesh.DefaultBoneIndex}。");
+            return (ushort)localIdx;
         }
 
         for (var v = 0; v < vertexCount; v++)
@@ -910,7 +914,17 @@ internal sealed class FlverNativeDocument
             int vertexBufferCountInMesh = ReadInt32(source, off + 0x28);
             int vertexBufferOffset = ReadInt32(source, off + 0x2C);
 
-            var boneIndices = ReadIndexArray(source, boneOffset, boneCountInMesh, meshCount);
+            // Mesh.BoneIndices 是局部 palette 到 FLVER 全局骨骼的映射；其
+            // count 上限必须按全局 boneCount 校验，而不是 meshCount。此前使用
+            // meshCount 会在合法 palette 较长时静默丢弃 palette，随后解码路径
+            // 误把顶点 index 当成全局骨骼 index，并可能回退到 default bone。
+            if (boneCountInMesh < 0 || boneCountInMesh > boneCount)
+                throw new FlverSkinMappingException(
+                    $"FLVER mesh[{i}] bone palette count={boneCountInMesh} 超出全局骨骼数量 {boneCount}；拒绝继续解码。");
+            var boneIndices = ReadIndexArray(source, boneOffset, boneCountInMesh, boneCount);
+            if (boneCountInMesh > 0 && boneIndices.Count != boneCountInMesh)
+                throw new FlverSkinMappingException(
+                    $"FLVER mesh[{i}] bone palette 位于无效范围 offset={boneOffset} count={boneCountInMesh}；拒绝继续解码。");
             var faceSetIndices = ReadIndexArray(source, faceSetOffset, faceSetCountInMesh, faceSetCount);
             var vertexBufferIndices = ReadIndexArray(source, vertexBufferOffset, vertexBufferCountInMesh, vertexBufferCount);
 
@@ -1513,6 +1527,15 @@ internal sealed class FlverNativeDocument
 
     private static string Hash(byte[] bytes) =>
         Convert.ToHexString(SHA256.HashData(bytes)).ToLowerInvariant();
+}
+
+internal sealed class FlverSkinMappingException : Exception
+{
+    public const string Code = "FLVER_SKIN_INDEX_PALETTE_OUT_OF_RANGE";
+
+    public FlverSkinMappingException(string message) : base(message)
+    {
+    }
 }
 
 internal sealed record FlverMaterialEntry(

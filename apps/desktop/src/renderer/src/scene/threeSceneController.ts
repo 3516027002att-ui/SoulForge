@@ -138,6 +138,18 @@ export interface FlverSceneMesh {
   texture?: FlverSceneTexture;
 }
 
+export type FlverSkinCapability = 'ready' | 'blocked' | 'not-requested';
+
+export interface FlverSkinDiagnostic {
+  code: 'FLVER_SKIN_ATTRIBUTES_INCOMPLETE' | 'FLVER_SKIN_SKELETON_MISSING' | 'FLVER_SKIN_INDEX_OUT_OF_RANGE';
+  message: string;
+}
+
+export interface FlverSkinCapabilityResult {
+  capability: FlverSkinCapability;
+  diagnostic?: FlverSkinDiagnostic;
+}
+
 export interface FlverSceneBone {
   id: string;
   name: string;
@@ -1091,12 +1103,62 @@ function createProxyMesh(
   return mesh;
 }
 
-function createFlverMesh(
+export function resolveFlverSkinCapability(
+  item: FlverSceneMesh,
+  skeleton: import('three').Skeleton | null
+): FlverSkinCapabilityResult {
+  const hasIndices = item.skinIndices !== undefined;
+  const hasWeights = item.skinWeights !== undefined;
+  if (!hasIndices && !hasWeights) return { capability: 'not-requested' };
+
+  if (!skeleton) {
+    return {
+      capability: 'blocked',
+      diagnostic: {
+        code: 'FLVER_SKIN_SKELETON_MISSING',
+        message: 'FLVER 网格带 skin attributes，但没有对应骨骼；禁止伪造 skin deformation。'
+      }
+    };
+  }
+
+  const expectedComponents = item.vertexCount * 4;
+  if (!Number.isInteger(item.vertexCount) || item.vertexCount < 0
+    || !item.skinIndices || !item.skinWeights
+    || item.skinIndices.length !== expectedComponents
+    || item.skinWeights.length !== expectedComponents) {
+    return {
+      capability: 'blocked',
+      diagnostic: {
+        code: 'FLVER_SKIN_ATTRIBUTES_INCOMPLETE',
+        message: `FLVER 网格 skin attributes 不完整：需要 ${expectedComponents} 个 index/weight 分量，禁止创建 SkinnedMesh。`
+      }
+    };
+  }
+
+  for (let i = 0; i < item.skinIndices.length; i++) {
+    const index = item.skinIndices[i]!;
+    const weight = item.skinWeights[i]!;
+    if (index >= skeleton.bones.length || !Number.isFinite(weight) || weight < 0) {
+      return {
+        capability: 'blocked',
+        diagnostic: {
+          code: 'FLVER_SKIN_INDEX_OUT_OF_RANGE',
+          message: `FLVER 网格 skin mapping 无效：分量 ${i} 的 bone index/weight 超出骨骼能力范围，禁止创建 SkinnedMesh。`
+        }
+      };
+    }
+  }
+
+  return { capability: 'ready' };
+}
+
+export function createFlverMesh(
   three: ThreeModule,
   track: ResourceTracker,
   item: FlverSceneMesh,
   skeleton: import('three').Skeleton | null = null
 ): Object3D {
+  const skin = resolveFlverSkinCapability(item, skeleton);
   const geometry = track(new three.BufferGeometry());
   geometry.setAttribute('position', new three.BufferAttribute(item.positions, 3));
   if (item.uvs) geometry.setAttribute('uv', new three.BufferAttribute(item.uvs, 2));
@@ -1111,11 +1173,11 @@ function createFlverMesh(
   }
   if (item.vertexColors) geometry.setAttribute('color', new three.BufferAttribute(item.vertexColors, 3));
 
-  // 真正的 GPU Skinning Attributes（4 components / vertex）
-  if (item.skinIndices) {
+  // 只有完整且已验证的 capability 才把 attributes 交给 GPU skinning。
+  if (skin.capability === 'ready' && item.skinIndices) {
     geometry.setAttribute('skinIndex', new three.Uint16BufferAttribute(item.skinIndices, 4));
   }
-  if (item.skinWeights) {
+  if (skin.capability === 'ready' && item.skinWeights) {
     geometry.setAttribute('skinWeight', new three.Float32BufferAttribute(item.skinWeights, 4));
   }
 
@@ -1131,7 +1193,7 @@ function createFlverMesh(
     vertexColors: Boolean(item.vertexColors)
   }));
 
-  if (skeleton) {
+  if (skeleton && skin.capability === 'ready') {
     const skinned = new three.SkinnedMesh(geometry, material);
     skinned.position.set(item.position[0], item.position[1], item.position[2]);
     skinned.rotation.set(item.rotation[0], item.rotation[1], item.rotation[2]);
@@ -1144,6 +1206,10 @@ function createFlverMesh(
   mesh.position.set(item.position[0], item.position[1], item.position[2]);
   mesh.rotation.set(item.rotation[0], item.rotation[1], item.rotation[2]);
   mesh.scale.set(item.scale[0], item.scale[1], item.scale[2]);
+  if (skin.capability === 'blocked' && skin.diagnostic) {
+    mesh.userData.skinCapability = skin.capability;
+    mesh.userData.skinDiagnostic = skin.diagnostic;
+  }
   if (item.wireframeOverlay) {
     const wireMaterial = track(new three.MeshBasicMaterial({
       color: 0x88bbee,

@@ -1672,6 +1672,10 @@ internal sealed class BridgeCommandService
                     "CHRBND_KRAK_OODLE_UNAVAILABLE",
                     "这份模型（chrbnd）是 KRAK 压缩，到「开始」页选择含 sekiro.exe 的原版目录后再看预览。");
             }
+            catch (FlverSkinMappingException ex)
+            {
+                return BridgeResult<object>.Failed(file, "chr", FlverSkinMappingException.Code, ex.Message);
+            }
             catch (Exception ex) when (ex is InvalidDataException or NotSupportedException or IOException)
             {
                 return BridgeResult<object>.Failed(file, "chr", "CHRBND_FLVER_PREVIEW_FAILED", ex.Message);
@@ -1796,6 +1800,10 @@ internal sealed class BridgeCommandService
                     "MAPBND_KRAK_OODLE_UNAVAILABLE",
                     "这份地图模型（mapbnd）是 KRAK 压缩，到「开始」页选择含 sekiro.exe 的原版目录后再看模型。");
             }
+            catch (FlverSkinMappingException ex)
+            {
+                return BridgeResult<object>.Failed(file, "map", FlverSkinMappingException.Code, ex.Message);
+            }
             catch (Exception ex) when (ex is InvalidDataException or NotSupportedException or IOException)
             {
                 return BridgeResult<object>.Failed(file, "map", "MAPBND_FLVER_PREVIEW_FAILED", ex.Message);
@@ -1823,6 +1831,10 @@ internal sealed class BridgeCommandService
                         roundTrip)
                 };
                 return BridgeResult<object>.Partial(file, "chr", diagnostics, document.ToEnvelope(roundTrip));
+            }
+            catch (FlverSkinMappingException ex)
+            {
+                return BridgeResult<object>.Failed(file, "chr", FlverSkinMappingException.Code, ex.Message);
             }
             catch (Exception ex) when (ex is InvalidDataException or NotSupportedException or IOException)
             {
@@ -1869,6 +1881,10 @@ internal sealed class BridgeCommandService
                     boneWeightsBase64 = boneWeights,
                     boneIndicesBase64 = boneIndices
                 });
+            }
+            catch (FlverSkinMappingException ex)
+            {
+                return BridgeResult<object>.Failed(file, "chr", FlverSkinMappingException.Code, ex.Message);
             }
             catch (Exception ex) when (ex is InvalidDataException or NotSupportedException or IOException)
             {

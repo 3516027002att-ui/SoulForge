@@ -50,6 +50,7 @@
     "bridge:verify:fxr": "npm run test:native-fxr -w @soulforge/core",
     "bridge:verify:fxr-writer": "npm run test:native-fxr-writer -w @soulforge/core",
     "bridge:verify:flver-mesh": "npm run test:native-flver-mesh -w @soulforge/core",
+    "bridge:verify:flver-skin-mapping": "npm run test:native-flver-skin-mapping -w @soulforge/core",
     "bridge:verify:flver-glb": "npm run test:native-flver-glb -w @soulforge/core",
     "bridge:verify:flver-multi": "npm run test:native-flver-multi -w @soulforge/core",
     "bridge:verify:flver-writer": "npm run test:native-flver-writer -w @soulforge/core",
