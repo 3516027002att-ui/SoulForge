@@ -459,6 +459,10 @@ export const TIER_BY_SCRIPT = Object.freeze({
   'bridge:verify:tpf-multi': 'native',
   'bridge:verify:collision-nav': 'native',
   'bridge:verify:flver-mesh': 'native',
+  // FLVER skin index/palette fail-closed smoke：真实 character corpus
+  // 以 global index 为主，缺 local palette 时保持 partial；越界 mapping
+  // 必须经 Bridge 返回结构化诊断，归 native。
+  'bridge:verify:flver-skin-mapping': 'native',
   'bridge:verify:fmg': 'native',
   'bridge:verify:msb': 'native',
   'bridge:verify:msb-all': 'native',
