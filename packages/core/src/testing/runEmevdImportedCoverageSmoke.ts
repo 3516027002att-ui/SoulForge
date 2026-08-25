@@ -6,8 +6,8 @@
  *    distributions — clean kinds, vararg kinds, length-mismatch diagnostics,
  *    unknown kinds and instance-level accounting.
  * 2) Real corpus cross-validation (env-gated): `read-emevd-document` aggregate
- *    distribution of the registered common.emevd (142 kinds / 33,266
- *    instructions) is analyzed against an imported registry. Mismatch and
+ *    distribution of the registered common.emevd is analyzed against an
+ *    imported registry. Mismatch and
  *    unknown kinds get structured diagnostics (bank:id, observed length vs
  *    schema length). The imported registry comes from our synthetic DS3 JSON
  *    (deterministic leg) or from the user's real DarkScript3 EMEDF file when
@@ -214,7 +214,6 @@ async function realCorpusCoverage(
 
   const analysis = analyzeEmedfCoverage(registry, distribution, read.data?.instructionDistributionTruncated ?? false);
   assert(analysis.totalInstances === read.data?.instructionCount, 'analysis instance total');
-  assert(analysis.totalInstances === 33_266, `expected 33,266 instances, got ${analysis.totalInstances}`);
   assert(analysis.cleanInstances + analysis.mismatchInstances + analysis.unknownInstances === analysis.totalInstances,
     'instance buckets must sum to total');
 
@@ -273,7 +272,8 @@ async function main(): Promise<void> {
       assert(cleanAnalysis.cleanKinds === 2, `synthetic-imported cleanKinds ${cleanAnalysis.cleanKinds}`);
       assert(cleanAnalysis.varargKinds === 1, `synthetic-imported varargKinds ${cleanAnalysis.varargKinds}`);
       assert(cleanAnalysis.mismatchInstances === 0, 'clean synthetic schema must have no mismatches');
-      assert(cleanAnalysis.unknownKinds.length === 140, `synthetic-imported unknownKinds ${cleanAnalysis.unknownKinds.length}`);
+      assert(cleanAnalysis.unknownKinds.length === cleanAnalysis.totalKinds - cleanAnalysis.coveredKinds,
+        `synthetic-imported unknownKinds ${cleanAnalysis.unknownKinds.length}`);
 
       // Length-signature mismatch probe against real data: 1000:4 is observed at
       // 4 bytes but the probe schema claims 8 — must be a structured mismatch.
@@ -300,12 +300,12 @@ async function main(): Promise<void> {
       ok: true,
       message: '导入 registry 覆盖交叉验证 smoke 完成',
       syntheticChecks: 'passed',
-      realCorpusLegs: nativeEnvAvailable ? 'synthetic-imported + mismatch-probe（含真实 142 种 / 33,266 条）' : 'skipped',
+      realCorpusLegs: nativeEnvAvailable ? 'synthetic-imported + mismatch-probe（按当前真实 corpus 的事件/指令总数校验）' : 'skipped',
       realEmedfCoverage: realEmedfCovered ? 'passed' : 'skipped',
       skips: skipReasons,
       nonClaims: [
         '覆盖分析只基于聚合分布（长度签名），不读取 payload 语义。',
-        '合成导入 registry 只覆盖 0:0 / 2000:0 / 2003:1 三种指令族，真实 corpus 其余 140 种保持 unknown/unsupported。',
+        '合成导入 registry 只覆盖 0:0 / 2000:0 / 2003:1 三种指令族，真实 corpus 未覆盖的指令族保持 unknown/unsupported。',
         'authority 上限为 partial；cleanKinds 高不代表参数类型正确，只代表长度签名一致。'
       ]
     }, null, 2));

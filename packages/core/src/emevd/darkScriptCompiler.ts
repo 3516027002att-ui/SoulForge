@@ -6,7 +6,8 @@
  * 可编码的固定参数指令），删掉行生成 delete_instruction；新增/删除 $Event 块
  * 生成 insert_event / delete_event。写不了的行（新增 WaitFor 折叠块、vararg
  * 指令、EMEDF 里查不到的名字、改了未解码注释）标 warning「未解码」，并且该事件
- * 的结构性改动整体抑制（只保留已对齐行的参数写入），不锁整份文件、不假成功。
+ * 的结构性改动整体抑制；任何未解码诊断都会让整个 plan fail-closed，避免 LCS
+ * 在重复指令名之间错配后仍把其他参数写入，不假成功。
  */
 
 import { createHash } from 'node:crypto';
@@ -163,7 +164,7 @@ export function compileEmevdDarkScript(
   }
 
   const hasUndecoded = diagnostics.some((item) => item.code === 'DARKSCRIPT_LINE_UNDECODED');
-  if (operations.length === 0 && hasUndecoded) {
+  if (hasUndecoded) {
     return { ok: false, ast, diagnostics: diagnostics.sort(compareDiagnostics) };
   }
 

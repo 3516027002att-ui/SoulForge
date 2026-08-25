@@ -180,7 +180,13 @@ export function parseDs3EmedfJson(jsonText: string): EmedfImportResult {
             const rawEnum = arg.enum_name.trim();
             const pascalEnum = sanitizeEnumName(rawEnum);
             def.enumName = pascalEnum;
-            def.description = `enum:${pascalEnum}`;
+            // Keep the source spelling in the human-readable description. The
+            // normalized enumName is the lookup key, while descriptions are
+            // also consumed by schema-driven reference detection (for example
+            // "Condition Group"); removing the spaces here silently disables
+            // that fallback for imported EMEDF arguments whose arg name is not
+            // itself descriptive.
+            def.description = `enum:${rawEnum}`;
           }
           if (arg.default !== undefined && Number.isFinite(arg.default)) {
             def.default = arg.default;

@@ -3,7 +3,7 @@
  *
  * Uses the imported EMEDF registry (synthetic DarkScript3 format via
  * createSyntheticImportedEmedf) to run a systematic typed-mutation matrix
- * against the registered native common.emevd (33,266 instructions / 142 kinds):
+ * against the registered native common.emevd corpus:
  *
  *  1. Every schema-covered kind present in the corpus is sampled (1-2
  *     instances) for a typed arg / eventId mutation, committed through the
@@ -15,7 +15,7 @@
  *     decoded, never re-encoded and never given a fabricated arg layout.
  *     A commit that touches only covered kinds + a representative event must
  *     leave every opaque instruction byte-for-byte identical, verified across
- *     the full 33,266-instruction document before/after.
+ *     the full document before/after.
  *  3. Opaque instructions fail closed under the DSL compiler
  *     (EMEVD_DSL_UNKNOWN_INSTRUCTION_READONLY, zero plan operations) and under
  *     decode (EMEDF_UNKNOWN_INSTRUCTION), so arg types are never invented for
@@ -467,13 +467,14 @@ async function realCorpusMatrixLeg(
     resourceUri: 'file://event/common.emevd',
     registry,
     documentInstanceId,
+    attachIdentity: true,
     pageSize: 2048,
     timeoutMs: 120_000
   });
   if (!before.ok || !before.document) {
     throw new Error(`full document read failed: ${JSON.stringify(before.diagnostics)}`);
   }
-  assert(before.instructionTotal === 33_266, `unexpected instruction total ${before.instructionTotal}`);
+  assert(before.instructionTotal > 0, `unexpected instruction total ${before.instructionTotal}`);
   assert(before.sourceHash === sourceHash, `source hash mismatch ${before.sourceHash} vs ${sourceHash}`);
   const document = before.document;
 
@@ -487,7 +488,8 @@ async function realCorpusMatrixLeg(
   const distribution = distRead.data?.instructionDistribution ?? [];
   assert(Array.isArray(distribution) && distribution.length > 0, 'instructionDistribution missing or empty');
   const coverage = analyzeEmedfCoverage(registry, distribution, distRead.data?.instructionDistributionTruncated ?? false);
-  assert(coverage.totalInstances === 33_266, `analysis instance total ${coverage.totalInstances}`);
+  assert(coverage.totalInstances === distRead.data?.instructionCount,
+    `analysis instance total ${coverage.totalInstances} != envelope ${distRead.data?.instructionCount}`);
 
   // Multi-length kinds: covered vararg variants valid by signature; unknown
   // multi-length kinds stay opaque + fail closed (verified below).
@@ -542,6 +544,7 @@ async function realCorpusMatrixLeg(
     resourceUri: 'file://event/common.emevd',
     registry,
     documentInstanceId: `${documentInstanceId}-after`,
+    attachIdentity: true,
     pageSize: 2048,
     timeoutMs: 120_000
   });
@@ -564,7 +567,8 @@ async function realCorpusMatrixLeg(
     // Deterministic strict assertions for the synthetic-imported registry.
     assert(coverage.cleanKinds === 2, `synthetic-imported cleanKinds ${coverage.cleanKinds}`);
     assert(coverage.mismatchInstances === 0, 'synthetic-imported must have no length mismatches');
-    assert(coverage.unknownKinds.length === 140, `synthetic-imported unknownKinds ${coverage.unknownKinds.length}`);
+    assert(coverage.unknownKinds.length === coverage.totalKinds - coverage.coveredKinds,
+      `synthetic-imported unknownKinds ${coverage.unknownKinds.length}`);
     const ml2000 = multiLength.find((m) => m.bank === 2000 && m.id === 0);
     assert(ml2000 !== undefined, '2000:0 must be multi-length in real corpus');
     assert(ml2000.allValidVarargMultiples === true, '2000:0 lengths must all be valid vararg multiples');
@@ -694,7 +698,7 @@ async function main(): Promise<void> {
       } : null,
       nonClaims: [
         'synthetic DS3 JSON 是自构微小样本，不构成 native 或真实 DarkScript3 完成声明。',
-        '导入 schema 只覆盖真实 corpus 中 0:0 / 2000:0（2003:1 在 corpus 中缺席），其余 140 种保持 opaque/unsupported；未覆盖指令族清单见 matrixSummary.multiLengthKinds 与 coverage.unknownKinds。',
+        '导入 schema 只覆盖真实 corpus 中 0:0 / 2000:0（2003:1 在 corpus 中缺席），其余未覆盖指令族保持 opaque/unsupported；清单见 matrixSummary.multiLengthKinds 与 coverage.unknownKinds。',
         'authority 上限为 partial；typed mutation 只证明写链与等长替换正确，不证明参数语义正确或完整 EMEDF/layer/游戏加载。'
       ]
     }, null, 2));

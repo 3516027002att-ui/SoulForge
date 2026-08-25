@@ -660,6 +660,7 @@ internal sealed class BridgeCommandService
                     ? EmevdDocumentSessionCache.CachePolicy.Bypass
                     : EmevdDocumentSessionCache.CachePolicy.Default;
                 var resumeSession = OptionString("documentSession", "");
+                var reportReadCounts = OptionBool("reportReadCounts", false);
                 EmevdDocumentSessionCache.Lookup cached;
                 var hooks = EmevdDocumentSessionCache.TestHooksEnabled
                     ? new EmevdDocumentSessionCache.TestHooks
@@ -683,14 +684,17 @@ internal sealed class BridgeCommandService
                             if (IsDcxBytes(bytes))
                             {
                                 var dcx = DcxNativeDocument.Read(bytes, oodleRuntimeRoot, file);
+                                EmevdDocumentSessionCache.RecordDcxRead();
                                 loadToken.ThrowIfCancellationRequested();
                                 loaded = EmevdNativeDocument.Read(dcx.Payload, loadToken);
+                                EmevdDocumentSessionCache.RecordEmevdRead();
                                 loadedFormat = "dcx";
                                 loadedOuterHash = dcx.SourceHash;
                             }
                             else
                             {
                                 loaded = EmevdNativeDocument.Read(bytes, loadToken);
+                                EmevdDocumentSessionCache.RecordEmevdRead();
                                 loadedFormat = "emevd";
                                 loadedOuterHash = loaded.SourceHash;
                             }
@@ -734,7 +738,7 @@ internal sealed class BridgeCommandService
                     ? requestedPageSize
                     : 256;
                 var cacheObservation = cached.Observation;
-                var diagnostics = new[]
+                var diagnostics = new List<Diagnostic>
                 {
                     new Diagnostic(
                         roundTrip.SemanticIdentical ? "info" : "error",
@@ -756,6 +760,20 @@ internal sealed class BridgeCommandService
                         BridgeResult<object>.MakeSourceUri(file),
                         cacheObservation)
                 };
+                if (reportReadCounts)
+                {
+                    diagnostics.Add(new Diagnostic(
+                        "info",
+                        "EMEVD_SESSION_READ_COUNTS",
+                        $"dcxReads={EmevdDocumentSessionCache.DcxReadCount}; "
+                        + $"emevdReads={EmevdDocumentSessionCache.EmevdReadCount}",
+                        BridgeResult<object>.MakeSourceUri(file),
+                        new
+                        {
+                            dcxReads = EmevdDocumentSessionCache.DcxReadCount,
+                            emevdReads = EmevdDocumentSessionCache.EmevdReadCount
+                        }));
+                }
                 return BridgeResult<object>.Partial(file, "event", diagnostics,
                     document.ToEnvelope(roundTrip, page, pageSize, sourceFormat, outerFileHash, cached.SessionToken));
             }

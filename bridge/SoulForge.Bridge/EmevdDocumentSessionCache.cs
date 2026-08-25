@@ -121,6 +121,17 @@ internal static class EmevdDocumentSessionCache
     private static int concurrentLoads;
     private static int peakConcurrentLoads;
 
+    // Read-count diagnostics are deliberately kept beside the active session
+    // cache.  EmevdDocumentCache was the pre-session implementation and is no
+    // longer on the production read path; keeping its counters there made the
+    // reportReadCounts smoke observe an always-empty/dead cache.
+    internal static long DcxReadCount;
+    internal static long EmevdReadCount;
+
+    internal static void RecordDcxRead() => Interlocked.Increment(ref DcxReadCount);
+
+    internal static void RecordEmevdRead() => Interlocked.Increment(ref EmevdReadCount);
+
     internal static bool TestHooksEnabled =>
         string.Equals(Environment.GetEnvironmentVariable(TestHooksEnv), "1", StringComparison.Ordinal);
 
@@ -744,6 +755,8 @@ internal static class EmevdDocumentSessionCache
             cancelledLoads = 0;
             sessionsIssued = 0;
             sessionHits = 0;
+            DcxReadCount = 0;
+            EmevdReadCount = 0;
             tickCounter = 0;
             Volatile.Write(ref concurrentLoads, 0);
             Volatile.Write(ref peakConcurrentLoads, 0);

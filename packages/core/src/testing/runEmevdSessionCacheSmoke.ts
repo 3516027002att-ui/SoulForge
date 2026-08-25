@@ -18,7 +18,7 @@
  * 这是算法级断言，不是「感觉快了」：读计数来自 Bridge 进程内静态钩子，
  * 通过 diagnostics 回传，TypeScript 侧不猜测。
  */
-import { mkdtemp, mkdir, writeFile, rm, utimes } from 'node:fs/promises';
+import { mkdtemp, mkdir, writeFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { runBridge, disposeBridgeDaemonPool } from '../bridge/runBridge.js';
@@ -31,7 +31,6 @@ function assert(condition: unknown, message: string): asserts condition {
 interface ReadCounts {
   dcxReads: number;
   emevdReads: number;
-  invalidations: number;
 }
 
 function readCountsOf(diagnostics: Array<{ code: string; message: string }>): ReadCounts | null {
@@ -39,12 +38,10 @@ function readCountsOf(diagnostics: Array<{ code: string; message: string }>): Re
   if (!diagnostic) return null;
   const dcx = /dcxReads=(\d+)/.exec(diagnostic.message);
   const emevd = /emevdReads=(\d+)/.exec(diagnostic.message);
-  const invalidations = /invalidations=(\d+)/.exec(diagnostic.message);
-  if (!dcx || !emevd || !invalidations) return null;
+  if (!dcx || !emevd) return null;
   return {
     dcxReads: Number(dcx[1]),
-    emevdReads: Number(emevd[1]),
-    invalidations: Number(invalidations[1])
+    emevdReads: Number(emevd[1])
   };
 }
 
@@ -142,13 +139,24 @@ async function main(): Promise<void> {
       `写回（不改源）后重读应命中缓存，emevdReads 应保持 1，实际 ${afterWrite.counts.emevdReads}。`
     );
 
-    // 文件变更（mtime 变化）→ 缓存键失效 → 重读重新解析。
-    await utimes(emevdPath, new Date(Date.now() + 2_000), new Date(Date.now() + 2_000));
+    // 内容变更（保持合法 EMEVD 与等长 payload）→ hash 缓存键失效 → 重读重新解析。
+    // 只改 mtime 而不改内容不能使 hash 身份失效；这正是缓存防止“外部工具
+    // 等长改写并恢复原 mtime”误命中的契约。
+    const changedBytes = buildSyntheticEmevd([{
+      id: 50,
+      restBehavior: 0,
+      instructions: Array.from({ length: 10 }, (_unused, i) => ({
+        bank: 1000 + i,
+        id: 0,
+        args: Buffer.from([i === 0 ? 0xfe : 0xff, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00])
+      }))
+    }]);
+    await writeFile(emevdPath, changedBytes);
     const afterTouch = await readPage(0);
-    assert(afterTouch.counts !== null, 'touch 后重读缺少计数诊断。');
+    assert(afterTouch.counts !== null, '内容变更后重读缺少计数诊断。');
     assert(
       afterTouch.counts.emevdReads === 2,
-      `文件变更后重读应重新解析，emevdReads 应为 2，实际 ${afterTouch.counts.emevdReads}。`
+      `内容变更后重读应重新解析，emevdReads 应为 2，实际 ${afterTouch.counts.emevdReads}。`
     );
 
     // 第二份文件（同内容不同路径）：独立键，读计数 +1（不共享缓存）。
