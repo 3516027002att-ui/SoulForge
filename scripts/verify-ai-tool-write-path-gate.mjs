@@ -61,8 +61,24 @@ const CONTROLLED_ENTRIES = Object.freeze([
   // setMsbPartTransform（包 write-msb），落盘均经 applyNativeMutation → Patch
   // Engine，定义在 editing/ 下，不直接写盘。
   'setTaeEventTimes',
-  'setMsbPartTransform'
+  'setMsbPartTransform',
+  // Map mutations are canonical semantic transactions.  The executor lives
+  // in editing/mapService.ts and owns staging, Patch Engine commit, native
+  // reread, and touched-field verification; it is not a generic text patch.
+  'executeMapTransaction',
+  // Multi-domain commits still enter the durable Patch Engine transaction;
+  // the semantic wrapper owns proposal validation and invokes that boundary.
+  'executeSemanticPatchProposalTransaction'
 ]);
+
+/** Durable side effects that are deliberately outside the Mod resource path. */
+const NON_MOD_PERSISTENT_TOOLS = Object.freeze({
+  write_memory: {
+    permissionLevel: 'commit',
+    requiredCall: /\bstore\.save\s*\(/,
+    description: 'writes only the main-process MemoryManager store below userData, never Mod resources'
+  }
+});
 
 /** 禁止在注册表里直接出现的写盘调用。 */
 const FORBIDDEN_WRITE_CALLS = Object.freeze([
@@ -121,7 +137,7 @@ for (const entry of CONTROLLED_ENTRIES) {
   // 而不写盘(加入清单前已核实其写盘调用数为 0)。目录清单的作用是保证
   // 「清单指向的符号真实存在」,不是断言它必须在某个目录 —— 但也不能放宽成
   // 全仓搜索,否则任何同名函数都能冒充受控入口。
-  const found = ['patch', 'transactions', 'backup', 'script', 'param', 'editing'].some((dir) => {
+  const found = ['patch', 'transactions', 'backup', 'script', 'param', 'editing', 'semantic'].some((dir) => {
     const dirPath = join(root, 'packages', 'core', 'src', dir);
     if (!existsSync(dirPath)) return false;
     // 浅扫该目录下的 .ts，找 export 定义
@@ -190,6 +206,12 @@ for (const block of toolBlocks) {
   writeLike.push({ name, permission });
   const usesControlled = CONTROLLED_ENTRIES.some((entry) => new RegExp(`\\b${entry}\\s*\\(`).test(body));
   if (!usesControlled) {
+    const nonMod = NON_MOD_PERSISTENT_TOOLS[name];
+    if (nonMod
+      && new RegExp(`permissionLevel\\s*:\\s*'${nonMod.permissionLevel}'`).test(body)
+      && nonMod.requiredCall.test(body)) {
+      continue;
+    }
     findings.push({
       code: 'AI_WRITE_TOOL_BYPASSES_PATCH_ENGINE',
       tool: name,

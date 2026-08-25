@@ -102,6 +102,14 @@ export interface TaeAnimationClipData {
   hkxToFlverBoneMap?: number[] | undefined;
   interleavedTransforms?: BoneTransformData[] | undefined;
   splineBlocks?: SplineBlockData[] | undefined;
+  splineBlockOffsets?: number[] | undefined;
+  splineFloatBlockOffsets?: number[] | undefined;
+  splineTransformOffsets?: number[] | undefined;
+  splineFloatOffsets?: number[] | undefined;
+  /** Optional raw HKX spline data section, exposed only by explicit diagnostic requests. */
+  splineRawPayloadBase64?: string | undefined;
+  splineMaskAndQuantizationSize?: number | undefined;
+  splineNumBlocks?: number | undefined;
   maxFramesPerBlock?: number | undefined;
 }
 

@@ -940,6 +940,9 @@ internal sealed class BridgeCommandService
             try
             {
                 var animId = OptionInt64("animId", 0);
+                var includeRawSplinePayload = optionsIsObject
+                    && options.TryGetProperty("includeRawSplinePayload", out var rawSplinePayloadEl)
+                    && rawSplinePayloadEl.ValueKind == JsonValueKind.True;
                 string[]? flverBoneNames = null;
                 if (optionsIsObject && options.TryGetProperty("flverBoneNames", out var boneNamesEl) && boneNamesEl.ValueKind == JsonValueKind.Array)
                 {
@@ -1083,6 +1086,16 @@ internal sealed class BridgeCommandService
                     splineBlocks = splineBlocksData,
                     splineBlockOffsets = animation is HkxSplineCompressedAnimation spline
                         ? spline.BlockOffsets
+                        : null,
+                    splineMaskAndQuantizationSize = animation is HkxSplineCompressedAnimation splineWithMasks
+                        ? (int?)splineWithMasks.MaskAndQuantizationSize
+                        : null,
+                    splineNumBlocks = animation is HkxSplineCompressedAnimation splineWithBlockCount
+                        ? (int?)splineWithBlockCount.NumBlocks
+                        : null,
+                    splineRawPayloadBase64 = includeRawSplinePayload
+                        && animation is HkxSplineCompressedAnimation splineWithRawPayload
+                        ? Convert.ToBase64String(splineWithRawPayload.Data)
                         : null,
                     splineFloatBlockOffsets = animation is HkxSplineCompressedAnimation splineWithFloats
                         ? splineWithFloats.FloatBlockOffsets

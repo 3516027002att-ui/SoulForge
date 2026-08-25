@@ -61,6 +61,34 @@ import type { SemanticChangeSet, SemanticChangeOperation } from '../semantic/typ
 /** @deprecated Prefer AiToolPermissionLevel. Kept for older UI labels. */
 export type ToolPermission = 'read' | 'plan' | 'write' | AiToolPermissionLevel;
 
+/**
+ * Structured result of the post-commit knowledge refresh boundary.
+ *
+ * `ragRefreshed` only means that the current chunks/references were persisted.
+ * `knowledgeFresh` is deliberately stricter: it is true only after a complete
+ * embedding set for the same source revision was durably stored.  Keeping the
+ * two facts separate prevents a lexical-only refresh from being advertised as
+ * vector/RAG freshness.
+ */
+export type KnowledgeRefreshEmbeddingStatus = 'fresh' | 'invalidated' | 'blocked';
+
+export type KnowledgeRefreshReason = 'read-enrichment' | 'committed-mutation';
+
+export interface KnowledgeRefreshNotice {
+  reason: KnowledgeRefreshReason;
+}
+
+export interface KnowledgeRefreshResult {
+  indexRefreshed: boolean;
+  referencesRefreshed: boolean;
+  ragRefreshed: boolean;
+  knowledgeFresh: boolean;
+  embeddingStatus: KnowledgeRefreshEmbeddingStatus;
+  sourceRevision?: string;
+  embeddingModel?: string;
+  diagnostics?: Array<{ code: string; message: string }>;
+}
+
 export interface ToolContext {
   workspaceIndex: WorkspaceIndex | null;
   mode: 'plan' | 'normal' | 'fullPermission';
@@ -84,8 +112,13 @@ export interface ToolContext {
   recoveryDir?: string;
   /** 用户对本次具体写操作的确认凭据（main 原生对话框签发，绑定操作 ID）。 */
   confirmation?: ConfirmationReceipt;
-  /** Persist/rebuild RAG after a live native read enriches WorkspaceIndex. */
-  onIndexUpdated?: () => Promise<void>;
+  /**
+   * Persist/rebuild knowledge after a live native read or write enriches the
+   * WorkspaceIndex.  The structured result is optional for older/offline
+   * hosts; when omitted the bridge can claim only that the callback ran, not
+   * that embeddings are fresh.
+   */
+  onIndexUpdated?: (notice?: KnowledgeRefreshNotice) => Promise<KnowledgeRefreshResult | void>;
 }
 
 export interface ToolDescriptor {
@@ -1101,7 +1134,7 @@ export function createDefaultToolRegistry(): ToolRegistry {
         });
         await refreshWorkspaceFileRevision(context, edit.session, result.containerPath, 'param');
         context.workspaceIndex.rebuildReferences();
-        await context.onIndexUpdated?.();
+        await context.onIndexUpdated?.({ reason: 'read-enrichment' });
       }
       return ok({
         ...result,
@@ -1139,7 +1172,7 @@ export function createDefaultToolRegistry(): ToolRegistry {
         mergeLiveParamSnapshots(context.workspaceIndex, sourceUri, result.after);
         await refreshWorkspaceFileRevision(context, edit.session, result.containerPath, 'param');
         context.workspaceIndex.rebuildReferences();
-        await context.onIndexUpdated?.();
+        await context.onIndexUpdated?.({ reason: 'committed-mutation' });
       }
       return ok(result);
     }
@@ -1192,7 +1225,7 @@ export function createDefaultToolRegistry(): ToolRegistry {
         });
         await refreshWorkspaceFileRevision(context, edit.session, result.containerPath, 'msg');
         context.workspaceIndex.rebuildReferences();
-        await context.onIndexUpdated?.();
+        await context.onIndexUpdated?.({ reason: 'read-enrichment' });
       }
       return ok({
         ...result,
@@ -1232,7 +1265,7 @@ export function createDefaultToolRegistry(): ToolRegistry {
         mergeLiveFmgSnapshots(context.workspaceIndex, sourceUri, result.after);
         await refreshWorkspaceFileRevision(context, edit.session, result.containerPath, 'msg');
         context.workspaceIndex.rebuildReferences();
-        await context.onIndexUpdated?.();
+        await context.onIndexUpdated?.({ reason: 'committed-mutation' });
       }
       return ok(result);
     }
@@ -1275,7 +1308,7 @@ export function createDefaultToolRegistry(): ToolRegistry {
         });
         await refreshWorkspaceFileRevision(context, edit.session, result.filePath, 'event');
         context.workspaceIndex.rebuildReferences();
-        await context.onIndexUpdated?.();
+        await context.onIndexUpdated?.({ reason: 'read-enrichment' });
       }
       return ok({
         ...result,
@@ -1334,7 +1367,7 @@ export function createDefaultToolRegistry(): ToolRegistry {
         });
         await refreshWorkspaceFileRevision(context, edit.session, reread.filePath, 'event');
         context.workspaceIndex.rebuildReferences();
-        await context.onIndexUpdated?.();
+        await context.onIndexUpdated?.({ reason: 'committed-mutation' });
       }
       return ok(result);
     }
@@ -1362,7 +1395,7 @@ export function createDefaultToolRegistry(): ToolRegistry {
         mergeLiveTaeEvents(context.workspaceIndex, result.chrId, sourceUri, result.events);
         await refreshWorkspaceFileRevision(context, edit.session, result.filePath, 'action');
         context.workspaceIndex.rebuildReferences();
-        await context.onIndexUpdated?.();
+        await context.onIndexUpdated?.({ reason: 'read-enrichment' });
       }
       return ok({ ...result, coverage: coverageForScope(context.workspaceIndex, 'action', result.events.length) });
     }
@@ -1391,7 +1424,7 @@ export function createDefaultToolRegistry(): ToolRegistry {
         if (chrId) mergeLiveTaeEvents(context.workspaceIndex, chrId, sourceUri, result.after);
         await refreshWorkspaceFileRevision(context, edit.session, result.filePath, 'action');
         context.workspaceIndex.rebuildReferences();
-        await context.onIndexUpdated?.();
+        await context.onIndexUpdated?.({ reason: 'committed-mutation' });
       }
       return ok(result);
     }
@@ -1418,7 +1451,7 @@ export function createDefaultToolRegistry(): ToolRegistry {
         mergeLiveMapSnapshots(context.workspaceIndex, result.mapId, pathToFileURL(result.filePath).href, result.parts);
         await refreshWorkspaceFileRevision(context, edit.session, result.filePath, 'map');
         context.workspaceIndex.rebuildReferences();
-        await context.onIndexUpdated?.();
+        await context.onIndexUpdated?.({ reason: 'read-enrichment' });
       }
       return ok({ ...result, coverage: coverageForScope(context.workspaceIndex, 'map', result.parts.length) });
     }
@@ -1491,7 +1524,7 @@ export function createDefaultToolRegistry(): ToolRegistry {
         mergeLiveMapSnapshots(context.workspaceIndex, reread.mapId, sourceUri, reread.parts);
         await refreshWorkspaceFileRevision(context, edit.session, reread.filePath, 'map');
         context.workspaceIndex.rebuildReferences();
-        await context.onIndexUpdated?.();
+        await context.onIndexUpdated?.({ reason: 'committed-mutation' });
       }
       return ok({
         ...result,
@@ -1636,7 +1669,7 @@ export function createDefaultToolRegistry(): ToolRegistry {
         mergeLiveMapSnapshots(context.workspaceIndex, reread.mapId, pathToFileURL(reread.filePath).href, reread.parts);
         await refreshWorkspaceFileRevision(context, edit.session, reread.filePath, 'map');
         context.workspaceIndex.rebuildReferences();
-        await context.onIndexUpdated?.();
+        await context.onIndexUpdated?.({ reason: 'committed-mutation' });
       }
       return ok({
         ...committed,
@@ -1693,7 +1726,7 @@ export function createDefaultToolRegistry(): ToolRegistry {
         mergeLiveMapDocument(context.workspaceIndex, reread.doc, pathToFileURL(reread.filePath).href);
         context.workspaceIndex.rebuildReferences();
         await refreshWorkspaceFileRevision(context, edit.session, reread.filePath, 'map');
-        await context.onIndexUpdated?.();
+        await context.onIndexUpdated?.({ reason: 'committed-mutation' });
       }
       return ok({
         ...committed,
@@ -1763,7 +1796,7 @@ export function createDefaultToolRegistry(): ToolRegistry {
       if (context.workspaceIndex) {
         mergeLiveMapDocument(context.workspaceIndex, reread.doc, pathToFileURL(reread.filePath).href);
         context.workspaceIndex.rebuildReferences();
-        await context.onIndexUpdated?.();
+        await context.onIndexUpdated?.({ reason: 'committed-mutation' });
       }
       return ok({
         transaction: translation.transaction,
@@ -1851,7 +1884,7 @@ export function createDefaultToolRegistry(): ToolRegistry {
             await refreshWorkspaceFileRevision(context, edit, targetPath, kind);
           }
           context.workspaceIndex.rebuildReferences();
-          await context.onIndexUpdated?.();
+          await context.onIndexUpdated?.({ reason: 'committed-mutation' });
         }
       });
       const failed = result.diagnostics.some((item) => item.severity === 'error')
@@ -2004,7 +2037,7 @@ export function createDefaultToolRegistry(): ToolRegistry {
           }), absolutePath, kind);
         }
         context.workspaceIndex.rebuildReferences();
-        await context.onIndexUpdated?.();
+        await context.onIndexUpdated?.({ reason: 'committed-mutation' });
       }
       return ok(result);
     }
@@ -2083,7 +2116,7 @@ export function createDefaultToolRegistry(): ToolRegistry {
           await refreshWorkspaceFileRevision(context, edit, absolutePath, kind);
         }
         context.workspaceIndex.rebuildReferences();
-        await context.onIndexUpdated?.();
+        await context.onIndexUpdated?.({ reason: 'committed-mutation' });
       }
       return ok(result);
     }
@@ -2113,8 +2146,11 @@ export function createDefaultToolRegistry(): ToolRegistry {
   registry.register({
     name: 'write_memory',
     description: 'Store or update a persistent long-term memory entry (topic, summary, details, tags) across sessions.',
-    permission: 'propose',
-    permissionLevel: 'propose',
+    // This is a durable side effect outside the Mod workspace.  It therefore
+    // is not a Patch Engine operation, but it still requires the commit-level
+    // approval boundary rather than being silently executable as a proposal.
+    permission: 'commit',
+    permissionLevel: 'commit',
     inputSchema: { topic: 'string', summary: 'string', details: 'string?', tags: 'array?' },
     run: (input, context) => {
       const store = context.memoryStore;

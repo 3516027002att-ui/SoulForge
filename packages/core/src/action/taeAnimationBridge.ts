@@ -16,6 +16,7 @@ export interface LoadTaeAnimationClipOptions {
   filePath: string;
   animId: number;
   flverBoneNames?: string[] | undefined;
+  includeRawSplinePayload?: boolean | undefined;
   oodleRuntimeRoot?: string | undefined;
   allowedRoots?: string[] | undefined;
   timeoutMs?: number | undefined;
@@ -51,7 +52,8 @@ export async function loadTaeAnimationClip(
     filePath: options.filePath,
     commandOptions: {
       animId: options.animId,
-      ...(options.flverBoneNames?.length ? { flverBoneNames: options.flverBoneNames } : {})
+      ...(options.flverBoneNames?.length ? { flverBoneNames: options.flverBoneNames } : {}),
+      ...(options.includeRawSplinePayload ? { includeRawSplinePayload: true } : {})
     },
     ...(options.oodleRuntimeRoot !== undefined ? { oodleRuntimeRoot: options.oodleRuntimeRoot } : {}),
     ...(options.allowedRoots !== undefined ? { allowedRoots: options.allowedRoots } : {}),

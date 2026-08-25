@@ -25,7 +25,13 @@
  */
 
 import type { ToolCall, ToolDefinition as AgentToolDefinition } from '../model-services/types.js';
-import { toolInputShapeToJsonSchema, type ToolContext, type ToolRegistry } from './toolRegistry.js';
+import {
+  toolInputShapeToJsonSchema,
+  type KnowledgeRefreshNotice,
+  type KnowledgeRefreshResult,
+  type ToolContext,
+  type ToolRegistry
+} from './toolRegistry.js';
 import { ResolverWorkflowState } from '../semantic/resolverState.js';
 import type { CompletionEvidence } from '../semantic/types.js';
 
@@ -52,7 +58,14 @@ export interface AgentToolBridge {
   executeTool: (
     call: ToolCall,
     contextOverride?: Partial<ToolContext>
-  ) => Promise<{ ok: boolean; content: string; code?: string; completionEvidence?: CompletionEvidence[] }>;
+  ) => Promise<{
+    ok: boolean;
+    content: string;
+    code?: string;
+    completionEvidence?: CompletionEvidence[];
+    /** Structured post-commit state, when this call refreshed the index. */
+    postCommit?: KnowledgeRefreshResult;
+  }>;
 }
 
 const PARALLEL_SAFE_LEVELS = new Set(['read', 'analyze']);
@@ -100,6 +113,7 @@ const INDEX_REFRESH_MUTATION_TOOLS = new Set([
   'mutate_tae_event_times',
   'mutate_msb_part_transform',
   'batch_transform_map_objects',
+  'execute_map_transaction',
   'import_map_from_blender'
 ]);
 
@@ -177,6 +191,27 @@ function boundedToolContent(name: string, data: unknown): string {
   });
 }
 
+function postCommitData(data: unknown, refresh: KnowledgeRefreshResult): unknown {
+  if (typeof data === 'object' && data !== null && !Array.isArray(data)) {
+    return { ...(data as Record<string, unknown>), postCommit: refresh };
+  }
+  return { result: data, postCommit: refresh };
+}
+
+function unavailableRefreshResult(): KnowledgeRefreshResult {
+  return {
+    indexRefreshed: true,
+    referencesRefreshed: false,
+    ragRefreshed: false,
+    knowledgeFresh: false,
+    embeddingStatus: 'blocked',
+    diagnostics: [{
+      code: 'KNOWLEDGE_REFRESH_RESULT_UNAVAILABLE',
+      message: '宿主只确认了索引回调已执行，未提供可验证的 RAG/embedding freshness 结果。'
+    }]
+  };
+}
+
 export function createAgentToolBridge(options: AgentToolBridgeOptions): AgentToolBridge {
   const { registry, context } = options;
   const resolverState = new ResolverWorkflowState(options.externalTaskGoal);
@@ -193,7 +228,13 @@ export function createAgentToolBridge(options: AgentToolBridgeOptions): AgentToo
   const executeTool = async (
     call: ToolCall,
     contextOverride?: Partial<ToolContext>
-  ): Promise<{ ok: boolean; content: string; code?: string; completionEvidence?: CompletionEvidence[] }> => {
+  ): Promise<{
+    ok: boolean;
+    content: string;
+    code?: string;
+    completionEvidence?: CompletionEvidence[];
+    postCommit?: KnowledgeRefreshResult;
+  }> => {
     let input: unknown = {};
     try {
       input = call.argumentsJson.trim() === '' ? {} : JSON.parse(call.argumentsJson);
@@ -230,24 +271,34 @@ export function createAgentToolBridge(options: AgentToolBridgeOptions): AgentToo
       if (cached) return cached;
     }
     let indexUpdated = false;
+    let knowledgeRefresh: KnowledgeRefreshResult | undefined;
     const effectiveContext: ToolContext = { ...context, ...contextOverride };
     if (effectiveContext.onIndexUpdated) {
       const onIndexUpdated = effectiveContext.onIndexUpdated;
-      effectiveContext.onIndexUpdated = async () => {
-        await onIndexUpdated();
+      effectiveContext.onIndexUpdated = async (notice?: KnowledgeRefreshNotice) => {
+        const refresh = await onIndexUpdated(notice);
         indexUpdated = true;
+        if (refresh) knowledgeRefresh = refresh;
+        return refresh;
       };
     }
     const result = await registry.run(call.name, input, effectiveContext);
     if (effectiveContext.mode && effectiveContext.mode !== context.mode) {
       context.mode = effectiveContext.mode;
     }
+    const mutationRefresh = INDEX_REFRESH_MUTATION_TOOLS.has(call.name) && indexUpdated
+      ? (knowledgeRefresh ?? unavailableRefreshResult())
+      : undefined;
     const completionEvidence = result.ok
       ? [
           ...(result.completionEvidence ?? []),
-          ...(INDEX_REFRESH_MUTATION_TOOLS.has(call.name) && indexUpdated
+          ...(mutationRefresh?.indexRefreshed === true
             ? [
                 { kind: 'index_refreshed' as const, evidenceIds: [`tool:${call.name}:index`] },
+              ]
+            : []),
+          ...(mutationRefresh?.ragRefreshed === true && mutationRefresh.knowledgeFresh === true
+            ? [
                 { kind: 'rag_refreshed' as const, evidenceIds: [`tool:${call.name}:rag`] }
               ]
             : [])
@@ -256,8 +307,12 @@ export function createAgentToolBridge(options: AgentToolBridgeOptions): AgentToo
     const response = result.ok
       ? {
           ok: true,
-          content: boundedToolContent(call.name, result.data),
-          ...(completionEvidence.length > 0 ? { completionEvidence } : {})
+          content: boundedToolContent(
+            call.name,
+            mutationRefresh ? postCommitData(result.data, mutationRefresh) : result.data
+          ),
+          ...(completionEvidence.length > 0 ? { completionEvidence } : {}),
+          ...(mutationRefresh ? { postCommit: mutationRefresh } : {})
         }
       : {
           ok: false,

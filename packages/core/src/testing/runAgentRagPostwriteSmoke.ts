@@ -20,7 +20,12 @@ import { mkdir, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import type { RagChunk, RagCorpus } from '@soulforge/shared';
 import { createAgentToolBridge } from '../ai/agentToolBridge.js';
-import { createDefaultToolRegistry, type ToolContext } from '../ai/toolRegistry.js';
+import {
+  createDefaultToolRegistry,
+  type KnowledgeRefreshNotice,
+  type KnowledgeRefreshResult,
+  type ToolContext
+} from '../ai/toolRegistry.js';
 import { disposeBridgeDaemonPool } from '../bridge/runBridge.js';
 import { buildRagCorpus, createRagCorpus } from '../rag/chunkBuilder.js';
 import { persistRagCorpus } from '../rag/persist.js';
@@ -48,6 +53,7 @@ type ToolResponse = {
   content: string;
   code?: string;
   completionEvidence?: Array<{ kind: string; evidenceIds: string[] }>;
+  postCommit?: KnowledgeRefreshResult;
 };
 
 type TaeEvent = {
@@ -179,8 +185,9 @@ VALUES (?, ?, ?, ?, ?)`)
   const index = new WorkspaceIndex(session.meta.workspaceId);
   const refreshes: RefreshTrace[] = [];
   let activeRag: RagCorpus | null = null;
+  let lastCommittedEmbedding: EmbeddingResult | undefined;
 
-  const refreshAfterPostcommit = async (): Promise<void> => {
+  const refreshAfterPostcommit = async (notice?: KnowledgeRefreshNotice): Promise<KnowledgeRefreshResult> => {
     if (!activeRag && index.getFiles().length === 0) {
       throw new Error('postcommit refresh called before the authoritative source entered WorkspaceIndex');
     }
@@ -188,6 +195,14 @@ VALUES (?, ?, ?, ?, ?)`)
     // Durable state is committed before the in-memory snapshot is switched.
     persistRagCorpus(repository, next);
     activeRag = next;
+    const embedding: EmbeddingResult = notice?.reason === 'committed-mutation'
+      ? await rebuildWithRealProvider(repository, next)
+      : {
+        status: 'BLOCKED',
+        code: 'EMBEDDING_DEFERRED_UNTIL_COMMIT',
+        message: 'read enrichment 只刷新 lexical chunks/references；embedding 由 committed mutation 触发。'
+      };
+    if (notice?.reason === 'committed-mutation') lastCommittedEmbedding = embedding;
     const targetChunk = next.chunks.find((chunk) => chunk.family === 'tae_event');
     refreshes.push({
       chunkCount: next.chunks.length,
@@ -197,6 +212,24 @@ VALUES (?, ?, ?, ?, ?)`)
         : {}),
       ...(targetChunk?.sourceRevision ? { targetChunkRevision: targetChunk.sourceRevision } : {})
     });
+    const knowledgeFresh = notice?.reason === 'committed-mutation'
+      && embedding.status === 'rebuilt'
+      && repository.loadRagEmbeddings().size === next.chunks.length
+      && next.coverage?.sourceRevision !== undefined
+      && repository.ragEmbeddingSourceRevision() === next.coverage.sourceRevision;
+    const result: KnowledgeRefreshResult = {
+      indexRefreshed: true,
+      referencesRefreshed: true,
+      ragRefreshed: true,
+      knowledgeFresh,
+      embeddingStatus: knowledgeFresh ? 'fresh' : 'blocked',
+      ...(next.coverage?.sourceRevision ? { sourceRevision: next.coverage.sourceRevision } : {}),
+      ...(embedding.status === 'rebuilt' ? { embeddingModel: embedding.model } : {}),
+      ...(embedding.status === 'BLOCKED'
+        ? { diagnostics: [{ code: embedding.code, message: embedding.message }] }
+        : {})
+    };
+    return result;
   };
 
   const confirmation = createConfirmationReceipt({
@@ -270,7 +303,10 @@ VALUES (?, ?, ?, ?, ?)`)
       file: taePath,
       edits: [{ address: targetAddress, startFrame: currentB.startFrame, endFrame: currentB.endFrame }]
     });
-    const mutation = parseData<{ after?: TaeEvent[] }>(mutationResponse);
+    const mutation = parseData<{
+      after?: TaeEvent[];
+      postCommit?: KnowledgeRefreshResult;
+    }>(mutationResponse);
     check(
       mutation.after?.some((event) => event.address === targetAddress
         && event.startFrame === currentB.startFrame
@@ -281,9 +317,12 @@ VALUES (?, ?, ?, ?, ?)`)
       mutationResponse.completionEvidence?.some((evidence) => evidence.kind === 'index_refreshed') === true,
       '现有 Agent bridge 必须保留 index_refreshed evidence'
     );
+    check(mutation.postCommit?.indexRefreshed === true, 'mutation result 必须显式报告 index refreshed');
+    check(mutation.postCommit?.ragRefreshed === true, 'mutation result 必须显式报告 lexical RAG refreshed');
     check(
-      mutationResponse.completionEvidence?.some((evidence) => evidence.kind === 'rag_refreshed') === true,
-      '现有 Agent bridge 必须保留 rag_refreshed evidence'
+      mutationResponse.completionEvidence?.some((evidence) => evidence.kind === 'rag_refreshed')
+        === (mutation.postCommit?.knowledgeFresh === true),
+      '只有 embedding 与 current revision 一致时才允许发出 rag_refreshed evidence'
     );
 
     // 3. 第二次 Agent exact read：B；不是只读 mutation 返回值。
@@ -362,7 +401,11 @@ VALUES (?, ?, ?, ?, ?)`)
     const embeddingInvalidated = repository.loadRagEmbeddings().size === 0;
     check(embeddingInvalidated, '替换 current chunks 后旧 embedding 必须被 FK cascade 清掉');
 
-    const embedding = await rebuildWithRealProvider(repository, currentCorpus);
+    const embedding = lastCommittedEmbedding ?? {
+      status: 'BLOCKED' as const,
+      code: 'POST_COMMIT_EMBEDDING_RESULT_MISSING',
+      message: 'mutation postcommit 未产生可审计的 embedding 结果。'
+    };
     const embeddingRebuilt = embedding.status === 'rebuilt'
       && repository.loadRagEmbeddings().size === currentCorpus.chunks.length
       && repository.ragEmbeddingSourceRevision() === currentChunkRevision;
@@ -390,7 +433,8 @@ VALUES (?, ?, ?, ?, ?)`)
           : []
       }
       : undefined;
-    const knowledgeFresh = embeddingRebuilt
+    const knowledgeFresh = mutation.postCommit?.knowledgeFresh === true
+      && embeddingRebuilt
       && oldAAbsent
       && oldRevisionAbsent
       && referencesPersisted
@@ -479,6 +523,10 @@ async function rebuildWithRealProvider(
   repository: WorkspaceDataRepository,
   corpus: RagCorpus
 ): Promise<EmbeddingResult> {
+  // The current source revision invalidates any older vectors before a new
+  // provider attempt.  A blocked/partial response must never leave stale
+  // vectors queryable.
+  repository.replaceRagEmbeddings([]);
   const baseUrl = process.env.SOULFORGE_EMBEDDING_BASE_URL?.trim();
   const apiKey = process.env.SOULFORGE_EMBEDDING_API_KEY?.trim();
   const model = process.env.SOULFORGE_EMBEDDING_MODEL?.trim();
@@ -490,13 +538,22 @@ async function rebuildWithRealProvider(
     };
   }
 
-  const result = await fetchEmbeddings({
-    baseUrl,
-    apiKey,
-    model,
-    inputs: corpus.chunks.map((chunk) => `${chunk.title}\n${chunk.body}`),
-    timeoutMs: 60_000
-  });
+  let result: Awaited<ReturnType<typeof fetchEmbeddings>>;
+  try {
+    result = await fetchEmbeddings({
+      baseUrl,
+      apiKey,
+      model,
+      inputs: corpus.chunks.map((chunk) => `${chunk.title}\n${chunk.body}`),
+      timeoutMs: 60_000
+    });
+  } catch (error) {
+    return {
+      status: 'BLOCKED',
+      code: 'EMBEDDING_REQUEST_FAILED',
+      message: `真实 embedding provider 请求异常：${error instanceof Error ? error.message : String(error)}`
+    };
+  }
   if (!result.ok) {
     return {
       status: 'BLOCKED',
@@ -504,8 +561,11 @@ async function rebuildWithRealProvider(
       message: `真实 embedding provider 未完成重建：${result.error.message}`
     };
   }
-  const sourceRevision = corpus.chunks[0]?.sourceRevision;
-  if (!sourceRevision || result.vectors.length !== corpus.chunks.length || result.dim <= 0) {
+  const sourceRevision = corpus.coverage?.sourceRevision ?? corpus.chunks[0]?.sourceRevision;
+  const vectorsValid = result.vectors.every((vector) => vector.length === result.dim
+    && vector.every((value) => Number.isFinite(value)));
+  if (!sourceRevision || result.vectors.length !== corpus.chunks.length || result.dim <= 0
+    || !vectorsValid || corpus.chunks.some((chunk) => chunk.sourceRevision !== sourceRevision)) {
     return {
       status: 'BLOCKED',
       code: 'EMBEDDING_REBUILD_INCOMPLETE',
@@ -518,6 +578,16 @@ async function rebuildWithRealProvider(
     vector: result.vectors[index]!,
     sourceRevision: chunk.sourceRevision ?? sourceRevision
   })));
+  if (repository.loadRagEmbeddings().size !== corpus.chunks.length
+    || repository.ragEmbeddingSourceRevision() !== sourceRevision
+    || repository.ragEmbeddingModel() !== model) {
+    repository.replaceRagEmbeddings([]);
+    return {
+      status: 'BLOCKED',
+      code: 'EMBEDDING_PERSISTENCE_VERIFY_FAILED',
+      message: 'provider 向量已返回，但 SQLite 持久化校验未通过。'
+    };
+  }
   return {
     status: 'rebuilt',
     model,

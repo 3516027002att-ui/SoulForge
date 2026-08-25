@@ -104,6 +104,10 @@ export const TIER_BY_SCRIPT = Object.freeze({
   // conformance 58 个 case 照样全绿。纯逻辑，归 unit。
   'test:ai-tool-permission': 'unit',
   'test:ai-fake-loop': 'unit',
+  // 写后知识刷新真实走 embedding provider；无 provider 时脚本以
+  // BLOCKED/非零退出，不能被 synthetic fixture 冒充通过。归 unit，确保
+  // verify:all 会显式暴露当前 provider 阻塞。
+  'test:agent-rag-postwrite': 'unit',
   'test:desktop-security': 'unit',
   // 本轮从孤儿状态接线：SqliteOperationLogStore 全阶段 journal 接线 + 磁盘
   // 错误/ACL 失败关闭。不依赖真机 corpus，故归 unit。
@@ -462,6 +466,9 @@ export const TIER_BY_SCRIPT = Object.freeze({
   // 真实 c0000 TAE/HKX/FLVER 采样的 TS↔C# differential smoke；无真机资源时
   // 结构化 NOT_RUN，不把合成 fallback 冒充 native。
   'test:action-native-differential': 'native',
+  // 真实 c0000 HKX spline pose 与成熟外部 oracle differential；oracle/runtime
+  // 仅测试时加载，不提交 GPL 源码或二进制。缺资源时结构化 BLOCKED。
+  'test:action-mature-oracle': 'native',
   'bridge:verify:oodle': 'native',
   'bridge:verify:param': 'native',
   'bridge:verify:gparam': 'native',

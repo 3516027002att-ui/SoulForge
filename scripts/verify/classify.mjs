@@ -17,6 +17,12 @@ const ENV_REQUIREMENT = Object.freeze({
   SOULFORGE_NATIVE_FIXTURE_REGISTRY: 'native-env',
   SOULFORGE_NATIVE_FIXTURE_ROOT: 'native-env',
   SOULFORGE_SEKIRO_GAME_ROOT: 'native-env',
+  SOULFORGE_ACTION_ORACLE_ROOT: 'native-env',
+  SOULFORGE_ACTION_ORACLE_SOURCE_CONTAINER: 'native-env',
+  SOULFORGE_ACTION_ORACLE_BASE_CONTAINER: 'native-env',
+  SOULFORGE_EMBEDDING_BASE_URL: 'provider-env',
+  SOULFORGE_EMBEDDING_API_KEY: 'provider-env',
+  SOULFORGE_EMBEDDING_MODEL: 'provider-env',
   SOULFORGE_EMEDF_PATH: 'emedf',
   SOULFORGE_INSTALLER_LIFECYCLE_RUN: 'opt-in',
   // script 容器 game-load 真实加载确认：opt-in 用户游戏内确认，未设置时该 leg 结构化跳过。

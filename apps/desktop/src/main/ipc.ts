@@ -128,6 +128,8 @@ import {
   type AiSidebarDraftRequest,
   type ResourceCapabilityMatrix,
   type RagCorpus,
+  type KnowledgeRefreshResult,
+  type KnowledgeRefreshReason,
   type ToolContext,
   type ModelProviderCapabilities,
   type ToolDescriptor,
@@ -2481,6 +2483,13 @@ const operationLogUtility = new OperationLogUtilityClient(
 const modelServiceVault = new ModelServiceCredentialVault(app.getPath('userData'));
 const memoryManager = new MemoryManager(app.getPath('userData'));
 
+const RAG_EMBED_BATCH_SIZE = 64;
+type StoredModelServiceConfig = Awaited<ReturnType<ModelServiceCredentialVault['listConfigs']>>[number];
+
+type RagEmbeddingAttempt =
+  | { ok: true; embedded: number; failed: number; model: string; dim: number; sourceRevision: string }
+  | { ok: false; error: { code: string; message: string } };
+
 const toolRegistry = createDefaultToolRegistry();
 // P0 authority: renderer cannot elevate this value. Persistent per-model-service
 // grants replace this constant in P6; until then the desktop is plan-only.
@@ -2561,6 +2570,8 @@ export interface AiAgentRunRequest {
   prompt: string;
   mode?: 'plan' | 'normal' | 'fullPermission';
   streaming?: boolean;
+  /** Maximum number of model/tool turns for this run; non-positive values are ignored. */
+  maxSteps?: number;
   /** Session-relative rollout path as returned by ai.agent.sessions. */
   resumeSessionPath?: string;
   /**
@@ -2779,7 +2790,7 @@ async function ensureActiveOperationLog(session: WorkspaceSession): Promise<Oper
   return operationLogUtility;
 }
 
-function currentToolContext(): ToolContext {
+function currentToolContext(embeddingConfigId?: string): ToolContext {
   const storage = activeSession ? durableStoragePaths(activeSession.meta.workspaceId) : undefined;
   return {
     workspaceIndex: activeIndex,
@@ -2789,11 +2800,7 @@ function currentToolContext(): ToolContext {
     ...(activeSession ? { session: activeSession } : {}),
     ...(activeOperationLog ? { operationLogStore: activeOperationLog } : {}),
     ...(storage ? { backupBaseDir: storage.backupBaseDir, recoveryDir: storage.recoveryDir } : {}),
-    onIndexUpdated: async () => {
-      if (!activeIndex || !activeSession) return;
-      const database = await ensureActiveOperationLog(activeSession);
-      await refreshRagAfterAnalyze(database, activeIndex);
-    }
+    onIndexUpdated: (notice) => refreshKnowledgeAfterIndexUpdate(embeddingConfigId, notice?.reason)
   };
 }
 
@@ -2839,6 +2846,278 @@ async function refreshRagAfterAnalyze(
   index: WorkspaceIndex
 ): Promise<void> {
   await persistActiveRag(database, buildRagCorpus(index));
+}
+
+/**
+ * Rebuild the durable knowledge projection after a live native read/write.
+ *
+ * Chunk/reference persistence and embedding freshness are deliberately two
+ * separate facts.  A provider that is absent, incompatible, or partial clears
+ * the invalidated vector set and returns a structured blocked result; callers
+ * must never turn lexical freshness into `rag_refreshed` evidence.
+ */
+async function refreshKnowledgeAfterIndexUpdate(
+  embeddingConfigId?: string,
+  reason: KnowledgeRefreshReason = 'read-enrichment'
+): Promise<KnowledgeRefreshResult> {
+  try {
+    return await refreshKnowledgeAfterIndexUpdateUnsafe(embeddingConfigId, reason);
+  } catch (error) {
+    return {
+      indexRefreshed: Boolean(activeIndex),
+      referencesRefreshed: false,
+      ragRefreshed: false,
+      knowledgeFresh: false,
+      embeddingStatus: 'blocked',
+      diagnostics: [{
+        code: 'KNOWLEDGE_REFRESH_FAILED',
+        message: `写后知识刷新发生未分类异常：${error instanceof Error ? error.message : String(error)}`
+      }]
+    };
+  }
+}
+
+async function refreshKnowledgeAfterIndexUpdateUnsafe(
+  embeddingConfigId: string | undefined,
+  reason: KnowledgeRefreshReason
+): Promise<KnowledgeRefreshResult> {
+  if (!activeIndex || !activeSession) {
+    return {
+      indexRefreshed: false,
+      referencesRefreshed: false,
+      ragRefreshed: false,
+      knowledgeFresh: false,
+      embeddingStatus: 'blocked',
+      diagnostics: [{
+        code: 'WORKSPACE_REQUIRED',
+        message: '没有活动工作区，无法刷新写后知识。'
+      }]
+    };
+  }
+
+  const database = await ensureActiveOperationLog(activeSession);
+  const sourceRevision = revisionForFiles(activeIndex.getFiles());
+  let corpus: RagCorpus;
+  try {
+    corpus = buildRagCorpus(activeIndex);
+    await persistActiveRag(database, corpus);
+  } catch (error) {
+    return {
+      indexRefreshed: true,
+      referencesRefreshed: false,
+      ragRefreshed: false,
+      knowledgeFresh: false,
+      embeddingStatus: 'blocked',
+      ...(sourceRevision ? { sourceRevision } : {}),
+      diagnostics: [{
+        code: 'RAG_PERSIST_FAILED',
+        message: `当前索引已更新，但 RAG chunk/reference 持久化失败：${error instanceof Error ? error.message : String(error)}`
+      }]
+    };
+  }
+
+  const base: KnowledgeRefreshResult = {
+    indexRefreshed: true,
+    referencesRefreshed: true,
+    ragRefreshed: true,
+    knowledgeFresh: false,
+    embeddingStatus: 'blocked',
+    ...(corpus.coverage?.sourceRevision ? { sourceRevision: corpus.coverage.sourceRevision } : {})
+  };
+  if (reason !== 'committed-mutation') {
+    return {
+      ...base,
+      embeddingStatus: 'invalidated',
+      diagnostics: [{
+        code: 'EMBEDDING_DEFERRED_UNTIL_COMMIT',
+        message: 'live read 已刷新 lexical chunks/references；embedding 只在 committed mutation 后生成。'
+      }]
+    };
+  }
+  if (!embeddingConfigId || embeddingConfigId.trim() === '') {
+    return {
+      ...base,
+      diagnostics: [{
+        code: 'REAL_EMBEDDING_PROVIDER_REQUIRED',
+        message: '写后 chunk/reference 已刷新，但没有绑定真实 embedding provider；拒绝伪造 knowledgeFresh。'
+      }]
+    };
+  }
+
+  const stored = (await modelServiceVault.listConfigs()).find((config) => config.id === embeddingConfigId);
+  if (!stored) {
+    return {
+      ...base,
+      diagnostics: [{
+        code: 'MODEL_SERVICE_CONFIG_NOT_FOUND',
+        message: '写后 RAG 已刷新，但绑定的 embedding provider 配置不存在。'
+      }]
+    };
+  }
+  const apiKey = await modelServiceVault.resolveApiKey(stored.id);
+  if (!apiKey) {
+    return {
+      ...base,
+      diagnostics: [{
+        code: 'MODEL_SERVICE_UNCONFIGURED',
+        message: '写后 RAG 已刷新，但 embedding provider 凭据不可用。'
+      }]
+    };
+  }
+
+  const embedded = await embedRagCorpusWithProvider(database, corpus, stored, apiKey);
+  if (!embedded.ok) {
+    return {
+      ...base,
+      diagnostics: [embedded.error]
+    };
+  }
+
+  // A newer mutation/read may have advanced the index while the provider was
+  // in flight.  Never attach an older vector set to the newer current index.
+  const currentRevision = activeIndex ? revisionForFiles(activeIndex.getFiles()) : undefined;
+  if (!currentRevision || currentRevision !== embedded.sourceRevision) {
+    await database.replaceRagEmbeddings([]);
+    return {
+      ...base,
+      embeddingStatus: 'invalidated',
+      diagnostics: [{
+        code: 'RAG_REFRESH_SUPERSEDED',
+        message: 'embedding 请求完成时索引已进入新 revision；旧批次已丢弃，等待最新写后刷新。'
+      }]
+    };
+  }
+
+  return {
+    ...base,
+    knowledgeFresh: true,
+    embeddingStatus: 'fresh',
+    embeddingModel: embedded.model
+  };
+}
+
+async function embedRagCorpusWithProvider(
+  database: OperationLogUtilityClient,
+  corpus: RagCorpus,
+  stored: StoredModelServiceConfig,
+  apiKey: string
+): Promise<RagEmbeddingAttempt> {
+  // Any attempted refresh invalidates the previous vector set first.  A
+  // provider timeout, partial response, or unsupported configuration must not
+  // leave vectors from an older source revision queryable as if they were
+  // current.
+  await database.replaceRagEmbeddings([]);
+  if (!stored.embeddingModel) {
+    return {
+      ok: false,
+      error: {
+        code: 'REAL_EMBEDDING_PROVIDER_REQUIRED',
+        message: '该服务未配置 Embedding 模型；写后知识保持 BLOCKED。'
+      }
+    };
+  }
+  const model = stored.embeddingModel;
+  if (stored.protocol !== 'openai-compatible') {
+    return {
+      ok: false,
+      error: {
+        code: 'EMBEDDING_PROTOCOL_UNSUPPORTED',
+        message: 'Embedding 仅支持 OpenAI 兼容协议；当前 provider 不可用于写后刷新。'
+      }
+    };
+  }
+  const sourceRevision = corpus.coverage?.sourceRevision;
+  if (!sourceRevision) {
+    return {
+      ok: false,
+      error: {
+        code: 'RAG_SOURCE_REVISION_REQUIRED',
+        message: '当前语料没有可验证的 sourceRevision，拒绝生成持久化 embedding。'
+      }
+    };
+  }
+  if (corpus.chunks.length === 0) {
+    return {
+      ok: false,
+      error: {
+        code: 'INSUFFICIENT_CORPUS',
+        message: '当前语料为空，无法完成写后 embedding refresh。'
+      }
+    };
+  }
+
+  const entries: Array<{ chunkId: string; model: string; vector: Float32Array; sourceRevision: string }> = [];
+  let failed = 0;
+  try {
+    for (let start = 0; start < corpus.chunks.length; start += RAG_EMBED_BATCH_SIZE) {
+      const batch = corpus.chunks.slice(start, start + RAG_EMBED_BATCH_SIZE);
+      const result = await fetchEmbeddings({
+        baseUrl: stored.baseUrl,
+        apiKey,
+        model,
+        inputs: batch.map((chunk) => `${chunk.title}\n${chunk.body}`),
+        timeoutMs: 60_000,
+        batchSize: RAG_EMBED_BATCH_SIZE
+      });
+      if (!result.ok) {
+        return { ok: false, error: { code: result.error.code, message: `真实 embedding provider 未完成写后刷新：${result.error.message}` } };
+      }
+      for (let i = 0; i < batch.length; i += 1) {
+        const vector = result.vectors[i];
+        const chunk = batch[i];
+        if (!vector || vector.length !== result.dim || result.dim <= 0
+          || [...vector].some((value) => !Number.isFinite(value))) {
+          failed += 1;
+          continue;
+        }
+        entries.push({ chunkId: chunk!.chunkId, model, vector, sourceRevision });
+      }
+    }
+  } catch (error) {
+    await database.replaceRagEmbeddings([]);
+    return {
+      ok: false,
+      error: {
+        code: 'EMBEDDING_REQUEST_FAILED',
+        message: `真实 embedding provider 请求异常：${error instanceof Error ? error.message : String(error)}`
+      }
+    };
+  }
+
+  const dim = entries[0]?.vector.length ?? 0;
+  const complete = failed === 0 && entries.length === corpus.chunks.length && dim > 0
+    && entries.every((entry) => entry.vector.length === dim);
+  if (!complete) {
+    await database.replaceRagEmbeddings([]);
+    return {
+      ok: false,
+      error: {
+        code: 'EMBEDDING_PARTIAL_FAILED',
+        message: `真实 embedding provider 只生成 ${entries.length}/${corpus.chunks.length} 个完整向量，旧索引已清空。`
+      }
+    };
+  }
+  await database.replaceRagEmbeddings(entries);
+  if (await database.ragEmbeddingSourceRevision() !== sourceRevision
+    || await database.ragEmbeddingModel() !== model
+    || (await database.loadRagEmbeddings()).size !== corpus.chunks.length) {
+    await database.replaceRagEmbeddings([]);
+    return {
+      ok: false,
+      error: {
+        code: 'EMBEDDING_PERSISTENCE_VERIFY_FAILED',
+        message: 'embedding 已请求完成，但 SQLite 持久化校验未通过，已清空向量索引。'
+      }
+    };
+  }
+  return {
+    ok: true,
+    embedded: entries.length,
+    failed: 0,
+    model,
+    dim,
+    sourceRevision
+  };
 }
 
 function workspaceStoragePaths(workspaceId: string): {
@@ -11475,8 +11754,6 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
   /*  renderer 载荷、不进工具上下文。                                   */
   /* ---------------------------------------------------------------- */
 
-  const EMBED_BATCH_SIZE = 64;
-
   /**
    * 为当前工作区语料生成 embedding 向量索引（POST /v1/embeddings，分批）。
    * 服务配置必须含 embeddingModel（仅 openai-compatible 支持，Anthropic 无
@@ -11530,52 +11807,14 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
       return { ok: false, error: { code: 'INSUFFICIENT_CORPUS', message: '语料为空：先扫描并分析工作区。' } };
     }
 
-    const sourceRevision = corpus.coverage?.sourceRevision;
-    if (!sourceRevision) {
-      return {
-        ok: false,
-        error: { code: 'RAG_SOURCE_REVISION_REQUIRED', message: '当前语料没有可验证的 sourceRevision，拒绝生成可持久化向量索引。' }
-      };
-    }
-    const entries: Array<{ chunkId: string; model: string; vector: Float32Array; sourceRevision: string }> = [];
-    let failed = 0;
-    for (let start = 0; start < corpus.chunks.length; start += EMBED_BATCH_SIZE) {
-      const batch = corpus.chunks.slice(start, start + EMBED_BATCH_SIZE);
-      const result = await fetchEmbeddings({
-        baseUrl: stored.baseUrl,
-        apiKey,
-        model: stored.embeddingModel,
-        inputs: batch.map((chunk) => `${chunk.title}\n${chunk.body}`),
-        timeoutMs: 60_000
-      });
-      if (!result.ok) {
-        failed += batch.length;
-        continue;
-      }
-      for (let i = 0; i < batch.length; i += 1) {
-        const vector = result.vectors[i];
-        const chunk = batch[i];
-        if (!vector || !chunk) {
-          failed += 1;
-          continue;
-        }
-        entries.push({ chunkId: chunk.chunkId, model: stored.embeddingModel, vector, sourceRevision });
-      }
-    }
-    if (failed > 0 || entries.length !== corpus.chunks.length) {
-      await database.replaceRagEmbeddings([]);
-      return {
-        ok: false,
-        error: { code: 'EMBEDDING_PARTIAL_FAILED', message: `Embedding 仅生成 ${entries.length}/${corpus.chunks.length} 个向量，旧索引已清空。` }
-      };
-    }
-    await database.replaceRagEmbeddings(entries);
+    const result = await embedRagCorpusWithProvider(database, corpus, stored, apiKey);
+    if (!result.ok) return result;
     return {
       ok: true,
-      embedded: entries.length,
-      failed,
-      model: stored.embeddingModel,
-      dim: entries[0]?.vector?.length ?? 0
+      embedded: result.embedded,
+      failed: result.failed,
+      model: result.model,
+      dim: result.dim
     };
   });
 
@@ -11944,7 +12183,11 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
     // 需要工作区的工具干净失败，不整次拒绝（T6）。
     const bridge = createAgentToolBridge({
       registry: toolRegistry,
-      context: { ...currentToolContext(), mode },
+      // The model service selected for this run is also the only provider
+      // allowed to make post-write embeddings fresh.  Read-only IPC callers
+      // keep the no-provider context and therefore cannot claim vector
+      // freshness accidentally.
+      context: { ...currentToolContext(stored.id), mode },
       externalTaskGoal: request.prompt,
       // Natural-language discovery always goes through ResolverWorkflowState's
       // text-first gate. Precise canonical addresses are exempted by that
@@ -12277,6 +12520,9 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
           ? { approvalRequiredLevels: [] }
           : {}),
       ...(request.streaming === true ? { streaming: true } : {}),
+      ...(request.maxSteps != null && request.maxSteps > 0
+        ? { maxSteps: Math.trunc(request.maxSteps) }
+        : {}),
       ...(request.timeoutMs != null && request.timeoutMs > 0
         ? { timeoutMs: Math.trunc(request.timeoutMs) }
         : {}),
@@ -12286,7 +12532,11 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
       // Always arm compaction. Missing provider metadata uses the same 500K
       // default shown in settings and compacts at 80%; an explicit request
       // override remains exact for deterministic callers/tests.
-      compaction: { autoCompactTokenLimit: effectiveAutoCompactTokenLimit },
+      compaction: {
+        autoCompactTokenLimit: request.autoCompactTokenLimit != null && request.autoCompactTokenLimit > 0
+          ? Math.trunc(request.autoCompactTokenLimit)
+          : effectiveAutoCompactTokenLimit
+      },
       ...(Object.keys(sampling).length > 0 ? { sampling } : {}),
       ...(request.useRagSearch === true
         ? {
