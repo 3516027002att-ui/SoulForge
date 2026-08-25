@@ -4,6 +4,8 @@ import type {
   PatchHistoryEntry,
   IndexedFile,
   RagChunk,
+  RagCorpusMetadata,
+  RagCoverage,
   ReferenceEdge
 } from '@soulforge/shared';
 import type {
@@ -18,7 +20,7 @@ import type {
   OperationLogStore
 } from '@soulforge/core';
 
-export const OPERATION_LOG_UTILITY_PROTOCOL = '1.3.0' as const;
+export const OPERATION_LOG_UTILITY_PROTOCOL = '1.4.0' as const;
 
 export interface ProviderUsageEventPayload {
   eventId: string;
@@ -113,6 +115,8 @@ export interface OperationLogUtilityPayloadMap {
   searchFiles: { query: string; limit?: number };
   replaceRagChunks: { chunks: RagChunk[]; preserveEmbeddingsForSourceRevision?: string };
   loadRagChunks: Record<string, never>;
+  replaceRagCorpusMetadata: { builtAt: string; coverage: RagCoverage };
+  loadRagCorpusMetadata: Record<string, never>;
   searchRagChunks: { query: string; limit?: number };
   replaceRagEmbeddings: { entries: Array<{ chunkId: string; model: string; vector: Float32Array; sourceRevision: string }> };
   loadRagEmbeddings: Record<string, never>;
@@ -186,6 +190,8 @@ export interface OperationLogUtilityResultMap {
   searchFiles: IndexedFile[];
   replaceRagChunks: null;
   loadRagChunks: RagChunk[];
+  replaceRagCorpusMetadata: null;
+  loadRagCorpusMetadata: RagCorpusMetadata | null;
   searchRagChunks: RagChunk[];
   replaceRagEmbeddings: null;
   loadRagEmbeddings: Record<string, number[]>;

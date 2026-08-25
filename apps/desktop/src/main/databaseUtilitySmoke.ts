@@ -224,6 +224,25 @@ app.whenReady().then(async () => {
       relativePath: 'event/test.emevd.dcx',
       resourceKind: 'event'
     }]);
+    const ragCoverage = {
+      status: 'PARTIALLY_INDEXED' as const,
+      scope: 'rag' as const,
+      indexed: 1,
+      expected: 1,
+      successful: 0,
+      failed: 0,
+      partial: 1,
+      completenessRatio: 0,
+      resultCount: 0,
+      sourceRevision: 'utility-rag-revision'
+    };
+    await client.replaceRagCorpusMetadata({ builtAt: now, coverage: ragCoverage });
+    const ragMetadata = await client.loadRagCorpusMetadata();
+    if (ragMetadata?.coverage.sourceRevision !== 'utility-rag-revision'
+      || ragMetadata.embeddingStatus !== 'invalidated'
+      || ragMetadata.embeddingCount !== 0) {
+      throw new Error(`Database utility RAG freshness metadata round trip failed: ${JSON.stringify(ragMetadata)}`);
+    }
     if ((await client.searchFiles('test EMEVD')).length !== 1
       || (await client.searchRagChunks('emevd', 8)).length !== 1
       || (await client.listDiagnostics())[0]?.code !== 'PARSE_PARTIAL'
@@ -235,7 +254,8 @@ app.whenReady().then(async () => {
     if (!restartedHealth.ready
       || !(await client.listAuditEvents()).some((item) => item.transactionId === committed.operation?.transactionId)
       || (await client.searchFiles('test')).length !== 1
-      || (await client.listJobs()).length !== 1) {
+      || (await client.listJobs()).length !== 1
+      || (await client.loadRagCorpusMetadata())?.coverage.sourceRevision !== 'utility-rag-revision') {
       throw new Error('Database utility restart did not reopen durable state.');
     }
     process.stdout.write(`${JSON.stringify({

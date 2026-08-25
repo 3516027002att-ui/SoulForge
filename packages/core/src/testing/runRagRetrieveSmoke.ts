@@ -153,6 +153,14 @@ VALUES (?, ?, ?, ?, ?)`).run(index.workspaceId, workspace.root, 'sekiro', now, n
     if (reloaded.chunks.length !== corpus.chunks.length) {
       throw new Error(`reload lost chunks: ${reloaded.chunks.length} != ${corpus.chunks.length}`);
     }
+    if (reloaded.coverage?.status !== corpus.coverage?.status
+      || reloaded.coverage?.sourceRevision !== corpus.coverage?.sourceRevision
+      || reloaded.builtAt !== corpus.builtAt) {
+      throw new Error(`reload lost persisted RAG coverage metadata: ${JSON.stringify({
+        expected: { builtAt: corpus.builtAt, coverage: corpus.coverage },
+        actual: { builtAt: reloaded.builtAt, coverage: reloaded.coverage }
+      })}`);
+    }
     const reloadedHit = retrieveEvidence(reloaded, '71000000');
     if (!reloadedHit.ok) throw new Error(`reloaded retrieve failed: ${reloadedHit.message}`);
 
@@ -176,6 +184,23 @@ VALUES (?, ?, ?, ?, ?)`).run(index.workspaceId, workspace.root, 'sekiro', now, n
     if (!tool.ok) throw new Error(`retrieve_evidence tool failed: ${JSON.stringify(tool.error)}`);
     const toolHits = (tool.data as { hits?: Array<{ chunk: RagChunk }> } | undefined)?.hits ?? [];
     if (toolHits.length === 0) throw new Error('retrieve_evidence tool returned no hits');
+    let hostRagQuery = '';
+    const hostTool = await registry.run(
+      'retrieve_evidence',
+      { query: '狼的义手', limit: 3, expandReferences: false },
+      {
+        workspaceIndex: index,
+        mode: 'plan',
+        rag: corpus,
+        retrieveEvidence: async (query, options) => {
+          hostRagQuery = `${query}:${options?.limit ?? 0}:${options?.expandReferences === false ? 'no-expand' : 'expand'}`;
+          return retrieveEvidence(corpus, query, options);
+        }
+      }
+    );
+    if (!hostTool.ok || hostRagQuery !== '狼的义手:3:no-expand') {
+      throw new Error(`retrieve_evidence did not use the host RAG path: ${JSON.stringify({ hostRagQuery, hostTool })}`);
+    }
 
     // --- 阶段3：loop 级 RAG 自动注入 ---
     const seenQueries: string[] = [];

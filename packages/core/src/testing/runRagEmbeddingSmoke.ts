@@ -4,7 +4,7 @@
  * 检索（lexical + 向量融合排序 / 无向量退化 / vectorScore 字段）。不发真实网络。
  */
 import { join } from 'node:path';
-import type { RagChunk, RagCorpus } from '@soulforge/shared';
+import type { RagChunk, RagCorpus, RagCoverage } from '@soulforge/shared';
 import { cosineSimilarity, fetchEmbeddings } from '../model-services/embeddingClient.js';
 import { createRagCorpus } from '../rag/chunkBuilder.js';
 import { retrieveEvidenceHybrid, retrieveEvidenceHybridAsync } from '../rag/hybridRetrieve.js';
@@ -140,6 +140,27 @@ VALUES (?, ?, ?, ?, ?)`).run('ws-embed', workspace.root, 'sekiro', now, now);
       vector,
       sourceRevision: 'fixture-revision-1'
     }]);
+    const coverage: RagCoverage = {
+      status: 'FOUND',
+      scope: 'rag',
+      indexed: 1,
+      expected: 1,
+      successful: 1,
+      failed: 0,
+      completenessRatio: 1,
+      resultCount: 0,
+      sourceRevision: 'fixture-revision-1'
+    };
+    repository.replaceRagCorpusMetadata({ builtAt: now, coverage });
+    const freshMetadata = repository.loadRagCorpusMetadata();
+    expect(freshMetadata?.coverage.sourceRevision === 'fixture-revision-1',
+      'workspace coverage survives repository reload');
+    expect(freshMetadata?.embeddingStatus === 'fresh'
+      && freshMetadata.embeddingModel === 'embed-model'
+      && freshMetadata.embeddingSourceRevision === 'fixture-revision-1'
+      && freshMetadata.embeddingDim === 4
+      && freshMetadata.embeddingCount === 1,
+    'workspace embedding freshness is derived from current rows');
     expect(repository.ragEmbeddingModel() === 'embed-model', 'embedding model recorded');
     expect(repository.ragEmbeddingSourceRevision() === 'fixture-revision-1', 'embedding source revision recorded');
     const loaded = repository.loadRagEmbeddings().get(probe.chunkId);
@@ -155,6 +176,10 @@ VALUES (?, ?, ?, ?, ?)`).run('ws-embed', workspace.root, 'sekiro', now, now);
       'preserved embeddings retain their corpus revision');
     const changedProbe = { ...probe, body: 'changed content', contentHash: 'probe-hash-2', sourceRevision: 'fixture-source-revision-2' };
     repository.replaceRagChunks([changedProbe]);
+    const invalidatedMetadata = repository.loadRagCorpusMetadata();
+    expect(invalidatedMetadata?.embeddingStatus === 'invalidated'
+      && invalidatedMetadata.embeddingCount === 0,
+    'source/content change invalidates persisted workspace embedding freshness');
     const reloadedChunk = repository.loadRagChunks()[0];
     expect(reloadedChunk?.contentHash === 'probe-hash-2', 'chunk content hash roundtrip after source change');
     expect(reloadedChunk?.sourceRevision === 'fixture-source-revision-2', 'chunk source revision roundtrip after source change');

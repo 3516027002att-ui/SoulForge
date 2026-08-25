@@ -5,6 +5,8 @@ import type {
   ParseStatus,
   RagChunk,
   RagChunkFamily,
+  RagCorpusMetadata,
+  RagCoverage,
   ReferenceConfidence,
   ReferenceEdge,
   ResourceFormatKind,
@@ -51,6 +53,18 @@ interface ExistingRagEmbeddingRow {
   vector: Buffer;
   sourceRevision: string;
   contentHash: string;
+}
+
+export type RagCorpusMetadataInput = Pick<RagCorpusMetadata, 'builtAt' | 'coverage'>;
+
+interface RagEmbeddingSummary {
+  count: number;
+  model: string | null;
+  modelCount: number;
+  sourceRevision: string | null;
+  revisionCount: number;
+  dim: number | null;
+  dimCount: number;
 }
 
 export class WorkspaceDataRepository {
@@ -227,6 +241,55 @@ VALUES (?, ?, ?, ?, ?, ?, ?)`);
     }).immediate();
   }
 
+  /** Persist corpus-wide coverage separately from per-chunk source revisions. */
+  replaceRagCorpusMetadata(input: RagCorpusMetadataInput): void {
+    const coverage = input.coverage;
+    const now = new Date().toISOString();
+    this.database.transaction(() => {
+      this.writeRagCorpusMetadata(input.builtAt, coverage, now);
+    }).immediate();
+  }
+
+  /**
+   * Load durable coverage and derive the embedding summary from the actual
+   * rows.  This is deliberately defensive: a crash between two projections
+   * may leave metadata claiming fresh vectors while the FK cascade already
+   * removed them, so the returned status is recomputed rather than trusted.
+   */
+  loadRagCorpusMetadata(): RagCorpusMetadata | null {
+    const row = this.database.prepare<[string], {
+      builtAt: string;
+      coverageJson: string;
+      updatedAt: string;
+    }>(`
+SELECT built_at AS builtAt, coverage_json AS coverageJson, updated_at AS updatedAt
+FROM rag_corpus_metadata WHERE workspace_id = ?`).get(this.workspaceId);
+    if (!row) return null;
+    const coverage = parseJson(String(row.coverageJson), 'RAG coverage metadata') as RagCoverage;
+    const summary = this.ragEmbeddingSummary();
+    const chunkCount = this.ragChunkCount();
+    const fresh = chunkCount > 0
+      && summary.count === chunkCount
+      && summary.modelCount === 1
+      && summary.revisionCount === 1
+      && summary.dimCount === 1
+      && summary.dim !== null
+      && summary.dim > 0
+      && coverage.sourceRevision !== undefined
+      && summary.sourceRevision === coverage.sourceRevision;
+    return {
+      workspaceId: this.workspaceId,
+      builtAt: String(row.builtAt),
+      coverage,
+      embeddingStatus: fresh ? 'fresh' : 'invalidated',
+      ...(summary.model ? { embeddingModel: summary.model } : {}),
+      ...(summary.sourceRevision ? { embeddingSourceRevision: summary.sourceRevision } : {}),
+      ...(summary.dim !== null && summary.dim > 0 ? { embeddingDim: summary.dim } : {}),
+      embeddingCount: summary.count,
+      updatedAt: String(row.updatedAt)
+    };
+  }
+
   loadRagChunks(): RagChunk[] {
     const rows = this.database.prepare<[string], RagChunkRow>(`
 SELECT chunk_id AS chunkId, workspace_id AS workspaceId, source_uri AS sourceUri,
@@ -305,6 +368,7 @@ VALUES (?, ?, ?, ?, ?, ?, ?)`);
           createdAt
         );
       }
+      this.refreshRagCorpusEmbeddingMetadata(createdAt);
     }).immediate();
   }
 
@@ -342,6 +406,85 @@ SELECT MIN(source_revision) AS sourceRevision,
 FROM rag_embeddings WHERE workspace_id = ?`).get(this.workspaceId);
     if (!row || row.vectorCount === 0 || row.revisionCount !== 1 || !row.sourceRevision) return null;
     return row.sourceRevision;
+  }
+
+  private writeRagCorpusMetadata(builtAt: string, coverage: RagCoverage, updatedAt: string): void {
+    const summary = this.ragEmbeddingSummary();
+    const chunkCount = this.ragChunkCount();
+    const fresh = chunkCount > 0
+      && summary.count === chunkCount
+      && summary.modelCount === 1
+      && summary.revisionCount === 1
+      && summary.dimCount === 1
+      && summary.dim !== null
+      && summary.dim > 0
+      && coverage.sourceRevision !== undefined
+      && summary.sourceRevision === coverage.sourceRevision;
+    this.database.prepare(`
+INSERT INTO rag_corpus_metadata (
+ workspace_id, built_at, coverage_json, embedding_status, embedding_model,
+ embedding_source_revision, embedding_dim, embedding_count, updated_at
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+ON CONFLICT(workspace_id) DO UPDATE SET built_at=excluded.built_at,
+ coverage_json=excluded.coverage_json, embedding_status=excluded.embedding_status,
+ embedding_model=excluded.embedding_model, embedding_source_revision=excluded.embedding_source_revision,
+ embedding_dim=excluded.embedding_dim, embedding_count=excluded.embedding_count,
+ updated_at=excluded.updated_at
+`).run(
+      this.workspaceId,
+      builtAt,
+      JSON.stringify(coverage),
+      fresh ? 'fresh' : 'invalidated',
+      summary.model,
+      summary.sourceRevision,
+      summary.dim,
+      summary.count,
+      updatedAt
+    );
+  }
+
+  private refreshRagCorpusEmbeddingMetadata(updatedAt: string): void {
+    const row = this.database.prepare<[string], { builtAt: string; coverageJson: string }>(`
+SELECT built_at AS builtAt, coverage_json AS coverageJson
+FROM rag_corpus_metadata WHERE workspace_id = ?`).get(this.workspaceId);
+    if (!row) return;
+    const coverage = parseJson(String(row.coverageJson), 'RAG coverage metadata') as RagCoverage;
+    this.writeRagCorpusMetadata(String(row.builtAt), coverage, updatedAt);
+  }
+
+  private ragChunkCount(): number {
+    const row = this.database.prepare<[string], { count: number }>(`
+SELECT COUNT(*) AS count FROM rag_chunks WHERE workspace_id = ?`).get(this.workspaceId);
+    return Number(row?.count ?? 0);
+  }
+
+  private ragEmbeddingSummary(): RagEmbeddingSummary {
+    const row = this.database.prepare<[string], {
+      count: number;
+      model: string | null;
+      modelCount: number;
+      sourceRevision: string | null;
+      revisionCount: number;
+      dim: number | null;
+      dimCount: number;
+    }>(`
+SELECT COUNT(*) AS count,
+       MIN(model) AS model,
+       COUNT(DISTINCT model) AS modelCount,
+       MIN(source_revision) AS sourceRevision,
+       COUNT(DISTINCT source_revision) AS revisionCount,
+       MIN(dim) AS dim,
+       COUNT(DISTINCT dim) AS dimCount
+FROM rag_embeddings WHERE workspace_id = ?`).get(this.workspaceId);
+    return {
+      count: Number(row?.count ?? 0),
+      model: row?.model ?? null,
+      modelCount: Number(row?.modelCount ?? 0),
+      sourceRevision: row?.sourceRevision ?? null,
+      revisionCount: Number(row?.revisionCount ?? 0),
+      dim: row?.dim === null || row?.dim === undefined ? null : Number(row.dim),
+      dimCount: Number(row?.dimCount ?? 0)
+    };
   }
 
   replaceReferences(references: readonly ReferenceEdge[]): void {    const insert = this.database.prepare(`

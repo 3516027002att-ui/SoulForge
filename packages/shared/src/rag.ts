@@ -67,6 +67,25 @@ export interface RagCoverage {
   resultCount: number;
 }
 
+/**
+ * Workspace-level durable RAG state.  Chunk rows carry per-source freshness;
+ * this row restores the corpus-wide coverage and embedding contract after a
+ * SQLite reopen without treating a loaded chunk list as complete evidence.
+ */
+export type RagEmbeddingFreshness = 'fresh' | 'invalidated' | 'unknown';
+
+export interface RagCorpusMetadata {
+  workspaceId: string;
+  builtAt: string;
+  coverage: RagCoverage;
+  embeddingStatus: RagEmbeddingFreshness;
+  embeddingModel?: string;
+  embeddingSourceRevision?: string;
+  embeddingDim?: number;
+  embeddingCount: number;
+  updatedAt: string;
+}
+
 export interface RagCorpusStats {
   total: number;
   byFamily: Record<RagChunkFamily, number>;

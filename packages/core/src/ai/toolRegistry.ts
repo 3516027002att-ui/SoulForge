@@ -21,7 +21,7 @@ import { rollbackOperation } from '../patch/rollback.js';
 import type { WorkspaceSession } from '../workspace/workspaceSession.js';
 import { buildGraphPatchFromProposal, summarizeGraphPatch } from '../patch/graphPatch.js';
 import { assessEditRisk, evaluateWriterGate, resolveWriterContract } from '../patch/writerContract.js';
-import type { RagChunkFamily, RagCorpus } from '@soulforge/shared';
+import type { RagChunkFamily, RagCorpus, RagRetrieveOptions, RagRetrieveResult } from '@soulforge/shared';
 import { RAG_CHUNK_FAMILIES } from '@soulforge/shared';
 import type { SearchResult, WorkspaceIndex } from '../indexing/workspaceIndex.js';
 import { ALL_RESOURCE_KINDS, classifyResourceKind } from '../workspace/resourceKinds.js';
@@ -98,6 +98,8 @@ export interface ToolContext {
   explicitCreate?: boolean;
   /** Optional durable/in-memory RAG corpus. Absent falls back to building from the index. */
   rag?: RagCorpus;
+  /** Optional host-owned hybrid RAG path; production hosts may attach provider-backed vectors. */
+  retrieveEvidence?: (query: string, options?: RagRetrieveOptions) => Promise<RagRetrieveResult>;
   /** Optional long-term memory store (Codex MEMORY.md persistent layer). */
   memoryStore?: MemoryStore;
   /**
@@ -510,7 +512,7 @@ export function createDefaultToolRegistry(): ToolRegistry {
       families: 'array?',
       expandReferences: 'boolean?'
     },
-    run: (input, context) => {
+    run: async (input, context) => {
       const corpus = resolveRagCorpus(context);
       if (corpus === null && context.workspaceIndex === null) {
         return fail('WORKSPACE_REQUIRED', '这次工具需要先打开 Mod 工作区。');
@@ -519,11 +521,14 @@ export function createDefaultToolRegistry(): ToolRegistry {
       const query = asString(value.query);
       if (!query.trim()) return fail('INVALID_INPUT', 'retrieve_evidence 需要非空 query。');
       const families = asRagFamilies(value.families);
-      const result = retrieveEvidence(corpus, query, {
+      const retrievalOptions = {
         limit: asNumber(value.limit, 8),
         ...(value.expandReferences === undefined ? {} : { expandReferences: value.expandReferences === true }),
         ...(families ? { families } : {})
-      });
+      };
+      const result = context.retrieveEvidence
+        ? await context.retrieveEvidence(query, retrievalOptions)
+        : retrieveEvidence(corpus, query, retrievalOptions);
       if (!result.ok) {
         if (result.code === 'insufficient_evidence') return ok({
           query,

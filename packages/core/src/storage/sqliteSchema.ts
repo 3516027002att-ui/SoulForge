@@ -604,6 +604,31 @@ CREATE INDEX IF NOT EXISTS idx_rag_embeddings_workspace_source_revision
   ON rag_embeddings(workspace_id, source_revision);
 `
   }
+  ,{
+    id: 12,
+    name: 'v0_5_rag_workspace_metadata',
+    sql: `
+PRAGMA foreign_keys = ON;
+
+-- One durable row restores corpus-wide coverage after a process restart.
+-- Embedding fields are a summary of rag_embeddings, never credentials.
+CREATE TABLE IF NOT EXISTS rag_corpus_metadata (
+  workspace_id TEXT PRIMARY KEY,
+  built_at TEXT NOT NULL,
+  coverage_json TEXT NOT NULL,
+  embedding_status TEXT NOT NULL,
+  embedding_model TEXT,
+  embedding_source_revision TEXT,
+  embedding_dim INTEGER,
+  embedding_count INTEGER NOT NULL DEFAULT 0,
+  updated_at TEXT NOT NULL,
+  FOREIGN KEY (workspace_id) REFERENCES workspaces(workspace_id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_rag_corpus_metadata_embedding_revision
+  ON rag_corpus_metadata(workspace_id, embedding_source_revision);
+`
+  }
 ];
 
 export const APP_DB_MIGRATIONS: readonly SqlMigration[] = [

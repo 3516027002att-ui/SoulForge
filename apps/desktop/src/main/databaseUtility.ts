@@ -150,6 +150,11 @@ async function dispatch(request: OperationLogUtilityRequest): Promise<unknown> {
       return null;
     case 'loadRagChunks':
       return requireWorkspaceDataRepository().loadRagChunks();
+    case 'replaceRagCorpusMetadata':
+      requireWorkspaceDataRepository().replaceRagCorpusMetadata(request.payload);
+      return null;
+    case 'loadRagCorpusMetadata':
+      return requireWorkspaceDataRepository().loadRagCorpusMetadata();
     case 'searchRagChunks':
       return requireWorkspaceDataRepository().searchRagChunks(request.payload.query, request.payload.limit);
     case 'replaceRagEmbeddings':

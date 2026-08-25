@@ -195,6 +195,7 @@ import type {
   GparamDocument,
   ReadOperationId,
   RagChunkFamily,
+  RagRetrieveOptions,
   RagRetrieveResult,
   ResourceKind,
   SaveTextResourceResult,
@@ -2810,6 +2811,8 @@ async function persistActiveRag(
 ): Promise<void> {
   await database.replaceRagChunks(corpus.chunks, corpus.coverage?.sourceRevision);
   await database.replaceReferences(corpus.references);
+  if (!corpus.coverage) throw new Error('生产 RAG 持久化缺少 coverage 元数据。');
+  await database.replaceRagCorpusMetadata({ builtAt: corpus.builtAt, coverage: corpus.coverage });
   // Switch the in-memory snapshot only after both durable projections have
   // succeeded; otherwise a failed persistence could expose a new RAG view
   // while SQLite still contains the previous one.
@@ -11824,7 +11827,7 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
    * 与索引模型一致时启用向量侧；否则退化为纯 lexical（行为不变）。
    * rag.searchEvidence IPC 与 ai.agent.run 的 ragSearch 自动注入共用本实现。
    */
-  const searchWorkspaceEvidence = async (
+  async function searchWorkspaceEvidence(
     database: OperationLogUtilityClient,
     query: string,
     options: {
@@ -11833,7 +11836,7 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
       families?: readonly RagChunkFamily[];
       expandReferences?: boolean;
     }
-  ): Promise<RagRetrieveResult> => {
+  ): Promise<RagRetrieveResult> {
     if (!activeIndex) {
       return { ok: false, code: 'WORKSPACE_REQUIRED', message: '先打开 Mod 工作区。' };
     }
@@ -11875,7 +11878,7 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
       ...(options.families && options.families.length > 0 ? { families: options.families } : {}),
       ...(vectors ? { vectors } : {})
     });
-  };
+  }
 
   handle('rag.searchEvidence', async (_event, input: {
     query: string;
@@ -12179,6 +12182,7 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
     const mode: ToolContext['mode'] = request.mode === 'normal' || request.mode === 'fullPermission'
       ? request.mode
       : 'plan';
+    const session = activeSession;
     // 无工作区时 activeIndex 为 null：工具层按工具守卫（WORKSPACE_REQUIRED），
     // 需要工作区的工具干净失败，不整次拒绝（T6）。
     const bridge = createAgentToolBridge({
@@ -12187,7 +12191,21 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
       // allowed to make post-write embeddings fresh.  Read-only IPC callers
       // keep the no-provider context and therefore cannot claim vector
       // freshness accidentally.
-      context: { ...currentToolContext(stored.id), mode },
+      context: {
+        ...currentToolContext(stored.id),
+        mode,
+        ...(session ? {
+          retrieveEvidence: async (query: string, options?: RagRetrieveOptions): Promise<RagRetrieveResult> => {
+            const database = await ensureActiveOperationLog(session);
+            return searchWorkspaceEvidence(database, query, {
+              configId: stored.id,
+              ...(options?.limit === undefined ? {} : { limit: options.limit }),
+              ...(options?.families === undefined ? {} : { families: options.families }),
+              ...(options?.expandReferences === undefined ? {} : { expandReferences: options.expandReferences })
+            });
+          }
+        } : {})
+      },
       externalTaskGoal: request.prompt,
       // Natural-language discovery always goes through ResolverWorkflowState's
       // text-first gate. Precise canonical addresses are exempted by that
@@ -12551,7 +12569,7 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
                   return { ok: false, code: 'WORKSPACE_REQUIRED', message: '先打开 Mod 工作区。' };
                 }
                 const ragDatabase = await ensureActiveOperationLog(activeSession);
-                return searchWorkspaceEvidence(ragDatabase, query, {});
+                return searchWorkspaceEvidence(ragDatabase, query, { configId: stored.id });
               }
             }
           }

@@ -6,6 +6,8 @@ import type {
   PatchHistoryEntry,
   IndexedFile,
   RagChunk,
+  RagCorpusMetadata,
+  RagCoverage,
   ReferenceEdge
 } from '@soulforge/shared';
 import type { OperationLogStore } from '@soulforge/core';
@@ -183,6 +185,14 @@ export class OperationLogUtilityClient implements OperationLogStore {
 
   loadRagChunks(): Promise<RagChunk[]> {
     return this.request('loadRagChunks', {});
+  }
+
+  replaceRagCorpusMetadata(input: { builtAt: string; coverage: RagCoverage }): Promise<void> {
+    return this.request('replaceRagCorpusMetadata', input).then(() => undefined);
+  }
+
+  loadRagCorpusMetadata(): Promise<RagCorpusMetadata | null> {
+    return this.request('loadRagCorpusMetadata', {});
   }
 
   async replaceRagEmbeddings(entries: Array<{ chunkId: string; model: string; vector: Float32Array; sourceRevision: string }>): Promise<void> {
@@ -381,6 +391,7 @@ export class OperationLogUtilityClient implements OperationLogStore {
       case 'openWorkspace':
       case 'replaceFiles':
       case 'replaceRagChunks':
+      case 'replaceRagCorpusMetadata':
       case 'replaceReferences':
       case 'replaceDiagnostics':
       case 'planRecoveryCleanup':
