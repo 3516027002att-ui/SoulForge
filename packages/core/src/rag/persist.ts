@@ -3,7 +3,7 @@ import type { WorkspaceDataRepository } from '../storage/workspaceDataRepository
 import { createRagCorpus } from './chunkBuilder.js';
 
 export function persistRagCorpus(repository: WorkspaceDataRepository, corpus: RagCorpus): void {
-  repository.replaceRagChunks(corpus.chunks);
+  repository.replaceRagChunks(corpus.chunks, corpus.coverage?.sourceRevision);
   repository.replaceReferences(corpus.references);
 }
 

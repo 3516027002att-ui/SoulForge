@@ -186,6 +186,7 @@ VALUES (?, ?, ?, ?, ?)`)
   const refreshes: RefreshTrace[] = [];
   let activeRag: RagCorpus | null = null;
   let lastCommittedEmbedding: EmbeddingResult | undefined;
+  let embeddingInvalidated = false;
 
   const refreshAfterPostcommit = async (notice?: KnowledgeRefreshNotice): Promise<KnowledgeRefreshResult> => {
     if (!activeRag && index.getFiles().length === 0) {
@@ -195,6 +196,11 @@ VALUES (?, ?, ?, ?, ?)`)
     // Durable state is committed before the in-memory snapshot is switched.
     persistRagCorpus(repository, next);
     activeRag = next;
+    if (notice?.reason === 'committed-mutation') {
+      // Observe invalidation before the new provider batch is attempted. A
+      // later same-revision read may legitimately preserve the fresh vectors.
+      embeddingInvalidated = repository.loadRagEmbeddings().size === 0;
+    }
     const embedding: EmbeddingResult = notice?.reason === 'committed-mutation'
       ? await rebuildWithRealProvider(repository, next)
       : {
@@ -398,7 +404,6 @@ VALUES (?, ?, ?, ?, ?)`)
         && hit.chunk?.sourceRevision === initialChunkRevision),
       '旧 A/current old revision 不得出现在第二次 RAG query'
     );
-    const embeddingInvalidated = repository.loadRagEmbeddings().size === 0;
     check(embeddingInvalidated, '替换 current chunks 后旧 embedding 必须被 FK cascade 清掉');
 
     const embedding = lastCommittedEmbedding ?? {
@@ -408,10 +413,16 @@ VALUES (?, ?, ?, ?, ?)`)
     };
     const embeddingRebuilt = embedding.status === 'rebuilt'
       && repository.loadRagEmbeddings().size === currentCorpus.chunks.length
-      && repository.ragEmbeddingSourceRevision() === currentChunkRevision;
+      && repository.ragEmbeddingSourceRevision() === currentCoverageRevision;
     check(
       embedding.status === 'BLOCKED' || embeddingRebuilt,
-      'embedding 必须真实重建，或在无 provider 时结构化 BLOCKED'
+      `embedding 必须真实重建，或在无 provider 时结构化 BLOCKED；${JSON.stringify({
+        status: embedding.status,
+        vectorCount: repository.loadRagEmbeddings().size,
+        expectedCount: currentCorpus.chunks.length,
+        storedRevision: repository.ragEmbeddingSourceRevision(),
+        currentCoverageRevision
+      })}`
     );
 
     const referencesPersisted = repository.loadReferences().length === currentCorpus.references.length;
@@ -561,11 +572,19 @@ async function rebuildWithRealProvider(
       message: `真实 embedding provider 未完成重建：${result.error.message}`
     };
   }
-  const sourceRevision = corpus.coverage?.sourceRevision ?? corpus.chunks[0]?.sourceRevision;
+  // A chunk keeps the native file revision for per-symbol provenance, while
+  // the durable vector set is bound to the complete corpus snapshot revision.
+  // The production desktop path uses this coverage revision for every vector;
+  // requiring every chunk revision to equal it would reject a valid corpus
+  // containing more than one source file.
+  const sourceRevision = corpus.coverage?.sourceRevision;
+  const chunkRevisionsValid = corpus.chunks.length > 0
+    && corpus.chunks.every((chunk) => typeof chunk.sourceRevision === 'string'
+      && chunk.sourceRevision.trim() !== '');
   const vectorsValid = result.vectors.every((vector) => vector.length === result.dim
     && vector.every((value) => Number.isFinite(value)));
   if (!sourceRevision || result.vectors.length !== corpus.chunks.length || result.dim <= 0
-    || !vectorsValid || corpus.chunks.some((chunk) => chunk.sourceRevision !== sourceRevision)) {
+    || !vectorsValid || !chunkRevisionsValid) {
     return {
       status: 'BLOCKED',
       code: 'EMBEDDING_REBUILD_INCOMPLETE',
@@ -576,7 +595,7 @@ async function rebuildWithRealProvider(
     chunkId: chunk.chunkId,
     model,
     vector: result.vectors[index]!,
-    sourceRevision: chunk.sourceRevision ?? sourceRevision
+    sourceRevision
   })));
   if (repository.loadRagEmbeddings().size !== corpus.chunks.length
     || repository.ragEmbeddingSourceRevision() !== sourceRevision

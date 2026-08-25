@@ -44,6 +44,15 @@ interface FileRow {
   parseStatus: string; diagnosticsJson: string; game: string;
 }
 
+interface ExistingRagEmbeddingRow {
+  chunkId: string;
+  model: string;
+  dim: number;
+  vector: Buffer;
+  sourceRevision: string;
+  contentHash: string;
+}
+
 export class WorkspaceDataRepository {
   constructor(private readonly database: SqliteDatabase, readonly workspaceId: string) {}
 
@@ -146,7 +155,7 @@ FROM background_jobs WHERE workspace_id = ? ORDER BY created_at DESC, job_id`).a
     return { ...input, id: randomUUID(), workspaceId: this.workspaceId };
   }
 
-  replaceRagChunks(chunks: readonly RagChunk[]): void {
+  replaceRagChunks(chunks: readonly RagChunk[], preserveEmbeddingsForSourceRevision?: string): void {
     for (const chunk of chunks) this.assertWorkspace(chunk.workspaceId);
     const insert = this.database.prepare(`
 INSERT INTO rag_chunks (
@@ -159,6 +168,29 @@ INSERT INTO rag_chunks_fts (chunk_id, title, body) VALUES (?, ?, ?)`);
 INSERT INTO rag_chunks_fts_trigram (chunk_id, title, body) VALUES (?, ?, ?)`);
     const createdAt = new Date().toISOString();
     this.database.transaction(() => {
+      const existingEmbeddings = this.database.prepare<[string], ExistingRagEmbeddingRow>(`
+SELECT e.chunk_id AS chunkId, e.model, e.dim, e.vector,
+       e.source_revision AS sourceRevision, c.content_hash AS contentHash
+FROM rag_embeddings e
+JOIN rag_chunks c ON c.chunk_id = e.chunk_id AND c.workspace_id = e.workspace_id
+WHERE e.workspace_id = ?`).all(this.workspaceId);
+      const nextChunksById = new Map(chunks.map((chunk) => [chunk.chunkId, chunk]));
+      const embeddingModels = new Set(existingEmbeddings.map((entry) => entry.model));
+      const preserveEmbeddings = typeof preserveEmbeddingsForSourceRevision === 'string'
+        && preserveEmbeddingsForSourceRevision.trim() !== ''
+        && existingEmbeddings.length === chunks.length
+        && existingEmbeddings.length > 0
+        && embeddingModels.size === 1
+        && existingEmbeddings.every((entry) => {
+          const next = nextChunksById.get(entry.chunkId);
+          return entry.sourceRevision === preserveEmbeddingsForSourceRevision
+            && next !== undefined
+            && next.contentHash === entry.contentHash
+            && Number.isInteger(entry.dim)
+            && entry.dim > 0
+            && Buffer.isBuffer(entry.vector)
+            && entry.vector.byteLength === entry.dim * Float32Array.BYTES_PER_ELEMENT;
+        });
       const deleteFts = this.database.prepare(
         'DELETE FROM rag_chunks_fts WHERE chunk_id IN (SELECT chunk_id FROM rag_chunks WHERE workspace_id = ?)');
       const deleteTrigram = this.database.prepare(
@@ -175,6 +207,22 @@ INSERT INTO rag_chunks_fts_trigram (chunk_id, title, body) VALUES (?, ?, ?)`);
         );
         insertFts.run(chunk.chunkId, chunk.title, chunk.body);
         insertTrigram.run(chunk.chunkId, chunk.title, chunk.body);
+      }
+      if (preserveEmbeddings) {
+        const insertEmbedding = this.database.prepare(`
+INSERT INTO rag_embeddings (chunk_id, workspace_id, model, dim, vector, source_revision, created_at)
+VALUES (?, ?, ?, ?, ?, ?, ?)`);
+        for (const entry of existingEmbeddings) {
+          insertEmbedding.run(
+            entry.chunkId,
+            this.workspaceId,
+            entry.model,
+            entry.dim,
+            entry.vector,
+            entry.sourceRevision,
+            createdAt
+          );
+        }
       }
     }).immediate();
   }

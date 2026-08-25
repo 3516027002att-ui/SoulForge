@@ -148,6 +148,11 @@ VALUES (?, ?, ?, ?, ?)`).run('ws-embed', workspace.root, 'sekiro', now, now);
       const third = loaded[2] ?? 0;
       expect(loaded.length === 4 && Math.abs(third - 0.3) < 1e-7, 'float32 roundtrip exact');
     }
+    repository.replaceRagChunks([probe], 'fixture-revision-1');
+    expect(repository.loadRagEmbeddings().size === 1,
+      'same content/revision rebuild preserves current embeddings');
+    expect(repository.ragEmbeddingSourceRevision() === 'fixture-revision-1',
+      'preserved embeddings retain their corpus revision');
     const changedProbe = { ...probe, body: 'changed content', contentHash: 'probe-hash-2', sourceRevision: 'fixture-source-revision-2' };
     repository.replaceRagChunks([changedProbe]);
     const reloadedChunk = repository.loadRagChunks()[0];
@@ -267,7 +272,7 @@ VALUES (?, ?, ?, ?, ?)`).run('ws-embed', workspace.root, 'sekiro', now, now);
       assertions: checked,
       protocol: 'POST /v1/embeddings (openai-compatible)',
       fusion: 'RRF (K=60)',
-      storage: 'rag_embeddings float32 BLOB, cascade on chunk rebuild',
+      storage: 'rag_embeddings float32 BLOB; same-revision rebuild preserves, source/content change cascades',
       nonClaims: [
         'Mock responses do not prove any real embedding provider is available.',
         'Vector similarity is not native-verified; large-corpus mode is bounded top-K exact scan, not ANN.'

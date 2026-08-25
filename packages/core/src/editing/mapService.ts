@@ -462,9 +462,32 @@ export async function executeMapTransaction(
   }
 
   // Resolve addresses/stable keys to the reread document's canonical names
-  // once. The working maps then compose operations in order instead of
-  // accidentally treating an address as a second, unrelated entity.
-  const operations = transaction.operations.map((operation) => canonicalizeMapOperation(loaded.sceneGraph, operation));
+  // once. The current native MSB writer accepts names, not stable identities;
+  // a duplicate display name therefore cannot be lowered safely. Keep the
+  // exact identity resolution in the scene graph, but fail closed here instead
+  // of silently selecting another same-name entity in the working maps.
+  let operations: MapEditOperation[];
+  try {
+    operations = transaction.operations.map((operation) => canonicalizeMapOperation(loaded.sceneGraph, operation));
+  } catch (error) {
+    if (error instanceof MapNativeNameCollisionError) {
+      return {
+        ok: false,
+        transactionId: transaction.id,
+        appliedOperations: 0,
+        error: {
+          code: 'MAP_NATIVE_NAME_COLLISION',
+          message: error.message,
+          details: {
+            target: error.target,
+            name: error.nameValue,
+            stableKey: error.stableKey
+          }
+        }
+      };
+    }
+    throw error;
+  }
 
   // Every domain transaction also enters the semantic ChangeSet boundary.  The
   // map writer remains the native authority, but no writer is allowed to stage
@@ -1085,8 +1108,28 @@ async function verifyMapPostCommit(
   return { diagnostics, document: reread.doc, createdEntities };
 }
 
-function canonicalizeMapOperation(sceneGraph: MapSceneGraph, operation: MapEditOperation): MapEditOperation {
-  const canonicalName = (target: string): string => sceneGraph.findEntity(target)?.name ?? target;
+export class MapNativeNameCollisionError extends Error {
+  constructor(
+    readonly target: string,
+    readonly nameValue: string,
+    readonly stableKey: string
+  ) {
+    super(
+      `MAP_NATIVE_NAME_COLLISION: 目标 ${target} 解析到重名实体 ${nameValue} `
+      + `(stableKey=${stableKey})；当前 native writer 只接受名称，已拒绝降级写回。`
+    );
+    this.name = 'MapNativeNameCollisionError';
+  }
+}
+
+export function canonicalizeMapOperation(sceneGraph: MapSceneGraph, operation: MapEditOperation): MapEditOperation {
+  const canonicalName = (target: string): string => {
+    const entity = sceneGraph.findEntity(target);
+    if (entity && sceneGraph.isNameAmbiguous(entity.name)) {
+      throw new MapNativeNameCollisionError(target, entity.name, entity.stableKey);
+    }
+    return entity?.name ?? target;
+  };
   switch (operation.kind) {
     case 'set_transform': return { ...operation, target: canonicalName(operation.target) };
     case 'batch_transform': return { ...operation, targets: operation.targets.map(canonicalName) };

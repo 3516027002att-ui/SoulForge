@@ -39,8 +39,14 @@ internal sealed class DcxNativeDocument
     {
         var info = new FileInfo(path);
         if (!info.Exists) throw new FileNotFoundException("DCX 文件不存在。", path);
-        if (info.Length <= 0 || info.Length > MaxSourceBytes)
-            throw new InvalidDataException($"DCX 文件大小 {info.Length} 超出安全读取范围。");
+        if (info.Length <= 0)
+            throw new InvalidDataException($"DCX 文件大小 {info.Length} 无效。");
+        if (info.Length > MaxSourceBytes)
+            throw new DcxSizeLimitException(
+                $"压缩源大小 {info.Length} bytes 超过安全上限 {MaxSourceBytes} bytes。",
+                info.Length,
+                null,
+                MaxSourceBytes);
         return Read(File.ReadAllBytes(path), oodleRuntimeRoot, path);
     }
 
@@ -57,8 +63,16 @@ internal sealed class DcxNativeDocument
             throw new InvalidDataException("DCX DCS/DCP 头缺失或位置不受支持。");
         var uncompressed = checked((int)ReadUInt32Be(source, 0x1C));
         var compressed = checked((int)ReadUInt32Be(source, 0x20));
-        if (uncompressed <= 0 || uncompressed > MaxPayloadBytes || compressed <= 0 || compressed > MaxPayloadBytes)
-            throw new InvalidDataException("DCX 压缩或解压大小超出安全范围。");
+        if (uncompressed <= 0 || compressed <= 0)
+            throw new InvalidDataException("DCX 压缩或解压大小无效。");
+        if (uncompressed > MaxPayloadBytes || compressed > MaxPayloadBytes)
+            throw new DcxSizeLimitException(
+                $"declaredUncompressedBytes={uncompressed}, "
+                + $"compressedBytes={compressed}, maxPayloadBytes={MaxPayloadBytes}。",
+                null,
+                compressed,
+                MaxPayloadBytes,
+                uncompressed);
         var format = System.Text.Encoding.ASCII.GetString(source, 0x28, 4);
         var dca = FindMagic(source, "DCA\0"u8, 0x30, Math.Min(source.Length, 0x100));
         if (dca < 0) throw new InvalidDataException("DCX DCA 头缺失。");
@@ -238,3 +252,25 @@ internal sealed record DcxRoundTripReport(
     string PayloadHash,
     string? RebuiltPayloadHash,
     string? Note);
+
+internal sealed class DcxSizeLimitException : Exception
+{
+    public DcxSizeLimitException(
+        string message,
+        long? sourceBytes,
+        long? compressedBytes,
+        long maxBytes,
+        long? uncompressedBytes = null)
+        : base(message)
+    {
+        Details = new
+        {
+            sourceBytes,
+            compressedBytes,
+            uncompressedBytes,
+            maxBytes
+        };
+    }
+
+    public object Details { get; }
+}

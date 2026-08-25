@@ -9,6 +9,7 @@ import {
   type MapDocument,
   type MapEditTransaction
 } from '@soulforge/shared';
+import { canonicalizeMapOperation, MapNativeNameCollisionError } from '../editing/mapService.js';
 
 export async function runMapDocument10kScaleSmoke(): Promise<void> {
   console.log('[Smoke] Testing 10k Scale MapDocument & SceneGraph...');
@@ -106,6 +107,16 @@ export async function runMapDocument10kScaleSmoke(): Promise<void> {
   });
   assert.equal(exactIdentityValidation.valid, true,
     'Exact stableKey must not be rejected as a duplicate-name ambiguity');
+  assert.throws(
+    () => canonicalizeMapOperation(duplicateGraph, {
+      kind: 'set_transform',
+      target: duplicateParts[0]!.stableKey,
+      position: [11, 12, 13]
+    }),
+    (error: unknown) => error instanceof MapNativeNameCollisionError
+      && String(error).includes('MAP_NATIVE_NAME_COLLISION'),
+    'Production native-name lowering must fail closed for duplicate-name exact identities'
+  );
   const bareNameValidation = validateMapTransaction(duplicateNameDoc, {
     id: 'map-duplicate-bare-name',
     mapId: duplicateNameDoc.mapId,

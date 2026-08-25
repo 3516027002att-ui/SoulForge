@@ -24,6 +24,208 @@ internal sealed class BridgeCommandService
     // BRIDGE_REQUEST_FAILED.  The gate covers packfile too: this keeps both
     // native HKX families on one checked production boundary.
     private static readonly SemaphoreSlim ActionHkxReadGate = new(1, 1);
+    private const long MaxActionSessionCacheBytes = 512L * 1024 * 1024;
+    private const int MaxActionSessionCaches = 3;
+    private static readonly object ActionSessionCachesLock = new();
+    private static readonly Dictionary<string, ActionSessionCache> ActionSessionCaches = new(StringComparer.Ordinal);
+
+    /// <summary>
+    /// Bounded, read-only cache used only by an explicitly identified corpus
+    /// coverage run. The normal editor read path passes no actionSessionId and
+    /// therefore keeps the old one-request lifetime.
+    /// </summary>
+    private sealed class ActionSessionCache
+    {
+        private readonly Dictionary<string, CachedActionBinder> binders = new(StringComparer.OrdinalIgnoreCase);
+        private readonly Dictionary<string, CachedTaeDocument> taeDocuments = new(StringComparer.OrdinalIgnoreCase);
+        private long bytes;
+        private long sequence;
+
+        public (DcxNativeDocument Dcx, Bnd4NativeDocument Bnd4) ReadBinder(
+            string file,
+            string? oodleRuntimeRoot)
+        {
+            var fullPath = Path.GetFullPath(file);
+            var cacheKey = CreateCacheKey(file, oodleRuntimeRoot);
+            var stamp = FileStamp.Read(fullPath);
+            if (binders.TryGetValue(cacheKey, out var cached) && cached.Stamp == stamp)
+            {
+                cached.LastAccess = ++sequence;
+                return (cached.Dcx, cached.Bnd4);
+            }
+
+            RemoveBinder(cacheKey);
+            var dcx = DcxNativeDocument.Read(fullPath, oodleRuntimeRoot);
+            var bnd4 = Bnd4NativeDocument.Read(dcx.Payload);
+            var estimatedBytes = EstimateBytes(dcx, bnd4);
+            if (estimatedBytes <= MaxActionSessionCacheBytes)
+            {
+                while (bytes + estimatedBytes > MaxActionSessionCacheBytes && binders.Count > 0)
+                {
+                    var oldest = binders.OrderBy(pair => pair.Value.LastAccess).First().Key;
+                    RemoveBinder(oldest);
+                }
+
+                binders[cacheKey] = new CachedActionBinder(
+                    stamp,
+                    dcx,
+                    bnd4,
+                    estimatedBytes,
+                    ++sequence);
+                bytes += estimatedBytes;
+            }
+
+            return (dcx, bnd4);
+        }
+
+        public bool TryGetTae(
+            string file,
+            string? oodleRuntimeRoot,
+            out TaeNativeDocument document,
+            out Diagnostic[] diagnostics)
+        {
+            var fullPath = Path.GetFullPath(file);
+            var cacheKey = CreateCacheKey(file, oodleRuntimeRoot);
+            var stamp = FileStamp.Read(fullPath);
+            if (taeDocuments.TryGetValue(cacheKey, out var cached) && cached.Stamp == stamp)
+            {
+                cached.LastAccess = ++sequence;
+                document = cached.Document;
+                diagnostics = cached.Diagnostics;
+                return true;
+            }
+
+            taeDocuments.Remove(cacheKey);
+            document = null!;
+            diagnostics = Array.Empty<Diagnostic>();
+            return false;
+        }
+
+        public void StoreTae(
+            string file,
+            string? oodleRuntimeRoot,
+            TaeNativeDocument document,
+            Diagnostic[] diagnostics)
+        {
+            var fullPath = Path.GetFullPath(file);
+            var cacheKey = CreateCacheKey(file, oodleRuntimeRoot);
+            taeDocuments[cacheKey] = new CachedTaeDocument(
+                FileStamp.Read(fullPath),
+                document,
+                diagnostics,
+                ++sequence);
+        }
+
+        private void RemoveBinder(string fullPath)
+        {
+            if (!binders.Remove(fullPath, out var existing)) return;
+            bytes -= existing.EstimatedBytes;
+        }
+
+        private static long EstimateBytes(DcxNativeDocument dcx, Bnd4NativeDocument bnd4) =>
+            dcx.SourceBytes.LongLength
+            + dcx.Payload.LongLength
+            + bnd4.Entries.Sum(entry => (long)entry.CompressedSize);
+
+        private static string CreateCacheKey(string file, string? oodleRuntimeRoot) =>
+            $"{Path.GetFullPath(file)}\n{(string.IsNullOrWhiteSpace(oodleRuntimeRoot) ? string.Empty : Path.GetFullPath(oodleRuntimeRoot))}";
+    }
+
+    private sealed class CachedActionBinder
+    {
+        public CachedActionBinder(
+            FileStamp stamp,
+            DcxNativeDocument dcx,
+            Bnd4NativeDocument bnd4,
+            long estimatedBytes,
+            long lastAccess)
+        {
+            Stamp = stamp;
+            Dcx = dcx;
+            Bnd4 = bnd4;
+            EstimatedBytes = estimatedBytes;
+            LastAccess = lastAccess;
+        }
+
+        public FileStamp Stamp { get; }
+        public DcxNativeDocument Dcx { get; }
+        public Bnd4NativeDocument Bnd4 { get; }
+        public long EstimatedBytes { get; }
+        public long LastAccess { get; set; }
+    }
+
+    private sealed class CachedTaeDocument
+    {
+        public CachedTaeDocument(
+            FileStamp stamp,
+            TaeNativeDocument document,
+            Diagnostic[] diagnostics,
+            long lastAccess)
+        {
+            Stamp = stamp;
+            Document = document;
+            Diagnostics = diagnostics;
+            LastAccess = lastAccess;
+        }
+
+        public FileStamp Stamp { get; }
+        public TaeNativeDocument Document { get; }
+        public Diagnostic[] Diagnostics { get; }
+        public long LastAccess { get; set; }
+    }
+
+    private readonly record struct FileStamp(long Length, long LastWriteUtcTicks)
+    {
+        public static FileStamp Read(string path)
+        {
+            var info = new FileInfo(path);
+            if (!info.Exists) throw new FileNotFoundException("ACTION cache input file does not exist.", path);
+            return new FileStamp(info.Length, info.LastWriteTimeUtc.Ticks);
+        }
+    }
+
+    private static readonly Dictionary<string, long> ActionSessionCacheAccess = new(StringComparer.Ordinal);
+    private static long actionSessionCacheSequence;
+
+    private static ActionSessionCache GetActionSessionCache(string sessionId)
+    {
+        lock (ActionSessionCachesLock)
+        {
+            if (ActionSessionCaches.TryGetValue(sessionId, out var existing))
+            {
+                ActionSessionCacheAccess[sessionId] = ++actionSessionCacheSequence;
+                return existing;
+            }
+
+            if (ActionSessionCaches.Count >= MaxActionSessionCaches)
+            {
+                var oldest = ActionSessionCacheAccess
+                    .OrderBy(pair => pair.Value)
+                    .Select(pair => pair.Key)
+                    .FirstOrDefault();
+                if (oldest != null)
+                {
+                    ActionSessionCaches.Remove(oldest);
+                    ActionSessionCacheAccess.Remove(oldest);
+                }
+            }
+
+            var created = new ActionSessionCache();
+            ActionSessionCaches[sessionId] = created;
+            ActionSessionCacheAccess[sessionId] = ++actionSessionCacheSequence;
+            return created;
+        }
+    }
+
+    private static bool ClearActionSessionCache(string sessionId)
+    {
+        lock (ActionSessionCachesLock)
+        {
+            var removed = ActionSessionCaches.Remove(sessionId);
+            ActionSessionCacheAccess.Remove(sessionId);
+            return removed;
+        }
+    }
 
     public async Task<BridgeResult<object>> ExecuteAsync(
         string rawCommand,
@@ -103,6 +305,28 @@ internal sealed class BridgeCommandService
             return ProbeDocumentLocator(file, oodleRuntimeRoot, resourceKind);
         }
 
+        if (command == "clear-action-session")
+        {
+            var actionSessionId = EmptyToNull(OptionString("actionSessionId", ""));
+            if (actionSessionId == null)
+                return BridgeResult<object>.Failed(file, "action", "ACTION_SESSION_ID_MISSING", "清理 ACTION session 需要 actionSessionId。");
+
+            var cleared = ClearActionSessionCache(actionSessionId);
+            return BridgeResult<object>.Partial(
+                file,
+                "action",
+                new[]
+                {
+                    new Diagnostic(
+                        "info",
+                        "ACTION_SESSION_CLEARED",
+                        cleared ? "ACTION coverage session cache 已清理。" : "ACTION coverage session cache 不存在或已被淘汰。",
+                        BridgeResult<object>.MakeSourceUri(file),
+                        new { actionSessionId, cleared })
+                },
+                new { actionSessionId, cleared });
+        }
+
         if (command == "inventory-asset-resources")
         {
             return InventoryAssetResources(file, options, oodleRuntimeRoot, cancellationToken);
@@ -144,6 +368,15 @@ internal sealed class BridgeCommandService
                 var payloadLimitBytes = OptionInt("payloadLimitBytes", 512 * 1024);
                 return BridgeResult<object>.Partial(file, GuessKindFromPath(file), diagnostics,
                     document.ToEnvelope(roundTrip, includePayload, payloadLimitBytes));
+            }
+            catch (DcxSizeLimitException ex)
+            {
+                return BridgeResult<object>.Unsupported(
+                    file,
+                    GuessKindFromPath(file),
+                    "DCX_SIZE_LIMIT_UNSUPPORTED",
+                    ex.Message,
+                    ex.Details);
             }
             catch (Exception ex) when (ex is InvalidDataException or NotSupportedException or InvalidOperationException or IOException)
             {
@@ -884,7 +1117,11 @@ internal sealed class BridgeCommandService
             }
             catch (TaeEntryMissingException)
             {
-                return BridgeResult<object>.Failed(file, "action", "TAE_ANIBND_NO_TAE_ENTRY", "anibnd 容器内未找到 TAE 魔数条目。");
+                return BridgeResult<object>.Unsupported(
+                    file,
+                    "action",
+                    "TAE_ANIBND_NO_TAE_ENTRY",
+                    "anibnd 容器内未找到 TAE 魔数条目；该文件是 companion shard，不是 TAE 文档。");
             }
             catch (Exception ex) when (ex is InvalidDataException or NotSupportedException or IOException)
             {
@@ -927,7 +1164,11 @@ internal sealed class BridgeCommandService
             }
             catch (TaeEntryMissingException)
             {
-                return BridgeResult<object>.Failed(file, "action", "TAE_ANIBND_NO_TAE_ENTRY", "anibnd 容器内未找到 TAE 魔数条目。");
+                return BridgeResult<object>.Unsupported(
+                    file,
+                    "action",
+                    "TAE_ANIBND_NO_TAE_ENTRY",
+                    "anibnd 容器内未找到 TAE 魔数条目；该文件是 companion shard，不是 TAE 文档。");
             }
             catch (Exception ex) when (ex is InvalidDataException or NotSupportedException or IOException)
             {
@@ -954,7 +1195,12 @@ internal sealed class BridgeCommandService
 
                 var (skeleton, animation, binding, motionAnimId, sourceContainer, sourceFormat,
                     sourceHash, animationContainerHash, skeletonContainerHash) =
-                    await ResolveTaeAnimationContextSerializedAsync(file, animId, oodleRuntimeRoot, cancellationToken);
+                    await ResolveTaeAnimationContextSerializedAsync(
+                        file,
+                        animId,
+                        oodleRuntimeRoot,
+                        cancellationToken,
+                        EmptyToNull(OptionString("actionSessionId", "")));
 
                 var (trackToHkxBone, _) = ActionAnimationSemantics.ValidateTrackBinding(
                     binding.TransformTrackToBoneIndices,
@@ -1130,7 +1376,11 @@ internal sealed class BridgeCommandService
             }
             catch (TaeEntryMissingException)
             {
-                return BridgeResult<object>.Failed(file, "action", "TAE_ANIBND_NO_TAE_ENTRY", "anibnd 容器内未找到 TAE 魔数条目。");
+                return BridgeResult<object>.Unsupported(
+                    file,
+                    "action",
+                    "TAE_ANIBND_NO_TAE_ENTRY",
+                    "anibnd 容器内未找到 TAE 魔数条目；该文件是 companion shard，不是 TAE 文档。");
             }
             catch (NotSupportedException ex) when (ex.Message.Contains("extracted root motion", StringComparison.OrdinalIgnoreCase)
                 || ex.Message.Contains("extractedMotion", StringComparison.OrdinalIgnoreCase))
@@ -1176,7 +1426,12 @@ internal sealed class BridgeCommandService
 
                 var (skeleton, animation, binding, motionAnimId, sourceContainer, sourceFormat,
                     sourceHash, animationContainerHash, skeletonContainerHash) =
-                    await ResolveTaeAnimationContextSerializedAsync(file, animId, oodleRuntimeRoot, cancellationToken);
+                    await ResolveTaeAnimationContextSerializedAsync(
+                        file,
+                        animId,
+                        oodleRuntimeRoot,
+                        cancellationToken,
+                        EmptyToNull(OptionString("actionSessionId", "")));
 
                 var sampler = new HkxContinuousSampler(skeleton, animation, binding);
                 var hkxPose = sampler.SampleLocalPose(timeSeconds, loop);
@@ -1293,7 +1548,11 @@ internal sealed class BridgeCommandService
             }
             catch (TaeEntryMissingException)
             {
-                return BridgeResult<object>.Failed(file, "action", "TAE_ANIBND_NO_TAE_ENTRY", "anibnd 容器内未找到 TAE 魔数条目。");
+                return BridgeResult<object>.Unsupported(
+                    file,
+                    "action",
+                    "TAE_ANIBND_NO_TAE_ENTRY",
+                    "anibnd 容器内未找到 TAE 魔数条目；该文件是 companion shard，不是 TAE 文档。");
             }
             catch (NotSupportedException ex) when (ex.Message.Contains("extracted root motion", StringComparison.OrdinalIgnoreCase)
                 || ex.Message.Contains("extractedMotion", StringComparison.OrdinalIgnoreCase))
@@ -1894,6 +2153,10 @@ internal sealed class BridgeCommandService
                         new { containerEntries, selectedEntryIndex, selectedEntryName });
                 }
             }
+            catch (DcxSizeLimitException ex)
+            {
+                return BridgeResult<object>.Unsupported(file, "sfx", "DCX_SIZE_LIMIT_UNSUPPORTED", ex.Message, ex.Details);
+            }
             catch (Exception ex) when (ex is InvalidDataException or NotSupportedException or IOException)
             {
                 return BridgeResult<object>.Failed(file, "sfx", "FXR_DOCUMENT_READ_FAILED", ex.Message);
@@ -1931,6 +2194,10 @@ internal sealed class BridgeCommandService
                     "sfx",
                     "FFXBND_KRAK_OODLE_UNAVAILABLE",
                     "这份效果库（ffxbnd）是 KRAK 压缩，到「开始」页选择含 sekiro.exe 的原版目录后再列条目。");
+            }
+            catch (DcxSizeLimitException ex)
+            {
+                return BridgeResult<object>.Unsupported(file, "sfx", "DCX_SIZE_LIMIT_UNSUPPORTED", ex.Message, ex.Details);
             }
             catch (Exception ex) when (ex is InvalidDataException or NotSupportedException or IOException)
             {
@@ -2473,6 +2740,18 @@ internal sealed class BridgeCommandService
         return lower.EndsWith(".anibnd.dcx") || lower.EndsWith(".anibnd");
     }
 
+    private static (DcxNativeDocument Dcx, Bnd4NativeDocument Bnd4) ReadActionBinder(
+        string file,
+        string? oodleRuntimeRoot,
+        ActionSessionCache? cache)
+    {
+        if (cache != null)
+            return cache.ReadBinder(file, oodleRuntimeRoot);
+
+        var dcx = DcxNativeDocument.Read(file, oodleRuntimeRoot);
+        return (dcx, Bnd4NativeDocument.Read(dcx.Payload));
+    }
+
     /// <summary>
     /// 打开 TAE 文档：anibnd 容器提取主 TAE（id 5000000 优先，其次字节最大），
     /// 裸 .tae 直接读。S17：read-tae-document 与 read-tae-event-params 共用，
@@ -2481,12 +2760,20 @@ internal sealed class BridgeCommandService
     /// </summary>
     private static (TaeNativeDocument Document, Diagnostic[] ExtractionDiagnostics) OpenTaeDocument(
         string file,
-        string? oodleRuntimeRoot)
+        string? oodleRuntimeRoot,
+        ActionSessionCache? cache = null)
     {
+        if (cache != null && cache.TryGetTae(file, oodleRuntimeRoot, out var cachedDocument, out var cachedDiagnostics))
+            return (cachedDocument, cachedDiagnostics);
+
         if (!IsAnibndPath(file))
-            return (TaeNativeDocument.ReadFile(file), Array.Empty<Diagnostic>());
-        var dcx = DcxNativeDocument.Read(file, oodleRuntimeRoot);
-        var bnd4 = Bnd4NativeDocument.Read(dcx.Payload);
+        {
+            var document = TaeNativeDocument.ReadFile(file);
+            cache?.StoreTae(file, oodleRuntimeRoot, document, Array.Empty<Diagnostic>());
+            return (document, Array.Empty<Diagnostic>());
+        }
+
+        var (dcx, bnd4) = ReadActionBinder(file, oodleRuntimeRoot, cache);
         int? mainIndex = null;
         var taeEntryCount = 0;
         var largestIndex = -1;
@@ -2521,7 +2808,9 @@ internal sealed class BridgeCommandService
                 BridgeResult<object>.MakeSourceUri(file),
                 new { taeEntryCount, mainEntryId, mainTaeBytes = mainBytes.Length })
         };
-        return (TaeNativeDocument.Read(mainBytes), diagnostics);
+        var parsedDocument = TaeNativeDocument.Read(mainBytes);
+        cache?.StoreTae(file, oodleRuntimeRoot, parsedDocument, diagnostics);
+        return (parsedDocument, diagnostics);
     }
 
     /// <summary>
@@ -2797,9 +3086,13 @@ internal sealed class BridgeCommandService
     }
 
     private static (HkxSkeleton Skeleton, HkxAnimation Animation, HkxAnimationBinding Binding, long MotionAnimId, string SourceContainerPath, string SourceFormat, string SourceHash, string AnimationContainerHash, string SkeletonContainerHash)
-        ResolveTaeAnimationContext(string file, long animId, string? oodleRuntimeRoot)
+        ResolveTaeAnimationContext(
+            string file,
+            long animId,
+            string? oodleRuntimeRoot,
+            ActionSessionCache? cache = null)
     {
-        var (document, _) = OpenTaeDocument(file, oodleRuntimeRoot);
+        var (document, _) = OpenTaeDocument(file, oodleRuntimeRoot, cache);
         var references = SekiroTaeMotionReferenceReader.ReadAll(document);
         long motionAnimId = ActionAnimationSemantics.ResolveMotionAnimationId(references, animId);
 
@@ -2840,8 +3133,7 @@ internal sealed class BridgeCommandService
         {
             try
             {
-                var dcx = DcxNativeDocument.Read(path, oodleRuntimeRoot);
-                var bnd4 = Bnd4NativeDocument.Read(dcx.Payload);
+                var (dcx, bnd4) = ReadActionBinder(path, oodleRuntimeRoot, cache);
                 if (string.Equals(Path.GetFullPath(path), primaryPath, StringComparison.OrdinalIgnoreCase))
                     sourceHash = dcx.SourceHash;
 
@@ -3009,12 +3301,16 @@ internal sealed class BridgeCommandService
             string file,
             long animId,
             string? oodleRuntimeRoot,
-            CancellationToken cancellationToken)
+            CancellationToken cancellationToken,
+            string? actionSessionId)
     {
         await ActionHkxReadGate.WaitAsync(cancellationToken);
         try
         {
-            return ResolveTaeAnimationContext(file, animId, oodleRuntimeRoot);
+            var cache = string.IsNullOrWhiteSpace(actionSessionId)
+                ? null
+                : GetActionSessionCache(actionSessionId);
+            return ResolveTaeAnimationContext(file, animId, oodleRuntimeRoot, cache);
         }
         finally
         {

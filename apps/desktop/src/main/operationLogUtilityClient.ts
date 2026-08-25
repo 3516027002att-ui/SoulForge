@@ -172,8 +172,13 @@ export class OperationLogUtilityClient implements OperationLogStore {
     return this.request('searchFiles', { query, ...(limit === undefined ? {} : { limit }) });
   }
 
-  replaceRagChunks(chunks: RagChunk[]): Promise<void> {
-    return this.request('replaceRagChunks', { chunks }).then(() => undefined);
+  replaceRagChunks(chunks: RagChunk[], preserveEmbeddingsForSourceRevision?: string): Promise<void> {
+    return this.request('replaceRagChunks', {
+      chunks,
+      ...(preserveEmbeddingsForSourceRevision === undefined
+        ? {}
+        : { preserveEmbeddingsForSourceRevision })
+    }).then(() => undefined);
   }
 
   loadRagChunks(): Promise<RagChunk[]> {

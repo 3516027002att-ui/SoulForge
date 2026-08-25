@@ -111,7 +111,7 @@ export interface OperationLogUtilityPayloadMap {
   finalizeCommit: { bundle: Parameters<NonNullable<OperationLogStore['finalizeCommit']>>[0] };
   replaceFiles: { files: IndexedFile[] };
   searchFiles: { query: string; limit?: number };
-  replaceRagChunks: { chunks: RagChunk[] };
+  replaceRagChunks: { chunks: RagChunk[]; preserveEmbeddingsForSourceRevision?: string };
   loadRagChunks: Record<string, never>;
   searchRagChunks: { query: string; limit?: number };
   replaceRagEmbeddings: { entries: Array<{ chunkId: string; model: string; vector: Float32Array; sourceRevision: string }> };

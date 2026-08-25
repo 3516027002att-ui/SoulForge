@@ -113,6 +113,7 @@ export type BridgeCommandName =
   | 'read-tae-event-params'
   | 'read-tae-animation-clip'
   | 'sample-tae-animation-pose'
+  | 'clear-action-session'
   | 'read-chrbnd-flver-preview'
   | 'read-map-part-flver-preview'
   | 'read-tpf-document'

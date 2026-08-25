@@ -143,7 +143,10 @@ async function dispatch(request: OperationLogUtilityRequest): Promise<unknown> {
     case 'searchFiles':
       return requireWorkspaceDataRepository().searchFiles(request.payload.query, request.payload.limit);
     case 'replaceRagChunks':
-      requireWorkspaceDataRepository().replaceRagChunks(request.payload.chunks);
+      requireWorkspaceDataRepository().replaceRagChunks(
+        request.payload.chunks,
+        request.payload.preserveEmbeddingsForSourceRevision
+      );
       return null;
     case 'loadRagChunks':
       return requireWorkspaceDataRepository().loadRagChunks();

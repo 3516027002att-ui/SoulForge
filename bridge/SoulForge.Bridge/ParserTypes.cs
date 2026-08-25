@@ -31,13 +31,23 @@ sealed record BridgeResult<T>(string SourceUri, string SourcePath, string Game, 
     public const string GameUnknown = "unknown";
     public static BridgeResult<T> Unsupported(string sourcePath, string resourceKind, string message)
     {
+        return Unsupported(sourcePath, resourceKind, "SEMANTIC_EXPORT_NOT_IMPLEMENTED", message);
+    }
+
+    public static BridgeResult<T> Unsupported(
+        string sourcePath,
+        string resourceKind,
+        string code,
+        string message,
+        object? details = null)
+    {
         return new BridgeResult<T>(
             MakeSourceUri(sourcePath),
             sourcePath,
             GameUnknown,
             resourceKind,
             "unsupported",
-            new[] { new Diagnostic("info", "SEMANTIC_EXPORT_NOT_IMPLEMENTED", message, MakeSourceUri(sourcePath)) });
+            new[] { new Diagnostic("warning", code, message, MakeSourceUri(sourcePath), details) });
     }
 
     public static BridgeResult<T> Failed(string sourcePath, string resourceKind, string code, string message, object? details = null)

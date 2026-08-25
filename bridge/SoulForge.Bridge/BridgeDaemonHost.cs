@@ -538,6 +538,7 @@ internal static class BridgeDaemonHost
         "read-tpf-document", "export-tpf-texture", "read-tpf-texture-preview",
         "write-tpf-texture-replace", "read-tae-document",
         "read-tae-event-params", "read-tae-animation-clip", "sample-tae-animation-pose",
+        "clear-action-session",
         "read-chrbnd-flver-preview",
         "read-map-part-flver-preview",
         "read-flver-document", "read-flver-mesh", "read-flver-skeleton",

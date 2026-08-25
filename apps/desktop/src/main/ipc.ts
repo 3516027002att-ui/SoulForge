@@ -2808,7 +2808,7 @@ async function persistActiveRag(
   database: OperationLogUtilityClient,
   corpus: RagCorpus
 ): Promise<void> {
-  await database.replaceRagChunks(corpus.chunks);
+  await database.replaceRagChunks(corpus.chunks, corpus.coverage?.sourceRevision);
   await database.replaceReferences(corpus.references);
   // Switch the in-memory snapshot only after both durable projections have
   // succeeded; otherwise a failed persistence could expose a new RAG view

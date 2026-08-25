@@ -1,4 +1,5 @@
 import { existsSync, readdirSync } from 'node:fs';
+import { randomUUID } from 'node:crypto';
 import { dirname, join, resolve } from 'node:path';
 import assert from 'node:assert/strict';
 import {
@@ -99,6 +100,7 @@ export async function runActionNativeCorpusCoverageSmoke(): Promise<void> {
   const maxFiles = boundedEnvInt('SOULFORGE_ACTION_MAX_FILES', 137, 1, 1000);
   const maxClips = boundedEnvInt('SOULFORGE_ACTION_MAX_CLIPS', 16_384, 1, 100_000);
   const representativesPerFile = boundedEnvInt('SOULFORGE_ACTION_REPRESENTATIVES_PER_FILE', 3, 1, 32);
+  const actionSessionId = randomUUID();
 
   if (!existsSync(bridgeExecutablePath)) {
     console.log(JSON.stringify({
@@ -116,13 +118,13 @@ export async function runActionNativeCorpusCoverageSmoke(): Promise<void> {
   }
 
   try {
-    const files = mode === 'single'
+    const discoveredFiles = mode === 'single'
       ? [defaultFilePath]
       : readdirSync(join(gameRoot, 'chr'), { withFileTypes: true })
         .filter((entry) => entry.isFile() && entry.name.toLowerCase().endsWith('.anibnd.dcx'))
         .map((entry) => resolve(join(gameRoot, 'chr', entry.name)))
-        .sort((a, b) => a.localeCompare(b))
-        .slice(0, maxFiles);
+        .sort((a, b) => a.localeCompare(b));
+    const files = discoveredFiles.slice(0, maxFiles);
     const containers = await mapWithConcurrency(files, 2, (filePath) => readContainer(filePath, gameRoot, bridgeExecutablePath));
     const taeContainers = containers.filter((container) => container.status === 'tae');
     const nonEmptyAnimations = taeContainers.flatMap((container) => container.animations.map((animation) => ({
@@ -135,7 +137,7 @@ export async function runActionNativeCorpusCoverageSmoke(): Promise<void> {
         ...bridgeOptions(target.filePath, gameRoot, bridgeExecutablePath),
         command: 'read-tae-animation-clip',
         filePath: target.filePath,
-        commandOptions: { animId: target.animId }
+        commandOptions: { animId: target.animId, actionSessionId }
       });
       const row = inspectClipResult(target.animId, result);
       return { ...row, filePath: target.filePath };
@@ -160,14 +162,18 @@ export async function runActionNativeCorpusCoverageSmoke(): Promise<void> {
       throw new Error(`ACTION clip payload contract invalid: ${JSON.stringify(invalidPayloadRows.slice(0, 5))}`);
     }
 
-    const scanTruncated = nonEmptyAnimations.length > targets.length || files.length >= maxFiles;
+    const fileScanTruncated = mode !== 'single' && discoveredFiles.length > files.length;
+    const clipScanTruncated = mode !== 'representative' && nonEmptyAnimations.length > targets.length;
+    const representativeSampling = mode === 'representative' && nonEmptyAnimations.length > targets.length;
+    const scanTruncated = fileScanTruncated || clipScanTruncated;
     console.log(JSON.stringify({
       ok: true,
       status: failedRows.length > 0 || unsupportedRows.length > 0 || scanTruncated ? 'partial' : 'PASS',
       authority: 'partial',
       mode,
       source: mode === 'single' ? defaultFilePath : join(gameRoot, 'chr'),
-      filesDiscovered: files.length,
+      filesDiscovered: discoveredFiles.length,
+      filesSelected: files.length,
       containersWithTae: taeContainers.length,
       containersEmpty: containers.filter((container) => container.status === 'empty').length,
       containerFailures: containers.filter((container) => container.status === 'failed').length,
@@ -175,6 +181,9 @@ export async function runActionNativeCorpusCoverageSmoke(): Promise<void> {
       selectedClipCount: targets.length,
       selectedClipCap: maxClips,
       scanTruncated,
+      fileScanTruncated,
+      clipScanTruncated,
+      representativeSampling,
       payloadCount: payloadRows.length,
       unsupportedCount: unsupportedRows.length,
       failedCount: failedRows.length,
@@ -203,7 +212,16 @@ export async function runActionNativeCorpusCoverageSmoke(): Promise<void> {
       ]
     }, null, 2));
   } finally {
-    await disposeBridgeDaemonPool();
+    try {
+      await runBridge({
+        ...bridgeOptions(defaultFilePath, gameRoot, bridgeExecutablePath),
+        command: 'clear-action-session',
+        filePath: defaultFilePath,
+        commandOptions: { actionSessionId }
+      });
+    } finally {
+      await disposeBridgeDaemonPool();
+    }
   }
 }
 
