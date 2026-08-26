@@ -92,6 +92,60 @@ const FRAME_RATE = 30;
  */
 const MAX_ANIMATION_SECONDS = 3600;
 
+/**
+ * TAE 动画分页的 renderer 状态。
+ *
+ * `hasMore` 只接受 Bridge 当前页的 `animationsTruncated`，不根据本地已加载数量
+ * 推断 EOF。`nextPage` 也由页号推进，避免在去重或重读后用动画数量反推页码。
+ */
+export interface TaeAnimationPaginationState {
+  documentKey: string;
+  baseAnimationIds: readonly number[];
+  animations: readonly TaeAnimationWire[];
+  nextPage: number;
+  hasMore: boolean;
+}
+
+export function createTaeAnimationPaginationState(
+  documentKey: string,
+  document: TaeDocument
+): TaeAnimationPaginationState {
+  return {
+    documentKey,
+    baseAnimationIds: document.animations.map((animation) => animation.animId),
+    animations: [],
+    nextPage: 1,
+    hasMore: document.animationsTruncated === true
+  };
+}
+
+/**
+ * 追加一个服务端动画页。页号不匹配时保持旧状态，调用方可安全忽略迟到响应；
+ * 动画 id 去重保证重试/重复响应不会把同一动画插入两次。
+ */
+export function appendTaeAnimationPage(
+  state: TaeAnimationPaginationState,
+  page: TaeDocument,
+  pageNumber: number
+): TaeAnimationPaginationState {
+  if (!state.hasMore || pageNumber !== state.nextPage) return state;
+  const seen = new Set<number>([
+    ...state.baseAnimationIds,
+    ...state.animations.map((animation) => animation.animId)
+  ]);
+  const additions = page.animations.filter((animation) => {
+    if (seen.has(animation.animId)) return false;
+    seen.add(animation.animId);
+    return true;
+  });
+  return {
+    ...state,
+    animations: [...state.animations, ...additions],
+    nextPage: pageNumber + 1,
+    hasMore: page.animationsTruncated === true
+  };
+}
+
 export interface TaeWorkbenchPanelProps {
   resourceUri: string;
   data: TaeDocument | null;
@@ -395,10 +449,12 @@ export function TaeWorkbenchPanel(props: TaeWorkbenchPanelProps): ReactElement {
   const [selected, setSelected] = useState<TaeSelection | null>(props.initialSelection ?? null);
   /** 提交成功后本地重读的文档（优先于 props.data；换文件/App 重读时清空）。 */
   const [refreshedDocument, setRefreshedDocument] = useState<TaeDocument | null>(null);
-  /** App 传入的原始文档之外，分页「加载更多」追加的增量文档片段（合并到本地展示）。 */
-  const [paginatedAnimations, setPaginatedAnimations] = useState<TaeAnimationWire[]>([]);
+  /** App 传入的原始文档之外，分页「加载更多」追加的增量文档片段。 */
+  const [pagination, setPagination] = useState<TaeAnimationPaginationState | null>(null);
   const [paginationNotice, setPaginationNotice] = useState<string | null>(null);
   const [paginationLoading, setPaginationLoading] = useState(false);
+  /** 令迟到的旧文件/旧页响应失效，不得污染当前文档。 */
+  const paginationRequestRef = useRef(0);
   /** 选中事件的时间编辑草稿（null = 未编辑/未选中）。 */
   const [timeDraft, setTimeDraft] = useState<TaeTimeDraft | null>(null);
   /** 提交进行中：禁用重复提交。 */
@@ -450,16 +506,22 @@ export function TaeWorkbenchPanel(props: TaeWorkbenchPanelProps): ReactElement {
     const source = refreshedDocument ?? props.data;
     return source && isTaeDocument(source) ? source : null;
   }, [refreshedDocument, props.data]);
+  const documentKey = document
+    ? `${props.resourceUri}\u0000${document.sourceHash}`
+    : props.resourceUri;
+  const documentKeyRef = useRef(documentKey);
+  documentKeyRef.current = documentKey;
+  const activePagination = pagination?.documentKey === documentKey ? pagination : null;
   const mergedDocument = useMemo(() => {
     if (!document) return null;
-    if (paginatedAnimations.length === 0) return document;
-    const base = document as TaeDocument;
+    if (!activePagination) return document;
     return {
-      ...base,
-      animations: [...base.animations, ...paginatedAnimations],
-      animationsTruncated: false
+      ...document,
+      animations: [...document.animations, ...activePagination.animations],
+      // 这是服务端页的 authority，不是 renderer 根据本地数量推断出来的状态。
+      animationsTruncated: activePagination.hasMore
     } as TaeDocument;
-  }, [document, paginatedAnimations]);
+  }, [activePagination, document]);
   const pages = useMemo(
     () => (mergedDocument ? projectTaeDocumentPages(mergedDocument) : null),
     [mergedDocument]
@@ -467,12 +529,23 @@ export function TaeWorkbenchPanel(props: TaeWorkbenchPanelProps): ReactElement {
 
   // 换文件或 App 重新传入数据时丢弃本地重读缓存（避免跨文件残留旧文档）。
   useEffect(() => {
+    paginationRequestRef.current += 1;
     setRefreshedDocument(null);
-    setPaginatedAnimations([]);
+    setPagination(null);
     setPaginationNotice(null);
+    setPaginationLoading(false);
     setEventParams(null);
     setPreview({ loading: false, error: null, meshCount: 0, boneCount: 0, meshes: [], bones: [] });
   }, [props.resourceUri, props.data]);
+
+  // 首次文档进入/提交重读后建立页 1 的权威游标；资源切换 effect 会先把旧状态清掉。
+  useEffect(() => {
+    if (!document) {
+      setPagination(null);
+      return;
+    }
+    setPagination(createTaeAnimationPaginationState(documentKey, document));
+  }, [document, documentKey]);
 
   /** S17：词条名目录一次拉取（模板只读本机；失败时列表显示数字 id + 「未命名」）。 */
   useEffect(() => {
@@ -762,33 +835,46 @@ export function TaeWorkbenchPanel(props: TaeWorkbenchPanelProps): ReactElement {
 
   async function loadMoreAnimations(): Promise<void> {
     const bridge = getRendererBridge();
-    if (!bridge || typeof bridge.readTaeDocument !== 'function' || !mergedDocument) return;
-    const currentCount = mergedDocument.animations.length;
+    const currentPagination = pagination?.documentKey === documentKey ? pagination : null;
+    if (
+      !bridge
+      || typeof bridge.readTaeDocument !== 'function'
+      || !mergedDocument
+      || !currentPagination
+      || !currentPagination.hasMore
+      || paginationLoading
+    ) return;
     const pageSize = 1000;
-    const nextPage = Math.floor(currentCount / pageSize);
+    const nextPage = currentPagination.nextPage;
+    const requestDocumentKey = documentKey;
+    const requestId = ++paginationRequestRef.current;
     setPaginationLoading(true);
     setPaginationNotice(null);
     try {
       const raw = await (bridge.readTaeDocument as (uri: string, opts?: { animationPage?: number; animationPageSize?: number }) => Promise<unknown>)(props.resourceUri, { animationPage: nextPage, animationPageSize: pageSize }) as { ok?: boolean; data?: unknown };
+      if (requestId !== paginationRequestRef.current || documentKeyRef.current !== requestDocumentKey) return;
       if (raw.ok && raw.data && isTaeDocument(raw.data)) {
         const nextDoc = raw.data as TaeDocument;
-        if (nextDoc.animations.length === 0) {
-          setPaginationNotice('没有更多动画。');
-        } else {
-          setPaginatedAnimations((prev) => [...prev, ...nextDoc.animations]);
-          if (nextDoc.animationsTruncated) {
-            setPaginationNotice(`已加载 ${currentCount + nextDoc.animations.length} / ${nextDoc.animationCount}，仍有剩余。`);
-          } else {
-            setPaginationNotice(null);
-          }
-        }
+        const next = appendTaeAnimationPage(currentPagination, nextDoc, nextPage);
+        setPagination((previous) => (
+          previous
+            && previous.documentKey === requestDocumentKey
+            && previous.nextPage === nextPage
+            ? next
+            : previous
+        ));
+        setPaginationNotice(
+          next.hasMore
+            ? `已加载 ${mergedDocument.animations.length + next.animations.length - currentPagination.animations.length} / ${nextDoc.animationCount}，仍有剩余。`
+            : (next.animations.length === currentPagination.animations.length ? '没有更多动画。' : null)
+        );
       } else {
         setPaginationNotice('加载更多失败。');
       }
     } catch {
       setPaginationNotice('加载更多异常。');
     } finally {
-      setPaginationLoading(false);
+      if (requestId === paginationRequestRef.current) setPaginationLoading(false);
     }
   }
 
@@ -799,8 +885,13 @@ export function TaeWorkbenchPanel(props: TaeWorkbenchPanelProps): ReactElement {
     try {
       const raw = await (bridge.readTaeDocument as (uri: string, opts?: { animationPage?: number; animationPageSize?: number }) => Promise<unknown>)(props.resourceUri, { animationPage: 0, animationPageSize: 1000 }) as { ok?: boolean; data?: unknown };
       if (raw.ok && raw.data && isTaeDocument(raw.data)) {
-        setRefreshedDocument(raw.data);
-        setPaginatedAnimations([]);
+        const refreshed = raw.data as TaeDocument;
+        paginationRequestRef.current += 1;
+        setRefreshedDocument(refreshed);
+        setPagination(createTaeAnimationPaginationState(
+          `${props.resourceUri}\u0000${refreshed.sourceHash}`,
+          refreshed
+        ));
         setPaginationNotice(null);
         return true;
       }
@@ -1172,7 +1263,7 @@ export function TaeWorkbenchPanel(props: TaeWorkbenchPanelProps): ReactElement {
           initialFlex: 0.22,
           minWidth: 220,
           children: (
-            <div className="wb-list tae-preview-body" style={{ display: 'flex', flexDirection: 'column', height: '100%' }}>
+            <div className="wb-list tae-preview-body" style={{ display: 'flex', flexDirection: 'column', height: '100%', minHeight: 0, minWidth: 0, overflow: 'hidden' }}>
               {mergedDocument === null && <p className="wb-empty">选择 .tae / .anibnd.dcx 文件后查看预览。</p>}
               {mergedDocument !== null && (
                 <>
@@ -1188,7 +1279,7 @@ export function TaeWorkbenchPanel(props: TaeWorkbenchPanelProps): ReactElement {
                     </>
                   )}
                   {!preview.loading && preview.error === null && preview.meshes.length > 0 && (
-                    <div className="tae-preview-host tae-preview__viewport" style={{ flex: 1, minHeight: 220 }} data-testid="tae-preview-viewport">
+                    <div className="tae-preview-host tae-preview__viewport" style={{ flex: 1, minHeight: 0, minWidth: 0 }} data-testid="tae-preview-viewport">
                       <FlverViewer
                         meshCount={preview.meshCount}
                         boneCount={preview.boneCount}
@@ -1200,7 +1291,7 @@ export function TaeWorkbenchPanel(props: TaeWorkbenchPanelProps): ReactElement {
                     </div>
                   )}
                   {!preview.loading && preview.error === null && preview.meshes.length === 0 && preview.boneCount > 0 && (
-                    <div className="tae-preview-host tae-preview__viewport" style={{ flex: 1, minHeight: 220 }} data-testid="tae-preview-viewport">
+                    <div className="tae-preview-host tae-preview__viewport" style={{ flex: 1, minHeight: 0, minWidth: 0 }} data-testid="tae-preview-viewport">
                       <FlverViewer
                         meshCount={0}
                         boneCount={preview.boneCount}

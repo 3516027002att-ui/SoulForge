@@ -10,6 +10,7 @@ export type {
   MsbModelLike,
   MsbPartTransformLike as PartLike,
   MsbRegionLike,
+  MsbRouteLike,
   MsbSceneSourceCounts,
   SceneDrawItem,
   SceneDrawList,

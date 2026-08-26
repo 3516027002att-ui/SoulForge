@@ -23,7 +23,7 @@ function main(): void {
     resourceKind: 'map' as const,
     revision: 'fixture-1'
   };
-  const sourceCounts = { models: 34, parts: 4500, regions: 1089, events: 46 };
+  const sourceCounts = { models: 34, parts: 4500, regions: 1089, events: 46, routes: 12 };
   const entities = {
     models: [{ name: 'm000010', nativeOffset: 0x200, typeId: 0 }],
     parts,
@@ -31,7 +31,8 @@ function main(): void {
       { name: 'Env_Point000', nativeOffset: 0x9000, typeId: 1, posX: 2, posY: 3, posZ: 4 },
       { name: 'Sound_Point000', nativeOffset: 0x9080, typeId: 2, posX: 5, posY: 6, posZ: 7 }
     ],
-    events: [{ name: 'Treasure_00', nativeOffset: 0xa000, typeId: 5 }]
+    events: [{ name: 'Treasure_00', nativeOffset: 0xa000, typeId: 5 }],
+    routes: [{ name: 'Route_00', nativeOffset: 0xb000, typeId: 8, id: 42 }]
   };
   const manifest = buildMsbSceneManifest({
     ...metadata,
@@ -42,7 +43,7 @@ function main(): void {
   if (manifest.schemaVersion !== 2 || manifest.revision !== metadata.revision) {
     throw new Error('scene manifest schema/revision mismatch');
   }
-  if (manifest.entityCount !== 29 || manifest.nodeCount !== 27) {
+  if (manifest.entityCount !== 30 || manifest.nodeCount !== 27) {
     throw new Error(`unexpected scene projection counts: ${manifest.entityCount}/${manifest.nodeCount}`);
   }
   if (!manifest.diagnostics.some((item) => item.code === 'SCENE_PROJECTION_PARTIAL')) {
@@ -50,8 +51,9 @@ function main(): void {
   }
   if (manifest.entities.filter((entity) => entity.kind === 'msb-model').length !== 1
     || manifest.entities.filter((entity) => entity.kind === 'msb-event').length !== 1
+    || manifest.entities.filter((entity) => entity.kind === 'msb-route' && entity.routeId === 42).length !== 1
     || manifest.nodes.filter((node) => node.kind === 'msb-region').length !== 2) {
-    throw new Error('model/part/region/event projection incomplete');
+    throw new Error('model/part/region/event/route projection incomplete');
   }
 
   const full = buildSceneDrawList(manifest, { maxItems: 100 });

@@ -149,6 +149,8 @@ describe('Negative source tests（MAP-50B 五类覆盖）', () => {
 
   it('左栏对象列表由 scene manifest 派生，renderer 不扫字节、不猜格式', () => {
     assert.match(panelSource, /manifest\??\.entities/);
+    assert.match(panelSource, /pick\('msb-route'\)/);
+    assert.match(panelSource, /props\.routes/);
     // 注释里提及的函数名只是职责说明，负向断言针对调用——带左括号。
     assert.doesNotMatch(panelSource, /detectNestedFormat\(/);
     assert.doesNotMatch(panelSource, /guessFormatKind\(/);

@@ -788,9 +788,9 @@ input::placeholder, textarea::placeholder { color: var(--ink-3); }
 .domain-browse-placeholder p { margin-top: 8px; }
 .domain-browse-placeholder .muted { font-size: 11px; color: var(--ink-3); }
 
-.tae-preview-host { display: flex; flex-direction: column; }
+.tae-preview-host { display: flex; flex-direction: column; min-width: 0; min-height: 0; overflow: hidden; }
 .tae-preview-host .flver-viewer,
-.tae-preview-host canvas { flex: 1; min-height: 160px; width: 100%; }
+.tae-preview-host canvas { flex: 1 1 auto; min-width: 0; min-height: 0; width: 100%; height: 100%; }
 
 /* 事件工作台必须自己吃满 pane 高度：外层 .viewer-content 默认 overflow-y:auto，
    若这里随 400/7 万行源码撑高，源码列和右侧词义列会跟同一个父滚动条走。 */
@@ -2423,9 +2423,12 @@ details.agent-block > summary.agent-block__label { cursor: pointer; }
 /* S17：动作预览右栏的 3D 视口宿主（FlverViewer 撑满列宽）。
    问题4-A：预览区（.tae-preview-body）吃满栏高——FlverViewer 高度跟栏走，不写死
    300px；完整模型（全部网格）拼进同一个 viewer，叠加字不裁切。 */
-.tae-preview-body { height: 100%; min-height: 240px; }
-.tae-preview__viewport { flex: 1; min-height: 240px; position: relative; }
-.tae-preview__viewport > div { position: absolute; inset: 0; }
+.workbench__column-body:has(> .tae-preview-body) {
+  display: flex; flex-direction: column; overflow: hidden; min-width: 0; min-height: 0;
+}
+.tae-preview-body { height: 100%; min-width: 0; min-height: 0; overflow: hidden; }
+.tae-preview__viewport { flex: 1 1 auto; min-width: 0; min-height: 0; position: relative; overflow: hidden; }
+.tae-preview__viewport > div { position: absolute; inset: 0; min-width: 0; min-height: 0; }
 
 /* 问题4-C：词条详情收在 Events 栏下半（可关抽屉），不占整条 workbench footer。
    起始帧/结束帧只留一套（主单位帧，旁边小字 ≈ 秒）。 */

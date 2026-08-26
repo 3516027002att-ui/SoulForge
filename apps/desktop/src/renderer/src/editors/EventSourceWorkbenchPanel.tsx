@@ -17,9 +17,8 @@
  *
  * S35（超长 EMEVD，规格 event-common-load.md §3.2）：打开回包只有 outline +
  * 前 400 行 + opaque source token，不再预先灌完 7 万行。面板首帧用前缀建缓冲，
- * 随后按片后台续载，每片立刻追加进编辑器（不等滚到边、也不等全部拉齐）。
- * 查找（Ctrl+F）/ 提交 / 脏标记仍一次拉齐。追加永远发生在文档末尾，不扰动用户
- * 编辑、光标与滚动位置。
+ * 随后只在用户滚近已加载底部时续载一片；不在打开路径自动拉到 EOF。查找（Ctrl+F）
+ * / 提交仍一次拉齐，追加永远发生在文档末尾，不扰动用户编辑、光标与滚动位置。
  */
 import React, {
   useCallback,
@@ -165,7 +164,8 @@ export interface EventSourceTabData {
   /**
    * S35 增量源（超长 EMEVD）：打开首帧只有前 400 行 + opaque source token，
    * 全文按视口续载（incrementalSourceInjection）。有 sourceToken 且 dslTemplate
-   * 为 null 时，首帧缓冲 = sourcePrefix；查找（Ctrl+F）/ 提交 / 脏标记时才拉齐。
+   * 为 null 时，首帧缓冲 = sourcePrefix；查找（Ctrl+F）/ 提交等明确的全文需求时才拉齐，
+   * 脏标记不会触发全量读取。
    * 提交后的重读回灌走完整 dslTemplate，不带这三项。
    */
   sourceToken?: string | null;
@@ -830,16 +830,14 @@ export function EventSourceWorkbenchPanel(props: EventSourceWorkbenchPanelProps)
   const incrementalSourcesRef = useRef<Map<string, IncrementalSourceState>>(new Map());
   /** S35：单片续载在飞 Promise：同一 tab 同时只拉一片，避免重复取同一行区间。 */
   const slicePromisesRef = useRef<Map<string, Promise<void>>>(new Map());
-  /** S35：拉齐在飞 Promise：提交 / 查找 / 脏标记并发时共享同一次拉齐。 */
+  /** S35：拉齐在飞 Promise：提交 / 查找并发时共享同一次拉齐。 */
   const fillPromisesRef = useRef<Map<string, Promise<void>>>(new Map());
-  /**
-   * 打开后按片后台续载（每片立刻追加）。与 ensureTabComplete 互斥：
-   * 一次拉齐在飞时切片循环让路，避免同一区间拉两次。
-   */
-  const backgroundFillPromisesRef = useRef<Map<string, Promise<void>>>(new Map());
   const maybeFillMoreRef = useRef<(view: EditorView) => void>(() => {});
   const ensureTabCompleteRef = useRef<(tabId: string) => Promise<void>>(async () => {});
-  const fillRemainingInSlicesRef = useRef<(tabId: string) => Promise<void>>(async () => {});
+  /** 用户滚动过的 tab 才允许触发近底续载；挂载/切 tab 的几何事件不算显式需求。 */
+  const userScrolledTabsRef = useRef<Set<string>>(new Set());
+  /** 源填充只更新展示，不触发每片一次的全量 symbol/diagnostic 分析。 */
+  const [analysisRevision, setAnalysisRevision] = useState(0);
 
   const activeTab = tabs.find((tab) => tab.tabId === activeTabId) ?? null;
   const splitTab = splitTabId ? tabs.find((tab) => tab.tabId === splitTabId) ?? null : null;
@@ -852,13 +850,13 @@ export function EventSourceWorkbenchPanel(props: EventSourceWorkbenchPanelProps)
       title: tab.title,
       headers: indexEventHeaders(tab.draft)
     })),
-    [tabs]
+    [analysisRevision]
   );
 
   const documentSymbols = useMemo(() => {
     if (!activeTab) return [];
     return indexDocumentSymbols(activeTab.draft).symbols;
-  }, [activeTab?.draft]);
+  }, [activeTabId, analysisRevision, showOutline, showSymbolModal]);
 
   const currentDiagnostics = useMemo(() => {
     if (!activeTabId) return [];
@@ -935,6 +933,7 @@ export function EventSourceWorkbenchPanel(props: EventSourceWorkbenchPanelProps)
         };
       })
     );
+    if (complete) setAnalysisRevision((revision) => revision + 1);
   }, []);
 
   /**
@@ -993,8 +992,6 @@ export function EventSourceWorkbenchPanel(props: EventSourceWorkbenchPanelProps)
     if (existing) return existing;
     const promise = fillOneSlice(tabId).finally(() => {
       if (slicePromisesRef.current.get(tabId) === promise) slicePromisesRef.current.delete(tabId);
-      const view = viewRef.current;
-      if (view !== null && activeTabIdRef.current === tabId) maybeFillMoreRef.current(view);
     });
     slicePromisesRef.current.set(tabId, promise);
     return promise;
@@ -1029,38 +1026,16 @@ export function EventSourceWorkbenchPanel(props: EventSourceWorkbenchPanelProps)
   }, [applyRestText, readSliceFromBridge]);
   ensureTabCompleteRef.current = ensureTabComplete;
 
-  /** 打开后按片后台续载到 eof。 */
-  const fillRemainingInSlices = useCallback((tabId: string): Promise<void> => {
-    const existing = backgroundFillPromisesRef.current.get(tabId);
-    if (existing) return existing;
-    const promise = (async () => {
-      while (true) {
-        if (fillPromisesRef.current.has(tabId)) return;
-        const current = incrementalSourcesRef.current.get(tabId);
-        if (!current || isIncrementalSourceComplete(current)) return;
-        await fillOneSliceGuarded(tabId);
-      }
-    })();
-    backgroundFillPromisesRef.current.set(tabId, promise);
-    void promise.finally(() => {
-      if (backgroundFillPromisesRef.current.get(tabId) === promise) {
-        backgroundFillPromisesRef.current.delete(tabId);
-      }
-    });
-    return promise;
-  }, [fillOneSliceGuarded]);
-  fillRemainingInSlicesRef.current = fillRemainingInSlices;
-
   /** S35：视口近底探测。 */
   const maybeFillMore = useCallback((view: EditorView) => {
     const tabId = activeTabIdRef.current;
     if (!tabId) return;
+    if (!userScrolledTabsRef.current.has(tabId)) return;
     const state = incrementalSourcesRef.current.get(tabId);
     if (!state || isIncrementalSourceComplete(state)) return;
     if (
       fillPromisesRef.current.has(tabId)
       || slicePromisesRef.current.has(tabId)
-      || backgroundFillPromisesRef.current.has(tabId)
     ) return;
     if (!isNearLoadedBottom(view)) return;
     void fillOneSliceGuarded(tabId);
@@ -1080,8 +1055,9 @@ export function EventSourceWorkbenchPanel(props: EventSourceWorkbenchPanelProps)
           : tab
       )
     );
-    void ensureTabComplete(tabId);
-  }, [ensureTabComplete]);
+    // 用户编辑只置 dirty；完整源码是 Ctrl+F / 保存的显式需求，不在每次输入时拉齐。
+    setAnalysisRevision((revision) => revision + 1);
+  }, []);
   commitDraftRef.current = commitDraft;
 
   /** 每个 tab 的 extensions 绑定自己的 tabId；运行时经 ref 调最新 commitDraft。 */
@@ -1218,6 +1194,7 @@ export function EventSourceWorkbenchPanel(props: EventSourceWorkbenchPanelProps)
       return [...previous, created];
     });
     setActiveTabId(pending.tabId);
+    setAnalysisRevision((revision) => revision + 1);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [props.pendingTab, createExtensionsFor]);
 
@@ -1251,7 +1228,11 @@ export function EventSourceWorkbenchPanel(props: EventSourceWorkbenchPanelProps)
     (view as unknown as { _eventLineInfo: Map<number, EventLineInfo> })._eventLineInfo =
       eventLineInfoRef.current;
     viewRef.current = view;
-    const onScrollerScroll = (): void => maybeFillMoreRef.current(view);
+    const onScrollerScroll = (): void => {
+      const tabId = activeTabIdRef.current;
+      if (tabId) userScrolledTabsRef.current.add(tabId);
+      maybeFillMoreRef.current(view);
+    };
     view.scrollDOM.addEventListener('scroll', onScrollerScroll, { passive: true });
     return () => {
       view.scrollDOM.removeEventListener('scroll', onScrollerScroll);
@@ -1274,18 +1255,8 @@ export function EventSourceWorkbenchPanel(props: EventSourceWorkbenchPanelProps)
       pendingRevealRef.current = null;
       revealLine(view, pending.line);
     }
-    maybeFillMoreRef.current(view);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeTabId]);
-
-  /** 12-A：打开并挂上前缀后，按片后台续载到 eof。 */
-  useEffect(() => {
-    if (!activeTabId) return;
-    const incremental = incrementalSourcesRef.current.get(activeTabId);
-    if (!incremental || isIncrementalSourceComplete(incremental)) return;
-    void fillRemainingInSlicesRef.current(activeTabId);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [activeTabId, props.pendingTab]);
 
   useEffect(() => {
     if (!splitTabId || !splitHostRef.current) return;
@@ -1386,7 +1357,8 @@ export function EventSourceWorkbenchPanel(props: EventSourceWorkbenchPanelProps)
     incrementalSourcesRef.current.delete(tabId);
     fillPromisesRef.current.delete(tabId);
     slicePromisesRef.current.delete(tabId);
-    backgroundFillPromisesRef.current.delete(tabId);
+    userScrolledTabsRef.current.delete(tabId);
+    setAnalysisRevision((revision) => revision + 1);
     setTabs((previous) => {
       const index = previous.findIndex((tab) => tab.tabId === tabId);
       const next = previous.filter((tab) => tab.tabId !== tabId);

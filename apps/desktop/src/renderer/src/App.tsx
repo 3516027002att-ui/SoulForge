@@ -24,6 +24,7 @@ import type {
   MsbModelLike,
   MsbPartTransformLike,
   MsbRegionLike,
+  MsbRouteLike,
   MsbSceneSourceCounts,
   ParamDefDocument,
   ParamFieldDef,
@@ -368,11 +369,13 @@ export function App(): ReactElement {
   const [msbModels, setMsbModels] = useState<MsbModelLike[]>([]);
   const [msbRegions, setMsbRegions] = useState<MsbRegionLike[]>([]);
   const [msbEvents, setMsbEvents] = useState<MsbMapEventLike[]>([]);
+  const [msbRoutes, setMsbRoutes] = useState<MsbRouteLike[]>([]);
   const [msbSourceCounts, setMsbSourceCounts] = useState<MsbSceneSourceCounts>({
     models: 0,
     parts: EMPTY_MSB_PARTS.length,
     regions: 0,
-    events: 0
+    events: 0,
+    routes: 0
   });
   const [, setMsbLive] = useState(false);
   const [msbSourceHash, setMsbSourceHash] = useState<string | null>(null);
@@ -528,7 +531,8 @@ export function App(): ReactElement {
       setMsbModels([]);
       setMsbRegions([]);
       setMsbEvents([]);
-      setMsbSourceCounts({ models: 0, parts: EMPTY_MSB_PARTS.length, regions: 0, events: 0 });
+      setMsbRoutes([]);
+      setMsbSourceCounts({ models: 0, parts: EMPTY_MSB_PARTS.length, regions: 0, events: 0, routes: 0 });
       setMsbLive(false);
       setMsbSourceHash(null);
       // S15/S19 失败面：跨资源族的「最近一次打开失败」随复位清空，避免把旧
@@ -1200,7 +1204,8 @@ export function App(): ReactElement {
         setMsbModels([]);
         setMsbRegions([]);
         setMsbEvents([]);
-        setMsbSourceCounts({ models: 0, parts: EMPTY_MSB_PARTS.length, regions: 0, events: 0 });
+        setMsbRoutes([]);
+        setMsbSourceCounts({ models: 0, parts: EMPTY_MSB_PARTS.length, regions: 0, events: 0, routes: 0 });
         setMsbLive(false);
         // 地图没在打开：上一份 MSB 失败不再对当前选区成立（Agent 元数据同理）。
         setLastOpenFailure((current) => current?.kind === 'msb-open-failed' ? null : current);
@@ -1211,7 +1216,8 @@ export function App(): ReactElement {
         setMsbModels([]);
         setMsbRegions([]);
         setMsbEvents([]);
-        setMsbSourceCounts({ models: 0, parts: EMPTY_MSB_PARTS.length, regions: 0, events: 0 });
+        setMsbRoutes([]);
+        setMsbSourceCounts({ models: 0, parts: EMPTY_MSB_PARTS.length, regions: 0, events: 0, routes: 0 });
         setMsbLive(false);
         return;
       }
@@ -1223,7 +1229,7 @@ export function App(): ReactElement {
           data?: {
             sourceHash?: string;
             models?: Array<{ name: string; nativeOffset?: number; offset?: number; typeId: number; sibPath?: string }>;
-            parts?: Array<{
+            parts: Array<{
               name: string;
               nativeOffset?: number;
               offset?: number;
@@ -1253,20 +1259,23 @@ export function App(): ReactElement {
               scaleZ?: number;
             }>;
             events?: Array<{ name: string; nativeOffset?: number; typeId: number }>;
+            routes?: Array<{ name: string; nativeOffset?: number; typeId: number; id?: number }>;
             modelCount?: number;
             partCount?: number;
             regionCount?: number;
             eventCount?: number;
+            routeCount?: number;
             authority?: string;
           } | null;
         };
         if (cancelled) return;
-        if (!result?.ok || !result.data?.parts?.length) {
+        if (!result?.ok || !result.data) {
           setMsbParts(EMPTY_MSB_PARTS);
           setMsbModels([]);
           setMsbRegions([]);
           setMsbEvents([]);
-          setMsbSourceCounts({ models: 0, parts: EMPTY_MSB_PARTS.length, regions: 0, events: 0 });
+          setMsbRoutes([]);
+          setMsbSourceCounts({ models: 0, parts: EMPTY_MSB_PARTS.length, regions: 0, events: 0, routes: 0 });
           setMsbLive(false);
           // S19 失败面：结构化失败进工作台 + Agent（code + 人话 + 下一步）。
           // message 来自已过 sanitizer 的 IPC 诊断；KRAK 缺 Oodle 时 Bridge 直接
@@ -1325,23 +1334,35 @@ export function App(): ReactElement {
           ...(event.nativeOffset === undefined ? {} : { nativeOffset: event.nativeOffset }),
           typeId: event.typeId
         })));
+        setMsbRoutes((result.data.routes ?? []).map((route) => ({
+          name: route.name,
+          ...(route.nativeOffset === undefined ? {} : { nativeOffset: route.nativeOffset }),
+          typeId: route.typeId,
+          ...(route.id === undefined ? {} : { id: route.id })
+        })));
         setMsbSourceCounts({
           models: result.data.modelCount ?? result.data.models?.length ?? 0,
           parts: result.data.partCount ?? result.data.parts.length,
           regions: result.data.regionCount ?? result.data.regions?.length ?? 0,
-          events: result.data.eventCount ?? result.data.events?.length ?? 0
+          events: result.data.eventCount ?? result.data.events?.length ?? 0,
+          routes: result.data.routeCount ?? result.data.routes?.length ?? 0
         });
         setMsbSourceHash(result.data.sourceHash ?? null);
         setMsbLive(true);
         setStatus(
           `已加载 MSB：${result.data.partCount ?? result.data.parts.length} parts`
           + (result.data.regionCount !== undefined ? ` / ${result.data.regionCount} regions` : '')
+          + (result.data.routeCount !== undefined ? ` / ${result.data.routeCount} routes` : '')
           + (result.data.authority ? ` · ${result.data.authority}` : '')
         );
       } catch (error) {
         if (cancelled) return;
+        setMsbParts(EMPTY_MSB_PARTS);
         setMsbModels([]);
+        setMsbRegions([]);
         setMsbEvents([]);
+        setMsbRoutes([]);
+        setMsbSourceCounts({ models: 0, parts: EMPTY_MSB_PARTS.length, regions: 0, events: 0, routes: 0 });
         setMsbLive(false);
         setStatus(error instanceof Error ? error.message : 'MSB 读取异常');
       }
@@ -3447,7 +3468,7 @@ export function App(): ReactElement {
                   读不出来）混成一句，用户无法据此判断下一步做什么。读取失败由
                   工作台自身的错误态表达。 */}
               <MsbScenePanel
-                key={`${selectedFile?.sourceUri ?? ''}:${msbSourceHash ?? ''}:${msbParts.length}:${msbRegions.length}`}
+                key={`${selectedFile?.sourceUri ?? ''}:${msbSourceHash ?? ''}:${msbParts.length}:${msbRegions.length}:${msbRoutes.length}`}
                 mapResourceUri={selectedFile?.sourceUri ?? ''}
                 sourcePath={selectedFile?.relativePath ?? ''}
                 game="sekiro"
@@ -3456,6 +3477,7 @@ export function App(): ReactElement {
                 parts={msbParts}
                 regions={msbRegions}
                 events={msbEvents}
+                routes={msbRoutes}
                 sourceCounts={msbSourceCounts}
                 onRevisionChange={setMsbSourceHash}
                 openFailure={lastOpenFailure?.kind === 'msb-open-failed' ? lastOpenFailure : null}

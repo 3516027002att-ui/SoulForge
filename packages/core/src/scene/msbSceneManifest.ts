@@ -9,6 +9,7 @@ export type {
   MsbNativeEntityLike,
   MsbPartTransformLike,
   MsbRegionLike,
+  MsbRouteLike,
   MsbSceneEntityKind,
   MsbSceneSourceCounts,
   MsbSemanticSceneEntity,

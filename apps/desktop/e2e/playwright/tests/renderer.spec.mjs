@@ -306,12 +306,13 @@ test('MSB 地图工作台三栏：对象列表↔viewport↔属性联动，defer
   await expect(window.getByRole('region', { name: 'Properties' })).toBeVisible();
   await expect(window.getByRole('region', { name: 'Tools' })).toHaveCount(0);
 
-  // 左栏对象列表由 fixture 合成 DTO 派生：Model/Event/Region/Part 分组都有实体。
+  // 左栏对象列表由 fixture 合成 DTO 派生：Model/Event/Region/Part/Route 分组都有实体。
   const objectList = window.getByRole('region', { name: 'Map Object List' });
   await expect(objectList.getByText('c0000')).toBeVisible();
-  await expect(objectList.getByText('e0000')).toBeVisible();
+  await expect(objectList.getByText('e0000', { exact: true })).toBeVisible();
   await expect(objectList.getByText('r0000')).toBeVisible();
   await expect(objectList.getByText('p0000')).toBeVisible();
+  await expect(objectList.getByText('route0000')).toBeVisible();
 
   // tree→inspector 联动：选中 part，右栏显示数值属性，viewport 报「已选择 part」。
   await objectList.getByRole('row', { name: /p0000/ }).click();
@@ -323,6 +324,10 @@ test('MSB 地图工作台三栏：对象列表↔viewport↔属性联动，defer
   await objectList.getByRole('row', { name: /r0001/ }).click();
   await expect(window.getByTestId('msb-selected-summary')).toContainText('已选择 region：r0001');
   await expect(properties).toContainText('Position Z');
+
+  // route 不制造 3D 节点，但必须保留原生 typeId/id 并在属性栏可见。
+  await objectList.getByRole('row', { name: /route0000/ }).click();
+  await expect(properties.getByRole('row', { name: /Route ID/ })).toContainText('42');
 
   // 问题4-B：地图工作台整条 footer（Δ 微调 / transform 输入 / 实时模式 /
   // 三个提交按钮）已移除；Properties 栏保持只读属性表。

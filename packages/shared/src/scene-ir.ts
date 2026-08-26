@@ -3,7 +3,7 @@
  * This module is browser-safe and must never receive absolute filesystem paths.
  */
 
-export type MsbSceneEntityKind = 'msb-model' | 'msb-part' | 'msb-region' | 'msb-event';
+export type MsbSceneEntityKind = 'msb-model' | 'msb-part' | 'msb-region' | 'msb-event' | 'msb-route';
 export type SceneProxyPrimitive = 'box' | 'sphere' | 'point';
 
 export interface SceneProjectionDiagnostic {
@@ -63,11 +63,18 @@ export interface MsbMapEventLike extends MsbNativeEntityLike {
   typeId: number;
 }
 
+export interface MsbRouteLike extends MsbNativeEntityLike {
+  typeId: number;
+  /** MSB route record id；可能由原生记录缺省。 */
+  id?: number;
+}
+
 export interface MsbSceneSourceCounts {
   models: number;
   parts: number;
   regions: number;
   events: number;
+  routes: number;
 }
 
 export interface MsbSemanticSceneEntity {
@@ -77,6 +84,8 @@ export interface MsbSemanticSceneEntity {
   sourceResourceUri: string;
   nativeOffset?: number;
   typeId?: number;
+  /** 仅 msb-route 有效，保留 Bridge 的原生 route id。 */
+  routeId?: number;
 }
 
 export interface SceneNode extends MsbSemanticSceneEntity {
@@ -168,6 +177,7 @@ export function buildMsbSceneManifest(input: SceneResourceMetadata & {
   parts: MsbPartTransformLike[];
   regions?: MsbRegionLike[];
   events?: MsbMapEventLike[];
+  routes?: MsbRouteLike[];
   sourceCounts?: Partial<MsbSceneSourceCounts>;
   maxNodes?: number;
   chunkSize?: number;
@@ -184,17 +194,20 @@ export function buildMsbSceneManifest(input: SceneResourceMetadata & {
   const models = input.models ?? [];
   const regions = input.regions ?? [];
   const events = input.events ?? [];
+  const routes = input.routes ?? [];
   const sourceCounts: MsbSceneSourceCounts = {
     models: sourceCount(input.sourceCounts?.models, models.length),
     parts: sourceCount(input.sourceCounts?.parts, input.parts.length),
     regions: sourceCount(input.sourceCounts?.regions, regions.length),
-    events: sourceCount(input.sourceCounts?.events, events.length)
+    events: sourceCount(input.sourceCounts?.events, events.length),
+    routes: sourceCount(input.sourceCounts?.routes, routes.length)
   };
   const projectedCounts: MsbSceneSourceCounts = {
     models: models.length,
     parts: input.parts.length,
     regions: regions.length,
-    events: events.length
+    events: events.length,
+    routes: routes.length
   };
   const identities = new Map<string, number>();
   let usedFallbackIdentity = false;
@@ -249,6 +262,10 @@ export function buildMsbSceneManifest(input: SceneResourceMetadata & {
     drawable.push(node);
   }
   for (const event of events) entities.push(createEntity('msb-event', event));
+  for (const route of routes) {
+    const entity = createEntity('msb-route', route);
+    entities.push(route.id === undefined ? entity : { ...entity, routeId: route.id });
+  }
 
   const nodes = maxNodes === undefined ? drawable : drawable.slice(0, maxNodes);
   if (maxNodes !== undefined && drawable.length > maxNodes) {

@@ -8,7 +8,7 @@
  * - onDiagnosticsUpdate callback for UI Problems pane
  */
 
-import { StateField, StateEffect, type Extension } from '@codemirror/state';
+import { StateField, StateEffect, type Extension, type Transaction } from '@codemirror/state';
 import {
   Decoration,
   type DecorationSet,
@@ -19,12 +19,18 @@ import {
 } from '@codemirror/view';
 import type { EmedfCompletionItem, EmedfEnumDef, EventDiagnostic } from '@soulforge/core';
 import { computeDocumentDiagnostics, getQuickFixesAt } from '@soulforge/core/dist/emevd/language-service/index.js';
+import { sourceFillAnnotation } from './incrementalSourceInjection.js';
 
 const setDiagnosticsEffect = StateEffect.define<EventDiagnostic[]>();
 
 const errorMark = Decoration.mark({ class: 'cm-diagnostic-error' });
 const warnMark = Decoration.mark({ class: 'cm-diagnostic-warning' });
 const infoMark = Decoration.mark({ class: 'cm-diagnostic-info' });
+
+/** 增量源码追加不应在每片到达时重新扫描不断增长的全文。 */
+export function isSourceFillTransaction(transaction: Transaction): boolean {
+  return transaction.annotation(sourceFillAnnotation) === true;
+}
 
 export const diagnosticsStateField = StateField.define<EventDiagnostic[]>({
   create() {
@@ -121,6 +127,7 @@ export function emevdDiagnosticsExtension(
   // Debounced live diagnostics dispatcher
   let timer: ReturnType<typeof setTimeout> | null = null;
   const listener = EditorView.updateListener.of((update) => {
+    if (update.transactions.some(isSourceFillTransaction)) return;
     if (update.docChanged || update.view.state.field(diagnosticsStateField).length === 0) {
       if (timer) clearTimeout(timer);
       timer = setTimeout(() => {

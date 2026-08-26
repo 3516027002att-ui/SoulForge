@@ -91,11 +91,18 @@ function projectNativeScene(envelope: MsbEnvelope) {
       nativeOffset: event.offset,
       typeId: event.typeId
     })),
+    routes: (envelope.routes ?? []).map((route) => ({
+      name: route.name,
+      nativeOffset: route.offset,
+      typeId: route.typeId,
+      ...(route.id === undefined ? {} : { id: route.id })
+    })),
     sourceCounts: {
       models: envelope.modelCount,
       parts: envelope.partCount,
       regions: envelope.regionCount ?? 0,
-      events: envelope.eventCount ?? 0
+      events: envelope.eventCount ?? 0,
+      routes: envelope.routeCount ?? 0
     }
   });
 }
@@ -211,8 +218,9 @@ async function mainInWorkspace(root: string): Promise<void> {
   }
   if (!sceneBefore.entities.some((entity) => entity.kind === 'msb-model')
     || !sceneBefore.entities.some((entity) => entity.kind === 'msb-event')
+    || !sceneBefore.entities.some((entity) => entity.kind === 'msb-route')
     || !sceneBefore.nodes.some((node) => node.kind === 'msb-region')) {
-    throw new Error('native scene projection must include model/part/region/event entities');
+    throw new Error('native scene projection must include model/part/region/event/route entities');
   }
 
   const part = read.data.parts[0];

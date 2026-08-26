@@ -4156,10 +4156,12 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
             partCount: result.data.partCount,
             regionCount: result.data.regionCount,
             eventCount: result.data.eventCount,
+            routeCount: result.data.routeCount,
             models: result.data.models,
             parts: result.data.parts,
             regions: result.data.regions,
             events: result.data.events,
+            routes: result.data.routes,
             authority: result.data.authority,
             entityEdit: result.data.entityEdit
           }

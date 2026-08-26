@@ -438,7 +438,7 @@ function registerFixtureIpc() {
   // ── MSB 地图工作台（MAP-50B）合成通道 ──────────────────────────────────
   // 基础 fixture 没有 map 文件，readMsbDocument 从未被 stub——选中 map 文件会走
   // 真实 Bridge 读不存在的源文件，工作台永远停在「读不出来」。这里注册合成 DTO
-  // （微小、合法构造、明确标记）：2 models / 3 parts / 2 regions / 1 event，
+  // （微小、合法构造、明确标记）：2 models / 3 parts / 2 regions / 1 event / 1 route，
   // 全部带 nativeOffset（id 稳定为 offset-<hex>），供 tree↔viewport↔inspector 联动断言。
   const fixtureMapUri = 'fixture://map/m10.msb.dcx';
 
@@ -459,7 +459,7 @@ function registerFixtureIpc() {
         partCount: 3,
         regionCount: 2,
         eventCount: 1,
-        routeCount: 0,
+        routeCount: 1,
         models: [
           { name: 'c0000', nativeOffset: 0x10, typeId: 0 },
           { name: 'a0000', nativeOffset: 0x20, typeId: 1 }
@@ -475,6 +475,9 @@ function registerFixtureIpc() {
         ],
         events: [
           { name: 'e0000', nativeOffset: 0x80, typeId: 0, eventId: 100 }
+        ],
+        routes: [
+          { name: 'route0000', nativeOffset: 0x90, typeId: 0, id: 42 }
         ]
       },
       diagnostics: []

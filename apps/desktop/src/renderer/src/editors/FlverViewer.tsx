@@ -316,8 +316,8 @@ export function FlverViewer(props: FlverViewerProps): ReactElement {
     : null;
 
   return (
-    <div style={{ position: 'relative', width: '100%', height: '100%', background: '#1a1d23', borderRadius: 4 }}>
-      <div ref={containerRef} style={{ width: '100%', height: '100%' }} />
+    <div className="flver-viewer" style={{ position: 'relative', width: '100%', height: '100%', minWidth: 0, minHeight: 0, overflow: 'hidden', background: '#1a1d23', borderRadius: 4 }}>
+      <div ref={containerRef} style={{ width: '100%', height: '100%', minWidth: 0, minHeight: 0 }} />
       <div style={{
         position: 'absolute', top: 8, left: 8, color: '#8899aa', fontSize: 12,
         background: 'rgba(0,0,0,0.5)', padding: '4px 8px', borderRadius: 4

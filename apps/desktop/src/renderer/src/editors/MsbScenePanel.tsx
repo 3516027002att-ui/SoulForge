@@ -7,6 +7,7 @@ import {
   type MsbMapEventLike,
   type MsbModelLike,
   type MsbRegionLike,
+  type MsbRouteLike,
   type MsbSceneSourceCounts,
   type PartLike,
   type SceneDrawItem,
@@ -36,13 +37,14 @@ export function resolvePartModelName(
 }
 
 /** 左栏 Map Object List 里的实体分类。 */
-type MsbEntityKind = 'msb-model' | 'msb-event' | 'msb-part' | 'msb-region';
+type MsbEntityKind = 'msb-model' | 'msb-event' | 'msb-part' | 'msb-region' | 'msb-route';
 
 interface SelectedEntity {
   id: string;
   label: string;
   kind: MsbEntityKind;
   nativeOffset?: number;
+  routeId?: number;
 }
 
 export interface MsbScenePanelProps {
@@ -54,6 +56,7 @@ export interface MsbScenePanelProps {
   parts: PartLike[];
   regions?: MsbRegionLike[];
   events?: MsbMapEventLike[];
+  routes?: MsbRouteLike[];
   sourceCounts?: MsbSceneSourceCounts;
   maxNodes?: number;
   /** native 提交后把 fresh revision 提升到 App，触发权威 MSB 重读。 */
@@ -187,6 +190,7 @@ export function MsbScenePanel(props: MsbScenePanelProps): ReactElement {
         parts: partsState,
         regions,
         ...(props.events ? { events: props.events } : {}),
+        ...(props.routes ? { routes: props.routes } : {}),
         ...(props.sourceCounts ? { sourceCounts: props.sourceCounts } : {}),
         ...(props.maxNodes !== undefined ? { maxNodes: props.maxNodes } : {}),
         chunkSize: 512
@@ -344,6 +348,7 @@ export function MsbScenePanel(props: MsbScenePanelProps): ReactElement {
     props.models,
     props.regions,
     props.events,
+    props.routes,
     props.sourceCounts,
     props.maxNodes
   ]);
@@ -410,7 +415,7 @@ export function MsbScenePanel(props: MsbScenePanelProps): ReactElement {
   }
 
   /**
-   * 左栏对象分组（Map Object List）：Model / Event / Region / Part。
+   * 左栏对象分组（Map Object List）：Model / Event / Region / Part / Route。
    *
    * 由 scene manifest 派生而不是 props 各数组直接拼：条目带稳定 id
    * （`<kind>:offset-<hex>` 或 name 退化），左栏选中 ↔ viewport 高亮用同一把 id。
@@ -424,7 +429,8 @@ export function MsbScenePanel(props: MsbScenePanelProps): ReactElement {
       { id: 'model', label: 'Model', entries: pick('msb-model') },
       { id: 'event', label: 'Event', entries: pick('msb-event') },
       { id: 'region', label: 'Region', entries: pick('msb-region') },
-      { id: 'part', label: 'Part', entries: pick('msb-part') }
+      { id: 'part', label: 'Part', entries: pick('msb-part') },
+      { id: 'route', label: 'Route', entries: pick('msb-route') }
     ];
   }, [manifest]);
 
@@ -476,6 +482,19 @@ export function MsbScenePanel(props: MsbScenePanelProps): ReactElement {
         ['Name', entity.label],
         ...(model?.sibPath ? [['Sib Path', model.sibPath] as const] : []),
         ...(model?.typeId !== undefined ? [['Type ID', String(model.typeId)] as const] : [])
+      ];
+    }
+    if (entity.kind === 'msb-route') {
+      const route = props.routes?.find((candidate) => (
+        candidate.name === entity.label
+        && (entity.nativeOffset === undefined || candidate.nativeOffset === entity.nativeOffset)
+      ));
+      const routeId = route?.id ?? entity.routeId;
+      return [
+        ['Name', entity.label],
+        ...(route?.typeId !== undefined ? [['Type ID', String(route.typeId)] as const] : []),
+        ...(routeId !== undefined ? [['Route ID', String(routeId)] as const] : []),
+        ...(route?.nativeOffset !== undefined ? [['Native Offset', String(route.nativeOffset)] as const] : [])
       ];
     }
     const mapEvent = props.events?.find((candidate) => candidate.name === entity.label);

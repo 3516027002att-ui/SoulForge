@@ -471,21 +471,36 @@ describe('S35 增量源（event-common-load.md §3.2：首帧前缀 + 按视口�
     assert.match(panelSource, /activeTab\?\.live && activeTab\.dslTemplate === null && !activeTab\.sourceToken/);
   });
 
-  it('12-A：挂载/切回前台即对增量源 tab 按片后台续载（首帧仍只带前缀）', () => {
-    // SSR 无法跑 effect；源码级钉住接线：activeTabId 变化时走 fillRemainingInSlices
-    // （每片立刻 append），不得再对打开路径调 ensureTabComplete 一次拉齐——
-    // 那会让前 400 行卡住直到切走再切回来。
-    assert.match(panelSource, /incrementalSourcesRef\.current\.get\(activeTabId\)/);
-    assert.match(panelSource, /fillRemainingInSlicesRef\.current\(activeTabId\)/);
-    assert.match(panelSource, /fillRemainingInSlices/);
-    const mountEffect = panelSource.slice(
-      panelSource.indexOf('12-A：打开并挂上前缀后'),
-      panelSource.indexOf('if (!splitTabId || !splitHostRef.current)')
-    );
-    assert.match(mountEffect, /fillRemainingInSlicesRef\.current\(activeTabId\)/);
-    assert.doesNotMatch(mountEffect, /ensureTabCompleteRef\.current\(activeTabId\)/);
+  it('12-A：打开/切回不自动拉齐，只有用户滚动近底才按片续载', () => {
+    // SSR 无法跑 effect；源码级钉住：没有打开后 EOF 循环，滚动事件先登记用户意图，
+    // 近底探测再取一片；Ctrl+F / 保存仍走 ensureTabComplete。
+    assert.doesNotMatch(panelSource, /fillRemainingInSlices/);
+    assert.doesNotMatch(panelSource, /backgroundFillPromisesRef/);
+    assert.match(panelSource, /userScrolledTabsRef\.current\.add\(tabId\)/);
+    assert.match(panelSource, /if \(!userScrolledTabsRef\.current\.has\(tabId\)\) return/);
+    assert.match(panelSource, /ensureTabCompleteRef\.current\(targetTabId\)/);
+    assert.match(panelSource, /ensureTabCompleteRef\.current\(activeTab\.tabId\)/);
     // 首帧缓冲仍是前缀，不把全量塞进第一次 IPC。
     assert.equal(baselineText(incrementalTab), 'L0\nL1\nL2');
+  });
+
+  it('12-A：用户编辑只置 dirty，不因每次 docChanged 自动拉齐', () => {
+    const commitDraft = panelSource.slice(
+      panelSource.indexOf('const commitDraft = useCallback'),
+      panelSource.indexOf('commitDraftRef.current = commitDraft')
+    );
+    assert.doesNotMatch(commitDraft, /ensureTabComplete/);
+    assert.match(commitDraft, /setAnalysisRevision/);
+  });
+
+  it('12-B：增量源追加带 sourceFillAnnotation，诊断扩展显式跳过该事务', () => {
+    const diagnosticsSource = readFileSync(
+      join(repoRoot, 'apps', 'desktop', 'src', 'renderer', 'src', 'emevd', 'cmDiagnostics.ts'),
+      'utf8'
+    );
+    assert.match(diagnosticsSource, /sourceFillAnnotation/);
+    assert.match(diagnosticsSource, /isSourceFillTransaction/);
+    assert.match(diagnosticsSource, /if \(update\.transactions\.some\(isSourceFillTransaction\)\) return/);
   });
 
   it('12-C：事件工作台有独立高度宿主，源码列与词义列不跟 viewer-content 一起滚', () => {

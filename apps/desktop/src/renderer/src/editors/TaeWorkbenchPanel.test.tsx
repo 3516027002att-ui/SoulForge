@@ -38,6 +38,8 @@ import { describe, it } from 'node:test';
 import { renderToStaticMarkup } from 'react-dom/server';
 import {
   animationIdLabel,
+  appendTaeAnimationPage,
+  createTaeAnimationPaginationState,
   isLegalHkxStem,
   secondsToFrame,
   TaeWorkbenchPanel,
@@ -205,6 +207,8 @@ describe('TaeWorkbenchPanel 初始结构（挂载即有的四栏骨架）', () =
     assert.match(panelSource, /FlverViewer/);
     assert.match(panelSource, /tae-preview__viewport/);
     assert.match(panelSource, /data-testid="tae-preview-viewport"/);
+    assert.match(panelSource, /minHeight: 0/);
+    assert.doesNotMatch(panelSource, /minHeight: 220|aspectRatio: ['"]16 \/ 9['"]/);
     // 模型挂上但动画还不能播：明说「未接入」，不假装在播。
     assert.match(panelSource, /模型已挂，动画播放未接入/);
     // 无「见底部日志」推诿句；「预览不可用」不再是必须空态（有可行动错误句时才有）。
@@ -246,6 +250,54 @@ describe('animationIdLabel / isLegalHkxStem / secondsToFrame（动画标签与�
     assert.equal(secondsToFrame(2), '60');
     assert.equal(secondsToFrame(Number.NaN), '—');
     assert.equal(secondsToFrame(Number.POSITIVE_INFINITY), '—');
+  });
+});
+
+describe('TAE 动画分页（服务端 hasMore authority）', () => {
+  it('page 1 → page 2 → page 3 只在服务端 EOF 时结束，追加稳定且不重复', () => {
+    const page0 = makeDocument({
+      animationCount: 5,
+      animations: [makeDocument().animations[0]],
+      animationsTruncated: true
+    }) as TaeDocument;
+    const page1 = makeDocument({
+      animationCount: 5,
+      animations: [{ ...makeDocument().animations[1], animId: 2 }],
+      animationsTruncated: true
+    }) as TaeDocument;
+    const page2 = makeDocument({
+      animationCount: 5,
+      animations: [{ ...makeDocument().animations[1], animId: 3 }],
+      animationsTruncated: true
+    }) as TaeDocument;
+    const page3 = makeDocument({
+      animationCount: 5,
+      animations: [{ ...makeDocument().animations[1], animId: 4 }],
+      animationsTruncated: false
+    }) as TaeDocument;
+
+    let state = createTaeAnimationPaginationState('fixture://tae', page0);
+    assert.equal(state.hasMore, true);
+    state = appendTaeAnimationPage(state, page1, 1);
+    assert.equal(state.hasMore, true);
+    state = appendTaeAnimationPage(state, page2, 2);
+    assert.equal(state.hasMore, true);
+    state = appendTaeAnimationPage(state, page3, 3);
+    assert.equal(state.hasMore, false);
+    // EOF 后的迟到/重复页不能再改变结果。
+    state = appendTaeAnimationPage(state, page3, 3);
+    assert.deepEqual(state.animations.map((animation) => animation.animId), [2, 3, 4]);
+    assert.equal(state.nextPage, 4);
+  });
+
+  it('重复页与错误页不会清空或复制已加载动画', () => {
+    const page0 = makeDocument({ animationsTruncated: true }) as TaeDocument;
+    const page1 = makeDocument({ animations: [{ ...page0.animations[1], animId: 2 }], animationsTruncated: false }) as TaeDocument;
+    let state = createTaeAnimationPaginationState('fixture://tae', page0);
+    state = appendTaeAnimationPage(state, page1, 1);
+    const before = state;
+    assert.deepEqual(appendTaeAnimationPage(state, page1, 1), before);
+    assert.deepEqual(state.animations.map((animation) => animation.animId), [2]);
   });
 });
 

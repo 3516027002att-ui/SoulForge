@@ -99,6 +99,7 @@ export const DOCUMENT_STATE_SETTERS: Readonly<Record<DocumentFamily, readonly st
       'setMsbModels',
       'setMsbRegions',
       'setMsbEvents',
+      'setMsbRoutes',
       'setMsbSourceCounts',
       'setMsbLive',
       'setMsbSourceHash',
