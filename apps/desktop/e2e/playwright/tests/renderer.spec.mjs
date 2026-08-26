@@ -598,7 +598,9 @@ test('动作工作台三栏（TAE）：动画 → 词条事件选择链，事件
   await expect(window.getByTestId('tae-preview-unavailable')).toContainText('预览不可用');
   // 右栏始终只读：无输入、无按钮。
   const preview = window.getByRole('region', { name: '预览（只读）' });
-  await expect(preview.locator('input, button')).toHaveCount(0);
+  await expect(preview.locator('input[type="number"], input[type="text"], textarea')).toHaveCount(0);
+  await expect(preview.getByTestId('tae-timeline-ctrl')).toBeVisible();
+  await expect(preview.getByRole('button', { name: '播放' })).toBeVisible();
 
   // 问题4-C：详情必须能关——点 × 关闭后详情不在，回到该动画。
   await window.getByRole('button', { name: '关闭词条详情' }).click();

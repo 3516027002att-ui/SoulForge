@@ -2263,10 +2263,10 @@ details.agent-block > summary.agent-block__label { cursor: pointer; }
 /* 行名编辑框（T5-3）：与只读 span 等高同宽，点击不触发行选择。 */
 .wb-row__name-input {
   flex: 1; min-width: 0; font: inherit; font-size: 12px;
-  border: 1px solid var(--border); border-radius: 2px; padding: 0 4px;
-  background: var(--surface-1); color: var(--ink-1);
+  border: 1px solid var(--line); border-radius: 2px; padding: 0 4px;
+  background: var(--forge-1); color: var(--ink-1);
 }
-.wb-row__name-input:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
+.wb-row__name-input:focus { outline: 2px solid var(--ember); outline-offset: -1px; }
 .wb-row__meta { flex: none; font-size: 10px; color: var(--ink-3); }
 /* 读取失败的条目：仍列在表里（不像参照工具那样移除），但明确标出。
    左边框 + 文字标记双通道 —— 只用颜色对色觉障碍用户不可分辨。 */
@@ -2426,9 +2426,27 @@ details.agent-block > summary.agent-block__label { cursor: pointer; }
 .workbench__column-body:has(> .tae-preview-body) {
   display: flex; flex-direction: column; overflow: hidden; min-width: 0; min-height: 0;
 }
-.tae-preview-body { height: 100%; min-width: 0; min-height: 0; overflow: hidden; }
-.tae-preview__viewport { flex: 1 1 auto; min-width: 0; min-height: 0; position: relative; overflow: hidden; }
+.tae-preview-body {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+}
+.tae-preview__viewport {
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: 120px;
+  position: relative;
+  overflow: hidden;
+}
 .tae-preview__viewport > div { position: absolute; inset: 0; min-width: 0; min-height: 0; }
+
+.wb-row.is-triggering:not([aria-selected='true']) {
+  background: var(--ember-soft);
+  border-left-color: var(--ember);
+}
 
 /* 问题4-C：词条详情收在 Events 栏下半（可关抽屉），不占整条 workbench footer。
    起始帧/结束帧只留一套（主单位帧，旁边小字 ≈ 秒）。 */
@@ -2446,7 +2464,259 @@ details.agent-block > summary.agent-block__label { cursor: pointer; }
   background: transparent; color: var(--ink-2); font-size: 14px; line-height: 1;
   cursor: pointer;
 }
-.tae-event-detail__close:hover { color: var(--ink-0); border-color: var(--accent); }
+.tae-event-detail__close:hover { color: var(--ink-0); border-color: var(--ember); }
+
+/* ══════════ TAE 动作播放控制栏（流光溢彩白 Transport Control） ══════════ */
+.tae-timeline-ctrl {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 6px 8px 8px;
+  background: var(--forge-1);
+  border-top: 1px solid var(--line);
+  user-select: none;
+  flex-shrink: 0;
+}
+
+.tae-transport-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  min-height: 24px;
+  flex-wrap: wrap;
+}
+
+.tae-transport-group {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  flex-wrap: wrap;
+}
+
+.tae-transport-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 24px;
+  height: 22px;
+  padding: 0 4px;
+  font-size: 11px;
+  color: var(--ink-1);
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: var(--radius-s);
+  cursor: pointer;
+  transition: background var(--dur-micro) var(--ease-standard), color var(--dur-micro) var(--ease-standard);
+}
+
+.tae-transport-btn svg {
+  display: block;
+  flex-shrink: 0;
+}
+
+.tae-transport-btn:hover:not(:disabled) {
+  background: var(--control-hover-bg);
+  color: var(--ink-0);
+}
+
+.tae-transport-btn:active:not(:disabled) {
+  background: var(--control-active-bg);
+  color: var(--ink-0);
+}
+
+.tae-transport-btn.is-active,
+.tae-transport-btn[aria-pressed='true'] {
+  color: var(--ember-text);
+  background: var(--ember-soft);
+}
+
+.tae-transport-btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.tae-transport-btn:focus-visible {
+  outline: 2px solid var(--ember);
+  outline-offset: -1px;
+}
+
+.tae-transport-btn--play {
+  font-weight: 600;
+  padding: 0 5px;
+  gap: 3px;
+}
+
+.tae-speed-select {
+  height: 22px;
+  padding: 0 4px;
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  color: var(--ink-1);
+  background: var(--forge-2);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-s);
+  cursor: pointer;
+  outline: none;
+  transition: border-color var(--dur-micro) var(--ease-standard);
+}
+
+.tae-speed-select:hover {
+  border-color: var(--line-strong);
+  color: var(--ink-0);
+}
+
+.tae-speed-select:focus-visible {
+  outline: 2px solid var(--ember);
+  outline-offset: -1px;
+}
+
+.tae-time-display {
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  color: var(--ink-2);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  letter-spacing: -0.02em;
+  user-select: text;
+}
+
+/* ── TAE 时间轴 Slider ── */
+.tae-timeline-slider-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+}
+
+.tae-timeline-slider {
+  flex: 1;
+  width: 100%;
+  height: 14px;
+  -webkit-appearance: none;
+  appearance: none;
+  background: transparent;
+  cursor: pointer;
+  margin: 0;
+  touch-action: none;
+}
+
+.tae-timeline-slider:focus {
+  outline: none;
+}
+
+.tae-timeline-slider::-webkit-slider-runnable-track {
+  width: 100%;
+  height: 4px;
+  background: var(--line-strong);
+  border-radius: 2px;
+  transition: background var(--dur-micro) var(--ease-standard);
+}
+
+.tae-timeline-slider:hover::-webkit-slider-runnable-track {
+  background: var(--ink-3);
+}
+
+.tae-timeline-slider::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: var(--ember);
+  border: 1.5px solid var(--canvas, #fff);
+  margin-top: -3px;
+  cursor: pointer;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.2);
+  transition: transform var(--dur-micro) var(--ease-standard), background var(--dur-micro) var(--ease-standard);
+}
+
+.tae-timeline-slider::-webkit-slider-thumb:hover {
+  transform: scale(1.2);
+  background: var(--ember-text);
+}
+
+.tae-timeline-slider:focus-visible::-webkit-slider-thumb {
+  outline: 2px solid var(--ember);
+  outline-offset: 2px;
+}
+
+/* ── TAE 多轨时间轴容器 ── */
+.tae-tracks-container {
+  max-height: 100px;
+  overflow-y: auto;
+  background: var(--forge-2);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-s);
+  padding: 3px;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  overscroll-behavior: contain;
+  user-select: none;
+  flex-shrink: 0;
+}
+
+.tae-track-row {
+  position: relative;
+  height: 18px;
+  background: var(--forge-1);
+  border-radius: 2px;
+  overflow: hidden;
+}
+
+.tae-track-block {
+  position: absolute;
+  top: 1px;
+  bottom: 1px;
+  display: flex;
+  align-items: center;
+  padding: 0 3px;
+  font-family: var(--font-mono);
+  font-size: 9.5px;
+  line-height: 1;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  border-radius: 2px;
+  cursor: pointer;
+  box-sizing: border-box;
+  background: color-mix(in oklch, var(--ink-1), transparent 84%);
+  color: var(--ink-1);
+  border: 1px solid var(--line);
+  transition: background var(--dur-micro) var(--ease-standard), border-color var(--dur-micro) var(--ease-standard), color var(--dur-micro) var(--ease-standard);
+}
+
+.tae-track-block:hover {
+  background: color-mix(in oklch, var(--ink-1), transparent 70%);
+  color: var(--ink-0);
+  border-color: var(--line-strong);
+}
+
+.tae-track-block.is-triggering {
+  background: var(--ember-soft);
+  color: var(--ember-text);
+  border-color: var(--ember);
+  font-weight: 600;
+}
+
+.tae-track-block.is-selected {
+  background: var(--ember);
+  color: var(--on-ember);
+  border-color: var(--ember);
+  font-weight: 600;
+}
+
+.tae-track-block.has-error {
+  background: var(--danger-soft);
+  color: var(--danger-text);
+  border-color: var(--danger);
+}
+
+.tae-track-block:focus-visible {
+  outline: 2px solid var(--ember);
+  outline-offset: -1px;
+}
 
 /* S24：ffxbnd 效果库的 .fxr 子项列表（文件条目下缩进展开）。 */
 .vfx-entries { padding-left: 14px; border-left: 2px solid var(--line); margin-left: 10px; }
@@ -2797,7 +3067,7 @@ details.agent-block > summary.agent-block__label { cursor: pointer; }
 
 .model-pick-list .is-selected {
   background: var(--forge-hover);
-  outline: 1px solid var(--accent);
+  outline: 1px solid var(--ember);
   border-radius: var(--radius-s);
 }
 

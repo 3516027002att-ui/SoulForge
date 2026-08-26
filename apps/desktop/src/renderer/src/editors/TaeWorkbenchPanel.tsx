@@ -92,6 +92,57 @@ const FRAME_RATE = 30;
  */
 const MAX_ANIMATION_SECONDS = 3600;
 
+function PlayIcon(): ReactElement {
+  return (
+    <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+      <path d="M8 5v14l11-7z" />
+    </svg>
+  );
+}
+
+function PauseIcon(): ReactElement {
+  return (
+    <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+      <path d="M6 19h4V5H6v14zm8-14v14h4V5h-4z" />
+    </svg>
+  );
+}
+
+function StopIcon(): ReactElement {
+  return (
+    <svg width="11" height="11" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+      <path d="M6 6h12v12H6z" />
+    </svg>
+  );
+}
+
+function PrevFrameIcon(): ReactElement {
+  return (
+    <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+      <path d="M6 6h2v12H6zm3.5 6l8.5 6V6z" />
+    </svg>
+  );
+}
+
+function NextFrameIcon(): ReactElement {
+  return (
+    <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+      <path d="M6 18l8.5-6L6 6v12zM16 6v12h2V6h-2z" />
+    </svg>
+  );
+}
+
+function LoopIcon(): ReactElement {
+  return (
+    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <path d="M17 2l4 4-4 4" />
+      <path d="M3 11v-1a4 4 0 0 1 4-4h14" />
+      <path d="M7 22l-4-4 4-4" />
+      <path d="M21 13v1a4 4 0 0 1-4 4H3" />
+    </svg>
+  );
+}
+
 /**
  * TAE 动画分页的 renderer 状态。
  *
@@ -1197,15 +1248,15 @@ export function TaeWorkbenchPanel(props: TaeWorkbenchPanelProps): ReactElement {
                     const invalid = isInvalidTimeRange(event.startTime, event.endTime);
                     const typeName = eventTypeNames.get(event.eventTypeId) ?? '未命名';
                     const isTriggering = !invalid && event.startTime <= playbackTime && playbackTime <= event.endTime;
+                    const rowClass = [
+                      'wb-row',
+                      invalid ? 'wb-row--failed' : '',
+                      isTriggering ? 'is-triggering' : ''
+                    ].filter(Boolean).join(' ');
                     return (
                       <div
                         key={`${selectedAnimation.animId}-${index}`}
-                        className={invalid ? 'wb-row wb-row--failed' : 'wb-row'}
-                        style={isTriggering ? {
-                          backgroundColor: 'rgba(224, 108, 58, 0.25)',
-                          borderLeft: '3px solid var(--ember, #e06c3a)',
-                          transition: 'background-color 0.1s ease'
-                        } : undefined}
+                        className={rowClass}
                         {...selectableRowAttributes({
                           selected: selected?.kind === 'event' && selected.eventIndex === index,
                           isTabEntry: false,
@@ -1214,7 +1265,7 @@ export function TaeWorkbenchPanel(props: TaeWorkbenchPanelProps): ReactElement {
                         title={`${event.eventTypeId} ${typeName}`}
                       >
                         <span className="wb-row__name" title={`${event.eventTypeId} ${typeName}`}>
-                          {isTriggering ? '⚡ ' : ''}{event.eventTypeId} {typeName}
+                          {event.eventTypeId} {typeName}
                         </span>
                         <span className="wb-row__meta">
                           {invalid ? '非法时间' : `帧 ${secondsToFrame(event.startTime)}–${secondsToFrame(event.endTime)}`}
@@ -1263,7 +1314,7 @@ export function TaeWorkbenchPanel(props: TaeWorkbenchPanelProps): ReactElement {
           initialFlex: 0.22,
           minWidth: 220,
           children: (
-            <div className="wb-list tae-preview-body" style={{ display: 'flex', flexDirection: 'column', height: '100%', minHeight: 0, minWidth: 0, overflow: 'hidden' }}>
+            <div className="wb-list tae-preview-body">
               {mergedDocument === null && <p className="wb-empty">选择 .tae / .anibnd.dcx 文件后查看预览。</p>}
               {mergedDocument !== null && (
                 <>
@@ -1279,7 +1330,7 @@ export function TaeWorkbenchPanel(props: TaeWorkbenchPanelProps): ReactElement {
                     </>
                   )}
                   {!preview.loading && preview.error === null && preview.meshes.length > 0 && (
-                    <div className="tae-preview-host tae-preview__viewport" style={{ flex: 1, minHeight: 0, minWidth: 0 }} data-testid="tae-preview-viewport">
+                    <div className="tae-preview-host tae-preview__viewport" data-testid="tae-preview-viewport">
                       <FlverViewer
                         meshCount={preview.meshCount}
                         boneCount={preview.boneCount}
@@ -1291,7 +1342,7 @@ export function TaeWorkbenchPanel(props: TaeWorkbenchPanelProps): ReactElement {
                     </div>
                   )}
                   {!preview.loading && preview.error === null && preview.meshes.length === 0 && preview.boneCount > 0 && (
-                    <div className="tae-preview-host tae-preview__viewport" style={{ flex: 1, minHeight: 0, minWidth: 0 }} data-testid="tae-preview-viewport">
+                    <div className="tae-preview-host tae-preview__viewport" data-testid="tae-preview-viewport">
                       <FlverViewer
                         meshCount={0}
                         boneCount={preview.boneCount}
@@ -1303,33 +1354,62 @@ export function TaeWorkbenchPanel(props: TaeWorkbenchPanelProps): ReactElement {
                     </div>
                   )}
                   {/* 统一 Authoritative 播放控制栏与 Timeline 轨道 */}
-                  <div className="tae-timeline-ctrl" style={{ padding: '8px 12px', background: 'var(--bg-secondary, #1e1e1e)', borderTop: '1px solid var(--border, #333)', display: 'flex', flexDirection: 'column', gap: 6 }}>
-                    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', fontSize: 12 }}>
-                      <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-                        <button type="button" onClick={togglePlay} style={{ padding: '2px 8px', fontWeight: 'bold' }} title="空格键播放/暂停">
-                          {isPlaying ? '⏸ 暂停' : '▶ 播放'}
-                        </button>
-                        <button type="button" onClick={resetPlayback} style={{ padding: '2px 6px' }} title="重置到开头">
-                          ⏹ 停止
-                        </button>
-                        <button type="button" onClick={() => stepFrame(-1)} style={{ padding: '2px 6px' }} title="上一帧">
-                          ⏮
-                        </button>
-                        <button type="button" onClick={() => stepFrame(1)} style={{ padding: '2px 6px' }} title="下一帧">
-                          ⏭
+                  <div className="tae-timeline-ctrl" data-testid="tae-timeline-ctrl">
+                    <div className="tae-transport-bar">
+                      <div className="tae-transport-group">
+                        <button
+                          type="button"
+                          className="tae-transport-btn tae-transport-btn--play"
+                          onClick={togglePlay}
+                          aria-label={isPlaying ? '暂停' : '播放'}
+                          title="空格键播放/暂停"
+                        >
+                          {isPlaying ? <PauseIcon /> : <PlayIcon />}
+                          <span>{isPlaying ? '暂停' : '播放'}</span>
                         </button>
                         <button
                           type="button"
+                          className="tae-transport-btn"
+                          onClick={resetPlayback}
+                          aria-label="重置到开头"
+                          title="重置到开头"
+                        >
+                          <StopIcon />
+                        </button>
+                        <button
+                          type="button"
+                          className="tae-transport-btn"
+                          onClick={() => stepFrame(-1)}
+                          aria-label="上一帧"
+                          title="上一帧"
+                        >
+                          <PrevFrameIcon />
+                        </button>
+                        <button
+                          type="button"
+                          className="tae-transport-btn"
+                          onClick={() => stepFrame(1)}
+                          aria-label="下一帧"
+                          title="下一帧"
+                        >
+                          <NextFrameIcon />
+                        </button>
+                        <button
+                          type="button"
+                          className={`tae-transport-btn ${isLooping ? 'is-active' : ''}`}
                           onClick={() => setIsLooping(!isLooping)}
-                          style={{ padding: '2px 6px', color: isLooping ? 'var(--accent, #4caf50)' : 'var(--muted, #888)' }}
+                          aria-label={isLooping ? '循环开启' : '循环关闭'}
+                          aria-pressed={isLooping}
                           title="循环播放"
                         >
-                          🔁
+                          <LoopIcon />
                         </button>
                         <select
+                          className="tae-speed-select"
                           value={playbackSpeed}
                           onChange={(e) => setPlaybackSpeed(Number(e.target.value))}
-                          style={{ background: 'var(--bg-input, #2a2a2a)', color: 'inherit', border: '1px solid var(--border, #444)', borderRadius: 3, padding: '2px 4px', fontSize: 11 }}
+                          aria-label="播放速度"
+                          title="播放速度"
                         >
                           <option value={0.25}>0.25x</option>
                           <option value={0.5}>0.5x</option>
@@ -1337,13 +1417,14 @@ export function TaeWorkbenchPanel(props: TaeWorkbenchPanelProps): ReactElement {
                           <option value={2.0}>2.0x</option>
                         </select>
                       </div>
-                      <div style={{ fontFamily: 'monospace', fontSize: 11, color: 'var(--text-secondary, #aaa)' }}>
+                      <div className="tae-time-display">
                         帧 {currentFrame} / {totalFrames} ({formatTime(playbackTime)}s / {formatTime(animDuration)}s)
                       </div>
                     </div>
-                    <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                    <div className="tae-timeline-slider-row">
                       <input
                         type="range"
+                        className="tae-timeline-slider"
                         min={0}
                         max={totalFrames > 0 ? totalFrames : 100}
                         value={currentFrame}
@@ -1351,47 +1432,36 @@ export function TaeWorkbenchPanel(props: TaeWorkbenchPanelProps): ReactElement {
                           const f = Number(e.target.value);
                           clockRef.current.seekFrame(f);
                         }}
-                        style={{ flex: 1, cursor: 'pointer' }}
+                        aria-label="时间轴进度"
                       />
                     </div>
                     {/* 多轨时间轴视觉呈现 */}
                     {timelineTracks.length > 0 && (
-                      <div className="tae-tracks-container" style={{ maxHeight: 120, overflowY: 'auto', background: 'var(--bg-canvas, #141414)', border: '1px solid var(--border, #282828)', borderRadius: 4, padding: 4, display: 'flex', flexDirection: 'column', gap: 4 }}>
+                      <div className="tae-tracks-container" data-testid="tae-tracks-container">
                         {timelineTracks.map((track) => (
-                          <div key={`track-${track.trackIndex}`} style={{ position: 'relative', height: 20, background: 'rgba(255,255,255,0.03)', borderRadius: 2 }}>
+                          <div key={`track-${track.trackIndex}`} className="tae-track-row">
                             {track.blocks.map((block) => {
                               const leftPercent = totalFrames > 0 ? (block.startFrame / totalFrames) * 100 : 0;
                               const widthPercent = totalFrames > 0 ? Math.max(2, (block.durationFrames / totalFrames) * 100) : 10;
                               const isTriggering = !block.hasError && block.startTime <= playbackTime && playbackTime <= block.endTime;
                               const isSelected = selected?.kind === 'event' && selected.eventIndex === block.eventIndex;
 
+                              const blockClass = [
+                                'tae-track-block',
+                                isSelected ? 'is-selected' : '',
+                                isTriggering ? 'is-triggering' : '',
+                                block.hasError ? 'has-error' : ''
+                              ].filter(Boolean).join(' ');
+
                               return (
                                 <div
                                   key={block.id}
+                                  className={blockClass}
                                   onClick={() => selectEvent(block.eventIndex)}
                                   title={`${block.eventTypeId} (${block.startFrame}F - ${block.endFrame}F)${block.hasError ? ': ' + block.errorMessage : ''}`}
                                   style={{
-                                    position: 'absolute',
                                     left: `${leftPercent}%`,
-                                    width: `${widthPercent}%`,
-                                    height: '100%',
-                                    background: block.hasError
-                                      ? 'rgba(244, 67, 54, 0.7)'
-                                      : isSelected
-                                      ? 'var(--accent, #2196f3)'
-                                      : isTriggering
-                                      ? 'rgba(224, 108, 58, 0.85)'
-                                      : 'rgba(100, 149, 237, 0.5)',
-                                    border: isSelected ? '1px solid #fff' : '1px solid rgba(255,255,255,0.2)',
-                                    borderRadius: 2,
-                                    fontSize: 10,
-                                    color: '#fff',
-                                    whiteSpace: 'nowrap',
-                                    overflow: 'hidden',
-                                    textOverflow: 'ellipsis',
-                                    padding: '1px 3px',
-                                    cursor: 'pointer',
-                                    boxSizing: 'border-box'
+                                    width: `${widthPercent}%`
                                   }}
                                 >
                                   {block.eventTypeId}

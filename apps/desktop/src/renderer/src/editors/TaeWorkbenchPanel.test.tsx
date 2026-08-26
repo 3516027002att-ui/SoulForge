@@ -207,8 +207,8 @@ describe('TaeWorkbenchPanel 初始结构（挂载即有的四栏骨架）', () =
     assert.match(panelSource, /FlverViewer/);
     assert.match(panelSource, /tae-preview__viewport/);
     assert.match(panelSource, /data-testid="tae-preview-viewport"/);
-    assert.match(panelSource, /minHeight: 0/);
-    assert.doesNotMatch(panelSource, /minHeight: 220|aspectRatio: ['"]16 \/ 9['"]/);
+    assert.match(panelSource, /tae-preview-body/);
+    assert.doesNotMatch(panelSource, /minHeight:\s*220|aspectRatio:\s*['"]16 \/ 9['"]/);
     // 模型挂上但动画还不能播：明说「未接入」，不假装在播。
     assert.match(panelSource, /模型已挂，动画播放未接入/);
     // 无「见底部日志」推诿句；「预览不可用」不再是必须空态（有可行动错误句时才有）。
@@ -531,10 +531,61 @@ describe('Negative source tests（ANIMATION-56B / ANIMATION-56C）', () => {
     assert.match(panelSource, /selectedAnimationEvents\.map\(/);
   });
 
-  it('问题4-A：预览按 meshCount 迭代全部网格，不再只画 mesh[0] 碎片', () => {
+  it('问题4-A：预览按 meshCount 迭代全部网格，不再只用 mesh[0] 碎片', () => {
     assert.match(panelSource, /for \(let index = 1; index < meshCount; index \+= 1\)/);
     assert.match(panelSource, /readTaeChrbndPreview\(props\.resourceUri, index\)/);
     assert.match(panelSource, /externalMeshes/);
     assert.doesNotMatch(panelSource, /meshIndex=\{0\}/);
+  });
+
+  it('TAE 视觉收敛：源码中禁止出现旧主题变量 (--bg-secondary / --bg-input / --bg-canvas / --text-secondary / 旧 --accent / 旧 --border)', () => {
+    assert.doesNotMatch(panelSource, /--bg-secondary/);
+    assert.doesNotMatch(panelSource, /--bg-input/);
+    assert.doesNotMatch(panelSource, /--bg-canvas/);
+    assert.doesNotMatch(panelSource, /--text-secondary/);
+    assert.doesNotMatch(panelSource, /var\(--accent\b/);
+    assert.doesNotMatch(panelSource, /var\(--border\b/);
+  });
+
+  it('TAE 视觉收敛：播放控制与时间轴区域禁止出现旧主题深色硬编码 (#1e1e1e / #2a2a2a / #141414 / #333 / #444)', () => {
+    assert.doesNotMatch(panelSource, /#1e1e1e/);
+    assert.doesNotMatch(panelSource, /#2a2a2a/);
+    assert.doesNotMatch(panelSource, /#141414/);
+    assert.doesNotMatch(panelSource, /#333333|#333\b/);
+    assert.doesNotMatch(panelSource, /#444444|#444\b/);
+  });
+
+  it('TAE 图标规范：禁止在正式播放器和词条列表中混用彩色 emoji (▶ / ⏸ / ⏹ / ⏮ / ⏭ / 🔁 / ⚡)', () => {
+    assert.doesNotMatch(panelSource, /[▶⏸⏹⏮⏭🔁⚡]/);
+  });
+
+  it('TAE Transport 控件：Loop 按钮具备明确 aria-pressed 语义与专属 class', () => {
+    const html = renderWithSelection();
+    assert.match(html, /class="tae-transport-btn\s+is-active"/);
+    assert.match(html, /aria-pressed="true"/);
+    assert.match(html, /aria-label="循环开启"/);
+  });
+
+  it('TAE 播放控制栏接入 SoulForge 专属 class 与单色矢量 SVG', () => {
+    const html = renderWithSelection();
+    assert.match(html, /class="tae-timeline-ctrl"/);
+    assert.match(html, /class="tae-transport-bar"/);
+    assert.match(html, /class="tae-transport-group"/);
+    assert.match(html, /class="tae-speed-select"/);
+    assert.match(html, /class="tae-time-display"/);
+    assert.match(html, /class="tae-timeline-slider"/);
+    // 渲染了 SVG 单色矢量图标
+    assert.match(html, /<svg[^>]*viewBox="0 0 24 24"[^>]*fill="currentColor"/);
+  });
+
+  it('TAE 响应式支持：Preview 栏 minWidth 为 220px 且包含完整 transport 控制项', () => {
+    assert.match(panelSource, /id:\s*'preview'[\s\S]*?minWidth:\s*220/);
+    const html = renderWithSelection();
+    assert.match(html, /aria-label="播放"/);
+    assert.match(html, /aria-label="重置到开头"/);
+    assert.match(html, /aria-label="上一帧"/);
+    assert.match(html, /aria-label="下一帧"/);
+    assert.match(html, /aria-label="播放速度"/);
+    assert.match(html, /aria-label="时间轴进度"/);
   });
 });
