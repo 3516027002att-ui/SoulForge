@@ -15,33 +15,12 @@ using System.Text;
 /// Bones(128B) → Meshes(48B) → FaceSets(32B) → VertexBuffers(32B) → BufferLayouts
 /// (16B header + 20B member) → Textures(32B) → SekiroUnk（version ≥ 0x2001A）。
 /// 顶点 stride 一律取自 VertexBuffer.VertexSize@0x08（不假定 40）；每个语义的字节偏移
-/// 取自该 mesh 实际使用的 BufferLayout.LayoutMember（Unk00@0/StructOffset@4/Type@8/
-/// Semantic@0xC/Index@0x10）。
-///
-/// 只读 authority，无 writer。解码约定与 SoulsFormats FLVER.Vertex 一致：
-///   Position：Float3 / Float4（取 xyz）
-///   Normal：Byte4* = (byte-127)/127；Float3/Float4 直接取 xyz
-///   UV：UVPair/UV = int16/2048（version ≥ 0x2000F）；Float2 直接取
-///   BoneWeights：Byte4C = byte/255；Byte4A = sbyte/127
-///   BoneIndices：Byte4B/Byte4E 原样字节
+/// 取自该 mesh 实际使用的 BufferLayout.LayoutMember。
 /// </summary>
 internal sealed class FlverNativeDocument
 {
     private static readonly byte[] MagicBytes = { 0x46, 0x4C, 0x56, 0x45, 0x52, 0x00 };
     private const int HeaderSize = 0x80;
-
-    /// <summary>
-    /// 已在真实语料上验证过的 FLVER internalVersion 闭集。
-    ///
-    /// 2026-08-08 实测 Sekiro mods/chr 全部 11 个 chrbnd 的 FLVER 子项：
-    /// 0x2001A ×8、0x20014 ×3（c5030 / c6210 / c8010），endian 标记全部 "L\0"。
-    ///
-    /// ⚠️ 这两个值都必须在集合里。我第一版只抽了 2 个 chrbnd 就把闭集定成
-    /// 0x2001A 单值，随即被 bridge:verify:flver-multi 打断——c5030 是 0x20014。
-    /// 抽样定闭集会把已验证路径判成不支持。扩这个集合必须先有该版本的真实样本
-    /// 与往返验证，不能凭「大概兼容」加进来——那等于在未验证的前提下扩大 native
-    /// 声明面；同理，缩小它会让已验证的样本失去支持。
-    /// </summary>
     private static readonly int[] SupportedInternalVersions = { 0x20014, 0x2001A };
     private const int DummySize = 64;
     private const int MaterialSize = 32;
@@ -67,8 +46,8 @@ internal sealed class FlverNativeDocument
     private const int SampleLimit = 10;
     private const int MaxStringBytes = 1024;
     private const int MaxIndexCount = 2_000_000;
+    private const float SkinWeightEpsilon = 1e-5f;
 
-    // FLVER2 LayoutType（SoulsFormats FLVER.LayoutMember.LayoutType）
     private const uint TypeFloat2 = 0x01;
     private const uint TypeFloat3 = 0x02;
     private const uint TypeFloat4 = 0x03;
@@ -84,7 +63,6 @@ internal sealed class FlverNativeDocument
     private const uint TypeByte4E = 0x2F;
     private const uint TypeEdgeCompressed = 0xF0;
 
-    // FLVER2 LayoutSemantic
     private const uint SemPosition = 0;
     private const uint SemBoneWeights = 1;
     private const uint SemBoneIndices = 2;
@@ -102,23 +80,6 @@ internal sealed class FlverNativeDocument
     private readonly IReadOnlyList<FlverFaceSetEntry> _faceSets;
     private readonly IReadOnlyList<FlverTextureSlotEntry> _textureSlots;
     private readonly List<string> _layoutWarnings;
-
-    /// <summary>
-    /// 已识别但**本实现未解析**的结构缺口。与 <see cref="_layoutWarnings"/> 刻意分成两个集合：
-    ///
-    ///   layoutWarnings = 「读到的东西不对」（越界引用、未知 member 大小、structOffset 越界）
-    ///                    → 数据可疑，是**异常**。
-    ///   unparsedGaps   = 「有东西我根本没读」（已定义未实现的语义、未读的字段区间）
-    ///                    → 数据没问题，是**能力边界**。
-    ///
-    /// 为什么必须分开：把缺口塞进 layoutWarnings 会让 11 个真实样本全部出现「警告」，
-    /// 而它们的数据其实完好——那是**误报**，且会淹没真正的越界警告（后者才需要人去查
-    /// 数据）。反过来，缺口若不进入任何集合，就是当前的状态：不可见。
-    ///
-    /// 两者都参与 <see cref="Authority"/> 的降级判定，但语义与诊断分开呈现。
-    /// 项目红线「未有真实 parser 时不得声称格式已解析」的执行机制正是这一条：
-    /// 让 authority 对缺口敏感，而不是让缺口悄悄通过。
-    /// </summary>
     private readonly SortedSet<string> _unparsedGaps;
 
     private FlverNativeDocument(
@@ -212,21 +173,10 @@ internal sealed class FlverNativeDocument
     public IReadOnlyList<FlverMeshEntry> Meshes { get; }
     public IReadOnlyList<FlverDummyEntry> Dummies => _dummies;
     public string SourceHash => Hash(_source);
-
-    /// <summary>首个 mesh 首 vertex buffer 的 stride；无 mesh 时为 0（兼容旧 envelope 字段）。</summary>
     public int VertexStride => Meshes.Count > 0 ? Meshes[0].VertexStride : 0;
-
-    /// <summary>全部 vertex buffer 出现过的不同 stride（升序）。</summary>
-    public int[] DistinctVertexStrides =>
-        _vertexBuffers.Select(vb => vb.VertexSize).Distinct().OrderBy(s => s).ToArray();
-
+    public int[] DistinctVertexStrides => _vertexBuffers.Select(vb => vb.VertexSize).Distinct().OrderBy(s => s).ToArray();
     public IReadOnlyList<string> LayoutWarnings => _layoutWarnings;
 
-    /// <summary>
-    /// 已识别但未解析的结构缺口（能力边界，不是数据异常）。
-    /// 访问前会触发一次 mesh plan 构建，确保顶点语义缺口已被登记——否则「没人调用过
-    /// BuildMeshPlan」与「真的没有缺口」不可区分。
-    /// </summary>
     public IReadOnlyList<string> UnparsedGaps
     {
         get
@@ -236,34 +186,12 @@ internal sealed class FlverNativeDocument
         }
     }
 
-    /// <summary>
-    /// 依据解析完整性计算 authority。
-    ///
-    /// 降级依据有**两条**，不是一条：
-    ///   ① _layoutWarnings：读到的东西不对（数据可疑）。
-    ///   ② _unparsedGaps：有东西没读（能力边界）。
-    ///
-    /// ⚠️ 此前只有 ①。那让这个 getter 成为一批缺口的**共同放大器**：
-    /// SemTangent/SemBitangent/SemVertexColor 三个语义声明后零引用、顶点语义 switch
-    /// 无 default 分支、material 后 16 字节从未读取——全都在不写 warning 的路径上，
-    /// 于是 11 个真实 Sekiro 样本一律报 native-verified、warnings=0（2026-08-08 实测），
-    /// 而实际未解析的 member 有 194 个（tangent 93 / bitangent 22 / vertexColor 79），
-    /// 每个 material 的后 16 字节（含 gxIndex，实测 11 个样本 505 条 material **全部**
-    /// 非零）也从未读出。缺口不进入任何集合，就等于对上层不存在。
-    ///
-    /// 现在缺口会把 authority 降到 partial。这是**故意收紧**：native-verified 的含义
-    /// 回到「本实现读到的东西已覆盖它宣称的结构」，而不是「没报错就算全对」。
-    /// </summary>
     public string Authority
     {
         get
         {
-            // 先探测再判定。顺序反了会有一个真实漏洞：BuildMeshPlan 自己也会写
-            // layoutWarnings（越界引用等），若在探测之前就读 _layoutWarnings.Count，
-            // 探测过程中新发现的警告在本次调用里看不到。
             EnsureVertexSemanticGapsProbed();
-            if (_layoutWarnings.Count > 0) return "partial";
-            if (_unparsedGaps.Count > 0) return "partial";
+            if (_layoutWarnings.Count > 0 || _unparsedGaps.Count > 0) return "partial";
             try
             {
                 for (var i = 0; i < Math.Min(Meshes.Count, 4); i++)
@@ -279,21 +207,15 @@ internal sealed class FlverNativeDocument
         }
     }
 
-    // ------------------------------------------------------------------
-    // 顶点/index 数据提取
-    // ------------------------------------------------------------------
-
-    /// <summary>单个语义在某个 vertex buffer 中的访问计划。</summary>
     private sealed class VertexMemberAccess
     {
-        public int DataBase;   // 顶点 0 数据的绝对偏移
-        public int Stride;     // VertexBuffer.VertexSize
-        public int Count;      // VertexBuffer.VertexCount
-        public int Offset;     // LayoutMember.StructOffset
-        public uint Type;      // LayoutMember.Type
+        public int DataBase;
+        public int Stride;
+        public int Count;
+        public int Offset;
+        public uint Type;
     }
 
-    /// <summary>一个 mesh 的顶点解码计划：按语义从该 mesh 各 vertex buffer 合并取址。</summary>
     private sealed class MeshDataPlan
     {
         public int VertexCount;
@@ -353,14 +275,6 @@ internal sealed class FlverNativeDocument
                     Offset = member.StructOffset,
                     Type = member.Type
                 };
-                // 语义分派。五个已实现语义各取**首个**出现的 member；其余一律登记为缺口。
-                //
-                // ⚠️ 这个 switch 此前没有 default 分支，于是两类东西被静默丢弃：
-                //   ① 已定义但未实现的语义（SemTangent/SemBitangent/SemVertexColor）；
-                //   ② 被 `when plan.X == null` 守卫挡掉的**第二个及以后**的同语义 member
-                //      —— 实测 11 个 Sekiro 样本里 UV member 有 108 个而 layout 只有 73 个，
-                //      也就是至少 35 个 UV（UV2/UV3 等）落在守卫之外、无人知晓。
-                // 现在两类都登记为缺口，让 Authority 与 envelope 能看见它们。
                 switch (member.Semantic)
                 {
                     case SemPosition when plan.Position == null: plan.Position = access; break;
@@ -368,7 +282,6 @@ internal sealed class FlverNativeDocument
                     case SemUV when plan.UV == null: plan.UV = access; break;
                     case SemBoneWeights when plan.Weights == null: plan.Weights = access; break;
                     case SemBoneIndices when plan.BoneIndices == null: plan.BoneIndices = access; break;
-
                     case SemTangent:
                         AddUnparsedGap($"vertex-semantic:tangent(0x{SemTangent:X}) 已定义未解析（type=0x{member.Type:X}）");
                         break;
@@ -378,8 +291,6 @@ internal sealed class FlverNativeDocument
                     case SemVertexColor:
                         AddUnparsedGap($"vertex-semantic:vertexColor(0x{SemVertexColor:X}) 已定义未解析（type=0x{member.Type:X}）");
                         break;
-
-                    // 被守卫挡掉的重复语义：数据完好，但本实现只取首个，其余未投影。
                     case SemPosition:
                     case SemNormal:
                     case SemUV:
@@ -387,7 +298,6 @@ internal sealed class FlverNativeDocument
                     case SemBoneIndices:
                         AddUnparsedGap($"vertex-semantic:0x{member.Semantic:X} 的第 2+ 个 member 未投影（index={member.Index} type=0x{member.Type:X}）");
                         break;
-
                     default:
                         AddUnparsedGap($"vertex-semantic:0x{member.Semantic:X} 未识别（type=0x{member.Type:X}）");
                         break;
@@ -397,52 +307,121 @@ internal sealed class FlverNativeDocument
         return plan;
     }
 
-    private bool TryExtractFloat3(VertexMemberAccess a, int vertexIndex, out float x, out float y, out float z)
+    private bool HasMemberBytes(VertexMemberAccess access, int vertexIndex)
+    {
+        var memberSize = MemberTypeSize(access.Type);
+        if (memberSize <= 0) return false;
+        var off = access.DataBase + (long)vertexIndex * access.Stride + access.Offset;
+        return off >= 0 && off + memberSize <= _source.Length;
+    }
+
+    private bool TryExtractFloat3(VertexMemberAccess access, int vertexIndex, out float x, out float y, out float z)
     {
         x = y = z = 0f;
-        var off = a.DataBase + (long)vertexIndex * a.Stride + a.Offset;
-        if (off < 0 || off + 12 > _source.Length) return false;
-        if (a.Type == TypeFloat3)
+        if (!HasMemberBytes(access, vertexIndex)) return false;
+        var off = access.DataBase + (long)vertexIndex * access.Stride + access.Offset;
+        if (access.Type is TypeFloat3 or TypeFloat4)
         {
             x = ReadFloat32(_source, (int)off);
             y = ReadFloat32(_source, (int)off + 4);
             z = ReadFloat32(_source, (int)off + 8);
-            return float.IsFinite(x) && float.IsFinite(y) && float.IsFinite(z);
         }
-        if (a.Type == TypeFloat4)
+        else if (access.Type is TypeByte4A or TypeByte4B or TypeByte4C or TypeByte4E)
         {
-            x = ReadFloat32(_source, (int)off);
-            y = ReadFloat32(_source, (int)off + 4);
-            z = ReadFloat32(_source, (int)off + 8);
-            return float.IsFinite(x) && float.IsFinite(y) && float.IsFinite(z);
+            x = ReadByteNorm((int)off);
+            y = ReadByteNorm((int)off + 1);
+            z = ReadByteNorm((int)off + 2);
         }
-        if (a.Type == TypeEdgeCompressed)
-            return false; // 边压缩顶点不支持直接解码
-        if (a.Type == TypeByte4A || a.Type == TypeByte4B || a.Type == TypeByte4C || a.Type == TypeByte4E)
-        {
-            x = (ReadByte(_source, (int)off) - 127) / 127f;
-            y = (ReadByte(_source, (int)off + 1) - 127) / 127f;
-            z = (ReadByte(_source, (int)off + 2) - 127) / 127f;
-            return true;
-        }
-        if (a.Type == TypeShort4toFloat4A)
+        else if (access.Type == TypeShort4toFloat4A)
         {
             x = ReadInt16(_source, (int)off) / 32767f;
             y = ReadInt16(_source, (int)off + 2) / 32767f;
             z = ReadInt16(_source, (int)off + 4) / 32767f;
-            return true;
         }
-        if (a.Type == TypeShort4toFloat4B)
+        else if (access.Type == TypeShort4toFloat4B)
         {
-            x = (ReadUInt16(_source, (int)off) - 32767) / 32767f;
-            y = (ReadUInt16(_source, (int)off + 2) - 32767) / 32767f;
-            z = (ReadUInt16(_source, (int)off + 4) - 32767) / 32767f;
-            return true;
+            x = ReadHalf(_source, (int)off);
+            y = ReadHalf(_source, (int)off + 2);
+            z = ReadHalf(_source, (int)off + 4);
         }
-        return false;
+        else
+        {
+            return false;
+        }
+        return float.IsFinite(x) && float.IsFinite(y) && float.IsFinite(z);
     }
 
-    /// <summary>提取网格顶点位置（float[3] 每顶点）为 base64。stride 与 position 偏移取自真实 layout。</summary>
+    /// <summary>
+    /// Decode FLVER normal.xyz and preserve normal.w. SoulsFormats treats normal.w
+    /// as a real single-bone binding index on rigid meshes; dropping it turns that
+    /// mesh class into an unbound SkinnedMesh and can collapse the whole character.
+    /// </summary>
+    private bool TryExtractNormal(
+        VertexMemberAccess access,
+        int vertexIndex,
+        out float x,
+        out float y,
+        out float z,
+        out int? normalW)
+    {
+        x = y = z = 0f;
+        normalW = null;
+        if (!HasMemberBytes(access, vertexIndex)) return false;
+        var off = access.DataBase + (long)vertexIndex * access.Stride + access.Offset;
+
+        switch (access.Type)
+        {
+            case TypeFloat3:
+                x = ReadFloat32(_source, (int)off);
+                y = ReadFloat32(_source, (int)off + 4);
+                z = ReadFloat32(_source, (int)off + 8);
+                break;
+            case TypeFloat4:
+            {
+                x = ReadFloat32(_source, (int)off);
+                y = ReadFloat32(_source, (int)off + 4);
+                z = ReadFloat32(_source, (int)off + 8);
+                var w = ReadFloat32(_source, (int)off + 12);
+                if (float.IsFinite(w) && MathF.Truncate(w) == w && w >= int.MinValue && w <= int.MaxValue)
+                    normalW = (int)w;
+                break;
+            }
+            case TypeByte4A:
+            case TypeByte4B:
+            case TypeByte4C:
+            case TypeByte4E:
+                x = ReadByteNorm((int)off);
+                y = ReadByteNorm((int)off + 1);
+                z = ReadByteNorm((int)off + 2);
+                normalW = ReadByte(_source, (int)off + 3);
+                break;
+            case TypeShort2toFloat2:
+                // SoulsFormats Normal + Short2toFloat2 stores W first, then Z/Y/X
+                // as signed normalized bytes.
+                normalW = ReadByte(_source, (int)off);
+                z = ReadSByte(_source, (int)off + 1) / 127f;
+                y = ReadSByte(_source, (int)off + 2) / 127f;
+                x = ReadSByte(_source, (int)off + 3) / 127f;
+                break;
+            case TypeShort4toFloat4A:
+                x = ReadInt16(_source, (int)off) / 32767f;
+                y = ReadInt16(_source, (int)off + 2) / 32767f;
+                z = ReadInt16(_source, (int)off + 4) / 32767f;
+                normalW = ReadInt16(_source, (int)off + 6);
+                break;
+            case TypeShort4toFloat4B:
+                x = ReadHalf(_source, (int)off);
+                y = ReadHalf(_source, (int)off + 2);
+                z = ReadHalf(_source, (int)off + 4);
+                normalW = ReadInt16(_source, (int)off + 6);
+                break;
+            default:
+                return false;
+        }
+
+        return float.IsFinite(x) && float.IsFinite(y) && float.IsFinite(z);
+    }
+
     public string? GetMeshPositionsBase64(int meshIndex, int maxVertices = 10_000)
     {
         var plan = BuildMeshPlan(meshIndex);
@@ -461,7 +440,6 @@ internal sealed class FlverNativeDocument
         return Convert.ToBase64String(bytes);
     }
 
-    /// <summary>提取网格顶点法线（float[3] 每顶点，已按布局类型解码）为 base64。</summary>
     public string? GetMeshNormalsBase64(int meshIndex, int maxVertices = 10_000)
     {
         var plan = BuildMeshPlan(meshIndex);
@@ -470,7 +448,7 @@ internal sealed class FlverNativeDocument
         var normals = new float[vertexCount * 3];
         for (var v = 0; v < vertexCount; v++)
         {
-            if (!TryExtractFloat3(plan.Normal, v, out var x, out var y, out var z)) return null;
+            if (!TryExtractNormal(plan.Normal, v, out var x, out var y, out var z, out _)) return null;
             normals[v * 3] = x;
             normals[v * 3 + 1] = y;
             normals[v * 3 + 2] = z;
@@ -480,7 +458,6 @@ internal sealed class FlverNativeDocument
         return Convert.ToBase64String(bytes);
     }
 
-    /// <summary>提取网格第一组 UV（float[2] 每顶点）为 base64。</summary>
     public string? GetMeshUVsBase64(int meshIndex, int maxVertices = 10_000)
     {
         var plan = BuildMeshPlan(meshIndex);
@@ -491,17 +468,14 @@ internal sealed class FlverNativeDocument
         var a = plan.UV;
         for (var v = 0; v < vertexCount; v++)
         {
+            if (!HasMemberBytes(a, v)) return null;
             var off = a.DataBase + (long)v * a.Stride + a.Offset;
-            if (off < 0 || off + 4 > _source.Length) return null;
             float u, vt;
             switch (a.Type)
             {
                 case TypeFloat2:
-                case TypeFloat4:
-                    u = ReadFloat32(_source, (int)off);
-                    vt = ReadFloat32(_source, (int)off + 4);
-                    break;
                 case TypeFloat3:
+                case TypeFloat4:
                     u = ReadFloat32(_source, (int)off);
                     vt = ReadFloat32(_source, (int)off + 4);
                     break;
@@ -526,156 +500,167 @@ internal sealed class FlverNativeDocument
         return Convert.ToBase64String(bytes);
     }
 
-    /// <summary>提取网格骨骼权重（float[4] 每顶点，Byte4C=byte/255）为 base64。</summary>
-    /// <summary>提取网格骨骼权重（float[4] 每顶点，归一化）为 base64。</summary>
-    public string? GetMeshBoneWeightsBase64(int meshIndex, int maxVertices = 10_000)
-    {
-        var plan = BuildMeshPlan(meshIndex);
-        if (plan?.Weights == null || plan.VertexCount <= 0) return null;
-        var vertexCount = Math.Min(plan.VertexCount, maxVertices);
-        var a = plan.Weights;
-        var weights = new float[vertexCount * 4];
-        for (var v = 0; v < vertexCount; v++)
-        {
-            var off = a.DataBase + (long)v * a.Stride + a.Offset;
-            if (off < 0 || off + 4 > _source.Length) return null;
-            switch (a.Type)
-            {
-                case TypeByte4C:
-                    weights[v * 4] = ReadByte(_source, (int)off) / 255f;
-                    weights[v * 4 + 1] = ReadByte(_source, (int)off + 1) / 255f;
-                    weights[v * 4 + 2] = ReadByte(_source, (int)off + 2) / 255f;
-                    weights[v * 4 + 3] = ReadByte(_source, (int)off + 3) / 255f;
-                    break;
-                case TypeByte4A:
-                    weights[v * 4] = Math.Max(0f, ReadSByte(_source, (int)off) / 127f);
-                    weights[v * 4 + 1] = Math.Max(0f, ReadSByte(_source, (int)off + 1) / 127f);
-                    weights[v * 4 + 2] = Math.Max(0f, ReadSByte(_source, (int)off + 2) / 127f);
-                    weights[v * 4 + 3] = Math.Max(0f, ReadSByte(_source, (int)off + 3) / 127f);
-                    break;
-                case TypeUVPair:
-                case TypeShort4toFloat4A:
-                    weights[v * 4] = Math.Max(0f, ReadInt16(_source, (int)off) / 32767f);
-                    weights[v * 4 + 1] = Math.Max(0f, ReadInt16(_source, (int)off + 2) / 32767f);
-                    weights[v * 4 + 2] = Math.Max(0f, ReadInt16(_source, (int)off + 4) / 32767f);
-                    weights[v * 4 + 3] = Math.Max(0f, ReadInt16(_source, (int)off + 6) / 32767f);
-                    break;
-                default:
-                    return null;
-            }
-
-            var w0 = float.IsFinite(weights[v * 4]) ? weights[v * 4] : 0f;
-            var w1 = float.IsFinite(weights[v * 4 + 1]) ? weights[v * 4 + 1] : 0f;
-            var w2 = float.IsFinite(weights[v * 4 + 2]) ? weights[v * 4 + 2] : 0f;
-            var w3 = float.IsFinite(weights[v * 4 + 3]) ? weights[v * 4 + 3] : 0f;
-            var sum = w0 + w1 + w2 + w3;
-            if (sum > 1e-5f)
-            {
-                weights[v * 4] = w0 / sum;
-                weights[v * 4 + 1] = w1 / sum;
-                weights[v * 4 + 2] = w2 / sum;
-                weights[v * 4 + 3] = w3 / sum;
-            }
-            else
-            {
-                // A zero/invalid influence set has no canonical bind target.
-                // Do not silently pin it to bone 0; the renderer must receive
-                // a structured unsupported result and keep the asset out of
-                // the skinned playback path.
-                return null;
-            }
-        }
-        var bytes = new byte[weights.Length * 4];
-        Buffer.BlockCopy(weights, 0, bytes, 0, bytes.Length);
-        return Convert.ToBase64String(bytes);
-    }
-
     /// <summary>
-    /// 提取网格全局骨骼索引（uint16[4] 每顶点，经 Mesh.BoneIndices 局部调色板 remap）为 base64。
-    /// 输出字节长度为 vertexCount * 8 字节。
+    /// Build one renderer-ready skin binding. Weighted vertices use Mesh.BoneIndices
+    /// as the local→global palette. Zero-weight slots are deliberately ignored so
+    /// sentinel values such as 255 cannot invalidate an otherwise valid vertex.
+    /// If explicit weights are absent (or a vertex has a zero influence sum),
+    /// NormalW provides the authoritative rigid single-bone binding.
     /// </summary>
-    public string? GetMeshBoneIndicesBase64(int meshIndex, int maxVertices = 10_000)
+    private bool TryBuildMeshSkinning(
+        int meshIndex,
+        int maxVertices,
+        out ushort[] globalIndices,
+        out float[] normalizedWeights)
     {
-        if (meshIndex < 0 || meshIndex >= Meshes.Count) return null;
+        globalIndices = Array.Empty<ushort>();
+        normalizedWeights = Array.Empty<float>();
+        if (meshIndex < 0 || meshIndex >= Meshes.Count) return false;
         var mesh = Meshes[meshIndex];
         var plan = BuildMeshPlan(meshIndex);
-        if (plan?.BoneIndices == null || plan.VertexCount <= 0) return null;
-        if (mesh.BoneCount > 0 && mesh.BoneIndices.Count != mesh.BoneCount)
-        {
-            // A declared but truncated/invalid local palette must not be
-            // reinterpreted as global indices.
-            return null;
-        }
-        var vertexCount = Math.Min(plan.VertexCount, maxVertices);
-        var a = plan.BoneIndices;
-        var globalIndices = new ushort[vertexCount * 4];
+        if (plan == null || plan.VertexCount <= 0) return false;
+        if (mesh.BoneCount > 0 && mesh.BoneIndices.Count != mesh.BoneCount) return false;
 
-        bool TryRemapBone(int localIdx, out ushort globalIndex)
+        var vertexCount = Math.Min(plan.VertexCount, maxVertices);
+        globalIndices = new ushort[vertexCount * 4];
+        normalizedWeights = new float[vertexCount * 4];
+
+        bool TryRemapPaletteIndex(int localIndex, out ushort globalIndex)
         {
             if (mesh.BoneIndices.Count > 0)
             {
-                if (localIdx >= 0 && localIdx < mesh.BoneIndices.Count)
+                if (localIndex >= 0 && localIndex < mesh.BoneIndices.Count)
                 {
-                    var g = mesh.BoneIndices[localIdx];
-                    if (g >= 0 && g < Bones.Count)
+                    var candidate = mesh.BoneIndices[localIndex];
+                    if (candidate >= 0 && candidate < Bones.Count)
                     {
-                        globalIndex = (ushort)g;
+                        globalIndex = checked((ushort)candidate);
                         return true;
                     }
-                    globalIndex = 0;
-                    return false;
                 }
                 globalIndex = 0;
                 return false;
             }
-            if (localIdx >= 0 && localIdx < Bones.Count)
+
+            if (localIndex >= 0 && localIndex < Bones.Count)
             {
-                globalIndex = (ushort)localIdx;
+                globalIndex = checked((ushort)localIndex);
                 return true;
             }
             globalIndex = 0;
             return false;
         }
 
-        for (var v = 0; v < vertexCount; v++)
+        bool TryRigidNormalW(int vertexIndex, out ushort globalIndex)
         {
-            var off = a.DataBase + (long)v * a.Stride + a.Offset;
-            if (off < 0 || off + 4 > _source.Length) return null;
-            int r0, r1, r2, r3;
-            if (a.Type == TypeShortBoneIndices)
+            globalIndex = 0;
+            if (plan.Normal == null) return false;
+            if (!TryExtractNormal(plan.Normal, vertexIndex, out _, out _, out _, out var normalW)) return false;
+            if (normalW is null || normalW < 0 || normalW >= Bones.Count) return false;
+            globalIndex = checked((ushort)normalW.Value);
+            return true;
+        }
+
+        for (var vertex = 0; vertex < vertexCount; vertex++)
+        {
+            var output = vertex * 4;
+            Span<float> weights = stackalloc float[4];
+            Span<int> rawIndices = stackalloc int[4];
+            var hasWeightedBinding = plan.Weights != null
+                && plan.BoneIndices != null
+                && TryReadWeights(plan.Weights, vertex, weights)
+                && TryReadBoneIndices(plan.BoneIndices, vertex, rawIndices);
+
+            if (hasWeightedBinding)
             {
-                if (off + 8 > _source.Length) return null;
-                r0 = ReadUInt16(_source, (int)off);
-                r1 = ReadUInt16(_source, (int)off + 2);
-                r2 = ReadUInt16(_source, (int)off + 4);
-                r3 = ReadUInt16(_source, (int)off + 6);
-            }
-            else if (a.Type is TypeByte4B or TypeByte4E)
-            {
-                r0 = ReadByte(_source, (int)off);
-                r1 = ReadByte(_source, (int)off + 1);
-                r2 = ReadByte(_source, (int)off + 2);
-                r3 = ReadByte(_source, (int)off + 3);
-            }
-            else
-            {
-                return null;
+                var sum = 0f;
+                for (var slot = 0; slot < 4; slot++)
+                {
+                    var weight = float.IsFinite(weights[slot]) ? Math.Max(0f, weights[slot]) : 0f;
+                    weights[slot] = weight;
+                    sum += weight;
+                }
+
+                if (sum > SkinWeightEpsilon)
+                {
+                    for (var slot = 0; slot < 4; slot++)
+                    {
+                        var weight = weights[slot] / sum;
+                        normalizedWeights[output + slot] = weight;
+                        if (weight <= SkinWeightEpsilon)
+                        {
+                            globalIndices[output + slot] = 0;
+                            continue;
+                        }
+                        if (!TryRemapPaletteIndex(rawIndices[slot], out globalIndices[output + slot]))
+                            return false;
+                    }
+                    continue;
+                }
             }
 
-            if (!TryRemapBone(r0, out globalIndices[v * 4])
-                || !TryRemapBone(r1, out globalIndices[v * 4 + 1])
-                || !TryRemapBone(r2, out globalIndices[v * 4 + 2])
-                || !TryRemapBone(r3, out globalIndices[v * 4 + 3]))
-            {
-                return null;
-            }
+            if (!TryRigidNormalW(vertex, out var rigidBone)) return false;
+            globalIndices[output] = rigidBone;
+            normalizedWeights[output] = 1f;
         }
-        var bytes = new byte[globalIndices.Length * 2];
-        Buffer.BlockCopy(globalIndices, 0, bytes, 0, bytes.Length);
+
+        return true;
+    }
+
+    private bool TryReadWeights(VertexMemberAccess access, int vertexIndex, Span<float> weights)
+    {
+        if (weights.Length < 4 || !HasMemberBytes(access, vertexIndex)) return false;
+        var off = access.DataBase + (long)vertexIndex * access.Stride + access.Offset;
+        switch (access.Type)
+        {
+            case TypeByte4C:
+                for (var i = 0; i < 4; i++) weights[i] = ReadByte(_source, (int)off + i) / 255f;
+                return true;
+            case TypeByte4A:
+                for (var i = 0; i < 4; i++) weights[i] = Math.Max(0f, ReadSByte(_source, (int)off + i) / 127f);
+                return true;
+            case TypeUVPair:
+            case TypeShort4toFloat4A:
+                for (var i = 0; i < 4; i++) weights[i] = Math.Max(0f, ReadInt16(_source, (int)off + i * 2) / 32767f);
+                return true;
+            default:
+                return false;
+        }
+    }
+
+    private bool TryReadBoneIndices(VertexMemberAccess access, int vertexIndex, Span<int> indices)
+    {
+        if (indices.Length < 4 || !HasMemberBytes(access, vertexIndex)) return false;
+        var off = access.DataBase + (long)vertexIndex * access.Stride + access.Offset;
+        if (access.Type == TypeShortBoneIndices)
+        {
+            for (var i = 0; i < 4; i++) indices[i] = ReadUInt16(_source, (int)off + i * 2);
+            return true;
+        }
+        if (access.Type is TypeByte4B or TypeByte4E)
+        {
+            for (var i = 0; i < 4; i++) indices[i] = ReadByte(_source, (int)off + i);
+            return true;
+        }
+        return false;
+    }
+
+    public string? GetMeshBoneWeightsBase64(int meshIndex, int maxVertices = 10_000)
+    {
+        if (!TryBuildMeshSkinning(meshIndex, maxVertices, out _, out var weights)) return null;
+        var bytes = new byte[weights.Length * 4];
+        Buffer.BlockCopy(weights, 0, bytes, 0, bytes.Length);
         return Convert.ToBase64String(bytes);
     }
 
-    /// <summary>获取网格主 FaceSet 的索引位宽（16 或 32 位）。</summary>
+    public string? GetMeshBoneIndicesBase64(int meshIndex, int maxVertices = 10_000)
+    {
+        if (!TryBuildMeshSkinning(meshIndex, maxVertices, out var indices, out _)) return null;
+        var bytes = new byte[indices.Length * 2];
+        Buffer.BlockCopy(indices, 0, bytes, 0, bytes.Length);
+        return Convert.ToBase64String(bytes);
+    }
+
     public int GetMeshIndexSize(int meshIndex)
     {
         if (meshIndex < 0 || meshIndex >= Meshes.Count) return 16;
@@ -690,10 +675,6 @@ internal sealed class FlverNativeDocument
         return selected.IndexSize == 32 ? 32 : 16;
     }
 
-    /// <summary>
-    /// 提取网格三角形索引为 base64（原样 u16 或 u32，随 faceSet.IndexSize）。
-    /// 优先取 Flags==0（None / 最高细节）的 face set，其次第一个可解码的。
-    /// </summary>
     public string? GetMeshIndicesBase64(int meshIndex, int maxIndices = 30_000)
     {
         if (meshIndex < 0 || meshIndex >= Meshes.Count) return null;
@@ -709,31 +690,48 @@ internal sealed class FlverNativeDocument
         if (selected.FaceSet == null) selected = candidates[0];
 
         var fs = selected.FaceSet;
-        if (fs.IndexSize != 16 && fs.IndexSize != 32) return null; // 边压缩（8）等不支持
-        if (fs.IndexCount <= 0 || fs.IndexCount > MaxIndexCount) return null;
-        var count = Math.Min(fs.IndexCount, maxIndices);
-        var indexDataOffset = (long)DataStart + fs.IndicesOffset;
-        var byteLen = count * (fs.IndexSize / 8);
-        if (indexDataOffset < 0 || indexDataOffset + byteLen > _source.Length) return null;
+        if (fs.IndexSize != 16 && fs.IndexSize != 32) return null;
+        if (fs.IndexCount <= 0 || fs.IndexCount > MaxIndexCount || maxIndices < 3) return null;
 
-        var raw = new byte[byteLen];
-        Buffer.BlockCopy(_source, (int)indexDataOffset, raw, 0, byteLen);
+        var bytesPerIndex = fs.IndexSize / 8;
+        var indexDataOffset = (long)DataStart + fs.IndicesOffset;
+        var sourceByteLength = (long)fs.IndexCount * bytesPerIndex;
+        if (indexDataOffset < 0 || indexDataOffset + sourceByteLength > _source.Length) return null;
+
+        var sourceIndices = new uint[fs.IndexCount];
+        for (var i = 0; i < sourceIndices.Length; i++)
+        {
+            var offset = checked((int)(indexDataOffset + (long)i * bytesPerIndex));
+            sourceIndices[i] = fs.IndexSize == 32 ? ReadUInt32(_source, offset) : ReadUInt16(_source, offset);
+        }
+
+        var triangleIndices = FlverTriangleTopology.ToTriangleList(
+            sourceIndices,
+            fs.TriangleStrip,
+            mesh.VertexCount < ushort.MaxValue,
+            maxIndices);
+        if (triangleIndices.Length == 0) return null;
+        if (triangleIndices.Any(index => index >= mesh.VertexCount)) return null;
+
+        var raw = new byte[triangleIndices.Length * bytesPerIndex];
+        for (var i = 0; i < triangleIndices.Length; i++)
+        {
+            var offset = i * bytesPerIndex;
+            if (fs.IndexSize == 32)
+            {
+                BinaryPrimitives.WriteUInt32LittleEndian(raw.AsSpan(offset, 4), triangleIndices[i]);
+            }
+            else
+            {
+                if (triangleIndices[i] > ushort.MaxValue) return null;
+                BinaryPrimitives.WriteUInt16LittleEndian(raw.AsSpan(offset, 2), (ushort)triangleIndices[i]);
+            }
+        }
         return Convert.ToBase64String(raw);
     }
 
-    // ------------------------------------------------------------------
-    // 纹理槽位与 Dummy
-    // ------------------------------------------------------------------
-
-    /// <summary>FLVER2 纹理槽位表（type/path 及所属材质）。</summary>
     public IReadOnlyList<FlverTextureSlotEntry> GetTextureSlots() => _textureSlots;
-
-    /// <summary>FLVER2 Dummy 表（挂点）。</summary>
     public IReadOnlyList<FlverDummyEntry> GetDummies() => Dummies;
-
-    // ------------------------------------------------------------------
-    // 解析
-    // ------------------------------------------------------------------
 
     public static FlverNativeDocument Read(byte[] source)
     {
@@ -746,18 +744,6 @@ internal sealed class FlverNativeDocument
                 throw new InvalidDataException($"FLVER 魔数不匹配；偏移 {i} 处为 0x{source[i]:X2}，期望 0x{MagicBytes[i]:X2}。");
         }
 
-        // 0x06 的两字节是 endian 标记（"L\0" = little-endian、"B\0" = big-endian）。
-        //
-        // 此前它只被当 UTF-16 字符串读走（versionString）却从不判断，而本类的全部
-        // 读原语（ReadInt32/ReadInt64/ReadFloat32，见文件末尾）都硬绑 LittleEndian。
-        // 于是 big-endian FLVER 的失效形态是**静默错解**而不是报错：魔数 FLVER\0
-        // 与小端文件完全相同，必然通过上面那道检查，随后每个字段都被按小端错读，
-        // 产出基于错位偏移的结果——而若那些垃圾值恰好落在越界检查的合法范围内
-        // （:611 与 ComputeSectionEnd 是概率性拦截），还会带着 authority 一路上报。
-        //
-        // 照 TaeNativeDocument.cs:74 与 EsdNativeDocument.cs 的先例做**前置拒绝**
-        // 而不是记 layoutWarning：warning 只降 authority，而这里的问题是「读出来的
-        // 每个数都不可信」，继续解析没有意义。
         if (source[0x06] != (byte)'L' || source[0x07] != 0x00)
         {
             throw new NotSupportedException(
@@ -769,31 +755,17 @@ internal sealed class FlverNativeDocument
 
         var versionString = ReadUtf16NullTerminated(source, 0x06, 4);
         var internalVersion = ReadInt32(source, 0x08);
-
-        // internalVersion 白名单。此前只读不判，而 :388（UV 除数 2048 vs 1024）与
-        // :704（indexSize 字段是否存在）已经在按 version 分支——也就是说不同版本的
-        // 布局**确实不同**，读到未登记版本时那些分支会按错误假设走。
-        //
-        // 闭集刻意只含本机真实语料实测出现过的值（2026-08-08 实测 Sekiro
-        // mods/chr 的 chrbnd：endian 恒 "L\0"、internalVersion 恒 0x2001A）。
-        // 扩这个集合必须先有该版本的真实样本与往返验证，不能凭「大概兼容」加进来
-        // ——那等于在未验证的前提下扩大 native 声明面。
         if (Array.IndexOf(SupportedInternalVersions, internalVersion) < 0)
         {
-            var supported = string.Join(
-                ", ",
-                Array.ConvertAll(SupportedInternalVersions, v => $"0x{v:X}"));
+            var supported = string.Join(", ", Array.ConvertAll(SupportedInternalVersions, v => $"0x{v:X}"));
             throw new NotSupportedException(
-                $"仅支持已验证的 FLVER internalVersion（{supported}），"
-                + $"收到 0x{internalVersion:X}。"
-                + " 不同 version 的 UV 除数与 FaceSet indexSize 字段布局不同"
-                + "（见本类的 version 分支），未登记版本会被按错误布局解析。"
-                + " 要支持新版本需先登记该版本的真实样本并通过往返验证。");
+                $"仅支持已验证的 FLVER internalVersion（{supported}），收到 0x{internalVersion:X}。"
+                + " 不同 version 的 UV 除数与 FaceSet indexSize 字段布局不同；"
+                + "要支持新版本需先登记真实样本并通过往返验证。");
         }
 
         var dataStart = ReadInt32(source, 0x0C);
         var dataLength = ReadInt32(source, 0x10);
-
         var skeletonTransformCount = ReadInt32(source, 0x14);
         var materialCount = ReadInt32(source, 0x18);
         var boneCount = ReadInt32(source, 0x1C);
@@ -811,7 +783,6 @@ internal sealed class FlverNativeDocument
         var totalFaceCount = ReadInt32(source, 0x44);
         var vertexIndicesSize = ReadByte(source, 0x48);
         var unicode = source[0x49] != 0;
-
         var faceSetCount = ReadInt32(source, 0x50);
         var bufferLayoutCount = ReadInt32(source, 0x54);
         var textureCount = ReadInt32(source, 0x58);
@@ -841,13 +812,9 @@ internal sealed class FlverNativeDocument
         var sectionEnd = ComputeSectionEnd(source, skeletonTransformCount, materialCount, boneCount, meshCount,
             faceSetCount, vertexBufferCount, bufferLayoutCount, textureCount, internalVersion);
         if (sectionEnd > dataStart)
-        {
-            // 结构表理应结束于 dataStart 之前；越界说明计数或长度被破坏。
             throw new InvalidDataException($"FLVER 结构表越过 dataStart：sectionEnd=0x{sectionEnd:X} dataStart=0x{dataStart:X}。");
-        }
 
         var off = HeaderSize;
-        // --- Dummies（64B/条）---
         var dummies = new List<FlverDummyEntry>(skeletonTransformCount);
         for (var i = 0; i < skeletonTransformCount; i++, off += DummySize)
         {
@@ -860,9 +827,6 @@ internal sealed class FlverNativeDocument
             dummies.Add(new FlverDummyEntry(i, posX, posY, posZ, referenceId, parentBoneIndex, attachBoneIndex));
         }
 
-        // --- Materials（32B/条）---
-        // 全 32 字节都读：前 16 是名字/MTD/贴图索引，后 16 是 Flags / GxOffset / Unk18 /
-        // 保留字段。后 16 字节此前整段未读（只登记为缺口），现按双源核对的规范解析。
         var materials = new List<FlverMaterialEntry>(materialCount);
         for (var i = 0; i < materialCount; i++, off += MaterialSize)
         {
@@ -876,10 +840,6 @@ internal sealed class FlverNativeDocument
             int reserved = ReadInt32(source, off + 0x1C);
             string name = ReadStringAtOffset(source, nameOffset, unicode);
             string mtdPath = ReadStringAtOffset(source, mtdOffset, unicode);
-
-            // 规范要求 +0x1C 恒为 0（两份实现都是 AssertInt32(0)）。实测 505/505 成立。
-            // 这里**不抛异常**而是记 layoutWarning：FLVER 是只读预览路径，为一个保留
-            // 字段拒绝整个文件会把「布局有出入」升级成「文件不可读」，代价不对等。
             if (reserved != 0)
                 warnings.Add($"material[{i}]:+0x1C 保留字段应为 0，实际 {reserved}（布局可能与已登记形态不同）。");
 
@@ -887,18 +847,14 @@ internal sealed class FlverNativeDocument
             if (gxOffset != 0)
             {
                 gxList = TryReadGxList(source, gxOffset, out var gxError);
-                // 解析失败必须留痕：GX 列表读不出来时若静默置 null，
-                // 「该 material 没有 GX 列表」与「有但没读懂」在输出上不可区分。
                 if (gxList is null)
                     warnings.Add($"material[{i}]:GX 列表解析失败（gxOffset={gxOffset}）：{gxError}");
             }
-
             materials.Add(new FlverMaterialEntry(
                 i, name, mtdPath, textureCountInMaterial, firstTextureIndex,
                 flags, gxOffset, unk18, gxList));
         }
 
-        // --- Bones（128B/条）---
         var bones = new List<FlverBoneEntry>(boneCount);
         for (var i = 0; i < boneCount; i++, off += BoneSize)
         {
@@ -914,11 +870,9 @@ internal sealed class FlverNativeDocument
             short nextSiblingIndex = ReadInt16(source, off + 0x2C);
             string name = ReadStringAtOffset(source, nameOffset, unicode);
             bones.Add(new FlverBoneEntry(i, name, nextSiblingIndex, parentIndex, childIndex,
-                translationX, translationY, translationZ,
-                rotationX, rotationY, rotationZ));
+                translationX, translationY, translationZ, rotationX, rotationY, rotationZ));
         }
 
-        // --- Meshes（48B/条）---
         var meshes = new List<FlverMeshEntry>(meshCount);
         for (var i = 0; i < meshCount; i++, off += MeshSize)
         {
@@ -932,29 +886,16 @@ internal sealed class FlverNativeDocument
             int vertexBufferCountInMesh = ReadInt32(source, off + 0x28);
             int vertexBufferOffset = ReadInt32(source, off + 0x2C);
 
-            // Mesh.BoneIndices is a palette of global skeleton indices. Its
-            // bounds are the skeleton bone table, not the mesh table; using
-            // meshCount here silently discarded valid palettes whenever a
-            // mesh referenced a bone index above the number of meshes.
             var boneIndices = ReadIndexArray(source, boneOffset, boneCountInMesh, boneCount);
             var faceSetIndices = ReadIndexArray(source, faceSetOffset, faceSetCountInMesh, faceSetCount);
             var vertexBufferIndices = ReadIndexArray(source, vertexBufferOffset, vertexBufferCountInMesh, vertexBufferCount);
-
-            // 解析 mesh 的顶点信息：从该 mesh 引用的第一个 vertex buffer 取 stride/layout/vertexCount。
-            int vertexCount = 0, vertexStride = 0, bufferLayoutIndex = -1, indexFormat = 0;
-            var firstVbIndex = vertexBufferIndices.Count > 0 ? vertexBufferIndices[0] : -1;
-            if (firstVbIndex >= 0 && firstVbIndex < vertexBufferCount)
-            {
-                // vertex buffer 段在 mesh 表之后；延迟到 vertex buffer 段解析后回填。
-            }
             meshes.Add(new FlverMeshEntry(i, dynamic, materialIndex, defaultBoneIndex,
                 vertexBufferCountInMesh, vertexBufferIndices,
-                vertexCount, vertexStride, bufferLayoutIndex,
-                faceSetCountInMesh, faceSetIndices, indexFormat,
+                0, 0, -1,
+                faceSetCountInMesh, faceSetIndices, 0,
                 boneCountInMesh, boneIndices));
         }
 
-        // --- FaceSets（32B/条）---
         var faceSets = new List<FlverFaceSetEntry>(faceSetCount);
         for (var i = 0; i < faceSetCount; i++, off += FaceSetSize)
         {
@@ -967,7 +908,6 @@ internal sealed class FlverNativeDocument
             faceSets.Add(new FlverFaceSetEntry(flags, triangleStrip, indexCount, indicesOffset, indexSize));
         }
 
-        // --- VertexBuffers（32B/条）---
         var vertexBuffers = new List<FlverVertexBufferEntry>(vertexBufferCount);
         for (var i = 0; i < vertexBufferCount; i++, off += VertexBufferSize)
         {
@@ -980,7 +920,6 @@ internal sealed class FlverNativeDocument
             vertexBuffers.Add(new FlverVertexBufferEntry(bufferIndex, layoutIndex, vertexSize, vertexCountInBuffer, bufferLength, bufferOffset));
         }
 
-        // --- BufferLayouts（16B header + 20B member）---
         var bufferLayouts = new List<FlverBufferLayoutEntry>(bufferLayoutCount);
         for (var i = 0; i < bufferLayoutCount; i++, off += BufferLayoutHeaderSize)
         {
@@ -995,17 +934,16 @@ internal sealed class FlverNativeDocument
             for (var m = 0; m < memberCount; m++)
             {
                 var e = (int)memberBase + m * LayoutMemberSize;
-                int unk00 = ReadInt32(source, e + 0x00);
-                int structOffset = ReadInt32(source, e + 0x04);
-                uint type = ReadUInt32(source, e + 0x08);
-                uint semantic = ReadUInt32(source, e + 0x0C);
-                int index = ReadInt32(source, e + 0x10);
-                members.Add(new FlverLayoutMemberEntry(unk00, structOffset, type, semantic, index));
+                members.Add(new FlverLayoutMemberEntry(
+                    ReadInt32(source, e + 0x00),
+                    ReadInt32(source, e + 0x04),
+                    ReadUInt32(source, e + 0x08),
+                    ReadUInt32(source, e + 0x0C),
+                    ReadInt32(source, e + 0x10)));
             }
             bufferLayouts.Add(new FlverBufferLayoutEntry(members));
         }
 
-        // --- Textures（32B/条）---
         var textureSlots = new List<FlverTextureSlotEntry>(textureCount);
         for (var i = 0; i < textureCount; i++, off += TextureSize)
         {
@@ -1013,7 +951,6 @@ internal sealed class FlverNativeDocument
             int typeOffset = ReadInt32(source, off + 0x04);
             string path = ReadStringAtOffset(source, pathOffset, unicode);
             string type = ReadStringAtOffset(source, typeOffset, unicode);
-
             int materialIndex = -1;
             for (var m = 0; m < materials.Count; m++)
             {
@@ -1024,7 +961,6 @@ internal sealed class FlverNativeDocument
             textureSlots.Add(new FlverTextureSlotEntry(i, type, path, materialIndex));
         }
 
-        // --- 回填 mesh 顶点信息（vertex buffer/layout 段已解析）---
         var resolvedMeshes = new List<FlverMeshEntry>(meshes.Count);
         foreach (var mesh in meshes)
         {
@@ -1044,10 +980,15 @@ internal sealed class FlverNativeDocument
                     warnings.Add($"mesh[{mesh.Index}] 引用的 vertex buffer {vbIndex} 越界。");
                 }
             }
-            // 主 face set 的 index 格式：优先 Flags==0，其次第一个。
-            var fsIndex = mesh.FaceSetIndices.FirstOrDefault(i => i >= 0 && i < faceSets.Count && faceSets[i].Flags == 0);
-            if (fsIndex < 0 && mesh.FaceSetIndices.Count > 0) fsIndex = mesh.FaceSetIndices[0];
-            if (fsIndex >= 0 && fsIndex < faceSets.Count) indexFormat = faceSets[fsIndex].IndexSize;
+            var primaryFaceSet = mesh.FaceSetIndices
+                .Where(index => index >= 0 && index < faceSets.Count)
+                .Select(index => faceSets[index])
+                .FirstOrDefault(faceSet => faceSet.Flags == 0)
+                ?? mesh.FaceSetIndices
+                    .Where(index => index >= 0 && index < faceSets.Count)
+                    .Select(index => faceSets[index])
+                    .FirstOrDefault();
+            if (primaryFaceSet != null) indexFormat = primaryFaceSet.IndexSize;
 
             resolvedMeshes.Add(mesh with
             {
@@ -1068,46 +1009,9 @@ internal sealed class FlverNativeDocument
             warnings);
     }
 
-    /// <summary>
-    /// 按 FLVER2 规范读一个 GX 列表。失败返回 null 并通过 <paramref name="error"/> 给出原因，
-    /// **不抛异常**——FLVER 是只读预览路径，为一处未识别的材质扩展拒绝整个模型文件，
-    /// 会把「布局有出入」升级成「文件不可读」，代价不对等。失败原因由调用方记进
-    /// layoutWarnings，从而压 authority 到 partial：读不懂也必须留痕。
-    ///
-    /// ── 结构依据（双源核对，2026-08-08）──
-    /// JKAnderson/SoulsFormats 与 soulsmods/SoulsFormatsNEXT 的 FLVER2 GXList/GXItem
-    /// 逐字段一致：
-    ///   · item 循环：读到 <c>id == int.MaxValue</c> 或 <c>id == -1</c> 即停，该 id 是终止 ID；
-    ///   · item 头 12 字节：id(int32) / unk04(int32) / length(int32)，
-    ///     payload 长度 = length − 12，**length 含头**；
-    ///   · 终止记录：终止 id 之后紧跟恒为 100 的 int32，再一个 int32，
-    ///     真实填充长度 = 该值 − 0xC，填充区按规范全零。
-    ///
-    /// ── 真实语料验证 ──
-    /// 11 个 Sekiro chrbnd 的 505 条 material（全部 gxOffset 非零）：
-    /// **505/505 解析成功、零错误**；常量 100 命中 505/505；填充全零 505/505；
-    /// item 数分布 1×392 / 2×56 / 3×8 / 5×34 / 7×14 / 9×1；
-    /// ID 为 4 字节 ASCII（GX00 505、GXMD 64、GX04 49、GX15 41、GX80/GX81 各 34…）。
-    ///
-    /// ── 两处与本文件旧注释的分歧（旧注释已作废）──
-    /// ① 旧注释称 material +0x10 是 <c>gxIndex</c>。**不对**：+0x10 是 <c>Flags</c>，
-    ///    +0x14 才是 GX 列表的**字节偏移**。两份实现都是先 <c>Flags = ReadInt32()</c>
-    ///    再 <c>int gxOffset = ReadInt32()</c>；实测 505 条的 +0x14 逐条严格单调递增、
-    ///    相邻差值以 64 为主（384/504 条），且全部 &lt; dataOffset —— 偏移的形态，
-    ///    不是索引。SoulsFormats 的公开属性 <c>GXIndex</c> 是**去重后**的列表序号
-    ///    （由 gxOffset → 列表表的映射得来），不是文件里的字段。
-    /// ② SoulsFormatsNEXT 把 +0x18 命名为 <c>Index</c>，但实测它**不是 material 序号**：
-    ///    11 个样本无一满足 <c>+0x18 == i</c>（c1020 前五条是 0,1,2,2,0）。故此处保留
-    ///    中性名 <c>Unk18</c> 并如实标注，不按上游命名反推语义。
-    ///
-    /// payload 一律**不解释**：各 GX ID 的字段语义按材质着色参数分歧，
-    /// 未经真实往返验证解码它就是在未验证前提下扩大 native 声明面。
-    /// 这里只导出 (id, unk04, length) 与长度，与 ESD 的 RPN 字节码同一口径。
-    /// </summary>
     private static FlverGxList? TryReadGxList(byte[] source, int gxOffset, out string error)
     {
         error = string.Empty;
-        // 上界用 12 而不是 0：终止记录本身就要 12 字节，连它都放不下时偏移必然不合法。
         if (gxOffset < 0 || (long)gxOffset + 12 > source.Length)
         {
             error = $"偏移越界（文件 {source.Length} 字节）";
@@ -1116,8 +1020,6 @@ internal sealed class FlverNativeDocument
 
         var items = new List<FlverGxItem>();
         var position = gxOffset;
-        // 上限防御：畸形长度可能构造出不前进的循环。505 条实测最多 9 项，
-        // 512 留足余量而不至于让坏数据把进程拖死。
         const int maxItems = 512;
         while (true)
         {
@@ -1132,17 +1034,15 @@ internal sealed class FlverNativeDocument
                 return null;
             }
             var id = ReadInt32(source, position);
-            if (id == int.MaxValue || id == -1) break;   // 终止哨兵
+            if (id == int.MaxValue || id == -1) break;
             var unk04 = ReadInt32(source, position + 4);
             var itemLength = ReadInt32(source, position + 8);
-            // itemLength 含 12 字节头，故 < 12 不合法；== 12 是合法的「无 payload」。
-            // 不校验这一条会让 itemLength <= 0 造出原地死循环。
             if (itemLength < 12 || (long)position + itemLength > source.Length)
             {
                 error = $"item 长度不合法（{itemLength}）";
                 return null;
             }
-            var idAscii = System.Text.Encoding.ASCII.GetString(source, position, 4);
+            var idAscii = Encoding.ASCII.GetString(source, position, 4);
             items.Add(new FlverGxItem(idAscii, id, unk04, itemLength, itemLength - 12));
             position += itemLength;
         }
@@ -1151,8 +1051,6 @@ internal sealed class FlverNativeDocument
         var hundred = ReadInt32(source, position + 4);
         if (hundred != 100)
         {
-            // 规范里这是 AssertInt32(100)。实测 505/505 命中，不符说明布局与已登记形态
-            // 不同——如实报失败而不是猜着往下读。
             error = $"终止记录的常量应为 100，实际 {hundred}";
             return null;
         }
@@ -1188,8 +1086,7 @@ internal sealed class FlverNativeDocument
         off += (long)vertexBufferCount * VertexBufferSize;
         off += (long)bufferLayoutCount * BufferLayoutHeaderSize;
         off += (long)textureCount * TextureSize;
-        if (internalVersion >= 0x2001A)
-            off += SekiroUnkHeaderSize; // SekiroUnk 为变长；仅统计固定头部用于越界判断
+        if (internalVersion >= 0x2001A) off += SekiroUnkHeaderSize;
         return off;
     }
 
@@ -1198,8 +1095,7 @@ internal sealed class FlverNativeDocument
         if (count < 0 || count > maxValid) return new List<int>();
         if (offset < 0 || (long)offset + (long)count * 4 > source.Length) return new List<int>();
         var list = new List<int>(count);
-        for (var i = 0; i < count; i++)
-            list.Add(ReadInt32(source, offset + i * 4));
+        for (var i = 0; i < count; i++) list.Add(ReadInt32(source, offset + i * 4));
         return list;
     }
 
@@ -1212,23 +1108,8 @@ internal sealed class FlverNativeDocument
         return Read(File.ReadAllBytes(path));
     }
 
-    /// <summary>
-    /// 重解析确定性检查（**不是**字节级往返验证）。
-    ///
-    /// FLVER 没有 writer，因此不存在「重建后与源比对」这件事可做。此前这里写的是
-    /// <c>_source.AsSpan().SequenceEqual(reparsed.SourceBytes)</c>——而 Read(_source)
-    /// 保存的就是同一个数组引用，所以那是「数组与自身比」，恒真。上层却据此发出
-    /// FLVER_DOCUMENT_ROUNDTRIP_BYTE_VERIFIED 与「字节级一致」的文案，对一个无
-    /// writer 的解析器是过强表述。
-    ///
-    /// 现在如实表达能验证的东西：同一输入两次解析必须得到相同的结构化结论
-    /// （ReparseDeterministic）。这能抓到解析器里的可变静态状态、缓存污染、
-    /// 依赖迭代顺序的哈希等真实缺陷；它**不**证明无损可写。
-    /// </summary>
     public FlverRoundTripReport VerifyRoundTrip()
     {
-        // 刻意从字节副本重新解析，而不是复用 _source 引用：只有这样两次解析才是
-        // 真正独立的两次，恒真的自比对才被消除。
         var reparsed = Read(_source.ToArray());
         var byteIdentical = _source.AsSpan().SequenceEqual(reparsed.SourceBytes);
         var semanticIdentical = byteIdentical
@@ -1251,8 +1132,6 @@ internal sealed class FlverNativeDocument
     public object ToEnvelope(FlverRoundTripReport? report = null)
     {
         var rt = report ?? VerifyRoundTrip();
-        // 顺序要紧：Authority 会触发缺口探测，必须在读 gaps 之前求值，
-        // 否则 envelope 里的 unparsedGaps 会比 authority 少看到一轮登记。
         var authority = Authority;
         var gaps = UnparsedGaps;
         var meshSamples = Meshes.Take(SampleLimit).Select(m => new
@@ -1310,8 +1189,6 @@ internal sealed class FlverNativeDocument
                 name = m.Name,
                 mtdPath = m.MtdPath,
                 textureCount = m.TextureCount,
-                // material 后 16 字节（此前整段未读）。gxOffset==0 表示该 material 无 GX 列表；
-                // gxList 为 null 且 gxOffset!=0 表示解析失败（另有 layoutWarning）。
                 flags = m.Flags,
                 gxOffset = m.GxOffset,
                 unk18 = m.Unk18,
@@ -1322,7 +1199,6 @@ internal sealed class FlverNativeDocument
                     terminatorId = m.GxList.TerminatorId,
                     terminatorLength = m.GxList.TerminatorLength,
                     terminatorPaddingAllZero = m.GxList.TerminatorPaddingAllZero,
-                    // payload 只报长度不报内容：语义未验证，见 TryReadGxList 注释。
                     items = m.GxList.Items.Select(x => new
                     {
                         id = x.Id,
@@ -1333,8 +1209,6 @@ internal sealed class FlverNativeDocument
                 }
             }).ToArray(),
             materialsTruncated = Materials.Count > SampleLimit,
-            // 全量 GX 覆盖面（不受 SampleLimit 截断影响）：消费方要能判断
-            // 「样本里没有 GX 列表」与「整个文件都没有」的区别。
             gxCoverage = new
             {
                 materialsWithGxOffset = Materials.Count(m => m.GxOffset != 0),
@@ -1357,9 +1231,6 @@ internal sealed class FlverNativeDocument
             meshes = meshSamples,
             meshesTruncated = Meshes.Count > SampleLimit,
             bufferLayouts = layoutSamples,
-            // 纹理槽表（MODEL-51A：material-slot page 从主文档直接可读，不必再单独发
-            // read-flver-texture-slots）。每个槽已按 material 的 firstTextureIndex/
-            // textureCount 归好所属材质；未命中任何材质时为 -1。
             textureSlots = _textureSlots.Take(SampleLimit).Select(t => new
             {
                 index = t.Index,
@@ -1369,8 +1240,6 @@ internal sealed class FlverNativeDocument
             }).ToArray(),
             texturesTruncated = _textureSlots.Count > SampleLimit,
             layoutWarnings = _layoutWarnings.ToArray(),
-            // 与 layoutWarnings 并列而不是合并：前者是「数据可疑」，本项是「能力边界」。
-            // 上层若把两者混为一谈，就会把「我没读」误报成「文件坏了」。
             unparsedGaps = gaps,
             roundTrip = rt,
             authority
@@ -1379,41 +1248,17 @@ internal sealed class FlverNativeDocument
 
     private void AddLayoutWarning(string message)
     {
-        if (_layoutWarnings.Count < 64)
-            _layoutWarnings.Add(message);
+        if (_layoutWarnings.Count < 64) _layoutWarnings.Add(message);
     }
 
-    /// <summary>
-    /// 登记一个「已识别但未解析」的缺口。用 SortedSet 去重：194 个未解析 member 会产生
-    /// 大量同文本条目，逐条堆积只是噪音；缺口的价值在**种类**，不在计数。
-    /// </summary>
     private void AddUnparsedGap(string message)
     {
-        if (_unparsedGaps.Count < 64)
-            _unparsedGaps.Add(message);
+        if (_unparsedGaps.Count < 64) _unparsedGaps.Add(message);
     }
 
-    /// <summary>
-    /// material 后 16 字节的缺口登记。
-    ///
-    /// **历史**：本方法原先无条件登记「后 16/32 字节未解析（含 FLVER2 gxIndex →
-    /// GXList 引用）」。那条缺口现已消除——32 字节全部读出（Flags / GxOffset / Unk18 /
-    /// 保留字段），GX 列表按双源核对的规范解析，真实语料 505/505 成功。
-    /// 原注释还有两处事实错误（+0x10 不是 gxIndex 而是 Flags；+0x14 是字节偏移不是
-    /// 索引），已在 <see cref="TryReadGxList"/> 的注释里逐条更正。
-    ///
-    /// **保留本方法的理由**：GX item 的 <b>payload 仍不解释</b>。各 ID（GX00/GXMD/GX04…）
-    /// 的字段语义按材质着色参数分歧，未经真实往返验证解码就是在未验证前提下扩大 native
-    /// 声明面。所以缺口从「整段未读」收窄为「payload 未解码」——**收窄不等于消失**，
-    /// 仍须让 authority 看见（与 ESD 的 RPN 字节码同一口径）。
-    ///
-    /// 判据挂在「确实存在 payload」上而不是无条件登记：全部 item 都是 length==12
-    /// （无 payload）时没有未解码内容，此时报缺口是假缺口，会稀释真信号。
-    /// </summary>
     private void RecordMaterialUnparsedTail()
     {
         if (Materials.Count == 0) return;
-
         var listCount = 0;
         var itemCount = 0;
         var payloadBytes = 0L;
@@ -1430,29 +1275,16 @@ internal sealed class FlverNativeDocument
             }
         }
 
-        // 只登记种类，不逐条展开（去重由 AddUnparsedGap 的 SortedSet 完成）。
         if (payloadBytes > 0)
         {
             AddUnparsedGap(
                 $"material:GX item payload 未解码（按 ID 分歧的材质着色参数，只按 (id, unk04, length) 上报）；"
                 + $"lists={listCount}, items={itemCount}, payloadBytes={payloadBytes}");
         }
-        // 解析失败与「未解码」是两件事：前者是读不懂（数据可疑，已另记 layoutWarning），
-        // 这里再登记一次能力边界，确保即使 payload 为 0 也不会把失败掩盖成「无缺口」。
         if (failedLists > 0)
-        {
             AddUnparsedGap($"material:GX 列表解析失败 {failedLists} 条（布局与已登记形态不同）");
-        }
     }
 
-    /// <summary>
-    /// 确保顶点语义缺口已被探测过。
-    ///
-    /// 缺口是在 <see cref="BuildMeshPlan"/> 里登记的，而 BuildMeshPlan 只在真正取顶点
-    /// 数据时才被调用。若 Authority 在任何 plan 构建之前被读取，_unparsedGaps 会是空的
-    /// ——那样「没探测过」会被误读成「没有缺口」，正是本次要修的那类不可见性。
-    /// 故此处对全部 mesh 各构建一次 plan（幂等，只为登记缺口）。
-    /// </summary>
     private void EnsureVertexSemanticGapsProbed()
     {
         if (_vertexSemanticGapsProbed) return;
@@ -1466,9 +1298,6 @@ internal sealed class FlverNativeDocument
 
     private bool _vertexSemanticGapsProbed;
 
-    // --- Private helpers ---
-
-    /// <summary>LayoutType 的字节宽度（SoulsFormats LayoutMember.Size）。未知类型返回 0。</summary>
     private static int MemberTypeSize(uint type) => type switch
     {
         TypeEdgeCompressed => 1,
@@ -1479,29 +1308,24 @@ internal sealed class FlverNativeDocument
         _ => 0
     };
 
+    private float ReadByteNorm(int offset) => (ReadByte(_source, offset) - 127) / 127f;
+
     private static int ReadInt32(byte[] source, int offset) =>
         BinaryPrimitives.ReadInt32LittleEndian(source.AsSpan(offset, 4));
-
     private static uint ReadUInt32(byte[] source, int offset) =>
         BinaryPrimitives.ReadUInt32LittleEndian(source.AsSpan(offset, 4));
-
     private static short ReadInt16(byte[] source, int offset) =>
         BinaryPrimitives.ReadInt16LittleEndian(source.AsSpan(offset, 2));
-
     private static ushort ReadUInt16(byte[] source, int offset) =>
         BinaryPrimitives.ReadUInt16LittleEndian(source.AsSpan(offset, 2));
-
     private static byte ReadByte(byte[] source, int offset) => source[offset];
-
     private static sbyte ReadSByte(byte[] source, int offset) => unchecked((sbyte)source[offset]);
-
-    private static float ReadFloat32(byte[] source, int offset) =>
-        BitConverter.Int32BitsToSingle(ReadInt32(source, offset));
+    private static float ReadFloat32(byte[] source, int offset) => BitConverter.Int32BitsToSingle(ReadInt32(source, offset));
+    private static float ReadHalf(byte[] source, int offset) => (float)BitConverter.UInt16BitsToHalf(ReadUInt16(source, offset));
 
     private static string ReadStringAtOffset(byte[] source, int absoluteOffset, bool unicode)
     {
-        if (absoluteOffset <= HeaderSize || absoluteOffset >= source.Length)
-            return string.Empty;
+        if (absoluteOffset <= HeaderSize || absoluteOffset >= source.Length) return string.Empty;
         return unicode
             ? ReadUtf16NullTerminated(source, absoluteOffset, MaxStringBytes)
             : ReadAsciiOrLatin1NullTerminated(source, absoluteOffset, MaxStringBytes);
@@ -1509,121 +1333,57 @@ internal sealed class FlverNativeDocument
 
     private static string ReadUtf16NullTerminated(byte[] source, int offset, int maxBytes)
     {
-        if (offset < 0 || offset >= source.Length)
-            return string.Empty;
+        if (offset < 0 || offset >= source.Length) return string.Empty;
         var end = Math.Min(offset + maxBytes, source.Length - 1);
         var pos = offset;
         while (pos < end)
         {
-            if (source[pos] == 0 && source[pos + 1] == 0)
-                break;
+            if (source[pos] == 0 && source[pos + 1] == 0) break;
             pos += 2;
         }
         var byteLength = pos - offset;
-        if (byteLength <= 0) return string.Empty;
-        return Encoding.Unicode.GetString(source, offset, byteLength);
+        return byteLength <= 0 ? string.Empty : Encoding.Unicode.GetString(source, offset, byteLength);
     }
 
     private static string ReadAsciiOrLatin1NullTerminated(byte[] source, int offset, int maxBytes)
     {
-        if (offset < 0 || offset >= source.Length)
-            return string.Empty;
+        if (offset < 0 || offset >= source.Length) return string.Empty;
         var end = Math.Min(offset + maxBytes, source.Length);
         var pos = offset;
-        while (pos < end && source[pos] != 0)
-            pos++;
+        while (pos < end && source[pos] != 0) pos++;
         var byteLength = pos - offset;
-        if (byteLength <= 0) return string.Empty;
-        return Encoding.Latin1.GetString(source, offset, byteLength);
+        return byteLength <= 0 ? string.Empty : Encoding.Latin1.GetString(source, offset, byteLength);
     }
 
-    private static string Hash(byte[] bytes) =>
-        Convert.ToHexString(SHA256.HashData(bytes)).ToLowerInvariant();
+    private static string Hash(byte[] bytes) => Convert.ToHexString(SHA256.HashData(bytes)).ToLowerInvariant();
 }
 
 internal sealed record FlverMaterialEntry(
     int Index, string Name, string MtdPath, int TextureCount, int FirstTextureIndex,
-    // ── material 32 字节的后 16 字节（此前整段未读）──
-    // 字段语义经**双源核对**（JKAnderson/SoulsFormats 与 soulsmods/SoulsFormatsNEXT
-    // 的 FLVER2/Material.cs 逐字段一致）。注意与本文件旧注释的分歧：旧注释把 +0x10
-    // 说成 gxIndex，实测与两份实现都表明 **+0x10 是 Flags**、+0x14 才是 GX 列表的
-    // **字节偏移**（不是索引）。旧注释的说法已作废，理由见 ReadGxList 的注释。
-    int Flags,            // +0x10
-    int GxOffset,         // +0x14：GX 列表字节偏移；0 表示该 material 无 GX 列表
-    int Unk18,            // +0x18：SoulsFormatsNEXT 命名为 Index，但实测非序号（见注释）
-    FlverGxList? GxList); // 按 GxOffset 解析出的列表；null 表示 GxOffset==0 或解析失败
-
-/// <summary>
-/// FLVER2 GX 列表：一串 <see cref="FlverGxItem"/> 后跟一个终止记录。
-///
-/// 结构双源核对（2026-08-08，两份独立实现逐字段一致）：
-///   循环读 item 直到 id == int.MaxValue 或 id == -1；该 id 即 TerminatorId，
-///   其后紧跟一个恒为 100 的 int32，再一个 int32 长度（真实填充长度 = 该值 - 0xC），
-///   填充区按规范应为全零。
-///
-/// 真实语料验证（11 个 Sekiro chrbnd、505 条 material，全部 gxOffset 非零）：
-/// 505/505 按本结构解析成功、零错误；terminator 后的常量 100 命中 505/505；
-/// 填充区全零 505/505；item 数分布 1×392、2×56、3×8、5×34、7×14、9×1；
-/// item ID 是 4 字节 ASCII 标签（GX00 505、GXMD 64、GX04 49、GX15 41、GX80/GX81 各 34…）。
-/// </summary>
+    int Flags, int GxOffset, int Unk18, FlverGxList? GxList);
 internal sealed record FlverGxList(
-    IReadOnlyList<FlverGxItem> Items,
-    int TerminatorId,
-    int TerminatorLength,
-    bool TerminatorPaddingAllZero,
-    int ByteLength);
-
-/// <summary>
-/// GX 列表里的一项。<c>Data</c> 按 <see cref="DataLength"/> 原样保留但**不解释**——
-/// 各 ID 的 payload 语义按材质着色参数分歧，未经真实往返验证不做解码
-/// （否则就是在未验证前提下扩大 native 声明面）。
-/// </summary>
-internal sealed record FlverGxItem(
-    string Id,          // 4 字节 ASCII（如 "GX00"）
-    int RawId,          // 同一 4 字节的 int32 视图，便于与规范里的 int 比较
-    int Unk04,
-    int ItemLength,     // 含 12 字节头
-    int DataLength);    // ItemLength - 12
-
+    IReadOnlyList<FlverGxItem> Items, int TerminatorId, int TerminatorLength,
+    bool TerminatorPaddingAllZero, int ByteLength);
+internal sealed record FlverGxItem(string Id, int RawId, int Unk04, int ItemLength, int DataLength);
 internal sealed record FlverBoneEntry(
     int Index, string Name, short NextSiblingIndex, short ParentIndex, short ChildIndex,
     float TranslationX, float TranslationY, float TranslationZ,
     float RotationX, float RotationY, float RotationZ);
-
 internal sealed record FlverMeshEntry(
-    int Index,
-    byte Dynamic,
-    int MaterialIndex,
-    int DefaultBoneIndex,
-    int VertexBufferCount,
-    IReadOnlyList<int> VertexBufferIndices,
-    int VertexCount,
-    int VertexStride,
-    int BufferLayoutIndex,
-    int FaceSetCount,
-    IReadOnlyList<int> FaceSetIndices,
-    int IndexFormat,
-    int BoneCount,
-    IReadOnlyList<int> BoneIndices);
-
+    int Index, byte Dynamic, int MaterialIndex, int DefaultBoneIndex,
+    int VertexBufferCount, IReadOnlyList<int> VertexBufferIndices,
+    int VertexCount, int VertexStride, int BufferLayoutIndex,
+    int FaceSetCount, IReadOnlyList<int> FaceSetIndices, int IndexFormat,
+    int BoneCount, IReadOnlyList<int> BoneIndices);
 internal sealed record FlverVertexBufferEntry(
     int BufferIndex, int LayoutIndex, int VertexSize, int VertexCount, int BufferLength, int BufferOffset);
-
-internal sealed record FlverLayoutMemberEntry(
-    int Unk00, int StructOffset, uint Type, uint Semantic, int Index);
-
+internal sealed record FlverLayoutMemberEntry(int Unk00, int StructOffset, uint Type, uint Semantic, int Index);
 internal sealed record FlverBufferLayoutEntry(IReadOnlyList<FlverLayoutMemberEntry> Members);
-
-internal sealed record FlverFaceSetEntry(
-    uint Flags, bool TriangleStrip, int IndexCount, int IndicesOffset, int IndexSize);
-
-internal sealed record FlverTextureSlotEntry(
-    int Index, string Type, string Path, int MaterialIndex);
-
+internal sealed record FlverFaceSetEntry(uint Flags, bool TriangleStrip, int IndexCount, int IndicesOffset, int IndexSize);
+internal sealed record FlverTextureSlotEntry(int Index, string Type, string Path, int MaterialIndex);
 internal sealed record FlverDummyEntry(
     int Index, float PositionX, float PositionY, float PositionZ,
     short ReferenceId, short ParentBoneIndex, short AttachBoneIndex);
-
 internal sealed record FlverRoundTripReport(
     bool ByteIdentical, bool SemanticIdentical,
     string SourceHash, string RebuiltHash,

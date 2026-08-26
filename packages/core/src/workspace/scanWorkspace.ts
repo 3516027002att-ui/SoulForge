@@ -13,12 +13,31 @@ import {
   toPosixPath
 } from './resourceUri.js';
 
+/**
+ * Initial workspace discovery is a catalog operation, not a content-verification
+ * operation. Large FromSoftware containers can be hundreds of MiB, so reading
+ * every byte only to populate an optional catalog hash makes application startup
+ * proportional to the total workspace size.
+ *
+ * Small files are still hashed eagerly by default because that is cheap and keeps
+ * existing fixtures / text-resource behavior unchanged. Large binary assets defer
+ * their authoritative hash to the actual open/read/write path, where the native
+ * document already computes a source hash from the bytes it consumes.
+ */
+const DEFAULT_EAGER_HASH_LIMIT_BYTES = 1024 * 1024;
+
 export interface ScanWorkspaceOptions {
   workspaceRoot: string;
   game?: string;
   includeKinds?: readonly ResourceKind[];
   signal?: AbortSignal;
   onProgress?: (progress: ScanProgress) => void;
+  /**
+   * Maximum file size that is SHA-256 hashed during catalog discovery.
+   * Set to Infinity for the historical full-workspace hashing behavior, or 0
+   * for metadata-only discovery. `IndexedFile.sha256` is optional by contract.
+   */
+  eagerHashLimitBytes?: number;
 }
 
 export async function scanWorkspace(options: ScanWorkspaceOptions): Promise<WorkspaceScanResult> {
@@ -128,17 +147,20 @@ async function addIndexedFile(
   // sourceLayer 恒为 'overlay'。
   const artifactMarkers = detectArtifactMarkers({ relativePath, sourceLayer: 'overlay' });
 
-  let sha256: string;
-  try {
-    sha256 = await sha256File(absolutePath);
-  } catch (error) {
-    diagnostics.push({
-      severity: 'warning',
-      code: 'FILE_HASH_FAILED',
-      message: error instanceof Error ? error.message : 'Failed to hash file during workspace scan.',
-      details: { absolutePath }
-    });
-    return;
+  const eagerHashLimit = normalizeEagerHashLimit(options.eagerHashLimitBytes);
+  let sha256: string | undefined;
+  if (fileStat.size <= eagerHashLimit) {
+    try {
+      sha256 = await sha256File(absolutePath);
+    } catch (error) {
+      diagnostics.push({
+        severity: 'warning',
+        code: 'FILE_HASH_FAILED',
+        message: error instanceof Error ? error.message : 'Failed to hash file during workspace scan.',
+        details: { absolutePath }
+      });
+      return;
+    }
   }
 
   files.push({
@@ -156,13 +178,20 @@ async function addIndexedFile(
     formatLabel: fileType.formatLabel,
     size: fileStat.size,
     mtimeMs: fileStat.mtimeMs,
-    sha256,
+    ...(sha256 ? { sha256 } : {}),
     parseStatus: 'unparsed',
     diagnostics: [],
     ...(artifactMarkers ? { artifactMarkers } : {})
   });
 
   options.onProgress?.({ scannedFiles: files.length, currentPath: toPosixPath(relativePath) });
+}
+
+function normalizeEagerHashLimit(value: number | undefined): number {
+  if (value === undefined) return DEFAULT_EAGER_HASH_LIMIT_BYTES;
+  if (value === Infinity) return Infinity;
+  if (!Number.isFinite(value) || value <= 0) return 0;
+  return Math.floor(value);
 }
 
 async function sha256File(filePath: string): Promise<string> {

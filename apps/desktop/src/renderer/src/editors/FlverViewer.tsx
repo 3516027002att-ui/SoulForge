@@ -355,43 +355,74 @@ function buildSemanticScene(input: {
   const meshes: FlverSceneMesh[] = [];
   for (const [index, meshData] of input.meshes.entries()) {
     const positions = decodeFloat32Array(meshData.positionsBase64);
-    const vertexCount = meshData.vertexCount || Math.floor(positions.length / 3);
+    // Bridge preview endpoints may cap emitted vertices. The typed payload is the
+    // authority for renderer buffer length; never trust a larger source vertexCount
+    // and then manufacture zero-filled attributes for vertices that were not sent.
+    const vertexCount = Math.floor(positions.length / 3);
+    if (vertexCount <= 0) continue;
+
     const mesh: FlverSceneMesh = {
       id: `mesh-${index}`,
       label: `mesh[${index}]`,
       position: [0, 0, 0],
       rotation: [0, 0, 0],
       scale: [1, 1, 1],
-      positions,
+      positions: positions.subarray(0, vertexCount * 3),
       vertexCount,
       wireframeOverlay: true
     };
-    if (meshData.uvsBase64) mesh.uvs = decodeFloat32Array(meshData.uvsBase64);
-    if (meshData.normalsBase64) mesh.normals = decodeFloat32Array(meshData.normalsBase64);
-    if (meshData.indicesBase64) mesh.indices = decodeMeshIndices(meshData.indicesBase64, meshData.indexSize ?? 16);
 
-    // 真正的 GPU Skinning Attributes（4 components / vertex）
-    if (meshData.boneIndicesBase64) {
-      mesh.skinIndices = decodeSkinIndices(meshData.boneIndicesBase64, vertexCount);
+    if (meshData.uvsBase64) {
+      const uvs = decodeFloat32Array(meshData.uvsBase64);
+      if (uvs.length >= vertexCount * 2) mesh.uvs = uvs.subarray(0, vertexCount * 2);
     }
-    if (meshData.boneWeightsBase64) {
-      mesh.skinWeights = decodeSkinWeights(meshData.boneWeightsBase64, vertexCount);
-      mesh.vertexColors = boneWeightColors(mesh.skinWeights, vertexCount);
-    } else if (mesh.skinIndices) {
-      mesh.vertexColors = boneIndexColors(mesh.skinIndices, vertexCount);
+    if (meshData.normalsBase64) {
+      const normals = decodeFloat32Array(meshData.normalsBase64);
+      if (normals.length >= vertexCount * 3) mesh.normals = normals.subarray(0, vertexCount * 3);
+    }
+    if (meshData.indicesBase64) {
+      const decoded = decodeMeshIndices(meshData.indicesBase64, meshData.indexSize ?? 16);
+      const safe = sanitizeTriangleIndices(decoded, vertexCount);
+      if (safe.length > 0) mesh.indices = safe;
+    }
+
+    // Skinning is an all-or-nothing contract. A skeleton with only indices or
+    // only weights is not a partially useful skinned mesh; Three.js will still
+    // execute skinning and can collapse / fling the geometry. Keep such meshes
+    // static until the native layer supplies a complete binding.
+    if (meshData.boneIndicesBase64 && meshData.boneWeightsBase64) {
+      const skinIndices = decodeSkinIndicesStrict(meshData.boneIndicesBase64, vertexCount);
+      const skinWeights = decodeSkinWeightsStrict(meshData.boneWeightsBase64, vertexCount);
+      if (skinIndices && skinWeights) {
+        mesh.skinIndices = skinIndices;
+        mesh.skinWeights = skinWeights;
+        mesh.vertexColors = boneWeightColors(skinWeights, vertexCount);
+      }
     }
 
     if (input.texture) mesh.texture = input.texture;
     meshes.push(mesh);
   }
   const bounds = computeSceneBounds(input.boundingBox, meshes);
-  const bones = input.skeleton.map((bone, index) => ({
-    id: `bone-${index}`,
-    name: bone.name,
-    parentIndex: bone.parentIndex,
-    translation: bone.translation,
-    rotation: bone.rotation
-  }));
+
+  // Current Three projection binds one shared Skeleton to every mesh whenever
+  // `bones` is present. Therefore mixed static/rigid/weighted FLVERs must fail
+  // closed to a static preview rather than falsely skinning the static meshes.
+  // Once the native DTO distinguishes rigid NormalW vs weighted binding, this
+  // gate can be relaxed per mesh in the projection layer.
+  const allMeshesSkinnable = meshes.length > 0 && meshes.every(
+    (mesh) => mesh.skinIndices?.length === mesh.vertexCount * 4
+      && mesh.skinWeights?.length === mesh.vertexCount * 4
+  );
+  const bones = allMeshesSkinnable
+    ? input.skeleton.map((bone, index) => ({
+        id: `bone-${index}`,
+        name: bone.name,
+        parentIndex: bone.parentIndex,
+        translation: bone.translation,
+        rotation: bone.rotation
+      }))
+    : [];
   const dummies = input.dummies.map((dummy, index) => ({
     id: `dummy-${index}`,
     referenceId: dummy.referenceId,
@@ -484,59 +515,48 @@ function decodeMeshIndices(base64: string, indexSize: number = 16): Uint16Array 
   return indexSize === 32 ? new Uint32Array(copy) : new Uint16Array(copy);
 }
 
-function decodeUint16Array(base64: string): Uint16Array {
-  const bytes = decodeBase64Safe(base64);
-  const copy = (bytes.buffer as ArrayBuffer).slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
-  return new Uint16Array(copy);
-}
-
-function decodeSkinIndices(base64: string, vertexCount: number): Uint16Array {
-  const bytes = decodeBase64Safe(base64);
-  const result = new Uint16Array(vertexCount * 4);
-  if (bytes.length >= vertexCount * 8) {
-    const copy = (bytes.buffer as ArrayBuffer).slice(bytes.byteOffset, bytes.byteOffset + vertexCount * 8);
-    const u16 = new Uint16Array(copy);
-    result.set(u16.subarray(0, vertexCount * 4));
-  } else if (bytes.length >= vertexCount * 4) {
-    for (let i = 0; i < vertexCount * 4; i++) {
-      result[i] = bytes[i] ?? 0;
-    }
-  } else {
-    for (let i = 0; i < Math.min(bytes.length, vertexCount * 4); i++) {
-      result[i] = bytes[i] ?? 0;
-    }
+function sanitizeTriangleIndices(
+  indices: Uint16Array | Uint32Array,
+  vertexCount: number
+): Uint16Array | Uint32Array {
+  const safe: number[] = [];
+  for (let index = 0; index + 2 < indices.length; index += 3) {
+    const a = indices[index] ?? vertexCount;
+    const b = indices[index + 1] ?? vertexCount;
+    const c = indices[index + 2] ?? vertexCount;
+    if (a >= vertexCount || b >= vertexCount || c >= vertexCount) continue;
+    if (a === b || b === c || c === a) continue;
+    safe.push(a, b, c);
   }
-  return result;
+  return indices instanceof Uint32Array ? Uint32Array.from(safe) : Uint16Array.from(safe);
 }
 
-function decodeSkinWeights(base64: string, vertexCount: number): Float32Array {
+function decodeSkinIndicesStrict(base64: string, vertexCount: number): Uint16Array | null {
   const bytes = decodeBase64Safe(base64);
-  const result = new Float32Array(vertexCount * 4);
-  if (bytes.length >= vertexCount * 16) {
-    const copy = (bytes.buffer as ArrayBuffer).slice(bytes.byteOffset, bytes.byteOffset + vertexCount * 16);
-    const f32 = new Float32Array(copy);
-    result.set(f32.subarray(0, vertexCount * 4));
-  } else if (bytes.length >= vertexCount * 4) {
-    for (let i = 0; i < vertexCount; i++) {
-      const offset = i * 4;
-      const w0 = (bytes[offset] ?? 0) / 255;
-      const w1 = (bytes[offset + 1] ?? 0) / 255;
-      const w2 = (bytes[offset + 2] ?? 0) / 255;
-      const w3 = (bytes[offset + 3] ?? 0) / 255;
-      const sum = w0 + w1 + w2 + w3;
-      if (sum > 0) {
-        result[offset] = w0 / sum;
-        result[offset + 1] = w1 / sum;
-        result[offset + 2] = w2 / sum;
-        result[offset + 3] = w3 / sum;
-      } else {
-        result[offset] = 1.0;
-      }
-    }
-  } else {
-    for (let i = 0; i < vertexCount; i++) {
-      result[i * 4] = 1.0;
-    }
+  if (bytes.length < vertexCount * 8) return null;
+  const copy = (bytes.buffer as ArrayBuffer).slice(bytes.byteOffset, bytes.byteOffset + vertexCount * 8);
+  const result = new Uint16Array(copy);
+  return result.length === vertexCount * 4 ? result : null;
+}
+
+function decodeSkinWeightsStrict(base64: string, vertexCount: number): Float32Array | null {
+  const bytes = decodeBase64Safe(base64);
+  if (bytes.length < vertexCount * 16) return null;
+  const copy = (bytes.buffer as ArrayBuffer).slice(bytes.byteOffset, bytes.byteOffset + vertexCount * 16);
+  const result = new Float32Array(copy);
+  if (result.length !== vertexCount * 4) return null;
+  for (let vertex = 0; vertex < vertexCount; vertex++) {
+    const offset = vertex * 4;
+    const w0 = Number.isFinite(result[offset]) ? Math.max(0, result[offset] ?? 0) : 0;
+    const w1 = Number.isFinite(result[offset + 1]) ? Math.max(0, result[offset + 1] ?? 0) : 0;
+    const w2 = Number.isFinite(result[offset + 2]) ? Math.max(0, result[offset + 2] ?? 0) : 0;
+    const w3 = Number.isFinite(result[offset + 3]) ? Math.max(0, result[offset + 3] ?? 0) : 0;
+    const sum = w0 + w1 + w2 + w3;
+    if (sum <= 1e-5) return null;
+    result[offset] = w0 / sum;
+    result[offset + 1] = w1 / sum;
+    result[offset + 2] = w2 / sum;
+    result[offset + 3] = w3 / sum;
   }
   return result;
 }
@@ -549,25 +569,6 @@ function boneWeightColors(weights: Float32Array, vertexCount: number): Float32Ar
     colors[v * 3] = primaryWeight;
     colors[v * 3 + 1] = 0.2;
     colors[v * 3 + 2] = 1 - primaryWeight;
-  }
-  return colors;
-}
-
-const BONE_PALETTE: Array<[number, number, number]> = [
-  [1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0], [1.0, 1.0, 0.0],
-  [1.0, 0.0, 1.0], [0.0, 1.0, 1.0], [1.0, 0.5, 0.0], [0.5, 0.0, 1.0],
-  [0.0, 1.0, 0.5], [0.5, 1.0, 0.0], [1.0, 0.0, 0.5], [0.0, 0.5, 1.0]
-];
-
-// 骨索引着色：按首个骨索引取调色板色。
-function boneIndexColors(indices: Uint16Array, vertexCount: number): Float32Array {
-  const colors = new Float32Array(vertexCount * 3);
-  for (let v = 0; v < vertexCount; v++) {
-    const boneIdx = (indices[v * 4] ?? 0) % BONE_PALETTE.length;
-    const color = BONE_PALETTE[boneIdx] ?? [1.0, 1.0, 1.0];
-    colors[v * 3] = color[0];
-    colors[v * 3 + 1] = color[1];
-    colors[v * 3 + 2] = color[2];
   }
   return colors;
 }
@@ -598,7 +599,8 @@ async function decodeFlverTexture(textureBase64: string): Promise<FlverSceneText
       };
     }
     // 非 DDS / 过小：RGBA 渐变占位纹理（语义形态，投影层建 DataTexture）。
-    const dv = new DataView(texBytes.buffer);
+    if (texBytes.byteLength < 20) return null;
+    const dv = new DataView(texBytes.buffer, texBytes.byteOffset, texBytes.byteLength);
     const width = dv.getUint32(12, true) || 256;
     const height = dv.getUint32(16, true) || 256;
     const size = Math.min(256, Math.max(1, Math.min(width, height)));
