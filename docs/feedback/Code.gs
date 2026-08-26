@@ -1,7 +1,7 @@
 /* SoulForge feedback receiver — Google Apps Script Web App.
  *
  * Script Properties required:
- *   SOULFORGE_FEEDBACK_FOLDER_ID   Drive folder receiving JSON archives
+ *   SOULFORGE_FEEDBACK_FOLDER_ID    Drive folder receiving JSON archives
  *   SOULFORGE_FEEDBACK_NOTIFY_EMAIL notification destination
  *
  * Deploy as a Web App that executes as the owner. The desktop client only
@@ -101,13 +101,23 @@ function buildNotification_(payload, driveUrl) {
     `SoulForge: ${payload.build && payload.build.appVersion ? payload.build.appVersion : 'unknown'}`
   ];
   if (payload.build && payload.build.commitSha) lines.push(`commit: ${payload.build.commitSha}`);
-  if (payload.build && payload.build.model) lines.push(`model: ${payload.build.model}`);
-  if (payload.build && payload.build.provider) lines.push(`provider: ${payload.build.provider}`);
+
+  const traceSummary = extractTraceSummary_(payload.trace && payload.trace.content);
+  const model = payload.build && payload.build.model ? payload.build.model : traceSummary.model;
+  const provider = payload.build && payload.build.provider ? payload.build.provider : traceSummary.protocol;
+  if (model) lines.push(`model: ${model}`);
+  if (provider) lines.push(`provider: ${provider}`);
+  if (traceSummary.configId) lines.push(`config: ${traceSummary.configId}`);
+
   if (payload.feedback) {
     lines.push(`rating: ${payload.feedback.rating}`);
     if (payload.feedback.comment) lines.push(`comment: ${payload.feedback.comment}`);
   }
   if (payload.trace && payload.trace.sessionId) lines.push(`session: ${payload.trace.sessionId}`);
+  if (traceSummary.steps !== null) lines.push(`steps: ${traceSummary.steps}`);
+  if (traceSummary.taskStatus) lines.push(`taskStatus: ${traceSummary.taskStatus}`);
+  if (traceSummary.finishReason) lines.push(`finishReason: ${traceSummary.finishReason}`);
+
   if (payload.kind === 'history-complete') {
     lines.push(`uploadedSessions: ${payload.uploadedSessions || 0}`);
     lines.push(`failedSessions: ${(payload.failedSessions || []).length}`);
@@ -116,9 +126,49 @@ function buildNotification_(payload, driveUrl) {
   return lines.join('\n');
 }
 
+/**
+ * Rollout JSONL already is the local authority. Parse only the tiny pieces
+ * needed for the notification; the archived Drive file remains byte-for-byte
+ * the submitted feedback envelope and keeps the complete trace.
+ */
+function extractTraceSummary_(content) {
+  const summary = {
+    model: '',
+    protocol: '',
+    configId: '',
+    steps: null,
+    taskStatus: '',
+    finishReason: ''
+  };
+  if (typeof content !== 'string' || !content) return summary;
+
+  const lines = content.split(/\r?\n/);
+  for (let i = 0; i < lines.length; i += 1) {
+    const line = lines[i].trim();
+    if (!line) continue;
+    let item;
+    try {
+      item = JSON.parse(line);
+    } catch (_) {
+      continue;
+    }
+    if (item && item.type === 'session-meta' && item.meta) {
+      if (typeof item.meta.model === 'string') summary.model = item.meta.model;
+      if (typeof item.meta.protocol === 'string') summary.protocol = item.meta.protocol;
+      if (typeof item.meta.configId === 'string') summary.configId = item.meta.configId;
+    }
+    if (item && item.type === 'turn-complete') {
+      if (typeof item.steps === 'number') summary.steps = item.steps;
+      if (typeof item.taskStatus === 'string') summary.taskStatus = item.taskStatus;
+      if (typeof item.finishReason === 'string') summary.finishReason = item.finishReason;
+    }
+  }
+  return summary;
+}
+
 function jsonResponse_(status, body) {
   // Apps Script ContentService cannot set HTTP status directly. Keep the
-  // semantic status in the JSON body; deployment/front proxy may map it.
+  // semantic status in the JSON body; the desktop client explicitly honors it.
   return ContentService
     .createTextOutput(JSON.stringify({ status, ...body }))
     .setMimeType(ContentService.MimeType.JSON);
