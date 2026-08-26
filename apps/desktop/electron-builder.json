@@ -35,6 +35,10 @@
     {
       "from": "../prompt",
       "to": "prompt"
+    },
+    {
+      "from": "../../mutter.md",
+      "to": "mutter.md"
     }
   ],
   "win": {
