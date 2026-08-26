@@ -19,6 +19,7 @@ export * from './editor-catalog.js';
 export * from './editor-pagination.js';
 export * from './emevd-editor-ir.js';
 export * from './agent-ui.js';
+export * from './auxiliary-ipc.js';
 export * from './emevd-dsl.js';
 export * from './param-field-reference.js';
 export * from './paramdef.js';
