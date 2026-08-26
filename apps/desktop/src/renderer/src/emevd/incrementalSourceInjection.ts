@@ -46,6 +46,13 @@ export const INCREMENTAL_NEAR_BOTTOM_LINES = 300;
  */
 export const sourceFillAnnotation = Annotation.define<boolean>();
 
+/**
+ * 仅在本次 source fill 令文档从 partial 正式变为 complete 时附加的标记。
+ * 中间片仍只带 sourceFillAnnotation，避免每片触发全文 diagnostics；完成片带两者，
+ * 让 diagnostics 扩展对刚补齐的完整文档运行一次最终分析。
+ */
+export const sourceFillCompletionAnnotation = Annotation.define<boolean>();
+
 /** 一个 tab 的增量源推进状态（operational，放在 ref 里供回调闭包读取）。 */
 export interface IncrementalSourceState {
   /** main 侧 opaque token；renderer 不得拿路径。 */

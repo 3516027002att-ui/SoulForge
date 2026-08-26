@@ -493,14 +493,18 @@ describe('S35 增量源（event-common-load.md §3.2：首帧前缀 + 按视口�
     assert.match(commitDraft, /setAnalysisRevision/);
   });
 
-  it('12-B：增量源追加带 sourceFillAnnotation，诊断扩展显式跳过该事务', () => {
+  it('12-B：中间增量源追加跳过诊断，completion 追加允许最终诊断', () => {
     const diagnosticsSource = readFileSync(
       join(repoRoot, 'apps', 'desktop', 'src', 'renderer', 'src', 'emevd', 'cmDiagnostics.ts'),
       'utf8'
     );
     assert.match(diagnosticsSource, /sourceFillAnnotation/);
     assert.match(diagnosticsSource, /isSourceFillTransaction/);
-    assert.match(diagnosticsSource, /if \(update\.transactions\.some\(isSourceFillTransaction\)\) return/);
+    assert.match(diagnosticsSource, /isSourceFillCompletionTransaction/);
+    assert.match(diagnosticsSource, /const hasSourceFill = update\.transactions\.some\(isSourceFillTransaction\)/);
+    assert.match(diagnosticsSource, /if \(hasSourceFill && !hasSourceFillCompletion\) return/);
+    assert.match(diagnosticsSource, /hasSourceFillCompletion\s*\n\s*\|\| update\.docChanged/);
+    assert.match(panelSource, /sourceFillCompletionAnnotation\.of\(true\)/);
   });
 
   it('12-C：事件工作台有独立高度宿主，源码列与词义列不跟 viewer-content 一起滚', () => {

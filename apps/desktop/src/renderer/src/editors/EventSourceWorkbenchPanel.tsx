@@ -53,6 +53,7 @@ import {
   isIncrementalSourceComplete,
   isNearLoadedBottom,
   sourceFillAnnotation,
+  sourceFillCompletionAnnotation,
   type IncrementalSourceState
 } from '../emevd/incrementalSourceInjection.js';
 import {
@@ -836,6 +837,8 @@ export function EventSourceWorkbenchPanel(props: EventSourceWorkbenchPanelProps)
   const ensureTabCompleteRef = useRef<(tabId: string) => Promise<void>>(async () => {});
   /** 用户滚动过的 tab 才允许触发近底续载；挂载/切 tab 的几何事件不算显式需求。 */
   const userScrolledTabsRef = useRef<Set<string>>(new Set());
+  /** 非活动 tab 完成 source fill 时，待其切回主视口后补发一次 completion diagnostics。 */
+  const pendingSourceCompletionDiagnosticsRef = useRef<Set<string>>(new Set());
   /** 源填充只更新展示，不触发每片一次的全量 symbol/diagnostic 分析。 */
   const [analysisRevision, setAnalysisRevision] = useState(0);
 
@@ -938,19 +941,32 @@ export function EventSourceWorkbenchPanel(props: EventSourceWorkbenchPanelProps)
 
   /**
    * S35：把「文件后半」文本追加进指定 tab 的缓冲。
+   * `complete=true` 时附加 completion annotation；普通续片不能带该标记。
    */
   const applyRestText = useCallback((tabId: string, restText: string | null, complete: boolean) => {
+    const fillAnnotations = [
+      sourceFillAnnotation.of(true),
+      ...(complete ? [sourceFillCompletionAnnotation.of(true)] : []),
+      Transaction.addToHistory.of(false)
+    ];
     if (!restText || restText.length === 0) {
       if (complete) {
+        const view = viewRef.current;
         const tab = tabsRef.current.find((item) => item.tabId === tabId);
-        if (tab) commitSourceFill(tabId, tab.editorState, tab.editorState.doc.lines, true);
+        if (!tab) return;
+        // 空的最终片也必须发一个 completion-only transaction，否则 diagnostics 不会知道
+        // source 已经从 partial 变成 complete。
+        if (view && activeTabIdRef.current === tabId) {
+          view.dispatch({ annotations: fillAnnotations });
+          commitSourceFill(tabId, view.state, view.state.doc.lines, true);
+        } else {
+          pendingSourceCompletionDiagnosticsRef.current.add(tabId);
+          const nextState = tab.editorState.update({ annotations: fillAnnotations }).state;
+          commitSourceFill(tabId, nextState, nextState.doc.lines, true);
+        }
       }
       return;
     }
-    const fillAnnotations = [
-      sourceFillAnnotation.of(true),
-      Transaction.addToHistory.of(false)
-    ];
     const view = viewRef.current;
     if (view && activeTabIdRef.current === tabId) {
       view.dispatch({
@@ -966,6 +982,7 @@ export function EventSourceWorkbenchPanel(props: EventSourceWorkbenchPanelProps)
       ...appendSourceTail(tab.editorState, restText),
       annotations: fillAnnotations
     }).state;
+    if (complete) pendingSourceCompletionDiagnosticsRef.current.add(tabId);
     commitSourceFill(tabId, nextState, nextState.doc.lines, complete, restText);
   }, [commitSourceFill]);
 
@@ -1250,6 +1267,15 @@ export function EventSourceWorkbenchPanel(props: EventSourceWorkbenchPanelProps)
     view.setState(activeTab.editorState);
     (view as unknown as { _eventLineInfo: Map<number, EventLineInfo> })._eventLineInfo =
       eventLineInfoRef.current;
+    if (pendingSourceCompletionDiagnosticsRef.current.delete(activeTab.tabId)) {
+      view.dispatch({
+        annotations: [
+          sourceFillAnnotation.of(true),
+          sourceFillCompletionAnnotation.of(true),
+          Transaction.addToHistory.of(false)
+        ]
+      });
+    }
     const pending = pendingRevealRef.current;
     if (pending?.pane === 'a') {
       pendingRevealRef.current = null;
@@ -1358,6 +1384,7 @@ export function EventSourceWorkbenchPanel(props: EventSourceWorkbenchPanelProps)
     fillPromisesRef.current.delete(tabId);
     slicePromisesRef.current.delete(tabId);
     userScrolledTabsRef.current.delete(tabId);
+    pendingSourceCompletionDiagnosticsRef.current.delete(tabId);
     setAnalysisRevision((revision) => revision + 1);
     setTabs((previous) => {
       const index = previous.findIndex((tab) => tab.tabId === tabId);

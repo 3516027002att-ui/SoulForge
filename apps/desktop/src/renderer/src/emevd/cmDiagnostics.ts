@@ -19,7 +19,10 @@ import {
 } from '@codemirror/view';
 import type { EmedfCompletionItem, EmedfEnumDef, EventDiagnostic } from '@soulforge/core';
 import { computeDocumentDiagnostics, getQuickFixesAt } from '@soulforge/core/dist/emevd/language-service/index.js';
-import { sourceFillAnnotation } from './incrementalSourceInjection.js';
+import {
+  sourceFillAnnotation,
+  sourceFillCompletionAnnotation
+} from './incrementalSourceInjection.js';
 
 const setDiagnosticsEffect = StateEffect.define<EventDiagnostic[]>();
 
@@ -30,6 +33,11 @@ const infoMark = Decoration.mark({ class: 'cm-diagnostic-info' });
 /** 增量源码追加不应在每片到达时重新扫描不断增长的全文。 */
 export function isSourceFillTransaction(transaction: Transaction): boolean {
   return transaction.annotation(sourceFillAnnotation) === true;
+}
+
+/** 最后一次 source fill 使文档从 partial 变 complete 时，允许一次全文 diagnostics。 */
+export function isSourceFillCompletionTransaction(transaction: Transaction): boolean {
+  return transaction.annotation(sourceFillCompletionAnnotation) === true;
 }
 
 export const diagnosticsStateField = StateField.define<EventDiagnostic[]>({
@@ -71,6 +79,11 @@ const diagnosticsDecorationField = StateField.define<DecorationSet>({
   },
   provide: (f) => EditorView.decorations.from(f)
 });
+
+/** diagnostics 结果事务只更新 StateField，不能被空诊断结果再次调度全文分析。 */
+function isDiagnosticsResultTransaction(transaction: Transaction): boolean {
+  return transaction.effects.some((effect) => effect.is(setDiagnosticsEffect));
+}
 
 export function emevdDiagnosticsExtension(
   getCatalog: () => EmedfCompletionItem[],
@@ -127,8 +140,17 @@ export function emevdDiagnosticsExtension(
   // Debounced live diagnostics dispatcher
   let timer: ReturnType<typeof setTimeout> | null = null;
   const listener = EditorView.updateListener.of((update) => {
-    if (update.transactions.some(isSourceFillTransaction)) return;
-    if (update.docChanged || update.view.state.field(diagnosticsStateField).length === 0) {
+    const hasSourceFill = update.transactions.some(isSourceFillTransaction);
+    const hasSourceFillCompletion = update.transactions.some(isSourceFillCompletionTransaction);
+    // 普通 source slice 只扩展展示缓冲；只有 completion annotation 才允许跑最终全文分析。
+    if (hasSourceFill && !hasSourceFillCompletion) return;
+    // 防止「最终结果为空 → StateField 仍为空 → 再次调度」的重复分析循环。
+    if (update.transactions.some(isDiagnosticsResultTransaction)) return;
+    if (
+      hasSourceFillCompletion
+      || update.docChanged
+      || update.view.state.field(diagnosticsStateField).length === 0
+    ) {
       if (timer) clearTimeout(timer);
       timer = setTimeout(() => {
         const catalog = getCatalog();
