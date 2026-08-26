@@ -5,17 +5,12 @@ import {
   HttpFeedbackEndpoint,
   MutterService,
   SessionFeedbackService,
-  type BuildFingerprint,
-  type SessionFeedbackInput
+  type BuildFingerprint
 } from '@soulforge/core';
-
-const CHANNELS = {
-  mutterNext: 'mutter.next',
-  mutterStatus: 'mutter.status',
-  feedbackStatus: 'feedback.status',
-  feedbackSubmitSession: 'feedback.submitSession',
-  feedbackSubmitAll: 'feedback.submitAllHistory'
-} as const;
+import {
+  AUXILIARY_IPC_CHANNELS,
+  type SessionFeedbackIpcRequest
+} from '@soulforge/shared';
 
 let handlersRegistered = false;
 let trustedRendererId: number | null = null;
@@ -27,6 +22,22 @@ function assertTrustedSender(event: IpcMainInvokeEvent): void {
   if (trustedRendererId === null || event.sender.id !== trustedRendererId) {
     throw new Error('AUXILIARY_IPC_UNTRUSTED_SENDER');
   }
+}
+
+function decodeSessionFeedbackInput(value: unknown): SessionFeedbackIpcRequest | null {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) return null;
+  const candidate = value as Record<string, unknown>;
+  const sessionId = candidate.sessionId;
+  const rating = candidate.rating;
+  const comment = candidate.comment;
+
+  if (typeof sessionId !== 'string' || sessionId.trim().length === 0 || sessionId.length > 160) return null;
+  if (rating !== 'positive' && rating !== 'negative' && rating !== 'incomplete') return null;
+  if (comment !== undefined && (typeof comment !== 'string' || comment.length > 2_000)) return null;
+
+  return comment === undefined
+    ? { sessionId, rating }
+    : { sessionId, rating, comment };
 }
 
 function resolveMutterPath(): string {
@@ -93,19 +104,19 @@ export function registerAuxiliaryIpcHandlers(webContents: WebContents): void {
   if (handlersRegistered) return;
   handlersRegistered = true;
 
-  ipcMain.handle(CHANNELS.mutterNext, async (event) => {
+  ipcMain.handle(AUXILIARY_IPC_CHANNELS.mutterNext, async (event) => {
     assertTrustedSender(event);
     const service = await ensureMutterService();
     return { text: service.next(), ...service.snapshot() };
   });
 
-  ipcMain.handle(CHANNELS.mutterStatus, async (event) => {
+  ipcMain.handle(AUXILIARY_IPC_CHANNELS.mutterStatus, async (event) => {
     assertTrustedSender(event);
     const service = await ensureMutterService();
     return service.snapshot();
   });
 
-  ipcMain.handle(CHANNELS.feedbackStatus, (event) => {
+  ipcMain.handle(AUXILIARY_IPC_CHANNELS.feedbackStatus, (event) => {
     assertTrustedSender(event);
     const service = ensureFeedbackService();
     return {
@@ -114,16 +125,20 @@ export function registerAuxiliaryIpcHandlers(webContents: WebContents): void {
     };
   });
 
-  ipcMain.handle(CHANNELS.feedbackSubmitSession, async (event, input: SessionFeedbackInput) => {
+  ipcMain.handle(AUXILIARY_IPC_CHANNELS.feedbackSubmitSession, async (event, input: unknown) => {
     assertTrustedSender(event);
+    const decoded = decodeSessionFeedbackInput(input);
+    if (!decoded) {
+      return { ok: false, code: 'INVALID_INPUT', message: '反馈请求格式无效。' };
+    }
     const service = ensureFeedbackService();
     if (!service) {
       return { ok: false, code: 'ENDPOINT_NOT_CONFIGURED', message: '反馈上传 endpoint 尚未配置。' };
     }
-    return service.submitSessionFeedback(input);
+    return service.submitSessionFeedback(decoded);
   });
 
-  ipcMain.handle(CHANNELS.feedbackSubmitAll, async (event) => {
+  ipcMain.handle(AUXILIARY_IPC_CHANNELS.feedbackSubmitAll, async (event) => {
     assertTrustedSender(event);
     const service = ensureFeedbackService();
     if (!service) {
