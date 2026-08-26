@@ -66,7 +66,12 @@ export type FeedbackUploadEnvelope =
 
 export type FeedbackEndpointResult =
   | { ok: true; status: number }
-  | { ok: false; code: 'ENDPOINT_INVALID' | 'PAYLOAD_TOO_LARGE' | 'NETWORK_FAILED' | 'HTTP_REJECTED'; status?: number; message: string };
+  | {
+      ok: false;
+      code: 'ENDPOINT_INVALID' | 'PAYLOAD_TOO_LARGE' | 'NETWORK_FAILED' | 'HTTP_REJECTED';
+      status?: number;
+      message: string;
+    };
 
 export interface FeedbackEndpoint {
   submit(payload: FeedbackUploadEnvelope): Promise<FeedbackEndpointResult>;
@@ -113,12 +118,15 @@ export class HttpFeedbackEndpoint implements FeedbackEndpoint {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), this.timeoutMs);
     try {
+      // Google Apps Script Web Apps may redirect /exec responses through a
+      // googleusercontent host. Following redirects is therefore required for
+      // the intended receiver; no client credential is attached to the request.
       const response = await this.fetchImpl(this.endpointUrl, {
         method: 'POST',
         headers: { 'content-type': 'application/json; charset=utf-8' },
         body,
         signal: controller.signal,
-        redirect: 'error'
+        redirect: 'follow'
       });
       if (!response.ok) {
         return {
@@ -128,7 +136,20 @@ export class HttpFeedbackEndpoint implements FeedbackEndpoint {
           message: `反馈 endpoint 返回 HTTP ${response.status}。`
         };
       }
-      return { ok: true, status: response.status };
+
+      // Apps Script ContentService cannot reliably set HTTP status codes. The
+      // receiver therefore also returns a small JSON body with semantic
+      // `status`; honor that or validation failures would look like success.
+      const semantic = await readSemanticResponse(response);
+      if (semantic !== null && semantic >= 400) {
+        return {
+          ok: false,
+          code: 'HTTP_REJECTED',
+          status: semantic,
+          message: `反馈 endpoint 拒绝了请求（semantic status ${semantic}）。`
+        };
+      }
+      return { ok: true, status: semantic ?? response.status };
     } catch (error) {
       return {
         ok: false,
@@ -141,6 +162,21 @@ export class HttpFeedbackEndpoint implements FeedbackEndpoint {
   }
 }
 
+async function readSemanticResponse(response: Response): Promise<number | null> {
+  const contentType = response.headers.get('content-type') ?? '';
+  if (!contentType.toLowerCase().includes('application/json')) return null;
+  try {
+    const text = await response.text();
+    if (text.length > 64 * 1024) return null;
+    const value = JSON.parse(text) as unknown;
+    if (value === null || typeof value !== 'object') return null;
+    const status = (value as { status?: unknown }).status;
+    return typeof status === 'number' && Number.isFinite(status) ? status : null;
+  } catch {
+    return null;
+  }
+}
+
 export interface SessionFeedbackServiceOptions {
   maxSessions?: number;
   maxTraceBytes?: number;
@@ -148,7 +184,11 @@ export interface SessionFeedbackServiceOptions {
 
 export type SubmitSessionFeedbackResult =
   | { ok: true; submissionId: string }
-  | { ok: false; code: 'INVALID_INPUT' | 'SESSION_NOT_FOUND' | 'TRACE_READ_FAILED' | 'TRACE_TOO_LARGE' | 'UPLOAD_FAILED'; message: string };
+  | {
+      ok: false;
+      code: 'INVALID_INPUT' | 'SESSION_NOT_FOUND' | 'TRACE_READ_FAILED' | 'TRACE_TOO_LARGE' | 'UPLOAD_FAILED';
+      message: string;
+    };
 
 export interface SubmitAllHistoryResult {
   ok: boolean;
@@ -311,7 +351,9 @@ function parseHttpsEndpoint(value: string): URL | null {
   }
 }
 
-function validateSessionFeedbackInput(input: SessionFeedbackInput): SubmitSessionFeedbackResult | { ok: true } {
+function validateSessionFeedbackInput(input: SessionFeedbackInput):
+  | { ok: true }
+  | { ok: false; code: 'INVALID_INPUT'; message: string } {
   if (input.sessionId.trim().length === 0 || input.sessionId.length > 160) {
     return { ok: false, code: 'INVALID_INPUT', message: 'sessionId 无效。' };
   }
