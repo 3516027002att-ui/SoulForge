@@ -1,5 +1,6 @@
 import { useRef, type KeyboardEvent, type ReactElement } from 'react';
 import type { DomainSummary, EditorDomainId } from '@soulforge/shared';
+import { LiquidTabGroup, LiquidTabItem } from '../components/motion/index.js';
 
 export interface DomainNavigationBarProps {
   domain: EditorDomainId;
@@ -17,6 +18,7 @@ export interface DomainNavigationBarProps {
 export function DomainNavigationBar({ domain, domains, onSelect, resourceSidebarOpen }: DomainNavigationBarProps): ReactElement {
   const tabRefs = useRef<Array<HTMLButtonElement | null>>([]);
   const visible = domains.filter((entry) => entry.visibility !== 'hidden');
+  const activeTabId = resourceSidebarOpen ? 'project' : domain;
 
   function handleKeyDown(event: KeyboardEvent<HTMLButtonElement>, index: number): void {
     let next: number | null = null;
@@ -31,16 +33,28 @@ export function DomainNavigationBar({ domain, domains, onSelect, resourceSidebar
 
   return (
     <nav className="domain-bar" aria-label="工作域导航">
-      <div className="domain-bar__tabs" role="tablist" aria-label="工作区工作域" data-testid="domain-bar">
+      <LiquidTabGroup
+        activeId={activeTabId}
+        fill="var(--forge-hover)"
+        blur={5}
+        contrast={18}
+        radius={4}
+        className="domain-bar__tabs"
+        role="tablist"
+        aria-label="工作区工作域"
+        data-testid="domain-bar"
+      >
         {visible.map((entry, index) => {
           // 「开始」的选中态 = 资源栏打开；其余领域仍按 activeDomain。
           const selected = entry.domain === 'project' ? resourceSidebarOpen : entry.domain === domain;
           const disabled = entry.visibility === 'disabled';
           const description = capabilityDescription(entry);
           return (
-            <button
+            <LiquidTabItem
               key={entry.domain}
-              ref={(element) => { tabRefs.current[index] = element; }}
+              id={entry.domain}
+              as="button"
+              ref={(element: HTMLElement | null) => { tabRefs.current[index] = element as HTMLButtonElement | null; }}
               type="button"
               role="tab"
               aria-selected={selected}
@@ -50,13 +64,13 @@ export function DomainNavigationBar({ domain, domains, onSelect, resourceSidebar
               data-domain={entry.domain}
               title={description}
               onClick={() => onSelect(entry.domain)}
-              onKeyDown={(event) => handleKeyDown(event, index)}
+              onKeyDown={(event: KeyboardEvent<any>) => handleKeyDown(event, index)}
             >
               <span className="domain-tab__label">{entry.label}</span>
-            </button>
+            </LiquidTabItem>
           );
         })}
-      </div>
+      </LiquidTabGroup>
     </nav>
   );
 }

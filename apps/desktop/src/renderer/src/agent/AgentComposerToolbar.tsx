@@ -8,6 +8,7 @@ import {
 } from './agentThinking.js';
 import { AgentParticipantBar, type AgentInteractionMode } from './AgentParticipantBar.js';
 import type { ComposerAction } from './AgentPromptEditor.js';
+import { LiquidPressable } from '../components/motion/index.js';
 
 export interface AgentComposerToolbarProps {
   /** send / stop / awaiting 由状态机决定（§12.6 执行中发送变为停止）。 */
@@ -82,7 +83,7 @@ export function AgentComposerToolbar(props: AgentComposerToolbarProps): ReactEle
 
   return (
     <div className="agent-composer__toolbar" role="toolbar" aria-label="Composer 工具栏">
-      <button
+      <LiquidPressable
         type="button"
         className={`composer-tool-btn${citeSelecting ? ' is-active' : ''}`}
         onClick={onToggleCiteSelect}
@@ -109,8 +110,8 @@ export function AgentComposerToolbar(props: AgentComposerToolbarProps): ReactEle
             strokeLinecap="round"
           />
         </svg>
-      </button>
-      <button
+      </LiquidPressable>
+      <LiquidPressable
         type="button"
         className="composer-tool-btn"
         disabled={attachmentDisabled || onAttach === undefined}
@@ -127,7 +128,7 @@ export function AgentComposerToolbar(props: AgentComposerToolbarProps): ReactEle
             strokeLinecap="round"
           />
         </svg>
-      </button>
+      </LiquidPressable>
       <AgentParticipantBar
         mode={interactionMode}
         onModeChange={(mode) => onInteractionModeChange?.(mode)}
@@ -148,23 +149,23 @@ export function AgentComposerToolbar(props: AgentComposerToolbarProps): ReactEle
       {action === 'awaiting' ? (
         <span className="composer-awaiting" data-testid="composer-awaiting">等待你在上方批准</span>
       ) : action === 'stop' ? (
-        <button
+        <LiquidPressable
           type="button"
           className="btn btn--danger btn--sm"
           data-testid="composer-stop"
           onClick={onStop}
         >
           停止
-        </button>
+        </LiquidPressable>
       ) : (
-        <button
+        <LiquidPressable
           type="button"
           className="btn btn--primary btn--sm"
           disabled={sendDisabled}
           onClick={onSend}
         >
           发送
-        </button>
+        </LiquidPressable>
       )}
     </div>
   );

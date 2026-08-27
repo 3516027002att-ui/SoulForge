@@ -31,6 +31,7 @@
     "@soulforge/core": "0.0.0",
     "@soulforge/shared": "0.0.0",
     "@tanstack/react-virtual": "3.14.9",
+    "liquid-gooey": "^0.2.0",
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
     "three": "^0.172.0"

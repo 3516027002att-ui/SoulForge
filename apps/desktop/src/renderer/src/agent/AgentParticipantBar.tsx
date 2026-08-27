@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState, type ReactElement } from 'react';
 import { createPortal } from 'react-dom';
+import { LiquidPressable } from '../components/motion/index.js';
 
 export type AgentInteractionMode = 'ask' | 'plan' | 'edit' | 'bypass';
 
@@ -101,7 +102,7 @@ export function AgentParticipantBar(props: AgentParticipantBarProps): ReactEleme
   return (
     <div className="agent-composer__participant">
       <div className="agent-mode-select">
-        <button
+        <LiquidPressable
           type="button"
           ref={triggerRef}
           className="agent-mode-trigger"
@@ -111,7 +112,7 @@ export function AgentParticipantBar(props: AgentParticipantBarProps): ReactEleme
         >
           {interactionModeLabel(mode)}
           <span aria-hidden="true">⌄</span>
-        </button>
+        </LiquidPressable>
         {modeOpen && menuPos !== null && createPortal(
           <div
             className="agent-mode-menu"
@@ -121,18 +122,20 @@ export function AgentParticipantBar(props: AgentParticipantBarProps): ReactEleme
             style={{ top: menuPos.top, left: menuPos.left }}
           >
             {AGENT_INTERACTION_MODES.map((item) => (
-              <button
+              <LiquidPressable
                 key={item.id}
                 type="button"
                 role="option"
                 aria-selected={mode === item.id}
+                pressScale={0.97}
+                hoverScale={1.01}
                 onClick={() => {
                   onModeChange(item.id);
                   setModeOpen(false);
                 }}
               >
                 <strong>{item.label}</strong><span>{item.description}</span>
-              </button>
+              </LiquidPressable>
             ))}
           </div>,
           document.body

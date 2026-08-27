@@ -3139,3 +3139,54 @@ details.agent-block > summary.agent-block__label { cursor: pointer; }
   border-radius: var(--radius-s);
 }
 
+/* ══════════ SoulForge Liquid Motion Accent Layer (liquid-gooey) ══════════ */
+.liquid-tab-group {
+  display: flex;
+  align-items: stretch;
+  position: relative;
+}
+
+.liquid-tab-group__liquid-layer {
+  contain: layout paint;
+  pointer-events: none;
+}
+
+.liquid-tab-indicator {
+  background: var(--forge-hover);
+  border-radius: var(--radius-s);
+  box-shadow: var(--control-hover-shadow);
+  pointer-events: none;
+}
+
+.liquid-tab-indicator-ghost {
+  background: var(--forge-hover);
+  border-radius: var(--radius-s);
+  pointer-events: none;
+}
+
+.liquid-tab-indicator-fallback {
+  background: var(--forge-hover);
+  border-radius: var(--radius-s);
+  box-shadow: var(--control-hover-shadow);
+  pointer-events: none;
+}
+
+.liquid-pressable {
+  touch-action: manipulation;
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+.liquid-pressable:focus-visible {
+  outline: 2px solid var(--ember-text);
+  outline-offset: 1px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .liquid-pressable {
+    transform: none !important;
+    transition: none !important;
+  }
+}
+
+

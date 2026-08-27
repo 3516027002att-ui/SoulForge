@@ -1,6 +1,7 @@
 import { useRef, type KeyboardEvent, type ReactElement } from 'react';
 import type { ResourceKind } from '@soulforge/shared';
 import { RESOURCE_FAMILIES, type ResourceMode } from './resourceFamilies.js';
+import { LiquidTabGroup, LiquidTabItem } from '../components/motion/index.js';
 
 export interface WorkspaceResourceBarProps {
   mode: ResourceMode;
@@ -36,16 +37,28 @@ export function WorkspaceResourceBar({ mode, counts, onSelect }: WorkspaceResour
 
   return (
     <nav className="resource-bar" aria-label="物理目录过滤">
-      <div className="resource-bar__tabs" role="tablist" aria-label="物理目录" data-testid="resource-bar">
+      <LiquidTabGroup
+        activeId={mode}
+        fill="var(--forge-hover)"
+        blur={5}
+        contrast={18}
+        radius={4}
+        className="resource-bar__tabs"
+        role="tablist"
+        aria-label="物理目录"
+        data-testid="resource-bar"
+      >
         {RESOURCE_FAMILIES.map((family, index) => {
           const selected = family.id === mode;
           const count = family.id === 'all'
             ? totalCount
             : counts?.[family.id] ?? null;
           return (
-            <button
+            <LiquidTabItem
               key={family.id}
-              ref={(element) => { tabRefs.current[index] = element; }}
+              id={family.id}
+              as="button"
+              ref={(element: HTMLElement | null) => { tabRefs.current[index] = element as HTMLButtonElement | null; }}
               type="button"
               role="tab"
               aria-selected={selected}
@@ -53,14 +66,14 @@ export function WorkspaceResourceBar({ mode, counts, onSelect }: WorkspaceResour
               className={selected ? 'resource-tab is-selected' : 'resource-tab'}
               data-resource-mode={family.id}
               onClick={() => onSelect(family.id)}
-              onKeyDown={(event) => handleTabKeyDown(event, index)}
+              onKeyDown={(event: KeyboardEvent<any>) => handleTabKeyDown(event, index)}
             >
               <span className="resource-tab__label">{family.label}</span>
               {counts && count !== null && <span className="resource-tab__count">{count}</span>}
-            </button>
+            </LiquidTabItem>
           );
         })}
-      </div>
+      </LiquidTabGroup>
       {unknownCount > 0 && (
         <span
           className="resource-bar__unknown"
