@@ -531,7 +531,7 @@ internal static class BridgeDaemonHost
     /// </summary>
     internal static readonly string[] AdvertisedCommands =
     {
-        "inspect", "validate", "read-dcx-document", "snapshot-bnd4-child",
+        "inspect", "validate", "read-dcx-document", "list-bnd4-entries", "snapshot-bnd4-child",
         "extract-bnd4-child", "write-bnd4", "inventory-asset-resources",
         "read-fmg-document", "write-fmg", "read-param-document", "write-param",
         "read-gparam-document", "write-gparam", "write-flver", "read-text-catalog",
@@ -541,6 +541,7 @@ internal static class BridgeDaemonHost
         "read-tae-event-params", "read-tae-animation-clip", "sample-tae-animation-pose",
         "read-chrbnd-flver-preview",
         "read-map-part-flver-preview",
+        "read-map-static-geometry",
         "read-flver-document", "read-flver-mesh", "read-flver-skeleton",
         "read-flver-texture-slots", "read-flver-dummies", "read-esd-document",
         "write-esd-document", "write-tae-document",

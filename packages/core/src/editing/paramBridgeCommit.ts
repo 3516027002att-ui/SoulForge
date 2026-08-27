@@ -18,13 +18,20 @@ export function isParamBackupPath(relativePath: string): boolean {
 }
 
 export type ParamBridgeMutation =
-  | { kind: 'upsert'; id: number; dataBase64: string }
-  | { kind: 'delete'; id: number };
+  | {
+      kind: 'upsert';
+      id: number;
+      dataBase64: string;
+      rowIndex?: number;
+      expectedDataHash?: string;
+    }
+  | { kind: 'delete'; id: number; rowIndex?: number; expectedDataHash?: string };
 
 export interface ParamBridgeCommitRequest {
   sourcePath: string;
   outputPath: string;
   expectedDocumentHash: string;
+  expectedRowDataSize?: number;
   allowedRoots: string[];
   writableRoots: string[];
   mutation: ParamBridgeMutation;
@@ -35,6 +42,7 @@ export interface ParamBridgeBatchCommitRequest {
   sourcePath: string;
   outputPath: string;
   expectedDocumentHash: string;
+  expectedRowDataSize?: number;
   allowedRoots: string[];
   writableRoots: string[];
   mutations: ParamBridgeMutation[];
@@ -55,6 +63,9 @@ export async function commitParamMutationViaBridge(
     sourcePath: request.sourcePath,
     outputPath: request.outputPath,
     expectedDocumentHash: request.expectedDocumentHash,
+    ...(request.expectedRowDataSize !== undefined
+      ? { expectedRowDataSize: request.expectedRowDataSize }
+      : {}),
     allowedRoots: request.allowedRoots,
     writableRoots: request.writableRoots,
     mutations: [request.mutation],
@@ -88,10 +99,28 @@ export async function commitParamMutationsViaBridge(
     commandOptions: {
       outputPath: request.outputPath,
       expectedDocumentHash: request.expectedDocumentHash,
+      ...(request.expectedRowDataSize !== undefined
+        ? { expectedRowDataSize: request.expectedRowDataSize }
+        : {}),
       mutations: request.mutations.map((mutation) => (
         mutation.kind === 'upsert'
-          ? { kind: 'upsert', id: mutation.id, dataBase64: mutation.dataBase64 }
-          : { kind: 'delete', id: mutation.id }
+          ? {
+              kind: 'upsert',
+              id: mutation.id,
+              dataBase64: mutation.dataBase64,
+              ...(mutation.rowIndex !== undefined ? { rowIndex: mutation.rowIndex } : {}),
+              ...(mutation.expectedDataHash !== undefined
+                ? { expectedDataHash: mutation.expectedDataHash }
+                : {})
+            }
+          : {
+              kind: 'delete',
+              id: mutation.id,
+              ...(mutation.rowIndex !== undefined ? { rowIndex: mutation.rowIndex } : {}),
+              ...(mutation.expectedDataHash !== undefined
+                ? { expectedDataHash: mutation.expectedDataHash }
+                : {})
+            }
       ))
     }
   });
@@ -128,7 +157,7 @@ export async function readParamDocumentViaBridge(input: {
     dataVersion?: number;
     rowCount: number;
     rowDataSize: number;
-    rows: Array<{ id: number; dataBase64: string; dataHash: string; name?: string }>;
+    rows: Array<{ rowIndex: number; id: number; dataBase64: string; dataHash: string; name?: string }>;
     authority?: string;
   };
   diagnostics: Array<{ severity: string; code: string; message: string }>;
@@ -139,7 +168,7 @@ export async function readParamDocumentViaBridge(input: {
     dataVersion?: number;
     rowCount?: number;
     rowDataSize?: number;
-    rows?: Array<{ id: number; dataBase64: string; dataHash: string; name?: string }>;
+    rows?: Array<{ rowIndex: number; id: number; dataBase64: string; dataHash: string; name?: string }>;
     authority?: string;
   }>({
     command: 'read-param-document',
@@ -171,6 +200,7 @@ export async function readParamDocumentViaBridge(input: {
     ? rawRows.slice(0, maxRows)
     : rawRows.slice(0, maxRows).concat(rawRows.slice(maxRows, effectiveMaxRows));
   const rows = boundedRows.map((r) => ({
+    rowIndex: r.rowIndex,
     id: r.id,
     dataBase64: r.dataBase64,
     dataHash: r.dataHash,

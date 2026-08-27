@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactElement } from 'react';
-import { isRowTabEntry, selectableRowAttributes } from '../a11y/selectableRow.js';
+import { useVirtualizer } from '@tanstack/react-virtual';
+import { selectableRowAttributes } from '../a11y/selectableRow.js';
 import {
   SceneProjectionError,
   buildMsbSceneManifest,
@@ -14,6 +15,12 @@ import {
   type SceneManifest
 } from '../scene/sceneManifestBrowser.js';
 import { mountThreeProxyScene, type ProxySceneHandle } from '../scene/threeSceneController.js';
+import {
+  FrameTaskQueue,
+  MapModelLoadCache,
+  normalizeMapModelKey,
+  type MapMeshGeometry
+} from '../scene/mapModelLoadScheduler.js';
 import { getRendererBridge } from '../runtime/rendererRuntime.js';
 import { WorkbenchLayout } from '../workbench/WorkbenchLayout.js';
 import type { MapEditTransaction } from '@soulforge/shared';
@@ -36,6 +43,30 @@ export function resolvePartModelName(
   return undefined;
 }
 
+interface MapMeshReadResult {
+  ok?: boolean;
+  data?: {
+    positionsBase64?: string;
+    indicesBase64?: string;
+    indexSize?: 16 | 32;
+    uvsBase64?: string;
+    normalsBase64?: string;
+    vertexCount?: number;
+  };
+}
+
+function toMapMeshGeometry(raw: MapMeshReadResult): MapMeshGeometry | null {
+  if (!raw.ok || !raw.data?.positionsBase64) return null;
+  return {
+    positionsBase64: raw.data.positionsBase64,
+    ...(raw.data.indicesBase64 ? { indicesBase64: raw.data.indicesBase64 } : {}),
+    ...(raw.data.indexSize === 16 || raw.data.indexSize === 32 ? { indexSize: raw.data.indexSize } : {}),
+    ...(raw.data.uvsBase64 ? { uvsBase64: raw.data.uvsBase64 } : {}),
+    ...(raw.data.normalsBase64 ? { normalsBase64: raw.data.normalsBase64 } : {}),
+    vertexCount: raw.data.vertexCount ?? 0
+  };
+}
+
 /** 左栏 Map Object List 里的实体分类。 */
 type MsbEntityKind = 'msb-model' | 'msb-event' | 'msb-part' | 'msb-region' | 'msb-route';
 
@@ -45,6 +76,144 @@ interface SelectedEntity {
   kind: MsbEntityKind;
   nativeOffset?: number;
   routeId?: number;
+}
+
+interface MapObjectGroup {
+  id: string;
+  label: string;
+  entries: SelectedEntity[];
+}
+
+type VirtualMapObjectRow =
+  | { kind: 'group'; group: MapObjectGroup }
+  | { kind: 'entity'; groupId: string; entity: SelectedEntity }
+  | { kind: 'empty'; group: MapObjectGroup };
+
+function VirtualMapObjectList(props: {
+  groups: MapObjectGroup[];
+  selectedId: string | null;
+  onSelect: (entity: SelectedEntity) => void;
+}): ReactElement {
+  const scrollRef = useRef<HTMLDivElement | null>(null);
+  const [expanded, setExpanded] = useState<Set<string>>(
+    () => new Set(props.groups.filter((group) => group.entries.length > 0).map((group) => group.id))
+  );
+
+  useEffect(() => {
+    setExpanded((current) => {
+      const next = new Set(current);
+      for (const group of props.groups) {
+        if (group.entries.length > 0 && !next.has(group.id)) next.add(group.id);
+      }
+      return next;
+    });
+  }, [props.groups]);
+
+  const rows = useMemo<VirtualMapObjectRow[]>(() => {
+    const next: VirtualMapObjectRow[] = [];
+    for (const group of props.groups) {
+      next.push({ kind: 'group', group });
+      if (!expanded.has(group.id)) continue;
+      if (group.entries.length === 0) next.push({ kind: 'empty', group });
+      else {
+        for (const entity of group.entries) {
+          next.push({ kind: 'entity', groupId: group.id, entity });
+        }
+      }
+    }
+    return next;
+  }, [expanded, props.groups]);
+  const firstEntityId = rows.find((row) => row.kind === 'entity')?.entity.id ?? null;
+  const virtualizer = useVirtualizer({
+    count: rows.length,
+    getScrollElement: () => scrollRef.current,
+    estimateSize: (index) => rows[index]?.kind === 'group' ? 32 : 28,
+    overscan: 16,
+    getItemKey: (index) => {
+      const row = rows[index];
+      if (!row) return index;
+      if (row.kind === 'entity') return `entity:${row.entity.id}`;
+      return `${row.kind}:${row.group.id}`;
+    }
+  });
+
+  return (
+    <div
+      ref={scrollRef}
+      className="msb-object-list"
+      role="table"
+      aria-label="地图对象"
+      aria-rowcount={rows.length}
+    >
+      <div className="msb-object-list__spacer" style={{ height: virtualizer.getTotalSize() }}>
+        {virtualizer.getVirtualItems().map((virtualRow) => {
+          const row = rows[virtualRow.index];
+          if (!row) return null;
+          const style = {
+            height: virtualRow.size,
+            transform: `translateY(${virtualRow.start}px)`
+          };
+          if (row.kind === 'group') {
+            const isExpanded = expanded.has(row.group.id);
+            return (
+              <div
+                key={virtualRow.key}
+                className="msb-object-list__virtual-row msb-object-group__summary"
+                style={style}
+                role="rowgroup"
+              >
+                <button
+                  type="button"
+                  className="msb-object-group__toggle"
+                  aria-expanded={isExpanded}
+                  onClick={() => setExpanded((current) => {
+                    const next = new Set(current);
+                    if (next.has(row.group.id)) next.delete(row.group.id);
+                    else next.add(row.group.id);
+                    return next;
+                  })}
+                >
+                  <span aria-hidden="true">{isExpanded ? '\u25be' : '\u25b8'}</span>
+                  <span>{row.group.label}</span>
+                  <span className="muted">{row.group.entries.length}</span>
+                </button>
+              </div>
+            );
+          }
+          if (row.kind === 'empty') {
+            return (
+              <div
+                key={virtualRow.key}
+                className="msb-object-list__virtual-row muted msb-object-group__empty"
+                style={style}
+                role="row"
+              >
+                无 {row.group.label} 实体
+              </div>
+            );
+          }
+          return (
+            <div
+              key={virtualRow.key}
+              className="msb-object-list__virtual-row binder-child-row msb-object-row"
+              {...selectableRowAttributes({
+                selected: props.selectedId === row.entity.id,
+                isTabEntry: props.selectedId === null && row.entity.id === firstEntityId,
+                onSelect: () => props.onSelect(row.entity)
+              })}
+              style={{
+                ...style,
+                ...(props.selectedId === row.entity.id ? { outline: '1px solid var(--ember)' } : {})
+              }}
+              title={row.entity.label}
+            >
+              <span className="msb-object-name" title={row.entity.label}>{row.entity.label}</span>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
 }
 
 export interface MsbScenePanelProps {
@@ -73,15 +242,13 @@ export interface MsbScenePanelProps {
  * MSB 三栏地图工作台（MAP-50B）：`Map Object List | Viewport | Properties`。
  *
  * 对照 Smithbox 2.2.4 Map Editor 的流程：左侧按类型分组列出地图对象，
- * 选中后中间 viewport 用线框高亮（proxy geometry），右侧显示数值属性；
- * camera（旋转/缩放/平移）走 OrbitControls。没有真实能力时不假造：
- * transform gizmo / 资产浏览器 / Prefabs 等在本版不出现（§10.6）。
+ * 选中后中间 viewport 用线框高亮，右侧显示数值属性；camera 走关卡编辑器式
+ * free-look，选中 part 后由 TransformControls 驱动平移/旋转/缩放。
  *
  * 问题4-A：打开地图默认按**全部** part 拉模型（可报进度「已挂 N / M」），不再只
- * 预取前 12 个；对象列表 entries.map 全量渲染，名字不 slice 截断（窄栏用
- * ellipsis + title 全名，但数据不砍），不写虚拟滚动。
- * 问题4-B：地图写入入口（Δ 微调 / transform 输入 / 三个提交按钮 / 「实时模式」）
- * 整段从本面板移除——Properties 栏保持只读属性表；写入另立案，不偷偷留一条。
+ * 预取前 12 个；对象数据完整保留，DOM 由虚拟列表按视窗窗口化，名字不截断。
+ * Gizmo 拖动只更新 GPU instance，松手后才写一次 React 语义状态；显式提交仍只走
+ * Patch Engine 事务，不从 renderer 直接写文件。
  */
 export function MsbScenePanel(props: MsbScenePanelProps): ReactElement {
   const hostRef = useRef<HTMLDivElement | null>(null);
@@ -99,8 +266,10 @@ export function MsbScenePanel(props: MsbScenePanelProps): ReactElement {
   }, [props.parts]);
   /** S23：最近一次 drawList（mesh 渐进加载后重建用）。 */
   const drawListRef = useRef<ReturnType<typeof buildSceneDrawList> | null>(null);
-  /** 按 modelName 去重后的网格：modelName → mesh。同一模型只读一次 Bridge，多 part 共享引用。 */
-  const loadedModelMeshesRef = useRef<Map<string, NonNullable<SceneDrawItem['mesh']>>>(new Map());
+  const drawItemByIdRef = useRef<Map<string, SceneDrawItem>>(new Map());
+  const modelLoadCacheRef = useRef<MapModelLoadCache | null>(null);
+  const modelUploadQueueRef = useRef<FrameTaskQueue | null>(null);
+  const modelUploadRef = useRef<((modelName: string, mesh: MapMeshGeometry) => Promise<boolean>) | null>(null);
   const [isSaving, setIsSaving] = useState(false);
   const [saveStatus, setSaveStatus] = useState<string | null>(null);
 
@@ -213,38 +382,41 @@ export function MsbScenePanel(props: MsbScenePanelProps): ReactElement {
     }
     setManifest(sceneManifest);
     setNodeCount(drawList.itemCount);
+    const nodeById = new Map(sceneManifest.nodes.map((node) => [node.id, node]));
 
     void mountThreeProxyScene({
       container: host,
       drawList,
       onSelect: (id) => {
-        const node = sceneManifest.nodes.find((candidate) => candidate.id === id) ?? null;
+        const node = id ? (nodeById.get(id) ?? null) : null;
         if (!node) return;
         setSelected({ id: node.id, label: node.label, kind: node.kind, ...(node.nativeOffset === undefined ? {} : { nativeOffset: node.nativeOffset }) });
       },
       onTransformChange: ({ id, position, rotation, scale }) => {
-        // 当 Gizmo 拖动时，同步更新选中的 Part 的坐标数据
-        setPartsState((prev) =>
-          prev.map((p) => {
-            const node = sceneManifest.nodes.find((candidate) => candidate.id === id);
-            const isMatch = node?.nativeOffset !== undefined
-              ? p.nativeOffset === node.nativeOffset
-              : p.name === id || `msb-part:${p.name}` === id || (selected?.id === id && p.name === selected.label);
-            if (!isMatch) return p;
-            return {
-              ...p,
-              posX: position[0],
-              posY: position[1],
-              posZ: position[2],
-              rotX: rotation[0],
-              rotY: rotation[1],
-              rotZ: rotation[2],
-              scaleX: scale[0],
-              scaleY: scale[1],
-              scaleZ: scale[2]
-            };
-          })
-        );
+        // controller 在拖拽结束才发一次；按稳定 nativeOffset 定位并只复制目标行。
+        const node = nodeById.get(id);
+        setPartsState((current) => {
+          const index = node?.nativeOffset !== undefined
+            ? current.findIndex((part) => part.nativeOffset === node.nativeOffset)
+            : current.findIndex((part) => part.name === id || `msb-part:${part.name}` === id);
+          if (index < 0) return current;
+          const part = current[index];
+          if (!part) return current;
+          const next = current.slice();
+          next[index] = {
+            ...part,
+            posX: position[0],
+            posY: position[1],
+            posZ: position[2],
+            rotX: rotation[0],
+            rotY: rotation[1],
+            rotZ: rotation[2],
+            scaleX: scale[0],
+            scaleY: scale[1],
+            scaleZ: scale[2]
+          };
+          return next;
+        });
       }
     }).then((handle) => {
       if (cancelled) {
@@ -254,6 +426,7 @@ export function MsbScenePanel(props: MsbScenePanelProps): ReactElement {
       handleRef.current = handle;
       handle.setTransformMode?.(transformMode);
       drawListRef.current = drawList;
+      drawItemByIdRef.current = new Map(drawList.items.map((item) => [item.id, item]));
       const partial = sceneManifest.diagnostics.some((item) => item.code === 'SCENE_PROJECTION_PARTIAL');
       setStatus(
         `3D 场景已加载（${drawList.itemCount} 节点 / ${sceneManifest.entityCount} 实体）`
@@ -263,9 +436,29 @@ export function MsbScenePanel(props: MsbScenePanelProps): ReactElement {
       // 场景挂载完成后立即启动去重模型并发拉取与热替换
       const bridge = getRendererBridge();
       if (bridge && typeof bridge.readMapPartMesh === 'function' && props.mapResourceUri) {
+        const loadCache = new MapModelLoadCache(async (modelName) => {
+          const raw = await bridge.readMapPartMesh!(props.mapResourceUri, modelName) as MapMeshReadResult;
+          return toMapMeshGeometry(raw);
+        });
+        const uploadQueue = new FrameTaskQueue();
+        const uploads = new Map<string, Promise<boolean>>();
+        const uploadModel = (modelName: string, geometry: MapMeshGeometry): Promise<boolean> => {
+          const key = normalizeMapModelKey(modelName);
+          const pending = uploads.get(key);
+          if (pending) return pending;
+          const upload = uploadQueue
+            .enqueue(() => handle.updateModelGeometry?.(modelName, geometry))
+            .finally(() => uploads.delete(key));
+          uploads.set(key, upload);
+          return upload;
+        };
+        modelLoadCacheRef.current = loadCache;
+        modelUploadQueueRef.current = uploadQueue;
+        modelUploadRef.current = uploadModel;
+
         const parts = drawList.items.filter((item) => item.entityKind === 'msb-part');
         if (parts.length > 0) {
-          const byModel = new Map<string, typeof parts>();
+          const byModel = new Map<string, { modelName: string; items: typeof parts }>();
           let missingFromNoModel = 0;
           for (const item of parts) {
             const modelName = item.modelName
@@ -274,55 +467,33 @@ export function MsbScenePanel(props: MsbScenePanelProps): ReactElement {
               missingFromNoModel += 1;
               continue;
             }
-            const list = byModel.get(modelName);
-            if (list) list.push(item);
-            else byModel.set(modelName, [item]);
+            const key = normalizeMapModelKey(modelName);
+            const group = byModel.get(key);
+            if (group) group.items.push(item);
+            else byModel.set(key, { modelName, items: [item] });
           }
-          const distinctModelNames = [...byModel.keys()];
+          const distinctModels = [...byModel.values()];
           const totalPartCount = parts.length;
+          setMeshStatus({ loaded: 0, missing: missingFromNoModel, total: totalPartCount });
           void (async () => {
             let loaded = 0;
             let missing = missingFromNoModel;
             const BATCH_SIZE = 8;
-            for (let i = 0; i < distinctModelNames.length; i += BATCH_SIZE) {
+            for (let i = 0; i < distinctModels.length; i += BATCH_SIZE) {
               if (cancelled) return;
-              const chunk = distinctModelNames.slice(i, i + BATCH_SIZE);
-              await Promise.all(chunk.map(async (modelName) => {
-                if (loadedModelMeshesRef.current.has(modelName)) {
-                  const cached = loadedModelMeshesRef.current.get(modelName)!;
-                  handle.updateModelGeometry?.(modelName, cached);
-                  loaded += (byModel.get(modelName)?.length ?? 1);
-                  return;
-                }
+              const chunk = distinctModels.slice(i, i + BATCH_SIZE);
+              await Promise.all(chunk.map(async ({ modelName, items }) => {
                 try {
-                  const raw = await bridge.readMapPartMesh(props.mapResourceUri, modelName) as {
-                    ok?: boolean;
-                    data?: {
-                      positionsBase64?: string;
-                      indicesBase64?: string;
-                      uvsBase64?: string;
-                      normalsBase64?: string;
-                      vertexCount?: number;
-                    };
-                  };
+                  const geometry = await loadCache.load(modelName);
                   if (cancelled) return;
-                  if (raw.ok && raw.data?.positionsBase64) {
-                    const geometryData = {
-                      positionsBase64: raw.data.positionsBase64,
-                      ...(raw.data.indicesBase64 ? { indicesBase64: raw.data.indicesBase64 } : {}),
-                      ...(raw.data.uvsBase64 ? { uvsBase64: raw.data.uvsBase64 } : {}),
-                      ...(raw.data.normalsBase64 ? { normalsBase64: raw.data.normalsBase64 } : {}),
-                      vertexCount: raw.data.vertexCount ?? 0
-                    };
-                    loadedModelMeshesRef.current.set(modelName, geometryData as any);
-                    loaded += (byModel.get(modelName)?.length ?? 1);
-                    // applyLoadedMeshes: 更新已加载的网格几何
-                    handle.updateModelGeometry?.(modelName, geometryData);
+                  if (geometry) {
+                    const uploaded = await uploadModel(modelName, geometry);
+                    if (!cancelled && uploaded) loaded += items.length;
                   } else {
-                    missing += (byModel.get(modelName)?.length ?? 1);
+                    missing += items.length;
                   }
                 } catch {
-                  if (!cancelled) missing += (byModel.get(modelName)?.length ?? 1);
+                  if (!cancelled) missing += items.length;
                 }
               }));
               if (!cancelled) setMeshStatus({ loaded, missing, total: totalPartCount });
@@ -339,6 +510,12 @@ export function MsbScenePanel(props: MsbScenePanelProps): ReactElement {
       handleRef.current?.dispose();
       handleRef.current = null;
       drawListRef.current = null;
+      drawItemByIdRef.current.clear();
+      modelLoadCacheRef.current?.dispose();
+      modelLoadCacheRef.current = null;
+      modelUploadQueueRef.current?.dispose();
+      modelUploadQueueRef.current = null;
+      modelUploadRef.current = null;
     };
   }, [
     props.mapResourceUri,
@@ -356,44 +533,20 @@ export function MsbScenePanel(props: MsbScenePanelProps): ReactElement {
   /** S23：选中 part 时按 modelName 补载（去重共享，直接热更新几何，绝不全量重新 setDrawList）。 */
   useEffect(() => {
     if (selected?.kind !== 'msb-part' || !handleRef.current) return;
-    const bridge = getRendererBridge();
-    if (!bridge || typeof bridge.readMapPartMesh !== 'function' || !props.mapResourceUri) return;
-    const base = drawListRef.current;
-    const item = base?.items.find((candidate) => candidate.id === selected.id) as SceneDrawItem | undefined;
+    const loadCache = modelLoadCacheRef.current;
+    const uploadModel = modelUploadRef.current;
+    if (!loadCache || !uploadModel) return;
+    const item = drawItemByIdRef.current.get(selected.id);
     const modelName = item?.modelName
       ?? (item ? resolvePartModelName(item as { modelName?: string; modelIndex?: number }, props.models) : undefined);
     if (!modelName) return;
 
-    if (loadedModelMeshesRef.current.has(modelName)) {
-      const cached = loadedModelMeshesRef.current.get(modelName)!;
-      handleRef.current.updateModelGeometry?.(modelName, cached);
-      return;
-    }
     let cancelled = false;
     void (async () => {
       try {
-        const raw = await bridge.readMapPartMesh(props.mapResourceUri, modelName) as {
-          ok?: boolean;
-          data?: {
-            positionsBase64?: string;
-            indicesBase64?: string;
-            uvsBase64?: string;
-            normalsBase64?: string;
-            vertexCount?: number;
-          };
-        };
-        if (cancelled || !raw.ok || !raw.data?.positionsBase64) return;
-        const meshData: NonNullable<SceneDrawItem['mesh']> = {
-          positionsBase64: raw.data.positionsBase64,
-          ...(raw.data.indicesBase64 ? { indicesBase64: raw.data.indicesBase64 } : {}),
-          ...(raw.data.uvsBase64 ? { uvsBase64: raw.data.uvsBase64 } : {}),
-          ...(raw.data.normalsBase64 ? { normalsBase64: raw.data.normalsBase64 } : {}),
-          vertexCount: raw.data.vertexCount ?? 0
-        };
-        loadedModelMeshesRef.current.set(modelName, meshData);
-        if (handleRef.current) {
-          handleRef.current.updateModelGeometry?.(modelName, meshData);
-        }
+        const meshData = await loadCache.load(modelName);
+        if (cancelled || !meshData) return;
+        await uploadModel(modelName, meshData);
       } catch {
         // 选中补载失败保持线框
       }
@@ -401,7 +554,7 @@ export function MsbScenePanel(props: MsbScenePanelProps): ReactElement {
     return () => {
       cancelled = true;
     };
-  }, [selected?.kind, selected?.id, selected?.label, props.mapResourceUri, props.models]);
+  }, [selected?.kind, selected?.id, props.models]);
 
   /**
    * 选中左栏对象：更新选中态，part/region 同时驱动 viewport 线框高亮。
@@ -420,11 +573,19 @@ export function MsbScenePanel(props: MsbScenePanelProps): ReactElement {
    * 由 scene manifest 派生而不是 props 各数组直接拼：条目带稳定 id
    * （`<kind>:offset-<hex>` 或 name 退化），左栏选中 ↔ viewport 高亮用同一把 id。
    */
-  const groupedEntities = useMemo(() => {
+  const groupedEntities = useMemo<MapObjectGroup[]>(() => {
     const entities = manifest?.entities ?? [];
     // entities 的 kind 字段是 MsbSceneEntityKind 联合；pick 返回同子集的数组，
     // 赋值给 SelectedEntity.kind 是结构兼容的（字面量联合等价）。
-    const pick = (kind: MsbEntityKind) => entities.filter((entity) => entity.kind === kind);
+    const pick = (kind: MsbEntityKind): SelectedEntity[] => entities
+      .filter((entity) => entity.kind === kind)
+      .map((entity) => ({
+        id: entity.id,
+        label: entity.label,
+        kind: entity.kind,
+        ...(entity.nativeOffset === undefined ? {} : { nativeOffset: entity.nativeOffset }),
+        ...('routeId' in entity && typeof entity.routeId === 'number' ? { routeId: entity.routeId } : {})
+      }));
     return [
       { id: 'model', label: 'Model', entries: pick('msb-model') },
       { id: 'event', label: 'Event', entries: pick('msb-event') },
@@ -520,7 +681,7 @@ export function MsbScenePanel(props: MsbScenePanelProps): ReactElement {
           initialFlex: 0.25,
           minWidth: 200,
           children: (
-            <div className="msb-object-list">
+            <div className="msb-object-list-shell">
               {props.openFailure ? (
                 <div className="msb-open-failure" role="alert">
                   <p className="msb-open-failure__code">{props.openFailure.code}</p>
@@ -528,39 +689,13 @@ export function MsbScenePanel(props: MsbScenePanelProps): ReactElement {
                 </div>
               ) : manifest === null ? (
                 <p className="muted">未加载 MSB 数据：请先在资源浏览器里选择一个 map 资源。</p>
-              ) : groupedEntities.map((group, groupIndex) => {
-                return (
-                  <details key={group.id} className="msb-object-group" open={group.entries.length > 0}>
-                    <summary className="msb-object-group__summary">
-                      {group.label}
-                      <span className="muted"> {group.entries.length}</span>
-                    </summary>
-                    {group.entries.length === 0 ? (
-                      <p className="muted msb-object-group__empty">无 {group.label} 实体</p>
-                    ) : (
-                      <div className="binder-child-table" role="table" aria-label={`${group.label} 实体`}>
-                        {group.entries.map((entity, index) => (
-                          <div
-                            key={entity.id}
-                            className="binder-child-row msb-object-row"
-                            {...selectableRowAttributes({
-                              selected: selected?.id === entity.id,
-                              isTabEntry: groupIndex === 0 && isRowTabEntry(index, selected !== null),
-                              onSelect: () => selectEntity(entity)
-                            })}
-                            style={selected?.id === entity.id
-                              ? { outline: '1px solid var(--ember)' }
-                              : undefined}
-                            title={entity.label}
-                          >
-                            <span className="msb-object-name" title={entity.label}>{entity.label}</span>
-                          </div>
-                        ))}
-                      </div>
-                    )}
-                  </details>
-                );
-              })}
+              ) : (
+                <VirtualMapObjectList
+                  groups={groupedEntities}
+                  selectedId={selected?.id ?? null}
+                  onSelect={selectEntity}
+                />
+              )}
             </div>
           )
         },
@@ -570,6 +705,23 @@ export function MsbScenePanel(props: MsbScenePanelProps): ReactElement {
           children: (
             <div className="msb-viewport" style={{ position: 'relative', display: 'flex', flexDirection: 'column', width: '100%', height: '100%' }}>
               <div ref={hostRef} className="scene-host" style={{ flex: 1, width: '100%', height: '100%', minHeight: 200, background: '#1a1d23' }} />
+              <div className="msb-transform-modes" role="group" aria-label="变换模式">
+                {([
+                  ['translate', '移动'],
+                  ['rotate', '旋转'],
+                  ['scale', '缩放']
+                ] as const).map(([mode, label]) => (
+                  <button
+                    key={mode}
+                    type="button"
+                    className={transformMode === mode ? 'is-active' : undefined}
+                    aria-pressed={transformMode === mode}
+                    onClick={() => handleSwitchTransformMode(mode)}
+                  >
+                    {label}
+                  </button>
+                ))}
+              </div>
               <p className="muted">
                 {props.openFailure
                   ? props.openFailure.message

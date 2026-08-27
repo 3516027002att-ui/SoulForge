@@ -61,6 +61,7 @@ describe('ACTION Continuous Sampler & De Boor Spline Tests', () => {
       transformTrackCount: 1,
       hkxBoneCount: 2,
       hkxBoneNames: ['Root', 'Spine'],
+      hkxParentIndices: [-1, 0],
       hkxReferencePose: [
         { translation: [0, 0, 0], rotation: [0, 0, 0, 1], scale: [1, 1, 1] },
         { translation: [0, 1, 0], rotation: [0, 0, 0, 1], scale: [1, 1, 1] }
@@ -99,6 +100,7 @@ describe('ACTION Continuous Sampler & De Boor Spline Tests', () => {
       transformTrackCount: 1,
       hkxBoneCount: 2,
       hkxBoneNames: ['HkxRoot', 'HkxArm'],
+      hkxParentIndices: [-1, 0],
       hkxReferencePose: [
         { translation: [0, 0, 0], rotation: [0, 0, 0, 1], scale: [1, 1, 1] },
         { translation: [5, 0, 0], rotation: [0, 0, 0, 1], scale: [1, 1, 1] }

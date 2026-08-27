@@ -164,7 +164,10 @@ export interface ParamRowPage {
   pageSize: number;
   pageCount: number;
   rows: Array<{
+    /** Physical row ordinal in the native PARAM directory; IDs are not unique. */
+    rowIndex: number;
     id: number;
+    dataHash?: string;
     name?: string;
     dataBase64?: string;
     dataHexPreview?: string;

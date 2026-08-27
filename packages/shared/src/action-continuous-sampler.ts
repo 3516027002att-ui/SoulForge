@@ -67,6 +67,8 @@ export interface TaeAnimationClipData {
   transformTrackCount: number;
   hkxBoneCount: number;
   hkxBoneNames: string[];
+  /** Parent indices in the HKX skeleton namespace; required for duplicate-name-safe retargeting. */
+  hkxParentIndices: number[];
   hkxReferencePose: BoneTransformData[];
   trackToHkxBone: number[];
   hkxToFlverBoneMap?: number[] | undefined;
@@ -407,8 +409,18 @@ function validateClip(clip: TaeAnimationClipData): void {
   if (!Number.isInteger(clip.frameCount) || clip.frameCount <= 0) throw new Error('ACTION_CLIP_FRAME_COUNT_INVALID');
   if (!Number.isInteger(clip.transformTrackCount) || clip.transformTrackCount <= 0) throw new Error('ACTION_CLIP_TRACK_COUNT_INVALID');
   if (!Number.isInteger(clip.hkxBoneCount) || clip.hkxBoneCount <= 0) throw new Error('ACTION_CLIP_BONE_COUNT_INVALID');
-  if (clip.hkxBoneNames.length !== clip.hkxBoneCount || clip.hkxReferencePose.length !== clip.hkxBoneCount) {
+  if (
+    clip.hkxBoneNames.length !== clip.hkxBoneCount
+    || clip.hkxParentIndices.length !== clip.hkxBoneCount
+    || clip.hkxReferencePose.length !== clip.hkxBoneCount
+  ) {
     throw new Error('ACTION_CLIP_REFERENCE_POSE_MISMATCH');
+  }
+  for (let index = 0; index < clip.hkxParentIndices.length; index += 1) {
+    const parent = clip.hkxParentIndices[index];
+    if (!Number.isInteger(parent) || parent === index || parent! < -1 || parent! >= clip.hkxBoneCount) {
+      throw new Error(`ACTION_CLIP_PARENT_INDEX_INVALID: bone=${index} parent=${String(parent)}`);
+    }
   }
   if (clip.trackToHkxBone.length !== clip.transformTrackCount) throw new Error('ACTION_CLIP_TRACK_MAPPING_MISMATCH');
   const seenBones = new Set<number>();

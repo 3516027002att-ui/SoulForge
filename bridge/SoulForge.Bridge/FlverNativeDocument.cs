@@ -268,7 +268,7 @@ internal sealed class FlverNativeDocument
             {
                 for (var i = 0; i < Math.Min(Meshes.Count, 4); i++)
                 {
-                    if (GetMeshPositionsBase64(i, 8) != null) return "native-verified";
+                    if (GetMeshPositionsBase64(i, 8, allowTruncation: true) != null) return "native-verified";
                 }
             }
             catch (Exception)
@@ -443,10 +443,11 @@ internal sealed class FlverNativeDocument
     }
 
     /// <summary>提取网格顶点位置（float[3] 每顶点）为 base64。stride 与 position 偏移取自真实 layout。</summary>
-    public string? GetMeshPositionsBase64(int meshIndex, int maxVertices = 10_000)
+    public string? GetMeshPositionsBase64(int meshIndex, int maxVertices = 10_000, bool allowTruncation = false)
     {
         var plan = BuildMeshPlan(meshIndex);
         if (plan?.Position == null || plan.VertexCount <= 0) return null;
+        if (!allowTruncation && plan.VertexCount > maxVertices) return null;
         var vertexCount = Math.Min(plan.VertexCount, maxVertices);
         var positions = new float[vertexCount * 3];
         for (var v = 0; v < vertexCount; v++)
@@ -462,10 +463,11 @@ internal sealed class FlverNativeDocument
     }
 
     /// <summary>提取网格顶点法线（float[3] 每顶点，已按布局类型解码）为 base64。</summary>
-    public string? GetMeshNormalsBase64(int meshIndex, int maxVertices = 10_000)
+    public string? GetMeshNormalsBase64(int meshIndex, int maxVertices = 10_000, bool allowTruncation = false)
     {
         var plan = BuildMeshPlan(meshIndex);
         if (plan?.Normal == null || plan.VertexCount <= 0) return null;
+        if (!allowTruncation && plan.VertexCount > maxVertices) return null;
         var vertexCount = Math.Min(plan.VertexCount, maxVertices);
         var normals = new float[vertexCount * 3];
         for (var v = 0; v < vertexCount; v++)
@@ -481,10 +483,11 @@ internal sealed class FlverNativeDocument
     }
 
     /// <summary>提取网格第一组 UV（float[2] 每顶点）为 base64。</summary>
-    public string? GetMeshUVsBase64(int meshIndex, int maxVertices = 10_000)
+    public string? GetMeshUVsBase64(int meshIndex, int maxVertices = 10_000, bool allowTruncation = false)
     {
         var plan = BuildMeshPlan(meshIndex);
         if (plan?.UV == null || plan.VertexCount <= 0) return null;
+        if (!allowTruncation && plan.VertexCount > maxVertices) return null;
         var vertexCount = Math.Min(plan.VertexCount, maxVertices);
         var uvFactor = InternalVersion >= 0x2000F ? 2048f : 1024f;
         var uvs = new float[vertexCount * 2];
@@ -526,153 +529,194 @@ internal sealed class FlverNativeDocument
         return Convert.ToBase64String(bytes);
     }
 
-    /// <summary>提取网格骨骼权重（float[4] 每顶点，Byte4C=byte/255）为 base64。</summary>
-    /// <summary>提取网格骨骼权重（float[4] 每顶点，归一化）为 base64。</summary>
-    public string? GetMeshBoneWeightsBase64(int meshIndex, int maxVertices = 10_000)
-    {
-        var plan = BuildMeshPlan(meshIndex);
-        if (plan?.Weights == null || plan.VertexCount <= 0) return null;
-        var vertexCount = Math.Min(plan.VertexCount, maxVertices);
-        var a = plan.Weights;
-        var weights = new float[vertexCount * 4];
-        for (var v = 0; v < vertexCount; v++)
-        {
-            var off = a.DataBase + (long)v * a.Stride + a.Offset;
-            if (off < 0 || off + 4 > _source.Length) return null;
-            switch (a.Type)
-            {
-                case TypeByte4C:
-                    weights[v * 4] = ReadByte(_source, (int)off) / 255f;
-                    weights[v * 4 + 1] = ReadByte(_source, (int)off + 1) / 255f;
-                    weights[v * 4 + 2] = ReadByte(_source, (int)off + 2) / 255f;
-                    weights[v * 4 + 3] = ReadByte(_source, (int)off + 3) / 255f;
-                    break;
-                case TypeByte4A:
-                    weights[v * 4] = Math.Max(0f, ReadSByte(_source, (int)off) / 127f);
-                    weights[v * 4 + 1] = Math.Max(0f, ReadSByte(_source, (int)off + 1) / 127f);
-                    weights[v * 4 + 2] = Math.Max(0f, ReadSByte(_source, (int)off + 2) / 127f);
-                    weights[v * 4 + 3] = Math.Max(0f, ReadSByte(_source, (int)off + 3) / 127f);
-                    break;
-                case TypeUVPair:
-                case TypeShort4toFloat4A:
-                    weights[v * 4] = Math.Max(0f, ReadInt16(_source, (int)off) / 32767f);
-                    weights[v * 4 + 1] = Math.Max(0f, ReadInt16(_source, (int)off + 2) / 32767f);
-                    weights[v * 4 + 2] = Math.Max(0f, ReadInt16(_source, (int)off + 4) / 32767f);
-                    weights[v * 4 + 3] = Math.Max(0f, ReadInt16(_source, (int)off + 6) / 32767f);
-                    break;
-                default:
-                    return null;
-            }
-
-            var w0 = float.IsFinite(weights[v * 4]) ? weights[v * 4] : 0f;
-            var w1 = float.IsFinite(weights[v * 4 + 1]) ? weights[v * 4 + 1] : 0f;
-            var w2 = float.IsFinite(weights[v * 4 + 2]) ? weights[v * 4 + 2] : 0f;
-            var w3 = float.IsFinite(weights[v * 4 + 3]) ? weights[v * 4 + 3] : 0f;
-            var sum = w0 + w1 + w2 + w3;
-            if (sum > 1e-5f)
-            {
-                weights[v * 4] = w0 / sum;
-                weights[v * 4 + 1] = w1 / sum;
-                weights[v * 4 + 2] = w2 / sum;
-                weights[v * 4 + 3] = w3 / sum;
-            }
-            else
-            {
-                // A zero/invalid influence set has no canonical bind target.
-                // Do not silently pin it to bone 0; the renderer must receive
-                // a structured unsupported result and keep the asset out of
-                // the skinned playback path.
-                return null;
-            }
-        }
-        var bytes = new byte[weights.Length * 4];
-        Buffer.BlockCopy(weights, 0, bytes, 0, bytes.Length);
-        return Convert.ToBase64String(bytes);
-    }
-
     /// <summary>
-    /// 提取网格全局骨骼索引（uint16[4] 每顶点，经 Mesh.BoneIndices 局部调色板 remap）为 base64。
-    /// 输出字节长度为 vertexCount * 8 字节。
+    /// Extracts a complete GPU skin binding. Sekiro-era FLVER (> 0x2000D)
+    /// stores vertex bone indices in the FLVER-global namespace; the per-mesh
+    /// palette is only authoritative for older versions. Rigid vertices use
+    /// NormalW (or the mesh default bone) with weight 1.
     /// </summary>
-    public string? GetMeshBoneIndicesBase64(int meshIndex, int maxVertices = 10_000)
+    public FlverMeshSkinning GetMeshSkinning(int meshIndex, int maxVertices = 10_000)
     {
-        if (meshIndex < 0 || meshIndex >= Meshes.Count) return null;
+        if (meshIndex < 0 || meshIndex >= Meshes.Count) return FlverMeshSkinning.Static;
         var mesh = Meshes[meshIndex];
         var plan = BuildMeshPlan(meshIndex);
-        if (plan?.BoneIndices == null || plan.VertexCount <= 0) return null;
-        if (mesh.BoneCount > 0 && mesh.BoneIndices.Count != mesh.BoneCount)
-        {
-            // A declared but truncated/invalid local palette must not be
-            // reinterpreted as global indices.
-            return null;
-        }
-        var vertexCount = Math.Min(plan.VertexCount, maxVertices);
-        var a = plan.BoneIndices;
-        var globalIndices = new ushort[vertexCount * 4];
+        if (plan == null || plan.VertexCount <= 0 || plan.VertexCount > maxVertices || Bones.Count == 0)
+            return FlverMeshSkinning.Static;
+        if (InternalVersion <= 0x2000D && mesh.BoneCount > 0 && mesh.BoneIndices.Count != mesh.BoneCount)
+            return FlverMeshSkinning.Static;
 
-        bool TryRemapBone(int localIdx, out ushort globalIndex)
+        var weights = new float[plan.VertexCount * 4];
+        var indices = new ushort[plan.VertexCount * 4];
+        var allRigid = true;
+
+        bool TryResolveIndex(int rawIndex, out ushort resolved)
         {
-            if (mesh.BoneIndices.Count > 0)
+            var globalIndex = rawIndex;
+            if (InternalVersion <= 0x2000D && mesh.BoneIndices.Count > 0)
             {
-                if (localIdx >= 0 && localIdx < mesh.BoneIndices.Count)
+                if (rawIndex < 0 || rawIndex >= mesh.BoneIndices.Count)
                 {
-                    var g = mesh.BoneIndices[localIdx];
-                    if (g >= 0 && g < Bones.Count)
-                    {
-                        globalIndex = (ushort)g;
-                        return true;
-                    }
-                    globalIndex = 0;
+                    resolved = 0;
                     return false;
                 }
-                globalIndex = 0;
+                globalIndex = mesh.BoneIndices[rawIndex];
+            }
+            if (globalIndex < 0 || globalIndex >= Bones.Count || globalIndex > ushort.MaxValue)
+            {
+                resolved = 0;
                 return false;
             }
-            if (localIdx >= 0 && localIdx < Bones.Count)
-            {
-                globalIndex = (ushort)localIdx;
-                return true;
-            }
-            globalIndex = 0;
-            return false;
+            resolved = (ushort)globalIndex;
+            return true;
         }
 
-        for (var v = 0; v < vertexCount; v++)
+        Span<float> vertexWeights = stackalloc float[4];
+        Span<int> rawIndices = stackalloc int[4];
+        for (var vertex = 0; vertex < plan.VertexCount; vertex++)
         {
-            var off = a.DataBase + (long)v * a.Stride + a.Offset;
-            if (off < 0 || off + 4 > _source.Length) return null;
-            int r0, r1, r2, r3;
-            if (a.Type == TypeShortBoneIndices)
+            vertexWeights.Clear();
+            rawIndices.Clear();
+            var hasDecodedWeights = plan.Weights != null
+                && TryReadBoneWeights(plan.Weights, vertex, vertexWeights);
+            var sum = hasDecodedWeights
+                ? vertexWeights[0] + vertexWeights[1] + vertexWeights[2] + vertexWeights[3]
+                : 0f;
+
+            var hasDecodedIndices = plan.BoneIndices != null
+                && TryReadBoneIndices(plan.BoneIndices, vertex, rawIndices);
+
+            if (sum > 1e-5f && hasDecodedIndices)
             {
-                if (off + 8 > _source.Length) return null;
-                r0 = ReadUInt16(_source, (int)off);
-                r1 = ReadUInt16(_source, (int)off + 2);
-                r2 = ReadUInt16(_source, (int)off + 4);
-                r3 = ReadUInt16(_source, (int)off + 6);
-            }
-            else if (a.Type is TypeByte4B or TypeByte4E)
-            {
-                r0 = ReadByte(_source, (int)off);
-                r1 = ReadByte(_source, (int)off + 1);
-                r2 = ReadByte(_source, (int)off + 2);
-                r3 = ReadByte(_source, (int)off + 3);
-            }
-            else
-            {
-                return null;
+                allRigid = false;
+                ushort firstResolved = 0;
+                var hasResolved = false;
+                for (var influence = 0; influence < 4; influence++)
+                {
+                    var weight = float.IsFinite(vertexWeights[influence])
+                        ? Math.Max(0f, vertexWeights[influence]) / sum
+                        : 0f;
+                    weights[vertex * 4 + influence] = weight;
+                    if (weight <= 1e-5f) continue;
+                    if (!TryResolveIndex(rawIndices[influence], out var globalIndex))
+                        return FlverMeshSkinning.Static;
+                    indices[vertex * 4 + influence] = globalIndex;
+                    if (!hasResolved)
+                    {
+                        firstResolved = globalIndex;
+                        hasResolved = true;
+                    }
+                }
+                if (!hasResolved) return FlverMeshSkinning.Static;
+                for (var influence = 0; influence < 4; influence++)
+                {
+                    if (weights[vertex * 4 + influence] <= 1e-5f)
+                        indices[vertex * 4 + influence] = firstResolved;
+                }
+                continue;
             }
 
-            if (!TryRemapBone(r0, out globalIndices[v * 4])
-                || !TryRemapBone(r1, out globalIndices[v * 4 + 1])
-                || !TryRemapBone(r2, out globalIndices[v * 4 + 2])
-                || !TryRemapBone(r3, out globalIndices[v * 4 + 3]))
+            var rigidRawIndex = TryReadNormalW(plan.Normal, vertex, out var normalW)
+                ? normalW
+                : mesh.DefaultBoneIndex;
+            if (!TryResolveIndex(rigidRawIndex, out var rigidIndex))
             {
-                return null;
+                if (hasDecodedIndices && TryResolveIndex(rawIndices[0], out var firstIndex))
+                    rigidIndex = firstIndex;
+                else
+                    return FlverMeshSkinning.Static;
             }
+            for (var influence = 0; influence < 4; influence++)
+                indices[vertex * 4 + influence] = rigidIndex;
+            weights[vertex * 4] = 1f;
         }
-        var bytes = new byte[globalIndices.Length * 2];
-        Buffer.BlockCopy(globalIndices, 0, bytes, 0, bytes.Length);
-        return Convert.ToBase64String(bytes);
+
+        var weightBytes = new byte[weights.Length * sizeof(float)];
+        var indexBytes = new byte[indices.Length * sizeof(ushort)];
+        Buffer.BlockCopy(weights, 0, weightBytes, 0, weightBytes.Length);
+        Buffer.BlockCopy(indices, 0, indexBytes, 0, indexBytes.Length);
+        return new FlverMeshSkinning(
+            allRigid ? "rigid" : "weighted",
+            "flver-global",
+            Convert.ToBase64String(weightBytes),
+            Convert.ToBase64String(indexBytes));
+    }
+
+    public string? GetMeshBoneWeightsBase64(int meshIndex, int maxVertices = 10_000)
+        => GetMeshSkinning(meshIndex, maxVertices).BoneWeightsBase64;
+
+    public string? GetMeshBoneIndicesBase64(int meshIndex, int maxVertices = 10_000)
+        => GetMeshSkinning(meshIndex, maxVertices).BoneIndicesBase64;
+
+    private bool TryReadBoneWeights(VertexMemberAccess access, int vertexIndex, Span<float> output)
+    {
+        var offset = access.DataBase + (long)vertexIndex * access.Stride + access.Offset;
+        if (offset < 0) return false;
+        switch (access.Type)
+        {
+            case TypeByte4C:
+                if (offset + 4 > _source.Length) return false;
+                for (var i = 0; i < 4; i++) output[i] = ReadByte(_source, (int)offset + i) / 255f;
+                return true;
+            case TypeByte4A:
+                if (offset + 4 > _source.Length) return false;
+                for (var i = 0; i < 4; i++) output[i] = Math.Max(0f, ReadSByte(_source, (int)offset + i) / 127f);
+                return true;
+            case TypeUVPair:
+            case TypeShort4toFloat4A:
+                if (offset + 8 > _source.Length) return false;
+                for (var i = 0; i < 4; i++) output[i] = Math.Max(0f, ReadInt16(_source, (int)offset + i * 2) / 32767f);
+                return true;
+            default:
+                return false;
+        }
+    }
+
+    private bool TryReadBoneIndices(VertexMemberAccess access, int vertexIndex, Span<int> output)
+    {
+        var offset = access.DataBase + (long)vertexIndex * access.Stride + access.Offset;
+        if (offset < 0) return false;
+        if (access.Type == TypeShortBoneIndices)
+        {
+            if (offset + 8 > _source.Length) return false;
+            for (var i = 0; i < 4; i++) output[i] = ReadUInt16(_source, (int)offset + i * 2);
+            return true;
+        }
+        if (access.Type is TypeByte4B or TypeByte4E)
+        {
+            if (offset + 4 > _source.Length) return false;
+            for (var i = 0; i < 4; i++) output[i] = ReadByte(_source, (int)offset + i);
+            return true;
+        }
+        return false;
+    }
+
+    private bool TryReadNormalW(VertexMemberAccess? access, int vertexIndex, out int normalW)
+    {
+        normalW = -1;
+        if (access == null) return false;
+        var offset = access.DataBase + (long)vertexIndex * access.Stride + access.Offset;
+        if (offset < 0) return false;
+        if (access.Type is TypeByte4A or TypeByte4B or TypeByte4C or TypeByte4E)
+        {
+            if (offset + 4 > _source.Length) return false;
+            normalW = ReadByte(_source, (int)offset + 3);
+            return true;
+        }
+        if (access.Type is TypeShort4toFloat4A or TypeShort4toFloat4B)
+        {
+            if (offset + 8 > _source.Length) return false;
+            normalW = ReadUInt16(_source, (int)offset + 6);
+            return true;
+        }
+        if (access.Type == TypeFloat4)
+        {
+            if (offset + 16 > _source.Length) return false;
+            var value = ReadFloat32(_source, (int)offset + 12);
+            if (!float.IsFinite(value)) return false;
+            normalW = checked((int)MathF.Round(value));
+            return true;
+        }
+        return false;
     }
 
     /// <summary>获取网格主 FaceSet 的索引位宽（16 或 32 位）。</summary>
@@ -691,10 +735,11 @@ internal sealed class FlverNativeDocument
     }
 
     /// <summary>
-    /// 提取网格三角形索引为 base64（原样 u16 或 u32，随 faceSet.IndexSize）。
-    /// 优先取 Flags==0（None / 最高细节）的 face set，其次第一个可解码的。
+    /// 提取网格三角形索引为 base64。输出契约始终是 triangle-list；FLVER
+    /// triangle strip 会在 Bridge 内按原生 primitive-restart / winding 语义展开。
+    /// 索引位宽仍由 face set 的 IndexSize 决定，不允许调用方猜测。
     /// </summary>
-    public string? GetMeshIndicesBase64(int meshIndex, int maxIndices = 30_000)
+    public string? GetMeshIndicesBase64(int meshIndex, int maxIndices = 30_000, bool allowTruncation = false)
     {
         if (meshIndex < 0 || meshIndex >= Meshes.Count) return null;
         var mesh = Meshes[meshIndex];
@@ -710,15 +755,102 @@ internal sealed class FlverNativeDocument
 
         var fs = selected.FaceSet;
         if (fs.IndexSize != 16 && fs.IndexSize != 32) return null; // 边压缩（8）等不支持
-        if (fs.IndexCount <= 0 || fs.IndexCount > MaxIndexCount) return null;
-        var count = Math.Min(fs.IndexCount, maxIndices);
+        if (fs.IndexCount <= 0 || fs.IndexCount > MaxIndexCount || maxIndices < 3) return null;
         var indexDataOffset = (long)DataStart + fs.IndicesOffset;
-        var byteLen = count * (fs.IndexSize / 8);
+        var byteLen = fs.IndexCount * (fs.IndexSize / 8);
         if (indexDataOffset < 0 || indexDataOffset + byteLen > _source.Length) return null;
 
-        var raw = new byte[byteLen];
-        Buffer.BlockCopy(_source, (int)indexDataOffset, raw, 0, byteLen);
-        return Convert.ToBase64String(raw);
+        var sourceIndices = new uint[fs.IndexCount];
+        var stride = fs.IndexSize / 8;
+        for (var i = 0; i < fs.IndexCount; i++)
+        {
+            var offset = checked((int)indexDataOffset + i * stride);
+            sourceIndices[i] = fs.IndexSize == 32
+                ? ReadUInt32(_source, offset)
+                : ReadUInt16(_source, offset);
+        }
+
+        uint[] triangleList;
+        if (fs.TriangleStrip)
+        {
+            var allowPrimitiveRestarts = mesh.VertexCount < ushort.MaxValue;
+            triangleList = TriangulateFaceSet(sourceIndices, fs.IndexSize, allowPrimitiveRestarts);
+        }
+        else
+        {
+            // A non-strip face set is already a triangle list. A trailing partial
+            // triangle is malformed and must not leak to Three.js as plausible data.
+            if (sourceIndices.Length % 3 != 0) return null;
+            triangleList = sourceIndices;
+        }
+
+        if (!allowTruncation && triangleList.Length > maxIndices) return null;
+        var outputCount = Math.Min(triangleList.Length, maxIndices);
+        outputCount -= outputCount % 3;
+        if (outputCount <= 0) return null;
+        var output = new byte[checked(outputCount * stride)];
+        for (var i = 0; i < outputCount; i++)
+        {
+            var value = triangleList[i];
+            if (fs.IndexSize == 16)
+            {
+                if (value > ushort.MaxValue) return null;
+                BinaryPrimitives.WriteUInt16LittleEndian(output.AsSpan(i * stride, stride), (ushort)value);
+            }
+            else
+            {
+                BinaryPrimitives.WriteUInt32LittleEndian(output.AsSpan(i * stride, stride), value);
+            }
+        }
+        return Convert.ToBase64String(output);
+    }
+
+    /// <summary>
+    /// SoulsFormats-compatible FLVER strip expansion. Degenerate triangles are
+    /// omitted, winding flips after every strip step, and a restart resets the
+    /// winding parity. Kept internal so synthetic regression fixtures can exercise
+    /// the format rule without involving renderer behavior.
+    /// </summary>
+    internal static uint[] TriangulateFaceSet(
+        IReadOnlyList<uint> indices,
+        int indexSize,
+        bool allowPrimitiveRestarts)
+    {
+        if (indices.Count < 3) return Array.Empty<uint>();
+        // SoulsFormats/FLVER2 uses the 16-bit primitive-restart sentinel for
+        // both 16- and 32-bit face sets. It is not the uint32 max value.
+        var restart = (uint)ushort.MaxValue;
+        var triangles = new List<uint>(Math.Max(0, (indices.Count - 2) * 3));
+        var flip = false;
+        for (var i = 0; i < indices.Count - 2; i++)
+        {
+            var a = indices[i];
+            var b = indices[i + 1];
+            var c = indices[i + 2];
+            if (allowPrimitiveRestarts && (a == restart || b == restart || c == restart))
+            {
+                flip = false;
+                continue;
+            }
+
+            if (a != b && b != c && c != a)
+            {
+                if (flip)
+                {
+                    triangles.Add(b);
+                    triangles.Add(a);
+                    triangles.Add(c);
+                }
+                else
+                {
+                    triangles.Add(a);
+                    triangles.Add(b);
+                    triangles.Add(c);
+                }
+            }
+            flip = !flip;
+        }
+        return triangles.ToArray();
     }
 
     // ------------------------------------------------------------------
@@ -911,11 +1043,15 @@ internal sealed class FlverNativeDocument
             float rotationZ = ReadFloat32(source, off + 0x18);
             short parentIndex = ReadInt16(source, off + 0x1C);
             short childIndex = ReadInt16(source, off + 0x1E);
+            float scaleX = ReadFloat32(source, off + 0x20);
+            float scaleY = ReadFloat32(source, off + 0x24);
+            float scaleZ = ReadFloat32(source, off + 0x28);
             short nextSiblingIndex = ReadInt16(source, off + 0x2C);
             string name = ReadStringAtOffset(source, nameOffset, unicode);
             bones.Add(new FlverBoneEntry(i, name, nextSiblingIndex, parentIndex, childIndex,
                 translationX, translationY, translationZ,
-                rotationX, rotationY, rotationZ));
+                rotationX, rotationY, rotationZ,
+                scaleX, scaleY, scaleZ));
         }
 
         // --- Meshes（48B/条）---
@@ -1588,7 +1724,8 @@ internal sealed record FlverGxItem(
 internal sealed record FlverBoneEntry(
     int Index, string Name, short NextSiblingIndex, short ParentIndex, short ChildIndex,
     float TranslationX, float TranslationY, float TranslationZ,
-    float RotationX, float RotationY, float RotationZ);
+    float RotationX, float RotationY, float RotationZ,
+    float ScaleX, float ScaleY, float ScaleZ);
 
 internal sealed record FlverMeshEntry(
     int Index,
@@ -1623,6 +1760,15 @@ internal sealed record FlverTextureSlotEntry(
 internal sealed record FlverDummyEntry(
     int Index, float PositionX, float PositionY, float PositionZ,
     short ReferenceId, short ParentBoneIndex, short AttachBoneIndex);
+
+internal sealed record FlverMeshSkinning(
+    string SkinningMode,
+    string BoneIndexSpace,
+    string? BoneWeightsBase64,
+    string? BoneIndicesBase64)
+{
+    public static FlverMeshSkinning Static { get; } = new("static", "none", null, null);
+}
 
 internal sealed record FlverRoundTripReport(
     bool ByteIdentical, bool SemanticIdentical,

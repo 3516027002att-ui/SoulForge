@@ -7,10 +7,10 @@
  *   2. Proxy scene natural fallback: in Node navigator has no `gpu`, so the mount
  *      must select WebGL2 on its own (rendererFactory only replaces the renderer
  *      implementation, never the backend decision).
- *   3. Picking 视觉反馈 — raycaster click returns the part id, second click toggles
- *      deselect, and the highlight is visible (emissive lift) then restored.
- *   4. FLVER scene — real mesh + rgba texture + bone/dummy markers projected from a
- *      renderer-independent semantic scene; WebGPU override path selects webgpu.
+ *   3. Picking 视觉反馈 — raycaster click returns the part id, repeated clicks keep
+ *      selection stable for Gizmo editing, and overlay highlighting does not mutate shared material.
+ *   4. FLVER scene — real mesh + rgba texture + dummy markers projected from a
+ *      renderer-independent semantic scene; diagnostic bone markers stay off by default.
  *   5. Skinning bind pose — non-origin bind transforms capture inverse bind matrices,
  *      retain skin attributes, and the Three.js skinning contract preserves/restores
  *      vertices across a pose change.
@@ -30,8 +30,6 @@ import {
   type ThreeRendererLike
 } from './threeSceneController.js';
 import type { SceneDrawList } from './sceneManifestBrowser.js';
-
-const HIGHLIGHT_COLOR = 0x4fa8ff;
 
 // ---------------------------------------------------------------------------
 // Tiny assertion helpers
@@ -365,12 +363,12 @@ async function testProxyScene(record: (name: string) => void): Promise<void> {
   assertEqual(selections.length, 1, '点击发射 onSelect');
   assertEqual(selections[0] ?? null, 'part-000', 'onSelect 返回 part id');
   assertEqual(handle.selectedId, 'part-000', 'selectedId 与选中项同步');
-  assertEqual(boxMaterial.emissive.getHex(), HIGHLIGHT_COLOR, '选中后基础材质 emissive 抬升为高亮色（视觉反馈）');
+  assertEqual(boxMaterial.emissive.getHex(), 0x000000, 'overlay 高亮不污染共享基础材质');
 
-  // 再次点击同一项 → 取消选中。
+  // 再次点击同一项保持选中，避免 Gizmo 编辑期间选择抖动。
   lastCreatedCanvas.dispatch('click', { clientX, clientY });
-  assertEqual(handle.selectedId, null, '再次点击同一项取消选中');
-  assertEqual(boxMaterial.emissive.getHex(), 0x000000, '取消选中后 emissive 恢复原色');
+  assertEqual(handle.selectedId, 'part-000', '再次点击同一项保持稳定选择');
+  assertEqual(boxMaterial.emissive.getHex(), 0x000000, '重复选择不污染共享基础材质');
 
   // 渲染循环驱动 fake renderer（headless）。
   pumpFrames(2);
@@ -433,7 +431,7 @@ async function testFlverScene(record: (name: string) => void): Promise<void> {
   const texture = audit1.find((r) => r instanceof three.DataTexture) as three.DataTexture | undefined;
   assert(texture !== undefined, 'RGBA 纹理投影为 DataTexture');
   assertEqual(texture.image.width, 4, '纹理宽度保持 4');
-  assert(audit1.some((r) => r instanceof three.SphereGeometry), '骨骼关节投影为 SphereGeometry');
+  assert(!audit1.some((r) => r instanceof three.SphereGeometry), '默认预览不创建黄色骨骼诊断 marker');
   assert(audit1.some((r) => r instanceof three.OctahedronGeometry), '挂点投影为 OctahedronGeometry');
 
   // 渲染循环驱动。
@@ -457,6 +455,67 @@ async function testFlverScene(record: (name: string) => void): Promise<void> {
   record('flver-webgpu-override');
   record('flver-real-mesh-texture');
   record('flver-scene-replace-release');
+}
+
+async function testMultiSkeletonPoseBatch(record: (name: string) => void): Promise<void> {
+  const triangle = (id: string, skeletonId: string, x: number): FlverSemanticScene['meshes'][number] => ({
+    id,
+    label: id,
+    position: [x, 0, 0],
+    rotation: [0, 0, 0],
+    scale: [1, 1, 1],
+    positions: new Float32Array([0, 0, 0, 1, 0, 0, 0, 1, 0]),
+    indices: new Uint16Array([0, 1, 2]),
+    skinIndices: new Uint16Array(12),
+    skinWeights: new Float32Array([1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0]),
+    skeletonId,
+    skinningMode: 'weighted',
+    boneIndexSpace: 'flver-global',
+    vertexCount: 3
+  });
+  const scene: FlverSemanticScene = {
+    meshes: [triangle('mesh-a', 'model-a', 0), triangle('mesh-b', 'model-b', 2)],
+    skeletons: [
+      { id: 'model-a', bones: [{ id: 'a-root', name: 'a-root', parentIndex: -1, translation: [0, 0, 0], rotation: [0, 0, 0] }] },
+      { id: 'model-b', bones: [{ id: 'b-root', name: 'b-root', parentIndex: -1, translation: [0, 0, 0], rotation: [0, 0, 0] }] }
+    ],
+    bounds: { min: [0, 0, 0], max: [3, 1, 0], center: [1.5, 0.5, 0] }
+  };
+  let audit: Array<{ dispose(): void }> = [];
+  const handle = await mountFlverScene({
+    container: new FakeElement() as unknown as HTMLElement,
+    scene,
+    rendererFactory: () => new FakeRenderer(),
+    resourceAudit: (resources) => {
+      audit = [...resources];
+    }
+  });
+  const skeletons = audit.filter((resource): resource is three.Skeleton => resource instanceof three.Skeleton);
+  assertEqual(skeletons.length, 2, '两个 FLVER 保持独立 skeleton namespace');
+
+  const groupPrototype = three.Group.prototype as three.Group & {
+    updateMatrixWorld(force?: boolean): void;
+  };
+  const originalUpdate = groupPrototype.updateMatrixWorld;
+  let groupUpdates = 0;
+  groupPrototype.updateMatrixWorld = function (force?: boolean): void {
+    groupUpdates += 1;
+    originalUpdate.call(this, force);
+  };
+  try {
+    handle.setSkeletonPoses?.({
+      'model-a': [{ translation: [1, 2, 3], rotation: [0, 0, 0, 1], scale: [1, 1, 1] }],
+      'model-b': [{ translation: [4, 5, 6], rotation: [0, 0, 0, 1], scale: [1, 1, 1] }]
+    });
+  } finally {
+    groupPrototype.updateMatrixWorld = originalUpdate;
+  }
+  const byName = new Map(skeletons.map((skeleton) => [skeleton.bones[0]?.name, skeleton.bones[0]]));
+  assertEqual(byName.get('a-root')?.position.x, 1, 'model-a pose 已应用');
+  assertEqual(byName.get('b-root')?.position.x, 4, 'model-b pose 已应用');
+  assertEqual(groupUpdates, 1, '多骨架一帧只传播一次 scene root matrix');
+  handle.dispose();
+  record('flver-multi-skeleton-pose-batch');
 }
 
 async function testRepeatedMountUnmount(record: (name: string) => void): Promise<void> {
@@ -519,6 +578,7 @@ async function main(): Promise<void> {
   await testBackendResolution(record);
   await testProxyScene(record);
   await testFlverScene(record);
+  await testMultiSkeletonPoseBatch(record);
   testSkinningBindPose(record);
   await testRepeatedMountUnmount(record);
   await testAbsolutePathLeakRejected(record);

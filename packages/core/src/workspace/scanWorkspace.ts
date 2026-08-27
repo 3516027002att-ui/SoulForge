@@ -17,6 +17,12 @@ export interface ScanWorkspaceOptions {
   workspaceRoot: string;
   game?: string;
   includeKinds?: readonly ResourceKind[];
+  /**
+   * Content hashes are expensive enrichment, not directory-discovery data.
+   * Keep the default for existing verification/write paths; the desktop open
+   * path explicitly disables it and hydrates hashes in a cancellable job.
+   */
+  includeContentHashes?: boolean;
   signal?: AbortSignal;
   onProgress?: (progress: ScanProgress) => void;
 }
@@ -128,17 +134,22 @@ async function addIndexedFile(
   // sourceLayer 恒为 'overlay'。
   const artifactMarkers = detectArtifactMarkers({ relativePath, sourceLayer: 'overlay' });
 
-  let sha256: string;
-  try {
-    sha256 = await sha256File(absolutePath);
-  } catch (error) {
-    diagnostics.push({
-      severity: 'warning',
-      code: 'FILE_HASH_FAILED',
-      message: error instanceof Error ? error.message : 'Failed to hash file during workspace scan.',
-      details: { absolutePath }
-    });
-    return;
+  let sha256: string | undefined;
+  let fileDiagnostics: Diagnostic[] = [];
+  if (options.includeContentHashes !== false) {
+    try {
+      sha256 = await sha256File(absolutePath, options.signal);
+    } catch (error) {
+      if (options.signal?.aborted) throw error;
+      const diag: Diagnostic = {
+        severity: 'warning',
+        code: 'FILE_HASH_FAILED',
+        message: error instanceof Error ? error.message : 'Failed to hash file during workspace scan.',
+        details: { absolutePath }
+      };
+      diagnostics.push(diag);
+      fileDiagnostics = [diag];
+    }
   }
 
   files.push({
@@ -156,18 +167,19 @@ async function addIndexedFile(
     formatLabel: fileType.formatLabel,
     size: fileStat.size,
     mtimeMs: fileStat.mtimeMs,
-    sha256,
+    ...(sha256 ? { sha256 } : {}),
     parseStatus: 'unparsed',
-    diagnostics: [],
+    diagnostics: fileDiagnostics,
     ...(artifactMarkers ? { artifactMarkers } : {})
   });
 
   options.onProgress?.({ scannedFiles: files.length, currentPath: toPosixPath(relativePath) });
 }
 
-async function sha256File(filePath: string): Promise<string> {
+async function sha256File(filePath: string, signal?: AbortSignal): Promise<string> {
   const hash = createHash('sha256');
-  for await (const chunk of createReadStream(filePath)) {
+  for await (const chunk of createReadStream(filePath, { signal })) {
+    throwIfAborted(signal);
     hash.update(chunk);
   }
   return hash.digest('hex');

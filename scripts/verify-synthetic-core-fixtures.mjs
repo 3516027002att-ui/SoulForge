@@ -32,6 +32,12 @@ function leLong(value) {
   return buffer;
 }
 
+function leU16(value) {
+  const buffer = Buffer.alloc(2);
+  buffer.writeUInt16LE(value, 0);
+  return buffer;
+}
+
 function beU32(value) {
   const buffer = Buffer.alloc(4);
   buffer.writeUInt32BE(value >>> 0, 0);
@@ -295,6 +301,42 @@ function writeParamFixture(path) {
   ]));
 }
 
+function writeNativeCompactParamFixture(path) {
+  const rowCount = 2;
+  const rowDataSize = 4;
+  const headerSize = 0x40;
+  const rowHeaderSize = 0x18;
+  const firstDataOffset = headerSize + rowCount * rowHeaderSize;
+  const dataTail = Buffer.from([0x13, 0x37, 0xa5, 0x5a]);
+  const typeName = Buffer.from('SYNTHETIC_PARAM\0', 'ascii');
+  const paramTypeOffset = firstDataOffset + rowCount * rowDataSize + dataTail.length;
+  const alignedStringsOffset = (paramTypeOffset + 0x0f) & ~0x0f;
+  const header = Buffer.alloc(headerSize);
+  leI32(alignedStringsOffset).copy(header, 0);
+  leU16(0).copy(header, 4);
+  leU16(0).copy(header, 6);
+  leU16(7).copy(header, 8);
+  leU16(rowCount).copy(header, 10);
+  leLong(paramTypeOffset).copy(header, 0x10);
+  header[0x2d] = 0x85;
+  header[0x2e] = 0x07;
+
+  const rowHeaders = Buffer.alloc(rowCount * rowHeaderSize);
+  for (let index = 0; index < rowCount; index += 1) {
+    const offset = index * rowHeaderSize;
+    leI32(1000 + index).copy(rowHeaders, offset);
+    leLong(firstDataOffset + index * rowDataSize).copy(rowHeaders, offset + 8);
+  }
+
+  writeFileSync(path, concat([
+    header,
+    rowHeaders,
+    Buffer.from([1, 2, 3, 4, 5, 6, 7, 8]),
+    dataTail,
+    typeName,
+  ]));
+}
+
 function writeMapFixture(path) {
   const entityA = utf16LeZ('c0000_0000_entity');
   const entityB = utf16LeZ('o0000_0000_object');
@@ -354,6 +396,7 @@ try {
   const fmgPath = join(tempRoot, 'synthetic.fmg');
   const eventPath = join(tempRoot, 'm10_00_00_00.synthetic.emevd');
   const paramPath = join(tempRoot, 'SpEffectParam.synthetic.param');
+  const nativeParamPath = join(tempRoot, 'SyntheticCompact.param');
   const mapPath = join(tempRoot, 'm10_00_00_00.synthetic.msb');
   const bndPath = join(tempRoot, 'synthetic.bnd');
   const dcxPath = join(tempRoot, 'synthetic.bnd.dcx');
@@ -361,6 +404,7 @@ try {
   writeFmgFixture(fmgPath);
   writeEventFixture(eventPath);
   writeParamFixture(paramPath);
+  writeNativeCompactParamFixture(nativeParamPath);
   writeMapFixture(mapPath);
   writeBndFixture(bndPath);
   writeDcxDfltFixture(dcxPath);
@@ -380,6 +424,23 @@ try {
   assertPartial(param, 'export-param');
   assertDiagnosticCode(param, 'PARAM_SYNTHETIC_FIXTURE_CONFIRMED');
   if (!param.data?.rows || param.data.rows.length !== 2) throw new Error('Expected two PARAM rows');
+
+  const nativeParam = invokeBridge('read-param-document', nativeParamPath);
+  assertPartial(nativeParam, 'read-param-document');
+  assertDiagnosticCode(nativeParam, 'PARAM_DOCUMENT_ROUNDTRIP_SEMANTIC_VERIFIED');
+  if (nativeParam.data?.rowDataSize !== 4) {
+    throw new Error(`Expected compact PARAM row size 4, got ${nativeParam.data?.rowDataSize}`);
+  }
+  if (nativeParam.data?.typeName !== 'SYNTHETIC_PARAM') {
+    throw new Error(`Expected full compact PARAM type name, got ${nativeParam.data?.typeName}`);
+  }
+  if (nativeParam.data?.roundTrip?.byteIdentical !== true) {
+    throw new Error('Expected compact PARAM alignment tail to survive byte-identical roundtrip');
+  }
+  const nativeRows = nativeParam.data?.rows ?? [];
+  if (nativeRows.length !== 2 || nativeRows[0]?.dataBase64 !== 'AQIDBA==' || nativeRows[1]?.dataBase64 !== 'BQYHCA==') {
+    throw new Error(`Unexpected compact PARAM row payloads: ${JSON.stringify(nativeRows)}`);
+  }
 
   const map = invokeBridge('export-map', mapPath);
   assertPartial(map, 'export-map');

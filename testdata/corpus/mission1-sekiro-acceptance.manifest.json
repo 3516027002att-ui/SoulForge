@@ -1,0 +1,130 @@
+{
+  "schemaVersion": "1.0.0",
+  "manifestId": "mission1-sekiro-acceptance-v1",
+  "game": "sekiro",
+  "gameBuild": "1.6",
+  "generatedAt": "2026-08-27T00:00:00.000Z",
+  "generatedBy": "mission1-sekiro-acceptance-generator",
+  "sourceGameRoot": "D:\\mystream\\Sekiro Shadows Die Twice\\Sekiro",
+  "corpusManifestRef": "testdata/corpus/sekiro-1.6.corpus-manifest.json",
+  "entryCount": 22,
+  "summary": {
+    "note": "bootstrap manifest for mission1 acceptance; tri-source hashes pending real filesystem+Andre+tool verification"
+  },
+  "entries": [
+    {
+      "logicalUri": "sekiro://param/gameparam.parambnd.dcx",
+      "relativePath": "param/gameparam.parambnd.dcx",
+      "size": 2027531,
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+      "resourceRole": "gameparam",
+      "format": "DFLT",
+      "expectedOutcome": "loaded",
+      "triSource": { "filesystem": "pending", "andre": "pending", "matureTool": "pending" }
+    },
+    {
+      "logicalUri": "sekiro://map/m10_00_00_00/m10_00_00_00.msb.dcx",
+      "relativePath": "map/m10_00_00_00/m10_00_00_00.msb.dcx",
+      "size": 500000,
+      "sha256": "1111111111111111111111111111111111111111111111111111111111111111",
+      "resourceRole": "msb",
+      "format": "DFLT",
+      "expectedOutcome": "loaded",
+      "modelInventory": { "type0": 499, "type1": 180, "type2": 39, "type5": 146, "parts": 7404 }
+    },
+    {
+      "logicalUri": "sekiro://map/m10_00_00_00/m10_00_00_00_002021.mapbnd.dcx",
+      "relativePath": "map/m10_00_00_00/m10_00_00_00_002021.mapbnd.dcx",
+      "size": 8000000,
+      "sha256": "2222222222222222222222222222222222222222222222222222222222222222",
+      "resourceRole": "mapbnd",
+      "format": "DFLT",
+      "expectedOutcome": "loaded",
+      "note": "m002021 static geometry must succeed under 16 MiB frame"
+    },
+    {
+      "logicalUri": "sekiro://obj/o000100.objbnd.dcx",
+      "relativePath": "obj/o000100.objbnd.dcx",
+      "size": 100000,
+      "sha256": "3333333333333333333333333333333333333333333333333333333333333333",
+      "resourceRole": "obj",
+      "format": "DFLT",
+      "expectedOutcome": "loaded"
+    },
+    {
+      "logicalUri": "sekiro://chr/c1000.chrbnd.dcx",
+      "relativePath": "chr/c1000.chrbnd.dcx",
+      "size": 200000,
+      "sha256": "4444444444444444444444444444444444444444444444444444444444444444",
+      "resourceRole": "chr",
+      "format": "DFLT",
+      "expectedOutcome": "loaded"
+    },
+    {
+      "logicalUri": "sekiro://chr/c0000.chrbnd.dcx",
+      "relativePath": "chr/c0000.chrbnd.dcx",
+      "size": 3000000,
+      "sha256": "5555555555555555555555555555555555555555555555555555555555555555",
+      "resourceRole": "chr-leader",
+      "format": "DFLT",
+      "expectedOutcome": "loaded",
+      "leaderBones": 467,
+      "meshes": 54,
+      "vertices": 122071
+    },
+    {
+      "logicalUri": "sekiro://chr/c0000.anibnd.dcx",
+      "relativePath": "chr/c0000.anibnd.dcx",
+      "size": 5000000,
+      "sha256": "6666666666666666666666666666666666666666666666666666666666666666",
+      "resourceRole": "anibnd-skeleton",
+      "format": "DFLT",
+      "expectedOutcome": "loaded"
+    },
+    {
+      "logicalUri": "sekiro://chr/c0000_a000_lo.anibnd.dcx",
+      "relativePath": "chr/c0000_a000_lo.anibnd.dcx",
+      "size": 4000000,
+      "sha256": "7777777777777777777777777777777777777777777777777777777777777777",
+      "resourceRole": "anibnd-animation",
+      "format": "DFLT",
+      "expectedOutcome": "loaded",
+      "animationId": 10
+    },
+    {
+      "logicalUri": "sekiro://param/AtkParam_Npc",
+      "relativePath": "param/gameparam.parambnd.dcx#AtkParam_Npc",
+      "size": 2027531,
+      "sha256": "8888888888888888888888888888888888888888888888888888888888888888",
+      "resourceRole": "param-table",
+      "expectedRowCount": 4090,
+      "expectedRowWidth": 464
+    },
+    {
+      "logicalUri": "sekiro://param/SpEffectParam",
+      "relativePath": "param/gameparam.parambnd.dcx#SpEffectParam",
+      "size": 8824847,
+      "sha256": "9999999999999999999999999999999999999999999999999999999999999999",
+      "resourceRole": "param-table",
+      "expectedRowCount": 7790
+    }
+  ],
+  "m10Models": {
+    "count": 499,
+    "expectedLoaded": 481,
+    "expectedUnavailable": 18,
+    "note": "bootstrap counts from historical 481/18; final must verify all oracle-renderable loaded"
+  },
+  "characterSamples": {
+    "strategy": "bin {single/multi FLVER, bone-count quartile, has32BitIndex} -> smallest SHA; plus c0000/c1000",
+    "count": 10,
+    "pending": true
+  },
+  "generator": {
+    "sourceHashes": ["pending"],
+    "andreHashes": ["pending"],
+    "toolHashes": ["pending"],
+    "generatorSourceHash": "pending"
+  },
+  "disputed": []
+}

@@ -531,10 +531,11 @@ describe('Negative source tests（ANIMATION-56B / ANIMATION-56C）', () => {
     assert.match(panelSource, /selectedAnimationEvents\.map\(/);
   });
 
-  it('问题4-A：预览按 meshCount 迭代全部网格，不再只用 mesh[0] 碎片', () => {
-    assert.match(panelSource, /for \(let index = 1; index < meshCount; index \+= 1\)/);
-    assert.match(panelSource, /readTaeChrbndPreview\(props\.resourceUri, index\)/);
-    assert.match(panelSource, /externalMeshes/);
+  it('问题4-A：预览一次读取并校验完整角色 bundle，不再逐 mesh 重启 Bridge', () => {
+    assert.match(panelSource, /readTaeChrbndPreview\(props\.resourceUri\)/);
+    assert.match(panelSource, /isCharacterPreviewBundle\(result\.data\)/);
+    assert.match(panelSource, /externalBundle=\{preview\.bundle\}/);
+    assert.doesNotMatch(panelSource, /readTaeChrbndPreview\(props\.resourceUri,\s*index\)/);
     assert.doesNotMatch(panelSource, /meshIndex=\{0\}/);
   });
 

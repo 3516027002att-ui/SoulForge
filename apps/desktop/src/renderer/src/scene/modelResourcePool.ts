@@ -135,6 +135,29 @@ export class ModelResourcePool {
     return this.defaultRealMaterial;
   }
 
+  /** 同色 proxy 实例共享一个材质，避免近万 placement 各自分配 Material。 */
+  public getProxyMaterial(
+    three: ThreeModule,
+    track: TrackFunction,
+    _colorRgb: [number, number, number]
+  ): Material {
+    const key = 'proxy:shared';
+    const existing = this.materials.get(key);
+    if (existing) return existing;
+    const material = track(new three.MeshStandardMaterial({
+      // Per-placement colors live in InstancedMesh.instanceColor.
+      color: new three.Color(1, 1, 1),
+      roughness: 0.65,
+      metalness: 0.05,
+      side: three.FrontSide,
+      wireframe: true,
+      transparent: true,
+      opacity: 0.35
+    }));
+    this.materials.set(key, material);
+    return material;
+  }
+
   /**
    * 注册并更新特定 modelName 的共享几何体与材质。
    */

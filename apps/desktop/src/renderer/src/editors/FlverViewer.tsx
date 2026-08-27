@@ -1,4 +1,10 @@
 import { useEffect, useRef, useState, type ReactElement } from 'react';
+import type {
+  BoneTransformData,
+  CharacterPreviewBundle,
+  FlverPreviewMesh,
+  FlverPreviewModel
+} from '@soulforge/shared';
 import {
   mountFlverScene,
   type FlverSceneHandle,
@@ -24,6 +30,10 @@ export interface FlverViewerProps {
   textureBase64?: string | undefined;
   boneWeightsBase64?: string | undefined;
   boneIndicesBase64?: string | undefined;
+  /** Atomic multi-FLVER character/parts payload. Every model keeps its own skeleton namespace. */
+  externalBundle?: CharacterPreviewBundle | undefined;
+  /** Per-FLVER local poses keyed by CharacterPreviewBundle.models[].modelId. */
+  externalSkeletonPoses?: Readonly<Record<string, BoneTransformData[]>> | undefined;
   /**
    * S17：动作预览——chrbnd 里 FLVER 的网格数据由 `read-chrbnd-flver-preview`
    * 一次性返回（base64 typed buffers），提供时不再走 readFlverMesh IPC。
@@ -37,11 +47,13 @@ export interface FlverViewerProps {
     normalsBase64?: string | undefined;
     boneWeightsBase64?: string | undefined;
     boneIndicesBase64?: string | undefined;
+    skinningMode?: 'weighted' | 'rigid' | 'static' | undefined;
+    boneIndexSpace?: 'flver-global' | 'none' | undefined;
     vertexCount: number;
   } | undefined;
   /**
-   * 问题4-A：chrbnd 里 FLVER 的**全部网格**（renderer 按 meshIndex=0..meshCount-1
-   * 循环读取后拼齐）。提供时把每个网格都投进同一个语义场景，相机框全覆盖；
+   * 问题4-A：chrbnd 里 FLVER 的**全部网格**（Bridge 一次构建完整 bundle）。
+   * 提供时把每个网格都投进同一个语义场景，相机框全覆盖；
    * 不播动画、不做假播放头。externalMeshData 只用于单网格回退。
    */
   externalMeshes?: Array<{
@@ -52,6 +64,8 @@ export interface FlverViewerProps {
     normalsBase64?: string | undefined;
     boneWeightsBase64?: string | undefined;
     boneIndicesBase64?: string | undefined;
+    skinningMode?: 'weighted' | 'rigid' | 'static' | undefined;
+    boneIndexSpace?: 'flver-global' | 'none' | undefined;
     vertexCount: number;
   }> | undefined;
   /** S17：外部骨骼层级（与 externalMeshData 同源），提供时跳过 readFlverSkeleton。 */
@@ -60,6 +74,8 @@ export interface FlverViewerProps {
     parentIndex: number;
     translation: [number, number, number];
     rotation: [number, number, number];
+    scale?: [number, number, number] | undefined;
+    rotationOrder?: 'XZY' | 'XYZ' | undefined;
   }> | undefined;
   /** 动画播放时间点（驱动骨骼蒙皮动画位姿） */
   playbackTime?: number | undefined;
@@ -71,6 +87,24 @@ export interface FlverViewerProps {
   }> | undefined;
 }
 
+interface ViewerPoseState {
+  playbackTime: FlverViewerProps['playbackTime'];
+  externalPose: FlverViewerProps['externalPose'];
+  externalSkeletonPoses: FlverViewerProps['externalSkeletonPoses'];
+}
+
+function applyViewerPose(handle: FlverSceneHandle, state: ViewerPoseState, resetIfEmpty = false): void {
+  if (state.externalSkeletonPoses !== undefined) {
+    handle.setSkeletonPoses?.(state.externalSkeletonPoses);
+  } else if (state.externalPose?.length) {
+    handle.setPose?.(state.externalPose);
+  } else if (typeof state.playbackTime === 'number') {
+    handle.setPlaybackTime?.(state.playbackTime);
+  } else if (resetIfEmpty) {
+    handle.setSkeletonPoses?.({});
+  }
+}
+
 interface MeshData {
   positionsBase64: string;
   indicesBase64: string;
@@ -79,6 +113,8 @@ interface MeshData {
   normalsBase64?: string | undefined;
   boneWeightsBase64?: string | undefined;
   boneIndicesBase64?: string | undefined;
+  skinningMode?: 'weighted' | 'rigid' | 'static' | undefined;
+  boneIndexSpace?: 'flver-global' | 'none' | undefined;
   vertexCount: number;
 }
 
@@ -87,6 +123,8 @@ interface SkeletonBone {
   parentIndex: number;
   translation: [number, number, number];
   rotation: [number, number, number];
+  scale?: [number, number, number] | undefined;
+  rotationOrder?: 'XZY' | 'XYZ' | undefined;
 }
 
 interface DummyPoint {
@@ -110,6 +148,16 @@ export function FlverViewer(props: FlverViewerProps): ReactElement {
   const containerRef = useRef<HTMLDivElement>(null);
   const handleRef = useRef<FlverSceneHandle | null>(null);
   const contentRef = useRef<FlverSemanticScene>(EMPTY_SCENE);
+  const poseStateRef = useRef<ViewerPoseState>({
+    playbackTime: props.playbackTime,
+    externalPose: props.externalPose,
+    externalSkeletonPoses: props.externalSkeletonPoses
+  });
+  poseStateRef.current = {
+    playbackTime: props.playbackTime,
+    externalPose: props.externalPose,
+    externalSkeletonPoses: props.externalSkeletonPoses
+  };
   const [meshDataList, setMeshDataList] = useState<MeshData[] | null>(null);
   const [meshError, setMeshError] = useState<string | null>(null);
   const [skeletonBones, setSkeletonBones] = useState<SkeletonBone[] | null>(null);
@@ -123,6 +171,10 @@ export function FlverViewer(props: FlverViewerProps): ReactElement {
 
   // Load dummy attachment points via IPC when sourceUri changes.
   useEffect(() => {
+    if (props.externalBundle) {
+      setDummyPoints([]);
+      return;
+    }
     if (!props.sourceUri || bridge === null || typeof bridge.readFlverDummies !== 'function') return;
     setDummyPoints(null);
     void (async () => {
@@ -143,13 +195,17 @@ export function FlverViewer(props: FlverViewerProps): ReactElement {
         // Dummy load failed; leave markers hidden.
       }
     })();
-  }, [props.sourceUri, bridge]);
+  }, [props.sourceUri, props.externalBundle, bridge]);
 
   // Load skeleton hierarchy via IPC when sourceUri changes.
   // Parent-relative transforms; world transforms are projected by the scene
   // controller (renderer layer), keeping the semantic scene pure typed data.
   // S17：externalBones（chrbnd 预览）直接使用，不走 IPC。
   useEffect(() => {
+    if (props.externalBundle) {
+      setSkeletonBones([]);
+      return;
+    }
     if (props.externalBones) {
       setSkeletonBones(props.externalBones);
       return;
@@ -160,7 +216,7 @@ export function FlverViewer(props: FlverViewerProps): ReactElement {
       try {
         const result = await bridge.readFlverSkeleton(props.sourceUri!) as {
           ok: boolean;
-          data?: { bones?: Array<{ name: string; parentIndex: number; translation: number[]; rotation: number[] }> };
+          data?: { bones?: Array<{ name: string; parentIndex: number; translation: number[]; rotation: number[]; scale?: number[]; rotationOrder?: 'XZY' | 'XYZ' }> };
         };
         const raw = result.ok ? result.data?.bones ?? [] : [];
         if (raw.length === 0) return;
@@ -169,19 +225,26 @@ export function FlverViewer(props: FlverViewerProps): ReactElement {
             name: b.name,
             parentIndex: b.parentIndex,
             translation: [b.translation[0] ?? 0, b.translation[1] ?? 0, b.translation[2] ?? 0],
-            rotation: [b.rotation[0] ?? 0, b.rotation[1] ?? 0, b.rotation[2] ?? 0]
+            rotation: [b.rotation[0] ?? 0, b.rotation[1] ?? 0, b.rotation[2] ?? 0],
+            scale: [b.scale?.[0] ?? 1, b.scale?.[1] ?? 1, b.scale?.[2] ?? 1],
+            rotationOrder: b.rotationOrder ?? 'XZY'
           }))
         );
       } catch {
         // Skeleton load failed; leave hierarchy hidden.
       }
     })();
-  }, [props.sourceUri, bridge]);
+  }, [props.sourceUri, props.externalBones, props.externalBundle, bridge]);
 
   // Load mesh data via IPC when sourceUri or meshIndex changes.
   // S17：externalMeshData（chrbnd 预览）直接使用，不走 IPC；
   // 问题4-A：externalMeshes（chrbnd 全部网格）同样直接使用，不走 IPC。
   useEffect(() => {
+    if (props.externalBundle) {
+      setMeshDataList([]);
+      setMeshError(null);
+      return;
+    }
     if (props.externalMeshes && props.externalMeshes.length > 0) {
       setMeshDataList(props.externalMeshes.map(toMeshData));
       setMeshError(null);
@@ -200,17 +263,20 @@ export function FlverViewer(props: FlverViewerProps): ReactElement {
       try {
         const result = await bridge.readFlverMesh(props.sourceUri!, idx) as {
           ok: boolean;
-          data?: { positionsBase64?: string; indicesBase64?: string; uvsBase64?: string; normalsBase64?: string; boneWeightsBase64?: string; boneIndicesBase64?: string; vertexCount?: number };
+          data?: { positionsBase64?: string; indicesBase64?: string; indexSize?: number; uvsBase64?: string; normalsBase64?: string; boneWeightsBase64?: string; boneIndicesBase64?: string; skinningMode?: 'weighted' | 'rigid' | 'static'; boneIndexSpace?: 'flver-global' | 'none'; vertexCount?: number };
           diagnostics?: Array<{ message: string }>;
         };
         if (result.ok && result.data?.positionsBase64) {
           setMeshDataList([{
             positionsBase64: result.data.positionsBase64,
             indicesBase64: result.data.indicesBase64 ?? '',
+            indexSize: result.data.indexSize,
             ...(result.data.uvsBase64 ? { uvsBase64: result.data.uvsBase64 } : {}),
             ...(result.data.normalsBase64 ? { normalsBase64: result.data.normalsBase64 } : {}),
             ...(result.data.boneWeightsBase64 ? { boneWeightsBase64: result.data.boneWeightsBase64 } : {}),
             ...(result.data.boneIndicesBase64 ? { boneIndicesBase64: result.data.boneIndicesBase64 } : {}),
+            skinningMode: result.data.skinningMode,
+            boneIndexSpace: result.data.boneIndexSpace,
             vertexCount: result.data.vertexCount ?? 0
           }]);
         } else {
@@ -220,7 +286,7 @@ export function FlverViewer(props: FlverViewerProps): ReactElement {
         setMeshError(error instanceof Error ? error.message : '网格加载失败');
       }
     })();
-  }, [props.sourceUri, props.meshIndex, props.externalMeshData, props.externalMeshes, bridge]);
+  }, [props.sourceUri, props.meshIndex, props.externalMeshData, props.externalMeshes, props.externalBundle, bridge]);
 
   // Decode texture bytes (base64 → DDS parse / RGBA fallback) into semantic form.
   // 渲染器对象（CompressedTexture / DataTexture）由投影层构造并纳入 dispose。
@@ -241,16 +307,28 @@ export function FlverViewer(props: FlverViewerProps): ReactElement {
 
   // Rebuild the renderer-independent semantic scene whenever source data changes.
   useEffect(() => {
-    const scene = buildSemanticScene({
-      meshes: meshDataList ?? [],
-      skeleton: skeletonBones ?? [],
-      dummies: dummyPoints ?? [],
-      boundingBox: props.boundingBox,
-      texture
-    });
-    contentRef.current = scene;
-    handleRef.current?.setScene(scene);
-  }, [meshDataList, skeletonBones, dummyPoints, props.boundingBox, texture]);
+    try {
+      const scene = props.externalBundle
+        ? buildBundleSemanticScene(props.externalBundle, props.boundingBox, texture)
+        : buildSemanticScene({
+            meshes: meshDataList ?? [],
+            skeleton: skeletonBones ?? [],
+            dummies: dummyPoints ?? [],
+            boundingBox: props.boundingBox,
+            texture
+          });
+      contentRef.current = scene;
+      const handle = handleRef.current;
+      if (handle) {
+        handle.setScene(scene);
+        applyViewerPose(handle, poseStateRef.current);
+      }
+      setSceneError(null);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'FLVER 语义数据无效';
+      setSceneError(message);
+    }
+  }, [meshDataList, skeletonBones, dummyPoints, props.boundingBox, props.externalBundle, texture]);
 
   // Mount the Three projection layer once; later data updates flow through setScene.
   useEffect(() => {
@@ -281,6 +359,8 @@ export function FlverViewer(props: FlverViewerProps): ReactElement {
         setBackend(handle.rendererBackend);
         // Content may have arrived while the mount promise was pending.
         handle.setScene(contentRef.current);
+        // Pose updates can arrive before the asynchronous Three mount resolves.
+        applyViewerPose(handle, poseStateRef.current);
       } catch (error) {
         setSceneError(error instanceof Error ? error.message : 'FLVER 3D 场景初始化失败');
       }
@@ -292,26 +372,23 @@ export function FlverViewer(props: FlverViewerProps): ReactElement {
     };
   }, []);
 
-  // 动画播放推进（驱动骨骼蒙皮动画位姿）
+  // Replay the latest pose source; multi-skeleton retargeting has priority.
   useEffect(() => {
-    if (typeof props.playbackTime === 'number') {
-      handleRef.current?.setPlaybackTime?.(props.playbackTime);
-    }
-  }, [props.playbackTime]);
+    const handle = handleRef.current;
+    if (handle) applyViewerPose(handle, poseStateRef.current, true);
+  }, [props.playbackTime, props.externalPose, props.externalSkeletonPoses]);
 
   // 真实动画采样位姿驱动骨骼蒙皮
-  useEffect(() => {
-    if (props.externalPose && props.externalPose.length > 0) {
-      handleRef.current?.setPose?.(props.externalPose);
-    }
-  }, [props.externalPose]);
 
   // 多网格（问题4-A）：叠加字报「全部网格 + 总顶点数」，不显示假播放头。
-  const meshSummary = meshDataList && meshDataList.length > 0
-    ? (meshDataList.length === 1
-        ? `${meshDataList[0]?.vertexCount ?? 0} verts`
-        : `${meshDataList.length} meshes · 总 ${
-            meshDataList.reduce((sum, mesh) => sum + (mesh.vertexCount || 0), 0)
+  const summaryMeshes = props.externalBundle
+    ? props.externalBundle.models.flatMap((model) => model.meshes)
+    : meshDataList;
+  const meshSummary = summaryMeshes && summaryMeshes.length > 0
+    ? (summaryMeshes.length === 1
+        ? `${summaryMeshes[0]?.vertexCount ?? 0} verts`
+        : `${summaryMeshes.length} meshes · 总 ${
+            summaryMeshes.reduce((sum, mesh) => sum + (mesh.vertexCount || 0), 0)
           } verts`)
     : null;
 
@@ -322,7 +399,7 @@ export function FlverViewer(props: FlverViewerProps): ReactElement {
         position: 'absolute', top: 8, left: 8, color: '#8899aa', fontSize: 12,
         background: 'rgba(0,0,0,0.5)', padding: '4px 8px', borderRadius: 4
       }}>
-        FLVER 3D 预览 · {props.boneCount ?? 0} bones · {props.meshCount ?? 0} meshes
+        FLVER 3D 预览 · {props.externalBundle?.boneCount ?? props.boneCount ?? 0} bones · {props.externalBundle?.meshCount ?? props.meshCount ?? 0} meshes
         {' · '}{backend === 'detecting' ? 'backend…' : `backend ${backend}`}
         {meshSummary ? ` · ${meshSummary}` : meshError ? ` · ${meshError}` : ''}
         {sceneError ? ` · ${sceneError}` : ''}
@@ -354,8 +431,9 @@ function buildSemanticScene(input: {
 }): FlverSemanticScene {
   const meshes: FlverSceneMesh[] = [];
   for (const [index, meshData] of input.meshes.entries()) {
-    const positions = decodeFloat32Array(meshData.positionsBase64);
+    const positions = decodeFloat32Array(meshData.positionsBase64, `mesh[${index}].positions`);
     const vertexCount = meshData.vertexCount || Math.floor(positions.length / 3);
+    assertVertexAttributeLength(positions.length, vertexCount, 3, `mesh[${index}].positions`);
     const mesh: FlverSceneMesh = {
       id: `mesh-${index}`,
       label: `mesh[${index}]`,
@@ -364,11 +442,27 @@ function buildSemanticScene(input: {
       scale: [1, 1, 1],
       positions,
       vertexCount,
-      wireframeOverlay: true
+      indexSize: meshData.indexSize === 32 ? 32 : 16,
+      skinningMode: meshData.skinningMode ?? (
+        meshData.boneIndicesBase64 && meshData.boneWeightsBase64 ? 'weighted' : 'static'
+      ),
+      boneIndexSpace: meshData.boneIndexSpace ?? (
+        meshData.boneIndicesBase64 && meshData.boneWeightsBase64 ? 'flver-global' : 'none'
+      ),
+      wireframeOverlay: false
     };
-    if (meshData.uvsBase64) mesh.uvs = decodeFloat32Array(meshData.uvsBase64);
-    if (meshData.normalsBase64) mesh.normals = decodeFloat32Array(meshData.normalsBase64);
-    if (meshData.indicesBase64) mesh.indices = decodeMeshIndices(meshData.indicesBase64, meshData.indexSize ?? 16);
+    if (meshData.uvsBase64) {
+      mesh.uvs = decodeFloat32Array(meshData.uvsBase64, `mesh[${index}].uvs`);
+      assertVertexAttributeLength(mesh.uvs.length, vertexCount, 2, `mesh[${index}].uvs`);
+    }
+    if (meshData.normalsBase64) {
+      mesh.normals = decodeFloat32Array(meshData.normalsBase64, `mesh[${index}].normals`);
+      assertVertexAttributeLength(mesh.normals.length, vertexCount, 3, `mesh[${index}].normals`);
+    }
+    if (meshData.indicesBase64) {
+      mesh.indices = decodeMeshIndices(meshData.indicesBase64, mesh.indexSize, `mesh[${index}].indices`);
+      assertTriangleIndices(mesh.indices, vertexCount, `mesh[${index}].indices`);
+    }
 
     // 真正的 GPU Skinning Attributes（4 components / vertex）
     if (meshData.boneIndicesBase64) {
@@ -376,9 +470,6 @@ function buildSemanticScene(input: {
     }
     if (meshData.boneWeightsBase64) {
       mesh.skinWeights = decodeSkinWeights(meshData.boneWeightsBase64, vertexCount);
-      mesh.vertexColors = boneWeightColors(mesh.skinWeights, vertexCount);
-    } else if (mesh.skinIndices) {
-      mesh.vertexColors = boneIndexColors(mesh.skinIndices, vertexCount);
     }
 
     if (input.texture) mesh.texture = input.texture;
@@ -390,7 +481,9 @@ function buildSemanticScene(input: {
     name: bone.name,
     parentIndex: bone.parentIndex,
     translation: bone.translation,
-    rotation: bone.rotation
+    rotation: bone.rotation,
+    scale: bone.scale ?? [1, 1, 1],
+    rotationOrder: bone.rotationOrder ?? 'XZY'
   }));
   const dummies = input.dummies.map((dummy, index) => ({
     id: `dummy-${index}`,
@@ -405,6 +498,100 @@ function buildSemanticScene(input: {
   };
 }
 
+export function buildBundleSemanticScene(
+  bundle: CharacterPreviewBundle,
+  boundingBox?: { min: number[]; max: number[] } | undefined,
+  texture: FlverSceneTexture | null = null
+): FlverSemanticScene {
+  const meshes: FlverSceneMesh[] = [];
+  const skeletons = bundle.models
+    .filter((model) => model.bones.length > 0)
+    .map((model) => ({
+      id: model.modelId,
+      bones: model.bones.map((bone) => ({
+        id: `${model.modelId}:bone:${bone.index}`,
+        index: bone.index,
+        name: bone.name,
+        parentIndex: bone.parentIndex,
+        childIndex: bone.childIndex,
+        nextSiblingIndex: bone.nextSiblingIndex,
+        hierarchyId: bone.hierarchyId,
+        translation: bone.translation,
+        rotation: bone.rotation,
+        scale: bone.scale,
+        rotationOrder: bone.rotationOrder
+      }))
+    }));
+
+  for (const model of bundle.models) {
+    for (const meshData of model.meshes) {
+      const mesh = decodeBundleMesh(model, meshData, texture);
+      meshes.push(mesh);
+    }
+  }
+  if (meshes.length !== bundle.meshCount) {
+    throw new Error(`FLVER_BUNDLE_MESH_COUNT_MISMATCH: expected=${bundle.meshCount} actual=${meshes.length}`);
+  }
+  return {
+    meshes,
+    ...(skeletons.length > 0 ? { skeletons } : {}),
+    bounds: computeSceneBounds(boundingBox, meshes)
+  };
+}
+
+function decodeBundleMesh(
+  model: FlverPreviewModel,
+  meshData: FlverPreviewMesh,
+  texture: FlverSceneTexture | null
+): FlverSceneMesh {
+  const label = `${model.entry.name}:mesh[${meshData.meshIndex}]`;
+  const positions = decodeFloat32Array(meshData.positionsBase64, `${label}.positions`);
+  const vertexCount = meshData.vertexCount;
+  assertVertexAttributeLength(positions.length, vertexCount, 3, `${label}.positions`);
+  const mesh: FlverSceneMesh = {
+    id: `${model.modelId}:mesh:${meshData.meshIndex}`,
+    label,
+    position: [0, 0, 0],
+    rotation: [0, 0, 0],
+    scale: [1, 1, 1],
+    positions,
+    indexSize: meshData.indexSize,
+    skinningMode: meshData.skinningMode,
+    boneIndexSpace: meshData.boneIndexSpace,
+    skeletonId: model.modelId,
+    vertexCount,
+    wireframeOverlay: false
+  };
+  if (meshData.indicesBase64) {
+    mesh.indices = decodeMeshIndices(meshData.indicesBase64, meshData.indexSize, `${label}.indices`);
+    assertTriangleIndices(mesh.indices, vertexCount, `${label}.indices`);
+  }
+  if (meshData.uvsBase64) {
+    mesh.uvs = decodeFloat32Array(meshData.uvsBase64, `${label}.uvs`);
+    assertVertexAttributeLength(mesh.uvs.length, vertexCount, 2, `${label}.uvs`);
+  }
+  if (meshData.normalsBase64) {
+    mesh.normals = decodeFloat32Array(meshData.normalsBase64, `${label}.normals`);
+    assertVertexAttributeLength(mesh.normals.length, vertexCount, 3, `${label}.normals`);
+  }
+  const hasSkinPayload = Boolean(meshData.boneIndicesBase64 && meshData.boneWeightsBase64);
+  if (meshData.skinningMode === 'static') {
+    if (hasSkinPayload) throw new Error(`FLVER_STATIC_MESH_HAS_SKIN_PAYLOAD: ${label}`);
+  } else {
+    if (!meshData.boneIndicesBase64 || !meshData.boneWeightsBase64) {
+      throw new Error(`FLVER_SKIN_BINDING_INCOMPLETE: ${label}`);
+    }
+    if (meshData.boneIndexSpace !== 'flver-global') {
+      throw new Error(`FLVER_SKIN_INDEX_SPACE_UNSUPPORTED: ${label}`);
+    }
+    mesh.skinIndices = decodeSkinIndices(meshData.boneIndicesBase64, vertexCount);
+    mesh.skinWeights = decodeSkinWeights(meshData.boneWeightsBase64, vertexCount);
+    assertSkinIndices(mesh.skinIndices, mesh.skinWeights, model.bones.length, label);
+  }
+  if (texture) mesh.texture = texture;
+  return mesh;
+}
+
 /** 把外部/IPC 返回的单个网格的 DTO 规整成内部 MeshData（问题4-A 参数复用）。 */
 function toMeshData(input: {
   positionsBase64: string;
@@ -414,6 +601,8 @@ function toMeshData(input: {
   normalsBase64?: string | undefined;
   boneWeightsBase64?: string | undefined;
   boneIndicesBase64?: string | undefined;
+  skinningMode?: 'weighted' | 'rigid' | 'static' | undefined;
+  boneIndexSpace?: 'flver-global' | 'none' | undefined;
   vertexCount: number;
 }): MeshData {
   return {
@@ -424,6 +613,8 @@ function toMeshData(input: {
     normalsBase64: input.normalsBase64 ?? undefined,
     boneWeightsBase64: input.boneWeightsBase64 ?? undefined,
     boneIndicesBase64: input.boneIndicesBase64 ?? undefined,
+    skinningMode: input.skinningMode,
+    boneIndexSpace: input.boneIndexSpace,
     vertexCount: input.vertexCount
   };
 }
@@ -472,104 +663,99 @@ function computeSceneBounds(
   };
 }
 
-function decodeFloat32Array(base64: string): Float32Array {
+function decodeFloat32Array(base64: string, label: string): Float32Array {
   const bytes = decodeBase64Safe(base64);
+  if (bytes.byteLength % Float32Array.BYTES_PER_ELEMENT !== 0) {
+    throw new Error(`FLVER_ATTRIBUTE_ALIGNMENT_INVALID: ${label} bytes=${bytes.byteLength}`);
+  }
   const copy = (bytes.buffer as ArrayBuffer).slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
-  return new Float32Array(copy);
+  const values = new Float32Array(copy);
+  for (const value of values) {
+    if (!Number.isFinite(value)) throw new Error(`FLVER_ATTRIBUTE_NONFINITE: ${label}`);
+  }
+  return values;
 }
 
-function decodeMeshIndices(base64: string, indexSize: number = 16): Uint16Array | Uint32Array {
+function decodeMeshIndices(base64: string, indexSize: number = 16, label = 'indices'): Uint16Array | Uint32Array {
   const bytes = decodeBase64Safe(base64);
+  const width = indexSize === 32 ? Uint32Array.BYTES_PER_ELEMENT : Uint16Array.BYTES_PER_ELEMENT;
+  if (bytes.byteLength % width !== 0) {
+    throw new Error(`FLVER_INDEX_ALIGNMENT_INVALID: ${label} bytes=${bytes.byteLength} width=${width}`);
+  }
   const copy = (bytes.buffer as ArrayBuffer).slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
   return indexSize === 32 ? new Uint32Array(copy) : new Uint16Array(copy);
 }
 
-function decodeUint16Array(base64: string): Uint16Array {
-  const bytes = decodeBase64Safe(base64);
-  const copy = (bytes.buffer as ArrayBuffer).slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
-  return new Uint16Array(copy);
+function assertVertexAttributeLength(
+  actualComponents: number,
+  vertexCount: number,
+  itemSize: number,
+  label: string
+): void {
+  const expected = vertexCount * itemSize;
+  if (actualComponents !== expected) {
+    throw new Error(`FLVER_ATTRIBUTE_LENGTH_MISMATCH: ${label} expected=${expected} actual=${actualComponents}`);
+  }
+}
+
+function assertTriangleIndices(
+  indices: Uint16Array | Uint32Array,
+  vertexCount: number,
+  label: string
+): void {
+  if (indices.length % 3 !== 0) {
+    throw new Error(`FLVER_TRIANGLE_LIST_LENGTH_INVALID: ${label} count=${indices.length}`);
+  }
+  for (const index of indices) {
+    if (index >= vertexCount) {
+      throw new Error(`FLVER_INDEX_OUT_OF_RANGE: ${label} index=${index} vertices=${vertexCount}`);
+    }
+  }
 }
 
 function decodeSkinIndices(base64: string, vertexCount: number): Uint16Array {
   const bytes = decodeBase64Safe(base64);
-  const result = new Uint16Array(vertexCount * 4);
-  if (bytes.length >= vertexCount * 8) {
-    const copy = (bytes.buffer as ArrayBuffer).slice(bytes.byteOffset, bytes.byteOffset + vertexCount * 8);
-    const u16 = new Uint16Array(copy);
-    result.set(u16.subarray(0, vertexCount * 4));
-  } else if (bytes.length >= vertexCount * 4) {
-    for (let i = 0; i < vertexCount * 4; i++) {
-      result[i] = bytes[i] ?? 0;
-    }
-  } else {
-    for (let i = 0; i < Math.min(bytes.length, vertexCount * 4); i++) {
-      result[i] = bytes[i] ?? 0;
-    }
+  const expectedBytes = vertexCount * 4 * Uint16Array.BYTES_PER_ELEMENT;
+  if (bytes.byteLength !== expectedBytes) {
+    throw new Error(`FLVER_SKIN_INDEX_LENGTH_MISMATCH: expected=${expectedBytes} actual=${bytes.byteLength}`);
   }
-  return result;
+  const copy = (bytes.buffer as ArrayBuffer).slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
+  return new Uint16Array(copy);
 }
 
 function decodeSkinWeights(base64: string, vertexCount: number): Float32Array {
   const bytes = decodeBase64Safe(base64);
-  const result = new Float32Array(vertexCount * 4);
-  if (bytes.length >= vertexCount * 16) {
-    const copy = (bytes.buffer as ArrayBuffer).slice(bytes.byteOffset, bytes.byteOffset + vertexCount * 16);
-    const f32 = new Float32Array(copy);
-    result.set(f32.subarray(0, vertexCount * 4));
-  } else if (bytes.length >= vertexCount * 4) {
-    for (let i = 0; i < vertexCount; i++) {
-      const offset = i * 4;
-      const w0 = (bytes[offset] ?? 0) / 255;
-      const w1 = (bytes[offset + 1] ?? 0) / 255;
-      const w2 = (bytes[offset + 2] ?? 0) / 255;
-      const w3 = (bytes[offset + 3] ?? 0) / 255;
-      const sum = w0 + w1 + w2 + w3;
-      if (sum > 0) {
-        result[offset] = w0 / sum;
-        result[offset + 1] = w1 / sum;
-        result[offset + 2] = w2 / sum;
-        result[offset + 3] = w3 / sum;
-      } else {
-        result[offset] = 1.0;
+  const expectedBytes = vertexCount * 4 * Float32Array.BYTES_PER_ELEMENT;
+  if (bytes.byteLength !== expectedBytes) {
+    throw new Error(`FLVER_SKIN_WEIGHT_LENGTH_MISMATCH: expected=${expectedBytes} actual=${bytes.byteLength}`);
+  }
+  const copy = (bytes.buffer as ArrayBuffer).slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
+  return new Float32Array(copy);
+}
+
+function assertSkinIndices(
+  indices: Uint16Array,
+  weights: Float32Array,
+  boneCount: number,
+  label: string
+): void {
+  for (let vertex = 0; vertex < weights.length / 4; vertex += 1) {
+    let sum = 0;
+    for (let influence = 0; influence < 4; influence += 1) {
+      const offset = vertex * 4 + influence;
+      const weight = weights[offset]!;
+      if (!Number.isFinite(weight) || weight < 0) {
+        throw new Error(`FLVER_SKIN_WEIGHT_INVALID: ${label} vertex=${vertex}`);
+      }
+      sum += weight;
+      if (weight > 1e-6 && indices[offset]! >= boneCount) {
+        throw new Error(`FLVER_SKIN_INDEX_OUT_OF_RANGE: ${label} vertex=${vertex} bone=${indices[offset]} bones=${boneCount}`);
       }
     }
-  } else {
-    for (let i = 0; i < vertexCount; i++) {
-      result[i * 4] = 1.0;
+    if (!Number.isFinite(sum) || sum < 0.999 || sum > 1.001) {
+      throw new Error(`FLVER_SKIN_WEIGHT_SUM_INVALID: ${label} vertex=${vertex} sum=${sum}`);
     }
   }
-  return result;
-}
-
-// 骨权重着色：基于真实 float32 权重，主骨权重高为红（顶点紧绑单骨），分散为蓝。
-function boneWeightColors(weights: Float32Array, vertexCount: number): Float32Array {
-  const colors = new Float32Array(vertexCount * 3);
-  for (let v = 0; v < vertexCount; v++) {
-    const primaryWeight = Math.max(0, Math.min(1, weights[v * 4] ?? 1.0));
-    colors[v * 3] = primaryWeight;
-    colors[v * 3 + 1] = 0.2;
-    colors[v * 3 + 2] = 1 - primaryWeight;
-  }
-  return colors;
-}
-
-const BONE_PALETTE: Array<[number, number, number]> = [
-  [1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0], [1.0, 1.0, 0.0],
-  [1.0, 0.0, 1.0], [0.0, 1.0, 1.0], [1.0, 0.5, 0.0], [0.5, 0.0, 1.0],
-  [0.0, 1.0, 0.5], [0.5, 1.0, 0.0], [1.0, 0.0, 0.5], [0.0, 0.5, 1.0]
-];
-
-// 骨索引着色：按首个骨索引取调色板色。
-function boneIndexColors(indices: Uint16Array, vertexCount: number): Float32Array {
-  const colors = new Float32Array(vertexCount * 3);
-  for (let v = 0; v < vertexCount; v++) {
-    const boneIdx = (indices[v * 4] ?? 0) % BONE_PALETTE.length;
-    const color = BONE_PALETTE[boneIdx] ?? [1.0, 1.0, 1.0];
-    colors[v * 3] = color[0];
-    colors[v * 3 + 1] = color[1];
-    colors[v * 3 + 2] = color[2];
-  }
-  return colors;
 }
 
 /**

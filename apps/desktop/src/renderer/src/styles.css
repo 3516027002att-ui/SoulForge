@@ -327,6 +327,18 @@ kbd {
   border-radius: var(--radius-s);
 }
 .workspace-switcher__menu button[role='menuitem']:hover { color: var(--ink-0); background: var(--control-hover-bg); }
+.workspace-indexing {
+  display: inline-flex; align-items: center; gap: 6px; min-width: 0; max-width: 34ch;
+  color: var(--ink-2); font-size: 11px; white-space: nowrap;
+}
+.workspace-indexing--failed { color: var(--warn); }
+.workspace-indexing__label { overflow: hidden; text-overflow: ellipsis; }
+.workspace-indexing__spinner {
+  width: 10px; height: 10px; flex: none; border: 1px solid var(--line-strong);
+  border-top-color: var(--ember); border-radius: 50%; animation: workspace-indexing-spin 800ms linear infinite;
+}
+@keyframes workspace-indexing-spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) { .workspace-indexing__spinner { animation: none; } }
 .titlebar__center { flex: 1; display: flex; justify-content: center; }
 .cmdk-trigger {
   -webkit-app-region: no-drag;
@@ -1023,7 +1035,22 @@ pre.tool-output {
 }
 
 /* MAP-50B：MSB 三栏地图工作台（Map Object List | Viewport | Properties） */
-.msb-object-list { display: flex; flex-direction: column; gap: 6px; }
+.msb-object-list-shell { height: 100%; min-height: 0; }
+.msb-object-list {
+  position: relative;
+  height: 100%;
+  min-height: 0;
+  overflow: auto;
+  scrollbar-gutter: stable;
+}
+.msb-object-list__spacer { position: relative; width: 100%; }
+.msb-object-list__virtual-row {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100%;
+  box-sizing: border-box;
+}
 .msb-object-group {
   border: 0; border-bottom: 1px solid var(--line);
   border-radius: 0; background: transparent;
@@ -1034,11 +1061,52 @@ pre.tool-output {
   transition: background var(--dur-micro);
 }
 .msb-object-group__summary:hover { background: var(--forge-hover); }
+.msb-object-group__toggle {
+  width: 100%;
+  height: 100%;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 10px;
+  border: 0;
+  color: inherit;
+  background: transparent;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
 .msb-object-group__empty { padding: 4px 10px; font-size: 12px; }
 /* 对象行：单列标签（覆盖 binder-child-row 的六列默认模板） */
 .msb-object-row {
   grid-template-columns: minmax(120px, 1fr);
   min-width: 150px;
+}
+.msb-transform-modes {
+  position: absolute;
+  top: 8px;
+  left: 8px;
+  z-index: 2;
+  display: flex;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  background: var(--forge-2);
+}
+.msb-transform-modes button {
+  min-width: 48px;
+  height: 28px;
+  padding: 0 8px;
+  border: 0;
+  border-right: 1px solid var(--line);
+  color: var(--ink-2);
+  background: transparent;
+  cursor: pointer;
+}
+.msb-transform-modes button:last-child { border-right: 0; }
+.msb-transform-modes button:hover { background: var(--forge-hover); }
+.msb-transform-modes button.is-active {
+  color: var(--ink-1);
+  background: var(--forge-active);
 }
 /* 问题4-A：对象名字给全——数据不 slice；窄栏 ellipsis + title 全名。 */
 .msb-object-name {

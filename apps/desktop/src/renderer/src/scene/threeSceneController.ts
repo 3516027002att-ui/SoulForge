@@ -13,14 +13,12 @@
  */
 
 import type { SceneDrawList } from './sceneManifestBrowser.js';
-import { decodeBase64ToUint8Array } from '../utils/binary.js';
 import {
   type AuthoritativeAnimationClip,
   sampleAuthoritativePose
 } from '@soulforge/shared';
 import { ModelResourcePool } from './modelResourcePool.js';
 import type {
-  BoxGeometry,
   BufferGeometry,
   CompressedPixelFormat,
   CompressedTextureMipmap,
@@ -29,17 +27,9 @@ import type {
   Object3D,
   PerspectiveCamera,
   Scene,
-  SphereGeometry
 } from 'three';
 
 type ThreeModule = typeof import('three');
-
-/** base64 → Float32Array（S23：mapbnd 提取的网格 typed buffer）。 */
-function decodeBase64F32(base64: string, expectedCount: number): Float32Array {
-  const bytes = decodeBase64ToUint8Array(base64);
-  const view = new Float32Array(bytes.buffer, bytes.byteOffset, Math.floor(bytes.length / 4));
-  return view.length >= expectedCount ? view : new Float32Array(expectedCount);
-}
 
 export type RendererBackend = 'webgpu' | 'webgl2';
 
@@ -77,6 +67,7 @@ export interface ProxySceneHandle extends ThreeSceneHandle {
   updateModelGeometry?: (modelName: string, geometryData: {
     positionsBase64: string;
     indicesBase64?: string | undefined;
+    indexSize?: 16 | 32 | undefined;
     uvsBase64?: string | undefined;
     normalsBase64?: string | undefined;
     vertexCount: number;
@@ -92,6 +83,11 @@ export interface FlverSceneHandle extends ThreeSceneHandle {
     rotation: [number, number, number, number] | [number, number, number];
     scale?: [number, number, number] | undefined;
   }>) => void;
+  setSkeletonPoses?: (poses: Readonly<Record<string, Array<{
+    translation: [number, number, number];
+    rotation: [number, number, number, number] | [number, number, number];
+    scale?: [number, number, number] | undefined;
+  }>>>) => void;
 }
 
 /** 未压缩 RGBA 纹理投影输入（typed bytes，不含渲染器对象）。 */
@@ -133,6 +129,10 @@ export interface FlverSceneMesh {
   vertexColors?: Float32Array;
   skinIndices?: Uint16Array;
   skinWeights?: Float32Array;
+  /** The FLVER-local skeleton namespace used by this mesh. */
+  skeletonId?: string;
+  skinningMode?: 'weighted' | 'rigid' | 'static';
+  boneIndexSpace?: 'flver-global' | 'none';
   vertexCount: number;
   wireframeOverlay?: boolean;
   texture?: FlverSceneTexture;
@@ -140,10 +140,21 @@ export interface FlverSceneMesh {
 
 export interface FlverSceneBone {
   id: string;
+  index?: number;
   name: string;
   parentIndex: number;
+  childIndex?: number;
+  nextSiblingIndex?: number;
+  hierarchyId?: string;
   translation: [number, number, number];
   rotation: [number, number, number];
+  scale?: [number, number, number];
+  rotationOrder?: 'XZY' | 'XYZ';
+}
+
+export interface FlverSceneSkeleton {
+  id: string;
+  bones: FlverSceneBone[];
 }
 
 export interface FlverSceneDummy {
@@ -165,7 +176,10 @@ export interface FlverSceneBounds {
 export interface FlverSemanticScene {
   meshes: FlverSceneMesh[];
   bones?: FlverSceneBone[];
+  skeletons?: FlverSceneSkeleton[];
   dummies?: FlverSceneDummy[];
+  /** Bone helpers are diagnostic and stay off in normal model/action previews. */
+  showSkeletonMarkers?: boolean;
   bounds: FlverSceneBounds;
 }
 
@@ -193,6 +207,7 @@ interface SceneCore {
   markerGroup: Object3D;
   highlightGroup: Object3D;
   meshes: Map<string, Object3D>;
+  instanceBatches: Map<string, InstanceBatch>;
   resources: Array<{ dispose(): void }>;
   track: ResourceTracker;
   renderer: ThreeRendererLike;
@@ -202,9 +217,31 @@ interface SceneCore {
   setSelected: (id: string | null, notify?: boolean) => void;
   setTransformMode: (mode: TransformMode) => void;
   addMesh: (id: string, object: Object3D) => void;
+  addInstanceBatch: (
+    key: string,
+    items: SceneDrawList['items'],
+    geometry: BufferGeometry,
+    material: Material
+  ) => void;
+  updateInstanceBatchGeometry: (key: string, geometry: BufferGeometry, material: Material) => void;
   clearContent: () => void;
   frameToBounds: (bounds: FlverSceneBounds) => void;
   disposeAll: () => void;
+}
+
+interface InstanceBinding {
+  batchKey: string;
+  mesh: import('three').InstancedMesh;
+  instanceIndex: number;
+  target: Object3D;
+  worldBounds: import('three').Box3;
+}
+
+interface InstanceBatch {
+  key: string;
+  mesh: import('three').InstancedMesh;
+  ids: string[];
+  root: Object3D;
 }
 
 const HIGHLIGHT_COLOR = 0x4fa8ff;
@@ -226,15 +263,30 @@ export async function mountThreeProxyScene(
   const core = await mountSceneCore(input);
   const resourcePool = new ModelResourcePool();
   let initialFramed = false;
+  let hasContent = false;
 
   const setDrawList = (list: SceneDrawList): void => {
     try {
       assertNoAbsolutePathLeak(list);
       const prevSelected = core.selectedId;
+      if (hasContent) resourcePool.clear();
       core.clearContent();
-      for (const item of list.items) {
-        core.addMesh(item.id, createProxyMesh(core.three, core.track, item, resourcePool));
+      for (const batch of groupSceneDrawItems(list.items)) {
+        const first = batch.items[0];
+        if (!first) continue;
+        const geometry = first.mesh
+          ? resourcePool.getOrCreateGeometry(core.three, core.track, batch.resourceKey, first.mesh)
+          : resourcePool.getPrimitiveGeometry(
+              core.three,
+              core.track,
+              first.primitive === 'sphere' ? 'sphere' : 'box'
+            );
+        const material = first.mesh
+          ? resourcePool.getDefaultRealMaterial(core.three, core.track)
+          : resourcePool.getProxyMaterial(core.three, core.track, first.colorRgb);
+        core.addInstanceBatch(batch.key, batch.items, geometry, material);
       }
+      hasContent = true;
       if (!initialFramed) {
         core.frameToBounds(list.bounds);
         initialFramed = true;
@@ -261,6 +313,7 @@ export async function mountThreeProxyScene(
     setDrawList,
     replaceItemMesh: (id, mesh) => {
       const previous = core.meshes.get(id);
+      if (previous?.userData.instanceBatchKey) return;
       if (previous) {
         core.root.remove(previous);
         core.meshes.delete(id);
@@ -277,17 +330,7 @@ export async function mountThreeProxyScene(
         geometryData
       );
 
-      const cleanName = modelName.toLowerCase().replace(/\.mapbnd(\.dcx)?$/i, '');
-      // 2. 匹配并热替换所有关联该 modelName 的 Mesh，共享 geometry 与 material
-      for (const [id, meshObj] of core.meshes) {
-        const mesh = meshObj as import('three').Mesh;
-        const uModel = typeof mesh.userData?.modelName === 'string' ? mesh.userData.modelName.toLowerCase() : '';
-        const belongs = id.toLowerCase().includes(cleanName) || uModel === cleanName || uModel.includes(cleanName);
-        if (belongs && mesh.isMesh) {
-          mesh.geometry = geometry;
-          mesh.material = material;
-        }
-      }
+      core.updateInstanceBatchGeometry(`model:${normalizeModelName(modelName)}`, geometry, material);
     },
     dispose: () => {
       resourcePool.clear();
@@ -311,38 +354,94 @@ export async function mountFlverScene(input: {
   resourceAudit?: (resources: ReadonlyArray<{ dispose(): void }>) => void;
 }): Promise<FlverSceneHandle> {
   const core = await mountSceneCore(input);
-  let activeBones: Array<import('three').Bone> = [];
+  interface RuntimeSkeleton {
+    bones: Array<import('three').Bone>;
+    skeleton: import('three').Skeleton;
+    initialBones: Array<{
+      translation: [number, number, number];
+      rotation: [number, number, number, number];
+      scale: [number, number, number];
+    }>;
+  }
+  let activeSkeletons = new Map<string, RuntimeSkeleton>();
 
-  let activeSkeleton: import('three').Skeleton | null = null;
-  let initialBones: Array<{
+  const applyPoseLocals = (runtime: RuntimeSkeleton, pose: Array<{
     translation: [number, number, number];
-    rotation: [number, number, number];
-  }> = [];
+    rotation: [number, number, number, number] | [number, number, number];
+    scale?: [number, number, number] | undefined;
+  }>): void => {
+    for (let index = 0; index < runtime.bones.length && index < pose.length; index += 1) {
+      const transform = pose[index];
+      const bone = runtime.bones[index];
+      if (!transform || !bone) continue;
+      bone.position.set(transform.translation[0], transform.translation[1], transform.translation[2]);
+      if (transform.rotation.length === 4) {
+        bone.quaternion.set(
+          transform.rotation[0],
+          transform.rotation[1],
+          transform.rotation[2],
+          transform.rotation[3]
+        );
+      } else {
+        bone.rotation.set(transform.rotation[0], transform.rotation[1], transform.rotation[2], 'XZY');
+      }
+      const scale = transform.scale ?? [1, 1, 1];
+      bone.scale.set(scale[0], scale[1], scale[2]);
+    }
+  };
+
+  const resetSkeletonLocals = (runtime: RuntimeSkeleton): void => {
+    for (let index = 0; index < runtime.bones.length; index += 1) {
+      const initial = runtime.initialBones[index];
+      const bone = runtime.bones[index];
+      if (!initial || !bone) continue;
+      bone.position.set(initial.translation[0], initial.translation[1], initial.translation[2]);
+      bone.quaternion.set(initial.rotation[0], initial.rotation[1], initial.rotation[2], initial.rotation[3]);
+      bone.scale.set(initial.scale[0], initial.scale[1], initial.scale[2]);
+    }
+  };
+
+  const syncSkeletons = (runtimes: Iterable<RuntimeSkeleton>): void => {
+    const changed = [...runtimes];
+    if (changed.length === 0) return;
+    // Every FLVER-local skeleton shares this scene root. Propagate local
+    // transforms once, then refresh only each skeleton's bone texture.
+    core.root.updateMatrixWorld(true);
+    for (const runtime of changed) runtime.skeleton.update();
+  };
 
   const setScene = (semantic: FlverSemanticScene): void => {
     try {
       core.clearContent();
-      activeBones = [];
-      activeSkeleton = null;
-      initialBones = [];
+      activeSkeletons = new Map<string, RuntimeSkeleton>();
 
-      // 1. 构建 THREE.Bone 骨骼树（原生弧度，禁止额外乘 PI/180）
-      let skeleton: import('three').Skeleton | null = null;
-      if (semantic.bones && semantic.bones.length > 0) {
+      const semanticSkeletons = semantic.skeletons?.length
+        ? semantic.skeletons
+        : (semantic.bones?.length ? [{ id: 'default', bones: semantic.bones }] : []);
+      for (const semanticSkeleton of semanticSkeletons) {
         const threeBones: Array<import('three').Bone> = [];
-        for (const b of semantic.bones) {
+        const initialBones: RuntimeSkeleton['initialBones'] = [];
+        for (const b of semanticSkeleton.bones) {
           const bone = new core.three.Bone();
           bone.name = b.name;
           bone.position.set(b.translation[0], b.translation[1], b.translation[2]);
-          bone.rotation.set(b.rotation[0], b.rotation[1], b.rotation[2]);
+          bone.rotation.set(
+            b.rotation[0],
+            b.rotation[1],
+            b.rotation[2],
+            b.rotationOrder ?? 'XZY'
+          );
+          const scale = b.scale ?? [1, 1, 1];
+          bone.scale.set(scale[0], scale[1], scale[2]);
           threeBones.push(bone);
           initialBones.push({
             translation: [b.translation[0], b.translation[1], b.translation[2]],
-            rotation: [b.rotation[0], b.rotation[1], b.rotation[2]]
+            rotation: [bone.quaternion.x, bone.quaternion.y, bone.quaternion.z, bone.quaternion.w],
+            scale: [scale[0], scale[1], scale[2]]
           });
         }
-        for (let i = 0; i < semantic.bones.length; i++) {
-          const parentIdx = semantic.bones[i]!.parentIndex;
+        for (let i = 0; i < semanticSkeleton.bones.length; i++) {
+          const parentIdx = semanticSkeleton.bones[i]!.parentIndex;
           if (parentIdx >= 0 && parentIdx < threeBones.length && parentIdx !== i) {
             threeBones[parentIdx]!.add(threeBones[i]!);
           } else {
@@ -353,14 +452,14 @@ export async function mountFlverScene(input: {
         // have just been attached to the semantic root, so force their world
         // matrices current before capturing bind-pose inverses.
         core.root.updateMatrixWorld(true);
-        skeleton = core.track(new core.three.Skeleton(threeBones));
-        activeBones = threeBones;
-        activeSkeleton = skeleton;
+        const skeleton = core.track(new core.three.Skeleton(threeBones));
+        activeSkeletons.set(semanticSkeleton.id, { bones: threeBones, skeleton, initialBones });
       }
 
-      // 2. 创建网格（含 SkinnedMesh 绑定）
+      // Each FLVER mesh binds only to its own local skeleton namespace.
       for (const item of semantic.meshes) {
-        core.addMesh(item.id, createFlverMesh(core.three, core.track, item, skeleton));
+        const runtime = activeSkeletons.get(item.skeletonId ?? 'default');
+        core.addMesh(item.id, createFlverMesh(core.three, core.track, item, runtime?.skeleton ?? null));
       }
       createMarkers(core.three, core.track, core.markerGroup, semantic);
       core.frameToBounds(semantic.bounds);
@@ -388,65 +487,43 @@ export async function mountFlverScene(input: {
       activeClip = clip;
     },
     setPlaybackTime: (time: number) => {
-      if (!activeSkeleton || activeBones.length === 0) return;
+      const runtime = activeSkeletons.get('default') ?? activeSkeletons.values().next().value as RuntimeSkeleton | undefined;
+      if (!runtime) return;
       if (!activeClip || time <= 0) {
-        // 重置为初始 Bind Pose
-        for (let i = 0; i < activeBones.length; i++) {
-          const init = initialBones[i];
-          const bone = activeBones[i];
-          if (init && bone) {
-            bone.position.set(init.translation[0], init.translation[1], init.translation[2]);
-            bone.rotation.set(init.rotation[0], init.rotation[1], init.rotation[2]);
-            bone.scale.set(1, 1, 1);
-          }
-        }
-        core.root.updateMatrixWorld(true);
-        activeSkeleton.update();
+        resetSkeletonLocals(runtime);
+        syncSkeletons([runtime]);
         return;
       }
       // 消费权威动画采样位姿（Havok Spline / De Boor 采样结果）
       const poses = sampleAuthoritativePose(activeClip, time, true);
       if (!poses) return;
 
-      for (let i = 0; i < activeBones.length; i++) {
-        const bone = activeBones[i];
+      for (let i = 0; i < runtime.bones.length; i++) {
+        const bone = runtime.bones[i];
         const pose = poses[i];
         if (!bone || !pose) continue;
         bone.position.set(pose.p[0], pose.p[1], pose.p[2]);
         bone.quaternion.set(pose.q[0], pose.q[1], pose.q[2], pose.q[3]);
         bone.scale.set(pose.s[0], pose.s[1], pose.s[2]);
       }
-      core.root.updateMatrixWorld(true);
-      activeSkeleton.update();
+      syncSkeletons([runtime]);
     },
     setPose: (pose) => {
-      if (!activeSkeleton || activeBones.length === 0 || !pose || pose.length === 0) return;
-      for (let i = 0; i < activeBones.length && i < pose.length; i++) {
-        const transform = pose[i];
-        const bone = activeBones[i];
-        if (!transform || !bone) continue;
-
-        bone.position.set(transform.translation[0], transform.translation[1], transform.translation[2]);
-        if (transform.rotation.length === 4) {
-          bone.quaternion.set(
-            transform.rotation[0],
-            transform.rotation[1],
-            transform.rotation[2],
-            transform.rotation[3]
-          );
-        } else {
-          bone.rotation.set(
-            transform.rotation[0],
-            transform.rotation[1],
-            transform.rotation[2]
-          );
-        }
-        if (transform.scale) {
-          bone.scale.set(transform.scale[0], transform.scale[1], transform.scale[2]);
-        }
+      const runtime = activeSkeletons.get('default') ?? activeSkeletons.values().next().value as RuntimeSkeleton | undefined;
+      if (runtime && pose?.length) {
+        applyPoseLocals(runtime, pose);
+        syncSkeletons([runtime]);
       }
-      core.root.updateMatrixWorld(true);
-      activeSkeleton.update();
+    },
+    setSkeletonPoses: (poses) => {
+      const changed: RuntimeSkeleton[] = [];
+      for (const [skeletonId, runtime] of activeSkeletons) {
+        const pose = poses[skeletonId];
+        if (pose?.length) applyPoseLocals(runtime, pose);
+        else resetSkeletonLocals(runtime);
+        changed.push(runtime);
+      }
+      syncSkeletons(changed);
     },
     dispose: core.disposeAll
   };
@@ -498,6 +575,9 @@ async function mountSceneCore(input: MountInput): Promise<SceneCore> {
   scene.add(highlightGroup);
 
   const meshes = new Map<string, Object3D>();
+  const instanceBindings = new Map<string, InstanceBinding>();
+  const instanceBatches = new Map<string, InstanceBatch>();
+  const pickables = new Set<Object3D>();
   const resources: Array<{ dispose(): void }> = [];
   const staticResources: Array<{ dispose(): void }> = [grid.geometry, axes.geometry];
   const highlightMaterials = new Set<{ dispose(): void }>();
@@ -507,8 +587,31 @@ async function mountSceneCore(input: MountInput): Promise<SceneCore> {
   };
 
   let selectedId: string | null = null;
+  let selectionGeneration = 0;
   let raf = 0;
   let disposed = false;
+
+  const detachSelectionTarget = (id: string | null): void => {
+    if (!id) return;
+    const binding = instanceBindings.get(id);
+    if (!binding) return;
+    if (transformControls?.object === binding.target) transformControls.detach();
+    if (binding.target.parent) binding.target.parent.remove(binding.target);
+    // post-condition: old target must be detached
+    if (binding.target.parent !== null) {
+      console.error(`[gizmo] detach failed for ${id}: parent still ${binding.target.parent?.type}`);
+    }
+  };
+
+  const assertAttachedToBatchRoot = (binding: InstanceBinding): boolean => {
+    const batch = instanceBatches.get(binding.batchKey);
+    const batchRoot = batch?.root ?? (binding.mesh.parent as Object3D | null) ?? root;
+    if (binding.target.parent !== batchRoot) {
+      console.error(`[gizmo] attach assert failed: target.parent !== batch.root for ${binding.target.userData.itemId}`);
+      return false;
+    }
+    return true;
+  };
 
   // ---- 关卡编辑器 Free-Look Fly Camera Controller (原地转头 + 自由漫游) ----
   let yaw = 0;
@@ -539,6 +642,9 @@ async function mountSceneCore(input: MountInput): Promise<SceneCore> {
     dispose(): void;
     object?: Object3D;
   } | null = null;
+  let transformDragging = false;
+  let pendingTransformChange: TransformChangeEvent | null = null;
+  let suppressSelectionUntil = 0;
 
   const setSize = (): void => {
     const width = Math.max(input.container.clientWidth, 1);
@@ -546,23 +652,6 @@ async function mountSceneCore(input: MountInput): Promise<SceneCore> {
     renderer.setSize(width, height, false);
     camera.aspect = width / height;
     camera.updateProjectionMatrix();
-  };
-
-  const restoreEmissive = (): void => {
-    for (const object of meshes.values()) {
-      object.traverse((child) => {
-        const mesh = child as Mesh;
-        if (!mesh.isMesh) return;
-        const materials = Array.isArray(mesh.material) ? mesh.material : [mesh.material];
-        for (const material of materials) {
-          const userData = material.userData as Record<string, unknown>;
-          const original = userData._sfOrigEmissive;
-          if (typeof original !== 'number') continue;
-          (material as unknown as { emissive: { setHex(value: number): void } }).emissive.setHex(original);
-          delete userData._sfOrigEmissive;
-        }
-      });
-    }
   };
 
   const clearHighlightObjects = (): void => {
@@ -580,54 +669,105 @@ async function mountSceneCore(input: MountInput): Promise<SceneCore> {
   const applyHighlight = (id: string): void => {
     const object = meshes.get(id);
     if (!object) return;
-    object.traverse((child) => {
-      const mesh = child as Mesh;
-      if (!mesh.isMesh) return;
-      const materials = Array.isArray(mesh.material) ? mesh.material : [mesh.material];
-      for (const material of materials) {
-        const emissive = (material as { emissive?: { getHex(): number; setHex(value: number): void } }).emissive;
-        if (!emissive) continue;
-        const userData = material.userData as Record<string, unknown>;
-        if (typeof userData._sfOrigEmissive !== 'number') userData._sfOrigEmissive = emissive.getHex();
-        emissive.setHex(HIGHLIGHT_COLOR);
-      }
-    });
-    let firstMesh: Mesh | null = (object as Mesh).isMesh ? object as Mesh : null;
-    if (!firstMesh) {
-      for (const child of object.children) {
-        if ((child as Mesh).isMesh) {
-          firstMesh = child as Mesh;
-          break;
+    const binding = instanceBindings.get(id);
+    let source: Object3D = object;
+    let geometry: BufferGeometry | null = binding?.mesh.geometry ?? null;
+    if (!geometry) {
+      object.traverse((child) => {
+        if (!geometry && (child as Mesh).isMesh) {
+          geometry = (child as Mesh).geometry;
+          source = child;
         }
-      }
-    }
-    if (firstMesh) {
-      const overlayMaterial = new three.MeshBasicMaterial({
-        color: HIGHLIGHT_COLOR,
-        wireframe: true,
-        transparent: true,
-        opacity: 0.7,
-        depthTest: false
       });
-      highlightMaterials.add(overlayMaterial);
-      resources.push(overlayMaterial);
-      const overlay = new three.Mesh(firstMesh.geometry, overlayMaterial);
-      overlay.position.copy(firstMesh.position);
-      overlay.rotation.copy(firstMesh.rotation);
-      overlay.scale.copy(firstMesh.scale);
-      highlightGroup.add(overlay);
     }
+    if (!geometry) return;
+    const overlayMaterial = new three.MeshBasicMaterial({
+      color: HIGHLIGHT_COLOR,
+      wireframe: true,
+      transparent: true,
+      opacity: 0.7,
+      depthTest: false
+    });
+    highlightMaterials.add(overlayMaterial);
+    resources.push(overlayMaterial);
+    const overlay = new three.Mesh(geometry, overlayMaterial);
+    source.updateMatrixWorld(true);
+    source.matrixWorld.decompose(overlay.position, overlay.quaternion, overlay.scale);
+    overlay.userData.itemId = id;
+    highlightGroup.add(overlay);
+  };
+
+  const syncHighlightTransform = (id: string): void => {
+    const source = meshes.get(id);
+    const overlay = highlightGroup.children[0];
+    if (!source || !overlay) return;
+    source.updateMatrixWorld(true);
+    source.matrixWorld.decompose(overlay.position, overlay.quaternion, overlay.scale);
   };
 
   const setSelected = (id: string | null, notify = true): void => {
+    if (selectedId === id) {
+      if (id) {
+        const binding = instanceBindings.get(id);
+        if (binding && transformControls && transformControls.object !== binding.target) {
+          const batch = instanceBatches.get(binding.batchKey);
+          const batchRoot = batch?.root ?? (binding.mesh.parent as Object3D) ?? root;
+          if (binding.target.parent !== batchRoot) {
+            binding.target.parent?.remove(binding.target);
+            batchRoot.add(binding.target);
+            // Ensure decomposed local matches batch-root-local matrix
+            binding.target.updateMatrix();
+            binding.target.updateMatrixWorld(true);
+          }
+          if (!assertAttachedToBatchRoot(binding)) return;
+          transformControls.attach(binding.target);
+        } else if (id && !transformControls) {
+          // TransformControls not yet loaded; bump generation to track pending attach
+          selectionGeneration += 1;
+        }
+      }
+      return;
+    }
+    // Detach old selection target from its batch root
+    if (selectedId) detachSelectionTarget(selectedId);
     selectedId = id;
-    restoreEmissive();
+    selectionGeneration += 1;
+    const currentGen = selectionGeneration;
     clearHighlightObjects();
     if (id) {
       applyHighlight(id);
-      const target = meshes.get(id);
-      if (target && transformControls) {
-        transformControls.attach(target);
+      const binding = instanceBindings.get(id);
+      if (binding) {
+        const batch = instanceBatches.get(binding.batchKey);
+        const batchRoot = batch?.root ?? (binding.mesh.parent as Object3D) ?? root;
+        // Extract batch-root-local TRS from instance matrix
+        const m = new three.Matrix4();
+        binding.mesh.getMatrixAt(binding.instanceIndex, m);
+        m.decompose(binding.target.position, binding.target.quaternion, binding.target.scale);
+        binding.target.updateMatrix();
+        // Attach to same parent as InstancedMesh
+        if (binding.target.parent !== batchRoot) {
+          binding.target.parent?.remove(binding.target);
+          batchRoot.add(binding.target);
+        }
+        binding.target.updateMatrixWorld(true);
+        if (!assertAttachedToBatchRoot(binding)) return;
+        if (transformControls) {
+          transformControls.attach(binding.target);
+        } else {
+          // Defer attach until TransformControls loads; generation guards stale attaches
+          void currentGen;
+        }
+      } else {
+        // Non-instanced mesh
+        const target = meshes.get(id);
+        if (target && transformControls) {
+          if (target.parent !== root) {
+            target.parent?.remove(target);
+            root.add(target);
+          }
+          transformControls.attach(target);
+        }
       }
     } else {
       transformControls?.detach();
@@ -642,18 +782,115 @@ async function mountSceneCore(input: MountInput): Promise<SceneCore> {
   const addMesh = (id: string, object: Object3D): void => {
     object.userData.itemId = id;
     root.add(object);
+    pickables.add(object);
     meshes.set(id, object);
     if (selectedId === id && transformControls) {
       transformControls.attach(object);
     }
   };
 
+  const updateBindingBounds = (binding: InstanceBinding): void => {
+    const geometry = binding.mesh.geometry;
+    if (!geometry.boundingBox) geometry.computeBoundingBox();
+    binding.target.updateMatrixWorld(true);
+    if (geometry.boundingBox) {
+      binding.worldBounds.copy(geometry.boundingBox).applyMatrix4(binding.target.matrixWorld);
+    } else {
+      binding.worldBounds.setFromCenterAndSize(
+        binding.target.position,
+        new three.Vector3(1, 1, 1)
+      );
+    }
+  };
+
+  const addInstanceBatch = (
+    batchKey: string,
+    items: SceneDrawList['items'],
+    geometry: BufferGeometry,
+    material: Material
+  ): void => {
+    if (items.length === 0) return;
+    const instanced = new three.InstancedMesh(geometry, material, items.length);
+    instanced.name = batchKey;
+    instanced.userData.instanceBatchKey = batchKey;
+    instanced.instanceMatrix.setUsage(three.DynamicDrawUsage);
+    const ids: string[] = [];
+    for (let index = 0; index < items.length; index += 1) {
+      const item = items[index];
+      if (!item) continue;
+      const target = new three.Object3D();
+      target.userData.itemId = item.id;
+      target.userData.instanceBatchKey = batchKey;
+      if (item.modelName) target.userData.modelName = item.modelName;
+      target.position.set(item.position[0], item.position[1], item.position[2]);
+      target.rotation.set(
+        (item.rotation[0] * Math.PI) / 180,
+        (item.rotation[1] * Math.PI) / 180,
+        (item.rotation[2] * Math.PI) / 180
+      );
+      target.scale.set(item.scale[0], item.scale[1], item.scale[2]);
+      target.updateMatrix();
+      target.updateMatrixWorld(true);
+      instanced.setMatrixAt(index, target.matrix);
+      instanced.setColorAt(
+        index,
+        new three.Color(item.colorRgb[0], item.colorRgb[1], item.colorRgb[2])
+      );
+      ids[index] = item.id;
+      const binding: InstanceBinding = {
+        batchKey,
+        mesh: instanced,
+        instanceIndex: index,
+        target,
+        worldBounds: new three.Box3()
+      };
+      meshes.set(item.id, target);
+      instanceBindings.set(item.id, binding);
+      updateBindingBounds(binding);
+    }
+    instanced.instanceMatrix.needsUpdate = true;
+    if (instanced.instanceColor) instanced.instanceColor.needsUpdate = true;
+    instanced.computeBoundingBox();
+    instanced.computeBoundingSphere();
+    root.add(instanced);
+    instanceBatches.set(batchKey, { key: batchKey, mesh: instanced, ids, root });
+  };
+
+  const updateInstanceBatchGeometry = (
+    batchKey: string,
+    geometry: BufferGeometry,
+    material: Material
+  ): void => {
+    const batch = instanceBatches.get(batchKey);
+    if (!batch) return;
+    batch.mesh.geometry = geometry;
+    batch.mesh.material = material;
+    // Real FLVER geometry uses its authored/default material rather than the
+    // diagnostic proxy tint that was attached while the model was loading.
+    batch.mesh.instanceColor = null;
+    for (const id of batch.ids) {
+      const binding = instanceBindings.get(id);
+      if (binding) updateBindingBounds(binding);
+    }
+    batch.mesh.computeBoundingBox();
+    batch.mesh.computeBoundingSphere();
+    if (selectedId && instanceBindings.get(selectedId)?.batchKey === batchKey) {
+      clearHighlightObjects();
+      applyHighlight(selectedId);
+    }
+  };
+
   const clearContent = (): void => {
+    if (selectedId) detachSelectionTarget(selectedId);
+    selectedId = null;
+    selectionGeneration += 1;
     transformControls?.detach();
-    restoreEmissive();
     clearHighlightObjects();
-    for (const object of meshes.values()) root.remove(object);
+    for (const object of root.children.slice()) root.remove(object);
     meshes.clear();
+    instanceBindings.clear();
+    instanceBatches.clear();
+    pickables.clear();
     for (const object of markerGroup.children.slice()) markerGroup.remove(object);
     for (const resource of resources) resource.dispose();
     resources.length = 0;
@@ -686,6 +923,7 @@ async function mountSceneCore(input: MountInput): Promise<SceneCore> {
   };
 
   // 挂载 TransformControls (Gizmo)
+  const pendingGenerationAtImport = selectionGeneration;
   void import('three/examples/jsm/controls/TransformControls.js')
     .then((module) => {
       if (disposed) return;
@@ -704,6 +942,20 @@ async function mountSceneCore(input: MountInput): Promise<SceneCore> {
         if (!target) return;
         const itemId = (target.userData.itemId as string | undefined) ?? selectedId;
         if (!itemId) return;
+        const binding = instanceBindings.get(itemId);
+        if (binding) {
+          // Ensure target is still attached to batch root before writing batch-local matrix
+          const batch = instanceBatches.get(binding.batchKey);
+          const batchRoot = batch?.root ?? (binding.mesh.parent as Object3D) ?? root;
+          if (target.parent !== batchRoot) {
+            console.error(`[gizmo] objectChange: target parent mismatch for ${itemId}`);
+            return;
+          }
+          target.updateMatrix();
+          // Write batch-root-local matrix only; never world matrix
+          binding.mesh.setMatrixAt(binding.instanceIndex, target.matrix);
+          binding.mesh.instanceMatrix.needsUpdate = true;
+        }
         const pos: [number, number, number] = [
           Math.round(target.position.x * 1e4) / 1e4,
           Math.round(target.position.y * 1e4) / 1e4,
@@ -719,18 +971,57 @@ async function mountSceneCore(input: MountInput): Promise<SceneCore> {
           Math.round(target.scale.y * 1e4) / 1e4,
           Math.round(target.scale.z * 1e4) / 1e4
         ];
-        input.onTransformChange?.({ id: itemId, position: pos, rotation: rot, scale: scl });
+        syncHighlightTransform(itemId);
+        pendingTransformChange = { id: itemId, position: pos, rotation: rot, scale: scl };
+      });
+
+      tc.addEventListener('dragging-changed', (event: unknown) => {
+        const dragging = Boolean((event as { value?: unknown }).value);
+        transformDragging = dragging;
+        const itemId = (tc.object?.userData.itemId as string | undefined) ?? selectedId;
+        const binding = itemId ? instanceBindings.get(itemId) : undefined;
+        if (binding) {
+          if (dragging) {
+            binding.mesh.frustumCulled = false;
+          } else {
+            updateBindingBounds(binding);
+            binding.mesh.computeBoundingBox();
+            binding.mesh.computeBoundingSphere();
+            binding.mesh.frustumCulled = true;
+          }
+        }
+        if (!dragging) {
+          suppressSelectionUntil = (typeof performance !== 'undefined' ? performance.now() : Date.now()) + 80;
+          if (pendingTransformChange) input.onTransformChange?.(pendingTransformChange);
+          pendingTransformChange = null;
+        }
       });
 
       transformControls = tc;
-      if (selectedId && meshes.has(selectedId)) {
-        tc.attach(meshes.get(selectedId)!);
+      // Attach only if selection generation hasn't moved past import's snapshot
+      if (selectedId && selectionGeneration === pendingGenerationAtImport) {
+        const binding = instanceBindings.get(selectedId);
+        if (binding) {
+          const batch = instanceBatches.get(binding.batchKey);
+          const batchRoot = batch?.root ?? (binding.mesh.parent as Object3D) ?? root;
+          if (binding.target.parent !== batchRoot) {
+            binding.target.parent?.remove(binding.target);
+            batchRoot.add(binding.target);
+          }
+          if (assertAttachedToBatchRoot(binding)) tc.attach(binding.target);
+        } else {
+          const target = meshes.get(selectedId);
+          if (target) tc.attach(target);
+        }
+      } else if (selectedId && selectionGeneration !== pendingGenerationAtImport) {
+        // Stale generation: do not attach old target; setSelected will handle current generation on next call
       }
     })
     .catch(() => undefined);
 
   // ---- 鼠标右键原地转头与中键平移控制 ----
   const onMouseDown = (event: MouseEvent): void => {
+    if (transformDragging) return;
     if (event.button === 2) {
       isRightMouseDown = true;
       lastPointerX = event.clientX;
@@ -745,6 +1036,7 @@ async function mountSceneCore(input: MountInput): Promise<SceneCore> {
   };
 
   const onMouseMove = (event: MouseEvent): void => {
+    if (transformDragging) return;
     const dx = event.movementX !== undefined && Math.abs(event.movementX) < 100
       ? event.movementX
       : (event.clientX - lastPointerX);
@@ -783,6 +1075,7 @@ async function mountSceneCore(input: MountInput): Promise<SceneCore> {
   };
 
   const onWheel = (event: WheelEvent): void => {
+    if (transformDragging) return;
     if (event.ctrlKey || event.altKey) {
       // 调节漫游速度
       const factor = event.deltaY < 0 ? 1.2 : 0.83;
@@ -834,7 +1127,10 @@ async function mountSceneCore(input: MountInput): Promise<SceneCore> {
       if (selectedId && meshes.has(selectedId)) {
         event.preventDefault();
         const targetObj = meshes.get(selectedId)!;
-        const box = new three.Box3().setFromObject(targetObj);
+        const binding = instanceBindings.get(selectedId);
+        const box = binding
+          ? binding.worldBounds.clone()
+          : new three.Box3().setFromObject(targetObj);
         const center = new three.Vector3();
         box.getCenter(center);
         frameToBounds({
@@ -878,21 +1174,38 @@ async function mountSceneCore(input: MountInput): Promise<SceneCore> {
 
   const raycaster = new three.Raycaster();
   const pointer = new three.Vector2();
+  const boundsHit = new three.Vector3();
   const onClick = (event: MouseEvent): void => {
     if ((event.button ?? 0) !== 0) return; // 只响应鼠标左键选择
+    const now = typeof performance !== 'undefined' ? performance.now() : Date.now();
+    if (transformDragging || now < suppressSelectionUntil) return;
     const rect = canvas.getBoundingClientRect();
     pointer.x = ((event.clientX - rect.left) / rect.width) * 2 - 1;
     pointer.y = -((event.clientY - rect.top) / rect.height) * 2 + 1;
     scene.updateMatrixWorld(true);
     raycaster.setFromCamera(pointer, camera);
-    const hits = raycaster.intersectObjects([...meshes.values()], true);
     let id: string | null = null;
-    if (hits[0]) {
-      id = (hits[0].object.userData.itemId as string | undefined)
-        ?? (hits[0].object.parent?.userData.itemId as string | undefined)
-        ?? null;
+    let nearestDistance = Number.POSITIVE_INFINITY;
+
+    // 大地图按预计算 world AABB 拾取：O(instance count) 的廉价 slab test，避免
+    // 对数千份真实 FLVER 三角形逐个 raycast。模型加载/拖拽后边界会同步更新。
+    for (const [candidateId, binding] of instanceBindings) {
+      const hit = raycaster.ray.intersectBox(binding.worldBounds, boundsHit);
+      if (!hit) continue;
+      const distance = raycaster.ray.origin.distanceTo(hit);
+      if (distance < nearestDistance) {
+        nearestDistance = distance;
+        id = candidateId;
+      }
     }
-    if (id === selectedId) id = null;
+
+    // 角色/普通单体场景数量小，保留精确三角拾取，并与实例 AABB 命中按距离比较。
+    const hits = raycaster.intersectObjects([...pickables], true);
+    if (hits[0] && hits[0].distance < nearestDistance) {
+      let object: Object3D | null = hits[0].object;
+      while (object && typeof object.userData.itemId !== 'string') object = object.parent;
+      id = (object?.userData.itemId as string | undefined) ?? null;
+    }
     setSelected(id);
   };
   canvas.addEventListener('click', onClick);
@@ -977,6 +1290,7 @@ async function mountSceneCore(input: MountInput): Promise<SceneCore> {
     markerGroup,
     highlightGroup,
     meshes,
+    instanceBatches,
     resources,
     track,
     renderer,
@@ -988,6 +1302,8 @@ async function mountSceneCore(input: MountInput): Promise<SceneCore> {
     setSelected,
     setTransformMode,
     addMesh,
+    addInstanceBatch,
+    updateInstanceBatchGeometry,
     clearContent,
     frameToBounds,
     disposeAll
@@ -1013,89 +1329,30 @@ async function createRealRenderer(
   return new three.WebGLRenderer({ canvas, antialias: true, alpha: false });
 }
 
-/**
- * S23 去重缓存：同一 FLVER（如 m000010 的地形）被几十个 part 共享，
- * 旧实现每 instance 都 new 一个 BufferGeometry + 解一次 base64，
- * 既占显存也卡解码。现按 positionsBase64 等入参缓存同一 BufferGeometry，
- * 多实例共享 geometry（mesh 仍独立，仅共享顶点缓冲）。
- */
-function createProxyMesh(
-  three: ThreeModule,
-  track: ResourceTracker,
-  item: SceneDrawList['items'][number],
-  resourcePool?: ModelResourcePool
-): Object3D {
-  let geometry: BufferGeometry;
-  let material: Material;
+interface SceneDrawBatch {
+  key: string;
+  resourceKey: string;
+  items: SceneDrawList['items'];
+}
 
-  if (item.mesh) {
-    const key = item.modelName
-      ? item.modelName.toLowerCase().replace(/\.mapbnd(\.dcx)?$/i, '')
-      : `mesh_${item.id}`;
-    if (resourcePool) {
-      geometry = resourcePool.getOrCreateGeometry(three, track, key, item.mesh);
-      material = resourcePool.getDefaultRealMaterial(three, track);
-    } else {
-      geometry = track(new three.BufferGeometry());
-      geometry.setAttribute(
-        'position',
-        new three.BufferAttribute(decodeBase64F32(item.mesh.positionsBase64, item.mesh.vertexCount * 3), 3)
-      );
-      if (item.mesh.indicesBase64) {
-        const indexBytes = decodeBase64ToUint8Array(item.mesh.indicesBase64);
-        const is32 = item.mesh.indexSize === 32;
-        if (is32) {
-          const view = new Uint32Array(indexBytes.buffer, indexBytes.byteOffset, Math.floor(indexBytes.length / 4));
-          geometry.setIndex(new three.Uint32BufferAttribute(view, 1));
-        } else {
-          const view = new Uint16Array(indexBytes.buffer, indexBytes.byteOffset, Math.floor(indexBytes.length / 2));
-          geometry.setIndex(new three.Uint16BufferAttribute(view, 1));
-        }
-      }
-      if (item.mesh.uvsBase64) {
-        geometry.setAttribute('uv', new three.BufferAttribute(decodeBase64F32(item.mesh.uvsBase64, item.mesh.vertexCount * 2), 2));
-      }
-      if (item.mesh.normalsBase64) {
-        geometry.setAttribute('normal', new three.BufferAttribute(decodeBase64F32(item.mesh.normalsBase64, item.mesh.vertexCount * 3), 3));
-      } else {
-        geometry.computeVertexNormals();
-      }
-      material = track(new three.MeshStandardMaterial({
-        color: new three.Color(0x8e97a3),
-        roughness: 0.55,
-        metalness: 0.12,
-        side: three.DoubleSide,
-        wireframe: false
-      }));
-    }
-  } else {
-    geometry = resourcePool
-      ? resourcePool.getPrimitiveGeometry(three, track, item.primitive === 'sphere' ? 'sphere' : 'box')
-      : (item.primitive === 'sphere'
-          ? track(new three.SphereGeometry(0.5, 12, 10))
-          : track(new three.BoxGeometry(1, 1, 1)));
-    material = track(new three.MeshStandardMaterial({
-      color: new three.Color(item.colorRgb[0], item.colorRgb[1], item.colorRgb[2]),
-      roughness: 0.65,
-      metalness: 0.05,
-      side: three.FrontSide,
-      wireframe: true,
-      transparent: true,
-      opacity: 0.35
-    }));
+function normalizeModelName(raw: string): string {
+  const base = raw.replace(/\\/g, '/').split('/').pop() ?? raw;
+  return base.toLowerCase().replace(/\.(flver|mapbnd)(\.dcx)?$/i, '');
+}
+
+/** 纯数据分组：同一模型的所有 placement 进入一个 GPU instance batch。 */
+export function groupSceneDrawItems(items: SceneDrawList['items']): SceneDrawBatch[] {
+  const batches = new Map<string, SceneDrawBatch>();
+  for (const item of items) {
+    const resourceKey = item.modelName
+      ? normalizeModelName(item.modelName)
+      : `proxy:${item.primitive}`;
+    const key = item.modelName ? `model:${resourceKey}` : resourceKey;
+    const existing = batches.get(key);
+    if (existing) existing.items.push(item);
+    else batches.set(key, { key, resourceKey, items: [item] });
   }
-
-  const mesh = new three.Mesh(geometry, material);
-  mesh.userData.itemId = item.id;
-  if (item.modelName) mesh.userData.modelName = item.modelName;
-  mesh.position.set(item.position[0], item.position[1], item.position[2]);
-  mesh.rotation.set(
-    (item.rotation[0] * Math.PI) / 180,
-    (item.rotation[1] * Math.PI) / 180,
-    (item.rotation[2] * Math.PI) / 180
-  );
-  mesh.scale.set(item.scale[0], item.scale[1], item.scale[2]);
-  return mesh;
+  return [...batches.values()];
 }
 
 function createFlverMesh(
@@ -1138,7 +1395,14 @@ function createFlverMesh(
     vertexColors: Boolean(item.vertexColors)
   }));
 
-  if (skeleton) {
+  const hasCompleteSkinBinding = skeleton !== null
+    && item.skinningMode !== 'static'
+    && item.boneIndexSpace === 'flver-global'
+    && item.skinIndices !== undefined
+    && item.skinWeights !== undefined
+    && item.skinIndices.length === item.vertexCount * 4
+    && item.skinWeights.length === item.vertexCount * 4;
+  if (hasCompleteSkinBinding) {
     const skinned = new three.SkinnedMesh(geometry, material);
     skinned.position.set(item.position[0], item.position[1], item.position[2]);
     skinned.rotation.set(item.rotation[0], item.rotation[1], item.rotation[2]);
@@ -1194,8 +1458,8 @@ function createMarkers(
   markerGroup: Object3D,
   semantic: FlverSemanticScene
 ): void {
-  const bones = semantic.bones ?? [];
-  if (bones.length > 0) {
+  const bones = semantic.bones ?? semantic.skeletons?.[0]?.bones ?? [];
+  if (semantic.showSkeletonMarkers === true && bones.length > 0) {
     const jointMaterial = track(new three.MeshBasicMaterial({ color: 0xffcc66 }));
     const jointGeometry = track(new three.SphereGeometry(0.15, 8, 8));
     const lineMaterial = track(new three.LineBasicMaterial({ color: 0xffaa44, transparent: true, opacity: 0.6 }));
@@ -1210,8 +1474,10 @@ function createMarkers(
         bone.rotation[0],
         bone.rotation[1],
         bone.rotation[2],
-        'XYZ'
+        bone.rotationOrder ?? 'XZY'
       ));
+      const scale = bone.scale ?? [1, 1, 1];
+      local.scale(new three.Vector3(scale[0], scale[1], scale[2]));
       local.setPosition(bone.translation[0], bone.translation[1], bone.translation[2]);
       let world = local;
       const parent = bone.parentIndex;

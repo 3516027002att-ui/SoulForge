@@ -24,6 +24,8 @@ export * from './param-field-reference.js';
 export * from './paramdef.js';
 export * from './gparam-editor.js';
 export * from './flver-editor.js';
+export * from './flver-preview.js';
+export * from './character-assembly.js';
 export * from './tpf-editor.js';
 export * from './behavior-editor.js';
 export * from './animation-editor.js';

@@ -311,7 +311,7 @@ async function mainInWorkspace(root: string): Promise<void> {
     throw new Error(`No PARAM children verified: ${JSON.stringify(failed.slice(0, 5))}`);
   }
 
-  // Legacy layout coverage: the three known old-layout params must be detected as the legacy
+  // Standard 32-bit layout coverage: these params use real 12-byte row headers for every row.
   // layout family, roundtrip byte-identically, accept a staged field-level upsert (write path
   // open), and fail closed on add/delete (headerless last row + variable tail are not losslessly
   // re-layout-able). These are real native samples from the pinned corpus.
@@ -356,8 +356,8 @@ async function mainInWorkspace(root: string): Promise<void> {
       timeoutMs: 60_000,
       commandOptions: {}
     });
-    if (doc.data?.layout !== 'legacy') {
-      throw new Error(`legacy ${name} layout misdetected: ${JSON.stringify(doc.data?.layout)}`);
+    if (doc.data?.layout !== 'standard-32') {
+      throw new Error(`standard-32 ${name} layout misdetected: ${JSON.stringify(doc.data?.layout)}`);
     }
     if (!doc.data?.roundTrip?.semanticIdentical || !doc.data?.roundTrip?.byteIdentical) {
       throw new Error(`legacy ${name} roundtrip failed: ${JSON.stringify(doc.data?.roundTrip)}`);

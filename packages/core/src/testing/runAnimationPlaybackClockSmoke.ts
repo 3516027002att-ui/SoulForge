@@ -169,6 +169,7 @@ export async function runAnimationPlaybackClockSmoke(): Promise<void> {
     transformTrackCount: 1,
     hkxBoneCount: 2,
     hkxBoneNames: ['HkxRoot', 'HkxSpine'],
+    hkxParentIndices: [-1, 0],
     hkxReferencePose: [
       { translation: [0, 0, 0], rotation: [0, 0, 0, 1], scale: [1, 1, 1] },
       { translation: [0, 1, 0], rotation: [0, 0, 0, 1], scale: [1, 1, 1] }

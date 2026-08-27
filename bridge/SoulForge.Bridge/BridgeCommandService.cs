@@ -154,6 +154,59 @@ internal sealed class BridgeCommandService
             }
         }
 
+        if (command == "list-bnd4-entries")
+        {
+            try
+            {
+                var includeContentHashes = OptionBool("includeContentHashes", false);
+                var (dcx, binder) = Bnd4NativeWriter.GetCachedBinder(file, oodleRuntimeRoot);
+                var diagnostics = new List<Diagnostic>
+                {
+                    new Diagnostic(
+                        "info",
+                        "BND4_ENTRIES_LISTED",
+                        $"BND4 条目已列出：{binder.Entries.Count} 项（{dcx.CompressionFormat}）。",
+                        BridgeResult<object>.MakeSourceUri(file),
+                        new { entryCount = binder.Entries.Count, compressionFormat = dcx.CompressionFormat })
+                };
+                var entries = binder.Entries.Select(entry => new
+                {
+                    index = entry.Index,
+                    id = entry.Id,
+                    name = entry.Name,
+                    flags = entry.Flags,
+                    unknown = entry.Unknown,
+                    duplicateOrdinal = entry.DuplicateOrdinal,
+                    compressedSize = entry.CompressedSize,
+                    uncompressedSize = entry.UncompressedSize,
+                    dataOffset = entry.DataOffset,
+                    nameOffset = entry.NameOffset,
+                    contentHash = includeContentHashes ? entry.ContentHash : null,
+                    size = entry.UncompressedSize
+                }).ToArray();
+                var payload = new
+                {
+                    format = "DCX",
+                    compressionFormat = dcx.CompressionFormat,
+                    variant = dcx.Variant,
+                    sourceSize = dcx.SourceBytes.Length,
+                    sourceHash = dcx.SourceHash,
+                    payloadHash = dcx.PayloadHash,
+                    entryCount = binder.Entries.Count,
+                    entries
+                };
+                return BridgeResult<object>.Partial(file, resourceKind, diagnostics, payload);
+            }
+            catch (OodleRuntimeUnavailableException)
+            {
+                return BridgeResult<object>.Failed(file, resourceKind, "BND4_LIST_KRAK_OODLE_UNAVAILABLE", "这份容器是 KRAK 压缩，到「开始」页选择含 sekiro.exe 的原版目录后再列目录。");
+            }
+            catch (Exception ex) when (ex is InvalidDataException or NotSupportedException or IOException or InvalidOperationException)
+            {
+                return BridgeResult<object>.Failed(file, resourceKind, "BND4_LIST_FAILED", ex.Message);
+            }
+        }
+
         if (command == "snapshot-bnd4-child")
         {
             try
@@ -276,7 +329,26 @@ internal sealed class BridgeCommandService
         {
             try
             {
-                var document = ParamNativeDocument.ReadFile(file);
+                if (OptionBool("headerOnly", false))
+                {
+                    var header = ParamNativeDocument.ReadHeaderFile(file);
+                    return BridgeResult<object>.Partial(
+                        file,
+                        "param",
+                        new[]
+                        {
+                            new Diagnostic(
+                                "info",
+                                "PARAM_HEADER_READ",
+                                "PARAM 头部已读取；未解析行数据。",
+                                BridgeResult<object>.MakeSourceUri(file))
+                        },
+                        header);
+                }
+                var expectedRowDataSize = OptionInt("expectedRowDataSize", 0);
+                var document = ParamNativeDocument.ReadFile(
+                    file,
+                    expectedRowDataSize > 0 ? expectedRowDataSize : null);
                 var roundTrip = document.VerifyRoundTrip();
                 var diagnostics = new[]
                 {
@@ -316,9 +388,11 @@ internal sealed class BridgeCommandService
             }
             catch (Exception ex) when (ex is InvalidDataException or NotSupportedException or IOException)
             {
-                var code = ex.Message.Contains("首行数据偏移", StringComparison.Ordinal)
-                    ? "PARAM_LAYOUT_UNSUPPORTED"
-                    : "PARAM_DOCUMENT_READ_FAILED";
+                var code = ex.Message.Contains("需要 PARAMDEF 行宽", StringComparison.Ordinal)
+                    ? "PARAM_ROW_SIZE_REQUIRED"
+                    : ex.Message.Contains("首行数据偏移", StringComparison.Ordinal)
+                        ? "PARAM_LAYOUT_UNSUPPORTED"
+                        : "PARAM_DOCUMENT_READ_FAILED";
                 return BridgeResult<object>.Failed(file, "param", code, ex.Message);
             }
         }
@@ -1061,6 +1135,7 @@ internal sealed class BridgeCommandService
                     transformTrackCount = animation.NumberOfTransformTracks,
                     hkxBoneCount = skeleton.Bones.Count,
                     hkxBoneNames,
+                    hkxParentIndices = skeleton.ParentIndices.Select(index => (int)index).ToArray(),
                     hkxReferencePose = hkxRefTransforms,
                     trackToHkxBone,
                     hkxToFlverBoneMap = hkxToFlverMap,
@@ -1280,78 +1355,59 @@ internal sealed class BridgeCommandService
         {
             try
             {
-                // S17：动作预览挂模型——伴生 chrbnd（overlay 或原版）解 DCX→BND4→
-                // 唯一 .flver 条目→网格/骨骼/挂点一次返回。复用 NativeLeafPayload
-                // 的容器提取；KRAK 外层缺 Oodle 时失败码可行动。
-                var payload = NativeLeafPayload.ResolveUnique(file, oodleRuntimeRoot, ".flver");
-                var flver = FlverNativeDocument.Read(payload);
-                var meshIndex = OptionInt("meshIndex", 0);
-                var maxVertices = OptionInt("maxVertices", 10_000);
-                var maxIndices = OptionInt("maxIndices", 30_000);
-                // c1001 这类占位 FLVER meshCount=0，属于正常可打开（空模型），不得判 failed。
-                // 审慎修复：meshCount==0 时直接返回骨骼/空网格，延续已提取语义，不改他处流程。
-                if (flver.MeshCount == 0)
+                // Character/parts containers are atomic preview resources. A partsbnd may
+                // contain several FLVER entries, each with an independent bone namespace;
+                // enumerate and parse each entry once rather than restarting the Bridge per mesh.
+                var maxVertices = OptionInt("maxVertices", 1_000_000);
+                var maxIndices = OptionInt("maxIndices", 3_000_000);
+                var leaves = NativeLeafPayload.ResolveAll(file, oodleRuntimeRoot, ".flver");
+                var models = new List<object>(leaves.Count);
+                var totalMeshes = 0;
+                long totalVertices = 0;
+                var leaderBoneCount = -1;
+                var leaderModelId = string.Empty;
+                foreach (var leaf in leaves)
                 {
-                    return BridgeResult<object>.Partial(file, "chr", new[]
+                    cancellationToken.ThrowIfCancellationRequested();
+                    var flver = FlverNativeDocument.Read(leaf.Payload);
+                    var meshes = BuildFlverMeshBundle(flver, maxVertices, maxIndices, cancellationToken);
+                    var modelId = $"entry:{leaf.Index}:{leaf.Id}:{leaf.DuplicateOrdinal}:{leaf.ContentHash[..Math.Min(16, leaf.ContentHash.Length)]}";
+                    if (flver.BoneCount > leaderBoneCount)
                     {
-                        new Diagnostic("info", "CHRBND_FLVER_PREVIEW_EMPTY",
-                            $"chrbnd 内 FLVER 为空模型：meshCount=0 bones={flver.BoneCount}，已返回骨骼。",
-                            BridgeResult<object>.MakeSourceUri(file))
-                    }, new
+                        leaderBoneCount = flver.BoneCount;
+                        leaderModelId = modelId;
+                    }
+                    totalMeshes += flver.MeshCount;
+                    totalVertices += flver.Meshes.Sum(mesh => (long)mesh.VertexCount);
+                    models.Add(new
                     {
-                        meshIndex = -1,
-                        vertexCount = 0,
-                        positionsBase64 = (string?)null,
-                        indicesBase64 = (string?)null,
-                        uvsBase64 = (string?)null,
-                        normalsBase64 = (string?)null,
-                        boneWeightsBase64 = (string?)null,
-                        boneIndicesBase64 = (string?)null,
-                        bones = flver.Bones.Select(b => new
+                        modelId,
+                        entry = new
                         {
-                            name = b.Name,
-                            parentIndex = b.ParentIndex,
-                            translation = new[] { b.TranslationX, b.TranslationY, b.TranslationZ },
-                            rotation = new[] { b.RotationX, b.RotationY, b.RotationZ }
-                        }).ToArray(),
+                            index = leaf.Index,
+                            id = leaf.Id,
+                            name = leaf.Name,
+                            duplicateOrdinal = leaf.DuplicateOrdinal,
+                            contentHash = leaf.ContentHash
+                        },
+                        meshCount = flver.MeshCount,
                         boneCount = flver.BoneCount,
-                        meshCount = flver.MeshCount
+                        meshes,
+                        bones = BuildFlverSkeleton(flver)
                     });
                 }
-                var positions = flver.GetMeshPositionsBase64(meshIndex, maxVertices);
-                if (positions == null)
-                    return BridgeResult<object>.Failed(file, "chr", "FLVER_MESH_NOT_FOUND", $"网格索引 {meshIndex} 超出范围或数据不可用。");
-                var indices = flver.GetMeshIndicesBase64(meshIndex, maxIndices);
-                var uvs = flver.GetMeshUVsBase64(meshIndex, maxVertices);
-                var normals = flver.GetMeshNormalsBase64(meshIndex, maxVertices);
-                var boneWeights = flver.GetMeshBoneWeightsBase64(meshIndex, maxVertices);
-                var boneIndices = flver.GetMeshBoneIndicesBase64(meshIndex, maxVertices);
-                var mesh = flver.Meshes[meshIndex];
                 return BridgeResult<object>.Partial(file, "chr", new[]
                 {
-                    new Diagnostic("info", "CHRBND_FLVER_PREVIEW_EXTRACTED",
-                        $"chrbnd 内 FLVER 网格/骨骼/挂点已提取；mesh={meshIndex} vertexCount={mesh.VertexCount} bones={flver.BoneCount}。",
+                    new Diagnostic("info", "CHRBND_FLVER_PREVIEW_BUNDLE_EXTRACTED",
+                        $"容器内 FLVER 已一次解包并完整提取；entries={models.Count} meshes={totalMeshes} vertices={totalVertices}。",
                         BridgeResult<object>.MakeSourceUri(file))
                 }, new
                 {
-                    meshIndex,
-                    vertexCount = mesh.VertexCount,
-                    indexSize = flver.GetMeshIndexSize(meshIndex),
-                    positionsBase64 = positions,
-                    indicesBase64 = indices,
-                    uvsBase64 = uvs,
-                    normalsBase64 = normals,
-                    boneWeightsBase64 = boneWeights,
-                    boneIndicesBase64 = boneIndices,
-                    bones = flver.Bones.Select(b => new
-                    {
-                        name = b.Name,
-                        parentIndex = b.ParentIndex,
-                        translation = new[] { b.TranslationX, b.TranslationY, b.TranslationZ },
-                        rotation = new[] { b.RotationX, b.RotationY, b.RotationZ }
-                    }).ToArray(),
-                    boneCount = flver.BoneCount,
-                    meshCount = flver.MeshCount
+                    meshCount = totalMeshes,
+                    vertexCount = totalVertices,
+                    boneCount = Math.Max(0, leaderBoneCount),
+                    leaderModelId,
+                    models
                 });
             }
             catch (OodleRuntimeUnavailableException)
@@ -1439,6 +1495,24 @@ internal sealed class BridgeCommandService
                 var meshIndex = OptionInt("meshIndex", 0);
                 var maxVertices = OptionInt("maxVertices", 10_000);
                 var maxIndices = OptionInt("maxIndices", 30_000);
+                var includeAllMeshes = OptionBool("includeAllMeshes", false);
+                if (includeAllMeshes)
+                {
+                    var meshes = BuildFlverMeshBundle(flver, maxVertices, maxIndices, cancellationToken);
+                    return BridgeResult<object>.Partial(file, "map", new[]
+                    {
+                        new Diagnostic("info", "MAP_PART_FLVER_BUNDLE_EXTRACTED",
+                            $"mapbnd 条目 {entry.Name} 的 FLVER 已一次解析并提取全部网格；meshes={meshes.Length} bones={flver.BoneCount}。",
+                            BridgeResult<object>.MakeSourceUri(file))
+                    }, new
+                    {
+                        entryName = entry.Name,
+                        meshCount = flver.MeshCount,
+                        boneCount = flver.BoneCount,
+                        meshes,
+                        bones = BuildFlverSkeleton(flver)
+                    });
+                }
                 var positions = flver.GetMeshPositionsBase64(meshIndex, maxVertices);
                 if (positions == null)
                 {
@@ -1467,13 +1541,7 @@ internal sealed class BridgeCommandService
                     normalsBase64 = normals,
                     boneWeightsBase64 = boneWeights,
                     boneIndicesBase64 = boneIndices,
-                    bones = flver.Bones.Select(b => new
-                    {
-                        name = b.Name,
-                        parentIndex = b.ParentIndex,
-                        translation = new[] { b.TranslationX, b.TranslationY, b.TranslationZ },
-                        rotation = new[] { b.RotationX, b.RotationY, b.RotationZ }
-                    }).ToArray(),
+                    bones = BuildFlverSkeleton(flver),
                     boneCount = flver.BoneCount,
                     meshCount = flver.MeshCount
                 });
@@ -1489,6 +1557,158 @@ internal sealed class BridgeCommandService
             catch (Exception ex) when (ex is InvalidDataException or NotSupportedException or IOException)
             {
                 return BridgeResult<object>.Failed(file, "map", "MAPBND_FLVER_PREVIEW_FAILED", ex.Message);
+            }
+        }
+
+        if (command == "read-map-static-geometry")
+        {
+            try
+            {
+                var modelName = OptionString("modelName", "");
+                var sessionToken = OptionString("sessionToken", "");
+                var cursor = OptionString("cursor", "");
+                // Resolve file hash for session validation
+                var fileBytesForHash = File.ReadAllBytes(file);
+                var fileHash = Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(fileBytesForHash)).ToLowerInvariant();
+
+                MapStaticGeometryService.SessionEntry? session = null;
+                string? entryNameForNew = null;
+                FlverNativeDocument? flverForNew = null;
+
+                if (!string.IsNullOrWhiteSpace(sessionToken) && MapStaticGeometryService.TryGet(sessionToken, out var existing))
+                {
+                    // Validate cursor if provided
+                    if (!string.IsNullOrWhiteSpace(cursor))
+                    {
+                        if (!MapStaticGeometryService.TryDecodeCursor(cursor, out _, out _))
+                            return BridgeResult<object>.Failed(file, "map", "MAP_STATIC_CURSOR_INVALID", "cursor 无法解析。");
+                    }
+                    session = existing;
+                    // Ensure file hash matches session's hash (stale content)
+                    if (session!.FileHash != fileHash)
+                        return BridgeResult<object>.Failed(file, "map", "MAP_STATIC_SESSION_EXPIRED", "文件内容已变化，session 已过期。");
+                }
+                else
+                {
+                    if (string.IsNullOrWhiteSpace(modelName))
+                        return BridgeResult<object>.Failed(file, "map", "MAPBND_MODEL_NAME_MISSING", "需要 modelName 才能定位 mapbnd 内的 FLVER 条目。");
+
+                    // Resolve FLVER payload: BND4 container or direct FLVER
+                    var sourceBytes = fileBytesForHash;
+                    byte[] payload = sourceBytes;
+                    bool isDcx = payload.Length >= 4 && payload.AsSpan(0, 4).SequenceEqual("DCX\0"u8);
+                    if (isDcx)
+                    {
+                        payload = DcxNativeDocument.Read(file, oodleRuntimeRoot).Payload;
+                    }
+                    string resolvedEntryName = modelName;
+                    byte[]? flverBytes = null;
+                    if (payload.Length >= 4 && payload.AsSpan(0, 4).SequenceEqual("BND4"u8))
+                    {
+                        var binder = Bnd4NativeDocument.Read(payload);
+                        var variants = new List<string> { modelName };
+                        var baseName = System.IO.Path.GetFileName(modelName.Replace('\\', '/'));
+                        if (!string.Equals(baseName, modelName, StringComparison.Ordinal)) variants.Add(baseName);
+                        var shortMatch = System.Text.RegularExpressions.Regex.Match(baseName, @"^m(\d{6})$", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+                        if (shortMatch.Success)
+                        {
+                            var suffix = shortMatch.Groups[1].Value;
+                            variants.Add(suffix);
+                            variants.Add(suffix + ".flver");
+                        }
+                        Bnd4Entry? entry = null;
+                        foreach (var variant in variants)
+                        {
+                            entry = binder.Entries.FirstOrDefault(item =>
+                                item.Name.EndsWith(variant, StringComparison.OrdinalIgnoreCase)
+                                || item.Name.EndsWith(variant + ".flver", StringComparison.OrdinalIgnoreCase));
+                            if (entry is not null) break;
+                        }
+                        if (entry is null)
+                        {
+                            foreach (var variant in variants)
+                            {
+                                entry = binder.Entries.FirstOrDefault(item =>
+                                    item.Name.IndexOf(variant, StringComparison.OrdinalIgnoreCase) >= 0
+                                    && item.Name.EndsWith(".flver", StringComparison.OrdinalIgnoreCase));
+                                if (entry is not null) break;
+                            }
+                        }
+                        if (entry is null)
+                            return BridgeResult<object>.Failed(file, "map", "MAPBND_MODEL_NOT_FOUND", $"mapbnd 里没有找到 {modelName} 的模型（.flver 条目）；该 part 用线框占位显示。");
+                        flverBytes = binder.GetStoredBytes(entry.Index);
+                        resolvedEntryName = entry.Name;
+                    }
+                    else
+                    {
+                        flverBytes = payload;
+                    }
+                    flverForNew = FlverNativeDocument.Read(flverBytes);
+                    entryNameForNew = resolvedEntryName;
+                    // Create session
+                    session = MapStaticGeometryService.GetOrCreate(file, modelName, null, fileHash, flverForNew, entryNameForNew);
+                    // If cursor was supplied with new session, validate it starts at 0
+                    if (!string.IsNullOrWhiteSpace(cursor) && cursor != MapStaticGeometryService.EncodeCursor(0,0))
+                        return BridgeResult<object>.Failed(file, "map", "MAP_STATIC_CURSOR_MISMATCH", "新 session 的 cursor 必须为空或指向起点。");
+                }
+
+                // Determine start position from cursor (if sessionToken provided, cursor indicates next; else start 0,0)
+                int startMesh = 0, startTri = 0;
+                if (!string.IsNullOrWhiteSpace(cursor))
+                {
+                    if (!MapStaticGeometryService.TryDecodeCursor(cursor, out startMesh, out startTri))
+                        return BridgeResult<object>.Failed(file, "map", "MAP_STATIC_CURSOR_INVALID", "cursor 无法解析。");
+                }
+                else if (!string.IsNullOrWhiteSpace(sessionToken))
+                {
+                    // resume without cursor -> start at 0 (should not happen, but handle)
+                    startMesh = 0; startTri = 0;
+                }
+
+                var chunkObj = MapStaticGeometryService.BuildChunk(session!, startMesh, startTri, out var nextCursor, out var complete);
+                // If no chunk (empty), return complete
+                if (chunkObj == null)
+                {
+                    return BridgeResult<object>.Partial(file, "map", new[]
+                    {
+                        new Diagnostic("info", "MAP_STATIC_GEOMETRY_COMPLETE", "静态几何已全部传输。", BridgeResult<object>.MakeSourceUri(file))
+                    }, new
+                    {
+                        sessionToken = session!.Token,
+                        nextCursor = (string?)null,
+                        complete = true,
+                        chunks = Array.Empty<object>(),
+                        telemetry = new { skin = MapStaticGeometryService.SkinCalls, skeleton = MapStaticGeometryService.SkeletonCalls, parse = MapStaticGeometryService.ParseCount }
+                    });
+                }
+
+                var chunks = new[] { chunkObj };
+                // Validate outbound JSON size <8 MiB (estimate). If would exceed, we already limited to one chunk.
+                var payloadObj = new
+                {
+                    sessionToken = session!.Token,
+                    nextCursor,
+                    complete,
+                    chunks,
+                    telemetry = new { skin = MapStaticGeometryService.SkinCalls, skeleton = MapStaticGeometryService.SkeletonCalls, parse = MapStaticGeometryService.ParseCount }
+                };
+                // Quick size check: serialize and check byte count
+                var json = System.Text.Json.JsonSerializer.Serialize(payloadObj);
+                if (System.Text.Encoding.UTF8.GetByteCount(json) >= 8 * 1024 * 1024)
+                    return BridgeResult<object>.Failed(file, "map", "MAP_STATIC_CHUNK_TOO_LARGE", "单个静态几何响应超过 8 MiB 限制。");
+
+                return BridgeResult<object>.Partial(file, "map", new[]
+                {
+                    new Diagnostic("info", "MAP_STATIC_GEOMETRY_CHUNK", $"静态几何 chunk 已生成；mesh={startMesh} triStart={startTri} complete={complete}。", BridgeResult<object>.MakeSourceUri(file))
+                }, payloadObj);
+            }
+            catch (OodleRuntimeUnavailableException)
+            {
+                return BridgeResult<object>.Failed(file, "map", "MAPBND_KRAK_OODLE_UNAVAILABLE", "这份地图模型（mapbnd）是 KRAK 压缩，到「开始」页选择含 sekiro.exe 的原版目录后再看模型。");
+            }
+            catch (Exception ex) when (ex is InvalidDataException or NotSupportedException or IOException)
+            {
+                return BridgeResult<object>.Failed(file, "map", "MAP_STATIC_GEOMETRY_FAILED", ex.Message);
             }
         }
 
@@ -1578,7 +1798,9 @@ internal sealed class BridgeCommandService
                     parentIndex = b.ParentIndex,
                     nextSiblingIndex = b.NextSiblingIndex,
                     translation = new[] { b.TranslationX, b.TranslationY, b.TranslationZ },
-                    rotation = new[] { b.RotationX, b.RotationY, b.RotationZ }
+                    rotation = new[] { b.RotationX, b.RotationY, b.RotationZ },
+                    scale = new[] { b.ScaleX, b.ScaleY, b.ScaleZ },
+                    rotationOrder = "XZY"
                 }).ToArray();
                 return BridgeResult<object>.Partial(file, "chr", new[]
                 {
@@ -2133,6 +2355,103 @@ internal sealed class BridgeCommandService
             "export-msg" => MsgTextExport.Export(file),
             _ => BridgeResult<object>.Failed(file, resourceKind, "UNKNOWN_COMMAND", $"Unknown bridge command: {command}")
         };
+    }
+
+    private static object BuildFlverMeshPreview(
+        FlverNativeDocument flver,
+        int meshIndex,
+        int maxVertices,
+        int maxIndices)
+    {
+        var positions = flver.GetMeshPositionsBase64(meshIndex, maxVertices);
+        if (positions == null)
+            throw new InvalidDataException($"FLVER_MESH_NOT_FOUND: 网格索引 {meshIndex} 超出范围或数据不可用。");
+        var indices = flver.GetMeshIndicesBase64(meshIndex, maxIndices);
+        if (indices == null)
+            throw new InvalidDataException(
+                $"FLVER_MESH_INDICES_UNAVAILABLE: 网格 {meshIndex} 的完整 triangle-list 无法在上限 {maxIndices} 内导出。");
+        var mesh = flver.Meshes[meshIndex];
+        var skinning = flver.GetMeshSkinning(meshIndex, maxVertices);
+        return new
+        {
+            meshIndex,
+            vertexCount = mesh.VertexCount,
+            indexSize = flver.GetMeshIndexSize(meshIndex),
+            positionsBase64 = positions,
+            indicesBase64 = indices,
+            uvsBase64 = flver.GetMeshUVsBase64(meshIndex, maxVertices),
+            normalsBase64 = flver.GetMeshNormalsBase64(meshIndex, maxVertices),
+            boneWeightsBase64 = skinning.BoneWeightsBase64,
+            boneIndicesBase64 = skinning.BoneIndicesBase64,
+            skinningMode = skinning.SkinningMode,
+            boneIndexSpace = skinning.BoneIndexSpace
+        };
+    }
+
+    private static object[] BuildFlverMeshBundle(
+        FlverNativeDocument flver,
+        int maxVertices,
+        int maxIndices,
+        CancellationToken cancellationToken)
+    {
+        var meshes = new object[flver.MeshCount];
+        for (var meshIndex = 0; meshIndex < flver.MeshCount; meshIndex++)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            meshes[meshIndex] = BuildFlverMeshPreview(flver, meshIndex, maxVertices, maxIndices);
+        }
+        return meshes;
+    }
+
+    private static object[] BuildFlverSkeleton(FlverNativeDocument flver)
+    {
+        var hierarchyIds = new string[flver.Bones.Count];
+        var visiting = new HashSet<int>();
+
+        string BuildHierarchyId(int index)
+        {
+            if (index < 0 || index >= flver.Bones.Count)
+                throw new InvalidDataException($"FLVER_BONE_INDEX_INVALID: {index}。");
+            if (!string.IsNullOrEmpty(hierarchyIds[index])) return hierarchyIds[index];
+            if (!visiting.Add(index))
+                throw new InvalidDataException($"FLVER_BONE_HIERARCHY_CYCLE: 骨骼 {index} 的 parent 链存在环。");
+
+            var bone = flver.Bones[index];
+            var parentId = bone.ParentIndex >= 0
+                && bone.ParentIndex < flver.Bones.Count
+                && bone.ParentIndex != index
+                ? BuildHierarchyId(bone.ParentIndex)
+                : "root";
+            var occurrence = 0;
+            for (var candidate = 0; candidate < index; candidate++)
+            {
+                var sibling = flver.Bones[candidate];
+                if (sibling.ParentIndex == bone.ParentIndex
+                    && string.Equals(sibling.Name, bone.Name, StringComparison.Ordinal))
+                    occurrence++;
+            }
+            var id = $"{parentId}/{bone.Name}#{occurrence}";
+            hierarchyIds[index] = id;
+            visiting.Remove(index);
+            return id;
+        }
+
+        for (var index = 0; index < flver.Bones.Count; index++)
+            _ = BuildHierarchyId(index);
+
+        return flver.Bones.Select(b => (object)new
+        {
+            index = b.Index,
+            name = b.Name,
+            parentIndex = b.ParentIndex,
+            childIndex = b.ChildIndex,
+            nextSiblingIndex = b.NextSiblingIndex,
+            hierarchyId = hierarchyIds[b.Index],
+            translation = new[] { b.TranslationX, b.TranslationY, b.TranslationZ },
+            rotation = new[] { b.RotationX, b.RotationY, b.RotationZ },
+            scale = new[] { b.ScaleX, b.ScaleY, b.ScaleZ },
+            rotationOrder = "XZY"
+        }).ToArray();
     }
 
     public static string GuessKindFromPath(string file)

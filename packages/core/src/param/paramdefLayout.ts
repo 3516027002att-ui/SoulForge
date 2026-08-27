@@ -728,6 +728,12 @@ function decodeField(rowData: Buffer, field: ParamFieldDef): ParamFieldValue {
   }
   const slice = rowData.subarray(field.offset, field.offset + field.size);
   try {
+    if (field.bitfield !== undefined) {
+      const stored = readUnsignedFieldBits(rowData, field);
+      const widthMask = (1n << BigInt(field.bitfield.bitWidth)) - 1n;
+      const value = Number((stored >> BigInt(field.bitfield.bitOffset)) & widthMask);
+      return base(field, field.type === 'bool' ? value !== 0 : value, slice.toString('hex'));
+    }
     switch (field.type) {
       case 'u8':
         return base(field, rowData.readUInt8(field.offset));

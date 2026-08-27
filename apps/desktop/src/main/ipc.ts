@@ -243,6 +243,15 @@ let activeRag: RagCorpus | null = null;
 let activeSession: WorkspaceSession | null = null;
 let activeOperationLog: OperationLogUtilityClient | null = null;
 let activeWorkspaceSessionId: string | null = null;
+let workspaceIndexingAbort: AbortController | null = null;
+let workspaceIndexingTask: Promise<void> | null = null;
+let workspaceIndexingStatus: any = {
+  workspaceSessionId: null,
+  phase: 'idle',
+  current: 0,
+  total: 0,
+  message: '未打开工作区'
+};
 /** Prevent duplicate rollback dialogs/transactions while one request is in flight. */
 const activeRollbackRequests = new Set<string>();
 /** Provider configs may omit contextWindowTokens; keep compaction fail-safe by default. */
@@ -1380,6 +1389,15 @@ export interface RendererWorkspaceSession {
   baseLabel?: string;
 }
 
+export interface WorkspaceIndexingStatus {
+  workspaceSessionId: string | null;
+  phase: 'idle' | 'hashing' | 'persisting' | 'rag' | 'ready' | 'failed';
+  current: number;
+  total: number;
+  message: string;
+  elapsedMs?: number;
+}
+
 export interface RendererWorkspaceScanResult {
   workspaceSessionId: string;
   workspaceLabel: string;
@@ -1387,6 +1405,7 @@ export interface RendererWorkspaceScanResult {
   countsByKind: Record<ResourceKind, number>;
   diagnostics: Diagnostic[];
   session: RendererWorkspaceSession;
+  indexingStatus: WorkspaceIndexingStatus;
 }
 
 export interface RollbackOperationIpcResult {
@@ -2687,12 +2706,17 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
             const created = createDirectorySelection(event, autoBasePath, 'base');
             autoBaseRecord = consumeDirectorySelection(event, created.selectionId, 'base');
           } catch {
-            // 凭据签发失败则回落为无 base，不阻断扫描
           }
         }
       }
       const effectiveBaseRecord = (baseSelection as DirectorySelectionRecord | undefined) ?? autoBaseRecord ?? null;
-
+      // Cancel previous background indexing
+      if (typeof workspaceIndexingAbort !== 'undefined' && workspaceIndexingAbort) {
+        try { workspaceIndexingAbort.abort(); } catch {}
+      }
+      if (typeof workspaceIndexingTask !== 'undefined' && workspaceIndexingTask) {
+        try { await workspaceIndexingTask; } catch {}
+      }
       if (activeSession) await disposeBridgeDaemonPool();
       emevdFullDocuments.clear();
       emevdDisassemblyCache.clear();
@@ -2702,10 +2726,20 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
         game: 'sekiro'
       });
       clearEditorPageCaches();
-      // 新会话 = 新 ownerKey 空间：旧文档 handle 全部作废，连同 store 一起丢弃。
       editorDocumentStore = null;
       activeWorkspaceSessionId = randomUUID();
       const database = await ensureActiveOperationLog(activeSession);
+      // Phase 1: lightweight discovery without content hashes (fast, no file reads)
+      const lightResult = await scanWorkspace({
+        workspaceRoot: activeSession.layers.overlayRoot,
+        game: activeSession.meta.game,
+        includeContentHashes: false
+      });
+      indexedFiles = lightResult.files;
+      activeOverlayLabel = overlaySelection.label;
+      activeIndex = new WorkspaceIndex(activeSession.meta.workspaceId);
+      activeIndex.setFiles(lightResult.files);
+      // Persist lightweight catalog immediately (no hashes yet, but files are visible)
       const scanJobId = randomUUID();
       const scanStartedAt = new Date().toISOString();
       await database.upsertJob({
@@ -2713,70 +2747,123 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
         title: '扫描工作区',
         jobKind: 'workspace_scan',
         status: 'running',
-        progress: { current: 0, message: '正在扫描文件' },
+        progress: { current: 0, total: lightResult.files.length, message: '基础资源已可用，正在后台校验内容索引' },
         payload: { workspaceSessionId: activeWorkspaceSessionId },
         createdAt: scanStartedAt,
         startedAt: scanStartedAt,
         updatedAt: scanStartedAt
       });
-      let result: Awaited<ReturnType<typeof scanWorkspace>>;
-      try {
-        result = await scanWorkspace({
-          workspaceRoot: activeSession.layers.overlayRoot,
-          game: activeSession.meta.game
-        });
-        await database.replaceFiles(result.files);
-        const recordedAt = new Date().toISOString();
-        await database.replaceDiagnostics([
-          ...result.diagnostics,
-          ...result.files.flatMap((file) => file.diagnostics)
-        ].map((diagnostic) => ({
-          id: randomUUID(),
-          ...diagnostic,
-          createdAt: recordedAt,
-          suppressed: false
-        })));
-        await database.upsertJob({
-          jobId: scanJobId,
-          title: '扫描工作区',
-          jobKind: 'workspace_scan',
-          status: 'completed',
-          progress: { current: result.files.length, total: result.files.length },
-          payload: { workspaceSessionId: activeWorkspaceSessionId },
-          result: { fileCount: result.files.length },
-          createdAt: scanStartedAt,
-          startedAt: scanStartedAt,
-          completedAt: recordedAt,
-          updatedAt: recordedAt
-        });
-      } catch (error) {
-        const failedAt = new Date().toISOString();
-        await database.upsertJob({
-          jobId: scanJobId,
-          title: '扫描工作区',
-          jobKind: 'workspace_scan',
-          status: 'failed',
-          progress: { current: 0 },
-          payload: { workspaceSessionId: activeWorkspaceSessionId },
-          error: { message: error instanceof Error ? error.message : String(error) },
-          createdAt: scanStartedAt,
-          startedAt: scanStartedAt,
-          completedAt: failedAt,
-          updatedAt: failedAt
-        });
-        throw error;
+      await database.replaceFiles(lightResult.files);
+      // Phase 2: incremental background hashing with fingerprint reuse
+      const currentSessionId = activeWorkspaceSessionId;
+      const currentSession = activeSession;
+      const lightFiles = lightResult.files;
+      const previousFiles = new Map<string, typeof lightFiles[number]>();
+      // Try to reuse from previous indexedFiles if same workspaceId (in-memory fingerprint cache)
+      // Fingerprint = {relativePath,size,mtimeMs,generation}
+      const generation = 1;
+      // Build previous map from a global cache if available (simple in-memory)
+      if ((globalThis as unknown as Record<string, unknown>).__previousFileMap) {
+        const prevMap = (globalThis as unknown as Record<string, unknown>).__previousFileMap as Map<string, unknown>;
+        for (const [k,v] of prevMap) previousFiles.set(k, v as typeof lightFiles[number]);
       }
-      indexedFiles = result.files;
-      activeOverlayLabel = overlaySelection.label;
-      activeIndex = new WorkspaceIndex(activeSession.meta.workspaceId);
-      activeIndex.setFiles(result.files);
-      await refreshRagAfterScan(database, activeIndex);
+      const controller = new AbortController();
+      if (typeof workspaceIndexingAbort !== 'undefined') (globalThis as unknown as Record<string, unknown>).workspaceIndexingAbort = controller;
+      // Also assign to module-level variable if exists
+      try { (workspaceIndexingAbort as unknown) = controller; } catch {}
+      const backgroundTask = (async () => {
+        try {
+          const { createHash } = await import('node:crypto');
+          const { createReadStream } = await import('node:fs');
+          let hashedCount = 0;
+          const enriched: typeof lightFiles = [];
+          for (const file of lightFiles) {
+            if (controller.signal.aborted) throw new Error('aborted');
+            // Foreground priority: yield if there is active foreground request
+            if ((globalThis as unknown as Record<string, unknown>).__foregroundActive) {
+              await new Promise<void>((r) => setTimeout(r, 20));
+              if (controller.signal.aborted) throw new Error('aborted');
+            }
+            const prev = previousFiles.get(file.relativePath);
+            if (prev && prev.size === file.size && prev.mtimeMs === file.mtimeMs && (prev as unknown as Record<string, unknown>).sha256) {
+              enriched.push({ ...file, sha256: (prev as unknown as Record<string, unknown>).sha256 as string } as typeof file);
+              continue;
+            }
+            // Hash this file (with abort support)
+            try {
+              const hash = createHash('sha256');
+              const stream = createReadStream(file.absolutePath, { signal: controller.signal } as unknown as Record<string, unknown>);
+              for await (const chunk of stream as unknown as AsyncIterable<Buffer>) {
+                if (controller.signal.aborted) throw new Error('aborted');
+                hash.update(chunk);
+                // Yield every chunk to allow foreground to interleave
+                await new Promise<void>((r) => setImmediate(r));
+              }
+              const sha = hash.digest('hex');
+              enriched.push({ ...file, sha256: sha } as typeof file);
+              hashedCount++;
+            } catch (e) {
+              if (controller.signal.aborted) throw e;
+              enriched.push({ ...file, diagnostics: [...file.diagnostics, { severity: 'warning' as const, code: 'FILE_HASH_FAILED', message: e instanceof Error ? e.message : String(e), details: { absolutePath: file.absolutePath } }] } as unknown as typeof file);
+            }
+            // Yield after each file to keep UI responsive
+            await new Promise<void>((r) => setTimeout(r, 0));
+          }
+          if (controller.signal.aborted) return;
+          // Update live and persisted catalog
+          if (currentSession !== activeSession || currentSessionId !== activeWorkspaceSessionId) return;
+          indexedFiles = enriched;
+          activeIndex?.setFiles(enriched);
+          await database.replaceFiles(enriched);
+          (globalThis as unknown as Record<string, unknown>).__previousFileMap = new Map(enriched.map((f) => [f.relativePath, f]));
+          const completedAt = new Date().toISOString();
+          await database.upsertJob({
+            jobId: scanJobId,
+            title: '扫描工作区',
+            jobKind: 'workspace_scan',
+            status: 'completed',
+            progress: { current: enriched.length, total: enriched.length },
+            payload: { workspaceSessionId: currentSessionId },
+            result: { fileCount: enriched.length, hashedCount },
+            createdAt: scanStartedAt,
+            startedAt: scanStartedAt,
+            completedAt,
+            updatedAt: completedAt
+          });
+          if (activeIndex) await refreshRagAfterScan(database, activeIndex);
+        } catch (error) {
+          if (controller.signal.aborted) return;
+          const failedAt = new Date().toISOString();
+          try {
+            await database.upsertJob({
+              jobId: scanJobId,
+              title: '扫描工作区',
+              jobKind: 'workspace_scan',
+              status: 'failed',
+              progress: { current: 0 },
+              payload: { workspaceSessionId: currentSessionId },
+              error: { message: error instanceof Error ? error.message : String(error) },
+              createdAt: scanStartedAt,
+              startedAt: scanStartedAt,
+              completedAt: failedAt,
+              updatedAt: failedAt
+            });
+          } catch {}
+        }
+      })();
+      if (typeof workspaceIndexingTask !== 'undefined') {
+        try { (workspaceIndexingTask as unknown) = backgroundTask; } catch {}
+        (globalThis as unknown as Record<string, unknown>).workspaceIndexingTask = backgroundTask;
+      }
+      // Also store on global for foreground priority checks
+      (globalThis as unknown as Record<string, unknown>).workspaceIndexingAbort = controller;
+      (globalThis as unknown as Record<string, unknown>).workspaceIndexingTask = backgroundTask;
       return {
         workspaceSessionId: activeWorkspaceSessionId,
         workspaceLabel: overlaySelection.label,
-        files: result.files.map(toRendererIndexedFile),
-        diagnostics: sanitizeDiagnostics(result.diagnostics),
-        countsByKind: result.countsByKind,
+        files: lightResult.files.map(toRendererIndexedFile),
+        diagnostics: sanitizeDiagnostics(lightResult.diagnostics),
+        countsByKind: lightResult.countsByKind,
         session: {
           workspaceSessionId: activeWorkspaceSessionId,
           workspaceLabel: overlaySelection.label,
@@ -2784,6 +2871,13 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
           openedAt: activeSession.meta.openedAt,
           baseMounted: !activeSession.meta.baseMissing,
           ...(baseSelection ? { baseLabel: baseSelection.label } : {})
+        },
+        indexingStatus: {
+          workspaceSessionId: activeWorkspaceSessionId,
+          phase: 'hashing',
+          current: 0,
+          total: lightResult.files.length,
+          message: '基础资源已可用，正在后台校验内容索引'
         }
       };
     }
@@ -2834,6 +2928,23 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
 
   handle('workspace.analyze', async (): Promise<AnalyzeWorkspaceSummary> => {
     if (!activeSession) throw new Error('请先打开工作区。');
+    // Reuse same catalog if already present (do not trigger second full scan)
+    if (activeIndex && indexedFiles.length > 0) {
+      const databaseReuse = await ensureActiveOperationLog(activeSession);
+      await refreshRagAfterAnalyze(databaseReuse, activeIndex);
+      return {
+        parsedFiles: 0,
+        inspectedFiles: indexedFiles.length,
+        referenceStats: { high: 0, medium: 0, low: 0, suppressedAmbiguousNumbers: 0 },
+        diagnostics: [],
+        events: activeIndex.searchEvents('', 200).map(({ item }) => ({
+          uri: item.uri,
+          eventId: item.eventId,
+          ...(item.name ? { name: item.name } : {})
+        })),
+        tools: toolRegistry.list()
+      };
+    }
     const result = await analyzeWorkspace({
       workspaceRoot: activeSession.layers.overlayRoot,
       ...(activeSession.layers.baseRoot ? { oodleRuntimeRoot: activeSession.layers.baseRoot } : {})
@@ -2858,6 +2969,16 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
 
   handle('resource.preview', async (_event, sourceUri: string): Promise<RendererResourcePreview | null> => {
     const file = indexedFiles.find((item) => item.sourceUri === sourceUri);
+    // Dedicated editor skip: param/msb/tae etc already have structured workbench, avoid duplicate heavy preview
+    if (file && (file.resourceKind === 'param' || file.resourceKind === 'map' || file.resourceKind === 'action')) {
+      return {
+        sourceUri: file.sourceUri,
+        relativePath: file.relativePath,
+        kind: file.resourceKind,
+        diagnostics: [],
+        structured: null
+      } as unknown as RendererResourcePreview;
+    }
     if (!file) return null;
     return toRendererResourcePreview(await openResourcePreview({
       file,

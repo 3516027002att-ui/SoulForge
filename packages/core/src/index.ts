@@ -66,6 +66,7 @@ export * from './patch/patchImpactGraph.js';
 export * from './files/index.js';
 export * from './workspace/semanticWorkspaceIndex.js';
 export * from './workspace/importLegacySemanticSnapshot.js';
+export * from './character/characterAssembly.js';
 export * from './ai/evidencePackBuilder.js';
 export * from './model-services/index.js';
 export * from './assets/assetImport.js';

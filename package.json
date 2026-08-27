@@ -230,7 +230,8 @@
     "test:container-param-writeback": "node scripts/verify-container-param-writeback.mjs",
     "test:recent-paths": "node scripts/verify-recent-paths.mjs",
     "test:native-document-locator": "npm run test:native-document-locator -w @soulforge/core",
-    "test:editor-catalog": "npm run test:editor-catalog -w @soulforge/core"
+    "test:editor-catalog": "npm run test:editor-catalog -w @soulforge/core",
+    "test:mission1-acceptance": "node scripts/verify-mission1-acceptance.mjs"
   },
   "devDependencies": {
     "@types/node": "^22.13.1",

@@ -239,9 +239,9 @@ function buildSyntheticLegacyParam(typeName: string, rows: LegacySyntheticRow[])
   const first = rows[0];
   if (!first || n < 2) throw new Error('synthetic legacy needs >= 2 rows');
   const rowSize = first.data.length;
-  const tailLen = 28; // canonical tail shared by default_AIStandardInfoBank / default_EnemyBehaviorBank
-  const headerEnd = 0x40 + (n - 1) * 12;
-  const dataStart = headerEnd + tailLen;
+  const rowDirectoryStart = 0x30;
+  const rowDirectoryEnd = rowDirectoryStart + n * 12;
+  const dataStart = rowDirectoryEnd + 0x20; // FormatFlags1.Flag01 padding
   const nameRegionStart = dataStart + n * rowSize;
   const nameOffsets: number[] = [];
   const nameBytes: number[] = [];
@@ -258,26 +258,24 @@ function buildSyntheticLegacyParam(typeName: string, rows: LegacySyntheticRow[])
     cursor += encoded.length;
   }
   const out = Buffer.alloc(cursor);
-  // Header (0x40): nameDataStart@0, dataStart@4 (u16), unk@6=1, version@8=1,
-  // rowCount@10, embedded type name@0x0C (32 bytes), unk@2C/30=0, dataStart@34,
-  // nameDataStart@38, unk@3C=0.
+  // Standard 32-bit PARAM: embedded type name plus one real 12-byte row header
+  // [id, dataOffset, nameOffset] for every row. Flag01 inserts a 0x20-byte raw gap
+  // between the directory and data; it does not create a headerless last row.
   out.writeInt32LE(nameRegionStart, 0);
   out.writeUInt16LE(dataStart, 4);
   out.writeUInt16LE(1, 6);
   out.writeUInt16LE(1, 8);
   out.writeUInt16LE(n, 10);
   out.write(typeName, 0x0c, 'ascii');
-  out.writeInt32LE(0, 0x2c);
-  out.writeInt32LE(0, 0x30);
-  out.writeInt32LE(dataStart, 0x34);
-  out.writeInt32LE(nameRegionStart, 0x38);
-  out.writeInt32LE(0, 0x3c);
-  // Row headers for rows 0..n-2 (last row is the headerless default).
-  for (let k = 0; k < n - 1; k++) {
-    const o = 0x40 + k * 12;
-    out.writeInt32LE(dataStart + (k + 1) * rowSize, o);
-    out.writeInt32LE(nameOffsets[k] ?? 0, o + 4);
-    out.writeInt32LE(rows[k]!.id, o + 8);
+  out[0x2c] = 0; // little endian
+  out[0x2d] = 0x01; // FormatFlags1.Flag01
+  out[0x2e] = 0; // Shift-JIS row names
+  out[0x2f] = 0;
+  for (let k = 0; k < n; k++) {
+    const o = rowDirectoryStart + k * 12;
+    out.writeInt32LE(rows[k]!.id, o);
+    out.writeUInt32LE(dataStart + k * rowSize, o + 4);
+    out.writeUInt32LE(nameOffsets[k] ?? 0, o + 8);
   }
   // Tail stays zero (buffer zero-initialized).
   for (let i = 0; i < n; i++) {
@@ -306,7 +304,7 @@ async function runSyntheticLegacy(): Promise<{
       { id: 100, name: 'Alpha', data: [1, 2, 3, 4, 5, 6, 7, 8] },
       { id: 101, name: 'Beta', data: [9, 10, 11, 12, 13, 14, 15, 16] },
       { id: 110, name: 'Gamma', data: [17, 18, 19, 20, 21, 22, 23, 24] },
-      { id: 0, name: '', data: [0, 0, 0, 0, 0, 0, 0, 0] } // headerless default row
+      { id: 0, name: '', data: [0, 0, 0, 0, 0, 0, 0, 0] }
     ];
     const file = buildSyntheticLegacyParam('SYNTH_LEGACY_ST', rows);
     const path = join(staging, 'synthetic-legacy.param');
@@ -318,8 +316,8 @@ async function runSyntheticLegacy(): Promise<{
       timeoutMs: 60_000,
       commandOptions: {}
     });
-    if (read.parseStatus === 'failed' || read.data?.layout !== 'legacy') {
-      throw new Error(`synthetic legacy misdetected: ${JSON.stringify(read.diagnostics)}`);
+    if (read.parseStatus === 'failed' || read.data?.layout !== 'standard-32') {
+      throw new Error(`synthetic standard-32 misdetected: layout=${String(read.data?.layout)} diagnostics=${JSON.stringify(read.diagnostics)}`);
     }
     const ids = read.data.rows.map((r) => r.id);
     if (ids.join(',') !== '100,101,110,0') {
@@ -395,6 +393,95 @@ async function runSyntheticLegacy(): Promise<{
   }
 }
 
+async function runSyntheticDuplicateRows(): Promise<{
+  ambiguousIdRejected: boolean;
+  targetedSecondRowVerified: boolean;
+}> {
+  const scratch = await mkdtemp(join(tmpdir(), 'soulforge-param-duplicate-'));
+  try {
+    const sourcePath = join(scratch, 'duplicate.param');
+    const rows: LegacySyntheticRow[] = [
+      { id: 42, name: 'First', data: [1, 2, 3, 4, 5, 6, 7, 8] },
+      { id: 42, name: 'Second', data: [11, 12, 13, 14, 15, 16, 17, 18] },
+      { id: 43, name: 'Third', data: [21, 22, 23, 24, 25, 26, 27, 28] }
+    ];
+    await writeFile(sourcePath, buildSyntheticLegacyParam('SYNTH_DUPLICATE_ST', rows));
+    const read = await runBridge<ParamEnvelope>({
+      command: 'read-param-document',
+      filePath: sourcePath,
+      allowedRoots: [scratch],
+      commandOptions: {}
+    });
+    if (read.parseStatus === 'failed' || !read.data || read.data.rows.length !== rows.length) {
+      throw new Error(`duplicate fixture read failed: ${JSON.stringify(read.diagnostics)}`);
+    }
+    const first = read.data.rows[0]!;
+    const second = read.data.rows[1]!;
+    if (first.id !== second.id || second.dataBase64 === null) {
+      throw new Error('duplicate fixture did not preserve the two physical rows');
+    }
+    const nextSecond = Buffer.from(second.dataBase64, 'base64');
+    nextSecond[0] = 0xa5;
+
+    const ambiguous = await runBridge({
+      command: 'write-param',
+      filePath: sourcePath,
+      allowedRoots: [scratch],
+      writableRoots: [scratch],
+      commandOptions: {
+        outputPath: join(scratch, 'ambiguous.param'),
+        expectedDocumentHash: read.data.sourceHash,
+        expectedRowDataSize: read.data.rowDataSize,
+        mutation: 'upsert',
+        id: second.id,
+        dataBase64: nextSecond.toString('base64')
+      }
+    });
+    if (ambiguous.parseStatus !== 'failed'
+      || !ambiguous.diagnostics.some((diagnostic) =>
+        diagnostic.code === 'PARAM_STAGING_WRITE_FAILED'
+        && diagnostic.message.includes('重复行'))) {
+      throw new Error(`duplicate id-only mutation was not rejected: ${JSON.stringify(ambiguous.diagnostics)}`);
+    }
+
+    const targetedPath = join(scratch, 'targeted.param');
+    const targeted = await runBridge({
+      command: 'write-param',
+      filePath: sourcePath,
+      allowedRoots: [scratch],
+      writableRoots: [scratch],
+      commandOptions: {
+        outputPath: targetedPath,
+        expectedDocumentHash: read.data.sourceHash,
+        expectedRowDataSize: read.data.rowDataSize,
+        mutation: 'upsert',
+        rowIndex: second.rowIndex,
+        id: second.id,
+        expectedDataHash: second.dataHash,
+        dataBase64: nextSecond.toString('base64')
+      }
+    });
+    if (!targeted.diagnostics.some((diagnostic) => diagnostic.code === 'PARAM_STAGING_WRITE_VERIFIED')) {
+      throw new Error(`targeted duplicate mutation failed: ${JSON.stringify(targeted.diagnostics)}`);
+    }
+    const reread = await runBridge<ParamEnvelope>({
+      command: 'read-param-document',
+      filePath: targetedPath,
+      allowedRoots: [scratch],
+      commandOptions: { expectedRowDataSize: read.data.rowDataSize }
+    });
+    if (!reread.data
+      || reread.data.rows[0]?.dataBase64 !== first.dataBase64
+      || reread.data.rows[1]?.dataBase64 !== nextSecond.toString('base64')
+      || reread.data.rows[2]?.dataBase64 !== read.data.rows[2]?.dataBase64) {
+      throw new Error('targeted duplicate mutation changed the wrong physical row');
+    }
+    return { ambiguousIdRejected: true, targetedSecondRowVerified: true };
+  } finally {
+    await rm(scratch, { recursive: true, force: true });
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Part 2: native matrix on real gameparam (env-gated).
 // ---------------------------------------------------------------------------
@@ -405,7 +492,7 @@ interface ParamEnvelope {
   dataVersion?: number;
   rowCount: number;
   rowDataSize: number;
-  rows: Array<{ id: number; dataBase64: string | null; dataHash: string }>;
+  rows: Array<{ rowIndex: number; id: number; dataBase64: string | null; dataHash: string }>;
   payloadsIncluded?: boolean;
   roundTrip?: { semanticIdentical: boolean; byteIdentical: boolean };
 }
@@ -631,6 +718,7 @@ async function verifyLayoutMatrix(
 async function main(): Promise<void> {
   const synthetic = runSyntheticMatrix();
   const legacySynthetic = await runSyntheticLegacy();
+  const duplicateSynthetic = await runSyntheticDuplicateRows();
   const sourceBnd = await resolveNativeFixture(
     process.argv[2],
     'param-primary',
@@ -657,6 +745,7 @@ async function main(): Promise<void> {
         layouts: synthetic.layouts
       },
       legacySynthetic,
+      duplicateSynthetic,
       reason: '本机 gameparam.parambnd.dcx 不可用，跨布局写矩阵真实 leg 结构化跳过。',
       diagnostics: [{
         severity: 'info',
@@ -695,6 +784,7 @@ async function main(): Promise<void> {
       layouts: synthetic.layouts
     },
     legacySynthetic,
+    duplicateSynthetic,
     results
   };
   if (seenSizes.size < 2) {

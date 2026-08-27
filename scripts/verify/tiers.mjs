@@ -601,5 +601,6 @@ export const EXCLUDED = Object.freeze({
   'gov:seal': '同上（追加 Evidence、挂 Gate 引用并重新投影交接书，三步原子写）',
   // 投影写入命令。跑它会改交接书，不能作为验证调度；对应的只读校验是
   // test:handoff-projection（内含 --check），已登记进 governance 层。
-  'handoff:project': '交接书投影写入命令，不是验证；只读校验由 test:handoff-projection 承担'
+  'handoff:project': '交接书投影写入命令，不是验证；只读校验由 test:handoff-projection 承担',
+  'test:mission1-acceptance': 'mission1 聚合验收入口，通过 scripts/verify-mission1-acceptance.mjs 直接运行，不经 verify.mjs tier 调度'
 });

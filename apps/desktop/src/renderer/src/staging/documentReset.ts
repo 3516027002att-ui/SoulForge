@@ -161,6 +161,7 @@ export interface ResetCoverageReport {
 /** 非文档态 setter：不参与复位登记，附排除理由。 */
 export const NON_DOCUMENT_SETTERS: Readonly<Record<string, string>> = Object.freeze({
   setWorkspace: '工作区扫描结果，由 openWorkspace 自己赋值',
+  setWorkspaceIndexing: '工作区级后台索引进度，由会话 token 和轮询生命周期管理，不属于资源文档态',
   setSessionMeta: '会话元数据，同上',
   setBaseRootChoice: '目录选择，跨工作区保留是有意的',
   setOperationHistory: '写入历史，按工作区刷新而非清空',

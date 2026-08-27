@@ -104,10 +104,11 @@ describe('Negative source tests（MAP-50B 五类覆盖）', () => {
     assert.doesNotMatch(html, /ΔX|rotX|scaleX/);
   });
 
-  it('问题4-B：面板不再自行渲染任何写入口（无输入框/无按钮）', () => {
+  it('面板不渲染数值微调输入；只提供真实 Gizmo 模式控件', () => {
     const html = render();
     assert.doesNotMatch(html, /type="number"/);
-    assert.doesNotMatch(html, /<button/);
+    assert.match(html, /aria-label="变换模式"/);
+    assert.match(html, />移动<|>旋转<|>缩放</);
   });
 
   it('视口状态不再写「无绝对路径」', () => {
@@ -139,12 +140,13 @@ describe('Negative source tests（MAP-50B 五类覆盖）', () => {
     assert.doesNotMatch(html, /见底部日志/);
     assert.match(panelSource, /readMapPartMesh/);
     assert.match(panelSource, /mapbnd/);
-    assert.match(panelSource, /applyLoadedMeshes/);
+    assert.match(panelSource, /FrameTaskQueue/);
+    assert.match(panelSource, /MapModelLoadCache/);
     // 进度句：已挂 loaded / total。
     assert.match(panelSource, /已挂 \$\{meshStatus\.loaded\} \/ \$\{meshStatus\.total\}/);
     // S23 去重：按 modelName 去重后串行拉取，同一 FLVER 只读一次
     assert.match(panelSource, /byModel/);
-    assert.match(panelSource, /distinctModelNames/);
+    assert.match(panelSource, /distinctModels/);
   });
 
   it('左栏对象列表由 scene manifest 派生，renderer 不扫字节、不猜格式', () => {
@@ -171,13 +173,25 @@ describe('Negative source tests（MAP-50B 五类覆盖）', () => {
     assert.doesNotMatch(panelSource, /writeMsbDocument\(/);
   });
 
-  it('问题4-A：不再有预取/分组渲染上限；对象列表全量、名字不 slice 截断', () => {
+  it('问题4-A：不设数据上限；对象完整保留并用虚拟列表限制 DOM，名字不 slice 截断', () => {
     assert.doesNotMatch(panelSource, /MAP_MESH_PREFETCH_LIMIT/);
     assert.doesNotMatch(panelSource, /GROUP_RENDER_LIMIT/);
     assert.doesNotMatch(panelSource, /\.slice\(0,\s*\d+\)\s*\.map\(/);
     assert.doesNotMatch(panelSource, /\.slice\(0,\s*40\)/);
     assert.doesNotMatch(panelSource, /data-testid="msb-region-truncation"/);
-    assert.match(panelSource, /group\.entries\.map\(/);
-    assert.match(panelSource, /title=\{entity\.label\}/);
+    assert.match(panelSource, /useVirtualizer/);
+    assert.match(panelSource, /for \(const entity of group\.entries\)/);
+    assert.match(panelSource, /getVirtualItems\(\)/);
+    assert.match(panelSource, /title=\{row\.entity\.label\}/);
+  });
+
+  it('Gizmo 拖动只在结束时提交一次语义变换，模型上传受帧预算调度', () => {
+    const controllerSource = readFileSync(
+      join(repoRoot, 'apps', 'desktop', 'src', 'renderer', 'src', 'scene', 'threeSceneController.ts'),
+      'utf8'
+    );
+    assert.match(controllerSource, /pendingTransformChange = \{ id: itemId/);
+    assert.match(controllerSource, /if \(pendingTransformChange\) input\.onTransformChange\?\.\(pendingTransformChange\)/);
+    assert.match(panelSource, /uploadQueue\s*\.enqueue/);
   });
 });

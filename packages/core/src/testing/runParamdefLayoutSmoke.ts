@@ -140,6 +140,11 @@ function main(): void {
   // Bitfield preserving writer: verify that only target bits are modified.
   // 'low' is bits 0-3 (bitWidth=4), 'high' is bits 4-7 (bitWidth=4)
   const bfRow = Buffer.from([0b11111111]); // all bits set
+  const decodedBitfields = decodeRowFields(Buffer.from([0b10110011]), bitfields);
+  if (decodedBitfields.find((field) => field.fieldId === 'low')?.value !== 3
+    || decodedBitfields.find((field) => field.fieldId === 'high')?.value !== 11) {
+    throw new Error(`bitfield decode must extract each declared range: ${JSON.stringify(decodedBitfields)}`);
+  }
   const bfMutation = encodeFieldMutation(bfRow, bitfields, 'low', 3);
   if (!bfMutation.ok) throw new Error(`bitfield write failed: ${bfMutation.message}`);
   // Original: 0b11111111, clear bits 0-3: 0b11110000, set 0b0011: 0b11110011
@@ -181,6 +186,7 @@ function main(): void {
     encodedHp: mutated.next.readUInt16LE(4),
     overlapBlocked: true,
     malformedNestedInputBlocked: true,
+    bitfieldReadAuthority: 'declared-bit-range',
     bitfieldWriteAuthority: 'preserving-bit-writer'
   }, null, 2));
 }

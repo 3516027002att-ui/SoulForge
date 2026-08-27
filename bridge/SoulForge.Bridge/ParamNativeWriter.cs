@@ -9,7 +9,11 @@ internal static class ParamNativeWriter
         CancellationToken cancellationToken)
     {
         var source = await File.ReadAllBytesAsync(sourcePath, cancellationToken);
-        var document = ParamNativeDocument.Read(source);
+        int? expectedRowDataSize = null;
+        if (options.TryGetProperty("expectedRowDataSize", out var rowSizeElement)
+            && rowSizeElement.ValueKind == JsonValueKind.Number)
+            expectedRowDataSize = rowSizeElement.GetInt32();
+        var document = ParamNativeDocument.Read(source, expectedRowDataSize);
         RequireHash(options, "expectedDocumentHash", document.SourceHash, "PARAM source hash");
 
         var patches = new List<ParamPatch>();
@@ -41,17 +45,25 @@ internal static class ParamNativeWriter
             if (File.Exists(temporary)) File.Delete(temporary);
         }
 
-        var reread = ParamNativeDocument.ReadFile(outputPath);
+        var reread = ParamNativeDocument.ReadFile(outputPath, document.RowDataSize > 0 ? document.RowDataSize : null);
         foreach (var patch in patches)
         {
-            var row = reread.Rows.FirstOrDefault(r => r.Id == patch.Id);
+            var row = patch.RowIndex is int rowIndex
+                && rowIndex >= 0
+                && rowIndex < reread.Rows.Count
+                    ? reread.Rows[rowIndex]
+                    : reread.Rows.Count(r => r.Id == patch.Id) == 1
+                        ? reread.Rows.First(r => r.Id == patch.Id)
+                        : null;
             if (patch.Kind is "delete")
             {
-                if (row is not null) throw new InvalidDataException($"PARAM delete 后 ID {patch.Id} 仍存在。");
+                if (patch.RowIndex is null && row is not null)
+                    throw new InvalidDataException($"PARAM delete 后 ID {patch.Id} 仍存在。");
             }
             else
             {
-                if (row is null) throw new InvalidDataException($"PARAM mutation 后缺少 ID {patch.Id}。");
+                if (row is null || row.Id != patch.Id)
+                    throw new InvalidDataException($"PARAM mutation 后缺少目标物理行（ID {patch.Id}）。");
                 if (patch.DataBase64 is not null)
                 {
                     var expected = Convert.FromBase64String(patch.DataBase64);
@@ -83,7 +95,15 @@ internal static class ParamNativeWriter
         string? name = null;
         if (item.TryGetProperty("name", out var nameElement) && nameElement.ValueKind == JsonValueKind.String)
             name = nameElement.GetString();
-        return new ParamPatch(kind, id, data, name);
+        int? rowIndex = null;
+        if (item.TryGetProperty("rowIndex", out var rowIndexElement)
+            && rowIndexElement.ValueKind == JsonValueKind.Number)
+            rowIndex = rowIndexElement.GetInt32();
+        string? expectedDataHash = null;
+        if (item.TryGetProperty("expectedDataHash", out var hashElement)
+            && hashElement.ValueKind == JsonValueKind.String)
+            expectedDataHash = hashElement.GetString();
+        return new ParamPatch(kind, id, data, name, rowIndex, expectedDataHash);
     }
 
     private static void RequireHash(JsonElement options, string field, string actual, string label)
