@@ -39,7 +39,7 @@ export function WorkspaceResourceBar({ mode, counts, onSelect }: WorkspaceResour
     <nav className="resource-bar" aria-label="物理目录过滤">
       <LiquidTabGroup
         activeId={mode}
-        fill="var(--forge-hover)"
+        fill="var(--forge-active)"
         blur={5}
         contrast={18}
         radius={4}
@@ -66,7 +66,7 @@ export function WorkspaceResourceBar({ mode, counts, onSelect }: WorkspaceResour
               className={selected ? 'resource-tab is-selected' : 'resource-tab'}
               data-resource-mode={family.id}
               onClick={() => onSelect(family.id)}
-              onKeyDown={(event: KeyboardEvent<any>) => handleTabKeyDown(event, index)}
+              onKeyDown={(event) => handleTabKeyDown(event, index)}
             >
               <span className="resource-tab__label">{family.label}</span>
               {counts && count !== null && <span className="resource-tab__count">{count}</span>}

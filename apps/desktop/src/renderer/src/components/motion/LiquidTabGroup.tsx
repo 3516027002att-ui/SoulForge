@@ -1,17 +1,18 @@
 import {
   createContext,
   forwardRef,
+  useCallback,
   useContext,
   useEffect,
   useLayoutEffect,
+  useMemo,
   useRef,
   useState,
   type CSSProperties,
-  type FC,
+  type ElementType,
   type HTMLAttributes,
   type ReactElement,
-  type ReactNode,
-  type RefObject
+  type ReactNode
 } from 'react';
 import { Liquid } from 'liquid-gooey';
 import { useReducedMotion } from './useReducedMotion.js';
@@ -32,7 +33,7 @@ const TabContext = createContext<TabRegistry | null>(null);
 export interface LiquidTabGroupProps extends HTMLAttributes<HTMLDivElement> {
   activeId: string;
   children: ReactNode;
-  /** 液体表面填充颜色，默认使用 SoulForge 当前高亮/悬浮底色 */
+  /** 液体表面填充颜色，默认使用 SoulForge 当前选中底色 */
   fill?: string;
   /** Gooey 模糊半径（px），控制桥接距离。默认 5px（克制优雅） */
   blur?: number;
@@ -57,7 +58,7 @@ export interface LiquidTabGroupProps extends HTMLAttributes<HTMLDivElement> {
 export function LiquidTabGroup({
   activeId,
   children,
-  fill = 'var(--forge-hover)',
+  fill = 'var(--forge-active)',
   blur = 5,
   contrast = 18,
   shadow = '0 1px 3px rgba(0, 0, 0, 0.05)',
@@ -69,21 +70,19 @@ export function LiquidTabGroup({
 }: LiquidTabGroupProps): ReactElement {
   const containerRef = useRef<HTMLDivElement>(null);
   const elementsMapRef = useRef<Map<string, HTMLElement>>(new Map());
+  const activeIdRef = useRef<string>(activeId);
+  activeIdRef.current = activeId;
+
   const [activeRect, setActiveRect] = useState<TabRect | null>(null);
   const [prevRect, setPrevRect] = useState<TabRect | null>(null);
   const [isTransitioning, setIsTransitioning] = useState(false);
+  const transitionTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const reducedMotion = useReducedMotion();
 
-  const register = (id: string, element: HTMLElement): (() => void) => {
-    elementsMapRef.current.set(id, element);
-    return () => {
-      elementsMapRef.current.delete(id);
-    };
-  };
-
-  const measureActive = (): void => {
+  const measureActive = useCallback((): void => {
     const container = containerRef.current;
-    const activeEl = elementsMapRef.current.get(activeId);
+    const currentActiveId = activeIdRef.current;
+    const activeEl = elementsMapRef.current.get(currentActiveId);
     if (!container || !activeEl) {
       setActiveRect(null);
       return;
@@ -96,8 +95,31 @@ export function LiquidTabGroup({
       width: aRect.width,
       height: aRect.height
     };
-    setActiveRect(nextRect);
-  };
+    setActiveRect((prev) => {
+      if (
+        prev &&
+        prev.left === nextRect.left &&
+        prev.top === nextRect.top &&
+        prev.width === nextRect.width &&
+        prev.height === nextRect.height
+      ) {
+        return prev;
+      }
+      return nextRect;
+    });
+  }, []);
+
+  const register = useCallback((id: string, element: HTMLElement): (() => void) => {
+    elementsMapRef.current.set(id, element);
+    if (id === activeIdRef.current) {
+      measureActive();
+    }
+    return () => {
+      elementsMapRef.current.delete(id);
+    };
+  }, [measureActive]);
+
+  const contextValue = useMemo<TabRegistry>(() => ({ register }), [register]);
 
   const useIsoLayoutEffect = typeof window !== 'undefined' ? useLayoutEffect : useEffect;
 
@@ -114,15 +136,18 @@ export function LiquidTabGroup({
         height: aRect.height
       };
 
-      if (activeRect && (activeRect.left !== newRect.left || activeRect.width !== newRect.width)) {
+      if (activeRect && (activeRect.left !== newRect.left || activeRect.width !== newRect.width || activeRect.top !== newRect.top)) {
+        if (transitionTimerRef.current) {
+          clearTimeout(transitionTimerRef.current);
+        }
         setPrevRect(activeRect);
         setIsTransitioning(true);
-        const timer = setTimeout(() => {
+        transitionTimerRef.current = setTimeout(() => {
           setIsTransitioning(false);
           setPrevRect(null);
-        }, 320);
+          transitionTimerRef.current = null;
+        }, 280);
         setActiveRect(newRect);
-        return () => clearTimeout(timer);
       } else {
         setActiveRect(newRect);
       }
@@ -132,18 +157,31 @@ export function LiquidTabGroup({
   }, [activeId]);
 
   useEffect(() => {
+    return () => {
+      if (transitionTimerRef.current) {
+        clearTimeout(transitionTimerRef.current);
+      }
+    };
+  }, []);
+
+  useEffect(() => {
     measureActive();
     const container = containerRef.current;
+    const activeEl = elementsMapRef.current.get(activeId);
     if (!container) return;
+
     const observer = new ResizeObserver(() => {
       measureActive();
     });
     observer.observe(container);
+    if (activeEl) {
+      observer.observe(activeEl);
+    }
     return () => observer.disconnect();
-  }, [activeId]);
+  }, [activeId, measureActive]);
 
   return (
-    <TabContext.Provider value={{ register }}>
+    <TabContext.Provider value={contextValue}>
       <div
         ref={containerRef}
         className={`liquid-tab-group ${className}`}
@@ -251,16 +289,18 @@ export function LiquidTabGroup({
           />
         )}
 
-        {/* 前景 DOM 内容层（文字、图标、点击 hit target 保持 100% 锐利清晰） */}
+        {/* 前景 DOM 内容层（继承父容器的 gap 与 align-items，保证布局 100% 一致） */}
         <div
           className="liquid-tab-group__content"
           style={{
             position: 'relative',
             zIndex: 1,
             display: 'flex',
-            alignItems: 'center',
+            alignItems: 'inherit',
+            gap: 'inherit',
             width: '100%',
-            height: '100%'
+            height: '100%',
+            minWidth: 0
           }}
         >
           {children}
@@ -272,7 +312,7 @@ export function LiquidTabGroup({
 
 export interface LiquidTabItemProps extends React.ButtonHTMLAttributes<HTMLButtonElement> {
   id: string;
-  as?: string | FC<any>;
+  as?: ElementType;
   children: ReactNode;
   className?: string;
   selected?: boolean;
@@ -295,7 +335,7 @@ export const LiquidTabItem = forwardRef<HTMLElement, LiquidTabItemProps>(functio
     if (typeof forwardedRef === 'function') {
       forwardedRef(node);
     } else if (forwardedRef) {
-      (forwardedRef as any).current = node;
+      (forwardedRef as { current: HTMLElement | null }).current = node;
     }
   };
 
@@ -305,7 +345,7 @@ export const LiquidTabItem = forwardRef<HTMLElement, LiquidTabItemProps>(functio
     }
   }, [ctx, id]);
 
-  const Comp = Component as any;
+  const Comp = Component as ElementType;
 
   return (
     <Comp
@@ -318,4 +358,3 @@ export const LiquidTabItem = forwardRef<HTMLElement, LiquidTabItemProps>(functio
     </Comp>
   );
 });
-

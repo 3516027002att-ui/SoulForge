@@ -35,7 +35,7 @@ export function DomainNavigationBar({ domain, domains, onSelect, resourceSidebar
     <nav className="domain-bar" aria-label="工作域导航">
       <LiquidTabGroup
         activeId={activeTabId}
-        fill="var(--forge-hover)"
+        fill="var(--forge-active)"
         blur={5}
         contrast={18}
         radius={4}
@@ -64,7 +64,7 @@ export function DomainNavigationBar({ domain, domains, onSelect, resourceSidebar
               data-domain={entry.domain}
               title={description}
               onClick={() => onSelect(entry.domain)}
-              onKeyDown={(event: KeyboardEvent<any>) => handleKeyDown(event, index)}
+              onKeyDown={(event) => handleKeyDown(event, index)}
             >
               <span className="domain-tab__label">{entry.label}</span>
             </LiquidTabItem>

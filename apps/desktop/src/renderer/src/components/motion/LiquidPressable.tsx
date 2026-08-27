@@ -12,9 +12,9 @@ import { useReducedMotion } from './useReducedMotion.js';
 
 export interface LiquidPressableProps extends ButtonHTMLAttributes<HTMLButtonElement> {
   children?: ReactNode;
-  /** 按压时的缩放比例，默认 0.95 (克制微压缩) */
+  /** 按压时的缩放比例，默认 0.96 (克制微压缩) */
   pressScale?: number;
-  /** 悬浮时的缩放比例，默认 1.02 */
+  /** 悬浮时的缩放比例，默认 1.01 */
   hoverScale?: number;
   className?: string;
   style?: CSSProperties;
@@ -24,9 +24,12 @@ export interface LiquidPressableProps extends ButtonHTMLAttributes<HTMLButtonEle
 
 /**
  * LiquidPressable:
- * SoulForge 基础物理反馈按钮。
- * 提供类似 Apple 风格的轻微材质按压（scale 0.95~0.97）与快速 Spring 回弹（~120ms），
+ * SoulForge 基础物理感按钮封装。
+ * 提供轻微物理触感按压（scale 0.95~0.97）与柔和回弹（~200ms），
  * 绝不过度晃动或果冻化。
+ *
+ * 完整组合内部 hover/active 状态与调用方传入的所有事件处理器，
+ * 绝不覆盖或吞掉 consumer 的 event handlers。
  */
 export const LiquidPressable = forwardRef<HTMLButtonElement, LiquidPressableProps>(function LiquidPressable(
   props,
@@ -34,8 +37,8 @@ export const LiquidPressable = forwardRef<HTMLButtonElement, LiquidPressableProp
 ): ReactElement {
   const {
     children,
-    pressScale = 0.95,
-    hoverScale = 1.02,
+    pressScale = 0.96,
+    hoverScale = 1.01,
     className = '',
     style = {},
     disabled = false,
@@ -44,6 +47,8 @@ export const LiquidPressable = forwardRef<HTMLButtonElement, LiquidPressableProp
     onPointerUp,
     onPointerLeave,
     onPointerCancel,
+    onMouseEnter,
+    onMouseLeave,
     ...rest
   } = props;
 
@@ -77,6 +82,19 @@ export const LiquidPressable = forwardRef<HTMLButtonElement, LiquidPressableProp
     onPointerCancel?.(e);
   };
 
+  const handleMouseEnter = (e: MouseEvent<HTMLButtonElement>): void => {
+    if (!disabled && !disableAnimation) {
+      setIsHovered(true);
+    }
+    onMouseEnter?.(e);
+  };
+
+  const handleMouseLeave = (e: MouseEvent<HTMLButtonElement>): void => {
+    setIsHovered(false);
+    setIsPressed(false);
+    onMouseLeave?.(e);
+  };
+
   const scale = disabled || disableAnimation || reducedMotion
     ? 1
     : isPressed
@@ -90,8 +108,8 @@ export const LiquidPressable = forwardRef<HTMLButtonElement, LiquidPressableProp
     : {
         transform: `scale(${scale}) translateZ(0)`,
         transition: isPressed
-          ? 'transform 90ms cubic-bezier(0.2, 0, 0, 1)'
-          : 'transform 240ms cubic-bezier(0.34, 1.56, 0.64, 1)',
+          ? 'transform 85ms cubic-bezier(0.25, 1, 0.5, 1)'
+          : 'transform 200ms cubic-bezier(0.25, 1, 0.5, 1)',
         willChange: isPressed || isHovered ? 'transform' : 'auto',
         ...style
       };
@@ -102,13 +120,13 @@ export const LiquidPressable = forwardRef<HTMLButtonElement, LiquidPressableProp
       disabled={disabled}
       className={`liquid-pressable ${isPressed ? 'is-pressed' : ''} ${className}`}
       style={springStyle}
+      {...rest}
       onPointerDown={handlePointerDown}
       onPointerUp={handlePointerUp}
       onPointerLeave={handlePointerLeave}
       onPointerCancel={handlePointerCancel}
-      onMouseEnter={() => !disabled && setIsHovered(true)}
-      onMouseLeave={() => setIsHovered(false)}
-      {...rest}
+      onMouseEnter={handleMouseEnter}
+      onMouseLeave={handleMouseLeave}
     >
       {children}
     </button>

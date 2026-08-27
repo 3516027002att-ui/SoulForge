@@ -18,6 +18,7 @@
     "test:three-scene-functional": "node ../../scripts/run-three-scene-functional-smoke.mjs",
     "release:installer:manifest": "node ../../scripts/generate-release-installer-manifest.mjs",
     "test:installer-lifecycle": "node ../../scripts/verify-installer-lifecycle.mjs",
+    "test:motion": "node ../../scripts/run-motion-tests.mjs",
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {

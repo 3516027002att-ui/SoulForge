@@ -176,6 +176,7 @@
     "test:renderer-e2e": "npm run test:renderer-playwright -w @soulforge/desktop",
     "test:seal-cli": "node scripts/verify-seal-cli-fixtures.mjs",
     "test:renderer-unit": "node scripts/run-renderer-unit-tests.mjs",
+    "test:motion": "npm run test:motion -w @soulforge/desktop",
     "test:real-mod-readonly-preview": "npm run test:real-mod-readonly-preview -w @soulforge/core",
     "test:workspace-completeness": "node scripts/with-local-has-game-env.mjs npm run test:workspace-completeness -w @soulforge/core",
     "test:desktop-contract-mutations": "node scripts/contract/verify-desktop-contract-mutations.mjs",
