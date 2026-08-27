@@ -12,6 +12,8 @@ import {
   type SessionFeedbackIpcRequest
 } from '@soulforge/shared';
 
+const DEFAULT_FEEDBACK_ENDPOINT = 'https://script.google.com/macros/s/AKfycbzWoGTeAvqfqBHyBfuktDEQPsOejKLpErdU40LbvkN_XxAaBaFDC3SdNCe5AryY4pmA/exec';
+
 let handlersRegistered = false;
 let trustedRendererId: number | null = null;
 let mutterService: MutterService | null = null;
@@ -75,13 +77,14 @@ async function ensureMutterService(): Promise<MutterService> {
 
 function ensureFeedbackService(): SessionFeedbackService | null {
   if (feedbackService) return feedbackService;
-  const endpointUrl = process.env.SOULFORGE_FEEDBACK_ENDPOINT?.trim() ?? '';
-  if (endpointUrl.length === 0) {
-    feedbackConfigured = false;
-    return null;
-  }
+  const configuredEndpoint = process.env.SOULFORGE_FEEDBACK_ENDPOINT?.trim();
+  const endpointUrl = configuredEndpoint && configuredEndpoint.length > 0
+    ? configuredEndpoint
+    : DEFAULT_FEEDBACK_ENDPOINT;
 
-  feedbackConfigured = true;
+  feedbackConfigured = endpointUrl.length > 0;
+  if (!feedbackConfigured) return null;
+
   feedbackService = new SessionFeedbackService(
     join(app.getPath('userData'), 'agent'),
     new HttpFeedbackEndpoint(endpointUrl),
