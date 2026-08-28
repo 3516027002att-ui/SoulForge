@@ -22,6 +22,7 @@ import {
   type MapMeshGeometry
 } from '../scene/mapModelLoadScheduler.js';
 import { getRendererBridge } from '../runtime/rendererRuntime.js';
+import { decodeBase64ToUint8Array, uint8ArrayToBase64 } from '../utils/binary.js';
 import { WorkbenchLayout } from '../workbench/WorkbenchLayout.js';
 import type { MapEditTransaction } from '@soulforge/shared';
 
@@ -53,6 +54,112 @@ interface MapMeshReadResult {
     normalsBase64?: string;
     vertexCount?: number;
   };
+}
+
+interface MapStaticGeometryChunk {
+  positionsBase64?: string | null;
+  indicesBase64?: string | null;
+  indexElementBytes?: 2 | 4 | null;
+  uvsBase64?: string | null;
+  normalsBase64?: string | null;
+}
+
+interface MapStaticGeometryPage {
+  sessionToken?: string | null;
+  nextCursor?: string | null;
+  complete?: boolean;
+  chunks?: MapStaticGeometryChunk[];
+}
+
+interface MapStaticGeometryReadResult {
+  ok?: boolean;
+  data?: MapStaticGeometryPage;
+}
+
+type MapMeshGeometryData = NonNullable<MapMeshReadResult['data']>;
+
+function concatUint8Arrays(parts: readonly Uint8Array[]): Uint8Array {
+  const totalLength = parts.reduce((sum, part) => sum + part.byteLength, 0);
+  const merged = new Uint8Array(totalLength);
+  let offset = 0;
+  for (const part of parts) {
+    merged.set(part, offset);
+    offset += part.byteLength;
+  }
+  return merged;
+}
+
+export function mergeMapStaticGeometryChunks(chunks: readonly MapStaticGeometryChunk[]): MapMeshGeometryData {
+  const geometryChunks = chunks.filter((chunk) => Boolean(chunk.positionsBase64));
+  if (geometryChunks.length === 0) return {};
+
+  const positions: Uint8Array[] = [];
+  const uvs: Uint8Array[] = [];
+  const normals: Uint8Array[] = [];
+  const indices: number[] = [];
+  const allHaveIndices = geometryChunks.every((chunk) => Boolean(chunk.indicesBase64));
+  const allHaveUvs = geometryChunks.every((chunk) => Boolean(chunk.uvsBase64));
+  const allHaveNormals = geometryChunks.every((chunk) => Boolean(chunk.normalsBase64));
+  let vertexCount = 0;
+  let indexSize: 16 | 32 = 16;
+
+  for (const chunk of geometryChunks) {
+    const positionBytes = decodeBase64ToUint8Array(chunk.positionsBase64!);
+    if (positionBytes.byteLength % (3 * Float32Array.BYTES_PER_ELEMENT) !== 0) {
+      throw new Error('MAP_STATIC_GEOMETRY_INVALID: positions are not Float32 xyz aligned');
+    }
+    const chunkVertexCount = positionBytes.byteLength / (3 * Float32Array.BYTES_PER_ELEMENT);
+    positions.push(positionBytes);
+
+    if (allHaveUvs) uvs.push(decodeBase64ToUint8Array(chunk.uvsBase64!));
+    if (allHaveNormals) normals.push(decodeBase64ToUint8Array(chunk.normalsBase64!));
+
+    if (allHaveIndices) {
+      const indexElementBytes = chunk.indexElementBytes;
+      if (indexElementBytes !== 2 && indexElementBytes !== 4) {
+        throw new Error('MAP_STATIC_GEOMETRY_INVALID: indexElementBytes must be 2 or 4');
+      }
+      const indexBytes = decodeBase64ToUint8Array(chunk.indicesBase64!);
+      if (indexBytes.byteLength % indexElementBytes !== 0) {
+        throw new Error('MAP_STATIC_GEOMETRY_INVALID: indices are not aligned');
+      }
+      const indexView = new DataView(indexBytes.buffer, indexBytes.byteOffset, indexBytes.byteLength);
+      for (let offset = 0; offset < indexBytes.byteLength; offset += indexElementBytes) {
+        const localIndex = indexElementBytes === 4
+          ? indexView.getUint32(offset, true)
+          : indexView.getUint16(offset, true);
+        const mergedIndex = localIndex + vertexCount;
+        if (mergedIndex > 0xffff_ffff) {
+          throw new Error('MAP_STATIC_GEOMETRY_INVALID: merged index exceeds uint32');
+        }
+        indices.push(mergedIndex);
+        if (indexElementBytes === 4 || mergedIndex > 0xffff) indexSize = 32;
+      }
+    }
+
+    vertexCount += chunkVertexCount;
+  }
+
+  const merged: MapMeshGeometryData = {
+    positionsBase64: uint8ArrayToBase64(concatUint8Arrays(positions)),
+    vertexCount
+  };
+
+  if (allHaveIndices) {
+    const indexBytes = new Uint8Array(indices.length * (indexSize / 8));
+    const indexView = new DataView(indexBytes.buffer);
+    for (let i = 0; i < indices.length; i += 1) {
+      const offset = i * (indexSize / 8);
+      if (indexSize === 32) indexView.setUint32(offset, indices[i]!, true);
+      else indexView.setUint16(offset, indices[i]!, true);
+    }
+    merged.indicesBase64 = uint8ArrayToBase64(indexBytes);
+    merged.indexSize = indexSize;
+  }
+  if (allHaveUvs) merged.uvsBase64 = uint8ArrayToBase64(concatUint8Arrays(uvs));
+  if (allHaveNormals) merged.normalsBase64 = uint8ArrayToBase64(concatUint8Arrays(normals));
+
+  return merged;
 }
 
 function toMapMeshGeometry(raw: MapMeshReadResult): MapMeshGeometry | null {
@@ -439,21 +546,23 @@ export function MsbScenePanel(props: MsbScenePanelProps): ReactElement {
       // Deprecated: readMapPartMesh -> readMapStaticGeometry
       if (bridge && typeof (bridge as any).readMapStaticGeometry === 'function' && props.mapResourceUri) {
         const loadCache = new MapModelLoadCache(async (modelName) => {
-          let raw: any = null;
+          let raw: MapMeshReadResult = { ok: false };
           // Chunked streaming: follow opaque cursors until complete, wire bytes budget <8MiB per chunk
           let cursor: string | null = null;
           let sessionToken: string | null = null;
-          let finalData: any = null;
+          const chunks: MapStaticGeometryChunk[] = [];
           do {
             const chunkResult = await (bridge as any).readMapStaticGeometry(props.mapResourceUri, modelName, cursor, sessionToken) as any;
-            if (!chunkResult?.ok) { raw = chunkResult; break; }
-            finalData = chunkResult.data; // TODO: merge chunks via mapMeshGeometry; for now take last chunk's data
-            sessionToken = finalData?.sessionToken ?? sessionToken;
-            cursor = finalData?.nextCursor ?? null;
-            if (finalData?.complete) { raw = { ok: true, data: finalData }; break; }
-            if (!cursor) { raw = { ok: true, data: finalData }; break; }
+            if (!chunkResult?.ok) { raw = chunkResult as MapMeshReadResult; break; }
+            const page = (chunkResult as MapStaticGeometryReadResult).data;
+            if (page?.chunks) chunks.push(...page.chunks);
+            sessionToken = page?.sessionToken ?? sessionToken;
+            cursor = page?.nextCursor ?? null;
+            if (page?.complete || !cursor) {
+              raw = { ok: true, data: mergeMapStaticGeometryChunks(chunks) };
+              break;
+            }
           } while (cursor);
-          const rawTyped = raw as MapMeshReadResult;
           return toMapMeshGeometry(raw);
         });
         const uploadQueue = new FrameTaskQueue();

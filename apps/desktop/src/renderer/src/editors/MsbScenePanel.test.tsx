@@ -17,11 +17,12 @@
  * bridge:verify:msb-all 与 E2E 覆盖，本文件只钉 renderer 侧的展示与接线约束。
  */
 import assert from 'node:assert/strict';
+import { Buffer } from 'node:buffer';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, it } from 'node:test';
 import { renderToStaticMarkup } from 'react-dom/server';
-import { MsbScenePanel } from './MsbScenePanel.js';
+import { MsbScenePanel, mergeMapStaticGeometryChunks } from './MsbScenePanel.js';
 
 function resolvePartModelName(
   part: { modelIndex?: number },
@@ -47,6 +48,105 @@ function render(overrides: Record<string, unknown> = {}): string {
     />
   );
 }
+
+function encodeFloat32(values: readonly number[]): string {
+  const bytes = new Uint8Array(values.length * Float32Array.BYTES_PER_ELEMENT);
+  const view = new DataView(bytes.buffer);
+  values.forEach((value, index) => view.setFloat32(index * Float32Array.BYTES_PER_ELEMENT, value, true));
+  return Buffer.from(bytes).toString('base64');
+}
+
+function encodeIndices(values: readonly number[], indexElementBytes: 2 | 4 = 2): string {
+  const bytes = new Uint8Array(values.length * indexElementBytes);
+  const view = new DataView(bytes.buffer);
+  values.forEach((value, index) => {
+    if (indexElementBytes === 4) view.setUint32(index * indexElementBytes, value, true);
+    else view.setUint16(index * indexElementBytes, value, true);
+  });
+  return Buffer.from(bytes).toString('base64');
+}
+
+function decodeFloat32(value: string): number[] {
+  const bytes = Buffer.from(value, 'base64');
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  const values: number[] = [];
+  for (let offset = 0; offset < bytes.byteLength; offset += Float32Array.BYTES_PER_ELEMENT) {
+    values.push(view.getFloat32(offset, true));
+  }
+  return values;
+}
+
+function decodeIndices(value: string, indexSize: 16 | 32): number[] {
+  const bytes = Buffer.from(value, 'base64');
+  const elementBytes = indexSize / 8;
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  const values: number[] = [];
+  for (let offset = 0; offset < bytes.byteLength; offset += elementBytes) {
+    values.push(elementBytes === 4 ? view.getUint32(offset, true) : view.getUint16(offset, true));
+  }
+  return values;
+}
+
+function staticGeometryChunk(offset: number, indexElementBytes: 2 | 4 = 2) {
+  return {
+    positionsBase64: encodeFloat32([
+      offset, 0, 0,
+      offset + 1, 0, 0,
+      offset, 1, 0
+    ]),
+    indicesBase64: encodeIndices([0, 1, 2], indexElementBytes),
+    indexElementBytes,
+    uvsBase64: encodeFloat32([0, 0, 1, 0, 0, 1]),
+    normalsBase64: encodeFloat32([0, 1, 0, 0, 1, 0, 0, 1, 0])
+  };
+}
+
+describe('MAP static geometry chunk 重组', () => {
+  it('单 chunk 保留原始几何数据', () => {
+    const merged = mergeMapStaticGeometryChunks([staticGeometryChunk(0)]);
+
+    assert.equal(merged.vertexCount, 3);
+    assert.equal(merged.indexSize, 16);
+    assert.deepEqual(decodeFloat32(merged.positionsBase64!), [0, 0, 0, 1, 0, 0, 0, 1, 0]);
+    assert.deepEqual(decodeIndices(merged.indicesBase64!, merged.indexSize!), [0, 1, 2]);
+  });
+
+  it('多个 chunk 按返回顺序拼接并重定位索引', () => {
+    const merged = mergeMapStaticGeometryChunks([
+      staticGeometryChunk(0),
+      staticGeometryChunk(10),
+      staticGeometryChunk(20)
+    ]);
+
+    assert.equal(merged.vertexCount, 9);
+    assert.deepEqual(decodeFloat32(merged.positionsBase64!), [
+      0, 0, 0, 1, 0, 0, 0, 1, 0,
+      10, 0, 0, 11, 0, 0, 10, 1, 0,
+      20, 0, 0, 21, 0, 0, 20, 1, 0
+    ]);
+    assert.deepEqual(decodeIndices(merged.indicesBase64!, merged.indexSize!), [0, 1, 2, 3, 4, 5, 6, 7, 8]);
+    assert.deepEqual(decodeFloat32(merged.uvsBase64!), [
+      0, 0, 1, 0, 0, 1,
+      0, 0, 1, 0, 0, 1,
+      0, 0, 1, 0, 0, 1
+    ]);
+  });
+
+  it('空中间或结束 chunk 不丢失有效几何，全部为空时不创建 geometry', () => {
+    const merged = mergeMapStaticGeometryChunks([
+      staticGeometryChunk(0),
+      { positionsBase64: '' },
+      staticGeometryChunk(20)
+    ]);
+    const terminalEmpty = mergeMapStaticGeometryChunks([staticGeometryChunk(0), { positionsBase64: '' }]);
+    const allEmpty = mergeMapStaticGeometryChunks([]);
+
+    assert.equal(merged.vertexCount, 6);
+    assert.deepEqual(decodeIndices(merged.indicesBase64!, merged.indexSize!), [0, 1, 2, 3, 4, 5]);
+    assert.equal(terminalEmpty.vertexCount, 3);
+    assert.equal(allEmpty.positionsBase64, undefined);
+  });
+});
 
 describe('MsbScenePanel 初始结构（挂载即有的三栏骨架）', () => {
   it('工作台根的可访问名是「MSB 地图工作台」', () => {
