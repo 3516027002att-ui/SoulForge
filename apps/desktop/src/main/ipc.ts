@@ -241,7 +241,6 @@ import { executeRecoveryCleanup } from './recoveryCleanup.js';
 import { ModelServiceCredentialVault } from './modelServiceCredentials.js';
 import { MainMe3RuntimeGateway } from './me3RuntimeGateway.js';
 import { MemoryManager } from './memoryManager.js';
-import type { TrustedIpcHandle } from './ipc/registration.js';
 import { registerWorkspaceIpcHandlers } from './ipc/workspace.js';
 import {
   decodeTaeParamFields,
