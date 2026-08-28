@@ -1,10 +1,8 @@
 import { existsSync, readFileSync } from 'node:fs';
 import { resolve, join, dirname } from 'node:path';
 import { createCipheriv, createDecipheriv, createHash, randomBytes } from 'node:crypto';
-import electron from 'electron';
+import { app as electronApp } from 'electron';
 import type { StoredModelServiceConfig } from './modelServiceCredentials.js';
-
-const electronApp = (electron as unknown as { app?: typeof electron.app })?.app;
 
 export interface DecryptedPlatformTestConfig {
   url: string;

@@ -130,10 +130,10 @@ export async function runAnimationPlaybackClockSmoke(): Promise<void> {
   assert.ok(Math.abs(qRotZ[2] - Math.SQRT1_2) < 1e-4);
   assert.ok(Math.abs(qRotZ[3] - Math.SQRT1_2) < 1e-4);
 
-  // Composite Euler angle
+  // Composite Euler angle — three non-zero angles, full quaternion check (fact 3/4: single-axis and modulus-only are blind)
   const qComp = eulerXYZToQuaternion([0.5, -0.3, 1.2]);
-  const qCompLen = qComp[0] ** 2 + qComp[1] ** 2 + qComp[2] ** 2 + qComp[3] ** 2;
-  assert.ok(Math.abs(qCompLen - 1.0) < 1e-4, 'Composite quaternion must be normalized');
+  const expectedComp = [0.1201424763, 0.0186237853, 0.5714598517, 0.8115741358];
+  for (let i = 0; i < 4; i++) assert.ok(Math.abs(qComp[i]! - expectedComp[i]!) < 1e-4, `qComp[${i}] mismatch: got ${qComp[i]}, expected ${expectedComp[i]}`);
 
   // De Boor evaluation
   const spline = {

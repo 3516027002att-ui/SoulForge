@@ -1,0 +1,137 @@
+{
+  "schema": "mission1-runner-negative-fixtures-v1",
+  "fixtureCount": 8,
+  "fixtures": [
+    {
+      "id": "forged-old-log",
+      "assertionId": "A0.snapshot-negative-fixtures",
+      "stage": "A0",
+      "expectedCode": "ARTIFACT_HASH_MISMATCH",
+      "forbiddenStatuses": ["PASS"],
+      "exactCommand": ["node", "scripts/verify-mission1-acceptance.mjs", "--fixture", "forged-old-log"],
+      "inputArtifacts": [
+        {
+          "path": "testdata/mission1/negative-inputs/forged-old-log.json",
+          "byteLength": 143,
+          "sha256": "6473b55ec9ee93af96d0aef54032108fe9c0fb8407411594566d6e3f0d7b8339"
+        }
+      ]
+    },
+    {
+      "id": "child-skipped",
+      "assertionId": "A0.child-exit-and-typed-artifact",
+      "stage": "A0",
+      "expectedCode": "CHILD_RESULT_INCOMPLETE",
+      "forbiddenStatuses": ["PASS"],
+      "exactCommand": ["node", "scripts/verify-mission1-acceptance.mjs", "--fixture", "child-skipped"],
+      "inputArtifacts": [
+        {
+          "path": "testdata/mission1/negative-inputs/child-skipped.json",
+          "byteLength": 151,
+          "sha256": "2cefca9379facd03ddd2b58dfc8c978c0453cc02e2290be00f9f31152919cbf4"
+        }
+      ]
+    },
+    {
+      "id": "source-changed-during-run",
+      "assertionId": "A0.snapshot-negative-fixtures",
+      "stage": "A0",
+      "expectedCode": "SOURCE_CHANGED_DURING_RUN",
+      "forbiddenStatuses": ["PASS"],
+      "exactCommand": ["node", "scripts/verify-mission1-acceptance.mjs", "--fixture", "source-changed-during-run"],
+      "inputArtifacts": [
+        {
+          "path": "testdata/mission1/negative-inputs/snapshot-before.json",
+          "byteLength": 97,
+          "sha256": "eb7d7019e2190b88bdc91cc72821410e015fa1405acf523836c3fafa619bfef2"
+        },
+        {
+          "path": "testdata/mission1/negative-inputs/snapshot-after.json",
+          "byteLength": 97,
+          "sha256": "6625c92409303424e4f56582cce186ba22f0f767665e6f71a2dbe87e8d98e9d8"
+        }
+      ]
+    },
+    {
+      "id": "bridge-hash-mismatch",
+      "assertionId": "A0.snapshot-negative-fixtures",
+      "stage": "A0",
+      "expectedCode": "BRIDGE_IDENTITY_MISMATCH",
+      "forbiddenStatuses": ["PASS"],
+      "exactCommand": ["node", "scripts/verify-mission1-acceptance.mjs", "--fixture", "bridge-hash-mismatch"],
+      "inputArtifacts": [
+        {
+          "path": "testdata/mission1/negative-inputs/bridge-provenance.json",
+          "byteLength": 257,
+          "sha256": "0c7a6bca86d0bd3e2d11d4056852ba2dbe52ba9ce2526bd9e351e76b9e4576e3"
+        }
+      ]
+    },
+    {
+      "id": "corpus-hash-mismatch",
+      "assertionId": "A0.snapshot-negative-fixtures",
+      "stage": "A0",
+      "expectedCode": "CORPUS_IDENTITY_CHANGED",
+      "forbiddenStatuses": ["PASS"],
+      "exactCommand": ["node", "scripts/verify-mission1-acceptance.mjs", "--fixture", "corpus-hash-mismatch"],
+      "inputArtifacts": [
+        {
+          "path": "testdata/mission1/negative-inputs/corpus-before.json",
+          "byteLength": 83,
+          "sha256": "1c3ce87688f9aebbaa7233ffe15a8145610d4bbe5b5caa887c7410b6ab581d4e"
+        },
+        {
+          "path": "testdata/mission1/negative-inputs/corpus-after.json",
+          "byteLength": 83,
+          "sha256": "ebc84b45e34784d72db43fcb94589c0f5208c77125219904741b6d67b9759d8e"
+        }
+      ]
+    },
+    {
+      "id": "handwritten-pass-without-artifact",
+      "assertionId": "A0.artifact-replay-fixtures",
+      "stage": "A0",
+      "expectedCode": "STATE_ARTIFACT_MISSING",
+      "forbiddenStatuses": ["PASS"],
+      "exactCommand": ["node", "scripts/verify-mission1-acceptance.mjs", "--fixture", "handwritten-pass-without-artifact"],
+      "inputArtifacts": [
+        {
+          "path": "testdata/mission1/negative-inputs/handwritten-pass-state.json",
+          "byteLength": 106,
+          "sha256": "93fccbb2f61044fdc212f7021509554a366c0200b5a9c12fedbf8bb95279a379"
+        }
+      ]
+    },
+    {
+      "id": "missing-ui-artifact",
+      "assertionId": "A0.child-exit-and-typed-artifact",
+      "stage": "A0",
+      "expectedCode": "UI_ARTIFACT_MISSING",
+      "forbiddenStatuses": ["PASS"],
+      "exactCommand": ["node", "scripts/verify-mission1-acceptance.mjs", "--fixture", "missing-ui-artifact"],
+      "inputArtifacts": [
+        {
+          "path": "testdata/mission1/negative-inputs/missing-ui-artifact.json",
+          "byteLength": 5,
+          "sha256": "38e0b9de817f645c4bec37c0d4a3e58baecccb040f5718dc069a72c7385a0bed"
+        }
+      ]
+    },
+    {
+      "id": "child-nonzero",
+      "assertionId": "A0.child-exit-and-typed-artifact",
+      "stage": "A0",
+      "expectedCode": "CHILD_EXIT_NONZERO",
+      "forbiddenStatuses": ["PASS"],
+      "exactCommand": ["node", "scripts/verify-mission1-acceptance.mjs", "--fixture", "child-nonzero"],
+      "inputArtifacts": [
+        {
+          "path": "testdata/mission1/negative-inputs/child-result-exit-1.json",
+          "byteLength": 207,
+          "sha256": "0a9313ea6384b4b59f9f42869d2075243c14d386d8e7073625ed50c576f6122c"
+        }
+      ]
+    }
+  ],
+  "manifestSha256": "fd6a9c58a6a01e70027c9eea52318ee1565b5bd1f8f6814cd8d5d0c007ad1e3d"
+}

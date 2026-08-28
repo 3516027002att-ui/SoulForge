@@ -17,6 +17,7 @@ export function isParamBackupPath(relativePath: string): boolean {
   return lower.endsWith('.bak') || lower.endsWith('.prev');
 }
 
+// 物理身份：rowIndex + expectedId(id) + expectedDataHash 贯穿写入链；id-only 在重复时必须拒绝。
 export type ParamBridgeMutation =
   | {
       kind: 'upsert';
@@ -24,8 +25,9 @@ export type ParamBridgeMutation =
       dataBase64: string;
       rowIndex?: number;
       expectedDataHash?: string;
+      expectedRowDataSize?: number;
     }
-  | { kind: 'delete'; id: number; rowIndex?: number; expectedDataHash?: string };
+  | { kind: 'delete'; id: number; rowIndex?: number; expectedDataHash?: string; expectedRowDataSize?: number };
 
 export interface ParamBridgeCommitRequest {
   sourcePath: string;
@@ -111,6 +113,9 @@ export async function commitParamMutationsViaBridge(
               ...(mutation.rowIndex !== undefined ? { rowIndex: mutation.rowIndex } : {}),
               ...(mutation.expectedDataHash !== undefined
                 ? { expectedDataHash: mutation.expectedDataHash }
+                : {}),
+              ...(mutation.expectedRowDataSize !== undefined
+                ? { expectedRowDataSize: mutation.expectedRowDataSize }
                 : {})
             }
           : {
@@ -119,6 +124,9 @@ export async function commitParamMutationsViaBridge(
               ...(mutation.rowIndex !== undefined ? { rowIndex: mutation.rowIndex } : {}),
               ...(mutation.expectedDataHash !== undefined
                 ? { expectedDataHash: mutation.expectedDataHash }
+                : {}),
+              ...(mutation.expectedRowDataSize !== undefined
+                ? { expectedRowDataSize: mutation.expectedRowDataSize }
                 : {})
             }
       ))

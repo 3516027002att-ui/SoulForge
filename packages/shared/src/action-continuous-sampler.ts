@@ -523,26 +523,27 @@ function normalizeQuaternion(q: [number, number, number, number]): [number, numb
 }
 
 /**
- * Converts Euler angles in XYZ order (radians) to a unit Quaternion [x, y, z, w].
+ * Converts FLVER Euler angles (radians, intrinsic XZY row-vector Rx*Rz*Ry) to column-vector quaternion qy⊗qz⊗qx.
+ * Hard constraint: Must match SoulsFormats.FLVER.Bone.ComputeLocalTransform transposed to column-vector T*Ry*Rz*Rx*S.
  */
 export function eulerXYZToQuaternion(
   euler: [number, number, number] | readonly [number, number, number]
 ): [number, number, number, number] {
   const [x, y, z] = euler;
-  const c1 = Math.cos(x / 2);
-  const c2 = Math.cos(y / 2);
-  const c3 = Math.cos(z / 2);
-  const s1 = Math.sin(x / 2);
-  const s2 = Math.sin(y / 2);
-  const s3 = Math.sin(z / 2);
+  const qx: [number, number, number, number] = [Math.sin(x / 2), 0, 0, Math.cos(x / 2)];
+  const qz: [number, number, number, number] = [0, 0, Math.sin(z / 2), Math.cos(z / 2)];
+  const qy: [number, number, number, number] = [0, Math.sin(y / 2), 0, Math.cos(y / 2)];
+  const q = multiplyQuaternion(multiplyQuaternion(qy, qz), qx);
+  return normalizeQuaternion(q);
+}
 
-  // Intrinsic XYZ Euler rotation: q = qx * qy * qz
-  const qx = s1 * c2 * c3 + c1 * s2 * s3;
-  const qy = c1 * s2 * c3 - s1 * c2 * s3;
-  const qz = c1 * c2 * s3 + s1 * s2 * c3;
-  const qw = c1 * c2 * c3 - s1 * s2 * s3;
-
-  return normalizeQuaternion([qx, qy, qz, qw]);
+function multiplyQuaternion(a: [number, number, number, number], b: [number, number, number, number]): [number, number, number, number] {
+  return [
+    a[3] * b[0] + a[0] * b[3] + a[1] * b[2] - a[2] * b[1],
+    a[3] * b[1] - a[0] * b[2] + a[1] * b[3] + a[2] * b[0],
+    a[3] * b[2] + a[0] * b[1] - a[1] * b[0] + a[2] * b[3],
+    a[3] * b[3] - a[0] * b[0] - a[1] * b[1] - a[2] * b[2]
+  ];
 }
 
 export const flverEulerToQuaternion = eulerXYZToQuaternion;

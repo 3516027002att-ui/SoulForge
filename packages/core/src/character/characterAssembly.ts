@@ -1,4 +1,3 @@
-// @ts-nocheck
 import type { Diagnostic } from '@soulforge/shared';
 import type { FlverPreviewBone, FlverPreviewMesh, FlverPreviewModel, CharacterPreviewBundle } from '@soulforge/shared';
 

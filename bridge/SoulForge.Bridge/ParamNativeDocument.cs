@@ -5,6 +5,7 @@ using System.Text;
 /// <summary>
 /// Native PARAM layout families handled losslessly by the Bridge.
 /// </summary>
+// 物理身份：rowIndex + expectedId + expectedDataHash 贯穿 DTO/Map/key，重复 ID 的 id-only 写入必须拒绝，页 DTO 携带 dataHash。
 internal enum ParamLayout
 {
     /// <summary>Sekiro regulation-style 64-bit offsets (FormatFlags1.LongDataOffset).</summary>
@@ -636,7 +637,7 @@ internal sealed class ParamNativeDocument
         return Rebuild(rows);
     }
 
-    public object ToEnvelope(ParamRoundTripReport? report = null, int rowPreviewLimit = 32, int rowPage = 0, int rowPageSize = 0, bool includeAllPayloads = false, int[]? rowIds = null)
+    public object ToEnvelope(ParamRoundTripReport? report = null, int rowPreviewLimit = 32, int rowPage = 0, int rowPageSize = 0, bool includeAllPayloads = false, int[]? rowIds = null, bool includeRowHashes = true)
     {
         // Large params (multi-MB / wide rows) must not dump payloads into one NDJSON frame.
         // 载荷上限按「本次实际返回多少行」算，而不是按全表行数。
@@ -681,7 +682,7 @@ internal sealed class ParamNativeDocument
                     item.row.Id,
                     item.row.Name,
                     dataBase64 = includePayload ? Convert.ToBase64String(item.row.Data) : null,
-                    dataHash = Hash(item.row.Data)
+                    dataHash = includeRowHashes ? Hash(item.row.Data) : null
                 }).ToArray(),
                 rowPreviewLimit,
                 rowsTruncated = false,
@@ -739,7 +740,7 @@ internal sealed class ParamNativeDocument
                 item.row.Id,
                 item.row.Name,
                 dataBase64 = pageIncludePayload ? Convert.ToBase64String(item.row.Data) : null,
-                dataHash = Hash(item.row.Data)
+                dataHash = includeRowHashes ? Hash(item.row.Data) : null
             }).ToArray(),
             rowPreviewLimit,
             rowsTruncated = rowPageSize <= 0 && totalRows > rowPreviewLimit,

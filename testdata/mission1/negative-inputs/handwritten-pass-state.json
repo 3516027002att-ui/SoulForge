@@ -1,0 +1,8 @@
+{
+  "schema": "mission1-acceptance-state-v2",
+  "gates": {
+    "G0": {
+      "status": "PASS"
+    }
+  }
+}

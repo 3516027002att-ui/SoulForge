@@ -23,6 +23,12 @@ A0 隔离当前伪 PASS 证据并修复验收信任根
  -> H 同一快照全量验收
 ```
 
+本轮新增的 IPC/Bridge 研究必须在进入 B、D、F、G 任一产品阶段前回读 §4.9：
+它是“先拆 main IPC domain router、再做 session/batch 迁移”的架构入口，不是
+允许提前大改 renderer 或 Bridge 的授权。§4.9.1.1 的 dirty checkout 覆盖层优先
+于旧行号和旧“不可达”快照；若当前源码与它不一致，先用符号搜索重新取证并停在
+只读诊断，不自行扩大范围。
+
 进入控制器前先构造一个**完整输入存在性结果**，不允许只检查 runner/state：
 
 ```ts
@@ -101,7 +107,7 @@ interface DirtyWorktreeApprovalV1 {
 | synthetic/fixture 绿 | 只证明 fixture；不能让 native/UI Gate PASS |
 | canvas 非黑/模型计数到了 | 不能证明 G4/G5；必须真实 m10 mask/depth/oracle/pointer artifact |
 | 黄色骨架或一块 body mesh | G6 FAIL |
-| main JSON 变小 | 不能证明 Bridge static DTO；C# skin/skeleton counter 必须为 0。**但当前这两个 counter 从不自增，恒为 0，见 0.4.2——直接读它们等于恒真判据，必须先让它们真的会加** |
+| main JSON 变小 | 不能证明 Bridge static DTO；C# skin/skeleton counter 必须在真实 static 请求中为 0。**旧快照中这两个 counter 从不自增而恒为 0；当前 dirty 候选已加入自增，但 runner/真实 native 路径仍须单独验证其调用关系和负向判别力，见 0.4.2。** |
 | cache hit/Promise 去重 | 不能证明 native session；C# parser counter 和顺序重开必须通过 |
 | 18 个历史地图失败已分类 | 不等于修复；所有 oracle-renderable identity 必须 loaded |
 | 手工/常量 CharacterAssemblyContext | G6 FAIL；必须有 PARAM 行/真实 selection provenance |
@@ -135,38 +141,33 @@ interface DirtyWorktreeApprovalV1 {
 
 本文行号都是 2026-08-27 工作树的近似定位，不是修改目标。接手者必须先用 `rg` 找符号，再读调用方和被调用方；禁止按行号盲改。命令名必须先从当前 `package.json` 或 `gov help` 核对，不能凭本文拼写不存在的脚本。
 
-> **【先确认你打开的是哪一个 `mission1.md`】（2026-08-27 实测）**
+> **【先确认你打开的是哪一个 `mission1.md`】（2026-08-27 晚间更新——本框早先版本的判据已因副本入库而反转，以本版为准）**
 >
-> 工作树里有**两个** `mission1.md`，内容不同：
+> 工作树里有**三份** `mission1.md`，当前口径：
 >
-> | | 路径 | 字节 | sha256 前 8 | git 状态 |
-> |---|---|---|---|---|
-> | **权威** | `锐评/mission1.md` | 会变，见下 | **勿用于校验** | **被忽略**（`.gitignore:101` 的 `锐评/`，`git check-ignore -v` 实测命中） |
-> | 陈旧分叉 | `msssion/mission1.md` | 423680 | `353a18d3` | `?? msssion/`——**未跟踪，但也没被忽略** |
+> | | 路径 | git 状态 | 能否回滚 |
+> |---|---|---|---|
+> | **权威（编辑点）** | `msssion/mission1.md` | 已跟踪；`.gitignore` 规则不作用于已跟踪文件；已在 commit `335b6110`（分支 `docs/mission1-handoff`，已推 GitHub）中保留 | **能**：`git checkout 335b6110 -- msssion/` |
+> | 影子副本 | `锐评/mission1.md` | 被 `.gitignore:101` 整目录忽略 | **不能**，改坏只能手工删段落 |
+> | 历史锚点 | 上述 commit `335b6110` 里的 `msssion/mission1.md` | 已推 GitHub | 只读 |
 >
-> 权威档那两格故意不填死值：**你每编辑一次它就变一次。** 本框刚写下时实测 487145 / `52857007`，把本框自己加进去之后立刻变成 489703 / `7e7c317f`——两次测量之间只有「插入本框」这一个动作，2558 字节的差额就是本框本身。所以任何写进本文的字节数或 hash，一旦用来校验本文，都是过期值；判别一律用上面那条 `grep -c` 命令。陈旧档相反，没人动它，`423680 / 353a18d3` 可以当身份锚点，也可以用来发现有人误改了它。
+> **为什么权威是 `msssion/` 那份**：它是唯一既在工作树、又有 git 兜底的副本（交接提示词 2026-08-27 指定）。**本框的早先版本曾把 `msssion/` 定性为「陈旧分叉」并禁止编辑它——那个定性已过期**：当时 `msssion/` 确实是一份 423680 字节的旧拷贝，随后它被定为权威、更新并强制入库；早先「`grep -c "24\.9\.0"` 输出 0 的是陈旧档」的判据随之作废——现在**权威档和影子副本两份都应该输出 `3`**，输出不一致说明两份分叉了，先同步再继续。同理，早先「`git grep -n msssion` 零命中」的观测也已过期（该 commit 之后仓库里有多处命中）。这两条留在这里当活教材：**一次性观测写成永久判据，观测失效时判据就变成陷阱。**
 >
-> `msssion` 是 `mission` 拼错产生的孤立目录：实测 `git grep -n "msssion"` 零命中，仓库里没有任何脚本或文档引用它。
+> **同步纪律（每次编辑都必须执行）**：编辑只在 `msssion/mission1.md` 上做，编辑后立即 `cp msssion/mission1.md 锐评/mission1.md` 并用 `cmp` 核对一致。禁止只改一份造成静默分叉；发现分叉时以 `msssion/` 为准重建 `锐评/`。
 >
-> **判别命令**（不要用字节数判断，字节数会随你自己的编辑变化）：
+> **判别命令**（不要用字节数或 hash 判断——你每编辑一次它们就变一次）：
 >
 > ```
-> grep -c "24\.9\.0" 锐评/mission1.md msssion/mission1.md
+> grep -c "24\.9\.0" msssion/mission1.md 锐评/mission1.md   # 两份都应为 3；不等 = 分叉
+> cmp msssion/mission1.md 锐评/mission1.md                  # 静默通过 = 逐字节同步
 > ```
 >
-> 实测权威档 `3`、陈旧档 `0`。**输出 0 的那个不是权威档，立刻关掉。**
+> 顺带保留一个仍然成立的结论：**在本仓库「被 gitignore」不等于「草稿」。** 实测 `docs/frontend-renovation/front-end.md:2601` 等三处**跟踪中**的文件都在引用 `锐评/` 下的材料，把权威材料放在忽略目录是本仓库既有惯例。不要因为它被忽略就去找一个「更正式」的副本。
 >
-> 顺带消除一个误解：**在本仓库「被 gitignore」不等于「草稿」。** 实测 `docs/frontend-renovation/front-end.md:2601`、`docs/frontend-renovation/radiant-white-implementation-report.md:3`、`docx/build-addressing-spec.py:136` 三处**跟踪中**的文件都在引用 `锐评/` 下的材料，把权威材料放在忽略目录是本仓库既有惯例。不要因为它被忽略就去找一个「更正式」的副本——`msssion/` 正是这样被找出来的那种东西。
+> **git 上的不对称仍然成立，两条都要记住：**
 >
-> **合并方向是单向的，没有任何内容需要从陈旧档捞回来。** 实测标题集合：陈旧档 154 个、权威档 164 个，**陈旧档独有 0 个**，权威档独有 10 个。
-> 未测：标题是子集**不等于**正文是子集——我只比对了标题行，没有逐段比对正文。若你确实要引用陈旧档里的某一段，先自己 diff 那一段再用。
->
-> **git 上的不对称最危险，这两条都要记住：**
->
-> - 权威档对 git 不可见 ⇒ **它没有任何 git 回滚**。改错了只能手工删掉你新加的段落，`git checkout` / `git restore` 都救不了它。本文自身就处在这个处境里，所以对本文的每次编辑都要小步、可辨识。
-> - 陈旧分叉**会被 `git add -A` 收进提交**。收口时若习惯性 `git add -A`，你会把一份过期任务书提交进仓库，而真正的任务书仍然对 git 隐身——事后从提交历史里看，唯一存在的任务书就是那份错的。
->
-> **禁止**：编辑 `msssion/mission1.md`；把它 `git add`；为了「统一」而擅自删除它——删除属于不可逆操作，先问委托方。
+> - `锐评/` 那份对 git 完全不可见 ⇒ 它没有任何 git 回滚，全靠与 `msssion/` 的同步纪律兜底。
+> - `msssion/` 这份已跟踪，编辑会出现在 `git status`；`锐评/` 仍在 ignore 名单里。收口时若习惯性 `git add -A`，你会把无关状态意外卷进提交；提交必须逐个文件暂存。
 
 ### 0.2 任务边界
 
@@ -249,24 +250,34 @@ oodleRuntimeRoot 必须传：game-side 的 parambnd 是 KRAK 压缩，缺 Oodle 
 
 G3 的最低证据因此要求独立核对 `corpusVerified === corpusTotal && corpusFailed === 0` 三个计数，并明确标注这一轮跑的是哪一侧容器。`runNativeParamSmoke.ts:309-312` 只在 `verified === 0` 时抛错、不断言 `failed.length === 0`；只要有一张表通过、其余全失败，它仍然退出 0。**`npm run bridge:verify:param` 退出 0 不构成 G3 证据**，必须读计数本身。
 
-#### 0.4.2 G4 两端都是空的：计数器恒 0，判据是四路 OR
+#### 0.4.2 G4 旧快照的两处空洞与当前 runner 复核
 
-G4 目前有两个**互相独立**的空洞。只修一个仍然是假绿，接手者必须一起处理。
+旧快照当时有两个**互相独立**的 G4 空洞。只修一个仍然是假绿；接手者阅读本节
+时要把它当历史反例，当前 checkout 的事实以 §4.9.1.1 为准。
 
-**空洞一：`SkinCalls`/`SkeletonCalls` 从不自增。** 实测这三个 counter 在整个主工作树的全部出现位置：
+**旧快照空洞一：`SkinCalls`/`SkeletonCalls` 从不自增。** 旧快照实测这三个 counter 在工作树的全部出现位置：
 
 ```text
 MapStaticGeometryService.cs:9,10,11    声明
 MapStaticGeometryService.cs:53,54,55   归零
-MapStaticGeometryService.cs:101        ParseCount++    <- 只有这一个会加
-BridgeCommandService.cs:1681,1693      读出并放进 telemetry
+MapStaticGeometryService.cs:101        ParseCount++    <- 旧快照只有这一个会加
+BridgeCommandService.cs:1681,1693      旧快照读出并放进 telemetry
 ```
 
-`ParseCount` 确实在 `:101` 自增；**`SkinCalls` 和 `SkeletonCalls` 在仓库任何位置都没有 `++`、`+=` 或 `Interlocked` 写入**（已按这三种形式分别 grep，零命中）。所以第104行和第1666行要求的「counter 证明 static 路径 skin/skeleton 构建为 0」是**由构造恒真**的：它们被声明成 0、归零成 0、读出来是 0，与 static 路径究竟有没有调用 skinning 毫无关系。
+`ParseCount` 确实在旧快照 `:101` 自增；**旧快照的 `SkinCalls` 和 `SkeletonCalls` 在仓库任何位置都没有 `++`、`+=` 或 `Interlocked` 写入**，所以当时第104行和第1666行要求的「counter 证明 static 路径 skin/skeleton 构建为 0」是**由构造恒真**的：它们被声明成 0、归零成 0、读出来是 0，与 static 路径究竟有没有调用 skinning 毫无关系。
 
-修法不是删掉这条判据，而是先让它有意义：在真正执行 skinning／构建 bones 的每个入口自增对应 counter，然后这条「必须为 0」才第一次具备判别力。**没有做这一步之前，不允许把 telemetry 里的 `skin: 0, skeleton: 0` 写进任何 G4 证据。** 验证方式按第0.4节末尾的通则——故意在 static 路径里插一次 skinning 调用，counter 必须变成非 0 且 G4 必须变红；做不到这个负向用例就说明 counter 仍是装饰。
+当前 dirty checkout 已在 `FlverNativeDocument.cs:543` 的 `GetMeshSkinning` 和
+`BridgeCommandService.cs:2467` 的 `BuildFlverSkeleton` 增加 counter 写入；但这只
+说明 counter 具备被观测的可能，不证明 static route 没有调用它们。当前 runner
+的 `isG4MapStaticWiringPresent()` 约在 `:1370` 声明了 `hasRenderer`，返回值却只
+合并 Bridge/main/preload 三项；`isG4TelemetryClean()` 约在 `:1378` 定义，但当前
+源码没有看到它进入 acceptance 调用链。接手者必须先用负向调用证明 counter 和
+runner 判据都会变红，再把真实 static 请求的 `skin=0/skeleton=0` 作为证据。
 
-**空洞二：runner 的 G4 是四路 OR，最后一路与被测能力无关。** `scripts/verify-mission1-acceptance.mjs:235-238`：
+修法不是删掉这条判据，而是保留当前 counter 并把它接入真实 acceptance：在真正执行 skinning／构建 bones 的每个入口自增对应 counter，然后这条「必须为 0」才具备判别力。**在 runner helper 进入实际 acceptance 且负向用例证明会变红之前，不允许把 telemetry 里的 `skin: 0, skeleton: 0` 写进任何 G4 证据。** 验证方式按第0.4节末尾的通则——故意在 static 路径里插一次 skinning 调用，counter 必须变成非 0 且 G4 必须变红；做不到这个负向用例就说明 counter 仍是装饰。
+
+**旧快照空洞二：runner 的 G4 曾是四路 OR，最后一路与被测能力无关。** 旧快照的
+`scripts/verify-mission1-acceptance.mjs:235-238`：
 
 ```js
 checks.G4 = fileContains('bridge/SoulForge.Bridge/BridgeCommandService.cs', 'read-map-static-geometry') ||
@@ -275,9 +286,9 @@ checks.G4 = fileContains('bridge/SoulForge.Bridge/BridgeCommandService.cs', 'rea
   fileContains('apps/desktop/src/main/ipc.ts', 'readMapPartMesh');
 ```
 
-实测：第三路恒假（`ipc.ts` 里 `read-map-static-geometry` 零命中），第四路恒真（`readMapPartMesh` 命中 1 次）。`readMapPartMesh` 是**旧的、要被删掉的**那条路径。于是 G4 的实际语义是「旧路径还在就算通过」，与新 static 路径是否接通完全无关。**把 `MapStaticGeometryService.cs` 整个删掉，G4 依然绿。** 更糟的是：按第1666行要求删除旧 production 路径以后，第四路才会转假——也就是说**正确的修复会让这条判据变红**，形态和第24.16.2节那条「惩罚正确修复」的测试完全一样。
+旧快照实测：第三路恒假（`ipc.ts` 里 `read-map-static-geometry` 零命中），第四路恒真（`readMapPartMesh` 命中 1 次）。`readMapPartMesh` 是**旧的、要被删掉的**那条路径。于是旧 G4 的实际语义是「旧路径还在就算通过」，与新 static 路径是否接通完全无关。**把 `MapStaticGeometryService.cs` 整个删掉，旧 G4 依然绿。** 当前 dirty runner 已新增 `isG4MapStaticWiringPresent` helper，但它尚未把 renderer 纳入返回值，也尚未在当前源码中看到 helper 的 acceptance 调用；这两个缺口必须单独修复和做负向验证，不能把 helper 的存在写成 G4 通过。
 
-这两个空洞叠加的后果，是 G4 在「命令有实现但零 production 调用」这个当前状态下报绿。已实测确认零调用：`apps/desktop/src`（main + preload + renderer，排除测试）下引用 `read-map-static-geometry` 的文件数为 **0**，引用 `list-bnd4-entries` 的文件数同样为 **0**；而两者都有完整的 C# 实现（`BridgeCommandService.cs:1563` / `:157`）、daemon 白名单（`BridgeDaemonHost.cs:544` / `:534`）和协议类型（`bridge-protocol.ts:119` / `:100`）。这就是第537、637行所说状态的确切度量。**「实现完毕但未接线」在 grep 判据下与「已完成」不可区分**，这是本文档所有 `fileContains` 判据的共性缺陷（见第18节禁令）。
+这两个空洞叠加的后果，是 G4 在「命令有实现但零 production 调用」这个**旧快照状态**下报绿。旧快照实测确认零调用：`apps/desktop`（main + preload + renderer，排除测试）下引用 `read-map-static-geometry` 的文件数为 **0**，引用 `list-bnd4-entries` 的文件数同样为 **0**；而两者都有完整的 C# 实现（旧快照 `BridgeCommandService.cs:1563` / `:157`）、daemon 白名单和协议类型。当前 checkout 已出现 static route 候选，但其完成状态、chunk 重组和 native 真实性以 §4.9.1.1 为准。**「实现完毕但未接线」或「有 caller 但未完成」在 grep 判据下都与「已完成」不可区分**，这是本文档所有 `fileContains` 判据的共性缺陷（见第18节禁令）。
 
 顺带一处同形问题，G3 也踩了：`:227-228` 的 `hasListBnd` 用 `list-bnd4-entries || listContainerParams` 兜底，而 `listContainerParams` 在 `ipc.ts` 命中 1 次，于是 `hasListBnd` 恒真。G3 因此只由 `hasParamSession` 单独决定。
 
@@ -355,6 +366,10 @@ manifest只保存logical URI、relative source identity、size、SHA-256、游�
 
 真实游戏根始终只读。acceptance runner 同时使用三层防护：Bridge `allowedRoots` 包含游戏根但 `writableRoots` 明确不含；原生只读 smoke 前后验证 manifest 输入 hash/size/mtime；通过 ProcMon/ETW 或等价 Windows 文件 I/O trace 记录已上报 SoulForge/Electron/Bridge PID 对解析后最终路径位于游戏根的 write/create/truncate/rename/delete/set-end-of-file 事件。任一层失败都使 G7 失败；事件审计不可用时记 `environment_blocked`，仍不能整体完成，但要与产品断言失败区分。写回 smoke 只对 test temp root 的副本执行，并额外运行现有 `test:bridge-write-boundary` 和 path final-resolution/hardlink escape 测试。
 
+#### C7 manifest 迁移边界（当前 A0 的明确决策）
+
+当前 `mission1-sekiro-acceptance.manifest.json` 的 V1/legacy 内容只作为诊断输入：A0 必须以 `CORPUS_PLACEHOLDER_REJECTED` 拒绝它，不能因为文件仍存在就进入 resume，也不能把它与新的 V2 字段拼接后继续使用。候选 runner 不实现 V1/V2 双读兼容，不自动覆盖、迁移或退休这份文件；迁移到 V2 的生成、三方独立复算、审查和最终替换是 A2 之前的单独数据变更。未取得新的 V2 manifest 及其独立 verifier 证据前，当前状态为 `unverified/blocked`，不得冻结 A2 或提升任何 Gate。
+
 ### 0.6 并发和编辑批次
 
 根 `AGENTS.md` 的并发检查不是启动时做一次。每个编辑批次前、测试后准备继续编辑前、提交/交接前都必须重新执行：
@@ -402,6 +417,8 @@ clean-HEAD 对照只能放在系统临时目录下新建的 `SoulForge-mission1-
 
 用户暂停执行 agent 后，三名互不复用结论的只读审查者分别审了验收控制器、native/core/PARAM 和 renderer/map。以下 identity 是本次交接修订所见的**冻结反例**；它们只帮助下一位 agent确认自己面对的是同一批错误成果，不能被当作阶段进度：
 
+> **时效边界**：本表只描述 A0 重写前的旧 runner/state/corpus 快照；`scripts/verify-mission1-acceptance.mjs` 已在 §4.8 替换，新的 state schema、负例与当前证据不得与本表的旧 hash 混用。本表保留为 quarantine/replay 的历史输入。表内 C1/N1/N3 以及旧 runner 的行号、字节数和 hash 只约束这份历史输入，不约束当前 v2 runner；当前 v2 的身份必须由本次 run 的 source snapshot、runner trust root 和 artifact manifest 重新计算。
+
 | 对象 | 冻结 identity | 已证实的问题 | 固定处置 |
 |---|---|---|---|
 | `scripts/verify-mission1-acceptance.mjs` | 18737 bytes；SHA-256 `523913D315AC09148A7DB54FBCC16F7807C1CF1DF22065D7894B93E0949C63F8` | `--selftest` 实际非零：`selftest: G2 should be FAIL in initial state`；G2-G6 以源码字符串存在判 PASS；G7 可在治理 child exit 1 时 PASS；snapshot、artifact、atomic state write 均不合格 | A0先保存原始 bytes/hash，再把这些真实 bytes加入 negative replay fixture；随后重写信任根，不允许局部加一个 if 掩盖 |
@@ -426,7 +443,7 @@ clean-HEAD 对照只能放在系统临时目录下新建的 `SoulForge-mission1-
 
 #### 0.8.1 `sourceSnapshotSha256` 不是源码 hash，新鲜度锚点是装饰性的
 
-上表把这条写成「`sourceSnapshotSha256`实际混用 summary hash」。措辞太轻，实测后果要重一档，而且它直接决定第58-71行那条「current-state identity 与当前源码不同 → 固定选择 A0」的判据能不能执行。
+上表把旧 runner 的这条写成「`sourceSnapshotSha256`实际混用 summary hash」。措辞太轻，实测后果要重一档，而且它直接决定第58-71行那条「current-state identity 与当前源码不同 → 固定选择 A0」的判据能不能执行。旧 runner 已由 §4.8 的 v2 实现替换；以下分析只用于解释为什么旧 state 永久不可信。
 
 实测：顶层 state 在 03:06→06:06 之间被 runner 又写了 6 次（精确 30 分钟节奏，06:06 后停止）。拿冻结那份和现值逐字段比，54 个字段只有 5 个不同：`generatedAt`、`evidenceDir`、`stateSha256`、`summarySha256`、`sourceSnapshotSha256`。
 
@@ -599,7 +616,7 @@ A0 退出不是“runner看起来更严格”。它必须由一个未参与实�
 
 冻结实现的关键跑偏：
 
-- production **完全没有调用** `read-map-static-geometry`。preload仍只暴露旧 `readMapPartMesh`，`MsbScenePanel`仍单次请求完整 base64，main 的旧 handler仍逐 mesh全量读取/合并，并把索引强制解释为 `Uint16Array`。真实 32-bit index因此仍可生成长三角/尖刺。
+- **旧快照（2026-08-27）**的 production **完全没有调用** `read-map-static-geometry`；当前 checkout 的候选可达性和未完成项见 §4.9.1.1。旧 handler 仍逐 mesh全量读取/合并，并把索引强制解释为 `Uint16Array` 的根因记录保持有效；真实 32-bit index因此仍可生成长三角/尖刺。
 - Bridge static service自身先把全部 positions/normals/UV/indices flatten到内存，再切 chunk；不是 24.9/24.10 要求的可恢复 streaming decoder。cursor只是可伪造的 `mesh:tri` base64，未绑定daemon/session owner、source hash/`pathSourceGeneration`、完整resource cache key，预算也不是实际序列化 wire bytes。
 - `FlverNativeDocument`对多个`Flags==0`静默取首个、缺主FaceSet回退第一个；8-bit/EdgeCompressed只返回null而没有结构化diagnostic，`CullBackfaces`未进入DTO。**动手前必读 §24.9.0：`FSFlags`/`CullBackfaces` 这两个符号在 SoulForge 仓库里解析不出来（`csproj` 零 PackageReference，Bridge 是自写解析器），它们的真值只能从本机 DSAnimStudio 4.9.9 的 `SoulsFormats.dll` 元数据取；`FSFlags.EdgeCompressed == 0x40000000`，与 `FlverNativeDocument.cs:85` 那个 `TypeEdgeCompressed = 0xF0`（顶点类型，不是 FaceSet flag）差 2²⁶ 倍。**它的restart边界`mesh.VertexCount < 65535`与成熟实现一致，不能再把这条正确条件误诊为根因；真正未闭合的是该条件没有进入版本化rule/边界oracle，且triangle-list输出前没有完整index bounds验证。旧差分不能替当前production实现背书。
 - 冻结实现的`TriangulateFaceSet`把strip奇数步输出成`(b,a,c)`并注释为SoulsFormats-compatible；本机DSAnimStudio 4.9.9所带`SoulsFormats.FLVER2.FaceSet.Triangulate`实际输出`(c,b,a)`。两者是同一三角形的循环置换，光栅画面/法向绕序可能一样，但canonical triangle-list bytes和SHA-256不同；如果生产者用前者、Andre oracle用后者，24.3/24.9会永久互相打脸。D阶段必须按24.9的成熟实现顺序修正，不能为了沿用当前测试expected继续保留`(b,a,c)`。
@@ -607,7 +624,7 @@ A0 退出不是“runner看起来更严格”。它必须由一个未参与实�
 - placement仍只绑定一个 mesh/instance，没有 placement→全部 chunks/cells的一对多 identity；pick仍扫描全部 placement；Gizmo只能更新一个 binding且没有多 chunk原子回滚。
 -现有 headless `FakeRenderer`/source-regex测试没有真实 GPU、真实 pointer或 native asset，不能证明地图已修。
 
-状态：**Bridge隔离 helper存在，但 production unreachable；旧生产路径仍是 P0 根因，static helper本身也仍 eager/fail-open**。D阶段先修 FLVER语义和 typed route并让旧 API不可达，随后才能复用 scheduler/InstancedMesh骨架；不得把“命令存在”写成 G4 PASS。
+状态（旧快照基线）：**Bridge隔离 helper存在，但当时 production unreachable；旧生产路径仍是 P0 根因，static helper本身也仍 eager/fail-open**。当前 route 是否可达及候选缺口以 §4.9.1.1 为准。D阶段先修 FLVER语义和 typed route并让旧 API不可达，随后才能复用 scheduler/InstancedMesh骨架；不得把“命令存在”或“已有 caller”写成 G4 PASS。
 
 ### 3.4 动作/角色
 
@@ -786,7 +803,7 @@ node scripts/run-renderer-unit-tests.mjs
 - `m10` 数百万索引差分正确，只证明几何投影语义，不证明 viewport 帧率、加载交互或 Gizmo 已完成。
 - CPU skin smoke 正确，只证明映射算法可行，不证明当前 renderer 已使用该算法。
 - `flver-multi-skeleton-pose-batch` 若仍断言多个 body FLVER保持独立 skeleton，只能登记为当前错误设计的 **negative characterization**；它必须先红、再由单 leader生产测试替代，绝不是 G6正证据。
-- `read-map-static-geometry`字符串/命令存在只证明隔离代码写入工作树；preload/main/renderer无调用时，G4仍 FAIL。
+- 在旧快照中，`read-map-static-geometry` 字符串/命令存在只证明隔离代码写入工作树；preload/main/renderer 无调用时，G4 仍 FAIL。当前候选虽已出现 caller，仍须按 §4.9.1.1 的 reassembly、identity、native counter 和旧新对账验收。
 
 ### 4.4 What already exists：必须复用，禁止平行重建
 
@@ -842,6 +859,438 @@ node scripts/run-renderer-unit-tests.mjs
 comparator 按 workflow 选择，不要求一个工具包办全部：PARAM 工具必须能打开同一 gameparam/大表，地图工具必须能打开同一 m10 并浏览，动作工具必须能打开 c0000/目标 clip。先对目录中所有候选执行 capability probe并保存结果；能够完成同一工作流的候选都测5次probe，正式阈值使用其中最快P50的工具，禁止故意挑较慢工具。正式 comparator 也按第17节跑20次，并使用第24.3节 `MatureToolAdapterV1` 的 typed machine artifact。UI坐标、截图、视频和逐步event log只供诊断，不能单独产生PASS。没有任何候选具备对应adapter/capability时，固定返回 `MATURE_TOOL_ADAPTER_UNAVAILABLE` 并使 comparator 项失败；绝不能换一个只会看文件列表的工具冒充。
 
 对照不是要求逐项复制成熟工具。若 SoulForge 的固定架构以更小改动达到相同/更好的可观察行为，保留 SoulForge 方案；若对照反驳第 0.3 节决策，按该节的用户裁定流程处理。
+
+### 4.7 `partial` 的结构化处置契约（2026-08-27 用户裁定：文档与脚本一起改）
+
+`scripts/verify-private-native-gate.mjs` 聚合各 native 子步骤的语义状态；有步骤返回 `partial/candidate/skipped/unsupported/fixture-confirmed/blocked/unverified` 时整门禁报 `partial`，语义是「可执行步骤完成，但覆盖不完整，不得声明 V0.5 全绿」。**此前 `partial` 的进程退出码是 0**——退出码是调用方（npm run、聚合 runner、CI）的结构化信号，文本 message 不是；`partial` 拿 0 就等于被当全绿转发。
+
+用户裁定（2026-08-27）：partial 处置 = 文档与脚本一起改。当前工作树已把该修补落在 `codex/mission1-a0`：
+
+- 三态退出码契约：`0 = passed`、`1 = failed`、`2 = partial`；`failed` 优先于 `partial`。实现是纯函数 `computeGateExitCode(failed, partial)`。
+- 新增 `--selftest`：退出码矩阵 4/4 断言 + 「partial 绝不映射为 0」的负向断言。**先证明会红再上线**：矩阵含 `[false,true] → 2` 的正向与 `!=0` 的负向。
+- honest-skip 路径（无 `SOULFORGE_SEKIRO_GAME_ROOT` / `SOULFORGE_NATIVE_FIXTURE_ROOT`）保持 exit 0，这是「诚实跳过」契约，不受本改动影响。
+- `report.ok=true` 仅表示没有失败子步骤；`report.complete=false` 或 `status=partial` 仍表示覆盖不完整。调用方要把 `status=passed && exitCode=0` 才视为完整通过，不能只读 `ok`。
+
+已实测的验证（本机，2026-08-27）：
+
+| 验证 | 命令 | 结果 |
+|---|---|---|
+| 语法 | `node --check scripts/verify-private-native-gate.mjs` | 通过 |
+| 退出码矩阵 | `node scripts/verify-private-native-gate.mjs --selftest` | `4/4 cases + partial!=0`，exit 0 |
+| honest-skip 无回归 | 无 env 直接运行 | exit 0，`status: "skipped"` |
+| 治理 runner 集成 | `node scripts/verify.mjs --tier native --filter private-native-gate` | `outcome: "skipped"`、`treatedAsFailure: false`，exit 0 |
+
+**已知粒度损失，接手者不要误判**：治理 runner 的 `classifyOutcome`（`scripts/verify/runner.mjs:250`）把**退出码非 0 一律映射为 FAILED**。partial 改为 exit 2 后，native 面板上 partial 会显示为 **FAILED（保守红）**，区分「真失败」与「覆盖不完整」要看 JSON 里的顶层 `status` 与 `steps[].semanticStatus`。把 runner 的 PARTIAL 判定扩展到识别 `status: "partial"` 属于治理层切片，不与本次改动混批（批次纪律见 §15/A0）。改动前 partial（exit 0、无 skipped 腿）在 native 面板上被报成 **PASSED**——那是本次修掉的静默全绿。
+
+**未测**：`partial → exit 2` 的端到端真实触发未跑——它需要真实语料加一个真实返回 partial 的子步骤，不可控构造；纯函数层由 selftest 矩阵覆盖。接手者第一次在本机带语料跑出 partial 时，核对三件事：进程退出码是 2、治理面板该项为 FAILED（保守红）、JSON 顶层 `status` 为 `partial`。三者对不上就按失败处理，不要解释掉。
+
+退出码 2 与 `status: partial` 不提升任何 authority；「不得声明 V0.5 全绿」的治理约束不变，本节只是把这条约束从文本升级为结构化信号。
+
+### 4.8 A0 验收信任根施工结果（2026-08-27 当前工作树）
+
+`scripts/verify-mission1-acceptance.mjs` 已从旧的源码字符串/旧 state 聚合器替换为 A0 fail-closed runner。它的当前职责是先验证信任根，不提前执行 B-G 产品阶段：
+
+- source snapshot 使用 `git diff --binary ... HEAD` 捕获 staged+unstaged patch；tracked raw diff 固定带 `--no-renames --abbrev=40`，记录完整 40 位 `headBlobOid`；所有 non-ignored untracked 文件通过 NUL 列表、UTF-8 path 排序和稳定两次 `lstat` 读取，禁止扩展名过滤，读取异常不吞掉。
+- 固定 registry 当前包含 50 个 A0-H assertion；G2-G6 不再由源码字符串或文件存在性判定，G0-G7 在 A0 未完成时强制 FAIL，禁止 override、`--pass`、`--ignore-unmapped` 和旧 schema 降级。
+- `testdata/mission1/runner-negative-fixtures.v1.json` 的 8 个负例会实际执行：manifest 自 hash、原始输入 byteLength/SHA-256、固定 exact command 和真实 child process 均被核对；覆盖伪造旧 artifact、skip child、源码漂移、Bridge/corpus hash 不一致、手写 PASS、缺 UI artifact、子命令非零。`--selftest` 同时覆盖 temp+fsync+atomic replace 的写前、写中、flush 后、rename 前、rename 后故障和成功读回。
+- runner 对自身、负例 manifest、`package.json` 和治理 tiers 建立 `mission1-reviewed-authority-root-v1`；summary/state 记录 `runnerTrustRootSha256`、A0 `stageCheckpoints` 和不可循环引用的 `artifact-manifest.json`，发布后逐项 readback。runner trust root 或 source snapshot 在准备期间漂移时，整批 A0 强制 FAIL。
+- `--bootstrap` 已将旧 `current-state.json` 及其 evidence 保留到 ignored `output/mission1-evidence/quarantine/`，再原子发布新的 `mission1-acceptance-state-v2` 全 FAIL state；旧 `schemaVersion=1.0.0`/G0-G7 PASS 文件只能作为拒绝型诊断输入。
+- `--status` 只接受新 schema、state/summary canonical hash、output-root 内路径和全量 fail-closed Gate；`--resume` 还要求当前 source snapshot 与 state 精确一致。当前 runner 不会因为 placeholder corpus、固定 exe 存在、child exit 1 或旧日志而制造 PASS。
+
+当前 A0 仍是 `FAIL`，这是预期的诚实结果：仓库内 manifest 仍为 `entryCount=22` 但只有 10 条 entries、含占位 hash/pending 三方证据；外部 `fork_turns=none` 的 A0 攻击审查 artifact 也不存在。因此本次只证明信任根改造和负例拒绝链已执行，**没有**证明 A0、任一 G0-G7、V0.5 或四个产品域完成；后续不得跳过 corpus 重建和独立审查。
+
+### 4.9 当前 IPC/Bridge 数据流审计与渐进拆分手册（2026-08-28，当前任务优先级）
+
+> **本节是当前任务的架构研究结论和施工手册，不是完成声明。** 本轮只要求把
+> 现状、边界、迁移顺序和验收条件锁定；不要把下面的目标接口提前实现成一轮
+> 大重写，也不要因为某个新入口能返回 JSON 就提升 native authority、Gate 或
+> release 状态。已有的 §7、§10、§14 是各域的深层诊断；本节是给低能力接手者
+> 执行的总控顺序，发生冲突时以本节的“先拆 IPC、再做单域 session、最后切换
+> renderer”顺序为准，但仍服从治理 JSON 和 Bridge/C# authority 边界。
+
+#### 4.9.1 研究范围、证据和当前结论
+
+本次只读核对的生产入口如下；行号是本次快照的定位锚点，代码移动后必须用
+同一关键词重新定位，不能把旧行号当作证据：
+
+| 层 | 当前入口 | 已核对事实 |
+|---|---|---|
+| Electron main IPC | apps/desktop/src/main/ipc.ts:2214-2236,2402，文件当前 11732 行 | handle() 只做 trusted sender 校验和结果清理；registerIpcHandlers() 仍把资源定位、allowed roots、Oodle、缓存、Bridge 调用、索引 ingest、DTO 投影和写回编排混在一个注册文件中。 |
+| Preload | apps/desktop/src/preload/index.ts:372-428,468-640,1009 | PARAM、MAP、CHR/FLVER、TAE 各有独立的 ipcRenderer.invoke 薄包装，但 API 仍以许多按 feature 拆碎的 read 方法暴露给 renderer。 |
+| Node/core Bridge | packages/core/src/bridge/runBridge.ts:45-70、bridgeDaemonClient.ts:56-84,271-328 | 已有按 root/session 复用的 NDJSON daemon、request multiplexing、timeout/cancel；这只复用传输进程，不会自动复用 C# native document，也不会合并重复 DTO。 |
+| 协议 | packages/shared/src/bridge-protocol.ts:1-120 | 已有 envelope、authority、diagnostics、main 解析的 filePath 和 allowedRoots 语义；不要再造一条 renderer 直连文件系统或第二套 native parser 的协议。 |
+| C# Bridge | bridge/SoulForge.Bridge/BridgeCommandService.cs:334,697,930,1017,1060,1413,1486,1622,1774,1802,1848,1881,1911 | 命令分派仍是长 if-chain；C# 负责 PARAM/MSB/TAE/FLVER/BND4/DCX 的 native 读取。当前 dirty 树虽出现 PARAM session 候选，普通 FLVER feature read 仍没有端到端接通的跨命令 native session；MAP static 也只是候选路线。 |
+
+#### 4.9.1.1 当前 dirty checkout 的二次核对（2026-08-28）
+
+本小节覆盖同一 §4.9 中较早的“当前状态”快照。原因是本次获授权继承的
+dirty worktree 在本次文档审查期间包含了若干未重新验收的产品候选改动；它们是
+当前 checkout 的输入，不是本次审查者的实现、提交或 Evidence。凡本小节标为
+**candidate / partial / unverified** 的内容，都不能触发 claim、complete、seal，
+也不能提升 native authority。代码移动后仍须先用符号搜索刷新行号。
+
+| 对象 | 当前可观察事实 | 正确状态和接手动作 |
+|---|---|---|
+| main IPC | `apps/desktop/src/main/ipc.ts` 当前 11732 行；`handle()` 约在 2214，`registerIpcHandlers()` 约在 2402；新增 static-map handler 约在 4801，但注册文件仍是跨域巨型 router。 | **partial**。拆 registration/adapters 仍是第一优先级；先保留 channel、参数、sanitize、verified roots 和 fallback，不借此批次改 wire contract。 |
+| PARAM session | 未跟踪的 `bridge/SoulForge.Bridge/ParamDocumentSessionCache.cs` 已被 `read-param-document`（约 334）候选调用；它能按 token 复用已解析 document，但 open/token 命中仍会读文件并计算 hash，只有有界字典/TTL，没有本批次要求的完整 owner lease/close 生命周期。当前 `resource.readParamPage`（约 6887）及容器路径仍以 `read-param-document` 的旧 options 调用，未把 document session、generation、entry identity 贯穿到 renderer→main→Bridge；`loadAll=true` 仍可请求 `includeAllPayloads` 和 32 MiB 帧。 | **candidate / not end-to-end**。先补 metadata/rowBatch contract、session identity 和真实 parse/IO telemetry，再做旧新对账；不得把“C# 文件存在”或单次 `read-param-document` 成功写成 PARAM session 完成。 |
+| MAP static | `read-map-static-geometry` 目前已由 `MsbScenePanel.tsx` 约 438、preload 约 397、main 约 4801 接通；但 renderer 约 450 的实现明确把 `finalData` 覆盖为最后一个 chunk，TODO 仍写着“for now take last chunk”。C# handler 约 1622 每次请求先 `ReadAllBytes`/重算 hash，未消费 main 传入的完整 owner/resource/path-generation 绑定；`MapStaticGeometryService` 建 session 时仍由 `BuildMeshInfos` 预先物化全部 mesh 的 positions/indices 等数组，再切 wire chunk。 | **reachable candidate / incomplete / unverified**。先完成 chunk 重组、terminal manifest、owner/source/cache identity 和真正的 bounded native decode；在旧新 geometry semantic hash、index/bounds、首 chunk、取消和内存证据齐备前，不得称为 M4 或地图 native 完成。 |
+| ordinary FLVER | `FlverViewer.tsx` 约 178、217、264 仍分别调用 dummies、skeleton、mesh；`read-flver-document` 约 1774 也仍独立 `ReadFile`。现有 external bundle seam 不能证明 standalone FLVER 已有统一 session。 | **split route remains**。先定义 standalone typed bundle，再以旧 channel adapter 接入；不得因 chrbnd bundle 已存在就删除三个旧入口或声称 CHR/FLVER 已去重。 |
+
+因此，本文此前 §0.4.2、§3.3、§4.3、§9.3 中关于“当前没有
+`read-map-static-geometry` caller”的句子，只能作为该次旧快照的 baseline；对当前
+checkout 的可达性和完成状态以本小节为准。它们仍可用于说明为什么旧 Gate/旧路线
+会误报，但不能再作为今天的 grep 事实。相同地，任何“已有 Param session”的
+句子都必须附带本小节的 **not end-to-end** 限定。A0 信任根、governance stale
+和当前独立审查缺失均不因这些候选改动而改变。
+
+当前结论只有三条，低能力接手者不得扩写成别的结论：
+
+1. **C# authority 没有问题，IPC 组织和 read projection 有问题。** 不能把解析器
+   搬到 TypeScript 来“提速”；应让 C# 持有 native document，Node/main 只管会话、
+   安全边界、缓存和分页/批量编排。
+2. **Bridge daemon 已经池化，但 parser 和 payload 仍可重复。** 看到
+   runBridge() 请求数下降，不等于 ParamNativeDocument.Read 或
+   FlverNativeDocument.ReadFile 次数下降。
+3. **目标是渐进迁移，不是换一套 IPC。** 第一个批次只拆 main 的 handler 注册；
+   旧 channel、preload 方法、旧 fallback 和 Patch Engine 都必须保留，直到新旧
+   结果按 source hash 和语义摘要完成对账。
+
+#### 4.9.2 现状总调用图
+
+下面是当前真实方向。箭头表示控制/数据流，不表示每层都拥有数据 authority：
+
+~~~text
+Renderer React / Three semantic projection
+  ├─ ParamTablePanel、App
+  │    └─ window.soulforge.readParamPage/readParamDocument
+  ├─ MsbScenePanel
+  │    └─ window.soulforge.readMsbDocument/readMapStaticGeometry (candidate)
+  │       └─ readMapPartMesh (legacy fallback)
+  ├─ FlverViewer
+  │    └─ readFlverDummies/readFlverSkeleton/readFlverMesh
+  └─ TaeWorkbenchPanel
+       └─ readTaeDocument/readTaeChrbndPreview/readTaeAnimationClip
+             ↓ typed preload wrapper
+Preload: ipcRenderer.invoke(existing resource.* channel, logical sourceUri, options)
+             ↓
+Electron main: handle()
+  ├─ trusted sender + argument/result sanitization
+  ├─ indexedFiles/sourceUri -> main-owned absolute path
+  ├─ verifiedReadRoots + overlay/base/Oodle resolution
+  ├─ ad-hoc per-domain cache / DTO mapping / index ingest
+  └─ runBridge(command, main-owned filePath, allowedRoots, commandOptions)
+             ↓ pooled NDJSON; not renderer-direct
+Node/core: BridgeDaemonClient pending request map + timeout/cancel
+             ↓
+C# BridgeDaemon / BridgeCommandService
+  ├─ DCX/BND4/container resolution
+  ├─ ParamNativeDocument / MsbNativeDocument / TaeNativeDocument
+  ├─ FlverNativeDocument and native mesh/skeleton extraction
+  └─ BridgeResult envelope: authority + diagnostics + data
+             ↓
+main sanitize / optional index ingest / Patch Engine only for writes
+             ↓
+Renderer receives JSON/base64/metadata, decodes and renders
+~~~
+
+这张图中最重要的职责界线是：renderer 只消费语义投影和有限 payload；main 可以
+解析逻辑引用并检查安全根，但不能成为第二个 native parser；C# 才能决定原生
+布局、索引含义、压缩容器和 round-trip/partial 诊断。
+
+#### 4.9.3 四个域的实际数据流和坏味道
+
+| 域 | 当前调用链 | 具体大 payload / 重复解析 / 碎片化位置 | 可复用的现有 seam |
+|---|---|---|---|
+| PARAM | ParamTablePanel.tsx:43-68、App.tsx:1018,1541 → preload readParamPage → ipc.ts:6887 → runBridge(read-param-document) → BridgeCommandService.cs:334 → ParamNativeDocument.ToEnvelope:639 | loadAll=true 显式走 includeAllPayloads，全表行字节进入单个 32 MiB 级帧（ipc.ts:6964-6965；容器路径同形于 9052-9053）；普通分页先拿全表 id/name，再另发一次带 rowPage/rowPageSize 的 payload 请求。当前 dirty 树虽有 ParamDocumentSessionCache 候选，但 main 的 readParamPage/container path 没有把 session/generation/entry identity 接通；裸文件、容器 child 与各 cache 仍是多入口。 | rowIds、rowPage、payloadsIncluded、dataHash 已经存在；应演进为 metadata + row batch，而不是继续扩大 full envelope；候选 session 只能标 candidate。 |
+| MAP | MsbScenePanel.tsx:438-455 → preload readMapStaticGeometry:397 → ipc.ts:4801；MSB 本身仍经 read-msb-document | main 已部分接入 read-map-static-geometry，并在 ipc.ts:4819 传入 ownerLeaseId/resourceCacheKey；renderer 只保留最后一个 chunk。C# BridgeCommandService.cs:1629-1631 每次请求重读/重算文件 hash，:1708 建 session 时没有消费完整 owner/resource/path-generation/entry identity；MapStaticGeometryService:196-287 建 session 时仍预先物化全部 mesh 数组。旧 readMapPartMesh/read-map-part-flver-preview 仍是 fallback/旁路；其中 ipc.ts:4644-4645/4672-4673 在合并失败或总顶点超过 Uint16 上限时返回 null，调用方于 :4712-4713/:4772-4777 使用 `first.data`，会静默退成首个 mesh。 | static route 是 **reachable candidate**，不是完成实现；先完成 chunk reassembly、terminal/identity/telemetry，并把部分 geometry fallback 改为结构化失败，再以旧新 geometry semantic hash 对账后逐 consumer 切流。 |
+| CHR/FLVER | FlverViewer.tsx:182,217,264 → preload readFlverDummies/readFlverSkeleton/readFlverMesh → ipc.ts:5305,5322,5338；打开/重读还可能经 App.tsx:1657,2281-2282 调 readFlverDocument | 同一个 standalone FLVER 至少被拆为 dummies、skeleton、mesh 三次请求；C# 1774/1802/1848/1881/1911 的每条命令都独立 FlverNativeDocument.ReadFile。mesh 又携带多份 base64；renderer 的 feature effects 并发不等于 native document 复用。 | read-chrbnd-flver-preview (BridgeCommandService.cs:1413-1470) 已在一个请求内枚举 leaf、每个 FLVER 只读一次并生成 models/meshes/bones；FlverViewer 已有 externalMeshes/externalBones/externalMeshData bundle seam。 |
+| TAE/动作 | TaeWorkbenchPanel.tsx:720,755,905,937,1033 → preload readTaeChrbndPreview/readTaeDocument/readTaeAnimationClip → ipc.ts:4462,4946,5013 → C# 930,1017,1060,1413 | 预览仍按 mesh index 续取；动画文档分页/提交后重读/clip 读取是不同调用。后续若让 sample-tae-animation-pose 每个渲染帧穿 IPC，会把控制调用放大成帧级碎片化。 | 先复用 CHRBND bundle 和已有 AnimationPlaybackClock/ActionContinuousSampler；pose IPC 只允许显式采样或批量/流式协议，不得成为每帧 renderer API。 |
+
+本表把 CHR/FLVER 放在同一行只表示它们共享“角色 native read session/bundle”的迁移
+模式，不表示可以合并 authority 或 DTO：CHR 是 chrbnd/partsbnd 容器和角色装配，
+FLVER 是被 C# 解析的具体 native 文档。standalone FLVER 与容器内 FLVER 必须分别
+做 source/entry identity 和旧新 parity。加载/启动的完整任务仍看 §5、§10–§13；
+动作预览看 §14 与本节 M6；本节只补 IPC/Bridge 组织，不能替代这些域的算法和真实
+交互验收。
+
+#### 4.9.4 问题矩阵：症状不是根因
+
+| 问题 | 当前可定位证据 | 真实后果 | 第一安全动作 |
+|---|---|---|---|
+| IPC 职责泄漏 | ipc.ts 一个 registerIpcHandlers() 覆盖工作区、资源读写、容器、PARAM、MAP、TAE、FLVER、AI/agent 等注册；generic handle() 并未隔离域服务 | 任何小改动都同时触及 sender/auth、路径边界、native 调用和 DTO；审查者无法判断调用是否绕过正确 owner | 先按域拆 registration/adapters，保留 channel 和 handle()，不改 wire contract |
+| 大 payload | PARAM includeAllPayloads；MAP 复用角色 FLVER bundle；FLVER feature read 各自带 typed buffers | JSON/base64 在 C#、daemon、main、React state、GPU 前可能多份常驻；帧上限被调大后问题只被隐藏 | metadata 与 payload 分离；payload 只按 row/mesh/chunk 批量传，上传后释放 wire 副本 |
+| 重复解析 | PARAM page/full/container 多入口；MAP per-mesh request；FLVER dummies/skeleton/mesh/document 各自 ReadFile | CPU、DCX/BND4 inflate、native allocation 和 GC 随 UI feature 数量增长；传输池化不能消除 | C# 持有 hash-bound opaque read session；一次 open/parse，后续 page/batch 从同一 document 投影 |
+| 调用过碎 | 旧 preload 每个 feature 一个 invoke；map 每个 mesh 一个 invoke；TAE preview/clip/pose 分开 | Promise 并发遮蔽了真正的 serial parse；取消、过期和错误回退难以关联 | main 增加 typed batch/session adapter；旧方法先映射到新 adapter，不马上删除 |
+| 现成实现与 production 状态混淆 | read-map-static-geometry 现已有 apps/desktop caller，但 renderer 丢弃前序 chunk；C# 仍有重读/全量物化和绑定未贯通 | “代码存在”或“有 caller”都会被误读成 production 已完成，测试也可能只测到半成品 | 先完成 chunk reassembly、identity、native parse/IO telemetry，再以首 chunk、旧新语义 hash 和负向诊断验收 |
+| 失败回退吞掉几何 | legacy `readMapPartMesh` 在 ipc.ts:4644-4645/4672-4673 对超大或合并失败返回 null，:4712-4713/:4772-4777 继续返回首个 mesh | 错误被伪装成“模型已显示”，多 mesh/索引语义被静默截断，旧新 parity 和性能结论都失真 | 新 route 失败必须返回结构化 diagnostic；禁止把首 mesh 或部分 geometry 当成功结果 |
+
+#### 4.9.5 最值得先拆的 3 个点
+
+##### 点 1（最高优先级）：拆 ipc.ts 的 main domain router，不拆协议
+
+范围固定为 apps/desktop/src/main/ipc.ts 的 registration/handler 组织：
+
+1. 新增 main-only domain registration 文件，建议最小分组为
+   ipc/paramHandlers.ts、ipc/mapHandlers.ts、ipc/characterHandlers.ts、
+   ipc/actionHandlers.ts；文件名可以调整，但不得按 renderer 组件复制一份。
+2. ipc.ts 只保留 registerIpcHandlers()、全局 owner/session wiring、通用
+   handle()、依赖组装和各域 register...Handlers(context) 调用。
+3. 第一批完全保留以下旧 channel 和参数形状：
+   resource.readParamDocument、resource.readParamPage、
+   resource.readContainerParamPage、resource.readMsbDocument、
+   resource.readMapPartFlverPreview、resource.readMapPartMesh、
+   resource.readFlverDocument、resource.readFlverMesh、
+   resource.readFlverSkeleton、resource.readFlverDummies、
+   resource.readFlverTextureSlots 以及 TAE read channel。
+4. handler 只负责四件事：解码逻辑引用、取得 main-owned context、调用 domain
+   service、返回结构化结果。verifiedReadRoots、sanitizeRendererValue、
+   runBridge 通过 context 注入或受控闭包传入；不能在 renderer/preload 重建。
+5. 第一批禁止顺手改缓存 key、C# command、DTO 字段、错误码、renderer state。
+   这个点的完成是“文件职责和测试边界变清楚”，不是“IPC 调用次数已经下降”。
+
+为什么先做它：这是所有后续 session/batch 迁移的稳定插槽；旧 channel 不变时，
+可以单独替换 PARAM、MAP、FLVER 的 main implementation，回滚也只需切回旧
+adapter，而不是回滚整个 renderer。
+
+##### 点 2：PARAM readParamPage/container page 的 native session 与 metadata/payload 分离
+
+具体目标不是继续把 loadAll 帧调大，而是把一次 PARAM 读取拆成三种语义：
+
+- metadata：sourceHash、typeName、rowDataSize、rowCount、layout、rowIndex/id/name
+  和可选 dataHash；**不得**含 row dataBase64。
+- rowBatch：以同一 sourceHash/sessionToken 为前提，按物理 rowIndex 或明确
+  rowIds 返回请求行的 bytes + dataHash；只能返回请求集合，不能把全表重新序列化。
+- full/validate：只给显式验证、导出或确实需要全量的调用；不能作为表格打开、
+  搜索、选择行和普通翻页的默认路径。
+
+session 由 C# native document 持有，至少绑定：
+
+    workspaceSessionId + workspaceSessionGeneration
+    canonical source identity + sourceHash
+    container entry identity（裸文件为空，container child 必须有）
+    pathSourceGeneration + layout identity + owner lease
+
+token 必须是随机 opaque token，不编码路径、row index 或 triangle ordinal。daemon
+重启、workspace dispose、TTL/LRU eviction、hash/generation 变化和 owner 不匹配
+必须返回结构化 SESSION_EXPIRED/SESSION_STALE/SESSION_OWNER_MISMATCH 类诊断；
+main 只允许一次显式 reopen，禁止无限透明重试。
+
+迁移时保留 readParamPage channel：旧 handler 先把旧参数翻译为上述三种
+operation，再由 Bridge adapter 调用 native session。paramPageCache、
+paramAllCache、containerParamAllCache 不得以 sourceUri 单独作为永久真相；
+缓存 key 必须包含 sourceHash、entry identity、generation、projection kind 和
+byte budget。写回成功、overlay/base 切换、工作区切换都必须使对应 session 和
+payload cache 失效；字段定义可以独立缓存，但必须以 typeName + rowDataSize +
+definition authority 为 key。
+
+##### 点 3：统一 native read session/batch 家族；先 MAP static，后 CHR/FLVER bundle
+
+点 3 是一个共同模式，**3A 与 3B 不得在同一批次同时大改**：
+
+- **3A MAP**：当前 dirty 树已经把一个 consumer 部分接到
+  read-map-static-geometry session/cursor，但这只是 candidate；先修复 renderer
+  丢弃前序 chunk、C# 每请求重读/重算 hash、owner/resource/path-generation 未
+  贯通，以及 session 建立时全量物化 mesh 的问题。完成后再把
+  resource.readMapPartMesh 的生产实现逐步收敛到 static route。chunk 只含
+  positions、local indices、source vertex remap、normals/uv、material/bounds 等
+  静态语义，不含 bones、boneWeights、boneIndices。main 不再 spread raw.data，
+  也不再在旧 inline path 里重复合并。旧 read-map-part-flver-preview 作为
+  feature flag fallback 保留，直到逐 chunk 语义 hash、bounds、index bounds、
+  首 chunk 时序和真实 viewport 对账通过。
+- **3B CHR/FLVER**：先为 standalone FLVER 提供一个 typed preview bundle
+  operation；同一 native document 一次给出 metadata（mesh descriptors、materials、
+  skeleton、dummies、texture slots）和按 mesh/chunk 拉取的 payload。已有
+  read-chrbnd-flver-preview 作为 chrbnd/partsbnd 的 bundle 基线，不要再让
+  FlverViewer 在 bundle 可用时调用 dummies/skeleton/mesh 三个旧入口。旧
+  readFlver* channel 先由 main adapter 映射到 session 读取，旧 renderer 仍可
+  工作，等 usage telemetry 为零后再删除。
+
+两条子路线共用 session 约束、correlation id、source hash 和 byte budget，但
+MAP 不得复用角色 skin DTO，CHR/FLVER 也不得把地图静态数据强行塞入角色 bundle。
+
+#### 4.9.6 目标边界：谁拥有哪种数据
+
+| 层 | 必须拥有 | 明确禁止 |
+|---|---|---|
+| C# Bridge/native | DCX/BND4/PARAM/MSB/TAE/FLVER parser、原生 layout/index semantics、source/content hash、native document session、session cursor、结构化 native diagnostics、按预算投影 typed bytes | 把 path 猜测交给 renderer；为了方便复制一份 TS native parser；把全模型预先 flatten 成多份 JSON/base64 |
+| Node/core | Bridge transport、session open/page/close 编排、owner/generation、bounded cache、batch scheduler、DTO schema 校验、correlation/telemetry、PatchIR 和索引投影 | 解析原生二进制；以 runBridge 调用数冒充 native parse；缓存没有 hash/generation 的 payload |
+| Electron main | trusted sender、逻辑 URI → 当前索引文件、verified allowed roots、Oodle/base 层选择、旧 channel compatibility adapter、取消/超时和 sanitize | 把绝对路径下发 renderer；把业务 parser/第二套 session 放进 IPC 巨型函数；绕过 Patch Engine 写 Mod |
+| Preload | 最小 typed API；旧 API 到新 batch/session API 的兼容桥 | ipcRenderer 直接暴露给 renderer；接收或拼造绝对路径；为了兼容偷偷发多次相同 native read |
+| Renderer | metadata state、当前可见 row/mesh/chunk、semantic scene/render projection、GPU resource lifecycle、显式用户取消/重试 | 文件系统、native parse、authority 判断、全表/全模型 payload 长期 React 常驻、每帧 sample-tae-animation-pose IPC |
+| Patch Engine/write path | 唯一 Mod 资源写边界、expected hash/CAS、backup/rollback、post-write index/reference/RAG refresh | 任何新的 read session 直接写盘；为读性能绕过 writer、审计、确认和回滚 |
+
+metadata/payload 分离的硬规则：
+
+1. metadata 可以跨层复制，但必须小、可 hash、无大 base64；它描述“有什么”和
+   “如何取”，不代替 bytes。
+2. payload 只沿一个明确的 batch/page/chunk 方向传输；同一 response 不得同时
+   携带原始 per-mesh 数组和已经合并的数组。
+3. renderer 上传成功后释放 wire payload；in-flight cache 只去重 Promise，
+   GPU pool 才按 source/content hash 持有 GPU 对象。
+4. 全量读取必须是显式 validate/export/用户动作，并有 byte limit、取消和
+   失败诊断；“打开表/打开地图/打开角色”默认走 metadata + bounded batch。
+
+#### 4.9.7 固定迁移顺序（每一步都可回退）
+
+| 顺序 | 只做什么 | 不做什么 | 出口条件 |
+|---|---|---|---|
+| M0 研究冻结 | 保存本节、现状调用清单、旧 route 的语义 snapshot；加只读计数/trace 设计 | 不新建第二套 milestone；不改产品 parser；不把孤立实现写成已接线 | 每个域都能从 renderer 文件追到 C# command，且旧 channel 清单完整 |
+| M1 IPC domain split | 将 ipc.ts handler registration 按 PARAM/MAP/CHR/TAE 拆成 main-only adapters；channel/参数/返回值不变 | 不改 Bridge command、缓存语义、renderer、C# | typecheck/test/build 通过；旧 channel contract test 仍通过；git diff 只在 IPC 拆分范围 |
+| M2 trace + contract | 为 request/session/sourceHash/generation/parse/cache/frame bytes 加 correlation；定义 shared typed metadata/payload schema 和负例 | 不用日志字符串代替 assertion；不把 main cache hit 当 native parse=1 | 能区分 Bridge request count、native parse count、cache hit 和 bytes；错误码结构化 |
+| M3 PARAM | 先接 metadata，再接 rowBatch；裸 PARAM 和 container child 统一 session key；旧 readParamPage adapter 双读对账 | 不再扩大 32 MiB；不让 loadAll 继续成为默认 UI 路径；不删除旧 cache/fallback | open+N page 的 C# parse=1；每页 bytes≤请求集合；sourceHash/dataHash/rowIndex 全对齐；旧新 projection 语义 hash 相同 |
+| M4 MAP-3A | main readMapPartMesh 后台切换到已有 static session/cursor；先一个模型/feature flag，再扩到真实 MSB | 不同时修坐标、骨骼、所有 MSB model type；不删旧 FLVER preview；不传 skin DTO | C# parse=1；GetMeshSkinning/skeleton build=0；每 response <8 MiB；首 chunk 早于全量完成；旧新几何差分为 0 |
+| M5 CHR/FLVER-3B | standalone FLVER bundle 与 chrbnd bundle 接入；FlverViewer 由一次 bundle 派生 skeleton/dummies/mesh | 不改骨骼坐标契约；不删除旧 feature channels；不把角色 session 与地图 DTO 合并 | 同一 source hash 一次 native parse；mesh/bone/dummy/material 计数和 semantic hash 对齐；取消/过期 token 可诊断 |
+| M6 TAE/动作 | 复用角色 session 的 skeleton identity；clip 选择是批量读，pose 只显式 sample 或 bounded stream；保留现有时钟/采样器 | 不做每帧 IPC；不在本批次开放未解码 event param writer；不猜 animation/skeleton 容器 | 预览无重复 FLVER parse；动作切换不会泄漏旧 session；播放/停止/取消可观测 |
+| M7 退役旧路由 | 统计真实 usage=0 后，先文档标 deprecated，再移除 fallback 和重复 DTO | 不凭 grep“看似没有 caller”删除；不在有旧窗口/插件调用时删 | 双路径 parity、native smoke、性能/内存证据、迁移窗口结束和治理 fresh evidence 全部满足 |
+
+#### 4.9.8 低能力 agent 的逐步施工指令
+
+接手者每次只领取一个 M 步骤；不得把多个域的“顺手修复”放进同一批次。
+执行顺序固定如下：
+
+1. **预检**：在仓库根运行 git status --short --branch、node scripts/gov.mjs status，
+   再用 rg -n 定位本节列出的入口。当前 dirty worktree 是已授权继承的冻结
+   输入，不得 reset/clean/checkout；不属于本步骤的改动不得覆盖、stage 或格式化。
+2. **读入口**：先读 AGENTS.md、本节对应表格、要改文件的当前完整函数边界；
+   不根据历史 handoff 的旧行号猜调用。若发现 channel、authority 或写边界与本节
+   不同，停在只读诊断并报告，不自行改范围。
+3. **先立契约**：对新 adapter/session 先写 shared type、错误码和 contract test。
+   任何 filePath 必须由 main 解析并经 verified roots；renderer 只传 logical
+   sourceUri、opaque handle/token、page/row/mesh/chunk selector。
+4. **再做一条旧路由兼容实现**：新 adapter 通过旧 channel 接入；保留旧 C# command
+   作为 fallback。绝不先删旧 route、先改全 renderer，或把旧 DTO 的大字段原样
+   spread 到新 DTO。
+5. **加真实性计数**：计数点必须在 C# 实际 parser/skin/skeleton/serialize
+   入口；main 的 Promise 数、IPC 次数和 cache hit 单独计数。每条 trace 带
+   correlation id、workspace generation、sourceHash、entry identity、owner/session。
+6. **跑最小验证**：按域先跑对应 focused test/native smoke；再跑根
+   npm run typecheck、npm test、npm run bridge:verify:synthetic、npm run build。
+   只要触及 React/renderer 或底层逻辑，必须重新 build；skipped、fixture 通过、
+   isolated C# command 通过都不能写成 native-verified。
+
+当前根 `package.json` 已存在的 focused 命令固定按下表选，不要凭名称另造命令；
+命令被 skip、找不到真实语料或缺本机环境时，记录 `blocked`/`unverified`，不能
+换成一个更容易通过的 synthetic 命令：
+
+| 范围/步骤 | 先跑的命令 | 不能替代的证据 |
+|---|---|---|
+| M1 IPC router | `npm run test:desktop-ipc-contract`、`npm run test:desktop-security` | 不能用 `rg` 命中 channel 代替 sender、roots、参数和返回值 contract。 |
+| M2 trace/Bridge contract | `npm run test:bridge-optional-args`、`npm run test:bridge-recovery-harness` | 不能用 main Promise 数代替 C# parse/cache/bytes/cancel 计数；新增 schema 必须有对应负例。 |
+| M3 PARAM | `npm run test:param-metadata-native`、`npm run test:param-duplicate-native`、`npm run test:editor-bounded-access`、`npm run test:container-param-edit` | mod-side 或 synthetic 通过不能代替 game-side；必须同时报告 sourceHash、rowIndex、parse 次数和 payload 字节。 |
+| M4 MAP | `npm run bridge:verify:msb`、`npm run test:map-document-scale`、`npm run test:three-scene-functional`、`npm run test:native-preview` | 不能用“有 static command”、最终实体数或只测一个 mesh 代替 chunk reassembly、index/bounds、首 chunk、viewport 和 native counter。 |
+| M5 CHR/FLVER | `npm run bridge:verify:flver`、`npm run bridge:verify:flver-mesh`、`npm run test:flver-candidate`、`npm run test:native-preview` | 不能用 chrbnd bundle 或单一 mesh 成功代替 standalone FLVER 的一次 parse、mesh/bone/dummy/material parity。 |
+| M6 动作/TAE | `npm run bridge:verify:tae`、`npm run test:animation-playback-clock`、`npm run test:action-deterministic-seek`；若要跑 renderer motion，再跑 `npm run test:motion` | 当前 dirty `package.json` 虽有 `test:motion`，但 `scripts/verify/tiers.mjs` 尚未登记它；先修 registry drift 或记录 `VERIFY_REGISTRY_DRIFTED`，不能把该命令单独当治理证据。不能用静态 clip JSON 代替播放/停止/取消生命周期，也不能把每帧 pose IPC 当作验证通过。 |
+| 加载/真实交互 | `npm run test:renderer-e2e`、`npm run test:three-scene-functional`、`npm run test:workspace-completeness` | 不能用 source-regex、非黑 canvas 或只读文件列表代替真实加载、选择、Gizmo 和资源释放。 |
+
+Focused 命令之后才跑四条根回归；每条命令都要记录 exit code、是否 skipped、
+输入身份、关键计数和产物路径。命令通过只证明它覆盖的断言，不自动提升其它
+域或 Gate 的 authority。
+7. **对账再切流**：同一输入同一 sourceHash 同时走旧/新 route，比较
+   rowIndex/id/dataHash、mesh/bone/dummy count、bounds、index bounds、semantic
+   payload hash、diagnostics 和 authority；差异先修 adapter/contract，不在 renderer
+   里“兼容掉”错误数据。
+8. **小范围启用**：只对一个明确 consumer 或 feature flag 开新路由；记录
+   parse/cache/frame/first-payload/peak-memory/取消/过期指标。连续验证通过后才扩
+   到下一个 consumer。
+9. **最后清理**：只有 usage telemetry 为零、旧新 parity 和治理 fresh evidence
+   齐全，才可以删除旧 route/DTO/cache。清理前再次 git diff --check 和
+   git diff --stat，确认没有把用户 dirty 改动混入提交。
+
+每一步的失败处理固定为：返回结构化 diagnostic，保留旧 route，取消当前 session，
+释放 payload；不得 catch 后返回空数组、不得把 partial 改成 success、不得无限重试。
+
+#### 4.9.8.1 M1 首批施工卡：只拆 IPC 注册，不改行为
+
+低能力 agent 第一次施工只做这一张卡，完成后停手；不要同时进入 M2/M3。
+“拆分”在本卡中只表示把**已经存在的 handler 注册代码搬到 main-only 文件**，不表示
+新建第二套协议或重写资源读取逻辑。
+
+**允许触碰的文件集合（超出即停止）**：
+
+```text
+apps/desktop/src/main/ipc.ts                  # 只删掉已搬走的注册并接入 register 调用
+apps/desktop/src/main/ipc/paramHandlers.ts    # 第一批只新增这个文件
+```
+
+第一批只搬 `resource.readParamDocument`；不要先搬 MAP、FLVER、TAE，也不要改
+`packages/*`、`bridge/*`、preload、React、协议 schema 或测试 fixture。后续每个域
+重复一张独立变更，文件名可以按仓库风格调整，但新增文件必须仍在 main-only 目录，
+不能按 renderer 组件各复制一份。
+
+**照着下面的顺序做，顺序不可交换**：
+
+1. 运行并记录 `git status --short --branch`、
+   `npm run test:desktop-ipc-contract`、`npm run test:desktop-security` 的 exit code；
+   任何一个基线已失败，先报告基线，不把它归因于本卡。
+2. 在 `ipc.ts` 中完整找到 `resource.readParamDocument` 的现有
+   `handle(...)` 边界，连同注释、前置安全检查、错误映射和返回清理一起移动；
+   不按行号截取，不拆出其中任意一段再在原文件留一份。
+3. 在 `paramHandlers.ts` 导出唯一的
+   `registerParamHandlers(context)`。`context` 只能接收 main 已拥有的能力：
+   trusted sender/`handle` 包装器、逻辑 URI 解析、verified read roots、Bridge
+   调用、sanitize、索引/诊断写入；不得接收 renderer 的绝对路径，也不得让新文件
+   自己 import `ipcRenderer` 或自己创建第二个 Bridge transport。
+4. 在 `registerIpcHandlers()` 中创建一次 context，再调用
+   `registerParamHandlers(context)`；每个 channel 在整个进程只能注册一次。搬完后
+   原 `ipc.ts` 不得再保留同名 `handle` 注册，避免 Electron 出现双 listener。
+5. 先只跑 `npm run typecheck` 和两条基线 contract/security 测试。失败就停在本卡，
+   保留原始输出和失败文件列表；不得为“让测试过”顺手改参数、DTO、缓存 key、
+   C# command、renderer state 或错误码。
+6. 用 `git diff --name-only` 检查结果只能落在上面的允许集合；再运行
+   `git diff --check`。如果出现第三个产品文件、channel/参数/返回值变化或新的
+   `ipcRenderer` 引用，立即标记 `M1_SCOPE_VIOLATION`（仅施工报告/停机标签，
+   不是 runtime diagnostic）并停止。
+7. 只有前六步全部通过，才跑 `npm run build`；构建通过只证明注册拆分没有破坏
+   编译，不证明 native parse 次数、payload 大小或 session 已完成。按本节
+   M1 出口记录 channel 数量、sender/roots contract、退出码和产物路径。
+
+**本卡唯一完成条件**：旧 PARAM channel 的参数和返回值逐字段不变、每个 channel
+只有一个注册点、所有路径仍经过原 `handle`/verified roots/sanitize、focused
+测试和 build 通过，且 diff 没有越过允许集合。任何一项不满足都保持 `M1=FAIL`，
+不进入 MAP/CHR/FLVER；“新文件能 import”“应用能启动”均不是完成条件。
+
+#### 4.9.9 当前绝对不要动的东西
+
+以下项目在 M1-M5 期间均为 **NO-TOUCH**；低能力 agent 看到相关代码也不能
+“顺便优化”：
+
+- FlverNativeDocument、ParamNativeDocument、MSB/DCX/BND4 native layout、
+  index/FaceSet/坐标转换、现有 round-trip/authority 语义。先做 session 投影，
+  不在 TS 复制解析器，也不把“能读”写成“可无损写”。
+- BridgeDaemonClient 的 NDJSON handshake、allowedRoots、max frame、pending
+  request、timeout/cancel 和 daemon pooling。需要扩展时只能走 shared protocol
+  版本化和 contract test，不能在 main 另起 transport。
+- Patch Engine、expected hash/CAS、staging、backup、rollback、post-write
+  index/reference/RAG refresh。读性能方案不得形成第二个写入口。
+- 第一批已有 preload/main channel、renderer semantic scene/Three parent、
+  worker/GPU ownership 和绝对路径隔离。新 API 先兼容旧调用，不做 flag-day rename。
+- read-map-static-geometry 的 C# 实现、MapStaticGeometryService 的预算和
+  cursor 约束。可以接线和补测试，但不能只因“已有实现”就修改 Gate 或声称地图
+  native 完成。
+- 当前 A0 runner、corpus、evidence、governance JSON 和 sealed evidence。IPC
+  研究不是 A0/A1/A2 施工；不要手写 evidence，不要用本节的架构结论覆盖治理状态。
+- 当前继承 dirty worktree 中不属于本步骤的文件。禁止 reset、clean、整体回滚、
+  批量格式化和无关 UI 重写。
+
+#### 4.9.10 迁移验收的最小可证伪集合
+
+新 route 只有同时满足以下条件，才能从“candidate”进入下一步；本节本身不改变
+任何 authority：
+
+| 断言 | 必须观察到 | 失败时 |
+|---|---|---|
+| identity | request/session 的 workspace generation、sourceHash、entry identity 与输入一致 | 返回 stale/owner/hash diagnostic，不能用旧 token 继续 |
+| native parse | PARAM open+N page=1；MAP unique model=1；FLVER bundle=1（计数在 C# parser 入口） | 保留旧 route，标记 REPEATED_NATIVE_PARSE |
+| projection | metadata 无大 payload；rowBatch/mesh chunk 只含请求范围；MAP 无 skin fields；FLVER bundle 无重复 feature payload | 返回 schema mismatch，不能由 renderer 删除字段后冒充成功 |
+| framing | MAP 单 response <8 MiB；PARAM full 不是默认路径；所有域都有 byte budget、deadline、cancel | 结构化 PAYLOAD_BUDGET_EXCEEDED，不得盲目调大 frame |
+| parity | rowIndex/id/dataHash、mesh/index/bounds、bone/dummy/material 计数和 semantic hash 对账一致 | 新路由不切流；保存最小失败样本 |
+| lifecycle | session open/reuse/evict/close、cache hit/miss、payload release、GPU upload、cancel/timeout 可追踪 | 不得声称“缓存完成”；先补 telemetry |
+| renderer | 首个 MAP chunk 可在全量完成前上传；wire payload 上传后不可由 React/cache/failure path 大字符串继续到达 | 标记 EAGER_WIRE_MATERIALIZATION 或 RETAINED_WIRE_PAYLOAD |
+| fallback | 新路由失败/过期/daemon 重启可回到旧 channel，且不重复写、不重复无限重试 | 该步失败关闭，不扩大 feature flag |
+
+最终报告必须分开写 fixture-confirmed、partial、native-verified、
+blocked、unverified；“typecheck 通过”“C# 文件存在”“独立审查等待批准”
+都不是这组断言的替代品。
 
 ## 5. 工作区启动慢：完整诊断
 
@@ -1258,7 +1707,7 @@ Bridge中已有若干实现尝试：
 
 抽样 179 个 m10 mapbnd 未见 strip。strip 支持仍必须保留，但该地图尖刺的主因是 32 位索引误解。
 
-这些尝试尚未按24.9规则registry/streaming cursor接入production，并且当前`read-map-static-geometry`不可达。上述真实差分是历史诊断，不是冻结实现的G4证据。
+这些尝试在该旧快照中尚未按24.9规则registry/streaming cursor接入production，且当时 `read-map-static-geometry` 不可达。当前候选接线仍未完成 §4.9.1.1 的 reassembly/identity/native 验收。上述真实差分是历史诊断，不是冻结实现的G4证据。
 
 ### 9.4 下一位 agent 的正确动作
 
@@ -1842,7 +2291,7 @@ IPC `readTaeAnimationClip` 目前如果只传 animId 并让 Bridge 猜邻居文�
 5. 实现 mapbnd/objbnd/chrbnd/HKX 的明确 route 和结构化诊断。
 6. 删除旧的重复 preview API。
 
-退出：Bridge counter 证明 static 路径 skin/skeleton 构建为 0（**前置条件：先按 0.4.2 让 `SkinCalls`/`SkeletonCalls` 真的会自增，并用「故意插一次 skinning 调用 → counter 非 0 且判据变红」的负向用例证明它有判别力。counter 当前恒 0，直接引用等于什么都没证**）；每帧小于 8 MiB且默认 outbound limit 保持 16 MiB；m002021 成功；499 type-0 全量逐 identity 符合 manifest，所有 oracle-renderable 项重组后 0 mismatch/0 越界，只有 oracle 证实缺失/无 FLVER 的项可 unavailable；type 1 `o000100` 和 type 2 `c1000` 真实成功；type 5 返回专属 collision diagnostic；preload/main/Bridge 不再有可达的旧地图 preview production 路径。
+退出：Bridge counter 证明 static 路径 skin/skeleton 构建为 0（**前置条件：当前 dirty 候选已在 `FlverNativeDocument.cs:543` 与 `BridgeCommandService.cs:2467` 写入 counter；仍须让 runner helper 真正进入 acceptance，并用「故意插一次 skinning 调用 → counter 非 0 且判据变红」的负向用例证明判别力。旧快照恒 0 的结论不能继承**）；每帧小于 8 MiB且默认 outbound limit 保持 16 MiB；m002021 成功；499 type-0 全量逐 identity 符合 manifest，所有 oracle-renderable 项重组后 0 mismatch/0 越界，只有 oracle 证实缺失/无 FLVER 的项可 unavailable；type 1 `o000100` 和 type 2 `c1000` 真实成功；type 5 返回专属 collision diagnostic；preload/main/Bridge 不再有可达的旧地图 preview production 路径。
 
 ### 阶段 E：地图生命周期和交互
 
@@ -2614,6 +3063,9 @@ captureSourceSnapshot():
 - `git --raw -z`解析器按NUL和Git raw grammar读原始bytes，不把输出先转成按行字符串；`--no-renames`使rename明确成为D+A两条路径。merge conflict/unmerged状态固定`SOURCE_UNMERGED`，不得继续验收。
 - 每个子命令开始前和结束后都重新调用；任何字段不同，结果固定为 `SOURCE_CHANGED_DURING_RUN`，丢弃本轮全部 PASS。
 - snapshot 算法自己的 fixture 必须覆盖 staged、unstaged、untracked、空格/中文路径、CRLF、文件执行中变化和 symlink/reparse point。
+- `:2566` 的 raw 命令必须带 `--abbrev=40`。git 默认把 headBlobOid 缩到 8 hex（32 bit 熵），实测同一命令不带该参数时 oid 列输出 `3388bb0b` 这样的 8 hex，带上后才是全 40 hex。headBlobOid 是 `SOURCE_CHANGED_DURING_RUN` 路径差分的锚点，32 bit 有真实碰撞概率。契约：`trackedChanges[].headBlobOid` 必须是全 40 hex，runner 收到短于 40 hex 的 oid 固定 FAIL。
+- 已知字段漂移：现存 `scripts/verify-mission1-acceptance.mjs:94` 的 untracked 记录字段名是 `path`/`size`，与本 schema 的 `pathPosix`/`byteLength` 逐字段不一致。处置：该 runner 属 A0 重写对象，重写时**按本 schema 实现**；禁止反向修改本 schema 迁就旧 runner 的字段名。
+- 已知覆盖边界（读之前不要误判）：`AGENTS.md`（`.gitignore:23`）、`CLAUDE.md`（`:25`）、`锐评/`（`:101`）全部被 ignore，`git ls-files --others` 不返回它们；且现存 runner 的 untracked 扫描还有目录白名单（apps/packages/bridge/scripts/testdata）加扩展名白名单（ts/tsx/js/mjs/cjs/cs/json）两层收窄（`verify-mission1-acceptance.mjs:70-85`），`.md` 无论在哪个目录都进不了 snapshot。后果：`SOURCE_CHANGED_DURING_RUN` **结构上无法对任何文档变更报警**，与是否 ignore 无关。在 A0 重写 runner 并裁定 snapshot 输入集合之前，禁止把「snapshot 未变」当成「文档未变」的证据。
 
 `diffSnapshot(old,current)`不允许从两个总hash反推路径：
 
@@ -6073,9 +6525,71 @@ map[hkxBone] = flverByName.TryGetValue(...) ? flverBone : -1;
 - 真实 Sekiro 语料里 HKX↔FLVER 骨名匹配率：未测。故 B 的现场发生率未知。
 - `preview.bones` 为空的现场频率：未测。故 A 的现场发生率未知。
 - 全 `-1` map 在真实语料里是否真的出现过：未测。B 的机制链已逐行走通，但**没有在真实 chrbnd 上复现过一次**。
-- 另一条采样路径 `BridgeCommandService.cs:1279` 附近（X6）是否共享同一张坏表：本节未展开，见后续切片。
+- 另一条采样路径 `BridgeCommandService.cs:1279` 附近（X6）是否共享同一张坏表：见 §24.16.7，位置已实测确认、共享性未确认。
 
-### 24.17 F-3：CPU bind-pose skin oracle 与 GPU bundle 算法
+#### 24.16.6 四元数样条缺半球对齐：反极点控制点会在曲线中点硬崩（崩溃级；真实语料未复现）
+
+`packages/shared/src/action-continuous-sampler.ts:347 evaluateBSplineQuat` 的 De Boor 混合（`:386-393`）逐分量线性插值后归一化，**没有做双覆盖（double cover）处理**。同一文件的 `slerpQuaternion:474` 有：`:483-489` `if (cosHalfTheta < 0)` 就取反 `qb`。两个函数对同一个数学问题给了两套策略。`:388-389` 的注释（「Havok evaluates spline quaternion control points component-wise … Slerp changes the native curve」）说明逐分量本身是刻意选择——缺的只是符号对齐，不是插值方式。
+
+**实测（构造输入）**：控制点取 `q=[0,0,0,1]` 与 `-q=[0,0,0,-1]`——同一个旋转，正确输出应是常量：
+
+```text
+t=0     [0, 0, 0,  1]
+t=0.25  [0, 0, 0,  1]
+t=0.5   THROW ACTION_QUATERNION_INVALID
+t=0.75  [0, 0, 0, -1]
+t=1     [0, 0, 0, -1]
+```
+
+一个阶跃函数 + 正中间硬崩。崩点是 `normalizeQuaternion:518` 的 `:520` `lenSq <= 1e-12`：两个反向四元数线性混合到中点抵消为零向量。
+
+**入口守卫为什么没拦住**：`validateQuatCurve:456`（逐点循环在 `:463`）对 `curve.controlPoints` **逐点**做归一化检查。`q` 和 `-q` 各自都是单位四元数，各自都过。问题是**成对**的（dot < 0），所以坏数据通过入口守卫，在后面某个任意 `t` 上才炸。
+
+**可达性**：`:280` `evaluateBSplineQuat(track.rotation, blockFrame)` 在 `SplineCompressed` 分支里——这是 Sekiro 存旋转的主要形式；`sampleFlverPose` 经 `TaeWorkbenchPanel.tsx:1068` 上屏。
+
+**这条是崩溃级，不是数值错误级。** 但必须保留的边界：**「会崩」是构造输入下的实测，不是「真实数据必崩」。真实 HKX 语料里相邻样条控制点是否真的出现反号，未测。** 反号在 Havok 压缩输出里是常见现象（压缩器不保证半球连续），但本轮没有跑真实 anibnd 统计过。接手者不要把两者混写。
+
+修法：De Boor 每次混合前先对齐半球（`if (dot(q0,q1) < 0) q1 = -q1`），与 `slerpQuaternion:483-489` 同一策略。**不要把插值改成 slerp**——`:388-389` 注释说明 Havok 就是逐分量算的，改插值方式会动原生曲线形状；缺的只是符号对齐。
+
+**配套的假绿测试（本条即 §24.16.5 引用的那条「t=0.5 空转断言」，此前悬空，现闭合）**：`packages/core/src/action/taeAnimationBridge.test.ts:37-50`，用例名「四元数样条插值正确保持单位化四元数」。控制点 `[0,0,0,1]` 与 `[0,1,0,0]` 相距 90°，`cosHalfTheta = 0`，**不触发双覆盖分支**；断言是模长 + `mid[1] > 0.5` + `mid[3] > 0.5`，且**只采 `t=0.5` 一个点**（`:46`）。实测 nlerp（实现）与 slerp 的 maxAbsDiff：`t=0.25`/`t=0.75` 为 `6.646e-2`，**`t=0.5` 为 `1.110e-16`**——t=0.5 是两种插值策略解析上唯一重合的点，而用例恰好只采这一个点。三条断言对两种策略全部同真（含看起来在判几何的 `> 0.5`）。**把采样点挪到 `t=0.25` 即可分开**，差值约为现有 `1e-4` 容差的 660 倍，不需要调松容差。
+
+**一条被实测否掉的怀疑，记下来防止后人重走**：`runAnimationPlaybackClockSmoke.ts:144-145` 只判 `t=0`/`t=1`，而 clamped B-spline 端点恒等于首末控制点，判据确实无判别力。**但后面没有缺陷**：那条曲线（degree 3、knots `[0,0,0,0,1,1,1,1]`、控制点 `[0,10,20,30]`）解析上就是直线 `30t`，实测 `t=0.25/0.5/0.75` 误差精确 `0.000e+0`。**不要去「修」`evaluateBSpline`。**
+
+本节未测清单：
+
+- 真实 HKX 语料相邻控制点反号出现率：未测（本节最大的开放项）。
+- 上述崩溃表与差值出自独立 oracle 复算 + 静态读实现；未在当前工作树重跑 `taeAnimationBridge.test.ts` 与 `runAnimationPlaybackClockSmoke` 的退出码。
+
+#### 24.16.7 跨语言失败策略相反（X5）、两条并行采样路径（X6）与 IPC 边界 `as` 断言（X7）
+
+这三条互相独立，但共同点是：**修任何一条的「一半」都会制造新的静默错误**。动手前先看清整条链。
+
+**X5：同为「按名把 follower 骨架映射进 leader」，C# 与 TS 的失败策略相反。**
+C# 侧 `ActionAnimationSemantics.cs:193 BuildUniqueNameIndex`：空名抛 `InvalidDataException`（`:201-202`），重名抛 `…duplicate bone name…remapping is ambiguous`（`:203-205`）；`:153-154` 让 FLVER 与 HKX 两副骨架都受检 → **整个 clip 读取失败**。TS 侧 `flverSkeletonMapping.ts:60 mapFollowerSkeleton`：leader 含两根同名 `Ctrl` 时返回 `[-1]` **静默降级为未映射**（`flverSkeletonMapping.test.ts:30-34` 把该行为背书为预期）。真实 Sekiro 骨架若含重名骨，两条路径一条抛异常、一条静静少映射。
+
+**两个修复方向都自洽，且都可能错**：改 C# 让它别抛 → 两边都静默，重名骨永久静默错绑；改 TS 让它抛 → 两边都抛，可能把本来能打开的文件变成打不开。**这是「重名骨该不该是致命错误」的规格决策，文档不替接手者选**；在用户裁定之前，禁止只动一边。未测：真实 Sekiro 骨架是否含重名骨（它决定哪条策略在现场被触发）。
+
+**X6：两条并行路径各自复现同类零匹配失效。**
+`BridgeCommandService.cs:1141` 的 handler 把 `hkxToFlverBoneMap` 回传，由 TS 侧 `sampleFlverPose` 采样（§24.16.5 的 B 结局在这条路径上）；`:1279` 的 handler 由 C# 侧 `RemapPoseToFlver(hkxPose, hkxToFlver, flverRefPose)` 直接算。零匹配静默降级**同时存在于两条路径**。且 `RemapPoseToFlver` 的文档注释承诺「Bones with no HKX name match retain the FLVER bind/reference local transform」——正是 TS 侧靠约定维持、无断言保护的那条不变式。**修之前先确认两条路径各自的调用方**；只修一条路径，另一条还坏，而测试大概率只覆盖被修的那条——看起来修完了，测试也过了。未测：`:1141` 与 `:1279` 是否真的共享同一张映射表（两处位置已实测确认，共享性未确认）。
+
+**X7：整条 TAE 预览链在 IPC 边界全是 `as` 断言。**
+`TaeWorkbenchPanel.tsx:720` 与 `:755` 用 `as PreviewResult`；`:1026` 与 `:1033` 用 `(bridge as any)` 调 `readTaeAnimationClip`。字段名写错 typecheck 照样通过，功能恒静默失败；§24.16.5 依赖的 wire 可选字段（`bones`/`boneCount`）正好落在这条边界上。**接手者的偏移方向是「改完 typecheck 绿、功能没动」**——修这一域的任何 wire 字段，必须同时把这四处 `as` 换成运行时结构校验（判字段与形状，不是判类型名），否则修复自证不可信。
+
+#### 24.16.8 每次点选动画都全量读取并哈希整个 anibnd（X8，成本模型）
+
+先记录一条被实测否掉的担忧，防止后人重走：**「per-animation 循环导致 N 次重复读」不存在。** `BridgeCommandService.cs` 的 clip 读取 handler（`:1000-1141` 区间）内每一处匹配都是单个 animation 内部的 LINQ 投影（骨名、HKX 骨名、参考变换、spline 块与轨道、interleaved 变换、父索引），payload 由 `animId` 选定，一次只构一个。
+
+真实成本形状不同但依然真实：renderer 每次切换动画调一次 `readTaeAnimationClip`（`TaeWorkbenchPanel.tsx:1033`），而每次调用都在 handler 里执行：
+
+```csharp
+// BridgeCommandService.cs:1142-1143
+sourceHash = HashHex(File.ReadAllBytes(file)),
+animationContainerHash = HashHex(File.ReadAllBytes(sourceContainer)),
+```
+
+即**每次点选动画 = 整个 anibnd 全量读取 + 两遍 SHA-256**，落在 UI 交互路径上。这与地图域 §24.10 的「违反 1」（每页一次全文件读取 + 全文件哈希）是同一成本模型缺陷的第二个文件。
+
+修法未定，不要自行挑一个走到底：这两个哈希当前可能承担会话缓存/增量验证锚点的职责，直接删会破坏一致性校验，加缓存要先定失效键。接手者第一步是把 `:1141` handler 的调用方与缓存结构画清楚，再向用户提方案。
 
 ### 24.17 F-3：CPU bind-pose skin oracle 与 GPU bundle 算法
 

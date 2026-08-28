@@ -74,6 +74,7 @@ internal sealed class DcxNativeDocument
             "KRAK" => DecompressKraken(compressedPayload, uncompressed, oodleRuntimeRoot, pathForOodle),
             _ => throw new NotSupportedException($"DCX 压缩格式 {format} 尚不支持完整文档读取。")
         };
+        System.Threading.Interlocked.Increment(ref BridgeTelemetry.DcxInflateCount);
         var variant = ClassifyVariant(source, format);
         return new DcxNativeDocument(source, format, variant, payloadOffset, compressed, uncompressed, payload);
     }

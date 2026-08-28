@@ -17,6 +17,11 @@ import {
   scratchBoundaryFailure
 } from './scratch-boundary.mjs';
 
+if (process.argv.slice(2).includes('--selftest')) {
+  runExitCodeSelfTest();
+  process.exit(0);
+}
+
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const configuredScratch =
   process.env.SOULFORGE_SCRATCH
@@ -85,6 +90,7 @@ const report = {
   assessmentFixtureCases,
   steps: /** @type {Array<Record<string, unknown>>} */ ([]),
   status: 'unknown',
+  complete: false,
   message: ''
 };
 
@@ -110,6 +116,7 @@ if (!sekiro && !nativeFixture) {
     skipped: true,
     reason: report.message
   });
+  report.exitCode = 0;
   const outPath = resolve(scratch, 'private-native-gate.json');
   await writeFile(outPath, JSON.stringify(report, null, 2), 'utf8');
   console.log(JSON.stringify({ ...report, reportPath: outPath }, null, 2));
@@ -166,16 +173,44 @@ try {
 
 report.status = failed ? 'failed' : partial ? 'partial' : 'passed';
 report.ok = !failed;
+report.complete = !failed && !partial;
 report.message = failed
   ? '私有 native 门禁有失败步骤；不得声明 V0.5 全绿。'
   : partial
     ? '私有 native 门禁可执行步骤完成，但仍含 partial/candidate 覆盖；不得声明 V0.5 全绿。'
     : '私有 native 门禁步骤通过（仍不等于 section-28 真游戏启动）。';
+report.exitCode = computeGateExitCode(failed, partial);
 
 const outPath = resolve(scratch, 'private-native-gate.json');
 await writeFile(outPath, JSON.stringify(report, null, 2), 'utf8');
 console.log(JSON.stringify({ ...report, reportPath: outPath }, null, 2));
-process.exitCode = failed ? 1 : 0;
+process.exitCode = report.exitCode;
+
+/** 三态退出码：0=passed、1=failed、2=partial；failed 优先于 partial。 */
+function computeGateExitCode(failed, partial) {
+  if (failed) return 1;
+  if (partial) return 2;
+  return 0;
+}
+
+function runExitCodeSelfTest() {
+  const cases = [
+    [false, false, 0],
+    [true, false, 1],
+    [false, true, 2],
+    [true, true, 1]
+  ];
+  for (const [failed, partial, expected] of cases) {
+    assert.equal(
+      computeGateExitCode(failed, partial),
+      expected,
+      `failed=${failed} partial=${partial} 应得退出码 ${expected}`
+    );
+  }
+  // 负向语义：partial 绝不允许落到 0（那是「全绿」信号）。
+  assert.notEqual(computeGateExitCode(false, true), 0, 'partial 不得映射为退出码 0');
+  console.log(`selftest ok: exit-code matrix ${cases.length}/4 cases + partial!=0`);
+}
 
 function assessStep(name, result) {
   if (!processSucceeded(result) || !result.result || result.result.ok !== true) {

@@ -123,13 +123,13 @@ function inverseUnitQuaternion(q: Quaternion): Quaternion {
   return [-normalized[0], -normalized[1], -normalized[2], normalized[3]];
 }
 
-/** FLVER local rotation: radians, intrinsic XZY (`RotX * RotZ * RotY`). */
+/** FLVER local rotation: radians, intrinsic XZY row-vector `Rx*Rz*Ry` → column-vector `T*Ry*Rz*Rx*S`, quaternion `qy⊗qz⊗qx`. */
 export function flverEulerXzyToQuaternion(rotation: readonly [number, number, number]): Quaternion {
   const [x, y, z] = rotation;
   const qx: Quaternion = [Math.sin(x / 2), 0, 0, Math.cos(x / 2)];
   const qz: Quaternion = [0, 0, Math.sin(z / 2), Math.cos(z / 2)];
   const qy: Quaternion = [0, Math.sin(y / 2), 0, Math.cos(y / 2)];
-  const q = multiplyQuaternion(multiplyQuaternion(qx, qz), qy);
+  const q = multiplyQuaternion(multiplyQuaternion(qy, qz), qx);
   return normalizeQuaternion(q);
 }
 

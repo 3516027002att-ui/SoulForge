@@ -5,6 +5,7 @@ import { mkdir, readFile, stat, unlink, writeFile } from 'node:fs/promises';
 import { app, BrowserWindow, dialog, ipcMain, type IpcMainInvokeEvent, type WebContents } from 'electron';
 import { basename, dirname, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
+import { mergeMapMeshGeometry } from './mapMeshGeometry.js';
 import {
   analyzeWorkspace,
   buildAiSidebarDraft,
@@ -133,6 +134,20 @@ import {
   type ScriptContainerEntryEvidence,
   type ScriptEntryClassification,
   ingestBridgeResult,
+  canReusePersistedHash,
+  makeFileFingerprint,
+  normalizeMtimeNs,
+  normalizeCtimeNs,
+  fileIdentityFromStat,
+  makeWorkspacePersistentIdentityHash,
+  type FingerprintContinuityV1,
+  type PersistedHashV1,
+  type FingerprintStoreState,
+  loadFingerprintStore,
+  saveFingerprintStore,
+  getPathSourceGeneration,
+  bumpPathSourceGeneration,
+  workspacePhysicalRootHash,
   mapExportFromMsbDocument
 } from '@soulforge/core';
 import {
@@ -223,6 +238,7 @@ import { clearRecentPath, readRecentPath, writeRecentPath } from './recentPaths.
 import { executeRecoveryCleanup } from './recoveryCleanup.js';
 import { ModelServiceCredentialVault } from './modelServiceCredentials.js';
 import { MainMe3RuntimeGateway } from './me3RuntimeGateway.js';
+import { MemoryManager } from './memoryManager.js';
 import {
   decodeTaeParamFields,
   getTaeTemplateCatalog
@@ -243,6 +259,32 @@ let activeRag: RagCorpus | null = null;
 let activeSession: WorkspaceSession | null = null;
 let activeOperationLog: OperationLogUtilityClient | null = null;
 let activeWorkspaceSessionId: string | null = null;
+let activeWorkspaceSessionGeneration = 0;
+let workspaceSessionGenerationCounter = 0;
+const FINGERPRINT_STORE_GENERATION = 1;
+let activeFingerprintStore: FingerprintStoreState | null = null;
+let foregroundActive = false;
+async function withForegroundPriority<T>(fn: () => Promise<T>): Promise<T> {
+  foregroundActive = true;
+  try { return await fn(); } finally { foregroundActive = false; }
+}
+function bumpPathSourceGenerationForUris(uris: readonly string[]): void {
+  if (!activeFingerprintStore) return;
+  for (const uri of uris) {
+    const rel = uri.startsWith('file://') ? decodeURI(uri.slice('file://'.length)) : uri;
+    // try to normalize to relativePath via indexedFiles lookup
+    const file = indexedFiles.find(f => f.sourceUri === uri || f.relativePath === uri || f.absolutePath === uri);
+    const rp = file?.relativePath ?? rel.replaceAll('\\','/').replace(/^\/+/,'');
+    if (!rp) continue;
+    bumpPathSourceGeneration(activeFingerprintStore, rp);
+    // also invalidate persisted hash for that path so next hash is forced
+    activeFingerprintStore.hashes.delete(rp);
+  }
+  if (activeSession) {
+    const root = durableStoragePaths(activeSession.meta.workspaceId).root;
+    void saveFingerprintStore({ storageRoot: root, state: activeFingerprintStore }).catch(()=>{});
+  }
+}
 let workspaceIndexingAbort: AbortController | null = null;
 let workspaceIndexingTask: Promise<void> | null = null;
 let workspaceIndexingStatus: any = {
@@ -392,7 +434,7 @@ interface CachedParamDocument {
   // 「页大小 = 总行数」必然超限。当前页的字节由 readParamPage 单独取一次分页
   // 补齐（见该 handler 头部的实测记录）。此处保留 optional 是如实建模，
   // 不是「小 param 才有字节」——原注释那个 rowDataSize<=256 的说法已不准确。
-  rows: Array<{ id: number; dataBase64?: string | null; dataHash: string; name?: string }>;
+  rows: Array<{ rowIndex: number; id: number; dataBase64?: string | null; dataHash: string; name?: string }>;
   authority?: string;
 }
 const paramPageCache = new Map<string, CachedParamDocument>();
@@ -1360,6 +1402,7 @@ const operationLogUtility = new OperationLogUtilityClient(
   sqliteNativeBindingPath
 );
 const modelServiceVault = new ModelServiceCredentialVault(app.getPath('userData'));
+const memoryManager = new MemoryManager(app.getPath('userData'));
 
 const toolRegistry = createDefaultToolRegistry();
 // P0 authority: renderer cannot elevate this value. Persistent per-model-service
@@ -2710,16 +2753,16 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
         }
       }
       const effectiveBaseRecord = (baseSelection as DirectorySelectionRecord | undefined) ?? autoBaseRecord ?? null;
-      // Cancel previous background indexing
-      if (typeof workspaceIndexingAbort !== 'undefined' && workspaceIndexingAbort) {
-        try { workspaceIndexingAbort.abort(); } catch {}
-      }
-      if (typeof workspaceIndexingTask !== 'undefined' && workspaceIndexingTask) {
-        try { await workspaceIndexingTask; } catch {}
-      }
+      // Cancel previous background indexing — abort old workspaceSessionGeneration, never overwrite new catalog with stale result
+      if (workspaceIndexingAbort) { try { workspaceIndexingAbort.abort(); } catch {} }
+      if (workspaceIndexingTask) { try { await workspaceIndexingTask; } catch {} }
       if (activeSession) await disposeBridgeDaemonPool();
       emevdFullDocuments.clear();
       emevdDisassemblyCache.clear();
+      // workspaceSessionGeneration: per open increment, NOT reused. Guard for stale async publish.
+      workspaceSessionGenerationCounter += 1;
+      const thisSessionGeneration = workspaceSessionGenerationCounter;
+      activeWorkspaceSessionGeneration = thisSessionGeneration;
       activeSession = await openWorkspaceSession({
         overlayRoot: overlaySelection.absolutePath,
         ...(effectiveBaseRecord ? { baseRoot: effectiveBaseRecord.absolutePath } : {}),
@@ -2729,17 +2772,25 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
       editorDocumentStore = null;
       activeWorkspaceSessionId = randomUUID();
       const database = await ensureActiveOperationLog(activeSession);
-      // Phase 1: lightweight discovery without content hashes (fast, no file reads)
+      const physicalOverlayRoot = await (async () => { try { const { realpath } = await import('node:fs/promises'); return await realpath(activeSession.layers.overlayRoot); } catch { return activeSession.layers.overlayRoot; } })();
+      const physicalOverlayHash = workspacePhysicalRootHash(physicalOverlayRoot);
+      const physicalBaseHash = activeSession.layers.baseRoot ? workspacePhysicalRootHash(await (async()=>{ try{ const {realpath}=await import('node:fs/promises'); return await realpath(activeSession.layers.baseRoot!);}catch{return activeSession.layers.baseRoot!;}})()) : undefined;
+      const workspacePersistentIdentityHash = makeWorkspacePersistentIdentityHash({ workspaceId: activeSession.meta.workspaceId, game: activeSession.meta.game, physicalOverlayRootHash: physicalOverlayHash, ...(physicalBaseHash?{physicalBaseRootHash: physicalBaseHash}:{}) });
+      const storageRoot = durableStoragePaths(activeSession.meta.workspaceId).root;
+      let fingerprintStore = await loadFingerprintStore({ workspacePersistentIdentityHash, storageRoot, fingerprintStoreGeneration: FINGERPRINT_STORE_GENERATION });
+      activeFingerprintStore = fingerprintStore;
+      const continuity = fingerprintStore.continuity;
+      const shellVisibleAt = Date.now();
       const lightResult = await scanWorkspace({
         workspaceRoot: activeSession.layers.overlayRoot,
         game: activeSession.meta.game,
         includeContentHashes: false
       });
+      const filesVisibleAt = Date.now();
       indexedFiles = lightResult.files;
       activeOverlayLabel = overlaySelection.label;
       activeIndex = new WorkspaceIndex(activeSession.meta.workspaceId);
       activeIndex.setFiles(lightResult.files);
-      // Persist lightweight catalog immediately (no hashes yet, but files are visible)
       const scanJobId = randomUUID();
       const scanStartedAt = new Date().toISOString();
       await database.upsertJob({
@@ -2748,83 +2799,139 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
         jobKind: 'workspace_scan',
         status: 'running',
         progress: { current: 0, total: lightResult.files.length, message: '基础资源已可用，正在后台校验内容索引' },
-        payload: { workspaceSessionId: activeWorkspaceSessionId },
+        payload: { workspaceSessionId: activeWorkspaceSessionId, workspaceSessionGeneration: thisSessionGeneration, fingerprintStoreGeneration: fingerprintStore.fingerprintStoreGeneration, workspacePersistentIdentityHash },
         createdAt: scanStartedAt,
         startedAt: scanStartedAt,
         updatedAt: scanStartedAt
       });
       await database.replaceFiles(lightResult.files);
-      // Phase 2: incremental background hashing with fingerprint reuse
       const currentSessionId = activeWorkspaceSessionId;
       const currentSession = activeSession;
+      const currentGeneration = thisSessionGeneration;
+      const currentStoreGen = fingerprintStore.fingerprintStoreGeneration;
       const lightFiles = lightResult.files;
-      const previousFiles = new Map<string, typeof lightFiles[number]>();
-      // Try to reuse from previous indexedFiles if same workspaceId (in-memory fingerprint cache)
-      // Fingerprint = {relativePath,size,mtimeMs,generation}
-      const generation = 1;
-      // Build previous map from a global cache if available (simple in-memory)
-      if ((globalThis as unknown as Record<string, unknown>).__previousFileMap) {
-        const prevMap = (globalThis as unknown as Record<string, unknown>).__previousFileMap as Map<string, unknown>;
-        for (const [k,v] of prevMap) previousFiles.set(k, v as typeof lightFiles[number]);
-      }
       const controller = new AbortController();
-      if (typeof workspaceIndexingAbort !== 'undefined') (globalThis as unknown as Record<string, unknown>).workspaceIndexingAbort = controller;
-      // Also assign to module-level variable if exists
-      try { (workspaceIndexingAbort as unknown) = controller; } catch {}
+      workspaceIndexingAbort = controller;
       const backgroundTask = (async () => {
+        const openHandles: import('node:fs/promises').FileHandle[] = [];
+        let activeDiskReaders = 0;
+        const releaseAll = async () => {
+          for (const h of openHandles) { try { await h.close(); } catch {} }
+          openHandles.length = 0;
+        };
         try {
-          const { createHash } = await import('node:crypto');
-          const { createReadStream } = await import('node:fs');
+          const { createHash: _createHash } = await import('node:crypto');
+          const { open: _open } = await import('node:fs/promises');
           let hashedCount = 0;
-          const enriched: typeof lightFiles = [];
+          let reuseCount = 0;
+          const enriched = [];
           for (const file of lightFiles) {
             if (controller.signal.aborted) throw new Error('aborted');
-            // Foreground priority: yield if there is active foreground request
-            if ((globalThis as unknown as Record<string, unknown>).__foregroundActive) {
-              await new Promise<void>((r) => setTimeout(r, 20));
-              if (controller.signal.aborted) throw new Error('aborted');
+            if (currentGeneration !== activeWorkspaceSessionGeneration || currentSession !== activeSession || currentSessionId !== activeWorkspaceSessionId) throw new Error('aborted');
+            let liveStat = null;
+            try {
+              const st = await (await import('node:fs/promises')).stat(file.absolutePath, { bigint: true }).catch(async()=> await (await import('node:fs/promises')).stat(file.absolutePath));
+              const mtimeNs = normalizeMtimeNs(st as any);
+              const ctimeNs = normalizeCtimeNs(st as any);
+              const fileIdentity = fileIdentityFromStat(st);
+              liveStat = { size: Number(st.size), mtimeNs, ctimeNs, fileIdentity };
+            } catch {
+              liveStat = { size: file.size, mtimeNs: String(BigInt(file.mtimeMs*1_000_000)), ctimeNs: String(BigInt(file.mtimeMs*1_000_000)), fileIdentity: null };
             }
-            const prev = previousFiles.get(file.relativePath);
-            if (prev && prev.size === file.size && prev.mtimeMs === file.mtimeMs && (prev as unknown as Record<string, unknown>).sha256) {
-              enriched.push({ ...file, sha256: (prev as unknown as Record<string, unknown>).sha256 as string } as typeof file);
+            const pathGen = getPathSourceGeneration(fingerprintStore, file.relativePath);
+            const fp = makeFileFingerprint({ relativePath: file.relativePath, size: liveStat.size, mtimeNs: liveStat.mtimeNs, ctimeNs: liveStat.ctimeNs, fileIdentity: liveStat.fileIdentity, pathSourceGeneration: pathGen });
+            const persisted = fingerprintStore.hashes.get(file.relativePath);
+            const reuseCheck = canReusePersistedHash({ fingerprint: fp, persisted, currentStoreGeneration: currentStoreGen, continuity, workspaceIdentityMatches: persisted ? persisted.relativePath===fp.relativePath : false });
+            if (reuseCheck.reuse && persisted) {
+              enriched.push({ ...file, sha256: persisted.sha256 });
+              reuseCount++;
               continue;
             }
-            // Hash this file (with abort support)
-            try {
-              const hash = createHash('sha256');
-              const stream = createReadStream(file.absolutePath, { signal: controller.signal } as unknown as Record<string, unknown>);
-              for await (const chunk of stream as unknown as AsyncIterable<Buffer>) {
-                if (controller.signal.aborted) throw new Error('aborted');
-                hash.update(chunk);
-                // Yield every chunk to allow foreground to interleave
-                await new Promise<void>((r) => setImmediate(r));
-              }
-              const sha = hash.digest('hex');
-              enriched.push({ ...file, sha256: sha } as typeof file);
-              hashedCount++;
-            } catch (e) {
-              if (controller.signal.aborted) throw e;
-              enriched.push({ ...file, diagnostics: [...file.diagnostics, { severity: 'warning' as const, code: 'FILE_HASH_FAILED', message: e instanceof Error ? e.message : String(e), details: { absolutePath: file.absolutePath } }] } as unknown as typeof file);
+            if (foregroundActive) {
+              await new Promise((r)=> setTimeout(r, 12));
+              if (controller.signal.aborted) throw new Error('aborted');
+              if (currentGeneration !== activeWorkspaceSessionGeneration) throw new Error('aborted');
             }
-            // Yield after each file to keep UI responsive
-            await new Promise<void>((r) => setTimeout(r, 0));
+            try {
+              const handle = await _open(file.absolutePath, 'r');
+              openHandles.push(handle);
+              activeDiskReaders++;
+              try {
+                const fhStat = await handle.stat({ bigint: true }).catch(async()=> await handle.stat());
+                void normalizeMtimeNs(fhStat as any); void normalizeCtimeNs(fhStat as any); void fileIdentityFromStat(fhStat as any);
+              } catch {}
+              const hasher = _createHash('sha256');
+              const buf = Buffer.alloc(1024*1024);
+              let offset = 0;
+              const fileSize = liveStat.size;
+              while (offset < fileSize) {
+                if (controller.signal.aborted) throw new Error('aborted');
+                if (currentGeneration !== activeWorkspaceSessionGeneration) throw new Error('aborted');
+                const toRead = Math.min(buf.length, fileSize - offset);
+                const { bytesRead } = await handle.read(buf, 0, toRead, offset);
+                if (bytesRead === 0 && offset < fileSize) {
+                  throw Object.assign(new Error('HASH_UNEXPECTED_EOF'), { code: 'HASH_UNEXPECTED_EOF' });
+                }
+                if (bytesRead > 0) hasher.update(buf.subarray(0, bytesRead));
+                offset += bytesRead;
+                if (offset < fileSize && foregroundActive) {
+                  activeDiskReaders = Math.max(0, activeDiskReaders - 1);
+                  await new Promise((r)=> setImmediate(r));
+                  activeDiskReaders++;
+                  if (controller.signal.aborted) throw new Error('aborted');
+                  if (currentGeneration !== activeWorkspaceSessionGeneration) throw new Error('aborted');
+                } else if (bytesRead>0) {
+                  await new Promise((r)=> setImmediate(r));
+                }
+                if (bytesRead===0) break;
+              }
+              try {
+                const endStat = await handle.stat({ bigint: true }).catch(async()=> await handle.stat());
+                const endMtimeNs = normalizeMtimeNs(endStat as any);
+                const endCtimeNs = normalizeCtimeNs(endStat as any);
+                const endId = fileIdentityFromStat(endStat as any);
+                if (endId !== fp.fileIdentity || Number(endStat.size) !== fp.size || endMtimeNs !== fp.mtimeNs || endCtimeNs !== fp.ctimeNs) {
+                  throw Object.assign(new Error('FILE_CHANGED_DURING_HASH'), { code: 'FILE_CHANGED_DURING_HASH' });
+                }
+              } catch (e) { if ((e as any) && (e as any).code==='FILE_CHANGED_DURING_HASH') throw e; }
+              const sha = hasher.digest('hex');
+              enriched.push({ ...file, sha256: sha });
+              hashedCount++;
+              fingerprintStore.hashes.set(file.relativePath, { ...fp, sha256: sha, lastVerifiedAtUtc: new Date().toISOString(), fingerprintStoreGeneration: currentStoreGen });
+              await handle.close(); openHandles.splice(openHandles.indexOf(handle),1);
+              activeDiskReaders = Math.max(0, activeDiskReaders-1);
+            } catch (e) {
+              activeDiskReaders = Math.max(0, activeDiskReaders-1);
+              if (controller.signal.aborted) throw e;
+              if ((e as any) && (e as any).code === 'FILE_CHANGED_DURING_HASH') {
+                enriched.push({ ...file });
+                continue;
+              }
+              if (currentGeneration !== activeWorkspaceSessionGeneration) throw e;
+              enriched.push({ ...file, diagnostics: [...file.diagnostics, { severity: 'warning' as const, code: 'FILE_HASH_FAILED', message: e instanceof Error ? e.message : String(e), details: { absolutePath: file.absolutePath } }] });
+            }
+            await new Promise((r)=> setTimeout(r, 0));
           }
-          if (controller.signal.aborted) return;
-          // Update live and persisted catalog
-          if (currentSession !== activeSession || currentSessionId !== activeWorkspaceSessionId) return;
-          indexedFiles = enriched;
-          activeIndex?.setFiles(enriched);
-          await database.replaceFiles(enriched);
-          (globalThis as unknown as Record<string, unknown>).__previousFileMap = new Map(enriched.map((f) => [f.relativePath, f]));
+          if (controller.signal.aborted) { await releaseAll(); return; }
+          if (currentGeneration !== activeWorkspaceSessionGeneration || currentSession !== activeSession || currentSessionId !== activeWorkspaceSessionId) { await releaseAll(); return; }
+          (indexedFiles as any) = enriched;
+          activeIndex?.setFiles(enriched as any);
+          await database.replaceFiles(enriched as any);
+          if (continuity.continuity === 'UNKNOWN' && hashedCount + reuseCount === enriched.length) {
+            fingerprintStore.continuity = { ...continuity, continuity: 'PROVEN', unknownReason: null, cleanShutdown: true };
+          }
+          fingerprintStore.continuity.cleanShutdown = true;
+          try { await saveFingerprintStore({ storageRoot, state: fingerprintStore }); } catch {}
           const completedAt = new Date().toISOString();
+          const backgroundCompleteAt = Date.now();
           await database.upsertJob({
             jobId: scanJobId,
             title: '扫描工作区',
             jobKind: 'workspace_scan',
             status: 'completed',
             progress: { current: enriched.length, total: enriched.length },
-            payload: { workspaceSessionId: currentSessionId },
-            result: { fileCount: enriched.length, hashedCount },
+            payload: { workspaceSessionId: currentSessionId, workspaceSessionGeneration: currentGeneration, fingerprintStoreGeneration: currentStoreGen },
+            result: { fileCount: enriched.length, hashedCount, reuseCount, shellVisibleAt, filesVisibleAt, backgroundCompleteAt, shellVisibleMs: filesVisibleAt - shellVisibleAt, indexingMs: backgroundCompleteAt - shellVisibleAt, openHandles: 0, activeDiskReaders: 0 },
             createdAt: scanStartedAt,
             startedAt: scanStartedAt,
             completedAt,
@@ -2832,7 +2939,9 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
           });
           if (activeIndex) await refreshRagAfterScan(database, activeIndex);
         } catch (error) {
+          await releaseAll();
           if (controller.signal.aborted) return;
+          if (currentGeneration !== activeWorkspaceSessionGeneration) return;
           const failedAt = new Date().toISOString();
           try {
             await database.upsertJob({
@@ -2841,7 +2950,7 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
               jobKind: 'workspace_scan',
               status: 'failed',
               progress: { current: 0 },
-              payload: { workspaceSessionId: currentSessionId },
+              payload: { workspaceSessionId: currentSessionId, workspaceSessionGeneration: currentGeneration },
               error: { message: error instanceof Error ? error.message : String(error) },
               createdAt: scanStartedAt,
               startedAt: scanStartedAt,
@@ -2851,13 +2960,7 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
           } catch {}
         }
       })();
-      if (typeof workspaceIndexingTask !== 'undefined') {
-        try { (workspaceIndexingTask as unknown) = backgroundTask; } catch {}
-        (globalThis as unknown as Record<string, unknown>).workspaceIndexingTask = backgroundTask;
-      }
-      // Also store on global for foreground priority checks
-      (globalThis as unknown as Record<string, unknown>).workspaceIndexingAbort = controller;
-      (globalThis as unknown as Record<string, unknown>).workspaceIndexingTask = backgroundTask;
+      workspaceIndexingTask = backgroundTask;
       return {
         workspaceSessionId: activeWorkspaceSessionId,
         workspaceLabel: overlaySelection.label,
@@ -2901,10 +3004,14 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
       const baseSelection = baseSelectionId
         ? consumeDirectorySelection(event, baseSelectionId, 'base')
         : undefined;
+      if (workspaceIndexingAbort) { try { workspaceIndexingAbort.abort(); } catch {} }
+      if (workspaceIndexingTask) { try { await workspaceIndexingTask; } catch {} }
       await disposeBridgeDaemonPool();
       emevdFullDocuments.clear();
       clearEditorPageCaches();
       editorDocumentStore = null;
+      workspaceSessionGenerationCounter += 1;
+      activeWorkspaceSessionGeneration = workspaceSessionGenerationCounter;
       activeWorkspaceSessionId = randomUUID();
       activeSession = await openWorkspaceSession({
         overlayRoot: activeSession.layers.overlayRoot,
@@ -2968,6 +3075,7 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
   });
 
   handle('resource.preview', async (_event, sourceUri: string): Promise<RendererResourcePreview | null> => {
+    return withForegroundPriority(async () => {
     const file = indexedFiles.find((item) => item.sourceUri === sourceUri);
     // Dedicated editor skip: param/msb/tae etc already have structured workbench, avoid duplicate heavy preview
     if (file && (file.resourceKind === 'param' || file.resourceKind === 'map' || file.resourceKind === 'action')) {
@@ -2986,6 +3094,7 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
       parseStructured: true,
       ...(activeSession?.layers.baseRoot ? { oodleRuntimeRoot: activeSession.layers.baseRoot } : {})
     }));
+    });
   });
 
   handle('resource.saveText', async (_event, sourceUri: string, newText: string): Promise<RendererSaveResult> => {
@@ -3036,6 +3145,7 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
       });
     }
     if (result.ok) {
+      bumpPathSourceGenerationForUris([sourceUri]);
       const refreshed = await openResourcePreview({
         file,
         inspectNative: true,
@@ -4687,9 +4797,41 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
     }
   );
 
+  // 24.10 D-2: streaming static geometry (chunked, cursor opaque with daemon/owner/sourceHash/resourceCacheKey, wire bytes budget <8MiB)
+  // Deprecated: resource.readMapPartMesh is legacy non-streaming; new path is resource.readMapStaticGeometry
+  handle(
+    'resource.readMapStaticGeometry',
+    async (_event, msbSourceUri, modelName, cursor, sessionToken) => {
+      const file = indexedFiles.find((item) => item.sourceUri === msbSourceUri);
+      if (!file || !activeSession) return { ok: false, diagnostics: [{ severity: 'error', code: 'MAP_PART_MSB_NOT_INDEXED', message: 'MSB not indexed', sourceUri: msbSourceUri }] };
+      const baseName = basename(file.relativePath);
+      const mapId = baseName.replace(/.msb(.dcx)?$/i, '');
+      const overlayParent = dirname(activeSession.layers.overlayRoot);
+      const effectiveBase = activeSession.layers.baseRoot ?? (existsSync(join(overlayParent, 'sekiro.exe')) || existsSync(join(overlayParent, 'map')) ? overlayParent : null);
+      const overlayDir = join(activeSession.layers.overlayRoot, 'map', mapId);
+      const baseDir = effectiveBase ? join(effectiveBase, 'map', mapId) : null;
+      const candidateDirs = [...(safeExists(overlayDir) ? [{ dir: overlayDir, fromBase: false }] : []), ...(baseDir && safeExists(baseDir) ? [{ dir: baseDir, fromBase: true }] : [])];
+      const roots = await verifiedReadRoots(activeSession, dirname(file.absolutePath));
+      if (roots.diagnostics.length > 0) return { ok: false, diagnostics: roots.diagnostics };
+      if (effectiveBase && !roots.allowedRoots.includes(effectiveBase)) roots.allowedRoots.push(effectiveBase);
+      for (const { dir, fromBase } of candidateDirs) {
+        let mapbnds: string[] = [];
+        try { mapbnds = readdirSync(dir).filter(n=>/.mapbnd.dcx$/i.test(n)).map(n=>join(dir,n)); } catch {}
+        for (const mapbndPath of mapbnds) {
+          const result = await runBridge({ command: 'read-map-static-geometry', filePath: mapbndPath, allowedRoots: roots.allowedRoots, timeoutMs: 120000, ...(fromBase && effectiveBase ? { oodleRuntimeRoot: effectiveBase } : {}), commandOptions: { modelName, sessionToken: sessionToken ?? undefined, cursor: cursor ?? undefined, ownerLeaseId: activeWorkspaceSessionId ?? '', resourceCacheKey: JSON.stringify({ modelName, mapId }) } });
+          if (result.parseStatus !== 'failed' && result.data) {
+            const wireBytes = Buffer.byteLength(JSON.stringify(result.data), 'utf8');
+            if (wireBytes >= 8*1024*1024) return { ok: false, diagnostics: [{ severity: 'error', code: 'MAP_STATIC_WIRE_BUDGET_EXCEEDED', message: 'wire bytes exceed 8 MiB', sourceUri: msbSourceUri }] };
+            return { ok: true, sourceUri: msbSourceUri, data: result.data, diagnostics: result.diagnostics };
+          }
+        }
+      }
+      return { ok: false, diagnostics: [{ severity: 'error', code: 'MAP_PART_MODEL_NOT_FOUND', message: 'not found ' + modelName, sourceUri: msbSourceUri }] };
+    }
+  );
+
   /**
    * S17：词条名目录。main 从本机 TAE.Template.SDT.xml 解析 eventTypeId → 名称；
-   * renderer 只拿逻辑名（渲染 `0 JumpTable` 这类词条行），绝不接触 XML 路径。
    */
   handle('resource.readTaeTemplateCatalog', async (): Promise<{
     ok: boolean;
@@ -4806,8 +4948,7 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
     'resource.readTaeChrbndPreview',
     async (
       _event,
-      sourceUri: string,
-      meshIndex: number
+      sourceUri: string
     ): Promise<{
       ok: boolean;
       sourceUri?: string;
@@ -4851,75 +4992,19 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
         allowedRoots: roots.allowedRoots,
         timeoutMs: 120_000,
         ...(effectiveBase ? { oodleRuntimeRoot: effectiveBase } : {}),
-        commandOptions: { meshIndex, maxVertices: 1_000_000, maxIndices: 3_000_000 }
+        commandOptions: { maxVertices: 1_000_000, maxIndices: 3_000_000 }
       });
       if (result.parseStatus === 'failed' || !result.data) {
         return { ok: false, sourceUri, diagnostics: result.diagnostics };
       }
 
-      // S17 / 只狼 c0000 玩家装配体增强：c0000 自身只有骨骼，mesh 在 parts/ 目录下。
-      // 自动扫描并组装只狼默认主角外观（身体 bd_m_9000、手臂 am_m_9000、腿部 lg_m_9000、头部 hd_m_9510、武器 wp_a_0300）。
-      const assembledMeshes: Array<Record<string, unknown>> = [];
-      if (stem.toLowerCase() === 'c0000' && Number(result.data.meshCount ?? 0) === 0) {
-        const partsSearchDirs = [
-          join(activeSession.layers.overlayRoot, 'parts'),
-          ...(effectiveBase ? [join(effectiveBase, 'parts')] : [])
-        ];
-        const defaultParts = ['bd_m_9000', 'am_m_9000', 'lg_m_9000', 'hd_m_9510', 'wp_a_0300'];
-        for (const partName of defaultParts) {
-          let partPath: string | null = null;
-          for (const dir of partsSearchDirs) {
-            const candidate = join(dir, `${partName}.partsbnd.dcx`);
-            if (safeExists(candidate)) {
-              partPath = candidate;
-              break;
-            }
-          }
-          if (!partPath) continue;
-          const firstPart = await runBridge<Record<string, unknown>>({
-            command: 'read-chrbnd-flver-preview',
-            filePath: partPath,
-            allowedRoots: roots.allowedRoots,
-            timeoutMs: 120_000,
-            ...(effectiveBase ? { oodleRuntimeRoot: effectiveBase } : {}),
-            commandOptions: { meshIndex: 0, maxVertices: 1_000_000, maxIndices: 3_000_000 }
-          });
-          if (firstPart.parseStatus !== 'failed' && firstPart.data?.positionsBase64) {
-            assembledMeshes.push(firstPart.data);
-            const subCount = Number(firstPart.data.meshCount ?? 1);
-            for (let subIdx = 1; subIdx < subCount; subIdx++) {
-              const nextSub = await runBridge<Record<string, unknown>>({
-                command: 'read-chrbnd-flver-preview',
-                filePath: partPath,
-                allowedRoots: roots.allowedRoots,
-                timeoutMs: 120_000,
-                ...(effectiveBase ? { oodleRuntimeRoot: effectiveBase } : {}),
-                commandOptions: { meshIndex: subIdx, maxVertices: 1_000_000, maxIndices: 3_000_000 }
-              });
-              if (nextSub.parseStatus !== 'failed' && nextSub.data?.positionsBase64) {
-                assembledMeshes.push(nextSub.data);
-              }
-            }
-          }
-        }
-      }
-
+      // Body parts are assembled via explicit CharacterAssemblyContext in core/main (packages/core/src/character/characterAssembly.ts#remapCharacterBundleToLeader).
+      // Single leader skeleton only; weapon attachments use explicit attachBoneName挂点, never body remap. No hard-coded c0000 parts.
       return {
         ok: true,
         sourceUri,
         relativePath: file.relativePath,
-        data: {
-          ...result.data,
-          ...(assembledMeshes.length > 0
-            ? {
-                meshCount: assembledMeshes.length,
-                meshes: assembledMeshes,
-                positionsBase64: assembledMeshes[0]!.positionsBase64,
-                indicesBase64: assembledMeshes[0]!.indicesBase64,
-                vertexCount: assembledMeshes[0]!.vertexCount
-              }
-            : {})
-        },
+        data: result.data,
         diagnostics: result.diagnostics
       };
     }
@@ -6870,7 +6955,7 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
           dataVersion?: number;
           rowCount?: number;
           rowDataSize?: number;
-          rows?: Array<{ id: number; dataBase64?: string | null; dataHash: string; name?: string }>;
+          rows?: Array<{ rowIndex: number; id: number; dataBase64?: string | null; dataHash: string; name?: string }>;
           authority?: string;
         }>({
           command: 'read-param-document',
@@ -6964,7 +7049,9 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
           rows: filtered.map((row) => {
             const dataBase64 = typeof row.dataBase64 === 'string' ? row.dataBase64 : undefined;
             return {
+              rowIndex: row.rowIndex,
               id: row.id,
+              dataHash: row.dataHash,
               ...(dataBase64 !== undefined
                 ? {
                     dataBase64,
@@ -6997,7 +7084,7 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
        * 失败不影响行表：字节缺失只让字段编辑不可用，而 id/name 列表仍然有用。
        * 因此这里吞掉分页读取的失败但把诊断带出去，不让整个面板变空。
        */
-      const pageBytes = new Map<number, string>();
+      const pagePayloadsBare = new Map<number, { base64: string; dataHash: string }>();
       const pageByteDiagnostics: Diagnostic[] = [];
       if (q.length === 0 && window.size > 0) {
         const bridgePage = Math.floor(window.offset / window.size);
@@ -7011,7 +7098,7 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
           } else {
           try {
             const paged = await runBridge<{
-              rows?: Array<{ id: number; dataBase64?: string | null }>;
+              rows?: Array<{ rowIndex: number; id: number; dataBase64?: string | null; dataHash: string }>;
               payloadsIncluded?: boolean;
             }>({
               command: 'read-param-document',
@@ -7021,7 +7108,7 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
               commandOptions: { rowPage: bridgePage, rowPageSize: window.size }
             });
             for (const row of paged.data?.rows ?? []) {
-              if (typeof row.dataBase64 === 'string') pageBytes.set(row.id, row.dataBase64);
+              if (typeof row.dataBase64 === 'string') pagePayloadsBare.set(row.rowIndex, { base64: row.dataBase64, dataHash: row.dataHash });
             }
             if (paged.data?.payloadsIncluded === false) {
               pageByteDiagnostics.push({
@@ -7059,11 +7146,15 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
           .map((row) => {
             // 字节优先取本页分页读取的结果（全表读取的行恒无字节，见头部注释）。
             // 两处都没有时如实不带该字段——绝不伪造字节。
+            const payload = pagePayloadsBare.get(row.rowIndex);
             const dataBase64 = typeof row.dataBase64 === 'string'
               ? row.dataBase64
-              : pageBytes.get(row.id);
+              : payload?.base64;
+            const dataHash = typeof row.dataHash === 'string' && row.dataHash.length > 0 ? row.dataHash : payload?.dataHash ?? '';
             return {
+              rowIndex: row.rowIndex,
               id: row.id,
+              dataHash,
               ...(typeof dataBase64 === 'string'
                 ? {
                     dataBase64,
@@ -7290,7 +7381,10 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
       mutation: {
         entryIndex: number;
         expectedChildHash: string;
+        rowIndex: number;
         rowId: number;
+        expectedDataHash: string;
+        expectedRowDataSize?: number;
         fieldId: string;
         value: number | string | boolean;
         rowDataBase64: string;
@@ -7404,8 +7498,11 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
               // S29：storedContentHash 缺失时对解包文件现算（写前读到的就是写时文件）。
               expectedDocumentHash: unpacked.child.storedContentHash
                 || await sha256FileNow(unpacked.child.absolutePath),
+              ...(mutation.expectedRowDataSize !== undefined ? { expectedRowDataSize: mutation.expectedRowDataSize } : {}),
               mutation: 'upsert',
+              rowIndex: mutation.rowIndex,
               id: mutation.rowId,
+              expectedDataHash: mutation.expectedDataHash,
               dataBase64: fieldResult.nextDataBase64
             }
           });
@@ -7524,7 +7621,10 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
       mutation: {
         entryIndex: number;
         expectedChildHash: string;
+        rowIndex: number;
         rowId: number;
+        expectedDataHash: string;
+        expectedRowDataSize?: number;
         name: string;
         rowDataBase64: string;
       }
@@ -7619,8 +7719,11 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
               // S29：storedContentHash 缺失时对解包文件现算（写前读到的就是写时文件）。
               expectedDocumentHash: unpacked.child.storedContentHash
                 || await sha256FileNow(unpacked.child.absolutePath),
+              ...(mutation.expectedRowDataSize !== undefined ? { expectedRowDataSize: mutation.expectedRowDataSize } : {}),
               mutation: 'upsert',
+              rowIndex: mutation.rowIndex,
               id: mutation.rowId,
+              expectedDataHash: mutation.expectedDataHash,
               dataBase64: mutation.rowDataBase64,
               name: mutation.name
             }
@@ -7980,7 +8083,7 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
       sourceHash?: string;
       typeName?: string;
       rowDataSize?: number;
-      rows?: Array<{ id: number; dataBase64?: string | null; name?: string }>;
+      rows?: Array<{ rowIndex: number; id: number; dataBase64?: string | null; dataHash: string; name?: string }>;
     }>({
       command: 'read-param-document',
       filePath: unpacked.child.absolutePath,
@@ -8940,7 +9043,7 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
           typeName?: string;
           rowCount?: number;
           rowDataSize?: number;
-          rows?: Array<{ id: number; dataBase64?: string | null; dataHash: string; name?: string }>;
+          rows?: Array<{ rowIndex: number; id: number; dataBase64?: string | null; dataHash: string; name?: string }>;
           authority?: string;
         }>({
           command: 'read-param-document',
@@ -9043,7 +9146,9 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
             const dataBase64 = typeof row.dataBase64 === 'string' ? row.dataBase64 : undefined;
             const yappedName = row.name ? undefined : yappedNameFor(row.id);
             return {
+              rowIndex: row.rowIndex,
               id: row.id,
+              dataHash: row.dataHash,
               ...(dataBase64 !== undefined
                 ? {
                     dataBase64,
@@ -9083,14 +9188,14 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
       );
 
       // ── 当页字节：与 readParamPage 同一策略，有搜索时不取（会对错行）──
-      const pageBytes = new Map<number, string>();
+      const pagePayloads = new Map<number, { base64: string; dataHash: string }>();
       const pageByteDiagnostics: Diagnostic[] = [];
       if (q.length === 0 && window.size > 0) {
         const bridgePage = Math.floor(window.offset / window.size);
         if (bridgePage * window.size === window.offset) {
           try {
             const paged = await runBridge<{
-              rows?: Array<{ id: number; dataBase64?: string | null }>;
+              rows?: Array<{ rowIndex: number; id: number; dataBase64?: string | null; dataHash: string }>;
               payloadsIncluded?: boolean;
             }>({
               command: 'read-param-document',
@@ -9100,7 +9205,7 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
               commandOptions: { rowPage: bridgePage, rowPageSize: window.size }
             });
             for (const row of paged.data?.rows ?? []) {
-              if (typeof row.dataBase64 === 'string') pageBytes.set(row.id, row.dataBase64);
+              if (typeof row.dataBase64 === 'string') pagePayloads.set(row.rowIndex, { base64: row.dataBase64, dataHash: row.dataHash });
             }
             if (paged.data?.payloadsIncluded === false) {
               pageByteDiagnostics.push({
@@ -9173,11 +9278,17 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
         rows: filtered
           .slice(window.offset, window.offset + window.size)
           .map((row) => {
+            const payload = pagePayloads.get(row.rowIndex);
             const dataBase64 = typeof row.dataBase64 === 'string'
               ? row.dataBase64
-              : pageBytes.get(row.id);
+              : payload?.base64;
+            const dataHash = typeof row.dataHash === 'string' && row.dataHash.length > 0
+              ? row.dataHash
+              : payload?.dataHash ?? '';
             return {
+              rowIndex: row.rowIndex,
               id: row.id,
+              dataHash,
               ...(typeof dataBase64 === 'string'
                 ? {
                     dataBase64,
@@ -9276,7 +9387,7 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
         typeName?: string;
         rowCount?: number;
         rowDataSize?: number;
-        rows?: Array<{ id: number; name?: string }>;
+        rows?: Array<{ rowIndex: number; id: number; name?: string }>;
         authority?: string;
       }>({
         command: 'read-param-document',
@@ -10445,6 +10556,57 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
   });
 
   handle('ai.tools', async () => toolRegistry.list());
+
+  handle('ai.memory.list', async () => {
+    try {
+      return { ok: true, entries: memoryManager.getStore().list() } as const;
+    } catch {
+      return { ok: false, error: { code: 'MEMORY_LIST_FAILED', message: '无法读取长期记忆。' } } as const;
+    }
+  });
+
+  handle('ai.memory.save', async (_event, rawEntry: unknown) => {
+    if (!rawEntry || typeof rawEntry !== 'object' || Array.isArray(rawEntry)) {
+      return { ok: false, error: { code: 'MEMORY_ENTRY_INVALID', message: '长期记忆条目格式无效。' } } as const;
+    }
+    const input = rawEntry as Record<string, unknown>;
+    const topic = typeof input.topic === 'string' ? input.topic.trim() : '';
+    const summary = typeof input.summary === 'string' ? input.summary.trim() : '';
+    const details = input.details === undefined ? undefined : typeof input.details === 'string' ? input.details.trim() : null;
+    const id = input.id === undefined ? undefined : typeof input.id === 'string' ? input.id.trim() : null;
+    const tags = input.tags === undefined
+      ? undefined
+      : Array.isArray(input.tags) && input.tags.every((tag) => typeof tag === 'string')
+        ? input.tags.map((tag) => tag.trim()).filter(Boolean)
+        : null;
+    const invalidTags = tags === null || (tags !== undefined && (tags.length > 32 || tags.some((tag) => tag.length > 128)));
+    if (!topic || topic.length > 256 || !summary || summary.length > 10_000 || details === null || id === null || invalidTags) {
+      return { ok: false, error: { code: 'MEMORY_ENTRY_INVALID', message: '长期记忆条目字段无效或超出长度限制。' } } as const;
+    }
+    try {
+      const entry = memoryManager.getStore().save({
+        ...(id ? { id } : {}),
+        topic,
+        summary,
+        ...(details !== undefined ? { details } : {}),
+        ...(tags !== undefined ? { tags } : {})
+      });
+      return { ok: true, entry } as const;
+    } catch {
+      return { ok: false, error: { code: 'MEMORY_SAVE_FAILED', message: '无法保存长期记忆。' } } as const;
+    }
+  });
+
+  handle('ai.memory.delete', async (_event, idOrTopic: unknown) => {
+    if (typeof idOrTopic !== 'string' || !idOrTopic.trim() || idOrTopic.length > 256) {
+      return { ok: false, error: { code: 'MEMORY_KEY_INVALID', message: '长期记忆标识无效。' } } as const;
+    }
+    try {
+      return { ok: true, deleted: memoryManager.getStore().delete(idOrTopic.trim()) } as const;
+    } catch {
+      return { ok: false, error: { code: 'MEMORY_DELETE_FAILED', message: '无法删除长期记忆。' } } as const;
+    }
+  });
 
   handle('ai.sidebarDraft', async (_event, request: AiSidebarDraftRequest): Promise<AiSidebarDraft> => {
     return buildAiSidebarDraft({

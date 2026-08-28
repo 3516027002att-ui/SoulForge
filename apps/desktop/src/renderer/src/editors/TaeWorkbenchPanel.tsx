@@ -67,6 +67,8 @@ import {
   AnimationPlaybackClock,
   ActionContinuousSampler,
   eulerXYZToQuaternion,
+  isCharacterPreviewBundle,
+  type CharacterPreviewBundle,
   type TaeAnimationClipData,
   type BoneTransformData,
   buildTaeTimelineTracks,
@@ -528,30 +530,12 @@ export function TaeWorkbenchPanel(props: TaeWorkbenchPanelProps): ReactElement {
     tailHex: string | null;
     undecodedHex: string | null;
   } | null>(null);
-  /** S17 / 问题4-A：伴生 chrbnd 预览状态（挂载后的模型句柄与空态原因）。
-   *  meshes 是 chrbnd 里 FLVER 的**全部网格**（按 meshIndex 循环拉齐）。 */
+  /** S17 / 问题4-A：伴生 chrbnd 预览状态（一次读取完整角色 bundle，不再逐 mesh 循环）。 */
   const [preview, setPreview] = useState<{
     loading: boolean;
     error: string | null;
-    meshCount: number;
-    boneCount: number;
-    /** chrbnd 里 FLVER 的全部网格/骨骼数据（有网格时右栏直接画完整模型）。 */
-    meshes: Array<{
-      positionsBase64: string;
-      indicesBase64: string;
-      uvsBase64?: string;
-      normalsBase64?: string;
-      boneWeightsBase64?: string;
-      boneIndicesBase64?: string;
-      vertexCount: number;
-    }>;
-    bones: Array<{
-      name: string;
-      parentIndex: number;
-      translation: [number, number, number];
-      rotation: [number, number, number];
-    }>;
-  }>({ loading: true, error: null, meshCount: 0, boneCount: 0, meshes: [], bones: [] });
+    bundle: CharacterPreviewBundle | null;
+  }>({ loading: true, error: null, bundle: null });
 
   const document = useMemo(() => {
     const source = refreshedDocument ?? props.data;
@@ -586,7 +570,7 @@ export function TaeWorkbenchPanel(props: TaeWorkbenchPanelProps): ReactElement {
     setPaginationNotice(null);
     setPaginationLoading(false);
     setEventParams(null);
-    setPreview({ loading: false, error: null, meshCount: 0, boneCount: 0, meshes: [], bones: [] });
+    setPreview({ loading: false, error: null, bundle: null });
   }, [props.resourceUri, props.data]);
 
   // 首次文档进入/提交重读后建立页 1 的权威游标；资源切换 effect 会先把旧状态清掉。
@@ -667,109 +651,32 @@ export function TaeWorkbenchPanel(props: TaeWorkbenchPanelProps): ReactElement {
     };
   }, [props.resourceUri, selected?.kind, selected?.eventIndex, selected?.animationId]);
 
-  /** S17 / 问题4-A：伴生 chrbnd FLVER 预览（overlay → 原版；KRAK 缺 Oodle 给可行动错误）。
-      按 meshIndex=0..meshCount-1 循环读齐全部网格，拼成完整模型。 */
+  /** S17 / 问题4-A：伴生 chrbnd FLVER 预览（一次读取完整角色 bundle，不再逐 mesh 循环）。 */
   useEffect(() => {
     if (!document) {
-      setPreview({ loading: false, error: null, meshCount: 0, boneCount: 0, meshes: [], bones: [] });
+      setPreview({ loading: false, error: null, bundle: null });
       return;
     }
     const bridge = getRendererBridge();
     if (!bridge || typeof bridge.readTaeChrbndPreview !== 'function') return;
     let cancelled = false;
-    setPreview({ loading: true, error: null, meshCount: 0, boneCount: 0, meshes: [], bones: [] });
+    setPreview({ loading: true, error: null, bundle: null });
     void (async () => {
-      interface PreviewMeshData {
-        positionsBase64?: string;
-        indicesBase64?: string;
-        uvsBase64?: string;
-        normalsBase64?: string;
-        boneWeightsBase64?: string;
-        boneIndicesBase64?: string;
-        vertexCount?: number;
-      }
-      interface PreviewResult {
-        ok?: boolean;
-        data?: {
-          meshCount?: number;
-          boneCount?: number;
-          bones?: Array<{ name: string; parentIndex: number; translation: number[]; rotation: number[] }>;
-        } & PreviewMeshData;
-        diagnostics?: Array<{ message?: string }>;
-      }
-      const toMesh = (data: PreviewMeshData | null): {
-        positionsBase64: string;
-        indicesBase64: string;
-        uvsBase64?: string;
-        normalsBase64?: string;
-        boneWeightsBase64?: string;
-        boneIndicesBase64?: string;
-        vertexCount: number;
-      } | null => (data?.positionsBase64
-        ? {
-            positionsBase64: data.positionsBase64,
-            indicesBase64: data.indicesBase64 ?? '',
-            ...(data.uvsBase64 ? { uvsBase64: data.uvsBase64 } : {}),
-            ...(data.normalsBase64 ? { normalsBase64: data.normalsBase64 } : {}),
-            ...(data.boneWeightsBase64 ? { boneWeightsBase64: data.boneWeightsBase64 } : {}),
-            ...(data.boneIndicesBase64 ? { boneIndicesBase64: data.boneIndicesBase64 } : {}),
-            vertexCount: data.vertexCount ?? 0
-          }
-        : null);
       try {
-        const first = await bridge.readTaeChrbndPreview(props.resourceUri, 0) as PreviewResult;
+        const result = await bridge.readTaeChrbndPreview(props.resourceUri) as { ok?: boolean; data?: unknown; diagnostics?: Array<{ message?: string }> };
         if (cancelled) return;
-        if (!first.ok || !first.data) {
+        if (!result.ok || !result.data || !isCharacterPreviewBundle(result.data)) {
           setPreview({
             loading: false,
-            error: first.diagnostics?.[0]?.message ?? '模型预览不可用。',
-            meshCount: 0,
-            boneCount: 0,
-            meshes: [],
-            bones: []
+            error: (result as any).diagnostics?.[0]?.message ?? '模型预览不可用。',
+            bundle: null
           });
           return;
         }
-        const meshCount = first.data.meshCount ?? 0;
-        const meshes: NonNullable<ReturnType<typeof toMesh>>[] = [];
-        if (Array.isArray((first.data as any).meshes) && (first.data as any).meshes.length > 0) {
-          for (const m of (first.data as any).meshes) {
-            const parsed = toMesh(m);
-            if (parsed) meshes.push(parsed);
-          }
-        } else {
-          const firstMesh = toMesh(first.data);
-          if (firstMesh) meshes.push(firstMesh);
-        }
-        const boneCount = first.data.boneCount ?? 0;
-        let bones = (first.data.bones ?? []).map((bone) => ({
-          name: bone.name,
-          parentIndex: bone.parentIndex,
-          translation: [bone.translation[0] ?? 0, bone.translation[1] ?? 0, bone.translation[2] ?? 0] as [number, number, number],
-          rotation: [bone.rotation[0] ?? 0, bone.rotation[1] ?? 0, bone.rotation[2] ?? 0] as [number, number, number]
-        }));
-        // 问题4-A：若不是预装配体且 mesh 0 之外还有网格，就把其余读齐。
-        if (!Array.isArray((first.data as any).meshes)) {
-          for (let index = 1; index < meshCount; index += 1) {
-            if (cancelled) return;
-            const next = await bridge.readTaeChrbndPreview(props.resourceUri, index) as PreviewResult;
-            if (cancelled) return;
-            const nextMesh = toMesh(next.data ?? null);
-            if (nextMesh) meshes.push(nextMesh);
-            if (bones.length === 0 && next.data?.bones) {
-              bones = next.data.bones.map((bone) => ({
-                name: bone.name,
-                parentIndex: bone.parentIndex,
-                translation: [bone.translation[0] ?? 0, bone.translation[1] ?? 0, bone.translation[2] ?? 0] as [number, number, number],
-                rotation: [bone.rotation[0] ?? 0, bone.rotation[1] ?? 0, bone.rotation[2] ?? 0] as [number, number, number]
-              }));
-            }
-          }
-        }
         if (cancelled) return;
-        setPreview({ loading: false, error: null, meshCount, boneCount, meshes, bones });
+        setPreview({ loading: false, error: null, bundle: result.data });
       } catch {
-        if (!cancelled) setPreview({ loading: false, error: '模型预览读取异常。', meshCount: 0, boneCount: 0, meshes: [], bones: [] });
+        if (!cancelled) setPreview({ loading: false, error: '模型预览读取异常。', bundle: null });
       }
     })();
     return () => {
@@ -1026,7 +933,12 @@ export function TaeWorkbenchPanel(props: TaeWorkbenchPanelProps): ReactElement {
     if (!bridge || typeof (bridge as any).readTaeAnimationClip !== 'function') return;
 
     let cancelled = false;
-    const boneNames = preview.bones.map((b) => b.name);
+    const leaderBones = (() => {
+      if (!preview.bundle) return [] as Array<{ name: string }>;
+      const leader = preview.bundle.models.find((m) => m.modelId === preview.bundle!.leaderModelId) ?? preview.bundle.models[0];
+      return leader?.bones ?? [];
+    })();
+    const boneNames = leaderBones.map((b) => b.name);
 
     void (async () => {
       try {
@@ -1055,18 +967,23 @@ export function TaeWorkbenchPanel(props: TaeWorkbenchPanelProps): ReactElement {
     return () => {
       cancelled = true;
     };
-  }, [props.resourceUri, selectedAnimation?.animId, preview.bones]);
+  }, [props.resourceUri, selectedAnimation?.animId, preview.bundle]);
 
   // 采样 FLVER 骨骼位姿
   const sampledPose = useMemo(() => {
-    if (!activeSampler || preview.boneCount === 0) return undefined;
-    const refPose: BoneTransformData[] = preview.bones.map((b) => ({
+    const leaderBones = (() => {
+      if (!preview.bundle) return [] as Array<{ translation: [number, number, number]; rotation: [number, number, number]; scale: [number, number, number]; }>;
+      const leader = preview.bundle.models.find((m) => m.modelId === preview.bundle!.leaderModelId) ?? preview.bundle.models[0];
+      return leader?.bones ?? [];
+    })();
+    if (!activeSampler || leaderBones.length === 0) return undefined;
+    const refPose: BoneTransformData[] = leaderBones.map((b) => ({
       translation: b.translation,
       rotation: eulerXYZToQuaternion(b.rotation),
-      scale: [1, 1, 1]
+      scale: b.scale ?? [1, 1, 1] as [number, number, number]
     }));
-    return activeSampler.sampleFlverPose(playbackTime, preview.boneCount, refPose, isLooping);
-  }, [activeSampler, playbackTime, preview.boneCount, preview.bones, isLooping]);
+    return activeSampler.sampleFlverPose(playbackTime, leaderBones.length, refPose, isLooping);
+  }, [activeSampler, playbackTime, preview.bundle, isLooping]);
 
   // 计算当前选中动画的总时长（根据真实 clip 时长，或事件最大 endTime，或默认 2.0s）
   const animDuration = useMemo(() => {
@@ -1329,25 +1246,19 @@ export function TaeWorkbenchPanel(props: TaeWorkbenchPanelProps): ReactElement {
                       </p>
                     </>
                   )}
-                  {!preview.loading && preview.error === null && preview.meshes.length > 0 && (
+                  {!preview.loading && preview.error === null && preview.bundle !== null && preview.bundle.meshCount > 0 && (
                     <div className="tae-preview-host tae-preview__viewport" data-testid="tae-preview-viewport">
                       <FlverViewer
-                        meshCount={preview.meshCount}
-                        boneCount={preview.boneCount}
-                        externalMeshes={preview.meshes}
-                        externalBones={preview.bones}
+                        externalBundle={preview.bundle}
                         playbackTime={playbackTime}
                         externalPose={sampledPose}
                       />
                     </div>
                   )}
-                  {!preview.loading && preview.error === null && preview.meshes.length === 0 && preview.boneCount > 0 && (
+                  {!preview.loading && preview.error === null && preview.bundle !== null && preview.bundle.meshCount === 0 && preview.bundle.boneCount > 0 && (
                     <div className="tae-preview-host tae-preview__viewport" data-testid="tae-preview-viewport">
                       <FlverViewer
-                        meshCount={0}
-                        boneCount={preview.boneCount}
-                        externalMeshes={[]}
-                        externalBones={preview.bones}
+                        externalBundle={preview.bundle}
                         playbackTime={playbackTime}
                         externalPose={sampledPose}
                       />
@@ -1474,16 +1385,14 @@ export function TaeWorkbenchPanel(props: TaeWorkbenchPanelProps): ReactElement {
                     )}
                   </div>
 
-                  {!preview.loading && preview.error === null && preview.meshes.length === 0 && preview.boneCount === 0 && (
+                  {!preview.loading && preview.error === null && preview.bundle === null && (
                     <p className="muted" style={{ fontSize: 11 }} data-testid="tae-preview-ok">
-                      {preview.meshCount > 0
-                        ? `已找到伴生模型（chrbnd）：${preview.meshCount} meshes / ${preview.boneCount} bones，但网格数据不可用。`
-                        : '没有找到该模型的网格数据（chrbnd 内无 FLVER 网格）。'}
+                      没有找到该模型的网格数据（chrbnd 内无 FLVER 网格）。
                     </p>
                   )}
-                  {!preview.loading && preview.error === null && preview.meshes.length === 0 && preview.boneCount > 0 && (
+                  {!preview.loading && preview.error === null && preview.bundle !== null && preview.bundle.meshCount === 0 && preview.bundle.boneCount > 0 && (
                     <p className="muted" style={{ fontSize: 11 }} data-testid="tae-preview-skeleton-note">
-                      该模型为骨骼装配体（{preview.boneCount} bones），网格由 partsbnd 装配，当前仅预览骨骼。
+                      该模型为骨骼装配体（{preview.bundle.boneCount} bones），网格由 partsbnd 装配，当前仅预览骨骼。
                     </p>
                   )}
                   {isPartial && invalidRangeCount > 0 && (

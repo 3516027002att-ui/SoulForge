@@ -1,0 +1,11 @@
+{
+  "exitCode": 1,
+  "status": "failed",
+  "assertions": [
+    {
+      "id": "x",
+      "status": "failed"
+    }
+  ],
+  "artifactSha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+}

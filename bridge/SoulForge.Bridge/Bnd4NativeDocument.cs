@@ -22,6 +22,7 @@ internal sealed class Bnd4NativeDocument
 
     public static Bnd4NativeDocument Read(byte[] source)
     {
+        System.Threading.Interlocked.Increment(ref BridgeTelemetry.BndParseCount);
         if (source.Length < 0x40 || !source.AsSpan(0, 4).SequenceEqual("BND4"u8))
             throw new InvalidDataException("输入不是 BND4 文档。");
         var fileCount = ReadInt32Le(source, 0x0C);

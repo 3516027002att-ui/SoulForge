@@ -142,3 +142,5 @@ export * from './emevd/language-service/index.js';
 // what electron-builder ships, and re-exporting harness helpers would drag
 // dist/testing into app.asar. Harnesses import their helpers by direct path.
 // 历史 `ai-tools/scaffoldToolRegistry` 已迁入 testing/harness，仅供 smoke 引用。
+export * from './workspace/fileFingerprint.js';
+export * from './workspace/workspaceFingerprintStore.js';

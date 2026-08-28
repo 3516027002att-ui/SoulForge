@@ -74,9 +74,11 @@ interface ParamEntryFailure {
   code: string;
 }
 
-/** 一行。 */
+/** 一行。物理身份为 rowIndex + id + dataHash，渲染与写入均以 rowIndex 为键，禁止以 id 去重或 first-match。 */
 export interface ParamRowLine {
+  rowIndex: number;
   id: number;
+  dataHash: string;
   name?: string;
   dataBase64?: string;
   dataHexPreview?: string;
@@ -159,7 +161,10 @@ export interface ParamWorkbenchProps {
     entryIndex: number;
     expectedContainerHash: string;
     expectedChildHash: string;
+    rowIndex: number;
     rowId: number;
+    expectedDataHash: string;
+    expectedRowDataSize: number;
     fieldId: string;
     value: number | string | boolean;
     rowDataBase64: string;
@@ -176,7 +181,10 @@ export interface ParamWorkbenchProps {
     entryIndex: number;
     expectedContainerHash: string;
     expectedChildHash: string;
+    rowIndex: number;
     rowId: number;
+    expectedDataHash: string;
+    expectedRowDataSize: number;
     name: string;
     rowDataBase64: string;
   }) => Promise<{ ok: boolean; message?: string }>;
@@ -208,8 +216,8 @@ interface ParamRowsColumnProps {
   rowsError: string | null;
   rowQuery: string;
   onRowQueryChange: (value: string) => void;
-  selectedRowId: number | null;
-  onSelectRow: (id: number) => void;
+  selectedRowIndex: number | null;
+  onSelectRow: (rowIndex: number) => void;
   /** 当前 param 条目名（S10 引用 data-cite 用）。 */
   paramName: string | null;
   /** 行名写入出口是否接通（缺省即行名只读）。 */
@@ -248,7 +256,7 @@ const ParamRowsColumn = memo(function ParamRowsColumn({
   rowsError,
   rowQuery,
   onRowQueryChange,
-  selectedRowId,
+  selectedRowIndex,
   onSelectRow,
   paramName,
   rowNameEditable,
@@ -259,11 +267,11 @@ const ParamRowsColumn = memo(function ParamRowsColumn({
   const [rowNameDraft, setRowNameDraft] = useState<string | null>(null);
   const [rowNameCommitting, setRowNameCommitting] = useState(false);
 
-  // 换选中行即收起上一行的草稿（宿主在 selectedRowId 变化时会重置 drafts，
+  // 换选中行即收起上一行的草稿（宿主在 selectedRowIndex 变化时会重置 drafts，
   // 行名草稿同理，落在栏内自治）。
   useEffect(() => {
     setRowNameDraft(null);
-  }, [selectedRowId]);
+  }, [selectedRowIndex]);
 
   const virtualizer = useVirtualizer({
     count: visibleRows.length,
@@ -341,14 +349,14 @@ const ParamRowsColumn = memo(function ParamRowsColumn({
                     }}
                     aria-rowindex={virtualRow.index + 1}
                     {...selectableRowAttributes({
-                      selected: selectedRowId === row.id,
-                      isTabEntry: isRowTabEntry(virtualRow.index, selectedRowId !== null),
-                      onSelect: () => onSelectRow(row.id)
+                      selected: selectedRowIndex === row.rowIndex,
+                      isTabEntry: isRowTabEntry(virtualRow.index, selectedRowIndex !== null),
+                      onSelect: () => onSelectRow(row.rowIndex)
                     })}
                     {...(citeRowAttr(row, paramName))}
                   >
                     <span className="wb-row__id">{row.id}</span>
-                    {selectedRowId === row.id && rowNameEditable && row.dataBase64
+                    {selectedRowIndex === row.rowIndex && rowNameEditable && row.dataBase64
                       ? (
                         <input
                           className="wb-row__name-input"
@@ -471,7 +479,7 @@ export function ParamWorkbench(props: ParamWorkbenchProps): ReactElement {
     { code: string; message: string } | null
   >(null);
 
-  const [selectedRowId, setSelectedRowId] = useState<number | null>(null);
+  const [selectedRowIndex, setSelectedRowIndex] = useState<number | null>(null);
   const [drafts, setDrafts] = useState<Record<string, string>>({});
   const [committing, setCommitting] = useState(false);
   /** S28：工作台内短时保存提示（成功几秒后消失）；失败留在原处直到下次操作。 */
@@ -524,7 +532,7 @@ export function ParamWorkbench(props: ParamWorkbenchProps): ReactElement {
   // 切换 param 时重置行与字段选择：否则会停在上一个 param 的行号/字段页上。
   useEffect(() => {
     setRowQuery('');
-    setSelectedRowId(null);
+    setSelectedRowIndex(null);
     setDrafts({});
     setToast(null);
     // 连续列表必须清：残留会让新 param 的列表里混着上一个 param 的行，
@@ -540,7 +548,7 @@ export function ParamWorkbench(props: ParamWorkbenchProps): ReactElement {
   useEffect(() => {
     setDrafts({});
     // 行名草稿随选中行重置的语义落在 ParamRowsColumn 内（栏内自治）。
-  }, [selectedRowId]);
+  }, [selectedRowIndex]);
 
   /*
    * 筛选 debounce：220ms。
@@ -612,7 +620,9 @@ export function ParamWorkbench(props: ParamWorkbenchProps): ReactElement {
             });
           }
           const mapped = result.rows.map((row) => ({
+            rowIndex: row.rowIndex,
             id: row.id,
+            dataHash: row.dataHash ?? '',
             ...(row.name ? { name: row.name } : {}),
             ...(row.dataBase64 ? { dataBase64: row.dataBase64 } : {}),
             ...(row.dataHexPreview ? { dataHexPreview: row.dataHexPreview } : {})
@@ -721,10 +731,10 @@ export function ParamWorkbench(props: ParamWorkbenchProps): ReactElement {
    * 只是不在最后一次请求的那一页里）。
    */
   const selectedRow = useMemo(
-    () => rows.find((row) => row.id === selectedRowId)
-      ?? loadedRows.find((row) => row.id === selectedRowId)
+    () => rows.find((row) => row.rowIndex === selectedRowIndex)
+      ?? loadedRows.find((row) => row.rowIndex === selectedRowIndex)
       ?? null,
-    [rows, loadedRows, selectedRowId]
+    [rows, loadedRows, selectedRowIndex]
   );
 
   /**
@@ -833,7 +843,7 @@ export function ParamWorkbench(props: ParamWorkbenchProps): ReactElement {
   useEffect(() => {
     setEnumOpenFieldId(null);
     setEnumFilter('');
-  }, [selectedRowId]);
+  }, [selectedRowIndex]);
 
   // S28：点击枚举列表/展开钮之外任意处收起列表（换字段、点其他行、
   // 关 tab 都走到这里）。列表本身用 capture 阶段冒泡到 document，target
@@ -879,7 +889,10 @@ export function ParamWorkbench(props: ParamWorkbenchProps): ReactElement {
         entryIndex: selectedEntry,
         expectedContainerHash: containerHash,
         expectedChildHash: childHash,
+        rowIndex: selectedRow.rowIndex,
         rowId: selectedRow.id,
+        expectedDataHash: selectedRow.dataHash,
+        expectedRowDataSize: rowDataSize,
         fieldId: field.id,
         // 数值字段按数值提交；解析失败时原样传字符串，由 main 侧的编码器给出
         // 结构化诊断，而不是在这里悄悄改成 0。bool 字段把 'true'/'false'/'1'/'0'
@@ -939,7 +952,10 @@ export function ParamWorkbench(props: ParamWorkbenchProps): ReactElement {
         entryIndex: selectedEntry,
         expectedContainerHash: containerHash,
         expectedChildHash: childHash,
+        rowIndex: row.rowIndex,
         rowId: row.id,
+        expectedDataHash: row.dataHash,
+        expectedRowDataSize: rowDataSize,
         name: normalizedName,
         rowDataBase64: row.dataBase64
       });
@@ -960,7 +976,7 @@ export function ParamWorkbench(props: ParamWorkbenchProps): ReactElement {
   /** 中栏行筛选受控回写。稳定引用（memo 门槛，同 commitRowName 注释）。 */
   const handleRowQueryChange = useCallback((value: string): void => setRowQuery(value), []);
   /** 中栏行选中。稳定引用（memo 门槛，同 commitRowName 注释）。 */
-  const handleSelectRow = useCallback((id: number): void => setSelectedRowId(id), []);
+  const handleSelectRow = useCallback((rowIndex: number): void => setSelectedRowIndex(rowIndex), []);
 
   /**
    * 行级写入（问题 4）：新建行 / 复制当前行 / 删除当前行。
@@ -1003,9 +1019,9 @@ export function ParamWorkbench(props: ParamWorkbenchProps): ReactElement {
         showToast(`${label}行已保存`, 'ok');
         loadRows();
         if (kind === 'delete') {
-          setSelectedRowId(null);
+          setSelectedRowIndex(null);
         } else {
-          setSelectedRowId(targetId);
+          setSelectedRowIndex(targetId);
         }
       } else {
         showToast(result.message ?? `${label}行失败。`, 'error');
@@ -1117,7 +1133,7 @@ export function ParamWorkbench(props: ParamWorkbenchProps): ReactElement {
           rowsError={rowsError}
           rowQuery={rowQuery}
           onRowQueryChange={handleRowQueryChange}
-          selectedRowId={selectedRowId}
+          selectedRowIndex={selectedRowIndex}
           onSelectRow={handleSelectRow}
           paramName={paramName}
           rowNameEditable={props.onApplyRowNameMutation !== undefined}
@@ -1155,11 +1171,11 @@ export function ParamWorkbench(props: ParamWorkbenchProps): ReactElement {
               </span>
             </div>
           )}
-          {selectedRowId === null && selectedEntry !== null && !entryFailures.has(selectedEntry) && (
+          {selectedRowIndex === null && selectedEntry !== null && !entryFailures.has(selectedEntry) && (
             <p className="wb-empty">先在中栏选择一行。</p>
           )}
           {selectedEntry === null && <p className="wb-empty">先在左栏选择一个 param。</p>}
-          {selectedRowId !== null && definition === null && (
+          {selectedRowIndex !== null && definition === null && (
             <p className="wb-empty">
               没有可用的字段定义{typeName ? `（${typeName}）` : ''}。字段视图不可用。
               {pageFieldDefsDiagnostic && (
@@ -1169,13 +1185,13 @@ export function ParamWorkbench(props: ParamWorkbenchProps): ReactElement {
               )}
             </p>
           )}
-          {selectedRowId !== null && definition !== null && selectedRow?.dataBase64 === undefined && (
+          {selectedRowIndex !== null && definition !== null && selectedRow?.dataBase64 === undefined && (
             <p className="wb-empty">
               本行没有行字节，字段值无法解码（全量加载下通常不会出现；若出现说明
               载荷被 Bridge 拒绝，见底部日志）。
             </p>
           )}
-          {selectedRowId !== null && definition !== null && (
+          {selectedRowIndex !== null && definition !== null && (
             <>
               {visibleFields.map((field) => {
                 const decoded = decodedValues?.get(field.id);
@@ -1200,7 +1216,7 @@ export function ParamWorkbench(props: ParamWorkbenchProps): ReactElement {
                 // 放开会让用户以为改得动，提交后才发现被编码器拒绝。
                 const editable = canCommitFields && decoded?.editable === true;
                 return (
-                  <div className="wb-prop" key={field.id} {...citeFieldAttr(field, shown, selectedRowId, paramName)}>
+                  <div className="wb-prop" key={field.id} {...citeFieldAttr(field, shown, selectedRow?.id ?? 0, paramName)}>
                     <span
                       className="wb-prop__name"
                       title={decoded?.diagnostic
@@ -1349,12 +1365,12 @@ export function ParamWorkbench(props: ParamWorkbenchProps): ReactElement {
     ...pageDiagnostics,
     // 页面级字段诊断（P1）：readContainerParamPage 随页下发，主进程在
     // resolveTrustedParamDefinition 里区分「包不可用/类型不存在/行宽不符/尚未授信」。
-    ...(selectedRowId !== null && definition === null && pageFieldDefsDiagnostic
+    ...(selectedRowIndex !== null && definition === null && pageFieldDefsDiagnostic
       ? [`字段定义不可用：${pageFieldDefsDiagnostic.code}——${pageFieldDefsDiagnostic.message}`]
       : []),
     // 只读原因必须说清下一步动作。T5-2 起行宽匹配即授信，字段写入不再被信任
     // 门挡着 —— 只剩行字节缺失这一种真实的只读原因。
-    ...(selectedRowId !== null && definition !== null && !canCommitFields
+    ...(selectedRowIndex !== null && definition !== null && !canCommitFields
       ? [
           selectedRow?.dataBase64 === undefined
             ? '字段写入未放行：本行字节未随分页下发。'

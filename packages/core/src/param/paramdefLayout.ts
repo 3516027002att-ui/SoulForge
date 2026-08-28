@@ -1,6 +1,8 @@
 /**
  * Apply / validate user-derived paramdef layouts against raw PARAM row bytes.
  * Does not parse native .paramdef binaries — that remains Bridge work.
+ * 物理行身份由 rowIndex + expectedId + expectedDataHash 在 Bridge/IPC/Renderer 贯穿；
+ * 本模块只负责字段在行字节内的编解码，不以 id 去重或 first-match。
  */
 
 import type {

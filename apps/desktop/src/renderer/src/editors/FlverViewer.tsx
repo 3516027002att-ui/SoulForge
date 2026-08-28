@@ -75,7 +75,7 @@ export interface FlverViewerProps {
     translation: [number, number, number];
     rotation: [number, number, number];
     scale?: [number, number, number] | undefined;
-    rotationOrder?: 'XZY' | 'XYZ' | undefined;
+    rotationOrder?: 'YZX' | 'XYZ' | 'XZY' | undefined;
   }> | undefined;
   /** 动画播放时间点（驱动骨骼蒙皮动画位姿） */
   playbackTime?: number | undefined;
@@ -124,7 +124,7 @@ interface SkeletonBone {
   translation: [number, number, number];
   rotation: [number, number, number];
   scale?: [number, number, number] | undefined;
-  rotationOrder?: 'XZY' | 'XYZ' | undefined;
+  rotationOrder?: 'YZX' | 'XYZ' | 'XZY' | undefined;
 }
 
 interface DummyPoint {
@@ -216,7 +216,7 @@ export function FlverViewer(props: FlverViewerProps): ReactElement {
       try {
         const result = await bridge.readFlverSkeleton(props.sourceUri!) as {
           ok: boolean;
-          data?: { bones?: Array<{ name: string; parentIndex: number; translation: number[]; rotation: number[]; scale?: number[]; rotationOrder?: 'XZY' | 'XYZ' }> };
+          data?: { bones?: Array<{ name: string; parentIndex: number; translation: number[]; rotation: number[]; scale?: number[]; rotationOrder?: 'YZX' | 'XYZ' | 'XZY' }> };
         };
         const raw = result.ok ? result.data?.bones ?? [] : [];
         if (raw.length === 0) return;
@@ -227,7 +227,7 @@ export function FlverViewer(props: FlverViewerProps): ReactElement {
             translation: [b.translation[0] ?? 0, b.translation[1] ?? 0, b.translation[2] ?? 0],
             rotation: [b.rotation[0] ?? 0, b.rotation[1] ?? 0, b.rotation[2] ?? 0],
             scale: [b.scale?.[0] ?? 1, b.scale?.[1] ?? 1, b.scale?.[2] ?? 1],
-            rotationOrder: b.rotationOrder ?? 'XZY'
+            rotationOrder: (b.rotationOrder === 'XZY' ? 'YZX' : b.rotationOrder) ?? 'YZX'
           }))
         );
       } catch {
@@ -483,7 +483,7 @@ function buildSemanticScene(input: {
     translation: bone.translation,
     rotation: bone.rotation,
     scale: bone.scale ?? [1, 1, 1],
-    rotationOrder: bone.rotationOrder ?? 'XZY'
+    rotationOrder: (bone.rotationOrder === 'XZY' ? 'YZX' : bone.rotationOrder) ?? 'YZX'
   }));
   const dummies = input.dummies.map((dummy, index) => ({
     id: `dummy-${index}`,
@@ -519,7 +519,7 @@ export function buildBundleSemanticScene(
         translation: bone.translation,
         rotation: bone.rotation,
         scale: bone.scale,
-        rotationOrder: bone.rotationOrder
+        rotationOrder: (bone.rotationOrder === 'XZY' ? 'YZX' : bone.rotationOrder) as 'YZX' | 'XYZ'
       }))
     }));
 

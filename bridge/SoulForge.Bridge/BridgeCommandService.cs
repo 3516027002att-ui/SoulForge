@@ -6,6 +6,7 @@ using System.Text.Json.Serialization;
 using System.Text.RegularExpressions;
 using SoulForge.Bridge.Hkx;
 
+// 物理身份：rowIndex + expectedId + expectedDataHash 贯穿 DTO/Map/key，重复 ID 的 id-only 写入必须拒绝，页 DTO 携带 dataHash。
 internal sealed class BridgeCommandService
 {
     private const int MaxPrefixBytes = 512 * 1024;
@@ -23,7 +24,8 @@ internal sealed class BridgeCommandService
         string? oodleRuntimeRoot = null,
         JsonElement options = default,
         string? outputPath = null,
-        IReadOnlyList<string>? allowedRoots = null)
+        IReadOnlyList<string>? allowedRoots = null,
+        string? workspaceSessionId = null)
     {
         var command = rawCommand.Trim().ToLowerInvariant();
 
@@ -193,8 +195,12 @@ internal sealed class BridgeCommandService
                     sourceHash = dcx.SourceHash,
                     payloadHash = dcx.PayloadHash,
                     entryCount = binder.Entries.Count,
-                    entries
+                    entries,
+                    telemetry = BridgeTelemetry.Snapshot(),
+                    workspaceSessionId,
+                    pathSourceGeneration = OptionInt64("pathSourceGeneration", 0)
                 };
+                diagnostics.Add(new Diagnostic("info", "BRIDGE_TELEMETRY", "telemetry", BridgeResult<object>.MakeSourceUri(file), BridgeTelemetry.Snapshot()));
                 return BridgeResult<object>.Partial(file, resourceKind, diagnostics, payload);
             }
             catch (OodleRuntimeUnavailableException)
@@ -346,29 +352,14 @@ internal sealed class BridgeCommandService
                         header);
                 }
                 var expectedRowDataSize = OptionInt("expectedRowDataSize", 0);
-                var document = ParamNativeDocument.ReadFile(
-                    file,
-                    expectedRowDataSize > 0 ? expectedRowDataSize : null);
-                var roundTrip = document.VerifyRoundTrip();
-                var diagnostics = new[]
-                {
-                    new Diagnostic(
-                        roundTrip.SemanticIdentical ? "info" : "error",
-                        roundTrip.SemanticIdentical ? "PARAM_DOCUMENT_ROUNDTRIP_SEMANTIC_VERIFIED" : "PARAM_DOCUMENT_ROUNDTRIP_FAILED",
-                        roundTrip.SemanticIdentical
-                            ? (roundTrip.ByteIdentical
-                                ? "PARAM 无修改往返字节级一致。"
-                                : "PARAM 无修改往返语义一致。")
-                            : "PARAM 无修改往返语义不一致。",
-                        BridgeResult<object>.MakeSourceUri(file),
-                        roundTrip)
-                };
-                // Pagination parameters from the request options.
                 var rowPage = OptionInt("rowPage", 0);
                 var rowPageSize = OptionInt("rowPageSize", 0);
-                // 全量载荷（用户裁定 2026-08-14）：打开表后一次加载全部行与行字节。
-                // 只对显式请求生效；缺省保持既有 32 行 / 512 KB 门控（守护进程帧上限）。
                 var includeAllPayloads = OptionBool("includeAllPayloads", false);
+                var includeRowHashes = OptionBool("includeRowHashes", false);
+                var pathSourceGeneration = OptionInt64("pathSourceGeneration", 0);
+                var entryIdentity = OptionString("entryIdentity", string.Empty);
+                var documentSession = OptionString("documentSession", string.Empty);
+                var correlationId = OptionString("correlationId", Guid.NewGuid().ToString("N"));
                 int[]? rowIds = null;
                 if (optionsIsObject && options.TryGetProperty("rowIds", out var rowIdsElement)
                     && rowIdsElement.ValueKind == JsonValueKind.Array)
@@ -381,10 +372,90 @@ internal sealed class BridgeCommandService
                     }
                     if (ids.Count > 0) rowIds = ids.ToArray();
                 }
-                // Detect legacy header-embedded type-name layout and fail closed with a clear code.
-                return BridgeResult<object>.Partial(file, "param", diagnostics,
-                    document.ToEnvelope(roundTrip, rowPageSize: rowPageSize, rowPage: rowPage,
-                        includeAllPayloads: includeAllPayloads, rowIds: rowIds));
+                // session-aware: try token first, else open/get by key (single parse)
+                ParamDocumentSessionCache.Entry entry;
+                string sessionToken;
+                bool isNewSession = false;
+                string curSourceHash = string.Empty;
+                if (!string.IsNullOrWhiteSpace(documentSession)
+                    && ParamDocumentSessionCache.TryGetByToken(documentSession, file, workspaceSessionId ?? string.Empty, pathSourceGeneration, out var hit, out curSourceHash))
+                {
+                    entry = hit;
+                    sessionToken = documentSession;
+                }
+                else if (!string.IsNullOrWhiteSpace(documentSession))
+                {
+                    return BridgeResult<object>.Failed(file, "param", "PARAM_DOCUMENT_SESSION_EXPIRED", "PARAM 文档会话已过期或与当前文件/工作区不匹配，请重开会话。");
+                }
+                else
+                {
+                    entry = ParamDocumentSessionCache.GetOrOpen(file, workspaceSessionId ?? string.Empty, oodleRuntimeRoot, pathSourceGeneration, expectedRowDataSize, entryIdentity, out sessionToken, out isNewSession, out curSourceHash);
+                }
+                var document = entry.Document;
+                var roundTrip = entry.RoundTrip;
+                // page projection defaults to 20 rows when caller asks for page without explicit size
+                if (rowPageSize == 0 && rowIds == null && !includeAllPayloads)
+                {
+                    // index projection when no page requested: return all rows as index (no hash unless requested)
+                    // page projection when page requested: rowPageSize defaults to 20
+                    // Caller explicitly sets rowPageSize for page; index caller leaves it 0
+                }
+                else if (rowPageSize == 0 && rowIds == null)
+                {
+                    // explicit page index without size means page size 20 per spec
+                }
+                // For page requests where caller set rowPage but not rowPageSize, default 20
+                if (rowPageSize == 0 && (OptionBool("isPageRequest", false) || rowPage > 0))
+                    rowPageSize = 20;
+                // If caller did not specify includeRowHashes, index (no page) stays without hash, page gets hash
+                bool effectiveIncludeHashes = includeRowHashes;
+                if (!optionsIsObject || !options.TryGetProperty("includeRowHashes", out _))
+                {
+                    // default false for index; page requests automatically get hashes
+                    if (rowPageSize > 0 || rowIds != null) effectiveIncludeHashes = true;
+                    else effectiveIncludeHashes = false;
+                }
+                if (rowPageSize == 0 && rowIds == null && !includeAllPayloads && effectiveIncludeHashes == false)
+                {
+                    // index already false
+                }
+                var envelope = document.ToEnvelope(roundTrip, rowPageSize: rowPageSize, rowPage: rowPage,
+                    includeAllPayloads: includeAllPayloads, rowIds: rowIds, includeRowHashes: effectiveIncludeHashes);
+                // track serialized rows
+                var rowsInEnvelope = 0;
+                if (envelope is not null)
+                {
+                    try { var prop = envelope.GetType().GetProperty("rows"); if (prop != null) { var arr = prop.GetValue(envelope) as System.Collections.ICollection; if (arr != null) rowsInEnvelope = arr.Count; } } catch {}
+                }
+                System.Threading.Interlocked.Add(ref BridgeTelemetry.ParamSerializedRowsCount, rowsInEnvelope);
+                var diagnostics = new List<Diagnostic>
+                {
+                    new Diagnostic(
+                        roundTrip.SemanticIdentical ? "info" : "error",
+                        roundTrip.SemanticIdentical ? "PARAM_DOCUMENT_ROUNDTRIP_SEMANTIC_VERIFIED" : "PARAM_DOCUMENT_ROUNDTRIP_FAILED",
+                        roundTrip.SemanticIdentical
+                            ? (roundTrip.ByteIdentical
+                                ? "PARAM 无修改往返字节级一致。"
+                                : "PARAM 无修改往返语义一致。")
+                            : "PARAM 无修改往返语义不一致。",
+                        BridgeResult<object>.MakeSourceUri(file),
+                        roundTrip)
+                };
+                diagnostics.Add(new Diagnostic("info", "PARAM_DOCUMENT_SESSION", $"session {sessionToken} gen {pathSourceGeneration} parse {(isNewSession?1:0)}", BridgeResult<object>.MakeSourceUri(file), new { sessionToken, workspaceSessionId, sourceHash = curSourceHash, pathSourceGeneration, entryIdentity, correlationId, isNewSession, telemetry = BridgeTelemetry.Snapshot() }));
+                // Keep the legacy PARAM envelope fields at data.*. Session metadata is
+                // additive; nesting the envelope under data.envelope breaks existing
+                // callers that read data.rowDataSize / data.rows / data.sourceHash.
+                var responseData = new Dictionary<string, object?>(StringComparer.Ordinal);
+                foreach (var property in envelope.GetType().GetProperties())
+                    responseData[property.Name] = property.GetValue(envelope);
+                responseData["sessionToken"] = sessionToken;
+                responseData["workspaceSessionId"] = workspaceSessionId;
+                responseData["sourceHash"] = curSourceHash;
+                responseData["pathSourceGeneration"] = pathSourceGeneration;
+                responseData["correlationId"] = correlationId;
+                responseData["telemetry"] = BridgeTelemetry.Snapshot();
+                return BridgeResult<object>.Partial(file, "param", diagnostics.ToArray(),
+                    responseData);
             }
             catch (Exception ex) when (ex is InvalidDataException or NotSupportedException or IOException)
             {
@@ -1232,7 +1303,7 @@ internal sealed class BridgeCommandService
                                 if (arr.Length == 4) rot = new Quaternion(arr[0], arr[1], arr[2], arr[3]);
                                 else if (arr.Length == 3)
                                 {
-                                    rot = Quaternion.CreateFromYawPitchRoll(arr[1], arr[0], arr[2]);
+                                    throw new InvalidDataException($"ACTION_FLVER_REFERENCE_POSE_ROTATION_ARITY: expected 4, got 3 at FLVER rotation {string.Join(',', arr)}.");
                                 }
                             }
                             if (item.TryGetProperty("scale", out var sEl) && sEl.ValueKind == JsonValueKind.Array)
@@ -2405,6 +2476,7 @@ internal sealed class BridgeCommandService
 
     private static object[] BuildFlverSkeleton(FlverNativeDocument flver)
     {
+        System.Threading.Interlocked.Increment(ref MapStaticGeometryService.SkeletonCalls);
         var hierarchyIds = new string[flver.Bones.Count];
         var visiting = new HashSet<int>();
 

@@ -222,6 +222,9 @@ internal sealed class FlverNativeDocument
 
     public IReadOnlyList<string> LayoutWarnings => _layoutWarnings;
 
+    public FlverFaceSetEntry? GetFaceSet(int index) => index >= 0 && index < _faceSets.Count ? _faceSets[index] : null;
+    public IReadOnlyList<FlverFaceSetEntry> GetFaceSets() => _faceSets;
+
     /// <summary>
     /// 已识别但未解析的结构缺口（能力边界，不是数据异常）。
     /// 访问前会触发一次 mesh plan 构建，确保顶点语义缺口已被登记——否则「没人调用过
@@ -537,6 +540,7 @@ internal sealed class FlverNativeDocument
     /// </summary>
     public FlverMeshSkinning GetMeshSkinning(int meshIndex, int maxVertices = 10_000)
     {
+        System.Threading.Interlocked.Increment(ref MapStaticGeometryService.SkinCalls);
         if (meshIndex < 0 || meshIndex >= Meshes.Count) return FlverMeshSkinning.Static;
         var mesh = Meshes[meshIndex];
         var plan = BuildMeshPlan(meshIndex);
@@ -719,18 +723,32 @@ internal sealed class FlverNativeDocument
         return false;
     }
 
-    /// <summary>获取网格主 FaceSet 的索引位宽（16 或 32 位）。</summary>
+    /// <summary>获取网格主 FaceSet 的索引位宽（16 或 32 位）。按 24.9.1 规则：仅 Flags==0 为 display，缺失不 fallback。</summary>
     public int GetMeshIndexSize(int meshIndex)
     {
-        if (meshIndex < 0 || meshIndex >= Meshes.Count) return 16;
+        if (meshIndex < 0 || meshIndex >= Meshes.Count) throw new InvalidDataException("FLVER_DISPLAY_FACESET_UNSUPPORTED: meshIndex out of range");
         var mesh = Meshes[meshIndex];
-        if (mesh.FaceSetIndices.Count == 0) return 16;
+        if (mesh.FaceSetIndices.Count == 0) throw new InvalidDataException("FLVER_DISPLAY_FACESET_UNSUPPORTED: mesh has no FaceSets");
         var candidates = mesh.FaceSetIndices
             .Where(i => i >= 0 && i < _faceSets.Count)
             .Select(i => _faceSets[i])
             .ToList();
-        if (candidates.Count == 0) return 16;
-        var selected = candidates.FirstOrDefault(fs => fs.Flags == 0) ?? candidates[0];
+        if (candidates.Count != mesh.FaceSetIndices.Count)
+            throw new InvalidDataException("FLVER_DISPLAY_FACESET_UNSUPPORTED: mesh references out-of-range FaceSet index");
+        // EdgeCompressed must be detected via flag, not indexSize 8
+        const uint EdgeCompressedFlag = 0x40000000u;
+        var displayCandidates = candidates.Where(fs => fs.Flags == 0).ToList();
+        if (displayCandidates.Count == 0)
+        {
+            if (candidates.Any(fs => (fs.Flags & EdgeCompressedFlag) != 0))
+                throw new InvalidDataException("FLVER_FACESET_EDGE_COMPRESSED_UNSUPPORTED: mesh contains EdgeCompressed FaceSet");
+            throw new InvalidDataException("FLVER_DISPLAY_FACESET_UNSUPPORTED: no Flags==0 FaceSet in mesh reference order");
+        }
+        if (displayCandidates.Count != 1)
+            throw new InvalidDataException("FLVER_DISPLAY_FACESET_UNSUPPORTED: multiple Flags==0 FaceSets not supported in V1");
+        var selected = displayCandidates[0];
+        if (selected.IndexSize != 16 && selected.IndexSize != 32)
+            throw new InvalidDataException($"FLVER_FACESET_EDGE_COMPRESSED_UNSUPPORTED: effective IndexSize {selected.IndexSize} not in {{16,32}}");
         return selected.IndexSize == 32 ? 32 : 16;
     }
 
@@ -738,6 +756,7 @@ internal sealed class FlverNativeDocument
     /// 提取网格三角形索引为 base64。输出契约始终是 triangle-list；FLVER
     /// triangle strip 会在 Bridge 内按原生 primitive-restart / winding 语义展开。
     /// 索引位宽仍由 face set 的 IndexSize 决定，不允许调用方猜测。
+    /// 24.9.1: Flags==0 单选，8-bit/EdgeCompressed 结构化诊断，CullBackfaces 保留在 record。
     /// </summary>
     public string? GetMeshIndicesBase64(int meshIndex, int maxIndices = 30_000, bool allowTruncation = false)
     {
@@ -749,12 +768,24 @@ internal sealed class FlverNativeDocument
             .Where(i => i >= 0 && i < _faceSets.Count)
             .Select(i => (Index: i, FaceSet: _faceSets[i]))
             .ToList();
+        if (candidates.Count != mesh.FaceSetIndices.Count) return null; // out-of-range FaceSet reference fails closed
         if (candidates.Count == 0) return null;
-        var selected = candidates.FirstOrDefault(c => c.FaceSet.Flags == 0);
-        if (selected.FaceSet == null) selected = candidates[0];
+        const uint EdgeCompressedFlag = 0x40000000u;
+        var displayCandidates = candidates.Where(c => c.FaceSet.Flags == 0).ToList();
+        if (displayCandidates.Count == 0)
+        {
+            // Pre-classify EdgeCompressed: with Flags==0 filtered out, 0x40000000 is isolated and not mistaken for IndexSize 8
+            if (candidates.Any(c => (c.FaceSet.Flags & EdgeCompressedFlag) != 0))
+                throw new InvalidDataException("FLVER_FACESET_EDGE_COMPRESSED_UNSUPPORTED: EdgeCompressed flag 0x40000000 not supported in V1");
+            throw new InvalidDataException("FLVER_DISPLAY_FACESET_UNSUPPORTED: no Flags==0 FaceSet in mesh reference order");
+        }
+        if (displayCandidates.Count != 1)
+            throw new InvalidDataException("FLVER_DISPLAY_FACESET_UNSUPPORTED: multiple Flags==0 FaceSets unsupported");
+
+        var selected = displayCandidates[0];
 
         var fs = selected.FaceSet;
-        if (fs.IndexSize != 16 && fs.IndexSize != 32) return null; // 边压缩（8）等不支持
+        if (fs.IndexSize != 16 && fs.IndexSize != 32) throw new InvalidDataException($"FLVER_FACESET_EDGE_COMPRESSED_UNSUPPORTED: IndexSize {fs.IndexSize} not in {{16,32}}");
         if (fs.IndexCount <= 0 || fs.IndexCount > MaxIndexCount || maxIndices < 3) return null;
         var indexDataOffset = (long)DataStart + fs.IndicesOffset;
         var byteLen = fs.IndexCount * (fs.IndexSize / 8);
@@ -770,10 +801,19 @@ internal sealed class FlverNativeDocument
                 : ReadUInt16(_source, offset);
         }
 
+        // Bounds validation: every source index must be < vertexCount before triangulation
+        for (var i = 0; i < sourceIndices.Length; i++)
+        {
+            var idx = sourceIndices[i];
+            if (idx == ushort.MaxValue && fs.TriangleStrip && mesh.VertexCount < 65535) continue; // sentinel allowed only when restart enabled
+            if (idx >= (uint)mesh.VertexCount)
+                throw new InvalidDataException($"FLVER_INDEX_OUT_OF_BOUNDS: mesh[{meshIndex}] index {idx} >= vertexCount {mesh.VertexCount}");
+        }
+
         uint[] triangleList;
         if (fs.TriangleStrip)
         {
-            var allowPrimitiveRestarts = mesh.VertexCount < ushort.MaxValue;
+            var allowPrimitiveRestarts = mesh.VertexCount < 65535;
             triangleList = TriangulateFaceSet(sourceIndices, fs.IndexSize, allowPrimitiveRestarts);
         }
         else
@@ -784,6 +824,7 @@ internal sealed class FlverNativeDocument
             triangleList = sourceIndices;
         }
 
+        // Post-triangulation bounds: triangle list indices already bounds-checked via source, but degenerate removal keeps subset
         if (!allowTruncation && triangleList.Length > maxIndices) return null;
         var outputCount = Math.Min(triangleList.Length, maxIndices);
         outputCount -= outputCount % 3;
@@ -810,6 +851,7 @@ internal sealed class FlverNativeDocument
     /// omitted, winding flips after every strip step, and a restart resets the
     /// winding parity. Kept internal so synthetic regression fixtures can exercise
     /// the format rule without involving renderer behavior.
+    /// Mature order: even step (a,b,c), odd step (c,b,a) per SoulsFormats.
     /// </summary>
     internal static uint[] TriangulateFaceSet(
         IReadOnlyList<uint> indices,
@@ -819,6 +861,7 @@ internal sealed class FlverNativeDocument
         if (indices.Count < 3) return Array.Empty<uint>();
         // SoulsFormats/FLVER2 uses the 16-bit primitive-restart sentinel for
         // both 16- and 32-bit face sets. It is not the uint32 max value.
+        // Rule: only when triangleStrip && vertexCount < 65535, 0xFFFF restarts.
         var restart = (uint)ushort.MaxValue;
         var triangles = new List<uint>(Math.Max(0, (indices.Count - 2) * 3));
         var flip = false;
@@ -837,9 +880,9 @@ internal sealed class FlverNativeDocument
             {
                 if (flip)
                 {
+                    triangles.Add(c);
                     triangles.Add(b);
                     triangles.Add(a);
-                    triangles.Add(c);
                 }
                 else
                 {
@@ -1096,11 +1139,13 @@ internal sealed class FlverNativeDocument
         {
             uint flags = ReadUInt32(source, off + 0x00);
             bool triangleStrip = source[off + 0x04] != 0;
+            bool cullBackfaces = source[off + 0x05] != 0; // SoulsFormats FLVER2.FaceSet.CullBackfaces at 0x05
             int indexCount = ReadInt32(source, off + 0x08);
             int indicesOffset = ReadInt32(source, off + 0x0C);
             int indexSize = internalVersion > 0x20005 ? ReadInt32(source, off + 0x18) : 0;
             if (indexSize == 0) indexSize = vertexIndicesSize;
-            faceSets.Add(new FlverFaceSetEntry(flags, triangleStrip, indexCount, indicesOffset, indexSize));
+            // Validate CullBackfaces only when Flags already known; record raw for DTO
+            faceSets.Add(new FlverFaceSetEntry(flags, triangleStrip, cullBackfaces, indexCount, indicesOffset, indexSize));
         }
 
         // --- VertexBuffers（32B/条）---
@@ -1180,10 +1225,25 @@ internal sealed class FlverNativeDocument
                     warnings.Add($"mesh[{mesh.Index}] 引用的 vertex buffer {vbIndex} 越界。");
                 }
             }
-            // 主 face set 的 index 格式：优先 Flags==0，其次第一个。
-            var fsIndex = mesh.FaceSetIndices.FirstOrDefault(i => i >= 0 && i < faceSets.Count && faceSets[i].Flags == 0);
-            if (fsIndex < 0 && mesh.FaceSetIndices.Count > 0) fsIndex = mesh.FaceSetIndices[0];
-            if (fsIndex >= 0 && fsIndex < faceSets.Count) indexFormat = faceSets[fsIndex].IndexSize;
+            // 24.9.1: mesh-level display FaceSet 选择必须按 mesh 引用顺序选 Flags==0，不 fallback。
+            // N4 旧代码用 FirstOrDefault(int) 恒返回 0 导致死代码 + file-level faceSets[0]  scope 错误。
+            int? resolvedFsIndex = null;
+            var meshCandidates = mesh.FaceSetIndices
+                .Where(idx => idx >= 0 && idx < faceSets.Count)
+                .Select(idx => idx)
+                .ToList();
+            var hasDisplay = meshCandidates.Any(idx => faceSets[idx].Flags == 0);
+            if (hasDisplay)
+            {
+                resolvedFsIndex = meshCandidates.First(idx => faceSets[idx].Flags == 0);
+            }
+            else
+            {
+                // No display FaceSet: do not fallback to mesh's first or file's faceSets[0]; leave indexFormat 0 to signal unsupported
+                resolvedFsIndex = null;
+            }
+            if (resolvedFsIndex.HasValue && resolvedFsIndex.Value >= 0 && resolvedFsIndex.Value < faceSets.Count)
+                indexFormat = faceSets[resolvedFsIndex.Value].IndexSize;
 
             resolvedMeshes.Add(mesh with
             {
@@ -1752,7 +1812,7 @@ internal sealed record FlverLayoutMemberEntry(
 internal sealed record FlverBufferLayoutEntry(IReadOnlyList<FlverLayoutMemberEntry> Members);
 
 internal sealed record FlverFaceSetEntry(
-    uint Flags, bool TriangleStrip, int IndexCount, int IndicesOffset, int IndexSize);
+    uint Flags, bool TriangleStrip, bool CullBackfaces, int IndexCount, int IndicesOffset, int IndexSize);
 
 internal sealed record FlverTextureSlotEntry(
     int Index, string Type, string Path, int MaterialIndex);

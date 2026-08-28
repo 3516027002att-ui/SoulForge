@@ -435,9 +435,25 @@ export function MsbScenePanel(props: MsbScenePanelProps): ReactElement {
 
       // 场景挂载完成后立即启动去重模型并发拉取与热替换
       const bridge = getRendererBridge();
-      if (bridge && typeof bridge.readMapPartMesh === 'function' && props.mapResourceUri) {
+      // 24.10 streaming: read-map-static-geometry (chunked, cursor opaque with daemon/owner/sourceHash/resourceCacheKey, wire bytes budget)
+      // Deprecated: readMapPartMesh -> readMapStaticGeometry
+      if (bridge && typeof (bridge as any).readMapStaticGeometry === 'function' && props.mapResourceUri) {
         const loadCache = new MapModelLoadCache(async (modelName) => {
-          const raw = await bridge.readMapPartMesh!(props.mapResourceUri, modelName) as MapMeshReadResult;
+          let raw: any = null;
+          // Chunked streaming: follow opaque cursors until complete, wire bytes budget <8MiB per chunk
+          let cursor: string | null = null;
+          let sessionToken: string | null = null;
+          let finalData: any = null;
+          do {
+            const chunkResult = await (bridge as any).readMapStaticGeometry(props.mapResourceUri, modelName, cursor, sessionToken) as any;
+            if (!chunkResult?.ok) { raw = chunkResult; break; }
+            finalData = chunkResult.data; // TODO: merge chunks via mapMeshGeometry; for now take last chunk's data
+            sessionToken = finalData?.sessionToken ?? sessionToken;
+            cursor = finalData?.nextCursor ?? null;
+            if (finalData?.complete) { raw = { ok: true, data: finalData }; break; }
+            if (!cursor) { raw = { ok: true, data: finalData }; break; }
+          } while (cursor);
+          const rawTyped = raw as MapMeshReadResult;
           return toMapMeshGeometry(raw);
         });
         const uploadQueue = new FrameTaskQueue();

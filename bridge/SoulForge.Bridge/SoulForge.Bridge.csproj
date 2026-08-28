@@ -11,4 +11,7 @@
     <PublishTrimmed>false</PublishTrimmed>
     <InvariantGlobalization>false</InvariantGlobalization>
   </PropertyGroup>
+  <ItemGroup>
+    <EmbeddedResource Include="FormatRules\sekiro-face-set-rules.v1.json" />
+  </ItemGroup>
 </Project>

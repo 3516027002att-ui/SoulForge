@@ -3594,7 +3594,10 @@ export function App(): ReactElement {
                   {
                     entryIndex: input.entryIndex,
                     expectedChildHash: input.expectedChildHash,
+                    rowIndex: input.rowIndex,
                     rowId: input.rowId,
+                    expectedDataHash: input.expectedDataHash,
+                    ...(input.expectedRowDataSize !== undefined ? { expectedRowDataSize: input.expectedRowDataSize } : {}),
                     fieldId: input.fieldId,
                     value: input.value,
                     rowDataBase64: input.rowDataBase64,
@@ -3628,7 +3631,10 @@ export function App(): ReactElement {
                   {
                     entryIndex: input.entryIndex,
                     expectedChildHash: input.expectedChildHash,
+                    rowIndex: input.rowIndex,
                     rowId: input.rowId,
+                    expectedDataHash: input.expectedDataHash,
+                    ...(input.expectedRowDataSize !== undefined ? { expectedRowDataSize: input.expectedRowDataSize } : {}),
                     name: input.name,
                     rowDataBase64: input.rowDataBase64
                   }

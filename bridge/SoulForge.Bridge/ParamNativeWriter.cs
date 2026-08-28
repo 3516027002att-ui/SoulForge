@@ -1,5 +1,6 @@
 using System.Text.Json;
 
+// 物理身份：rowIndex + expectedId + expectedDataHash 贯穿 DTO/Map/key，重复 ID 的 id-only 写入必须拒绝，页 DTO 携带 dataHash。
 internal static class ParamNativeWriter
 {
     public static async Task<object> WriteAsync(

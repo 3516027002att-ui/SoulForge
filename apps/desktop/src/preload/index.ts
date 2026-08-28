@@ -30,10 +30,7 @@ import type {
   ToolDescriptor,
   ToolResult,
   ModelThinkingLevel,
-  MemoryEntry,
-  DoctorReport,
-  AutoFixResult,
-  DoctorOptions
+  MemoryEntry
 } from '@soulforge/core';
 import type {
   AgentResourceReference,
@@ -381,9 +378,9 @@ const api = {
   /** S17：单个词条事件参数体（按本机模板解码字段；无模板返回未解码 + hex）。 */
   readTaeEventParams: (sourceUri: string, animId: number, eventIndex: number): Promise<unknown> =>
     ipcRenderer.invoke('resource.readTaeEventParams', sourceUri, animId, eventIndex),
-  /** S17：伴生 chrbnd 的 FLVER 预览（overlay → 原版；KRAK 缺 Oodle 给可行动码）。 */
-  readTaeChrbndPreview: (sourceUri: string, meshIndex: number): Promise<unknown> =>
-    ipcRenderer.invoke('resource.readTaeChrbndPreview', sourceUri, meshIndex),
+  /** S17：伴生 chrbnd 的 FLVER 预览（overlay → 原版；KRAK 缺 Oodle 给可行动码）。一次读取完整角色 bundle，不再逐 mesh 循环。 */
+  readTaeChrbndPreview: (sourceUri: string): Promise<unknown> =>
+    ipcRenderer.invoke('resource.readTaeChrbndPreview', sourceUri),
   /** ACTION：读取 TAE 关联的真实 HKX 动画 Clip 数据 */
   readTaeAnimationClip: (sourceUri: string, animId: number, flverBoneNames?: string[]): Promise<unknown> =>
     ipcRenderer.invoke('resource.readTaeAnimationClip', sourceUri, animId, flverBoneNames),
@@ -393,6 +390,9 @@ const api = {
   // S23：按 modelName 在 mapbnd 容器里取 part 的 FLVER 网格（地图 viewport）。
   readMapPartMesh: (msbSourceUri: string, modelName: string): Promise<unknown> =>
     ipcRenderer.invoke('resource.readMapPartMesh', msbSourceUri, modelName),
+  // 24.10 D-2：流式静态几何（chunked, cursor opaque with daemon/owner/sourceHash/resourceCacheKey, wire bytes budget 8 MiB）
+  readMapStaticGeometry: (msbSourceUri: string, modelName: string, cursor?: string | null, sessionToken?: string | null): Promise<unknown> =>
+    ipcRenderer.invoke('resource.readMapStaticGeometry', msbSourceUri, modelName, cursor ?? null, sessionToken ?? null),
   readEsdDocument: (sourceUri: string): Promise<unknown> =>
     ipcRenderer.invoke('resource.readEsdDocument', sourceUri),
   readMtdDocument: (sourceUri: string): Promise<unknown> =>
@@ -677,7 +677,10 @@ const api = {
     mutation: {
       entryIndex: number;
       expectedChildHash: string;
+      rowIndex: number;
       rowId: number;
+      expectedDataHash: string;
+      expectedRowDataSize?: number;
       fieldId: string;
       value: number | string | boolean;
       rowDataBase64: string;
@@ -699,7 +702,10 @@ const api = {
     mutation: {
       entryIndex: number;
       expectedChildHash: string;
+      rowIndex: number;
       rowId: number;
+      expectedDataHash: string;
+      expectedRowDataSize?: number;
       name: string;
       rowDataBase64: string;
     }
@@ -988,11 +994,7 @@ const api = {
     return () => {
       ipcRenderer.removeListener('ai:agent:event', listener);
     };
-  },
-  doctorDiagnose: (options?: DoctorOptions): Promise<DoctorReport> =>
-    ipcRenderer.invoke('doctor.diagnose', options),
-  doctorAutoFix: (options?: DoctorOptions): Promise<AutoFixResult> =>
-    ipcRenderer.invoke('doctor.autoFix', options)
+  }
 };
 
 contextBridge.exposeInMainWorld('soulforge', api);

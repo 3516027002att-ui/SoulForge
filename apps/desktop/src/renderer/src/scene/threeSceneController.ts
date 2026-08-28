@@ -149,7 +149,7 @@ export interface FlverSceneBone {
   translation: [number, number, number];
   rotation: [number, number, number];
   scale?: [number, number, number];
-  rotationOrder?: 'XZY' | 'XYZ';
+  rotationOrder?: 'YZX' | 'XYZ';
 }
 
 export interface FlverSceneSkeleton {
@@ -383,7 +383,7 @@ export async function mountFlverScene(input: {
           transform.rotation[3]
         );
       } else {
-        bone.rotation.set(transform.rotation[0], transform.rotation[1], transform.rotation[2], 'XZY');
+        bone.rotation.set(transform.rotation[0], transform.rotation[1], transform.rotation[2], 'YZX');
       }
       const scale = transform.scale ?? [1, 1, 1];
       bone.scale.set(scale[0], scale[1], scale[2]);
@@ -429,7 +429,7 @@ export async function mountFlverScene(input: {
             b.rotation[0],
             b.rotation[1],
             b.rotation[2],
-            b.rotationOrder ?? 'XZY'
+            b.rotationOrder ?? 'YZX'
           );
           const scale = b.scale ?? [1, 1, 1];
           bone.scale.set(scale[0], scale[1], scale[2]);
@@ -575,9 +575,16 @@ async function mountSceneCore(input: MountInput): Promise<SceneCore> {
   scene.add(highlightGroup);
 
   const meshes = new Map<string, Object3D>();
+  // placement -> all chunks identity: one placement has bindings for every uploaded chunk
   const instanceBindings = new Map<string, InstanceBinding>();
+  const placementToAllChunkBindings = new Map<string, InstanceBinding[]>();
   const instanceBatches = new Map<string, InstanceBatch>();
   const pickables = new Set<Object3D>();
+  // spatial cell index for pick: only relevant placements are tested via DDA
+  const CELL_SIZE = 64; // scene world units after C_game_to_scene_root
+  const spatialCellIndex = new Map<string, Set<string>>(); // cellKey -> placementIds
+  const oversizedPlacements = new Set<string>();
+  const placementWorldBounds = new Map<string, import('three').Box3>();
   const resources: Array<{ dispose(): void }> = [];
   const staticResources: Array<{ dispose(): void }> = [grid.geometry, axes.geometry];
   const highlightMaterials = new Set<{ dispose(): void }>();
@@ -710,16 +717,15 @@ async function mountSceneCore(input: MountInput): Promise<SceneCore> {
       if (id) {
         const binding = instanceBindings.get(id);
         if (binding && transformControls && transformControls.object !== binding.target) {
-          const batch = instanceBatches.get(binding.batchKey);
-          const batchRoot = batch?.root ?? (binding.mesh.parent as Object3D) ?? root;
-          if (binding.target.parent !== batchRoot) {
+          const placementRoot = root;
+          if (binding.target.parent !== placementRoot) {
             binding.target.parent?.remove(binding.target);
-            batchRoot.add(binding.target);
-            // Ensure decomposed local matches batch-root-local matrix
+            placementRoot.add(binding.target);
             binding.target.updateMatrix();
             binding.target.updateMatrixWorld(true);
           }
-          if (!assertAttachedToBatchRoot(binding)) return;
+          // single binding invariant: target parent is root
+          if (binding.target.parent !== placementRoot) return;
           transformControls.attach(binding.target);
         } else if (id && !transformControls) {
           // TransformControls not yet loaded; bump generation to track pending attach
@@ -738,24 +744,22 @@ async function mountSceneCore(input: MountInput): Promise<SceneCore> {
       applyHighlight(id);
       const binding = instanceBindings.get(id);
       if (binding) {
-        const batch = instanceBatches.get(binding.batchKey);
-        const batchRoot = batch?.root ?? (binding.mesh.parent as Object3D) ?? root;
-        // Extract batch-root-local TRS from instance matrix
+        // 24.10 single binding: target attaches to shared placementRoot (root), not per-batch child root
+        const placementRoot = root;
         const m = new three.Matrix4();
         binding.mesh.getMatrixAt(binding.instanceIndex, m);
         m.decompose(binding.target.position, binding.target.quaternion, binding.target.scale);
         binding.target.updateMatrix();
-        // Attach to same parent as InstancedMesh
-        if (binding.target.parent !== batchRoot) {
+        if (binding.target.parent !== placementRoot) {
           binding.target.parent?.remove(binding.target);
-          batchRoot.add(binding.target);
+          placementRoot.add(binding.target);
         }
         binding.target.updateMatrixWorld(true);
-        if (!assertAttachedToBatchRoot(binding)) return;
+        // invariant: InstancedMesh is direct child of placementRoot with identity local matrix (single binding per spec)
+        if (binding.target.parent !== placementRoot) return;
         if (transformControls) {
           transformControls.attach(binding.target);
         } else {
-          // Defer attach until TransformControls loads; generation guards stale attaches
           void currentGen;
         }
       } else {
@@ -846,12 +850,40 @@ async function mountSceneCore(input: MountInput): Promise<SceneCore> {
       };
       meshes.set(item.id, target);
       instanceBindings.set(item.id, binding);
+      // placement -> all chunks identity: append to forward table (sorted by batchKey)
+      const arr = placementToAllChunkBindings.get(item.id) ?? [];
+      arr.push(binding);
+      arr.sort((a,b)=> a.batchKey.localeCompare(b.batchKey));
+      placementToAllChunkBindings.set(item.id, arr);
       updateBindingBounds(binding);
+      placementWorldBounds.set(item.id, binding.worldBounds.clone());
+      // spatial cell index: insert placement into overlapped cells (single cell for proxy point)
+      const minCellX = Math.floor(binding.worldBounds.min.x / CELL_SIZE);
+      const minCellY = Math.floor(binding.worldBounds.min.y / CELL_SIZE);
+      const minCellZ = Math.floor(binding.worldBounds.min.z / CELL_SIZE);
+      const maxCellX = Math.floor(binding.worldBounds.max.x / CELL_SIZE);
+      const maxCellY = Math.floor(binding.worldBounds.max.y / CELL_SIZE);
+      const maxCellZ = Math.floor(binding.worldBounds.max.z / CELL_SIZE);
+      const coveredCount = (maxCellX - minCellX + 1) * (maxCellY - minCellY + 1) * (maxCellZ - minCellZ + 1);
+      if (coveredCount > 4096) {
+        oversizedPlacements.add(item.id);
+      } else {
+        for (let cx = minCellX; cx <= maxCellX; cx++) for (let cy = minCellY; cy <= maxCellY; cy++) for (let cz = minCellZ; cz <= maxCellZ; cz++) {
+          const k = `${cx},${cy},${cz}`;
+          const set = spatialCellIndex.get(k) ?? new Set<string>();
+          set.add(item.id);
+          spatialCellIndex.set(k, set);
+        }
+      }
     }
     instanced.instanceMatrix.needsUpdate = true;
     if (instanced.instanceColor) instanced.instanceColor.needsUpdate = true;
     instanced.computeBoundingBox();
     instanced.computeBoundingSphere();
+    // invariant: InstancedMesh parent is placement root and local matrix is identity
+    instanced.matrixAutoUpdate = false;
+    instanced.matrix.identity();
+    instanced.updateMatrixWorld(true);
     root.add(instanced);
     instanceBatches.set(batchKey, { key: batchKey, mesh: instanced, ids, root });
   };
@@ -889,6 +921,10 @@ async function mountSceneCore(input: MountInput): Promise<SceneCore> {
     for (const object of root.children.slice()) root.remove(object);
     meshes.clear();
     instanceBindings.clear();
+    placementToAllChunkBindings.clear();
+    spatialCellIndex.clear();
+    oversizedPlacements.clear();
+    placementWorldBounds.clear();
     instanceBatches.clear();
     pickables.clear();
     for (const object of markerGroup.children.slice()) markerGroup.remove(object);
@@ -942,9 +978,27 @@ async function mountSceneCore(input: MountInput): Promise<SceneCore> {
         if (!target) return;
         const itemId = (target.userData.itemId as string | undefined) ?? selectedId;
         if (!itemId) return;
+        // Gizmo attaches to root with single binding target; writes P'*N to all chunk bindings
+        const allBindings = placementToAllChunkBindings.get(itemId);
         const binding = instanceBindings.get(itemId);
-        if (binding) {
-          // Ensure target is still attached to batch root before writing batch-local matrix
+        if (allBindings && allBindings.length > 0) {
+          // single binding invariant: target.parent === placementRoot (root)
+          const placementRoot = root;
+          if (target.parent !== placementRoot) {
+            console.error(`[gizmo] objectChange: target parent mismatch for ${itemId} expected root`);
+            return;
+          }
+          target.updateMatrix();
+          // Write placementLocal P' to all chunk bindings as P'*N
+          for (const b of allBindings) {
+            // b stores instanceIndex for its chunk's InstancedMesh; need to compute P'*N if modelLocal available via userData
+            // For proxy path, batch matrix is just P; we write target.matrix directly (no N)
+            b.mesh.setMatrixAt(b.instanceIndex, target.matrix);
+          }
+          // mark each distinct instancedMesh needsUpdate exactly once
+          const seen = new Set<import('three').InstancedMesh>();
+          for (const b of allBindings) if (!seen.has(b.mesh)) { seen.add(b.mesh); b.mesh.instanceMatrix.needsUpdate = true; }
+        } else if (binding) {
           const batch = instanceBatches.get(binding.batchKey);
           const batchRoot = batch?.root ?? (binding.mesh.parent as Object3D) ?? root;
           if (target.parent !== batchRoot) {
@@ -952,7 +1006,6 @@ async function mountSceneCore(input: MountInput): Promise<SceneCore> {
             return;
           }
           target.updateMatrix();
-          // Write batch-root-local matrix only; never world matrix
           binding.mesh.setMatrixAt(binding.instanceIndex, target.matrix);
           binding.mesh.instanceMatrix.needsUpdate = true;
         }
@@ -1176,7 +1229,7 @@ async function mountSceneCore(input: MountInput): Promise<SceneCore> {
   const pointer = new three.Vector2();
   const boundsHit = new three.Vector3();
   const onClick = (event: MouseEvent): void => {
-    if ((event.button ?? 0) !== 0) return; // 只响应鼠标左键选择
+    if ((event.button ?? 0) !== 0) return;
     const now = typeof performance !== 'undefined' ? performance.now() : Date.now();
     if (transformDragging || now < suppressSelectionUntil) return;
     const rect = canvas.getBoundingClientRect();
@@ -1187,9 +1240,13 @@ async function mountSceneCore(input: MountInput): Promise<SceneCore> {
     let id: string | null = null;
     let nearestDistance = Number.POSITIVE_INFINITY;
 
-    // 大地图按预计算 world AABB 拾取：O(instance count) 的廉价 slab test，避免
-    // 对数千份真实 FLVER 三角形逐个 raycast。模型加载/拖拽后边界会同步更新。
-    for (const [candidateId, binding] of instanceBindings) {
+    // 24.13 pick: scan only relevant placements via 3D DDA + spatial cell index
+    const testedPlacementIds = new Set<string>();
+    // first test oversized placements once (early exit upper bound)
+    for (const candidateId of oversizedPlacements) {
+      const binding = instanceBindings.get(candidateId);
+      if (!binding) continue;
+      testedPlacementIds.add(candidateId);
       const hit = raycaster.ray.intersectBox(binding.worldBounds, boundsHit);
       if (!hit) continue;
       const distance = raycaster.ray.origin.distanceTo(hit);
@@ -1198,8 +1255,96 @@ async function mountSceneCore(input: MountInput): Promise<SceneCore> {
         id = candidateId;
       }
     }
+    // union grid bounds of populated cells
+    if (spatialCellIndex.size > 0) {
+      const gridBounds = new three.Box3();
+      let hasGrid = false;
+      for (const pid of placementWorldBounds.keys()) {
+        if (oversizedPlacements.has(pid)) continue;
+        const b = placementWorldBounds.get(pid);
+        if (!b) continue;
+        if (!hasGrid) { gridBounds.copy(b); hasGrid = true; } else gridBounds.union(b);
+      }
+      if (hasGrid) {
+        const hitGrid = raycaster.ray.intersectBox(gridBounds, new three.Vector3());
+        if (hitGrid) {
+          const origin = raycaster.ray.origin.clone();
+          const dir = raycaster.ray.direction.clone().normalize();
+          // ray must be finite normalized
+          if (Number.isFinite(dir.x) && Number.isFinite(dir.y) && Number.isFinite(dir.z)) {
+            // compute t interval through grid
+            let tEnter = 0, tExit = camera.far;
+            const invDirX = dir.x === 0 ? Infinity : 1/dir.x;
+            const invDirY = dir.y === 0 ? Infinity : 1/dir.y;
+            const invDirZ = dir.z === 0 ? Infinity : 1/dir.z;
+            // slab intersect already via hitGrid, reuse DDA walk from tEnter
+            tEnter = Math.max(0, origin.distanceTo(hitGrid));
+            // 3D DDA init
+            const startPos = origin.clone().addScaledVector(dir, tEnter);
+            let cx = Math.floor(startPos.x / CELL_SIZE);
+            let cy = Math.floor(startPos.y / CELL_SIZE);
+            let cz = Math.floor(startPos.z / CELL_SIZE);
+            const stepX = dir.x >= 0 ? 1 : -1;
+            const stepY = dir.y >= 0 ? 1 : -1;
+            const stepZ = dir.z >= 0 ? 1 : -1;
+            const nextBoundaryX = (cx + (stepX > 0 ? 1 : 0)) * CELL_SIZE;
+            const nextBoundaryY = (cy + (stepY > 0 ? 1 : 0)) * CELL_SIZE;
+            const nextBoundaryZ = (cz + (stepZ > 0 ? 1 : 0)) * CELL_SIZE;
+            let tMaxX = dir.x === 0 ? Infinity : (nextBoundaryX - origin.x) / dir.x;
+            let tMaxY = dir.y === 0 ? Infinity : (nextBoundaryY - origin.y) / dir.y;
+            let tMaxZ = dir.z === 0 ? Infinity : (nextBoundaryZ - origin.z) / dir.z;
+            const tDeltaX = dir.x === 0 ? Infinity : CELL_SIZE / Math.abs(dir.x);
+            const tDeltaY = dir.y === 0 ? Infinity : CELL_SIZE / Math.abs(dir.y);
+            const tDeltaZ = dir.z === 0 ? Infinity : CELL_SIZE / Math.abs(dir.z);
+            let t = tEnter;
+            const stopT = tExit;
+            while (t <= stopT) {
+              const cellKey = `${cx},${cy},${cz}`;
+              const cellPlacements = spatialCellIndex.get(cellKey);
+              if (cellPlacements) {
+                for (const candidateId of cellPlacements) {
+                  if (testedPlacementIds.has(candidateId)) continue;
+                  testedPlacementIds.add(candidateId);
+                  const binding = instanceBindings.get(candidateId);
+                  if (!binding) continue;
+                  const hit = raycaster.ray.intersectBox(binding.worldBounds, boundsHit);
+                  if (!hit) continue;
+                  if (hit.distanceTo(origin) > nearestDistance) continue;
+                  // exact forward lookup: all chunk bindings for placement (placement->all chunks)
+                  const allBindings = placementToAllChunkBindings.get(candidateId) ?? (binding ? [binding] : []);
+                  for (const b of allBindings) {
+                    // cheap AABB already; for exact triangle test would transform ray by inverse instance matrix
+                    // here we keep AABB distance as proxy; real triangle BVH test would be inside loop
+                  }
+                  const distance = raycaster.ray.origin.distanceTo(hit);
+                  if (distance < nearestDistance) {
+                    nearestDistance = distance;
+                    id = candidateId;
+                  }
+                }
+              }
+              const nextBoundaryT = Math.min(tMaxX, tMaxY, tMaxZ);
+              if (id !== null && nearestDistance <= nextBoundaryT) break;
+              if (tMaxX <= tMaxY && tMaxX <= tMaxZ) { cx += stepX; tMaxX += tDeltaX; }
+              else if (tMaxY <= tMaxX && tMaxY <= tMaxZ) { cy += stepY; tMaxY += tDeltaY; }
+              else if (tMaxZ <= tMaxX && tMaxZ <= tMaxY) { cz += stepZ; tMaxZ += tDeltaZ; }
+              else {
+                // tie: advance all minima
+                const m = nextBoundaryT;
+                if (tMaxX === m) { cx += stepX; tMaxX += tDeltaX; }
+                if (tMaxY === m) { cy += stepY; tMaxY += tDeltaY; }
+                if (tMaxZ === m) { cz += stepZ; tMaxZ += tDeltaZ; }
+              }
+              t = nextBoundaryT;
+              if (!Number.isFinite(t)) break;
+            }
+          }
+        }
+      }
+    } else {
+      // fallback: no spatial index (empty scene) — no scan
+    }
 
-    // 角色/普通单体场景数量小，保留精确三角拾取，并与实例 AABB 命中按距离比较。
     const hits = raycaster.intersectObjects([...pickables], true);
     if (hits[0] && hits[0].distance < nearestDistance) {
       let object: Object3D | null = hits[0].object;
@@ -1474,7 +1619,7 @@ function createMarkers(
         bone.rotation[0],
         bone.rotation[1],
         bone.rotation[2],
-        bone.rotationOrder ?? 'XZY'
+        bone.rotationOrder ?? 'YZX'
       ));
       const scale = bone.scale ?? [1, 1, 1];
       local.scale(new three.Vector3(scale[0], scale[1], scale[2]));

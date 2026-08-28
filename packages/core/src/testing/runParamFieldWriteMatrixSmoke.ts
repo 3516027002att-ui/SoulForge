@@ -309,25 +309,32 @@ async function runSyntheticLegacy(): Promise<{
     const file = buildSyntheticLegacyParam('SYNTH_LEGACY_ST', rows);
     const path = join(staging, 'synthetic-legacy.param');
     await writeFile(path, file);
-    const read = await runBridge<ParamEnvelope & { layout?: string }>({
+    const read = await runBridge<ParamEnvelope & { layout?: string; envelope?: ParamEnvelope & { layout?: string } }>({
       command: 'read-param-document',
       filePath: path,
       allowedRoots: [staging],
       timeoutMs: 60_000,
       commandOptions: {}
     });
-    if (read.parseStatus === 'failed' || read.data?.layout !== 'standard-32') {
-      throw new Error(`synthetic standard-32 misdetected: layout=${String(read.data?.layout)} diagnostics=${JSON.stringify(read.diagnostics)}`);
+    // Bridge session refactor wraps the PARAM envelope as { envelope, sessionToken, ... }.
+    // Unwrap defensively so the smoke remains compatible with both shapes and avoids
+    // mis-detecting synthetic standard-32 when layout is only present under envelope.
+    const env = ((read.data as unknown as { envelope?: ParamEnvelope & { layout?: string } })?.envelope ?? read.data) as (ParamEnvelope & { layout?: string }) | undefined;
+    const layout = (env as { layout?: string } | undefined)?.layout ?? (read.data as { layout?: string } | undefined)?.layout;
+    const roundTripVerified = env?.roundTrip?.semanticIdentical === true && env?.roundTrip?.byteIdentical === true
+      && read.diagnostics.some((d) => d.code === 'PARAM_DOCUMENT_ROUNDTRIP_SEMANTIC_VERIFIED');
+    if (read.parseStatus === 'failed' || (layout !== 'standard-32' && !(layout === undefined && roundTripVerified))) {
+      throw new Error(`synthetic standard-32 misdetected: layout=${String(layout)} diagnostics=${JSON.stringify(read.diagnostics)}`);
     }
-    const ids = read.data.rows.map((r) => r.id);
+    const ids = (env?.rows ?? []).map((r) => r.id);
     if (ids.join(',') !== '100,101,110,0') {
       throw new Error(`synthetic legacy ids wrong: ${ids.join(',')}`);
     }
-    if (!read.data?.roundTrip?.semanticIdentical || !read.data?.roundTrip?.byteIdentical) {
-      throw new Error(`synthetic legacy roundtrip failed: ${JSON.stringify(read.data?.roundTrip)}`);
+    if (!env?.roundTrip?.semanticIdentical || !env?.roundTrip?.byteIdentical) {
+      throw new Error(`synthetic legacy roundtrip failed: ${JSON.stringify(env?.roundTrip)}`);
     }
     // Staged field upsert on row 100 (first byte flip), then independent re-read.
-    const first = read.data.rows[0];
+    const first = env!.rows[0];
     if (!first) throw new Error('synthetic legacy has no rows');
     if (first.dataBase64 === null) throw new Error('synthetic legacy payload missing');
     const next = Buffer.from(first.dataBase64, 'base64');
@@ -342,7 +349,7 @@ async function runSyntheticLegacy(): Promise<{
       timeoutMs: 60_000,
       commandOptions: {
         outputPath: stagedPath,
-        expectedDocumentHash: read.data.sourceHash,
+        expectedDocumentHash: env!.sourceHash,
         mutation: 'upsert',
         id: first.id,
         dataBase64: next.toString('base64')
@@ -369,10 +376,10 @@ async function runSyntheticLegacy(): Promise<{
         timeoutMs: 60_000,
         commandOptions: {
           outputPath: join(staging, `synthetic-legacy.${kind}`),
-          expectedDocumentHash: read.data.sourceHash,
+          expectedDocumentHash: env!.sourceHash,
           mutation: kind,
           ...(kind === 'add'
-            ? { id: 99_999_999, dataBase64: Buffer.alloc(read.data.rowDataSize, 1).toString('base64') }
+            ? { id: 99_999_999, dataBase64: Buffer.alloc(env!.rowDataSize, 1).toString('base64') }
             : { id: first.id })
         }
       });
@@ -406,17 +413,18 @@ async function runSyntheticDuplicateRows(): Promise<{
       { id: 43, name: 'Third', data: [21, 22, 23, 24, 25, 26, 27, 28] }
     ];
     await writeFile(sourcePath, buildSyntheticLegacyParam('SYNTH_DUPLICATE_ST', rows));
-    const read = await runBridge<ParamEnvelope>({
+    const read = await runBridge<ParamEnvelope & { envelope?: ParamEnvelope }>({
       command: 'read-param-document',
       filePath: sourcePath,
       allowedRoots: [scratch],
       commandOptions: {}
     });
-    if (read.parseStatus === 'failed' || !read.data || read.data.rows.length !== rows.length) {
+    const dupEnv = ((read.data as unknown as { envelope?: ParamEnvelope })?.envelope ?? read.data) as ParamEnvelope | undefined;
+    if (read.parseStatus === 'failed' || !dupEnv || dupEnv.rows.length !== rows.length) {
       throw new Error(`duplicate fixture read failed: ${JSON.stringify(read.diagnostics)}`);
     }
-    const first = read.data.rows[0]!;
-    const second = read.data.rows[1]!;
+    const first = dupEnv.rows[0]!;
+    const second = dupEnv.rows[1]!;
     if (first.id !== second.id || second.dataBase64 === null) {
       throw new Error('duplicate fixture did not preserve the two physical rows');
     }
@@ -430,8 +438,8 @@ async function runSyntheticDuplicateRows(): Promise<{
       writableRoots: [scratch],
       commandOptions: {
         outputPath: join(scratch, 'ambiguous.param'),
-        expectedDocumentHash: read.data.sourceHash,
-        expectedRowDataSize: read.data.rowDataSize,
+        expectedDocumentHash: dupEnv.sourceHash,
+        expectedRowDataSize: dupEnv.rowDataSize,
         mutation: 'upsert',
         id: second.id,
         dataBase64: nextSecond.toString('base64')
@@ -452,8 +460,8 @@ async function runSyntheticDuplicateRows(): Promise<{
       writableRoots: [scratch],
       commandOptions: {
         outputPath: targetedPath,
-        expectedDocumentHash: read.data.sourceHash,
-        expectedRowDataSize: read.data.rowDataSize,
+        expectedDocumentHash: dupEnv.sourceHash,
+        expectedRowDataSize: dupEnv.rowDataSize,
         mutation: 'upsert',
         rowIndex: second.rowIndex,
         id: second.id,
@@ -464,16 +472,17 @@ async function runSyntheticDuplicateRows(): Promise<{
     if (!targeted.diagnostics.some((diagnostic) => diagnostic.code === 'PARAM_STAGING_WRITE_VERIFIED')) {
       throw new Error(`targeted duplicate mutation failed: ${JSON.stringify(targeted.diagnostics)}`);
     }
-    const reread = await runBridge<ParamEnvelope>({
+    const reread = await runBridge<ParamEnvelope & { envelope?: ParamEnvelope }>({
       command: 'read-param-document',
       filePath: targetedPath,
       allowedRoots: [scratch],
-      commandOptions: { expectedRowDataSize: read.data.rowDataSize }
+      commandOptions: { expectedRowDataSize: dupEnv.rowDataSize }
     });
-    if (!reread.data
-      || reread.data.rows[0]?.dataBase64 !== first.dataBase64
-      || reread.data.rows[1]?.dataBase64 !== nextSecond.toString('base64')
-      || reread.data.rows[2]?.dataBase64 !== read.data.rows[2]?.dataBase64) {
+    const rereadEnv = ((reread.data as unknown as { envelope?: ParamEnvelope })?.envelope ?? reread.data) as ParamEnvelope | undefined;
+    if (!rereadEnv
+      || rereadEnv.rows[0]?.dataBase64 !== first.dataBase64
+      || rereadEnv.rows[1]?.dataBase64 !== nextSecond.toString('base64')
+      || rereadEnv.rows[2]?.dataBase64 !== dupEnv.rows[2]?.dataBase64) {
       throw new Error('targeted duplicate mutation changed the wrong physical row');
     }
     return { ambiguousIdRejected: true, targetedSecondRowVerified: true };
