@@ -6,6 +6,8 @@ import { app, BrowserWindow, dialog, ipcMain, type IpcMainInvokeEvent, type WebC
 import { basename, dirname, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { mergeMapMeshGeometry } from './mapMeshGeometry.js';
+import type { TrustedIpcHandle } from './ipc/registration.js';
+import { registerAgentIpcHandlers, isAgentSessionActive } from './ipc/agent.js';
 import {
   analyzeWorkspace,
   buildAiSidebarDraft,
@@ -2420,6 +2422,24 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
   });
   if (handlersRegistered) return;
   handlersRegistered = true;
+  const trustedHandle: TrustedIpcHandle = handle;
+  registerAgentIpcHandlers({
+    handle: trustedHandle,
+    webContents,
+    toolRegistry,
+    memoryManager,
+    modelServiceVault,
+    operationLogUtility,
+    getActiveIndex: () => activeIndex,
+    getActiveSession: () => activeSession,
+    getActiveWorkspaceSessionId: () => activeWorkspaceSessionId,
+    getActiveRag: () => activeRag,
+    ensureActiveOperationLog,
+    durableStoragePaths,
+    currentToolContext,
+    requestWriteConfirmation,
+    readSystemPrompt,
+  });
 
   /**
    * §14.4 document.open：renderer 发送逻辑引用，main 从当前活动索引解析出
