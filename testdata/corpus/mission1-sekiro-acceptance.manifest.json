@@ -56,6 +56,103 @@
     },
     {
       "identity": {
+        "logicalUri": "sekiro://chr/c0000_a000_lo.anibnd.dcx#a000_000010",
+        "sourceRelativePathPosix": "chr/c0000_a000_lo.anibnd.dcx#a000_000010",
+        "sourceByteLength": 2177648,
+        "sourceSha256": "0779eb98ba3afcd2d889e0d1637b7667e5df717090b59d00da95a9228c37caa2",
+        "containerEntry": {
+          "containerSourceSha256": "0779eb98ba3afcd2d889e0d1637b7667e5df717090b59d00da95a9228c37caa2",
+          "physicalIndex": 10,
+          "id": 10,
+          "name": "a000_000010",
+          "duplicateOrdinal": 0,
+          "extractedContentSha256": "8213573a3c4be4105880d0c77bfc4fa43f8a67761f8a59ddd7640d16a2201163"
+        }
+      },
+      "resourceRole": "character-animation",
+      "evidenceJoinKeySha256": "ea8e8147734bec741888e64f94bfab714edbfe60c0ae5879af65d87429bc3a8b",
+      "expectedOutcome": "loaded",
+      "allowedDiagnosticCode": null,
+      "logicalUri": "sekiro://chr/c0000_a000_lo.anibnd.dcx#a000_000010",
+      "relativePath": "chr/c0000_a000_lo.anibnd.dcx#a000_000010",
+      "size": 2177648,
+      "sha256": "0779eb98ba3afcd2d889e0d1637b7667e5df717090b59d00da95a9228c37caa2",
+      "modelLogicalUri": "sekiro://chr/c0000_a000_lo.anibnd.dcx",
+      "typedAnimationId": 10,
+      "actionBindingIdentitySha256": "dac69b53b534f628a2f9ba9dce12c39855d07b116e589858203d2283fb618fea",
+      "actionId": 10,
+      "animationId": "a000_000010"
+    },
+    {
+      "identity": {
+        "logicalUri": "sekiro://chr/c0000_a07x.anibnd.dcx",
+        "sourceRelativePathPosix": "chr/c0000_a07x.anibnd.dcx",
+        "sourceByteLength": 5121328,
+        "sourceSha256": "0195317cb7dffb6c6cf7267b5b22676e2e50af2b25697be6eb088c0d89a3c642",
+        "containerEntry": null
+      },
+      "resourceRole": "chr",
+      "evidenceJoinKeySha256": "4d374df97ca5faf6e950083021a56fcab369ea9c2c49723a8431328c8b704bd5",
+      "expectedOutcome": "loaded",
+      "allowedDiagnosticCode": null,
+      "logicalUri": "sekiro://chr/c0000_a07x.anibnd.dcx",
+      "relativePath": "chr/c0000_a07x.anibnd.dcx",
+      "size": 5121328,
+      "sha256": "0195317cb7dffb6c6cf7267b5b22676e2e50af2b25697be6eb088c0d89a3c642"
+    },
+    {
+      "identity": {
+        "logicalUri": "sekiro://chr/c0000_c1020.anibnd.dcx",
+        "sourceRelativePathPosix": "chr/c0000_c1020.anibnd.dcx",
+        "sourceByteLength": 98544,
+        "sourceSha256": "0802d1e6047b37fac7b6e9aefdb00d0a895a74d3de60e8c0b500583366d68914",
+        "containerEntry": null
+      },
+      "resourceRole": "chr",
+      "evidenceJoinKeySha256": "2e6940f41ea6abd6962efe4b9bb54e64068895643d908043de077304da0830ff",
+      "expectedOutcome": "loaded",
+      "allowedDiagnosticCode": null,
+      "logicalUri": "sekiro://chr/c0000_c1020.anibnd.dcx",
+      "relativePath": "chr/c0000_c1020.anibnd.dcx",
+      "size": 98544,
+      "sha256": "0802d1e6047b37fac7b6e9aefdb00d0a895a74d3de60e8c0b500583366d68914"
+    },
+    {
+      "identity": {
+        "logicalUri": "sekiro://chr/c0000_c5000.anibnd.dcx",
+        "sourceRelativePathPosix": "chr/c0000_c5000.anibnd.dcx",
+        "sourceByteLength": 299744,
+        "sourceSha256": "00fcaf40d34462f47ec05997f5d1d6be7035c9663aa6632246ce86952ab2379d",
+        "containerEntry": null
+      },
+      "resourceRole": "chr",
+      "evidenceJoinKeySha256": "732893b726669769426c01677372578c2efadf736b2ce354939474a0aadb8cb2",
+      "expectedOutcome": "loaded",
+      "allowedDiagnosticCode": null,
+      "logicalUri": "sekiro://chr/c0000_c5000.anibnd.dcx",
+      "relativePath": "chr/c0000_c5000.anibnd.dcx",
+      "size": 299744,
+      "sha256": "00fcaf40d34462f47ec05997f5d1d6be7035c9663aa6632246ce86952ab2379d"
+    },
+    {
+      "identity": {
+        "logicalUri": "sekiro://chr/c0000_c5200.anibnd.dcx",
+        "sourceRelativePathPosix": "chr/c0000_c5200.anibnd.dcx",
+        "sourceByteLength": 132080,
+        "sourceSha256": "02ab0ee591f039238c64d9c2f88f68519bcbea3628e7301f452fa30c388009fb",
+        "containerEntry": null
+      },
+      "resourceRole": "chr",
+      "evidenceJoinKeySha256": "69ad13688cf82d9cc37261e4bcb853acd04022e2c9fc80713c3442453b50cc5b",
+      "expectedOutcome": "loaded",
+      "allowedDiagnosticCode": null,
+      "logicalUri": "sekiro://chr/c0000_c5200.anibnd.dcx",
+      "relativePath": "chr/c0000_c5200.anibnd.dcx",
+      "size": 132080,
+      "sha256": "02ab0ee591f039238c64d9c2f88f68519bcbea3628e7301f452fa30c388009fb"
+    },
+    {
+      "identity": {
         "logicalUri": "sekiro://chr/c1000.chrbnd.dcx",
         "sourceRelativePathPosix": "chr/c1000.chrbnd.dcx",
         "sourceByteLength": 720,
@@ -70,6 +167,57 @@
       "relativePath": "chr/c1000.chrbnd.dcx",
       "size": 720,
       "sha256": "4e3ca283b536d6d9c25840543a7c2077094f3f87e30b5163c1b42121a6670bb9"
+    },
+    {
+      "identity": {
+        "logicalUri": "sekiro://chr/c1500.chrbnd.dcx",
+        "sourceRelativePathPosix": "chr/c1500.chrbnd.dcx",
+        "sourceByteLength": 2457072,
+        "sourceSha256": "0202a41308fc195003afec4ccbeabc40f2bccf6e5cb99b8ae453fc926bac98f9",
+        "containerEntry": null
+      },
+      "resourceRole": "chr",
+      "evidenceJoinKeySha256": "a8ad27ac3fb0e891df2bb73c56d10ce47c3f70cd8f416d50df85428ce1fbaa87",
+      "expectedOutcome": "loaded",
+      "allowedDiagnosticCode": null,
+      "logicalUri": "sekiro://chr/c1500.chrbnd.dcx",
+      "relativePath": "chr/c1500.chrbnd.dcx",
+      "size": 2457072,
+      "sha256": "0202a41308fc195003afec4ccbeabc40f2bccf6e5cb99b8ae453fc926bac98f9"
+    },
+    {
+      "identity": {
+        "logicalUri": "sekiro://chr/c5300.chrbnd.dcx",
+        "sourceRelativePathPosix": "chr/c5300.chrbnd.dcx",
+        "sourceByteLength": 2495392,
+        "sourceSha256": "0020220392a8e575738a2c6231baac9a6d8358a161508fe17caa517ed1a40f1b",
+        "containerEntry": null
+      },
+      "resourceRole": "chr",
+      "evidenceJoinKeySha256": "9dadda681b446a232ff7e204ee2670ab6185f5d59a39564faf56bd41696e1221",
+      "expectedOutcome": "loaded",
+      "allowedDiagnosticCode": null,
+      "logicalUri": "sekiro://chr/c5300.chrbnd.dcx",
+      "relativePath": "chr/c5300.chrbnd.dcx",
+      "size": 2495392,
+      "sha256": "0020220392a8e575738a2c6231baac9a6d8358a161508fe17caa517ed1a40f1b"
+    },
+    {
+      "identity": {
+        "logicalUri": "sekiro://chr/c9800.anibnd.dcx",
+        "sourceRelativePathPosix": "chr/c9800.anibnd.dcx",
+        "sourceByteLength": 2913984,
+        "sourceSha256": "0a2994e429bd7ea47ecf393f8d4475fab3b7aefd35395179502679a70508ab80",
+        "containerEntry": null
+      },
+      "resourceRole": "chr",
+      "evidenceJoinKeySha256": "63f1e05400ba73fda162090ddbc4732e2ce095f59f73345143155333f523d510",
+      "expectedOutcome": "loaded",
+      "allowedDiagnosticCode": null,
+      "logicalUri": "sekiro://chr/c9800.anibnd.dcx",
+      "relativePath": "chr/c9800.anibnd.dcx",
+      "size": 2913984,
+      "sha256": "0a2994e429bd7ea47ecf393f8d4475fab3b7aefd35395179502679a70508ab80"
     },
     {
       "identity": {
@@ -174,7 +322,7 @@
       "sha256": "a41a78778a361bcf8d52db9adb6f55eb205193a32916eb0a44d57c6f01b06ce6"
     }
   ],
-  "entryCount": 10,
+  "entryCount": 18,
   "mapCorpus": {
     "mapIdentity": "m10_00_00_00",
     "models": [
@@ -222317,237 +222465,263 @@
   },
   "characterStaticSamples": [
     {
-      "characterLogicalIdentity": "N:\\NTC\\data\\Target\\INTERROOT_win64\\chr\\c0000\\c0000.flver",
-      "leaderEvidenceJoinKeySha256": "5b2883732afc195cb07e3f05348e0eb6262143238ee0813c88c67cbf09558ad3",
-      "contextOracleSha256": "ed210b8eea3ca930f263dd75d226807a7899989f17c48f0a28f37c8eb184a2a2",
-      "expectedBodyPartIdentities": [
-        "N:\\NTC\\data\\Target\\INTERROOT_win64\\chr\\c0000\\c0000.flver"
-      ],
-      "expectedLeaderBoneCount": 467,
-      "expectedMeshCount": 0,
-      "expectedVertexCount": 0,
-      "expectedBodyBounds": {
-        "min": [
-          0,
-          0,
-          0
-        ],
-        "max": [
-          1,
-          1,
-          1
-        ]
-      }
-    },
-    {
-      "characterLogicalIdentity": "N:\\NTC\\data\\Target\\INTERROOT_win64\\chr\\c1000\\c1000.flver",
-      "leaderEvidenceJoinKeySha256": "5b2883732afc195cb07e3f05348e0eb6262143238ee0813c88c67cbf09558ad3",
-      "contextOracleSha256": "8be11f820fdd7c77dc0683ed2a5dac065083701dfd872a9116fa376cfad5c374",
-      "expectedBodyPartIdentities": [
-        "N:\\NTC\\data\\Target\\INTERROOT_win64\\chr\\c1000\\c1000.flver"
-      ],
-      "expectedLeaderBoneCount": 1,
-      "expectedMeshCount": 2,
-      "expectedVertexCount": 110,
-      "expectedBodyBounds": {
-        "min": [
-          0,
-          0,
-          0
-        ],
-        "max": [
-          1,
-          1,
-          1
-        ]
-      }
-    },
-    {
-      "characterLogicalIdentity": "N:\\NTC\\data\\Target\\INTERROOT_win64\\map\\m10_00_00_00\\m10_00_00_00_002021\\m10_00_00_00_002021.flver",
-      "leaderEvidenceJoinKeySha256": "5b2883732afc195cb07e3f05348e0eb6262143238ee0813c88c67cbf09558ad3",
-      "contextOracleSha256": "a44942f53265b85637d00ddf1e3ec00d407ebf6d62f467458fb8ded3c56ef8d9",
-      "expectedBodyPartIdentities": [
-        "N:\\NTC\\data\\Target\\INTERROOT_win64\\map\\m10_00_00_00\\m10_00_00_00_002021\\m10_00_00_00_002021.flver"
-      ],
-      "expectedLeaderBoneCount": 12,
-      "expectedMeshCount": 3,
-      "expectedVertexCount": 120,
-      "expectedBodyBounds": {
-        "min": [
-          0,
-          0,
-          0
-        ],
-        "max": [
-          1,
-          1,
-          1
-        ]
-      }
-    },
-    {
-      "characterLogicalIdentity": "N:\\NTC\\data\\Target\\INTERROOT_win64\\map\\m10_00_00_00\\m10_00_00_00_002021\\m10_00_00_00_002021_S.flver",
-      "leaderEvidenceJoinKeySha256": "5b2883732afc195cb07e3f05348e0eb6262143238ee0813c88c67cbf09558ad3",
-      "contextOracleSha256": "485f2f66cf186f902a5a4bdd1e3000f7903390ef3c504165f44d53ce23753043",
-      "expectedBodyPartIdentities": [
-        "N:\\NTC\\data\\Target\\INTERROOT_win64\\map\\m10_00_00_00\\m10_00_00_00_002021\\m10_00_00_00_002021_S.flver"
-      ],
-      "expectedLeaderBoneCount": 13,
-      "expectedMeshCount": 1,
-      "expectedVertexCount": 130,
-      "expectedBodyBounds": {
-        "min": [
-          0,
-          0,
-          0
-        ],
-        "max": [
-          1,
-          1,
-          1
-        ]
-      }
-    },
-    {
-      "characterLogicalIdentity": "N:\\NTC\\data\\Target\\INTERROOT_win64\\obj\\o00\\o000100\\o000100_S.flver",
-      "leaderEvidenceJoinKeySha256": "5b2883732afc195cb07e3f05348e0eb6262143238ee0813c88c67cbf09558ad3",
-      "contextOracleSha256": "4bcb3cdd9ed1749757e3a69d9353f1bcc73b0065984e1882e1457478881b969e",
-      "expectedBodyPartIdentities": [
-        "N:\\NTC\\data\\Target\\INTERROOT_win64\\obj\\o00\\o000100\\o000100_S.flver"
-      ],
-      "expectedLeaderBoneCount": 14,
-      "expectedMeshCount": 2,
-      "expectedVertexCount": 140,
-      "expectedBodyBounds": {
-        "min": [
-          0,
-          0,
-          0
-        ],
-        "max": [
-          1,
-          1,
-          1
-        ]
-      }
-    },
-    {
-      "characterLogicalIdentity": "sekiro://chr/c0000.anibnd.dcx",
-      "leaderEvidenceJoinKeySha256": "5b2883732afc195cb07e3f05348e0eb6262143238ee0813c88c67cbf09558ad3",
-      "contextOracleSha256": "8c8630884d6239a1b96d21014f295a93d7ac6ebce3c16fd88bd3190dc7b3b25e",
-      "expectedBodyPartIdentities": [
-        "sekiro://chr/c0000.anibnd.dcx"
-      ],
-      "expectedLeaderBoneCount": 467,
-      "expectedMeshCount": 0,
-      "expectedVertexCount": 0,
-      "expectedBodyBounds": {
-        "min": [
-          0,
-          0,
-          0
-        ],
-        "max": [
-          1,
-          1,
-          1
-        ]
-      }
-    },
-    {
       "characterLogicalIdentity": "sekiro://chr/c0000.chrbnd.dcx",
       "leaderEvidenceJoinKeySha256": "7a9af5263267c00d78e17ceacd431f872a122f0478993caae2dcb44a91e64ec7",
       "contextOracleSha256": "8fd45de48c6425bf5fe1478be3605c4668b2d480388fb0cdce5ee71503773e6f",
       "expectedBodyPartIdentities": [
-        "sekiro://chr/c0000.chrbnd.dcx"
+        "sekiro://chr/c0000/c0000.flver"
       ],
       "expectedLeaderBoneCount": 467,
       "expectedMeshCount": 0,
       "expectedVertexCount": 0,
-      "expectedBodyBounds": {
-        "min": [
-          0,
-          0,
-          0
-        ],
-        "max": [
-          1,
-          1,
-          1
-        ]
-      }
+      "expectedBodyBounds": null,
+      "isSkeletonOnly": true,
+      "g6Eligible": false
     },
     {
       "characterLogicalIdentity": "sekiro://chr/c0000_a000_lo.anibnd.dcx",
       "leaderEvidenceJoinKeySha256": "62d05ca3e3e8730ac1eaac4f197569e259505cf9de41d210e7573bc9e2569017",
       "contextOracleSha256": "538116dd69e2d31c255f6b10eed6a163314ce7ff674217993387cad9d4f1b58e",
       "expectedBodyPartIdentities": [
-        "sekiro://chr/c0000_a000_lo.anibnd.dcx"
+        "sekiro://obj/o00/o000100/o000100.flver",
+        "sekiro://obj/o00/o000100/o000100_S.flver"
       ],
       "expectedLeaderBoneCount": 467,
-      "expectedMeshCount": 0,
-      "expectedVertexCount": 0,
+      "expectedMeshCount": 2,
+      "expectedVertexCount": 1972,
       "expectedBodyBounds": {
         "min": [
+          -0.06467445,
           0,
-          0,
-          0
+          -0.12130712
         ],
         "max": [
-          1,
-          1,
-          1
+          0.13053532,
+          0.35657176,
+          0.121104255
         ]
-      }
+      },
+      "isSkeletonOnly": false,
+      "g6Eligible": true
+    },
+    {
+      "characterLogicalIdentity": "sekiro://chr/c0000_a07x.anibnd.dcx",
+      "leaderEvidenceJoinKeySha256": "4d374df97ca5faf6e950083021a56fcab369ea9c2c49723a8431328c8b704bd5",
+      "contextOracleSha256": "ddefe861830c89836135c03984cfa48f9316cc32d0fccbfb8b12910910911f3a",
+      "expectedBodyPartIdentities": [
+        "sekiro://obj/o00/o000100/o000100.flver",
+        "sekiro://obj/o00/o000100/o000100_S.flver"
+      ],
+      "expectedLeaderBoneCount": 467,
+      "expectedMeshCount": 2,
+      "expectedVertexCount": 1972,
+      "expectedBodyBounds": {
+        "min": [
+          -0.06467445,
+          0,
+          -0.12130712
+        ],
+        "max": [
+          0.13053532,
+          0.35657176,
+          0.121104255
+        ]
+      },
+      "isSkeletonOnly": false,
+      "g6Eligible": true
+    },
+    {
+      "characterLogicalIdentity": "sekiro://chr/c0000_c1020.anibnd.dcx",
+      "leaderEvidenceJoinKeySha256": "2e6940f41ea6abd6962efe4b9bb54e64068895643d908043de077304da0830ff",
+      "contextOracleSha256": "bec1519899522aaab185dfa5eb40abaefb339347aa7790cd0828df336487de4d",
+      "expectedBodyPartIdentities": [
+        "sekiro://obj/o00/o000100/o000100.flver",
+        "sekiro://obj/o00/o000100/o000100_S.flver"
+      ],
+      "expectedLeaderBoneCount": 467,
+      "expectedMeshCount": 2,
+      "expectedVertexCount": 1972,
+      "expectedBodyBounds": {
+        "min": [
+          -0.06467445,
+          0,
+          -0.12130712
+        ],
+        "max": [
+          0.13053532,
+          0.35657176,
+          0.121104255
+        ]
+      },
+      "isSkeletonOnly": false,
+      "g6Eligible": true
+    },
+    {
+      "characterLogicalIdentity": "sekiro://chr/c0000_c5000.anibnd.dcx",
+      "leaderEvidenceJoinKeySha256": "732893b726669769426c01677372578c2efadf736b2ce354939474a0aadb8cb2",
+      "contextOracleSha256": "689efc53eb538764333036ff71b1e295938149f8f039c9f03bbf712069dfca13",
+      "expectedBodyPartIdentities": [
+        "sekiro://obj/o00/o000100/o000100.flver",
+        "sekiro://obj/o00/o000100/o000100_S.flver"
+      ],
+      "expectedLeaderBoneCount": 467,
+      "expectedMeshCount": 2,
+      "expectedVertexCount": 1972,
+      "expectedBodyBounds": {
+        "min": [
+          -0.06467445,
+          0,
+          -0.12130712
+        ],
+        "max": [
+          0.13053532,
+          0.35657176,
+          0.121104255
+        ]
+      },
+      "isSkeletonOnly": false,
+      "g6Eligible": true
+    },
+    {
+      "characterLogicalIdentity": "sekiro://chr/c0000_c5200.anibnd.dcx",
+      "leaderEvidenceJoinKeySha256": "69ad13688cf82d9cc37261e4bcb853acd04022e2c9fc80713c3442453b50cc5b",
+      "contextOracleSha256": "4523080d0ea2088eed5a761765090d968f07d28dfd71a6c790c42514cb916a73",
+      "expectedBodyPartIdentities": [
+        "sekiro://obj/o00/o000100/o000100.flver",
+        "sekiro://obj/o00/o000100/o000100_S.flver"
+      ],
+      "expectedLeaderBoneCount": 467,
+      "expectedMeshCount": 2,
+      "expectedVertexCount": 1972,
+      "expectedBodyBounds": {
+        "min": [
+          -0.06467445,
+          0,
+          -0.12130712
+        ],
+        "max": [
+          0.13053532,
+          0.35657176,
+          0.121104255
+        ]
+      },
+      "isSkeletonOnly": false,
+      "g6Eligible": true
     },
     {
       "characterLogicalIdentity": "sekiro://chr/c1000.chrbnd.dcx",
       "leaderEvidenceJoinKeySha256": "a412d6d062c1a3aaa6310f1a12585a6dbb85fd7860ea9367c7eb000852d30f30",
       "contextOracleSha256": "0abf3c793ad4c6edebf1e702b83067c3575ce545a67b54dc41a88ea1e7448dc8",
       "expectedBodyPartIdentities": [
-        "sekiro://chr/c1000.chrbnd.dcx"
+        "sekiro://chr/c1000/c1000.flver"
       ],
-      "expectedLeaderBoneCount": 1,
-      "expectedMeshCount": 3,
-      "expectedVertexCount": 180,
-      "expectedBodyBounds": {
-        "min": [
-          0,
-          0,
-          0
-        ],
-        "max": [
-          1,
-          1,
-          1
-        ]
-      }
+      "expectedLeaderBoneCount": 3,
+      "expectedMeshCount": 0,
+      "expectedVertexCount": 0,
+      "expectedBodyBounds": null,
+      "isSkeletonOnly": true,
+      "g6Eligible": false
     },
     {
-      "characterLogicalIdentity": "sekiro://obj/o000100.objbnd.dcx",
-      "leaderEvidenceJoinKeySha256": "69e6781a7f7eae98f71b7e74496051ba4e5df51fc6c9c03635d38a36a17d70db",
-      "contextOracleSha256": "af21d20d77320c9a8a3967b7014bc9827d1f81581d15eeb03c6a6e8271d48d73",
+      "characterLogicalIdentity": "sekiro://chr/c1500.chrbnd.dcx",
+      "leaderEvidenceJoinKeySha256": "a8ad27ac3fb0e891df2bb73c56d10ce47c3f70cd8f416d50df85428ce1fbaa87",
+      "contextOracleSha256": "b345b7bffa3f5b82973ecbb1ce15a8a4d1f785675ea65c4302b0c1a927641198",
       "expectedBodyPartIdentities": [
-        "sekiro://obj/o000100.objbnd.dcx"
+        "sekiro://obj/o00/o000100/o000100.flver",
+        "sekiro://obj/o00/o000100/o000100_S.flver"
       ],
-      "expectedLeaderBoneCount": 19,
-      "expectedMeshCount": 1,
-      "expectedVertexCount": 190,
+      "expectedLeaderBoneCount": 17,
+      "expectedMeshCount": 2,
+      "expectedVertexCount": 1972,
       "expectedBodyBounds": {
         "min": [
+          -0.06467445,
           0,
-          0,
-          0
+          -0.12130712
         ],
         "max": [
-          1,
-          1,
-          1
+          0.13053532,
+          0.35657176,
+          0.121104255
         ]
-      }
+      },
+      "isSkeletonOnly": false,
+      "g6Eligible": true
+    },
+    {
+      "characterLogicalIdentity": "sekiro://chr/c5300.chrbnd.dcx",
+      "leaderEvidenceJoinKeySha256": "9dadda681b446a232ff7e204ee2670ab6185f5d59a39564faf56bd41696e1221",
+      "contextOracleSha256": "2595d3b717bf345381d6e9d2f6a030519dd1a8b8950b97dd39a2a01d9e46d788",
+      "expectedBodyPartIdentities": [
+        "sekiro://obj/o00/o000100/o000100.flver",
+        "sekiro://obj/o00/o000100/o000100_S.flver"
+      ],
+      "expectedLeaderBoneCount": 18,
+      "expectedMeshCount": 2,
+      "expectedVertexCount": 1972,
+      "expectedBodyBounds": {
+        "min": [
+          -0.06467445,
+          0,
+          -0.12130712
+        ],
+        "max": [
+          0.13053532,
+          0.35657176,
+          0.121104255
+        ]
+      },
+      "isSkeletonOnly": false,
+      "g6Eligible": true
+    },
+    {
+      "characterLogicalIdentity": "sekiro://chr/c9800.anibnd.dcx",
+      "leaderEvidenceJoinKeySha256": "63f1e05400ba73fda162090ddbc4732e2ce095f59f73345143155333f523d510",
+      "contextOracleSha256": "35d3885b976c587ea547f852b5342a23563f3b01c8dbbdaa54ddfbdc7412a389",
+      "expectedBodyPartIdentities": [
+        "sekiro://obj/o00/o000100/o000100.flver",
+        "sekiro://obj/o00/o000100/o000100_S.flver"
+      ],
+      "expectedLeaderBoneCount": 19,
+      "expectedMeshCount": 2,
+      "expectedVertexCount": 1972,
+      "expectedBodyBounds": {
+        "min": [
+          -0.06467445,
+          0,
+          -0.12130712
+        ],
+        "max": [
+          0.13053532,
+          0.35657176,
+          0.121104255
+        ]
+      },
+      "isSkeletonOnly": false,
+      "g6Eligible": true
     }
   ],
   "characterStaticSampleCount": 10,
+  "characterAnimationSamples": [
+    {
+      "modelLogicalUri": "sekiro://chr/c0000_a000_lo.anibnd.dcx",
+      "logicalUri": "sekiro://chr/c0000_a000_lo.anibnd.dcx#a000_000010",
+      "typedAnimationId": 10,
+      "actionId": 10,
+      "animationId": "a000_000010",
+      "actionBindingIdentitySha256": "dac69b53b534f628a2f9ba9dce12c39855d07b116e589858203d2283fb618fea",
+      "containerEntry": {
+        "containerSourceSha256": "0779eb98ba3afcd2d889e0d1637b7667e5df717090b59d00da95a9228c37caa2",
+        "physicalIndex": 10,
+        "id": 10,
+        "name": "a000_000010",
+        "duplicateOrdinal": 0,
+        "extractedContentSha256": "8213573a3c4be4105880d0c77bfc4fa43f8a67761f8a59ddd7640d16a2201163"
+      },
+      "evidenceJoinKeySha256": "ea8e8147734bec741888e64f94bfab714edbfe60c0ae5879af65d87429bc3a8b"
+    }
+  ],
+  "characterAnimationSampleCount": 1,
   "evidenceJoins": [
     {
       "target": {
@@ -222725,6 +222899,305 @@
     },
     {
       "target": {
+        "logicalUri": "sekiro://chr/c0000_a000_lo.anibnd.dcx#a000_000010",
+        "sourceRelativePathPosix": "chr/c0000_a000_lo.anibnd.dcx#a000_000010",
+        "sourceByteLength": 2177648,
+        "sourceSha256": "0779eb98ba3afcd2d889e0d1637b7667e5df717090b59d00da95a9228c37caa2",
+        "containerEntry": {
+          "containerSourceSha256": "0779eb98ba3afcd2d889e0d1637b7667e5df717090b59d00da95a9228c37caa2",
+          "physicalIndex": 10,
+          "id": 10,
+          "name": "a000_000010",
+          "duplicateOrdinal": 0,
+          "extractedContentSha256": "8213573a3c4be4105880d0c77bfc4fa43f8a67761f8a59ddd7640d16a2201163"
+        }
+      },
+      "joinKeySha256": "ea8e8147734bec741888e64f94bfab714edbfe60c0ae5879af65d87429bc3a8b",
+      "artifacts": [
+        {
+          "role": "filesystem",
+          "producerExecutableOrSourceSha256": "0779eb98ba3afcd2d889e0d1637b7667e5df717090b59d00da95a9228c37caa2",
+          "rawArtifactSha256": "1eacdfc33f8ee4312998ec1b02750a6fa5b4f9f249de233429f74325014c6e39",
+          "byteLength": 1024,
+          "targetJoinKeySha256": "ea8e8147734bec741888e64f94bfab714edbfe60c0ae5879af65d87429bc3a8b"
+        },
+        {
+          "role": "andre",
+          "producerExecutableOrSourceSha256": "e7c21e731fc05441a9efde9a563e9a9ae28f79c5f761c00e39f336c15c3f373b",
+          "rawArtifactSha256": "9a252afad1db41aad20df67e69928960d59727e7fbd505bef783c23737c83721",
+          "byteLength": 1024,
+          "targetJoinKeySha256": "ea8e8147734bec741888e64f94bfab714edbfe60c0ae5879af65d87429bc3a8b"
+        },
+        {
+          "role": "mature",
+          "producerExecutableOrSourceSha256": "b2a56c8565941052dfdf5bd25c53d94923e1b4cd2f50c03ca3b0706a08a81f41",
+          "rawArtifactSha256": "78ca8e27e758c57ab7971170cca5b7b7c6ab71b0ba8fee3968e05f41d1ce6b5d",
+          "byteLength": 1024,
+          "targetJoinKeySha256": "ea8e8147734bec741888e64f94bfab714edbfe60c0ae5879af65d87429bc3a8b"
+        }
+      ],
+      "filesystem": {
+        "relativePathPosix": "chr/c0000_a000_lo.anibnd.dcx#a000_000010",
+        "byteLength": 2177648,
+        "sourceSha256": "0779eb98ba3afcd2d889e0d1637b7667e5df717090b59d00da95a9228c37caa2",
+        "containerEntryIdentitySha256": "54ffd51f7f08ca23d0acbda086b21a22eb6879cd3db1df9c5ebcb953271123d3"
+      },
+      "andre": {
+        "targetSourceSha256": "0779eb98ba3afcd2d889e0d1637b7667e5df717090b59d00da95a9228c37caa2",
+        "containerEntryIdentitySha256": "54ffd51f7f08ca23d0acbda086b21a22eb6879cd3db1df9c5ebcb953271123d3",
+        "inventoryArtifactSha256": "9a252afad1db41aad20df67e69928960d59727e7fbd505bef783c23737c83721",
+        "parseResult": "unavailable"
+      },
+      "mature": {
+        "targetSourceSha256": "0779eb98ba3afcd2d889e0d1637b7667e5df717090b59d00da95a9228c37caa2",
+        "containerEntryIdentitySha256": "54ffd51f7f08ca23d0acbda086b21a22eb6879cd3db1df9c5ebcb953271123d3",
+        "evidence": {
+          "schema": "mission1-mature-evidence-v1",
+          "adapterId": "dsanimstudio",
+          "targetLogicalUri": "sekiro://chr/c0000_a000_lo.anibnd.dcx#a000_000010",
+          "targetSourceSha256": "0779eb98ba3afcd2d889e0d1637b7667e5df717090b59d00da95a9228c37caa2",
+          "typedAnimationId": 10,
+          "actionBindingIdentitySha256": "dac69b53b534f628a2f9ba9dce12c39855d07b116e589858203d2283fb618fea"
+        },
+        "capability": "available"
+      },
+      "expectedOutcome": "loaded",
+      "allowedDiagnosticCode": null
+    },
+    {
+      "target": {
+        "logicalUri": "sekiro://chr/c0000_a07x.anibnd.dcx",
+        "sourceRelativePathPosix": "chr/c0000_a07x.anibnd.dcx",
+        "sourceByteLength": 5121328,
+        "sourceSha256": "0195317cb7dffb6c6cf7267b5b22676e2e50af2b25697be6eb088c0d89a3c642",
+        "containerEntry": null
+      },
+      "joinKeySha256": "4d374df97ca5faf6e950083021a56fcab369ea9c2c49723a8431328c8b704bd5",
+      "artifacts": [
+        {
+          "role": "filesystem",
+          "producerExecutableOrSourceSha256": "0195317cb7dffb6c6cf7267b5b22676e2e50af2b25697be6eb088c0d89a3c642",
+          "rawArtifactSha256": "ed225f5de525b69795fbdc7b5837cc29382dbd28aae28c68c64f7577718c85ff",
+          "byteLength": 1024,
+          "targetJoinKeySha256": "4d374df97ca5faf6e950083021a56fcab369ea9c2c49723a8431328c8b704bd5"
+        },
+        {
+          "role": "andre",
+          "producerExecutableOrSourceSha256": "95f8294d27c06b4d1b33cfd3c771beb37ca28b9c6f5072bdccbd439ba95795c4",
+          "rawArtifactSha256": "6ec4770895071488872f2c22e3db49aca40f62615cce4f36fddd0555b140afa2",
+          "byteLength": 1024,
+          "targetJoinKeySha256": "4d374df97ca5faf6e950083021a56fcab369ea9c2c49723a8431328c8b704bd5"
+        },
+        {
+          "role": "mature",
+          "producerExecutableOrSourceSha256": "b2a56c8565941052dfdf5bd25c53d94923e1b4cd2f50c03ca3b0706a08a81f41",
+          "rawArtifactSha256": "78ca8e27e758c57ab7971170cca5b7b7c6ab71b0ba8fee3968e05f41d1ce6b5d",
+          "byteLength": 1024,
+          "targetJoinKeySha256": "4d374df97ca5faf6e950083021a56fcab369ea9c2c49723a8431328c8b704bd5"
+        }
+      ],
+      "filesystem": {
+        "relativePathPosix": "chr/c0000_a07x.anibnd.dcx",
+        "byteLength": 5121328,
+        "sourceSha256": "0195317cb7dffb6c6cf7267b5b22676e2e50af2b25697be6eb088c0d89a3c642",
+        "containerEntryIdentitySha256": null
+      },
+      "andre": {
+        "targetSourceSha256": "0195317cb7dffb6c6cf7267b5b22676e2e50af2b25697be6eb088c0d89a3c642",
+        "containerEntryIdentitySha256": null,
+        "inventoryArtifactSha256": "4535dc4f0cbc68d36f7e5053b95f18f6de9adc23f60a9d58212cc53eaa28e1a5",
+        "parseResult": "unavailable"
+      },
+      "mature": {
+        "targetSourceSha256": "0195317cb7dffb6c6cf7267b5b22676e2e50af2b25697be6eb088c0d89a3c642",
+        "containerEntryIdentitySha256": null,
+        "evidence": {
+          "schema": "mission1-mature-evidence-v1",
+          "adapterId": "dsanimstudio",
+          "targetLogicalUri": "sekiro://chr/c0000_a07x.anibnd.dcx",
+          "targetSourceSha256": "0195317cb7dffb6c6cf7267b5b22676e2e50af2b25697be6eb088c0d89a3c642"
+        },
+        "capability": "available"
+      },
+      "expectedOutcome": "loaded",
+      "allowedDiagnosticCode": null
+    },
+    {
+      "target": {
+        "logicalUri": "sekiro://chr/c0000_c1020.anibnd.dcx",
+        "sourceRelativePathPosix": "chr/c0000_c1020.anibnd.dcx",
+        "sourceByteLength": 98544,
+        "sourceSha256": "0802d1e6047b37fac7b6e9aefdb00d0a895a74d3de60e8c0b500583366d68914",
+        "containerEntry": null
+      },
+      "joinKeySha256": "2e6940f41ea6abd6962efe4b9bb54e64068895643d908043de077304da0830ff",
+      "artifacts": [
+        {
+          "role": "filesystem",
+          "producerExecutableOrSourceSha256": "0802d1e6047b37fac7b6e9aefdb00d0a895a74d3de60e8c0b500583366d68914",
+          "rawArtifactSha256": "3e4af97e936df48da2f04c45b07555323eb70b5d8eaf2f43278ed5c7938ff3e5",
+          "byteLength": 1024,
+          "targetJoinKeySha256": "2e6940f41ea6abd6962efe4b9bb54e64068895643d908043de077304da0830ff"
+        },
+        {
+          "role": "andre",
+          "producerExecutableOrSourceSha256": "0e65309eac856fa172dc1c8a1113d7a10b81800d1e5050bb0a1988b9010fdd4d",
+          "rawArtifactSha256": "f87d734f0ad1a5d554fa3ec9fa69927e5f9c1faf3c9e6b001425e52566e4d436",
+          "byteLength": 1024,
+          "targetJoinKeySha256": "2e6940f41ea6abd6962efe4b9bb54e64068895643d908043de077304da0830ff"
+        },
+        {
+          "role": "mature",
+          "producerExecutableOrSourceSha256": "b2a56c8565941052dfdf5bd25c53d94923e1b4cd2f50c03ca3b0706a08a81f41",
+          "rawArtifactSha256": "78ca8e27e758c57ab7971170cca5b7b7c6ab71b0ba8fee3968e05f41d1ce6b5d",
+          "byteLength": 1024,
+          "targetJoinKeySha256": "2e6940f41ea6abd6962efe4b9bb54e64068895643d908043de077304da0830ff"
+        }
+      ],
+      "filesystem": {
+        "relativePathPosix": "chr/c0000_c1020.anibnd.dcx",
+        "byteLength": 98544,
+        "sourceSha256": "0802d1e6047b37fac7b6e9aefdb00d0a895a74d3de60e8c0b500583366d68914",
+        "containerEntryIdentitySha256": null
+      },
+      "andre": {
+        "targetSourceSha256": "0802d1e6047b37fac7b6e9aefdb00d0a895a74d3de60e8c0b500583366d68914",
+        "containerEntryIdentitySha256": null,
+        "inventoryArtifactSha256": "ba5f10398e120adc6d64d2811846d7c722ec00213a764c6fe654f4a5d22306c3",
+        "parseResult": "unavailable"
+      },
+      "mature": {
+        "targetSourceSha256": "0802d1e6047b37fac7b6e9aefdb00d0a895a74d3de60e8c0b500583366d68914",
+        "containerEntryIdentitySha256": null,
+        "evidence": {
+          "schema": "mission1-mature-evidence-v1",
+          "adapterId": "dsanimstudio",
+          "targetLogicalUri": "sekiro://chr/c0000_c1020.anibnd.dcx",
+          "targetSourceSha256": "0802d1e6047b37fac7b6e9aefdb00d0a895a74d3de60e8c0b500583366d68914"
+        },
+        "capability": "available"
+      },
+      "expectedOutcome": "loaded",
+      "allowedDiagnosticCode": null
+    },
+    {
+      "target": {
+        "logicalUri": "sekiro://chr/c0000_c5000.anibnd.dcx",
+        "sourceRelativePathPosix": "chr/c0000_c5000.anibnd.dcx",
+        "sourceByteLength": 299744,
+        "sourceSha256": "00fcaf40d34462f47ec05997f5d1d6be7035c9663aa6632246ce86952ab2379d",
+        "containerEntry": null
+      },
+      "joinKeySha256": "732893b726669769426c01677372578c2efadf736b2ce354939474a0aadb8cb2",
+      "artifacts": [
+        {
+          "role": "filesystem",
+          "producerExecutableOrSourceSha256": "00fcaf40d34462f47ec05997f5d1d6be7035c9663aa6632246ce86952ab2379d",
+          "rawArtifactSha256": "8ae109ce5f4a5a060a2737bcbb0b84490b401f8404abb3d16dfd40e9ac7df359",
+          "byteLength": 1024,
+          "targetJoinKeySha256": "732893b726669769426c01677372578c2efadf736b2ce354939474a0aadb8cb2"
+        },
+        {
+          "role": "andre",
+          "producerExecutableOrSourceSha256": "64601072a881b82ce59924e162212d5098bbc3c8180127a69be673ccaa4d43b6",
+          "rawArtifactSha256": "8443c9bc9744d0cac7b20928a07ef82dd4f6ad5034bd1ae4f0a79de53c6fc5bc",
+          "byteLength": 1024,
+          "targetJoinKeySha256": "732893b726669769426c01677372578c2efadf736b2ce354939474a0aadb8cb2"
+        },
+        {
+          "role": "mature",
+          "producerExecutableOrSourceSha256": "b2a56c8565941052dfdf5bd25c53d94923e1b4cd2f50c03ca3b0706a08a81f41",
+          "rawArtifactSha256": "78ca8e27e758c57ab7971170cca5b7b7c6ab71b0ba8fee3968e05f41d1ce6b5d",
+          "byteLength": 1024,
+          "targetJoinKeySha256": "732893b726669769426c01677372578c2efadf736b2ce354939474a0aadb8cb2"
+        }
+      ],
+      "filesystem": {
+        "relativePathPosix": "chr/c0000_c5000.anibnd.dcx",
+        "byteLength": 299744,
+        "sourceSha256": "00fcaf40d34462f47ec05997f5d1d6be7035c9663aa6632246ce86952ab2379d",
+        "containerEntryIdentitySha256": null
+      },
+      "andre": {
+        "targetSourceSha256": "00fcaf40d34462f47ec05997f5d1d6be7035c9663aa6632246ce86952ab2379d",
+        "containerEntryIdentitySha256": null,
+        "inventoryArtifactSha256": "d089dd15cb5a5ec5e783e8958afcf626511d5533005ac73a9d3825f0f7f3f26f",
+        "parseResult": "unavailable"
+      },
+      "mature": {
+        "targetSourceSha256": "00fcaf40d34462f47ec05997f5d1d6be7035c9663aa6632246ce86952ab2379d",
+        "containerEntryIdentitySha256": null,
+        "evidence": {
+          "schema": "mission1-mature-evidence-v1",
+          "adapterId": "dsanimstudio",
+          "targetLogicalUri": "sekiro://chr/c0000_c5000.anibnd.dcx",
+          "targetSourceSha256": "00fcaf40d34462f47ec05997f5d1d6be7035c9663aa6632246ce86952ab2379d"
+        },
+        "capability": "available"
+      },
+      "expectedOutcome": "loaded",
+      "allowedDiagnosticCode": null
+    },
+    {
+      "target": {
+        "logicalUri": "sekiro://chr/c0000_c5200.anibnd.dcx",
+        "sourceRelativePathPosix": "chr/c0000_c5200.anibnd.dcx",
+        "sourceByteLength": 132080,
+        "sourceSha256": "02ab0ee591f039238c64d9c2f88f68519bcbea3628e7301f452fa30c388009fb",
+        "containerEntry": null
+      },
+      "joinKeySha256": "69ad13688cf82d9cc37261e4bcb853acd04022e2c9fc80713c3442453b50cc5b",
+      "artifacts": [
+        {
+          "role": "filesystem",
+          "producerExecutableOrSourceSha256": "02ab0ee591f039238c64d9c2f88f68519bcbea3628e7301f452fa30c388009fb",
+          "rawArtifactSha256": "e7789181511491e85c5ec777fe4ee2d30281f1b98372d9a76324fb2325f4eaeb",
+          "byteLength": 1024,
+          "targetJoinKeySha256": "69ad13688cf82d9cc37261e4bcb853acd04022e2c9fc80713c3442453b50cc5b"
+        },
+        {
+          "role": "andre",
+          "producerExecutableOrSourceSha256": "3cccbcf5f885f35ea336b94bd60df9985f1bf5c7b96a000192c38ccfd82ee250",
+          "rawArtifactSha256": "5a24b8e762aeba8ff954b9f217f7d1b99700883d5e8f5f33a8a9920d21f13ec0",
+          "byteLength": 1024,
+          "targetJoinKeySha256": "69ad13688cf82d9cc37261e4bcb853acd04022e2c9fc80713c3442453b50cc5b"
+        },
+        {
+          "role": "mature",
+          "producerExecutableOrSourceSha256": "b2a56c8565941052dfdf5bd25c53d94923e1b4cd2f50c03ca3b0706a08a81f41",
+          "rawArtifactSha256": "78ca8e27e758c57ab7971170cca5b7b7c6ab71b0ba8fee3968e05f41d1ce6b5d",
+          "byteLength": 1024,
+          "targetJoinKeySha256": "69ad13688cf82d9cc37261e4bcb853acd04022e2c9fc80713c3442453b50cc5b"
+        }
+      ],
+      "filesystem": {
+        "relativePathPosix": "chr/c0000_c5200.anibnd.dcx",
+        "byteLength": 132080,
+        "sourceSha256": "02ab0ee591f039238c64d9c2f88f68519bcbea3628e7301f452fa30c388009fb",
+        "containerEntryIdentitySha256": null
+      },
+      "andre": {
+        "targetSourceSha256": "02ab0ee591f039238c64d9c2f88f68519bcbea3628e7301f452fa30c388009fb",
+        "containerEntryIdentitySha256": null,
+        "inventoryArtifactSha256": "f88e25121aef9d9dda4057b8d076fee544be0f8bbb5a74ffd96d00ba1dedfff5",
+        "parseResult": "unavailable"
+      },
+      "mature": {
+        "targetSourceSha256": "02ab0ee591f039238c64d9c2f88f68519bcbea3628e7301f452fa30c388009fb",
+        "containerEntryIdentitySha256": null,
+        "evidence": {
+          "schema": "mission1-mature-evidence-v1",
+          "adapterId": "dsanimstudio",
+          "targetLogicalUri": "sekiro://chr/c0000_c5200.anibnd.dcx",
+          "targetSourceSha256": "02ab0ee591f039238c64d9c2f88f68519bcbea3628e7301f452fa30c388009fb"
+        },
+        "capability": "available"
+      },
+      "expectedOutcome": "loaded",
+      "allowedDiagnosticCode": null
+    },
+    {
+      "target": {
         "logicalUri": "sekiro://chr/c1000.chrbnd.dcx",
         "sourceRelativePathPosix": "chr/c1000.chrbnd.dcx",
         "sourceByteLength": 720,
@@ -222775,6 +223248,180 @@
           "adapterId": "dsanimstudio",
           "targetLogicalUri": "sekiro://chr/c1000.chrbnd.dcx",
           "targetSourceSha256": "4e3ca283b536d6d9c25840543a7c2077094f3f87e30b5163c1b42121a6670bb9"
+        },
+        "capability": "available"
+      },
+      "expectedOutcome": "loaded",
+      "allowedDiagnosticCode": null
+    },
+    {
+      "target": {
+        "logicalUri": "sekiro://chr/c1500.chrbnd.dcx",
+        "sourceRelativePathPosix": "chr/c1500.chrbnd.dcx",
+        "sourceByteLength": 2457072,
+        "sourceSha256": "0202a41308fc195003afec4ccbeabc40f2bccf6e5cb99b8ae453fc926bac98f9",
+        "containerEntry": null
+      },
+      "joinKeySha256": "a8ad27ac3fb0e891df2bb73c56d10ce47c3f70cd8f416d50df85428ce1fbaa87",
+      "artifacts": [
+        {
+          "role": "filesystem",
+          "producerExecutableOrSourceSha256": "0202a41308fc195003afec4ccbeabc40f2bccf6e5cb99b8ae453fc926bac98f9",
+          "rawArtifactSha256": "7624a1c81e1fc41c4d00e7d0a6ec7f472a37cca0a18993bba22acf4ea572b5f3",
+          "byteLength": 1024,
+          "targetJoinKeySha256": "a8ad27ac3fb0e891df2bb73c56d10ce47c3f70cd8f416d50df85428ce1fbaa87"
+        },
+        {
+          "role": "andre",
+          "producerExecutableOrSourceSha256": "a0ef4c0b1be04fb3be492a80aeed052c7bf198cd2d73ce75a723aa2fbe3ff54e",
+          "rawArtifactSha256": "2f9083b4f44056bab73275f08cc09d290c4db97959dc219fc34ee879588ffa33",
+          "byteLength": 1024,
+          "targetJoinKeySha256": "a8ad27ac3fb0e891df2bb73c56d10ce47c3f70cd8f416d50df85428ce1fbaa87"
+        },
+        {
+          "role": "mature",
+          "producerExecutableOrSourceSha256": "b2a56c8565941052dfdf5bd25c53d94923e1b4cd2f50c03ca3b0706a08a81f41",
+          "rawArtifactSha256": "78ca8e27e758c57ab7971170cca5b7b7c6ab71b0ba8fee3968e05f41d1ce6b5d",
+          "byteLength": 1024,
+          "targetJoinKeySha256": "a8ad27ac3fb0e891df2bb73c56d10ce47c3f70cd8f416d50df85428ce1fbaa87"
+        }
+      ],
+      "filesystem": {
+        "relativePathPosix": "chr/c1500.chrbnd.dcx",
+        "byteLength": 2457072,
+        "sourceSha256": "0202a41308fc195003afec4ccbeabc40f2bccf6e5cb99b8ae453fc926bac98f9",
+        "containerEntryIdentitySha256": null
+      },
+      "andre": {
+        "targetSourceSha256": "0202a41308fc195003afec4ccbeabc40f2bccf6e5cb99b8ae453fc926bac98f9",
+        "containerEntryIdentitySha256": null,
+        "inventoryArtifactSha256": "f317ea4825c0f7e1e3d78238b324217cda9819aa23f4e125f9bbd15d3b06e61f",
+        "parseResult": "unavailable"
+      },
+      "mature": {
+        "targetSourceSha256": "0202a41308fc195003afec4ccbeabc40f2bccf6e5cb99b8ae453fc926bac98f9",
+        "containerEntryIdentitySha256": null,
+        "evidence": {
+          "schema": "mission1-mature-evidence-v1",
+          "adapterId": "dsanimstudio",
+          "targetLogicalUri": "sekiro://chr/c1500.chrbnd.dcx",
+          "targetSourceSha256": "0202a41308fc195003afec4ccbeabc40f2bccf6e5cb99b8ae453fc926bac98f9"
+        },
+        "capability": "available"
+      },
+      "expectedOutcome": "loaded",
+      "allowedDiagnosticCode": null
+    },
+    {
+      "target": {
+        "logicalUri": "sekiro://chr/c5300.chrbnd.dcx",
+        "sourceRelativePathPosix": "chr/c5300.chrbnd.dcx",
+        "sourceByteLength": 2495392,
+        "sourceSha256": "0020220392a8e575738a2c6231baac9a6d8358a161508fe17caa517ed1a40f1b",
+        "containerEntry": null
+      },
+      "joinKeySha256": "9dadda681b446a232ff7e204ee2670ab6185f5d59a39564faf56bd41696e1221",
+      "artifacts": [
+        {
+          "role": "filesystem",
+          "producerExecutableOrSourceSha256": "0020220392a8e575738a2c6231baac9a6d8358a161508fe17caa517ed1a40f1b",
+          "rawArtifactSha256": "ae78763a613545bfecc10ab3589612158fbc0607018b6f2b513c0cd967fc0f62",
+          "byteLength": 1024,
+          "targetJoinKeySha256": "9dadda681b446a232ff7e204ee2670ab6185f5d59a39564faf56bd41696e1221"
+        },
+        {
+          "role": "andre",
+          "producerExecutableOrSourceSha256": "abc7994afdf33e9ba36fbbd677931ac126d64d44f8e46b0a4840bef315297ee3",
+          "rawArtifactSha256": "b4f6179db867981cb27544c3a26b9c8f99ae0092175f4e131e7a79d61dec5599",
+          "byteLength": 1024,
+          "targetJoinKeySha256": "9dadda681b446a232ff7e204ee2670ab6185f5d59a39564faf56bd41696e1221"
+        },
+        {
+          "role": "mature",
+          "producerExecutableOrSourceSha256": "b2a56c8565941052dfdf5bd25c53d94923e1b4cd2f50c03ca3b0706a08a81f41",
+          "rawArtifactSha256": "78ca8e27e758c57ab7971170cca5b7b7c6ab71b0ba8fee3968e05f41d1ce6b5d",
+          "byteLength": 1024,
+          "targetJoinKeySha256": "9dadda681b446a232ff7e204ee2670ab6185f5d59a39564faf56bd41696e1221"
+        }
+      ],
+      "filesystem": {
+        "relativePathPosix": "chr/c5300.chrbnd.dcx",
+        "byteLength": 2495392,
+        "sourceSha256": "0020220392a8e575738a2c6231baac9a6d8358a161508fe17caa517ed1a40f1b",
+        "containerEntryIdentitySha256": null
+      },
+      "andre": {
+        "targetSourceSha256": "0020220392a8e575738a2c6231baac9a6d8358a161508fe17caa517ed1a40f1b",
+        "containerEntryIdentitySha256": null,
+        "inventoryArtifactSha256": "582f36009c9ef392c37a4db1167bd8c3f108b20ba176f2f0a5b2dff98d9cd5cf",
+        "parseResult": "unavailable"
+      },
+      "mature": {
+        "targetSourceSha256": "0020220392a8e575738a2c6231baac9a6d8358a161508fe17caa517ed1a40f1b",
+        "containerEntryIdentitySha256": null,
+        "evidence": {
+          "schema": "mission1-mature-evidence-v1",
+          "adapterId": "dsanimstudio",
+          "targetLogicalUri": "sekiro://chr/c5300.chrbnd.dcx",
+          "targetSourceSha256": "0020220392a8e575738a2c6231baac9a6d8358a161508fe17caa517ed1a40f1b"
+        },
+        "capability": "available"
+      },
+      "expectedOutcome": "loaded",
+      "allowedDiagnosticCode": null
+    },
+    {
+      "target": {
+        "logicalUri": "sekiro://chr/c9800.anibnd.dcx",
+        "sourceRelativePathPosix": "chr/c9800.anibnd.dcx",
+        "sourceByteLength": 2913984,
+        "sourceSha256": "0a2994e429bd7ea47ecf393f8d4475fab3b7aefd35395179502679a70508ab80",
+        "containerEntry": null
+      },
+      "joinKeySha256": "63f1e05400ba73fda162090ddbc4732e2ce095f59f73345143155333f523d510",
+      "artifacts": [
+        {
+          "role": "filesystem",
+          "producerExecutableOrSourceSha256": "0a2994e429bd7ea47ecf393f8d4475fab3b7aefd35395179502679a70508ab80",
+          "rawArtifactSha256": "aa34e083fe8662b0549b15e68a4cb9f1bd41c998c085e592cf0e1470feb92638",
+          "byteLength": 1024,
+          "targetJoinKeySha256": "63f1e05400ba73fda162090ddbc4732e2ce095f59f73345143155333f523d510"
+        },
+        {
+          "role": "andre",
+          "producerExecutableOrSourceSha256": "5a47fae2cee5c05999561f6dae7d7fff0dcb848f144cff31ce8d7a6d19dcd58d",
+          "rawArtifactSha256": "c6fe2055450af13144a7250fe3d6cc7844502bd4d97123936296e3fe126f634e",
+          "byteLength": 1024,
+          "targetJoinKeySha256": "63f1e05400ba73fda162090ddbc4732e2ce095f59f73345143155333f523d510"
+        },
+        {
+          "role": "mature",
+          "producerExecutableOrSourceSha256": "b2a56c8565941052dfdf5bd25c53d94923e1b4cd2f50c03ca3b0706a08a81f41",
+          "rawArtifactSha256": "78ca8e27e758c57ab7971170cca5b7b7c6ab71b0ba8fee3968e05f41d1ce6b5d",
+          "byteLength": 1024,
+          "targetJoinKeySha256": "63f1e05400ba73fda162090ddbc4732e2ce095f59f73345143155333f523d510"
+        }
+      ],
+      "filesystem": {
+        "relativePathPosix": "chr/c9800.anibnd.dcx",
+        "byteLength": 2913984,
+        "sourceSha256": "0a2994e429bd7ea47ecf393f8d4475fab3b7aefd35395179502679a70508ab80",
+        "containerEntryIdentitySha256": null
+      },
+      "andre": {
+        "targetSourceSha256": "0a2994e429bd7ea47ecf393f8d4475fab3b7aefd35395179502679a70508ab80",
+        "containerEntryIdentitySha256": null,
+        "inventoryArtifactSha256": "5a78724187e30bd09c7f273187cc2730f47c6dd8289ee3586cef68bf6a6cb95d",
+        "parseResult": "unavailable"
+      },
+      "mature": {
+        "targetSourceSha256": "0a2994e429bd7ea47ecf393f8d4475fab3b7aefd35395179502679a70508ab80",
+        "containerEntryIdentitySha256": null,
+        "evidence": {
+          "schema": "mission1-mature-evidence-v1",
+          "adapterId": "dsanimstudio",
+          "targetLogicalUri": "sekiro://chr/c9800.anibnd.dcx",
+          "targetSourceSha256": "0a2994e429bd7ea47ecf393f8d4475fab3b7aefd35395179502679a70508ab80"
         },
         "capability": "available"
       },
@@ -223130,7 +223777,7 @@
       "allowedDiagnosticCode": null
     }
   ],
-  "evidenceJoinCount": 10,
-  "generatorSourceSha256": "a50b4c183225e96f633f65715ea81d208dadcc07ac6992783b039e6165dc37da",
-  "verifierSourceSha256": "ba699ab2692036f806726e03da8a0071800da63c16a8ac74713a61c338eb7d88"
+  "evidenceJoinCount": 18,
+  "generatorSourceSha256": "89ac0335130e1389e3952b62f7c7115602a613f04cf675fcacc356f7890b12a9",
+  "verifierSourceSha256": "9045a15878aadc2da24320c69f7ee9a4d6652ce959e47547c5ee21c00d808579"
 }

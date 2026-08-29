@@ -18,7 +18,9 @@ import { resolve } from 'node:path';
 
 function main(): void {
   const root = resolve('../..');
-  const ipc = readFileSync(resolve(root, 'apps/desktop/src/main/ipc.ts'), 'utf8');
+  // IPC 物理拆分后，EMEVD 事件域的文档权威缓存与打开/提交链位于
+  // ipc/event.ts（组合根 ipc.ts 只做注册接线）。
+  const ipc = readFileSync(resolve(root, 'apps/desktop/src/main/ipc/event.ts'), 'utf8');
   const preload = readFileSync(resolve(root, 'apps/desktop/src/preload/index.ts'), 'utf8');
   const commit = readFileSync(resolve(root, 'packages/core/src/editing/emevdBridgeCommit.ts'), 'utf8');
 

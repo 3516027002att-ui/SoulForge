@@ -21,8 +21,9 @@ const domainNavigationSource = readFileSync(
   join(process.cwd(), 'apps', 'desktop', 'src', 'renderer', 'src', 'navigation', 'domainNavigation.ts'),
   'utf8'
 );
+// IPC 物理拆分后，回滚域 handler 位于 ipc/operations.ts（断言语义不变）。
 const ipcSource = readFileSync(
-  join(process.cwd(), 'apps', 'desktop', 'src', 'main', 'ipc.ts'),
+  join(process.cwd(), 'apps', 'desktop', 'src', 'main', 'ipc', 'operations.ts'),
   'utf8'
 );
 const workbenchOpsSource = readFileSync(

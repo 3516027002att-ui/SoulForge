@@ -3,7 +3,11 @@
   "compilerOptions": {
     "jsx": "react-jsx",
     "baseUrl": "../..",
-    "types": ["node", "react", "react-dom"],
+    "types": [
+      "node",
+      "react",
+      "react-dom"
+    ],
     "noEmit": true
   },
   "include": [
@@ -12,7 +16,11 @@
     "src/**/*.tsx"
   ],
   "references": [
-    { "path": "../../packages/shared" },
-    { "path": "../../packages/core" }
+    {
+      "path": "../../packages/shared"
+    },
+    {
+      "path": "../../packages/core"
+    }
   ]
 }

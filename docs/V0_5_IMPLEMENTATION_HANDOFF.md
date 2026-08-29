@@ -1011,7 +1011,7 @@ V0.5 不要求代表性硬件档位、真实大地图性能预算或原生后端
 
 | sliceId | claimId | owner | claimedAt | heartbeatAt | recoveryTrigger |
 |---|---|---|---|---|---|
-| `W-REL-D-GAMELOAD-01` | `claim-w-rel-d-gameload-01-20260814` | claude-code | 2026-08-14T04:27:22.409Z | 2026-08-14T04:27:22.409Z | 检查 `runScriptContainerLoadPreflightSmoke` 相关写进程与工作树改动；无相关写进程则 release 回 ready |
+| `W-REL-D-GAMELOAD-01` | `claim-w-rel-d-gameload-01-20260829-codex` | codex-mission1-`20260829` | 2026-08-29T03:13:08.430Z | 2026-08-29T03:38:50.434Z | 检查 `runScriptContainerLoadPreflightSmoke` 相关写进程、入口文件工作树改动和真实游戏内加载记录；无相关进程且未产生验证证据时 release 回 ready |
 
 <!-- SOULFORGE_PROJECTION_END:active-claims -->
 
@@ -1248,7 +1248,7 @@ npm run build
 
 <!-- SOULFORGE_PROJECTION_BEGIN:command-index -->
 
-全部 201 条已登记验证命令按层级列出。层级顺序即执行顺序（先快后慢，早失败早停）。
+全部 205 条已登记验证命令按层级列出。层级顺序即执行顺序（先快后慢，早失败早停）。
 
 一次跑完某一层：`node scripts/verify.mjs --tier <层级>`；跑全部：`npm run verify:all`。
 
@@ -1277,13 +1277,14 @@ npm run test:verify-entrypoint
 npm run verify:audit
 ~~~
 
-**unit**（70 条）
+**unit**（71 条）
 
 ~~~powershell
 npm run test
 npm run test:action-deterministic-seek
 npm run test:agent-approval-gate
 npm run test:agent-capability-wiring
+npm run test:agent-knowledge-refresh
 npm run test:agent-permission-unified
 npm run test:agent-tool-schema
 npm run test:ai-conformance
@@ -1409,7 +1410,7 @@ npm run test:upgrade-recovery
 npm run test:writer-failure-matrix
 ~~~
 
-**native**（49 条）
+**native**（52 条）
 
 ~~~powershell
 npm run bridge:verify:bnd4-transaction
@@ -1436,6 +1437,8 @@ npm run bridge:verify:tpf
 npm run bridge:verify:tpf-multi
 npm run bridge:verify:tpf-writer
 npm run probe:behavior-headers
+npm run test:action-mature-oracle
+npm run test:action-real-corpus
 npm run test:bridge-exit-hygiene
 npm run test:corpus-manifest
 npm run test:emevd-corpus-matrix
@@ -1446,6 +1449,7 @@ npm run test:fmg-reference-integrity
 npm run test:krak-combination-mutation
 npm run test:me3-sekiro-session
 npm run test:native-corpus-writeback
+npm run test:native-knowledge-refresh
 npm run test:native-preview
 npm run test:native-writer-failure-matrix
 npm run test:param-duplicate-native
@@ -1478,7 +1482,7 @@ npm run test:release-cross-machine
 npm run test:release-reproducible
 ~~~
 
-另有 18 条 script 显式排除在验证调度之外（写入命令、外部工具或入口自身）：
+另有 19 条 script 显式排除在验证调度之外（写入命令、外部工具或入口自身）：
 
 - `verify`：统一验证入口本身，自调度会无限递归
 - `verify:all`：同上（全层级别名）
@@ -1498,6 +1502,7 @@ npm run test:release-reproducible
 - `gov:complete`：同上
 - `gov:seal`：同上（追加 Evidence、挂 Gate 引用并重新投影交接书，三步原子写）
 - `handoff:project`：交接书投影写入命令，不是验证；只读校验由 test:handoff-projection 承担
+- `test:mission1-acceptance`：mission1 聚合验收入口，通过 scripts/verify-mission1-acceptance.mjs 直接运行，不经 verify.mjs tier 调度
 
 <!-- SOULFORGE_PROJECTION_END:command-index -->
 

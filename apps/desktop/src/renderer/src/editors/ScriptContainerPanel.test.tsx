@@ -142,8 +142,9 @@ describe('13-A luabnd 子项按 index 走 native 读链（名字 basename / 失�
     join(repoRoot, 'apps', 'desktop', 'src', 'renderer', 'src', 'editors', 'ScriptContainerPanel.tsx'),
     'utf8'
   );
+  // IPC 物理拆分后，脚本容器读链位于 ipc/raw.ts（save 链仍在组合根 ipc.ts）。
   const ipcSource = readFileSync(
-    join(repoRoot, 'apps', 'desktop', 'src', 'main', 'ipc.ts'),
+    join(repoRoot, 'apps', 'desktop', 'src', 'main', 'ipc', 'raw.ts'),
     'utf8'
   );
   // 切片到具体 handler，避免把别的通道（save / plaintext 视图）算进来。
@@ -151,13 +152,13 @@ describe('13-A luabnd 子项按 index 走 native 读链（名字 basename / 失�
     ipcSource.indexOf("'resource.listScriptContainerEntriesPage'"),
     ipcSource.indexOf("'resource.readScriptEntryPlaintext'")
   );
+  // saveScriptSource 不在本文件；readScriptSource 是最后一个读链 handler。
   const sourceHandler = ipcSource.slice(
-    ipcSource.indexOf("'resource.readScriptSource'"),
-    ipcSource.indexOf("'resource.saveScriptSource'")
+    ipcSource.indexOf("'resource.readScriptSource'")
   );
   const childReader = ipcSource.slice(
     ipcSource.indexOf('function scriptEntryEvidenceFromBridge'),
-    ipcSource.indexOf('function clearEditorPageCaches')
+    ipcSource.indexOf('export function clearRawIpcCaches')
   );
 
   it('列表出站名经 sanitizeEntryName（内层绝对路径不被打成「本机路径已隐藏」）', () => {
@@ -213,16 +214,21 @@ describe('S34 脚本全量读写（main 侧按打开编码写回，不硬编码 
     join(process.cwd(), 'apps', 'desktop', 'src', 'main', 'ipc.ts'),
     'utf8'
   );
-  // 从 saveScriptSource 注册处切片到下一个 handler（operation.list）：
+  // IPC 物理拆分后，读取侧（encoding 回传）在 ipc/raw.ts，保存链仍在组合根。
+  const rawSource = readFileSync(
+    join(process.cwd(), 'apps', 'desktop', 'src', 'main', 'ipc', 'raw.ts'),
+    'utf8'
+  );
+  // 从 saveScriptSource 注册处切片到下一个 handler（ai.tools）：
   // 容器条目分支与独立文件分支都在这个 handler 里，后面的 handler 不算。
   const saveChain = ipcSource.slice(
     ipcSource.indexOf('resource.saveScriptSource'),
-    ipcSource.indexOf("handle('operation.list'")
+    ipcSource.indexOf("handle('ai.tools'")
   );
 
   it('读取回传 encoding：明文=检测编码，反编译=decompiled', () => {
-    assert.match(ipcSource, /encoding: verdict\.detectedEncoding/);
-    assert.match(ipcSource, /encoding: 'decompiled'/);
+    assert.match(rawSource, /encoding: verdict\.detectedEncoding/);
+    assert.match(rawSource, /encoding: 'decompiled'/);
   });
 
   it('保存按打开编码重新编码：utf8-bom/shift_jis 走 writeEncoding 映射，其余归一 utf8', () => {

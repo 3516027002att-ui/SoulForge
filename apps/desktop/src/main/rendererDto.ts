@@ -49,7 +49,8 @@ const SOURCE_TEXT_KEYS = new Set([
   'sourcePrefix',
   'sliceText',
   'draft',
-  'nextDslTemplate'
+  'nextDslTemplate',
+  'text'
 ]);
 
 const SENSITIVE_PATH_KEYS = new Set([

@@ -16,7 +16,9 @@ function main(): void {
   const root = resolve('../..');
   const dto = readFileSync(resolve(root, 'apps/desktop/src/main/rendererDto.ts'), 'utf8');
   const vault = readFileSync(resolve(root, 'apps/desktop/src/main/modelServiceCredentials.ts'), 'utf8');
-  const ipc = readFileSync(resolve(root, 'apps/desktop/src/main/ipc.ts'), 'utf8');
+  // IPC 物理拆分后，modelService 域 handler 位于 ipc/modelServices.ts（upsert
+  // 经注入的 vault 依赖写凭据），不再在组合根 ipc.ts 内。
+  const modelServiceIpc = readFileSync(resolve(root, 'apps/desktop/src/main/ipc/modelServices.ts'), 'utf8');
 
   if (!dto.includes("'apiKey'") || !dto.includes("'secret'")) {
     throw new Error('rendererDto 必须从发往渲染进程的载荷中剥离 apiKey/secret 键。');
@@ -24,7 +26,7 @@ function main(): void {
   if (!vault.includes('safeStorage.encryptString')) {
     throw new Error('vault 必须使用 safeStorage 加密凭据。');
   }
-  if (!ipc.includes('modelServiceVault.upsertConfig')) {
+  if (!modelServiceIpc.includes('vault.upsertConfig')) {
     throw new Error('main 必须经 vault upsertConfig 写入凭据，不得旁路。');
   }
 

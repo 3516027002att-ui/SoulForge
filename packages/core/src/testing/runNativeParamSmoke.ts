@@ -95,9 +95,13 @@ async function mainInWorkspace(root: string): Promise<void> {
     filePath: paramPath,
     allowedRoots: [overlay],
     timeoutMs: 60_000,
-    // 显式空 options：规避 Bridge 对 default JsonElement 调用 TryGetProperty 抛
+    // 显式 options 对象：规避 Bridge 对 default JsonElement 调用 TryGetProperty 抛
     // InvalidOperationException 的缺陷（read-param-document 分页读取行无 ValueKind 防护）。
-    commandOptions: {}
+    // 必须传对象（不能省略该字段）；且必须 includeRowHashes=true —— 产品契约是
+    // 「index 模式默认不带 row hash」（见 mission1 §0.3 第 2 条、§27.1.2），
+    // 不传则 dataHash 为 undefined，下面 upsert 前后的 hash 对比会退化成
+    // undefined === undefined，断言恒失败且与写回是否生效无关。
+    commandOptions: { includeRowHashes: true }
   });
   if (!read.data?.roundTrip?.semanticIdentical) {
     throw new Error(`PARAM read/roundtrip failed: ${JSON.stringify(read.diagnostics)} ${JSON.stringify(read.data?.roundTrip)}`);
@@ -158,7 +162,9 @@ async function mainInWorkspace(root: string): Promise<void> {
     filePath: stagedParam,
     allowedRoots: [staging],
     timeoutMs: 60_000,
-    commandOptions: {}
+    // 同上面的首次读取：必须显式传对象且带 includeRowHashes，否则 index 模式
+    // 不返回 dataHash，与首次读取的 undefined 相等，断言失去判别力。
+    commandOptions: { includeRowHashes: true }
   });
   const stagedRow = stagedRead.data?.rows.find((r) => r.id === first.id);
   if (!stagedRow || stagedRow.dataHash === first.dataHash) {
