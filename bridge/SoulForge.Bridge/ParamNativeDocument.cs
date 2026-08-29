@@ -1014,6 +1014,7 @@ internal sealed class ParamNativeDocument
     private static void WriteUInt16(byte[] target, int offset, ushort value) => BinaryPrimitives.WriteUInt16LittleEndian(target.AsSpan(offset, 2), value);
     private static int Align16(int value) => checked((value + 0x0f) & ~0x0f);
     private static string Hash(byte[] bytes) => Convert.ToHexString(SHA256.HashData(bytes)).ToLowerInvariant();
+    internal static string ComputeRowDataHash(byte[] rowData) => Hash(rowData);
 }
 
 internal sealed record ParamRow(

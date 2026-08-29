@@ -15,6 +15,7 @@ export * from './ai-tools.js';
 export * from './vfs.js';
 export * from './bridge-protocol.js';
 export * from './editor-protocol.js';
+export * from './param-ipc-protocol.js';
 export * from './editor-catalog.js';
 export * from './editor-pagination.js';
 export * from './emevd-editor-ir.js';

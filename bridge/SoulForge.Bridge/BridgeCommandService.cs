@@ -356,6 +356,12 @@ internal sealed class BridgeCommandService
                 var rowPageSize = OptionInt("rowPageSize", 0);
                 var includeAllPayloads = OptionBool("includeAllPayloads", false);
                 var includeRowHashes = OptionBool("includeRowHashes", false);
+                bool? includeRowPayloads = null;
+                if (optionsIsObject && options.TryGetProperty("includeRowPayloads", out var irpEl))
+                {
+                    if (irpEl.ValueKind == JsonValueKind.True) includeRowPayloads = true;
+                    else if (irpEl.ValueKind == JsonValueKind.False) includeRowPayloads = false;
+                }
                 var pathSourceGeneration = OptionInt64("pathSourceGeneration", 0);
                 var entryIdentity = OptionString("entryIdentity", string.Empty);
                 var documentSession = OptionString("documentSession", string.Empty);
@@ -371,6 +377,22 @@ internal sealed class BridgeCommandService
                             ids.Add(id);
                     }
                     if (ids.Count > 0) rowIds = ids.ToArray();
+                }
+                List<(int rowIndex, int expectedId, string expectedDataHash)>? rowSelections = null;
+                if (optionsIsObject && options.TryGetProperty("rowSelections", out var rsEl)
+                    && rsEl.ValueKind == JsonValueKind.Array)
+                {
+                    var list = new List<(int, int, string)>();
+                    foreach (var item in rsEl.EnumerateArray())
+                    {
+                        if (item.ValueKind != JsonValueKind.Object) continue;
+                        if (!item.TryGetProperty("rowIndex", out var riEl) || !riEl.TryGetInt32(out var ri)) continue;
+                        if (!item.TryGetProperty("expectedId", out var eiEl) || !eiEl.TryGetInt32(out var ei)) continue;
+                        if (!item.TryGetProperty("expectedDataHash", out var ehEl) || ehEl.ValueKind != JsonValueKind.String) continue;
+                        var eh = ehEl.GetString() ?? string.Empty;
+                        list.Add((ri, ei, eh));
+                    }
+                    if (list.Count > 0) rowSelections = list;
                 }
                 // session-aware: try token first, else open/get by key (single parse)
                 ParamDocumentSessionCache.Entry entry;
@@ -393,6 +415,51 @@ internal sealed class BridgeCommandService
                 }
                 var document = entry.Document;
                 var roundTrip = entry.RoundTrip;
+                // B4 slim: rowSelections path — validates physical identity, no partial success
+                if (rowSelections is not null)
+                {
+                    const int batchMax = 256;
+                    if (rowSelections.Count > batchMax)
+                        return BridgeResult<object>.Failed(file, "param", "PARAM_ROW_PAYLOAD_BATCH_EXCEEDED", $"单次 rowSelections {rowSelections.Count} 超过上限 {batchMax}。");
+                    if (string.IsNullOrWhiteSpace(documentSession))
+                        return BridgeResult<object>.Failed(file, "param", "PARAM_DOCUMENT_SESSION_EXPIRED", "rowSelections 需要 documentSession。");
+                    bool slimIncludePayload = includeRowPayloads != false;
+                    // includeRowPayloads must be true for rowSelections with payload; enforce explicit opt-in
+                    if (includeRowPayloads == false)
+                        return BridgeResult<object>.Failed(file, "param", "PARAM_ROW_IDENTITY_MISMATCH", "rowSelections 与 includeRowPayloads=false 不兼容。");
+                    // validate all identities atomically before emitting any payload
+                    var slimRows = new List<object>(rowSelections.Count);
+                    foreach (var sel in rowSelections)
+                    {
+                        if (sel.rowIndex < 0 || sel.rowIndex >= document.Rows.Count)
+                            return BridgeResult<object>.Failed(file, "param", "PARAM_ROW_IDENTITY_MISMATCH", $"物理行索引 {sel.rowIndex} 越界（rowCount={document.Rows.Count}）。");
+                        var actual = document.Rows[sel.rowIndex];
+                        if (actual.Id != sel.expectedId)
+                            return BridgeResult<object>.Failed(file, "param", "PARAM_ROW_IDENTITY_MISMATCH", $"行 {sel.rowIndex} 的 id 已变化：expected={sel.expectedId} actual={actual.Id}。");
+                        var actualHash = ParamNativeDocument.ComputeRowDataHash(actual.Data);
+                        if (!string.Equals(actualHash, sel.expectedDataHash, StringComparison.OrdinalIgnoreCase))
+                            return BridgeResult<object>.Failed(file, "param", "PARAM_ROW_IDENTITY_MISMATCH", $"行 {sel.rowIndex} 的 dataHash 已变化。");
+                        slimRows.Add(new { rowIndex = sel.rowIndex, id = actual.Id, name = actual.Name, dataBase64 = slimIncludePayload ? Convert.ToBase64String(actual.Data) : null, dataHash = actualHash });
+                    }
+                    var slimEnvelope = new { format = "PARAM", typeName = document.TypeName, dataVersion = document.DataVersion, rowCount = document.Rows.Count, rowDataSize = document.RowDataSize, layout = document.Layout == ParamLayout.Standard32 ? "standard-32" : "long-64", sourceSize = document.SourceBytes.Length, sourceHash = document.SourceHash, rows = slimRows.ToArray(), payloadsIncluded = slimIncludePayload, sessionToken, workspaceSessionId, sourceHash2 = curSourceHash, pathSourceGeneration, correlationId };
+                    var slimData = new Dictionary<string, object?>(StringComparer.Ordinal);
+                    foreach (var p in slimEnvelope.GetType().GetProperties()) slimData[p.Name] = p.GetValue(slimEnvelope);
+                    slimData["sessionToken"] = sessionToken;
+                    slimData["workspaceSessionId"] = workspaceSessionId;
+                    slimData["sourceHash"] = curSourceHash;
+                    slimData["pathSourceGeneration"] = pathSourceGeneration;
+                    slimData["correlationId"] = correlationId;
+                    slimData["telemetry"] = BridgeTelemetry.Snapshot();
+                    System.Threading.Interlocked.Add(ref BridgeTelemetry.ParamSerializedRowsCount, slimRows.Count);
+                    var slimDiags = new List<Diagnostic>
+                    {
+                        new Diagnostic(roundTrip.SemanticIdentical ? "info" : "error", roundTrip.SemanticIdentical ? "PARAM_DOCUMENT_ROUNDTRIP_SEMANTIC_VERIFIED" : "PARAM_DOCUMENT_ROUNDTRIP_FAILED", roundTrip.SemanticIdentical ? (roundTrip.ByteIdentical ? "PARAM 无修改往返字节级一致。" : "PARAM 无修改往返语义一致。") : "PARAM 无修改往返语义不一致。", BridgeResult<object>.MakeSourceUri(file), roundTrip),
+                        new Diagnostic("info", "PARAM_DOCUMENT_SESSION", $"session {sessionToken} gen {pathSourceGeneration} parse {(isNewSession?1:0)}", BridgeResult<object>.MakeSourceUri(file), new { sessionToken, workspaceSessionId, sourceHash = curSourceHash, pathSourceGeneration, entryIdentity, correlationId, isNewSession, telemetry = BridgeTelemetry.Snapshot() })
+                    };
+                    return BridgeResult<object>.Partial(file, "param", slimDiags.ToArray(), slimData);
+                }
+                // Slim index: includeRowPayloads == false forces no payload regardless of budget
+                bool forceSlimIndex = includeRowPayloads == false;
                 // page projection defaults to 20 rows when caller asks for page without explicit size
                 if (rowPageSize == 0 && rowIds == null && !includeAllPayloads)
                 {
@@ -446,8 +513,25 @@ internal sealed class BridgeCommandService
                 // additive; nesting the envelope under data.envelope breaks existing
                 // callers that read data.rowDataSize / data.rows / data.sourceHash.
                 var responseData = new Dictionary<string, object?>(StringComparer.Ordinal);
-                foreach (var property in envelope.GetType().GetProperties())
-                    responseData[property.Name] = property.GetValue(envelope);
+                if (envelope is not null)
+                    foreach (var property in envelope.GetType().GetProperties())
+                        responseData[property.Name] = property.GetValue(envelope);
+                if (forceSlimIndex && responseData.TryGetValue("rows", out var rowsObj) && rowsObj is System.Collections.IEnumerable rowsEnum)
+                {
+                    var slimRows = new List<object>();
+                    foreach (var item in rowsEnum)
+                    {
+                        if (item == null) continue;
+                        var t = item.GetType();
+                        var ri = (int)(t.GetProperty("rowIndex")?.GetValue(item) ?? 0);
+                        var id = (int)(t.GetProperty("Id")?.GetValue(item) ?? t.GetProperty("id")?.GetValue(item) ?? 0);
+                        var name = t.GetProperty("Name")?.GetValue(item) ?? t.GetProperty("name")?.GetValue(item);
+                        var dh = t.GetProperty("dataHash")?.GetValue(item);
+                        slimRows.Add(new { rowIndex = ri, id, name, dataBase64 = (string?)null, dataHash = dh });
+                    }
+                    responseData["rows"] = slimRows.ToArray();
+                    responseData["payloadsIncluded"] = false;
+                }
                 responseData["sessionToken"] = sessionToken;
                 responseData["workspaceSessionId"] = workspaceSessionId;
                 responseData["sourceHash"] = curSourceHash;
@@ -1716,8 +1800,10 @@ internal sealed class BridgeCommandService
                     }
                     flverForNew = FlverNativeDocument.Read(flverBytes);
                     entryNameForNew = resolvedEntryName;
+                    var ownerLeaseId = OptionString("ownerLeaseId", "");
+                    var resourceCacheKey = OptionString("resourceCacheKey", "");
                     // Create session
-                    session = MapStaticGeometryService.GetOrCreate(file, modelName, null, fileHash, flverForNew, entryNameForNew);
+                    session = MapStaticGeometryService.GetOrCreate(file, modelName, null, fileHash, flverForNew, entryNameForNew, ownerLeaseId, resourceCacheKey);
                     // If cursor was supplied with new session, validate it starts at 0
                     if (!string.IsNullOrWhiteSpace(cursor) && cursor != MapStaticGeometryService.EncodeCursor(0,0))
                         return BridgeResult<object>.Failed(file, "map", "MAP_STATIC_CURSOR_MISMATCH", "新 session 的 cursor 必须为空或指向起点。");

@@ -60,7 +60,15 @@ import type {
   CiteHit,
   MapEditTransaction
 } from '@soulforge/shared';
-import { EDITOR_DOCUMENT_IPC_CHANNELS, maskPathFragments } from '@soulforge/shared';
+import { EDITOR_DOCUMENT_IPC_CHANNELS, maskPathFragments, PARAM_SESSION_IPC_CHANNELS } from '@soulforge/shared';
+import type {
+  OpenParamSessionRequest,
+  OpenParamSessionResult,
+  ReadParamIndexPageRequest,
+  ParamIndexPage,
+  ReadParamRowsRequest,
+  ParamRowPayloadBatch
+} from '@soulforge/shared';
 
 /** Path-bearing fields that must never cross the context bridge to the renderer. */
 const RENDERER_FORBIDDEN_PATH_KEYS = new Set([
@@ -586,6 +594,12 @@ const api = {
     loadAll?: boolean
   ): Promise<ParamRowPage> =>
     ipcRenderer.invoke('resource.readParamPage', sourceUri, page, pageSize, query, loadAll),
+  openParamSession: (request: OpenParamSessionRequest): Promise<OpenParamSessionResult> =>
+    ipcRenderer.invoke(PARAM_SESSION_IPC_CHANNELS.open, request),
+  readParamIndexPage: (request: ReadParamIndexPageRequest): Promise<ParamIndexPage> =>
+    ipcRenderer.invoke(PARAM_SESSION_IPC_CHANNELS.readIndexPage, request),
+  readParamRows: (request: ReadParamRowsRequest): Promise<ParamRowPayloadBatch> =>
+    ipcRenderer.invoke(PARAM_SESSION_IPC_CHANNELS.readRows, request),
   /**
    * 列出 parambnd 容器内的 param 条目（Smithbox 的 Param List 那一栏）。
    * 每一项都可直接交给 readContainerParamPage —— 列得出来就读得到。
