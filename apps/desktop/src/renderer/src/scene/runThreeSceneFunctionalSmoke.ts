@@ -107,7 +107,7 @@ class FakeElement {
     void options;
     removeHandler(this.handlers, type, handler);
   }
-  dispatch(type: string, event: { clientX: number; clientY: number }): void {
+  dispatch(type: string, event: unknown): void {
     for (const handler of [...(this.handlers.get(type) ?? [])]) handler(event);
   }
   getBoundingClientRect(): { left: number; top: number; width: number; height: number } {
@@ -145,13 +145,24 @@ globalThis.window = {
   removeEventListener: (type: string, handler: UnknownHandler): void => removeHandler(windowHandlers, type, handler)
 } as unknown as Window & typeof globalThis;
 
+const domGlobals = globalThis as unknown as Record<string, unknown>;
+domGlobals.HTMLElement = FakeElement;
+domGlobals.HTMLInputElement = class FakeInputElement extends FakeElement {};
+domGlobals.HTMLTextAreaElement = class FakeTextAreaElement extends FakeElement {};
+
+function dispatchWindow(type: string, event: unknown): void {
+  for (const handler of [...(windowHandlers.get(type) ?? [])]) handler(event);
+}
+
+let frameNow = performance.now();
 function pumpFrames(count: number): void {
   for (let index = 0; index < count; index++) {
     const next = [...rafCallbacks.entries()][0];
     if (!next) break;
     const [id, callback] = next;
     rafCallbacks.delete(id);
-    callback(performance.now());
+    frameNow += 16;
+    callback(frameNow);
   }
 }
 
@@ -317,6 +328,7 @@ async function testProxyScene(record: (name: string) => void): Promise<void> {
   let audit: Array<{ dispose(): void }> = [];
   const selections: Array<string | null> = [];
   const container = new FakeElement();
+  let mountedCamera: three.PerspectiveCamera | null = null;
 
   const handle = await mountThreeProxyScene({
     container: container as unknown as HTMLElement,
@@ -332,6 +344,9 @@ async function testProxyScene(record: (name: string) => void): Promise<void> {
     },
     resourceAudit: (resources) => {
       audit = [...resources];
+    },
+    cameraAudit: (camera) => {
+      mountedCamera = camera;
     }
   });
 
@@ -376,6 +391,30 @@ async function testProxyScene(record: (name: string) => void): Promise<void> {
   assert(createdRenderer.calls.includes('setSize'), 'setSize 已按容器尺寸调用');
   assert(createdRenderer.calls.includes('setPixelRatio'), 'setPixelRatio 已调用');
 
+  // Shift + WASD 使用同一方向与帧时间，只把位移倍率提升到 3.5x。
+  assert(mountedCamera !== null, '测试 seam 捕获真实 controller camera');
+  const activeCamera = mountedCamera as three.PerspectiveCamera;
+  const keyboardEvent = (key: string, shiftKey: boolean): KeyboardEvent => ({
+    key,
+    shiftKey,
+    target: lastCreatedCanvas,
+    preventDefault(): void {}
+  } as unknown as KeyboardEvent);
+  const normalStart = activeCamera.position.clone();
+  dispatchWindow('keydown', keyboardEvent('w', false));
+  pumpFrames(5);
+  dispatchWindow('keyup', keyboardEvent('w', false));
+  const normalDistance = activeCamera.position.distanceTo(normalStart);
+  const acceleratedStart = activeCamera.position.clone();
+  dispatchWindow('keydown', keyboardEvent('Shift', true));
+  dispatchWindow('keydown', keyboardEvent('w', true));
+  pumpFrames(5);
+  dispatchWindow('keyup', keyboardEvent('w', true));
+  dispatchWindow('keyup', keyboardEvent('Shift', false));
+  const acceleratedDistance = activeCamera.position.distanceTo(acceleratedStart);
+  assert(normalDistance > 0, 'W 连续漫游产生位移');
+  assert(Math.abs(acceleratedDistance / normalDistance - 3.5) < 1e-6, 'Shift+W 位移严格为普通 W 的 3.5x');
+
   // 全量释放：内容 + 高亮 overlay + 静态资源（grid/axes geometry）全部 dispose。
   handle.dispose();
   assert(createdRenderer.disposed, 'renderer.dispose 被调用');
@@ -388,6 +427,7 @@ async function testProxyScene(record: (name: string) => void): Promise<void> {
   record('proxy-natural-webgl2-fallback');
   record('proxy-picking-highlight');
   record('proxy-resource-release');
+  record('proxy-shift-wasd-acceleration');
 }
 
 async function testFlverScene(record: (name: string) => void): Promise<void> {

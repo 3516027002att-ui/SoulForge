@@ -1,0 +1,2526 @@
+你现在执行 SoulForge 的一次“纯运行时取证任务”。
+
+仓库：
+https://github.com/3516027002att-ui/SoulForge
+
+本任务不是修复任务。
+
+你的唯一目标是：
+
+把下面四条真实产品主链路当前到底走了什么代码、在哪一层开始偏离预期、实际发生了多少次解析/传输/回退，完整记录出来。
+
+四条链路是：
+
+1. PARAM 大表加载
+2. 地图 m10_00_00_00 加载
+3. 动作 c0000 静态 FLVER 加载
+4. 已提交 Agent 修改的回滚
+
+完成取证以后立即停止。
+
+不要修任何 bug。
+
+==================================================
+一、绝对禁止事项
+==================================================
+
+以下行为全部禁止：
+
+- 不要修 PARAM 性能。
+- 不要把 renderer 切到新 PARAM API。
+- 不要删除 legacy readParamPage。
+- 不要修改 loadAll 行为。
+- 不要新增 PARAM cache。
+
+- 不要修地图资源解析。
+- 不要修改 modelName → mapbnd 映射。
+- 不要修 MAP_PART_MODEL_NOT_FOUND。
+- 不要修 TriangleStrip。
+- 不要 triangulate。
+- 不要加 InstancedMesh。
+- 不要优化 mapbnd cache/session。
+- 不要修改 point cloud / placeholder fallback 的产品行为。
+
+- 不要修动作 FLVER。
+- 不要修 mesh projection。
+- 不要修 NormalW。
+- 不要修 BoneWeights/BoneIndices。
+- 不要修 bind pose。
+- 不要修 HKX。
+- 不要修动画播放器。
+- 不要修改 SkinnedMesh 逻辑。
+
+- 不要修 rollback。
+- 不要新增 revert transaction。
+- 不要修改 discard_draft/discard_all。
+- 不要给 rollback 补 transactionId。
+- 不要修 Agent prompt。
+- 不要修 UI refresh/invalidation。
+
+即使你在取证过程中已经 100% 看见 bug，也不要顺手修。
+
+如果你觉得“只改一行就能修好”，仍然不要改。
+
+本轮唯一允许的代码变化是：
+
+“不会改变业务结果的日志、计数器、计时器和诊断信息。”
+
+禁止为了插桩进行架构重构。
+
+禁止顺手格式化大文件。
+
+禁止整理 import。
+
+禁止重命名已有接口。
+
+禁止移动已有文件。
+
+禁止 commit。
+
+禁止 push。
+
+完成以后必须留下取证报告和原始日志，然后停止，等待下一轮指令。
+
+==================================================
+二、先记录当前运行版本，什么都不要改
+==================================================
+
+进入仓库根目录。
+
+运行：
+
+git rev-parse --show-toplevel
+git branch --show-current
+git rev-parse HEAD
+git status --short
+git log -1 --oneline
+
+把完整输出写入取证报告。
+
+然后记录：
+
+- 当前 branch
+- 当前 commit SHA
+- 工作区是否 dirty
+- SoulForge 当前版本号，如果仓库中已有版本字段
+- 实际启动 SoulForge 使用的命令
+- Node 版本
+- .NET 版本，如果当前 Bridge 使用 .NET
+- 当前测试使用的 MOD workspace
+- 当前挂载的 Sekiro authority/game source 是否存在
+
+不要记录：
+
+- API key
+- access token
+- cookie
+- Authorization header
+- 密码
+
+如果工作区在你开始之前就已经 dirty：
+
+不要清理。
+不要 reset。
+不要覆盖用户已有修改。
+
+只把“开始任务前已有的 dirty 文件”记下来。
+
+以后判断你的插桩修改时，要和这一份基线区分。
+
+==================================================
+三、建立取证输出目录
+==================================================
+
+在仓库的临时/构建忽略目录中建立本次取证目录。
+
+优先使用仓库已有 tmp / artifacts / logs 约定。
+
+如果仓库没有明确约定，可以临时建立：
+
+tmp/forensics/main-hotpaths/
+
+不要为了这个目录单独修改 .gitignore。
+
+至少生成两个文件：
+
+tmp/forensics/main-hotpaths/runtime.jsonl
+
+tmp/forensics/main-hotpaths/report.md
+
+runtime.jsonl 保存机器可读事件。
+
+report.md 保存最终整理后的结果。
+
+不要把几 MB 的二进制、Base64、FLVER、BND 原文塞进日志。
+
+==================================================
+四、先做静态调用链定位，不运行软件
+==================================================
+
+首先定位 PARAM 相关实现。
+
+运行：
+
+git grep -n -E "readParamPage|loadAll|paramAllCache|read-param-document|readIndexPage|readRows|includeRowPayloads|rowSelections"
+
+如果 git grep 不可用，再使用：
+
+rg -n "readParamPage|loadAll|paramAllCache|read-param-document|readIndexPage|readRows|includeRowPayloads|rowSelections" .
+
+不要只保存搜索结果。
+
+从搜索结果中找出并记录以下真实文件和真实函数：
+
+PARAM：
+- renderer 中“用户打开 PARAM 表”的入口函数
+- renderer 调 preload 的函数
+- preload 暴露的方法
+- main IPC handler
+- Bridge command
+- native/C# PARAM document/session/parser 的入口
+- legacy readParamPage 的定义
+- 新 open/readIndexPage/readRows 的定义
+- 如果存在 fallback，新路径 fallback 到 legacy 的位置
+
+写成：
+
+renderer:
+文件:
+函数:
+调用下一层:
+
+preload:
+文件:
+函数:
+调用下一层:
+
+main:
+文件:
+函数:
+调用下一层:
+
+bridge:
+文件:
+函数:
+调用下一层:
+
+native/parser:
+文件:
+函数:
+
+不要根据函数名猜调用关系。
+
+必须打开代码确认函数体里真的调用了下一层。
+
+--------------------------------------------------
+
+然后定位地图。
+
+运行：
+
+git grep -n -E "readMapStaticGeometry|readMapPartMesh|read-map-static-geometry|read-map-part-flver-preview|MAP_PART_MODEL_NOT_FOUND|mapbnd|MsbScene|modelName"
+
+如果 git grep 不可用，用 rg。
+
+定位并记录：
+
+- renderer 打开地图的入口
+- MSB document 被读取的位置
+- renderer 请求静态 geometry 的位置
+- preload 方法
+- main IPC handler
+- readMapStaticGeometry 实现
+- legacy readMapPartMesh 实现
+- Bridge map command
+- modelName 转换/候选生成的位置
+- mapbnd 查找位置
+- BND entry 查找位置
+- FLVER parse 位置
+- native mesh → DTO/projected mesh 的位置
+- renderer 收到 mesh DTO 的位置
+- placeholder / point / wireframe fallback 被激活的位置
+- MAP_PART_MODEL_NOT_FOUND 被创建的位置
+
+如果同一逻辑有多个入口，全部列出。
+
+不要选择“看起来最重要的那个”后忽略其他入口。
+
+--------------------------------------------------
+
+然后定位动作页。
+
+运行：
+
+git grep -n -E "readTaeChrbndPreview|read-chrbnd-flver-preview|FlverNativeDocument|meshCount|FLVER 3D|chrbnd|faceset|faceSet"
+
+定位：
+
+- c0000 action tab 的 renderer 入口
+- model preview 请求函数
+- preload
+- main IPC
+- Bridge command
+- chrbnd 读取位置
+- BND entry 选择位置
+- FLVER entry 选择位置
+- FlverNativeDocument 或等价 native parser
+- native mesh count 产生位置
+- DTO/projected mesh 产生位置
+- renderer 接收 mesh 的位置
+- Three/WebGL geometry 创建位置
+
+同时查：
+
+git grep -n -E "NormalW|BoneWeights|BoneIndices|SkinnedMesh|bindPose|HKX|hkx"
+
+只记录位置。
+
+本轮禁止修改这些逻辑。
+
+--------------------------------------------------
+
+最后定位 rollback / transaction。
+
+运行：
+
+git grep -n -E "rollback|Rollback|revert|Revert|discard_draft|discard_all|commit_all|commitDraft|transactionId|ChangeSet|revertedBy|revertOf"
+
+再运行：
+
+git grep -n -E "ItemName|Msg.Entry|Goods"
+
+定位：
+
+- 审计/历史栏“回滚”按钮 handler
+- 这个按钮实际传递什么参数
+- 如果它调用 Agent，找出 Agent 收到什么内容
+- rollback 对应 tool
+- ToolRegistry 注册位置
+- tool handler
+- transaction/change/operation log 数据结构
+- draft 数据结构
+- commit 实现
+- discard 实现
+- Patch Engine 写入入口
+- Patch Engine backup/recovery
+- commit 后 authority 被重新读取的位置，如果存在
+- renderer cache/store invalidation 位置，如果存在
+
+特别注意：
+
+不要因为存在一个名叫 rollback/revert 的函数，就假定按钮调用了它。
+
+必须从真实按钮向下追。
+
+--------------------------------------------------
+
+把四条静态调用链全部写入 report.md。
+
+每一个节点必须包含：
+
+文件路径
+函数名
+大约行号
+下一层实际调用
+
+如果某一层不存在，明确写：
+
+MISSING
+
+不要自己脑补一个应该存在的层。
+
+==================================================
+五、加入统一的临时运行时 trace
+==================================================
+
+先搜索项目有没有现成的：
+
+logger
+debug logger
+diagnostic logger
+trace
+operation log
+request id
+correlation id
+
+优先复用已有基础设施。
+
+不要另外建立一套大型 logging framework。
+
+如果没有适合的统一结构，只增加一个极小的 forensic trace helper。
+
+每条日志必须是单行 JSON。
+
+统一前缀/字段：
+
+{
+  "schema": "SOULFORGE_HOTPATH_FORENSICS_V1",
+  "traceId": "...",
+  "flow": "param|map|action|rollback",
+  "layer": "renderer|preload|main|bridge|native|authority|ui",
+  "stage": "...",
+  "op": "...",
+  "resource": "...",
+  "ts": 0,
+  "durationMs": 0,
+  "metrics": {},
+  "result": "ok|empty|error|fallback",
+  "errorCode": null
+}
+
+字段可以按语言现有结构实现。
+
+但是名称和语义必须保持一致。
+
+traceId 的规则：
+
+一次用户顶层操作使用一个 traceId。
+
+例如一次打开 PARAM：
+
+param-<timestamp/random>
+
+一次打开地图：
+
+map-<timestamp/random>
+
+一次打开 c0000：
+
+action-<timestamp/random>
+
+一次“修改 + commit”事务和之后 rollback 必须分别保留：
+
+transactionId
+rollback traceId
+
+如果当前 API 没有 traceId 参数：
+
+不要为了取证大改全部接口签名。
+
+优先：
+- 使用已有 request/session/context metadata；
+- 或在边界建立一个临时 correlation map；
+- 或用已有 request id。
+
+如果无法安全把同一个 traceId 穿过某一层：
+
+不要改业务 API 强行穿透。
+
+在 report.md 写明：
+
+CORRELATION BREAK AT: <层>
+原因:
+使用了什么辅助字段关联:
+
+但是仍要继续取证。
+
+--------------------------------------------------
+
+所有 trace 都禁止输出完整：
+
+raw bytes
+Base64 payload
+BND 内容
+FLVER 内容
+API key
+secret
+
+只记录：
+
+长度
+数量
+hash（如果已有）
+资源名
+rowId
+modelName
+entryName
+错误码
+耗时
+
+==================================================
+六、PARAM 取证
+==================================================
+
+目标：
+
+证明用户真实打开一个大 PARAM 时，产品究竟走 legacy 还是 session/slim 路径，以及时间和数据量到底花在哪里。
+
+不要修改 PARAM 行为。
+
+--------------------------------------------------
+
+A. 在以下位置增加计数/trace
+
+renderer 发起打开表：
+
+记录：
+
+stage = request_table
+table
+开始时间
+
+renderer 收到第一批可显示行：
+
+stage = rows_received
+rowCount
+payloadRowCount
+approxBytes
+
+renderer 真正第一次把行画到 UI：
+
+stage = first_rows_rendered
+
+这里只做日志。
+
+不要改变 React 状态逻辑。
+
+--------------------------------------------------
+
+preload：
+
+每次以下 API 被调用时分别计数：
+
+readParamPage
+open
+readIndexPage
+readRows
+
+记录：
+
+method
+table
+请求 row 数
+返回 row 数
+返回 JSON 序列化后的 UTF-8 大小
+
+字节大小算法：
+
+在 Node/TS 一侧，以：
+
+Buffer.byteLength(JSON.stringify(payload), "utf8")
+
+测量。
+
+只用于诊断。
+
+不要为了计算大小复制或解码 Base64 内容。
+
+--------------------------------------------------
+
+main：
+
+记录实际 IPC channel。
+
+分别统计：
+
+legacyReadParamPageCalls
+paramOpenCalls
+readIndexPageCalls
+readRowsCalls
+
+如果 readParamPage 参数里有 loadAll：
+
+必须记录：
+
+loadAll = true/false
+
+如果存在 fallback：
+
+记录：
+
+fallbackFrom
+fallbackTo
+fallbackReason
+
+不要修改 fallback 行为。
+
+--------------------------------------------------
+
+Bridge/native：
+
+找到“真正把 PARAM 文件解析成 document”的位置。
+
+不要把普通 row decode 错算成 document parse。
+
+每真正解析一次完整 PARAM document：
+
+paramDocumentParseCount += 1
+
+记录：
+
+resource
+table
+parse number
+durationMs
+
+如果有 session：
+
+记录：
+
+sessionCreated
+sessionReused
+sessionDisposed
+
+如果 readIndexPage/readRows 只是访问已解析 session：
+
+不要把它算成 parse。
+
+--------------------------------------------------
+
+还必须统计首屏数据结构。
+
+对第一份从 backend 进入 renderer 的有效 PARAM 响应记录：
+
+indexRowCount
+payloadRowCount
+rawPayloadFieldCount
+rawPayloadApproxBytes
+base64StringApproxBytes
+
+这里“payloadRowCount”定义为：
+
+真正携带完整 row bytes 或完整 decoded row payload 的行数。
+
+只有：
+
+rowId
+rowName
+identity
+轻量 metadata
+
+不能算 payload row。
+
+--------------------------------------------------
+
+B. 真实运行场景
+
+完全退出 SoulForge。
+
+重新启动。
+
+这是 cold run。
+
+不要在启动前预热 PARAM。
+
+选择用户当前实际感觉很慢的 PARAM 表。
+
+如果当前上下文里能确认是哪张表，就使用那张。
+
+如果不能确认：
+
+使用现有 PARAM 元数据选择 rowCount 最大的一张表。
+
+禁止通过“先把所有 row payload 读出来”来找最大表。
+
+记录：
+
+chosenTable
+rowCount
+为什么选择它
+
+然后：
+
+1. 点击打开该表。
+2. 不滚动。
+3. 不点击行。
+4. 等第一屏完整显示。
+5. 再等待 5 秒。
+6. 记录这一阶段全部 trace。
+7. 点击第一屏的一行。
+8. 记录是否出现 readRows / payload request。
+9. 再滚动或跳到大约 75% 位置。
+10. 选择一个此前从未显示过的 row。
+11. 再记录请求。
+
+禁止为了让结果好看重新跑第二次后只保留最快的一次。
+
+至少保留第一次 cold run。
+
+如果需要第二次 warm run，可以额外跑，但必须分别标记：
+
+cold
+warm
+
+--------------------------------------------------
+
+C. PARAM 最终必须回答
+
+report.md 必须明确给出这些事实：
+
+真实 UI 热路径是否调用 readParamPage：
+YES/NO
+
+真实 UI 热路径是否出现 loadAll=true：
+YES/NO
+
+真实 UI 热路径是否调用 open/readIndexPage/readRows：
+分别 YES/NO
+
+首屏前完整 PARAM parse 次数：
+
+首屏前传入 renderer 的总近似字节数：
+
+首屏前 index rows：
+
+首屏前 payload rows：
+
+首屏前 raw/Base64 数据近似大小：
+
+第一次可见行耗时：
+
+第一次实际 render 耗时：
+
+滚动到新区域后是否才发生新的 row payload fetch：
+
+是否发生 legacy fallback：
+
+fallback 原因：
+
+不要写：
+
+“看起来应该走新 API。”
+
+只能写运行时实际值。
+
+==================================================
+七、地图 m10_00_00_00 取证
+==================================================
+
+目标：
+
+确定当前地图从 MSB 到真实 FLVER geometry 的第一处断点。
+
+当前 UI 的 point/小方块/wireframe 不是成功证据。
+
+本轮禁止修地图。
+
+--------------------------------------------------
+
+A. 全局计数
+
+在一次 m10_00_00_00 加载期间统计：
+
+mapStaticGeometryCalls
+legacyReadMapPartMeshCalls
+
+MSB parse count
+
+mapbnd file read count
+mapbnd DCX decompress count
+BND parse count
+
+FLVER parse count
+
+nativeMeshCountTotal
+projectedMeshCountTotal
+rendererMeshCountTotal
+
+placeholderCount
+pointFallbackCount
+MAP_PART_MODEL_NOT_FOUND count
+
+这些计数必须按资源/source revision 能区分。
+
+至少能回答：
+
+同一个 mapbnd 在一次地图打开过程中究竟被读取/解压/解析了几次。
+
+不要通过修 cache 让数字变小。
+
+只记录当前行为。
+
+--------------------------------------------------
+
+B. MSB 层
+
+真实打开：
+
+m10_00_00_00
+
+记录：
+
+实际 MSB URI/path
+MSB 是否成功
+part 总数
+region 总数
+不同 modelName 数
+
+不要打印所有几千个 part。
+
+只采样：
+
+1. 第一个最终失败的 part
+2. 第一个最终成功拿到真实 mesh 的 part，如果存在
+3. 一个 modelName 重复出现的 part/model，如果存在
+
+如果一个真实 mesh 都没有成功：
+
+第 2 个样本写 NONE。
+
+--------------------------------------------------
+
+C. 对每个采样 part 建立完整链路
+
+每个样本输出：
+
+partName
+partType
+modelName
+
+然后记录资源解析器实际生成的：
+
+candidate map resource paths
+
+注意：
+
+必须输出程序“实际尝试”的候选。
+
+不是你根据 Sekiro 经验写出来的候选。
+
+每个 candidate 记录：
+
+path
+exists = true/false
+
+如果最终 selected：
+
+selectedMapBnd
+
+如果没有：
+
+selectedMapBnd = NONE
+failureStage = MAPBND_RESOLUTION
+
+--------------------------------------------------
+
+D. BND 层
+
+如果找到 mapbnd：
+
+记录：
+
+mapbnd path
+读取次数
+DCX decompress 次数
+BND parse 次数
+entryCount
+
+不要把所有 entry 名都打印。
+
+只打印：
+
+与当前 modelName 匹配过程实际检查/命中的相关 entry 名
+
+记录：
+
+candidateEntryNames
+selectedEntry
+
+如果 mapbnd 存在但 entry 没找到：
+
+failureStage = BINDER_ENTRY_RESOLUTION
+
+--------------------------------------------------
+
+E. FLVER 层
+
+如果找到 FLVER entry：
+
+记录 native parser 输出：
+
+flverParsed = true/false
+boneCount
+meshCount
+vertexCount
+indexCount
+faceSetCount
+
+如果能在不修改 parser 语义的前提下直接读到现有 FaceSet metadata：
+
+额外统计：
+
+triangleListFaceSetCount
+triangleStripFaceSetCount
+
+只记录。
+
+禁止 triangulate。
+
+如果 FLVER parser meshCount = 0：
+
+failureStage = NATIVE_FLVER_MESH_ZERO
+
+--------------------------------------------------
+
+F. Projection/DTO 层
+
+如果 native meshCount > 0：
+
+记录投影/DTO 后：
+
+projectedMeshCount
+projectedVertexCount
+projectedIndexCount
+
+如果：
+
+native meshCount > 0
+但 projected meshCount == 0
+
+则：
+
+failureStage = MESH_PROJECTION_ZERO
+
+不要修。
+
+--------------------------------------------------
+
+G. renderer 层
+
+记录 renderer 实际收到：
+
+chunk count
+mesh DTO count
+vertex/index count
+
+记录：
+
+Three/WebGL geometry 创建数量
+
+如果 renderer 收到 meshCount > 0，
+但画面仍然没有真实 geometry：
+
+failureStage = RENDERER_GEOMETRY_NOT_PRESENT
+
+只记录。
+
+--------------------------------------------------
+
+H. fallback
+
+每次 point cloud / placeholder / wireframe fallback 被激活：
+
+记录：
+
+fallback type
+reason
+origin function
+对应 modelName
+上游 errorCode
+
+尤其：
+
+MAP_PART_MODEL_NOT_FOUND
+
+必须找到：
+
+是谁创建这个 errorCode
+它创建时已经尝试了哪些 candidates
+最后失败在哪一步
+
+不能只写：
+
+“地图没找到模型。”
+
+--------------------------------------------------
+
+I. 地图报告必须最终给出一条明确链路
+
+例如仅作为格式示例：
+
+m10_00_00_00
+MSB = OK
+part = XXX
+modelName = XXX
+candidate mapbnd = [...]
+selected mapbnd = NONE
+FIRST FAILURE = MAPBND_RESOLUTION
+
+或者：
+
+MSB = OK
+mapbnd = OK
+binder entry = OK
+native FLVER = 23 meshes
+DTO = 0 meshes
+FIRST FAILURE = MESH_PROJECTION_ZERO
+
+这只是格式。
+
+实际值必须来自运行日志。
+
+==================================================
+八、动作 c0000 取证
+==================================================
+
+目标：
+
+找出：
+
+c0000 的 mesh 到底在哪一层变成了 0。
+
+当前 UI 已经能看到骨骼，但显示：
+
+467 bones
+0 meshes
+
+不要播放动画。
+
+本轮完全不进入动画正确性修复。
+
+--------------------------------------------------
+
+A. cold run
+
+完全关闭 SoulForge。
+
+重新启动。
+
+进入动作页。
+
+打开：
+
+c0000
+
+不要点击播放。
+
+不要主动选择其他动画进行测试。
+
+只观察静态 FLVER 模型建立过程。
+
+--------------------------------------------------
+
+B. 记录容器路径
+
+记录：
+
+requested character = c0000
+
+实际选中的：
+
+chrbnd path/URI
+source revision，如果已有
+文件是否存在
+文件读取次数
+DCX decompress 次数
+BND parse 次数
+
+记录 binder：
+
+entryCount
+
+只输出相关 entry：
+
+FLVER candidate entries
+selected FLVER entry
+
+如果选择 FLVER 有匹配算法：
+
+记录它实际输入、实际候选和最终选择。
+
+不要修改选择算法。
+
+--------------------------------------------------
+
+C. native FLVER parser
+
+在真正完成 FLVER parse 后立即记录：
+
+boneCount
+meshCount
+totalVertexCount
+totalIndexCount
+faceSetCount
+
+这是最重要的断点之一。
+
+不要使用 renderer 显示的 “467 bones / 0 meshes” 反推 native。
+
+必须直接在 native parser 完成的位置采样。
+
+如果 native 输出：
+
+467 bones
+46 meshes
+
+就原样记录 46。
+
+如果 native 本身就是：
+
+467 bones
+0 meshes
+
+也原样记录。
+
+--------------------------------------------------
+
+D. mesh projection / DTO
+
+下一层记录：
+
+inputNativeMeshCount
+outputDtoMeshCount
+dtoVertexCount
+dtoIndexCount
+
+如果逐 mesh 生成 DTO：
+
+记录：
+
+requested mesh indexes
+成功数
+失败数
+
+只对失败的前 3 个保存：
+
+mesh index
+错误码/原因
+
+不要打印 46 次完整大日志。
+
+--------------------------------------------------
+
+E. preload/main IPC
+
+记录动作模型整个加载过程中：
+
+readTaeChrbndPreview call count
+read-chrbnd-flver-preview call count
+
+如果 API 存在 meshIndex：
+
+记录不同 meshIndex 请求数量。
+
+同时统计：
+
+chrbnd 被重新读取多少次
+DCX 被重新解压多少次
+同一个 FLVER 被重新 parse 多少次
+
+目的只是证明当前行为。
+
+不要建立 session。
+不要优化。
+
+--------------------------------------------------
+
+F. renderer
+
+记录 renderer 收到：
+
+bones
+meshes
+vertices
+indices
+
+再记录真正创建：
+
+BufferGeometry count
+Mesh count
+SkinnedMesh count
+
+但是不要改 skinning。
+
+--------------------------------------------------
+
+G. 明确第一处数量变化
+
+最终报告必须给出：
+
+container/binder:
+FLVER entry selected:
+
+native:
+bones =
+meshes =
+vertices =
+indices =
+
+DTO:
+meshes =
+vertices =
+indices =
+
+renderer receive:
+meshes =
+
+GPU geometry create:
+geometry =
+
+然后写：
+
+LAST GOOD STAGE =
+FIRST BAD STAGE =
+
+例如：
+
+native = 46 meshes
+DTO = 0
+那么第一坏点就是 DTO projection。
+
+如果：
+
+native = 0
+
+那么不要再讨论 NormalW/HKX。
+
+第一坏点在 native 之前或 native parse 本身。
+
+--------------------------------------------------
+
+H. 本轮禁止调查以下问题
+
+即使搜索代码时看到：
+
+NormalW
+UsesBoneWeights
+UsesBoneIndices
+Weighted4
+SkinnedMesh
+BindPose
+HKX remap
+
+也只能记录文件位置。
+
+禁止继续调试它们。
+
+只有确认：
+
+静态 FLVER mesh > 0
+
+之后，下一轮才会进入这些内容。
+
+==================================================
+九、rollback / transaction 取证
+==================================================
+
+这个场景会发生真实写入。
+
+必须先保证安全。
+
+禁止写原版 Sekiro 文件。
+
+只能测试 MOD overlay / 当前 Patch Engine 正常允许写入的文件。
+
+--------------------------------------------------
+
+A. 安全准备
+
+在运行修改之前：
+
+确定 ItemName[1000] 最终会写到哪个 mod-overlay 文件。
+
+记录：
+
+target writable file
+
+确认它不是原版 game source。
+
+如果无法明确证明写的是 mod overlay：
+
+立即停止 rollback 场景。
+
+报告：
+
+BLOCKED_UNSAFE_WRITE_TARGET
+
+不要继续。
+
+确定目标文件以后：
+
+在 tmp/forensics/main-hotpaths/ 下保存一份测试前的字节级备份。
+
+记录：
+
+backup path
+原文件 size
+mtime
+
+可以额外计算这一份小范围目标文件的 SHA256 作为辅助证据。
+
+不要对整个游戏目录 hash。
+
+--------------------------------------------------
+
+B. 先读真正修改前的权威值
+
+目标固定为：
+
+domain = msg
+table/container = ItemName
+entryId = 1000
+field = text
+
+使用当前产品已有的 authority/native read 路径读取。
+
+记录：
+
+PRE_IMAGE = A
+
+这里的 A 是真正读取到的原值。
+
+不要从聊天历史猜。
+
+不要从 React store 猜。
+
+不要从截图猜。
+
+--------------------------------------------------
+
+C. 执行真实用户流程
+
+使用真实 SoulForge UI/Agent。
+
+要求执行：
+
+把 Msg.Entry / ItemName / 1000 改成：
+
+苇名国の壶
+
+应用。
+
+自动提交。
+
+不要直接在文件系统手改来模拟 transaction。
+
+必须走产品真实 Agent / tool / Patch Engine 路径。
+
+--------------------------------------------------
+
+D. 从修改开始跟踪 identity
+
+从用户请求开始记录：
+
+agent request
+tool call
+tool arguments
+draft operation
+ChangeSet/transaction
+commit
+Patch Engine
+
+每一层如果有 target，全部记录 canonical 字段：
+
+domain
+resourceKind
+table/container
+entryId
+field
+language
+document URI
+workspace/scope
+
+关键要求：
+
+不要只记录 UI label。
+
+例如“物品名称”不是 canonical identity。
+
+必须记录程序内部真正使用的字段。
+
+--------------------------------------------------
+
+E. 捕获原 transaction
+
+如果当前系统存在 transactionId：
+
+记录：
+
+originalTransactionId
+
+如果不存在：
+
+明确写：
+
+originalTransactionId = MISSING
+
+不要本轮补它。
+
+记录 transaction 当前真正保存的：
+
+target
+pre-image，如果存在
+post-image，如果存在
+status
+operations
+
+如果 journal 根本没有这些字段：
+
+写 MISSING。
+
+不要新增字段。
+
+--------------------------------------------------
+
+F. commit 后 authority readback
+
+Agent/工具宣称 commit 成功以后：
+
+不要相信 UI。
+
+使用已有 authority/backend read 路径重新读取：
+
+ItemName[1000]
+
+记录：
+
+POST_COMMIT_AUTHORITY_VALUE
+
+预期这次正常测试应该看到：
+
+苇名国の壶
+
+但如果不是：
+
+也不要修。
+
+原样记录。
+
+同时记录 UI 当前显示：
+
+POST_COMMIT_UI_VALUE
+
+这样把：
+
+authority state
+UI state
+
+分开。
+
+--------------------------------------------------
+
+G. 点击真实“回滚”按钮
+
+必须点击截图中审计/历史里的真实回滚按钮。
+
+不要手动调用 backend rollback 函数代替。
+
+从点击开始记录：
+
+UI rollback handler
+
+UI 实际传入什么：
+
+transactionId?
+history item?
+自然语言?
+resource?
+file?
+其他?
+
+完整记录结构，但不要记录 secret。
+
+然后一直跟踪：
+
+UI
+→ Agent/session（如果经过）
+→ tool selection
+→ tool arguments
+→ transaction/journal lookup
+→ draft/discard/revert
+→ commit
+→ Patch Engine
+→ authority
+
+--------------------------------------------------
+
+H. 专门抓 ItemName → Goods 漂移
+
+这一点是硬要求。
+
+在 rollback trace 的每一个拥有 target 信息的阶段记录：
+
+target.domain
+target.table/container
+target.entryId
+target.field
+
+一旦首次出现：
+
+Goods
+EquipParamGoods
+Goods 名称
+或其他不再属于 Msg/ItemName 的 canonical target
+
+立刻增加一条 trace：
+
+result = error/finding
+errorCode = TARGET_IDENTITY_DRIFT
+
+并记录：
+
+FIRST_DRIFT_FILE
+FIRST_DRIFT_FUNCTION
+INPUT_TARGET
+OUTPUT_TARGET
+
+但是：
+
+不要停止整个 rollback 用户操作。
+
+继续观察它最后实际做了什么。
+
+更不要修。
+
+--------------------------------------------------
+
+I. 记录 rollback 实际动作
+
+必须回答：
+
+用户点“回滚”以后，最终执行的是哪种底层行为？
+
+例如实际可能是：
+
+discard_draft
+discard_all
+revert
+restore backup
+new mutation
+LLM 重新调用 mutate tool
+什么都没调用
+
+不能根据函数名猜。
+
+必须用 runtime trace 证明。
+
+记录：
+
+ROLLBACK_BACKEND_ACTION = <真实动作>
+
+如果它实际只 discard draft：
+
+就记录 discard。
+
+不要评价或修复。
+
+--------------------------------------------------
+
+J. rollback 后 authority readback
+
+回滚链路自己返回以后：
+
+再次使用已有 authority/backend read 路径读取：
+
+Msg / ItemName / 1000
+
+记录：
+
+POST_ROLLBACK_AUTHORITY_VALUE
+
+然后单独记录：
+
+POST_ROLLBACK_UI_VALUE
+
+绝对不能只看 UI。
+
+如果没有任何现有方式能绕过 renderer cache 直接读取 authority：
+
+不要临时实现新 API。
+
+写：
+
+AUTHORITATIVE_READBACK_UNAVAILABLE
+
+并说明为什么。
+
+如果可以通过已有 Bridge/native document read 完成，就使用已有路径。
+
+--------------------------------------------------
+
+K. rollback outcome 分类
+
+根据实际证据，只允许选择下面一种或多种：
+
+R1_TARGET_IDENTITY_DRIFT
+含义：
+ItemName/1000 在某一层变成 Goods/1000 或其他 target。
+
+R2_BACKEND_ROLLBACK_NOOP_OR_WRONG_SEMANTICS
+含义：
+target 没漂，但底层实际没有生成恢复动作，或者只 discard 了已经不存在的 draft。
+
+R3_ROLLBACK_COMMIT_FAILED
+含义：
+真正恢复动作存在，但 commit/write 失败。
+
+R4_AUTHORITY_RESTORED_UI_STALE
+含义：
+authority 已恢复 A，但 UI 仍显示 B。
+
+R5_TRANSACTION_EVIDENCE_MISSING
+含义：
+系统没有足够 transaction identity / pre-image / post-image / journal 信息证明自己在回滚什么。
+
+R6_OTHER
+必须附精确证据。
+
+不要为了选一个分类强行排除其他同时存在的问题。
+
+--------------------------------------------------
+
+L. 清理测试数据
+
+无论 rollback 成功还是失败：
+
+在全部 trace 已保存之后：
+
+完全关闭 SoulForge。
+
+使用测试开始前保存的字节级备份，把该 mod-overlay 测试文件恢复到测试前状态。
+
+再次确认：
+
+目标是 mod-overlay 文件。
+
+绝对不要覆盖原版游戏文件。
+
+记录：
+
+TEST_FILE_RESTORED = YES/NO
+
+如果恢复失败：
+
+不要继续其他写操作。
+明确报告。
+
+==================================================
+十、不要让 trace 自己把性能测坏
+==================================================
+
+不要在每个顶点打印日志。
+
+不要在每个 PARAM row 打印日志。
+
+不要在每个地图 part 打印完整对象。
+
+不要在每个 index 打印日志。
+
+使用：
+
+汇总计数
+关键阶段
+有限样本
+
+地图只详细记录：
+
+第一个失败 part
+第一个成功 mesh part
+一个重复 modelName 样本
+
+动作只详细记录：
+
+整体统计
+最多前三个异常 mesh
+
+PARAM 不记录完整 row payload。
+
+否则你测到的会是日志系统的性能。
+
+==================================================
+十一、完成运行以后做静态-动态对应
+==================================================
+
+对每一条 runtime stage：
+
+回到代码。
+
+确认它对应的：
+
+文件
+函数
+行号
+
+最终不能只有：
+
+“bridge 花了 3 秒”。
+
+必须能够写成：
+
+stage:
+runtime evidence:
+file:
+function:
+line:
+input:
+output:
+
+这样下一轮修复 Agent 才能直接定位。
+
+==================================================
+十二、生成 First Divergence Matrix
+==================================================
+
+report.md 中必须包含一个表：
+
+Flow | Last Good Stage | First Bad Stage | Observed Input | Observed Output | Evidence
+
+四行：
+
+PARAM
+MAP
+ACTION
+ROLLBACK
+
+注意 PARAM 的“bad”可以是性能契约偏离，例如：
+
+真实热路径仍进入 legacy loadAll
+
+而地图/动作则主要是数据首次丢失的位置。
+
+如果证据还不足以判断：
+
+First Bad Stage = UNKNOWN
+
+不要猜。
+
+==================================================
+十三、PARAM 最终摘要固定格式
+==================================================
+
+必须原样填：
+
+PARAM TEST TABLE:
+ROW COUNT:
+
+Renderer entry:
+Preload method:
+Main IPC:
+Bridge command:
+Native parser/session:
+
+Runtime legacy readParamPage calls:
+Runtime loadAll=true calls:
+Runtime open calls:
+Runtime readIndexPage calls:
+Runtime readRows calls:
+
+PARAM full-document parse count:
+
+Rows available before first render:
+Payload rows transferred before first render:
+
+Bytes transferred before first render:
+Raw/Base64 bytes before first render:
+
+Request → first rows received:
+Request → first rows rendered:
+
+Offscreen row payload loaded before visit:
+YES/NO/UNKNOWN
+
+Fallback observed:
+YES/NO
+Fallback reason:
+
+Last good stage:
+First divergence:
+
+==================================================
+十四、地图最终摘要固定格式
+==================================================
+
+MAP:
+m10_00_00_00
+
+MSB URI:
+MSB parsed:
+Part count:
+Region count:
+Unique modelName count:
+
+readMapStaticGeometry runtime calls:
+legacy readMapPartMesh runtime calls:
+
+mapbnd reads:
+DCX decompressions:
+BND parses:
+FLVER parses:
+
+MAP_PART_MODEL_NOT_FOUND count:
+placeholder/point fallback count:
+
+FIRST FAILED PART:
+
+part:
+modelName:
+
+actual candidates:
+selected mapbnd:
+selected binder entry:
+
+native FLVER meshCount:
+native vertexCount:
+native indexCount:
+
+DTO meshCount:
+renderer meshCount:
+
+Last good stage:
+First bad stage:
+Exact error/fallback origin file:
+Exact function:
+
+==================================================
+十五、动作最终摘要固定格式
+==================================================
+
+ACTION:
+c0000
+
+chrbnd URI:
+selected FLVER entry:
+
+chrbnd reads:
+DCX decompressions:
+BND parses:
+FLVER parses:
+
+readTaeChrbndPreview calls:
+read-chrbnd-flver-preview calls:
+
+NATIVE:
+bones:
+meshes:
+vertices:
+indices:
+faceSets:
+
+DTO:
+meshes:
+vertices:
+indices:
+
+RENDERER:
+bones:
+meshes:
+vertices:
+indices:
+
+GPU:
+BufferGeometry:
+Mesh:
+SkinnedMesh:
+
+Last good stage:
+First bad stage:
+
+Do not analyze HKX:
+CONFIRMED
+
+Do not analyze NormalW/skinning:
+CONFIRMED
+
+==================================================
+十六、rollback 最终摘要固定格式
+==================================================
+
+ROLLBACK TEST:
+
+Writable mod target:
+Backup created:
+Original authority value:
+
+Original mutation target:
+
+domain:
+table/container:
+entryId:
+field:
+language:
+document:
+scope:
+
+Original transactionId:
+Original pre-image:
+Original post-image:
+Original status:
+
+Authority after commit:
+UI after commit:
+
+Rollback UI input:
+
+Rollback tool/action selected:
+
+Rollback backend action:
+
+First target identity drift:
+NONE
+或者精确写：
+file:
+function:
+input:
+output:
+
+Any Goods/1000 target observed:
+YES/NO
+
+Rollback commit result:
+
+Authority after rollback:
+UI after rollback:
+
+Outcome classification:
+R1/R2/R3/R4/R5/R6
+
+Test file restored:
+YES/NO
+
+==================================================
+十七、给出全局调用次数和性能计数
+==================================================
+
+单独做一个 counters 部分。
+
+PARAM：
+
+readParamPage =
+loadAllTrue =
+open =
+readIndexPage =
+readRows =
+paramDocumentParse =
+bytesToFirstRender =
+
+MAP：
+
+readMapStaticGeometry =
+readMapPartMesh =
+mapbndRead =
+mapbndDecompress =
+bndParse =
+flverParse =
+meshesNative =
+meshesProjected =
+meshesRenderer =
+
+ACTION：
+
+chrbndRead =
+chrbndDecompress =
+bndParse =
+flverParse =
+previewCalls =
+meshesNative =
+meshesDto =
+meshesRenderer =
+
+ROLLBACK：
+
+transactionsObserved =
+commitCalls =
+discardCalls =
+revertCalls =
+authorityReadbacks =
+uiInvalidations =
+
+如果某项无法获得：
+
+写 UNKNOWN。
+
+不要填 0。
+
+0 表示你已经插桩并且确认一次都没有发生。
+
+UNKNOWN 表示无法观察。
+
+这两个必须严格区分。
+
+==================================================
+十八、检查自己的 diff，防止你偷偷修了东西
+==================================================
+
+完成全部取证以后运行：
+
+git status --short
+git diff --stat
+git diff
+
+逐个检查你改过的文件。
+
+允许留下的变化只有：
+
+trace
+counter
+timer
+diagnostic helper
+report/log
+
+如果 diff 中出现：
+
+业务分支变化
+fallback 变化
+cache 变化
+API 路由切换
+解析算法变化
+renderer 行为变化
+rollback 行为变化
+transaction schema 变化
+
+说明你越权了。
+
+把这些功能变化恢复掉。
+
+只留下纯插桩。
+
+不要恢复用户在任务开始前已经存在的修改。
+
+==================================================
+十九、最终报告中不要写“我已经修好了”
+==================================================
+
+这是纯取证。
+
+最终回答不得出现：
+
+“问题已经解决”
+“已经优化”
+“已经修复”
+“现在应该正常”
+“测试全部通过，所以功能正常”
+
+你只允许报告：
+
+观察到了什么。
+
+==================================================
+二十、根因判断规则
+==================================================
+
+可以在报告最后增加：
+
+Observed Facts
+
+和：
+
+Possible Explanations
+
+但两者必须严格分开。
+
+Observed Facts 只能写 trace 直接证明的事实。
+
+Possible Explanations 最多写 3 条。
+
+每条 hypothesis 必须引用对应的 runtime evidence。
+
+禁止：
+
+“根据经验应该是……”
+“看起来可能是……所以我顺便修了……”
+“新 API 已存在，所以 renderer 应该在使用……”
+“contract test 通过，所以真实产品也在使用……”
+
+尤其记住：
+
+静态代码里“存在 readMapStaticGeometry”
+不证明真实地图使用它。
+
+静态代码里“存在 PARAM session”
+不证明真实 PARAM 使用它。
+
+静态代码里“存在 rollback”
+不证明回滚按钮调用它。
+
+必须以真实 UI 触发后的 runtime trace 为准。
+
+==================================================
+二十一、任务完成判据
+==================================================
+
+只有以下条件全部满足，本轮取证才算完成：
+
+PARAM：
+真实 cold UI 操作已经运行，并拿到了 renderer → preload → main → bridge/native 的调用证据和数据量/解析次数。
+
+地图：
+真实打开了 m10_00_00_00，并至少得到第一个失败 part 的完整解析链和第一失败阶段。
+
+动作：
+真实打开了 c0000，并确认 native / DTO / renderer 三层各自的 mesh 数，从而知道 mesh 首次在哪一层变成 0。
+
+rollback：
+安全地执行了真实 ItemName[1000] 修改、commit、真实 UI 回滚，并记录 target identity、实际 backend action、authority readback 和 UI readback。
+
+所有测试：
+必须来自真实产品 renderer/UI 路径。
+
+mock 不算。
+
+unit test 不算。
+
+直接调用 backend 函数不算替代真实 UI。
+
+contract verifier 不算替代真实 UI。
+
+如果因为环境原因导致其中一项无法运行：
+
+不要假装完成。
+
+写：
+
+BLOCKED
+
+并精确说明：
+
+缺什么
+在哪一步被阻断
+已经获得哪些证据
+还缺哪些证据
+
+==================================================
+二十二、最终交付形式
+==================================================
+
+从本节开始，本节规则覆盖前文所有关于：
+
+runtime.jsonl
+report.md
+多个日志文件
+多个交付文件
+分别提交原始 trace
+
+的要求。
+
+最终只能生成和交付一个 Markdown 文件。
+
+禁止交付第二个文件。
+
+禁止单独交付：
+
+runtime.jsonl
+txt
+json
+csv
+zip
+截图包
+日志目录
+附件目录
+其他辅助文件
+
+所有取证信息必须进入同一个 Markdown 文件。
+
+最终文件固定为：
+
+tmp/forensics/main-hotpaths/forensics.md
+
+这是本任务唯一允许交付给用户的文件。
+
+--------------------------------------------------
+A. runtime trace 也放进 Markdown
+--------------------------------------------------
+
+前文要求产生的机器可读 runtime trace 仍然要采集。
+
+但是不得最终单独保存为 runtime.jsonl 交付。
+
+运行过程中如果为了采集方便临时产生：
+
+runtime.jsonl
+临时 log
+临时 trace
+
+可以存在于 tmp 中。
+
+最终必须把真正用于结论的 runtime evidence 汇总进入：
+
+tmp/forensics/main-hotpaths/forensics.md
+
+然后删除这些由本任务产生的临时 trace/log 文件。
+
+不要删除用户任务开始前已经存在的文件。
+
+最终：
+
+tmp/forensics/main-hotpaths/
+
+中本任务新增并保留下来的交付文件只能有：
+
+forensics.md
+
+--------------------------------------------------
+B. Markdown 内保存原始机器证据
+--------------------------------------------------
+
+forensics.md 不能只有人工总结。
+
+必须同时保留：
+
+1. 人类可读的整理报告
+2. 支撑关键结论的原始 runtime trace
+
+在 Markdown 最后建立：
+
+# Raw Runtime Evidence
+
+下面按四个 flow 分：
+
+## PARAM Raw Trace
+
+## MAP Raw Trace
+
+## ACTION Raw Trace
+
+## ROLLBACK Raw Trace
+
+把用于结论的单行 JSON trace 原样放入 fenced code block。
+
+例如：
+
+```jsonl
+{"schema":"SOULFORGE_HOTPATH_FORENSICS_V1", ...}
+{"schema":"SOULFORGE_HOTPATH_FORENSICS_V1", ...}
+不要为了减小篇幅删掉决定：
+
+Last Good Stage
+First Bad Stage
+调用次数
+字节量
+parse 次数
+target identity drift
+authority readback
+fallback
+
+所必需的 trace。
+
+但是仍然禁止输出：
+
+完整 raw bytes
+完整 Base64
+完整 FLVER
+完整 BND
+几千行 row
+几千个 map part
+secret
+token
+cookie
+
+使用前文规定的汇总和有限样本。
+
+C. forensics.md 固定结构
+
+最终 Markdown 必须按下面顺序组织：
+
+SoulForge Main Hotpath Forensics
+1. Build Identity
+
+包括：
+
+commit SHA
+branch
+run command
+test workspace
+任务开始时间
+任务结束时间
+任务开始前 git status
+
+2. Static Route Map
+
+分别包含：
+
+PARAM
+MAP
+ACTION
+ROLLBACK
+
+每一层写：
+
+文件
+函数
+行号
+下一层调用
+
+3. PARAM Runtime Evidence
+
+包含前文要求的 PARAM 全部最终摘要、时序、调用次数和证据。
+
+4. MAP Runtime Evidence
+
+包含 m10_00_00_00 的完整断点证据。
+
+5. ACTION Runtime Evidence
+
+包含 c0000 从 container 到 native/DTO/renderer/GPU 的 mesh 数量变化。
+
+6. ROLLBACK Runtime Evidence
+
+包含：
+
+ItemName[1000]
+修改前 authority
+commit 后 authority
+真实 rollback UI 输入
+真实 backend action
+target identity
+Goods 漂移检查
+rollback 后 authority
+rollback 后 UI
+
+7. First Divergence Matrix
+
+表格：
+
+Flow | Last Good Stage | First Bad Stage | Observed Input | Observed Output | Evidence
+
+四行：
+
+PARAM
+MAP
+ACTION
+ROLLBACK
+
+8. Counters
+
+完整列出前文要求的全部计数器。
+
+UNKNOWN 与 0 必须严格区分。
+
+9. Observed Facts
+
+只写 runtime/static evidence 可以直接证明的事实。
+
+禁止解释性语言混进这里。
+
+10. Possible Explanations
+
+最多 3 条。
+
+每一条必须引用本文件中对应的 evidence/trace。
+
+不能把 hypothesis 写成事实。
+
+11. Unresolved / Blocked Evidence
+
+所有因为环境、权限、缺失 API、无法安全写入等原因没有完成的内容全部放这里。
+
+不能隐藏。
+
+12. Instrumentation Changes
+
+列出本次为了取证修改的：
+
+文件
+函数
+修改目的
+
+只允许 trace/counter/timer/diagnostic。
+
+13. Git Diff Audit
+
+放：
+
+任务开始前 dirty 文件
+任务结束后 dirty 文件
+git diff --stat
+
+并说明：
+
+哪些变化是用户原有的
+哪些变化是本任务 instrumentation
+
+14. Test Cleanup
+
+必须写：
+
+临时测试数据是否恢复
+rollback 测试 mod-overlay 是否恢复
+临时 trace 文件是否删除
+最终是否只留下 forensics.md
+
+15. Raw Runtime Evidence
+
+下面包含：
+
+PARAM Raw Trace
+MAP Raw Trace
+ACTION Raw Trace
+ROLLBACK Raw Trace
+
+==================================================
+二十三、最终文件自检
+
+在交付前检查：
+
+test -f tmp/forensics/main-hotpaths/forensics.md
+
+然后检查本任务最终留下的新增文件。
+
+最终不得存在本任务产生并遗留的：
+
+runtime.jsonl
+*.log
+*.trace
+*.json
+*.txt
+额外报告文件
+
+如果运行环境不支持上面的 shell 命令，用等价命令检查。
+
+注意：
+
+不要误删任务开始前就存在的用户文件。
+
+检查 forensics.md 是否包含：
+
+Build Identity
+Static Route Map
+PARAM Runtime Evidence
+MAP Runtime Evidence
+ACTION Runtime Evidence
+ROLLBACK Runtime Evidence
+First Divergence Matrix
+Counters
+Observed Facts
+Possible Explanations
+Unresolved / Blocked Evidence
+Instrumentation Changes
+Git Diff Audit
+Test Cleanup
+Raw Runtime Evidence
+
+缺任何一项都不算完成。
+
+检查四个 flow：
+
+PARAM
+MAP
+ACTION
+ROLLBACK
+
+每个必须明确写出：
+
+Last Good Stage
+First Bad Stage
+
+如果无法判断：
+
+First Bad Stage = UNKNOWN
+
+并附为什么 UNKNOWN。
+
+==================================================
+二十四、再次审计代码 diff
+
+运行：
+
+git status --short
+git diff --stat
+git diff
+
+确认代码修改仍然只有：
+
+trace
+counter
+timer
+diagnostic
+
+如果发现任何修复性质的修改：
+
+业务逻辑
+解析逻辑
+路由切换
+cache
+fallback
+transaction schema
+rollback 行为
+renderer 行为
+资源解析行为
+
+恢复这些越权修改。
+
+不要恢复用户任务开始前已有修改。
+
+forensics.md 中的结论不要因为恢复 instrumentation 外的误修改而删除。
+
+==================================================
+二十五、聊天中的最终回复规则
+
+不要把取证报告正文贴进聊天。
+
+不要把：
+
+摘要
+根因分析
+表格
+runtime trace
+结论
+调用链
+计数器
+
+复制到聊天回复里。
+
+不要在聊天里重新讲一遍报告。
+
+不要输出：
+
+“PARAM 的问题是……”
+“地图断在……”
+“动作断在……”
+“rollback 是因为……”
+
+这些内容全部只存在 forensics.md 中。
+
+聊天最终回复必须非常短。
+
+只允许说明：
+
+取证完成或被阻断
+唯一交付文件的位置
+
+如果完整完成，最终回复类似：
+
+取证完成。唯一交付文件：
+tmp/forensics/main-hotpaths/forensics.md
+
+如果任务存在 BLOCKED 项，但已经形成了现有证据报告：
+
+取证已完成到当前环境允许的范围，阻断信息已写入唯一交付文件：
+tmp/forensics/main-hotpaths/forensics.md
+
+不要追加报告内容。
+
+==================================================
+二十六、禁止自动进入修复阶段
+
+完成 forensics.md 后立即停止。
+
+不要：
+
+修 PARAM
+修地图
+修动作
+修 rollback
+设计修复
+写下一阶段代码
+自行创建 TODO
+自行启动新 Agent
+自行提交
+自行 push
+
+即使 forensics.md 已经把 bug 精确定位到一行代码，也不能修。
+
+本轮只负责取得证据。
+
+==================================================
+二十七、最终完成条件
+
+任务只有同时满足以下条件才算完成：
+
+真实 SoulForge UI 路径已经用于取证，而不是 mock 替代。
+PARAM 已经完成真实 cold run，或者明确记录 BLOCKED。
+m10_00_00_00 已经完成真实地图运行取证，或者明确记录 BLOCKED。
+c0000 已经完成 native → DTO → renderer mesh 数取证，或者明确记录 BLOCKED。
+rollback 已经完成安全测试，或者因为无法证明写入目标安全而明确记录 BLOCKED_UNSAFE_WRITE_TARGET。
+四条链路的证据全部写入 forensics.md。
+决定核心结论所需的 Raw Runtime Evidence 已经嵌入 forensics.md。
+本任务产生的临时 runtime/log/trace 文件已经清理。
+本任务最终只交付一个 Markdown 文件：
+
+tmp/forensics/main-hotpaths/forensics.md
+
+聊天里没有粘贴报告正文。
+没有修复任何被发现的问题。
+没有 commit。
+没有 push。
+
+满足后立即停止。

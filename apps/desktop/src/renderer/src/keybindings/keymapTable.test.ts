@@ -90,7 +90,7 @@ describe('固定键位表完整性', () => {
         assert.ok(ids.has(`${domain}.${id}`), `${domain} 视口表缺 ${id}`);
       }
       const keys = keysOf(table).join('|');
-      for (const required of ['WASD', 'Q/E', '右键', 'Shift', 'Ctrl', '滚轮', 'F', 'X', 'R', 'Shift+W/E/G', 'Esc']) {
+      for (const required of ['WASD', 'Q/E', '右键', 'Shift+WASD', 'Ctrl', '滚轮', 'F', 'X', 'R', '工具栏按钮', 'Esc']) {
         assert.ok(keys.includes(required), `${domain} 视口表缺 ${required}`);
       }
       assert.ok(table.every((entry) => entry.scope === 'domain' && entry.domain === domain),
@@ -230,10 +230,12 @@ describe('resolveKeybinding', () => {
     assert.ok(deselect.hit);
     if (deselect.hit) assert.equal(deselect.entry.id, 'model.deselect');
 
-    // gizmo：Shift+W/E/G 与普通 WASD 区分
-    const gizmo = resolveKeybinding(keyEvent({ key: 'w', shiftKey: true }), 'map', VIEWPORT);
-    assert.ok(gizmo.hit);
-    if (gizmo.hit) assert.equal(gizmo.entry.id, 'map.gizmo');
+    // Shift+WASD 属于漫游加速，不再与 Gizmo 工具栏冲突。
+    for (const key of ['w', 'a', 's', 'd']) {
+      const accelerated = resolveKeybinding(keyEvent({ key, shiftKey: true }), 'map', VIEWPORT);
+      assert.ok(accelerated.hit);
+      if (accelerated.hit) assert.equal(accelerated.entry.id, 'map.speed-up');
+    }
   });
 
   it('事件域键盘键命中', () => {

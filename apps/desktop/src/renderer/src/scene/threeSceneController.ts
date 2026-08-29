@@ -197,6 +197,8 @@ interface MountInput {
    * build, letting headless smoke assert every resource is disposed on release.
    */
   resourceAudit?: (resources: ReadonlyArray<{ dispose(): void }>) => void;
+  /** Headless functional-test seam; never used as scene authority. */
+  cameraAudit?: (camera: PerspectiveCamera) => void;
 }
 
 interface SceneCore {
@@ -257,6 +259,43 @@ export function resolveRendererBackend(
   return override ?? (gpuAvailable ? 'webgpu' : 'webgl2');
 }
 
+/**
+ * Derive a useful initial camera frame without changing the authoritative draw
+ * list or hiding any entities. Large native maps occasionally contain a small
+ * number of distant part placements; fitting the exact AABB makes the playable
+ * cluster a few pixels wide. For sufficiently large maps, trim one percent of
+ * placement centres at each axis edge for the initial camera only. Home/F keep
+ * using this stable navigation frame, while every part remains rendered and
+ * selectable.
+ */
+export function computeRobustInitialCameraBounds(list: SceneDrawList): FlverSceneBounds {
+  const partPositions = list.items
+    .filter((item) => item.entityKind === 'msb-part')
+    .map((item) => item.position)
+    .filter((position) => position.every(Number.isFinite));
+  if (partPositions.length < 32) return list.bounds;
+
+  const trim = Math.max(1, Math.floor(partPositions.length * 0.01));
+  const min: [number, number, number] = [0, 0, 0];
+  const max: [number, number, number] = [0, 0, 0];
+  for (let axis = 0; axis < 3; axis += 1) {
+    const values = partPositions.map((position) => position[axis]!).sort((a, b) => a - b);
+    const low = values[trim]!;
+    const high = values[values.length - trim - 1]!;
+    min[axis] = Object.is(low, -0) ? 0 : low;
+    max[axis] = Object.is(high, -0) ? 0 : high;
+  }
+  return {
+    min,
+    max,
+    center: [
+      (min[0] + max[0]) / 2,
+      (min[1] + max[1]) / 2,
+      (min[2] + max[2]) / 2
+    ]
+  };
+}
+
 export async function mountThreeProxyScene(
   input: MountInput & { drawList: SceneDrawList }
 ): Promise<ProxySceneHandle> {
@@ -288,7 +327,7 @@ export async function mountThreeProxyScene(
       }
       hasContent = true;
       if (!initialFramed) {
-        core.frameToBounds(list.bounds);
+        core.frameToBounds(computeRobustInitialCameraBounds(list));
         initialFramed = true;
       }
       if (prevSelected) {
@@ -557,6 +596,7 @@ async function mountSceneCore(input: MountInput): Promise<SceneCore> {
   const scene = new three.Scene();
   scene.background = new three.Color(0x1a1d23);
   const camera = new three.PerspectiveCamera(55, 1, 0.1, 50_000);
+  input.cameraAudit?.(camera);
   const root = new three.Group();
   scene.add(root);
   scene.add(new three.AmbientLight(0xffffff, 0.55));

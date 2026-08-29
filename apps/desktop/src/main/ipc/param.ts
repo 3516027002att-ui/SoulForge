@@ -54,6 +54,10 @@ import type { NativeDcxEnvelopeLike } from './bridgeEnvelopes.js';
 import { sanitizeDiagnostics, sanitizeRendererValue, type RendererSaveResult } from '../rendererDto.js';
 import type { TrustedIpcHandle } from './registration.js';
 import type { OperationLogUtilityClient } from '../operationLogUtilityClient.js';
+// Forensics counters (V1, pure diagnostic — no business logic change).
+const _forensicsCounters = new Map<string, number>();
+function _forensicsInc(key: string, delta = 1): void { _forensicsCounters.set(key, (_forensicsCounters.get(key) ?? 0) + delta); }
+export function getForensicsCounters(): Record<string, number> { return Object.fromEntries(_forensicsCounters); }
 const sessionBindings = new Map<string, { sourceUri: string; workspaceSessionId: string; sourceHash: string; pathSourceGeneration: number; entryIdentity?: string }>();
 // Isolated dummy for pre-split shared cache — real invalidation now via composition root (raw domain owns its cache).
 const containerChildrenCache = new Map<string, unknown>();
@@ -138,6 +142,7 @@ export function registerParamIpcHandlers(deps: ParamIpcDeps): void {
   // Slim PARAM session — Parse once → Project many (B6). C# ParamDocumentSessionCache is native authority;
   // Electron only keeps opaque token + lightweight binding. Never touches paramAllCache / includeAllPayloads.
   handle(PARAM_SESSION_IPC_CHANNELS.open, async (_event, request: unknown) => {
+    _forensicsInc('param:main:open:count');
     const req = request as { sourceUri?: string } | undefined;
     const sourceUri = typeof req?.sourceUri === 'string' ? req.sourceUri : '';
     const file = getFiles().find((item) => item.sourceUri === sourceUri);
@@ -212,6 +217,7 @@ export function registerParamIpcHandlers(deps: ParamIpcDeps): void {
     });
   });
   handle(PARAM_SESSION_IPC_CHANNELS.readIndexPage, async (_event, request: unknown) => {
+    _forensicsInc('param:main:readIndexPage:count');
     const req = request as { sourceUri?: string; sessionToken?: string; page?: number; pageSize?: number } | undefined;
     const sourceUri = typeof req?.sourceUri === 'string' ? req.sourceUri : '';
     const sessionToken = typeof req?.sessionToken === 'string' ? req.sessionToken : '';
@@ -263,6 +269,7 @@ export function registerParamIpcHandlers(deps: ParamIpcDeps): void {
   });
   // rowSelections — slim selected-row projection (B4.3)
   handle(PARAM_SESSION_IPC_CHANNELS.readRows, async (_event, request: unknown) => {
+    _forensicsInc('param:main:readRows:count');
     const req = request as { sourceUri?: string; sessionToken?: string; rows?: Array<{ rowIndex: number; id: number; dataHash: string }> } | undefined;
     const sourceUri = typeof req?.sourceUri === 'string' ? req.sourceUri : '';
     const sessionToken = typeof req?.sessionToken === 'string' ? req.sessionToken : '';
@@ -1272,6 +1279,8 @@ let paramMetadataCache: {
       query?: string,
       loadAll?: boolean
     ) => {
+      _forensicsInc('param:main:readParamPage:count');
+      if (loadAll) _forensicsInc('param:main:readParamPage:loadAllTrue:count');
       const file = getFiles().find((item) => item.sourceUri === sourceUri);
       const failure = (message: string, code = 'RESOURCE_NOT_INDEXED') => ({
         ok: false,

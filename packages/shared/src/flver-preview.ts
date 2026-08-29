@@ -65,6 +65,8 @@ export interface CharacterPreviewBundle {
   leaderModelId: string;
   models: FlverPreviewModel[];
   assemblyParts?: string[] | undefined;
+  /** A compatibility preview is deterministic, but does not represent save-game equipment. */
+  assemblyMode?: 'explicit' | 'compatibility-preview' | undefined;
 }
 
 export interface CharacterPreviewReadResult {
@@ -81,7 +83,13 @@ export function isCharacterPreviewBundle(value: unknown): value is CharacterPrev
     || !isNonNegativeInteger(value.vertexCount)
     || !isNonNegativeInteger(value.boneCount)
     || typeof value.leaderModelId !== 'string'
-    || !Array.isArray(value.models)) return false;
+    || !Array.isArray(value.models)
+    || (value.assemblyMode !== undefined
+      && value.assemblyMode !== 'explicit'
+      && value.assemblyMode !== 'compatibility-preview')
+    || (value.assemblyParts !== undefined
+      && (!Array.isArray(value.assemblyParts)
+        || !value.assemblyParts.every((part) => typeof part === 'string')))) return false;
   return value.models.every((candidate) => {
     if (!isRecord(candidate)
       || typeof candidate.modelId !== 'string'
@@ -110,7 +118,7 @@ function isPreviewMesh(value: unknown): boolean {
     || typeof value.indicesBase64 !== 'string'
     || (value.skinningMode !== 'weighted' && value.skinningMode !== 'rigid' && value.skinningMode !== 'static')
     || (value.boneIndexSpace !== 'flver-global' && value.boneIndexSpace !== 'none')) return false;
-  return ['uvsBase64', 'normalsBase64', 'boneWeightsBase64', 'boneIndicesBase64']
+  return ['uvsBase64', 'normalsBase64', 'boneWeightsBase64', 'boneIndicesBase64', 'skeletonId']
     .every((key) => value[key] === undefined || typeof value[key] === 'string');
 }
 

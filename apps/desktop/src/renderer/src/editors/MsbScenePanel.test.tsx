@@ -220,6 +220,10 @@ describe('Negative source tests（MAP-50B 五类覆盖）', () => {
     assert.doesNotMatch(html, /见底部日志/);
   });
 
+  it('视口帮助明确提示 Shift+WASD 加速漫游', () => {
+    assert.match(panelSource, /Shift\+WASD 加速/);
+  });
+
   it('resolvePartModelName 按 modelIndex 取逻辑名', () => {
     assert.equal(resolvePartModelName({ modelIndex: 1 }, [{ name: 'a' }, { name: 'm10_00_00_00_000080' }]), 'm10_00_00_00_000080');
     assert.equal(resolvePartModelName({}, [{ name: 'a' }]), null);

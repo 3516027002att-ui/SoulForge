@@ -535,6 +535,8 @@ describe('Negative source tests（ANIMATION-56B / ANIMATION-56C）', () => {
     assert.match(panelSource, /readTaeChrbndPreview\(props\.resourceUri\)/);
     assert.match(panelSource, /isCharacterPreviewBundle\(result\.data\)/);
     assert.match(panelSource, /externalBundle=\{preview\.bundle\}/);
+    assert.match(panelSource, /tae-preview-compatibility-notice/);
+    assert.match(panelSource, /这不代表存档当前装备/);
     assert.doesNotMatch(panelSource, /readTaeChrbndPreview\(props\.resourceUri,\s*index\)/);
     assert.doesNotMatch(panelSource, /meshIndex=\{0\}/);
   });

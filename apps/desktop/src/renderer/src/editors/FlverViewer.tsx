@@ -475,7 +475,7 @@ function buildSemanticScene(input: {
     if (input.texture) mesh.texture = input.texture;
     meshes.push(mesh);
   }
-  const bounds = computeSceneBounds(input.boundingBox, meshes);
+  const bounds = computeSceneBounds(input.boundingBox, meshes, input.skeleton.length > 0 ? 15 : 100);
   const bones = input.skeleton.map((bone, index) => ({
     id: `bone-${index}`,
     name: bone.name,
@@ -494,6 +494,7 @@ function buildSemanticScene(input: {
     meshes,
     ...(bones.length > 0 ? { bones } : {}),
     ...(dummies.length > 0 ? { dummies } : {}),
+    ...(meshes.length === 0 && bones.length > 0 ? { showSkeletonMarkers: true } : {}),
     bounds
   };
 }
@@ -525,7 +526,9 @@ export function buildBundleSemanticScene(
 
   for (const model of bundle.models) {
     for (const meshData of model.meshes) {
-      const mesh = decodeBundleMesh(model, meshData, texture);
+      const skeletonId = meshData.skeletonId ?? model.modelId;
+      const targetSkeleton = bundle.models.find((candidate) => candidate.modelId === skeletonId);
+      const mesh = decodeBundleMesh(model, meshData, texture, targetSkeleton?.bones.length ?? model.bones.length);
       meshes.push(mesh);
     }
   }
@@ -535,14 +538,16 @@ export function buildBundleSemanticScene(
   return {
     meshes,
     ...(skeletons.length > 0 ? { skeletons } : {}),
-    bounds: computeSceneBounds(boundingBox, meshes)
+    ...(meshes.length === 0 && skeletons.length > 0 ? { showSkeletonMarkers: true } : {}),
+    bounds: computeSceneBounds(boundingBox, meshes, skeletons.length > 0 ? 15 : 100)
   };
 }
 
 function decodeBundleMesh(
   model: FlverPreviewModel,
   meshData: FlverPreviewMesh,
-  texture: FlverSceneTexture | null
+  texture: FlverSceneTexture | null,
+  targetSkeletonBoneCount: number
 ): FlverSceneMesh {
   const label = `${model.entry.name}:mesh[${meshData.meshIndex}]`;
   const positions = decodeFloat32Array(meshData.positionsBase64, `${label}.positions`);
@@ -558,7 +563,7 @@ function decodeBundleMesh(
     indexSize: meshData.indexSize,
     skinningMode: meshData.skinningMode,
     boneIndexSpace: meshData.boneIndexSpace,
-    skeletonId: model.modelId,
+    skeletonId: meshData.skeletonId ?? model.modelId,
     vertexCount,
     wireframeOverlay: false
   };
@@ -586,7 +591,7 @@ function decodeBundleMesh(
     }
     mesh.skinIndices = decodeSkinIndices(meshData.boneIndicesBase64, vertexCount);
     mesh.skinWeights = decodeSkinWeights(meshData.boneWeightsBase64, vertexCount);
-    assertSkinIndices(mesh.skinIndices, mesh.skinWeights, model.bones.length, label);
+    assertSkinIndices(mesh.skinIndices, mesh.skinWeights, targetSkeletonBoneCount, label);
   }
   if (texture) mesh.texture = texture;
   return mesh;
@@ -621,7 +626,8 @@ function toMeshData(input: {
 
 function computeSceneBounds(
   boundingBox: { min: number[]; max: number[] } | undefined,
-  meshes: FlverSceneMesh[]
+  meshes: FlverSceneMesh[],
+  emptyFallbackSpan = 100
 ): FlverSemanticScene['bounds'] {
   const min: [number, number, number] = [Infinity, Infinity, Infinity];
   const max: [number, number, number] = [-Infinity, -Infinity, -Infinity];
@@ -647,12 +653,13 @@ function computeSceneBounds(
     }
   }
   if (!Number.isFinite(min[0])) {
-    min[0] = -50;
-    min[1] = -50;
-    min[2] = -50;
-    max[0] = 50;
-    max[1] = 50;
-    max[2] = 50;
+    const halfSpan = emptyFallbackSpan / 2;
+    min[0] = -halfSpan;
+    min[1] = -halfSpan;
+    min[2] = -halfSpan;
+    max[0] = halfSpan;
+    max[1] = halfSpan;
+    max[2] = halfSpan;
   }
   const [minX, minY, minZ] = min;
   const [maxX, maxY, maxZ] = max;

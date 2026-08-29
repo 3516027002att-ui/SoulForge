@@ -87,6 +87,7 @@
     "test:native-knowledge-refresh": "npm run test:native-knowledge-refresh -w @soulforge/core",
     "test:map-document-scale": "npm run test:map-document-scale -w @soulforge/core",
     "test:verify-map-action-open": "node scripts/verify-map-action-open.mjs",
+    "test:map-static-pagination-contract": "node scripts/verify-map-static-pagination-contract.mjs",
     "test:path-sanitizer": "npm run test:path-sanitizer -w @soulforge/shared",
     "test:action-deterministic-seek": "npm run test:action-deterministic-seek -w @soulforge/shared",
     "test:dds-convert-writeback": "npm run test:dds-convert-writeback -w @soulforge/core",

@@ -1,20 +1,38 @@
 import { existsSync } from 'node:fs';
+import { readdir } from 'node:fs/promises';
 import { basename, dirname, join, resolve, sep } from 'node:path';
 import {
   ingestBridgeResult,
   readTaeEventTemplateFile,
+  remapCharacterBundleToLeader,
   runBridge,
   type TaeEventTemplateInfo,
   type WorkspaceIndex,
   type WorkspaceSession
 } from '@soulforge/core';
-import type { Diagnostic, IndexedFile } from '@soulforge/shared';
+import {
+  isCharacterPreviewBundle,
+  type CharacterPreviewBundle,
+  type Diagnostic,
+  type FlverPreviewModel,
+  type IndexedFile
+} from '@soulforge/shared';
 import { sanitizeRendererValue } from '../rendererDto.js';
 import {
   decodeTaeParamFields,
   getTaeTemplateCatalog
 } from '../taeTemplateCatalog.js';
+import {
+  C0000_COMPATIBILITY_PART_SLOTS,
+  canonicalCharacterStemForActionPath,
+  planC0000CompatibilityCandidates,
+  type C0000CompatibilityCandidateOrigin
+} from './actionPreviewCompatibility.js';
 import type { TrustedIpcHandle } from './registration.js';
+// Forensics counters (V1, pure diagnostic — no business logic change).
+const _forensicsActionCounters = new Map<string, number>();
+function _forensicsActionInc(key: string, delta = 1): void { _forensicsActionCounters.set(key, (_forensicsActionCounters.get(key) ?? 0) + delta); }
+export function getActionForensicsCounters(): Record<string, number> { return Object.fromEntries(_forensicsActionCounters); }
 
 /* ------------------------------------------------------------------ */
 /*  本机 DSAnimStudio TAE 词条只读导入（S17 动作域）                    */
@@ -135,6 +153,140 @@ export interface ActionIpcDeps {
     session: WorkspaceSession | null,
     fallback: string
   ): Promise<{ allowedRoots: string[]; diagnostics: Diagnostic[] }>;
+}
+
+interface CompatibilityPartCandidate {
+  origin: C0000CompatibilityCandidateOrigin;
+  name: string;
+  absolutePath: string;
+}
+
+async function readDirectoryNames(directory: string | null): Promise<string[]> {
+  if (!directory) return [];
+  try {
+    return (await readdir(directory, { withFileTypes: true }))
+      .filter((entry) => entry.isFile())
+      .map((entry) => entry.name);
+  } catch {
+    return [];
+  }
+}
+
+async function assembleC0000CompatibilityPreview(input: {
+  leaderBundle: CharacterPreviewBundle;
+  overlayPartsDirectory: string;
+  basePartsDirectory: string | null;
+  allowedRoots: string[];
+  oodleRuntimeRoot: string | null;
+}): Promise<{ bundle: CharacterPreviewBundle | null; diagnostics: Diagnostic[] }> {
+  const leader = input.leaderBundle.models.find((model) => model.modelId === input.leaderBundle.leaderModelId)
+    ?? input.leaderBundle.models[0];
+  if (!leader || leader.bones.length === 0) {
+    return {
+      bundle: null,
+      diagnostics: [{
+        severity: 'warning',
+        code: 'ACTION_COMPATIBILITY_PREVIEW_LEADER_MISSING',
+        message: 'c0000 兼容预览缺少可用的 leader 骨骼，无法装配身体部件。'
+      }]
+    };
+  }
+
+  const [overlayNames, baseNames] = await Promise.all([
+    readDirectoryNames(input.overlayPartsDirectory),
+    readDirectoryNames(input.basePartsDirectory)
+  ]);
+  const selectedModels: FlverPreviewModel[] = [];
+  const selectedParts: string[] = [];
+  const missingSlots: string[] = [];
+  let attemptedCandidates = 0;
+  let rejectedCandidates = 0;
+
+  for (const slot of C0000_COMPATIBILITY_PART_SLOTS) {
+    const candidates: CompatibilityPartCandidate[] = planC0000CompatibilityCandidates(
+      slot,
+      overlayNames,
+      baseNames
+    ).map((candidate) => ({
+      ...candidate,
+      absolutePath: join(
+        candidate.origin === 'overlay' ? input.overlayPartsDirectory : input.basePartsDirectory!,
+        candidate.name
+      )
+    }));
+    let selected = false;
+    for (const candidate of candidates) {
+      attemptedCandidates += 1;
+      try {
+        const partResult = await runBridge<unknown>({
+          command: 'read-chrbnd-flver-preview',
+          filePath: candidate.absolutePath,
+          allowedRoots: input.allowedRoots,
+          timeoutMs: 120_000,
+          ...(input.oodleRuntimeRoot ? { oodleRuntimeRoot: input.oodleRuntimeRoot } : {}),
+          commandOptions: { maxVertices: 1_000_000, maxIndices: 3_000_000 }
+        });
+        if (partResult.parseStatus === 'failed'
+          || !isCharacterPreviewBundle(partResult.data)
+          || partResult.data.meshCount === 0) {
+          rejectedCandidates += 1;
+          continue;
+        }
+        const trial = remapCharacterBundleToLeader(leader, partResult.data.models);
+        if (!trial.ok || !trial.bundle || trial.bundle.meshCount <= leader.meshCount) {
+          rejectedCandidates += 1;
+          continue;
+        }
+        selectedModels.push(...partResult.data.models);
+        selectedParts.push(`parts/${candidate.name}`);
+        selected = true;
+        break;
+      } catch {
+        rejectedCandidates += 1;
+      }
+    }
+    if (!selected) missingSlots.push(slot);
+  }
+
+  if (selectedModels.length === 0) {
+    return {
+      bundle: null,
+      diagnostics: [{
+        severity: 'warning',
+        code: 'ACTION_COMPATIBILITY_PREVIEW_UNAVAILABLE',
+        message: 'c0000 本体只含骨骼；在有界的 bd/am/lg 候选中没有找到可通过骨骼映射的身体部件。当前只能显示骨架，这不代表存档装备。',
+        details: { attemptedCandidates, rejectedCandidates, missingSlots }
+      }]
+    };
+  }
+
+  const assembled = remapCharacterBundleToLeader(leader, selectedModels);
+  if (!assembled.ok || !assembled.bundle) {
+    return {
+      bundle: null,
+      diagnostics: assembled.diagnostics.length > 0
+        ? assembled.diagnostics
+        : [{
+            severity: 'warning',
+            code: 'ACTION_COMPATIBILITY_PREVIEW_REMAP_FAILED',
+            message: 'c0000 兼容预览的身体部件无法安全映射到 leader 骨骼。'
+          }]
+    };
+  }
+
+  return {
+    bundle: {
+      ...assembled.bundle,
+      assemblyMode: 'compatibility-preview',
+      assemblyParts: selectedParts
+    },
+    diagnostics: [{
+      severity: 'warning',
+      code: 'ACTION_COMPATIBILITY_PREVIEW_ASSEMBLED',
+      message: `c0000 本体只含骨骼；当前按 overlay 优先、文件名字典序从 bd/am/lg 的有界候选中装配兼容预览（${selectedParts.join('、')}）。这不是存档当前装备。`,
+      details: { attemptedCandidates, rejectedCandidates, selectedParts, missingSlots }
+    }]
+  };
 }
 
 export function registerActionIpcHandlers(deps: ActionIpcDeps): void {
@@ -334,14 +486,15 @@ export function registerActionIpcHandlers(deps: ActionIpcDeps): void {
       ok: boolean;
       sourceUri?: string;
       relativePath?: string;
-      data?: Record<string, unknown>;
-      diagnostics: Array<{ severity: string; code: string; message: string; sourceUri?: string }>;
+      data?: CharacterPreviewBundle;
+      diagnostics: Diagnostic[];
     }> => {
+      _forensicsActionInc('action:main:readTaeChrbndPreview:count');
       const file = deps.indexedFiles.find((item) => item.sourceUri === sourceUri);
       if (!file || !deps.activeSession) {
         return { ok: false, diagnostics: [{ severity: 'error' as const, code: 'RESOURCE_NOT_INDEXED', message: '资源未索引或工作区未打开，无法定位伴生 chrbnd。', sourceUri }] };
       }
-      const stem = basename(file.relativePath).replace(/\.anibnd(\.dcx)?$/i, '');
+      const stem = canonicalCharacterStemForActionPath(file.relativePath);
       const roots = await deps.verifiedReadRoots(deps.activeSession, dirname(file.absolutePath));
       if (roots.diagnostics.length > 0) return { ok: false, diagnostics: roots.diagnostics };
       const overlayParent = dirname(deps.activeSession.layers.overlayRoot);
@@ -379,14 +532,39 @@ export function registerActionIpcHandlers(deps: ActionIpcDeps): void {
         return { ok: false, sourceUri, diagnostics: result.diagnostics };
       }
 
-      // Body parts are assembled via explicit CharacterAssemblyContext in core/main (packages/core/src/character/characterAssembly.ts#remapCharacterBundleToLeader).
-      // Single leader skeleton only; weapon attachments use explicit attachBoneName挂点, never body remap. No hard-coded c0000 parts.
+      if (!isCharacterPreviewBundle(result.data)) {
+        return {
+          ok: false,
+          sourceUri,
+          diagnostics: [{
+            severity: 'error',
+            code: 'CHRBND_PREVIEW_SCHEMA_INVALID',
+            message: '伴生 chrbnd 返回的角色预览数据不符合协议。',
+            sourceUri
+          }]
+        };
+      }
+
+      let previewBundle: CharacterPreviewBundle = result.data;
+      let compatibilityDiagnostics: Diagnostic[] = [];
+      if (stem === 'c0000' && previewBundle.meshCount === 0 && previewBundle.boneCount > 0) {
+        const compatibility = await assembleC0000CompatibilityPreview({
+          leaderBundle: previewBundle,
+          overlayPartsDirectory: join(deps.activeSession.layers.overlayRoot, 'parts'),
+          basePartsDirectory: effectiveBase ? join(effectiveBase, 'parts') : null,
+          allowedRoots: roots.allowedRoots,
+          oodleRuntimeRoot: effectiveBase
+        });
+        compatibilityDiagnostics = compatibility.diagnostics;
+        if (compatibility.bundle) previewBundle = compatibility.bundle;
+      }
+
       return {
         ok: true,
         sourceUri,
         relativePath: file.relativePath,
-        data: result.data,
-        diagnostics: result.diagnostics
+        data: previewBundle,
+        diagnostics: [...result.diagnostics, ...compatibilityDiagnostics]
       };
     }
   );
@@ -500,7 +678,7 @@ export function registerActionIpcHandlers(deps: ActionIpcDeps): void {
     }
     const relative = file.relativePath.replace(/\\/g, '/');
     const dir = relative.includes('/') ? relative.slice(0, relative.lastIndexOf('/')) : '';
-    const stem = (relative.split('/').pop() ?? '').replace(/\.(tae|anibnd)(\.dcx)?$/i, '');
+    const stem = canonicalCharacterStemForActionPath(relative);
     const candidates = [`${stem}.chrbnd.dcx`, `${stem}.chrbnd`]
       .map((name) => (dir ? `${dir}/${name}` : name))
       .map((name) => name.replace(/\//g, sep));

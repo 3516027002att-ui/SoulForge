@@ -19,6 +19,10 @@ import {
 } from '../rendererDto.js';
 import type { OperationLogUtilityClient } from '../operationLogUtilityClient.js';
 import type { TrustedIpcHandle } from './registration.js';
+// Forensics counters (V1, pure diagnostic — no business logic change).
+const _forensicsRbCounters = new Map<string, number>();
+function _forensicsRbInc(key: string, delta = 1): void { _forensicsRbCounters.set(key, (_forensicsRbCounters.get(key) ?? 0) + delta); }
+export function getRollbackForensicsCounters(): Record<string, number> { return Object.fromEntries(_forensicsRbCounters); }
 
 export interface RollbackOperationIpcResult {
   ok: boolean;
@@ -77,6 +81,7 @@ export function registerOperationIpcHandlers(deps: OperationIpcDeps): void {
   });
 
   deps.handle('operation.rollback', async (_event, opId: string): Promise<RollbackOperationIpcResult> => {
+    _forensicsRbInc('rollback:main:operation.rollback:count');
     if (!deps.activeSession || !deps.activeOperationLog) {
       return {
         ok: false,
@@ -179,6 +184,7 @@ export function registerOperationIpcHandlers(deps: OperationIpcDeps): void {
   });
 
   deps.handle('operation.rollbackFile', async (_event, opId: string, targetUri: string): Promise<RollbackOperationIpcResult> => {
+    _forensicsRbInc('rollback:main:operation.rollbackFile:count');
     if (!deps.activeSession || !deps.activeOperationLog) {
       return {
         ok: false,

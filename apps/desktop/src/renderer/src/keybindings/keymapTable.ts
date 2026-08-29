@@ -9,8 +9,7 @@
  * - 每个条目除公开展示串 `keys` 外，还带内部 `matchKeys`（归一化匹配键集合）。
  *   展示串与匹配键分离，因为同一行可能对应多个物理键：
  *     - 「WASD 移动」展示为 'WASD'，匹配键是 'w'/'a'/'s'/'d'；
- *     - 「Shift+W/E/G gizmo」展示为 'Shift+W/E/G'，匹配键是
- *       'Shift+w'/'Shift+e'/'Shift+g'；
+ *     - 「Shift+WASD 加速」展示为 'Shift+WASD'，匹配组合键；
  *     - 「Home/End 头尾」展示为 'Home/End'，匹配键是 'Home'/'End'。
  *   归一化口径与 applyKeybinding.ts 的 normalizeKeyEvent 保持一致。
  * - 公开 API 只暴露 KeybindingEntry（不含 matchKeys）；applyKeybinding.ts 通过
@@ -106,13 +105,13 @@ const VIEWPORT_TEMPLATE: readonly {
   { id: 'lift', label: '升降', keys: 'Q/E', matchKeys: ['q', 'e'] },
   // 右键旋转 / 滚轮调速是鼠标与滚轮动作，键盘事件不命中（matchKeys 为空），仅 UI 展示。
   { id: 'rotate', label: '旋转', keys: '右键拖拽', matchKeys: [] },
-  { id: 'speed-up', label: '加速', keys: 'Shift', matchKeys: ['Shift'] },
+  { id: 'speed-up', label: '加速', keys: 'Shift+WASD', matchKeys: ['Shift', 'Shift+w', 'Shift+a', 'Shift+s', 'Shift+d'] },
   { id: 'speed-down', label: '减速', keys: 'Ctrl', matchKeys: ['Ctrl'] },
   { id: 'wheel-speed', label: '调速', keys: '滚轮', matchKeys: [] },
   { id: 'box-select', label: '框选', keys: 'F', matchKeys: ['f'] },
   { id: 'focus-camera', label: '拉到相机', keys: 'X', matchKeys: ['x'] },
   { id: 'reset-view', label: '重置视图', keys: 'R', matchKeys: ['r'] },
-  { id: 'gizmo', label: 'Gizmo 切换', keys: 'Shift+W/E/G', matchKeys: ['Shift+w', 'Shift+e', 'Shift+g'] },
+  { id: 'gizmo', label: 'Gizmo 切换', keys: '工具栏按钮', matchKeys: [] },
   { id: 'deselect', label: '取消选择', keys: 'Esc', matchKeys: ['Esc'] }
 ];
 

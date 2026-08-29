@@ -1264,6 +1264,14 @@ export function TaeWorkbenchPanel(props: TaeWorkbenchPanelProps): ReactElement {
                       />
                     </div>
                   )}
+                  {!preview.loading
+                    && preview.error === null
+                    && preview.bundle?.assemblyMode === 'compatibility-preview'
+                    && (
+                      <p className="muted" style={{ fontSize: 11 }} data-testid="tae-preview-compatibility-notice" role="status">
+                        兼容预览：身体部件按 overlay 优先与文件名字典序，从 bd / am / lg 的有界候选中选择；这不代表存档当前装备。
+                      </p>
+                    )}
                   {/* 统一 Authoritative 播放控制栏与 Timeline 轨道 */}
                   <div className="tae-timeline-ctrl" data-testid="tae-timeline-ctrl">
                     <div className="tae-transport-bar">
@@ -1392,7 +1400,7 @@ export function TaeWorkbenchPanel(props: TaeWorkbenchPanelProps): ReactElement {
                   )}
                   {!preview.loading && preview.error === null && preview.bundle !== null && preview.bundle.meshCount === 0 && preview.bundle.boneCount > 0 && (
                     <p className="muted" style={{ fontSize: 11 }} data-testid="tae-preview-skeleton-note">
-                      该模型为骨骼装配体（{preview.bundle.boneCount} bones），网格由 partsbnd 装配，当前仅预览骨骼。
+                      该模型为骨骼装配体（{preview.bundle.boneCount} bones）；没有找到可安全映射的 bd / am / lg 身体部件，当前显示骨架标记。这不代表存档当前装备。
                     </p>
                   )}
                   {isPartial && invalidRangeCount > 0 && (

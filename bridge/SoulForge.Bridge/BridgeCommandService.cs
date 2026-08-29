@@ -1735,7 +1735,10 @@ internal sealed class BridgeCommandService
                     // Validate cursor if provided
                     if (!string.IsNullOrWhiteSpace(cursor))
                     {
-                        if (!MapStaticGeometryService.TryDecodeCursor(cursor, out _, out _))
+                        // nextCursor is an opaque random token bound to this exact session.
+                        // The legacy Base64 "mesh:triangle" decoder cannot decode it and
+                        // caused every multi-page model to fail on page two.
+                        if (!MapStaticGeometryService.TryDecodeOpaqueCursor(existing!, cursor, out _, out _))
                             return BridgeResult<object>.Failed(file, "map", "MAP_STATIC_CURSOR_INVALID", "cursor 无法解析。");
                     }
                     session = existing;
@@ -1813,7 +1816,7 @@ internal sealed class BridgeCommandService
                 int startMesh = 0, startTri = 0;
                 if (!string.IsNullOrWhiteSpace(cursor))
                 {
-                    if (!MapStaticGeometryService.TryDecodeCursor(cursor, out startMesh, out startTri))
+                    if (!MapStaticGeometryService.TryDecodeOpaqueCursor(session!, cursor, out startMesh, out startTri))
                         return BridgeResult<object>.Failed(file, "map", "MAP_STATIC_CURSOR_INVALID", "cursor 无法解析。");
                 }
                 else if (!string.IsNullOrWhiteSpace(sessionToken))

@@ -21,6 +21,10 @@ import {
 } from '@soulforge/shared';
 import { sanitizeRendererValue, type RendererSaveResult } from '../rendererDto.js';
 import type { OperationLogUtilityClient } from '../operationLogUtilityClient.js';
+// Forensics counters (V1, pure diagnostic — no business logic change).
+const _forensicsMapCounters = new Map<string, number>();
+function _forensicsMapInc(key: string, delta = 1): void { _forensicsMapCounters.set(key, (_forensicsMapCounters.get(key) ?? 0) + delta); }
+export function getMapForensicsCounters(): Record<string, number> { return Object.fromEntries(_forensicsMapCounters); }
 import type { TrustedIpcHandle } from './registration.js';
 
 function logicalMapModelName(raw: string): string {
@@ -267,6 +271,7 @@ export function registerMapIpcHandlers(deps: MapIpcDeps): void {
       data?: Record<string, unknown>;
       diagnostics: Array<{ severity: string; code: string; message: string; sourceUri?: string }>;
     }> => {
+      _forensicsMapInc('map:main:readMapPartMesh:count');
       const file = deps.indexedFiles.find((item) => item.sourceUri === msbSourceUri);
       if (!file || !deps.activeSession) {
         return {
@@ -510,11 +515,18 @@ export function registerMapIpcHandlers(deps: MapIpcDeps): void {
   // Deprecated: resource.readMapPartMesh is legacy non-streaming; new path is resource.readMapStaticGeometry
   deps.handle(
     'resource.readMapStaticGeometry',
-    async (_event, msbSourceUri, modelName, cursor, sessionToken) => {
+    async (
+      _event,
+      msbSourceUri: string,
+      modelName: string,
+      cursor?: string | null,
+      sessionToken?: string | null
+    ) => {
+      _forensicsMapInc('map:main:readMapStaticGeometry:count');
       const file = deps.indexedFiles.find((item) => item.sourceUri === msbSourceUri);
       if (!file || !deps.activeSession) return { ok: false, diagnostics: [{ severity: 'error', code: 'MAP_PART_MSB_NOT_INDEXED', message: 'MSB not indexed', sourceUri: msbSourceUri }] };
       const baseName = basename(file.relativePath);
-      const mapId = baseName.replace(/.msb(.dcx)?$/i, '');
+      const mapId = baseName.replace(/\.msb(\.dcx)?$/i, '');
       const overlayParent = dirname(deps.activeSession.layers.overlayRoot);
       const effectiveBase = deps.activeSession.layers.baseRoot ?? (existsSync(join(overlayParent, 'sekiro.exe')) || existsSync(join(overlayParent, 'map')) ? overlayParent : null);
       const overlayDir = join(deps.activeSession.layers.overlayRoot, 'map', mapId);
@@ -523,16 +535,55 @@ export function registerMapIpcHandlers(deps: MapIpcDeps): void {
       const roots = await deps.verifiedReadRoots(deps.activeSession, dirname(file.absolutePath));
       if (roots.diagnostics.length > 0) return { ok: false, diagnostics: roots.diagnostics };
       if (effectiveBase && !roots.allowedRoots.includes(effectiveBase)) roots.allowedRoots.push(effectiveBase);
-      for (const { dir, fromBase } of candidateDirs) {
-        let mapbnds: string[] = [];
-        try { mapbnds = readdirSync(dir).filter(n=>/.mapbnd.dcx$/i.test(n)).map(n=>join(dir,n)); } catch {}
-        for (const mapbndPath of mapbnds) {
-          const result = await runBridge({ command: 'read-map-static-geometry', filePath: mapbndPath, allowedRoots: roots.allowedRoots, timeoutMs: 120000, ...(fromBase && effectiveBase ? { oodleRuntimeRoot: effectiveBase } : {}), commandOptions: { modelName, sessionToken: sessionToken ?? undefined, cursor: cursor ?? undefined, ownerLeaseId: deps.activeWorkspaceSessionId ?? '', resourceCacheKey: JSON.stringify({ modelName, mapId }) } });
-          if (result.parseStatus !== 'failed' && result.data) {
-            const wireBytes = Buffer.byteLength(JSON.stringify(result.data), 'utf8');
-            if (wireBytes >= 8*1024*1024) return { ok: false, diagnostics: [{ severity: 'error', code: 'MAP_STATIC_WIRE_BUDGET_EXCEEDED', message: 'wire bytes exceed 8 MiB', sourceUri: msbSourceUri }] };
-            return { ok: true, sourceUri: msbSourceUri, data: result.data, diagnostics: result.diagnostics };
+
+      const readStaticPath = async (modelPath: string) => {
+        const result = await runBridge({
+          command: 'read-map-static-geometry',
+          filePath: modelPath,
+          allowedRoots: roots.allowedRoots,
+          timeoutMs: 120_000,
+          ...(effectiveBase ? { oodleRuntimeRoot: effectiveBase } : {}),
+          commandOptions: {
+            modelName,
+            sessionToken: sessionToken ?? undefined,
+            cursor: cursor ?? undefined,
+            ownerLeaseId: deps.activeWorkspaceSessionId ?? '',
+            resourceCacheKey: JSON.stringify({ modelName, mapId })
           }
+        });
+        if (result.parseStatus === 'failed' || !result.data) return null;
+        const wireBytes = Buffer.byteLength(JSON.stringify(result.data), 'utf8');
+        if (wireBytes >= 8 * 1024 * 1024) {
+          return { ok: false, diagnostics: [{ severity: 'error', code: 'MAP_STATIC_WIRE_BUDGET_EXCEEDED', message: 'wire bytes exceed 8 MiB', sourceUri: msbSourceUri }] };
+        }
+        return { ok: true, sourceUri: msbSourceUri, data: result.data, diagnostics: result.diagnostics };
+      };
+
+      // The legacy route already knows the exact short-name -> mapbnd/chrbnd/objbnd
+      // resolution. Reuse it before directory scanning so each page opens one
+      // container instead of probing every mapbnd again (O(models * files * pages)).
+      const directModel = resolveMapModelFile(
+        deps.indexedFiles,
+        deps.activeSession,
+        deps.safeExists,
+        file.relativePath,
+        modelName
+      );
+      if (directModel) {
+        const directResult = await readStaticPath(directModel.absolutePath);
+        if (directResult) return directResult;
+      }
+
+      const triedPaths = new Set(directModel ? [directModel.absolutePath.toLowerCase()] : []);
+      for (const { dir } of candidateDirs) {
+        let mapbnds: string[] = [];
+        try { mapbnds = readdirSync(dir).filter((name) => /\.mapbnd\.dcx$/i.test(name)).map((name) => join(dir, name)); } catch {}
+        for (const mapbndPath of mapbnds) {
+          const key = mapbndPath.toLowerCase();
+          if (triedPaths.has(key)) continue;
+          triedPaths.add(key);
+          const result = await readStaticPath(mapbndPath);
+          if (result) return result;
         }
       }
       return { ok: false, diagnostics: [{ severity: 'error', code: 'MAP_PART_MODEL_NOT_FOUND', message: 'not found ' + modelName, sourceUri: msbSourceUri }] };

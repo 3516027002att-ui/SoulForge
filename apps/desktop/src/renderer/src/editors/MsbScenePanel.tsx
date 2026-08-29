@@ -859,7 +859,7 @@ export function MsbScenePanel(props: MsbScenePanelProps): ReactElement {
                               : meshStatus.missing > 0
                                 ? ' · 没有找到 part 模型（线框）；未挂原版时可到「开始」页挂载后重开'
                                 : '';
-                          return `节点 ${nodeCount} · region ${regions.length}${meshNote} · 漫游：WASD 移动 / Q下降 E上升 / F居中 / Gizmo 拖拽编辑`;
+                          return `节点 ${nodeCount} · region ${regions.length}${meshNote} · 漫游：WASD 移动 / Shift+WASD 加速 / Q下降 E上升 / F居中 / Gizmo 拖拽编辑`;
                         })()
                       : status)}
               </p>
