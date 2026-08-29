@@ -1,0 +1,132 @@
+{
+  "receipt": {
+    "schema": "mission1-review-dispatch-receipt-v1",
+    "round": 9,
+    "dispatchedAtUtc": "2026-08-28T15:10Z",
+    "dispatchedBy": "当前编排会话（mission1 修订者/调度者；审查本身由独立任务实例执行，调度者不裁决其结论）",
+    "reviewerTaskId": "general-purpose-call_bbcfdfc8fee14c6288da261e",
+    "reviewerProtocol": "fresh-subagent-no-context-round9（无对话上下文、只读、结构化协议；未透露第 8 轮发现）",
+    "reviewedDocumentAtDispatch": {
+      "path": "msssion/mission1.md",
+      "sha256": "260C6873017867D04D98B9489BED863BF696D1E5AA600803C23DB01AB3BC23C0",
+      "bytes": 592163,
+      "lines": 7619,
+      "gitHead": "72fcbdb364c60f48f1fe0e0b3a84cede18412009",
+      "bindingMatchAtReviewStart": true
+    },
+    "verifiedCorrections": [
+      "审查者将审查中途观测到的改写事件（260C6873→AB278923，+894 字节）定性为『894 处行尾 LF→CRLF 规范化，正文逐字未变』。调度者以字节计算决定性证伪：该窗口内唯一写入是本会话对 §24.16.1 C5 条目的内容重写（新 bullet 1934 字节 − 旧 bullet 1034 字节 = 恰好 +894 字节，与窗口差精确相等；行尾规范化假说在字节账上不成立）。归属：本编排会话的 V1/V2 文档修复，方向为权威→影子，符合 §0.1 纪律；分叉窗口（编辑与影子同步之间的缝隙）真实存在，审查者的上报行为本身正确。",
+      "F3（同步分叉窗口）的归属同上：本会话 edit→copy 两步序列产生，非外部工具。"
+    ],
+    "fullTranscript": "C:/Users/ASUS/.qwen/projects/d--repository-soulforge/subagents/b491e03f-5284-4b3e-9945-8fc6f9cb792c/agent-general-purpose-call_bbcfdfc8fee14c6288da261e.jsonl",
+    "usage": { "toolUses": 84, "durationMs": 1445035 }
+  },
+  "rawArtifact": {
+    "schema": "mission1-independent-blind-review-v1",
+    "reviewerIdentity": "fresh-subagent-no-context-round9",
+    "reviewedDocument": "msssion/mission1.md",
+    "reviewedDocumentSha256": "260C6873017867D04D98B9489BED863BF696D1E5AA600803C23DB01AB3BC23C0",
+    "bindingMatch": true,
+    "verdict": "YES",
+    "findings": [
+      {
+        "id": "F1",
+        "location": "§18 明确禁止的「修复」第 8-10 条禁令（约第 2844-2846 行区域，「顶点数超 Uint16 上限就只画第一个 mesh」「用字节长度能被 2 整除代替索引位宽判断」「让注释承诺一个代码里不存在的 guard」三条）",
+        "quote": "`apps/desktop/src/main/ipc.ts:4537` 现状即此：`if (totalVertexCount + vertexCount > 65535) return null;`，调用方（`:4604`、`:4664`）拿到 `null` 后退回单 mesh0 …… `ipc.ts:4535` 只有 `if (idx.length % 2 !== 0) return null;` …… `BridgeCommandService.cs:1537`，与 `indicesBase64` 相邻 …… `FlverNativeDocument.cs:740` 的注释明确写着「索引位宽仍由 face set 的 IndexSize 决定，不允许调用方猜测」，`:723` 还提供了 `GetMeshIndexSize()` …… 上面那两处的注释（`ipc.ts:4493-4494`）",
+        "attack": "行号锚点整体漂移且未带「已漂移」标注（不同于文档其他处的显式标注惯例）。实测：守卫实际位于 ipc.ts:4645（idx.length % 2）与 :4647（>65535），注释在 :4603-4604；BridgeCommandService.cs:1537 现为无关的模型名变体逻辑，indexSize 实际在 :1608/:1845/:2450；FlverNativeDocument.cs GetMeshIndexSize 实际在 :727，IndexSize 注释实际在 :758。弱 agent 按 :4535-4538 定位会落在无关的 asBasicDiagnostics 辅助函数上，可能得出「该缺陷已被修掉」的错误结论——而缺陷真实仍在（:4645/:4647 已核实存在）。语义断言本身经符号重定位全部成立（含 65535 与注释 65534 不一致、ipc.ts 对 indexSize 零引用、注释承诺的「索引非 16 位」guard 不存在），但铁律第 1 条的「符号优先」只缓解、不消除把现状断言当过期信息跳过的风险。",
+        "severity": "medium",
+        "suggestedFix": "把这三条禁令的行号刷新为 :4645/:4647/:4603-4604、:1608（或 :1845/:2450）、:727/:758，或按 §24.16.7 X7 的先例改为纯符号锚点（`totalVertexCount + vertexCount > 65535`、`idx.length % 2`、`GetMeshIndexSize`）并加「2026-08-28 复测」标记。"
+      },
+      {
+        "id": "F2",
+        "location": "§24.16.3「顺手记一条同形发现」段（约第 6388 行）",
+        "quote": "`remapCharacterBundleToLeader`（`packages/core/src/character/characterAssembly.ts:36`）已实现、已在 `packages/core/src/index.ts:69` 桶导出，但 `ipc.ts` 里**零引用**——第三个「实现完了没接线」的孤岛",
+        "attack": "字面失实两处：1) 函数实际定义在 characterAssembly.ts:35（isLeaderRemappedBundle 在 :227），各行偏 1 行；2) ipc.ts:5001 存在一条按名字引用该函数的注释（'Body parts are assembled via explicit CharacterAssemblyContext in core/main (…#remapCharacterBundleToLeader)'），「零引用」字面为假。实质断言（全仓库零调用点，未接 production）经 `remapCharacterBundleToLeader\\(` 全仓 grep 核实仍为真。攻击路径：弱 agent grep 得到 1 个命中后，可能把整段现状复测框当作已证伪而跳过，或反过来把注释当成「已接线」的证据。",
+        "severity": "low",
+        "suggestedFix": "改为「零调用点（仅 :5001 一条注释提及）」并把行号更正为 :35/:227。"
+      },
+      {
+        "id": "F3",
+        "location": "磁盘状态（两份副本），涉及 §0.1 同步纪律条款",
+        "quote": "「编辑只在 `msssion/mission1.md` 上做，编辑后立即 `cp msssion/mission1.md 锐评/mission1.md` 并用 `cmp` 核对一致。禁止只改一份造成静默分叉」／「哈希/逐字节相等才是唯一同步判据」",
+        "attack": "审查期间观测到真实分叉窗口：权威副本被外部改写（仅 894 处行尾 LF→CRLF，正文逐字未变，592163B→593057B）后，影子副本在检查时点仍停留在旧字节（260C6873…），byteIdentical=false；按文档自己的唯一判据此时两份不同步。此窗口内任何读 `锐评/mission1.md` 的 agent 与读 `msssion/mission1.md` 的 agent 会拿到字节不同的「同一文档」。窗口在审查结束前被外部重新同步（双方 AB278923…，逐字节相等）。归属未确认，需用户核实是哪个会话/工具写入了 CRLF 规范化。",
+        "severity": "medium",
+        "suggestedFix": "这是状态事件而非文本缺陷：按 §0.1 并发改写处置向用户报告归属；若为编辑会话所为，应确保「编辑后立即 cp+cmp」在同一原子步骤内完成，避免分叉窗口。"
+      }
+    ],
+    "syncCheck": {
+      "byteIdentical": false,
+      "method": "SHA-256 + 逐字节 Buffer.equals，三轮：T1 审查开始权威=260C6873…（=绑定）；T2 检查时点权威=AB278923…(593057B) vs 影子=260C6873…(592163B)，byteIdentical=false（差异为 894 处行尾规范化，正文逐字相同）；T3 审查结束前影子被重新同步，双方=AB278923…，byteIdentical=true。按协议以检查时点状态作答，全程已记入 limits。",
+      "receiptNote": "T2 差异的定性（行尾规范化）已被回执 verifiedCorrections 证伪：实为调度者会话的 C5 内容重写（+894 字节精确吻合）。分叉窗口存在与后续重新同步的事实部分不受影响。"
+    },
+    "reportMdGapsCheck": [
+      { "gap": "§2.1 独立盲审不存在/「实测」无分级", "plugged": true, "evidence": "§2.1 新增 L0/L1/L2 可信度分级与删码前重跑硬规则；§23 明言「当前全文没有任何 L2 结论」；A0/A2 退出要求 fork_turns=none 的外部攻击审查+用户确认 hash。文档未谎称已获得独立性。" },
+      { "gap": "§2.2 PARAM 容器来源双解（mod 绿即跳过域）", "plugged": true, "evidence": "§0.4.1 双侧曲线成文；§0.4 G3 行强制两侧分别实测并逐侧标注；§16.5 逐侧标注义务；§16.11 G3 机器条目含 game-side corpus 入口+oodleRuntimeRoot runtime-input identity；environment_blocked 保持 FAIL 且 mod-side 不得顶替。ipc.ts:757 注释与 smoke 无 oodle 参数的事实均已复核属实。" },
+      { "gap": "§2.3 加载域未审", "plugged": true, "evidence": "§5 顶部新增范围状态横幅：本域为未审范围、禁止跨域外推、进入阶段 G 前按 §24.4 重新取证；阶段阅读地图对 G 行标注「§5（注意未复审横幅）」。" },
+      { "gap": "§2.4 验收看行为不看名字/只修违反 1", "plugged": true, "evidence": "铁律第 3 条成文；§24.10 标题与正文覆盖违反 1 与违反 2（§24.16.8 交叉引用「地图域 §24.10 的违反 1……第二个文件」）；§24.16.8 的 X8 是同成本模型的第二实例，说明两处都在册。" },
+      { "gap": "§2.5 X5/X6/X7 已测未写", "plugged": true, "evidence": "§24.16.7 三条全部成文，含 2026-08-28 复测锚点、X5 「两个修复方向都自洽且都可能错……禁止只动一边」、X6 「共享性未确认」未测标注、X7 站点清单以符号重 grep 为准。锚点本轮抽验一致。" },
+      { "gap": "§2.6 三份 %TEMP% 暂存件未合并", "plugged": true, "evidence": "§24.1 C4/C5 带编号合入（C5 记载持久化路径）；§0.5.1 C7 迁移边界；§0.8 表头提及时效边界与 C1/N1/N3；X5-X8/反极点/t=0.5 落 §24.16.4-§24.16.8。实地核实 C:\\Users\\ASUS\\Desktop\\soulforge-mission1-staged-20260827\\ 存在且含三份暂存件+两份编辑前备份（5 个文件）。第 8 轮残留「C4/C5 无编号」已消解。" },
+      { "gap": "§2.7 §24.17–§24.24 欠规格审查未做", "plugged": true, "evidence": "以运行时强制机制替代逐卡审计：§24.0 步骤 0「欠规格预检」（出现多解或'例如/或/可以/任选'即停下问用户，禁止挑一个走到底）对每张卡生效，动手前三问第 1 条同构。注记：逐卡清点本身仍未做，文档也未声称已做——这是机制性堵漏而非内容审计完成。" },
+      { "gap": "§2.8 两个未决问题（partial 处置/修复顺序）", "plugged": true, "evidence": "§4.7 记录 2026-08-27 用户裁定（文档与脚本一起改、0/1/2 三态退出码、--selftest 矩阵、面板保守红粒度损失与未测项）；报告头部续接记录确认 A0 优先与 dirty worktree 继承授权；§15 阶段序把 A0 固定为第一步。" },
+      { "gap": "§2.9 两个验收文件未读", "plugged": true, "evidence": "§0.8 逐字节冻结旧 runner/state/corpus 的 identity 与缺陷判定；§4.8 记载 v2 信任根重写（本轮抽验：50 条注册表、FORBIDDEN_OVERRIDES、gate=null、helper 未接线均属实）；§4.8.1 记载 CRLF 负例事故与判别器。两份文件已被打开、裁定并处置。" }
+    ],
+    "attacksTried": [
+      "(a) 双解搜索：G3 mod/game 侧在 §0.4/§0.4.1/§15 B-C 退出/§16.5/§16.11 五处交叉阅读，寻找『mod 侧绿即 G3 绿』或『game 侧 blocked 可跳过』的解释——均被显式堵死（blocked 保持 FAIL、不得顶替、机器清单双侧编码）",
+      "(a) §24.0 步骤 0 的触发词（例如/或/可以/任选）与卡片内文的自指冲突——判定为设计内的 failsafe（触发即停下问用户），非漏洞",
+      "(a) 执行入口『唯一推进算法』各分支与 §15 入口/退出的优先级冲突——未发现矛盾（§0.1 权威序已裁定）",
+      "(b) 手写执行记录 JSON 冒充：被 §0.5 runner 自 spawn+stdout/stderr 哈希+ChildObservationEnvelopeV1 schema 拒绝 status 字段+A0 负例 ASSERTION_EVIDENCE_INCOMPLETE 挡住",
+      "(b) 源码字符串 grep 冒充行为验证使 G2-G6 变绿：被入口表『明确伪证据』条目、§15 A0 第 3 条禁令、runner 注册表无 fileContains 类 G2-G6 断言挡住；fileContainsForGate 仅存活于未被调用的 isG4MapStaticWiringPresent，且 §0.4.2 明令负向验证前不得作证",
+      "(b) fixture/synthetic 冒充 native：被入口表、§16.5/§16.6/§16.7 真实语料硬断言、corpus 三方 join（§24.3）挡住",
+      "(b) skip/N/A 冒充通过：被 §0.4『Gate 只有 PASS/FAIL』、runner schema 拒绝 skipped/not-run/N/A/candidate/fixture-only、A1 退出四项 exit 0 要求挡住",
+      "(b) 命令行开关绕过：实测 --force-pass/--pass/--ignore-unmapped/--accept-old-schema/--allow-failure 在 FORBIDDEN_OVERRIDES（runner :64-70）",
+      "(b) 换语料/伪 game 根：corpus sourceSha256 冻结+CORPUS_IDENTITY_CHANGED、runtime input registry 锁定、游戏根写审计三层挡住",
+      "(b) 篡改 package.json 脚本体冒充子命令：package.json 为 tracked source，进入 snapshot/stageInputRegistry，变化触发 STAGE_INPUT_UNMAPPED 回 A0",
+      "(c) §15/§16.11 要求的能力逐条映射 §24 卡片（G0→24.1/24.2、G2→24.4/24.20、G3→24.5-24.8、G4→24.9-24.11、G5→24.12-24.14/24.21、G6→24.15-24.18、G7→16.9/16.10/24.20、H→24.19）——无缺卡；抽样卡（24.0/24.1/24.3/24.4/24.15/24.16）内未发现未触发『停下问用户』的欠规格分叉（24.16.5/7/8 的未决分叉均显式停下问用户）",
+      "(d) 35 处行号/符号锚点抽查与 6 个现状复测框逐条验证（详见 anchorSpotChecks/statusRecheckBoxBoxes）",
+      "(e) 搜索『未测=没问题』表述：全文为显式未测清单+§2.1 硬规则 2；§0.4.1『实测 86/138』为历史测量、方向保守（强制补测），不绿化任何结论；§5.2 数据限定『本机 mods 工作区』且 §5 横幅禁止外推",
+      "(f) 同步纪律：SHA-256+逐字节比较三轮，检查时点发现分叉（行尾规范化窗口），详见 syncCheck 与 limits"
+    ],
+    "anchorSpotChecks": [
+      { "docRef": "§0.4.1 ipc.ts:757-760 oodleRuntimeRoot 注释", "actualLocation": "ipc.ts:757 起，逐字吻合", "consistent": true },
+      { "docRef": "§0.4.1 runNativeParamSmoke.ts:72/:309-312", "actualLocation": ":72 路径吻合；'oodle' 零命中；:310 if (verified === 0)", "consistent": true },
+      { "docRef": "§8.2 ipc.ts 约 8588/8775", "actualLocation": "ipc.ts:8588 与 :8775 精确命中", "consistent": true },
+      { "docRef": "§0.4.2 FlverNativeDocument.cs:543 / BridgeCommandService.cs:2479", "actualLocation": ":543 与 :2479 均为 Interlocked.Increment，精确命中", "consistent": true },
+      { "docRef": "§24.16.5 BuildFlverSkeleton :2477/:2514/:1467/:1584/:1615；FlverNativeDocument.cs:162/:177", "actualLocation": "全部精确命中", "consistent": true },
+      { "docRef": "§24.16.1 CreateFromYawPitchRoll 零命中、:1306 ARITY、72fcbdb3 移除", "actualLocation": "全桥零命中；:1306 throw 精确命中；git log -S 顶部即 72fcbdb3", "consistent": true },
+      { "docRef": "§24.16.1 现状复测框四点", "actualLocation": "flverSkeletonMapping.ts:132、threeSceneController.ts:152/:386/:432/:1622 全部吻合，XZY 零残留", "consistent": true },
+      { "docRef": "§24.16.3 现状复测框四点", "actualLocation": "全部精确命中", "consistent": true },
+      { "docRef": "§24.16.4/5 TaeWorkbenchPanel :983/:985、flver-preview.ts:78", "actualLocation": "全部精确命中", "consistent": true },
+      { "docRef": "§24.16.5/6 sampler 锚点 20 处", "actualLocation": "20 处全部逐行吻合", "consistent": true },
+      { "docRef": "§24.16.7 X5 锚点", "actualLocation": "全部精确命中，含 :146 原文", "consistent": true },
+      { "docRef": "§24.16.7/8 X6/X8 :1072/:1212/:1213-1214/:1249/:1350", "actualLocation": "全部精确命中", "consistent": true },
+      { "docRef": "§24.10 Array.Copy :276→:385", "actualLocation": ":385 精确命中", "consistent": true },
+      { "docRef": "§0.4.2 runner helper :1370/:1378 及未接线", "actualLocation": ":1370/:1378 精确命中；:1376 返回值不含 hasRenderer；全文零调用点", "consistent": true },
+      { "docRef": "§4.8 50 条注册表/禁用开关/A0 A2 gate=null", "actualLocation": "ASSERTION_REGISTRY 实测 50 条；5 开关在 FORBIDDEN_OVERRIDES；gate 列为 null", "consistent": true },
+      { "docRef": "§5.5 现状复测框（scanWorkspace.ts 11 处）", "actualLocation": "逐行逐结构全部吻合", "consistent": true },
+      { "docRef": "§24.16.3 packages/core/src/index.ts:69 桶导出", "actualLocation": ":69 精确命中", "consistent": true },
+      { "docRef": "§16.1-§16.7 引用的 13 个 npm 脚本", "actualLocation": "根 package.json 13/13 存在", "consistent": true },
+      { "docRef": "§0.1 grep -c 判别器", "actualLocation": "两份副本均输出 3", "consistent": true },
+      { "docRef": "§4.9.1.1 report.md SHA-256 A2A9EB2F…", "actualLocation": "实算完全一致", "consistent": true },
+      { "docRef": "§18 ipc.ts:4535/:4537/:4538 与注释 :4493-4494", "actualLocation": "实际为 :4645/:4647/~:4648 与 :4603-4604（漂移约 +110，未标注）", "consistent": false },
+      { "docRef": "§18 BridgeCommandService.cs:1537 indexSize", "actualLocation": "实际在 :1608/:1845/:2450", "consistent": false },
+      { "docRef": "§18 FlverNativeDocument.cs:723/:740", "actualLocation": "实际为 :727 与 :758", "consistent": false },
+      { "docRef": "§24.16.3 characterAssembly.ts:36/:228 与「零引用」", "actualLocation": ":35/:227（偏 1 行）；ipc.ts:5001 有一条按名引用的注释（零调用点的实质断言成立）", "consistent": false }
+    ],
+    "statusRecheckBoxChecks": [
+      { "box": "§24.16.1 现状复测框（四点已落地）", "verified": true },
+      { "box": "§24.16.3 现状复测框（四点已落地）", "verified": true },
+      { "box": "§24.16.5 A' 降级框", "verified": true },
+      { "box": "§5.5 实测更正框", "verified": true },
+      { "box": "§0.4.2 当前 runner 复核框", "verified": true },
+      { "box": "§4.8.1 CRLF 事故框", "verified": true, "note": "本轮未执行 selftest，仅静态核对文字与机制描述" }
+    ],
+    "limits": [
+      "审查期间文件变化事件：权威副本在审查中途被外部改写一次，260C6873…(592163B，=绑定) → AB278923…(593057B)；审查者定性为『仅行尾规范化、正文逐字未变』——该定性已被回执 verifiedCorrections 以字节计算证伪（实为调度者会话的 C5 内容重写，+894 字节精确吻合）；影子副本在检查时点滞后（分叉窗口），审查结束前被重新同步为逐字节相等。最终磁盘哈希 ≠ 绑定哈希，绑定仅在审查开始时成立。",
+      "绑定哈希对应未提交的工作区版本；HEAD blob 为 449CAC20…(558014B)，两者不同，属文档活跃编辑状态。",
+      "未读/未审计区域：§3 全部、§4.0-§4.6、§4.9.2-§4.9.10、§10 正文、§17、§19-§21、§24.2（仅头部）、§24.5-§24.14、§24.17-§24.24；欠规格审计仅覆盖抽样卡。阅读覆盖约 40-45%。",
+      "只读审查：未执行任何 runner、smoke、selftest 或构建；§4.8.1 的 CRLF 判别器未复跑；§23 引用的第 8 轮盲审产物未打开核验。",
+      "§0.4.1『实测 86/138』为历史测量数字（方向保守，用于强制补测），未按 §2.1 打 L 级标签，未列为 finding，仅记录。",
+      "§24.16.4 bind scale 贯通等未测项均被文档自行标注，本轮未做运行期验证。"
+    ]
+  }
+}
