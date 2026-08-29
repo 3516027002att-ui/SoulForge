@@ -26,6 +26,10 @@ const ipcSource = readFileSync(
   join(process.cwd(), 'apps', 'desktop', 'src', 'main', 'ipc', 'operations.ts'),
   'utf8'
 );
+const workspaceIpcSource = readFileSync(
+  join(process.cwd(), 'apps', 'desktop', 'src', 'main', 'ipc', 'workspace.ts'),
+  'utf8'
+);
 const workbenchOpsSource = readFileSync(
   join(process.cwd(), 'apps', 'desktop', 'src', 'renderer', 'src', 'editors', 'WorkbenchOpsPanel.tsx'),
   'utf8'
@@ -86,6 +90,19 @@ describe('问题 1 壳层：开始页只在首次打开；顶栏「开始」召�
     assert.match(appSource, /const restoredDomain = restoreLastShellState/);
     assert.match(appSource, /if \(!restoredDomain\)/);
     assert.match(appSource, /setActiveDomain\('param'\)/);
+  });
+
+  it('启动恢复只落地一次：过时挂载丢弃，不得叠两套 toast', () => {
+    assert.match(appSource, /let cancelled = false/);
+    assert.match(appSource, /mountGenerationRef/);
+    assert.match(appSource, /if \(generation !== mountGenerationRef\.current\) return/);
+    assert.doesNotMatch(appSource, /restoreAttemptedRef/);
+  });
+
+  it('workspace.analyze 不得把目录扫描当成已解析并回报 parsedFiles:0', () => {
+    assert.doesNotMatch(workspaceIpcSource, /if \(activeIndex && indexedFiles\.length > 0\)/);
+    assert.match(workspaceIpcSource, /await analyzeWorkspace\(/);
+    assert.match(workspaceIpcSource, /analyzeInFlight/);
   });
 
   it('12-E：侧栏不再拼「XX · 逻辑库」（所有语义域都删，Files 数量与 project「开始」仍在）', () => {

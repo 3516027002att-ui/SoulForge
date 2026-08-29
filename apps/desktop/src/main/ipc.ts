@@ -129,20 +129,8 @@ import {
   type ScriptContainerEntryEvidence,
   type ScriptEntryClassification,
   ingestBridgeResult,
-  canReusePersistedHash,
-  makeFileFingerprint,
-  normalizeMtimeNs,
-  normalizeCtimeNs,
-  fileIdentityFromStat,
-  makeWorkspacePersistentIdentityHash,
-  type FingerprintContinuityV1,
-  type PersistedHashV1,
-  type FingerprintStoreState,
-  loadFingerprintStore,
   saveFingerprintStore,
-  getPathSourceGeneration,
   bumpPathSourceGeneration,
-  workspacePhysicalRootHash,
   mapExportFromMsbDocument
 } from '@soulforge/core';
 import {
@@ -230,7 +218,20 @@ import { executeRecoveryCleanup } from './recoveryCleanup.js';
 import { ModelServiceCredentialVault } from './modelServiceCredentials.js';
 import { MainMe3RuntimeGateway } from './me3RuntimeGateway.js';
 import { MemoryManager } from './memoryManager.js';
-import { registerWorkspaceIpcHandlers, clearWorkspaceIpcCaches } from './ipc/workspace.js';
+import {
+  registerWorkspaceIpcHandlers,
+  clearWorkspaceIpcCaches,
+  getWorkspaceSession,
+  getWorkspaceIndexedFiles,
+  getWorkspaceActiveIndex,
+  getActiveWorkspaceSessionIdState,
+  getWorkspaceRag,
+  getWorkspaceFingerprintStore,
+  applyWorkspaceIndexSnapshot,
+  applyWorkspaceRag,
+  setWorkspaceForegroundActive,
+  revokeDirectorySelectionsFor
+} from './ipc/workspace.js';
 import { clearParamIpcCaches, registerParamIpcHandlers } from './ipc/param.js';
 import { registerDocumentIpcHandlers, resetEditorDocumentStore } from './ipc/documents.js';
 import { registerOperationIpcHandlers } from './ipc/operations.js';
@@ -252,55 +253,35 @@ function safeExists(path: string): boolean {
   }
 }
 
-let indexedFiles: IndexedFile[] = [];
-let activeIndex: WorkspaceIndex | null = null;
-let activeRag: RagCorpus | null = null;
-let activeSession: WorkspaceSession | null = null;
 let activeOperationLog: OperationLogUtilityClient | null = null;
-let activeWorkspaceSessionId: string | null = null;
-let activeWorkspaceSessionGeneration = 0;
-let workspaceSessionGenerationCounter = 0;
-const FINGERPRINT_STORE_GENERATION = 1;
-let activeFingerprintStore: FingerprintStoreState | null = null;
-let foregroundActive = false;
 async function withForegroundPriority<T>(fn: () => Promise<T>): Promise<T> {
-  foregroundActive = true;
-  try { return await fn(); } finally { foregroundActive = false; }
+  setWorkspaceForegroundActive(true);
+  try { return await fn(); } finally { setWorkspaceForegroundActive(false); }
 }
 function bumpPathSourceGenerationForUris(uris: readonly string[]): void {
-  if (!activeFingerprintStore) return;
+  const fingerprintStore = getWorkspaceFingerprintStore();
+  if (!fingerprintStore) return;
+  const indexedFiles = getWorkspaceIndexedFiles();
   for (const uri of uris) {
     const rel = uri.startsWith('file://') ? decodeURI(uri.slice('file://'.length)) : uri;
-    // try to normalize to relativePath via indexedFiles lookup
     const file = indexedFiles.find(f => f.sourceUri === uri || f.relativePath === uri || f.absolutePath === uri);
     const rp = file?.relativePath ?? rel.replaceAll('\\','/').replace(/^\/+/,'');
     if (!rp) continue;
-    bumpPathSourceGeneration(activeFingerprintStore, rp);
-    // also invalidate persisted hash for that path so next hash is forced
-    activeFingerprintStore.hashes.delete(rp);
+    bumpPathSourceGeneration(fingerprintStore, rp);
+    fingerprintStore.hashes.delete(rp);
   }
-  if (activeSession) {
-    const root = durableStoragePaths(activeSession.meta.workspaceId).root;
-    void saveFingerprintStore({ storageRoot: root, state: activeFingerprintStore }).catch(()=>{});
+  const session = getWorkspaceSession();
+  if (session) {
+    const root = durableStoragePaths(session.meta.workspaceId).root;
+    void saveFingerprintStore({ storageRoot: root, state: fingerprintStore }).catch(()=>{});
   }
 }
-let workspaceIndexingAbort: AbortController | null = null;
-let workspaceIndexingTask: Promise<void> | null = null;
-let workspaceIndexingStatus: any = {
-  workspaceSessionId: null,
-  phase: 'idle',
-  current: 0,
-  total: 0,
-  message: '未打开工作区'
-};
 /** Prevent duplicate rollback dialogs/transactions while one request is in flight. */
 const activeRollbackRequests = new Set<string>();
 /** Provider configs may omit contextWindowTokens; keep compaction fail-safe by default. */
 const DEFAULT_AGENT_CONTEXT_WINDOW_TOKENS = 500_000;
 const AGENT_CONTEXT_COMPACTION_RATIO = 0.8;
 /** 当前 overlay 的显示 label：remountBase 重建 session 时沿用（scan 时登记）。 */
-let activeOverlayLabel = '';
-
 type KnowledgeRefreshCarrier = Pick<SaveTextResourceResult, 'knowledgeRefresh'>;
 // EMEVD authoritative caches and open-slot state moved to ipc/event.ts (domain-owned).
 
@@ -378,9 +359,10 @@ function locateUserEmedfSync(): string | null {
     }
   }
   // 3) 已挂载 baseRoot 的兄弟 tools/<一层子目录>。
-  pushToolsSubdirs(roots, activeSession?.layers.baseRoot);
+  const emedfSession = getWorkspaceSession();
+  pushToolsSubdirs(roots, emedfSession?.layers.baseRoot);
   // 4) 已挂载 overlay 根向上两级（workspace 层）的兄弟 tools/<一层>/Resources/。
-  const overlay = activeSession?.layers.overlayRoot?.trim();
+  const overlay = emedfSession?.layers.overlayRoot?.trim();
   if (overlay) pushToolsSubdirs(roots, dirname(dirname(overlay)));
   // 5) SOULFORGE_SEKIRO_GAME_ROOT 同样扫兄弟 tools。
   const gameRootEnv = process.env.SOULFORGE_SEKIRO_GAME_ROOT?.trim();
@@ -416,7 +398,8 @@ function resolveChrbndVirtualFile(sourceUri: string): { absolutePath: string; re
   if (!relativePath || relativePath.split('/').some((segment) => segment === '..' || segment === '')) {
     return null;
   }
-  const overlay = activeSession?.layers.overlayRoot?.trim();
+  const chrbndSession = getWorkspaceSession();
+  const overlay = chrbndSession?.layers.overlayRoot?.trim();
   if (overlay) {
     const candidate = join(overlay, relativePath);
     try {
@@ -425,7 +408,7 @@ function resolveChrbndVirtualFile(sourceUri: string): { absolutePath: string; re
       // 不可读，继续下一个候选。
     }
   }
-  const base = activeSession?.layers.baseRoot?.trim();
+  const base = chrbndSession?.layers.baseRoot?.trim();
   if (base) {
     const candidate = join(base, relativePath);
     try {
@@ -442,7 +425,7 @@ function resolveChrbndVirtualFile(sourceUri: string): { absolutePath: string; re
  * （伴生模型预览）。返回 null 时调用方按 RESOURCE_NOT_INDEXED 处理。
  */
 function resolveFlverReadFile(sourceUri: string): { absolutePath: string; relativePath: string } | null {
-  const indexed = indexedFiles.find((item) => item.sourceUri === sourceUri);
+  const indexed = getWorkspaceIndexedFiles().find((item) => item.sourceUri === sourceUri);
   if (indexed) return { absolutePath: indexed.absolutePath, relativePath: indexed.relativePath };
   return resolveChrbndVirtualFile(sourceUri);
 }
@@ -485,6 +468,7 @@ function resolveMapModelFile(
     if (/^o\d/i.test(name)) candidates.push({ rel: `obj/${name}.objbnd.dcx`, kind: 'chrbnd' });
   }
   const normalize = (value: string): string => value.replace(/\\/g, '/').toLowerCase();
+  const indexedFiles = getWorkspaceIndexedFiles();
   for (const candidate of candidates) {
     const indexed = indexedFiles.find((item) => {
       const rel = normalize(item.relativePath);
@@ -494,8 +478,9 @@ function resolveMapModelFile(
       return { absolutePath: indexed.absolutePath, relativePath: indexed.relativePath, kind: candidate.kind };
     }
   }
-  const overlay = activeSession?.layers.overlayRoot?.trim();
-  const base = activeSession?.layers.baseRoot?.trim();
+  const mapSession = getWorkspaceSession();
+  const overlay = mapSession?.layers.overlayRoot?.trim();
+  const base = mapSession?.layers.baseRoot?.trim();
   for (const root of [overlay, base]) {
     if (!root) continue;
     for (const candidate of candidates) {
@@ -551,7 +536,7 @@ function ensureEditorDocumentStore(): EditorDocumentStore {
  */
 function deriveDocumentOwnerKey(event: IpcMainInvokeEvent): string {
   return createHash('sha256')
-    .update(`${activeWorkspaceSessionId ?? 'no-session'}:${event.sender.id}`)
+    .update(`${getActiveWorkspaceSessionIdState() ?? 'no-session'}:${event.sender.id}`)
     .digest('hex');
 }
 
@@ -912,12 +897,15 @@ async function ensureActiveOperationLog(session: WorkspaceSession): Promise<Oper
 }
 
 function currentToolContext(): ToolContext {
-  const storage = activeSession ? durableStoragePaths(activeSession.meta.workspaceId) : undefined;
+  const session = getWorkspaceSession();
+  const index = getWorkspaceActiveIndex();
+  const rag = getWorkspaceRag();
+  const storage = session ? durableStoragePaths(session.meta.workspaceId) : undefined;
   return {
-    workspaceIndex: activeIndex,
+    workspaceIndex: index,
     mode: activeAiMode,
-    ...(activeRag ? { rag: activeRag } : {}),
-    ...(activeSession ? { session: activeSession } : {}),
+    ...(rag ? { rag } : {}),
+    ...(session ? { session } : {}),
     ...(activeOperationLog ? { operationLogStore: activeOperationLog } : {}),
     ...(storage ? { backupBaseDir: storage.backupBaseDir, recoveryDir: storage.recoveryDir } : {}),
     onSemanticEvidenceUpdated: refreshActiveIndexAfterSemanticEvidence,
@@ -929,7 +917,7 @@ async function persistActiveRag(
   database: OperationLogUtilityClient,
   corpus: RagCorpus
 ): Promise<void> {
-  activeRag = corpus;
+  applyWorkspaceRag(corpus);
   await database.replaceRagChunks(corpus.chunks);
   await database.replaceReferences(corpus.references);
 }
@@ -956,19 +944,21 @@ async function refreshRagAfterAnalyze(
 }
 
 async function refreshActiveIndexAfterSemanticEvidence(sourceUris: readonly string[] = []): Promise<void> {
-  if (!activeSession || !activeIndex) return;
+  const session = getWorkspaceSession();
+  const index = getWorkspaceActiveIndex();
+  if (!session || !index) return;
   // Live read tools have already replaced/merged the relevant semantic export.
   // Re-scan only refreshes the file catalog; it must not invalidate unrelated
   // semantic data or merge a stale persisted copy over the just-read value.
   const result = await scanWorkspace({
-    workspaceRoot: activeSession.layers.overlayRoot,
-    game: activeSession.meta.game
+    workspaceRoot: session.layers.overlayRoot,
+    game: session.meta.game
   });
-  indexedFiles = result.files;
-  activeIndex.setFiles(result.files);
-  activeIndex.rebuildReferences();
-  const database = activeOperationLog ?? await ensureActiveOperationLog(activeSession);
-  await refreshRagAfterAnalyze(database, activeIndex);
+  index.setFiles(result.files);
+  index.rebuildReferences();
+  applyWorkspaceIndexSnapshot(index);
+  const database = activeOperationLog ?? await ensureActiveOperationLog(session);
+  await refreshRagAfterAnalyze(database, index);
   void sourceUris;
 }
 
@@ -981,9 +971,9 @@ async function refreshActiveIndexAfterNativeWrite(
   changedSources: readonly string[] = [],
   carrier?: KnowledgeRefreshCarrier
 ): Promise<KnowledgeRefreshResult | void> {
-  if (!activeSession || !activeIndex) return;
-  const session = activeSession;
-  const currentIndex = activeIndex;
+  const session = getWorkspaceSession();
+  const currentIndex = getWorkspaceActiveIndex();
+  if (!session || !currentIndex) return;
   const beforeFiles = currentIndex.getFiles();
   const requestedSources = resolveKnowledgeSourceUris(changedSources, beforeFiles);
   const result = await scanWorkspace({
@@ -1027,13 +1017,11 @@ async function refreshActiveIndexAfterNativeWrite(
       };
     },
     persist: async (index) => {
-      activeIndex = index;
-      indexedFiles = index.getFiles();
+      applyWorkspaceIndexSnapshot(index);
       await refreshRagAfterAnalyze(database, index);
     }
   });
-  activeIndex = output.index;
-  indexedFiles = output.index.getFiles();
+  applyWorkspaceIndexSnapshot(output.index);
   if (carrier) carrier.knowledgeRefresh = summarizeKnowledgeRefresh(output.result);
   return output.result;
 }
@@ -1267,7 +1255,7 @@ function decompilerLabel(origin: 'explicit' | 'v1.1.5' | 'tools-scan' | 'legacy'
 }
 
 function rejectNonSekiroNativeWrite(sourceUri: string, file?: IndexedFile): RendererSaveResult | null {
-  if (activeSession?.meta.game === 'sekiro' && file?.game === 'sekiro') return null;
+  if (getWorkspaceSession()?.meta.game === 'sekiro' && file?.game === 'sekiro') return null;
   return {
     ok: false,
     changedFiles: [],
@@ -1387,14 +1375,15 @@ async function requestWriteConfirmation(input: {
   payloadHash: string;
   extraSubjects?: string[];
 }): Promise<ConfirmationReceipt | null> {
-  if (!activeWorkspaceSessionId) return null;
+  const workspaceSessionId = getActiveWorkspaceSessionIdState();
+  if (!workspaceSessionId) return null;
   // 日常 PARAM/FMG/GPARAM/脚本写入不再弹系统确认框；备份与回滚仍在 Patch Engine。
   return createConfirmationReceipt({
     subjects: [
       'MAIN_NATIVE_DIALOG_CONFIRMED',
       input.sourceUri,
       'ALL_RISKS',
-      `WORKSPACE_SESSION:${activeWorkspaceSessionId}`,
+      `WORKSPACE_SESSION:${workspaceSessionId}`,
       `PATCH_HASH:${input.payloadHash}`,
       `NONCE:${randomUUID()}`,
       ...(input.extraSubjects ?? [])
@@ -1454,7 +1443,7 @@ function sessionCommitPort(
           'MAIN_WORKBENCH_COMMIT',
           input.file.sourceUri,
           'ALL_RISKS',
-          ...(activeWorkspaceSessionId ? [`WORKSPACE_SESSION:${activeWorkspaceSessionId}`] : []),
+          ...(getActiveWorkspaceSessionIdState() ? [`WORKSPACE_SESSION:${getActiveWorkspaceSessionIdState()}`] : []),
           `TITLE:${input.title}`
         ],
         riskLevel: 'high',
@@ -1503,6 +1492,7 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
   trustedRendererDocuments.set(webContents.id, normalizedDocument);
   webContents.once('destroyed', () => {
     trustedRendererDocuments.delete(webContents.id);
+    revokeDirectorySelectionsFor(webContents.id);
     for (const [selectionId, selection] of directorySelections) {
       if (selection.ownerWebContentsId === webContents.id) directorySelections.delete(selectionId);
     }
@@ -1517,18 +1507,18 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
   // Spec A2-A13 registration order: documents -> operations -> modelServices -> raw -> text -> map -> action -> assets -> event -> param -> workspace -> agent
   registerDocumentIpcHandlers({
     handle: trustedHandle,
-    activeSession,
-    activeWorkspaceSessionId,
-    indexedFiles,
+    get activeSession() { return getWorkspaceSession(); },
+    get activeWorkspaceSessionId() { return getActiveWorkspaceSessionIdState(); },
+    get indexedFiles() { return getWorkspaceIndexedFiles(); },
     durableStoragePaths,
     bridgeRootSession
   });
 
   registerOperationIpcHandlers({
     handle: trustedHandle,
-    activeSession,
-    activeOperationLog,
-    indexedFiles,
+    get activeSession() { return getWorkspaceSession(); },
+    get activeOperationLog() { return activeOperationLog; },
+    get indexedFiles() { return getWorkspaceIndexedFiles(); },
     durableStoragePaths,
     requestWriteConfirmation,
     refreshActiveIndexAfterNativeWrite
@@ -1544,8 +1534,8 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
 
   registerRawIpcHandlers({
     handle: trustedHandle,
-    indexedFiles,
-    activeSession,
+    get indexedFiles() { return getWorkspaceIndexedFiles(); },
+    get activeSession() { return getWorkspaceSession(); },
     durableStoragePaths,
     bridgeRootSession,
     bridgeRootsDiagnostic,
@@ -1555,8 +1545,8 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
 
   registerTextIpcHandlers({
     handle: trustedHandle,
-    indexedFiles,
-    activeSession,
+    get indexedFiles() { return getWorkspaceIndexedFiles(); },
+    get activeSession() { return getWorkspaceSession(); },
     durableStoragePaths,
     bridgeRootSession,
     bridgeRootsDiagnostic,
@@ -1572,10 +1562,10 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
 
   registerMapIpcHandlers({
     handle: trustedHandle,
-    indexedFiles,
-    activeSession,
-    activeIndex,
-    activeWorkspaceSessionId,
+    get indexedFiles() { return getWorkspaceIndexedFiles(); },
+    get activeSession() { return getWorkspaceSession(); },
+    get activeIndex() { return getWorkspaceActiveIndex(); },
+    get activeWorkspaceSessionId() { return getActiveWorkspaceSessionIdState(); },
     safeExists,
     asBasicDiagnostics: (items) => items.map((item) => ({ severity: item.severity === 'warning' || item.severity === 'info' ? item.severity : 'error', code: item.code, message: item.message, ...(item.sourceUri ? { sourceUri: item.sourceUri } : {}) })),
     durableStoragePaths,
@@ -1588,9 +1578,9 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
 
   registerActionIpcHandlers({
     handle: trustedHandle,
-    indexedFiles,
-    activeSession,
-    activeIndex,
+    get indexedFiles() { return getWorkspaceIndexedFiles(); },
+    get activeSession() { return getWorkspaceSession(); },
+    get activeIndex() { return getWorkspaceActiveIndex(); },
     safeExists,
     pushToolsSubdirs,
     asBasicDiagnostics: (items) => items.map((item) => ({ severity: item.severity === 'warning' || item.severity === 'info' ? item.severity : 'error', code: item.code, message: item.message, ...(item.sourceUri ? { sourceUri: item.sourceUri } : {}) })),
@@ -1599,8 +1589,8 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
 
   registerAssetIpcHandlers({
     handle: trustedHandle,
-    indexedFiles: indexedFiles as readonly IndexedFile[],
-    activeSession: activeSession as WorkspaceSession | null,
+    get indexedFiles() { return getWorkspaceIndexedFiles(); },
+    get activeSession() { return getWorkspaceSession(); },
     verifiedReadRoots,
     verifiedStageRoots,
     durableStoragePaths,
@@ -1614,8 +1604,8 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
 
   registerEventIpcHandlers({
     handle: trustedHandle,
-    indexedFiles,
-    activeSession,
+    get indexedFiles() { return getWorkspaceIndexedFiles(); },
+    get activeSession() { return getWorkspaceSession(); },
     durableStoragePaths,
     bridgeRootSession,
     bridgeRootsDiagnostic,
@@ -1630,9 +1620,12 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
 
   registerParamIpcHandlers({
     handle: trustedHandle,
-    indexedFiles,
-    activeSession,
-    activeWorkspaceSessionId,
+    get indexedFiles() { return getWorkspaceIndexedFiles(); },
+    get activeSession() { return getWorkspaceSession(); },
+    get activeWorkspaceSessionId() { return getActiveWorkspaceSessionIdState(); },
+    getIndexedFiles: getWorkspaceIndexedFiles,
+    getActiveSession: getWorkspaceSession,
+    getActiveWorkspaceSessionId: getActiveWorkspaceSessionIdState,
     durableStoragePaths,
     bridgeRootSession,
     bridgeRootsDiagnostic,
@@ -1647,7 +1640,10 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
     sha256FileNow
   });
 
-  registerWorkspaceIpcHandlers({ handle: trustedHandle });
+  registerWorkspaceIpcHandlers({
+    handle: trustedHandle,
+    ensureActiveOperationLog
+  });
 
   registerAgentIpcHandlers({
     handle: trustedHandle,
@@ -1656,10 +1652,10 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
     memoryManager,
     modelServiceVault,
     operationLogUtility,
-    getActiveIndex: () => activeIndex,
-    getActiveSession: () => activeSession,
-    getActiveWorkspaceSessionId: () => activeWorkspaceSessionId,
-    getActiveRag: () => activeRag,
+    getActiveIndex: getWorkspaceActiveIndex,
+    getActiveSession: getWorkspaceSession,
+    getActiveWorkspaceSessionId: getActiveWorkspaceSessionIdState,
+    getActiveRag: getWorkspaceRag,
     ensureActiveOperationLog,
     durableStoragePaths,
     currentToolContext,
@@ -1669,9 +1665,9 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
 
   registerResourceIpcHandlers({
     handle: trustedHandle,
-    getIndexedFiles: () => indexedFiles,
-    getActiveSession: () => activeSession,
-    getActiveWorkspaceSessionId: () => activeWorkspaceSessionId,
+    getIndexedFiles: getWorkspaceIndexedFiles,
+    getActiveSession: getWorkspaceSession,
+    getActiveWorkspaceSessionId: getActiveWorkspaceSessionIdState,
     durableStoragePaths,
     ensureActiveOperationLog,
     rejectNonSekiroNativeWrite,

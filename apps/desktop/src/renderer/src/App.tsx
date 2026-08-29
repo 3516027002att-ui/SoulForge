@@ -1856,7 +1856,10 @@ export function App(): ReactElement {
   function pushToast(text: string, kind: 'ok' | 'warn' = 'ok'): void {
     toastIdRef.current += 1;
     const id = toastIdRef.current;
-    setToasts((list) => [...list, { id, text, kind }]);
+    setToasts((list) => {
+      if (list.some((toast) => toast.text === text)) return list;
+      return [...list, { id, text, kind }];
+    });
     window.setTimeout(() => {
       setToasts((list) => list.filter((toast) => toast.id !== id));
     }, 4200);
@@ -1968,18 +1971,25 @@ export function App(): ReactElement {
    * baseSelectionId 显式传入而不是读 baseRootChoice：自动挂载时那个 state 还是
    * 初始值 null，而上次的原版目录凭据来自 lastWorkspaceSelection。
    */
+  const workspaceRef = useRef(workspace);
+  workspaceRef.current = workspace;
+  const mountGenerationRef = useRef(0);
+
   async function mountWorkspace(
     overlaySelectionId: string,
     baseSelectionId: string | undefined,
     origin: 'manual' | 'restored'
   ): Promise<void> {
     if (!bridge) return;
+    if (origin === 'restored' && workspaceRef.current !== null) return;
+    const generation = ++mountGenerationRef.current;
     try {
       setStatus(origin === 'restored' ? '正在恢复上次的工作区...' : '正在扫描工作区...');
       const result = await bridge.scanWorkspace({
         overlaySelectionId,
         ...(baseSelectionId ? { baseSelectionId } : {})
       });
+      if (generation !== mountGenerationRef.current) return;
       setWorkspace(result);
       setSessionMeta(result.session ?? null);
       setAllFiles(result.files);
@@ -2037,17 +2047,24 @@ export function App(): ReactElement {
       void (async () => {
         try {
           const nextAnalysis = await bridge.analyzeWorkspace();
+          if (generation !== mountGenerationRef.current) return;
           setAnalysis(nextAnalysis);
           setTools(nextAnalysis?.tools ?? []);
           setEventUri(nextAnalysis?.events?.[0]?.uri ?? '');
           await refreshOperationHistory();
-          setStatus(`${restoredPrefix}已就绪：已索引 ${result.files.length} 个文件，解析 ${nextAnalysis?.parsedFiles ?? 0} 个文本/资源${baseLabel}`);
-          pushToast(`RAG 知识库与符号索引构建完成（已解析 ${nextAnalysis?.parsedFiles ?? 0} 个资源）`, 'ok');
+          const parsed = nextAnalysis?.parsedFiles ?? 0;
+          const inspected = nextAnalysis?.inspectedFiles ?? 0;
+          setStatus(`${restoredPrefix}已就绪：已索引 ${result.files.length} 个文件，解析 ${parsed} 个文本/资源${baseLabel}`);
+          pushToast(
+            `RAG 知识库与符号索引构建完成（已解析 ${parsed} 个，已检查 ${inspected} 个）`,
+            'ok'
+          );
         } catch {
           // 后台分析静默降级
         }
       })();
     } catch (error) {
+      if (generation !== mountGenerationRef.current) return;
       const message = error instanceof Error ? error.message : String(error);
       /*
        * 自动恢复失败不弹 toast（S12 后无状态栏，也不写底栏）。
@@ -2085,24 +2102,22 @@ export function App(): ReactElement {
    * recent projects）不止记住对话框位置，重启后直接恢复上次的工程。
    *
    * 三条约束：
-   * 1. 只跑一次。ref 守卫而不是空依赖数组 —— 严格模式下 effect 会执行两次，
-   *    空依赖数组挡不住，会发出两次扫描。
+   * 1. effect 必须带 cancelled 清理。组件 ref 挡不住 React 18 严格模式的
+   *    卸载/重挂（ref 会重置），两次 lastSelection + 两次 scan 会叠出
+   *    「已恢复」和「已成功打开」两套 toast。
    * 2. 已有工作区就不动。用户可能在这次启动里已经手动打开了别的目录
    *    （虽然时序上很少，但覆盖用户的显式选择比不恢复糟糕得多）。
    * 3. 凭据由主进程签发（workspace.lastSelection），不是渲染器自报路径 ——
    *    workspace.scan 只接受一次性凭据，绕过它等于作废那道裁定。
    */
-  const restoreAttemptedRef = useRef(false);
   useEffect(() => {
-    if (restoreAttemptedRef.current) return;
     if (!bridge || typeof bridge.lastWorkspaceSelection !== 'function') return;
-    restoreAttemptedRef.current = true;
+    let cancelled = false;
     void (async () => {
       try {
         const last = await bridge.lastWorkspaceSelection();
-        if (!last?.overlay) return;
-        // 期间用户已手动打开了工作区：不覆盖他的选择。
-        if (workspace !== null) return;
+        if (cancelled || !last?.overlay) return;
+        if (workspaceRef.current !== null) return;
         await mountWorkspace(
           last.overlay.selectionId,
           last.base?.selectionId,
@@ -2113,8 +2128,9 @@ export function App(): ReactElement {
         // 失败原因（若来自 scan）已由 mountWorkspace 记录。
       }
     })();
-    // 只依赖 bridge：workspace 进依赖会在挂载成功后重跑（已被 ref 挡住，
-    // 但依赖里留一个会变的值等于把「只跑一次」的意图藏起来）。
+    return () => {
+      cancelled = true;
+    };
   }, [bridge]);
 
   async function search(): Promise<void> {

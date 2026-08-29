@@ -68,6 +68,7 @@ internal static class Program
 
         // 1. 初次诊断
         var report = await RunAndPrintDiagnosisAsync(manualSekiro, manualMods);
+        ProvisionRecentPaths(report);
 
         // 如果未定位到只狼目录，提示用户手动输入
         while (report.OverallStatus == DoctorStatus.Fail && string.IsNullOrWhiteSpace(report.DetectedSekiroPath))
@@ -96,11 +97,14 @@ internal static class Program
             }
         }
 
+        ProvisionRecentPaths(report);
+
         // 2. 如果存在待补全项且非纯检查模式，自动执行补全
         if (!checkOnly && (report.OverallStatus != DoctorStatus.Pass || fixOnly))
         {
             await RunAndPrintFixAsync(manualSekiro, manualMods);
             report = await DoctorEngine.DiagnoseAsync(manualSekiro, manualMods);
+            ProvisionRecentPaths(report);
         }
 
         // 3. 默认直接拉起主程序 (双击即用启动器模式)
@@ -247,6 +251,16 @@ internal static class Program
             Console.WriteLine($"⚠️ {result.Message}");
         }
         Console.ResetColor();
+    }
+
+    private static void ProvisionRecentPaths(DoctorReport report)
+    {
+        if (string.IsNullOrWhiteSpace(report.DetectedSekiroPath) || string.IsNullOrWhiteSpace(report.DetectedModsPath))
+        {
+            return;
+        }
+
+        SoulForgeConfigProvisioner.UpdateRecentPaths(report.DetectedSekiroPath, report.DetectedModsPath);
     }
 
     private static bool LaunchSoulForge()

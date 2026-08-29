@@ -68,6 +68,9 @@ internal static class SoulForgeLauncher
                 return 0;
             }
 
+            int built = TryLaunchBuiltDesktop(workDir);
+            if (built >= 0) return built;
+
             bool showConsole = string.Equals(
                 Environment.GetEnvironmentVariable("SOULFORGE_DEV_CONSOLE"),
                 "1",
@@ -108,6 +111,53 @@ internal static class SoulForgeLauncher
             if (FocusExistingSoulForge(workDir)) return;
             Thread.Sleep(200);
         }
+    }
+
+    /// <summary>
+    /// 仓库已有 desktop 构建产物时直接拉起，不经过 Doctor 诊断页、也不走 npm run dev。
+    /// 返回 -1 表示没有可用产物，交给 npm run dev；>=0 为进程退出码。
+    /// </summary>
+    private static int TryLaunchBuiltDesktop(string workDir)
+    {
+        string electronExe = Path.GetFullPath(Path.Combine(workDir, "node_modules", "electron", "dist", "electron.exe"));
+        string mainEntry = Path.GetFullPath(Path.Combine(workDir, "apps", "desktop", "out", "main", "index.js"));
+        if (!File.Exists(electronExe) || !File.Exists(mainEntry)) return -1;
+
+        ProcessStartInfo psi = new ProcessStartInfo();
+        psi.FileName = electronExe;
+        psi.Arguments = Quote(mainEntry);
+        psi.WorkingDirectory = workDir;
+        psi.UseShellExecute = false;
+        Process process;
+        try
+        {
+            process = Process.Start(psi);
+        }
+        catch (Exception ex)
+        {
+            ShowError("无法启动 SoulForge 桌面端：\n" + ex.Message);
+            return 1;
+        }
+        if (process == null)
+        {
+            ShowError("无法启动 SoulForge 桌面端。");
+            return 1;
+        }
+
+        DateTime deadline = DateTime.UtcNow.AddMinutes(2);
+        while (DateTime.UtcNow < deadline)
+        {
+            if (FocusExistingSoulForge(workDir)) return 0;
+            if (process.HasExited)
+            {
+                if (process.ExitCode == 0) return 0;
+                ShowError("SoulForge 桌面进程已退出，退出码 " + process.ExitCode + "。");
+                return process.ExitCode;
+            }
+            Thread.Sleep(200);
+        }
+        ShowError("SoulForge 窗口在 2 分钟内未出现。\n若确认启动失败，请先结束残留进程后重试。");
+        return 1;
     }
 
     private static bool FocusExistingSoulForge(string workDir)

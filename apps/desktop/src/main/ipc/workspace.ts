@@ -30,9 +30,7 @@ import type { Diagnostic, IndexedFile, ResourceKind } from '@soulforge/shared';
 import { sanitizeDiagnostics, sanitizeRendererValue, toRendererIndexedFile } from '../rendererDto.js';
 import type { RendererIndexedFile } from '../rendererDto.js';
 import { prepareBridgeRoots, type BridgeRootSession, type PrepareBridgeRootsResult } from '../bridgeRoots.js';
-import { OperationLogUtilityClient } from '../operationLogUtilityClient.js';
-import { executeRecoveryCleanup } from '../recoveryCleanup.js';
-import { resolveOperationLogStorePath } from '@soulforge/core';
+import type { OperationLogUtilityClient } from '../operationLogUtilityClient.js';
 import type { TrustedIpcHandle } from './registration.js';
 import { buildRagCorpus, createRagCorpus, mergeCatalogAndPersisted } from '@soulforge/core';
 
@@ -91,7 +89,6 @@ let indexedFiles: IndexedFile[] = [];
 let activeIndex: WorkspaceIndex | null = null;
 let activeRag: RagCorpus | null = null;
 let activeSession: WorkspaceSession | null = null;
-let activeOperationLog: OperationLogUtilityClient | null = null;
 let activeWorkspaceSessionId: string | null = null;
 let activeWorkspaceSessionGeneration = 0;
 let workspaceSessionGenerationCounter = 0;
@@ -120,31 +117,6 @@ function bridgeRootSession(session: WorkspaceSession, storage: { root: string })
 }
 function bridgeRootsDiagnostic(code: string, result: Extract<PrepareBridgeRootsResult, { ok: false }>): Diagnostic {
   return { severity: 'error', code, message: `${result.message}。操作：重试 / 打开 Problems / 检查工作区存储权限。`, ...(result.details !== undefined ? { details: result.details } : {}) };
-}
-function legacyOperationLogPathForWorkspace(workspaceId: string): string {
-  return resolveOperationLogStorePath(join(app.getPath('userData'), 'operation-logs'), workspaceId);
-}
-const here = dirname(new URL(import.meta.url).pathname);
-const sqliteNativeBindingPath = app.isPackaged ? join(process.resourcesPath, 'native', 'better_sqlite3.node') : resolve(here, '../../.native/better_sqlite3.node');
-const operationLogUtility = new OperationLogUtilityClient(join(here, 'databaseUtility.js'), 15_000, sqliteNativeBindingPath);
-async function ensureActiveOperationLog(session: WorkspaceSession): Promise<OperationLogUtilityClient> {
-  const storage = workspaceStoragePaths(session.meta.workspaceId);
-  await operationLogUtility.openWorkspace({
-    appDatabasePath: join(app.getPath('userData'), 'app.db'),
-    databasePath: join(storage.root, 'workspace.db'),
-    workspaceId: session.meta.workspaceId,
-    rootPath: session.layers.overlayRoot,
-    game: session.meta.game,
-    legacyOperationLogPath: legacyOperationLogPathForWorkspace(session.meta.workspaceId),
-    legacyBackupDirectory: join(storage.root, 'legacy-operation-logs'),
-    legacySemanticSnapshotPath: join(session.layers.overlayRoot, 'semantic-snapshot.json'),
-    legacySemanticBackupDirectory: join(storage.root, 'legacy-semantic-snapshots'),
-  });
-  const cleanupPlan = await operationLogUtility.planRecoveryCleanup();
-  const cleanup = await executeRecoveryCleanup({ plan: cleanupPlan, allowedRoots: [storage.backupBaseDir, storage.recoveryDir], store: operationLogUtility });
-  if (cleanup.rejected.length > 0) process.stderr.write(`[SoulForge recovery cleanup] ${JSON.stringify(cleanup.rejected)}\n`);
-  activeOperationLog = operationLogUtility;
-  return operationLogUtility;
 }
 async function persistActiveRag(database: OperationLogUtilityClient, corpus: RagCorpus): Promise<void> {
   activeRag = corpus;
@@ -189,6 +161,7 @@ function resolveProjectJsonGameRoot(overlayAbsolutePath: string): string | null 
 
 export interface WorkspaceIpcDeps {
   handle: TrustedIpcHandle;
+  ensureActiveOperationLog(session: WorkspaceSession): Promise<OperationLogUtilityClient>;
 }
 
 export function clearWorkspaceIpcCaches(): void {
@@ -283,7 +256,7 @@ export function registerWorkspaceIpcHandlers(deps: WorkspaceIpcDeps): void {
     activeWorkspaceSessionGeneration = thisSessionGeneration;
     activeSession = await openWorkspaceSession({ overlayRoot: overlaySelection.absolutePath, ...(effectiveBaseRecord ? { baseRoot: effectiveBaseRecord.absolutePath } : {}), game: 'sekiro' });
     activeWorkspaceSessionId = randomUUID();
-    const database = await ensureActiveOperationLog(activeSession);
+    const database = await deps.ensureActiveOperationLog(activeSession);
     const physicalOverlayRoot = await (async () => { try { const { realpath } = await import('node:fs/promises'); return await realpath(activeSession.layers.overlayRoot); } catch { return activeSession.layers.overlayRoot; } })();
     const physicalOverlayHash = workspacePhysicalRootHash(physicalOverlayRoot);
     const physicalBaseHash = activeSession.layers.baseRoot ? workspacePhysicalRootHash(await (async () => { try { const { realpath } = await import('node:fs/promises'); return await realpath(activeSession.layers.baseRoot!); } catch { return activeSession.layers.baseRoot!; } })()) : undefined;
@@ -387,23 +360,98 @@ export function registerWorkspaceIpcHandlers(deps: WorkspaceIpcDeps): void {
     return { workspaceSessionId: activeWorkspaceSessionId, session: { workspaceSessionId: activeWorkspaceSessionId, workspaceLabel, game: activeSession.meta.game, openedAt: activeSession.meta.openedAt, baseMounted: !activeSession.meta.baseMissing, ...(baseSelection ? { baseLabel: baseSelection.label } : {}) } };
   });
 
+  let analyzeInFlight: {
+    sessionId: string;
+    generation: number;
+    promise: Promise<AnalyzeWorkspaceSummary>;
+  } | null = null;
+  let lastAnalyze: {
+    sessionId: string;
+    generation: number;
+    summary: AnalyzeWorkspaceSummary;
+  } | null = null;
+
   handle('workspace.analyze', async (): Promise<AnalyzeWorkspaceSummary> => {
-    if (!activeSession) throw new Error('请先打开工作区。');
-    if (activeIndex && indexedFiles.length > 0) {
-      const databaseReuse = await ensureActiveOperationLog(activeSession);
-      await refreshRagAfterAnalyze(databaseReuse, activeIndex);
-      return { parsedFiles: 0, inspectedFiles: indexedFiles.length, referenceStats: { high: 0, medium: 0, low: 0, suppressedAmbiguousNumbers: 0 }, diagnostics: [], events: activeIndex.searchEvents('', 200).map(({ item }) => ({ uri: item.uri, eventId: item.eventId, ...(item.name ? { name: item.name } : {}) })), tools: toolRegistry.list() };
+    if (!activeSession || !activeWorkspaceSessionId) throw new Error('请先打开工作区。');
+    const session = activeSession;
+    const sessionId = activeWorkspaceSessionId;
+    const generation = activeWorkspaceSessionGeneration;
+    // 扫描只建立文件目录，不能当成「已经解析过」。目录非空就返回 parsedFiles:0
+    // 会让启动 toast 报「解析 0 个资源」，RAG 也只吃到空符号表。
+    if (lastAnalyze && lastAnalyze.sessionId === sessionId && lastAnalyze.generation === generation) {
+      return lastAnalyze.summary;
     }
-    const result = await analyzeWorkspace({ workspaceRoot: activeSession.layers.overlayRoot, ...(activeSession.layers.baseRoot ? { oodleRuntimeRoot: activeSession.layers.baseRoot } : {}) });
-    activeIndex = result.index; const database = await ensureActiveOperationLog(activeSession); await refreshRagAfterAnalyze(database, result.index);
-    return { parsedFiles: result.parsedFiles, inspectedFiles: result.inspectedFiles, referenceStats: result.referenceStats, diagnostics: sanitizeDiagnostics(result.diagnostics), events: result.index.searchEvents('', 200).map(({ item }) => ({ uri: item.uri, eventId: item.eventId, ...(item.name ? { name: item.name } : {}) })), tools: toolRegistry.list() };
+    if (analyzeInFlight && analyzeInFlight.sessionId === sessionId && analyzeInFlight.generation === generation) {
+      return analyzeInFlight.promise;
+    }
+    const promise = (async (): Promise<AnalyzeWorkspaceSummary> => {
+      const result = await analyzeWorkspace({
+        workspaceRoot: session.layers.overlayRoot,
+        ...(session.layers.baseRoot ? { oodleRuntimeRoot: session.layers.baseRoot } : {})
+      });
+      if (sessionId !== activeWorkspaceSessionId || generation !== activeWorkspaceSessionGeneration) {
+        throw new Error('工作区已切换，分析结果已丢弃。');
+      }
+      activeIndex = result.index;
+      indexedFiles = result.index.getFiles();
+      const database = await deps.ensureActiveOperationLog(session);
+      await refreshRagAfterAnalyze(database, result.index);
+      const summary: AnalyzeWorkspaceSummary = {
+        parsedFiles: result.parsedFiles,
+        inspectedFiles: result.inspectedFiles,
+        referenceStats: result.referenceStats,
+        diagnostics: sanitizeDiagnostics(result.diagnostics),
+        events: result.index.searchEvents('', 200).map(({ item }) => ({
+          uri: item.uri,
+          eventId: item.eventId,
+          ...(item.name ? { name: item.name } : {})
+        })),
+        tools: toolRegistry.list()
+      };
+      lastAnalyze = { sessionId, generation, summary };
+      return summary;
+    })();
+    analyzeInFlight = { sessionId, generation, promise };
+    try {
+      return await promise;
+    } finally {
+      if (analyzeInFlight?.promise === promise) analyzeInFlight = null;
+    }
   });
 
   // NOTE: resource.preview / resource.search / resource.saveText intentionally remain in composition root.
 }
 
-// Getters for composition root / tests if needed
-export function getWorkspaceSession(): WorkspaceSession | null { return activeSession; }
-export function getWorkspaceIndexedFiles(): readonly IndexedFile[] { return indexedFiles; }
-export function getWorkspaceActiveIndex(): WorkspaceIndex | null { return activeIndex; }
-export function getActiveWorkspaceSessionIdState(): string | null { return activeWorkspaceSessionId; }
+export function getWorkspaceSession(): WorkspaceSession | null {
+  return activeSession;
+}
+export function getWorkspaceIndexedFiles(): IndexedFile[] {
+  return indexedFiles;
+}
+export function getWorkspaceActiveIndex(): WorkspaceIndex | null {
+  return activeIndex;
+}
+export function getActiveWorkspaceSessionIdState(): string | null {
+  return activeWorkspaceSessionId;
+}
+export function getWorkspaceRag(): RagCorpus | null {
+  return activeRag;
+}
+export function getWorkspaceFingerprintStore(): FingerprintStoreState | null {
+  return activeFingerprintStore;
+}
+export function applyWorkspaceIndexSnapshot(index: WorkspaceIndex): void {
+  activeIndex = index;
+  indexedFiles = index.getFiles();
+}
+export function applyWorkspaceRag(corpus: RagCorpus): void {
+  activeRag = corpus;
+}
+export function setWorkspaceForegroundActive(value: boolean): void {
+  foregroundActive = value;
+}
+export function revokeDirectorySelectionsFor(webContentsId: number): void {
+  for (const [selectionId, selection] of directorySelections) {
+    if (selection.ownerWebContentsId === webContentsId) directorySelections.delete(selectionId);
+  }
+}

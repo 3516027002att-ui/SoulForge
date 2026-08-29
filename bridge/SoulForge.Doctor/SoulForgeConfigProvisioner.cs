@@ -13,6 +13,9 @@ public static class SoulForgeConfigProvisioner
         {
             paths.Add(Path.Combine(appData, "SoulForge", "recent-paths.json"));
             paths.Add(Path.Combine(appData, "soulforge", "recent-paths.json"));
+            // electron.exe 直接拉起 / electron-vite 开发态的 userData 名不一致
+            paths.Add(Path.Combine(appData, "Electron", "recent-paths.json"));
+            paths.Add(Path.Combine(appData, "@soulforge", "desktop", "recent-paths.json"));
         }
 
         // 本地仓库开发路径
