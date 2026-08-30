@@ -1,0 +1,2960 @@
+你现在在 SoulForge 仓库中执行一次受严格约束的后端修复任务。
+
+仓库：
+
+`D:\Repository\SoulForge`
+
+本任务只处理两个已经获得真实运行时证据的问题：
+
+1. MAP：`m10_00_00_00` 中一部分真实地图模型无法从 proxy 方块升级为真实几何。
+2. ACTION：`c0000` 玩家动作页面已经能得到并绑定骨骼，但动画 clip 无法读取，所以骨骼始终保持 reference pose，不运动。
+
+不要处理 PARAM。
+不要处理 ROLLBACK。
+不要处理任何 UI 美化。
+不要重构 renderer。
+不要顺手整理代码。
+不要修改与这两个 First Bad 无直接关系的架构。
+不要因为发现其他问题而扩大任务范围。
+
+本任务的最高优先级不是“尽可能多修东西”，而是：
+
+**严格沿已经证明的 First Bad 修复，禁止从症状反向猜实现。**
+
+如果某一步的真实证据不足以唯一决定实现，必须先补足最小证据，再修改该处；不得用“看起来合理”的常量、文件名规律、索引关系、骨骼位置关系或格式猜测替代证据。
+
+---
+
+# 事实基线
+
+开始工作前，把下面事实视为已经完成的运行时取证结果，不要重新把它们降级成“猜测”，也不要重新从零审计整个系统。
+
+当前已经验证过的基线 commit 是：
+
+`abb14982edc38c40a880a3169e58bb0ae813067d`
+
+真实运行环境使用：
+
+`D:\Repository\SoulForge`
+
+真实 Sekiro 根目录：
+
+`D:\mystream\Sekiro Shadows Die Twice\Sekiro`
+
+运行时取证使用的是产品自己的生产 Bridge 路径：
+
+`runBridge`
+→ pooled NDJSON daemon
+→ Release publish 的 `SoulForge.Bridge.exe`
+→ 真实 Sekiro 文件
+
+不是 mock。
+不是 synthetic fixture。
+不是静态 grep 冒充运行时。
+
+## MAP 已证实事实
+
+真实对象：
+
+`mods/map/mapstudio/m10_00_00_00.msb.dcx`
+
+MSB 读取成功。
+
+运行时得到：
+
+* models = 864
+* parts = 7404
+* 按 renderer part 顺序前 807 个 unique modelName
+* 对前 80 个 unique model 做生产路径实测
+* 61 / 80 能成功产生非空 static geometry chunks
+* 19 / 80 整模型 fail-closed
+* 38 个模型多页 pagination 正常
+
+19 个失败模型全部报同一类错误：
+
+`MAP_STATIC_GEOMETRY_FAILED: FLVER_DISPLAY_FACESET_UNSUPPORTED: no Flags==0 FaceSet in mesh reference order`
+
+已经证伪：
+
+* 不是 mapbnd 找不到
+* 不是 binder entry 找不到
+* 不是 short modelName → long map model name 解析失败
+* 不是当前 pagination bug
+* 本次 19 个失败中没有观察到 `multiple Flags==0`
+
+MAP 当前 First Bad 已经运行时确认在：
+
+`bridge/SoulForge.Bridge/FlverNativeDocument.cs`
+
+重点函数：
+
+`GetMeshIndexSize`
+
+`GetMeshIndicesBase64`
+
+它们被：
+
+`bridge/SoulForge.Bridge/MapStaticGeometryService.cs`
+
+中的 mesh geometry 构建路径调用。
+
+当前实现存在一个已经确定过严的 display FaceSet 规则：
+
+* 从当前 mesh 引用的 FaceSet 中找 `Flags == 0`
+* 找不到直接失败
+* 找到多个也直接失败
+* 只有恰好一个才继续
+
+真实 Sekiro 地图已经证明：
+
+**合法地图数据中确实存在 mesh 引用的全部 FaceSet 都是非零 Flags 的情况。**
+
+因此“没有 Flags==0 就整 mesh / 整模型失败”不是可接受的 Sekiro display projection 规则。
+
+但是，目前上一轮 runtime 报告没有记录这 19 个失败模型中每个失败 mesh 的完整 FaceSet 明细：
+
+* FaceSet ordinal
+* FaceSet 全局 index
+* Flags
+* TriangleStrip
+* CullBackfaces
+* IndexSize
+* IndexCount
+
+所以你现在**不能直接把规则改成任意非零 FaceSet**。
+
+尤其禁止：
+
+* 把所有 FaceSet indices 拼在一起
+* 把所有 LOD FaceSet 同时渲染
+* 简单删除 `Flags == 0` 判断然后无条件取第一个
+* 无条件允许 EdgeCompressed
+* 遇到不认识的 flag 仍假定兼容
+* 为了让测试过而把 fail-closed 全部改成 fallback
+
+MAP 修复必须先执行一个非常小的真实数据普查，然后按照下面指定的决策流程修改。
+
+## ACTION 已证实事实
+
+玩家：
+
+`c0000`
+
+生产 Bridge 已经得到：
+
+* leader skeleton = 467 bones
+* leader mesh = 0
+
+这本身不是当前动画不动的 First Bad，因为狼的可见 mesh 来自 character parts compatibility assembly，当前用户已经实际看到骨骼绑定。
+
+`read-tae-document` 对 c0000 正常：
+
+* 939 个动画
+
+但是对 c0000 分散抽样 40 个 animId：
+
+* clip 成功 = 0 / 40
+
+base 副本额外抽样 6 个：
+
+* clip 成功 = 0 / 6
+
+统一失败：
+
+`TAE_ANIMATION_CLIP_READ_FAILED: ANIBND contains no animation entry with logical HKX ID <id>`
+
+First Bad 位于：
+
+`bridge/SoulForge.Bridge/ActionAnimationSemantics.cs`
+
+函数：
+
+`ResolveAnimationBinderEntryIndex`
+
+当前代码依赖：
+
+`SekiroAnimationBinderIdBase = 1_000_000_000L`
+
+并只接受：
+
+`EntryId >= 1_000_000_000`
+
+且：
+
+`EntryId % 1_000_000_000 == motionAnimationId`
+
+真实 `c0000.anibnd.dcx`：
+
+* binder entry 总数 = 109
+* `EntryId >= 1_000_000_000` 的数量 = 0
+
+ID 家族已经实测：
+
+* 4M × 1：`skeleton.hkx`
+* 5M × 65
+* 6M × 42
+* 9M × 1
+
+已经观察到一些明确对应：
+
+* `5000010 ↔ 10`
+* `5000050 ↔ 50`
+* `5000070 ↔ 70`
+* `5000100 ~ 5000103 ↔ 100 ~ 103`
+* `5000110 ↔ 110`
+* `5000200 / 5000201 ↔ 200 / 201`
+
+但当前全量交集只证明了少量直接对应，**没有证明所有 5M 或 6M entry 都满足 `EntryId - familyBase == motionAnimationId`。**
+
+因此 ACTION 中严格禁止：
+
+* 直接把 `1_000_000_000` 改成 `5_000_000`
+* 写 `EntryId % 5_000_000`
+* 默认 5M 全是 animation
+* 默认 6M 全是 animation
+* 按 binder index 当 animation ID
+* 按条目排序位置与 TAE 顺序一一对应
+* 用 HKX→FLVER bone index 关系解决这个问题
+* 修改 renderer sampler 来掩盖 clip 读取失败
+* 在 clip 根本不存在时制造 reference-pose “假 clip”
+* fallback 到任意 HKX 让画面“先动起来”
+
+敌人对照：
+
+`c1020.anibnd.dcx`
+
+真实运行数据：
+
+* binder entries = 293
+* 其中 289 个 `EntryId >= 1e9`
+* 40 个散布动画中 33 个 clip 成功
+* 成功 clip 全部可以进入 sampler
+* 已抽样成功 clip 的 `mappedBoneCount = 126 / 126`
+* `mappedAnimatedTrackCount` 为 `106 / 106` 或 `126 / 126`
+* HKX pose 有明显时间变化
+* remap 后 FLVER pose 也有相同变化
+
+所以：
+
+**不要把 c1020 的正常 1e9 规则破坏掉。**
+
+ACTION 修复必须支持玩家 c0000 的真实容器身份规则，同时保持当前已经工作的敌人 1e9 路径。
+
+---
+
+# 工作树与基线保护
+
+进入仓库后第一件事只采集状态，不改文件。
+
+执行：
+
+```powershell
+git rev-parse HEAD
+git branch --show-current
+git status --short
+git diff --stat
+git diff
+```
+
+把输出保存进你的工作记录。
+
+如果 HEAD 已经不再是：
+
+`abb14982edc38c40a880a3169e58bb0ae813067d`
+
+不要 checkout，不要 reset，不要覆盖用户的新提交。
+
+继续在当前 HEAD 工作，但先执行：
+
+```powershell
+git log --oneline abb14982edc38c40a880a3169e58bb0ae813067d..HEAD
+git diff --stat abb14982edc38c40a880a3169e58bb0ae813067d..HEAD
+```
+
+然后检查这些目标文件是否已经被后续提交修改：
+
+`bridge/SoulForge.Bridge/FlverNativeDocument.cs`
+
+`bridge/SoulForge.Bridge/MapStaticGeometryService.cs`
+
+`bridge/SoulForge.Bridge/ActionAnimationSemantics.cs`
+
+`bridge/SoulForge.Bridge/BridgeCommandService.cs`
+
+以及与 ACTION/MAP 对应的现有验证脚本。
+
+如果目标函数已经被其他提交实质修改，不得机械套本指令里的旧行号或旧代码片段。
+
+你仍然必须围绕同一个 First Bad 工作，但以当前符号和当前实现为准。
+
+如果 `git status --short` 在开始时非空：
+
+* 不得 reset
+* 不得 checkout 用户文件
+* 不得 stash 用户工作
+* 不得覆盖未知修改
+
+先记录哪些文件在你开始之前已经 dirty。
+
+之后你的最终 diff 必须能够区分：
+
+* pre-existing changes
+* 本任务产生的 changes
+
+未经确认不得把 pre-existing dirty 内容计入你的修改成果。
+
+---
+
+# 修改范围红线
+
+默认允许修改的生产源码只有：
+
+`bridge/SoulForge.Bridge/FlverNativeDocument.cs`
+
+`bridge/SoulForge.Bridge/MapStaticGeometryService.cs`
+
+`bridge/SoulForge.Bridge/ActionAnimationSemantics.cs`
+
+以及只有在现有调用签名确实无法携带正确 ANIBND 身份信息时，才允许最小修改：
+
+`bridge/SoulForge.Bridge/BridgeCommandService.cs`
+
+测试或验证代码允许修改已有 MAP/ACTION 测试文件，或新增一个非常小的针对性 verifier。
+
+可以复用上一轮本地 runtime harness：
+
+`tmp/runtime-recapture/map-trace.mjs`
+
+`tmp/runtime-recapture/action-trace.mjs`
+
+以及原始结果：
+
+`tmp/runtime-recapture/map-trace.json`
+
+`tmp/runtime-recapture/map-trace-80.json`
+
+`tmp/runtime-recapture/action-trace.json`
+
+这些文件如果实际存在，优先复用。
+
+不要为了“代码整洁”把 runtime harness 搬进产品模块。
+
+禁止修改：
+
+`apps/desktop/src/renderer/**`
+
+`apps/desktop/src/preload/**`
+
+除非后续明确给出新的指令。
+
+也就是说，本轮不要碰：
+
+`MsbScenePanel.tsx`
+
+`TaeWorkbenchPanel.tsx`
+
+`FlverViewer.tsx`
+
+`threeSceneController.ts`
+
+本任务不通过修改前端掩盖 Bridge 数据问题。
+
+---
+
+# MAP：先补齐唯一缺失的运行时信息
+
+打开：
+
+`bridge/SoulForge.Bridge/FlverNativeDocument.cs`
+
+定位：
+
+`GetMeshIndexSize`
+
+和：
+
+`GetMeshIndicesBase64`
+
+先阅读两个函数当前关于 FaceSet candidate 选择的实现。
+
+确认当前逻辑仍然包含以下语义：
+
+* 从 `mesh.FaceSetIndices` 按 mesh reference order 获得 candidate FaceSet
+* 从 candidates 中筛选 `Flags == 0`
+* 0 个时抛 `FLVER_DISPLAY_FACESET_UNSUPPORTED`
+* 多个时抛 `FLVER_DISPLAY_FACESET_UNSUPPORTED`
+* EdgeCompressed 有独立拒绝路径
+* index size 只支持当前已经支持的位宽
+
+不要立刻修改选择规则。
+
+先让现有 runtime harness 能够输出**第一批失败 mesh 的 FaceSet 完整诊断**。
+
+优先方式：
+
+不要给整个产品增加永久全局日志。
+
+只在现有 runtime harness 或 Bridge 已有 diagnostic envelope 能最小得到数据的位置增加诊断。
+
+如果 `FlverNativeDocument` 当前已经公开：
+
+`GetFaceSet(int index)`
+
+或：
+
+`GetFaceSets()`
+
+优先复用。
+
+不要为了诊断重新解析 FLVER。
+
+对每个发生：
+
+`no Flags==0 FaceSet in mesh reference order`
+
+的 mesh，至少记录：
+
+* modelName
+* meshIndex
+* `mesh.FaceSetIndices` 原始顺序
+* 每个引用 FaceSet 的 global index
+* 每个引用 FaceSet 的 ordinal
+* `Flags`，同时输出十进制和 `0xXXXXXXXX`
+* `TriangleStrip`
+* `CullBackfaces`
+* `IndexSize`
+* `IndexCount`
+
+如果现有 `FlverFaceSetEntry` 字段名称略有不同，以当前真实字段为准，不得重新维护第二份解析结构。
+
+诊断必须来自已经被 `FlverNativeDocument` 解析出来的真实结构。
+
+不得从文件字节重新猜 offset。
+
+不得用 SoulsFormats 临时解析同一个文件后把结果当成 SoulForge 自己 parser 的运行结果。
+
+SoulsFormats / DSAnimStudio 可以用于解释语义，但本任务验收数据必须来自 SoulForge 自己的生产 Bridge parser。
+
+---
+
+重新发布 Bridge：
+
+```powershell
+npm run bridge:publish
+```
+
+如果失败：
+
+停在第一个编译错误上修正。
+
+不要继续跑旧 publish 二进制。
+
+发布成功后，确认 publish 产物 mtime 已更新。
+
+然后复用：
+
+`tmp/runtime-recapture/map-trace.mjs`
+
+如果该脚本已经能够指定 sample 数量，则继续跑原先的前 80 unique models。
+
+如果脚本固定就是前 80 个，不要重写。
+
+需要重新得到至少：
+
+* 61 个原健康模型
+* 原 19 个失败模型
+
+重点是捕获原 19 个失败模型中触发 First Bad 的具体 mesh FaceSet 信息。
+
+输出新的 raw result 到：
+
+`tmp/runtime-recapture/map-faceset-diagnostic.json`
+
+不要覆盖：
+
+`map-trace-80.json`
+
+因为旧文件是修复前证据。
+
+如果现有 harness 不能输出上述字段，只对 harness 做最小修改。
+
+不要在这一阶段改变 FaceSet 选择行为。
+
+运行完成后，建立一张实际 decision table。
+
+对于每个失败 mesh，把引用 FaceSet 按 reference order 分类为：
+
+* `Flags == 0`
+* 非零且只有当前实现已经理解的普通 FaceSet flag
+* `EdgeCompressed`
+* 未知 flag bit
+* 不支持的 IndexSize
+* 空 indices / 非法引用
+
+这里不要把“非零”本身视为错误。
+
+你要回答的是：
+
+**在真实 19 个失败模型中，当 Flags==0 不存在时，按 mesh reference order 排在前面的 FaceSet 到底是什么类型。**
+
+必须统计至少：
+
+`失败 mesh 总数`
+
+`全部候选 FaceSet 总数`
+
+`出现过的 distinct Flags`
+
+`每种 Flags 的出现次数`
+
+`每个失败 mesh 第一个 FaceSet 的 Flags`
+
+`EdgeCompressed 出现 mesh 数`
+
+`未知 flag bit 出现 mesh 数`
+
+`IndexSize 非 16/32 出现 mesh 数`
+
+只有这组结果出来以后，才允许进入 MAP 的选择规则修改。
+
+---
+
+# MAP FaceSet 选择规则的决策边界
+
+修改时必须保持一个原则：
+
+**一个 mesh 最终只选择一个 display FaceSet 作为当前 V1 projection。**
+
+不要合并全部 LOD。
+
+不要把多个 FaceSet 的 triangle list 拼接起来。
+
+原因是多个 FaceSet 很可能代表不同显示层级或特殊 rendering purpose；直接拼接会制造重复表面、Z fighting、错误 LOD 或特殊 pass 被当普通 geometry。
+
+当前 V1 的目标只是从真实 Sekiro FLVER 中确定一个稳定的普通 display projection。
+
+同时保持：
+
+* triangle strip → triangle list 的现有展开逻辑
+* primitive restart 逻辑
+* winding 逻辑
+* IndexSize 保护
+* EdgeCompressed fail-closed，除非真实证据和现有 parser 能力已经证明可以解析
+* maxIndices / allowTruncation 当前契约
+* `GetMeshIndexSize` 与 `GetMeshIndicesBase64` 必须选择**同一个 FaceSet**
+
+禁止让这两个函数各自复制一份不同的 candidate 筛选逻辑。
+
+如果当前代码中这两个函数已经各自实现一遍：
+
+`FaceSet candidates → displayCandidates → selected`
+
+则本次修复时把“选择哪个 FaceSet”的纯语义提取成一个**私有 helper**，两个函数共用。
+
+helper 只负责：
+
+`给定 meshIndex / mesh → 返回被选中的 FlverFaceSetEntry（以及需要时的引用 ordinal/index）`
+
+不要把 index 解码、triangle strip 展开等一起塞进去。
+
+不要创建新的公共 API。
+
+不要创建新的 service。
+
+不要移动 `FlverNativeDocument` 的职责边界。
+
+helper 名称以当前项目风格为准，例如语义应明确表达：
+
+`SelectDisplayFaceSet...`
+
+而不是模糊的：
+
+`GetBestFaceSet`
+
+因为这里不是评分算法。
+
+在真实诊断结果出来后严格按下面分支执行：
+
+如果原 19 个失败模型中：
+
+* 没有 `Flags==0`
+* 第一个 referenced FaceSet 全部属于当前可解析的普通非 EdgeCompressed FaceSet
+* IndexSize 都是当前支持的 16 或 32
+* 没有未知、会改变 index 编码的特殊 flag
+
+那么采用最小兼容规则：
+
+1. 如果 referenced candidates 中存在 `Flags==0`，按 reference order 选择第一个 `Flags==0`。
+2. 如果不存在 `Flags==0`，按 reference order 选择第一个当前 parser 明确能够解码的非 EdgeCompressed FaceSet。
+3. 如果第一个候选不支持，但后面存在普通可支持候选，不要静默跳过未知语义直到找到一个“能画”的；这种情况停止修改并记录实际 flags，因为这意味着选择优先级需要额外语义证据。
+4. 如果 candidates 中只有 EdgeCompressed 或当前不支持的 index representation，则保持 fail-closed。
+5. 不得因为多个 `Flags==0` 就整 mesh 失败。多个 `Flags==0` 时按 reference order 取第一个，并通过 regression test 固定其确定性。
+
+这里之所以允许“多个 Flags==0 取第一个”，不是因为当前 19 个样本出现过它，而是当前实现的“恰好一个”限制本身没有 FLVER mesh reference order 语义上的必要性；选择必须确定且单值，reference order 已经提供确定顺序。
+
+但是，如果运行时 diagnostic 显示：
+
+* 首位 FaceSet 经常是 EdgeCompressed
+* 或首位有未知 flags
+* 或不同失败 mesh 的 flags 分布存在明显不同类别
+
+不要继续套上述 fallback。
+
+此时必须保留 diagnostic，并在工作记录中列出真实 flags 分布；不要凭猜测完成 MAP 产品修改。
+
+在这种情况下，本任务允许 MAP 暂时停在“证据已补齐、实现等待明确语义”的状态，绝对不允许为了完成任务而扩大兼容声明。
+# MAP 修改后的回归证明
+
+只有在上一部分规定的 FaceSet runtime diagnostic 已经得到真实数据，并且实际数据满足允许修改的条件后，才执行这一节。
+
+修改：
+
+`bridge/SoulForge.Bridge/FlverNativeDocument.cs`
+
+核心要求是：
+
+`GetMeshIndexSize`
+
+与：
+
+`GetMeshIndicesBase64`
+
+不得继续分别决定 display FaceSet。
+
+两者必须调用同一个私有 FaceSet selection helper。
+
+helper 必须严格基于：
+
+`mesh.FaceSetIndices`
+
+的原始 reference order。
+
+不得对 FaceSet 按：
+
+* Flags
+* IndexCount
+* triangle 数量
+* 文件全局 FaceSet index
+* “看起来更完整”
+* “面积更大”
+* “顶点更多”
+
+重新排序。
+
+reference order 是默认确定性顺序。
+
+如果 runtime diagnostic 已证明原 19 个失败模型符合“首个 referenced FaceSet 是当前 parser 可以完整解码的普通 FaceSet”这一条件，则 selection 规则实现为：
+
+1. 建立当前 mesh 的 referenced FaceSet candidates。
+2. 如果 candidates 为空，保持当前空/失败行为，不伪造 geometry。
+3. 如果存在 `Flags == 0` 的 candidate：
+
+   * 选择 reference order 中第一个 `Flags == 0`。
+4. 如果一个 `Flags == 0` 都不存在：
+
+   * 检查 reference order 中第一个 FaceSet。
+   * 只有它满足当前实现已经支持的 index representation，且不是 EdgeCompressed，且 diagnostic 没有发现其包含当前 parser 不理解的会改变 index 数据语义的 flag 时，才选择它。
+5. 如果第一项不能被当前 parser可靠解释：
+
+   * fail closed。
+   * 不向后扫描寻找一个“碰巧能画”的 FaceSet。
+6. 多个 `Flags == 0`：
+
+   * 不再因为数量大于 1 而失败。
+   * 只取 reference order 中第一个。
+7. 任何情况下只返回一个 selection。
+8. selection helper 不得吞异常。
+9. selection helper 不得进行 triangle strip 展开。
+10. selection helper 不得改变 `IndexSize`。
+11. selection helper 不得截断 index。
+12. selection helper 不得自动过滤坏 triangle。
+13. selection helper 不得执行 geometry repair。
+
+如果你无法从实际 Flags 分布证明“非零 flag 不影响当前 index projection”，不要以“SoulsFormats 好像能画”为理由扩大支持。
+
+这次修复的 authority 是：
+
+**SoulForge parser 实际解析出的真实 Sekiro 文件 + 成熟工具语义作为对照。**
+
+成熟工具只能帮助解释。
+
+它不能替代本项目自己的真实 corpus 验证。
+
+---
+
+在 MAP 产品代码修改后，先编译：
+
+```powershell
+npm run bridge:publish
+```
+
+publish 必须成功。
+
+然后运行已有 FLVER 验证：
+
+```powershell
+npm run bridge:verify:flver-mesh
+npm run bridge:verify:flver-multi
+```
+
+如果其中任何一个失败：
+
+不要修改测试让它变绿。
+
+先判断是不是本次 FaceSet selection 改变造成。
+
+尤其检查：
+
+* 原本 `Flags==0` 的模型是否仍选择同一 FaceSet
+* IndexSize 是否一致
+* triangle count 是否出现意外变化
+* triangle strip 展开是否被改变
+* EdgeCompressed 是否被错误放行
+
+然后运行：
+
+```powershell
+npm run test:map-static-pagination-contract
+npm run test:verify-map-action-open
+```
+
+这些测试只能证明已有契约没有被破坏。
+
+**这些测试全部通过仍然不代表 MAP 修复完成。**
+
+MAP 修复的真正验收必须重新跑上一轮的真实 `m10_00_00_00` 80-model corpus。
+
+复用相同 model 顺序。
+
+不得重新选择“更容易成功”的 80 个模型。
+
+修复前已知结果：
+
+* healthy = 61
+* fail = 19
+
+修复后生成：
+
+`tmp/runtime-recapture/map-trace-80-after-fix.json`
+
+不要覆盖修复前：
+
+`tmp/runtime-recapture/map-trace-80.json`
+
+对 before / after 做逐 model 对比。
+
+至少输出：
+
+* modelName
+* before status
+* before errorCode
+* after status
+* after errorCode
+* before first chunk triangleCount
+* after first chunk triangleCount
+* before selected FaceSet
+* after selected FaceSet
+* pageCount
+* total chunk count
+
+验收第一条：
+
+**原 61 个成功模型不得出现回归。**
+
+也就是：
+
+`61 / 61` 原 healthy model 在修复后必须仍然产生非空 geometry。
+
+任何一个原 healthy model 从：
+
+`non-empty chunks`
+
+变成：
+
+* failed
+* empty
+* unsupported
+* timeout
+
+都算修复失败。
+
+不要接受“总成功数增加了，所以少坏几个没关系”。
+
+这是错误验收。
+
+验收第二条：
+
+对上一轮 19 个：
+
+`no Flags==0 FaceSet`
+
+失败模型，根据修复前 diagnostic 分类。
+
+如果 19 个全部满足本轮允许的 fallback 条件：
+
+目标就是：
+
+`19 / 19` 从 fail 变为非空 geometry。
+
+最终应为：
+
+`80 / 80` 非空 geometry。
+
+如果只有其中 N 个满足明确可支持条件：
+
+正确目标是：
+
+`61 + N`
+
+成功。
+
+剩余：
+
+`19 - N`
+
+必须继续以明确、不虚假的 unsupported diagnostic fail closed。
+
+不要为了得到 `80 / 80` 而扩大格式能力。
+
+验收第三条：
+
+新成功的模型不能只是返回：
+
+`ok`
+
+但：
+
+`chunkCount = 0`
+
+或者：
+
+`triangleCount = 0`
+
+这样的假成功。
+
+每个声称修复成功的原失败模型必须至少满足：
+
+* `read-map-static-geometry` 返回成功
+* 至少一页 chunk
+* 至少一个 mesh geometry
+* 至少一个 chunk `triangleCount > 0`
+* indices Base64 非空
+* vertex payload 非空
+* pagination 能正确终止
+* 不出现无限 cursor
+* 不重复返回同一 cursor
+
+验收第四条：
+
+检查被选中的 FaceSet。
+
+对原来已经有 `Flags==0` 的健康模型：
+
+不能因为 fallback 逻辑加入后改选其他 FaceSet。
+
+至少抽取 10 个原健康模型比较修复前后：
+
+`selectedFaceSetOrdinals`
+
+必须保持一致。
+
+如果已有 raw trace 可以全量比较，则全量比较 61 个，不要只抽样。
+
+验收第五条：
+
+不允许通过关闭错误检测制造假绿。
+
+最终代码中必须仍然存在明确的 fail-closed 路径用于：
+
+* EdgeCompressed 未支持
+* 非 16/32 IndexSize，如果当前 parser 仍只支持 16/32
+* FaceSet reference 越界
+* candidates 为空
+* 当前 parser 不认识且无法证明安全的 representation
+
+错误码可以因 helper 提取而调整内部结构，但不能把这些情况降成：
+
+`return null`
+
+然后让上层当正常空模型处理。
+
+---
+
+# MAP 的结构化诊断
+
+修复完成后，不要保留会对每一个正常 mesh 高频打印 console 的临时日志。
+
+但当前 First Bad 暴露出一个真实诊断缺陷：
+
+之前错误只有：
+
+`no Flags==0 FaceSet`
+
+却没有告诉我们到底看到了什么 FaceSet。
+
+因此如果能在不扩大 API 面的情况下，把失败时的必要信息放进异常文本或已有 structured diagnostic data，应保留**受界的结构化诊断**。
+
+最低应能确定：
+
+* meshIndex
+* referenced FaceSet count
+* referenced FaceSet flags
+* index sizes
+
+不要把几千个 index 数据塞进 error。
+
+不要记录 Base64。
+
+不要记录完整 vertex payload。
+
+不要制造大日志。
+
+只保留用于再次定位 FaceSet capability boundary 的小型诊断。
+
+如果现有错误传递结构不适合承载对象，不要为了这个任务大改 Bridge result schema。
+
+这种情况下只保留精炼错误文本即可。
+
+---
+
+# ACTION：先把 c0000 的 Binder 身份规则查清楚
+
+ACTION 不允许现在直接改产品 resolver。
+
+先打开：
+
+`bridge/SoulForge.Bridge/ActionAnimationSemantics.cs`
+
+确认：
+
+`ResolveAnimationBinderEntryIndex`
+
+当前仍然只接收：
+
+`IReadOnlyList<(int Index, long EntryId)> entries`
+
+以及：
+
+`long motionAnimationId`
+
+确认它仍按：
+
+`EntryId >= 1_000_000_000`
+
+和：
+
+`EntryId % 1_000_000_000 == motionAnimationId`
+
+唯一匹配。
+
+再打开：
+
+`bridge/SoulForge.Bridge/BridgeCommandService.cs`
+
+找到：
+
+`read-tae-animation-clip`
+
+以及它调用的：
+
+`ResolveTaeAnimationContext`
+
+确认实际链路为：
+
+`selected animId`
+→ `SekiroTaeMotionReferenceReader.ReadAll`
+→ `ActionAnimationSemantics.ResolveMotionAnimationId`
+→ 得到 `motionAnimId`
+→ 选定 `animationContainerPath`
+→ `ReadBnd(foundContainer)`
+→ `ResolveAnimationBinderEntryIndex`
+→ 读取对应 binder child
+→ HKX parse / binding / sampler
+
+这里已经证明的 First Bad 是：
+
+**`ResolveAnimationBinderEntryIndex` 没找到 c0000 的正确 HKX child。**
+
+因此在没有证明 binder identity 之前：
+
+不要改：
+
+`BuildHkxToFlverBoneMap`
+
+不要改：
+
+`ValidateTrackBinding`
+
+不要改：
+
+`HkxContinuousSampler`
+
+不要改：
+
+`ActionContinuousSampler`
+
+不要改：
+
+renderer playback clock。
+
+这些全在 First Bad 下游。
+
+---
+
+# 建立 c0000 全量 Binder 清单
+
+复用：
+
+`tmp/runtime-recapture/action-trace.mjs`
+
+如果需要新增一个专门脚本，则只能新增：
+
+`tmp/runtime-recapture/action-binder-diagnostic.mjs`
+
+不要在 `scripts/` 下新增正式产品 verifier，直到规则已经确定。
+
+对真实：
+
+`c0000.anibnd.dcx`
+
+把 109 个 binder entry 全部输出。
+
+保存到：
+
+`tmp/runtime-recapture/action-binder-inventory.json`
+
+每个 binder child 至少包含：
+
+* `index`
+* `entryId`
+* `entryIdHex`，如果有意义
+* `name`
+* `extension`
+* `uncompressedSize`
+* `family`
+
+`family` 只做数值分桶：
+
+* 4M
+* 5M
+* 6M
+* 9M
+* > =1e9
+* other
+
+不要给这些 family 先写“TAE”“HKX animation”等语义名称。
+
+语义必须由真实 entry 内容证明。
+
+对每个 child 增加：
+
+`payloadKind`
+
+它只能来自真实 payload 检查。
+
+优先使用项目已经存在的 parser / signature detector。
+
+不要仅根据 `.hkx` 文件名宣布：
+
+`payloadKind = animation`
+
+因为：
+
+`skeleton.hkx`
+
+也是 HKX。
+
+至少区分：
+
+* TAE
+* HKX skeleton
+* HKX animation/binding
+* other known
+* unknown
+* parse failed
+
+如果当前 HKX parser 一次读取后能明确知道对象包含：
+
+* `hkaSkeleton`
+* `hkaAnimation`
+* `hkaAnimationBinding`
+
+则按解析结果分类。
+
+不要自己写新的 HKX signature parser。
+
+如果现有命令只能通过生产 `read-tae-animation-clip` 解析 animation，而不能单独 classify child，则可以在本地 diagnostic harness 中调用已有 Bridge 能力逐 child 验证。
+
+不要为这一步修改正式产品行为。
+
+最终 inventory 必须让人一眼看出：
+
+**5M 的 65 个 entry 到底是什么。**
+
+以及：
+
+**6M 的 42 个 entry 到底是什么。**
+
+这是进入 ACTION 修复的第一道硬门。
+
+如果你没有输出这个结论，不允许改 resolver。
+
+---
+
+# 建立 TAE → motionAnimId 全量关系表
+
+不要只检查之前那 40 个 selected animation。
+
+`read-tae-document` 已经得到 939 个 animation。
+
+现在对这 939 个 animation 运行当前正式的：
+
+`SekiroTaeMotionReferenceReader.ReadAll`
+
+和：
+
+`ActionAnimationSemantics.ResolveMotionAnimationId`
+
+不要自己重新解释 TAE event。
+
+对每个 selected animation 输出：
+
+* `selectedAnimId`
+* `referenceKind`
+* `sourceAnimationId`
+* `resolvedMotionAnimId`
+* resolve 是否成功
+* 如果失败，原始 failure reason
+
+保存到：
+
+`tmp/runtime-recapture/action-motion-resolution.json`
+
+这里必须保留：
+
+* OwnHkx
+* ImportHkx
+* ImportOtherAnimation
+
+之间的区别。
+
+不要把：
+
+`selectedAnimId`
+
+直接等同于：
+
+`resolvedMotionAnimId`。
+
+之前产品已经有 import resolution，必须复用。
+
+如果某个 TAE animation 因：
+
+* import cycle
+* source missing
+* invalid source id
+
+而失败，继续保持 fail closed。
+
+不要为了扩大成功率跳过 import semantics。
+
+---
+
+# 建立 motionAnimId → Binder child 候选矩阵
+
+然后将：
+
+`action-motion-resolution.json`
+
+中所有成功得到的 distinct：
+
+`resolvedMotionAnimId`
+
+和：
+
+`action-binder-inventory.json`
+
+中的真实 binder child 建立候选关系。
+
+注意：
+
+这一阶段不是立刻写规则。
+
+而是同时检验可能存在的关系。
+
+对每个 distinct `resolvedMotionAnimId`，至少计算以下纯诊断字段：
+
+* 是否存在当前 `1e9 modulo` 匹配
+* 是否存在 `entryId - 5_000_000 == motionAnimId`
+* 是否存在 `entryId - 6_000_000 == motionAnimId`
+* binder child name 中是否出现 motionAnimId 的规范数字表达
+* 候选 payloadKind
+* 候选是否实际含 animation + binding
+* candidate count
+
+这里只是 diagnostic。
+
+**这些计算绝对不能在这一步进入产品 fallback。**
+
+保存：
+
+`tmp/runtime-recapture/action-motion-binder-matrix.json`
+
+然后统计：
+
+* distinct resolved motion IDs 数
+* 有唯一 1e9 match 数
+* 有唯一 5M match 数
+* 有唯一 6M match 数
+* 同时命中多个 family 数
+* 一个 family 内多候选数
+* 零候选数
+* 唯一候选但 payload 不是 animation 的数量
+* unique valid animation/binding candidate 数
+
+还必须把：
+
+`entryId`
+
+和：
+
+`entry name`
+
+同时保留下来。
+
+不能只给统计总数。
+
+---
+
+# 不要误读 5M
+
+这里额外设置一个禁止偏移的警告。
+
+在成熟工具实现中存在“某些 binder 版本使用 5,000,000~5,999,999 作为 TAE 文件 ID 范围”的先例。
+
+因此：
+
+**看到 `5000010 ↔ 10` 不等于证明 `5000010` 就是 anim 10 的 HKX animation child。**
+
+必须首先看：
+
+`5000010` 的真实：
+
+* name
+* payloadKind
+* parser result
+
+如果它其实是：
+
+TAE child
+
+那么它只能用于理解容器布局，不能作为：
+
+`read-tae-animation-clip`
+
+应该读取的 HKX child。
+
+同理：
+
+6M family 也不能因为“看起来更像动画”就自动认定。
+
+必须由 payload 与跨样本映射共同证明。
+
+---
+
+# 从 c0000 数据中导出候选身份规则
+
+只有在完成：
+
+`action-binder-inventory.json`
+
+`action-motion-resolution.json`
+
+`action-motion-binder-matrix.json`
+
+以后，才判断能否修改产品 resolver。
+
+可以接受的 identity rule 必须同时满足以下全部条件。
+
+第一：
+
+对于你声称支持的 c0000 motion ID，规则必须产生：
+
+**恰好一个** binder child。
+
+0 个继续失败。
+
+大于 1 个必须失败为 ambiguous。
+
+禁止：
+
+`FirstOrDefault`
+
+禁止：
+
+“取最接近的”
+
+禁止：
+
+“优先 6M，找不到再拿任意 HKX”
+
+禁止：
+
+“binder 中第一个 `.hkx`”
+
+第二：
+
+被选 child 必须被现有 HKX parser 证明包含实际 animation 数据。
+
+不能只看 entry ID。
+
+不能只看 filename。
+
+第三：
+
+规则必须解释足够多的真实 c0000 motion，而不是只针对：
+
+10、50、70、100、110、200
+
+写硬编码。
+
+禁止：
+
+```text
+if motionId == 10 -> ...
+if motionId == 50 -> ...
+```
+
+禁止 motion ID 白名单。
+
+第四：
+
+规则不得破坏当前已经工作的：
+
+`c1020`
+
+及其他当前使用：
+
+`>= 1_000_000_000`
+
+identity 的角色。
+
+旧的 1e9 规则必须继续存在。
+
+不要把：
+
+`SekiroAnimationBinderIdBase`
+
+全局改成一个玩家值。
+
+正确设计必须允许不同 ANIBND layout family 共存。
+
+第五：
+
+container layout 的判定必须来自 container 自身可以稳定观察的结构。
+
+优先级从高到低：
+
+1. 明确的 binder layout marker / version marker。
+2. 经真实 corpus 证明稳定的 entry-ID family composition。
+3. 明确且唯一的 numeric identity transformation。
+4. 只有在 binder numeric identity 本身无法确定且成熟工具/真实 corpus共同证明 filename 才是格式身份时，才考虑 filename。
+
+不要用：
+
+`file path contains "c0000"`
+
+作为格式规则。
+
+禁止：
+
+```text
+if filename starts with c0000 then use 6M
+```
+
+这是角色特判，不是 container semantics。
+
+同样禁止：
+
+```text
+if boneCount == 467
+```
+
+```text
+if entryCount == 109
+```
+
+```text
+if selected character == player
+```
+
+这些都是脆弱的样本特征。
+
+第六：
+
+如果 `c0000.anibnd.dcx` 中存在类似 layout/version marker，例如特殊 binder entry 能明确说明此容器采用另一套 ID layout，应优先基于该 marker 分派。
+
+但是：
+
+必须先证明 marker 的实际存在和意义。
+
+不得仅因为成熟工具中出现过某个 marker 就假定 SoulForge 当前 c0000 一定同样具有。
+
+如果 inventory 中确实观察到相关 marker，记录：
+
+* entry ID
+* name
+* payload
+* 它与 ID family 的关系
+
+再使用。
+
+---
+
+# ACTION 产品实现的允许形态
+
+如果真实数据最终证明存在两套明确的 numeric binder animation identity layout，例如：
+
+* 标准 Sekiro enemy layout
+* player/另一版本 layout
+
+那么修改仍然集中在：
+
+`ActionAnimationSemantics.cs`
+
+不要把 family 判断散落进：
+
+`BridgeCommandService.cs`
+
+三个不同命令里。
+
+`read-tae-animation-clip`
+
+和：
+
+`sample-tae-animation-pose`
+
+最终必须共享完全相同的 identity resolver。
+
+不要让：
+
+clip 读取使用新规则，
+
+pose sampling 仍使用旧规则。
+
+如果现有：
+
+`ResolveAnimationBinderEntryIndex`
+
+只拿：
+
+`Index + EntryId`
+
+不足以进行已经证明必要的 layout classification，
+
+允许最小扩展输入。
+
+例如从：
+
+`(Index, EntryId)`
+
+扩展为包含必要的：
+
+* Index
+* EntryId
+* Name
+
+或者定义一个非常小的内部 record。
+
+但只有实际规则确实需要 Name 时才加 Name。
+
+如果 numeric ID + container marker 已足够，就不要扩大参数。
+
+不要直接让 `ActionAnimationSemantics` 依赖：
+
+`Bnd4NativeDocument`
+
+这种 parser implementation type。
+
+它应继续保持 renderer-independent / parser-independent 的纯语义层。
+
+也就是说：
+
+Bridge 负责从 BND 提取 semantic resolver 所需的最小 entry metadata。
+
+`ActionAnimationSemantics`
+
+只负责确定性身份决策。
+
+---
+
+如果最终证据证明：
+
+`1e9` 与另一 numeric family 是两种合法 layout，
+
+不要保留误导性的“Sekiro animations 永远 1e9+”注释。
+
+更新：
+
+`ActionAnimationSemantics.cs`
+
+中与：
+
+`SekiroAnimationBinderIdBase`
+
+和：
+
+`ResolveAnimationBinderEntryIndex`
+
+相邻的注释。
+
+注释必须准确写：
+
+* 已存在不止一种真实 Sekiro ANIBND identity layout
+* 哪一种条件选择哪一种规则
+* 为什么不能仅按 binder index 或文件排序猜
+* ambiguous/missing 仍 fail closed
+
+不要把本次具体文件：
+
+`c0000.anibnd.dcx`
+
+写成整个格式定义。
+
+可以在测试注释里记录它是 regression corpus。
+
+产品语义注释应描述格式规则。
+
+---
+
+# ACTION 的纯语义测试
+
+在修改 resolver 后，必须给 resolver 本身增加最小、确定性的测试。
+
+优先放进当前已经测试：
+
+`ActionAnimationSemantics`
+
+的测试位置。
+
+先搜索现有测试，不要无脑新建第二套 test harness。
+
+测试必须至少包含：
+
+1. 现有标准 1e9 layout 唯一成功。
+2. 现有标准 1e9 layout 0 match 失败。
+3. 现有标准 1e9 layout 多 match 失败。
+4. 新 runtime-proven layout 唯一成功。
+5. 新 layout 0 match 失败。
+6. 新 layout 多 match 失败。
+7. 两种 layout 同时出现而没有明确 container layout authority 时，不得随意选一个。
+8. 无关 binder children 不得被误选。
+9. skeleton HKX 不得因为 ID 碰巧匹配被作为 animation。
+10. TAE child 不得因为 ID 碰巧匹配被作为 animation。
+
+其中第 9、10 条如果 semantic resolver 输入没有 payload kind，应该由 Bridge/context-level 测试证明，而不是让纯 resolver 重新 parse payload。
+
+不要为了测试方便让 production resolver 接受 mock-only 参数。
+
+测试必须对应真实产品 contract。
+
+---
+
+# ACTION 的真实 corpus 验证
+
+纯 unit test 绿以后：
+
+```powershell
+npm run bridge:publish
+```
+
+然后运行：
+
+```powershell
+npm run test:action-real-corpus
+npm run test:action-mature-oracle
+npm run test:animation-playback-clock
+npm run test:action-deterministic-seek
+npm run test:verify-map-action-open
+```
+
+某个命令如果因为本机真实游戏 corpus 环境要求而 skip：
+
+必须明确记录：
+
+`SKIPPED`
+
+以及原因。
+
+不能把 skip 算 PASS。
+
+然后重新运行：
+
+`tmp/runtime-recapture/action-trace.mjs`
+
+使用**与修复前相同的 c0000 40 个散布 animId**。
+
+不得换成只挑能成功的动画。
+
+保存：
+
+`tmp/runtime-recapture/action-trace-after-fix.json`
+
+不要覆盖：
+
+`action-trace.json`
+
+逐 selected animId 比较 before / after。
+
+修复前：
+
+`0 / 40 clip success`
+
+修复后的验收不是机械要求：
+
+`40 / 40`
+
+因为真实 TAE 中允许存在：
+
+* import/dummy
+* missing external source
+* 当前 decoder 确实不支持的 HKX
+* 合理 fail-closed
+
+正确验收方式是：
+
+对 diagnostic matrix 中已经证明：
+
+`resolvedMotionAnimId`
+→ 有唯一合法 animation binder child
+→ payload 可以被现有 HKX decoder 解析
+
+的每个采样 animId：
+
+生产：
+
+`read-tae-animation-clip`
+
+必须成功读取同一个 binder child。
+
+不得有：
+
+“diagnostic 能找到，production resolver 找不到”
+
+的分叉。
+
+对于没有合法 motion child 的动画：
+
+继续失败是正确行为。
+
+不要为了成功率添加错误 fallback。
+
+至少挑选 5 个已经由新规则成功读取的 c0000 clip，覆盖 motion ID 的低、中、高区域。
+
+如果有效 clip 总数不足 5，则全部测。
+
+对每个 clip：
+
+* clip duration 必须 > 0
+* transform track count 必须 > 0
+* binding 必须通过现有 `ValidateTrackBinding`
+* HKX skeleton 必须存在
+* animation 必须存在
+* binding 必须存在
+
+然后使用产品现有 sampler，在：
+
+`t = 0`
+
+和：
+
+`t = min(0.5s, duration * 0.5)`
+
+采样。
+
+不要自己写简化 sampler。
+
+必须使用产品代码。
+
+计算至少：
+
+* movedHkxBoneCount
+* maxTranslationDelta
+* maxRotationDelta
+
+至少一个普通动作样本必须满足：
+
+`movedHkxBoneCount > 0`
+
+并且：
+
+translation delta 或 rotation delta 至少一个明显非零。
+
+不要用浮点完全相等判断。
+
+使用当前项目已有 epsilon；如果没有，diagnostic 可使用足够小的数值 epsilon，但不要因此修改产品语义。
+
+随后使用与 renderer 相同的：
+
+HKX → FLVER bone map
+
+和产品 sampler 路径。
+
+记录：
+
+* hkxBoneCount
+* flverBoneCount
+* mappedBoneCount
+* mappedAnimatedTrackCount
+* movedFlverBoneCount
+* FLVER max translation delta
+* FLVER max rotation delta
+
+当前已知 c1020 对照必须继续健康。
+
+至少重新验证一个之前成功的 c1020 clip：
+
+* clip success
+* mapping 仍非零
+* pose delta 仍非零
+
+不能只证明 c0000 修好，却把 c1020 的旧格式打坏。
+
+如果 c0000 clip 现在已经：
+
+* 成功读取
+* HKX pose 随时间变化
+* FLVER sampled pose 随时间变化
+
+则 ACTION 的本轮 Bridge First Bad 修复成立。
+
+这时**不要继续修改 renderer**。
+
+renderer 应用层是否还有第二个问题，只能由真实 UI 运行证明。
+
+不要因为本任务标题写着“骨骼不会动”，就继续无边界修改 Three.js。
+
+本次严格遵守 First Bad：
+
+先让原来永远拿不到的 sampler 数据真正产生。
+
+如果 Bridge + sampler 已经健康，后续 UI 若仍冻结，那是新的 First Bad，需要单独取证。
+# MAP / ACTION 产品修复后的真实 UI 验收
+
+只有在以下条件全部满足后，才进入 UI 验收：
+
+MAP：
+
+* FaceSet runtime diagnostic 已完成
+* FaceSet selection 修改有真实语义依据
+* Bridge publish 成功
+* FLVER 相关回归测试通过
+* 原 80-model corpus 已重新跑完
+* 原 healthy model 无回归
+* 原可支持失败模型已经产生真实非空 geometry
+
+ACTION：
+
+* c0000 binder inventory 已完成
+* TAE → motionAnimId 全量关系表已完成
+* motionAnimId → binder child matrix 已完成
+* 新 identity 规则有真实 corpus 证据
+* 旧 1e9 layout 保持支持
+* Bridge publish 成功
+* resolver tests 通过
+* c0000 runtime trace 已经证明 clip / sampler 可以产生真实变化 pose
+* c1020 对照未回归
+
+如果其中任何一项没满足：
+
+不要进入 renderer 修改。
+
+不要用 UI 现象替代缺失的 Bridge 证据。
+
+---
+
+## MAP UI 验收目标
+
+上一轮真实 runtime 已经证明：
+
+80 个地图模型中有 61 个 Bridge geometry 本来就是健康的。
+
+所以用户此前看到“全是方块”不能只由 19 个 FaceSet 失败解释。
+
+因此在 Bridge FaceSet 修复后，必须执行一次真实 Electron UI 验收，明确回答：
+
+**已经从 Bridge 得到健康 geometry 的 model，renderer 是否真的把 proxy geometry 替换为真实 geometry。**
+
+这是一个新的边界问题。
+
+不要预设答案。
+
+先运行当前产品。
+
+使用当前仓库已有实际启动方式。
+
+优先查：
+
+`package.json`
+
+`apps/desktop/package.json`
+
+以及已有 launcher/dev 文档。
+
+不要自己发明第二套 Electron 启动脚本。
+
+如果仓库当前已有正式启动命令，使用它。
+
+如果需要构建 desktop：
+
+优先使用仓库现有：
+
+```powershell
+npm run build
+```
+
+或者实际 desktop workspace 已定义的当前开发命令。
+
+不要修改启动体系。
+
+---
+
+打开与上一轮相同的真实 Sekiro workspace。
+
+必须确保 session 的 read roots 同时能够访问：
+
+* overlay/mod root
+* vanilla/base root
+
+这一点很重要。
+
+上一轮真实数据已经证明：
+
+`mods/map/m10_00_00_00/`
+
+overlay 里只有一个：
+
+`m10_00_00_00_600050.mapbnd.dcx`
+
+其余绝大多数地图模型来自 base。
+
+所以 UI 验收前必须明确记录当前 active workspace 的：
+
+* overlay root
+* base root
+* verified read roots
+
+如果 UI session 根本没有挂载 base：
+
+不要继续判断 renderer hot replacement。
+
+此时正确结论是：
+
+`MAP_UI_BLOCKED_BY_SESSION_BASE_ROOT`
+
+而不是：
+
+`renderer replacement broken`
+
+不得在资源根缺失时修改 renderer。
+
+---
+
+在 UI 中打开：
+
+`m10_00_00_00`
+
+不要换地图。
+
+不要只挑一个最简单的小地图。
+
+观察初始 proxy 后等待当前 async geometry load 正常完成。
+
+因为当前设计就是：
+
+1. 先创建 proxy box。
+2. 后台异步加载 model geometry。
+3. 成功后 hot-replace batch geometry。
+
+所以：
+
+**“打开第一帧看到方块”不是失败。**
+
+必须观察加载结束后的稳定状态。
+
+如果当前 UI 有 loading 状态、scheduler pending count、console diagnostic 或可观察资源加载状态，复用。
+
+不要为了测试加新的 permanent UI。
+
+---
+
+## MAP UI 最小插桩
+
+只有当肉眼无法确定 batch replacement 是否发生时，才允许加临时诊断。
+
+临时诊断优先放在：
+
+`apps/desktop/src/renderer/src/scene/threeSceneController.ts`
+
+当前执行：
+
+`updateModelGeometry`
+
+或其实际调用的：
+
+`updateInstanceBatchGeometry`
+
+附近。
+
+不要改 geometry behavior。
+
+只记录受界信息：
+
+* `modelName`
+* normalized model key
+* batch 是否找到
+* old geometry identity
+* new geometry identity
+* incoming vertex count
+* incoming index count
+* replacement 是否执行
+* replacement 后 batch mesh geometry 是否就是 incoming geometry
+
+不要输出：
+
+* positions 全数组
+* indices 全数组
+* Base64
+* 每帧日志
+
+只对前若干 model 或第一个失败 model 记录一次。
+
+建议只捕获：
+
+* 一个已知修复前 Bridge healthy model
+* 一个原 19 个 FaceSet failure 中修复后变 healthy 的 model
+* 一个仍然 unsupported 的 model，如果存在
+
+临时日志必须有明确 modelName。
+
+不能只打印：
+
+`updated geometry`
+
+这种无法关联的字符串。
+
+---
+
+## MAP UI 决策树
+
+如果：
+
+* active session base root 正确
+* `readMapStaticGeometry` 对健康 model 返回 chunks > 0
+* renderer 收到 incoming geometry
+* `updateModelGeometry(modelName, geometry)` 被调用
+* normalized key 能找到 batch
+* replacement 被执行
+* batch geometry vertex/index 数非零
+
+并且 UI 已显示真实地图几何：
+
+MAP 本轮结束。
+
+不要继续查。
+
+如果：
+
+Bridge geometry 正常，
+
+但：
+
+`updateModelGeometry` 根本没有被调用，
+
+First Bad 就位于：
+
+`MsbScenePanel / map model scheduler → updateModelGeometry`
+
+这一段。
+
+只记录新的 First Bad。
+
+不要立刻大修。
+
+如果：
+
+`updateModelGeometry` 被调用，
+
+但：
+
+batch lookup miss，
+
+记录：
+
+* input modelName
+* normalized incoming key
+* batch keys
+
+此时 First Bad = model identity/key mismatch。
+
+只修 key identity。
+
+不要碰 native parser。
+
+如果：
+
+batch lookup hit，
+
+replacement 成功，
+
+但画面仍然全部保持 box：
+
+此时再检查：
+
+* actual Three mesh geometry
+* material
+* visibility
+* frustum/camera
+* draw call
+
+但必须按顺序。
+
+不能重新回去改 mapbnd resolver。
+
+如果：
+
+健康的 61 个 model 在 UI 已经显示真实 geometry，
+
+而仍有一部分 proxy 对应 Bridge unsupported model：
+
+这说明 UI hot replacement 本身健康。
+
+不要因为仍然存在少量 proxy 就判 renderer 故障。
+
+---
+
+# ACTION UI 验收目标
+
+只有 ACTION Bridge + sampler 已经明确健康后才做 UI 验收。
+
+使用：
+
+`c0000`
+
+不要只用 c1020。
+
+选择一个在：
+
+`action-trace-after-fix.json`
+
+中已经证明：
+
+* clip success
+* pose duration > 0
+* movedHkxBoneCount > 0
+* movedFlverBoneCount > 0
+
+的真实 animId。
+
+记录该 animId。
+
+然后在 UI 中打开相同动作。
+
+不要换成另一个“看起来会动”的动作。
+
+这样 UI 结果才能和 Bridge trace 一一对应。
+
+---
+
+用户此前现象是：
+
+* skeleton 已经显示
+* character part 已经绑定
+* bones 不动
+
+修复后首先观察：
+
+时间轴是否前进。
+
+如果当前 action playback UI 有：
+
+* playbackTime
+* play/pause
+* timeline cursor
+
+使用现有 UI。
+
+不要通过开发者工具手改 state。
+
+---
+
+## ACTION UI 最小插桩
+
+如果画面仍然不动，临时 diagnostic 只围绕已经确定的 renderer pose application 路径。
+
+优先检查：
+
+`apps/desktop/src/renderer/src/editors/TaeWorkbenchPanel.tsx`
+
+当前：
+
+* `readTaeAnimationClip`
+* `ActionContinuousSampler`
+* `sampleFlverPose`
+* `sampledPose`
+
+附近。
+
+记录一次：
+
+* selected animId
+* clip 是否存在
+* clip duration
+* sampler 是否存在
+* playbackTime
+* sampledPose length
+* reference pose 与当前 sampled pose 的 moved bone count
+
+不要重新实现 pose delta。
+
+优先复用产品已有采样数据。
+
+再检查：
+
+`apps/desktop/src/renderer/src/editors/FlverViewer.tsx`
+
+当前：
+
+`externalPose`
+
+→ viewer handle
+
+→ `setPose`
+
+链。
+
+记录：
+
+* externalPose 是否收到
+* pose length
+* target bone count
+* `setPose` 是否执行
+
+最后才检查：
+
+`apps/desktop/src/renderer/src/scene/threeSceneController.ts`
+
+当前：
+
+`setPose`
+
+以及：
+
+`Skeleton.update`
+
+记录：
+
+* active skeleton 是否存在
+* input pose count
+* skeleton bone count
+* 实际修改的 bone local transform 数
+* `Skeleton.update()` 是否调用
+
+这些全部是临时 diagnostic。
+
+不要一边抓证据一边修改矩阵算法。
+
+---
+
+## ACTION UI 决策树
+
+如果：
+
+`readTaeAnimationClip`
+
+在 UI 中仍失败，
+
+但同一个 animId 在本地 Bridge harness 成功：
+
+说明 desktop IPC 参数或 container path 与 harness 不一致。
+
+比较：
+
+* TAE sourceUri
+* animationContainerPath
+* skeletonContainerPath
+* animId
+* effective base
+* overlay/base source
+
+此时 First Bad 位于：
+
+renderer/main 调 Bridge 参数构造。
+
+不要修改 binder resolver 第二次。
+
+如果：
+
+clip 在 renderer 中存在，
+
+但是 sampler 不存在：
+
+只检查 sampler 构造条件和异常。
+
+不要修改 HKX parser。
+
+如果：
+
+sampler 存在，
+
+但是 `sampleFlverPose` 在不同 playbackTime 输出完全相同：
+
+而相同输入在 standalone product sampler runtime trace 中会变化：
+
+比较 UI 使用的：
+
+* playbackTime
+* loop flag
+* reference pose
+* hkx→flver map
+* clip data
+
+此时定位 renderer sampler input divergence。
+
+不要改底层 animation decode。
+
+如果：
+
+`sampledPose` 在 UI 中明显变化，
+
+但 `FlverViewer` 没收到 externalPose：
+
+First Bad = workbench → viewer props/state wiring。
+
+只修这一层。
+
+如果：
+
+`FlverViewer` 收到变化 pose，
+
+但 `threeSceneController.setPose` 未执行：
+
+First Bad = viewer handle application。
+
+只修这一层。
+
+如果：
+
+`setPose` 收到变化 pose，
+
+但 Skeleton local transforms 没变化：
+
+First Bad = pose application。
+
+这时才允许检查：
+
+* bone local position
+* quaternion
+* scale
+* matrix update
+
+如果：
+
+bone local transform 已变化，
+
+`Skeleton.update()` 也执行，
+
+但 mesh 不变，
+
+才进入 skinning/bind matrix investigation。
+
+在此之前：
+
+**禁止讨论 NormalW、bindMatrix、inverse bind matrix、skin weights。**
+
+这是本任务的重要停止规则。
+
+---
+
+# 不要修改 c1020 renderer，除非实际复现
+
+上一轮 runtime 只证明：
+
+c1020 的 Bridge + sampler 正常。
+
+它没有证明 c1020 UI 一定冻结。
+
+所以不要为了“顺便统一”修改 c1020 renderer。
+
+只有实际打开 c1020，并观察：
+
+相同 clip runtime pose 在 UI 不动，
+
+才能把 renderer case 3 作为跨角色问题处理。
+
+否则只处理 c0000 当前真实症状。
+
+---
+
+# PARAM 明确不处理
+
+本任务虽然已经知道 PARAM renderer 仍存在 legacy：
+
+`readParamPage(..., true)`
+
+但不要在这次提交中处理。
+
+不要修改：
+
+`App.tsx`
+
+中的 PARAM open path。
+
+不要修改：
+
+`ParamTablePanel.tsx`
+
+不要修改：
+
+`param-ipc-protocol.ts`
+
+不要顺手迁移 slim session。
+
+不要因为跑全量测试遇到 PARAM unrelated failure 就修 PARAM。
+
+如果 test failure 与本任务无关：
+
+记录为：
+
+`PRE-EXISTING / OUT OF SCOPE`
+
+并提供证据。
+
+---
+
+# ROLLBACK 明确不处理
+
+不要修改：
+
+`packages/core/src/patch/rollback.ts`
+
+不要修改 operation rollback IPC。
+
+不要修改 editor invalidation。
+
+不要因为观察到 rollback test 失败扩大范围。
+
+这次提交应该能够单独解释为：
+
+**MAP native display geometry compatibility + ACTION animation binder identity compatibility**
+
+不混入其他产品修复。
+
+---
+
+# 编译与测试顺序
+
+所有产品修改完成以后，严格按照以下顺序运行。
+
+先 Bridge：
+
+```powershell
+npm run bridge:publish
+```
+
+必须 PASS。
+
+然后 shared/core TypeScript build：
+
+```powershell
+npm run build -w @soulforge/shared
+npm run build -w @soulforge/core
+```
+
+必须 PASS。
+
+如果你修改了 desktop renderer，只在真实 UI First Bad 已经证明需要 renderer 修复时才执行：
+
+```powershell
+npm run build -w @soulforge/desktop
+```
+
+如果没改 renderer，也建议最终跑 desktop build，但不要为了 desktop unrelated warning 修改前端。
+
+---
+
+MAP 定向测试：
+
+```powershell
+npm run bridge:verify:flver
+npm run bridge:verify:flver-mesh
+npm run bridge:verify:flver-multi
+npm run test:map-static-pagination-contract
+npm run test:verify-map-action-open
+```
+
+ACTION 定向测试：
+
+```powershell
+npm run test:action-real-corpus
+npm run test:action-mature-oracle
+npm run test:animation-playback-clock
+npm run test:action-deterministic-seek
+npm run test:verify-map-action-open
+```
+
+如果 resolver 有现成 direct unit test，额外运行对应测试。
+
+不要只跑：
+
+`test:verify-map-action-open`
+
+然后宣布全部通过。
+
+这个测试不证明真实 m10 corpus，也不证明 c0000 真实 ANIBND。
+
+---
+
+然后重新运行真实 corpus harness。
+
+MAP：
+
+`tmp/runtime-recapture/map-trace.mjs`
+
+或本轮实际复用的相同 harness。
+
+ACTION：
+
+`tmp/runtime-recapture/action-trace.mjs`
+
+必须使用真实 Sekiro 文件。
+
+不能切 synthetic fixture。
+
+必须确认 Bridge publish mtime 晚于最后一次 Bridge 源码修改。
+
+如果 publish 产物旧于源码：
+
+本次 runtime evidence 无效。
+
+重新 publish 后再跑。
+
+---
+
+# 防止“测试假绿”
+
+下面任何一种情况都不能写 PASS：
+
+1. 测试命令 exit 0，但真实 corpus harness 没跑。
+2. harness 只跑了修复后新挑的成功样本。
+3. 原失败样本被从 sample list 删除。
+4. 原 healthy model 回归，但总成功数量增加。
+5. ACTION 从 0/40 变成若干成功，但成功的是和修复前不同的 sample set。
+6. clip 返回成功，但 pose 恒等于 reference pose。
+7. MAP 返回 success，但 chunkCount=0。
+8. MAP 返回 chunk，但 triangleCount=0。
+9. renderer 初始 proxy 被误认为最终 geometry。
+10. UI session 没挂 vanilla base，却把模型 missing 判成 renderer bug。
+11. test 被 skip，却写成 PASS。
+12. 修改 test expectation 使原错误行为成为“正确答案”。
+13. catch 原异常后返回空对象，让上游不报错。
+14. 为了让 c0000 动，随机选择另一个 HKX。
+15. 为了让地图显示，任意选择一个 binder FLVER 或 FaceSet。
+16. 删除 fail-closed 条件但没有真实 corpus proof。
+
+出现以上情况必须恢复正确验证。
+
+---
+
+# ACTION resolver 额外的回归要求
+
+修改后的：
+
+`ResolveAnimationBinderEntryIndex`
+
+不能只证明：
+
+c0000 works。
+
+必须至少验证三类输入。
+
+A：标准 1e9 layout。
+
+例如 c1020 当前真实 corpus。
+
+必须仍能解析。
+
+B：新证明的 c0000 layout。
+
+必须解析唯一正确 animation child。
+
+C：未知/不完整 layout。
+
+必须 fail closed。
+
+不要写一个“万能猜测 resolver”。
+
+resolver 的行为应该是：
+
+**认识的 layout → 确定性解析。**
+
+**不认识的 layout → 明确失败。**
+
+而不是：
+
+**尽量找一个 HKX 返回。**
+
+---
+
+# ACTION ambiguity 是错误，不是 fallback 条件
+
+如果新规则对同一个 motion ID 找到两个合法-looking animation child：
+
+必须：
+
+fail closed。
+
+错误需要至少包含：
+
+* motionAnimId
+* candidate count
+* candidate entry IDs
+
+可以受界加入 names。
+
+不要自动选择：
+
+* entry size 最大
+* index 最小
+* ID 最小
+* name 最短
+* 第一个 parser 成功
+
+如果成熟格式语义无法区分，这就是真 ambiguity。
+
+不要隐藏。
+
+---
+
+# MAP 多个候选同样保持确定性
+
+FaceSet 多 candidate 和 ACTION binder candidate 不同。
+
+FaceSet 本身具有 mesh reference order。
+
+所以在已证明其 semantics 可以按 reference order 做 V1 display projection 时，可以稳定取第一个合法 display FaceSet。
+
+但是 binder animation identity 没有类似“第一个就是正确 motion”的保证。
+
+不要把这两个策略混用。
+
+---
+
+# 性能不可明显回退
+
+MAP 修复不能恢复成旧的：
+
+每 part 重复：
+
+* mapbnd read
+* DCX decompress
+* BND parse
+* FLVER parse
+
+当前 abb14982 已经有 static geometry session/cache/pagination 相关优化。
+
+本任务不能破坏。
+
+重新跑前 80 model 时记录大致总耗时。
+
+不要求严格 benchmark 数字一致。
+
+但如果修复后出现：
+
+* 原本几十秒变成数分钟
+* 同一 mapbnd 重复解析数量暴涨
+* pagination request 数异常倍增
+
+视为回归。
+
+先检查是不是 diagnostic 临时逻辑造成。
+
+不得为了兼容 FaceSet 把 cache 绕开。
+
+---
+
+ACTION 同理。
+
+不要为了找 c0000 animation entry：
+
+对每一次 frame sample 重新扫描整个 binder。
+
+Binder identity resolution 应发生在 clip/context 建立阶段。
+
+不能在：
+
+`sampleTaeAnimationPose(time)`
+
+每帧重新做 109-entry 全扫描加 HKX parse。
+
+如果当前 architecture 已经缓存 clip/context，保持它。
+
+不要新增 per-frame I/O。
+
+---
+
+# 临时 runtime harness 与 diagnostic 清理
+
+`tmp/runtime-recapture/`
+
+中的 raw evidence 可以保留用于本轮验证。
+
+不要把这些文件误接进 production runtime。
+
+如果其中包含用户本机绝对路径：
+
+不要把 raw trace 当产品资源。
+
+不要写死：
+
+`D:\mystream\Sekiro Shadows Die Twice\Sekiro`
+
+进生产代码。
+
+真实路径只能存在：
+
+* 本地 diagnostic harness
+* runtime report
+* 测试环境变量 / local-only config
+
+不得进入 resolver 常量。
+
+---
+
+如果为了 UI 取证加入 renderer 临时 console log：
+
+最终提交前全部删除。
+
+如果加入的不是临时 console，而是一个真正有价值的、受界的 structured diagnostic，并且不会高频运行，可以酌情保留。
+
+但必须能说明它解决了什么未来诊断盲区。
+
+不能留下：
+
+`console.log("here")`
+
+`console.log(data)`
+
+这种垃圾插桩。
+
+---
+
+# 更新 runtime-first-divergence.md
+
+最终把所有真实结果写回：
+
+`D:\Repository\SoulForge\mission\runtime-first-divergence.md`
+
+不要新建第二个正式结论报告。
+
+`tmp/runtime-recapture/*.json`
+
+可以作为 raw evidence。
+
+正式结论仍以：
+
+`mission/runtime-first-divergence.md`
+
+为唯一长期报告入口。
+
+在报告末尾新增本轮修复验证章节。
+
+不要删掉原始 First Bad 证据。
+
+要保留 before / after。
+
+MAP 至少写：
+
+* before：61/80 success，19/80 `no Flags==0`
+* FaceSet diagnostic 的真实 flags 分布
+* 实际采用的 selection rule
+* 为什么该 rule 有真实数据依据
+* after：成功数量
+* 原 61 healthy 是否 61/61 保持
+* 原 19 分别多少转成功
+* 仍失败的具体原因
+* UI hot replacement 是否实测
+* base root 是否正确挂载
+* 最终 MAP First Bad 是否关闭
+* 是否发现第二个 renderer First Bad
+
+ACTION 至少写：
+
+* c0000 binder 109-entry inventory 摘要
+* 4M/5M/6M/9M 的实际 payloadKind
+* distinct resolved motion ID 数
+* 实际 binder identity rule
+* rule 的证据来源
+* before 0/40 clip
+* after 相同 40 sample 成功/失败分布
+* 合理失败类别
+* 至少 5 个成功 clip 的 pose delta
+* mappedBoneCount
+* mappedAnimatedTrackCount
+* c1020 regression result
+* UI c0000 是否实际运动
+* 如果 UI 仍不动，新的 First Bad 精确到哪一层
+
+不得把：
+
+`Bridge fixed`
+
+写成：
+
+`feature fixed`
+
+除非 UI 也实际验证。
+
+如果没有 UI run：
+
+明确写：
+
+`Bridge + sampler fixed; Electron UI not verified`
+
+不要模糊。
+
+---
+
+# 最终 Git diff 审计
+
+完成所有修改和测试后执行：
+
+```powershell
+git status --short
+git diff --stat
+git diff
+```
+
+然后检查每一个 modified production file。
+
+逐个回答：
+
+为什么改它？
+
+它属于哪个 First Bad？
+
+如果无法用一句话把文件和 MAP/ACTION First Bad 直接连接起来：
+
+这个修改大概率是 scope creep。
+
+把无关修改撤掉。
+
+但只能撤你本轮自己的修改。
+
+不要撤用户 pre-existing changes。
+
+---
+
+特别检查 production diff 中是否出现：
+
+* c0000 特判
+* bone count 467 特判
+* entry count 109 特判
+* 硬编码某几个 animId
+* `D:\...` 本机路径
+* renderer 为 clip failure 造假 pose
+* FaceSet all-concatenate
+* EdgeCompressed 被无证据放行
+* catch 后返回空成功
+* test-only branch
+* NODE_ENV=test 特判产品语义
+* hidden fallback
+* sibling ANIBND 扫描猜文件
+* random/first HKX fallback
+* 全局关闭 error
+
+出现任意一项：
+
+必须删除。
+
+---
+
+# 不要自动提交
+
+除非用户或当前任务环境明确要求提交，否则：
+
+不要 `git commit`。
+
+不要 `git push`。
+
+不要创建 PR。
+
+保留修改在工作树中。
+
+最终输出：
+
+* 当前 HEAD
+* 修改文件列表
+* 测试命令与结果
+* MAP before/after runtime 数字
+* ACTION before/after runtime 数字
+* UI 验证结果
+* 尚未解决项
+* `mission/runtime-first-divergence.md` 已更新确认
+
+---
+
+# 最终完成判据
+
+MAP 只能在以下情况下标为：
+
+`FIXED`
+
+A：
+
+原 FaceSet First Bad 已关闭。
+
+也就是原来因：
+
+`no Flags==0 FaceSet`
+
+失败、并且 runtime diagnostic 证明当前 parser 能安全投影的那些模型，修复后都产生真实非空 geometry。
+
+并且原 healthy model 无回归。
+
+B：
+
+如果用户要求的是“地图不再全是方块”，还必须完成 UI 验证。
+
+至少一个原本 Bridge healthy 的 model 和一个新修好的 model 必须在 UI 中完成：
+
+proxy
+→ real geometry
+
+的实际替换。
+
+否则写：
+
+`BRIDGE FIXED / UI UNVERIFIED`
+
+不能写完整 FIXED。
+
+---
+
+ACTION 只能在以下情况下标为：
+
+`FIXED`
+
+A：
+
+c0000 不再因为错误的 1e9-only binder identity 在 entry resolution 阶段 0/40 全灭。
+
+B：
+
+新 identity rule 来自真实 binder corpus，不是角色特判。
+
+C：
+
+至少多个真实 c0000 clip 能：
+
+TAE
+→ motionAnimId
+→ unique binder child
+→ HKX animation
+→ binding
+→ sampler
+→ HKX changing pose
+→ FLVER changing pose
+
+完整通过。
+
+D：
+
+标准 c1020 1e9 layout 不回归。
+
+E：
+
+如果用户要求的最终现象是“动作骨骼会动”，必须完成 Electron UI 验证。
+
+同一个在 standalone runtime trace 中会变化的 c0000 animId，在 UI 中也必须观察到骨骼 pose 随时间改变。
+
+否则写：
+
+`BRIDGE + SAMPLER FIXED / UI UNVERIFIED`
+
+不能写完整 FIXED。
+
+---
+
+# 失败也必须产出确定结论
+
+如果 MAP diagnostic 证明 FaceSet flags 比预期复杂，无法安全制定 V1 fallback：
+
+不要硬修。
+
+产出：
+
+`MAP BLOCKED_BY_FACESET_SEMANTICS`
+
+并附：
+
+* flags 分布
+* 失败 mesh
+* 为什么当前证据不足
+* 需要的最小下一证据
+
+这比错误地显示一张“看起来有东西”的地图正确。
+
+如果 ACTION inventory 证明：
+
+5M / 6M 和 motionAnimId 并不存在唯一确定规则，
+
+不要硬修。
+
+产出：
+
+`ACTION BLOCKED_BY_BINDER_IDENTITY_SEMANTICS`
+
+附：
+
+* binder inventory
+* TAE motion IDs
+* ambiguity examples
+* 已证伪的 candidate formulas
+* 需要的成熟工具或额外 corpus 证据
+
+不要写角色硬编码。
+
+---
+
+# 最终原则
+
+这次任务不是：
+
+“让地图看起来不像方块，让骨骼看起来动一下”。
+
+而是：
+
+**把两个已经运行时确认的 First Bad 用真实 Sekiro 格式语义修掉，并证明修复没有把错误从一层推到下一层。**
+
+始终遵守：
+
+观察到什么，就修什么。
+
+没有证明的下游，不碰。
+
+有歧义，fail closed。
+
+真实 corpus 优先于猜测。
+
+旧健康路径必须回归。
+
+成功必须由 before / after 同样本证明。
+
+UI 症状只能由 UI 路径验证。
+
+不要用测试绿替代真实结果。
+
+不要用“能显示”替代“显示的是正确资源”。
+
+不要用“能动”替代“播放的是正确动画”。

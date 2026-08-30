@@ -533,3 +533,75 @@ Forensics counters snapshot (available but unfired, via `getForensicsCounters`/`
 
 *Evidence hierarchy attestation:* All UNKNOWN entries above are UNKNOWN because the required real SoulForge Electron UI → actual user operation → actual IPC → actual main/core/Bridge → files path was not executed in this session. Source reading, mocks, and static grep do NOT count as runtime conclusions. Any future cold-run that threads a single `traceId` per top-level user action through renderer → preload → main → Bridge and logs `durationMs`, `metrics.rowCount/payloadRowCount/approxBytes`, and `errorCode` should append new `SOULFORGE_HOTPATH_FORENSICS_V1` lines here and promote the corresponding First Bad from UNKNOWN to a proven stage.
 
+---
+
+# Runtime First Divergence — Recapture EXECUTED (MAP / ACTION decisive evidence pass)
+
+Date: 2026-08-30 (local). This section supersedes the §8 "could not be executed" recapture attempt circulated out-of-repo: the decisive runtime captures of that attempt's §§3–4 decision tables **were executed on this machine** against the real Sekiro install.
+
+## R1. Build identity and execution channel
+
+- Repo: `D:\Repository\SoulForge`, branch `main`, HEAD `abb14982edc38c40a880a3169e58bb0ae813067d` (identical to GitHub `main` observed by the failed recapture session), `git status --short` clean before and after capture (only this report section + untracked tmp harnesses added).
+- Pre-capture rebuild so the binary under test matches committed source: `npm run bridge:publish` (Release win-x64 self-contained, publish exe mtime 2026-08-30 00:17, after the abb14982 `BridgeCommandService.cs` change committed 23:41) and `npm run build -w @soulforge/shared` + `-w @soulforge/core` (tsc incremental, output already in sync).
+- Execution channel: **not** the Electron UI. `runBridge` (production pooled NDJSON daemon entry, `packages/core/dist`) → the same Release-published `SoulForge.Bridge.exe` the desktop app spawns, with `allowedRoots=[mods, game]`, `oodleRuntimeRoot=game`. Renderer pose math was executed by importing the product's own `ActionContinuousSampler` / `eulerXYZToQuaternion` from `packages/shared/dist` and feeding them the Bridge clip DTO exactly as `TaeWorkbenchPanel.tsx:926-986` does (leader bone names from `read-chrbnd-flver-preview` leader model; reference pose from preview bones via `eulerXYZToQuaternion`).
+- Evidence level labels used below: **UI-observation** (user-reported), **STATIC** (source proof), **RUNTIME-BRIDGE** (trace-correlated measurement through the production Bridge binary on real game files), **RUNTIME-SAMPLER** (product sampler code on RUNTIME-BRIDGE data, renderer three.js application not included).
+- Harness + raw JSON: `tmp/runtime-recapture/action-trace.mjs`, `map-trace.mjs`, `action-trace.json`, `map-trace.json` (first 12 models), `map-trace-80.json` (first 80 models). Read-only against game/mod files.
+
+## R2. MAP — decision table §4 resolved
+
+Target: `mods/map/mapstudio/m10_00_00_00.msb.dcx` → RUNTIME-BRIDGE `read-msb-document` ok: models=864, parts=7404, 807 distinct model names in part order. Candidate containers found: overlay `mods/map/m10_00_00_00/` has exactly 1 mapbnd (`m10_00_00_00_600050.mapbnd.dcx`), base `Sekiro/map/m10_00_00_00/` has the remaining containers (550 total overlay+base). All sampled direct-probe candidates hit the exact `map/<mapId>/<mapId>_<suffix>.mapbnd.dcx` path.
+
+Sample: first 80 distinct models in renderer part order (`map-trace-80.json`). Each model exercised the production resolution order (short-name exact probe → `read-map-static-geometry` with `modelName`, `ownerLeaseId`, `resourceCacheKey`), paginated cursor follow-up up to 3 pages, plus a `read-map-part-flver-preview` contrast call.
+
+Results (RUNTIME-BRIDGE):
+
+| Outcome | Count | Detail |
+|---|---|---|
+| Valid non-empty chunks | 61 / 80 | first-chunk triangleCount 55..8000, `selectedFaceSetOrdinals=[0]`, rule `sekiro-flver-strip-restart-v1`; 38 models paginated multi-page with opaque cursors (abb14982 pagination fix works at runtime) |
+| Fail-closed model-level failure | 19 / 80 | all 19: `MAP_STATIC_GEOMETRY_FAILED: FLVER_DISPLAY_FACESET_UNSUPPORTED: no Flags==0 FaceSet in mesh reference order` (e.g. m001500, m001510, m001550, m002001, m002010, m002021..m002023, m002025, m002030, m002032, m002033, m002050, m002051, m002400, m002401, m002410, m002420) |
+| mapbnd resolution failure (case 1) | 0 | refuted for this sample |
+| binder entry failure (case 2) | 0 | refuted for this sample |
+| "multiple Flags==0 FaceSets" variant | 0 / 19 | the variant predicted by static audit did not occur in this sample; the observed variant is "no Flags==0" |
+
+Per the §4 decision table: **case 3 fired — MAP First Bad = native display-FaceSet projection** (`FlverNativeDocument.GetMeshIndexSize` / `GetMeshIndicesBase64`, `bridge/SoulForge.Bridge/FlverNativeDocument.cs:726-790`, called per mesh by `MapStaticGeometryService.BuildMeshInfos`), **CONFIRMED at RUNTIME-BRIDGE level** for 23.75% of the first-80 m10 models. The failure is all-or-nothing per model: one offending mesh aborts `BuildMeshInfos`, so the whole model returns `MAP_STATIC_GEOMETRY_FAILED` and its parts stay proxies forever. The static audit's mechanism (Flags==0 over-restriction) is confirmed; its predicted variant ("multiple Flags==0") is corrected by runtime to the dominant variant ("no Flags==0 in mesh reference order" — all referenced FaceSets carry non-zero Flags).
+
+Not captured (diagnostic channel does not carry it): per-FaceSet Flags/TriangleStrip/IndexSize/IndexCount of the first failing mesh. Follow-up when repairing: extend the fail-closed diagnostic payload, or enumerate FaceSets in a read-only probe.
+
+Case 4 (renderer hot replacement / GPU upload) was **not exercised** in this pass — no Electron UI run. For the 61 chunk-producing models the Bridge stage is proven healthy; whether the user's UI run (which reported "smooth map but only proxy boxes", UI-observation) failed downstream of Bridge, or ran without base mounted (with only 1 overlay container most models would MISS and legitimately stay wireframe), cannot be distinguished without one instrumented UI run. This is the remaining MAP observation gap.
+
+## R3. ACTION — decision table §3 resolved
+
+Leader skeleton source (production path, RUNTIME-BRIDGE): `read-chrbnd-flver-preview` — c0000 → 467 bones / 0 meshes (expected; player mesh lives in parts, see memory), c1020 → 346 bones / 36 meshes.
+
+### c0000 (player, the character the ACTION symptom is about)
+
+- `read-tae-document` ok: 939 animations (overlay `mods/chr/c0000.anibnd.dcx` and base `chr/c0000.anibnd.dcx` both).
+- **RUNTIME-BRIDGE: 0 / 40 spread-sampled animIds (and 0 / 6 on the base copy) produce a clip.** Every failure: `TAE_ANIMATION_CLIP_READ_FAILED: ANIBND contains no animation entry with logical HKX ID <id>` — thrown by `ActionAnimationSemantics.ResolveAnimationBinderEntryIndex` (`ActionAnimationSemantics.cs:85-105`), which only accepts binder entries with `EntryId >= 1_000_000_000 && EntryId % 1e9 == motionId`.
+- Container census (RUNTIME-BRIDGE, `read-dcx-document` nested binder envelope): `c0000.anibnd.dcx` has 109 entries, **0 with ID ≥ 1e9**. Families: 1 × 4,000,000 (`skeleton.hkx`), 65 × 5,000,000-family, 42 × 6,000,000-family, 1 × 9,000,000. Provably animId-correlated entries exist in the 5M family: 5000010↔10, 5000050↔50, 5000070↔70, 5000100..5000103↔100..103, 5000110↔110, 5000200/5000201↔200/201.
+- Control: `c1020.anibnd.dcx` has 293 entries, 289 with ID ≥ 1e9 — the invariant holds there.
+
+Decision table application: the table's case 1 (HKX→FLVER mapping) is **never reached** for c0000. The **First Bad for ACTION/c0000 is CONFIRMED at RUNTIME-BRIDGE one stage upstream: ANIBND binder-entry identity resolution — the `SekiroAnimationBinderIdBase = 1_000_000_000` invariant is categorically inapplicable to the player container.** 100% clip-read failure means the renderer never obtains a sampler (`TaeWorkbenchPanel` sets clip/sampler null), so bones stay in the reference pose — this reproduces the user's UI-observation ("skeleton binding visible, animation does not move bones") end to end at the evidence level RUNTIME-BRIDGE + STATIC renderer wiring; the final renderer screen frame itself was not photographed in this pass.
+
+### c1020 (control character)
+
+- RUNTIME-BRIDGE: 33 / 40 spread-sampled animIds produce clips (SplineCompressed). 7 failures: 5 × entry-missing (import/dummy TAE entries, legitimate fail-closed), 1 × `ACTION_HKX_SPLINE_OFFSET_BOUNDS_INVALID: floatBlockOffsets[1]=9644 dataLength=114800` (real decode guard), 1 × import-chain source missing.
+- RUNTIME-SAMPLER on 5 successful clips: `mappedBoneCount = 126/126 hkxBones`, `mappedAnimatedTrackCount = 106/106 (or 126/126)` tracks, `distinctAnimatedMappedBones` = same; HKX pose delta over [0, min(0.5, dur/2)] and [0, dur/2] is non-zero (e.g. animId 7600: maxTranslationDelta 0.987, maxRotationAngle 1.67 rad, 64/126 bones moved; animId 12311: 1.269 / 2.83 rad / 92 bones); FLVER-space deltas identical (full mapping).
+- Decision table application for c1020: cases 1–2 **refuted** — mapping is complete and the clip animates. If a c1020 UI session also shows frozen bones, the remaining candidate is renderer pose application (case 3), which this pass did not exercise (no UI run). Note §3's static silent-zero-mapping hole (`BuildHkxToFlverBoneMap` returning all -1) stays a real STATIC defect but was **not observed at runtime** in any sampled clip.
+
+## R4. Updated First Divergence Matrix
+
+| Flow | Last good stage (runtime-proven) | First Bad (evidence level) | What remains |
+|---|---|---|---|
+| MAP | mapbnd + binder-entry + FLVER parse + chunk pagination all RUNTIME-verified (61/80) | native display-FaceSet projection, case 3 — **CONFIRMED RUNTIME-BRIDGE** (19/80 fail-closed) | one instrumented UI run to split "61 healthy models still proxy in UI" vs "user session had no base mounted"; per-FaceSet detail in diagnostics |
+| ACTION c0000 | TAE document read (939 entries), chrbnd preview (467 bones) | ANIBND binder-entry identity (1e9 invariant), upstream of mapping — **CONFIRMED RUNTIME-BRIDGE (0/40 clips)** | renderer screen capture optional; fix design must census the 5M/6M ID scheme |
+| ACTION c1020 | clip decode + HKX→FLVER mapping + both pose deltas healthy (33/40 clips) | Bridge chain healthy; case 3 (renderer application) UNTESTED, not justified per stopping rule | only if a c1020 UI session shows the same frozen-bone symptom |
+| PARAM | unchanged from recapture doc §5 | renderer legacy `loadAll=true` API selection — STATIC (no new runtime) | magnitude profiling only |
+| ROLLBACK | unchanged from recapture doc §6 | historic First Bad UNKNOWN | real PRE→COMMIT→ROLLBACK authority cycle on a safe overlay target |
+
+## R5. Attestation
+
+- Every number in R2/R3 is a trace-correlated RUNTIME measurement from the Release-published production Bridge binary (`publish exe sha check possible via `bridge/SoulForge.Bridge/bin/Release/net10.0/win-x64/publish/SoulForge.Bridge.exe`, mtime 2026-08-30 00:17) on the real game/mod files at `D:\mystream\Sekiro Shadows Die Twice\Sekiro`; raw JSON is committed under `tmp/runtime-recapture/`.
+- No synthetic fixture, mock, or static inference was substituted for any runtime value. UNKNOWN items remain UNKNOWN and are listed as such.
+- No product source file was modified in this pass; no governance slice was claimed or completed; no authority level is promoted by this evidence (fixture/candidate promotion rules untouched). Governing-panel `GATE_EVIDENCE_STALE` errors observed at session start are pre-existing and unrelated.
+- No Electron UI run was executed: renderer-stage cases (MAP case 4, ACTION c1020 case 3) and the "user session environment" question therefore remain open by construction, not by omission.
+

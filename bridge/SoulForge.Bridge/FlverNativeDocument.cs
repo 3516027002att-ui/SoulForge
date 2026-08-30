@@ -723,30 +723,139 @@ internal sealed class FlverNativeDocument
         return false;
     }
 
-    /// <summary>获取网格主 FaceSet 的索引位宽（16 或 32 位）。按 24.9.1 规则：仅 Flags==0 为 display，缺失不 fallback。</summary>
+    /// <summary>
+    /// 受界 FaceSet 诊断：只在失败路径使用，说明当前 parser 沿 mesh reference order
+    /// 实际看到了哪些 FaceSet，用于再次定位 FaceSet capability boundary。
+    /// 不记录 index 数据、Base64、vertex payload；面集数量本身由 FLVER 决定且通常很小。
+    /// </summary>
+    private string DescribeMeshFaceSetCandidates(int meshIndex, FlverMeshEntry mesh)
+    {
+        var sb = new System.Text.StringBuilder();
+        sb.Append($"meshIndex={meshIndex}; faceSetRefs={mesh.FaceSetIndices.Count};");
+        for (var ord = 0; ord < mesh.FaceSetIndices.Count; ord++)
+        {
+            var global = mesh.FaceSetIndices[ord];
+            if (global < 0 || global >= _faceSets.Count)
+            {
+                sb.Append($" [ord={ord} global={global} OUT_OF_RANGE]");
+                continue;
+            }
+            var fs = _faceSets[global];
+            sb.Append($" [ord={ord} global={global} flags={fs.Flags}(0x{fs.Flags:X8})"
+                + $" strip={(fs.TriangleStrip ? 1 : 0)} cull={(fs.CullBackfaces ? 1 : 0)}"
+                + $" idxSize={fs.IndexSize} idxCount={fs.IndexCount}]");
+        }
+        return sb.ToString();
+    }
+
+    // FaceSet.Flags 的位含义以成熟工具（SoulsFormats FLVER2.FaceSet.FSFlags）作为语义对照，
+    // 但授权来自本项目自己 parser 在真实 Sekiro 语料上的解析结果。
+    private const uint FaceSetFlagLodLevel1 = 0x0100_0000u;
+    private const uint FaceSetFlagLodLevel2 = 0x0200_0000u;
+    private const uint FaceSetFlagMotionBlur = 0x8000_0000u;
+    private const uint FaceSetFlagEdgeCompressed = 0x4000_0000u;
+
+    /// <summary>
+    /// 已经证明不改变 index 数据编码的 flag 位集合。
+    /// LodLevel1 / LodLevel2 / MotionBlur 只描述这一份面集的显示用途，
+    /// 索引仍按 IndexSize 16/32 原样解码。EdgeCompressed（indexSize==8 的边压缩表）
+    /// 明确不在其列：它改变的是索引本身的编码，任何情况下都不放行。
+    /// </summary>
+    private const uint FaceSetFlagsIndexEncodingNeutral =
+        FaceSetFlagLodLevel1 | FaceSetFlagLodLevel2 | FaceSetFlagMotionBlur;
+
+    /// <summary>
+    /// 该面集是否能被当前 parser 以现有 index representation 完整解码。
+    /// 任何出现在中性集合之外的位（含 EdgeCompressed 与未来未知位）都视为不安全。
+    /// </summary>
+    private static bool IsFaceSetIndexDecodable(FlverFaceSetEntry fs)
+        => (fs.Flags & ~FaceSetFlagsIndexEncodingNeutral) == 0
+            && (fs.IndexSize == 16 || fs.IndexSize == 32);
+
+    /// <summary>
+    /// 按 mesh reference order 选出本 mesh 唯一的 V1 display FaceSet。
+    ///
+    /// 真实 Sekiro 地图语料已经证明：合法地图数据中存在「该 mesh 引用的全部 FaceSet
+    /// 都不是 Flags==0」的情况（m10_00_00_00 前 80 模型中 19 个整模型因此失败，
+    /// 且这 19 个 mesh 每个都只引用 1 个 FaceSet，flags 为 LodLevel1/LodLevel2）。
+    /// 因此「没有 Flags==0 就整 mesh 失败」不是可接受的 display projection 规则。
+    ///
+    /// 规则（严格按 reference order，永不重排、永不合并、永不向后扫描）：
+    /// 1. candidates 为空 / 引用越界 / 没有候选 -> 调用方 fail closed，不伪造 geometry。
+    /// 2. 存在 Flags==0 -> 取 reference order 中第一个（多个不再视为错误，reference order 已提供确定性）。
+    /// 3. 不存在 Flags==0 -> 只看 reference order 中的第一项：
+    ///    只有它能被当前 parser 完整解码（非 EdgeCompressed、IndexSize 16/32、无未知 flag 位）才选中；
+    ///    否则 fail closed。绝不跳过它去找后面一个「碰巧能画」的面集。
+    ///
+    /// 本 helper 只做选择：不展开 triangle strip、不改 IndexSize、不截断、不过滤退化三角形、不做几何修复、不吞异常。
+    /// </summary>
+    private enum FaceSetSelectionFailure
+    {
+        None,
+        /// <summary>mesh 没有引用任何 FaceSet；或引用越界。历史上 GetMeshIndexSize 抛、GetMeshIndicesBase64 返回 null。</summary>
+        NoCandidate,
+        /// <summary>没有 Flags==0，且 reference order 第一项不能被当前 parser 解码。两个调用方都 fail closed 抛异常。</summary>
+        NotDecodable
+    }
+
+    private readonly record struct FaceSetSelection(
+        FaceSetSelectionFailure Failure,
+        FlverFaceSetEntry? FaceSet,
+        int GlobalIndex,
+        string? Diagnostic);
+
+    private FaceSetSelection SelectDisplayFaceSet(int meshIndex, FlverMeshEntry mesh)
+    {
+        var diagnostic = DescribeMeshFaceSetCandidates(meshIndex, mesh);
+
+        if (mesh.FaceSetIndices.Count == 0)
+            return new FaceSetSelection(FaceSetSelectionFailure.NoCandidate, null, -1, diagnostic);
+
+        foreach (var global in mesh.FaceSetIndices)
+        {
+            if (global < 0 || global >= _faceSets.Count)
+                return new FaceSetSelection(FaceSetSelectionFailure.NoCandidate, null, -1, diagnostic);
+        }
+
+        foreach (var global in mesh.FaceSetIndices)
+        {
+            if (_faceSets[global].Flags == 0)
+                return new FaceSetSelection(FaceSetSelectionFailure.None, _faceSets[global], global, diagnostic);
+        }
+
+        // 没有 Flags==0：只评估 reference order 的第一项，不向后扫描。
+        var firstGlobal = mesh.FaceSetIndices[0];
+        var first = _faceSets[firstGlobal];
+        if (IsFaceSetIndexDecodable(first))
+            return new FaceSetSelection(FaceSetSelectionFailure.None, first, firstGlobal, diagnostic);
+
+        var message = (first.Flags & FaceSetFlagEdgeCompressed) != 0
+            ? $"FLVER_FACESET_EDGE_COMPRESSED_UNSUPPORTED: first referenced FaceSet is EdgeCompressed; {diagnostic}"
+            : $"FLVER_DISPLAY_FACESET_UNSUPPORTED: no Flags==0 FaceSet and first referenced FaceSet is not decodable by this parser; {diagnostic}";
+        return new FaceSetSelection(FaceSetSelectionFailure.NotDecodable, null, -1, message);
+    }
+
+    /// <summary>
+    /// 当前 mesh 被选中的 display FaceSet 的全局序号（与 GetMeshIndicesBase64 使用同一个选择规则）。
+    /// 供需要在 DTO 中回写 selectedFaceSetOrdinals 的调用方使用，避免各处复制一份选择逻辑。
+    /// 选择失败时返回 -1，由调用方决定 fail closed 还是跳过。
+    /// </summary>
+    internal int GetDisplayFaceSetOrdinal(int meshIndex)
+    {
+        if (meshIndex < 0 || meshIndex >= Meshes.Count) return -1;
+        return SelectDisplayFaceSet(meshIndex, Meshes[meshIndex]).GlobalIndex;
+    }
+
+    /// <summary>获取网格主 FaceSet 的索引位宽（16 或 32 位）。display FaceSet 由 SelectDisplayFaceSet 统一决定。</summary>
     public int GetMeshIndexSize(int meshIndex)
     {
         if (meshIndex < 0 || meshIndex >= Meshes.Count) throw new InvalidDataException("FLVER_DISPLAY_FACESET_UNSUPPORTED: meshIndex out of range");
         var mesh = Meshes[meshIndex];
-        if (mesh.FaceSetIndices.Count == 0) throw new InvalidDataException("FLVER_DISPLAY_FACESET_UNSUPPORTED: mesh has no FaceSets");
-        var candidates = mesh.FaceSetIndices
-            .Where(i => i >= 0 && i < _faceSets.Count)
-            .Select(i => _faceSets[i])
-            .ToList();
-        if (candidates.Count != mesh.FaceSetIndices.Count)
-            throw new InvalidDataException("FLVER_DISPLAY_FACESET_UNSUPPORTED: mesh references out-of-range FaceSet index");
-        // EdgeCompressed must be detected via flag, not indexSize 8
-        const uint EdgeCompressedFlag = 0x40000000u;
-        var displayCandidates = candidates.Where(fs => fs.Flags == 0).ToList();
-        if (displayCandidates.Count == 0)
-        {
-            if (candidates.Any(fs => (fs.Flags & EdgeCompressedFlag) != 0))
-                throw new InvalidDataException("FLVER_FACESET_EDGE_COMPRESSED_UNSUPPORTED: mesh contains EdgeCompressed FaceSet");
-            throw new InvalidDataException("FLVER_DISPLAY_FACESET_UNSUPPORTED: no Flags==0 FaceSet in mesh reference order");
-        }
-        if (displayCandidates.Count != 1)
-            throw new InvalidDataException("FLVER_DISPLAY_FACESET_UNSUPPORTED: multiple Flags==0 FaceSets not supported in V1");
-        var selected = displayCandidates[0];
+        // EdgeCompressed 由 flag 判定而非 indexSize 8；该判定已收进 SelectDisplayFaceSet。
+        var selection = SelectDisplayFaceSet(meshIndex, mesh);
+        if (selection.Failure != FaceSetSelectionFailure.None)
+            throw new InvalidDataException($"FLVER_DISPLAY_FACESET_UNSUPPORTED: {selection.Diagnostic}");
+        var selected = selection.FaceSet!;
         if (selected.IndexSize != 16 && selected.IndexSize != 32)
             throw new InvalidDataException($"FLVER_FACESET_EDGE_COMPRESSED_UNSUPPORTED: effective IndexSize {selected.IndexSize} not in {{16,32}}");
         return selected.IndexSize == 32 ? 32 : 16;
@@ -756,35 +865,23 @@ internal sealed class FlverNativeDocument
     /// 提取网格三角形索引为 base64。输出契约始终是 triangle-list；FLVER
     /// triangle strip 会在 Bridge 内按原生 primitive-restart / winding 语义展开。
     /// 索引位宽仍由 face set 的 IndexSize 决定，不允许调用方猜测。
-    /// 24.9.1: Flags==0 单选，8-bit/EdgeCompressed 结构化诊断，CullBackfaces 保留在 record。
+    /// display FaceSet 由 SelectDisplayFaceSet 统一决定，与 GetMeshIndexSize 必然选中同一个面集：
+    /// 优先 reference order 中第一个 Flags==0；不存在时只评估第一项，且其必须是当前 parser
+    /// 可完整解码的非 EdgeCompressed 面集，否则 fail closed。CullBackfaces 保留在 record。
     /// </summary>
     public string? GetMeshIndicesBase64(int meshIndex, int maxIndices = 30_000, bool allowTruncation = false)
     {
         if (meshIndex < 0 || meshIndex >= Meshes.Count) return null;
         var mesh = Meshes[meshIndex];
-        if (mesh.FaceSetIndices.Count == 0) return null;
 
-        var candidates = mesh.FaceSetIndices
-            .Where(i => i >= 0 && i < _faceSets.Count)
-            .Select(i => (Index: i, FaceSet: _faceSets[i]))
-            .ToList();
-        if (candidates.Count != mesh.FaceSetIndices.Count) return null; // out-of-range FaceSet reference fails closed
-        if (candidates.Count == 0) return null;
-        const uint EdgeCompressedFlag = 0x40000000u;
-        var displayCandidates = candidates.Where(c => c.FaceSet.Flags == 0).ToList();
-        if (displayCandidates.Count == 0)
-        {
-            // Pre-classify EdgeCompressed: with Flags==0 filtered out, 0x40000000 is isolated and not mistaken for IndexSize 8
-            if (candidates.Any(c => (c.FaceSet.Flags & EdgeCompressedFlag) != 0))
-                throw new InvalidDataException("FLVER_FACESET_EDGE_COMPRESSED_UNSUPPORTED: EdgeCompressed flag 0x40000000 not supported in V1");
-            throw new InvalidDataException("FLVER_DISPLAY_FACESET_UNSUPPORTED: no Flags==0 FaceSet in mesh reference order");
-        }
-        if (displayCandidates.Count != 1)
-            throw new InvalidDataException("FLVER_DISPLAY_FACESET_UNSUPPORTED: multiple Flags==0 FaceSets unsupported");
-
-        var selected = displayCandidates[0];
-
-        var fs = selected.FaceSet;
+        // 与 GetMeshIndexSize 共用同一个选择规则，保证两个函数永远选中同一个 FaceSet。
+        var selection = SelectDisplayFaceSet(meshIndex, mesh);
+        // 没有候选（mesh 未引用 FaceSet / 引用越界）保持原有「跳过该 mesh」行为，不伪造 geometry。
+        if (selection.Failure == FaceSetSelectionFailure.NoCandidate) return null;
+        // 无法被当前 parser 解码 -> fail closed，不向后扫描找「碰巧能画」的面集。
+        if (selection.Failure == FaceSetSelectionFailure.NotDecodable)
+            throw new InvalidDataException(selection.Diagnostic!);
+        var fs = selection.FaceSet!;
         if (fs.IndexSize != 16 && fs.IndexSize != 32) throw new InvalidDataException($"FLVER_FACESET_EDGE_COMPRESSED_UNSUPPORTED: IndexSize {fs.IndexSize} not in {{16,32}}");
         if (fs.IndexCount <= 0 || fs.IndexCount > MaxIndexCount || maxIndices < 3) return null;
         var indexDataOffset = (long)DataStart + fs.IndicesOffset;

@@ -251,21 +251,10 @@ internal static class MapStaticGeometryService
             }
             if (posFloats.Length == 0) { minX = minY = minZ = maxX = maxY = maxZ = 0; }
 
-            // 24.9.1: record selected FaceSet ordinals/ruleIds/sourceIndexBits/CullBackfaces for DTO
-            // For now, selected ordinals derived from GetMeshIndexSize's internal selection; reflect in MeshInfo for chunk DTO
-            int selectedOrdinal = -1;
-            if (mesh.FaceSetIndices.Count > 0)
-            {
-                for (int fi = 0; fi < mesh.FaceSetIndices.Count; fi++)
-                {
-                    var global = mesh.FaceSetIndices[fi];
-                    if (global >= 0 && global < flver.FaceSetCount)
-                    {
-                        var fs = flver.GetFaceSet(global);
-                        if (fs != null && fs.Flags == 0) { selectedOrdinal = global; break; }
-                    }
-                }
-            }
+            // 24.9.1: record selected FaceSet ordinals/ruleIds/sourceIndexBits/CullBackfaces for DTO.
+            // 必须与 FlverNativeDocument 的 display FaceSet 选择规则完全一致，
+            // 因此复用同一个 selection，而不是在这里再复制一份 Flags==0 判定。
+            int selectedOrdinal = flver.GetDisplayFaceSetOrdinal(mi);
             list.Add(new MeshInfo
             {
                 MeshIndex = mi,
