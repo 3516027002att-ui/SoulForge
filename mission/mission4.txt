@@ -1,0 +1,1635 @@
+SoulForge ACTION / PARAM / ROLLBACK / MAP 运行链修复与真实性验收
+
+仓库：
+
+https://github.com/3516027002att-ui/SoulForge
+
+你的任务不是重新做一轮宽泛代码审计，而是针对下面已经通过源码审计和真实 Electron 运行验证得到的问题，逐项修复真实生产链。
+
+必须先读取当前工作区和最新源码。不要相信本文中的行号，也不要假设文件仍处于旧位置。本文给出的符号名、故障事实、禁区和验收标准优先级高于你自己的猜测。
+
+总原则
+
+开始前先执行：
+
+git status --short
+
+git rev-parse HEAD
+
+git log -5 --oneline
+
+确认当前实际 HEAD、当前分支和已有未提交修改。
+
+如果工作区存在其他 Agent 未提交修改：
+
+不要 git reset --hard
+不要 git checkout .
+不要 git clean
+不要擅自 stash
+不要覆盖不属于本任务的修改
+只修改与你任务直接相关的文件
+
+如果仓库再次出现以下问题：
+
+fatal: bad object HEAD
+
+refs/codex/snapshots/** 悬空
+
+git stash 卡死
+
+electron-vite 清理 apps/desktop/out 被 genie-safe-delete 拦截
+
+better-sqlite3 ABI 不匹配
+
+缺少 pwsh.exe
+
+这些属于环境问题。
+
+可以为了运行测试采取最小绕过措施，但禁止把这些问题当成产品代码根因修进 SoulForge。
+
+不要为了“让测试绿”降低断言。
+
+不要创建替代真实生产路径的 mock-only 实现。
+
+不要以新增 smoke test 代替 Electron 实机闭环。
+
+一、ACTION：先修真实运行时 frame-size blocker
+
+当前真实 Electron UI 已经直接出现错误：
+
+Bridge result exceeds the negotiated frame-size limit; use a file-backed command instead.
+
+ACTION 预览表现为：
+
+c0000 模型能够显示
+骨骼能够绑定
+UI 出现播放控件
+但动作不播放
+预览区域直接报告上述 Bridge frame-size 错误
+
+这条错误是当前最高价值运行时证据。
+
+不要首先继续猜 HKX 不存在。
+
+不要首先继续改 motion binder ID。
+
+不要首先继续改 duplicate bone mapping。
+
+先确定：
+
+哪一个 ACTION Bridge command 正在把过大的结果通过普通 framed RPC 返回。
+
+1.1 定位真正超过 frame-size 的命令
+
+从 Electron ACTION IPC 开始追：
+
+搜索：
+
+readTaeAnimationClip
+
+sampleTaeAnimationPose
+
+animationContainerPath
+
+Bridge result exceeds the negotiated frame-size limit
+
+file-backed
+
+negotiated frame
+
+frame-size
+
+invokeBridge
+
+runBridge
+
+找到完整链：
+
+renderer
+→ preload / IPC
+→ apps/desktop/src/main/ipc/action.ts
+→ core ACTION bridge helper
+→ Bridge command
+→ C# command handler
+→ Bridge transport
+
+必须记录：
+
+具体是哪一个 command 返回超限
+它返回对象包含什么
+JSON 序列化后的近似字节数
+negotiated frame size 上限是多少
+是 clip 一次性 payload 超限，还是 sample pose 也超限
+
+不要只根据错误文本推断。
+
+至少用真实 c0000 动作触发一次，并在 Bridge 返回前记录实际 serialized payload size。
+
+1.2 不允许简单提高 frame-size 上限解决
+
+禁止把修复做成：
+
+FRAME_LIMIT = 更大的数字
+
+禁止单纯把限制从例如 16MB 改成 64MB / 128MB。
+
+错误文本自己已经明确告诉你正确方向：
+
+use a file-backed command instead
+
+因此必须检查项目现有 file-backed command 基础设施。
+
+搜索整个仓库：
+
+file-backed
+
+fileBacked
+
+backingFile
+
+resultFile
+
+tempFile
+
+payloadFile
+
+BridgeFile
+
+fileDescriptor
+
+找到现有的大结果传输方式。
+
+优先复用已有机制。
+
+不得为 ACTION 发明一套与现有 Bridge 不兼容的临时协议。
+
+1.3 ACTION 大 payload 改成 file-backed
+
+目标架构：
+
+Bridge 不再把完整大动画数据作为巨大 JSON frame 直接返回。
+
+Bridge 处理动画后，将大 payload 写入受控的临时/缓存文件，只通过正常 RPC 返回一个很小的 descriptor。
+
+descriptor 至少必须能让 Desktop 确定：
+
+result 文件位置或 opaque token
+payload format/version
+byte length
+animation duration
+frame/sample count
+bone count
+resource/source revision 或 hash
+必要的诊断信息
+
+不要把文件路径设计成 renderer 可以任意读取的安全漏洞。
+
+如果项目已有 opaque file token / file-backed result authority，复用它。
+
+如果实际 ACTION 只需要当前时间点 pose，而不是完整动画所有帧，优先检查是否应该根本不返回完整 clip。
+
+例如播放期间若可以：
+
+timeSeconds → Bridge/native sample → 一帧 compact pose
+
+就不要预先把：
+
+N bones × N frames × transforms
+
+全部 JSON 化送到 renderer。
+
+但不要未经 profiling 就擅自重写整个动画体系。
+
+先确定当前 command 实际返回内容和 renderer 实际消费内容。
+
+1.4 大量浮点数据禁止继续展开成巨大 JSON object graph
+
+如果当前 payload 类似：
+
+frames[].bones[].translation.x
+
+frames[].bones[].rotation.x
+
+这种对象树，必须评估并优先改成紧凑 binary layout。
+
+优先：
+
+float32
+
+连续数组
+
+固定 header
+
+TypedArray / ArrayBuffer 可直接消费的数据布局
+
+不要为了“可读性”把几百万个 float 继续 JSON 化。
+
+元数据可以 JSON。
+
+大量 geometry / animation 数值不应使用巨大 JSON。
+
+二、ACTION：修复已确认的 motion identity cache 污染
+
+当前源码审计已经发现确定逻辑错误。
+
+搜索：
+
+taeMotionIdentityCache
+
+检查当前 key。
+
+如果仍然只是：
+
+sourceUri
+
+而缓存值是某一个具体 animId 对应的 motionAnimId：
+
+这是错误的。
+
+因为同一个 TAE source 可以包含多个动画。
+
+第一次读取：
+
+sourceUri + animId A
+
+得到：
+
+motionAnimId X
+
+如果 cache 只按 sourceUri：
+
+第二次读取：
+
+sourceUri + animId B
+
+可能错误复用 X。
+
+这会造成同一 TAE 内不同动作互相污染。
+
+2.1 正确修复
+
+优先方案：
+
+一次解析 TAE 后，缓存：
+
+sourceUri + revision → Map<animId, motionAnimId>
+
+查询时：
+
+map.get(animId)
+
+如果现有结构暂时无法做到文件级 map，则最低限度 key 必须包含：
+
+sourceUri
+
+animId
+
+以及必要 source revision。
+
+禁止继续只按 sourceUri 缓存单个 motion identity。
+
+2.2 必须新增能抓住旧 bug 的回归测试
+
+旧测试如果只测一个动画，不够。
+
+必须在同一个真实或忠实 fixture TAE source 中至少存在两个：
+
+animId A → motionAnimId X
+
+animId B → motionAnimId Y
+
+其中：
+
+A != B
+
+X != Y
+
+测试顺序必须：
+
+第一次查询 A
+
+然后查询 B
+
+然后再次查询 A
+
+断言：
+
+A 始终 X
+
+B 始终 Y
+
+不得因为 cache warmup 导致 B 返回 X。
+
+然后反向：
+
+先 B 再 A。
+
+两种顺序都必须通过。
+
+三、ACTION：Binder membership authority 目前只完成了一半
+
+已有调查结论：
+
+1_000_000_000 + motionAnimId
+
+仍然是正确 animation HKX binder entry 规则。
+
+禁止改掉。
+
+c0000 主 c0000.anibnd.dcx 没有 animation HKX。
+
+真正动画存在约 42 个兄弟 ANIBND。
+
+显式传正确：
+
+animationContainerPath
+
+后，真实 c0000 已经做到：
+
+6/6 clip 成功
+
+42–98 根骨骼发生变化。
+
+所以 container selection 方向已被实测证明。
+
+3.1 当前实现需要重新确认
+
+检查：
+
+apps/desktop/src/main/ipc/action.ts
+
+WorkspaceIndex
+
+与 Binder membership 有关的 cache / resolver。
+
+如果当前仍然是：
+
+ACTION 播放时
+→ action.ts 临时遍历 <root>/chr
+→ 对大量 ANIBND stat
+→ 逐个读 binder entries
+→ 建 IPC 局部 binderMembershipCache
+→ 当场选 container
+
+则当前实现只是功能性半成品。
+
+最终 authority 不应属于播放按钮的 IPC handler。
+
+3.2 正确职责
+
+workspace/resource index 应能够维护：
+
+某 container：
+
+sourceUri / physical path / revision
+
+包含哪些 binder entry IDs。
+
+并提供严格反查：
+
+当前 ACTION resource family
++
+binderEntryId
+
+→ candidate containers。
+
+结果必须严格区分：
+
+UNIQUE
+
+NOT_FOUND
+
+AMBIGUOUS
+
+只有 UNIQUE 可以继续。
+
+禁止：
+
+找到第一个就返回
+sibling 扫描 first-match
+按 aXXX 文件名猜
+按 animId 范围猜
+c0000 特判
+“一般玩家动作都在某几个 ANIBND”之类经验规则
+3.3 允许扫描，但扫描必须属于 index 建立阶段
+
+完整枚举候选 ANIBND 并读取 binder directory 是允许的。
+
+禁止的是：
+
+播放某动作时临时随机扫到第一个匹配就用。
+
+正确逻辑：
+
+枚举完整作用域
+→ 建 membership
+→ 收集全部候选
+→ 证明唯一
+→ ACTION 查询。
+
+不要把“禁止随机 sibling scan”误解成“不允许 indexer 枚举真实文件”。
+
+四、ACTION：完成真实播放闭环后，再处理 duplicate bone identity
+
+不要现在把 duplicate bone 当第一 blocker。
+
+等：
+
+frame-size 修复
+
+motion cache 修复
+
+container 唯一解析
+
+都通过后，再处理。
+
+已知 c0000 FLVER 467 bones 中存在重复名字：
+
+Ctrl_Spine
+
+Ctrl_Spine1
+
+当前：
+
+ActionAnimationSemantics.BuildHkxToFlverBoneMap
+
+对名字做 unique-name validation，重复时 fail-closed。
+
+禁止：
+
+duplicate → take first
+
+禁止：
+
+duplicate → take lowest index
+
+禁止：
+
+duplicate → take closest numeric index
+
+4.1 先写 forensic diagnostics
+
+对每个重复 group 输出 HKX / FLVER 两边：
+
+bone index
+bone name
+parent index
+parent name
+ancestor chain
+child names
+reference translation
+reference rotation
+reference scale / transform
+
+必须先拿真实 c0000 数据比较。
+
+4.2 选择最小足够 identity
+
+优先验证：
+
+name + parent identity
+
+是否已经能够唯一确定。
+
+如果 parent 也重复：
+
+递归 ancestor chain。
+
+只有 hierarchy 仍不足时，才考虑 reference transform。
+
+浮点 transform 必须 tolerance 比较。
+
+不要 exact equality。
+
+不要一开始设计复杂加权 fuzzy matcher。
+
+先证明最小身份足够。
+
+五、ACTION 必须通过真实 Electron 播放验收
+
+现有 smoke 如果自己声明：
+
+不证明真实 Sekiro TAE/BND4/DCX
+不证明 Desktop IPC
+不证明 Electron
+不证明 release preview
+
+则它只能作为单元测试，不能作为完成证据。
+
+最终必须使用真实 c0000。
+
+至少选择两个明显不同 motion 的动作。
+
+验收过程中记录：
+
+TAE animId
+
+resolved motionAnimId
+
+binderEntryId = 1e9 + motionAnimId
+
+resolved animationContainerPath
+
+resolved binder entry
+
+HKX duration
+
+sampled bone count
+
+mapped FLVER bone count
+
+在时间：
+
+t=0
+
+t=duration/2
+
+至少比较 pose。
+
+必须证明至少若干骨骼 transform 实际变化。
+
+然后 Electron 中点击播放：
+
+时间 slider 前进
+
+frame counter 前进
+
+人物可观察运动
+
+停止后稳定
+
+切换第二个动作后播放的是第二个动作
+
+来回切换两个动作不能被缓存污染。
+
+只有这些全部成立，ACTION 才能标记完成。
+
+六、PARAM：当前分页只是减少返回 rows，没有解决 cold-open
+
+真实用户测试：
+
+点击大型 PARAM 后，等待 row 出现依旧很慢。
+
+不要用：
+
+“现在已经 500 rows/page”
+
+来反驳这个运行结果。
+
+检查：
+
+openParamSession
+
+ParamDocumentSessionCache
+
+GetOrOpen
+
+ParamNativeDocument.Read
+
+VerifyRoundTrip
+
+File.ReadAllBytes
+
+SHA256
+
+当前已观察到的疑似链：
+
+打开 session
+→ File.ReadAllBytes 整个 PARAM
+→ 整文件 SHA
+→ ParamNativeDocument.Read 整份解析
+→ VerifyRoundTrip 整份
+→ session ready
+→ 才返回第一页。
+
+如果最新源码仍如此，那么分页只优化了：
+
+renderer payload
+
+后续 paging
+
+没有优化：
+
+request → first rows。
+
+6.1 先做 profiling，不允许凭感觉改
+
+选择至少：
+
+一个小 PARAM
+
+一个明显大的 PARAM。
+
+记录 cold cache：
+
+request start
+file read 完成
+header/schema 完成
+row index/directory 完成
+full parse 完成
+roundtrip verification 完成
+first rows ready
+renderer first rows displayed
+
+记录：
+
+文件 bytes
+row count
+first payload rows
+first payload bytes
+full parse count
+offscreen rows 是否提前 materialize
+首屏时间
+
+输出具体数字。
+
+6.2 正确目标
+
+普通只读打开不应为了显示前几十/几百 rows，强制完成整份 PARAM 的重型 roundtrip validation。
+
+检查 PARAM 格式和现有 parser 是否支持：
+
+header
+
+row headers / offsets
+
+row directory
+
+lazy row decode。
+
+目标：
+
+openParamSession
+
+只建立 editor 必需的：
+
+schema metadata
+
+row identity/index
+
+row offsets
+
+必要 header。
+
+readParamIndexPage
+
+只返回轻量：
+
+row id
+
+row name
+
+必要状态。
+
+readParamRows
+
+仅 materialize 指定 row。
+
+不要在 session open 时 decode 所有 row value。
+
+6.3 VerifyRoundTrip 不应阻塞普通首屏
+
+检查 VerifyRoundTrip 的真实用途。
+
+如果它是写安全验证：
+
+移到 commit/write verification。
+
+如果它用于 parser correctness：
+
+可以保留 explicit integrity/debug/test path。
+
+禁止默认每次打开大 PARAM，为了显示第一页就完整 serialize/roundtrip 一遍。
+
+除非你能够证明该步骤是格式解析不可避免的一部分。
+
+6.4 不创建第三套 PARAM API
+
+继续使用：
+
+openParamSession
+
+readParamIndexPage
+
+readParamRows
+
+补齐现有 session contract。
+
+不要再新增：
+
+openFastParam
+
+readParamMetadata2
+
+readLazyParam
+
+这种第三条平行 API。
+
+legacy：
+
+readParamPage(..., loadAll=true)
+
+可以继续存在兼容用途。
+
+但是 renderer 生产 editor 不得为了 metadata 再偷偷调用一次 loadAll=true。
+
+6.5 Metadata contract
+
+session 必须一次提供 editor 所需可信 metadata。
+
+检查当前已有：
+
+typeName
+
+paramdefPath
+
+paramdefOrigin
+
+metadataPath
+
+metadataOrigin
+
+paramdefLoadedFromRegulation
+
+fieldCount
+
+warning
+
+不要重复实现已有字段。
+
+补缺失的：
+
+rowDataSize
+
+trusted field definitions
+
+field enums / display mappings
+
+field schema trust/origin diagnostics。
+
+七、PARAM 必须防止“假分页”
+
+新增测试必须能证明：
+
+打开大型 PARAM 后，在 first rows 返回前：
+
+没有 materialize 全部 rows。
+
+不要只断言：
+
+response.rows.length === 500
+
+这不能证明没有全量解析。
+
+应该加入 instrumentation/counter。
+
+例如测试能够观察：
+
+decodedRowCount
+
+首屏请求 100 rows 时：
+
+decodedRowCount
+
+不能等于全部几万行。
+
+如果格式 parser 必须先读 row directory，则 directory 枚举不计作 row payload decode。
+
+要区分：
+
+row metadata/index
+
+和
+
+row full payload。
+
+八、ROLLBACK：不要重构 transaction identity，先完成 authority 闭环
+
+现有核心机制不要推翻。
+
+已知核心大致正确：
+
+按 opId 找原 operation
+
+验证 committed record
+
+验证 current hash == afterHash
+
+验证 backup hash == beforeHash
+
+生成 inverse transaction
+
+继续使用原：
+
+targetUri / targetPath
+
+重新通过正式 transaction engine。
+
+不要重新让 Agent 猜资源目标。
+
+不要把 ItemName/Goods 漂移当当前默认根因。
+
+8.1 当前真实用户现象
+
+点击 rollback 后：
+
+另一个 rollback/redo 相关按钮会闪烁或改变状态
+
+但编辑器数据没有观察到任何变化。
+
+这说明：
+
+UI/history state 变化
+
+不能证明
+
+domain authority 真的变化。
+
+因此任何只测按钮 enable/disable、history cursor、toast 的测试都不算通过。
+
+8.2 强制做一次真实 writable mod overlay 闭环
+
+禁止写 vanilla 游戏文件。
+
+必须选择 mod overlay writable target。
+
+选择一个易于读取的真实资源字段。
+
+执行：
+
+PRE
+
+使用 native/fresh authority reader 读取值 A。
+
+不能从当前 editor React state 读。
+
+不能从可能 stale 的 document cache 读。
+
+然后修改：
+
+A → B。
+
+commit。
+
+POST_COMMIT：
+
+强制重新打开物理 overlay 文件。
+
+读取 authority。
+
+必须得到 B。
+
+然后 rollback。
+
+POST_ROLLBACK：
+
+再次 fresh reopen。
+
+必须得到 A。
+
+最后：
+
+让 WorkspaceIndex / editor document / renderer 正常重新读取。
+
+UI 必须显示 A。
+
+8.3 三层结果分别记录
+
+必须明确区分：
+
+disk/native fresh authority
+workspace/index/document semantic state
+renderer/UI state
+
+如果：
+
+native=A
+
+workspace=A
+
+UI=B
+
+则是 renderer invalidation First Bad。
+
+如果：
+
+native=A
+
+workspace=B
+
+UI=B
+
+则是 index/document invalidation First Bad。
+
+如果：
+
+native=B
+
+rollback 却报告 success
+
+则 rollback/transaction First Bad。
+
+如果：
+
+transaction 写入成功
+
+但 fresh native reopen 得到非法/不一致语义
+
+则是 semantic post-commit verification gap。
+
+不要把三种情况混在一起。
+
+8.4 rollback 成功后必须刷新正确 scope
+
+已知过去 operation-level rollback 有重新打开当前资源路径。
+
+file-level rollback 可能缺少同等 invalidation/reopen。
+
+只针对真实缺口修。
+
+不要因为 file-level stale 就把所有 rollback 路径全部重写。
+
+九、ROLLBACK 文案必须与真实机制一致
+
+当前 UI 出现语义冲突：
+
+一处表达类似：
+
+“逐个逆向应用事务”
+
+另一处表达类似：
+
+“基于历史快照恢复”
+
+如果真实机制是：
+
+历史 operation 保存 before state / backup
+→ 根据它构造 inverse transaction
+→ inverse 继续通过正式 Patch Engine 写入
+
+则 UI 不要同时把它描述成两个完全不同的系统。
+
+统一表达为类似：
+
+“根据历史事务保存的修改前状态生成逆操作，并通过 Patch Engine 重新应用。”
+
+具体中文由前端 Agent决定。
+
+后端 Agent只需要明确实际机制，给前端提供唯一语义来源。
+
+十、MAP：禁止重新修改已关闭的 FaceSet native geometry 修复
+
+旧 MAP native First Bad 已经真实验证：
+
+前 80 个模型：
+
+61/80 原来正常
+
+19/80 因没有 Flags == 0 FaceSet 失败
+
+修复 SelectDisplayFaceSet 后：
+
+80/80 成功
+
+61/61 无回归
+
+19/19 恢复非空 geometry。
+
+这个问题已经关闭。
+
+不要再改：
+
+FlverNativeDocument.cs
+
+相关 FaceSet selection
+
+LOD1/LOD2 fallback
+
+除非你拿到了新的独立 native corpus 失败证据。
+
+现在用户仍看到 proxy cube。
+
+这是一个新的 runtime/UI First Bad。
+
+十一、MAP：检查真实 mesh 是否也撞上大 payload transport
+
+这是当前“高价值假设”，但尚未像 ACTION 一样有直接错误文本证明。
+
+因此必须取证，不允许直接假设。
+
+追踪：
+
+MSB part
+→ readMapPartMesh
+→ Bridge
+→ mesh payload
+→ desktop IPC
+→ renderer
+→ proxy replacement。
+
+记录真实一个成功模型和一个仍显示 cube 的模型。
+
+分别记录：
+
+part model name
+mapbnd / resource path
+FLVER resolve 是否成功
+vertex count
+index count
+Bridge serialized bytes
+command 是否 success
+renderer 是否收到结果
+Three.js/scene geometry 是否建立
+proxy 是否删除/隐藏
+
+如果 MAP mesh 同样超过 framed RPC：
+
+复用与 ACTION 相同的大 payload file-backed 基础设施。
+
+不要单独给 MAP 再造另一套文件协议。
+
+如果 Bridge 成功返回 mesh，但 UI 仍 cube：
+
+到这里停止改 Bridge。
+
+把完整诊断交给前端 Agent处理 renderer replacement。
+
+十二、MAP 前端交互：Transform 必须是一体式 Universal Gizmo
+
+这一项属于前端修改。
+
+如果你是后端/主链 Agent：
+
+只定位当前 transform 数据 contract，不要擅自重做 renderer UI。
+
+需要给前端 Agent说明当前：
+
+position
+
+rotation
+
+scale
+
+transaction/write
+
+分别如何提交。
+
+前端最终目标不是三个互斥按钮：
+
+移动
+
+旋转
+
+缩放
+
+当前这三个互斥按钮应移除。
+
+选中对象后默认显示一个统一：
+
+Universal Transform Gizmo
+
+同一 Gizmo 中同时存在：
+
+translation axes/planes
+rotation rings
+scale handles
+
+用户点击不同 handle 自然决定当前操作。
+
+不应为了移动一下对象：
+
+先点“移动”。
+
+转一下：
+
+再点“旋转”。
+
+缩一下：
+
+再点“缩放”。
+
+底层数据仍然分别是：
+
+position
+
+rotation
+
+scale。
+
+统一的是交互，不是数据字段。
+
+如果已有：
+
+transformMode = translate | rotate | scale
+
+不要为了保留旧 UI 把 Universal Gizmo 外面再套三个主要按钮。
+
+可以保留：
+
+G / R / S
+
+或类似快捷键作为高级临时模式。
+
+但主 UI 默认应为 Universal。
+
+十三、设置页出现自相矛盾状态
+
+真实 UI 已出现：
+
+“原版游戏目录”
+
+下面显示：
+
+“未挂载”
+
+右侧同时显示绿色：
+
+“已挂载”
+
+这是确定的 UI 状态一致性 bug。
+
+不要单纯把其中一行文字硬改成另一行。
+
+先搜索实际字符串：
+
+未挂载
+
+已挂载
+
+原版游戏目录
+
+找到两处状态分别来源。
+
+确认它们是否分别表示：
+
+路径是否已配置
+
+目录是否存在
+
+资源是否挂载到 workspace
+
+index 是否 ready
+
+如果实际上是两个不同概念：
+
+必须重新命名，使用户不会理解为同一个 boolean。
+
+例如不要同时用：
+
+“未挂载”
+
+“已挂载”
+
+表达：
+
+“当前 workspace 未启用”
+
+和
+
+“目录路径有效”。
+
+如果它们理论上应该是同一个状态：
+
+统一到一个 authoritative selector/state。
+
+禁止两个组件各自推导。
+
+这一项交给前端 Agent实现，但主 Agent应提供实际 backend state 语义。
+
+十四、不要把 governance / capability flag 当完成功能证据
+
+如果 capability contract 里出现：
+
+releaseWriteEnabled: true
+
+deferredPreview: null
+
+之类声明：
+
+它不能证明功能已经真实可用。
+
+真实 Electron：
+
+动作不播放
+
+Bridge 报 frame limit
+
+就说明 runtime contract 还没满足。
+
+不要因为某个 capability JSON 说 release-ready 就跳过真实验收。
+
+测试必须证明行为，不是证明 flag。
+
+十五、测试要求：必须堵死常见假绿路径
+
+ACTION 不能只测：
+
+一个 animId
+
+一个 synthetic binder
+
+一个 mock Bridge result。
+
+必须至少证明：
+
+同一 TAE 两个动作
+
+不同 motionAnimId
+
+不同 binder entry
+
+正确 container
+
+真实 HKX
+
+真实 pose change
+
+Electron 播放。
+
+PARAM 不能只测：
+
+返回 500 rows。
+
+必须证明：
+
+首屏前没有 decode 全部 rows。
+
+ROLLBACK 不能只测：
+
+transaction 返回 success
+
+history cursor 更新
+
+按钮 enable 状态改变。
+
+必须证明：
+
+fresh native authority A→B→A
+
+workspace A→B→A
+
+UI A→B→A。
+
+MAP 不能只测：
+
+Bridge 返回 non-empty geometry。
+
+必须证明：
+
+Electron scene 中 proxy cube 被真实 geometry 替换。
+
+如果由于环境条件暂时无法跑 Electron：
+
+明确写：
+
+NOT VERIFIED
+
+不能写：
+
+PASS
+
+不能用 unit smoke 代替 Electron PASS。
+
+十六、施工顺序固定，不要自行重排
+
+按以下顺序执行：
+
+定位 ACTION frame-size 实际超限 command。
+把 ACTION 大 payload 接入已有 file-backed transport。
+修 taeMotionIdentityCache cache identity。
+跑双动作真实 ACTION resolver 验证。
+完成真实 Electron 动作播放。
+如果之后 duplicate bone mapping 才真正成为 blocker，再做 hierarchy identity。
+对 PARAM 做 cold-open profiling。
+消除 session open 前不必要的 full parse / full roundtrip 阻塞。
+做 PARAM 真 lazy row decode 验证。
+做 ROLLBACK overlay A→B→A 三层 authority 闭环。
+仅根据闭环结果修 transaction 或 invalidation。
+追 MAP readMapPartMesh → renderer 链。
+证明 MAP 是否也存在大 payload frame blocker。
+后端将 MAP renderer 结果和 transform contract 交给前端 Agent。
+前端再完成 Universal Transform Gizmo、proxy replacement 和设置状态文案一致性。
+
+不要同时在四个系统里大面积重构。
+
+每解决一个 First Bad 就重新跑真实链。
+
+不要因为“后面肯定还有问题”一次性把所有代码重写。
+
+十七、每完成一个阶段必须留下证据
+
+不要只回复：
+
+“已修复。”
+
+每阶段结束必须记录：
+
+修改文件
+
+实际 First Bad
+
+为什么旧逻辑错
+
+新逻辑为什么能解决
+
+真实测试数据
+
+测试命令
+
+关键运行结果
+
+仍未验证的部分。
+
+尤其 ACTION 必须最终给出类似这样的真实证据链，但数字必须来自实际运行，不得照抄：
+
+animId A
+→ motionAnimId X
+→ binderEntry 1_000_000_000 + X
+→ container P
+→ HKX clip
+→ duration D
+→ N mapped bones
+→ t0 pose
+→ t1 pose
+→ M bones changed
+→ Electron visible motion PASS。
+
+PARAM 必须给出：
+
+修复前：
+
+request → first rows = ... ms
+
+decoded rows before first paint = ...
+
+first response bytes = ...
+
+修复后同样数据。
+
+ROLLBACK 必须给出：
+
+PRE native = A
+
+POST_COMMIT native = B
+
+POST_ROLLBACK native = A
+
+workspace readback = A
+
+UI readback = A
+
+MAP 必须给出至少一个真实 part：
+
+proxy created
+
+→ mesh resolve success
+
+→ mesh payload delivered
+
+→ BufferGeometry created
+
+→ proxy removed
+
+→ Electron screenshot / runtime evidence。
+
+十八、最终禁止事项
+
+不要：
+
+修改 ACTION 的 1e9 + motionAnimId 规则。
+
+不要：
+
+给 c0000 animation container 写特判。
+
+不要：
+
+根据 aXXX 文件名范围猜动作。
+
+不要：
+
+随机 sibling 扫描并取第一个。
+
+不要：
+
+duplicate bone 直接取第一个。
+
+不要：
+
+用提高 Bridge frame limit 掩盖大 payload 架构问题。
+
+不要：
+
+为了 PARAM metadata 回退调用 loadAll=true。
+
+不要：
+
+新增第三套 PARAM API。
+
+不要：
+
+在没有新 native 证据时重新修改 MAP FaceSet 修复。
+
+不要：
+
+因为 rollback UI 按钮发生变化就判定 rollback 成功。
+
+不要：
+
+用 capability flag / smoke test 宣布 Electron 功能完成。
+
+不要：
+
+为了让测试通过减少真实断言。
+
+给前端 Agent 的独立施工任务如下。
+
+它只处理已经明确属于 renderer/UI 的问题，不重新研究 ACTION native parser、PARAM parser 或 rollback transaction engine。
+
+首先处理 MAP Universal Transform。
+
+搜索：
+
+移动
+
+旋转
+
+缩放
+
+以及当前 transform mode / gizmo component。
+
+删除主界面三个互斥的移动、旋转、缩放模式按钮。
+
+默认选中地图对象时直接启用 Universal Transform Gizmo。
+
+同一个 gizmo 同时提供 translation、rotation、scale handle。
+
+拖动 translation handle 时只能修改 position。
+
+拖动 rotation handle 时只能修改 rotation。
+
+拖动 scale handle 时只能修改 scale。
+
+继续复用现有 transaction/write pipeline。
+
+禁止因为 UI 合并而绕开正式 transaction engine。
+
+一次完整 drag gesture 应形成合理的单次 edit/transaction，不要 pointermove 每一帧制造几十条独立历史记录。
+
+如果已有 drag begin/update/end 生命周期：
+
+复用它。
+
+快捷键 G/R/S 可以继续作为效率模式，但不要再让三个按钮成为默认主要入口。
+
+其次处理 MAP proxy replacement。
+
+后端 Agent会提供：
+
+某个真实 part 的 mesh resolve 结果
+
+Bridge/file-backed delivery 情况
+
+renderer 实际收到的数据。
+
+如果 renderer 已经收到有效 mesh：
+
+追踪 proxy entity 和真实 geometry entity 的生命周期。
+
+真实 mesh ready 后：
+
+必须 atomically 替换 proxy。
+
+不得：
+
+真实 mesh 和 cube 重叠存在
+
+mesh 成功但 cube 不移除
+
+切换地图后旧 mesh 泄漏
+
+资源 reload 后继续显示旧 proxy。
+
+加载过程中可以显示 proxy。
+
+真实 geometry READY 后必须消失。
+
+真实 geometry FAILED 时可以保留 proxy，但必须有明确 diagnostic reason。
+
+禁止把所有失败静默表现成一个方块，让用户无法知道：
+
+resource missing
+
+parse failed
+
+transport failed
+
+renderer failed
+
+分别是哪一种。
+
+然后处理 rollback UI readback。
+
+后端完成 rollback 后如果 authority 已经恢复：
+
+前端必须 invalidate/reopen 当前受影响 editor。
+
+如果当前资源就是 rollback target：
+
+刷新 document。
+
+如果当前资源不受影响：
+
+不要全局把所有 editor 都重载。
+
+不得只刷新 history panel。
+
+必须保证用户看到的字段恢复。
+
+Undo/redo button enabled 状态必须来自真实 history authority，而不是局部临时 optimistic state。
+
+transaction 失败时：
+
+不得提前移动 history cursor。
+
+不得先闪按钮再悄悄失败。
+
+最后修设置页矛盾：
+
+“原版游戏目录”
+
+下面的“未挂载”
+
+和右侧绿色“已挂载”
+
+不能同时出现。
+
+先确认两个值的 backend 语义。
+
+如果一个表示：
+
+directory configured
+
+另一个表示：
+
+workspace mounted
+
+就把文字改成两个明确不同概念，例如：
+
+“目录已配置”
+
+“尚未载入工作区”
+
+不能继续都叫“挂载”。
+
+如果它们其实应该表示同一状态：
+
+使用单一 authoritative state。
+
+不要在两个 React component 中分别推导。
+
+前端验收必须使用真实应用操作，而不是 snapshot test：
+
+打开 Settings：
+
+同一目录状态不得出现逻辑矛盾。
+
+打开 MAP：
+
+选中实体后无需先点移动/旋转/缩放。
+
+直接能从同一 Gizmo：
+
+移动
+
+旋转
+
+缩放。
+
+每种操作提交后重新读取 entity transform，数值正确。
+
+Undo：
+
+恢复。
+
+Redo：
+
+恢复修改。
+
+关闭地图重新打开：
+
+修改结果与 transaction 状态一致。
+
+最后，不要擅自美化其他 UI。
+
+本轮前端改动只围绕：
+
+Universal Transform Gizmo
+
+MAP real-mesh replacement
+
+rollback readback/invalidation
+
+Settings mount-state consistency。
+
+不要顺手重新设计整个编辑器。

@@ -204,11 +204,12 @@ describe('Negative source tests（MAP-50B 五类覆盖）', () => {
     assert.doesNotMatch(html, /ΔX|rotX|scaleX/);
   });
 
-  it('面板不渲染数值微调输入；只提供真实 Gizmo 模式控件', () => {
+  it('面板不渲染数值微调输入；默认使用一体式 Universal Gizmo', () => {
     const html = render();
     assert.doesNotMatch(html, /type="number"/);
-    assert.match(html, /aria-label="变换模式"/);
-    assert.match(html, />移动<|>旋转<|>缩放</);
+    assert.doesNotMatch(html, /aria-label="变换模式"/);
+    assert.doesNotMatch(html, />移动<|>旋转<|>缩放</);
+    assert.match(html, /Universal Gizmo/);
   });
 
   it('视口状态不再写「无绝对路径」', () => {

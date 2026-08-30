@@ -89,6 +89,46 @@ internal sealed class BridgeCommandService
             return boundary.CanonicalPath;
         }
 
+        int[]? OptionIntArray(string name)
+        {
+            if (!optionsIsObject || !options.TryGetProperty(name, out var element)
+                || element.ValueKind != JsonValueKind.Array) return null;
+            return element.EnumerateArray()
+                .Select(item => item.TryGetInt32(out var value) ? value : int.MinValue)
+                .ToArray();
+        }
+
+        BoneTransform[]? OptionBoneTransforms(string name)
+        {
+            if (!optionsIsObject || !options.TryGetProperty(name, out var element)
+                || element.ValueKind != JsonValueKind.Array) return null;
+            var result = new List<BoneTransform>();
+            foreach (var item in element.EnumerateArray())
+            {
+                if (item.ValueKind != JsonValueKind.Object)
+                    throw new InvalidDataException($"ACTION_BONE_REFERENCE_POSE_INVALID: options.{name} contains a non-object entry.");
+                static float[] ReadVector(JsonElement owner, string property, int length)
+                {
+                    if (!owner.TryGetProperty(property, out var value) || value.ValueKind != JsonValueKind.Array)
+                        throw new InvalidDataException($"ACTION_BONE_REFERENCE_POSE_INVALID: missing {property}.");
+                    var values = value.EnumerateArray()
+                        .Select(element => element.TryGetSingle(out var number) ? number : float.NaN)
+                        .ToArray();
+                    if (values.Length != length || values.Any(number => !float.IsFinite(number)))
+                        throw new InvalidDataException($"ACTION_BONE_REFERENCE_POSE_INVALID: {property} must contain {length} finite values.");
+                    return values;
+                }
+                var translation = ReadVector(item, "translation", 3);
+                var rotation = ReadVector(item, "rotation", 4);
+                var scale = ReadVector(item, "scale", 3);
+                result.Add(new BoneTransform(
+                    new Vector3(translation[0], translation[1], translation[2]),
+                    new Quaternion(rotation[0], rotation[1], rotation[2], rotation[3]),
+                    new Vector3(scale[0], scale[1], scale[2])));
+            }
+            return result.ToArray();
+        }
+
         var resourceKind = command switch
         {
             "export-event" => "event",
@@ -394,6 +434,7 @@ internal sealed class BridgeCommandService
                     }
                     if (list.Count > 0) rowSelections = list;
                 }
+                var preferLazySession = includeRowPayloads == false || rowSelections is not null;
                 // session-aware: try token first, else open/get by key (single parse)
                 ParamDocumentSessionCache.Entry entry;
                 string sessionToken;
@@ -411,10 +452,8 @@ internal sealed class BridgeCommandService
                 }
                 else
                 {
-                    entry = ParamDocumentSessionCache.GetOrOpen(file, workspaceSessionId ?? string.Empty, oodleRuntimeRoot, pathSourceGeneration, expectedRowDataSize, entryIdentity, out sessionToken, out isNewSession, out curSourceHash);
+                    entry = ParamDocumentSessionCache.GetOrOpen(file, workspaceSessionId ?? string.Empty, oodleRuntimeRoot, pathSourceGeneration, expectedRowDataSize, entryIdentity, preferLazySession, out sessionToken, out isNewSession, out curSourceHash);
                 }
-                var document = entry.Document;
-                var roundTrip = entry.RoundTrip;
                 // B4 slim: rowSelections path — validates physical identity, no partial success
                 if (rowSelections is not null)
                 {
@@ -428,20 +467,20 @@ internal sealed class BridgeCommandService
                     if (includeRowPayloads == false)
                         return BridgeResult<object>.Failed(file, "param", "PARAM_ROW_IDENTITY_MISMATCH", "rowSelections 与 includeRowPayloads=false 不兼容。");
                     // validate all identities atomically before emitting any payload
+                    var index = entry.GetIndex();
                     var slimRows = new List<object>(rowSelections.Count);
                     foreach (var sel in rowSelections)
                     {
-                        if (sel.rowIndex < 0 || sel.rowIndex >= document.Rows.Count)
-                            return BridgeResult<object>.Failed(file, "param", "PARAM_ROW_IDENTITY_MISMATCH", $"物理行索引 {sel.rowIndex} 越界（rowCount={document.Rows.Count}）。");
-                        var actual = document.Rows[sel.rowIndex];
+                        if (sel.rowIndex < 0 || sel.rowIndex >= index.Rows.Count)
+                            return BridgeResult<object>.Failed(file, "param", "PARAM_ROW_IDENTITY_MISMATCH", $"物理行索引 {sel.rowIndex} 越界（rowCount={index.Rows.Count}）。");
+                        var actual = index.Rows[sel.rowIndex];
                         if (actual.Id != sel.expectedId)
                             return BridgeResult<object>.Failed(file, "param", "PARAM_ROW_IDENTITY_MISMATCH", $"行 {sel.rowIndex} 的 id 已变化：expected={sel.expectedId} actual={actual.Id}。");
-                        var actualHash = ParamNativeDocument.ComputeRowDataHash(actual.Data);
-                        if (!string.Equals(actualHash, sel.expectedDataHash, StringComparison.OrdinalIgnoreCase))
+                        if (!string.Equals(actual.DataHash, sel.expectedDataHash, StringComparison.OrdinalIgnoreCase))
                             return BridgeResult<object>.Failed(file, "param", "PARAM_ROW_IDENTITY_MISMATCH", $"行 {sel.rowIndex} 的 dataHash 已变化。");
-                        slimRows.Add(new { rowIndex = sel.rowIndex, id = actual.Id, name = actual.Name, dataBase64 = slimIncludePayload ? Convert.ToBase64String(actual.Data) : null, dataHash = actualHash });
+                        slimRows.Add(new { rowIndex = sel.rowIndex, id = actual.Id, name = actual.Name, dataBase64 = slimIncludePayload ? Convert.ToBase64String(index.ReadRowBytes(actual)) : null, dataHash = actual.DataHash });
                     }
-                    var slimEnvelope = new { format = "PARAM", typeName = document.TypeName, dataVersion = document.DataVersion, rowCount = document.Rows.Count, rowDataSize = document.RowDataSize, layout = document.Layout == ParamLayout.Standard32 ? "standard-32" : "long-64", sourceSize = document.SourceBytes.Length, sourceHash = document.SourceHash, rows = slimRows.ToArray(), payloadsIncluded = slimIncludePayload, sessionToken, workspaceSessionId, sourceHash2 = curSourceHash, pathSourceGeneration, correlationId };
+                    var slimEnvelope = new { format = "PARAM", typeName = index.TypeName, dataVersion = index.DataVersion, rowCount = index.Rows.Count, rowDataSize = index.RowDataSize, layout = index.Layout == ParamLayout.Standard32 ? "standard-32" : "long-64", sourceSize = index.SourceBytes.Length, sourceHash = index.SourceHash, rows = slimRows.ToArray(), payloadsIncluded = slimIncludePayload, sessionToken, workspaceSessionId, sourceHash2 = curSourceHash, pathSourceGeneration, correlationId };
                     var slimData = new Dictionary<string, object?>(StringComparer.Ordinal);
                     foreach (var p in slimEnvelope.GetType().GetProperties()) slimData[p.Name] = p.GetValue(slimEnvelope);
                     slimData["sessionToken"] = sessionToken;
@@ -453,11 +492,47 @@ internal sealed class BridgeCommandService
                     System.Threading.Interlocked.Add(ref BridgeTelemetry.ParamSerializedRowsCount, slimRows.Count);
                     var slimDiags = new List<Diagnostic>
                     {
-                        new Diagnostic(roundTrip.SemanticIdentical ? "info" : "error", roundTrip.SemanticIdentical ? "PARAM_DOCUMENT_ROUNDTRIP_SEMANTIC_VERIFIED" : "PARAM_DOCUMENT_ROUNDTRIP_FAILED", roundTrip.SemanticIdentical ? (roundTrip.ByteIdentical ? "PARAM 无修改往返字节级一致。" : "PARAM 无修改往返语义一致。") : "PARAM 无修改往返语义不一致。", BridgeResult<object>.MakeSourceUri(file), roundTrip),
+                        new Diagnostic("info", "PARAM_ROW_PAYLOAD_READ", $"已按物理身份读取 {slimRows.Count} 行 payload；未 materialize 其余行。", BridgeResult<object>.MakeSourceUri(file), new { selectedRows = slimRows.Count, rowCount = index.Rows.Count }),
                         new Diagnostic("info", "PARAM_DOCUMENT_SESSION", $"session {sessionToken} gen {pathSourceGeneration} parse {(isNewSession?1:0)}", BridgeResult<object>.MakeSourceUri(file), new { sessionToken, workspaceSessionId, sourceHash = curSourceHash, pathSourceGeneration, entryIdentity, correlationId, isNewSession, telemetry = BridgeTelemetry.Snapshot() })
                     };
                     return BridgeResult<object>.Partial(file, "param", slimDiags.ToArray(), slimData);
                 }
+                if (includeRowPayloads == false)
+                {
+                    var index = entry.GetIndex();
+                    if (rowPageSize == 0 && (OptionBool("isPageRequest", false) || rowPage > 0))
+                        rowPageSize = 20;
+                    var lazyIncludeHashes = includeRowHashes;
+                    if (!optionsIsObject || !options.TryGetProperty("includeRowHashes", out _))
+                        lazyIncludeHashes = true;
+                    var lazyEnvelope = index.ToEnvelope(
+                        rowPage: rowPage,
+                        rowPageSize: rowPageSize,
+                        rowIds: rowIds,
+                        includeRowHashes: lazyIncludeHashes,
+                        includePayloads: false);
+                    if (lazyEnvelope is not Dictionary<string, object?> lazyEnvelopeDictionary)
+                        throw new InvalidDataException("PARAM_INDEX_PROJECTION_INVALID: native lazy index envelope is not a dictionary.");
+                    var lazyResponseData = new Dictionary<string, object?>(lazyEnvelopeDictionary, StringComparer.Ordinal);
+                    lazyResponseData["sessionToken"] = sessionToken;
+                    lazyResponseData["workspaceSessionId"] = workspaceSessionId;
+                    lazyResponseData["sourceHash"] = curSourceHash;
+                    lazyResponseData["pathSourceGeneration"] = pathSourceGeneration;
+                    lazyResponseData["correlationId"] = correlationId;
+                    lazyResponseData["telemetry"] = BridgeTelemetry.Snapshot();
+                    var rowsInIndex = index.Rows.Count;
+                    if (lazyEnvelope.GetType().GetProperty("returnedRowCount")?.GetValue(lazyEnvelope) is int returnedRows)
+                        rowsInIndex = returnedRows;
+                    System.Threading.Interlocked.Add(ref BridgeTelemetry.ParamSerializedRowsCount, rowsInIndex);
+                    var indexDiagnostics = new[]
+                    {
+                        new Diagnostic("info", "PARAM_INDEX_READY", $"已完成 PARAM 行目录验证并返回 {rowsInIndex}/{index.Rows.Count} 行索引；未读取行 payload。", BridgeResult<object>.MakeSourceUri(file), new { rowCount = index.Rows.Count, returnedRows = rowsInIndex, telemetry = BridgeTelemetry.Snapshot() }),
+                        new Diagnostic("info", "PARAM_DOCUMENT_SESSION", $"session {sessionToken} gen {pathSourceGeneration} parse {(isNewSession?1:0)}", BridgeResult<object>.MakeSourceUri(file), new { sessionToken, workspaceSessionId, sourceHash = curSourceHash, pathSourceGeneration, entryIdentity, correlationId, isNewSession, telemetry = BridgeTelemetry.Snapshot() })
+                    };
+                    return BridgeResult<object>.Partial(file, "param", indexDiagnostics, lazyResponseData);
+                }
+                var document = entry.GetDocument();
+                var roundTrip = entry.GetRoundTrip();
                 // Slim index: includeRowPayloads == false forces no payload regardless of budget
                 bool forceSlimIndex = includeRowPayloads == false;
                 // page projection defaults to 20 rows when caller asks for page without explicit size
@@ -1166,6 +1241,8 @@ internal sealed class BridgeCommandService
                         .Select(e => e.GetString()!)
                         .ToArray();
                 }
+                var flverBoneParents = OptionIntArray("flverBoneParents");
+                var flverReferencePose = OptionBoneTransforms("flverReferencePose");
 
                 var animationContainerPath = OptionPath("animationContainerPath", file);
                 var skeletonContainerPath = OptionPath("skeletonContainerPath", file);
@@ -1180,10 +1257,17 @@ internal sealed class BridgeCommandService
                 _ = new HkxContinuousSampler(skeleton, animation, binding);
 
                 var hkxBoneNames = skeleton.Bones.Select(b => b.Name).ToArray();
+                var hkxParentIndices = skeleton.ParentIndices.Select(index => (int)index).ToArray();
                 int[]? hkxToFlverMap = null;
                 if (flverBoneNames != null && flverBoneNames.Length > 0)
                 {
-                    hkxToFlverMap = ActionAnimationSemantics.BuildHkxToFlverBoneMap(hkxBoneNames, flverBoneNames);
+                    hkxToFlverMap = flverBoneParents is null
+                        ? ActionAnimationSemantics.BuildHkxToFlverBoneMap(hkxBoneNames, flverBoneNames)
+                        : ActionAnimationSemantics.BuildHkxToFlverBoneMap(
+                            hkxBoneNames,
+                            hkxParentIndices,
+                            flverBoneNames,
+                            flverBoneParents);
                 }
 
                 int frameCount = animation is HkxSplineCompressedAnimation sc ? sc.NumFrames : (animation is HkxInterleavedAnimation ia ? ia.NumFrames : 0);
@@ -1195,6 +1279,38 @@ internal sealed class BridgeCommandService
                     rotation = new[] { t.Rotation.X, t.Rotation.Y, t.Rotation.Z, t.Rotation.W },
                     scale = new[] { t.Scale.X, t.Scale.Y, t.Scale.Z }
                 }).ToArray();
+
+                var hkxForensicNodes = skeleton.Bones.Select((bone, index) =>
+                {
+                    var transform = index < skeleton.Transforms.Count ? skeleton.Transforms[index] : default;
+                    return new ActionAnimationSemantics.BoneIdentityNode(
+                        index,
+                        bone.Name,
+                        index < hkxParentIndices.Length ? hkxParentIndices[index] : -1,
+                        new[] { transform.Translation.X, transform.Translation.Y, transform.Translation.Z },
+                        new[] { transform.Rotation.X, transform.Rotation.Y, transform.Rotation.Z, transform.Rotation.W },
+                        new[] { transform.Scale.X, transform.Scale.Y, transform.Scale.Z });
+                }).ToArray();
+                var duplicateHkxForensics = ActionAnimationSemantics.BuildDuplicateBoneForensics(hkxForensicNodes);
+                var duplicateFlverForensics = Array.Empty<object>();
+                if (flverBoneNames is not null && flverBoneParents is not null
+                    && flverBoneParents.Length == flverBoneNames.Length)
+                {
+                    duplicateFlverForensics = ActionAnimationSemantics.BuildDuplicateBoneForensics(
+                        flverBoneNames.Select((name, index) =>
+                        {
+                            var transform = flverReferencePose is not null && index < flverReferencePose.Length
+                                ? flverReferencePose[index]
+                                : default;
+                            return new ActionAnimationSemantics.BoneIdentityNode(
+                                index,
+                                name,
+                                flverBoneParents[index],
+                                new[] { transform.Translation.X, transform.Translation.Y, transform.Translation.Z },
+                                new[] { transform.Rotation.X, transform.Rotation.Y, transform.Rotation.Z, transform.Rotation.W },
+                                new[] { transform.Scale.X, transform.Scale.Y, transform.Scale.Z });
+                        }).ToArray());
+                }
 
                 var diagnostics = new List<Diagnostic>
                 {
@@ -1210,6 +1326,20 @@ internal sealed class BridgeCommandService
                         "当前 clip 只返回 local skeletal pose；未实现 hkaDefaultAnimatedReferenceFrame/root motion 提取。",
                         BridgeResult<object>.MakeSourceUri(file))
                 };
+                if (duplicateHkxForensics.Length > 0 || duplicateFlverForensics.Length > 0)
+                {
+                    diagnostics.Add(new Diagnostic(
+                        "warning",
+                        "ACTION_DUPLICATE_BONE_FORENSICS",
+                        "检测到真实骨骼重复名；映射仅使用 name + parent/hierarchy identity，无法证明唯一时保持 fail-closed。",
+                        BridgeResult<object>.MakeSourceUri(file),
+                        new
+                        {
+                            hkx = duplicateHkxForensics,
+                            flver = duplicateFlverForensics,
+                            mappingPolicy = "name+parent+full-hierarchy; no first/lowest/closest fallback"
+                        }));
+                }
 
                 object? splineBlocksData = null;
                 object? interleavedTransformsData = null;
@@ -1350,6 +1480,7 @@ internal sealed class BridgeCommandService
                         .Select(e => e.GetString()!)
                         .ToArray();
                 }
+                var flverBoneParents = OptionIntArray("flverBoneParents");
 
                 var animationContainerPath = OptionPath("animationContainerPath", file);
                 var skeletonContainerPath = OptionPath("skeletonContainerPath", file);
@@ -1363,7 +1494,14 @@ internal sealed class BridgeCommandService
 
                 if (flverBoneNames != null && flverBoneNames.Length > 0)
                 {
-                    var hkxToFlver = ActionAnimationSemantics.BuildHkxToFlverBoneMap(hkxBoneNames, flverBoneNames);
+                    var hkxParentIndices = skeleton.ParentIndices.Select(index => (int)index).ToArray();
+                    var hkxToFlver = flverBoneParents is null
+                        ? ActionAnimationSemantics.BuildHkxToFlverBoneMap(hkxBoneNames, flverBoneNames)
+                        : ActionAnimationSemantics.BuildHkxToFlverBoneMap(
+                            hkxBoneNames,
+                            hkxParentIndices,
+                            flverBoneNames,
+                            flverBoneParents);
 
                     // Build FLVER default reference pose
                     var flverRefPose = new BoneTransform[flverBoneNames.Length];

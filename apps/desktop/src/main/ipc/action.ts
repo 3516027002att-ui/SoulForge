@@ -3,10 +3,12 @@ import { lstat, readdir } from 'node:fs/promises';
 import { basename, dirname, isAbsolute, join, relative as relativePath, resolve, sep } from 'node:path';
 import {
   ingestBridgeResult,
+  ActionMotionIdentityCache,
   readTaeEventTemplateFile,
   remapCharacterBundleToLeader,
-  resolveBinderMembership,
   runBridge,
+  type BinderMembershipMatch,
+  type BinderMembershipCandidate,
   type TaeEventTemplateInfo,
   type WorkspaceIndex,
   type WorkspaceSession
@@ -330,7 +332,7 @@ function actionPathsEqual(left: string, right: string): boolean {
   return resolve(left).toLowerCase() === resolve(right).toLowerCase();
 }
 
-function actionEffectiveBaseRoot(session: WorkspaceSession): string | null {
+export function resolveActionEffectiveBaseRoot(session: WorkspaceSession): string | null {
   const explicit = session.layers.baseRoot?.trim();
   if (explicit && !actionPathsEqual(explicit, session.layers.overlayRoot)) return resolve(explicit);
   const overlayParent = dirname(session.layers.overlayRoot);
@@ -359,6 +361,78 @@ function actionCatalogRevisionKey(
 
 function actionBinderIdentityUri(candidate: ActionBinderCandidate): string {
   return `action-binder://${candidate.origin}/${candidate.relativePath.replace(/\\/g, '/')}`;
+}
+
+function actionBinderCandidateFromMembership(input: {
+  match: BinderMembershipMatch;
+  session: WorkspaceSession;
+  effectiveBase: string | null;
+}): { ok: true; candidate: ActionBinderCandidate } | { ok: false; diagnostic: Diagnostic } {
+  const sourcePath = typeof input.match.sourcePath === 'string'
+    ? input.match.sourcePath.replace(/\\/g, '/')
+    : '';
+  const sourceLayer = input.match.sourceLayer;
+  const origin = sourceLayer === 'overlay' || sourceLayer === 'base' ? sourceLayer : null;
+  const sourceRevision = typeof input.match.sourceRevision === 'string'
+    ? input.match.sourceRevision
+    : '';
+  const separator = sourceRevision.indexOf('|');
+  const physicalRevisionKey = separator > 0 ? sourceRevision.slice(0, separator) : '';
+  const catalogRevisionKey = separator > 0 ? sourceRevision.slice(separator + 1) : '';
+  const root = origin === 'overlay'
+    ? input.session.layers.overlayRoot
+    : origin === 'base'
+      ? input.effectiveBase
+      : null;
+  const relativeSegments = sourcePath.split('/');
+  const safeRelative = Boolean(sourcePath)
+    && relativeSegments.every((segment) => segment.length > 0 && segment !== '.' && segment !== '..')
+    && relativeSegments[0]?.toLowerCase() === 'chr';
+  if (!root || !origin || !safeRelative || !physicalRevisionKey || !catalogRevisionKey) {
+    return {
+      ok: false,
+      diagnostic: actionDiagnostic(
+        'ACTION_BINDER_MEMBERSHIP_INDEX_INVALID',
+        'WorkspaceIndex 返回的 Binder source identity 不完整，已拒绝从缓存重建容器路径。',
+        input.match.sourceUri,
+        { sourcePath, sourceLayer, hasRevision: Boolean(sourceRevision) }
+      )
+    };
+  }
+  const absolutePath = resolve(join(root, ...relativeSegments));
+  if ((origin === 'overlay' && !input.session.isOverlayPath(absolutePath))
+    || (origin === 'base' && !input.session.isBasePath(absolutePath) && !actionPathInsideRoot(root, absolutePath))) {
+    return {
+      ok: false,
+      diagnostic: actionDiagnostic(
+        'ACTION_BINDER_MEMBERSHIP_INDEX_INVALID',
+        'WorkspaceIndex 返回的 Binder source path 越过当前会话 root，已拒绝读取。',
+        input.match.sourceUri,
+        { sourcePath, sourceLayer }
+      )
+    };
+  }
+  const candidate: ActionBinderCandidate = {
+    origin,
+    name: basename(sourcePath),
+    relativePath: sourcePath,
+    absolutePath,
+    revisionKey: sourceRevision,
+    physicalRevisionKey,
+    catalogRevisionKey
+  };
+  if (actionBinderIdentityUri(candidate) !== input.match.sourceUri) {
+    return {
+      ok: false,
+      diagnostic: actionDiagnostic(
+        'ACTION_BINDER_MEMBERSHIP_INDEX_INVALID',
+        'WorkspaceIndex Binder source URI 与 source path 不一致，已拒绝继续。',
+        input.match.sourceUri,
+        { sourcePath, sourceLayer }
+      )
+    };
+  }
+  return { ok: true, candidate };
 }
 
 async function readActionBinderDirectory(
@@ -569,6 +643,120 @@ async function readActionBinderDocument(input: {
   }
 }
 
+async function discoverActionCharacterFamilies(input: {
+  session: WorkspaceSession;
+  effectiveBase: string | null;
+  indexedFiles: readonly IndexedFile[];
+}): Promise<{ families: string[]; diagnostics: Diagnostic[] }> {
+  const families = new Set<string>();
+  const diagnostics: Diagnostic[] = [];
+  for (const file of input.indexedFiles) {
+    if (ACTION_ANIBND_FILE_PATTERN.test(file.relativePath)) {
+      const family = canonicalCharacterStemForActionPath(file.relativePath).toLowerCase();
+      if (ACTION_CHARACTER_FAMILY_PATTERN.test(family)) families.add(family);
+    }
+  }
+  const layers: Array<{ origin: 'overlay' | 'base'; root: string }> = [
+    { origin: 'overlay', root: input.session.layers.overlayRoot },
+    ...(input.effectiveBase ? [{ origin: 'base' as const, root: input.effectiveBase }] : [])
+  ];
+  for (const layer of layers) {
+    const directory = join(layer.root, 'chr');
+    try {
+      const entries = await readdir(directory, { withFileTypes: true });
+      for (const entry of entries) {
+        if (!entry.isFile() && !entry.isSymbolicLink()) continue;
+        if (!ACTION_ANIBND_FILE_PATTERN.test(entry.name)) continue;
+        const family = canonicalCharacterStemForActionPath(entry.name).toLowerCase();
+        if (ACTION_CHARACTER_FAMILY_PATTERN.test(family)) families.add(family);
+      }
+    } catch (error) {
+      if ((error as { code?: string }).code !== 'ENOENT') {
+        diagnostics.push(actionDiagnostic(
+          'ACTION_BINDER_INDEX_BUILD_FAILED',
+          `读取 ${layer.origin} 的 chr 目录失败，无法建立完整 ACTION Binder membership index。`,
+          `action-index://${layer.origin}/chr`,
+          { origin: layer.origin, errorName: error instanceof Error ? error.name : typeof error }
+        ));
+      }
+    }
+  }
+  return { families: [...families].sort(compareActionNames), diagnostics };
+}
+
+export interface ActionBinderMembershipIndexBuildResult {
+  ok: boolean;
+  characterFamilies: string[];
+  candidates: BinderMembershipCandidate[];
+  diagnostics: Diagnostic[];
+}
+
+/**
+ * Build the complete ACTION Binder membership projection during workspace
+ * indexing. The playback IPC path must consume this projection and must not
+ * enumerate sibling ANIBND files or parse membership on demand.
+ */
+export async function buildActionBinderMembershipIndex(input: {
+  session: WorkspaceSession;
+  sessionId: string;
+  effectiveBase: string | null;
+  indexedFiles: readonly IndexedFile[];
+  allowedRoots: readonly string[];
+}): Promise<ActionBinderMembershipIndexBuildResult> {
+  const discovered = await discoverActionCharacterFamilies(input);
+  const diagnostics = [...discovered.diagnostics];
+  const candidates: BinderMembershipCandidate[] = [];
+  const allowedRoots = [...input.allowedRoots];
+  appendActionAllowedRoot(allowedRoots, input.effectiveBase);
+
+  for (const characterFamily of discovered.families) {
+    const indexSourceUri = `action-index://${characterFamily}`;
+    const plan = await enumerateActionBinderCandidates({
+      session: input.session,
+      effectiveBase: input.effectiveBase,
+      characterFamily,
+      sourceUri: indexSourceUri,
+      indexedFiles: input.indexedFiles
+    });
+    diagnostics.push(...plan.diagnostics);
+    for (const candidate of plan.candidates) {
+      const sourceUri = actionBinderIdentityUri(candidate);
+      const read = await readActionBinderDocument({
+        candidate,
+        sourceUri,
+        allowedRoots,
+        effectiveBase: input.effectiveBase,
+        sessionId: input.sessionId
+      });
+      if (!read.ok) {
+        diagnostics.push(...read.diagnostics);
+        continue;
+      }
+      candidates.push({
+        characterFamily,
+        source: {
+          sourceUri,
+          sourcePath: candidate.relativePath,
+          sourceRevision: candidate.revisionKey,
+          sourceLayer: candidate.origin
+        },
+        entries: read.entries.map((entry) => ({
+          entryId: entry.id,
+          entryIndex: entry.index,
+          entryName: entry.name
+        }))
+      });
+    }
+  }
+
+  return {
+    ok: diagnostics.length === 0,
+    characterFamilies: discovered.families,
+    candidates,
+    diagnostics
+  };
+}
+
 function findIndexedActionMotionIdentity(
   index: WorkspaceIndex | null,
   sourceUri: string,
@@ -707,18 +895,10 @@ export function registerActionIpcHandlers(deps: ActionIpcDeps): void {
   const locateTaeTemplatePathSync = makeLocateTaeTemplatePathSync(deps);
   const loadTaeEventTemplate = makeLoadTaeEventTemplate(locateTaeTemplatePathSync);
 
-  // ACTION 的本地缓存只缓存「已由 Bridge 读取过的 BND4 membership」和
-  // 「已由 Bridge 读取过的 TAE motion identity」。缓存键绑定当前会话、两层
-  // root、文件物理 revision 与 indexed-file revision；任何一个边界变化都不能
-  // 把旧的容器关系带进新的工作区。
-  const binderMembershipCache = new Map<string, {
-    revisionKey: string;
-    promise: Promise<ActionBinderReadResult>;
-  }>();
-  const taeMotionIdentityCache = new Map<string, {
-    revisionKey: string;
-    promise: Promise<ActionMotionIdentityResult>;
-  }>();
+  // ACTION 的播放时缓存只缓存「已由 Bridge 读取过的 TAE motion identity」。
+  // Binder membership 属于 WorkspaceIndex 的建立期投影；播放 handler 不得
+  // 在这里临时枚举 sibling ANIBND 或读取 BND4。
+  const taeMotionIdentityCache = new ActionMotionIdentityCache<Promise<ActionMotionIdentityResult>>();
   let actionCacheScopeKey: string | null = null;
 
   const syncActionCacheScope = (session: WorkspaceSession, effectiveBase: string | null, sessionId: string): void => {
@@ -729,7 +909,6 @@ export function registerActionIpcHandlers(deps: ActionIpcDeps): void {
     ].join('|');
     if (actionCacheScopeKey === scopeKey) return;
     actionCacheScopeKey = scopeKey;
-    binderMembershipCache.clear();
     taeMotionIdentityCache.clear();
   };
 
@@ -752,9 +931,8 @@ export function registerActionIpcHandlers(deps: ActionIpcDeps): void {
     allowedRoots: string[];
     effectiveBase: string | null;
   }): Promise<ActionMotionIdentityResult> => {
-    const cacheKey = input.sourceUri;
-    const cached = taeMotionIdentityCache.get(cacheKey);
-    if (cached?.revisionKey === input.sourceRevisionKey) return cached.promise;
+    const cached = taeMotionIdentityCache.get(input.sourceUri, input.sourceRevisionKey, input.animId);
+    if (cached) return cached;
 
     const promise = (async (): Promise<ActionMotionIdentityResult> => {
       try {
@@ -861,9 +1039,9 @@ export function registerActionIpcHandlers(deps: ActionIpcDeps): void {
         };
       }
     })();
-    // Keeping the map by source URI ensures a revision change replaces, rather
-    // than reuses, a result.
-    taeMotionIdentityCache.set(cacheKey, { revisionKey: input.sourceRevisionKey, promise });
+    // Keep source URI, source revision, and selected animId in the identity;
+    // a TAE file is a multi-animation source and cannot cache one motion per URI.
+    taeMotionIdentityCache.set(input.sourceUri, input.sourceRevisionKey, input.animId, promise);
     return promise;
   };
 
@@ -925,13 +1103,13 @@ export function registerActionIpcHandlers(deps: ActionIpcDeps): void {
 
     const roots = await deps.verifiedReadRoots(session, dirname(sourcePath));
     if (roots.diagnostics.length > 0) return { ok: false, diagnostics: roots.diagnostics };
-    const effectiveBase = actionEffectiveBaseRoot(session);
+    const effectiveBase = resolveActionEffectiveBaseRoot(session);
     appendActionAllowedRoot(roots.allowedRoots, effectiveBase);
     if (deps.activeSession !== session || deps.activeWorkspaceSessionId !== sessionId) {
       return { ok: false, diagnostics: [sessionChangedDiagnostic(sourceUri)] };
     }
 
-    const characterFamily = canonicalCharacterStemForActionPath(file.relativePath);
+    const characterFamily = canonicalCharacterStemForActionPath(file.relativePath).toLowerCase();
     if (!ACTION_CHARACTER_FAMILY_PATTERN.test(characterFamily)) {
       return {
         ok: false,
@@ -961,65 +1139,22 @@ export function registerActionIpcHandlers(deps: ActionIpcDeps): void {
       return { ok: false, diagnostics: [sessionChangedDiagnostic(sourceUri)] };
     }
 
-    const plan = await enumerateActionBinderCandidates({
-      session,
-      effectiveBase,
-      characterFamily,
-      sourceUri,
-      indexedFiles: deps.indexedFiles
-    });
-    if (plan.diagnostics.length > 0) return { ok: false, diagnostics: plan.diagnostics };
-    if (plan.candidates.length === 0) {
+    const actionIndex = deps.activeIndex;
+    if (!actionIndex || !actionIndex.isActionBinderMembershipReady()) {
       return {
         ok: false,
         diagnostics: [actionDiagnostic(
-          'ACTION_BINDER_MEMBERSHIP_NOT_FOUND',
-          `同 character family ${characterFamily} 没有可读取的 ANIBND 候选，已拒绝按文件名猜测。`,
+          'ACTION_BINDER_MEMBERSHIP_INDEX_NOT_READY',
+          'ACTION Binder membership 尚未由 workspace index 完整建立，播放阶段拒绝临时扫描 sibling ANIBND。',
           sourceUri,
-          { characterFamily, motionAnimId: motionIdentity.motionAnimId, candidates: [] }
+          { characterFamily, motionAnimId: motionIdentity.motionAnimId }
         )]
       };
     }
 
-    const binderReads = await Promise.all(plan.candidates.map((candidate) => {
-      const cacheKey = `${candidate.origin}:${candidate.relativePath.toLowerCase()}`;
-      const cached = binderMembershipCache.get(cacheKey);
-      if (cached?.revisionKey === candidate.revisionKey) return cached.promise;
-      const promise = readActionBinderDocument({
-        candidate,
-        sourceUri,
-        allowedRoots: [...roots.allowedRoots],
-        effectiveBase,
-        sessionId
-      });
-      binderMembershipCache.set(cacheKey, { revisionKey: candidate.revisionKey, promise });
-      return promise;
-    }));
-    const failedReads = binderReads.filter((item): item is Extract<ActionBinderReadResult, { ok: false }> => !item.ok);
-    if (failedReads.length > 0) {
-      return { ok: false, diagnostics: failedReads.flatMap((item) => item.diagnostics) };
-    }
-    const membership = resolveBinderMembership({
-      query: {
-        characterFamily,
-        binderEntryId: SEKIRO_ANIMATION_BINDER_ID_BASE + motionIdentity.motionAnimId
-      },
-      candidates: binderReads.flatMap((item) => item.ok
-        ? [{
-            characterFamily,
-            source: {
-              sourceUri: actionBinderIdentityUri(item.candidate),
-              sourcePath: item.candidate.relativePath,
-              sourceRevision: item.candidate.revisionKey,
-              sourceLayer: item.candidate.origin
-            },
-            entries: item.entries.map((entry) => ({
-              entryId: entry.id,
-              entryIndex: entry.index,
-              entryName: entry.name
-            }))
-          }]
-        : [])
+    const membership = actionIndex.lookupActionBinderMembership({
+      characterFamily,
+      binderEntryId: SEKIRO_ANIMATION_BINDER_ID_BASE + motionIdentity.motionAnimId
     });
     if (membership.diagnostics.length > 0) {
       return {
@@ -1042,7 +1177,11 @@ export function registerActionIpcHandlers(deps: ActionIpcDeps): void {
           {
             characterFamily,
             motionAnimId: motionIdentity.motionAnimId,
-            candidates: plan.candidates.map((candidate) => ({ origin: candidate.origin, relativePath: candidate.relativePath }))
+            candidates: membership.consideredSources.map((candidate) => ({
+              sourceUri: candidate.source.sourceUri,
+              sourcePath: candidate.source.sourcePath,
+              sourceLayer: candidate.source.sourceLayer
+            }))
           }
         )]
       };
@@ -1071,19 +1210,15 @@ export function registerActionIpcHandlers(deps: ActionIpcDeps): void {
       return { ok: false, diagnostics: [sessionChangedDiagnostic(sourceUri)] };
     }
     const membershipMatch = membership.match;
-    const matchedRead = binderReads.find((item): item is Extract<ActionBinderReadResult, { ok: true }> => item.ok
-      && actionBinderIdentityUri(item.candidate) === membershipMatch.sourceUri);
-    const matchedEntry = matchedRead?.entries.find((entry) => entry.id === membershipMatch.binderEntryId
-      && (membershipMatch.entryIndex === undefined || entry.index === membershipMatch.entryIndex));
-    if (!matchedRead || !matchedEntry) {
+    const resolvedCandidate = actionBinderCandidateFromMembership({
+      match: membershipMatch,
+      session,
+      effectiveBase
+    });
+    if (!resolvedCandidate.ok) {
       return {
         ok: false,
-        diagnostics: [actionDiagnostic(
-          'ACTION_BINDER_MEMBERSHIP_NOT_FOUND',
-          'ANIBND membership 结果缺少唯一 entry，已拒绝继续读取动画。',
-          sourceUri,
-          { characterFamily, motionAnimId: motionIdentity.motionAnimId }
-        )]
+        diagnostics: [resolvedCandidate.diagnostic]
       };
     }
     return {
@@ -1098,19 +1233,21 @@ export function registerActionIpcHandlers(deps: ActionIpcDeps): void {
       effectiveBase,
       allowedRoots: roots.allowedRoots,
       motionAnimId: motionIdentity.motionAnimId,
-      binder: matchedRead.candidate,
+      binder: resolvedCandidate.candidate,
       diagnostics: [{
         severity: 'info',
         code: 'ACTION_BINDER_MEMBERSHIP_UNIQUE',
-        message: `ACTION motion identity 已唯一定位到 ${matchedRead.candidate.relativePath} 的 BND4 entry。`,
+        message: `ACTION motion identity 已由 WorkspaceIndex 唯一定位到 ${resolvedCandidate.candidate.relativePath} 的 BND4 entry。`,
         sourceUri,
         details: {
           characterFamily,
           motionAnimId: motionIdentity.motionAnimId,
-          entryIndex: matchedEntry.index,
-          entryId: matchedEntry.id,
-          origin: matchedRead.candidate.origin,
-          relativePath: matchedRead.candidate.relativePath
+          entryIndex: membershipMatch.entryIndex,
+          entryId: membershipMatch.binderEntryId,
+          entryName: membershipMatch.entryName,
+          origin: resolvedCandidate.candidate.origin,
+          relativePath: resolvedCandidate.candidate.relativePath,
+          authority: 'workspace-index'
         }
       }]
     };
@@ -1429,7 +1566,13 @@ export function registerActionIpcHandlers(deps: ActionIpcDeps): void {
       _event,
       sourceUri: string,
       animId: number,
-      flverBoneNames?: string[]
+      flverBoneNames?: string[],
+      flverBoneParents?: number[],
+      flverReferencePose?: Array<{
+        translation: [number, number, number];
+        rotation: [number, number, number, number];
+        scale: [number, number, number];
+      }>
     ): Promise<{
       ok: boolean;
       sourceUri?: string;
@@ -1453,7 +1596,9 @@ export function registerActionIpcHandlers(deps: ActionIpcDeps): void {
         commandOptions: {
           animId,
           animationContainerPath: context.binder.absolutePath,
-          ...(flverBoneNames?.length ? { flverBoneNames } : {})
+          ...(flverBoneNames?.length ? { flverBoneNames } : {}),
+          ...(flverBoneParents?.length ? { flverBoneParents } : {}),
+          ...(flverReferencePose?.length ? { flverReferencePose } : {})
         }
       });
       const afterDiagnostics = await validateActionContextCurrent(context);
@@ -1480,7 +1625,13 @@ export function registerActionIpcHandlers(deps: ActionIpcDeps): void {
       animId: number,
       timeSeconds: number,
       flverBoneNames?: string[],
-      loop?: boolean
+      loop?: boolean,
+      flverBoneParents?: number[],
+      flverReferencePose?: Array<{
+        translation: [number, number, number];
+        rotation: [number, number, number, number];
+        scale: [number, number, number];
+      }>
     ): Promise<{
       ok: boolean;
       sourceUri?: string;
@@ -1506,7 +1657,9 @@ export function registerActionIpcHandlers(deps: ActionIpcDeps): void {
           timeSeconds,
           loop: loop ?? true,
           animationContainerPath: context.binder.absolutePath,
-          ...(flverBoneNames?.length ? { flverBoneNames } : {})
+          ...(flverBoneNames?.length ? { flverBoneNames } : {}),
+          ...(flverBoneParents?.length ? { flverBoneParents } : {}),
+          ...(flverReferencePose?.length ? { flverReferencePose } : {})
         }
       });
       const afterDiagnostics = await validateActionContextCurrent(context);

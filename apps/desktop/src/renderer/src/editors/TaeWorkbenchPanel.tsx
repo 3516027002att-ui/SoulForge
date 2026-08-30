@@ -934,18 +934,32 @@ export function TaeWorkbenchPanel(props: TaeWorkbenchPanelProps): ReactElement {
 
     let cancelled = false;
     const leaderBones = (() => {
-      if (!preview.bundle) return [] as Array<{ name: string }>;
+      if (!preview.bundle) return [] as Array<{
+        name: string;
+        parentIndex: number;
+        translation: [number, number, number];
+        rotation: [number, number, number];
+        scale: [number, number, number];
+      }>;
       const leader = preview.bundle.models.find((m) => m.modelId === preview.bundle!.leaderModelId) ?? preview.bundle.models[0];
       return leader?.bones ?? [];
     })();
     const boneNames = leaderBones.map((b) => b.name);
+    const boneParents = leaderBones.map((b) => b.parentIndex);
+    const referencePose = leaderBones.map((b) => ({
+      translation: b.translation,
+      rotation: eulerXYZToQuaternion(b.rotation),
+      scale: b.scale ?? [1, 1, 1] as [number, number, number]
+    }));
 
     void (async () => {
       try {
         const res = (await (bridge as any).readTaeAnimationClip(
           props.resourceUri,
           selectedAnimation.animId,
-          boneNames.length > 0 ? boneNames : undefined
+          boneNames.length > 0 ? boneNames : undefined,
+          boneParents.length > 0 ? boneParents : undefined,
+          referencePose.length > 0 ? referencePose : undefined
         )) as { ok?: boolean; data?: TaeAnimationClipData };
 
         if (cancelled) return;

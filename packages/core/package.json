@@ -42,6 +42,7 @@
     "test:emevd-dark-script-compiler-s14": "tsc -b ../shared . && node dist/testing/runEmevdDarkScriptCompilerSmoke.js",
     "test:emevd-session-cache": "tsc -b ../shared . && node dist/testing/runEmevdSessionCacheSmoke.js",
     "test:map-transaction-atomic": "tsc -b ../shared . && node dist/testing/runMapTransactionAtomicSmoke.js",
+    "test:native-map-rollback": "tsc -b ../shared . && node dist/testing/runNativeMapRollbackSmoke.js",
     "test:emevd-stable-identity": "tsc -b ../shared . && node dist/testing/runEmevdStableIdentitySmoke.js",
     "test:emevd-envelope-map": "tsc -b ../shared . && node dist/testing/runEmevdEnvelopeMapSmoke.js",
     "test:emevd-four-view": "tsc -b ../shared . && node dist/testing/runEmevdFourViewSmoke.js",

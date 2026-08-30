@@ -1619,7 +1619,8 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
 
   registerWorkspaceIpcHandlers({
     handle: trustedHandle,
-    ensureActiveOperationLog
+    ensureActiveOperationLog,
+    verifiedReadRoots
   });
 
   registerAgentIpcHandlers({

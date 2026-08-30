@@ -122,6 +122,9 @@ export function WorkbenchOpsPanel(props: WorkbenchOpsPanelProps): ReactElement {
 
       {tab === 'history' && (
         <div className="binder-child-table" role="table">
+          <p className="muted">
+            根据历史事务保存的修改前状态生成逆操作，并通过 Patch Engine 重新应用。
+          </p>
           <div className="binder-child-row binder-child-header" role="row">
             <span>摘要</span>
             <span>状态</span>

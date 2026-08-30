@@ -92,6 +92,26 @@ function main(): void {
   if (binderAmbiguous.status !== 'AMBIGUOUS') throw new Error('duplicate Binder fixture narrowed unexpectedly');
   assert.equal(binderAmbiguous.matches.length, 2);
 
+  const indexed = new WorkspaceIndex('action-binder-index-smoke');
+  assert.equal(indexed.isActionBinderMembershipReady(), false);
+  indexed.setActionBinderMembership([
+    {
+      characterFamily: 'c0000',
+      source: {
+        sourceUri: 'action-binder://base/chr/c0000_a00.anibnd.dcx',
+        sourcePath: 'chr/c0000_a00.anibnd.dcx',
+        sourceRevision: 'physical|catalog',
+        sourceLayer: 'base'
+      },
+      entries: [{ entryId: binderId, entryIndex: 3, entryName: 'a0000_004200.hkx' }]
+    }
+  ]);
+  assert.equal(indexed.isActionBinderMembershipReady(), true);
+  assert.equal(indexed.lookupActionBinderMembership({ characterFamily: 'c0000', binderEntryId: binderId }).status, 'UNIQUE');
+  assert.equal(indexed.lookupActionBinderMembership({ characterFamily: 'c0000', binderEntryId: binderId + 1 }).status, 'NOT_FOUND');
+  indexed.clearActionBinderMembership();
+  assert.equal(indexed.isActionBinderMembershipReady(), false);
+
   console.log(JSON.stringify({
     ok: true,
     status: 'fixture-confirmed',
@@ -103,7 +123,8 @@ function main(): void {
       'Binder UNIQUE',
       'Binder NOT_FOUND',
       'Binder AMBIGUOUS',
-      'character-family isolation'
+      'character-family isolation',
+      'WorkspaceIndex binder membership readiness and strict lookup'
     ],
     nonClaims: [
       '不证明真实 Sekiro TAE/BND4/DCX native 读取。',

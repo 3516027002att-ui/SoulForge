@@ -73,6 +73,12 @@ export const DOCUMENT_STATE_SETTERS: Readonly<Record<DocumentFamily, readonly st
       'setParamSourceHash',
       'setParamLive',
       'setParamRowPayloads',
+      'setParamRowCount',
+      'setParamSessionToken',
+      'setParamMaterialization',
+      'setParamNativeTelemetry',
+      'setParamIndexLoading',
+      'setParamIndexDiagnostic',
       // 字段定义与其缺失原因属于「当前这个 param 文档」的状态：切换资源后
       // 若不清，上一张表的字段列会残留在新表旁边——而两张表的行宽通常不同，
       // 那会让用户对着错误的字段名看新表的字节。

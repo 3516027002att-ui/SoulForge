@@ -33,6 +33,10 @@ import { prepareBridgeRoots, type BridgeRootSession, type PrepareBridgeRootsResu
 import type { OperationLogUtilityClient } from '../operationLogUtilityClient.js';
 import type { TrustedIpcHandle } from './registration.js';
 import { buildRagCorpus, createRagCorpus, mergeCatalogAndPersisted } from '@soulforge/core';
+import {
+  buildActionBinderMembershipIndex,
+  resolveActionEffectiveBaseRoot
+} from './action.js';
 
 // Workspace types – originally in ipc.ts composition root, now owned here.
 export interface DirectorySelection {
@@ -162,6 +166,39 @@ function resolveProjectJsonGameRoot(overlayAbsolutePath: string): string | null 
 export interface WorkspaceIpcDeps {
   handle: TrustedIpcHandle;
   ensureActiveOperationLog(session: WorkspaceSession): Promise<OperationLogUtilityClient>;
+  verifiedReadRoots(
+    session: WorkspaceSession | null,
+    fallback: string
+  ): Promise<{ allowedRoots: string[]; diagnostics: Diagnostic[] }>;
+}
+
+async function rebuildActionBinderMembershipIndex(input: {
+  deps: WorkspaceIpcDeps;
+  index: WorkspaceIndex;
+  session: WorkspaceSession;
+  sessionId: string;
+  indexedFiles: readonly IndexedFile[];
+}): Promise<{ ok: boolean; diagnostics: Diagnostic[]; characterFamilies: string[]; candidateCount: number }> {
+  const roots = await input.deps.verifiedReadRoots(input.session, input.session.layers.overlayRoot);
+  if (roots.diagnostics.length > 0) {
+    input.index.clearActionBinderMembership();
+    return { ok: false, diagnostics: roots.diagnostics, characterFamilies: [], candidateCount: 0 };
+  }
+  const result = await buildActionBinderMembershipIndex({
+    session: input.session,
+    sessionId: input.sessionId,
+    effectiveBase: resolveActionEffectiveBaseRoot(input.session),
+    indexedFiles: input.indexedFiles,
+    allowedRoots: roots.allowedRoots
+  });
+  if (result.ok) input.index.setActionBinderMembership(result.candidates);
+  else input.index.clearActionBinderMembership();
+  return {
+    ok: result.ok,
+    diagnostics: result.diagnostics,
+    characterFamilies: result.characterFamilies,
+    candidateCount: result.candidates.length
+  };
 }
 
 export function clearWorkspaceIpcCaches(): void {
@@ -272,6 +309,7 @@ export function registerWorkspaceIpcHandlers(deps: WorkspaceIpcDeps): void {
     activeOverlayLabel = overlaySelection.label;
     activeIndex = new WorkspaceIndex(activeSession.meta.workspaceId);
     activeIndex.setFiles(lightResult.files);
+    const indexForSession = activeIndex;
     const scanJobId = randomUUID();
     const scanStartedAt = new Date().toISOString();
     await database.upsertJob({ jobId: scanJobId, title: '扫描工作区', jobKind: 'workspace_scan', status: 'running', progress: { current: 0, total: lightResult.files.length, message: '基础资源已可用，正在后台校验内容索引' }, payload: { workspaceSessionId: activeWorkspaceSessionId, workspaceSessionGeneration: thisSessionGeneration, fingerprintStoreGeneration: fingerprintStore.fingerprintStoreGeneration, workspacePersistentIdentityHash }, createdAt: scanStartedAt, startedAt: scanStartedAt, updatedAt: scanStartedAt });
@@ -333,12 +371,19 @@ export function registerWorkspaceIpcHandlers(deps: WorkspaceIpcDeps): void {
         }
         if (controller.signal.aborted) { await releaseAll(); return; }
         if (currentGeneration !== activeWorkspaceSessionGeneration || currentSession !== activeSession || currentSessionId !== activeWorkspaceSessionId) { await releaseAll(); return; }
-        indexedFiles = enriched as unknown as IndexedFile[]; activeIndex?.setFiles(enriched as unknown as IndexedFile[]); await database.replaceFiles(enriched as unknown as IndexedFile[]);
+        indexedFiles = enriched as unknown as IndexedFile[]; indexForSession.setFiles(enriched as unknown as IndexedFile[]); await database.replaceFiles(enriched as unknown as IndexedFile[]);
+        const actionBinderIndex = await rebuildActionBinderMembershipIndex({
+          deps,
+          index: indexForSession,
+          session: currentSession,
+          sessionId: currentSessionId,
+          indexedFiles: indexedFiles
+        });
         if (continuity.continuity === 'UNKNOWN' && hashedCount + reuseCount === enriched.length) fingerprintStore.continuity = { ...continuity, continuity: 'PROVEN', unknownReason: null, cleanShutdown: true };
         fingerprintStore.continuity.cleanShutdown = true; try { await saveFingerprintStore({ storageRoot, state: fingerprintStore }); } catch {}
         const completedAt = new Date().toISOString(); const backgroundCompleteAt = Date.now();
-        await database.upsertJob({ jobId: scanJobId, title: '扫描工作区', jobKind: 'workspace_scan', status: 'completed', progress: { current: enriched.length, total: enriched.length }, payload: { workspaceSessionId: currentSessionId, workspaceSessionGeneration: currentGeneration, fingerprintStoreGeneration: currentStoreGen }, result: { fileCount: enriched.length, hashedCount, reuseCount, shellVisibleAt, filesVisibleAt, backgroundCompleteAt, shellVisibleMs: filesVisibleAt - shellVisibleAt, indexingMs: backgroundCompleteAt - shellVisibleAt, openHandles: 0, activeDiskReaders: 0 }, createdAt: scanStartedAt, startedAt: scanStartedAt, completedAt, updatedAt: completedAt });
-        if (activeIndex) await refreshRagAfterScan(database, activeIndex);
+        await database.upsertJob({ jobId: scanJobId, title: '扫描工作区', jobKind: 'workspace_scan', status: 'completed', progress: { current: enriched.length, total: enriched.length }, payload: { workspaceSessionId: currentSessionId, workspaceSessionGeneration: currentGeneration, fingerprintStoreGeneration: currentStoreGen }, result: { fileCount: enriched.length, hashedCount, reuseCount, shellVisibleAt, filesVisibleAt, backgroundCompleteAt, shellVisibleMs: filesVisibleAt - shellVisibleAt, indexingMs: backgroundCompleteAt - shellVisibleAt, openHandles: 0, activeDiskReaders: 0, actionBinderIndex }, createdAt: scanStartedAt, startedAt: scanStartedAt, completedAt, updatedAt: completedAt });
+        if (activeIndex === indexForSession) await refreshRagAfterScan(database, indexForSession);
       } catch (error) {
         await releaseAll(); if (controller.signal.aborted) return; if (currentGeneration !== activeWorkspaceSessionGeneration) return;
         const failedAt = new Date().toISOString(); try { await database.upsertJob({ jobId: scanJobId, title: '扫描工作区', jobKind: 'workspace_scan', status: 'failed', progress: { current: 0 }, payload: { workspaceSessionId: currentSessionId, workspaceSessionGeneration: currentGeneration }, error: { message: error instanceof Error ? error.message : String(error) }, createdAt: scanStartedAt, startedAt: scanStartedAt, completedAt: failedAt, updatedAt: failedAt }); } catch {}
@@ -356,6 +401,7 @@ export function registerWorkspaceIpcHandlers(deps: WorkspaceIpcDeps): void {
     await disposeBridgeDaemonPool();
     workspaceSessionGenerationCounter += 1; activeWorkspaceSessionGeneration = workspaceSessionGenerationCounter; activeWorkspaceSessionId = randomUUID();
     activeSession = await openWorkspaceSession({ overlayRoot: activeSession.layers.overlayRoot, ...(baseSelection ? { baseRoot: baseSelection.absolutePath } : {}), game: activeSession.meta.game });
+    activeIndex?.clearActionBinderMembership();
     const workspaceLabel = activeOverlayLabel || activeSession.meta.game;
     return { workspaceSessionId: activeWorkspaceSessionId, session: { workspaceSessionId: activeWorkspaceSessionId, workspaceLabel, game: activeSession.meta.game, openedAt: activeSession.meta.openedAt, baseMounted: !activeSession.meta.baseMissing, ...(baseSelection ? { baseLabel: baseSelection.label } : {}) } };
   });
@@ -394,6 +440,13 @@ export function registerWorkspaceIpcHandlers(deps: WorkspaceIpcDeps): void {
       }
       activeIndex = result.index;
       indexedFiles = result.index.getFiles();
+      const actionBinderIndex = await rebuildActionBinderMembershipIndex({
+        deps,
+        index: result.index,
+        session,
+        sessionId,
+        indexedFiles: indexedFiles
+      });
       const database = await deps.ensureActiveOperationLog(session);
       await refreshRagAfterAnalyze(database, result.index);
       const summary: AnalyzeWorkspaceSummary = {
@@ -408,6 +461,9 @@ export function registerWorkspaceIpcHandlers(deps: WorkspaceIpcDeps): void {
         })),
         tools: toolRegistry.list()
       };
+      if (!actionBinderIndex.ok) {
+        summary.diagnostics = [...summary.diagnostics, ...actionBinderIndex.diagnostics];
+      }
       lastAnalyze = { sessionId, generation, summary };
       return summary;
     })();

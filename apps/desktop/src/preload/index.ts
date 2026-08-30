@@ -65,9 +65,9 @@ import type {
   OpenParamSessionRequest,
   OpenParamSessionResult,
   ReadParamIndexPageRequest,
-  ParamIndexPage,
+  ParamIndexPageResult,
   ReadParamRowsRequest,
-  ParamRowPayloadBatch
+  ParamRowPayloadBatchResult
 } from '@soulforge/shared';
 
 /** Path-bearing fields that must never cross the context bridge to the renderer. */
@@ -390,11 +390,33 @@ const api = {
   readTaeChrbndPreview: (sourceUri: string): Promise<unknown> =>
     ipcRenderer.invoke('resource.readTaeChrbndPreview', sourceUri),
   /** ACTION：读取 TAE 关联的真实 HKX 动画 Clip 数据 */
-  readTaeAnimationClip: (sourceUri: string, animId: number, flverBoneNames?: string[]): Promise<unknown> =>
-    ipcRenderer.invoke('resource.readTaeAnimationClip', sourceUri, animId, flverBoneNames),
+  readTaeAnimationClip: (
+    sourceUri: string,
+    animId: number,
+    flverBoneNames?: string[],
+    flverBoneParents?: number[],
+    flverReferencePose?: Array<{
+      translation: [number, number, number];
+      rotation: [number, number, number, number];
+      scale: [number, number, number];
+    }>
+  ): Promise<unknown> =>
+    ipcRenderer.invoke('resource.readTaeAnimationClip', sourceUri, animId, flverBoneNames, flverBoneParents, flverReferencePose),
   /** ACTION：连续时间采样 TAE 动画位姿 */
-  sampleTaeAnimationPose: (sourceUri: string, animId: number, timeSeconds: number, flverBoneNames?: string[], loop?: boolean): Promise<unknown> =>
-    ipcRenderer.invoke('resource.sampleTaeAnimationPose', sourceUri, animId, timeSeconds, flverBoneNames, loop),
+  sampleTaeAnimationPose: (
+    sourceUri: string,
+    animId: number,
+    timeSeconds: number,
+    flverBoneNames?: string[],
+    loop?: boolean,
+    flverBoneParents?: number[],
+    flverReferencePose?: Array<{
+      translation: [number, number, number];
+      rotation: [number, number, number, number];
+      scale: [number, number, number];
+    }>
+  ): Promise<unknown> =>
+    ipcRenderer.invoke('resource.sampleTaeAnimationPose', sourceUri, animId, timeSeconds, flverBoneNames, loop, flverBoneParents, flverReferencePose),
   // S23：按 modelName 在 mapbnd 容器里取 part 的 FLVER 网格（地图 viewport）。
   readMapPartMesh: (msbSourceUri: string, modelName: string): Promise<unknown> =>
     ipcRenderer.invoke('resource.readMapPartMesh', msbSourceUri, modelName),
@@ -596,9 +618,9 @@ const api = {
     ipcRenderer.invoke('resource.readParamPage', sourceUri, page, pageSize, query, loadAll),
   openParamSession: (request: OpenParamSessionRequest): Promise<OpenParamSessionResult> =>
     ipcRenderer.invoke(PARAM_SESSION_IPC_CHANNELS.open, request),
-  readParamIndexPage: (request: ReadParamIndexPageRequest): Promise<ParamIndexPage> =>
+  readParamIndexPage: (request: ReadParamIndexPageRequest): Promise<ParamIndexPageResult> =>
     ipcRenderer.invoke(PARAM_SESSION_IPC_CHANNELS.readIndexPage, request),
-  readParamRows: (request: ReadParamRowsRequest): Promise<ParamRowPayloadBatch> =>
+  readParamRows: (request: ReadParamRowsRequest): Promise<ParamRowPayloadBatchResult> =>
     ipcRenderer.invoke(PARAM_SESSION_IPC_CHANNELS.readRows, request),
   /**
    * 列出 parambnd 容器内的 param 条目（Smithbox 的 Param List 那一栏）。
@@ -812,7 +834,13 @@ const api = {
   applyParamMutation: (
     sourceUri: string,
     expectedHash: string,
-    mutation: { kind: 'upsert' | 'delete'; id: number; dataBase64?: string }
+    mutation: {
+      kind: 'upsert' | 'delete';
+      id: number;
+      dataBase64?: string;
+      rowIndex?: number;
+      expectedDataHash?: string;
+    }
   ): Promise<RendererSaveResult> =>
     ipcRenderer.invoke('resource.applyParamMutation', sourceUri, expectedHash, mutation),
   applyParamFieldMutation: (
@@ -820,6 +848,8 @@ const api = {
     expectedHash: string,
     mutation: {
       rowId: number;
+      rowIndex?: number;
+      expectedDataHash?: string;
       fieldId: string;
       value: number | string | boolean;
       rowDataBase64: string;

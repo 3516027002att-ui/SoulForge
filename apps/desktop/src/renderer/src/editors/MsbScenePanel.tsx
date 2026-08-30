@@ -364,7 +364,6 @@ export function MsbScenePanel(props: MsbScenePanelProps): ReactElement {
   const [selected, setSelected] = useState<SelectedEntity | null>(null);
   const [status, setStatus] = useState('正在初始化 3D 场景…');
   const [nodeCount, setNodeCount] = useState(0);
-  const [transformMode, setTransformMode] = useState<'translate' | 'rotate' | 'scale'>('translate');
   const [partsState, setPartsState] = useState<PartLike[]>(props.parts);
   const regions = props.regions ?? [];
 
@@ -531,7 +530,6 @@ export function MsbScenePanel(props: MsbScenePanelProps): ReactElement {
         return;
       }
       handleRef.current = handle;
-      handle.setTransformMode?.(transformMode);
       drawListRef.current = drawList;
       drawItemByIdRef.current = new Map(drawList.items.map((item) => [item.id, item]));
       const partial = sceneManifest.diagnostics.some((item) => item.code === 'SCENE_PROJECTION_PARTIAL');
@@ -790,11 +788,6 @@ export function MsbScenePanel(props: MsbScenePanelProps): ReactElement {
     ];
   }
 
-  function handleSwitchTransformMode(mode: 'translate' | 'rotate' | 'scale'): void {
-    setTransformMode(mode);
-    handleRef.current?.setTransformMode?.(mode);
-  }
-
   return (
     <WorkbenchLayout
       label="MSB 地图工作台"
@@ -830,23 +823,6 @@ export function MsbScenePanel(props: MsbScenePanelProps): ReactElement {
           children: (
             <div className="msb-viewport" style={{ position: 'relative', display: 'flex', flexDirection: 'column', width: '100%', height: '100%' }}>
               <div ref={hostRef} className="scene-host" style={{ flex: 1, width: '100%', height: '100%', minHeight: 200, background: '#1a1d23' }} />
-              <div className="msb-transform-modes" role="group" aria-label="变换模式">
-                {([
-                  ['translate', '移动'],
-                  ['rotate', '旋转'],
-                  ['scale', '缩放']
-                ] as const).map(([mode, label]) => (
-                  <button
-                    key={mode}
-                    type="button"
-                    className={transformMode === mode ? 'is-active' : undefined}
-                    aria-pressed={transformMode === mode}
-                    onClick={() => handleSwitchTransformMode(mode)}
-                  >
-                    {label}
-                  </button>
-                ))}
-              </div>
               <p className="muted">
                 {props.openFailure
                   ? props.openFailure.message
@@ -859,10 +835,11 @@ export function MsbScenePanel(props: MsbScenePanelProps): ReactElement {
                               : meshStatus.missing > 0
                                 ? ' · 没有找到 part 模型（线框）；未挂原版时可到「开始」页挂载后重开'
                                 : '';
-                          return `节点 ${nodeCount} · region ${regions.length}${meshNote} · 漫游：WASD 移动 / Shift+WASD 加速 / Q下降 E上升 / F居中 / Gizmo 拖拽编辑`;
+                          return `节点 ${nodeCount} · region ${regions.length}${meshNote} · 漫游：WASD 移动 / Shift+WASD 加速 / Q下降 E上升 / F居中`;
                         })()
                       : status)}
               </p>
+              <p className="muted">Universal Gizmo 拖拽（移动、旋转、缩放）</p>
               {(selected?.kind === 'msb-part' || selected?.kind === 'msb-region') ? (
                 <p data-testid="msb-selected-summary">
                   已选择 {selected.kind === 'msb-region' ? 'region' : 'part'}：{selected.label}（已挂载 3D Transform Gizmo 拖拽句柄）

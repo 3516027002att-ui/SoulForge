@@ -1,31 +1,33 @@
 import { useMemo, useState, type ReactElement } from 'react';
-import type { ParamDefDocument, ParamFieldDef } from '@soulforge/shared';
+import type { ParamDefDocument, ParamFieldDef, ParamPhysicalRowIdentity } from '@soulforge/shared';
 import { base64ToUint8Array } from '../utils/binary.js';
 import { isRowTabEntry, selectableRowAttributes } from '../a11y/selectableRow.js';
+import type { ParamRowView } from './ParamTablePanel.js';
 
 export interface ParamDefPanelProps {
   typeName: string;
   rowDataSize: number;
   origin: string;
-  /** 分页读取目标（live 模式下经 resource.readParamPage 按页取行）。 */
+  /** 保留资源上下文，真实 payload 经 selected-row session 通道读取。 */
   resourceUri: string;
-  /** True when the source is a live Bridge PARAM document (page-fetchable). */
+  /** True when the source is a live Bridge PARAM document. */
   live?: boolean;
   /**
    * 字段级结构定义。为 null 表示当前没有可用的 paramdef 定义（官方适配包
    * 只读；用户派生定义尚未接入），此时字段视图保持只读/不可用。
    */
   definition: ParamDefDocument | null;
-  /** 真实 PARAM 行（与 ParamTablePanel 的 loadParam 一致）。 */
-  rows: Array<{ id: number; name?: string; dataHexPreview?: string }>;
-  /** 行的完整字节（base64）；截断/不可得的行返回 undefined。 */
-  getRowDataBase64: (rowId: number) => string | undefined;
+  /** 真实 PARAM 行索引；rowIndex + id + dataHash 是唯一身份。 */
+  rows: ParamRowView[];
+  /** 行的完整字节（base64）；缺失时由 App 通过 readParamRows 获取。 */
+  getRowDataBase64: (identity: ParamPhysicalRowIdentity) => string | undefined;
   /**
    * 提交字段 mutation（App 负责调用 applyParamFieldMutation 并刷新行数据）。
    * 返回结构化结果以便面板显示失败诊断。
    */
   onApplyFieldMutation?: (input: {
     rowId: number;
+    identity: ParamPhysicalRowIdentity;
     fieldId: string;
     value: number | string | boolean;
     rowDataBase64: string;
@@ -62,37 +64,37 @@ interface CommitResultView {
 }
 
 /*
- * 行表全量渲染，不再按 20 行翻页（显示不设限）。父级以整表（含行字节）下发
- * props.rows + getRowDataBase64；选中行解字段横幅的全量字节取自 payload Map。
- * PARAM 工作台（ParamWorkbench）自身的虚拟滚动不在此列 —— 那条是本条目明确
- * 保留不拆的既有能力。
+ * 行表渲染的是已加载的轻量索引；字段编辑只使用当前选中物理行的 payload。
  */
 
 /**
  * PARAM 字段级查看/编辑面板。
  *
- * 行选择列表直接 `props.rows.map` 全量进 DOM，由栏滚动；字段解码的字节取自
- * 所选行的完整 base64（props.getRowDataBase64 / 全量 payload）。演示与 live
- * 路径使用同一份 props.rows —— App 打开一张 param 即全量下发（含行字节）。
+ * 行选择列表直接 `props.rows.map` 进 DOM，由栏滚动；字段解码的字节取自
+ * 所选物理行的 selected-row payload。索引和 payload 两条链严格分离。
  * 字段解码是只读展示投影，不是 native authority；写入只经 applyParamFieldMutation
  * 的 whole-row Bridge upsert + Patch Engine。
  */
 export function ParamDefPanel(props: ParamDefPanelProps): ReactElement {
-  const [selectedRowId, setSelectedRowId] = useState<number | null>(null);
+  const [selectedRowKey, setSelectedRowKey] = useState<string | null>(null);
   const [drafts, setDrafts] = useState<Record<string, string>>({});
   const [committing, setCommitting] = useState(false);
   const [commitResult, setCommitResult] = useState<CommitResultView | null>(null);
 
   const selectedRow = useMemo(
-    () => props.rows.find((row) => row.id === selectedRowId) ?? null,
-    [props.rows, selectedRowId]
+    () => props.rows.find((row) => `${row.rowIndex}:${row.id}:${row.dataHash}` === selectedRowKey) ?? null,
+    [props.rows, selectedRowKey]
   );
 
-  function rowDataBase64(rowId: number): string | undefined {
-    return props.getRowDataBase64(rowId);
+  function rowDataBase64(identity: ParamPhysicalRowIdentity): string | undefined {
+    return props.getRowDataBase64(identity);
   }
 
-  const selectedRowDataBase64 = selectedRow ? rowDataBase64(selectedRow.id) : undefined;
+  const selectedRowIdentity: ParamPhysicalRowIdentity | null = selectedRow && selectedRow.rowIndex >= 0 && selectedRow.dataHash
+    ? { rowIndex: selectedRow.rowIndex, id: selectedRow.id, dataHash: selectedRow.dataHash }
+    : null;
+  const selectedRowDataBase64 = selectedRow?.dataBase64
+    ?? (selectedRowIdentity ? rowDataBase64(selectedRowIdentity) : undefined);
   const selectedRowBytes = useMemo(() => {
     if (!selectedRowDataBase64) return null;
     try {
@@ -116,8 +118,9 @@ export function ParamDefPanel(props: ParamDefPanelProps): ReactElement {
     && props.definition.rowDataSize === props.rowDataSize
     && props.onApplyFieldMutation !== undefined;
 
-  function selectRow(id: number): void {
-    setSelectedRowId((current) => (current === id ? null : id));
+  function selectRow(row: ParamRowView): void {
+    const key = `${row.rowIndex}:${row.id}:${row.dataHash}`;
+    setSelectedRowKey((current) => (current === key ? null : key));
     setDrafts({});
     setCommitResult(null);
   }
@@ -130,6 +133,7 @@ export function ParamDefPanel(props: ParamDefPanelProps): ReactElement {
     try {
       const result = await props.onApplyFieldMutation({
         rowId: selectedRow.id,
+        identity: selectedRowIdentity!,
         fieldId,
         value,
         rowDataBase64: selectedRowDataBase64,
@@ -191,21 +195,25 @@ export function ParamDefPanel(props: ParamDefPanelProps): ReactElement {
         </div>
         {/* 行选择必须键盘可达：字段表只在选中行后出现，此前键盘用户根本进不去
             字段编辑态。属性由 selectableRowAttributes 统一产出。 */}
-        {props.rows.map((row, rowIndex) => (
+        {props.rows.map((row, rowIndex) => {
+          const rowKey = `${row.rowIndex}:${row.id}:${row.dataHash}`;
+          const selected = rowKey === selectedRowKey;
+          return (
           <div
-            key={row.id}
-            className={row.id === selectedRowId ? 'binder-child-row selected' : 'binder-child-row'}
+            key={rowKey}
+            className={selected ? 'binder-child-row selected' : 'binder-child-row'}
             {...selectableRowAttributes({
-              selected: row.id === selectedRowId,
-              isTabEntry: isRowTabEntry(rowIndex, selectedRowId !== null),
-              onSelect: () => selectRow(row.id)
+              selected,
+              isTabEntry: isRowTabEntry(rowIndex, selectedRowKey !== null),
+              onSelect: () => selectRow(row)
             })}
           >
             <span>{row.id}</span>
             <span>{row.name ?? '—'}</span>
             <span title={row.dataHexPreview}>{row.dataHexPreview?.slice(0, 24) ?? '—'}</span>
           </div>
-        ))}
+          );
+        })}
         {props.rows.length === 0 && <p className="muted">无 PARAM 行数据。</p>}
       </div>
 

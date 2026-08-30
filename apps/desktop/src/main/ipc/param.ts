@@ -42,9 +42,12 @@ import {
 } from '@soulforge/core';
 import {
   PARAM_PAGE_SIZE,
+  PARAM_ROW_PAYLOAD_BATCH_MAX,
   type Diagnostic,
   type IndexedFile,
   type ParamDefDocument,
+  type ParamNativeTelemetry,
+  type ParamSessionMetadata,
   type ParamMetadataPackage,
   type StructuredDiagnostic
 } from '@soulforge/shared';
@@ -58,6 +61,27 @@ import type { OperationLogUtilityClient } from '../operationLogUtilityClient.js'
 const _forensicsCounters = new Map<string, number>();
 function _forensicsInc(key: string, delta = 1): void { _forensicsCounters.set(key, (_forensicsCounters.get(key) ?? 0) + delta); }
 export function getForensicsCounters(): Record<string, number> { return Object.fromEntries(_forensicsCounters); }
+
+/** Keep the existing Bridge telemetry observable without granting it authority. */
+function projectParamNativeTelemetry(value: unknown): ParamNativeTelemetry | null {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) return null;
+  const raw = value as Record<string, unknown>;
+  const count = (key: string): number | null => {
+    const candidate = raw[key];
+    return typeof candidate === 'number' && Number.isFinite(candidate) && candidate >= 0
+      ? candidate
+      : null;
+  };
+  const telemetry: ParamNativeTelemetry = {
+    paramParse: count('paramParse'),
+    paramDecodedRows: count('paramDecodedRows'),
+    paramSessionOpen: count('paramSessionOpen'),
+    paramStructuralValidation: count('paramStructuralValidation'),
+    paramSerializedRows: count('paramSerializedRows')
+  };
+  return Object.values(telemetry).some((candidate) => candidate !== null) ? telemetry : null;
+}
+
 const sessionBindings = new Map<string, { sourceUri: string; workspaceSessionId: string; sourceHash: string; pathSourceGeneration: number; entryIdentity?: string }>();
 // Isolated dummy for pre-split shared cache — real invalidation now via composition root (raw domain owns its cache).
 const containerChildrenCache = new Map<string, unknown>();
@@ -179,6 +203,7 @@ export function registerParamIpcHandlers(deps: ParamIpcDeps): void {
       rows?: Array<{ rowIndex: number; id: number; name?: string | null; dataHash: string }>;
       sessionToken?: string;
       pathSourceGeneration?: number;
+      telemetry?: unknown;
     }>({
       command: 'read-param-document',
       filePath: file.absolutePath,
@@ -205,6 +230,12 @@ export function registerParamIpcHandlers(deps: ParamIpcDeps): void {
       name: (r.name ?? null) as string | null,
       dataHash: r.dataHash ?? ''
     }));
+    const typeName = result.data.typeName ?? 'UNKNOWN_PARAM';
+    const rowDataSize = result.data.rowDataSize ?? 0;
+    const resolved = typeName
+      ? await resolveTrustedParamDefinition(typeName, rowDataSize)
+      : { document: null, trusted: false, diagnostic: null };
+    _forensicsInc('param:main:open:indexRows', rows.length);
     return sanitizeRendererValue({
       ok: true,
       sessionToken,
@@ -212,6 +243,8 @@ export function registerParamIpcHandlers(deps: ParamIpcDeps): void {
       sourceHash,
       pathSourceGeneration,
       rowCount: result.data.rowCount ?? rows.length,
+      metadata: projectParamSessionMetadata(typeName, rowDataSize, resolved),
+      nativeTelemetry: projectParamNativeTelemetry(result.data.telemetry),
       firstPage: { page: 0, pageSize: PARAM_PAGE_SIZE, rows },
       diagnostics: sanitizeDiagnostics(result.diagnostics)
     });
@@ -245,6 +278,7 @@ export function registerParamIpcHandlers(deps: ParamIpcDeps): void {
       rowCount?: number;
       rows?: Array<{ rowIndex: number; id: number; name?: string | null; dataHash: string }>;
       sessionToken?: string;
+      telemetry?: unknown;
     }>({
       command: 'read-param-document',
       filePath: file.absolutePath,
@@ -257,6 +291,7 @@ export function registerParamIpcHandlers(deps: ParamIpcDeps): void {
       return sanitizeRendererValue({ ok: false, diagnostics: sanitizeDiagnostics(result.diagnostics) });
     }
     const rows = (result.data?.rows ?? []).map((r) => ({ rowIndex: r.rowIndex, id: r.id, name: (r.name ?? null) as string | null, dataHash: r.dataHash ?? '' }));
+    _forensicsInc('param:main:readIndexPage:indexRows', rows.length);
     return sanitizeRendererValue({
       ok: true,
       sessionToken,
@@ -264,6 +299,7 @@ export function registerParamIpcHandlers(deps: ParamIpcDeps): void {
       page,
       pageSize,
       rows,
+      nativeTelemetry: projectParamNativeTelemetry(result.data?.telemetry),
       diagnostics: sanitizeDiagnostics(result.diagnostics)
     });
   });
@@ -280,8 +316,8 @@ export function registerParamIpcHandlers(deps: ParamIpcDeps): void {
     if (rowsIn.length === 0) {
       return sanitizeRendererValue({ ok: false, diagnostics: [{ severity: 'error' as const, code: 'PARAM_ROW_SELECTION_EMPTY', message: '未选择任何行。', sourceUri }] });
     }
-    if (rowsIn.length > 256) {
-      return sanitizeRendererValue({ ok: false, diagnostics: [{ severity: 'error' as const, code: 'PARAM_ROW_SELECTION_TOO_LARGE', message: `单次选中行请求 ${rowsIn.length} 行超过上限 256。`, sourceUri }] });
+    if (rowsIn.length > PARAM_ROW_PAYLOAD_BATCH_MAX) {
+      return sanitizeRendererValue({ ok: false, diagnostics: [{ severity: 'error' as const, code: 'PARAM_ROW_SELECTION_TOO_LARGE', message: `单次选中行请求 ${rowsIn.length} 行超过上限 ${PARAM_ROW_PAYLOAD_BATCH_MAX}。`, sourceUri }] });
     }
     const binding = sessionBindings.get(sessionToken);
     if (!binding || binding.sourceUri !== sourceUri) {
@@ -302,6 +338,7 @@ export function registerParamIpcHandlers(deps: ParamIpcDeps): void {
     const result = await runBridge<{
       rows?: Array<{ rowIndex: number; id: number; name?: string | null; dataBase64: string; dataHash: string }>;
       sessionToken?: string;
+      telemetry?: unknown;
     }>({
       command: 'read-param-document',
       filePath: file.absolutePath,
@@ -317,7 +354,14 @@ export function registerParamIpcHandlers(deps: ParamIpcDeps): void {
       identity: { rowIndex: r.rowIndex, id: r.id, dataHash: r.dataHash ?? '' },
       dataBase64: r.dataBase64
     }));
-    return sanitizeRendererValue({ ok: true, sessionToken, rows: payloadRows, diagnostics: sanitizeDiagnostics(result.diagnostics) });
+    _forensicsInc('param:main:readRows:payloadRows', payloadRows.length);
+    return sanitizeRendererValue({
+      ok: true,
+      sessionToken,
+      rows: payloadRows,
+      nativeTelemetry: projectParamNativeTelemetry(result.data?.telemetry),
+      diagnostics: sanitizeDiagnostics(result.diagnostics)
+    });
   });
 async function unpackContainerParamChild(input: {
   containerPath: string;
@@ -1025,6 +1069,26 @@ let paramMetadataCache: {
     };
   };
 
+  function projectParamSessionMetadata(
+    typeName: string,
+    rowDataSize: number,
+    resolved: {
+      document: ParamDefDocument | null;
+      trusted: boolean;
+      diagnostic: { code: string; message: string } | null;
+    }
+  ): ParamSessionMetadata {
+    return {
+      typeName,
+      rowDataSize,
+      fieldDefs: resolved.document?.fields ?? null,
+      fieldEnums: resolved.document?.enums ?? null,
+      fieldDefsDiagnostic: resolved.diagnostic,
+      fieldDefsOrigin: resolved.document?.origin ?? null,
+      fieldDefsTrusted: resolved.trusted
+    };
+  }
+
   /** 当前元数据包的身份与信任状态，供界面显示确认入口。 */
   handle('param.metadata.trustState', async () => {
     const metadata = await loadParamMetadata();
@@ -1567,7 +1631,13 @@ let paramMetadataCache: {
       event,
       sourceUri: string,
       expectedHash: string,
-      mutation: { kind: 'upsert' | 'delete'; id: number; dataBase64?: string }
+      mutation: {
+        kind: 'upsert' | 'delete';
+        id: number;
+        dataBase64?: string;
+        rowIndex?: number;
+        expectedDataHash?: string;
+      }
     ): Promise<RendererSaveResult> => {
       const file = getFiles().find((item) => item.sourceUri === sourceUri);
       if (!file || !getSession()) {
@@ -1607,8 +1677,19 @@ let paramMetadataCache: {
       }
       const bridgeMutation =
         mutation.kind === 'delete'
-          ? { kind: 'delete' as const, id: mutation.id }
-          : { kind: 'upsert' as const, id: mutation.id, dataBase64: mutation.dataBase64! };
+          ? {
+              kind: 'delete' as const,
+              id: mutation.id,
+              ...(mutation.rowIndex !== undefined ? { rowIndex: mutation.rowIndex } : {}),
+              ...(mutation.expectedDataHash ? { expectedDataHash: mutation.expectedDataHash } : {})
+            }
+          : {
+              kind: 'upsert' as const,
+              id: mutation.id,
+              dataBase64: mutation.dataBase64!,
+              ...(mutation.rowIndex !== undefined ? { rowIndex: mutation.rowIndex } : {}),
+              ...(mutation.expectedDataHash ? { expectedDataHash: mutation.expectedDataHash } : {})
+            };
       const operationLog = await deps.ensureActiveOperationLog(getSession()!);
       // S29：裸 param 行写入同样走「哈希缺失现算」兜底，renderer 空串不拒写；
       // 现算值同时喂给 Bridge 的 expectedDocumentHash 与 Patch Engine 前置。
@@ -1648,6 +1729,8 @@ let paramMetadataCache: {
       expectedHash: string,
       mutation: {
         rowId: number;
+        rowIndex?: number;
+        expectedDataHash?: string;
         fieldId: string;
         value: number | string | boolean;
         rowDataBase64: string;
@@ -1717,7 +1800,13 @@ let paramMetadataCache: {
           expectedDocumentHash: fieldExpectedHash,
           allowedRoots: context.allowedRoots,
           writableRoots: context.writableRoots,
-          mutation: { kind: 'upsert' as const, id: mutation.rowId, dataBase64: fieldResult.nextDataBase64 }
+          mutation: {
+            kind: 'upsert' as const,
+            id: mutation.rowId,
+            dataBase64: fieldResult.nextDataBase64,
+            ...(mutation.rowIndex !== undefined ? { rowIndex: mutation.rowIndex } : {}),
+            ...(mutation.expectedDataHash ? { expectedDataHash: mutation.expectedDataHash } : {})
+          }
         }),
         title: `PARAM field set ${mutation.fieldId} on row ${mutation.rowId}`,
         confirmActionLabel: '提交 PARAM 字段变更'

@@ -19,6 +19,12 @@ import type {
 import { buildReferenceGraph, type ReferenceBuildOptions, type ReferenceBuildResult } from '../references/referenceBuilder.js';
 import { collectEventEvidence, renderEventEvidenceMarkdown, type EventEvidenceReport } from '../references/eventEvidence.js';
 import { ALL_RESOURCE_KINDS } from '../workspace/resourceKinds.js';
+import {
+  resolveBinderMembership,
+  type BinderMembershipCandidate,
+  type BinderMembershipQuery,
+  type BinderMembershipResult
+} from '../action/binderMembership.js';
 
 export interface SearchResourcesOptions {
   query: string;
@@ -101,6 +107,8 @@ export class WorkspaceIndex {
   private msgExports: MsgExport[] = [];
   private taeExports: TaeExport[] = [];
   private references: ReferenceEdge[] = [];
+  private actionBinderMembershipCandidates: BinderMembershipCandidate[] = [];
+  private actionBinderMembershipReady = false;
 
   constructor(workspaceId: string) {
     this.workspaceId = workspaceId;
@@ -109,6 +117,41 @@ export class WorkspaceIndex {
   setFiles(files: readonly IndexedFile[]): void {
     this.filesByUri.clear();
     for (const file of files) this.filesByUri.set(file.sourceUri, file);
+    // Binder membership carries source revisions from the file catalog. Any
+    // catalog replacement invalidates that projection until the indexer has
+    // rebuilt it for the same workspace session.
+    this.clearActionBinderMembership();
+  }
+
+  /**
+   * Install the complete ACTION binder membership projection produced by the
+   * workspace indexer. Playback may query this projection, but must not scan
+   * sibling ANIBND files or parse containers on demand.
+   */
+  setActionBinderMembership(candidates: readonly BinderMembershipCandidate[]): void {
+    this.actionBinderMembershipCandidates = candidates.map((candidate) => ({
+      characterFamily: candidate.characterFamily,
+      source: { ...candidate.source },
+      entries: candidate.entries.map((entry) => ({ ...entry }))
+    }));
+    this.actionBinderMembershipReady = true;
+  }
+
+  /** Drop the projection when its source catalog/session is no longer valid. */
+  clearActionBinderMembership(): void {
+    this.actionBinderMembershipCandidates = [];
+    this.actionBinderMembershipReady = false;
+  }
+
+  isActionBinderMembershipReady(): boolean {
+    return this.actionBinderMembershipReady;
+  }
+
+  lookupActionBinderMembership(query: BinderMembershipQuery): BinderMembershipResult {
+    return resolveBinderMembership({
+      query,
+      candidates: this.actionBinderMembershipCandidates
+    });
   }
 
   /**

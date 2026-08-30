@@ -586,13 +586,26 @@ export async function executeMapTransaction(
   }
 
   const fileEntry = await edit.indexFile(loaded.filePath, 'map');
-  const expectedHash = loaded.doc.revision;
+  // MapDocument.revision is the native MSB payload hash. Patch Engine's
+  // file_replace precondition must instead bind the actual target bytes, which
+  // are the outer DCX bytes for `.msb.dcx`. Keep both identities explicit so a
+  // valid native writer result is not rejected (or, worse, checked against the
+  // wrong layer) before commit.
+  const expectedDocumentHash = loaded.doc.revision;
+  const expectedFileHash = fileEntry.sha256;
+  if (!expectedFileHash) {
+    return mapTransactionFailure(
+      transaction.id,
+      'MAP_FILE_HASH_REQUIRED',
+      'MSB 写回需要当前外层文件哈希；索引未提供哈希，已失败关闭。'
+    );
+  }
 
   // Single batch staging & Patch commit
   const outcome = await applyNativeMutation({
-    file: { ...fileEntry, sha256: expectedHash },
+    file: { ...fileEntry, sha256: expectedFileHash },
     sourceUri: fileEntry.sourceUri,
-    expectedHash,
+    expectedHash: expectedFileHash,
     stagingRoot: edit.stagingRoot,
     allowedRoots: () => [...edit.allowedRoots()],
     stagingPrefix: 'msb',
@@ -600,7 +613,7 @@ export async function executeMapTransaction(
     stageWrite: (context) => commitMsbMutationViaBridge({
       sourcePath: loaded.filePath,
       outputPath: context.outputPath,
-      expectedDocumentHash: expectedHash,
+      expectedDocumentHash,
       allowedRoots: context.allowedRoots,
       writableRoots: context.writableRoots,
       mutations,

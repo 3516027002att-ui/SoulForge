@@ -1,0 +1,81 @@
+# SoulForge Mission4 交付记录
+
+更新时间：2026-08-31
+分支：`codex/mission4-runtime-fixes`
+基线：`main` / `origin/main`
+范围：ACTION、PARAM、ROLLBACK、MAP 运行链修复与真实性验收。
+
+## 治理权威
+
+治理 CLI：`node scripts/gov.mjs help|next|status`。机器可读权威位于：
+
+- `docs/governance/releases.json`：当前 release；
+- `docs/governance/scope.json`：范围、延期与恢复条件；
+- `docs/governance/slices.json`：切片 lifecycle、authority、入口和验证；
+- `docs/governance/gates.json`：Gate 状态；
+- `docs/governance/evidence.jsonl`：追加式证据权威；
+- `scripts/verify/tiers.mjs`：验证调度。
+
+本次以 CLI 实际输出为准：当前 release 为 V0.5；可认领项是跨机安装验证，ACTION motion identity 仍有既存 claim，未在本次擅自抢占、释放或 complete。没有改治理 JSON，也没有把本记录当作 sealed Evidence。
+
+本次补登记了 mission4 定向脚本及构建 wrapper 的层级/排除理由，消除了 `VERIFY_REGISTRY_DRIFTED`。随后运行 `node scripts/verify.mjs --tier governance` 时，`handoff:fingerprint`、跨机 fixture、gov CLI 通过；`test:governance` 因 REL-F/REL-G/REL-I 的既有 sealed Evidence 对当前主题域变 stale 而失败关闭，后续 需提交后按治理四步重验/重封，本次不伪造 seal。
+
+V0.5/V0.6 过渡期不再对开发任务施加版本禁令。Patch Engine、C# Bridge native authority、写入前置条件、验证、备份和回滚仍是架构安全边界，不是版本冻结禁令。
+
+## 已实现并验证
+
+### ACTION
+
+- 过大 Bridge 结果改为受控 file-backed descriptor + 分块 materialize，未提高 frame 上限；真实 c0000 低 frame 运行取到 file-backed 与 materialized 诊断。
+- motion identity cache 绑定 `sourceUri + revision + animId`，A-B-A 与 B-A 顺序回归通过。
+- binder membership 在 workspace/index 建立阶段完整枚举并安装到 `WorkspaceIndex`；播放 handler 只查 membership authority，不在播放时随机扫描 sibling。
+- duplicate bone mapping 支持 name + parent/hierarchy identity；歧义失败关闭并输出 forensic diagnostics。真实 c0000 clip 取证包含 146 个 HKX/FLVER 映射和 duplicate forensic 诊断。
+- `npm run test:action-motion-identity`：通过。
+- `npm run test:action-real-corpus -- 10,11`：通过；真实 c0000 两个动作、native/TS 数值误差约 1e-7。
+
+### PARAM
+
+- 新增 native PARAM index/session lazy path：首屏返回索引，按物理 `rowIndex + expectedId + expectedDataHash` 选取行；没有 `loadAll=true` 兜底，也没有新增第三套 PARAM API。
+- telemetry 可区分结构校验、会话打开、行物化和序列化；真实 `ActionButtonParam`（353 行）与 `SpEffectParam`（7790 行）cold-open 首页均为 0 decoded rows / 0 payload rows。
+- PARAM 切换工作区/文件的复位覆盖已补齐，避免旧 session token、lazy materialization、telemetry 和诊断残留。
+- `npm run test:param-session-projection`：7/7 通过。
+- `npm run test:param-slim-ipc`：10/10 通过。
+- `npm run test:renderer-unit` 中 `documentReset` 定向测试：14/14 通过。
+
+### ROLLBACK
+
+- operation/file rollback 继续生成绑定原操作 ID 的 inverse PatchIR，经正式 Patch Engine、备份、原子替换和 fresh reread；逆事务不再作为第二条逻辑历史展示。
+- 修复 MSB `.dcx` 的两个哈希身份：native MSB payload hash 只供 Bridge writer，外层文件 hash 供 Patch Engine `file_replace` 前置条件。
+- 新增 `npm run test:native-map-rollback`：真实 MSB 复制到项目内临时 overlay，A→B 提交、Bridge fresh reread 得到 B，再按历史备份 inverse rollback、Bridge fresh reread 恢复 A；临时 overlay 最终清理。
+- 回滚历史面显示统一文案：`根据历史事务保存的修改前状态生成逆操作，并通过 Patch Engine 重新应用。`
+- `npm run test:large-transaction-recovery`、`npm run test:power-loss-recovery`、`npm run test:cross-session-journal`：通过。
+
+### MAP
+
+- 真实 static geometry 通过 chunked opaque-cursor transport；原版 map 与 overlay map 均完成 Bridge 读取，未另造 transport 协议。
+- renderer 通过 semantic scene → proxy scene → 调度上传 → geometry 替换；Universal Gizmo 不再暴露移动/旋转/缩放三个互斥主按钮。
+- 原版目录状态统一从 session `baseMounted` 派生，避免“已选择”与“已挂载”同时出现。
+- `npm run test:map-document-scale`：通过。
+- `npm run test:map-static-pagination-contract`：通过。
+- `npm run test:desktop-ipc-contract`：61 项通过。
+- `npm run test:ui-localization`：通过。
+- `npm run test:native-map-rollback`：真实 native MAP A→B→A 通过。
+
+## 未验证或部分结果
+
+- `unverified`：本次没有完成真实 Electron UI 中 c0000 播放按钮、时间轴拖动、骨骼实际运动和 MAP 视口最终 geometry 替换的人工/实机闭环；不能把 Bridge smoke、能力存在性或 renderer source test 写成 Electron PASS。
+- `partial`：`npm run test:verify-map-action-open` 的样本矩阵仍有既存 corpus 问题（选择的 c0000 sibling 没有对应 TAE entry，以及大型 KRAK FXR 样本超出安全读取范围）；不据此宣称 MAP/ACTION 全 release 通过。
+- `partial`：`npm run test:renderer-unit` 全量仍有 5 个既有脚本/PARAM 文本契约失败，具体为 ScriptContainer 编码/saveRawReplace 静态契约、PARAM backup handler 静态契约和 `sha256FileNow` 静态契约；本记录不把全量结果写成 PASS，也未降低断言。
+- 以上未验证项不阻止本分支提交，但阻止“mission4 全部 Electron 验收完成”或“V0.5 release 完成”的声明。
+
+## 构建与交付规则
+
+每次修改源代码或本记录后运行：
+
+```powershell
+npm run exe:build
+```
+
+本次交付前最后一次构建必须以命令退出码 0 为准；生成的 exe/发布目录为构建产物，不以未跟踪二进制替代源码与证据。
+
+最终推送前还需复核：`git diff --check`、任务范围内 diff、分支/远端、提交后的 `git ls-remote --heads origin codex/mission4-runtime-fixes`。

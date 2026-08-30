@@ -11,6 +11,9 @@
  *    等载荷字段）；行字节只经 `readRows` 按选中的物理身份返回。
  */
 
+import type { ParamDefDocument, ParamEnumDef, ParamFieldDef } from './paramdef.js';
+import type { Diagnostic } from './types.js';
+
 /** Channel source of truth：main/preload 都从这里取，不得各自手写。 */
 export const PARAM_SESSION_IPC_CHANNELS = {
   open: 'resource.openParamSession',
@@ -52,18 +55,53 @@ export interface OpenParamSessionRequest {
   sourceUri: string;
 }
 
-export interface OpenParamSessionResult {
+/**
+ * 一次 open 返回的可信 schema 投影。它和 row index 同批返回，避免 renderer
+ * 为了字段定义再发起一次「整表」读取。fieldDefs/fieldEnums 仍只是定义投影，
+ * native PARAM 格式 authority 仍在 Bridge；fieldDefsTrusted 由 main 的信任链给出。
+ */
+export interface ParamSessionMetadata {
+  typeName: string;
+  rowDataSize: number;
+  fieldDefs: ParamFieldDef[] | null;
+  fieldEnums: ParamEnumDef[] | null;
+  fieldDefsDiagnostic: { code: string; message: string } | null;
+  fieldDefsOrigin: ParamDefDocument['origin'] | null;
+  fieldDefsTrusted: boolean;
+}
+
+/** Bridge 已有 telemetry 的安全数值投影；计数是进程累计值，不是本地猜测。 */
+export interface ParamNativeTelemetry {
+  paramParse: number | null;
+  paramDecodedRows: number | null;
+  paramSessionOpen: number | null;
+  paramStructuralValidation: number | null;
+  paramSerializedRows: number | null;
+}
+
+export interface ParamSessionFailure {
+  ok: false;
+  diagnostics: Diagnostic[];
+}
+
+export interface OpenParamSessionSuccess {
+  ok: true;
   sessionToken: string;
   workspaceSessionId: string;
   sourceHash: string;
   pathSourceGeneration: number;
   rowCount: number;
+  metadata: ParamSessionMetadata;
+  nativeTelemetry: ParamNativeTelemetry | null;
   firstPage: {
     page: number;
     pageSize: number;
     rows: ParamIndexRow[];
   };
+  diagnostics: Diagnostic[];
 }
+
+export type OpenParamSessionResult = OpenParamSessionSuccess | ParamSessionFailure;
 
 export interface ReadParamIndexPageRequest {
   sourceUri: string;
@@ -73,12 +111,17 @@ export interface ReadParamIndexPageRequest {
 }
 
 export interface ParamIndexPage {
+  ok: true;
   sessionToken: string;
   rowCount: number;
   page: number;
   pageSize: number;
   rows: ParamIndexRow[];
+  nativeTelemetry: ParamNativeTelemetry | null;
+  diagnostics: Diagnostic[];
 }
+
+export type ParamIndexPageResult = ParamIndexPage | ParamSessionFailure;
 
 export interface ReadParamRowsRequest {
   sourceUri: string;
@@ -92,8 +135,70 @@ export interface ParamRowPayload {
 }
 
 export interface ParamRowPayloadBatch {
+  ok: true;
   sessionToken: string;
   rows: ParamRowPayload[];
+  nativeTelemetry: ParamNativeTelemetry | null;
+  diagnostics: Diagnostic[];
+}
+
+export type ParamRowPayloadBatchResult = ParamRowPayloadBatch | ParamSessionFailure;
+
+/** Stable renderer/main key; PARAM id alone is intentionally insufficient. */
+export function paramPhysicalRowKey(identity: ParamPhysicalRowIdentity): string {
+  return JSON.stringify([identity.rowIndex, identity.id, identity.dataHash]);
+}
+
+/**
+ * IPC-level materialization probe used by the renderer and regression smoke.
+ * `selectedPayloadRowsObserved` counts payload rows actually returned by
+ * readParamRows; it does not pretend to measure the native parser's internal
+ * memory. That boundary is reported separately by ParamNativeTelemetry.
+ */
+export interface ParamSessionMaterializationSnapshot {
+  rowCount: number;
+  indexRowsObserved: number;
+  selectedPayloadRowsObserved: number;
+  unrequestedPayloadRows: number;
+}
+
+export interface ParamSessionMaterializationTracker {
+  observeIndex(rows: readonly ParamIndexRow[]): void;
+  observePayload(
+    requested: readonly ParamPhysicalRowIdentity[],
+    returned: readonly ParamRowPayload[]
+  ): void;
+  snapshot(): ParamSessionMaterializationSnapshot;
+}
+
+export function createParamSessionMaterializationTracker(
+  rowCount: number
+): ParamSessionMaterializationTracker {
+  const normalizedRowCount = Number.isSafeInteger(rowCount) && rowCount >= 0 ? rowCount : 0;
+  const indexRows = new Set<number>();
+  const payloadRows = new Set<string>();
+  let unrequestedPayloadRows = 0;
+  return {
+    observeIndex(rows) {
+      for (const row of rows) indexRows.add(row.rowIndex);
+    },
+    observePayload(requested, returned) {
+      const requestedKeys = new Set(requested.map(paramPhysicalRowKey));
+      for (const row of returned) {
+        const key = paramPhysicalRowKey(row.identity);
+        if (!requestedKeys.has(key)) unrequestedPayloadRows += 1;
+        payloadRows.add(key);
+      }
+    },
+    snapshot() {
+      return {
+        rowCount: normalizedRowCount,
+        indexRowsObserved: indexRows.size,
+        selectedPayloadRowsObserved: payloadRows.size,
+        unrequestedPayloadRows
+      };
+    }
+  };
 }
 
 /**

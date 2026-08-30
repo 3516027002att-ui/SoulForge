@@ -7,12 +7,101 @@ internal static class ParamDocumentSessionCache
     private const long SessionTtlMs = 600_000;
     private const long MaxSessionBytes = 96L * 1024 * 1024;
 
-    internal sealed record Entry(
-        ParamNativeDocument Document,
-        ParamRoundTripReport RoundTrip,
-        string FileHash,
-        int ExpectedRowDataSize,
-        long EstimatedBytes);
+    internal sealed class Entry
+    {
+        private readonly object _materializationGate = new();
+        private readonly byte[] _sourceBytes;
+        private readonly int? _expectedRowDataSize;
+
+        private Entry(
+            byte[] sourceBytes,
+            string fileHash,
+            int expectedRowDataSize,
+            ParamNativeIndex? index,
+            ParamNativeDocument? document,
+            ParamRoundTripReport? roundTrip)
+        {
+            _sourceBytes = sourceBytes;
+            _expectedRowDataSize = expectedRowDataSize > 0 ? expectedRowDataSize : null;
+            FileHash = fileHash;
+            ExpectedRowDataSize = expectedRowDataSize;
+            Index = index;
+            Document = document;
+            RoundTrip = roundTrip;
+        }
+
+        public ParamNativeIndex? Index { get; private set; }
+        public ParamNativeDocument? Document { get; private set; }
+        public ParamRoundTripReport? RoundTrip { get; private set; }
+        public string FileHash { get; }
+        public int ExpectedRowDataSize { get; }
+        public long EstimatedBytes { get; set; }
+
+        internal static Entry Create(
+            byte[] sourceBytes,
+            string fileHash,
+            int expectedRowDataSize,
+            bool preferLazy)
+        {
+            if (preferLazy)
+            {
+                var index = ParamNativeIndex.Read(sourceBytes, expectedRowDataSize > 0 ? expectedRowDataSize : null);
+                System.Threading.Interlocked.Increment(ref BridgeTelemetry.ParamStructuralValidationCount);
+                return new Entry(sourceBytes, fileHash, expectedRowDataSize, index, null, null);
+            }
+
+            System.Threading.Interlocked.Increment(ref BridgeTelemetry.ParamParseCount);
+            var document = ParamNativeDocument.Read(sourceBytes, expectedRowDataSize > 0 ? expectedRowDataSize : null);
+            var roundTrip = document.VerifyRoundTrip();
+            System.Threading.Interlocked.Increment(ref BridgeTelemetry.ParamStructuralValidationCount);
+            return new Entry(sourceBytes, fileHash, expectedRowDataSize, null, document, roundTrip);
+        }
+
+        internal ParamNativeIndex GetIndex()
+        {
+            lock (_materializationGate)
+            {
+                if (Index is not null) return Index;
+                Index = ParamNativeIndex.Read(_sourceBytes, _expectedRowDataSize);
+                System.Threading.Interlocked.Increment(ref BridgeTelemetry.ParamStructuralValidationCount);
+                return Index;
+            }
+        }
+
+        internal ParamNativeDocument GetDocument()
+        {
+            lock (_materializationGate)
+            {
+                if (Document is not null) return Document;
+                System.Threading.Interlocked.Increment(ref BridgeTelemetry.ParamParseCount);
+                Document = ParamNativeDocument.Read(_sourceBytes, _expectedRowDataSize);
+                return Document;
+            }
+        }
+
+        internal ParamRoundTripReport GetRoundTrip()
+        {
+            lock (_materializationGate)
+            {
+                if (RoundTrip is not null) return RoundTrip;
+                var document = GetDocument();
+                RoundTrip = document.VerifyRoundTrip();
+                System.Threading.Interlocked.Increment(ref BridgeTelemetry.ParamStructuralValidationCount);
+                return RoundTrip;
+            }
+        }
+
+        internal long EstimateBytes()
+        {
+            var index = Index;
+            if (index is not null)
+                return _sourceBytes.LongLength + index.Rows.Count * 64L;
+            var document = Document;
+            return document is null
+                ? _sourceBytes.LongLength
+                : _sourceBytes.LongLength + document.Rows.Count * (long)(document.RowDataSize + 32);
+        }
+    }
 
     private sealed class Session
     {
@@ -39,13 +128,6 @@ internal static class ParamDocumentSessionCache
         try { return Path.GetFullPath(root); } catch { return root; }
     }
 
-    private static long EstimateBytes(Entry entry)
-    {
-        long total = entry.Document.SourceBytes.LongLength;
-        total += entry.Document.Rows.Count * (long)(entry.Document.RowDataSize + 32);
-        return total;
-    }
-
     internal static Entry GetOrOpen(
         string file,
         string workspaceSessionId,
@@ -53,6 +135,7 @@ internal static class ParamDocumentSessionCache
         long pathSourceGeneration,
         int expectedRowDataSize,
         string entryIdentity,
+        bool preferLazy,
         out string token,
         out bool isNew,
         out string sourceHash)
@@ -72,14 +155,12 @@ internal static class ParamDocumentSessionCache
                 isNew = false;
                 return existing.Entry;
             }
-            // single parse
-            System.Threading.Interlocked.Increment(ref BridgeTelemetry.ParamParseCount);
-            var doc = ParamNativeDocument.Read(bytes, expectedRowDataSize > 0 ? expectedRowDataSize : null);
-            var rt = doc.VerifyRoundTrip();
-            System.Threading.Interlocked.Increment(ref BridgeTelemetry.ParamStructuralValidationCount);
-            var entry = new Entry(doc, rt, hash, expectedRowDataSize, 0);
-            var est = EstimateBytes(entry);
-            entry = entry with { EstimatedBytes = est };
+            // The session editor opens a validated directory first. The legacy
+            // route remains available when callers explicitly need a full document
+            // and round-trip report for native writes.
+            var entry = Entry.Create(bytes, hash, expectedRowDataSize, preferLazy);
+            var est = entry.EstimateBytes();
+            entry.EstimatedBytes = est;
             var newToken = Convert.ToHexString(RandomNumberGenerator.GetBytes(16)).ToLowerInvariant();
             var session = new Session
             {
