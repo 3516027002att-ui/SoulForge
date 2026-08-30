@@ -1,6 +1,5 @@
 {
   "schemaVersion": "1.0.0",
-  "note": "跨版本治理的版本注册表。每条治理记录都带 targetRelease；本文件决定哪些版本的记录已冻结。冻结后对该版本条目的任何裁定字段修改都会被门禁物理拦截，因此 V0.6 的推进不可能悄悄改写 V0.5 的已批准裁定。解冻只能由用户新裁定完成，并且必须留下 unfreezeRuling 记录。",
   "currentRelease": "V0.5",
   "releases": [
     {
@@ -29,14 +28,17 @@
       "unfreezeRuling": {
         "status": "user-approved",
         "approvedBy": "user",
-        "approvedAt": "2026-08-18",
-        "decisionRef": "user-ruling-2026-08-18-revoke-me3-mod-loader-ban",
+        "approvedAt": "2026-08-30",
+        "decisionRef": "user-ruling-2026-08-30-resume-action-tae",
         "scopeItemIds": [
+          "SCOPE-BEHAVIOR-ANIMATION",
+          "SCOPE-BEHAVIOR-TAE",
           "SCOPE-BEHAVIOR-ESD",
           "SCOPE-BEHAVIOR-SCRIPT",
-          "SCOPE-RUNTIME"
+          "SCOPE-RUNTIME",
+          "SCOPE-EDITORS"
         ],
-        "reason": "用户裁定把 SCOPE-BEHAVIOR-ESD 从 V0.6 延期改回 supported，并实现状态转移边的只读解析（跟随 condition 的 targetStateOffset、读出 command call 的 commandID、检出悬空目标与指向哨兵槽的边）。写能力不在本次裁定范围内：any-esd-write-in-v05 与 raw-hex-write 保持禁止，unknown-expression-or-command-reencode 仍是永久禁令。scopeItemIds 限定只放开该条目；V0.5 其余 scopeItem 继续受 git 基线比对保护，条目删除保护不随解冻放开。 追加（同日第二次裁定）：SCOPE-BEHAVIOR-SCRIPT 放开**明文条目的源码级编辑**，新增 operation source-level-edit-plaintext-script-entries。实测明文条目共 6 个（luabnd 内 3 个 .lua + action 下 3 张符号表 txt），其余 306 个条目为 HKS 字节码（luabnd 侧 LuaP/0x50、action 侧 LuaQ/0x51 两种版本），对字节码的反编译与重编译仍延期 V0.6，禁令不变。scopeItemIds 仍限定只放开列出的两条，V0.5 其余 scopeItem 继续受 git 基线比对保护。 追加（2026-08-18 第三次裁定）：用户裁定撤销「不自实现 Mod loader 取代 me3」禁令（AGENTS.md 对应条目同日删除，交接书 §16 同步移除）。放开 SCOPE-RUNTIME.unsupportedOperations 中的 implement-mod-loader 与顶层 runtimeToolPolicy 的修订：允许自行实现 Mod loader，但须经独立切片、requiredValidation、Patch Engine 与审计边界，不得写入原版游戏目录；已完成的 me3 集成切片（W-ME3-ADAPTER-01 / W-ME3-MAIN-DETECT-02 / W-ME3-PROFILE-03）结论与 authority 不变，GameRuntimeAdapter 保持可替换接口。scopeItemIds 仍限定只放开列出的三条，V0.5 其余 scopeItem 继续受 git 基线比对保护，条目删除保护不随解冻放开。"
+        "reason": "用户裁定把 SCOPE-BEHAVIOR-ESD 从 V0.6 延期改回 supported，并实现状态转移边的只读解析（跟随 condition 的 targetStateOffset、读出 command call 的 commandID、检出悬空目标与指向哨兵槽的边）。第一阶段裁定当时只放开解析，写能力仍待后续裁定；同日第二阶段裁定已明确取代该阶段性限制，解除 SCOPE-BEHAVIOR-ANIMATION、SCOPE-BEHAVIOR-TAE、SCOPE-BEHAVIOR-ESD 与 SCOPE-EDITORS 在 V0.5/V0.6 过渡期的 writer、unknown-structure reencode、release-editor 和其他开发范围限制。追加（同日第二次裁定）：SCOPE-BEHAVIOR-SCRIPT 放开**明文条目的源码级编辑**，新增 operation source-level-edit-plaintext-script-entries。实测明文条目共 6 个（luabnd 内 3 个 .lua + action 下 3 张符号表 txt），其余 306 个条目为 HKS 字节码（luabnd 侧 LuaP/0x50、action 侧 LuaQ/0x51 两种版本）；字节码反编译、重编译与 typed mutation 尚未实现，但 V0.5/V0.6 过渡期不以版本禁令阻止其研发，完成度仍由独立实现与证据决定。scopeItemIds 仍限定只放开列出的两条，V0.5 其余 scopeItem 继续受 git 基线比对保护。追加（2026-08-18 第三次裁定）：用户裁定撤销「不自实现 Mod loader 取代 me3」禁令（AGENTS.md 对应条目同日删除，交接书 §16 同步移除）。放开 SCOPE-RUNTIME.unsupportedOperations 中的 implement-mod-loader 与顶层 runtimeToolPolicy 的修订：允许自行实现 Mod loader，但须经独立切片、requiredValidation、Patch Engine 与审计边界，不得写入原版游戏目录；已完成的 me3 集成切片（W-ME3-ADAPTER-01 / W-ME3-MAIN-DETECT-02 / W-ME3-PROFILE-03）结论与 authority 不变，GameRuntimeAdapter 保持可替换接口。scopeItemIds 仍限定只放开列出的三条，V0.5 其余 scopeItem 继续受 git 基线比对保护，条目删除保护不随解冻放开。追加（2026-08-30）：同日阶段性裁定中的限制均以第二阶段裁定为准；ACTION/TAE motion identity、Binder membership、clip/pose 预览和 TAE projection 继续推进，相关 writer、unknown-structure reencode、release editor 与其他开发均可继续，authority 仍须单独验证。追加（2026-08-30 第二次裁定）：用户进一步裁定解除 V0.5/V0.6 过渡期对 SCOPE-BEHAVIOR-ANIMATION、SCOPE-BEHAVIOR-TAE、SCOPE-BEHAVIOR-ESD 与 SCOPE-EDITORS 的 writer、unknown-structure reencode、release-editor 和其他开发范围限制；这些能力的 authority 仍必须由真实语料、native writer、Patch Engine、重读/恢复与功能验证分别建立，不能由范围放开自动推导。"
       }
     },
     {

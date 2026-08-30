@@ -72,6 +72,11 @@ export interface TaeTimelineEventWire {
 /** read-tae-document envelope 里的 animation 行：摘要 + bounded 事件时间表。 */
 export interface TaeAnimationWire {
   animId: number;
+  /**
+   * Bridge 解析出的实际动作引用 ID；缺省表示未能安全解析，不能回退猜测为 animId。
+   * 生产 wire 仅接受非负 safe integer，保持旧 envelope 的可选字段兼容性。
+   */
+  motionAnimId?: number;
   eventCount: number;
   groupCount: number;
   timesCount: number;
@@ -80,6 +85,11 @@ export interface TaeAnimationWire {
   events: TaeTimelineEventWire[];
   /** events 超出每动画上限而被截断。 */
   eventsTruncated: boolean;
+}
+
+/** 运行时 wire 守卫：motionAnimId 缺失/空值表示未解析，不得猜测为 animId。 */
+export function isSafeMotionAnimId(value: unknown): value is number {
+  return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0;
 }
 
 /** read-tae-document 的完整 envelope。 */

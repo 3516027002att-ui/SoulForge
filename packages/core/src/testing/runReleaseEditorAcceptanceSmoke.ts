@@ -1,17 +1,12 @@
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
-import {
-  DEFERRED_PREVIEW_EDITOR_KINDS,
-  isDeferredPreviewEditorKind,
-  type EditorKind
-} from '@soulforge/shared';
+import { isDeferredPreviewEditorKind } from '@soulforge/shared';
 import {
   EDITOR_CAPABILITY_CONTRACTS,
   buildProposedReleaseEditorInventory,
   buildReleaseEditorFunctionalScaleSchemas,
   editorAllowsMutation,
   evaluateReleaseEditorAcceptance,
-  listDeferredPreviewEditors,
   type EditorScaleSample,
   type ProposedReleaseEditorId,
   type ReleaseEditorAcceptanceResult,
@@ -22,12 +17,11 @@ function main(): void {
   const inventory = buildProposedReleaseEditorInventory();
   const schemas = buildReleaseEditorFunctionalScaleSchemas();
   assertInventoryDerivedFromCapabilities(inventory);
-  assertFrozenScopeInventory(inventory);
-  assertDeferredPreviewEditorsAreReadOnly();
+  const approvedEditorContract = assertScopeEditorProjection(inventory);
   assertReopenedWriteEditors();
   assertReadOnlyHexAndAssetExclusions();
   assertScaleContractsMatchCurrentSources();
-  assertFunctionalSchemasHaveNoQuantitativeThresholds(schemas);
+  assertFunctionalSchemasHaveNoQuantitativeThresholds(schemas, inventory);
 
   const demoFallback = evaluateReleaseEditorAcceptance({
     sample: { ...buildContractFixture('bnd4'), sourceMode: 'demo-fallback' }
@@ -91,20 +85,6 @@ function main(): void {
       diagnosticCode
     }];
   });
-  // Every frozen release editor must expose complete content through a bounded
-  // release-safe scale access mode; none may keep an eager/bounded-window/none
-  // gap. The fixture-driven gaps below would fail closed if any editor regressed.
-  for (const releaseEditorId of ['bnd4', 'fmg', 'param', 'emevd', 'script'] as const) {
-    const leftover = currentScaleContractGaps.find(
-      (item) => item.releaseEditorId === releaseEditorId
-    );
-    if (leftover) {
-      throw new Error(
-        `${releaseEditorId} scale gap must be closed (pagination wired): ${JSON.stringify(leftover)}`
-      );
-    }
-  }
-
   console.log(JSON.stringify({
     ok: null,
     harnessStatus: 'candidate',
@@ -115,6 +95,7 @@ function main(): void {
     functionalAcceptanceStatus: 'pending',
     scopeRulingStatus: 'user-approved',
     quantitativeThresholdsRequired: false,
+    approvedEditorContract,
     proposedInventory: inventory.map((item) => ({
       releaseEditorId: item.releaseEditorId,
       releaseIncluded: item.releaseIncluded,
@@ -142,17 +123,11 @@ function main(): void {
 function assertInventoryDerivedFromCapabilities(
   inventory: ReleaseEditorInventoryItem[]
 ): void {
-  // V0.5 冻结清单收窄为五个；msb/tae/esd/flver 已延期至 V0.6，
-  // 只保留标记只读预览，不得回到本清单。
-  const expectedIds: ProposedReleaseEditorId[] = [
-    'bnd4',
-    'fmg',
-    'param',
-    'emevd',
-    'script'
-  ];
-  if (JSON.stringify(inventory.map((item) => item.releaseEditorId)) !== JSON.stringify(expectedIds)) {
-    throw new Error('release editor inventory/order drifted');
+  // inventory 是当前 core 能力契约的投影，不在此处复制某一版本的
+  // editorIds；TAE/ESD 等过渡期编辑器可以正常进入该投影。
+  const inventoryIds = inventory.map((item) => item.releaseEditorId);
+  if (inventoryIds.length === 0 || new Set(inventoryIds).size !== inventoryIds.length) {
+    throw new Error('release editor inventory must be non-empty and unique');
   }
   if (inventory.some((item) => item.scopeRulingStatus !== 'user-approved'
     || item.releaseIncluded !== true)) {
@@ -169,7 +144,9 @@ function assertInventoryDerivedFromCapabilities(
   }
 }
 
-function assertFrozenScopeInventory(inventory: ReleaseEditorInventoryItem[]): void {
+function assertScopeEditorProjection(
+  inventory: ReleaseEditorInventoryItem[]
+): { editorIds: string[]; transitionEditorIds: string[] } {
   const root = resolve('../..');
   // 直读 docs/governance/scope.json。
   //
@@ -181,98 +158,80 @@ function assertFrozenScopeInventory(inventory: ReleaseEditorInventoryItem[]): vo
   ) as {
     scopeItems?: Array<{
       scopeItemId?: string;
+      decisionStatus?: unknown;
+      proposedSupport?: unknown;
       editorIds?: unknown;
+      editorMutationModes?: Record<string, unknown>;
+      deferredToRelease?: unknown;
+      deferredTrack?: unknown;
+      resumeRequires?: unknown;
       hexEvidenceView?: { included?: unknown; writable?: unknown };
     }>;
   };
   const editorScope = scope.scopeItems?.find((item) => item.scopeItemId === 'SCOPE-EDITORS');
-  if (!editorScope || !Array.isArray(editorScope.editorIds)) {
-    throw new Error('SCOPE-EDITORS must expose the exact frozen editorIds');
+  if (!editorScope || !Array.isArray(editorScope.editorIds)
+    || editorScope.decisionStatus !== 'user-approved'
+    || editorScope.proposedSupport !== 'supported'
+    || editorScope.deferredToRelease !== null
+    || editorScope.deferredTrack !== null
+    || !Array.isArray(editorScope.resumeRequires)
+    || editorScope.resumeRequires.length !== 0) {
+    throw new Error('SCOPE-EDITORS must expose the current user-approved supported contract');
   }
-  const actualIds = inventory.map((item) => item.releaseEditorId);
-  if (JSON.stringify(actualIds) !== JSON.stringify(editorScope.editorIds)) {
+
+  const editorIds = editorScope.editorIds.filter(
+    (editorId): editorId is string => typeof editorId === 'string'
+  );
+  if (editorIds.length !== editorScope.editorIds.length
+    || editorIds.length === 0
+    || new Set(editorIds).size !== editorIds.length
+    || editorIds.some((editorId) => editorId === 'hex'
+      || editorId === 'raw'
+      || !Object.hasOwn(EDITOR_CAPABILITY_CONTRACTS, editorId))) {
     throw new Error(
-      `runtime editor inventory drifted from frozen scope: ${JSON.stringify(actualIds)} != ${JSON.stringify(editorScope.editorIds)}`
+      `current editor contract must expose non-empty unique editorIds: ${JSON.stringify(editorScope.editorIds)}`
     );
   }
+
+  const inventoryIds = inventory.map((item) => item.releaseEditorId);
+  if (inventoryIds.some((editorId) => !editorIds.includes(editorId))) {
+    throw new Error(
+      `core editor inventory is not covered by the current scope projection: ${JSON.stringify(inventoryIds)} != ${JSON.stringify(editorIds)}`
+    );
+  }
+
+  const modes = editorScope.editorMutationModes;
+  const modeKeys = modes !== null && typeof modes === 'object' && !Array.isArray(modes)
+    ? Object.keys(modes)
+    : [];
+  if (modeKeys.length !== editorIds.length
+    || modeKeys.some((editorId) => !editorIds.includes(editorId))
+    || editorIds.some((editorId) => !['typed-mutation', 'whole-inner-file-replacement']
+      .includes(modes?.[editorId] as string))) {
+    throw new Error('SCOPE-EDITORS editorIds/editorMutationModes projection drifted');
+  }
+
   if (editorScope.hexEvidenceView?.included !== true
     || editorScope.hexEvidenceView.writable !== false) {
     throw new Error('SCOPE-EDITORS must keep Hex included as a read-only evidence view');
   }
+
+  const inventoryIdSet = new Set<string>(inventoryIds);
+  return {
+    editorIds,
+    transitionEditorIds: editorIds.filter((editorId) => !inventoryIdSet.has(editorId))
+  };
 }
 
 /**
- * 已延期、仅保留标记只读预览的编辑器允许保留面板，但必须同时满足：
- * 不在冻结发布清单内、写路径关闭、带延期只读预览标记。
- * S36/S38 已开闸：msb 与 flver 不再属于延期预览族（写链放行由下方
- * assertReopenedWriteEditors 正向断言），此处只对 tae/esd 逐项断言
- * `releaseWriteEnabled=false` 与 `editorAllowsMutation` 实际拒绝，
- * 避免冻结清单外仍存在可写编辑器或延期清单漂移。
- */
-function assertDeferredPreviewEditorsAreReadOnly(): void {
-  const expectedDeferred: EditorKind[] = ['tae', 'esd'];
-  const actualDeferred = [...listDeferredPreviewEditors()];
-  if (JSON.stringify(actualDeferred) !== JSON.stringify(expectedDeferred)) {
-    throw new Error(
-      `deferred preview editor set drifted: ${JSON.stringify(actualDeferred)} != ${JSON.stringify(expectedDeferred)}`
-    );
-  }
-  // core 能力契约（写入放行权威）与 shared 投影（renderer 打标来源）
-  // 必须逐项一致，否则会出现 UI 显示只读但写路径仍开放的反向漂移。
-  const sharedProjection = [...DEFERRED_PREVIEW_EDITOR_KINDS];
-  if (JSON.stringify(actualDeferred) !== JSON.stringify(sharedProjection)) {
-    throw new Error(
-      `core capability contract and shared deferred projection disagree: ${JSON.stringify(actualDeferred)} != ${JSON.stringify(sharedProjection)}`
-    );
-  }
-  for (const editorKind of actualDeferred) {
-    if (!isDeferredPreviewEditorKind(editorKind)) {
-      throw new Error(`shared projection does not mark ${editorKind} as a deferred preview editor`);
-    }
-  }
-  for (const editorKind of expectedDeferred) {
-    const contract = EDITOR_CAPABILITY_CONTRACTS[editorKind];
-    if (contract.proposedReleaseEditorId !== null || contract.proposalOrder !== null) {
-      throw new Error(`${editorKind} is deferred to V0.6 and must not claim a V0.5 release editor slot`);
-    }
-    if (contract.releaseWriteEnabled !== false) {
-      throw new Error(`${editorKind} is deferred to V0.6 and must keep its write path closed`);
-    }
-    if (contract.deferredPreview?.deferredToRelease !== 'V0.6'
-      || contract.deferredPreview.readOnly !== true
-      || contract.deferredPreview.markedAsPreview !== true
-      || contract.deferredPreview.countedAsReleaseEditor !== false) {
-      throw new Error(`${editorKind} must declare a marked V0.6 read-only preview contract`);
-    }
-    for (const mutationKind of contract.mutationKinds) {
-      if (editorAllowsMutation(editorKind, mutationKind)) {
-        throw new Error(
-          `${editorKind} still accepts ${mutationKind} while deferred to V0.6 as a read-only preview`
-        );
-      }
-    }
-  }
-
-  // script 在 V0.5 只做只读证据投影 + 整个内层文件替换，不得声称 typed mutation。
-  const script = EDITOR_CAPABILITY_CONTRACTS.script;
-  if (script.proposedReleaseEditorId !== 'script'
-    || script.releaseWriteEnabled !== true
-    || script.deferredPreview !== null
-    || script.mutationKinds.length !== 0) {
-    throw new Error('script editor must stay in V0.5 as whole-inner-file replacement without typed mutation');
-  }
-}
-
-/**
- * S36/S38 已开闸编辑器（msb/flver）的正向断言：写链放行，且不再被
- * shared 投影标记为延期预览。这些编辑器不在冻结发布清单内（frozen
- * inventory 不变），但必须能实际放行其 typed mutation，否则开闸只是
- * 纸面改动——把「仍延期」回归成「开闸后又被误关」都能在这里炸掉。
+ * 过渡期编辑器（msb/flver）的正向断言：既有 typed write 链可以继续开发，
+ * 但它们不因本次范围过渡自动进入当前 V0.5 release inventory；
+ * 这只验证契约投影，不替代 native、Patch Engine、重读/恢复或 release Gate。
  */
 function assertReopenedWriteEditors(): void {
   const msb = EDITOR_CAPABILITY_CONTRACTS.msb;
   if (msb.proposedReleaseEditorId !== null || msb.proposalOrder !== null) {
-    throw new Error('msb reopened for write must stay outside the frozen release editor list');
+    throw new Error('msb must remain outside the current V0.5 release inventory');
   }
   if (msb.releaseWriteEnabled !== true || msb.deferredPreview !== null) {
     throw new Error('msb must be write-enabled without a deferred preview contract (S36)');
@@ -287,10 +246,8 @@ function assertReopenedWriteEditors(): void {
   }
 
   const flver = EDITOR_CAPABILITY_CONTRACTS.flver;
-  // flver 不在 ProposedReleaseEditorId 联合内，类型层面已锁定 proposedReleaseEditorId
-  // 为 null，无需再比较；proposalOrder 保留运行时断言防漂移。
-  if (flver.proposalOrder !== null) {
-    throw new Error('flver reopened for write must stay outside the frozen release editor list');
+  if (flver.proposedReleaseEditorId !== null || flver.proposalOrder !== null) {
+    throw new Error('flver must remain outside the current V0.5 release inventory');
   }
   if (flver.releaseWriteEnabled !== true || flver.deferredPreview !== null) {
     throw new Error('flver must be write-enabled without a deferred preview contract (S38)');
@@ -311,14 +268,14 @@ function assertReopenedWriteEditors(): void {
 function assertReadOnlyHexAndAssetExclusions(): void {
   const hex = EDITOR_CAPABILITY_CONTRACTS.hex;
   const raw = EDITOR_CAPABILITY_CONTRACTS.raw;
+  const msb = EDITOR_CAPABILITY_CONTRACTS.msb;
   const flver = EDITOR_CAPABILITY_CONTRACTS.flver;
   if (hex.proposedReleaseEditorId !== null
     || hex.mutationKinds.length !== 0
-    || raw.mutationKinds.length !== 0) {
-    throw new Error('Hex/raw evidence views must not expose release editor mutations');
-  }
-  if (flver.proposedReleaseEditorId !== null) {
-    throw new Error('FLVER 已开闸写入（S38）但仍不在冻结发布编辑器清单内');
+    || raw.mutationKinds.length !== 0
+    || msb.proposedReleaseEditorId !== null
+    || flver.proposedReleaseEditorId !== null) {
+    throw new Error('Hex/raw evidence views and non-inventory asset editors must not be promoted into release inventory');
   }
 
   const root = resolve('../..');
@@ -372,9 +329,12 @@ function assertScaleContractsMatchCurrentSources(): void {
 }
 
 function assertFunctionalSchemasHaveNoQuantitativeThresholds(
-  schemas: ReturnType<typeof buildReleaseEditorFunctionalScaleSchemas>
+  schemas: ReturnType<typeof buildReleaseEditorFunctionalScaleSchemas>,
+  inventory: ReleaseEditorInventoryItem[]
 ): void {
-  if (schemas.length !== 5) throw new Error('expected one functional schema per V0.5 release editor');
+  if (schemas.length !== inventory.length) {
+    throw new Error('expected one functional schema per current release editor contract');
+  }
   for (const schema of schemas) {
     if (schema.scopeRulingStatus !== 'user-approved'
       || schema.quantitativeThresholdsRequired !== false

@@ -8,13 +8,23 @@
  * 分页 channel 是否注册、preload 是否暴露分页方法这两组断言已迁到真实执行
  * 观测门禁 `npm run test:desktop-ipc-contract`。
  */
-import { readFileSync } from 'node:fs';
+import { readdirSync, readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 
 function main(): void {
   const root = resolve('../..');
   const preload = readFileSync(resolve(root, 'apps/desktop/src/preload/index.ts'), 'utf8');
-  const ipc = readFileSync(resolve(root, 'apps/desktop/src/main/ipc.ts'), 'utf8');
+  // The composition root delegates domain handlers to split modules. Keep the
+  // static contract anchored to the actual production handler sources instead
+  // of silently checking only the root registration file.
+  const ipcRoot = resolve(root, 'apps/desktop/src/main/ipc');
+  const ipc = [
+    readFileSync(resolve(root, 'apps/desktop/src/main/ipc.ts'), 'utf8'),
+    ...readdirSync(ipcRoot)
+      .filter((name) => name.endsWith('.ts') && !name.endsWith('.test.ts'))
+      .sort()
+      .map((name) => readFileSync(resolve(ipcRoot, name), 'utf8'))
+  ].join('\n');
   const bridgeStaging = readFileSync(
     resolve(root, 'packages/core/src/editing/bridgeStaging.ts'),
     'utf8'

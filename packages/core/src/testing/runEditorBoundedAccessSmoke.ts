@@ -25,7 +25,7 @@
  * raise any editor/native authority above the acceptance contract's candidate
  * ceiling. Electron functional acceptance remains separately gated.
  */
-import { readFileSync } from 'node:fs';
+import { readdirSync, readFileSync } from 'node:fs';
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
@@ -662,7 +662,17 @@ function assertIpcSharesWindowHelper(): void {
   // regardless of the caller's cwd (npm -w runs from packages/core, direct
   // `node dist/testing/...` runs from the repo root).
   const root = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..', '..', '..');
-  const ipc = readFileSync(resolve(root, 'apps/desktop/src/main/ipc.ts'), 'utf8');
+  // The composition root delegates PARAM handlers to the split domain module;
+  // inspect both production sources so the static guard cannot miss the real
+  // paged payload path.
+  const ipcRoot = resolve(root, 'apps/desktop/src/main/ipc');
+  const ipc = [
+    readFileSync(resolve(root, 'apps/desktop/src/main/ipc.ts'), 'utf8'),
+    ...readdirSync(ipcRoot)
+      .filter((name) => name.endsWith('.ts') && !name.endsWith('.test.ts'))
+      .sort()
+      .map((name) => readFileSync(resolve(ipcRoot, name), 'utf8'))
+  ].join('\n');
   // The desktop main must import the shared window helper (single authority) and
   // must not define a private copy that could drift from this smoke.
   if (!ipc.includes('normalizePageWindow')) throw new Error('ipc.ts 必须使用共享 normalizePageWindow。');

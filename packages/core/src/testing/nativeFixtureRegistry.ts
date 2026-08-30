@@ -19,7 +19,7 @@ interface NativeFixtureRegistry {
  * 查询 registry 是否登记了某个 testRole。
  *
  * 为什么需要它：`resolveNativeFixture` 对「角色未登记」抛 ROLE_MISSING 是正确的
- * ——静默回落会让 smoke 假装验证过。但对已延期到 V0.6 的能力（ESD/TAE 等），
+ * ——静默回落会让 smoke 假装验证过。对当前环境没有登记样本的能力，
  * 「本机没有该样本」是合法状态，应当诚实跳过而不是硬失败。两者必须由调用方
  * 区分，因为只有调用方知道该能力在本版是否属于必须验证的范围。
  *

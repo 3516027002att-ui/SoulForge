@@ -393,6 +393,46 @@ internal sealed class TaeNativeDocument
         // S17：参数体 hex 预览上限（无模板布局时的兜底截断）。
         const int paramHexLimit = 64;
         var invalidTimeRangeCount = CountInvalidTimeRanges();
+        var motionReferences = new Dictionary<long, ActionAnimationSemantics.TaeMotionReference>();
+        var motionAnimationIds = new Dictionary<long, long>();
+        var motionDiagnostics = new List<Diagnostic>();
+        foreach (var animation in Animations)
+        {
+            try
+            {
+                var reference = SekiroTaeMotionReferenceReader.ReadOne(SourceBytes, animation);
+                if (!motionReferences.TryAdd(animation.AnimId, reference))
+                {
+                    motionDiagnostics.Add(new Diagnostic(
+                        "error",
+                        "TAE_MOTION_IDENTITY_DUPLICATE_ANIMATION_ID",
+                        $"TAE animation {animation.AnimId} 出现重复 ID，motion identity 无法唯一确定。"));
+                }
+            }
+            catch (Exception ex) when (ex is InvalidDataException or NotSupportedException)
+            {
+                motionDiagnostics.Add(new Diagnostic(
+                    "warning",
+                    "TAE_MOTION_REFERENCE_UNAVAILABLE",
+                    $"TAE animation {animation.AnimId} 的 motion reference 无法可靠投影：{ex.Message}"));
+            }
+        }
+        foreach (var animation in Animations)
+        {
+            if (!motionReferences.ContainsKey(animation.AnimId)) continue;
+            try
+            {
+                motionAnimationIds[animation.AnimId] =
+                    ActionAnimationSemantics.ResolveMotionAnimationId(motionReferences, animation.AnimId);
+            }
+            catch (Exception ex) when (ex is InvalidDataException or NotSupportedException)
+            {
+                motionDiagnostics.Add(new Diagnostic(
+                    "warning",
+                    "TAE_MOTION_IDENTITY_UNRESOLVED",
+                    $"TAE animation {animation.AnimId} 的 motion identity 无法可靠解析：{ex.Message}"));
+            }
+        }
         // 合并上游诊断（如 anibnd 提取 TAE 的 TAE_FROM_ANIBND_EXTRACTED），
         // 使预览面板能显示提取来源而不是只见文档自身诊断。
         var diagnostics = (extraDiagnostics ?? Array.Empty<Diagnostic>())
@@ -405,6 +445,7 @@ internal sealed class TaeNativeDocument
                         $"检测到 {invalidTimeRangeCount} 个事件时间范围非法（startTime > endTime 或非有限值），timeline 投影降级为 partial。")
                 }
                 : Array.Empty<Diagnostic>())
+            .Concat(motionDiagnostics)
             .ToArray();
         return new
         {
@@ -424,6 +465,9 @@ internal sealed class TaeNativeDocument
                 groupCount = a.EventGroupCount,
                 timesCount = a.TimesCount,
                 hkxName = a.HkxName,
+                motionAnimId = motionAnimationIds.TryGetValue(a.AnimId, out var motionAnimId)
+                    ? motionAnimId
+                    : (long?)null,
                 events = a.Events.Take(timelineEventLimit).Select(e =>
                 {
                     // S17：参数体按模板布局解码（4 字节槽对齐）；无模板时给有界 hex。
@@ -451,7 +495,7 @@ internal sealed class TaeNativeDocument
             eventTypes = EventTypes,
             roundTrip = report,
             diagnostics = diagnostics,
-            authority = invalidTimeRangeCount > 0 ? "partial" : "candidate"
+            authority = invalidTimeRangeCount > 0 || motionDiagnostics.Count > 0 ? "partial" : "candidate"
         };
     }
 

@@ -11,12 +11,11 @@
  * 这里把结构收敛成一个组件，行选择走共用的 selectableRowAttributes
  * （键盘契约由其单测锁定），各面板只提供「条目怎么投影成属性对」。
  *
- * ── 只读是设计而非欠缺 ──
+ * ── 只读是视图职责而非版本性门禁 ──
  *
- * ESD/TAE/FLVER 已由治理层延期至 V0.6（shared 的
- * DEFERRED_PREVIEW_EDITOR_KINDS）。TPF 不在延期清单里，它的只读是另一回事
- * （写回链尚未接通），所以延期横幅由调用方按实际情况传入，本组件不替它们
- * 编造理由 —— 把「延期」和「未实现」混成一句话会让用户无法判断该等还是该报 bug。
+ * 该组件只负责通用条目/属性展示。仍处于 deferred 的条目可以由调用方显式
+ * 传入延期横幅；已解除版本限制的 TAE/ESD/FLVER 等编辑器不应再传入该字段，
+ * 也不应把视图只读误读成写链被治理层禁止。
  *
  * ── 全量渲染 ──
  *
@@ -56,8 +55,8 @@ export interface ReadOnlyEntryWorkbenchProps {
   entries: ReadOnlyEntry[];
   /** 筛选框占位文案。 */
   filterPlaceholder: string;
-  /** 非空时显示延期标记与说明。 */
-  deferredPreviewRelease?: 'V0.6';
+  /** 仅对治理仍标记 deferred 的条目显示延期标记与说明。 */
+  deferredPreviewRelease?: string;
   /**
    * 只读原因说明（延期之外的情形，例如写回链未接通）。
    * 与 deferredPreviewRelease 互不替代 —— 两者含义不同。

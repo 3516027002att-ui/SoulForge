@@ -10,7 +10,7 @@ import type {
   TaeExport,
   TaeEventSymbol
 } from '@soulforge/shared';
-import { formatAnimCode, formatChrId, formatMapArea } from '@soulforge/shared';
+import { formatAnimCode, formatChrId, formatMapArea, isSafeMotionAnimId } from '@soulforge/shared';
 import type { WorkspaceIndex } from './workspaceIndex.js';
 import { isKnownResourceKind } from '../workspace/resourceKinds.js';
 
@@ -246,6 +246,7 @@ function parseMsgExport(value: unknown, sourceUri: string): ParsedValue<MsgExpor
 function parseTaeExport(value: unknown, sourceUri: string, sourcePath: string | undefined): ParsedValue<TaeExport> {
   const record = asRecord(value);
   const exportProvenance = sourceProvenance(record);
+  const diagnostics: Diagnostic[] = [];
   const chrId = formatChrId(sourcePath ?? '') ?? formatChrId(sourceUri) ?? null;
   if (!chrId) {
     return {
@@ -273,11 +274,31 @@ function parseTaeExport(value: unknown, sourceUri: string, sourcePath: string | 
   }
 
   const animations: TaeExport['animations'] = [];
+  const seenAnimIds = new Set<number>();
   for (let animIndex = 0; animIndex < animationsRaw.length; animIndex += 1) {
     const anim = asRecord(animationsRaw[animIndex]);
     const animId = asNumber(anim.animId);
     if (animId === null) {
       return { diagnostics: [invalidField(sourceUri, `animations[${animIndex}].animId`)] };
+    }
+    if (seenAnimIds.has(animId)) {
+      diagnostics.push({
+        severity: 'warning',
+        code: 'TAE_ANIMATION_ID_DUPLICATE',
+        message: `TAE 文档中的 animId=${animId} 重复；按 sourceUri + animId 的读取必须失败关闭。`,
+        sourceUri
+      });
+    } else {
+      seenAnimIds.add(animId);
+    }
+    const motionAnimId = isSafeMotionAnimId(anim.motionAnimId) ? anim.motionAnimId : null;
+    if (anim.motionAnimId !== undefined && anim.motionAnimId !== null && motionAnimId === null) {
+      diagnostics.push({
+        severity: 'warning',
+        code: 'TAE_MOTION_ANIM_ID_INVALID',
+        message: `TAE animation animId=${animId} 的 motionAnimId 不是非负 safe integer，已拒绝该 identity，禁止回退猜测为 animId。`,
+        sourceUri
+      });
     }
     const eventsRaw = anim.events;
     if (!Array.isArray(eventsRaw) || anim.eventsTruncated === true) {
@@ -324,6 +345,7 @@ function parseTaeExport(value: unknown, sourceUri: string, sourcePath: string | 
     animations.push({
       animId,
       code,
+      ...(motionAnimId === null ? {} : { motionAnimId }),
       ...(asString(anim.hkxName) ? { hkxName: asString(anim.hkxName) } : {}),
       events
     });
@@ -331,7 +353,7 @@ function parseTaeExport(value: unknown, sourceUri: string, sourcePath: string | 
 
   return {
     value: { chrId, sourceUri, ...exportProvenance, animations },
-    diagnostics: []
+    diagnostics
   };
 }
 

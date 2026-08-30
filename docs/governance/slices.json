@@ -274,8 +274,8 @@
         "D-BEHAVIOR"
       ],
       "blockerRefs": [],
-      "goal": "维持 script 容器（luabnd / action *.hks）的 magic/reference inventory 为只读证据视图；TAE/ESD native document parser 已存在但随 TAE/ESD 一并延期 V0.6",
-      "evidence": "script 容器 magic/reference inventory 已冻结（test:script-container-evidence 36 合成 case + 真实 leg：真实 luabnd aicommon.luabnd.dcx 301 条目/256 采样、扩展名 {lua:299,luagnl:1,luainfo:1}、magic 11/12 命中 \\x1bLuaP、文本 goal_list.lua magicVerified=false 如实、条目名脱敏无绝对路径；真实字节 magic 修正：Sekiro luabnd 编译字节码为 \\x1bLuaP（0x50）而非此前文档声称的 \\x1bLuaQ，且容器内 .lua 为字节码+文本列表混合；probe:behavior-headers 增强（\\x1bLuaP/HKX TAG0/TAE/ESD fsSL/LUAINFO 识别，SOULFORGE_SEKIRO_GAME_ROOT 缺失失败关闭）；sanitizeEntryName 导出供分页通道复用）；文本优先裁定后本切片范围收窄为 script 容器（luabnd / action *.hks）的 magic/reference inventory：probe:behavior-headers 本机研究工具已观察容器扩展名分布与 HKX/Lua/ESD 头部，并确证 .hks/.lua 内层为 \\x1bLuaQ 编译字节码（非文本源码），故 V0.5 只做只读证据视图；TAE/ESD native document parser（939 anims / 23711 events / 81 event types；36 groups / 295 states / 315 conditions / RPN bytecode）已存在但随 TAE/ESD 一并延期 V0.6",
+      "goal": "维持 script 容器（luabnd / action *.hks）的 magic/reference inventory 为只读证据视图；TAE/ESD native document parser 的既有登记能力保留为独立只读基础，不由本切片声明 ACTION identity 或 writer 完成",
+      "evidence": "script 容器 magic/reference inventory 已冻结（test:script-container-evidence 36 合成 case + 真实 leg：真实 luabnd aicommon.luabnd.dcx 301 条目/256 采样、扩展名 {lua:299,luagnl:1,luainfo:1}、magic 11/12 命中 \\x1bLuaP、文本 goal_list.lua magicVerified=false 如实、条目名脱敏无绝对路径；真实字节 magic 修正：Sekiro luabnd 编译字节码为 \\x1bLuaP（0x50）而非此前文档声称的 \\x1bLuaQ，且容器内 .lua 为字节码+文本列表混合；probe:behavior-headers 增强（\\x1bLuaP/HKX TAG0/TAE/ESD fsSL/LUAINFO 识别，SOULFORGE_SEKIRO_GAME_ROOT 缺失失败关闭）；sanitizeEntryName 导出供分页通道复用）。TAE/ESD native document parser 的既有登记样本仍由 Bridge 基础能力保留；ACTION motion identity、Binder membership 与预览调用由独立切片验证，不由本记录提前提升 authority",
       "hardPrerequisites": "合法 Sekiro corpus root/registry 已可用；不得套用其他游戏结论或把扩展名计数当 parser；探针输出不提交、不提升 authority；不得把字节码反汇编呈现为可编辑源码",
       "entryPoints": [
         "packages/core/src/testing/probeBehaviorHeaders.ts",
@@ -285,6 +285,31 @@
       ],
       "requiredValidation": "npm run bridge:verify:tae、npm run bridge:verify:esd；validation-unfrozen：script 容器 magic/reference inventory smoke",
       "declaresUnfrozenValidation": true
+    },
+    {
+      "sliceId": "W-ACTION-MOTION-IDENTITY-01",
+      "targetRelease": "V0.5",
+      "lifecycle": "active",
+      "authority": "candidate",
+      "authorityCap": "partial",
+      "authorityCapNote": "cap=partial；只覆盖真实 TAE motion identity、同 character family 的 ANIBND membership、只读 clip/pose IPC 与缓存失效，不覆盖 HKX 全语义、writer 或游戏加载",
+      "capabilityIds": [
+        "D-BEHAVIOR"
+      ],
+      "blockerRefs": [],
+      "goal": "完成 ACTION/TAE 链：TAE animId → motionAnimId → 同 character family 的 ANIBND Binder entry 唯一定位 → Bridge clip/pose；补齐 shared/core projection、overlay shadow、NOT_FOUND/AMBIGUOUS 失败关闭、base remount/source revision invalidation 与定向回归，并为后续 writer/editor 扩展保留同一 identity 入口",
+      "hardPrerequisites": "用户已解除 SCOPE-BEHAVIOR-ANIMATION、SCOPE-BEHAVIOR-TAE、SCOPE-BEHAVIOR-ESD 与 SCOPE-EDITORS 的 V0.5/V0.6 过渡期版本限制；writer、unknown-structure reencode 与 release editor 可继续独立开发；现有 bridge/SoulForge.Bridge/TaeNativeDocument.cs 未提交改动必须保留",
+      "entryPoints": [
+        "packages/shared/src/resourceSymbols.ts",
+        "packages/core/src/indexing/ingestBridgeResult.ts",
+        "packages/core/src/indexing/workspaceIndex.ts",
+        "packages/core/src/action/taeAnimationBridge.ts",
+        "apps/desktop/src/main/ipc/action.ts",
+        "apps/desktop/src/main/ipc/workspace.ts",
+        "bridge/SoulForge.Bridge/TaeNativeDocument.cs"
+      ],
+      "requiredValidation": "npm run test:action-motion-identity、npm run bridge:verify:tae、npm run typecheck、npm test、npm run build",
+      "declaresUnfrozenValidation": false
     },
     {
       "sliceId": "W-FLVER-READ-01",
@@ -669,13 +694,13 @@
       "lifecycle": "completed",
       "authority": "candidate",
       "authorityCap": "candidate",
-      "authorityCapNote": "cap=candidate；harness 不等于五个编辑器发布通过",
+      "authorityCapNote": "cap=candidate；harness 不等于当前编辑器 inventory 的真实发布通过",
       "capabilityIds": [
         "REL-F"
       ],
       "blockerRefs": [],
-      "goal": "已建立冻结五编辑器 inventory（BND4/FMG/PARAM/EMEVD/script）、authority/revision/typed mutation、只读 Hex、完整有界访问与提前 pass 失败关闭 harness；harness 同时断言 msb/tae/esd/flver 四个 V0.6 延期预览编辑器在 core 与 shared 两侧一致且写入被拒",
-      "hardPrerequisites": "不运行真实 Electron 真实文档功能验收；不以 synthetic/demo、FLVER 资产查看器或固定窗口冒充冻结编辑器完成；不要求量化容量/延迟门槛；延期预览编辑器不计入发布编辑器数",
+      "goal": "已建立当前编辑器 inventory、authority/revision/typed mutation、只读 Hex、完整有界访问与提前 pass 失败关闭 harness；2026-08-30 过渡裁定后，TAE/ESD 进入当前 inventory，MSB/FLVER 保留独立 typed write 路径并继续由各自验证负责",
+      "hardPrerequisites": "不运行真实 Electron 真实文档功能验收；不以 synthetic/demo、FLVER 资产查看器或固定窗口冒充编辑器完成；不要求量化容量/延迟门槛；任何编辑器仍须以对应 native、Patch Engine、revision、重读/恢复和功能证据建立完成度",
       "entryPoints": [
         "packages/core/src/editing/releaseEditorAcceptance.ts",
         "packages/core/src/editing/editorCapabilityContract.ts",
@@ -697,8 +722,8 @@
       ],
       "blockerRefs": [],
       "goal": "关闭剩余编辑器的规模访问缺口：script 仍为 scaleAccess=none，需要有界访问",
-      "evidence": "script 编辑器规模访问已升级为 release-safe pagination（listScriptContainerEntriesPage 主进程分页通道 + ScriptContainerPanel 显式分页，currentScaleContractGaps=[]——bnd4/fmg/param/emevd/script 五编辑器全部 release-safe）；bnd4/fmg/param 规模访问已升级为 release-safe pagination（主进程分页通道 resource.listContainerChildrenPage/readFmgPage/readParamPage，FMG_PAGE_SIZE=100/PARAM_PAGE_SIZE=20，renderer 面板按页导航不再 eager 物化；editorCapabilityContract bnd4/fmg/param scaleAccess=pagination；currentScaleContractGaps 仅剩 script）；script 编辑器 scaleAccess=none 缺口已关闭（提交 d4cc013 升级为 pagination）；inventory 已精确冻结为 BND4/FMG/PARAM/EMEVD/script 五项（文本优先裁定；MSB/TAE/ESD/FLVER 延期 V0.6 只读预览，不计入本版）；EMEVD 编辑器规模访问已从 eager 提升为 pagination（完整文档分页组装 readFullEmevdDocumentViaBridge + DSL 模板行数截断 renderEmevdPatchDslBounded（事件块边界截断 + 注释标记，patch no-op 语义安全）+ 事件列表分页每页 200 + loadFullDslTemplate 显式完整加载；currentScaleContractGaps 不再含 EMEVD）；前端工作台已补（ScriptContainerPanel.tsx script 只读证据 + 用户字节整内层替换；Bnd4WorkbenchPanel.tsx BND4 容器工作台；ParamDefPanel 接真实行数据 + 字段级编辑）；script 规模缺口已闭环（currentScaleContractGaps=[]，bnd4/fmg/param/emevd/script 五编辑器全部 release-safe pagination）；真实文档完整有界访问已通过（test:editor-bounded-access 真实腿：script luabnd-primary 301/301 全量枚举 entriesComplete=true、EMEVD 34 页/33,266 指令/1,730 事件全覆盖，页间不重叠/并集全覆盖/末页触尾，共享 normalizePageWindow 无私有副本；test:desktop-ipc-contract 51 断言真实执行观测：main 分页 channel 注册 + preload 分页方法接线 + 双向对账）；Electron 面板功能验收仍单独门控（opt-in，不在此声明）",
-      "hardPrerequisites": "FLVER 只读查看器属于已延期的资产线；Hex 永久只读；当前 candidate 只继承 acceptance harness 对缺口的分类；EMEVD pagination 只证明规模访问契约（分页组装/模板截断/列表分页），不证明完整语义编辑或真实验收；延期预览编辑器的规模缺口按 V0.6 记账，不得据此声称本版缺口减少",
+      "evidence": "script 编辑器规模访问已升级为 release-safe pagination（listScriptContainerEntriesPage 主进程分页通道 + ScriptContainerPanel 显式分页，currentScaleContractGaps=[]）；bnd4/fmg/param 规模访问已升级为 release-safe pagination（主进程分页通道 resource.listContainerChildrenPage/readFmgPage/readParamPage，FMG_PAGE_SIZE=100/PARAM_PAGE_SIZE=20，renderer 面板按页导航不再 eager 物化；editorCapabilityContract bnd4/fmg/param scaleAccess=pagination）；EMEVD 编辑器规模访问已从 eager 提升为 pagination（完整文档分页组装 readFullEmevdDocumentViaBridge + DSL 模板行数截断 renderEmevdPatchDslBounded（事件块边界截断 + 注释标记，patch no-op 语义安全）+ 事件列表分页每页 200 + loadFullDslTemplate 显式完整加载；currentScaleContractGaps 不再含 EMEVD）；当前 V0.5 inventory 精确登记 BND4/FMG/PARAM/EMEVD/script/TAE/ESD 七项，MSB/FLVER 独立 typed write 路径不纳入 inventory；前端工作台已补（ScriptContainerPanel.tsx script 只读证据 + 用户字节整内层替换；Bnd4WorkbenchPanel.tsx BND4 容器工作台；ParamDefPanel 接真实行数据 + 字段级编辑）；真实文档完整有界访问已通过（test:editor-bounded-access 真实腿：script luabnd-primary 301/301 全量枚举 entriesComplete=true、EMEVD 34 页/33,266 指令/1,730 事件全覆盖，页间不重叠/并集全覆盖/末页触尾，共享 normalizePageWindow 无私有副本；test:desktop-ipc-contract 51 断言真实执行观测：main 分页 channel 注册 + preload 分页方法接线 + 双向对账）；Electron 面板功能验收仍单独门控（opt-in，不在此声明）",
+      "hardPrerequisites": "Hex 保持只读证据视图；当前 candidate 只继承 acceptance harness 对缺口的分类；EMEVD pagination 只证明规模访问契约（分页组装/模板截断/列表分页），不证明完整语义编辑或真实验收；TAE/ESD/MSB/FLVER 的 bounded-window 与功能验收继续由对应切片推进，不因 inventory 统计自动提升 authority",
       "entryPoints": [
         "packages/core/src/editing/editorCapabilityContract.ts",
         "packages/core/src/editing/emevdFullDocument.ts",
@@ -720,7 +745,7 @@
       ],
       "blockerRefs": [],
       "goal": "各编辑器结构化 UI/DSL 与完整有界访问收尾、Electron 真实文档功能验收（opt-in）与 BND4/script 工作台继续",
-      "hardPrerequisites": "W-REL-F-SCALE-02 已完成（script 规模缺口关闭，currentScaleContractGaps=[]）；Electron 真实文档功能验收为 opt-in 工程项，未跑不构成完成声明；延期预览编辑器（msb/tae/esd/flver）按 V0.6 记账，不得据此声称本版缺口减少",
+      "hardPrerequisites": "W-REL-F-SCALE-02 已完成（currentScaleContractGaps=[]）；Electron 真实文档功能验收为 opt-in 工程项，未跑不构成完成声明；TAE/ESD/MSB/FLVER 的版本性开发限制已解除，但 inventory、authority 与 release pass 仍以各自真实证据为准",
       "entryPoints": [
         "packages/core/src/editing/editorCapabilityContract.ts",
         "packages/core/src/editing/releaseEditorAcceptance.ts",
@@ -1030,6 +1055,14 @@
       "claimedAt": "2026-08-29T03:13:08.430Z",
       "heartbeatAt": "2026-08-29T03:38:50.434Z",
       "recoveryTrigger": "检查 runScriptContainerLoadPreflightSmoke 相关写进程、入口文件工作树改动和真实游戏内加载记录；无相关进程且未产生验证证据时 release 回 ready"
+    },
+    {
+      "sliceId": "W-ACTION-MOTION-IDENTITY-01",
+      "claimId": "claim-w-action-motion-identity-01-20260830",
+      "owner": "codex-action-20260830",
+      "claimedAt": "2026-08-30T13:23:57.103Z",
+      "heartbeatAt": "2026-08-30T13:23:57.103Z",
+      "recoveryTrigger": "检查 ACTION motion identity、Binder membership、action IPC 相关进程与工作树；若无相关进程且未产生验证证据，按 gov help 核实后 release；若完成则先按治理流程记录证据再 complete"
     }
   ],
   "invariants": [

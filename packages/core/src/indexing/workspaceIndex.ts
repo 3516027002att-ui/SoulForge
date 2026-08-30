@@ -11,6 +11,7 @@ import type {
   ReferenceEdge,
   ResourceKind,
   SymbolBundle,
+  TaeAnimSymbol,
   TaeEventSymbol,
   TaeExport,
   TextEntrySymbol
@@ -67,6 +68,28 @@ export interface SourceInvalidationResult {
   };
   referencesRebuilt: number;
 }
+
+/** sourceUri + animId 的严格读取结果；重复 identity 必须显式失败关闭。 */
+export type TaeAnimationLookup =
+  | {
+      status: 'UNIQUE';
+      sourceUri: string;
+      animId: number;
+      animation: TaeAnimSymbol;
+      sourceHash?: string;
+      sourceRevision?: number;
+    }
+  | {
+      status: 'NOT_FOUND';
+      sourceUri: string;
+      animId: number;
+    }
+  | {
+      status: 'AMBIGUOUS';
+      sourceUri: string;
+      animId: number;
+      matchCount: number;
+    };
 
 export class WorkspaceIndex {
   readonly workspaceId: string;
@@ -221,6 +244,33 @@ export class WorkspaceIndex {
   /** 照 upsertMapExport 抄：TAE 一份 anibnd 一个 TaeExport，按 sourceUri 替换。 */
   upsertTaeExport(value: TaeExport): void {
     this.taeExports = replaceByKey(this.taeExports, value.sourceUri, (item) => item.sourceUri, value);
+  }
+
+  /**
+   * 按精确 sourceUri + animId 读取一个 TAE animation identity。
+   *
+   * sourceUri 不做 alias/fuzzy 匹配，animId 也不跨来源合并；同一来源出现
+   * 多个相同 animId 时返回 AMBIGUOUS，调用方不得取首项继续解析。
+   */
+  lookupTaeAnimation(sourceUri: string, animId: number): TaeAnimationLookup {
+    const matches: Array<{ exportItem: TaeExport; animation: TaeAnimSymbol }> = [];
+    for (const exportItem of this.taeExports) {
+      if (exportItem.sourceUri !== sourceUri) continue;
+      for (const animation of exportItem.animations) {
+        if (animation.animId === animId) matches.push({ exportItem, animation });
+      }
+    }
+    if (matches.length === 0) return { status: 'NOT_FOUND', sourceUri, animId };
+    if (matches.length !== 1) return { status: 'AMBIGUOUS', sourceUri, animId, matchCount: matches.length };
+    const match = matches[0]!;
+    return {
+      status: 'UNIQUE',
+      sourceUri: match.exportItem.sourceUri,
+      animId: match.animation.animId,
+      animation: match.animation,
+      ...(match.exportItem.sourceHash ? { sourceHash: match.exportItem.sourceHash } : {}),
+      ...(match.exportItem.sourceRevision !== undefined ? { sourceRevision: match.exportItem.sourceRevision } : {})
+    };
   }
 
   rebuildReferences(options: ReferenceBuildOptions = {}): ReferenceBuildResult {

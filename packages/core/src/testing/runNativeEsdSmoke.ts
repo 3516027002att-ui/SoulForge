@@ -10,15 +10,16 @@ import { join } from 'node:path';
 
 async function main(): Promise<void> {
   const explicitPath = process.argv[2]?.trim();
-  // ESD 已延期 V0.6，本机 registry 未登记 esd-primary 是合法状态，应诚实跳过。
+  // 当前版本不因 ESD 的开发范围阻断 native smoke；本机 registry 未登记
+  // esd-primary 是合法状态，应诚实跳过。
   // 原先直接调 resolveNativeFixture，角色缺失时抛 NATIVE_FIXTURE_ROLE_MISSING，
-  // 使下方 status:'skipped' 分支永远不可达，把「本版不验证的延期能力」报成失败。
+  // 使下方 status:'skipped' 分支永远不可达，把「当前环境没有样本」报成失败。
   // 注意这里只放行「未登记」；一旦登记，样本损坏/哈希不符/越界仍失败关闭。
   if (!explicitPath && !(await nativeFixtureRoleRegistered('esd-primary'))) {
     console.log(JSON.stringify({
       ok: true,
       status: 'skipped',
-      message: 'esd-primary not registered in native fixture registry (ESD deferred to V0.6).'
+      message: 'esd-primary not registered in native fixture registry; native ESD verification is unavailable in this environment.'
     }));
     return;
   }

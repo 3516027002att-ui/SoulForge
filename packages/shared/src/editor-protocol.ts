@@ -1,5 +1,5 @@
 /**
- * Unified professional-editor mutation protocol for V0.5 desktop.
+ * Unified professional-editor mutation protocol for the desktop workbench.
  * Editors emit only these mutations; main/core maps them to PatchIR.
  *
  * front-end.md 新增契约（§5.2 WorkbenchRoute、§12 Agent）追加在本文件尾部。
@@ -53,31 +53,30 @@ export type EditorMutationKind =
   | 'emevd_update_id'
   | 'msb_set_part_position'
   | 'msb_set_part_transform'
-  | 'flver_material_slot_set';
-
-/** 延期编辑器的目标里程碑。 */
-export const DEFERRED_PREVIEW_TARGET_RELEASE = 'V0.6' as const;
-export type DeferredPreviewTargetRelease = typeof DEFERRED_PREVIEW_TARGET_RELEASE;
+  | 'flver_material_slot_set'
+  /** 当前 TAE/ESD writer 使用 editor-catalog 的 canonical mutation id。 */
+  | 'tae-event-upsert'
+  | 'behavior-transition-upsert';
 
 /**
- * 已移出当前版本范围、仅保留标记只读预览的编辑器。与
- * `docs/V0_5_IMPLEMENTATION_HANDOFF.md` §18.2.1
- * `SCOPE-EDITORS.deferredPreviewEditors.editorIds` 对应。
+ * 旧版 deferred-preview 投影的兼容出口。
  *
- * S36/S38 已开闸：msb（write-msb typed mutation）与 flver（write-flver
- * material-slot-set）恢复写入，不再出现在本清单；tae/esd 保持延期只读。
+ * V0.5/V0.6 过渡期不再通过此列表限制 TAE/ESD/ACTION 开发；当前列表刻意
+ * 为空，因此 renderer 不会因历史 deferred 标记隐藏现有 writer 或编辑器。
+ * 该兼容出口不授予 native authority，也不替代 Patch Engine、revision 或
+ * fail-closed 校验。
  *
- * 放在 shared 而非 core：renderer 需要在运行时读取该清单来打标并隐藏
- * 提交入口，而 core 含 Node-only 模块，不能进入浏览器包。core 的能力
- * 契约仍是写入放行的唯一权威，两者一致性由 release-editor acceptance
- * smoke 断言，避免出现两份可漂移的清单。
+ * 放在 shared 而非 core 是为了让 renderer 继续安全读取兼容投影；当前
+ * editor capability contract 才是 core 侧写入能力的单一来源。
  */
-export const DEFERRED_PREVIEW_EDITOR_KINDS = [
-  'tae',
-  'esd'
-] as const satisfies readonly EditorKind[];
+export const DEFERRED_PREVIEW_EDITOR_KINDS = [] as const satisfies readonly EditorKind[];
 
-export type DeferredPreviewEditorKind = typeof DEFERRED_PREVIEW_EDITOR_KINDS[number];
+/**
+ * 历史兼容类型。运行时投影已为空，但保留旧版 tae/esd 取值以避免旧
+ * renderer/诊断代码在迁移期间失去类型信息；`isDeferredPreviewEditorKind`
+ * 仍以当前空数组为实际判断来源。
+ */
+export type DeferredPreviewEditorKind = 'tae' | 'esd';
 
 export function isDeferredPreviewEditorKind(
   editorKind: EditorKind

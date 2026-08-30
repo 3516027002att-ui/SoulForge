@@ -137,6 +137,11 @@ export interface TaeExport {
 
 export interface TaeAnimSymbol {
   animId: number;
+  /**
+   * Bridge 解析出的实际动作引用 ID；缺省表示当前 wire 未能安全解析。
+   * 生产写入方必须只发送非负 safe integer，消费方不得把缺省值猜测为 animId。
+   */
+  motionAnimId?: number;
   /** `formatAnimCode(animId)`，如 `A0200`。 */
   code: string;
   /** 合法 hkx 茎（如 `a000_020000`），检索别名，不是第二套主键。 */

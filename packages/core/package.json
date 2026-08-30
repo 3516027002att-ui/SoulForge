@@ -13,6 +13,7 @@
     "test:darkscript-languageservice-scale": "tsc -b ../shared . && node dist/testing/runDarkScriptLanguageServiceScaleSmoke.js",
     "test:map-document-scale": "tsc -b ../shared . && node dist/testing/runMapDocument10kScaleSmoke.js",
     "test:animation-playback-clock": "tsc -b ../shared . && node dist/testing/runAnimationPlaybackClockSmoke.js",
+    "test:action-motion-identity": "tsc -b ../shared . && node dist/testing/runActionMotionIdentitySmoke.js",
     "test:action-real-corpus": "tsc -b ../shared . && node dist/testing/runActionRealCorpusSmoke.js",
     "test:action-mature-oracle": "tsc -b ../shared . && node dist/testing/runActionMatureOracleDifferentialSmoke.js",
     "test:ai-conformance": "tsc -b ../shared . && node dist/testing/runAiConformanceSmoke.js",

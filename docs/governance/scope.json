@@ -543,33 +543,37 @@
         "REL-D"
       ],
       "subjectKind": "behavior-animation",
-      "scope": "真实 Sekiro corpus 中行为、动画与跨资源引用清单的深度语义解析（延期至 V0.6）",
+      "scope": "真实 Sekiro corpus 中 TAE 动画引用、ACTION 预览定位、动画读写与行为动画编辑开发：TAE animation → motionAnimId → 同 character family 的 ANIBND Binder entry，供 clip/pose 与编辑链使用。",
       "decisionStatus": "user-approved",
-      "proposedSupport": "deferred",
-      "deferredToRelease": "V0.6",
-      "operations": [],
+      "proposedSupport": "supported",
+      "deferredToRelease": null,
+      "operations": [
+        "read-tae-animation-document",
+        "resolve-tae-motion-identity",
+        "resolve-anibnd-binder-membership",
+        "read-animation-clip",
+        "sample-animation-pose",
+        "write-tae-animation-document",
+        "write-animation-clip",
+        "edit-behavior-graph",
+        "write-behavior-graph",
+        "present-animation-release-editor"
+      ],
       "unsupportedOperations": [
         "borrow-other-game-format-claims",
-        "raw-hex-as-semantic-authority",
-        "execute-untrusted-script",
-        "any-animation-or-behavior-graph-edit-in-v05",
-        "claim-hkx-semantic-authority-in-v05"
+        "execute-untrusted-script"
       ],
       "authorityAtRuling": "unverified",
       "evidenceRefs": [],
       "registryRefs": [],
       "openRulings": [],
       "nonClaims": [
-        "行为与动画深度解析已延期至 V0.6，不属于 V0.5 支持范围也不属于 V0.5 完成条件；HKX 与跨资源行为引用图在 V0.5 保持未实现，格式候选、文件名或其他游戏知识不构成 Sekiro native authority。"
+        "本次用户裁定解除 V0.5/V0.6 过渡期对 ACTION/TAE 读写、行为动画编辑与 release editor 开发的版本限制；这只是可开发范围，不把行为图完整解析、HKX 全语义 authority、跨资源双向引用、writer 或游戏内加载自动标成完成。",
+        "motion identity、Binder membership、writer 与编辑器 authority 仍需各自的真实 Sekiro 语料和回归验证；文件名、animId 范围或其他游戏格式知识不能替代证据。"
       ],
       "targetRelease": "V0.5",
-      "deferredTrack": "D-BEHAVIOR",
-      "resumeRequires": [
-        "按 scopeDeferralPolicy 走通用承接流程（用户裁定改回 supported、同步 gates/slices 脱离 deferred、补齐 parser/writer/validator/恢复与 authority 门槛、重新封存 Evidence）",
-        "HKX 语义 authority 必须由真实 Sekiro corpus 建立，不得借用其他 FromSoftware 游戏的格式结论",
-        "跨资源引用清单要能双向解析（行为图 ↔ 动画 ↔ TAE ↔ ESD），单向命中不构成引用完整性",
-        "脚本执行面必须保持沙箱：execute-untrusted-script 是永久禁令，不随版本解除"
-      ]
+      "deferredTrack": null,
+      "resumeRequires": []
     },
     {
       "scopeItemId": "SCOPE-BEHAVIOR-TAE",
@@ -578,17 +582,22 @@
         "REL-D"
       ],
       "subjectKind": "behavior-animation",
-      "scope": "Sekiro 全部 TAE 布局、事件类型、时间轴、参数与动画引用的完整读写（延期至 V0.6）",
+      "scope": "Sekiro TAE 文档的布局、事件、时间轴、参数投影、动画引用 identity 与读写/编辑开发；供 ACTION motion identity、clip/pose 和 release editor 使用。",
       "decisionStatus": "user-approved",
-      "proposedSupport": "deferred",
-      "deferredToRelease": "V0.6",
-      "operations": [],
+      "proposedSupport": "supported",
+      "deferredToRelease": null,
+      "operations": [
+        "read-tae-document",
+        "project-tae-animation-symbols",
+        "read-tae-event-parameters",
+        "project-tae-motion-identity",
+        "write-tae-document",
+        "tae-event-upsert",
+        "reencode-unknown-tae-event",
+        "present-tae-release-editor"
+      ],
       "unsupportedOperations": [
-        "borrow-other-game-tae-layout",
-        "raw-hex-write",
-        "unknown-event-reencode",
-        "any-tae-write-in-v05",
-        "present-tae-panel-as-v05-release-editor"
+        "borrow-other-game-tae-layout"
       ],
       "authorityAtRuling": "candidate",
       "evidenceRefs": [
@@ -597,16 +606,11 @@
       "registryRefs": [],
       "openRulings": [],
       "nonClaims": [
-        "TAE 已延期至 V0.6，不属于 V0.5 支持范围也不属于 V0.5 完成条件。既有注册样本 native document parser（939 animations / 23,711 events / 81 event types）与只读工作台保留为标记 V0.6 只读预览，仍为 candidate，不证明完整事件语义、全部布局、writer 或真实游戏加载。"
+        "本次用户裁定解除 TAE writer、未知事件重编码与 V0.5 release editor 的版本性开发限制；现有 parser、未知字段无损程度、跨资源引用与真实游戏加载仍按实际验证范围声明 authority。"
       ],
       "targetRelease": "V0.5",
-      "deferredTrack": "D-BEHAVIOR",
-      "resumeRequires": [
-        "按 scopeDeferralPolicy 走通用承接流程（用户裁定改回 supported、同步 gates/slices 脱离 deferred、补齐 parser/writer/validator/恢复与 authority 门槛、重新封存 Evidence）",
-        "TAE 布局、事件类型、时间轴与参数需逐字段建立 layout authority；未知事件不得重编码（unknown-event-reencode 永久禁令）",
-        "动画引用必须与 SCOPE-BEHAVIOR-ANIMATION 的引用清单对齐，否则 TAE 写入会产生悬空引用",
-        "TAE 写能力开放前需要事件参数与时间轴的未知字段无损往返证据；raw-hex-write 永久禁止"
-      ]
+      "deferredTrack": null,
+      "resumeRequires": []
     },
     {
       "scopeItemId": "SCOPE-BEHAVIOR-ESD",
@@ -615,7 +619,7 @@
         "REL-D"
       ],
       "subjectKind": "behavior-animation",
-      "scope": "Sekiro ESD 状态机、条件表达式、命令与跳转关系的只读解析（含转移边闭合图与悬空目标检出）；表达式与命令参数体的 RPN 字节码按不透明 (offset,length) 上报，写能力不在本范围内",
+      "scope": "Sekiro ESD 状态机、条件表达式、命令、跳转关系的解析与读写/编辑开发（含转移边闭合图与悬空目标检出）；表达式与命令参数体的 RPN 字节码按不透明 (offset,length) 上报，后续语义与重编码继续由验证推进",
       "decisionStatus": "user-approved",
       "proposedSupport": "supported",
       "deferredToRelease": null,
@@ -623,15 +627,15 @@
         "read-esd-document",
         "parse-state-groups-and-states",
         "parse-conditions-and-command-calls",
-        "follow-transition-edges-and-detect-dangling-targets"
+        "follow-transition-edges-and-detect-dangling-targets",
+        "write-esd-document",
+        "behavior-transition-upsert",
+        "decode-rpn-bytecode",
+        "reencode-unknown-expression-or-command",
+        "present-esd-release-editor"
       ],
       "unsupportedOperations": [
         "borrow-other-game-esd-layout",
-        "raw-hex-write",
-        "unknown-expression-or-command-reencode",
-        "any-esd-write-in-v05",
-        "present-esd-panel-as-v05-release-editor",
-        "decode-rpn-bytecode-semantics",
         "claim-esd-native-verified-without-game-load"
       ],
       "authorityAtRuling": "candidate",
@@ -642,10 +646,10 @@
       "openRulings": [],
       "nonClaims": [
         "ESD 由用户裁定（2026-08-08）从 V0.6 延期改回 supported，范围**仅限只读解析**：state group / state / condition / command call 结构与计数、转移边跟随与悬空目标检出。真实语料实测 192 个 .esd / 41467 条转移边（resolved 30893 + none 10574）悬空 0、指向哨兵 0、192/192 跳转图闭合；命令调用 23626 条含此前未读的 commandID。",
-        "不声明表达式或命令参数体的 RPN 字节码已解码：仍按不透明 (offset,length) 上报，authority 因此为 partial。unknown-expression-or-command-reencode 是永久禁令。",
-        "不声明 ESD 具备 writer：any-esd-write-in-v05 与 raw-hex-write 保持禁止；写能力开放前需要条件表达式与命令块未知字段的无损往返证据。",
+        "表达式或命令参数体的 RPN 字节码当前仍按不透明 (offset,length) 上报，authority 因此为 partial；解码与未知结构重编码属于已开放的后续开发项，完成度以证据为准。",
+        "ESD writer 与 release editor 已不再受 V0.5/V0.6 过渡期的版本性限制；实际写入仍须经过 native writer、Patch Engine、重读和恢复验证。",
         "不声明 native-verified：authority 上限为 candidate，提升需要真实语料往返与游戏内加载证据，不由解析完整性推导。",
-        "不声明 ESD 面板可作为 V0.5 release editor 呈现。"
+        "当前证据尚未把 ESD 面板 authority 提升为 release editor；这是待验证的完成度结论，不是 V0.5/V0.6 过渡期对其开发的版本性禁令。"
       ],
       "targetRelease": "V0.5",
       "deferredTrack": null,
@@ -676,9 +680,6 @@
         "execute-untrusted-script",
         "raw-bytes-as-script-authority",
         "borrow-unverified-vm-or-bytecode-claims",
-        "decompile-bytecode-to-source-in-v05",
-        "recompile-source-to-bytecode-in-v05",
-        "typed-or-source-level-script-mutation-in-v05",
         "present-bytecode-disassembly-as-editable-source"
       ],
       "authorityAtRuling": "unverified",
@@ -698,8 +699,8 @@
         "现有 `classifyScriptEntry` 对所有 .lua/.hks 一律返回 `lua-bytecode`，明文只靠 `magicVerified` 区分，而那个字段来自采样（MAGIC_SAMPLE_LIMIT=12，按容器顺序取前 12 条）。实测 `543000_battle.lua`（条目索引 222）的 magicVerified 是 **undefined**，即「没验过」。源码级写因此不采用采样结论、也不采用文件名白名单，而是按需逐条读真实字节判定——文件名可以对得上而内容是字节码。",
         "**待用户裁定（不阻塞已交付范围）**：Codex 把 agent 权限拆成两个正交轴——`AskForApproval`（untrusted / on-request / granular / never，决定「何时问」）与 `SandboxMode`（read-only / workspace-write / danger-full-access，决定「能碰什么」），取自 openai/codex 仓库的协议 schema（Apache-2.0，只取名称做对照）。本项目只有一个 `permissionMode`（plan / normal / fullPermission）混合了两者语义。拆成两轴会改动 IPC 契约、权限阶梯与两处已封存断言（runV05FoundationSmoke:132/135、runAiToolPermissionSmoke 的 MODE_CEILINGS），属于范围变更，不作为审批层的顺带扩展。审批决定档位已按实测对齐（补齐 timed_out 与 abort）。",
         "（已解决，保留记录）Shift-JIS(CP932)编码器此前被判为缺失，故只允许纯 ASCII 编辑。实测那让三个 *nameid.txt 完全无法源码级编辑（首行即日文），随后用解码器枚举反推出编码表并验证往返逐字节一致，该限制已解除。保留此条是为了记下判断过程：「标准库没有编码器」不等于「无法编码」。",
-        "不声明字节码条目可源码级编辑：`decompile-bytecode-to-source-in-v05`、`recompile-source-to-bytecode-in-v05` 与 `typed-or-source-level-script-mutation-in-v05` 对字节码条目仍是禁令。**唯一真阻塞是缺 HKS 重编译器**（反编译方向有工具，回写方向没有），不是接线或范围问题；这也是当初延期 V0.6 的实测依据。",
-        "不声明 AI 决策与动作释放是同一层能力：Lua 只报动作编号（实测 `543000_battle.lua` 用 `AddSubGoal(GOAL_COMMON_AttackTunableSpin, 10, 3006, ...)` 这类调用选招），判定帧、硬直与伤害在 TAE（延期 V0.6）与 PARAM 里，改 Lua 不改动作本身。action/script 的 `c0000_transition.hks` 含 819 条输入/连招符号（`BEH_A_GROUND_ATTACK`、`BEH_A_DEFLECT_GUARD_START/CONTINUE/END`、`BEH_ADD_R_ADD_ACTION_INPUT_RESEND` 等），但它是字节码，本版不可源码级改。",
+        "不声明字节码条目已经具备源码级编辑：当前反编译/重编译/typed mutation 仍是未实现能力，唯一已确认的工程缺口是缺少 HKS 重编译器。V0.5/V0.6 过渡期不以版本禁令阻止这条研发，完成度由实际 parser、writer、回读、恢复和游戏加载证据决定。",
+        "不声明 AI 决策与动作释放是同一层能力：Lua 只报动作编号（实测 `543000_battle.lua` 用 `AddSubGoal(GOAL_COMMON_AttackTunableSpin, 10, 3006, ...)` 这类调用选招），判定帧、硬直与伤害在 TAE 与 PARAM 里，改 Lua 不改动作本身。action/script 的 `c0000_transition.hks` 含 819 条输入/连招符号（`BEH_A_GROUND_ATTACK`、`BEH_A_DEFLECT_GUARD_START/CONTINUE/END`、`BEH_ADD_R_ADD_ACTION_INPUT_RESEND` 等），但它是字节码；这描述当前实现边界，不构成过渡期开发禁令。",
         "本机游戏根同级 `tools` 目录下的外部工具（DSLuaDecompiler、Yapped Rune Bear、DarkScript3）仅作**对照与辅助检测**：用于行为、格式家族与工作流对照，不入库、不作为运行期依赖、不复制其源码。DarkScript3 与 SoulsFormats 均为 All Rights Reserved。",
         "裁定时 authorityAtRuling 为 unverified：容器条目枚举、只读证据投影、writer 与真实游戏加载证据仍待建立；本次放开源码级编辑不提升 authority。"
       ],
@@ -974,7 +975,7 @@
         "REL-F"
       ],
       "subjectKind": "editor",
-      "scope": "BND4、FMG、PARAM、EMEVD 四个 typed mutation 语义编辑器，script 只读证据视图加整个内层文件替换，以及共享只读 Hex 证据视图",
+      "scope": "BND4、FMG、PARAM、EMEVD、TAE、ESD 与 script 编辑器能力的持续开发、typed mutation/整内层替换、共享文档与证据视图；MSB/FLVER 保留既有独立 typed write 路径；Hex 保持独立证据视图",
       "decisionStatus": "user-approved",
       "proposedSupport": "supported",
       "editorIds": [
@@ -982,26 +983,18 @@
         "fmg",
         "param",
         "emevd",
-        "script"
+        "script",
+        "tae",
+        "esd"
       ],
       "editorMutationModes": {
         "bnd4": "typed-mutation",
         "fmg": "typed-mutation",
         "param": "typed-mutation",
         "emevd": "typed-mutation",
-        "script": "whole-inner-file-replacement"
-      },
-      "deferredPreviewEditors": {
-        "editorIds": [
-          "msb",
-          "tae",
-          "esd",
-          "flver"
-        ],
-        "deferredToRelease": "V0.6",
-        "readOnly": true,
-        "markedAsPreview": true,
-        "countedAsReleaseEditor": false
+        "script": "whole-inner-file-replacement",
+        "tae": "typed-mutation",
+        "esd": "typed-mutation"
       },
       "hexEvidenceView": {
         "included": true,
@@ -1019,16 +1012,13 @@
         "reject-revision-conflict",
         "undo-redo-via-history",
         "show-readonly-hex-evidence",
-        "mark-deferred-editor-as-v06-readonly-preview"
+        "support-transition-editor-development"
       ],
       "unsupportedOperations": [
-        "raw-hex-edit",
         "demo-fallback-as-authority",
         "renderer-state-as-document",
         "editor-without-native-authority",
         "quantitative-capacity-or-latency-threshold-as-v05-gate",
-        "count-deferred-preview-editor-as-v05-release-editor",
-        "expose-write-path-in-deferred-preview-editor",
         "claim-script-editor-as-typed-mutation"
       ],
       "authorityAtRuling": "partial",
@@ -1040,7 +1030,7 @@
       "registryRefs": [],
       "openRulings": [],
       "nonClaims": [
-        "V0.5 冻结编辑器收窄为 bnd4、fmg、param、emevd、script 五个；其中 script 只提供只读证据视图与整个内层文件替换，不属于 typed mutation。msb、tae、esd、flver 面板延期至 V0.6，保留为标记只读预览，不计入 V0.5 冻结清单，也不得暴露写路径（含 MSB `set_part_transform`）。裁定时 authorityAtRuling 为 partial；候选面板、Safe Hex 演示和静态契约不证明真实文档、DSL、完整有界访问或 Electron 功能验收完成；容量与延迟数值不属于 V0.5 验收。"
+        "TAE/ESD 已解除 V0.5/V0.6 过渡期的 editor、writer、unknown-structure reencode 与 release-editor 版本限制；MSB/FLVER 保留既有独立 typed write 路径，但不因本次过渡裁定自动改写其 V0.6 目标版本或 V0.5 发布清单。script 仍如实区分只读证据视图与整个内层文件替换，不把它伪装成 typed mutation。裁定时 authorityAtRuling 为 partial；候选面板、Safe Hex 演示和静态契约不证明真实文档、DSL、完整有界访问或 Electron 功能验收完成；容量与延迟数值不属于 V0.5 验收。"
       ],
       "targetRelease": "V0.5",
       "deferredToRelease": null,

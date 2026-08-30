@@ -108,7 +108,6 @@ import {
   stageBridgeOutput,
   applyNativeMutation,
   validateContainer,
-  isDeferredPreviewEditor,
   buildNativeDocumentLocator,
   EditorDocumentStore,
   type EditorDocumentDataSource,
@@ -173,7 +172,6 @@ import type {
   EditorDocumentErrorCode,
   EditorDocumentPageValue,
   EditorDocumentResult,
-  EditorKind,
   EditorPageQuery,
   EditorContentQuery,
   EditorMutation,
@@ -1268,28 +1266,6 @@ function rejectNonSekiroNativeWrite(sourceUri: string, file?: IndexedFile): Rend
   };
 }
 
-/**
- * 阻断已延期至 V0.6、仅保留标记只读预览的编辑器写入。
- * 门禁点放在 IPC 主进程而非 renderer：即使 UI 仍持有旧的提交入口，
- * 写路径也在进入 Patch Engine 之前失败关闭，并返回结构化诊断。
- */
-function rejectDeferredPreviewEditorWrite(
-  editorKind: EditorKind,
-  sourceUri: string
-): RendererSaveResult | null {
-  if (!isDeferredPreviewEditor(editorKind)) return null;
-  return {
-    ok: false,
-    changedFiles: [],
-    diagnostics: [{
-      severity: 'error',
-      code: 'EDITOR_DEFERRED_TO_V06_READONLY',
-      message: `${editorKind} 编辑器已延期至 V0.6，本版仅提供标记只读预览，写入已阻断。`,
-      sourceUri
-    }]
-  };
-}
-
 export async function disposeOperationLogUtility(): Promise<void> {
   activeOperationLog = null;
   await operationLogUtility.dispose();
@@ -1581,6 +1557,7 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
     get indexedFiles() { return getWorkspaceIndexedFiles(); },
     get activeSession() { return getWorkspaceSession(); },
     get activeIndex() { return getWorkspaceActiveIndex(); },
+    get activeWorkspaceSessionId() { return getActiveWorkspaceSessionIdState(); },
     safeExists,
     pushToolsSubdirs,
     asBasicDiagnostics: (items) => items.map((item) => ({ severity: item.severity === 'warning' || item.severity === 'info' ? item.severity : 'error', code: item.code, message: item.message, ...(item.sourceUri ? { sourceUri: item.sourceUri } : {}) })),

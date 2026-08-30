@@ -22,7 +22,7 @@
  *   - **reopen-failure before-image 恢复**：输出损坏后 read 必须结构化失败，
  *     源 before-image 哈希可恢复；暂存区无 .soulforge-esd-*.tmp 残留。
  *
- * 缺语料处置：esd-primary 未登记是合法状态（ESD 曾延期 V0.6），此时走路径 B——
+ * 缺语料处置：esd-primary 未登记是合法状态，此时走路径 B——
  * 合成 fixture 仍真实经过 C# EsdNativeWriter 验证写回，不冒充 native authority
  * （syntheticFixture: true）。只有 registry 配置损坏等环境问题才失败关闭。
  */

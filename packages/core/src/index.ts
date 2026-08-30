@@ -79,6 +79,7 @@ export * from './bridge/bridgeDaemonClient.js';
 export * from './bridge/releaseCorpusRegistry.js';
 export * from './indexing/workspaceIndex.js';
 export * from './indexing/ingestBridgeResult.js';
+export * from './action/binderMembership.js';
 export * from './indexing/knowledgeRefresh.js';
 export * from './indexing/nativeSemanticRefresh.js';
 export * from './jobs/taskQueue.js';

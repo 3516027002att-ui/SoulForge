@@ -8,8 +8,8 @@
  * 1. SSR 结构：三栏 模型层级 | Viewport | Properties 挂载即存在，没有为凑四栏造
  *    Tools 空栏；未加载 FLVER 数据时左栏是显式 muted 空态而不是错误；树栈竖叠
  *    网格/材质/纹理槽/骨骼四组，分组列表由 shared pages 投影派生而不是扫字节；
- * 2. Negative source：FLVER 是 V0.6 延期只读预览时 footer 只有延期提示、没有任何
- *    保存动作；viewport 只承载 FlverViewer 宿主（SSR 下无 canvas）；partial model
+ * 2. Negative source：FLVER 的 viewport 只承载 FlverViewer 宿主（SSR 下无 canvas）；
+ *    未接入写回能力时 footer 不得伪装成可写；partial model
  *    必须把 unparsedGaps/layoutWarnings 暴露给用户，不能伪装成完整解析。
  *
  * 选择 → viewport 的绑定逻辑抽成纯函数 resolveViewportMeshIndex，直接断言

@@ -168,8 +168,8 @@
       "sliceId": "W-REL-F-ACCEPT-01",
       "targetRelease": "V0.5",
       "script": "npm run test:release-editor-acceptance；npm run test:desktop-live-editor-contract",
-      "fixture": "冻结的 BND4/FMG/PARAM/EMEVD/MSB/TAE/ESD/script 八编辑器 synthetic contract sample；Hex 只读与 FLVER 资产排除；demo/synthetic、authority、revision、typed mutation、完整有界访问和提前 pass 负向 case",
-      "assertion": "inventory 必须精确等于冻结八项，Hex/raw 不得暴露 mutation，FLVER 不得进入发布编辑器；scopeRulingStatus=user-approved、quantitativeThresholdsRequired=false；输出固定 ok=null、releaseGateDecision=pending、releasePassed=false、realFunctionalAcceptanceRun=false；当前访问/authority 缺口结构化失败关闭",
+      "fixture": "当前 user-approved 的 BND4/FMG/PARAM/EMEVD/script/TAE/ESD 七编辑器 synthetic contract sample；MSB/FLVER 保留既有独立 typed write 路径但不计入当前 V0.5 inventory；Hex 只读证据视图；demo/synthetic、authority、revision、typed mutation、完整有界访问和提前 pass 负向 case",
+      "assertion": "inventory 必须精确等于当前七项编辑器契约，MSB/FLVER 不得被隐式提升为当前 release editor，Hex/raw 不得暴露 mutation；scopeRulingStatus=user-approved、quantitativeThresholdsRequired=false；输出固定 ok=null、releaseGateDecision=pending、releasePassed=false、realFunctionalAcceptanceRun=false；当前访问/authority 缺口结构化失败关闭",
       "exitSemantics": "两个命令均须 exit 0；只支持 candidate harness，不支持真实 Electron 真实文档功能验收或 REL-F；不再等待用户裁定容量、延迟、规模档位或 benchmark 阈值"
     },
     {

@@ -24,21 +24,24 @@ const EXPECTED_GATES = [
   'REL-I',
   'REL-COMPLIANCE'
 ];
-const EXPECTED_RELEASE_EDITOR_IDS = [
+// 编辑器 id 是能力域的稳定标识，不是某一版本的冻结清单。当前版本的
+// user-approved 清单、顺序和写入模式都从 scope.json 的 SCOPE-EDITORS 投影读取；
+// 这里只挡住把证据视图或任意未知值伪装成编辑器的情况。
+const ALLOWED_EDITOR_IDS = new Set([
   'bnd4',
   'fmg',
   'param',
   'emevd',
-  'script'
-];
-const EXPECTED_EDITOR_MUTATION_MODES = {
-  bnd4: 'typed-mutation',
-  fmg: 'typed-mutation',
-  param: 'typed-mutation',
-  emevd: 'typed-mutation',
-  script: 'whole-inner-file-replacement'
-};
-const EXPECTED_DEFERRED_PREVIEW_EDITOR_IDS = ['msb', 'tae', 'esd', 'flver'];
+  'script',
+  'msb',
+  'tae',
+  'esd',
+  'flver'
+]);
+const ALLOWED_EDITOR_MUTATION_MODES = new Set([
+  'typed-mutation',
+  'whole-inner-file-replacement'
+]);
 
 const REQUIRED_SCOPE_ITEMS = new Map([
   ['SCOPE-SEKIRO-BUILD', { capabilityId: 'H-RUNTIME', gateId: 'REL-SCOPE' }],
@@ -807,7 +810,9 @@ if (proposal !== null) {
       requireFrozenOperation(itemById, 'SCOPE-EDITORS', 'project-canonical-dsl');
       requireFrozenOperation(itemById, 'SCOPE-EDITORS', 'show-readonly-hex-evidence');
       requireFrozenOperation(itemById, 'SCOPE-EDITORS', 'access-complete-document-through-bounded-mode');
-      requireFrozenUnsupported(itemById, 'SCOPE-EDITORS', 'raw-hex-edit');
+      // 编辑器契约必须保留 native authority 的安全边界；raw-hex 是否属于
+      // 当前范围由 scope.json 自己裁定，不再把旧版本的 raw-hex 禁令写死。
+      requireFrozenUnsupported(itemById, 'SCOPE-EDITORS', 'editor-without-native-authority');
       requireFrozenUnsupported(itemById, 'SCOPE-EDITORS', 'quantitative-capacity-or-latency-threshold-as-v05-gate');
       requireFrozenEditorMatrix(itemById);
       requireFrozenOperation(itemById, 'SCOPE-KRAK', 'recompress');
@@ -1097,11 +1102,29 @@ function requireFrozenValue(root, path, expected) {
 
 function requireFrozenEditorMatrix(itemById) {
   const editors = itemById.get('SCOPE-EDITORS');
-  if (JSON.stringify(editors?.editorIds) !== JSON.stringify(EXPECTED_RELEASE_EDITOR_IDS)) {
+  if (editors?.decisionStatus !== 'user-approved'
+    || editors?.proposedSupport !== 'supported'
+    || editors?.deferredToRelease !== null
+    || editors?.deferredTrack !== null
+    || !Array.isArray(editors?.resumeRequires)
+    || editors.resumeRequires.length !== 0) {
+    add(
+      'FROZEN_EDITOR_MATRIX_INVALID',
+      'SCOPE-EDITORS',
+      '当前 editor contract 必须保持 user-approved、supported，且不带 deferred 恢复字段。'
+    );
+  }
+  const editorIds = editors?.editorIds;
+  const editorIdsValid = Array.isArray(editorIds)
+    && editorIds.length > 0
+    && new Set(editorIds).size === editorIds.length
+    && editorIds.every((editorId) => typeof editorId === 'string'
+      && ALLOWED_EDITOR_IDS.has(editorId));
+  if (!editorIdsValid) {
     add(
       'FROZEN_EDITOR_MATRIX_INVALID',
       'SCOPE-EDITORS.editorIds',
-      `冻结编辑器必须精确为 ${EXPECTED_RELEASE_EDITOR_IDS.join(', ')}。`
+      'user-approved editor contract 必须列出非空、唯一且属于已知能力域的 editorIds。'
     );
   }
   if (editors?.hexEvidenceView?.included !== true
@@ -1113,45 +1136,69 @@ function requireFrozenEditorMatrix(itemById) {
     );
   }
 
-  // 每个冻结编辑器必须显式声明写入模式，避免把 script 的整文件替换
-  // 与 typed mutation 混为一谈。
+  // 每个当前清单编辑器必须显式声明写入模式，避免把整文件替换与
+  // typed mutation 混为一谈。键集从同一个 user-approved editor contract
+  // 投影读取；这里不固定某个版本的编辑器成员或延期状态。
   const modes = editors?.editorMutationModes;
-  if (JSON.stringify(modes) !== JSON.stringify(EXPECTED_EDITOR_MUTATION_MODES)) {
+  const modeKeys = modes !== null && typeof modes === 'object' && !Array.isArray(modes)
+    ? Object.keys(modes)
+    : [];
+  const modeKeysMatch = editorIdsValid
+    && modeKeys.length === editorIds.length
+    && modeKeys.every((editorId) => editorIds.includes(editorId));
+  const modeValuesValid = modeKeys.every((editorId) =>
+    ALLOWED_EDITOR_MUTATION_MODES.has(modes[editorId]));
+  if (!modeKeysMatch || !modeValuesValid) {
     add(
       'FROZEN_EDITOR_MUTATION_MODE_INVALID',
       'SCOPE-EDITORS.editorMutationModes',
-      '冻结编辑器写入模式必须精确为 '
-        + `${JSON.stringify(EXPECTED_EDITOR_MUTATION_MODES)}。`
+      'editorMutationModes 的键必须与当前 editorIds 一致，且每个值必须是受支持的写入模式。'
     );
   }
 
-  // 延期编辑器面板允许保留，但必须是标记过的 V0.6 只读预览，
-  // 且不得计入 V0.5 冻结清单。
+  // 如果治理数据仍显式登记 deferred preview，则只校验它自身的安全形状：
+  // 目标版本来自当前投影，不得把某个固定版本或固定编辑器名单写进门禁。
+  // 当前过渡期的 user-approved editor contract 可以完全不带此字段。
   const preview = editors?.deferredPreviewEditors;
-  if (JSON.stringify(preview?.editorIds) !== JSON.stringify(EXPECTED_DEFERRED_PREVIEW_EDITOR_IDS)) {
+  if (preview === undefined || preview === null) return;
+
+  const previewIds = preview !== null
+    && typeof preview === 'object'
+    && !Array.isArray(preview)
+    && Array.isArray(preview.editorIds)
+    ? preview.editorIds
+    : null;
+  const previewIdsValid = Array.isArray(previewIds)
+    && new Set(previewIds).size === previewIds.length
+    && previewIds.every((editorId) => typeof editorId === 'string'
+      && ALLOWED_EDITOR_IDS.has(editorId));
+  if (!previewIdsValid) {
     add(
       'DEFERRED_PREVIEW_EDITOR_SET_INVALID',
       'SCOPE-EDITORS.deferredPreviewEditors.editorIds',
-      `延期只读预览编辑器必须精确为 ${EXPECTED_DEFERRED_PREVIEW_EDITOR_IDS.join(', ')}。`
+      'deferred preview editorIds 必须是已知、唯一的编辑器 id 数组。'
     );
   }
-  if (preview?.deferredToRelease !== DEFERRED_TARGET_RELEASE
+  if (typeof preview !== 'object'
+    || preview === null
+    || Array.isArray(preview)
+    || !/^V\d+\.\d+$/.test(preview.deferredToRelease ?? '')
     || preview?.readOnly !== true
     || preview?.markedAsPreview !== true
     || preview?.countedAsReleaseEditor !== false) {
     add(
       'DEFERRED_PREVIEW_EDITOR_POLICY_INVALID',
       'SCOPE-EDITORS.deferredPreviewEditors',
-      `延期预览编辑器必须声明 deferredToRelease=${DEFERRED_TARGET_RELEASE}、readOnly=true、`
+      'deferred preview 必须声明合法目标版本、readOnly=true、'
         + 'markedAsPreview=true、countedAsReleaseEditor=false。'
     );
   }
-  for (const editorId of preview?.editorIds ?? []) {
-    if (EXPECTED_RELEASE_EDITOR_IDS.includes(editorId)) {
+  for (const editorId of previewIds ?? []) {
+    if (editorIdsValid && editorIds.includes(editorId)) {
       add(
         'DEFERRED_PREVIEW_EDITOR_OVERLAP',
         `SCOPE-EDITORS.deferredPreviewEditors.editorIds[${editorId}]`,
-        '延期只读预览编辑器不得同时出现在 V0.5 冻结编辑器清单中。'
+        'deferred preview editor 不得同时出现在当前 user-approved editor 清单中。'
       );
     }
   }

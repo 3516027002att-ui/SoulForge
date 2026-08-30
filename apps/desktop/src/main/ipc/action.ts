@@ -1,10 +1,11 @@
 import { existsSync } from 'node:fs';
-import { readdir } from 'node:fs/promises';
-import { basename, dirname, join, resolve, sep } from 'node:path';
+import { lstat, readdir } from 'node:fs/promises';
+import { basename, dirname, isAbsolute, join, relative as relativePath, resolve, sep } from 'node:path';
 import {
   ingestBridgeResult,
   readTaeEventTemplateFile,
   remapCharacterBundleToLeader,
+  resolveBinderMembership,
   runBridge,
   type TaeEventTemplateInfo,
   type WorkspaceIndex,
@@ -144,6 +145,7 @@ export interface ActionIpcDeps {
   readonly indexedFiles: readonly IndexedFile[];
   readonly activeSession: WorkspaceSession | null;
   readonly activeIndex: WorkspaceIndex | null;
+  readonly activeWorkspaceSessionId: string | null;
   safeExists(path: string): boolean;
   pushToolsSubdirs(roots: string[], gameRoot: string | undefined): void;
   asBasicDiagnostics(
@@ -170,6 +172,418 @@ async function readDirectoryNames(directory: string | null): Promise<string[]> {
   } catch {
     return [];
   }
+}
+
+const SEKIRO_ANIMATION_BINDER_ID_BASE = 1_000_000_000;
+const ACTION_ANIBND_FILE_PATTERN = /\.anibnd(?:\.dcx)?$/i;
+const ACTION_CHARACTER_FAMILY_PATTERN = /^c\d{4}$/i;
+
+interface ActionFileRevision {
+  key: string;
+  mtimeMs: number;
+}
+
+interface ActionBinderCandidate {
+  origin: 'overlay' | 'base';
+  name: string;
+  relativePath: string;
+  absolutePath: string;
+  revisionKey: string;
+  physicalRevisionKey: string;
+  catalogRevisionKey: string;
+}
+
+interface ActionBinderEntry {
+  index: number;
+  id: number;
+  name: string;
+  contentHash?: string;
+}
+
+type ActionBinderReadResult =
+  | { ok: true; candidate: ActionBinderCandidate; entries: ActionBinderEntry[] }
+  | { ok: false; candidate: ActionBinderCandidate; diagnostics: Diagnostic[] };
+
+type ActionMotionIdentityResult =
+  | { ok: true; motionAnimId: number }
+  | { ok: false; diagnostics: Diagnostic[] };
+
+type ActionAnimationContextResult =
+  | {
+      ok: true;
+      sourceUri: string;
+      file: IndexedFile;
+      session: WorkspaceSession;
+      sessionId: string;
+      sourceRevision: ActionFileRevision;
+      sourceRevisionKey: string;
+      sourceCatalogRevisionKey: string;
+      effectiveBase: string | null;
+      allowedRoots: string[];
+      motionAnimId: number;
+      binder: ActionBinderCandidate;
+      diagnostics: Diagnostic[];
+    }
+  | { ok: false; diagnostics: Diagnostic[] };
+
+interface ActionDirectoryEntry {
+  name: string;
+  isFile: boolean;
+  isSymbolicLink: boolean;
+}
+
+function actionDiagnostic(
+  code: string,
+  message: string,
+  sourceUri?: string,
+  details?: unknown
+): Diagnostic {
+  return {
+    severity: 'error',
+    code,
+    message,
+    ...(sourceUri ? { sourceUri } : {}),
+    ...(details === undefined ? {} : { details })
+  };
+}
+
+function asRecord(value: unknown): Record<string, unknown> | null {
+  return value !== null && typeof value === 'object' && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : null;
+}
+
+function asSafeInteger(value: unknown): number | null {
+  return typeof value === 'number' && Number.isSafeInteger(value) ? value : null;
+}
+
+function compareActionNames(left: string, right: string): number {
+  const a = left.toLowerCase();
+  const b = right.toLowerCase();
+  if (a < b) return -1;
+  if (a > b) return 1;
+  return left < right ? -1 : left > right ? 1 : 0;
+}
+
+async function readActionFileRevision(
+  absolutePath: string,
+  role: 'source' | 'binder',
+  sourceUri: string
+): Promise<{ ok: true; revision: ActionFileRevision } | { ok: false; diagnostic: Diagnostic }> {
+  try {
+    const info = await lstat(absolutePath);
+    if (info.isSymbolicLink() || !info.isFile()) {
+      return {
+        ok: false,
+        diagnostic: actionDiagnostic(
+          role === 'binder' ? 'ACTION_BINDER_MEMBERSHIP_READ_FAILED' : 'ACTION_SOURCE_REVISION_UNAVAILABLE',
+          role === 'binder'
+            ? 'ANIBND 候选不是普通文件，已拒绝读取 membership。'
+            : 'TAE 源文件不是普通文件，无法确认 source revision。',
+          sourceUri,
+          { role, reason: info.isSymbolicLink() ? 'symbolic-link' : 'not-file' }
+        )
+      };
+    }
+    if (!Number.isFinite(info.mtimeMs) || !Number.isFinite(info.size) || !Number.isFinite(info.ctimeMs)) {
+      return {
+        ok: false,
+        diagnostic: actionDiagnostic(
+          role === 'binder' ? 'ACTION_BINDER_MEMBERSHIP_READ_FAILED' : 'ACTION_SOURCE_REVISION_UNAVAILABLE',
+          role === 'binder'
+            ? 'ANIBND 候选的文件 revision 不完整，已拒绝读取 membership。'
+            : 'TAE 源文件的 revision 不完整，已拒绝复用旧 identity。',
+          sourceUri,
+          { role, reason: 'non-finite-stat' }
+        )
+      };
+    }
+    return {
+      ok: true,
+      revision: {
+        key: [info.size, info.mtimeMs, info.ctimeMs, info.dev, info.ino].join(':'),
+        mtimeMs: info.mtimeMs
+      }
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      diagnostic: actionDiagnostic(
+        role === 'binder' ? 'ACTION_BINDER_MEMBERSHIP_READ_FAILED' : 'ACTION_SOURCE_REVISION_UNAVAILABLE',
+        role === 'binder'
+          ? '读取 ANIBND 候选的文件 revision 失败，已拒绝复用旧 membership。'
+          : '读取 TAE 源文件的 revision 失败，已拒绝复用旧 motion identity。',
+        sourceUri,
+        { role, errorName: error instanceof Error ? error.name : typeof error }
+      )
+    };
+  }
+}
+
+function actionPathInsideRoot(root: string, candidate: string): boolean {
+  const relative = relativePath(resolve(root), resolve(candidate));
+  return relative.length === 0
+    || (!isAbsolute(relative) && relative !== '..' && !relative.startsWith(`..${sep}`));
+}
+
+function actionPathsEqual(left: string, right: string): boolean {
+  return resolve(left).toLowerCase() === resolve(right).toLowerCase();
+}
+
+function actionEffectiveBaseRoot(session: WorkspaceSession): string | null {
+  const explicit = session.layers.baseRoot?.trim();
+  if (explicit && !actionPathsEqual(explicit, session.layers.overlayRoot)) return resolve(explicit);
+  const overlayParent = dirname(session.layers.overlayRoot);
+  if (actionPathsEqual(overlayParent, session.layers.overlayRoot)) return null;
+  return existsSync(join(overlayParent, 'sekiro.exe')) || existsSync(join(overlayParent, 'parts'))
+    ? resolve(overlayParent)
+    : null;
+}
+
+function appendActionAllowedRoot(roots: string[], root: string | null): void {
+  if (!root) return;
+  const normalized = resolve(root);
+  if (!roots.some((item) => actionPathsEqual(item, normalized))) roots.push(normalized);
+}
+
+function actionCatalogRevisionKey(
+  indexedFiles: readonly IndexedFile[],
+  absolutePath: string
+): string {
+  const normalized = resolve(absolutePath).toLowerCase();
+  const file = indexedFiles.find((item) => resolve(item.absolutePath).toLowerCase() === normalized);
+  return file
+    ? `${file.sourceUri}:${file.mtimeMs}:${file.sha256 ?? ''}`
+    : 'not-indexed';
+}
+
+function actionBinderIdentityUri(candidate: ActionBinderCandidate): string {
+  return `action-binder://${candidate.origin}/${candidate.relativePath.replace(/\\/g, '/')}`;
+}
+
+async function readActionBinderDirectory(
+  directory: string | null,
+  origin: 'overlay' | 'base',
+  characterFamily: string,
+  sourceUri: string
+): Promise<{ entries: ActionDirectoryEntry[]; diagnostics: Diagnostic[] }> {
+  if (!directory) return { entries: [], diagnostics: [] };
+  try {
+    const entries = await readdir(directory, { withFileTypes: true });
+    return {
+      entries: entries
+        .filter((entry) => ACTION_ANIBND_FILE_PATTERN.test(entry.name)
+          && canonicalCharacterStemForActionPath(entry.name).toLowerCase() === characterFamily.toLowerCase())
+        .sort((left, right) => compareActionNames(left.name, right.name))
+        .map((entry) => ({ name: entry.name, isFile: entry.isFile(), isSymbolicLink: entry.isSymbolicLink() })),
+      diagnostics: []
+    };
+  } catch (error) {
+    const code = (error as { code?: string }).code;
+    if (code === 'ENOENT') return { entries: [], diagnostics: [] };
+    return {
+      entries: [],
+      diagnostics: [actionDiagnostic(
+        'ACTION_BINDER_MEMBERSHIP_READ_FAILED',
+        `读取 ${origin} 的 chr 目录失败，已拒绝推断 ANIBND membership。`,
+        sourceUri,
+        { origin, characterFamily, errorName: error instanceof Error ? error.name : typeof error }
+      )]
+    };
+  }
+}
+
+async function enumerateActionBinderCandidates(input: {
+  session: WorkspaceSession;
+  effectiveBase: string | null;
+  characterFamily: string;
+  sourceUri: string;
+  indexedFiles: readonly IndexedFile[];
+}): Promise<{ candidates: ActionBinderCandidate[]; diagnostics: Diagnostic[] }> {
+  const layers: Array<{ origin: 'overlay' | 'base'; root: string }> = [
+    { origin: 'overlay', root: input.session.layers.overlayRoot },
+    ...(input.effectiveBase ? [{ origin: 'base' as const, root: input.effectiveBase }] : [])
+  ];
+  const candidates: ActionBinderCandidate[] = [];
+  const diagnostics: Diagnostic[] = [];
+  const shadowedPaths = new Set<string>();
+
+  for (const layer of layers) {
+    const directory = join(layer.root, 'chr');
+    const listed = await readActionBinderDirectory(directory, layer.origin, input.characterFamily, input.sourceUri);
+    diagnostics.push(...listed.diagnostics);
+    if (listed.diagnostics.length > 0) continue;
+    for (const entry of listed.entries) {
+      const relative = `chr/${entry.name}`;
+      const shadowKey = relative.toLowerCase();
+      if (shadowedPaths.has(shadowKey)) continue;
+      // Mark an overlay name as shadowing base even if it is malformed or a link;
+      // falling through to base would silently change the selected resource.
+      shadowedPaths.add(shadowKey);
+      const absolutePath = resolve(join(directory, entry.name));
+      const contained = layer.origin === 'overlay'
+        ? input.session.isOverlayPath(absolutePath)
+        : (input.session.isBasePath(absolutePath) || actionPathInsideRoot(layer.root, absolutePath));
+      if (!contained) {
+        diagnostics.push(actionDiagnostic(
+          'ACTION_BINDER_MEMBERSHIP_READ_FAILED',
+          'ANIBND 候选路径不在当前会话允许的 root 内，已拒绝读取。',
+          input.sourceUri,
+          { origin: layer.origin, relativePath: relative, reason: 'path-containment' }
+        ));
+        continue;
+      }
+      if (!entry.isFile || entry.isSymbolicLink) {
+        diagnostics.push(actionDiagnostic(
+          'ACTION_BINDER_MEMBERSHIP_READ_FAILED',
+          'ANIBND 候选不是普通文件，已拒绝读取并保持 overlay shadow。',
+          input.sourceUri,
+          { origin: layer.origin, relativePath: relative, reason: entry.isSymbolicLink ? 'symbolic-link' : 'not-file' }
+        ));
+        continue;
+      }
+      const revision = await readActionFileRevision(absolutePath, 'binder', input.sourceUri);
+      if (!revision.ok) {
+        diagnostics.push(revision.diagnostic);
+        continue;
+      }
+      const catalogRevisionKey = actionCatalogRevisionKey(input.indexedFiles, absolutePath);
+      candidates.push({
+        origin: layer.origin,
+        name: entry.name,
+        relativePath: relative,
+        absolutePath,
+        revisionKey: `${revision.revision.key}|${catalogRevisionKey}`,
+        physicalRevisionKey: revision.revision.key,
+        catalogRevisionKey
+      });
+    }
+  }
+
+  return { candidates, diagnostics };
+}
+
+function parseActionBinderEntries(data: unknown, sourceUri: string): ActionBinderEntry[] | Diagnostic {
+  const envelope = asRecord(data);
+  const nested = asRecord(envelope?.nested);
+  if (nested?.format !== 'BND4' || !Array.isArray(nested.entries)) {
+    return actionDiagnostic(
+      'ACTION_BINDER_MEMBERSHIP_READ_FAILED',
+      'Bridge 返回的 ANIBND 不是可验证的 BND4 membership envelope。',
+      sourceUri,
+      { reason: 'missing-bnd4-envelope' }
+    );
+  }
+  const entries: ActionBinderEntry[] = [];
+  for (const raw of nested.entries) {
+    const record = asRecord(raw);
+    const index = asSafeInteger(record?.index);
+    const id = asSafeInteger(record?.id);
+    const name = typeof record?.name === 'string' ? record.name : null;
+    if (index === null || index < 0 || id === null || !name) {
+      return actionDiagnostic(
+        'ACTION_BINDER_MEMBERSHIP_READ_FAILED',
+        'Bridge 返回的 BND4 entry identity 不完整，已拒绝推断 membership。',
+        sourceUri,
+        { reason: 'invalid-entry-identity' }
+      );
+    }
+    entries.push({
+      index,
+      id,
+      name,
+      ...(typeof record?.contentHash === 'string' ? { contentHash: record.contentHash } : {})
+    });
+  }
+  return entries;
+}
+
+async function readActionBinderDocument(input: {
+  candidate: ActionBinderCandidate;
+  sourceUri: string;
+  allowedRoots: string[];
+  effectiveBase: string | null;
+  sessionId: string;
+}): Promise<ActionBinderReadResult> {
+  try {
+    const result = await runBridge<{ nested?: unknown }>({
+      command: 'read-dcx-document',
+      filePath: input.candidate.absolutePath,
+      resourceUri: input.sourceUri,
+      allowedRoots: input.allowedRoots,
+      timeoutMs: 120_000,
+      ...(input.effectiveBase ? { oodleRuntimeRoot: input.effectiveBase } : {}),
+      workspaceSessionId: input.sessionId
+    });
+    if (result.parseStatus === 'failed' || !result.data) {
+      return {
+        ok: false,
+        candidate: input.candidate,
+        diagnostics: [
+          actionDiagnostic(
+            'ACTION_BINDER_MEMBERSHIP_READ_FAILED',
+            'Bridge 读取 ANIBND membership 失败，已拒绝继续定位动画。',
+            input.sourceUri,
+            {
+              relativePath: input.candidate.relativePath,
+              origin: input.candidate.origin,
+              bridgeCodes: result.diagnostics.map((diagnostic) => diagnostic.code)
+            }
+          ),
+          ...result.diagnostics
+        ]
+      };
+    }
+    const parsed = parseActionBinderEntries(result.data, input.sourceUri);
+    if (!Array.isArray(parsed)) {
+      return { ok: false, candidate: input.candidate, diagnostics: [parsed, ...result.diagnostics] };
+    }
+    const after = await readActionFileRevision(input.candidate.absolutePath, 'binder', input.sourceUri);
+    if (!after.ok) {
+      return { ok: false, candidate: input.candidate, diagnostics: [after.diagnostic] };
+    }
+    if (after.revision.key !== input.candidate.physicalRevisionKey) {
+      return {
+        ok: false,
+        candidate: input.candidate,
+        diagnostics: [actionDiagnostic(
+          'ACTION_BINDER_MEMBERSHIP_READ_FAILED',
+          'ANIBND 在 Bridge 读取期间发生 source revision 变化，已丢弃本次 membership。',
+          input.sourceUri,
+          { relativePath: input.candidate.relativePath, reason: 'changed-during-read' }
+        )]
+      };
+    }
+    return { ok: true, candidate: input.candidate, entries: parsed };
+  } catch (error) {
+    return {
+      ok: false,
+      candidate: input.candidate,
+      diagnostics: [actionDiagnostic(
+        'ACTION_BINDER_MEMBERSHIP_READ_FAILED',
+        '读取 ANIBND membership 时发生未预期错误，已 fail-closed。',
+        input.sourceUri,
+        { relativePath: input.candidate.relativePath, errorName: error instanceof Error ? error.name : typeof error }
+      )]
+    };
+  }
+}
+
+function findIndexedActionMotionIdentity(
+  index: WorkspaceIndex | null,
+  sourceUri: string,
+  animId: number,
+  sourceRevision: ActionFileRevision
+): number | undefined {
+  const lookup = index?.lookupTaeAnimation(sourceUri, animId);
+  if (!lookup || lookup.status !== 'UNIQUE' || lookup.sourceRevision !== sourceRevision.mtimeMs) return undefined;
+  const motionAnimId = lookup.animation.motionAnimId;
+  return typeof motionAnimId === 'number'
+    && Number.isSafeInteger(motionAnimId)
+    && motionAnimId >= 0
+    && motionAnimId < SEKIRO_ANIMATION_BINDER_ID_BASE
+    ? motionAnimId
+    : undefined;
 }
 
 async function assembleC0000CompatibilityPreview(input: {
@@ -292,6 +706,446 @@ async function assembleC0000CompatibilityPreview(input: {
 export function registerActionIpcHandlers(deps: ActionIpcDeps): void {
   const locateTaeTemplatePathSync = makeLocateTaeTemplatePathSync(deps);
   const loadTaeEventTemplate = makeLoadTaeEventTemplate(locateTaeTemplatePathSync);
+
+  // ACTION 的本地缓存只缓存「已由 Bridge 读取过的 BND4 membership」和
+  // 「已由 Bridge 读取过的 TAE motion identity」。缓存键绑定当前会话、两层
+  // root、文件物理 revision 与 indexed-file revision；任何一个边界变化都不能
+  // 把旧的容器关系带进新的工作区。
+  const binderMembershipCache = new Map<string, {
+    revisionKey: string;
+    promise: Promise<ActionBinderReadResult>;
+  }>();
+  const taeMotionIdentityCache = new Map<string, {
+    revisionKey: string;
+    promise: Promise<ActionMotionIdentityResult>;
+  }>();
+  let actionCacheScopeKey: string | null = null;
+
+  const syncActionCacheScope = (session: WorkspaceSession, effectiveBase: string | null, sessionId: string): void => {
+    const scopeKey = [
+      sessionId,
+      resolve(session.layers.overlayRoot).toLowerCase(),
+      effectiveBase ? resolve(effectiveBase).toLowerCase() : '<no-base>'
+    ].join('|');
+    if (actionCacheScopeKey === scopeKey) return;
+    actionCacheScopeKey = scopeKey;
+    binderMembershipCache.clear();
+    taeMotionIdentityCache.clear();
+  };
+
+  const sessionChangedDiagnostic = (sourceUri: string): Diagnostic => ({
+    severity: 'error',
+    code: 'ACTION_WORKSPACE_SESSION_CHANGED',
+    message: '工作区会话在 ACTION 读取期间发生变化，已丢弃旧 session 的结果。',
+    sourceUri,
+    details: { reason: 'session-id-or-object-changed' }
+  });
+
+  const resolveTaeMotionIdentity = async (input: {
+    sourceUri: string;
+    file: IndexedFile;
+    session: WorkspaceSession;
+    sessionId: string;
+    animId: number;
+    sourceRevision: ActionFileRevision;
+    sourceRevisionKey: string;
+    allowedRoots: string[];
+    effectiveBase: string | null;
+  }): Promise<ActionMotionIdentityResult> => {
+    const cacheKey = input.sourceUri;
+    const cached = taeMotionIdentityCache.get(cacheKey);
+    if (cached?.revisionKey === input.sourceRevisionKey) return cached.promise;
+
+    const promise = (async (): Promise<ActionMotionIdentityResult> => {
+      try {
+        const indexed = findIndexedActionMotionIdentity(
+          deps.activeIndex,
+          input.sourceUri,
+          // The caller validates this before entering the resolver.
+          input.animId,
+          input.sourceRevision
+        );
+        if (indexed !== undefined) return { ok: true, motionAnimId: indexed };
+
+        const result = await runBridge<Record<string, unknown>>({
+          command: 'read-tae-document',
+          filePath: input.file.absolutePath,
+          resourceUri: input.sourceUri,
+          allowedRoots: input.allowedRoots,
+          timeoutMs: 120_000,
+          ...(input.effectiveBase ? { oodleRuntimeRoot: input.effectiveBase } : {}),
+          workspaceSessionId: input.sessionId
+        });
+        if (result.parseStatus === 'failed' || !result.data) {
+          return {
+            ok: false,
+            diagnostics: [
+              actionDiagnostic(
+                'TAE_MOTION_IDENTITY_READ_FAILED',
+                'Bridge 读取 TAE motion identity 失败，已拒绝回退到 animId。',
+                input.sourceUri,
+                { animId: input.animId, bridgeCodes: result.diagnostics.map((diagnostic) => diagnostic.code) }
+              ),
+              ...result.diagnostics
+            ]
+          };
+        }
+        const data = asRecord(result.data);
+        if (!data || data.animationsTruncated === true || !Array.isArray(data.animations)) {
+          return {
+            ok: false,
+            diagnostics: [actionDiagnostic(
+              'TAE_MOTION_IDENTITY_UNRESOLVED',
+              'TAE motion identity 数据缺失或被截断，已拒绝回退到 animId。',
+              input.sourceUri,
+              { animId: input.animId, animationsTruncated: data?.animationsTruncated === true }
+            )]
+          };
+        }
+        const matches = data.animations.filter((raw) => {
+          const animation = asRecord(raw);
+          return asSafeInteger(animation?.animId) === input.animId;
+        });
+        if (matches.length > 1) {
+          return {
+            ok: false,
+            diagnostics: [actionDiagnostic(
+              'TAE_MOTION_IDENTITY_AMBIGUOUS',
+              'TAE 返回多个相同 animId，motion identity 不唯一，已拒绝继续。',
+              input.sourceUri,
+              { animId: input.animId, matchCount: matches.length }
+            )]
+          };
+        }
+        const motionAnimId = matches.length === 1
+          ? asSafeInteger(asRecord(matches[0])?.motionAnimId)
+          : null;
+        if (motionAnimId === null || motionAnimId < 0 || motionAnimId >= SEKIRO_ANIMATION_BINDER_ID_BASE) {
+          return {
+            ok: false,
+            diagnostics: [actionDiagnostic(
+              'TAE_MOTION_IDENTITY_UNRESOLVED',
+              'TAE 没有可安全使用的 motionAnimId，禁止把选中 animId 当作 HKX ID。',
+              input.sourceUri,
+              { animId: input.animId }
+            )]
+          };
+        }
+
+        // 只把当前 source revision 的 Bridge 读结果投影回既有 index；这不是
+        // 第二套 parser，下一次读取仍以 Bridge envelope 为源。注入 revision
+        // 只是 desktop 在 core 尚未提供 source-revision 参数时的最小适配。
+        if (deps.activeSession === input.session
+          && deps.activeWorkspaceSessionId === input.sessionId
+          && deps.activeIndex) {
+          ingestBridgeResult(deps.activeIndex, {
+            sourceUri: input.sourceUri,
+            sourcePath: input.file.relativePath,
+            game: input.file.game,
+            resourceKind: 'action',
+            parseStatus: 'parsed',
+            diagnostics: deps.asBasicDiagnostics(result.diagnostics),
+            data: { ...data, sourceRevision: input.sourceRevision.mtimeMs }
+          });
+        }
+        return { ok: true, motionAnimId };
+      } catch (error) {
+        return {
+          ok: false,
+          diagnostics: [actionDiagnostic(
+            'TAE_MOTION_IDENTITY_READ_FAILED',
+            '读取 TAE motion identity 时发生未预期错误，已 fail-closed。',
+            input.sourceUri,
+            { animId: input.animId, errorName: error instanceof Error ? error.name : typeof error }
+          )]
+        };
+      }
+    })();
+    // Keeping the map by source URI ensures a revision change replaces, rather
+    // than reuses, a result.
+    taeMotionIdentityCache.set(cacheKey, { revisionKey: input.sourceRevisionKey, promise });
+    return promise;
+  };
+
+  const resolveActionAnimationContext = async (
+    sourceUri: string,
+    animId: number
+  ): Promise<ActionAnimationContextResult> => {
+    const file = deps.indexedFiles.find((item) => item.sourceUri === sourceUri);
+    const session = deps.activeSession;
+    const sessionId = deps.activeWorkspaceSessionId?.trim();
+    if (!file || !session) {
+      return {
+        ok: false,
+        diagnostics: [actionDiagnostic(
+          'RESOURCE_NOT_INDEXED',
+          '资源未索引或工作区未打开，无法解析 ACTION motion identity。',
+          sourceUri
+        )]
+      };
+    }
+    if (!sessionId) {
+      return {
+        ok: false,
+        diagnostics: [actionDiagnostic(
+          'ACTION_WORKSPACE_SESSION_UNAVAILABLE',
+          '当前工作区缺少 session identity，已拒绝使用可能过期的 ACTION membership。',
+          sourceUri
+        )]
+      };
+    }
+    if (!Number.isSafeInteger(animId) || animId < 0) {
+      return {
+        ok: false,
+        diagnostics: [actionDiagnostic(
+          'ACTION_ANIM_ID_INVALID',
+          'ACTION animId 必须是非负 safe integer。',
+          sourceUri,
+          { animId }
+        )]
+      };
+    }
+    const sourcePath = resolve(file.absolutePath);
+    if (!session.isOverlayPath(sourcePath) && !session.isBasePath(sourcePath)) {
+      return {
+        ok: false,
+        diagnostics: [actionDiagnostic(
+          'ACTION_SOURCE_PATH_OUTSIDE_SESSION',
+          'TAE 源文件不在当前工作区会话允许的 overlay/base 内，已拒绝读取。',
+          sourceUri,
+          { relativePath: file.relativePath }
+        )]
+      };
+    }
+
+    const sourceRevisionResult = await readActionFileRevision(sourcePath, 'source', sourceUri);
+    if (!sourceRevisionResult.ok) return { ok: false, diagnostics: [sourceRevisionResult.diagnostic] };
+    const sourceCatalogRevisionKey = actionCatalogRevisionKey(deps.indexedFiles, sourcePath);
+    const sourceRevisionKey = `${sourceRevisionResult.revision.key}|${sourceCatalogRevisionKey}`;
+
+    const roots = await deps.verifiedReadRoots(session, dirname(sourcePath));
+    if (roots.diagnostics.length > 0) return { ok: false, diagnostics: roots.diagnostics };
+    const effectiveBase = actionEffectiveBaseRoot(session);
+    appendActionAllowedRoot(roots.allowedRoots, effectiveBase);
+    if (deps.activeSession !== session || deps.activeWorkspaceSessionId !== sessionId) {
+      return { ok: false, diagnostics: [sessionChangedDiagnostic(sourceUri)] };
+    }
+
+    const characterFamily = canonicalCharacterStemForActionPath(file.relativePath);
+    if (!ACTION_CHARACTER_FAMILY_PATTERN.test(characterFamily)) {
+      return {
+        ok: false,
+        diagnostics: [actionDiagnostic(
+          'ACTION_CHARACTER_FAMILY_UNRESOLVED',
+          'TAE 路径无法解析为 cXXXX character family，已拒绝跨角色扫描 ANIBND。',
+          sourceUri,
+          { relativePath: file.relativePath }
+        )]
+      };
+    }
+    syncActionCacheScope(session, effectiveBase, sessionId);
+
+    const motionIdentity = await resolveTaeMotionIdentity({
+      sourceUri,
+      file,
+      session,
+      sessionId,
+      animId,
+      sourceRevision: sourceRevisionResult.revision,
+      sourceRevisionKey,
+      allowedRoots: [...roots.allowedRoots],
+      effectiveBase
+    });
+    if (!motionIdentity.ok) return motionIdentity;
+    if (deps.activeSession !== session || deps.activeWorkspaceSessionId !== sessionId) {
+      return { ok: false, diagnostics: [sessionChangedDiagnostic(sourceUri)] };
+    }
+
+    const plan = await enumerateActionBinderCandidates({
+      session,
+      effectiveBase,
+      characterFamily,
+      sourceUri,
+      indexedFiles: deps.indexedFiles
+    });
+    if (plan.diagnostics.length > 0) return { ok: false, diagnostics: plan.diagnostics };
+    if (plan.candidates.length === 0) {
+      return {
+        ok: false,
+        diagnostics: [actionDiagnostic(
+          'ACTION_BINDER_MEMBERSHIP_NOT_FOUND',
+          `同 character family ${characterFamily} 没有可读取的 ANIBND 候选，已拒绝按文件名猜测。`,
+          sourceUri,
+          { characterFamily, motionAnimId: motionIdentity.motionAnimId, candidates: [] }
+        )]
+      };
+    }
+
+    const binderReads = await Promise.all(plan.candidates.map((candidate) => {
+      const cacheKey = `${candidate.origin}:${candidate.relativePath.toLowerCase()}`;
+      const cached = binderMembershipCache.get(cacheKey);
+      if (cached?.revisionKey === candidate.revisionKey) return cached.promise;
+      const promise = readActionBinderDocument({
+        candidate,
+        sourceUri,
+        allowedRoots: [...roots.allowedRoots],
+        effectiveBase,
+        sessionId
+      });
+      binderMembershipCache.set(cacheKey, { revisionKey: candidate.revisionKey, promise });
+      return promise;
+    }));
+    const failedReads = binderReads.filter((item): item is Extract<ActionBinderReadResult, { ok: false }> => !item.ok);
+    if (failedReads.length > 0) {
+      return { ok: false, diagnostics: failedReads.flatMap((item) => item.diagnostics) };
+    }
+    const membership = resolveBinderMembership({
+      query: {
+        characterFamily,
+        binderEntryId: SEKIRO_ANIMATION_BINDER_ID_BASE + motionIdentity.motionAnimId
+      },
+      candidates: binderReads.flatMap((item) => item.ok
+        ? [{
+            characterFamily,
+            source: {
+              sourceUri: actionBinderIdentityUri(item.candidate),
+              sourcePath: item.candidate.relativePath,
+              sourceRevision: item.candidate.revisionKey,
+              sourceLayer: item.candidate.origin
+            },
+            entries: item.entries.map((entry) => ({
+              entryId: entry.id,
+              entryIndex: entry.index,
+              entryName: entry.name
+            }))
+          }]
+        : [])
+    });
+    if (membership.diagnostics.length > 0) {
+      return {
+        ok: false,
+        diagnostics: [actionDiagnostic(
+          'ACTION_BINDER_MEMBERSHIP_READ_FAILED',
+          'Binder membership identity 校验失败，已拒绝继续读取动画。',
+          sourceUri,
+          { diagnostics: membership.diagnostics }
+        )]
+      };
+    }
+    if (membership.status === 'NOT_FOUND') {
+      return {
+        ok: false,
+        diagnostics: [actionDiagnostic(
+          'ACTION_BINDER_MEMBERSHIP_NOT_FOUND',
+          `ANIBND membership 中没有 motionAnimId=${motionIdentity.motionAnimId} 的唯一 entry。`,
+          sourceUri,
+          {
+            characterFamily,
+            motionAnimId: motionIdentity.motionAnimId,
+            candidates: plan.candidates.map((candidate) => ({ origin: candidate.origin, relativePath: candidate.relativePath }))
+          }
+        )]
+      };
+    }
+    if (membership.status === 'AMBIGUOUS') {
+      return {
+        ok: false,
+        diagnostics: [actionDiagnostic(
+          'ACTION_BINDER_MEMBERSHIP_AMBIGUOUS',
+          `motionAnimId=${motionIdentity.motionAnimId} 在同 character family 的 ANIBND membership 中出现多个匹配，已拒绝猜测。`,
+          sourceUri,
+          {
+            characterFamily,
+            motionAnimId: motionIdentity.motionAnimId,
+            matches: membership.matches.map((match) => ({
+              sourceUri: match.sourceUri,
+              entryIndex: match.entryIndex,
+              entryId: match.binderEntryId,
+              entryName: match.entryName
+            }))
+          }
+        )]
+      };
+    }
+    if (deps.activeSession !== session || deps.activeWorkspaceSessionId !== sessionId) {
+      return { ok: false, diagnostics: [sessionChangedDiagnostic(sourceUri)] };
+    }
+    const membershipMatch = membership.match;
+    const matchedRead = binderReads.find((item): item is Extract<ActionBinderReadResult, { ok: true }> => item.ok
+      && actionBinderIdentityUri(item.candidate) === membershipMatch.sourceUri);
+    const matchedEntry = matchedRead?.entries.find((entry) => entry.id === membershipMatch.binderEntryId
+      && (membershipMatch.entryIndex === undefined || entry.index === membershipMatch.entryIndex));
+    if (!matchedRead || !matchedEntry) {
+      return {
+        ok: false,
+        diagnostics: [actionDiagnostic(
+          'ACTION_BINDER_MEMBERSHIP_NOT_FOUND',
+          'ANIBND membership 结果缺少唯一 entry，已拒绝继续读取动画。',
+          sourceUri,
+          { characterFamily, motionAnimId: motionIdentity.motionAnimId }
+        )]
+      };
+    }
+    return {
+      ok: true,
+      sourceUri,
+      file,
+      session,
+      sessionId,
+      sourceRevision: sourceRevisionResult.revision,
+      sourceRevisionKey,
+      sourceCatalogRevisionKey,
+      effectiveBase,
+      allowedRoots: roots.allowedRoots,
+      motionAnimId: motionIdentity.motionAnimId,
+      binder: matchedRead.candidate,
+      diagnostics: [{
+        severity: 'info',
+        code: 'ACTION_BINDER_MEMBERSHIP_UNIQUE',
+        message: `ACTION motion identity 已唯一定位到 ${matchedRead.candidate.relativePath} 的 BND4 entry。`,
+        sourceUri,
+        details: {
+          characterFamily,
+          motionAnimId: motionIdentity.motionAnimId,
+          entryIndex: matchedEntry.index,
+          entryId: matchedEntry.id,
+          origin: matchedRead.candidate.origin,
+          relativePath: matchedRead.candidate.relativePath
+        }
+      }]
+    };
+  };
+
+  const validateActionContextCurrent = async (
+    context: Extract<ActionAnimationContextResult, { ok: true }>
+  ): Promise<Diagnostic[]> => {
+    if (deps.activeSession !== context.session || deps.activeWorkspaceSessionId !== context.sessionId) {
+      return [sessionChangedDiagnostic(context.sourceUri)];
+    }
+    const sourceRevision = await readActionFileRevision(context.file.absolutePath, 'source', context.sourceUri);
+    if (!sourceRevision.ok) return [sourceRevision.diagnostic];
+    if (sourceRevision.revision.key !== context.sourceRevision.key
+      || actionCatalogRevisionKey(deps.indexedFiles, context.file.absolutePath) !== context.sourceCatalogRevisionKey) {
+      return [actionDiagnostic(
+        'ACTION_SOURCE_REVISION_CHANGED',
+        'TAE source revision 在动画读取前发生变化，已丢弃旧 motion identity。',
+        context.sourceUri,
+        { relativePath: context.file.relativePath }
+      )];
+    }
+    const binderRevision = await readActionFileRevision(context.binder.absolutePath, 'binder', context.sourceUri);
+    if (!binderRevision.ok) return [binderRevision.diagnostic];
+    if (binderRevision.revision.key !== context.binder.physicalRevisionKey
+      || actionCatalogRevisionKey(deps.indexedFiles, context.binder.absolutePath) !== context.binder.catalogRevisionKey) {
+      return [actionDiagnostic(
+        'ACTION_BINDER_SOURCE_REVISION_CHANGED',
+        'ANIBND source revision 在动画读取前发生变化，已拒绝复用旧 membership。',
+        context.sourceUri,
+        { relativePath: context.binder.relativePath }
+      )];
+    }
+    return [];
+  };
 
   deps.handle('resource.readTaeDocument', async (_event, sourceUri: string, options?: { animationPage?: number; animationPageSize?: number }) => {
     const file = deps.indexedFiles.find((item) => item.sourceUri === sourceUri);
@@ -581,37 +1435,39 @@ export function registerActionIpcHandlers(deps: ActionIpcDeps): void {
       sourceUri?: string;
       relativePath?: string;
       data?: Record<string, unknown>;
-      diagnostics: Array<{ severity: string; code: string; message: string; sourceUri?: string }>;
+      diagnostics: Diagnostic[];
     }> => {
-      const file = deps.indexedFiles.find((item) => item.sourceUri === sourceUri);
-      if (!file || !deps.activeSession) {
-        return { ok: false, diagnostics: [{ severity: 'error' as const, code: 'RESOURCE_NOT_INDEXED', message: '资源未索引或工作区未打开，无法读取 TAE 动画。', sourceUri }] };
-      }
-      const roots = await deps.verifiedReadRoots(deps.activeSession, dirname(file.absolutePath));
-      if (roots.diagnostics.length > 0) return { ok: false, diagnostics: roots.diagnostics };
-      const overlayParent = dirname(deps.activeSession.layers.overlayRoot);
-      const effectiveBase = deps.activeSession.layers.baseRoot?.trim()
-        ?? (existsSync(join(overlayParent, 'sekiro.exe')) || existsSync(join(overlayParent, 'parts')) ? overlayParent : null);
-      if (effectiveBase && !roots.allowedRoots.includes(effectiveBase)) roots.allowedRoots.push(effectiveBase);
+      const context = await resolveActionAnimationContext(sourceUri, animId);
+      if (!context.ok) return { ok: false, sourceUri, diagnostics: context.diagnostics };
+      const beforeDiagnostics = await validateActionContextCurrent(context);
+      if (beforeDiagnostics.length > 0) return { ok: false, sourceUri, diagnostics: beforeDiagnostics };
 
       const result = await runBridge<Record<string, unknown>>({
         command: 'read-tae-animation-clip',
-        filePath: file.absolutePath,
-        allowedRoots: roots.allowedRoots,
+        filePath: context.file.absolutePath,
+        resourceUri: sourceUri,
+        allowedRoots: context.allowedRoots,
         timeoutMs: 120_000,
-        ...(effectiveBase ? { oodleRuntimeRoot: effectiveBase } : {}),
-        commandOptions: { animId, ...(flverBoneNames?.length ? { flverBoneNames } : {}) }
+        ...(context.effectiveBase ? { oodleRuntimeRoot: context.effectiveBase } : {}),
+        workspaceSessionId: context.sessionId,
+        commandOptions: {
+          animId,
+          animationContainerPath: context.binder.absolutePath,
+          ...(flverBoneNames?.length ? { flverBoneNames } : {})
+        }
       });
+      const afterDiagnostics = await validateActionContextCurrent(context);
+      if (afterDiagnostics.length > 0) return { ok: false, sourceUri, diagnostics: afterDiagnostics };
       if (result.parseStatus === 'failed' || !result.data) {
-        return { ok: false, sourceUri, diagnostics: result.diagnostics };
+        return { ok: false, sourceUri, diagnostics: [...context.diagnostics, ...result.diagnostics] };
       }
 
       return {
         ok: true,
         sourceUri,
-        relativePath: file.relativePath,
+        relativePath: context.file.relativePath,
         data: result.data,
-        diagnostics: result.diagnostics
+        diagnostics: [...context.diagnostics, ...result.diagnostics]
       };
     }
   );
@@ -630,37 +1486,41 @@ export function registerActionIpcHandlers(deps: ActionIpcDeps): void {
       sourceUri?: string;
       relativePath?: string;
       data?: Record<string, unknown>;
-      diagnostics: Array<{ severity: string; code: string; message: string; sourceUri?: string }>;
+      diagnostics: Diagnostic[];
     }> => {
-      const file = deps.indexedFiles.find((item) => item.sourceUri === sourceUri);
-      if (!file || !deps.activeSession) {
-        return { ok: false, diagnostics: [{ severity: 'error' as const, code: 'RESOURCE_NOT_INDEXED', message: '资源未索引或工作区未打开，无法采样 TAE 动画位姿。', sourceUri }] };
-      }
-      const roots = await deps.verifiedReadRoots(deps.activeSession, dirname(file.absolutePath));
-      if (roots.diagnostics.length > 0) return { ok: false, diagnostics: roots.diagnostics };
-      const overlayParent = dirname(deps.activeSession.layers.overlayRoot);
-      const effectiveBase = deps.activeSession.layers.baseRoot?.trim()
-        ?? (existsSync(join(overlayParent, 'sekiro.exe')) || existsSync(join(overlayParent, 'parts')) ? overlayParent : null);
-      if (effectiveBase && !roots.allowedRoots.includes(effectiveBase)) roots.allowedRoots.push(effectiveBase);
+      const context = await resolveActionAnimationContext(sourceUri, animId);
+      if (!context.ok) return { ok: false, sourceUri, diagnostics: context.diagnostics };
+      const beforeDiagnostics = await validateActionContextCurrent(context);
+      if (beforeDiagnostics.length > 0) return { ok: false, sourceUri, diagnostics: beforeDiagnostics };
 
       const result = await runBridge<Record<string, unknown>>({
         command: 'sample-tae-animation-pose',
-        filePath: file.absolutePath,
-        allowedRoots: roots.allowedRoots,
+        filePath: context.file.absolutePath,
+        resourceUri: sourceUri,
+        allowedRoots: context.allowedRoots,
         timeoutMs: 120_000,
-        ...(effectiveBase ? { oodleRuntimeRoot: effectiveBase } : {}),
-        commandOptions: { animId, timeSeconds, loop: loop ?? true, ...(flverBoneNames?.length ? { flverBoneNames } : {}) }
+        ...(context.effectiveBase ? { oodleRuntimeRoot: context.effectiveBase } : {}),
+        workspaceSessionId: context.sessionId,
+        commandOptions: {
+          animId,
+          timeSeconds,
+          loop: loop ?? true,
+          animationContainerPath: context.binder.absolutePath,
+          ...(flverBoneNames?.length ? { flverBoneNames } : {})
+        }
       });
+      const afterDiagnostics = await validateActionContextCurrent(context);
+      if (afterDiagnostics.length > 0) return { ok: false, sourceUri, diagnostics: afterDiagnostics };
       if (result.parseStatus === 'failed' || !result.data) {
-        return { ok: false, sourceUri, diagnostics: result.diagnostics };
+        return { ok: false, sourceUri, diagnostics: [...context.diagnostics, ...result.diagnostics] };
       }
 
       return {
         ok: true,
         sourceUri,
-        relativePath: file.relativePath,
+        relativePath: context.file.relativePath,
         data: result.data,
-        diagnostics: result.diagnostics
+        diagnostics: [...context.diagnostics, ...result.diagnostics]
       };
     }
   );

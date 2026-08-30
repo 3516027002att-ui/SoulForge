@@ -6,7 +6,7 @@
  *   - docs/governance/scope.json：proposedSupport=deferred + deferredToRelease
  *   - §18.3 Gate 覆盖矩阵：gateState=deferred + applicability=deferred-v0.6
  *   - §13.1 执行面板：lifecycle=deferred
- *   - packages/shared/src/editor-protocol.ts：DEFERRED_PREVIEW_EDITOR_KINDS
+ *   - packages/shared/src/editor-protocol.ts：DEFERRED_PREVIEW_EDITOR_KINDS（若有）
  *
  * 本脚本逐项双向比对索引与权威记录。缺失、多写、目标版本不符或权威侧
  * 变化后未同步索引，全部失败关闭 —— 否则索引会独立漂移成假口径。
@@ -215,7 +215,9 @@ if (!kindsBlock) {
   compareSets('延期预览编辑器', `${HANDOFF} §18.5`, authoritativeKinds, indexedKinds);
 
   const releaseConstant = /DEFERRED_PREVIEW_TARGET_RELEASE\s*=\s*'([^']+)'/.exec(protocolSource)?.[1];
-  if (releaseConstant !== TARGET_RELEASE) {
+  // 过渡期可以没有延期预览编辑器；此时旧版 target-release 常量也不再是
+  // 必需的治理输入。若未来重新登记预览编辑器，再恢复目标版本校验。
+  if (authoritativeKinds.size > 0 && releaseConstant !== TARGET_RELEASE) {
     add(
       'PREVIEW_TARGET_RELEASE_MISMATCH',
       EDITOR_PROTOCOL,
@@ -247,7 +249,7 @@ process.stdout.write(`${JSON.stringify({
     `${SCOPE_AUTHORITY}（proposedSupport/deferredToRelease/authorityAtRuling/operations）`,
     `${HANDOFF} §18.3 Gate 覆盖矩阵（gateState/applicability）`,
     `${HANDOFF} §13.1 执行面板（lifecycle）`,
-    `${EDITOR_PROTOCOL}（DEFERRED_PREVIEW_EDITOR_KINDS / DEFERRED_PREVIEW_TARGET_RELEASE）`
+    `${EDITOR_PROTOCOL}（DEFERRED_PREVIEW_EDITOR_KINDS；存在延期预览编辑器时校验目标版本）`
   ],
   // 逐路对账规模。vacuous=true 表示该路两侧皆空——compareSets 恒真，
   // 「通过」只说明当前没有这类记录，不说明判据被行使过。

@@ -25,6 +25,7 @@ const temporaryRoot = await mkdtemp(join(tmpdir(), 'soulforge-release-scope-'));
 const cases = [];
 
 try {
+  assertApprovedTransitionEditorContract();
   await expectResult('canonical-proposal', {}, 0, 'proposal-valid');
   await expectResult('canonical-strict-frozen', {}, 0, 'scope-approved', false);
 
@@ -92,13 +93,24 @@ try {
     editors.operations = editors.operations.filter((operation) => operation !== 'project-canonical-dsl');
   }, 'FROZEN_OPERATION_MISSING');
 
-  await expectRejected('raw-hex-boundary-removed', (scope) => {
+  await expectRejected('native-authority-boundary-removed', (scope) => {
     const editors = item(scope, 'SCOPE-EDITORS');
-    editors.unsupportedOperations = editors.unsupportedOperations.filter((operation) => operation !== 'raw-hex-edit');
+    editors.unsupportedOperations = editors.unsupportedOperations.filter(
+      (operation) => operation !== 'editor-without-native-authority'
+    );
   }, 'FROZEN_UNSUPPORTED_BOUNDARY_MISSING');
 
   await expectRejected('frozen-editor-membership-drift', (scope) => {
     item(scope, 'SCOPE-EDITORS').editorIds[0] = 'safe-hex';
+  }, 'FROZEN_EDITOR_MATRIX_INVALID');
+
+  await expectRejected('editor-contract-redeferred', (scope) => {
+    const editors = item(scope, 'SCOPE-EDITORS');
+    editors.proposedSupport = 'deferred';
+    editors.deferredToRelease = scope.scopeDeferralPolicy.deferredToRelease;
+    editors.deferredTrack = 'fixture-editor-transition';
+    editors.operations = [];
+    editors.resumeRequires = ['fixture must retain the approved editor contract'];
   }, 'FROZEN_EDITOR_MATRIX_INVALID');
 
   await expectRejected('writable-hex-reintroduced', (scope) => {
@@ -215,8 +227,8 @@ try {
     item(scope, 'SCOPE-ASSET-MTD').deferredToRelease = 'V0.7';
   }, 'DEFERRED_RELEASE_INVALID');
 
-  // V0.6 承接后真实数据已无 deferred Gate（REL-E/REL-I 恢复 passed），
-  // 下面三条从 REL-I 反造 deferred 状态，验证延期 Gate 规则仍会触发。
+  // 当前过渡期仍保留通用 deferred Gate 规则；下面三条从 REL-I 反造
+  // deferred 状态，验证它与已放开的编辑器清单相互独立。
   await expectRejected('deferred-gate-carries-blocker', (scope, gates) => {
     const relI = gate(gates, 'REL-I');
     relI.gateState = 'deferred';
@@ -235,24 +247,28 @@ try {
     gate(gates, 'REL-I').gateState = 'open';
   }, 'FULLY_DEFERRED_GATE_STATE_INVALID');
 
-  await expectRejected('deferred-preview-editor-counted-as-release', (scope) => {
-    item(scope, 'SCOPE-EDITORS').deferredPreviewEditors.countedAsReleaseEditor = true;
+  await expectRejected('preview-editor-counted-as-release', (scope) => {
+    const editors = configureDeferredPreview(scope);
+    editors.deferredPreviewEditors.countedAsReleaseEditor = true;
   }, 'DEFERRED_PREVIEW_EDITOR_POLICY_INVALID');
 
-  await expectRejected('deferred-preview-editor-made-writable', (scope) => {
-    item(scope, 'SCOPE-EDITORS').deferredPreviewEditors.readOnly = false;
+  await expectRejected('preview-editor-made-writable', (scope) => {
+    const editors = configureDeferredPreview(scope);
+    editors.deferredPreviewEditors.readOnly = false;
   }, 'DEFERRED_PREVIEW_EDITOR_POLICY_INVALID');
 
-  await expectRejected('deferred-preview-editor-promoted-into-release-set', (scope) => {
-    item(scope, 'SCOPE-EDITORS').deferredPreviewEditors.editorIds = ['msb', 'tae', 'esd', 'flver', 'param'];
-  }, 'DEFERRED_PREVIEW_EDITOR_SET_INVALID');
+  await expectRejected('preview-editor-overlaps-current-editor-set', (scope) => {
+    const editors = configureDeferredPreview(scope);
+    editors.deferredPreviewEditors.editorIds = [editors.editorIds[0]];
+  }, 'DEFERRED_PREVIEW_EDITOR_OVERLAP');
 
-  await expectRejected('script-editor-claimed-as-typed-mutation', (scope) => {
-    item(scope, 'SCOPE-EDITORS').editorMutationModes.script = 'typed-mutation';
+  await expectRejected('editor-mutation-mode-invalid', (scope) => {
+    item(scope, 'SCOPE-EDITORS').editorMutationModes.script = 'unsupported-mode';
   }, 'FROZEN_EDITOR_MUTATION_MODE_INVALID');
 
-  await expectRejected('deferred-editor-reintroduced-into-frozen-set', (scope) => {
-    item(scope, 'SCOPE-EDITORS').editorIds.push('msb');
+  await expectRejected('duplicate-editor-reintroduced-into-contract', (scope) => {
+    const editors = item(scope, 'SCOPE-EDITORS');
+    editors.editorIds.push(editors.editorIds[0]);
   }, 'FROZEN_EDITOR_MATRIX_INVALID');
 
   // scope.json 新增字段但没进提案键序：装配层会静默漏投，这条挡住它。
@@ -400,6 +416,95 @@ function mutateGateRulingsRegion(text, mutate) {
   if (start === -1 || stop === -1) throw new Error('gate-rulings marker 对不存在，扰动锚点已失效。');
   const from = start + begin.length;
   return text.slice(0, from) + mutate(text.slice(from, stop)) + text.slice(stop);
+}
+
+/**
+ * 当前过渡期的正向基线：TAE/ESD/ACTION 的 writer、未知结构重编码和
+ * release-editor operation 必须由 user-approved scope contract 接受，
+ * 而不是被旧的固定 deferred/read-only 名单挡住。这里只确认治理投影；
+ * 不把它当作 native、Patch Engine 或真实游戏加载证据。
+ */
+function assertApprovedTransitionEditorContract() {
+  const editors = item(scopeSource, 'SCOPE-EDITORS');
+  if (editors.decisionStatus !== 'user-approved'
+    || editors.proposedSupport !== 'supported'
+    || editors.deferredToRelease !== null
+    || editors.deferredTrack !== null
+    || !Array.isArray(editors.resumeRequires)
+    || editors.resumeRequires.length !== 0) {
+    throw new Error('SCOPE-EDITORS must expose the current user-approved supported contract');
+  }
+
+  const editorIds = editors.editorIds;
+  const modes = editors.editorMutationModes;
+  const modeKeys = modes !== null && typeof modes === 'object' && !Array.isArray(modes)
+    ? Object.keys(modes)
+    : [];
+  if (!Array.isArray(editorIds)
+    || editorIds.length === 0
+    || new Set(editorIds).size !== editorIds.length
+    || modeKeys.length !== editorIds.length
+    || modeKeys.some((editorId) => !editorIds.includes(editorId))
+    || editorIds.some((editorId) => !['typed-mutation', 'whole-inner-file-replacement']
+      .includes(modes?.[editorId]))) {
+    throw new Error('SCOPE-EDITORS editorIds/editorMutationModes projection is invalid');
+  }
+
+  for (const editorId of ['tae', 'esd']) {
+    if (!editorIds.includes(editorId)) {
+      throw new Error(`transition editor ${editorId} is missing from the approved editor contract`);
+    }
+  }
+
+  const requiredOperations = new Map([
+    ['SCOPE-BEHAVIOR-ANIMATION', [
+      'write-tae-animation-document',
+      'write-animation-clip',
+      'edit-behavior-graph',
+      'write-behavior-graph',
+      'present-animation-release-editor'
+    ]],
+    ['SCOPE-BEHAVIOR-TAE', [
+      'write-tae-document',
+      'reencode-unknown-tae-event',
+      'present-tae-release-editor'
+    ]],
+    ['SCOPE-BEHAVIOR-ESD', [
+      'write-esd-document',
+      'reencode-unknown-expression-or-command',
+      'present-esd-release-editor'
+    ]]
+  ]);
+  for (const [scopeItemId, operations] of requiredOperations) {
+    const transition = item(scopeSource, scopeItemId);
+    if (transition.decisionStatus !== 'user-approved'
+      || transition.proposedSupport !== 'supported'
+      || transition.deferredToRelease !== null
+      || transition.deferredTrack !== null
+      || !Array.isArray(transition.resumeRequires)
+      || transition.resumeRequires.length !== 0
+      || operations.some((operation) => !transition.operations.includes(operation))) {
+      throw new Error(`${scopeItemId} does not expose the approved transition operations`);
+    }
+  }
+}
+
+/** 构造一个通用 preview 反例，不把旧的编辑器名单或固定目标版本带回门禁。 */
+function configureDeferredPreview(scope) {
+  const editors = item(scope, 'SCOPE-EDITORS');
+  const targetRelease = scope.scopeDeferralPolicy?.deferredToRelease;
+  if (typeof targetRelease !== 'string' || !Array.isArray(editors.editorIds)
+    || editors.editorIds.length === 0) {
+    throw new Error('cannot construct preview fixture without the current editor contract');
+  }
+  editors.deferredPreviewEditors = {
+    editorIds: [editors.editorIds[editors.editorIds.length - 1]],
+    deferredToRelease: targetRelease,
+    readOnly: true,
+    markedAsPreview: true,
+    countedAsReleaseEditor: false
+  };
+  return editors;
 }
 
 /** gates.json 里按 ID 取 Gate。提案侧的 currentState 对应这里的 gateState。 */

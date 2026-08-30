@@ -1,7 +1,5 @@
-import { DEFERRED_PREVIEW_TARGET_RELEASE } from '@soulforge/shared';
 import type {
   DeferredPreviewEditorKind,
-  DeferredPreviewTargetRelease,
   EditorKind,
   EditorMutationKind
 } from '@soulforge/shared';
@@ -40,26 +38,32 @@ export function normalizePageWindow(
 }
 
 /**
- * 冻结发布编辑器清单，与
- * `docs/V0_5_IMPLEMENTATION_HANDOFF.md` §18.2.1 `SCOPE-EDITORS.editorIds`
- * 逐项对应。msb/flver 已开闸写入但不在本清单（S36/S38 只解除写入延期，
- * 不改变冻结发布清单）；tae/esd 仍延期至 V0.6，只保留标记只读预览。
+ * 当前编辑器能力清单中的 editor id。该类型只描述能力契约投影，
+ * 不等同于 release Gate 已通过；真实 native authority、revision 校验、
+ * Patch Engine 提交和 release 验收仍由各自运行链路负责。
  */
 export type ProposedReleaseEditorId =
   | 'bnd4'
   | 'fmg'
   | 'param'
   | 'emevd'
-  | 'script';
+  | 'script'
+  | 'tae'
+  | 'esd';
 
 /**
- * V0.5 延期为只读预览、目标里程碑 V0.6 的编辑器。
- * 清单本体在 `@soulforge/shared`，因为 renderer 也要在运行时读取它。
+ * 旧版 deferred-preview 字段的兼容形状。
+ *
+ * 当前能力契约不再用它限制 TAE/ESD；所有当前编辑器均以
+ * `deferredPreview: null` 表示正常能力路径。保留该结构只为兼容旧的
+ * renderer/诊断读取方，不能替代 `releaseWriteEnabled`、native authority、
+ * revision 或 Patch Engine 门槛。
  */
 export type DeferredPreviewEditorId = DeferredPreviewEditorKind;
 
 export interface EditorDeferredPreviewContract {
-  deferredToRelease: DeferredPreviewTargetRelease;
+  /** 仅保留旧协议字段，当前能力契约不会创建此对象。 */
+  deferredToRelease: 'V0.6';
   readOnly: true;
   markedAsPreview: true;
   countedAsReleaseEditor: false;
@@ -71,16 +75,17 @@ export interface EditorCapabilityContract {
   proposalOrder: number | null;
   documentAuthority: EditorDocumentAuthorityContract;
   /**
-   * 已实现的 typed mutation 种类。保留实现事实，不代表本版放行：
-   * 实际放行由 `releaseWriteEnabled` 决定。
+   * 已接线的 typed mutation 种类。它们描述当前实现能力；是否允许执行
+   * 仍由 `releaseWriteEnabled` 与 native authority、revision、Patch Engine
+   * 写链共同决定。
    */
   mutationKinds: readonly EditorMutationKind[];
   /**
-   * 本版是否允许该编辑器写入。延期为只读预览的编辑器必须为 false，
-   * 使写路径在 store 层统一失败关闭，而不是靠 UI 自觉不调用。
+   * 当前能力契约是否允许该编辑器进入 typed write path。该标志不是绕过
+   * Patch Engine、native writer、revision/fail-closed 或 release Gate 的授权。
    */
   releaseWriteEnabled: boolean;
-  /** 非 null 表示该编辑器已延期，仅作标记只读预览。 */
+  /** 旧版兼容字段；当前可开发编辑器必须为 null。 */
   deferredPreview: EditorDeferredPreviewContract | null;
   revisionContract: 'monotonic-reject-stale';
   scalePrimitives: readonly EditorScaleAccess[];
@@ -89,19 +94,13 @@ export interface EditorCapabilityContract {
   contractSources: readonly string[];
 }
 
-const DEFERRED_TO_V06_READONLY_PREVIEW = {
-  deferredToRelease: DEFERRED_PREVIEW_TARGET_RELEASE,
-  readOnly: true,
-  markedAsPreview: true,
-  countedAsReleaseEditor: false
-} as const satisfies EditorDeferredPreviewContract;
-
 /**
  * Single source for the editor capabilities enforced by EditorDocumentStore and
- * projected into the release-acceptance inventory. Scale access describes the
- * current implementation, including known non-release-safe bounded/eager views.
+ * projected into the editor inventory. Scale access describes the current
+ * implementation, including known non-release-safe bounded/eager views; it does
+ * not by itself assert native verification or release completion.
  */
-export const EDITOR_CAPABILITY_CONTRACTS = {
+export const EDITOR_CAPABILITY_CONTRACTS: Readonly<Record<EditorKind, EditorCapabilityContract>> = {
   hex: {
     editorKind: 'hex',
     proposedReleaseEditorId: null,
@@ -224,34 +223,43 @@ export const EDITOR_CAPABILITY_CONTRACTS = {
   },
   tae: {
     editorKind: 'tae',
-    proposedReleaseEditorId: null,
-    proposalOrder: null,
+    proposedReleaseEditorId: 'tae',
+    proposalOrder: 5,
     documentAuthority: 'bridge-native-document',
-    mutationKinds: [],
-    releaseWriteEnabled: false,
-    deferredPreview: DEFERRED_TO_V06_READONLY_PREVIEW,
+    // TAE 已有 typed event upsert 实现：Bridge writer 只写 staging，
+    // 最终提交仍必须经过 Patch Engine，并由 native reread/revision 失败关闭。
+    mutationKinds: ['tae-event-upsert'],
+    releaseWriteEnabled: true,
+    deferredPreview: null,
     revisionContract: 'monotonic-reject-stale',
     scalePrimitives: ['bounded-window'],
     scaleAccess: 'bounded-window',
     scaleDimensions: ['animations', 'events', 'event-groups'],
     contractSources: [
-      'bridge/SoulForge.Bridge/TaeNativeDocument.cs'
+      'bridge/SoulForge.Bridge/TaeNativeDocument.cs',
+      'bridge/SoulForge.Bridge/TaeNativeWriter.cs',
+      'packages/core/src/editing/taeBridgeCommit.ts',
+      'packages/core/src/editing/taeEdit.ts'
     ]
   },
   esd: {
     editorKind: 'esd',
-    proposedReleaseEditorId: null,
-    proposalOrder: null,
+    proposedReleaseEditorId: 'esd',
+    proposalOrder: 6,
     documentAuthority: 'bridge-native-document',
-    mutationKinds: [],
-    releaseWriteEnabled: false,
-    deferredPreview: DEFERRED_TO_V06_READONLY_PREVIEW,
+    // ESD 已有 typed behavior transition upsert 实现：原生 writer 只负责
+    // staging/验证，实际资源写入仍由 Patch Engine 的统一事务完成。
+    mutationKinds: ['behavior-transition-upsert'],
+    releaseWriteEnabled: true,
+    deferredPreview: null,
     revisionContract: 'monotonic-reject-stale',
     scalePrimitives: ['bounded-window'],
     scaleAccess: 'bounded-window',
     scaleDimensions: ['state-groups', 'states', 'conditions'],
     contractSources: [
-      'bridge/SoulForge.Bridge/EsdNativeDocument.cs'
+      'bridge/SoulForge.Bridge/EsdNativeDocument.cs',
+      'bridge/SoulForge.Bridge/EsdNativeWriter.cs',
+      'packages/core/src/editing/esdBridgeCommit.ts'
     ]
   },
   script: {
@@ -338,32 +346,31 @@ export const EDITOR_CAPABILITY_CONTRACTS = {
     scaleDimensions: ['bytes'],
     contractSources: ['packages/core/src/editing/editorDocumentStore.ts']
   }
-} as const satisfies Record<EditorKind, EditorCapabilityContract>;
+};
 
 export function editorAllowsMutation(
   editorKind: EditorKind,
   mutationKind: EditorMutationKind
 ): boolean {
   const contract = EDITOR_CAPABILITY_CONTRACTS[editorKind];
-  // 延期为只读预览的编辑器即使已实现 typed mutation 也不得在本版写入，
-  // 否则会出现冻结清单外的可写编辑器（违反 REL-F 与硬约束 7）。
+  // releaseWriteEnabled 是能力契约的第一道门；后续 writer 仍必须通过
+  // native authority、revision/fail-closed 与 Patch Engine 事务链。
   if (!contract.releaseWriteEnabled) return false;
   const mutationKinds = contract.mutationKinds as readonly EditorMutationKind[];
   return mutationKinds.includes(mutationKind);
 }
 
 /**
- * 该编辑器是否已延期为标记只读预览（V0.6 交付）。
- * 以能力契约为准，是写入放行的权威判断；shared 的
- * `isDeferredPreviewEditorKind` 是给 renderer 的同源投影。
+ * 兼容旧 renderer/IPC 的延期查询。当前契约不再登记 deferred editor，
+ * 因此正常返回 false；它不是当前写入能力的权威判断。
  */
 export function isDeferredPreviewEditor(editorKind: EditorKind): boolean {
   return EDITOR_CAPABILITY_CONTRACTS[editorKind].deferredPreview !== null;
 }
 
 /**
- * 延期只读预览编辑器清单，供 UI 打标与 IPC 写路径拒绝时复用，
- * 避免各处各写一份硬编码列表。
+ * 兼容旧调用方的延期清单。过渡期没有被该投影屏蔽的 editor kind，
+ * 所以当前结果为空；写入仍由能力契约和统一安全写链决定。
  */
 export function listDeferredPreviewEditors(): readonly EditorKind[] {
   return Object.values(EDITOR_CAPABILITY_CONTRACTS)

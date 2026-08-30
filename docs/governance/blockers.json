@@ -83,8 +83,8 @@
       ],
       "owner": "历史记录；当前由工程方推进",
       "requiredInput": "已解除用户输入：本机 registry 已支持登记 TAE/ESD native document，并观察到 HKX/Lua 条目",
-      "unlockValidation": "TAE/ESD 已延期 V0.6，其完整语义不再是 V0.5 通过条件；V0.5 只在 W-BEHAVIOR-MAP-01 / W-SCRIPT-READONLY-01 对 script 容器枚举、字节码识别与整内层文件替换失败关闭",
-      "recheckTrigger": "本机 corpus 被撤回、新增声明变体，或 V0.6 恢复 TAE/ESD 时重新打开",
+      "unlockValidation": "TAE/ESD 已解除版本性开发限制；当前继续推进 motion identity、transition、writer 与 editor 链，完整语义与 release authority 仍须由真实 corpus、native writer、Patch Engine、重读/恢复和功能验证分别建立",
+      "recheckTrigger": "本机 corpus 被撤回、新增声明变体，或真实验证边界发生变化时重新打开",
       "evidenceRefs": [
         "EV-OWNER-INPUTS-IMPLEMENTATION-20260730",
         "EV-REL-SCOPE-20260731-TEXT-FIRST"

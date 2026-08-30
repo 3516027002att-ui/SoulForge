@@ -2657,7 +2657,7 @@ SHELL-09 → SHELL-10
   - 新增 Bridge `read-map-part-flver-preview`（广告门禁三方一致，45 条）：mapbnd（DCX→BND4）内按 `<modelName>.flver` 条目取 FLVER 网格/骨骼一次返回；KRAK 缺 Oodle 给可行动失败码。
   - 新增 IPC `resource.readMapPartMesh`：overlay `map/<mapId>/` 下的 `*.mapbnd.dcx` 优先，原版同相对路径次之（KRAK 由 Bridge 解）；全部失败给「没有找到该 part 的模型」/「未挂原版 → 去开始页挂原版」。
   - `SceneDrawItem.mesh`（base64 typed buffers）+ `createProxyMesh` 用真实几何替换 proxy 盒子；MsbScenePanel 打开时预取前 12 个 part、选中 part 补载，`setDrawList` 渐进更新。
-  - 状态句删「无绝对路径」/「见底部日志」，改为「N 个 part 已挂模型 / M 个没找到（线框）」。写入仍按 V0.6 延期。
+  - 状态句删「无绝对路径」/「见底部日志」，改为「N 个 part 已挂模型 / M 个没找到（线框）」。已接线写入继续经过 typed mutation、Patch Engine 与重读/恢复验证，不由版本性延期阻断。
 
 #### MAP-50C — MSB write
 
@@ -2682,7 +2682,7 @@ SHELL-09 → SHELL-10
 - **Allowed**：`[CREATE] bridge/SoulForge.Bridge/FlverNativeWriter.cs`；`[CREATE] packages/core/src/editing/flverBridgeCommit.ts`；`[CREATE] packages/core/src/testing/runNativeFlverWriterSmoke.ts`；`[MODIFY] apps/desktop/src/main/ipc.ts`；`[MODIFY] packages/core/package.json`；`[MODIFY] package.json`。
 - **Flow/Tests**：`flver-material-slot-set` → Patch/reopen/sibling verify/rollback；新增 root `bridge:verify:flver-writer` 并运行 `npm run bridge:verify:flver-writer`，该命令调用 writer smoke 编译产物。
 - **S38 开闸（2026-08-18）**：`DEFERRED_PREVIEW_EDITOR_KINDS` 拿掉 `flver`；`releaseWriteEnabled=true`；只开放已接线的 `flver_material_slot_set`。footer 不再写「延期至 V0.6」。骨骼权重不开放。
-- **S37 本机写回（2026-08-18）**：`c1130.anibnd` 抽出 `c1130.tae`，对不共享时间槽的事件做 `update-event-times`，重读时间命中，覆盖层字节未改（回滚=丢弃暂存）。共享槽仍 fail-closed。参数体不假装能编。治理契约仍标 TAE 为 V0.6 只读，IPC 实写未走延期拒绝。
+- **S37 本机写回（2026-08-18）**：`c1130.anibnd` 抽出 `c1130.tae`，对不共享时间槽的事件做 `update-event-times`，重读时间命中，覆盖层字节未改（回滚=丢弃暂存）。共享槽仍 fail-closed。参数体不假装能编。当前过渡裁定已解除 TAE 的版本性只读限制；IPC 实写仍必须经过 native writer、Patch Engine、重读与恢复验证。
 
 #### TEXTURE-52A — TPF/DDS read
 
