@@ -5,7 +5,8 @@
  * for Agent tools, Desktop IPC, and future Blender bridges.
  */
 
-import { basename } from 'node:path';
+import { access } from 'node:fs/promises';
+import { basename, resolve } from 'node:path';
 import {
   buildCanonicalMapDocument,
   MapSceneGraph,
@@ -26,6 +27,9 @@ export interface MapQueryResult {
   mapId: string;
   totalEntities: number;
   matchedEntities: MapEntity[];
+  /** Native snapshot identity; required before treating a query as write evidence. */
+  sourceUri?: string;
+  sourceHash?: string;
   error?: { code: string; message: string };
 }
 
@@ -33,6 +37,9 @@ export interface MapInspectResult {
   ok: boolean;
   mapId: string;
   entity?: MapEntity;
+  /** Native snapshot identity; required before treating an inspection as write evidence. */
+  sourceUri?: string;
+  sourceHash?: string;
   references?: {
     referencingEvents?: MapEntity[];
     partsUsingSameModel?: MapEntity[];
@@ -70,10 +77,28 @@ export async function loadMapDocument(
   file: string
 ): Promise<{ ok: true; doc: MapDocument; sceneGraph: MapSceneGraph; filePath: string } | { ok: false; error: { code: string; message: string } }> {
   const overlay = edit.session.layers.overlayRoot;
-  const candidates = [file, `${overlay}/${file}`, `${overlay}/map/${file}`];
-
-  let resolvedPath = file;
-  let mapId = basename(file).replace(/\.msb(\.dcx)?$/i, '');
+  const candidates = [...new Set([
+    resolve(file),
+    resolve(overlay, file),
+    resolve(overlay, 'map', file)
+  ])];
+  let resolvedPath: string | undefined;
+  for (const candidate of candidates) {
+    try {
+      await access(candidate);
+      resolvedPath = candidate;
+      break;
+    } catch {
+      // Try the next workspace/base/overlay candidate.
+    }
+  }
+  if (!resolvedPath) {
+    return {
+      ok: false,
+      error: { code: 'MAP_FILE_NOT_FOUND', message: `工作区内找不到地图文件：${file}` }
+    };
+  }
+  const mapId = basename(resolvedPath).replace(/\.msb(\.dcx)?$/i, '');
 
   const readResult = await readMsbDocumentViaBridge({
     sourcePath: resolvedPath,
@@ -92,8 +117,8 @@ export async function loadMapDocument(
   let doc: MapDocument;
   try {
     doc = buildCanonicalMapDocument({
-      sourceUri: `map://${mapId}/${basename(file)}`,
-      sourcePath: file,
+      sourceUri: `map://${mapId}/${basename(resolvedPath)}`,
+      sourcePath: resolvedPath,
       game: 'sekiro',
       revision: readResult.data.sourceHash || '1',
       models: readResult.data.models,
@@ -173,7 +198,9 @@ export async function queryMapEntities(
     ok: true,
     mapId: doc.mapId,
     totalEntities: doc.totalEntityCount,
-    matchedEntities: matched
+    matchedEntities: matched,
+    sourceUri: doc.sourceUri,
+    sourceHash: doc.revision
   };
 }
 
@@ -218,6 +245,8 @@ export async function inspectMapEntity(
     ok: true,
     mapId: doc.mapId,
     entity,
+    sourceUri: doc.sourceUri,
+    sourceHash: doc.revision,
     references
   };
 }

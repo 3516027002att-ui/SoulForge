@@ -1,6 +1,6 @@
 {
   "schemaVersion": "1.0.0",
-  "currentRelease": "V0.5",
+  "currentRelease": null,
   "releases": [
     {
       "release": "V0.5",
@@ -53,10 +53,10 @@
     }
   ],
   "invariants": [
-    "每个治理记录必须声明 targetRelease，且该版本必须存在于本文件。",
-    "对 frozen=true 版本的 frozenFields 做任何修改都必须失败关闭，除非同一提交提供该版本的 unfreezeRuling 用户批准记录。",
-    "V0.6 条目的新增与修改不得改变任何 targetRelease=V0.5 条目的裁定字段。",
-    "deferred 不等于 completed，也不等于 permanently-excluded；延期条目必须保留 resumeRequires。",
+    "版本登记仅用于发布审计、范围追踪与历史回溯；开发选点、claim、实现和验证不绑定 currentRelease。",
+    "targetRelease 只表达发布归属；未绑定里程碑的开发 Evidence 使用 targetRelease=null。",
+    "对 frozen=true 版本的 frozenFields 做任何修改都必须失败关闭，除非同一提交提供该版本的 unfreezeRuling 用户批准记录；该保护服务于发布审计，不得阻止独立开发。",
+    "deferred 不等于 completed，也不等于 permanently-excluded；若保留延期记录，必须保留 resumeRequires。",
     "冻结保护只约束裁定字段，不得用来阻止工程进度记录（gateState / lifecycle / authority / evidence 追加）。"
   ]
 }

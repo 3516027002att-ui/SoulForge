@@ -22,7 +22,7 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, it } from 'node:test';
 import { renderToStaticMarkup } from 'react-dom/server';
-import { MsbScenePanel, mergeMapStaticGeometryChunks } from './MsbScenePanel.js';
+import { MsbScenePanel, mergeMapStaticGeometryChunks, toMapMeshGeometry } from './MsbScenePanel.js';
 
 function resolvePartModelName(
   part: { modelIndex?: number },
@@ -87,7 +87,11 @@ function decodeIndices(value: string, indexSize: 16 | 32): number[] {
   return values;
 }
 
-function staticGeometryChunk(offset: number, indexElementBytes: 2 | 4 = 2) {
+function staticGeometryChunk(
+  offset: number,
+  indexElementBytes: 2 | 4 = 2,
+  texture?: { materialIndex: number; texturePreviewToken: string; textureColorSpace?: string }
+) {
   return {
     positionsBase64: encodeFloat32([
       offset, 0, 0,
@@ -97,11 +101,19 @@ function staticGeometryChunk(offset: number, indexElementBytes: 2 | 4 = 2) {
     indicesBase64: encodeIndices([0, 1, 2], indexElementBytes),
     indexElementBytes,
     uvsBase64: encodeFloat32([0, 0, 1, 0, 0, 1]),
-    normalsBase64: encodeFloat32([0, 1, 0, 0, 1, 0, 0, 1, 0])
+    normalsBase64: encodeFloat32([0, 1, 0, 0, 1, 0, 0, 1, 0]),
+    ...(texture ?? {})
   };
 }
 
 describe('MAP static geometry chunk 重组', () => {
+  it('ok 但没有 positions 时失败关闭，不把合法响应伪装成 missing', () => {
+    assert.throws(
+      () => toMapMeshGeometry({ ok: true, data: {} }),
+      /MAP_STATIC_GEOMETRY_NO_POSITIONS/
+    );
+  });
+
   it('单 chunk 保留原始几何数据', () => {
     const merged = mergeMapStaticGeometryChunks([staticGeometryChunk(0)]);
 
@@ -129,6 +141,30 @@ describe('MAP static geometry chunk 重组', () => {
       0, 0, 1, 0, 0, 1,
       0, 0, 1, 0, 0, 1,
       0, 0, 1, 0, 0, 1
+    ]);
+  });
+
+  it('合并 chunk 保留每个材质的 draw group 与纹理预览绑定', () => {
+    const merged = mergeMapStaticGeometryChunks([
+      staticGeometryChunk(0, 2, {
+        materialIndex: 0,
+        texturePreviewToken: 'data:image/png;base64,rock',
+        textureColorSpace: 'srgb'
+      }),
+      staticGeometryChunk(10, 2, {
+        materialIndex: 2,
+        texturePreviewToken: 'data:image/png;base64,grass',
+        textureColorSpace: 'linear'
+      })
+    ]);
+
+    assert.deepEqual(merged.materialGroups, [
+      { start: 0, count: 3, materialIndex: 0 },
+      { start: 3, count: 3, materialIndex: 2 }
+    ]);
+    assert.deepEqual(merged.texturePreviews, [
+      { materialIndex: 0, texturePreviewToken: 'data:image/png;base64,rock', colorSpace: 'srgb' },
+      { materialIndex: 2, texturePreviewToken: 'data:image/png;base64,grass', colorSpace: 'linear' }
     ]);
   });
 

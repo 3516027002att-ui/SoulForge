@@ -53,7 +53,7 @@ import {
 } from '@soulforge/shared';
 import { PARAM_SESSION_IPC_CHANNELS } from '@soulforge/shared';
 import { prepareBridgeRoots, type BridgeRootSession, type PrepareBridgeRootsResult } from '../bridgeRoots.js';
-import type { NativeDcxEnvelopeLike } from './bridgeEnvelopes.js';
+import type { NativeBnd4EntryLike, NativeDcxEnvelopeLike } from './bridgeEnvelopes.js';
 import { sanitizeDiagnostics, sanitizeRendererValue, type RendererSaveResult } from '../rendererDto.js';
 import type { TrustedIpcHandle } from './registration.js';
 import type { OperationLogUtilityClient } from '../operationLogUtilityClient.js';
@@ -103,10 +103,43 @@ const paramPageCache = new Map<string, CachedParamDocument>();
 const paramAllCache = new Map<string, CachedParamDocument>();
 interface UnpackedParamChild { absolutePath: string; entryIndex: number; name: string; storedContentHash: string; }
 const unpackedParamCache = new Map<string, UnpackedParamChild>();
+interface ParamUnpackExtractionResult {
+  parseStatus: string;
+  outputExists: boolean;
+  diagnostics: Diagnostic[];
+}
+const unpackedParamInFlight = new Map<string, Promise<ParamUnpackExtractionResult>>();
 type MemoizedParamEntryTable = Array<{ index: number; name: string; storedContentHash: string }>;
 const paramEntryTableCache = new Map<string, MemoizedParamEntryTable>();
 const CONTAINER_PARAM_ALL_CACHE_LIMIT = 4;
 const containerParamAllCache = new Map<string, CachedParamDocument>();
+interface CachedContainerParamSession {
+  document: CachedParamDocument;
+  sessionToken: string;
+  workspaceSessionId: string;
+  absolutePath: string;
+}
+const containerParamSessionCache = new Map<string, CachedContainerParamSession>();
+const takeContainerParamSession = (
+  key: string,
+  workspaceSessionId: string,
+  absolutePath: string
+): CachedContainerParamSession | undefined => {
+  const hit = containerParamSessionCache.get(key);
+  if (!hit || hit.workspaceSessionId !== workspaceSessionId || hit.absolutePath !== absolutePath) return undefined;
+  containerParamSessionCache.delete(key);
+  containerParamSessionCache.set(key, hit);
+  return hit;
+};
+const putContainerParamSession = (key: string, value: CachedContainerParamSession): void => {
+  containerParamSessionCache.delete(key);
+  containerParamSessionCache.set(key, value);
+  while (containerParamSessionCache.size > CONTAINER_PARAM_ALL_CACHE_LIMIT) {
+    const oldest = containerParamSessionCache.keys().next();
+    if (oldest.done) break;
+    containerParamSessionCache.delete(oldest.value);
+  }
+};
 const takeContainerParamAll = (key: string): CachedParamDocument | undefined => {
   const hit = containerParamAllCache.get(key);
   if (!hit) return undefined;
@@ -156,7 +189,9 @@ export function clearParamIpcCaches(): void {
   paramAllCache.clear();
   paramEntryTableCache.clear();
   containerParamAllCache.clear();
+  containerParamSessionCache.clear();
   unpackedParamCache.clear();
+  unpackedParamInFlight.clear();
 }
 export function registerParamIpcHandlers(deps: ParamIpcDeps): void {
   const handle = deps.handle;
@@ -233,7 +268,7 @@ export function registerParamIpcHandlers(deps: ParamIpcDeps): void {
     const typeName = result.data.typeName ?? 'UNKNOWN_PARAM';
     const rowDataSize = result.data.rowDataSize ?? 0;
     const resolved = typeName
-      ? await resolveTrustedParamDefinition(typeName, rowDataSize)
+      ? await resolveTrustedParamDefinition(typeName, rowDataSize, { waitForYappedOverlay: false })
       : { document: null, trusted: false, diagnostic: null };
     _forensicsInc('param:main:open:indexRows', rows.length);
     return sanitizeRendererValue({
@@ -398,6 +433,10 @@ async function unpackContainerParamChild(input: {
   const oodle = getSession()!.layers.baseRoot
     ? { oodleRuntimeRoot: getSession()!.layers.baseRoot as string }
     : {};
+  const workspaceSessionId = deps.getActiveWorkspaceSessionId
+    ? deps.getActiveWorkspaceSessionId()
+    : deps.activeWorkspaceSessionId;
+  const bridgeSession = workspaceSessionId ? { workspaceSessionId } : {};
 
   // ── 第一步：枚举条目，把「名字」解析成索引 ──
   // 条目表按「容器 URI + 容器哈希」备忘（paramEntryTableCache）：整张表属于
@@ -408,18 +447,20 @@ async function unpackContainerParamChild(input: {
   let named = paramEntryTableCache.get(entryTableKey);
   const entryTableReused = named !== undefined;
   if (!named) {
-    const dcx = await runBridge<NativeDcxEnvelopeLike>({
-      command: 'read-dcx-document',
+    const dcx = await runBridge<NativeDcxEnvelopeLike & { entries?: NativeBnd4EntryLike[] }>({
+      command: 'list-bnd4-entries',
       filePath: input.containerPath,
       resourceUri: input.containerUri,
       allowedRoots,
       timeoutMs: 120_000,
+      commandOptions: { includeContentHashes: true },
+      ...bridgeSession,
       ...oodle
     });
     if (dcx.parseStatus === 'failed') {
       return { ok: false, diagnostics: sanitizeDiagnostics(dcx.diagnostics) };
     }
-    const entries = dcx.data?.nested?.entries ?? [];
+    const entries = dcx.data?.entries ?? dcx.data?.nested?.entries ?? [];
     if (entries.length === 0) {
       return {
         ok: false,
@@ -460,13 +501,28 @@ async function unpackContainerParamChild(input: {
 
   // 缓存键含容器哈希：容器被写回后哈希变化，旧解包不会被误用。
   const cacheKey = `${input.containerUri}#${input.containerHash}#${target.index}`;
-  const cachedChild = unpackedParamCache.get(cacheKey);
+  const directCachedChild = unpackedParamCache.get(cacheKey);
+  // 扫描是异步补 sha256 的：首次点击可能用「路径摘要」建缓存，下一次
+  // 点击时同一 IndexedFile 已被后台补上真实容器哈希。不能因为缓存键变了
+  // 就重新解包到另一条路径——调用方手里的 native document session token
+  // 绑定的是旧路径。先按 sourceUri + entryIndex + native 条目内容哈希
+  // 找到旧缓存，再把它挂到新键；若条目内容真的变了，storedContentHash
+  // 不会相等，仍然走重新解包和新 session。
+  const migratedCachedChild = directCachedChild === undefined
+    ? [...unpackedParamCache.entries()].find(([key, candidate]) =>
+        key.startsWith(`${input.containerUri}#`)
+        && candidate.entryIndex === target.index
+        && candidate.storedContentHash === target.storedContentHash
+        && existsSync(candidate.absolutePath))?.[1]
+    : undefined;
+  const cachedChild = directCachedChild ?? migratedCachedChild;
   // 缓存命中还要求条目哈希未变：容器被写回后条目内容会变，沿用旧的
   // storedContentHash 会让 write-bnd4 的并发保护形同虚设（拿一个过期哈希去比对，
   // 要么误拒要么放过本该拒绝的覆盖）。哈希不符时重新解包。
   if (cachedChild
     && cachedChild.storedContentHash === target.storedContentHash
     && existsSync(cachedChild.absolutePath)) {
+    if (migratedCachedChild !== undefined) unpackedParamCache.set(cacheKey, migratedCachedChild);
     return {
       ok: true,
       child: cachedChild,
@@ -474,7 +530,8 @@ async function unpackContainerParamChild(input: {
         severity: 'info',
         code: 'PARAM_UNPACK_CACHE_HIT',
         message: `复用已解包的 ${cachedChild.name}。`
-          + (entryTableReused ? '（条目表亦复用，本次未解压容器）' : '（本次重新枚举了条目表）'),
+          + (entryTableReused ? '（条目表亦复用，本次未解压容器）' : '（本次重新枚举了条目表）')
+          + (migratedCachedChild !== undefined ? '（后台补齐容器哈希后仍复用原暂存文件）' : ''),
         sourceUri: input.containerUri
       }]
     };
@@ -490,38 +547,74 @@ async function unpackContainerParamChild(input: {
     `${input.containerHash.slice(0, 16)}-${target.index}`
   );
   const outputPath = join(unpackDirectory, target.name);
-  try {
-    await mkdir(unpackDirectory, { recursive: true });
-  } catch (error) {
-    return {
-      ok: false,
-      diagnostics: [{
-        severity: 'error',
-        code: 'PARAM_UNPACK_STAGING_PREPARE_FAILED',
-        message: `解包暂存目录创建失败：${error instanceof Error ? error.message : String(error)}`,
-        sourceUri: input.containerUri
-      }]
-    };
-  }
+  // StrictMode/快速切换可能让同一个条目同时进入两次。解包是昂贵的 native
+  // 写暂存操作，必须共享同一条 in-flight promise；键额外带 stagingRoot，避免
+  // 两个工作区恰好打开同一 sourceUri/hash 时把一个工作区的路径交给另一个。
+  const extractionKey = `${cacheKey}#${resolve(storage.stagingRoot)}`;
+  let extraction = unpackedParamInFlight.get(extractionKey);
+  if (!extraction) {
+    extraction = (async (): Promise<ParamUnpackExtractionResult> => {
+      try {
+        await mkdir(unpackDirectory, { recursive: true });
+      } catch (error) {
+        return {
+          parseStatus: 'failed',
+          outputExists: false,
+          diagnostics: [{
+            severity: 'error',
+            code: 'PARAM_UNPACK_STAGING_PREPARE_FAILED',
+            message: `解包暂存目录创建失败：${error instanceof Error ? error.message : String(error)}`,
+            sourceUri: input.containerUri
+          }]
+        };
+      }
 
-  const extracted = await runBridge({
-    command: 'extract-bnd4-child',
-    filePath: input.containerPath,
-    resourceUri: input.containerUri,
-    allowedRoots,
-    // 写命令必须显式声明 main 拥有的可写根，否则 Bridge 报
-    // BRIDGE_WRITABLE_ROOT_REQUIRED（实测）。只给 stagingRoot —— 解包永远
-    // 不该能写到原版目录或 Mod 工作区。
-    writableRoots: [storage.stagingRoot],
-    timeoutMs: 120_000,
-    commandOptions: { entryIndex: target.index, outputPath },
-    ...oodle
-  });
+      try {
+        const extracted = await runBridge({
+          command: 'extract-bnd4-child',
+          filePath: input.containerPath,
+          resourceUri: input.containerUri,
+          allowedRoots,
+          // 写命令必须显式声明 main 拥有的可写根，否则 Bridge 报
+          // BRIDGE_WRITABLE_ROOT_REQUIRED（实测）。只给 stagingRoot —— 解包永远
+          // 不该能写到原版目录或 Mod 工作区。
+          writableRoots: [storage.stagingRoot],
+          timeoutMs: 120_000,
+          commandOptions: { entryIndex: target.index, outputPath },
+          ...bridgeSession,
+          ...oodle
+        });
+        return {
+          parseStatus: extracted.parseStatus,
+          outputExists: existsSync(outputPath),
+          diagnostics: sanitizeDiagnostics(extracted.diagnostics)
+        };
+      } catch (error) {
+        return {
+          parseStatus: 'failed',
+          outputExists: false,
+          diagnostics: [{
+            severity: 'error',
+            code: 'PARAM_UNPACK_EXTRACT_EXCEPTION',
+            message: `解包 ${target.name} 时 Bridge 调用异常：${error instanceof Error ? error.message : String(error)}`,
+            sourceUri: input.containerUri
+          }]
+        };
+      }
+    })();
+    unpackedParamInFlight.set(extractionKey, extraction);
+    void extraction.finally(() => {
+      if (unpackedParamInFlight.get(extractionKey) === extraction) {
+        unpackedParamInFlight.delete(extractionKey);
+      }
+    }).catch(() => undefined);
+  }
+  const extracted = await extraction;
   if (extracted.parseStatus === 'failed' || !existsSync(outputPath)) {
     return {
       ok: false,
       diagnostics: [
-        ...sanitizeDiagnostics(extracted.diagnostics),
+        ...extracted.diagnostics,
         {
           severity: 'error',
           code: 'PARAM_UNPACK_EXTRACT_FAILED',
@@ -708,16 +801,18 @@ async function readScriptContainerChildByIndex(input: {
 }
 
 
+type ParamMetadataLoadResult = {
+  package: ParamMetadataPackage | null;
+  diagnostic: { code: string; message: string } | null;
+};
+
 let paramMetadataCache: {
     loaded: true;
     package: ParamMetadataPackage | null;
     diagnostic: { code: string; message: string } | null;
   } | null = null;
 
-  const loadParamMetadata = async (): Promise<{
-    package: ParamMetadataPackage | null;
-    diagnostic: { code: string; message: string } | null;
-  }> => {
+  const loadParamMetadataOnce = async (): Promise<ParamMetadataLoadResult> => {
     if (paramMetadataCache) return paramMetadataCache;
     const localAppData = process.env.LOCALAPPDATA;
     if (!localAppData) {
@@ -759,6 +854,19 @@ let paramMetadataCache: {
       };
       return paramMetadataCache;
     }
+  };
+
+  // 多个 PARAM handler 可能在冷启动同时请求同一份元数据（容器条目列表
+  // 会主动预取，选中行又会解析字段）。共享 in-flight promise，避免 cache
+  // 尚未落地时重复导入/校验同一套包，把 UI 的首行等待时间放大。
+  let paramMetadataLoad: Promise<ParamMetadataLoadResult> | null = null;
+  const loadParamMetadata = (): Promise<ParamMetadataLoadResult> => {
+    if (paramMetadataCache) return Promise.resolve(paramMetadataCache);
+    if (paramMetadataLoad) return paramMetadataLoad;
+    paramMetadataLoad = loadParamMetadataOnce().finally(() => {
+      paramMetadataLoad = null;
+    });
+    return paramMetadataLoad;
   };
 
   /* ------------------------------------------------------------------ */
@@ -930,7 +1038,7 @@ let paramMetadataCache: {
    * txt 实测数秒级，每读一个 param 都跑一遍会让界面卡住。空/缺失回 null，
    * 不抛 —— 失败降级到 Smithbox 英文。
    */
-  const loadYappedOverlay = async (): Promise<{
+  const loadYappedOverlayOnce = async (): Promise<{
     defs: ReadonlyMap<string, YappedParamOverlay> | null;
     rowNames: ReadonlyMap<string, ReadonlyMap<number, string>> | null;
     diagnostics: YappedSourceDiagnostic[];
@@ -961,6 +1069,18 @@ let paramMetadataCache: {
       diagnostics: [...defs.diagnostics, ...names.diagnostics]
     };
     return yappedOverlayCache;
+  };
+
+  // 列表、字段解析和全量兼容路径可能同时触发行名覆盖读取；共享 promise，
+  // 避免每个入口各扫一遍本机 Defs/Names。
+  let yappedOverlayInFlight: ReturnType<typeof loadYappedOverlayOnce> | null = null;
+  const loadYappedOverlay = (): ReturnType<typeof loadYappedOverlayOnce> => {
+    if (yappedOverlayCache) return Promise.resolve(yappedOverlayCache);
+    if (yappedOverlayInFlight) return yappedOverlayInFlight;
+    yappedOverlayInFlight = loadYappedOverlayOnce().finally(() => {
+      yappedOverlayInFlight = null;
+    });
+    return yappedOverlayInFlight;
   };
 
   /**
@@ -1022,7 +1142,8 @@ let paramMetadataCache: {
    */
   const resolveTrustedParamDefinition = async (
     typeName: string,
-    rowDataSize: number
+    rowDataSize: number,
+    options: { waitForYappedOverlay?: boolean } = {}
   ): Promise<{
     document: ParamDefDocument | null;
     trusted: boolean;
@@ -1057,7 +1178,13 @@ let paramMetadataCache: {
     }
     // 显示层覆盖：本机 Yapped 有该类型的中文 DisplayName/Description 就套上，
     // 没有（或本机没装 Yapped）就原样回落 Smithbox。覆盖不改变 origin。
-    const yapped = await loadYappedOverlay();
+    const waitForYappedOverlay = options.waitForYappedOverlay !== false;
+    const yapped = waitForYappedOverlay
+      ? await loadYappedOverlay()
+      : (yappedOverlayCache ?? { defs: null, rowNames: null, diagnostics: [] });
+    if (!waitForYappedOverlay) {
+      void loadYappedOverlay().catch(() => undefined);
+    }
     const applyOverlay = (document: ParamDefDocument): ParamDefDocument =>
       yapped.defs ? applyYappedFieldOverlay(document, yapped.defs) : document;
     // T5-2：行宽匹配即授信。包在导入时已核对归档/源树/许可证三个摘要（钉死），
@@ -3358,6 +3485,12 @@ let paramMetadataCache: {
         }]
       };
     }
+    // 字段包只读校验与容器条目枚举彼此独立：提前启动一次元数据加载，
+    // 让用户点进大型表时，native 行索引与字段定义可以并行准备，而不是
+    // 把几秒级的首次包导入全部压到“选中首行”之后。
+    void loadParamMetadata();
+    // 行名覆盖同样只读且只应有一个 loader；后台预热不阻塞左侧条目列表。
+    void loadYappedOverlay().catch(() => undefined);
     // ROOT-07：只读枚举只传已存在并 verified 的 roots，不附加 staging。
     const roots = await deps.verifiedReadRoots(getSession()!, dirname(file.absolutePath));
     if (roots.diagnostics.length > 0) {
@@ -3368,16 +3501,22 @@ let paramMetadataCache: {
         diagnostics: roots.diagnostics
       };
     }
-    const dcx = await runBridge<NativeDcxEnvelopeLike>({
-      command: 'read-dcx-document',
+    const workspaceSessionId = deps.getActiveWorkspaceSessionId
+      ? deps.getActiveWorkspaceSessionId()
+      : deps.activeWorkspaceSessionId;
+    const bridgeSession = workspaceSessionId ? { workspaceSessionId } : {};
+    const dcx = await runBridge<NativeDcxEnvelopeLike & { entries?: NativeBnd4EntryLike[] }>({
+      command: 'list-bnd4-entries',
       filePath: file.absolutePath,
       resourceUri: containerUri,
       allowedRoots: roots.allowedRoots,
       timeoutMs: 120_000,
+      commandOptions: { includeContentHashes: true },
       // KRAK（game-side）容器缺 Oodle 连条目表都读不出 —— 实测。
       ...(getSession()!.layers.baseRoot
         ? { oodleRuntimeRoot: getSession()!.layers.baseRoot as string }
-        : {})
+        : {}),
+      ...bridgeSession
     });
     if (dcx.parseStatus === 'failed') {
       return {
@@ -3387,8 +3526,25 @@ let paramMetadataCache: {
         diagnostics: sanitizeDiagnostics(dcx.diagnostics)
       };
     }
-    const entries = dcx.data?.nested?.entries ?? [];
+    const entries = dcx.data?.entries ?? dcx.data?.nested?.entries ?? [];
     const seen = new Set<string>();
+    const cachedEntryNames = new Set<string>();
+    const cacheContainerHash = file.sha256
+      ?? createHash('sha256').update(file.absolutePath).digest('hex');
+    // listContainerParams 与后续 unpackContainerParamChild 共享同一份只读
+    // 条目表；避免用户刚点开表时再次解压/枚举整个 parambnd。缓存键仍绑定
+    // 容器哈希，后台补齐 sha256 或内容变化时不会把旧条目表当成新版本。
+    paramEntryTableCache.set(
+      `${containerUri}#${cacheContainerHash}`,
+      entries.map((entry, position) => {
+        const index = entry.index ?? position;
+        return {
+          index,
+          name: sanitizeEntryName(entry.name ?? `entry_${position}`, index, cachedEntryNames),
+          storedContentHash: entry.contentHash ?? ''
+        };
+      })
+    );
     const params = entries
       .map((entry, position) => {
         const index = entry.index ?? position;
@@ -3435,7 +3591,8 @@ let paramMetadataCache: {
       requestedPage: number,
       requestedPageSize: number,
       query?: string,
-      loadAll?: boolean
+      loadAll?: boolean,
+      requestedDocumentSessionToken?: string
     ) => {
       const file = getFiles().find((item) => item.sourceUri === containerUri);
       const failure = (code: string, message: string, extra: Diagnostic[] = []) => ({
@@ -3503,16 +3660,40 @@ let paramMetadataCache: {
         );
       }
       const allowedRoots = stageRoots ? [...stageRoots.allowedRoots] : [dirname(paramPath)];
+      // 容器 PARAM 的索引和行字节请求必须落到同一个 native document
+      // session。显式绑定当前工作区身份，避免只靠 allowedRoots 的派生值在
+      // staging/root 形态变化时产生两个可覆盖但互不相容的 daemon session。
+      const workspaceSessionId = deps.getActiveWorkspaceSessionId
+        ? deps.getActiveWorkspaceSessionId()
+        : deps.activeWorkspaceSessionId;
+      const bridgeSession = workspaceSessionId ? { workspaceSessionId } : {};
+      const bridgeRuntime = getSession()?.layers.baseRoot
+        ? { oodleRuntimeRoot: getSession()!.layers.baseRoot as string }
+        : {};
 
-      // ── 全表读：只为 id/name 索引与跨页搜索（行字节恒缺，见 readParamPage 注释）。
-      //    loadAll（用户裁定 2026-08-14）：includeAllPayloads 一次拿回全表 +
-      //    全部行字节（帧上限提到 32 MiB 绝对上限），renderer 打开表即全量。
+      // ── 首次索引读：只取 rowIndex/id/name/dataHash，绝不取行字节。
+      //    loadAll=true 仍保留为显式 legacy 兼容路径；冷启动与普通分页路径
+      //    使用 includeRowPayloads=false 建立可复用的 native lazy session。
       //    回头再点同一张表不重跑 read-param-document：containerParamAllCache
-      //    LRU 备忘 loadAll 文档（问题 5-C）。分页路径（loadAll 假）与失败路径
-      //    禁止写缓存：分页行恒无字节，混进全量缓存会让「行有没有 dataBase64」
-      //    变成运气。字段定义不随 doc 缓存，信任裁决按当次策略现算。
+      //    只给 legacy 全量路径使用，分页路径禁止写入该缓存，避免把全量 payload
+      //    与轻量索引混在一起。字段定义不随 doc 缓存，信任裁决按当次策略现算。
       const docCacheKey = `${containerUri}#${cacheContainerHash}#${entryIndex}`;
       let doc = loadAll ? takeContainerParamAll(docCacheKey) : undefined;
+      const activeWorkspaceSessionId = workspaceSessionId ?? '';
+      let documentSessionToken = !loadAll
+        && typeof requestedDocumentSessionToken === 'string'
+        && requestedDocumentSessionToken.trim().length > 0
+        ? requestedDocumentSessionToken
+        : undefined;
+      const sessionCacheKey = `${docCacheKey}#${unpacked.child.storedContentHash}`;
+      const cachedSession = !loadAll
+        ? takeContainerParamSession(sessionCacheKey, activeWorkspaceSessionId, paramPath)
+        : undefined;
+      if (!doc && cachedSession
+        && (!documentSessionToken || documentSessionToken === cachedSession.sessionToken)) {
+        doc = cachedSession.document;
+        documentSessionToken = cachedSession.sessionToken;
+      }
       const docReused = doc !== undefined;
       if (!doc) {
         const full = await runBridge<{
@@ -3522,18 +3703,41 @@ let paramMetadataCache: {
           rowDataSize?: number;
           rows?: Array<{ rowIndex: number; id: number; dataBase64?: string | null; dataHash: string; name?: string }>;
           authority?: string;
+          sessionToken?: string;
         }>({
           command: 'read-param-document',
           filePath: paramPath,
           allowedRoots,
           timeoutMs: 120_000,
-          commandOptions: loadAll ? { includeAllPayloads: true } : {},
-          ...(loadAll ? { maxFrameBytes: 32 * 1024 * 1024 } : {})
+          commandOptions: loadAll
+            ? { includeAllPayloads: true }
+            : {
+                ...(documentSessionToken ? { documentSession: documentSessionToken } : {}),
+                includeRowPayloads: false,
+                includeRowHashes: true,
+                rowPage: 0,
+                rowPageSize: 0
+              },
+          ...(loadAll ? { maxFrameBytes: 32 * 1024 * 1024 } : {}),
+          ...bridgeSession,
+          ...bridgeRuntime
         });
         if (full.parseStatus === 'failed' || !full.data?.sourceHash) {
           return failure(
             'PARAM_DOCUMENT_READ_FAILED',
             `解包后的 ${unpacked.child.name} 无法解析为 PARAM。`,
+            sanitizeDiagnostics(full.diagnostics)
+          );
+        }
+
+        documentSessionToken = typeof full.data.sessionToken === 'string'
+          && full.data.sessionToken.trim().length > 0
+          ? full.data.sessionToken
+          : documentSessionToken;
+        if (!loadAll && !documentSessionToken) {
+          return failure(
+            'PARAM_DOCUMENT_SESSION_MISSING',
+            `解包后的 ${unpacked.child.name} 未返回可复用的 PARAM 会话。`,
             sanitizeDiagnostics(full.diagnostics)
           );
         }
@@ -3550,6 +3754,15 @@ let paramMetadataCache: {
         if (loadAll) putContainerParamAll(docCacheKey, doc);
       }
 
+      if (!loadAll && doc && documentSessionToken) {
+        putContainerParamSession(sessionCacheKey, {
+          document: doc,
+          sessionToken: documentSessionToken,
+          workspaceSessionId: activeWorkspaceSessionId,
+          absolutePath: paramPath
+        });
+      }
+
       // P1 裁定：容器工作台走 readContainerParamPage，渲染器的 FIELDS 栏只从
       // fieldDefs 拿定义，而这条通道此前根本没返回。这里复用与
       // resource.readParamDocument 完全相同的 resolveTrustedParamDefinition 与
@@ -3557,7 +3770,7 @@ let paramMetadataCache: {
       // UNKNOWN_PARAM 按空串走「无定义」分支（等价于原来的 full.data.typeName ?? ''）。
       const containerTypeName = doc.typeName === 'UNKNOWN_PARAM' ? '' : doc.typeName;
       const resolvedContainerDef = containerTypeName
-        ? await resolveTrustedParamDefinition(containerTypeName, doc.rowDataSize)
+        ? await resolveTrustedParamDefinition(containerTypeName, doc.rowDataSize, { waitForYappedOverlay: false })
         : { document: null, trusted: false, diagnostic: null };
       const containerParamDef = resolvedContainerDef.document;
       // 行宽已在 resolveTrustedParamDefinition 内核对：拿到 document 即行宽一致。
@@ -3658,6 +3871,7 @@ let paramMetadataCache: {
         };
       }
 
+      const payloadSessionToken = documentSessionToken ?? '';
       const window = normalizePageWindow(
         filtered.length,
         requestedPage,
@@ -3671,6 +3885,7 @@ let paramMetadataCache: {
         const bridgePage = Math.floor(window.offset / window.size);
         if (bridgePage * window.size === window.offset) {
           try {
+            const pageRows = filtered.slice(window.offset, window.offset + window.size);
             const paged = await runBridge<{
               rows?: Array<{ rowIndex: number; id: number; dataBase64?: string | null; dataHash: string }>;
               payloadsIncluded?: boolean;
@@ -3679,7 +3894,17 @@ let paramMetadataCache: {
               filePath: paramPath,
               allowedRoots,
               timeoutMs: 60_000,
-              commandOptions: { rowPage: bridgePage, rowPageSize: window.size }
+              commandOptions: {
+                documentSession: payloadSessionToken,
+                includeRowPayloads: true,
+                rowSelections: pageRows.map((row) => ({
+                  rowIndex: row.rowIndex,
+                  expectedId: row.id,
+                  expectedDataHash: row.dataHash
+                }))
+              },
+              ...bridgeSession,
+              ...bridgeRuntime
             });
             for (const row of paged.data?.rows ?? []) {
               if (typeof row.dataBase64 === 'string') pagePayloads.set(row.rowIndex, { base64: row.dataBase64, dataHash: row.dataHash });
@@ -3717,6 +3942,7 @@ let paramMetadataCache: {
          */
         containerHash: file.sha256 ?? '',
         childHash: unpacked.child.storedContentHash,
+        sessionToken: payloadSessionToken,
         sourceHash: doc.sourceHash,
         typeName: doc.typeName,
         rowDataSize: doc.rowDataSize,
@@ -3785,7 +4011,8 @@ let paramMetadataCache: {
   );
 
   /**
-   * 一次读出容器内某个 param 的**完整行索引**（只 id + name，不含行字节）。
+   * 一次读出容器内某个 param 的**完整行索引**（物理 rowIndex + id/name/dataHash，
+   * 不含行字节），并把建立索引的 native session token 交给 renderer 复用。
    *
    * ── 为什么加这条通道 ──
    *
@@ -3797,9 +4024,10 @@ let paramMetadataCache: {
    *      36 位，页大小只有 20），且有筛选时刻意不下发行字节，跳过去字段栏是空的。
    *   ② **总量语义**。虚拟滚动要一条完整长列表才成立，累积页数只是「已取到多少」。
    *
-   * 而这条通道几乎不增加成本：后端本来就在**每次**分页请求里读一遍全表
-   * （`commandOptions: {}`，行字节必然缺失）再切片。把那份全表直接给渲染器，
-   * 换来的是「一个 param 只读一次索引」，比每滚一页读一次全表更省。
+   * 该通道明确使用 `includeRowPayloads:false + includeRowHashes:true` 建立 native
+   * lazy index：不会进入 ParamNativeDocument.Read/VerifyRoundTrip，也不会把行字节
+   * 序列化到 renderer。Bridge 当前仍会为物理身份读取源字节并计算 hash；这一项
+   * 成本由 timing probe 单独报告，不能把「无 payload」夸大成「零 I/O」。
    *
    * 行字节仍按页取（载荷门限按页算，见 readContainerParamPage 的实测因果）：
    * 选中某行时只取包含它的那一页。
@@ -3830,10 +4058,12 @@ let paramMetadataCache: {
         return failure('PARAM_ENTRY_INDEX_INVALID', '容器条目下标非法。');
       }
 
+      const cacheContainerHash = file.sha256
+        ?? createHash('sha256').update(file.absolutePath).digest('hex');
       const unpacked = await unpackContainerParamChild({
         containerPath: file.absolutePath,
         containerUri,
-        containerHash: file.sha256 ?? createHash('sha256').update(file.absolutePath).digest('hex'),
+        containerHash: cacheContainerHash,
         entry: { index: entryIndex }
       });
       if (!unpacked.ok) {
@@ -3859,19 +4089,29 @@ let paramMetadataCache: {
           stageRoots.diagnostics
         );
       }
+      const workspaceSessionId = deps.getActiveWorkspaceSessionId
+        ? deps.getActiveWorkspaceSessionId()
+        : deps.activeWorkspaceSessionId;
+      const bridgeSession = workspaceSessionId ? { workspaceSessionId } : {};
+      const bridgeRuntime = getSession()?.layers.baseRoot
+        ? { oodleRuntimeRoot: getSession()!.layers.baseRoot as string }
+        : {};
       const full = await runBridge<{
         sourceHash?: string;
         typeName?: string;
         rowCount?: number;
         rowDataSize?: number;
-        rows?: Array<{ rowIndex: number; id: number; name?: string }>;
+        rows?: Array<{ rowIndex: number; id: number; name?: string | null; dataHash?: string }>;
         authority?: string;
+        sessionToken?: string;
       }>({
         command: 'read-param-document',
         filePath: unpacked.child.absolutePath,
         allowedRoots: stageRoots ? [...stageRoots.allowedRoots] : [dirname(unpacked.child.absolutePath)],
         timeoutMs: 60_000,
-        commandOptions: {}
+        commandOptions: { includeRowPayloads: false, includeRowHashes: true, rowPage: 0, rowPageSize: 0 },
+        ...bridgeSession,
+        ...bridgeRuntime
       });
       if (full.parseStatus === 'failed' || !full.data?.sourceHash) {
         return failure(
@@ -3881,11 +4121,65 @@ let paramMetadataCache: {
         );
       }
 
+      const sessionToken = typeof full.data.sessionToken === 'string'
+        && full.data.sessionToken.trim().length > 0
+        ? full.data.sessionToken
+        : undefined;
+      if (!sessionToken) {
+        return failure(
+          'PARAM_DOCUMENT_SESSION_MISSING',
+          `解包后的 ${unpacked.child.name} 未返回可复用的 PARAM 会话。`,
+          sanitizeDiagnostics(full.diagnostics)
+        );
+      }
+
       const allRows = full.data.rows ?? [];
       // 截断上限与分页读取一致：两条通道的下标必须落在同一个区间，
       // 否则按索引算出的页号会指向分页通道取不到的行。
       const rows = allRows.slice(0, MAX_PAGED_PARAM_ROWS);
       const declared = full.data.rowCount ?? allRows.length;
+      const invalidIdentity = rows.find((row) =>
+        !Number.isSafeInteger(row.rowIndex)
+        || row.rowIndex < 0
+        || !Number.isSafeInteger(row.id)
+        || typeof row.dataHash !== 'string'
+        || row.dataHash.length === 0
+      );
+      if (invalidIdentity) {
+        return failure(
+          'PARAM_ROW_IDENTITY_MISSING',
+          'native PARAM 行索引缺少完整物理身份（rowIndex + id + dataHash）。',
+          sanitizeDiagnostics(full.diagnostics)
+        );
+      }
+      const indexedRows = rows as Array<{
+        rowIndex: number;
+        id: number;
+        name?: string | null;
+        dataHash: string;
+      }>;
+      // readContainerParamPage 紧接着会拿同一个 token 取选中行字节。把本次
+      // 已验证的轻量文档随 token 留在 main，后续页请求不再重复发起一次
+      // read-param-document；真实 payload 仍只通过 rowSelections 按页读取。
+      const sessionCacheKey = `${containerUri}#${cacheContainerHash}#${entryIndex}#${unpacked.child.storedContentHash}`;
+      putContainerParamSession(sessionCacheKey, {
+        document: {
+          sourceHash: full.data.sourceHash,
+          typeName: full.data.typeName ?? 'UNKNOWN_PARAM',
+          rowDataSize: full.data.rowDataSize ?? 0,
+          rowCount: full.data.rowCount ?? indexedRows.length,
+          rows: indexedRows.map((row) => ({
+            rowIndex: row.rowIndex,
+            id: row.id,
+            dataHash: row.dataHash,
+            ...(row.name ? { name: row.name } : {})
+          })),
+          ...(full.data.authority ? { authority: full.data.authority } : {})
+        },
+        sessionToken,
+        workspaceSessionId: workspaceSessionId ?? '',
+        absolutePath: unpacked.child.absolutePath
+      });
       return {
         ok: true as const,
         containerUri,
@@ -3894,9 +4188,12 @@ let paramMetadataCache: {
         typeName: full.data.typeName ?? 'UNKNOWN_PARAM',
         rowDataSize: full.data.rowDataSize ?? 0,
         rowCount: rows.length,
-        rows: rows.map((row) => ({
+        sessionToken,
+        rows: indexedRows.map((row) => ({
+          rowIndex: row.rowIndex,
           id: row.id,
-          ...(row.name ? { name: row.name } : {})
+          ...(row.name ? { name: row.name } : {}),
+          dataHash: row.dataHash
         })),
         // 截断必须说出来：少给行而不声明，用户会以为这个 param 就这么大。
         rowsTruncated: declared > rows.length,
@@ -3918,6 +4215,10 @@ let paramMetadataCache: {
     }
   );
 
+  // 在主进程注册完成后后台预热一次本机只读元数据。这样用户打开工作区、扫描
+  // 资源时就能并行完成包校验；首次点表不再承担整包导入的全部等待。
+  void loadParamMetadata().catch(() => undefined);
+  void loadYappedOverlay().catch(() => undefined);
 
   // Renderer cutover must preserve value-search semantics without reintroducing loadAll; implement native/session-side value search before removing the legacy path.
 }

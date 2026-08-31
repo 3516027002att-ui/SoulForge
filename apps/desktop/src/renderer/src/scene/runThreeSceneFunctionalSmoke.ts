@@ -245,6 +245,25 @@ function buildProxyDrawList(): SceneDrawList {
   };
 }
 
+function buildModelReplacementDrawList(): SceneDrawList {
+  const base = buildProxyDrawList();
+  const first = base.items[0]!;
+  const second = {
+    ...first,
+    id: 'part-001',
+    position: [2, 0, 0] as [number, number, number],
+    modelName: 'M000010.FLVER'
+  };
+  base.items = [
+    { ...first, modelName: 'm000010.mapbnd.dcx' },
+    second
+  ];
+  base.totalItemCount = 2;
+  base.itemCount = 2;
+  base.bounds = { min: [-5, -5, -5], max: [5, 5, 5], center: [0, 0, 0] };
+  return base;
+}
+
 function buildFlverScene(): FlverSemanticScene {
   return {
     meshes: [
@@ -428,6 +447,38 @@ async function testProxyScene(record: (name: string) => void): Promise<void> {
   record('proxy-picking-highlight');
   record('proxy-resource-release');
   record('proxy-shift-wasd-acceleration');
+}
+
+async function testProxyModelReplacement(record: (name: string) => void): Promise<void> {
+  const audits: Array<{ phase: string; items: Array<{ id: string; state: string }> }> = [];
+  const handle = await mountThreeProxyScene({
+    container: new FakeElement() as unknown as HTMLElement,
+    drawList: buildModelReplacementDrawList(),
+    rendererFactory: () => new FakeRenderer(),
+    renderAudit: (phase, items) => {
+      audits.push({ phase, items: items.map((item) => ({ id: item.id, state: item.state })) });
+    }
+  });
+
+  const positionsBase64 = Buffer.from(new Float32Array([
+    0, 0, 0,
+    1, 0, 0,
+    0, 1, 0
+  ]).buffer).toString('base64');
+  const indicesBase64 = Buffer.from(new Uint16Array([0, 1, 2]).buffer).toString('base64');
+  const replaced = handle.updateModelGeometry?.('map/m000010.FLVER', {
+    positionsBase64,
+    indicesBase64,
+    indexSize: 16,
+    vertexCount: 3
+  }) ?? 0;
+  assertEqual(replaced, 2, 'canonical modelName 命中同一 instance batch 的两个 placement');
+  const ready = audits.filter((entry) => entry.phase === 'mesh-ready').at(-1);
+  assert(ready !== undefined, 'model geometry replacement 发出 mesh-ready audit');
+  assert(ready.items.every((item) => item.state === 'mesh'), 'replacement 后所有 placement 都是 mesh，不再是 proxy');
+
+  handle.dispose();
+  record('proxy-model-batch-replacement');
 }
 
 async function testFlverScene(record: (name: string) => void): Promise<void> {
@@ -617,6 +668,7 @@ async function main(): Promise<void> {
 
   await testBackendResolution(record);
   await testProxyScene(record);
+  await testProxyModelReplacement(record);
   await testFlverScene(record);
   await testMultiSkeletonPoseBatch(record);
   testSkinningBindPose(record);

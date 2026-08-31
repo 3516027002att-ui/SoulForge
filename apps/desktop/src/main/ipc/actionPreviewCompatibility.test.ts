@@ -52,6 +52,8 @@ describe('action preview compatibility planning', () => {
   it('wires the bounded planner and fail-closed remapper without hard-coded equipment ids', () => {
     assert.match(actionSource, /planC0000CompatibilityCandidates/);
     assert.match(actionSource, /remapCharacterBundleToLeader/);
+    assert.match(actionSource, /ACTION_PREVIEW_LEADER_REMAP_APPLIED/);
+    assert.match(actionSource, /ACTION_PREVIEW_LEADER_REMAP_FAILED/);
     assert.match(actionSource, /ACTION_COMPATIBILITY_PREVIEW_ASSEMBLED/);
     assert.doesNotMatch(actionSource, /(?:bd|am|lg)_m_\d{4}/i);
   });

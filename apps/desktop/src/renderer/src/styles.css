@@ -1896,6 +1896,15 @@ details.agent-block > summary.agent-block__label { cursor: pointer; }
   /* §12.6：整个 Composer 不超过 40vh；超出由中间层滚动承接。 */
   max-height: var(--agent-composer-max-height); overflow: hidden;
 }
+.agent-mutter {
+  display: flex; align-items: center; gap: 7px; min-height: 18px;
+  padding: 0 2px; color: var(--ink-3); font-size: 10.5px; line-height: 1.45;
+  opacity: 0; transform: translateY(2px);
+  transition: opacity 140ms var(--ease-standard), transform 140ms var(--ease-standard);
+}
+.agent-mutter.is-visible { opacity: 1; transform: translateY(0); }
+.agent-mutter__mark { flex: none; color: var(--ember-text); font-size: 11px; }
+.agent-mutter__text { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .agent-composer__participant { display: flex; align-items: center; gap: 7px; row-gap: 2px; min-height: 24px; flex-wrap: wrap; }
 /* 三层 Composer 的中间层：context chips + prompt editor，超限时内部滚动。 */
 .agent-composer__body {
@@ -1979,6 +1988,38 @@ details.agent-block > summary.agent-block__label { cursor: pointer; }
 .agent-history__item strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11px; }
 .agent-history__item span { color: var(--ink-3); font-size: 10px; }
 .agent-history__item-actions { display: flex; flex: none; gap: 4px; }
+.agent-feedback {
+  flex: none; margin: 4px 0 8px; padding: 9px 10px;
+  border: 1px solid var(--line); border-radius: var(--radius-m);
+  background: var(--forge-2); font-size: 11px;
+}
+.agent-feedback__head { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; }
+.agent-feedback__hint { color: var(--ink-3); font-size: 9.5px; }
+.agent-feedback__actions { display: flex; gap: 4px; margin-top: 7px; }
+.agent-feedback__button {
+  width: 28px; height: 26px; display: grid; place-items: center;
+  border: 1px solid var(--line); border-radius: var(--radius-s);
+  background: var(--forge-1); color: var(--ink-1); font-size: 14px;
+}
+.agent-feedback__button:hover:not(:disabled),
+.agent-feedback__button.is-selected { border-color: var(--ember-text); background: var(--ember-soft); }
+.agent-feedback__button:disabled { opacity: .45; cursor: default; }
+.agent-feedback__form { display: flex; align-items: flex-end; gap: 6px; margin-top: 7px; }
+.agent-feedback__form textarea { flex: 1; min-width: 0; resize: vertical; min-height: 52px; font-size: 11px; }
+.agent-feedback__note, .agent-feedback__status { margin: 6px 0 0; color: var(--ink-3); font-size: 10px; line-height: 1.4; }
+.agent-feedback__status.is-ok { color: var(--ok-text, var(--ok)); }
+.agent-feedback__status.is-error { color: var(--danger-text, var(--danger)); }
+.agent-history-upload {
+  display: flex; flex-direction: column; gap: 7px; margin-bottom: 12px; padding: 10px;
+  border: 1px solid var(--line); border-radius: var(--radius-m); background: var(--forge-2);
+}
+.agent-history-upload__head { display: flex; flex-direction: column; gap: 3px; }
+.agent-history-upload__head strong { font-size: 12px; }
+.agent-history-upload__head .muted { font-size: 10px; line-height: 1.4; }
+.agent-history-upload__endpoint { margin: 0; color: var(--ink-3); font-size: 10px; }
+.agent-history-upload__status { margin: 0; font-size: 10px; line-height: 1.4; }
+.agent-history-upload__status.is-ok { color: var(--ok-text, var(--ok)); }
+.agent-history-upload__status.is-error { color: var(--danger-text, var(--danger)); }
 
 /* §12.2：4px resizer，普通状态只有 1px 左分隔线（.agent 的 border-left 承担）。
    手柄贴在 dock 左缘内侧（left:0），不再伸出 aside 外：.agent 的 overflow:hidden
@@ -2257,6 +2298,15 @@ details.agent-block > summary.agent-block__label { cursor: pointer; }
   font-size: 10px; color: var(--ink-3); margin-left: auto;
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
+.workbench__column-action {
+  flex: none; margin-left: auto; padding: 1px 7px;
+  border: 1px solid var(--line-strong); border-radius: var(--radius-s, 3px);
+  background: transparent; color: var(--ink-2); font-size: 10px; line-height: 1.4;
+  cursor: pointer;
+}
+.workbench__column-hint + .workbench__column-action { margin-left: 0; }
+.workbench__column-action:hover:not(:disabled) { background: var(--forge-hover); color: var(--ink-1); }
+.workbench__column-action:disabled { opacity: .45; cursor: default; }
 .workbench__column-body { flex: 1; overflow: auto; min-height: 0; padding: 2px 0; overscroll-behavior: contain; }
 .workbench__column-body:has(> .msb-viewport) { display: flex; flex-direction: column; overflow: hidden; padding: 6px; }
 .workbench__column-body:has(> .esw-source) {

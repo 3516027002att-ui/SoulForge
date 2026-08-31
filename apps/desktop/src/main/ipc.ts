@@ -228,7 +228,9 @@ import {
   applyWorkspaceIndexSnapshot,
   applyWorkspaceRag,
   setWorkspaceForegroundActive,
-  revokeDirectorySelectionsFor
+  revokeDirectorySelectionsFor,
+  rebuildActionBinderMembershipIndex,
+  waitForWorkspaceIndexing
 } from './ipc/workspace.js';
 import { clearParamIpcCaches, registerParamIpcHandlers } from './ipc/param.js';
 import { registerDocumentIpcHandlers, resetEditorDocumentStore } from './ipc/documents.js';
@@ -430,7 +432,9 @@ function resolveFlverReadFile(sourceUri: string): { absolutePath: string; relati
 
 function logicalMapModelName(raw: string): string {
   const base = raw.replace(/\\/g, '/').split('/').pop() ?? raw;
-  return base.replace(/\.(flver|dcx|chrbnd|objbnd)$/i, '');
+  return base
+    .replace(/\.(?:flver|chrbnd|objbnd|mapbnd)(?:\.dcx)?$/i, '')
+    .replace(/\.dcx$/i, '');
 }
 
 function resolveMapModelFile(
@@ -944,7 +948,8 @@ async function refreshRagAfterAnalyze(
 async function refreshActiveIndexAfterSemanticEvidence(sourceUris: readonly string[] = []): Promise<void> {
   const session = getWorkspaceSession();
   const index = getWorkspaceActiveIndex();
-  if (!session || !index) return;
+  const sessionId = getActiveWorkspaceSessionIdState();
+  if (!session || !index || !sessionId) return;
   // Live read tools have already replaced/merged the relevant semantic export.
   // Re-scan only refreshes the file catalog; it must not invalidate unrelated
   // semantic data or merge a stale persisted copy over the just-read value.
@@ -953,6 +958,21 @@ async function refreshActiveIndexAfterSemanticEvidence(sourceUris: readonly stri
     game: session.meta.game
   });
   index.setFiles(result.files);
+  // WorkspaceIndex.setFiles intentionally clears source-bound ACTION Binder
+  // membership. Rebuild it before publishing the refreshed snapshot; otherwise
+  // a successful TAE reread makes the next animation lookup fail with
+  // ACTION_BINDER_MEMBERSHIP_INDEX_NOT_READY until the user reopens the workspace.
+  const actionBinderIndex = await rebuildActionBinderMembershipIndex({
+    deps: { verifiedReadRoots },
+    index,
+    session,
+    sessionId,
+    indexedFiles: result.files
+  });
+  if (!actionBinderIndex.ok) {
+    throw new Error(actionBinderIndex.diagnostics.map((diagnostic) => `${diagnostic.code}: ${diagnostic.message}`).join('；')
+      || 'ACTION_BINDER_MEMBERSHIP_REBUILD_FAILED');
+  }
   index.rebuildReferences();
   applyWorkspaceIndexSnapshot(index);
   const database = activeOperationLog ?? await ensureActiveOperationLog(session);
@@ -971,7 +991,8 @@ async function refreshActiveIndexAfterNativeWrite(
 ): Promise<KnowledgeRefreshResult | void> {
   const session = getWorkspaceSession();
   const currentIndex = getWorkspaceActiveIndex();
-  if (!session || !currentIndex) return;
+  const sessionId = getActiveWorkspaceSessionIdState();
+  if (!session || !currentIndex || !sessionId) return;
   const beforeFiles = currentIndex.getFiles();
   const requestedSources = resolveKnowledgeSourceUris(changedSources, beforeFiles);
   const result = await scanWorkspace({
@@ -1005,6 +1026,20 @@ async function refreshActiveIndexAfterNativeWrite(
       if (nativeRefresh.failedSources.length > 0) {
         const detail = nativeRefresh.diagnostics.map((diagnostic) => `${diagnostic.code}: ${diagnostic.message}`).join('；');
         throw new Error(detail || `native semantic refresh failed for ${nativeRefresh.failedSources.length} source(s)`);
+      }
+      if (getActiveWorkspaceSessionIdState() !== sessionId) {
+        throw new Error('工作区已切换，ACTION membership 刷新结果已丢弃。');
+      }
+      const actionBinderIndex = await rebuildActionBinderMembershipIndex({
+        deps: { verifiedReadRoots },
+        index: analyzed.index,
+        session,
+        sessionId,
+        indexedFiles: analyzed.index.getFiles()
+      });
+      if (!actionBinderIndex.ok) {
+        const detail = actionBinderIndex.diagnostics.map((diagnostic) => `${diagnostic.code}: ${diagnostic.message}`).join('；');
+        throw new Error(detail || 'ACTION_BINDER_MEMBERSHIP_REBUILD_FAILED');
       }
       return {
         index: analyzed.index,
@@ -1561,7 +1596,8 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
     safeExists,
     pushToolsSubdirs,
     asBasicDiagnostics: (items) => items.map((item) => ({ severity: item.severity === 'warning' || item.severity === 'info' ? item.severity : 'error', code: item.code, message: item.message, ...(item.sourceUri ? { sourceUri: item.sourceUri } : {}) })),
-    verifiedReadRoots
+    verifiedReadRoots,
+    waitForWorkspaceIndexing
   });
 
   registerAssetIpcHandlers({

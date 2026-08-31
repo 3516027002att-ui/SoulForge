@@ -17,7 +17,7 @@ import {
   type AuthoritativeAnimationClip,
   sampleAuthoritativePose
 } from '@soulforge/shared';
-import { ModelResourcePool } from './modelResourcePool.js';
+import { ModelResourcePool, normalizeModelResourceKey } from './modelResourcePool.js';
 import type {
   BufferGeometry,
   CompressedPixelFormat,
@@ -71,7 +71,7 @@ export interface ProxySceneHandle extends ThreeSceneHandle {
   setDrawList: (list: SceneDrawList) => void;
   /** 用真实 FLVER 网格替换某个 proxy 盒子；找不到 id 则忽略。 */
   replaceItemMesh: (id: string, mesh: FlverSceneMesh) => void;
-  /** 按 modelName 批量更新场景内所有引用该模型的 Mesh 几何体（对齐 Smithbox 几何共享池） */
+  /** 按 modelName 批量更新场景内所有引用该模型的 Mesh 几何体（对齐 Smithbox 几何共享池）。返回实际替换数。 */
   updateModelGeometry?: (modelName: string, geometryData: {
     positionsBase64: string;
     indicesBase64?: string | undefined;
@@ -79,7 +79,11 @@ export interface ProxySceneHandle extends ThreeSceneHandle {
     uvsBase64?: string | undefined;
     normalsBase64?: string | undefined;
     vertexCount: number;
-  }) => void;
+    texturePreviewToken?: string | undefined;
+    textureColorSpace?: string | undefined;
+    materialGroups?: Array<{ start: number; count: number; materialIndex: number }> | undefined;
+    texturePreviews?: Array<{ materialIndex: number; texturePreviewToken: string; colorSpace?: string }> | undefined;
+  }) => number;
 }
 
 export interface FlverSceneHandle extends ThreeSceneHandle {
@@ -121,7 +125,14 @@ export interface FlverSceneDdsTexture {
   mipmapCount: number;
 }
 
-export type FlverSceneTexture = FlverSceneRgbaTexture | FlverSceneDdsTexture;
+/** Bridge 侧生成的 PNG data URI；异步解码仍属于 projection 层，不进入语义 authority。 */
+export interface FlverSceneImageTexture {
+  kind: 'image-uri';
+  uri: string;
+  colorSpace?: 'srgb' | 'linear';
+}
+
+export type FlverSceneTexture = FlverSceneRgbaTexture | FlverSceneDdsTexture | FlverSceneImageTexture;
 
 export interface FlverSceneMesh {
   id: string;
@@ -157,7 +168,7 @@ export interface FlverSceneBone {
   translation: [number, number, number];
   rotation: [number, number, number];
   scale?: [number, number, number];
-  rotationOrder?: 'YZX' | 'XYZ';
+  rotationOrder?: 'YZX' | 'XYZ' | 'XZY';
 }
 
 export interface FlverSceneSkeleton {
@@ -175,6 +186,16 @@ export interface FlverSceneBounds {
   min: [number, number, number];
   max: [number, number, number];
   center: [number, number, number];
+}
+
+/** 相机取景参数；代理地图保留原有宽松默认值，角色/FLVER 可按真实尺寸取景。 */
+export interface SceneFrameOptions {
+  minSpan?: number;
+  distanceScale?: number;
+  minDistance?: number;
+  /** 角色/FLVER 预览可指定稳定的相机方位；未指定时保持地图旧默认视角。 */
+  azimuth?: number;
+  elevation?: number;
 }
 
 /**
@@ -237,9 +258,9 @@ interface SceneCore {
     material: Material
   ) => void;
   updateInstanceBatchGeometry: (key: string, geometry: BufferGeometry, material: Material) => void;
-  replaceModelGeometry: (modelName: string, geometry: BufferGeometry, material: Material) => number;
+  replaceModelGeometry: (modelName: string, geometry: BufferGeometry, material: Material | Material[]) => number;
   clearContent: () => void;
-  frameToBounds: (bounds: FlverSceneBounds) => void;
+  frameToBounds: (bounds: FlverSceneBounds, options?: SceneFrameOptions) => void;
   disposeAll: () => void;
 }
 
@@ -387,7 +408,7 @@ export async function mountThreeProxyScene(
       emitRenderAudit('mesh-ready');
     },
     updateModelGeometry: (modelName, geometryData) => {
-      if (!geometryData.positionsBase64 || geometryData.vertexCount <= 0) return;
+      if (!geometryData.positionsBase64 || geometryData.vertexCount <= 0) return 0;
       // 1. 使用共享资源池获取或创建 BufferGeometry 和 Material
       const { geometry, material } = resourcePool.updateModelGeometry(
         core.three,
@@ -398,9 +419,10 @@ export async function mountThreeProxyScene(
 
       const replaced = core.replaceModelGeometry(modelName, geometry, material);
       if (replaced === 0) {
-        throw new Error(`MAP_RENDERER_MODEL_BATCH_NOT_FOUND: ${modelName}`);
+        throw new Error(`MAP_RENDERER_MODEL_BATCH_NOT_FOUND: ${modelName} (expected batch key model:${normalizeModelName(modelName)})`);
       }
       emitRenderAudit('mesh-ready');
+      return replaced;
     },
     dispose: () => {
       resourcePool.clear();
@@ -454,7 +476,7 @@ export async function mountFlverScene(input: {
           transform.rotation[3]
         );
       } else {
-        bone.rotation.set(transform.rotation[0], transform.rotation[1], transform.rotation[2], 'YZX');
+        bone.rotation.set(transform.rotation[0], transform.rotation[1], transform.rotation[2], 'XZY');
       }
       const scale = transform.scale ?? [1, 1, 1];
       bone.scale.set(scale[0], scale[1], scale[2]);
@@ -500,7 +522,7 @@ export async function mountFlverScene(input: {
             b.rotation[0],
             b.rotation[1],
             b.rotation[2],
-            b.rotationOrder ?? 'YZX'
+            b.rotationOrder ?? 'XZY'
           );
           const scale = b.scale ?? [1, 1, 1];
           bone.scale.set(scale[0], scale[1], scale[2]);
@@ -533,7 +555,17 @@ export async function mountFlverScene(input: {
         core.addMesh(item.id, createFlverMesh(core.three, core.track, item, runtime?.skeleton ?? null));
       }
       createMarkers(core.three, core.track, core.markerGroup, semantic);
-      core.frameToBounds(semantic.bounds);
+      // 角色 FLVER 的真实尺寸通常只有 1~2 个游戏单位。通用代理取景
+      // 的 15/16 单位下限会把动作模型缩成原点旁的几像素，播放虽在走，
+      // 用户却看不到动作；这里按真实模型尺寸取景，仍保留较小安全下限。
+      core.frameToBounds(semantic.bounds, {
+        minSpan: semantic.meshes.length > 0 ? 1.5 : 2,
+        distanceScale: 1.35,
+        minDistance: 2.4,
+        // FLVER 的正面沿 +Z 观察，避免所有角色以地图式对角相机显示成侧面。
+        azimuth: 0,
+        elevation: 0.12
+      });
       core.setSelected(null, false);
       input.resourceAudit?.([...core.resources]);
     } catch (error) {
@@ -626,15 +658,26 @@ async function mountSceneCore(input: MountInput): Promise<SceneCore> {
   renderer.setPixelRatio(Math.min(typeof window !== 'undefined' && window.devicePixelRatio ? window.devicePixelRatio : 1, 2));
 
   const scene = new three.Scene();
-  scene.background = new three.Color(0x1a1d23);
+  scene.background = new three.Color(0x151922);
   const camera = new three.PerspectiveCamera(55, 1, 0.1, 50_000);
   input.cameraAudit?.(camera);
   const root = new three.Group();
   scene.add(root);
-  scene.add(new three.AmbientLight(0xffffff, 0.55));
-  const key = new three.DirectionalLight(0xffffff, 0.85);
+  // Real FLVER albedo previews have no environment map. A low ambient-only
+  // setup makes valid dark cloth/stone textures read as an untextured black
+  // silhouette, especially in the narrow action preview. Keep a neutral
+  // hemisphere/fill rig in the projection layer so both map and character
+  // previews remain readable without changing the authoritative asset data.
+  scene.add(new three.AmbientLight(0xffffff, 0.72));
+  const hemisphere = new three.HemisphereLight(0xcfe2ff, 0x493d35, 0.62);
+  hemisphere.position.set(0, 100, 0);
+  scene.add(hemisphere);
+  const key = new three.DirectionalLight(0xffffff, 0.95);
   key.position.set(40, 80, 20);
   scene.add(key);
+  const fill = new three.DirectionalLight(0xaecbff, 0.28);
+  fill.position.set(-40, 25, -30);
+  scene.add(fill);
 
   const grid = new three.GridHelper(200, 20, 0x3a4150, 0x2a303c);
   const axes = new three.AxesHelper(10);
@@ -1061,7 +1104,7 @@ async function mountSceneCore(input: MountInput): Promise<SceneCore> {
   const replaceModelGeometry = (
     modelName: string,
     geometry: BufferGeometry,
-    material: Material
+    material: Material | Material[]
   ): number => {
     const modelKey = normalizeModelName(modelName);
     const batchKey = `model:${modelKey}`;
@@ -1174,22 +1217,40 @@ async function mountSceneCore(input: MountInput): Promise<SceneCore> {
   };
 
   let lastBounds: FlverSceneBounds | null = null;
+  let lastFrameOptions: SceneFrameOptions = {};
 
-  const frameToBounds = (bounds: FlverSceneBounds): void => {
+  const frameToBounds = (bounds: FlverSceneBounds, options: SceneFrameOptions = {}): void => {
+    const effectiveOptions = Object.keys(options).length > 0 ? options : lastFrameOptions;
     const [cx, cy, cz] = bounds.center;
     const span = Math.max(
       bounds.max[0] - bounds.min[0],
       bounds.max[1] - bounds.min[1],
       bounds.max[2] - bounds.min[2],
-      15
+      effectiveOptions.minSpan ?? 15
     );
     lastBounds = bounds;
+    lastFrameOptions = effectiveOptions;
     // 动态校准基准移动速度，超大地图与局部模型均能自适应
     baseFlySpeed = Math.max(10, Math.min(span * 0.12, 120));
 
     // 计算合理视距：俯视主要建筑群
-    const dist = Math.max(span * 1.0, 16);
-    camera.position.set(cx + dist, cy + dist * 0.75, cz + dist);
+    const dist = Math.max(
+      span * (effectiveOptions.distanceScale ?? 1.0),
+      effectiveOptions.minDistance ?? 16
+    );
+    if (effectiveOptions.azimuth !== undefined || effectiveOptions.elevation !== undefined) {
+      const azimuth = effectiveOptions.azimuth ?? Math.PI / 4;
+      const elevation = effectiveOptions.elevation ?? Math.atan(0.75 / Math.sqrt(2));
+      const horizontalDistance = Math.cos(elevation) * dist;
+      camera.position.set(
+        cx + Math.sin(azimuth) * horizontalDistance,
+        cy + Math.sin(elevation) * dist,
+        cz + Math.cos(azimuth) * horizontalDistance
+      );
+    } else {
+      // 地图代理维持原有的右前上方宽松视角。
+      camera.position.set(cx + dist, cy + dist * 0.75, cz + dist);
+    }
     camera.lookAt(cx, cy, cz);
     camera.updateMatrixWorld(true);
 
@@ -1213,7 +1274,12 @@ async function mountSceneCore(input: MountInput): Promise<SceneCore> {
         ) => UniversalTransformControl;
       };
       const controls = (['translate', 'rotate', 'scale'] as const).map((mode) => {
-        const control = new TransformControls(camera);
+        // TransformControls.disconnect() removes listeners from its domElement
+        // during dispose(). Passing the actual scene canvas is required here:
+        // the MSB panel can be remounted while the first async scene mount is
+        // still settling, and a control constructed without a domElement
+        // crashes the React error boundary on that normal cleanup path.
+        const control = new TransformControls(camera, canvas);
         control.setMode(mode);
         const helper = control.getHelper ? control.getHelper() : (control as unknown as Object3D);
         scene.add(helper);
@@ -1839,8 +1905,7 @@ interface SceneDrawBatch {
 }
 
 function normalizeModelName(raw: string): string {
-  const base = raw.replace(/\\/g, '/').split('/').pop() ?? raw;
-  return base.toLowerCase().replace(/\.(flver|mapbnd)(\.dcx)?$/i, '');
+  return normalizeModelResourceKey(raw);
 }
 
 /** 纯数据分组：同一模型的所有 placement 进入一个 GPU instance batch。 */
@@ -1935,6 +2000,18 @@ function createFlverMesh(
 }
 
 function createTexture(three: ThreeModule, track: ResourceTracker, texture: FlverSceneTexture): import('three').Texture {
+  if (texture.kind === 'image-uri') {
+    if (!/^data:image\/png;base64,[A-Za-z0-9+/=]+$/.test(texture.uri)) {
+      throw new Error('FLVER_TEXTURE_URI_INVALID: only Bridge PNG data URI is accepted');
+    }
+    const loaded = new three.TextureLoader().load(texture.uri);
+    loaded.flipY = false;
+    loaded.colorSpace = texture.colorSpace === 'linear' ? three.LinearSRGBColorSpace : three.SRGBColorSpace;
+    loaded.wrapS = three.RepeatWrapping;
+    loaded.wrapT = three.RepeatWrapping;
+    loaded.needsUpdate = true;
+    return track(loaded);
+  }
   if (texture.kind === 'rgba') {
     const dataTexture = track(new three.DataTexture(texture.rgbaBytes, texture.width, texture.height, three.RGBAFormat));
     dataTexture.needsUpdate = true;
@@ -1977,7 +2054,7 @@ function createMarkers(
         bone.rotation[0],
         bone.rotation[1],
         bone.rotation[2],
-        bone.rotationOrder ?? 'YZX'
+        bone.rotationOrder ?? 'XZY'
       ));
       const scale = bone.scale ?? [1, 1, 1];
       local.scale(new three.Vector3(scale[0], scale[1], scale[2]));

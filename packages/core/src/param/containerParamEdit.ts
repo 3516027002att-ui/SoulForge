@@ -39,8 +39,11 @@ export interface ParamFieldReadQuery {
 export interface ParamFieldSnapshot {
   table: string;
   rowId: number;
+  /** Native row name returned by the PARAM document, when available. */
+  rowName?: string;
   fieldId: string;
   displayName?: string;
+  description?: string;
   /** Provenance returned by the same native document read, never a cached index fallback. */
   sourceHash?: string;
   sourceRevision?: number;
@@ -213,7 +216,14 @@ export async function readParamFields(input: {
         continue;
       }
       let foundAnyField = false;
-      for (const fieldId of query.fieldIds) {
+      // An empty fieldIds list is an explicit request for the complete
+      // trusted row projection. This lets the agent inspect a richly named
+      // PARAM row before it has to guess a field id, while the writer still
+      // requires explicit field ids for mutations.
+      const requestedFieldIds = query.fieldIds.length > 0
+        ? query.fieldIds
+        : loaded.definition.fields.map((field) => field.id);
+      for (const fieldId of requestedFieldIds) {
         const field = loaded.definition.fields.find((item) => item.id === fieldId);
         if (!field) {
           diagnostics.push({
@@ -227,17 +237,19 @@ export async function readParamFields(input: {
         fields.push({
           table: loaded.tableName,
           rowId,
+          ...(row.name ? { rowName: row.name } : {}),
           fieldId,
           ...(field.name && field.name !== fieldId ? { displayName: field.name } : {}),
+          ...(field.description ? { description: field.description } : {}),
           sourceHash: loaded.sourceHash,
           ...(sourceRevision !== undefined ? { sourceRevision } : {}),
           value: readFieldValue(row.dataBase64, loaded.definition, fieldId)
         });
       }
-      if (!foundAnyField && query.fieldIds.length > 0) {
+      if (!foundAnyField && requestedFieldIds.length > 0) {
         return {
           ok: false,
-          error: { code: 'PARAM_FIELD_NOT_FOUND', message: `${query.table} 请求的字段均不在授信定义里（${query.fieldIds.join(', ')}）。` },
+          error: { code: 'PARAM_FIELD_NOT_FOUND', message: `${query.table} 请求的字段均不在授信定义里（${requestedFieldIds.join(', ')}）。` },
           diagnostics
         };
       }
@@ -320,15 +332,19 @@ export async function setParamFields(input: {
         before.push({
           table: loaded.tableName,
           rowId,
+          ...(row.name ? { rowName: row.name } : {}),
           fieldId: edit.fieldId,
           ...(field?.name && field.name !== edit.fieldId ? { displayName: field.name } : {}),
+          ...(field?.description ? { description: field.description } : {}),
           value: applied.before[edit.fieldId] ?? null
         });
         after.push({
           table: loaded.tableName,
           rowId,
+          ...(row.name ? { rowName: row.name } : {}),
           fieldId: edit.fieldId,
           ...(field?.name && field.name !== edit.fieldId ? { displayName: field.name } : {}),
+          ...(field?.description ? { description: field.description } : {}),
           value: applied.after[edit.fieldId] ?? null
         });
       }
@@ -498,7 +514,7 @@ async function loadTableRows(
       tableName: string;
       entry: ContainerEntry;
       definition: ParamDefDocument;
-      rows: Map<number, { id: number; dataBase64: string }>;
+      rows: Map<number, { id: number; dataBase64: string; name?: string }>;
       unpackedPath: string;
       sourceHash: string;
       missingRows: number[];
@@ -559,12 +575,16 @@ async function loadTableRows(
   if (!definition.ok) return { ok: false, error: definition.error, diagnostics: documentDiagnostics };
 
   let sourceHash = document.data.sourceHash;
-  const rows = new Map<number, { id: number; dataBase64: string }>();
-  const ingest = (items: Array<{ id: number; dataBase64: string }>): void => {
+  const rows = new Map<number, { id: number; dataBase64: string; name?: string }>();
+  const ingest = (items: Array<{ id: number; dataBase64: string; name?: string }>): void => {
     rows.clear();
     for (const row of items) {
       if (typeof row.dataBase64 === 'string' && row.dataBase64.length > 0) {
-        rows.set(row.id, { id: row.id, dataBase64: row.dataBase64 });
+        rows.set(row.id, {
+          id: row.id,
+          dataBase64: row.dataBase64,
+          ...(row.name ? { name: row.name } : {})
+        });
       }
     }
   };

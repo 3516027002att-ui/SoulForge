@@ -8,9 +8,25 @@ import type { ModelServiceConfig, ToolDefinition } from '../model-services/types
 
 const API_KEY = 'sk-fake-responses-001';
 
-function startResponsesFake(): Promise<{ baseUrl: string; close: () => Promise<void> }> {
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function startResponsesFake(): Promise<{
+  baseUrl: string;
+  close: () => Promise<void>;
+  stats: () => {
+    maxRejected: number;
+    observedEfforts: string[];
+    nestedFunctionCallRejected: number;
+    topLevelFunctionCallSeen: number;
+  };
+}> {
   return new Promise((resolve, reject) => {
-    let toolTurn = 0;
+    let maxRejected = 0;
+    let nestedFunctionCallRejected = 0;
+    let topLevelFunctionCallSeen = 0;
+    const observedEfforts: string[] = [];
     const server = http.createServer((req, res) => {
       if (req.method !== 'POST' || !req.url?.endsWith('/v1/responses')) {
         res.writeHead(404);
@@ -20,7 +36,7 @@ function startResponsesFake(): Promise<{ baseUrl: string; close: () => Promise<v
       const chunks: Buffer[] = [];
       req.on('data', (c) => chunks.push(c));
       req.on('end', () => {
-        let body: { stream?: boolean; input?: unknown[] } = {};
+        let body: { stream?: boolean; input?: unknown[]; reasoning?: { effort?: string } } = {};
         try {
           body = JSON.parse(Buffer.concat(chunks).toString('utf8')) as typeof body;
         } catch {
@@ -28,15 +44,68 @@ function startResponsesFake(): Promise<{ baseUrl: string; close: () => Promise<v
           res.end('bad json');
           return;
         }
-        const hasToolResult = JSON.stringify(body.input ?? []).includes('function_call_output');
+        const effort = body.reasoning?.effort;
+        if (effort !== undefined) observedEfforts.push(effort);
+        if (effort === 'max') {
+          maxRejected += 1;
+          res.writeHead(400, { 'content-type': 'application/json' });
+          res.end(JSON.stringify({
+            error: {
+              param: 'reasoning.effort',
+              type: 'invalid_request_error',
+              message: 'unknown variant `max`, expected one of `none`, `minimal`, `low`, `medium`, `high`, `xhigh`'
+            }
+          }));
+          return;
+        }
+        const inputItems = Array.isArray(body.input) ? body.input : [];
+        const hasNestedFunctionCall = inputItems.some((item) => {
+          if (!isRecord(item) || item.type !== 'message' || !Array.isArray(item.content)) {
+            return false;
+          }
+          return item.content.some((part) => isRecord(part) && part.type === 'function_call');
+        });
+        if (hasNestedFunctionCall) {
+          nestedFunctionCallRejected += 1;
+          res.writeHead(400, { 'content-type': 'application/json' });
+          res.end(JSON.stringify({
+            error: {
+              param: 'input[2].content',
+              type: 'invalid_request_error',
+              message: 'function_call must be a top-level input item, not a message content part'
+            }
+          }));
+          return;
+        }
+        if (inputItems.some((item) => isRecord(item) && item.type === 'function_call')) {
+          topLevelFunctionCallSeen += 1;
+        }
+        const hasEmptyFunctionCallName = inputItems.some((item) =>
+          isRecord(item)
+          && item.type === 'function_call'
+          && (typeof item.name !== 'string' || item.name.trim().length === 0)
+        );
+        if (hasEmptyFunctionCallName) {
+          res.writeHead(400, { 'content-type': 'application/json' });
+          res.end(JSON.stringify({
+            error: {
+              param: 'name',
+              type: 'invalid_request_error',
+              message: 'function_call name must be non-empty'
+            }
+          }));
+          return;
+        }
+        const hasToolResult = inputItems.some(
+          (item) => isRecord(item) && item.type === 'function_call_output'
+        );
         if (body.stream) {
           res.writeHead(200, {
             'content-type': 'text/event-stream',
             'cache-control': 'no-cache',
             connection: 'keep-alive'
           });
-          if (!hasToolResult && toolTurn === 0) {
-            toolTurn += 1;
+          if (!hasToolResult) {
             res.write(`data: ${JSON.stringify({
               type: 'response.output_text.delta',
               delta: 'Responses stream '
@@ -114,7 +183,13 @@ function startResponsesFake(): Promise<{ baseUrl: string; close: () => Promise<v
       }
       resolve({
         baseUrl: `http://127.0.0.1:${addr.port}`,
-        close: () => new Promise((r) => server.close(() => r()))
+        close: () => new Promise((r) => server.close(() => r())),
+        stats: () => ({
+          maxRejected,
+          observedEfforts: [...observedEfforts],
+          nestedFunctionCallRejected,
+          topLevelFunctionCallSeen
+        })
       });
     });
   });
@@ -148,11 +223,20 @@ async function main(): Promise<void> {
       updatedAt: new Date().toISOString()
     };
 
+    const direct = await adapter.complete({
+      messages: [{ role: 'user', content: 'complete' }],
+      thinkingLevel: 'max'
+    });
+    if (direct.finishReason === 'error') {
+      throw new Error(`complete reasoning fallback failed: ${JSON.stringify(direct.diagnostics)}`);
+    }
+
     const streamText: string[] = [];
     let streamTool = false;
     for await (const event of adapter.stream({
       messages: [{ role: 'user', content: 'stream' }],
-      tools
+      tools,
+      thinkingLevel: 'max'
     })) {
       if (event.type === 'text-delta') streamText.push(event.text);
       if (event.type === 'tool-call') streamTool = true;
@@ -169,7 +253,8 @@ async function main(): Promise<void> {
         ok: true,
         content: JSON.stringify({ hits: 1, tool: call.name })
       }),
-      maxSteps: 4
+      maxSteps: 4,
+      streaming: true
     });
 
     if (!streamText.join('').includes('Responses') && !streamTool) {
@@ -184,6 +269,13 @@ async function main(): Promise<void> {
     if (!run.messages.some((m) => m.role === 'assistant')) {
       throw new Error('no assistant message');
     }
+    const stats = server.stats();
+    if (stats.maxRejected !== 2 || !stats.observedEfforts.includes('xhigh')) {
+      throw new Error(`reasoning fallback was not exercised: ${JSON.stringify(stats)}`);
+    }
+    if (stats.nestedFunctionCallRejected !== 0 || stats.topLevelFunctionCallSeen < 1) {
+      throw new Error(`Responses tool-call input shape was not normalized: ${JSON.stringify(stats)}`);
+    }
 
     console.log(JSON.stringify({
       ok: true,
@@ -191,6 +283,7 @@ async function main(): Promise<void> {
       transport: adapter.transport,
       streamTool,
       streamText: streamText.join(''),
+      reasoningFallback: stats.observedEfforts,
       steps: run.steps,
       finishReason: run.finishReason
     }, null, 2));

@@ -1,3 +1,4 @@
+import { Buffer } from 'node:buffer';
 import { existsSync, readdirSync } from 'node:fs';
 import { basename, dirname, join } from 'node:path';
 import type { IpcMainInvokeEvent } from 'electron';
@@ -15,7 +16,11 @@ import {
   type WriteConfirmationPort
 } from '@soulforge/core';
 import {
+  isCharacterPreviewBundle,
+  type CharacterPreviewBundle,
   type Diagnostic,
+  type FlverPreviewModel,
+  type FlverPreviewMesh,
   type IndexedFile,
   type MapEditTransaction
 } from '@soulforge/shared';
@@ -26,10 +31,102 @@ const _forensicsMapCounters = new Map<string, number>();
 function _forensicsMapInc(key: string, delta = 1): void { _forensicsMapCounters.set(key, (_forensicsMapCounters.get(key) ?? 0) + delta); }
 export function getMapForensicsCounters(): Record<string, number> { return Object.fromEntries(_forensicsMapCounters); }
 import type { TrustedIpcHandle } from './registration.js';
+import {
+  assembleC0000CompatibilityPreview,
+  characterTexturePackagePaths
+} from './action.js';
+
+/**
+ * 地图里的 c* / o* 对象不是 mapbnd 静态几何，而是 chrbnd/objbnd。将其
+ * 转成地图只读几何时保留每个 mesh 的材质分组和已由 Bridge 解码的 PNG，
+ * 仅忽略动作所需的 skin attributes；地图实例本身不驱动角色动画。
+ */
+function characterBundleToMapChunks(bundle: CharacterPreviewBundle): Array<Record<string, unknown>> {
+  const textureMaterialIndices = new Map<string, number>();
+  const emittedTextureMaterials = new Set<number>();
+  let nextTextureMaterialIndex = 1; // 0 保留给没有纹理的中性材质。
+  const chunks: Array<Record<string, unknown>> = [];
+
+  const textureFor = (model: FlverPreviewModel, mesh: FlverPreviewMesh) =>
+    model.texturePreviews?.find((preview) => preview.materialIndex === mesh.materialIndex)
+      ?? (model.texturePreviewToken
+        ? {
+            materialIndex: mesh.materialIndex ?? 0,
+            textureName: `${model.entry.name}:default`,
+            texturePreviewToken: model.texturePreviewToken,
+            width: 1,
+            height: 1,
+            colorSpace: model.textureColorSpace ?? 'srgb'
+          }
+        : undefined);
+
+  for (const model of bundle.models) {
+    for (const mesh of model.meshes) {
+      const positionBytes = Buffer.from(mesh.positionsBase64, 'base64');
+      const expectedPositionBytes = mesh.vertexCount * 3 * Float32Array.BYTES_PER_ELEMENT;
+      if (positionBytes.byteLength !== expectedPositionBytes) {
+        throw new Error(`MAP_CHARACTER_GEOMETRY_INVALID: ${model.entry.name}:mesh[${mesh.meshIndex}] positions length mismatch`);
+      }
+
+      const chunk: Record<string, unknown> = {
+        positionsBase64: mesh.positionsBase64,
+        vertexCount: mesh.vertexCount
+      };
+      if (mesh.indicesBase64) {
+        const indexElementBytes = mesh.indexSize / 8;
+        const indexBytes = Buffer.from(mesh.indicesBase64, 'base64');
+        if (indexBytes.byteLength % indexElementBytes !== 0) {
+          throw new Error(`MAP_CHARACTER_GEOMETRY_INVALID: ${model.entry.name}:mesh[${mesh.meshIndex}] indices alignment`);
+        }
+        chunk.indicesBase64 = mesh.indicesBase64;
+        chunk.indexElementBytes = indexElementBytes;
+      }
+      if (mesh.uvsBase64) {
+        const uvBytes = Buffer.from(mesh.uvsBase64, 'base64');
+        if (uvBytes.byteLength !== mesh.vertexCount * 2 * Float32Array.BYTES_PER_ELEMENT) {
+          throw new Error(`MAP_CHARACTER_GEOMETRY_INVALID: ${model.entry.name}:mesh[${mesh.meshIndex}] UV length mismatch`);
+        }
+        chunk.uvsBase64 = mesh.uvsBase64;
+      }
+      if (mesh.normalsBase64) {
+        const normalBytes = Buffer.from(mesh.normalsBase64, 'base64');
+        if (normalBytes.byteLength !== mesh.vertexCount * 3 * Float32Array.BYTES_PER_ELEMENT) {
+          throw new Error(`MAP_CHARACTER_GEOMETRY_INVALID: ${model.entry.name}:mesh[${mesh.meshIndex}] normal length mismatch`);
+        }
+        chunk.normalsBase64 = mesh.normalsBase64;
+      }
+
+      const preview = textureFor(model, mesh);
+      if (preview?.texturePreviewToken) {
+        const colorSpace = preview.colorSpace ?? 'srgb';
+        const textureKey = `${preview.texturePreviewToken}\0${colorSpace}`;
+        let materialIndex = textureMaterialIndices.get(textureKey);
+        if (materialIndex === undefined) {
+          materialIndex = nextTextureMaterialIndex++;
+          textureMaterialIndices.set(textureKey, materialIndex);
+        }
+        chunk.materialIndex = materialIndex;
+        // 纹理 data URI 可能很大，同一材质只在第一个 chunk 携带一次；
+        // renderer 的 merge 阶段会把它复用到后续 draw group。
+        if (!emittedTextureMaterials.has(materialIndex)) {
+          emittedTextureMaterials.add(materialIndex);
+          chunk.texturePreviewToken = preview.texturePreviewToken;
+          chunk.textureColorSpace = colorSpace;
+        }
+      } else {
+        chunk.materialIndex = 0;
+      }
+      chunks.push(chunk);
+    }
+  }
+  return chunks;
+}
 
 function logicalMapModelName(raw: string): string {
   const base = raw.replace(/\\/g, '/').split('/').pop() ?? raw;
-  return base.replace(/\.(flver|dcx|chrbnd|objbnd)$/i, '');
+  return base
+    .replace(/\.(?:flver|chrbnd|objbnd|mapbnd)(?:\.dcx)?$/i, '')
+    .replace(/\.dcx$/i, '');
 }
 
 function resolveMapModelFile(
@@ -536,12 +633,125 @@ export function registerMapIpcHandlers(deps: MapIpcDeps): void {
       if (roots.diagnostics.length > 0) return { ok: false, diagnostics: roots.diagnostics };
       if (effectiveBase && !roots.allowedRoots.includes(effectiveBase)) roots.allowedRoots.push(effectiveBase);
 
-      const readStaticPath = async (modelPath: string) => {
+      const readCharacterPath = async (modelPath: string) => {
+        const result = await runBridge<unknown>({
+          command: 'read-chrbnd-flver-preview',
+          filePath: modelPath,
+          allowedRoots: roots.allowedRoots,
+          timeoutMs: 120_000,
+          ...(effectiveBase ? { oodleRuntimeRoot: effectiveBase } : {}),
+          commandOptions: {
+            maxVertices: 1_000_000,
+            maxIndices: 3_000_000,
+            texturePackagePaths: characterTexturePackagePaths(modelPath)
+          }
+        });
+        if (result.parseStatus === 'failed' || !isCharacterPreviewBundle(result.data)) {
+          return {
+            ok: false,
+            sourceUri: msbSourceUri,
+            diagnostics: result.diagnostics
+          };
+        }
+
+        let bundle = result.data;
+        const modelStem = basename(modelPath).replace(/\.chrbnd(?:\.dcx)?$/i, '').toLowerCase();
+        let compatibilityDiagnostics: Diagnostic[] = [];
+        if (modelStem === 'c0000' && bundle.meshCount === 0 && bundle.boneCount > 0) {
+          const compatibility = await assembleC0000CompatibilityPreview({
+            leaderBundle: bundle,
+            overlayPartsDirectory: join(deps.activeSession!.layers.overlayRoot, 'parts'),
+            basePartsDirectory: effectiveBase ? join(effectiveBase, 'parts') : null,
+            allowedRoots: roots.allowedRoots,
+            oodleRuntimeRoot: effectiveBase
+          });
+          compatibilityDiagnostics = compatibility.diagnostics;
+          if (compatibility.bundle) bundle = compatibility.bundle;
+        }
+
+        let chunks: Array<Record<string, unknown>>;
+        try {
+          chunks = characterBundleToMapChunks(bundle);
+        } catch (error) {
+          return {
+            ok: false,
+            sourceUri: msbSourceUri,
+            diagnostics: [
+              ...result.diagnostics,
+              ...compatibilityDiagnostics,
+              {
+                severity: 'error' as const,
+                code: 'MAP_CHARACTER_GEOMETRY_INVALID',
+                message: error instanceof Error ? error.message : String(error),
+                sourceUri: msbSourceUri
+              }
+            ]
+          };
+        }
+        if (chunks.length === 0) {
+          return {
+            ok: false,
+            sourceUri: msbSourceUri,
+            diagnostics: [
+              ...result.diagnostics,
+              ...compatibilityDiagnostics,
+              {
+                severity: 'warning' as const,
+                code: 'MAP_CHARACTER_GEOMETRY_UNAVAILABLE',
+                message: `角色模型 ${modelStem} 只有骨骼或没有可显示网格，地图保留线框占位。`,
+                sourceUri: msbSourceUri
+              }
+            ]
+          };
+        }
+        const data = {
+          sessionToken: null,
+          nextCursor: null,
+          complete: true,
+          chunks
+        };
+        if (Buffer.byteLength(JSON.stringify(data), 'utf8') >= 8 * 1024 * 1024) {
+          return {
+            ok: false,
+            sourceUri: msbSourceUri,
+            diagnostics: [{
+              severity: 'error' as const,
+              code: 'MAP_CHARACTER_WIRE_BUDGET_EXCEEDED',
+              message: `角色模型 ${modelStem} 的地图只读几何响应超过 8 MiB，已失败关闭。`,
+              sourceUri: msbSourceUri
+            }]
+          };
+        }
+        return {
+          ok: true,
+          sourceUri: msbSourceUri,
+          data,
+          diagnostics: [
+            ...result.diagnostics,
+            ...compatibilityDiagnostics,
+            {
+              severity: 'info' as const,
+              code: 'MAP_CHARACTER_GEOMETRY_READY',
+              message: `地图角色 ${modelStem} 已从 chrbnd/parts 预览链生成 ${chunks.length} 个静态网格 chunk。`,
+              sourceUri: msbSourceUri
+            }
+          ]
+        };
+      };
+
+      const readStaticPath = async (modelPath: string, modelKind: 'flver' | 'chrbnd' = 'flver') => {
+        if (modelKind === 'chrbnd') return readCharacterPath(modelPath);
         const result = await runBridge({
           command: 'read-map-static-geometry',
           filePath: modelPath,
           allowedRoots: roots.allowedRoots,
           timeoutMs: 120_000,
+          // MAP 静态几何是只读、按模型去重的批量链路；Bridge native session
+          // 已按模型隔离，允许受控并发 4，缩短 807 个模型的渐进挂载时间。
+          maxConcurrency: 4,
+          ...(deps.activeWorkspaceSessionId
+            ? { workspaceSessionId: deps.activeWorkspaceSessionId }
+            : {}),
           ...(effectiveBase ? { oodleRuntimeRoot: effectiveBase } : {}),
           commandOptions: {
             modelName,
@@ -570,7 +780,7 @@ export function registerMapIpcHandlers(deps: MapIpcDeps): void {
         modelName
       );
       if (directModel) {
-        const directResult = await readStaticPath(directModel.absolutePath);
+        const directResult = await readStaticPath(directModel.absolutePath, directModel.kind);
         if (directResult) return directResult;
       }
 

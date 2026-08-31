@@ -17,7 +17,11 @@
   ],
   "properties": {
     "evidenceId": { "type": "string", "pattern": "^EV-[A-Z0-9-]+$" },
-    "targetRelease": { "type": "string", "pattern": "^V\\d+\\.\\d+$" },
+    "targetRelease": {
+      "type": ["string", "null"],
+      "pattern": "^V\\d+\\.\\d+$",
+      "description": "发布证据可绑定登记的里程碑；开发证据为 null，不受版本筛选。"
+    },
     "evidenceType": { "enum": ["sealed-current-run", "unsealed-record", "historical-record"] },
     "subject": { "type": "string", "minLength": 1 },
     "fingerprint": { "type": "string", "minLength": 1 },

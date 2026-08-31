@@ -134,6 +134,8 @@ describe('TaeWorkbenchPanel 初始结构（挂载即有的四栏骨架）', () =
     assert.doesNotMatch(html, /aria-label="Inspector"/);
     assert.doesNotMatch(html, /aria-label="Files \/ Animations"/);
     assert.doesNotMatch(html, /aria-label="Tools"/);
+    assert.match(html, /aria-label="收起详情栏"/);
+    assert.match(html, />收起<\/button>/);
   });
 
   it('未加载 TAE 数据时左栏是显式 muted 空态而不是错误', () => {
@@ -535,6 +537,8 @@ describe('Negative source tests（ANIMATION-56B / ANIMATION-56C）', () => {
     assert.match(panelSource, /readTaeChrbndPreview\(props\.resourceUri\)/);
     assert.match(panelSource, /isCharacterPreviewBundle\(result\.data\)/);
     assert.match(panelSource, /externalBundle=\{preview\.bundle\}/);
+    assert.match(panelSource, /externalSkeletonPoses=\{sampledSkeletonPoses\}/);
+    assert.doesNotMatch(panelSource, /externalPose=\{sampledPose\}/);
     assert.match(panelSource, /tae-preview-compatibility-notice/);
     assert.match(panelSource, /这不代表存档当前装备/);
     assert.doesNotMatch(panelSource, /readTaeChrbndPreview\(props\.resourceUri,\s*index\)/);

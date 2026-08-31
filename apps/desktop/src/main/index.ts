@@ -4,6 +4,7 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { disposeBridgeDaemonPool } from '@soulforge/core';
 import { disposeOperationLogUtility, registerIpcHandlers } from './ipc.js';
+import { disposeAuxiliaryServices, registerAuxiliaryIpcHandlers } from './auxiliaryServices.js';
 
 /**
  * 脱敏函数从 main 入口再导出一次，供安全门禁在生产构建产物上真实调用。
@@ -126,6 +127,7 @@ function createWindow(): void {
   }
 
   registerIpcHandlers(mainWindow.webContents, rendererDocumentUrl);
+  registerAuxiliaryIpcHandlers(mainWindow.webContents);
 
   if (developmentRendererUrl) {
     void mainWindow.loadURL(developmentRendererUrl);
@@ -176,6 +178,7 @@ app.on('before-quit', (event) => {
   if (bridgeShutdownStarted) return;
   event.preventDefault();
   bridgeShutdownStarted = true;
+  disposeAuxiliaryServices();
   void Promise.allSettled([
     disposeBridgeDaemonPool(),
     disposeOperationLogUtility()

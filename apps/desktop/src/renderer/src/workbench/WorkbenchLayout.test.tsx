@@ -19,7 +19,13 @@ const layoutSource = readFileSync(
 
 const columns: WorkbenchColumnSpec[] = [
   { id: 'rows', title: 'ROWS', initialWidth: 260, minWidth: 260, children: null },
-  { id: 'fields', title: 'FIELDS', initialFlex: 1, children: null }
+  {
+    id: 'fields',
+    title: 'FIELDS',
+    initialFlex: 1,
+    children: null,
+    headerAction: { label: '收起', ariaLabel: '收起详情栏', onClick: () => undefined }
+  }
 ];
 
 describe('S27 栏宽回归（WorkbenchLayout）', () => {
@@ -32,6 +38,15 @@ describe('S27 栏宽回归（WorkbenchLayout）', () => {
     assert.match(html, /role="separator"/);
     // 11-C：恢复默认栏宽 入口已整块移除（栏仍可拖拽，只是没有一键恢复）。
     assert.doesNotMatch(html, /恢复默认栏宽/);
+  });
+
+  it('标题栏操作是真按钮并保留可访问名', () => {
+    const html = renderToStaticMarkup(
+      <WorkbenchLayout label="详情工作台" columns={columns} />
+    );
+    assert.match(html, /class="workbench__column-action"/);
+    assert.match(html, /aria-label="收起详情栏"/);
+    assert.match(html, />收起<\/button>/);
   });
 
   it('像素模式也必须守 minWidth：style 同时带 width 与 minWidth', () => {

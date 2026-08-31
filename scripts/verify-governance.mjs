@@ -78,7 +78,7 @@ console.log(JSON.stringify({
     'passed / deferred / scope-excluded Gate 必须引用有效 sealed Evidence 及对应用户批准标记',
     'Evidence 封存指纹可重算；passed Gate freshness 按登记主题域判定',
     'blocker 八字段完整，与 Gate/切片双向闭合',
-    '每条治理记录的 targetRelease 已在 releases.json 登记',
+    '发布归属型治理记录的 targetRelease 已在 releases.json 登记；开发 Evidence 可使用 targetRelease=null',
     'frozen=true 版本的裁定字段与 git 基线一致；基线不可验证时失败关闭'
   ],
   engineeringReviewStillRequired: [

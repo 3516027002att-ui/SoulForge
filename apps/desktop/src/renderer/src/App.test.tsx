@@ -102,7 +102,7 @@ describe('问题 1 壳层：开始页只在首次打开；顶栏「开始」召�
   it('workspace.analyze 不得把目录扫描当成已解析并回报 parsedFiles:0', () => {
     assert.doesNotMatch(workspaceIpcSource, /if \(activeIndex && indexedFiles\.length > 0\)/);
     assert.match(workspaceIpcSource, /await analyzeWorkspace\(/);
-    assert.match(workspaceIpcSource, /analyzeInFlight/);
+    assert.match(workspaceIpcSource, /workspaceAnalyzeInFlight/);
   });
 
   it('12-E：侧栏不再拼「XX · 逻辑库」（所有语义域都删，Files 数量与 project「开始」仍在）', () => {
@@ -122,11 +122,20 @@ describe('P0 回滚与会话续接防线', () => {
     assert.match(ipcSource, /ROLLBACK_IN_PROGRESS/);
   });
 
-  it('所有回滚入口共享忙状态，快速多击不会重复提交', () => {
+  it('回滚只锁定当前入口，历史刷新按最新请求落地，快速多击不会重复提交', () => {
     assert.match(appSource, /rollbackInFlightRef/);
-    assert.match(appSource, /disabled=\{rollbackInFlight !== null\}/);
-    assert.match(workbenchOpsSource, /rollbackBusy\?: boolean/);
-    assert.match(workbenchOpsSource, /disabled=\{props\.rollbackBusy === true\}/);
+    assert.match(appSource, /operationHistoryRefreshRef/);
+    assert.match(appSource, /operationHistoryRequestRef/);
+    assert.doesNotMatch(appSource, /disabled=\{rollbackInFlight !== null\}/);
+    assert.doesNotMatch(workbenchOpsSource, /rollbackBusy\?: boolean/);
+    assert.doesNotMatch(workbenchOpsSource, /disabled=\{props\.rollbackBusy === true\}/);
+    assert.match(workbenchOpsSource, /rollbackBusyOpId\?: string \| null/);
+    assert.match(workbenchOpsSource, /props\.rollbackBusyOpId === row\.opId/);
+    assert.match(appSource, /已有回滚正在处理中，请等待当前操作完成/);
+    assert.match(appSource, /rollbackInFlight === `operation:\$\{entry\.opId\}`/);
+    assert.match(appSource, /rollbackInFlight === `file:\$\{entry\.opId\}:\$\{path\}`/);
+    assert.match(appSource, /reloadSelectedResourceAfterRollback/);
+    assert.match(appSource, /selectFile\(\{ \.\.\.selectedFile \}\)/);
   });
 
   it('partial/max_steps 不会被普通发送隐式续接', () => {

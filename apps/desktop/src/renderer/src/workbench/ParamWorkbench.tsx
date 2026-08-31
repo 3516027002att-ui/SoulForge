@@ -43,6 +43,9 @@ import { decodeFieldView } from '../editors/ParamDefPanel.js';
 import { isParamCheckboxField } from './paramCheckboxField.js';
 import { WorkbenchLayout, type WorkbenchColumnSpec } from './WorkbenchLayout.js';
 
+/** 容器 PARAM 选中行 payload 的物理页大小；必须与 main 侧页契约一致。 */
+const PARAM_PAGE_SIZE = 20;
+
 /** 容器内的一个 param 条目。 */
 export interface ParamEntryView {
   entryIndex: number;
@@ -311,7 +314,7 @@ const ParamRowsColumn = memo(function ParamRowsColumn({
               value={rowQuery}
               onChange={(event) => onRowQueryChange(event.target.value)}
               placeholder="筛选 id / name（全量数据本地过滤）"
-              aria-label="筛选 PARAM 行 id 或 name（全量数据本地过滤）"
+              aria-label="筛选 PARAM 行 id 或 name（索引数据本地过滤）"
               style={{ flex: 1, minWidth: 0 }}
             />
           </div>
@@ -322,7 +325,7 @@ const ParamRowsColumn = memo(function ParamRowsColumn({
           {!rowsLoading && !rowsError && visibleRows.length === 0 && (
             <p className="wb-empty">没有匹配的行。</p>
           )}
-          {/* 虚拟滚动：全量数据一次在手，DOM 只保留可见行 + overscan。
+          {/* 虚拟滚动：轻量索引一次在手，DOM 只保留可见行 + overscan。
               role=grid + aria-rowcount 给出**总行数**而不是渲染数 ——
               否则屏幕阅读器会播报「共 20 行」而实际有 5275 行。 */}
           <div
@@ -444,13 +447,15 @@ export function ParamWorkbench(props: ParamWorkbenchProps): ReactElement {
   const [entryFailures, setEntryFailures] = useState<Map<number, ParamEntryFailure>>(new Map());
   const [rowCount, setRowCount] = useState(0);
   const [rowsLoading, setRowsLoading] = useState(false);
+  const [payloadLoading, setPayloadLoading] = useState(false);
   const [rowsError, setRowsError] = useState<string | null>(null);
   const [typeName, setTypeName] = useState<string | null>(null);
   const [rowDataSize, setRowDataSize] = useState(0);
   const [paramName, setParamName] = useState<string | null>(null);
   const [pageDiagnostics, setPageDiagnostics] = useState<string[]>([]);
   /**
-   * 写回所需的两个哈希，由 readContainerParamPage 给出，写入时原样回传。
+   * 写回所需的两个哈希由索引/分页结果给出，写入时原样回传；opaque session token
+   * 只用于把 row-index 建好的 native session 传给 payload page，不进入 DOM 或写入参数。
    *
    * 渲染器不自己算：它拿不到容器字节。容器哈希防「读与写之间容器被改过」，
    * 条目哈希防「同一条目被并发改过」—— 缺它们就没有并发保护，两个基于同一份
@@ -458,6 +463,8 @@ export function ParamWorkbench(props: ParamWorkbenchProps): ReactElement {
    */
   const [containerHash, setContainerHash] = useState<string>('');
   const [childHash, setChildHash] = useState<string>('');
+  /** row index 建立的 opaque native session；选中行 payload 必须复用它。 */
+  const [documentSessionToken, setDocumentSessionToken] = useState<string | null>(null);
 
   /**
    * 主进程随 readContainerParamPage 返回的字段定义（P1 裁定）。
@@ -480,6 +487,8 @@ export function ParamWorkbench(props: ParamWorkbenchProps): ReactElement {
   >(null);
 
   const [selectedRowIndex, setSelectedRowIndex] = useState<number | null>(null);
+  /** 防止 StrictMode/重复渲染对同一物理行重复发起 payload 请求。 */
+  const payloadRequestRef = useRef<string | null>(null);
   const [drafts, setDrafts] = useState<Record<string, string>>({});
   const [committing, setCommitting] = useState(false);
   /** S28：工作台内短时保存提示（成功几秒后消失）；失败留在原处直到下次操作。 */
@@ -535,9 +544,22 @@ export function ParamWorkbench(props: ParamWorkbenchProps): ReactElement {
     setSelectedRowIndex(null);
     setDrafts({});
     setToast(null);
-    // 连续列表必须清：残留会让新 param 的列表里混着上一个 param 的行，
-    // 而两者行宽通常不同，选中后字段会按错误的定义解码。
+    // 索引与已 materialize 的 payload 都必须清：残留会让新 param 的列表里混着
+    // 上一个 param 的行，而两者行宽通常不同，选中后字段会按错误的定义解码。
+    setRows([]);
     setLoadedRows([]);
+    setRowCount(0);
+    setRowsLoading(false);
+    setPayloadLoading(false);
+    setRowsError(null);
+    setTypeName(null);
+    setRowDataSize(0);
+    setParamName(null);
+    setContainerHash('');
+    setChildHash('');
+    setDocumentSessionToken(null);
+    setPageDiagnostics([]);
+    payloadRequestRef.current = null;
     // 页面级字段定义同样按 param 重置：上一张表的字段列不能留到新表上。
     setPageFieldDefs(null);
     setPageFieldEnums(null);
@@ -565,21 +587,29 @@ export function ParamWorkbench(props: ParamWorkbenchProps): ReactElement {
     return () => clearTimeout(timer);
   }, [rowQuery]);
 
-  // ── 中栏：选中 param 的行 —— 全量加载（用户裁定 2026-08-14）──
+  // ── 中栏：选中 param 的行 —— lazy index 首屏 ──
   //
-  // 打开一张 param 就把全部行（含行字节）一次取回：main 经 includeAllPayloads
-  // 跳过 Bridge 的 32 行 / 512 KB 页门控，renderer 本地过滤 + 虚拟滚动渲染。
-  // 不再分批续取、不再有「继续加载」——数万行的表也一次到位，任何一行点开
-  // 右边的字段值都能解码（行字节已全量在手）。
+  // 打开一张 param 先只取完整的 rowIndex/id/name/dataHash 索引；行字节等用户
+  // 选中具体行后，再按该物理行所在页从现有 readContainerParamPage 取回。
+  // 这样虚拟列表立即有真实行数，同时不把全表 payload 搬过 renderer IPC。
   const loadRows = useCallback(() => {
-    if (!bridge || typeof bridge.readContainerParamPage !== 'function') return;
     if (selectedEntry === null || !props.containerUri) return;
+    if (!bridge || typeof bridge.readContainerParamRowIndex !== 'function') {
+      setRowsError('当前桌面 Bridge 未提供 PARAM 行索引通道。');
+      return;
+    }
     let cancelled = false;
+    payloadRequestRef.current = null;
+    setDocumentSessionToken(null);
     setRowsLoading(true);
+    setPayloadLoading(false);
     setRowsError(null);
-    bridge.readContainerParamPage(
-      props.containerUri, selectedEntry, 0, 0, '', true
-    )
+    setPageDiagnostics([]);
+    setPageFieldDefs(null);
+    setPageFieldEnums(null);
+    setPageFieldDefsDiagnostic(null);
+    setPageFieldDefsOrigin('fixture');
+    bridge.readContainerParamRowIndex(props.containerUri, selectedEntry)
       .then((result) => {
         if (cancelled) return;
         if (!result.ok) {
@@ -591,15 +621,15 @@ export function ParamWorkbench(props: ParamWorkbenchProps): ReactElement {
           setPageFieldDefsDiagnostic(null);
           setPageFieldDefsOrigin('fixture');
           const first = result.diagnostics?.[0];
-          setRowsError(first?.message ?? 'PARAM 行读取失败。');
+          setRowsError(first?.message ?? 'PARAM 行索引读取失败。');
           setPageDiagnostics([]);
           // 登记失败：该 param 在左栏保留并标记，不像 Smithbox 那样从列表消失。
           if (selectedEntry !== null) {
             setEntryFailures((current) => {
               const next = new Map(current);
               next.set(selectedEntry, {
-                message: first?.message ?? 'PARAM 行读取失败。',
-                code: first?.code ?? 'PARAM_READ_FAILED'
+                message: first?.message ?? 'PARAM 行索引读取失败。',
+                code: first?.code ?? 'PARAM_INDEX_READ_FAILED'
               });
               return next;
             });
@@ -619,15 +649,55 @@ export function ParamWorkbench(props: ParamWorkbenchProps): ReactElement {
               return next;
             });
           }
-          const mapped = result.rows.map((row) => ({
+          const invalidRow = result.rows.find((row) =>
+            !Number.isSafeInteger(row.rowIndex)
+            || row.rowIndex < 0
+            || !Number.isSafeInteger(row.id)
+            || typeof row.dataHash !== 'string'
+            || row.dataHash.length === 0
+          );
+          if (invalidRow) {
+            const message = 'PARAM 行索引缺少完整物理身份（rowIndex + id + dataHash）。';
+            setRows([]);
+            setLoadedRows([]);
+            setRowsError(message);
+            if (selectedEntry !== null) {
+              setEntryFailures((current) => {
+                const next = new Map(current);
+                next.set(selectedEntry, { message, code: 'PARAM_ROW_IDENTITY_MISSING' });
+                return next;
+              });
+            }
+            setRowsLoading(false);
+            return;
+          }
+          const sessionToken = typeof result.sessionToken === 'string'
+            && result.sessionToken.trim().length > 0
+            ? result.sessionToken
+            : null;
+          if (!sessionToken) {
+            const message = 'PARAM 行索引未返回可复用 native session，拒绝退回二次解析。';
+            setRows([]);
+            setLoadedRows([]);
+            setRowsError(message);
+            if (selectedEntry !== null) {
+              setEntryFailures((current) => {
+                const next = new Map(current);
+                next.set(selectedEntry, { message, code: 'PARAM_DOCUMENT_SESSION_MISSING' });
+                return next;
+              });
+            }
+            setRowsLoading(false);
+            return;
+          }
+          setDocumentSessionToken(sessionToken);
+          const mapped: ParamRowLine[] = result.rows.map((row) => ({
             rowIndex: row.rowIndex,
             id: row.id,
-            dataHash: row.dataHash ?? '',
-            ...(row.name ? { name: row.name } : {}),
-            ...(row.dataBase64 ? { dataBase64: row.dataBase64 } : {}),
-            ...(row.dataHexPreview ? { dataHexPreview: row.dataHexPreview } : {})
+            dataHash: row.dataHash,
+            ...(row.name ? { name: row.name } : {})
           }));
-          // 全量：当前页即全表（loadAll），rows 与累积列表都放全量。
+          // 索引首屏：rows/loadedRows 只放轻量身份；payload 由选中行 effect 合并。
           setRows(mapped);
           setLoadedRows(mapped);
           setRowCount(result.rowCount ?? mapped.length);
@@ -637,38 +707,11 @@ export function ParamWorkbench(props: ParamWorkbenchProps): ReactElement {
           setContainerHash(result.containerHash ?? '');
           setChildHash(result.childHash ?? '');
           setRowsError(null);
-          // P1：随页下发的字段定义/枚举/授信来源（主进程已做包校验 + 行宽核对
-          // + 用户信任策略；origin 白名单收窄，不自行判定）。
-          setPageFieldDefs(Array.isArray(result.fieldDefs) ? result.fieldDefs : null);
-          setPageFieldEnums(
-            Array.isArray(result.fieldEnums)
-              ? result.fieldEnums
-                  .filter((entry) => typeof entry?.id === 'string')
-                  .map((entry) => ({
-                    id: entry.id,
-                    name: typeof entry.name === 'string' ? entry.name : entry.id,
-                    values: Array.isArray(entry.values)
-                      ? entry.values
-                          .filter((v) => typeof v?.value === 'number' && typeof v?.label === 'string')
-                          .map((v) => ({ value: v.value, label: v.label }))
-                      : []
-                  }))
-              : null
+          setPageDiagnostics(
+            (result.diagnostics ?? [])
+              .filter((diagnostic) => diagnostic.severity === 'warning' || diagnostic.severity === 'error')
+              .map((diagnostic) => `${diagnostic.code}：${diagnostic.message}`)
           );
-          setPageFieldDefsOrigin(
-            result.fieldDefsOrigin === 'imported' || result.fieldDefsOrigin === 'user-derived'
-              ? result.fieldDefsOrigin
-              : 'fixture'
-          );
-          setPageFieldDefsDiagnostic(
-            result.fieldDefsDiagnostic
-              && typeof result.fieldDefsDiagnostic.code === 'string'
-              && typeof result.fieldDefsDiagnostic.message === 'string'
-              ? { code: result.fieldDefsDiagnostic.code, message: result.fieldDefsDiagnostic.message }
-              : null
-          );
-          // 全量模式下没有「本页无字节」类诊断（行字节已全量下发），清空旧提示。
-          setPageDiagnostics([]);
         }
         setRowsLoading(false);
       })
@@ -680,12 +723,11 @@ export function ParamWorkbench(props: ParamWorkbenchProps): ReactElement {
         setRowsLoading(false);
       });
     return () => { cancelled = true; };
-    // 全量模式：只在 param 切换时重载；筛选在本地做，不再触发 IPC。
+    // 索引只在 param 切换/显式重载时读取；筛选在本地做，不触发全量 payload IPC。
   }, [bridge, props.containerUri, selectedEntry]);
 
   /**
-   * 全量数据上的本地筛选（用户裁定）：数据一次全量在手，筛选只在 renderer
-   * 过滤可见行，不再发 IPC、不再依赖后端子串匹配。
+   * 已取到的物理行索引上的本地筛选：筛选只在 renderer 过滤，不改变 rowIndex。
    */
   const visibleRows = useMemo(() => {
     const needle = rowQueryDebounced.trim().toLowerCase();
@@ -736,6 +778,169 @@ export function ParamWorkbench(props: ParamWorkbenchProps): ReactElement {
       ?? null,
     [rows, loadedRows, selectedRowIndex]
   );
+
+  /**
+   * 选中行后按物理 rowIndex 取所在页的 payload。
+   *
+   * 这条请求显式传 false：main 会先建立 lazy session，再用 rowSelections
+   * 读取这一页的行字节；不会回到 `includeAllPayloads` 或按过滤后位置猜行。
+   */
+  useEffect(() => {
+    if (
+      !bridge
+      || typeof bridge.readContainerParamPage !== 'function'
+      || selectedEntry === null
+      || selectedRowIndex === null
+      || !props.containerUri
+      || !selectedRow
+      || !documentSessionToken
+    ) return;
+    if (selectedRow.dataBase64 !== undefined) {
+      setPayloadLoading(false);
+      return;
+    }
+    if (
+      !Number.isSafeInteger(selectedRow.rowIndex)
+      || selectedRow.rowIndex < 0
+      || typeof selectedRow.dataHash !== 'string'
+      || selectedRow.dataHash.length === 0
+    ) {
+      setPageDiagnostics(['PARAM_ROW_IDENTITY_MISSING：选中行缺少完整物理身份，拒绝读取 payload。']);
+      return;
+    }
+
+    const requestKey = [
+      props.containerUri,
+      selectedEntry,
+      selectedRow.rowIndex,
+      selectedRow.id,
+      selectedRow.dataHash,
+      documentSessionToken
+    ].join('#');
+    if (payloadRequestRef.current === requestKey) return;
+    payloadRequestRef.current = requestKey;
+
+    let cancelled = false;
+    const page = Math.floor(selectedRow.rowIndex / PARAM_PAGE_SIZE);
+    setPayloadLoading(true);
+    bridge.readContainerParamPage(
+      props.containerUri,
+      selectedEntry,
+      page,
+      PARAM_PAGE_SIZE,
+      '',
+      false,
+      documentSessionToken
+    )
+      .then((result) => {
+        if (cancelled) return;
+        if (!result.ok) {
+          const first = result.diagnostics?.[0];
+          setPageDiagnostics([
+            `${first?.code ?? 'PARAM_PAGE_PAYLOAD_READ_FAILED'}：${first?.message ?? '选中行 payload 读取失败。'}`
+          ]);
+          return;
+        }
+
+        const payloadByIndex = new Map<number, {
+          id: number;
+          dataHash?: string;
+          dataBase64?: string;
+          dataHexPreview?: string;
+        }>();
+        for (const row of result.rows) {
+          if (
+            Number.isSafeInteger(row.rowIndex)
+            && typeof row.dataBase64 === 'string'
+            && typeof row.dataHash === 'string'
+          ) {
+            payloadByIndex.set(row.rowIndex, {
+              id: row.id,
+              dataHash: row.dataHash,
+              dataBase64: row.dataBase64,
+              ...(row.dataHexPreview ? { dataHexPreview: row.dataHexPreview } : {})
+            });
+          }
+        }
+
+        const mergePayload = (current: ParamRowLine[]): ParamRowLine[] => current.map((row) => {
+          const payload = payloadByIndex.get(row.rowIndex);
+          if (
+            !payload
+            || payload.id !== row.id
+            || payload.dataHash !== row.dataHash
+            || typeof payload.dataBase64 !== 'string'
+          ) return row;
+          return {
+            ...row,
+            dataBase64: payload.dataBase64,
+            ...(payload.dataHexPreview ? { dataHexPreview: payload.dataHexPreview } : {})
+          };
+        });
+        setRows(mergePayload);
+        setLoadedRows(mergePayload);
+        setTypeName(result.typeName ?? typeName);
+        setRowDataSize(result.rowDataSize ?? rowDataSize);
+        setParamName(result.paramName ?? paramName);
+        setContainerHash(result.containerHash ?? containerHash);
+        setChildHash(result.childHash ?? childHash);
+        setPageFieldDefs(Array.isArray(result.fieldDefs) ? result.fieldDefs : null);
+        setPageFieldEnums(
+          Array.isArray(result.fieldEnums)
+            ? result.fieldEnums
+                .filter((entry) => typeof entry?.id === 'string')
+                .map((entry) => ({
+                  id: entry.id,
+                  name: typeof entry.name === 'string' ? entry.name : entry.id,
+                  values: Array.isArray(entry.values)
+                    ? entry.values
+                        .filter((value) => typeof value?.value === 'number' && typeof value?.label === 'string')
+                        .map((value) => ({ value: value.value, label: value.label }))
+                    : []
+                }))
+            : null
+        );
+        setPageFieldDefsOrigin(
+          result.fieldDefsOrigin === 'imported' || result.fieldDefsOrigin === 'user-derived'
+            ? result.fieldDefsOrigin
+            : 'fixture'
+        );
+        setPageFieldDefsDiagnostic(
+          result.fieldDefsDiagnostic
+            && typeof result.fieldDefsDiagnostic.code === 'string'
+            && typeof result.fieldDefsDiagnostic.message === 'string'
+            ? { code: result.fieldDefsDiagnostic.code, message: result.fieldDefsDiagnostic.message }
+            : null
+        );
+        setPageDiagnostics(
+          (result.diagnostics ?? [])
+            .filter((diagnostic) => diagnostic.code !== 'PARAM_ROW_PAYLOAD_READ' && diagnostic.code !== 'PARAM_DOCUMENT_SESSION')
+            .map((diagnostic) => `${diagnostic.code}：${diagnostic.message}`)
+        );
+      })
+      .catch((error: unknown) => {
+        if (cancelled) return;
+        setPageDiagnostics([
+          `PARAM_PAGE_PAYLOAD_READ_FAILED：${error instanceof Error ? error.message : '选中行 payload 读取异常。'}`
+        ]);
+      })
+      .finally(() => {
+        if (!cancelled) setPayloadLoading(false);
+      });
+    return () => { cancelled = true; };
+  }, [
+    bridge,
+    props.containerUri,
+    selectedEntry,
+    selectedRowIndex,
+    selectedRow,
+    documentSessionToken,
+    typeName,
+    rowDataSize,
+    paramName,
+    containerHash,
+    childHash
+  ]);
 
   /**
    * 解码选中行的字段值。
@@ -1117,7 +1322,7 @@ export function ParamWorkbench(props: ParamWorkbenchProps): ReactElement {
     {
       id: 'rows',
       title: 'Rows',
-      // 全量加载（用户裁定）：列表一次完整，hint 直接报总数，不再有「已加载 N/M」。
+      // 索引首屏：列表一次拿到完整轻量行表，hint 直接报总数。
       // typeName 移到工具栏 —— 它是文档级信息，不是这一列的属性。
       hint: `${visibleRows.length > 0 || rowQueryDebounced === '' ? rowCount : visibleRows.length} 行`,
       initialFlex: 0.29,
@@ -1175,7 +1380,10 @@ export function ParamWorkbench(props: ParamWorkbenchProps): ReactElement {
             <p className="wb-empty">先在中栏选择一行。</p>
           )}
           {selectedEntry === null && <p className="wb-empty">先在左栏选择一个 param。</p>}
-          {selectedRowIndex !== null && definition === null && (
+          {selectedRowIndex !== null && payloadLoading && (
+            <p className="wb-empty" role="status">读取选中行字节…</p>
+          )}
+          {selectedRowIndex !== null && !payloadLoading && definition === null && (
             <p className="wb-empty">
               没有可用的字段定义{typeName ? `（${typeName}）` : ''}。字段视图不可用。
               {pageFieldDefsDiagnostic && (
@@ -1185,10 +1393,9 @@ export function ParamWorkbench(props: ParamWorkbenchProps): ReactElement {
               )}
             </p>
           )}
-          {selectedRowIndex !== null && definition !== null && selectedRow?.dataBase64 === undefined && (
+          {selectedRowIndex !== null && !payloadLoading && definition !== null && selectedRow?.dataBase64 === undefined && (
             <p className="wb-empty">
-              本行没有行字节，字段值无法解码（全量加载下通常不会出现；若出现说明
-              载荷被 Bridge 拒绝，见底部日志）。
+              本行没有行字节，字段值无法解码（选中行 payload 未返回；请查看底部诊断）。
             </p>
           )}
           {selectedRowIndex !== null && definition !== null && (
@@ -1373,7 +1580,7 @@ export function ParamWorkbench(props: ParamWorkbenchProps): ReactElement {
     ...(selectedRowIndex !== null && definition !== null && !canCommitFields
       ? [
           selectedRow?.dataBase64 === undefined
-            ? '字段写入未放行：本行字节未随分页下发。'
+            ? (payloadLoading ? '字段值读取中：等待选中行 payload。' : '字段写入未放行：本行字节未按需下发。')
             : '字段写入未放行：字段编辑出口未接通。数值可读，提交已关闭。'
         ]
       : [])

@@ -24,14 +24,37 @@ export interface MeshGeometryWire {
   uvsBase64?: string | undefined;
   normalsBase64?: string | undefined;
   vertexCount: number;
+  texturePreviewToken?: string | undefined;
+  textureColorSpace?: string | undefined;
+  materialGroups?: Array<{ start: number; count: number; materialIndex: number }> | undefined;
+  texturePreviews?: Array<{ materialIndex: number; texturePreviewToken: string; colorSpace?: string }> | undefined;
   boundingBoxMin?: [number, number, number] | undefined;
   boundingBoxMax?: [number, number, number] | undefined;
+}
+
+/**
+ * MAP scene 与资源池共用的模型资源键：只保留 basename，去掉容器/网格复合扩展。
+ * 这样 `m000010`、`map/.../M000010.FLVER` 与 `m000010.mapbnd.dcx` 会命中同一
+ * geometry entry，也与 threeSceneController 的 instance batch key 对齐。
+ */
+export function normalizeModelResourceKey(modelName: string): string {
+  const base = modelName.replace(/\\/g, '/').split('/').pop() ?? modelName;
+  return base.toLowerCase().replace(/\.(flver|mapbnd|objbnd|chrbnd)(\.dcx)?$/i, '');
 }
 
 function decodeBase64F32(base64: string, expectedCount: number): Float32Array {
   const bytes = decodeBase64ToUint8Array(base64);
   const view = new Float32Array(bytes.buffer, bytes.byteOffset, Math.floor(bytes.length / 4));
   return view.length >= expectedCount ? view : new Float32Array(expectedCount);
+}
+
+function hashTextureToken(value: string): string {
+  let hash = 0x811c9dc5;
+  for (let index = 0; index < value.length; index += 1) {
+    hash ^= value.charCodeAt(index);
+    hash = Math.imul(hash, 0x01000193);
+  }
+  return (hash >>> 0).toString(16).padStart(8, '0');
 }
 
 export type TrackFunction = <T extends { dispose(): void }>(resource: T) => T;
@@ -74,6 +97,7 @@ export class ModelResourcePool {
   // legacy single-context compat for existing Proxy path
   private legacyGeometries = new Map<string, BufferGeometry>();
   private legacyMaterials = new Map<string, Material>();
+  private legacyTextures = new Map<string, import('three').Texture>();
   private primitiveBox: BufferGeometry | null = null;
   private primitiveSphere: BufferGeometry | null = null;
   private wireframeMaterial: Material | null = null;
@@ -240,6 +264,16 @@ export class ModelResourcePool {
       geometry.computeVertexNormals();
     }
 
+    if (data.materialGroups && data.materialGroups.length > 0) {
+      geometry.clearGroups();
+      for (const group of data.materialGroups) {
+        if (!Number.isInteger(group.start) || group.start < 0
+          || !Number.isInteger(group.count) || group.count <= 0
+          || !Number.isInteger(group.materialIndex) || group.materialIndex < 0) continue;
+        geometry.addGroup(group.start, group.count, group.materialIndex);
+      }
+    }
+
     this.legacyGeometries.set(key, geometry);
     return geometry;
   }
@@ -300,16 +334,97 @@ export class ModelResourcePool {
     return material;
   }
 
+  /**
+   * 地图 texture slot 在 Sekiro FLVER 中常为空路径；Bridge 已将真正的 albedo
+   * 投影为 data URI。材质按模型 + 纹理 token 分开，避免把一个模型的纹理泄漏到
+   * 另一个模型的共享材质上。加载完成前保留同色默认材质，失败时也安全回退。
+   */
+  private getTexturedRealMaterial(
+    three: ThreeModule,
+    track: TrackFunction,
+    modelKey: string,
+    texturePreviewToken: string,
+    colorSpace = 'srgb'
+  ): Material {
+    if (!/^data:image\/png;base64,[A-Za-z0-9+/=]+$/.test(texturePreviewToken)) {
+      return this.getDefaultRealMaterial(three, track);
+    }
+    const tokenKey = hashTextureToken(texturePreviewToken);
+    const normalizedColorSpace = colorSpace.toLowerCase() === 'linear' ? 'linear' : 'srgb';
+    const key = `real:${modelKey}:texture:${tokenKey}:${normalizedColorSpace}`;
+    const existing = this.legacyMaterials.get(key);
+    if (existing) return existing;
+
+    const material = track(new three.MeshStandardMaterial({
+      color: new three.Color(0xffffff),
+      roughness: 0.78,
+      metalness: 0.04,
+      side: three.DoubleSide,
+      wireframe: false
+    }));
+    this.legacyMaterials.set(key, material);
+
+    const loader = new three.TextureLoader();
+    const texture = loader.load(
+      texturePreviewToken,
+      (loaded) => {
+        if (!this.legacyMaterials.has(key)) {
+          loaded.dispose();
+          return;
+        }
+        // FLVER UVs are authored in model space; keep the decoded TPF/DDS
+        // orientation consistent with the FLVER viewer's image-uri path.
+        loaded.flipY = false;
+        loaded.colorSpace = normalizedColorSpace === 'linear' ? three.LinearSRGBColorSpace : three.SRGBColorSpace;
+        loaded.wrapS = three.RepeatWrapping;
+        loaded.wrapT = three.RepeatWrapping;
+        loaded.needsUpdate = true;
+        material.map = loaded;
+        material.needsUpdate = true;
+      },
+      undefined,
+      () => {
+        // Keep the gray/textured fallback material when a browser decoder rejects
+        // the preview; the Bridge diagnostic remains the source of truth.
+      }
+    );
+    this.legacyTextures.set(key, texture);
+    return material;
+  }
+
   public updateModelGeometry(
     three: ThreeModule,
     track: TrackFunction,
     modelName: string,
     geometryData: MeshGeometryWire
-  ): { geometry: BufferGeometry; material: Material } {
-    // Use raw id without zero-padding: modelName lowercased, no padStart.
-    const key = modelName.toLowerCase().replace(/\.mapbnd(\.dcx)?$/i, '');
+  ): { geometry: BufferGeometry; material: Material | Material[] } {
+    const key = normalizeModelResourceKey(modelName);
     const geometry = this.getOrCreateGeometry(three, track, key, geometryData);
-    const material = this.getDefaultRealMaterial(three, track);
+    const previews = new Map(
+      (geometryData.texturePreviews ?? [])
+        .filter((preview) => Number.isInteger(preview.materialIndex) && preview.materialIndex >= 0)
+        .map((preview) => [preview.materialIndex, preview])
+    );
+    const groupIndices = (geometryData.materialGroups ?? [])
+      .map((group) => group.materialIndex)
+      .filter((index) => Number.isInteger(index) && index >= 0);
+    if (previews.size > 0 || groupIndices.length > 0) {
+      const previewIndices = [...previews.keys()];
+      const maxMaterialIndex = Math.max(-1, ...previewIndices, ...groupIndices);
+      const materials = Array.from({ length: maxMaterialIndex + 1 }, (_, materialIndex) => {
+        const preview = previews.get(materialIndex);
+        return preview
+          ? this.getTexturedRealMaterial(three, track, key, preview.texturePreviewToken, preview.colorSpace)
+          : this.getDefaultRealMaterial(three, track);
+      });
+      return {
+        geometry,
+        material: materials.length === 1 ? materials[0]! : materials
+      };
+    }
+    const material = geometryData.texturePreviewToken
+      ? this.getTexturedRealMaterial(three, track, key, geometryData.texturePreviewToken, geometryData.textureColorSpace)
+      : this.getDefaultRealMaterial(three, track);
     return { geometry, material };
   }
 
@@ -324,6 +439,8 @@ export class ModelResourcePool {
     this.contextPools.clear();
     this.legacyGeometries.clear();
     this.legacyMaterials.clear();
+    for (const texture of this.legacyTextures.values()) texture.dispose();
+    this.legacyTextures.clear();
     this.primitiveBox = null;
     this.primitiveSphere = null;
     this.wireframeMaterial = null;

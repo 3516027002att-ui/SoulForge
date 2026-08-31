@@ -251,7 +251,7 @@ export function registerTextIpcHandlers(deps: TextIpcDeps): void {
     // 恒不 live —— 正是 fixture 掩盖掉的缺口）。目录读返回整容器 outerHash
     // （= 写链密封期望，后续 applyFmgMutation 用同一 hash 做并发保护）与首表
     // 条目；loose `.fmg` 仍走原有 read-fmg-document。
-    if (file.compoundExtension === '.msgbnd.dcx') {
+    if (['.msgbnd.dcx', '.msgbnd'].includes(file.compoundExtension.toLowerCase())) {
       const catalog = await readTextCatalogViaBridge({
         sourcePath: file.absolutePath,
         allowedRoots,
@@ -441,7 +441,7 @@ export function registerTextIpcHandlers(deps: TextIpcDeps): void {
     const isZhocnPath = (relativePath: string): boolean =>
       /[\\/]zhocn[\\/]/i.test(relativePath);
     const allMsgFiles = deps.indexedFiles.filter(
-      (file) => file.compoundExtension === '.msgbnd.dcx'
+      (file) => ['.msgbnd.dcx', '.msgbnd'].includes(file.compoundExtension.toLowerCase())
     );
     const msgFiles = allMsgFiles.filter((file) => isZhocnPath(file.relativePath));
     const filteredOutOfZhocn = allMsgFiles.length > msgFiles.length;

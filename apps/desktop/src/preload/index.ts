@@ -42,7 +42,10 @@ import type {
   EditorDocumentResult,
   EditorPageQuery,
   EditorSelectionContext,
+  FeedbackStatusIpcResult,
   FmgEntryPage,
+  MutterNextIpcResult,
+  MutterStatusIpcResult,
   OpenEditorDocumentRequest,
   OpenEditorDocumentValue,
   PageEditorDocumentRequest,
@@ -57,10 +60,13 @@ import type {
   ScriptContainerEntryPage,
   ScriptContainerEvidence,
   ScriptEntryPlaintextView,
+  SessionFeedbackIpcRequest,
+  SessionFeedbackIpcResult,
+  SubmitAllHistoryIpcResult,
   CiteHit,
   MapEditTransaction
 } from '@soulforge/shared';
-import { EDITOR_DOCUMENT_IPC_CHANNELS, maskPathFragments, PARAM_SESSION_IPC_CHANNELS } from '@soulforge/shared';
+import { AUXILIARY_IPC_CHANNELS, EDITOR_DOCUMENT_IPC_CHANNELS, maskPathFragments, PARAM_SESSION_IPC_CHANNELS } from '@soulforge/shared';
 import type {
   OpenParamSessionRequest,
   OpenParamSessionResult,
@@ -624,7 +630,7 @@ const api = {
     ipcRenderer.invoke(PARAM_SESSION_IPC_CHANNELS.readRows, request),
   /**
    * 列出 parambnd 容器内的 param 条目（Smithbox 的 Param List 那一栏）。
-   * 每一项都可直接交给 readContainerParamPage —— 列得出来就读得到。
+   * 每一项都可直接交给 readContainerParamRowIndex —— 列得出来就读得到。
    */
   listContainerParams: (containerUri: string): Promise<{
     ok: boolean;
@@ -636,6 +642,7 @@ const api = {
   /**
    * 读取容器内某个 param 的一页行。main 侧先把该条目解包成裸 param 落会话
    * 暂存区再读 —— read-param-document 不解 DCX/BND4，直接喂容器必失败。
+   * 默认分页路径只返回按物理身份选择的页 payload；loadAll 仅供显式 legacy 调用。
    */
   readContainerParamPage: (
     containerUri: string,
@@ -643,14 +650,18 @@ const api = {
     page: number,
     pageSize: number,
     query?: string,
-    /** 全量加载（用户裁定）：一次返回全部行（含字节），renderer 本地过滤/虚拟化。 */
-    loadAll?: boolean
+    /** 显式 legacy 全量加载：一次返回全部行（含字节），不用于 PARAM 冷启动。 */
+    loadAll?: boolean,
+    /** readContainerParamRowIndex 返回的 opaque native session token。 */
+    documentSessionToken?: string
   ): Promise<ParamRowPage & {
     containerUri: string;
-    entryIndex: number;
-    paramName?: string;
-    typeName: string | null;
-    /** 写回所需：容器与条目的当前哈希，原样回传即可。 */
+     entryIndex: number;
+     paramName?: string;
+     typeName: string | null;
+     /** 当前分页复用的 opaque native session token。 */
+     sessionToken?: string;
+     /** 写回所需：容器与条目的当前哈希，原样回传即可。 */
     containerHash?: string;
     childHash?: string;
     /**
@@ -673,10 +684,11 @@ const api = {
     page,
     pageSize,
     query,
-    loadAll
+    loadAll,
+    documentSessionToken
   ),
   /**
-   * 一次读出容器内某个 param 的完整行索引（只 id + name，不含行字节）。
+   * 一次读出容器内某个 param 的完整行索引（物理 rowIndex + id/name/hash，不含行字节）。
    *
    * 行表据此建成一条完整长列表（虚拟滚动的前提），跨表引用跳转也据此按绝对下标
    * 定位目标行。行字节仍按页取 —— 载荷门限按页算。详见 main 侧该 handler 的注释。
@@ -690,10 +702,12 @@ const api = {
     typeName: string | null;
     rowDataSize: number;
     rowCount: number;
-    rows: Array<{ id: number; name?: string }>;
+    rows: Array<{ rowIndex: number; id: number; name?: string; dataHash: string }>;
     rowsTruncated: boolean;
     containerHash: string;
     childHash: string;
+    sessionToken?: string;
+    authority?: string;
     diagnostics?: Array<{ severity: string; code: string; message: string }>;
   }> => ipcRenderer.invoke(
     'resource.readContainerParamRowIndex',
@@ -862,6 +876,18 @@ const api = {
     ipcRenderer.invoke('ai.sidebarDraft', request),
   runAiTool: (name: string, input: unknown): Promise<ToolResult> =>
     ipcRenderer.invoke('ai.runTool', name, input),
+  /** UI-only 碎碎念：文本由 main 读取，renderer 不接触文件路径。 */
+  getMutterNext: (): Promise<MutterNextIpcResult> =>
+    ipcRenderer.invoke(AUXILIARY_IPC_CHANNELS.mutterNext),
+  getMutterStatus: (): Promise<MutterStatusIpcResult> =>
+    ipcRenderer.invoke(AUXILIARY_IPC_CHANNELS.mutterStatus),
+  /** 反馈上传：renderer 只提交 sessionId，rollout 读取和网络请求留在 main。 */
+  getFeedbackStatus: (): Promise<FeedbackStatusIpcResult> =>
+    ipcRenderer.invoke(AUXILIARY_IPC_CHANNELS.feedbackStatus),
+  submitSessionFeedback: (input: SessionFeedbackIpcRequest): Promise<SessionFeedbackIpcResult> =>
+    ipcRenderer.invoke(AUXILIARY_IPC_CHANNELS.feedbackSubmitSession, input),
+  submitAllHistory: (): Promise<SubmitAllHistoryIpcResult> =>
+    ipcRenderer.invoke(AUXILIARY_IPC_CHANNELS.feedbackSubmitAll),
   /** Model service configs — hasCredential only; never plaintext secrets. */
   listModelServices: (): Promise<Array<{
     id: string;

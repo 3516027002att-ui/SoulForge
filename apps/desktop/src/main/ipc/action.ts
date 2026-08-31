@@ -4,6 +4,7 @@ import { basename, dirname, isAbsolute, join, relative as relativePath, resolve,
 import {
   ingestBridgeResult,
   ActionMotionIdentityCache,
+  isLeaderRemappedBundle,
   readTaeEventTemplateFile,
   remapCharacterBundleToLeader,
   runBridge,
@@ -157,6 +158,8 @@ export interface ActionIpcDeps {
     session: WorkspaceSession | null,
     fallback: string
   ): Promise<{ allowedRoots: string[]; diagnostics: Diagnostic[] }>;
+  /** 等待 workspace.scan 的后台 ACTION membership 建立完成。 */
+  waitForWorkspaceIndexing?: () => Promise<void>;
 }
 
 interface CompatibilityPartCandidate {
@@ -774,7 +777,37 @@ function findIndexedActionMotionIdentity(
     : undefined;
 }
 
-async function assembleC0000CompatibilityPreview(input: {
+/**
+ * 角色 FLVER 的纹理不是 FLVER 内嵌资源：chrbnd 通常配套同名 texbnd，
+ * partsbnd 还会共享 parts/common_body.tpf。只把真实存在且位于 Bridge
+ * allowed roots 的候选传给 Bridge，避免 renderer 猜本机绝对路径。
+ */
+export function characterTexturePackagePaths(modelPath: string): string[] {
+  const candidates: string[] = [];
+  const add = (candidate: string): void => {
+    if (!existsSync(candidate)) return;
+    if (!candidates.some((path) => path.toLowerCase() === candidate.toLowerCase())) {
+      candidates.push(candidate);
+    }
+  };
+  const lower = modelPath.toLowerCase();
+  if (lower.endsWith('.chrbnd.dcx')) {
+    const stem = modelPath.slice(0, -'.chrbnd.dcx'.length);
+    add(`${stem}.texbnd.dcx`);
+    add(`${stem}.texbnd`);
+  } else if (lower.endsWith('.chrbnd')) {
+    const stem = modelPath.slice(0, -'.chrbnd'.length);
+    add(`${stem}.texbnd`);
+    add(`${stem}.texbnd.dcx`);
+  }
+  if (basename(dirname(modelPath)).toLowerCase() === 'parts') {
+    add(join(dirname(modelPath), 'common_body.tpf.dcx'));
+    add(join(dirname(modelPath), 'common_body.tpf'));
+  }
+  return candidates;
+}
+
+export async function assembleC0000CompatibilityPreview(input: {
   leaderBundle: CharacterPreviewBundle;
   overlayPartsDirectory: string;
   basePartsDirectory: string | null;
@@ -826,7 +859,11 @@ async function assembleC0000CompatibilityPreview(input: {
           allowedRoots: input.allowedRoots,
           timeoutMs: 120_000,
           ...(input.oodleRuntimeRoot ? { oodleRuntimeRoot: input.oodleRuntimeRoot } : {}),
-          commandOptions: { maxVertices: 1_000_000, maxIndices: 3_000_000 }
+          commandOptions: {
+            maxVertices: 1_000_000,
+            maxIndices: 3_000_000,
+            texturePackagePaths: characterTexturePackagePaths(candidate.absolutePath)
+          }
         });
         if (partResult.parseStatus === 'failed'
           || !isCharacterPreviewBundle(partResult.data)
@@ -856,7 +893,7 @@ async function assembleC0000CompatibilityPreview(input: {
       diagnostics: [{
         severity: 'warning',
         code: 'ACTION_COMPATIBILITY_PREVIEW_UNAVAILABLE',
-        message: 'c0000 本体只含骨骼；在有界的 bd/am/lg 候选中没有找到可通过骨骼映射的身体部件。当前只能显示骨架，这不代表存档装备。',
+         message: 'c0000 本体只含骨骼；在有界的 bd/am/lg/hd 候选中没有找到可通过骨骼映射的身体部件。当前只能显示骨架，这不代表存档装备。',
         details: { attemptedCandidates, rejectedCandidates, missingSlots }
       }]
     };
@@ -885,7 +922,7 @@ async function assembleC0000CompatibilityPreview(input: {
     diagnostics: [{
       severity: 'warning',
       code: 'ACTION_COMPATIBILITY_PREVIEW_ASSEMBLED',
-      message: `c0000 本体只含骨骼；当前按 overlay 优先、文件名字典序从 bd/am/lg 的有界候选中装配兼容预览（${selectedParts.join('、')}）。这不是存档当前装备。`,
+       message: `c0000 本体只含骨骼；当前按 overlay 优先、文件名字典序从 bd/am/lg/hd 的有界候选中装配兼容预览（${selectedParts.join('、')}）。这不是存档当前装备。`,
       details: { attemptedCandidates, rejectedCandidates, selectedParts, missingSlots }
     }]
   };
@@ -1139,7 +1176,16 @@ export function registerActionIpcHandlers(deps: ActionIpcDeps): void {
       return { ok: false, diagnostics: [sessionChangedDiagnostic(sourceUri)] };
     }
 
-    const actionIndex = deps.activeIndex;
+    let actionIndex = deps.activeIndex;
+    if (!actionIndex || !actionIndex.isActionBinderMembershipReady()) {
+      // workspace.scan 先让轻量文件列表可见，再异步哈希并建立 Binder
+      // membership。等待这一个受控任务，禁止在播放阶段临时扫描 sibling ANIBND。
+      await deps.waitForWorkspaceIndexing?.();
+      if (deps.activeSession !== session || deps.activeWorkspaceSessionId !== sessionId) {
+        return { ok: false, diagnostics: [sessionChangedDiagnostic(sourceUri)] };
+      }
+      actionIndex = deps.activeIndex;
+    }
     if (!actionIndex || !actionIndex.isActionBinderMembershipReady()) {
       return {
         ok: false,
@@ -1511,13 +1557,23 @@ export function registerActionIpcHandlers(deps: ActionIpcDeps): void {
         };
       }
       const chrbndPath = overlayExists ? overlayCandidate : vanillaCandidate!;
+      const texturePackagePaths = [
+        ...characterTexturePackagePaths(chrbndPath),
+        ...(overlayExists && vanillaCandidate && vanillaExists
+          ? characterTexturePackagePaths(vanillaCandidate)
+          : [])
+      ].filter((path, index, all) => all.findIndex((candidate) => candidate.toLowerCase() === path.toLowerCase()) === index);
       const result = await runBridge<Record<string, unknown>>({
         command: 'read-chrbnd-flver-preview',
         filePath: chrbndPath,
         allowedRoots: roots.allowedRoots,
         timeoutMs: 120_000,
         ...(effectiveBase ? { oodleRuntimeRoot: effectiveBase } : {}),
-        commandOptions: { maxVertices: 1_000_000, maxIndices: 3_000_000 }
+        commandOptions: {
+          maxVertices: 1_000_000,
+          maxIndices: 3_000_000,
+          texturePackagePaths
+        }
       });
       if (result.parseStatus === 'failed' || !result.data) {
         return { ok: false, sourceUri, diagnostics: result.diagnostics };
@@ -1548,6 +1604,64 @@ export function registerActionIpcHandlers(deps: ActionIpcDeps): void {
         });
         compatibilityDiagnostics = compatibility.diagnostics;
         if (compatibility.bundle) previewBundle = compatibility.bundle;
+      }
+
+      // A normal chrbnd/partsbnd can contain several FLVER-local skeletons.
+      // The TAE clip is sampled in the leader skeleton's index space, so passing
+      // the raw bundle to the renderer would leave body parts on independent,
+      // unmoving skeletons (or make an unkeyed pose update the wrong skeleton).
+      // Normalize every multi-model action preview at the main/core boundary;
+      // the renderer then consumes one explicit leader skeleton namespace.
+      if (previewBundle.models.length > 1 && !isLeaderRemappedBundle(previewBundle)) {
+        const leader = previewBundle.models.find((model) => model.modelId === previewBundle.leaderModelId);
+        if (!leader || leader.bones.length === 0) {
+          return {
+            ok: false,
+            sourceUri,
+            diagnostics: [
+              ...result.diagnostics,
+              ...compatibilityDiagnostics,
+              actionDiagnostic(
+                'ACTION_PREVIEW_LEADER_MISSING',
+                '动作预览包含多个 FLVER，但没有可用的 leader 骨架，已拒绝在错误骨架上播放。',
+                sourceUri,
+                { leaderModelId: previewBundle.leaderModelId, modelCount: previewBundle.models.length }
+              )
+            ]
+          };
+        }
+        const remapped = remapCharacterBundleToLeader(
+          leader,
+          previewBundle.models.filter((model) => model.modelId !== leader.modelId)
+        );
+        if (!remapped.ok || !remapped.bundle) {
+          return {
+            ok: false,
+            sourceUri,
+            diagnostics: [
+              ...result.diagnostics,
+              ...compatibilityDiagnostics,
+              ...remapped.diagnostics,
+              actionDiagnostic(
+                'ACTION_PREVIEW_LEADER_REMAP_FAILED',
+                '动作预览的身体部件无法安全映射到 leader 骨架，已关闭播放预览。',
+                sourceUri,
+                { leaderModelId: leader.modelId, modelCount: previewBundle.models.length }
+              )
+            ]
+          };
+        }
+        previewBundle = remapped.bundle;
+        compatibilityDiagnostics = [
+          ...compatibilityDiagnostics,
+          {
+            severity: 'info',
+            code: 'ACTION_PREVIEW_LEADER_REMAP_APPLIED',
+            message: `动作预览已将 ${previewBundle.models.length} 个 FLVER 统一到 leader 骨架 ${leader.modelId}。`,
+            sourceUri,
+            details: { leaderModelId: leader.modelId, modelCount: previewBundle.models.length }
+          }
+        ];
       }
 
       return {

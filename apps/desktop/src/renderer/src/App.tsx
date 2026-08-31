@@ -316,6 +316,8 @@ export function App(): ReactElement {
   const [operationHistory, setOperationHistory] = useState<RendererPatchHistoryEntry[]>([]);
   const [rollbackInFlight, setRollbackInFlight] = useState<string | null>(null);
   const rollbackInFlightRef = useRef<string | null>(null);
+  const operationHistoryRefreshRef = useRef(Promise.resolve());
+  const operationHistoryRequestRef = useRef(0);
   const [analysis, setAnalysis] = useState<AnalyzeWorkspaceSummary | null>(null);
   const [tools, setTools] = useState<ToolDescriptor[]>([]);
   const [selectedFile, setSelectedFile] = useState<RendererIndexedFile | null>(null);
@@ -1596,8 +1598,23 @@ export function App(): ReactElement {
 
   async function refreshOperationHistory(): Promise<void> {
     if (!bridge) return;
-    const history = await bridge.listOperations();
-    setOperationHistory(history);
+    const requestId = ++operationHistoryRequestRef.current;
+    const load = async (): Promise<void> => {
+      try {
+        const history = await bridge.listOperations();
+        // 历史读取可以跨越回滚完成/资源重载；迟到快照不能覆盖更新的结果。
+        if (requestId === operationHistoryRequestRef.current) setOperationHistory(history);
+      } catch (error) {
+        if (requestId !== operationHistoryRequestRef.current) return;
+        const message = error instanceof Error ? error.message : String(error);
+        setStatus(`历史刷新失败：${message}`);
+        pushToast(`历史刷新失败：${message}`, 'warn');
+      }
+    };
+    // 串行化 listOperations，保证回滚后的刷新不会和回滚前的旧快照并发返回。
+    const next = operationHistoryRefreshRef.current.then(load, load);
+    operationHistoryRefreshRef.current = next.catch(() => undefined);
+    await next;
   }
 
   async function reloadParamRowsFromSource(): Promise<void> {
@@ -2604,33 +2621,48 @@ export function App(): ReactElement {
     );
   }
 
+  /**
+   * 回滚后重新走一次完整的资源打开链，而不是只刷新文本预览。
+   * MSB/TAE/FLVER 等领域面板的 useEffect 依赖选中文件对象；克隆对象
+   * 让当前资源在内容恢复后必然触发重读，同时保留同一 sourceUri/tab。
+   */
+  async function reloadSelectedResourceAfterRollback(): Promise<void> {
+    if (!selectedFile) return;
+    await selectFile({ ...selectedFile });
+  }
+
   async function rollbackOp(opId: string): Promise<void> {
     const lockKey = `operation:${opId}`;
-    if (rollbackInFlightRef.current !== null) return;
+    if (rollbackInFlightRef.current !== null) {
+      pushToast('已有回滚正在处理中，请等待当前操作完成。', 'warn');
+      return;
+    }
     rollbackInFlightRef.current = lockKey;
     setRollbackInFlight(lockKey);
+    let restored = false;
     try {
-    if (!bridge) {
-      announceDesktopOnly('回滚操作');
-      return;
-    }
-    setStatus(`正在回滚操作 ${opId.slice(0, 8)}...`);
-    const result = await bridge.rollbackOperation(opId);
-    await refreshOperationHistory();
-    if (!result.ok) {
-      setStatus(`回滚失败：${result.diagnostics.map((d: Diagnostic) => d.message).join('; ') || opId}`);
-      return;
-    }
-    if (selectedFile) {
-      const refreshed = await bridge.openResourcePreview(selectedFile.sourceUri);
-      setPreview(refreshed);
-      const text = refreshed?.text ?? '';
-      setEditText(text);
-      setLastSavedText(text);
-      setMsgRows(extractMsgRows(refreshed));
-    }
-    setStatus(`已回滚 ${result.restoredFiles.length} 个文件`);
-    pushToast(`已回滚 ${result.restoredFiles.length} 个文件`);
+      if (!bridge) {
+        announceDesktopOnly('回滚操作');
+        return;
+      }
+      setStatus(`正在回滚操作 ${opId.slice(0, 8)}...`);
+      const result = await bridge.rollbackOperation(opId);
+      if (!result.ok) {
+        setStatus(`回滚失败：${result.diagnostics.map((d: Diagnostic) => d.message).join('; ') || opId}`);
+        pushToast(`回滚失败：${result.diagnostics.map((d: Diagnostic) => d.message).join('; ') || opId}`, 'warn');
+        await refreshOperationHistory();
+        return;
+      }
+      restored = true;
+      await refreshOperationHistory();
+      await reloadSelectedResourceAfterRollback();
+      setStatus(`已回滚 ${result.restoredFiles.length} 个文件`);
+      pushToast(`已回滚 ${result.restoredFiles.length} 个文件`);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      const prefix = restored ? '回滚已完成，但资源界面重载失败' : '回滚异常';
+      setStatus(`${prefix}：${message}`);
+      pushToast(`${prefix}：${message}`, 'warn');
     } finally {
       rollbackInFlightRef.current = null;
       setRollbackInFlight(null);
@@ -2640,25 +2672,38 @@ export function App(): ReactElement {
   /** 文件级回滚：把某次操作里的单个文件恢复到操作前状态。 */
   async function rollbackFileOp(opId: string, targetUri: string): Promise<void> {
     const lockKey = `file:${opId}:${targetUri}`;
-    if (rollbackInFlightRef.current !== null) return;
+    if (rollbackInFlightRef.current !== null) {
+      pushToast('已有回滚正在处理中，请等待当前操作完成。', 'warn');
+      return;
+    }
     rollbackInFlightRef.current = lockKey;
     setRollbackInFlight(lockKey);
+    let restored = false;
     try {
-    if (!bridge) {
-      announceDesktopOnly('文件回滚');
-      return;
-    }
-    if (typeof bridge.rollbackFile !== 'function') {
-      pushToast('当前预加载未暴露文件级回滚。', 'warn');
-      return;
-    }
-    const result = await bridge.rollbackFile(opId, targetUri);
-    await refreshOperationHistory();
-    if (!result.ok) {
-      pushToast(`文件回滚失败：${result.diagnostics.map((d: Diagnostic) => d.message).join('; ') || targetUri}`, 'warn');
-      return;
-    }
-    pushToast(`已回滚文件（${result.restoredFiles.length} 个）`);
+      if (!bridge) {
+        announceDesktopOnly('文件回滚');
+        return;
+      }
+      if (typeof bridge.rollbackFile !== 'function') {
+        pushToast('当前预加载未暴露文件级回滚。', 'warn');
+        return;
+      }
+      const result = await bridge.rollbackFile(opId, targetUri);
+      if (!result.ok) {
+        const message = result.diagnostics.map((d: Diagnostic) => d.message).join('; ') || targetUri;
+        pushToast(`文件回滚失败：${message}`, 'warn');
+        await refreshOperationHistory();
+        return;
+      }
+      restored = true;
+      await refreshOperationHistory();
+      await reloadSelectedResourceAfterRollback();
+      pushToast(`已回滚文件（${result.restoredFiles.length} 个）`);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      const prefix = restored ? '文件已回滚，但资源界面重载失败' : '文件回滚异常';
+      setStatus(`${prefix}：${message}`);
+      pushToast(`${prefix}：${message}`, 'warn');
     } finally {
       rollbackInFlightRef.current = null;
       setRollbackInFlight(null);
@@ -3308,7 +3353,7 @@ export function App(): ReactElement {
                         <button
                           type="button"
                           className="btn btn--ghost btn--sm"
-                          disabled={rollbackInFlight !== null}
+                          disabled={rollbackInFlight === `operation:${entry.opId}`}
                           onClick={() => void rollbackOp(entry.opId)}
                         >
                           {rollbackInFlight === `operation:${entry.opId}` ? '回滚中…' : '回滚'}
@@ -3324,7 +3369,7 @@ export function App(): ReactElement {
                                 <button
                                   type="button"
                                   className="btn btn--ghost btn--sm"
-                                  disabled={rollbackInFlight !== null}
+                                  disabled={rollbackInFlight === `file:${entry.opId}:${path}`}
                                   onClick={() => void rollbackFileOp(entry.opId, path)}
                                 >
                                   {rollbackInFlight === `file:${entry.opId}:${path}` ? '回滚中…' : '回滚此文件'}
@@ -3999,7 +4044,9 @@ export function App(): ReactElement {
                 fileCount: entry.fileCount,
                 canRollback: entry.status === 'committed'
               }))}
-              rollbackBusy={rollbackInFlight !== null}
+              rollbackBusyOpId={rollbackInFlight?.startsWith('operation:')
+                ? rollbackInFlight.slice('operation:'.length)
+                : null}
               diagnostics={(preview?.diagnostics ?? []).map((d) => ({
                 severity: d.severity,
                 code: d.code,

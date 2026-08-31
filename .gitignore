@@ -101,3 +101,7 @@ obj/
 锐评/
 /test
 /tmp/
+
+# Mission/task briefs and local review reports are operator working material,
+# not product source or release content.
+/mission/

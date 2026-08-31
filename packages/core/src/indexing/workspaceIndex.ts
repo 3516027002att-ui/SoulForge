@@ -395,8 +395,14 @@ export class WorkspaceIndex {
     return searchSymbols(this.mapExports.flatMap((item) => [...item.entities, ...item.regions]), query, limit, mapSymbolSearchText);
   }
 
-  searchParamRows(query: string, limit = 100): Array<SearchResult<ParamRowSymbol>> {
-    return searchSymbols(this.paramExports.flatMap((item) => item.rows), query, limit, paramRowSearchText);
+  searchParamRows(query: string, limit = 100, paramNames?: readonly string[]): Array<SearchResult<ParamRowSymbol>> {
+    const allowed = paramNames && paramNames.length > 0
+      ? new Set(paramNames.map(normalizeParamName))
+      : null;
+    const rows = this.paramExports
+      .filter((item) => allowed === null || allowed.has(normalizeParamName(item.paramName)))
+      .flatMap((item) => item.rows);
+    return searchSymbols(rows, query, limit, paramRowSearchText);
   }
 
   searchTextEntries(query: string, limit = 100): Array<SearchResult<TextEntrySymbol>> {
@@ -616,7 +622,27 @@ function mapSymbolSearchText(symbol: MapEntitySymbol | MapRegionSymbol): string 
 }
 
 function paramRowSearchText(row: ParamRowSymbol): string {
-  return [row.uri, row.paramName, row.rowId, row.rowName, row.fields?.map((field) => `${field.name}:${String(field.value)}`).join(' ')].filter(Boolean).join(' ');
+  return [
+    row.uri,
+    row.paramName,
+    row.rowId,
+    row.rowName,
+    row.fields?.map((field) => [
+      field.fieldId,
+      field.name,
+      field.description,
+      String(field.value)
+    ].filter(Boolean).join(':')).join(' ')
+  ].filter(Boolean).join(' ');
+}
+
+function normalizeParamName(value: string): string {
+  return value
+    .replace(/\\/g, '/')
+    .split('/')
+    .pop()!
+    .replace(/\.param$/i, '')
+    .toLocaleLowerCase();
 }
 
 function textEntrySearchText(entry: TextEntrySymbol): string {

@@ -32,7 +32,7 @@
       "pending-scope",
       "in-scope",
       "scope-excluded",
-      "deferred-v0.6"
+      "deferred"
     ]
   },
   "gates": [
@@ -276,7 +276,6 @@
       "gateState": "open",
       "applicability": "in-scope",
       "sliceRefs": [
-        "W-ACTION-MOTION-IDENTITY-01",
         "W-REL-D-GAMELOAD-01"
       ],
       "evidenceRefs": [
@@ -615,7 +614,7 @@
     "open 必须至少引用一个 ready/active 切片；completed/superseded 切片不得覆盖 open Gate。",
     "blocked 必须引用 blockers.json 中已定义 blocker，且其全部切片必须为 blocked。",
     "passed 与 scope-excluded 只能引用 sealed-current-run Evidence；scope-excluded 必须同时 gateState=passed。",
-    "deferred 必须成对 applicability=deferred-v0.6，禁用于基础 Gate，且必须引用带 scope-deferral:<GateId>:<release>:user-approved 的 sealed Evidence。",
+    "deferred 必须成对 applicability=deferred，禁用于基础 Gate，且必须引用带 scope-deferral:<GateId>:<Release>:user-approved 的 sealed Evidence；Release 由 Gate 的发布归属决定。",
     "只要仍能推进 protocol/validator/registry/instrumentation/失败关闭/synthetic harness，就必须补 ready/active 切片并保持 open，不得因下游 corpus 或阈值缺失提前记 blocked。"
   ]
 }

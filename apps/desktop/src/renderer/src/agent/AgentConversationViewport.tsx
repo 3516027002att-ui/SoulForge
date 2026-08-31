@@ -55,6 +55,8 @@ export interface AgentConversationViewportProps {
   failure?: AgentConversationFailure | null;
   /** 任务进行中的状态文案（describeAgentTaskStatus 产出）。 */
   status?: string | null;
+  /** 当前会话结束后的附属操作（例如反馈），仍属于会话滚动区。 */
+  footer?: ReactNode;
   children?: ReactNode;
 }
 
@@ -159,11 +161,22 @@ export function AgentConversationViewport(props: AgentConversationViewportProps)
     approvals = [],
     failure = null,
     status = null,
+    footer = null,
     children
   } = props;
   const scrollRef = useRef<HTMLDivElement>(null);
   const hasMessages = messages.length > 0;
   const hasTimeline = conversationItems.length > 0;
+  // 任务态时间线包含模型口播与工具调用的步序关系。只要时间线里有
+  // assistant 正文，就不能被旧的「messages 非空优先」分支遮掉；否则用户
+  // 只能看到工具行，看不到模型为什么调用工具、得出了什么结论。
+  const hasAssistantTimeline = conversationItems.some(
+    (item) => item.kind === 'assistant' && item.text.trim() !== ''
+  );
+  const hasAssistantMessages = messages.some(
+    (message) => message.kind === 'assistant' && message.markdown.trim() !== ''
+  );
+  const useTimeline = hasTimeline && (hasAssistantTimeline || !hasAssistantMessages);
   const [nowTick, setNowTick] = useState(0);
 
   const thinkingLive = conversationItems.some((item) => item.kind === 'thinking' && item.live);
@@ -219,12 +232,12 @@ export function AgentConversationViewport(props: AgentConversationViewportProps)
         </section>
       )}
 
-      {hasMessages ? (
+      {useTimeline ? (
+        conversationItems.map((item, index) => renderConversationItem(item, index))
+      ) : hasMessages ? (
         <AgentMessageList messages={messages} />
       ) : idle && !hasTimeline ? (
         <AgentWelcome testActive={props.testActive} />
-      ) : hasTimeline ? (
-        conversationItems.map((item, index) => renderConversationItem(item, index))
       ) : (
         children
       )}
@@ -254,6 +267,8 @@ export function AgentConversationViewport(props: AgentConversationViewportProps)
           </div>
         </div>
       )}
+
+      {footer}
 
       <AgentScrollToBottom scrollRef={scrollRef} />
     </div>

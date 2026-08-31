@@ -49,7 +49,7 @@ export const ALLOWED_APPLICABILITY = new Set([
   'pending-scope',
   'in-scope',
   'scope-excluded',
-  'deferred-v0.6'
+  'deferred'
 ]);
 /**
  * `deferred` 与 `scope-excluded` 必须严格区分：
@@ -58,8 +58,30 @@ export const ALLOWED_APPLICABILITY = new Set([
  * 两者都需要 sealed + 用户批准 Evidence，都不得用于基础 Gate。
  * `deferred` 不计入本里程碑完成，也不阻止本里程碑完成。
  */
-export const DEFERRED_APPLICABILITY = 'deferred-v0.6';
-export const DEFERRED_TARGET_RELEASE = 'V0.6';
+export const DEFERRED_APPLICABILITY = 'deferred';
+
+function escapeRegExp(value) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+/**
+ * 生成延期批准标记。Gate 有发布归属时精确匹配该归属；旧 handoff 数据没有
+ * 该字段时只要求本 Gate 搭配任意格式合法的发布号，不把某个历史版本写死。
+ */
+export function deferralClaimMarker(gateId, targetRelease = null) {
+  const prefix = `scope-deferral:${gateId}:`;
+  if (typeof targetRelease === 'string' && /^V\d+\.\d+$/.test(targetRelease)) {
+    return `${prefix}${targetRelease}:user-approved`;
+  }
+  return new RegExp(`${escapeRegExp(prefix)}V\\d+\\.\\d+:user-approved`);
+}
+
+export function deferralClaimDescription(gateId, targetRelease = null) {
+  if (typeof targetRelease === 'string' && /^V\d+\.\d+$/.test(targetRelease)) {
+    return `scope-deferral:${gateId}:${targetRelease}:user-approved`;
+  }
+  return `scope-deferral:${gateId}:<Release>:user-approved`;
+}
 export const ALLOWED_BLOCKER_REASONS = new Set([
   'private-corpus',
   'credential',
@@ -126,7 +148,8 @@ export function evidenceIsSealed(evidence, id) {
 
 export function evidenceHasClaim(evidence, id, marker) {
   const record = evidence.get(id);
-  return evidenceIsSealed(evidence, id) && record.claim.includes(marker);
+  if (!evidenceIsSealed(evidence, id)) return false;
+  return marker instanceof RegExp ? marker.test(record.claim) : record.claim.includes(marker);
 }
 
 /**
@@ -588,7 +611,7 @@ export function validateGateMatrix(
 
   for (const row of gateRows) {
     const gateId = row.id;
-    const { gateState, applicability, sliceIds, blockerIds, evidenceIds, successor } = row;
+    const { gateState, applicability, sliceIds, blockerIds, evidenceIds, successor, targetRelease } = row;
     const location = `${where} ${gateId}`;
 
     if (LEGACY_GATE_STATES.has(gateState) || gateState.startsWith('blocked:')) {
@@ -621,7 +644,7 @@ export function validateGateMatrix(
       findings.push(makeFinding(
         'GATE_SCOPE_RESOLVED_PENDING',
         location,
-        'REL-SCOPE 已通过后，功能 Gate 必须明确为 in-scope、scope-excluded 或 deferred-v0.6，不能继续 pending-scope。'
+        'REL-SCOPE 已通过后，功能 Gate 必须明确为 in-scope、scope-excluded 或 deferred，不能继续 pending-scope。'
       ));
     }
     for (const sliceId of sliceIds) {
@@ -750,7 +773,7 @@ export function validateGateMatrix(
       findings.push(makeFinding('GATE_PENDING_SCOPE_PASSED', location, 'pending-scope Gate 不能进入 passed。'));
     }
 
-    // gateState=deferred 与 applicability=deferred-v0.6 必须双向成对，
+    // gateState=deferred 与 applicability=deferred 必须双向成对，
     // 防止用「延期」掩盖未完成，或用 passed 冒充延期。
     if (gateState === 'deferred' && applicability !== DEFERRED_APPLICABILITY) {
       findings.push(makeFinding(
@@ -812,13 +835,13 @@ export function validateGateMatrix(
             + '该切片必须一并写成 lifecycle=deferred。'
         ));
       }
-      const deferralMarker = `scope-deferral:${gateId}:${DEFERRED_TARGET_RELEASE}:user-approved`;
+      const deferralMarker = deferralClaimMarker(gateId, targetRelease);
       const approvedDeferralIds = evidenceIds.filter((id) => evidenceHasClaim(evidence, id, deferralMarker));
       if (approvedDeferralIds.length === 0) {
         findings.push(makeFinding(
           'GATE_DEFERRAL_APPROVAL_REQUIRED',
           location,
-          `${DEFERRED_APPLICABILITY} Gate 必须引用声明 ${deferralMarker} 的 sealed Evidence。`
+          `${DEFERRED_APPLICABILITY} Gate 必须引用声明 ${deferralClaimDescription(gateId, targetRelease)} 的 sealed Evidence。`
         ));
       } else {
         const finding = checkFreshness(

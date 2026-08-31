@@ -87,17 +87,17 @@ export function ingestBridgeResult(index: WorkspaceIndex, result: BridgeResult<u
   }
 
   if (result.resourceKind === 'param') {
-    const parsed = parseParamExport(result.data, result.sourceUri);
+    const parsed = parseParamExports(result.data, result.sourceUri);
     diagnostics.push(...parsed.diagnostics);
-    if (parsed.value) index.upsertParamExport(parsed.value);
-    return { accepted: Boolean(parsed.value), parseStatus: parsed.value ? result.parseStatus : 'partial', diagnostics };
+    for (const value of parsed.values) index.upsertParamExport(value);
+    return { accepted: parsed.values.length > 0, parseStatus: parsed.values.length > 0 ? result.parseStatus : 'partial', diagnostics };
   }
 
   if (result.resourceKind === 'msg') {
-    const parsed = parseMsgExport(result.data, result.sourceUri);
+    const parsed = parseMsgExports(result.data, result.sourceUri);
     diagnostics.push(...parsed.diagnostics);
-    if (parsed.value) index.upsertMsgExport(parsed.value);
-    return { accepted: Boolean(parsed.value), parseStatus: parsed.value ? result.parseStatus : 'partial', diagnostics };
+    for (const value of parsed.values) index.upsertMsgExport(value);
+    return { accepted: parsed.values.length > 0, parseStatus: parsed.values.length > 0 ? result.parseStatus : 'partial', diagnostics };
   }
 
   if (result.resourceKind === 'action') {
@@ -121,6 +121,11 @@ export function ingestBridgeResult(index: WorkspaceIndex, result: BridgeResult<u
 
 interface ParsedValue<T> {
   value?: T;
+  diagnostics: Diagnostic[];
+}
+
+interface ParsedValues<T> {
+  values: T[];
   diagnostics: Diagnostic[];
 }
 
@@ -223,6 +228,26 @@ function parseParamExport(value: unknown, sourceUri: string): ParsedValue<ParamE
   };
 }
 
+function parseParamExports(value: unknown, sourceUri: string): ParsedValues<ParamExport> {
+  const record = asRecord(value);
+  if (!Array.isArray(record.params)) {
+    const parsed = parseParamExport(value, sourceUri);
+    return { values: parsed.value ? [parsed.value] : [], diagnostics: parsed.diagnostics };
+  }
+
+  const values: ParamExport[] = [];
+  const diagnostics: Diagnostic[] = [];
+  record.params.forEach((item, index) => {
+    const parsed = parseParamExport(item, sourceUri);
+    diagnostics.push(...parsed.diagnostics.map((diagnostic) => ({
+      ...diagnostic,
+      message: `params[${index}]: ${diagnostic.message}`
+    })));
+    if (parsed.value) values.push(parsed.value);
+  });
+  return { values, diagnostics };
+}
+
 function parseMsgExport(value: unknown, sourceUri: string): ParsedValue<MsgExport> {
   const record = asRecord(value);
   const exportProvenance = sourceProvenance(record);
@@ -234,6 +259,26 @@ function parseMsgExport(value: unknown, sourceUri: string): ParsedValue<MsgExpor
     },
     diagnostics: []
   };
+}
+
+function parseMsgExports(value: unknown, sourceUri: string): ParsedValues<MsgExport> {
+  const record = asRecord(value);
+  if (!Array.isArray(record.msgs)) {
+    const parsed = parseMsgExport(value, sourceUri);
+    return { values: parsed.value ? [parsed.value] : [], diagnostics: parsed.diagnostics };
+  }
+
+  const values: MsgExport[] = [];
+  const diagnostics: Diagnostic[] = [];
+  record.msgs.forEach((item, index) => {
+    const parsed = parseMsgExport(item, sourceUri);
+    diagnostics.push(...parsed.diagnostics.map((diagnostic) => ({
+      ...diagnostic,
+      message: `msgs[${index}]: ${diagnostic.message}`
+    })));
+    if (parsed.value) values.push(parsed.value);
+  });
+  return { values, diagnostics };
 }
 
 /**
@@ -358,9 +403,9 @@ function parseTaeExport(value: unknown, sourceUri: string, sourcePath: string | 
 }
 
 /**
- * 把 read-msb-document 的 parts[] / regions[] 投影成 MapExport 需要的 data 形状
- * （问题 6-B：生产 analyze 走 export-map，而 export-map 未实现，故在桌面打开 MSB
- * 时用 read-msb-document 喂 MapExport，不要实现 C# export-map）。
+ * 把 MSB 的 parts[] / regions[] 投影成 MapExport 需要的 data 形状。
+ * 生产 analyze 现在优先消费 C# export-map 的同形结果；保留这个适配器供
+ * read-msb-document 及旧调用方继续使用。
  */
 export function mapExportFromMsbDocument(input: {
   mapId: string;
@@ -431,9 +476,16 @@ export function mapExportFromMsbDocument(input: {
   };
 }
 
-/** MSB part typeId → MapEntitySymbol.kind（Sekiro 通用布局；未知回落 unknown）。 */
+/** MSB part typeId → MapEntitySymbol.kind（Sekiro native typeId；兼容旧候选编号）。 */
 function mapKindFromTypeId(typeId: number | undefined): MapExport['entities'][number]['kind'] {
   if (typeId === undefined) return 'unknown';
+  // Sekiro MSB native PARTS_PARAM_ST uses small family-local ids.  The old
+  // candidate export used 1000-based ids, so retain those mappings below for
+  // synthetic/legacy documents while preferring the native layout here.
+  if (typeId === 0) return 'mapPiece';
+  if (typeId === 1 || typeId === 9 || typeId === 10) return 'object';
+  if (typeId === 2 || typeId === 4 || typeId === 11) return 'character';
+  if (typeId === 5) return 'collision';
   if (typeId >= 1000 && typeId < 1100) return 'mapPiece';
   if (typeId >= 1100 && typeId < 1200) return 'object';
   if (typeId >= 1200 && typeId < 1300) return 'character';
@@ -542,9 +594,12 @@ function parseParamRow(
 
 function parseParamField(value: unknown): ParamFieldSymbol {
   const record = asRecord(value);
+  const fieldId = asString(record.fieldId) || asString(record.id);
   return {
+    ...(fieldId ? { fieldId } : {}),
     name: asString(record.name, 'unknown'),
     ...(asString(record.type) ? { type: asString(record.type) } : {}),
+    ...(asString(record.description) ? { description: asString(record.description) } : {}),
     value: parseNullableScalar(record.value)
   };
 }

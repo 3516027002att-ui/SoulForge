@@ -10,6 +10,7 @@ import type {
   ModelCompleteResult,
   ModelListResult,
   ModelServiceAdapter,
+  OpenAiReasoningEffort,
   StreamEvent,
   ToolCall,
   ToolDefinition
@@ -50,26 +51,22 @@ export class OpenAiResponsesAdapter implements ModelServiceAdapter {
   async complete(request: ModelCompleteRequest): Promise<ModelCompleteResult> {
     const body = buildResponsesBody(this.model, request, false);
     const { signal, cleanup } = createRequestSignal(request.signal, request.timeoutMs);
-    let response: Response;
-    try {
-      response = await this.fetchImpl(`${this.baseUrl}/v1/responses`, {
-        method: 'POST',
-        headers: {
-          'content-type': 'application/json',
-          authorization: `Bearer ${this.apiKey}`
-        },
-        body: JSON.stringify(body),
-        ...(signal ? { signal } : {})
-      });
-    } catch (error) {
+    const attempt = await fetchResponsesWithReasoningFallback({
+      fetchResponse: (nextBody) => this.fetchResponses(nextBody, signal),
+      model: this.model,
+      request,
+      stream: false,
+      body
+    });
+    if ('error' in attempt) {
       cleanup();
-      return errorResult(classifyFetchError(error, 'OpenAI Responses', signal, { callerSignal: request.signal }));
+      return errorResult(classifyFetchError(attempt.error, 'OpenAI Responses', signal, { callerSignal: request.signal }));
     }
+    const response = attempt.response;
     if (!response.ok) {
-      const text = await response.text().catch(() => '');
       cleanup();
       return errorResult(classifyHttpError(
-        response.status, text, 'OpenAI Responses',
+        response.status, attempt.errorBody, 'OpenAI Responses',
         response.headers.get('retry-after')
       ));
     }
@@ -129,26 +126,23 @@ export class OpenAiResponsesAdapter implements ModelServiceAdapter {
   async *stream(request: ModelCompleteRequest): AsyncGenerator<StreamEvent, void, undefined> {
     const body = buildResponsesBody(this.model, request, true);
     const { signal, cleanup } = createRequestSignal(request.signal, request.timeoutMs);
-    let response: Response;
-    try {
-      response = await this.fetchImpl(`${this.baseUrl}/v1/responses`, {
-        method: 'POST',
-        headers: {
-          'content-type': 'application/json',
-          authorization: `Bearer ${this.apiKey}`
-        },
-        body: JSON.stringify(body),
-        ...(signal ? { signal } : {})
-      });
-    } catch (error) {
+    const attempt = await fetchResponsesWithReasoningFallback({
+      fetchResponse: (nextBody) => this.fetchResponses(nextBody, signal),
+      model: this.model,
+      request,
+      stream: true,
+      body
+    });
+    if ('error' in attempt) {
       cleanup();
-      yield errorStreamEvent(classifyFetchError(error, 'OpenAI Responses', signal, { callerSignal: request.signal }));
+      yield errorStreamEvent(classifyFetchError(attempt.error, 'OpenAI Responses', signal, { callerSignal: request.signal }));
       return;
     }
+    const response = attempt.response;
     if (!response.ok || !response.body) {
       cleanup();
       yield errorStreamEvent(classifyHttpError(
-        response.status, '', 'OpenAI Responses',
+        response.status, attempt.errorBody, 'OpenAI Responses',
         response.headers.get('retry-after')
       ));
       return;
@@ -158,7 +152,11 @@ export class OpenAiResponsesAdapter implements ModelServiceAdapter {
     const decoder = new TextDecoder();
     let buffer = '';
     const toolAcc = new Map<string, { id: string; name: string; args: string }>();
+    const toolAliases = new Map<string, string>();
     let sawTool = false;
+    const collectToolCalls = (): ToolCall[] => [...toolAcc.values()]
+      .filter((tool) => tool.name.trim().length > 0)
+      .map((tool) => ({ id: tool.id, name: tool.name, argumentsJson: tool.args }));
 
     try {
       while (true) {
@@ -173,11 +171,8 @@ export class OpenAiResponsesAdapter implements ModelServiceAdapter {
           const data = trimmed.slice(5).trim();
           if (!data || data === '[DONE]') {
             if (data === '[DONE]') {
-              for (const tool of toolAcc.values()) {
-                yield {
-                  type: 'tool-call',
-                  toolCall: { id: tool.id, name: tool.name, argumentsJson: tool.args }
-                };
+              for (const toolCall of collectToolCalls()) {
+                yield { type: 'tool-call', toolCall };
               }
               yield { type: 'message-stop', finishReason: sawTool ? 'tool_use' : 'stop' };
               return;
@@ -206,9 +201,10 @@ export class OpenAiResponsesAdapter implements ModelServiceAdapter {
             continue;
           }
           if (eventType === 'response.function_call_arguments.delta') {
-            const key = event.item_id ?? event.output_index?.toString() ?? '0';
+            const rawKey = event.item_id ?? event.output_index?.toString() ?? '0';
+            const key = toolAliases.get(rawKey) ?? rawKey;
             const current = toolAcc.get(key) ?? {
-              id: event.item_id ?? key,
+              id: rawKey,
               name: event.name ?? '',
               args: ''
             };
@@ -221,22 +217,45 @@ export class OpenAiResponsesAdapter implements ModelServiceAdapter {
           if (eventType === 'response.output_item.done' && event.item) {
             const item = event.item;
             if (item.type === 'function_call') {
-              const id = item.call_id ?? item.id ?? 'call';
+              // The Responses stream commonly uses the output item's `id`
+              // for argument deltas and the function's `call_id` on the
+              // completed item. They describe one call, not two calls.
+              const itemId = item.id;
+              const callId = item.call_id;
+              const candidateKeys = [itemId, callId]
+                .filter((value): value is string => typeof value === 'string' && value.length > 0)
+                .map((value) => toolAliases.get(value) ?? value);
+              let existingKey: string | undefined;
+              for (const candidate of candidateKeys) {
+                if (toolAcc.has(candidate)) {
+                  existingKey = candidate;
+                  break;
+                }
+              }
+              if (existingKey === undefined) {
+                const matching = [...toolAcc.entries()].find(([, tool]) =>
+                  candidateKeys.includes(tool.id)
+                );
+                existingKey = matching?.[0];
+              }
+              const previous = existingKey === undefined ? undefined : toolAcc.get(existingKey);
+              const id = callId ?? itemId ?? previous?.id ?? 'call';
+              if (existingKey !== undefined && existingKey !== id) toolAcc.delete(existingKey);
               toolAcc.set(id, {
                 id,
-                name: item.name ?? '',
-                args: item.arguments ?? ''
+                name: item.name?.trim() ? item.name : previous?.name ?? '',
+                args: item.arguments?.length ? item.arguments : previous?.args ?? ''
               });
+              for (const candidate of [itemId, callId]) {
+                if (candidate) toolAliases.set(candidate, id);
+              }
               sawTool = true;
             }
             continue;
           }
           if (eventType === 'response.completed' || eventType === 'response.incomplete') {
-            for (const tool of toolAcc.values()) {
-              yield {
-                type: 'tool-call',
-                toolCall: { id: tool.id, name: tool.name, argumentsJson: tool.args }
-              };
+            for (const toolCall of collectToolCalls()) {
+              yield { type: 'tool-call', toolCall };
             }
             if (event.response?.usage) {
               yield {
@@ -265,11 +284,8 @@ export class OpenAiResponsesAdapter implements ModelServiceAdapter {
           }
         }
       }
-      for (const tool of toolAcc.values()) {
-        yield {
-          type: 'tool-call',
-          toolCall: { id: tool.id, name: tool.name, argumentsJson: tool.args }
-        };
+      for (const toolCall of collectToolCalls()) {
+        yield { type: 'tool-call', toolCall };
       }
       yield { type: 'message-stop', finishReason: sawTool ? 'tool_use' : 'stop' };
     } catch (error) {
@@ -280,6 +296,18 @@ export class OpenAiResponsesAdapter implements ModelServiceAdapter {
       }
       yield errorStreamEvent(classifyFetchError(error, 'OpenAI Responses', signal, { callerSignal: request.signal }));
     }
+  }
+
+  private fetchResponses(body: Record<string, unknown>, signal?: AbortSignal): Promise<Response> {
+    return this.fetchImpl(`${this.baseUrl}/v1/responses`, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        authorization: `Bearer ${this.apiKey}`
+      },
+      body: JSON.stringify(body),
+      ...(signal ? { signal } : {})
+    });
   }
 }
 
@@ -321,13 +349,16 @@ interface ResponsesStreamEvent {
 function buildResponsesBody(
   model: string,
   request: ModelCompleteRequest,
-  stream: boolean
+  stream: boolean,
+  reasoningEffortOverride?: OpenAiReasoningEffort
 ): Record<string, unknown> {
-  const reasoningEffort = resolveOpenAiReasoningEffort(request.thinkingLevel);
+  const reasoningEffort = reasoningEffortOverride ?? resolveOpenAiReasoningEffort(request.thinkingLevel);
   return {
     model,
     stream,
-    input: request.messages.map(toResponsesInputItem),
+    // function_call / function_call_output 必须是 Responses input 的顶层项；
+    // 一个 assistant 消息可能展开为文本消息加一个或多个 function_call。
+    input: request.messages.flatMap(toResponsesInputItems),
     ...(request.tools?.length
       ? { tools: request.tools.map(toResponsesTool) }
       : {}),
@@ -340,6 +371,76 @@ function buildResponsesBody(
   };
 }
 
+type ResponsesFetchAttempt =
+  | { response: Response; errorBody: string }
+  | { error: unknown };
+
+/**
+ * Some gateways expose a Responses endpoint while advertising a narrower
+ * reasoning-effort enum for an individual model. Keep the product-level
+ * `max` option intact, but recover when the server explicitly tells us which
+ * values it accepts. This is deliberately a one-shot, evidence-based retry:
+ * unrelated 400s must remain visible to the user and must not be retried.
+ */
+async function fetchResponsesWithReasoningFallback(options: {
+  fetchResponse: (body: Record<string, unknown>) => Promise<Response>;
+  model: string;
+  request: ModelCompleteRequest;
+  stream: boolean;
+  body: Record<string, unknown>;
+}): Promise<ResponsesFetchAttempt> {
+  let response: Response;
+  try {
+    response = await options.fetchResponse(options.body);
+  } catch (error) {
+    return { error };
+  }
+  if (response.ok) return { response, errorBody: '' };
+
+  const firstErrorBody = await response.text().catch(() => '');
+  const fallbackEffort = resolveUnsupportedReasoningEffort(options.request, firstErrorBody);
+  if (fallbackEffort === undefined) {
+    return { response, errorBody: firstErrorBody };
+  }
+
+  try {
+    response = await options.fetchResponse(
+      buildResponsesBody(options.model, options.request, options.stream, fallbackEffort)
+    );
+  } catch (error) {
+    return { error };
+  }
+  if (response.ok) return { response, errorBody: '' };
+  return {
+    response,
+    errorBody: await response.text().catch(() => '')
+  };
+}
+
+/**
+ * Extract the highest supported fallback from a provider's explicit enum
+ * error. The server's list is authoritative for this request; no provider is
+ * assumed to support `xhigh` or `max` merely because another one does.
+ */
+function resolveUnsupportedReasoningEffort(
+  request: ModelCompleteRequest,
+  bodyText: string
+): OpenAiReasoningEffort | undefined {
+  if (request.thinkingLevel !== 'max') return undefined;
+  if (!/reasoning[.\s_-]*effort/i.test(bodyText)) return undefined;
+  const rejectsMax = /unknown variant\s*[`'\"]?max[`'\"]?/i.test(bodyText)
+    || /reasoning[.\s_-]*effort[\s\S]{0,160}\bmax\b[\s\S]{0,160}(?:unsupported|not supported|invalid|expected)/i.test(bodyText);
+  if (!rejectsMax) return undefined;
+
+  const expectedSection = bodyText.match(/expected\s+one\s+of\s+([\s\S]+)/i)?.[1] ?? '';
+  const supported = new Set(
+    (expectedSection.match(/\b(?:none|minimal|low|medium|high|xhigh|max)\b/gi) ?? [])
+      .map((value) => value.toLowerCase())
+  );
+  const fallbacks: OpenAiReasoningEffort[] = ['xhigh', 'high', 'medium', 'low', 'minimal', 'none'];
+  return fallbacks.find((effort) => supported.has(effort));
+}
+
 function listModelsError(diagnostic: {
   severity: string;
   code: string;
@@ -348,35 +449,36 @@ function listModelsError(diagnostic: {
   return { ok: false, error: { code: diagnostic.code, message: diagnostic.message } };
 }
 
-function toResponsesInputItem(message: ChatMessage): Record<string, unknown> {
+function toResponsesInputItems(message: ChatMessage): Array<Record<string, unknown>> {
   if (message.role === 'tool') {
-    return {
+    return [{
       type: 'function_call_output',
       call_id: message.toolCallId ?? 'unknown',
       output: message.content
-    };
+    }];
   }
   if (message.role === 'assistant' && message.toolCalls?.length) {
-    // Expand assistant tool calls as function_call items for multi-turn continuity.
-    return {
-      type: 'message',
-      role: 'assistant',
-      content: [
-        ...(message.content
-          ? [{ type: 'output_text', text: message.content }]
-          : []),
-        ...message.toolCalls.map((call) => ({
-          type: 'function_call',
-          call_id: call.id,
-          name: call.name,
-          arguments: call.argumentsJson
-        }))
-      ]
-    };
+    // Responses API 的 function_call 是 input 顶层 item，不能嵌在
+    // assistant message.content 中，否则第二轮请求会被拒绝为 input[n].content 400。
+    return [
+      ...(message.content
+        ? [{
+            type: 'message',
+            role: 'assistant',
+            content: message.content
+          }]
+        : []),
+      ...message.toolCalls.map((call) => ({
+        type: 'function_call',
+        call_id: call.id,
+        name: call.name,
+        arguments: call.argumentsJson
+      }))
+    ];
   }
   // 多模态：user 消息带图像时 content 用 input_* parts（data URL 内联）。
   if (message.role === 'user' && message.images && message.images.length > 0) {
-    return {
+    return [{
       type: 'message',
       role: 'user',
       content: [
@@ -386,13 +488,13 @@ function toResponsesInputItem(message: ChatMessage): Record<string, unknown> {
           image_url: `data:${image.mediaType};base64,${image.dataBase64}`
         }))
       ]
-    };
+    }];
   }
-  return {
+  return [{
     type: 'message',
     role: message.role === 'system' ? 'system' : message.role === 'assistant' ? 'assistant' : 'user',
     content: message.content
-  };
+  }];
 }
 
 function toResponsesTool(tool: ToolDefinition): Record<string, unknown> {

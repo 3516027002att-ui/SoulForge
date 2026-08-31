@@ -501,10 +501,8 @@ export function registerAgentIpcHandlers(deps: AgentIpcDeps): void {
       const bridge = createAgentToolBridge({
         registry: deps.toolRegistry,
         context: { ...deps.currentToolContext(), mode },
-        // Structured discovery must be evidence-first for every prompt, not only
-        // prompts containing a fragile keyword subset. Exact targets are still
-        // allowed by the bridge's canonical-target check.
-        requireTextLookupBeforeStructuredDiscovery: true
+        // Discovery is non-blocking: the bridge returns candidate/evidence
+        // metadata, while native readers and writers enforce real authority.
       });
   
       // AI 回滚接通：rollback_operation 走与 UI 操作级回滚完全相同的通道 ——

@@ -1,0 +1,164 @@
+import { existsSync } from 'node:fs';
+import { join } from 'node:path';
+import { app, ipcMain, type IpcMainInvokeEvent, type WebContents } from 'electron';
+import {
+  HttpFeedbackEndpoint,
+  MutterService,
+  SessionFeedbackService,
+  type BuildFingerprint
+} from '@soulforge/core';
+import {
+  AUXILIARY_IPC_CHANNELS,
+  type SessionFeedbackIpcRequest
+} from '@soulforge/shared';
+
+const DEFAULT_FEEDBACK_ENDPOINT = 'https://script.google.com/macros/s/AKfycbzWoGTeAvqfqBHyBfuktDEQPsOejKLpErdU40LbvkN_XxAaBaFDC3SdNCe5AryY4pmA/exec';
+
+let handlersRegistered = false;
+let trustedRendererId: number | null = null;
+let mutterService: MutterService | null = null;
+let feedbackService: SessionFeedbackService | null = null;
+let feedbackConfigured = false;
+
+function assertTrustedSender(event: IpcMainInvokeEvent): void {
+  if (trustedRendererId === null || event.sender.id !== trustedRendererId) {
+    throw new Error('AUXILIARY_IPC_UNTRUSTED_SENDER');
+  }
+}
+
+function decodeSessionFeedbackInput(value: unknown): SessionFeedbackIpcRequest | null {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) return null;
+  const candidate = value as Record<string, unknown>;
+  const sessionId = candidate.sessionId;
+  const rating = candidate.rating;
+  const comment = candidate.comment;
+
+  if (typeof sessionId !== 'string' || sessionId.trim().length === 0 || sessionId.length > 160) return null;
+  if (rating !== 'positive' && rating !== 'negative' && rating !== 'incomplete') return null;
+  if (comment !== undefined && (typeof comment !== 'string' || comment.length > 2_000)) return null;
+
+  return comment === undefined
+    ? { sessionId, rating }
+    : { sessionId, rating, comment };
+}
+
+function resolveMutterPath(): string {
+  const configured = process.env.SOULFORGE_MUTTER_PATH?.trim();
+  const candidates = [
+    configured && configured.length > 0 ? configured : null,
+    app.isPackaged ? join(process.resourcesPath, 'mutter.md') : null,
+    join(app.getAppPath(), 'mutter.md'),
+    join(app.getAppPath(), '..', '..', 'mutter.md'),
+    join(process.cwd(), 'mutter.md')
+  ].filter((value): value is string => value !== null);
+
+  return candidates.find((candidate) => existsSync(candidate)) ?? candidates[0] ?? join(process.cwd(), 'mutter.md');
+}
+
+function buildFingerprint(): BuildFingerprint {
+  const fingerprint: BuildFingerprint = { appVersion: app.getVersion() };
+  const commitSha = process.env.SOULFORGE_COMMIT_SHA?.trim();
+  const promptVersion = process.env.SOULFORGE_PROMPT_VERSION?.trim();
+  const toolRegistryVersion = process.env.SOULFORGE_TOOL_REGISTRY_VERSION?.trim();
+  if (commitSha) fingerprint.commitSha = commitSha;
+  if (promptVersion) fingerprint.promptVersion = promptVersion;
+  if (toolRegistryVersion) fingerprint.toolRegistryVersion = toolRegistryVersion;
+  return fingerprint;
+}
+
+async function ensureMutterService(): Promise<MutterService> {
+  if (mutterService) return mutterService;
+  const service = new MutterService(resolveMutterPath());
+  await service.load();
+  service.startWatching();
+  mutterService = service;
+  return service;
+}
+
+function ensureFeedbackService(): SessionFeedbackService | null {
+  if (feedbackService) return feedbackService;
+  const configuredEndpoint = process.env.SOULFORGE_FEEDBACK_ENDPOINT?.trim();
+  const endpointUrl = configuredEndpoint && configuredEndpoint.length > 0
+    ? configuredEndpoint
+    : DEFAULT_FEEDBACK_ENDPOINT;
+
+  feedbackConfigured = endpointUrl.length > 0;
+  if (!feedbackConfigured) return null;
+
+  feedbackService = new SessionFeedbackService(
+    join(app.getPath('userData'), 'agent'),
+    new HttpFeedbackEndpoint(endpointUrl),
+    buildFingerprint()
+  );
+  return feedbackService;
+}
+
+/**
+ * Registers the main-process half of the two auxiliary features. The preload
+ * and renderer deliberately stay separate so UI work can be done without
+ * touching filesystem/network authority.
+ */
+export function registerAuxiliaryIpcHandlers(webContents: WebContents): void {
+  trustedRendererId = webContents.id;
+  webContents.once('destroyed', () => {
+    if (trustedRendererId === webContents.id) trustedRendererId = null;
+  });
+
+  if (handlersRegistered) return;
+  handlersRegistered = true;
+
+  ipcMain.handle(AUXILIARY_IPC_CHANNELS.mutterNext, async (event) => {
+    assertTrustedSender(event);
+    const service = await ensureMutterService();
+    return { text: service.next(), ...service.snapshot() };
+  });
+
+  ipcMain.handle(AUXILIARY_IPC_CHANNELS.mutterStatus, async (event) => {
+    assertTrustedSender(event);
+    const service = await ensureMutterService();
+    return service.snapshot();
+  });
+
+  ipcMain.handle(AUXILIARY_IPC_CHANNELS.feedbackStatus, (event) => {
+    assertTrustedSender(event);
+    const service = ensureFeedbackService();
+    return {
+      configured: service !== null && feedbackConfigured,
+      appVersion: app.getVersion()
+    };
+  });
+
+  ipcMain.handle(AUXILIARY_IPC_CHANNELS.feedbackSubmitSession, async (event, input: unknown) => {
+    assertTrustedSender(event);
+    const decoded = decodeSessionFeedbackInput(input);
+    if (!decoded) {
+      return { ok: false, code: 'INVALID_INPUT', message: '反馈请求格式无效。' };
+    }
+    const service = ensureFeedbackService();
+    if (!service) {
+      return { ok: false, code: 'ENDPOINT_NOT_CONFIGURED', message: '反馈上传 endpoint 尚未配置。' };
+    }
+    return service.submitSessionFeedback(decoded);
+  });
+
+  ipcMain.handle(AUXILIARY_IPC_CHANNELS.feedbackSubmitAll, async (event) => {
+    assertTrustedSender(event);
+    const service = ensureFeedbackService();
+    if (!service) {
+      return {
+        ok: false,
+        submissionId: '',
+        uploadedSessions: 0,
+        failedSessions: [{ sessionId: '__endpoint__', code: 'ENDPOINT_NOT_CONFIGURED' }]
+      };
+    }
+    return service.submitAllHistory();
+  });
+}
+
+export function disposeAuxiliaryServices(): void {
+  mutterService?.dispose();
+  mutterService = null;
+  feedbackService = null;
+  trustedRendererId = null;
+}

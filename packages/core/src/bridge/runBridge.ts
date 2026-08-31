@@ -36,6 +36,11 @@ export interface RunBridgeOptions {
    * 可到数 MB~29 MB base64，调用方按需提高（守护进程绝对上限 32 MiB）。
    */
   maxFrameBytes?: number;
+  /**
+   * 守护进程并发请求数。默认 2；仅对已证明可并行的读取批次提高，避免
+   * 把所有 native writer/read 链路一起放大。
+   */
+  maxConcurrency?: number;
 }
 
 const DEFAULT_TIMEOUT_MS = 15_000;
@@ -59,7 +64,15 @@ export async function runBridge<T = unknown>(options: RunBridgeOptions): Promise
     ?? stableSessionId(allowedRoots);
   const launch = resolveBridgeLaunch(options, bridgeProjectPath);
   const writableRoots = uniqueResolvedRoots(options.writableRoots ?? []);
-  const poolKey = JSON.stringify({ launch, workspaceSessionId, allowedRoots, writableRoots, oodleRuntimeRoot: options.oodleRuntimeRoot });
+  const maxConcurrency = normalizeMaxConcurrency(options.maxConcurrency);
+  const poolKey = JSON.stringify({
+    launch,
+    workspaceSessionId,
+    allowedRoots,
+    writableRoots,
+    oodleRuntimeRoot: options.oodleRuntimeRoot,
+    maxConcurrency
+  });
 
   try {
     const client = await getOrCreateClient(poolKey, {
@@ -73,7 +86,7 @@ export async function runBridge<T = unknown>(options: RunBridgeOptions): Promise
       // PARAM/MSB children and FMG tables can exceed 1 MiB when base64-framed.
       // PARAM 全量载荷（includeAllPayloads）可达数 MB~29 MB base64，按需提高。
       maxFrameBytes: options.maxFrameBytes ?? 16 * 1024 * 1024,
-      maxConcurrency: 2,
+      maxConcurrency,
       startupTimeoutMs: options.timeoutMs ?? DEFAULT_TIMEOUT_MS
     }, launch);
     const payload = await client.request<BridgeResult<T>>({
@@ -271,10 +284,12 @@ export async function disposeBridgeDaemonPool(): Promise<void> {
 
 async function findCoveringClient(
   launch: { executable: string; args: string[] },
+  workspaceSessionId: string,
   allowedRoots: string[],
   writableRoots: string[],
   oodleRuntimeRoot?: string,
-  maxFrameBytes?: number
+  maxFrameBytes?: number,
+  maxConcurrency?: number
 ): Promise<BridgeDaemonClient | undefined> {
   const normAllowed = allowedRoots.map((r) => resolve(r));
   const normWritable = writableRoots.map((r) => resolve(r));
@@ -286,8 +301,14 @@ async function findCoveringClient(
         continue;
       }
       if (client.options.executable !== launch.executable) continue;
+      // Native document sessions are scoped to this opaque workspace session.
+      // A client whose roots cover the request is not interchangeable with a
+      // client from another session: reusing it can make a valid PARAM session
+      // token look expired when the follow-up request lands on the other daemon.
+      if (client.options.workspaceSessionId !== workspaceSessionId) continue;
       if (oodleRuntimeRoot && client.options.oodleRuntimeRoot !== resolve(oodleRuntimeRoot)) continue;
       if (maxFrameBytes && (client.options.maxFrameBytes ?? 0) < maxFrameBytes) continue;
+      if (maxConcurrency && (client.options.maxConcurrency ?? 1) < maxConcurrency) continue;
 
       const clientAllowed = client.options.allowedRoots.map((r) => resolve(r));
       const allAllowedCovered = normAllowed.every((root) => isCoveredBy(root, clientAllowed));
@@ -320,10 +341,12 @@ async function getOrCreateClient(
 ): Promise<BridgeDaemonClient> {
   const covering = await findCoveringClient(
     launch,
+    options.workspaceSessionId,
     options.allowedRoots,
     options.writableRoots ?? [],
     options.oodleRuntimeRoot,
-    options.maxFrameBytes
+    options.maxFrameBytes,
+    options.maxConcurrency
   );
   if (covering) return covering;
 
@@ -403,6 +426,11 @@ function findBridgeProjectPathUp(startDirectory: string): string | null {
 
 function stableSessionId(allowedRoots: string[]): string {
   return `bridge-${createHash('sha256').update(allowedRoots.join('\n')).digest('hex').slice(0, 24)}`;
+}
+
+function normalizeMaxConcurrency(value: number | undefined): number {
+  if (value === undefined || !Number.isSafeInteger(value)) return 2;
+  return Math.max(1, Math.min(8, value));
 }
 
 function uniqueResolvedRoots(roots: string[]): string[] {

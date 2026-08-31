@@ -101,6 +101,11 @@ let activeFingerprintStore: FingerprintStoreState | null = null;
 let foregroundActive = false;
 let workspaceIndexingAbort: AbortController | null = null;
 let workspaceIndexingTask: Promise<void> | null = null;
+let workspaceAnalyzeInFlight: {
+  sessionId: string;
+  generation: number;
+  promise: Promise<AnalyzeWorkspaceSummary>;
+} | null = null;
 let activeOverlayLabel = '';
 const directorySelections = new Map<string, DirectorySelectionRecord>();
 const recentPathsFile = join(app.getPath('userData'), 'recent-paths.json');
@@ -172,8 +177,8 @@ export interface WorkspaceIpcDeps {
   ): Promise<{ allowedRoots: string[]; diagnostics: Diagnostic[] }>;
 }
 
-async function rebuildActionBinderMembershipIndex(input: {
-  deps: WorkspaceIpcDeps;
+export async function rebuildActionBinderMembershipIndex(input: {
+  deps: Pick<WorkspaceIpcDeps, 'verifiedReadRoots'>;
   index: WorkspaceIndex;
   session: WorkspaceSession;
   sessionId: string;
@@ -199,6 +204,39 @@ async function rebuildActionBinderMembershipIndex(input: {
     characterFamilies: result.characterFamilies,
     candidateCount: result.candidates.length
   };
+}
+
+/**
+ * 等待当前工作区的后台哈希/语义索引任务完成。
+ *
+ * workspace.scan 先返回轻量文件列表，再在后台建立 ACTION Binder membership。
+ * 动作 IPC 需要等待同一个任务，而不是在播放阶段重新扫描 sibling ANIBND。
+ * 任务自身会把失败写入扫描 job，因此这里保持等待接口不抛出后台异常。
+ */
+export async function waitForWorkspaceIndexing(): Promise<void> {
+  // scan 与 analyze 都可能替换/建立 ACTION membership。按快照等待，完成后
+  // 再检查一次，避免刚等完 scan 就撞上 analyze 刚发布的未就绪索引。
+  for (;;) {
+    const scanTask = workspaceIndexingTask;
+    if (scanTask) {
+      try {
+        await scanTask;
+      } catch {
+        // 失败状态由 workspace scan job / active index diagnostics 负责暴露。
+      }
+    }
+    const analyzeTask = workspaceAnalyzeInFlight?.promise;
+    if (analyzeTask) {
+      try {
+        await analyzeTask;
+      } catch {
+        // 分析失败由调用方的结构化诊断负责暴露。
+      }
+    }
+    if (activeIndex?.isActionBinderMembershipReady()) return;
+    if (workspaceIndexingTask !== scanTask || workspaceAnalyzeInFlight?.promise !== analyzeTask) continue;
+    return;
+  }
 }
 
 export function clearWorkspaceIpcCaches(): void {
@@ -406,11 +444,6 @@ export function registerWorkspaceIpcHandlers(deps: WorkspaceIpcDeps): void {
     return { workspaceSessionId: activeWorkspaceSessionId, session: { workspaceSessionId: activeWorkspaceSessionId, workspaceLabel, game: activeSession.meta.game, openedAt: activeSession.meta.openedAt, baseMounted: !activeSession.meta.baseMissing, ...(baseSelection ? { baseLabel: baseSelection.label } : {}) } };
   });
 
-  let analyzeInFlight: {
-    sessionId: string;
-    generation: number;
-    promise: Promise<AnalyzeWorkspaceSummary>;
-  } | null = null;
   let lastAnalyze: {
     sessionId: string;
     generation: number;
@@ -427,8 +460,8 @@ export function registerWorkspaceIpcHandlers(deps: WorkspaceIpcDeps): void {
     if (lastAnalyze && lastAnalyze.sessionId === sessionId && lastAnalyze.generation === generation) {
       return lastAnalyze.summary;
     }
-    if (analyzeInFlight && analyzeInFlight.sessionId === sessionId && analyzeInFlight.generation === generation) {
-      return analyzeInFlight.promise;
+    if (workspaceAnalyzeInFlight && workspaceAnalyzeInFlight.sessionId === sessionId && workspaceAnalyzeInFlight.generation === generation) {
+      return workspaceAnalyzeInFlight.promise;
     }
     const promise = (async (): Promise<AnalyzeWorkspaceSummary> => {
       const result = await analyzeWorkspace({
@@ -438,15 +471,20 @@ export function registerWorkspaceIpcHandlers(deps: WorkspaceIpcDeps): void {
       if (sessionId !== activeWorkspaceSessionId || generation !== activeWorkspaceSessionGeneration) {
         throw new Error('工作区已切换，分析结果已丢弃。');
       }
-      activeIndex = result.index;
-      indexedFiles = result.index.getFiles();
       const actionBinderIndex = await rebuildActionBinderMembershipIndex({
         deps,
         index: result.index,
         session,
         sessionId,
-        indexedFiles: indexedFiles
+        indexedFiles: result.index.getFiles()
       });
+      if (sessionId !== activeWorkspaceSessionId || generation !== activeWorkspaceSessionGeneration) {
+        throw new Error('工作区已切换，分析结果已丢弃。');
+      }
+      // 只有完整 ACTION membership 已装入新索引后才发布它。这样分析期间
+      // 仍保留上一份可用索引，动作读取不会短暂撞上“未就绪”空投影。
+      activeIndex = result.index;
+      indexedFiles = result.index.getFiles();
       const database = await deps.ensureActiveOperationLog(session);
       await refreshRagAfterAnalyze(database, result.index);
       const summary: AnalyzeWorkspaceSummary = {
@@ -467,11 +505,11 @@ export function registerWorkspaceIpcHandlers(deps: WorkspaceIpcDeps): void {
       lastAnalyze = { sessionId, generation, summary };
       return summary;
     })();
-    analyzeInFlight = { sessionId, generation, promise };
+    workspaceAnalyzeInFlight = { sessionId, generation, promise };
     try {
       return await promise;
     } finally {
-      if (analyzeInFlight?.promise === promise) analyzeInFlight = null;
+      if (workspaceAnalyzeInFlight?.promise === promise) workspaceAnalyzeInFlight = null;
     }
   });
 

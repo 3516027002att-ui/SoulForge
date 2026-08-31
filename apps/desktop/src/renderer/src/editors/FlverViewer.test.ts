@@ -29,6 +29,55 @@ const leaderBone: FlverPreviewBone = {
 };
 
 describe('buildBundleSemanticScene action assembly projection', () => {
+  it('按 material index 绑定不同 albedo，未匹配材质才回退模型纹理', () => {
+    const baseTexture = 'data:image/png;base64,base';
+    const materialTexture = 'data:image/png;base64,material';
+    const mesh = (meshIndex: number, materialIndex: number) => ({
+      meshIndex,
+      materialIndex,
+      vertexCount: 3,
+      indexSize: 16 as const,
+      positionsBase64: float32Base64([0, 0, 0, 1, 0, 0, 0, 1, 0]),
+      indicesBase64: uint16Base64([0, 1, 2]),
+      skinningMode: 'static' as const,
+      boneIndexSpace: 'none' as const
+    });
+    const bundle: CharacterPreviewBundle = {
+      meshCount: 2,
+      vertexCount: 6,
+      boneCount: 0,
+      leaderModelId: 'model',
+      models: [{
+        modelId: 'model',
+        entry: { index: 0, id: 1, name: 'c1130.flver', duplicateOrdinal: 0, contentHash: 'hash' },
+        meshCount: 2,
+        boneCount: 0,
+        meshes: [mesh(0, 0), mesh(1, 1)],
+        bones: [],
+        texturePreviewToken: baseTexture,
+        texturePreviews: [{
+          materialIndex: 1,
+          textureName: 'c1130_head_a',
+          texturePreviewToken: materialTexture,
+          width: 1,
+          height: 1,
+          colorSpace: 'srgb'
+        }]
+    }]
+    };
+
+    const scene = buildBundleSemanticScene(bundle);
+    const baseSceneTexture = scene.meshes[0]?.texture;
+    const materialSceneTexture = scene.meshes[1]?.texture;
+    assert.equal(baseSceneTexture?.kind, 'image-uri');
+    assert.equal(materialSceneTexture?.kind, 'image-uri');
+    if (baseSceneTexture?.kind !== 'image-uri' || materialSceneTexture?.kind !== 'image-uri') {
+      throw new Error('expected image-uri texture projections');
+    }
+    assert.equal(baseSceneTexture.uri, baseTexture);
+    assert.equal(materialSceneTexture.uri, materialTexture);
+  });
+
   it('preserves a remapped body mesh leader skeleton id', () => {
     const bundle: CharacterPreviewBundle = {
       meshCount: 1,

@@ -1,4 +1,5 @@
-import { dirname, basename } from 'node:path';
+import { existsSync } from 'node:fs';
+import { dirname, basename, join } from 'node:path';
 import type { IpcMainInvokeEvent } from 'electron';
 import {
   applyNativeMutation,
@@ -38,6 +39,36 @@ export interface AssetIpcDeps {
   electronConfirmationPort(event: IpcMainInvokeEvent): WriteConfirmationPort;
   toSaveResultFromOutcome(outcome: NativeMutationOutcome, files: readonly IndexedFile[]): RendererSaveResult;
   resolveFlverReadFile(sourceUri: string): { absolutePath: string; relativePath: string } | null;
+}
+
+/**
+ * FLVER 本身通常不携带可直接显示的纹理像素。纹理候选只能由 main 根据
+ * 已解析的真实路径派生，再经过 Bridge allowed roots 校验；renderer 不接触
+ * 本机路径，也不按文件名在浏览器里猜纹理。
+ */
+function flverTexturePackagePaths(modelPath: string): string[] {
+  const candidates: string[] = [];
+  const add = (candidate: string): void => {
+    if (!existsSync(candidate)) return;
+    if (!candidates.some((path) => path.toLowerCase() === candidate.toLowerCase())) {
+      candidates.push(candidate);
+    }
+  };
+  const lower = modelPath.toLowerCase();
+  let stem: string | null = null;
+  if (lower.endsWith('.flver.dcx')) stem = modelPath.slice(0, -'.flver.dcx'.length);
+  else if (lower.endsWith('.flver')) stem = modelPath.slice(0, -'.flver'.length);
+  if (stem) {
+    add(`${stem}.texbnd.dcx`);
+    add(`${stem}.texbnd`);
+    add(`${stem}.tpf.dcx`);
+    add(`${stem}.tpf`);
+  }
+  if (basename(dirname(modelPath)).toLowerCase() === 'parts') {
+    add(join(dirname(modelPath), 'common_body.tpf.dcx'));
+    add(join(dirname(modelPath), 'common_body.tpf'));
+  }
+  return candidates;
 }
 
 export function registerAssetIpcHandlers(deps: AssetIpcDeps): void {
@@ -108,7 +139,12 @@ deps.handle('resource.readFlverDocument', async (_event, sourceUri: string) => {
       filePath: file.absolutePath,
       allowedRoots: roots.allowedRoots,
       timeoutMs: 120_000,
-      commandOptions: { meshIndex }
+      commandOptions: {
+        meshIndex,
+        maxVertices: 1_000_000,
+        maxIndices: 3_000_000,
+        texturePackagePaths: flverTexturePackagePaths(file.absolutePath)
+      }
     });
     return sanitizeRendererValue({ ok: result.parseStatus !== 'failed', sourceUri, relativePath: file.relativePath, data: result.data, diagnostics: result.diagnostics });
   });

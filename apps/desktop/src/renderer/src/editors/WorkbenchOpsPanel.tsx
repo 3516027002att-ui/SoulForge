@@ -45,8 +45,8 @@ export interface WorkbenchOpsPanelProps {
   patchImpact?: WorkbenchPatchImpactView | null;
   onCancelJob?: (jobId: string) => void;
   onRollback?: (opId: string) => void;
-  /** Disable every rollback action while one transaction is in flight. */
-  rollbackBusy?: boolean;
+  /** Only this history row owns the visible in-flight label. */
+  rollbackBusyOpId?: string | null;
 }
 
 type TabId = 'jobs' | 'history' | 'diagnostics' | 'patch';
@@ -143,10 +143,10 @@ export function WorkbenchOpsPanel(props: WorkbenchOpsPanelProps): ReactElement {
                 {row.canRollback && (
                   <button
                     type="button"
-                    disabled={props.rollbackBusy === true}
+                    disabled={props.rollbackBusyOpId === row.opId}
                     onClick={() => props.onRollback?.(row.opId)}
                   >
-                    {props.rollbackBusy === true ? '回滚中…' : '回滚'}
+                    {props.rollbackBusyOpId === row.opId ? '回滚中…' : '回滚'}
                   </button>
                 )}
               </span>

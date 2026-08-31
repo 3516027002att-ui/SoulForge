@@ -3,7 +3,8 @@ import type {
   BoneTransformData,
   CharacterPreviewBundle,
   FlverPreviewMesh,
-  FlverPreviewModel
+  FlverPreviewModel,
+  FlverPreviewTexture
 } from '@soulforge/shared';
 import {
   mountFlverScene,
@@ -30,7 +31,7 @@ export interface FlverViewerProps {
   textureBase64?: string | undefined;
   boneWeightsBase64?: string | undefined;
   boneIndicesBase64?: string | undefined;
-  /** Atomic multi-FLVER character/parts payload. Every model keeps its own skeleton namespace. */
+  /** Atomic multi-FLVER character/parts payload. Main/core may remap parts to the leader namespace. */
   externalBundle?: CharacterPreviewBundle | undefined;
   /** Per-FLVER local poses keyed by CharacterPreviewBundle.models[].modelId. */
   externalSkeletonPoses?: Readonly<Record<string, BoneTransformData[]>> | undefined;
@@ -49,6 +50,9 @@ export interface FlverViewerProps {
     boneIndicesBase64?: string | undefined;
     skinningMode?: 'weighted' | 'rigid' | 'static' | undefined;
     boneIndexSpace?: 'flver-global' | 'none' | undefined;
+    /** Bridge 根据当前 mesh 的 material 解析出的 PNG data URI。 */
+    texturePreviewToken?: string | undefined;
+    textureColorSpace?: string | undefined;
     vertexCount: number;
   } | undefined;
   /**
@@ -66,6 +70,8 @@ export interface FlverViewerProps {
     boneIndicesBase64?: string | undefined;
     skinningMode?: 'weighted' | 'rigid' | 'static' | undefined;
     boneIndexSpace?: 'flver-global' | 'none' | undefined;
+    texturePreviewToken?: string | undefined;
+    textureColorSpace?: string | undefined;
     vertexCount: number;
   }> | undefined;
   /** S17：外部骨骼层级（与 externalMeshData 同源），提供时跳过 readFlverSkeleton。 */
@@ -115,6 +121,8 @@ interface MeshData {
   boneIndicesBase64?: string | undefined;
   skinningMode?: 'weighted' | 'rigid' | 'static' | undefined;
   boneIndexSpace?: 'flver-global' | 'none' | undefined;
+  texturePreviewToken?: string | undefined;
+  textureColorSpace?: string | undefined;
   vertexCount: number;
 }
 
@@ -227,7 +235,9 @@ export function FlverViewer(props: FlverViewerProps): ReactElement {
             translation: [b.translation[0] ?? 0, b.translation[1] ?? 0, b.translation[2] ?? 0],
             rotation: [b.rotation[0] ?? 0, b.rotation[1] ?? 0, b.rotation[2] ?? 0],
             scale: [b.scale?.[0] ?? 1, b.scale?.[1] ?? 1, b.scale?.[2] ?? 1],
-            rotationOrder: (b.rotationOrder === 'XZY' ? 'YZX' : b.rotationOrder) ?? 'YZX'
+            // Bridge 的 FLVER 原生欧拉顺序是 XZY；不能在 renderer 入口
+            // 偷换成 YZX，否则骨骼层级和采样姿态都会发生确定性偏移。
+            rotationOrder: b.rotationOrder ?? 'XZY'
           }))
         );
       } catch {
@@ -263,7 +273,7 @@ export function FlverViewer(props: FlverViewerProps): ReactElement {
       try {
         const result = await bridge.readFlverMesh(props.sourceUri!, idx) as {
           ok: boolean;
-          data?: { positionsBase64?: string; indicesBase64?: string; indexSize?: number; uvsBase64?: string; normalsBase64?: string; boneWeightsBase64?: string; boneIndicesBase64?: string; skinningMode?: 'weighted' | 'rigid' | 'static'; boneIndexSpace?: 'flver-global' | 'none'; vertexCount?: number };
+          data?: { positionsBase64?: string; indicesBase64?: string; indexSize?: number; uvsBase64?: string; normalsBase64?: string; boneWeightsBase64?: string; boneIndicesBase64?: string; skinningMode?: 'weighted' | 'rigid' | 'static'; boneIndexSpace?: 'flver-global' | 'none'; texturePreviewToken?: string; textureColorSpace?: string; vertexCount?: number };
           diagnostics?: Array<{ message: string }>;
         };
         if (result.ok && result.data?.positionsBase64) {
@@ -277,6 +287,8 @@ export function FlverViewer(props: FlverViewerProps): ReactElement {
             ...(result.data.boneIndicesBase64 ? { boneIndicesBase64: result.data.boneIndicesBase64 } : {}),
             skinningMode: result.data.skinningMode,
             boneIndexSpace: result.data.boneIndexSpace,
+            ...(result.data.texturePreviewToken ? { texturePreviewToken: result.data.texturePreviewToken } : {}),
+            ...(result.data.textureColorSpace ? { textureColorSpace: result.data.textureColorSpace } : {}),
             vertexCount: result.data.vertexCount ?? 0
           }]);
         } else {
@@ -472,7 +484,15 @@ function buildSemanticScene(input: {
       mesh.skinWeights = decodeSkinWeights(meshData.boneWeightsBase64, vertexCount);
     }
 
-    if (input.texture) mesh.texture = input.texture;
+    if (input.texture) {
+      mesh.texture = input.texture;
+    } else if (meshData.texturePreviewToken) {
+      mesh.texture = {
+        kind: 'image-uri',
+        uri: meshData.texturePreviewToken,
+        colorSpace: normalizeTextureColorSpace(meshData.textureColorSpace)
+      };
+    }
     meshes.push(mesh);
   }
   const bounds = computeSceneBounds(input.boundingBox, meshes, input.skeleton.length > 0 ? 15 : 100);
@@ -483,7 +503,7 @@ function buildSemanticScene(input: {
     translation: bone.translation,
     rotation: bone.rotation,
     scale: bone.scale ?? [1, 1, 1],
-    rotationOrder: (bone.rotationOrder === 'XZY' ? 'YZX' : bone.rotationOrder) ?? 'YZX'
+    rotationOrder: bone.rotationOrder ?? 'XZY'
   }));
   const dummies = input.dummies.map((dummy, index) => ({
     id: `dummy-${index}`,
@@ -520,15 +540,32 @@ export function buildBundleSemanticScene(
         translation: bone.translation,
         rotation: bone.rotation,
         scale: bone.scale,
-        rotationOrder: (bone.rotationOrder === 'XZY' ? 'YZX' : bone.rotationOrder) as 'YZX' | 'XYZ'
+        rotationOrder: bone.rotationOrder as 'YZX' | 'XYZ' | 'XZY'
       }))
     }));
 
   for (const model of bundle.models) {
+    const materialTextures = new Map<number, FlverSceneTexture>();
+    if (!texture) {
+      for (const texturePreview of model.texturePreviews ?? []) {
+        materialTextures.set(texturePreview.materialIndex, toSceneTexture(texturePreview));
+      }
+    }
+    const modelTexture = texture ?? (model.texturePreviewToken
+      ? {
+          kind: 'image-uri' as const,
+          uri: model.texturePreviewToken,
+          colorSpace: normalizeTextureColorSpace(model.textureColorSpace)
+        }
+      : null);
     for (const meshData of model.meshes) {
       const skeletonId = meshData.skeletonId ?? model.modelId;
       const targetSkeleton = bundle.models.find((candidate) => candidate.modelId === skeletonId);
-      const mesh = decodeBundleMesh(model, meshData, texture, targetSkeleton?.bones.length ?? model.bones.length);
+      const meshTexture = texture
+        ?? (meshData.materialIndex !== undefined
+          ? materialTextures.get(meshData.materialIndex) ?? modelTexture
+          : modelTexture);
+      const mesh = decodeBundleMesh(model, meshData, meshTexture, targetSkeleton?.bones.length ?? model.bones.length);
       meshes.push(mesh);
     }
   }
@@ -597,6 +634,18 @@ function decodeBundleMesh(
   return mesh;
 }
 
+function normalizeTextureColorSpace(value: string | undefined): 'linear' | 'srgb' {
+  return value?.toLowerCase() === 'linear' ? 'linear' : 'srgb';
+}
+
+function toSceneTexture(texture: FlverPreviewTexture): FlverSceneTexture {
+  return {
+    kind: 'image-uri',
+    uri: texture.texturePreviewToken,
+    colorSpace: normalizeTextureColorSpace(texture.colorSpace)
+  };
+}
+
 /** 把外部/IPC 返回的单个网格的 DTO 规整成内部 MeshData（问题4-A 参数复用）。 */
 function toMeshData(input: {
   positionsBase64: string;
@@ -608,6 +657,8 @@ function toMeshData(input: {
   boneIndicesBase64?: string | undefined;
   skinningMode?: 'weighted' | 'rigid' | 'static' | undefined;
   boneIndexSpace?: 'flver-global' | 'none' | undefined;
+  texturePreviewToken?: string | undefined;
+  textureColorSpace?: string | undefined;
   vertexCount: number;
 }): MeshData {
   return {
@@ -620,6 +671,8 @@ function toMeshData(input: {
     boneIndicesBase64: input.boneIndicesBase64 ?? undefined,
     skinningMode: input.skinningMode,
     boneIndexSpace: input.boneIndexSpace,
+    texturePreviewToken: input.texturePreviewToken ?? undefined,
+    textureColorSpace: input.textureColorSpace ?? undefined,
     vertexCount: input.vertexCount
   };
 }

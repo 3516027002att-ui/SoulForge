@@ -637,7 +637,59 @@ function registerFixtureIpc() {
     };
   });
 
-  handleTrusted('resource.readContainerParamPage', async (_event, containerUri, entryIndex, page, pageSize, query, loadAll) => {
+  handleTrusted('resource.readContainerParamRowIndex', async (_event, containerUri, entryIndex) => {
+    track('resource.readContainerParamRowIndex');
+    // 与旧分页等待测试同口径：延迟只由测试 env 打开，用来观察索引首屏的加载反馈。
+    const delayMs = Number(process.env.SF_TEST_PARAM_READ_DELAY_MS ?? 0);
+    if (Number.isFinite(delayMs) && delayMs > 0) {
+      await new Promise((resolve) => { setTimeout(resolve, delayMs); });
+    }
+    const failure = (message, code) => ({
+      ok: false,
+      containerUri,
+      entryIndex,
+      paramName: null,
+      typeName: null,
+      rowDataSize: 0,
+      rowCount: 0,
+      rows: [],
+      rowsTruncated: false,
+      containerHash: null,
+      childHash: null,
+      diagnostics: [{ severity: 'error', code, message, containerUri }]
+    });
+    if (containerUri !== fixtureParamUri) {
+      return failure(`fixture 未登记的容器：${containerUri}`, 'CONTAINER_NOT_FOUND');
+    }
+    const table = paramTables.find((t) => t.entryIndex === entryIndex);
+    if (!table || table.broken) {
+      return failure('BrokenParam 是 fixture 的失败样本：字段层读取失败。', 'PARAM_READ_FAILED');
+    }
+    const rows = table.rows.map((row, rowIndex) => ({
+      rowIndex,
+      id: row.id,
+      name: row.name,
+      dataHash: row.dataHash
+    }));
+    return {
+      ok: true,
+      containerUri,
+      entryIndex,
+      paramName: table.name,
+      typeName: table.typeName,
+      rowDataSize: PARAM_ROW_SIZE,
+      rowCount: rows.length,
+      rows,
+      rowsTruncated: false,
+      containerHash: 'fixture-container-hash',
+      childHash: `fixture-child-hash-${entryIndex}`,
+      sessionToken: `fixture-param-session-${entryIndex}`,
+      authority: 'fixture',
+      diagnostics: []
+    };
+  });
+
+  handleTrusted('resource.readContainerParamPage', async (_event, containerUri, entryIndex, page, pageSize, query, loadAll, documentSessionToken) => {
     track('resource.readContainerParamPage');
     // 问题 5-E：SF_TEST_PARAM_READ_DELAY_MS 只在 spec 自己的 env 里设，用来
     // 稳定复现「打开大表后、行出来之前」的等待窗口（默认 fixture 73ms 就答完，
@@ -660,17 +712,21 @@ function registerFixtureIpc() {
     if (!table || table.broken) {
       return failure('BrokenParam 是 fixture 的失败样本：字段层读取失败。', 'PARAM_READ_FAILED');
     }
+    if (loadAll !== true && documentSessionToken !== `fixture-param-session-${entryIndex}`) {
+      return failure('容器 PARAM 分页缺少或使用了错误的 native session token。', 'PARAM_DOCUMENT_SESSION_MISSING');
+    }
+    const indexedRows = table.rows.map((row, rowIndex) => ({ ...row, rowIndex }));
     const needle = (query ?? '').trim().toLowerCase();
     const filtered = needle
-      ? table.rows.filter((r) => String(r.id).includes(needle) || (r.name ?? '').toLowerCase().includes(needle))
-      : table.rows;
+      ? indexedRows.filter((r) => String(r.id).includes(needle) || (r.name ?? '').toLowerCase().includes(needle))
+      : indexedRows;
     // 用户裁定（2026-08-14）：loadAll=true 时一次返回全部行（含字节），
     // 与生产 main 的 includeAllPayloads 全量路径同语义。
     if (loadAll === true) {
       return {
         ok: true,
         containerUri, entryIndex, page: 0, pageSize: filtered.length, pageCount: 1,
-        rows: filtered.map((r) => ({ id: r.id, name: r.name, dataBase64: r.dataBase64, dataHash: r.dataHash })),
+        rows: filtered.map((r) => ({ rowIndex: r.rowIndex, id: r.id, name: r.name, dataBase64: r.dataBase64, dataHash: r.dataHash })),
         rowCount: filtered.length,
         sourceHash: 'fixture-param-container-hash',
         typeName: table.typeName,
@@ -678,6 +734,7 @@ function registerFixtureIpc() {
         paramName: table.name,
         containerHash: 'fixture-container-hash',
         childHash: `fixture-child-hash-${entryIndex}`,
+        sessionToken: `fixture-param-session-${entryIndex}`,
         // P1：字段定义随容器 PARAM 下发（与生产 main 的 resolveTrustedParamDefinition
         // 同字段面；fixture 统一用合成定义，明确标记 synthetic）。
         // 大表用表自己的 221 字段定义：回落到默认 4 个就测不出字段栏成本。
@@ -696,7 +753,7 @@ function registerFixtureIpc() {
     return {
       ok: true,
       containerUri, entryIndex, page: p, pageSize: size, pageCount,
-      rows: slice.map((r) => ({ id: r.id, name: r.name, dataBase64: r.dataBase64, dataHash: r.dataHash })),
+      rows: slice.map((r) => ({ rowIndex: r.rowIndex, id: r.id, name: r.name, dataBase64: r.dataBase64, dataHash: r.dataHash })),
       rowCount: filtered.length,
       sourceHash: 'fixture-param-container-hash',
       typeName: table.typeName,
@@ -704,6 +761,7 @@ function registerFixtureIpc() {
       paramName: table.name,
       containerHash: 'fixture-container-hash',
       childHash: `fixture-child-hash-${entryIndex}`,
+      sessionToken: `fixture-param-session-${entryIndex}`,
       diagnostics: []
     };
   });

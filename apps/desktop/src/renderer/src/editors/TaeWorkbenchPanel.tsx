@@ -13,9 +13,9 @@
  * 右栏是只读 3D 预览（S17）：
  * `read-chrbnd-flver-preview`（已登记进 AdvertisedCommands）从 overlay 或原版
  * chr/<id>.chrbnd.dcx 取伴生 FLVER，renderer 按 meshIndex=0..meshCount-1 循环读齐
- * 全部网格拼成完整模型（问题4-A），挂进现有 FlverViewer 画网格。两边都没有
- * chrbnd 时给可行动空态（去「开始」页挂原版）；动画播放未接入，空态明说
- * 「模型已挂，动画播放未接入」，不假装在播。不要时间轴图、不要 64 KiB 条。
+ * 全部网格拼成完整模型（问题4-A），挂进现有 FlverViewer 画网格；选中动画后由真实
+ * TAE Clip 驱动连续骨骼采样和播放控制。两边都没有 chrbnd 时给可行动空态（去「开始」
+ * 页挂原版）。不要时间轴图、不要 64 KiB 条。
  *
  * ── 事件参数体未解码是刻意边界 ──
  *
@@ -500,6 +500,7 @@ export function TaeEventDetail(props: TaeEventDetailProps): ReactElement {
 
 export function TaeWorkbenchPanel(props: TaeWorkbenchPanelProps): ReactElement {
   const [selected, setSelected] = useState<TaeSelection | null>(props.initialSelection ?? null);
+  const [detailsCollapsed, setDetailsCollapsed] = useState(false);
   /** 提交成功后本地重读的文档（优先于 props.data；换文件/App 重读时清空）。 */
   const [refreshedDocument, setRefreshedDocument] = useState<TaeDocument | null>(null);
   /** App 传入的原始文档之外，分页「加载更多」追加的增量文档片段。 */
@@ -922,17 +923,31 @@ export function TaeWorkbenchPanel(props: TaeWorkbenchPanelProps): ReactElement {
   // 权威动画 Clip 数据与连续采样器
   const [activeClip, setActiveClip] = useState<TaeAnimationClipData | null>(null);
   const [activeSampler, setActiveSampler] = useState<ActionContinuousSampler | null>(null);
+  const [clipLoading, setClipLoading] = useState(false);
+  const [clipError, setClipError] = useState<string | null>(null);
 
   useEffect(() => {
     if (!selectedAnimation || !props.resourceUri) {
       setActiveClip(null);
       setActiveSampler(null);
+      setClipLoading(false);
+      setClipError(null);
       return;
     }
     const bridge = getRendererBridge();
-    if (!bridge || typeof (bridge as any).readTaeAnimationClip !== 'function') return;
+    if (!bridge || typeof (bridge as any).readTaeAnimationClip !== 'function') {
+      setActiveClip(null);
+      setActiveSampler(null);
+      setClipLoading(false);
+      setClipError(null);
+      return;
+    }
 
     let cancelled = false;
+    setActiveClip(null);
+    setActiveSampler(null);
+    setClipLoading(true);
+    setClipError(null);
     const leaderBones = (() => {
       if (!preview.bundle) return [] as Array<{
         name: string;
@@ -960,7 +975,11 @@ export function TaeWorkbenchPanel(props: TaeWorkbenchPanelProps): ReactElement {
           boneNames.length > 0 ? boneNames : undefined,
           boneParents.length > 0 ? boneParents : undefined,
           referencePose.length > 0 ? referencePose : undefined
-        )) as { ok?: boolean; data?: TaeAnimationClipData };
+        )) as {
+          ok?: boolean;
+          data?: TaeAnimationClipData;
+          diagnostics?: Array<{ code?: string; message?: string }>;
+        };
 
         if (cancelled) return;
         if (res.ok && res.data) {
@@ -969,12 +988,19 @@ export function TaeWorkbenchPanel(props: TaeWorkbenchPanelProps): ReactElement {
         } else {
           setActiveClip(null);
           setActiveSampler(null);
+          const diagnostic = res.diagnostics?.find((item) => item.message) ?? res.diagnostics?.[0];
+          setClipError(diagnostic
+            ? `[${diagnostic.code ?? 'TAE_ANIMATION_CLIP_READ_FAILED'}] ${diagnostic.message ?? '动画 Clip 读取失败。'}`
+            : '动画 Clip 读取失败，已关闭播放。');
         }
-      } catch {
+      } catch (error) {
         if (!cancelled) {
           setActiveClip(null);
           setActiveSampler(null);
+          setClipError(error instanceof Error ? error.message : '动画 Clip 读取异常，已关闭播放。');
         }
+      } finally {
+        if (!cancelled) setClipLoading(false);
       }
     })();
 
@@ -998,6 +1024,14 @@ export function TaeWorkbenchPanel(props: TaeWorkbenchPanelProps): ReactElement {
     }));
     return activeSampler.sampleFlverPose(playbackTime, leaderBones.length, refPose, isLooping);
   }, [activeSampler, playbackTime, preview.bundle, isLooping]);
+
+  // Pose updates must carry the same skeleton identity used by the semantic
+  // bundle.  An unkeyed setPose falls back to the first runtime skeleton and
+  // silently leaves the actual TAE leader (and its meshes) unchanged.
+  const sampledSkeletonPoses = useMemo(() => {
+    if (!sampledPose || !preview.bundle) return undefined;
+    return { [preview.bundle.leaderModelId]: sampledPose };
+  }, [preview.bundle, sampledPose]);
 
   // 计算当前选中动画的总时长（根据真实 clip 时长，或事件最大 endTime，或默认 2.0s）
   const animDuration = useMemo(() => {
@@ -1216,11 +1250,18 @@ export function TaeWorkbenchPanel(props: TaeWorkbenchPanelProps): ReactElement {
           id: 'details',
           title: '详情',
           hint: selected?.kind === 'event' ? '词条详情' : '—',
+          headerAction: {
+            label: detailsCollapsed ? '展开' : '收起',
+            ariaLabel: detailsCollapsed ? '展开详情栏' : '收起详情栏',
+            onClick: () => setDetailsCollapsed((collapsed) => !collapsed)
+          },
           initialFlex: 0.28,
           minWidth: 240,
           children: (
             <div className="wb-list">
-              {selected?.kind === 'event' && selectedEvent ? (
+              {detailsCollapsed ? (
+                <p className="wb-empty" data-testid="tae-details-collapsed">详情栏已收起，点击“展开”继续查看。</p>
+              ) : selected?.kind === 'event' && selectedEvent ? (
                 <TaeEventDetail
                   event={selectedEvent}
                   eventIndex={selectedEventIndex}
@@ -1265,7 +1306,7 @@ export function TaeWorkbenchPanel(props: TaeWorkbenchPanelProps): ReactElement {
                       <FlverViewer
                         externalBundle={preview.bundle}
                         playbackTime={playbackTime}
-                        externalPose={sampledPose}
+                        externalSkeletonPoses={sampledSkeletonPoses}
                       />
                     </div>
                   )}
@@ -1274,7 +1315,7 @@ export function TaeWorkbenchPanel(props: TaeWorkbenchPanelProps): ReactElement {
                       <FlverViewer
                         externalBundle={preview.bundle}
                         playbackTime={playbackTime}
-                        externalPose={sampledPose}
+                        externalSkeletonPoses={sampledSkeletonPoses}
                       />
                     </div>
                   )}
@@ -1286,6 +1327,16 @@ export function TaeWorkbenchPanel(props: TaeWorkbenchPanelProps): ReactElement {
                         兼容预览：身体部件按 overlay 优先与文件名字典序，从 bd / am / lg 的有界候选中选择；这不代表存档当前装备。
                       </p>
                     )}
+                  {clipLoading && (
+                    <p className="muted" style={{ fontSize: 11 }} data-testid="tae-clip-loading">
+                      正在读取当前动画 Clip…
+                    </p>
+                  )}
+                  {clipError && (
+                    <p className="diag-error" style={{ fontSize: 11 }} data-testid="tae-clip-error" role="alert">
+                      {clipError}
+                    </p>
+                  )}
                   {/* 统一 Authoritative 播放控制栏与 Timeline 轨道 */}
                   <div className="tae-timeline-ctrl" data-testid="tae-timeline-ctrl">
                     <div className="tae-transport-bar">
@@ -1293,9 +1344,10 @@ export function TaeWorkbenchPanel(props: TaeWorkbenchPanelProps): ReactElement {
                         <button
                           type="button"
                           className="tae-transport-btn tae-transport-btn--play"
+                          disabled={clipLoading || activeSampler === null}
                           onClick={togglePlay}
                           aria-label={isPlaying ? '暂停' : '播放'}
-                          title="空格键播放/暂停"
+                          title={clipError ?? '空格键播放/暂停'}
                         >
                           {isPlaying ? <PauseIcon /> : <PlayIcon />}
                           <span>{isPlaying ? '暂停' : '播放'}</span>

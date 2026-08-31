@@ -1,4 +1,4 @@
-export const C0000_COMPATIBILITY_PART_SLOTS = ['bd', 'am', 'lg'] as const;
+export const C0000_COMPATIBILITY_PART_SLOTS = ['bd', 'am', 'lg', 'hd'] as const;
 export const C0000_COMPATIBILITY_CANDIDATE_LIMIT_PER_SLOT = 12;
 
 export type C0000CompatibilityPartSlot = typeof C0000_COMPATIBILITY_PART_SLOTS[number];

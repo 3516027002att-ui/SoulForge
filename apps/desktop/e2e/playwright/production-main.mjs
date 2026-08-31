@@ -43,11 +43,16 @@ const outRoot = resolve(here, '../../out');
 /** SF_E2E_DIALOG_CANCEL=1 时模拟用户在目录选择器里取消。 */
 const CANCEL_DIALOG = process.env.SF_E2E_DIALOG_CANCEL === '1';
 
-const overlayRoot = join(app.getPath('userData'), 'e2e-overlay');
-const baseRoot = join(app.getPath('userData'), 'e2e-base');
+// 允许一次真实资源探针把生产 main 接到用户指定的 overlay/base；默认仍使用
+// 隔离的合成目录，避免普通 e2e 读写用户工作区。
+const externalOverlayRoot = process.env.SF_E2E_OVERLAY_ROOT?.trim();
+const externalBaseRoot = process.env.SF_E2E_BASE_ROOT?.trim();
+const overlayRoot = externalOverlayRoot || join(app.getPath('userData'), 'e2e-overlay');
+const baseRoot = externalBaseRoot || join(app.getPath('userData'), 'e2e-base');
 
 /** 测试工作区：目录结构镜像真实 mod 布局，内容是最小合法样本。 */
 function seedWorkspace() {
+  if (externalOverlayRoot || externalBaseRoot) return;
   for (const dir of ['msg', 'param', 'event', 'script']) {
     mkdirSync(join(overlayRoot, dir), { recursive: true });
   }

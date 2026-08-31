@@ -7,6 +7,7 @@ import {
 } from '../a11y/focusTrap.js';
 import { ModelServiceSettingsPanel } from '../editors/ModelServiceSettingsPanel.js';
 import { AgentMemoryDrawer } from './AgentMemoryDrawer.js';
+import { AgentHistoryUploadControl } from './AgentHistoryUploadControl.js';
 import type { AgentTaskPanelProps } from './AgentTaskPanel.js';
 import { isAgentTaskCancellable } from './agentTaskState.js';
 
@@ -215,6 +216,7 @@ export function AgentSecondaryDrawer(props: AgentSecondaryDrawerProps): ReactEle
         // S25：设置页只放模型服务表单——运行任务/取消/草稿生成器/思考强度/
         // 权限黄条全部离开设置页（思考强度的日常入口在 S32 输入条）。
         <div className="agent-settings-drawer">
+          <AgentHistoryUploadControl />
           <ModelServiceSettingsPanel onCancel={onClose} />
         </div>
       )}

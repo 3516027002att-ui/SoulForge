@@ -46,6 +46,7 @@ export function resolvePartModelName(
 
 interface MapMeshReadResult {
   ok?: boolean;
+  diagnostics?: Array<{ severity?: string; code?: string; message?: string }>;
   data?: {
     positionsBase64?: string;
     indicesBase64?: string;
@@ -53,6 +54,10 @@ interface MapMeshReadResult {
     uvsBase64?: string;
     normalsBase64?: string;
     vertexCount?: number;
+    texturePreviewToken?: string | null;
+    textureColorSpace?: string | null;
+    materialGroups?: Array<{ start: number; count: number; materialIndex: number }>;
+    texturePreviews?: Array<{ materialIndex: number; texturePreviewToken: string; colorSpace?: string }>;
   };
 }
 
@@ -62,6 +67,10 @@ interface MapStaticGeometryChunk {
   indexElementBytes?: 2 | 4 | null;
   uvsBase64?: string | null;
   normalsBase64?: string | null;
+  materialIndex?: number | null;
+  materialName?: string | null;
+  texturePreviewToken?: string | null;
+  textureColorSpace?: string | null;
 }
 
 interface MapStaticGeometryPage {
@@ -69,10 +78,13 @@ interface MapStaticGeometryPage {
   nextCursor?: string | null;
   complete?: boolean;
   chunks?: MapStaticGeometryChunk[];
+  texturePreviewToken?: string | null;
+  textureColorSpace?: string | null;
 }
 
 interface MapStaticGeometryReadResult {
   ok?: boolean;
+  diagnostics?: Array<{ severity?: string; code?: string; message?: string }>;
   data?: MapStaticGeometryPage;
 }
 
@@ -100,6 +112,8 @@ export function mergeMapStaticGeometryChunks(chunks: readonly MapStaticGeometryC
   const allHaveIndices = geometryChunks.every((chunk) => Boolean(chunk.indicesBase64));
   const allHaveUvs = geometryChunks.every((chunk) => Boolean(chunk.uvsBase64));
   const allHaveNormals = geometryChunks.every((chunk) => Boolean(chunk.normalsBase64));
+  const materialGroups: Array<{ start: number; count: number; materialIndex: number }> = [];
+  const texturePreviews = new Map<number, { materialIndex: number; texturePreviewToken: string; colorSpace?: string }>();
   let vertexCount = 0;
   let indexSize: 16 | 32 = 16;
 
@@ -114,6 +128,11 @@ export function mergeMapStaticGeometryChunks(chunks: readonly MapStaticGeometryC
     if (allHaveUvs) uvs.push(decodeBase64ToUint8Array(chunk.uvsBase64!));
     if (allHaveNormals) normals.push(decodeBase64ToUint8Array(chunk.normalsBase64!));
 
+    const materialIndex = Number.isInteger(chunk.materialIndex) && (chunk.materialIndex ?? -1) >= 0
+      ? chunk.materialIndex!
+      : 0;
+    let groupStart = vertexCount;
+    let groupCount = chunkVertexCount;
     if (allHaveIndices) {
       const indexElementBytes = chunk.indexElementBytes;
       if (indexElementBytes !== 2 && indexElementBytes !== 4) {
@@ -124,6 +143,8 @@ export function mergeMapStaticGeometryChunks(chunks: readonly MapStaticGeometryC
         throw new Error('MAP_STATIC_GEOMETRY_INVALID: indices are not aligned');
       }
       const indexView = new DataView(indexBytes.buffer, indexBytes.byteOffset, indexBytes.byteLength);
+      groupStart = indices.length;
+      groupCount = indexBytes.byteLength / indexElementBytes;
       for (let offset = 0; offset < indexBytes.byteLength; offset += indexElementBytes) {
         const localIndex = indexElementBytes === 4
           ? indexView.getUint32(offset, true)
@@ -135,6 +156,15 @@ export function mergeMapStaticGeometryChunks(chunks: readonly MapStaticGeometryC
         indices.push(mergedIndex);
         if (indexElementBytes === 4 || mergedIndex > 0xffff) indexSize = 32;
       }
+    }
+
+    if (groupCount > 0) materialGroups.push({ start: groupStart, count: groupCount, materialIndex });
+    if (chunk.texturePreviewToken) {
+      texturePreviews.set(materialIndex, {
+        materialIndex,
+        texturePreviewToken: chunk.texturePreviewToken,
+        ...(chunk.textureColorSpace ? { colorSpace: chunk.textureColorSpace } : {})
+      });
     }
 
     vertexCount += chunkVertexCount;
@@ -158,18 +188,30 @@ export function mergeMapStaticGeometryChunks(chunks: readonly MapStaticGeometryC
   }
   if (allHaveUvs) merged.uvsBase64 = uint8ArrayToBase64(concatUint8Arrays(uvs));
   if (allHaveNormals) merged.normalsBase64 = uint8ArrayToBase64(concatUint8Arrays(normals));
+  if (materialGroups.length > 0) merged.materialGroups = materialGroups;
+  if (texturePreviews.size > 0) merged.texturePreviews = [...texturePreviews.values()];
 
   return merged;
 }
 
-function toMapMeshGeometry(raw: MapMeshReadResult): MapMeshGeometry | null {
-  if (!raw.ok || !raw.data?.positionsBase64) return null;
+export function toMapMeshGeometry(raw: MapMeshReadResult): MapMeshGeometry | null {
+  if (!raw.ok) return null;
+  if (!raw.data?.positionsBase64) {
+    throw new Error('MAP_STATIC_GEOMETRY_NO_POSITIONS: ok response contained no positions');
+  }
+  if (!Number.isInteger(raw.data.vertexCount) || (raw.data.vertexCount ?? 0) <= 0) {
+    throw new Error('MAP_STATIC_GEOMETRY_INVALID: vertexCount must be a positive integer');
+  }
   return {
     positionsBase64: raw.data.positionsBase64,
     ...(raw.data.indicesBase64 ? { indicesBase64: raw.data.indicesBase64 } : {}),
     ...(raw.data.indexSize === 16 || raw.data.indexSize === 32 ? { indexSize: raw.data.indexSize } : {}),
     ...(raw.data.uvsBase64 ? { uvsBase64: raw.data.uvsBase64 } : {}),
     ...(raw.data.normalsBase64 ? { normalsBase64: raw.data.normalsBase64 } : {}),
+    ...(raw.data.texturePreviewToken ? { texturePreviewToken: raw.data.texturePreviewToken } : {}),
+    ...(raw.data.textureColorSpace ? { textureColorSpace: raw.data.textureColorSpace } : {}),
+    ...(raw.data.materialGroups ? { materialGroups: raw.data.materialGroups } : {}),
+    ...(raw.data.texturePreviews ? { texturePreviews: raw.data.texturePreviews } : {}),
     vertexCount: raw.data.vertexCount ?? 0
   };
 }
@@ -376,6 +418,7 @@ export function MsbScenePanel(props: MsbScenePanelProps): ReactElement {
   const modelLoadCacheRef = useRef<MapModelLoadCache | null>(null);
   const modelUploadQueueRef = useRef<FrameTaskQueue | null>(null);
   const modelUploadRef = useRef<((modelName: string, mesh: MapMeshGeometry) => Promise<boolean>) | null>(null);
+  const meshPartTotalRef = useRef(0);
   const [isSaving, setIsSaving] = useState(false);
   const [saveStatus, setSaveStatus] = useState<string | null>(null);
 
@@ -438,12 +481,80 @@ export function MsbScenePanel(props: MsbScenePanelProps): ReactElement {
     }
   }, [partsState, props.mapResourceUri, props.onRevisionChange, props.revision, props.sourcePath]);
 
-  const [meshStatus, setMeshStatus] = useState<{ loaded: number; missing: number; total: number } | null>(null);
+  const [meshStatus, setMeshStatus] = useState<{
+    loaded: number;
+    missing: number;
+    total: number;
+    modelsLoaded: number;
+    modelsFailed: number;
+    modelsTotal: number;
+    pending: number;
+    firstDiagnostic?: string;
+  } | null>(null);
 
   useEffect(() => {
     let cancelled = false;
     const host = hostRef.current;
     if (!host) return;
+
+    let firstMeshDiagnostic: string | null = null;
+    let loaderStarted = 0;
+    let loaderCompleted = 0;
+    let uploadedPartCount = 0;
+    const diagnosticFromDetail = (detail: unknown): { code: string; message: string } => {
+      const candidate = detail && typeof detail === 'object'
+        ? (detail as { diagnostics?: unknown }).diagnostics
+        : undefined;
+      const first = Array.isArray(candidate) && candidate[0] && typeof candidate[0] === 'object'
+        ? candidate[0] as { code?: unknown; message?: unknown }
+        : null;
+      if (typeof first?.code === 'string' || typeof first?.message === 'string') {
+        return {
+          code: typeof first.code === 'string' && first.code.length > 0 ? first.code : 'MAP_MESH_LOAD_FAILED',
+          message: typeof first.message === 'string' && first.message.length > 0
+            ? first.message
+            : 'Bridge 返回了不完整的结构化诊断'
+        };
+      }
+      const rawMessage = detail instanceof Error
+        ? detail.message
+        : typeof detail === 'string'
+          ? detail
+          : detail === null || detail === undefined
+            ? '未收到返回值'
+            : '未收到结构化诊断（返回值为空或格式不符合 MAP 几何协议）';
+      const separator = rawMessage.indexOf(':');
+      const possibleCode = separator > 0 ? rawMessage.slice(0, separator) : rawMessage;
+      return {
+        code: /^[A-Z][A-Z0-9_]{2,}$/.test(possibleCode) ? possibleCode : 'MAP_MESH_LOAD_FAILED',
+        message: separator > 0 ? rawMessage.slice(separator + 1).trim() || rawMessage : rawMessage
+      };
+    };
+    const reportMeshDiagnostic = (modelName: string, stage: string, detail: unknown): void => {
+      if (firstMeshDiagnostic) return;
+      const { code, message } = diagnosticFromDetail(detail);
+      const firstDiagnosticMessage = `${stage} ${modelName} [${code}] ${message}`;
+      firstMeshDiagnostic = firstDiagnosticMessage;
+      console.error('[MsbScenePanel] MAP mesh first diagnostic', {
+        modelName,
+        stage,
+        code,
+        message,
+        errorStack: detail instanceof Error ? detail.stack : undefined
+      });
+      setMeshStatus((current) => ({
+        loaded: current?.loaded ?? 0,
+        missing: current?.missing ?? 0,
+        total: current?.total ?? meshPartTotalRef.current,
+        modelsLoaded: current?.modelsLoaded ?? 0,
+        modelsFailed: current?.modelsFailed ?? 0,
+        modelsTotal: current?.modelsTotal ?? 0,
+        pending: current?.pending ?? Math.max(0, (current?.total ?? meshPartTotalRef.current) - (current?.loaded ?? 0) - (current?.missing ?? 0)),
+        ...(current?.firstDiagnostic
+          ? { firstDiagnostic: current.firstDiagnostic }
+          : { firstDiagnostic: firstDiagnosticMessage })
+      }));
+    };
 
     if (!props.mapResourceUri || !props.mapResourceUri.includes('://')) {
       setStatus('未选中可解析的 MSB 资源：请先在资源浏览器里选择一个 map 资源。');
@@ -462,7 +573,12 @@ export function MsbScenePanel(props: MsbScenePanelProps): ReactElement {
         resourceKind: 'map',
         revision: props.revision,
         ...(props.models ? { models: props.models } : {}),
-        parts: partsState,
+        // `partsState` is the editable property projection and is updated by
+        // the gizmo. Scene construction must consume the authoritative MSB
+        // props snapshot instead: the sync effect below can update
+        // `partsState` while this async mount is settling, and the previous
+        // effect then got cancelled with a stale scene/mesh loader.
+        parts: props.parts,
         regions,
         ...(props.events ? { events: props.events } : {}),
         ...(props.routes ? { routes: props.routes } : {}),
@@ -488,11 +604,39 @@ export function MsbScenePanel(props: MsbScenePanelProps): ReactElement {
     }
     setManifest(sceneManifest);
     setNodeCount(drawList.itemCount);
+    meshPartTotalRef.current = drawList.items.filter((item) => item.entityKind === 'msb-part').length;
     const nodeById = new Map(sceneManifest.nodes.map((node) => [node.id, node]));
 
     void mountThreeProxyScene({
       container: host,
       drawList,
+      renderAudit: (phase, items) => {
+        if (phase === 'content-ready') {
+          const partItems = drawList.items.filter((item) => item.entityKind === 'msb-part');
+          const namedPartItems = partItems.filter((item) => Boolean(item.modelName));
+          console.debug('[MsbScenePanel] MAP mesh render plan', {
+            itemCount: items.length,
+            partCount: partItems.length,
+            namedPartCount: namedPartItems.length,
+            firstModelName: namedPartItems[0]?.modelName ?? null,
+            firstModelKey: namedPartItems[0]?.modelName
+              ? normalizeMapModelKey(namedPartItems[0].modelName)
+              : null,
+            firstBatchKey: namedPartItems[0]?.modelName
+              ? `model:${normalizeMapModelKey(namedPartItems[0].modelName)}`
+              : null
+          });
+          if (partItems.length > 0 && namedPartItems.length === 0) {
+            reportMeshDiagnostic('__scene__', 'render-plan', 'MAP_RENDERER_PART_MODEL_NAMES_MISSING');
+          }
+          return;
+        }
+        if (phase !== 'mesh-ready') return;
+        const meshCount = items.filter((item) => item.state === 'mesh').length;
+        if (meshCount === 0) {
+          reportMeshDiagnostic('__scene__', 'renderer-audit', 'MAP_RENDERER_NO_MESH_AFTER_READY');
+        }
+      },
       onSelect: (id) => {
         const node = id ? (nodeById.get(id) ?? null) : null;
         if (!node) return;
@@ -526,6 +670,10 @@ export function MsbScenePanel(props: MsbScenePanelProps): ReactElement {
       }
     }).then((handle) => {
       if (cancelled) {
+        console.debug('[MsbScenePanel] MAP mesh effect cancelled before loader start', {
+          loaderStarted,
+          partCount: meshPartTotalRef.current
+        });
         handle.dispose();
         return;
       }
@@ -540,28 +688,99 @@ export function MsbScenePanel(props: MsbScenePanelProps): ReactElement {
 
       // 场景挂载完成后立即启动去重模型并发拉取与热替换
       const bridge = getRendererBridge();
+      // contextBridge 暴露的函数必须保留 bridge 作为 receiver；直接把
+      // bridge.readMapStaticGeometry 解构出来再调用会在真实 Electron 中报
+      // `Illegal invocation`，而页面直接调用 api.readMapStaticGeometry 是正常的。
+      const readMapStaticGeometry = bridge && typeof bridge.readMapStaticGeometry === 'function'
+        ? (
+            msbSourceUri: string,
+            modelName: string,
+            cursor?: string | null,
+            sessionToken?: string | null
+          ) => bridge.readMapStaticGeometry(msbSourceUri, modelName, cursor, sessionToken)
+        : null;
+      console.debug('[MsbScenePanel] MAP mesh loader init', {
+        bridgePresent: Boolean(bridge),
+        readMapStaticGeometryType: typeof readMapStaticGeometry,
+        mapResourceUriPresent: Boolean(props.mapResourceUri),
+        partCount: meshPartTotalRef.current
+      });
+      if (!bridge) {
+        reportMeshDiagnostic('__scene__', 'bridge-init', 'MAP_BRIDGE_MISSING: preload bridge is unavailable');
+        return;
+      }
+      if (typeof readMapStaticGeometry !== 'function') {
+        reportMeshDiagnostic('__scene__', 'bridge-init', 'MAP_STATIC_GEOMETRY_METHOD_MISSING: preload readMapStaticGeometry is unavailable');
+        return;
+      }
       // 24.10 streaming: read-map-static-geometry (chunked, cursor opaque with daemon/owner/sourceHash/resourceCacheKey, wire bytes budget)
       // Deprecated: readMapPartMesh -> readMapStaticGeometry
-      if (bridge && typeof (bridge as any).readMapStaticGeometry === 'function' && props.mapResourceUri) {
+      if (props.mapResourceUri) {
         const loadCache = new MapModelLoadCache(async (modelName) => {
+          const modelKey = normalizeMapModelKey(modelName);
+          if (!modelName.trim() || !modelKey) {
+            const invalidModel = `MAP_MESH_LOADER_START_INVALID: modelName=${JSON.stringify(modelName)}`;
+            reportMeshDiagnostic(modelName || '<empty>', 'loader-start', invalidModel);
+            throw new Error(invalidModel);
+          }
+          loaderStarted += 1;
+          console.debug('[MsbScenePanel] MAP mesh loader start', {
+            modelName,
+            modelKey,
+            batchKey: `model:${modelKey}`
+          });
           let raw: MapMeshReadResult = { ok: false };
           // Chunked streaming: follow opaque cursors until complete, wire bytes budget <8MiB per chunk
           let cursor: string | null = null;
           let sessionToken: string | null = null;
           const chunks: MapStaticGeometryChunk[] = [];
-          do {
-            const chunkResult = await (bridge as any).readMapStaticGeometry(props.mapResourceUri, modelName, cursor, sessionToken) as any;
-            if (!chunkResult?.ok) { raw = chunkResult as MapMeshReadResult; break; }
-            const page = (chunkResult as MapStaticGeometryReadResult).data;
-            if (page?.chunks) chunks.push(...page.chunks);
-            sessionToken = page?.sessionToken ?? sessionToken;
-            cursor = page?.nextCursor ?? null;
-            if (page?.complete || !cursor) {
-              raw = { ok: true, data: mergeMapStaticGeometryChunks(chunks) };
-              break;
+          let texturePreviewToken: string | undefined;
+          let textureColorSpace: string | undefined;
+          try {
+            do {
+              const chunkResult = await readMapStaticGeometry(props.mapResourceUri, modelName, cursor, sessionToken) as MapStaticGeometryReadResult | null | undefined;
+              if (!chunkResult) {
+                const nullResponse = 'MAP_STATIC_GEOMETRY_NULL_RESPONSE: readMapStaticGeometry returned null/undefined';
+                reportMeshDiagnostic(modelName, 'ipc', nullResponse);
+                throw new Error(nullResponse);
+              }
+              if (!chunkResult.ok) {
+                raw = chunkResult as MapMeshReadResult;
+                reportMeshDiagnostic(modelName, 'ipc', chunkResult);
+                break;
+              }
+              const page = chunkResult.data;
+              if (page?.chunks) chunks.push(...page.chunks);
+              if (!texturePreviewToken && page?.texturePreviewToken) {
+                texturePreviewToken = page.texturePreviewToken;
+              }
+              if (!textureColorSpace && page?.textureColorSpace) {
+                textureColorSpace = page.textureColorSpace;
+              }
+              sessionToken = page?.sessionToken ?? sessionToken;
+              cursor = page?.nextCursor ?? null;
+              if (page?.complete || !cursor) {
+                raw = {
+                  ok: true,
+                  data: {
+                    ...mergeMapStaticGeometryChunks(chunks),
+                    ...(texturePreviewToken ? { texturePreviewToken } : {}),
+                    ...(textureColorSpace ? { textureColorSpace } : {})
+                  }
+                };
+                break;
+              }
+            } while (cursor);
+            const geometry = toMapMeshGeometry(raw);
+            if (!geometry) {
+              reportMeshDiagnostic(modelName, 'geometry', raw);
             }
-          } while (cursor);
-          return toMapMeshGeometry(raw);
+            loaderCompleted += 1;
+            return geometry;
+          } catch (error) {
+            reportMeshDiagnostic(modelName, 'merge/decode', error);
+            throw error;
+          }
         });
         const uploadQueue = new FrameTaskQueue();
         const uploads = new Map<string, Promise<boolean>>();
@@ -570,7 +789,22 @@ export function MsbScenePanel(props: MsbScenePanelProps): ReactElement {
           const pending = uploads.get(key);
           if (pending) return pending;
           const upload = uploadQueue
-            .enqueue(() => handle.updateModelGeometry?.(modelName, geometry))
+            .enqueue(() => {
+              try {
+                if (typeof handle.updateModelGeometry !== 'function') {
+                  throw new Error('MAP_RENDERER_UPDATE_METHOD_MISSING: proxy scene handle cannot replace model geometry');
+                }
+                const replaced = handle.updateModelGeometry(modelName, geometry);
+                if (replaced <= 0) {
+                  throw new Error(`MAP_RENDERER_MODEL_BATCH_NOT_FOUND: ${modelName} (expected batch key model:${normalizeMapModelKey(modelName)})`);
+                }
+                uploadedPartCount += replaced;
+                return replaced > 0;
+              } catch (error) {
+                reportMeshDiagnostic(modelName, 'renderer-upload', error);
+                throw error;
+              }
+            })
             .finally(() => uploads.delete(key));
           uploads.set(key, upload);
           return upload;
@@ -595,12 +829,38 @@ export function MsbScenePanel(props: MsbScenePanelProps): ReactElement {
             if (group) group.items.push(item);
             else byModel.set(key, { modelName, items: [item] });
           }
-          const distinctModels = [...byModel.values()];
+          // 先加载复用次数最多的模型：一个高频 terrain/建筑模型完成后，
+          // 视口会立即出现较大面积真实网格，不会长时间只看到线框代理。
+          // Map insertion order 作为稳定 tie-breaker，避免同频模型抖动。
+          const distinctModels = [...byModel.values()].sort((left, right) =>
+            right.items.length - left.items.length
+          );
           const totalPartCount = parts.length;
-          setMeshStatus({ loaded: 0, missing: missingFromNoModel, total: totalPartCount });
+          console.debug('[MsbScenePanel] MAP mesh loader plan', {
+            partCount: totalPartCount,
+            distinctModelCount: distinctModels.length,
+            firstModelName: distinctModels[0]?.modelName ?? null,
+            firstModelKey: distinctModels[0] ? normalizeMapModelKey(distinctModels[0].modelName) : null,
+            firstBatchKey: distinctModels[0] ? `model:${normalizeMapModelKey(distinctModels[0].modelName)}` : null
+          });
+          if (distinctModels.length === 0) {
+            reportMeshDiagnostic('__scene__', 'loader-plan', 'MAP_MESH_LOADER_PLAN_EMPTY: part items have no usable modelName');
+          }
+          setMeshStatus({
+            loaded: 0,
+            missing: missingFromNoModel,
+            total: totalPartCount,
+            modelsLoaded: 0,
+            modelsFailed: 0,
+            modelsTotal: distinctModels.length,
+            pending: Math.max(0, totalPartCount - missingFromNoModel),
+            ...(firstMeshDiagnostic ? { firstDiagnostic: firstMeshDiagnostic } : {})
+          });
           void (async () => {
             let loaded = 0;
             let missing = missingFromNoModel;
+            let modelsLoaded = 0;
+            let modelsFailed = 0;
             const BATCH_SIZE = 8;
             for (let i = 0; i < distinctModels.length; i += BATCH_SIZE) {
               if (cancelled) return;
@@ -611,25 +871,68 @@ export function MsbScenePanel(props: MsbScenePanelProps): ReactElement {
                   if (cancelled) return;
                   if (geometry) {
                     const uploaded = await uploadModel(modelName, geometry);
-                    if (!cancelled && uploaded) loaded += items.length;
+                    if (!cancelled && uploaded) {
+                      loaded += items.length;
+                      modelsLoaded += 1;
+                    }
+                    else if (!cancelled && !uploaded) {
+                      reportMeshDiagnostic(modelName, 'renderer-upload', 'MAP_RENDERER_UPLOAD_CANCELLED: FrameTaskQueue completed without replacement');
+                      missing += items.length;
+                      modelsFailed += 1;
+                    }
                   } else {
                     missing += items.length;
+                    modelsFailed += 1;
                   }
-                } catch {
-                  if (!cancelled) missing += items.length;
+                } catch (error) {
+                  if (!cancelled) {
+                    reportMeshDiagnostic(modelName, 'loader', error);
+                    missing += items.length;
+                    modelsFailed += 1;
+                  }
                 }
               }));
-              if (!cancelled) setMeshStatus({ loaded, missing, total: totalPartCount });
+              if (!cancelled) setMeshStatus((current) => ({
+                loaded,
+                missing,
+                total: totalPartCount,
+                modelsLoaded,
+                modelsFailed,
+                modelsTotal: distinctModels.length,
+                pending: Math.max(0, totalPartCount - loaded - missing),
+                ...(current?.firstDiagnostic || firstMeshDiagnostic
+                  ? { firstDiagnostic: current?.firstDiagnostic ?? firstMeshDiagnostic! }
+                  : {})
+              }));
             }
+            console.debug('[MsbScenePanel] MAP mesh loader complete', {
+              loaderStarted,
+              loaderCompleted,
+              uploadedPartCount,
+              loaded,
+              missing,
+              modelsLoaded,
+              modelsFailed,
+              cancelled
+            });
           })();
         }
       }
     }).catch((error: unknown) => {
+      if (!cancelled) reportMeshDiagnostic('__scene__', 'scene-mount', error);
+      else console.debug('[MsbScenePanel] MAP mesh effect cleanup during scene mount', { loaderStarted, error: diagnosticFromDetail(error) });
       setStatus(error instanceof Error ? error.message : '3D 场景初始化失败');
     });
 
     return () => {
       cancelled = true;
+      console.debug('[MsbScenePanel] MAP mesh effect cleanup', {
+        loaderStarted,
+        loaderCompleted,
+        uploadedPartCount,
+        cacheCreated: modelLoadCacheRef.current !== null,
+        queueCreated: modelUploadQueueRef.current !== null
+      });
       handleRef.current?.dispose();
       handleRef.current = null;
       drawListRef.current = null;
@@ -645,6 +948,7 @@ export function MsbScenePanel(props: MsbScenePanelProps): ReactElement {
     props.sourcePath,
     props.game,
     props.revision,
+    props.parts,
     props.models,
     props.regions,
     props.events,
@@ -830,12 +1134,26 @@ export function MsbScenePanel(props: MsbScenePanelProps): ReactElement {
                       ? (() => {
                           const meshNote = meshStatus === null
                             ? ''
-                            : meshStatus.loaded > 0
-                              ? ` · 已挂 ${meshStatus.loaded} / ${meshStatus.total} 个 part 模型${meshStatus.missing > 0 ? `，${meshStatus.missing} 个没找到（线框）` : ''}`
-                              : meshStatus.missing > 0
-                                ? ' · 没有找到 part 模型（线框）；未挂原版时可到「开始」页挂载后重开'
-                                : '';
-                          return `节点 ${nodeCount} · region ${regions.length}${meshNote} · 漫游：WASD 移动 / Shift+WASD 加速 / Q下降 E上升 / F居中`;
+                            : (() => {
+                                const pending = meshStatus.pending
+                                  ?? Math.max(0, meshStatus.total - meshStatus.loaded - meshStatus.missing);
+                                const failedModelNote = meshStatus.modelsFailed > 0
+                                  ? ` · 失败模型 ${meshStatus.modelsFailed}`
+                                  : '';
+                                const proxyNote = pending > 0 ? ` · 线框代理 ${pending}` : '';
+                                const missingNote = meshStatus.missing > 0
+                                  ? ` · 缺失/无几何 ${meshStatus.missing}`
+                                  : '';
+                                return ` · 真实模型 ${meshStatus.modelsLoaded} / ${meshStatus.modelsTotal}`
+                                  + ` · 已挂 ${meshStatus.loaded} / ${meshStatus.total} 个 part 模型`
+                                  + proxyNote
+                                  + missingNote
+                                  + failedModelNote;
+                              })();
+                          const diagnosticNote = meshStatus?.firstDiagnostic
+                            ? ` · 首个 MAP mesh 诊断：${meshStatus.firstDiagnostic}`
+                            : '';
+                          return `节点 ${nodeCount} · region ${regions.length}${meshNote}${diagnosticNote} · 漫游：WASD 移动 / Shift+WASD 加速 / Q下降 E上升 / F居中`;
                         })()
                       : status)}
               </p>

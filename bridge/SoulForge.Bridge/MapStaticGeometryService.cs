@@ -59,6 +59,10 @@ internal static class MapStaticGeometryService
         public int VertexCount;
         public int IndexElementBytes; // original file's 2 or 4
         public int MaterialIndex;
+        public string MaterialName = "";
+        public string MaterialMtdPath = "";
+        public string TexturePath = "";
+        public string[] TexturePaths = Array.Empty<string>();
         public float[] Positions; // flat xyz - lazy decode per chunk in future; currently holds window-scoped dense but session retains only necessary
         public float[]? Normals; // flat xyz or null
         public float[]? UVs; // flat uv or null
@@ -255,12 +259,22 @@ internal static class MapStaticGeometryService
             // 必须与 FlverNativeDocument 的 display FaceSet 选择规则完全一致，
             // 因此复用同一个 selection，而不是在这里再复制一份 Flags==0 判定。
             int selectedOrdinal = flver.GetDisplayFaceSetOrdinal(mi);
+            var material = mesh.MaterialIndex >= 0 && mesh.MaterialIndex < flver.Materials.Count
+                ? flver.Materials[mesh.MaterialIndex]
+                : null;
+            var materialName = material?.Name ?? "";
+            var materialMtdPath = material?.MtdPath ?? "";
+            var texturePaths = FindAlbedoTexturePaths(flver, mesh.MaterialIndex);
             list.Add(new MeshInfo
             {
                 MeshIndex = mi,
                 VertexCount = mesh.VertexCount,
                 IndexElementBytes = indexSize / 8,
                 MaterialIndex = mesh.MaterialIndex,
+                MaterialName = materialName,
+                MaterialMtdPath = materialMtdPath,
+                TexturePath = texturePaths.FirstOrDefault() ?? "",
+                TexturePaths = texturePaths,
                 Positions = posFloats,
                 Normals = normals,
                 UVs = uvs,
@@ -274,6 +288,45 @@ internal static class MapStaticGeometryService
             });
         }
         return list;
+    }
+
+    private static string[] FindAlbedoTexturePaths(FlverNativeDocument flver, int materialIndex)
+    {
+        if (materialIndex < 0) return Array.Empty<string>();
+        var slots = flver.GetTextureSlots()
+            .Where(slot => slot.MaterialIndex == materialIndex && !string.IsNullOrWhiteSpace(slot.Path))
+            .ToArray();
+        if (slots.Length == 0) return Array.Empty<string>();
+
+        // FLVER material names are shader/MTD names (for example Rock1.mtd),
+        // while the package entry is usually carried by the texture slot
+        // (for example m11_rock_04_a.tif). Keep every color slot: some native
+        // materials have a missing DDO test path before their real albedo slots.
+        // The preview resolver tries them in source order and stops at the first
+        // package entry that exists, instead of silently locking onto slot 0.
+        var albedo = slots.Where(slot => IsLikelyAlbedo(slot.Type, slot.Path));
+        var candidates = albedo.Any() ? albedo : slots;
+        return candidates
+            .Select(slot => slot.Path)
+            .Where(path => !string.IsNullOrWhiteSpace(path))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+    }
+
+    private static bool IsLikelyAlbedo(string type, string path)
+    {
+        var value = $"{type} {path}".ToLowerInvariant();
+        if (value.Contains("normal") || value.Contains("bump") || value.Contains("spec")
+            || value.Contains("rough") || value.Contains("mask"))
+            return false;
+        return type.Contains("albedo", StringComparison.OrdinalIgnoreCase)
+            || type.Contains("diffuse", StringComparison.OrdinalIgnoreCase)
+            || type.Contains("basecolor", StringComparison.OrdinalIgnoreCase)
+            || value.Contains("diffuse") || value.Contains("albedo") || value.Contains("basecolor")
+            || path.EndsWith("_a.tif", StringComparison.OrdinalIgnoreCase)
+            || path.EndsWith("_d.tif", StringComparison.OrdinalIgnoreCase)
+            || path.EndsWith("_a.dds", StringComparison.OrdinalIgnoreCase)
+            || path.EndsWith("_d.dds", StringComparison.OrdinalIgnoreCase);
     }
 
     // Opaque cursor: random token bound to daemon/owner/sourceHash/resourceCacheKeySha256. Server stores mapping.
@@ -340,8 +393,30 @@ internal static class MapStaticGeometryService
         return TryDecodeCursor(cursor, out meshIndex, out triangleStart);
     }
 
+    internal static MeshInfo? GetMeshForChunk(SessionEntry session, int startMesh, int startTri)
+    {
+        if (startMesh < 0 || startTri < 0) return null;
+        var meshIndex = startMesh;
+        var triangleStart = startTri;
+        while (meshIndex < session.Meshes.Count)
+        {
+            var mesh = session.Meshes[meshIndex];
+            if (triangleStart < mesh.Indices.Length / 3) return mesh;
+            meshIndex++;
+            triangleStart = 0;
+        }
+        return null;
+    }
+
     // Build one chunk starting at given mesh/triangle. Returns chunk and next cursor.
-    internal static object BuildChunk(SessionEntry session, int startMesh, int startTri, out string? nextCursor, out bool complete)
+    internal static object BuildChunk(
+        SessionEntry session,
+        int startMesh,
+        int startTri,
+        out string? nextCursor,
+        out bool complete,
+        string? texturePreviewToken = null,
+        string? textureColorSpace = null)
     {
         // Find mesh containing start
         var meshIndex = startMesh;
@@ -485,7 +560,10 @@ internal static class MapStaticGeometryService
             uvsBase64 = uvsB64,
             bounds = new { min = new[] { cMinX, cMinY, cMinZ }, max = new[] { cMaxX, cMaxY, cMaxZ } },
             materialKey,
-            materialIndex = mesh.MaterialIndex
+            materialIndex = mesh.MaterialIndex,
+            materialName = mesh.MaterialName,
+            texturePreviewToken,
+            textureColorSpace
         };
         return chunk;
     }

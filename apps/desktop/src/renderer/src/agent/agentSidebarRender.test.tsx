@@ -312,6 +312,34 @@ describe('区块顺序与默认折叠状态', () => {
     assert.ok(!html.includes('rollout-secret.jsonl'));
     assert.ok(!html.includes('data-testid="agent-task-status"'), '正常结束后不再挂一条思考已完成状态行');
   });
+
+  it('工具消息存在时仍保留任务时间线里的模型口播', () => {
+    const running = {
+      ...INITIAL_AGENT_TASK_STATE,
+      sessionId: 's',
+      phase: 'done' as const,
+      finishReason: 'stop',
+      narrations: [{ step: 1, text: '我先核对正式对象名称，再制定修改方案。' }],
+      toolCalls: [{
+        callId: 'c1', name: 'search_param_rows', step: 1, status: 'ok' as const
+      }]
+    };
+    const messages: AgentMessageDto[] = [{
+      id: 'tool-only',
+      kind: 'tool-activity',
+      summary: 'search_param_rows',
+      status: 'succeeded',
+      createdAt: '2026-01-01T00:00:00.000Z'
+    }];
+    const html = render({
+      goal: '测试时间线与工具消息共存',
+      messages,
+      task: { ...render0Task(), task: running }
+    });
+    assert.match(html, /我先核对正式对象名称，再制定修改方案。/, '工具消息不能遮住模型口播');
+    assert.match(html, /search_param_rows/, '工具调用仍应可见');
+    assert.ok(!html.includes('data-testid="agent-message-tool-only"'), '本例应由任务时间线统一渲染，避免两条重复工具记录');
+  });
 });
 
 describe('隐藏 dock 不清状态（§12.2）', () => {

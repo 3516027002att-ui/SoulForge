@@ -27,6 +27,8 @@ export interface FlverPreviewBone {
 
 export interface FlverPreviewMesh {
   meshIndex: number;
+  /** FLVER material table index; -1 means the native mesh has no valid material. */
+  materialIndex?: number | undefined;
   vertexCount: number;
   indexSize: 16 | 32;
   positionsBase64: string;
@@ -49,6 +51,20 @@ export interface FlverPreviewModel {
   bones: FlverPreviewBone[];
   sourceRole?: 'character' | 'part' | 'map' | 'object' | undefined;
   sourceName?: string | undefined;
+  /** Bridge 解析出的首个 albedo PNG data URI，供旧 renderer/调用方回退。 */
+  texturePreviewToken?: string | undefined;
+  textureColorSpace?: string | undefined;
+  /** FLVER material index -> albedo preview. 一个 FLVER 可能同时使用多张纹理。 */
+  texturePreviews?: FlverPreviewTexture[] | undefined;
+}
+
+export interface FlverPreviewTexture {
+  materialIndex: number;
+  textureName: string;
+  texturePreviewToken: string;
+  width: number;
+  height: number;
+  colorSpace: string;
 }
 
 /**
@@ -97,7 +113,11 @@ export function isCharacterPreviewBundle(value: unknown): value is CharacterPrev
       || !isNonNegativeInteger(candidate.boneCount)
       || !Array.isArray(candidate.meshes)
       || !Array.isArray(candidate.bones)
-      || !isRecord(candidate.entry)) return false;
+      || !isRecord(candidate.entry)
+      || (candidate.texturePreviewToken !== undefined && typeof candidate.texturePreviewToken !== 'string')
+      || (candidate.texturePreviews !== undefined
+        && (!Array.isArray(candidate.texturePreviews)
+          || !candidate.texturePreviews.every(isPreviewTexture)))) return false;
     const entry = candidate.entry;
     if (!isNonNegativeInteger(entry.index)
       || !Number.isInteger(entry.id)
@@ -112,6 +132,7 @@ export function isCharacterPreviewBundle(value: unknown): value is CharacterPrev
 function isPreviewMesh(value: unknown): boolean {
   if (!isRecord(value)
     || !isNonNegativeInteger(value.meshIndex)
+    || (value.materialIndex !== undefined && !Number.isInteger(value.materialIndex))
     || !isNonNegativeInteger(value.vertexCount)
     || (value.indexSize !== 16 && value.indexSize !== 32)
     || typeof value.positionsBase64 !== 'string'
@@ -120,6 +141,16 @@ function isPreviewMesh(value: unknown): boolean {
     || (value.boneIndexSpace !== 'flver-global' && value.boneIndexSpace !== 'none')) return false;
   return ['uvsBase64', 'normalsBase64', 'boneWeightsBase64', 'boneIndicesBase64', 'skeletonId']
     .every((key) => value[key] === undefined || typeof value[key] === 'string');
+}
+
+function isPreviewTexture(value: unknown): boolean {
+  return isRecord(value)
+    && isNonNegativeInteger(value.materialIndex)
+    && typeof value.textureName === 'string'
+    && typeof value.texturePreviewToken === 'string'
+    && isPositiveInteger(value.width)
+    && isPositiveInteger(value.height)
+    && typeof value.colorSpace === 'string';
 }
 
 function isPreviewBone(value: unknown): boolean {
@@ -142,6 +173,10 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function isNonNegativeInteger(value: unknown): value is number {
   return Number.isInteger(value) && (value as number) >= 0;
+}
+
+function isPositiveInteger(value: unknown): value is number {
+  return isNonNegativeInteger(value) && (value as number) > 0;
 }
 
 function isNumberTuple(value: unknown, length: number): value is number[] {

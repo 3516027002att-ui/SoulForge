@@ -156,6 +156,14 @@ describe('PARAM-10A negative source tests（§18.14）', () => {
     join(repoRoot, 'apps', 'desktop', 'src', 'renderer', 'src', 'workbench', 'ParamWorkbench.tsx'),
     'utf8'
   ));
+  const paramIpcSource = stripComments(readFileSync(
+    join(repoRoot, 'apps', 'desktop', 'src', 'main', 'ipc', 'param.ts'),
+    'utf8'
+  ));
+  const preloadSource = stripComments(readFileSync(
+    join(repoRoot, 'apps', 'desktop', 'src', 'preload', 'index.ts'),
+    'utf8'
+  ));
 
   it('backup 不读：所有 param 读取通道都必须拒绝（PARAM 两个 + GPARAM 一个）', () => {
     // 3 个读取通道（readParamDocument / readParamPage / readGparamDocument）各带
@@ -211,6 +219,48 @@ describe('PARAM-10A negative source tests（§18.14）', () => {
       '指示器不得带 visibleRows.length > 0 守卫');
     assert.doesNotMatch(workbenchSource, /style=\{\{ padding: '4px 10px' \}\}>加载中…/,
       '虚拟容器内的旧「加载中…」指示器必须删除');
+  });
+
+  it('PARAM First Bad：首屏走行索引，选中行才走非全量 payload', () => {
+    assert.match(workbenchSource, /bridge\.readContainerParamRowIndex\(/,
+      '首屏必须调用 readContainerParamRowIndex');
+    assert.match(workbenchSource, /bridge\.readContainerParamPage\([\s\S]*?false\s*\)/,
+      '选中行 payload 必须显式传 loadAll=false');
+    assert.match(workbenchSource, /false,\s*documentSessionToken\s*\)/,
+      '选中行 payload 必须复用行索引返回的 native session token');
+    assert.doesNotMatch(
+      workbenchSource,
+      /readContainerParamPage\(\s*props\.containerUri,\s*selectedEntry,\s*0,\s*0,\s*'',\s*true\s*\)/,
+      '首屏不得再调用 readContainerParamPage(..., true)'
+    );
+
+    const rowIndexHandler = sliceHandler(paramIpcSource, 'resource.readContainerParamRowIndex');
+    assert.match(rowIndexHandler, /includeRowPayloads:\s*false/,
+      '容器行索引必须显式关闭 payload');
+    assert.match(rowIndexHandler, /includeRowHashes:\s*true/,
+      '容器行索引必须返回 dataHash');
+    assert.match(rowIndexHandler, /rowIndex:/,
+      '容器行索引必须返回物理 rowIndex');
+    assert.match(rowIndexHandler, /dataHash:/,
+      '容器行索引必须返回物理 dataHash');
+    assert.match(rowIndexHandler, /sessionToken/,
+      '容器行索引必须把 native session token 带回 renderer');
+
+    const pageHandler = sliceHandler(paramIpcSource, 'resource.readContainerParamPage');
+    assert.match(pageHandler, /includeRowPayloads:\s*false/,
+      '容器分页的首次 session 打开必须走 lazy index');
+    assert.match(pageHandler, /documentSession:/,
+      '容器分页 payload 必须复用 lazy session');
+    assert.match(pageHandler, /rowSelections:/,
+      '容器分页 payload 必须按物理身份选择行');
+    assert.match(pageHandler, /requestedDocumentSessionToken|documentSessionToken/,
+      '容器分页必须接收并复用 native session token');
+    const preloadPage = preloadSource.slice(
+      preloadSource.indexOf('readContainerParamPage:'),
+      preloadSource.indexOf('readContainerParamRowIndex:')
+    );
+    assert.match(preloadPage, /documentSessionToken/,
+      'preload 必须把 native session token 传给容器分页 IPC');
   });
 
   it('backup 拒绝只属于 IPC 层：组件不得自行拼拒绝逻辑', () => {

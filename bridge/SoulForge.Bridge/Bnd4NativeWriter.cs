@@ -5,26 +5,33 @@ using System.Text.Json;
 internal static class Bnd4NativeWriter
 {
     private static readonly ConcurrentDictionary<string, (long Length, DateTime LastWriteUtc, DcxNativeDocument Dcx, Bnd4NativeDocument Binder)> BinderCache = new(StringComparer.OrdinalIgnoreCase);
+    private static readonly object BinderCacheGate = new();
 
     public static (DcxNativeDocument Dcx, Bnd4NativeDocument Binder) GetCachedBinder(string sourcePath, string? oodleRuntimeRoot)
     {
-        var info = new FileInfo(sourcePath);
-        if (info.Exists && BinderCache.TryGetValue(sourcePath, out var cached) && cached.Length == info.Length && cached.LastWriteUtc == info.LastWriteTimeUtc)
+        lock (BinderCacheGate)
         {
-            return (cached.Dcx, cached.Binder);
+            var info = new FileInfo(sourcePath);
+            if (info.Exists && BinderCache.TryGetValue(sourcePath, out var cached) && cached.Length == info.Length && cached.LastWriteUtc == info.LastWriteTimeUtc)
+            {
+                return (cached.Dcx, cached.Binder);
+            }
+            var dcx = DcxNativeDocument.Read(sourcePath, oodleRuntimeRoot);
+            var binder = Bnd4NativeDocument.Read(dcx.Payload);
+            if (info.Exists)
+            {
+                BinderCache[sourcePath] = (info.Length, info.LastWriteTimeUtc, dcx, binder);
+            }
+            return (dcx, binder);
         }
-        var dcx = DcxNativeDocument.Read(sourcePath, oodleRuntimeRoot);
-        var binder = Bnd4NativeDocument.Read(dcx.Payload);
-        if (info.Exists)
-        {
-            BinderCache[sourcePath] = (info.Length, info.LastWriteTimeUtc, dcx, binder);
-        }
-        return (dcx, binder);
     }
 
     public static void InvalidateCache(string sourcePath)
     {
-        BinderCache.TryRemove(sourcePath, out _);
+        lock (BinderCacheGate)
+        {
+            BinderCache.TryRemove(sourcePath, out _);
+        }
     }
 
     public static object SnapshotChild(string sourcePath, JsonElement options, string? oodleRuntimeRoot)

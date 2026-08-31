@@ -348,7 +348,12 @@ function relativeSourcePath(sourceUri: string): string {
 
 function paramRowChunk(workspaceId: string, row: ParamRowSymbol, sourceHash?: string, sourceRevision?: number): RagChunk {
   const fields = (row.fields ?? []).slice(0, MAX_FIELDS)
-    .map((field) => `${field.name}=${stringifyValue(field.value)}`);
+    .map((field) => [
+      field.fieldId,
+      field.name,
+      field.description,
+      `value=${stringifyValue(field.value)}`
+    ].filter(Boolean).join(' '));
   const truncated = (row.fields?.length ?? 0) > MAX_FIELDS
     ? `\n… ${(row.fields?.length ?? 0) - MAX_FIELDS} more fields`
     : '';
