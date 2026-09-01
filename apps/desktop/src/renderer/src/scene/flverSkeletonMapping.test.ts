@@ -34,7 +34,7 @@ describe('FLVER skeleton mapping', () => {
     assert.deepEqual(mapFollowerSkeleton(leader, follower), [-1]);
   });
 
-  it('composes FLVER Euler rotations in XZY order', () => {
+  it('composes native FLVER Euler rotations for Three.js column vectors', () => {
     const actual = flverEulerXzyToQuaternion([0.5, -0.3, 1.2]);
     const expected = [
       0.1201424763,

@@ -2,7 +2,7 @@
  * W-REL-F-SCALE-02 release editor bounded-access smoke (validation-unfrozen
  * closure: 真实文档完整有界访问).
  *
- * Verifies that every V0.5 release editor's paginated access channel covers the
+ * Verifies that every release editor's paginated access channel covers the
  * COMPLETE content of its document through bounded pages (hard constraint 17):
  *
  *   - total page count = ceil(total / pageSize);

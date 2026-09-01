@@ -1,7 +1,7 @@
 import type { AiToolPermissionLevel, PatchMode } from '@soulforge/shared';
 
 /**
- * Ordered v0.5 AI tool permission ladder.
+ * Ordered AI tool permission ladder.
  * Higher ranks include lower capabilities after mode policy checks.
  */
 export const AI_TOOL_PERMISSION_ORDER: readonly AiToolPermissionLevel[] = [

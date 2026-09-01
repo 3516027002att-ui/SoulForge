@@ -94,12 +94,12 @@ describe('EventSourceWorkbenchPanel SSR 结构（DarkScript3 式骨架挂载即�
     assert.match(html, /暂无打开的事件文档。/);
   });
 
-  it('T4：具备 Outline、Problems 与格式化工具条按钮', () => {
+  it('T4：主工作台不渲染 Outline、Problems 等旁路面板开关', () => {
     const html = render();
-    assert.match(html, /data-testid="esw-toggle-outline"/);
-    assert.match(html, />Outline<\/button>/);
-    assert.match(html, /data-testid="esw-toggle-problems"/);
-    assert.match(html, /Problems/);
+    assert.doesNotMatch(html, /data-testid="esw-toggle-outline"/);
+    assert.doesNotMatch(html, />Outline<\/button>/);
+    assert.doesNotMatch(html, /data-testid="esw-toggle-problems"/);
+    assert.doesNotMatch(html, /Problems \(/);
   });
 
   it('源码主区用 CodeMirror 引擎挂载位（data-editor-engine=codemirror）', () => {

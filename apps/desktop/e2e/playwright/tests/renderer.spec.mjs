@@ -396,7 +396,7 @@ test('FLVER 模型工作台三栏：树栈↔viewport↔属性联动，材质槽
   // S38 后写入口文案分两态：无 onMaterialSlotSet 时「写入口未开放」，有则
   // 「材质槽修改…经 Patch Engine 提交」（材质槽「应用」在 Properties 栏按需
   // 出现，不属全局提交条）。两种都算只读预览语义，不得再断言已删除的
-  // 「FLVER 编辑已延期至 V0.6」。
+  // 旧的延期提示。
   await expect(window.getByRole('button', { name: /提交|保存|写入/ })).toHaveCount(0);
   const note = window.getByRole('note');
   await expect(note).toBeVisible();
@@ -2102,7 +2102,8 @@ test('PARAM 工作台三栏 + CSV 工具条：选择链、父选区清理、虚�
   // T5-4 + 问题 4 工具条：新建行/复制当前行/删除当前行 + 导出行/导入行/导出备注/
   // 导入备注 七个真实按钮；未选表时全部禁用（没有可操作的表格目标）。不再有
   // 「Game Parameters · 1 library · N tables」crumb、类型名、行大小。
-  const toolbarButtons = window.locator('.workbench__toolbar .toolbar-button, .pane-toolbar .toolbar-button');
+  const toolbarButtons = window.getByLabel('PARAM 工作台')
+    .locator('.workbench__toolbar .toolbar-button, .pane-toolbar .toolbar-button');
   await expect(toolbarButtons).toHaveCount(7);
   await expect(toolbarButtons.nth(0)).toHaveText('新建行');
   await expect(toolbarButtons.nth(1)).toHaveText('复制当前行');

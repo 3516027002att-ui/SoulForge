@@ -160,30 +160,34 @@ describe('PARAM-10A negative source tests（§18.14）', () => {
     join(repoRoot, 'apps', 'desktop', 'src', 'main', 'ipc', 'param.ts'),
     'utf8'
   ));
+  const assetIpcSource = stripComments(readFileSync(
+    join(repoRoot, 'apps', 'desktop', 'src', 'main', 'ipc', 'assets.ts'),
+    'utf8'
+  ));
   const preloadSource = stripComments(readFileSync(
     join(repoRoot, 'apps', 'desktop', 'src', 'preload', 'index.ts'),
     'utf8'
   ));
 
-  it('backup 不读：所有 param 读取通道都必须拒绝（PARAM 两个 + GPARAM 一个）', () => {
-    // 3 个读取通道（readParamDocument / readParamPage / readGparamDocument）各带
+  it('backup 不读：所有 param 读取通道都必须拒绝（会话 + PARAM 两个 + GPARAM）', () => {
+    // PARAM 会话、两个 legacy PARAM 读取通道与 GPARAM 读取通道各带
     // 一处 BACKUP_READ_FORBIDDEN；五个写通道（GPARAM/MTD/ESD/TAE/FXR：
     // commitGparamMutations、commitMtdPropertySet、commitEsdTransition、
     // commitTaeEvent、commitFxrFieldSet）也各带一处（backup 是 History-only，
-    // 写同样被拒）—— 所以非注释总数是 8。
-    const matches = ipcSource.match(/BACKUP_READ_FORBIDDEN/g) ?? [];
-    assert.equal(matches.length, 8,
-      'BACKUP_READ_FORBIDDEN 应覆盖 3 个读取通道 + 5 个写通道（GPARAM/MTD/ESD/TAE/FXR）');
+    // 写同样被拒）—— 所以非注释总数是 9。
+    const matches = `${paramIpcSource}\n${assetIpcSource}`.match(/BACKUP_READ_FORBIDDEN/g) ?? [];
+    assert.equal(matches.length, 9,
+      'BACKUP_READ_FORBIDDEN 应覆盖 PARAM 会话 + 2 个 PARAM 读取 + GPARAM 读取 + 5 个写通道');
     // 每个 handler 都调用同一判定函数（行为测试见上），拒绝不能只挂在一个通道。
     // 新加读取/写入通道时必须同步扩展这里：少一个通道就少一处 backup 泄漏。
-    const doc = sliceHandler(ipcSource, 'resource.readParamDocument');
-    const page = sliceHandler(ipcSource, 'resource.readParamPage');
-    const gparam = sliceHandler(ipcSource, 'resource.readGparamDocument');
-    const gparamWrite = sliceHandler(ipcSource, 'resource.commitGparamMutations');
-    const mtdWrite = sliceHandler(ipcSource, 'resource.commitMtdPropertySet');
-    const esdWrite = sliceHandler(ipcSource, 'resource.commitEsdTransition');
-    const taeWrite = sliceHandler(ipcSource, 'resource.commitTaeEvent');
-    const fxrWrite = sliceHandler(ipcSource, 'resource.commitFxrFieldSet');
+    const doc = sliceHandler(paramIpcSource, 'resource.readParamDocument');
+    const page = sliceHandler(paramIpcSource, 'resource.readParamPage');
+    const gparam = sliceHandler(assetIpcSource, 'resource.readGparamDocument');
+    const gparamWrite = sliceHandler(assetIpcSource, 'resource.commitGparamMutations');
+    const mtdWrite = sliceHandler(assetIpcSource, 'resource.commitMtdPropertySet');
+    const esdWrite = sliceHandler(assetIpcSource, 'resource.commitEsdTransition');
+    const taeWrite = sliceHandler(assetIpcSource, 'resource.commitTaeEvent');
+    const fxrWrite = sliceHandler(assetIpcSource, 'resource.commitFxrFieldSet');
     assert.ok(doc.includes('isParamBackupPath('), 'readParamDocument 未调用 isParamBackupPath');
     assert.ok(page.includes('isParamBackupPath('), 'readParamPage 未调用 isParamBackupPath');
     assert.ok(gparam.includes('isParamBackupPath('), 'readGparamDocument 未调用 isParamBackupPath');
@@ -195,7 +199,7 @@ describe('PARAM-10A negative source tests（§18.14）', () => {
   });
 
   it('backup 拒绝的诊断指向 History & Recovery（不冒充普通读取失败）', () => {
-    const doc = sliceHandler(ipcSource, 'resource.readParamDocument');
+    const doc = sliceHandler(paramIpcSource, 'resource.readParamDocument');
     assert.match(doc, /History & Recovery/);
   });
 
@@ -288,7 +292,7 @@ describe('PARAM-10A negative source tests（§18.14）', () => {
  */
 function sliceHandler(source: string, channel: string): string {
   const start = source.indexOf(`'${channel}'`);
-  assert.ok(start >= 0, `ipc.ts 中找不到 handler: ${channel}`);
+    assert.ok(start >= 0, `IPC 模块中找不到 handler: ${channel}`);
   return source.slice(start);
 }
 
@@ -345,6 +349,10 @@ describe('S29 能打开就能写（grok §1-9/§1-10）', () => {
     join(process.cwd(), 'apps', 'desktop', 'src', 'main', 'ipc.ts'),
     'utf8'
   ));
+  const paramIpcSource = stripComments(readFileSync(
+    join(process.cwd(), 'apps', 'desktop', 'src', 'main', 'ipc', 'param.ts'),
+    'utf8'
+  ));
 
   it('bool 与 1bit 字段渲染为打勾（checkbox），不再用数字框', () => {
     // 判定唯一来源是共享 helper paramCheckboxField.ts（bool 整字段或 1bit 位域）。
@@ -369,8 +377,8 @@ describe('S29 能打开就能写（grok §1-9/§1-10）', () => {
 
   it('main 侧缺哈希写时现算（sha256FileNow 兜底，不挡写入）', () => {
     assert.ok(ipcSource.includes('async function sha256FileNow'), '现算 helper 在场');
-    assert.ok(ipcSource.includes('file.sha256 ?? await sha256FileNow(file.absolutePath)'), '容器哈希现算兜底');
-    assert.ok(ipcSource.includes('|| await sha256FileNow(unpacked.child.absolutePath)'), '条目哈希现算兜底');
+    assert.ok(paramIpcSource.includes('file.sha256 ?? await deps.sha256FileNow(file.absolutePath)'), '容器哈希现算兜底');
+    assert.ok(paramIpcSource.includes('|| await deps.sha256FileNow(unpacked.child.absolutePath)'), '条目哈希现算兜底');
   });
 
   it('main 不再弹「确认高风险写入」（确认端口从 PARAM 链拆除）', () => {

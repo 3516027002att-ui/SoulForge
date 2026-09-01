@@ -158,6 +158,8 @@ export interface ActionIpcDeps {
     session: WorkspaceSession | null,
     fallback: string
   ): Promise<{ allowedRoots: string[]; diagnostics: Diagnostic[] }>;
+  /** 为当前 TAE 的 character family 建立前台完整 membership 投影。 */
+  ensureActionBinderMembershipForFamily?: (characterFamily: string) => Promise<unknown>;
   /** 等待 workspace.scan 的后台 ACTION membership 建立完成。 */
   waitForWorkspaceIndexing?: () => Promise<void>;
 }
@@ -182,6 +184,10 @@ async function readDirectoryNames(directory: string | null): Promise<string[]> {
 const SEKIRO_ANIMATION_BINDER_ID_BASE = 1_000_000_000;
 const ACTION_ANIBND_FILE_PATTERN = /\.anibnd(?:\.dcx)?$/i;
 const ACTION_CHARACTER_FAMILY_PATTERN = /^c\d{4}$/i;
+// ACTION membership reads are independent, read-only native operations. Keep a
+// small shared concurrency cap so opening one animation does not wait behind a
+// serial scan of every character's ANIBND container.
+const ACTION_BINDER_READ_CONCURRENCY = 4;
 
 interface ActionFileRevision {
   key: string;
@@ -581,6 +587,7 @@ async function readActionBinderDocument(input: {
   allowedRoots: string[];
   effectiveBase: string | null;
   sessionId: string;
+  readConcurrency?: number;
 }): Promise<ActionBinderReadResult> {
   try {
     const result = await runBridge<{ nested?: unknown }>({
@@ -589,6 +596,7 @@ async function readActionBinderDocument(input: {
       resourceUri: input.sourceUri,
       allowedRoots: input.allowedRoots,
       timeoutMs: 120_000,
+      maxConcurrency: input.readConcurrency ?? ACTION_BINDER_READ_CONCURRENCY,
       ...(input.effectiveBase ? { oodleRuntimeRoot: input.effectiveBase } : {}),
       workspaceSessionId: input.sessionId
     });
@@ -695,66 +703,130 @@ export interface ActionBinderMembershipIndexBuildResult {
 }
 
 /**
- * Build the complete ACTION Binder membership projection during workspace
- * indexing. The playback IPC path must consume this projection and must not
- * enumerate sibling ANIBND files or parse membership on demand.
+ * Build the complete ACTION Binder membership projection for the requested
+ * scope during workspace indexing. A foreground call may request one
+ * character family, but it still uses the same deterministic directory
+ * enumeration and exact native membership reads; playback never scans sibling
+ * ANIBND files itself.
  */
+async function mapWithConcurrency<T, R>(
+  items: readonly T[],
+  concurrency: number,
+  worker: (item: T, index: number) => Promise<R>
+): Promise<R[]> {
+  if (items.length === 0) return [];
+  const workerCount = Math.min(Math.max(1, concurrency), items.length);
+  const results = new Array<R>(items.length);
+  let nextIndex = 0;
+
+  const run = async (): Promise<void> => {
+    for (;;) {
+      const index = nextIndex++;
+      if (index >= items.length) return;
+      results[index] = await worker(items[index]!, index);
+    }
+  };
+
+  await Promise.all(Array.from({ length: workerCount }, () => run()));
+  return results;
+}
+
 export async function buildActionBinderMembershipIndex(input: {
   session: WorkspaceSession;
   sessionId: string;
   effectiveBase: string | null;
   indexedFiles: readonly IndexedFile[];
   allowedRoots: readonly string[];
+  /** Optional foreground scope; omitted means every discovered character family. */
+  characterFamilies?: readonly string[];
+  /** Separate foreground pool prevents a full background scan from queueing ahead. */
+  readConcurrency?: number;
 }): Promise<ActionBinderMembershipIndexBuildResult> {
   const discovered = await discoverActionCharacterFamilies(input);
+  const requestedFamilies = input.characterFamilies?.length
+    ? new Set(input.characterFamilies.map((family) => family.toLowerCase()))
+    : null;
+  const families = requestedFamilies
+    ? discovered.families.filter((family) => requestedFamilies.has(family.toLowerCase()))
+    : discovered.families;
   const diagnostics = [...discovered.diagnostics];
   const candidates: BinderMembershipCandidate[] = [];
   const allowedRoots = [...input.allowedRoots];
   appendActionAllowedRoot(allowedRoots, input.effectiveBase);
+  const readConcurrency = Number.isInteger(input.readConcurrency) && input.readConcurrency! > 0
+    ? input.readConcurrency!
+    : ACTION_BINDER_READ_CONCURRENCY;
 
-  for (const characterFamily of discovered.families) {
-    const indexSourceUri = `action-index://${characterFamily}`;
-    const plan = await enumerateActionBinderCandidates({
+  // Directory enumeration is cheap; perform it up front, then schedule the
+  // native membership reads through one global bounded queue. The previous
+  // nested serial loop made the first playable ACTION wait for every large
+  // character binder in the game, even though each read is independent.
+  const plans = await Promise.all(families.map(async (characterFamily) => ({
+    characterFamily,
+    plan: await enumerateActionBinderCandidates({
       session: input.session,
       effectiveBase: input.effectiveBase,
       characterFamily,
-      sourceUri: indexSourceUri,
+      sourceUri: `action-index://${characterFamily}`,
       indexedFiles: input.indexedFiles
-    });
-    diagnostics.push(...plan.diagnostics);
-    for (const candidate of plan.candidates) {
-      const sourceUri = actionBinderIdentityUri(candidate);
-      const read = await readActionBinderDocument({
-        candidate,
-        sourceUri,
-        allowedRoots,
-        effectiveBase: input.effectiveBase,
-        sessionId: input.sessionId
-      });
-      if (!read.ok) {
-        diagnostics.push(...read.diagnostics);
-        continue;
-      }
-      candidates.push({
-        characterFamily,
-        source: {
-          sourceUri,
-          sourcePath: candidate.relativePath,
-          sourceRevision: candidate.revisionKey,
-          sourceLayer: candidate.origin
-        },
-        entries: read.entries.map((entry) => ({
-          entryId: entry.id,
-          entryIndex: entry.index,
-          entryName: entry.name
-        }))
-      });
+    })
+  })));
+  const readJobs = plans.flatMap(({ characterFamily, plan }) => plan.candidates.map((candidate) => ({
+    characterFamily,
+    candidate
+  })));
+  const reads = await mapWithConcurrency(readJobs, readConcurrency, async (job) => ({
+    ...job,
+    read: await readActionBinderDocument({
+      candidate: job.candidate,
+      sourceUri: actionBinderIdentityUri(job.candidate),
+      allowedRoots,
+      effectiveBase: input.effectiveBase,
+      sessionId: input.sessionId,
+      readConcurrency
+    })
+  }));
+
+  for (const { plan } of plans) diagnostics.push(...plan.diagnostics);
+  for (const job of reads) {
+    const { characterFamily, read } = job;
+    if (!read.ok) {
+      diagnostics.push(...read.diagnostics);
+      continue;
     }
+    candidates.push({
+      characterFamily,
+      source: {
+        sourceUri: actionBinderIdentityUri(read.candidate),
+        sourcePath: read.candidate.relativePath,
+        sourceRevision: read.candidate.revisionKey,
+        sourceLayer: read.candidate.origin
+      },
+      entries: read.entries.map((entry) => ({
+        entryId: entry.id,
+        entryIndex: entry.index,
+        entryName: entry.name
+      }))
+    });
   }
 
+  /*
+   * Keep the old deterministic family/candidate order in the projection even
+   * though the native reads above completed concurrently.
+   */
+  candidates.sort((left, right) => {
+    const family = compareActionNames(left.characterFamily, right.characterFamily);
+    if (family !== 0) return family;
+    return compareActionNames(left.source.sourcePath ?? '', right.source.sourcePath ?? '');
+  });
+
+  /*
+   * The read queue above is intentionally the only native fan-out. Do not
+   * reintroduce a playback-time sibling scan here.
+   */
   return {
     ok: diagnostics.length === 0,
-    characterFamilies: discovered.families,
+    characterFamilies: families,
     candidates,
     diagnostics
   };
@@ -782,7 +854,10 @@ function findIndexedActionMotionIdentity(
  * partsbnd 还会共享 parts/common_body.tpf。只把真实存在且位于 Bridge
  * allowed roots 的候选传给 Bridge，避免 renderer 猜本机绝对路径。
  */
-export function characterTexturePackagePaths(modelPath: string): string[] {
+export function characterTexturePackagePaths(
+  modelPath: string,
+  additionalPartsDirectories: readonly string[] = []
+): string[] {
   const candidates: string[] = [];
   const add = (candidate: string): void => {
     if (!existsSync(candidate)) return;
@@ -800,9 +875,20 @@ export function characterTexturePackagePaths(modelPath: string): string[] {
     add(`${stem}.texbnd`);
     add(`${stem}.texbnd.dcx`);
   }
-  if (basename(dirname(modelPath)).toLowerCase() === 'parts') {
-    add(join(dirname(modelPath), 'common_body.tpf.dcx'));
-    add(join(dirname(modelPath), 'common_body.tpf'));
+  const modelDirectory = dirname(modelPath);
+  const partsDirectories = new Set<string>();
+  if (basename(modelDirectory).toLowerCase() === 'parts') partsDirectories.add(modelDirectory);
+  // Character files normally live in `chr/`, while common body textures live
+  // in the game root's `parts/`. The old resolver only handled a model that
+  // was itself inside `parts`, which made map characters render as clothing or
+  // neutral gray when their face/body was in the shared package.
+  partsDirectories.add(join(modelDirectory, '..', 'parts'));
+  for (const directory of additionalPartsDirectories) {
+    if (directory.trim()) partsDirectories.add(directory);
+  }
+  for (const directory of partsDirectories) {
+    add(join(directory, 'common_body.tpf.dcx'));
+    add(join(directory, 'common_body.tpf'));
   }
   return candidates;
 }
@@ -893,7 +979,7 @@ export async function assembleC0000CompatibilityPreview(input: {
       diagnostics: [{
         severity: 'warning',
         code: 'ACTION_COMPATIBILITY_PREVIEW_UNAVAILABLE',
-         message: 'c0000 本体只含骨骼；在有界的 bd/am/lg/hd 候选中没有找到可通过骨骼映射的身体部件。当前只能显示骨架，这不代表存档装备。',
+         message: 'c0000 本体只含骨骼；在有界的 bd/am/lg/hd/fc 候选中没有找到可通过骨骼映射的身体部件。当前只能显示骨架，这不代表存档装备。',
         details: { attemptedCandidates, rejectedCandidates, missingSlots }
       }]
     };
@@ -922,7 +1008,7 @@ export async function assembleC0000CompatibilityPreview(input: {
     diagnostics: [{
       severity: 'warning',
       code: 'ACTION_COMPATIBILITY_PREVIEW_ASSEMBLED',
-       message: `c0000 本体只含骨骼；当前按 overlay 优先、文件名字典序从 bd/am/lg/hd 的有界候选中装配兼容预览（${selectedParts.join('、')}）。这不是存档当前装备。`,
+       message: `c0000 本体只含骨骼；当前按原版 face/hair 组件优先、overlay 覆盖与确定性候选从 bd/am/lg/hd/fc 装配兼容预览（${selectedParts.join('、')}）。这不是存档当前装备。`,
       details: { attemptedCandidates, rejectedCandidates, selectedParts, missingSlots }
     }]
   };
@@ -1177,21 +1263,26 @@ export function registerActionIpcHandlers(deps: ActionIpcDeps): void {
     }
 
     let actionIndex = deps.activeIndex;
-    if (!actionIndex || !actionIndex.isActionBinderMembershipReady()) {
-      // workspace.scan 先让轻量文件列表可见，再异步哈希并建立 Binder
-      // membership。等待这一个受控任务，禁止在播放阶段临时扫描 sibling ANIBND。
-      await deps.waitForWorkspaceIndexing?.();
+    if (!actionIndex || !actionIndex.isActionBinderMembershipReadyFor(characterFamily)) {
+      // 先建立当前 character family 的完整前台投影；这仍然走统一的
+      // deterministic enumerator + native membership reader，不在播放阶段
+      // 自己扫描 sibling ANIBND。全局索引继续由 workspace.scan 后台完成。
+      if (deps.ensureActionBinderMembershipForFamily) {
+        await deps.ensureActionBinderMembershipForFamily(characterFamily);
+      } else {
+        await deps.waitForWorkspaceIndexing?.();
+      }
       if (deps.activeSession !== session || deps.activeWorkspaceSessionId !== sessionId) {
         return { ok: false, diagnostics: [sessionChangedDiagnostic(sourceUri)] };
       }
       actionIndex = deps.activeIndex;
     }
-    if (!actionIndex || !actionIndex.isActionBinderMembershipReady()) {
+    if (!actionIndex || !actionIndex.isActionBinderMembershipReadyFor(characterFamily)) {
       return {
         ok: false,
         diagnostics: [actionDiagnostic(
           'ACTION_BINDER_MEMBERSHIP_INDEX_NOT_READY',
-          'ACTION Binder membership 尚未由 workspace index 完整建立，播放阶段拒绝临时扫描 sibling ANIBND。',
+          '当前 character family 的 ACTION Binder membership 尚未由 workspace index 完整建立，播放阶段拒绝临时扫描 sibling ANIBND。',
           sourceUri,
           { characterFamily, motionAnimId: motionIdentity.motionAnimId }
         )]

@@ -114,7 +114,7 @@ function main(): void {
     ],
     nonClaims: [
       '未运行真实 Electron 真实文档功能验收。',
-      'V0.5 不要求编辑器容量、延迟、规模档位或 benchmark 阈值。',
+      '当前不以编辑器容量、延迟、规模档位或 benchmark 阈值作为开发门槛。',
       'contract fixture 只验证 harness，不能提升 editor/native authority 或 REL-F。'
     ]
   }, null, 2));
@@ -225,13 +225,13 @@ function assertScopeEditorProjection(
 
 /**
  * 过渡期编辑器（msb/flver）的正向断言：既有 typed write 链可以继续开发，
- * 但它们不因本次范围过渡自动进入当前 V0.5 release inventory；
+ * 但它们不因本次范围过渡自动进入当前 release inventory；
  * 这只验证契约投影，不替代 native、Patch Engine、重读/恢复或 release Gate。
  */
 function assertReopenedWriteEditors(): void {
   const msb = EDITOR_CAPABILITY_CONTRACTS.msb;
   if (msb.proposedReleaseEditorId !== null || msb.proposalOrder !== null) {
-    throw new Error('msb must remain outside the current V0.5 release inventory');
+    throw new Error('msb must remain outside the current release inventory');
   }
   if (msb.releaseWriteEnabled !== true || msb.deferredPreview !== null) {
     throw new Error('msb must be write-enabled without a deferred preview contract (S36)');
@@ -247,7 +247,7 @@ function assertReopenedWriteEditors(): void {
 
   const flver = EDITOR_CAPABILITY_CONTRACTS.flver;
   if (flver.proposedReleaseEditorId !== null || flver.proposalOrder !== null) {
-    throw new Error('flver must remain outside the current V0.5 release inventory');
+    throw new Error('flver must remain outside the current release inventory');
   }
   if (flver.releaseWriteEnabled !== true || flver.deferredPreview !== null) {
     throw new Error('flver must be write-enabled without a deferred preview contract (S38)');

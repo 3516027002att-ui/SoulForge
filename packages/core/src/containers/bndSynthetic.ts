@@ -141,7 +141,7 @@ export function readSyntheticBnd(bytes: Buffer): SyntheticBndReadResult {
       diagnostics: [createDiagnostic({
         severity: 'warning',
         code: 'BND_NATIVE_NOT_AUTHORITATIVE',
-        message: 'Native BND3/BND4 without SFBN marker is not authoritative for child replace in v0.6. Use raw-level only.',
+        message: 'Native BND3/BND4 without SFBN marker is not authoritative for child replace. Use raw-level only.',
         details: { format, nativeFormatAuthority: false }
       })]
     };

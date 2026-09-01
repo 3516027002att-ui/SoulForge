@@ -58,6 +58,8 @@ export type KnowledgeSourceChange = readonly string[];
 export interface ToolContext {
   workspaceIndex: WorkspaceIndex | null;
   mode: 'plan' | 'normal' | 'fullPermission';
+  /** Agent sessions are read-only with respect to the persistent memory layer. */
+  allowMemoryWrite?: boolean;
   /** Optional durable/in-memory RAG corpus. Absent falls back to building from the index. */
   rag?: RagCorpus;
   /** Optional long-term memory store (Codex MEMORY.md persistent layer). */
@@ -815,7 +817,7 @@ export function createDefaultToolRegistry(): ToolRegistry {
 
   registry.register({
     name: 'build_patch_graph',
-    description: 'Project a full PatchProposal into the v0.5 graph patch IR for review.',
+    description: 'Project a full PatchProposal into the graph patch IR for review.',
     permission: 'analyze',
     permissionLevel: 'analyze',
     // Same whole-input-is-the-proposal contract as validate_patch. With only
@@ -1682,6 +1684,9 @@ export function createDefaultToolRegistry(): ToolRegistry {
     permissionLevel: 'propose',
     inputSchema: { topic: 'string', summary: 'string', details: 'string?', tags: 'array?' },
     run: (input, context) => {
+      if (context.allowMemoryWrite === false) {
+        return fail('AGENT_MEMORY_WRITE_FORBIDDEN', 'Agent 运行禁止写入长期记忆。');
+      }
       const store = context.memoryStore;
       if (!store) return fail('MEMORY_STORE_REQUIRED', '宿主未提供持久记忆存储，拒绝伪装为已保存。');
       const value = asRecord(input);

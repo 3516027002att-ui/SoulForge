@@ -489,6 +489,8 @@ export function ParamWorkbench(props: ParamWorkbenchProps): ReactElement {
   const [selectedRowIndex, setSelectedRowIndex] = useState<number | null>(null);
   /** 防止 StrictMode/重复渲染对同一物理行重复发起 payload 请求。 */
   const payloadRequestRef = useRef<string | null>(null);
+  /** 行级写入后按稳定 row id 重新定位，不能把 row id 当成物理 rowIndex。 */
+  const pendingSelectedRowIdRef = useRef<number | null>(null);
   const [drafts, setDrafts] = useState<Record<string, string>>({});
   const [committing, setCommitting] = useState(false);
   /** S28：工作台内短时保存提示（成功几秒后消失）；失败留在原处直到下次操作。 */
@@ -542,6 +544,7 @@ export function ParamWorkbench(props: ParamWorkbenchProps): ReactElement {
   useEffect(() => {
     setRowQuery('');
     setSelectedRowIndex(null);
+    pendingSelectedRowIdRef.current = null;
     setDrafts({});
     setToast(null);
     // 索引与已 materialize 的 payload 都必须清：残留会让新 param 的列表里混着
@@ -697,9 +700,15 @@ export function ParamWorkbench(props: ParamWorkbenchProps): ReactElement {
             dataHash: row.dataHash,
             ...(row.name ? { name: row.name } : {})
           }));
+          const pendingRowId = pendingSelectedRowIdRef.current;
+          const pendingRow = pendingRowId === null
+            ? undefined
+            : mapped.find((row) => row.id === pendingRowId);
+          if (pendingRowId !== null) pendingSelectedRowIdRef.current = null;
           // 索引首屏：rows/loadedRows 只放轻量身份；payload 由选中行 effect 合并。
           setRows(mapped);
           setLoadedRows(mapped);
+          if (pendingRowId !== null) setSelectedRowIndex(pendingRow?.rowIndex ?? null);
           setRowCount(result.rowCount ?? mapped.length);
           setTypeName(result.typeName ?? null);
           setRowDataSize(result.rowDataSize ?? 0);
@@ -1221,12 +1230,16 @@ export function ParamWorkbench(props: ParamWorkbenchProps): ReactElement {
       });
       const label = kind === 'add' ? '新建' : kind === 'copy' ? '复制' : '删除';
       if (result.ok) {
+        if (kind === 'delete') pendingSelectedRowIdRef.current = null;
+        else pendingSelectedRowIdRef.current = targetId;
         showToast(`${label}行已保存`, 'ok');
         loadRows();
         if (kind === 'delete') {
           setSelectedRowIndex(null);
         } else {
-          setSelectedRowIndex(targetId);
+          // selectedRowIndex 是物理 rowIndex；新建/复制回调只知道稳定 rowId。
+          // 等索引重读后按 rowId 定位，避免 id=100 被误当成第 100 行。
+          setSelectedRowIndex(null);
         }
       } else {
         showToast(result.message ?? `${label}行失败。`, 'error');

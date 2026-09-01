@@ -50,6 +50,7 @@ export interface FlverViewerProps {
     boneIndicesBase64?: string | undefined;
     skinningMode?: 'weighted' | 'rigid' | 'static' | undefined;
     boneIndexSpace?: 'flver-global' | 'none' | undefined;
+    renderMode?: 'surface' | 'projected-decal' | undefined;
     /** Bridge 根据当前 mesh 的 material 解析出的 PNG data URI。 */
     texturePreviewToken?: string | undefined;
     textureColorSpace?: string | undefined;
@@ -70,6 +71,7 @@ export interface FlverViewerProps {
     boneIndicesBase64?: string | undefined;
     skinningMode?: 'weighted' | 'rigid' | 'static' | undefined;
     boneIndexSpace?: 'flver-global' | 'none' | undefined;
+    renderMode?: 'surface' | 'projected-decal' | undefined;
     texturePreviewToken?: string | undefined;
     textureColorSpace?: string | undefined;
     vertexCount: number;
@@ -121,6 +123,7 @@ interface MeshData {
   boneIndicesBase64?: string | undefined;
   skinningMode?: 'weighted' | 'rigid' | 'static' | undefined;
   boneIndexSpace?: 'flver-global' | 'none' | undefined;
+  renderMode?: 'surface' | 'projected-decal' | undefined;
   texturePreviewToken?: string | undefined;
   textureColorSpace?: string | undefined;
   vertexCount: number;
@@ -273,7 +276,7 @@ export function FlverViewer(props: FlverViewerProps): ReactElement {
       try {
         const result = await bridge.readFlverMesh(props.sourceUri!, idx) as {
           ok: boolean;
-          data?: { positionsBase64?: string; indicesBase64?: string; indexSize?: number; uvsBase64?: string; normalsBase64?: string; boneWeightsBase64?: string; boneIndicesBase64?: string; skinningMode?: 'weighted' | 'rigid' | 'static'; boneIndexSpace?: 'flver-global' | 'none'; texturePreviewToken?: string; textureColorSpace?: string; vertexCount?: number };
+          data?: { positionsBase64?: string; indicesBase64?: string; indexSize?: number; uvsBase64?: string; normalsBase64?: string; boneWeightsBase64?: string; boneIndicesBase64?: string; skinningMode?: 'weighted' | 'rigid' | 'static'; boneIndexSpace?: 'flver-global' | 'none'; renderMode?: 'surface' | 'projected-decal'; texturePreviewToken?: string; textureColorSpace?: string; vertexCount?: number };
           diagnostics?: Array<{ message: string }>;
         };
         if (result.ok && result.data?.positionsBase64) {
@@ -287,6 +290,7 @@ export function FlverViewer(props: FlverViewerProps): ReactElement {
             ...(result.data.boneIndicesBase64 ? { boneIndicesBase64: result.data.boneIndicesBase64 } : {}),
             skinningMode: result.data.skinningMode,
             boneIndexSpace: result.data.boneIndexSpace,
+            ...(result.data.renderMode ? { renderMode: result.data.renderMode } : {}),
             ...(result.data.texturePreviewToken ? { texturePreviewToken: result.data.texturePreviewToken } : {}),
             ...(result.data.textureColorSpace ? { textureColorSpace: result.data.textureColorSpace } : {}),
             vertexCount: result.data.vertexCount ?? 0
@@ -461,6 +465,7 @@ function buildSemanticScene(input: {
       boneIndexSpace: meshData.boneIndexSpace ?? (
         meshData.boneIndicesBase64 && meshData.boneWeightsBase64 ? 'flver-global' : 'none'
       ),
+      previewRenderMode: meshData.renderMode,
       wireframeOverlay: false
     };
     if (meshData.uvsBase64) {
@@ -546,25 +551,28 @@ export function buildBundleSemanticScene(
 
   for (const model of bundle.models) {
     const materialTextures = new Map<number, FlverSceneTexture>();
-    if (!texture) {
-      for (const texturePreview of model.texturePreviews ?? []) {
-        materialTextures.set(texturePreview.materialIndex, toSceneTexture(texturePreview));
-      }
+    for (const texturePreview of model.texturePreviews ?? []) {
+      materialTextures.set(texturePreview.materialIndex, toSceneTexture(texturePreview));
     }
-    const modelTexture = texture ?? (model.texturePreviewToken
+    // `texturePreviewToken` is the legacy first-texture projection. It is a
+    // valid compatibility fallback only when this model has no per-material
+    // table at all; using it for an unmatched material paints (for example)
+    // the head with the body's first albedo. An explicitly supplied legacy
+    // texture follows the same rule so it cannot override material bindings.
+    const legacyTexture = texture ?? (model.texturePreviewToken
       ? {
           kind: 'image-uri' as const,
           uri: model.texturePreviewToken,
           colorSpace: normalizeTextureColorSpace(model.textureColorSpace)
         }
       : null);
+    const hasMaterialTextures = materialTextures.size > 0;
     for (const meshData of model.meshes) {
       const skeletonId = meshData.skeletonId ?? model.modelId;
       const targetSkeleton = bundle.models.find((candidate) => candidate.modelId === skeletonId);
-      const meshTexture = texture
-        ?? (meshData.materialIndex !== undefined
-          ? materialTextures.get(meshData.materialIndex) ?? modelTexture
-          : modelTexture);
+      const meshTexture = meshData.materialIndex !== undefined && meshData.materialIndex >= 0
+        ? materialTextures.get(meshData.materialIndex) ?? (hasMaterialTextures ? null : legacyTexture)
+        : (hasMaterialTextures ? null : legacyTexture);
       const mesh = decodeBundleMesh(model, meshData, meshTexture, targetSkeleton?.bones.length ?? model.bones.length);
       meshes.push(mesh);
     }
@@ -600,6 +608,7 @@ function decodeBundleMesh(
     indexSize: meshData.indexSize,
     skinningMode: meshData.skinningMode,
     boneIndexSpace: meshData.boneIndexSpace,
+    previewRenderMode: meshData.renderMode,
     skeletonId: meshData.skeletonId ?? model.modelId,
     vertexCount,
     wireframeOverlay: false
@@ -657,6 +666,7 @@ function toMeshData(input: {
   boneIndicesBase64?: string | undefined;
   skinningMode?: 'weighted' | 'rigid' | 'static' | undefined;
   boneIndexSpace?: 'flver-global' | 'none' | undefined;
+  renderMode?: 'surface' | 'projected-decal' | undefined;
   texturePreviewToken?: string | undefined;
   textureColorSpace?: string | undefined;
   vertexCount: number;
@@ -671,6 +681,7 @@ function toMeshData(input: {
     boneIndicesBase64: input.boneIndicesBase64 ?? undefined,
     skinningMode: input.skinningMode,
     boneIndexSpace: input.boneIndexSpace,
+    renderMode: input.renderMode,
     texturePreviewToken: input.texturePreviewToken ?? undefined,
     textureColorSpace: input.textureColorSpace ?? undefined,
     vertexCount: input.vertexCount
@@ -684,7 +695,8 @@ function computeSceneBounds(
 ): FlverSemanticScene['bounds'] {
   const min: [number, number, number] = [Infinity, Infinity, Infinity];
   const max: [number, number, number] = [-Infinity, -Infinity, -Infinity];
-  if (boundingBox) {
+  const hasProjectedDecal = meshes.some((mesh) => mesh.previewRenderMode === 'projected-decal');
+  if (boundingBox && !hasProjectedDecal) {
     min[0] = boundingBox.min[0] ?? 0;
     min[1] = boundingBox.min[1] ?? 0;
     min[2] = boundingBox.min[2] ?? 0;
@@ -693,6 +705,7 @@ function computeSceneBounds(
     max[2] = boundingBox.max[2] ?? 0;
   }
   for (const mesh of meshes) {
+    if (mesh.previewRenderMode === 'projected-decal') continue;
     for (let index = 0; index < mesh.positions.length; index += 3) {
       const x = mesh.positions[index] ?? 0;
       const y = mesh.positions[index + 1] ?? 0;

@@ -9,6 +9,7 @@ import {
   replaceContainerChild,
   saveRawReplace,
   saveTextResource,
+  type WorkspaceIndex,
   type WorkspaceSession
 } from '@soulforge/core';
 import type { IndexedFile } from '@soulforge/shared';
@@ -26,6 +27,7 @@ import type { ConfirmationReceipt } from '@soulforge/shared';
 export interface ResourceIpcDeps {
   handle: TrustedIpcHandle;
   getIndexedFiles(): readonly IndexedFile[];
+  getActiveIndex(): WorkspaceIndex | null;
   getActiveSession(): WorkspaceSession | null;
   getActiveWorkspaceSessionId(): string | null;
   durableStoragePaths(workspaceId: string): {
@@ -433,16 +435,37 @@ export function registerResourceIpcHandlers(deps: ResourceIpcDeps): void {
 
   // Workspace index search — generic resource listing, lives here rather than workspace domain.
   handle('resource.search', async (_event, query: string) => {
-    const normalized = query.trim().toLowerCase();
     const indexedFiles = deps.getIndexedFiles();
-    const items =
-      normalized.length === 0
-        ? indexedFiles
-        : indexedFiles.filter(
-            (file) =>
-              file.relativePath.toLowerCase().includes(normalized) ||
-              file.resourceKind.includes(normalized)
-          );
+    const activeIndex = deps.getActiveIndex();
+    if (activeIndex) {
+      const items = activeIndex
+        .searchResources({ query, limit: Math.max(100, indexedFiles.length) })
+        .map(({ item }) => item);
+      return items.map(toRendererIndexedFile);
+    }
+
+    // No active workspace means there is no resource catalog to search. Keep
+    // the fallback tolerant of slashes, dots and underscores so an old/early
+    // scan cannot turn a valid path query into a false empty result.
+    const terms = query
+      .trim()
+      .toLowerCase()
+      .replace(/[^\p{L}\p{N}\u4e00-\u9fff]+/gu, ' ')
+      .split(/\s+/)
+      .filter(Boolean);
+    const items = terms.length === 0
+      ? indexedFiles
+      : indexedFiles.filter((file) => {
+          const text = [
+            file.relativePath,
+            file.resourceKind,
+            file.extension,
+            file.compoundExtension,
+            file.formatKind,
+            file.formatLabel
+          ].join(' ').toLowerCase().replace(/[^\p{L}\p{N}\u4e00-\u9fff]+/gu, ' ');
+          return terms.every((term) => text.includes(term));
+        });
     return items.map(toRendererIndexedFile);
   });
 }

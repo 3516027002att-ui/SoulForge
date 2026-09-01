@@ -2,7 +2,7 @@
 
 SoulForge 的 C# 原生格式辅助进程。
 
-当前产品里程碑是 V0.5，唯一实施标准见 [`docs/V0_5_IMPLEMENTATION_HANDOFF.md`](../../docs/V0_5_IMPLEMENTATION_HANDOFF.md)。Bridge 使用 .NET 10、自包含 `win-x64` 与 `1.0.0` NDJSON 常驻协议。当前已具备登记 DFLT/BND4/KRAK 容器路径、FMG/PARAM/EMEVD/MSB 的不同程度 native document/writer，以及 TAE/ESD/FLVER/TPF 的登记样本只读 native document；各格式 authority 仍必须以交接书 §13.1 和真实 smoke 为准，不能由命令存在、synthetic fixture 或 parser 名称外推。
+Bridge 使用 .NET 10、自包含 `win-x64` 与 `1.0.0` NDJSON 常驻协议。当前已具备登记 DFLT/BND4/KRAK 容器路径、FMG/PARAM/EMEVD/MSB 的不同程度 native document/writer，以及 TAE/ESD/FLVER/TPF 的登记样本只读 native document；各格式 authority 仍必须以当前治理数据和真实 smoke 为准，不能由命令存在、synthetic fixture 或 parser 名称外推。
 
 本机没有全局 .NET 10 SDK 时：
 

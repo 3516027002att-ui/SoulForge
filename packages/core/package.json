@@ -18,6 +18,7 @@
     "test:action-mature-oracle": "tsc -b ../shared . && node dist/testing/runActionMatureOracleDifferentialSmoke.js",
     "test:ai-conformance": "tsc -b ../shared . && node dist/testing/runAiConformanceSmoke.js",
     "test:ai-fake-loop": "tsc -b ../shared . && node dist/testing/runAiFakeLoopSmoke.js",
+    "test:agent-production-scenario": "tsc -b ../shared . && node dist/testing/runAgentProductionScenarioSmoke.js",
     "test:asset-import": "tsc -b ../shared . && node dist/testing/runAssetImportSmoke.js",
     "test:asset-writeback": "tsc -b ../shared . && node dist/testing/runAssetWritebackSmoke.js",
     "test:bridge-daemon-client": "tsc -b ../shared . && node dist/testing/runBridgeDaemonClientSmoke.js",

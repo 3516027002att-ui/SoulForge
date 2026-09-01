@@ -15,6 +15,7 @@
 import type { SceneDrawList } from './sceneManifestBrowser.js';
 import {
   type AuthoritativeAnimationClip,
+  eulerXYZToQuaternion,
   sampleAuthoritativePose
 } from '@soulforge/shared';
 import { ModelResourcePool, normalizeModelResourceKey } from './modelResourcePool.js';
@@ -152,6 +153,8 @@ export interface FlverSceneMesh {
   skeletonId?: string;
   skinningMode?: 'weighted' | 'rigid' | 'static';
   boneIndexSpace?: 'flver-global' | 'none';
+  /** Native material projection mode. Projected decals are not generic surfaces. */
+  previewRenderMode?: 'surface' | 'projected-decal' | undefined;
   vertexCount: number;
   wireframeOverlay?: boolean;
   texture?: FlverSceneTexture;
@@ -197,6 +200,18 @@ export interface SceneFrameOptions {
   azimuth?: number;
   elevation?: number;
 }
+
+/**
+ * 原生 FLVER 的角色正面朝向 -Z；角色预览使用固定正面取景，
+ * 地图场景仍保留自己的相机方位与统计裁剪策略。
+ */
+export const FLVER_PREVIEW_FRAME_OPTIONS: Readonly<Required<SceneFrameOptions>> = Object.freeze({
+  minSpan: 1.5,
+  distanceScale: 1.35,
+  minDistance: 2.4,
+  azimuth: Math.PI,
+  elevation: 0.12
+});
 
 /**
  * 渲染器无关的 FLVER 语义场景：纯 typed data（float32/uint16 缓冲、数量），
@@ -326,6 +341,38 @@ export function computeRobustInitialCameraBounds(list: SceneDrawList): FlverScen
       (min[1] + max[1]) / 2,
       (min[2] + max[2]) / 2
     ]
+  };
+}
+
+export interface ScenePointerPosition {
+  x: number;
+  y: number;
+}
+
+export interface ScenePointerDelta {
+  x: number;
+  y: number;
+  moved: boolean;
+}
+
+/**
+ * Pointer capture makes `movementX/Y` implementation-dependent in Chromium:
+ * depending on the platform they can be zero, scaled differently, or jump
+ * when the pointer crosses a window boundary.  Camera gestures therefore use
+ * the captured pointer's client coordinates as their sole delta source.
+ */
+export function computeStablePointerDelta(
+  previous: ScenePointerPosition,
+  current: ScenePointerPosition,
+  maxDelta = 150
+): ScenePointerDelta {
+  const clamp = (value: number): number => Math.max(-maxDelta, Math.min(maxDelta, value));
+  const rawX = Number.isFinite(previous.x) && Number.isFinite(current.x) ? current.x - previous.x : 0;
+  const rawY = Number.isFinite(previous.y) && Number.isFinite(current.y) ? current.y - previous.y : 0;
+  return {
+    x: clamp(rawX),
+    y: clamp(rawY),
+    moved: Math.abs(rawX) > 0.5 || Math.abs(rawY) > 0.5
   };
 }
 
@@ -476,7 +523,8 @@ export async function mountFlverScene(input: {
           transform.rotation[3]
         );
       } else {
-        bone.rotation.set(transform.rotation[0], transform.rotation[1], transform.rotation[2], 'XZY');
+        const quaternion = eulerXYZToQuaternion(transform.rotation as [number, number, number]);
+        bone.quaternion.set(quaternion[0], quaternion[1], quaternion[2], quaternion[3]);
       }
       const scale = transform.scale ?? [1, 1, 1];
       bone.scale.set(scale[0], scale[1], scale[2]);
@@ -518,12 +566,8 @@ export async function mountFlverScene(input: {
           const bone = new core.three.Bone();
           bone.name = b.name;
           bone.position.set(b.translation[0], b.translation[1], b.translation[2]);
-          bone.rotation.set(
-            b.rotation[0],
-            b.rotation[1],
-            b.rotation[2],
-            b.rotationOrder ?? 'XZY'
-          );
+          const quaternion = eulerXYZToQuaternion(b.rotation);
+          bone.quaternion.set(quaternion[0], quaternion[1], quaternion[2], quaternion[3]);
           const scale = b.scale ?? [1, 1, 1];
           bone.scale.set(scale[0], scale[1], scale[2]);
           threeBones.push(bone);
@@ -549,22 +593,25 @@ export async function mountFlverScene(input: {
         activeSkeletons.set(semanticSkeleton.id, { bones: threeBones, skeleton, initialBones });
       }
 
+      // A character bundle repeats the same albedo across many FLVER meshes
+      // (body/cloth/hair cards are a common example). Keep one GPU texture per
+      // image identity for this scene, as Smithbox's texture pool does, instead
+      // of asking Chromium to decode the same data URI once per mesh.
+      const textureCache = new Map<string, import('three').Texture>();
+
       // Each FLVER mesh binds only to its own local skeleton namespace.
       for (const item of semantic.meshes) {
+        if (item.previewRenderMode === 'projected-decal') continue;
         const runtime = activeSkeletons.get(item.skeletonId ?? 'default');
-        core.addMesh(item.id, createFlverMesh(core.three, core.track, item, runtime?.skeleton ?? null));
+        core.addMesh(item.id, createFlverMesh(core.three, core.track, item, runtime?.skeleton ?? null, textureCache));
       }
       createMarkers(core.three, core.track, core.markerGroup, semantic);
       // 角色 FLVER 的真实尺寸通常只有 1~2 个游戏单位。通用代理取景
       // 的 15/16 单位下限会把动作模型缩成原点旁的几像素，播放虽在走，
       // 用户却看不到动作；这里按真实模型尺寸取景，仍保留较小安全下限。
       core.frameToBounds(semantic.bounds, {
-        minSpan: semantic.meshes.length > 0 ? 1.5 : 2,
-        distanceScale: 1.35,
-        minDistance: 2.4,
-        // FLVER 的正面沿 +Z 观察，避免所有角色以地图式对角相机显示成侧面。
-        azimuth: 0,
-        elevation: 0.12
+        ...FLVER_PREVIEW_FRAME_OPTIONS,
+        minSpan: semantic.meshes.length > 0 ? FLVER_PREVIEW_FRAME_OPTIONS.minSpan : 2
       });
       core.setSelected(null, false);
       input.resourceAudit?.([...core.resources]);
@@ -638,6 +685,11 @@ async function mountSceneCore(input: MountInput): Promise<SceneCore> {
   canvas.style.width = '100%';
   canvas.style.height = '100%';
   canvas.style.display = 'block';
+  // The viewport owns pointer gestures.  Suppress browser panning/text
+  // selection so a right-drag cannot be stolen by Chromium's default gesture.
+  canvas.style.touchAction = 'none';
+  canvas.style.userSelect = 'none';
+  canvas.style.cursor = 'grab';
   input.container.replaceChildren(canvas);
 
   let renderer: ThreeRendererLike;
@@ -782,8 +834,15 @@ async function mountSceneCore(input: MountInput): Promise<SceneCore> {
   let baseFlySpeed = 15;
   let isRightMouseDown = false;
   let isMiddleMouseDown = false;
-  let lastPointerX = 0;
-  let lastPointerY = 0;
+  type CameraGestureKind = 'right-look' | 'middle-pan';
+  interface ActiveCameraGesture {
+    pointerId: number;
+    kind: CameraGestureKind;
+    last: ScenePointerPosition;
+    moved: boolean;
+  }
+  let activeCameraGesture: ActiveCameraGesture | null = null;
+  let activeTransformPointerId: number | null = null;
 
   const updateCameraOrientation = (): void => {
     const cosPitch = Math.cos(pitch);
@@ -1434,24 +1493,147 @@ async function mountSceneCore(input: MountInput): Promise<SceneCore> {
     return null;
   };
 
+  const focusCanvas = (): void => {
+    canvas.focus({ preventScroll: true });
+  };
+
+  const tryCapturePointer = (pointerId: number): void => {
+    if (!Number.isFinite(pointerId) || typeof canvas.setPointerCapture !== 'function') return;
+    try {
+      canvas.setPointerCapture(pointerId);
+    } catch {
+      // The pointer can disappear between pointerdown and capture (for
+      // example when the window loses focus). The gesture still remains
+      // client-coordinate driven and will be closed by pointerup/blur.
+    }
+  };
+
+  const releasePointer = (pointerId: number | null): void => {
+    if (pointerId === null || !Number.isFinite(pointerId) || typeof canvas.releasePointerCapture !== 'function') return;
+    try {
+      if (canvas.hasPointerCapture?.(pointerId)) canvas.releasePointerCapture(pointerId);
+    } catch {
+      // Release is best-effort: Chromium may already have released capture
+      // while dispatching pointercancel or a window blur.
+    }
+  };
+
+  const now = (): number => typeof performance !== 'undefined' ? performance.now() : Date.now();
+
+  const finishCameraGesture = (markSelectionSuppression: boolean): void => {
+    const gesture = activeCameraGesture;
+    if (!gesture) {
+      isRightMouseDown = false;
+      isMiddleMouseDown = false;
+      canvas.style.cursor = 'grab';
+      return;
+    }
+    // Secondary clicks must never be reinterpreted as a primary selection by
+    // a platform-specific synthesized click. A middle pan only suppresses
+    // selection after actual movement; a right gesture suppresses even a
+    // stationary click for the same reason.
+    if (markSelectionSuppression && (gesture.moved || gesture.kind === 'right-look')) {
+      suppressSelectionUntil = now() + 120;
+    }
+    releasePointer(gesture.pointerId);
+    activeCameraGesture = null;
+    isRightMouseDown = false;
+    isMiddleMouseDown = false;
+    canvas.style.cursor = 'grab';
+  };
+
+  const cancelTransformGesture = (): void => {
+    const control = activeTransformControl;
+    if (!control) {
+      activeTransformPointerId = null;
+      transformDragging = false;
+      return;
+    }
+    releasePointer(activeTransformPointerId);
+    control.reset();
+    pendingTransformChange = null;
+    control.pointerUp({ x: 0, y: 0, button: 0 });
+    activeTransformControl = null;
+    activeTransformPointerId = null;
+    transformDragging = false;
+  };
+
   const onPointerDown = (event: PointerEvent): void => {
+    if (event.button === 2 || event.button === 1) {
+      // Camera gestures have priority over hover-only gizmo state, but never
+      // interrupt an active transform drag. Keeping one owner/pointer avoids
+      // mixed right+middle state when Chromium reports a late button event.
+      if (transformDragging) {
+        event.preventDefault();
+        event.stopPropagation();
+        return;
+      }
+      if (activeCameraGesture && activeCameraGesture.pointerId !== event.pointerId) return;
+      const kind: CameraGestureKind = event.button === 2 ? 'right-look' : 'middle-pan';
+      activeCameraGesture = {
+        pointerId: event.pointerId,
+        kind,
+        last: { x: event.clientX, y: event.clientY },
+        moved: false
+      };
+      isRightMouseDown = kind === 'right-look';
+      isMiddleMouseDown = kind === 'middle-pan';
+      focusCanvas();
+      canvas.style.cursor = 'grabbing';
+      tryCapturePointer(event.pointerId);
+      event.preventDefault();
+      event.stopPropagation();
+      return;
+    }
     if (event.button !== 0 || activeTransformControl || transformControls.length === 0) return;
     const control = pickUniversalControl(transformPointer(event, 0));
     if (!control) return;
     activeTransformControl = control;
+    activeTransformPointerId = event.pointerId;
     control.pointerDown(transformPointer(event, 0));
     if (!control.dragging) {
       activeTransformControl = null;
+      activeTransformPointerId = null;
       return;
     }
-    if (typeof canvas.setPointerCapture === 'function') canvas.setPointerCapture(event.pointerId);
+    tryCapturePointer(event.pointerId);
     event.preventDefault();
+    event.stopPropagation();
   };
 
   const onPointerMove = (event: PointerEvent): void => {
     if (activeTransformControl) {
+      if (activeTransformPointerId !== null && event.pointerId !== activeTransformPointerId) return;
       activeTransformControl.pointerMove(transformPointer(event, -1));
       event.preventDefault();
+      event.stopPropagation();
+      return;
+    }
+    const gesture = activeCameraGesture;
+    if (gesture && event.pointerId === gesture.pointerId) {
+      // Do not use movementX/Y here. They are unreliable under pointer capture
+      // and can report zero for a visibly moved pointer in Electron.
+      const delta = computeStablePointerDelta(gesture.last, { x: event.clientX, y: event.clientY });
+      gesture.last = { x: event.clientX, y: event.clientY };
+      if (delta.moved) gesture.moved = true;
+      if (delta.x !== 0 || delta.y !== 0) {
+        if (gesture.kind === 'right-look') {
+          const sensitivity = 0.0028;
+          yaw -= delta.x * sensitivity;
+          pitch = Math.max(-1.55, Math.min(1.55, pitch - delta.y * sensitivity));
+          updateCameraOrientation();
+        } else {
+          const panSpeed = baseFlySpeed * 0.0018;
+          const forward = new three.Vector3();
+          camera.getWorldDirection(forward);
+          const right = new three.Vector3().crossVectors(forward, new three.Vector3(0, 1, 0)).normalize();
+          const up = new three.Vector3().crossVectors(right, forward).normalize();
+          camera.position.addScaledVector(right, -delta.x * panSpeed);
+          camera.position.addScaledVector(up, delta.y * panSpeed);
+        }
+      }
+      event.preventDefault();
+      event.stopPropagation();
       return;
     }
     if (event.pointerType === 'mouse' || event.pointerType === 'pen') {
@@ -1460,22 +1642,38 @@ async function mountSceneCore(input: MountInput): Promise<SceneCore> {
   };
 
   const onPointerUp = (event: PointerEvent): void => {
-    if (!activeTransformControl || event.button !== 0) return;
+    if (activeCameraGesture && event.pointerId === activeCameraGesture.pointerId) {
+      finishCameraGesture(true);
+      event.preventDefault();
+      event.stopPropagation();
+      return;
+    }
+    if (event.button === 2 || event.button === 1) {
+      releasePointer(event.pointerId);
+      return;
+    }
+    if (!activeTransformControl || (activeTransformPointerId !== null && event.pointerId !== activeTransformPointerId)) return;
     const control = activeTransformControl;
     control.pointerUp(transformPointer(event, 0));
-    if (typeof canvas.releasePointerCapture === 'function' && canvas.hasPointerCapture?.(event.pointerId)) {
-      canvas.releasePointerCapture(event.pointerId);
-    }
+    releasePointer(activeTransformPointerId);
+    activeTransformPointerId = null;
     event.preventDefault();
+    event.stopPropagation();
   };
 
-  const onPointerCancel = (): void => {
-    const control = activeTransformControl;
-    if (!control) return;
-    control.reset();
-    pendingTransformChange = null;
-    control.pointerUp({ x: 0, y: 0, button: 0 });
-    activeTransformControl = null;
+  const onPointerCancel = (event: PointerEvent): void => {
+    if (activeCameraGesture && (event.pointerId === activeCameraGesture.pointerId || !Number.isFinite(event.pointerId))) {
+      finishCameraGesture(false);
+    } else {
+      releasePointer(event.pointerId);
+      isRightMouseDown = false;
+      isMiddleMouseDown = false;
+    }
+    if (activeTransformControl && (activeTransformPointerId === null || event.pointerId === activeTransformPointerId)) {
+      cancelTransformGesture();
+    }
+    event.preventDefault();
+    event.stopPropagation();
   };
 
   canvas.addEventListener('pointerdown', onPointerDown);
@@ -1487,63 +1685,24 @@ async function mountSceneCore(input: MountInput): Promise<SceneCore> {
     window.addEventListener('pointercancel', onPointerCancel);
   }
 
-  // ---- 鼠标右键原地转头与中键平移控制 ----
-  const onMouseDown = (event: MouseEvent): void => {
-    if (transformDragging) return;
-    if (event.button === 2) {
-      isRightMouseDown = true;
-      lastPointerX = event.clientX;
-      lastPointerY = event.clientY;
-      canvas.focus();
-    } else if (event.button === 1) {
-      isMiddleMouseDown = true;
-      lastPointerX = event.clientX;
-      lastPointerY = event.clientY;
-      event.preventDefault();
-    }
-  };
-
-  const onMouseMove = (event: MouseEvent): void => {
-    if (transformDragging) return;
-    const dx = event.movementX !== undefined && Math.abs(event.movementX) < 100
-      ? event.movementX
-      : (event.clientX - lastPointerX);
-    const dy = event.movementY !== undefined && Math.abs(event.movementY) < 100
-      ? event.movementY
-      : (event.clientY - lastPointerY);
-    lastPointerX = event.clientX;
-    lastPointerY = event.clientY;
-
-    if (isRightMouseDown) {
-      // 鼠标转头：灵敏度稳定，不随距离产生非线性公转
-      const sensitivity = 0.0028;
-      yaw -= dx * sensitivity;
-      pitch -= dy * sensitivity;
-      pitch = Math.max(-1.55, Math.min(1.55, pitch));
-      updateCameraOrientation();
-    } else if (isMiddleMouseDown) {
-      // 中键屏幕空间平移
-      const panSpeed = baseFlySpeed * 0.0018;
-      const forward = new three.Vector3();
-      camera.getWorldDirection(forward);
-      const right = new three.Vector3().crossVectors(forward, new three.Vector3(0, 1, 0)).normalize();
-      const up = new three.Vector3().crossVectors(right, forward).normalize();
-      camera.position.addScaledVector(right, -dx * panSpeed);
-      camera.position.addScaledVector(up, dy * panSpeed);
-    }
-  };
-
-  const onMouseUp = (event: MouseEvent): void => {
-    if (event.button === 2) isRightMouseDown = false;
-    if (event.button === 1) isMiddleMouseDown = false;
-  };
-
   const onContextMenu = (event: MouseEvent): void => {
-    event.preventDefault(); // 拦截右键菜单，保障关卡漫游体验
+    // Secondary click is a camera gesture, never a browser/parent-panel menu.
+    event.preventDefault();
+    event.stopPropagation();
+  };
+
+  const onAuxClick = (event: MouseEvent): void => {
+    if (event.button !== 1 && event.button !== 2) return;
+    // Chromium may emit auxclick after pointerup even when contextmenu was
+    // cancelled. Swallow it so a right click cannot bubble into a selection
+    // or panel command.
+    event.preventDefault();
+    event.stopPropagation();
   };
 
   const onWheel = (event: WheelEvent): void => {
     if (transformDragging) return;
+    event.preventDefault();
     if (event.ctrlKey || event.altKey) {
       // 调节漫游速度
       const factor = event.deltaY < 0 ? 1.2 : 0.83;
@@ -1557,13 +1716,9 @@ async function mountSceneCore(input: MountInput): Promise<SceneCore> {
     }
   };
 
-  canvas.addEventListener('mousedown', onMouseDown);
   canvas.addEventListener('contextmenu', onContextMenu);
-  canvas.addEventListener('wheel', onWheel, { passive: true });
-  if (typeof window !== 'undefined') {
-    window.addEventListener('mousemove', onMouseMove);
-    window.addEventListener('mouseup', onMouseUp);
-  }
+  canvas.addEventListener('auxclick', onAuxClick);
+  canvas.addEventListener('wheel', onWheel, { passive: false });
 
   // WASD 连续漫游
   const pressed = new Set<string>();
@@ -1578,6 +1733,10 @@ async function mountSceneCore(input: MountInput): Promise<SceneCore> {
 
   const onKeyDown = (event: KeyboardEvent): void => {
     if (isTypingTarget(event.target)) return;
+    // 只在视口获得焦点（或正在按住相机键）时接管键盘，避免用户在
+    // 左侧列表/属性输入框操作时地图偷偷移动；这也是 Smithbox 的
+    // viewport-focused shortcut 语义。
+    if (document.activeElement !== canvas && !isRightMouseDown && !isMiddleMouseDown) return;
     const key = event.key.toLowerCase();
     if (event.shiftKey) pressed.add('shift');
     else pressed.delete('shift');
@@ -1625,11 +1784,13 @@ async function mountSceneCore(input: MountInput): Promise<SceneCore> {
   };
   const onWindowBlur = (): void => {
     pressed.clear();
-    isRightMouseDown = false;
-    isMiddleMouseDown = false;
+    finishCameraGesture(false);
+    cancelTransformGesture();
   };
   const onDblClick = (): void => { if (lastBounds) frameToBounds(lastBounds); };
-  const onCanvasClick = (): void => canvas.focus();
+  const onCanvasClick = (event: MouseEvent): void => {
+    if ((event.button ?? 0) === 0) focusCanvas();
+  };
   canvas.tabIndex = 0;
 
   if (typeof window !== 'undefined') {
@@ -1819,8 +1980,10 @@ async function mountSceneCore(input: MountInput): Promise<SceneCore> {
   const disposeAll = (): void => {
     disposed = true;
     cancelAnimationFrame(raf);
-    canvas.removeEventListener('mousedown', onMouseDown);
+    finishCameraGesture(false);
+    cancelTransformGesture();
     canvas.removeEventListener('contextmenu', onContextMenu);
+    canvas.removeEventListener('auxclick', onAuxClick);
     canvas.removeEventListener('wheel', onWheel);
     canvas.removeEventListener('pointerdown', onPointerDown);
     canvas.removeEventListener('pointermove', onPointerMove);
@@ -1830,8 +1993,6 @@ async function mountSceneCore(input: MountInput): Promise<SceneCore> {
     canvas.removeEventListener('dblclick', onDblClick);
     canvas.removeEventListener('click', onCanvasClick);
     if (typeof window !== 'undefined') {
-      window.removeEventListener('mousemove', onMouseMove);
-      window.removeEventListener('mouseup', onMouseUp);
       window.removeEventListener('pointerup', onPointerUp);
       window.removeEventListener('pointercancel', onPointerCancel);
       window.removeEventListener('resize', onResize);
@@ -1927,7 +2088,8 @@ function createFlverMesh(
   three: ThreeModule,
   track: ResourceTracker,
   item: FlverSceneMesh,
-  skeleton: import('three').Skeleton | null = null
+  skeleton: import('three').Skeleton | null = null,
+  textureCache?: Map<string, import('three').Texture>
 ): Object3D {
   const geometry = track(new three.BufferGeometry());
   geometry.setAttribute('position', new three.BufferAttribute(item.positions, 3));
@@ -1951,12 +2113,18 @@ function createFlverMesh(
     geometry.setAttribute('skinWeight', new three.Float32BufferAttribute(item.skinWeights, 4));
   }
 
-  const texture = item.texture ? createTexture(three, track, item.texture) : null;
+  const texture = item.texture ? createTexture(three, track, item.texture, textureCache) : null;
   const material = track(new three.MeshStandardMaterial({
     color: texture ? 0xffffff : new three.Color(0xb0b8c4),
     roughness: 0.5,
     metalness: 0.1,
     ...(texture ? { map: texture } : {}),
+    // Character hair/fur and several cloth/face layers are RGBA cut-outs.
+    // Without an alpha test Three renders the transparent part of each card
+    // as an opaque rectangle, which is exactly the stretched-strip artifact
+    // seen above C0000's head. Keep depth writes enabled so overlapping cards
+    // still sort like native cut-out geometry.
+    ...(texture ? { transparent: true, alphaTest: 0.1, depthWrite: true } : {}),
     wireframe: false,
     side: three.DoubleSide,
     flatShading: false,
@@ -1999,18 +2167,29 @@ function createFlverMesh(
   return mesh;
 }
 
-function createTexture(three: ThreeModule, track: ResourceTracker, texture: FlverSceneTexture): import('three').Texture {
+function createTexture(
+  three: ThreeModule,
+  track: ResourceTracker,
+  texture: FlverSceneTexture,
+  textureCache?: Map<string, import('three').Texture>
+): import('three').Texture {
   if (texture.kind === 'image-uri') {
     if (!/^data:image\/png;base64,[A-Za-z0-9+/=]+$/.test(texture.uri)) {
       throw new Error('FLVER_TEXTURE_URI_INVALID: only Bridge PNG data URI is accepted');
     }
+    const colorSpace = texture.colorSpace === 'linear' ? 'linear' : 'srgb';
+    const cacheKey = `${colorSpace}\0${texture.uri}`;
+    const cached = textureCache?.get(cacheKey);
+    if (cached) return cached;
     const loaded = new three.TextureLoader().load(texture.uri);
     loaded.flipY = false;
-    loaded.colorSpace = texture.colorSpace === 'linear' ? three.LinearSRGBColorSpace : three.SRGBColorSpace;
+    loaded.colorSpace = colorSpace === 'linear' ? three.LinearSRGBColorSpace : three.SRGBColorSpace;
     loaded.wrapS = three.RepeatWrapping;
     loaded.wrapT = three.RepeatWrapping;
     loaded.needsUpdate = true;
-    return track(loaded);
+    const tracked = track(loaded);
+    textureCache?.set(cacheKey, tracked);
+    return tracked;
   }
   if (texture.kind === 'rgba') {
     const dataTexture = track(new three.DataTexture(texture.rgbaBytes, texture.width, texture.height, three.RGBAFormat));
@@ -2050,11 +2229,8 @@ function createMarkers(
       const bone = bones[index];
       if (!bone) return new three.Matrix4();
       const local = new three.Matrix4();
-      local.makeRotationFromEuler(new three.Euler(
-        bone.rotation[0],
-        bone.rotation[1],
-        bone.rotation[2],
-        bone.rotationOrder ?? 'XZY'
+      local.makeRotationFromQuaternion(new three.Quaternion().set(
+        ...eulerXYZToQuaternion(bone.rotation)
       ));
       const scale = bone.scale ?? [1, 1, 1];
       local.scale(new three.Vector3(scale[0], scale[1], scale[2]));

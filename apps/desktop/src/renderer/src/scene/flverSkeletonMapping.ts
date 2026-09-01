@@ -123,7 +123,12 @@ function inverseUnitQuaternion(q: Quaternion): Quaternion {
   return [-normalized[0], -normalized[1], -normalized[2], normalized[3]];
 }
 
-/** FLVER local rotation: radians, intrinsic XZY row-vector `Rx*Rz*Ry` → column-vector `T*Ry*Rz*Rx*S`, quaternion `qy⊗qz⊗qx`. */
+/**
+ * Native FLVER local rotation in radians.
+ * SoulsFormats composes the row-vector local matrix as
+ * `Scale * RotationX * RotationZ * RotationY * Translation`; its transpose
+ * for Three.js is `Translation * RotationY * RotationZ * RotationX * Scale`.
+ */
 export function flverEulerXzyToQuaternion(rotation: readonly [number, number, number]): Quaternion {
   const [x, y, z] = rotation;
   const qx: Quaternion = [Math.sin(x / 2), 0, 0, Math.cos(x / 2)];

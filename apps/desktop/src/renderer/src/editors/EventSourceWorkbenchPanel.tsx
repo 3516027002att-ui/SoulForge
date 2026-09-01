@@ -75,7 +75,6 @@ import { emevdDiagnosticsExtension } from '../emevd/cmDiagnostics.js';
 import { emevdEditingCommandsExtension, formatDocument } from '../emevd/cmEditorCommands.js';
 import { emevdNavigationExtension } from '../emevd/cmNavigation.js';
 import { EventOutlinePane } from './EventOutlinePane.js';
-import { EventProblemsPane } from './EventProblemsPane.js';
 import { WorkbenchLayout } from '../workbench/WorkbenchLayout.js';
 import { EditorState, Transaction, type Extension } from '@codemirror/state';
 import {
@@ -802,11 +801,8 @@ export function EventSourceWorkbenchPanel(props: EventSourceWorkbenchPanelProps)
   const [resourceJump, setResourceJump] = useState<ResourceJumpResult | null>(null);
   const [inspectPane, setInspectPane] = useState<'a' | 'b'>('a');
 
-  // IDE Panes & Modals
-  const [showOutline, setShowOutline] = useState(false);
-  const [showProblems, setShowProblems] = useState(false);
+  // IDE Modals：主工作台保持源码单主区；符号导航仅由快捷键唤起弹窗。
   const [showSymbolModal, setShowSymbolModal] = useState(false);
-  const [diagnosticsMap, setDiagnosticsMap] = useState<Map<string, EventDiagnostic[]>>(new Map());
 
   const editorHostRef = useRef<HTMLDivElement>(null);
   const splitHostRef = useRef<HTMLDivElement>(null);
@@ -859,12 +855,7 @@ export function EventSourceWorkbenchPanel(props: EventSourceWorkbenchPanelProps)
   const documentSymbols = useMemo(() => {
     if (!activeTab) return [];
     return indexDocumentSymbols(activeTab.draft).symbols;
-  }, [activeTabId, analysisRevision, showOutline, showSymbolModal]);
-
-  const currentDiagnostics = useMemo(() => {
-    if (!activeTabId) return [];
-    return diagnosticsMap.get(activeTabId) ?? [];
-  }, [activeTabId, diagnosticsMap]);
+  }, [activeTabId, analysisRevision, showSymbolModal]);
 
   /** T4-3：从主进程拉取本机 EMEDF 指令名目录与结构化枚举。 */
   useEffect(() => {
@@ -1110,11 +1101,7 @@ export function EventSourceWorkbenchPanel(props: EventSourceWorkbenchPanelProps)
       },
       () => enumsRef.current,
       () => tabsRef.current.flatMap((t) => Array.from(indexEventHeaders(t.draft).keys()).map((id) => ({ eventId: id, title: t.title }))),
-      (diags) => {
-        if (!isSatellite) {
-          setDiagnosticsMap((prev) => new Map(prev).set(tabId, diags));
-        }
-      },
+      undefined,
       (eventId) => jumpToEvent(eventId),
       (pos) => {
         setCursorPos(pos);
@@ -1597,26 +1584,6 @@ export function EventSourceWorkbenchPanel(props: EventSourceWorkbenchPanelProps)
               </>
             )}
 
-            <button
-              type="button"
-              className={showOutline ? 'toolbar-button is-active' : 'toolbar-button'}
-              data-testid="esw-toggle-outline"
-              title="切换大纲侧栏（Ctrl+Shift+O 快速跳转）"
-              onClick={() => setShowOutline((v) => !v)}
-            >
-              Outline
-            </button>
-
-            <button
-              type="button"
-              className={showProblems ? 'toolbar-button is-active' : 'toolbar-button'}
-              data-testid="esw-toggle-problems"
-              title="切换问题诊断面板"
-              onClick={() => setShowProblems((v) => !v)}
-            >
-              Problems ({currentDiagnostics.length})
-            </button>
-
             <span className="muted" style={{ fontSize: 11 }} title="Ctrl+F 查找替换 · Ctrl+Shift+O 符号搜索 · Ctrl+Shift+Space 参数提示">
               快捷键: Ctrl+F 查找 · Ctrl+Shift+O 符号
             </span>
@@ -1645,23 +1612,6 @@ export function EventSourceWorkbenchPanel(props: EventSourceWorkbenchPanelProps)
           </div>
         )}
         columns={[
-          ...(showOutline
-            ? [{
-                id: 'outline',
-                title: '大纲',
-                ariaLabel: '事件大纲',
-                minWidth: 180,
-                initialWidth: 220,
-                children: (
-                  <EventOutlinePane
-                    symbols={documentSymbols}
-                    activeEventId={activeSymbolAtCursor?.eventId}
-                    onSelectEvent={(sym) => revealLine(viewRef.current, sym.line)}
-                    onClose={() => setShowOutline(false)}
-                  />
-                )
-              }]
-            : []),
           {
             id: 'source-a',
             title: activeTab?.title ?? '源码',
@@ -1712,16 +1662,6 @@ export function EventSourceWorkbenchPanel(props: EventSourceWorkbenchPanelProps)
                   </div>
                 )}
 
-                {/* Bottom Problems Dock */}
-                {showProblems && (
-                  <div className="esw-problems-dock">
-                    <EventProblemsPane
-                      diagnostics={currentDiagnostics}
-                      onSelectDiagnostic={(diag) => revealLine(viewRef.current, diag.line)}
-                      onClose={() => setShowProblems(false)}
-                    />
-                  </div>
-                )}
               </section>
             )
           },

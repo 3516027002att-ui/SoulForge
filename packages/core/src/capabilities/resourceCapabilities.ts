@@ -1,7 +1,7 @@
 /**
  * Unified resource capability matrix for Files Mode honesty.
  * Raw-level support is universal; semantic/native is never claimed without real writers.
- * v0.6: container-level fields for DCX/BND synthetic + DFLT.
+ * Container-level fields for DCX/BND synthetic + DFLT.
  */
 
 import type {
@@ -64,7 +64,7 @@ export interface ResourceCapabilityMatrix {
   /** @deprecated prefer containerWritableLevel */
   containerWritable: boolean;
 
-  // v0.6 container-level
+  // container-level
   containerReadableLevel: ContainerReadableLevel;
   containerWritableLevel: ContainerWritableLevel;
   containerRoundTripSafe: boolean;

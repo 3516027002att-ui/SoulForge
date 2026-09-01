@@ -1,5 +1,5 @@
 /**
- * Lightweight performance baselines for V0.5 (not full product benchmarks).
+ * Lightweight performance baselines (not full product benchmarks).
  * Fails only on extreme regressions so CI stays deterministic.
  */
 import { performance } from 'node:perf_hooks';

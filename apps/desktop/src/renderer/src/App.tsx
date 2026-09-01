@@ -39,6 +39,7 @@ import type {
   ResourceKind
 } from '@soulforge/shared';
 import type {
+  AiAgentEventEnvelope,
   AnalyzeWorkspaceSummary,
   DirectorySelection,
   RendererWorkspaceScanResult,
@@ -113,6 +114,7 @@ import type { DomainSummary, EditorDomainId } from '@soulforge/shared';
 import { buildDomainSummaries, domainLabel } from './navigation/domainNavigation.js';
 import { DomainNavigationBar } from './navigation/DomainNavigationBar.js';
 import { DomainLibraryList } from './navigation/DomainLibraryList.js';
+import { orderUnseenAgentEvents } from './agent/agentEventReplay.js';
 import {
   behaviorLibraryGroups,
   filesForDomain,
@@ -165,6 +167,11 @@ import {
   isTrappableElement,
   nextTrappedFocusIndex
 } from './a11y/focusTrap.js';
+import {
+  filterCommandPaletteResources,
+  matchesCommandSearch,
+  normalizeCommandSearchText
+} from './navigation/commandPaletteSearch.js';
 
 type SidebarView = 'explorer' | 'search' | 'staging' | 'audit' | 'settings';
 
@@ -483,6 +490,13 @@ export function App(): ReactElement {
      任务状态全部由 agentTaskState 的纯函数折叠，本组件只持有它的当前值——
      折叠规则放在组件里就只能靠真实 Electron 才能测，而那一层抓不到规则本身的错。 */
   const [agentTask, setAgentTask] = useState<AgentTaskState>(INITIAL_AGENT_TASK_STATE);
+  // agent.run 是异步受理：主进程可能在 run 返回 sessionId 前已经推送了
+  // session-accepted / 首轮口播。refs 用来承接这段竞态，主进程回放再按 seq 去重。
+  const agentEventExpectedSessionRef = useRef<string | null>(null);
+  const agentEventReadySessionRef = useRef<string | null>(null);
+  const agentEventReplaySessionRef = useRef<string | null>(null);
+  const agentEventSeenSeqsRef = useRef(new Map<string, Set<number>>());
+  const pendingAgentEventsRef = useRef(new Map<string, AiAgentEventEnvelope[]>());
   const [agentServices, setAgentServices] = useState<ModelServiceChoice[]>([]);
   const [agentServiceId, setAgentServiceId] = useState<string | null>(null);
   const [agentSessions, setAgentSessions] = useState<AgentSessionRow[]>([]);
@@ -757,7 +771,7 @@ export function App(): ReactElement {
   const showTextWorkbench = activeEditor === 'text'
     || (activeDomain === 'text' && activeEditor === 'empty' && workspace !== null);
   // 11-B：打开文本域（未选具体文件）也进 live 目录链 —— readTextCatalog 扫全部
-  // zhocn msgbnd，不依赖选中文件；否则「文本→item」的第一步就做不出来。
+  // 已索引 MSG 容器，不依赖选中文件；否则「文本→item」的第一步就做不出来。
   const fmgPanelLive = fmgLive
     || (activeDomain === 'text' && activeEditor === 'empty'
       && typeof bridge?.readTextCatalog === 'function'
@@ -938,12 +952,83 @@ export function App(): ReactElement {
    * 折叠里的会话隔离（reduceAgentTaskEvent 对 sessionId 不符者原样返回）保证
    * 上一次运行的迟到事件不会把新任务标成已结束。
    */
+  function queueAgentEvent(envelope: AiAgentEventEnvelope): void {
+    const queued = pendingAgentEventsRef.current.get(envelope.sessionId) ?? [];
+    if (!queued.some((item) => item.seq === envelope.seq)) queued.push(envelope);
+    if (queued.length > 4096) queued.splice(0, queued.length - 4096);
+    pendingAgentEventsRef.current.set(envelope.sessionId, queued);
+  }
+
+  function applyAgentEventEnvelopes(envelopes: readonly AiAgentEventEnvelope[]): void {
+    const sessionId = agentEventExpectedSessionRef.current;
+    if (!sessionId || agentEventReadySessionRef.current !== sessionId) {
+      for (const envelope of envelopes) queueAgentEvent(envelope);
+      return;
+    }
+    const orderedResult = orderUnseenAgentEvents(
+      envelopes,
+      sessionId,
+      agentEventSeenSeqsRef.current.get(sessionId) ?? new Set<number>()
+    );
+    agentEventSeenSeqsRef.current.set(sessionId, orderedResult.seen);
+    const ordered = orderedResult.events;
+    if (ordered.length === 0) return;
+    // 先推进已应用集合，再排入 React 状态队列；IPC 回放和实时推送交错时，
+    // 重复/倒序 envelope 都不会让口播或工具条目翻倍，也不会丢掉较早事件。
+    setAgentTask((current) => {
+      if (current.sessionId !== sessionId) return current;
+      return ordered.reduce(
+        (state, envelope) => reduceAgentTaskEvent(state, envelope),
+        current
+      );
+    });
+  }
+
   useEffect(() => {
     if (!bridge) return undefined;
     return bridge.onAiAgentEvent((envelope) => {
-      setAgentTask((current) => reduceAgentTaskEvent(current, envelope));
+      if (!Number.isSafeInteger(envelope.seq) || envelope.seq < 1) return;
+      if (
+        envelope.sessionId !== agentEventExpectedSessionRef.current
+        || envelope.sessionId !== agentEventReadySessionRef.current
+      ) {
+        queueAgentEvent(envelope);
+        return;
+      }
+      applyAgentEventEnvelopes([envelope]);
     });
   }, [bridge]);
+
+  // state 已提交后先补回放，回放完成后才开放实时折叠；这样即使终态事件
+  // 先抵达，也不会在更早的 turn-started/口播之前把状态提前结算。
+  useEffect(() => {
+    if (!bridge || !agentTask.sessionId) return undefined;
+    const sessionId = agentTask.sessionId;
+    if (agentEventReplaySessionRef.current === sessionId) return undefined;
+    agentEventReplaySessionRef.current = sessionId;
+    void bridge.getAiAgentEvents(sessionId, 0).then((result) => {
+      const queued = pendingAgentEventsRef.current.get(sessionId) ?? [];
+      pendingAgentEventsRef.current.delete(sessionId);
+      if (agentEventExpectedSessionRef.current !== sessionId) return;
+      agentEventReadySessionRef.current = sessionId;
+      if (result.ok) {
+        applyAgentEventEnvelopes([...result.events, ...queued]);
+      } else {
+        // 回放失败不阻断实时通道；已经排队的事件仍然要显示。
+        applyAgentEventEnvelopes(queued);
+      }
+    }).catch(() => {
+      // 旧版 preload、受限 fixture 或热更新期间可能没有回放 handler。
+      // 回放是补偿通道，不应让实时事件永远停在“已受理”；打开实时门后
+      // 仍按 seq 去重，生产主进程有回放时不进入此分支。
+      const queued = pendingAgentEventsRef.current.get(sessionId) ?? [];
+      pendingAgentEventsRef.current.delete(sessionId);
+      if (agentEventExpectedSessionRef.current !== sessionId) return;
+      agentEventReadySessionRef.current = sessionId;
+      applyAgentEventEnvelopes(queued);
+    });
+    return undefined;
+  }, [agentTask.sessionId, bridge]);
 
   /** 模型服务与工具清单：任务面板的两个前置数据源，与工作区无关，挂载期取一次。 */
   useEffect(() => {
@@ -2016,6 +2101,11 @@ export function App(): ReactElement {
     setAgentIdleNotice(null);
     setAiPrompt('');
     setAiBusy(false);
+    agentEventExpectedSessionRef.current = null;
+    agentEventReadySessionRef.current = null;
+    agentEventReplaySessionRef.current = null;
+    agentEventSeenSeqsRef.current.clear();
+    pendingAgentEventsRef.current.clear();
     setAgentTask(INITIAL_AGENT_TASK_STATE);
     setToolOutput(null);
     setApprovalError(null);
@@ -2825,6 +2915,10 @@ export function App(): ReactElement {
     const previousTask = agentTask;
     const previousGoal = agentGoal;
     setAgentGoal(prompt);
+    agentEventExpectedSessionRef.current = result.sessionId;
+    agentEventReadySessionRef.current = null;
+    agentEventReplaySessionRef.current = null;
+    agentEventSeenSeqsRef.current.delete(result.sessionId);
     setAgentTask(startAgentTask(result.sessionId, Date.now(), previousTask, previousGoal));
     setStatus('AI 任务已发起，进度会在 Agent 面板更新');
   }
@@ -2951,17 +3045,16 @@ export function App(): ReactElement {
     { id: 'toggle-agent', icon: '✦', label: '切换 AI Agent 面板', hint: 'Ctrl J', run: (): void => { setAgentOpen((open) => !open); } },
     { id: 'toggle-sidebar', icon: '◨', label: '切换侧栏', hint: 'Ctrl B', run: (): void => { setSidebarCollapsed((collapsed) => !collapsed); } }
   ];
-  const cmdkNormalized = cmdkQuery.trim().toLowerCase();
+  const cmdkNormalized = normalizeCommandSearchText(cmdkQuery);
   const filteredCmdkCommands = cmdkCommands.filter(
-    (command) => !cmdkNormalized || command.label.toLowerCase().includes(cmdkNormalized)
+    (command) => matchesCommandSearch(command.label, cmdkNormalized)
   );
   /**
    * 命令面板的资源命中：全量渲染（显示不设限）。此前按 8 条上限截断并补说明，
    * 命令面板列由 .cmdk__list 自身滚动，匹配项一次给全。
    */
-  const cmdkAllResourceMatches = cmdkNormalized
-    ? (allFiles.length > 0 ? allFiles : files)
-        .filter((file) => file.relativePath.toLowerCase().includes(cmdkNormalized))
+  const cmdkAllResourceMatches = workspace && cmdkNormalized
+    ? filterCommandPaletteResources(indexedFiles, cmdkNormalized)
     : [];
   const cmdkItemCount = filteredCmdkCommands.length + cmdkAllResourceMatches.length;
   const selectedCmdkIndex = Math.min(cmdkIndex, Math.max(0, cmdkItemCount - 1));
@@ -4421,7 +4514,11 @@ export function App(): ReactElement {
             />
           </div>
           <div className="cmdk__list">
-            {cmdkItemCount === 0 && <p className="empty-hint">无匹配命令或资源。</p>}
+            {cmdkItemCount === 0 && (
+              <p className="empty-hint">
+                {workspace ? '无匹配命令或资源。' : '请先打开 Mod 工作区；打开后可搜索资源。'}
+              </p>
+            )}
             {filteredCmdkCommands.map((command, index) => (
               <button
                 key={command.id}

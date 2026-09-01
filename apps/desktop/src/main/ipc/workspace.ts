@@ -101,6 +101,12 @@ let activeFingerprintStore: FingerprintStoreState | null = null;
 let foregroundActive = false;
 let workspaceIndexingAbort: AbortController | null = null;
 let workspaceIndexingTask: Promise<void> | null = null;
+const actionMembershipForegroundTasks = new Map<string, Promise<{
+  ok: boolean;
+  diagnostics: Diagnostic[];
+  characterFamilies: string[];
+  candidateCount: number;
+}>>();
 let workspaceAnalyzeInFlight: {
   sessionId: string;
   generation: number;
@@ -183,10 +189,15 @@ export async function rebuildActionBinderMembershipIndex(input: {
   session: WorkspaceSession;
   sessionId: string;
   indexedFiles: readonly IndexedFile[];
+  characterFamilies?: readonly string[];
 }): Promise<{ ok: boolean; diagnostics: Diagnostic[]; characterFamilies: string[]; candidateCount: number }> {
   const roots = await input.deps.verifiedReadRoots(input.session, input.session.layers.overlayRoot);
   if (roots.diagnostics.length > 0) {
-    input.index.clearActionBinderMembership();
+    if (input.characterFamilies?.length) {
+      input.index.clearActionBinderMembershipFamilies(input.characterFamilies);
+    } else {
+      input.index.markActionBinderMembershipGlobalNotReady();
+    }
     return { ok: false, diagnostics: roots.diagnostics, characterFamilies: [], candidateCount: 0 };
   }
   const result = await buildActionBinderMembershipIndex({
@@ -194,16 +205,78 @@ export async function rebuildActionBinderMembershipIndex(input: {
     sessionId: input.sessionId,
     effectiveBase: resolveActionEffectiveBaseRoot(input.session),
     indexedFiles: input.indexedFiles,
-    allowedRoots: roots.allowedRoots
+    allowedRoots: roots.allowedRoots,
+    ...(input.characterFamilies?.length ? { characterFamilies: input.characterFamilies } : {}),
+    ...(input.characterFamilies?.length ? { readConcurrency: 2 } : {})
   });
-  if (result.ok) input.index.setActionBinderMembership(result.candidates);
-  else input.index.clearActionBinderMembership();
+  if (result.ok) {
+    if (input.characterFamilies?.length) {
+      input.index.mergeActionBinderMembership(result.characterFamilies, result.candidates);
+    } else {
+      input.index.setActionBinderMembership(result.candidates, result.characterFamilies);
+    }
+  } else if (input.characterFamilies?.length) {
+    input.index.clearActionBinderMembershipFamilies(result.characterFamilies);
+  } else {
+    // Keep any already-built foreground family projection available. The
+    // global build can fail on an unrelated malformed family without making a
+    // currently opened character unplayable; its global-ready bit remains off.
+    input.index.markActionBinderMembershipGlobalNotReady();
+  }
   return {
     ok: result.ok,
     diagnostics: result.diagnostics,
     characterFamilies: result.characterFamilies,
     candidateCount: result.candidates.length
   };
+}
+
+/**
+ * Build only the current character family's complete membership projection.
+ * workspace.scan still performs the full background build, but opening one
+ * TAE must not wait for hashes/native reads belonging to unrelated characters.
+ */
+export async function ensureActionBinderMembershipForFamily(
+  deps: Pick<WorkspaceIpcDeps, 'verifiedReadRoots'>,
+  characterFamily: string
+): Promise<{ ok: boolean; diagnostics: Diagnostic[]; characterFamilies: string[]; candidateCount: number }> {
+  const normalizedFamily = characterFamily.trim().toLowerCase();
+  if (!/^(?:c\d{4})$/.test(normalizedFamily)) {
+    return {
+      ok: false,
+      diagnostics: [{ severity: 'error', code: 'ACTION_CHARACTER_FAMILY_UNRESOLVED', message: 'ACTION character family 无法用于前台 membership 建立。' }],
+      characterFamilies: [],
+      candidateCount: 0
+    };
+  }
+  const session = activeSession;
+  const sessionId = activeWorkspaceSessionId;
+  const index = activeIndex;
+  if (!session || !sessionId || !index) {
+    return {
+      ok: false,
+      diagnostics: [{ severity: 'error', code: 'ACTION_WORKSPACE_SESSION_UNAVAILABLE', message: '当前没有可用的 workspace session/index，无法建立 ACTION membership。' }],
+      characterFamilies: [],
+      candidateCount: 0
+    };
+  }
+  const key = `${sessionId}|${activeWorkspaceSessionGeneration}|${normalizedFamily}`;
+  const existing = actionMembershipForegroundTasks.get(key);
+  if (existing) return existing;
+  const task = rebuildActionBinderMembershipIndex({
+    deps,
+    index,
+    session,
+    sessionId,
+    indexedFiles,
+    characterFamilies: [normalizedFamily]
+  });
+  actionMembershipForegroundTasks.set(key, task);
+  try {
+    return await task;
+  } finally {
+    if (actionMembershipForegroundTasks.get(key) === task) actionMembershipForegroundTasks.delete(key);
+  }
 }
 
 /**
@@ -241,6 +314,7 @@ export async function waitForWorkspaceIndexing(): Promise<void> {
 
 export function clearWorkspaceIpcCaches(): void {
   directorySelections.clear();
+  actionMembershipForegroundTasks.clear();
 }
 
 export function registerWorkspaceIpcHandlers(deps: WorkspaceIpcDeps): void {

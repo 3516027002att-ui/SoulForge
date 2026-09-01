@@ -22,7 +22,16 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, it } from 'node:test';
 import { renderToStaticMarkup } from 'react-dom/server';
-import { MsbScenePanel, mergeMapStaticGeometryChunks, toMapMeshGeometry } from './MsbScenePanel.js';
+import {
+  MsbScenePanel,
+  filterCollisionDrawItems,
+  isCollisionMapModel,
+  isMapMeshUnavailableResponse,
+  mapModelLoadPriority,
+  mergeMapStaticGeometryChunks,
+  orderMapModelLoadGroups,
+  toMapMeshGeometry
+} from './MsbScenePanel.js';
 
 function resolvePartModelName(
   part: { modelIndex?: number },
@@ -114,6 +123,19 @@ describe('MAP static geometry chunk 重组', () => {
     );
   });
 
+  it('空几何和骨架-only 诊断被识别为无可渲染，而不是硬失败', () => {
+    assert.equal(isMapMeshUnavailableResponse({
+      ok: true,
+      diagnostics: [{ severity: 'info', code: 'MAP_STATIC_GEOMETRY_COMPLETE', message: 'empty' }],
+      data: {}
+    }), true);
+    assert.equal(toMapMeshGeometry({
+      ok: true,
+      diagnostics: [{ severity: 'warning', code: 'MAP_CHARACTER_GEOMETRY_UNAVAILABLE', message: 'skeleton-only' }],
+      data: {}
+    }), null);
+  });
+
   it('单 chunk 保留原始几何数据', () => {
     const merged = mergeMapStaticGeometryChunks([staticGeometryChunk(0)]);
 
@@ -181,6 +203,11 @@ describe('MAP static geometry chunk 重组', () => {
     assert.deepEqual(decodeIndices(merged.indicesBase64!, merged.indexSize!), [0, 1, 2, 3, 4, 5]);
     assert.equal(terminalEmpty.vertexCount, 3);
     assert.equal(allEmpty.positionsBase64, undefined);
+
+    const { uvsBase64: _discardedUvs, ...chunkWithoutUvs } = staticGeometryChunk(20);
+    const mixedUvs = mergeMapStaticGeometryChunks([staticGeometryChunk(0), chunkWithoutUvs]);
+    assert.equal(decodeFloat32(mixedUvs.uvsBase64!).length, 12);
+    assert.deepEqual(decodeFloat32(mixedUvs.uvsBase64!).slice(6), [0, 0, 0, 0, 0, 0]);
   });
 });
 
@@ -224,6 +251,87 @@ describe('MsbScenePanel 初始结构（挂载即有的三栏骨架）', () => {
   });
 });
 
+describe('地图真实模型加载优先级', () => {
+  it('角色与对象先于地形，避免真实人物长期停留在线框方块', () => {
+    assert.equal(mapModelLoadPriority('c1050'), 0);
+    assert.equal(mapModelLoadPriority('map/m10_00_00_00/c1050.flver'), 0);
+    assert.equal(mapModelLoadPriority('o000100'), 1);
+    assert.equal(mapModelLoadPriority('m10_00_00_00_000000'), 2);
+    assert.equal(mapModelLoadPriority('h000000'), 2);
+  });
+
+  it('角色、对象与场景几何交错进入读取队列，不让 terrain 长时间空白', () => {
+    const groups = [
+      { modelName: 'm000010', items: [1, 2, 3] },
+      { modelName: 'c1050', items: [1] },
+      { modelName: 'o000100', items: [1] },
+      { modelName: 'm000020', items: [1] },
+      { modelName: 'c1060', items: [1, 2] },
+      { modelName: 'm000030', items: [1, 2, 3, 4] }
+    ];
+    assert.deepEqual(
+      orderMapModelLoadGroups(groups).map((group) => group.modelName),
+      ['c1060', 'o000100', 'm000030', 'm000010', 'm000020', 'c1050']
+    );
+  });
+});
+
+describe('地图碰撞模型过滤', () => {
+  it('按原生 typeId=5 或 h* 名称识别碰撞模型，并从默认 draw list 隐藏', () => {
+    assert.equal(isCollisionMapModel('h000123'), true);
+    assert.equal(isCollisionMapModel('m000123', [{ name: 'm000123', typeId: 5 }]), true);
+    assert.equal(isCollisionMapModel('m000123', [{ name: 'm000123', typeId: 0 }]), false);
+
+    const result = filterCollisionDrawItems({
+      sourceUri: 'fixture://map/m10.msb.dcx',
+      sourcePath: 'map/m10.msb.dcx',
+      game: 'sekiro',
+      resourceKind: 'map',
+      revision: 'fixture-hash-0001',
+      schemaVersion: 2,
+      mapResourceUri: 'fixture://map/m10.msb.dcx',
+      authority: 'partial',
+      packetId: 'packet-1',
+      chunkIndex: 0,
+      chunkCount: 1,
+      totalItemCount: 2,
+      itemCount: 2,
+      items: [
+        {
+          id: 'part-visible',
+          label: 'visible',
+          entityKind: 'msb-part',
+          primitive: 'box',
+          position: [0, 0, 0],
+          rotation: [0, 0, 0],
+          scale: [1, 1, 1],
+          sourceResourceUri: 'fixture://map/m10.msb.dcx',
+          colorRgb: [1, 1, 1],
+          modelName: 'm000123'
+        },
+        {
+          id: 'part-collision',
+          label: 'collision',
+          entityKind: 'msb-part',
+          primitive: 'box',
+          position: [1, 0, 0],
+          rotation: [0, 0, 0],
+          scale: [1, 1, 1],
+          sourceResourceUri: 'fixture://map/m10.msb.dcx',
+          colorRgb: [1, 1, 1],
+          modelName: 'h000123'
+        }
+      ],
+      bounds: { min: [0, 0, 0], max: [1, 0, 0], center: [0.5, 0, 0] },
+      diagnostics: []
+    }, [{ name: 'm000123', typeId: 0 }, { name: 'h000123', typeId: 5 }]);
+
+    assert.equal(result.hiddenCollisionCount, 1);
+    assert.deepEqual(result.drawList.items.map((item) => item.id), ['part-visible']);
+    assert.equal(result.drawList.itemCount, 1);
+  });
+});
+
 describe('Negative source tests（MAP-50B 五类覆盖）', () => {
   const repoRoot = process.cwd();
   const panelSource = readFileSync(
@@ -240,12 +348,12 @@ describe('Negative source tests（MAP-50B 五类覆盖）', () => {
     assert.doesNotMatch(html, /ΔX|rotX|scaleX/);
   });
 
-  it('面板不渲染数值微调输入；默认使用一体式 Universal Gizmo', () => {
+  it('面板不渲染数值微调输入；默认使用视口 Gizmo', () => {
     const html = render();
     assert.doesNotMatch(html, /type="number"/);
     assert.doesNotMatch(html, /aria-label="变换模式"/);
     assert.doesNotMatch(html, />移动<|>旋转<|>缩放</);
-    assert.match(html, /Universal Gizmo/);
+    assert.match(html, /刷新模型\/纹理/);
   });
 
   it('视口状态不再写「无绝对路径」', () => {
@@ -257,8 +365,9 @@ describe('Negative source tests（MAP-50B 五类覆盖）', () => {
     assert.doesNotMatch(html, /见底部日志/);
   });
 
-  it('视口帮助明确提示 Shift+WASD 加速漫游', () => {
-    assert.match(panelSource, /Shift\+WASD 加速/);
+  it('视口帮助明确提示右键视角与聚焦快捷键', () => {
+    assert.match(panelSource, /右键拖动视角/);
+    assert.match(panelSource, /F 聚焦/);
   });
 
   it('resolvePartModelName 按 modelIndex 取逻辑名', () => {
@@ -279,12 +388,13 @@ describe('Negative source tests（MAP-50B 五类覆盖）', () => {
     const html = render();
     assert.doesNotMatch(html, /无绝对路径/);
     assert.doesNotMatch(html, /见底部日志/);
-    assert.match(panelSource, /readMapPartMesh/);
+    assert.match(panelSource, /readMapStaticGeometry/);
     assert.match(panelSource, /mapbnd/);
     assert.match(panelSource, /FrameTaskQueue/);
     assert.match(panelSource, /MapModelLoadCache/);
-    // 进度句：已挂 loaded / total。
-    assert.match(panelSource, /已挂 \$\{meshStatus\.loaded\} \/ \$\{meshStatus\.total\}/);
+    // 进度句：Part loaded / total。
+    assert.match(panelSource, /meshStatus\.loaded/);
+    assert.match(panelSource, /meshStatus\.total/);
     // S23 去重：按 modelName 去重后串行拉取，同一 FLVER 只读一次
     assert.match(panelSource, /byModel/);
     assert.match(panelSource, /distinctModels/);

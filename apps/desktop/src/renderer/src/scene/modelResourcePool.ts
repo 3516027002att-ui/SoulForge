@@ -342,7 +342,6 @@ export class ModelResourcePool {
   private getTexturedRealMaterial(
     three: ThreeModule,
     track: TrackFunction,
-    modelKey: string,
     texturePreviewToken: string,
     colorSpace = 'srgb'
   ): Material {
@@ -351,7 +350,12 @@ export class ModelResourcePool {
     }
     const tokenKey = hashTextureToken(texturePreviewToken);
     const normalizedColorSpace = colorSpace.toLowerCase() === 'linear' ? 'linear' : 'srgb';
-    const key = `real:${modelKey}:texture:${tokenKey}:${normalizedColorSpace}`;
+    // The material state is fully described by the preview identity and color
+    // space. Do not include the model name: the same map texture is commonly
+    // used by hundreds of placements/models, and Smithbox's texture/material
+    // pool keeps those resources shared instead of allocating one material per
+    // model. Geometry remains keyed by model, so this cannot mix vertex data.
+    const key = `real:texture:${tokenKey}:${normalizedColorSpace}`;
     const existing = this.legacyMaterials.get(key);
     if (existing) return existing;
 
@@ -360,35 +364,41 @@ export class ModelResourcePool {
       roughness: 0.78,
       metalness: 0.04,
       side: three.DoubleSide,
-      wireframe: false
+      wireframe: false,
+      // Map foliage, banners and several decal-like materials use cut-out
+      // alpha. Without an alpha test Chromium draws the transparent texels as
+      // dark opaque fragments, producing the black shard field visible in the
+      // map viewport. Keep depth writes so cut-outs still occlude correctly.
+      alphaTest: 0.1,
+      depthWrite: true
     }));
     this.legacyMaterials.set(key, material);
 
-    const loader = new three.TextureLoader();
-    const texture = loader.load(
-      texturePreviewToken,
-      (loaded) => {
-        if (!this.legacyMaterials.has(key)) {
-          loaded.dispose();
-          return;
+    // One preview token can be referenced by hundreds of placements and by
+    // several models. Reuse the decoded Texture by token/color-space, matching
+    // Smithbox's texture pool and avoiding one browser decode per material.
+    const textureKey = `preview:${tokenKey}:${normalizedColorSpace}`;
+    let texture = this.legacyTextures.get(textureKey);
+    if (!texture) {
+      const loader = new three.TextureLoader();
+      texture = loader.load(
+        texturePreviewToken,
+        undefined,
+        undefined,
+        () => {
+          // Keep the neutral material when a browser decoder rejects the
+          // preview; the Bridge diagnostic remains the source of truth.
         }
-        // FLVER UVs are authored in model space; keep the decoded TPF/DDS
-        // orientation consistent with the FLVER viewer's image-uri path.
-        loaded.flipY = false;
-        loaded.colorSpace = normalizedColorSpace === 'linear' ? three.LinearSRGBColorSpace : three.SRGBColorSpace;
-        loaded.wrapS = three.RepeatWrapping;
-        loaded.wrapT = three.RepeatWrapping;
-        loaded.needsUpdate = true;
-        material.map = loaded;
-        material.needsUpdate = true;
-      },
-      undefined,
-      () => {
-        // Keep the gray/textured fallback material when a browser decoder rejects
-        // the preview; the Bridge diagnostic remains the source of truth.
-      }
-    );
-    this.legacyTextures.set(key, texture);
+      );
+      texture.flipY = false;
+      texture.colorSpace = normalizedColorSpace === 'linear' ? three.LinearSRGBColorSpace : three.SRGBColorSpace;
+      texture.wrapS = three.RepeatWrapping;
+      texture.wrapT = three.RepeatWrapping;
+      texture.needsUpdate = true;
+      this.legacyTextures.set(textureKey, texture);
+    }
+    material.map = texture;
+    material.needsUpdate = true;
     return material;
   }
 
@@ -414,7 +424,7 @@ export class ModelResourcePool {
       const materials = Array.from({ length: maxMaterialIndex + 1 }, (_, materialIndex) => {
         const preview = previews.get(materialIndex);
         return preview
-          ? this.getTexturedRealMaterial(three, track, key, preview.texturePreviewToken, preview.colorSpace)
+          ? this.getTexturedRealMaterial(three, track, preview.texturePreviewToken, preview.colorSpace)
           : this.getDefaultRealMaterial(three, track);
       });
       return {
@@ -423,7 +433,7 @@ export class ModelResourcePool {
       };
     }
     const material = geometryData.texturePreviewToken
-      ? this.getTexturedRealMaterial(three, track, key, geometryData.texturePreviewToken, geometryData.textureColorSpace)
+      ? this.getTexturedRealMaterial(three, track, geometryData.texturePreviewToken, geometryData.textureColorSpace)
       : this.getDefaultRealMaterial(three, track);
     return { geometry, material };
   }

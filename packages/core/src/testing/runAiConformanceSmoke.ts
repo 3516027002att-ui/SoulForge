@@ -3957,17 +3957,17 @@ async function main(): Promise<void> {
     targetInstructionTrace,
     nonClaims: [
       '离线 conformance 不证明任何第三方真实服务可用。',
-      'Anthropic 真实 SSE 只在本机确定性 contract server 上验证事件解析/取消/超时/错误分类；第三方流式事件形状差异不属于 V0.5 验收。',
+      'Anthropic 真实 SSE 只在本机确定性 contract server 上验证事件解析/取消/超时/错误分类；第三方流式事件形状差异不在本次离线验收范围。',
       'MODEL_SERVICE_CANCELLED 区分主动取消与超时是 conformance 层的错误码语义；不影响真实 provider 行为。',
       '写矩阵只覆盖实际接线的安全写路径（scaffold text_edit + WorkspaceTransaction），不提升 native writer authority 或 Patch Engine authority。',
       'plan 的权威判据是 ai/toolPermissions 的等级阶梯；ToolRegistry 与 agent loop 消费同一 predicate，'
         + 'plan 允许 read/analyze/propose，stage/validate/commit/rollback 均被拒绝。',
       'normal 模式的确认语义为：commit 被结构化拒绝，经用户确认升级后才经 Patch Engine 提交。',
-      'Context Broker 是离线可测的 evidence 装配层；其真实 provider 侧接入（第三方模型上下文窗口、真实工作区索引来源）不属于 V0.5 验收。',
+      'Context Broker 是离线可测的 evidence 装配层；其真实 provider 侧接入（第三方模型上下文窗口、真实工作区索引来源）不在本次离线验收范围。',
       'Codex 派生内核（重试退避、并行工具、流式事件、rollout、compaction）参考 openai/codex（Apache-2.0）设计重写；离线矩阵不证明与 Codex 行为逐位一致，也不提升 provider 或 native authority。',
       'production 接线（agentToolBridge、文件 rollout、session host、desktop IPC/preload 契约）由 typecheck/build + 本 smoke 的 fake adapter/registry 验证；未经真实 provider 端到端运行，renderer agent 任务面板归前端 Agent。',
       '目标指令五轮闭环使用本地 scripted adapter 与 synthetic native evidence；验证真实 loop/bridge 编排，不证明第三方 provider 或真实游戏资源中的具体 eventId/参数。',
-      '真实 provider 凭据不属于 V0.5 验收。'
+      '真实 provider 凭据不在本次离线验收范围。'
     ]
   }));
 }

@@ -435,16 +435,12 @@ export function registerTextIpcHandlers(deps: TextIpcDeps): void {
     const roots = await deps.verifiedReadRoots(deps.activeSession, deps.activeSession.layers.overlayRoot);
     if (roots.diagnostics.length > 0) return fail(roots.diagnostics);
 
-    // R2 裁定：文本目录默认只列出简体中文（zhocn），英语/日语整包延期至 V0.6。
-    // 过滤时需要同时接纳 `/zhocn/` 与 Windows 分隔符 `\zhocn\`，且大小写不敏感
-    // （真实索引路径由主进程生成，分隔符随平台，段名大小写不随平台）。
-    const isZhocnPath = (relativePath: string): boolean =>
-      /[\\/]zhocn[\\/]/i.test(relativePath);
+    // 按索引收集所有已发现的 MSG 容器；语言由路径提示与 Bridge 原生目录共同确认。
+    // 不在入口按版本或语言裁剪，避免侧栏和 Agent 看到的文本集合不一致。
     const allMsgFiles = deps.indexedFiles.filter(
       (file) => ['.msgbnd.dcx', '.msgbnd'].includes(file.compoundExtension.toLowerCase())
     );
-    const msgFiles = allMsgFiles.filter((file) => isZhocnPath(file.relativePath));
-    const filteredOutOfZhocn = allMsgFiles.length > msgFiles.length;
+    const msgFiles = allMsgFiles;
     // 目录读取幂等：每次重建表引用映射，避免上一次扫描的 entryIndex 残留。
     textTableRefs.clear();
 
@@ -524,16 +520,6 @@ export function registerTextIpcHandlers(deps: TextIpcDeps): void {
         languageId,
         containers: containers.sort((a, b) => a.containerKind.localeCompare(b.containerKind))
       }));
-
-    // 只在确实过滤掉了非 zhocn 文件时追加这条 info 诊断：它解释的是「侧栏为什么
-    // 没有英语/日语」，而不是万能口号。
-    if (filteredOutOfZhocn) {
-      diagnostics.push({
-        severity: 'info',
-        code: 'TEXT_CATALOG_ZHOCN_ONLY',
-        message: '文本目录当前只列出简体中文（zhocn）；英语/日语延期至 V0.6。'
-      });
-    }
 
     return {
       ok: true,

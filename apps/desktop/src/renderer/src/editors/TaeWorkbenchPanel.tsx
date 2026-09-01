@@ -1012,7 +1012,12 @@ export function TaeWorkbenchPanel(props: TaeWorkbenchPanelProps): ReactElement {
   // 采样 FLVER 骨骼位姿
   const sampledPose = useMemo(() => {
     const leaderBones = (() => {
-      if (!preview.bundle) return [] as Array<{ translation: [number, number, number]; rotation: [number, number, number]; scale: [number, number, number]; }>;
+      if (!preview.bundle) return [] as Array<{
+        parentIndex: number;
+        translation: [number, number, number];
+        rotation: [number, number, number];
+        scale: [number, number, number];
+      }>;
       const leader = preview.bundle.models.find((m) => m.modelId === preview.bundle!.leaderModelId) ?? preview.bundle.models[0];
       return leader?.bones ?? [];
     })();
@@ -1022,7 +1027,13 @@ export function TaeWorkbenchPanel(props: TaeWorkbenchPanelProps): ReactElement {
       rotation: eulerXYZToQuaternion(b.rotation),
       scale: b.scale ?? [1, 1, 1] as [number, number, number]
     }));
-    return activeSampler.sampleFlverPose(playbackTime, leaderBones.length, refPose, isLooping);
+    return activeSampler.sampleFlverPose(
+      playbackTime,
+      leaderBones.length,
+      refPose,
+      isLooping,
+      leaderBones.map((bone) => bone.parentIndex)
+    );
   }, [activeSampler, playbackTime, preview.bundle, isLooping]);
 
   // Pose updates must carry the same skeleton identity used by the semantic
@@ -1324,7 +1335,10 @@ export function TaeWorkbenchPanel(props: TaeWorkbenchPanelProps): ReactElement {
                     && preview.bundle?.assemblyMode === 'compatibility-preview'
                     && (
                       <p className="muted" style={{ fontSize: 11 }} data-testid="tae-preview-compatibility-notice" role="status">
-                        兼容预览：身体部件按 overlay 优先与文件名字典序，从 bd / am / lg 的有界候选中选择；这不代表存档当前装备。
+                      兼容预览：身体部件按原版 face/hair 组件优先、overlay 覆盖与确定性候选，从实际通过骨骼映射的候选中装配
+                        {preview.bundle.assemblyParts && preview.bundle.assemblyParts.length > 0
+                          ? `（${preview.bundle.assemblyParts.join('、')}）`
+                          : '（清单为空）'}；这不代表存档当前装备。
                       </p>
                     )}
                   {clipLoading && (
@@ -1466,7 +1480,7 @@ export function TaeWorkbenchPanel(props: TaeWorkbenchPanelProps): ReactElement {
                   )}
                   {!preview.loading && preview.error === null && preview.bundle !== null && preview.bundle.meshCount === 0 && preview.bundle.boneCount > 0 && (
                     <p className="muted" style={{ fontSize: 11 }} data-testid="tae-preview-skeleton-note">
-                      该模型为骨骼装配体（{preview.bundle.boneCount} bones）；没有找到可安全映射的 bd / am / lg 身体部件，当前显示骨架标记。这不代表存档当前装备。
+                      该模型为骨骼装配体（{preview.bundle.boneCount} bones）；没有找到可安全映射的 bd / am / lg / hd / fc 身体部件，当前显示骨架标记。这不代表存档当前装备。
                     </p>
                   )}
                   {isPartial && invalidRangeCount > 0 && (

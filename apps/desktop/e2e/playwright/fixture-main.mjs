@@ -762,6 +762,13 @@ function registerFixtureIpc() {
       containerHash: 'fixture-container-hash',
       childHash: `fixture-child-hash-${entryIndex}`,
       sessionToken: `fixture-param-session-${entryIndex}`,
+      // 与 loadAll=true 保持同一字段定义契约：Fields 栏的按需 payload
+      // 路径也必须携带当前表的 221 字段定义，否则选中行后只会看到空栏。
+      fieldDefs: table.fieldDefs ?? paramFieldDefsFixture,
+      fieldEnums: paramFieldEnumsFixture,
+      fieldDefsDiagnostic: null,
+      fieldDefsOrigin: 'fixture',
+      fieldDefsTrusted: false,
       diagnostics: []
     };
   });
@@ -2543,12 +2550,18 @@ function registerFixtureIpc() {
      生产 ipc.ts 的行为），只验证 renderer 发出了 ai.agent.cancel 并据推送更新界面。 */
   const agentTimers = new Set();
   let agentSessionSeq = 0;
+  const agentEventHistory = new Map();
   /** approval-requested 后挂起的推进回调；ai.agent.approval.respond 触发。 */
   let pendingApprovalAdvance = null;
 
   function pushAgentEvent(window, sessionId, event) {
     if (window.isDestroyed() || window.webContents.isDestroyed()) return;
-    window.webContents.send('ai:agent:event', { sessionId, event });
+    const history = agentEventHistory.get(sessionId) ?? [];
+    const envelope = { sessionId, seq: history.length + 1, event };
+    history.push(envelope);
+    if (history.length > 4096) history.splice(0, history.length - 4096);
+    agentEventHistory.set(sessionId, history);
+    window.webContents.send('ai:agent:event', envelope);
   }
 
   function scheduleAgentEvent(window, sessionId, delayMs, event) {
@@ -2657,6 +2670,15 @@ function registerFixtureIpc() {
       type: 'session-done', finishReason: 'cancelled', steps: 1, rolloutFileName: 'fixture-rollout.jsonl'
     });
     return { ok: true };
+  });
+
+  handleTrusted('ai.agent.events', (_event, sessionId, afterSeq = 0) => {
+    track('ai.agent.events');
+    if (typeof sessionId !== 'string' || sessionId.trim() === '') {
+      return { ok: false, error: { code: 'INVALID_INPUT', message: 'sessionId 必填。' } };
+    }
+    const history = agentEventHistory.get(sessionId) ?? [];
+    return { ok: true, events: history.filter((envelope) => envelope.seq > afterSeq) };
   });
 
   handleTrusted('ai.agent.approval.respond', (event, request) => {
@@ -2781,6 +2803,18 @@ function registerFixtureIpc() {
       { id: 'fixture-model-a' },
       { id: 'fixture-model-b', displayName: 'fixture 模型 B' }
     ]
+  }));
+  // 生产设置面板会在加载/保存后并发读取用量汇总；fixture 也必须提供
+  // 同形的空汇总，否则保存本身成功却会被缺失 IPC handler 伪装成失败。
+  handleTrusted('modelService.usageSummary', () => ({
+    calls: 0,
+    reportedCalls: 0,
+    totalInputTokens: 0,
+    totalOutputTokens: 0,
+    firstUsedAt: null,
+    lastUsedAt: null,
+    byService: [],
+    latestSession: null
   }));
   // 合成向量索引：模拟 /v1/embeddings 全量生成完成（e2e 不发真实网络）。
   handleTrusted('rag.embed', () => ({

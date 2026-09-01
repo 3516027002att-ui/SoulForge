@@ -3,7 +3,7 @@
  *
  * 用户裁定(2026-08-08)给 SCOPE-BEHAVIOR-SCRIPT 开了
  * `source-level-edit-plaintext-script-entries`,范围严格限于**实测确认为明文**
- * 的条目;306 个字节码条目仍只许整文件替换(V0.5 无 HKS 重编译器)。
+ * 的条目；306 个字节码条目仍只许整文件替换（当前没有 HKS 重编译器）。
  *
  * ── 为什么不新建 writer ──
  *

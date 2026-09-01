@@ -49,6 +49,21 @@ describe('action preview compatibility planning', () => {
     assert.ok(planned.every((candidate) => candidate.name.startsWith('am_')));
   });
 
+  it('keeps the native Wolf face/hair component ahead of cape and other form variants', () => {
+    assert.deepEqual(
+      planC0000CompatibilityCandidates(
+        'fc',
+        ['fc_m_0000.partsbnd.dcx'],
+        ['fc_m_0000.partsbnd.dcx', 'fc_m_0100.partsbnd.dcx', 'fc_m_0200.partsbnd.dcx']
+      ),
+      [
+        { origin: 'base', name: 'fc_m_0200.partsbnd.dcx' },
+        { origin: 'overlay', name: 'fc_m_0000.partsbnd.dcx' },
+        { origin: 'base', name: 'fc_m_0100.partsbnd.dcx' }
+      ]
+    );
+  });
+
   it('wires the bounded planner and fail-closed remapper without hard-coded equipment ids', () => {
     assert.match(actionSource, /planC0000CompatibilityCandidates/);
     assert.match(actionSource, /remapCharacterBundleToLeader/);

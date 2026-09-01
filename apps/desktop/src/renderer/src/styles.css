@@ -834,10 +834,17 @@ input::placeholder, textarea::placeholder { color: var(--ink-3); }
 .event-source__notice { padding: 7px 9px; color: var(--warn); background: var(--warn-soft); font-size: 10.5px; line-height: 1.5; border-top: 1px solid var(--line); }
 .event-source__notice button { margin-left: 5px; }
 
-/* EVENT-30B DarkScript3 式源码 IDE：文档标签 + 源码主区 + 查找替换；Outline /
-   Inspector 仅显式打开；Problems 底部 dock。不做 260/320 固定三栏。 */
+/* EVENT-30B DarkScript3 式源码 IDE：文档标签 + 源码主区 + 查找替换；
+   符号导航只经快捷键弹窗，不在主工具条挂载旁路面板。不做 260/320 固定三栏。 */
 .esw-tabs {
-  display: none;
+  display: flex;
+  align-items: flex-end;
+  gap: 2px;
+  min-height: 31px;
+  flex: none;
+  overflow-x: auto;
+  border-bottom: 1px solid var(--line);
+  background: var(--forge-2);
 }
 .esw-tab { display: inline-flex; align-items: center; gap: 6px; padding: 6px 9px; border: 1px solid transparent; border-bottom: none; border-radius: var(--radius-s) var(--radius-s) 0 0; background: transparent; color: var(--ink-3); font-size: 11px; cursor: pointer; white-space: nowrap; }
 .esw-tab:hover { background: var(--control-hover-bg); color: var(--ink-1); }
@@ -1124,6 +1131,16 @@ pre.tool-output {
    双保险，gap 不再导致首帧收缩；scene-host 用 flex:1 1 0 保证拖动时宽度跟随 .workbench__columns 变化。 */
 .msb-viewport { flex: 1 1 0; min-height: 0; min-width: 0; height: 100%; width: 100%; display: flex; flex-direction: column; gap: 8px; align-items: stretch; }
 .msb-viewport .scene-host { flex: 1 1 0; min-height: 200px; min-width: 0; width: 100%; height: 100%; display: block; }
+.msb-workbench-toolbar { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.msb-workbench-toolbar .button { min-height: 28px; padding: 3px 10px; }
+.msb-viewport-status { flex: none; display: grid; gap: 3px; min-width: 0; font-size: 12px; line-height: 1.45; }
+.msb-viewport-status p { margin: 0; }
+.msb-viewport-status__primary { color: var(--ink-2); overflow-wrap: anywhere; }
+.msb-viewport-status__progress { width: 100%; height: 4px; accent-color: var(--ember); }
+.msb-viewport-status__hint { font-size: 11px; }
+.msb-viewport-diagnostics { color: var(--ink-3); font-size: 11px; }
+.msb-viewport-diagnostics summary { cursor: pointer; user-select: none; }
+.msb-viewport-diagnostics p { margin: 3px 0 0 15px; overflow-wrap: anywhere; }
 /* S19 失败面：地图打开失败的可行动错误块（code + 人话），复用 notice 视觉族 */
 .msb-open-failure {
   display: grid; gap: 4px; padding: 10px 12px;
@@ -1469,7 +1486,14 @@ pre.tool-output {
 .agent-welcome li { position: relative; padding-left: 22px; line-height: 1.8; }
 .agent-welcome li::before { content: "✓"; position: absolute; left: 0; color: var(--ok); }
 .agent-message { padding: 6px 0; border: 0; background: transparent; font-size: 13px; line-height: 1.65; user-select: text; }
-.agent-message--user { background: var(--forge-2); border-radius: 8px; padding: 8px 12px; margin: 4px 0; border: 0; }
+.agent-message--user {
+  margin: 4px 0;
+  padding: 8px 0 8px 12px;
+  border: 0;
+  border-left: 2px solid var(--line-strong);
+  border-radius: 0;
+  background: transparent;
+}
 .agent-message--agent { background: transparent; border: 0; }
 .agent-message--system { display: flex; align-items: center; gap: 8px; color: var(--ink-2); background: transparent; border: 0; }
 .agent-message__meta { margin-bottom: 3px; color: var(--ink-3); font: 10px var(--font-mono); }
@@ -1508,15 +1532,15 @@ pre.tool-output {
 .agent-empty__steps li { margin-bottom: 3px; }
 .agent-empty__note { margin: 0; font-size: 11px; color: var(--ink-3); }
 
-/* 审批卡片。三档危险度靠左边框色区分——commit/rollback 不可能靠再跑一次撤销，
-   它们必须在扫一眼时就与「写暂存区」区分开。 */
+/* 审批信息保持 Codex 式无框消息流；三档危险度只用左侧语义线区分。 */
 .agent-approval {
-  border: 1px solid var(--line);
+  border: 0;
   border-left-width: 3px;
-  border-radius: 4px;
-  padding: 8px 10px;
+  border-left-style: solid;
+  border-radius: 0;
+  padding: 8px 0 8px 12px;
   margin-bottom: 8px;
-  background: var(--forge-2);
+  background: transparent;
 }
 .agent-approval.is-high { border-left-color: var(--danger); }
 .agent-approval.is-medium { border-left-color: var(--warn); }
@@ -1530,7 +1554,14 @@ pre.tool-output {
 .agent-approval__target code { word-break: break-all; }
 /* 改动 diff。增删用左边框 + 底色双重编码，不只靠颜色——只靠红绿对色觉障碍
    用户不可读，而这里要判断的正是「哪些行被删了」。 */
-.agent-approval__diff { margin-bottom: 8px; border: 1px solid var(--line); border-radius: 3px; overflow: hidden; }
+.agent-approval__diff {
+  margin-bottom: 8px;
+  border: 0;
+  border-top: 1px solid var(--line);
+  border-bottom: 1px solid var(--line);
+  border-radius: 0;
+  overflow: hidden;
+}
 .agent-approval__diff-head {
   display: flex; justify-content: space-between; align-items: baseline; gap: 8px;
   padding: 4px 8px; background: var(--forge-3, var(--forge-2)); font-size: 11px; flex-wrap: wrap;
@@ -1612,13 +1643,14 @@ pre.tool-output {
 }
 .agent-message__markdown { white-space: pre-wrap; }
 
-/* Change Review 审批卡：消息流唯一强边界卡（§12.5/§12.9）。 */
+/* Change Review 审批信息：保留危险度左线，不用卡片外框打断消息流。 */
 .agent-approval-card {
-  border: 1px solid var(--line-strong);
+  border: 0;
   border-left-width: 3px;
-  border-radius: 6px;
-  padding: 10px 12px;
-  background: var(--forge-2);
+  border-left-style: solid;
+  border-radius: 0;
+  padding: 10px 0 10px 12px;
+  background: transparent;
   box-shadow: none;
   max-width: 100%;
 }
@@ -1637,7 +1669,14 @@ pre.tool-output {
 .agent-approval-card__row dd { margin: 0; min-width: 0; overflow-wrap: anywhere; }
 .agent-approval-card__row dd code { word-break: break-all; }
 .agent-approval-card__unavailable { color: var(--ink-3); }
-.agent-approval-card__diff { max-height: 240px; overflow: auto; border: 1px solid var(--line); border-radius: 3px; }
+.agent-approval-card__diff {
+  max-height: 240px;
+  overflow: auto;
+  border: 0;
+  border-top: 1px solid var(--line);
+  border-bottom: 1px solid var(--line);
+  border-radius: 0;
+}
 .agent-approval-card__diff-body { margin: 0; padding: 0; font-size: 11px; line-height: 1.55; background: transparent; }
 .agent-approval-card__diff-body .diff-line { display: block; padding: 0 8px; border-left: 2px solid transparent; white-space: pre-wrap; word-break: break-all; }
 .agent-approval-card__diff-body .diff-line.is-add { background: color-mix(in srgb, var(--ok) 12%, transparent); border-left-color: var(--ok); }
@@ -1648,9 +1687,9 @@ pre.tool-output {
 .agent-approval-card__args summary { font-size: 11px; color: var(--ink-3); cursor: pointer; }
 .agent-approval-card__actions { flex-wrap: wrap; margin-top: 8px; }
 .agent-approval-card__failure {
-  margin-top: 8px; padding: 8px 10px;
-  border: 1px solid var(--danger); border-radius: 4px;
-  background: color-mix(in srgb, var(--danger) 8%, transparent);
+  margin-top: 8px; padding: 8px 0 8px 10px;
+  border: 0; border-left: 2px solid var(--danger); border-radius: 0;
+  background: transparent;
   font-size: 11px; line-height: 1.6;
 }
 .agent-approval-card__failure strong { color: var(--danger-text); }
@@ -1658,8 +1697,8 @@ pre.tool-output {
 
 /* 失败态：有界诊断，绝不替换整个 dock（§12.9 禁止巨型错误卡）。 */
 .agent-failure-card {
-  border: 1px solid var(--danger); border-left-width: 3px; border-radius: 4px;
-  padding: 8px 10px; background: color-mix(in srgb, var(--danger) 8%, transparent);
+  border: 0; border-left: 3px solid var(--danger); border-radius: 0;
+  padding: 8px 0 8px 10px; background: transparent;
   max-height: 160px; overflow: auto; font-size: 11px; line-height: 1.6;
 }
 .agent-failure-card strong { color: var(--danger-text); }

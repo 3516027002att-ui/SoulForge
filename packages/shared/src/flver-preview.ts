@@ -2,6 +2,12 @@ import type { Diagnostic } from './types.js';
 
 export type FlverRotationOrder = 'XZY';
 export type FlverSkinningMode = 'weighted' | 'rigid' | 'static';
+/**
+ * Generic albedo preview cannot reproduce native projected-decal materials.
+ * Such meshes remain in the read-only payload for inspection, but the
+ * renderer must not draw them as ordinary surfaces.
+ */
+export type FlverPreviewRenderMode = 'surface' | 'projected-decal';
 
 export interface FlverContainerEntryIdentity {
   index: number;
@@ -40,6 +46,7 @@ export interface FlverPreviewMesh {
   skinningMode: FlverSkinningMode;
   boneIndexSpace: 'flver-global' | 'none';
   skeletonId?: string | undefined;
+  renderMode?: FlverPreviewRenderMode | undefined;
 }
 
 export interface FlverPreviewModel {
@@ -138,7 +145,10 @@ function isPreviewMesh(value: unknown): boolean {
     || typeof value.positionsBase64 !== 'string'
     || typeof value.indicesBase64 !== 'string'
     || (value.skinningMode !== 'weighted' && value.skinningMode !== 'rigid' && value.skinningMode !== 'static')
-    || (value.boneIndexSpace !== 'flver-global' && value.boneIndexSpace !== 'none')) return false;
+    || (value.boneIndexSpace !== 'flver-global' && value.boneIndexSpace !== 'none')
+    || (value.renderMode !== undefined
+      && value.renderMode !== 'surface'
+      && value.renderMode !== 'projected-decal')) return false;
   return ['uvsBase64', 'normalsBase64', 'boneWeightsBase64', 'boneIndicesBase64', 'skeletonId']
     .every((key) => value[key] === undefined || typeof value[key] === 'string');
 }

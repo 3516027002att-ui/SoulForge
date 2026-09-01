@@ -210,20 +210,24 @@ describe('13-A luabnd 子项按 index 走 native 读链（名字 basename / 失�
 });
 
 describe('S34 脚本全量读写（main 侧按打开编码写回，不硬编码 UTF-8）', () => {
-  const ipcSource = readFileSync(
+  const compositionSource = readFileSync(
     join(process.cwd(), 'apps', 'desktop', 'src', 'main', 'ipc.ts'),
     'utf8'
   );
-  // IPC 物理拆分后，读取侧（encoding 回传）在 ipc/raw.ts，保存链仍在组合根。
+  const resourceSource = readFileSync(
+    join(process.cwd(), 'apps', 'desktop', 'src', 'main', 'ipc', 'resource.ts'),
+    'utf8'
+  );
+  // IPC 物理拆分后，读取侧（encoding 回传）在 ipc/raw.ts，脚本保存链在 ipc/resource.ts。
   const rawSource = readFileSync(
     join(process.cwd(), 'apps', 'desktop', 'src', 'main', 'ipc', 'raw.ts'),
     'utf8'
   );
-  // 从 saveScriptSource 注册处切片到下一个 handler（ai.tools）：
+  // 从 saveScriptSource 注册处切片到下一个 resource handler：
   // 容器条目分支与独立文件分支都在这个 handler 里，后面的 handler 不算。
-  const saveChain = ipcSource.slice(
-    ipcSource.indexOf('resource.saveScriptSource'),
-    ipcSource.indexOf("handle('ai.tools'")
+  const saveChain = resourceSource.slice(
+    resourceSource.indexOf("'resource.saveScriptSource'"),
+    resourceSource.indexOf("'resource.preview'")
   );
 
   it('读取回传 encoding：明文=检测编码，反编译=decompiled', () => {
@@ -232,7 +236,7 @@ describe('S34 脚本全量读写（main 侧按打开编码写回，不硬编码 
   });
 
   it('保存按打开编码重新编码：utf8-bom/shift_jis 走 writeEncoding 映射，其余归一 utf8', () => {
-    assert.match(ipcSource, /const writeEncoding = /);
+    assert.match(resourceSource, /const writeEncoding\s*=/);
     // 编码感知写回由 encodeScriptSourceForWriteback 按原始字节分类完成
     // （明文跟打开编码 / 反编译 UTF-8 / mixed-unknown 拒绝），禁止硬编码 UTF-8。
     assert.match(saveChain, /encodeScriptSourceForWriteback\(read\.bytes, sourceText\)/);
@@ -246,7 +250,7 @@ describe('S34 脚本全量读写（main 侧按打开编码写回，不硬编码 
 
   it('不再弹「保存脚本源码」确认框：requestWriteConfirmation 只签发静默回执', () => {
     // 确认回执是 Patch Engine 高风险门的凭据，不是弹窗；主进程全仓无 dialog.showMessageBox 调用。
-    assert.doesNotMatch(ipcSource, /dialog\.showMessageBox\(/);
-    assert.match(ipcSource, /不再弹系统确认框/);
+    assert.doesNotMatch(compositionSource, /dialog\.showMessageBox\(/);
+    assert.match(compositionSource, /不再弹系统确认框/);
   });
 });

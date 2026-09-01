@@ -23,7 +23,7 @@ using System.Text;
 /// 明确标注未解码（那里写的是 "Expression bytecode is reported as opaque
 /// (offset, length) pairs — not decoded"）。
 ///
-/// 这不是待办标记：TAE 属 V0.6 延期只读预览族，不解参数体是当前范围内的正确状态。
+/// 这不是待办标记：TAE 当前属于只读预览族，不解参数体是当前范围内的正确状态。
 /// 要解它必须先按 eventTypeId 逐类登记布局并有真实样本验证，否则无法无损保留
 /// 未知字段、也就不得开放 writer。</para>
 /// </summary>

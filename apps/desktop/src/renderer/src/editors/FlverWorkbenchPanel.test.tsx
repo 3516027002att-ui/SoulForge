@@ -181,7 +181,7 @@ describe('Negative source tests（MODEL-51B 四类覆盖）', () => {
     'utf8'
   );
 
-  it('S38 开闸后无延期文案：footer 不再标注「延期至 V0.6 / 主进程拒绝写入」', () => {
+  it('S38 开闸后无延期文案：footer 不再标注旧延期提示或主进程拒绝写入', () => {
     const html = render();
     assert.doesNotMatch(html, /已延期至|只读预览与网格\/材质槽选择，无写回入口|主进程会拒绝写入请求/);
     assert.match(html, /写入口未开放|直接写入/);

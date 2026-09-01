@@ -1,7 +1,11 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 import type { SceneDrawList } from './sceneManifestBrowser.js';
-import { computeRobustInitialCameraBounds } from './threeSceneController.js';
+import {
+  computeRobustInitialCameraBounds,
+  computeStablePointerDelta,
+  FLVER_PREVIEW_FRAME_OPTIONS
+} from './threeSceneController.js';
 
 function drawListWithPositions(positions: Array<[number, number, number]>): SceneDrawList {
   const min: [number, number, number] = [Infinity, Infinity, Infinity];
@@ -69,5 +73,31 @@ describe('地图初始相机稳健聚焦', () => {
   it('小场景不启用统计裁剪，保持精确 bounds', () => {
     const list = drawListWithPositions([[0, 0, 0], [10, 20, 30]]);
     assert.strictEqual(computeRobustInitialCameraBounds(list), list.bounds);
+  });
+
+  it('角色预览固定从原生 FLVER 正面取景', () => {
+    assert.equal(FLVER_PREVIEW_FRAME_OPTIONS.azimuth, Math.PI);
+    assert.equal(FLVER_PREVIEW_FRAME_OPTIONS.elevation, 0.12);
+    assert.equal(FLVER_PREVIEW_FRAME_OPTIONS.minDistance, 2.4);
+  });
+});
+
+describe('地图 viewport 指针增量', () => {
+  it('只使用 client 坐标并限制跨窗口跳变', () => {
+    assert.deepEqual(
+      computeStablePointerDelta({ x: 100, y: 80 }, { x: 132, y: 95 }),
+      { x: 32, y: 15, moved: true }
+    );
+    assert.deepEqual(
+      computeStablePointerDelta({ x: 100, y: 80 }, { x: 900, y: -500 }),
+      { x: 150, y: -150, moved: true }
+    );
+  });
+
+  it('非法坐标不会污染相机手势状态', () => {
+    assert.deepEqual(
+      computeStablePointerDelta({ x: Number.NaN, y: 20 }, { x: 30, y: Number.POSITIVE_INFINITY }),
+      { x: 0, y: 0, moved: false }
+    );
   });
 });

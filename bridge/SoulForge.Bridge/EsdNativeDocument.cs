@@ -818,7 +818,7 @@ internal sealed class EsdNativeDocument
             // ── 条件明细页（bounded：按 conditionRelOffset 排序取前 MaxConditionSamples 行）──
             // 行数恒等于 parsedConditionCount（同一 visitedConditions 去重生命周期）；
             // 只携带元数据，不含 evaluator 字节。工作台条件页用它做列表；
-            // 完整分页需 V0.6 承接分页 channel。
+            // 完整分页需按当前治理承接分页 channel。
             conditionSamples = ConditionInfos
                 .OrderBy(c => c.ConditionRelOffset)
                 .Take(MaxConditionSamples)
@@ -896,7 +896,7 @@ internal sealed class EsdNativeDocument
             // 待真实语料确认」，而「声明 500 只读出 3」是另一回事：那是解析
             // 覆盖面残缺，必须降到 partial 并附结构化诊断（硬约束 8）。
             //
-            // 上限就是 candidate：ESD 是 user-approved 的 V0.6 延期项
+            // 上限就是 candidate：ESD 当前仍受 scope.json 的
             // （scope.json SCOPE-BEHAVIOR-ESD，authorityAtRuling=candidate）。
             // 计数对齐只说明**结构计数**已闭合，不构成表达式 schema、writer 或
             // 真实游戏加载的验证——RPN 字节码仍按不透明 (offset,length) 上报。

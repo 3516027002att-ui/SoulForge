@@ -2,6 +2,7 @@ import { contextBridge, ipcRenderer } from 'electron';
 import type {
   AiAgentApprovalResponseRequest,
   AiAgentEventEnvelope,
+  AiAgentEventReplayIpcResult,
   AiAgentRunIpcResult,
   AiAgentRunRequest,
   AiAgentSessionListIpcResult,
@@ -1011,6 +1012,8 @@ const api = {
    */
   runAiAgent: (request: AiAgentRunRequest): Promise<AiAgentRunIpcResult> =>
     ipcRenderer.invoke('ai.agent.run', request),
+  getAiAgentEvents: (sessionId: string, afterSeq = 0): Promise<AiAgentEventReplayIpcResult> =>
+    ipcRenderer.invoke('ai.agent.events', sessionId, afterSeq),
   cancelAiAgent: (sessionId: string): Promise<{ ok: boolean }> =>
     ipcRenderer.invoke('ai.agent.cancel', sessionId),
   /**

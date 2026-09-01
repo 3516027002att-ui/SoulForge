@@ -301,7 +301,7 @@ internal sealed class MsbNativeDocument
         //    同样的模型/部件/区域/事件/路线集合」，也就是 **parser 的自洽性**，
         //    不是 writer 的无损性。
         //
-        // MSB 没有 writer（V0.6 延期，全仓无 write-msb 落盘路径），所以这里
+        // MSB 当前没有 writer（全仓无 write-msb 落盘路径），所以这里
         // 不存在可比的重建产物。保持现状是诚实的，但 ByteIdentical 字段名会让
         // 读者误以为它证明了写回无损，故显式传 false 并让语义项承载结论。
         //

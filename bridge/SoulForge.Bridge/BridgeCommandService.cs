@@ -1603,7 +1603,13 @@ internal sealed class BridgeCommandService
                         }
                     }
 
-                    var flverPose = ActionAnimationSemantics.RemapPoseToFlver(hkxPose, hkxToFlver, flverRefPose);
+                    var flverPose = ActionAnimationSemantics.RetargetPoseToFlver(
+                        skeleton.Transforms,
+                        hkxPose,
+                        hkxToFlver,
+                        flverRefPose,
+                        hkxParentIndices,
+                        flverBoneParents);
 
                     var flverOutput = flverPose.Select(p => new
                     {
@@ -1714,7 +1720,12 @@ internal sealed class BridgeCommandService
                     }
                     totalMeshes += flver.MeshCount;
                     totalVertices += flver.Meshes.Sum(mesh => (long)mesh.VertexCount);
-                    var textureBindings = CharacterTexturePreviewService.ResolveAll(flver, leaf.Name, textureLeaves);
+                    var textureBindings = CharacterTexturePreviewService.ResolveAll(
+                        flver,
+                        leaf.Name,
+                        textureLeaves,
+                        oodleRuntimeRoot,
+                        allowedRoots);
                     var firstTexture = textureBindings.FirstOrDefault()?.Preview;
                     if (textureBindings.Count > 0) texturedModelCount++;
                     if (textureBindings.Count == 0)
@@ -1935,6 +1946,7 @@ internal sealed class BridgeCommandService
             try
             {
                 var modelName = OptionString("modelName", "");
+                var mapGroupName = OptionString("mapGroupName", "");
                 var sessionToken = OptionString("sessionToken", "");
                 var cursor = OptionString("cursor", "");
                 // Resolve file hash for session validation
@@ -2058,7 +2070,8 @@ internal sealed class BridgeCommandService
                         textureMesh.MaterialName,
                         textureMesh.MaterialMtdPath,
                         oodleRuntimeRoot,
-                        textureMesh.TexturePaths);
+                        textureMesh.TexturePaths,
+                        mapGroupName);
                 var chunkObj = MapStaticGeometryService.BuildChunk(
                     session!,
                     startMesh,
@@ -2198,7 +2211,7 @@ internal sealed class BridgeCommandService
                 if (textureEntryName.EndsWith(".dcx", StringComparison.OrdinalIgnoreCase))
                     textureEntryName = textureEntryName[..^4];
                 var textureBinding = CharacterTexturePreviewService
-                    .ResolveAll(document, textureEntryName, textureLeaves)
+                    .ResolveAll(document, textureEntryName, textureLeaves, oodleRuntimeRoot, allowedRoots)
                     .FirstOrDefault(binding => binding.MaterialIndex == mesh.MaterialIndex);
                 var meshDiagnostics = new List<Diagnostic>
                 {
@@ -2239,6 +2252,7 @@ internal sealed class BridgeCommandService
                     normalsBase64 = normals,
                     boneWeightsBase64 = boneWeights,
                     boneIndicesBase64 = boneIndices,
+                    renderMode = ResolveFlverPreviewRenderMode(document, mesh.MaterialIndex),
                     textureStatus = textureBinding is null ? "missing" : "ready",
                     textureMaterialName = mesh.MaterialIndex >= 0 && mesh.MaterialIndex < document.Materials.Count
                         ? document.Materials[mesh.MaterialIndex].Name
@@ -2373,8 +2387,8 @@ internal sealed class BridgeCommandService
 
         if (command == "read-mtd-document")
         {
-            // MATERIAL-53A：恢复 read-mtd-document。MTD 是 user-approved 的 V0.6
-            // 延期项（scope.json 的 SCOPE-ASSET-MTD，authorityAtRuling=unverified），
+            // MATERIAL-53A：恢复 read-mtd-document。MTD 当前仍受 scope.json
+            // 的 authorityAtRuling=unverified 约束，
             // 按 resumeRequires 走通用承接流程时恢复三处入口：本分支、
             // AdvertisedCommands 与两侧 TS union（test:bridge-command-advertisement
             // 会在任一处漏掉时失败关闭）。
@@ -2629,7 +2643,7 @@ internal sealed class BridgeCommandService
                 }
                 // 本版刻意未解析的字段区间**单列诊断码**，不并进上面那条。
                 // 两者都会压 authority，但处置方向相反：DIVERGED 指向「去查 parser
-                // 为什么少读了」，而这一条指向「本版范围如此，要做得先走 V0.6 承接」。
+                // 为什么少读了」，而这一条指向「当前范围如此；如需扩大，按治理承接」。
                 // 混成一条会让下一个人去修一个不存在的 bug（ESD 哨兵那次就是这么
                 // 被误判的），也会让真实的解析缺口被结构性缺口的噪音盖住。
                 var esdUnparsedGaps = document.UnparsedGaps();
@@ -2915,10 +2929,12 @@ internal sealed class BridgeCommandService
                 $"FLVER_MESH_INDICES_UNAVAILABLE: 网格 {meshIndex} 的完整 triangle-list 无法在上限 {maxIndices} 内导出。");
         var mesh = flver.Meshes[meshIndex];
         var skinning = flver.GetMeshSkinning(meshIndex, maxVertices);
+        var renderMode = ResolveFlverPreviewRenderMode(flver, mesh.MaterialIndex);
         return new
         {
             meshIndex,
             materialIndex = mesh.MaterialIndex,
+            renderMode,
             vertexCount = mesh.VertexCount,
             indexSize = flver.GetMeshIndexSize(meshIndex),
             positionsBase64 = positions,
@@ -2945,6 +2961,22 @@ internal sealed class BridgeCommandService
             meshes[meshIndex] = BuildFlverMeshPreview(flver, meshIndex, maxVertices, maxIndices);
         }
         return meshes;
+    }
+
+    /// <summary>
+    /// A generic albedo material cannot reproduce native projector/decal
+    /// shaders. Keep those meshes in the read-only payload, but identify them
+    /// explicitly so the renderer does not turn their projection volume into
+    /// visible strips or boxes.
+    /// </summary>
+    private static string ResolveFlverPreviewRenderMode(FlverNativeDocument flver, int materialIndex)
+    {
+        if (materialIndex < 0 || materialIndex >= flver.Materials.Count)
+            return "surface";
+        var mtdPath = flver.Materials[materialIndex].MtdPath;
+        return mtdPath.Contains("decal", StringComparison.OrdinalIgnoreCase)
+            ? "projected-decal"
+            : "surface";
     }
 
     private static object[] BuildFlverSkeleton(FlverNativeDocument flver)

@@ -199,7 +199,7 @@ export function classifyPlaintextBytes(bytes: Uint8Array): PlaintextVerdict {
         code: 'PLAINTEXT_REJECTED_LUA_BYTECODE_MAGIC',
         message: '条目以 \\x1bLua 字节码签名开头,是编译产物。'
           + ' 字节码条目只允许整文件替换,不允许源码级编辑'
-          + '(V0.5 无 HKS 重编译器)。'
+          + '(当前没有 HKS 重编译器)。'
       })]
     };
   }

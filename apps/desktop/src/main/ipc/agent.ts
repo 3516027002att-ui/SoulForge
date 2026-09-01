@@ -79,6 +79,7 @@ export interface AiAgentRunRequest {
 }
 export interface AiAgentApprovalResponseRequest { sessionId: string; callId: string; decision: ApprovalDecision; note?: string; }
 export type AiAgentRunIpcResult = { ok: true; sessionId: string } | { ok: false; error: { code: string; message: string } };
+export type AiAgentEventReplayIpcResult = { ok: true; events: AiAgentEventEnvelope[] } | { ok: false; error: { code: string; message: string } };
 export interface AiAgentSessionSummaryIpc { sessionPath: string; fileName: string; sessionId: string | null; startedAt: string | null; messageCount: number; parseErrors: number; interrupted: boolean; compactedWindows: number; sizeBytes: number; modifiedAt: string; }
 export type AiAgentSessionListIpcResult = { ok: true; sessions: AiAgentSessionSummaryIpc[] } | { ok: false; error: { code: string; message: string } };
 export type AiAgentSessionLoadIpcResult = { ok: true; meta: RolloutSessionMeta | null; messageCount: number; parseErrors: number; interrupted: boolean; compactedWindows: number; messagesPage: ChatMessage[]; } | { ok: false; error: { code: string; message: string } };
@@ -91,12 +92,17 @@ const DEFAULT_AGENT_CONTEXT_WINDOW_TOKENS = 500_000;
 const AGENT_CONTEXT_COMPACTION_RATIO = 0.8;
 const EMBED_BATCH_SIZE = 64;
 const APPROVAL_TIMEOUT_MS = 600_000;
+const AGENT_EVENT_HISTORY_LIMIT = 4_096;
+const AGENT_EVENT_HISTORY_TTL_MS = 5 * 60_000;
 
 const agentSessionsBaseDir = join(app.getPath('userData'), 'agent');
 const activeAgentRuns = new Map<string, { controller: AbortController; ownerId: number; serviceId: string; model: string; }>();
 const agentReferenceRegistry = new Map<string, { ownerId: string; tokenId: string; citation?: Citation }>();
 const pendingApprovals = new Map<string, { resolve: (response: { decision: ApprovalDecision; note?: string }) => void; timer: NodeJS.Timeout }>();
 const agentSessionSeqs = new Map<string, number>();
+const agentSessionOwners = new Map<string, number>();
+const agentEventHistory = new Map<string, AiAgentEventEnvelope[]>();
+const agentEventHistoryCleanup = new Map<string, NodeJS.Timeout>();
 let boundWebContents: WebContents | null = null;
 
 const settleApproval = (key: string, response: { decision: ApprovalDecision; note?: string }): boolean => {
@@ -113,11 +119,29 @@ const rejectSessionApprovals = (sessionId: string, note: string): void => {
   }
 };
 const sendAgentEvent = (sessionId: string, event: AgentEvent | AiAgentSessionLifecycleEvent): void => {
-  if (!boundWebContents || boundWebContents!.isDestroyed()) return;
   const seq = (agentSessionSeqs.get(sessionId) ?? 0) + 1;
   agentSessionSeqs.set(sessionId, seq);
-  const envelope: AiAgentEventEnvelope = { sessionId, seq, event };
-  boundWebContents!.send('ai:agent:event', sanitizeRendererValue(envelope));
+  const envelope = sanitizeRendererValue({ sessionId, seq, event }) as AiAgentEventEnvelope;
+  const history = agentEventHistory.get(sessionId) ?? [];
+  history.push(envelope);
+  if (history.length > AGENT_EVENT_HISTORY_LIMIT) {
+    history.splice(0, history.length - AGENT_EVENT_HISTORY_LIMIT);
+  }
+  agentEventHistory.set(sessionId, history);
+  if (event.type === 'session-done' || event.type === 'session-error') {
+    const previous = agentEventHistoryCleanup.get(sessionId);
+    if (previous) clearTimeout(previous);
+    const cleanup = setTimeout(() => {
+      agentEventHistory.delete(sessionId);
+      agentEventHistoryCleanup.delete(sessionId);
+      agentSessionSeqs.delete(sessionId);
+      agentSessionOwners.delete(sessionId);
+    }, AGENT_EVENT_HISTORY_TTL_MS);
+    cleanup.unref?.();
+    agentEventHistoryCleanup.set(sessionId, cleanup);
+  }
+  if (!boundWebContents || boundWebContents.isDestroyed()) return;
+  boundWebContents.send('ai:agent:event', envelope);
 };
 const resolveSessionPath = (sessionPath: string): { ok: true; absolute: string } | { ok: false; error: { code: string; message: string } } => {
   const base = resolve(agentSessionsBaseDir);
@@ -133,6 +157,10 @@ export function clearAgentIpcState(): void {
   }
   pendingApprovals.clear();
   agentReferenceRegistry.clear();
+  for (const timer of agentEventHistoryCleanup.values()) clearTimeout(timer);
+  agentEventHistoryCleanup.clear();
+  agentEventHistory.clear();
+  agentSessionOwners.clear();
   agentSessionSeqs.clear();
 }
 export interface AgentIpcDeps {
@@ -500,7 +528,9 @@ export function registerAgentIpcHandlers(deps: AgentIpcDeps): void {
       // 需要工作区的工具干净失败，不整次拒绝（T6）。
       const bridge = createAgentToolBridge({
         registry: deps.toolRegistry,
-        context: { ...deps.currentToolContext(), mode },
+        // Agent 可以读取记忆来恢复项目上下文，但不能把未经用户明确整理的
+        // 运行时对话或测试内容写入长期记忆；记忆写入只保留给显式宿主流程。
+        context: { ...deps.currentToolContext(), mode, allowMemoryWrite: false },
         // Discovery is non-blocking: the bridge returns candidate/evidence
         // metadata, while native readers and writers enforce real authority.
       });
@@ -644,6 +674,7 @@ export function registerAgentIpcHandlers(deps: AgentIpcDeps): void {
         serviceId: stored!.id,
         model: stored!.model
       });
+      agentSessionOwners.set(sessionId, _event.sender.id);
       sendAgentEvent(sessionId, { type: 'session-accepted', mode });
   
       const permissionMode = mode === 'fullPermission' ? 'full' : mode;
@@ -877,6 +908,32 @@ export function registerAgentIpcHandlers(deps: AgentIpcDeps): void {
   
       return { ok: true, sessionId };
     });
+
+  deps.handle(
+    'ai.agent.events',
+    async (
+      event,
+      rawSessionId: unknown,
+      rawAfterSeq?: unknown
+    ): Promise<AiAgentEventReplayIpcResult> => {
+      if (typeof rawSessionId !== 'string' || rawSessionId.trim() === '') {
+        return { ok: false, error: { code: 'INVALID_INPUT', message: 'sessionId 必填。' } };
+      }
+      const sessionId = rawSessionId.trim();
+      const ownerId = agentSessionOwners.get(sessionId);
+      if (ownerId === undefined || ownerId !== event.sender.id) {
+        return { ok: false, error: { code: 'AGENT_SESSION_FORBIDDEN', message: '无权读取该 Agent 会话事件。' } };
+      }
+      const afterSeq = rawAfterSeq === undefined ? 0 : rawAfterSeq;
+      if (typeof afterSeq !== 'number' || !Number.isSafeInteger(afterSeq) || afterSeq < 0) {
+        return { ok: false, error: { code: 'INVALID_INPUT', message: 'afterSeq 必须是非负安全整数。' } };
+      }
+      return {
+        ok: true,
+        events: (agentEventHistory.get(sessionId) ?? []).filter((envelope) => envelope.seq > afterSeq)
+      };
+    }
+  );
   
   deps.handle('ai.agent.cancel', async (_event, sessionId: string): Promise<{ ok: boolean }> => {
       const entry = activeAgentRuns.get(sessionId);

@@ -1,4 +1,6 @@
 using System.Collections.ObjectModel;
+using System.Numerics;
+using SoulForge.Bridge.Hkx;
 
 /// <summary>
 /// Renderer-independent ACTION identity / mapping rules for Sekiro animation playback.
@@ -323,6 +325,242 @@ public static class ActionAnimationSemantics
             result[flverBone] = hkxLocalPose[hkxBone];
         }
         return result;
+    }
+
+    /// <summary>
+    /// Retargets an HKX local pose into a FLVER skeleton while preserving the
+    /// target bind hierarchy. When parent indices are supplied, the method
+    /// follows the native absolute-matrix remapper: source animated locals are
+    /// accumulated first, then each target local is decomposed against its
+    /// current no-scale parent. Without hierarchy data it keeps the legacy
+    /// local-delta compatibility path.
+    /// </summary>
+    public static BoneTransform[] RetargetPoseToFlver(
+        IReadOnlyList<BoneTransform> hkxReferencePose,
+        IReadOnlyList<BoneTransform> hkxAnimatedPose,
+        IReadOnlyList<int> hkxToFlverBone,
+        IReadOnlyList<BoneTransform> flverReferenceLocalPose,
+        IReadOnlyList<int>? hkxParentIndices = null,
+        IReadOnlyList<int>? flverParentIndices = null)
+    {
+        if (hkxReferencePose.Count != hkxAnimatedPose.Count
+            || hkxAnimatedPose.Count != hkxToFlverBone.Count)
+        {
+            throw new InvalidDataException(
+                $"HKX reference/pose/mapping length mismatch: reference={hkxReferencePose.Count}, pose={hkxAnimatedPose.Count}, map={hkxToFlverBone.Count}.");
+        }
+
+        if (hkxParentIndices is not null || flverParentIndices is not null)
+        {
+            if (hkxParentIndices is null || flverParentIndices is null)
+                throw new InvalidDataException("ACTION_RETARGET_PARENT_HIERARCHY_INCOMPLETE.");
+            return RetargetPoseToFlverAbsolute(
+                hkxParentIndices,
+                hkxReferencePose,
+                hkxAnimatedPose,
+                hkxToFlverBone,
+                flverReferenceLocalPose,
+                flverParentIndices);
+        }
+
+        var result = flverReferenceLocalPose.ToArray();
+        for (var hkxBone = 0; hkxBone < hkxToFlverBone.Count; hkxBone++)
+        {
+            var flverBone = hkxToFlverBone[hkxBone];
+            if (flverBone < 0) continue;
+            if (flverBone >= result.Length)
+            {
+                throw new InvalidDataException(
+                    $"HKX->FLVER map targets bone {flverBone}, outside FLVER skeleton range 0..{result.Length - 1}.");
+            }
+
+            var hkxReference = hkxReferencePose[hkxBone];
+            var hkxAnimated = hkxAnimatedPose[hkxBone];
+            var flverReference = flverReferenceLocalPose[flverBone];
+            var rotationDelta = Quaternion.Multiply(
+                InverseUnitQuaternion(hkxReference.Rotation),
+                NormalizeQuaternion(hkxAnimated.Rotation));
+            var rotation = NormalizeQuaternion(Quaternion.Multiply(
+                NormalizeQuaternion(flverReference.Rotation),
+                rotationDelta));
+            var scale = new Vector3(
+                flverReference.Scale.X * SafeScaleRatio(hkxAnimated.Scale.X, hkxReference.Scale.X),
+                flverReference.Scale.Y * SafeScaleRatio(hkxAnimated.Scale.Y, hkxReference.Scale.Y),
+                flverReference.Scale.Z * SafeScaleRatio(hkxAnimated.Scale.Z, hkxReference.Scale.Z));
+
+            result[flverBone] = new BoneTransform(
+                flverReference.Translation + hkxAnimated.Translation - hkxReference.Translation,
+                rotation,
+                scale);
+        }
+
+        return result;
+    }
+
+    /// <summary>
+    /// Retargets through the absolute traversal used by mature animation
+    /// tooling. The native code uses System.Numerics' row-vector convention:
+    /// the source animated absolute matrix is used as the target bone's
+    /// desired absolute matrix, then decomposed against the target parent's
+    /// current no-scale matrix. Non-master target translations retain their
+    /// real reference length; copying source child translations detaches
+    /// skinned limbs and head parts.
+    /// </summary>
+    private static BoneTransform[] RetargetPoseToFlverAbsolute(
+        IReadOnlyList<int> hkxParentIndices,
+        IReadOnlyList<BoneTransform> hkxReferencePose,
+        IReadOnlyList<BoneTransform> hkxAnimatedPose,
+        IReadOnlyList<int> hkxToFlverBone,
+        IReadOnlyList<BoneTransform> flverReferenceLocalPose,
+        IReadOnlyList<int> flverParentIndices)
+    {
+        if (hkxReferencePose.Count != hkxToFlverBone.Count)
+            throw new InvalidDataException(
+                $"ACTION_RETARGET_SOURCE_HIERARCHY_MISMATCH: reference={hkxReferencePose.Count}, map={hkxToFlverBone.Count}.");
+        if (flverReferenceLocalPose.Count != flverParentIndices.Count)
+            throw new InvalidDataException(
+                $"ACTION_RETARGET_TARGET_HIERARCHY_MISMATCH: reference={flverReferenceLocalPose.Count}, parents={flverParentIndices.Count}.");
+
+        ValidateParentIndices(hkxParentIndices, hkxReferencePose.Count, "ACTION_HKX_PARENT_INDEX_INVALID");
+        ValidateParentIndices(flverParentIndices, flverReferenceLocalPose.Count, "ACTION_FLVER_PARENT_INDEX_INVALID");
+
+        var sourceAnimatedAbs = BuildMatureAbsoluteMatrices(hkxAnimatedPose, hkxParentIndices);
+        var targetToHkx = Enumerable.Repeat(-1, flverReferenceLocalPose.Count).ToArray();
+        for (var hkxIndex = 0; hkxIndex < hkxToFlverBone.Count; hkxIndex++)
+        {
+            var flverIndex = hkxToFlverBone[hkxIndex];
+            if (flverIndex < 0) continue;
+            if (flverIndex >= targetToHkx.Length)
+                throw new InvalidDataException($"ACTION_RETARGET_TARGET_INDEX_INVALID: {flverIndex}.");
+            if (targetToHkx[flverIndex] >= 0)
+                throw new InvalidDataException($"ACTION_RETARGET_MAPPING_AMBIGUOUS: FLVER bone {flverIndex}.");
+            targetToHkx[flverIndex] = hkxIndex;
+        }
+
+        var result = flverReferenceLocalPose.ToArray();
+        // Keep this traversal free of local scale. The mature remapper uses
+        // the same no-scale matrix for a child's inverse/decomposition and
+        // tracks accumulated scale separately in the source absolute matrix.
+        var targetCurrentAbsNoScale = new Matrix4x4?[result.Length];
+        var visiting = new HashSet<int>();
+
+        Matrix4x4 ResolveTarget(int flverIndex)
+        {
+            if (targetCurrentAbsNoScale[flverIndex] is Matrix4x4 cached) return cached;
+            if (!visiting.Add(flverIndex))
+                throw new InvalidDataException($"ACTION_RETARGET_TARGET_HIERARCHY_CYCLE: bone={flverIndex}.");
+
+            var parent = flverParentIndices[flverIndex];
+            var parentAbsNoScale = parent >= 0 ? ResolveTarget(parent) : Matrix4x4.Identity;
+            var hkxIndex = targetToHkx[flverIndex];
+            if (hkxIndex >= 0)
+            {
+                var desiredAbs = sourceAnimatedAbs[hkxIndex];
+                if (!Matrix4x4.Invert(parentAbsNoScale, out var parentInverse)
+                    || !Matrix4x4.Decompose(
+                        Matrix4x4.Multiply(desiredAbs, parentInverse),
+                        out var scale,
+                        out var rotation,
+                        out var translation))
+                {
+                    throw new InvalidDataException($"ACTION_RETARGET_LOCAL_DECOMPOSE_FAILED: bone={flverIndex}.");
+                }
+
+                if (parent >= 0)
+                    translation = result[flverIndex].Translation;
+                result[flverIndex] = new BoneTransform(
+                    translation,
+                    NormalizeQuaternion(rotation),
+                    scale);
+            }
+
+            var currentAbsNoScale = Matrix4x4.Multiply(
+                ComposeRetargetNoScale(result[flverIndex]),
+                parentAbsNoScale);
+            targetCurrentAbsNoScale[flverIndex] = currentAbsNoScale;
+            visiting.Remove(flverIndex);
+            return currentAbsNoScale;
+        }
+
+        for (var flverIndex = 0; flverIndex < result.Length; flverIndex++)
+            _ = ResolveTarget(flverIndex);
+
+        return result;
+    }
+
+    private static Matrix4x4[] BuildMatureAbsoluteMatrices(
+        IReadOnlyList<BoneTransform> pose,
+        IReadOnlyList<int> parentIndices)
+    {
+        var result = new Matrix4x4?[pose.Count];
+        var accumulatedScales = new Vector3[pose.Count];
+        var visiting = new HashSet<int>();
+        Matrix4x4 Resolve(int index)
+        {
+            if (result[index] is Matrix4x4 cached) return cached;
+            if (!visiting.Add(index))
+                throw new InvalidDataException($"ACTION_RETARGET_SOURCE_HIERARCHY_CYCLE: bone={index}.");
+            var parent = parentIndices[index];
+            var local = ComposeRetargetNoScale(pose[index]);
+            var parentAbsolute = parent >= 0 ? Resolve(parent) : Matrix4x4.Identity;
+            var parentScale = parent >= 0 ? accumulatedScales[parent] : Vector3.One;
+            var accumulatedScale = parentScale * pose[index].Scale;
+            var currentAbsolute = Matrix4x4.Multiply(local, parentAbsolute);
+            // This is deliberately the native tooling order:
+            // CreateScale(accumulatedScale) * currentMatrix.
+            var absolute = Matrix4x4.Multiply(
+                Matrix4x4.CreateScale(accumulatedScale),
+                currentAbsolute);
+            accumulatedScales[index] = accumulatedScale;
+            result[index] = absolute;
+            visiting.Remove(index);
+            return absolute;
+        }
+
+        for (var index = 0; index < pose.Count; index++) _ = Resolve(index);
+        return result.Select(value => value ?? throw new InvalidDataException("ACTION_RETARGET_ABSOLUTE_MATRIX_MISSING.")).ToArray();
+    }
+
+    private static Matrix4x4 ComposeRetargetNoScale(BoneTransform transform)
+    {
+        return Matrix4x4.CreateFromQuaternion(NormalizeQuaternion(transform.Rotation))
+            * Matrix4x4.CreateTranslation(transform.Translation);
+    }
+
+    private static void ValidateParentIndices(
+        IReadOnlyList<int> parentIndices,
+        int count,
+        string code)
+    {
+        if (parentIndices.Count != count)
+            throw new InvalidDataException($"{code}: count={parentIndices.Count}/{count}.");
+        for (var index = 0; index < parentIndices.Count; index++)
+        {
+            var parent = parentIndices[index];
+            if (parent < -1 || parent >= count || parent == index)
+                throw new InvalidDataException($"{code}: bone={index} parent={parent}.");
+        }
+    }
+
+    private static Quaternion InverseUnitQuaternion(Quaternion value)
+    {
+        var normalized = NormalizeQuaternion(value);
+        return new Quaternion(-normalized.X, -normalized.Y, -normalized.Z, normalized.W);
+    }
+
+    private static Quaternion NormalizeQuaternion(Quaternion value)
+    {
+        var lengthSquared = value.LengthSquared();
+        if (!float.IsFinite(lengthSquared) || lengthSquared <= 1e-12f)
+            throw new InvalidDataException("ACTION_QUATERNION_INVALID: zero or non-finite quaternion.");
+        return Quaternion.Normalize(value);
+    }
+
+    private static float SafeScaleRatio(float animated, float reference)
+    {
+        if (MathF.Abs(reference) <= 1e-8f) return 1f;
+        var ratio = animated / reference;
+        return float.IsFinite(ratio) ? ratio : 1f;
     }
 
     private static void ValidateBoneNames(IReadOnlyList<string> names, string skeletonKind)

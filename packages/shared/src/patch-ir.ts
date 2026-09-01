@@ -174,7 +174,7 @@ export const SCAFFOLD_SUPPORTED_PATCH_KINDS: readonly PatchIrOpKind[] = [
   'raw_byte_range_edit',
   'text_edit',
   'synthetic_resource_edit',
-  /** v0.6: synthetic SFBN BND + DCX DFLT nested child replace (authoritative for owned fixtures). */
+  /** synthetic SFBN BND + DCX DFLT nested child replace (authoritative for owned fixtures). */
   'container_child_replace'
 ] as const;
 
