@@ -1,13 +1,13 @@
 # 治理数据（机器可读权威）
 
 本目录是 SoulForge 发布治理的**唯一机器可读权威**。门禁只读这里，不再对
-`docs/V0_5_IMPLEMENTATION_HANDOFF.md` 做正则解析。
+历史交接书做正则解析。
 
 ## 权威归属
 
 | 文件 | 权威内容 | 迁移来源 |
 | --- | --- | --- |
-| `releases.json` | 版本注册与冻结状态；`frozenFields` 定义门禁物理拦截范围 | 新建 |
+| `releases.json` | 发布版本注册与冻结状态；`frozenFields` 定义发布审计的物理拦截范围 | 新建 |
 | `scope.json` | 27 项范围裁定矩阵、用户批准记录、各项政策 | §18.2.1 冻结 JSON |
 | `gates.json` | 11 个必需 Gate 的 `gateState`/`applicability`/引用/后继要求 | §18.1 + §18.3 + `scope.gateCoverage` |
 | `slices.json` | 39 个切片的 `lifecycle`/`authority`/`authorityCap`/入口/验证；`activeClaims` 并发占用 | §13.1 + §13.1.1 |
@@ -18,6 +18,15 @@
 
 交接书中的对应章节改为由这些文件**投影生成**，不再是权威。人工编辑交接书的治理章节
 不会改变门禁判定，只会被下一次生成覆盖。
+
+## 开发与发布的边界
+
+开发流程按切片的 `lifecycle`、`capabilityIds`、`authorityCap` 和实际前置推进，
+不读取 `currentRelease` 作为默认筛选条件。`node scripts/gov.mjs next` 默认展示
+全部可开发切片；只有显式传入 `--release <Release>` 时才查看某个发布归属。
+
+版本号仍保留在发布记录、历史范围和发布 Evidence 中，用于审计和回溯；它不是开发
+权限、实现范围或验证预算。未绑定发布的开发 Evidence 允许 `targetRelease=null`。
 
 ## 跨版本设计
 
@@ -31,7 +40,7 @@
 
 `releases.json` 的 `frozenFields` **只包含用户裁定字段**。工程进度字段
 （`gates[].gateState`、`slices[].lifecycle`、`slices[].authority`、evidence 追加）
-不在冻结范围内——否则 V0.5 冻结后自身无法继续推进。
+不在冻结范围内；发布冻结不等于停止开发。
 
 ## 修改约束
 

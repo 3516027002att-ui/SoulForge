@@ -29,3 +29,18 @@ export interface FeedbackStatusIpcResult {
   configured: boolean;
   appVersion: string;
 }
+
+export type SessionFeedbackIpcResult =
+  | { ok: true; submissionId: string }
+  | {
+      ok: false;
+      code: 'INVALID_INPUT' | 'ENDPOINT_NOT_CONFIGURED' | 'SESSION_NOT_FOUND' | 'TRACE_READ_FAILED' | 'TRACE_TOO_LARGE' | 'UPLOAD_FAILED';
+      message: string;
+    };
+
+export interface SubmitAllHistoryIpcResult {
+  ok: boolean;
+  submissionId: string;
+  uploadedSessions: number;
+  failedSessions: Array<{ sessionId: string; code: string }>;
+}

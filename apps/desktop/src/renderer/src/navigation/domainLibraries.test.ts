@@ -37,10 +37,10 @@ describe('domainLibraries', () => {
       filesForDomain('event', files).map((file) => file.relativePath),
       ['event/common.emevd']
     );
-    // R2：文本域只列简中（zhocn），japanese 不得出现。
+    // 文本域收集所有已索引语言包，语言由路径/目录元数据区分。
     assert.deepEqual(
       filesForDomain('text', files).map((file) => file.relativePath),
-      ['msg/zhocn/test.msgbnd.dcx']
+      ['msg/zhocn/test.msgbnd.dcx', 'msg/japanese/menu.msgbnd.dcx']
     );
     assert.deepEqual(filesForDomain('files', files), []);
     assert.deepEqual(filesForDomain('project', files), []);

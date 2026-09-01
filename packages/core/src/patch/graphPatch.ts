@@ -12,7 +12,7 @@ export interface BuildGraphPatchOptions {
 }
 
 /**
- * Project a PatchProposal into the v0.5 graph patch IR.
+ * Project a PatchProposal into the graph patch IR.
  * This is the visual/impact model for AI review and future patch-graph UI.
  */
 export function buildGraphPatchFromProposal(

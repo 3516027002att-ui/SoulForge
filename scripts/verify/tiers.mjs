@@ -84,6 +84,9 @@ export const TIER_BY_SCRIPT = Object.freeze({
   'test:emevd-dark-script-compiler-s14': 'unit',
   'test:emevd-session-cache': 'unit',
   'test:map-transaction-atomic': 'unit',
+  'test:action-motion-identity': 'unit',
+  'test:map-static-pagination-contract': 'unit',
+  'test:param-slim-ipc': 'unit',
   'test:darkscript-languageservice-scale': 'unit',
   'test:animation-playback-clock': 'unit',
   'test:map-document-scale': 'unit',
@@ -488,6 +491,8 @@ export const TIER_BY_SCRIPT = Object.freeze({
   'test:native-writer-failure-matrix': 'native',
   'test:param-duplicate-native': 'native',
   'test:param-metadata-native': 'native',
+  'test:param-session-projection': 'native',
+  'test:native-map-rollback': 'native',
   'test:script-container-evidence': 'native',
   'test:script-container-replace': 'native',
   // 明文脚本条目的源码级编辑(用户裁定 2026-08-08)。判定与编排是纯逻辑,
@@ -587,6 +592,8 @@ export const EXCLUDED = Object.freeze({
     + '故不进 tier。若将来 release 链要用它，请一并把 runBridge.ts 的 Release 候选路径'
     + '纳入验证——那两条路径至今从未被生成过。',
   'launcher:build': '启动器二进制发布构建，不是验证',
+  'exe:build': 'Bridge、启动器和开发 launcher 的显式构建命令；由交付流程直接调用，不是独立验证套件',
+  'dev-launcher:build': '开发 launcher 产物构建；由 exe:build 调用，不是独立验证套件',
   'corpus:build-local-release': '生成本机 corpus registry，写 testdata，不是验证',
   'corpus:build-local-release:configured': '同上（被 wrapper 调用的内层）',
   // gov CLI 是治理数据的写入口，不是验证：跑它会改执行面板状态。

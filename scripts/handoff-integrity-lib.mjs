@@ -1,5 +1,10 @@
 import { createHash } from 'node:crypto';
-import { checkEvidenceFreshness } from './governance/governanceRules.mjs';
+import {
+  checkEvidenceFreshness,
+  DEFERRED_APPLICABILITY,
+  deferralClaimDescription,
+  deferralClaimMarker
+} from './governance/governanceRules.mjs';
 
 const ALLOWED_SLICE_LIFECYCLES = new Set([
   'ready',
@@ -8,12 +13,12 @@ const ALLOWED_SLICE_LIFECYCLES = new Set([
   'blocked',
   'superseded',
   // `deferred` = 已裁定移出本里程碑、在后续里程碑交付。
-  // 对 V0.5 是终态（不可认领、不得留在 validation-unfrozen），
+  // 对当前发布视图是终态（不可认领、不得留在 validation-unfrozen），
   // 但与 `completed` 严格区分：不表示达到验收边界。
   'deferred'
 ]);
 
-/** 对 V0.5 而言不可继续认领的切片 lifecycle。 */
+/** 对当前发布视图而言不可继续认领的切片 lifecycle。 */
 const TERMINAL_SLICE_LIFECYCLES = new Set(['completed', 'superseded', 'deferred']);
 
 const ALLOWED_AUTHORITIES = new Set([
@@ -30,17 +35,15 @@ const ALLOWED_APPLICABILITY = new Set([
   'pending-scope',
   'in-scope',
   'scope-excluded',
-  'deferred-v0.6'
+  DEFERRED_APPLICABILITY
 ]);
 /**
  * `deferred` 与 `scope-excluded` 必须严格区分：
  * - `scope-excluded` = 已裁定永久不属于本产品范围，强制 gateState=passed；
- * - `deferred` = 已裁定移出 V0.5、仍将在后续里程碑交付，禁止写成 passed。
+ * - `deferred` = 已裁定移出当前发布范围、仍将在后续里程碑交付，禁止写成 passed。
  * 两者都需要 sealed + 用户批准 Evidence，都不得用于基础 Gate。
- * `deferred` 不计入 V0.5 完成，也不阻止 V0.5 完成。
+ * `deferred` 不计入当前发布完成，也不阻止当前发布完成。
  */
-const DEFERRED_APPLICABILITY = 'deferred-v0.6';
-const DEFERRED_TARGET_RELEASE = 'V0.6';
 const ALLOWED_BLOCKER_REASONS = new Set([
   'private-corpus',
   'credential',
@@ -793,7 +796,7 @@ function parseReleaseGateIds(markdown, where, findings) {
       findings.push(makeFinding(
         'GATE_REQUIRED_MISSING',
         `${where} §18.1`,
-        `V0.5 固定 Gate 集合缺少：${requiredId}`
+        `固定 Gate 集合缺少：${requiredId}`
       ));
     }
   }
@@ -802,7 +805,7 @@ function parseReleaseGateIds(markdown, where, findings) {
       findings.push(makeFinding(
         'GATE_REQUIRED_EXTRA',
         `${where} §18.1`,
-        `§18.1 包含不在 V0.5 固定 Gate 集合中的 ID：${id}`
+        `§18.1 包含不在固定 Gate 集合中的 ID：${id}`
       ));
     }
   }
@@ -816,7 +819,8 @@ function evidenceIsSealed(evidence, id) {
 
 function evidenceHasClaim(evidence, id, marker) {
   const record = evidence.get(id);
-  return evidenceIsSealed(evidence, id) && record.claim.includes(marker);
+  if (!evidenceIsSealed(evidence, id)) return false;
+  return marker instanceof RegExp ? marker.test(record.claim) : record.claim.includes(marker);
 }
 
 /**
@@ -1018,7 +1022,7 @@ const REL_COMPLIANCE_SUBJECT_SET = Object.freeze({
   handoffBlocks: Object.freeze([])
 });
 // REL-E 资产只读线主题域：FLVER/TPF/MTD native document、资产 smoke 与候选权威。
-// V0.6 承接时 REL-E 从 deferred 恢复为 passed，必须登记 freshness 主题域，
+// 后续发布承接时，deferred Gate 恢复为 passed 前必须登记 freshness 主题域，
 // 否则 passed Gate 因 GATE_SUBJECT_SET_UNDEFINED 失败关闭。
 const REL_E_SUBJECT_SET = Object.freeze({
   files: Object.freeze([
@@ -1042,7 +1046,7 @@ const REL_E_SUBJECT_SET = Object.freeze({
   handoffBlocks: Object.freeze([])
 });
 // REL-I 渲染功能闭环主题域：semantic scene / render packet 与渲染投影层。
-// V0.6 承接时 REL-I 从 deferred 恢复为 passed，必须登记 freshness 主题域。
+// 后续发布承接时，deferred Gate 恢复为 passed 前必须登记 freshness 主题域。
 const REL_I_SUBJECT_SET = Object.freeze({
   files: Object.freeze([
     'apps/desktop/src/renderer/src/scene/threeSceneController.ts',
@@ -1264,7 +1268,7 @@ function parseAndValidateGateMatrix(
       findings.push(makeFinding(
         'GATE_SCOPE_RESOLVED_PENDING',
         location,
-        'REL-SCOPE 已通过后，功能 Gate 必须明确为 in-scope、scope-excluded 或 deferred-v0.6，不能继续 pending-scope。'
+        'REL-SCOPE 已通过后，功能 Gate 必须明确为 in-scope、scope-excluded 或 deferred，不能继续 pending-scope。'
       ));
     }
 
@@ -1418,7 +1422,7 @@ function parseAndValidateGateMatrix(
       ));
     }
 
-    // gateState=deferred 与 applicability=deferred-v0.6 必须双向成对，
+    // gateState=deferred 与 applicability=deferred 必须双向成对，
     // 防止用「延期」掩盖未完成，或用 passed 冒充延期。
     if (gateState === 'deferred' && applicability !== DEFERRED_APPLICABILITY) {
       findings.push(makeFinding(
@@ -1473,8 +1477,8 @@ function parseAndValidateGateMatrix(
         ));
       }
       // 延期 Gate 不得掩盖仍在推进或已声称完成的切片：
-      // 前者会让 V0.5 出现无 Gate 覆盖的活动工作，
-      // 后者会把延期范围内的工作误记为 V0.5 完成。
+      // 前者会让当前发布视图出现无 Gate 覆盖的活动工作，
+      // 后者会把延期范围内的工作误记为当前发布完成。
       const deferredGateSlices = sliceIds.map((id) => slices.get(id)).filter(Boolean);
       for (const slice of deferredGateSlices.filter((item) => item.lifecycle !== 'deferred')) {
         findings.push(makeFinding(
@@ -1484,7 +1488,7 @@ function parseAndValidateGateMatrix(
             + '该切片必须一并写成 lifecycle=deferred。'
         ));
       }
-      const deferralMarker = `scope-deferral:${gateId}:${DEFERRED_TARGET_RELEASE}:user-approved`;
+      const deferralMarker = deferralClaimMarker(gateId);
       const approvedDeferralIds = evidenceIds.filter(
         (id) => evidenceHasClaim(evidence, id, deferralMarker)
       );
@@ -1492,7 +1496,7 @@ function parseAndValidateGateMatrix(
         findings.push(makeFinding(
           'GATE_DEFERRAL_APPROVAL_REQUIRED',
           location,
-          `${DEFERRED_APPLICABILITY} Gate 必须引用声明 ${deferralMarker} 的 sealed Evidence。`
+          `${DEFERRED_APPLICABILITY} Gate 必须引用声明 ${deferralClaimDescription(gateId)} 的 sealed Evidence。`
         ));
       } else {
         const freshnessFinding = checkEvidenceFreshness(
@@ -1602,7 +1606,7 @@ function validateBlockerImpactClosure(where, findings, blockers, slices, gates) 
 /**
  * 对 handoff Markdown 做无副作用治理校验。
  *
- * @param {string} markdown 完整的 V0.5 handoff Markdown。
+ * @param {string} markdown 完整的 handoff Markdown。
  * @param {{ source?: string, authoritativeEvidence?: Map<string, object> }} options
  *   输出 findings 使用的来源标识，以及 compact Evidence 索引对应的 JSON 权威记录。
  * @returns {{ ok: boolean, findings: Array<{severity: string, code: string, where: string, message: string}> }}

@@ -1,5 +1,5 @@
 /**
- * Dual model-service contracts for V0.5 (OpenAI-compatible + Anthropic-compatible).
+ * Dual model-service contracts (OpenAI-compatible + Anthropic-compatible).
  * Credentials never appear in renderer DTOs or audit payloads.
  */
 

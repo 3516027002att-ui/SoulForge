@@ -19,6 +19,12 @@ import type {
 import { buildReferenceGraph, type ReferenceBuildOptions, type ReferenceBuildResult } from '../references/referenceBuilder.js';
 import { collectEventEvidence, renderEventEvidenceMarkdown, type EventEvidenceReport } from '../references/eventEvidence.js';
 import { ALL_RESOURCE_KINDS } from '../workspace/resourceKinds.js';
+import {
+  resolveBinderMembership,
+  type BinderMembershipCandidate,
+  type BinderMembershipQuery,
+  type BinderMembershipResult
+} from '../action/binderMembership.js';
 
 export interface SearchResourcesOptions {
   query: string;
@@ -101,14 +107,134 @@ export class WorkspaceIndex {
   private msgExports: MsgExport[] = [];
   private taeExports: TaeExport[] = [];
   private references: ReferenceEdge[] = [];
+  private actionBinderMembershipCandidates: BinderMembershipCandidate[] = [];
+  private actionBinderMembershipReady = false;
+  /** Families whose foreground membership projection is complete. */
+  private actionBinderMembershipReadyFamilies = new Set<string>();
 
   constructor(workspaceId: string) {
     this.workspaceId = workspaceId;
   }
 
   setFiles(files: readonly IndexedFile[]): void {
+    // A foreground ACTION family may already have been indexed while the
+    // background scanner is replacing the light catalog with hashed files.
+    // Keep that read-only projection alive, but refresh the catalog half of
+    // each source revision so later source validation remains exact.
+    const previousMembership = this.actionBinderMembershipCandidates;
     this.filesByUri.clear();
     for (const file of files) this.filesByUri.set(file.sourceUri, file);
+    this.actionBinderMembershipCandidates = previousMembership.map((candidate) => ({
+      characterFamily: candidate.characterFamily,
+      source: this.refreshActionBinderSourceRevision(candidate.source, files),
+      entries: candidate.entries.map((entry) => ({ ...entry }))
+    }));
+    // The full projection is no longer authoritative after a catalog
+    // replacement. Scoped foreground projections remain usable and are still
+    // checked against the live file revision by the ACTION IPC layer.
+    this.actionBinderMembershipReady = false;
+  }
+
+  /**
+   * Install the complete ACTION binder membership projection produced by the
+   * workspace indexer. Playback may query this projection, but must not scan
+   * sibling ANIBND files or parse containers on demand.
+   */
+  setActionBinderMembership(
+    candidates: readonly BinderMembershipCandidate[],
+    characterFamilies?: readonly string[]
+  ): void {
+    this.actionBinderMembershipCandidates = candidates.map((candidate) => ({
+      characterFamily: candidate.characterFamily,
+      source: { ...candidate.source },
+      entries: candidate.entries.map((entry) => ({ ...entry }))
+    }));
+    this.actionBinderMembershipReady = true;
+    this.actionBinderMembershipReadyFamilies = new Set(
+      (characterFamilies ?? candidates.map((candidate) => candidate.characterFamily))
+        .map((family) => family.toLowerCase())
+    );
+  }
+
+  /**
+   * Install a complete projection for one or more character families without
+   * discarding another family that is already available to the foreground.
+   * The global-ready bit deliberately stays false until the full indexer
+   * publishes every discovered family.
+   */
+  mergeActionBinderMembership(
+    characterFamilies: readonly string[],
+    candidates: readonly BinderMembershipCandidate[]
+  ): void {
+    const families = new Set(characterFamilies.map((family) => family.toLowerCase()));
+    this.actionBinderMembershipCandidates = [
+      ...this.actionBinderMembershipCandidates.filter(
+        (candidate) => !families.has(candidate.characterFamily.toLowerCase())
+      ),
+      ...candidates.map((candidate) => ({
+        characterFamily: candidate.characterFamily,
+        source: { ...candidate.source },
+        entries: candidate.entries.map((entry) => ({ ...entry }))
+      }))
+    ];
+    for (const family of families) this.actionBinderMembershipReadyFamilies.add(family);
+    this.actionBinderMembershipReady = false;
+  }
+
+  /** Mark the global projection stale without dropping valid scoped families. */
+  markActionBinderMembershipGlobalNotReady(): void {
+    this.actionBinderMembershipReady = false;
+  }
+
+  /** Drop only the requested scoped projection and fail closed for it. */
+  clearActionBinderMembershipFamilies(characterFamilies: readonly string[]): void {
+    const families = new Set(characterFamilies.map((family) => family.toLowerCase()));
+    this.actionBinderMembershipCandidates = this.actionBinderMembershipCandidates.filter(
+      (candidate) => !families.has(candidate.characterFamily.toLowerCase())
+    );
+    for (const family of families) this.actionBinderMembershipReadyFamilies.delete(family);
+    this.actionBinderMembershipReady = false;
+  }
+
+  /** Drop the projection when its source catalog/session is no longer valid. */
+  clearActionBinderMembership(): void {
+    this.actionBinderMembershipCandidates = [];
+    this.actionBinderMembershipReady = false;
+    this.actionBinderMembershipReadyFamilies.clear();
+  }
+
+  isActionBinderMembershipReady(): boolean {
+    return this.actionBinderMembershipReady;
+  }
+
+  isActionBinderMembershipReadyFor(characterFamily: string): boolean {
+    return this.actionBinderMembershipReady
+      || this.actionBinderMembershipReadyFamilies.has(characterFamily.toLowerCase());
+  }
+
+  lookupActionBinderMembership(query: BinderMembershipQuery): BinderMembershipResult {
+    return resolveBinderMembership({
+      query,
+      candidates: this.actionBinderMembershipCandidates
+    });
+  }
+
+  private refreshActionBinderSourceRevision(
+    source: BinderMembershipCandidate['source'],
+    files: readonly IndexedFile[]
+  ): BinderMembershipCandidate['source'] {
+    const revision = source.sourceRevision;
+    if (typeof revision !== 'string') return { ...source };
+    const separator = revision.indexOf('|');
+    if (separator <= 0) return { ...source };
+    const sourcePath = source.sourcePath?.replace(/\\/g, '/').toLowerCase();
+    const matchingFile = sourcePath
+      ? files.find((file) => file.relativePath.replace(/\\/g, '/').toLowerCase() === sourcePath)
+      : undefined;
+    if (!matchingFile) return { ...source };
+    const physicalRevision = revision.slice(0, separator);
+    const catalogRevision = `${matchingFile.sourceUri}:${matchingFile.mtimeMs}:${matchingFile.sha256 ?? ''}`;
+    return { ...source, sourceRevision: `${physicalRevision}|${catalogRevision}` };
   }
 
   /**
@@ -329,7 +455,7 @@ export class WorkspaceIndex {
         file.formatKind,
         file.formatLabel
       ].join(' ');
-      const score = scoreText(text, query);
+      const score = scoreResource(file, text, query);
       if (score > 0) results.push({ item: file, score, highlights: makeHighlights(text, query) });
     }
 
@@ -352,8 +478,14 @@ export class WorkspaceIndex {
     return searchSymbols(this.mapExports.flatMap((item) => [...item.entities, ...item.regions]), query, limit, mapSymbolSearchText);
   }
 
-  searchParamRows(query: string, limit = 100): Array<SearchResult<ParamRowSymbol>> {
-    return searchSymbols(this.paramExports.flatMap((item) => item.rows), query, limit, paramRowSearchText);
+  searchParamRows(query: string, limit = 100, paramNames?: readonly string[]): Array<SearchResult<ParamRowSymbol>> {
+    const allowed = paramNames && paramNames.length > 0
+      ? new Set(paramNames.map(normalizeParamName))
+      : null;
+    const rows = this.paramExports
+      .filter((item) => allowed === null || allowed.has(normalizeParamName(item.paramName)))
+      .flatMap((item) => item.rows);
+    return searchSymbols(rows, query, limit, paramRowSearchText);
   }
 
   searchTextEntries(query: string, limit = 100): Array<SearchResult<TextEntrySymbol>> {
@@ -478,6 +610,24 @@ function scoreText(text: string, query: string): number {
   return score;
 }
 
+function scoreResource(file: IndexedFile, text: string, query: string): number {
+  const score = scoreText(text, query);
+  if (score <= 0 || query.length === 0) return score;
+
+  // Resource search is also the command palette's open-resource resolver. A
+  // filename query must prefer the exact file over a similarly named sibling
+  // (for example c0000.anibnd.dcx over c0000_a000_lo.anibnd.dcx), otherwise
+  // pressing Enter can open a different document even when the visible query
+  // looks unambiguous.
+  const normalizedQuery = normalizeSearch(query);
+  const normalizedRelativePath = normalizeSearch(file.relativePath);
+  const relativeName = file.relativePath.split(/[\\/]/).pop() ?? file.relativePath;
+  const normalizedName = normalizeSearch(relativeName);
+  if (normalizedRelativePath === normalizedQuery) return score + 10_000;
+  if (normalizedName === normalizedQuery) return score + 9_000;
+  return score;
+}
+
 function makeHighlights(text: string, query: string): string[] {
   if (query.length === 0) return [];
   const normalized = normalizeSearch(text);
@@ -573,7 +723,27 @@ function mapSymbolSearchText(symbol: MapEntitySymbol | MapRegionSymbol): string 
 }
 
 function paramRowSearchText(row: ParamRowSymbol): string {
-  return [row.uri, row.paramName, row.rowId, row.rowName, row.fields?.map((field) => `${field.name}:${String(field.value)}`).join(' ')].filter(Boolean).join(' ');
+  return [
+    row.uri,
+    row.paramName,
+    row.rowId,
+    row.rowName,
+    row.fields?.map((field) => [
+      field.fieldId,
+      field.name,
+      field.description,
+      String(field.value)
+    ].filter(Boolean).join(':')).join(' ')
+  ].filter(Boolean).join(' ');
+}
+
+function normalizeParamName(value: string): string {
+  return value
+    .replace(/\\/g, '/')
+    .split('/')
+    .pop()!
+    .replace(/\.param$/i, '')
+    .toLocaleLowerCase();
 }
 
 function textEntrySearchText(entry: TextEntrySymbol): string {

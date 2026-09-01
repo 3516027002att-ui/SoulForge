@@ -44,7 +44,7 @@ export interface WorkspaceSession {
 }
 
 /**
- * v0.5 workspace session: the opened Mod workspace (overlay) is writable.
+ * Workspace session: the opened Mod workspace (overlay) is writable.
  * Overlay may sit inside a mounted game install (e.g. Sekiro\\mods); those
  * opened paths stay writable. Sibling files that are only in the mounted game
  * tree and not in the opened workspace stay rejected.

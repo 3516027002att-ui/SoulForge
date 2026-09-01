@@ -288,8 +288,16 @@ function bridgeSemanticData(command: BridgeCommand, data: unknown): BridgeSemant
     return { editable: false, symbols: { maps: [record as unknown as MapExport] } };
   }
 
+  if (command === 'export-param' && Array.isArray(record.params)) {
+    return { editable: false, symbols: { params: record.params as ParamExport[] } };
+  }
+
   if (command === 'export-param' && Array.isArray(record.rows)) {
     return { editable: false, symbols: { params: [record as unknown as ParamExport] } };
+  }
+
+  if (command === 'export-msg' && Array.isArray(record.msgs)) {
+    return { editable: false, symbols: { msgs: record.msgs as MsgExport[] } };
   }
 
   if (command === 'export-msg' && Array.isArray(record.entries)) {

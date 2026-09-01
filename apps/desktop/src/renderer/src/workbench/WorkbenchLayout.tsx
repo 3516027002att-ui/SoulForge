@@ -40,6 +40,13 @@ export interface WorkbenchColumnSpec {
   title: string;
   /** 标题右侧的次要说明，例如条目数。 */
   hint?: string;
+  /** 标题栏内的显式操作，例如收起/展开详情栏。 */
+  headerAction?: {
+    label: string;
+    ariaLabel: string;
+    onClick: () => void;
+    disabled?: boolean;
+  };
   /**
    * 可访问名（12-D）：不出现在画面上的栏名，标题为空（hideHeader）时用来给
    * `<section>` 与分隔条命名，防止屏幕阅读器拿到空名。缺省退回 title。
@@ -332,6 +339,17 @@ export function WorkbenchLayout(props: WorkbenchLayoutProps): ReactElement {
                   <header className="workbench__column-header">
                     <h3 className="workbench__column-title">{column.title}</h3>
                     {column.hint && <span className="workbench__column-hint">{column.hint}</span>}
+                    {column.headerAction && (
+                      <button
+                        type="button"
+                        className="workbench__column-action"
+                        aria-label={column.headerAction.ariaLabel}
+                        disabled={column.headerAction.disabled === true}
+                        onClick={column.headerAction.onClick}
+                      >
+                        {column.headerAction.label}
+                      </button>
+                    )}
                   </header>
                 )}
                 <div className="workbench__column-body">{column.children}</div>

@@ -25,6 +25,57 @@ function hierarchyIdFor(bones: readonly FlverPreviewBone[], index: number): stri
   return `${bone.name}#${index}`;
 }
 
+function cloneBone(
+  bone: FlverPreviewBone,
+  index = bone.index,
+  parentIndex = bone.parentIndex,
+  childIndex = bone.childIndex,
+  nextSiblingIndex = bone.nextSiblingIndex,
+  hierarchyId = bone.hierarchyId
+): FlverPreviewBone {
+  return {
+    ...bone,
+    index,
+    parentIndex,
+    childIndex,
+    nextSiblingIndex,
+    hierarchyId,
+    translation: [...bone.translation] as [number, number, number],
+    rotation: [...bone.rotation] as [number, number, number],
+    scale: [...bone.scale] as [number, number, number]
+  };
+}
+
+/**
+ * Appended compatibility bones are preview-only. Rebuild the two convenience
+ * links after appending so the DTO remains a valid skeleton even though the
+ * native FLVER bone table is never written back.
+ */
+function rebuildBoneLinks(bones: readonly FlverPreviewBone[]): FlverPreviewBone[] {
+  const result = bones.map((bone) => cloneBone(bone, bone.index));
+  const children = new Map<number, number[]>();
+  for (const bone of result) {
+    if (bone.parentIndex < 0 || bone.parentIndex >= result.length || bone.parentIndex === bone.index) continue;
+    const list = children.get(bone.parentIndex) ?? [];
+    list.push(bone.index);
+    children.set(bone.parentIndex, list);
+  }
+  for (const bone of result) {
+    bone.childIndex = -1;
+    bone.nextSiblingIndex = -1;
+  }
+  for (const [parentIndex, childIndexes] of children) {
+    const parent = result[parentIndex];
+    if (!parent || childIndexes.length === 0) continue;
+    parent.childIndex = childIndexes[0]!;
+    for (let index = 0; index + 1 < childIndexes.length; index += 1) {
+      const child = result[childIndexes[index]!];
+      if (child) child.nextSiblingIndex = childIndexes[index + 1]!;
+    }
+  }
+  return result;
+}
+
 /**
  * Remap all body part skin indices to leader bone space. This runs in
  * core/main (renderer-independent). Renderer receives a single leader skeleton.
@@ -37,51 +88,180 @@ export function remapCharacterBundleToLeader(
   bodyPartModels: readonly FlverPreviewModel[]
 ): RemapResult {
   const diagnostics: Diagnostic[] = [];
-  const leaderBones = leaderModel.bones;
+  // Parts such as c0000's head use a small native extension of the common
+  // skeleton (for example HD_L_bone1 -> HD_L_bone2). The old implementation
+  // rejected those meshes because it treated the leader bone table as closed.
+  // Keep the leader authoritative, but allow exact native part bones and their
+  // exact parent chain to be appended to the read-only compatibility skeleton.
+  const leaderBones = leaderModel.bones.map((bone) => cloneBone(bone, bone.index));
   const leaderByName = buildLeaderNameToIndex(leaderBones);
   const leaderByHierarchy = new Map<string, number>();
   for (const bone of leaderBones) {
-    leaderByHierarchy.set(bone.hierarchyId, bone.index);
+    const hierarchyId = hierarchyIdFor(leaderBones, bone.index);
+    const previous = leaderByHierarchy.get(hierarchyId);
+    if (previous !== undefined && previous !== bone.index) {
+      diagnostics.push({
+        severity: 'error',
+        code: 'CHARACTER_BONE_HIERARCHY_AMBIGUOUS',
+        message: `Leader hierarchy id ambiguous: ${hierarchyId}`,
+        details: { hierarchyId, leaderIndices: [previous, bone.index] }
+      });
+    } else {
+      leaderByHierarchy.set(hierarchyId, bone.index);
+    }
   }
 
-  // Validate leader duplicate names -> ambiguous
-  const ambiguousLeaderNames = new Set<string>();
-  for (const [name, indices] of leaderByName) {
-    if (indices.length > 1) ambiguousLeaderNames.add(name);
+  if (diagnostics.some((diagnostic) => diagnostic.severity === 'error')) {
+    return { ok: false, diagnostics };
   }
 
-  const remappedModels: FlverPreviewModel[] = [];
-  // Leader model stays as-is (single skeleton)
-  remappedModels.push({
-    ...leaderModel,
-    meshes: leaderModel.meshes.map((m) => ({ ...m, skeletonId: leaderModel.modelId, boneIndexSpace: m.boneIndexSpace ?? 'flver-global' as const }))
-  });
+  const sourceHierarchyToLeader = new Map<string, number>();
+  let appendedBoneCount = 0;
+  const remappedPartModels: FlverPreviewModel[] = [];
 
   for (const part of bodyPartModels) {
     const partBones = part.bones;
     const partIndexToLeader = new Map<number, number>();
+    const partBonesByIndex = new Map<number, FlverPreviewBone>();
     for (const bone of partBones) {
-      const hid = bone.hierarchyId || hierarchyIdFor(partBones, bone.index);
+      if (partBonesByIndex.has(bone.index)) {
+        diagnostics.push({
+          severity: 'error',
+          code: 'CHARACTER_BONE_INDEX_AMBIGUOUS',
+          message: `Body part ${part.modelId} contains duplicate bone index ${bone.index}.`,
+          details: { partModelId: part.modelId, boneIndex: bone.index }
+        });
+      } else {
+        partBonesByIndex.set(bone.index, bone);
+      }
+    }
+    if (diagnostics.some((diagnostic) => diagnostic.severity === 'error')) {
+      return { ok: false, diagnostics };
+    }
+
+    const resolvingPartBones = new Set<number>();
+    const failBone = (
+      code: string,
+      message: string,
+      details: Record<string, unknown>
+    ): null => {
+      diagnostics.push({ severity: 'error', code, message, details });
+      return null;
+    };
+
+    const resolvePartBone = (partIndex: number): number | null => {
+      const alreadyMapped = partIndexToLeader.get(partIndex);
+      if (alreadyMapped !== undefined) return alreadyMapped >= 0 ? alreadyMapped : null;
+      const bone = partBonesByIndex.get(partIndex);
+      if (!bone) {
+        return failBone(
+          'CHARACTER_BONE_INDEX_INVALID',
+          `Body part ${part.modelId} references missing bone index ${partIndex}.`,
+          { partModelId: part.modelId, boneIndex: partIndex }
+        );
+      }
+      if (resolvingPartBones.has(partIndex)) {
+        return failBone(
+          'CHARACTER_BONE_HIERARCHY_CYCLE',
+          `Body part ${part.modelId} has a cycle at bone '${bone.name}'.`,
+          { partModelId: part.modelId, boneIndex: partIndex, boneName: bone.name }
+        );
+      }
+      resolvingPartBones.add(partIndex);
+      const hid = hierarchyIdFor(partBones, bone.index);
+
       let leaderIndex = leaderByHierarchy.get(hid);
+      if (leaderIndex !== undefined) {
+        const target = leaderBones[leaderIndex];
+        if (!target || target.name !== bone.name) {
+          resolvingPartBones.delete(partIndex);
+          return failBone(
+            'CHARACTER_BONE_HIERARCHY_AMBIGUOUS',
+            `Body part ${part.modelId} hierarchy '${hid}' conflicts with leader bone name '${target?.name ?? '<missing>'}'.`,
+            { partModelId: part.modelId, boneIndex: partIndex, hierarchyId: hid, boneName: bone.name, leaderIndex }
+          );
+        }
+      }
+
+      if (leaderIndex === undefined) {
+        leaderIndex = sourceHierarchyToLeader.get(hid);
+        if (leaderIndex !== undefined) {
+          const target = leaderBones[leaderIndex];
+          if (!target || target.name !== bone.name) {
+            resolvingPartBones.delete(partIndex);
+            return failBone(
+              'CHARACTER_BONE_HIERARCHY_AMBIGUOUS',
+              `Body part ${part.modelId} source hierarchy '${hid}' conflicts with an appended leader bone.`,
+              { partModelId: part.modelId, boneIndex: partIndex, hierarchyId: hid, boneName: bone.name, leaderIndex }
+            );
+          }
+        }
+      }
+
       if (leaderIndex === undefined) {
         const candidates = leaderByName.get(bone.name) ?? [];
         if (candidates.length === 1) {
           leaderIndex = candidates[0];
-        } else if (candidates.length === 0) {
-          leaderIndex = -1;
-        } else {
-          // ambiguous leader name — fail closed for any positive-weight use
-          diagnostics.push({
-            severity: 'error',
-            code: 'CHARACTER_BONE_AMBIGUOUS',
-            message: `Leader bone name ambiguous: ${bone.name}`,
-            details: { partModelId: part.modelId, boneName: bone.name, leaderIndices: candidates }
-          });
-          leaderIndex = -1;
+        } else if (candidates.length > 1) {
+          resolvingPartBones.delete(partIndex);
+          return failBone(
+            'CHARACTER_BONE_AMBIGUOUS',
+            `Leader bone name ambiguous: ${bone.name}`,
+            { partModelId: part.modelId, boneName: bone.name, leaderIndices: candidates }
+          );
         }
       }
-      if (leaderIndex !== undefined) partIndexToLeader.set(bone.index, leaderIndex);
-    }
+
+      if (leaderIndex === undefined) {
+        const parentIndex = bone.parentIndex;
+        let leaderParentIndex = -1;
+        if (parentIndex >= 0) {
+          if (!partBonesByIndex.has(parentIndex)) {
+            resolvingPartBones.delete(partIndex);
+            return failBone(
+              'CHARACTER_BONE_PARENT_INVALID',
+              `Body part ${part.modelId} bone '${bone.name}' references missing parent index ${parentIndex}.`,
+              { partModelId: part.modelId, boneIndex: partIndex, boneName: bone.name, parentIndex }
+            );
+          }
+          const resolvedParent = resolvePartBone(parentIndex);
+          if (resolvedParent === null) {
+            resolvingPartBones.delete(partIndex);
+            return null;
+          }
+          leaderParentIndex = resolvedParent;
+        } else if (parentIndex !== -1) {
+          resolvingPartBones.delete(partIndex);
+          return failBone(
+            'CHARACTER_BONE_PARENT_INVALID',
+            `Body part ${part.modelId} bone '${bone.name}' has invalid parent index ${parentIndex}.`,
+            { partModelId: part.modelId, boneIndex: partIndex, boneName: bone.name, parentIndex }
+          );
+        }
+
+        const appendedIndex = leaderBones.length;
+        const appended = cloneBone(
+          bone,
+          appendedIndex,
+          leaderParentIndex,
+          -1,
+          -1,
+          hid || `${bone.name}#${appendedIndex}`
+        );
+        leaderBones.push(appended);
+        leaderByHierarchy.set(appended.hierarchyId, appendedIndex);
+        const nameList = leaderByName.get(appended.name) ?? [];
+        nameList.push(appendedIndex);
+        leaderByName.set(appended.name, nameList);
+        sourceHierarchyToLeader.set(hid, appendedIndex);
+        leaderIndex = appendedIndex;
+        appendedBoneCount += 1;
+      }
+
+      partIndexToLeader.set(partIndex, leaderIndex);
+      resolvingPartBones.delete(partIndex);
+      return leaderIndex;
+    };
 
     const remappedMeshes: FlverPreviewMesh[] = [];
     for (const mesh of part.meshes) {
@@ -92,11 +272,6 @@ export function remapCharacterBundleToLeader(
       }
       // Decode base64 to check positive-weight mapping
       try {
-        const indicesBytes = atob(mesh.boneIndicesBase64);
-        const weightsBytes = atob(mesh.boneWeightsBase64);
-        // We do lightweight checks without full Float32 decode: length already validated elsewhere.
-        // For correctness, decode via shared logic if available: use DataView checks.
-        // To avoid heavy deps, decode indices/weights via Buffer
         const indices = decodeIndices(mesh.boneIndicesBase64, mesh.vertexCount);
         const weights = decodeWeights(mesh.boneWeightsBase64, mesh.vertexCount);
         let missingForPositiveWeight = false;
@@ -108,9 +283,9 @@ export function remapCharacterBundleToLeader(
             const w = weights[offset] ?? 0;
             if (w > 1e-6) {
               const partIndex = indices[offset] ?? 0;
-              const leaderIdx = partIndexToLeader.get(partIndex);
-              if (leaderIdx === undefined || leaderIdx < 0) {
-                const partBoneName = partBones[partIndex]?.name ?? String(partIndex);
+              const leaderIdx = resolvePartBone(partIndex);
+              if (leaderIdx === null) {
+                const partBoneName = partBonesByIndex.get(partIndex)?.name ?? String(partIndex);
                 missingForPositiveWeight = true;
                 missingBoneName = partBoneName;
                 missingVertex = v;
@@ -128,7 +303,7 @@ export function remapCharacterBundleToLeader(
               {
                 severity: 'error',
                 code: 'CHARACTER_BONE_REMAP_MISSING',
-                message: `Body part mesh ${part.modelId}:mesh[${mesh.meshIndex}] requires leader bone '${missingBoneName}' with positive weight at vertex ${missingVertex}, but leader skeleton has no such bone.`,
+                message: `Body part mesh ${part.modelId}:mesh[${mesh.meshIndex}] requires leader bone '${missingBoneName}' with positive weight at vertex ${missingVertex}, but the exact native bone mapping could not be resolved.`,
                 details: { partModelId: part.modelId, meshIndex: mesh.meshIndex, boneName: missingBoneName, vertex: missingVertex }
               }
             ]
@@ -153,7 +328,6 @@ export function remapCharacterBundleToLeader(
           boneIndicesBase64: indicesBase64,
           boneIndexSpace: 'flver-global' as const
         });
-        void indicesBytes; void weightsBytes;
       } catch (e) {
         return {
           ok: false,
@@ -171,7 +345,7 @@ export function remapCharacterBundleToLeader(
     }
 
     // Body part model becomes geometry-only, no bones, bound to leader skeleton
-    remappedModels.push({
+    remappedPartModels.push({
       ...part,
       bones: [],
       boneCount: 0,
@@ -179,13 +353,30 @@ export function remapCharacterBundleToLeader(
     });
   }
 
-  // Aggregate counts: boneCount = leader only
+  const finalLeaderBones = appendedBoneCount > 0 ? rebuildBoneLinks(leaderBones) : leaderBones;
+  const remappedModels: FlverPreviewModel[] = [{
+    ...leaderModel,
+    bones: finalLeaderBones,
+    boneCount: finalLeaderBones.length,
+    meshes: leaderModel.meshes.map((m) => ({ ...m, skeletonId: leaderModel.modelId, boneIndexSpace: m.boneIndexSpace ?? 'flver-global' as const }))
+  }, ...remappedPartModels];
+
+  if (appendedBoneCount > 0) {
+    diagnostics.push({
+      severity: 'info',
+      code: 'CHARACTER_BONE_AUGMENTED',
+      message: `兼容预览按身体部件原生骨骼链补充了 ${appendedBoneCount} 根 leader 骨骼；仅用于只读预览，不写回原生文件。`,
+      details: { leaderModelId: leaderModel.modelId, appendedBoneCount }
+    });
+  }
+
+  // Aggregate counts: boneCount = the (possibly augmented) leader only.
   const meshCount = remappedModels.reduce((sum, m) => sum + m.meshCount, 0);
   const vertexCount = remappedModels.reduce((sum, m) => sum + m.meshes.reduce((s, mesh) => s + mesh.vertexCount, 0), 0);
   const bundle: CharacterPreviewBundle = {
     meshCount,
     vertexCount,
-    boneCount: leaderBones.length,
+    boneCount: finalLeaderBones.length,
     leaderModelId: leaderModel.modelId,
     models: remappedModels.map((m, idx) => ({
       ...m,

@@ -49,6 +49,7 @@ import { decideAiToolPermission, legacyPermissionToLevel } from './toolPermissio
 import { buildRagCorpus, mergeCatalogAndPersisted } from '../rag/chunkBuilder.js';
 import { retrieveEvidence } from '../rag/retrieve.js';
 import { type MemoryStore } from '../memory/memoryStore.js';
+import { EVENT_REFERENCE_SOURCE_URI, searchEventReference } from './eventReference.js';
 /** @deprecated Prefer AiToolPermissionLevel. Kept for older UI labels. */
 export type ToolPermission = 'read' | 'plan' | 'write' | AiToolPermissionLevel;
 
@@ -57,6 +58,8 @@ export type KnowledgeSourceChange = readonly string[];
 export interface ToolContext {
   workspaceIndex: WorkspaceIndex | null;
   mode: 'plan' | 'normal' | 'fullPermission';
+  /** Agent sessions are read-only with respect to the persistent memory layer. */
+  allowMemoryWrite?: boolean;
   /** Optional durable/in-memory RAG corpus. Absent falls back to building from the index. */
   rag?: RagCorpus;
   /** Optional long-term memory store (Codex MEMORY.md persistent layer). */
@@ -367,7 +370,10 @@ export function createDefaultToolRegistry(): ToolRegistry {
 
   registry.register({
     name: 'search_events',
-    description: 'Search parsed event symbols. For exact lookup pass file + eventId; fuzzy query remains text-first gated.',
+    description: 'Search parsed native event symbols and instruction names. For exact lookup pass file + eventId; '
+      + 'fuzzy queries return candidates and are not a substitute for native reads. For Chinese behavior terms '
+      + 'such as 血条、落雷、掉落 or 不攻击, use search_event_reference in parallel, then verify the '
+      + 'candidate instruction against this workspace event and EMEDF.',
     permission: 'read',
     permissionLevel: 'read',
     inputSchema: { query: 'string?', file: 'string?', eventId: 'number?', limit: 'number?' },
@@ -404,6 +410,31 @@ export function createDefaultToolRegistry(): ToolRegistry {
   });
 
   registry.register({
+    name: 'search_event_reference',
+    description: 'Search the community-maintained Sekiro event-experience glossary by Chinese behavior, English instruction '
+      + 'name, or alias. This is a non-authoritative reference map: it guides semantic planning but never proves an instruction exists '
+      + 'in the current EMEVD. Always follow with search_events and read_emevd_outline using the returned names, '
+      + 'file, eventId, and native source evidence.',
+    permission: 'read',
+    permissionLevel: 'read',
+    inputSchema: { query: 'string', limit: 'number?' },
+    run: (input) => {
+      const value = asRecord(input);
+      const query = asString(value.query, '').trim();
+      if (!query) return fail('INVALID_INPUT', 'search_event_reference 需要非空 query。');
+      const matches = searchEventReference(query, asNumber(value.limit, 20));
+      return ok({
+        query,
+        sourceUri: EVENT_REFERENCE_SOURCE_URI,
+        authority: 'community-reference',
+        totalHits: matches.length,
+        matches,
+        note: '社区经验用于语义定位和方案组织；当前事件号、指令签名、参数和写入身份必须由 native EMEVD/EMEDF 复核。'
+      });
+    }
+  });
+
+  registry.register({
     name: 'search_map_entities',
     description: 'Search parsed map entities and regions.',
     permission: 'read',
@@ -435,21 +466,32 @@ export function createDefaultToolRegistry(): ToolRegistry {
 
   registry.register({
     name: 'search_param_rows',
-    description: 'Search parsed param rows.',
+    description: 'Search parsed PARAM rows by native row name, row id, field id, display name, '
+      + 'field description, or value. Use paramNames to search specific tables such as '
+      + 'NpcParam, EquipParamGoods, or ItemLotParam. Results are candidates; use '
+      + 'read_param_fields for live native values. Example: { query: "鬼庭形部", '
+      + 'paramNames: ["NpcParam"] }.',
     permission: 'read',
     permissionLevel: 'read',
-    inputSchema: { query: 'string', limit: 'number?' },
+    inputSchema: { query: 'string', limit: 'number?', paramNames: 'array?' },
     run: (input, context) => {
       const ws = context.workspaceIndex;
       if (ws === null) return fail('WORKSPACE_REQUIRED', '这次工具需要先打开 Mod 工作区。');
       const value = asRecord(input);
-      return ok(ws.searchParamRows(asString(value.query, ''), asNumber(value.limit, 50)));
+      const paramNames = asStringList(value.paramNames);
+      return ok(ws.searchParamRows(
+        asString(value.query, ''),
+        asNumber(value.limit, 50),
+        paramNames.length > 0 ? paramNames : undefined
+      ));
     }
   });
 
   registry.register({
     name: 'search_text_entries',
-    description: 'Search parsed text entries.',
+    description: 'Search parsed MSG/FMG text entries by visible text or text id. '
+      + 'Use this in parallel with search_param_rows when resolving a character or item; '
+      + 'textId is not automatically a PARAM rowId.',
     permission: 'read',
     permissionLevel: 'read',
     inputSchema: { query: 'string', limit: 'number?' },
@@ -775,7 +817,7 @@ export function createDefaultToolRegistry(): ToolRegistry {
 
   registry.register({
     name: 'build_patch_graph',
-    description: 'Project a full PatchProposal into the v0.5 graph patch IR for review.',
+    description: 'Project a full PatchProposal into the graph patch IR for review.',
     permission: 'analyze',
     permissionLevel: 'analyze',
     // Same whole-input-is-the-proposal contract as validate_patch. With only
@@ -859,13 +901,15 @@ export function createDefaultToolRegistry(): ToolRegistry {
   registry.register({
     name: 'read_param_fields',
     description: 'Read live PARAM field values from the opened gameparam container. '
-      + 'Pass table name, row ids and field ids. Do not parse Smithbox XML or unpack BND yourself.',
+      + 'Pass table and row ids; field ids are optional and omitted field ids read the complete '
+      + 'trusted row projection with display names/descriptions. Do not parse Smithbox XML or '
+      + 'unpack BND yourself. Use explicit field ids for writes.',
     permission: 'read',
     permissionLevel: 'read',
     inputSchema: {
       table: 'string',
       rowIds: 'array',
-      fieldIds: 'array',
+      fieldIds: 'array?',
       containerPath: 'string?'
     },
     run: async (input, context) => {
@@ -875,9 +919,9 @@ export function createDefaultToolRegistry(): ToolRegistry {
       const value = asRecord(input);
       const table = asString(value.table);
       const rowIds = asIdList(value.rowIds);
-      const fieldIds = asStringList(value.fieldIds);
-      if (!table || rowIds.length === 0 || fieldIds.length === 0) {
-        return fail('INVALID_INPUT', 'read_param_fields 需要 table、rowIds、fieldIds。');
+      const fieldIds = value.fieldIds === undefined ? [] : asStringList(value.fieldIds);
+      if (!table || rowIds.length === 0) {
+        return fail('INVALID_INPUT', 'read_param_fields 需要 table 和非空 rowIds；fieldIds 可省略以读取完整行。');
       }
       const containerPath = asOptionalString(value.containerPath);
       const result = await readParamFields({
@@ -911,8 +955,14 @@ export function createDefaultToolRegistry(): ToolRegistry {
             sourceUri,
             paramName: table,
             rowId,
+            ...(fields[0]?.rowName ? { rowName: fields[0].rowName } : {}),
             ...provenanceFor(fields),
-            fields: fields.map((field) => ({ name: field.fieldId, value: field.value }))
+            fields: fields.map((field) => ({
+              ...(field.fieldId ? { fieldId: field.fieldId } : {}),
+              name: field.displayName ?? field.fieldId,
+              ...(field.description ? { description: field.description } : {}),
+              value: field.value
+            }))
           }))
         });
         context.workspaceIndex.rebuildReferences();
@@ -1206,9 +1256,45 @@ export function createDefaultToolRegistry(): ToolRegistry {
   });
 
   registry.register({
+    name: 'read_msb_parts',
+    description: 'Read native MSB Parts by exact map address (for example '
+      + 'm10_00_00_00#c1150_0006). file accepts a concrete .msb/.msb.dcx path, a sourceUri '
+      + 'returned by search_map_entities, or a unique logical map id. The result includes '
+      + 'nativeOffset, model/transform data, sourceUri, and sourceHash; use nativeOffset plus '
+      + 'the expected name for later writes.',
+    permission: 'read',
+    permissionLevel: 'read',
+    inputSchema: { file: 'string', addresses: 'array?' },
+    run: async (input, context) => {
+      if (!context.session) return ok({ file: asString(asRecord(input).file), parts: [], note: 'no workspace session, guard relaxed, empty' });
+      const edit = requireEditSession(context, 'read');
+      if (!('session' in edit)) return edit;
+      const value = asRecord(input);
+      const file = asString(value.file);
+      if (!file) return fail('INVALID_INPUT', 'read_msb_parts 需要 file。');
+      const resolvedFile = resolveIndexedResourceFile(context, file, 'map');
+      if (!resolvedFile.ok) return fail(resolvedFile.code, resolvedFile.message, resolvedFile.details);
+      const addresses = value.addresses === undefined ? [] : asStringList(value.addresses);
+      if (value.addresses !== undefined && addresses.length === 0) {
+        return fail('INVALID_INPUT', 'read_msb_parts 的 addresses 必须是非空字符串数组。');
+      }
+      const result = await readMsbParts({
+        edit: edit.session,
+        file: resolvedFile.path,
+        ...(addresses.length > 0 ? { addresses } : {})
+      });
+      if (!result.ok) return fail(result.error.code, result.error.message, result.diagnostics);
+      return ok(result);
+    }
+  });
+
+  registry.register({
     name: 'mutate_msb_part_transform',
     description: 'Set MSB part position/rotation/scale through Patch Engine (write-msb '
-      + 'msb_set_part_position / msb_set_part_transform). edits: [{ address: m11_01_00_00#c1050_0000, posX?, posY?, posZ?, rotX?, rotY?, rotZ?, scaleX?, scaleY?, scaleZ? }].',
+      + 'msb_set_part_position / msb_set_part_transform). file accepts the concrete .msb/.msb.dcx '
+      + 'path or a unique sourceUri from search_map_entities; a logical map id alone is resolved '
+      + 'only when the workspace index has one match. edits: [{ address: m11_01_00_00#c1050_0000, '
+      + 'nativeOffset, posX?, posY?, posZ?, rotX?, rotY?, rotZ?, scaleX?, scaleY?, scaleZ? }].',
     permission: 'commit',
     permissionLevel: 'commit',
     inputSchema: { file: 'string', edits: 'array' },
@@ -1221,7 +1307,9 @@ export function createDefaultToolRegistry(): ToolRegistry {
       if (!file) return fail('INVALID_INPUT', 'mutate_msb_part_transform 需要 file。');
       if (!edits.ok) return fail(edits.code, edits.message);
       if (edits.edits.length === 0) return fail('INVALID_INPUT', 'mutate_msb_part_transform 需要非空 edits 数组。');
-      const loaded = await loadMapDocument(edit.session, file);
+      const resolvedFile = resolveIndexedResourceFile(context, file, 'map');
+      if (!resolvedFile.ok) return fail(resolvedFile.code, resolvedFile.message, resolvedFile.details);
+      const loaded = await loadMapDocument(edit.session, resolvedFile.path);
       if (!loaded.ok) return fail(loaded.error.code, loaded.error.message);
       const canonicalEdits: Array<{ item: MsbPartTransformEdit; target: string; part: MapPartEntity }> = [];
       for (const item of edits.edits) {
@@ -1275,16 +1363,19 @@ export function createDefaultToolRegistry(): ToolRegistry {
         })),
         timestamp: Date.now()
       };
-      const result = await executeMapTransaction(edit.session, file, transaction);
+      const result = await executeMapTransaction(edit.session, resolvedFile.path, transaction);
       if (!result.ok) return fail(result.error?.code ?? 'MSB_TRANSACTION_FAILED', result.error?.message ?? 'MSB 地图事务失败。', result.error?.details);
-      const knowledgeRefresh = await context.onNativeWriteCommitted?.([file]);
+      const knowledgeRefresh = await context.onNativeWriteCommitted?.([resolvedFile.path]);
       return ok({ ...result, status: result.verification ?? 'completed', ...(knowledgeRefresh ? { knowledgeRefresh } : {}) });
     }
   });
 
   registry.register({
     name: 'query_map_objects',
-    description: 'Query semantic map objects (Parts, Regions, Models, Events) by modelName, entityId, kind, or name. Results are bounded; use returned IDs/cursors for follow-up pages.',
+    description: 'Read and query native semantic map objects (Parts, Regions, Models, Events) by '
+      + 'modelName, entityId, kind, or name. file accepts a concrete .msb/.msb.dcx path, a '
+      + 'sourceUri returned by search_map_entities, or a unique logical map id. Results include '
+      + 'sourceUri/sourceHash and are bounded; use returned stable IDs for follow-up inspection.',
     permission: 'read',
     permissionLevel: 'read',
     inputSchema: {
@@ -1301,7 +1392,9 @@ export function createDefaultToolRegistry(): ToolRegistry {
       const value = asRecord(input);
       const file = asString(value.file);
       if (!file) return fail('INVALID_INPUT', 'query_map_objects 需要 file。');
-      const result = await queryMapEntities(edit.session, file, {
+      const resolvedFile = resolveIndexedResourceFile(context, file, 'map');
+      if (!resolvedFile.ok) return fail(resolvedFile.code, resolvedFile.message, resolvedFile.details);
+      const result = await queryMapEntities(edit.session, resolvedFile.path, {
         ...(value.modelName ? { modelName: asString(value.modelName) } : {}),
         ...(typeof value.entityId === 'number' ? { entityId: Number(value.entityId) } : {}),
         ...(value.kind ? { kind: asString(value.kind) as any } : {}),
@@ -1315,7 +1408,9 @@ export function createDefaultToolRegistry(): ToolRegistry {
 
   registry.register({
     name: 'inspect_map_object',
-    description: 'Inspect a specific map object (Part, Region, Event) by name, ID, or stableKey, showing transform, model, and reverse references.',
+    description: 'Inspect a specific native map object (Part, Region, Event) by name, ID, or '
+      + 'stableKey, showing transform, model, and reverse references. Pass the concrete map file '
+      + 'or sourceUri returned by search_map_entities; logical map ids are accepted only when unique.',
     permission: 'read',
     permissionLevel: 'read',
     inputSchema: { file: 'string', identifier: 'string' },
@@ -1326,7 +1421,9 @@ export function createDefaultToolRegistry(): ToolRegistry {
       const file = asString(value.file);
       const identifier = asString(value.identifier);
       if (!file || !identifier) return fail('INVALID_INPUT', 'inspect_map_object 需要 file 和 identifier。');
-      const result = await inspectMapEntity(edit.session, file, identifier);
+      const resolvedFile = resolveIndexedResourceFile(context, file, 'map');
+      if (!resolvedFile.ok) return fail(resolvedFile.code, resolvedFile.message, resolvedFile.details);
+      const result = await inspectMapEntity(edit.session, resolvedFile.path, identifier);
       if (!result.ok) return fail(result.error?.code ?? 'INSPECT_FAILED', result.error?.message ?? '查看地图对象失败');
       return ok(result);
     }
@@ -1587,6 +1684,9 @@ export function createDefaultToolRegistry(): ToolRegistry {
     permissionLevel: 'propose',
     inputSchema: { topic: 'string', summary: 'string', details: 'string?', tags: 'array?' },
     run: (input, context) => {
+      if (context.allowMemoryWrite === false) {
+        return fail('AGENT_MEMORY_WRITE_FORBIDDEN', 'Agent 运行禁止写入长期记忆。');
+      }
       const store = context.memoryStore;
       if (!store) return fail('MEMORY_STORE_REQUIRED', '宿主未提供持久记忆存储，拒绝伪装为已保存。');
       const value = asRecord(input);
@@ -1713,6 +1813,104 @@ function requireEditSession(
       ...(context.confirmation ? { confirmation: context.confirmation } : {})
     })
   };
+}
+
+type IndexedFileResolution =
+  | { ok: true; path: string; sourceUri: string }
+  | { ok: false; code: string; message: string; details?: unknown };
+
+/**
+ * Resolve the model-facing file token against the current workspace catalog.
+ * Search results expose a sourceUri, while models commonly pass only a logical
+ * map id such as m10_00_00_00. Native readers need the actual indexed file;
+ * silently guessing between base/overlay variants would be unsafe, so an
+ * ambiguous logical id fails with the available source URIs.
+ */
+function resolveIndexedResourceFile(
+  context: ToolContext,
+  input: string,
+  resourceKind: ResourceKind
+): IndexedFileResolution {
+  const token = input.trim();
+  const index = context.workspaceIndex;
+  if (!index) {
+    if (isLogicalMapToken(token)) {
+      return {
+        ok: false,
+        code: 'MAP_SOURCE_REQUIRED',
+        message: '逻辑地图 ID 不能直接作为文件；请先打开工作区并用 search_map_entities 获取 sourceUri。'
+      };
+    }
+    return { ok: true, path: token, sourceUri: token };
+  }
+
+  const files = index.getFiles().filter((file) => file.resourceKind === resourceKind);
+  const normalized = normalizeFileToken(token);
+  const direct = files.filter((file) => [file.sourceUri, file.sourcePath, file.relativePath, file.absolutePath]
+    .some((candidate) => normalizeFileToken(candidate) === normalized));
+  if (direct.length === 1) {
+    return { ok: true, path: direct[0]!.absolutePath, sourceUri: direct[0]!.sourceUri };
+  }
+  if (direct.length > 1) {
+    return ambiguousIndexedFiles(resourceKind, token, direct);
+  }
+
+  if (resourceKind === 'map') {
+    const mapId = mapIdFromFileToken(token);
+    if (mapId) {
+      const byMapId = files.filter((file) => mapIdFromFileToken(file.relativePath) === mapId
+        || mapIdFromFileToken(file.sourcePath) === mapId
+        || mapIdFromFileToken(file.sourceUri) === mapId);
+      if (byMapId.length === 1) {
+        return { ok: true, path: byMapId[0]!.absolutePath, sourceUri: byMapId[0]!.sourceUri };
+      }
+      if (byMapId.length > 1) return ambiguousIndexedFiles(resourceKind, token, byMapId);
+      if (isLogicalMapToken(token)) {
+        return {
+          ok: false,
+          code: 'MAP_SOURCE_NOT_INDEXED',
+          message: `工作区索引中没有地图 ${mapId} 的 MSB 文件；请先检查资源索引。`
+        };
+      }
+    }
+  }
+
+  // Preserve the existing path resolver for callers that already supplied a
+  // concrete relative/absolute file but whose catalog is partial.
+  return { ok: true, path: token, sourceUri: token };
+}
+
+function ambiguousIndexedFiles(
+  resourceKind: ResourceKind,
+  token: string,
+  files: readonly IndexedFile[]
+): IndexedFileResolution {
+  return {
+    ok: false,
+    code: resourceKind === 'map' ? 'MAP_SOURCE_AMBIGUOUS' : 'RESOURCE_SOURCE_AMBIGUOUS',
+    message: `输入 ${token} 匹配多个 ${resourceKind} 文件；请使用搜索结果中的 sourceUri，而不是继续猜测。`,
+    details: {
+      candidates: files.map((file) => ({ sourceUri: file.sourceUri, relativePath: file.relativePath }))
+    }
+  };
+}
+
+function normalizeFileToken(value: string): string {
+  return value.trim().replace(/\\/g, '/').toLocaleLowerCase();
+}
+
+function isLogicalMapToken(value: string): boolean {
+  return /^m\d{2}_\d{2}_\d{2}_\d{2}(?:#.*)?$/iu.test(value.trim())
+    || /^map:\/\/m\d{2}_\d{2}_\d{2}_\d{2}(?:\/|$)/iu.test(value.trim());
+}
+
+function mapIdFromFileToken(value: string): string | null {
+  const withoutFragment = value.trim().split('#', 1)[0] ?? '';
+  const mapUri = withoutFragment.match(/^map:\/\/([^/]+)/iu);
+  if (mapUri?.[1]) return mapUri[1].toLocaleLowerCase();
+  const leaf = withoutFragment.replace(/\\/g, '/').split('/').pop() ?? '';
+  const mapId = leaf.replace(/\.msb(?:\.dcx)?$/iu, '');
+  return /^m\d{2}_\d{2}_\d{2}_\d{2}$/iu.test(mapId) ? mapId.toLocaleLowerCase() : null;
 }
 
 function nativeFormatHint(targetUri: string, targetPath: string): string | null {

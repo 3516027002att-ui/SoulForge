@@ -144,6 +144,13 @@ export interface FlverMeshData {
   normalsBase64: string | null;
   boneWeightsBase64: string | null;
   boneIndicesBase64: string | null;
+  textureStatus?: 'ready' | 'missing' | undefined;
+  textureMaterialName?: string | null | undefined;
+  textureName?: string | null | undefined;
+  texturePreviewToken?: string | null | undefined;
+  textureWidth?: number | null | undefined;
+  textureHeight?: number | null | undefined;
+  textureColorSpace?: string | null | undefined;
 }
 
 /** read-flver-skeleton 的响应。 */

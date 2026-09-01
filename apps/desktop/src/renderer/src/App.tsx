@@ -1,4 +1,5 @@
 import {
+  useCallback,
   useEffect,
   useMemo,
   useRef,
@@ -13,7 +14,10 @@ import {
   classifyWorkspaceOpen,
   EDITOR_DOMAIN_IDS,
   PARAM_PAGE_SIZE,
-  mergeCiteHits
+  PARAM_ROW_PAYLOAD_BATCH_MAX,
+  createParamSessionMaterializationTracker,
+  mergeCiteHits,
+  paramPhysicalRowKey
 } from '@soulforge/shared';
 import type {
   AgentAttachmentReference,
@@ -28,9 +32,14 @@ import type {
   MsbSceneSourceCounts,
   ParamDefDocument,
   ParamFieldDef,
+  ParamIndexRow,
+  ParamNativeTelemetry,
+  ParamPhysicalRowIdentity,
+  ParamSessionMaterializationSnapshot,
   ResourceKind
 } from '@soulforge/shared';
 import type {
+  AiAgentEventEnvelope,
   AnalyzeWorkspaceSummary,
   DirectorySelection,
   RendererWorkspaceScanResult,
@@ -67,7 +76,7 @@ import {
   type EventSourceTabData
 } from './editors/EventSourceWorkbenchPanel.js';
 import { FmgWorkbenchPanel } from './editors/FmgWorkbenchPanel.js';
-import { ParamTablePanel } from './editors/ParamTablePanel.js';
+import { ParamTablePanel, type ParamRowView } from './editors/ParamTablePanel.js';
 import {
   findCatalogContainer,
   resolveFmgJump,
@@ -99,11 +108,13 @@ import {
   describeBridgeAbsence,
   getRendererRuntime
 } from './runtime/rendererRuntime.js';
+import { base64ToUint8Array } from './utils/binary.js';
 import type { ResourceMode } from './navigation/resourceFamilies.js';
 import type { DomainSummary, EditorDomainId } from '@soulforge/shared';
 import { buildDomainSummaries, domainLabel } from './navigation/domainNavigation.js';
 import { DomainNavigationBar } from './navigation/DomainNavigationBar.js';
 import { DomainLibraryList } from './navigation/DomainLibraryList.js';
+import { orderUnseenAgentEvents } from './agent/agentEventReplay.js';
 import {
   behaviorLibraryGroups,
   filesForDomain,
@@ -156,6 +167,11 @@ import {
   isTrappableElement,
   nextTrappedFocusIndex
 } from './a11y/focusTrap.js';
+import {
+  filterCommandPaletteResources,
+  matchesCommandSearch,
+  normalizeCommandSearchText
+} from './navigation/commandPaletteSearch.js';
 
 type SidebarView = 'explorer' | 'search' | 'staging' | 'audit' | 'settings';
 
@@ -210,7 +226,40 @@ const EMPTY_EMEVD_DOCUMENT: EmevdEditorDocument = {
 
 const EMPTY_FMG_ENTRIES: Array<{ id: number; text: string }> = [];
 
-const EMPTY_PARAM_ROWS: Array<{ id: number; name?: string; dataHexPreview: string }> = [];
+const EMPTY_PARAM_ROWS: ParamRowView[] = [];
+
+function paramRowViewFromIndex(row: ParamIndexRow): ParamRowView {
+  return {
+    rowIndex: row.rowIndex,
+    id: row.id,
+    dataHash: row.dataHash,
+    dataHexPreview: '',
+    ...(row.name !== null ? { name: row.name } : {})
+  };
+}
+
+function mergeParamRowViews(
+  existing: readonly ParamRowView[],
+  incoming: readonly ParamIndexRow[]
+): ParamRowView[] {
+  const byRowIndex = new Map(existing.map((row) => [row.rowIndex, row]));
+  for (const row of incoming) {
+    const next = paramRowViewFromIndex(row);
+    const previous = byRowIndex.get(row.rowIndex);
+    byRowIndex.set(row.rowIndex, previous
+      ? { ...next, ...(previous.dataBase64 ? { dataBase64: previous.dataBase64 } : {}), ...(previous.dataHexPreview ? { dataHexPreview: previous.dataHexPreview } : {}) }
+      : next);
+  }
+  return [...byRowIndex.values()].sort((left, right) => left.rowIndex - right.rowIndex);
+}
+
+function paramDataHexPreview(dataBase64: string): string {
+  try {
+    return Array.from(base64ToUint8Array(dataBase64).slice(0, 16), (value) => value.toString(16).padStart(2, '0')).join(' ');
+  } catch {
+    return '';
+  }
+}
 
 const AGENT_MIN_WIDTH = 96; // S8:下限收到约一条工具栏宽,不要 340
 const AGENT_MAX_WIDTH = 620;
@@ -250,21 +299,9 @@ function eventTabShortTitle(relativePath: string): string {
 /**
  * 空 paramdef：origin 为 fixture 且无字段，definitionCanCommit 永不放行写入。
  *
- * ⚠️ 真实字段定义的来源**已实现但尚未接进 main**（2026-08-08 实测）：
- * packages/core/src/param/smithboxParamMetadataSource.ts 是 Paramdex-compatible
- * metadata 投影，已从 core barrel 导出（index.ts:72），并有
- * runSmithboxParamMetadataSourceSmoke 与 runParamMetadataNativeSmoke 两条验证。
- * 但 apps/desktop/src/main 侧对它零引用——没有任何 IPC 通道把它送到 renderer。
- *
- * 所以下面 :2261 那处 `definition={paramLive ? null : EMPTY_PARAM_DEF}` 的两条
- * 分支都进不了字段表：live 分支给 null 触发 ParamDefPanel 短路，非 live 分支给
- * fields:[] 导致 fieldViews 为空。这不是「投影不存在」，是最后一跳没接
- * ——原注释写成「来自 main 侧投影」是把待接线状态写成了已完成状态。
- *
- * 接线前不要把这里改成看起来能用：definitionCanCommit 靠 origin/fields 拦住写入，
- * 是保护性设计。要解除断点需先建 main→renderer 的 metadata 通道，
- * 且 matchParamMetadataPackage 要求显式用户信任策略（缺失报
- * PARAM_METADATA_TRUST_POLICY_REQUIRED 并拒绝匹配），不能绕过。
+ * 真实 live PARAM 的字段定义经 `openParamSession.metadata` 送入 renderer；
+ * 这里仍只作为未加载/浏览器预览的空态。definitionCanCommit 继续依赖
+ * main 返回的 origin/trusted 结果，renderer 不自行给 metadata 授信。
  */
 const EMPTY_PARAM_DEF: ParamDefDocument = {
   schemaVersion: 1,
@@ -286,6 +323,8 @@ export function App(): ReactElement {
   const [operationHistory, setOperationHistory] = useState<RendererPatchHistoryEntry[]>([]);
   const [rollbackInFlight, setRollbackInFlight] = useState<string | null>(null);
   const rollbackInFlightRef = useRef<string | null>(null);
+  const operationHistoryRefreshRef = useRef(Promise.resolve());
+  const operationHistoryRequestRef = useRef(0);
   const [analysis, setAnalysis] = useState<AnalyzeWorkspaceSummary | null>(null);
   const [tools, setTools] = useState<ToolDescriptor[]>([]);
   const [selectedFile, setSelectedFile] = useState<RendererIndexedFile | null>(null);
@@ -381,9 +420,17 @@ export function App(): ReactElement {
   const [msbSourceHash, setMsbSourceHash] = useState<string | null>(null);
   const [paramTypeName, setParamTypeName] = useState('');
   const [paramRows, setParamRows] = useState(EMPTY_PARAM_ROWS);
+  const [paramRowCount, setParamRowCount] = useState(0);
   const [paramSourceHash, setParamSourceHash] = useState<string | null>(null);
   const [paramLive, setParamLive] = useState(false);
-  const [paramRowPayloads, setParamRowPayloads] = useState<Map<number, string>>(new Map());
+  const [paramSessionToken, setParamSessionToken] = useState<string | null>(null);
+  const paramSessionTokenRef = useRef<string | null>(null);
+  const [paramRowPayloads, setParamRowPayloads] = useState<Map<string, string>>(new Map());
+  const paramMaterializationRef = useRef<ReturnType<typeof createParamSessionMaterializationTracker> | null>(null);
+  const [paramMaterialization, setParamMaterialization] = useState<ParamSessionMaterializationSnapshot | null>(null);
+  const [paramNativeTelemetry, setParamNativeTelemetry] = useState<ParamNativeTelemetry | null>(null);
+  const [paramIndexLoading, setParamIndexLoading] = useState(false);
+  const [paramIndexDiagnostic, setParamIndexDiagnostic] = useState<string | null>(null);
   /**
    * 主进程给出的字段定义（Smithbox SDT 2.2.4）与缺失原因。
    *
@@ -443,6 +490,13 @@ export function App(): ReactElement {
      任务状态全部由 agentTaskState 的纯函数折叠，本组件只持有它的当前值——
      折叠规则放在组件里就只能靠真实 Electron 才能测，而那一层抓不到规则本身的错。 */
   const [agentTask, setAgentTask] = useState<AgentTaskState>(INITIAL_AGENT_TASK_STATE);
+  // agent.run 是异步受理：主进程可能在 run 返回 sessionId 前已经推送了
+  // session-accepted / 首轮口播。refs 用来承接这段竞态，主进程回放再按 seq 去重。
+  const agentEventExpectedSessionRef = useRef<string | null>(null);
+  const agentEventReadySessionRef = useRef<string | null>(null);
+  const agentEventReplaySessionRef = useRef<string | null>(null);
+  const agentEventSeenSeqsRef = useRef(new Map<string, Set<number>>());
+  const pendingAgentEventsRef = useRef(new Map<string, AiAgentEventEnvelope[]>());
   const [agentServices, setAgentServices] = useState<ModelServiceChoice[]>([]);
   const [agentServiceId, setAgentServiceId] = useState<string | null>(null);
   const [agentSessions, setAgentSessions] = useState<AgentSessionRow[]>([]);
@@ -510,6 +564,14 @@ export function App(): ReactElement {
       setParamSourceHash(null);
       setParamLive(false);
       setParamRowPayloads(new Map());
+      setParamRowCount(0);
+      setParamSessionToken(null);
+      paramSessionTokenRef.current = null;
+      setParamMaterialization(null);
+      paramMaterializationRef.current = null;
+      setParamNativeTelemetry(null);
+      setParamIndexLoading(false);
+      setParamIndexDiagnostic(null);
       // 字段定义必须一起清：两张 param 表的行宽通常不同，残留的字段列会让用户
       // 对着上一张表的字段名看新表的字节。
       setParamFieldDefs(null);
@@ -709,7 +771,7 @@ export function App(): ReactElement {
   const showTextWorkbench = activeEditor === 'text'
     || (activeDomain === 'text' && activeEditor === 'empty' && workspace !== null);
   // 11-B：打开文本域（未选具体文件）也进 live 目录链 —— readTextCatalog 扫全部
-  // zhocn msgbnd，不依赖选中文件；否则「文本→item」的第一步就做不出来。
+  // 已索引 MSG 容器，不依赖选中文件；否则「文本→item」的第一步就做不出来。
   const fmgPanelLive = fmgLive
     || (activeDomain === 'text' && activeEditor === 'empty'
       && typeof bridge?.readTextCatalog === 'function'
@@ -890,12 +952,83 @@ export function App(): ReactElement {
    * 折叠里的会话隔离（reduceAgentTaskEvent 对 sessionId 不符者原样返回）保证
    * 上一次运行的迟到事件不会把新任务标成已结束。
    */
+  function queueAgentEvent(envelope: AiAgentEventEnvelope): void {
+    const queued = pendingAgentEventsRef.current.get(envelope.sessionId) ?? [];
+    if (!queued.some((item) => item.seq === envelope.seq)) queued.push(envelope);
+    if (queued.length > 4096) queued.splice(0, queued.length - 4096);
+    pendingAgentEventsRef.current.set(envelope.sessionId, queued);
+  }
+
+  function applyAgentEventEnvelopes(envelopes: readonly AiAgentEventEnvelope[]): void {
+    const sessionId = agentEventExpectedSessionRef.current;
+    if (!sessionId || agentEventReadySessionRef.current !== sessionId) {
+      for (const envelope of envelopes) queueAgentEvent(envelope);
+      return;
+    }
+    const orderedResult = orderUnseenAgentEvents(
+      envelopes,
+      sessionId,
+      agentEventSeenSeqsRef.current.get(sessionId) ?? new Set<number>()
+    );
+    agentEventSeenSeqsRef.current.set(sessionId, orderedResult.seen);
+    const ordered = orderedResult.events;
+    if (ordered.length === 0) return;
+    // 先推进已应用集合，再排入 React 状态队列；IPC 回放和实时推送交错时，
+    // 重复/倒序 envelope 都不会让口播或工具条目翻倍，也不会丢掉较早事件。
+    setAgentTask((current) => {
+      if (current.sessionId !== sessionId) return current;
+      return ordered.reduce(
+        (state, envelope) => reduceAgentTaskEvent(state, envelope),
+        current
+      );
+    });
+  }
+
   useEffect(() => {
     if (!bridge) return undefined;
     return bridge.onAiAgentEvent((envelope) => {
-      setAgentTask((current) => reduceAgentTaskEvent(current, envelope));
+      if (!Number.isSafeInteger(envelope.seq) || envelope.seq < 1) return;
+      if (
+        envelope.sessionId !== agentEventExpectedSessionRef.current
+        || envelope.sessionId !== agentEventReadySessionRef.current
+      ) {
+        queueAgentEvent(envelope);
+        return;
+      }
+      applyAgentEventEnvelopes([envelope]);
     });
   }, [bridge]);
+
+  // state 已提交后先补回放，回放完成后才开放实时折叠；这样即使终态事件
+  // 先抵达，也不会在更早的 turn-started/口播之前把状态提前结算。
+  useEffect(() => {
+    if (!bridge || !agentTask.sessionId) return undefined;
+    const sessionId = agentTask.sessionId;
+    if (agentEventReplaySessionRef.current === sessionId) return undefined;
+    agentEventReplaySessionRef.current = sessionId;
+    void bridge.getAiAgentEvents(sessionId, 0).then((result) => {
+      const queued = pendingAgentEventsRef.current.get(sessionId) ?? [];
+      pendingAgentEventsRef.current.delete(sessionId);
+      if (agentEventExpectedSessionRef.current !== sessionId) return;
+      agentEventReadySessionRef.current = sessionId;
+      if (result.ok) {
+        applyAgentEventEnvelopes([...result.events, ...queued]);
+      } else {
+        // 回放失败不阻断实时通道；已经排队的事件仍然要显示。
+        applyAgentEventEnvelopes(queued);
+      }
+    }).catch(() => {
+      // 旧版 preload、受限 fixture 或热更新期间可能没有回放 handler。
+      // 回放是补偿通道，不应让实时事件永远停在“已受理”；打开实时门后
+      // 仍按 seq 去重，生产主进程有回放时不进入此分支。
+      const queued = pendingAgentEventsRef.current.get(sessionId) ?? [];
+      pendingAgentEventsRef.current.delete(sessionId);
+      if (agentEventExpectedSessionRef.current !== sessionId) return;
+      agentEventReadySessionRef.current = sessionId;
+      applyAgentEventEnvelopes(queued);
+    });
+    return undefined;
+  }, [agentTask.sessionId, bridge]);
 
   /** 模型服务与工具清单：任务面板的两个前置数据源，与工作区无关，挂载期取一次。 */
   useEffect(() => {
@@ -999,58 +1132,36 @@ export function App(): ReactElement {
         setParamTypeName('');
         setParamSourceHash(null);
         setParamLive(false);
+        setParamRowCount(0);
+        setParamSessionToken(null);
+        paramSessionTokenRef.current = null;
         setParamRowPayloads(new Map());
         return;
       }
-      if (!bridge || typeof bridge.readParamPage !== 'function') {
+      if (!bridge || typeof bridge.openParamSession !== 'function') {
         setParamRows(EMPTY_PARAM_ROWS);
         setParamTypeName('');
         setParamSourceHash(null);
         setParamLive(false);
+        setParamRowCount(0);
+        setParamSessionToken(null);
+        paramSessionTokenRef.current = null;
         setParamRowPayloads(new Map());
         return;
       }
       setStatus(`正在读取 PARAM：${target.relativePath}`);
+      setParamIndexLoading(true);
+      setParamIndexDiagnostic(null);
       try {
-        // 用户裁定（2026-08-14）：打开参数即全量加载（含全部行字节 + 字段定义）。
-        // 走 readParamPage 的 loadAll 分支：main 经 includeAllPayloads 一次拿全表，
-        // 与 readParamDocument 同一套字段定义三层检查（包校验 + 行宽 + 信任策略）。
-        const result = await bridge.readParamPage(target.sourceUri, 0, PARAM_PAGE_SIZE, '', true) as {
-          ok?: boolean;
-          sourceHash?: string;
-          typeName?: string;
-          rowDataSize?: number;
-          rowCount?: number;
-          rows?: Array<{
-            id: number;
-            dataBase64?: string;
-            dataHexPreview?: string;
-            name?: string;
-          }>;
-          authority?: string;
-          // 必须在断言里声明：不声明就读，取到的永远是 undefined 且 typecheck 不报
-          // ——那正是「字段列空着但没有任何错误」的形态。
-          fieldDefs?: ParamFieldDef[] | null;
-          /** 枚举表。主进程一直在返回，此前渲染器没取（枚举因此只显示裸数字）。 */
-          fieldEnums?: Array<{
-            id?: unknown;
-            name?: unknown;
-            values?: Array<{ value?: unknown; label?: unknown }>;
-          }> | null;
-          fieldDefsDiagnostic?: { code?: string; message?: string } | null;
-          /**
-           * 字段定义的授信来源，由主进程在包校验 + 行宽核对 + 用户信任策略
-           * 都通过后给出。'imported' 才放行字段写入 —— 渲染器不自行拼这个值，
-           * 那等于用一个字段名换掉一道授权检查。
-           */
-          fieldDefsOrigin?: string | null;
-        };
+        const result = await bridge.openParamSession({ sourceUri: target.sourceUri });
         if (cancelled) return;
-        // readParamPage 响应是平铺结构（无 data 嵌套）。
-        if (!result?.ok || !result.rows?.length) {
+        if (!result.ok) {
           setParamRows(EMPTY_PARAM_ROWS);
           setParamLive(false);
           setParamSourceHash(null);
+          setParamRowCount(0);
+          setParamSessionToken(null);
+          paramSessionTokenRef.current = null;
           setParamRowPayloads(new Map());
           setParamFieldDefs(null);
           setParamFieldEnums(null);
@@ -1058,74 +1169,78 @@ export function App(): ReactElement {
           // 读取失败同样要清授信来源：否则上一个 param 的 'imported' 残留，
           // 会让这个读不出来的资源看起来仍可写入字段。
           setParamFieldDefsOrigin('fixture');
-          setStatus('这个 PARAM 读不出来。');
+          setStatus(result.diagnostics?.[0]?.message ?? '这个 PARAM 读不出来。');
           return;
         }
-        // 字段定义与缺失原因逐字段取，不用 as 整体断言 —— IPC 边界上字段名对不上
-        // 只会表现为「字段列空着」而 typecheck 照过（本轮接线已踩过四次）。
-        setParamFieldDefs(Array.isArray(result.fieldDefs) ? result.fieldDefs : null);
-        /*
-         * 枚举表逐字段收窄，不用 as 整体断言 —— IPC 边界上字段名对不上只会表现为
-         * 「枚举没生效」而 typecheck 照过（本文件已因此踩过四次：def.typeName、
-         * f.enumId、f.bitSize、枚举值的 label 各错一次）。
-         *
-         * values 为空数组是**正常状态**而非缺失：元数据包里多数 enum 没有值表
-         * （对照统计 228 个 enum id 里 190 个为空）。UI 必须把空 values 当
-         * 「无标签」处理，而不是当「无枚举」——后者会让本该显示枚举名的字段
-         * 变成纯数字，用户无从知道这是个枚举。
-         */
-        setParamFieldEnums(
-          Array.isArray(result.fieldEnums)
-            ? result.fieldEnums
-                .filter((entry) => typeof entry?.id === 'string')
-                .map((entry) => ({
-                  id: entry.id as string,
-                  name: typeof entry.name === 'string' ? entry.name : (entry.id as string),
-                  values: Array.isArray(entry.values)
-                    ? entry.values
-                        .filter((v) => typeof v?.value === 'number' && typeof v?.label === 'string')
-                        .map((v) => ({ value: v.value as number, label: v.label as string }))
-                    : []
-                }))
-            : null
-        );
-        setParamRowDataSize(result.rowDataSize ?? 0);
-        // 只接受主进程给出的两个合法值，其余一律降级为 fixture（只读）。
-        // 白名单而不是直接透传：透传意味着后端将来多返回一个值就可能意外放行写入。
+        const sessionToken = result.sessionToken;
+        paramSessionTokenRef.current = sessionToken;
+        setParamSessionToken(sessionToken);
+        setParamRowCount(result.rowCount);
+        setParamSourceHash(result.sourceHash);
+        setParamTypeName(result.metadata.typeName || target.relativePath);
+        setParamRowDataSize(result.metadata.rowDataSize);
+        setParamFieldDefs(result.metadata.fieldDefs);
+        setParamFieldEnums(result.metadata.fieldEnums);
         setParamFieldDefsOrigin(
-          result.fieldDefsOrigin === 'imported' || result.fieldDefsOrigin === 'user-derived'
-            ? result.fieldDefsOrigin
+          result.metadata.fieldDefsOrigin === 'imported' || result.metadata.fieldDefsOrigin === 'user-derived'
+            ? result.metadata.fieldDefsOrigin
             : 'fixture'
         );
         setParamFieldDefsDiagnostic(
-          result.fieldDefsDiagnostic
-            && typeof result.fieldDefsDiagnostic.code === 'string'
-            && typeof result.fieldDefsDiagnostic.message === 'string'
-            ? { code: result.fieldDefsDiagnostic.code, message: result.fieldDefsDiagnostic.message }
+          result.metadata.fieldDefsDiagnostic
+            ? { code: result.metadata.fieldDefsDiagnostic.code, message: result.metadata.fieldDefsDiagnostic.message }
             : null
         );
-        const payloads = new Map<number, string>();
-        setParamRows(result.rows.map((r) => {
-          if (r.dataBase64) payloads.set(r.id, r.dataBase64);
-          return {
-            id: r.id,
-            dataHexPreview: r.dataHexPreview ?? '',
-            ...(r.name ? { name: r.name } : {})
-          };
-        }));
-        setParamRowPayloads(payloads);
-        setParamTypeName(result.typeName ?? target.relativePath);
-        setParamSourceHash(result.sourceHash ?? null);
-        if (result.rowDataSize !== undefined) setParamRowDataSize(result.rowDataSize);
+        setParamNativeTelemetry(result.nativeTelemetry);
+        const tracker = createParamSessionMaterializationTracker(result.rowCount);
+        paramMaterializationRef.current = tracker;
+        tracker.observeIndex(result.firstPage.rows);
+        setParamRows(result.firstPage.rows.map(paramRowViewFromIndex));
+        setParamMaterialization(tracker.snapshot());
+        setParamRowPayloads(new Map());
         setParamLive(true);
+        setParamIndexLoading(true);
         setStatus(
-          `已加载 PARAM：${result.rowCount ?? result.rows.length} 行（全量）`
-          + (result.authority ? ` · ${result.authority}` : '')
+          `已打开 PARAM：${result.rowCount} 行索引（首批 ${result.firstPage.rows.length} 行）`
         );
+        let loadedThrough = result.firstPage.rows.reduce(
+          (max, row) => Math.max(max, row.rowIndex + 1),
+          0
+        );
+        let page = result.firstPage.page + 1;
+        while (!cancelled && loadedThrough < result.rowCount) {
+          const pageResult = await bridge.readParamIndexPage({
+            sourceUri: target.sourceUri,
+            sessionToken,
+            page,
+            pageSize: PARAM_PAGE_SIZE
+          });
+          if (cancelled) return;
+          if (!pageResult.ok) {
+            setParamIndexDiagnostic(pageResult.diagnostics?.[0]?.message ?? 'PARAM 索引续读失败。');
+            break;
+          }
+          tracker.observeIndex(pageResult.rows);
+          setParamRows((current) => mergeParamRowViews(current, pageResult.rows));
+          setParamMaterialization(tracker.snapshot());
+          setParamNativeTelemetry(pageResult.nativeTelemetry);
+          const nextLoadedThrough = pageResult.rows.reduce(
+            (max, row) => Math.max(max, row.rowIndex + 1),
+            loadedThrough
+          );
+          if (pageResult.rows.length === 0 || nextLoadedThrough <= loadedThrough) break;
+          loadedThrough = nextLoadedThrough;
+          page += 1;
+          if (pageResult.rows.length < PARAM_PAGE_SIZE) break;
+        }
       } catch (error) {
         if (cancelled) return;
         setParamLive(false);
+        setParamSessionToken(null);
+        paramSessionTokenRef.current = null;
         setStatus(error instanceof Error ? error.message : 'PARAM 读取异常');
+      } finally {
+        if (!cancelled) setParamIndexLoading(false);
       }
     }
     void loadParam();
@@ -1133,6 +1248,43 @@ export function App(): ReactElement {
       cancelled = true;
     };
   }, [bridge, selectedFile]);
+
+  async function readParamRowsForPanel(
+    identities: readonly ParamPhysicalRowIdentity[]
+  ): Promise<ReadonlyArray<{ identity: ParamPhysicalRowIdentity; dataBase64: string }>> {
+    if (!bridge || !selectedFile || !paramSessionToken || identities.length === 0) {
+      throw new Error('PARAM 会话未就绪，无法读取选中行。');
+    }
+    if (typeof bridge.readParamRows !== 'function') {
+      throw new Error('当前预加载未暴露 readParamRows。');
+    }
+    const result = await bridge.readParamRows({
+      sourceUri: selectedFile.sourceUri,
+      sessionToken: paramSessionToken,
+      rows: [...identities]
+    });
+    if (!result.ok) {
+      throw new Error(result.diagnostics?.[0]?.message ?? '读取选中 PARAM 行失败。');
+    }
+    const tracker = paramMaterializationRef.current;
+    tracker?.observePayload(identities, result.rows);
+    if (tracker) setParamMaterialization(tracker.snapshot());
+    setParamNativeTelemetry(result.nativeTelemetry);
+    const payloadByKey = new Map(result.rows.map((row) => [paramPhysicalRowKey(row.identity), row.dataBase64]));
+    setParamRowPayloads((current) => {
+      const next = new Map(current);
+      for (const row of result.rows) next.set(paramPhysicalRowKey(row.identity), row.dataBase64);
+      return next;
+    });
+    setParamRows((current) => current.map((row) => {
+      const identity = { rowIndex: row.rowIndex, id: row.id, dataHash: row.dataHash };
+      const dataBase64 = payloadByKey.get(paramPhysicalRowKey(identity));
+      return dataBase64
+        ? { ...row, dataBase64, dataHexPreview: paramDataHexPreview(dataBase64) }
+        : row;
+    }));
+    return result.rows;
+  }
 
   useEffect(() => {
     let cancelled = false;
@@ -1531,44 +1683,96 @@ export function App(): ReactElement {
 
   async function refreshOperationHistory(): Promise<void> {
     if (!bridge) return;
-    const history = await bridge.listOperations();
-    setOperationHistory(history);
+    const requestId = ++operationHistoryRequestRef.current;
+    const load = async (): Promise<void> => {
+      try {
+        const history = await bridge.listOperations();
+        // 历史读取可以跨越回滚完成/资源重载；迟到快照不能覆盖更新的结果。
+        if (requestId === operationHistoryRequestRef.current) setOperationHistory(history);
+      } catch (error) {
+        if (requestId !== operationHistoryRequestRef.current) return;
+        const message = error instanceof Error ? error.message : String(error);
+        setStatus(`历史刷新失败：${message}`);
+        pushToast(`历史刷新失败：${message}`, 'warn');
+      }
+    };
+    // 串行化 listOperations，保证回滚后的刷新不会和回滚前的旧快照并发返回。
+    const next = operationHistoryRefreshRef.current.then(load, load);
+    operationHistoryRefreshRef.current = next.catch(() => undefined);
+    await next;
   }
 
   async function reloadParamRowsFromSource(): Promise<void> {
-    if (!bridge || !selectedFile) return;
-    // 与 loadParam 同一全量口径（用户裁定）：写回后重读也用 loadAll。
-    const reload = await bridge.readParamPage(selectedFile.sourceUri, 0, PARAM_PAGE_SIZE, '', true) as {
-      ok?: boolean;
-      sourceHash?: string;
-      typeName?: string;
-      rows?: Array<{
-        id: number;
-        dataBase64?: string;
-        dataHexPreview?: string;
-        name?: string;
-      }>;
-      rowDataSize?: number;
-    };
-    if (reload?.ok && reload.rows) {
-      const payloads = new Map<number, string>();
-      setParamRows(reload.rows.map((r) => {
-        if (r.dataBase64) payloads.set(r.id, r.dataBase64);
-        return {
-          id: r.id,
-          dataHexPreview: r.dataHexPreview ?? '',
-          ...(r.name ? { name: r.name } : {})
-        };
-      }));
-      setParamRowPayloads(payloads);
-      setParamSourceHash(reload.sourceHash ?? null);
-      if (reload.typeName) setParamTypeName(reload.typeName);
-      if (reload.rowDataSize !== undefined) setParamRowDataSize(reload.rowDataSize);
+    if (!bridge || !selectedFile || typeof bridge.openParamSession !== 'function') return;
+    const reload = await bridge.openParamSession({ sourceUri: selectedFile.sourceUri });
+    if (!reload.ok) {
+      setParamLive(false);
+      setParamIndexDiagnostic(reload.diagnostics?.[0]?.message ?? 'PARAM 写回后重开会话失败。');
+      return;
+    }
+    const sessionToken = reload.sessionToken;
+    paramSessionTokenRef.current = sessionToken;
+    setParamSessionToken(sessionToken);
+    setParamSourceHash(reload.sourceHash);
+    setParamTypeName(reload.metadata.typeName || selectedFile.relativePath);
+    setParamRowDataSize(reload.metadata.rowDataSize);
+    setParamRowCount(reload.rowCount);
+    setParamFieldDefs(reload.metadata.fieldDefs);
+    setParamFieldEnums(reload.metadata.fieldEnums);
+    setParamFieldDefsOrigin(
+      reload.metadata.fieldDefsOrigin === 'imported' || reload.metadata.fieldDefsOrigin === 'user-derived'
+        ? reload.metadata.fieldDefsOrigin
+        : 'fixture'
+    );
+    setParamFieldDefsDiagnostic(reload.metadata.fieldDefsDiagnostic);
+    setParamNativeTelemetry(reload.nativeTelemetry);
+    const tracker = createParamSessionMaterializationTracker(reload.rowCount);
+    paramMaterializationRef.current = tracker;
+    tracker.observeIndex(reload.firstPage.rows);
+    setParamRows(reload.firstPage.rows.map(paramRowViewFromIndex));
+    setParamRowPayloads(new Map());
+    setParamMaterialization(tracker.snapshot());
+    setParamLive(true);
+    setParamIndexLoading(true);
+    setParamIndexDiagnostic(null);
+    try {
+      let loadedThrough = reload.firstPage.rows.reduce(
+        (max, row) => Math.max(max, row.rowIndex + 1),
+        0
+      );
+      let page = reload.firstPage.page + 1;
+      while (loadedThrough < reload.rowCount) {
+        const pageResult = await bridge.readParamIndexPage({
+          sourceUri: selectedFile.sourceUri,
+          sessionToken,
+          page,
+          pageSize: PARAM_PAGE_SIZE
+        });
+        if (!pageResult.ok) {
+          setParamIndexDiagnostic(pageResult.diagnostics?.[0]?.message ?? 'PARAM 写回后索引续读失败。');
+          break;
+        }
+        tracker.observeIndex(pageResult.rows);
+        setParamRows((current) => mergeParamRowViews(current, pageResult.rows));
+        setParamMaterialization(tracker.snapshot());
+        setParamNativeTelemetry(pageResult.nativeTelemetry);
+        const nextLoadedThrough = pageResult.rows.reduce(
+          (max, row) => Math.max(max, row.rowIndex + 1),
+          loadedThrough
+        );
+        if (pageResult.rows.length === 0 || nextLoadedThrough <= loadedThrough) break;
+        loadedThrough = nextLoadedThrough;
+        page += 1;
+        if (pageResult.rows.length < PARAM_PAGE_SIZE) break;
+      }
+    } finally {
+      setParamIndexLoading(false);
     }
   }
 
   async function applyParamFieldMutationFromPanel(input: {
     rowId: number;
+    identity?: ParamPhysicalRowIdentity;
     fieldId: string;
     value: number | string | boolean;
     rowDataBase64: string;
@@ -1599,6 +1803,9 @@ export function App(): ReactElement {
       paramSourceHash ?? '',
       {
         rowId: input.rowId,
+        ...(input.identity
+          ? { rowIndex: input.identity.rowIndex, expectedDataHash: input.identity.dataHash }
+          : {}),
         fieldId: input.fieldId,
         value: input.value,
         rowDataBase64: input.rowDataBase64,
@@ -1894,6 +2101,11 @@ export function App(): ReactElement {
     setAgentIdleNotice(null);
     setAiPrompt('');
     setAiBusy(false);
+    agentEventExpectedSessionRef.current = null;
+    agentEventReadySessionRef.current = null;
+    agentEventReplaySessionRef.current = null;
+    agentEventSeenSeqsRef.current.clear();
+    pendingAgentEventsRef.current.clear();
     setAgentTask(INITIAL_AGENT_TASK_STATE);
     setToolOutput(null);
     setApprovalError(null);
@@ -2499,33 +2711,48 @@ export function App(): ReactElement {
     );
   }
 
+  /**
+   * 回滚后重新走一次完整的资源打开链，而不是只刷新文本预览。
+   * MSB/TAE/FLVER 等领域面板的 useEffect 依赖选中文件对象；克隆对象
+   * 让当前资源在内容恢复后必然触发重读，同时保留同一 sourceUri/tab。
+   */
+  async function reloadSelectedResourceAfterRollback(): Promise<void> {
+    if (!selectedFile) return;
+    await selectFile({ ...selectedFile });
+  }
+
   async function rollbackOp(opId: string): Promise<void> {
     const lockKey = `operation:${opId}`;
-    if (rollbackInFlightRef.current !== null) return;
+    if (rollbackInFlightRef.current !== null) {
+      pushToast('已有回滚正在处理中，请等待当前操作完成。', 'warn');
+      return;
+    }
     rollbackInFlightRef.current = lockKey;
     setRollbackInFlight(lockKey);
+    let restored = false;
     try {
-    if (!bridge) {
-      announceDesktopOnly('回滚操作');
-      return;
-    }
-    setStatus(`正在回滚操作 ${opId.slice(0, 8)}...`);
-    const result = await bridge.rollbackOperation(opId);
-    await refreshOperationHistory();
-    if (!result.ok) {
-      setStatus(`回滚失败：${result.diagnostics.map((d: Diagnostic) => d.message).join('; ') || opId}`);
-      return;
-    }
-    if (selectedFile) {
-      const refreshed = await bridge.openResourcePreview(selectedFile.sourceUri);
-      setPreview(refreshed);
-      const text = refreshed?.text ?? '';
-      setEditText(text);
-      setLastSavedText(text);
-      setMsgRows(extractMsgRows(refreshed));
-    }
-    setStatus(`已回滚 ${result.restoredFiles.length} 个文件`);
-    pushToast(`已回滚 ${result.restoredFiles.length} 个文件`);
+      if (!bridge) {
+        announceDesktopOnly('回滚操作');
+        return;
+      }
+      setStatus(`正在回滚操作 ${opId.slice(0, 8)}...`);
+      const result = await bridge.rollbackOperation(opId);
+      if (!result.ok) {
+        setStatus(`回滚失败：${result.diagnostics.map((d: Diagnostic) => d.message).join('; ') || opId}`);
+        pushToast(`回滚失败：${result.diagnostics.map((d: Diagnostic) => d.message).join('; ') || opId}`, 'warn');
+        await refreshOperationHistory();
+        return;
+      }
+      restored = true;
+      await refreshOperationHistory();
+      await reloadSelectedResourceAfterRollback();
+      setStatus(`已回滚 ${result.restoredFiles.length} 个文件`);
+      pushToast(`已回滚 ${result.restoredFiles.length} 个文件`);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      const prefix = restored ? '回滚已完成，但资源界面重载失败' : '回滚异常';
+      setStatus(`${prefix}：${message}`);
+      pushToast(`${prefix}：${message}`, 'warn');
     } finally {
       rollbackInFlightRef.current = null;
       setRollbackInFlight(null);
@@ -2535,25 +2762,38 @@ export function App(): ReactElement {
   /** 文件级回滚：把某次操作里的单个文件恢复到操作前状态。 */
   async function rollbackFileOp(opId: string, targetUri: string): Promise<void> {
     const lockKey = `file:${opId}:${targetUri}`;
-    if (rollbackInFlightRef.current !== null) return;
+    if (rollbackInFlightRef.current !== null) {
+      pushToast('已有回滚正在处理中，请等待当前操作完成。', 'warn');
+      return;
+    }
     rollbackInFlightRef.current = lockKey;
     setRollbackInFlight(lockKey);
+    let restored = false;
     try {
-    if (!bridge) {
-      announceDesktopOnly('文件回滚');
-      return;
-    }
-    if (typeof bridge.rollbackFile !== 'function') {
-      pushToast('当前预加载未暴露文件级回滚。', 'warn');
-      return;
-    }
-    const result = await bridge.rollbackFile(opId, targetUri);
-    await refreshOperationHistory();
-    if (!result.ok) {
-      pushToast(`文件回滚失败：${result.diagnostics.map((d: Diagnostic) => d.message).join('; ') || targetUri}`, 'warn');
-      return;
-    }
-    pushToast(`已回滚文件（${result.restoredFiles.length} 个）`);
+      if (!bridge) {
+        announceDesktopOnly('文件回滚');
+        return;
+      }
+      if (typeof bridge.rollbackFile !== 'function') {
+        pushToast('当前预加载未暴露文件级回滚。', 'warn');
+        return;
+      }
+      const result = await bridge.rollbackFile(opId, targetUri);
+      if (!result.ok) {
+        const message = result.diagnostics.map((d: Diagnostic) => d.message).join('; ') || targetUri;
+        pushToast(`文件回滚失败：${message}`, 'warn');
+        await refreshOperationHistory();
+        return;
+      }
+      restored = true;
+      await refreshOperationHistory();
+      await reloadSelectedResourceAfterRollback();
+      pushToast(`已回滚文件（${result.restoredFiles.length} 个）`);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      const prefix = restored ? '文件已回滚，但资源界面重载失败' : '文件回滚异常';
+      setStatus(`${prefix}：${message}`);
+      pushToast(`${prefix}：${message}`, 'warn');
     } finally {
       rollbackInFlightRef.current = null;
       setRollbackInFlight(null);
@@ -2675,6 +2915,10 @@ export function App(): ReactElement {
     const previousTask = agentTask;
     const previousGoal = agentGoal;
     setAgentGoal(prompt);
+    agentEventExpectedSessionRef.current = result.sessionId;
+    agentEventReadySessionRef.current = null;
+    agentEventReplaySessionRef.current = null;
+    agentEventSeenSeqsRef.current.delete(result.sessionId);
     setAgentTask(startAgentTask(result.sessionId, Date.now(), previousTask, previousGoal));
     setStatus('AI 任务已发起，进度会在 Agent 面板更新');
   }
@@ -2801,17 +3045,16 @@ export function App(): ReactElement {
     { id: 'toggle-agent', icon: '✦', label: '切换 AI Agent 面板', hint: 'Ctrl J', run: (): void => { setAgentOpen((open) => !open); } },
     { id: 'toggle-sidebar', icon: '◨', label: '切换侧栏', hint: 'Ctrl B', run: (): void => { setSidebarCollapsed((collapsed) => !collapsed); } }
   ];
-  const cmdkNormalized = cmdkQuery.trim().toLowerCase();
+  const cmdkNormalized = normalizeCommandSearchText(cmdkQuery);
   const filteredCmdkCommands = cmdkCommands.filter(
-    (command) => !cmdkNormalized || command.label.toLowerCase().includes(cmdkNormalized)
+    (command) => matchesCommandSearch(command.label, cmdkNormalized)
   );
   /**
    * 命令面板的资源命中：全量渲染（显示不设限）。此前按 8 条上限截断并补说明，
    * 命令面板列由 .cmdk__list 自身滚动，匹配项一次给全。
    */
-  const cmdkAllResourceMatches = cmdkNormalized
-    ? (allFiles.length > 0 ? allFiles : files)
-        .filter((file) => file.relativePath.toLowerCase().includes(cmdkNormalized))
+  const cmdkAllResourceMatches = workspace && cmdkNormalized
+    ? filterCommandPaletteResources(indexedFiles, cmdkNormalized)
     : [];
   const cmdkItemCount = filteredCmdkCommands.length + cmdkAllResourceMatches.length;
   const selectedCmdkIndex = Math.min(cmdkIndex, Math.max(0, cmdkItemCount - 1));
@@ -2841,6 +3084,33 @@ export function App(): ReactElement {
     .find((service) => service.id === agentServiceId)?.protocol ?? 'openai-compatible';
   const sidebarStyle = { '--sidebar-w': `${sidebarWidth}px` } as CSSProperties;
   const agentStyle = { '--agent-w': `${agentWidth}px` } as CSSProperties;
+  // 原版目录展示只从这一份派生状态生成，避免把「已选择路径」误显示成
+  // 「已挂载到当前 workspace」。baseMounted 是主进程 session 的权威值。
+  const baseMountPresentation = sessionMeta
+    ? sessionMeta.baseMounted
+      ? {
+          label: sessionMeta.baseLabel ?? '原版游戏目录已挂载到当前工作区',
+          status: '已挂载到当前工作区',
+          className: 'pill pill--ok'
+        }
+      : {
+          label: sessionMeta.baseLabel
+            ? `${sessionMeta.baseLabel}（未挂载到当前工作区）`
+            : '当前工作区未挂载原版游戏目录',
+          status: '未挂载到当前工作区',
+          className: 'pill'
+        }
+    : baseRootChoice
+      ? {
+          label: `${baseRootChoice.label}（已选择，待工作区挂载）`,
+          status: '已选择，待挂载',
+          className: 'pill pill--accent'
+        }
+      : {
+          label: '尚未选择原版游戏目录',
+          status: '未选择',
+          className: 'pill'
+        };
 
   return (
     <>
@@ -3176,7 +3446,7 @@ export function App(): ReactElement {
                         <button
                           type="button"
                           className="btn btn--ghost btn--sm"
-                          disabled={rollbackInFlight !== null}
+                          disabled={rollbackInFlight === `operation:${entry.opId}`}
                           onClick={() => void rollbackOp(entry.opId)}
                         >
                           {rollbackInFlight === `operation:${entry.opId}` ? '回滚中…' : '回滚'}
@@ -3192,7 +3462,7 @@ export function App(): ReactElement {
                                 <button
                                   type="button"
                                   className="btn btn--ghost btn--sm"
-                                  disabled={rollbackInFlight !== null}
+                                  disabled={rollbackInFlight === `file:${entry.opId}:${path}`}
                                   onClick={() => void rollbackFileOp(entry.opId, path)}
                                 >
                                   {rollbackInFlight === `file:${entry.opId}:${path}` ? '回滚中…' : '回滚此文件'}
@@ -3221,14 +3491,10 @@ export function App(): ReactElement {
                 <div>
                   <div className="setting-name">原版游戏目录</div>
                   <div className="setting-desc">
-                    {sessionMeta?.baseLabel
-                      ?? baseRootChoice?.label
-                      ?? (sessionMeta ? '未挂载' : '打开工作区前可先选择')}
+                    {baseMountPresentation.label}
                   </div>
                 </div>
-                <span className={sessionMeta?.baseMounted ? 'pill pill--ok' : 'pill'}>
-                  {sessionMeta ? (sessionMeta.baseMounted ? '已挂载' : '未挂载') : '待选择'}
-                </span>
+                <span className={baseMountPresentation.className}>{baseMountPresentation.status}</span>
               </div>
               <div className="row gap setting-actions">
                 <button
@@ -3709,6 +3975,10 @@ export function App(): ReactElement {
                 resourceUri={selectedFile?.sourceUri ?? ''}
                 rows={paramRows}
                 live={paramLive}
+                rowCount={paramRowCount}
+                indexLoading={paramIndexLoading}
+                indexDiagnostic={paramIndexDiagnostic}
+                onReadRows={readParamRowsForPanel}
                 revealRowId={paramRevealRowId}
                 onRevealHandled={() => setParamRevealRowId(null)}
                 onMutation={(mutation) => {
@@ -3725,10 +3995,19 @@ export function App(): ReactElement {
                   const target = selectedFile;
                   const run = async (): Promise<void> => {
                     if (mutation.kind === 'param_row_delete') {
+                      if (!mutation.identity) {
+                        setStatus('缺少物理行身份，拒绝按 id 猜测删除目标。');
+                        return;
+                      }
                       const result = await bridge.applyParamMutation(
                         target.sourceUri,
                         paramSourceHash ?? '',
-                        { kind: 'delete', id: mutation.id }
+                        {
+                          kind: 'delete',
+                          id: mutation.id,
+                          rowIndex: mutation.identity.rowIndex,
+                          expectedDataHash: mutation.identity.dataHash
+                        }
                       );
                       if (!result.ok) {
                         const message = result.diagnostics?.[0]?.message ?? 'PARAM 行删除失败。';
@@ -3747,9 +4026,8 @@ export function App(): ReactElement {
                     // for rows outside the current page.
                     const payload =
                       mutation.dataBase64
-                      ?? paramRowPayloads.get(mutation.id)
-                      ?? (mutation.sourceId !== undefined
-                        ? paramRowPayloads.get(mutation.sourceId)
+                      ?? (mutation.sourceIdentity
+                        ? paramRowPayloads.get(paramPhysicalRowKey(mutation.sourceIdentity))
                         : undefined);
                     if (!payload) {
                       setStatus('缺少 row dataBase64，无法写入（截断行）。');
@@ -3803,13 +4081,14 @@ export function App(): ReactElement {
                 live={paramLive}
                 definition={paramFieldDefinition}
                 rows={paramRows}
-                getRowDataBase64={(rowId) => paramRowPayloads.get(rowId)}
+                getRowDataBase64={(identity) => paramRowPayloads.get(paramPhysicalRowKey(identity))}
                 {...(paramLive && selectedFile
                   ? {
                     // S29：裸 .param 字段直写（applyParamFieldMutation → Patch Engine），
                     // 不进审查队列；状态/重读由 applyParamFieldMutationFromPanel 负责。
                     onApplyFieldMutation: (input: {
                       rowId: number;
+                      identity: ParamPhysicalRowIdentity;
                       fieldId: string;
                       value: number | string | boolean;
                       rowDataBase64: string;
@@ -3858,7 +4137,9 @@ export function App(): ReactElement {
                 fileCount: entry.fileCount,
                 canRollback: entry.status === 'committed'
               }))}
-              rollbackBusy={rollbackInFlight !== null}
+              rollbackBusyOpId={rollbackInFlight?.startsWith('operation:')
+                ? rollbackInFlight.slice('operation:'.length)
+                : null}
               diagnostics={(preview?.diagnostics ?? []).map((d) => ({
                 severity: d.severity,
                 code: d.code,
@@ -4233,7 +4514,11 @@ export function App(): ReactElement {
             />
           </div>
           <div className="cmdk__list">
-            {cmdkItemCount === 0 && <p className="empty-hint">无匹配命令或资源。</p>}
+            {cmdkItemCount === 0 && (
+              <p className="empty-hint">
+                {workspace ? '无匹配命令或资源。' : '请先打开 Mod 工作区；打开后可搜索资源。'}
+              </p>
+            )}
             {filteredCmdkCommands.map((command, index) => (
               <button
                 key={command.id}

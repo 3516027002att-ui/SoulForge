@@ -8,7 +8,7 @@
  * - 所有 DTO 的 runtime decoder。decoder 拒绝绝对路径与 unknown extra
  *   fields；renderer 不得用 `as` 强转绕过 decoder。
  *
- * 命名说明：§14.4 的 `EditorMutation` 与 editor-protocol.ts 中 V0.5 legacy
+ * 命名说明：§14.4 的 `EditorMutation` 与 editor-protocol.ts 中 legacy
  * `EditorMutation`（patchIR 计划，仍被 core/editorDocumentStore.ts 引用，
  * 且该文件不在 SCHEMA-02 Allowed 内）重名，因此新契约整体放在本文件，
  * 名字与字段保持 §14.4 逐字不变。

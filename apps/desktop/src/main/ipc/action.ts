@@ -3,10 +3,13 @@ import { lstat, readdir } from 'node:fs/promises';
 import { basename, dirname, isAbsolute, join, relative as relativePath, resolve, sep } from 'node:path';
 import {
   ingestBridgeResult,
+  ActionMotionIdentityCache,
+  isLeaderRemappedBundle,
   readTaeEventTemplateFile,
   remapCharacterBundleToLeader,
-  resolveBinderMembership,
   runBridge,
+  type BinderMembershipMatch,
+  type BinderMembershipCandidate,
   type TaeEventTemplateInfo,
   type WorkspaceIndex,
   type WorkspaceSession
@@ -155,6 +158,10 @@ export interface ActionIpcDeps {
     session: WorkspaceSession | null,
     fallback: string
   ): Promise<{ allowedRoots: string[]; diagnostics: Diagnostic[] }>;
+  /** 为当前 TAE 的 character family 建立前台完整 membership 投影。 */
+  ensureActionBinderMembershipForFamily?: (characterFamily: string) => Promise<unknown>;
+  /** 等待 workspace.scan 的后台 ACTION membership 建立完成。 */
+  waitForWorkspaceIndexing?: () => Promise<void>;
 }
 
 interface CompatibilityPartCandidate {
@@ -177,6 +184,10 @@ async function readDirectoryNames(directory: string | null): Promise<string[]> {
 const SEKIRO_ANIMATION_BINDER_ID_BASE = 1_000_000_000;
 const ACTION_ANIBND_FILE_PATTERN = /\.anibnd(?:\.dcx)?$/i;
 const ACTION_CHARACTER_FAMILY_PATTERN = /^c\d{4}$/i;
+// ACTION membership reads are independent, read-only native operations. Keep a
+// small shared concurrency cap so opening one animation does not wait behind a
+// serial scan of every character's ANIBND container.
+const ACTION_BINDER_READ_CONCURRENCY = 4;
 
 interface ActionFileRevision {
   key: string;
@@ -330,7 +341,7 @@ function actionPathsEqual(left: string, right: string): boolean {
   return resolve(left).toLowerCase() === resolve(right).toLowerCase();
 }
 
-function actionEffectiveBaseRoot(session: WorkspaceSession): string | null {
+export function resolveActionEffectiveBaseRoot(session: WorkspaceSession): string | null {
   const explicit = session.layers.baseRoot?.trim();
   if (explicit && !actionPathsEqual(explicit, session.layers.overlayRoot)) return resolve(explicit);
   const overlayParent = dirname(session.layers.overlayRoot);
@@ -359,6 +370,78 @@ function actionCatalogRevisionKey(
 
 function actionBinderIdentityUri(candidate: ActionBinderCandidate): string {
   return `action-binder://${candidate.origin}/${candidate.relativePath.replace(/\\/g, '/')}`;
+}
+
+function actionBinderCandidateFromMembership(input: {
+  match: BinderMembershipMatch;
+  session: WorkspaceSession;
+  effectiveBase: string | null;
+}): { ok: true; candidate: ActionBinderCandidate } | { ok: false; diagnostic: Diagnostic } {
+  const sourcePath = typeof input.match.sourcePath === 'string'
+    ? input.match.sourcePath.replace(/\\/g, '/')
+    : '';
+  const sourceLayer = input.match.sourceLayer;
+  const origin = sourceLayer === 'overlay' || sourceLayer === 'base' ? sourceLayer : null;
+  const sourceRevision = typeof input.match.sourceRevision === 'string'
+    ? input.match.sourceRevision
+    : '';
+  const separator = sourceRevision.indexOf('|');
+  const physicalRevisionKey = separator > 0 ? sourceRevision.slice(0, separator) : '';
+  const catalogRevisionKey = separator > 0 ? sourceRevision.slice(separator + 1) : '';
+  const root = origin === 'overlay'
+    ? input.session.layers.overlayRoot
+    : origin === 'base'
+      ? input.effectiveBase
+      : null;
+  const relativeSegments = sourcePath.split('/');
+  const safeRelative = Boolean(sourcePath)
+    && relativeSegments.every((segment) => segment.length > 0 && segment !== '.' && segment !== '..')
+    && relativeSegments[0]?.toLowerCase() === 'chr';
+  if (!root || !origin || !safeRelative || !physicalRevisionKey || !catalogRevisionKey) {
+    return {
+      ok: false,
+      diagnostic: actionDiagnostic(
+        'ACTION_BINDER_MEMBERSHIP_INDEX_INVALID',
+        'WorkspaceIndex 返回的 Binder source identity 不完整，已拒绝从缓存重建容器路径。',
+        input.match.sourceUri,
+        { sourcePath, sourceLayer, hasRevision: Boolean(sourceRevision) }
+      )
+    };
+  }
+  const absolutePath = resolve(join(root, ...relativeSegments));
+  if ((origin === 'overlay' && !input.session.isOverlayPath(absolutePath))
+    || (origin === 'base' && !input.session.isBasePath(absolutePath) && !actionPathInsideRoot(root, absolutePath))) {
+    return {
+      ok: false,
+      diagnostic: actionDiagnostic(
+        'ACTION_BINDER_MEMBERSHIP_INDEX_INVALID',
+        'WorkspaceIndex 返回的 Binder source path 越过当前会话 root，已拒绝读取。',
+        input.match.sourceUri,
+        { sourcePath, sourceLayer }
+      )
+    };
+  }
+  const candidate: ActionBinderCandidate = {
+    origin,
+    name: basename(sourcePath),
+    relativePath: sourcePath,
+    absolutePath,
+    revisionKey: sourceRevision,
+    physicalRevisionKey,
+    catalogRevisionKey
+  };
+  if (actionBinderIdentityUri(candidate) !== input.match.sourceUri) {
+    return {
+      ok: false,
+      diagnostic: actionDiagnostic(
+        'ACTION_BINDER_MEMBERSHIP_INDEX_INVALID',
+        'WorkspaceIndex Binder source URI 与 source path 不一致，已拒绝继续。',
+        input.match.sourceUri,
+        { sourcePath, sourceLayer }
+      )
+    };
+  }
+  return { ok: true, candidate };
 }
 
 async function readActionBinderDirectory(
@@ -504,6 +587,7 @@ async function readActionBinderDocument(input: {
   allowedRoots: string[];
   effectiveBase: string | null;
   sessionId: string;
+  readConcurrency?: number;
 }): Promise<ActionBinderReadResult> {
   try {
     const result = await runBridge<{ nested?: unknown }>({
@@ -512,6 +596,7 @@ async function readActionBinderDocument(input: {
       resourceUri: input.sourceUri,
       allowedRoots: input.allowedRoots,
       timeoutMs: 120_000,
+      maxConcurrency: input.readConcurrency ?? ACTION_BINDER_READ_CONCURRENCY,
       ...(input.effectiveBase ? { oodleRuntimeRoot: input.effectiveBase } : {}),
       workspaceSessionId: input.sessionId
     });
@@ -569,6 +654,184 @@ async function readActionBinderDocument(input: {
   }
 }
 
+async function discoverActionCharacterFamilies(input: {
+  session: WorkspaceSession;
+  effectiveBase: string | null;
+  indexedFiles: readonly IndexedFile[];
+}): Promise<{ families: string[]; diagnostics: Diagnostic[] }> {
+  const families = new Set<string>();
+  const diagnostics: Diagnostic[] = [];
+  for (const file of input.indexedFiles) {
+    if (ACTION_ANIBND_FILE_PATTERN.test(file.relativePath)) {
+      const family = canonicalCharacterStemForActionPath(file.relativePath).toLowerCase();
+      if (ACTION_CHARACTER_FAMILY_PATTERN.test(family)) families.add(family);
+    }
+  }
+  const layers: Array<{ origin: 'overlay' | 'base'; root: string }> = [
+    { origin: 'overlay', root: input.session.layers.overlayRoot },
+    ...(input.effectiveBase ? [{ origin: 'base' as const, root: input.effectiveBase }] : [])
+  ];
+  for (const layer of layers) {
+    const directory = join(layer.root, 'chr');
+    try {
+      const entries = await readdir(directory, { withFileTypes: true });
+      for (const entry of entries) {
+        if (!entry.isFile() && !entry.isSymbolicLink()) continue;
+        if (!ACTION_ANIBND_FILE_PATTERN.test(entry.name)) continue;
+        const family = canonicalCharacterStemForActionPath(entry.name).toLowerCase();
+        if (ACTION_CHARACTER_FAMILY_PATTERN.test(family)) families.add(family);
+      }
+    } catch (error) {
+      if ((error as { code?: string }).code !== 'ENOENT') {
+        diagnostics.push(actionDiagnostic(
+          'ACTION_BINDER_INDEX_BUILD_FAILED',
+          `读取 ${layer.origin} 的 chr 目录失败，无法建立完整 ACTION Binder membership index。`,
+          `action-index://${layer.origin}/chr`,
+          { origin: layer.origin, errorName: error instanceof Error ? error.name : typeof error }
+        ));
+      }
+    }
+  }
+  return { families: [...families].sort(compareActionNames), diagnostics };
+}
+
+export interface ActionBinderMembershipIndexBuildResult {
+  ok: boolean;
+  characterFamilies: string[];
+  candidates: BinderMembershipCandidate[];
+  diagnostics: Diagnostic[];
+}
+
+/**
+ * Build the complete ACTION Binder membership projection for the requested
+ * scope during workspace indexing. A foreground call may request one
+ * character family, but it still uses the same deterministic directory
+ * enumeration and exact native membership reads; playback never scans sibling
+ * ANIBND files itself.
+ */
+async function mapWithConcurrency<T, R>(
+  items: readonly T[],
+  concurrency: number,
+  worker: (item: T, index: number) => Promise<R>
+): Promise<R[]> {
+  if (items.length === 0) return [];
+  const workerCount = Math.min(Math.max(1, concurrency), items.length);
+  const results = new Array<R>(items.length);
+  let nextIndex = 0;
+
+  const run = async (): Promise<void> => {
+    for (;;) {
+      const index = nextIndex++;
+      if (index >= items.length) return;
+      results[index] = await worker(items[index]!, index);
+    }
+  };
+
+  await Promise.all(Array.from({ length: workerCount }, () => run()));
+  return results;
+}
+
+export async function buildActionBinderMembershipIndex(input: {
+  session: WorkspaceSession;
+  sessionId: string;
+  effectiveBase: string | null;
+  indexedFiles: readonly IndexedFile[];
+  allowedRoots: readonly string[];
+  /** Optional foreground scope; omitted means every discovered character family. */
+  characterFamilies?: readonly string[];
+  /** Separate foreground pool prevents a full background scan from queueing ahead. */
+  readConcurrency?: number;
+}): Promise<ActionBinderMembershipIndexBuildResult> {
+  const discovered = await discoverActionCharacterFamilies(input);
+  const requestedFamilies = input.characterFamilies?.length
+    ? new Set(input.characterFamilies.map((family) => family.toLowerCase()))
+    : null;
+  const families = requestedFamilies
+    ? discovered.families.filter((family) => requestedFamilies.has(family.toLowerCase()))
+    : discovered.families;
+  const diagnostics = [...discovered.diagnostics];
+  const candidates: BinderMembershipCandidate[] = [];
+  const allowedRoots = [...input.allowedRoots];
+  appendActionAllowedRoot(allowedRoots, input.effectiveBase);
+  const readConcurrency = Number.isInteger(input.readConcurrency) && input.readConcurrency! > 0
+    ? input.readConcurrency!
+    : ACTION_BINDER_READ_CONCURRENCY;
+
+  // Directory enumeration is cheap; perform it up front, then schedule the
+  // native membership reads through one global bounded queue. The previous
+  // nested serial loop made the first playable ACTION wait for every large
+  // character binder in the game, even though each read is independent.
+  const plans = await Promise.all(families.map(async (characterFamily) => ({
+    characterFamily,
+    plan: await enumerateActionBinderCandidates({
+      session: input.session,
+      effectiveBase: input.effectiveBase,
+      characterFamily,
+      sourceUri: `action-index://${characterFamily}`,
+      indexedFiles: input.indexedFiles
+    })
+  })));
+  const readJobs = plans.flatMap(({ characterFamily, plan }) => plan.candidates.map((candidate) => ({
+    characterFamily,
+    candidate
+  })));
+  const reads = await mapWithConcurrency(readJobs, readConcurrency, async (job) => ({
+    ...job,
+    read: await readActionBinderDocument({
+      candidate: job.candidate,
+      sourceUri: actionBinderIdentityUri(job.candidate),
+      allowedRoots,
+      effectiveBase: input.effectiveBase,
+      sessionId: input.sessionId,
+      readConcurrency
+    })
+  }));
+
+  for (const { plan } of plans) diagnostics.push(...plan.diagnostics);
+  for (const job of reads) {
+    const { characterFamily, read } = job;
+    if (!read.ok) {
+      diagnostics.push(...read.diagnostics);
+      continue;
+    }
+    candidates.push({
+      characterFamily,
+      source: {
+        sourceUri: actionBinderIdentityUri(read.candidate),
+        sourcePath: read.candidate.relativePath,
+        sourceRevision: read.candidate.revisionKey,
+        sourceLayer: read.candidate.origin
+      },
+      entries: read.entries.map((entry) => ({
+        entryId: entry.id,
+        entryIndex: entry.index,
+        entryName: entry.name
+      }))
+    });
+  }
+
+  /*
+   * Keep the old deterministic family/candidate order in the projection even
+   * though the native reads above completed concurrently.
+   */
+  candidates.sort((left, right) => {
+    const family = compareActionNames(left.characterFamily, right.characterFamily);
+    if (family !== 0) return family;
+    return compareActionNames(left.source.sourcePath ?? '', right.source.sourcePath ?? '');
+  });
+
+  /*
+   * The read queue above is intentionally the only native fan-out. Do not
+   * reintroduce a playback-time sibling scan here.
+   */
+  return {
+    ok: diagnostics.length === 0,
+    characterFamilies: families,
+    candidates,
+    diagnostics
+  };
+}
+
 function findIndexedActionMotionIdentity(
   index: WorkspaceIndex | null,
   sourceUri: string,
@@ -586,7 +849,51 @@ function findIndexedActionMotionIdentity(
     : undefined;
 }
 
-async function assembleC0000CompatibilityPreview(input: {
+/**
+ * 角色 FLVER 的纹理不是 FLVER 内嵌资源：chrbnd 通常配套同名 texbnd，
+ * partsbnd 还会共享 parts/common_body.tpf。只把真实存在且位于 Bridge
+ * allowed roots 的候选传给 Bridge，避免 renderer 猜本机绝对路径。
+ */
+export function characterTexturePackagePaths(
+  modelPath: string,
+  additionalPartsDirectories: readonly string[] = []
+): string[] {
+  const candidates: string[] = [];
+  const add = (candidate: string): void => {
+    if (!existsSync(candidate)) return;
+    if (!candidates.some((path) => path.toLowerCase() === candidate.toLowerCase())) {
+      candidates.push(candidate);
+    }
+  };
+  const lower = modelPath.toLowerCase();
+  if (lower.endsWith('.chrbnd.dcx')) {
+    const stem = modelPath.slice(0, -'.chrbnd.dcx'.length);
+    add(`${stem}.texbnd.dcx`);
+    add(`${stem}.texbnd`);
+  } else if (lower.endsWith('.chrbnd')) {
+    const stem = modelPath.slice(0, -'.chrbnd'.length);
+    add(`${stem}.texbnd`);
+    add(`${stem}.texbnd.dcx`);
+  }
+  const modelDirectory = dirname(modelPath);
+  const partsDirectories = new Set<string>();
+  if (basename(modelDirectory).toLowerCase() === 'parts') partsDirectories.add(modelDirectory);
+  // Character files normally live in `chr/`, while common body textures live
+  // in the game root's `parts/`. The old resolver only handled a model that
+  // was itself inside `parts`, which made map characters render as clothing or
+  // neutral gray when their face/body was in the shared package.
+  partsDirectories.add(join(modelDirectory, '..', 'parts'));
+  for (const directory of additionalPartsDirectories) {
+    if (directory.trim()) partsDirectories.add(directory);
+  }
+  for (const directory of partsDirectories) {
+    add(join(directory, 'common_body.tpf.dcx'));
+    add(join(directory, 'common_body.tpf'));
+  }
+  return candidates;
+}
+
+export async function assembleC0000CompatibilityPreview(input: {
   leaderBundle: CharacterPreviewBundle;
   overlayPartsDirectory: string;
   basePartsDirectory: string | null;
@@ -638,7 +945,11 @@ async function assembleC0000CompatibilityPreview(input: {
           allowedRoots: input.allowedRoots,
           timeoutMs: 120_000,
           ...(input.oodleRuntimeRoot ? { oodleRuntimeRoot: input.oodleRuntimeRoot } : {}),
-          commandOptions: { maxVertices: 1_000_000, maxIndices: 3_000_000 }
+          commandOptions: {
+            maxVertices: 1_000_000,
+            maxIndices: 3_000_000,
+            texturePackagePaths: characterTexturePackagePaths(candidate.absolutePath)
+          }
         });
         if (partResult.parseStatus === 'failed'
           || !isCharacterPreviewBundle(partResult.data)
@@ -668,7 +979,7 @@ async function assembleC0000CompatibilityPreview(input: {
       diagnostics: [{
         severity: 'warning',
         code: 'ACTION_COMPATIBILITY_PREVIEW_UNAVAILABLE',
-        message: 'c0000 本体只含骨骼；在有界的 bd/am/lg 候选中没有找到可通过骨骼映射的身体部件。当前只能显示骨架，这不代表存档装备。',
+         message: 'c0000 本体只含骨骼；在有界的 bd/am/lg/hd/fc 候选中没有找到可通过骨骼映射的身体部件。当前只能显示骨架，这不代表存档装备。',
         details: { attemptedCandidates, rejectedCandidates, missingSlots }
       }]
     };
@@ -697,7 +1008,7 @@ async function assembleC0000CompatibilityPreview(input: {
     diagnostics: [{
       severity: 'warning',
       code: 'ACTION_COMPATIBILITY_PREVIEW_ASSEMBLED',
-      message: `c0000 本体只含骨骼；当前按 overlay 优先、文件名字典序从 bd/am/lg 的有界候选中装配兼容预览（${selectedParts.join('、')}）。这不是存档当前装备。`,
+       message: `c0000 本体只含骨骼；当前按原版 face/hair 组件优先、overlay 覆盖与确定性候选从 bd/am/lg/hd/fc 装配兼容预览（${selectedParts.join('、')}）。这不是存档当前装备。`,
       details: { attemptedCandidates, rejectedCandidates, selectedParts, missingSlots }
     }]
   };
@@ -707,18 +1018,10 @@ export function registerActionIpcHandlers(deps: ActionIpcDeps): void {
   const locateTaeTemplatePathSync = makeLocateTaeTemplatePathSync(deps);
   const loadTaeEventTemplate = makeLoadTaeEventTemplate(locateTaeTemplatePathSync);
 
-  // ACTION 的本地缓存只缓存「已由 Bridge 读取过的 BND4 membership」和
-  // 「已由 Bridge 读取过的 TAE motion identity」。缓存键绑定当前会话、两层
-  // root、文件物理 revision 与 indexed-file revision；任何一个边界变化都不能
-  // 把旧的容器关系带进新的工作区。
-  const binderMembershipCache = new Map<string, {
-    revisionKey: string;
-    promise: Promise<ActionBinderReadResult>;
-  }>();
-  const taeMotionIdentityCache = new Map<string, {
-    revisionKey: string;
-    promise: Promise<ActionMotionIdentityResult>;
-  }>();
+  // ACTION 的播放时缓存只缓存「已由 Bridge 读取过的 TAE motion identity」。
+  // Binder membership 属于 WorkspaceIndex 的建立期投影；播放 handler 不得
+  // 在这里临时枚举 sibling ANIBND 或读取 BND4。
+  const taeMotionIdentityCache = new ActionMotionIdentityCache<Promise<ActionMotionIdentityResult>>();
   let actionCacheScopeKey: string | null = null;
 
   const syncActionCacheScope = (session: WorkspaceSession, effectiveBase: string | null, sessionId: string): void => {
@@ -729,7 +1032,6 @@ export function registerActionIpcHandlers(deps: ActionIpcDeps): void {
     ].join('|');
     if (actionCacheScopeKey === scopeKey) return;
     actionCacheScopeKey = scopeKey;
-    binderMembershipCache.clear();
     taeMotionIdentityCache.clear();
   };
 
@@ -752,9 +1054,8 @@ export function registerActionIpcHandlers(deps: ActionIpcDeps): void {
     allowedRoots: string[];
     effectiveBase: string | null;
   }): Promise<ActionMotionIdentityResult> => {
-    const cacheKey = input.sourceUri;
-    const cached = taeMotionIdentityCache.get(cacheKey);
-    if (cached?.revisionKey === input.sourceRevisionKey) return cached.promise;
+    const cached = taeMotionIdentityCache.get(input.sourceUri, input.sourceRevisionKey, input.animId);
+    if (cached) return cached;
 
     const promise = (async (): Promise<ActionMotionIdentityResult> => {
       try {
@@ -861,9 +1162,9 @@ export function registerActionIpcHandlers(deps: ActionIpcDeps): void {
         };
       }
     })();
-    // Keeping the map by source URI ensures a revision change replaces, rather
-    // than reuses, a result.
-    taeMotionIdentityCache.set(cacheKey, { revisionKey: input.sourceRevisionKey, promise });
+    // Keep source URI, source revision, and selected animId in the identity;
+    // a TAE file is a multi-animation source and cannot cache one motion per URI.
+    taeMotionIdentityCache.set(input.sourceUri, input.sourceRevisionKey, input.animId, promise);
     return promise;
   };
 
@@ -925,13 +1226,13 @@ export function registerActionIpcHandlers(deps: ActionIpcDeps): void {
 
     const roots = await deps.verifiedReadRoots(session, dirname(sourcePath));
     if (roots.diagnostics.length > 0) return { ok: false, diagnostics: roots.diagnostics };
-    const effectiveBase = actionEffectiveBaseRoot(session);
+    const effectiveBase = resolveActionEffectiveBaseRoot(session);
     appendActionAllowedRoot(roots.allowedRoots, effectiveBase);
     if (deps.activeSession !== session || deps.activeWorkspaceSessionId !== sessionId) {
       return { ok: false, diagnostics: [sessionChangedDiagnostic(sourceUri)] };
     }
 
-    const characterFamily = canonicalCharacterStemForActionPath(file.relativePath);
+    const characterFamily = canonicalCharacterStemForActionPath(file.relativePath).toLowerCase();
     if (!ACTION_CHARACTER_FAMILY_PATTERN.test(characterFamily)) {
       return {
         ok: false,
@@ -961,65 +1262,36 @@ export function registerActionIpcHandlers(deps: ActionIpcDeps): void {
       return { ok: false, diagnostics: [sessionChangedDiagnostic(sourceUri)] };
     }
 
-    const plan = await enumerateActionBinderCandidates({
-      session,
-      effectiveBase,
-      characterFamily,
-      sourceUri,
-      indexedFiles: deps.indexedFiles
-    });
-    if (plan.diagnostics.length > 0) return { ok: false, diagnostics: plan.diagnostics };
-    if (plan.candidates.length === 0) {
+    let actionIndex = deps.activeIndex;
+    if (!actionIndex || !actionIndex.isActionBinderMembershipReadyFor(characterFamily)) {
+      // 先建立当前 character family 的完整前台投影；这仍然走统一的
+      // deterministic enumerator + native membership reader，不在播放阶段
+      // 自己扫描 sibling ANIBND。全局索引继续由 workspace.scan 后台完成。
+      if (deps.ensureActionBinderMembershipForFamily) {
+        await deps.ensureActionBinderMembershipForFamily(characterFamily);
+      } else {
+        await deps.waitForWorkspaceIndexing?.();
+      }
+      if (deps.activeSession !== session || deps.activeWorkspaceSessionId !== sessionId) {
+        return { ok: false, diagnostics: [sessionChangedDiagnostic(sourceUri)] };
+      }
+      actionIndex = deps.activeIndex;
+    }
+    if (!actionIndex || !actionIndex.isActionBinderMembershipReadyFor(characterFamily)) {
       return {
         ok: false,
         diagnostics: [actionDiagnostic(
-          'ACTION_BINDER_MEMBERSHIP_NOT_FOUND',
-          `同 character family ${characterFamily} 没有可读取的 ANIBND 候选，已拒绝按文件名猜测。`,
+          'ACTION_BINDER_MEMBERSHIP_INDEX_NOT_READY',
+          '当前 character family 的 ACTION Binder membership 尚未由 workspace index 完整建立，播放阶段拒绝临时扫描 sibling ANIBND。',
           sourceUri,
-          { characterFamily, motionAnimId: motionIdentity.motionAnimId, candidates: [] }
+          { characterFamily, motionAnimId: motionIdentity.motionAnimId }
         )]
       };
     }
 
-    const binderReads = await Promise.all(plan.candidates.map((candidate) => {
-      const cacheKey = `${candidate.origin}:${candidate.relativePath.toLowerCase()}`;
-      const cached = binderMembershipCache.get(cacheKey);
-      if (cached?.revisionKey === candidate.revisionKey) return cached.promise;
-      const promise = readActionBinderDocument({
-        candidate,
-        sourceUri,
-        allowedRoots: [...roots.allowedRoots],
-        effectiveBase,
-        sessionId
-      });
-      binderMembershipCache.set(cacheKey, { revisionKey: candidate.revisionKey, promise });
-      return promise;
-    }));
-    const failedReads = binderReads.filter((item): item is Extract<ActionBinderReadResult, { ok: false }> => !item.ok);
-    if (failedReads.length > 0) {
-      return { ok: false, diagnostics: failedReads.flatMap((item) => item.diagnostics) };
-    }
-    const membership = resolveBinderMembership({
-      query: {
-        characterFamily,
-        binderEntryId: SEKIRO_ANIMATION_BINDER_ID_BASE + motionIdentity.motionAnimId
-      },
-      candidates: binderReads.flatMap((item) => item.ok
-        ? [{
-            characterFamily,
-            source: {
-              sourceUri: actionBinderIdentityUri(item.candidate),
-              sourcePath: item.candidate.relativePath,
-              sourceRevision: item.candidate.revisionKey,
-              sourceLayer: item.candidate.origin
-            },
-            entries: item.entries.map((entry) => ({
-              entryId: entry.id,
-              entryIndex: entry.index,
-              entryName: entry.name
-            }))
-          }]
-        : [])
+    const membership = actionIndex.lookupActionBinderMembership({
+      characterFamily,
+      binderEntryId: SEKIRO_ANIMATION_BINDER_ID_BASE + motionIdentity.motionAnimId
     });
     if (membership.diagnostics.length > 0) {
       return {
@@ -1042,7 +1314,11 @@ export function registerActionIpcHandlers(deps: ActionIpcDeps): void {
           {
             characterFamily,
             motionAnimId: motionIdentity.motionAnimId,
-            candidates: plan.candidates.map((candidate) => ({ origin: candidate.origin, relativePath: candidate.relativePath }))
+            candidates: membership.consideredSources.map((candidate) => ({
+              sourceUri: candidate.source.sourceUri,
+              sourcePath: candidate.source.sourcePath,
+              sourceLayer: candidate.source.sourceLayer
+            }))
           }
         )]
       };
@@ -1071,19 +1347,15 @@ export function registerActionIpcHandlers(deps: ActionIpcDeps): void {
       return { ok: false, diagnostics: [sessionChangedDiagnostic(sourceUri)] };
     }
     const membershipMatch = membership.match;
-    const matchedRead = binderReads.find((item): item is Extract<ActionBinderReadResult, { ok: true }> => item.ok
-      && actionBinderIdentityUri(item.candidate) === membershipMatch.sourceUri);
-    const matchedEntry = matchedRead?.entries.find((entry) => entry.id === membershipMatch.binderEntryId
-      && (membershipMatch.entryIndex === undefined || entry.index === membershipMatch.entryIndex));
-    if (!matchedRead || !matchedEntry) {
+    const resolvedCandidate = actionBinderCandidateFromMembership({
+      match: membershipMatch,
+      session,
+      effectiveBase
+    });
+    if (!resolvedCandidate.ok) {
       return {
         ok: false,
-        diagnostics: [actionDiagnostic(
-          'ACTION_BINDER_MEMBERSHIP_NOT_FOUND',
-          'ANIBND membership 结果缺少唯一 entry，已拒绝继续读取动画。',
-          sourceUri,
-          { characterFamily, motionAnimId: motionIdentity.motionAnimId }
-        )]
+        diagnostics: [resolvedCandidate.diagnostic]
       };
     }
     return {
@@ -1098,19 +1370,21 @@ export function registerActionIpcHandlers(deps: ActionIpcDeps): void {
       effectiveBase,
       allowedRoots: roots.allowedRoots,
       motionAnimId: motionIdentity.motionAnimId,
-      binder: matchedRead.candidate,
+      binder: resolvedCandidate.candidate,
       diagnostics: [{
         severity: 'info',
         code: 'ACTION_BINDER_MEMBERSHIP_UNIQUE',
-        message: `ACTION motion identity 已唯一定位到 ${matchedRead.candidate.relativePath} 的 BND4 entry。`,
+        message: `ACTION motion identity 已由 WorkspaceIndex 唯一定位到 ${resolvedCandidate.candidate.relativePath} 的 BND4 entry。`,
         sourceUri,
         details: {
           characterFamily,
           motionAnimId: motionIdentity.motionAnimId,
-          entryIndex: matchedEntry.index,
-          entryId: matchedEntry.id,
-          origin: matchedRead.candidate.origin,
-          relativePath: matchedRead.candidate.relativePath
+          entryIndex: membershipMatch.entryIndex,
+          entryId: membershipMatch.binderEntryId,
+          entryName: membershipMatch.entryName,
+          origin: resolvedCandidate.candidate.origin,
+          relativePath: resolvedCandidate.candidate.relativePath,
+          authority: 'workspace-index'
         }
       }]
     };
@@ -1374,13 +1648,23 @@ export function registerActionIpcHandlers(deps: ActionIpcDeps): void {
         };
       }
       const chrbndPath = overlayExists ? overlayCandidate : vanillaCandidate!;
+      const texturePackagePaths = [
+        ...characterTexturePackagePaths(chrbndPath),
+        ...(overlayExists && vanillaCandidate && vanillaExists
+          ? characterTexturePackagePaths(vanillaCandidate)
+          : [])
+      ].filter((path, index, all) => all.findIndex((candidate) => candidate.toLowerCase() === path.toLowerCase()) === index);
       const result = await runBridge<Record<string, unknown>>({
         command: 'read-chrbnd-flver-preview',
         filePath: chrbndPath,
         allowedRoots: roots.allowedRoots,
         timeoutMs: 120_000,
         ...(effectiveBase ? { oodleRuntimeRoot: effectiveBase } : {}),
-        commandOptions: { maxVertices: 1_000_000, maxIndices: 3_000_000 }
+        commandOptions: {
+          maxVertices: 1_000_000,
+          maxIndices: 3_000_000,
+          texturePackagePaths
+        }
       });
       if (result.parseStatus === 'failed' || !result.data) {
         return { ok: false, sourceUri, diagnostics: result.diagnostics };
@@ -1413,6 +1697,64 @@ export function registerActionIpcHandlers(deps: ActionIpcDeps): void {
         if (compatibility.bundle) previewBundle = compatibility.bundle;
       }
 
+      // A normal chrbnd/partsbnd can contain several FLVER-local skeletons.
+      // The TAE clip is sampled in the leader skeleton's index space, so passing
+      // the raw bundle to the renderer would leave body parts on independent,
+      // unmoving skeletons (or make an unkeyed pose update the wrong skeleton).
+      // Normalize every multi-model action preview at the main/core boundary;
+      // the renderer then consumes one explicit leader skeleton namespace.
+      if (previewBundle.models.length > 1 && !isLeaderRemappedBundle(previewBundle)) {
+        const leader = previewBundle.models.find((model) => model.modelId === previewBundle.leaderModelId);
+        if (!leader || leader.bones.length === 0) {
+          return {
+            ok: false,
+            sourceUri,
+            diagnostics: [
+              ...result.diagnostics,
+              ...compatibilityDiagnostics,
+              actionDiagnostic(
+                'ACTION_PREVIEW_LEADER_MISSING',
+                '动作预览包含多个 FLVER，但没有可用的 leader 骨架，已拒绝在错误骨架上播放。',
+                sourceUri,
+                { leaderModelId: previewBundle.leaderModelId, modelCount: previewBundle.models.length }
+              )
+            ]
+          };
+        }
+        const remapped = remapCharacterBundleToLeader(
+          leader,
+          previewBundle.models.filter((model) => model.modelId !== leader.modelId)
+        );
+        if (!remapped.ok || !remapped.bundle) {
+          return {
+            ok: false,
+            sourceUri,
+            diagnostics: [
+              ...result.diagnostics,
+              ...compatibilityDiagnostics,
+              ...remapped.diagnostics,
+              actionDiagnostic(
+                'ACTION_PREVIEW_LEADER_REMAP_FAILED',
+                '动作预览的身体部件无法安全映射到 leader 骨架，已关闭播放预览。',
+                sourceUri,
+                { leaderModelId: leader.modelId, modelCount: previewBundle.models.length }
+              )
+            ]
+          };
+        }
+        previewBundle = remapped.bundle;
+        compatibilityDiagnostics = [
+          ...compatibilityDiagnostics,
+          {
+            severity: 'info',
+            code: 'ACTION_PREVIEW_LEADER_REMAP_APPLIED',
+            message: `动作预览已将 ${previewBundle.models.length} 个 FLVER 统一到 leader 骨架 ${leader.modelId}。`,
+            sourceUri,
+            details: { leaderModelId: leader.modelId, modelCount: previewBundle.models.length }
+          }
+        ];
+      }
+
       return {
         ok: true,
         sourceUri,
@@ -1429,7 +1771,13 @@ export function registerActionIpcHandlers(deps: ActionIpcDeps): void {
       _event,
       sourceUri: string,
       animId: number,
-      flverBoneNames?: string[]
+      flverBoneNames?: string[],
+      flverBoneParents?: number[],
+      flverReferencePose?: Array<{
+        translation: [number, number, number];
+        rotation: [number, number, number, number];
+        scale: [number, number, number];
+      }>
     ): Promise<{
       ok: boolean;
       sourceUri?: string;
@@ -1453,7 +1801,9 @@ export function registerActionIpcHandlers(deps: ActionIpcDeps): void {
         commandOptions: {
           animId,
           animationContainerPath: context.binder.absolutePath,
-          ...(flverBoneNames?.length ? { flverBoneNames } : {})
+          ...(flverBoneNames?.length ? { flverBoneNames } : {}),
+          ...(flverBoneParents?.length ? { flverBoneParents } : {}),
+          ...(flverReferencePose?.length ? { flverReferencePose } : {})
         }
       });
       const afterDiagnostics = await validateActionContextCurrent(context);
@@ -1480,7 +1830,13 @@ export function registerActionIpcHandlers(deps: ActionIpcDeps): void {
       animId: number,
       timeSeconds: number,
       flverBoneNames?: string[],
-      loop?: boolean
+      loop?: boolean,
+      flverBoneParents?: number[],
+      flverReferencePose?: Array<{
+        translation: [number, number, number];
+        rotation: [number, number, number, number];
+        scale: [number, number, number];
+      }>
     ): Promise<{
       ok: boolean;
       sourceUri?: string;
@@ -1506,7 +1862,9 @@ export function registerActionIpcHandlers(deps: ActionIpcDeps): void {
           timeSeconds,
           loop: loop ?? true,
           animationContainerPath: context.binder.absolutePath,
-          ...(flverBoneNames?.length ? { flverBoneNames } : {})
+          ...(flverBoneNames?.length ? { flverBoneNames } : {}),
+          ...(flverBoneParents?.length ? { flverBoneParents } : {}),
+          ...(flverReferencePose?.length ? { flverReferencePose } : {})
         }
       });
       const afterDiagnostics = await validateActionContextCurrent(context);

@@ -3,7 +3,7 @@
  * Editors emit only these mutations; main/core maps them to PatchIR.
  *
  * front-end.md 新增契约（§5.2 WorkbenchRoute、§12 Agent）追加在本文件尾部。
- * §14 DocumentStore 契约因与 V0.5 legacy `EditorMutation` 重名，整体位于
+ * §14 DocumentStore 契约因与 legacy `EditorMutation` 重名，整体位于
  * editor-catalog.ts（见该文件头部说明）。
  */
 
@@ -61,7 +61,7 @@ export type EditorMutationKind =
 /**
  * 旧版 deferred-preview 投影的兼容出口。
  *
- * V0.5/V0.6 过渡期不再通过此列表限制 TAE/ESD/ACTION 开发；当前列表刻意
+ * 过渡期不再通过此列表限制 TAE/ESD/ACTION 开发；当前列表刻意
  * 为空，因此 renderer 不会因历史 deferred 标记隐藏现有 writer 或编辑器。
  * 该兼容出口不授予 native authority，也不替代 Patch Engine、revision 或
  * fail-closed 校验。
@@ -94,7 +94,7 @@ export interface EditorDocumentRef {
 }
 
 /**
- * @deprecated V0.5 patchIR 计划形态。§14.4 的 `EditorMutation`
+ * @deprecated 旧 patchIR 计划形态。§14.4 的 `EditorMutation`
  * （kebab-case discriminated union）已移至 editor-catalog.ts 并取代本类型；
  * 本类型仅保留给迁移前仍在使用的 core 调用方。
  */

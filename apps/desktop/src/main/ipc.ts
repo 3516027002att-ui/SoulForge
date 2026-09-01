@@ -228,7 +228,10 @@ import {
   applyWorkspaceIndexSnapshot,
   applyWorkspaceRag,
   setWorkspaceForegroundActive,
-  revokeDirectorySelectionsFor
+  revokeDirectorySelectionsFor,
+  rebuildActionBinderMembershipIndex,
+  ensureActionBinderMembershipForFamily,
+  waitForWorkspaceIndexing
 } from './ipc/workspace.js';
 import { clearParamIpcCaches, registerParamIpcHandlers } from './ipc/param.js';
 import { registerDocumentIpcHandlers, resetEditorDocumentStore } from './ipc/documents.js';
@@ -430,7 +433,9 @@ function resolveFlverReadFile(sourceUri: string): { absolutePath: string; relati
 
 function logicalMapModelName(raw: string): string {
   const base = raw.replace(/\\/g, '/').split('/').pop() ?? raw;
-  return base.replace(/\.(flver|dcx|chrbnd|objbnd)$/i, '');
+  return base
+    .replace(/\.(?:flver|chrbnd|objbnd|mapbnd)(?:\.dcx)?$/i, '')
+    .replace(/\.dcx$/i, '');
 }
 
 function resolveMapModelFile(
@@ -463,7 +468,7 @@ function resolveMapModelFile(
     }
     candidates.push({ rel: `map/${name}.flver.dcx`, kind: 'flver' });
     if (/^c\d/i.test(name)) candidates.push({ rel: `chr/${name}.chrbnd.dcx`, kind: 'chrbnd' });
-    if (/^o\d/i.test(name)) candidates.push({ rel: `obj/${name}.objbnd.dcx`, kind: 'chrbnd' });
+    if (/^o\d/i.test(name)) candidates.push({ rel: `obj/${name}.objbnd.dcx`, kind: 'flver' });
   }
   const normalize = (value: string): string => value.replace(/\\/g, '/').toLowerCase();
   const indexedFiles = getWorkspaceIndexedFiles();
@@ -815,6 +820,14 @@ export interface AiAgentEventEnvelope {
   event: AgentEvent | AiAgentSessionLifecycleEvent;
 }
 
+/**
+ * 补取 run 返回前已经产生的 agent 事件。推送仍是实时通道，回放只是
+ * 为 renderer 建立 session 状态前的短竞态提供可靠补偿；调用方按 seq 去重。
+ */
+export type AiAgentEventReplayIpcResult =
+  | { ok: true; events: AiAgentEventEnvelope[] }
+  | { ok: false; error: { code: string; message: string } };
+
 /** §12.11 资源引用 token 校验结果（agent 通道专用；不是 param/format 读取）。 */
 export type AgentResourceReferenceCreateIpcResult =
   | { ok: true; reference: AgentResourceReference }
@@ -944,7 +957,8 @@ async function refreshRagAfterAnalyze(
 async function refreshActiveIndexAfterSemanticEvidence(sourceUris: readonly string[] = []): Promise<void> {
   const session = getWorkspaceSession();
   const index = getWorkspaceActiveIndex();
-  if (!session || !index) return;
+  const sessionId = getActiveWorkspaceSessionIdState();
+  if (!session || !index || !sessionId) return;
   // Live read tools have already replaced/merged the relevant semantic export.
   // Re-scan only refreshes the file catalog; it must not invalidate unrelated
   // semantic data or merge a stale persisted copy over the just-read value.
@@ -953,6 +967,21 @@ async function refreshActiveIndexAfterSemanticEvidence(sourceUris: readonly stri
     game: session.meta.game
   });
   index.setFiles(result.files);
+  // WorkspaceIndex.setFiles intentionally clears source-bound ACTION Binder
+  // membership. Rebuild it before publishing the refreshed snapshot; otherwise
+  // a successful TAE reread makes the next animation lookup fail with
+  // ACTION_BINDER_MEMBERSHIP_INDEX_NOT_READY until the user reopens the workspace.
+  const actionBinderIndex = await rebuildActionBinderMembershipIndex({
+    deps: { verifiedReadRoots },
+    index,
+    session,
+    sessionId,
+    indexedFiles: result.files
+  });
+  if (!actionBinderIndex.ok) {
+    throw new Error(actionBinderIndex.diagnostics.map((diagnostic) => `${diagnostic.code}: ${diagnostic.message}`).join('；')
+      || 'ACTION_BINDER_MEMBERSHIP_REBUILD_FAILED');
+  }
   index.rebuildReferences();
   applyWorkspaceIndexSnapshot(index);
   const database = activeOperationLog ?? await ensureActiveOperationLog(session);
@@ -971,7 +1000,8 @@ async function refreshActiveIndexAfterNativeWrite(
 ): Promise<KnowledgeRefreshResult | void> {
   const session = getWorkspaceSession();
   const currentIndex = getWorkspaceActiveIndex();
-  if (!session || !currentIndex) return;
+  const sessionId = getActiveWorkspaceSessionIdState();
+  if (!session || !currentIndex || !sessionId) return;
   const beforeFiles = currentIndex.getFiles();
   const requestedSources = resolveKnowledgeSourceUris(changedSources, beforeFiles);
   const result = await scanWorkspace({
@@ -1005,6 +1035,20 @@ async function refreshActiveIndexAfterNativeWrite(
       if (nativeRefresh.failedSources.length > 0) {
         const detail = nativeRefresh.diagnostics.map((diagnostic) => `${diagnostic.code}: ${diagnostic.message}`).join('；');
         throw new Error(detail || `native semantic refresh failed for ${nativeRefresh.failedSources.length} source(s)`);
+      }
+      if (getActiveWorkspaceSessionIdState() !== sessionId) {
+        throw new Error('工作区已切换，ACTION membership 刷新结果已丢弃。');
+      }
+      const actionBinderIndex = await rebuildActionBinderMembershipIndex({
+        deps: { verifiedReadRoots },
+        index: analyzed.index,
+        session,
+        sessionId,
+        indexedFiles: analyzed.index.getFiles()
+      });
+      if (!actionBinderIndex.ok) {
+        const detail = actionBinderIndex.diagnostics.map((diagnostic) => `${diagnostic.code}: ${diagnostic.message}`).join('；');
+        throw new Error(detail || 'ACTION_BINDER_MEMBERSHIP_REBUILD_FAILED');
       }
       return {
         index: analyzed.index,
@@ -1252,8 +1296,32 @@ function decompilerLabel(origin: 'explicit' | 'v1.1.5' | 'tools-scan' | 'legacy'
   }
 }
 
+function normalizeGameIdentity(value: unknown): string {
+  return String(value ?? '')
+    .trim()
+    .toLowerCase()
+    .replace(/[\s_]+/g, '-')
+    .replace(/[^a-z0-9-]/g, '');
+}
+
+function isSekiroGameIdentity(value: unknown): boolean {
+  const normalized = normalizeGameIdentity(value);
+  return normalized === 'sekiro'
+    || normalized === 'sdt'
+    || normalized === 'sekiro-shadows-die-twice';
+}
+
 function rejectNonSekiroNativeWrite(sourceUri: string, file?: IndexedFile): RendererSaveResult | null {
-  if (getWorkspaceSession()?.meta.game === 'sekiro' && file?.game === 'sekiro') return null;
+  const sessionGame = getWorkspaceSession()?.meta.game;
+  const fileGame = file?.game;
+  // The light workspace scan can briefly carry `unknown`/empty metadata while
+  // the active session is already the Sekiro adapter. The file has still been
+  // resolved from the active index by each writer, so do not reject that normal
+  // indexing window; explicit evidence of another game remains blocked.
+  const fileGameIsUnresolved = normalizeGameIdentity(fileGame) === ''
+    || normalizeGameIdentity(fileGame) === 'unknown';
+  if (isSekiroGameIdentity(sessionGame)
+    && (isSekiroGameIdentity(fileGame) || fileGameIsUnresolved)) return null;
   return {
     ok: false,
     changedFiles: [],
@@ -1561,7 +1629,9 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
     safeExists,
     pushToolsSubdirs,
     asBasicDiagnostics: (items) => items.map((item) => ({ severity: item.severity === 'warning' || item.severity === 'info' ? item.severity : 'error', code: item.code, message: item.message, ...(item.sourceUri ? { sourceUri: item.sourceUri } : {}) })),
-    verifiedReadRoots
+    verifiedReadRoots,
+    ensureActionBinderMembershipForFamily: (characterFamily) => ensureActionBinderMembershipForFamily({ verifiedReadRoots }, characterFamily),
+    waitForWorkspaceIndexing
   });
 
   registerAssetIpcHandlers({
@@ -1619,7 +1689,8 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
 
   registerWorkspaceIpcHandlers({
     handle: trustedHandle,
-    ensureActiveOperationLog
+    ensureActiveOperationLog,
+    verifiedReadRoots
   });
 
   registerAgentIpcHandlers({
@@ -1643,6 +1714,7 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
   registerResourceIpcHandlers({
     handle: trustedHandle,
     getIndexedFiles: getWorkspaceIndexedFiles,
+    getActiveIndex: getWorkspaceActiveIndex,
     getActiveSession: getWorkspaceSession,
     getActiveWorkspaceSessionId: getActiveWorkspaceSessionIdState,
     durableStoragePaths,

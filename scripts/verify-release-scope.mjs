@@ -79,13 +79,11 @@ const ALLOWED_RULING_STATUS = new Set(['pending-user-ruling', 'user-approved']);
 /**
  * `deferred` 与 `unsupported` 严格区分：
  * - `unsupported` = 已裁定不支持，unlistedPolicy 同级；
- * - `deferred` = 已裁定移出 V0.5，仍将在 `deferredToRelease` 里程碑交付。
+ * - `deferred` = 已裁定移出当前发布范围，仍将在 `deferredToRelease` 里程碑交付。
  * `deferred` 条目必须声明 `deferredToRelease`，且不得声明 supported operations。
  */
 const ALLOWED_SUPPORT = new Set(['supported', 'unsupported', 'deferred']);
 const ALLOWED_GATE_STATE = new Set(['open', 'blocked', 'passed', 'deferred']);
-const DEFERRED_TARGET_RELEASE = 'V0.6';
-const ALLOWED_DEFERRED_RELEASE = new Set([DEFERRED_TARGET_RELEASE]);
 const ALLOWED_BUILD_MATCH_POLICY = new Set(['file-product-version-major-minor']);
 const ALLOWED_AUTHORITY = new Set([
   'unsupported',
@@ -257,9 +255,9 @@ function checkPrivateRegistryFields(value, where = 'proposal') {
 /**
  * deferred 条目的 resumeRequires 必须写本条专属的承接前置，不能是策略复制。
  *
- * 实测踩过：12 条 deferredToRelease=V0.6 的 resumeRequires 曾是逐字相同的四行
+ * 实测踩过：多条 deferredToRelease 的 resumeRequires 曾是逐字相同的四行
  * 通用策略——而策略正文本就在 scopeDeferralPolicy 里且已冻结。那份复制不承载
- * 任何条目专属信息，接手 V0.6 的 agent 从中读不到「这一条到底还差什么」，
+ * 任何条目专属信息，接手后续工作的 agent 从中读不到「这一条到底还差什么」，
  * 而且没有任何门禁能看见它退化（当时 resumeRequires 未被任何脚本读取）。
  *
  * 判据是「与其他 deferred 条目逐字重合」而不是「长度」或「包含某些关键词」：
@@ -354,6 +352,14 @@ try {
 } catch (error) {
   add('GOVERNANCE_READ_FAILED', proposalWhere, error instanceof Error ? error.message : String(error));
 }
+
+// 延期目标来自权威范围策略，而不是验证器里的历史版本常量。版本字段仍可用于
+// 发布审计，但不会因为某个旧里程碑写进代码就限制后续开发或范围提案。
+const allowedDeferredReleases = new Set(
+  scopeData?.scopeDeferralPolicy?.deferredToRelease
+    ? [scopeData.scopeDeferralPolicy.deferredToRelease]
+    : []
+);
 
 /**
  * §18.2.1 摘要块仍必须存在且是 scope.json 的完整投影。
@@ -457,8 +463,8 @@ if (proposal !== null) {
         + '要么加入 NON_PROPOSAL_SCOPE_KEYS 说明它不承载范围语义。'
     );
   }
-  // proposalId 里的版本号取自 proposal.release，不硬编码 V0.5：治理必须能
-  // 跨到 V0.6，写死版本号意味着 V0.6 的范围提案永远过不了这道校验。
+  // proposalId 里的版本号取自 proposal.release，不绑定某个历史里程碑；
+  // 新的范围提案只要符合统一格式即可进入独立审计。
   const proposalIdPattern = new RegExp(`^${String(proposal.release ?? '').replace('.', '\\.')}-SCOPE-[0-9]{8}$`);
   if (!/^V\d+\.\d+$/.test(proposal.release ?? '') || !proposalIdPattern.test(proposal.proposalId ?? '')) {
     add(
@@ -467,9 +473,6 @@ if (proposal !== null) {
       `proposalId 必须匹配 <release>-SCOPE-YYYYMMDD 且与 release 字段同版本，`
         + `实际 release=${JSON.stringify(proposal.release)} proposalId=${JSON.stringify(proposal.proposalId)}。`
     );
-  }
-  if (proposal.release !== 'V0.5') {
-    add('RELEASE_INVALID', 'proposal.release', 'release 必须为 V0.5。');
   }
   if (proposal.game !== 'Sekiro') {
     add('GAME_INVALID', 'proposal.game', 'game 必须精确为 Sekiro。');
@@ -631,11 +634,11 @@ if (proposal !== null) {
       }
       // deferred 条目必须声明目标里程碑，且不得同时声明本版可用 operation。
       if (item.proposedSupport === 'deferred') {
-        if (!ALLOWED_DEFERRED_RELEASE.has(item.deferredToRelease ?? '')) {
+        if (!allowedDeferredReleases.has(item.deferredToRelease ?? '')) {
           add(
             'DEFERRED_RELEASE_INVALID',
             `${where}.deferredToRelease`,
-            `deferred 条目必须声明 deferredToRelease，允许值：${[...ALLOWED_DEFERRED_RELEASE].join('、')}。`
+            `deferred 条目必须声明 deferredToRelease，允许值：${[...allowedDeferredReleases].join('、') || '由 scopeDeferralPolicy 提供'}。`
           );
         }
         if (Array.isArray(item.operations) && item.operations.length > 0) {
@@ -790,7 +793,12 @@ if (proposal !== null) {
       requireFrozenValue(proposal, 'quantitativeAcceptancePolicy.boundedEditorAccessRequired', true);
       requireFrozenValue(proposal, 'quantitativeAcceptancePolicy.installerLifecycleIntegrityRequired', true);
       requireFrozenValue(proposal, 'scopeDeferralPolicy.status', 'user-approved');
-      requireFrozenValue(proposal, 'scopeDeferralPolicy.deferredToRelease', 'V0.6');
+      // 后继里程碑由 scopeDeferralPolicy 自身登记，不能在验证器里写死某个版本。
+      if (typeof proposal.scopeDeferralPolicy?.deferredToRelease !== 'string'
+        || proposal.scopeDeferralPolicy.deferredToRelease.trim().length === 0) {
+        add('DEFERRED_TARGET_RELEASE_INVALID', 'scopeDeferralPolicy.deferredToRelease',
+          '延期策略必须登记非空的后继里程碑；具体版本由治理数据决定。');
+      }
       requireFrozenValue(proposal, 'scopeDeferralPolicy.deferredIsNotCompleted', true);
       requireFrozenValue(proposal, 'scopeDeferralPolicy.deferredIsNotPermanentlyExcluded', true);
       requireFrozenValue(proposal, 'scopeDeferralPolicy.deferredCodeMayRemainAsMarkedPreview', true);
@@ -1020,8 +1028,8 @@ if (proposalMode) {
         gateCount: EXPECTED_GATES.length,
         findings: [],
         note: frozen
-          ? '用户批准范围结构有效；--proposal 本身不替代 sealed Evidence，也不构成功能或 V0.5 完成声明。'
-          : '提案结构有效；这不是用户范围裁定，也不构成 V0.5 发布声明。'
+          ? '用户批准范围结构有效；--proposal 本身不替代 sealed Evidence，也不构成功能或发布完成声明。'
+          : '提案结构有效；这不是用户范围裁定，也不构成发布声明。'
       }
     : {
         ok: false,

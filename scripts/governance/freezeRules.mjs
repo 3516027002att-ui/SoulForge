@@ -7,7 +7,7 @@
  *
  * 拦截边界（releases.json 的 frozenFields）刻意只覆盖用户裁定字段。
  * 工程进度字段（gateState / lifecycle / authority / evidence 追加）不受冻结
- * 约束，否则 V0.5 冻结后自身无法继续推进——那会把治理变成死锁。
+ * 约束，否则发布审计冻结后自身无法继续推进——那会把治理变成死锁。
  */
 import { spawnSync } from 'node:child_process';
 
@@ -134,7 +134,7 @@ function diffFrozenField(release, spec, baseline, current, findings, where, unfr
   );
 
   for (const [id, currentItem] of currentItems) {
-    // 只保护属于该冻结版本的条目。V0.6 新条目自由，V0.5 条目不可动。
+    // 只保护属于该冻结版本的条目；其他发布归属的条目不受该版本的基线比较影响。
     if (currentItem.targetRelease !== undefined && currentItem.targetRelease !== release) continue;
     // 按条目解冻：只放开 unfreezeRuling.scopeItemIds 里显式列出的条目。
     // 未列出的条目继续比对基线——这是「按条目」与「整版放开」的全部区别。
@@ -208,7 +208,9 @@ export function validateCrossVersionFreeze(data, findings, options = {}) {
     }
   }
   for (const record of data.evidence ?? []) {
-    if (!knownReleases.has(record.targetRelease)) {
+    // 开发 Evidence 可以不绑定发布里程碑；只有显式 targetRelease 的发布记录
+    // 才需要回查 releases.json。null 是有意的开发态，而不是缺失登记。
+    if (record.targetRelease !== null && !knownReleases.has(record.targetRelease)) {
       findings.push(makeFinding(
         'TARGET_RELEASE_UNKNOWN',
         `docs/governance/evidence.jsonl ${record.evidenceId}`,

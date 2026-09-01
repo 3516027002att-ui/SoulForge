@@ -130,7 +130,8 @@ export async function runAnimationPlaybackClockSmoke(): Promise<void> {
   assert.ok(Math.abs(qRotZ[2] - Math.SQRT1_2) < 1e-4);
   assert.ok(Math.abs(qRotZ[3] - Math.SQRT1_2) < 1e-4);
 
-  // Composite Euler angle — three non-zero angles, full quaternion check (fact 3/4: single-axis and modulus-only are blind)
+  // Composite native FLVER Euler angle — three non-zero angles, full
+  // quaternion check (single-axis checks cannot distinguish composition order).
   const qComp = eulerXYZToQuaternion([0.5, -0.3, 1.2]);
   const expectedComp = [0.1201424763, 0.0186237853, 0.5714598517, 0.8115741358];
   for (let i = 0; i < 4; i++) assert.ok(Math.abs(qComp[i]! - expectedComp[i]!) < 1e-4, `qComp[${i}] mismatch: got ${qComp[i]}, expected ${expectedComp[i]}`);
@@ -177,8 +178,8 @@ export async function runAnimationPlaybackClockSmoke(): Promise<void> {
     trackToHkxBone: [1],
     hkxToFlverBoneMap: [1, 0],
     interleavedTransforms: [
-      { translation: [0, 2, 0], rotation: [0, 0, 0, 1], scale: [1, 1, 1] },
-      { translation: [0, 6, 0], rotation: [0, 0, 0, 1], scale: [1, 1, 1] }
+      { translation: [0, 1, 0], rotation: [0, 0, 0, 1], scale: [1, 1, 1] },
+      { translation: [0, 5, 0], rotation: [0, 0, 0, 1], scale: [1, 1, 1] }
     ]
   });
 
@@ -188,9 +189,10 @@ export async function runAnimationPlaybackClockSmoke(): Promise<void> {
     { translation: [0, 0, 9], rotation: nonUnitRefQuat, scale: [1, 1, 1] }
   ]);
 
-  // FLVER 0 from HKX 1: mid-point between 2 and 6 -> [0, 4, 0]
-  assert.deepEqual(sampledFlver[0]?.translation, [0, 4, 0]);
-  // FLVER 1 from HKX 0: ref pose [0, 0, 0]
+  // FLVER 0 from HKX 1: mid-point between 1 and 5 is a +2 delta applied to
+  // the FLVER bind translation [0, 0, 0].
+  assert.deepEqual(sampledFlver[0]?.translation, [0, 2, 0]);
+  // FLVER 1 from HKX 0: its FLVER bind pose remains [0, 0, 0].
   assert.deepEqual(sampledFlver[1]?.translation, [0, 0, 0]);
   // FLVER 2 unmapped: preserves non-unit reference rotation
   assert.deepEqual(sampledFlver[2]?.translation, [0, 0, 9]);

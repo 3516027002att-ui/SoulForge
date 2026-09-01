@@ -50,3 +50,22 @@ test('FrameTaskQueue keeps later uploads for a subsequent frame when budget is e
   assert.equal(await first, true);
   assert.equal(await second, true);
 });
+
+test('FrameTaskQueue propagates an explicit upload result instead of task execution', async () => {
+  const frames: FrameRequestCallback[] = [];
+  const queue = new FrameTaskQueue(
+    (callback) => { frames.push(callback); return frames.length; },
+    () => undefined,
+    () => 0,
+    5
+  );
+  const uploaded = queue.enqueue(() => false);
+  frames.shift()!(0);
+  assert.equal(await uploaded, false);
+});
+
+test('MapModelLoadCache exposes dispose instead of converting it to a missing mesh', async () => {
+  const cache = new MapModelLoadCache(async () => mesh);
+  cache.dispose();
+  await assert.rejects(cache.load('m000010'), /MAP_MESH_LOAD_CACHE_DISPOSED/);
+});

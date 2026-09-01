@@ -30,7 +30,7 @@ export class FileRiskValidator implements ValidatorContract {
         relativePath
       });
 
-      // v0.6: container_child_replace is handled by ContainerChildReplaceWriter +
+      // Container child replacement is handled by ContainerChildReplaceWriter +
       // ContainerRoundTripValidator for synthetic SFBN / DCX DFLT nested only.
       if (op.kind === 'container_child_replace') {
         if (op.metadata?.requiresConfirmation !== true && op.riskLevel !== 'high') {

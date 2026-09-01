@@ -1,6 +1,7 @@
 using System.Collections.Concurrent;
 using System.Text;
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using System.Text.Json.Serialization;
 
 internal static class BridgeDaemonHost
@@ -397,16 +398,27 @@ internal static class BridgeDaemonHost
                     completed = 0,
                     total = 1
                 });
-                var service = new BridgeCommandService();
-                var result = await service.ExecuteAsync(
-                    payload.Command,
-                    boundary.CanonicalPath,
-                    requestCts.Token,
-                    state.OodleRuntimeRoot,
-                    payload.Options ?? default,
-                    outputPath,
-                    state.AllowedRoots,
-                    frame.WorkspaceSessionId);
+                BridgeResult<object> result;
+                if (string.Equals(payload.Command, "read-bridge-artifact", StringComparison.OrdinalIgnoreCase))
+                {
+                    result = await state.ReadArtifactAsync(
+                        payload.Options,
+                        boundary.CanonicalPath,
+                        requestCts.Token);
+                }
+                else
+                {
+                    var service = new BridgeCommandService();
+                    result = await service.ExecuteAsync(
+                        payload.Command,
+                        boundary.CanonicalPath,
+                        requestCts.Token,
+                        state.OodleRuntimeRoot,
+                        payload.Options ?? default,
+                        outputPath,
+                        state.AllowedRoots,
+                        frame.WorkspaceSessionId);
+                }
                 requestCts.Token.ThrowIfCancellationRequested();
                 await state.WriteAsync("progress", frame.RequestId, frame.WorkspaceSessionId, frame.ResourceUri, new
                 {
@@ -417,12 +429,7 @@ internal static class BridgeDaemonHost
                 var authority = result.Diagnostics.Any(item => item.Code.Contains("SYNTHETIC", StringComparison.OrdinalIgnoreCase))
                     ? "fixture-confirmed"
                     : result.ParseStatus == "unsupported" ? "unsupported" : "candidate";
-                await state.WriteAsync("result", frame.RequestId, frame.WorkspaceSessionId, frame.ResourceUri, new
-                {
-                    authority,
-                    nativeFormatAuthority = false,
-                    result
-                });
+                await state.WriteResultAsync(frame, payload.Command, authority, result);
             }
             finally
             {
@@ -437,9 +444,21 @@ internal static class BridgeDaemonHost
                 message = "Bridge request was cancelled or exceeded its deadline."
             });
         }
-        catch (BridgeOutboundFrameTooLargeException)
+        catch (BridgeOutboundFrameTooLargeException ex)
         {
-            await state.WriteFailureAsync(frame.RequestId, frame.WorkspaceSessionId, "BRIDGE_OUTBOUND_FRAME_TOO_LARGE", "Bridge result exceeds the negotiated frame-size limit; use a file-backed command instead.");
+            await state.WriteFailureAsync(
+                frame.RequestId,
+                frame.WorkspaceSessionId,
+                "BRIDGE_OUTBOUND_FRAME_TOO_LARGE",
+                "Bridge result exceeds the negotiated frame-size limit; use a file-backed command instead.",
+                new
+                {
+                    command = payload?.Command,
+                    frameKind = ex.FrameKind,
+                    serializedBytes = ex.SerializedBytes,
+                    maxFrameBytes = ex.MaxFrameBytes,
+                    resourceUri = frame.ResourceUri
+                });
         }
         catch (Exception ex)
         {
@@ -540,6 +559,7 @@ internal static class BridgeDaemonHost
         "read-tpf-document", "export-tpf-texture", "read-tpf-texture-preview",
         "write-tpf-texture-replace", "read-tae-document",
         "read-tae-event-params", "read-tae-animation-clip", "sample-tae-animation-pose",
+        "read-bridge-artifact",
         "read-chrbnd-flver-preview",
         "read-map-part-flver-preview",
         "read-map-static-geometry",
@@ -570,6 +590,7 @@ internal static class BridgeDaemonHost
         private readonly SemaphoreSlim _outputLock = new(1, 1);
         private readonly ConcurrentDictionary<string, CancellationTokenSource> _requests = new(StringComparer.Ordinal);
         private readonly CancellationTokenSource _shutdown = new();
+        private readonly BridgeArtifactStore _artifacts = new();
         private string? _workspaceSessionId;
 
         public DaemonState(TextWriter output)
@@ -620,14 +641,134 @@ internal static class BridgeDaemonHost
             return true;
         }
 
-        public async Task WriteFailureAsync(string? requestId, string? workspaceSessionId, string code, string message)
+        public async Task WriteFailureAsync(
+            string? requestId,
+            string? workspaceSessionId,
+            string code,
+            string message,
+            object? details = null)
         {
             await WriteAsync("failed", requestId, workspaceSessionId, null, new
             {
                 code,
                 message,
-                retryable = code is "BRIDGE_REQUEST_FAILED" or "BRIDGE_REQUEST_NOT_ACTIVE"
+                retryable = code is "BRIDGE_REQUEST_FAILED" or "BRIDGE_REQUEST_NOT_ACTIVE",
+                details
             });
+        }
+
+        public async Task WriteResultAsync(
+            BridgeInboundFrame request,
+            string command,
+            string authority,
+            BridgeResult<object> result)
+        {
+            var payload = new
+            {
+                authority,
+                nativeFormatAuthority = false,
+                result
+            };
+            var frame = CreateFrame("result", request.RequestId, request.WorkspaceSessionId, request.ResourceUri, payload);
+            var json = JsonSerializer.Serialize(frame, JsonOptions);
+            var serializedBytes = Encoding.UTF8.GetByteCount(json);
+            if (serializedBytes <= MaxFrameBytes)
+            {
+                await WriteSerializedAsync(json);
+                return;
+            }
+
+            var resultJson = JsonSerializer.SerializeToUtf8Bytes(result, JsonOptions);
+            var artifact = _artifacts.Store(resultJson);
+            var resultNode = JsonNode.Parse(Encoding.UTF8.GetString(resultJson))?.AsObject()
+                ?? throw new InvalidDataException("Bridge result could not be converted to a JSON object.");
+            var diagnosticArray = resultNode["diagnostics"] as JsonArray ?? new JsonArray();
+            diagnosticArray.Add(JsonSerializer.SerializeToNode(new
+            {
+                severity = "info",
+                code = "BRIDGE_RESULT_FILE_BACKED",
+                message = "Bridge result exceeded one negotiated frame and was moved to a daemon-owned artifact.",
+                sourceUri = request.ResourceUri,
+                details = new
+                {
+                    command,
+                    serializedBytes,
+                    maxFrameBytes = MaxFrameBytes,
+                    artifactToken = artifact.Token,
+                    artifactByteLength = artifact.ByteLength,
+                    artifactChunkSize = artifact.ChunkSize
+                }
+            }, JsonOptions));
+            resultNode["diagnostics"] = diagnosticArray;
+            resultNode["data"] = JsonSerializer.SerializeToNode(new
+            {
+                fileBacked = new
+                {
+                    artifactToken = artifact.Token,
+                    payloadFormat = "bridge-result-json",
+                    payloadVersion = 1,
+                    byteLength = artifact.ByteLength,
+                    chunkSize = artifact.ChunkSize,
+                    sourceUri = request.ResourceUri,
+                    sourceRevision = ReadString(resultNode["data"], "sourceHash")
+                        ?? ReadString(resultNode["data"], "animationContainerHash"),
+                    duration = ReadDouble(resultNode["data"], "duration"),
+                    frameCount = ReadLong(resultNode["data"], "frameCount"),
+                    boneCount = ReadLong(resultNode["data"], "boneCount"),
+                    diagnostics = new { serializedBytes, maxFrameBytes = MaxFrameBytes }
+                }
+            }, JsonOptions);
+
+            await WriteAsync("result", request.RequestId, request.WorkspaceSessionId, request.ResourceUri, new
+            {
+                authority,
+                nativeFormatAuthority = false,
+                result = resultNode
+            });
+        }
+
+        public async Task<BridgeResult<object>> ReadArtifactAsync(
+            JsonElement? options,
+            string sourcePath,
+            CancellationToken cancellationToken)
+        {
+            if (options is not { ValueKind: JsonValueKind.Object }
+                || !options.Value.TryGetProperty("artifactToken", out var tokenElement)
+                || tokenElement.ValueKind != JsonValueKind.String
+                || string.IsNullOrWhiteSpace(tokenElement.GetString())
+                || !options.Value.TryGetProperty("offset", out var offsetElement)
+                || !offsetElement.TryGetInt64(out var offset)
+                || !options.Value.TryGetProperty("length", out var lengthElement)
+                || !lengthElement.TryGetInt32(out var length))
+            {
+                return BridgeResult<object>.Failed(sourcePath, "unknown", "BRIDGE_ARTIFACT_REQUEST_INVALID", "artifactToken、offset 和 length 是必需的。");
+            }
+
+            try
+            {
+                var chunk = _artifacts.Read(tokenElement.GetString()!, offset, length, cancellationToken);
+                return BridgeResult<object>.Partial(sourcePath, "unknown", new[]
+                {
+                    new Diagnostic("info", "BRIDGE_ARTIFACT_CHUNK_READ", "Bridge file-backed artifact chunk 已读取。", BridgeResult<object>.MakeSourceUri(sourcePath))
+                }, new
+                {
+                    artifactToken = tokenElement.GetString()!,
+                    offset,
+                    length = chunk.Bytes.Length,
+                    totalLength = chunk.TotalLength,
+                    complete = offset + chunk.Bytes.Length >= chunk.TotalLength,
+                    dataBase64 = Convert.ToBase64String(chunk.Bytes)
+                });
+            }
+            catch (Exception ex) when (ex is ArgumentException or InvalidDataException or IOException)
+            {
+                return BridgeResult<object>.Failed(sourcePath, "unknown", "BRIDGE_ARTIFACT_READ_FAILED", ex.Message, new
+                {
+                    artifactToken = tokenElement.GetString(),
+                    offset,
+                    length
+                });
+            }
         }
 
         public async Task WriteAsync(
@@ -637,21 +778,32 @@ internal static class BridgeDaemonHost
             string? resourceUri,
             object payload)
         {
-            var frame = new BridgeOutboundFrame
-            {
-                ProtocolVersion = ProtocolVersion,
-                Kind = kind,
-                RequestId = requestId,
-                WorkspaceSessionId = workspaceSessionId,
-                ResourceUri = resourceUri,
-                TimestampUtc = DateTimeOffset.UtcNow,
-                Payload = payload
-            };
+            var frame = CreateFrame(kind, requestId, workspaceSessionId, resourceUri, payload);
             var json = JsonSerializer.Serialize(frame, JsonOptions);
-            if (Encoding.UTF8.GetByteCount(json) > MaxFrameBytes)
-            {
-                throw new BridgeOutboundFrameTooLargeException();
-            }
+            var serializedBytes = Encoding.UTF8.GetByteCount(json);
+            if (serializedBytes > MaxFrameBytes)
+                throw new BridgeOutboundFrameTooLargeException(kind, requestId, serializedBytes, MaxFrameBytes);
+            await WriteSerializedAsync(json);
+        }
+
+        private BridgeOutboundFrame CreateFrame(
+            string kind,
+            string? requestId,
+            string? workspaceSessionId,
+            string? resourceUri,
+            object payload) => new()
+        {
+            ProtocolVersion = ProtocolVersion,
+            Kind = kind,
+            RequestId = requestId,
+            WorkspaceSessionId = workspaceSessionId,
+            ResourceUri = resourceUri,
+            TimestampUtc = DateTimeOffset.UtcNow,
+            Payload = payload
+        };
+
+        private async Task WriteSerializedAsync(string json)
+        {
             await _outputLock.WaitAsync();
             try
             {
@@ -664,6 +816,24 @@ internal static class BridgeDaemonHost
             }
         }
 
+        private static string? ReadString(JsonNode? node, string propertyName)
+        {
+            if (node is not JsonObject obj || obj[propertyName] is not JsonValue value) return null;
+            return value.TryGetValue<string>(out var result) ? result : null;
+        }
+
+        private static double? ReadDouble(JsonNode? node, string propertyName)
+        {
+            if (node is not JsonObject obj || obj[propertyName] is not JsonValue value) return null;
+            return value.TryGetValue<double>(out var result) ? result : null;
+        }
+
+        private static long? ReadLong(JsonNode? node, string propertyName)
+        {
+            if (node is not JsonObject obj || obj[propertyName] is not JsonValue value) return null;
+            return value.TryGetValue<long>(out var result) ? result : null;
+        }
+
         public void Dispose()
         {
             _shutdown.Cancel();
@@ -671,11 +841,93 @@ internal static class BridgeDaemonHost
             Concurrency.Dispose();
             _outputLock.Dispose();
             _shutdown.Dispose();
+            _artifacts.Dispose();
         }
     }
 }
 
-internal sealed class BridgeOutboundFrameTooLargeException : Exception { }
+internal sealed class BridgeOutboundFrameTooLargeException : Exception
+{
+    public BridgeOutboundFrameTooLargeException(string frameKind, string? requestId, int serializedBytes, int maxFrameBytes)
+        : base($"Outbound frame {frameKind} is {serializedBytes} bytes; negotiated maximum is {maxFrameBytes}.")
+    {
+        FrameKind = frameKind;
+        RequestId = requestId;
+        SerializedBytes = serializedBytes;
+        MaxFrameBytes = maxFrameBytes;
+    }
+
+    public string FrameKind { get; }
+    public string? RequestId { get; }
+    public int SerializedBytes { get; }
+    public int MaxFrameBytes { get; }
+}
+
+internal sealed class BridgeArtifactStore : IDisposable
+{
+    private const int MaxArtifactBytes = 512 * 1024 * 1024;
+    // Must fit inside the protocol's minimum negotiated 64 KiB frame after
+    // base64 expansion and the result envelope. Keeping one conservative size
+    // makes the artifact command safe even when a caller deliberately uses the
+    // minimum frame budget for a transport regression test.
+    public const int ChunkSize = 32 * 1024;
+    private readonly string root;
+    private readonly ConcurrentDictionary<string, string> files = new(StringComparer.Ordinal);
+
+    public BridgeArtifactStore()
+    {
+        root = Path.Combine(Path.GetTempPath(), "SoulForge.Bridge", Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(root);
+    }
+
+    public ArtifactRecord Store(byte[] bytes)
+    {
+        if (bytes.Length <= 0 || bytes.Length > MaxArtifactBytes)
+            throw new InvalidDataException($"Bridge artifact size {bytes.Length} is outside the allowed range.");
+        var token = Guid.NewGuid().ToString("N");
+        var path = Path.Combine(root, token + ".json");
+        File.WriteAllBytes(path, bytes);
+        if (!files.TryAdd(token, path))
+        {
+            File.Delete(path);
+            throw new IOException("Bridge artifact token collision.");
+        }
+        return new ArtifactRecord(token, bytes.Length, ChunkSize);
+    }
+
+    public ArtifactChunk Read(string token, long offset, int length, CancellationToken cancellationToken)
+    {
+        if (string.IsNullOrWhiteSpace(token) || !files.TryGetValue(token, out var path))
+            throw new InvalidDataException("Bridge artifact token is unknown or expired.");
+        if (offset < 0 || length <= 0 || length > ChunkSize)
+            throw new ArgumentOutOfRangeException(nameof(length), "Bridge artifact chunk range is invalid.");
+
+        var totalLength = checked((int)new FileInfo(path).Length);
+        if (offset >= totalLength || offset + length > totalLength)
+            throw new InvalidDataException("Bridge artifact chunk range exceeds the artifact.");
+
+        var bytes = new byte[length];
+        using var stream = File.OpenRead(path);
+        stream.Position = offset;
+        cancellationToken.ThrowIfCancellationRequested();
+        stream.ReadExactly(bytes, 0, bytes.Length);
+        return new ArtifactChunk(bytes, totalLength);
+    }
+
+    public void Dispose()
+    {
+        files.Clear();
+        try
+        {
+            if (Directory.Exists(root)) Directory.Delete(root, recursive: true);
+        }
+        catch (IOException) { }
+        catch (UnauthorizedAccessException) { }
+    }
+
+    public sealed record ArtifactRecord(string Token, int ByteLength, int ChunkSize);
+    public sealed record ArtifactChunk(byte[] Bytes, int TotalLength);
+}
 
 internal sealed class BridgeInboundFrame
 {

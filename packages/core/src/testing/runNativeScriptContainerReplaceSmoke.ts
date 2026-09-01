@@ -2,7 +2,7 @@
  * Native script-container whole-inner-file replacement smoke against a real
  * luabnd (DCX DFLT + BND4) container.
  *
- * Verifies the V0.5 SCOPE-BEHAVIOR-SCRIPT writer path end-to-end:
+ * Verifies the SCOPE-BEHAVIOR-SCRIPT writer path end-to-end:
  *   snapshot real inner entry -> replace via Bridge native write-bnd4 staging
  *   -> PatchIR container_child_replace -> WorkspaceTransaction commit -> reread
  *   -> operation-level rollback restores original bytes byte-identically.

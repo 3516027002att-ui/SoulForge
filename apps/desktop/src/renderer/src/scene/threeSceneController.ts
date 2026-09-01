@@ -15,9 +15,10 @@
 import type { SceneDrawList } from './sceneManifestBrowser.js';
 import {
   type AuthoritativeAnimationClip,
+  eulerXYZToQuaternion,
   sampleAuthoritativePose
 } from '@soulforge/shared';
-import { ModelResourcePool } from './modelResourcePool.js';
+import { ModelResourcePool, normalizeModelResourceKey } from './modelResourcePool.js';
 import type {
   BufferGeometry,
   CompressedPixelFormat,
@@ -42,6 +43,14 @@ export interface TransformChangeEvent {
   scale: [number, number, number];
 }
 
+export type ProxySceneRenderState = 'proxy' | 'mesh' | 'missing';
+
+export interface ProxySceneRenderAuditItem {
+  id: string;
+  state: ProxySceneRenderState;
+  visible: boolean;
+}
+
 /** Minimal renderer surface shared by WebGPU / WebGL2 / headless fakes. */
 export interface ThreeRendererLike {
   setPixelRatio(ratio: number): void;
@@ -63,7 +72,7 @@ export interface ProxySceneHandle extends ThreeSceneHandle {
   setDrawList: (list: SceneDrawList) => void;
   /** 用真实 FLVER 网格替换某个 proxy 盒子；找不到 id 则忽略。 */
   replaceItemMesh: (id: string, mesh: FlverSceneMesh) => void;
-  /** 按 modelName 批量更新场景内所有引用该模型的 Mesh 几何体（对齐 Smithbox 几何共享池） */
+  /** 按 modelName 批量更新场景内所有引用该模型的 Mesh 几何体（对齐 Smithbox 几何共享池）。返回实际替换数。 */
   updateModelGeometry?: (modelName: string, geometryData: {
     positionsBase64: string;
     indicesBase64?: string | undefined;
@@ -71,7 +80,11 @@ export interface ProxySceneHandle extends ThreeSceneHandle {
     uvsBase64?: string | undefined;
     normalsBase64?: string | undefined;
     vertexCount: number;
-  }) => void;
+    texturePreviewToken?: string | undefined;
+    textureColorSpace?: string | undefined;
+    materialGroups?: Array<{ start: number; count: number; materialIndex: number }> | undefined;
+    texturePreviews?: Array<{ materialIndex: number; texturePreviewToken: string; colorSpace?: string }> | undefined;
+  }) => number;
 }
 
 export interface FlverSceneHandle extends ThreeSceneHandle {
@@ -113,7 +126,14 @@ export interface FlverSceneDdsTexture {
   mipmapCount: number;
 }
 
-export type FlverSceneTexture = FlverSceneRgbaTexture | FlverSceneDdsTexture;
+/** Bridge 侧生成的 PNG data URI；异步解码仍属于 projection 层，不进入语义 authority。 */
+export interface FlverSceneImageTexture {
+  kind: 'image-uri';
+  uri: string;
+  colorSpace?: 'srgb' | 'linear';
+}
+
+export type FlverSceneTexture = FlverSceneRgbaTexture | FlverSceneDdsTexture | FlverSceneImageTexture;
 
 export interface FlverSceneMesh {
   id: string;
@@ -133,6 +153,8 @@ export interface FlverSceneMesh {
   skeletonId?: string;
   skinningMode?: 'weighted' | 'rigid' | 'static';
   boneIndexSpace?: 'flver-global' | 'none';
+  /** Native material projection mode. Projected decals are not generic surfaces. */
+  previewRenderMode?: 'surface' | 'projected-decal' | undefined;
   vertexCount: number;
   wireframeOverlay?: boolean;
   texture?: FlverSceneTexture;
@@ -149,7 +171,7 @@ export interface FlverSceneBone {
   translation: [number, number, number];
   rotation: [number, number, number];
   scale?: [number, number, number];
-  rotationOrder?: 'YZX' | 'XYZ';
+  rotationOrder?: 'YZX' | 'XYZ' | 'XZY';
 }
 
 export interface FlverSceneSkeleton {
@@ -168,6 +190,28 @@ export interface FlverSceneBounds {
   max: [number, number, number];
   center: [number, number, number];
 }
+
+/** 相机取景参数；代理地图保留原有宽松默认值，角色/FLVER 可按真实尺寸取景。 */
+export interface SceneFrameOptions {
+  minSpan?: number;
+  distanceScale?: number;
+  minDistance?: number;
+  /** 角色/FLVER 预览可指定稳定的相机方位；未指定时保持地图旧默认视角。 */
+  azimuth?: number;
+  elevation?: number;
+}
+
+/**
+ * 原生 FLVER 的角色正面朝向 -Z；角色预览使用固定正面取景，
+ * 地图场景仍保留自己的相机方位与统计裁剪策略。
+ */
+export const FLVER_PREVIEW_FRAME_OPTIONS: Readonly<Required<SceneFrameOptions>> = Object.freeze({
+  minSpan: 1.5,
+  distanceScale: 1.35,
+  minDistance: 2.4,
+  azimuth: Math.PI,
+  elevation: 0.12
+});
 
 /**
  * 渲染器无关的 FLVER 语义场景：纯 typed data（float32/uint16 缓冲、数量），
@@ -197,6 +241,8 @@ interface MountInput {
    * build, letting headless smoke assert every resource is disposed on release.
    */
   resourceAudit?: (resources: ReadonlyArray<{ dispose(): void }>) => void;
+  /** Headless lifecycle seam: records proxy → mesh replacement without becoming scene authority. */
+  renderAudit?: (phase: 'content-ready' | 'mesh-ready' | 'content-cleared', items: readonly ProxySceneRenderAuditItem[]) => void;
   /** Headless functional-test seam; never used as scene authority. */
   cameraAudit?: (camera: PerspectiveCamera) => void;
 }
@@ -218,6 +264,7 @@ interface SceneCore {
   selectedId: string | null;
   setSelected: (id: string | null, notify?: boolean) => void;
   setTransformMode: (mode: TransformMode) => void;
+  getItemRenderState: (id: string) => ProxySceneRenderState;
   addMesh: (id: string, object: Object3D) => void;
   addInstanceBatch: (
     key: string,
@@ -226,8 +273,9 @@ interface SceneCore {
     material: Material
   ) => void;
   updateInstanceBatchGeometry: (key: string, geometry: BufferGeometry, material: Material) => void;
+  replaceModelGeometry: (modelName: string, geometry: BufferGeometry, material: Material | Material[]) => number;
   clearContent: () => void;
-  frameToBounds: (bounds: FlverSceneBounds) => void;
+  frameToBounds: (bounds: FlverSceneBounds, options?: SceneFrameOptions) => void;
   disposeAll: () => void;
 }
 
@@ -296,6 +344,38 @@ export function computeRobustInitialCameraBounds(list: SceneDrawList): FlverScen
   };
 }
 
+export interface ScenePointerPosition {
+  x: number;
+  y: number;
+}
+
+export interface ScenePointerDelta {
+  x: number;
+  y: number;
+  moved: boolean;
+}
+
+/**
+ * Pointer capture makes `movementX/Y` implementation-dependent in Chromium:
+ * depending on the platform they can be zero, scaled differently, or jump
+ * when the pointer crosses a window boundary.  Camera gestures therefore use
+ * the captured pointer's client coordinates as their sole delta source.
+ */
+export function computeStablePointerDelta(
+  previous: ScenePointerPosition,
+  current: ScenePointerPosition,
+  maxDelta = 150
+): ScenePointerDelta {
+  const clamp = (value: number): number => Math.max(-maxDelta, Math.min(maxDelta, value));
+  const rawX = Number.isFinite(previous.x) && Number.isFinite(current.x) ? current.x - previous.x : 0;
+  const rawY = Number.isFinite(previous.y) && Number.isFinite(current.y) ? current.y - previous.y : 0;
+  return {
+    x: clamp(rawX),
+    y: clamp(rawY),
+    moved: Math.abs(rawX) > 0.5 || Math.abs(rawY) > 0.5
+  };
+}
+
 export async function mountThreeProxyScene(
   input: MountInput & { drawList: SceneDrawList }
 ): Promise<ProxySceneHandle> {
@@ -303,10 +383,23 @@ export async function mountThreeProxyScene(
   const resourcePool = new ModelResourcePool();
   let initialFramed = false;
   let hasContent = false;
+  let activeDrawList = input.drawList;
+
+  const emitRenderAudit = (phase: 'content-ready' | 'mesh-ready' | 'content-cleared'): void => {
+    input.renderAudit?.(
+      phase,
+      activeDrawList.items.map((item) => ({
+        id: item.id,
+        state: core.getItemRenderState(item.id),
+        visible: core.meshes.get(item.id)?.visible ?? false
+      }))
+    );
+  };
 
   const setDrawList = (list: SceneDrawList): void => {
     try {
       assertNoAbsolutePathLeak(list);
+      activeDrawList = list;
       const prevSelected = core.selectedId;
       if (hasContent) resourcePool.clear();
       core.clearContent();
@@ -334,6 +427,7 @@ export async function mountThreeProxyScene(
         core.setSelected(prevSelected, false);
       }
       input.resourceAudit?.([...core.resources]);
+      emitRenderAudit('content-ready');
     } catch (error) {
       core.disposeAll();
       throw error;
@@ -358,9 +452,10 @@ export async function mountThreeProxyScene(
         core.meshes.delete(id);
       }
       core.addMesh(id, createFlverMesh(core.three, core.track, mesh));
+      emitRenderAudit('mesh-ready');
     },
     updateModelGeometry: (modelName, geometryData) => {
-      if (!geometryData.positionsBase64 || geometryData.vertexCount <= 0) return;
+      if (!geometryData.positionsBase64 || geometryData.vertexCount <= 0) return 0;
       // 1. 使用共享资源池获取或创建 BufferGeometry 和 Material
       const { geometry, material } = resourcePool.updateModelGeometry(
         core.three,
@@ -369,11 +464,17 @@ export async function mountThreeProxyScene(
         geometryData
       );
 
-      core.updateInstanceBatchGeometry(`model:${normalizeModelName(modelName)}`, geometry, material);
+      const replaced = core.replaceModelGeometry(modelName, geometry, material);
+      if (replaced === 0) {
+        throw new Error(`MAP_RENDERER_MODEL_BATCH_NOT_FOUND: ${modelName} (expected batch key model:${normalizeModelName(modelName)})`);
+      }
+      emitRenderAudit('mesh-ready');
+      return replaced;
     },
     dispose: () => {
       resourcePool.clear();
       core.disposeAll();
+      emitRenderAudit('content-cleared');
     }
   };
 }
@@ -422,7 +523,8 @@ export async function mountFlverScene(input: {
           transform.rotation[3]
         );
       } else {
-        bone.rotation.set(transform.rotation[0], transform.rotation[1], transform.rotation[2], 'YZX');
+        const quaternion = eulerXYZToQuaternion(transform.rotation as [number, number, number]);
+        bone.quaternion.set(quaternion[0], quaternion[1], quaternion[2], quaternion[3]);
       }
       const scale = transform.scale ?? [1, 1, 1];
       bone.scale.set(scale[0], scale[1], scale[2]);
@@ -464,12 +566,8 @@ export async function mountFlverScene(input: {
           const bone = new core.three.Bone();
           bone.name = b.name;
           bone.position.set(b.translation[0], b.translation[1], b.translation[2]);
-          bone.rotation.set(
-            b.rotation[0],
-            b.rotation[1],
-            b.rotation[2],
-            b.rotationOrder ?? 'YZX'
-          );
+          const quaternion = eulerXYZToQuaternion(b.rotation);
+          bone.quaternion.set(quaternion[0], quaternion[1], quaternion[2], quaternion[3]);
           const scale = b.scale ?? [1, 1, 1];
           bone.scale.set(scale[0], scale[1], scale[2]);
           threeBones.push(bone);
@@ -495,13 +593,26 @@ export async function mountFlverScene(input: {
         activeSkeletons.set(semanticSkeleton.id, { bones: threeBones, skeleton, initialBones });
       }
 
+      // A character bundle repeats the same albedo across many FLVER meshes
+      // (body/cloth/hair cards are a common example). Keep one GPU texture per
+      // image identity for this scene, as Smithbox's texture pool does, instead
+      // of asking Chromium to decode the same data URI once per mesh.
+      const textureCache = new Map<string, import('three').Texture>();
+
       // Each FLVER mesh binds only to its own local skeleton namespace.
       for (const item of semantic.meshes) {
+        if (item.previewRenderMode === 'projected-decal') continue;
         const runtime = activeSkeletons.get(item.skeletonId ?? 'default');
-        core.addMesh(item.id, createFlverMesh(core.three, core.track, item, runtime?.skeleton ?? null));
+        core.addMesh(item.id, createFlverMesh(core.three, core.track, item, runtime?.skeleton ?? null, textureCache));
       }
       createMarkers(core.three, core.track, core.markerGroup, semantic);
-      core.frameToBounds(semantic.bounds);
+      // 角色 FLVER 的真实尺寸通常只有 1~2 个游戏单位。通用代理取景
+      // 的 15/16 单位下限会把动作模型缩成原点旁的几像素，播放虽在走，
+      // 用户却看不到动作；这里按真实模型尺寸取景，仍保留较小安全下限。
+      core.frameToBounds(semantic.bounds, {
+        ...FLVER_PREVIEW_FRAME_OPTIONS,
+        minSpan: semantic.meshes.length > 0 ? FLVER_PREVIEW_FRAME_OPTIONS.minSpan : 2
+      });
       core.setSelected(null, false);
       input.resourceAudit?.([...core.resources]);
     } catch (error) {
@@ -574,6 +685,11 @@ async function mountSceneCore(input: MountInput): Promise<SceneCore> {
   canvas.style.width = '100%';
   canvas.style.height = '100%';
   canvas.style.display = 'block';
+  // The viewport owns pointer gestures.  Suppress browser panning/text
+  // selection so a right-drag cannot be stolen by Chromium's default gesture.
+  canvas.style.touchAction = 'none';
+  canvas.style.userSelect = 'none';
+  canvas.style.cursor = 'grab';
   input.container.replaceChildren(canvas);
 
   let renderer: ThreeRendererLike;
@@ -594,15 +710,26 @@ async function mountSceneCore(input: MountInput): Promise<SceneCore> {
   renderer.setPixelRatio(Math.min(typeof window !== 'undefined' && window.devicePixelRatio ? window.devicePixelRatio : 1, 2));
 
   const scene = new three.Scene();
-  scene.background = new three.Color(0x1a1d23);
+  scene.background = new three.Color(0x151922);
   const camera = new three.PerspectiveCamera(55, 1, 0.1, 50_000);
   input.cameraAudit?.(camera);
   const root = new three.Group();
   scene.add(root);
-  scene.add(new three.AmbientLight(0xffffff, 0.55));
-  const key = new three.DirectionalLight(0xffffff, 0.85);
+  // Real FLVER albedo previews have no environment map. A low ambient-only
+  // setup makes valid dark cloth/stone textures read as an untextured black
+  // silhouette, especially in the narrow action preview. Keep a neutral
+  // hemisphere/fill rig in the projection layer so both map and character
+  // previews remain readable without changing the authoritative asset data.
+  scene.add(new three.AmbientLight(0xffffff, 0.72));
+  const hemisphere = new three.HemisphereLight(0xcfe2ff, 0x493d35, 0.62);
+  hemisphere.position.set(0, 100, 0);
+  scene.add(hemisphere);
+  const key = new three.DirectionalLight(0xffffff, 0.95);
   key.position.set(40, 80, 20);
   scene.add(key);
+  const fill = new three.DirectionalLight(0xaecbff, 0.28);
+  fill.position.set(-40, 25, -30);
+  scene.add(fill);
 
   const grid = new three.GridHelper(200, 20, 0x3a4150, 0x2a303c);
   const axes = new three.AxesHelper(10);
@@ -625,6 +752,8 @@ async function mountSceneCore(input: MountInput): Promise<SceneCore> {
   const spatialCellIndex = new Map<string, Set<string>>(); // cellKey -> placementIds
   const oversizedPlacements = new Set<string>();
   const placementWorldBounds = new Map<string, import('three').Box3>();
+  const placementCells = new Map<string, string[]>();
+  const renderStates = new Map<string, ProxySceneRenderState>();
   const resources: Array<{ dispose(): void }> = [];
   const staticResources: Array<{ dispose(): void }> = [grid.geometry, axes.geometry];
   const highlightMaterials = new Set<{ dispose(): void }>();
@@ -634,18 +763,57 @@ async function mountSceneCore(input: MountInput): Promise<SceneCore> {
   };
 
   let selectedId: string | null = null;
-  let selectionGeneration = 0;
   let raf = 0;
   let disposed = false;
+
+  type TransformPointer = { x: number; y: number; button: number };
+  type UniversalTransformControl = {
+    attach(object: Object3D): void;
+    detach(): void;
+    setMode(mode: TransformMode): void;
+    getHelper?(): Object3D;
+    addEventListener(event: string, listener: (event: unknown) => void): void;
+    pointerHover(pointer: TransformPointer): void;
+    pointerDown(pointer: TransformPointer): void;
+    pointerMove(pointer: TransformPointer): void;
+    pointerUp(pointer: TransformPointer): void;
+    reset(): void;
+    dispose(): void;
+    axis?: string | null;
+    dragging?: boolean;
+    object?: Object3D;
+    mode?: TransformMode;
+  };
+
+  let transformControls: UniversalTransformControl[] = [];
+  let activeTransformControl: UniversalTransformControl | null = null;
+  let preferredTransformMode: TransformMode = 'translate';
+  let transformDragging = false;
+  let pendingTransformChange: TransformChangeEvent | null = null;
+
+  const detachUniversalControls = (): void => {
+    for (const control of transformControls) control.detach();
+    activeTransformControl = null;
+    transformDragging = false;
+  };
+
+  const attachUniversalControls = (target: Object3D): void => {
+    for (const control of transformControls) control.attach(target);
+  };
 
   const detachSelectionTarget = (id: string | null): void => {
     if (!id) return;
     const binding = instanceBindings.get(id);
-    if (!binding) return;
-    if (transformControls?.object === binding.target) transformControls.detach();
-    if (binding.target.parent) binding.target.parent.remove(binding.target);
+    const target = binding?.target ?? meshes.get(id);
+    if (!target) return;
+    if (transformControls.some((control) => control.object === target)) {
+      for (const control of transformControls) control.detach();
+    }
+    // Instance targets are temporarily attached to root while selected. Real
+    // meshes remain scene children and must not be removed on deselection.
+    if (binding && binding.target.parent) binding.target.parent.remove(binding.target);
     // post-condition: old target must be detached
-    if (binding.target.parent !== null) {
+    if (binding && binding.target.parent !== null) {
       console.error(`[gizmo] detach failed for ${id}: parent still ${binding.target.parent?.type}`);
     }
   };
@@ -666,8 +834,15 @@ async function mountSceneCore(input: MountInput): Promise<SceneCore> {
   let baseFlySpeed = 15;
   let isRightMouseDown = false;
   let isMiddleMouseDown = false;
-  let lastPointerX = 0;
-  let lastPointerY = 0;
+  type CameraGestureKind = 'right-look' | 'middle-pan';
+  interface ActiveCameraGesture {
+    pointerId: number;
+    kind: CameraGestureKind;
+    last: ScenePointerPosition;
+    moved: boolean;
+  }
+  let activeCameraGesture: ActiveCameraGesture | null = null;
+  let activeTransformPointerId: number | null = null;
 
   const updateCameraOrientation = (): void => {
     const cosPitch = Math.cos(pitch);
@@ -680,17 +855,6 @@ async function mountSceneCore(input: MountInput): Promise<SceneCore> {
   };
   updateCameraOrientation();
 
-  let transformControls: {
-    attach(object: Object3D): void;
-    detach(): void;
-    setMode(mode: 'translate' | 'rotate' | 'scale'): void;
-    getHelper?(): Object3D;
-    addEventListener(event: string, listener: (event: unknown) => void): void;
-    dispose(): void;
-    object?: Object3D;
-  } | null = null;
-  let transformDragging = false;
-  let pendingTransformChange: TransformChangeEvent | null = null;
   let suppressSelectionUntil = 0;
 
   const setSize = (): void => {
@@ -756,7 +920,8 @@ async function mountSceneCore(input: MountInput): Promise<SceneCore> {
     if (selectedId === id) {
       if (id) {
         const binding = instanceBindings.get(id);
-        if (binding && transformControls && transformControls.object !== binding.target) {
+        const target = binding?.target ?? meshes.get(id);
+        if (binding) {
           const placementRoot = root;
           if (binding.target.parent !== placementRoot) {
             binding.target.parent?.remove(binding.target);
@@ -766,10 +931,11 @@ async function mountSceneCore(input: MountInput): Promise<SceneCore> {
           }
           // single binding invariant: target parent is root
           if (binding.target.parent !== placementRoot) return;
-          transformControls.attach(binding.target);
-        } else if (id && !transformControls) {
-          // TransformControls not yet loaded; bump generation to track pending attach
-          selectionGeneration += 1;
+          if (transformControls.length > 0 && !transformControls.every((control) => control.object === binding.target)) {
+            attachUniversalControls(binding.target);
+          }
+        } else if (target && transformControls.length > 0 && !transformControls.every((control) => control.object === target)) {
+          attachUniversalControls(target);
         }
       }
       return;
@@ -777,8 +943,6 @@ async function mountSceneCore(input: MountInput): Promise<SceneCore> {
     // Detach old selection target from its batch root
     if (selectedId) detachSelectionTarget(selectedId);
     selectedId = id;
-    selectionGeneration += 1;
-    const currentGen = selectionGeneration;
     clearHighlightObjects();
     if (id) {
       applyHighlight(id);
@@ -797,30 +961,29 @@ async function mountSceneCore(input: MountInput): Promise<SceneCore> {
         binding.target.updateMatrixWorld(true);
         // invariant: InstancedMesh is direct child of placementRoot with identity local matrix (single binding per spec)
         if (binding.target.parent !== placementRoot) return;
-        if (transformControls) {
-          transformControls.attach(binding.target);
-        } else {
-          void currentGen;
-        }
+        if (transformControls.length > 0) attachUniversalControls(binding.target);
       } else {
         // Non-instanced mesh
         const target = meshes.get(id);
-        if (target && transformControls) {
+        if (target && transformControls.length > 0) {
           if (target.parent !== root) {
             target.parent?.remove(target);
             root.add(target);
           }
-          transformControls.attach(target);
+          attachUniversalControls(target);
         }
       }
     } else {
-      transformControls?.detach();
+      detachUniversalControls();
     }
     if (notify) input.onSelect?.(id);
   };
 
   const setTransformMode = (mode: TransformMode): void => {
-    if (transformControls) transformControls.setMode(mode);
+    // Compatibility for keyboard/legacy callers. Universal mode keeps all
+    // three handle families visible; the preferred family only resolves exact
+    // overlap when a pointer begins a gesture.
+    preferredTransformMode = mode;
   };
 
   const addMesh = (id: string, object: Object3D): void => {
@@ -828,8 +991,9 @@ async function mountSceneCore(input: MountInput): Promise<SceneCore> {
     root.add(object);
     pickables.add(object);
     meshes.set(id, object);
-    if (selectedId === id && transformControls) {
-      transformControls.attach(object);
+    renderStates.set(id, 'mesh');
+    if (selectedId === id && transformControls.length > 0) {
+      for (const control of transformControls) control.attach(object);
     }
   };
 
@@ -845,6 +1009,64 @@ async function mountSceneCore(input: MountInput): Promise<SceneCore> {
         new three.Vector3(1, 1, 1)
       );
     }
+  };
+
+  const removePlacementSpatialIndex = (id: string): void => {
+    for (const cellKey of placementCells.get(id) ?? []) {
+      const placements = spatialCellIndex.get(cellKey);
+      placements?.delete(id);
+      if (placements && placements.size === 0) spatialCellIndex.delete(cellKey);
+    }
+    placementCells.delete(id);
+    oversizedPlacements.delete(id);
+    placementWorldBounds.delete(id);
+  };
+
+  const indexPlacementBounds = (id: string, bounds: import('three').Box3): void => {
+    removePlacementSpatialIndex(id);
+    if (![...bounds.min.toArray(), ...bounds.max.toArray()].every(Number.isFinite)) return;
+    placementWorldBounds.set(id, bounds.clone());
+    const minCellX = Math.floor(bounds.min.x / CELL_SIZE);
+    const minCellY = Math.floor(bounds.min.y / CELL_SIZE);
+    const minCellZ = Math.floor(bounds.min.z / CELL_SIZE);
+    const maxCellX = Math.floor(bounds.max.x / CELL_SIZE);
+    const maxCellY = Math.floor(bounds.max.y / CELL_SIZE);
+    const maxCellZ = Math.floor(bounds.max.z / CELL_SIZE);
+    const coveredCount = (maxCellX - minCellX + 1) * (maxCellY - minCellY + 1) * (maxCellZ - minCellZ + 1);
+    if (coveredCount > 4096) {
+      oversizedPlacements.add(id);
+      return;
+    }
+    const cells: string[] = [];
+    for (let cx = minCellX; cx <= maxCellX; cx += 1) {
+      for (let cy = minCellY; cy <= maxCellY; cy += 1) {
+        for (let cz = minCellZ; cz <= maxCellZ; cz += 1) {
+          const cellKey = `${cx},${cy},${cz}`;
+          const placements = spatialCellIndex.get(cellKey) ?? new Set<string>();
+          placements.add(id);
+          spatialCellIndex.set(cellKey, placements);
+          cells.push(cellKey);
+        }
+      }
+    }
+    placementCells.set(id, cells);
+  };
+
+  const updateObjectBounds = (id: string, object: Object3D): void => {
+    const box = new three.Box3();
+    let foundGeometry: BufferGeometry | undefined;
+    object.traverse((child) => {
+      if (!foundGeometry && (child as Mesh).isMesh) foundGeometry = (child as Mesh).geometry;
+    });
+    object.updateMatrixWorld(true);
+    const geometry = foundGeometry;
+    if (geometry) {
+      if (!geometry.boundingBox) geometry.computeBoundingBox();
+      if (geometry.boundingBox) box.copy(geometry.boundingBox).applyMatrix4(object.matrixWorld);
+    }
+    if (box.isEmpty()) box.setFromObject(object);
+    if (box.isEmpty()) box.setFromCenterAndSize(object.position, new three.Vector3(1, 1, 1));
+    indexPlacementBounds(id, box);
   };
 
   const addInstanceBatch = (
@@ -889,6 +1111,7 @@ async function mountSceneCore(input: MountInput): Promise<SceneCore> {
         worldBounds: new three.Box3()
       };
       meshes.set(item.id, target);
+      renderStates.set(item.id, 'proxy');
       instanceBindings.set(item.id, binding);
       // placement -> all chunks identity: append to forward table (sorted by batchKey)
       const arr = placementToAllChunkBindings.get(item.id) ?? [];
@@ -896,25 +1119,7 @@ async function mountSceneCore(input: MountInput): Promise<SceneCore> {
       arr.sort((a,b)=> a.batchKey.localeCompare(b.batchKey));
       placementToAllChunkBindings.set(item.id, arr);
       updateBindingBounds(binding);
-      placementWorldBounds.set(item.id, binding.worldBounds.clone());
-      // spatial cell index: insert placement into overlapped cells (single cell for proxy point)
-      const minCellX = Math.floor(binding.worldBounds.min.x / CELL_SIZE);
-      const minCellY = Math.floor(binding.worldBounds.min.y / CELL_SIZE);
-      const minCellZ = Math.floor(binding.worldBounds.min.z / CELL_SIZE);
-      const maxCellX = Math.floor(binding.worldBounds.max.x / CELL_SIZE);
-      const maxCellY = Math.floor(binding.worldBounds.max.y / CELL_SIZE);
-      const maxCellZ = Math.floor(binding.worldBounds.max.z / CELL_SIZE);
-      const coveredCount = (maxCellX - minCellX + 1) * (maxCellY - minCellY + 1) * (maxCellZ - minCellZ + 1);
-      if (coveredCount > 4096) {
-        oversizedPlacements.add(item.id);
-      } else {
-        for (let cx = minCellX; cx <= maxCellX; cx++) for (let cy = minCellY; cy <= maxCellY; cy++) for (let cz = minCellZ; cz <= maxCellZ; cz++) {
-          const k = `${cx},${cy},${cz}`;
-          const set = spatialCellIndex.get(k) ?? new Set<string>();
-          set.add(item.id);
-          spatialCellIndex.set(k, set);
-        }
-      }
+      indexPlacementBounds(item.id, binding.worldBounds);
     }
     instanced.instanceMatrix.needsUpdate = true;
     if (instanced.instanceColor) instanced.instanceColor.needsUpdate = true;
@@ -942,7 +1147,10 @@ async function mountSceneCore(input: MountInput): Promise<SceneCore> {
     batch.mesh.instanceColor = null;
     for (const id of batch.ids) {
       const binding = instanceBindings.get(id);
-      if (binding) updateBindingBounds(binding);
+      if (binding) {
+        updateBindingBounds(binding);
+        indexPlacementBounds(id, binding.worldBounds);
+      }
     }
     batch.mesh.computeBoundingBox();
     batch.mesh.computeBoundingSphere();
@@ -952,43 +1160,156 @@ async function mountSceneCore(input: MountInput): Promise<SceneCore> {
     }
   };
 
+  const replaceModelGeometry = (
+    modelName: string,
+    geometry: BufferGeometry,
+    material: Material | Material[]
+  ): number => {
+    const modelKey = normalizeModelName(modelName);
+    const batchKey = `model:${modelKey}`;
+    const batches = [...instanceBatches.values()].filter((batch) => batch.key === batchKey);
+    const replacements: Array<{ id: string; object: Object3D }> = [];
+
+    // Build every real object while the proxy batch is still intact. No scene
+    // mutation occurs until all placements can be represented, so a renderer
+    // allocation/geometry error leaves the original proxy available.
+    for (const batch of batches) {
+      for (const id of batch.ids) {
+        const binding = instanceBindings.get(id);
+        if (!binding) continue;
+        const object = new three.Mesh(geometry, material);
+        object.userData.itemId = id;
+        object.userData.modelName = modelName;
+        object.position.copy(binding.target.position);
+        object.quaternion.copy(binding.target.quaternion);
+        object.scale.copy(binding.target.scale);
+        replacements.push({ id, object });
+      }
+    }
+
+    // A repeated READY notification updates the existing real meshes without
+    // resurrecting a proxy or creating duplicate scene entities.
+    if (batches.length === 0) {
+      const existing = [...meshes.entries()].filter(([id, object]) => (
+        renderStates.get(id) === 'mesh'
+        && normalizeModelName(String(object.userData.modelName ?? '')) === modelKey
+      ));
+      for (const [id, object] of existing) {
+        const mesh = object as Mesh;
+        mesh.geometry = geometry;
+        mesh.material = material;
+        updateObjectBounds(id, mesh);
+      }
+      if (selectedId && existing.some(([id]) => id === selectedId)) {
+        clearHighlightObjects();
+        applyHighlight(selectedId);
+      }
+      return existing.length;
+    }
+
+    if (replacements.length === 0) return 0;
+
+    const replacementIds = new Set(replacements.map(({ id }) => id));
+    const selectedReplacement = selectedId !== null && replacementIds.has(selectedId);
+    if (selectedReplacement) {
+      detachUniversalControls();
+      clearHighlightObjects();
+    }
+
+    for (const batch of batches) {
+      root.remove(batch.mesh);
+      instanceBatches.delete(batch.key);
+      for (const id of batch.ids) {
+        const binding = instanceBindings.get(id);
+        if (binding?.target.parent) binding.target.parent.remove(binding.target);
+        instanceBindings.delete(id);
+        placementToAllChunkBindings.delete(id);
+        removePlacementSpatialIndex(id);
+        meshes.delete(id);
+        renderStates.delete(id);
+      }
+    }
+
+    // Commit the replacement as one synchronous scene operation: the old
+    // InstancedMesh is removed and every real placement is added in this same
+    // turn, before the next render frame can observe the scene.
+    for (const { id, object } of replacements) {
+      root.add(object);
+      pickables.add(object);
+      meshes.set(id, object);
+      renderStates.set(id, 'mesh');
+      updateObjectBounds(id, object);
+    }
+
+    if (selectedReplacement && selectedId) {
+      const selectedObject = meshes.get(selectedId);
+      if (selectedObject) {
+        applyHighlight(selectedId);
+        attachUniversalControls(selectedObject);
+      }
+    }
+    return replacements.length;
+  };
+
+  const getItemRenderState = (id: string): ProxySceneRenderState => renderStates.get(id) ?? 'missing';
+
   const clearContent = (): void => {
     if (selectedId) detachSelectionTarget(selectedId);
     selectedId = null;
-    selectionGeneration += 1;
-    transformControls?.detach();
+    detachUniversalControls();
+    pendingTransformChange = null;
     clearHighlightObjects();
     for (const object of root.children.slice()) root.remove(object);
     meshes.clear();
     instanceBindings.clear();
     placementToAllChunkBindings.clear();
     spatialCellIndex.clear();
+    placementCells.clear();
     oversizedPlacements.clear();
     placementWorldBounds.clear();
     instanceBatches.clear();
     pickables.clear();
+    renderStates.clear();
     for (const object of markerGroup.children.slice()) markerGroup.remove(object);
     for (const resource of resources) resource.dispose();
     resources.length = 0;
   };
 
   let lastBounds: FlverSceneBounds | null = null;
+  let lastFrameOptions: SceneFrameOptions = {};
 
-  const frameToBounds = (bounds: FlverSceneBounds): void => {
+  const frameToBounds = (bounds: FlverSceneBounds, options: SceneFrameOptions = {}): void => {
+    const effectiveOptions = Object.keys(options).length > 0 ? options : lastFrameOptions;
     const [cx, cy, cz] = bounds.center;
     const span = Math.max(
       bounds.max[0] - bounds.min[0],
       bounds.max[1] - bounds.min[1],
       bounds.max[2] - bounds.min[2],
-      15
+      effectiveOptions.minSpan ?? 15
     );
     lastBounds = bounds;
+    lastFrameOptions = effectiveOptions;
     // 动态校准基准移动速度，超大地图与局部模型均能自适应
     baseFlySpeed = Math.max(10, Math.min(span * 0.12, 120));
 
     // 计算合理视距：俯视主要建筑群
-    const dist = Math.max(span * 1.0, 16);
-    camera.position.set(cx + dist, cy + dist * 0.75, cz + dist);
+    const dist = Math.max(
+      span * (effectiveOptions.distanceScale ?? 1.0),
+      effectiveOptions.minDistance ?? 16
+    );
+    if (effectiveOptions.azimuth !== undefined || effectiveOptions.elevation !== undefined) {
+      const azimuth = effectiveOptions.azimuth ?? Math.PI / 4;
+      const elevation = effectiveOptions.elevation ?? Math.atan(0.75 / Math.sqrt(2));
+      const horizontalDistance = Math.cos(elevation) * dist;
+      camera.position.set(
+        cx + Math.sin(azimuth) * horizontalDistance,
+        cy + Math.sin(elevation) * dist,
+        cz + Math.cos(azimuth) * horizontalDistance
+      );
+    } else {
+      // 地图代理维持原有的右前上方宽松视角。
+      camera.position.set(cx + dist, cy + dist * 0.75, cz + dist);
+    }
     camera.lookAt(cx, cy, cz);
     camera.updateMatrixWorld(true);
 
@@ -998,23 +1319,36 @@ async function mountSceneCore(input: MountInput): Promise<SceneCore> {
     yaw = Math.atan2(dir.x, -dir.z);
   };
 
-  // 挂载 TransformControls (Gizmo)
-  const pendingGenerationAtImport = selectionGeneration;
+  // 挂载 Universal Transform Gizmo。Three.js 的 TransformControls 本身一次
+  // 只展示一种 mode，因此这里把三份 mode-specific control 绑定到同一个
+  // semantic target：三个 helper 同时可见，pointerdown 只由命中的那一份
+  // control 接管，仍然只产生一个 drag 生命周期。
   void import('three/examples/jsm/controls/TransformControls.js')
     .then((module) => {
       if (disposed) return;
       const { TransformControls } = module as unknown as {
         TransformControls: new (
           camera: PerspectiveCamera,
-          element: HTMLElement
-        ) => NonNullable<typeof transformControls>;
+          element?: HTMLElement
+        ) => UniversalTransformControl;
       };
-      const tc = new TransformControls(camera, canvas as unknown as HTMLElement);
-      const helper = tc.getHelper ? tc.getHelper() : (tc as unknown as Object3D);
-      scene.add(helper);
+      const controls = (['translate', 'rotate', 'scale'] as const).map((mode) => {
+        // TransformControls.disconnect() removes listeners from its domElement
+        // during dispose(). Passing the actual scene canvas is required here:
+        // the MSB panel can be remounted while the first async scene mount is
+        // still settling, and a control constructed without a domElement
+        // crashes the React error boundary on that normal cleanup path.
+        const control = new TransformControls(camera, canvas);
+        control.setMode(mode);
+        const helper = control.getHelper ? control.getHelper() : (control as unknown as Object3D);
+        scene.add(helper);
+        return control;
+      });
+      transformControls = controls;
 
-      tc.addEventListener('objectChange', () => {
-        const target = tc.object;
+      const onObjectChange = (control: UniversalTransformControl): void => {
+        if (activeTransformControl !== null && activeTransformControl !== control) return;
+        const target = control.object;
         if (!target) return;
         const itemId = (target.userData.itemId as string | undefined) ?? selectedId;
         if (!itemId) return;
@@ -1037,7 +1371,14 @@ async function mountSceneCore(input: MountInput): Promise<SceneCore> {
           }
           // mark each distinct instancedMesh needsUpdate exactly once
           const seen = new Set<import('three').InstancedMesh>();
-          for (const b of allBindings) if (!seen.has(b.mesh)) { seen.add(b.mesh); b.mesh.instanceMatrix.needsUpdate = true; }
+          for (const b of allBindings) {
+            updateBindingBounds(b);
+            if (!seen.has(b.mesh)) {
+              seen.add(b.mesh);
+              b.mesh.instanceMatrix.needsUpdate = true;
+            }
+          }
+          indexPlacementBounds(itemId, allBindings[0]!.worldBounds);
         } else if (binding) {
           const batch = instanceBatches.get(binding.batchKey);
           const batchRoot = batch?.root ?? (binding.mesh.parent as Object3D) ?? root;
@@ -1046,8 +1387,12 @@ async function mountSceneCore(input: MountInput): Promise<SceneCore> {
             return;
           }
           target.updateMatrix();
-          binding.mesh.setMatrixAt(binding.instanceIndex, target.matrix);
-          binding.mesh.instanceMatrix.needsUpdate = true;
+           binding.mesh.setMatrixAt(binding.instanceIndex, target.matrix);
+           binding.mesh.instanceMatrix.needsUpdate = true;
+           updateBindingBounds(binding);
+           indexPlacementBounds(itemId, binding.worldBounds);
+        } else if (renderStates.get(itemId) === 'mesh') {
+           updateObjectBounds(itemId, target);
         }
         const pos: [number, number, number] = [
           Math.round(target.position.x * 1e4) / 1e4,
@@ -1066,109 +1411,298 @@ async function mountSceneCore(input: MountInput): Promise<SceneCore> {
         ];
         syncHighlightTransform(itemId);
         pendingTransformChange = { id: itemId, position: pos, rotation: rot, scale: scl };
-      });
+      };
 
-      tc.addEventListener('dragging-changed', (event: unknown) => {
+      for (const control of controls) {
+        control.addEventListener('objectChange', () => onObjectChange(control));
+        control.addEventListener('dragging-changed', (event: unknown) => {
         const dragging = Boolean((event as { value?: unknown }).value);
-        transformDragging = dragging;
-        const itemId = (tc.object?.userData.itemId as string | undefined) ?? selectedId;
-        const binding = itemId ? instanceBindings.get(itemId) : undefined;
-        if (binding) {
-          if (dragging) {
-            binding.mesh.frustumCulled = false;
-          } else {
+        if (dragging) {
+          transformDragging = true;
+          activeTransformControl = control;
+          const itemId = (control.object?.userData.itemId as string | undefined) ?? selectedId;
+          const bindings = itemId
+            ? (placementToAllChunkBindings.get(itemId) ?? (instanceBindings.get(itemId) ? [instanceBindings.get(itemId)!] : []))
+            : [];
+          for (const binding of bindings) binding.mesh.frustumCulled = false;
+        } else if (activeTransformControl === control) {
+          const itemId = (control.object?.userData.itemId as string | undefined) ?? selectedId;
+          const bindings = itemId
+            ? (placementToAllChunkBindings.get(itemId) ?? (instanceBindings.get(itemId) ? [instanceBindings.get(itemId)!] : []))
+            : [];
+          for (const binding of bindings) {
             updateBindingBounds(binding);
+            indexPlacementBounds(itemId!, binding.worldBounds);
             binding.mesh.computeBoundingBox();
             binding.mesh.computeBoundingSphere();
             binding.mesh.frustumCulled = true;
           }
-        }
-        if (!dragging) {
-          suppressSelectionUntil = (typeof performance !== 'undefined' ? performance.now() : Date.now()) + 80;
-          if (pendingTransformChange) input.onTransformChange?.(pendingTransformChange);
-          pendingTransformChange = null;
-        }
-      });
-
-      transformControls = tc;
-      // Attach only if selection generation hasn't moved past import's snapshot
-      if (selectedId && selectionGeneration === pendingGenerationAtImport) {
-        const binding = instanceBindings.get(selectedId);
-        if (binding) {
-          const batch = instanceBatches.get(binding.batchKey);
-          const batchRoot = batch?.root ?? (binding.mesh.parent as Object3D) ?? root;
-          if (binding.target.parent !== batchRoot) {
-            binding.target.parent?.remove(binding.target);
-            batchRoot.add(binding.target);
+          if (itemId && renderStates.get(itemId) === 'mesh') {
+            const target = meshes.get(itemId);
+            if (target) updateObjectBounds(itemId, target);
           }
-          if (assertAttachedToBatchRoot(binding)) tc.attach(binding.target);
-        } else {
-          const target = meshes.get(selectedId);
-          if (target) tc.attach(target);
+          transformDragging = controls.some((candidate) => Boolean(candidate.dragging));
+          if (!transformDragging) {
+            suppressSelectionUntil = (typeof performance !== 'undefined' ? performance.now() : Date.now()) + 80;
+            if (pendingTransformChange) input.onTransformChange?.(pendingTransformChange);
+            pendingTransformChange = null;
+            activeTransformControl = null;
+          }
         }
-      } else if (selectedId && selectionGeneration !== pendingGenerationAtImport) {
-        // Stale generation: do not attach old target; setSelected will handle current generation on next call
+        });
+      }
+
+      if (selectedId) {
+        const binding = instanceBindings.get(selectedId);
+        const target = binding?.target ?? meshes.get(selectedId);
+        if (target) {
+          if (binding) {
+            const batch = instanceBatches.get(binding.batchKey);
+            const batchRoot = batch?.root ?? (binding.mesh.parent as Object3D) ?? root;
+            if (binding.target.parent !== batchRoot) {
+              binding.target.parent?.remove(binding.target);
+              batchRoot.add(binding.target);
+            }
+            if (assertAttachedToBatchRoot(binding)) attachUniversalControls(target);
+          } else {
+            attachUniversalControls(target);
+          }
+        }
       }
     })
     .catch(() => undefined);
 
-  // ---- 鼠标右键原地转头与中键平移控制 ----
-  const onMouseDown = (event: MouseEvent): void => {
-    if (transformDragging) return;
-    if (event.button === 2) {
-      isRightMouseDown = true;
-      lastPointerX = event.clientX;
-      lastPointerY = event.clientY;
-      canvas.focus();
-    } else if (event.button === 1) {
-      isMiddleMouseDown = true;
-      lastPointerX = event.clientX;
-      lastPointerY = event.clientY;
+  const transformPointer = (event: PointerEvent, button: number): TransformPointer => {
+    const rect = canvas.getBoundingClientRect();
+    return {
+      x: ((event.clientX - rect.left) / Math.max(rect.width, 1)) * 2 - 1,
+      y: -((event.clientY - rect.top) / Math.max(rect.height, 1)) * 2 + 1,
+      button
+    };
+  };
+
+  const pickUniversalControl = (pointer: TransformPointer): UniversalTransformControl | null => {
+    scene.updateMatrixWorld(true);
+    const ordered = [...transformControls].sort((left, right) => (
+      left.mode === preferredTransformMode ? -1 : right.mode === preferredTransformMode ? 1 : 0
+    ));
+    for (const control of ordered) {
+      control.pointerHover(pointer);
+      if (control.axis !== null && control.axis !== undefined) return control;
+    }
+    return null;
+  };
+
+  const focusCanvas = (): void => {
+    canvas.focus({ preventScroll: true });
+  };
+
+  const tryCapturePointer = (pointerId: number): void => {
+    if (!Number.isFinite(pointerId) || typeof canvas.setPointerCapture !== 'function') return;
+    try {
+      canvas.setPointerCapture(pointerId);
+    } catch {
+      // The pointer can disappear between pointerdown and capture (for
+      // example when the window loses focus). The gesture still remains
+      // client-coordinate driven and will be closed by pointerup/blur.
+    }
+  };
+
+  const releasePointer = (pointerId: number | null): void => {
+    if (pointerId === null || !Number.isFinite(pointerId) || typeof canvas.releasePointerCapture !== 'function') return;
+    try {
+      if (canvas.hasPointerCapture?.(pointerId)) canvas.releasePointerCapture(pointerId);
+    } catch {
+      // Release is best-effort: Chromium may already have released capture
+      // while dispatching pointercancel or a window blur.
+    }
+  };
+
+  const now = (): number => typeof performance !== 'undefined' ? performance.now() : Date.now();
+
+  const finishCameraGesture = (markSelectionSuppression: boolean): void => {
+    const gesture = activeCameraGesture;
+    if (!gesture) {
+      isRightMouseDown = false;
+      isMiddleMouseDown = false;
+      canvas.style.cursor = 'grab';
+      return;
+    }
+    // Secondary clicks must never be reinterpreted as a primary selection by
+    // a platform-specific synthesized click. A middle pan only suppresses
+    // selection after actual movement; a right gesture suppresses even a
+    // stationary click for the same reason.
+    if (markSelectionSuppression && (gesture.moved || gesture.kind === 'right-look')) {
+      suppressSelectionUntil = now() + 120;
+    }
+    releasePointer(gesture.pointerId);
+    activeCameraGesture = null;
+    isRightMouseDown = false;
+    isMiddleMouseDown = false;
+    canvas.style.cursor = 'grab';
+  };
+
+  const cancelTransformGesture = (): void => {
+    const control = activeTransformControl;
+    if (!control) {
+      activeTransformPointerId = null;
+      transformDragging = false;
+      return;
+    }
+    releasePointer(activeTransformPointerId);
+    control.reset();
+    pendingTransformChange = null;
+    control.pointerUp({ x: 0, y: 0, button: 0 });
+    activeTransformControl = null;
+    activeTransformPointerId = null;
+    transformDragging = false;
+  };
+
+  const onPointerDown = (event: PointerEvent): void => {
+    if (event.button === 2 || event.button === 1) {
+      // Camera gestures have priority over hover-only gizmo state, but never
+      // interrupt an active transform drag. Keeping one owner/pointer avoids
+      // mixed right+middle state when Chromium reports a late button event.
+      if (transformDragging) {
+        event.preventDefault();
+        event.stopPropagation();
+        return;
+      }
+      if (activeCameraGesture && activeCameraGesture.pointerId !== event.pointerId) return;
+      const kind: CameraGestureKind = event.button === 2 ? 'right-look' : 'middle-pan';
+      activeCameraGesture = {
+        pointerId: event.pointerId,
+        kind,
+        last: { x: event.clientX, y: event.clientY },
+        moved: false
+      };
+      isRightMouseDown = kind === 'right-look';
+      isMiddleMouseDown = kind === 'middle-pan';
+      focusCanvas();
+      canvas.style.cursor = 'grabbing';
+      tryCapturePointer(event.pointerId);
       event.preventDefault();
+      event.stopPropagation();
+      return;
+    }
+    if (event.button !== 0 || activeTransformControl || transformControls.length === 0) return;
+    const control = pickUniversalControl(transformPointer(event, 0));
+    if (!control) return;
+    activeTransformControl = control;
+    activeTransformPointerId = event.pointerId;
+    control.pointerDown(transformPointer(event, 0));
+    if (!control.dragging) {
+      activeTransformControl = null;
+      activeTransformPointerId = null;
+      return;
+    }
+    tryCapturePointer(event.pointerId);
+    event.preventDefault();
+    event.stopPropagation();
+  };
+
+  const onPointerMove = (event: PointerEvent): void => {
+    if (activeTransformControl) {
+      if (activeTransformPointerId !== null && event.pointerId !== activeTransformPointerId) return;
+      activeTransformControl.pointerMove(transformPointer(event, -1));
+      event.preventDefault();
+      event.stopPropagation();
+      return;
+    }
+    const gesture = activeCameraGesture;
+    if (gesture && event.pointerId === gesture.pointerId) {
+      // Do not use movementX/Y here. They are unreliable under pointer capture
+      // and can report zero for a visibly moved pointer in Electron.
+      const delta = computeStablePointerDelta(gesture.last, { x: event.clientX, y: event.clientY });
+      gesture.last = { x: event.clientX, y: event.clientY };
+      if (delta.moved) gesture.moved = true;
+      if (delta.x !== 0 || delta.y !== 0) {
+        if (gesture.kind === 'right-look') {
+          const sensitivity = 0.0028;
+          yaw -= delta.x * sensitivity;
+          pitch = Math.max(-1.55, Math.min(1.55, pitch - delta.y * sensitivity));
+          updateCameraOrientation();
+        } else {
+          const panSpeed = baseFlySpeed * 0.0018;
+          const forward = new three.Vector3();
+          camera.getWorldDirection(forward);
+          const right = new three.Vector3().crossVectors(forward, new three.Vector3(0, 1, 0)).normalize();
+          const up = new three.Vector3().crossVectors(right, forward).normalize();
+          camera.position.addScaledVector(right, -delta.x * panSpeed);
+          camera.position.addScaledVector(up, delta.y * panSpeed);
+        }
+      }
+      event.preventDefault();
+      event.stopPropagation();
+      return;
+    }
+    if (event.pointerType === 'mouse' || event.pointerType === 'pen') {
+      pickUniversalControl(transformPointer(event, -1));
     }
   };
 
-  const onMouseMove = (event: MouseEvent): void => {
-    if (transformDragging) return;
-    const dx = event.movementX !== undefined && Math.abs(event.movementX) < 100
-      ? event.movementX
-      : (event.clientX - lastPointerX);
-    const dy = event.movementY !== undefined && Math.abs(event.movementY) < 100
-      ? event.movementY
-      : (event.clientY - lastPointerY);
-    lastPointerX = event.clientX;
-    lastPointerY = event.clientY;
-
-    if (isRightMouseDown) {
-      // 鼠标转头：灵敏度稳定，不随距离产生非线性公转
-      const sensitivity = 0.0028;
-      yaw -= dx * sensitivity;
-      pitch -= dy * sensitivity;
-      pitch = Math.max(-1.55, Math.min(1.55, pitch));
-      updateCameraOrientation();
-    } else if (isMiddleMouseDown) {
-      // 中键屏幕空间平移
-      const panSpeed = baseFlySpeed * 0.0018;
-      const forward = new three.Vector3();
-      camera.getWorldDirection(forward);
-      const right = new three.Vector3().crossVectors(forward, new three.Vector3(0, 1, 0)).normalize();
-      const up = new three.Vector3().crossVectors(right, forward).normalize();
-      camera.position.addScaledVector(right, -dx * panSpeed);
-      camera.position.addScaledVector(up, dy * panSpeed);
+  const onPointerUp = (event: PointerEvent): void => {
+    if (activeCameraGesture && event.pointerId === activeCameraGesture.pointerId) {
+      finishCameraGesture(true);
+      event.preventDefault();
+      event.stopPropagation();
+      return;
     }
+    if (event.button === 2 || event.button === 1) {
+      releasePointer(event.pointerId);
+      return;
+    }
+    if (!activeTransformControl || (activeTransformPointerId !== null && event.pointerId !== activeTransformPointerId)) return;
+    const control = activeTransformControl;
+    control.pointerUp(transformPointer(event, 0));
+    releasePointer(activeTransformPointerId);
+    activeTransformPointerId = null;
+    event.preventDefault();
+    event.stopPropagation();
   };
 
-  const onMouseUp = (event: MouseEvent): void => {
-    if (event.button === 2) isRightMouseDown = false;
-    if (event.button === 1) isMiddleMouseDown = false;
+  const onPointerCancel = (event: PointerEvent): void => {
+    if (activeCameraGesture && (event.pointerId === activeCameraGesture.pointerId || !Number.isFinite(event.pointerId))) {
+      finishCameraGesture(false);
+    } else {
+      releasePointer(event.pointerId);
+      isRightMouseDown = false;
+      isMiddleMouseDown = false;
+    }
+    if (activeTransformControl && (activeTransformPointerId === null || event.pointerId === activeTransformPointerId)) {
+      cancelTransformGesture();
+    }
+    event.preventDefault();
+    event.stopPropagation();
   };
+
+  canvas.addEventListener('pointerdown', onPointerDown);
+  canvas.addEventListener('pointermove', onPointerMove);
+  canvas.addEventListener('pointerup', onPointerUp);
+  canvas.addEventListener('pointercancel', onPointerCancel);
+  if (typeof window !== 'undefined') {
+    window.addEventListener('pointerup', onPointerUp);
+    window.addEventListener('pointercancel', onPointerCancel);
+  }
 
   const onContextMenu = (event: MouseEvent): void => {
-    event.preventDefault(); // 拦截右键菜单，保障关卡漫游体验
+    // Secondary click is a camera gesture, never a browser/parent-panel menu.
+    event.preventDefault();
+    event.stopPropagation();
+  };
+
+  const onAuxClick = (event: MouseEvent): void => {
+    if (event.button !== 1 && event.button !== 2) return;
+    // Chromium may emit auxclick after pointerup even when contextmenu was
+    // cancelled. Swallow it so a right click cannot bubble into a selection
+    // or panel command.
+    event.preventDefault();
+    event.stopPropagation();
   };
 
   const onWheel = (event: WheelEvent): void => {
     if (transformDragging) return;
+    event.preventDefault();
     if (event.ctrlKey || event.altKey) {
       // 调节漫游速度
       const factor = event.deltaY < 0 ? 1.2 : 0.83;
@@ -1182,13 +1716,9 @@ async function mountSceneCore(input: MountInput): Promise<SceneCore> {
     }
   };
 
-  canvas.addEventListener('mousedown', onMouseDown);
   canvas.addEventListener('contextmenu', onContextMenu);
-  canvas.addEventListener('wheel', onWheel, { passive: true });
-  if (typeof window !== 'undefined') {
-    window.addEventListener('mousemove', onMouseMove);
-    window.addEventListener('mouseup', onMouseUp);
-  }
+  canvas.addEventListener('auxclick', onAuxClick);
+  canvas.addEventListener('wheel', onWheel, { passive: false });
 
   // WASD 连续漫游
   const pressed = new Set<string>();
@@ -1203,6 +1733,10 @@ async function mountSceneCore(input: MountInput): Promise<SceneCore> {
 
   const onKeyDown = (event: KeyboardEvent): void => {
     if (isTypingTarget(event.target)) return;
+    // 只在视口获得焦点（或正在按住相机键）时接管键盘，避免用户在
+    // 左侧列表/属性输入框操作时地图偷偷移动；这也是 Smithbox 的
+    // viewport-focused shortcut 语义。
+    if (document.activeElement !== canvas && !isRightMouseDown && !isMiddleMouseDown) return;
     const key = event.key.toLowerCase();
     if (event.shiftKey) pressed.add('shift');
     else pressed.delete('shift');
@@ -1250,11 +1784,13 @@ async function mountSceneCore(input: MountInput): Promise<SceneCore> {
   };
   const onWindowBlur = (): void => {
     pressed.clear();
-    isRightMouseDown = false;
-    isMiddleMouseDown = false;
+    finishCameraGesture(false);
+    cancelTransformGesture();
   };
   const onDblClick = (): void => { if (lastBounds) frameToBounds(lastBounds); };
-  const onCanvasClick = (): void => canvas.focus();
+  const onCanvasClick = (event: MouseEvent): void => {
+    if ((event.button ?? 0) === 0) focusCanvas();
+  };
   canvas.tabIndex = 0;
 
   if (typeof window !== 'undefined') {
@@ -1444,15 +1980,21 @@ async function mountSceneCore(input: MountInput): Promise<SceneCore> {
   const disposeAll = (): void => {
     disposed = true;
     cancelAnimationFrame(raf);
-    canvas.removeEventListener('mousedown', onMouseDown);
+    finishCameraGesture(false);
+    cancelTransformGesture();
     canvas.removeEventListener('contextmenu', onContextMenu);
+    canvas.removeEventListener('auxclick', onAuxClick);
     canvas.removeEventListener('wheel', onWheel);
+    canvas.removeEventListener('pointerdown', onPointerDown);
+    canvas.removeEventListener('pointermove', onPointerMove);
+    canvas.removeEventListener('pointerup', onPointerUp);
+    canvas.removeEventListener('pointercancel', onPointerCancel);
     canvas.removeEventListener('click', onClick);
     canvas.removeEventListener('dblclick', onDblClick);
     canvas.removeEventListener('click', onCanvasClick);
     if (typeof window !== 'undefined') {
-      window.removeEventListener('mousemove', onMouseMove);
-      window.removeEventListener('mouseup', onMouseUp);
+      window.removeEventListener('pointerup', onPointerUp);
+      window.removeEventListener('pointercancel', onPointerCancel);
       window.removeEventListener('resize', onResize);
       window.removeEventListener('keydown', onKeyDown);
       window.removeEventListener('keyup', onKeyUp);
@@ -1460,7 +2002,8 @@ async function mountSceneCore(input: MountInput): Promise<SceneCore> {
     }
     resizeObserver?.disconnect();
     resizeObserver = null;
-    transformControls?.dispose();
+    for (const control of transformControls) control.dispose();
+    transformControls = [];
     clearContent();
     for (const resource of staticResources) resource.dispose();
     renderer.dispose();
@@ -1486,9 +2029,11 @@ async function mountSceneCore(input: MountInput): Promise<SceneCore> {
     },
     setSelected,
     setTransformMode,
+    getItemRenderState,
     addMesh,
     addInstanceBatch,
     updateInstanceBatchGeometry,
+    replaceModelGeometry,
     clearContent,
     frameToBounds,
     disposeAll
@@ -1521,8 +2066,7 @@ interface SceneDrawBatch {
 }
 
 function normalizeModelName(raw: string): string {
-  const base = raw.replace(/\\/g, '/').split('/').pop() ?? raw;
-  return base.toLowerCase().replace(/\.(flver|mapbnd)(\.dcx)?$/i, '');
+  return normalizeModelResourceKey(raw);
 }
 
 /** 纯数据分组：同一模型的所有 placement 进入一个 GPU instance batch。 */
@@ -1544,7 +2088,8 @@ function createFlverMesh(
   three: ThreeModule,
   track: ResourceTracker,
   item: FlverSceneMesh,
-  skeleton: import('three').Skeleton | null = null
+  skeleton: import('three').Skeleton | null = null,
+  textureCache?: Map<string, import('three').Texture>
 ): Object3D {
   const geometry = track(new three.BufferGeometry());
   geometry.setAttribute('position', new three.BufferAttribute(item.positions, 3));
@@ -1568,12 +2113,18 @@ function createFlverMesh(
     geometry.setAttribute('skinWeight', new three.Float32BufferAttribute(item.skinWeights, 4));
   }
 
-  const texture = item.texture ? createTexture(three, track, item.texture) : null;
+  const texture = item.texture ? createTexture(three, track, item.texture, textureCache) : null;
   const material = track(new three.MeshStandardMaterial({
     color: texture ? 0xffffff : new three.Color(0xb0b8c4),
     roughness: 0.5,
     metalness: 0.1,
     ...(texture ? { map: texture } : {}),
+    // Character hair/fur and several cloth/face layers are RGBA cut-outs.
+    // Without an alpha test Three renders the transparent part of each card
+    // as an opaque rectangle, which is exactly the stretched-strip artifact
+    // seen above C0000's head. Keep depth writes enabled so overlapping cards
+    // still sort like native cut-out geometry.
+    ...(texture ? { transparent: true, alphaTest: 0.1, depthWrite: true } : {}),
     wireframe: false,
     side: three.DoubleSide,
     flatShading: false,
@@ -1616,7 +2167,30 @@ function createFlverMesh(
   return mesh;
 }
 
-function createTexture(three: ThreeModule, track: ResourceTracker, texture: FlverSceneTexture): import('three').Texture {
+function createTexture(
+  three: ThreeModule,
+  track: ResourceTracker,
+  texture: FlverSceneTexture,
+  textureCache?: Map<string, import('three').Texture>
+): import('three').Texture {
+  if (texture.kind === 'image-uri') {
+    if (!/^data:image\/png;base64,[A-Za-z0-9+/=]+$/.test(texture.uri)) {
+      throw new Error('FLVER_TEXTURE_URI_INVALID: only Bridge PNG data URI is accepted');
+    }
+    const colorSpace = texture.colorSpace === 'linear' ? 'linear' : 'srgb';
+    const cacheKey = `${colorSpace}\0${texture.uri}`;
+    const cached = textureCache?.get(cacheKey);
+    if (cached) return cached;
+    const loaded = new three.TextureLoader().load(texture.uri);
+    loaded.flipY = false;
+    loaded.colorSpace = colorSpace === 'linear' ? three.LinearSRGBColorSpace : three.SRGBColorSpace;
+    loaded.wrapS = three.RepeatWrapping;
+    loaded.wrapT = three.RepeatWrapping;
+    loaded.needsUpdate = true;
+    const tracked = track(loaded);
+    textureCache?.set(cacheKey, tracked);
+    return tracked;
+  }
   if (texture.kind === 'rgba') {
     const dataTexture = track(new three.DataTexture(texture.rgbaBytes, texture.width, texture.height, three.RGBAFormat));
     dataTexture.needsUpdate = true;
@@ -1655,11 +2229,8 @@ function createMarkers(
       const bone = bones[index];
       if (!bone) return new three.Matrix4();
       const local = new three.Matrix4();
-      local.makeRotationFromEuler(new three.Euler(
-        bone.rotation[0],
-        bone.rotation[1],
-        bone.rotation[2],
-        bone.rotationOrder ?? 'YZX'
+      local.makeRotationFromQuaternion(new three.Quaternion().set(
+        ...eulerXYZToQuaternion(bone.rotation)
       ));
       const scale = bone.scale ?? [1, 1, 1];
       local.scale(new three.Vector3(scale[0], scale[1], scale[2]));

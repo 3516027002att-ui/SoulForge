@@ -33,6 +33,10 @@ import { prepareBridgeRoots, type BridgeRootSession, type PrepareBridgeRootsResu
 import type { OperationLogUtilityClient } from '../operationLogUtilityClient.js';
 import type { TrustedIpcHandle } from './registration.js';
 import { buildRagCorpus, createRagCorpus, mergeCatalogAndPersisted } from '@soulforge/core';
+import {
+  buildActionBinderMembershipIndex,
+  resolveActionEffectiveBaseRoot
+} from './action.js';
 
 // Workspace types – originally in ipc.ts composition root, now owned here.
 export interface DirectorySelection {
@@ -97,6 +101,17 @@ let activeFingerprintStore: FingerprintStoreState | null = null;
 let foregroundActive = false;
 let workspaceIndexingAbort: AbortController | null = null;
 let workspaceIndexingTask: Promise<void> | null = null;
+const actionMembershipForegroundTasks = new Map<string, Promise<{
+  ok: boolean;
+  diagnostics: Diagnostic[];
+  characterFamilies: string[];
+  candidateCount: number;
+}>>();
+let workspaceAnalyzeInFlight: {
+  sessionId: string;
+  generation: number;
+  promise: Promise<AnalyzeWorkspaceSummary>;
+} | null = null;
 let activeOverlayLabel = '';
 const directorySelections = new Map<string, DirectorySelectionRecord>();
 const recentPathsFile = join(app.getPath('userData'), 'recent-paths.json');
@@ -162,10 +177,144 @@ function resolveProjectJsonGameRoot(overlayAbsolutePath: string): string | null 
 export interface WorkspaceIpcDeps {
   handle: TrustedIpcHandle;
   ensureActiveOperationLog(session: WorkspaceSession): Promise<OperationLogUtilityClient>;
+  verifiedReadRoots(
+    session: WorkspaceSession | null,
+    fallback: string
+  ): Promise<{ allowedRoots: string[]; diagnostics: Diagnostic[] }>;
+}
+
+export async function rebuildActionBinderMembershipIndex(input: {
+  deps: Pick<WorkspaceIpcDeps, 'verifiedReadRoots'>;
+  index: WorkspaceIndex;
+  session: WorkspaceSession;
+  sessionId: string;
+  indexedFiles: readonly IndexedFile[];
+  characterFamilies?: readonly string[];
+}): Promise<{ ok: boolean; diagnostics: Diagnostic[]; characterFamilies: string[]; candidateCount: number }> {
+  const roots = await input.deps.verifiedReadRoots(input.session, input.session.layers.overlayRoot);
+  if (roots.diagnostics.length > 0) {
+    if (input.characterFamilies?.length) {
+      input.index.clearActionBinderMembershipFamilies(input.characterFamilies);
+    } else {
+      input.index.markActionBinderMembershipGlobalNotReady();
+    }
+    return { ok: false, diagnostics: roots.diagnostics, characterFamilies: [], candidateCount: 0 };
+  }
+  const result = await buildActionBinderMembershipIndex({
+    session: input.session,
+    sessionId: input.sessionId,
+    effectiveBase: resolveActionEffectiveBaseRoot(input.session),
+    indexedFiles: input.indexedFiles,
+    allowedRoots: roots.allowedRoots,
+    ...(input.characterFamilies?.length ? { characterFamilies: input.characterFamilies } : {}),
+    ...(input.characterFamilies?.length ? { readConcurrency: 2 } : {})
+  });
+  if (result.ok) {
+    if (input.characterFamilies?.length) {
+      input.index.mergeActionBinderMembership(result.characterFamilies, result.candidates);
+    } else {
+      input.index.setActionBinderMembership(result.candidates, result.characterFamilies);
+    }
+  } else if (input.characterFamilies?.length) {
+    input.index.clearActionBinderMembershipFamilies(result.characterFamilies);
+  } else {
+    // Keep any already-built foreground family projection available. The
+    // global build can fail on an unrelated malformed family without making a
+    // currently opened character unplayable; its global-ready bit remains off.
+    input.index.markActionBinderMembershipGlobalNotReady();
+  }
+  return {
+    ok: result.ok,
+    diagnostics: result.diagnostics,
+    characterFamilies: result.characterFamilies,
+    candidateCount: result.candidates.length
+  };
+}
+
+/**
+ * Build only the current character family's complete membership projection.
+ * workspace.scan still performs the full background build, but opening one
+ * TAE must not wait for hashes/native reads belonging to unrelated characters.
+ */
+export async function ensureActionBinderMembershipForFamily(
+  deps: Pick<WorkspaceIpcDeps, 'verifiedReadRoots'>,
+  characterFamily: string
+): Promise<{ ok: boolean; diagnostics: Diagnostic[]; characterFamilies: string[]; candidateCount: number }> {
+  const normalizedFamily = characterFamily.trim().toLowerCase();
+  if (!/^(?:c\d{4})$/.test(normalizedFamily)) {
+    return {
+      ok: false,
+      diagnostics: [{ severity: 'error', code: 'ACTION_CHARACTER_FAMILY_UNRESOLVED', message: 'ACTION character family 无法用于前台 membership 建立。' }],
+      characterFamilies: [],
+      candidateCount: 0
+    };
+  }
+  const session = activeSession;
+  const sessionId = activeWorkspaceSessionId;
+  const index = activeIndex;
+  if (!session || !sessionId || !index) {
+    return {
+      ok: false,
+      diagnostics: [{ severity: 'error', code: 'ACTION_WORKSPACE_SESSION_UNAVAILABLE', message: '当前没有可用的 workspace session/index，无法建立 ACTION membership。' }],
+      characterFamilies: [],
+      candidateCount: 0
+    };
+  }
+  const key = `${sessionId}|${activeWorkspaceSessionGeneration}|${normalizedFamily}`;
+  const existing = actionMembershipForegroundTasks.get(key);
+  if (existing) return existing;
+  const task = rebuildActionBinderMembershipIndex({
+    deps,
+    index,
+    session,
+    sessionId,
+    indexedFiles,
+    characterFamilies: [normalizedFamily]
+  });
+  actionMembershipForegroundTasks.set(key, task);
+  try {
+    return await task;
+  } finally {
+    if (actionMembershipForegroundTasks.get(key) === task) actionMembershipForegroundTasks.delete(key);
+  }
+}
+
+/**
+ * 等待当前工作区的后台哈希/语义索引任务完成。
+ *
+ * workspace.scan 先返回轻量文件列表，再在后台建立 ACTION Binder membership。
+ * 动作 IPC 需要等待同一个任务，而不是在播放阶段重新扫描 sibling ANIBND。
+ * 任务自身会把失败写入扫描 job，因此这里保持等待接口不抛出后台异常。
+ */
+export async function waitForWorkspaceIndexing(): Promise<void> {
+  // scan 与 analyze 都可能替换/建立 ACTION membership。按快照等待，完成后
+  // 再检查一次，避免刚等完 scan 就撞上 analyze 刚发布的未就绪索引。
+  for (;;) {
+    const scanTask = workspaceIndexingTask;
+    if (scanTask) {
+      try {
+        await scanTask;
+      } catch {
+        // 失败状态由 workspace scan job / active index diagnostics 负责暴露。
+      }
+    }
+    const analyzeTask = workspaceAnalyzeInFlight?.promise;
+    if (analyzeTask) {
+      try {
+        await analyzeTask;
+      } catch {
+        // 分析失败由调用方的结构化诊断负责暴露。
+      }
+    }
+    if (activeIndex?.isActionBinderMembershipReady()) return;
+    if (workspaceIndexingTask !== scanTask || workspaceAnalyzeInFlight?.promise !== analyzeTask) continue;
+    return;
+  }
 }
 
 export function clearWorkspaceIpcCaches(): void {
   directorySelections.clear();
+  actionMembershipForegroundTasks.clear();
 }
 
 export function registerWorkspaceIpcHandlers(deps: WorkspaceIpcDeps): void {
@@ -272,6 +421,7 @@ export function registerWorkspaceIpcHandlers(deps: WorkspaceIpcDeps): void {
     activeOverlayLabel = overlaySelection.label;
     activeIndex = new WorkspaceIndex(activeSession.meta.workspaceId);
     activeIndex.setFiles(lightResult.files);
+    const indexForSession = activeIndex;
     const scanJobId = randomUUID();
     const scanStartedAt = new Date().toISOString();
     await database.upsertJob({ jobId: scanJobId, title: '扫描工作区', jobKind: 'workspace_scan', status: 'running', progress: { current: 0, total: lightResult.files.length, message: '基础资源已可用，正在后台校验内容索引' }, payload: { workspaceSessionId: activeWorkspaceSessionId, workspaceSessionGeneration: thisSessionGeneration, fingerprintStoreGeneration: fingerprintStore.fingerprintStoreGeneration, workspacePersistentIdentityHash }, createdAt: scanStartedAt, startedAt: scanStartedAt, updatedAt: scanStartedAt });
@@ -333,12 +483,19 @@ export function registerWorkspaceIpcHandlers(deps: WorkspaceIpcDeps): void {
         }
         if (controller.signal.aborted) { await releaseAll(); return; }
         if (currentGeneration !== activeWorkspaceSessionGeneration || currentSession !== activeSession || currentSessionId !== activeWorkspaceSessionId) { await releaseAll(); return; }
-        indexedFiles = enriched as unknown as IndexedFile[]; activeIndex?.setFiles(enriched as unknown as IndexedFile[]); await database.replaceFiles(enriched as unknown as IndexedFile[]);
+        indexedFiles = enriched as unknown as IndexedFile[]; indexForSession.setFiles(enriched as unknown as IndexedFile[]); await database.replaceFiles(enriched as unknown as IndexedFile[]);
+        const actionBinderIndex = await rebuildActionBinderMembershipIndex({
+          deps,
+          index: indexForSession,
+          session: currentSession,
+          sessionId: currentSessionId,
+          indexedFiles: indexedFiles
+        });
         if (continuity.continuity === 'UNKNOWN' && hashedCount + reuseCount === enriched.length) fingerprintStore.continuity = { ...continuity, continuity: 'PROVEN', unknownReason: null, cleanShutdown: true };
         fingerprintStore.continuity.cleanShutdown = true; try { await saveFingerprintStore({ storageRoot, state: fingerprintStore }); } catch {}
         const completedAt = new Date().toISOString(); const backgroundCompleteAt = Date.now();
-        await database.upsertJob({ jobId: scanJobId, title: '扫描工作区', jobKind: 'workspace_scan', status: 'completed', progress: { current: enriched.length, total: enriched.length }, payload: { workspaceSessionId: currentSessionId, workspaceSessionGeneration: currentGeneration, fingerprintStoreGeneration: currentStoreGen }, result: { fileCount: enriched.length, hashedCount, reuseCount, shellVisibleAt, filesVisibleAt, backgroundCompleteAt, shellVisibleMs: filesVisibleAt - shellVisibleAt, indexingMs: backgroundCompleteAt - shellVisibleAt, openHandles: 0, activeDiskReaders: 0 }, createdAt: scanStartedAt, startedAt: scanStartedAt, completedAt, updatedAt: completedAt });
-        if (activeIndex) await refreshRagAfterScan(database, activeIndex);
+        await database.upsertJob({ jobId: scanJobId, title: '扫描工作区', jobKind: 'workspace_scan', status: 'completed', progress: { current: enriched.length, total: enriched.length }, payload: { workspaceSessionId: currentSessionId, workspaceSessionGeneration: currentGeneration, fingerprintStoreGeneration: currentStoreGen }, result: { fileCount: enriched.length, hashedCount, reuseCount, shellVisibleAt, filesVisibleAt, backgroundCompleteAt, shellVisibleMs: filesVisibleAt - shellVisibleAt, indexingMs: backgroundCompleteAt - shellVisibleAt, openHandles: 0, activeDiskReaders: 0, actionBinderIndex }, createdAt: scanStartedAt, startedAt: scanStartedAt, completedAt, updatedAt: completedAt });
+        if (activeIndex === indexForSession) await refreshRagAfterScan(database, indexForSession);
       } catch (error) {
         await releaseAll(); if (controller.signal.aborted) return; if (currentGeneration !== activeWorkspaceSessionGeneration) return;
         const failedAt = new Date().toISOString(); try { await database.upsertJob({ jobId: scanJobId, title: '扫描工作区', jobKind: 'workspace_scan', status: 'failed', progress: { current: 0 }, payload: { workspaceSessionId: currentSessionId, workspaceSessionGeneration: currentGeneration }, error: { message: error instanceof Error ? error.message : String(error) }, createdAt: scanStartedAt, startedAt: scanStartedAt, completedAt: failedAt, updatedAt: failedAt }); } catch {}
@@ -356,15 +513,11 @@ export function registerWorkspaceIpcHandlers(deps: WorkspaceIpcDeps): void {
     await disposeBridgeDaemonPool();
     workspaceSessionGenerationCounter += 1; activeWorkspaceSessionGeneration = workspaceSessionGenerationCounter; activeWorkspaceSessionId = randomUUID();
     activeSession = await openWorkspaceSession({ overlayRoot: activeSession.layers.overlayRoot, ...(baseSelection ? { baseRoot: baseSelection.absolutePath } : {}), game: activeSession.meta.game });
+    activeIndex?.clearActionBinderMembership();
     const workspaceLabel = activeOverlayLabel || activeSession.meta.game;
     return { workspaceSessionId: activeWorkspaceSessionId, session: { workspaceSessionId: activeWorkspaceSessionId, workspaceLabel, game: activeSession.meta.game, openedAt: activeSession.meta.openedAt, baseMounted: !activeSession.meta.baseMissing, ...(baseSelection ? { baseLabel: baseSelection.label } : {}) } };
   });
 
-  let analyzeInFlight: {
-    sessionId: string;
-    generation: number;
-    promise: Promise<AnalyzeWorkspaceSummary>;
-  } | null = null;
   let lastAnalyze: {
     sessionId: string;
     generation: number;
@@ -381,8 +534,8 @@ export function registerWorkspaceIpcHandlers(deps: WorkspaceIpcDeps): void {
     if (lastAnalyze && lastAnalyze.sessionId === sessionId && lastAnalyze.generation === generation) {
       return lastAnalyze.summary;
     }
-    if (analyzeInFlight && analyzeInFlight.sessionId === sessionId && analyzeInFlight.generation === generation) {
-      return analyzeInFlight.promise;
+    if (workspaceAnalyzeInFlight && workspaceAnalyzeInFlight.sessionId === sessionId && workspaceAnalyzeInFlight.generation === generation) {
+      return workspaceAnalyzeInFlight.promise;
     }
     const promise = (async (): Promise<AnalyzeWorkspaceSummary> => {
       const result = await analyzeWorkspace({
@@ -392,6 +545,18 @@ export function registerWorkspaceIpcHandlers(deps: WorkspaceIpcDeps): void {
       if (sessionId !== activeWorkspaceSessionId || generation !== activeWorkspaceSessionGeneration) {
         throw new Error('工作区已切换，分析结果已丢弃。');
       }
+      const actionBinderIndex = await rebuildActionBinderMembershipIndex({
+        deps,
+        index: result.index,
+        session,
+        sessionId,
+        indexedFiles: result.index.getFiles()
+      });
+      if (sessionId !== activeWorkspaceSessionId || generation !== activeWorkspaceSessionGeneration) {
+        throw new Error('工作区已切换，分析结果已丢弃。');
+      }
+      // 只有完整 ACTION membership 已装入新索引后才发布它。这样分析期间
+      // 仍保留上一份可用索引，动作读取不会短暂撞上“未就绪”空投影。
       activeIndex = result.index;
       indexedFiles = result.index.getFiles();
       const database = await deps.ensureActiveOperationLog(session);
@@ -408,14 +573,17 @@ export function registerWorkspaceIpcHandlers(deps: WorkspaceIpcDeps): void {
         })),
         tools: toolRegistry.list()
       };
+      if (!actionBinderIndex.ok) {
+        summary.diagnostics = [...summary.diagnostics, ...actionBinderIndex.diagnostics];
+      }
       lastAnalyze = { sessionId, generation, summary };
       return summary;
     })();
-    analyzeInFlight = { sessionId, generation, promise };
+    workspaceAnalyzeInFlight = { sessionId, generation, promise };
     try {
       return await promise;
     } finally {
-      if (analyzeInFlight?.promise === promise) analyzeInFlight = null;
+      if (workspaceAnalyzeInFlight?.promise === promise) workspaceAnalyzeInFlight = null;
     }
   });
 

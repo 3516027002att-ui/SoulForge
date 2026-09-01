@@ -257,18 +257,20 @@ check('cli/next-item-self-sufficient',
   }
 }
 
-// --release 的默认值必须来自 releases.json 的 currentRelease，不能是字面量。
-// 治理要跨 V0.5 → V0.6：写死版本号会在 V0.5 冻结后把新证据继续挂到旧版本上，
-// 而 currentRelease 已经翻页——两份权威分叉且无门禁可见。
+// 开发视图不绑定 releases.json 的 currentRelease：默认必须跨越全部发布归属，
+// 只有显式 --release 才进行发布筛选。这样历史版本不会意外变成开发门槛。
 {
   const releasesData = JSON.parse(readFileSync(join(cliRoot, 'docs/governance/releases.json'), 'utf8'));
   const knownReleases = releasesData.releases.map((entry) => entry.release);
-  check('cli/next-default-release-follows-current',
-    next.payload?.release === releasesData.currentRelease,
-    `gov next 默认版本应等于 currentRelease=${releasesData.currentRelease}，实际 ${JSON.stringify(next.payload?.release)}。`);
-  check('cli/next-default-release-filters',
-    claimable.every((item) => item.targetRelease === releasesData.currentRelease),
-    '默认过滤后不应出现其他版本的切片——V0.6 切片的硬前置尚未成立，混进选点会误导 agent。');
+  const slicesData = JSON.parse(readFileSync(join(cliRoot, 'docs/governance/slices.json'), 'utf8'));
+  const defaultReady = slicesData.slices.filter((slice) => slice.lifecycle === 'ready');
+  check('cli/next-default-is-unversioned-development-view',
+    next.payload?.release === null,
+    `gov next 默认开发视图必须为 release=null，实际 ${JSON.stringify(next.payload?.release)}。`);
+  check('cli/next-default-spans-development-slices',
+    claimable.length === defaultReady.length
+      && claimable.every((item) => defaultReady.some((slice) => slice.sliceId === item.sliceId)),
+    '默认开发视图必须返回全部 lifecycle=ready 切片，不得按历史发布归属静默过滤。');
 
   // 未登记版本必须硬失败。原先只校验 /^V\d+\.\d+$/ 形状，V9.9 能通过并封存出
   // 一条挂在不存在版本上的证据；cmdNext 更是连形状都不校验，拼错静默返回空列表,
@@ -284,8 +286,7 @@ check('cli/next-item-self-sufficient',
     `形状非法的版本必须拒绝，实际 ${JSON.stringify(badShape.payload)?.slice(0, 200)}`);
 
   // 每个已登记版本都必须可查询。这条断言随 releases.json 增长而自动覆盖新版本,
-  // 不需要在 fixture 里追加 V0.6、V0.7 的硬编码用例。
-  const slicesData = JSON.parse(readFileSync(join(cliRoot, 'docs/governance/slices.json'), 'utf8'));
+  // 不需要在 fixture 里追加具体版本的硬编码用例。
   const releaseOf = new Map(slicesData.slices.map((slice) => [slice.sliceId, slice.targetRelease]));
 
   for (const releaseId of knownReleases) {
@@ -296,9 +297,9 @@ check('cli/next-item-self-sufficient',
       `${releaseId} 应可查询且只返回该版本切片，实际 ${JSON.stringify(scoped.payload)?.slice(0, 200)}`);
 
     // claimable/activeSlices/blockedSlices 必须用同一个版本判据。
-    // 实测漏过一次：只给 claimable 加了过滤，于是 next --release V0.6 返回
-    // claimable=0 但 activeSlices=5，而那 5 条 targetRelease 全是 V0.5——
-    // agent 会读成「V0.6 有人在做了」，实际是 V0.5 的在飞 claim 漏进了 V0.6 视图。
+    // 实测漏过一次：只给 claimable 加了过滤，于是 next --release <Release> 返回
+    // claimable=0 但 activeSlices 混入其他发布归属——agent 会把别的发布视图
+    // 误读成当前发布正在推进，实际是筛选判据没有贯穿三个列表。
     const leaked = [
       ...(scoped.payload?.activeSlices ?? []),
       ...(scoped.payload?.blockedSlices ?? [])
@@ -308,7 +309,7 @@ check('cli/next-item-self-sufficient',
       + JSON.stringify(leaked.map((entry) => `${entry.sliceId}@${releaseOf.get(entry.sliceId)}`)));
 
     // 无可 claim 切片时，出路必须与该版本切片的实际 lifecycle 分布匹配。
-    // 实测踩过：V0.6 的 3 条切片全是 deferred 且 blockerRefs 为空数组，而消息一律说
+    // 实测踩过：某个发布视图的切片全是 deferred 且 blockerRefs 为空数组，而消息一律说
     // 「先完成或释放在飞切片，或按 blockers.json 解阻塞」——agent 去查 blockers.json
     // 什么都查不到，deferred 也不是靠释放 claim 能变 ready 的。给错出路比不给更糟。
     if ((scoped.payload?.claimable ?? []).length === 0) {
@@ -327,7 +328,7 @@ check('cli/next-item-self-sufficient',
     }
 
     // 指对方向还不够：只说「去 scope.json 找 resumeRequires」仍然是把 agent 送去
-    // 手工检索——V0.6 的 3 条 deferred 切片对应 12 个 scopeItem，靠 capabilityId
+    // 手工检索——某个发布视图的 deferred 切片对应多个 scopeItem，靠 capabilityId
     // 反查是每个 agent 都要重做一遍的活。承接条件必须直接投影出来。
     const deferredIn = slicesData.slices
       .filter((slice) => slice.targetRelease === releaseId && slice.lifecycle === 'deferred');
@@ -350,8 +351,7 @@ check('cli/next-item-self-sufficient',
         `每条 deferred 切片要么给出非空 fromScopeItems，要么给出 reason 说明为何取不到，`
         + `不得返回空数组冒充「没有承接条件」。实际 ${JSON.stringify(projected.map((entry) => entry.resumeRequires))?.slice(0, 400)}`);
     } else {
-      // 没有 deferred 切片时不投影，避免污染默认版本的首屏体积
-      // （实测 V0.5 首屏 6608 B，只比投影前多 24 B）。
+      // 没有 deferred 切片时不投影，避免污染发布筛选视图的首屏体积。
       check(`cli/next-release-${releaseId}-no-deferred-noise`,
         (scoped.payload?.deferredSlices ?? []).length === 0,
         `${releaseId} 没有 deferred 切片时不得投影 deferredSlices，实际 ${JSON.stringify(scoped.payload?.deferredSlices)?.slice(0, 200)}`);
@@ -368,7 +368,7 @@ check('cli/next-item-self-sufficient',
   // 实测：5 条 owner=coordinator-agent 的 claim 心跳停在 2026-08-01，其后 24 个提交
   // 全在治理层、没有一个碰过这些切片的 entryPoints，同期封存的 22 条证据也全是
   // EV-REL-SCOPE-*。它们是被中断的半成品，而 next 当时只报 sliceId/owner，接手的
-  // agent 读成「有人在做」全部避开，V0.5 的可 claim 面被无声压到 4 条。
+  // agent 读成「有人在做」全部避开，可 claim 面被无声压缩。
   //
   // 陈旧与新鲜两种结局各自显式构造，不共用 if/else——互斥分支靠「环境碰巧走哪边」
   // 声称覆盖两种结局是假覆盖（本 fixture 曾因此让 7 条正向断言一次都没执行）。
@@ -496,9 +496,9 @@ check('cli/next-item-self-sufficient',
 
 // seal 的继承标记预检。
 //
-// 本轮实测：照 gov help 的 sealWhenToUse 三步做，重封存 REL-SCOPE/REL-E/REL-I
-// 仍然失败——subject 里少了 scope-ruling:user-approved 与两条
-// scope-deferral:<Gate>:V0.6:user-approved，而门禁按标记筛选参与 freshness 的证据，
+// 本轮实测：照 gov help 的 sealWhenToUse 三步做，重封存多个 Gate
+// 仍然失败——subject 里少了 scope-ruling:user-approved 与 scope-deferral 标记，
+// 而门禁按标记筛选参与 freshness 的证据，
 // 筛完为空就报 GATE_EVIDENCE_STALE。那个诊断指向「主题域变了」，真实原因是
 // 「标记漏了」，agent 会照错误方向反复重跑验证。预检必须在追加之前拦下，
 // 且必须指名缺哪个标记——只报「失败」等于没修。
@@ -862,6 +862,8 @@ if (rollbackTarget) {
       `封存基线必须自洽（五字段齐全且 fingerprintSha256 匹配），实际 ${JSON.stringify(parsedSeal)?.slice(0, 400)}`);
     check('cli/seal-type-is-sealed', record?.evidenceType === 'sealed-current-run',
       'gov seal 只产出 sealed-current-run。');
+    check('cli/seal-default-is-development-evidence', record?.targetRelease === null,
+      `省略 --release 的 seal 必须生成不绑定发布的开发 Evidence，实际 ${JSON.stringify(record?.targetRelease)}`);
     // 交接书 §17.1 是治理 JSON 的投影。seal 必须顺带重新投影，否则 markdown
     // 少一行、handoff 门禁判 stale——而消除 stale 正是封存的目的。
     // 这条断言锁定「封存即完成投影」，不允许退回「记得手跑生成器」。
@@ -1052,7 +1054,7 @@ console.log(JSON.stringify({
     'seal 成功时封存基线自洽；后置校验失败时同时回滚 evidence.jsonl 与 gates.json',
     'seal 回滚 hint 指出 --gates 缺失（freshness 只判定 Gate 引用的证据）',
     'seal 成功即完成交接书投影；失败时连交接书一并回滚',
-    '--release 默认取 releases.json 的 currentRelease；未登记或形状非法的版本硬失败',
+    '开发视图默认不绑定 currentRelease；显式 --release 未登记或形状非法时硬失败，开发 seal 可使用 targetRelease=null',
     'seal 在追加前预检 subject 是否带齐目标 Gate 的 user-approved 继承标记，缺失时逐个指名（否则会报成指向错误原因的 GATE_EVIDENCE_STALE）',
     'next 的输出自带完整闭环：每条切片有 entryPoints/requiredValidation/hardPrerequisites，另附 claim→验证→封存→complete 的流程骨架',
     'seal 成功后报出自己写过但仍未提交的治理文件，并说明下次封存锚点是 HEAD（漏提交会让事实源与已入库的投影错位）',

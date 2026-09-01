@@ -2,13 +2,18 @@ import { createHash } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import type { BridgeResult, Diagnostic, ResourceKind } from '@soulforge/shared';
+import type {
+  BridgeFileBackedResultDescriptor,
+  BridgeResult,
+  Diagnostic,
+  ResourceKind
+} from '@soulforge/shared';
 import {
   BridgeDaemonClient,
   BridgeDaemonError
 } from './bridgeDaemonClient.js';
 
-export type BridgeCommand = 'inspect' | 'read-dcx-document' | 'write-bnd4' | 'snapshot-bnd4-child' | 'extract-bnd4-child' | 'list-bnd4-entries' | 'inventory-asset-resources' | 'read-fmg-document' | 'write-fmg' | 'read-param-document' | 'write-param' | 'read-gparam-document' | 'write-gparam' | 'read-text-catalog' | 'read-emevd-document' | 'write-emevd' | 'read-msb-document' | 'write-msb' | 'read-tae-document' | 'read-tae-event-params' | 'read-tae-animation-clip' | 'sample-tae-animation-pose' | 'read-chrbnd-flver-preview' | 'read-map-part-flver-preview' | 'read-map-static-geometry' | 'read-tpf-document' | 'export-tpf-texture' | 'read-tpf-texture-preview' | 'write-tpf-texture-replace' | 'read-flver-document' | 'write-flver' | 'read-flver-mesh' | 'read-flver-skeleton' | 'read-flver-texture-slots' | 'read-flver-dummies' | 'read-esd-document' | 'write-esd-document' | 'write-tae-document' | 'write-fxr-document' | 'read-mtd-document' | 'write-mtd-document' | 'read-fxr-document' | 'list-ffxbnd-entries' | 'export-event' | 'export-map' | 'export-param' | 'export-msg' | 'validate' | 'probe-oodle' | 'probe-document-locator';
+export type BridgeCommand = 'inspect' | 'read-dcx-document' | 'write-bnd4' | 'snapshot-bnd4-child' | 'extract-bnd4-child' | 'list-bnd4-entries' | 'inventory-asset-resources' | 'read-fmg-document' | 'write-fmg' | 'read-param-document' | 'write-param' | 'read-gparam-document' | 'write-gparam' | 'read-text-catalog' | 'read-emevd-document' | 'write-emevd' | 'read-msb-document' | 'write-msb' | 'read-tae-document' | 'read-tae-event-params' | 'read-tae-animation-clip' | 'sample-tae-animation-pose' | 'read-bridge-artifact' | 'read-chrbnd-flver-preview' | 'read-map-part-flver-preview' | 'read-map-static-geometry' | 'read-tpf-document' | 'export-tpf-texture' | 'read-tpf-texture-preview' | 'write-tpf-texture-replace' | 'read-flver-document' | 'write-flver' | 'read-flver-mesh' | 'read-flver-skeleton' | 'read-flver-texture-slots' | 'read-flver-dummies' | 'read-esd-document' | 'write-esd-document' | 'write-tae-document' | 'write-fxr-document' | 'read-mtd-document' | 'write-mtd-document' | 'read-fxr-document' | 'list-ffxbnd-entries' | 'export-event' | 'export-map' | 'export-param' | 'export-msg' | 'validate' | 'probe-oodle' | 'probe-document-locator';
 
 export interface RunBridgeOptions {
   bridgeProjectPath?: string;
@@ -31,6 +36,11 @@ export interface RunBridgeOptions {
    * 可到数 MB~29 MB base64，调用方按需提高（守护进程绝对上限 32 MiB）。
    */
   maxFrameBytes?: number;
+  /**
+   * 守护进程并发请求数。默认 2；仅对已证明可并行的读取批次提高，避免
+   * 把所有 native writer/read 链路一起放大。
+   */
+  maxConcurrency?: number;
 }
 
 const DEFAULT_TIMEOUT_MS = 15_000;
@@ -54,7 +64,15 @@ export async function runBridge<T = unknown>(options: RunBridgeOptions): Promise
     ?? stableSessionId(allowedRoots);
   const launch = resolveBridgeLaunch(options, bridgeProjectPath);
   const writableRoots = uniqueResolvedRoots(options.writableRoots ?? []);
-  const poolKey = JSON.stringify({ launch, workspaceSessionId, allowedRoots, writableRoots, oodleRuntimeRoot: options.oodleRuntimeRoot });
+  const maxConcurrency = normalizeMaxConcurrency(options.maxConcurrency);
+  const poolKey = JSON.stringify({
+    launch,
+    workspaceSessionId,
+    allowedRoots,
+    writableRoots,
+    oodleRuntimeRoot: options.oodleRuntimeRoot,
+    maxConcurrency
+  });
 
   try {
     const client = await getOrCreateClient(poolKey, {
@@ -68,7 +86,7 @@ export async function runBridge<T = unknown>(options: RunBridgeOptions): Promise
       // PARAM/MSB children and FMG tables can exceed 1 MiB when base64-framed.
       // PARAM 全量载荷（includeAllPayloads）可达数 MB~29 MB base64，按需提高。
       maxFrameBytes: options.maxFrameBytes ?? 16 * 1024 * 1024,
-      maxConcurrency: 2,
+      maxConcurrency,
       startupTimeoutMs: options.timeoutMs ?? DEFAULT_TIMEOUT_MS
     }, launch);
     const payload = await client.request<BridgeResult<T>>({
@@ -82,7 +100,8 @@ export async function runBridge<T = unknown>(options: RunBridgeOptions): Promise
       ...(options.signal ? { signal: options.signal } : {}),
       ...(options.onProgress ? { onProgress: options.onProgress } : {})
     });
-    return payload.result;
+    if (options.command === 'read-bridge-artifact') return payload.result;
+    return materializeFileBackedResult(client, payload.result, options);
   } catch (error) {
     const client = await clients.get(poolKey)?.catch(() => undefined);
     if (!client || client.isClosed) clients.delete(poolKey);
@@ -101,6 +120,159 @@ export async function runBridge<T = unknown>(options: RunBridgeOptions): Promise
   }
 }
 
+async function materializeFileBackedResult<T>(
+  client: BridgeDaemonClient,
+  result: BridgeResult<T>,
+  options: RunBridgeOptions
+): Promise<BridgeResult<T>> {
+  const descriptor = readFileBackedDescriptor(result.data);
+  if (!descriptor) return result;
+
+  const chunks: Buffer[] = [];
+  let offset = 0;
+  while (offset < descriptor.byteLength) {
+    const length = Math.min(descriptor.chunkSize, descriptor.byteLength - offset);
+    const payload = await client.request<BridgeResult<{
+      artifactToken: string;
+      offset: number;
+      length: number;
+      totalLength: number;
+      complete: boolean;
+      dataBase64: string;
+    }>>({
+      payload: {
+        command: 'read-bridge-artifact',
+        filePath: resolve(options.filePath),
+        options: {
+          artifactToken: descriptor.artifactToken,
+          offset,
+          length
+        }
+      },
+      resourceUri: options.resourceUri ?? pathToFileURL(resolve(options.filePath)).toString(),
+      timeoutMs: options.timeoutMs ?? DEFAULT_TIMEOUT_MS,
+      ...(options.signal ? { signal: options.signal } : {}),
+      ...(options.onProgress ? { onProgress: options.onProgress } : {})
+    });
+    const chunkResult = payload.result;
+    const chunk = asArtifactChunk(chunkResult.data);
+    if (chunkResult.parseStatus === 'failed' || !chunk) {
+      return {
+        ...chunkResult,
+        diagnostics: [
+          ...chunkResult.diagnostics,
+          {
+            severity: 'error',
+            code: 'BRIDGE_FILE_BACKED_RESULT_READ_FAILED',
+            message: 'Bridge file-backed result chunk 无法读取或协议不完整。',
+            sourceUri: options.resourceUri
+          }
+        ]
+      } as BridgeResult<T>;
+    }
+    if (chunk.artifactToken !== descriptor.artifactToken
+      || chunk.offset !== offset
+      || chunk.totalLength !== descriptor.byteLength) {
+      return failedBridgeResult<T>(options, 'BRIDGE_FILE_BACKED_RESULT_SCHEMA_INVALID', 'Bridge file-backed result chunk identity 不匹配。', {
+        artifactToken: descriptor.artifactToken,
+        expectedOffset: offset,
+        actualOffset: chunk.offset,
+        expectedLength: descriptor.byteLength,
+        actualLength: chunk.totalLength
+      });
+    }
+    const bytes = Buffer.from(chunk.dataBase64, 'base64');
+    if (bytes.length !== chunk.length || bytes.length === 0) {
+      return failedBridgeResult<T>(options, 'BRIDGE_FILE_BACKED_RESULT_CHUNK_INVALID', 'Bridge file-backed result chunk 长度无效。', {
+        artifactToken: descriptor.artifactToken,
+        offset,
+        expectedLength: chunk.length,
+        actualLength: bytes.length
+      });
+    }
+    chunks.push(bytes);
+    offset += bytes.length;
+  }
+
+  try {
+    const restored = JSON.parse(Buffer.concat(chunks).toString('utf8')) as BridgeResult<T>;
+    if (!restored || typeof restored !== 'object' || !Array.isArray(restored.diagnostics)) {
+      throw new Error('restored BridgeResult envelope is invalid');
+    }
+    return {
+      ...restored,
+      diagnostics: [
+        ...restored.diagnostics,
+        // The daemon must keep the transport evidence that caused the
+        // fallback.  The artifact intentionally contains the pre-fallback
+        // result so materialization cannot recurse; merge the diagnostic from
+        // the small descriptor envelope back into the restored result here.
+        ...result.diagnostics.filter((diagnostic) => diagnostic.code === 'BRIDGE_RESULT_FILE_BACKED'),
+        {
+          severity: 'info',
+          code: 'BRIDGE_FILE_BACKED_RESULT_MATERIALIZED',
+          message: 'Bridge 大结果已通过 daemon-owned file-backed artifact 分块还原。',
+          sourceUri: restored.sourceUri,
+          details: {
+            artifactToken: descriptor.artifactToken,
+            byteLength: descriptor.byteLength,
+            chunkSize: descriptor.chunkSize,
+            payloadFormat: descriptor.payloadFormat,
+            payloadVersion: descriptor.payloadVersion
+          }
+        }
+      ]
+    };
+  } catch (error) {
+    return failedBridgeResult<T>(options, 'BRIDGE_FILE_BACKED_RESULT_JSON_INVALID', 'Bridge file-backed result 不是有效的 BridgeResult JSON。', {
+      artifactToken: descriptor.artifactToken,
+      byteLength: descriptor.byteLength,
+      error: error instanceof Error ? error.message : String(error)
+    });
+  }
+}
+
+function readFileBackedDescriptor(value: unknown): BridgeFileBackedResultDescriptor | undefined {
+  if (!value || typeof value !== 'object') return undefined;
+  const candidate = (value as { fileBacked?: unknown }).fileBacked;
+  if (!candidate || typeof candidate !== 'object') return undefined;
+  const item = candidate as Partial<BridgeFileBackedResultDescriptor>;
+  const byteLength: unknown = item.byteLength;
+  const chunkSize: unknown = item.chunkSize;
+  if (typeof item.artifactToken !== 'string' || item.artifactToken.length < 16
+    || item.payloadFormat !== 'bridge-result-json' || item.payloadVersion !== 1
+    || !isPositiveSafeInteger(byteLength)
+    || !isPositiveSafeInteger(chunkSize)) return undefined;
+  return { ...item, byteLength, chunkSize } as BridgeFileBackedResultDescriptor;
+}
+
+function isPositiveSafeInteger(value: unknown): value is number {
+  return typeof value === 'number' && Number.isSafeInteger(value) && value > 0;
+}
+
+function asArtifactChunk(value: unknown): {
+  artifactToken: string;
+  offset: number;
+  length: number;
+  totalLength: number;
+  complete: boolean;
+  dataBase64: string;
+} | undefined {
+  if (!value || typeof value !== 'object') return undefined;
+  const item = value as Record<string, unknown>;
+  if (typeof item.artifactToken !== 'string' || !Number.isSafeInteger(item.offset)
+    || !Number.isSafeInteger(item.length) || !Number.isSafeInteger(item.totalLength)
+    || typeof item.complete !== 'boolean' || typeof item.dataBase64 !== 'string') return undefined;
+  return item as {
+    artifactToken: string;
+    offset: number;
+    length: number;
+    totalLength: number;
+    complete: boolean;
+    dataBase64: string;
+  };
+}
+
 export async function disposeBridgeDaemonPool(): Promise<void> {
   const active = [...clients.values()];
   clients.clear();
@@ -112,10 +284,12 @@ export async function disposeBridgeDaemonPool(): Promise<void> {
 
 async function findCoveringClient(
   launch: { executable: string; args: string[] },
+  workspaceSessionId: string,
   allowedRoots: string[],
   writableRoots: string[],
   oodleRuntimeRoot?: string,
-  maxFrameBytes?: number
+  maxFrameBytes?: number,
+  maxConcurrency?: number
 ): Promise<BridgeDaemonClient | undefined> {
   const normAllowed = allowedRoots.map((r) => resolve(r));
   const normWritable = writableRoots.map((r) => resolve(r));
@@ -127,8 +301,14 @@ async function findCoveringClient(
         continue;
       }
       if (client.options.executable !== launch.executable) continue;
+      // Native document sessions are scoped to this opaque workspace session.
+      // A client whose roots cover the request is not interchangeable with a
+      // client from another session: reusing it can make a valid PARAM session
+      // token look expired when the follow-up request lands on the other daemon.
+      if (client.options.workspaceSessionId !== workspaceSessionId) continue;
       if (oodleRuntimeRoot && client.options.oodleRuntimeRoot !== resolve(oodleRuntimeRoot)) continue;
       if (maxFrameBytes && (client.options.maxFrameBytes ?? 0) < maxFrameBytes) continue;
+      if (maxConcurrency && (client.options.maxConcurrency ?? 1) < maxConcurrency) continue;
 
       const clientAllowed = client.options.allowedRoots.map((r) => resolve(r));
       const allAllowedCovered = normAllowed.every((root) => isCoveredBy(root, clientAllowed));
@@ -161,10 +341,12 @@ async function getOrCreateClient(
 ): Promise<BridgeDaemonClient> {
   const covering = await findCoveringClient(
     launch,
+    options.workspaceSessionId,
     options.allowedRoots,
     options.writableRoots ?? [],
     options.oodleRuntimeRoot,
-    options.maxFrameBytes
+    options.maxFrameBytes,
+    options.maxConcurrency
   );
   if (covering) return covering;
 
@@ -246,6 +428,11 @@ function stableSessionId(allowedRoots: string[]): string {
   return `bridge-${createHash('sha256').update(allowedRoots.join('\n')).digest('hex').slice(0, 24)}`;
 }
 
+function normalizeMaxConcurrency(value: number | undefined): number {
+  if (value === undefined || !Number.isSafeInteger(value)) return 2;
+  return Math.max(1, Math.min(8, value));
+}
+
 function uniqueResolvedRoots(roots: string[]): string[] {
   const seen = new Set<string>();
   const result: string[] = [];
@@ -304,6 +491,7 @@ function commandToResourceKind(command: BridgeCommand): ResourceKind {
     case 'read-msb-document': return 'map';
     case 'write-msb': return 'map';
     case 'read-tae-event-params': return 'action';
+    case 'read-bridge-artifact': return 'unknown';
     case 'read-chrbnd-flver-preview': return 'chr';
     case 'read-map-part-flver-preview': return 'map';
     case 'list-ffxbnd-entries': return 'sfx';

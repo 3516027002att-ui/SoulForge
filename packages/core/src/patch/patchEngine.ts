@@ -55,7 +55,7 @@ export interface StagingArea {
    *
    * 在补上这个方法之前，createStagingArea 用 mkdtemp 在系统临时目录建
    * `soulforge-<opId>-*`，但没有任何释放入口，于是每次调用泄漏一个目录。
-   * 实测：单次 runV05FoundationSmoke 泄漏 4 个；本机累计 25724 个残留目录。
+    * 实测：单次 foundation smoke 泄漏 4 个；本机累计 25724 个残留目录。
    *
    * 幂等：重复调用与对已删除目录调用都不报错（force: true）。
    */

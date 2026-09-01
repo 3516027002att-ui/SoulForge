@@ -138,6 +138,7 @@ import {
 } from '../model-services/contextCompactor.js';
 import { createDefaultToolRegistry, ToolRegistry, validateToolInput, type ToolContext } from '../ai/toolRegistry.js';
 import { createAgentToolBridge, MAX_BOUNDED_TOOL_RESULT_CHARS } from '../ai/agentToolBridge.js';
+import { searchEventReference } from '../ai/eventReference.js';
 import { WorkspaceIndex } from '../indexing/workspaceIndex.js';
 import {
   FileRolloutStorage,
@@ -369,7 +370,7 @@ function assertStableToolEnvelope(content: string, label: string, truncated: boo
     throw new Error(`${label}: result must be valid JSON: ${String(error)}`);
   }
   const topKeys = Object.keys(parsed).sort();
-  const expectedTopKeys = ['data', 'identifiers', 'ok', 'pagination', 'state', 'truncated'];
+  const expectedTopKeys = ['data', 'evidence', 'identifiers', 'ok', 'pagination', 'state', 'truncated'];
   if (JSON.stringify(topKeys) !== JSON.stringify(expectedTopKeys)) {
     throw new Error(`${label}: unstable envelope keys ${JSON.stringify(topKeys)}`);
   }
@@ -377,6 +378,20 @@ function assertStableToolEnvelope(content: string, label: string, truncated: boo
     throw new Error(`${label}: invalid status fields ${JSON.stringify(parsed)}`);
   }
   if (!Array.isArray(parsed.identifiers)) throw new Error(`${label}: identifiers must be an array.`);
+  const evidence = parsed.evidence;
+  if (!evidence || typeof evidence !== 'object' || Array.isArray(evidence)) {
+    throw new Error(`${label}: evidence must be an object.`);
+  }
+  const evidenceRecord = evidence as Record<string, unknown>;
+  if (!['not_applicable', 'candidate', 'native-verified', 'insufficient_evidence'].includes(String(evidenceRecord.status))
+    || !['discovery', 'rag', 'native-read', 'proposal', 'validation', 'mutation', 'memory', 'other'].includes(String(evidenceRecord.kind))
+    || !Array.isArray(evidenceRecord.sourceUris)
+    || !Array.isArray(evidenceRecord.sourceHashes)
+    || !Array.isArray(evidenceRecord.sourceRevisions)
+    || !Array.isArray(evidenceRecord.nextActions)
+    || typeof evidenceRecord.repeatedQuery !== 'boolean') {
+    throw new Error(`${label}: evidence shape is not stable.`);
+  }
   const data = parsed.data;
   if (!data || typeof data !== 'object' || Array.isArray(data)) {
     throw new Error(`${label}: data must be an object.`);
@@ -504,7 +519,14 @@ async function runScriptedMatrix(
 
 async function main(): Promise<void> {
   let passed = 0;
-  const total = 63;
+  const total = 65;
+  let targetInstructionTrace: {
+    steps: number;
+    finishReason: string;
+    modelRounds: Array<{ round: number; requestedTools: string[]; priorToolResults: number }>;
+    executedTools: Array<{ name: string; ok: boolean; code?: string }>;
+    finalAnswer: string;
+  } | undefined;
 
   // --- Case 1: HTTP 429 rate limit ---
   {
@@ -2971,7 +2993,8 @@ async function main(): Promise<void> {
     }
     assertStableToolEnvelope(boundedEmevd.content, 'Case 54 large EMEVD result', true);
 
-    // Exact event targets bypass text-first discovery; fuzzy event queries do not.
+    // Exact and fuzzy event queries both return candidates; neither is blocked
+    // by a previous text query.
     const eventSourceUri = 'file://synthetic/event/common.emevd.dcx';
     const eventSourcePath = 'event/common.emevd.dcx';
     const eventIndex = new WorkspaceIndex('ws-event-contract');
@@ -3010,7 +3033,6 @@ async function main(): Promise<void> {
     const eventBridge = createAgentToolBridge({
       registry: createDefaultToolRegistry(),
       context: { workspaceIndex: eventIndex, mode: 'plan' },
-      requireTextLookupBeforeStructuredDiscovery: true
     });
     const eventDescriptor = eventBridge.tools.find((tool) => tool.name === 'search_events');
     const eventSchema = eventDescriptor?.parametersJsonSchema as {
@@ -3030,7 +3052,7 @@ async function main(): Promise<void> {
       name: 'search_events',
       argumentsJson: JSON.stringify({ file: eventSourcePath, eventId: 1000 })
     });
-    if (!exactEvent.ok) throw new Error(`Case 54: exact event lookup must bypass text-first: ${exactEvent.content}`);
+    if (!exactEvent.ok) throw new Error(`Case 54: exact event lookup must remain available: ${exactEvent.content}`);
     const exactEnvelope = assertStableToolEnvelope(exactEvent.content, 'Case 54 exact event result', false);
     const exactItems = (exactEnvelope.data as { items?: unknown[] }).items ?? [];
     if (!exactItems.some((item) => (item as { eventId?: number }).eventId === 1000)) {
@@ -3041,8 +3063,17 @@ async function main(): Promise<void> {
       name: 'search_events',
       argumentsJson: JSON.stringify({ query: 'Gyoubu' })
     });
-    if (fuzzyEvent.ok || fuzzyEvent.code !== 'TEXT_LOOKUP_REQUIRED') {
-      throw new Error(`Case 54: fuzzy event discovery must remain text-first gated: ${fuzzyEvent.content}`);
+    if (!fuzzyEvent.ok) {
+      throw new Error(`Case 54: fuzzy event discovery must return candidates without a text gate: ${fuzzyEvent.content}`);
+    }
+    const fuzzyEnvelope = assertStableToolEnvelope(fuzzyEvent.content, 'Case 54 fuzzy event result', false);
+    const fuzzyItems = (fuzzyEnvelope.data as { items?: unknown[] }).items ?? [];
+    if (!fuzzyItems.some((item) => {
+      const record = item as { eventId?: number; item?: { eventId?: number } };
+      return record.eventId === 1000 || record.item?.eventId === 1000;
+    })
+      || (fuzzyEnvelope.evidence as { status?: string }).status !== 'candidate') {
+      throw new Error(`Case 54: fuzzy event result must be a candidate with event 1000: ${fuzzyEvent.content}`);
     }
     // 声明的字段名与类型必须到达模型。此前投影是不带 properties 的空壳,
     // 模型只能猜字段名,猜错拿到的 INVALID_INPUT 又不含正确名字。
@@ -3107,9 +3138,8 @@ async function main(): Promise<void> {
     passed++;
   }
 
-  // --- Case 54b: the documented text-first discovery order is enforced by
-  // --- the runtime bridge, then unlocks structured discovery after a text
-  // --- lookup attempt.  Prompt instruction-following alone is insufficient.
+  // --- Case 54b: discovery is non-blocking, while the result envelope carries
+  // --- deterministic candidate/native evidence and warns on repeated queries.
   {
     const registry = new ToolRegistry();
     registry.register({
@@ -3118,7 +3148,7 @@ async function main(): Promise<void> {
       permission: 'read',
       permissionLevel: 'read',
       inputSchema: { query: 'string' },
-      run: () => ({ ok: true, data: [{ id: 902012, text: '鬼庭形部雅孝' }] })
+      run: () => ({ ok: true, data: [{ id: 902012, text: '鬼庭形部雅孝', sourceUri: 'file://synthetic/msg/title.fmg' }] })
     });
     registry.register({
       name: 'read_param_fields',
@@ -3126,20 +3156,31 @@ async function main(): Promise<void> {
       permission: 'read',
       permissionLevel: 'read',
       inputSchema: { table: 'string', rowId: 'number' },
-      run: () => ({ ok: true, data: { rowId: 50800000 } })
+      run: () => ({ ok: true, data: {
+        rowId: 50800000,
+        sourceUri: 'file://synthetic/param/gameparam.parambnd.dcx',
+        sourceHash: 'native-param-v1',
+        sourceRevision: 1
+      } })
     });
     const bridge = createAgentToolBridge({
       registry,
       context: { workspaceIndex: {} as never, mode: 'normal' },
       requireTextLookupBeforeStructuredDiscovery: true
     });
-    const premature = await bridge.executeTool({
+    const paramFirst = await bridge.executeTool({
       id: 'param-first',
       name: 'read_param_fields',
       argumentsJson: '{"table":"NpcParam","rowId":50800000}'
     });
-    if (premature.ok || premature.code !== 'TEXT_LOOKUP_REQUIRED') {
-      throw new Error(`Case 54b: param-first call must be denied, got ${JSON.stringify(premature)}`);
+    if (!paramFirst.ok) {
+      throw new Error(`Case 54b: structured read must not be denied before text lookup: ${JSON.stringify(paramFirst)}`);
+    }
+    const paramFirstEnvelope = assertStableToolEnvelope(paramFirst.content, 'Case 54b native read result', false);
+    const paramEvidence = paramFirstEnvelope.evidence as { status?: string; sourceHashes?: string[] };
+    if (paramEvidence.status !== 'native-verified'
+      || !paramEvidence.sourceHashes?.includes('native-param-v1')) {
+      throw new Error(`Case 54b: native read must expose deterministic source evidence: ${paramFirst.content}`);
     }
     const text = await bridge.executeTool({
       id: 'text-first',
@@ -3152,8 +3193,363 @@ async function main(): Promise<void> {
       argumentsJson: '{"table":"NpcParam","rowId":50800000}'
     });
     if (!text.ok || !param.ok || !param.content.includes('50800000')) {
-      throw new Error('Case 54b: text lookup must unlock structured discovery.');
+      throw new Error('Case 54b: text lookup and structured read must both remain available.');
     }
+    const textEnvelope = assertStableToolEnvelope(text.content, 'Case 54b candidate result', false);
+    if ((textEnvelope.evidence as { status?: string }).status !== 'candidate') {
+      throw new Error(`Case 54b: text lookup must be marked candidate: ${text.content}`);
+    }
+    const repeatedText = await bridge.executeTool({
+      id: 'text-repeat',
+      name: 'search_text_entries',
+      argumentsJson: '{"query":"鬼庭形部雅孝"}'
+    });
+    if (!repeatedText.ok) throw new Error(`Case 54b: repeated text query must remain callable: ${repeatedText.content}`);
+    const repeatedEnvelope = assertStableToolEnvelope(repeatedText.content, 'Case 54b repeated candidate result', false);
+    const repeatedEvidence = repeatedEnvelope.evidence as { repeatedQuery?: boolean; nextActions?: string[] };
+    if (repeatedEvidence.repeatedQuery !== true
+      || !repeatedEvidence.nextActions?.some((action) => action.includes('停止重复同义词'))) {
+      throw new Error(`Case 54b: repeated query must guide the model to a structured lookup: ${repeatedText.content}`);
+    }
+    passed++;
+  }
+
+  // --- Case 54c: event-note semantic lookup is candidate-only, while PARAM
+  // --- search exposes rowName/fieldId/description and table scoping.
+  {
+    const registry = createDefaultToolRegistry();
+    const referenceBridge = createAgentToolBridge({
+      registry,
+      context: { workspaceIndex: null, mode: 'plan' }
+    });
+    const referenceDescriptor = referenceBridge.tools.find((tool) => tool.name === 'search_event_reference');
+    const referenceSchema = referenceDescriptor?.parametersJsonSchema as {
+      properties?: Record<string, { type?: string }>;
+      required?: string[];
+    } | undefined;
+    if (referenceSchema?.properties?.query?.type !== 'string'
+      || !referenceSchema.required?.includes('query')
+      || !referenceDescriptor?.description.includes('non-authoritative')) {
+      throw new Error(`Case 54c: event reference schema/description is incomplete: ${JSON.stringify(referenceSchema)}`);
+    }
+    const reference = await referenceBridge.executeTool({
+      id: 'event-reference',
+      name: 'search_event_reference',
+      argumentsJson: JSON.stringify({ query: '地上随机落雷5秒', limit: 10 })
+    });
+    if (!reference.ok) throw new Error(`Case 54c: event reference query failed: ${reference.content}`);
+    const referenceEnvelope = assertStableToolEnvelope(reference.content, 'Case 54c event reference', false);
+    const referenceData = referenceEnvelope.data as { record?: unknown };
+    const referenceRecord = referenceData.record as {
+      matches?: Array<{ instruction?: string; authority?: string }>;
+    } | null;
+    if (!referenceRecord?.matches?.some((item) => item.instruction === 'SpawnMapSFX'
+      && item.authority === 'community-reference')
+      || (referenceEnvelope.evidence as { status?: string }).status !== 'candidate') {
+      throw new Error(`Case 54c: event-note lookup must return a candidate SpawnMapSFX: ${reference.content}`);
+    }
+
+    const paramIndex = new WorkspaceIndex('ws-param-semantic-contract');
+    paramIndex.upsertParamExport({
+      paramName: 'NpcParam',
+      rows: [{
+        uri: 'param://NpcParam/50800000',
+        sourceUri: 'file://synthetic/param/NpcParam.param',
+        paramName: 'NpcParam',
+        rowId: 50800000,
+        rowName: '鬼庭形部雅孝',
+        fields: [{ fieldId: 'hp', name: 'HP', description: '生命值', value: 100 }]
+      }]
+    });
+    paramIndex.upsertParamExport({
+      paramName: 'EquipParamGoods',
+      rows: [{
+        uri: 'param://EquipParamGoods/3080',
+        sourceUri: 'file://synthetic/param/EquipParamGoods.param',
+        paramName: 'EquipParamGoods',
+        rowId: 3080,
+        rowName: '义父的铃铛',
+        fields: [{ fieldId: 'nameId', name: '名称文本', description: '物品名称引用', value: 10020080 }]
+      }]
+    });
+    const paramBridge = createAgentToolBridge({
+      registry,
+      context: { workspaceIndex: paramIndex, mode: 'plan' }
+    });
+    const paramSearch = await paramBridge.executeTool({
+      id: 'param-semantic-search',
+      name: 'search_param_rows',
+      argumentsJson: JSON.stringify({ query: '生命值', paramNames: ['NpcParam'] })
+    });
+    if (!paramSearch.ok) throw new Error(`Case 54c: PARAM semantic search failed: ${paramSearch.content}`);
+    const paramEnvelope = assertStableToolEnvelope(paramSearch.content, 'Case 54c PARAM search', false);
+    const paramData = paramEnvelope.data as { items?: unknown[] };
+    const paramItems = paramData.items as Array<{ item?: {
+      paramName?: string;
+      rowName?: string;
+      fields?: Array<{ fieldId?: string; description?: string }>;
+    } }>;
+    const paramRow = paramItems[0]?.item;
+    if (paramRow?.paramName !== 'NpcParam'
+      || paramRow.rowName !== '鬼庭形部雅孝'
+      || paramRow.fields?.[0]?.fieldId !== 'hp'
+      || paramRow.fields?.[0]?.description !== '生命值') {
+      throw new Error(`Case 54c: PARAM row semantic fields were not searchable/projected: ${paramSearch.content}`);
+    }
+    const filteredOut = await paramBridge.executeTool({
+      id: 'param-table-scope',
+      name: 'search_param_rows',
+      argumentsJson: JSON.stringify({ query: '义父的铃铛', paramNames: ['NpcParam'] })
+    });
+    if (!filteredOut.ok) throw new Error(`Case 54c: PARAM table scope query failed: ${filteredOut.content}`);
+    const filteredEnvelope = assertStableToolEnvelope(filteredOut.content, 'Case 54c PARAM table scope', false);
+    const filteredData = filteredEnvelope.data as { items?: unknown[] };
+    if ((filteredData.items ?? []).length !== 0) {
+      throw new Error(`Case 54c: paramNames must exclude rows from other tables: ${filteredOut.content}`);
+    }
+    passed++;
+  }
+
+  // --- Case 54d: production-shaped five-round loop for the user's concrete
+  // --- boss/event request. The provider is scripted, but the real loop,
+  // --- production bridge, result envelopes, parallel discovery and native
+  // --- evidence states are exercised end to end.
+  {
+    const registry = new ToolRegistry();
+    const msgSourceUri = 'file://synthetic/msg/title.fmg';
+    const paramSourceUri = 'file://synthetic/param/gameparam.parambnd.dcx';
+    const itemSourceUri = 'file://synthetic/param/item.parambnd.dcx';
+    const eventSourceUri = 'file://synthetic/event/m10_00_00_00.emevd.dcx';
+    const npcRow = {
+      paramName: 'NpcParam',
+      rowId: 50800000,
+      rowName: '鬼庭形部雅孝',
+      fields: [
+        { fieldId: 'hp', name: 'HP', description: '生命值', value: 100 },
+        { fieldId: 'hpBarType', name: 'HP bar type', description: 'Boss/elite health bar', value: 2 }
+      ],
+      sourceUri: paramSourceUri,
+      sourceHash: 'param-native-v1',
+      sourceRevision: 17
+    };
+    const goodsRow = {
+      paramName: 'EquipParamGoods',
+      rowId: 3080,
+      rowName: '义父的铃铛',
+      fields: [{ fieldId: 'nameId', name: '名称文本', description: '物品名称引用', value: 10020080 }],
+      sourceUri: itemSourceUri,
+      sourceHash: 'item-native-v1',
+      sourceRevision: 9
+    };
+    const lotRow = {
+      paramName: 'ItemLotParam',
+      rowId: 200300,
+      rowName: '义父的铃铛掉落组',
+      fields: [{ fieldId: 'itemId', name: '掉落物', description: '掉落物品行引用', value: 3080 }],
+      sourceUri: itemSourceUri,
+      sourceHash: 'item-native-v1',
+      sourceRevision: 9
+    };
+    const recordOf = (value: unknown): Record<string, unknown> => (
+      value && typeof value === 'object' && !Array.isArray(value)
+        ? value as Record<string, unknown>
+        : {}
+    );
+    const registerReadTool = (
+      name: string,
+      inputSchema: Record<string, string>,
+      handler: (input: unknown) => unknown
+    ): void => {
+      registry.register({
+        name,
+        description: `scenario ${name}`,
+        permission: 'read',
+        permissionLevel: 'read',
+        inputSchema,
+        run: (input) => ({ ok: true, data: handler(input) })
+      });
+    };
+
+    registerReadTool('list_memories', {}, () => ({ count: 0, topics: [] }));
+    registerReadTool('search_text_entries', { query: 'string', limit: 'number?' }, () => ([{
+      textId: 902012,
+      category: 'Title',
+      text: '鬼庭形部雅孝',
+      sourceUri: msgSourceUri
+    }]));
+    registerReadTool('search_param_rows', { query: 'string', limit: 'number?', paramNames: 'array?' }, (input) => {
+      const value = recordOf(input);
+      const query = String(value.query ?? '');
+      const tables = Array.isArray(value.paramNames)
+        ? value.paramNames.filter((item): item is string => typeof item === 'string')
+        : [];
+      if (query.includes('鬼') && tables.includes('NpcParam')) return [npcRow];
+      if (query.includes('铃') && (tables.includes('EquipParamGoods') || tables.includes('ItemLotParam'))) {
+        return [
+          ...(tables.includes('EquipParamGoods') ? [goodsRow] : []),
+          ...(tables.includes('ItemLotParam') ? [lotRow] : [])
+        ];
+      }
+      return [];
+    });
+    registerReadTool('search_event_reference', { query: 'string', limit: 'number?' }, (input) => {
+      const query = String(recordOf(input).query ?? '');
+      return {
+        query,
+        sourceUri: 'reference://community/sekiro-event-notes',
+        authority: 'community-reference',
+        matches: searchEventReference(query, 20)
+      };
+    });
+    registerReadTool('read_fmg_entries', { table: 'string', ids: 'array' }, () => ([{
+      id: 902012,
+      text: '鬼庭形部雅孝',
+      sourceUri: msgSourceUri,
+      sourceHash: 'msg-native-v1',
+      sourceRevision: 4
+    }]));
+    registerReadTool('search_events', { query: 'string?', file: 'string?', eventId: 'number?', limit: 'number?' }, () => ([{
+      eventId: 900210,
+      file: eventSourceUri,
+      sourceUri: eventSourceUri
+    }]));
+    registerReadTool('read_param_fields', { table: 'string', rowIds: 'array', fieldIds: 'array?' }, (input) => {
+      const table = String(recordOf(input).table ?? '');
+      if (table === 'NpcParam') return { table, rows: [npcRow] };
+      if (table === 'EquipParamGoods') return { table, rows: [goodsRow] };
+      return { table, rows: [lotRow] };
+    });
+    registerReadTool('read_emevd_outline', { file: 'string' }, () => ({
+      file: eventSourceUri,
+      sourceUri: eventSourceUri,
+      sourceHash: 'emevd-native-v1',
+      sourceRevision: 22,
+      events: [{
+        eventId: 900210,
+        instructions: [
+          { name: 'DisplayBossHealthBar', args: ['鬼庭形部雅孝', 2] },
+          { name: 'SetCharacterHPBarDisplay', args: [50800000, 2] },
+          { name: 'SpawnMapSFX', args: ['random-ground-lightning', 5] },
+          { name: 'SetCharacterTeamType', args: ['鬼庭形部雅孝', 'enemy'] },
+          { name: 'ForceCharacterTarget', args: ['鬼庭形部雅孝', 'not-wolf'] },
+          { name: 'IfCharacterDamagedBy', args: ['wolf', 'ignore'] },
+          { name: 'HandleBossDefeat', args: ['鬼庭形部雅孝'] },
+          { name: 'AwardItemLot', args: [200300] }
+        ]
+      }]
+    }));
+
+    const bridge = createAgentToolBridge({
+      registry,
+      context: { workspaceIndex: null, mode: 'normal' }
+    });
+    const eventReferenceDescriptor = bridge.tools.find((tool) => tool.name === 'search_event_reference');
+    const textDescriptor = bridge.tools.find((tool) => tool.name === 'search_text_entries');
+    const paramDescriptor = bridge.tools.find((tool) => tool.name === 'search_param_rows');
+    if (!eventReferenceDescriptor?.supportsParallel || !textDescriptor?.supportsParallel || !paramDescriptor?.supportsParallel) {
+      throw new Error('Case 54d: MSG/PARAM/community event discovery must be advertised as parallel-safe.');
+    }
+
+    const modelRounds: Array<{ round: number; requestedTools: string[]; priorToolResults: number }> = [];
+    const call = (id: string, name: string, input: unknown): ToolCall => ({
+      id,
+      name,
+      argumentsJson: JSON.stringify(input)
+    });
+    const scenarioAdapter: ModelServiceAdapter = {
+      protocol: 'openai-compatible',
+      listModels: fakeListModels,
+      async complete(request) {
+        const round = modelRounds.length + 1;
+        const priorToolResults = request.messages.filter((message) => message.role === 'tool').length;
+        let toolCalls: ToolCall[] = [];
+        if (round === 1) {
+          toolCalls = [call('scenario-memory', 'list_memories', {})];
+        } else if (round === 2) {
+          toolCalls = [
+            call('scenario-msg', 'search_text_entries', { query: '鬼刑部', limit: 20 }),
+            call('scenario-npc', 'search_param_rows', { query: '鬼刑部', paramNames: ['NpcParam'], limit: 20 }),
+            call('scenario-item', 'search_param_rows', { query: '义父的铃铛', paramNames: ['EquipParamGoods', 'ItemLotParam'], limit: 20 }),
+            call('scenario-events', 'search_event_reference', { query: '血条 落雷 不攻击 击杀 掉落', limit: 20 })
+          ];
+        } else if (round === 3) {
+          toolCalls = [
+            call('scenario-msg-read', 'read_fmg_entries', { table: 'Title', ids: [902012] }),
+            call('scenario-npc-read', 'read_param_fields', { table: 'NpcParam', rowIds: [50800000] }),
+            call('scenario-goods-read', 'read_param_fields', { table: 'EquipParamGoods', rowIds: [3080] }),
+            call('scenario-lot-read', 'read_param_fields', { table: 'ItemLotParam', rowIds: [200300] }),
+            call('scenario-event-search', 'search_events', { query: '900210', limit: 20 })
+          ];
+        } else if (round === 4) {
+          toolCalls = [call('scenario-event-read', 'read_emevd_outline', { file: eventSourceUri })];
+        }
+        modelRounds.push({ round, requestedTools: toolCalls.map((item) => item.name), priorToolResults });
+        if (round === 5) {
+          return {
+            message: {
+              role: 'assistant',
+              content: '已完成定位：MSG 正式名称为“鬼庭形部雅孝”，对应 NpcParam 行 50800000；物品为 EquipParamGoods 行 3080，掉落组为 ItemLotParam 行 200300。原生事件 900210 已读到 DisplayBossHealthBar、SetCharacterHPBarDisplay、SpawnMapSFX、SetCharacterTeamType、ForceCharacterTarget、IfCharacterDamagedBy、HandleBossDefeat、AwardItemLot。方案是：精英血条等级 2，出场地面随机落雷持续 5 秒，过滤狼为攻击目标，击杀后发放义父的铃铛；提交修改前还需走 Patch Engine 和用户确认。'
+            },
+            finishReason: 'stop',
+            diagnostics: []
+          };
+        }
+        return {
+          message: {
+            role: 'assistant',
+            content: `第 ${round} 轮继续收集结构化证据。`,
+            toolCalls
+          },
+          finishReason: 'tool_use',
+          diagnostics: []
+        };
+      },
+      async *stream() {
+        throw new Error('Case 54d uses complete() to preserve the round trace.');
+      }
+    };
+    const scenarioResult = await runAgentToolLoop(scenarioAdapter, {
+      config: makeConfig(9, 'openai-compatible'),
+      apiKey: 'scenario-key',
+      taskQuery: '把鬼刑部设置成精英怪，血条设置为2，出场时地上随机落雷5秒，不攻击到狼，击杀后掉落义父的铃铛',
+      messages: [
+        { role: 'system', content: '先看记忆；记忆没有命中时并发 MSG/PARAM，并用社区事件经验组织候选方案。' },
+        { role: 'user', content: '把鬼刑部设置成精英怪，血条设置为2，出场时地上随机落雷5秒，不攻击到狼，击杀后掉落义父的铃铛' }
+      ],
+      tools: bridge.tools,
+      permissionMode: 'normal',
+      executeTool: bridge.executeTool,
+      maxSteps: 8
+    });
+    const executedTools = scenarioResult.audit.toolCalls.map((entry) => ({
+      name: entry.name,
+      ok: entry.ok,
+      ...(entry.code ? { code: entry.code } : {})
+    }));
+    const expectedTools = [
+      'list_memories',
+      'search_text_entries', 'search_param_rows', 'search_param_rows', 'search_event_reference',
+      'read_fmg_entries', 'read_param_fields', 'read_param_fields', 'read_param_fields', 'search_events',
+      'read_emevd_outline'
+    ];
+    if (scenarioResult.finishReason !== 'stop' || scenarioResult.steps !== 5
+      || JSON.stringify(executedTools.map((entry) => entry.name)) !== JSON.stringify(expectedTools)
+      || executedTools.some((entry) => !entry.ok)
+      || modelRounds[1]?.requestedTools.join('|') !== 'search_text_entries|search_param_rows|search_param_rows|search_event_reference'
+      || modelRounds[2]?.requestedTools.join('|') !== 'read_fmg_entries|read_param_fields|read_param_fields|read_param_fields|search_events') {
+      throw new Error(`Case 54d: target instruction loop did not complete the expected five-round path: ${JSON.stringify({ scenarioResult, modelRounds, executedTools })}`);
+    }
+    const finalAnswer = scenarioResult.messages[scenarioResult.messages.length - 1]?.content ?? '';
+    for (const marker of ['鬼庭形部雅孝', 'DisplayBossHealthBar', 'SpawnMapSFX', 'AwardItemLot', 'Patch Engine']) {
+      if (!finalAnswer.includes(marker)) throw new Error(`Case 54d: final plan missing ${marker}: ${finalAnswer}`);
+    }
+    targetInstructionTrace = {
+      steps: scenarioResult.steps,
+      finishReason: scenarioResult.finishReason,
+      modelRounds,
+      executedTools,
+      finalAnswer
+    };
     passed++;
   }
 
@@ -3558,18 +3954,20 @@ async function main(): Promise<void> {
     message: 'AI 双协议错误/取消/超时/限额矩阵 + 真实 SSE 流式（含流式取消/超时/错误分类）+ 脱敏矩阵 + Context Broker 证据装配 + 真实工作区多步 typed mutation 写矩阵 + Codex 派生内核（重试退避/并行工具/流式事件/rollout 持久化/上下文压缩）+ production 接线（工具桥/输入校验/文件 rollout/会话宿主）conformance 验证通过',
     passed,
     total,
+    targetInstructionTrace,
     nonClaims: [
       '离线 conformance 不证明任何第三方真实服务可用。',
-      'Anthropic 真实 SSE 只在本机确定性 contract server 上验证事件解析/取消/超时/错误分类；第三方流式事件形状差异不属于 V0.5 验收。',
+      'Anthropic 真实 SSE 只在本机确定性 contract server 上验证事件解析/取消/超时/错误分类；第三方流式事件形状差异不在本次离线验收范围。',
       'MODEL_SERVICE_CANCELLED 区分主动取消与超时是 conformance 层的错误码语义；不影响真实 provider 行为。',
       '写矩阵只覆盖实际接线的安全写路径（scaffold text_edit + WorkspaceTransaction），不提升 native writer authority 或 Patch Engine authority。',
       'plan 的权威判据是 ai/toolPermissions 的等级阶梯；ToolRegistry 与 agent loop 消费同一 predicate，'
         + 'plan 允许 read/analyze/propose，stage/validate/commit/rollback 均被拒绝。',
       'normal 模式的确认语义为：commit 被结构化拒绝，经用户确认升级后才经 Patch Engine 提交。',
-      'Context Broker 是离线可测的 evidence 装配层；其真实 provider 侧接入（第三方模型上下文窗口、真实工作区索引来源）不属于 V0.5 验收。',
+      'Context Broker 是离线可测的 evidence 装配层；其真实 provider 侧接入（第三方模型上下文窗口、真实工作区索引来源）不在本次离线验收范围。',
       'Codex 派生内核（重试退避、并行工具、流式事件、rollout、compaction）参考 openai/codex（Apache-2.0）设计重写；离线矩阵不证明与 Codex 行为逐位一致，也不提升 provider 或 native authority。',
       'production 接线（agentToolBridge、文件 rollout、session host、desktop IPC/preload 契约）由 typecheck/build + 本 smoke 的 fake adapter/registry 验证；未经真实 provider 端到端运行，renderer agent 任务面板归前端 Agent。',
-      '真实 provider 凭据不属于 V0.5 验收。'
+      '目标指令五轮闭环使用本地 scripted adapter 与 synthetic native evidence；验证真实 loop/bridge 编排，不证明第三方 provider 或真实游戏资源中的具体 eventId/参数。',
+      '真实 provider 凭据不在本次离线验收范围。'
     ]
   }));
 }

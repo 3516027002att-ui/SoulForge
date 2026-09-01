@@ -64,7 +64,7 @@ export interface OperationLogStore {
 
 /**
  * In-memory operation log used until the desktop main process wires SQLite.
- * Semantics match the v0.5 operation / file rollback model.
+ * Semantics match the operation / file rollback model.
  */
 export class MemoryOperationLogStore implements OperationLogStore {
   private readonly byId = new Map<string, OperationLogRecord>();

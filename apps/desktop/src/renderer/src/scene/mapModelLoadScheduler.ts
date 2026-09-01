@@ -1,4 +1,5 @@
 import type { SceneDrawItem } from '@soulforge/shared';
+import { normalizeModelResourceKey } from './modelResourcePool.js';
 
 export type MapMeshGeometry = NonNullable<SceneDrawItem['mesh']>;
 
@@ -34,8 +35,7 @@ export function canonicalResourceCacheKeySha256(key: ResourceCacheKeyV1): string
 }
 
 export function normalizeMapModelKey(modelName: string): string {
-  const base = modelName.replace(/\\/g, '/').split('/').pop() ?? modelName;
-  return base.toLowerCase().replace(/\.(flver|mapbnd|objbnd|chrbnd)(\.dcx)?$/i, '');
+  return normalizeModelResourceKey(modelName);
 }
 
 export interface ReadyResourceManifestV1 {
@@ -86,7 +86,9 @@ export class MapModelLoadCache {
   ) {}
 
   public load(modelName: string): Promise<MapMeshGeometry | null> {
-    if (this.disposed) return Promise.resolve(null);
+    if (this.disposed) {
+      return Promise.reject(new Error(`MAP_MESH_LOAD_CACHE_DISPOSED: cannot load ${modelName}`));
+    }
     const legacySha = normalizeMapModelKey(modelName);
     // legacyResolved path (test compat) — still keyed via normalized short key but also via canonical SHA for spec
     const syntheticKey: ResourceCacheKeyV1 = {
@@ -110,7 +112,9 @@ export class MapModelLoadCache {
     const controller = new AbortController();
     const request = this.loader(modelName, controller.signal)
       .then((geometry) => {
-        if (this.disposed || controller.signal.aborted) return null;
+        if (this.disposed || controller.signal.aborted) {
+          throw new Error(`MAP_MESH_LOAD_CANCELLED: ${modelName}`);
+        }
         this.legacyResolved.set(sha, geometry);
         return geometry;
       })
@@ -124,7 +128,9 @@ export class MapModelLoadCache {
   }
 
   public loadByKey(key: ResourceCacheKeyV1, modelName: string): Promise<MapMeshGeometry | null> {
-    if (this.disposed) return Promise.resolve(null);
+    if (this.disposed) {
+      return Promise.reject(new Error(`MAP_MESH_LOAD_CACHE_DISPOSED: cannot load ${modelName}`));
+    }
     const sha = canonicalResourceCacheKeySha256(key);
     if (this.resolvedManifests.has(sha)) {
       // ready hit: manifest exists, wire payload not retained — caller acquires from GPU pool.
@@ -135,7 +141,9 @@ export class MapModelLoadCache {
     const controller = new AbortController();
     const promise = this.loader(modelName, controller.signal)
       .then((geometry) => {
-        if (this.disposed || controller.signal.aborted) return null;
+        if (this.disposed || controller.signal.aborted) {
+          throw new Error(`MAP_MESH_LOAD_CANCELLED: ${modelName}`);
+        }
         if (!geometry) {
           this.resolvedManifests.set(sha, null);
           return null;
@@ -188,7 +196,8 @@ type FrameScheduler = (callback: FrameRequestCallback) => number;
 type FrameCanceller = (handle: number) => void;
 
 interface QueuedFrameTask {
-  run: () => void;
+  /** `undefined` keeps the legacy "task ran" meaning; boolean carries a real upload result. */
+  run: () => boolean | void;
   resolve: (ran: boolean) => void;
   reject: (error: unknown) => void;
 }
@@ -203,13 +212,16 @@ export class FrameTaskQueue {
   private disposed = false;
 
   public constructor(
-    private readonly scheduleFrame: FrameScheduler = requestAnimationFrame,
-    private readonly cancelFrame: FrameCanceller = cancelAnimationFrame,
+    // Chromium 的 requestAnimationFrame/cancelAnimationFrame 需要 Window receiver；
+    // 直接把原生方法作为参数保存后再以 this.scheduleFrame(...) 调用会触发
+    // `Illegal invocation`，导致所有 MAP mesh 上传任务永远不执行。
+    private readonly scheduleFrame: FrameScheduler = (callback) => requestAnimationFrame(callback),
+    private readonly cancelFrame: FrameCanceller = (handle) => cancelAnimationFrame(handle),
     private readonly now: () => number = () => performance.now(),
     private readonly frameBudgetMs = 6
   ) {}
 
-  public enqueue(run: () => void): Promise<boolean> {
+  public enqueue(run: () => boolean | void): Promise<boolean> {
     if (this.disposed) return Promise.resolve(false);
     const pending = new Promise<boolean>((resolve, reject) => {
       this.tasks.push({ run, resolve, reject });
@@ -238,8 +250,8 @@ export class FrameTaskQueue {
       const task = this.tasks.shift();
       if (!task) break;
       try {
-        task.run();
-        task.resolve(true);
+        const result = task.run();
+        task.resolve(result === undefined ? true : result);
       } catch (error) {
         task.reject(error);
       }

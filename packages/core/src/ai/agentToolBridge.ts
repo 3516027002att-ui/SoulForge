@@ -31,9 +31,10 @@ export interface AgentToolBridgeOptions {
   registry: ToolRegistry;
   context: ToolContext;
   /**
-   * Entity/item discovery runs must attempt FMG/RAG text lookup before
-   * probing PARAM/MSB/EMEVD.  This is a runtime contract, not prompt advice:
-   * models that ignore the documented workflow receive a structured denial.
+   * @deprecated Kept for compatibility with older hosts. Discovery is no
+   * longer blocked on a previous text query; the bridge returns a deterministic
+   * candidate/native-evidence status and native read/write contracts enforce
+   * the actual evidence boundary.
    */
   requireTextLookupBeforeStructuredDiscovery?: boolean;
 }
@@ -52,16 +53,47 @@ export interface AgentToolBridge {
 }
 
 const PARALLEL_SAFE_LEVELS = new Set(['read', 'analyze']);
-const TEXT_DISCOVERY_TOOLS = new Set(['search_text_entries', 'retrieve_evidence']);
-const STRUCTURED_DISCOVERY_TOOLS = new Set([
+const DISCOVERY_TOOLS = new Set([
   'search_resources',
   'search_param_rows',
-  'read_param_fields',
-  'query_map_objects',
   'search_map_entities',
-  'read_msb_parts',
+  'search_events',
+  'search_tae_events',
+  'search_text_entries',
+  'search_event_reference',
+  'retrieve_evidence',
+  'lookup_text_id'
+]);
+const NATIVE_READ_TOOLS = new Set([
+  'read_param_fields',
+  'read_fmg_entries',
   'read_emevd_outline',
-  'search_events'
+  'read_tae_events',
+  'read_msb_parts',
+  'query_map_objects',
+  'inspect_map_object'
+]);
+const DISCOVERY_QUERY_TOOLS = new Set([
+  'search_resources',
+  'search_param_rows',
+  'search_map_entities',
+  'search_events',
+  'search_tae_events',
+  'search_text_entries',
+  'search_event_reference',
+  'retrieve_evidence'
+]);
+const PROPOSAL_TOOLS = new Set(['propose_text_patch', 'propose_plaintext_script_edit', 'build_patch_graph']);
+const VALIDATION_TOOLS = new Set(['validate_patch', 'assess_edit_risk']);
+const MUTATION_TOOLS = new Set([
+  'commit_patch',
+  'mutate_param_fields',
+  'mutate_fmg_entries',
+  'apply_emevd_dsl',
+  'mutate_tae_event_times',
+  'mutate_msb_part_transform',
+  'batch_transform_map_objects',
+  'import_map_from_blender'
 ]);
 
 /**
@@ -77,6 +109,7 @@ const BOUNDED_DISCOVERY_TOOLS = new Set([
   'search_tae_events',
   'search_param_rows',
   'search_text_entries',
+  'search_event_reference',
   'query_map_objects',
   'read_param_fields',
   'read_fmg_entries',
@@ -86,7 +119,25 @@ const BOUNDED_DISCOVERY_TOOLS = new Set([
 const SUMMARY_ARRAY_LIMIT = 16;
 const SUMMARY_STRING_LIMIT = 320;
 const RESULT_ENVELOPE_DESCRIPTION =
-  '返回固定结果 envelope：data、pagination、truncated、identifiers；大型结果只在 data.summary 中摘要，不能按原始 typed response 解读。';
+  '返回固定结果 envelope：data、pagination、truncated、identifiers、evidence；大型结果只在 data.summary 中摘要，不能按原始 typed response 解读。evidence 只表示确定性来源状态，不是模型置信度分数。';
+
+export type AgentEvidenceStatus = 'not_applicable' | 'candidate' | 'native-verified' | 'insufficient_evidence';
+export type AgentEvidenceKind = 'discovery' | 'rag' | 'native-read' | 'proposal' | 'validation' | 'mutation' | 'memory' | 'other';
+
+/**
+ * Agent-facing evidence is a finite workflow state, not a probability. A
+ * candidate can guide the next lookup, while only a native read carrying a
+ * source hash can support a native edit boundary.
+ */
+export interface AgentEvidenceMetadata {
+  status: AgentEvidenceStatus;
+  kind: AgentEvidenceKind;
+  sourceUris: string[];
+  sourceHashes: string[];
+  sourceRevisions: Array<number | string>;
+  nextActions: string[];
+  repeatedQuery: boolean;
+}
 
 export interface AgentToolResultEnvelope {
   ok: true;
@@ -105,6 +156,7 @@ export interface AgentToolResultEnvelope {
   };
   truncated: boolean;
   identifiers: string[];
+  evidence: AgentEvidenceMetadata;
 }
 
 function summarizeToolValue(value: unknown, depth = 0): unknown {
@@ -192,12 +244,184 @@ function collectionCounts(value: unknown): { returnedCount: number | null; total
   return { returnedCount, totalCount };
 }
 
+function collectEvidenceFacts(value: unknown): Pick<AgentEvidenceMetadata, 'sourceUris' | 'sourceHashes' | 'sourceRevisions'> {
+  const sourceUris = new Set<string>();
+  const sourceHashes = new Set<string>();
+  const sourceRevisions = new Set<number | string>();
+  const seen = new Set<object>();
+  const walk = (node: unknown, depth: number): void => {
+    if (depth > 6 || node === null || typeof node !== 'object') return;
+    if (seen.has(node)) return;
+    seen.add(node);
+    if (Array.isArray(node)) {
+      node.slice(0, 128).forEach((item) => walk(item, depth + 1));
+      return;
+    }
+    for (const [key, child] of Object.entries(node as Record<string, unknown>)) {
+      const normalizedKey = key.toLocaleLowerCase();
+      if (normalizedKey === 'sourceuri' && typeof child === 'string' && child.trim() !== '') {
+        sourceUris.add(child.trim().slice(0, 512));
+      } else if (normalizedKey === 'sourcehash' && typeof child === 'string' && child.trim() !== '') {
+        sourceHashes.add(child.trim().slice(0, 256));
+      } else if (normalizedKey === 'sourcerevision'
+        && ((typeof child === 'number' && Number.isFinite(child))
+          || (typeof child === 'string' && child.trim() !== ''))) {
+        sourceRevisions.add(typeof child === 'string' ? child.trim().slice(0, 256) : child);
+      }
+      walk(child, depth + 1);
+    }
+  };
+  walk(value, 0);
+  return {
+    sourceUris: [...sourceUris].slice(0, 16),
+    sourceHashes: [...sourceHashes].slice(0, 16),
+    sourceRevisions: [...sourceRevisions].slice(0, 16)
+  };
+}
+
+function hasMeaningfulResult(value: unknown): boolean {
+  if (Array.isArray(value)) return value.length > 0;
+  if (!value || typeof value !== 'object') return false;
+  const record = value as Record<string, unknown>;
+  for (const key of [
+    'items',
+    'hits',
+    'entries',
+    'matches',
+    'rows',
+    'events',
+    'parts',
+    'entities',
+    'matchedEntities',
+    'results',
+    'topics',
+    'fields'
+  ]) {
+    if (Array.isArray(record[key]) && record[key]!.length > 0) return true;
+  }
+  return ['totalHits', 'totalCount', 'matchedCount', 'returnedCount'].some((key) => (
+    typeof record[key] === 'number' && Number.isFinite(record[key]) && record[key] > 0
+  ));
+}
+
+function buildEvidenceMetadata(name: string, data: unknown, repeatedQuery = false): AgentEvidenceMetadata {
+  const facts = collectEvidenceFacts(data);
+  if (DISCOVERY_TOOLS.has(name)) {
+    const hasHits = hasMeaningfulResult(data);
+    const isRag = name === 'retrieve_evidence';
+    return {
+      ...facts,
+      status: hasHits ? 'candidate' : 'insufficient_evidence',
+      kind: isRag ? 'rag' : 'discovery',
+      nextActions: hasHits
+        ? discoveryNextActions(name, repeatedQuery)
+        : [
+            repeatedQuery
+              ? '已执行相同或语义相近的查询；不要原样重试，改用另一条对象解析路径或原生读取。'
+              : '当前查询没有命中；这只结束本次查询，不代表对象不存在。继续使用正式名称、参数备注、数字 ID、资源来源或引用关系定位。'
+          ],
+      repeatedQuery
+    };
+  }
+  if (NATIVE_READ_TOOLS.has(name)) {
+    const nativeVerified = facts.sourceHashes.length > 0;
+    return {
+      ...facts,
+      status: nativeVerified ? 'native-verified' : 'insufficient_evidence',
+      kind: 'native-read',
+      nextActions: nativeVerified
+        ? ['已取得带 sourceHash 的原生快照；写入前仍须使用该哈希和 sourceRevision 做前置条件校验。']
+        : ['原生读取没有返回 sourceHash，不能把本次结果作为写入前置依据。'],
+      repeatedQuery: false
+    };
+  }
+  if (PROPOSAL_TOOLS.has(name)) {
+    return {
+      ...facts,
+      status: 'candidate',
+      kind: 'proposal',
+      nextActions: ['这是候选方案，不是已写入结果；先完成原生读取、校验和用户确认，再进入写入。'],
+      repeatedQuery: false
+    };
+  }
+  if (VALIDATION_TOOLS.has(name)) {
+    return {
+      ...facts,
+      status: 'not_applicable',
+      kind: 'validation',
+      nextActions: ['校验结果只说明当前补丁检查结果；原生格式仍须保留 sourceHash/sourceRevision 并在写入后回读。'],
+      repeatedQuery: false
+    };
+  }
+  if (MUTATION_TOOLS.has(name)) {
+    return {
+      ...facts,
+      status: 'not_applicable',
+      kind: 'mutation',
+      nextActions: ['写入完成后必须原生回读目标资源，确认语义、哈希变化和可回滚记录。'],
+      repeatedQuery: false
+    };
+  }
+  if (name === 'list_memories' || name === 'read_memory') {
+    return {
+      ...facts,
+      status: 'not_applicable',
+      kind: 'memory',
+      nextActions: [],
+      repeatedQuery: false
+    };
+  }
+  return {
+    ...facts,
+    status: 'not_applicable',
+    kind: 'other',
+    nextActions: [],
+    repeatedQuery: false
+  };
+}
+
+function discoveryNextActions(name: string, repeatedQuery: boolean): string[] {
+  if (repeatedQuery) {
+    return [
+      '已命中相同或语义相近的定位词；停止重复同义词搜索，停止继续扩大同一路径，改用另一类资源或已有结果的稳定 ID/sourceUri。'
+    ];
+  }
+  if (name === 'search_text_entries') {
+    return [
+      '这是 MSG/FMG 候选；读取返回的 textId/category/sourceUri，并与 PARAM 行名交叉比对。',
+      'textId 不等于 NpcParam、EquipParamGoods 或 ItemLotParam 的 rowId。'
+    ];
+  }
+  if (name === 'search_param_rows') {
+    return [
+      '这是 PARAM 候选；优先使用返回的 paramName、rowName、fieldId、字段显示名/备注和 sourceUri。',
+      '下一步用 read_param_fields 读取候选行；fieldIds 可省略以读取完整的可信字段投影。'
+    ];
+  }
+  if (name === 'search_map_entities') {
+    return [
+      '这是地图候选；使用返回的实体稳定地址和 sourceUri 继续读取 MSB。',
+      '不要把逻辑地图 ID 直接当作 MSB file 参数。'
+    ];
+  }
+  if (name === 'search_event_reference') {
+    return [
+      '这是社区事件经验提供的语义参考，可用于组织方案；使用返回的 instruction 名称继续 search_events。',
+      '再用 search_events 的 file/eventId 和 read_emevd_outline/native EMEDF 确认当前事件身份、指令签名、参数及真实事件关系。'
+    ];
+  }
+  return [
+    '候选结果不是写入依据；使用返回的稳定 ID/sourceUri 转入结构化查询或原生读取。'
+  ];
+}
+
 function createResultEnvelope(
   data: unknown,
   originalChars: number,
   truncated: boolean,
   summary: string | null,
-  identifiers = collectStableIdentifiers(data)
+  identifiers = collectStableIdentifiers(data),
+  evidence = buildEvidenceMetadata('unknown', data)
 ): AgentToolResultEnvelope {
   const counts = collectionCounts(data);
   return {
@@ -210,7 +434,8 @@ function createResultEnvelope(
       cursors: identifiers.cursors
     },
     truncated,
-    identifiers: identifiers.ids
+    identifiers: identifiers.ids,
+    evidence
   };
 }
 
@@ -224,15 +449,16 @@ function compactIdentifiers(
   };
 }
 
-function boundedToolContent(name: string, data: unknown): string {
-  const raw = JSON.stringify({ ok: true, state: 'completed', data: data ?? null });
+function boundedToolContent(name: string, data: unknown, repeatedQuery = false): string {
+  const evidence = buildEvidenceMetadata(name, data, repeatedQuery);
+  const raw = JSON.stringify({ ok: true, state: 'completed', data: data ?? null, evidence });
   const identifiers = collectStableIdentifiers(data);
   if (!BOUNDED_DISCOVERY_TOOLS.has(name) || raw.length <= MAX_BOUNDED_TOOL_RESULT_CHARS) {
-    return JSON.stringify(createResultEnvelope(data, raw.length, false, null, identifiers));
+    return JSON.stringify(createResultEnvelope(data, raw.length, false, null, identifiers, evidence));
   }
   const summary = summarizeToolValue(data);
   const summaryText = `工具 ${name} 输出过大，已返回摘要；请使用返回的 ID 或游标继续分页查询。`;
-  const summarizedEnvelope = createResultEnvelope(summary, raw.length, true, summaryText, identifiers);
+  const summarizedEnvelope = createResultEnvelope(summary, raw.length, true, summaryText, identifiers, evidence);
   const encoded = JSON.stringify(summarizedEnvelope);
   if (encoded.length <= MAX_BOUNDED_TOOL_RESULT_CHARS) return encoded;
 
@@ -244,7 +470,8 @@ function boundedToolContent(name: string, data: unknown): string {
     raw.length,
     true,
     `工具 ${name} 输出已截断；请使用 identifiers 或 pagination.cursors 继续查询。`,
-    compact
+    compact,
+    evidence
   );
   const compactEncoded = JSON.stringify(compactEnvelope);
   if (compactEncoded.length <= MAX_BOUNDED_TOOL_RESULT_CHARS) return compactEncoded;
@@ -254,13 +481,14 @@ function boundedToolContent(name: string, data: unknown): string {
     raw.length,
     true,
     `工具 ${name} 输出已截断；请继续分页查询。`,
-    { ids: [], cursors: {} }
+    { ids: [], cursors: {} },
+    evidence
   ));
 }
 
 export function createAgentToolBridge(options: AgentToolBridgeOptions): AgentToolBridge {
   const { registry, context } = options;
-  const textLookupEvidence: string[] = [];
+  const attemptedDiscoveryQueries: DiscoveryQueryRecord[] = [];
   const tools: AgentToolDefinition[] = registry.list().map((descriptor) => ({
     name: descriptor.name,
     // Every successful result is normalized by boundedToolContent, not only
@@ -291,36 +519,25 @@ export function createAgentToolBridge(options: AgentToolBridgeOptions): AgentToo
         })
       };
     }
-    const exactTarget = isExactStructuredTarget(call.name, input);
-    if (
-      options.requireTextLookupBeforeStructuredDiscovery === true
-      && STRUCTURED_DISCOVERY_TOOLS.has(call.name)
-      && !exactTarget
-      && !hasMatchingTextEvidence(input, textLookupEvidence)
-    ) {
-      return {
-        ok: false,
-        code: 'TEXT_LOOKUP_REQUIRED',
-        content: JSON.stringify({
-          ok: false,
-          error: {
-            code: 'TEXT_LOOKUP_REQUIRED',
-            message: '本任务必须先调用 search_text_entries（或 retrieve_evidence）按名称查 FMG 文本，再查询 PARAM/MSB/EMEVD；不要猜测行号。'
-          }
-        })
-      };
-    }
     const effectiveContext: ToolContext = { ...context, ...contextOverride };
     const result = await registry.run(call.name, input, effectiveContext);
     if (effectiveContext.mode && effectiveContext.mode !== context.mode) {
       context.mode = effectiveContext.mode;
     }
     if (result.ok) {
-      if (TEXT_DISCOVERY_TOOLS.has(call.name)) {
-        const evidence = extractTextEvidenceQuery(input, result.data);
-        if (evidence) textLookupEvidence.push(evidence);
+      let repeatedQuery = false;
+      if (DISCOVERY_QUERY_TOOLS.has(call.name)) {
+        const current = makeDiscoveryQueryRecord(call.name, input, result.data);
+        if (current) {
+          repeatedQuery = attemptedDiscoveryQueries.some((previous) => (
+            previous.scope === current.scope
+            && previous.terms.some((previousTerm) => current.terms.some((term) => areSimilarEvidenceTerms(previousTerm, term)))
+          ));
+          attemptedDiscoveryQueries.push(current);
+          if (attemptedDiscoveryQueries.length > 64) attemptedDiscoveryQueries.shift();
+        }
       }
-      return { ok: true, content: boundedToolContent(call.name, result.data) };
+      return { ok: true, content: boundedToolContent(call.name, result.data, repeatedQuery) };
     }
     return {
       ok: false,
@@ -336,63 +553,81 @@ export function createAgentToolBridge(options: AgentToolBridgeOptions): AgentToo
   return { tools, executeTool };
 }
 
-function extractTextEvidenceQuery(input: unknown, data: unknown): string | undefined {
-  const query = input && typeof input === 'object' && typeof (input as Record<string, unknown>).query === 'string'
-    ? (input as Record<string, unknown>).query as string
-    : '';
-  if (!hasTextHits(data)) return undefined;
-  return query.trim().toLocaleLowerCase();
+interface DiscoveryQueryRecord {
+  scope: string;
+  terms: string[];
 }
 
-function hasTextHits(data: unknown): boolean {
-  if (Array.isArray(data)) return data.length > 0;
-  if (!data || typeof data !== 'object') return false;
-  const record = data as Record<string, unknown>;
-  return (Array.isArray(record.hits) && record.hits.length > 0)
-    || (Array.isArray(record.entries) && record.entries.length > 0)
-    || (Array.isArray(record.matches) && record.matches.length > 0);
+function makeDiscoveryQueryRecord(name: string, input: unknown, data: unknown): DiscoveryQueryRecord | null {
+  const terms = collectDiscoveryTerms(input, data);
+  if (terms.length === 0) return null;
+  return { scope: discoveryQueryScope(name, input), terms };
 }
 
-function isExactStructuredTarget(name: string, input: unknown): boolean {
-  if (!input || typeof input !== 'object') return false;
-  const value = input as Record<string, unknown>;
-  if (name === 'read_param_fields') {
-    return typeof value.table === 'string' && asNonEmptyNumberList(value.rowIds);
+function discoveryQueryScope(name: string, input: unknown): string {
+  const record = input && typeof input === 'object' && !Array.isArray(input)
+    ? input as Record<string, unknown>
+    : {};
+  if (name === 'search_text_entries') return `text:${String(record.category ?? '')}`.toLocaleLowerCase();
+  if (name === 'search_param_rows') {
+    const tables = Array.isArray(record.paramNames)
+      ? record.paramNames.filter((item): item is string => typeof item === 'string').map((item) => normalizeEvidenceTerm(item)).sort()
+      : [];
+    return `param:${tables.join(',')}`;
   }
-  if (name === 'read_fmg_entries') {
-    return typeof value.table === 'string' && asNonEmptyNumberList(value.ids);
+  if (name === 'search_resources') {
+    const kinds = Array.isArray(record.kinds)
+      ? record.kinds.filter((item): item is string => typeof item === 'string').map((item) => normalizeEvidenceTerm(item)).sort()
+      : [];
+    return `resource:${kinds.join(',')}`;
   }
-  if (name === 'read_msb_parts') {
-    return Array.isArray(value.addresses) && value.addresses.length > 0
-      && value.addresses.every((item) => typeof item === 'string' && /^(?:m\d{2}_\d{2}_\d{2}_\d{2}#|map:\/\/)/iu.test(item));
-  }
-  if (name === 'read_emevd_outline') {
-    return typeof value.file === 'string' && /\.emevd(?:\.dcx)?$/iu.test(value.file);
-  }
-  if (name === 'search_events') {
-    return typeof value.file === 'string'
-      && value.file.trim().length > 0
-      && typeof value.eventId === 'number'
-      && Number.isSafeInteger(value.eventId);
-  }
-  if (name === 'search_param_rows' || name === 'search_map_entities') {
-    return typeof value.query === 'string' && /^\d+$|^(?:m\d{2}_\d{2}_\d{2}_\d{2}#|map:\/\/)/iu.test(value.query.trim());
-  }
-  return false;
+  return name;
 }
 
-function asNonEmptyNumberList(value: unknown): boolean {
-  return Array.isArray(value) && value.length > 0 && value.every((item) => typeof item === 'number' && Number.isInteger(item));
+function collectDiscoveryTerms(input: unknown, data: unknown): string[] {
+  const terms = new Set<string>();
+  const collect = (value: unknown): void => {
+    if (typeof value !== 'string') return;
+    const normalized = normalizeEvidenceTerm(value);
+    if (normalized.length >= 2) terms.add(normalized);
+  };
+  if (input && typeof input === 'object' && !Array.isArray(input)) {
+    const query = (input as Record<string, unknown>).query;
+    if (typeof query === 'string') collect(query);
+  }
+  const walk = (node: unknown, depth: number): void => {
+    if (depth > 4 || node === null || typeof node !== 'object') return;
+    if (Array.isArray(node)) {
+      node.slice(0, 32).forEach((item) => walk(item, depth + 1));
+      return;
+    }
+    for (const [key, child] of Object.entries(node as Record<string, unknown>)) {
+      if (/^(?:query|text|rowName|name|paramName|mapId|model|category|title)$/i.test(key)) collect(child);
+      else if (typeof child === 'object') walk(child, depth + 1);
+    }
+  };
+  walk(data, 0);
+  return [...terms].slice(0, 32);
 }
 
-function hasMatchingTextEvidence(input: unknown, evidence: readonly string[]): boolean {
-  if (evidence.length === 0 || !input || typeof input !== 'object') return false;
-  const terms = Object.entries(input as Record<string, unknown>)
-    .filter(([key, value]) => /query|name|identifier|target|region|model/i.test(key) && typeof value === 'string')
-    .map(([, value]) => normalizeEvidenceTerm(value as string))
-    .filter((value) => value.length >= 2);
-  if (terms.length === 0) return true;
-  return terms.some((term) => evidence.some((query) => query.includes(term) || term.includes(query)));
+function areSimilarEvidenceTerms(left: string, right: string): boolean {
+  const normalizedLeft = normalizeEvidenceTerm(left);
+  const normalizedRight = normalizeEvidenceTerm(right);
+  if (normalizedLeft.length < 2 || normalizedRight.length < 2) return false;
+  if (normalizedLeft === normalizedRight
+    || normalizedLeft.includes(normalizedRight)
+    || normalizedRight.includes(normalizedLeft)) return true;
+
+  // Chinese display names frequently differ by a shortened or alternate
+  // character. This is a non-blocking hint only: it stops the model from
+  // wasting calls on the same semantic lookup without rejecting a useful
+  // cross-reference lookup.
+  const leftHan = [...normalizedLeft].filter((char) => /\p{Script=Han}/u.test(char));
+  const rightHan = [...normalizedRight].filter((char) => /\p{Script=Han}/u.test(char));
+  if (leftHan.length < 3 || rightHan.length < 3) return false;
+  const rightSet = new Set(rightHan);
+  const overlap = new Set(leftHan.filter((char) => rightSet.has(char))).size;
+  return overlap >= Math.max(2, Math.ceil(Math.min(leftHan.length, rightHan.length) / 2));
 }
 
 function normalizeEvidenceTerm(value: string): string {

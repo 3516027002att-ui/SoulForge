@@ -89,6 +89,74 @@ internal sealed class BridgeCommandService
             return boundary.CanonicalPath;
         }
 
+        IReadOnlyList<string> OptionPaths(string name, int maxCount)
+        {
+            if (!optionsIsObject || !options.TryGetProperty(name, out var element))
+                return Array.Empty<string>();
+            if (element.ValueKind != JsonValueKind.Array)
+                throw new InvalidDataException($"BRIDGE_OPTIONS_INVALID: options.{name} 必须是路径数组。");
+
+            var roots = allowedRoots is { Count: > 0 }
+                ? allowedRoots
+                : new[] { Path.GetDirectoryName(file) ?? file };
+            var paths = new List<string>();
+            foreach (var item in element.EnumerateArray())
+            {
+                if (item.ValueKind != JsonValueKind.String)
+                    throw new InvalidDataException($"BRIDGE_OPTIONS_INVALID: options.{name} 含非字符串路径。");
+                var candidate = item.GetString();
+                if (string.IsNullOrWhiteSpace(candidate)) continue;
+                if (paths.Count >= maxCount)
+                    throw new InvalidDataException($"BRIDGE_OPTIONS_INVALID: options.{name} 最多允许 {maxCount} 个路径。");
+                var boundary = BridgePathBoundary.Verify(candidate, roots);
+                if (!boundary.Ok)
+                    throw new InvalidDataException($"{boundary.Code}: options.{name} 不在当前 Bridge allowed roots 内：{candidate}");
+                if (!paths.Contains(boundary.CanonicalPath, StringComparer.OrdinalIgnoreCase))
+                    paths.Add(boundary.CanonicalPath);
+            }
+            return paths;
+        }
+
+        int[]? OptionIntArray(string name)
+        {
+            if (!optionsIsObject || !options.TryGetProperty(name, out var element)
+                || element.ValueKind != JsonValueKind.Array) return null;
+            return element.EnumerateArray()
+                .Select(item => item.TryGetInt32(out var value) ? value : int.MinValue)
+                .ToArray();
+        }
+
+        BoneTransform[]? OptionBoneTransforms(string name)
+        {
+            if (!optionsIsObject || !options.TryGetProperty(name, out var element)
+                || element.ValueKind != JsonValueKind.Array) return null;
+            var result = new List<BoneTransform>();
+            foreach (var item in element.EnumerateArray())
+            {
+                if (item.ValueKind != JsonValueKind.Object)
+                    throw new InvalidDataException($"ACTION_BONE_REFERENCE_POSE_INVALID: options.{name} contains a non-object entry.");
+                static float[] ReadVector(JsonElement owner, string property, int length)
+                {
+                    if (!owner.TryGetProperty(property, out var value) || value.ValueKind != JsonValueKind.Array)
+                        throw new InvalidDataException($"ACTION_BONE_REFERENCE_POSE_INVALID: missing {property}.");
+                    var values = value.EnumerateArray()
+                        .Select(element => element.TryGetSingle(out var number) ? number : float.NaN)
+                        .ToArray();
+                    if (values.Length != length || values.Any(number => !float.IsFinite(number)))
+                        throw new InvalidDataException($"ACTION_BONE_REFERENCE_POSE_INVALID: {property} must contain {length} finite values.");
+                    return values;
+                }
+                var translation = ReadVector(item, "translation", 3);
+                var rotation = ReadVector(item, "rotation", 4);
+                var scale = ReadVector(item, "scale", 3);
+                result.Add(new BoneTransform(
+                    new Vector3(translation[0], translation[1], translation[2]),
+                    new Quaternion(rotation[0], rotation[1], rotation[2], rotation[3]),
+                    new Vector3(scale[0], scale[1], scale[2])));
+            }
+            return result.ToArray();
+        }
+
         var resourceKind = command switch
         {
             "export-event" => "event",
@@ -129,7 +197,13 @@ internal sealed class BridgeCommandService
         {
             try
             {
-                var document = DcxNativeDocument.Read(file, oodleRuntimeRoot);
+                // PARAM/MAP 容器的 list → child snapshot/extract 链会连续访问同一
+                // 个 BND4.DCX。复用 Bnd4NativeWriter 的按文件时间戳缓存，避免
+                // 每次点表或每个地图模型都重新解压并解析整个容器；未知 DCX
+                // 仍走通用 DCX 读链，不能把所有 .dcx 冒充 BND4。
+                var document = IsLikelyBnd4ContainerPath(file)
+                    ? Bnd4NativeWriter.GetCachedBinder(file, oodleRuntimeRoot).Dcx
+                    : DcxNativeDocument.Read(file, oodleRuntimeRoot);
                 var roundTrip = document.VerifyRoundTrip();
                 var diagnostics = new List<Diagnostic>
                 {
@@ -394,6 +468,7 @@ internal sealed class BridgeCommandService
                     }
                     if (list.Count > 0) rowSelections = list;
                 }
+                var preferLazySession = includeRowPayloads == false || rowSelections is not null;
                 // session-aware: try token first, else open/get by key (single parse)
                 ParamDocumentSessionCache.Entry entry;
                 string sessionToken;
@@ -411,10 +486,8 @@ internal sealed class BridgeCommandService
                 }
                 else
                 {
-                    entry = ParamDocumentSessionCache.GetOrOpen(file, workspaceSessionId ?? string.Empty, oodleRuntimeRoot, pathSourceGeneration, expectedRowDataSize, entryIdentity, out sessionToken, out isNewSession, out curSourceHash);
+                    entry = ParamDocumentSessionCache.GetOrOpen(file, workspaceSessionId ?? string.Empty, oodleRuntimeRoot, pathSourceGeneration, expectedRowDataSize, entryIdentity, preferLazySession, out sessionToken, out isNewSession, out curSourceHash);
                 }
-                var document = entry.Document;
-                var roundTrip = entry.RoundTrip;
                 // B4 slim: rowSelections path — validates physical identity, no partial success
                 if (rowSelections is not null)
                 {
@@ -428,20 +501,20 @@ internal sealed class BridgeCommandService
                     if (includeRowPayloads == false)
                         return BridgeResult<object>.Failed(file, "param", "PARAM_ROW_IDENTITY_MISMATCH", "rowSelections 与 includeRowPayloads=false 不兼容。");
                     // validate all identities atomically before emitting any payload
+                    var index = entry.GetIndex();
                     var slimRows = new List<object>(rowSelections.Count);
                     foreach (var sel in rowSelections)
                     {
-                        if (sel.rowIndex < 0 || sel.rowIndex >= document.Rows.Count)
-                            return BridgeResult<object>.Failed(file, "param", "PARAM_ROW_IDENTITY_MISMATCH", $"物理行索引 {sel.rowIndex} 越界（rowCount={document.Rows.Count}）。");
-                        var actual = document.Rows[sel.rowIndex];
+                        if (sel.rowIndex < 0 || sel.rowIndex >= index.Rows.Count)
+                            return BridgeResult<object>.Failed(file, "param", "PARAM_ROW_IDENTITY_MISMATCH", $"物理行索引 {sel.rowIndex} 越界（rowCount={index.Rows.Count}）。");
+                        var actual = index.Rows[sel.rowIndex];
                         if (actual.Id != sel.expectedId)
                             return BridgeResult<object>.Failed(file, "param", "PARAM_ROW_IDENTITY_MISMATCH", $"行 {sel.rowIndex} 的 id 已变化：expected={sel.expectedId} actual={actual.Id}。");
-                        var actualHash = ParamNativeDocument.ComputeRowDataHash(actual.Data);
-                        if (!string.Equals(actualHash, sel.expectedDataHash, StringComparison.OrdinalIgnoreCase))
+                        if (!string.Equals(actual.DataHash, sel.expectedDataHash, StringComparison.OrdinalIgnoreCase))
                             return BridgeResult<object>.Failed(file, "param", "PARAM_ROW_IDENTITY_MISMATCH", $"行 {sel.rowIndex} 的 dataHash 已变化。");
-                        slimRows.Add(new { rowIndex = sel.rowIndex, id = actual.Id, name = actual.Name, dataBase64 = slimIncludePayload ? Convert.ToBase64String(actual.Data) : null, dataHash = actualHash });
+                        slimRows.Add(new { rowIndex = sel.rowIndex, id = actual.Id, name = actual.Name, dataBase64 = slimIncludePayload ? Convert.ToBase64String(index.ReadRowBytes(actual)) : null, dataHash = actual.DataHash });
                     }
-                    var slimEnvelope = new { format = "PARAM", typeName = document.TypeName, dataVersion = document.DataVersion, rowCount = document.Rows.Count, rowDataSize = document.RowDataSize, layout = document.Layout == ParamLayout.Standard32 ? "standard-32" : "long-64", sourceSize = document.SourceBytes.Length, sourceHash = document.SourceHash, rows = slimRows.ToArray(), payloadsIncluded = slimIncludePayload, sessionToken, workspaceSessionId, sourceHash2 = curSourceHash, pathSourceGeneration, correlationId };
+                    var slimEnvelope = new { format = "PARAM", typeName = index.TypeName, dataVersion = index.DataVersion, rowCount = index.Rows.Count, rowDataSize = index.RowDataSize, layout = index.Layout == ParamLayout.Standard32 ? "standard-32" : "long-64", sourceSize = index.SourceBytes.Length, sourceHash = index.SourceHash, rows = slimRows.ToArray(), payloadsIncluded = slimIncludePayload, sessionToken, workspaceSessionId, sourceHash2 = curSourceHash, pathSourceGeneration, correlationId };
                     var slimData = new Dictionary<string, object?>(StringComparer.Ordinal);
                     foreach (var p in slimEnvelope.GetType().GetProperties()) slimData[p.Name] = p.GetValue(slimEnvelope);
                     slimData["sessionToken"] = sessionToken;
@@ -453,11 +526,47 @@ internal sealed class BridgeCommandService
                     System.Threading.Interlocked.Add(ref BridgeTelemetry.ParamSerializedRowsCount, slimRows.Count);
                     var slimDiags = new List<Diagnostic>
                     {
-                        new Diagnostic(roundTrip.SemanticIdentical ? "info" : "error", roundTrip.SemanticIdentical ? "PARAM_DOCUMENT_ROUNDTRIP_SEMANTIC_VERIFIED" : "PARAM_DOCUMENT_ROUNDTRIP_FAILED", roundTrip.SemanticIdentical ? (roundTrip.ByteIdentical ? "PARAM 无修改往返字节级一致。" : "PARAM 无修改往返语义一致。") : "PARAM 无修改往返语义不一致。", BridgeResult<object>.MakeSourceUri(file), roundTrip),
+                        new Diagnostic("info", "PARAM_ROW_PAYLOAD_READ", $"已按物理身份读取 {slimRows.Count} 行 payload；未 materialize 其余行。", BridgeResult<object>.MakeSourceUri(file), new { selectedRows = slimRows.Count, rowCount = index.Rows.Count }),
                         new Diagnostic("info", "PARAM_DOCUMENT_SESSION", $"session {sessionToken} gen {pathSourceGeneration} parse {(isNewSession?1:0)}", BridgeResult<object>.MakeSourceUri(file), new { sessionToken, workspaceSessionId, sourceHash = curSourceHash, pathSourceGeneration, entryIdentity, correlationId, isNewSession, telemetry = BridgeTelemetry.Snapshot() })
                     };
                     return BridgeResult<object>.Partial(file, "param", slimDiags.ToArray(), slimData);
                 }
+                if (includeRowPayloads == false)
+                {
+                    var index = entry.GetIndex();
+                    if (rowPageSize == 0 && (OptionBool("isPageRequest", false) || rowPage > 0))
+                        rowPageSize = 20;
+                    var lazyIncludeHashes = includeRowHashes;
+                    if (!optionsIsObject || !options.TryGetProperty("includeRowHashes", out _))
+                        lazyIncludeHashes = true;
+                    var lazyEnvelope = index.ToEnvelope(
+                        rowPage: rowPage,
+                        rowPageSize: rowPageSize,
+                        rowIds: rowIds,
+                        includeRowHashes: lazyIncludeHashes,
+                        includePayloads: false);
+                    if (lazyEnvelope is not Dictionary<string, object?> lazyEnvelopeDictionary)
+                        throw new InvalidDataException("PARAM_INDEX_PROJECTION_INVALID: native lazy index envelope is not a dictionary.");
+                    var lazyResponseData = new Dictionary<string, object?>(lazyEnvelopeDictionary, StringComparer.Ordinal);
+                    lazyResponseData["sessionToken"] = sessionToken;
+                    lazyResponseData["workspaceSessionId"] = workspaceSessionId;
+                    lazyResponseData["sourceHash"] = curSourceHash;
+                    lazyResponseData["pathSourceGeneration"] = pathSourceGeneration;
+                    lazyResponseData["correlationId"] = correlationId;
+                    lazyResponseData["telemetry"] = BridgeTelemetry.Snapshot();
+                    var rowsInIndex = index.Rows.Count;
+                    if (lazyEnvelope.GetType().GetProperty("returnedRowCount")?.GetValue(lazyEnvelope) is int returnedRows)
+                        rowsInIndex = returnedRows;
+                    System.Threading.Interlocked.Add(ref BridgeTelemetry.ParamSerializedRowsCount, rowsInIndex);
+                    var indexDiagnostics = new[]
+                    {
+                        new Diagnostic("info", "PARAM_INDEX_READY", $"已完成 PARAM 行目录验证并返回 {rowsInIndex}/{index.Rows.Count} 行索引；未读取行 payload。", BridgeResult<object>.MakeSourceUri(file), new { rowCount = index.Rows.Count, returnedRows = rowsInIndex, telemetry = BridgeTelemetry.Snapshot() }),
+                        new Diagnostic("info", "PARAM_DOCUMENT_SESSION", $"session {sessionToken} gen {pathSourceGeneration} parse {(isNewSession?1:0)}", BridgeResult<object>.MakeSourceUri(file), new { sessionToken, workspaceSessionId, sourceHash = curSourceHash, pathSourceGeneration, entryIdentity, correlationId, isNewSession, telemetry = BridgeTelemetry.Snapshot() })
+                    };
+                    return BridgeResult<object>.Partial(file, "param", indexDiagnostics, lazyResponseData);
+                }
+                var document = entry.GetDocument();
+                var roundTrip = entry.GetRoundTrip();
                 // Slim index: includeRowPayloads == false forces no payload regardless of budget
                 bool forceSlimIndex = includeRowPayloads == false;
                 // page projection defaults to 20 rows when caller asks for page without explicit size
@@ -1166,6 +1275,8 @@ internal sealed class BridgeCommandService
                         .Select(e => e.GetString()!)
                         .ToArray();
                 }
+                var flverBoneParents = OptionIntArray("flverBoneParents");
+                var flverReferencePose = OptionBoneTransforms("flverReferencePose");
 
                 var animationContainerPath = OptionPath("animationContainerPath", file);
                 var skeletonContainerPath = OptionPath("skeletonContainerPath", file);
@@ -1180,10 +1291,17 @@ internal sealed class BridgeCommandService
                 _ = new HkxContinuousSampler(skeleton, animation, binding);
 
                 var hkxBoneNames = skeleton.Bones.Select(b => b.Name).ToArray();
+                var hkxParentIndices = skeleton.ParentIndices.Select(index => (int)index).ToArray();
                 int[]? hkxToFlverMap = null;
                 if (flverBoneNames != null && flverBoneNames.Length > 0)
                 {
-                    hkxToFlverMap = ActionAnimationSemantics.BuildHkxToFlverBoneMap(hkxBoneNames, flverBoneNames);
+                    hkxToFlverMap = flverBoneParents is null
+                        ? ActionAnimationSemantics.BuildHkxToFlverBoneMap(hkxBoneNames, flverBoneNames)
+                        : ActionAnimationSemantics.BuildHkxToFlverBoneMap(
+                            hkxBoneNames,
+                            hkxParentIndices,
+                            flverBoneNames,
+                            flverBoneParents);
                 }
 
                 int frameCount = animation is HkxSplineCompressedAnimation sc ? sc.NumFrames : (animation is HkxInterleavedAnimation ia ? ia.NumFrames : 0);
@@ -1195,6 +1313,38 @@ internal sealed class BridgeCommandService
                     rotation = new[] { t.Rotation.X, t.Rotation.Y, t.Rotation.Z, t.Rotation.W },
                     scale = new[] { t.Scale.X, t.Scale.Y, t.Scale.Z }
                 }).ToArray();
+
+                var hkxForensicNodes = skeleton.Bones.Select((bone, index) =>
+                {
+                    var transform = index < skeleton.Transforms.Count ? skeleton.Transforms[index] : default;
+                    return new ActionAnimationSemantics.BoneIdentityNode(
+                        index,
+                        bone.Name,
+                        index < hkxParentIndices.Length ? hkxParentIndices[index] : -1,
+                        new[] { transform.Translation.X, transform.Translation.Y, transform.Translation.Z },
+                        new[] { transform.Rotation.X, transform.Rotation.Y, transform.Rotation.Z, transform.Rotation.W },
+                        new[] { transform.Scale.X, transform.Scale.Y, transform.Scale.Z });
+                }).ToArray();
+                var duplicateHkxForensics = ActionAnimationSemantics.BuildDuplicateBoneForensics(hkxForensicNodes);
+                var duplicateFlverForensics = Array.Empty<object>();
+                if (flverBoneNames is not null && flverBoneParents is not null
+                    && flverBoneParents.Length == flverBoneNames.Length)
+                {
+                    duplicateFlverForensics = ActionAnimationSemantics.BuildDuplicateBoneForensics(
+                        flverBoneNames.Select((name, index) =>
+                        {
+                            var transform = flverReferencePose is not null && index < flverReferencePose.Length
+                                ? flverReferencePose[index]
+                                : default;
+                            return new ActionAnimationSemantics.BoneIdentityNode(
+                                index,
+                                name,
+                                flverBoneParents[index],
+                                new[] { transform.Translation.X, transform.Translation.Y, transform.Translation.Z },
+                                new[] { transform.Rotation.X, transform.Rotation.Y, transform.Rotation.Z, transform.Rotation.W },
+                                new[] { transform.Scale.X, transform.Scale.Y, transform.Scale.Z });
+                        }).ToArray());
+                }
 
                 var diagnostics = new List<Diagnostic>
                 {
@@ -1210,6 +1360,20 @@ internal sealed class BridgeCommandService
                         "当前 clip 只返回 local skeletal pose；未实现 hkaDefaultAnimatedReferenceFrame/root motion 提取。",
                         BridgeResult<object>.MakeSourceUri(file))
                 };
+                if (duplicateHkxForensics.Length > 0 || duplicateFlverForensics.Length > 0)
+                {
+                    diagnostics.Add(new Diagnostic(
+                        "warning",
+                        "ACTION_DUPLICATE_BONE_FORENSICS",
+                        "检测到真实骨骼重复名；映射仅使用 name + parent/hierarchy identity，无法证明唯一时保持 fail-closed。",
+                        BridgeResult<object>.MakeSourceUri(file),
+                        new
+                        {
+                            hkx = duplicateHkxForensics,
+                            flver = duplicateFlverForensics,
+                            mappingPolicy = "name+parent+full-hierarchy; no first/lowest/closest fallback"
+                        }));
+                }
 
                 object? splineBlocksData = null;
                 object? interleavedTransformsData = null;
@@ -1350,6 +1514,7 @@ internal sealed class BridgeCommandService
                         .Select(e => e.GetString()!)
                         .ToArray();
                 }
+                var flverBoneParents = OptionIntArray("flverBoneParents");
 
                 var animationContainerPath = OptionPath("animationContainerPath", file);
                 var skeletonContainerPath = OptionPath("skeletonContainerPath", file);
@@ -1363,7 +1528,14 @@ internal sealed class BridgeCommandService
 
                 if (flverBoneNames != null && flverBoneNames.Length > 0)
                 {
-                    var hkxToFlver = ActionAnimationSemantics.BuildHkxToFlverBoneMap(hkxBoneNames, flverBoneNames);
+                    var hkxParentIndices = skeleton.ParentIndices.Select(index => (int)index).ToArray();
+                    var hkxToFlver = flverBoneParents is null
+                        ? ActionAnimationSemantics.BuildHkxToFlverBoneMap(hkxBoneNames, flverBoneNames)
+                        : ActionAnimationSemantics.BuildHkxToFlverBoneMap(
+                            hkxBoneNames,
+                            hkxParentIndices,
+                            flverBoneNames,
+                            flverBoneParents);
 
                     // Build FLVER default reference pose
                     var flverRefPose = new BoneTransform[flverBoneNames.Length];
@@ -1431,7 +1603,13 @@ internal sealed class BridgeCommandService
                         }
                     }
 
-                    var flverPose = ActionAnimationSemantics.RemapPoseToFlver(hkxPose, hkxToFlver, flverRefPose);
+                    var flverPose = ActionAnimationSemantics.RetargetPoseToFlver(
+                        skeleton.Transforms,
+                        hkxPose,
+                        hkxToFlver,
+                        flverRefPose,
+                        hkxParentIndices,
+                        flverBoneParents);
 
                     var flverOutput = flverPose.Select(p => new
                     {
@@ -1516,11 +1694,19 @@ internal sealed class BridgeCommandService
                 var maxVertices = OptionInt("maxVertices", 1_000_000);
                 var maxIndices = OptionInt("maxIndices", 3_000_000);
                 var leaves = NativeLeafPayload.ResolveAll(file, oodleRuntimeRoot, ".flver");
+                var texturePackagePaths = OptionPaths("texturePackagePaths", 8);
+                var textureLeaves = ResolveCharacterTextureLeaves(
+                    file,
+                    oodleRuntimeRoot,
+                    allowedRoots,
+                    texturePackagePaths);
                 var models = new List<object>(leaves.Count);
+                var diagnostics = new List<Diagnostic>();
                 var totalMeshes = 0;
                 long totalVertices = 0;
                 var leaderBoneCount = -1;
                 var leaderModelId = string.Empty;
+                var texturedModelCount = 0;
                 foreach (var leaf in leaves)
                 {
                     cancellationToken.ThrowIfCancellationRequested();
@@ -1534,6 +1720,32 @@ internal sealed class BridgeCommandService
                     }
                     totalMeshes += flver.MeshCount;
                     totalVertices += flver.Meshes.Sum(mesh => (long)mesh.VertexCount);
+                    var textureBindings = CharacterTexturePreviewService.ResolveAll(
+                        flver,
+                        leaf.Name,
+                        textureLeaves,
+                        oodleRuntimeRoot,
+                        allowedRoots);
+                    var firstTexture = textureBindings.FirstOrDefault()?.Preview;
+                    if (textureBindings.Count > 0) texturedModelCount++;
+                    if (textureBindings.Count == 0)
+                    {
+                        diagnostics.Add(new Diagnostic(
+                            "warning",
+                            "CHRBND_TEXTURE_PREVIEW_MISSING",
+                            $"FLVER {leaf.Name} 没有找到可与 material 对应的 albedo 纹理；几何仍已返回，预览将使用中性材质。",
+                            BridgeResult<object>.MakeSourceUri(file),
+                            new { materialCount = flver.Materials.Count, texturePackageCount = textureLeaves.Count }));
+                    }
+                    else if (textureBindings.Count < flver.Materials.Count)
+                    {
+                        diagnostics.Add(new Diagnostic(
+                            "warning",
+                            "CHRBND_TEXTURE_PREVIEW_PARTIAL",
+                            $"FLVER {leaf.Name} 仅为 {textureBindings.Count}/{flver.Materials.Count} 个 material 找到 albedo 纹理；未匹配网格将使用中性材质。",
+                            BridgeResult<object>.MakeSourceUri(file),
+                            new { materialCount = flver.Materials.Count, bindingCount = textureBindings.Count }));
+                    }
                     models.Add(new
                     {
                         modelId,
@@ -1548,15 +1760,29 @@ internal sealed class BridgeCommandService
                         meshCount = flver.MeshCount,
                         boneCount = flver.BoneCount,
                         meshes,
-                        bones = BuildFlverSkeleton(flver)
+                        bones = BuildFlverSkeleton(flver),
+                        texturePreviewToken = firstTexture?.PreviewToken,
+                        textureWidth = firstTexture?.Width,
+                        textureHeight = firstTexture?.Height,
+                        textureColorSpace = firstTexture?.ColorSpace,
+                        texturePreviews = textureBindings.Select(binding => new
+                        {
+                            materialIndex = binding.MaterialIndex,
+                            textureName = binding.Preview.TextureName,
+                            texturePreviewToken = binding.Preview.PreviewToken,
+                            width = binding.Preview.Width,
+                            height = binding.Preview.Height,
+                            colorSpace = binding.Preview.ColorSpace
+                        }).ToArray()
                     });
                 }
-                return BridgeResult<object>.Partial(file, "chr", new[]
-                {
-                    new Diagnostic("info", "CHRBND_FLVER_PREVIEW_BUNDLE_EXTRACTED",
-                        $"容器内 FLVER 已一次解包并完整提取；entries={models.Count} meshes={totalMeshes} vertices={totalVertices}。",
-                        BridgeResult<object>.MakeSourceUri(file))
-                }, new
+                diagnostics.Insert(0, new Diagnostic(
+                    "info",
+                    "CHRBND_FLVER_PREVIEW_BUNDLE_EXTRACTED",
+                    $"容器内 FLVER 已一次解包并完整提取；entries={models.Count} meshes={totalMeshes} vertices={totalVertices} texturedModels={texturedModelCount} textureLeaves={textureLeaves.Count}。",
+                    BridgeResult<object>.MakeSourceUri(file)));
+                return BridgeResult<object>.Partial(file, "chr", diagnostics,
+                new
                 {
                     meshCount = totalMeshes,
                     vertexCount = totalVertices,
@@ -1720,6 +1946,7 @@ internal sealed class BridgeCommandService
             try
             {
                 var modelName = OptionString("modelName", "");
+                var mapGroupName = OptionString("mapGroupName", "");
                 var sessionToken = OptionString("sessionToken", "");
                 var cursor = OptionString("cursor", "");
                 // Resolve file hash for session validation
@@ -1754,8 +1981,15 @@ internal sealed class BridgeCommandService
                     // Resolve FLVER payload: BND4 container or direct FLVER
                     var sourceBytes = fileBytesForHash;
                     byte[] payload = sourceBytes;
+                    Bnd4NativeDocument? cachedBinder = null;
                     bool isDcx = payload.Length >= 4 && payload.AsSpan(0, 4).SequenceEqual("DCX\0"u8);
-                    if (isDcx)
+                    if (isDcx && IsLikelyBnd4ContainerPath(file))
+                    {
+                        var cached = Bnd4NativeWriter.GetCachedBinder(file, oodleRuntimeRoot);
+                        payload = cached.Dcx.Payload;
+                        cachedBinder = cached.Binder;
+                    }
+                    else if (isDcx)
                     {
                         payload = DcxNativeDocument.Read(file, oodleRuntimeRoot).Payload;
                     }
@@ -1763,7 +1997,7 @@ internal sealed class BridgeCommandService
                     byte[]? flverBytes = null;
                     if (payload.Length >= 4 && payload.AsSpan(0, 4).SequenceEqual("BND4"u8))
                     {
-                        var binder = Bnd4NativeDocument.Read(payload);
+                        var binder = cachedBinder ?? Bnd4NativeDocument.Read(payload);
                         var variants = new List<string> { modelName };
                         var baseName = System.IO.Path.GetFileName(modelName.Replace('\\', '/'));
                         if (!string.Equals(baseName, modelName, StringComparison.Ordinal)) variants.Add(baseName);
@@ -1825,7 +2059,27 @@ internal sealed class BridgeCommandService
                     startMesh = 0; startTri = 0;
                 }
 
-                var chunkObj = MapStaticGeometryService.BuildChunk(session!, startMesh, startTri, out var nextCursor, out var complete);
+                // Resolve the material belonging to the chunk being sent. The old
+                // implementation always used the first material-bearing mesh, so
+                // later meshes silently inherited the first mesh's texture.
+                var textureMesh = MapStaticGeometryService.GetMeshForChunk(session!, startMesh, startTri);
+                var texturePreview = textureMesh is null
+                    ? MapTexturePreviewResult.Missing("MAP_TEXTURE_MATERIAL_NAME_EMPTY", "FLVER mesh 没有可用于纹理查找的 material name 或 texture slot path。")
+                    : MapTexturePreviewService.ResolveMany(
+                        file,
+                        textureMesh.MaterialName,
+                        textureMesh.MaterialMtdPath,
+                        oodleRuntimeRoot,
+                        textureMesh.TexturePaths,
+                        mapGroupName);
+                var chunkObj = MapStaticGeometryService.BuildChunk(
+                    session!,
+                    startMesh,
+                    startTri,
+                    out var nextCursor,
+                    out var complete,
+                    texturePreview.Preview?.PreviewToken,
+                    texturePreview.Preview?.ColorSpace);
                 // If no chunk (empty), return complete
                 if (chunkObj == null)
                 {
@@ -1850,6 +2104,11 @@ internal sealed class BridgeCommandService
                     nextCursor,
                     complete,
                     chunks,
+                    textureStatus = texturePreview.Status,
+                    textureMaterialName = texturePreview.Preview?.MaterialName,
+                    texturePreviewToken = texturePreview.Preview?.PreviewToken,
+                    textureWidth = texturePreview.Preview?.Width,
+                    textureHeight = texturePreview.Preview?.Height,
                     telemetry = new { skin = MapStaticGeometryService.SkinCalls, skeleton = MapStaticGeometryService.SkeletonCalls, parse = MapStaticGeometryService.ParseCount }
                 };
                 // Quick size check: serialize and check byte count
@@ -1857,10 +2116,34 @@ internal sealed class BridgeCommandService
                 if (System.Text.Encoding.UTF8.GetByteCount(json) >= 8 * 1024 * 1024)
                     return BridgeResult<object>.Failed(file, "map", "MAP_STATIC_CHUNK_TOO_LARGE", "单个静态几何响应超过 8 MiB 限制。");
 
-                return BridgeResult<object>.Partial(file, "map", new[]
+                var diagnostics = new List<Diagnostic>
                 {
-                    new Diagnostic("info", "MAP_STATIC_GEOMETRY_CHUNK", $"静态几何 chunk 已生成；mesh={startMesh} triStart={startTri} complete={complete}。", BridgeResult<object>.MakeSourceUri(file))
-                }, payloadObj);
+                    new("info", "MAP_STATIC_GEOMETRY_CHUNK", $"静态几何 chunk 已生成；mesh={startMesh} triStart={startTri} complete={complete}。", BridgeResult<object>.MakeSourceUri(file))
+                };
+                if (texturePreview.Preview is not null)
+                {
+                    diagnostics.Add(new Diagnostic(
+                        "info",
+                        "MAP_TEXTURE_PREVIEW_READY",
+                        $"地图材质 {texturePreview.Preview.MaterialName} 已解析为 {texturePreview.Preview.Width}x{texturePreview.Preview.Height} 预览纹理。",
+                        BridgeResult<object>.MakeSourceUri(file),
+                        new
+                        {
+                            materialName = texturePreview.Preview.MaterialName,
+                            packageEntry = texturePreview.Preview.PackageEntryName,
+                            textureName = texturePreview.Preview.TextureName,
+                            colorSpace = texturePreview.Preview.ColorSpace
+                        }));
+                }
+                else if (texturePreview.Status == "failed")
+                {
+                    diagnostics.Add(new Diagnostic(
+                        "warning",
+                        texturePreview.Code ?? "MAP_TEXTURE_PREVIEW_FAILED",
+                        texturePreview.Message ?? "地图材质预览纹理解析失败。",
+                        BridgeResult<object>.MakeSourceUri(file)));
+                }
+                return BridgeResult<object>.Partial(file, "map", diagnostics, payloadObj);
             }
             catch (OodleRuntimeUnavailableException)
             {
@@ -1909,6 +2192,7 @@ internal sealed class BridgeCommandService
                 var meshIndex = OptionInt("meshIndex", 0);
                 var maxVertices = OptionInt("maxVertices", 10_000);
                 var maxIndices = OptionInt("maxIndices", 30_000);
+                var texturePackagePaths = OptionPaths("texturePackagePaths", 8);
                 var positions = document.GetMeshPositionsBase64(meshIndex, maxVertices);
                 var indices = document.GetMeshIndicesBase64(meshIndex, maxIndices);
                 var uvs = document.GetMeshUVsBase64(meshIndex, maxVertices);
@@ -1918,12 +2202,42 @@ internal sealed class BridgeCommandService
                 if (positions == null)
                     return BridgeResult<object>.Failed(file, "chr", "FLVER_MESH_NOT_FOUND", $"网格索引 {meshIndex} 超出范围或数据不可用。");
                 var mesh = document.Meshes[meshIndex];
-                return BridgeResult<object>.Partial(file, "chr", new[]
+                var textureLeaves = ResolveCharacterTextureLeaves(
+                    file,
+                    oodleRuntimeRoot,
+                    allowedRoots,
+                    texturePackagePaths);
+                var textureEntryName = Path.GetFileName(file);
+                if (textureEntryName.EndsWith(".dcx", StringComparison.OrdinalIgnoreCase))
+                    textureEntryName = textureEntryName[..^4];
+                var textureBinding = CharacterTexturePreviewService
+                    .ResolveAll(document, textureEntryName, textureLeaves, oodleRuntimeRoot, allowedRoots)
+                    .FirstOrDefault(binding => binding.MaterialIndex == mesh.MaterialIndex);
+                var meshDiagnostics = new List<Diagnostic>
                 {
                     new Diagnostic("info", "FLVER_MESH_DATA_EXTRACTED",
                         $"FLVER 网格 {meshIndex} 顶点/索引/UV/法线/骨骼权重/骨骼索引数据已提取；vertexCount={mesh.VertexCount}。",
                         BridgeResult<object>.MakeSourceUri(file))
-                }, new
+                };
+                if (textureBinding is null)
+                {
+                    meshDiagnostics.Add(new Diagnostic(
+                        "warning",
+                        "FLVER_TEXTURE_PREVIEW_MISSING",
+                        $"FLVER 网格 {meshIndex} 没有找到与 material={mesh.MaterialIndex} 对应的 albedo 纹理；将使用中性材质。",
+                        BridgeResult<object>.MakeSourceUri(file),
+                        new { materialIndex = mesh.MaterialIndex, texturePackageCount = textureLeaves.Count }));
+                }
+                else
+                {
+                    meshDiagnostics.Add(new Diagnostic(
+                        "info",
+                        "FLVER_TEXTURE_PREVIEW_READY",
+                        $"FLVER 网格 {meshIndex} 的 material={mesh.MaterialIndex} 已绑定 {textureBinding.Preview.TextureName} 纹理预览。",
+                        BridgeResult<object>.MakeSourceUri(file),
+                        new { materialIndex = mesh.MaterialIndex, textureName = textureBinding.Preview.TextureName, colorSpace = textureBinding.Preview.ColorSpace }));
+                }
+                return BridgeResult<object>.Partial(file, "chr", meshDiagnostics, new
                 {
                     meshIndex,
                     vertexCount = mesh.VertexCount,
@@ -1937,7 +2251,17 @@ internal sealed class BridgeCommandService
                     uvsBase64 = uvs,
                     normalsBase64 = normals,
                     boneWeightsBase64 = boneWeights,
-                    boneIndicesBase64 = boneIndices
+                    boneIndicesBase64 = boneIndices,
+                    renderMode = ResolveFlverPreviewRenderMode(document, mesh.MaterialIndex),
+                    textureStatus = textureBinding is null ? "missing" : "ready",
+                    textureMaterialName = mesh.MaterialIndex >= 0 && mesh.MaterialIndex < document.Materials.Count
+                        ? document.Materials[mesh.MaterialIndex].Name
+                        : null,
+                    textureName = textureBinding?.Preview.TextureName,
+                    texturePreviewToken = textureBinding?.Preview.PreviewToken,
+                    textureWidth = textureBinding?.Preview.Width,
+                    textureHeight = textureBinding?.Preview.Height,
+                    textureColorSpace = textureBinding?.Preview.ColorSpace
                 });
             }
             catch (Exception ex) when (ex is InvalidDataException or NotSupportedException or IOException)
@@ -2063,8 +2387,8 @@ internal sealed class BridgeCommandService
 
         if (command == "read-mtd-document")
         {
-            // MATERIAL-53A：恢复 read-mtd-document。MTD 是 user-approved 的 V0.6
-            // 延期项（scope.json 的 SCOPE-ASSET-MTD，authorityAtRuling=unverified），
+            // MATERIAL-53A：恢复 read-mtd-document。MTD 当前仍受 scope.json
+            // 的 authorityAtRuling=unverified 约束，
             // 按 resumeRequires 走通用承接流程时恢复三处入口：本分支、
             // AdvertisedCommands 与两侧 TS union（test:bridge-command-advertisement
             // 会在任一处漏掉时失败关闭）。
@@ -2319,7 +2643,7 @@ internal sealed class BridgeCommandService
                 }
                 // 本版刻意未解析的字段区间**单列诊断码**，不并进上面那条。
                 // 两者都会压 authority，但处置方向相反：DIVERGED 指向「去查 parser
-                // 为什么少读了」，而这一条指向「本版范围如此，要做得先走 V0.6 承接」。
+                // 为什么少读了」，而这一条指向「当前范围如此；如需扩大，按治理承接」。
                 // 混成一条会让下一个人去修一个不存在的 bug（ESD 哨兵那次就是这么
                 // 被误判的），也会让真实的解析缺口被结构性缺口的噪音盖住。
                 var esdUnparsedGaps = document.UnparsedGaps();
@@ -2509,12 +2833,85 @@ internal sealed class BridgeCommandService
         cancellationToken.ThrowIfCancellationRequested();
         return command switch
         {
-            "export-event" => ExportSemanticCandidate(file, "event", "Semantic EMEVD export is not implemented yet; inspect returns the audit envelope first."),
-            "export-map" => ExportSemanticCandidate(file, "map", "Semantic MSB export is not implemented yet; inspect returns the audit envelope first."),
-            "export-param" => ExportSemanticCandidate(file, "param", "Semantic PARAM export is not implemented yet; inspect returns the audit envelope first."),
-            "export-msg" => MsgTextExport.Export(file),
+            "export-event" => ExportSemanticCandidate(file, "event", "原生 EMEVD 语义导出不可用；请查看返回的结构化诊断。", oodleRuntimeRoot),
+            "export-map" => ExportSemanticCandidate(file, "map", "原生 MSB 语义导出不可用；请查看返回的结构化诊断。", oodleRuntimeRoot),
+            "export-param" => ExportSemanticCandidate(file, "param", "原生 PARAM 语义导出不可用；请查看返回的结构化诊断。", oodleRuntimeRoot),
+            "export-msg" => MsgTextExport.Export(file, oodleRuntimeRoot),
             _ => BridgeResult<object>.Failed(file, resourceKind, "UNKNOWN_COMMAND", $"Unknown bridge command: {command}")
         };
+        }
+
+    private static IReadOnlyList<NativeLeafEntry> ResolveCharacterTextureLeaves(
+        string file,
+        string? oodleRuntimeRoot,
+        IReadOnlyList<string>? allowedRoots,
+        IReadOnlyList<string> optionPaths)
+    {
+        var roots = allowedRoots is { Count: > 0 }
+            ? allowedRoots
+            : new[] { Path.GetDirectoryName(file) ?? file };
+        var packagePaths = new List<string>();
+
+        void AddPackage(string? candidate)
+        {
+            if (string.IsNullOrWhiteSpace(candidate)) return;
+            var boundary = BridgePathBoundary.Verify(candidate, roots);
+            if (!boundary.Ok) return;
+            if (!packagePaths.Contains(boundary.CanonicalPath, StringComparer.OrdinalIgnoreCase))
+                packagePaths.Add(boundary.CanonicalPath);
+        }
+
+        AddPackage(file);
+        foreach (var optionPath in optionPaths) AddPackage(optionPath);
+
+        var lowerFile = file.ToLowerInvariant();
+        if (lowerFile.EndsWith(".chrbnd.dcx", StringComparison.Ordinal))
+        {
+            var stem = file[..^".chrbnd.dcx".Length];
+            AddPackage($"{stem}.texbnd.dcx");
+            AddPackage($"{stem}.texbnd");
+        }
+        else if (lowerFile.EndsWith(".chrbnd", StringComparison.Ordinal))
+        {
+            var stem = file[..^".chrbnd".Length];
+            AddPackage($"{stem}.texbnd");
+            AddPackage($"{stem}.texbnd.dcx");
+        }
+
+        var directory = Path.GetDirectoryName(file);
+        if (directory is not null
+            && string.Equals(new DirectoryInfo(directory).Name, "parts", StringComparison.OrdinalIgnoreCase))
+        {
+            AddPackage(Path.Combine(directory, "common_body.tpf.dcx"));
+            AddPackage(Path.Combine(directory, "common_body.tpf"));
+        }
+
+        var leaves = new List<NativeLeafEntry>();
+        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var packagePath in packagePaths)
+        {
+            if (!File.Exists(packagePath)) continue;
+            IReadOnlyList<NativeLeafEntry> packageLeaves;
+            try
+            {
+                packageLeaves = NativeLeafPayload.ResolveAll(packagePath, oodleRuntimeRoot, ".tpf");
+            }
+            catch (Exception ex) when (ex is InvalidDataException
+                or NotSupportedException
+                or ArgumentOutOfRangeException
+                or IOException)
+            {
+                // chrbnd 内部通常没有 TPF；单个伴生包不可读时保留其它包的预览。
+                continue;
+            }
+
+            foreach (var leaf in packageLeaves)
+            {
+                var identity = $"{packagePath}\0{leaf.Index}\0{leaf.Id}\0{leaf.DuplicateOrdinal}\0{leaf.ContentHash}";
+                if (seen.Add(identity)) leaves.Add(leaf);
+            }
+        }
+        return leaves;
     }
 
     private static object BuildFlverMeshPreview(
@@ -2532,9 +2929,12 @@ internal sealed class BridgeCommandService
                 $"FLVER_MESH_INDICES_UNAVAILABLE: 网格 {meshIndex} 的完整 triangle-list 无法在上限 {maxIndices} 内导出。");
         var mesh = flver.Meshes[meshIndex];
         var skinning = flver.GetMeshSkinning(meshIndex, maxVertices);
+        var renderMode = ResolveFlverPreviewRenderMode(flver, mesh.MaterialIndex);
         return new
         {
             meshIndex,
+            materialIndex = mesh.MaterialIndex,
+            renderMode,
             vertexCount = mesh.VertexCount,
             indexSize = flver.GetMeshIndexSize(meshIndex),
             positionsBase64 = positions,
@@ -2561,6 +2961,22 @@ internal sealed class BridgeCommandService
             meshes[meshIndex] = BuildFlverMeshPreview(flver, meshIndex, maxVertices, maxIndices);
         }
         return meshes;
+    }
+
+    /// <summary>
+    /// A generic albedo material cannot reproduce native projector/decal
+    /// shaders. Keep those meshes in the read-only payload, but identify them
+    /// explicitly so the renderer does not turn their projection volume into
+    /// visible strips or boxes.
+    /// </summary>
+    private static string ResolveFlverPreviewRenderMode(FlverNativeDocument flver, int materialIndex)
+    {
+        if (materialIndex < 0 || materialIndex >= flver.Materials.Count)
+            return "surface";
+        var mtdPath = flver.Materials[materialIndex].MtdPath;
+        return mtdPath.Contains("decal", StringComparison.OrdinalIgnoreCase)
+            ? "projected-decal"
+            : "surface";
     }
 
     private static object[] BuildFlverSkeleton(FlverNativeDocument flver)
@@ -2637,9 +3053,10 @@ internal sealed class BridgeCommandService
     private static BridgeResult<object> ExportSemanticCandidate(
         string file,
         string resourceKind,
-        string unsupportedMessage)
+        string unsupportedMessage,
+        string? oodleRuntimeRoot)
     {
-        return SemanticCandidateExports.TryExport(file, resourceKind)
+        return SemanticCandidateExports.TryExport(file, resourceKind, oodleRuntimeRoot)
             ?? BridgeResult<object>.Unsupported(file, resourceKind, unsupportedMessage);
     }
 
@@ -3118,6 +3535,18 @@ internal sealed class BridgeCommandService
         var fileName = name.Replace('\\', '/').Split('/').LastOrDefault() ?? name;
         var dot = fileName.LastIndexOf('.');
         return dot >= 0 && dot < fileName.Length - 1 ? fileName[dot..].ToLowerInvariant() : "(none)";
+    }
+
+    private static bool IsLikelyBnd4ContainerPath(string path)
+    {
+        var lower = path.Replace('\\', '/').ToLowerInvariant();
+        return lower.EndsWith(".parambnd.dcx", StringComparison.Ordinal)
+            || lower.EndsWith(".mapbnd.dcx", StringComparison.Ordinal)
+            || lower.EndsWith(".anibnd.dcx", StringComparison.Ordinal)
+            || lower.EndsWith(".chrbnd.dcx", StringComparison.Ordinal)
+            || lower.EndsWith(".objbnd.dcx", StringComparison.Ordinal)
+            || lower.EndsWith(".luabnd.dcx", StringComparison.Ordinal)
+            || lower.EndsWith(".bnd4.dcx", StringComparison.Ordinal);
     }
 
     private static string BinderEntryBasename(string name)

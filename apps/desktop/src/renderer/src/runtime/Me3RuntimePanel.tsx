@@ -5,8 +5,8 @@ import { me3LaunchBlocker } from './me3LaunchGuard.js';
 /**
  * me3 运行时面板：能力探测 → profile → 启动 → 终止。
  *
- * 接的是 SCOPE-RUNTIME（capabilityId H-RUNTIME / REL-H，targetRelease=V0.5，
- * decisionStatus=user-approved）的四条 IPC。它们后端齐全但 renderer 此前零引用，
+ * 接的是 SCOPE-RUNTIME（capabilityId H-RUNTIME / REL-H，decisionStatus=user-approved）
+ * 的四条 IPC。它们后端齐全但 renderer 此前零引用，
  * 属 §11.8 那个失败模式：每段都实现了，用户摸不到。
  *
  * ── 三条不可放松的约束（scope.json 的 unsupportedOperations 明列）──

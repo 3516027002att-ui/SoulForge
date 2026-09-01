@@ -138,6 +138,12 @@ export interface SceneDrawItem {
     uvsBase64?: string;
     normalsBase64?: string;
     vertexCount: number;
+    /** Bridge 解析出的 albedo PNG data URI；renderer 不猜测本机纹理路径。 */
+    texturePreviewToken?: string;
+    textureColorSpace?: string;
+    /** 合并多个 FLVER mesh 后的 index/vertex draw groups，materialIndex 对应 texturePreviews。 */
+    materialGroups?: Array<{ start: number; count: number; materialIndex: number }>;
+    texturePreviews?: Array<{ materialIndex: number; texturePreviewToken: string; colorSpace?: string }>;
     boundingBoxMin?: [number, number, number];
     boundingBoxMax?: [number, number, number];
   };

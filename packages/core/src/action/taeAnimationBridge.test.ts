@@ -10,8 +10,8 @@ import {
 describe('ACTION Continuous Sampler & De Boor Spline Tests', () => {
   it('De Boor 样条插值在给定单节点控制点时精确返回控制点', () => {
     const curve = {
-      degree: 3,
-      knots: [0, 0, 0, 0, 1, 1, 1, 1],
+      degree: 0,
+      knots: [0, 1],
       controlPoints: [10.5]
     };
     const val = evaluateBSpline(curve, 0.5);
@@ -89,14 +89,14 @@ describe('ACTION Continuous Sampler & De Boor Spline Tests', () => {
     assert.ok(Math.abs(poseAtMid[1].translation[2] - 0) < 1e-4);
   });
 
-  it('sampleFlverPose 正确执行骨骼映射并在缺失时回退 reference pose', () => {
+  it('sampleFlverPose 应用 HKX 动画差分并保留 FLVER 绑定姿态', () => {
     const clip: TaeAnimationClipData = {
       animId: 200,
       motionAnimId: 200,
       animationType: 'Interleaved',
       duration: 1.0,
-      frameCount: 1,
-      frameDuration: 1.0,
+      frameCount: 2,
+      frameDuration: 0.5,
       transformTrackCount: 1,
       hkxBoneCount: 2,
       hkxBoneNames: ['HkxRoot', 'HkxArm'],
@@ -108,7 +108,9 @@ describe('ACTION Continuous Sampler & De Boor Spline Tests', () => {
       trackToHkxBone: [1], // drives HkxArm (HKX bone 1)
       hkxToFlverBoneMap: [1, 0], // HkxRoot -> FLVER bone 1, HkxArm -> FLVER bone 0
       interleavedTransforms: [
-        { translation: [10, 0, 0], rotation: [0, 0, 0, 1], scale: [1, 1, 1] }
+        // The clip starts at the HKX reference pose and then moves the arm.
+        { translation: [5, 0, 0], rotation: [0, 0, 0, 1], scale: [1, 1, 1] },
+        { translation: [9, 0, 0], rotation: [0, 0, Math.SQRT1_2, Math.SQRT1_2], scale: [2, 1, 1] }
       ]
     };
 
@@ -119,15 +121,27 @@ describe('ACTION Continuous Sampler & De Boor Spline Tests', () => {
       { translation: [0, 0, 3] as [number, number, number], rotation: [0, 0, 0, 1] as [number, number, number, number], scale: [1, 1, 1] as [number, number, number] } // FLVER bone 2 unmapped
     ];
 
-    const flverPose = sampler.sampleFlverPose(0, 3, flverRefPose, false);
+    const flverPoseAtStart = sampler.sampleFlverPose(0, 3, flverRefPose, false);
 
-    // FLVER bone 0 mapped from HKX bone 1 (HkxArm, animated to [10, 0, 0])
-    assert.deepEqual(flverPose[0]?.translation, [10, 0, 0]);
+    // At frame 0, mapped bones retain the actual FLVER bind pose even though
+    // the HKX skeleton uses a different local translation for the arm.
+    assert.deepEqual(flverPoseAtStart[0]?.translation, [0, 0, 0]);
 
-    // FLVER bone 1 mapped from HKX bone 0 (HkxRoot, ref pose [0, 0, 0])
-    assert.deepEqual(flverPose[1]?.translation, [0, 0, 0]);
+    // The root is mapped too, but its FLVER bind translation is preserved.
+    assert.deepEqual(flverPoseAtStart[1]?.translation, [0, 2, 0]);
+
+    const flverPoseAtMid = sampler.sampleFlverPose(0.25, 3, flverRefPose, false);
+
+    // HKX arm is halfway from 5 to 9; only the +2 animation delta is applied
+    // to the FLVER arm bind translation [0, 0, 0].
+    assert.deepEqual(flverPoseAtMid[0]?.translation, [2, 0, 0]);
+    assert.deepEqual(flverPoseAtMid[0]?.scale, [1.5, 1, 1]);
+    const expectedHalfTurnZ = Math.sin(Math.PI / 8);
+    const expectedHalfTurnW = Math.cos(Math.PI / 8);
+    assert.ok(Math.abs((flverPoseAtMid[0]?.rotation[2] ?? 0) - expectedHalfTurnZ) < 1e-6);
+    assert.ok(Math.abs((flverPoseAtMid[0]?.rotation[3] ?? 0) - expectedHalfTurnW) < 1e-6);
 
     // FLVER bone 2 unmapped in HKX, retains FLVER reference pose [0, 0, 3]
-    assert.deepEqual(flverPose[2]?.translation, [0, 0, 3]);
+    assert.deepEqual(flverPoseAtMid[2]?.translation, [0, 0, 3]);
   });
 });

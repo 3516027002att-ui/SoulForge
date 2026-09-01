@@ -1,5 +1,14 @@
-export const C0000_COMPATIBILITY_PART_SLOTS = ['bd', 'am', 'lg'] as const;
+export const C0000_COMPATIBILITY_PART_SLOTS = ['bd', 'am', 'lg', 'hd', 'fc'] as const;
 export const C0000_COMPATIBILITY_CANDIDATE_LIMIT_PER_SLOT = 12;
+
+/**
+ * c0000 的脸/头发不是 hd 部件，而是独立的 FC_M_0200 组件。它是原版
+ * Wolf 的默认 face/hair 资源；不能按文件名字典序把 fc_m_0000（披风）
+ * 或其它变身头部当成 c0000 的头发。
+ */
+const C0000_COMPATIBILITY_PREFERRED_NAMES: Partial<Record<C0000CompatibilityPartSlot, readonly string[]>> = {
+  fc: ['fc_m_0200.partsbnd.dcx']
+};
 
 export type C0000CompatibilityPartSlot = typeof C0000_COMPATIBILITY_PART_SLOTS[number];
 export type C0000CompatibilityCandidateOrigin = 'overlay' | 'base';
@@ -45,16 +54,32 @@ export function planC0000CompatibilityCandidates(
   };
   const seen = new Set<string>();
   const planned: C0000CompatibilityCandidateName[] = [];
-  for (const [origin, names] of [
+  const sources = [
     ['overlay', overlayNames],
     ['base', baseNames]
-  ] as const) {
+  ] as const;
+  const add = (origin: C0000CompatibilityCandidateOrigin, name: string): boolean => {
+    if (!pattern.test(name)) return false;
+    const identity = name.toLowerCase();
+    if (seen.has(identity)) return false;
+    seen.add(identity);
+    planned.push({ origin, name });
+    return planned.length >= safeLimit;
+  };
+
+  // A preferred native component is semantic identity, not a first-sibling
+  // fallback. Check overlay first so an explicitly supplied mod component
+  // still shadows the same-named base component.
+  for (const preferred of C0000_COMPATIBILITY_PREFERRED_NAMES[slot] ?? []) {
+    for (const [origin, names] of sources) {
+      const exact = names.find((candidate) => candidate.toLowerCase() === preferred.toLowerCase());
+      if (exact && add(origin, exact)) return planned;
+    }
+  }
+
+  for (const [origin, names] of sources) {
     for (const name of names.filter((candidate) => pattern.test(candidate)).sort(compareNames)) {
-      const identity = name.toLowerCase();
-      if (seen.has(identity)) continue;
-      seen.add(identity);
-      planned.push({ origin, name });
-      if (planned.length >= safeLimit) return planned;
+      if (add(origin, name)) return planned;
     }
   }
   return planned;

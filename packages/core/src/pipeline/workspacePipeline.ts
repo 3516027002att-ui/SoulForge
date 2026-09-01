@@ -18,6 +18,8 @@ export interface AnalyzeWorkspaceOptions {
   maxFilesToParse?: number;
   maxFilesToInspect?: number;
   bridgeProjectPath?: string;
+  /** Optional explicit Bridge executable, primarily for release/runtime verification. */
+  bridgeExecutablePath?: string;
   bridgeTimeoutMs?: number;
   /** Main-owned Sekiro installation root used for local Oodle capability. */
   oodleRuntimeRoot?: string;
@@ -148,6 +150,7 @@ async function inspectNativeResource(
     ...(options.oodleRuntimeRoot ? { oodleRuntimeRoot: options.oodleRuntimeRoot } : {}),
     ...(options.signal ? { signal: options.signal } : {}),
     ...(options.bridgeProjectPath ? { bridgeProjectPath: options.bridgeProjectPath } : {}),
+    ...(options.bridgeExecutablePath ? { bridgeExecutablePath: options.bridgeExecutablePath } : {}),
     ...(options.bridgeTimeoutMs ? { timeoutMs: options.bridgeTimeoutMs } : {})
   });
 
@@ -184,6 +187,7 @@ async function parseKnownResource(
         ...(options.oodleRuntimeRoot ? { oodleRuntimeRoot: options.oodleRuntimeRoot } : {}),
         ...(options.signal ? { signal: options.signal } : {}),
         ...(options.bridgeProjectPath ? { bridgeProjectPath: options.bridgeProjectPath } : {}),
+        ...(options.bridgeExecutablePath ? { bridgeExecutablePath: options.bridgeExecutablePath } : {}),
         ...(options.bridgeTimeoutMs ? { timeoutMs: options.bridgeTimeoutMs } : {})
       });
       const ingest = ingestBridgeResult(index, result);

@@ -3,14 +3,15 @@
  * 「开始」仍在，只召唤资源栏；换文件夹走标题栏 workspace-switcher；
  * 暂存/审计入口在活动栏。
  *
- * App.tsx 需要真实 bridge + Electron 才能 SSR 完整渲染，这里做源码级断言
- * （与 FmgWorkbenchPanel 的 Negative source tests 同一范式）：锁的是 DOM
- * 结构与入口的存在性，不是行为。
+ * App.tsx 需要真实 bridge + Electron 才能 SSR 完整渲染，壳层部分继续做源码级断言
+ * （与 FmgWorkbenchPanel 的 Negative source tests 同一范式）；命令面板的纯搜索
+ * 规则则直接调用 renderer helper 验证行为，避免只靠正则“证明”匹配逻辑。
  */
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, it } from 'node:test';
+import { filterCommandPaletteResources } from './navigation/commandPaletteSearch.js';
 
 const appSource = readFileSync(
   join(process.cwd(), 'apps', 'desktop', 'src', 'renderer', 'src', 'App.tsx'),
@@ -102,7 +103,7 @@ describe('问题 1 壳层：开始页只在首次打开；顶栏「开始」召�
   it('workspace.analyze 不得把目录扫描当成已解析并回报 parsedFiles:0', () => {
     assert.doesNotMatch(workspaceIpcSource, /if \(activeIndex && indexedFiles\.length > 0\)/);
     assert.match(workspaceIpcSource, /await analyzeWorkspace\(/);
-    assert.match(workspaceIpcSource, /analyzeInFlight/);
+    assert.match(workspaceIpcSource, /workspaceAnalyzeInFlight/);
   });
 
   it('12-E：侧栏不再拼「XX · 逻辑库」（所有语义域都删，Files 数量与 project「开始」仍在）', () => {
@@ -122,15 +123,99 @@ describe('P0 回滚与会话续接防线', () => {
     assert.match(ipcSource, /ROLLBACK_IN_PROGRESS/);
   });
 
-  it('所有回滚入口共享忙状态，快速多击不会重复提交', () => {
+  it('回滚只锁定当前入口，历史刷新按最新请求落地，快速多击不会重复提交', () => {
     assert.match(appSource, /rollbackInFlightRef/);
-    assert.match(appSource, /disabled=\{rollbackInFlight !== null\}/);
-    assert.match(workbenchOpsSource, /rollbackBusy\?: boolean/);
-    assert.match(workbenchOpsSource, /disabled=\{props\.rollbackBusy === true\}/);
+    assert.match(appSource, /operationHistoryRefreshRef/);
+    assert.match(appSource, /operationHistoryRequestRef/);
+    assert.doesNotMatch(appSource, /disabled=\{rollbackInFlight !== null\}/);
+    assert.doesNotMatch(workbenchOpsSource, /rollbackBusy\?: boolean/);
+    assert.doesNotMatch(workbenchOpsSource, /disabled=\{props\.rollbackBusy === true\}/);
+    assert.match(workbenchOpsSource, /rollbackBusyOpId\?: string \| null/);
+    assert.match(workbenchOpsSource, /props\.rollbackBusyOpId === row\.opId/);
+    assert.match(appSource, /已有回滚正在处理中，请等待当前操作完成/);
+    assert.match(appSource, /rollbackInFlight === `operation:\$\{entry\.opId\}`/);
+    assert.match(appSource, /rollbackInFlight === `file:\$\{entry\.opId\}:\$\{path\}`/);
+    assert.match(appSource, /reloadSelectedResourceAfterRollback/);
+    assert.match(appSource, /selectFile\(\{ \.\.\.selectedFile \}\)/);
   });
 
   it('partial/max_steps 不会被普通发送隐式续接', () => {
     assert.match(appSource, /canAutoResumeAgentTask\(agentTask\)/);
     assert.doesNotMatch(appSource, /agentTask\.phase === 'done' \|\| agentTask\.phase === 'error'/);
+  });
+});
+
+describe('命令面板资源搜索', () => {
+  const indexedFiles = [
+    {
+      relativePath: 'chr/c0000_a000_lo.anibnd.dcx',
+      resourceKind: 'chr',
+      extension: '.dcx',
+      compoundExtension: '.anibnd.dcx',
+      formatKind: 'dcx',
+      formatLabel: '动画绑定'
+    },
+    {
+      relativePath: 'chr\\c0000.anibnd.dcx',
+      resourceKind: 'chr',
+      extension: '.dcx',
+      compoundExtension: '.anibnd.dcx',
+      formatKind: 'dcx',
+      formatLabel: '动画绑定'
+    },
+    {
+      relativePath: 'map/m11_01_00_00.msb.dcx',
+      resourceKind: 'map',
+      extension: '.dcx',
+      compoundExtension: '.msb.dcx',
+      formatKind: 'msb',
+      formatLabel: '地图场景'
+    },
+    {
+      relativePath: 'param/gameparam/gameparam.parambnd.dcx',
+      resourceKind: 'param',
+      extension: '.dcx',
+      compoundExtension: '.parambnd.dcx',
+      formatKind: 'param',
+      formatLabel: '游戏参数'
+    }
+  ] as const;
+
+  it('App 只在已打开工作区的 indexedFiles 中渲染资源候选，并保留区分空态', () => {
+    assert.match(appSource, /const cmdkAllResourceMatches = workspace && cmdkNormalized/);
+    assert.match(appSource, /filterCommandPaletteResources\(indexedFiles, cmdkNormalized\)/);
+    assert.match(appSource, /workspace \? '无匹配命令或资源。' : '请先打开 Mod 工作区；打开后可搜索资源。'/);
+  });
+
+  it('完整路径、basename、斜杠/反斜杠和裸 basename 都只从索引中稳定命中', () => {
+    assert.equal(
+      filterCommandPaletteResources(indexedFiles, 'chr/c0000.anibnd.dcx')[0]?.relativePath,
+      'chr\\c0000.anibnd.dcx'
+    );
+    assert.equal(
+      filterCommandPaletteResources(indexedFiles, 'c0000.anibnd.dcx')[0]?.relativePath,
+      'chr\\c0000.anibnd.dcx'
+    );
+    assert.equal(filterCommandPaletteResources(indexedFiles, 'c0000')[0]?.relativePath, 'chr\\c0000.anibnd.dcx');
+    assert.equal(
+      filterCommandPaletteResources(indexedFiles, 'chr\\c0000.anibnd.dcx')[0]?.relativePath,
+      'chr\\c0000.anibnd.dcx'
+    );
+  });
+
+  it('中文与多个词按 AND 命中，并支持全角输入', () => {
+    assert.deepEqual(
+      filterCommandPaletteResources(indexedFiles, '地图 m11 01').map((file) => file.relativePath),
+      ['map/m11_01_00_00.msb.dcx']
+    );
+    assert.deepEqual(
+      filterCommandPaletteResources(indexedFiles, '游戏　参数').map((file) => file.relativePath),
+      ['param/gameparam/gameparam.parambnd.dcx']
+    );
+  });
+
+  it('不打开工作区或索引中没有的资源不会凭空产生命中', () => {
+    assert.deepEqual(filterCommandPaletteResources([], 'chr/c0000.anibnd.dcx'), []);
+    assert.deepEqual(filterCommandPaletteResources(indexedFiles, 'chr/c9999.anibnd.dcx'), []);
   });
 });

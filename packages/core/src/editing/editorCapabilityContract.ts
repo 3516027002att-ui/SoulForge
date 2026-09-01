@@ -63,7 +63,7 @@ export type DeferredPreviewEditorId = DeferredPreviewEditorKind;
 
 export interface EditorDeferredPreviewContract {
   /** 仅保留旧协议字段，当前能力契约不会创建此对象。 */
-  deferredToRelease: 'V0.6';
+  deferredToRelease: string;
   readOnly: true;
   markedAsPreview: true;
   countedAsReleaseEditor: false;
@@ -267,7 +267,7 @@ export const EDITOR_CAPABILITY_CONTRACTS: Readonly<Record<EditorKind, EditorCapa
     proposedReleaseEditorId: 'script',
     proposalOrder: 4,
     documentAuthority: 'bridge-native-document',
-    // 脚本为 Havok Script 编译字节码（`\x1bLuaQ`），V0.5 不做 typed
+    // 脚本为 Havok Script 编译字节码（`\x1bLuaQ`），当前不做 typed
     // mutation，只提供只读证据投影与经 Patch Engine 的整个内层文件替换，
     // 因此 mutationKinds 为空但 releaseWriteEnabled=true。
     // game-load 边界：整内层替换产物的结构/放位/magic 加载前置由

@@ -332,16 +332,22 @@ async function readParamExports(
         if (bytes.length !== definition.rowDataSize) {
           throw new Error(`PARAM ${entry.name}#${rowId} 行宽 ${bytes.length} != ${definition.rowDataSize}。`);
         }
-        const fields: ParamFieldSymbol[] = decodeRowFields(bytes, definition).map((field) => ({
-          name: field.name,
-          type: field.type,
-          value: field.value
-        }));
+        const fields: ParamFieldSymbol[] = decodeRowFields(bytes, definition).map((field) => {
+          const definitionField = definition.fields.find((candidate) => candidate.id === field.fieldId);
+          return {
+            fieldId: field.fieldId,
+            name: field.name,
+            type: field.type,
+            ...(definitionField?.description ? { description: definitionField.description } : {}),
+            value: field.value
+          };
+        });
         const row: ParamRowSymbol = {
           uri: `${file.sourceUri}#${tableName}/${rowId}`,
           sourceUri: file.sourceUri,
           paramName: tableName,
           rowId,
+          ...(stringValue(record.name) ? { rowName: stringValue(record.name) } : {}),
           ...(file.sha256 ? { sourceHash: file.sha256 } : {}),
           ...(file.mtimeMs !== undefined ? { sourceRevision: file.mtimeMs } : {}),
           fields,

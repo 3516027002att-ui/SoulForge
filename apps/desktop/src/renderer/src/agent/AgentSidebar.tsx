@@ -30,6 +30,7 @@ import { AgentDockResizer } from './AgentDockResizer.js';
 import { AgentDockHeader } from './AgentDockHeader.js';
 import { AgentConversationViewport } from './AgentConversationViewport.js';
 import { AgentComposer, type AgentInteractionMode } from './AgentComposer.js';
+import { AgentFeedbackBar } from './AgentFeedbackBar.js';
 import { AgentResourceReferencePicker } from './AgentResourceReferencePicker.js';
 import {
   createCitationFlow,
@@ -461,6 +462,7 @@ export function AgentSidebar(props: AgentSidebarProps): ReactElement {
             approvals={approvals}
             failure={failure}
             status={statusText}
+            footer={<AgentFeedbackBar sessionId={taskState.sessionId} phase={taskState.phase} />}
           />
 
           <div className="agent-composer-context" data-testid="agent-composer-context">

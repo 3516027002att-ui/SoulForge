@@ -10,6 +10,7 @@ import {
 } from './AgentPromptEditor.js';
 import { AgentComposerToolbar } from './AgentComposerToolbar.js';
 import type { AgentAttachmentChip } from './agentAttachments.js';
+import { MutterBanner } from './MutterBanner.js';
 
 export type { AgentInteractionMode } from './AgentParticipantBar.js';
 
@@ -86,6 +87,7 @@ export function AgentComposer(props: AgentComposerProps): ReactElement {
 
   return (
     <div className="agent__composer" data-testid="agent-composer" aria-label="Agent 输入区">
+      <MutterBanner />
       <div className="agent-composer__body">
         <AgentContextChipList
           chips={chips}

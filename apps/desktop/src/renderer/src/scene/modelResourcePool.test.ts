@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import * as THREE from 'three';
-import { ModelResourcePool, type MeshGeometryWire } from './modelResourcePool.js';
+import { ModelResourcePool, normalizeModelResourceKey, type MeshGeometryWire } from './modelResourcePool.js';
 import { groupSceneDrawItems } from './threeSceneController.js';
 
 const dummyPositions = Buffer.from(new Float32Array([0, 0, 0, 1, 0, 0, 0, 1, 0]).buffer).toString('base64');
@@ -21,9 +21,12 @@ test('ModelResourcePool：相同 modelName 的多 Part 共享唯一 BufferGeomet
 
   const res1 = pool.updateModelGeometry(THREE, tracker, 'm000010.mapbnd.dcx', meshWire);
   const res2 = pool.updateModelGeometry(THREE, tracker, 'm000010', meshWire);
+  const res3 = pool.updateModelGeometry(THREE, tracker, 'D:\\map\\M000010.FLVER', meshWire);
 
   assert.equal(res1.geometry, res2.geometry);
+  assert.equal(res2.geometry, res3.geometry);
   assert.equal(res1.material, res2.material);
+  assert.equal(normalizeModelResourceKey('D:\\map\\M000010.FLVER.dcx'), 'm000010');
 });
 
 test('ModelResourcePool：indexSize 为 16/32 时精准创建 Uint16/Uint32 缓冲，无脆弱启发式', () => {

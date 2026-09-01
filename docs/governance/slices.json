@@ -289,7 +289,7 @@
     {
       "sliceId": "W-ACTION-MOTION-IDENTITY-01",
       "targetRelease": "V0.5",
-      "lifecycle": "active",
+      "lifecycle": "completed",
       "authority": "candidate",
       "authorityCap": "partial",
       "authorityCapNote": "cap=partial；只覆盖真实 TAE motion identity、同 character family 的 ANIBND membership、只读 clip/pose IPC 与缓存失效，不覆盖 HKX 全语义、writer 或游戏加载",
@@ -1009,7 +1009,7 @@
     {
       "sliceId": "W-REL-D-GAMELOAD-01",
       "targetRelease": "V0.5",
-      "lifecycle": "active",
+      "lifecycle": "ready",
       "authority": "candidate",
       "authorityCap": "candidate",
       "authorityCapNote": "cap=candidate；真实游戏内加载确认前 authority 保持 candidate",
@@ -1047,24 +1047,7 @@
       "declaresUnfrozenValidation": true
     }
   ],
-  "activeClaims": [
-    {
-      "sliceId": "W-REL-D-GAMELOAD-01",
-      "claimId": "claim-w-rel-d-gameload-01-20260829-codex",
-      "owner": "codex-mission1-20260829",
-      "claimedAt": "2026-08-29T03:13:08.430Z",
-      "heartbeatAt": "2026-08-29T03:38:50.434Z",
-      "recoveryTrigger": "检查 runScriptContainerLoadPreflightSmoke 相关写进程、入口文件工作树改动和真实游戏内加载记录；无相关进程且未产生验证证据时 release 回 ready"
-    },
-    {
-      "sliceId": "W-ACTION-MOTION-IDENTITY-01",
-      "claimId": "claim-w-action-motion-identity-01-20260830",
-      "owner": "codex-action-20260830",
-      "claimedAt": "2026-08-30T13:23:57.103Z",
-      "heartbeatAt": "2026-08-30T13:23:57.103Z",
-      "recoveryTrigger": "检查 ACTION motion identity、Binder membership、action IPC 相关进程与工作树；若无相关进程且未产生验证证据，按 gov help 核实后 release；若完成则先按治理流程记录证据再 complete"
-    }
-  ],
+  "activeClaims": [],
   "invariants": [
     "authority 不得高于 authorityCap；unverified 表示尚无所需证据，不是绕过 cap 的高等级。",
     "completed 只表示该切片完成，不表示整条路线或 Gate 完成。",

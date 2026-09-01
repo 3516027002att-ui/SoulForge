@@ -162,10 +162,10 @@ expectCodes('deferred-gate-cannot-hide-live-slice', ({ read, write }) => {
   const gates = read('gates.json');
   const slices = read('slices.json');
   // V0.6 承接后真实数据已无 deferred Gate（REL-E/REL-I 恢复 passed），
-  // 从 REL-E 反造一个 deferred-v0.6 Gate 来测试该拦截仍会触发。
+  // 从 REL-E 反造一个 deferred Gate 来测试该拦截仍会触发。
   const gate = gates.gates.find((item) => item.gateId === 'REL-E');
   gate.gateState = 'deferred';
-  gate.applicability = 'deferred-v0.6';
+  gate.applicability = 'deferred';
   const sliceId = gate.sliceRefs[0];
   const slice = slices.slices.find((item) => item.sliceId === sliceId);
   slice.lifecycle = 'ready';
@@ -175,11 +175,11 @@ expectCodes('deferred-gate-cannot-hide-live-slice', ({ read, write }) => {
 
 expectCodes('deferred-gate-cannot-be-written-passed', ({ read, write }) => {
   const gates = read('gates.json');
-  // 真实数据已无 deferred Gate；把 REL-E 重新标成 deferred-v0.6 后写成
-  // passed，验证 deferred-v0.6 不得使用非 deferred gateState。
+  // 真实数据已无 deferred Gate；把 REL-E 重新标成 deferred 后写成 passed，
+  // 验证 deferred 不得使用非 deferred gateState。
   const gate = gates.gates.find((item) => item.gateId === 'REL-E');
   gate.gateState = 'deferred';
-  gate.applicability = 'deferred-v0.6';
+  gate.applicability = 'deferred';
   gate.gateState = 'passed';
   write('gates.json', gates);
 }, ['GATE_DEFERRED_STATE_INVALID']);
@@ -188,7 +188,7 @@ expectCodes('base-gate-cannot-be-deferred', ({ read, write }) => {
   const gates = read('gates.json');
   const base = gates.gates.find((gate) => gate.gateId === 'REL-A');
   base.gateState = 'deferred';
-  base.applicability = 'deferred-v0.6';
+  base.applicability = 'deferred';
   write('gates.json', gates);
 }, ['GATE_BASE_DEFERRAL_FORBIDDEN', 'GATE_BASE_APPLICABILITY_INVALID']);
 

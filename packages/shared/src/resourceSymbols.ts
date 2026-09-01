@@ -98,8 +98,12 @@ export interface ParamRowSymbol {
 }
 
 export interface ParamFieldSymbol {
+  /** Native PARAM definition id used by read_param_fields/mutate_param_fields. */
+  fieldId?: string;
   name: string;
   type?: string;
+  /** Human-readable field note from the trusted PARAM metadata package. */
+  description?: string;
   value: string | number | boolean | null;
 }
 

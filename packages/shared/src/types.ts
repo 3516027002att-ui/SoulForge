@@ -161,7 +161,7 @@ export interface ReferenceEdge {
 export type PatchMode = 'plan' | 'normal' | 'fullPermission';
 
 /**
- * v0.5 AI tool permission ladder.
+ * AI tool permission ladder.
  * Higher levels always include lower-level capabilities after policy checks.
  */
 export type AiToolPermissionLevel =

@@ -68,11 +68,11 @@ function readSlices() {
 }
 
 /**
- * 解析 --release。默认值取自 releases.json 的 currentRelease，不写字面量。
+ * 解析显式传入的 --release。
  *
- * 治理必须跨版本（V0.5 → V0.6 → …）。把 'V0.5' 写死在 CLI 里意味着 V0.5 收尾
- * 那天，seal 会继续把证据挂到已冻结的版本上，而 releases.json 里 currentRelease
- * 已经翻到 V0.6——两份权威直接分叉，且没有任何门禁能看见。
+ * 开发命令不绑定发布里程碑：省略 --release 返回 release=null，由调用方展示全部
+ * 可开发切片或写入未绑定发布的开发 Evidence。只有显式传入 --release 时，才校验
+ * 它是否已在发布注册表登记。这样发布版本仍可审计，但不会反过来限制开发选点。
  *
  * 同时校验版本必须在 releases.json 里真实存在。原先只校验 /^V\d+\.\d+$/ 形状，
  * 所以 `--release V9.9` 能通过，会封存出一条挂在不存在版本上的证据；而 cmdNext
@@ -80,19 +80,22 @@ function readSlices() {
  * 「参数拼错」读成「没有可推进切片」。
  *
  * @param {unknown} raw 命令行传入的 --release 原值
- * @returns {{ok: true, release: string, isDefault: boolean} | {ok: false, code: string, message: string, known: string[]}}
+ * @returns {{ok: true, release: string|null, isDefault: boolean, known: string[]} | {ok: false, code: string, message: string, known: string[]}}
  */
 function resolveRelease(raw) {
   const data = readJson(RELEASES);
   const known = data.releases.map((entry) => entry.release);
   const provided = typeof raw === 'string' ? raw.trim() : '';
-  const release = provided.length > 0 ? provided : data.currentRelease;
+  if (provided.length === 0) {
+    return { ok: true, release: null, isDefault: true, known };
+  }
+  const release = provided;
 
   if (typeof release !== 'string' || !/^V\d+\.\d+$/.test(release)) {
     return {
       ok: false,
       code: 'RELEASE_SHAPE_INVALID',
-      message: `--release 必须形如 V0.5，收到 ${JSON.stringify(release)}。`,
+      message: `--release 必须形如 V<major>.<minor>，收到 ${JSON.stringify(release)}。`,
       known
     };
   }
@@ -208,10 +211,10 @@ function withGovernanceWrite(owner, mutate) {
 // ---------------------------------------------------------------------------
 
 /**
- * 没有可 claim 切片时，按该版本切片的实际 lifecycle 分布给出正确出路。
+ * 没有可 claim 切片时，按当前筛选视图的实际 lifecycle 分布给出正确出路。
  *
  * 原先无论什么原因都回同一句「先完成或释放在飞切片，或按 blockers.json 解阻塞」。
- * 实测 `next --release V0.6` 撞上死路：V0.6 的 3 条切片全是 lifecycle=deferred，
+ * 实测某个发布筛选视图曾撞上死路：其中的切片全是 lifecycle=deferred，
  * blockerRefs 全为空数组，agent 按指引去查 blockers.json 什么都查不到，而 deferred
  * 也不是靠释放 claim 或解阻塞能变 ready 的——真正的出路是 scope.json 里那条
  * scopeItem 的 resumeRequires。给错出路比不给更糟：agent 会沿着错误方向反复尝试。
@@ -259,10 +262,10 @@ function emptyCandidateMessage(slicesInRelease, release) {
   for (const slice of slicesInRelease) {
     counts.set(slice.lifecycle, (counts.get(slice.lifecycle) ?? 0) + 1);
   }
-  const scope = release === null ? '全部版本' : release;
+  const scope = release === null ? '全部开发视图' : `发布归属 ${release}`;
 
   if (slicesInRelease.length === 0) {
-    return `${scope} 下没有任何切片；新版本要先在 slices.json 里登记 targetRelease=${scope} 的切片。`;
+    return `${scope} 下没有任何切片；发布归属只用于筛选，开发切片应先登记到 slices.json。`;
   }
 
   const parts = [];
@@ -316,9 +319,9 @@ function cmdNext(args) {
   const data = readSlices();
   const claimedIds = new Set(data.activeClaims.map((claim) => claim.sliceId));
 
-  // --all 明确表示跨版本查看；不传 --release 时按当前版本过滤而不是列出全部。
-  // 列出全部会把 V0.6 切片混进选点结果，而 V0.6 的硬前置尚未成立。
-  const wantsAll = args.all === true || args.release === 'all';
+  // 开发视图默认跨越所有发布归属；--all 只是保留的显式同义写法。
+  // 发布筛选必须由调用方显式传入 --release，避免历史里程碑意外变成开发门槛。
+  const wantsAll = args.all === true || args.release === 'all' || args.release === undefined;
   let release = null;
   if (!wantsAll) {
     const resolved = resolveRelease(args.release);
@@ -329,10 +332,7 @@ function cmdNext(args) {
     release = resolved.release;
   }
 
-  // 三个列表必须用同一个版本判据。实测漏过一次：只给 candidates 加了过滤，
-  // 于是 `next --release V0.6` 返回 claimable=0 但 activeSlices=5，而那 5 条
-  // targetRelease 全是 V0.5——agent 会读成「V0.6 有人在做了」，实际是 V0.5 的在飞
-  // claim 漏进了 V0.6 视图。
+  // 三个列表必须用同一个发布归属判据。默认开发视图不筛选，显式 --release 才筛选。
   const inRelease = (slice) => !release || slice.targetRelease === release;
 
   const candidates = data.slices.filter((slice) => inRelease(slice) && slice.lifecycle === 'ready');
@@ -344,8 +344,8 @@ function cmdNext(args) {
     mode: 'next',
     release,
     claimable: candidates.map((slice) => ({
+      ...(release === null ? {} : { targetRelease: slice.targetRelease }),
       sliceId: slice.sliceId,
-      targetRelease: slice.targetRelease,
       capabilityIds: slice.capabilityIds,
       authority: slice.authority,
       authorityCap: slice.authorityCap,
@@ -364,7 +364,7 @@ function cmdNext(args) {
     // 实测：5 条 owner=coordinator-agent 的 claim 心跳停在 2026-08-01，此后 24 个
     // 提交全在治理层、没有一个碰过这些切片的 entryPoints，8/1–8/2 封存的 22 条证据
     // 也全是 EV-REL-SCOPE-*。它们是被中断的半成品，但 next 只报 sliceId/owner，
-    // 新接手的 agent 读成「有人在做」而全部避开——于是 V0.5 剩下的可 claim 面被
+    // 新接手的 agent 读成「有人在做」而全部避开——于是剩余的可 claim 面被
     // 无声压到 4 条，谁都不知道那 5 条其实无人推进。
     //
     // 判据是心跳超过 STALE_CLAIM_HOURS 小时。不自动释放：claim 的语义是并发占用，
@@ -397,12 +397,12 @@ function cmdNext(args) {
     // deferred 切片的承接条件直接投影出来，不让 agent 去手工翻 scope.json。
     //
     // message 已经指对了方向（去满足 resumeRequires 而不是解阻塞），但只说「去
-    // scope.json 找」仍然是把 agent 送去手工检索：V0.6 有 3 条 deferred 切片，
-    // 对应 12 个 scopeItem，靠 gateIds 反查是 agent 每次都要重做一遍的活。
+    // scope.json 找」仍然是把 agent 送去手工检索；靠 capabilityId 反查是每次都要
+    // 重做一遍的活。
     // 这与本轮修的其他诊断问题同源——方向对但不到位，收敛还是慢。
     deferredSlices: deferred.map((slice) => ({
       sliceId: slice.sliceId,
-      targetRelease: slice.targetRelease,
+      ...(release === null ? {} : { targetRelease: slice.targetRelease }),
       goal: slice.goal,
       // 承接条件的权威在 scope.json；这里只投影，不复述也不改写。
       resumeRequires: collectResumeRequires(slice)
@@ -423,7 +423,7 @@ function cmdNext(args) {
       '2. 读该切片的 entryPoints，按 hardPrerequisites 划定不可越界的范围',
       '3. 实现改动；写能力必须经 Patch Engine，writer 只写暂存区',
       '4. 跑该切片的 requiredValidation，外加 npm run typecheck / npm test',
-      '5. 改了治理主题域文件就先提交，再 gov seal（四步流程见 gov help 的 sealWhenToUse）',
+      '5. 改了治理主题域文件就先提交，再 gov seal（开发 Evidence 可不绑定发布；四步流程见 gov help 的 sealWhenToUse）',
       '6. gov complete --slice <sliceId> —— 只改执行面板状态，不提升 authority',
       'authority 提升必须另有真实运行的验证支撑，不能由 claim/complete 推导。'
     ]
@@ -972,9 +972,9 @@ function cmdSeal(args) {
   // subject 必须带齐目标 Gate 现有证据已声明的用户批准标记，否则 freshness
   // 判定找不到可继承的证据。
   //
-  // 这一步是本轮实测的产物：照 sealWhenToUse 写的三步做，重封存 REL-SCOPE/
-  // REL-E/REL-I 仍然失败，因为 subject 里少了 scope-ruling:user-approved 与两条
-  // scope-deferral:<Gate>:V0.6:user-approved——而门禁按标记筛选参与 freshness 的
+  // 这一步是本轮实测的产物：照 sealWhenToUse 写的三步做，重封存多个 Gate
+  // 仍然失败，因为 subject 里少了 scope-ruling:user-approved 与 scope-deferral
+  // 标记——而门禁按标记筛选参与 freshness 的
   // 证据（handoff-integrity-lib.mjs 的 evidenceHasClaim 分支），筛完为空就报
   // GATE_EVIDENCE_STALE。那个诊断指向「主题域变了」，真实原因是「标记漏了」，
   // agent 会照着错误方向反复重跑验证。
@@ -1149,15 +1149,15 @@ if (!command || command === '--help' || command === 'help') {
   emit({
     mode: 'help',
     commands: {
-      'gov next [--release V0.5]': '列出可 claim 的切片、在飞切片（带心跳新鲜度）与被阻塞切片',
+      'gov next [--release <Release>]': '默认列出全部可开发切片；显式 --release 时按发布归属筛选',
       'gov status': '执行面板汇总 + 治理门禁当前是否通过（含 freshness 判定；'
         + '门禁红时顶层 ok=false 且退出码 1，与 verify --tier governance 结论一致）',
       'gov claim --slice W-X --owner me [--claim-id id] [--recovery-trigger 文本]': '原子占用切片并置 active',
       'gov heartbeat --slice W-X [--owner me]': '刷新心跳，证明仍在推进',
       'gov release --slice W-X [--owner me] [--force]': '释放 claim 并退回 ready',
       'gov complete --slice W-X [--owner me] [--force]': '标为 completed（不提升 authority、不写 Evidence）',
-      'gov seal --id EV-X --subject 声明 --commands 命令与退出码 --result 结论 --non-claims 不声明项 [--gates REL-SCOPE,REL-E] [--release V0.5]':
-        '追加 sealed-current-run Evidence：自动算五字段指纹，按需挂到 Gate 的 evidenceRefs，追加后跑含 freshness 的完整门禁，失败即回滚'
+      'gov seal --id EV-X --subject 声明 --commands 命令与退出码 --result 结论 --non-claims 不声明项 [--gates REL-SCOPE,REL-E] [--release <Release>]':
+        '追加 sealed-current-run Evidence：自动算五字段指纹；省略 --release 表示开发 Evidence，显式传入时绑定发布归属；按需挂到 Gate 的 evidenceRefs，追加后跑含 freshness 的完整门禁，失败即回滚'
     },
     sealWhenToUse: '改了任何 Gate 主题域文件（治理校验器、治理 schema、范围 JSON、验证脚本）后该 Gate 的封存证据会变 stale。步骤：'
       + '(1) 先把主题域改动提交——指纹锚点是 HEAD，未提交的改动会算进 trackedDiffSha256 但不进 HEAD；'

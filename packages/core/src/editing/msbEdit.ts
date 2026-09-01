@@ -56,7 +56,7 @@ export interface MsbEditFailure {
 }
 
 export type MsbReadResult =
-  | { ok: true; filePath: string; mapId: string; parts: MsbPartSnapshot[]; diagnostics: Diagnostic[] }
+  | { ok: true; filePath: string; mapId: string; sourceUri: string; sourceHash: string; parts: MsbPartSnapshot[]; diagnostics: Diagnostic[] }
   | { ok: false; error: MsbEditFailure; diagnostics: Diagnostic[] };
 
 export type MsbSetResult =
@@ -140,7 +140,15 @@ export async function readMsbParts(input: {
       }
     }
   }
-  return { ok: true, filePath: resolved.path, mapId, parts: selected, diagnostics: asDiagnostics(doc.diagnostics) };
+  return {
+    ok: true,
+    filePath: resolved.path,
+    mapId,
+    sourceUri: `map://${mapId}/${basename(resolved.path)}`,
+    sourceHash: doc.data.sourceHash,
+    parts: selected,
+    diagnostics: asDiagnostics(doc.diagnostics)
+  };
 }
 
 export async function setMsbPartTransform(input: {

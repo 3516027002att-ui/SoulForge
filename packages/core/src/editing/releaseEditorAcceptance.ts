@@ -125,7 +125,7 @@ export function buildProposedReleaseEditorInventory(): ReleaseEditorInventoryIte
 }
 
 /**
- * Defines the non-quantitative V0.5 scale contract. Numeric capacity, latency,
+ * Defines the non-quantitative editor scale contract. Numeric capacity, latency,
  * package-size, and elapsed-time thresholds are explicitly outside acceptance;
  * every editor must instead expose complete content through a bounded access
  * mode and retain the normal authority/revision/mutation gates.

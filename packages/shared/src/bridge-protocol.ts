@@ -59,6 +59,25 @@ export interface BridgeRequestPayload {
   options?: Record<string, unknown>;
 }
 
+/**
+ * Descriptor returned when a daemon result cannot fit in one negotiated
+ * NDJSON frame. The token is daemon-owned and is intentionally not a file
+ * path; callers must fetch it through `read-bridge-artifact`.
+ */
+export interface BridgeFileBackedResultDescriptor {
+  artifactToken: string;
+  payloadFormat: 'bridge-result-json';
+  payloadVersion: 1;
+  byteLength: number;
+  chunkSize: number;
+  sourceUri?: string;
+  sourceRevision?: string;
+  duration?: number;
+  frameCount?: number;
+  boneCount?: number;
+  diagnostics?: unknown;
+}
+
 export interface BridgeCancelPayload {
   targetRequestId: string;
 }
@@ -114,6 +133,7 @@ export type BridgeCommandName =
   | 'read-tae-event-params'
   | 'read-tae-animation-clip'
   | 'sample-tae-animation-pose'
+  | 'read-bridge-artifact'
   | 'read-chrbnd-flver-preview'
   | 'read-map-part-flver-preview'
   | 'read-map-static-geometry'

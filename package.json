@@ -1,6 +1,6 @@
 {
   "name": "soulforge",
-  "version": "0.5.6",
+  "version": "0.5.8",
   "private": true,
   "type": "module",
   "workspaces": [
@@ -34,6 +34,7 @@
     "bridge:verify:tpf-writer": "npm run test:native-tpf-writer -w @soulforge/core",
     "test:ai-fake-loop": "npm run test:ai-fake-loop -w @soulforge/core",
     "test:ai-conformance": "npm run test:ai-conformance -w @soulforge/core",
+    "test:agent-production-scenario": "npm run test:agent-production-scenario -w @soulforge/core",
     "test:rag": "npm run test:rag -w @soulforge/core",
     "test:model-service-configuration": "npm run test:model-service-configuration -w @soulforge/core",
     "bridge:verify:emevd": "npm run test:native-emevd -w @soulforge/core",
@@ -81,6 +82,7 @@
     "test:emevd-dark-script-compiler-s14": "npm run test:emevd-dark-script-compiler-s14 -w @soulforge/core",
     "test:emevd-session-cache": "npm run test:emevd-session-cache -w @soulforge/core",
     "test:map-transaction-atomic": "npm run test:map-transaction-atomic -w @soulforge/core",
+    "test:native-map-rollback": "npm run test:native-map-rollback -w @soulforge/core",
     "test:animation-playback-clock": "npm run test:animation-playback-clock -w @soulforge/core",
     "test:action-motion-identity": "npm run test:action-motion-identity -w @soulforge/core",
     "test:action-real-corpus": "npm run test:action-real-corpus -w @soulforge/core",

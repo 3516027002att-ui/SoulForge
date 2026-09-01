@@ -24,15 +24,6 @@ export function isTextLibraryPath(relativePath: string): boolean {
   return /\.(msgbnd|fmg)(\.dcx)?$/i.test(relativePath);
 }
 
-/**
- * R2 裁定：文本域默认只列出简中（路径段 `zhocn`，例如
- * `msg/zhocn/item.msgbnd.dcx`）；英语/日语整包延期到 V0.6。
- * 侧栏不得出现 `msg/japanese/...`、`msg/engus/...`。
- */
-export function isZhocnTextPath(relativePath: string): boolean {
-  return /(?:^|[\\/])zhocn[\\/]/i.test(relativePath);
-}
-
 export function isEventDocumentPath(relativePath: string): boolean {
   return /\.emevd(\.dcx)?$/i.test(relativePath);
 }
@@ -107,8 +98,8 @@ const DOMAIN_MATCHERS: Partial<Record<EditorDomainId, (path: string) => boolean>
   // R1 裁定：PARAM 与 GPARAM 都进左侧「参数」逻辑库（顶栏已无独立 GPARAM）。
   param: (path) => isParamContainerPath(path) || isGparamPath(path),
   gparam: isGparamPath,
-  // R2 裁定：文本域只列简中（zhocn）；japanese/engus 整包延期 V0.6。
-  text: (path) => isTextLibraryPath(path) && isZhocnTextPath(path),
+  // 文本域按资源类型收集所有已索引语言包；具体语言由资源路径和 MSG 元数据展示。
+  text: isTextLibraryPath,
   event: isEventDocumentPath,
   map: isMapDocumentPath,
   script: isScriptLibraryPath,

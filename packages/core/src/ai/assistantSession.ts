@@ -156,8 +156,21 @@ function recommendTools(prompt: string, tools: ToolDescriptor[], mode: AiPermiss
   names.add('workspace_stats');
   names.add('retrieve_evidence');
 
-  if (lower.includes('event') || lower.includes('事件') || lower.includes('emevd')) {
+  const hasObjectResolutionTerms = [
+    '角色', '敌人', 'npc', 'boss', '鬼刑部', '狼', '物品', '道具', '铃铛', '掉落', '奖励',
+    '技能', '血条', '落雷', '阵营', '不攻击', '击杀', '过场', '雾门', 'ai'
+  ].some((term) => lower.includes(term));
+  if (hasObjectResolutionTerms) {
+    names.add('list_memories');
+    names.add('read_memory');
+    names.add('search_text_entries');
+    names.add('search_param_rows');
+  }
+
+  if (lower.includes('event') || lower.includes('事件') || lower.includes('emevd')
+    || hasObjectResolutionTerms && ['血条', '落雷', '雷电', '阵营', '不攻击', '击杀', '掉落', '过场', '雾门', 'ai'].some((term) => lower.includes(term))) {
     names.add('search_events');
+    names.add('search_event_reference');
     names.add('explain_event');
     names.add('read_emevd_outline');
     names.add('apply_emevd_dsl');
@@ -225,8 +238,11 @@ function reasonForTool(name: string): string {
   const reasons: Record<string, string> = {
     workspace_stats: '先看索引规模，避免在空工作区里误判。',
     retrieve_evidence: '用混合检索（精确 ID + 文本 + 引用扩展）收集有界证据。',
+    list_memories: '先查看跨会话已经沉淀的正式名称、ID 和对象关系。',
+    read_memory: '读取与当前对象相关的历史线索，再用当前工作区原生读取复核。',
     search_resources: '定位相关资源文件，建立最小上下文。',
     search_events: '查找候选事件入口。',
+    search_event_reference: '按用户提供的事件笔记，把血条、落雷、掉落等语义映射为候选指令名，再回到当前 EMEVD 复核。',
     explain_event: '生成证据优先的事件解释输入。',
     search_map_entities: '查找地图实体、区域和可见命名候选。',
     search_tae_events: '按动作地址（cXXXX#AXXXX.eN）或 SoundID 查找 TAE 词条。',

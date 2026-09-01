@@ -53,6 +53,7 @@ type UnknownHandler = (...args: unknown[]) => void;
 
 interface DocumentLike {
   createElement(tag: string): FakeElement;
+  activeElement: FakeElement | null;
   addEventListener(type: string, handler: UnknownHandler, options?: unknown): void;
   removeEventListener(type: string, handler: UnknownHandler, options?: unknown): void;
 }
@@ -75,6 +76,7 @@ function removeHandler(map: Map<string, Set<UnknownHandler>>, type: string, hand
 let lastCreatedCanvas: FakeElement | null = null;
 
 const fakeDocument: DocumentLike = {
+  activeElement: null,
   createElement(tag: string): FakeElement {
     const element = new FakeElement();
     if (tag === 'canvas') lastCreatedCanvas = element;
@@ -98,6 +100,7 @@ class FakeElement {
   clientWidth = 800;
   clientHeight = 600;
   private readonly handlers = new Map<string, Set<UnknownHandler>>();
+  private readonly pointerCaptures = new Set<number>();
 
   addEventListener(type: string, handler: UnknownHandler, options?: unknown): void {
     void options;
@@ -117,7 +120,16 @@ class FakeElement {
     return fakeDocument;
   }
   focus(): void {
-    /* no-op: headless */
+    fakeDocument.activeElement = this;
+  }
+  setPointerCapture(pointerId: number): void {
+    this.pointerCaptures.add(pointerId);
+  }
+  releasePointerCapture(pointerId: number): void {
+    this.pointerCaptures.delete(pointerId);
+  }
+  hasPointerCapture(pointerId: number): boolean {
+    return this.pointerCaptures.has(pointerId);
   }
   tabIndex = 0;
   replaceChildren(): void {
@@ -164,6 +176,43 @@ function pumpFrames(count: number): void {
     frameNow += 16;
     callback(frameNow);
   }
+}
+
+function makePointerEvent(
+  button: number,
+  pointerId: number,
+  clientX: number,
+  clientY: number
+): { button: number; pointerId: number; clientX: number; clientY: number; movementX: number; movementY: number; pointerType: string; prevented: boolean; stopped: boolean; preventDefault(): void; stopPropagation(): void } {
+  const event = {
+    button,
+    pointerId,
+    clientX,
+    clientY,
+    // Deliberately keep these at zero. The controller must use client deltas,
+    // not Chromium's unreliable movementX/Y while pointer capture is active.
+    movementX: 0,
+    movementY: 0,
+    pointerType: 'mouse',
+    prevented: false,
+    stopped: false,
+    preventDefault(): void { event.prevented = true; },
+    stopPropagation(): void { event.stopped = true; }
+  };
+  return event;
+}
+
+function makeMouseEvent(button: number, clientX: number, clientY: number): { button: number; clientX: number; clientY: number; prevented: boolean; stopped: boolean; preventDefault(): void; stopPropagation(): void } {
+  const event = {
+    button,
+    clientX,
+    clientY,
+    prevented: false,
+    stopped: false,
+    preventDefault(): void { event.prevented = true; },
+    stopPropagation(): void { event.stopped = true; }
+  };
+  return event;
 }
 
 // ---------------------------------------------------------------------------
@@ -243,6 +292,25 @@ function buildProxyDrawList(): SceneDrawList {
     bounds: { min: [-5, -5, -5], max: [5, 5, 5], center: [0, 0, 0] },
     diagnostics: []
   };
+}
+
+function buildModelReplacementDrawList(): SceneDrawList {
+  const base = buildProxyDrawList();
+  const first = base.items[0]!;
+  const second = {
+    ...first,
+    id: 'part-001',
+    position: [2, 0, 0] as [number, number, number],
+    modelName: 'M000010.FLVER'
+  };
+  base.items = [
+    { ...first, modelName: 'm000010.mapbnd.dcx' },
+    second
+  ];
+  base.totalItemCount = 2;
+  base.itemCount = 2;
+  base.bounds = { min: [-5, -5, -5], max: [5, 5, 5], center: [0, 0, 0] };
+  return base;
 }
 
 function buildFlverScene(): FlverSemanticScene {
@@ -391,9 +459,62 @@ async function testProxyScene(record: (name: string) => void): Promise<void> {
   assert(createdRenderer.calls.includes('setSize'), 'setSize 已按容器尺寸调用');
   assert(createdRenderer.calls.includes('setPixelRatio'), 'setPixelRatio 已调用');
 
-  // Shift + WASD 使用同一方向与帧时间，只把位移倍率提升到 3.5x。
   assert(mountedCamera !== null, '测试 seam 捕获真实 controller camera');
   const activeCamera = mountedCamera as three.PerspectiveCamera;
+
+  // Pointer capture / camera gesture contract. movementX/Y stays zero on
+  // purpose: the real controller must still rotate/pan from client deltas.
+  assert(lastCreatedCanvas !== null, '指针 smoke 已创建 canvas');
+  const canvas = lastCreatedCanvas;
+  const directionBeforeLook = new three.Vector3();
+  activeCamera.getWorldDirection(directionBeforeLook);
+  const rightDown = makePointerEvent(2, 41, 100, 100);
+  canvas.dispatch('pointerdown', rightDown);
+  assert(rightDown.prevented && rightDown.stopped, '右键按下阻止默认行为并截断冒泡');
+  assert(canvas.hasPointerCapture(41), '右键拖动取得 pointer capture');
+  assertEqual(canvas.style.cursor, 'grabbing', '右键拖动显示抓取光标');
+  const rightMove = makePointerEvent(2, 41, 160, 130);
+  canvas.dispatch('pointermove', rightMove);
+  const directionAfterLook = new three.Vector3();
+  activeCamera.getWorldDirection(directionAfterLook);
+  assert(directionAfterLook.distanceTo(directionBeforeLook) > 1e-6, '右键 client 坐标拖动改变观察方向');
+  assert(rightMove.prevented && rightMove.stopped, '右键拖动阻止默认行为并截断冒泡');
+  const contextMenu = makeMouseEvent(2, 160, 130);
+  canvas.dispatch('contextmenu', contextMenu);
+  assert(contextMenu.prevented && contextMenu.stopped, '右键不打开原生上下文菜单');
+  const rightUp = makePointerEvent(2, 41, 160, 130);
+  canvas.dispatch('pointerup', rightUp);
+  assert(!canvas.hasPointerCapture(41), '右键释放 pointer capture');
+  assertEqual(canvas.style.cursor, 'grab', '右键释放恢复抓取光标');
+  const selectionCountAfterLook = selections.length;
+  const synthesizedClick = makeMouseEvent(0, 160, 130);
+  canvas.dispatch('click', synthesizedClick);
+  assertEqual(selections.length, selectionCountAfterLook, '右键拖动后的合成 click 不改变选中项');
+  const auxClick = makeMouseEvent(2, 160, 130);
+  canvas.dispatch('auxclick', auxClick);
+  assert(auxClick.prevented && auxClick.stopped, '右键 auxclick 不冒泡到面板命令');
+
+  const positionBeforePan = activeCamera.position.clone();
+  const middleDown = makePointerEvent(1, 42, 200, 200);
+  canvas.dispatch('pointerdown', middleDown);
+  const middleMove = makePointerEvent(1, 42, 230, 214);
+  canvas.dispatch('pointermove', middleMove);
+  canvas.dispatch('pointerup', makePointerEvent(1, 42, 230, 214));
+  assert(activeCamera.position.distanceTo(positionBeforePan) > 1e-6, '中键 client 坐标拖动仍能平移');
+
+  const directionBeforeBlur = new three.Vector3();
+  activeCamera.getWorldDirection(directionBeforeBlur);
+  const blurDown = makePointerEvent(2, 43, 300, 300);
+  canvas.dispatch('pointerdown', blurDown);
+  assert(canvas.hasPointerCapture(43), '失焦前右键持有 pointer capture');
+  dispatchWindow('blur', {});
+  assert(!canvas.hasPointerCapture(43), '窗口失焦释放 pointer capture');
+  canvas.dispatch('pointermove', makePointerEvent(2, 43, 360, 360));
+  const directionAfterBlur = new three.Vector3();
+  activeCamera.getWorldDirection(directionAfterBlur);
+  assert(directionAfterBlur.distanceTo(directionBeforeBlur) < 1e-6, '失焦后迟到 pointermove 不再改变视角');
+
+  // Shift + WASD 使用同一方向与帧时间，只把位移倍率提升到 3.5x。
   const keyboardEvent = (key: string, shiftKey: boolean): KeyboardEvent => ({
     key,
     shiftKey,
@@ -428,6 +549,39 @@ async function testProxyScene(record: (name: string) => void): Promise<void> {
   record('proxy-picking-highlight');
   record('proxy-resource-release');
   record('proxy-shift-wasd-acceleration');
+  record('proxy-pointer-camera-gestures');
+}
+
+async function testProxyModelReplacement(record: (name: string) => void): Promise<void> {
+  const audits: Array<{ phase: string; items: Array<{ id: string; state: string }> }> = [];
+  const handle = await mountThreeProxyScene({
+    container: new FakeElement() as unknown as HTMLElement,
+    drawList: buildModelReplacementDrawList(),
+    rendererFactory: () => new FakeRenderer(),
+    renderAudit: (phase, items) => {
+      audits.push({ phase, items: items.map((item) => ({ id: item.id, state: item.state })) });
+    }
+  });
+
+  const positionsBase64 = Buffer.from(new Float32Array([
+    0, 0, 0,
+    1, 0, 0,
+    0, 1, 0
+  ]).buffer).toString('base64');
+  const indicesBase64 = Buffer.from(new Uint16Array([0, 1, 2]).buffer).toString('base64');
+  const replaced = handle.updateModelGeometry?.('map/m000010.FLVER', {
+    positionsBase64,
+    indicesBase64,
+    indexSize: 16,
+    vertexCount: 3
+  }) ?? 0;
+  assertEqual(replaced, 2, 'canonical modelName 命中同一 instance batch 的两个 placement');
+  const ready = audits.filter((entry) => entry.phase === 'mesh-ready').at(-1);
+  assert(ready !== undefined, 'model geometry replacement 发出 mesh-ready audit');
+  assert(ready.items.every((item) => item.state === 'mesh'), 'replacement 后所有 placement 都是 mesh，不再是 proxy');
+
+  handle.dispose();
+  record('proxy-model-batch-replacement');
 }
 
 async function testFlverScene(record: (name: string) => void): Promise<void> {
@@ -617,6 +771,7 @@ async function main(): Promise<void> {
 
   await testBackendResolution(record);
   await testProxyScene(record);
+  await testProxyModelReplacement(record);
   await testFlverScene(record);
   await testMultiSkeletonPoseBatch(record);
   testSkinningBindPose(record);
