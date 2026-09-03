@@ -40,10 +40,25 @@ QWEN.md.*
 graphify-out/
 mcps/
 .playwright-cli/
+.playwright-mcp/
 .workbuddy/
+.kiro/
+.zcode/
 output/
 .ai-bridge/
 problem/
+docx/
+research/
+test-results/
+playwright-report/
+tmp/
+.tmp/
+release/
+锐评/
+mission/
+*.mdz
+*.log
+.*.log
 
 # One-off local generation scratch files.
 scripts/_tmp_*
