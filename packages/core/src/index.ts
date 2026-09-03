@@ -76,6 +76,7 @@ export * from './assets/assetImport.js';
 
 export * from './references/referenceBuilder.js';
 export * from './references/eventEvidence.js';
+export * from './references/chrLinkageResolver.js';
 export * from './bridge/runBridge.js';
 export * from './bridge/bridgeDaemonClient.js';
 export * from './bridge/releaseCorpusRegistry.js';

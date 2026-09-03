@@ -40,10 +40,21 @@ try
     else
     {
         JsonElement options = default;
-        if (args.Length > 2 && args[2].TrimStart().StartsWith("{"))
+        for (var i = 2; i < args.Length; i++)
         {
-            using var doc = JsonDocument.Parse(args[2]);
-            options = doc.RootElement.Clone();
+            if (args[i].TrimStart().StartsWith("{"))
+            {
+                using var doc = JsonDocument.Parse(args[i]);
+                options = doc.RootElement.Clone();
+                break;
+            }
+            if ((args[i] == "--options" || args[i] == "-o") && i + 1 < args.Length)
+            {
+                using var doc = JsonDocument.Parse(args[i + 1]);
+                options = doc.RootElement.Clone();
+                i++;
+                break;
+            }
         }
         result = await service.ExecuteAsync(args[0], args[1], CancellationToken.None, configuredOodleRoot, options);
     }

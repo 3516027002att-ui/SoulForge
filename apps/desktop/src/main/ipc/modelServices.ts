@@ -57,7 +57,6 @@ export function registerModelServiceIpcHandlers(deps: ModelServiceIpcDeps): void
         maxTokens?: number;
         contextWindowTokens?: number;
         thinkingLevel?: 'off' | 'none' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max';
-        embeddingModel?: string;
       }
     ) => {
       // apiKey is accepted once for encryption; never returned in the response DTO.
@@ -76,8 +75,7 @@ export function registerModelServiceIpcHandlers(deps: ModelServiceIpcDeps): void
         ...(saved.topK !== undefined ? { topK: saved.topK } : {}),
         ...(saved.maxTokens !== undefined ? { maxTokens: saved.maxTokens } : {}),
         ...(saved.contextWindowTokens !== undefined ? { contextWindowTokens: saved.contextWindowTokens } : {}),
-        ...(saved.thinkingLevel !== undefined ? { thinkingLevel: saved.thinkingLevel } : {}),
-        ...(saved.embeddingModel !== undefined ? { embeddingModel: saved.embeddingModel } : {})
+        ...(saved.thinkingLevel !== undefined ? { thinkingLevel: saved.thinkingLevel } : {})
       };
     }
   );

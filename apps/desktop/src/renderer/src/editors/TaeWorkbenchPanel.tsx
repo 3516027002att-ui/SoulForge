@@ -66,7 +66,6 @@ import {
   TAE_INVALID_TIME_RANGE,
   AnimationPlaybackClock,
   ActionContinuousSampler,
-  eulerXYZToQuaternion,
   isCharacterPreviewBundle,
   type CharacterPreviewBundle,
   type TaeAnimationClipData,
@@ -80,6 +79,7 @@ import {
   type TaeTimelineEventRow,
   type TaeTimelineEventWire
 } from '@soulforge/shared';
+import { flverEulerXzyToQuaternion } from '../scene/flverSkeletonMapping.js';
 import { isRowTabEntry, selectableRowAttributes } from '../a11y/selectableRow.js';
 import { getRendererBridge } from '../runtime/rendererRuntime.js';
 import { WorkbenchLayout } from '../workbench/WorkbenchLayout.js';
@@ -963,7 +963,7 @@ export function TaeWorkbenchPanel(props: TaeWorkbenchPanelProps): ReactElement {
     const boneParents = leaderBones.map((b) => b.parentIndex);
     const referencePose = leaderBones.map((b) => ({
       translation: b.translation,
-      rotation: eulerXYZToQuaternion(b.rotation),
+      rotation: flverEulerXzyToQuaternion(b.rotation),
       scale: b.scale ?? [1, 1, 1] as [number, number, number]
     }));
 
@@ -1024,7 +1024,7 @@ export function TaeWorkbenchPanel(props: TaeWorkbenchPanelProps): ReactElement {
     if (!activeSampler || leaderBones.length === 0) return undefined;
     const refPose: BoneTransformData[] = leaderBones.map((b) => ({
       translation: b.translation,
-      rotation: eulerXYZToQuaternion(b.rotation),
+      rotation: flverEulerXzyToQuaternion(b.rotation),
       scale: b.scale ?? [1, 1, 1] as [number, number, number]
     }));
     return activeSampler.sampleFlverPose(

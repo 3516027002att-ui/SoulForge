@@ -113,6 +113,28 @@ export class MemoryManager {
     return store.formatForSystemPrompt(12);
   }
 
+  /**
+   * The user's writing rules and project memory are operational instructions,
+   * not retrieval candidates.  Inject the complete Markdown stores on every
+   * Agent run; unlike the compact UI preview this method deliberately does
+   * not cap the number of entries.
+   */
+  getFullMemoryForSystemPrompt(workspaceId?: string): string {
+    const sections: string[] = [];
+    const global = this.getStore().serializeMarkdown().trim();
+    if (global) sections.push(`### 全局用户记忆\n\n${global}`);
+    if (workspaceId) {
+      const workspace = this.getStore(workspaceId).serializeMarkdown().trim();
+      if (workspace) sections.push(`### 当前项目记忆\n\n${workspace}`);
+    }
+    if (sections.length === 0) return '';
+    return [
+      '## 用户记忆（每次任务完整注入；不属于 RAG）',
+      '以下内容是用户维护的写入规范、偏好和项目知识。执行写入时必须遵守其中的写入规范；对象身份、字段和当前资源状态仍须通过本次工作区搜索与原生读取确认。',
+      ...sections
+    ].join('\n\n');
+  }
+
   private writeAtomically(targetPath: string, markdown: string): void {
     const dir = dirname(targetPath);
     if (!existsSync(dir)) mkdirSync(dir, { recursive: true });

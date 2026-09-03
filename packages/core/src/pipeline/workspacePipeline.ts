@@ -25,6 +25,18 @@ export interface AnalyzeWorkspaceOptions {
   oodleRuntimeRoot?: string;
   signal?: AbortSignal;
   onProgress?: (progress: AnalyzeWorkspaceProgress) => void;
+  /**
+   * Publish the first searchable semantic slice before the heavyweight
+   * inspection pass finishes.  The callback is invoked once after the first
+   * useful export, or at the end of parsing when no semantic export could be
+   * accepted, so callers can distinguish "still parsing" from "no evidence".
+   */
+  onSemanticIndexReady?: (input: {
+    index: WorkspaceIndex;
+    parsedFiles: number;
+    total: number;
+    diagnostics: readonly Diagnostic[];
+  }) => void | Promise<void>;
 }
 
 export interface AnalyzeWorkspaceProgress {
@@ -77,8 +89,38 @@ export async function analyzeWorkspace(options: AnalyzeWorkspaceOptions): Promis
   index.setFiles(scan.files);
 
   const parseCandidates = scan.files.filter((file) => shouldParse(file, options));
-  const parseLimited = parseCandidates.slice(0, options.maxFilesToParse ?? 500);
+  // The first useful semantic slice is what unblocks Agent lookup.  Parse
+  // PARAM/MSG before the much larger EVENT/MAP population, while preserving
+  // discovery order within one resource family.  This is a scheduling hint,
+  // not evidence about any ID or source; every value still comes from Bridge
+  // export/ingest below.
+  const parseLimited = parseCandidates
+    .map((file, order) => ({ file, order }))
+    .sort((left, right) => parsePriority(left.file) - parsePriority(right.file) || left.order - right.order)
+    .slice(0, options.maxFilesToParse ?? 500)
+    .map(({ file }) => file);
   let parsedFiles = 0;
+  let semanticIndexNotified = false;
+
+  const hasSearchableSemanticEntries = (): boolean => {
+    const stats = index.getStats();
+    return stats.events > 0
+      || stats.mapEntities > 0
+      || stats.paramRows > 0
+      || stats.textEntries > 0;
+  };
+
+  const notifySemanticIndexReady = async (force: boolean): Promise<void> => {
+    if (semanticIndexNotified || !options.onSemanticIndexReady) return;
+    if (!force && !hasSearchableSemanticEntries()) return;
+    semanticIndexNotified = true;
+    await options.onSemanticIndexReady({
+      index,
+      parsedFiles,
+      total: parseLimited.length,
+      diagnostics: [...diagnostics]
+    });
+  };
 
   for (let i = 0; i < parseLimited.length; i += 1) {
     throwIfAborted(options.signal);
@@ -87,7 +129,19 @@ export async function analyzeWorkspace(options: AnalyzeWorkspaceOptions): Promis
     const parsed = await parseKnownResource(file, index, options);
     diagnostics.push(...parsed.diagnostics);
     if (parsed.accepted) parsedFiles += 1;
+    // PARAM/MSG are ordered first, so on a real game workspace this normally
+    // publishes immediately after the first native PARAM/MSG export instead
+    // of waiting for every map/event Bridge read.  If those families are
+    // absent, the first accepted semantic family still unblocks the same
+    // contract.
+    await notifySemanticIndexReady(false);
   }
+
+  // Resolve the staged-readiness contract even when every candidate failed or
+  // the workspace had no parse candidates.  The caller will keep the corpus
+  // fail-closed as unavailable; it must not wait forever for a stage that can
+  // never become searchable.
+  await notifySemanticIndexReady(true);
 
   const inspectCandidates = (options.inspectNativeResources ?? true)
     ? scan.files.filter((file) => shouldInspectWithBridge(file, options))
@@ -125,6 +179,21 @@ function shouldParse(file: IndexedFile, options: AnalyzeWorkspaceOptions): boole
   return false;
 }
 
+// The real Sekiro gameparam container takes longer than the generic 15-second
+// Bridge request budget to unwrap and serialize its 131 native PARAM entries.
+// Keep the longer budget scoped to semantic exports (still cancellable and
+// single-flight); inspection/read tools retain their normal bounded timeout.
+const DEFAULT_SEMANTIC_EXPORT_TIMEOUT_MS = 30_000;
+const DEFAULT_PARAM_EXPORT_TIMEOUT_MS = 120_000;
+
+function parsePriority(file: IndexedFile): number {
+  if (file.resourceKind === 'param') return 0;
+  if (file.resourceKind === 'msg') return 1;
+  if (file.resourceKind === 'event') return 2;
+  if (file.resourceKind === 'map') return 3;
+  return 4;
+}
+
 function shouldInspectWithBridge(file: IndexedFile, options: AnalyzeWorkspaceOptions): boolean {
   if (shouldParse(file, options)) return false;
   if (file.resourceKind === 'unknown') return false;
@@ -147,6 +216,12 @@ async function inspectNativeResource(
     filePath: file.absolutePath,
     resourceUri: file.sourceUri,
     allowedRoots: [options.workspaceRoot],
+    // Workspace analysis only needs bounded envelope evidence.  KRAK preview
+    // decompression is deliberately opt-in: running it for every .dcx file
+    // can allocate hundreds of MiB per file and starve the desktop during a
+    // full real-game scan.  Explicit preview/read tools keep the default-on
+    // behavior for callers that actually need decompressed evidence.
+    commandOptions: { includeDcxDecompressionPreview: false },
     ...(options.oodleRuntimeRoot ? { oodleRuntimeRoot: options.oodleRuntimeRoot } : {}),
     ...(options.signal ? { signal: options.signal } : {}),
     ...(options.bridgeProjectPath ? { bridgeProjectPath: options.bridgeProjectPath } : {}),
@@ -155,6 +230,9 @@ async function inspectNativeResource(
   });
 
   const diagnostics: Diagnostic[] = [...result.diagnostics];
+  const inspection = result.data && typeof result.data === 'object'
+    ? result.data as Record<string, unknown>
+    : null;
   diagnostics.push({
     severity: result.parseStatus === 'failed' ? 'warning' : 'info',
     code: 'BRIDGE_INSPECTION_RECORDED',
@@ -163,7 +241,9 @@ async function inspectNativeResource(
     details: {
       resourceKind: result.resourceKind,
       bridgeSourceUri: result.sourceUri,
-      data: result.data
+      parseStatus: result.parseStatus,
+      evidenceCount: Array.isArray(inspection?.evidence) ? inspection.evidence.length : 0,
+      layerCount: Array.isArray(inspection?.layers) ? inspection.layers.length : 0
     }
   });
 
@@ -179,6 +259,8 @@ async function parseKnownResource(
     if (isNativeMsgResource(file) || isNativeCandidateResource(file)) {
       const command = exportCommandFor(file);
       if (!command) return { accepted: false, diagnostics: [] };
+      const semanticTimeoutMs = options.bridgeTimeoutMs
+        ?? (command === 'export-param' ? DEFAULT_PARAM_EXPORT_TIMEOUT_MS : DEFAULT_SEMANTIC_EXPORT_TIMEOUT_MS);
       const result = await runBridge({
         command,
         filePath: file.absolutePath,
@@ -188,9 +270,13 @@ async function parseKnownResource(
         ...(options.signal ? { signal: options.signal } : {}),
         ...(options.bridgeProjectPath ? { bridgeProjectPath: options.bridgeProjectPath } : {}),
         ...(options.bridgeExecutablePath ? { bridgeExecutablePath: options.bridgeExecutablePath } : {}),
-        ...(options.bridgeTimeoutMs ? { timeoutMs: options.bridgeTimeoutMs } : {})
+        timeoutMs: semanticTimeoutMs
       });
-      const ingest = ingestBridgeResult(index, result);
+      // Bridge emits an absolute file URI because it is also used by native
+      // diagnostics. WorkspaceIndex/RAG uses the workspace-relative URI as
+      // its stable source key. Rebind only equal-to-envelope sourceUri
+      // fields; never rewrite unrelated evidence from a nested payload.
+      const ingest = ingestBridgeResult(index, canonicalizeBridgeSource(result, file.sourceUri));
       return { accepted: ingest.accepted, diagnostics: ingest.diagnostics };
     }
 
@@ -239,6 +325,27 @@ async function parseKnownResource(
       ]
     };
   }
+}
+
+function canonicalizeBridgeSource(result: BridgeResult<unknown>, sourceUri: string): BridgeResult<unknown> {
+  const nativeSourceUri = result.sourceUri;
+  const rewrite = (value: unknown): unknown => {
+    if (Array.isArray(value)) return value.map(rewrite);
+    if (!value || typeof value !== 'object') return value;
+    const output: Record<string, unknown> = {};
+    for (const [key, child] of Object.entries(value)) {
+      output[key] = key === 'sourceUri' && child === nativeSourceUri ? sourceUri : rewrite(child);
+    }
+    return output;
+  };
+  return {
+    ...result,
+    sourceUri,
+    diagnostics: result.diagnostics.map((diagnostic) => (
+      diagnostic.sourceUri === nativeSourceUri ? { ...diagnostic, sourceUri } : diagnostic
+    )),
+    ...(result.data === undefined ? {} : { data: rewrite(result.data) })
+  };
 }
 
 function isNativeMsgResource(file: IndexedFile): boolean {

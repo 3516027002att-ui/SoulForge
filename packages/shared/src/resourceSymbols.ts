@@ -80,6 +80,10 @@ export interface MapRegionSymbol {
 
 export interface ParamExport {
   paramName: string;
+  /** Native container identity; typeName alone is not unique across entries. */
+  sourceUri?: string;
+  entryIndex?: number;
+  entryName?: string;
   sourceHash?: string;
   sourceRevision?: number;
   rows: ParamRowSymbol[];
@@ -89,6 +93,9 @@ export interface ParamRowSymbol {
   uri: string;
   sourceUri: string;
   paramName: string;
+  /** Physical BND4 child name; typeName/paramName is not unique in a container. */
+  entryName?: string;
+  entryIndex?: number;
   rowId: number;
   rowName?: string;
   sourceHash?: string;

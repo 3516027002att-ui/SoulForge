@@ -155,6 +155,11 @@ export type BridgeCommandName =
   | 'write-mtd-document'
   | 'read-fxr-document'
   | 'list-ffxbnd-entries'
+  | 'read-luabnd-document'
+  | 'inspect-luabnd'
+  | 'read-luabnd-script'
+  | 'write-luabnd-script'
+  | 'export-luabnd'
   | 'capabilities'
   | 'health';
 

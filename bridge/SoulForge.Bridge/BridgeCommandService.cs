@@ -190,7 +190,13 @@ internal sealed class BridgeCommandService
         cancellationToken.ThrowIfCancellationRequested();
         if (command is "inspect" or "validate")
         {
-            return await InspectEnvelopeAsync(file, command == "validate", cancellationToken, oodleRuntimeRoot);
+            var includeDcxDecompressionPreview = OptionBool("includeDcxDecompressionPreview", true);
+            return await InspectEnvelopeAsync(
+                file,
+                command == "validate",
+                cancellationToken,
+                oodleRuntimeRoot,
+                includeDcxDecompressionPreview);
         }
 
         if (command == "read-dcx-document")
@@ -1694,12 +1700,27 @@ internal sealed class BridgeCommandService
                 var maxVertices = OptionInt("maxVertices", 1_000_000);
                 var maxIndices = OptionInt("maxIndices", 3_000_000);
                 var leaves = NativeLeafPayload.ResolveAll(file, oodleRuntimeRoot, ".flver");
+                // FLVER 的材质 MTD 是纹理包身份的原生线索。不能只按 chrbnd
+                // basename 猜同名 texbnd：c5400 的 FLVER 明确引用 c5409_* MTD，
+                // 对应的真实纹理包就是 chr/c5409.texbnd.dcx。
+                var flverSources = leaves
+                    .Select(leaf => (Leaf: leaf, Document: FlverNativeDocument.Read(leaf.Payload)))
+                    .ToArray();
                 var texturePackagePaths = OptionPaths("texturePackagePaths", 8);
                 var textureLeaves = ResolveCharacterTextureLeaves(
                     file,
                     oodleRuntimeRoot,
                     allowedRoots,
-                    texturePackagePaths);
+                    texturePackagePaths,
+                    flverSources.Select(source => source.Document).ToArray());
+                // Compatibility assembly may provide an explicitly verified
+                // projection source for a native decal material. It is exact
+                // basename lookup only; ordinary FLVER material resolution
+                // remains native-identity gated.
+                var compatibilityProjectionTextureName = OptionString("compatibilityProjectionTextureName", string.Empty);
+                var compatibilityProjection = CharacterTexturePreviewService.ResolveExact(
+                    textureLeaves,
+                    compatibilityProjectionTextureName);
                 var models = new List<object>(leaves.Count);
                 var diagnostics = new List<Diagnostic>();
                 var totalMeshes = 0;
@@ -1707,11 +1728,40 @@ internal sealed class BridgeCommandService
                 var leaderBoneCount = -1;
                 var leaderModelId = string.Empty;
                 var texturedModelCount = 0;
-                foreach (var leaf in leaves)
+                foreach (var source in flverSources)
                 {
                     cancellationToken.ThrowIfCancellationRequested();
-                    var flver = FlverNativeDocument.Read(leaf.Payload);
-                    var meshes = BuildFlverMeshBundle(flver, maxVertices, maxIndices, cancellationToken);
+                    var leaf = source.Leaf;
+                    var flver = source.Document;
+                    var textureBindings = CharacterTexturePreviewService.ResolveAll(
+                        flver,
+                        leaf.Name,
+                        textureLeaves,
+                        oodleRuntimeRoot,
+                        allowedRoots);
+                    // A native projected-decal still cannot be rendered by the
+                    // generic Three shader, but a material-local albedo is a
+                    // source-backed compatibility input when the same FLVER
+                    // material resolves it exactly from its MTD/TPF identity.
+                    // Do not reuse one explicit assembly texture for every
+                    // projected material: the native material index wins.
+                    var nativeProjectionByMaterial = new Dictionary<int, CharacterTexturePreview>();
+                    foreach (var binding in textureBindings)
+                    {
+                        if (binding.MaterialIndex >= 0
+                            && binding.MaterialIndex < flver.Materials.Count
+                            && ResolveFlverPreviewRenderMode(flver, binding.MaterialIndex) == "projected-decal")
+                        {
+                            nativeProjectionByMaterial[binding.MaterialIndex] = binding.Preview;
+                        }
+                    }
+                    var meshes = BuildFlverMeshBundle(
+                        flver,
+                        maxVertices,
+                        maxIndices,
+                        cancellationToken,
+                        compatibilityProjection,
+                        nativeProjectionByMaterial);
                     var modelId = $"entry:{leaf.Index}:{leaf.Id}:{leaf.DuplicateOrdinal}:{leaf.ContentHash[..Math.Min(16, leaf.ContentHash.Length)]}";
                     if (flver.BoneCount > leaderBoneCount)
                     {
@@ -1720,14 +1770,42 @@ internal sealed class BridgeCommandService
                     }
                     totalMeshes += flver.MeshCount;
                     totalVertices += flver.Meshes.Sum(mesh => (long)mesh.VertexCount);
-                    var textureBindings = CharacterTexturePreviewService.ResolveAll(
-                        flver,
-                        leaf.Name,
-                        textureLeaves,
-                        oodleRuntimeRoot,
-                        allowedRoots);
                     var firstTexture = textureBindings.FirstOrDefault()?.Preview;
-                    if (textureBindings.Count > 0) texturedModelCount++;
+                    var hasCompatibilityProjection = nativeProjectionByMaterial.Count > 0
+                        || (compatibilityProjection is not null
+                            && flver.Materials.Any(material =>
+                                ResolveFlverPreviewRenderMode(flver, material.Index) == "projected-decal"));
+                    if (textureBindings.Count > 0 || hasCompatibilityProjection) texturedModelCount++;
+                    if (hasCompatibilityProjection)
+                    {
+                        diagnostics.Add(new Diagnostic(
+                            "info",
+                            "CHRBND_COMPATIBILITY_PROJECTION_APPLIED",
+                            $"FLVER {leaf.Name} 已按材质索引使用有界投影接收面；native projected-decal 材质身份未被替换。",
+                            BridgeResult<object>.MakeSourceUri(file),
+                            new
+                            {
+                                textureNames = nativeProjectionByMaterial.Values
+                                    .Select(preview => preview.TextureName)
+                                    .Concat(compatibilityProjection is not null
+                                        ? new[] { compatibilityProjection.TextureName }
+                                        : Array.Empty<string>())
+                                    .Distinct(StringComparer.OrdinalIgnoreCase)
+                                    .ToArray(),
+                                materialIndices = nativeProjectionByMaterial.Keys.OrderBy(index => index).ToArray(),
+                                sourceRole = "compatibility-preview"
+                            }));
+                    }
+                    else if (!string.IsNullOrWhiteSpace(compatibilityProjectionTextureName)
+                        && compatibilityProjection is null)
+                    {
+                        diagnostics.Add(new Diagnostic(
+                            "warning",
+                            "CHRBND_COMPATIBILITY_PROJECTION_SOURCE_MISSING",
+                            $"请求的兼容投影源 {compatibilityProjectionTextureName} 未在当前有界纹理包中找到；native projected-decal 保持只读且不光栅化。",
+                            BridgeResult<object>.MakeSourceUri(file),
+                            new { textureName = compatibilityProjectionTextureName }));
+                    }
                     if (textureBindings.Count == 0)
                     {
                         diagnostics.Add(new Diagnostic(
@@ -1772,7 +1850,42 @@ internal sealed class BridgeCommandService
                             texturePreviewToken = binding.Preview.PreviewToken,
                             width = binding.Preview.Width,
                             height = binding.Preview.Height,
-                            colorSpace = binding.Preview.ColorSpace
+                            colorSpace = binding.Preview.ColorSpace,
+                            alphaMode = binding.Preview.AlphaMode,
+                            normalTextureName = binding.Preview.Normal?.TextureName,
+                            normalTexturePreviewToken = binding.Preview.Normal?.PreviewToken,
+                            normalTextureColorSpace = binding.Preview.Normal?.ColorSpace,
+                            metalnessTextureName = binding.Preview.Metalness?.TextureName,
+                            metalnessTexturePreviewToken = binding.Preview.Metalness?.PreviewToken,
+                            metalnessTextureColorSpace = binding.Preview.Metalness?.ColorSpace,
+                            mask1TextureName = binding.Preview.Mask1?.TextureName,
+                            mask1TexturePreviewToken = binding.Preview.Mask1?.PreviewToken,
+                            mask1TextureColorSpace = binding.Preview.Mask1?.ColorSpace,
+                            albedo2 = binding.Preview.Albedo2 is null ? null : new
+                            {
+                                textureName = binding.Preview.Albedo2.TextureName,
+                                texturePreviewToken = binding.Preview.Albedo2.PreviewToken,
+                                width = binding.Preview.Albedo2.Width,
+                                height = binding.Preview.Albedo2.Height,
+                                colorSpace = binding.Preview.Albedo2.ColorSpace
+                            },
+                            normal2 = binding.Preview.Normal2 is null ? null : new
+                            {
+                                textureName = binding.Preview.Normal2.TextureName,
+                                texturePreviewToken = binding.Preview.Normal2.PreviewToken,
+                                width = binding.Preview.Normal2.Width,
+                                height = binding.Preview.Normal2.Height,
+                                colorSpace = binding.Preview.Normal2.ColorSpace
+                            },
+                            diffuseBlend = binding.Preview.DiffuseBlend is null ? null : new
+                            {
+                                mode = binding.Preview.DiffuseBlend.Mode,
+                                albedo2UvIndex = binding.Preview.DiffuseBlend.Albedo2UvIndex,
+                                blendMaskUvIndex = binding.Preview.DiffuseBlend.BlendMaskUvIndex,
+                                undefinedBlendMaskValue = binding.Preview.DiffuseBlend.UndefinedBlendMaskValue,
+                                enableTextureAlpha = binding.Preview.DiffuseBlend.EnableTextureAlpha,
+                                multiplyBlendMaskByAlbedo2Alpha = binding.Preview.DiffuseBlend.MultiplyBlendMaskByAlbedo2Alpha
+                            }
                         }).ToArray()
                     });
                 }
@@ -1900,17 +2013,22 @@ internal sealed class BridgeCommandService
                     return BridgeResult<object>.Failed(file, "map", "FLVER_MESH_NOT_FOUND", $"网格索引 {meshIndex} 超出范围或数据不可用。");
                 }
                 var indices = flver.GetMeshIndicesBase64(meshIndex, maxIndices);
-                var uvs = flver.GetMeshUVsBase64(meshIndex, maxVertices);
+                var uvSets = flver.GetMeshUVSetsBase64(meshIndex, maxVertices);
+                var uvs = uvSets?.FirstOrDefault();
                 var normals = flver.GetMeshNormalsBase64(meshIndex, maxVertices);
                 var boneWeights = flver.GetMeshBoneWeightsBase64(meshIndex, maxVertices);
                 var boneIndices = flver.GetMeshBoneIndicesBase64(meshIndex, maxVertices);
+                var vertexColorRead = flver.GetMeshVertexColorDiagnostics(meshIndex, maxVertices);
+                var vertexAlpha = vertexColorRead.FirstAlphaBase64;
                 var mesh = flver.Meshes[meshIndex];
-                return BridgeResult<object>.Partial(file, "map", new[]
+                var mapMeshDiagnostics = new List<Diagnostic>
                 {
                     new Diagnostic("info", "MAP_PART_FLVER_EXTRACTED",
                         $"mapbnd 条目 {entry.Name} 的 FLVER 网格已提取；mesh={meshIndex} vertexCount={mesh.VertexCount} bones={flver.BoneCount}。",
                         BridgeResult<object>.MakeSourceUri(file))
-                }, new
+                };
+                AppendFlverVertexColorDiagnostic(mapMeshDiagnostics, file, meshIndex, vertexColorRead);
+                return BridgeResult<object>.Partial(file, "map", mapMeshDiagnostics, new
                 {
                     entryName = entry.Name,
                     meshIndex,
@@ -1919,7 +2037,13 @@ internal sealed class BridgeCommandService
                     positionsBase64 = positions,
                     indicesBase64 = indices,
                     uvsBase64 = uvs,
+                    uvSetsBase64 = uvSets,
                     normalsBase64 = normals,
+                    vertexColorStatus = vertexColorRead.Status,
+                    vertexColorFailure = vertexColorRead.Failure,
+                    vertexColorDiagnostics = BuildFlverVertexColorDiagnostics(vertexColorRead),
+                    vertexAlphaBase64 = vertexAlpha,
+                    cullBackfaces = flver.GetMeshCullBackfaces(meshIndex),
                     boneWeightsBase64 = boneWeights,
                     boneIndicesBase64 = boneIndices,
                     bones = BuildFlverSkeleton(flver),
@@ -2195,10 +2319,13 @@ internal sealed class BridgeCommandService
                 var texturePackagePaths = OptionPaths("texturePackagePaths", 8);
                 var positions = document.GetMeshPositionsBase64(meshIndex, maxVertices);
                 var indices = document.GetMeshIndicesBase64(meshIndex, maxIndices);
-                var uvs = document.GetMeshUVsBase64(meshIndex, maxVertices);
+                var uvSets = document.GetMeshUVSetsBase64(meshIndex, maxVertices);
+                var uvs = uvSets?.FirstOrDefault();
                 var normals = document.GetMeshNormalsBase64(meshIndex, maxVertices);
                 var boneWeights = document.GetMeshBoneWeightsBase64(meshIndex, maxVertices);
                 var boneIndices = document.GetMeshBoneIndicesBase64(meshIndex, maxVertices);
+                var vertexColorRead = document.GetMeshVertexColorDiagnostics(meshIndex, maxVertices);
+                var vertexAlpha = vertexColorRead.FirstAlphaBase64;
                 if (positions == null)
                     return BridgeResult<object>.Failed(file, "chr", "FLVER_MESH_NOT_FOUND", $"网格索引 {meshIndex} 超出范围或数据不可用。");
                 var mesh = document.Meshes[meshIndex];
@@ -2219,6 +2346,7 @@ internal sealed class BridgeCommandService
                         $"FLVER 网格 {meshIndex} 顶点/索引/UV/法线/骨骼权重/骨骼索引数据已提取；vertexCount={mesh.VertexCount}。",
                         BridgeResult<object>.MakeSourceUri(file))
                 };
+                AppendFlverVertexColorDiagnostic(meshDiagnostics, file, meshIndex, vertexColorRead);
                 if (textureBinding is null)
                 {
                     meshDiagnostics.Add(new Diagnostic(
@@ -2249,9 +2377,20 @@ internal sealed class BridgeCommandService
                     positionsBase64 = positions,
                     indicesBase64 = indices,
                     uvsBase64 = uvs,
+                    uvSetsBase64 = uvSets,
                     normalsBase64 = normals,
+                    vertexColorStatus = vertexColorRead.Status,
+                    vertexColorFailure = vertexColorRead.Failure,
+                    vertexColorDiagnostics = BuildFlverVertexColorDiagnostics(vertexColorRead),
+                    vertexAlphaBase64 = vertexAlpha,
+                    cullBackfaces = document.GetMeshCullBackfaces(meshIndex),
                     boneWeightsBase64 = boneWeights,
                     boneIndicesBase64 = boneIndices,
+                    // DSAnimStudio's mature FLVER shader uses the absolute
+                    // reference-pose matrix for mesh.Dynamic == 0. Preserve
+                    // that native distinction instead of making every mesh
+                    // look like a conventional inverse-bind model.
+                    skinningTransformMode = mesh.Dynamic == 0 ? "absolute" : "delta",
                     renderMode = ResolveFlverPreviewRenderMode(document, mesh.MaterialIndex),
                     textureStatus = textureBinding is null ? "missing" : "ready",
                     textureMaterialName = mesh.MaterialIndex >= 0 && mesh.MaterialIndex < document.Materials.Count
@@ -2261,7 +2400,26 @@ internal sealed class BridgeCommandService
                     texturePreviewToken = textureBinding?.Preview.PreviewToken,
                     textureWidth = textureBinding?.Preview.Width,
                     textureHeight = textureBinding?.Preview.Height,
-                    textureColorSpace = textureBinding?.Preview.ColorSpace
+                    textureColorSpace = textureBinding?.Preview.ColorSpace,
+                    textureAlphaMode = textureBinding?.Preview.AlphaMode,
+                    mask1TextureName = textureBinding?.Preview.Mask1?.TextureName,
+                    mask1TexturePreviewToken = textureBinding?.Preview.Mask1?.PreviewToken,
+                    mask1TextureColorSpace = textureBinding?.Preview.Mask1?.ColorSpace,
+                    albedo2TextureName = textureBinding?.Preview.Albedo2?.TextureName,
+                    albedo2TexturePreviewToken = textureBinding?.Preview.Albedo2?.PreviewToken,
+                    albedo2TextureColorSpace = textureBinding?.Preview.Albedo2?.ColorSpace,
+                    normal2TextureName = textureBinding?.Preview.Normal2?.TextureName,
+                    normal2TexturePreviewToken = textureBinding?.Preview.Normal2?.PreviewToken,
+                    normal2TextureColorSpace = textureBinding?.Preview.Normal2?.ColorSpace,
+                    diffuseBlend = textureBinding?.Preview.DiffuseBlend is null ? null : new
+                    {
+                        mode = textureBinding.Preview.DiffuseBlend.Mode,
+                        albedo2UvIndex = textureBinding.Preview.DiffuseBlend.Albedo2UvIndex,
+                        blendMaskUvIndex = textureBinding.Preview.DiffuseBlend.BlendMaskUvIndex,
+                        undefinedBlendMaskValue = textureBinding.Preview.DiffuseBlend.UndefinedBlendMaskValue,
+                        enableTextureAlpha = textureBinding.Preview.DiffuseBlend.EnableTextureAlpha,
+                        multiplyBlendMaskByAlbedo2Alpha = textureBinding.Preview.DiffuseBlend.MultiplyBlendMaskByAlbedo2Alpha
+                    }
                 });
             }
             catch (Exception ex) when (ex is InvalidDataException or NotSupportedException or IOException)
@@ -2830,6 +2988,135 @@ internal sealed class BridgeCommandService
             }
         }
 
+        if (command == "read-luabnd-document" || command == "inspect-luabnd")
+        {
+            try
+            {
+                var doc = LuabndNativeDocument.Read(file, oodleRuntimeRoot);
+                return BridgeResult<object>.Ok(file, "script", doc.ToEnvelope());
+            }
+            catch (OodleRuntimeUnavailableException)
+            {
+                return BridgeResult<object>.Failed(
+                    file,
+                    "script",
+                    "LUABND_KRAK_OODLE_UNAVAILABLE",
+                    "这份 Lua 脚本容器（luabnd）是 KRAK 压缩，需要提供包含 sekiro.exe 的原版游戏目录。");
+            }
+            catch (Exception ex) when (ex is InvalidDataException or NotSupportedException or IOException)
+            {
+                return BridgeResult<object>.Failed(file, "script", "LUABND_READ_FAILED", ex.Message);
+            }
+        }
+
+        if (command == "read-luabnd-script")
+        {
+            try
+            {
+                var childSelector = options.TryGetProperty("childPath", out var childPathEl) ? childPathEl.GetString() : null;
+                var entryIndex = options.TryGetProperty("entryIndex", out var idxEl) && idxEl.ValueKind == JsonValueKind.Number ? idxEl.GetInt32().ToString() : null;
+                var selector = childSelector ?? entryIndex;
+                if (string.IsNullOrWhiteSpace(selector))
+                {
+                    return BridgeResult<object>.Failed(file, "script", "LUABND_SELECTOR_REQUIRED", "read-luabnd-script 需要 options.childPath 或 options.entryIndex。");
+                }
+
+                var doc = LuabndNativeDocument.Read(file, oodleRuntimeRoot);
+                if (options.TryGetProperty("expectedContainerHash", out var expContHash)
+                    && expContHash.ValueKind == JsonValueKind.String
+                    && !string.IsNullOrWhiteSpace(expContHash.GetString())
+                    && !doc.SourceHash.Equals(expContHash.GetString(), StringComparison.OrdinalIgnoreCase))
+                {
+                    return BridgeResult<object>.Failed(file, "script", "LUABND_CONTAINER_HASH_MISMATCH", "luabnd 容器 expectedContainerHash 不匹配。");
+                }
+
+                var script = doc.ReadScript(selector);
+                if (options.TryGetProperty("expectedChildHash", out var expChildHash)
+                    && expChildHash.ValueKind == JsonValueKind.String
+                    && !string.IsNullOrWhiteSpace(expChildHash.GetString())
+                    && !script.ContentHash.Equals(expChildHash.GetString(), StringComparison.OrdinalIgnoreCase))
+                {
+                    return BridgeResult<object>.Failed(file, "script", "LUABND_CHILD_HASH_MISMATCH", "脚本 expectedChildHash 不匹配。");
+                }
+
+                return BridgeResult<object>.Ok(file, "script", script);
+            }
+            catch (OodleRuntimeUnavailableException)
+            {
+                return BridgeResult<object>.Failed(
+                    file,
+                    "script",
+                    "LUABND_KRAK_OODLE_UNAVAILABLE",
+                    "这份 Lua 脚本容器（luabnd）是 KRAK 压缩，需要提供包含 sekiro.exe 的原版游戏目录。");
+            }
+            catch (Exception ex) when (ex is InvalidDataException or NotSupportedException or IOException)
+            {
+                return BridgeResult<object>.Failed(file, "script", "LUABND_SCRIPT_READ_FAILED", ex.Message);
+            }
+        }
+
+        if (command == "write-luabnd-script")
+        {
+            var targetOutPath = outputPath ?? (options.TryGetProperty("outputPath", out var outPathEl) ? outPathEl.GetString() : null);
+            if (string.IsNullOrWhiteSpace(targetOutPath))
+                return BridgeResult<object>.Failed(file, "script", "BRIDGE_OUTPUT_PATH_REQUIRED", "write-luabnd-script 需要已校验的 options.outputPath。");
+
+            try
+            {
+                var written = await LuabndNativeDocument.WriteScriptAsync(file, targetOutPath, options, cancellationToken, oodleRuntimeRoot);
+                return BridgeResult<object>.Partial(file, "script", new[]
+                {
+                    new Diagnostic("info", "BND4_STAGING_WRITE_VERIFIED", "luabnd 脚本已写入暂存区并重读验证。", BridgeResult<object>.MakeSourceUri(file), written)
+                }, written);
+            }
+            catch (OodleRuntimeUnavailableException)
+            {
+                return BridgeResult<object>.Failed(
+                    file,
+                    "script",
+                    "LUABND_KRAK_OODLE_UNAVAILABLE",
+                    "KRAK 写回需要提供包含 sekiro.exe 的原版游戏目录并加载支持压缩的 Oodle 运行库。");
+            }
+            catch (Exception ex) when (ex is InvalidDataException or NotSupportedException or IOException)
+            {
+                return BridgeResult<object>.Failed(file, "script", "LUABND_STAGING_WRITE_FAILED", ex.Message);
+            }
+        }
+
+        if (command == "export-luabnd")
+        {
+            var exportDir = outputPath ?? (options.TryGetProperty("outputPath", out var outPathEl) ? outPathEl.GetString() : (options.TryGetProperty("outputDirectory", out var outDirEl) ? outDirEl.GetString() : null));
+            if (string.IsNullOrWhiteSpace(exportDir))
+            {
+                return BridgeResult<object>.Failed(file, "script", "BRIDGE_OUTPUT_PATH_REQUIRED", "export-luabnd 需要指定 outputPath 或 options.outputDirectory。");
+            }
+
+            try
+            {
+                var doc = LuabndNativeDocument.Read(file, oodleRuntimeRoot);
+                var includeJson = !options.TryGetProperty("includeMetadataJson", out var jsonEl) || jsonEl.GetBoolean();
+                var result = doc.ExportAll(exportDir, includeJson);
+                return BridgeResult<object>.Ok(file, "script", result);
+            }
+            catch (OodleRuntimeUnavailableException)
+            {
+                return BridgeResult<object>.Failed(
+                    file,
+                    "script",
+                    "LUABND_KRAK_OODLE_UNAVAILABLE",
+                    "这份 Lua 脚本容器（luabnd）是 KRAK 压缩，需要提供包含 sekiro.exe 的原版游戏目录。");
+            }
+            catch (Exception ex) when (ex is InvalidDataException or NotSupportedException or IOException)
+            {
+                return BridgeResult<object>.Failed(file, "script", "LUABND_EXPORT_FAILED", ex.Message);
+            }
+        }
+
+        if (command == "read-bridge-artifact")
+        {
+            return BridgeResult<object>.Failed(file, "unknown", "BRIDGE_ARTIFACT_DAEMON_ONLY", "read-bridge-artifact 仅由 BridgeDaemonHost 守护进程支持。");
+        }
+
         cancellationToken.ThrowIfCancellationRequested();
         return command switch
         {
@@ -2845,7 +3132,8 @@ internal sealed class BridgeCommandService
         string file,
         string? oodleRuntimeRoot,
         IReadOnlyList<string>? allowedRoots,
-        IReadOnlyList<string> optionPaths)
+        IReadOnlyList<string> optionPaths,
+        IReadOnlyList<FlverNativeDocument>? flverDocuments = null)
     {
         var roots = allowedRoots is { Count: > 0 }
             ? allowedRoots
@@ -2864,6 +3152,7 @@ internal sealed class BridgeCommandService
         AddPackage(file);
         foreach (var optionPath in optionPaths) AddPackage(optionPath);
 
+        var directory = Path.GetDirectoryName(file);
         var lowerFile = file.ToLowerInvariant();
         if (lowerFile.EndsWith(".chrbnd.dcx", StringComparison.Ordinal))
         {
@@ -2878,7 +3167,37 @@ internal sealed class BridgeCommandService
             AddPackage($"{stem}.texbnd.dcx");
         }
 
-        var directory = Path.GetDirectoryName(file);
+        // 纹理包不一定与 chrbnd 同名。材质表中的 MTD basename 是 native
+        // 绑定身份的一部分，例如 c5409_body_SSS.mtd -> c5409.texbnd；
+        // 只从已解析的 FLVER MTD 取前缀，并且仍须通过 exists + allowed-root
+        // 校验，绝不把 cXXXX 当作试探值或扫描目录里的第一个兄弟包。
+        if (directory is not null && flverDocuments is { Count: > 0 })
+        {
+            var nativeTexturePackageStems = flverDocuments
+                .SelectMany(document => document.Materials)
+                .Select(material => NativeTexturePackageStem(material.MtdPath))
+                .Where(stem => !string.IsNullOrWhiteSpace(stem))
+                .Distinct(StringComparer.OrdinalIgnoreCase);
+            foreach (var stem in nativeTexturePackageStems)
+            {
+                AddPackage(Path.Combine(directory, $"{stem}.texbnd.dcx"));
+                AddPackage(Path.Combine(directory, $"{stem}.texbnd"));
+                // overlay 可能只提供 chrbnd，而对应 texbnd 留在已挂载原版根；
+                // 这里仍只使用 MTD 已证明的 stem，并让 BridgePathBoundary
+                // 再次校验候选是否位于本次会话的 allowed roots 内。
+                foreach (var root in roots)
+                {
+                    var canonicalRoot = Path.GetFullPath(root);
+                    var rootName = new DirectoryInfo(canonicalRoot).Name;
+                    var textureDirectory = string.Equals(rootName, "chr", StringComparison.OrdinalIgnoreCase)
+                        ? canonicalRoot
+                        : Path.Combine(canonicalRoot, "chr");
+                    AddPackage(Path.Combine(textureDirectory, $"{stem}.texbnd.dcx"));
+                    AddPackage(Path.Combine(textureDirectory, $"{stem}.texbnd"));
+                }
+            }
+        }
+
         if (directory is not null
             && string.Equals(new DirectoryInfo(directory).Name, "parts", StringComparison.OrdinalIgnoreCase))
         {
@@ -2914,22 +3233,97 @@ internal sealed class BridgeCommandService
         return leaves;
     }
 
+    private static string? NativeTexturePackageStem(string? materialMtdPath)
+    {
+        if (string.IsNullOrWhiteSpace(materialMtdPath)) return null;
+        var normalized = materialMtdPath.Trim().Replace('\\', '/');
+        var basename = normalized.Split('/').LastOrDefault();
+        if (string.IsNullOrWhiteSpace(basename)
+            || !basename.EndsWith(".mtd", StringComparison.OrdinalIgnoreCase))
+            return null;
+
+        var stem = basename[..^4];
+        var separator = stem.IndexOf('_');
+        if (separator <= 0 || separator >= stem.Length - 1) return null;
+        var packageStem = stem[..separator];
+        return packageStem.Length <= 64 && packageStem.All(char.IsLetterOrDigit)
+            ? packageStem
+            : null;
+    }
+
+    private static object[]? BuildFlverVertexColorDiagnostics(FlverVertexColorReadResult result)
+    {
+        if (result.Status != "decoded") return null;
+        return result.Members.Select(member => (object)new
+        {
+            memberOrdinal = member.MemberOrdinal,
+            memberIndex = member.MemberIndex,
+            layoutType = member.LayoutType,
+            layoutTypeName = member.LayoutTypeName,
+            vertexBufferIndex = member.VertexBufferIndex,
+            bufferLayoutIndex = member.BufferLayoutIndex,
+            structOffset = member.StructOffset,
+            rgbaBase64 = member.RgbaBase64
+        }).ToArray();
+    }
+
+    private static void AppendFlverVertexColorDiagnostic(
+        List<Diagnostic> diagnostics,
+        string file,
+        int meshIndex,
+        FlverVertexColorReadResult result)
+    {
+        if (result.Status is "absent" or "decoded") return;
+        var severity = result.Status == "invalid" ? "error" : "warning";
+        var code = result.Status switch
+        {
+            "unsupported" => "FLVER_VERTEX_COLOR_UNSUPPORTED_LAYOUT",
+            "truncated" => "FLVER_VERTEX_COLOR_TRUNCATED",
+            "invalid" => "FLVER_VERTEX_COLOR_INVALID",
+            _ => "FLVER_VERTEX_COLOR_UNAVAILABLE"
+        };
+        diagnostics.Add(new Diagnostic(
+            severity,
+            code,
+            $"FLVER 网格 {meshIndex} 的 VertexColor RGBA 只读诊断未完整导出：{result.Failure}",
+            BridgeResult<object>.MakeSourceUri(file),
+            new { meshIndex, status = result.Status, failure = result.Failure }));
+    }
+
     private static object BuildFlverMeshPreview(
         FlverNativeDocument flver,
         int meshIndex,
         int maxVertices,
-        int maxIndices)
+        int maxIndices,
+        CharacterTexturePreview? compatibilityProjection = null,
+        IReadOnlyDictionary<int, CharacterTexturePreview>? nativeProjectionByMaterial = null)
     {
         var positions = flver.GetMeshPositionsBase64(meshIndex, maxVertices);
         if (positions == null)
             throw new InvalidDataException($"FLVER_MESH_NOT_FOUND: 网格索引 {meshIndex} 超出范围或数据不可用。");
-        var indices = flver.GetMeshIndicesBase64(meshIndex, maxIndices);
+        var mesh = flver.Meshes[meshIndex];
+        var nativeRenderMode = ResolveFlverPreviewRenderMode(flver, flver.Meshes[meshIndex].MaterialIndex);
+        CharacterTexturePreview? projectionSource = null;
+        if (nativeRenderMode == "projected-decal")
+        {
+            if (nativeProjectionByMaterial is not null)
+                nativeProjectionByMaterial.TryGetValue(mesh.MaterialIndex, out projectionSource);
+            projectionSource ??= compatibilityProjection;
+        }
+        var useCompatibilityProjection = nativeRenderMode == "projected-decal"
+            && projectionSource is not null;
+        var indices = useCompatibilityProjection
+            ? flver.GetMeshProjectionReceiverIndicesBase64(meshIndex, maxIndices)
+            : flver.GetMeshIndicesBase64(meshIndex, maxIndices);
         if (indices == null)
             throw new InvalidDataException(
                 $"FLVER_MESH_INDICES_UNAVAILABLE: 网格 {meshIndex} 的完整 triangle-list 无法在上限 {maxIndices} 内导出。");
-        var mesh = flver.Meshes[meshIndex];
         var skinning = flver.GetMeshSkinning(meshIndex, maxVertices);
-        var renderMode = ResolveFlverPreviewRenderMode(flver, mesh.MaterialIndex);
+        var uvSets = flver.GetMeshUVSetsBase64(meshIndex, maxVertices);
+        var vertexColorRead = flver.GetMeshVertexColorDiagnostics(meshIndex, maxVertices);
+        var renderMode = useCompatibilityProjection
+            ? "compatibility-projected"
+            : nativeRenderMode;
         return new
         {
             meshIndex,
@@ -2939,10 +3333,23 @@ internal sealed class BridgeCommandService
             indexSize = flver.GetMeshIndexSize(meshIndex),
             positionsBase64 = positions,
             indicesBase64 = indices,
-            uvsBase64 = flver.GetMeshUVsBase64(meshIndex, maxVertices),
+            uvsBase64 = uvSets?.FirstOrDefault(),
+            uvSetsBase64 = uvSets,
             normalsBase64 = flver.GetMeshNormalsBase64(meshIndex, maxVertices),
+            vertexColorStatus = vertexColorRead.Status,
+            vertexColorFailure = vertexColorRead.Failure,
+            vertexColorDiagnostics = BuildFlverVertexColorDiagnostics(vertexColorRead),
+            // Legacy compatibility projection only; VertexColor alpha is not global opacity.
+            vertexAlphaBase64 = vertexColorRead.FirstAlphaBase64,
+            cullBackfaces = flver.GetMeshCullBackfaces(meshIndex),
+            projectionTextureName = useCompatibilityProjection ? projectionSource!.TextureName : null,
+            projectionTexturePreviewToken = useCompatibilityProjection ? projectionSource!.PreviewToken : null,
+            projectionTextureColorSpace = useCompatibilityProjection ? projectionSource!.ColorSpace : null,
             boneWeightsBase64 = skinning.BoneWeightsBase64,
             boneIndicesBase64 = skinning.BoneIndicesBase64,
+            // Source-backed parity with DSAnimStudio/FlverSubmeshRenderer:
+            // UsesRefPose = (mesh.Dynamic == 0).
+            skinningTransformMode = mesh.Dynamic == 0 ? "absolute" : "delta",
             skinningMode = skinning.SkinningMode,
             boneIndexSpace = skinning.BoneIndexSpace
         };
@@ -2952,13 +3359,21 @@ internal sealed class BridgeCommandService
         FlverNativeDocument flver,
         int maxVertices,
         int maxIndices,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        CharacterTexturePreview? compatibilityProjection = null,
+        IReadOnlyDictionary<int, CharacterTexturePreview>? nativeProjectionByMaterial = null)
     {
         var meshes = new object[flver.MeshCount];
         for (var meshIndex = 0; meshIndex < flver.MeshCount; meshIndex++)
         {
             cancellationToken.ThrowIfCancellationRequested();
-            meshes[meshIndex] = BuildFlverMeshPreview(flver, meshIndex, maxVertices, maxIndices);
+            meshes[meshIndex] = BuildFlverMeshPreview(
+                flver,
+                meshIndex,
+                maxVertices,
+                maxIndices,
+                compatibilityProjection,
+                nativeProjectionByMaterial);
         }
         return meshes;
     }
@@ -2974,7 +3389,18 @@ internal sealed class BridgeCommandService
         if (materialIndex < 0 || materialIndex >= flver.Materials.Count)
             return "surface";
         var mtdPath = flver.Materials[materialIndex].MtdPath;
+        // Native FLVER material identity is not limited to the filename suffix.
+        // Sekiro's FC_M_0200 crystal-eye material is named
+        // `Eye_[Crystal].mtd`, while its texture-slot type is explicitly
+        // `Character_MeshDecal`. Treating it as an ordinary UV surface paints
+        // the crystal projection over the head with a generic albedo shader.
+        // Keep the classification source-derived and narrow: only the known
+        // MeshDecal material family (or an explicit decal filename) is omitted
+        // by the generic renderer.
         return mtdPath.Contains("decal", StringComparison.OrdinalIgnoreCase)
+            || mtdPath.Contains("MeshDecal", StringComparison.OrdinalIgnoreCase)
+            || (mtdPath.Contains("Eye_", StringComparison.OrdinalIgnoreCase)
+                && mtdPath.Contains("Crystal", StringComparison.OrdinalIgnoreCase))
             ? "projected-decal"
             : "surface";
     }
@@ -3560,7 +3986,8 @@ internal sealed class BridgeCommandService
         string file,
         bool includeReadableValidation,
         CancellationToken cancellationToken,
-        string? oodleRuntimeRoot)
+        string? oodleRuntimeRoot,
+        bool includeDcxDecompressionPreview)
     {
         var fileInfo = new FileInfo(file);
         var sample = await ReadBoundedPrefixAsync(file, MaxPrefixBytes, cancellationToken);
@@ -3569,7 +3996,8 @@ internal sealed class BridgeCommandService
             sample,
             fileInfo.Length,
             MaxPrefixBytes,
-            oodleRuntimeRoot);
+            oodleRuntimeRoot,
+            includeDcxDecompressionPreview);
         var diagnostics = includeReadableValidation
             ? inspection.Diagnostics.Prepend(new Diagnostic(
                 "info",

@@ -6,7 +6,7 @@ import { app, BrowserWindow, dialog, ipcMain, type IpcMainInvokeEvent, type WebC
 import { basename, dirname, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import type { TrustedIpcHandle } from './ipc/registration.js';
-import { registerAgentIpcHandlers, isAgentSessionActive } from './ipc/agent.js';
+import { registerAgentIpcHandlers, hasActiveAgentRuns, isAgentSessionActive, scheduleInternalRagEmbedding } from './ipc/agent.js';
 import { registerResourceIpcHandlers } from './ipc/resource.js';
 import {
   analyzeWorkspace,
@@ -19,12 +19,9 @@ import {
   type AppSettingsStore,
   createAgentToolBridge,
   createConfiguredModelServiceAdapter,
-  fetchEmbeddings,
   isAllowedEndpoint,
   OpenAiCompatibleAdapter,
   AnthropicCompatibleAdapter,
-  retrieveEvidenceHybrid,
-  type HybridVectorSource,
   createDefaultToolRegistry,
   createConfirmationReceipt,
   createContextBroker,
@@ -215,6 +212,7 @@ import { clearRecentPath, readRecentPath, writeRecentPath } from './recentPaths.
 import { executeRecoveryCleanup } from './recoveryCleanup.js';
 import { ModelServiceCredentialVault } from './modelServiceCredentials.js';
 import { MainMe3RuntimeGateway } from './me3RuntimeGateway.js';
+import { persistRagCorpusBySourceDelta } from './ragPersistence.js';
 import { MemoryManager } from './memoryManager.js';
 import {
   registerWorkspaceIpcHandlers,
@@ -229,7 +227,6 @@ import {
   applyWorkspaceRag,
   setWorkspaceForegroundActive,
   revokeDirectorySelectionsFor,
-  rebuildActionBinderMembershipIndex,
   ensureActionBinderMembershipForFamily,
   waitForWorkspaceIndexing
 } from './ipc/workspace.js';
@@ -255,6 +252,14 @@ function safeExists(path: string): boolean {
 }
 
 let activeOperationLog: OperationLogUtilityClient | null = null;
+let activeOperationLogWorkspaceId: string | null = null;
+let recoveryCleanupWorkspaceId: string | null = null;
+let recoveryCleanupInFlight: Promise<void> | null = null;
+let semanticRefreshInFlight: Promise<void> | null = null;
+let semanticRefreshQueued = false;
+const semanticRefreshSources = new Set<string>();
+const semanticRefreshSymbols = new Set<string>();
+let semanticRefreshTimer: NodeJS.Timeout | null = null;
 async function withForegroundPriority<T>(fn: () => Promise<T>): Promise<T> {
   setWorkspaceForegroundActive(true);
   try { return await fn(); } finally { setWorkspaceForegroundActive(false); }
@@ -671,6 +676,14 @@ function readSystemPrompt(): string | null {
   return null;
 }
 
+function agentTaskRecordDirectory(): string {
+  const explicit = process.env.SOULFORGE_AGENT_TASK_RECORD_DIR;
+  if (explicit && explicit.trim() !== '') return resolve(explicit);
+  return app.isPackaged
+    ? join(app.getPath('userData'), 'prompt', '.agent-task-records')
+    : resolve(app.getAppPath(), '..', '..', 'prompt', '.agent-task-records');
+}
+
 /* ------------------------------------------------------------------ */
 /*  AI agent session IPC contract (Codex-derived kernel).             */
 /*  Keys never cross the bridge; events are redacted by the host.     */
@@ -683,6 +696,8 @@ export interface AiAgentRunRequest {
   streaming?: boolean;
   /** Session-relative rollout path as returned by ai.agent.sessions. */
   resumeSessionPath?: string;
+  /** Optional per-run ceiling; omitted uses the core's safe default. */
+  maxSteps?: number;
   /**
    * Per-model-call timeout. Before this was exposed, the loop ran with no
    * timeout at all: a provider that accepted the connection and then stalled
@@ -709,9 +724,10 @@ export interface AiAgentRunRequest {
    */
   thinkingLevel?: 'off' | 'none' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max';
   /**
-   * RAG auto-search: before each model call, retrieve workspace evidence from
-   * the most recent user message and inject a [rag-evidence] system message.
-   * Default false; requires an analyzed workspace (activeRag corpus).
+   * RAG auto-search: once per run, retrieve workspace evidence from the fixed
+   * external prompt and inject a [rag-evidence] system message. The cached
+   * candidate is re-injected after compaction without repeating provider/DB
+   * work. Default false; requires an analyzed workspace (activeRag corpus).
    */
   useRagSearch?: boolean;
   /** Cap on injected rag-evidence hits per turn (1..8). */
@@ -894,16 +910,41 @@ async function ensureActiveOperationLog(session: WorkspaceSession): Promise<Oper
     legacySemanticSnapshotPath: join(session.layers.overlayRoot, 'semantic-snapshot.json'),
     legacySemanticBackupDirectory: join(storage.root, 'legacy-semantic-snapshots')
   });
-  const cleanupPlan = await operationLogUtility.planRecoveryCleanup();
-  const cleanup = await executeRecoveryCleanup({
-    plan: cleanupPlan,
-    allowedRoots: [storage.backupBaseDir, storage.recoveryDir],
-    store: operationLogUtility
-  });
-  if (cleanup.rejected.length > 0) {
-    process.stderr.write(`[SoulForge recovery cleanup] ${JSON.stringify(cleanup.rejected)}\n`);
+  // Every native read used to repeat the global recovery scan.  With a large
+  // operation history this made one agent turn enqueue dozens of identical
+  // SQLite cleanup requests and starve the actual read/RAG requests.  Run it
+  // once per opened workspace and let concurrent callers share that promise.
+  if (activeOperationLog === operationLogUtility
+    && activeOperationLogWorkspaceId === session.meta.workspaceId) {
+    return operationLogUtility;
   }
-  activeOperationLog = operationLogUtility;
+  if (recoveryCleanupInFlight && recoveryCleanupWorkspaceId === session.meta.workspaceId) {
+    await recoveryCleanupInFlight;
+    return operationLogUtility;
+  }
+  const cleanupTask = (async () => {
+    const cleanupPlan = await operationLogUtility.planRecoveryCleanup();
+    const cleanup = await executeRecoveryCleanup({
+      plan: cleanupPlan,
+      allowedRoots: [storage.backupBaseDir, storage.recoveryDir],
+      store: operationLogUtility
+    });
+    if (cleanup.rejected.length > 0) {
+      process.stderr.write(`[SoulForge recovery cleanup] ${JSON.stringify(cleanup.rejected)}\n`);
+    }
+  })();
+  recoveryCleanupWorkspaceId = session.meta.workspaceId;
+  recoveryCleanupInFlight = cleanupTask;
+  try {
+    await cleanupTask;
+    activeOperationLog = operationLogUtility;
+    activeOperationLogWorkspaceId = session.meta.workspaceId;
+  } finally {
+    if (recoveryCleanupInFlight === cleanupTask) {
+      recoveryCleanupInFlight = null;
+      recoveryCleanupWorkspaceId = null;
+    }
+  }
   return operationLogUtility;
 }
 
@@ -912,9 +953,11 @@ function currentToolContext(): ToolContext {
   const index = getWorkspaceActiveIndex();
   const rag = getWorkspaceRag();
   const storage = session ? durableStoragePaths(session.meta.workspaceId) : undefined;
+  const memoryStore = memoryManager.getStore(index?.workspaceId);
   return {
     workspaceIndex: index,
     mode: activeAiMode,
+    memoryStore,
     ...(rag ? { rag } : {}),
     ...(session ? { session } : {}),
     ...(activeOperationLog ? { operationLogStore: activeOperationLog } : {}),
@@ -926,16 +969,32 @@ function currentToolContext(): ToolContext {
 
 async function persistActiveRag(
   database: OperationLogUtilityClient,
-  corpus: RagCorpus
+  corpus: RagCorpus,
+  previous: RagCorpus | null = null,
+  signal?: AbortSignal
 ): Promise<void> {
+  throwIfRagRefreshAborted(signal);
+  await persistRagCorpusBySourceDelta(database, corpus, previous, signal);
+  // Do not publish an in-memory corpus before its delta is durable.  A
+  // cancelled refresh may already have written one bounded SQLite batch; if
+  // the speculative corpus became the next `previous` snapshot, the retry
+  // would incorrectly conclude that the database was current and skip the
+  // remaining batches.
   applyWorkspaceRag(corpus);
-  await database.replaceRagChunks(corpus.chunks);
-  await database.replaceReferences(corpus.references);
+  scheduleInternalRagEmbedding(corpus, database);
+}
+
+function throwIfRagRefreshAborted(signal?: AbortSignal): void {
+  if (!signal?.aborted) return;
+  const error = new Error('RAG 语义持久化已被更新任务取消。');
+  error.name = 'AbortError';
+  throw error;
 }
 
 async function refreshRagAfterScan(
   database: OperationLogUtilityClient,
-  index: WorkspaceIndex
+  index: WorkspaceIndex,
+  signal?: AbortSignal
 ): Promise<void> {
   const catalog = buildRagCorpus(index);
   const persisted = createRagCorpus({
@@ -944,49 +1003,205 @@ async function refreshRagAfterScan(
     chunks: await database.loadRagChunks(),
     references: await database.loadReferences()
   });
-  await persistActiveRag(database, mergeCatalogAndPersisted(catalog, persisted));
+  await persistActiveRag(database, mergeCatalogAndPersisted(catalog, persisted), persisted, signal);
 }
 
 async function refreshRagAfterAnalyze(
   database: OperationLogUtilityClient,
-  index: WorkspaceIndex
+  index: WorkspaceIndex,
+  signal?: AbortSignal,
+  changedSources: readonly string[] = [],
+  changedSymbols: readonly string[] = []
 ): Promise<void> {
-  await persistActiveRag(database, buildRagCorpus(index));
+  const builtAt = new Date().toISOString();
+  const sourceFilter = new Set(changedSources.filter((sourceUri) => sourceUri.trim().length > 0));
+  const symbolFilter = new Set(changedSymbols.filter((symbolUri) => symbolUri.trim().length > 0));
+
+  const mergeChangedChunks = (
+    base: RagCorpus,
+    changed: RagCorpus
+  ): RagCorpus['chunks'] => {
+    if (symbolFilter.size > 0) {
+      const changedIds = new Set(changed.chunks.map((chunk) => chunk.chunkId));
+      return [
+        ...base.chunks.filter((chunk) => !changedIds.has(chunk.chunkId)),
+        ...changed.chunks
+      ];
+    }
+    return [
+      ...base.chunks.filter((chunk) => !sourceFilter.has(chunk.sourceUri)),
+      ...changed.chunks
+    ];
+  };
+
+  // Live native reads already enriched the active in-memory index.  Reusing
+  // the last durable in-memory corpus here avoids loading every persisted
+  // chunk over the database utility IPC for each read.  Only the changed
+  // source is rebuilt and `persistRagCorpusBySourceDelta` writes its delta.
+  // The full load below remains the recovery path for the first publication
+  // or after the active corpus was intentionally cleared.
+  const current = getWorkspaceRag();
+  if ((sourceFilter.size > 0 || symbolFilter.size > 0) && current?.workspaceId === index.workspaceId) {
+    const changedCatalog = buildRagCorpus(
+      index,
+      builtAt,
+      [],
+      sourceFilter.size > 0 ? [...sourceFilter] : undefined,
+      symbolFilter.size > 0 ? [...symbolFilter] : undefined
+    );
+    const next = createRagCorpus({
+      workspaceId: index.workspaceId,
+      builtAt,
+      chunks: mergeChangedChunks(current, changedCatalog),
+      references: index.listReferences(),
+      diagnostics: changedCatalog.diagnostics
+    });
+    await persistActiveRag(database, next, current, signal);
+    return;
+  }
+
+  const persisted = createRagCorpus({
+    workspaceId: index.workspaceId,
+    builtAt,
+    chunks: await database.loadRagChunks(),
+    references: await database.loadReferences()
+  });
+  let catalog: RagCorpus;
+  if (sourceFilter.size === 0 && symbolFilter.size === 0) {
+    catalog = buildRagCorpus(index, builtAt);
+  } else {
+    const changedCatalog = buildRagCorpus(
+      index,
+      builtAt,
+      [],
+      sourceFilter.size > 0 ? [...sourceFilter] : undefined,
+      symbolFilter.size > 0 ? [...symbolFilter] : undefined
+    );
+    const current = getWorkspaceRag();
+    const base = current?.workspaceId === index.workspaceId ? current : persisted;
+    catalog = createRagCorpus({
+      workspaceId: index.workspaceId,
+      builtAt,
+      chunks: mergeChangedChunks(base, changedCatalog),
+      references: index.listReferences(),
+      diagnostics: changedCatalog.diagnostics
+    });
+  }
+  await persistActiveRag(database, mergeCatalogAndPersisted(catalog, persisted), persisted, signal);
 }
 
-async function refreshActiveIndexAfterSemanticEvidence(sourceUris: readonly string[] = []): Promise<void> {
-  const session = getWorkspaceSession();
+async function performActiveIndexSemanticRefresh(
+  changedSources: readonly string[] = [],
+  changedSymbols: readonly string[] = [],
+  signal?: AbortSignal
+): Promise<void> {
   const index = getWorkspaceActiveIndex();
   const sessionId = getActiveWorkspaceSessionIdState();
-  if (!session || !index || !sessionId) return;
-  // Live read tools have already replaced/merged the relevant semantic export.
-  // Re-scan only refreshes the file catalog; it must not invalidate unrelated
-  // semantic data or merge a stale persisted copy over the just-read value.
-  const result = await scanWorkspace({
-    workspaceRoot: session.layers.overlayRoot,
-    game: session.meta.game
-  });
-  index.setFiles(result.files);
-  // WorkspaceIndex.setFiles intentionally clears source-bound ACTION Binder
-  // membership. Rebuild it before publishing the refreshed snapshot; otherwise
-  // a successful TAE reread makes the next animation lookup fail with
-  // ACTION_BINDER_MEMBERSHIP_INDEX_NOT_READY until the user reopens the workspace.
-  const actionBinderIndex = await rebuildActionBinderMembershipIndex({
-    deps: { verifiedReadRoots },
-    index,
-    session,
-    sessionId,
-    indexedFiles: result.files
-  });
-  if (!actionBinderIndex.ok) {
-    throw new Error(actionBinderIndex.diagnostics.map((diagnostic) => `${diagnostic.code}: ${diagnostic.message}`).join('；')
-      || 'ACTION_BINDER_MEMBERSHIP_REBUILD_FAILED');
-  }
+  if (!index || !sessionId) return;
+  throwIfRagRefreshAborted(signal);
+  // Live read tools have already replaced/merged the relevant semantic export
+  // in this index.  Do not rescan the whole workspace here: the callback is
+  // invoked from every native read, and a full scan + Binder rebuild per read
+  // was the main CPU/SQLite queue multiplier in long agent searches.  The next
+  // normal workspace scan still refreshes file hashes and Binder membership;
+  // this path only publishes the already-authoritative in-memory read result.
   index.rebuildReferences();
   applyWorkspaceIndexSnapshot(index);
+  const session = getWorkspaceSession();
+  if (!session || sessionId !== getActiveWorkspaceSessionIdState()) return;
   const database = activeOperationLog ?? await ensureActiveOperationLog(session);
-  await refreshRagAfterAnalyze(database, index);
-  void sourceUris;
+  if (sessionId !== getActiveWorkspaceSessionIdState()) return;
+  await refreshRagAfterAnalyze(database, index, signal, changedSources, changedSymbols);
+}
+
+const SEMANTIC_REFRESH_DEBOUNCE_MS = 40;
+const SEMANTIC_REFRESH_IDLE_POLL_MS = 250;
+
+function reportDeferredSemanticRefreshFailure(error: unknown): void {
+  const message = error instanceof Error ? error.message : String(error);
+  console.error(`[SoulForge RAG] deferred semantic refresh failed: ${message}`);
+}
+
+/** Start one serialized source-delta refresh, if one is not already running. */
+function startSemanticRefresh(): Promise<void> {
+  if (semanticRefreshInFlight) return semanticRefreshInFlight;
+  semanticRefreshInFlight = (async () => {
+    try {
+      // Keep collecting callbacks which arrive during the debounce window or
+      // while the source-delta write is running.  If an Agent is still active,
+      // leave the batch queued and let the idle timer resume it later.
+      do {
+        if (hasActiveAgentRuns()) {
+          scheduleSemanticRefreshWhenIdle();
+          return;
+        }
+        semanticRefreshQueued = false;
+        const sourcesForRefresh = [...semanticRefreshSources];
+        const symbolsForRefresh = [...semanticRefreshSymbols];
+        // Take ownership of this batch before awaiting.  A callback that
+        // arrives while the refresh is running must remain in the next batch;
+        // deleting the set after await would lose that update.
+        semanticRefreshSources.clear();
+        semanticRefreshSymbols.clear();
+        await performActiveIndexSemanticRefresh(sourcesForRefresh, symbolsForRefresh);
+      } while (semanticRefreshQueued || semanticRefreshSources.size > 0 || semanticRefreshSymbols.size > 0);
+    } finally {
+      semanticRefreshInFlight = null;
+      if (semanticRefreshQueued || semanticRefreshSources.size > 0 || semanticRefreshSymbols.size > 0) {
+        scheduleSemanticRefreshWhenIdle();
+      }
+    }
+  })();
+  return semanticRefreshInFlight;
+}
+
+/**
+ * Keep native-read evidence publication out of the Agent's critical path.
+ * Sequential reads must not each await a 50k-chunk RAG rebuild; one
+ * source-delta refresh is enough after the Agent becomes idle.
+ */
+function scheduleSemanticRefreshWhenIdle(): void {
+  if (semanticRefreshTimer) return;
+  if (!semanticRefreshQueued && semanticRefreshSources.size === 0 && semanticRefreshSymbols.size === 0) return;
+  const delay = hasActiveAgentRuns() ? SEMANTIC_REFRESH_IDLE_POLL_MS : SEMANTIC_REFRESH_DEBOUNCE_MS;
+  semanticRefreshTimer = setTimeout(() => {
+    semanticRefreshTimer = null;
+    if (hasActiveAgentRuns()) {
+      scheduleSemanticRefreshWhenIdle();
+      return;
+    }
+    if (!semanticRefreshQueued && semanticRefreshSources.size === 0 && semanticRefreshSymbols.size === 0) return;
+    void startSemanticRefresh().catch(reportDeferredSemanticRefreshFailure);
+  }, delay);
+  semanticRefreshTimer.unref?.();
+}
+
+/**
+ * Coalesce callbacks emitted by live native reads.  Agent reads return as soon
+ * as the native index is updated; the durable RAG publication is deferred
+ * until no Agent session is active. UI reads outside an Agent still await the
+ * serialized refresh for the existing freshness contract.
+ */
+function refreshActiveIndexAfterSemanticEvidence(
+  sourceUris: readonly string[] = [],
+  symbolUris: readonly string[] = []
+): Promise<void> {
+  for (const sourceUri of sourceUris) {
+    if (sourceUri.trim().length > 0) semanticRefreshSources.add(sourceUri);
+  }
+  for (const symbolUri of symbolUris) {
+    if (symbolUri.trim().length > 0) semanticRefreshSymbols.add(symbolUri);
+  }
+  semanticRefreshQueued = true;
+  if (hasActiveAgentRuns()) {
+    scheduleSemanticRefreshWhenIdle();
+    return Promise.resolve();
+  }
+  if (semanticRefreshTimer) {
+    clearTimeout(semanticRefreshTimer);
+    semanticRefreshTimer = null;
+  }
+  return startSemanticRefresh();
 }
 
 /**
@@ -1039,17 +1254,11 @@ async function refreshActiveIndexAfterNativeWrite(
       if (getActiveWorkspaceSessionIdState() !== sessionId) {
         throw new Error('工作区已切换，ACTION membership 刷新结果已丢弃。');
       }
-      const actionBinderIndex = await rebuildActionBinderMembershipIndex({
-        deps: { verifiedReadRoots },
-        index: analyzed.index,
-        session,
-        sessionId,
-        indexedFiles: analyzed.index.getFiles()
-      });
-      if (!actionBinderIndex.ok) {
-        const detail = actionBinderIndex.diagnostics.map((diagnostic) => `${diagnostic.code}: ${diagnostic.message}`).join('；');
-        throw new Error(detail || 'ACTION_BINDER_MEMBERSHIP_REBUILD_FAILED');
-      }
+      // Native writes invalidate the semantic index, but they do not require
+      // rebuilding every character family's ACTION Binder projection.  Keep
+      // the global projection deferred; a later ACTION read will rebuild only
+      // its exact cXXXX family through the scoped membership path.
+      analyzed.index.markActionBinderMembershipGlobalNotReady();
       return {
         index: analyzed.index,
         semanticState: nativeRefresh.partialSources.length > 0 ? 'partial' as const : 'reanalyzed' as const,
@@ -1336,6 +1545,9 @@ function rejectNonSekiroNativeWrite(sourceUri: string, file?: IndexedFile): Rend
 
 export async function disposeOperationLogUtility(): Promise<void> {
   activeOperationLog = null;
+  activeOperationLogWorkspaceId = null;
+  recoveryCleanupWorkspaceId = null;
+  recoveryCleanupInFlight = null;
   await operationLogUtility.dispose();
 }
 
@@ -1690,7 +1902,8 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
   registerWorkspaceIpcHandlers({
     handle: trustedHandle,
     ensureActiveOperationLog,
-    verifiedReadRoots
+    verifiedReadRoots,
+    scheduleRagEmbedding: scheduleInternalRagEmbedding
   });
 
   registerAgentIpcHandlers({
@@ -1704,10 +1917,12 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
     getActiveSession: getWorkspaceSession,
     getActiveWorkspaceSessionId: getActiveWorkspaceSessionIdState,
     getActiveRag: getWorkspaceRag,
+    waitForWorkspaceIndexing,
     ensureActiveOperationLog,
     durableStoragePaths,
     currentToolContext,
     requestWriteConfirmation,
+    taskRecordDirectory: agentTaskRecordDirectory,
     readSystemPrompt
   });
 

@@ -134,14 +134,18 @@ function parseEventExport(value: unknown, sourceUri: string): ParsedValue<EventE
   const record = asRecord(value);
   const exportProvenance = sourceProvenance(record);
   const eventsRaw = record.events;
+  const sharedInstructionRows = Array.isArray(record.instructionRows)
+    ? record.instructionRows
+    : Array.isArray(record.instructions) ? record.instructions : undefined;
 
   if (!Array.isArray(eventsRaw)) return { diagnostics: [missingField(sourceUri, 'events')] };
 
   const events = eventsRaw.flatMap((eventRaw, index) => {
     const event = asRecord(eventRaw);
     const eventProvenance = sourceProvenance(event, exportProvenance);
-    const eventId = asNumber(event.eventId);
+    const eventId = asNumber(event.eventId) ?? asNumber(event.id);
     const uri = asString(event.uri) || `event://${sourceUri}/${String(eventId ?? index)}`;
+    const eventMapId = asString(event.mapId) || asString(record.mapId);
     const instructionsRaw = event.instructions;
 
     if (eventId === null) {
@@ -149,14 +153,33 @@ function parseEventExport(value: unknown, sourceUri: string): ParsedValue<EventE
       return [];
     }
 
+    let instructions: EventExport['events'][number]['instructions'] = [];
+    if (Array.isArray(instructionsRaw)) {
+      instructions = parseInstructions(instructionsRaw, uri, sourceUri, diagnostics, `events[${index}].instructions`);
+    } else if (instructionsRaw === undefined) {
+      const boundRows = sharedInstructionRows?.filter((row) => instructionRowBelongsToEvent(row, eventId, index)) ?? [];
+      if (boundRows.length > 0) {
+        instructions = parseInstructions(boundRows, uri, sourceUri, diagnostics, `instructionRows[${index}]`);
+      } else {
+        diagnostics.push({
+          severity: 'warning',
+          code: 'INGEST_EVENT_INSTRUCTIONS_MISSING',
+          message: `Bridge event ${eventId} 没有 instruction rows；保留为空仅表示未提供语义行。`,
+          sourceUri
+        });
+      }
+    } else {
+      diagnostics.push(invalidField(sourceUri, `events[${index}].instructions`));
+    }
+
     return [{
       uri,
       sourceUri: asString(event.sourceUri) || sourceUri,
-      ...(asString(event.mapId) ? { mapId: asString(event.mapId) } : {}),
+      ...(eventMapId ? { mapId: eventMapId } : {}),
       eventId,
       ...(asString(event.name) ? { name: asString(event.name) } : {}),
       ...eventProvenance,
-      instructions: Array.isArray(instructionsRaw) ? instructionsRaw.map((item, instructionIndex) => parseInstruction(item, uri, instructionIndex)) : [],
+      instructions,
       ...(event.raw === undefined ? {} : { raw: event.raw })
     }];
   });
@@ -171,28 +194,135 @@ function parseEventExport(value: unknown, sourceUri: string): ParsedValue<EventE
   };
 }
 
-function parseInstruction(value: unknown, eventUri: string, index: number): EventExport['events'][number]['instructions'][number] {
-  const record = asRecord(value);
-  const argsRaw = record.args;
+function parseInstructions(
+  values: unknown[],
+  eventUri: string,
+  sourceUri: string,
+  diagnostics: Diagnostic[],
+  fieldPath: string
+): EventExport['events'][number]['instructions'] {
+  return values.flatMap((value, index) => {
+    const parsed = parseInstruction(value, eventUri, index, sourceUri, `${fieldPath}[${index}]`);
+    diagnostics.push(...parsed.diagnostics);
+    return parsed.value ? [parsed.value] : [];
+  });
+}
+
+function parseInstruction(
+  value: unknown,
+  eventUri: string,
+  index: number,
+  sourceUri: string,
+  fieldPath: string
+): ParsedValue<EventExport['events'][number]['instructions'][number]> {
+  if (!isObjectRecord(value)) return { diagnostics: [invalidField(sourceUri, fieldPath)] };
+  const record = value;
+  const diagnostics: Diagnostic[] = [];
+  const instructionIndex = asNumber(record.index);
+  const normalizedIndex = instructionIndex !== null && Number.isSafeInteger(instructionIndex) && instructionIndex >= 0
+    ? instructionIndex
+    : index;
+  if (instructionIndex === null) {
+    diagnostics.push({
+      severity: 'warning',
+      code: 'INGEST_INSTRUCTION_INDEX_DEFAULTED',
+      message: `Bridge instruction 缺少合法 index，使用该 rows 的位置 ${index}。`,
+      sourceUri
+    });
+  }
+  const name = asString(record.name);
+  if (!name) {
+    diagnostics.push({
+      severity: 'warning',
+      code: 'INGEST_INSTRUCTION_NAME_MISSING',
+      message: `Bridge instruction ${fieldPath} 没有 name；保留 raw/args，不猜测指令语义。`,
+      sourceUri
+    });
+  }
+
+  const args: EventExport['events'][number]['instructions'][number]['args'] = [];
+  if (record.args === undefined) {
+    diagnostics.push({
+      severity: 'warning',
+      code: 'INGEST_INSTRUCTION_ARGS_MISSING',
+      message: `Bridge instruction ${fieldPath} 没有 args；不补造参数。`,
+      sourceUri
+    });
+  } else if (!Array.isArray(record.args)) {
+    diagnostics.push(invalidField(sourceUri, `${fieldPath}.args`));
+  } else {
+    record.args.forEach((arg, argIndex) => {
+      const parsed = parseArg(arg, sourceUri, `${fieldPath}.args[${argIndex}]`);
+      diagnostics.push(...parsed.diagnostics);
+      if (parsed.value) args.push(parsed.value);
+    });
+  }
+
   return {
-    uri: asString(record.uri) || `${eventUri}/instruction/${index}`,
-    index: asNumber(record.index) ?? index,
-    ...(asString(record.name) ? { name: asString(record.name) } : {}),
-    ...(asString(record.category) ? { category: asString(record.category) } : {}),
-    args: Array.isArray(argsRaw) ? argsRaw.map(parseArg) : [],
-    ...(record.raw === undefined ? {} : { raw: record.raw })
+    value: {
+      uri: asString(record.uri) || `${eventUri}/instruction/${normalizedIndex}`,
+      index: normalizedIndex,
+      ...(name ? { name } : {}),
+      ...(asString(record.category) ? { category: asString(record.category) } : {}),
+      args,
+      ...(record.raw === undefined && hasInstructionWireFields(record)
+        ? { raw: record }
+        : record.raw === undefined ? {} : { raw: record.raw })
+    },
+    diagnostics
   };
 }
 
-function parseArg(value: unknown): EventExport['events'][number]['instructions'][number]['args'][number] {
-  const record = asRecord(value);
+function parseArg(
+  value: unknown,
+  sourceUri: string,
+  fieldPath: string
+): ParsedValue<EventExport['events'][number]['instructions'][number]['args'][number]> {
+  if (value === null || value === undefined) return { diagnostics: [invalidField(sourceUri, fieldPath)] };
+  if (typeof value !== 'object') {
+    const scalar = parseScalar(value);
+    return scalar === undefined
+      ? { diagnostics: [invalidField(sourceUri, fieldPath)] }
+      : { value: { value: scalar }, diagnostics: [] };
+  }
+  if (Array.isArray(value)) return { diagnostics: [invalidField(sourceUri, fieldPath)] };
+  const record = value as Record<string, unknown>;
+  if (!Object.prototype.hasOwnProperty.call(record, 'value')) {
+    return {
+      diagnostics: [{
+        severity: 'warning',
+        code: 'INGEST_ARG_VALUE_MISSING',
+        message: `Bridge arg ${fieldPath} 缺少 value；不补空字符串。`,
+        sourceUri
+      }]
+    };
+  }
+  const scalar = parseScalar(record.value);
+  if (scalar === undefined) return { diagnostics: [invalidField(sourceUri, `${fieldPath}.value`)] };
   return {
-    ...(asString(record.name) ? { name: asString(record.name) } : {}),
-    value: parseScalar(record.value),
-    ...(isRole(record.role) ? { role: record.role } : {}),
-    ...(asString(record.paramName) ? { paramName: asString(record.paramName) } : {}),
-    ...(isConfidence(record.confidence) ? { confidence: record.confidence } : {})
+    value: {
+      ...(asString(record.name) ? { name: asString(record.name) } : {}),
+      value: scalar,
+      ...(isRole(record.role) ? { role: record.role } : {}),
+      ...(asString(record.paramName) ? { paramName: asString(record.paramName) } : {}),
+      ...(isConfidence(record.confidence) ? { confidence: record.confidence } : {})
+    },
+    diagnostics: []
   };
+}
+
+function instructionRowBelongsToEvent(value: unknown, eventId: number, eventIndex: number): boolean {
+  if (!isObjectRecord(value)) return false;
+  const rowEventId = asNumber(value.eventId) ?? asNumber(value.event);
+  return rowEventId === eventId || asNumber(value.eventIndex) === eventIndex;
+}
+
+function isObjectRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
+}
+
+function hasInstructionWireFields(record: Record<string, unknown>): boolean {
+  return ['bank', 'id', 'argsBase64', 'layerOffset'].some((field) => field in record);
 }
 
 function parseMapExport(value: unknown, sourceUri: string): ParsedValue<MapExport> {
@@ -217,12 +347,28 @@ function parseParamExport(value: unknown, sourceUri: string): ParsedValue<ParamE
   const exportProvenance = sourceProvenance(record);
   const paramName = asString(record.paramName);
   if (!paramName) return { diagnostics: [missingField(sourceUri, 'paramName')] };
+  const entryIndex = asNumber(record.entryIndex);
+  const entryName = asString(record.entryName);
+  const normalizedEntryIndex = entryIndex === null ? undefined : entryIndex;
 
   return {
     value: {
       paramName,
+      sourceUri,
+      ...(normalizedEntryIndex === undefined ? {} : { entryIndex: normalizedEntryIndex }),
+      ...(entryName ? { entryName } : {}),
       ...exportProvenance,
-      rows: Array.isArray(record.rows) ? record.rows.flatMap((item, index) => parseParamRow(item, sourceUri, paramName, index, exportProvenance)) : []
+      rows: Array.isArray(record.rows)
+        ? record.rows.flatMap((item, index) => parseParamRow(
+            item,
+            sourceUri,
+            paramName,
+            index,
+            exportProvenance,
+            entryName,
+            normalizedEntryIndex
+          ))
+        : []
     },
     diagnostics: []
   };
@@ -365,11 +511,19 @@ function parseTaeExport(value: unknown, sourceUri: string, sourcePath: string | 
       const eventTypeId = asNumber(event.eventTypeId);
       const templateFields = Array.isArray(event.templateFields) ? event.templateFields : null;
       const fields = templateFields
-        ? templateFields.flatMap((field) => {
+        ? templateFields.flatMap((field, fieldIndex) => {
           const fieldRecord = asRecord(field);
           const name = asString(fieldRecord.name);
           if (!name) return [];
-          return [{ name, value: parseScalar(fieldRecord.value) }];
+          const value = parseScalar(fieldRecord.value);
+          if (value === undefined) {
+            diagnostics.push(invalidField(
+              sourceUri,
+              `animations[${animIndex}].events[${eventIndex}].templateFields[${fieldIndex}].value`
+            ));
+            return [];
+          }
+          return [{ name, value }];
         })
         : [];
       const result: TaeEventSymbol = {
@@ -573,7 +727,9 @@ function parseParamRow(
   sourceUri: string,
   paramName: string,
   index: number,
-  fallbackProvenance: SourceProvenance = {}
+  fallbackProvenance: SourceProvenance = {},
+  entryName?: string,
+  entryIndex?: number
 ): ParamExport['rows'][number][] {
   const record = asRecord(value);
   const provenance = sourceProvenance(record, fallbackProvenance);
@@ -584,6 +740,8 @@ function parseParamRow(
     uri: asString(record.uri) || `param://${paramName}/${rowId}`,
     sourceUri: asString(record.sourceUri) || sourceUri,
     paramName,
+    ...(entryName ? { entryName } : {}),
+    ...(entryIndex !== undefined ? { entryIndex } : {}),
     rowId,
     ...provenance,
     ...(asString(record.rowName) ? { rowName: asString(record.rowName) } : {}),
@@ -654,9 +812,10 @@ function asNumber(value: unknown): number | null {
   return typeof value === 'number' && Number.isFinite(value) ? value : null;
 }
 
-function parseScalar(value: unknown): string | number | boolean {
-  if (typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean') return value;
-  return String(value ?? '');
+function parseScalar(value: unknown): string | number | boolean | undefined {
+  if (typeof value === 'string' || typeof value === 'boolean') return value;
+  if (typeof value === 'number' && Number.isFinite(value)) return value;
+  return undefined;
 }
 
 function parseNullableScalar(value: unknown): string | number | boolean | null {

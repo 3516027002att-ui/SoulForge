@@ -14,7 +14,8 @@ static class EnvelopeInspection
         byte[] sample,
         long length,
         int maxSampleBytes = 512 * 1024,
-        string? oodleRuntimeRoot = null)
+        string? oodleRuntimeRoot = null,
+        bool includeDcxDecompressionPreview = true)
     {
         var extensionChain = BuildExtensionChain(sourcePath);
         var magicEvidence = new List<FormatEvidence>();
@@ -24,7 +25,12 @@ static class EnvelopeInspection
         var pathHints = EnvelopeHintScanner.Scan(sample);
         var binderChildCandidates = BinderChildCandidateScanner.Scan(sample);
         var nestedMagicCandidates = NestedFormatScanner.Scan(sample);
-        var dcxPayloadProbe = DcxPayloadProbe.Probe(sourcePath, sample, length, oodleRuntimeRoot);
+        var dcxPayloadProbe = DcxPayloadProbe.Probe(
+            sourcePath,
+            sample,
+            length,
+            oodleRuntimeRoot,
+            includeDcxDecompressionPreview);
         var syntheticBinderInventory = SyntheticBinderFixtureExports.TryInspect(sourcePath, sample);
         var diagnostics = new List<Diagnostic>
         {

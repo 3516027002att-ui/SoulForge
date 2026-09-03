@@ -77,8 +77,10 @@ function rebuildBoneLinks(bones: readonly FlverPreviewBone[]): FlverPreviewBone[
 }
 
 /**
- * Remap all body part skin indices to leader bone space. This runs in
- * core/main (renderer-independent). Renderer receives a single leader skeleton.
+ * Resolve all body part influences against the leader bone space. This runs in
+ * core/main (renderer-independent). The renderer receives one pose-owning
+ * leader skeleton plus per-part follower binding metadata, so native part
+ * inverse bind matrices remain available.
  *
  * Positive-weight influences with missing leader mapping fail closed.
  * Zero-weight slots are ignored.
@@ -263,6 +265,8 @@ export function remapCharacterBundleToLeader(
       return leaderIndex;
     };
 
+    const maxPartBoneIndex = partBones.reduce((max, bone) => Math.max(max, bone.index), -1);
+    const bindingBoneMap = Array.from({ length: maxPartBoneIndex + 1 }, () => -1);
     const remappedMeshes: FlverPreviewMesh[] = [];
     for (const mesh of part.meshes) {
       if (mesh.skinningMode === 'static' || !mesh.boneIndicesBase64 || !mesh.boneWeightsBase64) {
@@ -323,10 +327,21 @@ export function remapCharacterBundleToLeader(
           }
         }
         const indicesBase64 = encodeUint16Array(remappedIndices);
+        for (const [sourceIndex, leaderIndex] of partIndexToLeader) {
+          if (sourceIndex >= 0 && sourceIndex < bindingBoneMap.length) {
+            bindingBoneMap[sourceIndex] = leaderIndex;
+          }
+        }
         remappedMeshes.push({
           ...mesh,
+          // Keep the native part-local indices. The renderer uses these with
+          // the part's own bind inverses and follows the leader through the
+          // binding map below; rewriting the indices alone loses the native
+          // follower reference pose.
+          sourceBoneIndicesBase64: mesh.boneIndicesBase64,
           boneIndicesBase64: indicesBase64,
-          boneIndexSpace: 'flver-global' as const
+          boneIndexSpace: 'flver-global' as const,
+          skeletonId: part.modelId
         });
       } catch (e) {
         return {
@@ -344,12 +359,24 @@ export function remapCharacterBundleToLeader(
       }
     }
 
-    // Body part model becomes geometry-only, no bones, bound to leader skeleton
+    const hasFollowerMeshes = remappedMeshes.some(
+      (mesh) => mesh.skinningMode !== 'static' && mesh.sourceBoneIndicesBase64 !== undefined
+    );
+    // Body part geometry remains geometry-only in the leader-remapped DTO, but
+    // its original FLVER skeleton is retained as binding metadata. This is
+    // the same split used by mature character viewers: the leader owns the
+    // sampled pose, while each part keeps its own reference/bind matrices.
     remappedPartModels.push({
       ...part,
       bones: [],
       boneCount: 0,
-      meshes: remappedMeshes.map((m) => ({ ...m }))
+      meshes: remappedMeshes.map((m) => ({ ...m })),
+      ...(hasFollowerMeshes
+        ? {
+            bindingBones: partBones.map((bone) => cloneBone(bone, bone.index)),
+            bindingBoneMap
+          }
+        : {})
     });
   }
 
@@ -378,12 +405,20 @@ export function remapCharacterBundleToLeader(
     vertexCount,
     boneCount: finalLeaderBones.length,
     leaderModelId: leaderModel.modelId,
-    models: remappedModels.map((m, idx) => ({
+    models: remappedModels.map((m) => ({
       ...m,
-      // All skinned meshes point to leader skeletonId
+      // Follower-bound parts keep their own skeleton namespace. Models that
+      // have no retained source skeleton continue using the leader namespace
+      // for compatibility with the older remapped payload.
       meshes: m.meshes.map((mesh) => ({
         ...mesh,
-        ...(mesh.skinningMode !== 'static' ? { skeletonId: leaderModel.modelId } : {})
+        ...(mesh.skinningMode !== 'static'
+          ? {
+              skeletonId: m.bindingBones !== undefined
+                ? m.modelId
+                : leaderModel.modelId
+            }
+          : {})
       }))
     }))
   };

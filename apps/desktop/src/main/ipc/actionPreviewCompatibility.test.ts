@@ -64,6 +64,29 @@ describe('action preview compatibility planning', () => {
     );
   });
 
+  it('keeps the native SDT default equipment identities ahead of parseable siblings', () => {
+    assert.deepEqual(
+      planC0000CompatibilityCandidates(
+        'bd',
+        ['bd_m_9000.partsbnd.dcx'],
+        ['bd_m_9000.partsbnd.dcx', 'bd_m_9040_l.partsbnd.dcx', 'bd_m_9040.partsbnd.dcx']
+      ),
+      [
+        { origin: 'base', name: 'bd_m_9040.partsbnd.dcx' },
+        { origin: 'overlay', name: 'bd_m_9000.partsbnd.dcx' },
+        { origin: 'base', name: 'bd_m_9040_l.partsbnd.dcx' }
+      ]
+    );
+    assert.deepEqual(
+      planC0000CompatibilityCandidates(
+        'am',
+        [],
+        ['am_m_9000_l.partsbnd.dcx', 'am_m_9000.partsbnd.dcx']
+      )[0],
+      { origin: 'base', name: 'am_m_9000.partsbnd.dcx' }
+    );
+  });
+
   it('wires the bounded planner and fail-closed remapper without hard-coded equipment ids', () => {
     assert.match(actionSource, /planC0000CompatibilityCandidates/);
     assert.match(actionSource, /remapCharacterBundleToLeader/);

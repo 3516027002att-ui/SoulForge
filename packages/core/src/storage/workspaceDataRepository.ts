@@ -20,6 +20,8 @@ export interface PersistedDiagnostic extends Diagnostic {
   resolvedByOpId?: string;
 }
 
+const MAX_RAG_DELTA_BATCH = 512;
+
 export type BackgroundJobStatus = 'queued' | 'running' | 'completed' | 'failed' | 'cancelled';
 export interface BackgroundJobRecord {
   jobId: string;
@@ -180,6 +182,158 @@ INSERT INTO rag_chunks_fts_trigram (chunk_id, title, body) VALUES (?, ?, ?)`);
     }).immediate();
   }
 
+  /**
+   * Incrementally converge the RAG corpus.
+   *
+   * The previous implementation deleted every chunk and rebuilt both FTS
+   * tables after every native read.  That made a parallel read batch turn
+   * into repeated full-table writes.  The caller still supplies the complete
+   * desired corpus, but only changed/new/deleted chunks touch SQLite.
+   */
+  mergeRagChunks(chunks: readonly RagChunk[]): void {
+    for (const chunk of chunks) this.assertWorkspace(chunk.workspaceId);
+    const existing = new Map(this.database.prepare<[string], RagChunkRow>(`
+SELECT chunk_id AS chunkId, workspace_id AS workspaceId, source_uri AS sourceUri,
+ symbol_uri AS symbolUri, family, title, body, numeric_ids_json AS numericIdsJson,
+ relative_path AS relativePath, resource_kind AS resourceKind, confidence,
+ content_hash AS contentHash, source_revision AS sourceRevision, source_hash AS sourceHash
+FROM rag_chunks WHERE workspace_id = ?`).all(this.workspaceId)
+      .map((row) => [row.chunkId, row] as const));
+    const desired = new Map(chunks.map((chunk) => [chunk.chunkId, chunk] as const));
+    const deleted = [...existing.keys()].filter((chunkId) => !desired.has(chunkId));
+    const changed = chunks.filter((chunk) => {
+      const row = existing.get(chunk.chunkId);
+      if (!row) return true;
+      return row.sourceUri !== chunk.sourceUri
+        || row.symbolUri !== chunk.symbolUri
+        || row.family !== chunk.family
+        || row.title !== chunk.title
+        || row.body !== chunk.body
+        || row.numericIdsJson !== JSON.stringify(chunk.numericIds)
+        || (row.relativePath ?? null) !== (chunk.relativePath ?? null)
+        || (row.resourceKind ?? null) !== (chunk.resourceKind ?? null)
+        || (row.confidence ?? null) !== (chunk.confidence ?? null)
+        || row.contentHash !== chunk.contentHash
+        || (row.sourceRevision ?? null) !== (chunk.sourceRevision ?? null)
+        || (row.sourceHash ?? null) !== (chunk.sourceHash ?? null);
+    });
+    if (deleted.length === 0 && changed.length === 0) return;
+
+    const deleteChunk = this.database.prepare('DELETE FROM rag_chunks WHERE workspace_id = ? AND chunk_id = ?');
+    const deleteFts = this.database.prepare('DELETE FROM rag_chunks_fts WHERE chunk_id = ?');
+    const deleteTrigram = this.database.prepare('DELETE FROM rag_chunks_fts_trigram WHERE chunk_id = ?');
+    const deleteEmbedding = this.database.prepare('DELETE FROM rag_embeddings WHERE chunk_id = ?');
+    const insert = this.database.prepare(`
+INSERT INTO rag_chunks (
+ chunk_id, workspace_id, source_uri, symbol_uri, family, title, body,
+ numeric_ids_json, relative_path, resource_kind, confidence, content_hash,
+ source_revision, source_hash, created_at
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+ON CONFLICT(chunk_id) DO UPDATE SET workspace_id=excluded.workspace_id,
+ source_uri=excluded.source_uri, symbol_uri=excluded.symbol_uri, family=excluded.family,
+ title=excluded.title, body=excluded.body, numeric_ids_json=excluded.numeric_ids_json,
+ relative_path=excluded.relative_path, resource_kind=excluded.resource_kind,
+ confidence=excluded.confidence, content_hash=excluded.content_hash,
+ source_revision=excluded.source_revision, source_hash=excluded.source_hash,
+ created_at=excluded.created_at`);
+    const insertFts = this.database.prepare(
+      'INSERT INTO rag_chunks_fts (chunk_id, title, body) VALUES (?, ?, ?)');
+    const insertTrigram = this.database.prepare(
+      'INSERT INTO rag_chunks_fts_trigram (chunk_id, title, body) VALUES (?, ?, ?)');
+    const createdAt = new Date().toISOString();
+    this.database.transaction(() => {
+      for (const chunkId of deleted) {
+        deleteFts.run(chunkId);
+        deleteTrigram.run(chunkId);
+        deleteChunk.run(this.workspaceId, chunkId);
+      }
+      for (const chunk of changed) {
+        // FTS tables are contentless from SQLite's perspective, so an update
+        // must remove the old index row before inserting the new one.
+        deleteFts.run(chunk.chunkId);
+        deleteTrigram.run(chunk.chunkId);
+        deleteEmbedding.run(chunk.chunkId);
+        insert.run(
+          chunk.chunkId, this.workspaceId, chunk.sourceUri, chunk.symbolUri, chunk.family,
+          chunk.title, chunk.body, JSON.stringify(chunk.numericIds),
+          chunk.relativePath ?? null, chunk.resourceKind ?? null, chunk.confidence ?? null,
+          chunk.contentHash, chunk.sourceRevision ?? null, chunk.sourceHash ?? null, createdAt
+        );
+        insertFts.run(chunk.chunkId, chunk.title, chunk.body);
+        insertTrigram.run(chunk.chunkId, chunk.title, chunk.body);
+      }
+    }).immediate();
+  }
+
+  /**
+   * Apply one bounded source delta.  The desktop scheduler sends multiple
+   * calls when a source has more than MAX_RAG_DELTA_BATCH changes, allowing it
+   * to cancel between calls instead of holding one giant synchronous SQLite
+   * transaction.
+   */
+  mergeRagChunkDelta(input: {
+    sourceUri: string;
+    upserts: readonly RagChunk[];
+    deletedChunkIds: readonly string[];
+  }): void {
+    const sourceUri = input.sourceUri.trim();
+    if (!sourceUri) throw new Error('RAG source delta 缺少 sourceUri。');
+    if (input.upserts.length > MAX_RAG_DELTA_BATCH || input.deletedChunkIds.length > MAX_RAG_DELTA_BATCH) {
+      throw new Error(`RAG source delta 超过单批上限 ${MAX_RAG_DELTA_BATCH}。`);
+    }
+    for (const chunk of input.upserts) {
+      this.assertWorkspace(chunk.workspaceId);
+      if (chunk.sourceUri !== sourceUri) {
+        throw new Error(`RAG source delta 的 chunk ${chunk.chunkId} 不属于 ${sourceUri}。`);
+      }
+    }
+    const deleteChunk = this.database.prepare(
+      'DELETE FROM rag_chunks WHERE workspace_id = ? AND source_uri = ? AND chunk_id = ?');
+    const deleteFts = this.database.prepare('DELETE FROM rag_chunks_fts WHERE chunk_id = ?');
+    const deleteTrigram = this.database.prepare('DELETE FROM rag_chunks_fts_trigram WHERE chunk_id = ?');
+    const deleteEmbedding = this.database.prepare('DELETE FROM rag_embeddings WHERE chunk_id = ?');
+    const insert = this.database.prepare(`
+INSERT INTO rag_chunks (
+ chunk_id, workspace_id, source_uri, symbol_uri, family, title, body,
+ numeric_ids_json, relative_path, resource_kind, confidence, content_hash,
+ source_revision, source_hash, created_at
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+ON CONFLICT(chunk_id) DO UPDATE SET workspace_id=excluded.workspace_id,
+ source_uri=excluded.source_uri, symbol_uri=excluded.symbol_uri, family=excluded.family,
+ title=excluded.title, body=excluded.body, numeric_ids_json=excluded.numeric_ids_json,
+ relative_path=excluded.relative_path, resource_kind=excluded.resource_kind,
+ confidence=excluded.confidence, content_hash=excluded.content_hash,
+ source_revision=excluded.source_revision, source_hash=excluded.source_hash,
+ created_at=excluded.created_at`);
+    const insertFts = this.database.prepare(
+      'INSERT INTO rag_chunks_fts (chunk_id, title, body) VALUES (?, ?, ?)');
+    const insertTrigram = this.database.prepare(
+      'INSERT INTO rag_chunks_fts_trigram (chunk_id, title, body) VALUES (?, ?, ?)');
+    const createdAt = new Date().toISOString();
+    this.database.transaction(() => {
+      for (const chunkId of input.deletedChunkIds) {
+        deleteFts.run(chunkId);
+        deleteTrigram.run(chunkId);
+        deleteChunk.run(this.workspaceId, sourceUri, chunkId);
+      }
+      for (const chunk of input.upserts) {
+        // A changed chunk invalidates its old vector.  The next embedding run
+        // must regenerate it under the current content and model revision.
+        deleteFts.run(chunk.chunkId);
+        deleteTrigram.run(chunk.chunkId);
+        deleteEmbedding.run(chunk.chunkId);
+        insert.run(
+          chunk.chunkId, this.workspaceId, chunk.sourceUri, chunk.symbolUri, chunk.family,
+          chunk.title, chunk.body, JSON.stringify(chunk.numericIds),
+          chunk.relativePath ?? null, chunk.resourceKind ?? null, chunk.confidence ?? null,
+          chunk.contentHash, chunk.sourceRevision ?? null, chunk.sourceHash ?? null, createdAt
+        );
+        insertFts.run(chunk.chunkId, chunk.title, chunk.body);
+        insertTrigram.run(chunk.chunkId, chunk.title, chunk.body);
+      }
+    }).immediate();
+  }
+
   loadRagChunks(): RagChunk[] {
     const rows = this.database.prepare<[string], RagChunkRow>(`
 SELECT chunk_id AS chunkId, workspace_id AS workspaceId, source_uri AS sourceUri,
@@ -240,20 +394,42 @@ ORDER BY family, title LIMIT ?`).all(this.workspaceId, needle, needle, boundedLi
   }
 
   /**
-   * 整体替换该 workspace 的 chunk 向量（embed 时先删后插）。
-   * 向量只按 chunkId 关联；语料 replaceRagChunks 后旧的向量行会被 FK 级联删除。
+   * 兼容旧调用方的整体替换入口。新的内部 embedding 管理器使用下面的
+   * mergeRagEmbeddings，按内容指纹做增量更新，不会因一个源变化重写全库。
    */
-  replaceRagEmbeddings(entries: Array<{ chunkId: string; model: string; vector: Float32Array }>): void {
+  replaceRagEmbeddings(entries: Array<{ chunkId: string; model: string; vector: Float32Array; contentHash?: string }>): void {
     const insert = this.database.prepare(`
-INSERT OR REPLACE INTO rag_embeddings (chunk_id, workspace_id, model, dim, vector, created_at)
-VALUES (?, ?, ?, ?, ?, ?)`);
+INSERT OR REPLACE INTO rag_embeddings (chunk_id, workspace_id, model, dim, vector, content_hash, created_at)
+VALUES (?, ?, ?, ?, ?, ?, ?)`);
     const createdAt = new Date().toISOString();
     this.database.transaction(() => {
       this.database.prepare('DELETE FROM rag_embeddings WHERE workspace_id = ?').run(this.workspaceId);
       for (const entry of entries) {
         insert.run(
           entry.chunkId, this.workspaceId, entry.model, entry.vector.length,
-          Buffer.from(entry.vector.buffer, entry.vector.byteOffset, entry.vector.byteLength), createdAt
+          Buffer.from(entry.vector.buffer, entry.vector.byteOffset, entry.vector.byteLength), entry.contentHash ?? null, createdAt
+        );
+      }
+    }).immediate();
+  }
+
+  /** 只写入已变化的向量，并删除已失效的 chunk。 */
+  mergeRagEmbeddings(input: {
+    model: string;
+    entries: Array<{ chunkId: string; contentHash: string; vector: Float32Array }>;
+    deletedChunkIds: readonly string[];
+  }): void {
+    const remove = this.database.prepare('DELETE FROM rag_embeddings WHERE workspace_id = ? AND chunk_id = ?');
+    const insert = this.database.prepare(`
+INSERT OR REPLACE INTO rag_embeddings (chunk_id, workspace_id, model, dim, vector, content_hash, created_at)
+VALUES (?, ?, ?, ?, ?, ?, ?)`);
+    const createdAt = new Date().toISOString();
+    this.database.transaction(() => {
+      for (const chunkId of input.deletedChunkIds) remove.run(this.workspaceId, chunkId);
+      for (const entry of input.entries) {
+        insert.run(
+          entry.chunkId, this.workspaceId, input.model, entry.vector.length,
+          Buffer.from(entry.vector.buffer, entry.vector.byteOffset, entry.vector.byteLength), entry.contentHash, createdAt
         );
       }
     }).immediate();
@@ -272,6 +448,18 @@ SELECT chunk_id AS chunkId, vector FROM rag_embeddings WHERE workspace_id = ?`)
       map.set(row.chunkId, new Float32Array(row.vector.buffer, row.vector.byteOffset, row.vector.byteLength / 4));
     }
     return map;
+  }
+
+  loadRagEmbeddingRecords(): Array<{ chunkId: string; model: string; contentHash: string | null; vector: Float32Array }> {
+    const rows = this.database.prepare<[string], { chunkId: string; model: string; contentHash: string | null; vector: Buffer }>(`
+SELECT chunk_id AS chunkId, model, content_hash AS contentHash, vector
+FROM rag_embeddings WHERE workspace_id = ?`).all(this.workspaceId);
+    return rows.map((row) => ({
+      chunkId: row.chunkId,
+      model: row.model,
+      contentHash: row.contentHash,
+      vector: new Float32Array(row.vector.buffer, row.vector.byteOffset, row.vector.byteLength / 4)
+    }));
   }
 
   /** 该 workspace 是否已有向量索引，以及所用 embedding 模型名。 */

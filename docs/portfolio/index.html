@@ -1,0 +1,237 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="SoulForge：面向 Sekiro Mod 的安全协作编辑工作台。">
+  <title>SoulForge — AI 原生 Mod 工程工作台</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #101313;
+      --surface: #171c1c;
+      --surface-2: #1d2423;
+      --line: #33413d;
+      --text: #edf4ef;
+      --muted: #a9b8b0;
+      --accent: #a7e26b;
+      --accent-2: #6ed7c1;
+      --warning: #f0c674;
+      --danger: #ee8f83;
+      --radius: 10px;
+      --max: 1160px;
+    }
+    * { box-sizing: border-box; }
+    html { scroll-behavior: smooth; }
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--text);
+      font: 16px/1.65 Inter, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+    }
+    a { color: var(--accent); }
+    a:focus-visible, button:focus-visible { outline: 3px solid var(--warning); outline-offset: 3px; }
+    .wrap { width: min(calc(100% - 40px), var(--max)); margin: 0 auto; }
+    .topbar { border-bottom: 1px solid var(--line); background: rgba(16, 19, 19, .95); }
+    .topbar-inner { min-height: 68px; display: flex; align-items: center; justify-content: space-between; gap: 24px; }
+    .brand { display: flex; align-items: center; gap: 10px; color: var(--text); text-decoration: none; font-weight: 750; letter-spacing: .02em; }
+    .brand-mark { width: 28px; height: 28px; border: 2px solid var(--accent); border-radius: 7px; display: grid; place-items: center; color: var(--accent); font-size: 15px; }
+    nav { display: flex; gap: 20px; flex-wrap: wrap; }
+    nav a { color: var(--muted); text-decoration: none; font-size: 14px; }
+    nav a:hover { color: var(--text); }
+    .hero { padding: 92px 0 74px; border-bottom: 1px solid var(--line); }
+    .eyebrow { color: var(--accent); font-size: 13px; font-weight: 750; letter-spacing: .12em; text-transform: uppercase; }
+    h1, h2, h3 { line-height: 1.2; letter-spacing: -.025em; }
+    h1 { max-width: 850px; margin: 18px 0 24px; font-size: clamp(42px, 7vw, 76px); }
+    .hero-lede { max-width: 760px; color: var(--muted); font-size: clamp(18px, 2vw, 22px); margin: 0; }
+    .hero-actions { display: flex; gap: 12px; flex-wrap: wrap; margin-top: 34px; }
+    .button { display: inline-flex; align-items: center; min-height: 44px; padding: 0 16px; border: 1px solid var(--accent); border-radius: 7px; background: var(--accent); color: #182016; font-weight: 750; text-decoration: none; }
+    .button.secondary { border-color: var(--line); background: transparent; color: var(--text); }
+    .facts { display: grid; grid-template-columns: repeat(4, 1fr); gap: 1px; margin-top: 58px; border: 1px solid var(--line); background: var(--line); }
+    .fact { background: var(--surface); padding: 18px; }
+    .fact strong { display: block; color: var(--accent); font-size: 23px; line-height: 1.2; }
+    .fact span { display: block; margin-top: 6px; color: var(--muted); font-size: 13px; }
+    section { padding: 78px 0; border-bottom: 1px solid var(--line); }
+    .section-head { display: flex; align-items: end; justify-content: space-between; gap: 24px; margin-bottom: 28px; }
+    h2 { margin: 0; font-size: clamp(28px, 4vw, 42px); }
+    .section-head p { max-width: 540px; margin: 0; color: var(--muted); }
+    .problem-grid, .architecture-grid, .evidence-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px; }
+    .panel { background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); padding: 22px; }
+    .panel h3 { margin: 0 0 11px; font-size: 20px; }
+    .panel p { margin: 0; color: var(--muted); }
+    .panel small { color: var(--accent-2); }
+    .flow { display: grid; grid-template-columns: repeat(6, 1fr); gap: 0; border: 1px solid var(--line); }
+    .flow-step { min-height: 144px; padding: 18px; background: var(--surface); border-right: 1px solid var(--line); }
+    .flow-step:last-child { border-right: 0; }
+    .flow-step .num { color: var(--accent); font-size: 13px; font-weight: 750; }
+    .flow-step h3 { margin: 14px 0 8px; font-size: 17px; }
+    .flow-step p { margin: 0; color: var(--muted); font-size: 13px; }
+    .trace { overflow: auto; border: 1px solid var(--line); border-radius: var(--radius); background: #0b0f0e; }
+    .trace pre { min-width: 720px; margin: 0; padding: 22px; color: #c8d5cc; font: 13px/1.8 ui-monospace, SFMono-Regular, Consolas, monospace; }
+    .trace .ok { color: var(--accent); }
+    .trace .dim { color: #799087; }
+    .decision-table { width: 100%; border-collapse: collapse; border: 1px solid var(--line); background: var(--surface); }
+    .decision-table th, .decision-table td { padding: 14px 16px; border-bottom: 1px solid var(--line); text-align: left; vertical-align: top; }
+    .decision-table th { color: var(--accent); font-size: 13px; font-weight: 750; }
+    .decision-table td { color: var(--muted); }
+    .decision-table tr:last-child td { border-bottom: 0; }
+    .badge { display: inline-block; margin-bottom: 12px; padding: 3px 8px; border: 1px solid var(--line); border-radius: 999px; color: var(--accent-2); font-size: 12px; }
+    .boundary { border-left: 3px solid var(--warning); }
+    .boundary p { color: #d9c89c; }
+    .footer { padding: 32px 0 58px; color: var(--muted); font-size: 14px; }
+    .footer p { margin: 6px 0; }
+    @media (max-width: 900px) {
+      .facts { grid-template-columns: repeat(2, 1fr); }
+      .flow { grid-template-columns: repeat(3, 1fr); }
+      .flow-step:nth-child(3) { border-right: 0; }
+      .flow-step:nth-child(-n+3) { border-bottom: 1px solid var(--line); }
+      .problem-grid, .architecture-grid, .evidence-grid { grid-template-columns: 1fr 1fr; }
+    }
+    @media (max-width: 600px) {
+      .wrap { width: min(calc(100% - 28px), var(--max)); }
+      .topbar-inner { align-items: flex-start; flex-direction: column; padding: 15px 0; }
+      nav { gap: 12px; }
+      .hero { padding: 62px 0 48px; }
+      section { padding: 56px 0; }
+      .facts, .problem-grid, .architecture-grid, .evidence-grid, .flow { grid-template-columns: 1fr; }
+      .flow-step, .flow-step:nth-child(3) { border-right: 0; border-bottom: 1px solid var(--line); }
+      .flow-step:last-child { border-bottom: 0; }
+      .section-head { display: block; }
+      .section-head p { margin-top: 14px; }
+      .decision-table { display: block; overflow-x: auto; white-space: normal; }
+      .decision-table th, .decision-table td { min-width: 180px; }
+    }
+  </style>
+</head>
+<body>
+  <header class="topbar">
+    <div class="wrap topbar-inner">
+      <a class="brand" href="#top" aria-label="SoulForge 首页"><span class="brand-mark" aria-hidden="true">S</span> SoulForge</a>
+      <nav aria-label="页面导航">
+        <a href="#problem">问题</a>
+        <a href="#product">产品</a>
+        <a href="#architecture">架构</a>
+        <a href="#evidence">证据</a>
+        <a href="#boundary">边界</a>
+      </nav>
+    </div>
+  </header>
+
+  <main id="top">
+    <section class="hero">
+      <div class="wrap">
+        <div class="eyebrow">AI-native Mod engineering workbench</div>
+        <h1>把 Mod 制作，变成一条可解释、可验证、可回滚的产品流程。</h1>
+        <p class="hero-lede">SoulForge 面向《只狼》Mod 创作者：用户用自然语言描述目标，Agent 在真实工作区里定位资源、读取原生证据、生成修改计划，并通过 Patch Engine 完成受控写回。</p>
+        <div class="hero-actions">
+          <a class="button" href="CASE_STUDY.md">查看完整案例说明</a>
+          <a class="button secondary" href="DEMO_SCRIPT.md">打开演示脚本</a>
+        </div>
+        <div class="facts" aria-label="项目事实">
+          <div class="fact"><strong>多资源</strong><span>参数、文本、事件、地图、动作等工作区对象</span></div>
+          <div class="fact"><strong>lexical</strong><span>本地词法、结构化 ID 与引用扩展，结果可追溯</span></div>
+          <div class="fact"><strong>可停</strong><span>审批、取消、失败关闭与有限步数</span></div>
+          <div class="fact"><strong>可回滚</strong><span>操作记录、备份、原子提交与回滚链路</span></div>
+        </div>
+      </div>
+    </section>
+
+    <section id="problem">
+      <div class="wrap">
+        <div class="section-head">
+          <h2>先解决创作者的真实摩擦</h2>
+          <p>传统工作流不是“没有工具”，而是工具之间没有共同的上下文。复杂 Mod 越往后，查找、串联、验证和恢复越依赖个人经验。</p>
+        </div>
+        <div class="problem-grid">
+          <article class="panel"><span class="badge">现状 01</span><h3>解包与切换</h3><p>先解包，再在多个编辑器、脚本工具和查看器之间来回切换；用户目标无法连续传递。</p></article>
+          <article class="panel"><span class="badge">现状 02</span><h3>隐性知识</h3><p>即使是参数编辑，也要理解参数组之间的串联、并联和引用关系；新手很难知道下一步应该查什么。</p></article>
+          <article class="panel"><span class="badge">机会 03</span><h3>AI 原生交互</h3><p>今天的工具可以理解自然语言、调用工具和生成代码，但 Mod 工作流还缺少安全的领域编排层。</p></article>
+        </div>
+      </div>
+    </section>
+
+    <section id="product">
+      <div class="wrap">
+        <div class="section-head">
+          <h2>产品闭环</h2>
+          <p>Agent 不是一个“替用户随便改文件”的聊天机器人，而是一个受证据、权限和原生格式边界约束的协作编辑器。</p>
+        </div>
+        <div class="flow" aria-label="SoulForge 工作流">
+          <div class="flow-step"><span class="num">01 / 目标</span><h3>说清楚想改什么</h3><p>自然语言目标、当前选区和附件进入同一任务。</p></div>
+          <div class="flow-step"><span class="num">02 / 证据</span><h3>定位资源</h3><p>检索术语、数字 ID、资源 URI 和引用关系。</p></div>
+          <div class="flow-step"><span class="num">03 / 原生读取</span><h3>确认当前值</h3><p>读取原生文档，保留 sourceHash 与 sourceRevision。</p></div>
+          <div class="flow-step"><span class="num">04 / 方案</span><h3>生成 Patch</h3><p>展示影响面、风险和未覆盖的未知字段。</p></div>
+          <div class="flow-step"><span class="num">05 / 提交</span><h3>审批后写回</h3><p>只经 Patch Engine、staging、备份和原子提交。</p></div>
+          <div class="flow-step"><span class="num">06 / 恢复</span><h3>验证或回滚</h3><p>写后重读；失败关闭，用户可撤销本次操作。</p></div>
+        </div>
+      </div>
+    </section>
+
+    <section id="architecture">
+      <div class="wrap">
+        <div class="section-head">
+          <h2>我做的关键产品判断</h2>
+          <p>真正的 AI 产品能力，不是堆模型名，而是让模型能力、领域数据和风险边界彼此匹配。</p>
+        </div>
+        <div class="architecture-grid">
+          <article class="panel"><span class="badge">检索</span><h3>lexical 优先</h3><p>Mod 语料大量包含精确 ID、表名、字段名、符号和路径。首选本地词法 + 结构化 ID + 一跳引用扩展：成本低、结果可解释，也不要求用户有额外 embedding/API 能力。</p></article>
+          <article class="panel"><span class="badge">模型</span><h3>模型是可替换的推理层</h3><p>开发阶段按任务混合使用 Opus 5、GPT-5.6 Sol、Luna、Grok 4.5/4.6、GLM 5.3、Flash、DeepSeek V4 Flash、Qwen 3.8 Max；运行时由用户自行配置 API，按成本、性能、延迟和任务复杂度选择。</p></article>
+          <article class="panel"><span class="badge">安全</span><h3>权限和证据先于执行</h3><p>只读发现、原生读取、提案、验证、变更和回滚分级；写操作需要审批，失败或证据不足时明确拒绝，不靠模型“自信”推进。</p></article>
+        </div>
+        <div class="trace" style="margin-top: 18px" aria-label="Agent 任务轨迹示例">
+          <pre><span class="dim">用户：</span>把鬼刑部从 BOSS 改成精英怪，增加一个靛蓝星陨，红点数改为 2
+<span class="ok">Agent → workspace_stats</span>       获取当前工作区索引范围
+<span class="ok">Agent → retrieve_evidence</span>    lexical / ID / 引用关系定位候选
+<span class="ok">Agent → read_param_fields</span>    原生读取当前值与 sourceHash
+<span class="ok">Agent → build_patch_graph</span>    汇总跨参数与文本影响面
+<span class="ok">Agent → validate_patch</span>       检查字段类型、范围和前置条件
+<span class="ok">Agent → approval-requested</span>  展示改动摘要，等待用户确认
+<span class="dim">结果：</span>工具调用、失败原因、审批决定和会话历史均可回看</pre>
+        </div>
+      </div>
+    </section>
+
+    <section id="evidence">
+      <div class="wrap">
+        <div class="section-head">
+          <h2>不是概念图，是可回看的实践</h2>
+          <p>仓库保留了 Agent 的多轮任务记录；作品展示以实际会话轨迹、代码能力和可复核边界为证据，不用虚构业务指标。</p>
+        </div>
+        <div class="evidence-grid">
+          <article class="panel"><span class="badge">真实任务</span><h3>复杂参数修改</h3><p>已有会话归档包含“鬼刑部”相关修改请求，最长记录 64 步。可从中展示发现失败、换路径定位、证据累积和多轮收敛。</p></article>
+          <article class="panel"><span class="badge">可观察</span><h3>每一步都能解释</h3><p>任务面板显示模型服务、步骤、工具调用、重试、上下文压缩、审批和会话记录；错误参数不会被静默隐藏。</p></article>
+          <article class="panel"><span class="badge">可验证</span><h3>结果不等于模型输出</h3><p>候选发现不能直接写入；原生读取、Patch 校验、用户审批、写后重读和回滚分别承担不同责任。</p></article>
+        </div>
+        <table class="decision-table" style="margin-top: 18px">
+          <thead><tr><th>作品里展示</th><th>证据来源</th><th>不会声称</th></tr></thead>
+          <tbody>
+            <tr><td>Agent 能理解领域任务并调用工具</td><td>代码中的工具注册、任务循环和本地会话归档</td><td>不会把一次成功对话包装成全格式 native 完成</td></tr>
+            <tr><td>模型服务可配置</td><td>桌面端模型服务设置与加密凭据通道</td><td>不会声称所有列出的模型都已真实联网验证</td></tr>
+            <tr><td>安全写回闭环</td><td>Patch Engine、审批、验证、备份和回滚接口</td><td>不会把 synthetic/partial 测试写成游戏内完整验收</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <section id="boundary">
+      <div class="wrap">
+        <div class="section-head">
+          <h2>主动承认边界</h2>
+          <p>产品判断的一部分，是知道什么不应该在当前版本里承诺。</p>
+        </div>
+        <article class="panel boundary">
+          <h3>3D 自由操控没有被伪装成已完成能力</h3>
+          <p>当前没有提供像 Blender 那样自由操控 3D 模型和地图的 Agent 接口。原因是这需要额外的场景状态同步、几何/骨骼语义、交互投影和更成熟的模型能力，工作量与技术风险都明显超出本次闭环。现阶段保留结构化地图变换和导入/导出边界，3D 自由操控列为后续方向。</p>
+        </article>
+      </div>
+    </section>
+  </main>
+
+  <footer class="footer">
+    <div class="wrap">
+      <p><strong>SoulForge</strong> · 面向 Sekiro Mod 的 AI 原生、安全协作编辑</p>
+      <p>作品材料：<a href="CASE_STUDY.md">案例说明</a> · <a href="DEMO_SCRIPT.md">演示脚本</a> · <a href="../PRODUCT_VISION.md">产品愿景</a></p>
+    </div>
+  </footer>
+</body>
+</html>

@@ -975,20 +975,19 @@ const api = {
   deleteModelService: (configId: string): Promise<{ ok: true }> =>
     ipcRenderer.invoke('modelService.delete', configId),
   /**
-   * 为当前工作区语料生成 embedding 向量索引（分批 POST /v1/embeddings）。
-   * 服务配置必须含 embeddingModel；失败批降级返回失败数。
+   * 兼容性入口：触发 SoulForge 内部 embedding 管理器。用户无需提供模型、
+   * endpoint、API key 或 configId；正常工作区分析会自动触发此流程。
    */
-  embedWorkspaceRag: (input: { configId: string }): Promise<
-    | { ok: true; embedded: number; failed: number; model: string; dim: number }
+  embedWorkspaceRag: (): Promise<
+    | { ok: true; embedded: number; reused: number; failed: number; model: string; dim: number }
     | { ok: false; error: { code: string; message: string } }
-  > => ipcRenderer.invoke('rag.embed', input),
+  > => ipcRenderer.invoke('rag.embed'),
   /**
-   * 工作区混合检索：lexical + 向量 RRF 融合。configId 提供且与索引模型一致时
-   * 启用向量侧，否则退化为纯 lexical。
+   * 工作区混合检索：lexical + SoulForge 内置向量 RRF 融合；内置向量暂不可用时
+   * 自动退化为 lexical + structured，并返回可诊断结果。
    */
   searchWorkspaceEvidence: (input: {
     query: string;
-    configId?: string;
     limit?: number;
     families?: string[];
     expandReferences?: boolean;

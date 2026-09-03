@@ -8,7 +8,7 @@
  * 报错、不会有测试红,只表现为「长任务永远不超时」「上下文从不压缩」。
  *
  * 实测(2026-08-08)接线前的真实状态,六项并不齐一:
- *   maxSteps      —— loop 内有默认 8(agentLoop:194),已生效但不可调
+ *   maxSteps      —— loop 内有默认 200，宿主显式值也限制为最多 200
  *   retryPolicy   —— resolveRetryPolicy() 有默认策略,已生效但不可调
  *   streaming     —— 唯一此前已有 IPC 入口的
  *   timeoutMs     —— 无默认值,生产从未设过超时
@@ -55,6 +55,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 const LABEL = 'agent-capability-wiring';
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const IPC_TS = join(root, 'apps', 'desktop', 'src', 'main', 'ipc.ts');
+const IPC_AGENT_TS = join(root, 'apps', 'desktop', 'src', 'main', 'ipc', 'agent.ts');
 const HOST_TS = join(root, 'packages', 'core', 'src', 'model-services', 'agentSessionHost.ts');
 const HOST_JS = join(root, 'packages', 'core', 'dist', 'model-services', 'agentSessionHost.js');
 
@@ -63,7 +64,7 @@ function report(payload, exitCode) {
   process.exit(exitCode);
 }
 
-for (const [name, path] of [['ipc.ts', IPC_TS], ['agentSessionHost.ts', HOST_TS], ['agentSessionHost.js', HOST_JS]]) {
+for (const [name, path] of [['ipc.ts', IPC_TS], ['ipc/agent.ts', IPC_AGENT_TS], ['agentSessionHost.ts', HOST_TS], ['agentSessionHost.js', HOST_JS]]) {
   if (!existsSync(path)) {
     report({
       ok: false, gate: LABEL, status: 'failed', code: 'SOURCE_MISSING',
@@ -73,6 +74,7 @@ for (const [name, path] of [['ipc.ts', IPC_TS], ['agentSessionHost.ts', HOST_TS]
 }
 
 const ipcSource = readFileSync(IPC_TS, 'utf8');
+const ipcAgentSource = readFileSync(IPC_AGENT_TS, 'utf8');
 const hostSource = readFileSync(HOST_TS, 'utf8');
 const findings = [];
 
@@ -113,11 +115,11 @@ for (const capability of CAPABILITIES) {
 }
 
 // 判据②:main 必须真的把字段传下去。截取 runAgentSession 调用块。
-const runCallMatch = /void runAgentSession\(\{([\s\S]*?)\n    \}\)/.exec(ipcSource);
+const runCallMatch = /void runAgentSession\(\{([\s\S]*?)\n      \}\)/.exec(ipcAgentSource);
 if (runCallMatch === null) {
   report({
     ok: false, gate: LABEL, status: 'failed', code: 'RUN_CALL_UNPARSEABLE',
-    message: '未能从 ipc.ts 提取 runAgentSession 调用块;失败关闭。'
+    message: '未能从 ipc/agent.ts 提取 runAgentSession 调用块;失败关闭。'
   }, 1);
 }
 const runCallBody = runCallMatch[1];

@@ -12,6 +12,7 @@ import { mkdir, mkdtemp, rm } from 'node:fs/promises';
 import { basename, dirname, join, resolve } from 'node:path';
 import type {
   Diagnostic,
+  EventInstruction,
   EventExport,
   IndexedFile,
   MapExport,
@@ -167,7 +168,12 @@ async function readEventExport(
   input: NativeSemanticRefreshOptions
 ): Promise<EventExport> {
   const result = await runBridge<Record<string, unknown>>({
-    command: 'read-emevd-document',
+    // The outline document is deliberately bounded and has no per-event
+    // instruction body.  Refreshing the semantic index through it recreates
+    // the old empty `instructions: []` projection.  `export-event` is the
+    // native semantic export that already expands every event/instruction
+    // while keeping the raw args opaque until EMEDF is bound by the caller.
+    command: 'export-event',
     filePath: file.absolutePath,
     resourceUri: file.sourceUri,
     allowedRoots,
@@ -175,18 +181,14 @@ async function readEventExport(
     ...(input.timeoutMs ? { timeoutMs: input.timeoutMs } : {}),
     ...(input.signal ? { signal: input.signal } : {}),
     maxFrameBytes: 32 * 1024 * 1024,
-    commandOptions: {
-      cachePolicy: 'bypass',
-      instructionPage: 0,
-      instructionPageSize: 65_536
-    }
+    commandOptions: { cachePolicy: 'bypass' }
   });
   const data = requireBridgeData(result, file.sourceUri, 'EMEVD');
   const eventsRaw = arrayValue(data.events);
   if (eventsRaw.length === 0 && numberValue(data.eventCount) !== 0) {
     throw new Error('EMEVD native read returned no event table.');
   }
-  const sourceHash = file.sha256;
+  const sourceHash = stringValue(data.sourceHash) ?? file.sha256;
   const sourceRevision = file.mtimeMs;
   const mapId = stripNativeExtension(file.relativePath || file.absolutePath, 'emevd');
   const events = eventsRaw.map((value, index) => {
@@ -196,20 +198,23 @@ async function readEventExport(
       throw new Error(`EMEVD events[${index}] 缺少合法 id。`);
     }
     const raw: Record<string, unknown> = {
-      authority: 'native-verified-outline',
+      authority: 'native-read-semantic-export',
       instructionCount: numberValue(record.instructionCount) ?? 0,
       restBehavior: numberValue(record.restBehavior) ?? 0,
       parameterCount: Array.isArray(record.parameters) ? record.parameters.length : 0,
       parameters: Array.isArray(record.parameters) ? record.parameters : []
     };
+    const eventUri = `${file.sourceUri}#event/${eventId}`;
+    const semanticInstructions = nativeSemanticInstructions(record, eventUri);
     return {
-      uri: `${file.sourceUri}#event/${eventId}`,
+      uri: eventUri,
       sourceUri: file.sourceUri,
       mapId,
       eventId,
+      ...(stringValue(record.name) ? { name: stringValue(record.name) } : {}),
       ...(sourceHash ? { sourceHash } : {}),
       ...(sourceRevision !== undefined ? { sourceRevision } : {}),
-      instructions: [],
+      instructions: semanticInstructions,
       raw
     };
   });
@@ -219,6 +224,56 @@ async function readEventExport(
     ...(sourceRevision !== undefined ? { sourceRevision } : {}),
     events
   };
+}
+
+/**
+ * Some Bridge semantic exports already attach decoded rows to each event,
+ * while the native outline normally omits them. Keep rows only when they are
+ * actually present and preserve their args/raw wire data; an absent row is not
+ * replaced by a guessed instruction.
+ */
+function nativeSemanticInstructions(
+  event: Record<string, unknown>,
+  eventUri: string
+): EventInstruction[] {
+  const rows = Array.isArray(event.instructions)
+    ? event.instructions
+    : Array.isArray(event.instructionRows) ? event.instructionRows : [];
+  return rows.flatMap((value, index) => {
+    const record = recordValue(value);
+    const instructionIndex = numberValue(record.index);
+    const args = Array.isArray(record.args)
+      ? record.args.flatMap((arg) => nativeSemanticArg(arg))
+      : [];
+    return [{
+      uri: stringValue(record.uri) || `${eventUri}/instruction/${instructionIndex ?? index}`,
+      index: instructionIndex !== undefined && Number.isSafeInteger(instructionIndex) && instructionIndex >= 0
+        ? instructionIndex
+        : index,
+      ...(stringValue(record.name) ? { name: stringValue(record.name) } : {}),
+      ...(stringValue(record.category) ? { category: stringValue(record.category) } : {}),
+      args,
+      ...(record.raw === undefined && (record.bank !== undefined || record.id !== undefined)
+        ? { raw: { bank: record.bank, id: record.id } }
+        : record.raw === undefined ? {} : { raw: record.raw })
+    }];
+  });
+}
+
+function nativeSemanticArg(value: unknown): EventInstruction['args'][number][] {
+  const record = recordValue(value);
+  const scalar = record.value;
+  if (typeof scalar !== 'string' && typeof scalar !== 'number' && typeof scalar !== 'boolean') return [];
+  return [{
+    ...(stringValue(record.name) ? { name: stringValue(record.name) } : {}),
+    value: scalar,
+    ...(record.role === 'flag' || record.role === 'eventId' || record.role === 'entityId'
+      || record.role === 'regionId' || record.role === 'paramId' || record.role === 'textId' || record.role === 'unknown'
+      ? { role: record.role } : {}),
+    ...(stringValue(record.paramName) ? { paramName: stringValue(record.paramName) } : {}),
+    ...(record.confidence === 'high' || record.confidence === 'medium' || record.confidence === 'low'
+      ? { confidence: record.confidence } : {})
+  }];
 }
 
 async function readMapExport(
@@ -346,6 +401,8 @@ async function readParamExports(
           uri: `${file.sourceUri}#${tableName}/${rowId}`,
           sourceUri: file.sourceUri,
           paramName: tableName,
+          entryName: entry.name,
+          entryIndex: entry.index,
           rowId,
           ...(stringValue(record.name) ? { rowName: stringValue(record.name) } : {}),
           ...(file.sha256 ? { sourceHash: file.sha256 } : {}),
@@ -357,6 +414,9 @@ async function readParamExports(
       });
       const exported: ParamExport = {
         paramName: tableName,
+        sourceUri: file.sourceUri,
+        entryName: entry.name,
+        entryIndex: entry.index,
         ...(file.sha256 ? { sourceHash: file.sha256 } : {}),
         ...(file.mtimeMs !== undefined ? { sourceRevision: file.mtimeMs } : {}),
         rows

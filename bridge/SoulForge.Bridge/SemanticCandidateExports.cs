@@ -61,9 +61,11 @@ static class SemanticCandidateExports
                         raw = new
                         {
                             parser = "sekiro-emevd-native-v1",
+                            sourceHash = document.SourceHash,
                             bank = instruction.Bank,
                             id = instruction.Id,
                             argsLength = instruction.ArgsLength,
+                            argsBase64 = Convert.ToBase64String(instruction.Args),
                             argsOffset = instruction.ArgsOffset,
                             layerOffset = instruction.LayerOffset,
                             confidence = "medium"

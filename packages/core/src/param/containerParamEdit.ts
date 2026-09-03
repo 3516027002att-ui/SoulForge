@@ -39,11 +39,16 @@ export interface ParamFieldReadQuery {
 export interface ParamFieldSnapshot {
   table: string;
   rowId: number;
+  /** Physical BND4 child identity returned by the native read. */
+  entryName?: string;
+  entryIndex?: number;
   /** Native row name returned by the PARAM document, when available. */
   rowName?: string;
   fieldId: string;
   displayName?: string;
   description?: string;
+  /** Native metadata reference target, for example ResourceItemLotParam. */
+  refs?: string;
   /** Provenance returned by the same native document read, never a cached index fallback. */
   sourceHash?: string;
   sourceRevision?: number;
@@ -62,6 +67,30 @@ export type ParamReadResult =
       containerPath: string;
       fields: ParamFieldSnapshot[];
       missingRows: Array<{ table: string; rowId: number }>;
+      diagnostics: Diagnostic[];
+    }
+  | { ok: false; error: ParamEditFailure; diagnostics: Diagnostic[] };
+
+export interface ParamFieldDefinitionSnapshot {
+  fieldId: string;
+  name: string;
+  type: string;
+  description?: string;
+  /** Native metadata reference target, for example ResourceItemLotParam. */
+  refs?: string;
+}
+
+export type ParamFieldDefinitionResult =
+  | {
+      ok: true;
+      containerPath: string;
+      table: string;
+      entryName: string;
+      entryIndex: number;
+      rowIds: number[];
+      sourceHash: string;
+      sourceRevision?: number;
+      fields: ParamFieldDefinitionSnapshot[];
       diagnostics: Diagnostic[];
     }
   | { ok: false; error: ParamEditFailure; diagnostics: Diagnostic[] };
@@ -237,10 +266,13 @@ export async function readParamFields(input: {
         fields.push({
           table: loaded.tableName,
           rowId,
+          entryName: loaded.entry.name,
+          entryIndex: loaded.entry.index,
           ...(row.name ? { rowName: row.name } : {}),
           fieldId,
           ...(field.name && field.name !== fieldId ? { displayName: field.name } : {}),
           ...(field.description ? { description: field.description } : {}),
+          ...(field.refs ? { refs: field.refs } : {}),
           sourceHash: loaded.sourceHash,
           ...(sourceRevision !== undefined ? { sourceRevision } : {}),
           value: readFieldValue(row.dataBase64, loaded.definition, fieldId)
@@ -266,6 +298,114 @@ export async function readParamFields(input: {
     };
   }
   return { ok: true, containerPath: container.path, fields, missingRows, diagnostics };
+}
+
+/**
+ * Search the trusted definition for fields relevant to an already resolved
+ * native row. This is deliberately separate from read_param_fields: it lets
+ * the Agent obtain real field IDs without sending an unbounded full-row read,
+ * while the subsequent value read still requires an explicit non-empty list.
+ */
+export async function searchParamFieldDefinitions(input: {
+  edit: NativeEditSession;
+  table: string;
+  rowIds: number[];
+  query: string;
+  limit?: number;
+  containerPath?: string;
+}): Promise<ParamFieldDefinitionResult> {
+  const query = input.query.trim();
+  if (!query || input.rowIds.length === 0) {
+    return {
+      ok: false,
+      error: {
+        code: 'PARAM_FIELD_QUERY_REQUIRED',
+        message: 'search_param_fields 需要已定位的 table、rowIds 和非空 query。'
+      },
+      diagnostics: []
+    };
+  }
+  const container = await resolveGameparamContainer(input.edit.session.layers.overlayRoot, input.containerPath);
+  if (!container.ok) return { ok: false, error: container.error, diagnostics: [] };
+  const entries = await listParamEntries(input.edit, container.path);
+  if (!entries.ok) return { ok: false, error: entries.error, diagnostics: entries.diagnostics };
+  const loaded = await loadTableRows(input.edit, container.path, entries.entries, input.table, input.rowIds);
+  if (!loaded.ok) return loaded;
+
+  const queryTerms = expandParamFieldQuery(query);
+  const scored = loaded.definition.fields.map((field) => ({
+    field,
+    score: scoreParamFieldDefinition(field, queryTerms)
+  }))
+    .filter((item) => item.score > 0)
+    .sort((left, right) => right.score - left.score || left.field.id.localeCompare(right.field.id))
+    .slice(0, Math.max(1, Math.min(32, Math.trunc(input.limit ?? 12))))
+    .map(({ field }) => ({
+      fieldId: field.id,
+      name: field.name,
+      type: field.type,
+      ...(field.description ? { description: field.description } : {}),
+      ...(field.refs ? { refs: field.refs } : {})
+    }));
+
+  let sourceRevision: number | undefined;
+  try {
+    sourceRevision = (await stat(container.path)).mtimeMs;
+  } catch {
+    // source revision is useful provenance, but failure to stat must not turn
+    // a metadata lookup into an unstructured exception.
+  }
+  return {
+    ok: true,
+    containerPath: container.path,
+    table: loaded.tableName,
+    entryName: loaded.entry.name,
+    entryIndex: loaded.entry.index,
+    rowIds: [...input.rowIds],
+    sourceHash: loaded.sourceHash,
+    ...(sourceRevision !== undefined ? { sourceRevision } : {}),
+    fields: scored,
+    diagnostics: loaded.diagnostics
+  };
+}
+
+function scoreParamFieldDefinition(
+  field: ParamDefDocument['fields'][number],
+  queryTerms: readonly string[]
+): number {
+  const id = field.id.toLocaleLowerCase();
+  const name = field.name?.toLocaleLowerCase() ?? '';
+  const description = field.description?.toLocaleLowerCase() ?? '';
+  const type = field.type.toLocaleLowerCase();
+  return queryTerms.reduce((sum, term) => {
+    const normalized = term.toLocaleLowerCase();
+    // A term in the stable field id is stronger than a prose mention in a
+    // description. For example, ResourceItemLotParam descriptions mention
+    // `resourceItemCategory01` on itemNum/lotBasePoint fields; returning those
+    // first hid the actual category field behind the result limit.
+    if (id === normalized) return sum + 100;
+    if (id.includes(normalized)) return sum + 60;
+    if (name === normalized) return sum + 40;
+    if (name.includes(normalized)) return sum + 30;
+    if (description.includes(normalized)) return sum + 10;
+    if (type.includes(normalized)) return sum + 5;
+    return sum;
+  }, 0);
+}
+
+function expandParamFieldQuery(query: string): string[] {
+  const terms = new Set(query.toLocaleLowerCase().split(/[\s,，、/]+/u).filter(Boolean));
+  const aliases: ReadonlyArray<[RegExp, string]> = [
+    [/血条|生命|生命值/u, 'hp health vitality hitpoint'],
+    [/精英|首领|boss/u, 'elite boss difficulty'],
+    [/攻击|敌对|阵营|目标/u, 'attack hostile team target faction'],
+    [/落雷|雷|特效|效果/u, 'lightning effect sfx spawn'],
+    [/掉落|奖励|铃铛|物品/u, 'drop reward item lot goods']
+  ];
+  for (const [pattern, replacement] of aliases) {
+    if (pattern.test(query)) replacement.split(' ').forEach((term) => terms.add(term));
+  }
+  return [...terms];
 }
 
 export async function setParamFields(input: {
@@ -676,16 +816,43 @@ function findTableEntry(entries: ContainerEntry[], wanted: string): ContainerEnt
   const token = normalizeTableToken(wanted);
   const exact = entries.find((entry) => normalizeTableToken(entry.name) === token);
   if (exact) return exact;
-  return entries.find((entry) => {
+
+  // Bridge PARAM rows may expose the native type name (BEHAVIOR_PARAM_ST)
+  // while the live container entry is the physical child (BehaviorParam.param).
+  // Accept that alias only when it resolves to exactly one child.  In
+  // particular, ATK_PARAM_ST can back multiple physical tables, so it must
+  // remain unresolved instead of selecting the first sibling.
+  const wantedVariants = new Set(tableTokenVariants(wanted));
+  const identityMatches = entries.filter((entry) =>
+    tableTokenVariants(entry.name).some((variant) => wantedVariants.has(variant))
+  );
+  if (identityMatches.length === 1) return identityMatches[0];
+
+  // Preserve the older prefix compatibility for callers that provide a
+  // shortened physical name, but make it fail closed if more than one child
+  // matches rather than silently choosing an arbitrary table.
+  const prefixMatches = entries.filter((entry) => {
     const name = normalizeTableToken(entry.name);
-    return name === token || name.startsWith(`${token}param`) || token.startsWith(name);
+    return name.startsWith(`${token}param`) || token.startsWith(name);
   });
+  return prefixMatches.length === 1 ? prefixMatches[0] : undefined;
 }
 
 export function normalizeTableToken(value: string): string {
   return basename(value.replace(/\\/g, '/'))
     .replace(/\.param$/i, '')
     .toLowerCase();
+}
+
+function tableTokenVariants(value: string): string[] {
+  const token = normalizeTableToken(value);
+  const compact = token.replace(/[^a-z0-9]+/gi, '');
+  if (compact.length === 0) return [];
+  const variants = new Set([compact]);
+  if (compact.endsWith('st') && compact.length > 2) {
+    variants.add(compact.slice(0, -2));
+  }
+  return [...variants];
 }
 
 function readFieldValue(

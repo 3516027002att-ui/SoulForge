@@ -126,12 +126,54 @@ export function compileEmevdDarkScript(
   const parsed = parseDarkScriptEvents(source, index, add);
   const ast = emptyAst(request, fileSpan);
 
+  // Event-scoped DarkScript is deliberately stricter than whole-file mode:
+  // one source block must identify one existing event. Pairing against a
+  // one-event projection below makes it impossible for omitted sibling events
+  // to turn into delete_event operations.
+  let scopedDocumentEvents: readonly EmevdEditorDocument['events'][number][] = document.events;
+  if (request.scopeEventId !== undefined) {
+    if (!Number.isSafeInteger(request.scopeEventId)) {
+      add(error(
+        'EMEVD_DSL_SCOPE_EVENT_ID_INVALID',
+        '事件作用域 eventId 必须是安全整数。',
+        fileSpan,
+        { resourceUri: request.resourceUri }
+      ));
+    }
+    const target = document.events.find((event) => event.eventId === request.scopeEventId);
+    if (!target) {
+      add(error(
+        'EMEVD_DSL_SCOPE_EVENT_NOT_FOUND',
+        `目标事件 ${request.scopeEventId} 不存在，拒绝作用域写回。`,
+        fileSpan,
+        { resourceUri: request.resourceUri }
+      ));
+    }
+    if (parsed.length !== 1) {
+      add(error(
+        'EMEVD_DSL_SCOPE_REQUIRES_SINGLE_EVENT',
+        `事件作用域要求源码恰好包含一个 $Event 块，实际为 ${parsed.length} 个。`,
+        fileSpan,
+        { resourceUri: request.resourceUri }
+      ));
+    } else if (parsed[0]!.eventId !== request.scopeEventId) {
+      add(error(
+        'EMEVD_DSL_SCOPE_EVENT_MISMATCH',
+        `源码事件 ${parsed[0]!.eventId} 与目标作用域事件 ${request.scopeEventId} 不一致。`,
+        parsed[0]!.span,
+        { resourceUri: request.resourceUri }
+      ));
+    } else if (target) {
+      scopedDocumentEvents = [target];
+    }
+  }
+
   if (diagnostics.some((item) => item.severity === 'error') || !registry || !actualSchemaFingerprint) {
     return { ok: false, ast, diagnostics: diagnostics.sort(compareDiagnostics) };
   }
 
   const operations: EmevdPlannedMutation[] = [];
-  const pairing = pairEvents(parsed, document.events);
+  const pairing = pairEvents(parsed, scopedDocumentEvents);
   for (const pair of pairing.pairs) {
     compilePairedEvent(pair.parsed, pair.documentEvent, registry, operations, add, request.resourceUri);
   }
@@ -156,6 +198,18 @@ export function compileEmevdDarkScript(
       targetPreconditionHash: computeEmevdEventFingerprint(missing),
       sourceSpan: fileSpan
     });
+  }
+
+  if (
+    request.scopeEventId !== undefined
+    && operations.some((operation) => operation.kind === 'insert_event' || operation.kind === 'delete_event')
+  ) {
+    add(error(
+      'EMEVD_DSL_SCOPE_EVENT_MUTATION_LEAK',
+      '事件作用域编译产生了越界的事件结构 mutation，拒绝提交。',
+      fileSpan,
+      { resourceUri: request.resourceUri }
+    ));
   }
 
   if (diagnostics.some((item) => item.severity === 'error')) {
@@ -273,7 +327,15 @@ function compilePairedEvent(
     encodings.set(entry.statement, { bank: encoded.bank, id: encoded.id, argsBase64: encoded.argsBase64, def: encoded.def });
   }
 
-  // 已对齐行：照旧逐行编参数差异。
+  // If an inserted structural line could not be encoded, do not continue into
+  // the match/delete/parameter-rebuild phase.  Otherwise an ambiguous rename
+  // can pair a later repeated instruction with the wrong native row, or delete
+  // the old row while silently dropping the replacement.  The whole
+  // structural edit is fail-closed as one unit.
+  if (blocked) return;
+
+  // 已对齐行：照旧逐行编参数差异。只有确认没有未编码的结构行后才执行，
+  // 避免 LCS 在重复指令名场景下给出“看似匹配”但身份不安全的参数写入。
   for (const entry of diff) {
     if (entry.kind === 'match') {
       compileStatement(entry.statement, entry.item, eventAnchor, operations, add, resourceUri);

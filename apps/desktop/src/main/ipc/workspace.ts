@@ -32,6 +32,7 @@ import type { RendererIndexedFile } from '../rendererDto.js';
 import { prepareBridgeRoots, type BridgeRootSession, type PrepareBridgeRootsResult } from '../bridgeRoots.js';
 import type { OperationLogUtilityClient } from '../operationLogUtilityClient.js';
 import type { TrustedIpcHandle } from './registration.js';
+import { persistRagCorpusBySourceDelta } from '../ragPersistence.js';
 import { buildRagCorpus, createRagCorpus, mergeCatalogAndPersisted } from '@soulforge/core';
 import {
   buildActionBinderMembershipIndex,
@@ -59,6 +60,7 @@ export interface AnalyzeWorkspaceSummary {
   inspectedFiles: number;
   referenceStats: { high: number; medium: number; low: number; suppressedAmbiguousNumbers: number };
   diagnostics: Diagnostic[];
+  rag: Pick<RagCorpus, 'stats' | 'availability' | 'diagnostics'>;
   events: Array<{ uri: string; eventId: number; name?: string }>;
   tools: import('@soulforge/core').ToolDescriptor[];
 }
@@ -92,6 +94,7 @@ export interface RendererWorkspaceScanResult {
 let indexedFiles: IndexedFile[] = [];
 let activeIndex: WorkspaceIndex | null = null;
 let activeRag: RagCorpus | null = null;
+let scheduleRagEmbedding: ((corpus: RagCorpus, database: OperationLogUtilityClient) => void) | null = null;
 let activeSession: WorkspaceSession | null = null;
 let activeWorkspaceSessionId: string | null = null;
 let activeWorkspaceSessionGeneration = 0;
@@ -101,6 +104,13 @@ let activeFingerprintStore: FingerprintStoreState | null = null;
 let foregroundActive = false;
 let workspaceIndexingAbort: AbortController | null = null;
 let workspaceIndexingTask: Promise<void> | null = null;
+interface WorkspaceSemanticIndexingTask {
+  sessionId: string;
+  generation: number;
+  promise: Promise<void>;
+  resolve: () => void;
+}
+let workspaceSemanticIndexingTask: WorkspaceSemanticIndexingTask | null = null;
 const actionMembershipForegroundTasks = new Map<string, Promise<{
   ok: boolean;
   diagnostics: Diagnostic[];
@@ -112,6 +122,7 @@ let workspaceAnalyzeInFlight: {
   generation: number;
   promise: Promise<AnalyzeWorkspaceSummary>;
 } | null = null;
+let workspaceAnalysisStarter: (() => Promise<void>) | null = null;
 let activeOverlayLabel = '';
 const directorySelections = new Map<string, DirectorySelectionRecord>();
 const recentPathsFile = join(app.getPath('userData'), 'recent-paths.json');
@@ -133,18 +144,90 @@ function bridgeRootSession(session: WorkspaceSession, storage: { root: string })
 function bridgeRootsDiagnostic(code: string, result: Extract<PrepareBridgeRootsResult, { ok: false }>): Diagnostic {
   return { severity: 'error', code, message: `${result.message}。操作：重试 / 打开 Problems / 检查工作区存储权限。`, ...(result.details !== undefined ? { details: result.details } : {}) };
 }
-async function persistActiveRag(database: OperationLogUtilityClient, corpus: RagCorpus): Promise<void> {
+async function persistActiveRag(
+  database: OperationLogUtilityClient,
+  corpus: RagCorpus,
+  previous: RagCorpus | null = null,
+  signal?: AbortSignal,
+  scheduleEmbedding = true
+): Promise<void> {
+  await persistRagCorpusBySourceDelta(database, corpus, previous, signal);
+  // Publish only after the source delta is durable.  Publishing first would
+  // make a cancelled bounded refresh look committed and could cause the next
+  // retry to skip SQLite batches that were not written yet.
   activeRag = corpus;
-  await database.replaceRagChunks(corpus.chunks);
-  await database.replaceReferences(corpus.references);
+  if (scheduleEmbedding) scheduleRagEmbedding?.(corpus, database);
 }
-async function refreshRagAfterScan(database: OperationLogUtilityClient, index: WorkspaceIndex): Promise<void> {
+
+function throwIfRagRefreshAborted(signal?: AbortSignal): void {
+  if (!signal?.aborted) return;
+  const error = new Error('RAG 语义持久化已被更新任务取消。');
+  error.name = 'AbortError';
+  throw error;
+}
+
+async function refreshRagAfterScan(
+  database: OperationLogUtilityClient,
+  index: WorkspaceIndex,
+  signal?: AbortSignal
+): Promise<void> {
+  throwIfRagRefreshAborted(signal);
   const catalog = buildRagCorpus(index);
-  const persisted = createRagCorpus({ workspaceId: index.workspaceId, builtAt: catalog.builtAt, chunks: await database.loadRagChunks(), references: await database.loadReferences() });
-  await persistActiveRag(database, mergeCatalogAndPersisted(catalog, persisted));
+  const chunks = await database.loadRagChunks();
+  throwIfRagRefreshAborted(signal);
+  const references = await database.loadReferences();
+  throwIfRagRefreshAborted(signal);
+  const persisted = createRagCorpus({ workspaceId: index.workspaceId, builtAt: catalog.builtAt, chunks, references });
+  await persistActiveRag(database, mergeCatalogAndPersisted(catalog, persisted), persisted, signal);
 }
-async function refreshRagAfterAnalyze(database: OperationLogUtilityClient, index: WorkspaceIndex): Promise<void> {
-  await persistActiveRag(database, buildRagCorpus(index));
+async function refreshRagAfterAnalyze(
+  database: OperationLogUtilityClient,
+  index: WorkspaceIndex,
+  diagnostics: readonly Diagnostic[] = [],
+  signal?: AbortSignal,
+  scheduleEmbedding = true
+): Promise<void> {
+  throwIfRagRefreshAborted(signal);
+  const catalog = buildRagCorpus(index, new Date().toISOString(), diagnostics);
+  throwIfRagRefreshAborted(signal);
+  const chunks = await database.loadRagChunks();
+  throwIfRagRefreshAborted(signal);
+  const references = await database.loadReferences();
+  throwIfRagRefreshAborted(signal);
+  const persisted = createRagCorpus({
+    workspaceId: index.workspaceId,
+    builtAt: catalog.builtAt,
+    chunks,
+    references
+  });
+  await persistActiveRag(database, mergeCatalogAndPersisted(catalog, persisted), persisted, signal, scheduleEmbedding);
+}
+
+function resolveWorkspaceSemanticIndexingTask(task: WorkspaceSemanticIndexingTask | null = workspaceSemanticIndexingTask): void {
+  if (!task) return;
+  task.resolve();
+  if (workspaceSemanticIndexingTask === task) workspaceSemanticIndexingTask = null;
+}
+
+async function cancelAbandonedWorkspaceJobs(database: OperationLogUtilityClient): Promise<void> {
+  const now = new Date().toISOString();
+  for (const job of await database.listJobs()) {
+    if (job.status !== 'running' || !job.jobKind.startsWith('workspace_')) continue;
+    await database.upsertJob({
+      jobId: job.jobId,
+      title: job.title,
+      jobKind: job.jobKind,
+      status: 'cancelled',
+      progress: { ...job.progress, message: '上一次工作区任务未正常收口，已在新会话启动时取消。' },
+      payload: job.payload,
+      ...(job.result !== undefined ? { result: job.result } : {}),
+      error: { code: 'WORKSPACE_JOB_SUPERSEDED', message: '工作区会话重新打开，旧任务已被新任务取代。' },
+      createdAt: job.createdAt,
+      ...(job.startedAt ? { startedAt: job.startedAt } : {}),
+      completedAt: now,
+      updatedAt: now
+    });
+  }
 }
 function createDirectorySelection(event: IpcMainInvokeEvent, absolutePath: string, kind: DirectorySelectionRecord['kind']): DirectorySelection {
   const selection: DirectorySelectionRecord = { selectionId: randomUUID(), label: basename(absolutePath) || (kind === 'overlay' ? 'Mod 工作区' : '原版游戏目录'), absolutePath, kind, ownerWebContentsId: event.sender.id, expiresAt: Date.now() + 5 * 60_000 };
@@ -181,6 +264,7 @@ export interface WorkspaceIpcDeps {
     session: WorkspaceSession | null,
     fallback: string
   ): Promise<{ allowedRoots: string[]; diagnostics: Diagnostic[] }>;
+  scheduleRagEmbedding?: (corpus: RagCorpus, database: OperationLogUtilityClient) => void;
 }
 
 export async function rebuildActionBinderMembershipIndex(input: {
@@ -280,17 +364,38 @@ export async function ensureActionBinderMembershipForFamily(
 }
 
 /**
- * 等待当前工作区的后台哈希/语义索引任务完成。
+ * 等待当前工作区的后台哈希与首批语义索引任务完成。
  *
- * workspace.scan 先返回轻量文件列表，再在后台建立 ACTION Binder membership。
- * 动作 IPC 需要等待同一个任务，而不是在播放阶段重新扫描 sibling ANIBND。
- * 任务自身会把失败写入扫描 job，因此这里保持等待接口不抛出后台异常。
+ * workspace.scan 先返回轻量文件列表，再在后台完成哈希和 RAG 文件目录发布；
+ * workspace.analyze 随后优先解析 PARAM/MSG，并在首批真实语义行出现时发布
+ * 一份可查询的中间索引。
+ * ACTION membership 现在按 cXXXX 家族懒建立；动作 IPC 不应在播放阶段
+ * 重新扫描 sibling ANIBND，而应等待同一个按家族去重的任务。扫描任务自身
+ * 会把失败写入 scan job，因此这里保持等待接口不抛出后台异常。
+ *
+ * 这里不能等待 workspace.analyze 的最终 Promise：深度原生分析包含真实 MSB
+ * 全量解析，可能持续数分钟。只等待它的首批语义阶段；需要原生字段时，仍
+ * 由对应工具按精确 sourceUri/ID 失败关闭或懒读取。
  */
-export async function waitForWorkspaceIndexing(): Promise<void> {
-  // scan 与 analyze 都可能替换/建立 ACTION membership。按快照等待，完成后
-  // 再检查一次，避免刚等完 scan 就撞上 analyze 刚发布的未就绪索引。
+export async function waitForWorkspaceIndexing(signal?: AbortSignal): Promise<void> {
+  // The renderer normally starts workspace.analyze after the shell is visible,
+  // but an Agent can be submitted in that small interval. Start the one
+  // existing single-flight analysis here as well, so RAG never settles on a
+  // file-only/old corpus merely because the UI request has not arrived yet.
+  if (workspaceAnalysisStarter && activeSession && activeWorkspaceSessionId && activeIndex && !workspaceSemanticIndexingTask) {
+    void workspaceAnalysisStarter().catch(() => {
+      // The owning workspace job keeps the structured diagnostics; the Agent
+      // receives RAG_UNAVAILABLE rather than an unhandled rejection.
+    });
+  }
   for (;;) {
+    if (signal?.aborted) {
+      const error = new Error('等待工作区语义索引时任务已取消。');
+      error.name = 'AbortError';
+      throw error;
+    }
     const scanTask = workspaceIndexingTask;
+    const semanticTask = workspaceSemanticIndexingTask;
     if (scanTask) {
       try {
         await scanTask;
@@ -298,16 +403,20 @@ export async function waitForWorkspaceIndexing(): Promise<void> {
         // 失败状态由 workspace scan job / active index diagnostics 负责暴露。
       }
     }
-    const analyzeTask = workspaceAnalyzeInFlight?.promise;
-    if (analyzeTask) {
+    if (semanticTask) {
       try {
-        await analyzeTask;
+        await semanticTask.promise;
       } catch {
-        // 分析失败由调用方的结构化诊断负责暴露。
+        // 分析失败时由 activeRag/诊断保持失败关闭；等待者不能永久悬挂。
       }
     }
-    if (activeIndex?.isActionBinderMembershipReady()) return;
-    if (workspaceIndexingTask !== scanTask || workspaceAnalyzeInFlight?.promise !== analyzeTask) continue;
+    if (signal?.aborted) {
+      const error = new Error('等待工作区语义索引时任务已取消。');
+      error.name = 'AbortError';
+      throw error;
+    }
+    if (workspaceIndexingTask !== scanTask
+      || workspaceSemanticIndexingTask?.promise !== semanticTask?.promise) continue;
     return;
   }
 }
@@ -315,9 +424,14 @@ export async function waitForWorkspaceIndexing(): Promise<void> {
 export function clearWorkspaceIpcCaches(): void {
   directorySelections.clear();
   actionMembershipForegroundTasks.clear();
+  resolveWorkspaceSemanticIndexingTask();
+  activeRag = null;
+  scheduleRagEmbedding = null;
+  workspaceAnalysisStarter = null;
 }
 
 export function registerWorkspaceIpcHandlers(deps: WorkspaceIpcDeps): void {
+  scheduleRagEmbedding = deps.scheduleRagEmbedding ?? null;
   const handle = deps.handle;
 
   let runtimeAdapter: Me3RuntimeAdapter | null = null;
@@ -399,13 +513,21 @@ export function registerWorkspaceIpcHandlers(deps: WorkspaceIpcDeps): void {
     const effectiveBaseRecord = (baseSelection as DirectorySelectionRecord | undefined) ?? autoBaseRecord ?? null;
     if (workspaceIndexingAbort) { try { workspaceIndexingAbort.abort(); } catch {} }
     if (workspaceIndexingTask) { try { await workspaceIndexingTask; } catch {} }
+    resolveWorkspaceSemanticIndexingTask();
     if (activeSession) await disposeBridgeDaemonPool();
+    // A corpus is valid only for its active WorkspaceIndex/session.  Clear it
+    // before exposing the new session so an agent cannot query the previous
+    // workspace during the open-to-analyze window.
+    activeRag = null;
+    activeIndex = null;
+    indexedFiles = [];
     workspaceSessionGenerationCounter += 1;
     const thisSessionGeneration = workspaceSessionGenerationCounter;
     activeWorkspaceSessionGeneration = thisSessionGeneration;
     activeSession = await openWorkspaceSession({ overlayRoot: overlaySelection.absolutePath, ...(effectiveBaseRecord ? { baseRoot: effectiveBaseRecord.absolutePath } : {}), game: 'sekiro' });
     activeWorkspaceSessionId = randomUUID();
     const database = await deps.ensureActiveOperationLog(activeSession);
+    await cancelAbandonedWorkspaceJobs(database);
     const physicalOverlayRoot = await (async () => { try { const { realpath } = await import('node:fs/promises'); return await realpath(activeSession.layers.overlayRoot); } catch { return activeSession.layers.overlayRoot; } })();
     const physicalOverlayHash = workspacePhysicalRootHash(physicalOverlayRoot);
     const physicalBaseHash = activeSession.layers.baseRoot ? workspacePhysicalRootHash(await (async () => { try { const { realpath } = await import('node:fs/promises'); return await realpath(activeSession.layers.baseRoot!); } catch { return activeSession.layers.baseRoot!; } })()) : undefined;
@@ -437,6 +559,29 @@ export function registerWorkspaceIpcHandlers(deps: WorkspaceIpcDeps): void {
       const openHandles: import('node:fs/promises').FileHandle[] = [];
       let activeDiskReaders = 0;
       const releaseAll = async () => { for (const h of openHandles) { try { await h.close(); } catch {} } openHandles.length = 0; };
+      const cancelCurrentJob = async (message: string) => {
+        // The operation-log client is shared.  Once another workspace has
+        // opened, writing through this old closure could mark the new
+        // workspace's database, so leave cross-session reconciliation to the
+        // next open's cancelAbandonedWorkspaceJobs call.
+        if (currentSession !== activeSession || currentSessionId !== activeWorkspaceSessionId) return;
+        const cancelledAt = new Date().toISOString();
+        try {
+          await database.upsertJob({
+            jobId: scanJobId,
+            title: '扫描工作区',
+            jobKind: 'workspace_scan',
+            status: 'cancelled',
+            progress: { current: 0, total: lightFiles.length, message },
+            payload: { workspaceSessionId: currentSessionId, workspaceSessionGeneration: currentGeneration },
+            error: { code: 'WORKSPACE_SCAN_CANCELLED', message },
+            createdAt: scanStartedAt,
+            startedAt: scanStartedAt,
+            completedAt: cancelledAt,
+            updatedAt: cancelledAt
+          });
+        } catch { /* 会话切换时数据库可能已关闭；不能阻止句柄清理。 */ }
+      };
       try {
         const { createHash: _createHash } = await import('node:crypto');
         const { open: _open } = await import('node:fs/promises');
@@ -481,23 +626,33 @@ export function registerWorkspaceIpcHandlers(deps: WorkspaceIpcDeps): void {
           }
           await new Promise((r) => setTimeout(r, 0));
         }
-        if (controller.signal.aborted) { await releaseAll(); return; }
-        if (currentGeneration !== activeWorkspaceSessionGeneration || currentSession !== activeSession || currentSessionId !== activeWorkspaceSessionId) { await releaseAll(); return; }
+        if (controller.signal.aborted) { await cancelCurrentJob('工作区扫描被新任务取消。'); await releaseAll(); return; }
+        if (currentGeneration !== activeWorkspaceSessionGeneration || currentSession !== activeSession || currentSessionId !== activeWorkspaceSessionId) { await cancelCurrentJob('工作区会话已切换，旧扫描结果已丢弃。'); await releaseAll(); return; }
         indexedFiles = enriched as unknown as IndexedFile[]; indexForSession.setFiles(enriched as unknown as IndexedFile[]); await database.replaceFiles(enriched as unknown as IndexedFile[]);
-        const actionBinderIndex = await rebuildActionBinderMembershipIndex({
-          deps,
-          index: indexForSession,
-          session: currentSession,
-          sessionId: currentSessionId,
-          indexedFiles: indexedFiles
-        });
+        // ACTION membership is an on-demand projection.  Building every
+        // original/mod *.anibnd.dcx here forces full DCX+BND4 materialization
+        // for unrelated character families while the user is merely opening a
+        // workspace; several large native reads can otherwise coexist and
+        // exhaust the desktop.  The ACTION IPC builds only the requested
+        // cXXXX family through ensureActionBinderMembershipForFamily.
+        indexForSession.markActionBinderMembershipGlobalNotReady();
+        const actionBinderIndex = {
+          ok: true,
+          diagnostics: [{
+            severity: 'info' as const,
+            code: 'ACTION_BINDER_MEMBERSHIP_DEFERRED',
+            message: '全局 ACTION membership 已延迟；打开具体 cXXXX 动作时按角色家族建立。'
+          }],
+          characterFamilies: [],
+          candidateCount: 0
+        };
         if (continuity.continuity === 'UNKNOWN' && hashedCount + reuseCount === enriched.length) fingerprintStore.continuity = { ...continuity, continuity: 'PROVEN', unknownReason: null, cleanShutdown: true };
         fingerprintStore.continuity.cleanShutdown = true; try { await saveFingerprintStore({ storageRoot, state: fingerprintStore }); } catch {}
         const completedAt = new Date().toISOString(); const backgroundCompleteAt = Date.now();
         await database.upsertJob({ jobId: scanJobId, title: '扫描工作区', jobKind: 'workspace_scan', status: 'completed', progress: { current: enriched.length, total: enriched.length }, payload: { workspaceSessionId: currentSessionId, workspaceSessionGeneration: currentGeneration, fingerprintStoreGeneration: currentStoreGen }, result: { fileCount: enriched.length, hashedCount, reuseCount, shellVisibleAt, filesVisibleAt, backgroundCompleteAt, shellVisibleMs: filesVisibleAt - shellVisibleAt, indexingMs: backgroundCompleteAt - shellVisibleAt, openHandles: 0, activeDiskReaders: 0, actionBinderIndex }, createdAt: scanStartedAt, startedAt: scanStartedAt, completedAt, updatedAt: completedAt });
-        if (activeIndex === indexForSession) await refreshRagAfterScan(database, indexForSession);
+        if (activeIndex === indexForSession) await refreshRagAfterScan(database, indexForSession, controller.signal);
       } catch (error) {
-        await releaseAll(); if (controller.signal.aborted) return; if (currentGeneration !== activeWorkspaceSessionGeneration) return;
+        await releaseAll(); if (controller.signal.aborted) { await cancelCurrentJob('工作区扫描被新任务取消。'); return; } if (currentGeneration !== activeWorkspaceSessionGeneration) { await cancelCurrentJob('工作区会话已切换，旧扫描结果已丢弃。'); return; }
         const failedAt = new Date().toISOString(); try { await database.upsertJob({ jobId: scanJobId, title: '扫描工作区', jobKind: 'workspace_scan', status: 'failed', progress: { current: 0 }, payload: { workspaceSessionId: currentSessionId, workspaceSessionGeneration: currentGeneration }, error: { message: error instanceof Error ? error.message : String(error) }, createdAt: scanStartedAt, startedAt: scanStartedAt, completedAt: failedAt, updatedAt: failedAt }); } catch {}
       }
     })();
@@ -510,10 +665,14 @@ export function registerWorkspaceIpcHandlers(deps: WorkspaceIpcDeps): void {
     const baseSelection = baseSelectionId ? consumeDirectorySelection(event, baseSelectionId, 'base') : undefined;
     if (workspaceIndexingAbort) { try { workspaceIndexingAbort.abort(); } catch {} }
     if (workspaceIndexingTask) { try { await workspaceIndexingTask; } catch {} }
+    resolveWorkspaceSemanticIndexingTask();
     await disposeBridgeDaemonPool();
+    activeRag = null;
+    activeIndex?.clearActionBinderMembership();
+    activeIndex = null;
+    indexedFiles = [];
     workspaceSessionGenerationCounter += 1; activeWorkspaceSessionGeneration = workspaceSessionGenerationCounter; activeWorkspaceSessionId = randomUUID();
     activeSession = await openWorkspaceSession({ overlayRoot: activeSession.layers.overlayRoot, ...(baseSelection ? { baseRoot: baseSelection.absolutePath } : {}), game: activeSession.meta.game });
-    activeIndex?.clearActionBinderMembership();
     const workspaceLabel = activeOverlayLabel || activeSession.meta.game;
     return { workspaceSessionId: activeWorkspaceSessionId, session: { workspaceSessionId: activeWorkspaceSessionId, workspaceLabel, game: activeSession.meta.game, openedAt: activeSession.meta.openedAt, baseMounted: !activeSession.meta.baseMissing, ...(baseSelection ? { baseLabel: baseSelection.label } : {}) } };
   });
@@ -524,7 +683,7 @@ export function registerWorkspaceIpcHandlers(deps: WorkspaceIpcDeps): void {
     summary: AnalyzeWorkspaceSummary;
   } | null = null;
 
-  handle('workspace.analyze', async (): Promise<AnalyzeWorkspaceSummary> => {
+  const analyzeCurrentWorkspace = async (): Promise<AnalyzeWorkspaceSummary> => {
     if (!activeSession || !activeWorkspaceSessionId) throw new Error('请先打开工作区。');
     const session = activeSession;
     const sessionId = activeWorkspaceSessionId;
@@ -537,21 +696,72 @@ export function registerWorkspaceIpcHandlers(deps: WorkspaceIpcDeps): void {
     if (workspaceAnalyzeInFlight && workspaceAnalyzeInFlight.sessionId === sessionId && workspaceAnalyzeInFlight.generation === generation) {
       return workspaceAnalyzeInFlight.promise;
     }
+    // workspace.scan deliberately returns after the light directory scan so the
+    // shell can become interactive.  Its background task still hashes every
+    // file, builds ACTION membership, and publishes the file-only RAG corpus.
+    // Do not start the full native analysis beside that work: the map export is
+    // CPU/memory intensive and the overlap can make Electron appear hung.
+    const scanTask = workspaceIndexingTask;
+    let resolveSemanticStage!: () => void;
+    const semanticStagePromise = new Promise<void>((resolve) => {
+      resolveSemanticStage = resolve;
+    });
+    const semanticStage: WorkspaceSemanticIndexingTask = {
+      sessionId,
+      generation,
+      promise: semanticStagePromise,
+      resolve: resolveSemanticStage
+    };
+    workspaceSemanticIndexingTask = semanticStage;
+    let semanticStagePublished = false;
     const promise = (async (): Promise<AnalyzeWorkspaceSummary> => {
+      if (scanTask) {
+        try {
+          await scanTask;
+        } catch {
+          // The scan job owns its structured failure state.  Analysis should
+          // still run so it can return any native diagnostics it can obtain.
+        }
+      }
+      if (sessionId !== activeWorkspaceSessionId || generation !== activeWorkspaceSessionGeneration) {
+        throw new Error('工作区已切换，分析结果已丢弃。');
+      }
       const result = await analyzeWorkspace({
         workspaceRoot: session.layers.overlayRoot,
-        ...(session.layers.baseRoot ? { oodleRuntimeRoot: session.layers.baseRoot } : {})
+        ...(session.layers.baseRoot ? { oodleRuntimeRoot: session.layers.baseRoot } : {}),
+        onSemanticIndexReady: async (stage) => {
+          if (semanticStagePublished) return;
+          if (sessionId !== activeWorkspaceSessionId || generation !== activeWorkspaceSessionGeneration) {
+            throw new Error('工作区已切换，阶段语义索引已丢弃。');
+          }
+          semanticStagePublished = true;
+          // The analysis scan deliberately omits content hashes. Reattach the
+          // already verified light catalog before publishing symbols so exact
+          // sourceHash/sourceRevision checks remain available to the Agent.
+          stage.index.setFiles(indexedFiles);
+          stage.index.rebuildReferences({ enableNumericFallback: true });
+          activeIndex = stage.index;
+          indexedFiles = stage.index.getFiles();
+          try {
+            const database = await deps.ensureActiveOperationLog(session);
+            // The full analysis will publish again at the end.  Do not start
+            // embedding during this transitional slice: it would compete with
+            // the remaining native EVENT/MAP pass and is not needed for the
+            // default lexical/structured Agent path.
+            await refreshRagAfterAnalyze(database, stage.index, stage.diagnostics, undefined, false);
+          } finally {
+            resolveWorkspaceSemanticIndexingTask(semanticStage);
+          }
+        }
       });
       if (sessionId !== activeWorkspaceSessionId || generation !== activeWorkspaceSessionGeneration) {
         throw new Error('工作区已切换，分析结果已丢弃。');
       }
-      const actionBinderIndex = await rebuildActionBinderMembershipIndex({
-        deps,
-        index: result.index,
-        session,
-        sessionId,
-        indexedFiles: result.index.getFiles()
-      });
+      // Do not eagerly materialize every character's ANIBND after native
+      // analysis.  ACTION playback has a scoped, deterministic lazy builder;
+      // keeping the global projection deferred prevents another full native
+      // fan-out immediately after the expensive map/event pass.
+      result.index.markActionBinderMembershipGlobalNotReady();
       if (sessionId !== activeWorkspaceSessionId || generation !== activeWorkspaceSessionGeneration) {
         throw new Error('工作区已切换，分析结果已丢弃。');
       }
@@ -560,12 +770,28 @@ export function registerWorkspaceIpcHandlers(deps: WorkspaceIpcDeps): void {
       activeIndex = result.index;
       indexedFiles = result.index.getFiles();
       const database = await deps.ensureActiveOperationLog(session);
-      await refreshRagAfterAnalyze(database, result.index);
+      await refreshRagAfterAnalyze(database, result.index, result.diagnostics.map((diagnostic) => ({
+        severity: diagnostic.severity,
+        code: diagnostic.code,
+        message: diagnostic.message,
+        ...(diagnostic.sourceUri ? { sourceUri: diagnostic.sourceUri } : {})
+      })));
       const summary: AnalyzeWorkspaceSummary = {
         parsedFiles: result.parsedFiles,
         inspectedFiles: result.inspectedFiles,
         referenceStats: result.referenceStats,
         diagnostics: sanitizeDiagnostics(result.diagnostics),
+        rag: activeRag
+          ? {
+              stats: activeRag.stats,
+              availability: activeRag.availability,
+              diagnostics: sanitizeDiagnostics(activeRag.diagnostics)
+            }
+          : {
+              stats: createRagCorpus({ workspaceId: result.index.workspaceId, builtAt: new Date().toISOString(), chunks: [] }).stats,
+              availability: 'unavailable',
+              diagnostics: [{ severity: 'warning', code: 'RAG_NOT_PUBLISHED', message: 'RAG 语料尚未发布。' }]
+            },
         events: result.index.searchEvents('', 200).map(({ item }) => ({
           uri: item.uri,
           eventId: item.eventId,
@@ -573,9 +799,6 @@ export function registerWorkspaceIpcHandlers(deps: WorkspaceIpcDeps): void {
         })),
         tools: toolRegistry.list()
       };
-      if (!actionBinderIndex.ok) {
-        summary.diagnostics = [...summary.diagnostics, ...actionBinderIndex.diagnostics];
-      }
       lastAnalyze = { sessionId, generation, summary };
       return summary;
     })();
@@ -584,8 +807,13 @@ export function registerWorkspaceIpcHandlers(deps: WorkspaceIpcDeps): void {
       return await promise;
     } finally {
       if (workspaceAnalyzeInFlight?.promise === promise) workspaceAnalyzeInFlight = null;
+      resolveWorkspaceSemanticIndexingTask(semanticStage);
     }
-  });
+  };
+  handle('workspace.analyze', analyzeCurrentWorkspace);
+  workspaceAnalysisStarter = async () => {
+    await analyzeCurrentWorkspace();
+  };
 
   // NOTE: resource.preview / resource.search / resource.saveText intentionally remain in composition root.
 }

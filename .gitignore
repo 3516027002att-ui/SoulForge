@@ -42,6 +42,7 @@ mcps/
 .playwright-cli/
 .workbuddy/
 output/
+.ai-bridge/
 
 # One-off local generation scratch files.
 scripts/_tmp_*
@@ -105,3 +106,7 @@ obj/
 # Mission/task briefs and local review reports are operator working material,
 # not product source or release content.
 /mission/
+
+# Session-local Agent object/property ledgers; the user-facing protocol lives
+# in prompt/agent-task-record.md, while runtime records are disposable.
+/prompt/.agent-task-records/

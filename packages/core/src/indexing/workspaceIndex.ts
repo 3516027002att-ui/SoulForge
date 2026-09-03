@@ -1,5 +1,7 @@
 import type {
+  EventArg,
   EventExport,
+  EventInstruction,
   EventSymbol,
   IndexedFile,
   MapEntitySymbol,
@@ -25,6 +27,11 @@ import {
   type BinderMembershipQuery,
   type BinderMembershipResult
 } from '../action/binderMembership.js';
+import {
+  buildTextEntryLookup,
+  collectParamTextLinks,
+  paramTextLinkSearchText
+} from '../references/paramTextReferences.js';
 
 export interface SearchResourcesOptions {
   query: string;
@@ -311,8 +318,36 @@ export class WorkspaceIndex {
   }
 
   upsertEventExport(value: EventExport): void {
-    const key = value.mapId ?? value.events[0]?.sourceUri ?? value.events[0]?.uri ?? 'unknown';
-    this.eventExports = replaceByKey(this.eventExports, key, (item) => item.mapId ?? item.events[0]?.sourceUri ?? item.events[0]?.uri ?? 'unknown', value);
+    // An empty outline has no source URI in EventExport and therefore cannot
+    // identify a replacement. Treat it as an incomplete observation so it
+    // cannot erase an already indexed rich event body.
+    if (value.events.length === 0) return;
+    const key = eventExportKey(value);
+    // An export without one unambiguous source identity cannot safely replace
+    // another export. Keep it as a separate candidate instead of collapsing it
+    // under a shared "unknown" key.
+    if (!key || !hasUniqueEventIds(value.events)) {
+      this.eventExports = [...this.eventExports, value];
+      return;
+    }
+    const matches = this.eventExports
+      .map((item, index) => ({ item, index }))
+      .filter(({ item }) => eventExportKey(item) === key);
+    // Multiple exports with the same physical identity are ambiguous. Do not
+    // pick the first one and do not erase either body; a caller can invalidate
+    // the source and ingest a fresh export to resolve the ambiguity.
+    if (matches.length > 1) {
+      this.eventExports = [...this.eventExports, value];
+      return;
+    }
+    if (matches.length === 0) {
+      this.eventExports = [...this.eventExports, value];
+      return;
+    }
+    const match = matches[0]!;
+    const copy = [...this.eventExports];
+    copy[match.index] = mergeEventExport(match.item, value);
+    this.eventExports = copy;
   }
 
   upsertMapExport(value: MapExport): void {
@@ -320,13 +355,13 @@ export class WorkspaceIndex {
   }
 
   upsertParamExport(value: ParamExport): void {
-    this.paramExports = replaceByKey(this.paramExports, value.paramName.toLowerCase(), (item) => item.paramName.toLowerCase(), value);
+    this.paramExports = replaceByKey(this.paramExports, paramExportKey(value), paramExportKey, value);
   }
 
   /** Merge a partial live PARAM read without erasing rows indexed earlier. */
   mergeParamRows(value: ParamExport): void {
-    const key = value.paramName.toLowerCase();
-    const existing = this.paramExports.find((item) => item.paramName.toLowerCase() === key);
+    const key = paramExportKey(value);
+    const existing = this.paramExports.find((item) => paramExportKey(item) === key);
     // Row IDs are only unique inside one native source.  Keying by rowId alone
     // used to let a live read from source B overwrite source A, and could then
     // carry source A's old semantic body under source B's hash.
@@ -336,6 +371,9 @@ export class WorkspaceIndex {
     const sourceHashes = new Set(mergedRows.map((row) => row.sourceHash).filter((item): item is string => Boolean(item)));
     const sourceRevisions = new Set(mergedRows.map((row) => row.sourceRevision).filter((item): item is number => item !== undefined));
     this.upsertParamExport({
+      ...(value.sourceUri !== undefined ? { sourceUri: value.sourceUri } : existing?.sourceUri !== undefined ? { sourceUri: existing.sourceUri } : {}),
+      ...(value.entryIndex !== undefined ? { entryIndex: value.entryIndex } : existing?.entryIndex !== undefined ? { entryIndex: existing.entryIndex } : {}),
+      ...(value.entryName !== undefined ? { entryName: value.entryName } : existing?.entryName !== undefined ? { entryName: existing.entryName } : {}),
       paramName: value.paramName,
       ...(sourceHashes.size === 1 ? { sourceHash: [...sourceHashes][0] } : {}),
       ...(sourceRevisions.size === 1 ? { sourceRevision: [...sourceRevisions][0] } : {}),
@@ -480,12 +518,28 @@ export class WorkspaceIndex {
 
   searchParamRows(query: string, limit = 100, paramNames?: readonly string[]): Array<SearchResult<ParamRowSymbol>> {
     const allowed = paramNames && paramNames.length > 0
-      ? new Set(paramNames.map(normalizeParamName))
+      ? new Set(paramNames.flatMap(paramNameVariants))
       : null;
-    const rows = this.paramExports
-      .filter((item) => allowed === null || allowed.has(normalizeParamName(item.paramName)))
-      .flatMap((item) => item.rows);
-    return searchSymbols(rows, query, limit, paramRowSearchText);
+    // Native semantic rows often have no rowName. Resolve only the bounded,
+    // source-backed PARAM↔FMG links once per query so an item-name search can
+    // find the physical row without scanning/rebuilding RAG per tool call.
+    const textEntryLookup = buildTextEntryLookup(this.msgExports);
+    // Rank each physical table independently before interleaving. Ranking the
+    // flattened 50k-row corpus first can exhaust the limit on one dense table
+    // and hide the NpcParam/ItemLotParam representative entirely.
+    const ranked = this.paramExports
+      .filter((item) => allowed === null || paramExportMatches(item, allowed))
+      .flatMap((item) => searchSymbols(
+        item.rows,
+        query,
+        limit,
+        (row) => paramRowSearchText(row, textEntryLookup)
+      ));
+    return diversifyParamSearchResults(
+      ranked,
+      limit,
+      query
+    );
   }
 
   searchTextEntries(query: string, limit = 100): Array<SearchResult<TextEntrySymbol>> {
@@ -549,19 +603,194 @@ export class WorkspaceIndex {
   }
 }
 
+function paramExportKey(value: ParamExport): string {
+  const sourceUri = value.sourceUri ?? value.rows[0]?.sourceUri ?? '';
+  const entryIdentity = value.entryName
+    ?? (value.entryIndex === undefined ? value.paramName : `#${value.entryIndex}`);
+  // A physical BND4 child is the authoritative table identity.  Its native
+  // typeName can differ between export/read paths (NPC_PARAM_ST vs NpcParam),
+  // so including both would duplicate the same live row after a native read.
+  return `${sourceUri}\u0000${entryIdentity.toLowerCase()}`;
+}
+
+function eventExportKey(value: EventExport): string | undefined {
+  const sourceUris = new Set(value.events.map((event) => event.sourceUri).filter(Boolean));
+  if (sourceUris.size !== 1) return undefined;
+  const identities = new Set(value.events.map((event) => `${event.mapId ?? value.mapId ?? ''}`));
+  if (identities.size !== 1) return undefined;
+  const sourceUri = [...sourceUris][0]!;
+  const mapId = value.mapId ?? value.events[0]?.mapId ?? '';
+  return `${sourceUri}\u0000${mapId}`;
+}
+
+function hasUniqueEventIds(events: readonly EventSymbol[]): boolean {
+  const ids = new Set<number>();
+  for (const event of events) {
+    if (ids.has(event.eventId)) return false;
+    ids.add(event.eventId);
+  }
+  return true;
+}
+
+function mergeEventExport(existing: EventExport, incoming: EventExport): EventExport {
+  // Hash/revision are part of the semantic identity. A new native snapshot
+  // may use the same source URI and event ID, but its old instructions must
+  // never be carried into that new identity.
+  if (!eventExportSourceIdentityMatches(existing, incoming)) return incoming;
+
+  const existingById = new Map(existing.events.map((event) => [event.eventId, event]));
+  const incomingIds = new Set(incoming.events.map((event) => event.eventId));
+  const mergedIncomingEvents = incoming.events.map((event) =>
+    mergeEventSymbol(existingById.get(event.eventId), event, existing, incoming)
+  );
+  const retainOmittedEvents = incoming.events.length < existing.events.length
+    || incoming.events.every(isIncompleteEventOutline);
+  return {
+    ...existing,
+    ...incoming,
+    // An incomplete outline is not a complete event set. Keep omitted symbols
+    // from the same source identity, then merge the observations it did have.
+    // A complete/rich export remains authoritative for its event list.
+    events: [
+      ...(retainOmittedEvents ? existing.events.filter((event) => !incomingIds.has(event.eventId)) : []),
+      ...mergedIncomingEvents
+    ]
+  };
+}
+
+function mergeEventSymbol(
+  existing: EventSymbol | undefined,
+  incoming: EventSymbol,
+  existingExport: EventExport,
+  incomingExport: EventExport
+): EventSymbol {
+  if (!existing
+    || !eventSourceIdentityMatches(existing, incoming, existingExport, incomingExport)
+    || !shouldPreserveInstructions(existing, incoming)) {
+    return incoming;
+  }
+  return {
+    ...existing,
+    ...incoming,
+    // Native outline reads intentionally have no instruction rows. They may
+    // refresh sourceHash/sourceRevision and raw.instructionCount, but cannot
+    // destroy an already ingested semantic instruction body.
+    instructions: existing.instructions,
+    raw: mergeEventRaw(existing.raw, incoming.raw)
+  };
+}
+
+function shouldPreserveInstructions(
+  existing: EventSymbol,
+  incoming: EventSymbol
+): boolean {
+  if (existing.instructions.length === 0) return false;
+  return incoming.instructions.length < existing.instructions.length
+    || isIncompleteEventOutline(incoming);
+}
+
+function isIncompleteEventOutline(event: EventSymbol): boolean {
+  if (event.instructions.length === 0) return true;
+
+  const raw = isRecord(event.raw) ? event.raw : undefined;
+  const declaredCount = raw?.instructionCount;
+  if (typeof declaredCount === 'number'
+    && Number.isSafeInteger(declaredCount)
+    && declaredCount >= 0
+    && event.instructions.length < declaredCount) {
+    return true;
+  }
+
+  const authority = raw?.authority;
+  return typeof authority === 'string' && authority.toLocaleLowerCase().includes('outline')
+    || raw?.semanticArgsDecoded === false;
+}
+
+function eventExportSourceIdentityMatches(existing: EventExport, incoming: EventExport): boolean {
+  return sourceIdentityCandidatesMatch(
+    eventExportIdentityCandidates(existing, 'sourceHash'),
+    eventExportIdentityCandidates(incoming, 'sourceHash')
+  ) && sourceIdentityCandidatesMatch(
+    eventExportIdentityCandidates(existing, 'sourceRevision'),
+    eventExportIdentityCandidates(incoming, 'sourceRevision')
+  );
+}
+
+function eventSourceIdentityMatches(
+  existing: EventSymbol,
+  incoming: EventSymbol,
+  existingExport: EventExport,
+  incomingExport: EventExport
+): boolean {
+  if (existing.sourceUri !== incoming.sourceUri) return false;
+  return sourceIdentityCandidatesMatch(
+    eventIdentityCandidates(existing, existingExport, 'sourceHash'),
+    eventIdentityCandidates(incoming, incomingExport, 'sourceHash')
+  ) && sourceIdentityCandidatesMatch(
+    eventIdentityCandidates(existing, existingExport, 'sourceRevision'),
+    eventIdentityCandidates(incoming, incomingExport, 'sourceRevision')
+  );
+}
+
+type EventIdentityValue = string | number;
+
+function eventExportIdentityCandidates(
+  value: EventExport,
+  field: 'sourceHash' | 'sourceRevision'
+): EventIdentityValue[] {
+  return uniqueIdentityValues([
+    value[field],
+    ...value.events.map((event) => event[field])
+  ]);
+}
+
+function eventIdentityCandidates(
+  event: EventSymbol,
+  exportItem: EventExport,
+  field: 'sourceHash' | 'sourceRevision'
+): EventIdentityValue[] {
+  return uniqueIdentityValues([event[field], exportItem[field]]);
+}
+
+function uniqueIdentityValues(values: readonly (EventIdentityValue | undefined)[]): EventIdentityValue[] {
+  return [...new Set(values.filter((value): value is EventIdentityValue => value !== undefined))];
+}
+
+function sourceIdentityCandidatesMatch(left: readonly EventIdentityValue[], right: readonly EventIdentityValue[]): boolean {
+  // A missing identity is unknown, not evidence of a conflict. This lets an
+  // outline observation enrich an older body with a newly available hash,
+  // while still dropping the body when two concrete hashes/revisions differ.
+  if (left.length === 0 || right.length === 0) return true;
+  if (left.length !== right.length) return false;
+  return left.every((value) => right.includes(value));
+}
+
+function mergeEventRaw(existing: unknown, incoming: unknown): unknown {
+  if (isRecord(existing) && isRecord(incoming)) return { ...existing, ...incoming };
+  return incoming === undefined ? existing : incoming;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
+}
+
 const SEKIRO_SEARCH_SYNONYMS: ReadonlyArray<[RegExp, string]> = [
-  [/鬼[刑型]部/g, '鬼形部 鬼庭形部雅孝 50800000 Gyoubu'],
-  [/形部/g, '鬼形部 鬼庭形部雅孝 50800000 Gyoubu'],
-  [/雅孝/g, '鬼庭形部雅孝 50800000'],
-  [/蝴蝶夫人|阿蝶/g, '幻影之蝶 50900000 Butterfly'],
-  [/弦一郎/g, '苇名弦一郎 51100000 11000000 Genichiro'],
-  [/狮子猿/g, '狮子猿 51000000 51000100 Ape Guardian'],
-  [/巨型忍者|义父|枭/g, '巨型忍者 枭 50600000 50601000 Father Owl'],
-  [/一心|剑圣/g, '苇名一心 剑圣 54000000 54300000 Isshin'],
-  [/破戒僧/g, '破戒僧 50000000 50100000 Monk'],
-  [/赤鬼/g, '赤鬼 50210000 50210080 Ogre'],
-  [/火牛|樱牛/g, '火牛 樱牛 50100000 50100100 Bull'],
-  [/佐濑甚助|居合哥/g, '佐濑甚助 10100000 Jinsuke']
+  [/鬼[刑型]部/, '鬼形部 鬼庭形部雅孝 Gyoubu'],
+  [/形部/, '鬼形部 鬼庭形部雅孝 Gyoubu'],
+  [/雅孝/, '鬼庭形部雅孝'],
+  [/蝴蝶夫人|阿蝶/, '幻影之蝶 Butterfly'],
+  [/弦一郎|屑一郎/, '苇名弦一郎 Genichiro c5400 540000 540000_battle.lua'],
+  [/狮子猿/, '狮子猿 Ape Guardian'],
+  [/巨型忍者|义父|枭/, '巨型忍者 枭 Father Owl'],
+  // 当前 Sekiro 中文语料把用户说的“义父的铃铛”写成
+  // EquipParamGoods 行名“义父的守护铃”；这是受限的词法别名，不是
+  // 数字 ID 映射。它让精确 Goods 行先进入候选，后续仍必须原生读取。
+  [/义父(?:的(?:铃铛|守护铃))?|铃铛|守护铃|守り鈴/iu, '义父的守护铃 守护铃 铃铛 Bell'],
+  [/一心|剑圣/, '苇名一心 剑圣 Isshin'],
+  [/破戒僧/, '破戒僧 Monk'],
+  [/赤鬼/, '赤鬼 Ogre'],
+  [/火牛|樱牛/, '火牛 樱牛 Bull'],
+  [/佐濑甚助|居合哥/, '佐濑甚助 Jinsuke']
 ];
 
 function expandSearchQuery(query: string): string {
@@ -651,6 +880,84 @@ function sortAndLimit<T>(results: Array<SearchResult<T>>, limit: number): Array<
   return results.sort((a, b) => b.score - a.score).slice(0, limit);
 }
 
+/**
+ * An unscoped PARAM query can match tens of thousands of rows.  Keeping only
+ * the globally highest-scoring rows often hides NpcParam behind a dense
+ * BehaviorParam/AtkParam cluster, so the Agent never sees the table it needs.
+ * Preserve row-name phrase matches before interleaving table groups. This
+ * keeps two equally strong physical rows (for example the two distinct bell
+ * names) visible in the bounded model-facing page instead of hiding the
+ * second row behind one representative from every unrelated table. Exact
+ * top-score ties are also preserved for rows whose phrase is not available.
+ * The remaining rows still interleave table groups so a dense
+ * BehaviorParam/AtkParam cluster cannot hide NpcParam or ItemLotParam.
+ * Explicit paramNames that resolve to one table are unchanged.
+ */
+function diversifyParamSearchResults(
+  results: Array<SearchResult<ParamRowSymbol>>,
+  limit: number,
+  query = ''
+): Array<SearchResult<ParamRowSymbol>> {
+  if (limit <= 0 || results.length <= 1) return limit <= 0 ? [] : results.slice(0, limit);
+  const phraseTerms = normalizeSearch(expandSearchQuery(query))
+    .split(' ')
+    .filter((term) => term.length >= 2);
+  const rowNamePhraseMatches = results
+    .filter((result) => {
+      const rowName = normalizeSearch(result.item.rowName ?? '');
+      return rowName.length > 0 && phraseTerms.some((term) => rowName.includes(term));
+    })
+    .sort((left, right) => right.score - left.score);
+  const phrasePriority = rowNamePhraseMatches.slice(0, Math.min(12, limit));
+  if (phrasePriority.length > 0) {
+    const selected = new Set(phrasePriority.map((result) => result.item.uri));
+    const remainder = results.filter((result) => !selected.has(result.item.uri));
+    const diversifiedRemainder = diversifyParamSearchResults(remainder, limit - phrasePriority.length, query);
+    return [...phrasePriority, ...diversifiedRemainder].slice(0, limit);
+  }
+  const topScore = results.reduce((highest, result) => Math.max(highest, result.score), 0);
+  const topScoreMatches = results
+    .filter((result) => result.score === topScore)
+    .slice(0, Math.min(12, limit));
+  if (topScoreMatches.length > 1) {
+    const selected = new Set(topScoreMatches.map((result) => result.item.uri));
+    const remainder = results.filter((result) => !selected.has(result.item.uri));
+    const diversifiedRemainder = diversifyParamSearchResults(remainder, limit - topScoreMatches.length, query);
+    return [...topScoreMatches, ...diversifiedRemainder].slice(0, limit);
+  }
+  const groups = new Map<string, Array<SearchResult<ParamRowSymbol>>>();
+  for (const result of results) {
+    const groupName = normalizeParamName(result.item.paramName || result.item.entryName || 'unknown');
+    const group = groups.get(groupName) ?? [];
+    group.push(result);
+    groups.set(groupName, group);
+  }
+  if (groups.size <= 1) return results.slice(0, limit);
+
+  for (const group of groups.values()) group.sort((left, right) => right.score - left.score);
+
+  const orderedGroups = [...groups.values()].sort((left, right) => {
+    const scoreDelta = (right[0]?.score ?? 0) - (left[0]?.score ?? 0);
+    if (scoreDelta !== 0) return scoreDelta;
+    return normalizeParamName(left[0]?.item.paramName ?? '').localeCompare(
+      normalizeParamName(right[0]?.item.paramName ?? '')
+    );
+  });
+  const diversified: Array<SearchResult<ParamRowSymbol>> = [];
+  for (let offset = 0; diversified.length < limit; offset += 1) {
+    let added = false;
+    for (const group of orderedGroups) {
+      const result = group[offset];
+      if (!result) continue;
+      diversified.push(result);
+      added = true;
+      if (diversified.length >= limit) break;
+    }
+    if (!added) break;
+  }
+  return diversified;
+}
+
 function normalizeSearch(value: string): string {
   return value.toLowerCase().replaceAll('_', ' ').replaceAll(':', ' ').replaceAll('/', ' ').replaceAll('\\', ' ').replaceAll('.', ' ').replaceAll('-', ' ').split(' ').filter(Boolean).join(' ');
 }
@@ -715,17 +1022,102 @@ function sourceReferenceKeys(value: string): string[] {
 }
 
 function eventSearchText(event: EventSymbol): string {
-  return [event.uri, event.eventId, event.name, event.mapId, event.instructions.map((item) => item.name).join(' ')].filter(Boolean).join(' ');
+  return [
+    event.eventId,
+    boundedSearchString(event.name),
+    boundedSearchString(event.mapId),
+    ...event.instructions.flatMap(eventInstructionSearchTokens),
+    ...safeRawNumericTokens(event.raw)
+  ].filter((value) => value !== undefined && value !== null && String(value).length > 0).join(' ');
+}
+
+function eventInstructionSearchTokens(instruction: EventInstruction): string[] {
+  return [
+    boundedSearchString(instruction.name),
+    boundedSearchString(instruction.category),
+    ...instruction.args.flatMap(eventArgSearchTokens),
+    ...safeRawNumericTokens(instruction.raw)
+  ].filter((value): value is string => typeof value === 'string' && value.length > 0);
+}
+
+function eventArgSearchTokens(arg: EventArg): string[] {
+  const tokens: string[] = [];
+  const name = boundedSearchString(arg.name);
+  const role = boundedSearchString(arg.role);
+  const paramName = boundedSearchString(arg.paramName);
+  if (name) tokens.push(name);
+  if (role) tokens.push(role);
+  if (paramName) tokens.push(paramName);
+  // A low-confidence numeric value is evidence for review, not a confirmed
+  // searchable entity. Textual values remain useful labels, but are bounded
+  // and path-like values are excluded from the index text.
+  if (arg.confidence !== 'low') {
+    if (typeof arg.value === 'number') {
+      const numeric = safeNumericToken(arg.value);
+      if (numeric !== undefined) tokens.push(numeric);
+    } else if (typeof arg.value === 'string') {
+      const value = boundedSearchString(arg.value);
+      if (value && !looksLikePath(value)) tokens.push(value);
+    } else if (typeof arg.value === 'boolean') {
+      tokens.push(String(arg.value));
+    }
+  }
+  return tokens;
+}
+
+function safeRawNumericTokens(raw: unknown): string[] {
+  const tokens: string[] = [];
+  collectSafeRawNumericTokens(raw, tokens, 0);
+  return tokens;
+}
+
+function collectSafeRawNumericTokens(value: unknown, tokens: string[], depth: number): void {
+  if (depth > 3 || tokens.length >= 24 || !isRecord(value)) return;
+  if (value.confidence === 'low') return;
+  for (const [key, child] of Object.entries(value)) {
+    if (/^(?:bank|id|entity|entityId)$/i.test(key)) {
+      const numeric = safeNumericToken(child);
+      if (numeric !== undefined) tokens.push(`${key}:${numeric}`);
+      continue;
+    }
+    if (isRecord(child)) collectSafeRawNumericTokens(child, tokens, depth + 1);
+    else if (Array.isArray(child)) {
+      for (const item of child.slice(0, 8)) collectSafeRawNumericTokens(item, tokens, depth + 1);
+    }
+  }
+}
+
+function safeNumericToken(value: unknown): string | undefined {
+  if (typeof value === 'number') {
+    return Number.isSafeInteger(value) ? String(value) : undefined;
+  }
+  if (typeof value !== 'string' || !/^-?\d+$/.test(value) || value.length > 16) return undefined;
+  const parsed = Number(value);
+  return Number.isSafeInteger(parsed) && String(parsed) === value ? value : undefined;
+}
+
+function boundedSearchString(value: unknown): string | undefined {
+  if (typeof value !== 'string' || value.length === 0 || value.length > 128) return undefined;
+  return value;
+}
+
+function looksLikePath(value: string): boolean {
+  return value.includes('\\') || value.includes('/') || /^[A-Za-z]:/.test(value) || value.startsWith('file:');
 }
 
 function mapSymbolSearchText(symbol: MapEntitySymbol | MapRegionSymbol): string {
   return [symbol.uri, symbol.entityId, symbol.name, symbol.mapId, 'kind' in symbol ? symbol.kind : undefined, 'model' in symbol ? symbol.model : undefined].filter(Boolean).join(' ');
 }
 
-function paramRowSearchText(row: ParamRowSymbol): string {
+function paramRowSearchText(row: ParamRowSymbol, textEntryLookup?: ReturnType<typeof buildTextEntryLookup>): string {
+  const linkedText = textEntryLookup
+    ? paramTextLinkSearchText(collectParamTextLinks(row, textEntryLookup))
+    : '';
   return [
     row.uri,
     row.paramName,
+    row.entryName,
+    row.entryIndex,
     row.rowId,
     row.rowName,
     row.fields?.map((field) => [
@@ -733,7 +1125,8 @@ function paramRowSearchText(row: ParamRowSymbol): string {
       field.name,
       field.description,
       String(field.value)
-    ].filter(Boolean).join(':')).join(' ')
+    ].filter(Boolean).join(':')).join(' '),
+    linkedText
   ].filter(Boolean).join(' ');
 }
 
@@ -743,7 +1136,33 @@ function normalizeParamName(value: string): string {
     .split('/')
     .pop()!
     .replace(/\.param$/i, '')
+    // Bridge exports may expose the native type (NPC_PARAM_ST) while the
+    // physical BND4 child is NpcParam.param.  Compare a punctuation-free
+    // token and its conventional _ST-less alias, but retain entryName as a
+    // separate candidate so same-type tables (e.g. ATK_PARAM_ST) do not get
+    // conflated with one another.
+    .replace(/[^A-Za-z0-9]+/g, '')
     .toLocaleLowerCase();
+}
+
+function paramNameVariants(value: string): string[] {
+  const normalized = normalizeParamName(value);
+  if (normalized.length === 0) return [];
+  const variants = new Set([normalized]);
+  if (normalized.endsWith('st') && normalized.length > 2) {
+    variants.add(normalized.slice(0, -2));
+  }
+  return [...variants];
+}
+
+function paramExportMatches(value: ParamExport, allowed: ReadonlySet<string>): boolean {
+  const names = [
+    value.paramName,
+    value.entryName,
+    value.rows[0]?.paramName,
+    value.rows[0]?.entryName
+  ].filter((name): name is string => typeof name === 'string' && name.length > 0);
+  return names.some((name) => paramNameVariants(name).some((variant) => allowed.has(variant)));
 }
 
 function textEntrySearchText(entry: TextEntrySymbol): string {

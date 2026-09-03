@@ -176,12 +176,32 @@ export class OperationLogUtilityClient implements OperationLogStore {
     return this.request('replaceRagChunks', { chunks }).then(() => undefined);
   }
 
+  mergeRagChunks(chunks: RagChunk[]): Promise<void> {
+    return this.request('mergeRagChunks', { chunks }).then(() => undefined);
+  }
+
+  mergeRagChunkDelta(input: {
+    sourceUri: string;
+    upserts: RagChunk[];
+    deletedChunkIds: string[];
+  }): Promise<void> {
+    return this.request('mergeRagChunkDelta', input).then(() => undefined);
+  }
+
   loadRagChunks(): Promise<RagChunk[]> {
     return this.request('loadRagChunks', {});
   }
 
   async replaceRagEmbeddings(entries: Array<{ chunkId: string; model: string; vector: Float32Array }>): Promise<void> {
     await this.request('replaceRagEmbeddings', { entries }).then(() => undefined);
+  }
+
+  async mergeRagEmbeddings(input: {
+    model: string;
+    entries: Array<{ chunkId: string; contentHash: string; vector: Float32Array }>;
+    deletedChunkIds: string[];
+  }): Promise<void> {
+    await this.request('mergeRagEmbeddings', input).then(() => undefined);
   }
 
   async loadRagEmbeddings(): Promise<Map<string, Float32Array>> {
@@ -191,6 +211,16 @@ export class OperationLogUtilityClient implements OperationLogStore {
       map.set(chunkId, Float32Array.from(values));
     }
     return map;
+  }
+
+  async loadRagEmbeddingRecords(): Promise<Array<{ chunkId: string; model: string; contentHash: string | null; vector: Float32Array }>> {
+    const records = await this.request('loadRagEmbeddingRecords', {});
+    return records.map((record) => ({
+      chunkId: record.chunkId,
+      model: record.model,
+      contentHash: record.contentHash,
+      vector: Float32Array.from(record.vector)
+    }));
   }
 
   ragEmbeddingModel(): Promise<string | null> {

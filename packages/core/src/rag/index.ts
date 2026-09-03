@@ -3,7 +3,13 @@ export { buildRagCorpus, createRagCorpus, mergeCatalogAndPersisted, emptyFamilyC
 export { retrieveEvidence } from './retrieve.js';
 export { ensureLookupIndex } from './lookupIndex.js';
 export { retrieveEvidenceHybrid, type HybridVectorSource } from './hybridRetrieve.js';
-export { persistRagCorpus, loadRagCorpus } from './persist.js';
+export {
+  persistRagCorpus,
+  loadRagCorpus,
+  diffRagCorpusBySource,
+  sameRagReferences,
+  type RagChunkDelta
+} from './persist.js';
 export type { ParsedRagQuery } from './queryParse.js';
 export type {
   RagChunk,

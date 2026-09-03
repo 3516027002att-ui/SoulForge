@@ -55,6 +55,7 @@ const REQUIRED_TOOL_NAMES = [
   'search_map_entities',
   'search_tae_events',
   'search_param_rows',
+  'search_param_fields',
   'search_text_entries',
   'lookup_text_id',
   'find_text_references',
@@ -387,6 +388,7 @@ async function runScenario(root: string): Promise<{
   for (const name of REQUIRED_TOOL_NAMES) assert.ok(advertisedNames.has(name), `生产 bridge 未暴露工具 ${name}。`);
   assert.ok(readBridge.tools.find((tool) => tool.name === 'search_text_entries')?.supportsParallel === true);
   assert.ok(readBridge.tools.find((tool) => tool.name === 'search_param_rows')?.supportsParallel === true);
+  assert.ok(readBridge.tools.find((tool) => tool.name === 'search_param_fields')?.supportsParallel === true);
   assert.ok(readBridge.tools.find((tool) => tool.name === 'mutate_param_fields')?.supportsParallel === false);
 
   const proposalInput = {
@@ -418,6 +420,7 @@ async function runScenario(root: string): Promise<{
     ['search_map_entities', { query: '鬼刑部' }],
     ['search_tae_events', { query: 'c0000 A0200' }],
     ['search_param_rows', { query: '鬼刑部', paramNames: ['NpcParam'] }],
+    ['search_param_fields', { table: 'NpcParam', rowIds: [50800000], query: 'health' }],
     ['search_text_entries', { query: '鬼刑部' }],
     ['lookup_text_id', { textId: 902012, category: 'zhocn' }],
     ['find_text_references', { textId: 902012, category: 'zhocn' }],
@@ -437,7 +440,7 @@ async function runScenario(root: string): Promise<{
     ['validate_patch', proposal],
     ['build_patch_graph', proposal],
     ['assess_edit_risk', { file: syntheticFile, changeKind: 'text' }],
-    ['read_param_fields', { table: 'NpcParam', rowIds: [50800000] }],
+    ['read_param_fields', { table: 'NpcParam', rowIds: [50800000], fieldIds: ['hp'] }],
     ['mutate_param_fields', { edits: [{ table: 'NpcParam', rowId: 50800000, fieldId: 'hp', value: 2 }] }],
     ['read_fmg_entries', { table: 'zhocn', ids: [902012] }],
     ['mutate_fmg_entries', { edits: [{ table: 'zhocn', id: 90032, text: '义父的铃铛' }] }],
@@ -574,7 +577,7 @@ async function runScenario(root: string): Promise<{
     },
     {
       toolCalls: [
-        call('s5-param-read', 'read_param_fields', { table: 'NpcParam', rowIds: [50800000] }),
+        call('s5-param-read', 'read_param_fields', { table: 'NpcParam', rowIds: [50800000], fieldIds: ['hp'] }),
         call('s5-fmg-read', 'read_fmg_entries', { table: 'zhocn', ids: [902012] }),
         call('s5-emevd-read', 'read_emevd_outline', { file: 'event/m10_00_00_00.emevd.dcx' }),
         call('s5-tae-read', 'read_tae_events', { file: 'action/c0000.anibnd.dcx' }),

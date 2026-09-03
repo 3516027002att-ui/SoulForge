@@ -116,6 +116,7 @@ export function retrieveEvidenceHybrid(
     ok: true,
     query: lexical.ok ? lexical.query : query.trim(),
     hits,
+    retrievalMode: 'hybrid',
     stats: {
       scanned: lexical.ok ? lexical.stats.scanned : corpus.chunks.length,
       matched: fused.size,

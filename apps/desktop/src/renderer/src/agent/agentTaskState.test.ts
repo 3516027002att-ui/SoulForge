@@ -528,6 +528,27 @@ describe('对话时间线：口播与工具按步交织，思考可折叠', () =
     assert.ok(!JSON.stringify(items).includes('secret.jsonl'), '时间线不得带会话记录文件名');
   });
 
+  it('连续步骤的工具调用合并为一组，并在下一段口播前标记为自动收起', () => {
+    const state = feed(
+      startAgentTask(SESSION, 1_000),
+      { type: 'turn-started', step: 1 },
+      { type: 'tool-call-begin', step: 1, callId: 'c1', name: 'search_param_rows' },
+      { type: 'tool-call-end', step: 1, callId: 'c1', name: 'search_param_rows', ok: true },
+      { type: 'turn-started', step: 2 },
+      { type: 'tool-call-begin', step: 2, callId: 'c2', name: 'read_param_fields' },
+      { type: 'tool-call-end', step: 2, callId: 'c2', name: 'read_param_fields', ok: true },
+      { type: 'turn-started', step: 3 },
+      { type: 'agent-message-delta', step: 3, text: '已找到原生字段。' }
+    );
+    const items = buildAgentConversationItems({ goal: '定位对象', task: state });
+    const groups = items.filter((item) => item.kind === 'tools');
+    assert.equal(groups.length, 1);
+    assert.equal(groups[0]?.kind === 'tools' ? groups[0].calls.length : 0, 2);
+    assert.equal(groups[0]?.kind === 'tools' ? groups[0].collapsed : false, true);
+    assert.equal(groups[0]?.kind === 'tools' ? groups[0].live : true, false);
+    assert.equal(items.at(-1)?.kind, 'assistant');
+  });
+
   it('多轮对话：第一轮完成后开启第二轮，时间线保留第一轮并拼接第二轮实时内容', () => {
     // 第一轮任务
     const turn1Session = 'session-turn-1';

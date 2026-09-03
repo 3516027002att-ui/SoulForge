@@ -1641,6 +1641,31 @@ pre.tool-output {
 .agent-tool-chip-row {
   display: flex; flex-direction: column; gap: 2px; padding: 2px 0;
 }
+.agent-tool-group {
+  margin: 2px 0 4px;
+  border-left: 2px solid var(--line);
+  padding-left: 10px;
+}
+.agent-tool-group.is-live { border-left-color: var(--ember-text); }
+.agent-tool-group > summary {
+  display: flex; align-items: baseline; gap: 8px; min-width: 0;
+  cursor: pointer; list-style: none; font-size: 12px; line-height: 1.55;
+}
+.agent-tool-group > summary::-webkit-details-marker { display: none; }
+.agent-tool-group > summary::before { content: "▸"; color: var(--ink-3); flex: none; }
+.agent-tool-group[open] > summary::before { content: "▾"; }
+.agent-tool-group__label { flex: none; color: var(--ink-1); }
+.agent-tool-group__names {
+  min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  color: var(--ink-3); font-family: var(--font-mono); font-size: 10.5px;
+}
+.agent-tool-group__status {
+  flex: none; margin-left: auto; color: var(--ink-3); font: 10px var(--font-mono);
+}
+.agent-tool-group__status.is-running { color: var(--ember-text); }
+.agent-tool-group__status.is-succeeded { color: var(--ok); }
+.agent-tool-group__status.is-failed { color: var(--danger); }
+.agent-tool-group__body { padding: 4px 0 2px 8px; }
 .agent-message__markdown { white-space: pre-wrap; }
 
 /* Change Review 审批信息：保留危险度左线，不用卡片外框打断消息流。 */

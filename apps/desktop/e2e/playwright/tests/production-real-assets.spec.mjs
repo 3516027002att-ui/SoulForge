@@ -17,6 +17,10 @@ const hasCorpus = [
   join(overlayRoot, 'obj', 'o000100.objbnd.dcx'),
   join(gameRoot, 'chr', 'c1130.chrbnd.dcx')
 ].every(existsSync);
+const hasC5400Corpus = [
+  join(gameRoot, 'chr', 'c5400.chrbnd.dcx'),
+  join(gameRoot, 'chr', 'c5409.texbnd.dcx')
+].every(existsSync);
 
 test.skip(!hasCorpus, '本机没有配置真实只狼语料，跳过只读生产资源 E2E。');
 
@@ -44,7 +48,31 @@ test.describe('真实只狼资源：ACTION / MAP / 纹理渲染链', () => {
     await window.waitForLoadState('domcontentloaded');
     const cleanup = async () => {
       await app.close().catch(() => undefined);
-      rmSync(userDataDir, { recursive: true, force: true });
+      // Electron/Bridge 子进程在 app.close() 返回后可能还持有 Chromium
+      // user-data 文件句柄。先等待宿主进程退出，再对明确的临时目录做
+      // 有界重试；清理失败只能留下本次临时目录，不能把真实资源断言判成失败。
+      const child = app.process();
+      if (child && child.exitCode === null) {
+        const deadline = Date.now() + 5_000;
+        while (child.exitCode === null && Date.now() < deadline) {
+          await new Promise((resolve) => setTimeout(resolve, 100));
+        }
+      }
+      let cleanupError;
+      for (let attempt = 0; attempt < 20; attempt += 1) {
+        try {
+          rmSync(userDataDir, { recursive: true, force: true, maxRetries: 2, retryDelay: 250 });
+          cleanupError = undefined;
+          break;
+        } catch (error) {
+          cleanupError = error;
+          if (!['EBUSY', 'ENOTEMPTY', 'EPERM'].includes(error?.code) || attempt === 19) break;
+          await new Promise((resolve) => setTimeout(resolve, 250));
+        }
+      }
+      if (cleanupError) {
+        console.warn(`真实资源 E2E 临时目录清理延迟：${userDataDir} (${cleanupError.code ?? 'unknown'})`);
+      }
     };
     return { app, window, pageErrors, consoleErrors, cleanup };
   }
@@ -111,6 +139,12 @@ test.describe('真实只狼资源：ACTION / MAP / 纹理渲染链', () => {
         const actionTextures = actionModels.flatMap((model) => Array.isArray(model?.texturePreviews) ? model.texturePreviews : []);
         const c0000Models = Array.isArray(actionC0000?.data?.models) ? actionC0000.data.models : [];
         const c0000Textures = c0000Models.flatMap((model) => Array.isArray(model?.texturePreviews) ? model.texturePreviews : []);
+        const c0000Meshes = c0000Models
+          .flatMap((model) => Array.isArray(model?.meshes) ? model.meshes : []);
+        const c0000NativeProjectionMeshes = c0000Meshes
+          .filter((mesh) => mesh?.renderMode === 'projected-decal');
+        const c0000CompatibilityProjectionMeshes = c0000Meshes
+          .filter((mesh) => mesh?.renderMode === 'compatibility-projected');
         const mapChunks = Array.isArray(map?.data?.chunks) ? map.data.chunks : [];
         const characterChunks = Array.isArray(mapCharacter?.data?.chunks) ? mapCharacter.data.chunks : [];
         return {
@@ -121,6 +155,16 @@ test.describe('真实只狼资源：ACTION / MAP / 纹理渲染链', () => {
             textureNames: c0000Textures
               .map((texture) => texture?.textureName)
               .filter((name) => typeof name === 'string' && name.length > 0),
+            nativeProjectedMeshes: c0000NativeProjectionMeshes.length,
+            compatibilityProjectionMeshes: c0000CompatibilityProjectionMeshes.length,
+            projectionTextureNames: c0000CompatibilityProjectionMeshes
+              .map((mesh) => mesh?.projectionTextureName)
+              .filter((name) => typeof name === 'string' && name.length > 0),
+            projectionTextureTokens: c0000CompatibilityProjectionMeshes
+              .filter((mesh) => typeof mesh?.projectionTexturePreviewToken === 'string' && mesh.projectionTexturePreviewToken.length > 0)
+              .length,
+            projectionIndexBytes: c0000CompatibilityProjectionMeshes
+              .map((mesh) => typeof mesh?.indicesBase64 === 'string' ? mesh.indicesBase64.length : 0),
             diagnostics: (actionC0000?.diagnostics ?? []).map((diagnostic) => diagnostic.code)
           },
           action: {
@@ -152,7 +196,11 @@ test.describe('真实只狼资源：ACTION / MAP / 纹理渲染链', () => {
 
       expect(probe.ok, JSON.stringify(probe)).toBe(true);
       expect(probe.c0000.ok, JSON.stringify(probe.c0000)).toBe(true);
-      expect(probe.c0000.textureNames, JSON.stringify(probe.c0000)).toContain('FC_M_0000_head_a');
+      expect(probe.c0000.nativeProjectedMeshes, JSON.stringify(probe.c0000)).toBeGreaterThan(0);
+      expect(probe.c0000.compatibilityProjectionMeshes, JSON.stringify(probe.c0000)).toBeGreaterThan(0);
+      expect(probe.c0000.projectionTextureNames, JSON.stringify(probe.c0000)).toContain('FC_M_0000_head_a');
+      expect(probe.c0000.projectionTextureTokens, JSON.stringify(probe.c0000)).toBeGreaterThan(0);
+      expect(probe.c0000.projectionIndexBytes.some((length) => length > 0), JSON.stringify(probe.c0000)).toBe(true);
       expect(probe.action.meshCount).toBeGreaterThan(0);
       expect(probe.action.meshPayloads).toBeGreaterThan(0);
       expect(probe.action.texturePreviews, JSON.stringify(probe.action)).toBeGreaterThan(0);
@@ -170,13 +218,13 @@ test.describe('真实只狼资源：ACTION / MAP / 纹理渲染链', () => {
 
       await openResource(window, 'chr/c1130.anibnd.dcx');
       await expect(window.getByLabel('动作工作台')).toBeVisible();
-      await expect(window.getByTestId('tae-preview-viewport'), { timeout: 120_000 }).toBeVisible();
+      await expect(window.getByTestId('tae-preview-viewport')).toBeVisible({ timeout: 120_000 });
       await expect(window.locator('.tae-preview__viewport canvas')).toHaveCount(1);
 
       await openResource(window, 'map/mapstudio/m10_00_00_00.msb.dcx');
       await expect(window.getByLabel('MSB 地图工作台')).toBeVisible();
       await expect(window.getByRole('region', { name: 'Viewport' })).toBeVisible();
-      await expect(window.locator('.msb-viewport canvas'), { timeout: 120_000 }).toHaveCount(1);
+      await expect(window.locator('.msb-viewport canvas')).toHaveCount(1, { timeout: 120_000 });
       await window.waitForFunction(() => {
         const text = document.querySelector('.msb-viewport')?.textContent ?? '';
         return /模型(?:已处理)?\s*[1-9]/.test(text) && /Part\s*[1-9]/.test(text);
@@ -191,13 +239,65 @@ test.describe('真实只狼资源：ACTION / MAP / 纹理渲染链', () => {
     }
   });
 
+  test('真实 c5400 按 FLVER MTD 身份绑定 c5409 纹理，而不是公共材质回退', async () => {
+    test.skip(!hasC5400Corpus, '本机没有 c5400.chrbnd 与 c5409.texbnd，跳过 c5400 原生纹理身份回归。');
+    const { window, cleanup } = await launchProduction();
+    try {
+      await openWorkspace(window);
+      const probe = await window.evaluate(async () => {
+        const api = globalThis.soulforge;
+        const files = await api.searchResources('c5400.anibnd.dcx');
+        const file = files.find((candidate) => /(^|\/)chr\/c5400\.anibnd\.dcx$/i.test(candidate.relativePath));
+        if (!file) return { ok: false, reason: 'c5400 动作未进入生产索引', paths: files.map((candidate) => candidate.relativePath) };
+        const result = await api.readTaeChrbndPreview(file.sourceUri);
+        const models = Array.isArray(result?.data?.models) ? result.data.models : [];
+        const textures = models.flatMap((model) => Array.isArray(model?.texturePreviews) ? model.texturePreviews : []);
+        const meshes = models.flatMap((model) => Array.isArray(model?.meshes) ? model.meshes : []);
+        const texturedMaterialIndices = new Set(textures
+          .map((texture) => texture?.materialIndex)
+          .filter((index) => Number.isInteger(index)));
+        return {
+          ok: Boolean(result?.ok),
+          modelCount: models.length,
+          meshCount: meshes.length,
+          texturedMeshCount: meshes.filter((mesh) => texturedMaterialIndices.has(mesh?.materialIndex)).length,
+          textureCount: textures.length,
+          textureNames: textures.map((texture) => texture?.textureName).filter((name) => typeof name === 'string' && name.length > 0),
+          diagnostics: (result?.diagnostics ?? []).map((diagnostic) => diagnostic.code)
+        };
+      });
+
+      expect(probe.ok, JSON.stringify(probe)).toBe(true);
+      expect(probe.modelCount, JSON.stringify(probe)).toBeGreaterThan(0);
+      expect(probe.meshCount, JSON.stringify(probe)).toBeGreaterThan(0);
+      expect(probe.texturedMeshCount, JSON.stringify(probe)).toBeGreaterThan(0);
+      expect(probe.textureNames, JSON.stringify(probe)).toContain('c5409_body_a');
+      expect(probe.textureNames, JSON.stringify(probe)).toContain('c5409_head_a');
+      expect(probe.textureNames, JSON.stringify(probe)).toContain('c5409_kimono_a');
+
+      await openResource(window, 'chr/c5400.anibnd.dcx');
+      await expect(window.getByLabel('动作工作台')).toBeVisible();
+      await expect(window.getByTestId('tae-preview-viewport')).toBeVisible({ timeout: 120_000 });
+      // FLVER bundle 的 PNG data URI 与 Three 场景挂载是异步的；只断言宿主
+      // 出现会在首帧仍为空时过早截图，必须等 canvas 完成至少一帧绘制。
+      await window.waitForTimeout(3_000);
+      mkdirSync(resolve(repoRoot, 'output/playwright'), { recursive: true });
+      await window.screenshot({
+        path: resolve(repoRoot, 'output/playwright/c5400-mtd-texture-preview.png'),
+        fullPage: false
+      });
+    } finally {
+      await cleanup();
+    }
+  });
+
   test('真实 C0000 动画第 0 帧保持绑定姿态并可播放', async () => {
     const { app, window, pageErrors, consoleErrors, cleanup } = await launchProduction();
     try {
       await openWorkspace(window);
       await openResource(window, 'chr/c0000.anibnd.dcx');
       await expect(window.getByLabel('动作工作台')).toBeVisible();
-      await expect(window.getByTestId('tae-preview-viewport'), { timeout: 120_000 }).toBeVisible();
+      await expect(window.getByTestId('tae-preview-viewport')).toBeVisible({ timeout: 120_000 });
 
       const animations = window.getByRole('region', { name: 'Animations' });
       const animation = animations.locator('.wb-row').filter({ hasText: 'a000_201802' });

@@ -60,7 +60,16 @@ export type AgentConversationItem =
   | { kind: 'notice'; text: string }
   | { kind: 'thinking'; label: string; text: string; live: boolean }
   | { kind: 'assistant'; step: number; text: string }
-  | { kind: 'tools'; step: number; calls: AgentToolCallView[] }
+  | {
+      kind: 'tools';
+      step: number;
+      calls: AgentToolCallView[];
+      groupId: string;
+      /** 当前仍在流式执行的最后一组工具。 */
+      live: boolean;
+      /** 后续已有模型口播或任务已结束，默认收起。 */
+      collapsed: boolean;
+    }
   | { kind: 'compacted'; windows: number }
   | { kind: 'draft'; title: string; summary: string; nextActions: readonly string[] };
 
@@ -339,18 +348,7 @@ export function extractCompletedTurnItems(
     });
   }
 
-  const steps = new Set<number>();
-  for (const narration of task.narrations) steps.add(narration.step);
-  for (const call of task.toolCalls) steps.add(call.step);
-  const orderedSteps = [...steps].sort((a, b) => a - b);
-  for (const step of orderedSteps) {
-    const narration = task.narrations.find((entry) => entry.step === step);
-    if (narration !== undefined && narration.text.trim() !== '') {
-      items.push({ kind: 'assistant', step, text: narration.text });
-    }
-    const calls = task.toolCalls.filter((call) => call.step === step);
-    if (calls.length > 0) items.push({ kind: 'tools', step, calls });
-  }
+  appendTaskTimeline(items, task, false);
 
   if (task.compactedWindows > 0) {
     items.push({ kind: 'compacted', windows: task.compactedWindows });
@@ -700,6 +698,49 @@ export function describeAgentThinkingLabel(state: AgentTaskState, now: number = 
   return duration === null ? '正在思考' : `正在思考 ${duration}`;
 }
 
+function appendTaskTimeline(
+  items: AgentConversationItem[],
+  task: AgentTaskState,
+  live: boolean
+): void {
+  const steps = new Set<number>();
+  for (const narration of task.narrations) steps.add(narration.step);
+  for (const call of task.toolCalls) steps.add(call.step);
+  const orderedSteps = [...steps].sort((a, b) => a - b);
+  let pendingCalls: AgentToolCallView[] = [];
+  let pendingStartStep = 0;
+
+  const flushTools = (collapsed: boolean): void => {
+    if (pendingCalls.length === 0) return;
+    items.push({
+      kind: 'tools',
+      step: pendingStartStep,
+      calls: pendingCalls,
+      groupId: `tools-${pendingStartStep}-${pendingCalls[0]!.callId}`,
+      live: live && !collapsed,
+      collapsed
+    });
+    pendingCalls = [];
+  };
+
+  for (const step of orderedSteps) {
+    const narration = task.narrations.find((entry) => entry.step === step);
+    if (narration !== undefined && narration.text.trim() !== '') {
+      // The next model message is the boundary of the previous tool span.
+      // Flush first so the completed span renders immediately before that
+      // narration and receives a closed default state.
+      flushTools(true);
+      items.push({ kind: 'assistant', step, text: narration.text });
+    }
+    const calls = task.toolCalls.filter((call) => call.step === step);
+    if (calls.length > 0) {
+      if (pendingCalls.length === 0) pendingStartStep = step;
+      pendingCalls.push(...calls);
+    }
+  }
+  flushTools(!live);
+}
+
 export interface BuildAgentConversationItemsInput {
   goal: string | null;
   idleNotice?: string | null;
@@ -749,18 +790,7 @@ export function buildAgentConversationItems(
     });
   }
 
-  const steps = new Set<number>();
-  for (const narration of task.narrations) steps.add(narration.step);
-  for (const call of task.toolCalls) steps.add(call.step);
-  const orderedSteps = [...steps].sort((a, b) => a - b);
-  for (const step of orderedSteps) {
-    const narration = task.narrations.find((entry) => entry.step === step);
-    if (narration !== undefined && narration.text.trim() !== '') {
-      items.push({ kind: 'assistant', step, text: narration.text });
-    }
-    const calls = task.toolCalls.filter((call) => call.step === step);
-    if (calls.length > 0) items.push({ kind: 'tools', step, calls });
-  }
+  appendTaskTimeline(items, task, isAgentTaskActive(task));
 
   if (task.compactedWindows > 0) {
     items.push({ kind: 'compacted', windows: task.compactedWindows });

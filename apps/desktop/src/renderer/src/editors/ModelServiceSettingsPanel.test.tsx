@@ -41,7 +41,7 @@ describe('2-E 自动保存契约（源码级）', () => {
     // 数字 / effort 字段走同一份 debounce 入口。
     for (const field of [
       'setThinkingLevel', 'setContextWindowTokens', 'setMaxTokens',
-      'setTemperature', 'setTopP', 'setTopK', 'setEmbeddingModel'
+      'setTemperature', 'setTopP', 'setTopK'
     ]) {
       assert.match(source, new RegExp(`${field}\\([^)]*\\);[\\s\\S]{0,300}scheduleAutoSave\\(\\)`),
         `${field} 的 onChange 应调用 scheduleAutoSave()`);
@@ -94,6 +94,13 @@ describe('2-E 自动保存契约（源码级）', () => {
   it('手动「保存」仍是立即 flush，且成功后清空密钥输入框', () => {
     assert.match(source, /已保存模型服务：\$\{saved\.displayName\}（凭据=/, '手动保存文案保留');
     assert.match(source, /setApiKey\(''\)/, '手动保存成功清除密钥输入框');
+  });
+
+  it('模型服务设置不暴露 embeddingModel 配置', () => {
+    assert.match(source, /function editRow\(row: ModelServiceDto\)/);
+    assert.match(source, /onClick=\{\(\) => editRow\(row\)\}/);
+    assert.ok(!source.includes('embeddingModel'), '用户设置页不得要求单独配置 embeddingModel');
+    assert.match(source, /Embedding 由 SoulForge 内部自动管理/);
   });
 });
 

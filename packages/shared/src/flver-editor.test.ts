@@ -14,6 +14,7 @@ import {
   isFlverDocument,
   type FlverDocument
 } from './flver-editor.js';
+import { isCharacterPreviewBundle } from './flver-preview.js';
 
 function makeEnvelope(overrides: Record<string, unknown> = {}): FlverDocument {
   return {
@@ -134,4 +135,59 @@ test('isFlverDocument 窄守卫：接受 FLVER envelope、拒绝垃圾值', () =
   assert.equal(isFlverDocument({ format: 'GPARAM', sourceHash: 'x', authority: 'native-verified' }), false);
   assert.equal(isFlverDocument(null), false);
   assert.equal(isFlverDocument('FLVER'), false);
+});
+
+test('character preview 窄守卫保留多 VertexColor member 的 RGBA 诊断', () => {
+  const diagnostic = {
+    memberOrdinal: 0,
+    memberIndex: 2,
+    layoutType: 3,
+    layoutTypeName: 'Float4',
+    vertexBufferIndex: 1,
+    bufferLayoutIndex: 4,
+    structOffset: 28,
+    rgbaBase64: 'rgba-float4'
+  };
+  const mesh = {
+    meshIndex: 0,
+    vertexCount: 2,
+    indexSize: 16 as const,
+    positionsBase64: 'positions',
+    indicesBase64: 'indices',
+    skinningMode: 'static' as const,
+    boneIndexSpace: 'none' as const,
+    vertexColorStatus: 'decoded' as const,
+    vertexColorDiagnostics: [diagnostic]
+  };
+  const model = {
+    modelId: 'model:0',
+    entry: { index: 0, id: 0, name: 'sample.flver', duplicateOrdinal: 0, contentHash: 'hash' },
+    meshCount: 1,
+    boneCount: 0,
+    meshes: [mesh],
+    bones: []
+  };
+  const bundle = {
+    meshCount: 1,
+    vertexCount: 2,
+    boneCount: 0,
+    leaderModelId: 'model:0',
+    models: [model]
+  };
+
+  assert.equal(isCharacterPreviewBundle(bundle), true);
+  assert.equal(isCharacterPreviewBundle({
+    ...bundle,
+    models: [{
+      ...model,
+      meshes: [{
+        ...mesh,
+        vertexColorDiagnostics: [{ ...diagnostic, layoutTypeName: 'Color' }]
+      }]
+    }]
+  }), false);
+  assert.equal(isCharacterPreviewBundle({
+    ...bundle,
+    models: [{ ...model, meshes: [{ ...mesh, vertexColorStatus: 'opaque' }] }]
+  }), false);
 });

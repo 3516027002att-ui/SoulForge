@@ -15,9 +15,9 @@
 import type { SceneDrawList } from './sceneManifestBrowser.js';
 import {
   type AuthoritativeAnimationClip,
-  eulerXYZToQuaternion,
   sampleAuthoritativePose
 } from '@soulforge/shared';
+import { flverEulerXzyToQuaternion } from './flverSkeletonMapping.js';
 import { ModelResourcePool, normalizeModelResourceKey } from './modelResourcePool.js';
 import type {
   BufferGeometry,
@@ -131,9 +131,32 @@ export interface FlverSceneImageTexture {
   kind: 'image-uri';
   uri: string;
   colorSpace?: 'srgb' | 'linear';
+  /** Native texture identity used only to select a conservative preview path. */
+  label?: string;
 }
 
 export type FlverSceneTexture = FlverSceneRgbaTexture | FlverSceneDdsTexture | FlverSceneImageTexture;
+
+export interface FlverSceneMaterialTextures {
+  albedo: FlverSceneTexture;
+  albedo2?: FlverSceneTexture;
+  normal?: FlverSceneTexture;
+  normal2?: FlverSceneTexture;
+  metalness?: FlverSceneTexture;
+  blendMask?: FlverSceneTexture;
+  diffuseBlend?: FlverSceneDiffuseBlend;
+  /** Native MTD alpha policy propagated from the Bridge. */
+  alphaMode?: 'opaque' | 'cutout';
+}
+
+export interface FlverSceneDiffuseBlend {
+  mode: 'multiply';
+  albedo2UvIndex: number;
+  blendMaskUvIndex: number;
+  undefinedBlendMaskValue: number;
+  enableTextureAlpha: boolean;
+  multiplyBlendMaskByAlbedo2Alpha: boolean;
+}
 
 export interface FlverSceneMesh {
   id: string;
@@ -143,21 +166,39 @@ export interface FlverSceneMesh {
   scale: [number, number, number];
   positions: Float32Array;
   uvs?: Float32Array;
+  /** All native UV sets; uv/uv1/... are attached in this order. */
+  uvSets?: Float32Array[];
   normals?: Float32Array;
   indices?: Uint16Array | Uint32Array;
   indexSize?: 16 | 32;
   vertexColors?: Float32Array;
+  /** Native VertexColor alpha retained as evidence; it is not generic opacity. */
+  vertexAlpha?: Float32Array;
+  /** Selected native FaceSet.CullBackfaces. */
+  cullBackfaces?: boolean | undefined;
+  /** Native MTD alpha policy for the bound material. */
+  materialAlphaMode?: 'opaque' | 'cutout' | undefined;
+  /** Explicit compatibility-only projection source; native decal meshes have none. */
+  projectionTexture?: FlverSceneTexture;
   skinIndices?: Uint16Array;
   skinWeights?: Float32Array;
   /** The FLVER-local skeleton namespace used by this mesh. */
   skeletonId?: string;
   skinningMode?: 'weighted' | 'rigid' | 'static';
   boneIndexSpace?: 'flver-global' | 'none';
-  /** Native material projection mode. Projected decals are not generic surfaces. */
-  previewRenderMode?: 'surface' | 'projected-decal' | undefined;
+  /** Native FLVER mesh.Dynamic skinning matrix contract. */
+  skinningTransformMode?: 'absolute' | 'delta';
+  /** Native/compatibility material projection mode. */
+  previewRenderMode?: 'surface' | 'projected-decal' | 'compatibility-projected' | undefined;
   vertexCount: number;
   wireframeOverlay?: boolean;
   texture?: FlverSceneTexture;
+  normalTexture?: FlverSceneTexture;
+  albedo2Texture?: FlverSceneTexture;
+  normal2Texture?: FlverSceneTexture;
+  blendMaskTexture?: FlverSceneTexture;
+  diffuseBlend?: FlverSceneDiffuseBlend;
+  metalnessTexture?: FlverSceneTexture;
 }
 
 export interface FlverSceneBone {
@@ -177,6 +218,19 @@ export interface FlverSceneBone {
 export interface FlverSceneSkeleton {
   id: string;
   bones: FlverSceneBone[];
+}
+
+/**
+ * A read-only character-part binding. The part keeps its own reference-pose
+ * bones/inverse binds, while the projection copies the mapped leader FK
+ * matrices into those bones before updating its Skeleton texture.
+ */
+export interface FlverSceneSkeletonBinding {
+  id: string;
+  leaderSkeletonId: string;
+  bones: FlverSceneBone[];
+  /** Source FLVER bone index -> leader skeleton bone index; -1 is unmapped. */
+  sourceToLeader: number[];
 }
 
 export interface FlverSceneDummy {
@@ -202,8 +256,11 @@ export interface SceneFrameOptions {
 }
 
 /**
- * 原生 FLVER 的角色正面朝向 -Z；角色预览使用固定正面取景，
- * 地图场景仍保留自己的相机方位与统计裁剪策略。
+ * DSAnimStudio 的成熟 FLVER 渲染路径会把原生坐标乘以
+ * `Matrix.CreateScale(1, 1, -1)`。本项目相机的方位角定义是“相机所在方向”，
+ * 因此经过该镜像后，原生角色正面位于转换后的 -Z 一侧，正面取景使用
+ * `azimuth=Math.PI`；这由真实 c0000 的正/背面截图和原生坐标变换共同确认，
+ * 不是对模型 ID 或网格顺序的猜测。
  */
 export const FLVER_PREVIEW_FRAME_OPTIONS: Readonly<Required<SceneFrameOptions>> = Object.freeze({
   minSpan: 1.5,
@@ -221,6 +278,7 @@ export interface FlverSemanticScene {
   meshes: FlverSceneMesh[];
   bones?: FlverSceneBone[];
   skeletons?: FlverSceneSkeleton[];
+  skeletonBindings?: FlverSceneSkeletonBinding[];
   dummies?: FlverSceneDummy[];
   /** Bone helpers are diagnostic and stay off in normal model/action previews. */
   showSkeletonMarkers?: boolean;
@@ -231,6 +289,8 @@ type ResourceTracker = <T extends { dispose(): void }>(resource: T) => T;
 
 interface MountInput {
   container: HTMLElement;
+  /** Only native FLVER projection uses the DSAnimStudio Z-handedness conversion. */
+  nativeFlverCoordinateSpace?: boolean;
   rendererBackend?: RendererBackend;
   /** Headless test seam: replaces GPU-backed renderer construction. */
   rendererFactory?: (canvas: HTMLCanvasElement) => ThreeRendererLike;
@@ -276,6 +336,8 @@ interface SceneCore {
   replaceModelGeometry: (modelName: string, geometry: BufferGeometry, material: Material | Material[]) => number;
   clearContent: () => void;
   frameToBounds: (bounds: FlverSceneBounds, options?: SceneFrameOptions) => void;
+  /** Request one bounded render for the next scene tick. */
+  requestRender?: () => void;
   disposeAll: () => void;
 }
 
@@ -493,10 +555,18 @@ export async function mountFlverScene(input: {
   rendererFactory?: (canvas: HTMLCanvasElement) => ThreeRendererLike;
   resourceAudit?: (resources: ReadonlyArray<{ dispose(): void }>) => void;
 }): Promise<FlverSceneHandle> {
-  const core = await mountSceneCore(input);
+  const core = await mountSceneCore({ ...input, nativeFlverCoordinateSpace: true });
   interface RuntimeSkeleton {
     bones: Array<import('three').Bone>;
     skeleton: import('three').Skeleton;
+    /** Lazily-created native Dynamic==0 absolute-matrix view of the same bones. */
+    absoluteSkeleton?: import('three').Skeleton;
+    /** Source bone indices aligned with `bones` for a follower binding. */
+    sourceBoneIndices?: number[];
+    /** Leader runtime id for a follower binding; absent for pose-owning skeletons. */
+    leaderSkeletonId?: string;
+    /** Source FLVER bone index -> leader bone index. */
+    sourceToLeader?: number[];
     initialBones: Array<{
       translation: [number, number, number];
       rotation: [number, number, number, number];
@@ -523,7 +593,7 @@ export async function mountFlverScene(input: {
           transform.rotation[3]
         );
       } else {
-        const quaternion = eulerXYZToQuaternion(transform.rotation as [number, number, number]);
+        const quaternion = flverEulerXzyToQuaternion(transform.rotation as [number, number, number]);
         bone.quaternion.set(quaternion[0], quaternion[1], quaternion[2], quaternion[3]);
       }
       const scale = transform.scale ?? [1, 1, 1];
@@ -542,13 +612,89 @@ export async function mountFlverScene(input: {
     }
   };
 
+  const syncFollowerSkeleton = (runtime: RuntimeSkeleton): void => {
+    const sourceToLeader = runtime.sourceToLeader;
+    if (!runtime.leaderSkeletonId || !sourceToLeader) return;
+    const leader = activeSkeletons.get(runtime.leaderSkeletonId);
+    if (!leader) return;
+    const sourceIndexByBone = new Map<import('three').Bone, number>();
+    for (let index = 0; index < runtime.bones.length; index += 1) {
+      const sourceBone = runtime.bones[index];
+      if (sourceBone) sourceIndexByBone.set(sourceBone, index);
+    }
+
+    // DSAnimStudio's NewSkeletonMapper walks the complete follower tree. A
+    // mapped bone receives the leader FK, but a follower-only bone still gets
+    // its own local/reference FK composed beneath the last mapped ancestor.
+    // Skipping those bones leaves their old bind-pose world matrices in the
+    // bone texture; this is especially visible on auxiliary finger/wrist
+    // bones. Keep the native follower bind skeleton and only rebuild the
+    // missing world matrices from its own local transforms.
+    const processed = new Set<import('three').Bone>();
+    const visiting = new Set<import('three').Bone>();
+    const syncBone = (index: number): void => {
+      const sourceBone = runtime.bones[index];
+      if (!sourceBone || processed.has(sourceBone)) return;
+      if (visiting.has(sourceBone)) return;
+      visiting.add(sourceBone);
+
+      const parent = sourceBone.parent;
+      const parentIndex = parent && parent !== core.root
+        ? sourceIndexByBone.get(parent as import('three').Bone)
+        : undefined;
+      if (parentIndex !== undefined) syncBone(parentIndex);
+
+      const sourceIndex = runtime.sourceBoneIndices?.[index] ?? index;
+      const leaderIndex = sourceToLeader[sourceIndex] ?? -1;
+      const leaderBone = leader.bones[leaderIndex];
+      if (leaderIndex >= 0 && leaderBone) {
+        // Do not rebuild mapped follower local transforms from the leader.
+        // Mature viewers replace the follower's current FK/world matrix with
+        // the leader FK while retaining the follower inverse bind matrix.
+        sourceBone.matrixWorld.copy(leaderBone.matrixWorld);
+      } else if (parentIndex !== undefined) {
+        // The follower bone is not in the leader map. Recompose its native
+        // local FK under the already-synchronised follower parent. Its local
+        // transform remains the reference/local transform created at mount.
+        sourceBone.updateMatrix();
+        sourceBone.matrixWorld.multiplyMatrices(
+          runtime.bones[parentIndex]!.matrixWorld,
+          sourceBone.matrix
+        );
+      }
+      sourceBone.matrixWorldNeedsUpdate = false;
+      processed.add(sourceBone);
+      visiting.delete(sourceBone);
+    };
+
+    for (let index = 0; index < runtime.bones.length; index += 1) syncBone(index);
+  };
+
   const syncSkeletons = (runtimes: Iterable<RuntimeSkeleton>): void => {
     const changed = [...runtimes];
     if (changed.length === 0) return;
-    // Every FLVER-local skeleton shares this scene root. Propagate local
-    // transforms once, then refresh only each skeleton's bone texture.
+    const changedSet = new Set(changed);
+    const changedLeaders = new Set(
+      changed.filter((runtime) => runtime.leaderSkeletonId === undefined)
+    );
+    // Every pose-owning FLVER skeleton shares this scene root. Propagate local
+    // transforms once, then refresh the changed skeletons and any follower
+    // skeletons whose leader changed.
     core.root.updateMatrixWorld(true);
-    for (const runtime of changed) runtime.skeleton.update();
+    const toUpdate = new Set<RuntimeSkeleton>();
+    for (const runtime of activeSkeletons.values()) {
+      if (changedSet.has(runtime)
+        || (runtime.leaderSkeletonId !== undefined
+          && activeSkeletons.get(runtime.leaderSkeletonId)
+          && changedLeaders.has(activeSkeletons.get(runtime.leaderSkeletonId)!))) {
+        toUpdate.add(runtime);
+      }
+    }
+    for (const runtime of toUpdate) {
+      if (runtime.leaderSkeletonId !== undefined) syncFollowerSkeleton(runtime);
+      runtime.skeleton.update();
+      runtime.absoluteSkeleton?.update();
+    }
   };
 
   const setScene = (semantic: FlverSemanticScene): void => {
@@ -559,14 +705,17 @@ export async function mountFlverScene(input: {
       const semanticSkeletons = semantic.skeletons?.length
         ? semantic.skeletons
         : (semantic.bones?.length ? [{ id: 'default', bones: semantic.bones }] : []);
-      for (const semanticSkeleton of semanticSkeletons) {
+      const createRuntimeSkeleton = (
+        semanticSkeleton: FlverSceneSkeleton,
+        binding?: FlverSceneSkeletonBinding
+      ): RuntimeSkeleton => {
         const threeBones: Array<import('three').Bone> = [];
         const initialBones: RuntimeSkeleton['initialBones'] = [];
         for (const b of semanticSkeleton.bones) {
           const bone = new core.three.Bone();
           bone.name = b.name;
           bone.position.set(b.translation[0], b.translation[1], b.translation[2]);
-          const quaternion = eulerXYZToQuaternion(b.rotation);
+          const quaternion = flverEulerXzyToQuaternion(b.rotation);
           bone.quaternion.set(quaternion[0], quaternion[1], quaternion[2], quaternion[3]);
           const scale = b.scale ?? [1, 1, 1];
           bone.scale.set(scale[0], scale[1], scale[2]);
@@ -577,10 +726,17 @@ export async function mountFlverScene(input: {
             scale: [scale[0], scale[1], scale[2]]
           });
         }
+        const bonesByIndex = new Map<number, import('three').Bone>();
+        for (let i = 0; i < semanticSkeleton.bones.length; i += 1) {
+          const bone = threeBones[i];
+          const source = semanticSkeleton.bones[i];
+          if (bone && source) bonesByIndex.set(source.index ?? i, bone);
+        }
         for (let i = 0; i < semanticSkeleton.bones.length; i++) {
           const parentIdx = semanticSkeleton.bones[i]!.parentIndex;
-          if (parentIdx >= 0 && parentIdx < threeBones.length && parentIdx !== i) {
-            threeBones[parentIdx]!.add(threeBones[i]!);
+          const parent = bonesByIndex.get(parentIdx);
+          if (parent && parent !== threeBones[i]) {
+            parent.add(threeBones[i]!);
           } else {
             core.root.add(threeBones[i]!);
           }
@@ -590,8 +746,50 @@ export async function mountFlverScene(input: {
         // matrices current before capturing bind-pose inverses.
         core.root.updateMatrixWorld(true);
         const skeleton = core.track(new core.three.Skeleton(threeBones));
-        activeSkeletons.set(semanticSkeleton.id, { bones: threeBones, skeleton, initialBones });
+        const runtime: RuntimeSkeleton = {
+          bones: threeBones,
+          skeleton,
+          initialBones,
+          ...(binding
+            ? {
+                sourceBoneIndices: semanticSkeleton.bones.map((bone, index) => bone.index ?? index),
+                leaderSkeletonId: binding.leaderSkeletonId,
+                sourceToLeader: [...binding.sourceToLeader]
+              }
+            : {})
+        };
+        if (binding) {
+          // Follower bones are no longer scene children after their reference
+          // matrices have been captured. Their matrixWorld is updated only by
+          // syncFollowerSkeleton, so Three cannot overwrite the mapped FK by
+          // traversing the source hierarchy on a later frame.
+          for (const bone of threeBones) {
+            if (bone.parent === core.root) core.root.remove(bone);
+          }
+        }
+        return runtime;
+      };
+
+      for (const semanticSkeleton of semanticSkeletons) {
+        const runtime = createRuntimeSkeleton(semanticSkeleton);
+        activeSkeletons.set(semanticSkeleton.id, runtime);
       }
+      for (const binding of semantic.skeletonBindings ?? []) {
+        if (!activeSkeletons.has(binding.leaderSkeletonId)) {
+          throw new Error(`FLVER_FOLLOWER_LEADER_MISSING: ${binding.id} -> ${binding.leaderSkeletonId}`);
+        }
+        if (activeSkeletons.has(binding.id)) {
+          throw new Error(`FLVER_SKELETON_ID_DUPLICATE: ${binding.id}`);
+        }
+        const runtime = createRuntimeSkeleton(
+          { id: binding.id, bones: binding.bones },
+          binding
+        );
+        activeSkeletons.set(binding.id, runtime);
+      }
+      // Establish follower FK at bind pose before any mesh consumes its
+      // source skeleton. This is the native DirectBoneMap contract.
+      syncSkeletons(activeSkeletons.values());
 
       // A character bundle repeats the same albedo across many FLVER meshes
       // (body/cloth/hair cards are a common example). Keep one GPU texture per
@@ -599,17 +797,47 @@ export async function mountFlverScene(input: {
       // of asking Chromium to decode the same data URI once per mesh.
       const textureCache = new Map<string, import('three').Texture>();
 
-      // Each FLVER mesh binds only to its own local skeleton namespace.
+      // Each FLVER mesh binds to its own local skeleton namespace. Character
+      // parts use a follower namespace that retains their native inverse bind
+      // matrices; ordinary standalone FLVERs use their own pose skeleton.
+      // Native projected-decal remains closed because the generic Three
+      // renderer has no equivalent of the game's projected-coordinate shader.
+      // A compatibility-projected mesh is different: the Bridge has already
+      // selected the verified receiver component and attached an explicit
+      // source texture, so it is a bounded read-only surface projection and
+      // may be rasterized. This keeps native shader identity intact without
+      // turning an unverified projection volume into a visible overlay.
       for (const item of semantic.meshes) {
         if (item.previewRenderMode === 'projected-decal') continue;
         const runtime = activeSkeletons.get(item.skeletonId ?? 'default');
-        core.addMesh(item.id, createFlverMesh(core.three, core.track, item, runtime?.skeleton ?? null, textureCache));
+        let meshSkeleton = runtime?.skeleton;
+        if (runtime && item.skinningTransformMode === 'absolute') {
+          // Mature FLVER viewers pass the absolute reference-pose matrix to
+          // mesh.Dynamic==0. Three's default Skeleton.calculateInverses()
+          // would cancel that pose and is only correct for model-space
+          // inverse-bind vertices. Keep one shared bone tree, but give this
+          // mesh class an explicit identity inverse array.
+          runtime.absoluteSkeleton ??= core.track(new core.three.Skeleton(
+            runtime.bones,
+            runtime.bones.map(() => new core.three.Matrix4())
+          ));
+          meshSkeleton = runtime.absoluteSkeleton;
+        }
+        core.addMesh(item.id, createFlverMesh(
+          core.three,
+          core.track,
+          item,
+          meshSkeleton ?? null,
+          textureCache,
+          core.rendererBackend,
+          true
+        ));
       }
       createMarkers(core.three, core.track, core.markerGroup, semantic);
       // 角色 FLVER 的真实尺寸通常只有 1~2 个游戏单位。通用代理取景
       // 的 15/16 单位下限会把动作模型缩成原点旁的几像素，播放虽在走，
       // 用户却看不到动作；这里按真实模型尺寸取景，仍保留较小安全下限。
-      core.frameToBounds(semantic.bounds, {
+      core.frameToBounds(mirrorFlverBounds(semantic.bounds), {
         ...FLVER_PREVIEW_FRAME_OPTIONS,
         minSpan: semantic.meshes.length > 0 ? FLVER_PREVIEW_FRAME_OPTIONS.minSpan : 2
       });
@@ -637,11 +865,13 @@ export async function mountFlverScene(input: {
       activeClip = clip;
     },
     setPlaybackTime: (time: number) => {
-      const runtime = activeSkeletons.get('default') ?? activeSkeletons.values().next().value as RuntimeSkeleton | undefined;
+      const runtime = activeSkeletons.get('default')
+        ?? [...activeSkeletons.values()].find((candidate) => candidate.leaderSkeletonId === undefined);
       if (!runtime) return;
       if (!activeClip || time <= 0) {
         resetSkeletonLocals(runtime);
         syncSkeletons([runtime]);
+        core.requestRender?.();
         return;
       }
       // 消费权威动画采样位姿（Havok Spline / De Boor 采样结果）
@@ -657,23 +887,28 @@ export async function mountFlverScene(input: {
         bone.scale.set(pose.s[0], pose.s[1], pose.s[2]);
       }
       syncSkeletons([runtime]);
+      core.requestRender?.();
     },
     setPose: (pose) => {
-      const runtime = activeSkeletons.get('default') ?? activeSkeletons.values().next().value as RuntimeSkeleton | undefined;
+      const runtime = activeSkeletons.get('default')
+        ?? [...activeSkeletons.values()].find((candidate) => candidate.leaderSkeletonId === undefined);
       if (runtime && pose?.length) {
         applyPoseLocals(runtime, pose);
         syncSkeletons([runtime]);
+        core.requestRender?.();
       }
     },
     setSkeletonPoses: (poses) => {
       const changed: RuntimeSkeleton[] = [];
       for (const [skeletonId, runtime] of activeSkeletons) {
+        if (runtime.leaderSkeletonId !== undefined) continue;
         const pose = poses[skeletonId];
         if (pose?.length) applyPoseLocals(runtime, pose);
         else resetSkeletonLocals(runtime);
         changed.push(runtime);
       }
       syncSkeletons(changed);
+      core.requestRender?.();
     },
     dispose: core.disposeAll
   };
@@ -714,6 +949,10 @@ async function mountSceneCore(input: MountInput): Promise<SceneCore> {
   const camera = new three.PerspectiveCamera(55, 1, 0.1, 50_000);
   input.cameraAudit?.(camera);
   const root = new three.Group();
+  // Match the native FLVER coordinate projection used by DSAnimStudio only
+  // for the FLVER projection. Map/proxy scenes remain in their existing scene
+  // coordinate system and must not inherit this handedness conversion.
+  if (input.nativeFlverCoordinateSpace) root.scale.set(1, 1, -1);
   scene.add(root);
   // Real FLVER albedo previews have no environment map. A low ambient-only
   // setup makes valid dark cloth/stone textures read as an untextured black
@@ -765,6 +1004,14 @@ async function mountSceneCore(input: MountInput): Promise<SceneCore> {
   let selectedId: string | null = null;
   let raf = 0;
   let disposed = false;
+  // Rendering a 100k-vertex character at the browser refresh rate while it is
+  // static can consume a full renderer core on software/WebGL fallback. Keep
+  // the animation/input poll alive, but submit a frame only after a semantic,
+  // camera, resize, or selection change explicitly requests one.
+  let renderRequested = true;
+  const requestRender = (): void => {
+    renderRequested = true;
+  };
 
   type TransformPointer = { x: number; y: number; button: number };
   type UniversalTransformControl = {
@@ -852,6 +1099,7 @@ async function mountSceneCore(input: MountInput): Promise<SceneCore> {
     const forward = new three.Vector3(sinYaw * cosPitch, sinPitch, -cosYaw * cosPitch).normalize();
     camera.lookAt(camera.position.clone().add(forward));
     camera.updateMatrixWorld(true);
+    requestRender();
   };
   updateCameraOrientation();
 
@@ -863,6 +1111,7 @@ async function mountSceneCore(input: MountInput): Promise<SceneCore> {
     renderer.setSize(width, height, false);
     camera.aspect = width / height;
     camera.updateProjectionMatrix();
+    requestRender();
   };
 
   const clearHighlightObjects = (): void => {
@@ -976,6 +1225,7 @@ async function mountSceneCore(input: MountInput): Promise<SceneCore> {
     } else {
       detachUniversalControls();
     }
+    requestRender();
     if (notify) input.onSelect?.(id);
   };
 
@@ -1630,6 +1880,7 @@ async function mountSceneCore(input: MountInput): Promise<SceneCore> {
           const up = new three.Vector3().crossVectors(right, forward).normalize();
           camera.position.addScaledVector(right, -delta.x * panSpeed);
           camera.position.addScaledVector(up, delta.y * panSpeed);
+          requestRender();
         }
       }
       event.preventDefault();
@@ -1713,6 +1964,7 @@ async function mountSceneCore(input: MountInput): Promise<SceneCore> {
       camera.getWorldDirection(forward);
       const step = (event.deltaY < 0 ? 1 : -1) * (baseFlySpeed * 0.15);
       camera.position.addScaledVector(forward, step);
+      requestRender();
     }
   };
 
@@ -1946,6 +2198,8 @@ async function mountSceneCore(input: MountInput): Promise<SceneCore> {
   setSize();
 
   let lastTick = typeof performance !== 'undefined' ? performance.now() : Date.now();
+  const minRenderIntervalMs = 1000 / 30;
+  let lastRenderAt = Number.NEGATIVE_INFINITY;
   const tick = (now?: number): void => {
     if (disposed) return;
     const current = typeof now === 'number' ? now : (typeof performance !== 'undefined' ? performance.now() : Date.now());
@@ -1970,9 +2224,18 @@ async function mountSceneCore(input: MountInput): Promise<SceneCore> {
       if (reusableDir.lengthSq() > 0) {
         reusableDir.normalize().multiplyScalar(speed * delta);
         camera.position.add(reusableDir);
+        requestRender();
       }
     }
-    renderer.render(scene, camera);
+    // The scene is static most of the time, but the old loop rendered at the
+    // browser's refresh rate even when neither the camera nor the scene had
+    // changed. Keep input/animation polling responsive while capping the
+    // expensive WebGL submission to 30 FPS.
+    if (renderRequested && current - lastRenderAt >= minRenderIntervalMs) {
+      renderer.render(scene, camera);
+      lastRenderAt = current;
+      renderRequested = false;
+    }
     raf = requestAnimationFrame(tick as FrameRequestCallback);
   };
   tick(lastTick);
@@ -2036,6 +2299,7 @@ async function mountSceneCore(input: MountInput): Promise<SceneCore> {
     replaceModelGeometry,
     clearContent,
     frameToBounds,
+    requestRender,
     disposeAll
   };
 }
@@ -2084,16 +2348,34 @@ export function groupSceneDrawItems(items: SceneDrawList['items']): SceneDrawBat
   return [...batches.values()];
 }
 
+function mirrorFlverBounds(bounds: FlverSceneBounds): FlverSceneBounds {
+  return {
+    min: [bounds.min[0], bounds.min[1], -bounds.max[2]],
+    max: [bounds.max[0], bounds.max[1], -bounds.min[2]],
+    center: [bounds.center[0], bounds.center[1], -bounds.center[2]]
+  };
+}
+
 function createFlverMesh(
   three: ThreeModule,
   track: ResourceTracker,
   item: FlverSceneMesh,
   skeleton: import('three').Skeleton | null = null,
-  textureCache?: Map<string, import('three').Texture>
+  textureCache?: Map<string, import('three').Texture>,
+  rendererBackend: RendererBackend = 'webgl2',
+  nativeFlverCoordinateSpace = false
 ): Object3D {
   const geometry = track(new three.BufferGeometry());
   geometry.setAttribute('position', new three.BufferAttribute(item.positions, 3));
-  if (item.uvs) geometry.setAttribute('uv', new three.BufferAttribute(item.uvs, 2));
+  const uvSets = item.uvSets ?? (item.uvs ? [item.uvs] : undefined);
+  if (uvSets) {
+    for (const [index, uvSet] of uvSets.entries()) {
+      // Keep the primary set on Three's conventional `uv` attribute. Secondary
+      // sets use private names so a MeshBasicMaterial light-map declaration
+      // cannot collide with the native material's UV index.
+      geometry.setAttribute(index === 0 ? 'uv' : `soulforgeUv${index}`, new three.BufferAttribute(uvSet, 2));
+    }
+  }
   if (item.normals) geometry.setAttribute('normal', new three.BufferAttribute(item.normals, 3));
   else geometry.computeVertexNormals(); // 真实法线存在时绝不覆盖（无损性）。
   if (item.indices) {
@@ -2103,7 +2385,24 @@ function createFlverMesh(
       geometry.setIndex(new three.Uint16BufferAttribute(item.indices, 1));
     }
   }
-  if (item.vertexColors) geometry.setAttribute('color', new three.BufferAttribute(item.vertexColors, 3));
+  const isNativeProjectedDecal = item.previewRenderMode === 'projected-decal';
+  const isCompatibilityProjected = item.previewRenderMode === 'compatibility-projected';
+  const isProjectedDecal = isNativeProjectedDecal || isCompatibilityProjected;
+  // Mature FLVER viewers preserve VertexColor as a full native attribute and
+  // let the selected MTD decide whether it participates in shading. The
+  // generic Three material has no such MTD contract, so vertex alpha must not
+  // be silently reinterpreted as surface opacity.
+  if (item.vertexColors) {
+    geometry.setAttribute('color', new three.BufferAttribute(item.vertexColors, 3));
+  }
+  if (item.vertexAlpha) {
+    // Keep the native alpha channel available under its own attribute. Three's
+    // `color` attribute is RGB-only in the generic materials used here, so
+    // putting alpha there would either change the face colour or be silently
+    // dropped. The selected material path decides later whether this channel
+    // is coverage, blend weight, or diagnostic data.
+    geometry.setAttribute('soulforgeVertexAlpha', new three.BufferAttribute(item.vertexAlpha, 1));
+  }
 
   // 真正的 GPU Skinning Attributes（4 components / vertex）
   if (item.skinIndices) {
@@ -2114,22 +2413,115 @@ function createFlverMesh(
   }
 
   const texture = item.texture ? createTexture(three, track, item.texture, textureCache) : null;
-  const material = track(new three.MeshStandardMaterial({
-    color: texture ? 0xffffff : new three.Color(0xb0b8c4),
-    roughness: 0.5,
-    metalness: 0.1,
-    ...(texture ? { map: texture } : {}),
-    // Character hair/fur and several cloth/face layers are RGBA cut-outs.
-    // Without an alpha test Three renders the transparent part of each card
-    // as an opaque rectangle, which is exactly the stretched-strip artifact
-    // seen above C0000's head. Keep depth writes enabled so overlapping cards
-    // still sort like native cut-out geometry.
-    ...(texture ? { transparent: true, alphaTest: 0.1, depthWrite: true } : {}),
-    wireframe: false,
-    side: three.DoubleSide,
-    flatShading: false,
-    vertexColors: Boolean(item.vertexColors)
-  }));
+  const projectionTexture = item.projectionTexture
+    ? createTexture(three, track, item.projectionTexture, textureCache)
+    : null;
+  const normalTexture = item.normalTexture
+    ? createTexture(three, track, item.normalTexture, textureCache)
+    : null;
+  const albedo2Texture = item.albedo2Texture
+    ? createTexture(three, track, item.albedo2Texture, textureCache)
+    : null;
+  const blendMaskTexture = item.blendMaskTexture
+    ? createTexture(three, track, item.blendMaskTexture, textureCache)
+    : null;
+  const metalnessTexture = item.metalnessTexture
+    ? createTexture(three, track, item.metalnessTexture, textureCache)
+    : null;
+  const displayTexture = isCompatibilityProjected ? projectionTexture ?? texture : texture;
+  // The Bridge has already applied the native MTD alpha policy. In
+  // particular, Character_AMSN_[AO_SSS]_[Cs] HeadA is an opaque lit surface.
+  // Never infer this policy from a texture filename: mature viewers resolve
+  // sampler/alpha state from MTD material data, while a filename is only a
+  // locating token and is not write/render authority.
+  const isUnlitCharacterLayer = item.materialAlphaMode === 'cutout';
+  const alphaMode = item.materialAlphaMode;
+  // Mature FLVER viewers bind native Mask1 to the material's colour-blend
+  // operation (for example Blend1To2). It is not an opacity map. The Bridge
+  // keeps the exact `_1m` companion in its diagnostic DTO, but the generic
+  // Three surface path deliberately has no Mask1 slot until that native blend
+  // shader is implemented; this prevents a blend input from becoming alpha.
+  const usesTextureAlpha = alphaMode !== 'opaque';
+  const textureAlphaTest = isNativeProjectedDecal ? 0.01 : 0.5;
+  // The native viewer mirrors FLVER world Z before rasterization. That mirror
+  // reverses the projected winding; WebGL compensates for a negative object
+  // determinant, so BackSide preserves the native clockwise-cull contract on
+  // WebGL while WebGPU needs the corresponding FrontSide pipeline state.
+  const cullSide = item.cullBackfaces === true
+    ? (nativeFlverCoordinateSpace
+      ? (rendererBackend === 'webgl2' ? three.BackSide : three.FrontSide)
+      : three.FrontSide)
+    : three.DoubleSide;
+  // Native character MTDs provide SSS/hair-card lighting that a generic
+  // MeshStandardMaterial cannot reproduce. Non-opaque face/hair cards still
+  // use the unlit cut-out fallback, while an opaque HeadA remains on the
+  // standard path so its native texture layers are not discarded.
+  const material = track(isProjectedDecal || isUnlitCharacterLayer
+    ? new three.MeshBasicMaterial({
+      color: displayTexture ? 0xffffff : new three.Color(0xb0b8c4),
+      ...(displayTexture
+        ? {
+            map: displayTexture,
+            ...(usesTextureAlpha
+              ? {
+                  transparent: true,
+                  alphaTest: textureAlphaTest
+                }
+              : {})
+          }
+        : {}),
+      depthTest: true,
+      depthWrite: !isNativeProjectedDecal,
+      wireframe: false,
+      // Match the selected native FaceSet. Ordinary hair/fur cards commonly
+      // have cullBackfaces=false, while the eye/head/mouth meshes use true.
+      side: cullSide,
+      vertexColors: Boolean(item.vertexColors)
+    })
+    : new three.MeshStandardMaterial({
+      color: texture ? 0xffffff : new three.Color(0xb0b8c4),
+      roughness: 0.5,
+      metalness: 0.1,
+      ...(texture ? { map: texture } : {}),
+      ...(normalTexture ? { normalMap: normalTexture, normalScale: new three.Vector2(1, 1) } : {}),
+      ...(metalnessTexture ? { metalness: 1, metalnessMap: metalnessTexture } : {}),
+      // Character hair/fur and several cloth/face layers are RGBA cut-outs.
+      // Without an alpha test Three renders the transparent part of each card
+      // as an opaque rectangle, which is exactly the stretched-strip artifact
+      // seen above C0000's head. Keep depth writes enabled so overlapping cards
+      // still sort like native cut-out geometry.
+      ...(texture && usesTextureAlpha
+        ? {
+            transparent: true,
+            alphaTest: 0.1,
+            depthWrite: true
+          }
+        : {}),
+      wireframe: false,
+      side: cullSide,
+      flatShading: false,
+      vertexColors: Boolean(item.vertexColors)
+    }));
+
+  // This is the small, source-mapped part of the native Character_AMSN
+  // shader that the preview can reproduce: primary albedo on UV0, secondary
+  // albedo on the declared UV set, and the native Multiply operation. It is
+  // installed only for the WebGL2 projection path; WebGPU keeps the verified
+  // primary surface rather than silently applying a different approximation.
+  if (rendererBackend === 'webgl2'
+    && !isProjectedDecal
+    && albedo2Texture
+    && item.diffuseBlend
+    && uvSets?.[item.diffuseBlend.albedo2UvIndex]
+    && (!blendMaskTexture || uvSets?.[item.diffuseBlend.blendMaskUvIndex])) {
+    configureNativeDiffuseBlend(
+      material,
+      albedo2Texture,
+      blendMaskTexture,
+      item.diffuseBlend,
+      uvSets[item.diffuseBlend.albedo2UvIndex] !== undefined
+    );
+  }
 
   const hasCompleteSkinBinding = skeleton !== null
     && item.skinningMode !== 'static'
@@ -2143,7 +2535,15 @@ function createFlverMesh(
     skinned.position.set(item.position[0], item.position[1], item.position[2]);
     skinned.rotation.set(item.rotation[0], item.rotation[1], item.rotation[2]);
     skinned.scale.set(item.scale[0], item.scale[1], item.scale[2]);
-    skinned.bind(skeleton);
+    // SkinnedMesh.bind(skeleton) without an explicit bind matrix calls
+    // skeleton.calculateInverses() again. That would overwrite a follower's
+    // source reference inverses after its FK has been mapped to the leader
+    // (and would also cancel the explicit identity inverses for Dynamic==0).
+    // Capture only this mesh's local bind matrix and leave the already-created
+    // skeleton namespace authoritative.
+    skinned.updateMatrixWorld(true);
+    skinned.bind(skeleton, skinned.matrixWorld.clone());
+    if (isProjectedDecal) skinned.renderOrder = isNativeProjectedDecal ? 2 : 1;
     return skinned;
   }
 
@@ -2151,6 +2551,7 @@ function createFlverMesh(
   mesh.position.set(item.position[0], item.position[1], item.position[2]);
   mesh.rotation.set(item.rotation[0], item.rotation[1], item.rotation[2]);
   mesh.scale.set(item.scale[0], item.scale[1], item.scale[2]);
+  if (isProjectedDecal) mesh.renderOrder = isNativeProjectedDecal ? 2 : 1;
   if (item.wireframeOverlay) {
     const wireMaterial = track(new three.MeshBasicMaterial({
       color: 0x88bbee,
@@ -2165,6 +2566,84 @@ function createFlverMesh(
     mesh.add(wire);
   }
   return mesh;
+}
+
+function configureNativeDiffuseBlend(
+  material: Material,
+  albedo2Texture: import('three').Texture,
+  blendMaskTexture: import('three').Texture | null,
+  diffuseBlend: FlverSceneDiffuseBlend,
+  hasSecondaryUv: boolean
+): void {
+  if (!hasSecondaryUv) return;
+  const albedo2UvIndex = diffuseBlend.albedo2UvIndex;
+  const blendMaskUvIndex = diffuseBlend.blendMaskUvIndex;
+  if (!Number.isInteger(albedo2UvIndex) || albedo2UvIndex < 0 || albedo2UvIndex > 7) return;
+  if (!Number.isInteger(blendMaskUvIndex) || blendMaskUvIndex < 0 || blendMaskUvIndex > 7) return;
+
+  // Three already declares `attribute vec2 uv` in the generated program. The
+  // previous injection redeclared it for UV0, which makes the native layer
+  // fail shader compilation on real WebGL. Keep UV0 as an existing attribute
+  // and declare only the private attributes that the FLVER actually carries.
+  const uvBindings = new Map<number, { attribute: string | null; varying: string }>();
+  const getUvBinding = (uvIndex: number): { attribute: string | null; varying: string } => {
+    const existing = uvBindings.get(uvIndex);
+    if (existing) return existing;
+    const binding = {
+      attribute: uvIndex === 0 ? null : `soulforgeUv${uvIndex}`,
+      varying: `soulforgeNativeUv${uvIndex}`
+    };
+    uvBindings.set(uvIndex, binding);
+    return binding;
+  };
+  const albedo2Binding = getUvBinding(albedo2UvIndex);
+  const blendMaskBinding = blendMaskTexture ? getUvBinding(blendMaskUvIndex) : null;
+
+  const vertexDeclarations = [...uvBindings.values()]
+    .map(({ attribute, varying }) => [
+      attribute ? `attribute vec2 ${attribute};` : '',
+      `varying vec2 ${varying};`
+    ].filter(Boolean).join('\n'))
+    .join('\n');
+  const vertexAssignments = [...uvBindings.entries()]
+    .map(([uvIndex, { attribute, varying }]) => `${varying} = ${attribute ?? 'uv'}; // native FLVER UV${uvIndex}`)
+    .join('\n');
+  const fragmentDeclarations = [...uvBindings.values()]
+    .map(({ varying }) => `varying vec2 ${varying};`)
+    .join('\n');
+  const maskSample = blendMaskBinding
+    ? `soulforgeBlendValue = texture2D(soulforgeBlendMask, ${blendMaskBinding.varying}).r;`
+    : '';
+  material.onBeforeCompile = (shader) => {
+    shader.uniforms.soulforgeAlbedo2 = { value: albedo2Texture };
+    shader.uniforms.soulforgeBlendMask = { value: blendMaskTexture };
+    shader.uniforms.soulforgeHasBlendMask = { value: blendMaskTexture !== null ? 1 : 0 };
+    shader.uniforms.soulforgeUndefinedBlend = { value: diffuseBlend.undefinedBlendMaskValue };
+    shader.uniforms.soulforgeMultiplyBlendByAlbedo2Alpha = {
+      value: diffuseBlend.multiplyBlendMaskByAlbedo2Alpha
+    };
+    shader.vertexShader = shader.vertexShader
+      .replace(
+        '#include <common>',
+        `#include <common>\n${vertexDeclarations}`
+      )
+      .replace(
+        '#include <begin_vertex>',
+        `#include <begin_vertex>\n${vertexAssignments}`
+      );
+    shader.fragmentShader = shader.fragmentShader
+      .replace(
+        '#include <common>',
+        `#include <common>\nuniform sampler2D soulforgeAlbedo2;\nuniform sampler2D soulforgeBlendMask;\nuniform float soulforgeHasBlendMask;\nuniform float soulforgeUndefinedBlend;\nuniform bool soulforgeMultiplyBlendByAlbedo2Alpha;\n${fragmentDeclarations}`
+      )
+      .replace(
+        '#include <map_fragment>',
+        `#include <map_fragment>\nvec4 soulforgeAlbedo2Color = texture2D(soulforgeAlbedo2, ${albedo2Binding.varying});\nfloat soulforgeBlendValue = soulforgeUndefinedBlend;\nif (soulforgeHasBlendMask > 0.5) { ${maskSample} }\nif (soulforgeMultiplyBlendByAlbedo2Alpha) { soulforgeBlendValue *= soulforgeAlbedo2Color.a; }\nvec3 soulforgeMultiply = sqrt(max(soulforgeAlbedo2Color.rgb, vec3(0.0)));\nsoulforgeMultiply *= 2.0;\nsoulforgeMultiply *= soulforgeMultiply;\ndiffuseColor.rgb = mix(diffuseColor.rgb, diffuseColor.rgb * soulforgeMultiply, clamp(soulforgeBlendValue, 0.0, 1.0));`
+      );
+  };
+  material.customProgramCacheKey = () =>
+    `soulforge-native-diffuse-${diffuseBlend.mode}-${albedo2UvIndex}-${blendMaskUvIndex}-${diffuseBlend.enableTextureAlpha ? 1 : 0}-${diffuseBlend.multiplyBlendMaskByAlbedo2Alpha ? 1 : 0}`;
+  material.needsUpdate = true;
 }
 
 function createTexture(
@@ -2230,7 +2709,7 @@ function createMarkers(
       if (!bone) return new three.Matrix4();
       const local = new three.Matrix4();
       local.makeRotationFromQuaternion(new three.Quaternion().set(
-        ...eulerXYZToQuaternion(bone.rotation)
+        ...flverEulerXzyToQuaternion(bone.rotation)
       ));
       const scale = bone.scale ?? [1, 1, 1];
       local.scale(new three.Vector3(scale[0], scale[1], scale[2]));

@@ -44,6 +44,28 @@ internal static class CharacterTexturePreviewService
         IReadOnlyList<string>? materialRoots = null) =>
         ResolveAll(flver, flverEntryName, textureLeaves, gameRoot, materialRoots).FirstOrDefault()?.Preview;
 
+    /// <summary>
+    /// Resolve one explicitly named preview texture. This is intentionally
+    /// exact basename matching: it is used only by an already verified
+    /// compatibility assembly mapping, never by ordinary material fallback.
+    /// </summary>
+    public static CharacterTexturePreview? ResolveExact(
+        IReadOnlyList<NativeLeafEntry> textureLeaves,
+        string? textureName)
+    {
+        if (textureLeaves.Count == 0 || string.IsNullOrWhiteSpace(textureName)) return null;
+        var target = TextureBasename(textureName);
+        if (target.Length == 0) return null;
+        foreach (var candidate in ReadColorTextureCandidates(textureLeaves))
+        {
+            if (!string.Equals(TextureBasename(candidate.TextureName), target, StringComparison.OrdinalIgnoreCase))
+                continue;
+            var preview = TryDecode(candidate);
+            if (preview is not null) return preview;
+        }
+        return null;
+    }
+
     public static IReadOnlyList<CharacterTexturePreviewBinding> ResolveAll(
         FlverNativeDocument flver,
         string flverEntryName,
@@ -129,21 +151,124 @@ internal static class CharacterTexturePreviewService
                 .ThenBy(item => item.Candidate.TextureIndex)
                 .ToArray();
 
-            foreach (var item in ranked)
+            var primaryItem = ranked.FirstOrDefault();
+            if (primaryItem is null) continue;
+            var primaryCandidate = primaryItem.Candidate;
+            var primaryCacheKey = $"{primaryCandidate.LeafName}\0{primaryCandidate.TextureIndex}";
+            if (!decoded.TryGetValue(primaryCacheKey, out var preview))
             {
-                var candidate = item.Candidate;
-                var cacheKey = $"{candidate.LeafName}\0{candidate.TextureIndex}";
-                if (!decoded.TryGetValue(cacheKey, out var preview))
-                {
-                    preview = TryDecode(candidate);
-                    decoded[cacheKey] = preview;
-                }
-                if (preview is null) continue;
-                bindings.Add(new CharacterTexturePreviewBinding(material.Index, preview));
-                break;
+                preview = TryDecode(primaryCandidate);
+                decoded[primaryCacheKey] = preview;
             }
+            if (preview is null) continue;
+
+            // A second albedo is valid only when the native MTD lookup gave us
+            // another exact slot identity. Do not turn a semantic tie-breaker
+            // into an invented material layer.
+            var nativeStems = nativeTextureStemsByMaterial.TryGetValue(material.Index, out var materialStems)
+                ? materialStems
+                : EmptyTextureStems;
+            var secondaryItem = nativeStems.Count > 1
+                ? ranked.FirstOrDefault(item =>
+                    !ReferenceEquals(item.Candidate, primaryCandidate)
+                    && FindNativeTextureIndex(
+                        nativeStems,
+                        NormalizeTextureStem(item.Candidate.TextureName)) > 0)
+                : null;
+            CharacterTexturePreview? albedo2 = null;
+            CharacterTexturePreview? normal2 = null;
+            if (secondaryItem is not null)
+            {
+                var secondaryCandidate = secondaryItem.Candidate;
+                var secondaryCacheKey = $"{secondaryCandidate.LeafName}\0{secondaryCandidate.TextureIndex}";
+                if (!decoded.TryGetValue(secondaryCacheKey, out albedo2))
+                {
+                    albedo2 = TryDecode(secondaryCandidate);
+                    decoded[secondaryCacheKey] = albedo2;
+                }
+                if (albedo2 is not null)
+                    normal2 = TryDecodeCompanion(secondaryCandidate, "n", "linear", decoded);
+            }
+
+            // Sekiro character TPFs keep non-color maps beside the albedo
+            // using the same stem (`*_n` normal, `*_m` material mask). Resolve
+            // them only from the exact selected albedo candidate and its own
+            // TPF; never use a global first-match.
+            var normal = TryDecodeCompanion(primaryCandidate, "n", "linear", decoded);
+            var metalness = TryDecodeCompanion(primaryCandidate, "m", "linear", decoded);
+            // Native Mask1 is a material colour-blend input in the mature
+            // FLVER viewers, not a coverage/opacity map. Only keep it for
+            // the two source-mapped material families whose native MTD
+            // declares the same-TPF companion; the generic renderer must
+            // not reinterpret it as alphaMap.
+            var mask1 = UsesNativeBlendMask(material.MtdPath)
+                ? TryDecodeCompanion(primaryCandidate, "1m", "linear", decoded)
+                : null;
+            bindings.Add(new CharacterTexturePreviewBinding(
+                material.Index,
+                preview with
+                {
+                    Normal = normal,
+                    Metalness = metalness,
+                    Mask1 = mask1,
+                    Albedo2 = albedo2,
+                    Normal2 = normal2,
+                    DiffuseBlend = albedo2 is not null
+                        ? ResolveDiffuseBlend(material.MtdPath)
+                        : null,
+                    AlphaMode = ResolvePreviewAlphaMode(material.MtdPath)
+                }));
         }
         return bindings;
+    }
+
+    /// <summary>
+    /// Preserve the alpha policy declared by the native shader family.
+    ///
+    /// The mature DSAnimStudio SDT config for Character_AMSN_[AO_SSS]_[Cs]
+    /// sets EnableAlphas=false. Sekiro's FC_M_0200 HeadA_a consequently uses
+    /// its RGBA payload as color data; treating that alpha as a cutout removes
+    /// almost the entire face and leaves the eye/mouth cards floating on a
+    /// black surface. Unknown MTD families stay conservative and remain
+    /// cutout-rendered until their shader semantics are known.
+    /// </summary>
+    private static string ResolvePreviewAlphaMode(string? materialMtdPath)
+    {
+        var name = Path.GetFileNameWithoutExtension(
+            (materialMtdPath ?? string.Empty).Replace('\\', Path.DirectorySeparatorChar));
+        return name.Contains("_[AO_SSS]", StringComparison.OrdinalIgnoreCase)
+            && !name.Contains("decal", StringComparison.OrdinalIgnoreCase)
+            ? "opaque"
+            : "cutout";
+    }
+
+    private static bool UsesNativeBlendMask(string? materialMtdPath)
+    {
+        var name = Path.GetFileNameWithoutExtension(
+            (materialMtdPath ?? string.Empty).Replace('\\', Path.DirectorySeparatorChar));
+        return name.Contains("CatEye", StringComparison.OrdinalIgnoreCase)
+            || name.EndsWith("_Mouth", StringComparison.OrdinalIgnoreCase)
+            || name.Equals("Mouth", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static CharacterTextureDiffuseBlend? ResolveDiffuseBlend(string? materialMtdPath)
+    {
+        var name = Path.GetFileNameWithoutExtension(
+            (materialMtdPath ?? string.Empty).Replace('\\', Path.DirectorySeparatorChar));
+        // These values come from the mature DSAnimStudio SDT configs for the
+        // Character_AMSN_[AO_SSS] family: Albedo1 uses UV0, Albedo2 uses UV1,
+        // undefined blend mask is 1, and diffuse blending is Multiply. The
+        // [Cs] variant does not consume texture alpha; the base variant also
+        // multiplies the blend amount by Albedo2 alpha.
+        if (name.Contains("_[AO_SSS]_[Cs]", StringComparison.OrdinalIgnoreCase))
+        {
+            return new CharacterTextureDiffuseBlend("multiply", 1, 0, 1f, false, false);
+        }
+        if (name.EndsWith("_[AO_SSS]", StringComparison.OrdinalIgnoreCase))
+        {
+            return new CharacterTextureDiffuseBlend("multiply", 1, 0, 1f, false, true);
+        }
+        return null;
     }
 
     private static List<TextureCandidate> ReadColorTextureCandidates(
@@ -185,7 +310,60 @@ internal static class CharacterTexturePreviewService
         return candidates;
     }
 
-    private static CharacterTexturePreview? TryDecode(TextureCandidate candidate)
+    private static CharacterTexturePreview? TryDecodeCompanion(
+        TextureCandidate albedo,
+        string suffix,
+        string colorSpaceOverride,
+        IDictionary<string, CharacterTexturePreview?> decoded)
+    {
+        var companion = FindCompanion(albedo, suffix);
+        if (companion is null) return null;
+        var cacheKey = $"{companion.LeafName}\0{companion.TextureIndex}\0{colorSpaceOverride}";
+        if (decoded.TryGetValue(cacheKey, out var preview)) return preview;
+        preview = TryDecode(companion, colorSpaceOverride);
+        decoded[cacheKey] = preview;
+        return preview;
+    }
+
+    private static TextureCandidate? FindCompanion(TextureCandidate albedo, string suffix)
+    {
+        // NormalizeTextureStem intentionally compacts separators for semantic
+        // scoring. Companion lookup is different: `_a`/`_n`/`_m` are an exact
+        // filename convention, so preserve underscores and compare basenames.
+        var stem = TextureBasename(albedo.TextureName);
+        var baseStem = stem.EndsWith("_a", StringComparison.OrdinalIgnoreCase)
+            ? stem[..^2]
+            : stem;
+        var target = $"{baseStem}_{suffix}";
+        for (var index = 0; index < albedo.Document.Textures.Count; index++)
+        {
+            var name = albedo.Document.Textures[index].Name;
+            if (!string.Equals(TextureBasename(name), target, StringComparison.OrdinalIgnoreCase))
+                continue;
+            return new TextureCandidate(albedo.Document, index, albedo.LeafName, albedo.Order, name);
+        }
+        return null;
+    }
+
+    private static string TextureBasename(string value)
+    {
+        var normalized = value.Trim().Replace('\\', '/');
+        var basename = normalized.Split('/').LastOrDefault() ?? normalized;
+        var stem = basename;
+        for (var i = 0; i < 4; i++)
+        {
+            var extension = Path.GetExtension(stem);
+            if (string.IsNullOrWhiteSpace(extension)
+                || extension is not (".tif" or ".tga" or ".dds" or ".png" or ".tex" or ".tpf" or ".dcx"))
+                break;
+            stem = stem[..^extension.Length];
+        }
+        return stem;
+    }
+
+    private static CharacterTexturePreview? TryDecode(
+        TextureCandidate candidate,
+        string? colorSpaceOverride = null)
     {
         try
         {
@@ -198,7 +376,7 @@ internal static class CharacterTexturePreviewService
                 width,
                 height,
                 $"data:image/png;base64,{Convert.ToBase64String(png)}",
-                colorSpace.ToString());
+                colorSpaceOverride ?? colorSpace.ToString());
         }
         catch (Exception ex) when (ex is InvalidDataException
             or NotSupportedException
@@ -226,6 +404,15 @@ internal static class CharacterTexturePreviewService
             return 3000 - Math.Min(nativeIndex, 999)
                 + (candidate.MatchesModel(modelStem) ? 16 : 0);
         }
+
+        // Once the native FLVER/MTD has declared an albedo identity, a semantic
+        // name match is not a safe fallback. It can bind a different atlas to a
+        // mesh that happens to contain the word "head" (the concrete failure was
+        // HD_M_9510's native `HD_M_9510_dammy_a` being replaced by
+        // `FC_M_0000_head_a`). Keep the mesh untextured and let the caller report
+        // the missing native asset instead of rendering a plausible but false
+        // material.
+        if (nativeTextureStems.Count > 0) return 0;
 
         var materialTokens = SemanticTokens(material.Name, modelStem);
         var mtdTokens = SemanticTokens(
@@ -440,4 +627,19 @@ internal sealed record CharacterTexturePreview(
     int Width,
     int Height,
     string PreviewToken,
-    string ColorSpace);
+    string ColorSpace,
+    string AlphaMode = "cutout",
+    CharacterTexturePreview? Normal = null,
+    CharacterTexturePreview? Metalness = null,
+    CharacterTexturePreview? Mask1 = null,
+    CharacterTexturePreview? Albedo2 = null,
+    CharacterTexturePreview? Normal2 = null,
+    CharacterTextureDiffuseBlend? DiffuseBlend = null);
+
+internal sealed record CharacterTextureDiffuseBlend(
+    string Mode,
+    int Albedo2UvIndex,
+    int BlendMaskUvIndex,
+    float UndefinedBlendMaskValue,
+    bool EnableTextureAlpha,
+    bool MultiplyBlendMaskByAlbedo2Alpha);

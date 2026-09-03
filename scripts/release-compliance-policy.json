@@ -7,8 +7,13 @@
     "Apache-2.0",
     "BSD-2-Clause",
     "BSD-3-Clause",
+    "0BSD",
     "BlueOak-1.0.0",
     "CC-BY-4.0",
+    "LGPL-3.0-or-later",
+    "Apache-2.0 AND LGPL-3.0-or-later",
+    "Apache-2.0 AND LGPL-3.0-or-later AND MIT",
+    "(MIT OR CC0-1.0)",
     "(MIT OR WTFPL)",
     "(BSD-2-Clause OR MIT OR Apache-2.0)"
   ],

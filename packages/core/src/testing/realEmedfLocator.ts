@@ -20,6 +20,14 @@
 import { access, readdir } from 'node:fs/promises';
 import { dirname, join, resolve } from 'node:path';
 
+export interface RealEmedfLocatorOptions {
+  /**
+   * 已挂载的游戏根。传入时优先扫描其兄弟 `tools` 目录；未传入时回退到
+   * SOULFORGE_SEKIRO_GAME_ROOT。这里只影响路径候选，不读取或解析 EMEDF 内容。
+   */
+  gameRoot?: string | null;
+}
+
 const REAL_EMEDF_CANDIDATE_PATHS = [
   'sekiro-common.emedf.json',
   'Sekiro/sekiro-common.emedf.json',
@@ -53,12 +61,15 @@ async function toolsSiblingRoots(gameRoot: string): Promise<string[]> {
   }
 }
 
-export async function searchRealEmedf(): Promise<string | undefined> {
+export async function searchRealEmedf(
+  options: RealEmedfLocatorOptions = {}
+): Promise<string | undefined> {
   const explicit = process.env.SOULFORGE_EMEDF_PATH?.trim();
   if (explicit) return resolve(explicit);
 
   const home = process.env.USERPROFILE ?? process.env.HOME ?? '';
-  const gameRoot = process.env.SOULFORGE_SEKIRO_GAME_ROOT?.trim() ?? '';
+  const configuredGameRoot = options.gameRoot?.trim();
+  const gameRoot = configuredGameRoot || process.env.SOULFORGE_SEKIRO_GAME_ROOT?.trim() || '';
   // 顺序即优先级：**有版本出处的工具发布包排在临时目录之前**。
   //
   // 实测（2026-08-08）踩到过：`%LOCALAPPDATA%/Temp` 下有一份 520398 字节、

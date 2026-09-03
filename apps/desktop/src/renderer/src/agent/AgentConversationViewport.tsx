@@ -3,7 +3,7 @@ import { shouldAgentAutoScroll, type AgentMessageDto } from '@soulforge/shared';
 import type { AgentApprovalDiffView, AgentApprovalPreview, AgentConversationItem } from './agentTaskState.js';
 import { AgentWelcome } from './AgentWelcome.js';
 import { AgentMessageList } from './AgentMessageList.js';
-import { AgentToolActivityRow } from './AgentToolActivityRow.js';
+import { AgentToolActivityGroup } from './AgentToolActivityGroup.js';
 import {
   AgentApprovalCard,
   type AgentApprovalCommitFailure
@@ -110,18 +110,13 @@ function renderConversationItem(item: AgentConversationItem, index: number): Rea
       );
     case 'tools':
       return (
-        <div className="agent-tool-chip-row" key={`tools-${item.step}`}>
-          {item.calls.map((call) => (
-            <AgentToolActivityRow
-              key={call.callId}
-              id={call.callId}
-              summary={call.name}
-              status={call.status === 'ok' ? 'succeeded' : call.status === 'failed' ? 'failed' : 'running'}
-              detail={call.argumentsJson ?? null}
-              step={call.step}
-            />
-          ))}
-        </div>
+        <AgentToolActivityGroup
+          key={item.groupId}
+          groupId={item.groupId}
+          calls={item.calls}
+          live={item.live}
+          collapsed={item.collapsed}
+        />
       );
     case 'compacted':
       return (

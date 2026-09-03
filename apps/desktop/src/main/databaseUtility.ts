@@ -145,6 +145,12 @@ async function dispatch(request: OperationLogUtilityRequest): Promise<unknown> {
     case 'replaceRagChunks':
       requireWorkspaceDataRepository().replaceRagChunks(request.payload.chunks);
       return null;
+    case 'mergeRagChunks':
+      requireWorkspaceDataRepository().mergeRagChunks(request.payload.chunks);
+      return null;
+    case 'mergeRagChunkDelta':
+      requireWorkspaceDataRepository().mergeRagChunkDelta(request.payload);
+      return null;
     case 'loadRagChunks':
       return requireWorkspaceDataRepository().loadRagChunks();
     case 'searchRagChunks':
@@ -152,12 +158,22 @@ async function dispatch(request: OperationLogUtilityRequest): Promise<unknown> {
     case 'replaceRagEmbeddings':
       requireWorkspaceDataRepository().replaceRagEmbeddings(request.payload.entries);
       return null;
+    case 'mergeRagEmbeddings':
+      requireWorkspaceDataRepository().mergeRagEmbeddings(request.payload);
+      return null;
     case 'loadRagEmbeddings': {
       const vectors = requireWorkspaceDataRepository().loadRagEmbeddings();
       const plain: Record<string, number[]> = {};
       for (const [chunkId, vector] of vectors) plain[chunkId] = Array.from(vector);
       return plain;
     }
+    case 'loadRagEmbeddingRecords':
+      return requireWorkspaceDataRepository().loadRagEmbeddingRecords().map((record) => ({
+        chunkId: record.chunkId,
+        model: record.model,
+        contentHash: record.contentHash,
+        vector: Array.from(record.vector)
+      }));
     case 'ragEmbeddingModel':
       return requireWorkspaceDataRepository().ragEmbeddingModel();
     case 'replaceReferences':

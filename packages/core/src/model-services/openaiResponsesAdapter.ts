@@ -153,7 +153,6 @@ export class OpenAiResponsesAdapter implements ModelServiceAdapter {
     let buffer = '';
     const toolAcc = new Map<string, { id: string; name: string; args: string }>();
     const toolAliases = new Map<string, string>();
-    let sawTool = false;
     const collectToolCalls = (): ToolCall[] => [...toolAcc.values()]
       .filter((tool) => tool.name.trim().length > 0)
       .map((tool) => ({ id: tool.id, name: tool.name, argumentsJson: tool.args }));
@@ -171,10 +170,11 @@ export class OpenAiResponsesAdapter implements ModelServiceAdapter {
           const data = trimmed.slice(5).trim();
           if (!data || data === '[DONE]') {
             if (data === '[DONE]') {
-              for (const toolCall of collectToolCalls()) {
+              const toolCalls = collectToolCalls();
+              for (const toolCall of toolCalls) {
                 yield { type: 'tool-call', toolCall };
               }
-              yield { type: 'message-stop', finishReason: sawTool ? 'tool_use' : 'stop' };
+              yield { type: 'message-stop', finishReason: toolCalls.length > 0 ? 'tool_use' : 'stop' };
               return;
             }
             continue;
@@ -211,7 +211,6 @@ export class OpenAiResponsesAdapter implements ModelServiceAdapter {
             if (event.name) current.name = event.name;
             if (typeof event.delta === 'string') current.args += event.delta;
             toolAcc.set(key, current);
-            sawTool = true;
             continue;
           }
           if (eventType === 'response.output_item.done' && event.item) {
@@ -249,12 +248,12 @@ export class OpenAiResponsesAdapter implements ModelServiceAdapter {
               for (const candidate of [itemId, callId]) {
                 if (candidate) toolAliases.set(candidate, id);
               }
-              sawTool = true;
             }
             continue;
           }
           if (eventType === 'response.completed' || eventType === 'response.incomplete') {
-            for (const toolCall of collectToolCalls()) {
+            const toolCalls = collectToolCalls();
+            for (const toolCall of toolCalls) {
               yield { type: 'tool-call', toolCall };
             }
             if (event.response?.usage) {
@@ -270,7 +269,11 @@ export class OpenAiResponsesAdapter implements ModelServiceAdapter {
             }
             yield {
               type: 'message-stop',
-              finishReason: sawTool ? 'tool_use' : 'stop'
+              finishReason: toolCalls.length > 0
+                ? 'tool_use'
+                : eventType === 'response.incomplete'
+                  ? 'length'
+                  : 'stop'
             };
             return;
           }
@@ -284,17 +287,23 @@ export class OpenAiResponsesAdapter implements ModelServiceAdapter {
           }
         }
       }
-      for (const toolCall of collectToolCalls()) {
+      const toolCalls = collectToolCalls();
+      for (const toolCall of toolCalls) {
         yield { type: 'tool-call', toolCall };
       }
-      yield { type: 'message-stop', finishReason: sawTool ? 'tool_use' : 'stop' };
+      yield { type: 'message-stop', finishReason: toolCalls.length > 0 ? 'tool_use' : 'stop' };
     } catch (error) {
-      cleanup();
       if (request.signal?.aborted) {
         yield { type: 'message-stop', finishReason: 'cancelled' };
         return;
       }
       yield errorStreamEvent(classifyFetchError(error, 'OpenAI Responses', signal, { callerSignal: request.signal }));
+    } finally {
+      // A successful SSE response can return through [DONE], response.completed,
+      // response.incomplete, or EOF.  All of those paths must release the
+      // request timeout; otherwise a long Agent session accumulates one live
+      // timeout signal per model turn.
+      cleanup();
     }
   }
 

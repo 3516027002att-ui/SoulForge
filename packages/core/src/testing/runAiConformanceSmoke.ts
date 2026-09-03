@@ -2964,6 +2964,34 @@ async function main(): Promise<void> {
         }
       })
     });
+    boundedRegistry.register({
+      name: 'search_text_entries',
+      description: 'bounded text discovery',
+      permission: 'read',
+      permissionLevel: 'read',
+      inputSchema: { query: 'string' },
+      run: () => ({
+        ok: true,
+        data: {
+          hits: Array.from({ length: 240 }, (_item, index) => ({
+            chunk: {
+              chunkId: `text-chunk-${index}`,
+              sourceUri: `file://synthetic/menu-${index}.fmg`,
+              symbolUri: `text://Title/${900000 + index}`,
+              family: 'text_entry',
+              textId: 900000 + index,
+              title: `鬼刑部候选 ${index}`,
+              body: `textId=${900000 + index}; 鬼刑部；这是用于选择原生读取的稳定候选。`
+            },
+            excerpt: `鬼刑部候选 ${index}`,
+            score: 1 - index / 1000,
+            reasons: ['phrase:鬼刑部']
+          })),
+          totalHits: 240,
+          nextCursor: 'text-page-2'
+        }
+      })
+    });
     const boundedBridge = createAgentToolBridge({
       registry: boundedRegistry,
       context: { workspaceIndex: {} as never, mode: 'normal' }
@@ -2980,6 +3008,19 @@ async function main(): Promise<void> {
       throw new Error(`Case 54: discovery result must be bounded with IDs/cursor: ${bounded.content.length}`);
     }
     assertStableToolEnvelope(bounded.content, 'Case 54 large discovery result', true);
+    const boundedText = await boundedBridge.executeTool({
+      id: 'bounded-text',
+      name: 'search_text_entries',
+      argumentsJson: '{"query":"鬼刑部"}'
+    });
+    if (!boundedText.ok || boundedText.content.length > MAX_BOUNDED_TOOL_RESULT_CHARS
+      || !boundedText.content.includes('text-page-2')
+      || !boundedText.content.includes('sourceUri')
+      || !boundedText.content.includes('textId')
+      || !boundedText.content.includes('鬼刑部')) {
+      throw new Error(`Case 54: bounded text discovery must preserve native-read candidates: ${boundedText.content.length}`);
+    }
+    assertStableToolEnvelope(boundedText.content, 'Case 54 bounded text candidate', true);
     const boundedEmevd = await boundedBridge.executeTool({
       id: 'bounded-emevd',
       name: 'read_emevd_outline',
@@ -3413,7 +3454,7 @@ async function main(): Promise<void> {
       file: eventSourceUri,
       sourceUri: eventSourceUri
     }]));
-    registerReadTool('read_param_fields', { table: 'string', rowIds: 'array', fieldIds: 'array?' }, (input) => {
+    registerReadTool('read_param_fields', { table: 'string', rowIds: 'array', fieldIds: 'array' }, (input) => {
       const table = String(recordOf(input).table ?? '');
       if (table === 'NpcParam') return { table, rows: [npcRow] };
       if (table === 'EquipParamGoods') return { table, rows: [goodsRow] };
@@ -3475,9 +3516,9 @@ async function main(): Promise<void> {
         } else if (round === 3) {
           toolCalls = [
             call('scenario-msg-read', 'read_fmg_entries', { table: 'Title', ids: [902012] }),
-            call('scenario-npc-read', 'read_param_fields', { table: 'NpcParam', rowIds: [50800000] }),
-            call('scenario-goods-read', 'read_param_fields', { table: 'EquipParamGoods', rowIds: [3080] }),
-            call('scenario-lot-read', 'read_param_fields', { table: 'ItemLotParam', rowIds: [200300] }),
+            call('scenario-npc-read', 'read_param_fields', { table: 'NpcParam', rowIds: [50800000], fieldIds: ['hp'] }),
+            call('scenario-goods-read', 'read_param_fields', { table: 'EquipParamGoods', rowIds: [3080], fieldIds: ['nameId'] }),
+            call('scenario-lot-read', 'read_param_fields', { table: 'ItemLotParam', rowIds: [200300], fieldIds: ['lotItemId01'] }),
             call('scenario-event-search', 'search_events', { query: '900210', limit: 20 })
           ];
         } else if (round === 4) {
@@ -3691,9 +3732,8 @@ async function main(): Promise<void> {
     }
   }
 
-  // --- Case 60: production default has no fixed step/tool-call ceiling.  A
-  // --- deterministic 70-tool sequence must pass the former 64-step boundary
-  // --- and finish normally; explicit maxSteps remains test-only injection.
+  // --- Case 60: production default is bounded. A deterministic long tool
+  // --- sequence must stop at the 200-step safety ceiling instead of spinning forever.
   {
     let calls = 0;
     const adapter: ModelServiceAdapter = {
@@ -3701,7 +3741,7 @@ async function main(): Promise<void> {
       listModels: fakeListModels,
       async complete() {
         calls += 1;
-        if (calls <= 70) {
+        if (calls <= 240) {
           return {
             message: {
               role: 'assistant',
@@ -3724,9 +3764,9 @@ async function main(): Promise<void> {
       permissionMode: 'normal',
       executeTool: async () => ({ ok: true, content: 'ok' })
     });
-    if (result.finishReason !== 'stop' || result.steps !== 71 || calls !== 71
-      || result.diagnostics.some((diagnostic) => diagnostic.code === 'AGENT_MAX_STEPS_REACHED')) {
-      throw new Error(`Case 60: unbounded default stopped early: ${JSON.stringify({ calls, steps: result.steps, finish: result.finishReason })}`);
+    if (result.finishReason !== 'partial' || result.steps !== 200 || calls !== 200
+      || !result.diagnostics.some((diagnostic) => diagnostic.code === 'AGENT_MAX_STEPS_REACHED')) {
+      throw new Error(`Case 60: default step ceiling failed: ${JSON.stringify({ calls, steps: result.steps, finish: result.finishReason })}`);
     }
 
     // 同一 Param 表不断换 rowId 仍是同一个语义失败：不能靠改行号绕过
@@ -3782,6 +3822,296 @@ async function main(): Promise<void> {
     passed++;
   }
 
+  // --- Case 61: a blocked report may contain a next-step handoff, but it is
+  // --- still terminal. Do not resample it and turn a valid stop into a hot loop.
+  {
+    let conclusionCalls = 0;
+    const conclusionAdapter: ModelServiceAdapter = {
+      protocol: 'openai-compatible',
+      listModels: fakeListModels,
+      async complete() {
+        conclusionCalls += 1;
+        if (conclusionCalls === 1) {
+          return {
+            message: {
+              role: 'assistant',
+              content: '',
+              toolCalls: [{
+                id: 'blocked-search',
+                name: 'search_param_rows',
+                argumentsJson: JSON.stringify({ query: '鬼刑部', paramNames: ['NpcParam'] })
+              }]
+            },
+            finishReason: 'tool_use' as const,
+            diagnostics: []
+          };
+        }
+        return {
+          message: {
+            role: 'assistant',
+            content: '当前工作区的参数证据不足，任务处于 blocked 状态，无法继续写入。下一步需要重新扫描并验证目标。'
+          },
+          finishReason: 'stop' as const,
+          diagnostics: []
+        };
+      },
+      async *stream() { throw new Error('unused'); }
+    };
+    const conclusionResult = await runAgentToolLoop(conclusionAdapter, {
+      config: makeConfig(9, 'openai-compatible'),
+      apiKey: 'sk-test',
+      messages: [{ role: 'user', content: 'blocked task' }],
+      tools: [{
+        name: 'search_param_rows',
+        description: 'search param',
+        parametersJsonSchema: { type: 'object' },
+        permissionLevel: 'read',
+        supportsParallel: true
+      }],
+      permissionMode: 'normal',
+      executeTool: async () => ({
+        ok: false,
+        code: 'RAG_UNAVAILABLE',
+        content: JSON.stringify({ ok: false, error: { code: 'RAG_UNAVAILABLE', message: '语料为空' } })
+      })
+    });
+    if (conclusionResult.finishReason !== 'stop' || conclusionResult.steps !== 2 || conclusionCalls !== 2) {
+      throw new Error(`Case 61: blocked conclusion was resampled: ${JSON.stringify({
+        conclusionCalls,
+        steps: conclusionResult.steps,
+        finish: conclusionResult.finishReason
+      })}`);
+    }
+    passed++;
+  }
+
+  // --- Case 62: discovery-only progress is a bounded failure mode. A model
+  // --- that keeps returning candidate searches without consuming a native
+  // --- read must stop before the 200-step ceiling. Once the research budget
+  // --- is exhausted, the loop gives one tool-free partial-summary turn.
+  {
+    let discoveryCalls = 0;
+    const discoveryAdapter: ModelServiceAdapter = {
+      protocol: 'openai-compatible',
+      listModels: fakeListModels,
+      async complete(request) {
+        if ((request.tools?.length ?? 0) === 0) {
+          return {
+            message: {
+              role: 'assistant',
+              content: '检索预算已耗尽，当前仅确认了候选文本，未完成原生读取。'
+            },
+            finishReason: 'stop' as const,
+            diagnostics: []
+          };
+        }
+        discoveryCalls += 1;
+        return {
+          message: {
+            role: 'assistant',
+            content: '',
+            toolCalls: [{
+              id: `discovery-${discoveryCalls}`,
+              name: 'search_text_entries',
+              argumentsJson: JSON.stringify({ query: `同义词 ${discoveryCalls}` })
+            }]
+          },
+          finishReason: 'tool_use' as const,
+          diagnostics: []
+        };
+      },
+      async *stream() { throw new Error('unused'); }
+    };
+    const discoveryResult = await runAgentToolLoop(discoveryAdapter, {
+      config: makeConfig(9, 'openai-compatible'),
+      apiKey: 'sk-test',
+      taskQuery: '定位鬼刑部',
+      messages: [{ role: 'user', content: '定位鬼刑部' }],
+      tools: [{
+        name: 'search_text_entries',
+        description: 'search text',
+        parametersJsonSchema: { type: 'object' },
+        permissionLevel: 'read',
+        supportsParallel: true
+      }],
+      permissionMode: 'normal',
+      executeTool: async () => ({
+        ok: true,
+        content: JSON.stringify({
+          ok: true,
+          state: 'completed',
+          data: {
+            items: [{ textId: 91, sourceUri: 'file://synthetic/title.fmg', text: '鬼刑部' }],
+            record: null,
+            scalar: null,
+            summary: null
+          },
+          pagination: { originalChars: 200, returnedCount: 1, totalCount: 1, cursors: {} },
+          truncated: false,
+          identifiers: ['textId=91'],
+          evidence: { status: 'candidate' }
+        })
+      })
+    });
+    if (discoveryResult.finishReason !== 'partial' || discoveryResult.steps !== 7
+      || discoveryCalls !== 6
+      || !discoveryResult.diagnostics.some((diagnostic) => diagnostic.code === 'AGENT_RESEARCH_BUDGET_EXHAUSTED')) {
+      throw new Error(`Case 62: discovery-only guard failed: ${JSON.stringify({
+        discoveryCalls,
+        steps: discoveryResult.steps,
+        finish: discoveryResult.finishReason,
+        diagnostics: discoveryResult.diagnostics
+      })}`);
+    }
+    passed++;
+  }
+
+  // --- Case 63: a provider length stop must not trigger empty-conclusion
+  // --- retries, which would otherwise issue extra requests after the budget
+  // --- has already been exhausted.
+  {
+    let lengthCalls = 0;
+    const lengthAdapter: ModelServiceAdapter = {
+      protocol: 'openai-compatible',
+      listModels: fakeListModels,
+      async complete() {
+        lengthCalls += 1;
+        return {
+          message: { role: 'assistant', content: '' },
+          finishReason: 'length' as const,
+          diagnostics: []
+        };
+      },
+      async *stream() { throw new Error('unused'); }
+    };
+    const lengthResult = await runAgentToolLoop(lengthAdapter, {
+      config: makeConfig(9, 'openai-compatible'),
+      apiKey: 'sk-test',
+      messages: [{ role: 'user', content: 'length task' }],
+      tools: [],
+      permissionMode: 'normal',
+      executeTool: async () => ({ ok: true, content: 'unused' })
+    });
+    if (lengthResult.finishReason !== 'length' || lengthResult.steps !== 1 || lengthCalls !== 1) {
+      throw new Error(`Case 63: length response was retried: ${JSON.stringify({
+        lengthCalls,
+        steps: lengthResult.steps,
+        finish: lengthResult.finishReason
+      })}`);
+    }
+    let malformedToolUseCalls = 0;
+    const malformedToolUseAdapter: ModelServiceAdapter = {
+      protocol: 'openai-compatible',
+      listModels: fakeListModels,
+      async complete() {
+        malformedToolUseCalls += 1;
+        return {
+          message: { role: 'assistant', content: '工具响应不完整' },
+          finishReason: 'tool_use' as const,
+          diagnostics: []
+        };
+      },
+      async *stream() { throw new Error('unused'); }
+    };
+    const malformedToolUseResult = await runAgentToolLoop(malformedToolUseAdapter, {
+      config: makeConfig(9, 'openai-compatible'),
+      apiKey: 'sk-test',
+      messages: [{ role: 'user', content: 'malformed tool task' }],
+      tools: [],
+      permissionMode: 'normal',
+      executeTool: async () => ({ ok: true, content: 'unused' })
+    });
+    if (malformedToolUseResult.finishReason !== 'partial' || malformedToolUseCalls !== 1
+      || !malformedToolUseResult.diagnostics.some((diagnostic) => diagnostic.code === 'AGENT_TOOL_USE_WITHOUT_CALLS')) {
+      throw new Error(`Case 63: empty tool_use response was not failed closed: ${JSON.stringify({
+        malformedToolUseCalls,
+        finish: malformedToolUseResult.finishReason,
+        diagnostics: malformedToolUseResult.diagnostics
+      })}`);
+    }
+    passed++;
+  }
+
+  // --- Case 64: a tool-producing turn truncated by the provider receives one
+  // --- bounded tool-free conclusion instead of ending with an empty report.
+  {
+    let lengthConclusionCalls = 0;
+    const lengthConclusionAdapter: ModelServiceAdapter = {
+      protocol: 'openai-compatible',
+      listModels: fakeListModels,
+      async complete(request) {
+        lengthConclusionCalls += 1;
+        if (lengthConclusionCalls === 1) {
+          return {
+            message: {
+              role: 'assistant',
+              content: '',
+              toolCalls: [{
+                id: 'length-search',
+                name: 'search_text_entries',
+                argumentsJson: JSON.stringify({ query: '截断后仍需汇报' })
+              }]
+            },
+            finishReason: 'tool_use' as const,
+            diagnostics: []
+          };
+        }
+        if (lengthConclusionCalls === 2) {
+          return {
+            message: { role: 'assistant', content: '' },
+            finishReason: 'length' as const,
+            diagnostics: []
+          };
+        }
+        if ((request.tools?.length ?? 0) !== 0) {
+          throw new Error('Case 64: conclusion retry must disable tools');
+        }
+        return {
+          message: { role: 'assistant', content: '已完成有限检索汇报：当前只有候选文本，未完成原生写入。' },
+          finishReason: 'stop' as const,
+          diagnostics: []
+        };
+      },
+      async *stream() { throw new Error('unused'); }
+    };
+    const lengthConclusionResult = await runAgentToolLoop(lengthConclusionAdapter, {
+      config: makeConfig(9, 'openai-compatible'),
+      apiKey: 'sk-test',
+      messages: [{ role: 'user', content: '截断后仍需汇报' }],
+      tools: [{
+        name: 'search_text_entries',
+        description: 'search text',
+        parametersJsonSchema: { type: 'object' },
+        permissionLevel: 'read'
+      }],
+      permissionMode: 'normal',
+      executeTool: async () => ({
+        ok: true,
+        content: JSON.stringify({
+          ok: true,
+          state: 'completed',
+          data: { items: [], record: null, scalar: null, summary: null },
+          pagination: { originalChars: 20, returnedCount: 0, totalCount: 0, cursors: {} },
+          truncated: false,
+          identifiers: [],
+          evidence: { status: 'insufficient_evidence' }
+        })
+      })
+    });
+    if (lengthConclusionResult.finishReason !== 'partial'
+      || lengthConclusionCalls !== 3
+      || !lengthConclusionResult.messages.some((message) => message.content.includes('有限检索汇报'))
+      || !lengthConclusionResult.diagnostics.some((diagnostic) => diagnostic.code === 'MODEL_SERVICE_LENGTH_FORCED_CONCLUSION')) {
+      throw new Error(`Case 64: truncated tool run did not produce bounded conclusion: ${JSON.stringify({
+        calls: lengthConclusionCalls,
+        finish: lengthConclusionResult.finishReason,
+        diagnostics: lengthConclusionResult.diagnostics,
+        messages: lengthConclusionResult.messages
+      })}`);
+    }
+    passed++;
+  }
+
   // --- Case 58: session cancellation — pre-aborted signal yields 'cancelled'
   // --- and a durable interrupted marker in the rollout ---
   {
@@ -3811,6 +4141,10 @@ async function main(): Promise<void> {
         signal: controller.signal
       });
       if (result.run.finishReason !== 'cancelled') throw new Error(`Case 58: ${result.run.finishReason}`);
+      if (!result.run.messages.some((message) => message.role === 'assistant'
+        && message.content.includes('系统收口摘要-cancelled'))) {
+        throw new Error('Case 58: cancelled run must expose an honest terminal report.');
+      }
       const loaded = await loadRolloutSession(result.rolloutPath);
       if (!loaded.ok || !loaded.interrupted) throw new Error('Case 58: interrupted marker missing.');
       passed++;

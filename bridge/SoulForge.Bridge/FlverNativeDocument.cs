@@ -24,6 +24,7 @@ using System.Text;
 ///   UV：UVPair/UV = int16/2048（version ≥ 0x2000F）；Float2 直接取
 ///   BoneWeights：Byte4C = byte/255；Byte4A = sbyte/127
 ///   BoneIndices：Byte4B/Byte4E 原样字节
+///   VertexColor：Float4 保留 RGBA float；Color/UByte4Norm 按 RGBA byte/255 读取
 /// </summary>
 internal sealed class FlverNativeDocument
 {
@@ -73,9 +74,11 @@ internal sealed class FlverNativeDocument
     private const uint TypeFloat3 = 0x02;
     private const uint TypeFloat4 = 0x03;
     private const uint TypeByte4A = 0x10;
+    private const uint TypeColor = TypeByte4A;       // LayoutType.Color
     private const uint TypeByte4B = 0x11;
     private const uint TypeShort2toFloat2 = 0x12;
     private const uint TypeByte4C = 0x13;
+    private const uint TypeUByte4Norm = TypeByte4C;  // LayoutType.UByte4Norm
     private const uint TypeUV = 0x15;
     private const uint TypeUVPair = 0x16;
     private const uint TypeShortBoneIndices = 0x18;
@@ -226,6 +229,21 @@ internal sealed class FlverNativeDocument
     public IReadOnlyList<FlverFaceSetEntry> GetFaceSets() => _faceSets;
 
     /// <summary>
+    /// Returns the back-face policy of the same display FaceSet used by
+    /// <see cref="GetMeshIndicesBase64"/>. Keeping this lookup on the native
+    /// document prevents the renderer from silently defaulting every FLVER
+    /// material to double-sided rendering.
+    /// </summary>
+    public bool? GetMeshCullBackfaces(int meshIndex)
+    {
+        if (meshIndex < 0 || meshIndex >= Meshes.Count) return null;
+        var selection = SelectDisplayFaceSet(meshIndex, Meshes[meshIndex]);
+        return selection.Failure == FaceSetSelectionFailure.None
+            ? selection.FaceSet!.CullBackfaces
+            : null;
+    }
+
+    /// <summary>
     /// 已识别但未解析的结构缺口（能力边界，不是数据异常）。
     /// 访问前会触发一次 mesh plan 构建，确保顶点语义缺口已被登记——否则「没人调用过
     /// BuildMeshPlan」与「真的没有缺口」不可区分。
@@ -289,11 +307,25 @@ internal sealed class FlverNativeDocument
     /// <summary>单个语义在某个 vertex buffer 中的访问计划。</summary>
     private sealed class VertexMemberAccess
     {
+        public int MemberIndex;
+        public int VertexBufferIndex;
+        public int BufferLayoutIndex;
         public int DataBase;   // 顶点 0 数据的绝对偏移
         public int Stride;     // VertexBuffer.VertexSize
         public int Count;      // VertexBuffer.VertexCount
         public int Offset;     // LayoutMember.StructOffset
         public uint Type;      // LayoutMember.Type
+    }
+
+    /// <summary>一个原生 VertexColor member；保留所有 member，不折叠重复语义。</summary>
+    private sealed class VertexColorMemberCandidate
+    {
+        public int MemberIndex;
+        public uint Type;
+        public int VertexBufferIndex;
+        public int BufferLayoutIndex;
+        public int StructOffset;
+        public VertexMemberAccess? Access;
     }
 
     /// <summary>一个 mesh 的顶点解码计划：按语义从该 mesh 各 vertex buffer 合并取址。</summary>
@@ -302,7 +334,13 @@ internal sealed class FlverNativeDocument
         public int VertexCount;
         public VertexMemberAccess? Position;
         public VertexMemberAccess? Normal;
-        public VertexMemberAccess? UV;
+        /// <summary>
+        /// FLVER 的一个 UV member 不一定只包含一组坐标：UVPair/Short4/Half4 和
+        /// UByte4Norm 都会按成熟 SoulsFormats 读取器展开成两组。保留 layout
+        /// 顺序，供 MTD 的 Albedo1UVIndex/Albedo2UVIndex 选择。
+        /// </summary>
+        public List<VertexMemberAccess> UVs { get; } = new();
+        public List<VertexColorMemberCandidate> VertexColors { get; } = new();
         public VertexMemberAccess? Weights;
         public VertexMemberAccess? BoneIndices;
     }
@@ -337,40 +375,68 @@ internal sealed class FlverNativeDocument
             var count = Math.Min(plan.VertexCount, vb.VertexCount);
             foreach (var member in layout.Members)
             {
+                VertexColorMemberCandidate? vertexColorCandidate = null;
+                if (member.Semantic == SemVertexColor)
+                {
+                    vertexColorCandidate = new VertexColorMemberCandidate
+                    {
+                        MemberIndex = member.Index,
+                        Type = member.Type,
+                        VertexBufferIndex = vbIndex,
+                        BufferLayoutIndex = vb.LayoutIndex,
+                        StructOffset = member.StructOffset
+                    };
+                    plan.VertexColors.Add(vertexColorCandidate);
+                }
                 var memberSize = MemberTypeSize(member.Type);
                 if (memberSize <= 0)
                 {
                     AddLayoutWarning($"layout[{vb.LayoutIndex}] member type=0x{member.Type:X} 未知大小。");
+                    if (vertexColorCandidate is not null)
+                        AddUnparsedGap(DescribeVertexColorMember(vertexColorCandidate) + " layout 大小未知，失败关闭。");
                     continue;
                 }
                 if (member.StructOffset < 0 || member.StructOffset + memberSize > vb.VertexSize)
                 {
                     AddLayoutWarning($"layout[{vb.LayoutIndex}] member structOffset={member.StructOffset} size={memberSize} 越界 stride={vb.VertexSize}。");
+                    if (vertexColorCandidate is not null)
+                        AddUnparsedGap(DescribeVertexColorMember(vertexColorCandidate) + " structOffset 越界，失败关闭。");
                     continue;
                 }
                 var access = new VertexMemberAccess
                 {
+                    MemberIndex = member.Index,
+                    VertexBufferIndex = vbIndex,
+                    BufferLayoutIndex = vb.LayoutIndex,
                     DataBase = (int)dataBase,
                     Stride = vb.VertexSize,
                     Count = count,
                     Offset = member.StructOffset,
                     Type = member.Type
                 };
-                // 语义分派。五个已实现语义各取**首个**出现的 member；其余一律登记为缺口。
+                // 语义分派。位置、法线、权重、骨骼索引保留首个原生 member；
+                // VertexColor 保留全部 member，供只读诊断完整传递。
+                // UV 必须保留全部 member，因为一个 UV member 还可能展开为两组 UV。
                 //
                 // ⚠️ 这个 switch 此前没有 default 分支，于是两类东西被静默丢弃：
-                //   ① 已定义但未实现的语义（SemTangent/SemBitangent/SemVertexColor）；
+                //   ① 已定义但未实现的语义（SemTangent/SemBitangent）；
                 //   ② 被 `when plan.X == null` 守卫挡掉的**第二个及以后**的同语义 member
-                //      —— 实测 11 个 Sekiro 样本里 UV member 有 108 个而 layout 只有 73 个，
-                //      也就是至少 35 个 UV（UV2/UV3 等）落在守卫之外、无人知晓。
-                // 现在两类都登记为缺口，让 Authority 与 envelope 能看见它们。
+                //      —— 实测 Sekiro 样本中这些重复 UV 正是材质第二层所需的坐标。
                 switch (member.Semantic)
                 {
                     case SemPosition when plan.Position == null: plan.Position = access; break;
                     case SemNormal when plan.Normal == null: plan.Normal = access; break;
-                    case SemUV when plan.UV == null: plan.UV = access; break;
+                    case SemUV: plan.UVs.Add(access); break;
                     case SemBoneWeights when plan.Weights == null: plan.Weights = access; break;
                     case SemBoneIndices when plan.BoneIndices == null: plan.BoneIndices = access; break;
+                    case SemVertexColor:
+                        vertexColorCandidate!.Access = access;
+                        if (!IsSupportedVertexColorType(member.Type))
+                        {
+                            AddUnparsedGap(DescribeVertexColorMember(vertexColorCandidate)
+                                + " 只读 RGBA 仅支持 Float4/Color/UByte4Norm，失败关闭。");
+                        }
+                        break;
 
                     case SemTangent:
                         AddUnparsedGap($"vertex-semantic:tangent(0x{SemTangent:X}) 已定义未解析（type=0x{member.Type:X}）");
@@ -378,14 +444,9 @@ internal sealed class FlverNativeDocument
                     case SemBitangent:
                         AddUnparsedGap($"vertex-semantic:bitangent(0x{SemBitangent:X}) 已定义未解析（type=0x{member.Type:X}）");
                         break;
-                    case SemVertexColor:
-                        AddUnparsedGap($"vertex-semantic:vertexColor(0x{SemVertexColor:X}) 已定义未解析（type=0x{member.Type:X}）");
-                        break;
-
                     // 被守卫挡掉的重复语义：数据完好，但本实现只取首个，其余未投影。
                     case SemPosition:
                     case SemNormal:
-                    case SemUV:
                     case SemBoneWeights:
                     case SemBoneIndices:
                         AddUnparsedGap($"vertex-semantic:0x{member.Semantic:X} 的第 2+ 个 member 未投影（index={member.Index} type=0x{member.Type:X}）");
@@ -485,52 +546,229 @@ internal sealed class FlverNativeDocument
         return Convert.ToBase64String(bytes);
     }
 
-    /// <summary>提取网格第一组 UV（float[2] 每顶点）为 base64。</summary>
-    public string? GetMeshUVsBase64(int meshIndex, int maxVertices = 10_000, bool allowTruncation = false)
+    /// <summary>
+    /// 提取网格全部原生 UV 组（每组 float[2] 每顶点）为 base64。
+    /// 展开顺序与 SoulsFormats Vertex.UVs 一致：一个 UVPair/Short4/Half4
+    /// member 会产生连续的两组 UV，后续 layout member 接着编号。
+    /// </summary>
+    public IReadOnlyList<string>? GetMeshUVSetsBase64(int meshIndex, int maxVertices = 10_000, bool allowTruncation = false)
     {
         var plan = BuildMeshPlan(meshIndex);
-        if (plan?.UV == null || plan.VertexCount <= 0) return null;
+        if (plan is null || plan.UVs.Count == 0 || plan.VertexCount <= 0) return null;
         if (!allowTruncation && plan.VertexCount > maxVertices) return null;
         var vertexCount = Math.Min(plan.VertexCount, maxVertices);
         var uvFactor = InternalVersion >= 0x2000F ? 2048f : 1024f;
-        var uvs = new float[vertexCount * 2];
-        var a = plan.UV;
-        for (var v = 0; v < vertexCount; v++)
+        var sets = new List<float[]>();
+        Span<float> values = stackalloc float[4];
+        foreach (var access in plan.UVs)
         {
-            var off = a.DataBase + (long)v * a.Stride + a.Offset;
-            if (off < 0 || off + 4 > _source.Length) return null;
-            float u, vt;
-            switch (a.Type)
+            var setCount = UVSetCount(access.Type);
+            if (setCount <= 0)
             {
-                case TypeFloat2:
-                case TypeFloat4:
-                    u = ReadFloat32(_source, (int)off);
-                    vt = ReadFloat32(_source, (int)off + 4);
-                    break;
-                case TypeFloat3:
-                    u = ReadFloat32(_source, (int)off);
-                    vt = ReadFloat32(_source, (int)off + 4);
-                    break;
-                case TypeUVPair:
-                case TypeUV:
-                case TypeByte4A:
-                case TypeByte4B:
-                case TypeByte4C:
-                case TypeShort2toFloat2:
-                    u = ReadInt16(_source, (int)off) / uvFactor;
-                    vt = ReadInt16(_source, (int)off + 2) / uvFactor;
-                    break;
-                default:
-                    return null;
+                AddUnparsedGap($"vertex-semantic:UV type=0x{access.Type:X} 未支持；无法导出 UV 组");
+                return null;
             }
-            if (!float.IsFinite(u) || !float.IsFinite(vt)) return null;
-            uvs[v * 2] = u;
-            uvs[v * 2 + 1] = vt;
+            var decodedSets = new float[setCount][];
+            for (var set = 0; set < setCount; set++)
+                decodedSets[set] = new float[vertexCount * 2];
+
+            for (var vertex = 0; vertex < vertexCount; vertex++)
+            {
+                if (!TryReadUVValues(access, vertex, uvFactor, values, out var decodedCount)
+                    || decodedCount != setCount)
+                    return null;
+                for (var set = 0; set < decodedCount; set++)
+                {
+                    var target = decodedSets[set];
+                    target[vertex * 2] = values[set * 2];
+                    target[vertex * 2 + 1] = values[set * 2 + 1];
+                }
+            }
+            sets.AddRange(decodedSets);
         }
-        var bytes = new byte[uvs.Length * 4];
-        Buffer.BlockCopy(uvs, 0, bytes, 0, bytes.Length);
-        return Convert.ToBase64String(bytes);
+
+        return sets.Select(values =>
+        {
+            var bytes = new byte[values.Length * sizeof(float)];
+            Buffer.BlockCopy(values, 0, bytes, 0, bytes.Length);
+            return Convert.ToBase64String(bytes);
+        }).ToArray();
     }
+
+    /// <summary>提取网格第一组 UV（float[2] 每顶点）为 base64，兼容旧调用方。</summary>
+    public string? GetMeshUVsBase64(int meshIndex, int maxVertices = 10_000, bool allowTruncation = false)
+    {
+        var sets = GetMeshUVSetsBase64(meshIndex, maxVertices, allowTruncation);
+        return sets is { Count: > 0 } ? sets[0] : null;
+    }
+
+    private static int UVSetCount(uint type) => type switch
+    {
+        TypeFloat2 or TypeFloat3
+            or TypeByte4A or TypeByte4B or TypeShort2toFloat2 or TypeUV => 1,
+        TypeFloat4 or TypeByte4C or TypeUVPair or TypeShort4toFloat4B => 2,
+        _ => 0
+    };
+
+    private bool TryReadUVValues(
+        VertexMemberAccess access,
+        int vertexIndex,
+        float uvFactor,
+        Span<float> output,
+        out int setCount)
+    {
+        setCount = UVSetCount(access.Type);
+        var offset = access.DataBase + (long)vertexIndex * access.Stride + access.Offset;
+        if (setCount <= 0 || offset < 0 || offset + MemberTypeSize(access.Type) > _source.Length)
+        {
+            setCount = 0;
+            return false;
+        }
+
+        switch (access.Type)
+        {
+            case TypeFloat2:
+            case TypeFloat3:
+                output[0] = ReadFloat32(_source, (int)offset);
+                output[1] = ReadFloat32(_source, (int)offset + 4);
+                break;
+            case TypeFloat4:
+                output[0] = ReadFloat32(_source, (int)offset);
+                output[1] = ReadFloat32(_source, (int)offset + 4);
+                output[2] = ReadFloat32(_source, (int)offset + 8);
+                output[3] = ReadFloat32(_source, (int)offset + 12);
+                break;
+            case TypeByte4A:
+            case TypeByte4B:
+            case TypeShort2toFloat2:
+            case TypeUV:
+                output[0] = ReadInt16(_source, (int)offset) / uvFactor;
+                output[1] = ReadInt16(_source, (int)offset + 2) / uvFactor;
+                break;
+            case TypeByte4C:
+                output[0] = ReadByte(_source, (int)offset) / 255f;
+                output[1] = ReadByte(_source, (int)offset + 1) / 255f;
+                output[2] = ReadByte(_source, (int)offset + 2) / 255f;
+                output[3] = ReadByte(_source, (int)offset + 3) / 255f;
+                break;
+            case TypeUVPair:
+            case TypeShort4toFloat4B:
+                output[0] = ReadInt16(_source, (int)offset) / uvFactor;
+                output[1] = ReadInt16(_source, (int)offset + 2) / uvFactor;
+                output[2] = ReadInt16(_source, (int)offset + 4) / uvFactor;
+                output[3] = ReadInt16(_source, (int)offset + 6) / uvFactor;
+                break;
+            default:
+                setCount = 0;
+                return false;
+        }
+
+        for (var index = 0; index < setCount * 2; index++)
+        {
+            if (!float.IsFinite(output[index]))
+            {
+                setCount = 0;
+                return false;
+            }
+        }
+        return true;
+    }
+
+    /// <summary>
+    /// 按 SoulsFormats 的 VertexColor 读取分派，完整提取每一个 VertexColor member 的
+    /// RGBA。Float4 保留原始 float（包括负值或大于 1 的值）；Color/UByte4Norm
+    /// 按四个原生 byte 除以 255。结果是只读诊断，不是材质透明度，也不会把 alpha
+    /// 投影成全局 opacity。未知/越界 layout 失败关闭且不返回部分颜色。
+    /// </summary>
+    public FlverVertexColorReadResult GetMeshVertexColorDiagnostics(
+        int meshIndex, int maxVertices = 10_000, bool allowTruncation = false)
+    {
+        var plan = BuildMeshPlan(meshIndex);
+        if (plan is null || plan.VertexColors.Count == 0)
+            return new FlverVertexColorReadResult("absent", Array.Empty<FlverVertexColorDiagnostic>(), null, null);
+        if (plan.VertexCount <= 0)
+        {
+            return new FlverVertexColorReadResult(
+                "invalid", Array.Empty<FlverVertexColorDiagnostic>(),
+                "vertex-semantic:vertexColor 没有可读取的顶点。", null);
+        }
+        if (maxVertices <= 0)
+        {
+            return new FlverVertexColorReadResult(
+                "invalid", Array.Empty<FlverVertexColorDiagnostic>(),
+                "vertex-semantic:vertexColor maxVertices 必须大于 0。", null);
+        }
+        if (!allowTruncation && plan.VertexCount > maxVertices)
+        {
+            return new FlverVertexColorReadResult(
+                "truncated", Array.Empty<FlverVertexColorDiagnostic>(),
+                $"vertex-semantic:vertexColor 顶点数 {plan.VertexCount} 超过上限 {maxVertices}，未导出。", null);
+        }
+
+        var vertexCount = Math.Min(plan.VertexCount, maxVertices);
+        if (vertexCount > int.MaxValue / 4)
+        {
+            return new FlverVertexColorReadResult(
+                "invalid", Array.Empty<FlverVertexColorDiagnostic>(),
+                $"vertex-semantic:vertexColor 顶点数 {vertexCount} 导出缓冲区过大，失败关闭。", null);
+        }
+
+        var members = new List<FlverVertexColorDiagnostic>(plan.VertexColors.Count);
+        string? firstAlphaBase64 = null;
+        Span<float> rgba = stackalloc float[4];
+        for (var ordinal = 0; ordinal < plan.VertexColors.Count; ordinal++)
+        {
+            var candidate = plan.VertexColors[ordinal];
+            var access = candidate.Access;
+            if (access is null || !IsSupportedVertexColorType(candidate.Type))
+            {
+                var failure = DescribeVertexColorMember(candidate)
+                    + " 未支持或布局无效；仅支持 Float4/Color/UByte4Norm，失败关闭。";
+                AddUnparsedGap(failure);
+                return new FlverVertexColorReadResult(
+                    "unsupported", Array.Empty<FlverVertexColorDiagnostic>(), failure, null);
+            }
+
+            var values = new float[vertexCount * 4];
+            var alpha = ordinal == 0 ? new float[vertexCount] : null;
+            for (var vertex = 0; vertex < vertexCount; vertex++)
+            {
+                if (!TryReadVertexColor(access, vertex, rgba))
+                {
+                    var failure = DescribeVertexColorMember(candidate)
+                        + $" 顶点 {vertex} RGBA 数据越界或非有限，失败关闭。";
+                    AddUnparsedGap(failure);
+                    return new FlverVertexColorReadResult(
+                        "invalid", Array.Empty<FlverVertexColorDiagnostic>(), failure, null);
+                }
+                for (var channel = 0; channel < 4; channel++)
+                    values[vertex * 4 + channel] = rgba[channel];
+                if (alpha is not null)
+                    alpha[vertex] = rgba[3];
+            }
+
+            members.Add(new FlverVertexColorDiagnostic(
+                ordinal,
+                candidate.MemberIndex,
+                candidate.Type,
+                VertexColorLayoutTypeName(candidate.Type),
+                candidate.VertexBufferIndex,
+                candidate.BufferLayoutIndex,
+                candidate.StructOffset,
+                EncodeFloatArray(values)));
+            if (alpha is not null)
+                firstAlphaBase64 = EncodeFloatArray(alpha);
+        }
+
+        return new FlverVertexColorReadResult("decoded", members, null, firstAlphaBase64);
+    }
+
+    /// <summary>
+    /// 兼容旧调用方的首个 VertexColor alpha 投影。它只是独立只读属性/诊断，绝不是
+    /// 全局透明度；完整 RGBA 必须消费 GetMeshVertexColorDiagnostics。
+    /// </summary>
+    public string? GetMeshVertexAlphaBase64(int meshIndex, int maxVertices = 10_000, bool allowTruncation = false)
+        => GetMeshVertexColorDiagnostics(meshIndex, maxVertices, allowTruncation).FirstAlphaBase64;
 
     /// <summary>
     /// Extracts a complete GPU skin binding. Sekiro-era FLVER (> 0x2000D)
@@ -692,6 +930,60 @@ internal sealed class FlverNativeDocument
             return true;
         }
         return false;
+    }
+
+    private bool TryReadVertexColor(VertexMemberAccess access, int vertexIndex, Span<float> rgba)
+    {
+        rgba.Clear();
+        if (vertexIndex < 0 || vertexIndex >= access.Count) return false;
+        var byteCount = access.Type == TypeFloat4 ? 16 : 4;
+        var offset = access.DataBase + (long)vertexIndex * access.Stride + access.Offset;
+        if (offset < 0 || offset > _source.Length || byteCount > _source.Length - offset)
+            return false;
+
+        switch (access.Type)
+        {
+            case TypeFloat4:
+                for (var channel = 0; channel < 4; channel++)
+                    rgba[channel] = ReadFloat32(_source, (int)offset + channel * sizeof(float));
+                break;
+            case TypeColor:
+            case TypeUByte4Norm:
+                for (var channel = 0; channel < 4; channel++)
+                    rgba[channel] = ReadByte(_source, (int)offset + channel) / 255f;
+                break;
+            default:
+                return false;
+        }
+
+        for (var channel = 0; channel < 4; channel++)
+        {
+            if (!float.IsFinite(rgba[channel])) return false;
+        }
+        return true;
+    }
+
+    private static bool IsSupportedVertexColorType(uint type)
+        => type is TypeFloat4 or TypeColor or TypeUByte4Norm;
+
+    private static string VertexColorLayoutTypeName(uint type) => type switch
+    {
+        TypeFloat4 => "Float4",
+        TypeColor => "Color",
+        TypeUByte4Norm => "UByte4Norm",
+        _ => $"Unknown(0x{type:X})"
+    };
+
+    private static string DescribeVertexColorMember(VertexColorMemberCandidate member)
+        => $"vertex-semantic:vertexColor memberIndex={member.MemberIndex} type=0x{member.Type:X} "
+            + $"vertexBuffer={member.VertexBufferIndex} layout={member.BufferLayoutIndex} "
+            + $"structOffset={member.StructOffset}";
+
+    private static string EncodeFloatArray(float[] values)
+    {
+        var bytes = new byte[checked(values.Length * sizeof(float))];
+        Buffer.BlockCopy(values, 0, bytes, 0, bytes.Length);
+        return Convert.ToBase64String(bytes);
     }
 
     private bool TryReadNormalW(VertexMemberAccess? access, int vertexIndex, out int normalW)
@@ -939,6 +1231,149 @@ internal sealed class FlverNativeDocument
             {
                 BinaryPrimitives.WriteUInt32LittleEndian(output.AsSpan(i * stride, stride), value);
             }
+        }
+        return Convert.ToBase64String(output);
+    }
+
+    /// <summary>
+    /// 为已确认的角色投影材质导出其原生投影接收面。
+    ///
+    /// Sekiro 的 <c>P_FB_M_9510_Decal</c> FLVER 不是一张普通 UV 表面：同一个
+    /// display FaceSet 内包含一个连续的皮肤接收面，以及眼睛、嘴、发片和辅助
+    /// 投影岛。成熟工具会保留这些原生面集，只有在拥有对应游戏 shader 时才
+    /// 把它们交给 shader。SoulForge 的兼容预览没有该 shader，因此只将原生
+    /// triangle-list 中最大的连续接收面投影到显式兼容贴图；这不是按坐标或
+    /// 名称猜测几何，也不修改 native payload，只是一个有边界的只读显示投影。
+    ///
+    /// 调用方必须已经依据 MTD 语义确认这是兼容投影路径；普通 FLVER 永远使用
+    /// GetMeshIndicesBase64。组件选择保持三角形原顺序和原生索引位宽。
+    /// </summary>
+    public string? GetMeshProjectionReceiverIndicesBase64(int meshIndex, int maxIndices = 30_000)
+    {
+        if (maxIndices < 3) return null;
+        var sourceBase64 = GetMeshIndicesBase64(meshIndex, MaxIndexCount, allowTruncation: false);
+        if (sourceBase64 is null) return null;
+        var indexSize = GetMeshIndexSize(meshIndex);
+        var indexStride = indexSize / 8;
+        if (indexStride is not (2 or 4)) return null;
+
+        byte[] sourceBytes;
+        try
+        {
+            sourceBytes = Convert.FromBase64String(sourceBase64);
+        }
+        catch (FormatException)
+        {
+            return null;
+        }
+        if (sourceBytes.Length == 0 || sourceBytes.Length % (indexStride * 3) != 0)
+            return null;
+
+        var vertexCount = Meshes[meshIndex].VertexCount;
+        if (vertexCount <= 0) return null;
+        var parent = new int[vertexCount];
+        var rank = new byte[vertexCount];
+        for (var vertex = 0; vertex < parent.Length; vertex++) parent[vertex] = vertex;
+
+        int Find(int value)
+        {
+            var root = value;
+            while (parent[root] != root) root = parent[root];
+            while (parent[value] != value)
+            {
+                var next = parent[value];
+                parent[value] = root;
+                value = next;
+            }
+            return root;
+        }
+
+        void Union(int left, int right)
+        {
+            var leftRoot = Find(left);
+            var rightRoot = Find(right);
+            if (leftRoot == rightRoot) return;
+            if (rank[leftRoot] < rank[rightRoot])
+            {
+                parent[leftRoot] = rightRoot;
+            }
+            else if (rank[leftRoot] > rank[rightRoot])
+            {
+                parent[rightRoot] = leftRoot;
+            }
+            else
+            {
+                parent[rightRoot] = leftRoot;
+                rank[leftRoot]++;
+            }
+        }
+
+        var indexCount = sourceBytes.Length / indexStride;
+        var indices = new uint[indexCount];
+        for (var index = 0; index < indexCount; index++)
+        {
+            var offset = index * indexStride;
+            indices[index] = indexSize == 16
+                ? ReadUInt16(sourceBytes, offset)
+                : ReadUInt32(sourceBytes, offset);
+            if (indices[index] >= (uint)vertexCount) return null;
+        }
+
+        var triangleCountByRoot = new Dictionary<int, int>();
+        for (var triangle = 0; triangle < indexCount / 3; triangle++)
+        {
+            var offset = triangle * 3;
+            var a = checked((int)indices[offset]);
+            var b = checked((int)indices[offset + 1]);
+            var c = checked((int)indices[offset + 2]);
+            if (a == b || b == c || c == a) continue;
+            Union(a, b);
+            Union(b, c);
+        }
+        for (var triangle = 0; triangle < indexCount / 3; triangle++)
+        {
+            var offset = triangle * 3;
+            var a = checked((int)indices[offset]);
+            var b = checked((int)indices[offset + 1]);
+            var c = checked((int)indices[offset + 2]);
+            if (a == b || b == c || c == a) continue;
+            var root = Find(a);
+            triangleCountByRoot[root] = triangleCountByRoot.TryGetValue(root, out var count)
+                ? count + 1
+                : 1;
+        }
+        if (triangleCountByRoot.Count == 0) return null;
+
+        // Deterministic tie-breaker: native triangle order has already been
+        // preserved; the smallest root keeps identical inputs stable.
+        var receiverRoot = triangleCountByRoot
+            .OrderByDescending(pair => pair.Value)
+            .ThenBy(pair => pair.Key)
+            .First()
+            .Key;
+        var receiver = new List<uint>(triangleCountByRoot[receiverRoot] * 3);
+        for (var triangle = 0; triangle < indexCount / 3; triangle++)
+        {
+            var offset = triangle * 3;
+            var a = checked((int)indices[offset]);
+            var b = checked((int)indices[offset + 1]);
+            var c = checked((int)indices[offset + 2]);
+            if (a == b || b == c || c == a || Find(a) != receiverRoot) continue;
+            receiver.Add(indices[offset]);
+            receiver.Add(indices[offset + 1]);
+            receiver.Add(indices[offset + 2]);
+        }
+        if (receiver.Count == 0 || receiver.Count > maxIndices) return null;
+
+        var output = new byte[checked(receiver.Count * indexStride)];
+        for (var index = 0; index < receiver.Count; index++)
+        {
+            var value = receiver[index];
+            var offset = index * indexStride;
+            if (indexSize == 16)
+                BinaryPrimitives.WriteUInt16LittleEndian(output.AsSpan(offset, indexStride), checked((ushort)value));
+            else
+                BinaryPrimitives.WriteUInt32LittleEndian(output.AsSpan(offset, indexStride), value);
         }
         return Convert.ToBase64String(output);
     }
@@ -1926,6 +2361,24 @@ internal sealed record FlverMeshSkinning(
 {
     public static FlverMeshSkinning Static { get; } = new("static", "none", null, null);
 }
+
+/// <summary>一个原生 VertexColor member 的完整 RGBA 只读诊断。</summary>
+internal sealed record FlverVertexColorDiagnostic(
+    int MemberOrdinal,
+    int MemberIndex,
+    uint LayoutType,
+    string LayoutTypeName,
+    int VertexBufferIndex,
+    int BufferLayoutIndex,
+    int StructOffset,
+    string RgbaBase64);
+
+/// <summary>VertexColor 诊断结果；失败时 Members 始终为空，避免部分颜色被误用。</summary>
+internal sealed record FlverVertexColorReadResult(
+    string Status,
+    IReadOnlyList<FlverVertexColorDiagnostic> Members,
+    string? Failure,
+    string? FirstAlphaBase64);
 
 internal sealed record FlverRoundTripReport(
     bool ByteIdentical, bool SemanticIdentical,

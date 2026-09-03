@@ -76,7 +76,7 @@ export interface ReadFullEmevdDocumentInput {
   filePath: string;
   allowedRoots: string[];
   resourceUri: string;
-  registry: EmedfRegistry;
+  registry?: EmedfRegistry;
   documentInstanceId?: string;
   pageSize?: number;
   timeoutMs?: number;
@@ -403,7 +403,7 @@ async function attemptFullEmevdRead(
       }
       for (let index = 0; index < count; index += 1) {
         const entry = allInstructions[start + index]!;
-        const unknown = findInstructionDef(input.registry, entry.bank, entry.id) === undefined;
+        const unknown = input.registry ? findInstructionDef(input.registry, entry.bank, entry.id) === undefined : true;
         if (unknown) {
           unknownCount += 1;
           hasUnknown = true;

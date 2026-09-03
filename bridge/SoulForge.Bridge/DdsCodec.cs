@@ -320,6 +320,23 @@ internal static class DdsCodec
                 DecodeBc4Block(src, block + 8, rgba, width, height, bx, by, channel: 1); // G
             }
         }
+
+        // Sekiro's `_n` maps are BC5 tangent-space normals. BC5 stores only X/Y;
+        // leaving B at zero makes Three.js interpret Z as -1, which flattens or
+        // inverts the lighting when the decoded PNG is used as normalMap. Rebuild
+        // the positive hemisphere exactly once after both channels are decoded.
+        for (int y = 0; y < height; y++)
+        {
+            for (int x = 0; x < width; x++)
+            {
+                int dest = (y * width + x) * 4;
+                float nx = rgba[dest + 0] / 127.5f - 1f;
+                float ny = rgba[dest + 1] / 127.5f - 1f;
+                float nz = MathF.Sqrt(MathF.Max(0f, 1f - nx * nx - ny * ny));
+                rgba[dest + 2] = (byte)Math.Clamp((int)MathF.Round((nz * 0.5f + 0.5f) * 255f), 0, 255);
+                rgba[dest + 3] = 255;
+            }
+        }
     }
 
     static void DecodeBc4Block(byte[] src, int block, byte[] rgba, int width, int height, int bx, int by, int channel)
@@ -361,8 +378,8 @@ internal static class DdsCodec
             }
             else if (channel == 1)
             {
-                // BC5 green channel (normal map): B unused, opaque alpha.
-                rgba[dest + 2] = 0;
+                // BC5 green channel (normal map): B is reconstructed after the
+                // complete block image has both X and Y; keep alpha opaque here.
                 rgba[dest + 3] = 255;
             }
             // channel == 3 (BC3 alpha): only alpha is written; RGB comes from the color block.

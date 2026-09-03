@@ -1,0 +1,32 @@
+/*
+ * SoulForge portfolio V2
+ *
+ * This is an additive print theme. It is injected into portfolio.html by
+ * build-pdf-v2.mjs, so the current PDF and its source remain unchanged.
+ *
+ * Mode: 五彩斑斓黑 / obsidian
+ * Base: near-black ink with a large black center.
+ * Field: color grows gradually toward the edges, keeping the content field
+ * quiet while the palette remains visible around the frame.
+ */
+:root {
+  --v2-ink: #070a11;
+}
+
+html,
+body {
+  background: var(--v2-ink);
+}
+
+/* Keep the original content hierarchy intact; change the environment layer
+ * so the accent palette can be seen without turning the deck into a glow. */
+.page {
+  background-color: #05080d;
+  background-image: var(--page-bg);
+  background-position: center;
+  background-size: cover;
+  background-repeat: no-repeat;
+}
+
+/* Keep the ambient field in the page background itself. A direct print layer
+ * avoids compositing text into a raster-like PDF layer. */

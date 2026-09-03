@@ -15,6 +15,7 @@ import type {
   SymbolBundle,
   TextEntrySymbol
 } from '@soulforge/shared';
+import { buildParamTextReferenceEdges } from './paramTextReferences.js';
 
 export interface ReferenceBuildOptions {
   /**
@@ -128,6 +129,10 @@ export function buildReferenceGraph(bundle: SymbolBundle, options: ReferenceBuil
     }
   }
 
+  // PARAM text associations are explicit metadata/row-domain links, not the
+  // noisy numeric fallback. Include them in the same graph so find_references
+  // and RAG one-hop expansion can reach an item name from its physical row.
+  edges.push(...buildParamTextReferenceEdges(bundle.params ?? [], bundle.msgs ?? []));
   const dedupedEdges = dedupeEdges(edges);
   return {
     edges: dedupedEdges,

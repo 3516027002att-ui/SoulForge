@@ -18,7 +18,7 @@ import type {
   OperationLogStore
 } from '@soulforge/core';
 
-export const OPERATION_LOG_UTILITY_PROTOCOL = '1.3.0' as const;
+export const OPERATION_LOG_UTILITY_PROTOCOL = '1.4.0' as const;
 
 export interface ProviderUsageEventPayload {
   eventId: string;
@@ -112,10 +112,22 @@ export interface OperationLogUtilityPayloadMap {
   replaceFiles: { files: IndexedFile[] };
   searchFiles: { query: string; limit?: number };
   replaceRagChunks: { chunks: RagChunk[] };
+  mergeRagChunks: { chunks: RagChunk[] };
+  mergeRagChunkDelta: {
+    sourceUri: string;
+    upserts: RagChunk[];
+    deletedChunkIds: string[];
+  };
   loadRagChunks: Record<string, never>;
   searchRagChunks: { query: string; limit?: number };
   replaceRagEmbeddings: { entries: Array<{ chunkId: string; model: string; vector: Float32Array }> };
+  mergeRagEmbeddings: {
+    model: string;
+    entries: Array<{ chunkId: string; contentHash: string; vector: Float32Array }>;
+    deletedChunkIds: string[];
+  };
   loadRagEmbeddings: Record<string, never>;
+  loadRagEmbeddingRecords: Record<string, never>;
   ragEmbeddingModel: Record<string, never>;
   replaceReferences: { references: ReferenceEdge[] };
   loadReferences: Record<string, never>;
@@ -184,10 +196,14 @@ export interface OperationLogUtilityResultMap {
   replaceFiles: null;
   searchFiles: IndexedFile[];
   replaceRagChunks: null;
+  mergeRagChunks: null;
+  mergeRagChunkDelta: null;
   loadRagChunks: RagChunk[];
   searchRagChunks: RagChunk[];
   replaceRagEmbeddings: null;
+  mergeRagEmbeddings: null;
   loadRagEmbeddings: Record<string, number[]>;
+  loadRagEmbeddingRecords: Array<{ chunkId: string; model: string; contentHash: string | null; vector: number[] }>;
   ragEmbeddingModel: string | null;
   replaceReferences: null;
   loadReferences: ReferenceEdge[];

@@ -261,7 +261,9 @@ internal static class BridgeDaemonHost
         // list-ffxbnd-entries 是纯只读列目录，不得进写盘集合。
         // 误登记会强制 options.outputPath，IPC 不传时左栏永远 BRIDGE_OUTPUT_PATH_REQUIRED。
         "export-tpf-texture",
-        "extract-bnd4-child"
+        "extract-bnd4-child",
+        "write-luabnd-script",
+        "export-luabnd"
     };
 
     /// <summary>
@@ -570,7 +572,9 @@ internal static class BridgeDaemonHost
         "list-ffxbnd-entries",
         "read-mtd-document", "write-mtd-document", "read-fxr-document",
         "export-event", "export-map", "export-param",
-        "export-msg", "probe-oodle", "probe-document-locator"
+        "export-msg", "probe-oodle", "probe-document-locator",
+        "read-luabnd-document", "inspect-luabnd", "read-luabnd-script",
+        "write-luabnd-script", "export-luabnd"
     };
 
     private static object BuildCapabilities(string? oodleRuntimeRoot) => new

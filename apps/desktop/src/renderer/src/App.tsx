@@ -2892,6 +2892,9 @@ export function App(): ReactElement {
       ...(agentResources.length > 0 ? { resources: agentResources } : {}),
       ...(agentAttachments.length > 0 ? { attachments: agentAttachments } : {}),
       streaming: true,
+      // 工作区 Agent 默认启用一次性 RAG 预检；main 会优先使用内存
+      // active corpus，并等待正在进行的那一次语义分析完成，不会按查询重扫。
+      useRagSearch: true,
       // S32：输入条的思考强度随任务提交（优先于服务级默认）。
       thinkingLevel: aiThinking,
       // Ask/Plan = 只读计划；Edit = 可经 Patch Engine 提交（需审批卡）；Bypass = 全自动提交（免审批）。

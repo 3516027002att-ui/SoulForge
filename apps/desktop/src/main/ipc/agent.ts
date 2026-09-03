@@ -10,9 +10,7 @@ import {
   createConfirmationReceipt,
   createContextBroker,
   createUnifiedDiff,
-  fetchEmbeddings,
-  retrieveEvidenceHybrid,
-  type HybridVectorSource,
+  retrieveEvidence,
   createRagCorpus,
   listRolloutSessions,
   loadRolloutSession,
@@ -56,6 +54,8 @@ import type { TrustedIpcHandle } from './registration.js';
 import type { MemoryManager } from '../memoryManager.js';
 import type { ModelServiceCredentialVault } from '../modelServiceCredentials.js';
 import type { OperationLogUtilityClient } from '../operationLogUtilityClient.js';
+import { createAgentTaskRecordGateway } from '../agentTaskRecord.js';
+import { InternalRagEmbeddingService } from '../ragEmbedding.js';
 
 export interface AiAgentRunRequest {
   configId: string;
@@ -63,6 +63,8 @@ export interface AiAgentRunRequest {
   mode?: 'plan' | 'normal' | 'fullPermission';
   streaming?: boolean;
   resumeSessionPath?: string;
+  /** Optional per-run ceiling; omitted uses the core's safe default. */
+  maxSteps?: number;
   timeoutMs?: number;
   maxTotalOutputTokens?: number;
   autoCompactTokenLimit?: number;
@@ -90,13 +92,13 @@ export type AgentAttachmentCreateIpcResult = { ok: true; reference: { token: str
 
 const DEFAULT_AGENT_CONTEXT_WINDOW_TOKENS = 500_000;
 const AGENT_CONTEXT_COMPACTION_RATIO = 0.8;
-const EMBED_BATCH_SIZE = 64;
 const APPROVAL_TIMEOUT_MS = 600_000;
 const AGENT_EVENT_HISTORY_LIMIT = 4_096;
 const AGENT_EVENT_HISTORY_TTL_MS = 5 * 60_000;
 
 const agentSessionsBaseDir = join(app.getPath('userData'), 'agent');
 const activeAgentRuns = new Map<string, { controller: AbortController; ownerId: number; serviceId: string; model: string; }>();
+const internalRagEmbedding = new InternalRagEmbeddingService(join(app.getPath('userData'), 'rag', 'embedding-cache'));
 const agentReferenceRegistry = new Map<string, { ownerId: string; tokenId: string; citation?: Citation }>();
 const pendingApprovals = new Map<string, { resolve: (response: { decision: ApprovalDecision; note?: string }) => void; timer: NodeJS.Timeout }>();
 const agentSessionSeqs = new Map<string, number>();
@@ -150,7 +152,9 @@ const resolveSessionPath = (sessionPath: string): { ok: true; absolute: string }
   return { ok: true, absolute };
 };
 export function isAgentSessionActive(sessionId: string): boolean { return activeAgentRuns.has(sessionId); }
+export function hasActiveAgentRuns(): boolean { return activeAgentRuns.size > 0; }
 export function clearAgentIpcState(): void {
+  void internalRagEmbedding.close();
   for (const key of [...pendingApprovals.keys()]) {
     const p = pendingApprovals.get(key);
     if (p) { clearTimeout(p.timer); p.resolve({ decision: 'reject', note: '状态已重置，未回答的审批按拒绝处理。' }); }
@@ -163,6 +167,10 @@ export function clearAgentIpcState(): void {
   agentSessionOwners.clear();
   agentSessionSeqs.clear();
 }
+
+export function scheduleInternalRagEmbedding(corpus: RagCorpus, database: OperationLogUtilityClient): void {
+  internalRagEmbedding.schedule(corpus, database);
+}
 export interface AgentIpcDeps {
   handle: TrustedIpcHandle;
   webContents: WebContents;
@@ -174,10 +182,13 @@ export interface AgentIpcDeps {
   getActiveSession: () => WorkspaceSession | null;
   getActiveWorkspaceSessionId: () => string | null;
   getActiveRag: () => RagCorpus | null;
+  /** 等待当前一次性工作区分析；不会为每次 RAG 查询重新扫描。 */
+  waitForWorkspaceIndexing: (signal?: AbortSignal) => Promise<void>;
   ensureActiveOperationLog: (session: WorkspaceSession) => Promise<OperationLogUtilityClient>;
   durableStoragePaths: (workspaceId: string) => { root: string; backupBaseDir: string; recoveryDir: string; stagingRoot: string };
   currentToolContext: () => ToolContext;
   requestWriteConfirmation: (input: { event?: IpcMainInvokeEvent; resourceLabel: string; sourceUri: string; actionLabel: string; payloadHash: string; extraSubjects?: string[] }) => Promise<ConfirmationReceipt | null>;
+  taskRecordDirectory: () => string;
   readSystemPrompt: () => string | null;
 }
 
@@ -261,13 +272,10 @@ export function registerAgentIpcHandlers(deps: AgentIpcDeps): void {
     }
   );
 
-  deps.handle('rag.embed', async (_event, input: { configId: string }): Promise<
-      | { ok: true; embedded: number; failed: number; model: string; dim: number }
+  deps.handle('rag.embed', async (_event, _input: unknown): Promise<
+      | { ok: true; embedded: number; reused: number; failed: number; model: string; dim: number }
       | { ok: false; error: { code: string; message: string } }
     > => {
-      if (typeof input?.configId !== 'string' || input.configId.trim() === '') {
-        return { ok: false, error: { code: 'INVALID_INPUT', message: 'configId 必填。' } };
-      }
       if (!deps.getActiveIndex()) {
         return {
           ok: false,
@@ -280,120 +288,86 @@ export function registerAgentIpcHandlers(deps: AgentIpcDeps): void {
           error: { code: 'WORKSPACE_REQUIRED', message: '工作区会话未就绪。' }
         };
       }
-      const stored = (await deps.modelServiceVault.listConfigs()).find((config) => config.id === input.configId);
-      if (!stored) {
-        return { ok: false, error: { code: 'MODEL_SERVICE_CONFIG_NOT_FOUND', message: '模型服务配置不存在。' } };
-      }
-      if (!stored!.embeddingModel) {
-        return {
-          ok: false,
-          error: { code: 'EMBEDDING_MODEL_UNCONFIGURED', message: '该服务未配置 Embedding 模型（高级选项）。' }
-        };
-      }
-      if (stored!.protocol !== 'openai-compatible') {
-        return {
-          ok: false,
-          error: { code: 'EMBEDDING_PROTOCOL_UNSUPPORTED', message: 'Embedding 仅支持 OpenAI 兼容协议（Anthropic 无 embedding API）。' }
-        };
-      }
-      const apiKey = await deps.modelServiceVault.resolveApiKey(stored!.id);
-      if (!apiKey) {
-        return { ok: false, error: { code: 'MODEL_SERVICE_UNCONFIGURED', message: '模型服务凭据不可解密。' } };
-      }
       const database = await deps.ensureActiveOperationLog(deps.getActiveSession()!);
       const corpus = deps.getActiveRag() ?? createRagCorpus({
-      workspaceId: deps.getActiveIndex()!.workspaceId,
+        workspaceId: deps.getActiveIndex()!.workspaceId,
         builtAt: new Date().toISOString(),
         chunks: await database.loadRagChunks(),
         references: await database.loadReferences()
       });
+      if (corpus.availability !== 'available') {
+        return {
+          ok: false,
+          error: {
+            code: 'RAG_UNAVAILABLE',
+            message: corpus.diagnostics.find((diagnostic) => diagnostic.code === 'RAG_SEMANTIC_CORPUS_EMPTY')?.message
+              ?? 'RAG 语义语料不可用，请先完成工作区原生分析。'
+          }
+        };
+      }
       if (corpus.chunks.length === 0) {
         return { ok: false, error: { code: 'INSUFFICIENT_CORPUS', message: '语料为空：先扫描并分析工作区。' } };
       }
   
-      const entries: Array<{ chunkId: string; model: string; vector: Float32Array }> = [];
-      let failed = 0;
-      for (let start = 0; start < corpus.chunks.length; start += EMBED_BATCH_SIZE) {
-        const batch = corpus.chunks.slice(start, start + EMBED_BATCH_SIZE);
-        const result = await fetchEmbeddings({
-          baseUrl: stored!.baseUrl,
-          apiKey,
-          model: stored!.embeddingModel,
-          inputs: batch.map((chunk) => `${chunk.title}\n${chunk.body}`),
-          timeoutMs: 60_000
-        });
-        if (!result.ok) {
-          failed += batch.length;
-          continue;
-        }
-        for (let i = 0; i < batch.length; i += 1) {
-          const vector = result.vectors[i];
-          const chunk = batch[i];
-          if (!vector || !chunk) continue;
-          entries.push({ chunkId: chunk.chunkId, model: stored!.embeddingModel, vector });
-        }
-      }
-      await database.replaceRagEmbeddings(entries);
-      return {
-        ok: true,
-        embedded: entries.length,
-        failed,
-        model: stored!.embeddingModel,
-        dim: entries[0]?.vector?.length ?? 0
-      };
+      const result = await internalRagEmbedding.ensure(corpus, database);
+      if (!result.ok) return { ok: false, error: { code: result.code, message: result.message } };
+      return { ok: true, embedded: result.embedded, reused: result.reused, failed: result.failed, model: result.model, dim: result.dim };
     });
   
-    const searchWorkspaceEvidence = async (
-    database: OperationLogUtilityClient,
+  const searchWorkspaceEvidence = async (
+    database: OperationLogUtilityClient | null,
     query: string,
     options: {
-      configId?: string;
       limit?: number;
       families?: readonly RagChunkFamily[];
       expandReferences?: boolean;
+      signal?: AbortSignal;
     }
   ): Promise<RagRetrieveResult> => {
     if (!deps.getActiveIndex()) {
       return { ok: false as const, code: 'WORKSPACE_REQUIRED' as const, message: '先打开 Mod 工作区。' };
     }
-    const corpus = deps.getActiveRag() ?? createRagCorpus({
+    const activeRag = deps.getActiveRag();
+    if (!activeRag && !database) {
+      return {
+        ok: false,
+        code: 'RAG_UNAVAILABLE',
+        message: '内存 RAG 语料尚未就绪；查询不会启动数据库 recovery。'
+      };
+    }
+    const corpus = activeRag ?? createRagCorpus({
       workspaceId: deps.getActiveIndex()!.workspaceId,
       builtAt: new Date().toISOString(),
-      chunks: await database.loadRagChunks(),
-      references: await database.loadReferences()
+      chunks: await database!.loadRagChunks(),
+      references: await database!.loadReferences()
     });
-    let vectors: HybridVectorSource | undefined;
-    const indexedModel = await database.ragEmbeddingModel();
-    if (indexedModel && typeof options.configId === 'string' && options.configId !== '') {
-      const stored = (await deps.modelServiceVault.listConfigs()).find((config) => config.id === options.configId);
-      if (stored?.embeddingModel === indexedModel) {
-        const apiKey = await deps.modelServiceVault.resolveApiKey(stored!.id);
-        if (apiKey) {
-          const embedded = await fetchEmbeddings({
-            baseUrl: stored!.baseUrl,
-            apiKey,
-            model: stored!.embeddingModel,
-            inputs: [query],
-            timeoutMs: 30_000
-          });
-          const queryVector = embedded.ok ? embedded.vectors[0] : undefined;
-          if (queryVector) {
-            vectors = { vectors: await database.loadRagEmbeddings(), queryVector };
-          }
-        }
-      }
-    }
-    return retrieveEvidenceHybrid(corpus, query, {
+    // Agent 默认只走本地 lexical + 结构化 ID + 引用扩展。
+    // embedding 实验能力仍可独立保留，但不应成为普通用户的查询前置条件，
+    // 也不应因为一次 Agent 查询触发额外模型/API 调用。
+    const result = retrieveEvidence(corpus, query, {
       ...(options.limit != null && options.limit > 0 ? { limit: Math.trunc(options.limit) } : {}),
       ...(options.expandReferences === undefined ? {} : { expandReferences: options.expandReferences === true }),
-      ...(options.families && options.families.length > 0 ? { families: options.families } : {}),
-      ...(vectors ? { vectors } : {})
+      ...(options.families && options.families.length > 0 ? { families: options.families } : {})
     });
+    if (result.ok) {
+      return {
+        ...result,
+        retrievalMode: 'lexical',
+        diagnostics: [
+          ...(result.diagnostics ?? []),
+          {
+            severity: 'info',
+            code: 'LEXICAL_EVIDENCE_ONLY',
+            message: '当前 Agent 未调用 embedding；已使用本地词法、结构化 ID 和引用扩展检索。'
+          }
+        ]
+      };
+    }
+    return result;
   };
 
   deps.handle('rag.searchEvidence', async (_event, input: {
       query: string;
-      configId?: string;
       limit?: number;
       families?: readonly RagChunkFamily[];
       expandReferences?: boolean;
@@ -404,9 +378,10 @@ export function registerAgentIpcHandlers(deps: AgentIpcDeps): void {
       if (!deps.getActiveIndex() || !deps.getActiveSession()) {
         return { ok: false as const, code: 'WORKSPACE_REQUIRED' as const, message: '先打开 Mod 工作区。' };
       }
-      const database = await deps.ensureActiveOperationLog(deps.getActiveSession()!);
+      const database = deps.getActiveRag()
+        ? deps.operationLogUtility
+        : await deps.ensureActiveOperationLog(deps.getActiveSession()!);
       return searchWorkspaceEvidence(database, input.query, {
-        ...(input.configId !== undefined ? { configId: input.configId } : {}),
         ...(input.limit !== undefined ? { limit: input.limit } : {}),
         ...(input.families !== undefined ? { families: input.families } : {}),
         ...(input.expandReferences !== undefined ? { expandReferences: input.expandReferences } : {})
@@ -524,13 +499,23 @@ export function registerAgentIpcHandlers(deps: AgentIpcDeps): void {
       const mode: ToolContext['mode'] = request.mode === 'normal' || request.mode === 'fullPermission'
         ? request.mode
         : 'plan';
+      const sessionId = randomUUID();
+      const taskRecord = createAgentTaskRecordGateway(deps.taskRecordDirectory(), sessionId);
+      await taskRecord.read();
       // 无工作区时 deps.getActiveIndex() 为 null：工具层按工具守卫（WORKSPACE_REQUIRED），
       // 需要工作区的工具干净失败，不整次拒绝（T6）。
       const bridge = createAgentToolBridge({
         registry: deps.toolRegistry,
+        contextProvider: deps.currentToolContext,
         // Agent 可以读取记忆来恢复项目上下文，但不能把未经用户明确整理的
         // 运行时对话或测试内容写入长期记忆；记忆写入只保留给显式宿主流程。
-        context: { ...deps.currentToolContext(), mode, allowMemoryWrite: false },
+        context: {
+          ...deps.currentToolContext(),
+          mode,
+          allowMemoryWrite: false,
+          taskRecord,
+          requireTaskRecord: true
+        },
         // Discovery is non-blocking: the bridge returns candidate/evidence
         // metadata, while native readers and writers enforce real authority.
       });
@@ -541,12 +526,25 @@ export function registerAgentIpcHandlers(deps: AgentIpcDeps): void {
       // （真实 SQLite store / session / 备份与恢复目录）注入工具执行。审批卡
       // （agentLoop 的 rollback 级 gate）是「允许调这个工具」，这里的对话框是
       // 「确认这一次具体回滚」——双重防线，回滚是高危险不可逆操作。
+      let agentSignal: AbortSignal | undefined;
       {
         const rawExecuteTool = bridge.executeTool;
-        bridge.executeTool = async (call) => {
+        const executeLiveTool = (call: Parameters<typeof rawExecuteTool>[0], extra: Partial<ToolContext> = {}) => {
+          return rawExecuteTool(call, {
+            // The run's mode and task ledger are stable for its lifetime; all
+            // workspace/RAG/session state must be refreshed per tool call.
+            mode,
+            allowMemoryWrite: false,
+            taskRecord,
+            requireTaskRecord: true,
+            ...(agentSignal ? { signal: agentSignal } : {}),
+            ...extra
+          });
+        };
+        bridge.executeTool = async (call, contextOverride = {}) => {
           if (call.name === 'commit_patch' || call.name === 'mutate_param_fields'
             || call.name === 'mutate_fmg_entries' || call.name === 'apply_emevd_dsl') {
-            if (!deps.getActiveSession() || !deps.operationLogUtility) return rawExecuteTool(call);
+            if (!deps.getActiveSession() || !deps.operationLogUtility) return executeLiveTool(call, contextOverride);
             const storage = deps.durableStoragePaths(deps.getActiveSession()!.meta.workspaceId);
             const confirmation = createConfirmationReceipt({
               subjects: [
@@ -558,7 +556,8 @@ export function registerAgentIpcHandlers(deps: AgentIpcDeps): void {
               riskLevel: 'high',
               note: 'Agent 审批卡通过后签发的写入回执'
             });
-            return rawExecuteTool(call, {
+            return executeLiveTool(call, {
+              ...contextOverride,
               session: deps.getActiveSession()!,
               operationLogStore: deps.operationLogUtility,
               backupBaseDir: storage.backupBaseDir,
@@ -566,7 +565,7 @@ export function registerAgentIpcHandlers(deps: AgentIpcDeps): void {
               confirmation
             });
           }
-          if (call.name !== 'rollback_operation') return rawExecuteTool(call);
+          if (call.name !== 'rollback_operation') return executeLiveTool(call, contextOverride);
           let input: Record<string, unknown> = {};
           try {
             input = call.argumentsJson.trim() === '' ? {} : JSON.parse(call.argumentsJson);
@@ -575,12 +574,12 @@ export function registerAgentIpcHandlers(deps: AgentIpcDeps): void {
           }
           const opId = typeof input.opId === 'string' ? input.opId : '';
           if (opId === '' || !deps.getActiveSession() || !deps.operationLogUtility) {
-            return rawExecuteTool(call);
+            return executeLiveTool(call, contextOverride);
           }
           const storage = deps.durableStoragePaths(deps.getActiveSession()!.meta.workspaceId);
           const sourceOperation = await deps.operationLogUtility.get(opId);
           if (!sourceOperation) {
-            return rawExecuteTool(call);
+            return executeLiveTool(call, contextOverride);
           }
           const confirmation = await deps.requestWriteConfirmation({
             resourceLabel: sourceOperation.title,
@@ -602,8 +601,9 @@ export function registerAgentIpcHandlers(deps: AgentIpcDeps): void {
               })
             };
           }
-          return rawExecuteTool(call, {
-              session: deps.getActiveSession()!,
+          return executeLiveTool(call, {
+            ...contextOverride,
+            session: deps.getActiveSession()!,
             operationLogStore: deps.operationLogUtility,
             backupBaseDir: storage.backupBaseDir,
             recoveryDir: storage.recoveryDir,
@@ -627,6 +627,12 @@ export function registerAgentIpcHandlers(deps: AgentIpcDeps): void {
       // T6-2：系统提示由 main 读入并装配（renderer 不拼）。选区作为可选元数据
       // 附在系统提示里供模型参考，不是默认任务对象，也不自动写进 prompt 文本。
       const systemPromptParts = [deps.readSystemPrompt() ?? ''];
+      const fullUserMemory = deps.memoryManager.getFullMemoryForSystemPrompt(
+        deps.getActiveIndex()?.workspaceId
+      );
+      if (fullUserMemory.trim().length > 0) {
+        systemPromptParts.push(fullUserMemory);
+      }
       if (request.selection) {
         systemPromptParts.push(
           `用户当前选区（仅可选元数据，不是默认任务对象）：${request.selection.label}（${request.selection.resourceKind}）。`
@@ -666,8 +672,8 @@ export function registerAgentIpcHandlers(deps: AgentIpcDeps): void {
       }
       const systemPrompt = systemPromptParts.filter((part) => part.trim().length > 0).join('\n\n');
   
-      const sessionId = randomUUID();
       const controller = new AbortController();
+      agentSignal = controller.signal;
       activeAgentRuns.set(sessionId, {
         controller,
         ownerId: _event.sender.id,
@@ -845,10 +851,17 @@ export function registerAgentIpcHandlers(deps: AgentIpcDeps): void {
         ...(request.maxTotalOutputTokens != null && request.maxTotalOutputTokens > 0
           ? { maxTotalOutputTokens: Math.trunc(request.maxTotalOutputTokens) }
           : {}),
+        ...(request.maxSteps != null && request.maxSteps > 0
+          ? { maxSteps: Math.min(200, Math.trunc(request.maxSteps)) }
+          : {}),
         // Always arm compaction. Missing provider metadata uses the same 500K
         // default shown in settings and compacts at 80%; an explicit request
         // override remains exact for deterministic callers/tests.
-        compaction: { autoCompactTokenLimit: effectiveAutoCompactTokenLimit },
+        compaction: {
+          autoCompactTokenLimit: request.autoCompactTokenLimit != null && request.autoCompactTokenLimit > 0
+            ? Math.trunc(request.autoCompactTokenLimit)
+            : effectiveAutoCompactTokenLimit
+        },
         ...(Object.keys(sampling).length > 0 ? { sampling } : {}),
         ...(request.useRagSearch === true
           ? {
@@ -862,8 +875,29 @@ export function registerAgentIpcHandlers(deps: AgentIpcDeps): void {
                   if (!deps.getActiveIndex() || !deps.getActiveSession()) {
                     return { ok: false as const, code: 'WORKSPACE_REQUIRED' as const, message: '先打开 Mod 工作区。' };
                   }
-                  const ragDatabase = await deps.ensureActiveOperationLog(deps.getActiveSession()!);
-                  return searchWorkspaceEvidence(ragDatabase, query, {});
+                  // RAG retrieval is a read-only model preflight. It uses the
+                  // current in-memory corpus first; vector persistence is
+                  // recovered by the background embedding task, never by this
+                  // query and never by running recovery cleanup.
+                  // Always join the workspace's one single-flight semantic
+                  // analysis before the first lookup. The renderer starts it
+                  // after the shell becomes interactive, but an Agent can be
+                  // submitted in that race window; waiting only when the
+                  // corpus is unavailable would accept an older partial corpus
+                  // that happens to contain text/event/map rows but no PARAM.
+                  try {
+                    await deps.waitForWorkspaceIndexing(controller.signal);
+                  } catch (error) {
+                    if (controller.signal.aborted) {
+                      return {
+                        ok: false as const,
+                        code: 'RAG_UNAVAILABLE' as const,
+                        message: '等待工作区语义索引期间任务已取消。'
+                      };
+                    }
+                    throw error;
+                  }
+                  return searchWorkspaceEvidence(deps.operationLogUtility, query, { signal: controller.signal });
                 }
               }
             }

@@ -3,10 +3,10 @@
  *
  * Covers: no-op compile (empty plan), event header writes (set_event_id /
  * set_event_rest_behavior), instruction argument writes (set_instruction_arg
- * with typed before/after), and the fail-closed diagnostics — instruction
- * count changes, instruction name changes, WaitFor fold edits, unknown
- * instruction edits — each without locking the whole document or pretending
- * a write happened.
+ * with typed before/after), structural instruction deletion, WaitFor folded
+ * predicate edits, and fail-closed diagnostics for unsafe instruction
+ * insertions/name changes/unknown instruction edits — each without locking
+ * the whole document or pretending a write happened.
  *
  * All EMEDF data here is synthetic and self-authored (same shapes as the
  * renderer smoke); never a dump of any real EMEDF file.
@@ -16,6 +16,7 @@ import { parseDs3EmedfJson } from '../emevd/emedfExternalAdapter.js';
 import type { EmedfRegistry } from '../emevd/emedfSchema.js';
 import { renderEmevdDarkScript } from '../emevd/darkScriptRenderer.js';
 import { compileEmevdDarkScript } from '../emevd/darkScriptCompiler.js';
+import { fingerprintEmedfRegistry } from '../emevd/dslCompiler.js';
 import type { EmevdEditorDocument, EmevdDslCompileRequest } from '@soulforge/shared';
 
 /**
@@ -159,13 +160,17 @@ function createDocument(): EmevdEditorDocument {
   });
 }
 
-function requestFor(document: EmevdEditorDocument, sourceText: string): EmevdDslCompileRequest {
+function requestFor(
+  document: EmevdEditorDocument,
+  sourceText: string,
+  registry: EmedfRegistry
+): EmevdDslCompileRequest {
   return {
     schemaVersion: 1,
     resourceUri: document.resourceUri,
     documentInstanceId: document.documentInstanceId ?? '',
     baseRevision: document.revision,
-    emedfSchemaFingerprint: 'smoke-fingerprint',
+    emedfSchemaFingerprint: fingerprintEmedfRegistry(registry),
     sourceText,
     mode: 'dark-script'
   };
@@ -178,7 +183,7 @@ function main(): void {
 
   /* 1. 未编辑原文 → 空 plan, ok。 */
   {
-    const result = compileEmevdDarkScript(requestFor(document, base), document, registry);
+    const result = compileEmevdDarkScript(requestFor(document, base, registry), document, registry);
     if (!result.ok) throw new Error(`no-op 编译必须成功: ${JSON.stringify(result.diagnostics)}`);
     if (!result.plan || result.plan.operations.length !== 0) {
       throw new Error(`no-op 编译必须产生空操作集, 得到 ${result.plan?.operations.length}`);
@@ -190,7 +195,7 @@ function main(): void {
     const edited = base
       .replace('$Event(0, Default, function() {', '$Event(100, Default, function() {')
       .replace('$Event(965672, Restart, function() {', '$Event(965672, Default, function() {');
-    const result = compileEmevdDarkScript(requestFor(document, edited), document, registry);
+    const result = compileEmevdDarkScript(requestFor(document, edited, registry), document, registry);
     if (!result.ok) throw new Error(`事件头编译失败: ${JSON.stringify(result.diagnostics)}`);
     const ops = result.plan!.operations;
     const setId = ops.find((op) => op.kind === 'set_event_id');
@@ -206,7 +211,7 @@ function main(): void {
   /* 3. 普通指令参数:改一个固定参数(s32 Event Slot ID, 避开 vararg 尾部). */
   {
     const edited = base.replace('InitializeEvent(1, 77770002, 0);', 'InitializeEvent(9, 77770002, 0);');
-    const result = compileEmevdDarkScript(requestFor(document, edited), document, registry);
+    const result = compileEmevdDarkScript(requestFor(document, edited, registry), document, registry);
     if (!result.ok) throw new Error(`指令参数编译失败: ${JSON.stringify(result.diagnostics)}`);
     const ops = result.plan!.operations;
     const write = ops.find((op) => op.kind === 'set_instruction_arg');
@@ -218,49 +223,57 @@ function main(): void {
     }
   }
 
-  /* 4. fail-closed:普通指令条数变化 → 整事件指令跳过(事件头仍可编). */
+  /* 4. 结构删除: DarkScript 删除一行生成受锚点保护的 delete_instruction. */
   {
     const edited = base.replace('    InitializeEvent(1, 77770002, 0);\n', '');
-    const result = compileEmevdDarkScript(requestFor(document, edited), document, registry);
-    if (result.ok) throw new Error('指令条数变化必须 fail-closed');
-    const hasCount = result.diagnostics.some((d) => d.code === 'EMEVD_DSL_INSTRUCTION_COUNT_CHANGED');
-    if (!hasCount) throw new Error(`期望 EMEVD_DSL_INSTRUCTION_COUNT_CHANGED: ${JSON.stringify(result.diagnostics)}`);
-  }
-
-  /* 5. fail-closed:WaitFor 折叠块内容被修改. */
-  {
-    const edited = base.replace('IfPlayerHasItem(6, 2498)', 'IfPlayerHasItem(6, 9999)');
-    const result = compileEmevdDarkScript(requestFor(document, edited), document, registry);
-    if (result.ok) throw new Error('WaitFor 折叠块修改必须 fail-closed');
-    if (!result.diagnostics.some((d) => d.code === 'EMEVD_DSL_WAITFOR_READONLY')) {
-      throw new Error(`期望 EMEVD_DSL_WAITFOR_READONLY: ${JSON.stringify(result.diagnostics)}`);
+    const result = compileEmevdDarkScript(requestFor(document, edited, registry), document, registry);
+    if (!result.ok) throw new Error(`结构删除编译失败: ${JSON.stringify(result.diagnostics)}`);
+    const deleted = result.plan!.operations.find((operation) => operation.kind === 'delete_instruction');
+    if (!deleted || deleted.kind !== 'delete_instruction' || deleted.bank !== 2000 || deleted.id !== 0) {
+      throw new Error(`期望受保护的 delete_instruction: ${JSON.stringify(result.plan!.operations)}`);
     }
   }
 
-  /* 6. 未知指令是注释行:改注释内容不产生写入也不诊断(注释不是指令). */
+  /* 5. WaitFor 折叠块内的已知 predicate 参数可以安全写回。 */
+  {
+    const edited = base.replace('IfPlayerHasItem(6, 2498)', 'IfPlayerHasItem(6, 9999)');
+    const result = compileEmevdDarkScript(requestFor(document, edited, registry), document, registry);
+    if (!result.ok) throw new Error(`WaitFor 折叠块参数编译失败: ${JSON.stringify(result.diagnostics)}`);
+    const write = result.plan!.operations.find((operation) => (
+      operation.kind === 'set_instruction_arg'
+      && operation.bank === 4
+      && operation.id === 10
+      && operation.argument === 'itemId'
+    ));
+    if (!write || write.kind !== 'set_instruction_arg' || write.before !== 2498 || write.after !== 9999) {
+      throw new Error(`WaitFor predicate 参数写入不正确: ${JSON.stringify(result.plan!.operations)}`);
+    }
+  }
+
+  /* 6. 未知指令的注释被改动时 fail-closed，不伪造对未知字节的写入。 */
   {
     const edited = base.replace('// unknown bank=9999 id=7', '// unknown bank=9999 id=7 (用户备注)');
-    const result = compileEmevdDarkScript(requestFor(document, edited), document, registry);
-    if (!result.ok) throw new Error('仅改注释必须仍是 no-op 成功');
-    if (result.plan!.operations.length !== 0) {
-      throw new Error(`仅改注释必须产生空操作集: ${JSON.stringify(result.plan!.operations)}`);
+    const result = compileEmevdDarkScript(requestFor(document, edited, registry), document, registry);
+    if (result.ok) throw new Error('未知指令注释改动必须 fail-closed');
+    if (!result.diagnostics.some((d) => d.code === 'DARKSCRIPT_LINE_UNDECODED')) {
+      throw new Error(`期望未知指令未解码诊断: ${JSON.stringify(result.diagnostics)}`);
     }
   }
 
   /* 7. fail-closed:指令名被替换. */
   {
     const edited = base.replace('InitializeEvent(0, 77770001, 0);', 'OtherEvent(0);');
-    const result = compileEmevdDarkScript(requestFor(document, edited), document, registry);
+    const result = compileEmevdDarkScript(requestFor(document, edited, registry), document, registry);
     if (result.ok) throw new Error('指令名替换必须 fail-closed');
-    if (!result.diagnostics.some((d) => d.code === 'EMEVD_DSL_INSTRUCTION_NAME_CHANGED')) {
-      throw new Error(`期望 EMEVD_DSL_INSTRUCTION_NAME_CHANGED: ${JSON.stringify(result.diagnostics)}`);
+    if (!result.diagnostics.some((d) => d.code === 'DARKSCRIPT_LINE_UNDECODED')) {
+      throw new Error(`期望未知指令未解码诊断: ${JSON.stringify(result.diagnostics)}`);
     }
   }
 
   /* 8. 单事件头错误不应锁整份:改事件 0 的 id, waitBlock 不动 → 只有 set_event_id. */
   {
     const edited = base.replace('$Event(0, Default, function() {', '$Event(7, Default, function() {');
-    const result = compileEmevdDarkScript(requestFor(document, edited), document, registry);
+    const result = compileEmevdDarkScript(requestFor(document, edited, registry), document, registry);
     if (!result.ok) throw new Error(`只改事件头应编译成功: ${JSON.stringify(result.diagnostics)}`);
     const ops = result.plan!.operations;
     if (ops.length !== 1 || ops[0]!.kind !== 'set_event_id') {
@@ -274,7 +287,7 @@ function main(): void {
     noOpPlan: true,
     eventHeaderWrites: true,
     instructionArgWrite: true,
-    failClosed: ['EMEVD_DSL_INSTRUCTION_COUNT_CHANGED', 'EMEVD_DSL_WAITFOR_READONLY', 'EMEVD_DSL_INSTRUCTION_NAME_CHANGED'],
+    failClosed: ['DARKSCRIPT_LINE_UNDECODED', 'EMEVD_DSL_SCOPE_EVENT_MUTATION_LEAK'],
     partialApply: true
   }, null, 2));
 }

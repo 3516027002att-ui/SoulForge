@@ -29,10 +29,7 @@ export interface StoredModelServiceConfig {
   /** 思考强度（采样/能力参数）。类型只写官方 effort 值；旧 vault 的遗留档由
       listConfigs 读路径兼容映射，写路径只写新值。 */
   thinkingLevel?: ModelThinkingLevel;
-  /**
-   * 该服务同时用作 embedding（POST /v1/embeddings，仅 openai-compatible 支持）。
-   * 配置后 workspace 语料可生成向量索引，检索走 RRF 混合（lexical + 向量）。
-   */
+  /** 旧 vault 的兼容字段；运行时不再读取，也不再向用户暴露。 */
   embeddingModel?: string;
 }
 
@@ -171,7 +168,6 @@ export class ModelServiceCredentialVault {
     maxTokens?: number;
     contextWindowTokens?: number;
     thinkingLevel?: StoredModelServiceConfig['thinkingLevel'];
-    embeddingModel?: string;
   }): Promise<StoredModelServiceConfig> {
     if (!this.isEncryptionAvailable()) {
       throw new Error('MODEL_SERVICE_SAFE_STORAGE_UNAVAILABLE');
@@ -195,9 +191,8 @@ export class ModelServiceCredentialVault {
       ...(input.maxTokens !== undefined ? { maxTokens: input.maxTokens } : {}),
       ...(input.contextWindowTokens !== undefined ? { contextWindowTokens: input.contextWindowTokens } : {}),
       ...(input.thinkingLevel !== undefined ? { thinkingLevel: input.thinkingLevel } : {}),
-      ...(input.embeddingModel !== undefined && input.embeddingModel.trim() !== ''
-        ? { embeddingModel: input.embeddingModel.trim() }
-        : {})
+      // embedding 不属于模型服务配置；由 SoulForge 内部管理。
+      ...(existing?.embeddingModel !== undefined ? { embeddingModel: existing.embeddingModel } : {})
     };
     if (input.apiKey !== undefined) {
       if (!input.apiKey) {

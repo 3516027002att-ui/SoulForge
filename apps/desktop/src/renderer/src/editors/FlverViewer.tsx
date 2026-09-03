@@ -10,7 +10,10 @@ import {
   mountFlverScene,
   type FlverSceneHandle,
   type FlverSceneMesh,
+  type FlverSceneMaterialTextures,
+  type FlverSceneDiffuseBlend,
   type FlverSemanticScene,
+  type FlverSceneBone,
   type FlverSceneTexture
 } from '../scene/threeSceneController.js';
 import { getRendererBridge } from '../runtime/rendererRuntime.js';
@@ -45,15 +48,30 @@ export interface FlverViewerProps {
     indicesBase64: string;
     indexSize?: number | undefined;
     uvsBase64?: string | undefined;
+    uvSetsBase64?: string[] | undefined;
     normalsBase64?: string | undefined;
+    vertexAlphaBase64?: string | undefined;
+    cullBackfaces?: boolean | undefined;
     boneWeightsBase64?: string | undefined;
     boneIndicesBase64?: string | undefined;
     skinningMode?: 'weighted' | 'rigid' | 'static' | undefined;
     boneIndexSpace?: 'flver-global' | 'none' | undefined;
-    renderMode?: 'surface' | 'projected-decal' | undefined;
+    skinningTransformMode?: 'absolute' | 'delta' | undefined;
+    renderMode?: 'surface' | 'projected-decal' | 'compatibility-projected' | undefined;
     /** Bridge 根据当前 mesh 的 material 解析出的 PNG data URI。 */
     texturePreviewToken?: string | undefined;
     textureColorSpace?: string | undefined;
+    textureAlphaMode?: 'opaque' | 'cutout' | undefined;
+    albedo2TextureName?: string | undefined;
+    albedo2TexturePreviewToken?: string | undefined;
+    albedo2TextureColorSpace?: string | undefined;
+    normal2TextureName?: string | undefined;
+    normal2TexturePreviewToken?: string | undefined;
+    normal2TextureColorSpace?: string | undefined;
+    diffuseBlend?: FlverSceneDiffuseBlend | undefined;
+    projectionTextureName?: string | null | undefined;
+    projectionTexturePreviewToken?: string | null | undefined;
+    projectionTextureColorSpace?: string | null | undefined;
     vertexCount: number;
   } | undefined;
   /**
@@ -66,14 +84,29 @@ export interface FlverViewerProps {
     indicesBase64: string;
     indexSize?: number | undefined;
     uvsBase64?: string | undefined;
+    uvSetsBase64?: string[] | undefined;
     normalsBase64?: string | undefined;
+    vertexAlphaBase64?: string | undefined;
+    cullBackfaces?: boolean | undefined;
     boneWeightsBase64?: string | undefined;
     boneIndicesBase64?: string | undefined;
     skinningMode?: 'weighted' | 'rigid' | 'static' | undefined;
     boneIndexSpace?: 'flver-global' | 'none' | undefined;
-    renderMode?: 'surface' | 'projected-decal' | undefined;
+    skinningTransformMode?: 'absolute' | 'delta' | undefined;
+    renderMode?: 'surface' | 'projected-decal' | 'compatibility-projected' | undefined;
     texturePreviewToken?: string | undefined;
     textureColorSpace?: string | undefined;
+    textureAlphaMode?: 'opaque' | 'cutout' | undefined;
+    albedo2TextureName?: string | undefined;
+    albedo2TexturePreviewToken?: string | undefined;
+    albedo2TextureColorSpace?: string | undefined;
+    normal2TextureName?: string | undefined;
+    normal2TexturePreviewToken?: string | undefined;
+    normal2TextureColorSpace?: string | undefined;
+    diffuseBlend?: FlverSceneDiffuseBlend | undefined;
+    projectionTextureName?: string | null | undefined;
+    projectionTexturePreviewToken?: string | null | undefined;
+    projectionTextureColorSpace?: string | null | undefined;
     vertexCount: number;
   }> | undefined;
   /** S17：外部骨骼层级（与 externalMeshData 同源），提供时跳过 readFlverSkeleton。 */
@@ -118,14 +151,29 @@ interface MeshData {
   indicesBase64: string;
   indexSize?: number | undefined;
   uvsBase64?: string | undefined;
+  uvSetsBase64?: string[] | undefined;
   normalsBase64?: string | undefined;
+  vertexAlphaBase64?: string | undefined;
+  cullBackfaces?: boolean | undefined;
   boneWeightsBase64?: string | undefined;
   boneIndicesBase64?: string | undefined;
   skinningMode?: 'weighted' | 'rigid' | 'static' | undefined;
   boneIndexSpace?: 'flver-global' | 'none' | undefined;
-  renderMode?: 'surface' | 'projected-decal' | undefined;
+  skinningTransformMode?: 'absolute' | 'delta' | undefined;
+  renderMode?: 'surface' | 'projected-decal' | 'compatibility-projected' | undefined;
   texturePreviewToken?: string | undefined;
   textureColorSpace?: string | undefined;
+  textureAlphaMode?: 'opaque' | 'cutout' | undefined;
+  albedo2TextureName?: string | undefined;
+  albedo2TexturePreviewToken?: string | undefined;
+  albedo2TextureColorSpace?: string | undefined;
+  normal2TextureName?: string | undefined;
+  normal2TexturePreviewToken?: string | undefined;
+  normal2TextureColorSpace?: string | undefined;
+  diffuseBlend?: FlverSceneDiffuseBlend | undefined;
+  projectionTextureName?: string | null | undefined;
+  projectionTexturePreviewToken?: string | null | undefined;
+  projectionTextureColorSpace?: string | null | undefined;
   vertexCount: number;
 }
 
@@ -276,7 +324,7 @@ export function FlverViewer(props: FlverViewerProps): ReactElement {
       try {
         const result = await bridge.readFlverMesh(props.sourceUri!, idx) as {
           ok: boolean;
-          data?: { positionsBase64?: string; indicesBase64?: string; indexSize?: number; uvsBase64?: string; normalsBase64?: string; boneWeightsBase64?: string; boneIndicesBase64?: string; skinningMode?: 'weighted' | 'rigid' | 'static'; boneIndexSpace?: 'flver-global' | 'none'; renderMode?: 'surface' | 'projected-decal'; texturePreviewToken?: string; textureColorSpace?: string; vertexCount?: number };
+          data?: { positionsBase64?: string; indicesBase64?: string; indexSize?: number; uvsBase64?: string; uvSetsBase64?: string[]; normalsBase64?: string; vertexAlphaBase64?: string; cullBackfaces?: boolean; boneWeightsBase64?: string; boneIndicesBase64?: string; skinningMode?: 'weighted' | 'rigid' | 'static'; boneIndexSpace?: 'flver-global' | 'none'; skinningTransformMode?: 'absolute' | 'delta'; renderMode?: 'surface' | 'projected-decal' | 'compatibility-projected'; texturePreviewToken?: string; textureColorSpace?: string; textureAlphaMode?: 'opaque' | 'cutout'; albedo2TextureName?: string; albedo2TexturePreviewToken?: string; albedo2TextureColorSpace?: string; normal2TextureName?: string; normal2TexturePreviewToken?: string; normal2TextureColorSpace?: string; diffuseBlend?: FlverSceneDiffuseBlend; projectionTextureName?: string | null; projectionTexturePreviewToken?: string | null; projectionTextureColorSpace?: string | null; vertexCount?: number };
           diagnostics?: Array<{ message: string }>;
         };
         if (result.ok && result.data?.positionsBase64) {
@@ -285,14 +333,29 @@ export function FlverViewer(props: FlverViewerProps): ReactElement {
             indicesBase64: result.data.indicesBase64 ?? '',
             indexSize: result.data.indexSize,
             ...(result.data.uvsBase64 ? { uvsBase64: result.data.uvsBase64 } : {}),
-            ...(result.data.normalsBase64 ? { normalsBase64: result.data.normalsBase64 } : {}),
-            ...(result.data.boneWeightsBase64 ? { boneWeightsBase64: result.data.boneWeightsBase64 } : {}),
+            ...(result.data.uvSetsBase64 ? { uvSetsBase64: result.data.uvSetsBase64 } : {}),
+             ...(result.data.normalsBase64 ? { normalsBase64: result.data.normalsBase64 } : {}),
+             ...(result.data.vertexAlphaBase64 ? { vertexAlphaBase64: result.data.vertexAlphaBase64 } : {}),
+             ...(result.data.cullBackfaces !== undefined ? { cullBackfaces: result.data.cullBackfaces } : {}),
+             ...(result.data.projectionTextureName !== undefined ? { projectionTextureName: result.data.projectionTextureName } : {}),
+             ...(result.data.projectionTexturePreviewToken !== undefined ? { projectionTexturePreviewToken: result.data.projectionTexturePreviewToken } : {}),
+             ...(result.data.projectionTextureColorSpace !== undefined ? { projectionTextureColorSpace: result.data.projectionTextureColorSpace } : {}),
+             ...(result.data.boneWeightsBase64 ? { boneWeightsBase64: result.data.boneWeightsBase64 } : {}),
             ...(result.data.boneIndicesBase64 ? { boneIndicesBase64: result.data.boneIndicesBase64 } : {}),
             skinningMode: result.data.skinningMode,
             boneIndexSpace: result.data.boneIndexSpace,
+            skinningTransformMode: result.data.skinningTransformMode,
             ...(result.data.renderMode ? { renderMode: result.data.renderMode } : {}),
             ...(result.data.texturePreviewToken ? { texturePreviewToken: result.data.texturePreviewToken } : {}),
             ...(result.data.textureColorSpace ? { textureColorSpace: result.data.textureColorSpace } : {}),
+            ...(result.data.textureAlphaMode ? { textureAlphaMode: result.data.textureAlphaMode } : {}),
+            ...(result.data.albedo2TextureName ? { albedo2TextureName: result.data.albedo2TextureName } : {}),
+            ...(result.data.albedo2TexturePreviewToken ? { albedo2TexturePreviewToken: result.data.albedo2TexturePreviewToken } : {}),
+            ...(result.data.albedo2TextureColorSpace ? { albedo2TextureColorSpace: result.data.albedo2TextureColorSpace } : {}),
+            ...(result.data.normal2TextureName ? { normal2TextureName: result.data.normal2TextureName } : {}),
+            ...(result.data.normal2TexturePreviewToken ? { normal2TexturePreviewToken: result.data.normal2TexturePreviewToken } : {}),
+            ...(result.data.normal2TextureColorSpace ? { normal2TextureColorSpace: result.data.normal2TextureColorSpace } : {}),
+            ...(result.data.diffuseBlend ? { diffuseBlend: result.data.diffuseBlend } : {}),
             vertexCount: result.data.vertexCount ?? 0
           }]);
         } else {
@@ -465,16 +528,45 @@ function buildSemanticScene(input: {
       boneIndexSpace: meshData.boneIndexSpace ?? (
         meshData.boneIndicesBase64 && meshData.boneWeightsBase64 ? 'flver-global' : 'none'
       ),
+      ...(meshData.skinningTransformMode
+        ? { skinningTransformMode: meshData.skinningTransformMode }
+        : {}),
       previewRenderMode: meshData.renderMode,
+      cullBackfaces: meshData.cullBackfaces,
+      materialAlphaMode: meshData.textureAlphaMode,
       wireframeOverlay: false
     };
-    if (meshData.uvsBase64) {
+    if (meshData.uvSetsBase64 && meshData.uvSetsBase64.length > 0) {
+      mesh.uvSets = meshData.uvSetsBase64.map((base64, uvIndex) => {
+        const values = decodeFloat32Array(base64, `mesh[${index}].uv${uvIndex}`);
+        assertVertexAttributeLength(values.length, vertexCount, 2, `mesh[${index}].uv${uvIndex}`);
+        return values;
+      });
+      const [firstUvSet] = mesh.uvSets;
+      if (firstUvSet) mesh.uvs = firstUvSet;
+    } else if (meshData.uvsBase64) {
       mesh.uvs = decodeFloat32Array(meshData.uvsBase64, `mesh[${index}].uvs`);
       assertVertexAttributeLength(mesh.uvs.length, vertexCount, 2, `mesh[${index}].uvs`);
     }
     if (meshData.normalsBase64) {
       mesh.normals = decodeFloat32Array(meshData.normalsBase64, `mesh[${index}].normals`);
       assertVertexAttributeLength(mesh.normals.length, vertexCount, 3, `mesh[${index}].normals`);
+    }
+    if (meshData.vertexAlphaBase64) {
+      mesh.vertexAlpha = decodeFloat32Array(meshData.vertexAlphaBase64, `mesh[${index}].vertexAlpha`);
+      assertVertexAttributeLength(mesh.vertexAlpha.length, vertexCount, 1, `mesh[${index}].vertexAlpha`);
+      assertVertexAlpha(mesh.vertexAlpha, `mesh[${index}].vertexAlpha`);
+    }
+    if (meshData.renderMode === 'compatibility-projected') {
+      if (typeof meshData.projectionTexturePreviewToken !== 'string') {
+        throw new Error(`FLVER_COMPATIBILITY_PROJECTION_SOURCE_MISSING: mesh[${index}]`);
+      }
+      mesh.projectionTexture = {
+        kind: 'image-uri',
+        uri: meshData.projectionTexturePreviewToken,
+        colorSpace: normalizeTextureColorSpace(meshData.projectionTextureColorSpace ?? undefined),
+        ...(meshData.projectionTextureName ? { label: meshData.projectionTextureName } : {})
+      };
     }
     if (meshData.indicesBase64) {
       mesh.indices = decodeMeshIndices(meshData.indicesBase64, mesh.indexSize, `mesh[${index}].indices`);
@@ -498,6 +590,23 @@ function buildSemanticScene(input: {
         colorSpace: normalizeTextureColorSpace(meshData.textureColorSpace)
       };
     }
+    if (meshData.albedo2TexturePreviewToken) {
+      mesh.albedo2Texture = {
+        kind: 'image-uri',
+        uri: meshData.albedo2TexturePreviewToken,
+        colorSpace: normalizeTextureColorSpace(meshData.albedo2TextureColorSpace),
+        ...(meshData.albedo2TextureName ? { label: meshData.albedo2TextureName } : {})
+      };
+    }
+    if (meshData.normal2TexturePreviewToken) {
+      mesh.normal2Texture = {
+        kind: 'image-uri',
+        uri: meshData.normal2TexturePreviewToken,
+        colorSpace: normalizeTextureColorSpace(meshData.normal2TextureColorSpace),
+        ...(meshData.normal2TextureName ? { label: meshData.normal2TextureName } : {})
+      };
+    }
+    if (meshData.diffuseBlend) mesh.diffuseBlend = meshData.diffuseBlend;
     meshes.push(mesh);
   }
   const bounds = computeSceneBounds(input.boundingBox, meshes, input.skeleton.length > 0 ? 15 : 100);
@@ -530,29 +639,42 @@ export function buildBundleSemanticScene(
   texture: FlverSceneTexture | null = null
 ): FlverSemanticScene {
   const meshes: FlverSceneMesh[] = [];
+  const toSceneBones = (
+    modelId: string,
+    sourceBones: readonly FlverPreviewModel['bones'][number][]
+  ): FlverSceneBone[] => sourceBones.map((bone) => ({
+    id: `${modelId}:bone:${bone.index}`,
+    index: bone.index,
+    name: bone.name,
+    parentIndex: bone.parentIndex,
+    childIndex: bone.childIndex,
+    nextSiblingIndex: bone.nextSiblingIndex,
+    hierarchyId: bone.hierarchyId,
+    translation: bone.translation,
+    rotation: bone.rotation,
+    scale: bone.scale,
+    rotationOrder: bone.rotationOrder as 'YZX' | 'XYZ' | 'XZY'
+  }));
   const skeletons = bundle.models
     .filter((model) => model.bones.length > 0)
     .map((model) => ({
       id: model.modelId,
-      bones: model.bones.map((bone) => ({
-        id: `${model.modelId}:bone:${bone.index}`,
-        index: bone.index,
-        name: bone.name,
-        parentIndex: bone.parentIndex,
-        childIndex: bone.childIndex,
-        nextSiblingIndex: bone.nextSiblingIndex,
-        hierarchyId: bone.hierarchyId,
-        translation: bone.translation,
-        rotation: bone.rotation,
-        scale: bone.scale,
-        rotationOrder: bone.rotationOrder as 'YZX' | 'XYZ' | 'XZY'
-      }))
+      bones: toSceneBones(model.modelId, model.bones)
     }));
+  const skeletonBindings = bundle.models.flatMap((model) => {
+    if (!model.bindingBones || !model.bindingBoneMap) return [];
+    return [{
+      id: model.modelId,
+      leaderSkeletonId: bundle.leaderModelId,
+      bones: toSceneBones(model.modelId, model.bindingBones),
+      sourceToLeader: [...model.bindingBoneMap]
+    }];
+  });
 
   for (const model of bundle.models) {
-    const materialTextures = new Map<number, FlverSceneTexture>();
+    const materialTextures = new Map<number, FlverSceneMaterialTextures>();
     for (const texturePreview of model.texturePreviews ?? []) {
-      materialTextures.set(texturePreview.materialIndex, toSceneTexture(texturePreview));
+      materialTextures.set(texturePreview.materialIndex, toSceneMaterialTextures(texturePreview));
     }
     // `texturePreviewToken` is the legacy first-texture projection. It is a
     // valid compatibility fallback only when this model has no per-material
@@ -566,14 +688,27 @@ export function buildBundleSemanticScene(
           colorSpace: normalizeTextureColorSpace(model.textureColorSpace)
         }
       : null);
+    const legacyMaterialTextures: FlverSceneMaterialTextures | null = legacyTexture
+      ? { albedo: legacyTexture }
+      : null;
     const hasMaterialTextures = materialTextures.size > 0;
     for (const meshData of model.meshes) {
-      const skeletonId = meshData.skeletonId ?? model.modelId;
+      const usesFollowerBinding = model.bindingBones !== undefined && model.bindingBoneMap !== undefined;
+      const skeletonId = usesFollowerBinding ? model.modelId : (meshData.skeletonId ?? model.modelId);
       const targetSkeleton = bundle.models.find((candidate) => candidate.modelId === skeletonId);
-      const meshTexture = meshData.materialIndex !== undefined && meshData.materialIndex >= 0
-        ? materialTextures.get(meshData.materialIndex) ?? (hasMaterialTextures ? null : legacyTexture)
-        : (hasMaterialTextures ? null : legacyTexture);
-      const mesh = decodeBundleMesh(model, meshData, meshTexture, targetSkeleton?.bones.length ?? model.bones.length);
+      const targetSkeletonBoneCount = usesFollowerBinding
+        ? Math.max(-1, ...model.bindingBones!.map((bone) => bone.index)) + 1
+        : targetSkeleton?.bones.length ?? model.bones.length;
+      const selectedMeshTextures = meshData.materialIndex !== undefined && meshData.materialIndex >= 0
+        ? materialTextures.get(meshData.materialIndex) ?? (hasMaterialTextures ? null : legacyMaterialTextures)
+        : (hasMaterialTextures ? null : legacyMaterialTextures);
+      const mesh = decodeBundleMesh(
+        model,
+        meshData,
+        selectedMeshTextures,
+        targetSkeletonBoneCount,
+        usesFollowerBinding
+      );
       meshes.push(mesh);
     }
   }
@@ -583,6 +718,7 @@ export function buildBundleSemanticScene(
   return {
     meshes,
     ...(skeletons.length > 0 ? { skeletons } : {}),
+    ...(skeletonBindings.length > 0 ? { skeletonBindings } : {}),
     ...(meshes.length === 0 && skeletons.length > 0 ? { showSkeletonMarkers: true } : {}),
     bounds: computeSceneBounds(boundingBox, meshes, skeletons.length > 0 ? 15 : 100)
   };
@@ -591,8 +727,9 @@ export function buildBundleSemanticScene(
 function decodeBundleMesh(
   model: FlverPreviewModel,
   meshData: FlverPreviewMesh,
-  texture: FlverSceneTexture | null,
-  targetSkeletonBoneCount: number
+  materialTextures: FlverSceneMaterialTextures | null,
+  targetSkeletonBoneCount: number,
+  usesFollowerBinding: boolean
 ): FlverSceneMesh {
   const label = `${model.entry.name}:mesh[${meshData.meshIndex}]`;
   const positions = decodeFloat32Array(meshData.positionsBase64, `${label}.positions`);
@@ -608,8 +745,13 @@ function decodeBundleMesh(
     indexSize: meshData.indexSize,
     skinningMode: meshData.skinningMode,
     boneIndexSpace: meshData.boneIndexSpace,
+    ...(meshData.skinningTransformMode
+      ? { skinningTransformMode: meshData.skinningTransformMode }
+      : {}),
     previewRenderMode: meshData.renderMode,
-    skeletonId: meshData.skeletonId ?? model.modelId,
+    cullBackfaces: meshData.cullBackfaces,
+    materialAlphaMode: materialTextures?.alphaMode,
+    skeletonId: usesFollowerBinding ? model.modelId : (meshData.skeletonId ?? model.modelId),
     vertexCount,
     wireframeOverlay: false
   };
@@ -617,7 +759,15 @@ function decodeBundleMesh(
     mesh.indices = decodeMeshIndices(meshData.indicesBase64, meshData.indexSize, `${label}.indices`);
     assertTriangleIndices(mesh.indices, vertexCount, `${label}.indices`);
   }
-  if (meshData.uvsBase64) {
+  if (meshData.uvSetsBase64 && meshData.uvSetsBase64.length > 0) {
+    mesh.uvSets = meshData.uvSetsBase64.map((base64, uvIndex) => {
+      const values = decodeFloat32Array(base64, `${label}.uv${uvIndex}`);
+      assertVertexAttributeLength(values.length, vertexCount, 2, `${label}.uv${uvIndex}`);
+      return values;
+    });
+    const [firstUvSet] = mesh.uvSets;
+    if (firstUvSet) mesh.uvs = firstUvSet;
+  } else if (meshData.uvsBase64) {
     mesh.uvs = decodeFloat32Array(meshData.uvsBase64, `${label}.uvs`);
     assertVertexAttributeLength(mesh.uvs.length, vertexCount, 2, `${label}.uvs`);
   }
@@ -625,21 +775,52 @@ function decodeBundleMesh(
     mesh.normals = decodeFloat32Array(meshData.normalsBase64, `${label}.normals`);
     assertVertexAttributeLength(mesh.normals.length, vertexCount, 3, `${label}.normals`);
   }
+  if (meshData.vertexAlphaBase64) {
+    mesh.vertexAlpha = decodeFloat32Array(meshData.vertexAlphaBase64, `${label}.vertexAlpha`);
+    assertVertexAttributeLength(mesh.vertexAlpha.length, vertexCount, 1, `${label}.vertexAlpha`);
+    assertVertexAlpha(mesh.vertexAlpha, `${label}.vertexAlpha`);
+  }
+  if (meshData.renderMode === 'compatibility-projected') {
+    if (typeof meshData.projectionTexturePreviewToken !== 'string') {
+      throw new Error(`FLVER_COMPATIBILITY_PROJECTION_SOURCE_MISSING: ${label}`);
+    }
+    mesh.projectionTexture = {
+      kind: 'image-uri',
+      uri: meshData.projectionTexturePreviewToken,
+      colorSpace: normalizeTextureColorSpace(meshData.projectionTextureColorSpace ?? undefined),
+      ...(meshData.projectionTextureName ? { label: meshData.projectionTextureName } : {})
+    };
+  }
   const hasSkinPayload = Boolean(meshData.boneIndicesBase64 && meshData.boneWeightsBase64);
   if (meshData.skinningMode === 'static') {
     if (hasSkinPayload) throw new Error(`FLVER_STATIC_MESH_HAS_SKIN_PAYLOAD: ${label}`);
   } else {
-    if (!meshData.boneIndicesBase64 || !meshData.boneWeightsBase64) {
+    const skinIndicesBase64 = usesFollowerBinding
+      ? meshData.sourceBoneIndicesBase64
+      : meshData.boneIndicesBase64;
+    if (usesFollowerBinding && !skinIndicesBase64) {
+      throw new Error(`FLVER_FOLLOWER_SOURCE_INDICES_MISSING: ${label}`);
+    }
+    if (!skinIndicesBase64 || !meshData.boneWeightsBase64) {
       throw new Error(`FLVER_SKIN_BINDING_INCOMPLETE: ${label}`);
     }
     if (meshData.boneIndexSpace !== 'flver-global') {
       throw new Error(`FLVER_SKIN_INDEX_SPACE_UNSUPPORTED: ${label}`);
     }
-    mesh.skinIndices = decodeSkinIndices(meshData.boneIndicesBase64, vertexCount);
+    mesh.skinIndices = decodeSkinIndices(skinIndicesBase64, vertexCount);
     mesh.skinWeights = decodeSkinWeights(meshData.boneWeightsBase64, vertexCount);
     assertSkinIndices(mesh.skinIndices, mesh.skinWeights, targetSkeletonBoneCount, label);
   }
-  if (texture) mesh.texture = texture;
+  if (materialTextures) {
+    mesh.texture = materialTextures.albedo;
+    mesh.materialAlphaMode = materialTextures.alphaMode;
+    if (materialTextures.albedo2) mesh.albedo2Texture = materialTextures.albedo2;
+    if (materialTextures.normal) mesh.normalTexture = materialTextures.normal;
+    if (materialTextures.normal2) mesh.normal2Texture = materialTextures.normal2;
+    if (materialTextures.blendMask) mesh.blendMaskTexture = materialTextures.blendMask;
+    if (materialTextures.diffuseBlend) mesh.diffuseBlend = materialTextures.diffuseBlend;
+    if (materialTextures.metalness) mesh.metalnessTexture = materialTextures.metalness;
+  }
   return mesh;
 }
 
@@ -651,8 +832,58 @@ function toSceneTexture(texture: FlverPreviewTexture): FlverSceneTexture {
   return {
     kind: 'image-uri',
     uri: texture.texturePreviewToken,
-    colorSpace: normalizeTextureColorSpace(texture.colorSpace)
+    colorSpace: normalizeTextureColorSpace(texture.colorSpace),
+    label: texture.textureName
   };
+}
+
+function toSceneTextureLayer(texture: {
+  textureName: string;
+  texturePreviewToken: string;
+  colorSpace: string;
+}): FlverSceneTexture {
+  return {
+    kind: 'image-uri',
+    uri: texture.texturePreviewToken,
+    colorSpace: normalizeTextureColorSpace(texture.colorSpace),
+    label: texture.textureName
+  };
+}
+
+function toSceneMaterialTextures(texture: FlverPreviewTexture): FlverSceneMaterialTextures {
+  const result: FlverSceneMaterialTextures = {
+    albedo: toSceneTexture(texture),
+    ...(texture.alphaMode ? { alphaMode: texture.alphaMode } : {})
+  };
+  if (texture.albedo2) result.albedo2 = toSceneTextureLayer(texture.albedo2);
+  if (texture.normal2) result.normal2 = toSceneTextureLayer(texture.normal2);
+  if (texture.diffuseBlend) result.diffuseBlend = texture.diffuseBlend;
+  if (texture.normalTexturePreviewToken) {
+    result.normal = {
+      kind: 'image-uri',
+      uri: texture.normalTexturePreviewToken,
+      colorSpace: normalizeTextureColorSpace(texture.normalTextureColorSpace)
+    };
+  }
+  if (texture.metalnessTexturePreviewToken) {
+    result.metalness = {
+      kind: 'image-uri',
+      uri: texture.metalnessTexturePreviewToken,
+      colorSpace: normalizeTextureColorSpace(texture.metalnessTextureColorSpace)
+    };
+  }
+  // Mask1 is a native colour-blend input, not generic surface opacity. It is
+  // only projected when the Bridge also supplies a source-mapped diffuse
+  // blend contract; otherwise it remains evidence-only.
+  if (texture.mask1TexturePreviewToken && texture.diffuseBlend) {
+    result.blendMask = {
+      kind: 'image-uri',
+      uri: texture.mask1TexturePreviewToken,
+      colorSpace: normalizeTextureColorSpace(texture.mask1TextureColorSpace),
+      ...(texture.mask1TextureName ? { label: texture.mask1TextureName } : {})
+    };
+  }
+  return result;
 }
 
 /** 把外部/IPC 返回的单个网格的 DTO 规整成内部 MeshData（问题4-A 参数复用）。 */
@@ -661,14 +892,29 @@ function toMeshData(input: {
   indicesBase64: string;
   indexSize?: number | undefined;
   uvsBase64?: string | undefined;
+  uvSetsBase64?: string[] | undefined;
   normalsBase64?: string | undefined;
+  vertexAlphaBase64?: string | undefined;
+  cullBackfaces?: boolean | undefined;
   boneWeightsBase64?: string | undefined;
   boneIndicesBase64?: string | undefined;
   skinningMode?: 'weighted' | 'rigid' | 'static' | undefined;
   boneIndexSpace?: 'flver-global' | 'none' | undefined;
-  renderMode?: 'surface' | 'projected-decal' | undefined;
+  skinningTransformMode?: 'absolute' | 'delta' | undefined;
+  renderMode?: 'surface' | 'projected-decal' | 'compatibility-projected' | undefined;
   texturePreviewToken?: string | undefined;
   textureColorSpace?: string | undefined;
+  textureAlphaMode?: 'opaque' | 'cutout' | undefined;
+  albedo2TextureName?: string | undefined;
+  albedo2TexturePreviewToken?: string | undefined;
+  albedo2TextureColorSpace?: string | undefined;
+  normal2TextureName?: string | undefined;
+  normal2TexturePreviewToken?: string | undefined;
+  normal2TextureColorSpace?: string | undefined;
+  diffuseBlend?: FlverSceneDiffuseBlend | undefined;
+  projectionTextureName?: string | null | undefined;
+  projectionTexturePreviewToken?: string | null | undefined;
+  projectionTextureColorSpace?: string | null | undefined;
   vertexCount: number;
 }): MeshData {
   return {
@@ -676,14 +922,29 @@ function toMeshData(input: {
     indicesBase64: input.indicesBase64,
     indexSize: input.indexSize ?? undefined,
     uvsBase64: input.uvsBase64 ?? undefined,
+    uvSetsBase64: input.uvSetsBase64 ?? undefined,
     normalsBase64: input.normalsBase64 ?? undefined,
+    vertexAlphaBase64: input.vertexAlphaBase64 ?? undefined,
+    cullBackfaces: input.cullBackfaces,
+    projectionTextureName: input.projectionTextureName ?? undefined,
+    projectionTexturePreviewToken: input.projectionTexturePreviewToken ?? undefined,
+    projectionTextureColorSpace: input.projectionTextureColorSpace ?? undefined,
     boneWeightsBase64: input.boneWeightsBase64 ?? undefined,
     boneIndicesBase64: input.boneIndicesBase64 ?? undefined,
     skinningMode: input.skinningMode,
     boneIndexSpace: input.boneIndexSpace,
+    skinningTransformMode: input.skinningTransformMode,
     renderMode: input.renderMode,
     texturePreviewToken: input.texturePreviewToken ?? undefined,
     textureColorSpace: input.textureColorSpace ?? undefined,
+    textureAlphaMode: input.textureAlphaMode ?? undefined,
+    albedo2TextureName: input.albedo2TextureName ?? undefined,
+    albedo2TexturePreviewToken: input.albedo2TexturePreviewToken ?? undefined,
+    albedo2TextureColorSpace: input.albedo2TextureColorSpace ?? undefined,
+    normal2TextureName: input.normal2TextureName ?? undefined,
+    normal2TexturePreviewToken: input.normal2TexturePreviewToken ?? undefined,
+    normal2TextureColorSpace: input.normal2TextureColorSpace ?? undefined,
+    diffuseBlend: input.diffuseBlend ?? undefined,
     vertexCount: input.vertexCount
   };
 }
@@ -768,6 +1029,14 @@ function assertVertexAttributeLength(
   const expected = vertexCount * itemSize;
   if (actualComponents !== expected) {
     throw new Error(`FLVER_ATTRIBUTE_LENGTH_MISMATCH: ${label} expected=${expected} actual=${actualComponents}`);
+  }
+}
+
+function assertVertexAlpha(values: Float32Array, label: string): void {
+  for (const value of values) {
+    if (value < 0 || value > 1) {
+      throw new Error(`FLVER_VERTEX_ALPHA_INVALID: ${label} value=${value}`);
+    }
   }
 }
 

@@ -589,6 +589,15 @@ CREATE INDEX IF NOT EXISTS idx_rag_embeddings_workspace_model
 CREATE INDEX IF NOT EXISTS idx_rag_chunks_workspace_source_hash
   ON rag_chunks(workspace_id, source_uri, source_hash);
 `
+  },
+  {
+    id: 11,
+    name: 'v0_5_rag_embedding_content_hash',
+    sql: 'PRAGMA foreign_keys = ON;',
+    addColumns: [
+      // 旧 embedding 行没有内容指纹，只能被内部管理器视为过期并重建。
+      { table: 'rag_embeddings', column: 'content_hash', definition: 'TEXT' }
+    ]
   }
 ];
 

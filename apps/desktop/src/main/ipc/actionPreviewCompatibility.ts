@@ -2,11 +2,27 @@ export const C0000_COMPATIBILITY_PART_SLOTS = ['bd', 'am', 'lg', 'hd', 'fc'] as 
 export const C0000_COMPATIBILITY_CANDIDATE_LIMIT_PER_SLOT = 12;
 
 /**
- * c0000 的脸/头发不是 hd 部件，而是独立的 FC_M_0200 组件。它是原版
- * Wolf 的默认 face/hair 资源；不能按文件名字典序把 fc_m_0000（披风）
- * 或其它变身头部当成 c0000 的头发。
+ * c0000 的兼容预览不能把「第一个能解析的 partsbnd」当成身体。
+ *
+ * 这些身份来自两个独立的只读来源：
+ * 1. DSAnimStudio 的 SDT NewChrAsm 配置：Head/Body/Arms/Legs 使用
+ *    EquipParamProtector 行 100000/101000/102000/103000，Face 使用
+ *    直接装备 FC_M_0200；
+ * 2. 当前原版 EquipParamProtector 的 native read：上述四行的
+ *    equipModelId / equipModelGender / headEquip..legEquip 分别解析为
+ *    200/9040/9000/9000、男性模型，且槽位位标记各自唯一。
+ *
+ * 因此主资源名是 `hd_m_9510`、`bd_m_9040`、`am_m_9000`、
+ * `lg_m_9000` 和 `fc_m_0200`。这里的优先级不是猜测，也不是按目录
+ * 顺序推导；它只把成熟工具已经证明的装备身份放到有限候选队列最前面。
+ * 找不到这些身份时仍允许后续候选参与只读诊断，但调用方不得把邻近
+ * 候选宣称为当前装备。
  */
 const C0000_COMPATIBILITY_PREFERRED_NAMES: Partial<Record<C0000CompatibilityPartSlot, readonly string[]>> = {
+  bd: ['bd_m_9040.partsbnd.dcx'],
+  am: ['am_m_9000.partsbnd.dcx'],
+  lg: ['lg_m_9000.partsbnd.dcx'],
+  hd: ['hd_m_9510.partsbnd.dcx'],
   fc: ['fc_m_0200.partsbnd.dcx']
 };
 

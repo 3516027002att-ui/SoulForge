@@ -142,8 +142,13 @@ export interface FlverMeshData {
   indicesBase64: string | null;
   uvsBase64: string | null;
   normalsBase64: string | null;
+  vertexAlphaBase64: string | null;
   boneWeightsBase64: string | null;
   boneIndicesBase64: string | null;
+  /** Native FLVER mesh.Dynamic projection used by the renderer skinning path. */
+  skinningTransformMode?: 'absolute' | 'delta' | undefined;
+  /** Read-only character assembly source indices retained for follower skeleton binding. */
+  sourceBoneIndicesBase64?: string | undefined;
   textureStatus?: 'ready' | 'missing' | undefined;
   textureMaterialName?: string | null | undefined;
   textureName?: string | null | undefined;

@@ -23,7 +23,6 @@ interface ModelServiceDto {
   maxTokens?: number;
   contextWindowTokens?: number;
   thinkingLevel?: ModelThinkingLevel;
-  embeddingModel?: string;
 }
 
 /** 回环地址判据。地址串和已保存服务共用同一份，不许各写一遍正则。 */
@@ -82,7 +81,6 @@ interface FormSnapshot {
   temperature: string;
   topP: string;
   topK: string;
-  embeddingModel: string;
 }
 
 /** 自动保存防抖间隔（输入停止后 400–600ms 再写，避免每个按键打 IPC）。 */
@@ -125,8 +123,6 @@ export function ModelServiceSettingsPanel({ onCancel }: ModelServiceSettingsPane
   const [temperature, setTemperature] = useState('');
   const [topP, setTopP] = useState('');
   const [topK, setTopK] = useState('');
-  const [embeddingModel, setEmbeddingModel] = useState('');
-  const [embeddingBusy, setEmbeddingBusy] = useState(false);
 
   // 模型列表（GET /v1/models）。
   const [modelOptions, setModelOptions] = useState<string[]>([]);
@@ -148,8 +144,7 @@ export function ModelServiceSettingsPanel({ onCancel }: ModelServiceSettingsPane
     maxTokens: '',
     temperature: '',
     topP: '',
-    topK: '',
-    embeddingModel: ''
+    topK: ''
   });
   useEffect(() => {
     formRef.current = {
@@ -163,8 +158,7 @@ export function ModelServiceSettingsPanel({ onCancel }: ModelServiceSettingsPane
       maxTokens,
       temperature,
       topP,
-      topK,
-      embeddingModel
+      topK
     };
   });
 
@@ -245,8 +239,7 @@ export function ModelServiceSettingsPanel({ onCancel }: ModelServiceSettingsPane
       ...(parsedTopK !== undefined ? { topK: parsedTopK } : {}),
       ...(parsedMaxTokens !== undefined ? { maxTokens: parsedMaxTokens } : {}),
       ...(parsedContextWindow !== undefined ? { contextWindowTokens: parsedContextWindow } : {}),
-      ...(values.thinkingLevel !== 'off' ? { thinkingLevel: values.thinkingLevel } : {}),
-      ...(values.embeddingModel.trim() !== '' ? { embeddingModel: values.embeddingModel.trim() } : {})
+      ...(values.thinkingLevel !== 'off' ? { thinkingLevel: values.thinkingLevel } : {})
     };
   }
 
@@ -319,7 +312,6 @@ export function ModelServiceSettingsPanel({ onCancel }: ModelServiceSettingsPane
     setTemperature('');
     setTopP('');
     setTopK('');
-    setEmbeddingModel('');
     setModelOptions([]);
     setStatus('表单已重置。');
     void refresh().catch((error: unknown) => {
@@ -391,26 +383,22 @@ export function ModelServiceSettingsPanel({ onCancel }: ModelServiceSettingsPane
     setStatus('已删除模型服务配置');
   }
 
-  async function embedCorpus(row: ModelServiceDto): Promise<void> {
-    if (!bridge) {
-      setStatus(describeBridgeAbsence('生成向量索引'));
-      return;
-    }
-    setEmbeddingBusy(true);
-    try {
-      const result = await bridge.embedWorkspaceRag({ configId: row.id });
-      if (result.ok) {
-        setStatus(
-          `向量索引完成：${result.embedded} 个块（失败 ${result.failed}），模型 ${result.model}，维度 ${result.dim}。`
-        );
-      } else {
-        setStatus(`生成向量索引失败：${result.error.message}`);
-      }
-    } catch (error) {
-      setStatus(error instanceof Error ? error.message : '生成向量索引失败');
-    } finally {
-      setEmbeddingBusy(false);
-    }
+  function editRow(row: ModelServiceDto): void {
+    // API 密钥永不从 main 回传；编辑已有服务时保留原凭据，空密钥不会覆盖它。
+    savedIdRef.current = row.id;
+    setDisplayName(row.displayName);
+    setProtocol(row.protocol);
+    setBaseUrl(row.baseUrl);
+    setModel(row.model);
+    setApiKey('');
+    setThinkingLevel(row.thinkingLevel ?? 'off');
+    setContextWindowTokens(row.contextWindowTokens === undefined ? '' : String(row.contextWindowTokens));
+    setMaxTokens(row.maxTokens === undefined ? '' : String(row.maxTokens));
+    setTemperature(row.temperature === undefined ? '' : String(row.temperature));
+    setTopP(row.topP === undefined ? '' : String(row.topP));
+    setTopK(row.topK === undefined ? '' : String(row.topK));
+    setModelOptions([]);
+    setStatus(`正在编辑模型服务：${row.displayName}`);
   }
 
   return (
@@ -637,20 +625,9 @@ export function ModelServiceSettingsPanel({ onCancel }: ModelServiceSettingsPane
               />
             </label>
             <p className="muted">topK 仅 Anthropic 协议生效（OpenAI 兼容协议无此参数）。</p>
-            <label>
-              Embedding 模型
-              <input
-                value={embeddingModel}
-                onChange={(e) => {
-                  setEmbeddingModel(e.target.value);
-                  scheduleAutoSave();
-                }}
-                placeholder="不填则不启用语义检索"
-              />
-            </label>
             <p className="muted">
-              仅 OpenAI 兼容协议（Chat Completions / Responses）支持（Anthropic 无 embedding API）。配置后可为工作区
-              语料生成向量索引，检索自动升级为「词法 + 向量」RRF 混合。
+              Embedding 由 SoulForge 内部自动管理：工作区分析完成后后台增量生成向量，
+              用户无需选择模型、配置 endpoint 或手工生成索引；内置模型暂不可用时自动保留词法检索。
             </p>
           </div>
         </details>
@@ -683,19 +660,7 @@ export function ModelServiceSettingsPanel({ onCancel }: ModelServiceSettingsPane
                 </>
               );
             })()}
-            {row.embeddingModel && (
-              <>
-                {' · '}
-                <span className="muted">embedding: {row.embeddingModel}</span>
-                <button
-                  type="button"
-                  disabled={embeddingBusy || !row.hasCredential}
-                  onClick={() => void embedCorpus(row)}
-                >
-                  {embeddingBusy ? '生成中…' : '生成向量索引'}
-                </button>
-              </>
-            )}
+            <button type="button" onClick={() => editRow(row)}>编辑</button>
             <button type="button" onClick={() => void remove(row.id)}>删除</button>
           </li>
         ))}

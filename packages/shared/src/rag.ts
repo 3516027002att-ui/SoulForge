@@ -1,4 +1,4 @@
-import type { ReferenceConfidence, ReferenceEdge, ResourceKind } from './types.js';
+import type { Diagnostic, ReferenceConfidence, ReferenceEdge, ResourceKind } from './types.js';
 
 /**
  * Retrievable evidence unit for workspace RAG.
@@ -54,6 +54,9 @@ export interface RagCorpus {
   chunks: RagChunk[];
   references: ReferenceEdge[];
   stats: RagCorpusStats;
+  /** A file-only/light-scan corpus is not a usable semantic RAG corpus. */
+  availability: 'available' | 'unavailable';
+  diagnostics: Diagnostic[];
 }
 
 export interface RagHit {
@@ -70,6 +73,9 @@ export interface RagRetrieveOk {
   ok: true;
   query: string;
   hits: RagHit[];
+  /** 向量是可选增益；没有向量时必须明确标记纯 lexical 路径。 */
+  retrievalMode?: 'lexical' | 'hybrid';
+  diagnostics?: Diagnostic[];
   stats: {
     scanned: number;
     matched: number;
@@ -80,7 +86,7 @@ export interface RagRetrieveOk {
 
 export interface RagRetrieveFailure {
   ok: false;
-  code: 'insufficient_evidence' | 'INVALID_INPUT' | 'WORKSPACE_REQUIRED';
+  code: 'insufficient_evidence' | 'RAG_UNAVAILABLE' | 'INVALID_INPUT' | 'WORKSPACE_REQUIRED';
   message: string;
 }
 

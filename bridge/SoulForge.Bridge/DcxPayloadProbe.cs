@@ -25,7 +25,8 @@ static class DcxPayloadProbe
         string sourcePath,
         byte[] sample,
         long fileLength,
-        string? oodleRuntimeRoot = null)
+        string? oodleRuntimeRoot = null,
+        bool includeDecompressionPreview = true)
     {
         if (!StartsWith(sample, "DCX\0")) return null;
 
@@ -124,17 +125,24 @@ static class DcxPayloadProbe
             sourceUri,
             new { compressionFormat, dcxType, payloadOffset, compressedSize, uncompressedSize, fileLength, header }));
 
-        var decompression = TryBuildDecompressedPreview(
-            sourcePath,
-            compressionFormat,
-            payloadOffset,
-            compressedSize,
-            uncompressedSize,
-            payloadRangeValid,
-            sourceUri,
-            oodleRuntimeRoot,
-            evidence,
-            diagnostics);
+        var decompression = includeDecompressionPreview
+            ? TryBuildDecompressedPreview(
+                sourcePath,
+                compressionFormat,
+                payloadOffset,
+                compressedSize,
+                uncompressedSize,
+                payloadRangeValid,
+                sourceUri,
+                oodleRuntimeRoot,
+                evidence,
+                diagnostics)
+            : new
+            {
+                status = "not-attempted",
+                reason = "disabled-by-caller",
+                compressionFormat
+            };
 
         return new DcxPayloadProbeResult(
             BoundaryStatus: boundaryStatus,

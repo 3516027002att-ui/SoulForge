@@ -410,7 +410,9 @@ try {
     { command: 'write-mtd-document', options: { paramId: '0', newValue: 'boundary-probe' } },
     { command: 'write-esd-document', options: { mutations: [] } },
     { command: 'write-tae-document', options: { mutations: [] } },
-    { command: 'write-fxr-document', options: { mutations: [] } }
+    { command: 'write-fxr-document', options: { mutations: [] } },
+    { command: 'write-luabnd-script', options: { childPath: childName, contentBase64: childBytes.toString('base64') } },
+    { command: 'export-luabnd', options: {} }
   ];
 
   /**

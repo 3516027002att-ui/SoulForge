@@ -131,6 +131,7 @@ const findings = [];
 const PLACEHOLDER = {
   string: 'x',
   number: 1,
+  'safe-integer': 1,
   boolean: true,
   array: [],
   object: {}
@@ -205,6 +206,7 @@ for (const descriptor of descriptors) {
   const expectedTypeFor = (declared) => {
     const bare = declared.endsWith('?') ? declared.slice(0, -1) : declared;
     if (enumValuesOf(bare) !== null) return 'string';
+    if (bare === 'safe-integer') return 'integer';
     return ['string', 'number', 'boolean', 'array', 'object'].includes(bare) ? bare : null;
   };
 

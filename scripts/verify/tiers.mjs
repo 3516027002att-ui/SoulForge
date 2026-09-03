@@ -72,11 +72,17 @@ export const TIER_BY_SCRIPT = Object.freeze({
   // 判据用构造的导出记录驱动 compare，逐字段单独差异各测一次（只测「全都不同」会让
   // 「只比一个字段」的实现全绿）。纯静态、临时目录、秒级，归 governance。
   'test:cross-machine-fixtures': 'governance',
+  'test:agent-task-record-gate': 'governance',
 
   // ---- unit：编译 + 跨包单元与契约。代码改动必跑 ----
   typecheck: 'unit',
   test: 'unit',
   'test:ai-conformance': 'unit',
+  'test:agent-production-scenario': 'unit',
+  'test:emevd-cross-file-index': 'unit',
+  'test:emevd-agent-event-read': 'unit',
+  'test:emevd-agent-tools': 'unit',
+  'test:emedf-session-wiring': 'unit',
   'test:rag': 'unit',
   'test:agent-knowledge-refresh': 'unit',
   'test:emevd-stable-identity': 'unit',
@@ -439,6 +445,8 @@ export const TIER_BY_SCRIPT = Object.freeze({
   'bridge:verify:bnd4-transaction': 'native',
   'bridge:verify:bnd4-writer': 'native',
   'bridge:verify:dcx-documents': 'native',
+  'bridge:verify:luabnd': 'native',
+  'test:native-luabnd': 'native',
   // corpus manifest 对账：把本机语料与入库 manifest 逐内容哈希比对。
   // 此前它没有任何 npm 入口、不在任何 tier —— orphan-smoke-gate 原先只扫
   // packages/core/src/testing，--audit 只查已存在的 script，两道门禁都看不见它。
@@ -574,6 +582,7 @@ export const EXCLUDED = Object.freeze({
   'verify:all': '同上（全层级别名）',
   'verify:list': '同上（只列计划，不是验证）',
   dev: '交互式开发服务器，不是验证',
+  'agent:simulate': '真实 Agent 链路模拟入口，依赖真实模型与本地 Mod 交互，按需手工运行',
   'ai-logs:sync': '用于从 Antigravity 提取或同步真实 AI 会话日志到 testdata/ai-audit-transcripts 的离线同步工具，不是验证',
   // ⚠️ 排除理由已按实测改写（2026-08-08）。原文写的是「由 release 链按需调用」，
   // 而实测 release 层 10 条脚本（build / release:installer:manifest /

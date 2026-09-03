@@ -1383,6 +1383,10 @@ async function main(): Promise<void> {
     (process.env.SOULFORGE_NATIVE_FIXTURE_REGISTRY?.trim() && process.env.SOULFORGE_NATIVE_FIXTURE_ROOT?.trim())
     || nativeFixtureArg
   );
+  // The Bridge daemon inherits test-hook enablement at process start. Set it
+  // before the first synthetic read so the later cache cancellation matrix is
+  // testing the intended hook-enabled daemon rather than a reused hook-free one.
+  enableCacheTestHooks();
   try {
     await syntheticAssembly(root);
     await bridgeDocumentCacheRegressions(root);

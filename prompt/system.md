@@ -51,9 +51,20 @@ MSG 与 PARAM 的结果要合并比对：可见正式名称、PARAM rowName/备�
 对每个仍为 candidate 的对象，按工具返回的稳定标识继续读取，不用文件名、首个兄弟项、邻近行号或模型记忆猜测：
 
 1. 文本候选：read_fmg_entries，确认真实文本、textId、category、sourceUri。
-2. 参数候选：read_param_fields，优先完整读取候选行，确认真实字段定义、字段备注、当前值、rowName、sourceUri、sourceHash/sourceRevision。
+2. 参数候选：read_param_fields，优先完整读取候选行，确认真实字段定义、字段备注、当前值、rowName、sourceUri、sourceHash/sourceRevision。注意：
+   - 当读取 NpcParam 敌人参数时，工具会主动返回 crossReferences 关联网，包含该角色所在的地图 MSB、对应事件 EMEVD 文件、关联的遭遇战事件（如开战血条 encounter_start、不死锁维护 immortality_control、死亡与击败结算 defeat_handling）与 AI 脚本。
+   - **精英怪化（Boss 改为精英怪）的核心机制与事件联动**：
+     - **血条与架势条**：大首领使用 `DisplayBossHealthBar(1, entityId, slot, nameId)`（2003[11]），精英怪（Miniboss，如赤鬼、侍大将、火牛等）使用专用的 `DisplayMinibossHealthBar(1, entityId, slot, nameId)`（2003[87]）。改为精英怪时，开战事件（encounter_start）需将 `DisplayBossHealthBar` 替换为 `DisplayMinibossHealthBar(1, ...)`，死亡结算事件（defeat_handling）中用 `DisplayMinibossHealthBar(0, ...)` 关闭。
+     - **血条格数与忍杀数**：由 `NPC_PARAM_ST.ninsatuNum` 直接决定红点数量（如血条改为2，则直接将 `ninsatuNum` 设为 2）。
+     - **特殊忍杀 vs 自然死亡（不死锁机制）**：
+       - 大首领之所以在打光红点后不立刻死、而是跪地等待二次特写特殊忍杀（Cinematic Execution），是因为在开战事件中开启了 `SetCharacterImmortality(entityId, 1)`（2004[12]），且死亡事件在 `WaitFor(IfCharacterHasSpEffect(entityId, 201000) && ...)`。
+       - **精英怪不需要特殊忍杀，清完红点就死**！若改为精英怪：
+         1. 必须在开战事件（encounter_start，如 11105810）中**移除 `SetCharacterImmortality(entityId, 1)`**（或置0），并在关联控制事件（immortality_control，如 11105820）中确保不再被重置为 1；
+         2. 在死亡结算事件（defeat_handling，如 11105800）中**移除对 `SpEffect 201000` 的等待**，改为直接监听 `IfCharacterDeadAlive` 实体死亡；
+         3. 将 `HandleBossDefeat`（大首领不死斩横幅 2003[12]）替换为 `HandleMinibossDefeat`（精英怪结算 2003[15]）。
+     - 遇到此类生命周期联动时，直接沿着 crossReferences 中指示的 eventFile 和 eventId 调用 read_emevd_event 读取完整 DarkScript 源码（获取 sourceHash、darkScriptComplete 与指令列表），修改后使用 apply_emevd_dsl(scope: 'event', eventId: ..., sourceHash: ..., darkScriptComplete: true) 联动修改，不能仅停留在参数层。
 3. 地图候选：先用 search_map_entities 获取实体地址和 sourceUri，再用 read_msb_parts 按返回的 sourceUri 与精确地址读取 nativeOffset、模型和变换。逻辑地图 ID（如 m10_00_00_00）不能直接当作 file；如果来源不唯一，停止猜测并列出候选 sourceUri。
-4. 事件候选：机制词可先用 search_event_reference 获取候选 instruction 名称，再用 search_events 获取当前文件与 eventId，最后用 read_emevd_outline 读取事件结构、指令和引用。
+4. 事件候选：机制词可先用 search_event_reference 获取候选 instruction 名称，再用 search_events 获取当前文件与 eventId，最后用 read_emevd_event 读取该事件的完整 DarkScript 源码与指令详情（若只需查看全文件事件清单则用 read_emevd_outline）。
 5. 动作候选：用 search_tae_events 获取精确 action/event 地址，再用 read_tae_events 原生读取。
 
 纯读工具在同一轮可并发；依赖前一轮候选结果的原生读取必须等标识返回后执行；proposal、校验、写入、提交和回滚按顺序执行。工具返回的截断摘要只用于决定下一次查询，必须使用 identifiers 或 cursor 继续取数。

@@ -33,6 +33,7 @@ export default defineConfig({
         input: {
           index: resolve(here, 'src/main/index.ts'),
           emevdDarkScriptWorker: resolve(here, 'src/main/emevdDarkScriptWorker.ts'),
+          ragEmbeddingWorker: resolve(here, 'src/main/ragEmbeddingWorker.ts'),
           databaseUtility: resolve(here, 'src/main/databaseUtility.ts'),
           ...(includeDatabaseUtilitySmoke
             ? { databaseUtilitySmoke: resolve(here, 'src/main/databaseUtilitySmoke.ts') }

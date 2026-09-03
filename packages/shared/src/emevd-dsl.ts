@@ -80,6 +80,12 @@ export interface EmevdDslCompileRequest {
    *   指令增删与 WaitFor 折叠块内容变化会给出结构化诊断，不锁整份文档。
    */
   mode: 'patch' | 'dark-script';
+  /**
+   * Optional event-level scope for DarkScript compilation. When present, the
+   * source must contain exactly this existing event; other document events are
+   * outside the compile domain and must never become delete_event operations.
+   */
+  scopeEventId?: number;
 }
 
 interface EmevdPlannedMutationBase {

@@ -28,7 +28,23 @@ export function retrieveEvidence(
       message: 'retrieve_evidence 需要非空 query。'
     };
   }
-  if (!corpus || corpus.chunks.length === 0) {
+  if (!corpus) {
+    return {
+      ok: false,
+      code: 'insufficient_evidence',
+      message: '没有可检索的工作区证据。先打开 Mod 工作区并完成扫描或分析。'
+    };
+  }
+  if (corpus.availability !== 'available') {
+    const detail = corpus.diagnostics.find((diagnostic) => diagnostic.code === 'RAG_SEMANTIC_CORPUS_EMPTY')?.message
+      ?? 'RAG 语义语料不可用。先完成工作区原生分析并确认语义索引非空。';
+    return {
+      ok: false,
+      code: 'RAG_UNAVAILABLE',
+      message: detail
+    };
+  }
+  if (corpus.chunks.length === 0) {
     return {
       ok: false,
       code: 'insufficient_evidence',
@@ -73,6 +89,7 @@ export function retrieveEvidence(
     ok: true,
     query: trimmed,
     hits: expanded,
+    retrievalMode: 'lexical',
     stats: {
       scanned: candidates.length,
       matched: scored.length,

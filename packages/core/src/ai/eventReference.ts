@@ -28,13 +28,16 @@ interface EventReferenceEntry {
  * 当前工作区的 EMEVD/EMEDF 读取为准。别名刻意包含中英文和常见口语。
  */
 const EVENT_REFERENCE_ENTRIES: readonly EventReferenceEntry[] = [
-  { instruction: 'DisplayBossHealthBar', aliases: ['血条', 'boss血条', '首领血条', '显示boss血条', '显示首领血条', 'boss health bar'], description: '显示屏幕下方的 Boss/首领血条。' },
+  { instruction: 'DisplayBossHealthBar', aliases: ['血条', 'boss血条', '首领血条', '显示boss血条', '显示首领血条', 'boss health bar'], description: '显示屏幕下方的 Boss/首领全屏血条与正顶端大架势条。' },
+  { instruction: 'DisplayMinibossHealthBar', aliases: ['精英怪血条', '精英血条', '小boss血条', '头目血条', 'miniboss health bar', '显示精英怪血条', '精英怪全屏血条', 'miniboss血条'], description: '显示精英怪/小Boss/头目的专属全屏血条与架势条（包含红点生命槽）。首领改为精英怪时，开战需换用 DisplayMinibossHealthBar(1, entityId, slot, nameId)，击破时置0关闭。' },
   { instruction: 'SetCharacterHPBarDisplay', aliases: ['头顶血条', '头顶血量', '关闭头顶血条', '人物血量显示'], description: '控制角色头顶的 HP 显示，不等同于 Boss 血条。' },
   { instruction: 'IfCharacterHPValue', aliases: ['血量小于', 'hp小于', '生命值条件', '血量条件', 'hp condition'], description: '按角色当前 HP 建立条件分支。' },
+  { instruction: 'IfNumberOfCharacterHealthBars', aliases: ['血条格数', '红点数', '生命槽数', '残机数', 'health bars count', '剩余红点'], description: '判断角色当前剩余的血条格数/红点数。' },
   { instruction: 'SpawnMapSFX', aliases: ['落雷', '雷电', '闪电', '地图特效', '天气特效', '地面随机特效', 'map sfx'], description: '调用地图/天气特效；具体特效编号和持续方式必须从事件与参数确认。' },
   { instruction: 'DeleteMapSFX', aliases: ['关闭落雷', '关闭地图特效', '删除地图特效', '停止天气特效'], description: '删除或关闭地图特效；不可据此猜测特效编号。' },
   { instruction: 'AwardItemLot', aliases: ['掉落', '奖励', '奖励组', '击杀奖励', '击杀后掉落', 'item lot', 'award'], description: '触发 ItemLot/奖励组；奖励组 ID 必须沿事件或参数引用读取。' },
   { instruction: 'HandleBossDefeat', aliases: ['击杀', '首领死亡', 'boss死亡', '忍杀字幕', '击杀字幕', 'boss defeat'], description: '处理首领击败后的通用流程或字幕；具体语义需由原生事件确认。' },
+  { instruction: 'HandleMinibossDefeat', aliases: ['精英怪击杀', '精英怪死亡', '击杀精英怪', '头目击败', 'miniboss defeat', '击败精英怪', '精英怪结算', '普通击破'], description: '处理精英怪/头目击败结算流程（区别于大首领不死斩横幅）。改为精英怪时需换用 HandleMinibossDefeat(entityId)。' },
   { instruction: 'HandleBossDefeatAndDisplayBanner', aliases: ['击败字幕', '显示击杀横幅', '不死斩字幕', '踏破字幕', 'boss banner'], description: '处理首领击败并显示横幅文本。' },
   { instruction: 'ForceCharacterDeath', aliases: ['强制死亡', '强制npc死亡', '让敌人死亡', 'force death'], description: '请求角色死亡；是否掉钱、掉落或触发其它事件不能从笔记单独推断。' },
   { instruction: 'IfCharacterDeadalive', aliases: ['判断死亡', '判断npc死亡', '角色是否死亡', 'dead alive'], description: '检测角色生死状态。笔记中的拼写需要由当前 EMEDF/native 名称校正。' },
@@ -47,7 +50,7 @@ const EVENT_REFERENCE_ENTRIES: readonly EventReferenceEntry[] = [
   { instruction: 'SetCharacterAIId', aliases: ['更换ai', 'ai id', '切换ai'], description: '设置角色使用的 AI 参数候选；AI ID 必须从当前资源读取。' },
   { instruction: 'RequestCharacterAICommand', aliases: ['ai命令', '发送ai命令', '请求ai计划', 'ai command'], description: '向角色 AI 发送命令；是否生效依赖 AI 计划。' },
   { instruction: 'RequestCharacterAIReplan', aliases: ['ai重规划', '重新规划ai', 'ai replan'], description: '请求角色 AI 重新规划。' },
-  { instruction: 'SetCharacterImmortality', aliases: ['不死身', '无敌', '角色不死', 'immortality'], description: '设置角色不死/免死候选状态。' },
+  { instruction: 'SetCharacterImmortality', aliases: ['不死身', '无敌', '角色不死', '特殊忍杀', '处决下跪', '特殊处决', 'immortality', '取消特殊忍杀'], description: '设置角色不死。大首领（Boss）在开战时调用 SetCharacterImmortality(entityId, 1)，导致打光红点后空血下跪等待 SpEffect 201000 触发二次特殊处决动画；精英怪不需要特殊处决，清完红点就死。改为精英怪时必须移除开战事件中的 SetCharacterImmortality(entityId, 1)（并在关联控制事件中置0防重置），并在死亡事件中直接监听 IfCharacterDeadAlive。' },
   { instruction: 'SetCharacterAnimationState', aliases: ['不能动', '可以动', '开启动作', '关闭动画', '让单位行动', 'animation state'], description: '控制角色动画/行动状态；与显示或隐藏角色是不同层。' },
   { instruction: 'ChangeCharacterEnableState', aliases: ['显示人物', '隐藏人物', '启用人物', '禁用人物', 'enable state'], description: '控制角色是否启用/显示，不等同于允许其行动。' },
   { instruction: 'ForceAnimationPlayback', aliases: ['强制动作', '播放动作', '强制播放动画', 'force animation'], description: '强制角色播放指定动画。动画 ID 必须通过动作原生身份解析。' },

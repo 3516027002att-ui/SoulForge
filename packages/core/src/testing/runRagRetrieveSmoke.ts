@@ -1,5 +1,5 @@
 import { join } from 'node:path';
-import type { BridgeResult, IndexedFile, RagChunk } from '@soulforge/shared';
+import type { BridgeResult, IndexedFile, RagChunk, RagCorpus } from '@soulforge/shared';
 import { ingestBridgeResult } from '../indexing/ingestBridgeResult.js';
 import { WorkspaceIndex } from '../indexing/workspaceIndex.js';
 import { createDefaultToolRegistry } from '../ai/toolRegistry.js';
@@ -8,7 +8,7 @@ import type { ModelServiceAdapter, ModelServiceConfig } from '../model-services/
 import { buildRagCorpus, createRagCorpus, mergeCatalogAndPersisted } from '../rag/chunkBuilder.js';
 import { retrieveEvidence } from '../rag/retrieve.js';
 import { parseRagQuery } from '../rag/queryParse.js';
-import { loadRagCorpus, persistRagCorpus } from '../rag/persist.js';
+import { diffRagCorpusBySource, loadRagCorpus, persistRagCorpus, sameRagReferences } from '../rag/persist.js';
 import { openWorkspaceDatabase } from '../storage/sqliteDatabase.js';
 import { WorkspaceDataRepository } from '../storage/workspaceDataRepository.js';
 import { findPathLeak } from './assertNoPathLeak.js';
@@ -21,6 +21,55 @@ function main(): Promise<void> {
     if (corpus.stats.byFamily.file < 1 || corpus.stats.byFamily.event < 1) {
       throw new Error(`RAG corpus missing families: ${JSON.stringify(corpus.stats)}`);
     }
+    // Native readback can identify one row inside a large PARAM source.  A
+    // symbol-scoped rebuild must return only that row so the host can merge it
+    // without rebuilding or replacing the rest of the table.
+    const symbolSource = 'file://synthetic/param/symbol-scoped.param';
+    const symbolIndex = new WorkspaceIndex('workspace-rag-symbol-scoped');
+    symbolIndex.setFiles([makeFile('param/symbol-scoped.param', 'param', symbolSource, 'symbol-source-v1')]);
+    assertAccepted(ingestBridgeResult(symbolIndex, {
+      sourceUri: symbolSource,
+      sourcePath: 'param/symbol-scoped.param',
+      game: 'sekiro',
+      resourceKind: 'param',
+      parseStatus: 'parsed',
+      diagnostics: [],
+      data: {
+        paramName: 'NpcParam',
+        rows: [
+          {
+            uri: `${symbolSource}#NpcParam/100`,
+            sourceUri: symbolSource,
+            paramName: 'NpcParam',
+            rowId: 100,
+            rowName: 'first-row',
+            fields: [{ name: 'hp', type: 'int32', value: 100 }]
+          },
+          {
+            uri: `${symbolSource}#NpcParam/200`,
+            sourceUri: symbolSource,
+            paramName: 'NpcParam',
+            rowId: 200,
+            rowName: 'second-row',
+            fields: [{ name: 'hp', type: 'int32', value: 200 }]
+          }
+        ]
+      }
+    }));
+    const symbolScoped = buildRagCorpus(
+      symbolIndex,
+      new Date().toISOString(),
+      [],
+      [symbolSource],
+      [`${symbolSource}#NpcParam/200`]
+    );
+    if (symbolScoped.chunks.length !== 1
+      || symbolScoped.chunks[0]?.symbolUri !== `${symbolSource}#NpcParam/200`
+      || symbolScoped.chunks[0]?.body.includes('first-row')) {
+      throw new Error(`symbol-scoped RAG rebuild returned unrelated symbols: ${JSON.stringify(symbolScoped.chunks)}`);
+    }
+    await assertParamNameAliases();
+    await assertParamTextLinks();
 
     // P0 regression: a changed file must invalidate semantic symbols before
     // the new catalog hash reaches RAG. Otherwise old-value + new-hash would
@@ -73,6 +122,57 @@ function main(): Promise<void> {
     if (!textHit.ok) throw new Error(`CJK retrieve failed: ${textHit.message}`);
     if (!textHit.hits.some((hit) => hit.chunk.family === 'text_entry')) {
       throw new Error('CJK query did not hit the text entry');
+    }
+    const compoundCjkHit = retrieveEvidence(corpus, '把狼的义手设置成精英怪，出场时地上随机落雷5秒，击杀后掉落铃铛');
+    if (!compoundCjkHit.ok || !compoundCjkHit.hits.some((hit) => hit.chunk.family === 'text_entry')) {
+      throw new Error(`compound Chinese task query must hit the object phrase: ${JSON.stringify(compoundCjkHit)}`);
+    }
+
+    // Natural-language configuration values are not object IDs.  A previous
+    // parser promoted the "2" health bars and "5" seconds in this task into
+    // numeric lookup keys, so unrelated map entities with IDs 2/5 outranked
+    // the actual character text evidence.
+    const naturalTaskCorpus = createRagCorpus({
+      workspaceId: 'workspace-rag-natural-task',
+      builtAt: new Date().toISOString(),
+      chunks: [
+        {
+          chunkId: 'rag:map_entity:natural-number-noise',
+          workspaceId: 'workspace-rag-natural-task',
+          sourceUri: 'file://synthetic/map/natural.msb',
+          symbolUri: 'map://natural/entity/2',
+          family: 'map_entity',
+          title: 'unrelated map entity',
+          body: 'entity unrelated to the requested character',
+          numericIds: [2, 5],
+          contentHash: 'natural-map-noise'
+        },
+        {
+          chunkId: 'rag:text_entry:natural-character',
+          workspaceId: 'workspace-rag-natural-task',
+          sourceUri: 'file://synthetic/msg/menu.msg',
+          symbolUri: 'msg://menu/1001',
+          family: 'text_entry',
+          title: 'npc name 1001',
+          body: 'textId 1001\n鬼刑部',
+          numericIds: [1001],
+          contentHash: 'natural-character'
+        }
+      ]
+    });
+    const naturalTaskHit = retrieveEvidence(
+      naturalTaskCorpus,
+      '把鬼刑部设置成精英怪，血条设置为2，出场时地上随机落雷5秒，不攻击到狼，击杀后掉落义父的铃铛',
+      { limit: 4, expandReferences: false }
+    );
+    if (!naturalTaskHit.ok
+      || naturalTaskHit.hits[0]?.chunk.family !== 'text_entry'
+      || naturalTaskHit.hits.some((hit) => hit.reasons.includes('id:2') || hit.reasons.includes('id:5'))) {
+      throw new Error(`natural task values must not outrank object evidence: ${JSON.stringify(naturalTaskHit)}`);
+    }
+    const explicitShortId = parseRagQuery('rowId 2');
+    if (!explicitShortId.numericIds.includes(2)) {
+      throw new Error(`explicit rowId context must retain short numeric IDs: ${JSON.stringify(explicitShortId)}`);
     }
 
     const fileHit = retrieveEvidence(corpus, 'common.emevd.dcx', { families: ['file'] });
@@ -167,6 +267,9 @@ INSERT INTO workspaces (workspace_id, root_path, game, created_at, updated_at)
 VALUES (?, ?, ?, ?, ?)`).run(index.workspaceId, workspace.root, 'sekiro', now, now);
     const repository = new WorkspaceDataRepository(database, index.workspaceId);
     persistRagCorpus(repository, corpus);
+    if (!sameRagReferences(corpus.references, [...corpus.references].reverse())) {
+      throw new Error('reference comparison must ignore SQLite/discovery ordering');
+    }
     const fts = repository.searchRagChunks('义手', 10);
     if (!fts.some((chunk) => chunk.family === 'text_entry')) {
       throw new Error(`FTS persist search missed CJK text: ${fts.map((chunk) => chunk.title).join(',')}`);
@@ -188,6 +291,54 @@ VALUES (?, ?, ?, ?, ?)`).run(index.workspaceId, workspace.root, 'sekiro', now, n
     if (!merged.chunks.some((chunk) => chunk.family === 'event')) {
       throw new Error('scan merge dropped previously analyzed event chunks');
     }
+    const persistedEvent = reloaded.chunks.find((chunk) => chunk.family === 'event');
+    if (!persistedEvent) throw new Error('fixture must contain a persisted event for provenance checks');
+    // P0 regression: an analyze result contains fresh semantic chunks.  The
+    // merge must keep them even when the persisted database is empty; otherwise
+    // the active RAG silently degrades to a file catalog.
+    const currentOnly = mergeCatalogAndPersisted(corpus, createRagCorpus({
+      workspaceId: corpus.workspaceId,
+      builtAt: corpus.builtAt,
+      chunks: []
+    }));
+    if (!currentOnly.chunks.some((chunk) => chunk.family === 'event')
+      || !currentOnly.chunks.some((chunk) => chunk.family === 'param_row')
+      || currentOnly.availability !== 'available') {
+      throw new Error(`merge dropped current semantic catalog: ${JSON.stringify(currentOnly.stats)}`);
+    }
+    const currentChanged = createRagCorpus({
+      workspaceId: corpus.workspaceId,
+      builtAt: corpus.builtAt,
+      chunks: corpus.chunks.map((chunk) => chunk.chunkId === persistedEvent.chunkId
+        ? { ...chunk, body: 'fresh current semantic body', contentHash: 'fresh-current-hash' }
+        : chunk),
+      references: corpus.references
+    });
+    const currentWins = mergeCatalogAndPersisted(currentChanged, reloaded);
+    if (currentWins.chunks.find((chunk) => chunk.chunkId === persistedEvent.chunkId)?.body !== 'fresh current semantic body') {
+      throw new Error('merge allowed an older persisted chunk to overwrite current catalog data');
+    }
+    const deltas = diffRagCorpusBySource(catalogOnly, currentOnly);
+    if (!deltas.some((delta) => delta.upserts.some((chunk) => chunk.family === 'event'))) {
+      throw new Error('source delta did not include current semantic event chunks');
+    }
+    const unavailable = createRagCorpus({
+      workspaceId: corpus.workspaceId,
+      builtAt: corpus.builtAt,
+      chunks: catalogOnly.chunks
+    });
+    if (unavailable.availability !== 'unavailable'
+      || !unavailable.diagnostics.some((diagnostic) => diagnostic.code === 'RAG_SEMANTIC_CORPUS_EMPTY')) {
+      throw new Error(`file-only corpus must be unavailable: ${JSON.stringify(unavailable)}`);
+    }
+    const unavailableHit = retrieveEvidence(unavailable, 'common.emevd.dcx');
+    if (unavailableHit.ok || unavailableHit.code !== 'RAG_UNAVAILABLE') {
+      throw new Error(`file-only RAG must fail closed: ${JSON.stringify(unavailableHit)}`);
+    }
+    const unavailableSearch = await registrySearchParamRowsForRagTest(fileOnlyIndex(index.workspaceId), unavailable);
+    if (unavailableSearch.ok || unavailableSearch.error?.code !== 'RAG_UNAVAILABLE') {
+      throw new Error(`specialized search must expose unavailable RAG: ${JSON.stringify(unavailableSearch)}`);
+    }
     const stalePersisted = createRagCorpus({
       workspaceId: index.workspaceId,
       builtAt: reloaded.builtAt,
@@ -199,6 +350,42 @@ VALUES (?, ?, ?, ?, ?)`).run(index.workspaceId, workspace.root, 'sekiro', now, n
     const staleMerged = mergeCatalogAndPersisted(catalogOnly, stalePersisted);
     if (staleMerged.chunks.some((chunk) => chunk.family === 'event')) {
       throw new Error('scan merge retained an event chunk from a stale source hash');
+    }
+    const missingHashPersisted = createRagCorpus({
+      workspaceId: index.workspaceId,
+      builtAt: reloaded.builtAt,
+      chunks: reloaded.chunks.map((chunk) => chunk === persistedEvent
+        ? withoutSourceHash(chunk)
+        : chunk),
+      references: reloaded.references
+    });
+    const missingHashMerged = mergeCatalogAndPersisted(catalogOnly, missingHashPersisted);
+    if (missingHashMerged.chunks.some((chunk) => chunk.chunkId === persistedEvent.chunkId)) {
+      throw new Error('scan merge retained a semantic chunk with missing source hash');
+    }
+    const missingRevisionPersisted = createRagCorpus({
+      workspaceId: index.workspaceId,
+      builtAt: reloaded.builtAt,
+      chunks: reloaded.chunks.map((chunk) => chunk === persistedEvent
+        ? withoutSourceRevision(chunk)
+        : chunk),
+      references: reloaded.references
+    });
+    const missingRevisionMerged = mergeCatalogAndPersisted(catalogOnly, missingRevisionPersisted);
+    if (missingRevisionMerged.chunks.some((chunk) => chunk.chunkId === persistedEvent.chunkId)) {
+      throw new Error('scan merge retained a semantic chunk with missing source revision');
+    }
+    const mismatchedRevisionPersisted = createRagCorpus({
+      workspaceId: index.workspaceId,
+      builtAt: reloaded.builtAt,
+      chunks: reloaded.chunks.map((chunk) => chunk === persistedEvent
+        ? { ...chunk, sourceRevision: 999 }
+        : chunk),
+      references: reloaded.references
+    });
+    const mismatchedRevisionMerged = mergeCatalogAndPersisted(catalogOnly, mismatchedRevisionPersisted);
+    if (mismatchedRevisionMerged.chunks.some((chunk) => chunk.chunkId === persistedEvent.chunkId)) {
+      throw new Error('scan merge retained a semantic chunk from a mismatched source revision');
     }
     database.close();
 
@@ -293,11 +480,15 @@ VALUES (?, ?, ?, ?, ?)`).run(index.workspaceId, workspace.root, 'sekiro', now, n
     // role=user message after a tool call, but retrieval must keep using the
     // host-captured external taskQuery.
     const retryQueries: string[] = [];
+    const retryInjected: string[] = [];
     let retryCalls = 0;
     const retryAdapter: ModelServiceAdapter = {
       protocol: 'openai-compatible',
-      async complete() {
+      async complete(request) {
         retryCalls += 1;
+        retryInjected.push(request.messages.filter((message) =>
+          message.role === 'system' && message.content.startsWith('[rag-evidence')
+        ).map((message) => message.content).join('\n'));
         if (retryCalls === 1) {
           return {
             message: {
@@ -320,8 +511,8 @@ VALUES (?, ?, ?, ?, ?)`).run(index.workspaceId, workspace.root, 'sekiro', now, n
     const retryResult = await runAgentToolLoop(retryAdapter, {
       config: loopConfig,
       apiKey: 'sk-rag-loop-fixture-key',
-      messages: [{ role: 'user', content: 'external task' }],
-      taskQuery: 'external task',
+      messages: [{ role: 'user', content: 'flag 71000000 在哪个事件里使用' }],
+      taskQuery: 'flag 71000000 在哪个事件里使用',
       tools: [{ name: 'noop', description: 'test', parametersJsonSchema: { type: 'object' }, permissionLevel: 'read' }],
       permissionMode: 'plan',
       executeTool: async () => ({ ok: true, content: 'internal retry text' }),
@@ -332,9 +523,10 @@ VALUES (?, ?, ?, ?, ?)`).run(index.workspaceId, workspace.root, 'sekiro', now, n
         }
       }
     });
-    if (retryResult.finishReason !== 'stop' || retryCalls !== 3 || retryQueries.length !== 3
-      || retryQueries.some((query) => query !== 'external task')) {
-      throw new Error(`taskQuery must remain fixed across internal retry: ${JSON.stringify({ retryCalls, retryQueries, finish: retryResult.finishReason })}`);
+    if (retryResult.finishReason !== 'stop' || retryCalls !== 3 || retryQueries.length !== 1
+      || retryInjected.filter((content) => content.length > 0).length !== 1
+      || retryQueries.some((query) => query !== 'flag 71000000 在哪个事件里使用')) {
+      throw new Error(`RAG evidence/query must be cached per context window: ${JSON.stringify({ retryCalls, retryQueries, retryInjected, finish: retryResult.finishReason })}`);
     }
 
     const fatChunks: RagChunk[] = [];
@@ -392,6 +584,165 @@ VALUES (?, ?, ?, ?, ?)`).run(index.workspaceId, workspace.root, 'sekiro', now, n
   });
 }
 
+async function registrySearchParamRowsForRagTest(index: WorkspaceIndex, rag: RagCorpus) {
+  const registry = createDefaultToolRegistry();
+  return registry.run(
+    'search_param_rows',
+    { query: '鬼刑部', paramNames: ['NpcParam'] },
+    { workspaceIndex: index, mode: 'plan', rag }
+  );
+}
+
+async function assertParamNameAliases(): Promise<void> {
+  const index = new WorkspaceIndex('workspace-rag-param-alias');
+  const sourceUri = 'file://synthetic/param/gameparam.parambnd.dcx';
+  index.setFiles([makeFile('param/gameparam.parambnd.dcx', 'param', sourceUri)]);
+  assertAccepted(ingestBridgeResult(index, {
+    sourceUri,
+    sourcePath: 'param/gameparam.parambnd.dcx',
+    game: 'sekiro',
+    resourceKind: 'param',
+    parseStatus: 'parsed',
+    diagnostics: [],
+    data: {
+      // Native export uses the type name while the BND4 child is the table
+      // name the model receives from read-dcx-document.
+      paramName: 'NPC_PARAM_ST',
+      entryName: 'NpcParam.param',
+      rows: [{
+        uri: `${sourceUri}#NpcParam/50800000`,
+        sourceUri,
+        paramName: 'NPC_PARAM_ST',
+        entryName: 'NpcParam.param',
+        rowId: 50800000,
+        rowName: '鬼形部'
+      }]
+    }
+  }));
+
+  for (const requested of ['NpcParam', 'NpcParam.param', 'NPC_PARAM_ST']) {
+    const hits = index.searchParamRows('鬼形部', 10, [requested]);
+    if (hits.length !== 1 || hits[0]?.item.rowId !== 50800000) {
+      throw new Error(`PARAM table alias ${requested} did not resolve the physical/native identity: ${JSON.stringify(hits)}`);
+    }
+  }
+
+  // Exercise the same identity rule after the native path falls back to RAG.
+  // This models a partially parsed index whose persisted semantic corpus still
+  // has the row, and guards against a second silent zero-hit path.
+  const fallbackIndex = new WorkspaceIndex(index.workspaceId);
+  fallbackIndex.setFiles([makeFile('param/gameparam.parambnd.dcx', 'param', sourceUri)]);
+  const fallback = await createDefaultToolRegistry().run(
+    'search_param_rows',
+    { query: '鬼形部', paramNames: ['NpcParam.param'] },
+    { workspaceIndex: fallbackIndex, mode: 'plan', rag: buildRagCorpus(index) }
+  );
+  const fallbackData = fallback.data as { hits?: unknown[]; totalHits?: number } | undefined;
+  if (!fallback.ok || !fallbackData || fallbackData.totalHits !== 1 || fallbackData.hits?.length !== 1) {
+    throw new Error(`RAG PARAM table alias fallback failed: ${JSON.stringify(fallback)}`);
+  }
+}
+
+async function assertParamTextLinks(): Promise<void> {
+  const index = new WorkspaceIndex('workspace-rag-param-text-links');
+  const paramSource = 'file://synthetic/param/gameparam.parambnd.dcx';
+  const msgSource = 'file://synthetic/msg/zhocn/item.msgbnd.dcx';
+  index.setFiles([
+    makeFile('param/gameparam.parambnd.dcx', 'param', paramSource),
+    makeFile('msg/zhocn/item.msgbnd.dcx', 'msg', msgSource)
+  ]);
+  assertAccepted(ingestBridgeResult(index, {
+    sourceUri: paramSource,
+    sourcePath: 'param/gameparam.parambnd.dcx',
+    game: 'sekiro',
+    resourceKind: 'param',
+    parseStatus: 'parsed',
+    diagnostics: [],
+    data: {
+       paramName: 'EQUIP_PARAM_GOODS_ST',
+        rows: [{
+          uri: `${paramSource}#EQUIP_PARAM_GOODS_ST/3504`,
+          sourceUri: paramSource,
+         paramName: 'EQUIP_PARAM_GOODS_ST',
+         rowId: 3504,
+        fields: [{ fieldId: 'maxNum', name: '最大持有数', value: 1 }]
+      }]
+    }
+  }));
+  assertAccepted(ingestBridgeResult(index, {
+    sourceUri: msgSource,
+    sourcePath: 'msg/zhocn/item.msgbnd.dcx',
+    game: 'sekiro',
+    resourceKind: 'msg',
+    parseStatus: 'parsed',
+    diagnostics: [],
+    data: {
+      category: 'item',
+      entries: [{
+        uri: `${msgSource}#item/3504`,
+        sourceUri: msgSource,
+        category: 'item',
+        textId: 3504,
+        text: '义父的铃铛'
+      }, {
+        uri: `${msgSource}#menu/3504`,
+        sourceUri: msgSource,
+        category: 'menu',
+        textId: 3504,
+        text: '无关菜单文本'
+      }]
+    }
+  }));
+
+  // An unscoped search may have equally strong hits in multiple physical
+  // tables. Keep the same-table Goods row visible in the first bounded page
+  // even when a ShopLineup row has the same display name.
+  index.upsertParamExport({
+    paramName: 'SHOP_LINEUP_PARAM',
+    sourceUri: paramSource,
+    entryName: 'ShopLineupParam.param',
+    rows: [{
+      uri: `${paramSource}#SHOP_LINEUP_PARAM/1301`,
+      sourceUri: paramSource,
+      paramName: 'SHOP_LINEUP_PARAM',
+      entryName: 'ShopLineupParam.param',
+      rowId: 1301,
+      rowName: '义父的铃铛'
+    }]
+  });
+
+  const nativeSearch = index.searchParamRows('义父的铃铛', 10, ['EquipParamGoods']);
+  if (nativeSearch.length !== 1 || nativeSearch[0]?.item.rowId !== 3504) {
+    throw new Error(`PARAM native search did not use the declared row-FMG association: ${JSON.stringify(nativeSearch)}`);
+  }
+  const unscopedSearch = index.searchParamRows('义父的铃铛', 2);
+  if (!unscopedSearch.some((hit) => hit.item.paramName === 'EQUIP_PARAM_GOODS_ST' && hit.item.rowId === 3504)) {
+    throw new Error(`unscoped PARAM search hid the physical Goods row: ${JSON.stringify(unscopedSearch)}`);
+  }
+
+  const corpus = buildRagCorpus(index);
+  const ragSearch = retrieveEvidence(corpus, '击杀后掉落义父的铃铛', {
+    limit: 8,
+    expandReferences: true
+  });
+  const paramHit = ragSearch.ok
+    ? ragSearch.hits.find((hit) => hit.chunk.family === 'param_row' && hit.chunk.symbolUri.endsWith('/3504'))
+    : undefined;
+  if (!ragSearch.ok || !paramHit || !paramHit.chunk.body.includes('义父的铃铛')) {
+    throw new Error(`RAG did not project the row-FMG text association: ${JSON.stringify(ragSearch)}`);
+  }
+
+  index.rebuildReferences({ enableNumericFallback: false });
+  const textEntryUri = `${msgSource}#item/3504`;
+  if (!index.findReferences(textEntryUri, 'to').some((edge) => (
+        edge.fromUri === `${paramSource}#EQUIP_PARAM_GOODS_ST/3504`
+      && edge.toUri === textEntryUri
+      && edge.kind === 'references_text'
+  ))) {
+    throw new Error('PARAM↔FMG row association was not published to the evidence graph.');
+  }
+}
+
 function buildSyntheticIndex(): WorkspaceIndex {
   const index = new WorkspaceIndex('workspace-rag-smoke');
   index.setFiles([makeFile('event/common.emevd.dcx', 'event', 'file://synthetic/event/common.emevd.dcx')]);
@@ -442,6 +793,18 @@ function makeFile(
     parseStatus: 'partial',
     diagnostics: []
   };
+}
+
+function withoutSourceHash(chunk: RagChunk): RagChunk {
+  const copy = { ...chunk };
+  delete copy.sourceHash;
+  return copy;
+}
+
+function withoutSourceRevision(chunk: RagChunk): RagChunk {
+  const copy = { ...chunk };
+  delete copy.sourceRevision;
+  return copy;
 }
 
 function makeEventExport(sourceHash = 'event-source-v1', eventName = 'synthetic_event_1000'): BridgeResult<unknown> {

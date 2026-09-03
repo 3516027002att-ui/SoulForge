@@ -328,8 +328,25 @@ function buildFlverScene(): FlverSemanticScene {
         skinIndices: new Uint16Array([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]),
         skinWeights: new Float32Array([1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0]),
         vertexCount: 3,
+        cullBackfaces: true,
         wireframeOverlay: true,
         texture: { kind: 'rgba', width: 4, height: 4, rgbaBytes: new Uint8Array(64).fill(128) }
+      },
+      {
+        id: 'mesh-projected-decal',
+        label: 'projected-decal',
+        position: [0, 0, 0],
+        rotation: [0, 0, 0],
+        scale: [1, 1, 1],
+        positions: new Float32Array([
+          0, 0, 0.01, 1, 0, 0.01, 0, 1, 0.01,
+          3, 2, 0.01, 4, 2, 0.01, 3, 3, 0.01
+        ]),
+        uvs: new Float32Array([0, 0, 1, 0, 0, 1, 0, 0, 1, 0, 0, 1]),
+        indices: new Uint16Array([0, 1, 2, 3, 4, 5]),
+        vertexCount: 6,
+        previewRenderMode: 'projected-decal',
+        texture: { kind: 'rgba', width: 4, height: 4, rgbaBytes: new Uint8Array(64).fill(200) }
       }
     ],
     bones: [{ id: 'bone-0', name: 'root', parentIndex: -1, translation: [1, 0, 0], rotation: [0, 0, 0] }],
@@ -454,7 +471,9 @@ async function testProxyScene(record: (name: string) => void): Promise<void> {
   assertEqual(boxMaterial.emissive.getHex(), 0x000000, '重复选择不污染共享基础材质');
 
   // 渲染循环驱动 fake renderer（headless）。
-  pumpFrames(2);
+  // 渲染提交已限速为 30 FPS；4 个 16ms tick 才能稳定覆盖两个提交，
+  // 不把测试绑定到原先每个 rAF 都提交的高 CPU 行为。
+  pumpFrames(4);
   assert((createdRenderer.calls.filter((c) => c === 'render').length) >= 2, '渲染循环驱动 fake renderer');
   assert(createdRenderer.calls.includes('setSize'), 'setSize 已按容器尺寸调用');
   assert(createdRenderer.calls.includes('setPixelRatio'), 'setPixelRatio 已调用');
@@ -615,7 +634,8 @@ async function testFlverScene(record: (name: string) => void): Promise<void> {
   const serialized = JSON.stringify(scene);
   assert(serialized.length > 0, 'FLVER 语义场景可序列化（renderer-independent）');
 
-  // 真实 FLVER 网格 + RGBA 纹理被投影。
+  // 真实 FLVER 网格 + RGBA 纹理被投影；原生 projected-decal 只保留在
+  // 语义场景中，通用 Three 渲染器没有对应的原生投影 shader 时必须失败关闭。
   const geometry = audit1.find((r) => r instanceof three.BufferGeometry) as three.BufferGeometry | undefined;
   assert(geometry !== undefined, 'FLVER 网格投影为 BufferGeometry');
   const positionAttribute = geometry.attributes.position;
@@ -625,12 +645,35 @@ async function testFlverScene(record: (name: string) => void): Promise<void> {
   const texture = audit1.find((r) => r instanceof three.DataTexture) as three.DataTexture | undefined;
   assert(texture !== undefined, 'RGBA 纹理投影为 DataTexture');
   assertEqual(texture.image.width, 4, '纹理宽度保持 4');
+  const flverGeometries = audit1
+    .filter((r): r is three.BufferGeometry => r instanceof three.BufferGeometry)
+    .filter((candidate) => candidate.attributes.position?.count === 3 || candidate.attributes.position?.count === 6);
+  const maxGeometryY = (candidate: three.BufferGeometry): number => {
+    const position = candidate.attributes.position;
+    if (!position) return Number.NEGATIVE_INFINITY;
+    let maxY = Number.NEGATIVE_INFINITY;
+    const index = candidate.index?.array;
+    if (index) {
+      for (const vertexIndex of index) {
+        maxY = Math.max(maxY, Number(position.array[Number(vertexIndex) * 3 + 1]));
+      }
+    } else {
+      for (let offset = 1; offset < position.array.length; offset += 3) maxY = Math.max(maxY, Number(position.array[offset]));
+    }
+    return maxY;
+  };
+  assert(flverGeometries.some((candidate) => candidate.attributes.position?.count === 3),
+    '普通 FLVER surface 网格仍然被投影');
+  assert(!flverGeometries.some((candidate) => maxGeometryY(candidate) > 1.5),
+    `projected-decal 未被当成普通表面光栅化，避免动画时出现拉丝; geometries=${JSON.stringify(flverGeometries.map((candidate) => ({ count: candidate.attributes.position?.count, maxY: maxGeometryY(candidate) })))}`);
+  assert(!flverGeometries.some((candidate) => candidate.attributes.position?.count === 6),
+    'native projected-decal 在通用 renderer 中失败关闭，不绘制未实现 shader 的投影体');
   assert(!audit1.some((r) => r instanceof three.SphereGeometry), '默认预览不创建黄色骨骼诊断 marker');
   assert(audit1.some((r) => r instanceof three.OctahedronGeometry), '挂点投影为 OctahedronGeometry');
 
   // 渲染循环驱动。
-  pumpFrames(2);
-  assert((createdRenderer.calls.filter((c) => c === 'render').length) >= 2, 'FLVER 渲染循环驱动');
+  pumpFrames(4);
+  assert((createdRenderer.calls.filter((c) => c === 'render').length) >= 1, 'FLVER 场景请求并提交了有界渲染帧');
 
   // 内容替换：旧资源必须全部释放。
   handle.setScene(buildFlverScene());
@@ -712,6 +755,104 @@ async function testMultiSkeletonPoseBatch(record: (name: string) => void): Promi
   record('flver-multi-skeleton-pose-batch');
 }
 
+async function testFollowerBindingPreservesReferencePose(record: (name: string) => void): Promise<void> {
+  const scene: FlverSemanticScene = {
+    meshes: [{
+      id: 'part-mesh',
+      label: 'part-mesh',
+      position: [0, 0, 0],
+      rotation: [0, 0, 0],
+      scale: [1, 1, 1],
+      positions: new Float32Array([0, 0, 0]),
+      skinIndices: new Uint16Array([0, 0, 0, 0]),
+      skinWeights: new Float32Array([1, 0, 0, 0]),
+      vertexCount: 1,
+      skinningMode: 'weighted',
+      boneIndexSpace: 'flver-global',
+      skeletonId: 'part-follower'
+    }],
+    skeletons: [{
+      id: 'leader',
+      bones: [{
+        id: 'leader-root',
+        index: 0,
+        name: 'leader-root',
+        parentIndex: -1,
+        translation: [1, 0, 0],
+        rotation: [0, 0, 0]
+      }]
+    }],
+    skeletonBindings: [{
+      id: 'part-follower',
+      leaderSkeletonId: 'leader',
+      bones: [{
+        id: 'part-root',
+        index: 0,
+        name: 'part-root',
+        parentIndex: -1,
+        translation: [2, 0, 0],
+        rotation: [0, 0, 0]
+      }, {
+        id: 'part-finger',
+        index: 1,
+        name: 'part-finger',
+        parentIndex: 0,
+        translation: [0, 1, 0],
+        rotation: [0, 0, 0]
+      }, {
+        id: 'part-knuckle',
+        index: 2,
+        name: 'part-knuckle',
+        parentIndex: 1,
+        translation: [0, 0.5, 0],
+        rotation: [0, 0, 0]
+      }],
+      // The child and grandchild intentionally have no leader counterparts.
+      // Mature viewers still walk this follower-only subtree using its native
+      // local FK instead of leaving stale bind-pose world matrices behind.
+      sourceToLeader: [0, -1, -1]
+    }],
+    bounds: { min: [-1, -1, -1], max: [3, 1, 1], center: [1, 0, 0] }
+  };
+  let audit: Array<{ dispose(): void }> = [];
+  const handle = await mountFlverScene({
+    container: new FakeElement() as unknown as HTMLElement,
+    scene,
+    rendererFactory: () => new FakeRenderer(),
+    resourceAudit: (resources) => {
+      audit = [...resources];
+    }
+  });
+  const skeletons = audit.filter((resource): resource is three.Skeleton => resource instanceof three.Skeleton);
+  assertEqual(skeletons.length, 2, 'follower 绑定保留独立的 source skeleton');
+  const byName = new Map(skeletons.map((skeleton) => [skeleton.bones[0]?.name, skeleton]));
+  const leader = byName.get('leader-root');
+  const follower = byName.get('part-root');
+  const followerFinger = follower?.bones.find((bone) => bone.name === 'part-finger');
+  const followerKnuckle = follower?.bones.find((bone) => bone.name === 'part-knuckle');
+  assert(leader && follower && followerFinger && followerKnuckle, 'leader/source skeleton 及 follower 子树均已创建');
+  assert(Math.abs(leader.boneInverses[0]!.elements[12] + 1) < 1e-6,
+    'leader 使用自己的 reference pose inverse');
+  assert(Math.abs(follower.boneInverses[0]!.elements[12] + 2) < 1e-6,
+    `follower 保留部件自己的 reference pose inverse (actual=${follower.boneInverses[0]!.elements[12]}, world=${follower.bones[0]!.matrixWorld.elements[12]}, local=${follower.bones[0]!.position.x})`);
+  assert(Math.abs(follower.boneMatrices[12]! + 1) < 1e-6,
+    'bind pose follower FK 已映射到 leader，而非留在部件 reference pose');
+
+  handle.setSkeletonPoses?.({
+    leader: [{ translation: [3, 0, 0], rotation: [0, 0, 0, 1], scale: [1, 1, 1] }]
+  });
+  assert(Math.abs(follower.boneMatrices[12]! - 1) < 1e-6,
+    'leader 变换后 follower 使用 leader current FK 与自己的 inverse bind');
+  assert(Math.abs(followerFinger.matrixWorld.elements[12] - 3) < 1e-6
+    && Math.abs(followerFinger.matrixWorld.elements[13] - 1) < 1e-6,
+    '未映射的 follower 手指子骨骼沿 native local FK 跟随已映射手腕');
+  assert(Math.abs(followerKnuckle.matrixWorld.elements[12] - 3) < 1e-6
+    && Math.abs(followerKnuckle.matrixWorld.elements[13] - 1.5) < 1e-6,
+    '未映射的 follower 深层手指子骨骼沿 native local FK 递归跟随');
+  handle.dispose();
+  record('flver-follower-binding-reference-pose');
+}
+
 async function testRepeatedMountUnmount(record: (name: string) => void): Promise<void> {
   let totalTracked = 0;
   for (let cycle = 0; cycle < 5; cycle++) {
@@ -774,6 +915,7 @@ async function main(): Promise<void> {
   await testProxyModelReplacement(record);
   await testFlverScene(record);
   await testMultiSkeletonPoseBatch(record);
+  await testFollowerBindingPreservesReferencePose(record);
   testSkinningBindPose(record);
   await testRepeatedMountUnmount(record);
   await testAbsolutePathLeakRejected(record);

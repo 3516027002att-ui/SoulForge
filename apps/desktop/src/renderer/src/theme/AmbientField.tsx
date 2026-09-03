@@ -1,5 +1,8 @@
 import { useEffect, useRef, type ReactElement } from 'react';
 
+const AMBIENT_MAX_FPS = 24;
+const AMBIENT_FRAME_INTERVAL_MS = 1000 / AMBIENT_MAX_FPS;
+
 /**
  * 流光溢彩白 V3：全窗口 WebGL 虹彩环境场。
  *
@@ -162,6 +165,7 @@ export function AmbientField(): ReactElement {
     const start = performance.now();
     let raf = 0;
     let running = true;
+    let lastDrawAt = Number.NEGATIVE_INFINITY;
     const reduce = window.matchMedia('(prefers-reduced-motion: reduce)');
 
     function isLight(): boolean {
@@ -185,9 +189,14 @@ export function AmbientField(): ReactElement {
       if (!running) return;
       resize();
       if (!isLight()) {
-        if (!document.hidden && !reduce.matches) raf = requestAnimationFrame(draw);
+        canvas.dataset.ambientMotion = 'off';
         return;
       }
+      if (!reduce.matches && now - lastDrawAt < AMBIENT_FRAME_INTERVAL_MS) {
+        if (!document.hidden) raf = requestAnimationFrame(draw);
+        return;
+      }
+      lastDrawAt = now;
       gl.uniform2f(locRes, canvas.width, canvas.height);
       gl.uniform1f(locTime, (now - start) / 1000);
       gl.uniform1f(locActive, 0);
@@ -198,6 +207,7 @@ export function AmbientField(): ReactElement {
 
     function kick(): void {
       cancelAnimationFrame(raf);
+      lastDrawAt = Number.NEGATIVE_INFINITY;
       raf = requestAnimationFrame(draw);
     }
 
@@ -206,6 +216,10 @@ export function AmbientField(): ReactElement {
     reduce.addEventListener('change', onReduce);
     document.addEventListener('visibilitychange', onVisibility);
     window.addEventListener('resize', kick);
+    const themeObserver = typeof MutationObserver !== 'undefined'
+      ? new MutationObserver(() => kick())
+      : null;
+    themeObserver?.observe(root, { attributes: true, attributeFilter: ['data-theme'] });
     kick();
 
     return () => {
@@ -214,6 +228,7 @@ export function AmbientField(): ReactElement {
       reduce.removeEventListener('change', onReduce);
       document.removeEventListener('visibilitychange', onVisibility);
       window.removeEventListener('resize', kick);
+      themeObserver?.disconnect();
       gl.deleteBuffer(buffer);
       gl.deleteProgram(program);
       gl.deleteShader(vs);

@@ -170,6 +170,35 @@ interface CompatibilityPartCandidate {
   absolutePath: string;
 }
 
+// c0000 的这组身份来自当前原版资源的 native FLVER/MTD 读取：
+// HD_M_9510 使用 Character_MeshDecal 接收面，而成熟查看器用
+// FC_M_0000_head_a 作为该只读兼容投影的颜色源。它不是“第一个 head 纹理”
+// 或语义相似名回退；只有 exact parts 文件名命中时才可启用。
+const C0000_VERIFIED_HEAD_PROJECTION_PART = 'hd_m_9510.partsbnd.dcx';
+const C0000_VERIFIED_HEAD_PROJECTION_TEXTURE = 'FC_M_0000_head_a';
+
+function c0000CompatibilityProjectionTextureName(
+  slot: typeof C0000_COMPATIBILITY_PART_SLOTS[number],
+  candidateName: string
+): string | undefined {
+  return slot === 'hd'
+    && candidateName.toLowerCase() === C0000_VERIFIED_HEAD_PROJECTION_PART
+    ? C0000_VERIFIED_HEAD_PROJECTION_TEXTURE
+    : undefined;
+}
+
+function hasCompatibilityProjection(
+  bundle: CharacterPreviewBundle,
+  textureName: string
+): boolean {
+  return bundle.models.some((model) => model.meshes.some((mesh) =>
+    mesh.renderMode === 'compatibility-projected'
+    && mesh.projectionTextureName === textureName
+    && typeof mesh.projectionTexturePreviewToken === 'string'
+    && mesh.projectionTexturePreviewToken.length > 0
+  ));
+}
+
 async function readDirectoryNames(directory: string | null): Promise<string[]> {
   if (!directory) return [];
   try {
@@ -938,6 +967,7 @@ export async function assembleC0000CompatibilityPreview(input: {
     let selected = false;
     for (const candidate of candidates) {
       attemptedCandidates += 1;
+      const projectionTextureName = c0000CompatibilityProjectionTextureName(slot, candidate.name);
       try {
         const partResult = await runBridge<unknown>({
           command: 'read-chrbnd-flver-preview',
@@ -948,12 +978,22 @@ export async function assembleC0000CompatibilityPreview(input: {
           commandOptions: {
             maxVertices: 1_000_000,
             maxIndices: 3_000_000,
-            texturePackagePaths: characterTexturePackagePaths(candidate.absolutePath)
+            texturePackagePaths: characterTexturePackagePaths(candidate.absolutePath),
+            ...(projectionTextureName
+              ? { compatibilityProjectionTextureName: projectionTextureName }
+              : {})
           }
         });
         if (partResult.parseStatus === 'failed'
           || !isCharacterPreviewBundle(partResult.data)
           || partResult.data.meshCount === 0) {
+          rejectedCandidates += 1;
+          continue;
+        }
+        if (projectionTextureName && !hasCompatibilityProjection(partResult.data, projectionTextureName)) {
+          // The exact native component was found, but its explicitly required
+          // texture source was not proved by the same Bridge read. Do not
+          // silently accept a textureless head and call it a completed face.
           rejectedCandidates += 1;
           continue;
         }
@@ -1266,7 +1306,8 @@ export function registerActionIpcHandlers(deps: ActionIpcDeps): void {
     if (!actionIndex || !actionIndex.isActionBinderMembershipReadyFor(characterFamily)) {
       // 先建立当前 character family 的完整前台投影；这仍然走统一的
       // deterministic enumerator + native membership reader，不在播放阶段
-      // 自己扫描 sibling ANIBND。全局索引继续由 workspace.scan 后台完成。
+      // 自己扫描 sibling ANIBND。全局索引保持延迟，避免打开工作区时读取
+      // 与当前角色无关的全部 ANIBND。
       if (deps.ensureActionBinderMembershipForFamily) {
         await deps.ensureActionBinderMembershipForFamily(characterFamily);
       } else {
@@ -1701,8 +1742,9 @@ export function registerActionIpcHandlers(deps: ActionIpcDeps): void {
       // The TAE clip is sampled in the leader skeleton's index space, so passing
       // the raw bundle to the renderer would leave body parts on independent,
       // unmoving skeletons (or make an unkeyed pose update the wrong skeleton).
-      // Normalize every multi-model action preview at the main/core boundary;
-      // the renderer then consumes one explicit leader skeleton namespace.
+      // Normalize every multi-model action preview at the main/core boundary:
+      // the leader owns the sampled pose, while each part retains its native
+      // bind skeleton through an explicit follower binding.
       if (previewBundle.models.length > 1 && !isLeaderRemappedBundle(previewBundle)) {
         const leader = previewBundle.models.find((model) => model.modelId === previewBundle.leaderModelId);
         if (!leader || leader.bones.length === 0) {

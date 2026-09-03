@@ -106,6 +106,10 @@ describe('问题 1 壳层：开始页只在首次打开；顶栏「开始」召�
     assert.match(workspaceIpcSource, /workspaceAnalyzeInFlight/);
   });
 
+  it('Agent 任务默认开启一次性 RAG 预检', () => {
+    assert.match(appSource, /useRagSearch:\s*true/);
+  });
+
   it('12-E：侧栏不再拼「XX · 逻辑库」（所有语义域都删，Files 数量与 project「开始」仍在）', () => {
     // 用户点名的是侧栏头那句「XX · 逻辑库」：这一句所有域都删，且不留空 hint span。
     assert.doesNotMatch(appSource, /\$\{domainLabel\(activeDomain\)\} · 逻辑库/);

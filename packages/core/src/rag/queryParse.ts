@@ -12,37 +12,60 @@ const URI_PATTERN = /\b(?:file|event|map|param|text|soulforge):\/\/[^\s"'<>]+/gi
 const QUOTED_PATTERN = /"([^"]{1,200})"|“([^”]{1,200})”/g;
 const NUMERIC_PATTERN = /\b\d{1,12}\b/g;
 const CJK_PATTERN = /[\u3400-\u9fff]/;
+const CJK_RUN_PATTERN = /[\u3400-\u9fff]{2,}/g;
 
 export function parseRagQuery(raw: string): ParsedRagQuery {
   const trimmed = raw.trim();
   const uris = unique(matchAll(trimmed, URI_PATTERN));
-  const phrases = unique(
+  const phraseValues = [
     [...trimmed.matchAll(QUOTED_PATTERN)]
       .map((match) => (match[1] ?? match[2] ?? '').trim())
       .filter((value) => value.length > 0)
-  );
+  ].flat();
 
   let remainder = trimmed;
-  for (const uri of uris) remainder = remainder.replaceAll(uri, ' ');
-  remainder = remainder.replace(QUOTED_PATTERN, ' ');
+  // Keep a masked copy for numeric classification. It retains the Chinese
+  // words around a number ("血条为2" / "持续5秒") while removing numbers
+  // embedded in a URI or an explicitly quoted phrase.
+  let numericSource = trimmed;
+  for (const uri of uris) {
+    const mask = ' '.repeat(uri.length);
+    remainder = remainder.replaceAll(uri, mask);
+    numericSource = numericSource.replaceAll(uri, mask);
+  }
+  remainder = remainder.replace(QUOTED_PATTERN, (match) => ' '.repeat(match.length));
+  numericSource = numericSource.replace(QUOTED_PATTERN, (match) => ' '.repeat(match.length));
+
+  // 中文请求通常把多个意图写在同一句里。如果把整段连续中文交给
+  // tokenize，它会成为一个必须完整出现的超长 term，任何只包含对象名的
+  // PARAM/地图条目都会被过滤掉。连续片段用 phrase + 二字短语检索，
+  // phrase 命中不参加多 term 的半数门槛。
+  const cjkRuns = matchAll(remainder, CJK_RUN_PATTERN);
+  for (const run of cjkRuns) {
+    phraseValues.push(run, ...cjkBigrams(run));
+    // Keep offsets stable while removing the natural-language phrase.  The
+    // numeric classifier below uses the surrounding words to distinguish an
+    // object ID from a task value such as "血条为 2" or "持续 5 秒".
+    remainder = remainder.replace(new RegExp(escapeRegExp(run), 'g'), ' '.repeat(run.length));
+  }
 
   // 完整原子地址（带 `#` 或下划线四段块）进 phrases：m11_01_00_00 作为一个
   // 不可拆的短语，命中索引 / 正文里同一个原子词（问题 6）。
   for (const atomic of extractAtomicAddressTokens(remainder)) {
-    if (atomic.includes('#') || atomic.includes('_')) phrases.push(atomic);
+    if (atomic.includes('#') || atomic.includes('_')) phraseValues.push(atomic);
   }
 
-  const numericIds = uniqueNumbers(matchAll(remainder, NUMERIC_PATTERN).map((value) => Number(value)));
+  const numericIds = extractNumericIds(numericSource);
   const terms = tokenize(remainder).filter((term) => !/^\d+$/.test(term));
 
-  if (terms.length === 0 && phrases.length === 0 && CJK_PATTERN.test(trimmed)) {
-    phrases.push(trimmed);
+  if (terms.length === 0 && phraseValues.length === 0 && CJK_PATTERN.test(trimmed)) {
+    phraseValues.push(trimmed);
     // 整串之外再产出 2 字 bigram：用户只记得部分词（「义手」）也能命中
     // 含完整短语（「狼的义手」）的 chunk —— 复用 phrase-body includes 匹配。
-    for (const bigram of cjkBigrams(trimmed)) phrases.push(bigram);
+    phraseValues.push(...cjkBigrams(trimmed));
   }
 
-  return { raw: trimmed, terms, phrases, numericIds, uris };
+  return { raw: trimmed, terms, phrases: unique(phraseValues), numericIds, uris };
 }
 
 /** 连续 CJK 片段切 2 字 bigram；非 CJK 字符打断片段。 */
@@ -123,4 +146,42 @@ function uniqueNumbers(values: readonly number[]): number[] {
     result.push(value);
   }
   return result;
+}
+
+/**
+ * Only promote numbers that look like identifiers.  A natural-language task
+ * commonly contains small configuration values (health-bar count, duration,
+ * retry count, etc.). Treating every number as an ID made a query such as
+ * "血条设置为2，落雷5秒" rank map entities whose native IDs happened to be 2
+ * or 5 above the actual character evidence.
+ *
+ * Long numeric tokens remain searchable by default because Sekiro IDs are
+ * often written without a label. Short tokens are retained only when the
+ * query explicitly supplies an ID context or consists solely of that number.
+ */
+function extractNumericIds(value: string): number[] {
+  const matches = [...value.matchAll(NUMERIC_PATTERN)];
+  const kept: number[] = [];
+  for (const match of matches) {
+    const token = match[0];
+    if (!token) continue;
+    const start = match.index ?? 0;
+    const before = value.slice(Math.max(0, start - 24), start);
+    const after = value.slice(start + token.length, start + token.length + 24);
+    const explicit = isExplicitNumericIdContext(before);
+    if (!explicit && isMeasurementContext(before, after)) continue;
+    if (explicit || token.length >= 3) {
+      kept.push(Number(token));
+    }
+  }
+  return uniqueNumbers(kept);
+}
+
+function isExplicitNumericIdContext(before: string): boolean {
+  return /(?:id|rowid|eventid|textid|entityid|paramid|flag|编号|行号|事件号|文本号|实体号|参数号)\s*[:=#]?\s*$/iu.test(before);
+}
+
+function isMeasurementContext(before: string, after: string): boolean {
+  const context = `${before}${after}`;
+  return /(?:血条|生命|健康|health|hp|持续|duration|落雷|秒|毫秒|milliseconds?|seconds?|\bms\b|\bs\b|条|个|次|层|级|等级|分钟|小时|数量|随机|设置为)/iu.test(context);
 }

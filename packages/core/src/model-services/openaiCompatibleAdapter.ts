@@ -172,9 +172,16 @@ export class OpenAiCompatibleAdapter implements ModelServiceAdapter {
       return;
     }
     if (!response.ok || !response.body) {
+      // Keep the provider's JSON error body.  DashScope and other compatible
+      // gateways put the actionable reason (for example context overflow or
+      // an unsupported request field) here; dropping it makes a real Agent
+      // run indistinguishable from an unexplained HTTP failure.
+      const text = !response.ok
+        ? await response.text().catch(() => '')
+        : '';
       cleanup();
       yield errorStreamEvent(classifyHttpError(
-        response.status, '', 'OpenAI-compatible',
+        response.status, text, 'OpenAI-compatible',
         response.headers.get('retry-after')
       ));
       return;
@@ -344,7 +351,11 @@ function mapFinish(
   reason: string | null | undefined,
   toolCalls: ToolCall[]
 ): ModelCompleteResult['finishReason'] {
-  if (toolCalls.length > 0 || reason === 'tool_calls') return 'tool_use';
+  if (toolCalls.length > 0) return 'tool_use';
+  // A gateway can announce tool_calls while dropping the malformed/empty
+  // function item from the stream. Treat that as an incomplete response so
+  // the agent cannot report a successful stop without executing any tool.
+  if (reason === 'tool_calls') return 'length';
   if (reason === 'length') return 'length';
   if (reason === 'stop' || !reason) return 'stop';
   return 'stop';

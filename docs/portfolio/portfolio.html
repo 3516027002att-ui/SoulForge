@@ -1,0 +1,446 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="SoulForge AI Mod 工作台：腾讯 2027 AI 产品经理培训生作品集。">
+  <title>SoulForge · AI Mod 工作台</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #070a11;
+      --surface: #10141b;
+      --surface-2: #151b24;
+      --line: #2b3441;
+      --line-soft: rgba(255,255,255,.09);
+      --text: #f4f7fb;
+      --muted: #a5afbd;
+      --faint: #687382;
+      --teal: #14b8a6;
+      --red: #f87171;
+      --purple: #a78bfa;
+      --amber: #fbbf24;
+      --green: #34d399;
+      --blue: #60a5fa;
+      --pink: #f472b6;
+      --mono: "Cascadia Code", "SFMono-Regular", Consolas, monospace;
+      --sans: Inter, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+    }
+    * { box-sizing: border-box; }
+    html { background: #161a21; scroll-behavior: smooth; }
+    body {
+      margin: 0;
+      background: #161a21;
+      color: var(--text);
+      font-family: var(--sans);
+      -webkit-font-smoothing: antialiased;
+      -webkit-print-color-adjust: exact;
+      print-color-adjust: exact;
+    }
+    @page { size: 1280px 720px; margin: 0; }
+    .page {
+      --accent: var(--teal);
+      position: relative;
+      width: 1280px;
+      height: 720px;
+      overflow: hidden;
+      padding: 48px 64px 50px;
+      background-color: #05080d;
+      background-image: var(--page-bg);
+      background-position: center;
+      background-size: cover;
+      background-repeat: no-repeat;
+      page-break-after: always;
+      break-after: page;
+    }
+    .page:last-child { page-break-after: auto; break-after: auto; }
+    .page::before {
+      content: "";
+      position: absolute;
+      inset: 0;
+      z-index: 0;
+      pointer-events: none;
+      opacity: .14;
+      background-image:
+        linear-gradient(rgba(255,255,255,.028) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(255,255,255,.028) 1px, transparent 1px);
+      background-size: 42px 42px;
+      mask-image: linear-gradient(to bottom, rgba(0,0,0,.85), transparent 74%);
+    }
+    .page > * { position: relative; z-index: 1; }
+    .topline { display: flex; align-items: center; justify-content: space-between; height: 18px; margin-bottom: 28px; }
+    .eyebrow { color: var(--accent); font-size: 11px; font-weight: 650; letter-spacing: .19em; line-height: 1; text-transform: uppercase; }
+    .counter { color: var(--faint); font-family: var(--mono); font-size: 11px; letter-spacing: .12em; }
+    .title { max-width: 980px; margin: 0; color: var(--text); font-size: 50px; font-weight: 500; letter-spacing: -.045em; line-height: 1.08; }
+    .title .accent { color: var(--accent); }
+    .lead { max-width: 700px; margin: 19px 0 0; color: var(--muted); font-size: 19px; line-height: 1.55; }
+    .muted { color: var(--muted); }
+    .faint { color: var(--faint); }
+    .mono { font-family: var(--mono); }
+    .code { display: inline-flex; align-items: center; padding: 3px 7px; border: 1px solid var(--line); border-radius: 5px; background: rgba(0,0,0,.22); color: #d7def0; font-family: var(--mono); font-size: .86em; line-height: 1.2; }
+    .pill { display: inline-flex; align-items: center; gap: 7px; min-height: 26px; padding: 4px 10px; border: 1px solid var(--line); border-radius: 999px; background: rgba(255,255,255,.035); color: var(--muted); font-size: 12px; line-height: 1; }
+    .pill::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: var(--accent); box-shadow: 0 0 13px var(--accent); }
+    .panel { border: 1px solid var(--line); border-radius: 12px; background: linear-gradient(145deg, rgba(255,255,255,.06), rgba(255,255,255,.018)); box-shadow: 0 16px 36px rgba(0,0,0,.14); }
+    .page-footer { position: absolute; right: 64px; bottom: 27px; left: 64px; display: flex; align-items: center; justify-content: space-between; gap: 24px; color: var(--faint); font-size: 11px; letter-spacing: .02em; }
+    .page-footer strong { color: var(--muted); font-size: 11px; font-weight: 500; }
+    .progress { position: absolute; right: 64px; bottom: 17px; left: 64px; height: 2px; overflow: hidden; background: rgba(255,255,255,.09); }
+    .progress span { display: block; height: 100%; width: var(--progress, 8%); background: var(--accent); box-shadow: 0 0 12px var(--accent); }
+    .cover { padding-top: 54px; --accent: var(--teal); }
+    .cover-grid { display: grid; grid-template-columns: 1fr 1.02fr; gap: 42px; margin-top: 54px; }
+    .cover-title { max-width: 580px; margin: 0; font-size: 72px; font-weight: 450; letter-spacing: -.07em; line-height: .98; }
+    .cover-title span { color: var(--accent); }
+    .cover-subtitle { max-width: 520px; margin: 27px 0 0; color: #d3dae4; font-size: 22px; line-height: 1.45; }
+    .cover-meta { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 37px; }
+    .cover-note { position: absolute; right: 64px; bottom: 54px; max-width: 370px; color: var(--muted); font-size: 14px; line-height: 1.5; text-align: right; }
+    .cover-note strong { display: block; margin-bottom: 5px; color: var(--text); font-weight: 500; }
+    .visual-stack { position: relative; height: 485px; }
+    .screen { position: absolute; overflow: hidden; border: 1px solid #394454; border-radius: 12px; background: #0d1117; box-shadow: 0 24px 50px rgba(0,0,0,.45); }
+    .screen img { display: block; width: 100%; height: 100%; object-fit: cover; }
+    .screen-main { top: 0; right: 0; width: 510px; height: 320px; transform: rotate(1.1deg); }
+    .statement-layout { display: grid; grid-template-columns: .84fr 1.16fr; gap: 46px; margin-top: 48px; }
+    .statement { max-width: 390px; color: var(--text); font-size: 34px; font-weight: 450; letter-spacing: -.045em; line-height: 1.16; }
+    .problem-opening { max-width: 410px; color: var(--text); font-size: 24px; font-weight: 450; letter-spacing: -.035em; line-height: 1.4; }
+    .problem-conclusion { max-width: 400px; margin-top: 24px; color: var(--muted); font-size: 14px; line-height: 1.65; }
+    .statement-note { max-width: 340px; margin-top: 26px; color: var(--muted); font-size: 14px; line-height: 1.65; }
+    .problem-cards { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; }
+    .problem-card { min-height: 224px; padding: 21px; }
+    .problem-card .num { color: var(--red); font-family: var(--mono); font-size: 12px; }
+    .problem-card h3 { margin: 55px 0 11px; font-size: 20px; font-weight: 500; letter-spacing: -.03em; }
+    .problem-card p { margin: 0; color: var(--muted); font-size: 13px; line-height: 1.65; }
+    .old-flow { display: flex; align-items: center; gap: 0; height: 68px; margin-top: 37px; padding: 0 17px; border: 1px solid rgba(248,113,113,.38); border-radius: 10px; background: rgba(248,113,113,.055); }
+    .old-flow .node { flex: 1; color: #d8afb0; font-family: var(--mono); font-size: 12px; text-align: center; }
+    .old-flow .arrow { color: var(--red); font-size: 17px; opacity: .7; }
+    .product-grid { display: grid; grid-template-columns: .8fr 1.2fr; gap: 60px; margin-top: 56px; }
+    .product-statement { max-width: 390px; font-size: 37px; font-weight: 450; letter-spacing: -.055em; line-height: 1.12; }
+    .product-statement span { color: var(--purple); }
+    .product-note { max-width: 330px; margin-top: 28px; color: var(--muted); font-size: 14px; line-height: 1.65; }
+    .task-card { padding: 24px 26px; }
+    .task-card .task-head { display: flex; align-items: center; justify-content: space-between; padding-bottom: 17px; border-bottom: 1px solid var(--line); }
+    .task-card .task-head strong { font-size: 15px; font-weight: 500; }
+    .task-card .task-head span { color: var(--purple); font-family: var(--mono); font-size: 11px; }
+    .task-row { display: grid; grid-template-columns: 128px 1fr; gap: 20px; padding: 16px 0; border-bottom: 1px solid var(--line-soft); }
+    .task-row:last-child { border-bottom: 0; }
+    .task-row .key { color: var(--faint); font-size: 12px; }
+    .task-row .value { color: #e4e9f1; font-size: 14px; line-height: 1.5; }
+    .task-row .value .code { margin: 0 5px 5px 0; }
+    .quote-strip { display: flex; align-items: center; gap: 14px; margin-top: 46px; color: var(--muted); font-size: 14px; }
+    .quote-strip::before { content: ""; width: 28px; height: 2px; background: var(--purple); box-shadow: 0 0 12px var(--purple); }
+    .chain { display: grid; grid-template-columns: repeat(8, 1fr); gap: 8px; margin-top: 48px; }
+    .chain-step { position: relative; min-height: 151px; padding: 17px 15px; border: 1px solid var(--line); border-radius: 9px; background: rgba(255,255,255,.034); }
+    .chain-step:not(:last-child)::after { content: "›"; position: absolute; top: 61px; right: -12px; color: var(--blue); font-size: 25px; font-weight: 300; z-index: 2; }
+    .chain-step .index { color: var(--blue); font-family: var(--mono); font-size: 11px; }
+    .chain-step h3 { margin: 35px 0 8px; font-size: 16px; font-weight: 500; letter-spacing: -.025em; }
+    .chain-step p { margin: 0; color: var(--muted); font-size: 11px; line-height: 1.5; }
+    .state-bar { display: flex; align-items: center; gap: 9px; margin-top: 31px; padding: 13px 16px; border-left: 2px solid var(--blue); background: rgba(96,165,250,.07); color: var(--muted); font-size: 13px; }
+    .state-bar strong { color: var(--text); font-weight: 500; }
+    .demo-prompt { display: flex; align-items: flex-start; gap: 15px; margin-top: 42px; padding: 22px 26px; border: 1px solid rgba(167,139,250,.48); border-radius: 11px; background: linear-gradient(110deg, rgba(167,139,250,.14), rgba(255,255,255,.025)); }
+    .demo-prompt .prompt-mark { color: var(--purple); font-family: var(--mono); font-size: 16px; }
+    .demo-prompt p { margin: 0; color: #f0edff; font-size: 21px; line-height: 1.45; }
+    .demo-note { margin-top: 14px; color: var(--faint); font-size: 12px; }
+    .objective-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px; margin-top: 25px; }
+    .objective-card { min-height: 178px; padding: 20px; }
+    .objective-card .obj-index { color: var(--purple); font-family: var(--mono); font-size: 11px; }
+    .objective-card h3 { margin: 43px 0 9px; font-size: 19px; font-weight: 500; }
+    .objective-card p { margin: 0; color: var(--muted); font-size: 13px; line-height: 1.5; }
+    .objective-card b { color: #e6e0ff; font-weight: 500; }
+    .uncertainty-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px; margin-top: 52px; }
+    .uncertainty-card { min-height: 338px; padding: 23px; border-top: 2px solid var(--accent); }
+    .uncertainty-card .small { color: var(--accent); font-family: var(--mono); font-size: 11px; }
+    .uncertainty-card h3 { margin: 35px 0 14px; font-size: 25px; font-weight: 500; letter-spacing: -.04em; }
+    .uncertainty-card p { margin: 0; color: var(--muted); font-size: 14px; line-height: 1.65; }
+    .uncertainty-card .action { display: flex; align-items: center; gap: 9px; margin-top: 30px; color: var(--text); font-size: 13px; }
+    .uncertainty-card .action::before { content: "→"; color: var(--accent); font-family: var(--mono); }
+    .uncertainty-foot { margin-top: 28px; color: var(--muted); font-size: 14px; }
+    .uncertainty-foot strong { color: var(--text); font-weight: 500; }
+    .entity-layout { display: grid; grid-template-columns: 1.05fr .95fr; gap: 28px; margin-top: 43px; }
+    .search-panel { padding: 20px; }
+    .search-head { display: flex; align-items: center; gap: 10px; height: 36px; padding: 0 12px; border: 1px solid var(--line); border-radius: 7px; background: rgba(0,0,0,.22); color: var(--muted); font-family: var(--mono); font-size: 12px; }
+    .search-head::before { content: "⌕"; color: var(--green); font-size: 18px; }
+    .search-result { display: grid; grid-template-columns: 20px 1fr auto; align-items: center; gap: 10px; padding: 17px 4px; border-bottom: 1px solid var(--line-soft); }
+    .search-result:last-child { border-bottom: 0; }
+    .search-result .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--green); box-shadow: 0 0 10px var(--green); }
+    .search-result strong { display: block; font-size: 14px; font-weight: 500; }
+    .search-result span { display: block; margin-top: 4px; color: var(--muted); font-family: var(--mono); font-size: 11px; }
+    .search-result .kind { color: var(--green); font-size: 11px; }
+    .entity-list { display: grid; gap: 10px; }
+    .entity-card { display: grid; grid-template-columns: 145px 1fr; gap: 17px; padding: 17px 19px; border: 1px solid var(--line); border-radius: 9px; background: rgba(255,255,255,.03); }
+    .entity-card .entity-name { color: var(--green); font-size: 12px; }
+    .entity-card .entity-body { color: var(--muted); font-size: 12px; line-height: 1.6; }
+    .entity-card .entity-body strong { color: var(--text); font-weight: 500; }
+    .entity-note { margin-top: 14px; padding: 13px 16px; border-left: 2px solid var(--amber); background: rgba(251,191,36,.06); color: #c8b98b; font-size: 12px; line-height: 1.55; }
+    .path-layout { display: grid; grid-template-columns: .92fr 1.08fr; gap: 38px; margin-top: 43px; }
+    .path-flow { display: grid; gap: 0; }
+    .path-item { display: grid; grid-template-columns: 28px 1fr; gap: 14px; min-height: 66px; }
+    .path-item .path-node { position: relative; display: flex; justify-content: center; }
+    .path-item .path-node::before { content: ""; width: 11px; height: 11px; margin-top: 5px; border: 2px solid var(--amber); border-radius: 50%; background: var(--bg); box-shadow: 0 0 12px rgba(251,191,36,.5); z-index: 1; }
+    .path-item:not(:last-child) .path-node::after { content: ""; position: absolute; top: 16px; bottom: -3px; width: 1px; background: linear-gradient(var(--amber), rgba(251,191,36,.08)); }
+    .path-item strong { display: block; font-size: 15px; font-weight: 500; }
+    .path-item p { margin: 7px 0 0; color: var(--muted); font-size: 12px; line-height: 1.5; }
+    .path-callout { margin-top: 9px; padding: 17px 19px; border: 1px solid rgba(251,191,36,.45); border-radius: 9px; background: rgba(251,191,36,.08); color: #e9d79d; font-size: 14px; line-height: 1.55; }
+    .event-shot { overflow: hidden; height: 336px; border: 1px solid #394454; border-radius: 11px; background: #0c1015; box-shadow: 0 18px 40px rgba(0,0,0,.3); }
+    .event-shot img { display: block; width: 100%; height: 100%; object-fit: cover; object-position: center; }
+    .path-tags { display: flex; gap: 9px; margin-top: 16px; }
+    .path-tags .tag { flex: 1; padding: 10px 12px; border: 1px solid var(--line); border-radius: 7px; color: var(--muted); font-size: 11px; line-height: 1.4; }
+    .path-tags .tag strong { display: block; margin-bottom: 3px; color: var(--text); font-size: 12px; font-weight: 500; }
+    .memory-layout { display: grid; grid-template-columns: .85fr 1.15fr; gap: 40px; margin-top: 42px; }
+    .memory-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 9px; align-content: start; }
+    .memory-tag { display: flex; align-items: center; gap: 9px; min-height: 43px; padding: 0 14px; border: 1px solid var(--line); border-radius: 7px; background: rgba(255,255,255,.03); color: #d3d9e2; font-size: 13px; }
+    .memory-tag::before { content: "·"; color: var(--green); font-size: 22px; line-height: 0; }
+    .memory-note { margin-top: 19px; color: var(--muted); font-size: 12px; line-height: 1.6; }
+    .retrieval-stack { display: grid; gap: 12px; }
+    .retrieve-pair { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+    .retrieve-pair .retrieve-box { height: 100%; }
+    .retrieve-box { position: relative; padding: 17px 20px; border: 1px solid var(--line); border-radius: 9px; background: rgba(255,255,255,.03); }
+    .retrieve-box.default { border-color: rgba(52,211,153,.55); background: rgba(52,211,153,.065); }
+    .retrieve-box.optional { border-style: dashed; border-color: rgba(167,139,250,.55); background: rgba(167,139,250,.055); }
+    .retrieve-box .box-title { display: flex; align-items: center; justify-content: space-between; gap: 20px; }
+    .retrieve-box .box-title strong { font-size: 16px; font-weight: 500; }
+    .retrieve-box .box-title span { color: var(--green); font-family: var(--mono); font-size: 10px; letter-spacing: .08em; text-transform: uppercase; }
+    .retrieve-box.optional .box-title span { color: var(--purple); }
+    .retrieve-box p { margin: 10px 0 0; color: var(--muted); font-size: 12px; line-height: 1.55; }
+    .retrieve-arrow { text-align: center; color: var(--green); font-family: var(--mono); font-size: 15px; }
+    .retrieve-join { display: flex; align-items: center; gap: 10px; color: var(--faint); font-family: var(--mono); font-size: 10px; letter-spacing: .06em; text-transform: uppercase; }
+    .retrieve-join::before, .retrieve-join::after { content: ""; flex: 1; height: 1px; background: var(--line); }
+    .retrieval-result { padding: 15px 20px; border: 1px solid rgba(96,165,250,.45); border-radius: 9px; background: rgba(96,165,250,.065); color: #d4e5ff; font-family: var(--mono); font-size: 12px; }
+    .memory-footer-note { margin-top: 19px; color: var(--faint); font-size: 11px; line-height: 1.5; }
+    .evidence-layout { display: grid; grid-template-columns: 1.1fr .9fr; gap: 38px; margin-top: 42px; }
+    .evidence-file { min-height: 382px; padding: 19px 22px; border: 1px solid rgba(96,165,250,.5); border-radius: 10px; background: #0b1017; box-shadow: 0 18px 42px rgba(0,0,0,.24); }
+    .file-top { display: flex; align-items: center; gap: 8px; padding-bottom: 14px; border-bottom: 1px solid var(--line); color: var(--muted); font-family: var(--mono); font-size: 11px; }
+    .file-top i { width: 8px; height: 8px; border-radius: 50%; background: var(--blue); box-shadow: 0 0 11px var(--blue); }
+    .evidence-file pre { margin: 19px 0 0; color: #c9d5e6; font-family: var(--mono); font-size: 12px; line-height: 1.8; white-space: pre-wrap; }
+    .evidence-file .key { color: var(--blue); }
+    .evidence-file .value { color: #dce4f1; }
+    .evidence-file .budget { color: var(--amber); }
+    .gate-flow { display: grid; gap: 9px; }
+    .gate-step { display: grid; grid-template-columns: 29px 1fr auto; align-items: center; gap: 11px; min-height: 51px; padding: 0 13px; border: 1px solid var(--line); border-radius: 8px; background: rgba(255,255,255,.03); }
+    .gate-step .n { color: var(--blue); font-family: var(--mono); font-size: 11px; }
+    .gate-step strong { font-size: 13px; font-weight: 500; }
+    .gate-step span { color: var(--faint); font-size: 11px; text-align: right; }
+    .gate-step.gate { border-color: rgba(251,191,36,.58); background: rgba(251,191,36,.09); }
+    .gate-step.gate .n, .gate-step.gate span { color: var(--amber); }
+    .gate-caption { margin-top: 20px; padding: 15px 17px; border-left: 2px solid var(--blue); background: rgba(96,165,250,.07); color: var(--muted); font-size: 12px; line-height: 1.6; }
+    .metrics { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin-top: 44px; }
+    .metric { min-height: 146px; padding: 21px 20px; border: 1px solid rgba(251,191,36,.28); border-radius: 10px; background: linear-gradient(150deg, rgba(251,191,36,.11), rgba(255,255,255,.025)); }
+    .metric .num { color: var(--amber); font-size: 39px; font-weight: 450; letter-spacing: -.065em; line-height: 1; }
+    .metric .desc { margin-top: 18px; color: #e9e1c8; font-size: 13px; }
+    .metric .source { margin-top: 6px; color: var(--faint); font-family: var(--mono); font-size: 10px; }
+    .efficiency-chain { display: grid; grid-template-columns: repeat(7, 1fr); gap: 0; margin-top: 34px; }
+    .eff-step { min-height: 93px; padding: 16px 14px; border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); border-left: 1px solid var(--line); color: var(--muted); font-size: 12px; line-height: 1.45; }
+    .eff-step:last-child { border-right: 1px solid var(--line); }
+    .eff-step.active { background: rgba(251,191,36,.08); color: #eee5c9; }
+    .eff-step strong { display: block; margin-bottom: 9px; color: var(--text); font-size: 13px; font-weight: 500; }
+    .eff-step.active strong { color: var(--amber); }
+    .sessions { margin-top: 21px; color: var(--faint); font-family: var(--mono); font-size: 10px; letter-spacing: .01em; }
+    .dev-layout { display: grid; grid-template-columns: .75fr .95fr .85fr; gap: 27px; margin-top: 45px; }
+    .dev-column-title { margin-bottom: 13px; color: var(--purple); font-size: 11px; font-weight: 650; letter-spacing: .13em; text-transform: uppercase; }
+    .tool-list, .model-list { display: grid; gap: 8px; }
+    .tool-card, .model-card { display: flex; align-items: center; justify-content: space-between; min-height: 45px; padding: 0 14px; border: 1px solid var(--line); border-radius: 7px; background: rgba(255,255,255,.03); color: #e6e9f2; font-size: 13px; }
+    .tool-card span, .model-card span { color: var(--faint); font-family: var(--mono); font-size: 10px; }
+    .tool-card:first-child { border-color: rgba(167,139,250,.6); background: rgba(167,139,250,.1); }
+    .dev-pipeline { display: grid; grid-template-columns: repeat(2, 1fr); gap: 8px; }
+    .dev-pipeline .pipe { display: flex; align-items: center; min-height: 48px; padding: 0 13px; border: 1px solid var(--line); border-radius: 7px; color: var(--muted); font-size: 12px; }
+    .dev-pipeline .pipe::before { content: "↳"; margin-right: 9px; color: var(--purple); font-family: var(--mono); }
+    .protocols { display: flex; flex-wrap: wrap; gap: 7px; margin-top: 16px; }
+    .protocol { padding: 6px 8px; border: 1px solid rgba(96,165,250,.4); border-radius: 5px; color: #bed7f7; font-family: var(--mono); font-size: 10px; }
+    .handoff { display: flex; align-items: baseline; gap: 12px; margin-top: 28px; padding-top: 20px; border-top: 1px solid var(--line); }
+    .handoff strong { color: var(--pink); font-size: 29px; font-weight: 450; letter-spacing: -.05em; }
+    .handoff span { color: var(--muted); font-size: 12px; }
+    .iteration-layout { display: grid; grid-template-columns: .75fr 1.25fr; gap: 43px; margin-top: 42px; }
+    .session-stack { display: grid; gap: 9px; }
+    .session-row { display: grid; grid-template-columns: 65px 1fr auto; align-items: center; gap: 13px; min-height: 57px; padding: 0 15px; border: 1px solid var(--line); border-radius: 8px; background: rgba(255,255,255,.03); }
+    .session-row strong { color: var(--pink); font-size: 24px; font-weight: 450; letter-spacing: -.04em; }
+    .session-row span { color: var(--muted); font-size: 12px; }
+    .session-row em { color: var(--faint); font-family: var(--mono); font-size: 10px; font-style: normal; }
+    .session-caption { margin-top: 16px; color: var(--faint); font-size: 11px; line-height: 1.55; }
+    .mechanism-list { display: grid; gap: 0; }
+    .mechanism { display: grid; grid-template-columns: 1fr 28px 1fr; gap: 13px; align-items: center; min-height: 58px; border-bottom: 1px solid var(--line-soft); }
+    .mechanism:first-child { border-top: 1px solid var(--line-soft); }
+    .mechanism .problem { color: var(--muted); font-size: 12px; line-height: 1.4; }
+    .mechanism .arrow { color: var(--pink); font-family: var(--mono); text-align: center; }
+    .mechanism .solution { color: #e8d9e2; font-size: 12px; line-height: 1.4; }
+    .scope-row { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 24px; }
+    .scope-chip { padding: 7px 10px; border: 1px solid var(--line); border-radius: 5px; color: var(--muted); font-family: var(--mono); font-size: 10px; }
+    .closing { position: absolute; right: 64px; bottom: 78px; left: 64px; display: grid; grid-template-columns: 1.15fr .85fr; gap: 50px; align-items: end; }
+    .closing-title { max-width: 700px; color: var(--text); font-size: 31px; font-weight: 450; letter-spacing: -.045em; line-height: 1.22; }
+    .closing-title span { color: var(--teal); }
+    .closing-side { padding-left: 21px; border-left: 1px solid var(--teal); color: var(--muted); font-size: 13px; line-height: 1.65; }
+    .closing-side strong { display: block; margin-bottom: 7px; color: var(--text); font-weight: 500; }
+    .iteration-page .title { max-width: 1120px; font-size: 46px; }
+    .iteration-page .iteration-layout { margin-top: 30px; }
+    .iteration-page .session-row { min-height: 55px; }
+    .iteration-page .session-row span small { display: block; margin-bottom: 3px; color: var(--faint); font-family: var(--mono); font-size: 9px; line-height: 1; }
+    .iteration-page .mechanism { min-height: 45px; }
+    .iteration-page .mechanism .problem, .iteration-page .mechanism .solution { font-size: 11px; }
+    .iteration-page .scope-row { margin-top: 16px; }
+    .uncertainty-page .title, .entity-page .title, .evidence-page .title, .impact-page .title { max-width: 1120px; font-size: 46px; }
+    @media screen { .page { margin: 28px auto; box-shadow: 0 24px 80px rgba(0,0,0,.34); } }
+    @media print { html, body { background: var(--bg); } .page { margin: 0; box-shadow: none; } }
+
+    /* obsidian contrast pass: bright state bars, transparent structure, no gray edge noise */
+    .panel { border: 0; border-radius: 0; background: linear-gradient(90deg, var(--accent) 0 4px, transparent 4px 100%); box-shadow: none; }
+    .code { border: 0; border-radius: 4px; background: var(--accent); color: #070a0f; }
+    .pill { border: 0; background: rgba(255,255,255,.12); color: var(--text); }
+    .screen { border: 2px solid var(--accent); }
+    .problem-card { border-top: 2px solid var(--red); }
+    .problem-card p, .uncertainty-card p { color: #c9d2dd; }
+    .task-card { border-left: 3px solid var(--purple); padding-left: 23px; }
+    .task-card .task-head { border-bottom: 2px solid var(--purple); }
+    .task-row { border-bottom: 0; }
+    .chain-step { border: 0; border-top: 2px solid var(--accent); background: transparent; }
+    .chain-step:not(:last-child)::after { color: var(--accent); }
+    .objective-card { border-top: 2px solid var(--purple); }
+    .uncertainty-card { border: 0; border-top: 2px solid var(--accent); background: transparent; }
+    .search-panel { border-left: 3px solid var(--green); padding-left: 17px; }
+    .search-head { border: 0; border-bottom: 3px solid var(--green); background: rgba(52,211,153,.12); }
+    .search-result { border-bottom: 0; background: linear-gradient(90deg, rgba(52,211,153,.055), transparent 72%); }
+    .entity-card { border: 0; border-left: 3px solid var(--green); border-radius: 0; background: transparent; }
+    .event-shot { border: 2px solid var(--amber); }
+    .path-tags .tag { border: 0; border-top: 2px solid var(--amber); }
+    .memory-tag { border: 0; border-left: 3px solid var(--green); border-radius: 0; background: rgba(52,211,153,.11); }
+    .retrieve-box { border: 0; border-left: 3px solid var(--green); border-radius: 0; }
+    .retrieve-box.default { border-left-color: var(--green); }
+    .retrieve-box.optional { border-left-color: var(--purple); }
+    .retrieval-result { border: 0; border-left: 3px solid var(--blue); border-radius: 0; }
+    .evidence-file { border: 2px solid var(--blue); border-radius: 0; }
+    .file-top { border-bottom: 2px solid var(--blue); }
+    .gate-step { border: 0; border-left: 3px solid var(--blue); border-radius: 0; background: transparent; }
+    .gate-step.gate { border: 0; border-left: 3px solid var(--amber); border-radius: 0; }
+    .metric { border: 0; border-top: 3px solid var(--amber); border-radius: 0; background: linear-gradient(90deg, rgba(251,191,36,.13), transparent 90%); }
+    .eff-step { border: 0; border-top: 2px solid rgba(251,191,36,.42); }
+    .eff-step:last-child { border-right: 0; }
+    .tool-card, .model-card { border: 0; border-left: 3px solid var(--purple); border-radius: 0; background: transparent; }
+    .tool-card:first-child { border-color: var(--purple); }
+    .dev-pipeline .pipe { border: 0; border-left: 2px solid var(--purple); border-radius: 0; }
+    .protocol { border-color: var(--blue); border-radius: 0; }
+    .handoff { border-top: 2px solid var(--pink); }
+    .session-row { border: 0; border-left: 3px solid var(--pink); border-radius: 0; background: rgba(244,114,182,.07); }
+    .mechanism { border-bottom-color: rgba(244,114,182,.28); }
+    .mechanism:first-child { border-top-color: rgba(244,114,182,.28); }
+    .scope-chip { border: 0; border-radius: 0; background: rgba(244,114,182,.12); color: #f8d1e7; }
+    .progress { background: rgba(255,255,255,.22); }
+    /* 窗口证据：封面只展示当前桌面应用的原生窗口截图，不再叠加手工绘制的 UI。 */
+    .cover .visual-stack { height: auto; display: flex; align-items: flex-start; justify-content: center; }
+    .cover .visual-stack .screen { position: static; width: 100%; height: auto; transform: none; border: 0; border-radius: 0; background: transparent; box-shadow: none; }
+    .cover .visual-stack .screen img { display: block; width: 100%; height: auto; object-fit: contain; }
+    .event-shot img { object-fit: contain; background: #f7f7f7; }
+    .evidence-page .evidence-layout { margin-top: 30px; }
+    .evidence-page .gate-flow { gap: 5px; }
+    .evidence-page .gate-step { min-height: 42px; padding: 0 10px; }
+    .evidence-page .gate-step strong { font-size: 12px; }
+    .evidence-page .gate-step span { font-size: 10px; }
+    .evidence-page .gate-caption { margin-top: 10px; padding: 10px 12px; font-size: 11px; line-height: 1.45; }
+  </style>
+</head>
+<body>
+  <main>
+    <section class="page cover" style="--page-bg:url('assets/obsidian-page-01.png');--progress:8.3%">
+      <div class="topline"><div class="eyebrow">SoulForge / AI-native Mod workbench</div><div class="counter">01 / 12</div></div>
+      <div class="cover-grid">
+        <div><h1 class="cover-title">让复杂 Mod 修改<br>从多工具切换，变成<br><span>Agent 流程编排。</span></h1><p class="cover-subtitle">SoulForge AI Mod 工作台</p><p class="lead">面向复杂游戏 Mod 的 AI Agent 编辑工具：把用户目标，连接到真实对象、跨文件关系、修改路径与受控写入。</p></div>
+        <div class="visual-stack"><div class="screen screen-main"><img src="assets/soulforge-project-actual-paramtab2.png" alt="当前运行的 SoulForge 参数工作台截图"></div></div>
+      </div>
+      <div class="cover-note"><strong>从“我要改什么”开始</strong>到“应该改哪一层”结束。</div><div class="page-footer"><span>AI PRODUCT CASE / SOULFORGE</span><strong>自然语言目标 → 真实资源路径</strong></div><div class="progress"><span></span></div>
+    </section>
+
+    <section class="page" style="--page-bg:url('assets/obsidian-page-02.png');--accent:var(--red);--progress:16.7%">
+      <div class="topline"><div class="eyebrow">01 / user friction</div><div class="counter">02 / 12</div></div>
+      <h2 class="title">Mod 修改的时间成本，<span class="accent">主要花在定位和切换</span></h2>
+      <div class="statement-layout"><div><div class="problem-opening">以前修改一个复杂 Mod，通常要先解包，再在参数工具、文本工具、事件工具和地图工具之间反复切换。用户知道想要的结果，却不一定知道它对应哪个文件、哪个字段或哪条事件。</div><div class="problem-conclusion">用户需要一条低门槛的，把自然语言目标连接到正确资源和修改路径的工作流。</div></div><div><div class="problem-cards"><article class="panel problem-card"><div class="num">01 / CONTEXT</div><h3>上下文被工具切断</h3><p>解包、查找、编辑、打包分别发生在不同工具中。用户的目标、当前对象和上一轮结果无法自然传递。</p></article><article class="panel problem-card"><div class="num">02 / RELATION</div><h3>资源之间存在隐性关系</h3><p>一个看似简单的改动，可能同时涉及参数表、物品文本、地图和事件多文件联动，学习门槛较高。</p></article><article class="panel problem-card"><div class="num">03 / AI WORKFLOW</div><h3>现有工具没有利用 AI 的工作方式</h3><p>成熟工具仍以较早期的编辑器交互为主；对工作效率提升有限，且学习门槛较高。</p></article></div></div></div>
+      <div class="old-flow"><div class="node">解包</div><div class="arrow">→</div><div class="node">参数编辑器</div><div class="arrow">→</div><div class="node">文本工具</div><div class="arrow">→</div><div class="node">事件工具</div><div class="arrow">→</div><div class="node">打包</div><div class="arrow">→</div><div class="node">进游戏测试</div></div>
+      <div class="page-footer"><span>USER PROBLEM</span><strong>用户需要一条连接目标、资源与修改路径的工作流</strong></div><div class="progress"><span></span></div>
+    </section>
+
+    <section class="page" style="--page-bg:url('assets/obsidian-page-03.png');--accent:var(--purple);--progress:25%">
+      <div class="topline"><div class="eyebrow">02 / product framing</div><div class="counter">03 / 12</div></div>
+      <h2 class="title">从普通编辑器到 <span class="accent">Mod 修改 Agent</span></h2>
+      <div class="product-grid"><div><div class="product-statement">模型负责理解与规划，<span>领域工具</span>负责搜索、读取、验证和执行。</div><div class="product-note">SoulForge 是面向复杂 Mod 工作区的 Agent 流程编排工具：用户描述目标，Agent 负责解析、检索、展开关系、判断路径并组织领域工具完成修改。</div><div class="quote-strip">把分散工具组织成连续流程。</div></div><div class="panel task-card"><div class="task-head"><strong>Agent / structured task</strong><span>draft → evidence</span></div><div class="task-row"><div class="key">目标对象</div><div class="value"><span class="code">鬼型部</span><span class="code">靛蓝星陨</span></div></div><div class="task-row"><div class="key">修改意图</div><div class="value">精英化 / 增加奖励 / 红点数改为 2</div></div><div class="task-row"><div class="key">可能资源</div><div class="value"><span class="code">NpcParam</span><span class="code">EquipParamGoods</span><span class="code">EMEVD</span><span class="code">MSB</span></div></div><div class="task-row"><div class="key">资源关系</div><div class="value">参数字段 → 掉落表 / 物品 → 地图实体 → 事件与脚本。</div></div><div class="task-row"><div class="key">不确定性</div><div class="value">用户把“鬼型部”误写成“鬼刑部”；“红点”不是天然明确的字段。</div></div><div class="task-row"><div class="key">下一步</div><div class="value">先搜索最相关名称与参数，再扩展关联文件并确认修改路径。</div></div></div></div>
+      <div class="page-footer"><span>PRODUCT POSITIONING</span><strong>自然语言目标 → 结构化任务卡 → 领域工具调用</strong></div><div class="progress"><span></span></div>
+    </section>
+
+    <section class="page" style="--page-bg:url('assets/obsidian-page-04.png');--accent:var(--blue);--progress:33.3%">
+      <div class="topline"><div class="eyebrow">03 / orchestration</div><div class="counter">04 / 12</div></div>
+      <h2 class="title">可靠的修改链路<span class="accent">工作流</span></h2>
+      <p class="lead">每一阶段都有输入、工具、状态和下一步；关系闭合、Evidence 与用户确认是进入写入的关键门槛。</p>
+      <div class="chain"><article class="chain-step"><div class="index">01</div><h3>解析</h3><p>目标对象<br>修改意图</p></article><article class="chain-step"><div class="index">02</div><h3>搜索</h3><p>文本、参数<br>物品、事件</p></article><article class="chain-step"><div class="index">03</div><h3>关系</h3><p>ID、引用<br>影响范围</p></article><article class="chain-step"><div class="index">04</div><h3>确认</h3><p>原生读取<br>当前值与来源</p></article><article class="chain-step"><div class="index">05</div><h3>判断</h3><p>参数、掉落<br>或事件路径</p></article><article class="chain-step"><div class="index">06</div><h3>成案</h3><p>格式化 Evidence<br>关联边</p></article><article class="chain-step"><div class="index">07</div><h3>执行</h3><p>用户确认<br>受控写入</p></article><article class="chain-step"><div class="index">08</div><h3>收口</h3><p>写后重读<br>记录或回退</p></article></div>
+      <div class="state-bar"><strong>可停：</strong><span>证据不足、关系未闭合或验证失败时，流程停在当前状态并保留结构化诊断。</span></div>
+      <div class="page-footer"><span>AGENT FLOW</span><strong>有阶段 · 有工具 · 有状态 · 有写入门禁</strong></div><div class="progress"><span></span></div>
+    </section>
+
+    <section class="page" style="--page-bg:url('assets/obsidian-page-05.png');--accent:var(--purple);--progress:41.7%">
+      <div class="topline"><div class="eyebrow">04 / main demo</div><div class="counter">05 / 12</div></div>
+      <h2 class="title">一个真实输入，如何变成 <span class="accent">复合任务</span></h2>
+      <div class="demo-prompt"><div class="prompt-mark">USER //</div><p>修改鬼刑部：从 BOSS 改为精英怪，掉落物品增加一个靛蓝星陨，红点数改为 2。</p></div><div class="demo-note">这是用户输入，不是写入指令。首轮只登记对象和修改意图，不直接修改文件。</div>
+      <div class="objective-grid"><article class="panel objective-card"><div class="obj-index">OBJECT 01</div><h3>鬼型部</h3><p><b>目标候选：</b>名称可能存在误写，需要搜索确认真实对象与 ID。</p></article><article class="panel objective-card"><div class="obj-index">OBJECT 02</div><h3>靛蓝星陨</h3><p><b>目标候选：</b>可能是原创忍具，需要区分卷轴、本体与奖励入口。</p></article><article class="panel objective-card"><div class="obj-index">OBJECT 03</div><h3>红点数 = 2</h3><p><b>语义候选：</b>“红点”不是字段名，要结合参数、文本与项目知识解释。</p></article></div>
+      <div class="state-bar" style="--accent:var(--purple);border-left-color:var(--purple);background:rgba(167,139,250,.07)"><strong>首轮动作：</strong><span>列出可能需要修改的对象 → 调用搜索工具 → 扩展关联文件 → 为每个对象累积 Evidence。</span></div>
+      <div class="page-footer"><span>DEMO INPUT</span><strong>先拆解，再搜索；先形成证据，再进入写入链路</strong></div><div class="progress"><span></span></div>
+    </section>
+
+    <section class="page uncertainty-page" style="--page-bg:url('assets/obsidian-page-06.png');--accent:var(--red);--progress:50%">
+      <div class="topline"><div class="eyebrow">05 / uncertainty</div><div class="counter">06 / 12</div></div>
+      <h2 class="title">三种指令不确定性，<span class="accent">分别需要不同的检索动作</span></h2>
+      <div class="uncertainty-grid"><article class="panel uncertainty-card" style="--accent:var(--red)"><div class="small">TYPE 01 / NAME</div><h3>错误指令</h3><p>把“鬼型部”误写成“鬼刑部”。Agent 不能把错误名称直接当作另一个对象，也不能擅自改写用户真实目标。</p><div class="action">搜索项目名称、别名与相关资源，反向确认鬼型部</div></article><article class="panel uncertainty-card" style="--accent:var(--amber)"><div class="small">TYPE 02 / SEMANTIC</div><h3>模糊指令</h3><p>“红点数改为 2”不是天然明确的字段名。模型需要结合参数说明、项目文本、历史对话和开发记忆，保留候选解释。</p><div class="action">提出候选字段，证据不足时停在待确认</div></article><article class="panel uncertainty-card" style="--accent:var(--pink)"><div class="small">TYPE 03 / KNOWLEDGE</div><h3>知识外指令</h3><p>“靛蓝星陨”不是只狼原版知识，而是 Mod《孑影长荫》中的原创忍具，需要从项目自身知识中找到它。</p><div class="action">查找文本、参数、事件、历史对话与开发记忆</div></article></div>
+      <div class="uncertainty-foot"><strong>产品动作：</strong>名称核对、语义解释和项目知识发现，不能用同一种搜索动作替代。</div>
+      <div class="page-footer"><span>UNCERTAINTY DESIGN</span><strong>不确定性被登记、检索、解释，而不是被模型直接掩盖</strong></div><div class="progress"><span></span></div>
+    </section>
+
+    <section class="page entity-page" style="--page-bg:url('assets/obsidian-page-07.png');--accent:var(--green);--progress:58.3%">
+      <div class="topline"><div class="eyebrow">06 / evidence discovery</div><div class="counter">07 / 12</div></div>
+      <h2 class="title">搜索结果把用户称呼，变成项目里的 <span class="accent">真实对象与关联链路</span></h2>
+      <div class="entity-layout">
+        <div class="panel search-panel"><div class="search-head">鬼型部 / 靛蓝星陨 / relation path</div><div class="search-result"><div class="dot"></div><div><strong>鬼型部</strong><span>NpcParam / 50800000</span></div><div class="kind">PARAM</div></div><div class="search-result"><div class="dot"></div><div><strong>角色与地图实体</strong><span>c5080 → MSB m11 / m13</span></div><div class="kind">RELATION</div></div><div class="search-result"><div class="dot"></div><div><strong>忍具卷轴·靛蓝星陨</strong><span>EquipParamGoods / 5970 · FMG 11107</span></div><div class="kind">GOODS</div></div><div class="search-result"><div class="dot"></div><div><strong>击杀 / 血条事件</strong><span>m11_00_00_00.emevd.dcx</span></div><div class="kind">EMEVD</div></div></div>
+        <div class="entity-list"><div class="entity-card"><div class="entity-name mono">NPCPARAM 50800000</div><div class="entity-body"><strong>npcType=0 · ninsatuNum=3</strong><br>isSoulGetByBoss=16；itemLotId_1~6 全部为 -1。</div></div><div class="entity-card"><div class="entity-name mono">c5080 → MSB</div><div class="entity-body"><strong>地图实体：m11 / m13</strong><br>关系扩展继续进入地图与事件文件，不能停在 PARAM。</div></div><div class="entity-card"><div class="entity-name mono">GOODS 5970</div><div class="entity-body"><strong>奖励对象：忍具卷轴</strong><br>与 Weapon 78600 区分，不能因为名称相同就互换 ID。</div></div><div class="entity-card"><div class="entity-name mono">EMEVD / EVENT</div><div class="entity-body"><strong>奖励、血条和演出路径</strong><br>关联事件完成原生读取后，才可进入 Evidence。</div></div><div class="entity-note">关系图是写入前的完整性检查。搜索结果、原生读取结果和 Agent 判断分区保留。</div></div>
+      </div>
+      <div class="page-footer"><span>OBJECT RESOLUTION</span><strong>名称只是入口，ID、字段和跨文件关系才是工作对象</strong></div><div class="progress"><span></span></div>
+    </section>
+
+    <section class="page" style="--page-bg:url('assets/obsidian-page-08.png');--accent:var(--amber);--progress:66.7%">
+      <div class="topline"><div class="eyebrow">07 / path decision</div><div class="counter">08 / 12</div></div>
+      <h2 class="title">从参数层继续追踪到 <span class="accent">全文件逻辑链路</span></h2>
+      <div class="path-layout"><div><div class="path-flow"><div class="path-item"><div class="path-node"></div><div><strong>读取 NpcParam 50800000</strong><p>确认鬼型部的当前参数与身份。</p></div></div><div class="path-item"><div class="path-node"></div><div><strong>发现 itemLotId_1~6 全部为 -1</strong><p>无直接掉落字段，不代表链路结束。</p></div></div><div class="path-item"><div class="path-node"></div><div><strong>沿 c5080 展开关联文件</strong><p>从角色到 m11 / m13 地图实体，再进入事件文件。</p></div></div><div class="path-item"><div class="path-node"></div><div><strong>原生确认 MSB 与 EMEVD</strong><p>判断奖励、血条和演出是否由事件承载。</p></div></div><div class="path-item"><div class="path-node"></div><div><strong>区分 Goods 5970 与 Weapon 78600</strong><p>卷轴和本体是两个对象，不能混用。</p></div></div><div class="path-item"><div class="path-node"></div><div><strong>关系闭合后形成 Evidence</strong><p>全部关联对象完成读取，才进入修改方案。</p></div></div></div><div class="path-callout">修复后的闭环：参数 / 文本命中 → 关系扩展 → 全部原生读取 → Evidence → 受控写入。</div></div><div><div class="event-shot"><img src="assets/soulforge-project-actual-event2.png" alt="当前运行的 SoulForge 事件编辑器截图"></div><div class="path-tags"><div class="tag"><strong>BOSS → 精英</strong>参数与事件组合判断</div><div class="tag"><strong>增加奖励</strong>Goods → ItemLot / EMEVD</div><div class="tag"><strong>红点 = 2</strong>保留字段候选，等待语义证据</div></div></div></div>
+      <div class="page-footer"><span>PATH JUDGEMENT</span><strong>Agent 不只改参数，而是闭合影响到的全文件逻辑链路</strong></div><div class="progress"><span></span></div>
+    </section>
+
+    <section class="page" style="--page-bg:url('assets/obsidian-page-09.png');--accent:var(--green);--progress:75%">
+      <div class="topline"><div class="eyebrow">08 / memory & retrieval</div><div class="counter">09 / 12</div></div>
+      <h2 class="title">记忆与检索系统</h2>
+      <div class="memory-layout"><div><div class="memory-grid"><div class="memory-tag">Mod 文本</div><div class="memory-tag">参数说明</div><div class="memory-tag">物品文本</div><div class="memory-tag">事件文本</div><div class="memory-tag">Agent 历史对话</div><div class="memory-tag">操作记录</div><div class="memory-tag">项目知识</div><div class="memory-tag">开发记忆</div></div><div class="memory-note">用户记忆中的成熟写入规范属于操作规则，不属于 RAG；每次 Agent 运行都全量写入系统提示词。</div></div><div class="retrieval-stack"><div class="retrieve-pair"><div class="retrieve-box default"><div class="box-title"><strong>默认：lexical + 结构化检索</strong><span>default</span></div><p>默认采用 lexical + 结构化检索，而不是依赖 embedding / RAG。面向真实 Mod 用户；ID、名称、字段、参数表等对象高度结构化，关键词和结构化检索本身就有很强价值。</p></div><div class="retrieve-box optional"><div class="box-title"><strong>可选：配置 embedding 开启 RAG</strong><span>optional</span></div><p>主动配置 embedding 后，提高搜索效率；工程实现保留 Embedding + RRF 混合召回作为配置增强。</p></div></div><div class="retrieve-join">both paths</div><div class="retrieval-result">search tool → 关系扩展 → formatted Evidence → decision / write gate</div><div class="memory-footer-note">模型负责理解与规划；未开启 RAG 时，软件仍编排 lexical、结构化字段、ID 和引用关系完成搜索，两条路径最后都进入关系扩展与同一 Evidence。</div></div></div>
+      <div class="page-footer"><span>MEMORY / RETRIEVAL</span><strong>检索方案服从用户能力与任务结构，而不是追逐默认配置</strong></div><div class="progress"><span></span></div>
+    </section>
+
+    <section class="page evidence-page" style="--page-bg:url('assets/obsidian-page-10.png');--accent:var(--blue);--progress:83.3%">
+      <div class="topline"><div class="eyebrow">09 / evidence gate</div><div class="counter">10 / 12</div></div>
+      <h2 class="title">Evidence：把搜索结果接到写入工具的 <span class="accent">中间接口</span></h2>
+      <p class="lead">Evidence 是 Agent 根据工具搜索结果编写的格式化文本文件：既记录待写对象，也记录已确认的关系边。</p>
+      <div class="evidence-layout"><div class="evidence-file"><div class="file-top"><i></i><span>evidence.txt</span><span style="margin-left:auto;color:var(--faint)">formatted text / write ledger</span></div><pre><span class="key"># Evidence</span>
+
+<span class="key">## Target</span>
+- <span class="value">鬼型部</span>
+- <span class="value">靛蓝星陨</span>
+
+<span class="key">## Evidence entries</span>
+- <span class="key">npcparam</span><span class="budget">（3）</span>：NpcParam 50800000；ninsatuNum 当前为 3。
+- <span class="key">msb</span><span class="budget">（1）</span>：c5080 → m11 / m13 地图实体，关联对象已原生读取。
+- <span class="key">emevd</span><span class="budget">（1）</span>：m11_00_00_00.emevd.dcx 中的关联事件已确认。
+- <span class="key">itemlot / equipparam_goods</span><span class="budget">（1）</span>：奖励入口与 Goods 5970 的关系已原生确认。</pre></div><div><div class="gate-flow"><div class="gate-step"><div class="n">01</div><strong>列出目标对象</strong><span>鬼型部 / 靛蓝星陨</span></div><div class="gate-step"><div class="n">02</div><strong>调用搜索工具</strong><span>返回 searchId</span></div><div class="gate-step"><div class="n">03</div><strong>扩展关联对象</strong><span>ID / refs / crossReferences</span></div><div class="gate-step"><div class="n">04</div><strong>原生读取关联文件</strong><span>参数 / 地图 / 事件</span></div><div class="gate-step"><div class="n">05</div><strong>编写 Evidence 文件</strong><span>对象 + 关系边</span></div><div class="gate-step"><div class="n">06</div><strong>用户确认</strong><span>影响范围</span></div><div class="gate-step gate"><div class="n">07</div><strong>写入工具检查词条</strong><span>完整才放行</span></div></div><div class="gate-caption">写入工具检测每个 edit target 是否有对应 Evidence 词条（匹配不区分大小写）；发现的关联对象和关系边未完整记录，或原生读取未完成，就拒绝写入。词条次数用尽后，必须回退或重新搜索 → 更新 Evidence → 写入。</div></div></div>
+      <div class="page-footer"><span>EVIDENCE LEDGER</span><strong>只有 Evidence 记录完整对象与关系，写入工具才会放行</strong></div><div class="progress"><span></span></div>
+    </section>
+
+    <section class="page impact-page" style="--page-bg:url('assets/obsidian-page-11.png');--accent:var(--amber);--progress:91.7%">
+      <div class="topline"><div class="eyebrow">10 / measured impact</div><div class="counter">11 / 12</div></div>
+      <h2 class="title">一句话需求，Agent 跑完一条 <span class="accent">可验证的修改链路</span></h2>
+      <div class="metrics"><div class="metric"><div class="num">37.69×</div><div class="desc">资源检索效率提高</div><div class="source">8065 → 214 files</div></div><div class="metric"><div class="num">100%+</div><div class="desc">事件读取速度提高</div><div class="source">2 IPC → 1 IPC</div></div><div class="metric"><div class="num">99.4%</div><div class="desc">长脚本首屏负担降低</div><div class="source">约 7 万行 → 400 行</div></div><div class="metric"><div class="num">32.3×</div><div class="desc">原生结果验证加速</div><div class="source">21 min → 39 s</div></div></div>
+      <div class="efficiency-chain"><div class="eff-step"><strong>解析</strong>目标与修改意图</div><div class="eff-step active"><strong>检索</strong>资源范围缩小 37.69×</div><div class="eff-step"><strong>关系闭合</strong>跨文件影响范围</div><div class="eff-step active"><strong>读取</strong>事件链路加速 100%+</div><div class="eff-step active"><strong>首屏</strong>负担降低 99.4%</div><div class="eff-step"><strong>Evidence</strong>结果接入写入门禁</div><div class="eff-step active"><strong>验证</strong>原生结果加速 32.3×</div></div>
+      <div class="sessions">会话记录样本：64 步 / 63 次工具调用 · 19 / 39 · 9 / 31 · 4 / 10　｜　不同条件下的归档记录，不直接计算成 KPI</div>
+      <div class="page-footer"><span>MEASURED PRODUCT IMPACT</span><strong>只呈现已有项目记录支撑的数字</strong></div><div class="progress"><span></span></div>
+    </section>
+
+    <section class="page iteration-page" style="--page-bg:url('assets/obsidian-page-12.png');--accent:var(--pink);--progress:100%">
+      <div class="topline"><div class="eyebrow">11 / iteration to product</div><div class="counter">12 / 12</div></div>
+      <h2 class="title">从反复试错的会话记录，提炼出可复用的 <span class="accent">Agent 流程</span></h2>
+      <div class="iteration-layout"><div><div class="session-stack"><div class="session-row"><strong>64</strong><span><small>2026/8/23 20:40</small>主长会话</span><em>63 tool calls</em></div><div class="session-row"><strong>19</strong><span><small>2026/8/22 11:46</small>关键 ID 与奖励路径分析</span><em>39 tool calls</em></div><div class="session-row"><strong>9</strong><span><small>2026/8/23 11:41</small>会话</span><em>31 tool calls</em></div><div class="session-row"><strong>4</strong><span><small>2026/8/23 11:21</small>会话</span><em>10 tool calls</em></div></div><div class="session-caption">项目归档中同一类“修改鬼型部”任务出现 64、19、9、4 等不同步数；模型、索引状态、工具权限和运行阶段并不完全相同，这里展示问题如何暴露、流程如何被产品化。</div></div><div><div class="mechanism-list"><div class="mechanism"><div class="problem">名称可能写错，搜索沿着错误称呼反复尝试</div><div class="arrow">→</div><div class="solution">先登记目标对象，再用项目搜索确认真实对象</div></div><div class="mechanism"><div class="problem">中文未命中后继续猜 ID 和字段</div><div class="arrow">→</div><div class="solution">lexical、结构化字段和引用关系分层检索</div></div><div class="mechanism"><div class="problem">“红点”容易被模型直接猜成字段</div><div class="arrow">→</div><div class="solution">保留候选解释，证据不足时进入待确认</div></div><div class="mechanism"><div class="problem">忍具卷轴和忍具本体容易混淆</div><div class="arrow">→</div><div class="solution">区分 Goods 5970 与 Weapon 78600</div></div><div class="mechanism"><div class="problem">参数已改但关联事件未知</div><div class="arrow">→</div><div class="solution">参数命中后强制扩展关系；未闭合时禁止写入</div></div><div class="mechanism"><div class="problem">事件只返回摘要或截断结果</div><div class="arrow">→</div><div class="solution">关联事件必须完成原生读取，不能用摘要代替依据</div></div><div class="mechanism"><div class="problem">模型输出和文件修改混在一起</div><div class="arrow">→</div><div class="solution">搜索、Evidence、写入门禁、Patch Engine 分层</div></div></div><div class="scope-row"><span class="scope-chip">FMG</span><span class="scope-chip">PARAM</span><span class="scope-chip">MSB</span><span class="scope-chip">EMEVD</span><span class="scope-chip">BND4</span><span class="scope-chip">limited script</span></div></div></div>
+      <div class="closing"><div class="closing-title">让用户只描述目标，但始终知道 Agent 正在查什么、准备改什么，以及下一步进入这一层的 <span>依据</span>。</div><div class="closing-side"><strong>SoulForge / 交付</strong>用 Agent 降低 Mod 工具的学习门槛，用项目内检索和 Evidence 组织知识，用确定性工具闭合跨文件关系并把修改落到正确的资源路径。3D 地图自由操控暂不在本次核心闭环。</div></div>
+      <div class="page-footer"><span>END / SOULFORGE</span><strong>感谢阅读</strong></div><div class="progress"><span></span></div>
+    </section>
+  </main>
+</body>
+</html>

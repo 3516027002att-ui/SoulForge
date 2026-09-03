@@ -205,12 +205,28 @@ export function createRequestSignal(
   if (callerSignal) signals.push(callerSignal);
   let timer: ReturnType<typeof setTimeout> | undefined;
   if (timeoutMs && timeoutMs > 0) {
-    const timeoutSignal = AbortSignal.timeout(timeoutMs);
-    signals.push(timeoutSignal);
+    // AbortSignal.timeout() cannot be cancelled.  A long Agent session can
+    // create one signal per model turn, so use a cancellable controller and
+    // release its timer when the adapter reaches any terminal stream path.
+    const timeoutController = new AbortController();
+    timer = setTimeout(() => {
+      const reason = typeof DOMException === 'function'
+        ? new DOMException('The request timed out.', 'TimeoutError')
+        : Object.assign(new Error('The request timed out.'), { name: 'TimeoutError' });
+      timeoutController.abort(reason);
+    }, timeoutMs);
+    (timer as unknown as { unref?: () => void }).unref?.();
+    signals.push(timeoutController.signal);
   }
+  const cleanup = (): void => {
+    if (timer !== undefined) {
+      clearTimeout(timer);
+      timer = undefined;
+    }
+  };
   if (signals.length === 1) {
-    return { signal: signals[0], cleanup: () => { if (timer) clearTimeout(timer); } };
+    return { signal: signals[0], cleanup };
   }
   const combined = AbortSignal.any(signals);
-  return { signal: combined, cleanup: () => { if (timer) clearTimeout(timer); } };
+  return { signal: combined, cleanup };
 }

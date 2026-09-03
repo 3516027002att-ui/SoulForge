@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import type {
   EventSymbol,
+  Diagnostic,
   IndexedFile,
   MapEntitySymbol,
   MapRegionSymbol,
@@ -25,19 +26,44 @@ import {
 } from '@soulforge/shared';
 import type { WorkspaceIndex } from '../indexing/workspaceIndex.js';
 import { attachLookupIndex } from './lookupIndex.js';
+import {
+  buildParamTextReferenceEdges,
+  buildTextEntryLookup,
+  collectParamTextLinks,
+  paramTextLinkSearchText
+} from '../references/paramTextReferences.js';
 
 const MAX_BODY_CHARS = 1_800;
 const MAX_INSTRUCTIONS = 24;
 const MAX_FIELDS = 24;
 
-export function buildRagCorpus(index: WorkspaceIndex, now = new Date().toISOString()): RagCorpus {
+export function buildRagCorpus(
+  index: WorkspaceIndex,
+  now = new Date().toISOString(),
+  diagnostics: readonly Diagnostic[] = [],
+  sourceUris?: readonly string[],
+  symbolUris?: readonly string[]
+): RagCorpus {
+  const sourceFilter = sourceUris && sourceUris.length > 0 ? new Set(sourceUris) : null;
+  const symbolFilter = symbolUris && symbolUris.length > 0 ? new Set(symbolUris) : null;
+  const includeSource = (sourceUri: string): boolean => sourceFilter === null || sourceFilter.has(sourceUri);
+  const includeSymbol = (sourceUri: string, symbolUri: string): boolean => (
+    includeSource(sourceUri) && (symbolFilter === null || symbolFilter.has(symbolUri))
+  );
   const chunks: RagChunk[] = [];
   for (const file of index.getFiles()) {
-    chunks.push(fileChunk(index.workspaceId, file));
+    // A symbol-scoped refresh replaces only native rows/events. The existing
+    // file catalog chunk must remain in the previous corpus; rebuilding it
+    // here would make the caller drop unrelated symbols from the same source.
+    if (symbolFilter === null && includeSource(file.sourceUri)) {
+      chunks.push(fileChunk(index.workspaceId, file));
+    }
   }
   const symbols = index.toSymbolBundle();
+  const textEntryLookup = buildTextEntryLookup(symbols.msgs ?? []);
   for (const eventExport of symbols.events ?? []) {
     for (const event of eventExport.events) {
+      if (!includeSymbol(event.sourceUri, event.uri)) continue;
       chunks.push(eventChunk(
         index.workspaceId,
         event,
@@ -48,6 +74,7 @@ export function buildRagCorpus(index: WorkspaceIndex, now = new Date().toISOStri
   }
   for (const mapExport of symbols.maps ?? []) {
     for (const entity of mapExport.entities) {
+      if (!includeSymbol(entity.sourceUri, entity.uri)) continue;
       chunks.push(mapEntityChunk(
         index.workspaceId,
         entity,
@@ -56,6 +83,7 @@ export function buildRagCorpus(index: WorkspaceIndex, now = new Date().toISOStri
       ));
     }
     for (const region of mapExport.regions) {
+      if (!includeSymbol(region.sourceUri, region.uri)) continue;
       chunks.push(mapRegionChunk(
         index.workspaceId,
         region,
@@ -65,8 +93,10 @@ export function buildRagCorpus(index: WorkspaceIndex, now = new Date().toISOStri
     }
   }
   for (const taeExport of symbols.tae ?? []) {
+    if (!includeSource(taeExport.sourceUri)) continue;
     for (const anim of taeExport.animations) {
       for (const event of anim.events) {
+        if (!includeSymbol(taeExport.sourceUri, event.uri)) continue;
         chunks.push(taeEventChunk(
           index.workspaceId,
           taeExport,
@@ -80,9 +110,11 @@ export function buildRagCorpus(index: WorkspaceIndex, now = new Date().toISOStri
   }
   for (const paramExport of symbols.params ?? []) {
     for (const row of paramExport.rows) {
+      if (!includeSymbol(row.sourceUri, row.uri)) continue;
       chunks.push(paramRowChunk(
         index.workspaceId,
         row,
+        textEntryLookup,
         row.sourceHash ?? paramExport.sourceHash,
         row.sourceRevision ?? paramExport.sourceRevision
       ));
@@ -90,6 +122,7 @@ export function buildRagCorpus(index: WorkspaceIndex, now = new Date().toISOStri
   }
   for (const msgExport of symbols.msgs ?? []) {
     for (const entry of msgExport.entries) {
+      if (!includeSymbol(entry.sourceUri, entry.uri)) continue;
       chunks.push(textEntryChunk(
         index.workspaceId,
         entry,
@@ -103,7 +136,14 @@ export function buildRagCorpus(index: WorkspaceIndex, now = new Date().toISOStri
     workspaceId: index.workspaceId,
     builtAt: now,
     chunks,
-    references: index.listReferences()
+    // Keep the current graph, but derive PARAM↔FMG edges from the same source
+    // mapping in this snapshot as well. This makes a freshly assembled corpus
+    // correct even when the caller has not yet published a reference rebuild.
+    references: mergeReferenceEdges(
+      index.listReferences(),
+      buildParamTextReferenceEdges(symbols.params ?? [], symbols.msgs ?? [])
+    ),
+    diagnostics
   });
 }
 
@@ -112,15 +152,33 @@ export function createRagCorpus(input: {
   builtAt: string;
   chunks: readonly RagChunk[];
   references?: readonly ReferenceEdge[];
+  diagnostics?: readonly Diagnostic[];
 }): RagCorpus {
   const byFamily = emptyFamilyCounts();
   for (const chunk of input.chunks) byFamily[chunk.family] += 1;
+  // RAG availability is intentionally stricter than "there is some parsed
+  // metadata".  A file catalog, map-region shell, or TAE export alone cannot
+  // prove that the object-location families used by the agent are searchable.
+  // Keep the four production lookup families as the fail-closed gate.
+  const semanticCount = byFamily.event + byFamily.map_entity
+    + byFamily.param_row + byFamily.text_entry;
+  const diagnostics = (input.diagnostics ?? [])
+    .filter((diagnostic) => diagnostic.code !== 'RAG_SEMANTIC_CORPUS_EMPTY' || semanticCount === 0);
+  if (semanticCount === 0) {
+    diagnostics.push({
+      severity: 'warning',
+      code: 'RAG_SEMANTIC_CORPUS_EMPTY',
+      message: 'RAG 语义语料为空；仅有文件目录不能用于对象定位。'
+    });
+  }
   const corpus: RagCorpus = {
     workspaceId: input.workspaceId,
     builtAt: input.builtAt,
     chunks: [...input.chunks],
     references: [...(input.references ?? [])],
-    stats: { total: input.chunks.length, byFamily }
+    stats: { total: input.chunks.length, byFamily },
+    availability: semanticCount > 0 ? 'available' : 'unavailable',
+    diagnostics
   };
   attachLookupIndex(corpus);
   return corpus;
@@ -149,15 +207,32 @@ export function mergeCatalogAndPersisted(catalog: RagCorpus, persisted: RagCorpu
         && chunk.sourceRevision === current.sourceRevision;
     }
   );
-  const keptUris = new Set(keptSymbols.map((chunk) => chunk.symbolUri));
-  const keptReferences = persisted.references.filter(
-    (edge) => keptUris.has(edge.fromUri) || keptUris.has(edge.toUri)
-  );
+  // The freshly built catalog is the current semantic authority.  The old
+  // implementation returned only catalog file chunks plus persisted symbols,
+  // silently discarding every newly decoded PARAM/MAP/MSG/EVENT row.  Keep
+  // current semantic chunks first; valid persisted chunks fill only gaps.
+  const currentSymbols = catalog.chunks.filter((chunk) => chunk.family !== 'file');
+  const symbolsById = new Map<string, RagChunk>();
+  for (const chunk of currentSymbols) symbolsById.set(chunk.chunkId, chunk);
+  for (const chunk of keptSymbols) {
+    if (!symbolsById.has(chunk.chunkId)) symbolsById.set(chunk.chunkId, chunk);
+  }
+  const symbols = [...symbolsById.values()];
+  const symbolUris = new Set(symbols.map((chunk) => chunk.symbolUri));
+  const seenReferences = new Set<string>();
+  const references = [...catalog.references, ...persisted.references].filter((edge) => {
+    if (!symbolUris.has(edge.fromUri) && !symbolUris.has(edge.toUri)) return false;
+    const key = `${edge.fromUri}\u0000${edge.toUri}\u0000${edge.kind}\u0000${edge.confidence}`;
+    if (seenReferences.has(key)) return false;
+    seenReferences.add(key);
+    return true;
+  });
   return createRagCorpus({
     workspaceId: catalog.workspaceId,
     builtAt: catalog.builtAt,
-    chunks: [...catalog.chunks.filter((chunk) => chunk.family === 'file'), ...keptSymbols],
-    references: keptReferences
+    chunks: [...catalog.chunks.filter((chunk) => chunk.family === 'file'), ...symbols],
+    references,
+    diagnostics: catalog.diagnostics
   });
 }
 
@@ -346,7 +421,14 @@ function relativeSourcePath(sourceUri: string): string {
   return sourceUri;
 }
 
-function paramRowChunk(workspaceId: string, row: ParamRowSymbol, sourceHash?: string, sourceRevision?: number): RagChunk {
+function paramRowChunk(
+  workspaceId: string,
+  row: ParamRowSymbol,
+  textEntryLookup: ReturnType<typeof buildTextEntryLookup>,
+  sourceHash?: string,
+  sourceRevision?: number
+): RagChunk {
+  const linkedText = collectParamTextLinks(row, textEntryLookup);
   const fields = (row.fields ?? []).slice(0, MAX_FIELDS)
     .map((field) => [
       field.fieldId,
@@ -359,9 +441,12 @@ function paramRowChunk(workspaceId: string, row: ParamRowSymbol, sourceHash?: st
     : '';
   const body = [
     `param ${row.paramName}`,
+    row.entryName ? `entry ${row.entryName}` : '',
+    row.entryIndex !== undefined ? `entryIndex ${row.entryIndex}` : '',
     `row ${row.rowId}`,
     row.rowName ? `name ${row.rowName}` : '',
     ...fields,
+    linkedText.length > 0 ? `linkedText\n${paramTextLinkSearchText(linkedText)}` : '',
     truncated
   ].filter(Boolean).join('\n');
   return makeChunk({
@@ -376,9 +461,26 @@ function paramRowChunk(workspaceId: string, row: ParamRowSymbol, sourceHash?: st
       ...(row.fields ?? []).map((field) => field.value)
     ]),
     resourceKind: 'param',
+    // A native PARAM container can contain several entries with the same
+    // typeName (for example multiple ATK_PARAM_ST tables). Keep the physical
+    // source in the chunk identity so one table cannot overwrite another in
+    // SQLite/RAG merely because rowId and typeName match.
+    identityKey: `${row.sourceUri}\u0000${row.uri}`,
     ...(sourceRevision !== undefined ? { sourceRevision } : {}),
     ...(sourceHash ? { sourceHash } : {})
   });
+}
+
+function mergeReferenceEdges(primary: readonly ReferenceEdge[], derived: readonly ReferenceEdge[]): ReferenceEdge[] {
+  const merged: ReferenceEdge[] = [];
+  const seen = new Set<string>();
+  for (const edge of [...primary, ...derived]) {
+    const key = `${edge.fromUri}\u0000${edge.toUri}\u0000${edge.kind}\u0000${edge.confidence}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    merged.push(edge);
+  }
+  return merged;
 }
 
 function textEntryChunk(workspaceId: string, entry: TextEntrySymbol, sourceHash?: string, sourceRevision?: number): RagChunk {
@@ -415,10 +517,11 @@ function makeChunk(input: {
   relativePath?: string;
   resourceKind?: ResourceKind;
   confidence?: RagChunk['confidence'];
+  identityKey?: string;
 }): RagChunk {
   const body = truncateBody(input.body);
   return {
-    chunkId: `rag:${input.family}:${stableId(input.symbolUri)}`,
+    chunkId: `rag:${input.family}:${stableId(input.identityKey ?? input.symbolUri)}`,
     workspaceId: input.workspaceId,
     sourceUri: input.sourceUri,
     symbolUri: input.symbolUri,

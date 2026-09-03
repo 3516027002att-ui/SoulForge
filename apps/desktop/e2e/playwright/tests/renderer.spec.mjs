@@ -1111,14 +1111,15 @@ test('模型服务高级选项：默认收起，展开可配置采样参数并�
   expect(await advanced.evaluate((el) => el.open)).toBe(true);
   await expect(advanced.getByLabel('effort')).toBeVisible();
 
-  // 配置采样参数：effort=high（官方档）、上下文/输出长度、temperature/topP/topK、embedding。
+  // 配置采样参数：effort=high（官方档）、上下文/输出长度、temperature/topP/topK。
   await advanced.getByLabel('effort').selectOption('high');
   await advanced.getByLabel('上下文长度（token）').fill('16000');
   await advanced.getByLabel('输出长度（token）').fill('2048');
   await advanced.getByLabel('temperature').fill('0.7');
   await advanced.getByLabel('topP').fill('0.9');
   await advanced.getByLabel('topK').fill('5');
-  await advanced.getByLabel('Embedding 模型').fill('fixture-embed-model');
+  await expect(advanced).toContainText('Embedding 由 SoulForge 内部自动管理');
+  await expect(advanced.getByLabel('Embedding 模型')).toHaveCount(0);
 
   // 服务地址 / 模型必须先填：2-E 起 baseUrl 空不 upsert、不拉模型列表
   // （「请先填写服务地址再获取模型列表」是产品正确行为）。同时它也是
@@ -1127,7 +1128,7 @@ test('模型服务高级选项：默认收起，展开可配置采样参数并�
   await drawer.locator('label', { hasText: '模型 ID' }).locator('input').fill('fixture-model');
 
   // 保存：fixture upsert echo 输入，状态文案确认保存成功。填密钥让
-  // fixture 返回 hasCredential=true（「生成向量索引」按钮依赖它）。
+  // fixture 返回 hasCredential=true。
   // S25 起页脚按钮文本是「保存」（不再是「保存模型服务」）；自动保存也在场，
   // 但这里显式点「保存」做立即 flush 后再断言手动保存文案。
   await drawer.getByLabel('API 密钥（仅写入，不回显）').fill('fixture-api-key');
@@ -1140,10 +1141,9 @@ test('模型服务高级选项：默认收起，展开可配置采样参数并�
   await expect(drawer).toContainText('找到 2 个可用模型');
   await expect(drawer.locator('.model-pick-list button')).toHaveCount(2);
 
-  // 已保存服务带 embedding 模型：列表项显示 embedding 标记与「生成向量索引」按钮。
-  await expect(drawer.locator('.list')).toContainText('embedding: fixture-embed-model');
-  await drawer.getByRole('button', { name: '生成向量索引' }).click();
-  await expect(drawer).toContainText('向量索引完成：6 个块（失败 0），模型 fixture-embed-model，维度 384。');
+  // Embedding 是 SoulForge 内部能力，不随模型服务配置展示，也没有手工生成按钮。
+  await expect(drawer.locator('.list')).not.toContainText('embedding:');
+  await expect(drawer.getByRole('button', { name: '生成向量索引' })).toHaveCount(0);
 
   await window.screenshot({ path: 'test-results/06b-model-service-advanced.png' });
   await app.close();

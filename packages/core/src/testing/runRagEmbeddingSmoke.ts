@@ -132,6 +132,18 @@ VALUES (?, ?, ?, ?, ?)`).run('ws-embed', workspace.root, 'sekiro', now, now);
       contentHash: 'probe-hash'
     };
     repository.replaceRagChunks([probe]);
+    // 增量收敛不得重复写入未变化 chunk，也必须更新变更 chunk 的两个 FTS 索引。
+    repository.mergeRagChunks([probe]);
+    expect(repository.searchRagChunks('义手').length === 1, 'unchanged incremental merge keeps one FTS row');
+    repository.mergeRagChunks([{
+      ...probe,
+      body: '狼的义手（incremental）',
+      contentHash: 'probe-hash-incremental',
+      sourceRevision: 2,
+      sourceHash: 'source-hash-incremental'
+    }]);
+    expect(repository.searchRagChunks('incremental').length === 1, 'changed incremental merge refreshes FTS');
+    expect(repository.searchRagChunks('probe').length === 0, 'changed incremental merge removes stale FTS text');
     const vector = new Float32Array([0.1, 0.2, 0.3, 0.4]);
     repository.replaceRagEmbeddings([{ chunkId: probe.chunkId, model: 'embed-model', vector }]);
     expect(repository.ragEmbeddingModel() === 'embed-model', 'embedding model recorded');
@@ -141,6 +153,14 @@ VALUES (?, ?, ?, ?, ?)`).run('ws-embed', workspace.root, 'sekiro', now, now);
       const third = loaded[2] ?? 0;
       expect(loaded.length === 4 && Math.abs(third - 0.3) < 1e-7, 'float32 roundtrip exact');
     }
+    repository.mergeRagEmbeddings({
+      model: 'internal-model',
+      entries: [{ chunkId: probe.chunkId, contentHash: 'probe-hash-incremental', vector }],
+      deletedChunkIds: []
+    });
+    const records = repository.loadRagEmbeddingRecords();
+    expect(records.length === 1 && records[0]?.model === 'internal-model', 'incremental embedding record stored');
+    expect(records[0]?.contentHash === 'probe-hash-incremental', 'incremental embedding content hash stored');
     // Same chunkId is not enough to reuse a vector: replacing content/source
     // provenance deletes the old row through the chunk FK before re-embed.
     repository.replaceRagChunks([{
@@ -156,12 +176,30 @@ VALUES (?, ?, ?, ?, ?)`).run('ws-embed', workspace.root, 'sekiro', now, now);
     // 语料重建后向量被 FK 级联清掉（孤儿向量不得残留）。
     repository.replaceRagChunks([]);
     expect(repository.loadRagEmbeddings().size === 0, 'cascade deletes orphan vectors');
+    repository.mergeRagChunkDelta({
+      sourceUri: probe.sourceUri,
+      upserts: [{
+        ...probe,
+        body: '狼的义手（source delta）',
+        contentHash: 'probe-hash-delta',
+        sourceRevision: 3,
+        sourceHash: 'source-hash-delta'
+      }],
+      deletedChunkIds: []
+    });
+    expect(repository.searchRagChunks('source delta').length === 1, 'source delta refreshes FTS');
+    repository.mergeRagChunkDelta({
+      sourceUri: probe.sourceUri,
+      upserts: [],
+      deletedChunkIds: [probe.chunkId]
+    });
+    expect(repository.searchRagChunks('source delta').length === 0, 'source delta deletes stale chunk');
     database.close();
 
     // --- 4. RRF 混合检索 ---
     const corpus = makeCorpus();
     const lexicalOnly = retrieveEvidence(corpus, 'flag 71000000');
-    expect(lexicalOnly.ok, 'lexical baseline ok');
+    expect(lexicalOnly.ok && lexicalOnly.retrievalMode === 'lexical', 'lexical baseline ok');
 
     const vecA = new Float32Array([1, 0, 0]);
     const vecB = new Float32Array([0.9, 0.1, 0]);
@@ -178,7 +216,7 @@ VALUES (?, ?, ?, ?, ?)`).run('ws-embed', workspace.root, 'sekiro', now, now);
       vectors: { vectors, queryVector: new Float32Array([0.05, 0.02, 1]) },
       limit: 8
     });
-    expect(hybrid.ok, 'hybrid ok');
+    expect(hybrid.ok && hybrid.retrievalMode === 'hybrid', 'hybrid ok');
     if (hybrid.ok) {
       const uris = hybrid.hits.map((hit) => hit.chunk.symbolUri);
       expect(uris.includes('event://m10_00_00_00/1000'), 'lexical hit retained in hybrid');
@@ -191,12 +229,18 @@ VALUES (?, ?, ?, ?, ?)`).run('ws-embed', workspace.root, 'sekiro', now, now);
       expect(hybrid.hits.every((hit) => hit.score > 0), 'hybrid scores positive');
     }
 
-    // 无向量源 → 退化为纯 lexical（结果等价）。
-    const noVectors = retrieveEvidenceHybrid(corpus, 'flag 71000000', {});
+    // 无向量是生产主路径：自然语言任务不应因为没有向量而失去词法、
+    // 结构化 ID 和引用扩展能力，结果必须与纯 lexical 检索一致。
+    const noEmbeddingQuery = '把狼的义手设置成精英怪，出场时地上随机落雷5秒，击杀后掉落铃铛';
+    const noVectors = retrieveEvidenceHybrid(corpus, noEmbeddingQuery, {});
+    const noVectorsBaseline = retrieveEvidence(corpus, noEmbeddingQuery);
     expect(noVectors.ok, 'no vectors -> lexical ok');
-    if (noVectors.ok && lexicalOnly.ok) {
+    if (noVectors.ok && noVectorsBaseline.ok) {
+      expect(noVectors.retrievalMode === 'lexical', 'no vectors -> lexical mode');
       expect(noVectors.hits.map((hit) => hit.chunk.chunkId).join(',')
-        === lexicalOnly.hits.map((hit) => hit.chunk.chunkId).join(','), 'no vectors -> identical to lexical');
+        === noVectorsBaseline.hits.map((hit) => hit.chunk.chunkId).join(','), 'no vectors -> identical to lexical');
+      expect(noVectors.hits.some((hit) => hit.chunk.family === 'text_entry'), 'no vectors -> CJK object hit');
+      expect(noVectors.hits.every((hit) => hit.vectorScore === undefined), 'no vectors -> no fake vector score');
     }
 
     // 大库回归：词法完全 miss 时，纯向量命中仍必须进入候选集。

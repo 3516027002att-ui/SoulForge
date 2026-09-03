@@ -98,6 +98,16 @@ describe('character compatibility skeleton augmentation', () => {
       'base64'
     );
     assert.equal(remappedIndices.readUInt16LE(0), 3);
+    const sourceIndices = Buffer.from(
+      result.bundle.models[1]?.meshes[0]?.sourceBoneIndicesBase64 ?? '',
+      'base64'
+    );
+    assert.equal(sourceIndices.readUInt16LE(0), 3);
+    assert.deepEqual(result.bundle.models[1]?.bindingBones?.map((candidate) => candidate.name), [
+      'Head', 'HD_L_bone1', 'HD_L_bone2'
+    ]);
+    assert.equal(result.bundle.models[1]?.bindingBoneMap?.[3], 3);
+    assert.equal(result.bundle.models[1]?.meshes[0]?.skeletonId, 'head');
     assert.equal(result.bundle.models[1]?.bones.length, 0);
     assert.ok(result.diagnostics.some((diagnostic) => diagnostic.code === 'CHARACTER_BONE_AUGMENTED'));
   });
