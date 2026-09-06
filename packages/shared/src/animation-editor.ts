@@ -57,6 +57,11 @@ export interface TaeTimelineEventWire {
   startTime: number;
   endTime: number;
   eventTypeId: number;
+  /** 所属 ANIBND TAE 子项；同一 animId 在不同 section 可重复。 */
+  taeEntryIndex?: number;
+  taeEntryId?: number;
+  taeEntryName?: string;
+  taeGroup?: string;
   /**
    * S17：参数体按模板布局解码结果。有模板且布局全部解出时为 true，
    * templateFields 携带字段名 + 值；无模板或布局越界时为 false，
@@ -69,6 +74,23 @@ export interface TaeTimelineEventWire {
   parameterBytesHex?: string;
 }
 
+/**
+ * ANIBND 内一个原生 TAE 子项的身份摘要。
+ *
+ * BND4 中不同 TAE 子项可以复用同一个 animId，因此 entryIndex/id/name
+ * 是动画身份的一部分，不能只把 animId 当作全局主键。name 由 Bridge
+ * 限制为逻辑 basename（例如 a00.tae），不携带宿主机路径。
+ */
+export interface TaeEntryWire {
+  entryIndex: number;
+  entryId: number;
+  entryName: string;
+  taeGroup: string;
+  animationCount: number;
+  sourceSize: number;
+  sourceHash: string;
+}
+
 /** read-tae-document envelope 里的 animation 行：摘要 + bounded 事件时间表。 */
 export interface TaeAnimationWire {
   animId: number;
@@ -76,15 +98,54 @@ export interface TaeAnimationWire {
    * Bridge 解析出的实际动作引用 ID；缺省表示未能安全解析，不能回退猜测为 animId。
    * 生产 wire 仅接受非负 safe integer，保持旧 envelope 的可选字段兼容性。
    */
-  motionAnimId?: number;
+  motionAnimId?: number | undefined;
+  /** 所属 ANIBND BND4 子项；裸 .tae 时缺省。 */
+  taeEntryIndex?: number | undefined;
+  taeEntryId?: number | undefined;
+  taeEntryName?: string | undefined;
+  taeGroup?: string | undefined;
   eventCount: number;
   groupCount: number;
   timesCount: number;
-  hkxName?: string;
+  hkxName?: string | undefined;
   /** 本动画的事件时间表，受 timelineEventLimit 上限约束。 */
   events: TaeTimelineEventWire[];
   /** events 超出每动画上限而被截断。 */
   eventsTruncated: boolean;
+}
+
+/**
+ * 动画的稳定 UI/运行时身份。entryIndex 只在当前 BND4 source 内解释，
+ * 与 sourceHash/sourceUri 组合后可作为完整外部身份；animId 不能单独使用。
+ */
+export function taeAnimationIdentityKey(
+  animation: Pick<TaeAnimationWire, 'animId' | 'taeEntryIndex' | 'taeEntryId' | 'taeEntryName' | 'taeGroup'>
+): string {
+  const entry = Number.isSafeInteger(animation.taeEntryIndex)
+    ? `index:${animation.taeEntryIndex}`
+    : Number.isSafeInteger(animation.taeEntryId)
+      ? `id:${animation.taeEntryId}`
+      : `name:${animation.taeEntryName ?? animation.taeGroup ?? 'tae'}`;
+  return `${entry}|anim:${animation.animId}`;
+}
+
+/** 分组键使用原生 entry 身份，不从 hkxName 或 animId 猜分区。 */
+export function taeAnimationGroupKey(
+  animation: Pick<TaeAnimationWire, 'taeEntryIndex' | 'taeEntryId' | 'taeEntryName' | 'taeGroup'>
+): string {
+  if (Number.isSafeInteger(animation.taeEntryIndex)) return `index:${animation.taeEntryIndex}`;
+  if (Number.isSafeInteger(animation.taeEntryId)) return `id:${animation.taeEntryId}`;
+  return `name:${animation.taeEntryName ?? animation.taeGroup ?? 'tae'}`;
+}
+
+/** UI 分组标题；a150 等不存在的子项不会被本地补造。 */
+export function taeAnimationGroupLabel(
+  animation: Pick<TaeAnimationWire, 'taeEntryName' | 'taeGroup'>
+): string {
+  const label = animation.taeGroup
+    ?? animation.taeEntryName?.replace(/\.tae$/i, '')
+    ?? 'TAE';
+  return label || 'TAE';
 }
 
 /** 运行时 wire 守卫：motionAnimId 缺失/空值表示未解析，不得猜测为 animId。 */
@@ -102,6 +163,9 @@ export interface TaeDocument {
   totalEventCount: number;
   totalGroupCount: number;
   animations: TaeAnimationWire[];
+  /** ANIBND 内完整 TAE 子项目录；裸 .tae 时可缺省。 */
+  taeEntryCount?: number;
+  taeEntries?: TaeEntryWire[];
   /** animations 只采样前 sampleLimit 条时为 true。 */
   animationsTruncated: boolean;
   /** distinct 事件类型列表（C# 侧 SortedSet，已去重排序）。 */
@@ -153,7 +217,14 @@ export function projectTaeDocumentPages(doc: TaeDocument): TaeDocumentPages {
   let truncatedAnimationCount = 0;
   for (const animation of doc.animations) {
     for (const event of animation.events) {
-      timelineEvents.push({ animId: animation.animId, ...event });
+      timelineEvents.push({
+        animId: animation.animId,
+        ...event,
+        ...(animation.taeEntryIndex === undefined ? {} : { taeEntryIndex: animation.taeEntryIndex }),
+        ...(animation.taeEntryId === undefined ? {} : { taeEntryId: animation.taeEntryId }),
+        ...(animation.taeEntryName === undefined ? {} : { taeEntryName: animation.taeEntryName }),
+        ...(animation.taeGroup === undefined ? {} : { taeGroup: animation.taeGroup })
+      });
     }
     if (animation.eventsTruncated) truncatedAnimationCount++;
   }

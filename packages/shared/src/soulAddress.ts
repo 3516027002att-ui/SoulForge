@@ -11,6 +11,7 @@
  *
  * symbolUri（稳定，给 RAG / cite）：
  *   action://c1050/A0200/e0
+ *   action://c1050/tae/3/A0200/e0
  *   map://m11_01_00_00/part/c1050_0000
  *   map://m11_01_00_00/region/<name>
  *
@@ -29,6 +30,17 @@ export interface ActionAddress {
   chr: string;
   /** animId（如 200）。缺省表示只到角色级地址。 */
   animId?: number;
+  /**
+   * ANIBND 内 TAE child 的 section selector。直接写数字时表示 BND4
+   * entryIndex；它只在当前 source 内有意义，不能替代 animId。
+   */
+  taeEntryIndex?: number;
+  /** 显式的 BND4 entryId selector（与 taeEntryIndex/name/group 互斥）。 */
+  taeEntryId?: number;
+  /** 显式的 TAE child basename selector（与其他 selector 互斥）。 */
+  taeEntryName?: string;
+  /** 显式的逻辑 TAE group selector（与其他 selector 互斥）。 */
+  taeGroup?: string;
   /** 该动画 events[] 下标（如 e0 的 0）。 */
   eventIndex?: number;
   /** 字段名（startFrame / endFrame / SoundID / …）。 */
@@ -50,7 +62,134 @@ const HKX_STEM_RE = /\ba(\d{3})_(\d+)(?![\w])/gi;
 const MAP_AREA_RE = /\b[Mm](\d{2})(?![\w])/g;
 const MAP_BLOCK_RE = /\bm(\d{2})_(\d{2})_(\d{2})_(\d{2})(?![\w])/g;
 const ACTION_ADDR_RE = /\bc\d{4}#(?:A\d{1,5}|a\d{3}_\d+)(?:\.e\d+)?(?:\.\w+)?/gi;
+const ACTION_URI_ADDR_RE = /\baction:\/\/c\d{4}\/(?:A\d{1,5}(?:\/e\d+(?:\.[A-Za-z0-9_]+)?)?|tae\/(?:(?:0|[1-9]\d*)|index\/(?:0|[1-9]\d*)|id\/-?\d+|(?:name|group)\/[^\s/?#]+)\/A\d{1,5}(?:\/e\d+(?:\.[A-Za-z0-9_]+)?)?)/gi;
 const MAP_ADDR_RE = /\bm\d{2}_\d{2}_\d{2}_\d{2}#[^\s.]*(?:\.[\w]+)?/gi;
+
+type ActionSectionSelector =
+  | { taeEntryIndex: number }
+  | { taeEntryId: number }
+  | { taeEntryName: string }
+  | { taeGroup: string };
+
+function parseSafeIntegerSegment(value: string, allowNegative: boolean, canonical = true): number | null {
+  const pattern = canonical
+    ? allowNegative ? /^-?(?:0|[1-9]\d*)$/ : /^(?:0|[1-9]\d*)$/
+    : allowNegative ? /^-?\d+$/ : /^\d+$/;
+  if (!pattern.test(value)) return null;
+  const parsed = Number(value);
+  return Number.isSafeInteger(parsed) ? parsed : null;
+}
+
+function decodeSectionText(value: string): string | null {
+  let decoded: string;
+  try {
+    decoded = decodeURIComponent(value);
+  } catch {
+    return null;
+  }
+  if (decoded.length === 0 || /[\u0000-\u001f\u007f]/.test(decoded) || /[\\/?#]/.test(decoded)) return null;
+  return decoded;
+}
+
+function parseActionSectionSelector(kind: string, value: string | undefined): ActionSectionSelector | null {
+  const normalizedKind = kind.toLowerCase();
+  if (normalizedKind === 'index') {
+    if (value === undefined) return null;
+    const taeEntryIndex = parseSafeIntegerSegment(value, false);
+    return taeEntryIndex === null ? null : { taeEntryIndex };
+  }
+  if (normalizedKind === 'id') {
+    if (value === undefined) return null;
+    const taeEntryId = parseSafeIntegerSegment(value, true);
+    return taeEntryId === null ? null : { taeEntryId };
+  }
+  if (normalizedKind === 'name') {
+    const taeEntryName = value === undefined ? null : decodeSectionText(value);
+    return taeEntryName === null ? null : { taeEntryName };
+  }
+  if (normalizedKind === 'group') {
+    const taeGroup = value === undefined ? null : decodeSectionText(value);
+    return taeGroup === null ? null : { taeGroup };
+  }
+  return null;
+}
+
+function parseActionTail(parts: string[], codeIndex: number, section?: ActionSectionSelector): ActionAddress | null {
+  const code = parts[codeIndex];
+  if (code === undefined || !/^A\d{1,5}$/i.test(code)) return null;
+  const animId = parseAnimCode(code);
+  if (animId === null) return null;
+  if (parts.length > codeIndex + 2) return null;
+
+  const result: ActionAddress = { chr: '', animId, ...section };
+  if (parts.length === codeIndex + 2) {
+    const eventMatch = /^e(\d+)(?:\.([A-Za-z0-9_]+))?$/i.exec(parts[codeIndex + 1] ?? '');
+    if (!eventMatch) return null;
+    const eventIndex = parseSafeIntegerSegment(eventMatch[1]!, false, false);
+    if (eventIndex === null) return null;
+    result.eventIndex = eventIndex;
+    if (eventMatch[2] !== undefined) result.field = eventMatch[2];
+  }
+  return result;
+}
+
+function parseActionUri(value: string): ActionAddress | null {
+  const match = /^action:\/\/(c\d{4})\/(.+)$/i.exec(value);
+  if (!match) return null;
+  const parts = match[2]!.split('/');
+  if (parts.some((part) => part.length === 0)) return null;
+
+  if (parts[0]!.toLowerCase() !== 'tae') {
+    const result = parseActionTail(parts, 0);
+    return result === null ? null : { ...result, chr: match[1]!.toLowerCase() };
+  }
+
+  if (parts.length < 3) return null;
+  let selector: ActionSectionSelector | null = null;
+  let codeIndex = 2;
+  const selectorHead = parts[1]!;
+  if (/^(?:0|[1-9]\d*)$/.test(selectorHead)) {
+    selector = parseActionSectionSelector('index', selectorHead);
+  } else if (/^(?:index|id|name|group)$/i.test(selectorHead)) {
+    selector = parseActionSectionSelector(selectorHead, parts[2]);
+    codeIndex = 3;
+  }
+  if (selector === null) return null;
+
+  const result = parseActionTail(parts, codeIndex, selector);
+  return result === null ? null : { ...result, chr: match[1]!.toLowerCase() };
+}
+
+function formatActionSectionSelector(address: ActionAddress): string | null {
+  const selectors: Array<{ key: 'index' | 'id' | 'name' | 'group'; value: number | string }> = [];
+  if (address.taeEntryIndex !== undefined) selectors.push({ key: 'index', value: address.taeEntryIndex });
+  if (address.taeEntryId !== undefined) selectors.push({ key: 'id', value: address.taeEntryId });
+  if (address.taeEntryName !== undefined) selectors.push({ key: 'name', value: address.taeEntryName });
+  if (address.taeGroup !== undefined) selectors.push({ key: 'group', value: address.taeGroup });
+  if (selectors.length === 0) return null;
+  if (selectors.length > 1) {
+    throw new TypeError('ActionAddress 只能包含一个 TAE section selector。');
+  }
+
+  const selector = selectors[0]!;
+  if (selector.key === 'index') {
+    if (typeof selector.value !== 'number' || !Number.isSafeInteger(selector.value) || selector.value < 0) {
+      throw new TypeError('ActionAddress.taeEntryIndex 必须是非负 safe integer。');
+    }
+    return `tae/${String(selector.value)}`;
+  }
+  if (selector.key === 'id') {
+    if (typeof selector.value !== 'number' || !Number.isSafeInteger(selector.value)) {
+      throw new TypeError('ActionAddress.taeEntryId 必须是 safe integer。');
+    }
+    return `tae/id/${String(selector.value)}`;
+  }
+
+  if (typeof selector.value !== 'string' || decodeSectionText(encodeURIComponent(selector.value)) === null) {
+    throw new TypeError(`ActionAddress.${selector.key} 必须是非空且不含路径分隔符的字符串。`);
+  }
+  return `tae/${selector.key}/${encodeURIComponent(selector.value)}`;
+}
 
 /** animId → `A0200`。 */
 export function formatAnimCode(animId: number): string {
@@ -83,15 +222,43 @@ export function formatMapArea(block: string): string {
   return match ? `M${match[1]}` : '';
 }
 
-/** 动作地址 → 字符串：`{ chr:'c1050', animId:200, eventIndex:0, field:'startFrame' }` → `c1050#A0200.e0.startFrame`。 */
+/**
+ * 动作地址 → 字符串。无 section selector 时保留旧语法
+ * `c1050#A0200.e0.startFrame`；有 selector 时输出 canonical action URI，
+ * 例如 `{ chr:'c1050', taeEntryIndex:3, animId:200, eventIndex:0 }` →
+ * `action://c1050/tae/3/A0200/e0`。
+ */
 export function formatActionAddress(address: ActionAddress): string {
   let result = address.chr.toLowerCase();
   if (address.animId !== undefined) {
-    result = `${result}#${formatAnimCode(address.animId)}`;
+    const section = formatActionSectionSelector(address);
+    if (section !== null) {
+      if (!Number.isSafeInteger(address.animId) || address.animId < 0) {
+        throw new TypeError('canonical ActionAddress.animId 必须是非负 safe integer。');
+      }
+      if (address.animId > 99999) throw new TypeError('canonical ActionAddress.animId 必须不超过 5 位。');
+      if (address.eventIndex !== undefined
+        && (!Number.isSafeInteger(address.eventIndex) || address.eventIndex < 0)) {
+        throw new TypeError('canonical ActionAddress.eventIndex 必须是非负 safe integer。');
+      }
+      if (address.field && address.field.length > 0 && !/^[A-Za-z0-9_]+$/.test(address.field)) {
+        throw new TypeError('canonical ActionAddress.field 只能包含字母、数字和下划线。');
+      }
+    }
+    result = section === null
+      ? `${result}#${formatAnimCode(address.animId)}`
+      : `action://${result}/${section}/${formatAnimCode(address.animId)}`;
     if (address.eventIndex !== undefined) {
-      result = `${result}.e${address.eventIndex}`;
+      result = section === null
+        ? `${result}.e${address.eventIndex}`
+        : `${result}/e${address.eventIndex}`;
       if (address.field && address.field.length > 0) result = `${result}.${address.field}`;
     }
+  } else if (address.taeEntryIndex !== undefined
+    || address.taeEntryId !== undefined
+    || address.taeEntryName !== undefined
+    || address.taeGroup !== undefined) {
+    throw new TypeError('带 TAE section selector 的 ActionAddress 必须包含 animId。');
   }
   return result;
 }
@@ -105,13 +272,20 @@ export function formatActionAddress(address: ActionAddress): string {
  * fail-closed 返回 null，不编造主键 —— 未知映射不能开放读写目标。
  */
 export function parseActionAddress(value: string): ActionAddress | null {
+  if (typeof value !== 'string') return null;
   const text = value.trim();
+  const uriResult = parseActionUri(text);
+  if (uriResult !== null) return uriResult;
   const match = /^c(\d{4})(?:#A(\d{1,5})(?:\.e(\d+))?(?:\.([A-Za-z0-9_]+))?)?$/i.exec(text);
   if (!match) return null;
   const result: ActionAddress = { chr: `c${match[1]}`.toLowerCase() };
   if (match[2] === undefined) return result;
   result.animId = Number(match[2]);
-  if (match[3] !== undefined) result.eventIndex = Number(match[3]);
+  if (match[3] !== undefined) {
+    const eventIndex = parseSafeIntegerSegment(match[3], false, false);
+    if (eventIndex === null) return null;
+    result.eventIndex = eventIndex;
+  }
   if (match[4]) result.field = match[4];
   return result;
 }
@@ -154,8 +328,9 @@ export function extractAtomicAddressTokens(text: string): string[] {
     if (!tokens.includes(normalized)) tokens.push(normalized);
   };
 
-  // 完整地址（带 #）优先整体提取，保证 m11_01_00_00#c1050_0000.posX 不被拆。
+  // 完整地址优先整体提取，保证带 # 的旧地址及 action:// section URI 不被拆。
   for (const match of text.matchAll(ACTION_ADDR_RE)) add(match[0]);
+  for (const match of text.matchAll(ACTION_URI_ADDR_RE)) add(match[0]);
   for (const match of text.matchAll(MAP_ADDR_RE)) add(match[0]);
 
   // 再抽独立分量（c1050 / a0200 / m11 / m11_01_00_00 等）。

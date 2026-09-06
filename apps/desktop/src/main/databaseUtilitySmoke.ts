@@ -224,6 +224,30 @@ app.whenReady().then(async () => {
       relativePath: 'event/test.emevd.dcx',
       resourceKind: 'event'
     }]);
+    await client.upsertSemanticFileCache({
+      relativePath: 'event/test.emevd.dcx',
+      fileSha256: 'sha-test-123',
+      resourceKind: 'event',
+      payload: {
+        events: [
+          {
+            events: [
+              {
+                uri: 'event://file://event/test.emevd.dcx/100',
+                sourceUri: 'file://event/test.emevd.dcx',
+                eventId: 100,
+                instructions: []
+              }
+            ]
+          }
+        ]
+      },
+      mtimeMs: 1
+    });
+    const cacheMap = await client.getAllSemanticFileCache();
+    if (!cacheMap.has('event/test.emevd.dcx') || cacheMap.get('event/test.emevd.dcx')?.fileSha256 !== 'sha-test-123') {
+      throw new Error('Database utility semantic file cache round trip failed.');
+    }
     if ((await client.searchFiles('test EMEVD')).length !== 1
       || (await client.searchRagChunks('emevd', 8)).length !== 1
       || (await client.listDiagnostics())[0]?.code !== 'PARSE_PARTIAL'

@@ -17,6 +17,10 @@ const DEFAULT_DIFFERENTIAL_IDS = [10, 11, 12, 13, 100, 101, 200, 300, 400, 500, 
 const MAX_TRANSLATION_SCALE_ERROR = 1e-3;
 const MAX_ROTATION_ERROR = 1e-3;
 const BRIDGE_MAX_FRAME_BYTES = 16 * 1024 * 1024;
+// c0000_a000_lo is the HKX companion of the a00 TAE child. The TAE selector
+// is part of animation identity: animId alone repeats across a00/a50/a70...
+// and must never be allowed to pick an arbitrary child.
+const C0000_TAE_GROUP = 'a00';
 
 interface PoseResult {
   sampledPose: BoneTransformData[];
@@ -85,6 +89,7 @@ async function sampleNative(filePath: string, animId: number, timeSeconds: numbe
   const result = await sampleTaeAnimationPose({
     filePath,
     animId,
+    taeGroup: C0000_TAE_GROUP,
     timeSeconds,
     loop: false,
     animationContainerPath: join(root, 'chr', 'c0000_a000_lo.anibnd.dcx'),
@@ -177,9 +182,10 @@ async function main(): Promise<void> {
   try {
     for (const entry of inventoryEntries) {
       const animId = entry.id;
-      const loaded = await loadTaeAnimationClip({
+        const loaded = await loadTaeAnimationClip({
           filePath,
           animId,
+          taeGroup: C0000_TAE_GROUP,
           animationContainerPath,
           skeletonContainerPath: filePath,
           allowedRoots: [root],

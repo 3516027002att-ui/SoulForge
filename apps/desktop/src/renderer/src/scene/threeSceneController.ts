@@ -212,6 +212,8 @@ export interface FlverSceneBone {
   translation: [number, number, number];
   rotation: [number, number, number];
   scale?: [number, number, number];
+  /** Native reference FK in row-major System.Numerics order. */
+  referenceFkMatrix?: number[];
   rotationOrder?: 'YZX' | 'XYZ' | 'XZY';
 }
 
@@ -231,6 +233,191 @@ export interface FlverSceneSkeletonBinding {
   bones: FlverSceneBone[];
   /** Source FLVER bone index -> leader skeleton bone index; -1 is unmapped. */
   sourceToLeader: number[];
+}
+
+export type FlverRuntimeBoneDiagnosticCode =
+  | 'FLVER_RUNTIME_BONE_INDEX_INVALID'
+  | 'FLVER_RUNTIME_BONE_INDEX_DUPLICATE'
+  | 'FLVER_RUNTIME_PARENT_INDEX_INVALID'
+  | 'FLVER_RUNTIME_PARENT_INDEX_MISSING'
+  | 'FLVER_RUNTIME_PARENT_CYCLE'
+  | 'FLVER_FOLLOWER_SOURCE_INDEX_MISSING'
+  | 'FLVER_FOLLOWER_LEADER_INDEX_INVALID'
+  | 'FLVER_FOLLOWER_LEADER_BONE_MISSING';
+
+export interface FlverRuntimeBoneDiagnostic {
+  severity: 'error';
+  code: FlverRuntimeBoneDiagnosticCode;
+  message: string;
+  details: Readonly<Record<string, unknown>>;
+}
+
+export class FlverRuntimeBindingError extends Error {
+  readonly diagnostics: readonly FlverRuntimeBoneDiagnostic[];
+
+  constructor(diagnostics: readonly FlverRuntimeBoneDiagnostic[]) {
+    const normalized = [...diagnostics];
+    super(`FLVER_RUNTIME_BONE_BINDING_FAILED: ${normalized.map((diagnostic) => diagnostic.code).join(',')}`);
+    this.name = 'FlverRuntimeBindingError';
+    this.diagnostics = normalized;
+  }
+}
+
+interface FlverRuntimeSkeletonValidation {
+  boneArrayIndexBySourceIndex: Map<number, number>;
+  diagnostics: FlverRuntimeBoneDiagnostic[];
+}
+
+function runtimeNativeBoneIndex(source: Pick<FlverSceneBone, 'index'>, runtimeOrdinal: number): number {
+  return source.index ?? runtimeOrdinal;
+}
+
+/**
+ * Validate native FLVER identity before constructing a Three hierarchy. The
+ * renderer may project a sparse/reordered native table, but it must not invent
+ * a parent or silently overwrite a duplicate native index.
+ */
+export function validateFlverRuntimeSkeleton(
+  bones: readonly FlverSceneBone[],
+  skeletonId: string
+): FlverRuntimeSkeletonValidation {
+  const boneArrayIndexBySourceIndex = new Map<number, number>();
+  const diagnostics: FlverRuntimeBoneDiagnostic[] = [];
+  const parentBySourceIndex = new Map<number, number>();
+  const sourceIndexByOrdinal = bones.map((bone, ordinal) => runtimeNativeBoneIndex(bone, ordinal));
+
+  for (let ordinal = 0; ordinal < bones.length; ordinal += 1) {
+    const sourceIndex = sourceIndexByOrdinal[ordinal]!;
+    if (!Number.isSafeInteger(sourceIndex) || sourceIndex < 0) {
+      diagnostics.push({
+        severity: 'error',
+        code: 'FLVER_RUNTIME_BONE_INDEX_INVALID',
+        message: `Skeleton ${skeletonId} bone ${ordinal} has invalid native index ${String(sourceIndex)}.`,
+        details: { skeletonId, ordinal, sourceIndex }
+      });
+      continue;
+    }
+    if (boneArrayIndexBySourceIndex.has(sourceIndex)) {
+      diagnostics.push({
+        severity: 'error',
+        code: 'FLVER_RUNTIME_BONE_INDEX_DUPLICATE',
+        message: `Skeleton ${skeletonId} contains duplicate native bone index ${sourceIndex}.`,
+        details: { skeletonId, sourceIndex, ordinal, previousOrdinal: boneArrayIndexBySourceIndex.get(sourceIndex) }
+      });
+      continue;
+    }
+    boneArrayIndexBySourceIndex.set(sourceIndex, ordinal);
+  }
+
+  for (let ordinal = 0; ordinal < bones.length; ordinal += 1) {
+    const bone = bones[ordinal]!;
+    const sourceIndex = sourceIndexByOrdinal[ordinal]!;
+    if (!boneArrayIndexBySourceIndex.has(sourceIndex)) continue;
+    const parentIndex = bone.parentIndex;
+    if (!Number.isSafeInteger(parentIndex) || parentIndex < -1) {
+      diagnostics.push({
+        severity: 'error',
+        code: 'FLVER_RUNTIME_PARENT_INDEX_INVALID',
+        message: `Skeleton ${skeletonId} bone ${sourceIndex} has invalid parent index ${String(parentIndex)}.`,
+        details: { skeletonId, sourceIndex, parentIndex }
+      });
+      continue;
+    }
+    if (parentIndex === -1) continue;
+    if (parentIndex === sourceIndex) {
+      diagnostics.push({
+        severity: 'error',
+        code: 'FLVER_RUNTIME_PARENT_CYCLE',
+        message: `Skeleton ${skeletonId} bone ${sourceIndex} points to itself as parent.`,
+        details: { skeletonId, sourceIndex, parentIndex }
+      });
+      continue;
+    }
+    if (!boneArrayIndexBySourceIndex.has(parentIndex)) {
+      diagnostics.push({
+        severity: 'error',
+        code: 'FLVER_RUNTIME_PARENT_INDEX_MISSING',
+        message: `Skeleton ${skeletonId} bone ${sourceIndex} references missing parent ${parentIndex}.`,
+        details: { skeletonId, sourceIndex, parentIndex }
+      });
+      continue;
+    }
+    parentBySourceIndex.set(sourceIndex, parentIndex);
+  }
+
+  const visiting = new Set<number>();
+  const visited = new Set<number>();
+  const visit = (sourceIndex: number): void => {
+    if (visited.has(sourceIndex)) return;
+    if (visiting.has(sourceIndex)) {
+      diagnostics.push({
+        severity: 'error',
+        code: 'FLVER_RUNTIME_PARENT_CYCLE',
+        message: `Skeleton ${skeletonId} has a parent cycle involving native bone ${sourceIndex}.`,
+        details: { skeletonId, sourceIndex }
+      });
+      return;
+    }
+    visiting.add(sourceIndex);
+    const parentIndex = parentBySourceIndex.get(sourceIndex);
+    if (parentIndex !== undefined) visit(parentIndex);
+    visiting.delete(sourceIndex);
+    visited.add(sourceIndex);
+  };
+  for (const sourceIndex of boneArrayIndexBySourceIndex.keys()) visit(sourceIndex);
+
+  return { boneArrayIndexBySourceIndex, diagnostics };
+}
+
+export function validateFlverRuntimeFollowerBinding(
+  followerBones: readonly FlverSceneBone[],
+  sourceToLeader: readonly number[],
+  leaderBoneArrayIndexBySourceIndex: ReadonlyMap<number, number>,
+  skeletonId: string
+): FlverRuntimeBoneDiagnostic[] {
+  const diagnostics: FlverRuntimeBoneDiagnostic[] = [];
+  const followerIndices = new Set<number>();
+  for (let ordinal = 0; ordinal < followerBones.length; ordinal += 1) {
+    const sourceIndex = runtimeNativeBoneIndex(followerBones[ordinal]!, ordinal);
+    followerIndices.add(sourceIndex);
+    const leaderIndex = sourceToLeader[sourceIndex];
+    if (leaderIndex === undefined) {
+      diagnostics.push({
+        severity: 'error',
+        code: 'FLVER_FOLLOWER_SOURCE_INDEX_MISSING',
+        message: `Follower ${skeletonId} has no leader mapping for native bone ${sourceIndex}.`,
+        details: { skeletonId, sourceIndex }
+      });
+      continue;
+    }
+    if (!Number.isSafeInteger(leaderIndex) || leaderIndex < -1) {
+      diagnostics.push({
+        severity: 'error',
+        code: 'FLVER_FOLLOWER_LEADER_INDEX_INVALID',
+        message: `Follower ${skeletonId} has invalid leader mapping ${String(leaderIndex)} for native bone ${sourceIndex}.`,
+        details: { skeletonId, sourceIndex, leaderIndex }
+      });
+    } else if (leaderIndex >= 0 && !leaderBoneArrayIndexBySourceIndex.has(leaderIndex)) {
+      diagnostics.push({
+        severity: 'error',
+        code: 'FLVER_FOLLOWER_LEADER_BONE_MISSING',
+        message: `Follower ${skeletonId} maps native bone ${sourceIndex} to missing leader bone ${leaderIndex}.`,
+        details: { skeletonId, sourceIndex, leaderIndex }
+      });
+    }
+  }
+  for (let sourceIndex = 0; sourceIndex < sourceToLeader.length; sourceIndex += 1) {
+    const leaderIndex = sourceToLeader[sourceIndex];
+    if (leaderIndex !== undefined && leaderIndex >= 0 && !followerIndices.has(sourceIndex)) {
+      diagnostics.push({
+        severity: 'error',
+        code: 'FLVER_FOLLOWER_SOURCE_INDEX_MISSING',
+        message: `Follower ${skeletonId} maps absent native bone ${sourceIndex}.`,
+        details: { skeletonId, sourceIndex, leaderIndex }
+      });
+    }
+  }
+  return diagnostics;
 }
 
 export interface FlverSceneDummy {
@@ -258,15 +445,15 @@ export interface SceneFrameOptions {
 /**
  * DSAnimStudio 的成熟 FLVER 渲染路径会把原生坐标乘以
  * `Matrix.CreateScale(1, 1, -1)`。本项目相机的方位角定义是“相机所在方向”，
- * 因此经过该镜像后，原生角色正面位于转换后的 -Z 一侧，正面取景使用
- * `azimuth=Math.PI`；这由真实 c0000 的正/背面截图和原生坐标变换共同确认，
+ * 因此经过该镜像后，真实 c0000 的正面位于转换后的 +Z 一侧，正面取景使用
+ * `azimuth=0`；这由真实 c0000 的正/背面截图和原生坐标变换共同确认，
  * 不是对模型 ID 或网格顺序的猜测。
  */
 export const FLVER_PREVIEW_FRAME_OPTIONS: Readonly<Required<SceneFrameOptions>> = Object.freeze({
   minSpan: 1.5,
   distanceScale: 1.35,
   minDistance: 2.4,
-  azimuth: Math.PI,
+  azimuth: 0,
   elevation: 0.12
 });
 
@@ -291,6 +478,8 @@ interface MountInput {
   container: HTMLElement;
   /** Only native FLVER projection uses the DSAnimStudio Z-handedness conversion. */
   nativeFlverCoordinateSpace?: boolean;
+  /** Optional editor guides; action previews hide these presentation-only helpers. */
+  showSceneGuides?: boolean;
   rendererBackend?: RendererBackend;
   /** Headless test seam: replaces GPU-backed renderer construction. */
   rendererFactory?: (canvas: HTMLCanvasElement) => ThreeRendererLike;
@@ -554,10 +743,15 @@ export async function mountFlverScene(input: {
   rendererBackend?: RendererBackend;
   rendererFactory?: (canvas: HTMLCanvasElement) => ThreeRendererLike;
   resourceAudit?: (resources: ReadonlyArray<{ dispose(): void }>) => void;
+  showSceneGuides?: boolean;
 }): Promise<FlverSceneHandle> {
   const core = await mountSceneCore({ ...input, nativeFlverCoordinateSpace: true });
   interface RuntimeSkeleton {
     bones: Array<import('three').Bone>;
+    /** Native FLVER bone index -> Three Skeleton.bones array position. */
+    boneArrayIndexBySourceIndex: Map<number, number>;
+    /** Native FLVER bone index -> runtime Bone, never an array-position lookup. */
+    boneBySourceIndex: Map<number, import('three').Bone>;
     skeleton: import('three').Skeleton;
     /** Lazily-created native Dynamic==0 absolute-matrix view of the same bones. */
     absoluteSkeleton?: import('three').Skeleton;
@@ -567,6 +761,8 @@ export async function mountFlverScene(input: {
     leaderSkeletonId?: string;
     /** Source FLVER bone index -> leader bone index. */
     sourceToLeader?: number[];
+    /** Exact native reference locals used for follower-only descendants. */
+    referenceLocalMatrices?: Array<import('three').Matrix4 | undefined>;
     initialBones: Array<{
       translation: [number, number, number];
       rotation: [number, number, number, number];
@@ -574,6 +770,10 @@ export async function mountFlverScene(input: {
     }>;
   }
   let activeSkeletons = new Map<string, RuntimeSkeleton>();
+  // Bone helpers belong to the projection layer and must be refreshed after
+  // every pose/FK update.  Keeping the callback outside the semantic scene
+  // prevents renderer objects from leaking back into React/core authority.
+  let updateSkeletonMarkers: () => void = () => undefined;
 
   const applyPoseLocals = (runtime: RuntimeSkeleton, pose: Array<{
     translation: [number, number, number];
@@ -646,7 +846,7 @@ export async function mountFlverScene(input: {
 
       const sourceIndex = runtime.sourceBoneIndices?.[index] ?? index;
       const leaderIndex = sourceToLeader[sourceIndex] ?? -1;
-      const leaderBone = leader.bones[leaderIndex];
+      const leaderBone = leader.boneBySourceIndex.get(leaderIndex);
       if (leaderIndex >= 0 && leaderBone) {
         // Do not rebuild mapped follower local transforms from the leader.
         // Mature viewers replace the follower's current FK/world matrix with
@@ -654,13 +854,23 @@ export async function mountFlverScene(input: {
         sourceBone.matrixWorld.copy(leaderBone.matrixWorld);
       } else if (parentIndex !== undefined) {
         // The follower bone is not in the leader map. Recompose its native
-        // local FK under the already-synchronised follower parent. Its local
-        // transform remains the reference/local transform created at mount.
-        sourceBone.updateMatrix();
+        // local FK under the already-synchronised follower parent. Mature
+        // viewers keep the exact native reference local matrix here rather
+        // than rebuilding it through another Euler/quaternion round trip.
+        const referenceLocal = runtime.referenceLocalMatrices?.[index];
+        if (referenceLocal) sourceBone.matrix.copy(referenceLocal);
+        else sourceBone.updateMatrix();
         sourceBone.matrixWorld.multiplyMatrices(
           runtime.bones[parentIndex]!.matrixWorld,
           sourceBone.matrix
         );
+      } else {
+        // DirectBoneMap also walks unmapped roots. Leaving an unmapped root at
+        // its old bind world matrix detaches the whole follower subtree.
+        const referenceLocal = runtime.referenceLocalMatrices?.[index];
+        if (referenceLocal) sourceBone.matrix.copy(referenceLocal);
+        else sourceBone.updateMatrix();
+        sourceBone.matrixWorld.multiplyMatrices(core.root.matrixWorld, sourceBone.matrix);
       }
       sourceBone.matrixWorldNeedsUpdate = false;
       processed.add(sourceBone);
@@ -695,10 +905,12 @@ export async function mountFlverScene(input: {
       runtime.skeleton.update();
       runtime.absoluteSkeleton?.update();
     }
+    updateSkeletonMarkers();
   };
 
   const setScene = (semantic: FlverSemanticScene): void => {
     try {
+      updateSkeletonMarkers = () => undefined;
       core.clearContent();
       activeSkeletons = new Map<string, RuntimeSkeleton>();
 
@@ -711,7 +923,14 @@ export async function mountFlverScene(input: {
       ): RuntimeSkeleton => {
         const threeBones: Array<import('three').Bone> = [];
         const initialBones: RuntimeSkeleton['initialBones'] = [];
+        const validation = validateFlverRuntimeSkeleton(semanticSkeleton.bones, semanticSkeleton.id);
+        if (validation.diagnostics.length > 0) {
+          throw new FlverRuntimeBindingError(validation.diagnostics);
+        }
+        const boneArrayIndexBySourceIndex = validation.boneArrayIndexBySourceIndex;
+        const boneBySourceIndex = new Map<number, import('three').Bone>();
         for (const b of semanticSkeleton.bones) {
+          const sourceIndex = b.index ?? threeBones.length;
           const bone = new core.three.Bone();
           bone.name = b.name;
           bone.position.set(b.translation[0], b.translation[1], b.translation[2]);
@@ -720,6 +939,8 @@ export async function mountFlverScene(input: {
           const scale = b.scale ?? [1, 1, 1];
           bone.scale.set(scale[0], scale[1], scale[2]);
           threeBones.push(bone);
+          boneArrayIndexBySourceIndex.set(sourceIndex, threeBones.length - 1);
+          boneBySourceIndex.set(sourceIndex, bone);
           initialBones.push({
             translation: [b.translation[0], b.translation[1], b.translation[2]],
             rotation: [bone.quaternion.x, bone.quaternion.y, bone.quaternion.z, bone.quaternion.w],
@@ -735,21 +956,64 @@ export async function mountFlverScene(input: {
         for (let i = 0; i < semanticSkeleton.bones.length; i++) {
           const parentIdx = semanticSkeleton.bones[i]!.parentIndex;
           const parent = bonesByIndex.get(parentIdx);
-          if (parent && parent !== threeBones[i]) {
-            parent.add(threeBones[i]!);
-          } else {
-            core.root.add(threeBones[i]!);
-          }
+          if (parent) parent.add(threeBones[i]!);
+          else core.root.add(threeBones[i]!);
         }
         // Skeleton.calculateInverses() samples bone.matrixWorld. The bones
         // have just been attached to the semantic root, so force their world
         // matrices current before capturing bind-pose inverses.
         core.root.updateMatrixWorld(true);
+        const exactReferenceFk = new Map<number, import('three').Matrix4>();
+        for (const source of semanticSkeleton.bones) {
+          if (source.referenceFkMatrix?.length !== 16) continue;
+          const matrix = new core.three.Matrix4().fromArray(source.referenceFkMatrix);
+          if ([...matrix.elements].every(Number.isFinite)) {
+            exactReferenceFk.set(source.index ?? semanticSkeleton.bones.indexOf(source), matrix);
+          }
+        }
+        const referenceLocalMatrices: Array<import('three').Matrix4 | undefined> = [];
+        for (let index = 0; index < semanticSkeleton.bones.length; index += 1) {
+          const source = semanticSkeleton.bones[index];
+          if (!source) continue;
+          const sourceIndex = source.index ?? index;
+          const referenceFk = exactReferenceFk.get(sourceIndex);
+          if (!referenceFk) continue;
+          const parentSource = source.parentIndex >= 0
+            ? semanticSkeleton.bones.find((candidate, candidateIndex) =>
+                (candidate.index ?? candidateIndex) === source.parentIndex)
+            : undefined;
+          const parentFk = parentSource
+            ? exactReferenceFk.get(parentSource.index ?? source.parentIndex)
+            : undefined;
+          if (source.parentIndex >= 0 && !parentFk) continue;
+          const local = referenceFk.clone();
+          if (parentFk) local.premultiply(parentFk.clone().invert());
+          referenceLocalMatrices[index] = local;
+          const bone = threeBones[index];
+          if (bone) {
+            // Bridge serializes the native row-major matrix. Matrix4.fromArray
+            // interprets that sequence as the equivalent column-vector
+            // transpose, so no Euler round-trip is involved here. Decompose
+            // the exact local matrix before Three traverses the hierarchy;
+            // writing matrixWorld alone would be overwritten by the next
+            // root.updateMatrixWorld(true).
+            local.decompose(bone.position, bone.quaternion, bone.scale);
+            bone.updateMatrix();
+            initialBones[index] = {
+              translation: [bone.position.x, bone.position.y, bone.position.z],
+              rotation: [bone.quaternion.x, bone.quaternion.y, bone.quaternion.z, bone.quaternion.w],
+              scale: [bone.scale.x, bone.scale.y, bone.scale.z]
+            };
+          }
+        }
         const skeleton = core.track(new core.three.Skeleton(threeBones));
         const runtime: RuntimeSkeleton = {
           bones: threeBones,
+          boneArrayIndexBySourceIndex,
+          boneBySourceIndex,
           skeleton,
           initialBones,
+          referenceLocalMatrices,
           ...(binding
             ? {
                 sourceBoneIndices: semanticSkeleton.bones.map((bone, index) => bone.index ?? index),
@@ -775,11 +1039,21 @@ export async function mountFlverScene(input: {
         activeSkeletons.set(semanticSkeleton.id, runtime);
       }
       for (const binding of semantic.skeletonBindings ?? []) {
-        if (!activeSkeletons.has(binding.leaderSkeletonId)) {
+        const leaderRuntime = activeSkeletons.get(binding.leaderSkeletonId);
+        if (!leaderRuntime) {
           throw new Error(`FLVER_FOLLOWER_LEADER_MISSING: ${binding.id} -> ${binding.leaderSkeletonId}`);
         }
         if (activeSkeletons.has(binding.id)) {
           throw new Error(`FLVER_SKELETON_ID_DUPLICATE: ${binding.id}`);
+        }
+        const bindingDiagnostics = validateFlverRuntimeFollowerBinding(
+          binding.bones,
+          binding.sourceToLeader,
+          leaderRuntime.boneArrayIndexBySourceIndex,
+          binding.id
+        );
+        if (bindingDiagnostics.length > 0) {
+          throw new FlverRuntimeBindingError(bindingDiagnostics);
         }
         const runtime = createRuntimeSkeleton(
           { id: binding.id, bones: binding.bones },
@@ -810,30 +1084,50 @@ export async function mountFlverScene(input: {
       for (const item of semantic.meshes) {
         if (item.previewRenderMode === 'projected-decal') continue;
         const runtime = activeSkeletons.get(item.skeletonId ?? 'default');
+        const projectedItem = runtime && item.skinIndices
+          ? {
+              ...item,
+              skinIndices: remapSkinIndicesToRuntime(item, runtime.boneArrayIndexBySourceIndex)
+            }
+          : item;
         let meshSkeleton = runtime?.skeleton;
         if (runtime && item.skinningTransformMode === 'absolute') {
           // Mature FLVER viewers pass the absolute reference-pose matrix to
           // mesh.Dynamic==0. Three's default Skeleton.calculateInverses()
           // would cancel that pose and is only correct for model-space
           // inverse-bind vertices. Keep one shared bone tree, but give this
-          // mesh class an explicit identity inverse array.
+          // mesh class the inverse of the native scene-root conversion. The
+          // mesh bind matrix includes that same root conversion below, so the
+          // resulting shader matrix is the native absolute current FK rather
+          // than a mirrored/conjugated matrix.
+          const nativeRootInverse = core.root.matrixWorld.clone().invert();
           runtime.absoluteSkeleton ??= core.track(new core.three.Skeleton(
             runtime.bones,
-            runtime.bones.map(() => new core.three.Matrix4())
+            runtime.bones.map(() => nativeRootInverse.clone())
           ));
           meshSkeleton = runtime.absoluteSkeleton;
         }
         core.addMesh(item.id, createFlverMesh(
           core.three,
           core.track,
-          item,
+          projectedItem,
           meshSkeleton ?? null,
           textureCache,
           core.rendererBackend,
-          true
+          true,
+          core.root.matrixWorld
         ));
       }
-      createMarkers(core.three, core.track, core.markerGroup, semantic);
+      const markerRuntime = [...activeSkeletons.values()]
+        .find((runtime) => runtime.leaderSkeletonId === undefined);
+      updateSkeletonMarkers = createMarkers(
+        core.three,
+        core.track,
+        core.markerGroup,
+        semantic,
+        markerRuntime?.bones
+      );
+      updateSkeletonMarkers();
       // 角色 FLVER 的真实尺寸通常只有 1~2 个游戏单位。通用代理取景
       // 的 15/16 单位下限会把动作模型缩成原点旁的几像素，播放虽在走，
       // 用户却看不到动作；这里按真实模型尺寸取景，仍保留较小安全下限。
@@ -970,10 +1264,14 @@ async function mountSceneCore(input: MountInput): Promise<SceneCore> {
   fill.position.set(-40, 25, -30);
   scene.add(fill);
 
-  const grid = new three.GridHelper(200, 20, 0x3a4150, 0x2a303c);
-  const axes = new three.AxesHelper(10);
-  scene.add(grid);
-  scene.add(axes);
+  const grid = input.showSceneGuides === false
+    ? null
+    : new three.GridHelper(200, 20, 0x3a4150, 0x2a303c);
+  const axes = input.showSceneGuides === false
+    ? null
+    : new three.AxesHelper(10);
+  if (grid) scene.add(grid);
+  if (axes) scene.add(axes);
 
   const markerGroup = new three.Group();
   scene.add(markerGroup);
@@ -994,7 +1292,9 @@ async function mountSceneCore(input: MountInput): Promise<SceneCore> {
   const placementCells = new Map<string, string[]>();
   const renderStates = new Map<string, ProxySceneRenderState>();
   const resources: Array<{ dispose(): void }> = [];
-  const staticResources: Array<{ dispose(): void }> = [grid.geometry, axes.geometry];
+  const staticResources: Array<{ dispose(): void }> = [];
+  if (grid) staticResources.push(grid.geometry);
+  if (axes) staticResources.push(axes.geometry);
   const highlightMaterials = new Set<{ dispose(): void }>();
   const track: ResourceTracker = (resource) => {
     resources.push(resource);
@@ -2333,6 +2633,74 @@ function normalizeModelName(raw: string): string {
   return normalizeModelResourceKey(raw);
 }
 
+/**
+ * Three's skinIndex attribute addresses the order of `Skeleton.bones`, while
+ * FLVER payloads address bones by their native index.  They are usually the
+ * same sequence, but a sparse/reordered native table must not be allowed to
+ * bind a vertex to a different bone.  Zero-weight garbage indices are safely
+ * canonicalized to slot 0; every positive-weight index must resolve exactly.
+ */
+export function remapSkinIndicesToRuntime(
+  item: Pick<FlverSceneMesh, 'skinIndices' | 'skinWeights'>,
+  boneArrayIndexBySourceIndex: ReadonlyMap<number, number>
+): Uint16Array {
+  const source = item.skinIndices;
+  if (!source) return new Uint16Array();
+  const result = new Uint16Array(source.length);
+  for (let index = 0; index < source.length; index += 1) {
+    const sourceIndex = source[index]!;
+    const runtimeIndex = boneArrayIndexBySourceIndex.get(sourceIndex);
+    if (runtimeIndex === undefined) {
+      const weight = item.skinWeights?.[index] ?? 0;
+      if (weight > 1e-6) {
+        throw new Error(`FLVER_RUNTIME_BONE_INDEX_UNRESOLVED: sourceBone=${sourceIndex} influence=${index}`);
+      }
+      result[index] = 0;
+      continue;
+    }
+    if (!Number.isSafeInteger(runtimeIndex) || runtimeIndex < 0 || runtimeIndex > 0xffff) {
+      throw new Error(`FLVER_RUNTIME_BONE_INDEX_UNSUPPORTED: sourceBone=${sourceIndex} runtimeIndex=${runtimeIndex}`);
+    }
+    result[index] = runtimeIndex;
+  }
+  return result;
+}
+
+/**
+ * Three's stock skinning shader accumulates the four influences directly,
+ * while the mature FLVER path divides the accumulated position by the native
+ * weight sum. Keep the Bridge payload untouched (it is the native evidence),
+ * and normalize only the renderer projection copy consumed by `skinWeight`.
+ */
+export function normalizeSkinWeightsForThree(weights: Float32Array): Float32Array {
+  if (weights.length % 4 !== 0) {
+    throw new Error(`FLVER_SKIN_WEIGHT_ARITY_INVALID: ${weights.length}`);
+  }
+  const normalized = new Float32Array(weights.length);
+  for (let offset = 0; offset < weights.length; offset += 4) {
+    const w0 = weights[offset] ?? 0;
+    const w1 = weights[offset + 1] ?? 0;
+    const w2 = weights[offset + 2] ?? 0;
+    const w3 = weights[offset + 3] ?? 0;
+    const sum = w0 + w1 + w2 + w3;
+    if (![w0, w1, w2, w3, sum].every(Number.isFinite)) {
+      throw new Error(`FLVER_SKIN_WEIGHT_NONFINITE: vertex=${offset / 4}`);
+    }
+    if (Math.abs(sum) <= 1e-8) {
+      // This is the same safe rigid fallback used by the mature decoder for
+      // an all-zero vertex. The corresponding index is already canonicalized
+      // by the Bridge, so slot 0 is the only deterministic fallback here.
+      normalized[offset] = 1;
+      continue;
+    }
+    normalized[offset] = w0 / sum;
+    normalized[offset + 1] = w1 / sum;
+    normalized[offset + 2] = w2 / sum;
+    normalized[offset + 3] = w3 / sum;
+  }
+  return normalized;
+}
+
 /** 纯数据分组：同一模型的所有 placement 进入一个 GPU instance batch。 */
 export function groupSceneDrawItems(items: SceneDrawList['items']): SceneDrawBatch[] {
   const batches = new Map<string, SceneDrawBatch>();
@@ -2363,7 +2731,8 @@ function createFlverMesh(
   skeleton: import('three').Skeleton | null = null,
   textureCache?: Map<string, import('three').Texture>,
   rendererBackend: RendererBackend = 'webgl2',
-  nativeFlverCoordinateSpace = false
+  nativeFlverCoordinateSpace = false,
+  nativeRootMatrix?: import('three').Matrix4
 ): Object3D {
   const geometry = track(new three.BufferGeometry());
   geometry.setAttribute('position', new three.BufferAttribute(item.positions, 3));
@@ -2409,7 +2778,10 @@ function createFlverMesh(
     geometry.setAttribute('skinIndex', new three.Uint16BufferAttribute(item.skinIndices, 4));
   }
   if (item.skinWeights) {
-    geometry.setAttribute('skinWeight', new three.Float32BufferAttribute(item.skinWeights, 4));
+    geometry.setAttribute(
+      'skinWeight',
+      new three.Float32BufferAttribute(normalizeSkinWeightsForThree(item.skinWeights), 4)
+    );
   }
 
   const texture = item.texture ? createTexture(three, track, item.texture, textureCache) : null;
@@ -2418,6 +2790,9 @@ function createFlverMesh(
     : null;
   const normalTexture = item.normalTexture
     ? createTexture(three, track, item.normalTexture, textureCache)
+    : null;
+  const normal2Texture = item.normal2Texture
+    ? createTexture(three, track, item.normal2Texture, textureCache)
     : null;
   const albedo2Texture = item.albedo2Texture
     ? createTexture(three, track, item.albedo2Texture, textureCache)
@@ -2434,7 +2809,6 @@ function createFlverMesh(
   // Never infer this policy from a texture filename: mature viewers resolve
   // sampler/alpha state from MTD material data, while a filename is only a
   // locating token and is not write/render authority.
-  const isUnlitCharacterLayer = item.materialAlphaMode === 'cutout';
   const alphaMode = item.materialAlphaMode;
   // Mature FLVER viewers bind native Mask1 to the material's colour-blend
   // operation (for example Blend1To2). It is not an opacity map. The Bridge
@@ -2453,10 +2827,11 @@ function createFlverMesh(
       : three.FrontSide)
     : three.DoubleSide;
   // Native character MTDs provide SSS/hair-card lighting that a generic
-  // MeshStandardMaterial cannot reproduce. Non-opaque face/hair cards still
-  // use the unlit cut-out fallback, while an opaque HeadA remains on the
-  // standard path so its native texture layers are not discarded.
-  const material = track(isProjectedDecal || isUnlitCharacterLayer
+  // MeshStandardMaterial cannot reproduce, but alpha/cutout is a coverage
+  // policy rather than an instruction to discard lighting. Keep cut-out
+  // surfaces lit and attach alphaTest; only projected decals use Basic as a
+  // deliberate projection fallback.
+  const material = track(isProjectedDecal
     ? new three.MeshBasicMaterial({
       color: displayTexture ? 0xffffff : new three.Color(0xb0b8c4),
       ...(displayTexture
@@ -2483,7 +2858,12 @@ function createFlverMesh(
       roughness: 0.5,
       metalness: 0.1,
       ...(texture ? { map: texture } : {}),
-      ...(normalTexture ? { normalMap: normalTexture, normalScale: new three.Vector2(1, 1) } : {}),
+      // Three has one generic normalMap slot. Prefer native normal, and use
+      // normal2 when it is the only available layer; never silently drop a
+      // secondary-only normal texture.
+      ...((normalTexture ?? normal2Texture)
+        ? { normalMap: normalTexture ?? normal2Texture, normalScale: new three.Vector2(1, 1) }
+        : {}),
       ...(metalnessTexture ? { metalness: 1, metalnessMap: metalnessTexture } : {}),
       // Character hair/fur and several cloth/face layers are RGBA cut-outs.
       // Without an alpha test Three renders the transparent part of each card
@@ -2493,7 +2873,7 @@ function createFlverMesh(
       ...(texture && usesTextureAlpha
         ? {
             transparent: true,
-            alphaTest: 0.1,
+            alphaTest: textureAlphaTest,
             depthWrite: true
           }
         : {}),
@@ -2539,10 +2919,16 @@ function createFlverMesh(
     // skeleton.calculateInverses() again. That would overwrite a follower's
     // source reference inverses after its FK has been mapped to the leader
     // (and would also cancel the explicit identity inverses for Dynamic==0).
-    // Capture only this mesh's local bind matrix and leave the already-created
-    // skeleton namespace authoritative.
+    // The mature viewer evaluates FLVER in its native scene space. This
+    // projection mirrors that space at the scene root, so the bind matrix must
+    // contain the same root conversion. Omitting it conjugates every FK by the
+    // mirror and is the source of the characteristic face/limb shear.
     skinned.updateMatrixWorld(true);
-    skinned.bind(skeleton, skinned.matrixWorld.clone());
+    const localBindMatrix = skinned.matrixWorld.clone();
+    const bindMatrix = nativeFlverCoordinateSpace && nativeRootMatrix
+      ? new three.Matrix4().multiplyMatrices(nativeRootMatrix, localBindMatrix)
+      : localBindMatrix;
+    skinned.bind(skeleton, bindMatrix);
     if (isProjectedDecal) skinned.renderOrder = isNativeProjectedDecal ? 2 : 1;
     return skinned;
   }
@@ -2694,47 +3080,111 @@ function createMarkers(
   three: ThreeModule,
   track: ResourceTracker,
   markerGroup: Object3D,
-  semantic: FlverSemanticScene
-): void {
+  semantic: FlverSemanticScene,
+  runtimeBones: readonly import('three').Bone[] | undefined = undefined
+): () => void {
   const bones = semantic.bones ?? semantic.skeletons?.[0]?.bones ?? [];
+  let updateSkeletonMarkers: () => void = () => undefined;
   if (semantic.showSkeletonMarkers === true && bones.length > 0) {
-    const jointMaterial = track(new three.MeshBasicMaterial({ color: 0xffcc66 }));
-    const jointGeometry = track(new three.SphereGeometry(0.15, 8, 8));
-    const lineMaterial = track(new three.LineBasicMaterial({ color: 0xffaa44, transparent: true, opacity: 0.6 }));
-    const worldMatrices = new Map<number, import('three').Matrix4>();
-    const computeWorld = (index: number): import('three').Matrix4 => {
-      const cached = worldMatrices.get(index);
-      if (cached) return cached;
-      const bone = bones[index];
-      if (!bone) return new three.Matrix4();
-      const local = new three.Matrix4();
-      local.makeRotationFromQuaternion(new three.Quaternion().set(
-        ...flverEulerXzyToQuaternion(bone.rotation)
-      ));
-      const scale = bone.scale ?? [1, 1, 1];
-      local.scale(new three.Vector3(scale[0], scale[1], scale[2]));
-      local.setPosition(bone.translation[0], bone.translation[1], bone.translation[2]);
-      let world = local;
-      const parent = bone.parentIndex;
-      if (parent >= 0 && parent < bones.length && parent !== index) {
-        world = computeWorld(parent).clone().multiply(local);
-      }
-      worldMatrices.set(index, world);
-      return world;
-    };
-    const positions = bones.map((_, index) => new three.Vector3().setFromMatrixPosition(computeWorld(index)));
-    for (let index = 0; index < bones.length; index++) {
-      const bone = bones[index];
-      const position = positions[index];
-      if (!bone || !position) continue;
-      const joint = new three.Mesh(jointGeometry, jointMaterial);
-      joint.position.copy(position);
-      markerGroup.add(joint);
-      const parent = bone.parentIndex;
-      const parentPosition = parent >= 0 && parent < positions.length ? positions[parent] : null;
-      if (parentPosition && parent !== index) {
-        const lineGeometry = track(new three.BufferGeometry().setFromPoints([position, parentPosition]));
-        markerGroup.add(new three.Line(lineGeometry, lineMaterial));
+    const jointMaterial = track(new three.MeshBasicMaterial({
+      color: 0xffcc66,
+      depthTest: false,
+      depthWrite: false
+    }));
+    const jointGeometry = track(new three.SphereGeometry(runtimeBones ? 0.06 : 0.15, 8, 6));
+    const lineMaterial = track(new three.LineBasicMaterial({
+      color: 0xffaa44,
+      transparent: true,
+      opacity: 0.85,
+      depthTest: false,
+      depthWrite: false
+    }));
+
+    if (runtimeBones && runtimeBones.length > 0) {
+      // Runtime Bone.matrixWorld is the only correct source after an HKX pose
+      // is applied.  Rebuilding lines from semantic bind transforms would make
+      // the overlay stay behind while the skinned mesh moves.
+      const runtimeIndexByBone = new Map<import('three').Bone, number>();
+      runtimeBones.forEach((bone, index) => runtimeIndexByBone.set(bone, index));
+      const joints = runtimeBones.map(() => {
+        const joint = new three.Mesh(jointGeometry, jointMaterial);
+        markerGroup.add(joint);
+        return joint;
+      });
+      const linePairs: Array<[number, number]> = [];
+      runtimeBones.forEach((bone, index) => {
+        const parent = bone.parent as import('three').Bone | null;
+        const parentIndex = parent ? runtimeIndexByBone.get(parent) : undefined;
+        if (parentIndex !== undefined && parentIndex !== index) linePairs.push([index, parentIndex]);
+      });
+      const linePositions = new Float32Array(linePairs.length * 6);
+      const lineGeometry = track(new three.BufferGeometry());
+      lineGeometry.setAttribute('position', new three.BufferAttribute(linePositions, 3));
+      if (linePairs.length > 0) markerGroup.add(new three.LineSegments(lineGeometry, lineMaterial));
+      const positions = runtimeBones.map(() => new three.Vector3());
+      updateSkeletonMarkers = () => {
+        for (let index = 0; index < runtimeBones.length; index += 1) {
+          const bone = runtimeBones[index];
+          const position = positions[index];
+          const joint = joints[index];
+          if (!bone || !position || !joint) continue;
+          position.setFromMatrixPosition(bone.matrixWorld);
+          joint.position.copy(position);
+        }
+        for (let index = 0; index < linePairs.length; index += 1) {
+          const pair = linePairs[index];
+          const from = pair ? positions[pair[0]] : undefined;
+          const to = pair ? positions[pair[1]] : undefined;
+          if (!from || !to) continue;
+          const offset = index * 6;
+          linePositions[offset] = from.x;
+          linePositions[offset + 1] = from.y;
+          linePositions[offset + 2] = from.z;
+          linePositions[offset + 3] = to.x;
+          linePositions[offset + 4] = to.y;
+          linePositions[offset + 5] = to.z;
+        }
+        const positionAttribute = lineGeometry.getAttribute('position');
+        if (positionAttribute) positionAttribute.needsUpdate = true;
+        lineGeometry.computeBoundingSphere();
+      };
+    } else {
+      // Fallback for callers that only provide semantic bind-pose bones.
+      const worldMatrices = new Map<number, import('three').Matrix4>();
+      const computeWorld = (index: number): import('three').Matrix4 => {
+        const cached = worldMatrices.get(index);
+        if (cached) return cached;
+        const bone = bones[index];
+        if (!bone) return new three.Matrix4();
+        const local = new three.Matrix4();
+        local.makeRotationFromQuaternion(new three.Quaternion().set(
+          ...flverEulerXzyToQuaternion(bone.rotation)
+        ));
+        const scale = bone.scale ?? [1, 1, 1];
+        local.scale(new three.Vector3(scale[0], scale[1], scale[2]));
+        local.setPosition(bone.translation[0], bone.translation[1], bone.translation[2]);
+        let world = local;
+        const parent = bone.parentIndex;
+        if (parent >= 0 && parent < bones.length && parent !== index) {
+          world = computeWorld(parent).clone().multiply(local);
+        }
+        worldMatrices.set(index, world);
+        return world;
+      };
+      const positions = bones.map((_, index) => new three.Vector3().setFromMatrixPosition(computeWorld(index)));
+      for (let index = 0; index < bones.length; index++) {
+        const bone = bones[index];
+        const position = positions[index];
+        if (!bone || !position) continue;
+        const joint = new three.Mesh(jointGeometry, jointMaterial);
+        joint.position.copy(position);
+        markerGroup.add(joint);
+        const parent = bone.parentIndex;
+        const parentPosition = parent >= 0 && parent < positions.length ? positions[parent] : null;
+        if (parentPosition && parent !== index) {
+          const lineGeometry = track(new three.BufferGeometry().setFromPoints([position, parentPosition]));
+          markerGroup.add(new three.Line(lineGeometry, lineMaterial));
+        }
       }
     }
   }
@@ -2750,6 +3200,7 @@ function createMarkers(
       markerGroup.add(marker);
     }
   }
+  return updateSkeletonMarkers;
 }
 
 function assertNoAbsolutePathLeak(list: SceneDrawList): void {

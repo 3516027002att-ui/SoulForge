@@ -26,19 +26,20 @@ export async function persistRagCorpusBySourceDelta(
   const deltas = diffRagCorpusBySource(previous, corpus);
   for (const delta of deltas) {
     throwIfAborted(signal);
+    for (let dStart = 0; dStart < delta.deletedChunkIds.length; dStart += RAG_PERSIST_BATCH_SIZE) {
+      throwIfAborted(signal);
+      await store.mergeRagChunkDelta({
+        sourceUri: delta.sourceUri,
+        upserts: [],
+        deletedChunkIds: delta.deletedChunkIds.slice(dStart, dStart + RAG_PERSIST_BATCH_SIZE)
+      });
+    }
     for (let start = 0; start < delta.upserts.length; start += RAG_PERSIST_BATCH_SIZE) {
       throwIfAborted(signal);
       await store.mergeRagChunkDelta({
         sourceUri: delta.sourceUri,
         upserts: delta.upserts.slice(start, start + RAG_PERSIST_BATCH_SIZE),
-        deletedChunkIds: start === 0 ? delta.deletedChunkIds : []
-      });
-    }
-    if (delta.upserts.length === 0 && delta.deletedChunkIds.length > 0) {
-      await store.mergeRagChunkDelta({
-        sourceUri: delta.sourceUri,
-        upserts: [],
-        deletedChunkIds: delta.deletedChunkIds
+        deletedChunkIds: []
       });
     }
   }

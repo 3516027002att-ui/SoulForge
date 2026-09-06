@@ -77,6 +77,34 @@ internal sealed class BridgeCommandService
             return string.IsNullOrWhiteSpace(value) ? fallback : value;
         }
 
+        int? OptionNullableInt(string name)
+        {
+            if (!optionsIsObject || !options.TryGetProperty(name, out var element)) return null;
+            if (element.ValueKind == JsonValueKind.Null) return null;
+            if (element.ValueKind != JsonValueKind.Number || !element.TryGetInt32(out var parsed))
+                throw new InvalidDataException($"BRIDGE_OPTIONS_INVALID: options.{name} 必须是整数。");
+            return parsed;
+        }
+
+        long? OptionNullableInt64(string name)
+        {
+            if (!optionsIsObject || !options.TryGetProperty(name, out var element)) return null;
+            if (element.ValueKind == JsonValueKind.Null) return null;
+            if (element.ValueKind != JsonValueKind.Number || !element.TryGetInt64(out var parsed))
+                throw new InvalidDataException($"BRIDGE_OPTIONS_INVALID: options.{name} 必须是整数。");
+            return parsed;
+        }
+
+        string? OptionNullableString(string name)
+        {
+            if (!optionsIsObject || !options.TryGetProperty(name, out var element)) return null;
+            if (element.ValueKind == JsonValueKind.Null) return null;
+            if (element.ValueKind != JsonValueKind.String)
+                throw new InvalidDataException($"BRIDGE_OPTIONS_INVALID: options.{name} 必须是字符串。");
+            var value = element.GetString();
+            return string.IsNullOrWhiteSpace(value) ? null : value;
+        }
+
         string OptionPath(string name, string fallback)
         {
             var candidate = OptionString(name, fallback);
@@ -1143,8 +1171,9 @@ internal sealed class BridgeCommandService
             try
             {
                 // T3（2026-08-15）：`*.anibnd.dcx` 是 DCX(DFLT)→BND4 容器，内含多个
-                // 独立 TAE 条目。解 DCX→解析 BND4→按 "TAE " 魔数挑主 TAE
-                // （优先 id 5000000，其次字节最大的 TAE 条目）→TaeNativeDocument.Read。
+                // 独立 TAE 条目。现在按 BND4 原始顺序解析全部 TAE child，每个 child
+                // 保留自己的 TaeNativeDocument/SourceBytes；envelope 只做带 provenance
+                // 的投影，不挑主 TAE、不拼接 TAE 二进制。裸 .anibnd 也支持直接 BND4。
                 // hkx 是逐条 DCX，本命令不读。envelope 合并提取来源诊断，使 UI 能
                 // 显示「从 anibnd 提取」而不是把 BND4 子项当成容器打开。
                 // S17：提取逻辑抽成 OpenTaeDocument，read-tae-event-params 共用，
@@ -1158,7 +1187,7 @@ internal sealed class BridgeCommandService
                         roundTrip.SemanticIdentical ? "info" : "error",
                         roundTrip.SemanticIdentical ? "TAE_DOCUMENT_ROUNDTRIP_VERIFIED" : "TAE_DOCUMENT_ROUNDTRIP_FAILED",
                         roundTrip.SemanticIdentical
-                            ? $"TAE 只读往返验证通过；animations={document.Animations.Count}, events={document.TotalEventCount}, groups={document.TotalGroupCount}。"
+                            ? $"TAE 只读往返验证通过；animations={document.AnimationCount}, events={document.TotalEventCount}, groups={document.TotalGroupCount}。"
                             : "TAE 只读往返语义不一致。",
                         BridgeResult<object>.MakeSourceUri(file),
                         roundTrip)
@@ -1236,11 +1265,14 @@ internal sealed class BridgeCommandService
                 var animId = OptionInt64("animId", -1);
                 var eventIndex = OptionInt("eventIndex", -1);
                 var paramSize = OptionInt("paramSize", 0);
-                var ev = document.FindEvent(animId, eventIndex);
-                if (ev is null)
-                    throw new InvalidDataException($"TAE 动画 {animId} 事件下标 {eventIndex} 不存在。");
+                var taeEntryIndex = OptionNullableInt("taeEntryIndex");
+                var taeEntryId = OptionNullableInt64("taeEntryId");
+                var taeEntryName = OptionNullableString("taeEntryName");
+                var taeGroup = OptionNullableString("taeGroup");
+                var located = document.ResolveEvent(animId, eventIndex, taeEntryIndex, taeEntryId, taeEntryName, taeGroup);
+                var ev = located.Event;
                 var length = paramSize > 0 ? paramSize : Math.Min(16, (int)Math.Max(0, ev.ParameterDataOffset));
-                var raw = document.ReadParameterBody(ev, length);
+                var raw = located.Entry.Document.ReadParameterBody(ev, length);
                 return BridgeResult<object>.Partial(file, "action", new[]
                 {
                     new Diagnostic(
@@ -1252,6 +1284,10 @@ internal sealed class BridgeCommandService
                 {
                     animId,
                     eventIndex,
+                    taeEntryIndex = located.Entry.TaeEntryIndex,
+                    taeEntryId = located.Entry.TaeEntryId,
+                    taeEntryName = located.Entry.TaeEntryName,
+                    taeGroup = located.Entry.TaeGroup,
                     eventTypeId = ev.EventTypeId,
                     paramDataOffset = ev.ParameterDataOffset,
                     paramHex = Convert.ToHexString(raw).ToLowerInvariant(),
@@ -1287,8 +1323,21 @@ internal sealed class BridgeCommandService
                 var animationContainerPath = OptionPath("animationContainerPath", file);
                 var skeletonContainerPath = OptionPath("skeletonContainerPath", file);
                 var includeRawSplinePayload = OptionBool("includeRawSplinePayload", false);
-                var (skeleton, animation, binding, motionAnimId, sourceContainer) =
-                    ResolveTaeAnimationContext(file, animId, oodleRuntimeRoot, animationContainerPath, skeletonContainerPath);
+                var taeEntryIndex = OptionNullableInt("taeEntryIndex");
+                var taeEntryId = OptionNullableInt64("taeEntryId");
+                var taeEntryName = OptionNullableString("taeEntryName");
+                var taeGroup = OptionNullableString("taeGroup");
+                var (skeleton, animation, binding, motionAnimId, sourceContainer, taeEntry) =
+                    ResolveTaeAnimationContext(
+                        file,
+                        animId,
+                        oodleRuntimeRoot,
+                        animationContainerPath,
+                        skeletonContainerPath,
+                        taeEntryIndex,
+                        taeEntryId,
+                        taeEntryName,
+                        taeGroup);
 
                 var (trackToHkxBone, _) = ActionAnimationSemantics.ValidateTrackBinding(
                     binding.TransformTrackToBoneIndices,
@@ -1452,6 +1501,10 @@ internal sealed class BridgeCommandService
                 {
                     animId,
                     motionAnimId,
+                    taeEntryIndex = taeEntry.TaeEntryIndex,
+                    taeEntryId = taeEntry.TaeEntryId,
+                    taeEntryName = taeEntry.TaeEntryName,
+                    taeGroup = taeEntry.TaeGroup,
                     sourceContainer = Path.GetFileName(sourceContainer),
                     animationType = animation.AnimationType.ToString(),
                     duration = animation.Duration,
@@ -1524,8 +1577,21 @@ internal sealed class BridgeCommandService
 
                 var animationContainerPath = OptionPath("animationContainerPath", file);
                 var skeletonContainerPath = OptionPath("skeletonContainerPath", file);
-                var (skeleton, animation, binding, motionAnimId, sourceContainer) =
-                    ResolveTaeAnimationContext(file, animId, oodleRuntimeRoot, animationContainerPath, skeletonContainerPath);
+                var taeEntryIndex = OptionNullableInt("taeEntryIndex");
+                var taeEntryId = OptionNullableInt64("taeEntryId");
+                var taeEntryName = OptionNullableString("taeEntryName");
+                var taeGroup = OptionNullableString("taeGroup");
+                var (skeleton, animation, binding, motionAnimId, sourceContainer, taeEntry) =
+                    ResolveTaeAnimationContext(
+                        file,
+                        animId,
+                        oodleRuntimeRoot,
+                        animationContainerPath,
+                        skeletonContainerPath,
+                        taeEntryIndex,
+                        taeEntryId,
+                        taeEntryName,
+                        taeGroup);
 
                 var sampler = new HkxContinuousSampler(skeleton, animation, binding);
                 var hkxPose = sampler.SampleLocalPose(timeSeconds, loop);
@@ -1640,6 +1706,10 @@ internal sealed class BridgeCommandService
                     {
                         animId,
                         motionAnimId,
+                        taeEntryIndex = taeEntry.TaeEntryIndex,
+                        taeEntryId = taeEntry.TaeEntryId,
+                        taeEntryName = taeEntry.TaeEntryName,
+                        taeGroup = taeEntry.TaeGroup,
                         timeSeconds,
                         duration = animation.Duration,
                         boneCount = flverOutput.Length,
@@ -1672,6 +1742,10 @@ internal sealed class BridgeCommandService
                     {
                         animId,
                         motionAnimId,
+                        taeEntryIndex = taeEntry.TaeEntryIndex,
+                        taeEntryId = taeEntry.TaeEntryId,
+                        taeEntryName = taeEntry.TaeEntryName,
+                        taeGroup = taeEntry.TaeGroup,
                         timeSeconds,
                         duration = animation.Duration,
                         boneCount = hkxOutput.Length,
@@ -1739,6 +1813,17 @@ internal sealed class BridgeCommandService
                         textureLeaves,
                         oodleRuntimeRoot,
                         allowedRoots);
+                    // Material identity is resolved from the bounded native
+                    // MTD4 catalog before any render-mode decision. A basename
+                    // containing "decal" is only a locating token; it is not
+                    // shader authority.
+                    var nativeMeshDecalMaterialIndices = flver.Materials
+                        .Where(material => NativeMtdTextureLocator.HasNativeMeshDecalSemantics(
+                            material.MtdPath,
+                            oodleRuntimeRoot,
+                            allowedRoots))
+                        .Select(material => material.Index)
+                        .ToHashSet();
                     // A native projected-decal still cannot be rendered by the
                     // generic Three shader, but a material-local albedo is a
                     // source-backed compatibility input when the same FLVER
@@ -1750,10 +1835,45 @@ internal sealed class BridgeCommandService
                     {
                         if (binding.MaterialIndex >= 0
                             && binding.MaterialIndex < flver.Materials.Count
-                            && ResolveFlverPreviewRenderMode(flver, binding.MaterialIndex) == "projected-decal")
+                            && ResolveFlverPreviewRenderMode(flver, binding.MaterialIndex, nativeMeshDecalMaterialIndices) == "projected-decal")
                         {
                             nativeProjectionByMaterial[binding.MaterialIndex] = binding.Preview;
                         }
+                    }
+                    var nativeProjectedMaterialSemantics = flver.Materials
+                        .Where(material => ResolveFlverPreviewRenderMode(flver, material.Index, nativeMeshDecalMaterialIndices) == "projected-decal")
+                        .Select(material => new
+                        {
+                            materialIndex = material.Index,
+                            mtdPath = material.MtdPath,
+                            nativeMeshDecal = nativeMeshDecalMaterialIndices.Contains(material.Index),
+                            previewSemantics = NativeMtdTextureLocator.ResolvePreviewSemantics(
+                                material.MtdPath,
+                                oodleRuntimeRoot,
+                                allowedRoots) is { } semantics
+                                ? new
+                                {
+                                    shaderName = semantics.ShaderName,
+                                    alphaMode = semantics.AlphaMode,
+                                    hasMask1Slot = semantics.HasMask1Slot,
+                                    diffuseBlend = semantics.DiffuseBlend is null
+                                        ? null
+                                        : semantics.DiffuseBlend.Mode
+                                }
+                                : null
+                        })
+                        .ToArray();
+                    if (nativeProjectedMaterialSemantics.Length > 0)
+                    {
+                        diagnostics.Add(new Diagnostic(
+                            "info",
+                            "CHRBND_NATIVE_MTD_SEMANTICS",
+                            $"FLVER {leaf.Name} 的 projected-decal 材质已按真实 MTD4 正文核对 MeshDecal 语义。",
+                            BridgeResult<object>.MakeSourceUri(file),
+                            new
+                            {
+                                materials = nativeProjectedMaterialSemantics
+                            }));
                     }
                     var meshes = BuildFlverMeshBundle(
                         flver,
@@ -1761,7 +1881,8 @@ internal sealed class BridgeCommandService
                         maxIndices,
                         cancellationToken,
                         compatibilityProjection,
-                        nativeProjectionByMaterial);
+                        nativeProjectionByMaterial,
+                        nativeMeshDecalMaterialIndices);
                     var modelId = $"entry:{leaf.Index}:{leaf.Id}:{leaf.DuplicateOrdinal}:{leaf.ContentHash[..Math.Min(16, leaf.ContentHash.Length)]}";
                     if (flver.BoneCount > leaderBoneCount)
                     {
@@ -1771,10 +1892,16 @@ internal sealed class BridgeCommandService
                     totalMeshes += flver.MeshCount;
                     totalVertices += flver.Meshes.Sum(mesh => (long)mesh.VertexCount);
                     var firstTexture = textureBindings.FirstOrDefault()?.Preview;
+                    var compatibilityProjectionCanApply = compatibilityProjection is not null
+                        && flver.Materials.Any(material =>
+                            ResolveFlverPreviewRenderMode(flver, material.Index, nativeMeshDecalMaterialIndices) == "projected-decal"
+                            && AllowsCompatibilityProjectionFallback(
+                                flver,
+                                material.Index,
+                                nativeMeshDecalMaterialIndices)
+                            && !nativeProjectionByMaterial.ContainsKey(material.Index));
                     var hasCompatibilityProjection = nativeProjectionByMaterial.Count > 0
-                        || (compatibilityProjection is not null
-                            && flver.Materials.Any(material =>
-                                ResolveFlverPreviewRenderMode(flver, material.Index) == "projected-decal"));
+                        || compatibilityProjectionCanApply;
                     if (textureBindings.Count > 0 || hasCompatibilityProjection) texturedModelCount++;
                     if (hasCompatibilityProjection)
                     {
@@ -1787,12 +1914,13 @@ internal sealed class BridgeCommandService
                             {
                                 textureNames = nativeProjectionByMaterial.Values
                                     .Select(preview => preview.TextureName)
-                                    .Concat(compatibilityProjection is not null
+                                    .Concat(compatibilityProjectionCanApply && compatibilityProjection is not null
                                         ? new[] { compatibilityProjection.TextureName }
                                         : Array.Empty<string>())
                                     .Distinct(StringComparer.OrdinalIgnoreCase)
                                     .ToArray(),
                                 materialIndices = nativeProjectionByMaterial.Keys.OrderBy(index => index).ToArray(),
+                                compatibilityFallbackApplied = compatibilityProjectionCanApply,
                                 sourceRole = "compatibility-preview"
                             }));
                     }
@@ -2340,6 +2468,13 @@ internal sealed class BridgeCommandService
                 var textureBinding = CharacterTexturePreviewService
                     .ResolveAll(document, textureEntryName, textureLeaves, oodleRuntimeRoot, allowedRoots)
                     .FirstOrDefault(binding => binding.MaterialIndex == mesh.MaterialIndex);
+                var nativeMeshDecalMaterialIndices = document.Materials
+                    .Where(material => NativeMtdTextureLocator.HasNativeMeshDecalSemantics(
+                        material.MtdPath,
+                        oodleRuntimeRoot,
+                        allowedRoots))
+                    .Select(material => material.Index)
+                    .ToHashSet();
                 var meshDiagnostics = new List<Diagnostic>
                 {
                     new Diagnostic("info", "FLVER_MESH_DATA_EXTRACTED",
@@ -2391,7 +2526,7 @@ internal sealed class BridgeCommandService
                     // that native distinction instead of making every mesh
                     // look like a conventional inverse-bind model.
                     skinningTransformMode = mesh.Dynamic == 0 ? "absolute" : "delta",
-                    renderMode = ResolveFlverPreviewRenderMode(document, mesh.MaterialIndex),
+                    renderMode = ResolveFlverPreviewRenderMode(document, mesh.MaterialIndex, nativeMeshDecalMaterialIndices),
                     textureStatus = textureBinding is null ? "missing" : "ready",
                     textureMaterialName = mesh.MaterialIndex >= 0 && mesh.MaterialIndex < document.Materials.Count
                         ? document.Materials[mesh.MaterialIndex].Name
@@ -3203,6 +3338,47 @@ internal sealed class BridgeCommandService
         {
             AddPackage(Path.Combine(directory, "common_body.tpf.dcx"));
             AddPackage(Path.Combine(directory, "common_body.tpf"));
+            if (lowerFile.EndsWith("_l.partsbnd.dcx", StringComparison.Ordinal))
+            {
+                var baseStem = file[..^"_l.partsbnd.dcx".Length];
+                AddPackage($"{baseStem}.partsbnd.dcx");
+                AddPackage($"{baseStem}.partsbnd");
+            }
+            else if (lowerFile.EndsWith("_l.partsbnd", StringComparison.Ordinal))
+            {
+                var baseStem = file[..^"_l.partsbnd".Length];
+                AddPackage($"{baseStem}.partsbnd");
+                AddPackage($"{baseStem}.partsbnd.dcx");
+            }
+            else if (lowerFile.EndsWith(".partsbnd.dcx", StringComparison.Ordinal))
+            {
+                var baseStem = file[..^".partsbnd.dcx".Length];
+                AddPackage($"{baseStem}_l.partsbnd.dcx");
+                AddPackage($"{baseStem}_l.partsbnd");
+            }
+            else if (lowerFile.EndsWith(".partsbnd", StringComparison.Ordinal))
+            {
+                var baseStem = file[..^".partsbnd".Length];
+                AddPackage($"{baseStem}_l.partsbnd");
+                AddPackage($"{baseStem}_l.partsbnd.dcx");
+            }
+        }
+
+        // DSAnimStudio's SDT character loader primes the shared game texture
+        // pool before loading any character part. These packages are part of
+        // the native material lookup domain, not an optional semantic guess:
+        // MTDs in character FLVERs may point at systex/maptex/decaltex or the
+        // shared common_body TPF even when the source partsbnd contains no
+        // matching TPF. Add only the four fixed SDT package identities and
+        // let the existing path boundary decide whether this game root is
+        // actually trusted and the package exists.
+        if (!string.IsNullOrWhiteSpace(oodleRuntimeRoot))
+        {
+            var gameRoot = Path.GetFullPath(oodleRuntimeRoot);
+            AddPackage(Path.Combine(gameRoot, "other", "systex.tpf.dcx"));
+            AddPackage(Path.Combine(gameRoot, "other", "maptex.tpf.dcx"));
+            AddPackage(Path.Combine(gameRoot, "other", "decaltex.tpf.dcx"));
+            AddPackage(Path.Combine(gameRoot, "parts", "common_body.tpf.dcx"));
         }
 
         var leaves = new List<NativeLeafEntry>();
@@ -3296,19 +3472,35 @@ internal sealed class BridgeCommandService
         int maxVertices,
         int maxIndices,
         CharacterTexturePreview? compatibilityProjection = null,
-        IReadOnlyDictionary<int, CharacterTexturePreview>? nativeProjectionByMaterial = null)
+        IReadOnlyDictionary<int, CharacterTexturePreview>? nativeProjectionByMaterial = null,
+        IReadOnlySet<int>? nativeMeshDecalMaterialIndices = null)
     {
         var positions = flver.GetMeshPositionsBase64(meshIndex, maxVertices);
         if (positions == null)
             throw new InvalidDataException($"FLVER_MESH_NOT_FOUND: 网格索引 {meshIndex} 超出范围或数据不可用。");
         var mesh = flver.Meshes[meshIndex];
-        var nativeRenderMode = ResolveFlverPreviewRenderMode(flver, flver.Meshes[meshIndex].MaterialIndex);
+        var nativeRenderMode = ResolveFlverPreviewRenderMode(
+            flver,
+            flver.Meshes[meshIndex].MaterialIndex,
+            nativeMeshDecalMaterialIndices);
         CharacterTexturePreview? projectionSource = null;
         if (nativeRenderMode == "projected-decal")
         {
             if (nativeProjectionByMaterial is not null)
                 nativeProjectionByMaterial.TryGetValue(mesh.MaterialIndex, out projectionSource);
-            projectionSource ??= compatibilityProjection;
+            // An explicit assembly texture is not a generic decal shader. Only
+            // attach it when the native MTD identity proves that this material
+            // is a MeshDecal receiver. This prevents a standard AMNS material
+            // such as HD_M_9510_Decal from painting a guessed face atlas over
+            // the real FC head mesh.
+            if (projectionSource is null
+                && AllowsCompatibilityProjectionFallback(
+                    flver,
+                    mesh.MaterialIndex,
+                    nativeMeshDecalMaterialIndices))
+            {
+                projectionSource = compatibilityProjection;
+            }
         }
         var useCompatibilityProjection = nativeRenderMode == "projected-decal"
             && projectionSource is not null;
@@ -3361,7 +3553,8 @@ internal sealed class BridgeCommandService
         int maxIndices,
         CancellationToken cancellationToken,
         CharacterTexturePreview? compatibilityProjection = null,
-        IReadOnlyDictionary<int, CharacterTexturePreview>? nativeProjectionByMaterial = null)
+        IReadOnlyDictionary<int, CharacterTexturePreview>? nativeProjectionByMaterial = null,
+        IReadOnlySet<int>? nativeMeshDecalMaterialIndices = null)
     {
         var meshes = new object[flver.MeshCount];
         for (var meshIndex = 0; meshIndex < flver.MeshCount; meshIndex++)
@@ -3373,7 +3566,8 @@ internal sealed class BridgeCommandService
                 maxVertices,
                 maxIndices,
                 compatibilityProjection,
-                nativeProjectionByMaterial);
+                nativeProjectionByMaterial,
+                nativeMeshDecalMaterialIndices);
         }
         return meshes;
     }
@@ -3384,30 +3578,46 @@ internal sealed class BridgeCommandService
     /// explicitly so the renderer does not turn their projection volume into
     /// visible strips or boxes.
     /// </summary>
-    private static string ResolveFlverPreviewRenderMode(FlverNativeDocument flver, int materialIndex)
+    private static string ResolveFlverPreviewRenderMode(
+        FlverNativeDocument flver,
+        int materialIndex,
+        IReadOnlySet<int>? nativeMeshDecalMaterialIndices = null)
     {
         if (materialIndex < 0 || materialIndex >= flver.Materials.Count)
             return "surface";
-        var mtdPath = flver.Materials[materialIndex].MtdPath;
-        // Native FLVER material identity is not limited to the filename suffix.
-        // Sekiro's FC_M_0200 crystal-eye material is named
-        // `Eye_[Crystal].mtd`, while its texture-slot type is explicitly
-        // `Character_MeshDecal`. Treating it as an ordinary UV surface paints
-        // the crystal projection over the head with a generic albedo shader.
-        // Keep the classification source-derived and narrow: only the known
-        // MeshDecal material family (or an explicit decal filename) is omitted
-        // by the generic renderer.
-        return mtdPath.Contains("decal", StringComparison.OrdinalIgnoreCase)
-            || mtdPath.Contains("MeshDecal", StringComparison.OrdinalIgnoreCase)
-            || (mtdPath.Contains("Eye_", StringComparison.OrdinalIgnoreCase)
-                && mtdPath.Contains("Crystal", StringComparison.OrdinalIgnoreCase))
+        // The caller has already resolved this set against native MTD4
+        // contents. Missing/ambiguous MTD identity stays a normal read-only
+        // surface and never gains projection authority from a filename.
+        return nativeMeshDecalMaterialIndices?.Contains(materialIndex) == true
             ? "projected-decal"
             : "surface";
+    }
+
+    private static bool AllowsCompatibilityProjectionFallback(
+        FlverNativeDocument flver,
+        int materialIndex,
+        IReadOnlySet<int>? nativeMeshDecalMaterialIndices)
+    {
+        if (materialIndex < 0 || materialIndex >= flver.Materials.Count)
+            return false;
+
+        // The fallback texture is only meaningful for a native MTD4 whose
+        // source-backed semantics identify a Character MeshDecal or the
+        // separately verified paint-decal receiver contract. The filename is
+        // not authority: P_FB_M_9510_Decal.mtd has an ordinary AMNS shader
+        // basename, but its MTD body carries the narrow receiver signature.
+        // The caller resolves this set once from the bounded native catalog.
+        return nativeMeshDecalMaterialIndices?.Contains(materialIndex) == true;
     }
 
     private static object[] BuildFlverSkeleton(FlverNativeDocument flver)
     {
         System.Threading.Interlocked.Increment(ref MapStaticGeometryService.SkeletonCalls);
+        // Keep the native reference FK as an explicit part of the skeleton
+        // contract. The renderer still receives local TRS for interaction, but
+        // inverse-bind capture must not depend on an Euler/quaternion round
+        // trip when a mature FLVER viewer would use the original matrix.
+        var referenceFkMatrices = FlverMatureSkinning.BuildReferenceFkMatrices(flver.Bones);
         var hierarchyIds = new string[flver.Bones.Count];
         var visiting = new HashSet<int>();
 
@@ -3453,6 +3663,7 @@ internal sealed class BridgeCommandService
             translation = new[] { b.TranslationX, b.TranslationY, b.TranslationZ },
             rotation = new[] { b.RotationX, b.RotationY, b.RotationZ },
             scale = new[] { b.ScaleX, b.ScaleY, b.ScaleZ },
+            referenceFkMatrix = FlverMatureSkinning.ToThreeMatrixArray(referenceFkMatrices[b.Index]),
             rotationOrder = "XZY"
         }).ToArray();
     }
@@ -3774,54 +3985,103 @@ internal sealed class BridgeCommandService
     }
 
     /// <summary>
-    /// 打开 TAE 文档：anibnd 容器提取主 TAE（id 5000000 优先，其次字节最大），
-    /// 裸 .tae 直接读。S17：read-tae-document 与 read-tae-event-params 共用，
-    /// 不再维护第二份 anibnd 解包。找不到 TAE 条目抛 TaeEntryMissingException，
-    /// 命令层映射 TAE_ANIBND_NO_TAE_ENTRY。
+    /// 打开 TAE 文档：anibnd 容器按 BND4 原始顺序解析全部 TAE child，
+    /// 每个 child 都保留自己的原生文档和 SourceBytes；裸 .tae 直接读。
+    /// S17：read-tae-document、read-tae-event-params 与动作播放共用这条入口。
+    /// 找不到 TAE 条目抛 TaeEntryMissingException，命令层映射
+    /// TAE_ANIBND_NO_TAE_ENTRY；任一带 TAE 魔数的 child 解析失败则整体失败关闭。
     /// </summary>
-    private static (TaeNativeDocument Document, Diagnostic[] ExtractionDiagnostics) OpenTaeDocument(
+    private static (TaeDocumentSet Document, Diagnostic[] ExtractionDiagnostics) OpenTaeDocument(
         string file,
         string? oodleRuntimeRoot)
     {
         if (!IsAnibndPath(file))
-            return (TaeNativeDocument.ReadFile(file), Array.Empty<Diagnostic>());
-        var dcx = DcxNativeDocument.Read(file, oodleRuntimeRoot);
-        var bnd4 = Bnd4NativeDocument.Read(dcx.Payload);
-        int? mainIndex = null;
-        var taeEntryCount = 0;
-        var largestIndex = -1;
-        var largestBytes = -1L;
+            return (TaeDocumentSet.FromRaw(TaeNativeDocument.ReadFile(file)), Array.Empty<Diagnostic>());
+
+        var bnd4 = ReadBnd4Container(file, oodleRuntimeRoot);
+        var taeEntries = new List<TaeDocumentSetEntry>();
         for (var i = 0; i < bnd4.Entries.Count; i++)
         {
             var bytes = bnd4.GetStoredBytes(i);
             if (bytes.Length < 4 || !bytes.AsSpan(0, 4).SequenceEqual("TAE "u8)) continue;
-            taeEntryCount++;
-            if (bnd4.Entries[i].Id == 5000000)
+            var entry = bnd4.Entries[i];
+            TaeNativeDocument document;
+            try
             {
-                mainIndex = i;
-                break;
+                // Do not catch-and-skip a declared TAE child.  A partial aggregate
+                // would silently alter animation identity and is therefore unsafe.
+                document = TaeNativeDocument.Read(bytes);
             }
-            if (bytes.Length > largestBytes)
+            catch (Exception ex) when (ex is InvalidDataException
+                or NotSupportedException
+                or OverflowException
+                or ArgumentException
+                or IndexOutOfRangeException)
             {
-                largestBytes = bytes.Length;
-                largestIndex = i;
+                var logicalName = TaeDocumentSet.LogicalBasename(entry.Name);
+                throw new InvalidDataException(
+                    $"TAE child 解析失败：index={entry.Index} id={entry.Id} name={logicalName}：{ex.Message}",
+                    ex);
             }
+            var logicalEntryName = TaeDocumentSet.LogicalBasename(entry.Name);
+            taeEntries.Add(new TaeDocumentSetEntry(
+                entry.Index,
+                entry.Id,
+                logicalEntryName,
+                TaeDocumentSet.LogicalGroup(logicalEntryName),
+                document));
         }
-        mainIndex ??= largestIndex >= 0 ? largestIndex : null;
-        if (mainIndex is null)
+        if (taeEntries.Count == 0)
             throw new TaeEntryMissingException("anibnd 容器内未找到 TAE 魔数条目。");
-        var mainBytes = bnd4.GetStoredBytes(mainIndex.Value);
-        var mainEntryId = bnd4.Entries[mainIndex.Value].Id;
+
+        var documentSet = TaeDocumentSet.FromAnibnd(
+            bnd4.SourceHash,
+            bnd4.SourceBytes.Length,
+            taeEntries);
+        var legacyPrimary = taeEntries.FirstOrDefault(entry => entry.TaeEntryId == 5000000);
         var diagnostics = new[]
         {
             new Diagnostic(
                 "info",
                 "TAE_FROM_ANIBND_EXTRACTED",
-                $"从 anibnd 容器提取 TAE（BND4 内 {taeEntryCount} 个 TAE 条目，本次打开 id={mainEntryId}，大小 {mainBytes.Length} 字节）。hkx 未读取。",
+                $"从 anibnd 容器提取并聚合 TAE（BND4 内 {taeEntries.Count} 个 TAE 条目；每项保留独立 SourceBytes，未拼接二进制）。"
+                    + (legacyPrimary is null ? "" : $"兼容主条目 id={legacyPrimary.TaeEntryId}。")
+                    + "hkx 未读取。",
                 BridgeResult<object>.MakeSourceUri(file),
-                new { taeEntryCount, mainEntryId, mainTaeBytes = mainBytes.Length })
+                new
+                {
+                    taeEntryCount = taeEntries.Count,
+                    aggregateSourceHash = documentSet.SourceHash,
+                    legacyPrimaryEntryId = legacyPrimary?.TaeEntryId,
+                    taeEntries = taeEntries.Select(entry => new
+                    {
+                        entryIndex = entry.TaeEntryIndex,
+                        entryId = entry.TaeEntryId,
+                        entryName = entry.TaeEntryName,
+                        taeGroup = entry.TaeGroup,
+                        animationCount = entry.Document.Animations.Count,
+                        sourceSize = entry.Document.SourceBytes.Length,
+                        sourceHash = entry.Document.SourceHash
+                    }).ToArray()
+                })
         };
-        return (TaeNativeDocument.Read(mainBytes), diagnostics);
+        return (documentSet, diagnostics);
+    }
+
+    private static Bnd4NativeDocument ReadBnd4Container(string path, string? oodleRuntimeRoot)
+    {
+        byte[] payload;
+        if (IsDcxFile(path))
+        {
+            payload = DcxNativeDocument.Read(path, oodleRuntimeRoot).Payload;
+        }
+        else
+        {
+            payload = File.ReadAllBytes(path);
+            if (IsDcxBytes(payload))
+                payload = DcxNativeDocument.Read(payload, oodleRuntimeRoot, path).Payload;
+        }
+        return Bnd4NativeDocument.Read(payload);
     }
 
     /// <summary>
@@ -4047,22 +4307,30 @@ internal sealed class BridgeCommandService
         return buffer;
     }
 
-    private static (HkxSkeleton Skeleton, HkxAnimation Animation, HkxAnimationBinding Binding, long MotionAnimId, string SourceContainerPath)
+    private static (HkxSkeleton Skeleton, HkxAnimation Animation, HkxAnimationBinding Binding, long MotionAnimId, string SourceContainerPath, TaeDocumentSetEntry TaeEntry)
         ResolveTaeAnimationContext(
             string file,
             long animId,
             string? oodleRuntimeRoot,
             string? animationContainerPath = null,
-            string? skeletonContainerPath = null)
+            string? skeletonContainerPath = null,
+            int? taeEntryIndex = null,
+            long? taeEntryId = null,
+            string? taeEntryName = null,
+            string? taeGroup = null)
     {
         var (document, _) = OpenTaeDocument(file, oodleRuntimeRoot);
-        var references = SekiroTaeMotionReferenceReader.ReadAll(document);
-        long motionAnimId = ActionAnimationSemantics.ResolveMotionAnimationId(references, animId);
+        var selectedAnimation = document.ResolveAnimation(
+            animId,
+            taeEntryIndex,
+            taeEntryId,
+            taeEntryName,
+            taeGroup);
+        long motionAnimId = document.ResolveMotionAnimationId(selectedAnimation);
 
         Bnd4NativeDocument ReadBnd(string path)
         {
-            var dcx = DcxNativeDocument.Read(path, oodleRuntimeRoot);
-            return Bnd4NativeDocument.Read(dcx.Payload);
+            return ReadBnd4Container(path, oodleRuntimeRoot);
         }
 
         byte[] ReadEntryBytes(Bnd4NativeDocument bnd4, Bnd4Entry entry)
@@ -4170,7 +4438,7 @@ internal sealed class BridgeCommandService
             throw new InvalidDataException("ACTION_HKX_SKELETON_MISSING: 未能获取动画所需的骨骼 (hkaSkeleton) 数据。");
         }
 
-        return (skeleton, animation, binding, motionAnimId, foundContainer);
+        return (skeleton, animation, binding, motionAnimId, foundContainer, selectedAnimation.Entry);
     }
 
     private static HkxSkeleton ResolveUniqueAnimationSkeleton(

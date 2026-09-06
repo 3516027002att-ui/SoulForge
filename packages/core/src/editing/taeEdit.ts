@@ -1,7 +1,7 @@
 /**
  * Agent / CLI TAE facade（问题 6-F）。
  *
- * 读：read-tae-document（anibnd 内的主 TAE 信封，采样 envelope）。写：只接已有
+ * 读：read-tae-document（anibnd 内所有可解析 TAE 子项的聚合 envelope）。写：只接已有
  * Bridge mutation —— update-event-times / insert-event（write-tae-document），
  * 经 applyNativeMutation → Patch Engine 提交，不直接写盘。
  *
@@ -13,7 +13,7 @@ import { createHash } from 'node:crypto';
 import { readFile, access } from 'node:fs/promises';
 import { basename, join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
-import type { Diagnostic } from '@soulforge/shared';
+import type { ActionAddress, Diagnostic, TaeEntryWire } from '@soulforge/shared';
 import { formatActionAddress, parseActionAddress } from '@soulforge/shared';
 import { runBridge } from '../bridge/runBridge.js';
 import { applyNativeMutation } from './editorMutationService.js';
@@ -35,6 +35,10 @@ export interface TaeEventSnapshot {
   endTime: number;
   startFrame: number;
   endFrame: number;
+  taeEntryIndex?: number;
+  taeEntryId?: number;
+  taeEntryName?: string;
+  taeGroup?: string;
   fields?: Array<{ name: string; value: string | number | boolean }>;
   parameterBytesHex?: string;
 }
@@ -53,7 +57,16 @@ export interface TaeEditFailure {
 }
 
 export type TaeReadResult =
-  | { ok: true; filePath: string; chrId: string; sourceHash?: string; events: TaeEventSnapshot[]; diagnostics: Diagnostic[] }
+  | {
+    ok: true;
+    filePath: string;
+    chrId: string;
+    sourceHash?: string;
+    taeEntryCount?: number;
+    taeEntries?: TaeEntryWire[];
+    events: TaeEventSnapshot[];
+    diagnostics: Diagnostic[];
+  }
   | { ok: false; error: TaeEditFailure; diagnostics: Diagnostic[] };
 
 export type TaeSetResult =
@@ -72,6 +85,10 @@ interface EnvelopeEvent {
 interface EnvelopeAnim {
   animId?: number;
   hkxName?: string;
+  taeEntryIndex?: number;
+  taeEntryId?: number;
+  taeEntryName?: string;
+  taeGroup?: string;
   events?: EnvelopeEvent[];
 }
 
@@ -105,7 +122,19 @@ export async function readTaeEvents(input: {
   let selected = events;
   if (wanted.length > 0) {
     selected = events.filter((event) => wanted.some((wantedAddr) => matchesAddress(wantedAddr!, event)));
-    const missing = (input.addresses ?? []).filter((address) => !selected.some((event) => event.address === address));
+    const ambiguous = (input.addresses ?? []).filter((address) => (
+      events.filter((event) => matchesAddress(parseActionAddress(address)!, event)).length > 1
+    ));
+    if (ambiguous.length > 0) {
+      return {
+        ok: false,
+        error: { code: 'TAE_EVENT_AMBIGUOUS', message: `词条地址在多个 TAE section 中重复，必须指定 section：${ambiguous.join(', ')}` },
+        diagnostics: []
+      };
+    }
+    const missing = (input.addresses ?? []).filter((address, index) => (
+      !events.some((event) => matchesAddress(wanted[index]!, event))
+    ));
     if (missing.length > 0) {
       return {
         ok: false,
@@ -119,6 +148,8 @@ export async function readTaeEvents(input: {
     filePath: resolved.path,
     chrId,
     ...(envelope.sourceHash ? { sourceHash: envelope.sourceHash } : {}),
+    ...(envelope.taeEntryCount !== undefined ? { taeEntryCount: envelope.taeEntryCount } : {}),
+    ...(envelope.taeEntries ? { taeEntries: envelope.taeEntries } : {}),
     events: selected,
     diagnostics: envelope.diagnostics
   };
@@ -136,6 +167,13 @@ export async function setTaeEventTimes(input: {
   if (!resolved.ok) return { ok: false, error: resolved.error, diagnostics: [] };
   const envelope = await readTaeEnvelope(input.edit, resolved.path);
   if (!envelope.ok) return envelope.result;
+  if ((envelope.taeEntryCount ?? 0) > 1) {
+    return {
+      ok: false,
+      error: { code: 'TAE_MULTI_ENTRY_WRITE_UNSUPPORTED', message: '多 TAE 子项聚合文档当前只读，不能把事件写入未明确选择的 section。' },
+      diagnostics: envelope.diagnostics
+    };
+  }
   const chrId = envelope.chrId;
   const events = projectEvents(chrId, envelope.animations);
 
@@ -152,7 +190,15 @@ export async function setTaeEventTimes(input: {
         diagnostics: []
       };
     }
-    const event = events.find((item) => item.animId === parsed.animId && item.eventIndex === parsed.eventIndex);
+    const matches = events.filter((item) => matchesAddress(parsed, item));
+    if (matches.length > 1) {
+      return {
+        ok: false,
+        error: { code: 'TAE_EVENT_AMBIGUOUS', message: `词条 ${edit.address} 在多个 TAE section 中重复，必须指定 section。` },
+        diagnostics: []
+      };
+    }
+    const event = matches[0];
     if (!event) {
       return {
         ok: false,
@@ -232,11 +278,32 @@ export async function setTaeEventTimes(input: {
   };
 }
 
-function matchesAddress(address: { chr: string; animId?: number; eventIndex?: number }, event: TaeEventSnapshot): boolean {
+function matchesAddress(address: ActionAddress, event: TaeEventSnapshot): boolean {
   if (address.chr !== event.chrId && address.chr.toLowerCase() !== event.chrId.toLowerCase()) return false;
   if (address.animId === undefined && address.eventIndex === undefined) return true;
   if (address.animId !== event.animId) return false;
-  return address.eventIndex === undefined || address.eventIndex === event.eventIndex;
+  if (address.eventIndex !== undefined && address.eventIndex !== event.eventIndex) return false;
+  if (address.taeEntryIndex !== undefined && address.taeEntryIndex !== event.taeEntryIndex) return false;
+  if (address.taeEntryId !== undefined && address.taeEntryId !== event.taeEntryId) return false;
+  if (address.taeEntryName !== undefined
+    && address.taeEntryName.toLowerCase() !== event.taeEntryName?.toLowerCase()) return false;
+  if (address.taeGroup !== undefined
+    && address.taeGroup.toLowerCase() !== event.taeGroup?.toLowerCase()) return false;
+  return true;
+}
+
+function sectionSelectorForAnimation(anim: EnvelopeAnim): Pick<
+  ActionAddress,
+  'taeEntryIndex' | 'taeEntryId' | 'taeEntryName' | 'taeGroup'
+> {
+  // The protocol intentionally emits one selector. Prefer the source-local
+  // BND4 index, then fall back to the stable id/name/group selectors for
+  // envelopes that do not expose an index.
+  if (anim.taeEntryIndex !== undefined) return { taeEntryIndex: anim.taeEntryIndex };
+  if (anim.taeEntryId !== undefined) return { taeEntryId: anim.taeEntryId };
+  if (anim.taeEntryName !== undefined) return { taeEntryName: anim.taeEntryName };
+  if (anim.taeGroup !== undefined) return { taeGroup: anim.taeGroup };
+  return {};
 }
 
 function projectEvents(chrId: string, animations: EnvelopeAnim[]): TaeEventSnapshot[] {
@@ -248,15 +315,28 @@ function projectEvents(chrId: string, animations: EnvelopeAnim[]): TaeEventSnaps
       const event = anim.events![index]!;
       const startTime = typeof event.startTime === 'number' && Number.isFinite(event.startTime) ? event.startTime : 0;
       const endTime = typeof event.endTime === 'number' && Number.isFinite(event.endTime) ? event.endTime : startTime;
-      const uri = `action://${chrId}/${code}/e${String(index)}`;
+      const sectionSelector = sectionSelectorForAnimation(anim);
+      const canonicalAddress = formatActionAddress({
+        chr: chrId,
+        animId: anim.animId,
+        eventIndex: index,
+        ...sectionSelector
+      });
+      const uri = canonicalAddress.startsWith('action://')
+        ? canonicalAddress
+        : `action://${chrId}/${code}/e${String(index)}`;
       out.push({
         chrId,
         animId: anim.animId,
         code,
         eventIndex: index,
         uri,
-        address: formatActionAddress({ chr: chrId, animId: anim.animId, eventIndex: index }),
+        address: canonicalAddress,
         eventTypeId: typeof event.eventTypeId === 'number' ? event.eventTypeId : 0,
+        ...(anim.taeEntryIndex === undefined ? {} : { taeEntryIndex: anim.taeEntryIndex }),
+        ...(anim.taeEntryId === undefined ? {} : { taeEntryId: anim.taeEntryId }),
+        ...(anim.taeEntryName === undefined ? {} : { taeEntryName: anim.taeEntryName }),
+        ...(anim.taeGroup === undefined ? {} : { taeGroup: anim.taeGroup }),
         ...(typeof event.typeName === 'string' && event.typeName.length > 0 ? { typeName: event.typeName } : {}),
         startTime,
         endTime,
@@ -275,7 +355,11 @@ function projectEvents(chrId: string, animations: EnvelopeAnim[]): TaeEventSnaps
       });
     }
   }
-  return out.sort((a, b) => a.animId - b.animId || a.eventIndex - b.eventIndex);
+  return out.sort((a, b) => (
+    (a.taeEntryIndex ?? -1) - (b.taeEntryIndex ?? -1)
+    || a.animId - b.animId
+    || a.eventIndex - b.eventIndex
+  ));
 }
 
 function parseScalar(value: unknown): string | number | boolean {
@@ -287,10 +371,23 @@ async function readTaeEnvelope(
   edit: NativeEditSession,
   filePath: string
 ): Promise<
-  | { ok: true; chrId: string; sourceHash?: string; animations: EnvelopeAnim[]; diagnostics: Diagnostic[] }
+  | {
+    ok: true;
+    chrId: string;
+    sourceHash?: string;
+    taeEntryCount?: number;
+    taeEntries?: TaeEntryWire[];
+    animations: EnvelopeAnim[];
+    diagnostics: Diagnostic[];
+  }
   | { ok: false; result: { ok: false; error: TaeEditFailure; diagnostics: Diagnostic[] } }
 > {
-  const result = await runBridge<{ sourceHash?: string; animations?: Array<Record<string, unknown>> }>({
+  const result = await runBridge<{
+    sourceHash?: string;
+    taeEntryCount?: number;
+    taeEntries?: TaeEntryWire[];
+    animations?: Array<Record<string, unknown>>;
+  }>({
     command: 'read-tae-document',
     filePath,
     resourceUri: pathToFileURL(filePath).href,
@@ -325,6 +422,10 @@ async function readTaeEnvelope(
     return {
       ...(animId === undefined ? {} : { animId }),
       ...(typeof anim.hkxName === 'string' ? { hkxName: anim.hkxName } : {}),
+      ...(typeof anim.taeEntryIndex === 'number' ? { taeEntryIndex: anim.taeEntryIndex } : {}),
+      ...(typeof anim.taeEntryId === 'number' ? { taeEntryId: anim.taeEntryId } : {}),
+      ...(typeof anim.taeEntryName === 'string' ? { taeEntryName: anim.taeEntryName } : {}),
+      ...(typeof anim.taeGroup === 'string' ? { taeGroup: anim.taeGroup } : {}),
       events: Array.isArray(anim.events) ? anim.events.map((event) => {
         const startTime = asFinite(event.startTime);
         const endTime = asFinite(event.endTime);
@@ -344,6 +445,8 @@ async function readTaeEnvelope(
     ok: true,
     chrId,
     ...(result.data.sourceHash ? { sourceHash: result.data.sourceHash } : {}),
+    ...(typeof result.data.taeEntryCount === 'number' ? { taeEntryCount: result.data.taeEntryCount } : {}),
+    ...(Array.isArray(result.data.taeEntries) ? { taeEntries: result.data.taeEntries } : {}),
     animations,
     diagnostics
   };

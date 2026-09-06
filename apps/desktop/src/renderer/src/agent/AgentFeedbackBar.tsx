@@ -36,6 +36,7 @@ export function AgentFeedbackBar({ sessionId, phase }: AgentFeedbackBarProps): R
   const [commentOpen, setCommentOpen] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [status, setStatus] = useState<{ kind: 'ok' | 'error'; text: string } | null>(null);
+  const [copied, setCopied] = useState(false);
 
   useEffect(() => {
     setRating(null);
@@ -43,6 +44,7 @@ export function AgentFeedbackBar({ sessionId, phase }: AgentFeedbackBarProps): R
     setCommentOpen(false);
     setSubmitting(false);
     setStatus(null);
+    setCopied(false);
   }, [sessionId]);
 
   if (sessionId === null) return null;
@@ -81,14 +83,25 @@ export function AgentFeedbackBar({ sessionId, phase }: AgentFeedbackBarProps): R
     if (!commentOpen) void submit(nextRating);
   }
 
+  async function handleCopy(): Promise<void> {
+    try {
+      // 提取视口中最后一条 agent 回答文本
+      const agentMessages = document.querySelectorAll('.agent-message--agent .agent-message__markdown');
+      const lastText = agentMessages.length > 0 ? (agentMessages[agentMessages.length - 1]?.textContent ?? '') : '';
+      if (lastText) {
+        await navigator.clipboard.writeText(lastText);
+        setCopied(true);
+        setTimeout(() => setCopied(false), 1500);
+      }
+    } catch {
+      // 忽略剪贴板权限异常
+    }
+  }
+
   return (
     <section className="agent-feedback" data-testid="agent-feedback" aria-label="本轮会话反馈">
-      <div className="agent-feedback__head">
-        <span>这次回答对你有帮助吗？</span>
-        <span className="agent-feedback__hint">仅上传本轮脱敏会话记录</span>
-      </div>
       <div className="agent-feedback__actions" role="group" aria-label="会话评价">
-        {RATING_OPTIONS.map((option) => (
+        {RATING_OPTIONS.filter((opt) => opt.value !== 'incomplete').map((option) => (
           <button
             key={option.value}
             type="button"
@@ -96,7 +109,7 @@ export function AgentFeedbackBar({ sessionId, phase }: AgentFeedbackBarProps): R
             aria-label={option.label}
             aria-pressed={rating === option.value}
             disabled={!finished || !canSubmit || submitting}
-            title={finished ? option.label : '任务结束后可评价'}
+            title={finished ? `${option.label}（仅上传本轮脱敏记录）` : '任务结束后可评价'}
             onClick={() => selectRating(option.value)}
           >
             <span aria-hidden="true">{option.icon}</span>
@@ -104,25 +117,32 @@ export function AgentFeedbackBar({ sessionId, phase }: AgentFeedbackBarProps): R
         ))}
         <button
           type="button"
+          className="agent-feedback__button"
+          aria-label="复制回答"
+          title={copied ? '已复制' : '复制此回答'}
+          onClick={() => void handleCopy()}
+        >
+          <span aria-hidden="true">{copied ? '✓' : '📋'}</span>
+        </button>
+        <button
+          type="button"
           className={`agent-feedback__button${commentOpen ? ' is-selected' : ''}`}
           aria-label="添加反馈评论"
           aria-pressed={commentOpen}
           disabled={!finished || !canSubmit || submitting}
-          title="添加反馈评论"
+          title={finished ? '补充评论反馈' : '任务结束后可评论'}
           onClick={() => setCommentOpen((open) => !open)}
         >
           <span aria-hidden="true">💬</span>
         </button>
       </div>
-      {!finished && <p className="agent-feedback__note">任务结束后可以评价本轮结果。</p>}
-      {bridge === null && <p className="agent-feedback__note">浏览器预览不提供反馈上传。</p>}
       {commentOpen && (
         <div className="agent-feedback__form">
           <textarea
             value={comment}
             maxLength={2_000}
-            rows={3}
-            placeholder="补充一条评论（可选）"
+            rows={2}
+            placeholder="补充反馈评论（可选）"
             aria-label="反馈评论"
             onChange={(event) => setComment(event.target.value)}
           />
@@ -132,7 +152,7 @@ export function AgentFeedbackBar({ sessionId, phase }: AgentFeedbackBarProps): R
             disabled={rating === null || !canSubmit || submitting}
             onClick={() => void submit()}
           >
-            {submitting ? '上传中…' : '提交反馈'}
+            {submitting ? '…' : '提交'}
           </button>
         </div>
       )}
@@ -146,3 +166,4 @@ export function AgentFeedbackBar({ sessionId, phase }: AgentFeedbackBarProps): R
 }
 
 export { isFinished };
+

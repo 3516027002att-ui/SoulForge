@@ -143,6 +143,17 @@ export interface TaeExport {
   sourceUri: string;
   sourceHash?: string;
   sourceRevision?: number;
+  /** ANIBND 内原生 TAE 子项目录；裸 .tae 时可缺省。 */
+  taeEntryCount?: number;
+  taeEntries?: Array<{
+    entryIndex: number;
+    entryId: number;
+    entryName: string;
+    taeGroup: string;
+    animationCount: number;
+    sourceSize: number;
+    sourceHash: string;
+  }>;
   animations: TaeAnimSymbol[];
 }
 
@@ -153,6 +164,11 @@ export interface TaeAnimSymbol {
    * 生产写入方必须只发送非负 safe integer，消费方不得把缺省值猜测为 animId。
    */
   motionAnimId?: number;
+  /** 同一 sourceUri 内的 TAE 子项身份；animId 不能单独寻址。 */
+  taeEntryIndex?: number;
+  taeEntryId?: number;
+  taeEntryName?: string;
+  taeGroup?: string;
   /** `formatAnimCode(animId)`，如 `A0200`。 */
   code: string;
   /** 合法 hkx 茎（如 `a000_020000`），检索别名，不是第二套主键。 */
@@ -163,6 +179,11 @@ export interface TaeAnimSymbol {
 export interface TaeEventSymbol {
   /** `action://c1050/A0200/e0`。 */
   uri: string;
+  /** 事件继承所属 TAE 子项身份，避免跨 section 的相同 animId 串线。 */
+  taeEntryIndex?: number;
+  taeEntryId?: number;
+  taeEntryName?: string;
+  taeGroup?: string;
   /** 该动画 events[] 下标。 */
   index: number;
   eventTypeId: number;

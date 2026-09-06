@@ -57,6 +57,7 @@
     "bridge:verify:fxr-writer": "npm run test:native-fxr-writer -w @soulforge/core",
     "bridge:verify:flver-mesh": "npm run test:native-flver-mesh -w @soulforge/core",
     "bridge:verify:flver-glb": "npm run test:native-flver-glb -w @soulforge/core",
+    "bridge:verify:character-preview": "npm run test:native-character-preview -w @soulforge/core",
     "bridge:verify:flver-multi": "npm run test:native-flver-multi -w @soulforge/core",
     "bridge:verify:flver-writer": "npm run test:native-flver-writer -w @soulforge/core",
     "bridge:verify:tpf-multi": "npm run test:native-tpf-multi -w @soulforge/core",

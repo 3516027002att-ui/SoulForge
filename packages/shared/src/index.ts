@@ -43,5 +43,6 @@ export * from './soulAddress.js';
 export * from './map-document.js';
 export * from './animation-playback.js';
 export * from './action-continuous-sampler.js';
+export * from './action-editor-module.js';
 export * from './path-sanitizer.js';
 export * from './sanitizeRendererPath.js';

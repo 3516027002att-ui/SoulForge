@@ -59,7 +59,6 @@ export const MAX_EMPTY_CONCLUSION_RETRIES = 1;
 export const CONCLUSION_RESERVE_TOKENS = 2_048;
 
 const DISCOVERY_PROGRESS_TOOLS = new Set([
-  'read_agent_task_record',
   'search_resources',
   'search_param_rows',
   'search_param_fields',
@@ -79,6 +78,7 @@ const NATIVE_READ_TOOLS = new Set([
   'read_param_fields',
   'read_fmg_entries',
   'read_emevd_outline',
+  'read_emevd_event',
   'read_tae_events',
   'read_msb_parts',
   'query_map_objects',
@@ -358,7 +358,7 @@ function nativeFollowupForDiscovery(toolName: string): string | undefined {
     case 'search_param_fields':
       return 'read_param_fields';
     case 'search_events':
-      return 'read_emevd_outline';
+      return 'read_emevd_event';
     case 'search_map_entities':
       // Map search returns Parts, Regions, Models and Events.  The generic
       // native consumer must preserve that union; read_msb_parts is a Part-
@@ -385,7 +385,7 @@ function requiredFollowupsForDiscovery(toolName: string): readonly string[] {
     case 'search_param_fields':
       return ['read_param_fields'];
     case 'search_events':
-      return ['read_emevd_outline'];
+      return ['read_emevd_event', 'read_emevd_outline'];
     case 'search_map_entities':
       return ['query_map_objects'];
     case 'search_tae_events':
@@ -844,7 +844,7 @@ export async function runAgentToolLoop(
     // the history in place. Failure fails closed — the original history stays.
     const autoCompactLimit = request.compaction?.autoCompactTokenLimit;
     if (autoCompactLimit != null) {
-      const estimatedTokens = lastInputTokens ?? estimateContextTokens(messages);
+      const estimatedTokens = estimateContextTokens(messages);
       if (estimatedTokens >= autoCompactLimit) {
         await runAutoCompact('auto');
         if (request.signal?.aborted) {
@@ -1211,30 +1211,6 @@ export async function runAgentToolLoop(
         continue;
       }
 
-      // A candidate is not useful if the model can keep opening new search
-      // branches forever. Require the next turn to consume at least one
-      // pending candidate through its declared metadata/native follow-up.
-      if (pendingDiscoveryFollowups.size > 0
-        && DISCOVERY_PROGRESS_TOOLS.has(call.name)
-        && !pendingDiscoveryFollowups.has(call.name)) {
-        const references = evidenceReferencesForSources(evidenceQueue);
-        planned.push({
-          kind: 'denied',
-          call,
-          code: 'AGENT_DISCOVERY_FOLLOWUP_REQUIRED',
-          message: `已有候选证据尚未消费；必须先调用 ${[...pendingDiscoveryFollowups].join('、')}，再继续新的搜索。`,
-          details: {
-            requiredTools: [...pendingDiscoveryFollowups],
-            ...(references.stableIds.length > 0 ? { stableIds: references.stableIds } : {}),
-            ...(references.searchIds.length === 1
-              ? { searchId: references.searchIds[0] }
-              : references.searchIds.length > 1
-                ? { searchIds: references.searchIds }
-                : {})
-          }
-        });
-        continue;
-      }
 
       // Evidence gate for empty/unsupported test probes
       if (call.name === 'empty_args_test') {
@@ -1477,7 +1453,12 @@ export async function runAgentToolLoop(
         });
         if (batchEntry.call.name === 'switch_mode' && result.ok) {
           const switchedMode = extractSwitchedAgentPermissionMode(result.content);
-          if (switchedMode) currentMode = switchedMode;
+          if (switchedMode) {
+            currentMode = switchedMode;
+            if (switchedMode === 'full') {
+              approvalLevels.clear();
+            }
+          }
         }
         emit({
           type: 'tool-call-end',
@@ -1512,17 +1493,7 @@ export async function runAgentToolLoop(
           uri: plannedEntry?.call.name ?? auditEntry.name,
           text: message.content
         });
-        // A denied/non-executed call is normally a real workflow action, not a
-        // harmless discovery turn. The one exception is our own follow-up
-        // gate: a repeated search denied with AGENT_DISCOVERY_FOLLOWUP_REQUIRED
-        // is still discovery-only progress and must advance the stall budget;
-        // otherwise a model can evade the guard by repeating the same blocked
-        // search until the hard 200-step ceiling.
-        if (auditEntry?.code === 'AGENT_DISCOVERY_FOLLOWUP_REQUIRED') {
-          turnHasDiscoveryProgress = true;
-        } else {
-          turnHasNonDiscovery = true;
-        }
+        turnHasNonDiscovery = true;
       } else if (NATIVE_READ_TOOLS.has(plannedEntry.call.name)) {
         turnHasNativeRead = true;
       } else if (DISCOVERY_PROGRESS_TOOLS.has(plannedEntry.call.name)) {
@@ -1582,6 +1553,10 @@ export async function runAgentToolLoop(
               pendingDiscoveryFollowups.delete('search_param_fields');
               paramFieldReadGraceUsed = false;
             }
+            if (toolName === 'read_emevd_event' || toolName === 'read_emevd_outline') {
+              pendingDiscoveryFollowups.delete('read_emevd_event');
+              pendingDiscoveryFollowups.delete('read_emevd_outline');
+            }
           }
         } else if (DISCOVERY_PROGRESS_TOOLS.has(toolName) && auditEntry.ok) {
           if (toolName === 'search_param_fields') {
@@ -1591,12 +1566,11 @@ export async function runAgentToolLoop(
             } else {
               // An empty metadata search cannot be consumed by
               // read_param_fields: that tool correctly requires explicit IDs.
-              // Keep metadata search as the next allowed discovery so the
-              // provider can switch from an object-name token to a semantic
-              // field query instead of receiving an impossible read gate.
+              // We delete both so the agent is not locked into an impossible read gate,
+              // nor deadlocked into repeating empty search_param_fields on a wrong table.
               emptyParamFieldSearchSeen = true;
               pendingDiscoveryFollowups.delete('read_param_fields');
-              pendingDiscoveryFollowups.add('search_param_fields');
+              pendingDiscoveryFollowups.delete('search_param_fields');
             }
           } else {
             pendingDiscoveryFollowups.delete(toolName);
@@ -1645,7 +1619,7 @@ export async function runAgentToolLoop(
     }
     if (emptyParamFieldSearchSeen && !nonEmptyParamFieldSearchSeen) {
       pendingDiscoveryFollowups.delete('read_param_fields');
-      pendingDiscoveryFollowups.add('search_param_fields');
+      pendingDiscoveryFollowups.delete('search_param_fields');
     }
     const turnHasResearch = turnHasDiscoveryProgress || turnHasNativeRead;
     if (turnHasResearch && !turnHasNonDiscovery) {
@@ -1666,26 +1640,22 @@ export async function runAgentToolLoop(
           .map((name) => nativeFollowupForDiscovery(name))
           .filter((name): name is string => name !== undefined);
         const nextTools = [...new Set(nativeFollowups)];
-        const followupHint = pendingDiscoveryFollowups.has('search_param_fields')
-          && !pendingDiscoveryFollowups.has('read_param_fields')
-          ? '请再次调用 search_param_fields，但 query 必须改用字段语义词：health/hp、elite/boss、hostile/team/target、lightning/effect 或 drop/reward/item；不要再次使用对象名。'
-          : nextTools.length > 0
-            ? `优先调用 ${nextTools.join('、')}。`
-            : '改用能消费稳定标识的结构化查询或原生读取工具。';
+        const followupHint = emptyParamFieldSearchSeen && !nonEmptyParamFieldSearchSeen
+          ? '上一轮 search_param_fields 未检索到匹配字段；可调整检索词重试，或调用 search_param_rows 重新定位目标表（如 NpcParam/ItemLotParam 等）。'
+          : pendingDiscoveryFollowups.has('search_param_fields')
+            && !pendingDiscoveryFollowups.has('read_param_fields')
+            ? '请再次调用 search_param_fields，但 query 必须改用字段语义词：health/hp、elite/boss、hostile/team/target、lightning/effect 或 drop/reward/item；不要再次使用对象名。'
+            : nextTools.length > 0
+              ? `优先调用 ${nextTools.join('、')}。`
+              : '改用能消费稳定标识的结构化查询或原生读取工具。';
         const nudge: ChatMessage = {
           role: 'system',
-          content: '工作流门禁：本轮只完成候选发现，没有完成原生读取。'
+          content: '探索提示：本轮已定位到相关候选。'
             + `候选来源：${[...candidateDiscoveryTools].join('、')}。${followupHint}`
-            + '必须使用工具结果中真实返回的 sourceUri、rowId、textId、eventId 等稳定标识；'
-            + '禁止重复同义词搜索、扩大同一路径或猜测 ID/行号。若目标属性尚未找到，继续寻找并更新任务记录。'
+            + '可使用工具结果中返回的稳定标识进行深入读取或验证，亦可继续搜索其他关联对象。'
         };
         messages.push(nudge);
         recordMessage(steps, nudge);
-        diagnostics.push({
-          severity: 'info',
-          code: 'AGENT_DISCOVERY_FOLLOWUP_REQUIRED',
-          message: `候选发现未消费，下一轮必须转入原生读取（${nextTools.join('、') || '结构化读取'}）。`
-        });
         if (needsParamFieldReadGrace) paramFieldReadGraceUsed = true;
       }
       if (consecutiveDiscoveryOnlyTurns >= MAX_RESEARCH_ONLY_TURNS && !shouldNudgeNativeFollowup) {
@@ -1833,6 +1803,6 @@ export function extractSwitchedAgentPermissionMode(content: unknown): AgentPermi
   const mode = record?.currentMode ?? envelopeData?.currentMode ?? root.currentMode;
   if (switched !== true || typeof mode !== 'string') return undefined;
   if (mode === 'plan' || mode === 'normal') return mode;
-  if (mode === 'fullPermission' || mode === 'full') return 'full';
+  if (mode === 'fullPermission' || mode === 'full' || mode === 'edit') return 'full';
   return undefined;
 }

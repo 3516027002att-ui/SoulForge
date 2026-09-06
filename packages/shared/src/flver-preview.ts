@@ -46,6 +46,8 @@ export interface FlverPreviewBone {
   translation: [number, number, number];
   rotation: [number, number, number];
   scale: [number, number, number];
+  /** Native reference FK, serialized in row-major System.Numerics order. */
+  referenceFkMatrix?: number[] | undefined;
   rotationOrder: FlverRotationOrder;
 }
 
@@ -348,6 +350,7 @@ function isPreviewBone(value: unknown): boolean {
     && isNumberTuple(value.translation, 3)
     && isNumberTuple(value.rotation, 3)
     && isNumberTuple(value.scale, 3)
+    && (value.referenceFkMatrix === undefined || isNumberTuple(value.referenceFkMatrix, 16))
     && value.rotationOrder === 'XZY';
 }
 

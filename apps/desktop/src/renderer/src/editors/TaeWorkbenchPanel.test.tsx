@@ -7,17 +7,17 @@
  * 动画列表、词条事件与中栏详情区的文件统计；选择联动由 e2e 覆盖。
  * 面板只在提交/重读处理器里触达 window，SSR 渲染路径不触达，无需假 window。
  *
- * T3（2026-08-15，grok）重构后三栏为：
- *   Animations | Events / 词条（含详情 + 写回）| 预览（只读）。
+ * T3（2026-08-15，grok）重构后四栏为：
+ *   Animations | Events / 词条 | 详情 | 动作视图。
  * 没有 Timeline / Events、没有 Inspector 第三栏 —— 详情收进中栏。
  *
  * 覆盖：
- * 1. SSR 结构：三栏 Animations | Events / 词条 | 预览（只读）挂载即存在；
+ * 1. SSR 结构：四栏 Animations | Events / 词条 | 详情 | 动作视图挂载即存在；
  *    无 Timeline / Events、无 Inspector、无 Tools 空栏；动画列表由 shared pages
  *    投影派生（不按 chr/action 目录分类），hkxName 去扩展作主标签。
  * 2. 纯逻辑：isInvalidTimeRange（startTime > endTime / 非有限时间判非法）。
- * 3. authority 语义：partial（TAE_INVALID_TIME_RANGE）时 diagnostics 必须暴露给
- *    用户（tae-partial-diagnostics），非法时间行在词条列表标 failed。
+ * 3. authority 语义：partial（TAE_INVALID_TIME_RANGE）时非法时间行在词条列表标
+ *    failed；主工作区不铺 authority/诊断长文，写回失败仍显示可行动 diagnostics。
  * 4. ANIMATION-56C 写回接线（收进中栏详情）：
  *    - 事件选中后详情区出现时间编辑（update-event-times）与新增事件
  *      （insert-event，模板 = 当前事件）入口；提交期间禁用重复提交。
@@ -47,6 +47,8 @@ import {
   buildUpdateEventTimesMutation,
   eventIndexOfTimelineRow,
   formatWriteDiagnostics,
+  groupTaeAnimations,
+  findSelectedTaeAnimation,
   isInvalidTimeRange
 } from './TaeWorkbenchPanel.js';
 import type { TaeDocument, TaeTimelineEventRow } from '@soulforge/shared';
@@ -124,12 +126,12 @@ describe('TaeWorkbenchPanel 初始结构（挂载即有的四栏骨架）', () =
     assert.match(render(), /aria-label="动作工作台"/);
   });
 
-  it('四栏 Animations | Events / 词条 | 详情 | 预览（只读）同时存在，无 Timeline/Inspector/Tools', () => {
+  it('四栏 Animations | Events / 词条 | 详情 | 动作视图同时存在，无 Timeline/Inspector/Tools', () => {
     const html = render();
     assert.match(html, /aria-label="Animations"/);
     assert.match(html, /aria-label="Events \/ 词条"/);
     assert.match(html, /aria-label="详情"/);
-    assert.match(html, /aria-label="预览（只读）"/);
+    assert.match(html, /aria-label="动作视图"/);
     assert.doesNotMatch(html, /aria-label="Timeline \/ Events"/);
     assert.doesNotMatch(html, /aria-label="Inspector"/);
     assert.doesNotMatch(html, /aria-label="Files \/ Animations"/);
@@ -179,22 +181,30 @@ describe('TaeWorkbenchPanel 初始结构（挂载即有的四栏骨架）', () =
     assert.doesNotMatch(html, /更新事件时间/);
   });
 
-  it('右栏预览在 SSR 下是查找中空态，不出现「预览不可用」推诿句', () => {
+  it('右栏动作视图在 SSR 下是加载中空态，不出现调试字报', () => {
     const html = render();
-    // effect 不跑 → 预览初始态是「正在查找伴生模型（chrbnd）与装配部件（partsbnd）…」。
-    assert.match(html, /正在查找伴生模型（chrbnd）/);
+    // effect 不跑 → 动作视图初始态只保留简短加载提示。
+    assert.match(html, />加载中…</);
+    assert.doesNotMatch(html, /FLVER 3D 预览/);
+    assert.doesNotMatch(html, /显示骨架|隐藏骨架/);
+    assert.doesNotMatch(html, /兼容预览|authority=/);
     assert.doesNotMatch(html, /本夜不挂/);
     assert.doesNotMatch(html, /预览不可用/);
     assert.doesNotMatch(html, /见底部日志/);
   });
 
-  it('S17：源码挂 FlverViewer，有网格时出现预览宿主', () => {
+  it('S17：完整动作预览模块挂 FlverViewer，有网格时出现预览宿主', () => {
     const source = readFileSync(
       join(process.cwd(), 'apps', 'desktop', 'src', 'renderer', 'src', 'editors', 'TaeWorkbenchPanel.tsx'),
       'utf8'
     );
-    assert.match(source, /FlverViewer/);
-    assert.match(source, /tae-preview-host/);
+    const previewSource = readFileSync(
+      join(process.cwd(), 'apps', 'desktop', 'src', 'renderer', 'src', 'editors', 'action', 'ActionPreviewModule.tsx'),
+      'utf8'
+    );
+    assert.match(source, /ActionPreviewModule/);
+    assert.match(previewSource, /FlverViewer/);
+    assert.match(previewSource, /tae-preview-host/);
     assert.match(source, /tae-timeline-ctrl/);
     assert.doesNotMatch(source, /本夜不挂/);
     assert.doesNotMatch(source, /见底部日志/);
@@ -206,11 +216,21 @@ describe('TaeWorkbenchPanel 初始结构（挂载即有的四栏骨架）', () =
       join(process.cwd(), 'apps', 'desktop', 'src', 'renderer', 'src', 'editors', 'TaeWorkbenchPanel.tsx'),
       'utf8'
     );
-    assert.match(panelSource, /FlverViewer/);
-    assert.match(panelSource, /tae-preview__viewport/);
-    assert.match(panelSource, /data-testid="tae-preview-viewport"/);
+    const previewSource = readFileSync(
+      join(process.cwd(), 'apps', 'desktop', 'src', 'renderer', 'src', 'editors', 'action', 'ActionPreviewModule.tsx'),
+      'utf8'
+    );
+    assert.match(panelSource, /ActionPreviewModule/);
+    assert.match(previewSource, /FlverViewer/);
+    assert.match(previewSource, /tae-preview__viewport/);
+    assert.match(previewSource, /data-testid="tae-preview-viewport"/);
     assert.match(panelSource, /tae-preview-body/);
-    assert.doesNotMatch(panelSource, /minHeight:\s*220|aspectRatio:\s*['"]16 \/ 9['"]/);
+    assert.match(previewSource, /showViewerHud=\{false\}/);
+    assert.match(previewSource, /showSceneGuides=\{false\}/);
+    assert.doesNotMatch(previewSource, /showSkeletonMarkers\s*\/?\s*>/);
+    assert.doesNotMatch(previewSource, /minHeight:\s*220|aspectRatio:\s*['"]16 \/ 9['"]/);
+    assert.match(previewSource, /externalBundle=\{bundle\}/);
+    assert.match(previewSource, /externalSkeletonPoses=\{props\.skeletonPoses\}/);
     // 模型挂上后保留真实播放控制与 Clip 状态，不能再用“未接入”静态文案掩盖能力。
     assert.match(panelSource, /tae-timeline-ctrl/);
     assert.match(panelSource, /正在读取当前动画 Clip/);
@@ -235,6 +255,9 @@ describe('animationIdLabel / isLegalHkxStem / secondsToFrame（动画标签与�
     assert.equal(animationIdLabel({ animId: 9, eventCount: 0, groupCount: 0, timesCount: 0, hkxName: '', events: [], eventsTruncated: false }), 'a000_000009');
     // 单字母 "a"（旧截断残留）→ a000_ 回退
     assert.equal(animationIdLabel({ animId: 10, eventCount: 0, groupCount: 0, timesCount: 0, hkxName: 'a', events: [], eventsTruncated: false }), 'a000_000010');
+    // 缺失 hkxName 必须保留物理 TAE child 的分区前缀，不能把 a200 动作显示成 a000。
+    assert.equal(animationIdLabel({ animId: 501010, taeGroup: 'a200', eventCount: 0, groupCount: 0, timesCount: 0, events: [], eventsTruncated: false }), 'a200_501010');
+    assert.equal(animationIdLabel({ animId: 122302, taeEntryName: 'a50.tae', eventCount: 0, groupCount: 0, timesCount: 0, events: [], eventsTruncated: false }), 'a050_122302');
   });
 
   it('isLegalHkxStem：ASCII 文件名茎合法，空白/乱码/空/过短不合法', () => {
@@ -302,6 +325,68 @@ describe('TAE 动画分页（服务端 hasMore authority）', () => {
     assert.deepEqual(appendTaeAnimationPage(state, page1, 1), before);
     assert.deepEqual(state.animations.map((animation) => animation.animId), [2]);
   });
+
+  it('不同 TAE section 可以保留相同 animId，分页不按裸 animId 丢弃', () => {
+    const page0 = makeDocument({
+      animations: [{ ...makeDocument().animations[0], animId: 10, taeEntryIndex: 1, taeEntryId: 5000000, taeEntryName: 'a00.tae', taeGroup: 'a00' }],
+      animationCount: 2,
+      animationsTruncated: true
+    }) as TaeDocument;
+    const page1 = makeDocument({
+      animations: [{ ...makeDocument().animations[0], animId: 10, taeEntryIndex: 3, taeEntryId: 5000050, taeEntryName: 'a50.tae', taeGroup: 'a50' }],
+      animationCount: 2,
+      animationsTruncated: false
+    }) as TaeDocument;
+    let state = createTaeAnimationPaginationState('fixture://aggregate', page0);
+    state = appendTaeAnimationPage(state, page1, 1);
+    assert.equal(state.animations.length, 1);
+    assert.equal(state.animations[0]?.taeGroup, 'a50');
+  });
+});
+
+describe('TAE section identity（动作分组与选中态）', () => {
+  const a00 = { ...makeDocument().animations[0]!, animId: 10, taeEntryIndex: 1, taeEntryId: 5000000, taeEntryName: 'a00.tae', taeGroup: 'a00' };
+  const a50 = { ...makeDocument().animations[0]!, animId: 10, taeEntryIndex: 3, taeEntryId: 5000050, taeEntryName: 'a50.tae', taeGroup: 'a50' };
+
+  it('按 native a* TAE child 分组，并保留各 child 的动作族', () => {
+    const groups = groupTaeAnimations([a00, a50]);
+    assert.deepEqual(groups.map((group) => [group.label, group.animations.length]), [['a00', 1], ['a50', 1]]);
+  });
+
+  it('普通角色的 cXXXX.tae 按真实 hkx 动作前缀归入 a00，而不是显示成 cXXXX', () => {
+    const c1130 = {
+      ...a00,
+      taeEntryIndex: 1,
+      taeEntryId: 3000000,
+      taeEntryName: 'c1130.tae',
+      taeGroup: 'c1130',
+      hkxName: 'a000_000000.hkt'
+    };
+    assert.deepEqual(groupTaeAnimations([c1130]).map((group) => group.label), ['a00']);
+  });
+
+  it('缺少 hkx 与 TAE child 名称时沿用动作列表的 a00 fallback', () => {
+    const unnamed = {
+      ...a00,
+      taeEntryIndex: undefined,
+      taeEntryId: undefined,
+      taeEntryName: undefined,
+      taeGroup: undefined,
+      hkxName: undefined
+    };
+    assert.deepEqual(groupTaeAnimations([unnamed]).map((group) => group.label), ['a00']);
+  });
+
+  it('相同 animId 只有带完整 section 选择器才能选中', () => {
+    assert.equal(findSelectedTaeAnimation([a00, a50], { kind: 'animation', id: 'bare', label: '', animationId: 10 }), undefined);
+    assert.equal(
+      findSelectedTaeAnimation([a00, a50], {
+        kind: 'animation', id: 'a50', label: '', animationId: 10,
+        taeEntryIndex: 3, taeEntryId: 5000050, taeEntryName: 'a50.tae', taeGroup: 'a50'
+      })?.taeGroup,
+      'a50'
+    );
+  });
 });
 
 describe('isInvalidTimeRange（时间范围合法性判据）', () => {
@@ -326,8 +411,8 @@ describe('isInvalidTimeRange（时间范围合法性判据）', () => {
   });
 });
 
-describe('authority 语义（partial 非法时间范围必须暴露）', () => {
-  it('partial + TAE_INVALID_TIME_RANGE 时 diagnostics 区段可见', () => {
+describe('TAE 非法时间行（主工作区不显示 authority/诊断长文）', () => {
+  it('partial + TAE_INVALID_TIME_RANGE 仍标记非法事件，但不渲染内部诊断长文', () => {
     const html = renderToStaticMarkup(
       <TaeWorkbenchPanel
         resourceUri="fixture://action/c0000.tae"
@@ -349,9 +434,8 @@ describe('authority 语义（partial 非法时间范围必须暴露）', () => {
         initialSelection={{ kind: 'animation', id: 'anim-0', label: '动画 0', animationId: 0 }}
       />
     );
-    assert.match(html, /data-testid="tae-partial-diagnostics"/);
-    assert.match(html, /TAE_INVALID_TIME_RANGE/);
-    assert.match(html, /事件时间范围非法/);
+    assert.doesNotMatch(html, /data-testid="tae-partial-diagnostics"/);
+    assert.doesNotMatch(html, /authority=partial/);
     // 非法时间行在词条列表标记 failed（S17：词条行只显示类型名 + 非法标记）。
     assert.match(html, />9 未命名</);
     assert.match(html, /非法时间/);
@@ -529,19 +613,32 @@ describe('Negative source tests（ANIMATION-56B / ANIMATION-56C）', () => {
     assert.doesNotMatch(panelSource, /\.slice\(0,\s*\d+\)\s*\.map\(/);
     assert.doesNotMatch(panelSource, /data-testid="tae-truncation"/);
     assert.doesNotMatch(panelSource, /data-testid="tae-events-truncation"/);
-    // 全量渲染：直接 animations.map / selectedAnimationEvents.map。
-    assert.match(panelSource, /animations\.map\(/);
+    const listSource = readFileSync(
+      join(repoRoot, 'apps', 'desktop', 'src', 'renderer', 'src', 'editors', 'action', 'ActionAnimationList.tsx'),
+      'utf8'
+    );
+    // 全量渲染：动作目录组件与事件栏都直接 map，不做第二套隐式上限。
+    assert.match(listSource, /group\.animations\.map\(/);
     assert.match(panelSource, /selectedAnimationEvents\.map\(/);
   });
 
   it('问题4-A：预览一次读取并校验完整角色 bundle，不再逐 mesh 重启 Bridge', () => {
     assert.match(panelSource, /readTaeChrbndPreview\(props\.resourceUri\)/);
     assert.match(panelSource, /isCharacterPreviewBundle\(result\.data\)/);
-    assert.match(panelSource, /externalBundle=\{preview\.bundle\}/);
-    assert.match(panelSource, /externalSkeletonPoses=\{sampledSkeletonPoses\}/);
+    const previewSource = readFileSync(
+      join(repoRoot, 'apps', 'desktop', 'src', 'renderer', 'src', 'editors', 'action', 'ActionPreviewModule.tsx'),
+      'utf8'
+    );
+    assert.match(panelSource, /<ActionPreviewModule/);
+    assert.match(panelSource, /bundle=\{preview\.bundle\}/);
+    assert.match(panelSource, /skeletonPoses=\{sampledSkeletonPoses\}/);
+    assert.match(previewSource, /externalBundle=\{bundle\}/);
+    assert.match(previewSource, /externalSkeletonPoses=\{props\.skeletonPoses\}/);
+    assert.match(previewSource, /showViewerHud=\{false\}/);
+    assert.match(previewSource, /showSceneGuides=\{false\}/);
     assert.doesNotMatch(panelSource, /externalPose=\{sampledPose\}/);
-    assert.match(panelSource, /tae-preview-compatibility-notice/);
-    assert.match(panelSource, /这不代表存档当前装备/);
+    assert.doesNotMatch(panelSource, /tae-preview-compatibility-notice/);
+    assert.doesNotMatch(panelSource, /这不代表存档当前装备/);
     assert.doesNotMatch(panelSource, /readTaeChrbndPreview\(props\.resourceUri,\s*index\)/);
     assert.doesNotMatch(panelSource, /meshIndex=\{0\}/);
   });
@@ -586,7 +683,7 @@ describe('Negative source tests（ANIMATION-56B / ANIMATION-56C）', () => {
     assert.match(html, /<svg[^>]*viewBox="0 0 24 24"[^>]*fill="currentColor"/);
   });
 
-  it('TAE 响应式支持：Preview 栏 minWidth 为 220px 且包含完整 transport 控制项', () => {
+  it('TAE 响应式支持：动作视图栏 minWidth 为 220px 且包含完整 transport 控制项', () => {
     assert.match(panelSource, /id:\s*'preview'[\s\S]*?minWidth:\s*220/);
     const html = renderWithSelection();
     assert.match(html, /aria-label="播放"/);

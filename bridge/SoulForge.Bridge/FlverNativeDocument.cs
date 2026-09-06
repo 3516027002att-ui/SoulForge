@@ -773,8 +773,10 @@ internal sealed class FlverNativeDocument
     /// <summary>
     /// Extracts a complete GPU skin binding. Sekiro-era FLVER (> 0x2000D)
     /// stores vertex bone indices in the FLVER-global namespace; the per-mesh
-    /// palette is only authoritative for older versions. Rigid vertices use
-    /// NormalW (or the mesh default bone) with weight 1.
+    /// palette is only authoritative for older versions. For layouts that have
+    /// a BoneIndices semantic, native readers use BoneIndices[0] for vertices
+    /// whose decoded weights are all zero; NormalW is only the rigid fallback
+    /// for layouts without a BoneIndices semantic.
     /// </summary>
     public FlverMeshSkinning GetMeshSkinning(int meshIndex, int maxVertices = 10_000)
     {
@@ -791,85 +793,39 @@ internal sealed class FlverNativeDocument
         var indices = new ushort[plan.VertexCount * 4];
         var allRigid = true;
 
-        bool TryResolveIndex(int rawIndex, out ushort resolved)
-        {
-            var globalIndex = rawIndex;
-            if (InternalVersion <= 0x2000D && mesh.BoneIndices.Count > 0)
-            {
-                if (rawIndex < 0 || rawIndex >= mesh.BoneIndices.Count)
-                {
-                    resolved = 0;
-                    return false;
-                }
-                globalIndex = mesh.BoneIndices[rawIndex];
-            }
-            if (globalIndex < 0 || globalIndex >= Bones.Count || globalIndex > ushort.MaxValue)
-            {
-                resolved = 0;
-                return false;
-            }
-            resolved = (ushort)globalIndex;
-            return true;
-        }
-
         Span<float> vertexWeights = stackalloc float[4];
         Span<int> rawIndices = stackalloc int[4];
+        Span<float> decodedWeights = stackalloc float[4];
+        Span<ushort> decodedIndices = stackalloc ushort[4];
         for (var vertex = 0; vertex < plan.VertexCount; vertex++)
         {
             vertexWeights.Clear();
             rawIndices.Clear();
             var hasDecodedWeights = plan.Weights != null
                 && TryReadBoneWeights(plan.Weights, vertex, vertexWeights);
-            var sum = hasDecodedWeights
-                ? vertexWeights[0] + vertexWeights[1] + vertexWeights[2] + vertexWeights[3]
-                : 0f;
-
             var hasDecodedIndices = plan.BoneIndices != null
                 && TryReadBoneIndices(plan.BoneIndices, vertex, rawIndices);
 
-            if (sum > 1e-5f && hasDecodedIndices)
-            {
-                allRigid = false;
-                ushort firstResolved = 0;
-                var hasResolved = false;
-                for (var influence = 0; influence < 4; influence++)
-                {
-                    var weight = float.IsFinite(vertexWeights[influence])
-                        ? Math.Max(0f, vertexWeights[influence]) / sum
-                        : 0f;
-                    weights[vertex * 4 + influence] = weight;
-                    if (weight <= 1e-5f) continue;
-                    if (!TryResolveIndex(rawIndices[influence], out var globalIndex))
-                        return FlverMeshSkinning.Static;
-                    indices[vertex * 4 + influence] = globalIndex;
-                    if (!hasResolved)
-                    {
-                        firstResolved = globalIndex;
-                        hasResolved = true;
-                    }
-                }
-                if (!hasResolved) return FlverMeshSkinning.Static;
-                for (var influence = 0; influence < 4; influence++)
-                {
-                    if (weights[vertex * 4 + influence] <= 1e-5f)
-                        indices[vertex * 4 + influence] = firstResolved;
-                }
-                continue;
-            }
-
-            var rigidRawIndex = TryReadNormalW(plan.Normal, vertex, out var normalW)
-                ? normalW
-                : mesh.DefaultBoneIndex;
-            if (!TryResolveIndex(rigidRawIndex, out var rigidIndex))
-            {
-                if (hasDecodedIndices && TryResolveIndex(rawIndices[0], out var firstIndex))
-                    rigidIndex = firstIndex;
-                else
-                    return FlverMeshSkinning.Static;
-            }
-            for (var influence = 0; influence < 4; influence++)
-                indices[vertex * 4 + influence] = rigidIndex;
-            weights[vertex * 4] = 1f;
+            var hasNormalW = TryReadNormalW(plan.Normal, vertex, out var normalW);
+            var mode = FlverMatureSkinning.DecodeVertex(
+                InternalVersion,
+                Bones.Count,
+                mesh,
+                plan.BoneIndices != null,
+                hasDecodedWeights,
+                vertexWeights,
+                hasDecodedIndices,
+                rawIndices,
+                hasNormalW,
+                normalW,
+                decodedWeights,
+                decodedIndices,
+                out _);
+            if (mode == FlverMatureSkinning.VertexMode.Invalid)
+                return FlverMeshSkinning.Static;
+            if (mode == FlverMatureSkinning.VertexMode.Weighted) allRigid = false;
+            decodedWeights.CopyTo(weights.AsSpan(vertex * 4, 4));
+            decodedIndices.CopyTo(indices.AsSpan(vertex * 4, 4));
         }
 
         var weightBytes = new byte[weights.Length * sizeof(float)];
@@ -901,12 +857,12 @@ internal sealed class FlverNativeDocument
                 return true;
             case TypeByte4A:
                 if (offset + 4 > _source.Length) return false;
-                for (var i = 0; i < 4; i++) output[i] = Math.Max(0f, ReadSByte(_source, (int)offset + i) / 127f);
+                for (var i = 0; i < 4; i++) output[i] = ReadSByte(_source, (int)offset + i) / 127f;
                 return true;
             case TypeUVPair:
             case TypeShort4toFloat4A:
                 if (offset + 8 > _source.Length) return false;
-                for (var i = 0; i < 4; i++) output[i] = Math.Max(0f, ReadInt16(_source, (int)offset + i * 2) / 32767f);
+                for (var i = 0; i < 4; i++) output[i] = ReadInt16(_source, (int)offset + i * 2) / 32767f;
                 return true;
             default:
                 return false;
@@ -1236,146 +1192,208 @@ internal sealed class FlverNativeDocument
     }
 
     /// <summary>
-    /// 为已确认的角色投影材质导出其原生投影接收面。
+    /// 为已确认的角色投影材质导出兼容预览的原生接收面。
     ///
     /// Sekiro 的 <c>P_FB_M_9510_Decal</c> FLVER 不是一张普通 UV 表面：同一个
-    /// display FaceSet 内包含一个连续的皮肤接收面，以及眼睛、嘴、发片和辅助
-    /// 投影岛。成熟工具会保留这些原生面集，只有在拥有对应游戏 shader 时才
-    /// 把它们交给 shader。SoulForge 的兼容预览没有该 shader，因此只将原生
-    /// triangle-list 中最大的连续接收面投影到显式兼容贴图；这不是按坐标或
-    /// 名称猜测几何，也不修改 native payload，只是一个有边界的只读显示投影。
+    /// display FaceSet 内包含多个彼此不连通的原生接收岛。不能按最大连通块
+    /// 裁掉脸、眼睛、嘴等岛；但也不能把挂在 Head 下、由 <c>HD_*</c> 骨骼
+    /// 驱动的投影/装饰体当成普通脸面，直接套上兼容颜色。原生 decal shader
+    /// 会用投影体语义处理这些面，而兼容路径只是把显式颜色作为普通材质输入，
+    /// 因此这里按 FLVER 的 BoneIndices/Weights 和 Head 父链筛选真正的头部接收面。
     ///
-    /// 调用方必须已经依据 MTD 语义确认这是兼容投影路径；普通 FLVER 永远使用
-    /// GetMeshIndicesBase64。组件选择保持三角形原顺序和原生索引位宽。
+    /// 过滤只在检测到 Head 下的 HD_* 骨骼时启用；其他投影材质仍完整使用其
+    /// native display FaceSet。输出保持三角形原顺序和原生索引位宽。
     /// </summary>
     public string? GetMeshProjectionReceiverIndicesBase64(int meshIndex, int maxIndices = 30_000)
     {
-        if (maxIndices < 3) return null;
-        var sourceBase64 = GetMeshIndicesBase64(meshIndex, MaxIndexCount, allowTruncation: false);
-        if (sourceBase64 is null) return null;
-        var indexSize = GetMeshIndexSize(meshIndex);
-        var indexStride = indexSize / 8;
-        if (indexStride is not (2 or 4)) return null;
-
-        byte[] sourceBytes;
-        try
+        if (meshIndex < 0 || meshIndex >= Meshes.Count || maxIndices < 3) return null;
+        var mesh = Meshes[meshIndex];
+        var receiverBones = BuildHeadProjectionReceiverBones();
+        if (receiverBones is null)
         {
-            sourceBytes = Convert.FromBase64String(sourceBase64);
+            // There is no native head-mounted projection skeleton to split. Keep
+            // the exact FaceSet path for non-character projected materials.
+            return GetMeshIndicesBase64(meshIndex, maxIndices, allowTruncation: false);
         }
-        catch (FormatException)
+
+        var selection = SelectDisplayFaceSet(meshIndex, mesh);
+        if (selection.Failure == FaceSetSelectionFailure.NoCandidate) return null;
+        if (selection.Failure == FaceSetSelectionFailure.NotDecodable)
+            throw new InvalidDataException(selection.Diagnostic!);
+        var fs = selection.FaceSet!;
+        if (fs.IndexSize != 16 && fs.IndexSize != 32)
+            throw new InvalidDataException($"FLVER_FACESET_EDGE_COMPRESSED_UNSUPPORTED: IndexSize {fs.IndexSize} not in {{16,32}}");
+        if (fs.IndexCount <= 0 || fs.IndexCount > MaxIndexCount) return null;
+        var indexDataOffset = (long)DataStart + fs.IndicesOffset;
+        var stride = fs.IndexSize / 8;
+        var byteLen = (long)fs.IndexCount * stride;
+        if (indexDataOffset < 0 || indexDataOffset + byteLen > _source.Length) return null;
+
+        var sourceIndices = new uint[fs.IndexCount];
+        for (var i = 0; i < fs.IndexCount; i++)
         {
-            return null;
+            var offset = checked((int)indexDataOffset + i * stride);
+            sourceIndices[i] = fs.IndexSize == 32
+                ? ReadUInt32(_source, offset)
+                : ReadUInt16(_source, offset);
         }
-        if (sourceBytes.Length == 0 || sourceBytes.Length % (indexStride * 3) != 0)
-            return null;
 
-        var vertexCount = Meshes[meshIndex].VertexCount;
-        if (vertexCount <= 0) return null;
-        var parent = new int[vertexCount];
-        var rank = new byte[vertexCount];
-        for (var vertex = 0; vertex < parent.Length; vertex++) parent[vertex] = vertex;
-
-        int Find(int value)
+        for (var i = 0; i < sourceIndices.Length; i++)
         {
-            var root = value;
-            while (parent[root] != root) root = parent[root];
-            while (parent[value] != value)
+            var idx = sourceIndices[i];
+            if (idx == ushort.MaxValue && fs.TriangleStrip && mesh.VertexCount < 65535) continue;
+            if (idx >= (uint)mesh.VertexCount)
+                throw new InvalidDataException($"FLVER_INDEX_OUT_OF_BOUNDS: mesh[{meshIndex}] index {idx} >= vertexCount {mesh.VertexCount}");
+        }
+
+        var triangleList = fs.TriangleStrip
+            ? TriangulateFaceSet(sourceIndices, fs.IndexSize, mesh.VertexCount < 65535)
+            : sourceIndices.Length % 3 == 0 ? sourceIndices : Array.Empty<uint>();
+        if (triangleList.Length == 0) return null;
+
+        var plan = BuildMeshPlan(meshIndex);
+        if (plan is null || plan.VertexCount <= 0) return null;
+        var filtered = new List<uint>(triangleList.Length);
+        Span<int> resolvedBones = stackalloc int[4];
+        for (var i = 0; i < triangleList.Length; i += 3)
+        {
+            var include = true;
+            for (var corner = 0; corner < 3; corner++)
             {
-                var next = parent[value];
-                parent[value] = root;
-                value = next;
+                if (!VertexUsesProjectionReceiver(
+                        plan,
+                        mesh,
+                        checked((int)triangleList[i + corner]),
+                        receiverBones,
+                        resolvedBones))
+                {
+                    include = false;
+                    break;
+                }
             }
-            return root;
+            if (!include) continue;
+            filtered.Add(triangleList[i]);
+            filtered.Add(triangleList[i + 1]);
+            filtered.Add(triangleList[i + 2]);
         }
 
-        void Union(int left, int right)
+        if (filtered.Count == 0 || filtered.Count > maxIndices) return null;
+        var output = new byte[checked(filtered.Count * stride)];
+        for (var i = 0; i < filtered.Count; i++)
         {
-            var leftRoot = Find(left);
-            var rightRoot = Find(right);
-            if (leftRoot == rightRoot) return;
-            if (rank[leftRoot] < rank[rightRoot])
+            var value = filtered[i];
+            if (fs.IndexSize == 16)
             {
-                parent[leftRoot] = rightRoot;
-            }
-            else if (rank[leftRoot] > rank[rightRoot])
-            {
-                parent[rightRoot] = leftRoot;
+                if (value > ushort.MaxValue) return null;
+                BinaryPrimitives.WriteUInt16LittleEndian(output.AsSpan(i * stride, stride), (ushort)value);
             }
             else
             {
-                parent[rightRoot] = leftRoot;
-                rank[leftRoot]++;
+                BinaryPrimitives.WriteUInt32LittleEndian(output.AsSpan(i * stride, stride), value);
             }
-        }
-
-        var indexCount = sourceBytes.Length / indexStride;
-        var indices = new uint[indexCount];
-        for (var index = 0; index < indexCount; index++)
-        {
-            var offset = index * indexStride;
-            indices[index] = indexSize == 16
-                ? ReadUInt16(sourceBytes, offset)
-                : ReadUInt32(sourceBytes, offset);
-            if (indices[index] >= (uint)vertexCount) return null;
-        }
-
-        var triangleCountByRoot = new Dictionary<int, int>();
-        for (var triangle = 0; triangle < indexCount / 3; triangle++)
-        {
-            var offset = triangle * 3;
-            var a = checked((int)indices[offset]);
-            var b = checked((int)indices[offset + 1]);
-            var c = checked((int)indices[offset + 2]);
-            if (a == b || b == c || c == a) continue;
-            Union(a, b);
-            Union(b, c);
-        }
-        for (var triangle = 0; triangle < indexCount / 3; triangle++)
-        {
-            var offset = triangle * 3;
-            var a = checked((int)indices[offset]);
-            var b = checked((int)indices[offset + 1]);
-            var c = checked((int)indices[offset + 2]);
-            if (a == b || b == c || c == a) continue;
-            var root = Find(a);
-            triangleCountByRoot[root] = triangleCountByRoot.TryGetValue(root, out var count)
-                ? count + 1
-                : 1;
-        }
-        if (triangleCountByRoot.Count == 0) return null;
-
-        // Deterministic tie-breaker: native triangle order has already been
-        // preserved; the smallest root keeps identical inputs stable.
-        var receiverRoot = triangleCountByRoot
-            .OrderByDescending(pair => pair.Value)
-            .ThenBy(pair => pair.Key)
-            .First()
-            .Key;
-        var receiver = new List<uint>(triangleCountByRoot[receiverRoot] * 3);
-        for (var triangle = 0; triangle < indexCount / 3; triangle++)
-        {
-            var offset = triangle * 3;
-            var a = checked((int)indices[offset]);
-            var b = checked((int)indices[offset + 1]);
-            var c = checked((int)indices[offset + 2]);
-            if (a == b || b == c || c == a || Find(a) != receiverRoot) continue;
-            receiver.Add(indices[offset]);
-            receiver.Add(indices[offset + 1]);
-            receiver.Add(indices[offset + 2]);
-        }
-        if (receiver.Count == 0 || receiver.Count > maxIndices) return null;
-
-        var output = new byte[checked(receiver.Count * indexStride)];
-        for (var index = 0; index < receiver.Count; index++)
-        {
-            var value = receiver[index];
-            var offset = index * indexStride;
-            if (indexSize == 16)
-                BinaryPrimitives.WriteUInt16LittleEndian(output.AsSpan(offset, indexStride), checked((ushort)value));
-            else
-                BinaryPrimitives.WriteUInt32LittleEndian(output.AsSpan(offset, indexStride), value);
         }
         return Convert.ToBase64String(output);
+    }
+
+    /// <summary>
+    /// Returns the native Head-to-root chain only when this skeleton actually has
+    /// Head-mounted HD_* descendants. Those descendants are projection/ornament
+    /// geometry, not the common head receiver used by the compatibility color.
+    /// </summary>
+    private HashSet<int>? BuildHeadProjectionReceiverBones()
+    {
+        var headIndex = -1;
+        for (var i = 0; i < Bones.Count; i++)
+        {
+            if (string.Equals(Bones[i].Name, "Head", StringComparison.OrdinalIgnoreCase))
+            {
+                headIndex = i;
+                break;
+            }
+        }
+        if (headIndex < 0) return null;
+
+        var hasHeadMountedProjectionBone = false;
+        for (var i = 0; i < Bones.Count; i++)
+        {
+            if (!Bones[i].Name.StartsWith("HD_", StringComparison.OrdinalIgnoreCase)) continue;
+            var current = i;
+            var visited = new HashSet<int>();
+            while (current >= 0 && current < Bones.Count && visited.Add(current))
+            {
+                if (current == headIndex)
+                {
+                    hasHeadMountedProjectionBone = true;
+                    break;
+                }
+                current = Bones[current].ParentIndex;
+            }
+            if (hasHeadMountedProjectionBone) break;
+        }
+        if (!hasHeadMountedProjectionBone) return null;
+
+        var receiverBones = new HashSet<int>();
+        var chainIndex = headIndex;
+        var chainVisited = new HashSet<int>();
+        while (chainIndex >= 0 && chainIndex < Bones.Count && chainVisited.Add(chainIndex))
+        {
+            receiverBones.Add(chainIndex);
+            chainIndex = Bones[chainIndex].ParentIndex;
+        }
+        return receiverBones;
+    }
+
+    private bool VertexUsesProjectionReceiver(
+        MeshDataPlan plan,
+        FlverMeshEntry mesh,
+        int vertexIndex,
+        IReadOnlySet<int> receiverBones,
+        Span<int> resolvedBones)
+    {
+        if (vertexIndex < 0 || vertexIndex >= plan.VertexCount) return false;
+        resolvedBones.Clear();
+        Span<float> vertexWeights = stackalloc float[4];
+        Span<int> rawIndices = stackalloc int[4];
+        Span<float> decodedWeights = stackalloc float[4];
+        Span<ushort> decodedIndices = stackalloc ushort[4];
+        var hasDecodedWeights = plan.Weights != null
+            && TryReadBoneWeights(plan.Weights, vertexIndex, vertexWeights);
+        var hasDecodedIndices = plan.BoneIndices != null
+            && TryReadBoneIndices(plan.BoneIndices, vertexIndex, rawIndices);
+
+        var hasNormalW = TryReadNormalW(plan.Normal, vertexIndex, out var normalW);
+        var mode = FlverMatureSkinning.DecodeVertex(
+            InternalVersion,
+            Bones.Count,
+            mesh,
+            plan.BoneIndices != null,
+            hasDecodedWeights,
+            vertexWeights,
+            hasDecodedIndices,
+            rawIndices,
+            hasNormalW,
+            normalW,
+            decodedWeights,
+            decodedIndices,
+            out _);
+        if (mode == FlverMatureSkinning.VertexMode.Invalid) return false;
+
+        if (mode == FlverMatureSkinning.VertexMode.Weighted)
+        {
+            var hasPositiveInfluence = false;
+            for (var influence = 0; influence < 4; influence++)
+            {
+                if (decodedWeights[influence] <= 1e-5f) continue;
+                var globalIndex = decodedIndices[influence];
+                resolvedBones[influence] = globalIndex;
+                hasPositiveInfluence = true;
+                if (!receiverBones.Contains(globalIndex)) return false;
+            }
+            return hasPositiveInfluence;
+        }
+
+        resolvedBones[0] = decodedIndices[0];
+        return receiverBones.Contains(decodedIndices[0]);
     }
 
     /// <summary>

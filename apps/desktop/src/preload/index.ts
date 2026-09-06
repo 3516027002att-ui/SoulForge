@@ -391,8 +391,16 @@ const api = {
   readTaeTemplateCatalog: (): Promise<unknown> =>
     ipcRenderer.invoke('resource.readTaeTemplateCatalog'),
   /** S17：单个词条事件参数体（按本机模板解码字段；无模板返回未解码 + hex）。 */
-  readTaeEventParams: (sourceUri: string, animId: number, eventIndex: number): Promise<unknown> =>
-    ipcRenderer.invoke('resource.readTaeEventParams', sourceUri, animId, eventIndex),
+  readTaeEventParams: (
+    sourceUri: string,
+    animId: number,
+    eventIndex: number,
+    taeEntryIndex?: number,
+    taeEntryId?: number,
+    taeEntryName?: string,
+    taeGroup?: string
+  ): Promise<unknown> =>
+    ipcRenderer.invoke('resource.readTaeEventParams', sourceUri, animId, eventIndex, taeEntryIndex, taeEntryId, taeEntryName, taeGroup),
   /** S17：伴生 chrbnd 的 FLVER 预览（overlay → 原版；KRAK 缺 Oodle 给可行动码）。一次读取完整角色 bundle，不再逐 mesh 循环。 */
   readTaeChrbndPreview: (sourceUri: string): Promise<unknown> =>
     ipcRenderer.invoke('resource.readTaeChrbndPreview', sourceUri),
@@ -406,9 +414,13 @@ const api = {
       translation: [number, number, number];
       rotation: [number, number, number, number];
       scale: [number, number, number];
-    }>
+    }>,
+    taeEntryIndex?: number,
+    taeEntryId?: number,
+    taeEntryName?: string,
+    taeGroup?: string
   ): Promise<unknown> =>
-    ipcRenderer.invoke('resource.readTaeAnimationClip', sourceUri, animId, flverBoneNames, flverBoneParents, flverReferencePose),
+    ipcRenderer.invoke('resource.readTaeAnimationClip', sourceUri, animId, flverBoneNames, flverBoneParents, flverReferencePose, taeEntryIndex, taeEntryId, taeEntryName, taeGroup),
   /** ACTION：连续时间采样 TAE 动画位姿 */
   sampleTaeAnimationPose: (
     sourceUri: string,
@@ -421,9 +433,13 @@ const api = {
       translation: [number, number, number];
       rotation: [number, number, number, number];
       scale: [number, number, number];
-    }>
+    }>,
+    taeEntryIndex?: number,
+    taeEntryId?: number,
+    taeEntryName?: string,
+    taeGroup?: string
   ): Promise<unknown> =>
-    ipcRenderer.invoke('resource.sampleTaeAnimationPose', sourceUri, animId, timeSeconds, flverBoneNames, loop, flverBoneParents, flverReferencePose),
+    ipcRenderer.invoke('resource.sampleTaeAnimationPose', sourceUri, animId, timeSeconds, flverBoneNames, loop, flverBoneParents, flverReferencePose, taeEntryIndex, taeEntryId, taeEntryName, taeGroup),
   // S23：按 modelName 在 mapbnd 容器里取 part 的 FLVER 网格（地图 viewport）。
   readMapPartMesh: (msbSourceUri: string, modelName: string): Promise<unknown> =>
     ipcRenderer.invoke('resource.readMapPartMesh', msbSourceUri, modelName),

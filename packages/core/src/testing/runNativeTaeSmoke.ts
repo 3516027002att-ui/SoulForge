@@ -1,12 +1,13 @@
 /**
  * Native TAE smoke: read a real Sekiro TAE from the registered corpus via Bridge.
- * Verifies header, animation count, event types, and roundtrip integrity.
+ * Verifies header, full TAE-child inventory, animation count, event types, and
+ * roundtrip integrity. Container reads intentionally exercise the aggregate
+ * path instead of extracting only the first child.
  *
  * Authority: candidate — read-only, no writer or game-load verification.
  */
 import { runBridge, disposeBridgeDaemonPool } from '../bridge/runBridge.js';
 import { nativeFixtureRoleRegistered, resolveNativeFixture } from './nativeFixtureRegistry.js';
-import { classifyChildExtract, reportInfrastructureFailure } from './nativeFixtureExtract.js';
 
 interface TaeEnvelope {
   format: string;
@@ -18,6 +19,16 @@ interface TaeEnvelope {
   totalGroupCount: number;
   eventTypes: number[];
   authority: string;
+  taeEntryCount?: number;
+  taeEntries?: Array<{
+    entryIndex: number;
+    entryId: number;
+    entryName: string;
+    taeGroup: string;
+    animationCount: number;
+    sourceSize: number;
+    sourceHash: string;
+  }>;
   animations?: Array<{
     animId: number;
     eventCount: number;
@@ -45,53 +56,11 @@ async function main(): Promise<void> {
     '../../mods/chr/c0000.anibnd.dcx'
   );
 
-  // TAE files are inside anibnd containers; extract first if needed.
-  const isContainer = source.endsWith('.dcx');
-  let taePath = source;
-
-  if (isContainer) {
-    // Extract the first TAE child from the anibnd container.
-    const tmpDir = process.env.SOULFORGE_SCRATCH ?? (await import('node:os')).tmpdir();
-    const { join } = await import('node:path');
-    const { mkdirSync } = await import('node:fs');
-    mkdirSync(tmpDir, { recursive: true });
-    taePath = join(tmpDir, 'soulforge-tae-smoke-a00.tae');
-
-    const oodleRuntimeRoot = process.env.SOULFORGE_OODLE_RUNTIME_ROOT || 'D:/mystream/Sekiro Shadows Die Twice/Sekiro';
-    const extract = await runBridge<{ contentSize?: number }>({
-      command: 'extract-bnd4-child',
-      filePath: source,
-      allowedRoots: [source.replace(/[/\\][^/\\]+$/, ''), oodleRuntimeRoot],
-      writableRoots: [tmpDir],
-      commandOptions: { childPath: 'tae/a00.tae', outputPath: taePath },
-      oodleRuntimeRoot,
-      timeoutMs: 120_000
-    });
-    // 「缺语料」与「环境/基础设施坏了」必须区分（硬约束 7）。判定逻辑与理由见
-    // nativeFixtureExtract.ts —— TPF smoke 用同一份，不各写一遍。
-    const verdict = classifyChildExtract(extract);
-    if (verdict.kind === 'infrastructure-failure') {
-      reportInfrastructureFailure('TAE', 'TAE_FIXTURE_EXTRACT_INFRASTRUCTURE_FAILURE', verdict);
-      await disposeBridgeDaemonPool();
-      return;
-    }
-    if (verdict.kind === 'missing-child') {
-      console.log(JSON.stringify({
-        ok: true,
-        status: 'skipped',
-        message: 'TAE fixture not available in container (子项不存在).',
-        diagnostics: verdict.codes
-      }));
-      await disposeBridgeDaemonPool();
-      return;
-    }
-  }
-
   const oodleRuntimeRoot = process.env.SOULFORGE_OODLE_RUNTIME_ROOT || 'D:/mystream/Sekiro Shadows Die Twice/Sekiro';
   const result = await runBridge<TaeEnvelope>({
     command: 'read-tae-document',
-    filePath: taePath,
-    allowedRoots: [taePath.replace(/[/\\][^/\\]+$/, ''), oodleRuntimeRoot],
+    filePath: source,
+    allowedRoots: [source.replace(/[/\\][^/\\]+$/, ''), oodleRuntimeRoot],
     oodleRuntimeRoot,
     timeoutMs: 120_000
   });
@@ -106,6 +75,21 @@ async function main(): Promise<void> {
   if (data.totalEventCount <= 0) throw new Error('no events found');
   if (!data.sourceHash) throw new Error('missing source hash');
 
+  if (source.toLowerCase().endsWith('.anibnd.dcx')) {
+    if (data.taeEntryCount !== 65) {
+      throw new Error(`expected all 65 native TAE entries, received ${data.taeEntryCount ?? 'missing'}`);
+    }
+    if (!data.taeEntries || data.taeEntries.length !== data.taeEntryCount) {
+      throw new Error('TAE entry inventory is missing or incomplete');
+    }
+    for (const expected of ['a00.tae', 'a50.tae', 'a200.tae']) {
+      const entry = data.taeEntries.find((item) => item.entryName.toLowerCase() === expected);
+      if (!entry || entry.sourceHash.length === 0 || entry.animationCount <= 0) {
+        throw new Error(`missing or empty native TAE entry ${expected}`);
+      }
+    }
+  }
+
   console.log(JSON.stringify({
     ok: true,
     message: `TAE native 读取验证通过（${data.animationCount} animations, ${data.totalEventCount} events）`,
@@ -114,6 +98,16 @@ async function main(): Promise<void> {
     totalGroupCount: data.totalGroupCount,
     eventTypeCount: data.eventTypes?.length ?? 0,
     eventTypes: data.eventTypes?.slice(0, 20),
+    taeEntryCount: data.taeEntryCount,
+    taeEntries: data.taeEntries?.map((entry) => ({
+      entryIndex: entry.entryIndex,
+      entryId: entry.entryId,
+      entryName: entry.entryName,
+      taeGroup: entry.taeGroup,
+      animationCount: entry.animationCount,
+      sourceSize: entry.sourceSize,
+      sourceHash: entry.sourceHash
+    })),
     authority: data.authority,
     sourceSize: data.sourceSize,
     sampleAnimations: data.animations?.slice(0, 5)

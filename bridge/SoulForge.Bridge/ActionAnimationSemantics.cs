@@ -30,7 +30,14 @@ public static class ActionAnimationSemantics
     public sealed record TaeMotionReference(
         long AnimationId,
         MotionReferenceKind Kind,
-        long? SourceAnimationId = null);
+        long? SourceAnimationId = null,
+        /**
+         * Logical HKX identity parsed from the native TAE animation filename
+         * (for example a050_002010.hkt -> 50002010).  This is deliberately
+         * separate from AnimationId: TAE ids and ANIBND logical ids are not
+         * the same namespace.
+         */
+        long? HkxAnimationId = null);
 
     /// <summary>
     /// Minimal skeleton identity plus reference local transform used by the
@@ -48,8 +55,10 @@ public static class ActionAnimationSemantics
     /// <summary>
     /// Resolves a selected TAE animation to the animation ID whose HKX motion must be loaded.
     /// ImportOtherAnimation follows the referenced TAE entry recursively. ImportHkx points directly
-    /// at an HKX animation ID and therefore terminates immediately. Cycles and missing references fail
-    /// closed rather than falling back to the selected animation ID.
+    /// at an HKX animation ID and therefore terminates immediately. A native self-reference is the
+    /// mature-editor terminal form for an eventless TAE placeholder: it resolves to that same logical
+    /// animation ID, and the later ANIBND binder lookup remains the authority that proves the HKX exists.
+    /// Other cycles and missing references fail closed rather than falling back to an arbitrary ID.
     /// </summary>
     public static long ResolveMotionAnimationId(
         IReadOnlyDictionary<long, TaeMotionReference> animations,
@@ -71,7 +80,14 @@ public static class ActionAnimationSemantics
             switch (reference.Kind)
             {
                 case MotionReferenceKind.OwnHkx:
-                    return reference.AnimationId;
+                    if (reference.HkxAnimationId is null
+                        || reference.HkxAnimationId < 0
+                        || reference.HkxAnimationId >= SekiroAnimationBinderIdBase)
+                    {
+                        throw new InvalidDataException(
+                            $"TAE animation {reference.AnimationId} has no valid native HKX filename identity; refusing to use the TAE id as a binder id.");
+                    }
+                    return reference.HkxAnimationId.Value;
 
                 case MotionReferenceKind.ImportHkx:
                     if (reference.SourceAnimationId is null || reference.SourceAnimationId < 0)
@@ -83,6 +99,14 @@ public static class ActionAnimationSemantics
                     if (reference.SourceAnimationId is null || reference.SourceAnimationId < 0)
                         throw new InvalidDataException(
                             $"TAE animation {reference.AnimationId} imports another animation but has no valid source animation ID.");
+                    if (reference.SourceAnimationId.Value == current
+                        && reference.AnimationId == current)
+                    {
+                        if (current >= SekiroAnimationBinderIdBase)
+                            throw new InvalidDataException(
+                                $"TAE animation {current} self-reference is not a valid Sekiro logical HKX ID.");
+                        return current;
+                    }
                     current = reference.SourceAnimationId.Value;
                     break;
 
@@ -402,9 +426,11 @@ public static class ActionAnimationSemantics
     /// tooling. The native code uses System.Numerics' row-vector convention:
     /// the source animated absolute matrix is used as the target bone's
     /// desired absolute matrix, then decomposed against the target parent's
-    /// current no-scale matrix. Non-master target translations retain their
-    /// real reference length; copying source child translations detaches
-    /// skinned limbs and head parts.
+    /// current no-scale matrix. A mapped target bone follows the source
+    /// absolute FK, including its local translation after decomposition. The
+    /// mature DirectBoneMap does not clamp mapped child translations back to
+    /// the target bind pose; doing so changes the source FK and makes an
+    /// incompatible skeleton's head and limbs detach.
     /// </summary>
     private static BoneTransform[] RetargetPoseToFlverAbsolute(
         IReadOnlyList<int> hkxParentIndices,
@@ -466,8 +492,6 @@ public static class ActionAnimationSemantics
                     throw new InvalidDataException($"ACTION_RETARGET_LOCAL_DECOMPOSE_FAILED: bone={flverIndex}.");
                 }
 
-                if (parent >= 0)
-                    translation = result[flverIndex].Translation;
                 result[flverIndex] = new BoneTransform(
                     translation,
                     NormalizeQuaternion(rotation),

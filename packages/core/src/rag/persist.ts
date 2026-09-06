@@ -52,18 +52,18 @@ function groupChunksBySource(chunks: readonly RagChunk[]): Map<string, RagChunk[
 export function persistRagCorpus(repository: WorkspaceDataRepository, corpus: RagCorpus): void {
   const previous = loadRagCorpus(repository, corpus.workspaceId);
   for (const delta of diffRagCorpusBySource(previous, corpus)) {
+    for (let dStart = 0; dStart < delta.deletedChunkIds.length; dStart += PERSIST_BATCH_SIZE) {
+      repository.mergeRagChunkDelta({
+        sourceUri: delta.sourceUri,
+        upserts: [],
+        deletedChunkIds: delta.deletedChunkIds.slice(dStart, dStart + PERSIST_BATCH_SIZE)
+      });
+    }
     for (let start = 0; start < delta.upserts.length; start += PERSIST_BATCH_SIZE) {
       repository.mergeRagChunkDelta({
         sourceUri: delta.sourceUri,
         upserts: delta.upserts.slice(start, start + PERSIST_BATCH_SIZE),
-        deletedChunkIds: start === 0 ? delta.deletedChunkIds : []
-      });
-    }
-    if (delta.upserts.length === 0 && delta.deletedChunkIds.length > 0) {
-      repository.mergeRagChunkDelta({
-        sourceUri: delta.sourceUri,
-        upserts: [],
-        deletedChunkIds: delta.deletedChunkIds
+        deletedChunkIds: []
       });
     }
   }

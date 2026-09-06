@@ -6,21 +6,21 @@
 
 ## 两类词条
 
-### 1. target：先列出可能涉及的对象
+### 1. target：列出可能涉及的修改对象
 
-在第一次调用记忆、RAG 或资源搜索工具前，Agent 必须根据用户指令列出可能需要修改的对象。对象可以是角色、敌人、物品、奖励、参数组、事件或其它用户明确提到的实体。登记是硬性前置步骤，不是搜索后的补记。必须先收到所有 target 更新成功的工具结果，再在后续工具轮次搜索；不能把 target 更新和搜索/RAG 调用放在同一批工具调用中。
+只读搜索（如 `search_param_rows`、`search_text_entries` 等）全面放行，无需前置 target 即可直接定位。在调用写入工具（如 `mutate_param_fields`、`apply_emevd_dsl`）修改资源前，Agent 必须根据定位结果和用户指令在台账中登记涉及修改的对象。对象可以是角色、敌人、物品、奖励、参数组、事件或其它用户明确提到的实体。
 
 ```text
-## 鬼型部
-- target: 用户要求将其从 BOSS 改为精英怪、修改红点数
+## 目标敌人
+- target: 用户要求调整该敌人的数值与生命周期
   - kind: target
   - status: candidate
   - mutationBudget: 0
   - mutationUsed: 0
   - evidence: 用户原始指令
 
-## 靛蓝星陨
-- target: 用户要求把该原创忍具加入奖励
+## 目标奖励
+- target: 用户要求配置该物品的掉落
   - kind: target
   - status: candidate
   - mutationBudget: 0
@@ -28,7 +28,9 @@
   - evidence: 用户原始指令
 ```
 
-没有 target 词条时，搜索工具拒绝执行。target 只声明待定位对象，不授权写入；target 可以直接来自用户指令，因此不要求 searchId 或搜索 evidence。target 登记失败时不得改用搜索、RAG 或模型记忆继续推进，先修正 `kind=target`、`propertyKey=target`、非空 `value` 和 `status=candidate`。
+target 声明待修改对象，不授权直接写入；target 可以直接来自用户指令或搜索定位，不强制要求 searchId 或搜索 evidence。在发起资源写入前，台账中必须存在对应的 target 词条。
+
+**并发登记要求**：当需要登记多个 target 或 evidence 词条时，**必须在同一轮 tool calls 中并发发起多个 `update_agent_task_record` 调用**，一轮完成所有词条登记，严禁每个词条单独占用一轮对话逐个串行发送！
 
 ### 目标名称与搜索票据必须原样传递
 
@@ -41,7 +43,7 @@
 搜索工具成功返回结果后，工具会在结果中附带本次搜索的 `searchId`。Agent 必须根据这个搜索结果写入 Evidence 词条；Evidence 不允许省略 searchId、evidence 或 mutationBudget：
 
 ```text
-## 鬼型部
+## 目标敌人
 - npcparam: rowId=搜索结果中的值；fieldIds=字段元数据返回的非空列表；需要继续读取字段定义和当前值
   - entry-id: entry-...
   - kind: evidence
@@ -65,9 +67,9 @@
 
 ## 搜索—Evidence—写入闭环
 
-以“把鬼型部改为精英怪、增加靛蓝星陨、红点数改为 2”为例：
+以“修改某敌人属性并配置物品掉落”为例：
 
-1. Agent 先登记 `鬼型部`、`靛蓝星陨` 等可能需要修改的对象；
+1. Agent 先登记可能涉及的敌人、物品等对象为 target；
 2. 调用搜索工具，在参数、文本、事件等当前工作区资源中搜索对象名称；
 3. 搜索结果返回 `searchId` 后，Agent 根据结果编写格式化 Evidence 文件，并登记可能修改的规范 key，例如 `npcparam`、`atkparam_npc`、`emevd`；
 4. 只有 Evidence 文件中出现与写入目标匹配的 key，写入工具才会通过门禁；
@@ -79,8 +81,7 @@
 
 ## 强制规则
 
-- 不得在没有 target 的情况下调用搜索工具；
-- 收到 `TASK_RECORD_TARGETS_REQUIRED` 时，立即停止当前搜索链，先登记缺少的 target；不得用另一种名称、空值或猜测值绕过该前置门。
+- 搜索工具属于只读探索，无需提前登记 target；搜索获得确切结果后再按需登记为目标与 Evidence；
 - 不得手写或猜测 `searchId`、rowId、fieldId、eventId、掉落 ID、特效 ID 或文件身份；所有身份必须逐字采用当前工具返回值；
 - `update_agent_task_record(kind=evidence)` 必须引用当前运行中搜索工具返回的有效 `searchId`，并声明正整数 `mutationBudget`；
 - `read_param_fields` 每次都必须传入工具返回的非空 `fieldIds`；没有字段 ID 就继续查元数据，不能省略或猜测；

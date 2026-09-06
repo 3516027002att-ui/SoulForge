@@ -54,11 +54,17 @@ export interface AgentNarrationView {
   text: string;
 }
 
+/** 某一步模型思考过程（agent-thinking-delta）。 */
+export interface AgentThinkingView {
+  step: number;
+  text: string;
+}
+
 /** 对话区时间线条目（纯数据，由 viewport 渲染）。 */
 export type AgentConversationItem =
   | { kind: 'user'; text: string }
   | { kind: 'notice'; text: string }
-  | { kind: 'thinking'; label: string; text: string; live: boolean }
+  | { kind: 'thinking'; step?: number; label: string; text: string; live: boolean }
   | { kind: 'assistant'; step: number; text: string }
   | {
       kind: 'tools';
@@ -274,29 +280,22 @@ export interface AgentTaskState {
   deltaChars: number;
   /** 按步骤累积的模型正文（agent-message-delta），供对话区交织渲染。 */
   narrations: AgentNarrationView[];
-  /** 模型思考/推理摘要（agent-thinking-delta），完成后折叠进「已思考」。 */
+  /** 按步骤累积的模型思考/推理摘要（agent-thinking-delta）。 */
+  thinkings: AgentThinkingView[];
+  /** 模型思考/推理摘要（agent-thinking-delta），保留兼容。 */
   thinkingText: string;
   /** 任务受理时刻（epoch ms）；idle 为 null。 */
   startedAt: number | null;
-  /** 终态时刻（epoch ms）；未结束为 null。 */
   endedAt: number | null;
+  /** 当前正在执行的步骤（turn-started）的开始时刻（epoch ms）。 */
+  currentStepStartedAt: number | null;
   retry: { attempt: number; maxAttempts: number; delayMs: number; code: string } | null;
   compactedWindows: number;
   contextBytes: number | null;
   rolloutFileName: string | null;
-  /**
-   * 待回答的审批请求,按到达顺序。
-   *
-   * 是队列而不是单个:模型一轮里可以发起多个写类调用,loop 会逐个等待。
-   * 只保留一个会让第二条请求在界面上消失,而 loop 仍在等它 —— 表现为任务
-   * 卡住且无从得知原因。
-   */
   pendingApprovals: AgentApprovalView[];
-  /** 已回答的审批记录(最近若干条),供用户回看自己批准过什么。 */
   approvalDecisions: AgentApprovalDecisionView[];
-  /** 多轮对话中已完成轮次的历史时间线条目集合。 */
   historyItems: AgentConversationItem[];
-  /** 最近一次完成任务的 rollout 文件名/相对路径，供后续多轮次承接使用。 */
   lastRolloutPath: string | null;
 }
 
@@ -311,9 +310,11 @@ export const INITIAL_AGENT_TASK_STATE: AgentTaskState = Object.freeze({
   toolCalls: [],
   deltaChars: 0,
   narrations: [],
+  thinkings: [],
   thinkingText: '',
   startedAt: null,
   endedAt: null,
+  currentStepStartedAt: null,
   retry: null,
   compactedWindows: 0,
   contextBytes: null,
@@ -338,17 +339,7 @@ export function extractCompletedTurnItems(
     items.push({ kind: 'user', text: goal });
   }
 
-  const showThinking = typeof task.thinkingText === 'string' && task.thinkingText.length > 0;
-  if (showThinking) {
-    items.push({
-      kind: 'thinking',
-      label: describeAgentThinkingLabel(task, now),
-      text: task.thinkingText,
-      live: false
-    });
-  }
-
-  appendTaskTimeline(items, task, false);
+  appendTaskTimeline(items, task, false, now);
 
   if (task.compactedWindows > 0) {
     items.push({ kind: 'compacted', windows: task.compactedWindows });
@@ -384,6 +375,7 @@ export function startAgentTask(
     sessionId,
     phase: 'accepted',
     startedAt: now,
+    currentStepStartedAt: now,
     historyItems,
     lastRolloutPath: previousState?.rolloutFileName ?? lastRolloutPath
   };
@@ -422,14 +414,25 @@ export function reduceAgentTaskEvent(
       return {
         ...state,
         phase: state.phase === 'cancelling' ? 'cancelling' : 'running',
-        step: Math.max(state.step, event.step)
+        step: Math.max(state.step, event.step),
+        currentStepStartedAt: Date.now()
       };
     case 'agent-message-delta': {
       const narrations = appendNarration(state.narrations, event.step, event.text);
       return { ...state, deltaChars: state.deltaChars + event.text.length, narrations };
     }
-    case 'agent-thinking-delta':
-      return { ...state, thinkingText: state.thinkingText + event.text };
+    case 'agent-thinking-delta': {
+      const step = typeof event.step === 'number' && event.step > 0 ? event.step : (state.step > 0 ? state.step : 1);
+      const existing = (state.thinkings ?? []).find((t) => t.step === step);
+      const thinkings = existing !== undefined
+        ? state.thinkings.map((t) => (t.step === step ? { ...t, text: t.text + event.text } : t))
+        : [...(state.thinkings ?? []), { step, text: event.text }];
+      return {
+        ...state,
+        thinkings,
+        thinkingText: (state.thinkingText ?? '') + event.text
+      };
+    }
     case 'tool-call-begin':
       return {
         ...state,
@@ -599,41 +602,58 @@ function describeFinishReason(reason: string): string {
  * 刻意不写「智能」「高效」这类无证据形容词，也不用「A · B · C」串联宣传摘要
  * （docs/frontend-renovation/anti-ai-design.md §2）。
  */
-export function describeAgentTaskStatus(state: AgentTaskState): string {
+export function describeAgentTaskStatus(state: AgentTaskState, now: number = Date.now()): string {
   switch (state.phase) {
     case 'idle':
       return '没有进行中的任务。';
-    case 'accepted':
+    case 'accepted': {
+      const elapsed = state.startedAt !== null ? formatAgentDuration(Math.max(0, now - state.startedAt)) : null;
+      const duration = elapsed ? `（已受理 ${elapsed}）` : '';
       if (state.pendingApprovals.length > 0) {
         const first = state.pendingApprovals[0];
-        return `等待你批准：要执行 ${first?.toolName ?? '未知工具'}`
+        return `等待你批准${duration}：要执行 ${first?.toolName ?? '未知工具'}`
           + `（${first?.permissionLevel ?? '未知等级'}）。批准或拒绝后任务才会继续。`;
       }
-      return `任务已受理，等待模型首次响应。可随时取消。`;
+      return `任务已受理${duration}，等待模型首次响应。可随时取消。`;
+    }
     case 'running': {
       // 等待审批必须先说：此时 loop 停在工具阶段等用户回答，与「模型在想」
       // 表面上都是「进行中」，但前者要用户动手才会继续。不区分的话，用户会
       // 一直等一个永远不会自己走完的任务。
+      const elapsed = state.startedAt !== null ? formatAgentDuration(Math.max(0, now - state.startedAt)) : null;
+      const duration = elapsed ? `（已用时 ${elapsed}）` : '';
       if (state.pendingApprovals.length > 0) {
         const first = state.pendingApprovals[0];
         const more = state.pendingApprovals.length > 1
           ? `，另有 ${state.pendingApprovals.length - 1} 项排队`
           : '';
-        return `等待你批准：要执行 ${first?.toolName ?? '未知工具'}`
+        return `等待你批准${duration}：要执行 ${first?.toolName ?? '未知工具'}`
           + `（${first?.permissionLevel ?? '未知等级'}）${more}。批准或拒绝后任务才会继续。`;
       }
       const output = state.deltaChars > 0 ? `，已产出 ${state.deltaChars} 字符` : '';
-      return `任务进行中${output}。可随时取消。`;
+      return `任务进行中${duration}${output}。可随时取消。`;
     }
-    case 'cancelling':
-      return `已发出取消请求，等待主进程结束当前步骤后停止。取消需要等当前步骤让出。`;
+    case 'cancelling': {
+      const elapsed = state.startedAt !== null ? formatAgentDuration(Math.max(0, now - state.startedAt)) : null;
+      const duration = elapsed ? `（已用时 ${elapsed}）` : '';
+      return `已发出取消请求${duration}，等待主进程结束当前步骤后停止。取消需要等当前步骤让出。`;
+    }
     case 'done': {
-      if (state.finishReason === 'cancelled') return '任务已结束（已被取消）。';
+      const elapsed = (state.startedAt !== null && state.endedAt !== null)
+        ? formatAgentDuration(Math.max(0, state.endedAt - state.startedAt))
+        : null;
+      const duration = elapsed ? `，用时 ${elapsed}` : '';
+      if (state.finishReason === 'cancelled') return `任务已结束（已被取消${duration}）。`;
       const reason = state.finishReason === null ? '未回报结束原因' : describeFinishReason(state.finishReason);
-      return `任务已结束（${reason}）。`;
+      return `任务已结束（${reason}${duration}）。`;
     }
-    case 'error':
-      return `任务失败：${state.error?.code ?? '未回报错误码'}——${state.error?.message ?? '未回报原因'}。`;
+    case 'error': {
+      const elapsed = (state.startedAt !== null && state.endedAt !== null)
+        ? formatAgentDuration(Math.max(0, state.endedAt - state.startedAt))
+        : null;
+      const duration = elapsed ? `（用时 ${elapsed}）` : '';
+      return `任务失败${duration}：${state.error?.code ?? '未回报错误码'}——${state.error?.message ?? '未回报原因'}。`;
+    }
     default:
       return '未知状态。';
   }
@@ -688,24 +708,51 @@ export function formatAgentDuration(ms: number): string {
   return `${seconds}s`;
 }
 
-export function describeAgentThinkingLabel(state: AgentTaskState, now: number = Date.now()): string {
+export function describeAgentThinkingLabel(
+  state: AgentTaskState,
+  now: number = Date.now(),
+  step?: number
+): string {
+  const isFinished = state.phase === 'done' || state.phase === 'error' || state.phase === 'idle';
+  const isLive = !isFinished && (step === undefined || step === state.step);
+  if (!isLive) {
+    if (step !== undefined) {
+      return '已思考';
+    }
+    const start = state.startedAt;
+    const end = state.endedAt ?? now;
+    const duration = start === null ? null : formatAgentDuration(end - start);
+    return duration === null ? '已思考' : `已思考 ${duration}`;
+  }
+  // 方案 B：各步骤折叠卡片统一展示静态「正在思考」，避免单步倒计时每轮重置让人困惑；
+  // 全局总时长统一在顶栏「SoulForge 执行中 (Xm Ys)」与底栏状态中呈现。
+  if (step !== undefined) {
+    return '正在思考';
+  }
   const start = state.startedAt;
   const end = state.endedAt ?? now;
   const duration = start === null ? null : formatAgentDuration(end - start);
-  if (state.phase === 'done' || state.phase === 'error' || state.phase === 'idle') {
-    return duration === null ? '已思考' : `已思考 ${duration}`;
-  }
   return duration === null ? '正在思考' : `正在思考 ${duration}`;
 }
 
 function appendTaskTimeline(
   items: AgentConversationItem[],
   task: AgentTaskState,
-  live: boolean
+  live: boolean,
+  now: number = Date.now()
 ): void {
   const steps = new Set<number>();
-  for (const narration of task.narrations) steps.add(narration.step);
-  for (const call of task.toolCalls) steps.add(call.step);
+  for (const t of task.thinkings ?? []) steps.add(t.step);
+  for (const narration of task.narrations ?? []) steps.add(narration.step);
+  for (const call of task.toolCalls ?? []) steps.add(call.step);
+  if (live) {
+    steps.add(task.step > 0 ? task.step : 1);
+  }
+
+  const hasThinkings = (task.thinkings ?? []).length > 0;
+  const legacyThinking = !hasThinkings && typeof task.thinkingText === 'string' && task.thinkingText.trim() !== '';
+  if (legacyThinking) steps.add(1);
+
   const orderedSteps = [...steps].sort((a, b) => a - b);
   let pendingCalls: AgentToolCallView[] = [];
   let pendingStartStep = 0;
@@ -724,21 +771,43 @@ function appendTaskTimeline(
   };
 
   for (const step of orderedSteps) {
-    const narration = task.narrations.find((entry) => entry.step === step);
+    const thinking = hasThinkings
+      ? task.thinkings.find((entry) => entry.step === step)
+      : (legacyThinking && step === 1 ? { step: 1, text: task.thinkingText } : undefined);
+    const narration = (task.narrations ?? []).find((entry) => entry.step === step);
+    const calls = (task.toolCalls ?? []).filter((call) => call.step === step);
+
+    const hasThinkingText = thinking !== undefined && thinking.text.trim() !== '';
+    const isStepLive = live && (step === task.step || (task.phase === 'running' && step === orderedSteps.at(-1)));
+
+    // 1. 若当前步骤有思考内容，或者当前步骤是活跃运行步且尚未产出工具/口播：展示思考项
+    if (hasThinkingText || (isStepLive && calls.length === 0 && narration === undefined)) {
+      flushTools(true);
+      items.push({
+        kind: 'thinking',
+        step,
+        label: describeAgentThinkingLabel(task, now, step),
+        text: thinking?.text ?? '',
+        live: isStepLive
+      });
+    }
+
+    // 2. 若当前步骤有口播：口播也是此前工具调用的自然闭合边界，先 flush 前序工具
     if (narration !== undefined && narration.text.trim() !== '') {
-      // The next model message is the boundary of the previous tool span.
-      // Flush first so the completed span renders immediately before that
-      // narration and receives a closed default state.
       flushTools(true);
       items.push({ kind: 'assistant', step, text: narration.text });
     }
-    const calls = task.toolCalls.filter((call) => call.step === step);
+
+    // 3. 收集本步的工具调用
     if (calls.length > 0) {
       if (pendingCalls.length === 0) pendingStartStep = step;
       pendingCalls.push(...calls);
     }
   }
-  flushTools(!live);
+
+  // 4. 收尾：最后残留的一组工具全部 flush
+  const lastCallsRunning = pendingCalls.some((c) => c.status === 'running');
+  flushTools(!live || !lastCallsRunning);
 }
 
 export interface BuildAgentConversationItemsInput {
@@ -751,7 +820,7 @@ export interface BuildAgentConversationItemsInput {
 }
 
 /**
- * 把任务态折成对话时间线：用户话 → 思考块 → 逐步「口播 + 工具」→ 压缩提示。
+ * 把任务态折成对话时间线：用户话 → 各轮次自然交织「思考 + 口播 + 工具」→ 压缩提示。
  * 不含会话 jsonl 文件名。
  */
 export function buildAgentConversationItems(
@@ -777,20 +846,7 @@ export function buildAgentConversationItems(
     });
   }
 
-  const showThinking = task.thinkingText.length > 0
-    || task.narrations.length > 0
-    || task.toolCalls.length > 0
-    || task.phase !== 'idle';
-  if (showThinking && (task.phase !== 'idle' || task.startedAt !== null || task.thinkingText.length > 0)) {
-    items.push({
-      kind: 'thinking',
-      label: describeAgentThinkingLabel(task, now),
-      text: task.thinkingText,
-      live: isAgentTaskActive(task)
-    });
-  }
-
-  appendTaskTimeline(items, task, isAgentTaskActive(task));
+  appendTaskTimeline(items, task, isAgentTaskActive(task), now);
 
   if (task.compactedWindows > 0) {
     items.push({ kind: 'compacted', windows: task.compactedWindows });

@@ -24,6 +24,7 @@ import { AgentTaskPanelProps } from './AgentTaskPanel.js';
 import {
   buildAgentConversationItems,
   describeAgentTaskStatus,
+  formatAgentDuration,
   isAgentTaskActive
 } from './agentTaskState.js';
 import { AgentDockResizer } from './AgentDockResizer.js';
@@ -393,13 +394,16 @@ export function AgentSidebar(props: AgentSidebarProps): ReactElement {
     };
   });
 
+  const elapsedMs = taskState.startedAt !== null ? Math.max(0, now - taskState.startedAt) : null;
+  const elapsedText = elapsedMs !== null ? formatAgentDuration(elapsedMs) : null;
+
   const failure = taskState.phase === 'error' && taskState.error !== null
     ? { code: taskState.error.code, message: taskState.error.message }
     : null;
   const statusText = taskState.phase === 'idle'
     || (taskState.phase === 'done' && taskState.finishReason !== 'cancelled')
     ? null
-    : describeAgentTaskStatus(taskState);
+    : describeAgentTaskStatus(taskState, now);
   const conversationItems = buildAgentConversationItems({
     goal,
     idleNotice: idleNotice ?? null,
@@ -412,7 +416,11 @@ export function AgentSidebar(props: AgentSidebarProps): ReactElement {
 
   const selectedService = task.services.find((service) => service.id === task.selectedServiceId);
   void selectedService;
-  const headerState = awaitingApproval ? '等待批准' : taskRunning ? '执行中' : undefined;
+  const headerState = awaitingApproval
+    ? (elapsedText ? `等待批准 (${elapsedText})` : '等待批准')
+    : taskRunning
+      ? (elapsedText ? `执行中 (${elapsedText})` : '执行中')
+      : undefined;
 
   return (
     <aside

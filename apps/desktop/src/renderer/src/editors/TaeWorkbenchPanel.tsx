@@ -1,7 +1,7 @@
 /**
  * ANIMATION-56B / T3（2026-08-15）：动作工作台（grok T3，对照 DSAS）。
  *
- * 上三栏 + 底部终端：`[Animations | Events | Preview]` + 底部可拖动详情面板。
+ * 四栏工作台：`[动作 | 词条 | 详情 | 动作视图]`；动作组按原生 TAE child 折叠。
  *
  * ── T3 重构（行为 + 动画合并为「动作」）+ 底部 IDE 终端式详情 ──
  *
@@ -10,12 +10,12 @@
  * （PlaySound_ByStateInfo 等）当前未解码，诚实显示「事件类型 N」；选中后详情在
  * 底部独立面板展示（起止帧 / 事件类型 / 下标与能解出的全部字段；解不出的字段写
  * 「未解码」+ 原始数值，禁止编造 SoundType 含义），支持拖拽调高、独立滚动。
- * 右栏是只读 3D 预览（S17）：
+ * 右栏是只读动作视图（S17）：
  * `read-chrbnd-flver-preview`（已登记进 AdvertisedCommands）从 overlay 或原版
  * chr/<id>.chrbnd.dcx 取伴生 FLVER，renderer 按 meshIndex=0..meshCount-1 循环读齐
  * 全部网格拼成完整模型（问题4-A），挂进现有 FlverViewer 画网格；选中动画后由真实
- * TAE Clip 驱动连续骨骼采样和播放控制。两边都没有 chrbnd 时给可行动空态（去「开始」
- * 页挂原版）。不要时间轴图、不要 64 KiB 条。
+ * TAE Clip 驱动连续骨骼采样和播放控制。动作目录、事件图和预览分别由 action/ 下的
+ * 独立模块承载；两边都没有 chrbnd 时给可行动空态（去「开始」页挂原版）。
  *
  * ── 事件参数体未解码是刻意边界 ──
  *
@@ -53,8 +53,8 @@
  *
  * 存在 startTime > endTime、非有限时间、或 endTime 超过合理动画长度（> 3600 秒，
  * 问题4-C 防 1.02e+40 科学计数法）时，C# 侧降 partial 并在 diagnostics 里给
- * TAE_INVALID_TIME_RANGE。面板必须把 diagnostics 暴露给用户，并把非法时间行标记
- * 出来（列表禁印科学计数法，一律「非法时间」）；时间编辑本身可用来修复非法范围。
+ * TAE_INVALID_TIME_RANGE。主动作区只保留非法时间行和可行动的写回错误提示，不把
+ * authority/内部诊断长文铺在预览下方；时间编辑本身可用来修复非法范围。
  * 提交后仍非法、或时间槽被兄弟事件共享时 C# 侧 fail-closed，面板展示诊断并保持
  * 事件表原状（失败不清空）。
  */
@@ -63,16 +63,18 @@ import { useCallback, useEffect, useMemo, useRef, useState, type ReactElement } 
 import {
   isTaeDocument,
   projectTaeDocumentPages,
-  TAE_INVALID_TIME_RANGE,
   AnimationPlaybackClock,
   ActionContinuousSampler,
   isCharacterPreviewBundle,
+  actionAnimationGroupKey,
+  actionAnimationGroupLabel,
+  buildActionTimeline,
+  filterActionAnimations,
+  groupActionAnimations,
   type CharacterPreviewBundle,
   type TaeAnimationClipData,
   type BoneTransformData,
-  buildTaeTimelineTracks,
-  type TaeTimelineTrack,
-  type TaeTimelineBlock,
+  taeAnimationIdentityKey,
   type Diagnostic,
   type TaeAnimationWire,
   type TaeDocument,
@@ -83,7 +85,13 @@ import { flverEulerXzyToQuaternion } from '../scene/flverSkeletonMapping.js';
 import { isRowTabEntry, selectableRowAttributes } from '../a11y/selectableRow.js';
 import { getRendererBridge } from '../runtime/rendererRuntime.js';
 import { WorkbenchLayout } from '../workbench/WorkbenchLayout.js';
-import { FlverViewer } from './FlverViewer.js';
+import { ActionAnimationList } from './action/ActionAnimationList.js';
+import { ActionPreviewModule } from './action/ActionPreviewModule.js';
+import { ActionTimelineGraph } from './action/ActionTimelineGraph.js';
+
+// 保留旧编辑器对这些纯函数的导出，外部深链/测试不需要改 API。
+export { actionAnimationGroupLabel, actionAnimationGroupKey } from '@soulforge/shared';
+export { groupActionAnimations as groupTaeAnimations } from '@soulforge/shared';
 
 /** 帧率换算（Sekiro 常见 30fps；frame = second × 30）。 */
 const FRAME_RATE = 30;
@@ -153,7 +161,8 @@ function LoopIcon(): ReactElement {
  */
 export interface TaeAnimationPaginationState {
   documentKey: string;
-  baseAnimationIds: readonly number[];
+  /** 已在首屏出现的完整动画身份键；同一 animId 可属于多个 TAE child。 */
+  baseAnimationIds: readonly string[];
   animations: readonly TaeAnimationWire[];
   nextPage: number;
   hasMore: boolean;
@@ -165,7 +174,7 @@ export function createTaeAnimationPaginationState(
 ): TaeAnimationPaginationState {
   return {
     documentKey,
-    baseAnimationIds: document.animations.map((animation) => animation.animId),
+    baseAnimationIds: document.animations.map((animation) => taeAnimationIdentityKey(animation)),
     animations: [],
     nextPage: 1,
     hasMore: document.animationsTruncated === true
@@ -174,7 +183,8 @@ export function createTaeAnimationPaginationState(
 
 /**
  * 追加一个服务端动画页。页号不匹配时保持旧状态，调用方可安全忽略迟到响应；
- * 动画 id 去重保证重试/重复响应不会把同一动画插入两次。
+ * 完整 TAE identity 去重保证重试/重复响应不会把同一 child 动画插入两次，
+ * 同时保留不同 TAE child 中可重复的 animId。
  */
 export function appendTaeAnimationPage(
   state: TaeAnimationPaginationState,
@@ -182,13 +192,14 @@ export function appendTaeAnimationPage(
   pageNumber: number
 ): TaeAnimationPaginationState {
   if (!state.hasMore || pageNumber !== state.nextPage) return state;
-  const seen = new Set<number>([
+  const seen = new Set<string>([
     ...state.baseAnimationIds,
-    ...state.animations.map((animation) => animation.animId)
+    ...state.animations.map((animation) => taeAnimationIdentityKey(animation))
   ]);
   const additions = page.animations.filter((animation) => {
-    if (seen.has(animation.animId)) return false;
-    seen.add(animation.animId);
+    const identityKey = taeAnimationIdentityKey(animation);
+    if (seen.has(identityKey)) return false;
+    seen.add(identityKey);
     return true;
   });
   return {
@@ -215,7 +226,11 @@ export interface TaeSelection {
   /** 选中动画的 animId。 */
   animationId: number;
   /** 选中事件在该动画 events 数组内的下标（写回定位用）。 */
-  eventIndex?: number;
+  eventIndex?: number | undefined;
+  taeEntryIndex?: number | undefined;
+  taeEntryId?: number | undefined;
+  taeEntryName?: string | undefined;
+  taeGroup?: string | undefined;
 }
 
 /** 时间编辑草稿（字符串输入态，主单位是**帧**；提交时 /30 换秒再解析）。 */
@@ -254,14 +269,26 @@ export function isLegalHkxStem(value: string): boolean {
 }
 
 /**
+ * 无 hkxName 时按所属 TAE child 生成回退前缀。a00 的文件名约定是 a000_，
+ * a50 是 a050_；不能把所有 child 的缺失名称都归回 a000_，否则 a200 的动作
+ * 会在 UI 中看起来像被加载进了错误分区。
+ */
+function animationFallbackPrefix(animation: Pick<TaeAnimationWire, 'taeGroup' | 'taeEntryName'>): string {
+  const group = (animation.taeGroup ?? animation.taeEntryName?.replace(/\.tae$/i, '') ?? '').trim();
+  const match = /^a(\d+)$/i.exec(group);
+  return match ? `a${match[1]!.padStart(3, '0')}` : 'a000';
+}
+
+/**
  * 动画 id 显示名（S17）：
  * - 合法 hkx 茎（去 .hkx/.hkt 扩展，如 a000_003013）直接用；
- * - 乱码 / 空 / 过短（"a"）/ 非文件名字符一律丢弃，回退为 a000_ + 6位 animId。
+ * - 乱码 / 空 / 过短（"a"）/ 非文件名字符一律丢弃，回退为当前 TAE child
+ *   对应的前缀 + 6位 animId。
  */
 export function animationIdLabel(animation: TaeAnimationWire): string {
   const base = (animation.hkxName ?? '').replace(/\.(hkx|hkt)$/i, '');
   if (isLegalHkxStem(base)) return base;
-  return `a000_${String(animation.animId).padStart(6, '0')}`;
+  return `${animationFallbackPrefix(animation)}_${String(animation.animId).padStart(6, '0')}`;
 }
 
 /** 秒 → 帧（30fps）。非有限返回 '—'，不编造数值。 */
@@ -282,11 +309,54 @@ export function isInvalidTimeRange(startTime: number, endTime: number): boolean 
     || endTime > MAX_ANIMATION_SECONDS;
 }
 
+export function findSelectedTaeAnimation(
+  animations: readonly TaeAnimationWire[],
+  selection: TaeSelection | null | undefined
+): TaeAnimationWire | undefined {
+  if (!selection) return undefined;
+  const matches = animations.filter((animation) => animation.animId === selection.animationId);
+  if (matches.length === 0) return undefined;
+  const hasSelector = selection.taeEntryIndex !== undefined
+    || selection.taeEntryId !== undefined
+    || selection.taeEntryName !== undefined
+    || selection.taeGroup !== undefined;
+
+  // 单一候选可以兼容旧的裸 animId 深链；同 animId 多候选时必须有 child selector，
+  // 否则宁可不选中，也不能静默落到第一个 TAE。
+  if (!hasSelector) return matches.length === 1 ? matches[0] : undefined;
+
+  const requestedIdentityKey = taeAnimationIdentityKey({
+    animId: selection.animationId,
+    ...(typeof selection.taeEntryIndex === 'number' ? { taeEntryIndex: selection.taeEntryIndex } : {}),
+    ...(typeof selection.taeEntryId === 'number' ? { taeEntryId: selection.taeEntryId } : {}),
+    ...(selection.taeEntryName ? { taeEntryName: selection.taeEntryName } : {}),
+    ...(selection.taeGroup ? { taeGroup: selection.taeGroup } : {})
+  });
+  const matchesSelector = (animation: TaeAnimationWire): boolean => {
+    if (selection.taeEntryIndex !== undefined && animation.taeEntryIndex !== selection.taeEntryIndex) return false;
+    if (selection.taeEntryId !== undefined && animation.taeEntryId !== selection.taeEntryId) return false;
+    if (selection.taeEntryName !== undefined && animation.taeEntryName !== selection.taeEntryName) return false;
+    if (selection.taeGroup !== undefined && animation.taeGroup !== selection.taeGroup) return false;
+    return true;
+  };
+
+  // 完整 key 先定位，但仍必须通过每个显式 selector 字段，避免 index 优先级
+  // 掩盖冲突的 entryId/name/group；部分 selector 则要求字段匹配唯一。
+  const identityMatches = matches.filter((animation) => (
+    taeAnimationIdentityKey(animation) === requestedIdentityKey && matchesSelector(animation)
+  ));
+  if (identityMatches.length === 1) return identityMatches[0];
+
+  const fieldMatches = matches.filter(matchesSelector);
+  return fieldMatches.length === 1 ? fieldMatches[0] : undefined;
+}
+
 /**
  * 时间轴行在其所属动画 events 数组内的下标。
  *
  * timeline 页是各动画 events 的有序展平（projectTaeDocumentPages 按 animId 分组
- * 顺序 push），所以「同一 animId 的此前行数」就是该行在动画 events 数组里的下标。
+ * 顺序 push），所以「同一 TAE child + animId 的此前行数」就是该行在动画 events
+ * 数组里的下标。
  * 用计数而非值匹配，避免同一动画内重复事件（同 start/end/type）取错下标。
  */
 export function eventIndexOfTimelineRow(
@@ -295,9 +365,11 @@ export function eventIndexOfTimelineRow(
 ): number | undefined {
   const row = rows[index];
   if (!row) return undefined;
+  const rowIdentityKey = taeAnimationIdentityKey(row);
   let count = 0;
   for (let i = 0; i < index; i += 1) {
-    if (rows[i]?.animId === row.animId) count += 1;
+    const previous = rows[i];
+    if (previous && taeAnimationIdentityKey(previous) === rowIdentityKey) count += 1;
   }
   return count;
 }
@@ -500,6 +572,10 @@ export function TaeEventDetail(props: TaeEventDetailProps): ReactElement {
 
 export function TaeWorkbenchPanel(props: TaeWorkbenchPanelProps): ReactElement {
   const [selected, setSelected] = useState<TaeSelection | null>(props.initialSelection ?? null);
+  const [selectedBankKey, setSelectedBankKey] = useState<string>('all');
+  const [animationSearchQuery, setAnimationSearchQuery] = useState<string>('');
+  /** 动作分组默认收起；按键名保存，适用于所有 TAE/ANIBND 对象。 */
+  const [expandedAnimationGroups, setExpandedAnimationGroups] = useState<Set<string>>(() => new Set());
   const [detailsCollapsed, setDetailsCollapsed] = useState(false);
   /** 提交成功后本地重读的文档（优先于 props.data；换文件/App 重读时清空）。 */
   const [refreshedDocument, setRefreshedDocument] = useState<TaeDocument | null>(null);
@@ -572,6 +648,9 @@ export function TaeWorkbenchPanel(props: TaeWorkbenchPanelProps): ReactElement {
     setPaginationLoading(false);
     setEventParams(null);
     setPreview({ loading: false, error: null, bundle: null });
+    setSelectedBankKey('all');
+    setAnimationSearchQuery('');
+    setExpandedAnimationGroups(new Set());
   }, [props.resourceUri, props.data]);
 
   // 首次文档进入/提交重读后建立页 1 的权威游标；资源切换 effect 会先把旧状态清掉。
@@ -612,7 +691,15 @@ export function TaeWorkbenchPanel(props: TaeWorkbenchPanelProps): ReactElement {
     if (!bridge || typeof bridge.readTaeEventParams !== 'function') return;
     let cancelled = false;
     setEventParams({ loading: true, error: null, templateName: null, fields: [], tailHex: null, undecodedHex: null });
-    bridge.readTaeEventParams(props.resourceUri, selected.animationId, selected.eventIndex).then((raw) => {
+    bridge.readTaeEventParams(
+      props.resourceUri,
+      selected.animationId,
+      selected.eventIndex,
+      selected.taeEntryIndex,
+      selected.taeEntryId,
+      selected.taeEntryName,
+      selected.taeGroup
+    ).then((raw) => {
       if (cancelled) return;
       const result = raw as {
         ok?: boolean;
@@ -650,7 +737,16 @@ export function TaeWorkbenchPanel(props: TaeWorkbenchPanelProps): ReactElement {
     return () => {
       cancelled = true;
     };
-  }, [props.resourceUri, selected?.kind, selected?.eventIndex, selected?.animationId]);
+  }, [
+    props.resourceUri,
+    selected?.kind,
+    selected?.eventIndex,
+    selected?.animationId,
+    selected?.taeEntryIndex,
+    selected?.taeEntryId,
+    selected?.taeEntryName,
+    selected?.taeGroup
+  ]);
 
   /** S17 / 问题4-A：伴生 chrbnd FLVER 预览（一次读取完整角色 bundle，不再逐 mesh 循环）。 */
   useEffect(() => {
@@ -731,17 +827,44 @@ export function TaeWorkbenchPanel(props: TaeWorkbenchPanelProps): ReactElement {
 
   const animations: TaeAnimationWire[] = pages?.animations.animations ?? [];
 
-  const selectedAnimation = selected?.kind === 'animation' || selected?.kind === 'event'
-    ? animations.find((animation) => animation.animId === selected.animationId)
-    : undefined;
+  const animationGroups = useMemo(() => groupActionAnimations(animations), [animations]);
+  const animationView = useMemo(
+    () => filterActionAnimations(animations, {
+      bankKey: selectedBankKey,
+      query: animationSearchQuery
+    }),
+    [animations, selectedBankKey, animationSearchQuery]
+  );
+  const filteredAnimations = animationView.animations;
+  const filteredAnimationGroups = animationView.groups;
+  const selectedBankGroup = animationView.selectedGroup;
+
+  const selectedAnimation = findSelectedTaeAnimation(animations, selected);
   const selectedAnimationEvents = selectedAnimation?.events ?? [];
 
-  const invalidRangeCount = (mergedDocument?.diagnostics ?? [])
-    .filter((diag) => diag.code === TAE_INVALID_TIME_RANGE).length;
-  const authority = mergedDocument?.authority;
-  const isPartial = authority === 'partial';
-  // 具名切片而非连写：listTruncation gate 把裸 `.slice(0, N).map(` 视为静默截断。
-  const visibleDiagnostics = (mergedDocument?.diagnostics ?? []).slice(0, 8);
+  // 深链/事件选择与搜索结果必须自动展开所属分组，否则选中项会被折叠在视图外。
+  useEffect(() => {
+    const selectedGroupKey = selectedAnimation ? actionAnimationGroupKey(selectedAnimation) : null;
+    const query = animationSearchQuery.trim();
+    const keysToOpen = new Set<string>();
+    if (selectedGroupKey) keysToOpen.add(selectedGroupKey);
+    if (query) {
+      for (const group of filteredAnimationGroups) keysToOpen.add(group.key);
+    }
+    if (keysToOpen.size === 0) return;
+    setExpandedAnimationGroups((current) => {
+      let changed = false;
+      const next = new Set(current);
+      for (const key of keysToOpen) {
+        if (!next.has(key)) {
+          next.add(key);
+          changed = true;
+        }
+      }
+      return changed ? next : current;
+    });
+  }, [animationSearchQuery, filteredAnimationGroups, selectedAnimation]);
+
   const isAnimationsTruncated = mergedDocument?.animationsTruncated === true;
 
   const selectedEventIndex = selected?.kind === 'event'
@@ -754,9 +877,13 @@ export function TaeWorkbenchPanel(props: TaeWorkbenchPanelProps): ReactElement {
   function selectAnimation(animation: TaeAnimationWire): void {
     setSelected({
       kind: 'animation',
-      id: `anim-${animation.animId}`,
+      id: `anim-${taeAnimationIdentityKey(animation)}`,
       label: animationIdLabel(animation),
-      animationId: animation.animId
+      animationId: animation.animId,
+      taeEntryIndex: animation.taeEntryIndex,
+      taeEntryId: animation.taeEntryId,
+      taeEntryName: animation.taeEntryName,
+      taeGroup: animation.taeGroup
     });
   }
 
@@ -765,9 +892,13 @@ export function TaeWorkbenchPanel(props: TaeWorkbenchPanelProps): ReactElement {
     if (selected?.kind === 'event' && selectedAnimation) {
       setSelected({
         kind: 'animation',
-        id: `anim-${selectedAnimation.animId}`,
+        id: `anim-${taeAnimationIdentityKey(selectedAnimation)}`,
         label: animationIdLabel(selectedAnimation),
-        animationId: selectedAnimation.animId
+        animationId: selectedAnimation.animId,
+        taeEntryIndex: selectedAnimation.taeEntryIndex,
+        taeEntryId: selectedAnimation.taeEntryId,
+        taeEntryName: selectedAnimation.taeEntryName,
+        taeGroup: selectedAnimation.taeGroup
       });
     }
   }
@@ -782,10 +913,14 @@ export function TaeWorkbenchPanel(props: TaeWorkbenchPanelProps): ReactElement {
     }
     setSelected({
       kind: 'event',
-      id: `ev-${selectedAnimation.animId}-${index}`,
+      id: `ev-${taeAnimationIdentityKey(selectedAnimation)}-${index}`,
       label: `事件类型 ${event.eventTypeId} @${formatTime(event.startTime)}s`,
       animationId: selectedAnimation.animId,
-      eventIndex: index
+      eventIndex: index,
+      taeEntryIndex: selectedAnimation.taeEntryIndex,
+      taeEntryId: selectedAnimation.taeEntryId,
+      taeEntryName: selectedAnimation.taeEntryName,
+      taeGroup: selectedAnimation.taeGroup
     });
     // 问题4-C：主单位帧（输入框存帧，「帧 = 秒 × 30」）。
     setTimeDraft({ startText: secondsToFrame(event.startTime), endText: secondsToFrame(event.endTime) });
@@ -842,7 +977,7 @@ export function TaeWorkbenchPanel(props: TaeWorkbenchPanelProps): ReactElement {
     const bridge = getRendererBridge();
     if (!bridge || typeof bridge.readTaeDocument !== 'function') return false;
     try {
-      const raw = await (bridge.readTaeDocument as (uri: string, opts?: { animationPage?: number; animationPageSize?: number }) => Promise<unknown>)(props.resourceUri, { animationPage: 0, animationPageSize: 1000 }) as { ok?: boolean; data?: unknown };
+      const raw = await (bridge.readTaeDocument as (uri: string) => Promise<unknown>)(props.resourceUri) as { ok?: boolean; data?: unknown };
       if (raw.ok && raw.data && isTaeDocument(raw.data)) {
         const refreshed = raw.data as TaeDocument;
         paginationRequestRef.current += 1;
@@ -974,7 +1109,11 @@ export function TaeWorkbenchPanel(props: TaeWorkbenchPanelProps): ReactElement {
           selectedAnimation.animId,
           boneNames.length > 0 ? boneNames : undefined,
           boneParents.length > 0 ? boneParents : undefined,
-          referencePose.length > 0 ? referencePose : undefined
+          referencePose.length > 0 ? referencePose : undefined,
+          selectedAnimation.taeEntryIndex,
+          selectedAnimation.taeEntryId,
+          selectedAnimation.taeEntryName,
+          selectedAnimation.taeGroup
         )) as {
           ok?: boolean;
           data?: TaeAnimationClipData;
@@ -1007,7 +1146,15 @@ export function TaeWorkbenchPanel(props: TaeWorkbenchPanelProps): ReactElement {
     return () => {
       cancelled = true;
     };
-  }, [props.resourceUri, selectedAnimation?.animId, preview.bundle]);
+  }, [
+    props.resourceUri,
+    selectedAnimation?.animId,
+    selectedAnimation?.taeEntryIndex,
+    selectedAnimation?.taeEntryId,
+    selectedAnimation?.taeEntryName,
+    selectedAnimation?.taeGroup,
+    preview.bundle
+  ]);
 
   // 采样 FLVER 骨骼位姿
   const sampledPose = useMemo(() => {
@@ -1034,7 +1181,16 @@ export function TaeWorkbenchPanel(props: TaeWorkbenchPanelProps): ReactElement {
       isLooping,
       leaderBones.map((bone) => bone.parentIndex)
     );
-  }, [activeSampler, playbackTime, preview.bundle, isLooping]);
+  }, [
+    activeSampler,
+    playbackTime,
+    preview.bundle,
+    isLooping,
+    selectedAnimation?.taeEntryIndex,
+    selectedAnimation?.taeEntryId,
+    selectedAnimation?.taeEntryName,
+    selectedAnimation?.taeGroup
+  ]);
 
   // Pose updates must carry the same skeleton identity used by the semantic
   // bundle.  An unkeyed setPose falls back to the first runtime skeleton and
@@ -1089,7 +1245,13 @@ export function TaeWorkbenchPanel(props: TaeWorkbenchPanelProps): ReactElement {
   // 切换动画时重置播放进度
   useEffect(() => {
     clockRef.current.stop();
-  }, [selected?.animationId]);
+  }, [
+    selected?.animationId,
+    selected?.taeEntryIndex,
+    selected?.taeEntryId,
+    selected?.taeEntryName,
+    selected?.taeGroup
+  ]);
 
   // 播放器 rAF 驱动权威时钟
   useEffect(() => {
@@ -1130,19 +1292,16 @@ export function TaeWorkbenchPanel(props: TaeWorkbenchPanelProps): ReactElement {
   const stepFrame = (frames: number) => clockRef.current.stepFrame(frames);
   const seekSeconds = (secs: number) => clockRef.current.seek(secs);
 
-  // 构造结构化 Timeline Tracks
-  const timelineTracks = useMemo(() => {
-    if (!selectedAnimationEvents || selectedAnimationEvents.length === 0 || !selectedAnimation) return [];
-    const rows: TaeTimelineEventRow[] = selectedAnimationEvents.map((ev) => ({
-      animId: selectedAnimation.animId,
-      ...ev
-    }));
-    return buildTaeTimelineTracks(rows, mergedDocument?.diagnostics, { fps: FRAME_RATE });
-  }, [selectedAnimationEvents, selectedAnimation, mergedDocument?.diagnostics]);
+  // 动作模块统一负责事件行与时间轴轨道的投影；native identity 和诊断原样下传。
+  const timelineTracks = useMemo(
+    () => buildActionTimeline(selectedAnimation, mergedDocument?.diagnostics, FRAME_RATE),
+    [selectedAnimation, mergedDocument?.diagnostics]
+  );
 
   return (
     <WorkbenchLayout
       label="动作工作台"
+      className="tae-workbench"
       columns={[
         {
           id: 'animations',
@@ -1151,53 +1310,45 @@ export function TaeWorkbenchPanel(props: TaeWorkbenchPanelProps): ReactElement {
           initialFlex: 0.22,
           minWidth: 220,
           children: (
-            <div className="wb-list">
-              {mergedDocument === null ? (
+            mergedDocument === null ? (
+              <div className="wb-list">
                 <p className="wb-empty">选择 .tae / .anibnd.dcx 文件以查看动画事件数据。</p>
-              ) : (
-                <>
-                  <div className="wb-list__group-label">动画</div>
-                  {animations.map((animation) => {
-                    const name = animationIdLabel(animation);
-                    return (
-                      <div
-                        key={animation.animId}
-                        className="wb-row"
-                        {...selectableRowAttributes({
-                          selected: selected?.kind !== 'event'
-                            && selected?.kind === 'animation'
-                            && selected.animationId === animation.animId,
-                          isTabEntry: isRowTabEntry(0, selected !== null),
-                          onSelect: () => selectAnimation(animation)
-                        })}
-                        title={animation.hkxName ? animationIdLabel(animation) : String(animation.animId)}
-                      >
-                        <span className="wb-row__name" title={name}>{name}</span>
-                        <span className="wb-row__meta">{`${animation.eventCount} 事件`}</span>
-                      </div>
-                    );
-                  })}
-                  {isAnimationsTruncated && (
-                    <div className="wb-list__group-label" data-testid="tae-animations-truncated">
-                      动画列表已截断（仍有未加载项）
-                    </div>
-                  )}
-                  {paginationNotice && (
-                    <p className="muted" style={{ fontSize: 11 }} data-testid="tae-pagination-notice">{paginationNotice}</p>
-                  )}
-                  {isAnimationsTruncated && (
-                    <button
-                      type="button"
-                      disabled={paginationLoading}
-                      onClick={() => void loadMoreAnimations()}
-                      data-testid="tae-load-more"
-                    >
-                      {paginationLoading ? '加载中…' : '加载更多'}
-                    </button>
-                  )}
-                </>
-              )}
-            </div>
+              </div>
+            ) : (
+              <ActionAnimationList
+                animations={animations}
+                groups={animationGroups}
+                selectedBankKey={selectedBankKey}
+                searchQuery={animationSearchQuery}
+                selectedAnimation={selectedAnimation}
+                selectedKind={selected?.kind}
+                expandedGroups={expandedAnimationGroups}
+                animationLabel={animationIdLabel}
+                onBankChange={(nextKey) => {
+                  setSelectedBankKey(nextKey);
+                  if (nextKey !== 'all') {
+                    setExpandedAnimationGroups((current) => {
+                      if (current.has(nextKey)) return current;
+                      return new Set(current).add(nextKey);
+                    });
+                  }
+                }}
+                onSearchChange={setAnimationSearchQuery}
+                onToggleGroup={(groupKey) => {
+                  setExpandedAnimationGroups((current) => {
+                    const next = new Set(current);
+                    if (next.has(groupKey)) next.delete(groupKey);
+                    else next.add(groupKey);
+                    return next;
+                  });
+                }}
+                onSelectAnimation={selectAnimation}
+                animationsTruncated={isAnimationsTruncated}
+                paginationLoading={paginationLoading}
+                paginationNotice={paginationNotice}
+                onLoadMore={() => void loadMoreAnimations()}
+              />
+            )
           )
         },
         {
@@ -1218,6 +1369,7 @@ export function TaeWorkbenchPanel(props: TaeWorkbenchPanelProps): ReactElement {
                 <>
                   <div className="wb-list__group-label">
                     词条 · 动画 {selectedAnimation.animId}
+                    {' · '}{actionAnimationGroupLabel(selectedAnimation)}
                     {selectedAnimation.hkxName ? `（${animationIdLabel(selectedAnimation)}）` : ''}
                   </div>
                   {selectedAnimationEvents.map((event, index) => {
@@ -1231,7 +1383,7 @@ export function TaeWorkbenchPanel(props: TaeWorkbenchPanelProps): ReactElement {
                     ].filter(Boolean).join(' ');
                     return (
                       <div
-                        key={`${selectedAnimation.animId}-${index}`}
+                        key={`${taeAnimationIdentityKey(selectedAnimation)}-${index}`}
                         className={rowClass}
                         {...selectableRowAttributes({
                           selected: selected?.kind === 'event' && selected.eventIndex === index,
@@ -1293,7 +1445,9 @@ export function TaeWorkbenchPanel(props: TaeWorkbenchPanelProps): ReactElement {
         },
         {
           id: 'preview',
-          title: '预览（只读）',
+          title: '动作视图',
+          ariaLabel: '动作视图',
+          hideHeader: true,
           initialFlex: 0.22,
           minWidth: 220,
           children: (
@@ -1301,46 +1455,13 @@ export function TaeWorkbenchPanel(props: TaeWorkbenchPanelProps): ReactElement {
               {mergedDocument === null && <p className="wb-empty">选择 .tae / .anibnd.dcx 文件后查看预览。</p>}
               {mergedDocument !== null && (
                 <>
-                  {preview.loading && <p className="wb-empty">正在查找伴生模型（chrbnd）与装配部件（partsbnd）…</p>}
-                  {!preview.loading && preview.error !== null && (
-                    <>
-                      <p className="wb-empty" data-testid="tae-preview-unavailable">
-                        预览不可用
-                      </p>
-                      <p className="muted" style={{ fontSize: 11 }} data-testid="tae-preview-error">
-                        {preview.error}
-                      </p>
-                    </>
-                  )}
-                  {!preview.loading && preview.error === null && preview.bundle !== null && preview.bundle.meshCount > 0 && (
-                    <div className="tae-preview-host tae-preview__viewport" data-testid="tae-preview-viewport">
-                      <FlverViewer
-                        externalBundle={preview.bundle}
-                        playbackTime={playbackTime}
-                        externalSkeletonPoses={sampledSkeletonPoses}
-                      />
-                    </div>
-                  )}
-                  {!preview.loading && preview.error === null && preview.bundle !== null && preview.bundle.meshCount === 0 && preview.bundle.boneCount > 0 && (
-                    <div className="tae-preview-host tae-preview__viewport" data-testid="tae-preview-viewport">
-                      <FlverViewer
-                        externalBundle={preview.bundle}
-                        playbackTime={playbackTime}
-                        externalSkeletonPoses={sampledSkeletonPoses}
-                      />
-                    </div>
-                  )}
-                  {!preview.loading
-                    && preview.error === null
-                    && preview.bundle?.assemblyMode === 'compatibility-preview'
-                    && (
-                      <p className="muted" style={{ fontSize: 11 }} data-testid="tae-preview-compatibility-notice" role="status">
-                      兼容预览：身体部件按原版 face/hair 组件优先、overlay 覆盖与确定性候选，从实际通过骨骼映射的候选中装配
-                        {preview.bundle.assemblyParts && preview.bundle.assemblyParts.length > 0
-                          ? `（${preview.bundle.assemblyParts.join('、')}）`
-                          : '（清单为空）'}；这不代表存档当前装备。
-                      </p>
-                    )}
+                  <ActionPreviewModule
+                    bundle={preview.bundle}
+                    loading={preview.loading}
+                    error={preview.error}
+                    playbackTime={playbackTime}
+                    skeletonPoses={sampledSkeletonPoses}
+                  />
                   {clipLoading && (
                     <p className="muted" style={{ fontSize: 11 }} data-testid="tae-clip-loading">
                       正在读取当前动画 Clip…
@@ -1434,75 +1555,16 @@ export function TaeWorkbenchPanel(props: TaeWorkbenchPanelProps): ReactElement {
                         aria-label="时间轴进度"
                       />
                     </div>
-                    {/* 多轨时间轴视觉呈现 */}
-                    {timelineTracks.length > 0 && (
-                      <div className="tae-tracks-container" data-testid="tae-tracks-container">
-                        {timelineTracks.map((track) => (
-                          <div key={`track-${track.trackIndex}`} className="tae-track-row">
-                            {track.blocks.map((block) => {
-                              const leftPercent = totalFrames > 0 ? (block.startFrame / totalFrames) * 100 : 0;
-                              const widthPercent = totalFrames > 0 ? Math.max(2, (block.durationFrames / totalFrames) * 100) : 10;
-                              const isTriggering = !block.hasError && block.startTime <= playbackTime && playbackTime <= block.endTime;
-                              const isSelected = selected?.kind === 'event' && selected.eventIndex === block.eventIndex;
-
-                              const blockClass = [
-                                'tae-track-block',
-                                isSelected ? 'is-selected' : '',
-                                isTriggering ? 'is-triggering' : '',
-                                block.hasError ? 'has-error' : ''
-                              ].filter(Boolean).join(' ');
-
-                              return (
-                                <div
-                                  key={block.id}
-                                  className={blockClass}
-                                  onClick={() => selectEvent(block.eventIndex)}
-                                  title={`${block.eventTypeId} (${block.startFrame}F - ${block.endFrame}F)${block.hasError ? ': ' + block.errorMessage : ''}`}
-                                  style={{
-                                    left: `${leftPercent}%`,
-                                    width: `${widthPercent}%`
-                                  }}
-                                >
-                                  {block.eventTypeId}
-                                </div>
-                              );
-                            })}
-                          </div>
-                        ))}
-                      </div>
-                    )}
+                    <ActionTimelineGraph
+                      tracks={timelineTracks}
+                      totalFrames={totalFrames}
+                      playbackTime={playbackTime}
+                      frameRate={FRAME_RATE}
+                      selectedEventIndex={selectedEventIndex}
+                      onSelectEvent={selectEvent}
+                    />
                   </div>
 
-                  {!preview.loading && preview.error === null && preview.bundle === null && (
-                    <p className="muted" style={{ fontSize: 11 }} data-testid="tae-preview-ok">
-                      没有找到该模型的网格数据（chrbnd 内无 FLVER 网格）。
-                    </p>
-                  )}
-                  {!preview.loading && preview.error === null && preview.bundle !== null && preview.bundle.meshCount === 0 && preview.bundle.boneCount > 0 && (
-                    <p className="muted" style={{ fontSize: 11 }} data-testid="tae-preview-skeleton-note">
-                      该模型为骨骼装配体（{preview.bundle.boneCount} bones）；没有找到可安全映射的 bd / am / lg / hd / fc 身体部件，当前显示骨架标记。这不代表存档当前装备。
-                    </p>
-                  )}
-                  {isPartial && invalidRangeCount > 0 && (
-                    <details className="tae-partial" data-testid="tae-partial-diagnostics">
-                      <summary>
-                        authority={authority} · {invalidRangeCount} 条非法时间范围诊断
-                        （TAE_INVALID_TIME_RANGE）
-                      </summary>
-                      <ul>
-                        {visibleDiagnostics.map((diag, index) => (
-                          <li key={`diag-${index}`} className="muted">
-                            [{diag.severity}] {diag.code}: {diag.message}
-                          </li>
-                        ))}
-                      </ul>
-                    </details>
-                  )}
-                  {mergedDocument.diagnostics.length > 0 && !(isPartial && invalidRangeCount > 0) && (
-                    <p className="muted" style={{ fontSize: 11 }} data-testid="tae-preview-diagnostics">
-                      {mergedDocument.diagnostics.length} 条文档诊断。
-                    </p>
-                  )}
                 </>
               )}
             </div>

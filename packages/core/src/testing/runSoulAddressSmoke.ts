@@ -69,13 +69,83 @@ function run(): void {
       && parsedAction.field === 'startFrame',
     `parseActionAddress('c1050#A0200.e0.startFrame') fields, got ${JSON.stringify(parsedAction)}`
   );
+  const parsedLegacyPaddedEvent = parseActionAddress('c1050#A0200.e01');
+  assert(
+    parsedLegacyPaddedEvent !== null && parsedLegacyPaddedEvent.eventIndex === 1,
+    'legacy sectionless address keeps padded event index compatibility'
+  );
+  const parsedSectionedAction = parseActionAddress('action://c0000/tae/3/A0200/e0.startFrame');
+  assert(
+    parsedSectionedAction !== null
+      && parsedSectionedAction.chr === 'c0000'
+      && parsedSectionedAction.taeEntryIndex === 3
+      && parsedSectionedAction.animId === 200
+      && parsedSectionedAction.eventIndex === 0
+      && parsedSectionedAction.field === 'startFrame',
+    `parseActionAddress sectioned fields, got ${JSON.stringify(parsedSectionedAction)}`
+  );
+  assert(
+    parsedSectionedAction !== null
+      && formatActionAddress(parsedSectionedAction) === 'action://c0000/tae/3/A0200/e0.startFrame',
+    'sectioned ActionAddress → parseActionAddress round trip'
+  );
+  const canonicalSectionedAction = parseActionAddress('action://c0000/tae/3/A0200/e0');
+  assert(
+    canonicalSectionedAction !== null
+      && canonicalSectionedAction.taeEntryIndex === 3
+      && canonicalSectionedAction.animId === 200
+      && canonicalSectionedAction.eventIndex === 0
+      && formatActionAddress(canonicalSectionedAction) === 'action://c0000/tae/3/A0200/e0',
+    'canonical sectioned ActionAddress → parseActionAddress round trip'
+  );
+  const parsedIdSection = parseActionAddress('action://c0000/tae/id/5000050/A0200/e0');
+  assert(
+    parsedIdSection !== null
+      && parsedIdSection.taeEntryId === 5000050
+      && formatActionAddress(parsedIdSection) === 'action://c0000/tae/id/5000050/A0200/e0',
+    'explicit taeEntryId selector round trip'
+  );
+  const parsedNameSection = parseActionAddress('action://c0000/tae/name/a50.tae/A0200/e0');
+  assert(
+    parsedNameSection !== null
+      && parsedNameSection.taeEntryName === 'a50.tae'
+      && formatActionAddress(parsedNameSection) === 'action://c0000/tae/name/a50.tae/A0200/e0',
+    'explicit taeEntryName selector round trip'
+  );
+  const parsedGroupSection = parseActionAddress('action://c0000/tae/group/a50/A0200/e0');
+  assert(
+    parsedGroupSection !== null
+      && parsedGroupSection.taeGroup === 'a50'
+      && formatActionAddress(parsedGroupSection) === 'action://c0000/tae/group/a50/A0200/e0',
+    'explicit taeGroup selector round trip'
+  );
   const parsedActionChrOnly = parseActionAddress('c1050');
   assert(
     parsedActionChrOnly !== null && parsedActionChrOnly.chr === 'c1050' && parsedActionChrOnly.animId === undefined,
     'parseActionAddress chr-only'
   );
+  const parsedSymbolUri = parseActionAddress('action://c1050/A0200/e0');
+  assert(
+    parsedSymbolUri !== null && parsedSymbolUri.chr === 'c1050' && parsedSymbolUri.animId === 200 && parsedSymbolUri.eventIndex === 0,
+    'parseActionAddress sectionless action symbol URI'
+  );
   assert(parseActionAddress('c1050#a000_020000') === null, 'parseActionAddress must fail closed on hkx alias');
   assert(parseActionAddress('m11_01_00_00#c1050_0000') === null, 'parseActionAddress must reject map address');
+  for (const malformed of [
+    'action://c0000/tae/-1/A0200/e0',
+    'action://c0000/tae/9007199254740992/A0200/e0',
+    'action://c0000/tae/not-an-index/A0200/e0',
+    'action://c0000/tae/id/not-an-id/A0200/e0',
+    'action://c0000/tae/name/a%ZZ/A0200/e0',
+    'action://c0000/tae/group/a%2Fb/A0200/e0',
+    'action://c0000/tae/3/a000_020000/e0',
+    'action://c0000/tae/3/A0200/e-1',
+    'action://c0000/tae/3/A0200/e0/extra',
+    'action://c0000/tae/3/A0200/e0?field=startFrame',
+    'action://c0000/tae/3'
+  ]) {
+    assert(parseActionAddress(malformed) === null, `sectioned address must fail closed: ${malformed}`);
+  }
 
   // ── parseMapAddress ──
   const parsedMap = parseMapAddress('m11_01_00_00#c1050_0000.posX');
@@ -113,6 +183,11 @@ function run(): void {
   assert(
     addressTokens.includes('c1050#a0200.e0.startframe') && addressTokens.includes('c1050') && addressTokens.includes('a0200'),
     `extractAtomicAddressTokens must keep full action address, got ${JSON.stringify(addressTokens)}`
+  );
+  const sectionedTokens = extractAtomicAddressTokens('改 action://c0000/tae/3/A0200/e0.startFrame');
+  assert(
+    sectionedTokens.includes('action://c0000/tae/3/a0200/e0.startframe'),
+    `extractAtomicAddressTokens must keep sectioned action URI atomic, got ${JSON.stringify(sectionedTokens)}`
   );
 
   // ── parseRagQuery 原子地址（问题 6-A：queryParse 不再拆地址）──

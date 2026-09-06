@@ -126,3 +126,8 @@ obj/
 # Session-local Agent object/property ledgers; the user-facing protocol lives
 # in prompt/agent-task-record.md, while runtime records are disposable.
 /prompt/.agent-task-records/
+**/.agent-task-records/
+
+# Companion database, semantic cache and local scratch
+.soulforge/
+

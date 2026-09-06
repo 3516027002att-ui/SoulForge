@@ -551,8 +551,10 @@ type RetargetMatrix = Float64Array;
  * matrix; the target local transform is then decomposed against the target
  * parent's current no-scale matrix.  This matters because HKX and FLVER
  * local reference rotations are not interchangeable, while copying source
- * child translations would change the target skeleton's physical bone
- * lengths and detach skinned parts.
+ * mapped child translations are retained: DirectBoneMap follows the source
+ * absolute FK and does not replace them with the target bind translation.
+ * Replacing them changes the source FK and detaches skinned parts on an
+ * incompatible skeleton.
  */
 function retargetHkxPoseToFlverAbsolute(
   hkxParentIndices: readonly number[],
@@ -610,13 +612,6 @@ function retargetHkxPoseToFlverAbsolute(
         multiplyRetargetMatrices(inverseRetargetMatrix(parentAbsNoScale), desiredAbs)
       );
 
-      // Keep the target skeleton's physical bone length.  The source HKX
-      // translation is still used while deriving orientation in absolute
-      // space, but copying it into a FLVER child local position is what made
-      // the head/limbs detach in the real C0000 preview.
-      if (parent >= 0) {
-        local.translation = [...flverReferencePose[flverIndex]!.translation];
-      }
       result[flverIndex] = local;
     }
 

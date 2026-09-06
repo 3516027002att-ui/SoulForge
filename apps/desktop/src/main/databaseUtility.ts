@@ -191,6 +191,13 @@ async function dispatch(request: OperationLogUtilityRequest): Promise<unknown> {
       return null;
     case 'listJobs':
       return requireWorkspaceDataRepository().listJobs();
+    case 'getAllSemanticFileCache':
+      return {
+        entries: requireWorkspaceDataRepository().getAllSemanticFileCacheRows()
+      };
+    case 'upsertSemanticFileCache':
+      requireWorkspaceDataRepository().upsertSemanticFileCacheRow(request.payload.entry);
+      return null;
   }
 }
 

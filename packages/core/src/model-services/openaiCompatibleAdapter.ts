@@ -219,6 +219,8 @@ export class OpenAiCompatibleAdapter implements ModelServiceAdapter {
                   content?: string;
                   reasoning_content?: string;
                   reasoning?: string;
+                  thinking?: string;
+                  thought?: string;
                   tool_calls?: Array<{
                     index?: number;
                     id?: string;
@@ -229,7 +231,7 @@ export class OpenAiCompatibleAdapter implements ModelServiceAdapter {
               }>;
             };
             const delta = json.choices?.[0]?.delta;
-            const reasoning = delta?.reasoning_content ?? delta?.reasoning;
+            const reasoning = delta?.reasoning_content ?? delta?.reasoning ?? delta?.thinking ?? delta?.thought;
             if (typeof reasoning === 'string' && reasoning.length > 0) {
               yield { type: 'thinking-delta', text: reasoning };
             }

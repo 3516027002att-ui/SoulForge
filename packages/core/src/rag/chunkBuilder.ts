@@ -383,12 +383,16 @@ function taeEventChunk(
   const lines = [
     `chr ${taeExport.chrId}`,
     `anim ${anim.code} animId ${anim.animId}${anim.hkxName ? ` hkx ${anim.hkxName}` : ''}`,
+    ...(anim.taeGroup
+      ? [`taeSection ${anim.taeGroup}${anim.taeEntryName ? ` entry ${anim.taeEntryName}` : ''}${anim.taeEntryId !== undefined ? ` entryId ${anim.taeEntryId}` : ''}`]
+      : []),
     `event e${event.index} type ${event.eventTypeId}${event.typeName ? ` ${event.typeName}` : ''}`,
     `startFrame ${event.startFrame} endFrame ${event.endFrame} startTime ${trimNumber(event.startTime)} endTime ${trimNumber(event.endTime)}`,
     ...(event.fields ?? []).map((field) => `${field.name} ${field.value}`),
     ...(event.fields && event.fields.length > 0 ? [] : event.parameterBytesHex ? [`undecoded hex=${event.parameterBytesHex}`] : []),
     taeExport.sourceUri ? `source ${relativeSourcePath(taeExport.sourceUri)}` : '',
-    `address ${address}`
+    `address ${address}`,
+    ...(event.uri !== `action://${taeExport.chrId}/${anim.code}/e${String(event.index)}` ? [`identity ${event.uri}`] : [])
   ].filter(Boolean);
   const numericFieldValues = (event.fields ?? []).map((field) => field.value);
   return makeChunk({
@@ -403,6 +407,8 @@ function taeEventChunk(
       event.eventTypeId,
       event.startFrame,
       event.endFrame,
+      anim.taeEntryIndex,
+      anim.taeEntryId,
       ...numericFieldValues
     ]),
     resourceKind: 'action',

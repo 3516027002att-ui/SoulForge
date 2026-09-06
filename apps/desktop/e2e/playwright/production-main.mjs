@@ -49,6 +49,10 @@ const externalOverlayRoot = process.env.SF_E2E_OVERLAY_ROOT?.trim();
 const externalBaseRoot = process.env.SF_E2E_BASE_ROOT?.trim();
 const overlayRoot = externalOverlayRoot || join(app.getPath('userData'), 'e2e-overlay');
 const baseRoot = externalBaseRoot || join(app.getPath('userData'), 'e2e-base');
+// Keep production-Electron tests from opening the user's persistent
+// <overlay>/.soulforge/workspace.db. Real assets remain read-only inputs;
+// SQLite/fingerprint/staging state is isolated under this run's userData.
+process.env.SF_E2E_WORKSPACE_STORAGE_ROOT = join(app.getPath('userData'), 'workspace-storage');
 
 /** 测试工作区：目录结构镜像真实 mod 布局，内容是最小合法样本。 */
 function seedWorkspace() {

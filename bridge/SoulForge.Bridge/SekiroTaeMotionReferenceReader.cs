@@ -1,4 +1,6 @@
 using System.Buffers.Binary;
+using System.Globalization;
+using System.Text.RegularExpressions;
 
 /// <summary>
 /// Reads only the Sekiro TAE animation mini-header fields needed to resolve motion identity.
@@ -53,7 +55,7 @@ internal static class SekiroTaeMotionReferenceReader
         var semantics = p + 0x18;
         return miniHeaderType switch
         {
-            MiniHeaderTypeStandard => ReadStandard(source, animation.AnimId, semantics),
+            MiniHeaderTypeStandard => ReadStandard(source, animation, semantics),
             MiniHeaderTypeImportOtherAnim => ReadImportOther(source, animation.AnimId, semantics),
             _ => throw new NotSupportedException(
                 $"TAE animation {animation.AnimId} has unsupported mini-header type {miniHeaderType}.")
@@ -62,9 +64,10 @@ internal static class SekiroTaeMotionReferenceReader
 
     private static ActionAnimationSemantics.TaeMotionReference ReadStandard(
         byte[] source,
-        long animationId,
+        TaeAnimation animation,
         int semantics)
     {
+        var animationId = animation.AnimId;
         EnsureRange(source, semantics, 8, animationId);
         var isLoopByDefault = source[semantics] != 0;
         var importsHkx = source[semantics + 1] != 0;
@@ -79,6 +82,16 @@ internal static class SekiroTaeMotionReferenceReader
         _ = isLoopByDefault;
         _ = allowDelayLoad;
 
+        var nativeHkxId = ParseNativeHkxAnimationId(animation.HkxName);
+        if (nativeHkxId.HasValue)
+        {
+            return new ActionAnimationSemantics.TaeMotionReference(
+                animationId,
+                ActionAnimationSemantics.MotionReferenceKind.OwnHkx,
+                null,
+                nativeHkxId.Value);
+        }
+
         return importsHkx
             ? new ActionAnimationSemantics.TaeMotionReference(
                 animationId,
@@ -86,7 +99,37 @@ internal static class SekiroTaeMotionReferenceReader
                 importHkxSourceAnimationId)
             : new ActionAnimationSemantics.TaeMotionReference(
                 animationId,
-                ActionAnimationSemantics.MotionReferenceKind.OwnHkx);
+                ActionAnimationSemantics.MotionReferenceKind.OwnHkx,
+                null,
+                null);
+    }
+
+    /// <summary>
+    /// Converts the exact native TAE HKX filename identity to Sekiro's
+    /// logical ANIBND id.  `a050_002010.hkt` is 050002010, i.e. 50002010;
+    /// it must not be guessed from the TAE animation id 2010.  No directory
+    /// scan or sibling filename matching is involved.
+    /// </summary>
+    private static long? ParseNativeHkxAnimationId(string? hkxName)
+    {
+        if (string.IsNullOrWhiteSpace(hkxName)) return null;
+        var normalized = hkxName.Trim().Replace('\\', '/');
+        var slash = normalized.LastIndexOf('/');
+        var basename = slash >= 0 ? normalized[(slash + 1)..] : normalized;
+        var match = Regex.Match(
+            basename,
+            "^a(?<family>\\d{3})_(?<animation>\\d+)(?:\\.hkt|\\.hkx)$",
+            RegexOptions.CultureInvariant | RegexOptions.IgnoreCase);
+        if (!match.Success) return null;
+
+        var logicalText = match.Groups["family"].Value + match.Groups["animation"].Value;
+        return long.TryParse(
+            logicalText,
+            NumberStyles.None,
+            CultureInfo.InvariantCulture,
+            out var logicalId)
+            ? logicalId
+            : null;
     }
 
     private static ActionAnimationSemantics.TaeMotionReference ReadImportOther(

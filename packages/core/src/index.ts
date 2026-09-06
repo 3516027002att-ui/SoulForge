@@ -65,6 +65,7 @@ export * from './patch/containerChildInverse.js';
 export * from './patch/patchImpactGraph.js';
 export * from './files/index.js';
 export * from './workspace/semanticWorkspaceIndex.js';
+export * from './workspace/semanticFileCache.js';
 export * from './workspace/importLegacySemanticSnapshot.js';
 export * from './character/characterAssembly.js';
 export * from './ai/evidencePackBuilder.js';

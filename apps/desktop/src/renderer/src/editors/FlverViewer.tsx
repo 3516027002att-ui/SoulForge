@@ -38,6 +38,12 @@ export interface FlverViewerProps {
   externalBundle?: CharacterPreviewBundle | undefined;
   /** Per-FLVER local poses keyed by CharacterPreviewBundle.models[].modelId. */
   externalSkeletonPoses?: Readonly<Record<string, BoneTransformData[]>> | undefined;
+  /** 显示跟随当前姿态更新的骨骼线/joint 诊断层；默认关闭普通 FLVER 预览。 */
+  showSkeletonMarkers?: boolean | undefined;
+  /** 是否显示视口内的调试字报、选择提示和交互说明；动作工作台默认隐藏。 */
+  showViewerHud?: boolean | undefined;
+  /** 是否显示视口网格与红/绿坐标轴等编辑器辅助线；动作工作台默认隐藏。 */
+  showSceneGuides?: boolean | undefined;
   /**
    * S17：动作预览——chrbnd 里 FLVER 的网格数据由 `read-chrbnd-flver-preview`
    * 一次性返回（base64 typed buffers），提供时不再走 readFlverMesh IPC。
@@ -116,6 +122,7 @@ export interface FlverViewerProps {
     translation: [number, number, number];
     rotation: [number, number, number];
     scale?: [number, number, number] | undefined;
+    referenceFkMatrix?: number[] | undefined;
     rotationOrder?: 'YZX' | 'XYZ' | 'XZY' | undefined;
   }> | undefined;
   /** 动画播放时间点（驱动骨骼蒙皮动画位姿） */
@@ -183,7 +190,165 @@ interface SkeletonBone {
   translation: [number, number, number];
   rotation: [number, number, number];
   scale?: [number, number, number] | undefined;
+  referenceFkMatrix?: number[] | undefined;
   rotationOrder?: 'YZX' | 'XYZ' | 'XZY' | undefined;
+}
+
+export interface FlverSkeletonDiagnostic {
+  severity: string;
+  code: string;
+  message: string;
+}
+
+export type FlverSkeletonLoadStatus = 'idle' | 'loading' | 'ready' | 'empty' | 'error' | 'external';
+
+export interface FlverSkeletonLoadState {
+  status: FlverSkeletonLoadStatus;
+  bones: SkeletonBone[];
+  diagnostics: FlverSkeletonDiagnostic[];
+}
+
+function asRecord(value: unknown): Record<string, unknown> | null {
+  return typeof value === 'object' && value !== null ? value as Record<string, unknown> : null;
+}
+
+function normalizeSkeletonDiagnostics(
+  value: unknown,
+  fallback: FlverSkeletonDiagnostic
+): FlverSkeletonDiagnostic[] {
+  const diagnostics = Array.isArray(value)
+    ? value.flatMap((item): FlverSkeletonDiagnostic[] => {
+        const diagnostic = asRecord(item);
+        if (!diagnostic) return [];
+        const code = typeof diagnostic.code === 'string' && diagnostic.code.length > 0
+          ? diagnostic.code
+          : fallback.code;
+        const message = typeof diagnostic.message === 'string' && diagnostic.message.length > 0
+          ? diagnostic.message
+          : code;
+        return [{
+          severity: typeof diagnostic.severity === 'string' && diagnostic.severity.length > 0
+            ? diagnostic.severity
+            : fallback.severity,
+          code,
+          message
+        }];
+      })
+    : [];
+  return diagnostics.length > 0 ? diagnostics : [fallback];
+}
+
+function normalizeSkeletonVector(value: unknown, fallback: [number, number, number], label: string): [number, number, number] {
+  if (!Array.isArray(value)) throw new Error(`FLVER_SKELETON_BONE_INVALID: ${label} 不是向量`);
+  return [0, 1, 2].map((axis) => {
+    const component = value[axis];
+    if (typeof component !== 'number' || !Number.isFinite(component)) {
+      if (component === undefined) return fallback[axis];
+      throw new Error(`FLVER_SKELETON_BONE_INVALID: ${label}[${axis}] 不是有限数值`);
+    }
+    return component;
+  }) as [number, number, number];
+}
+
+function normalizeSkeletonBones(value: unknown): SkeletonBone[] {
+  if (value === undefined) return [];
+  if (!Array.isArray(value)) throw new Error('FLVER_SKELETON_RESPONSE_INVALID: bones 不是数组');
+  return value.map((item, index) => {
+    const bone = asRecord(item);
+    if (!bone || typeof bone.name !== 'string' || typeof bone.parentIndex !== 'number' || !Number.isInteger(bone.parentIndex)) {
+      throw new Error(`FLVER_SKELETON_BONE_INVALID: bones[${index}] 缺少有效 name 或 parentIndex`);
+    }
+    const rotationOrder = bone.rotationOrder === 'YZX' || bone.rotationOrder === 'XYZ' || bone.rotationOrder === 'XZY'
+      ? bone.rotationOrder
+      : 'XZY';
+    return {
+      name: bone.name,
+      parentIndex: bone.parentIndex,
+      translation: normalizeSkeletonVector(bone.translation, [0, 0, 0], `bones[${index}].translation`),
+      rotation: normalizeSkeletonVector(bone.rotation, [0, 0, 0], `bones[${index}].rotation`),
+      scale: bone.scale === undefined || bone.scale === null
+        ? [1, 1, 1]
+        : normalizeSkeletonVector(bone.scale, [1, 1, 1], `bones[${index}].scale`),
+      ...(Array.isArray(bone.referenceFkMatrix)
+        && bone.referenceFkMatrix.length === 16
+        && bone.referenceFkMatrix.every((value) => typeof value === 'number' && Number.isFinite(value))
+        ? { referenceFkMatrix: [...bone.referenceFkMatrix] }
+        : {}),
+      rotationOrder
+    };
+  });
+}
+
+export function createFlverSkeletonErrorState(
+  error: unknown,
+  fallback: Pick<FlverSkeletonDiagnostic, 'code' | 'message'> = {
+    code: 'FLVER_SKELETON_READ_EXCEPTION',
+    message: 'FLVER 骨骼读取异常。'
+  }
+): FlverSkeletonLoadState {
+  const record = asRecord(error);
+  const errorMessage = error instanceof Error
+    ? error.message
+    : typeof record?.message === 'string' && record.message.length > 0
+      ? record.message
+      : typeof error === 'string' && error.length > 0
+        ? error
+        : fallback.message;
+  const diagnosticFallback: FlverSkeletonDiagnostic = {
+    severity: 'error',
+    code: typeof record?.code === 'string' && record.code.length > 0 ? record.code : fallback.code,
+    message: errorMessage
+  };
+  return {
+    status: 'error',
+    bones: [],
+    diagnostics: normalizeSkeletonDiagnostics(record?.diagnostics, diagnosticFallback)
+  };
+}
+
+export function resolveFlverSkeletonLoadState(result: unknown): FlverSkeletonLoadState {
+  const record = asRecord(result);
+  if (!record || record.ok !== true) {
+    const fallback = {
+      code: 'FLVER_SKELETON_READ_FAILED',
+      message: 'FLVER 骨骼读取失败。'
+    } as const;
+    return createFlverSkeletonErrorState(record ?? result, fallback);
+  }
+  try {
+    const data = asRecord(record.data);
+    const bones = normalizeSkeletonBones(data?.bones);
+    return {
+      status: bones.length > 0 ? 'ready' : 'empty',
+      bones,
+      diagnostics: []
+    };
+  } catch (error) {
+    return createFlverSkeletonErrorState(error, {
+      code: 'FLVER_SKELETON_RESPONSE_INVALID',
+      message: 'Bridge 返回的 FLVER 骨骼数据无效。'
+    });
+  }
+}
+
+export function describeFlverSkeletonLoadState(state: FlverSkeletonLoadState): string | null {
+  switch (state.status) {
+    case 'loading':
+      return '骨骼加载中…';
+    case 'ready':
+      return `骨骼已加载：${state.bones.length} bones`;
+    case 'empty':
+      return '骨骼为空：Bridge 返回 0 根骨骼';
+    case 'error': {
+      const diagnostic = state.diagnostics[0];
+      const details = diagnostic ? `${diagnostic.code} · ${diagnostic.message}` : '未知错误';
+      const additional = state.diagnostics.length > 1 ? `（另有 ${state.diagnostics.length - 1} 条诊断）` : '';
+      return `骨骼加载失败：${details}${additional}`;
+    }
+    case 'idle':
+    case 'external':
+      return null;
+  }
 }
 
 interface DummyPoint {
@@ -219,12 +384,22 @@ export function FlverViewer(props: FlverViewerProps): ReactElement {
   };
   const [meshDataList, setMeshDataList] = useState<MeshData[] | null>(null);
   const [meshError, setMeshError] = useState<string | null>(null);
-  const [skeletonBones, setSkeletonBones] = useState<SkeletonBone[] | null>(null);
+  const [skeletonLoadState, setSkeletonLoadState] = useState<FlverSkeletonLoadState>({
+    status: 'idle',
+    bones: [],
+    diagnostics: []
+  });
+  const skeletonBones = skeletonLoadState.bones;
   const [dummyPoints, setDummyPoints] = useState<DummyPoint[] | null>(null);
   const [texture, setTexture] = useState<FlverSceneTexture | null>(null);
   const [selected, setSelected] = useState<{ id: string; label: string } | null>(null);
   const [backend, setBackend] = useState<'webgpu' | 'webgl2' | 'detecting'>('detecting');
   const [sceneError, setSceneError] = useState<string | null>(null);
+  const [skeletonMarkersVisible, setSkeletonMarkersVisible] = useState(props.showSkeletonMarkers === true);
+
+  useEffect(() => {
+    setSkeletonMarkersVisible(props.showSkeletonMarkers === true);
+  }, [props.showSkeletonMarkers]);
 
   const bridge = getRendererBridge();
 
@@ -262,39 +437,38 @@ export function FlverViewer(props: FlverViewerProps): ReactElement {
   // S17：externalBones（chrbnd 预览）直接使用，不走 IPC。
   useEffect(() => {
     if (props.externalBundle) {
-      setSkeletonBones([]);
+      setSkeletonLoadState({ status: 'external', bones: [], diagnostics: [] });
       return;
     }
     if (props.externalBones) {
-      setSkeletonBones(props.externalBones);
+      setSkeletonLoadState({ status: 'external', bones: props.externalBones, diagnostics: [] });
       return;
     }
-    if (!props.sourceUri || bridge === null || typeof bridge.readFlverSkeleton !== 'function') return;
-    setSkeletonBones(null);
+    if (!props.sourceUri) {
+      setSkeletonLoadState({ status: 'idle', bones: [], diagnostics: [] });
+      return;
+    }
+    if (bridge === null || typeof bridge.readFlverSkeleton !== 'function') {
+      setSkeletonLoadState(createFlverSkeletonErrorState(null, {
+        code: 'FLVER_SKELETON_BRIDGE_UNAVAILABLE',
+        message: '无法读取 FLVER 骨骼：桌面桥接能力不可用。'
+      }));
+      return;
+    }
+    const readFlverSkeleton = bridge.readFlverSkeleton;
+    setSkeletonLoadState({ status: 'loading', bones: [], diagnostics: [] });
+    let cancelled = false;
     void (async () => {
       try {
-        const result = await bridge.readFlverSkeleton(props.sourceUri!) as {
-          ok: boolean;
-          data?: { bones?: Array<{ name: string; parentIndex: number; translation: number[]; rotation: number[]; scale?: number[]; rotationOrder?: 'YZX' | 'XYZ' | 'XZY' }> };
-        };
-        const raw = result.ok ? result.data?.bones ?? [] : [];
-        if (raw.length === 0) return;
-        setSkeletonBones(
-          raw.map((b) => ({
-            name: b.name,
-            parentIndex: b.parentIndex,
-            translation: [b.translation[0] ?? 0, b.translation[1] ?? 0, b.translation[2] ?? 0],
-            rotation: [b.rotation[0] ?? 0, b.rotation[1] ?? 0, b.rotation[2] ?? 0],
-            scale: [b.scale?.[0] ?? 1, b.scale?.[1] ?? 1, b.scale?.[2] ?? 1],
-            // Bridge 的 FLVER 原生欧拉顺序是 XZY；不能在 renderer 入口
-            // 偷换成 YZX，否则骨骼层级和采样姿态都会发生确定性偏移。
-            rotationOrder: b.rotationOrder ?? 'XZY'
-          }))
-        );
-      } catch {
-        // Skeleton load failed; leave hierarchy hidden.
+        const result = await readFlverSkeleton(props.sourceUri!) as unknown;
+        if (!cancelled) setSkeletonLoadState(resolveFlverSkeletonLoadState(result));
+      } catch (error) {
+        if (!cancelled) setSkeletonLoadState(createFlverSkeletonErrorState(error));
       }
     })();
+    return () => {
+      cancelled = true;
+    };
   }, [props.sourceUri, props.externalBones, props.externalBundle, bridge]);
 
   // Load mesh data via IPC when sourceUri or meshIndex changes.
@@ -388,13 +562,14 @@ export function FlverViewer(props: FlverViewerProps): ReactElement {
   useEffect(() => {
     try {
       const scene = props.externalBundle
-        ? buildBundleSemanticScene(props.externalBundle, props.boundingBox, texture)
+        ? buildBundleSemanticScene(props.externalBundle, props.boundingBox, texture, skeletonMarkersVisible)
         : buildSemanticScene({
             meshes: meshDataList ?? [],
             skeleton: skeletonBones ?? [],
             dummies: dummyPoints ?? [],
             boundingBox: props.boundingBox,
-            texture
+            texture,
+            showSkeletonMarkers: skeletonMarkersVisible
           });
       contentRef.current = scene;
       const handle = handleRef.current;
@@ -407,7 +582,7 @@ export function FlverViewer(props: FlverViewerProps): ReactElement {
       const message = error instanceof Error ? error.message : 'FLVER 语义数据无效';
       setSceneError(message);
     }
-  }, [meshDataList, skeletonBones, dummyPoints, props.boundingBox, props.externalBundle, texture]);
+  }, [meshDataList, skeletonBones, dummyPoints, props.boundingBox, props.externalBundle, texture, skeletonMarkersVisible]);
 
   // Mount the Three projection layer once; later data updates flow through setScene.
   useEffect(() => {
@@ -419,6 +594,7 @@ export function FlverViewer(props: FlverViewerProps): ReactElement {
         const handle = await mountFlverScene({
           container,
           scene: contentRef.current,
+          showSceneGuides: props.showSceneGuides !== false,
           onSelect: (id) => {
             if (!id) {
               setSelected(null);
@@ -470,33 +646,67 @@ export function FlverViewer(props: FlverViewerProps): ReactElement {
             summaryMeshes.reduce((sum, mesh) => sum + (mesh.vertexCount || 0), 0)
           } verts`)
     : null;
+  const skeletonStatusMessage = describeFlverSkeletonLoadState(skeletonLoadState);
+  const hasSkeleton = (props.externalBundle?.boneCount ?? props.boneCount ?? skeletonBones.length) > 0;
+  const canToggleSkeletonMarkers = props.showSkeletonMarkers !== undefined;
+  const showViewerHud = props.showViewerHud !== false;
 
   return (
     <div className="flver-viewer" style={{ position: 'relative', width: '100%', height: '100%', minWidth: 0, minHeight: 0, overflow: 'hidden', background: '#1a1d23', borderRadius: 4 }}>
       <div ref={containerRef} style={{ width: '100%', height: '100%', minWidth: 0, minHeight: 0 }} />
-      <div style={{
-        position: 'absolute', top: 8, left: 8, color: '#8899aa', fontSize: 12,
-        background: 'rgba(0,0,0,0.5)', padding: '4px 8px', borderRadius: 4
-      }}>
-        FLVER 3D 预览 · {props.externalBundle?.boneCount ?? props.boneCount ?? 0} bones · {props.externalBundle?.meshCount ?? props.meshCount ?? 0} meshes
-        {' · '}{backend === 'detecting' ? 'backend…' : `backend ${backend}`}
-        {meshSummary ? ` · ${meshSummary}` : meshError ? ` · ${meshError}` : ''}
-        {sceneError ? ` · ${sceneError}` : ''}
-      </div>
-      {selected ? (
-        <div style={{
-          position: 'absolute', top: 8, right: 8, color: '#9fd0ff', fontSize: 12,
-          background: 'rgba(0,0,0,0.5)', padding: '4px 8px', borderRadius: 4
-        }}>
-          已选择 {selected.label}
-        </div>
-      ) : null}
-      <div style={{
-        position: 'absolute', bottom: 8, left: 8, color: '#6a7686', fontSize: 11,
-        background: 'rgba(0,0,0,0.45)', padding: '2px 8px', borderRadius: 4
-      }}>
-        点击网格选中 / 再次点击取消 · 网格数据只读
-      </div>
+      {showViewerHud && (
+        <>
+          <div style={{
+            position: 'absolute', top: 8, left: 8, color: '#8899aa', fontSize: 12,
+            background: 'rgba(0,0,0,0.5)', padding: '4px 8px', borderRadius: 4
+          }}>
+            FLVER 3D 预览 · {props.externalBundle?.boneCount ?? props.boneCount ?? 0} bones · {props.externalBundle?.meshCount ?? props.meshCount ?? 0} meshes
+            {' · '}{backend === 'detecting' ? 'backend…' : `backend ${backend}`}
+            {meshSummary ? ` · ${meshSummary}` : meshError ? ` · ${meshError}` : ''}
+            {sceneError ? ` · ${sceneError}` : ''}
+          </div>
+          {skeletonStatusMessage ? (
+            <div
+              data-testid="flver-skeleton-status"
+              role={skeletonLoadState.status === 'error' ? 'alert' : 'status'}
+              aria-live={skeletonLoadState.status === 'error' ? 'assertive' : 'polite'}
+              aria-busy={skeletonLoadState.status === 'loading'}
+              style={{
+                position: 'absolute', top: 36, left: 8, maxWidth: 'calc(100% - 16px)',
+                color: skeletonLoadState.status === 'error' ? '#ffb4a8' : '#b7c7d8',
+                fontSize: 11, background: 'rgba(0,0,0,0.55)', padding: '3px 8px', borderRadius: 4
+              }}
+            >
+              {skeletonStatusMessage}
+            </div>
+          ) : null}
+          {selected ? (
+            <div style={{
+              position: 'absolute', top: hasSkeleton ? 40 : 8, right: 8, color: '#9fd0ff', fontSize: 12,
+              background: 'rgba(0,0,0,0.5)', padding: '4px 8px', borderRadius: 4
+            }}>
+              已选择 {selected.label}
+            </div>
+          ) : null}
+          {hasSkeleton && canToggleSkeletonMarkers ? (
+            <button
+              type="button"
+              className="flver-viewer__skeleton-toggle"
+              data-testid="flver-toggle-skeleton"
+              aria-pressed={skeletonMarkersVisible}
+              onClick={() => setSkeletonMarkersVisible((visible) => !visible)}
+            >
+              {skeletonMarkersVisible ? '隐藏骨架' : '显示骨架'}
+            </button>
+          ) : null}
+          <div style={{
+            position: 'absolute', bottom: 8, left: 8, color: '#6a7686', fontSize: 11,
+            background: 'rgba(0,0,0,0.45)', padding: '2px 8px', borderRadius: 4
+          }}>
+            点击网格选中 / 再次点击取消 · 网格数据只读
+          </div>
+        </>
+      )}
     </div>
   );
 }
@@ -507,6 +717,7 @@ function buildSemanticScene(input: {
   dummies: DummyPoint[];
   boundingBox?: { min: number[]; max: number[] } | undefined;
   texture: FlverSceneTexture | null;
+  showSkeletonMarkers?: boolean | undefined;
 }): FlverSemanticScene {
   const meshes: FlverSceneMesh[] = [];
   for (const [index, meshData] of input.meshes.entries()) {
@@ -617,6 +828,7 @@ function buildSemanticScene(input: {
     translation: bone.translation,
     rotation: bone.rotation,
     scale: bone.scale ?? [1, 1, 1],
+    ...(bone.referenceFkMatrix ? { referenceFkMatrix: [...bone.referenceFkMatrix] } : {}),
     rotationOrder: bone.rotationOrder ?? 'XZY'
   }));
   const dummies = input.dummies.map((dummy, index) => ({
@@ -628,7 +840,9 @@ function buildSemanticScene(input: {
     meshes,
     ...(bones.length > 0 ? { bones } : {}),
     ...(dummies.length > 0 ? { dummies } : {}),
-    ...(meshes.length === 0 && bones.length > 0 ? { showSkeletonMarkers: true } : {}),
+    ...(bones.length > 0 && (input.showSkeletonMarkers === true || meshes.length === 0)
+      ? { showSkeletonMarkers: true }
+      : {}),
     bounds
   };
 }
@@ -636,7 +850,8 @@ function buildSemanticScene(input: {
 export function buildBundleSemanticScene(
   bundle: CharacterPreviewBundle,
   boundingBox?: { min: number[]; max: number[] } | undefined,
-  texture: FlverSceneTexture | null = null
+  texture: FlverSceneTexture | null = null,
+  showSkeletonMarkers = false
 ): FlverSemanticScene {
   const meshes: FlverSceneMesh[] = [];
   const toSceneBones = (
@@ -653,6 +868,7 @@ export function buildBundleSemanticScene(
     translation: bone.translation,
     rotation: bone.rotation,
     scale: bone.scale,
+    ...(bone.referenceFkMatrix ? { referenceFkMatrix: [...bone.referenceFkMatrix] } : {}),
     rotationOrder: bone.rotationOrder as 'YZX' | 'XYZ' | 'XZY'
   }));
   const skeletons = bundle.models
@@ -693,12 +909,18 @@ export function buildBundleSemanticScene(
       : null;
     const hasMaterialTextures = materialTextures.size > 0;
     for (const meshData of model.meshes) {
-      const usesFollowerBinding = model.bindingBones !== undefined && model.bindingBoneMap !== undefined;
+      const usesFollowerBinding = model.bindingBones !== undefined
+        && model.bindingBoneMap !== undefined;
       const skeletonId = usesFollowerBinding ? model.modelId : (meshData.skeletonId ?? model.modelId);
       const targetSkeleton = bundle.models.find((candidate) => candidate.modelId === skeletonId);
-      const targetSkeletonBoneCount = usesFollowerBinding
-        ? Math.max(-1, ...model.bindingBones!.map((bone) => bone.index)) + 1
-        : targetSkeleton?.bones.length ?? model.bones.length;
+      // FLVER skin indices are native bone identities, not positions in the
+      // JSON array.  A sparse/reordered table such as [9, 4] is valid; using
+      // length here rejects a valid index 9 and can leave an otherwise
+      // complete character invisible.
+      const targetSkeletonBoneIndices = new Set(
+        (usesFollowerBinding ? model.bindingBones! : targetSkeleton?.bones ?? model.bones)
+          .map((bone) => bone.index)
+      );
       const selectedMeshTextures = meshData.materialIndex !== undefined && meshData.materialIndex >= 0
         ? materialTextures.get(meshData.materialIndex) ?? (hasMaterialTextures ? null : legacyMaterialTextures)
         : (hasMaterialTextures ? null : legacyMaterialTextures);
@@ -706,7 +928,7 @@ export function buildBundleSemanticScene(
         model,
         meshData,
         selectedMeshTextures,
-        targetSkeletonBoneCount,
+        targetSkeletonBoneIndices,
         usesFollowerBinding
       );
       meshes.push(mesh);
@@ -719,7 +941,9 @@ export function buildBundleSemanticScene(
     meshes,
     ...(skeletons.length > 0 ? { skeletons } : {}),
     ...(skeletonBindings.length > 0 ? { skeletonBindings } : {}),
-    ...(meshes.length === 0 && skeletons.length > 0 ? { showSkeletonMarkers: true } : {}),
+    ...(skeletons.length > 0 && (showSkeletonMarkers || meshes.length === 0)
+      ? { showSkeletonMarkers: true }
+      : {}),
     bounds: computeSceneBounds(boundingBox, meshes, skeletons.length > 0 ? 15 : 100)
   };
 }
@@ -728,7 +952,7 @@ function decodeBundleMesh(
   model: FlverPreviewModel,
   meshData: FlverPreviewMesh,
   materialTextures: FlverSceneMaterialTextures | null,
-  targetSkeletonBoneCount: number,
+  targetSkeletonBoneIndices: ReadonlySet<number>,
   usesFollowerBinding: boolean
 ): FlverSceneMesh {
   const label = `${model.entry.name}:mesh[${meshData.meshIndex}]`;
@@ -809,7 +1033,7 @@ function decodeBundleMesh(
     }
     mesh.skinIndices = decodeSkinIndices(skinIndicesBase64, vertexCount);
     mesh.skinWeights = decodeSkinWeights(meshData.boneWeightsBase64, vertexCount);
-    assertSkinIndices(mesh.skinIndices, mesh.skinWeights, targetSkeletonBoneCount, label);
+    assertSkinIndices(mesh.skinIndices, mesh.skinWeights, targetSkeletonBoneIndices, label);
   }
   if (materialTextures) {
     mesh.texture = materialTextures.albedo;
@@ -1075,10 +1299,27 @@ function decodeSkinWeights(base64: string, vertexCount: number): Float32Array {
   return new Float32Array(copy);
 }
 
+/**
+ * Native FLVER weight members are commonly Byte4C (byte / 255). Each channel
+ * is quantized independently, so a valid vertex can arrive with a sum such as
+ * 252 / 255 instead of exactly 1. The renderer normalizes its projection copy;
+ * this check must validate the native payload without rejecting that evidence.
+ */
+function isNativeQuantizedWeightVector(weights: Float32Array, offset: number): boolean {
+  for (const denominator of [255, 127, 32767]) {
+    const quantized = [0, 1, 2, 3].every((influence) => {
+      const value = weights[offset + influence] ?? 0;
+      return Math.abs(value * denominator - Math.round(value * denominator)) <= 1e-3;
+    });
+    if (quantized) return true;
+  }
+  return false;
+}
+
 function assertSkinIndices(
   indices: Uint16Array,
   weights: Float32Array,
-  boneCount: number,
+  boneIndices: ReadonlySet<number>,
   label: string
 ): void {
   for (let vertex = 0; vertex < weights.length / 4; vertex += 1) {
@@ -1090,11 +1331,14 @@ function assertSkinIndices(
         throw new Error(`FLVER_SKIN_WEIGHT_INVALID: ${label} vertex=${vertex}`);
       }
       sum += weight;
-      if (weight > 1e-6 && indices[offset]! >= boneCount) {
-        throw new Error(`FLVER_SKIN_INDEX_OUT_OF_RANGE: ${label} vertex=${vertex} bone=${indices[offset]} bones=${boneCount}`);
+      if (weight > 1e-6 && !boneIndices.has(indices[offset]!)) {
+        throw new Error(`FLVER_SKIN_INDEX_OUT_OF_RANGE: ${label} vertex=${vertex} bone=${indices[offset]} knownBones=${boneIndices.size}`);
       }
     }
-    if (!Number.isFinite(sum) || sum < 0.999 || sum > 1.001) {
+    const sumError = Math.abs(sum - 1);
+    const quantizedWeightSumAllowed = isNativeQuantizedWeightVector(weights, vertex * 4)
+      && sumError <= (4 / 255) + 1e-5;
+    if (!Number.isFinite(sum) || (sumError > 0.001 && !quantizedWeightSumAllowed)) {
       throw new Error(`FLVER_SKIN_WEIGHT_SUM_INVALID: ${label} vertex=${vertex} sum=${sum}`);
     }
   }

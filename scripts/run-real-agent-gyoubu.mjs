@@ -328,7 +328,7 @@ function assessTaskCompletion({ runResult, toolEvents, historyBeforeRollback }) 
     && /ninsatuNum|teamType/iu.test(String(edit.fieldId ?? ''))
   )));
   const hasDropMutation = mutationCalls.some((value) => value.edits.some((edit) => (
-    /itemlot|resourceitemlot|equipparamgoods|npcparam/iu.test(String(edit.table ?? ''))
+    /itemlot|resourceitemlot|equipparamgoods|npcparam|npc_param_st/iu.test(String(edit.table ?? ''))
     && /itemlot|lotitem|resourceitem/iu.test(String(edit.fieldId ?? ''))
   )));
   const successfulToolNames = new Set(

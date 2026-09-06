@@ -76,6 +76,7 @@ internal sealed class TaeNativeDocument
     public int TotalGroupCount { get; }
     public IReadOnlyList<int> EventTypes { get; }
     public string SourceHash => Hash(SourceBytes);
+    internal int InvalidTimeRangeCount => CountInvalidTimeRanges();
 
     public static TaeNativeDocument Read(byte[] source)
     {
@@ -458,37 +459,14 @@ internal sealed class TaeNativeDocument
             totalGroupCount = TotalGroupCount,
             animations = (animationPage.HasValue && animationPageSize.HasValue
                 ? Animations.Skip(animationPage.Value * animationPageSize.Value).Take(animationPageSize.Value)
-                : Animations).Select(a => new
-            {
-                animId = a.AnimId,
-                eventCount = a.EventCount,
-                groupCount = a.EventGroupCount,
-                timesCount = a.TimesCount,
-                hkxName = a.HkxName,
-                motionAnimId = motionAnimationIds.TryGetValue(a.AnimId, out var motionAnimId)
-                    ? motionAnimId
-                    : (long?)null,
-                events = a.Events.Take(timelineEventLimit).Select(e =>
-                {
-                    // S17：参数体按模板布局解码（4 字节槽对齐）；无模板时给有界 hex。
-                    var decodedFields = templateLayouts != null
-                        && templateLayouts.TryGetValue(e.EventTypeId, out var layout)
-                        && layout.Length > 0
-                        && DecodeParamFields(e, layout, out var decoded)
-                        ? decoded
-                        : null;
-                    return new
-                    {
-                        startTime = e.StartTime,
-                        endTime = e.EndTime,
-                        eventTypeId = e.EventTypeId,
-                        parameterDecoded = decodedFields != null,
-                        templateFields = decodedFields,
-                        parameterBytesHex = ParameterBytesHex(e, paramHexLimit)
-                    };
-                }).ToArray(),
-                eventsTruncated = a.Events.Count > timelineEventLimit
-            }).ToArray(),
+                : Animations).Select(a => ToAnimationEnvelope(
+                    a,
+                    motionAnimationIds.TryGetValue(a.AnimId, out var motionAnimId)
+                        ? motionAnimId
+                        : (long?)null,
+                    templateLayouts,
+                    timelineEventLimit,
+                    paramHexLimit)).ToArray(),
             animationsTruncated = animationPage.HasValue && animationPageSize.HasValue
                 ? Animations.Count > (animationPage.Value + 1) * animationPageSize.Value
                 : false,
@@ -496,6 +474,77 @@ internal sealed class TaeNativeDocument
             roundTrip = report,
             diagnostics = diagnostics,
             authority = invalidTimeRangeCount > 0 || motionDiagnostics.Count > 0 ? "partial" : "candidate"
+        };
+    }
+
+    /// <summary>
+    /// Projects one native animation without changing its source document.  The
+    /// optional provenance fields are emitted only for an ANIBND aggregate; the
+    /// naked .tae envelope therefore keeps its existing shape.
+    /// </summary>
+    internal object ToAnimationEnvelope(
+        TaeAnimation animation,
+        long? motionAnimId,
+        IReadOnlyDictionary<int, TaeFieldLayout[]>? templateLayouts,
+        int timelineEventLimit,
+        int paramHexLimit,
+        int? taeEntryIndex = null,
+        long? taeEntryId = null,
+        string? taeEntryName = null,
+        string? taeGroup = null)
+    {
+        var events = animation.Events.Take(timelineEventLimit).Select(e =>
+        {
+            // S17：参数体按模板布局解码（4 字节槽对齐）；无模板时给有界 hex。
+            var decodedFields = templateLayouts != null
+                && templateLayouts.TryGetValue(e.EventTypeId, out var layout)
+                && layout.Length > 0
+                && DecodeParamFields(e, layout, out var decoded)
+                ? decoded
+                : null;
+            return new
+            {
+                startTime = e.StartTime,
+                endTime = e.EndTime,
+                eventTypeId = e.EventTypeId,
+                parameterDecoded = decodedFields != null,
+                templateFields = decodedFields,
+                parameterBytesHex = ParameterBytesHex(e, paramHexLimit)
+            };
+        }).ToArray();
+
+        if (!taeEntryIndex.HasValue
+            && !taeEntryId.HasValue
+            && taeEntryName is null
+            && taeGroup is null)
+        {
+            return new
+            {
+                animId = animation.AnimId,
+                eventCount = animation.EventCount,
+                groupCount = animation.EventGroupCount,
+                timesCount = animation.TimesCount,
+                hkxName = animation.HkxName,
+                motionAnimId,
+                events,
+                eventsTruncated = animation.Events.Count > timelineEventLimit
+            };
+        }
+
+        return new
+        {
+            taeEntryIndex,
+            taeEntryId,
+            taeEntryName,
+            taeGroup,
+            animId = animation.AnimId,
+            eventCount = animation.EventCount,
+            groupCount = animation.EventGroupCount,
+            timesCount = animation.TimesCount,
+            hkxName = animation.HkxName,
+            motionAnimId,
+            events,
+            eventsTruncated = animation.Events.Count > timelineEventLimit
         };
     }
 

@@ -4,7 +4,7 @@ import type {
   FlverPreviewBone,
   FlverPreviewModel
 } from '@soulforge/shared';
-import { remapCharacterBundleToLeader } from '../../../../../packages/core/src/character/characterAssembly.js';
+import { remapCharacterBundleToLeader } from '@soulforge/core';
 
 function bone(
   index: number,
@@ -65,7 +65,7 @@ const headMesh: FlverPreviewModel['meshes'][number] = {
   indexSize: 16,
   positionsBase64: float32Base64([0, 0, 0]),
   indicesBase64: '',
-  boneIndicesBase64: uint16Base64([3, 3, 3, 3]),
+  boneIndicesBase64: uint16Base64([2, 2, 2, 2]),
   boneWeightsBase64: float32Base64([1, 0, 0, 0]),
   skinningMode: 'weighted',
   boneIndexSpace: 'flver-global'
@@ -78,9 +78,9 @@ describe('character compatibility skeleton augmentation', () => {
       bone(1, 'Head', 0, 'Root#0/Head#0')
     ], []);
     const head = model('head', [
-      bone(1, 'Head', 0, 'root/Head#0'),
-      bone(2, 'HD_L_bone1', 1, 'root/Head#0/HD_L_bone1#0'),
-      bone(3, 'HD_L_bone2', 2, 'root/Head#0/HD_L_bone1#0/HD_L_bone2#0')
+      bone(0, 'Head', -1, 'root/Head#0'),
+      bone(1, 'HD_L_bone1', 0, 'root/Head#0/HD_L_bone1#0'),
+      bone(2, 'HD_L_bone2', 1, 'root/Head#0/HD_L_bone1#0/HD_L_bone2#0')
     ], [headMesh]);
 
     const result = remapCharacterBundleToLeader(leader, [head]);
@@ -102,12 +102,12 @@ describe('character compatibility skeleton augmentation', () => {
       result.bundle.models[1]?.meshes[0]?.sourceBoneIndicesBase64 ?? '',
       'base64'
     );
-    assert.equal(sourceIndices.readUInt16LE(0), 3);
+    assert.equal(sourceIndices.readUInt16LE(0), 2);
     assert.deepEqual(result.bundle.models[1]?.bindingBones?.map((candidate) => candidate.name), [
       'Head', 'HD_L_bone1', 'HD_L_bone2'
     ]);
-    assert.equal(result.bundle.models[1]?.bindingBoneMap?.[3], 3);
     assert.equal(result.bundle.models[1]?.meshes[0]?.skeletonId, 'head');
+    assert.equal(result.bundle.models[1]?.bindingBoneMap?.[2], 3);
     assert.equal(result.bundle.models[1]?.bones.length, 0);
     assert.ok(result.diagnostics.some((diagnostic) => diagnostic.code === 'CHARACTER_BONE_AUGMENTED'));
   });
@@ -125,5 +125,23 @@ describe('character compatibility skeleton augmentation', () => {
 
     assert.equal(result.ok, false);
     assert.ok(result.diagnostics.some((diagnostic) => diagnostic.code === 'CHARACTER_BONE_PARENT_INVALID'));
+  });
+
+  it('resolves leader bones by native index when the payload array is reordered', () => {
+    const leader = model('leader', [
+      bone(9, 'Head', 4, 'Root#0/Head#0'),
+      bone(4, 'Root', -1, 'Root#0')
+    ], []);
+    const part = model('part', [
+      bone(0, 'Head', -1, 'root/Head#0')
+    ], [{
+      ...headMesh,
+      boneIndicesBase64: uint16Base64([0, 0, 0, 0])
+    }]);
+
+    const result = remapCharacterBundleToLeader(leader, [part]);
+
+    assert.equal(result.ok, true);
+    assert.equal(result.bundle?.models[1]?.bindingBoneMap?.[0], 9);
   });
 });

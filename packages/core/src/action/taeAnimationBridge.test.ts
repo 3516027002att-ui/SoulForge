@@ -144,4 +144,43 @@ describe('ACTION Continuous Sampler & De Boor Spline Tests', () => {
     // FLVER bone 2 unmapped in HKX, retains FLVER reference pose [0, 0, 3]
     assert.deepEqual(flverPoseAtMid[2]?.translation, [0, 0, 3]);
   });
+
+  it('绝对重定向遵循 DirectBoneMap 并保留映射子骨骼的 FK 平移', () => {
+    const clip: TaeAnimationClipData = {
+      animId: 300,
+      motionAnimId: 300,
+      animationType: 'Interleaved',
+      duration: 1.0,
+      frameCount: 2,
+      frameDuration: 1.0,
+      transformTrackCount: 1,
+      hkxBoneCount: 2,
+      hkxBoneNames: ['HkxRoot', 'HkxHead'],
+      hkxParentIndices: [-1, 0],
+      hkxReferencePose: [
+        { translation: [0, 0, 0], rotation: [0, 0, 0, 1], scale: [1, 1, 1] },
+        { translation: [0, 2, 0], rotation: [0, 0, 0, 1], scale: [1, 1, 1] }
+      ],
+      trackToHkxBone: [1],
+      hkxToFlverBoneMap: [0, 1],
+      interleavedTransforms: [
+        { translation: [0, 2, 0], rotation: [0, 0, 0, 1], scale: [1, 1, 1] },
+        { translation: [0, 3, 0], rotation: [0, 0, 0, 1], scale: [1, 1, 1] }
+      ]
+    };
+
+    const sampler = new ActionContinuousSampler(clip);
+    const flverReferencePose = [
+      { translation: [0, 5, 0] as [number, number, number], rotation: [0, 0, 0, 1] as [number, number, number, number], scale: [1, 1, 1] as [number, number, number] },
+      { translation: [0, 1, 0] as [number, number, number], rotation: [0, 0, 0, 1] as [number, number, number, number], scale: [1, 1, 1] as [number, number, number] }
+    ];
+
+    const pose = sampler.sampleFlverPose(0, 2, flverReferencePose, false, [-1, 0]);
+
+    // The source root and head FK are authoritative for mapped bones. The
+    // target bind translations are intentionally different so a regression
+    // that clamps children back to bind pose is observable here.
+    assert.deepEqual(pose[0]?.translation, [0, 0, 0]);
+    assert.deepEqual(pose[1]?.translation, [0, 2, 0]);
+  });
 });

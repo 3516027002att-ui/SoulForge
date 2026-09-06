@@ -96,6 +96,102 @@ internal static class NativeMtdTextureLocator
         return empty;
     }
 
+    /// <summary>
+    /// Resolve the bounded, source-backed material semantics used by the
+    /// read-only FLVER preview. The MTD basename is only an entry locator; the
+    /// shader family and sampler contract come from the MTD4 body itself.
+    ///
+    /// This is deliberately a narrow projection, not a claim that MTD4 has
+    /// been fully parsed. Unknown shader families return a conservative
+    /// cutout/no-blend contract, and callers must keep the corresponding
+    /// native feature closed rather than guessing from a filename.
+    /// </summary>
+    public static NativeMtdPreviewSemantics? ResolvePreviewSemantics(
+        string? materialMtdPath,
+        string? gameRoot,
+        IEnumerable<string>? additionalRoots = null)
+    {
+        var source = ResolveMtdSource(materialMtdPath, gameRoot, additionalRoots);
+        return source is null ? null : ParsePreviewSemantics(source);
+    }
+
+    /// <summary>
+    /// 判断真实 MTD4 是否声明了 Character 的 decal/paint-decal 接收面。
+    ///
+    /// 不能用 MTD 文件名判断：Sekiro 的 <c>P_FB_M_9510_Decal.mtd</c> 文件名
+    /// 带有 Decal，但它的原生 Character shader 是 paint-decal 变体，描述仍以
+    /// <c>Albedo/Metallic/Shininess/Normal/</c> 结尾，并通过
+    /// <c>GXFT_PaintDecal_Mat</c> 与 <c>g_GX_bDisableDecal</c> 参数声明投影
+    /// 功能；其它材质则可能直接在描述中带 <c>/MeshDecal</c>。反过来，仅凭
+    /// 文件名猜投影会把普通 AMNS 占位材质涂到脸上。这里复用同一套有界 MTD
+    /// 候选解析，只把经过真实 MTD4 正文确认的材质交给兼容投影。
+    /// </summary>
+    public static bool HasNativeMeshDecalSemantics(
+        string? materialMtdPath,
+        string? gameRoot,
+        IEnumerable<string>? additionalRoots = null)
+    {
+        return ResolvePreviewSemantics(materialMtdPath, gameRoot, additionalRoots)
+            ?.IsNativeMeshDecal == true;
+    }
+
+    /// <summary>
+    /// 判断真实 MTD4 的 sampler 定义是否包含指定的原生 slot token。
+    ///
+    /// 角色 Character_AMSN 材质把 Mask1Map 作为 Albedo1/Albedo2 的颜色混合
+    /// 输入；它不是透明度。调用方用这个结果决定是否把同一 TPF 中的 `_1m`
+    /// companion 传给只读预览，避免凭材质名漏掉头部的 Blend1To2。
+    /// </summary>
+    public static bool HasNativeTextureSlot(
+        string? materialMtdPath,
+        string? slotToken,
+        string? gameRoot,
+        IEnumerable<string>? additionalRoots = null)
+    {
+        if (string.IsNullOrWhiteSpace(slotToken)) return false;
+
+        var source = ResolveMtdSource(materialMtdPath, gameRoot, additionalRoots);
+        return source is not null && ContainsNativeTextureSlot(source, slotToken);
+    }
+
+    private static byte[]? ResolveMtdSource(
+        string? materialMtdPath,
+        string? gameRoot,
+        IEnumerable<string>? additionalRoots)
+    {
+        var materialName = GetMaterialName(materialMtdPath);
+        if (materialName.Length == 0) return null;
+
+        var roots = ResolveMtdRoots(gameRoot, additionalRoots);
+        if (roots.Count == 0) return null;
+
+        var catalogs = roots.Select(GetRootCatalog).ToArray();
+        var candidates = EnumerateCandidates(materialName, catalogs).ToArray();
+        var packageCount = 0;
+        foreach (var candidate in candidates)
+        {
+            if (packageCount++ >= MaxMtdPackages) break;
+            try
+            {
+                var bytes = candidate.IsLoose
+                    ? ReadLooseMtd(candidate.Path, gameRoot)
+                    : ReadPackagedMtd(candidate.Path, materialName, gameRoot);
+                if (bytes is not null) return bytes;
+            }
+            catch (Exception ex) when (ex is InvalidDataException
+                or NotSupportedException
+                or IOException
+                or UnauthorizedAccessException
+                or SecurityException)
+            {
+                // A bad overlay package must not prevent the original catalog
+                // from being checked. Missing/ambiguous source stays null so
+                // callers remain fail-closed.
+            }
+        }
+        return null;
+    }
+
     private static byte[]? ReadLooseMtd(string path, string? gameRoot)
     {
         var info = new FileInfo(path);
@@ -235,6 +331,138 @@ internal static class NativeMtdTextureLocator
             paths = fallback.ToArray();
         }
         return paths;
+    }
+
+    private static bool ContainsNativeCharacterDecalSemantics(
+        byte[] source,
+        string shaderName)
+    {
+        if (source.Length <= 0 || source.Length > MaxMtdBytes) return false;
+        var ascii = Encoding.ASCII.GetString(source);
+        // 这些字符串来自 MTD4 正文，而不是 basename。普通 Character_AMSN
+        // 也可能带 GXFT_PaintDecal_Mat；仅凭该 token（或另一个通用开关）
+        // 会把 BD_M_9040 的全部布料误判成 projected-decal。因此 MeshDecal
+        // 以真实 shader/Description 为第一条权威路径；第二条仅保留当前
+        // 已核对的 character_AMSN paint-decal receiver 结构
+        // （MaterialID + SSR 开关、且没有 ValidWet），这是 HD_M_9510 的
+        // MTD4 结构，不是材质文件名猜测。
+        var hasCharacterDescription = ascii.Contains(
+            "[Character]\r\nAlbedo/Metallic/Shininess/Normal/",
+            StringComparison.OrdinalIgnoreCase);
+        if (!hasCharacterDescription) return false;
+
+        var hasMeshDecalDescription = ascii.Contains(
+            "Albedo/Metallic/Shininess/Normal/MeshDecal",
+            StringComparison.OrdinalIgnoreCase);
+        var hasMeshDecalShader = string.Equals(
+            shaderName,
+            "Character_MeshDecal",
+            StringComparison.OrdinalIgnoreCase);
+        var hasPaintDecalReceiverContract = string.Equals(
+                shaderName,
+                "character_AMSN",
+                StringComparison.OrdinalIgnoreCase)
+            && ascii.Contains(
+                "GXFT_PaintDecal_Mat",
+                StringComparison.OrdinalIgnoreCase)
+            && ascii.Contains(
+                "g_GX_MaterialID",
+                StringComparison.OrdinalIgnoreCase)
+            && ascii.Contains(
+                "g_GX_bEnableSSR",
+                StringComparison.OrdinalIgnoreCase)
+            && !ascii.Contains(
+                "GXFT_ValidWet",
+                StringComparison.OrdinalIgnoreCase);
+        return hasMeshDecalDescription
+            || hasMeshDecalShader
+            || hasPaintDecalReceiverContract;
+    }
+
+    private static NativeMtdPreviewSemantics ParsePreviewSemantics(byte[] source)
+    {
+        if (source.Length <= 0 || source.Length > MaxMtdBytes)
+            return NativeMtdPreviewSemantics.Unknown;
+
+        var ascii = Encoding.ASCII.GetString(source);
+        var shaderPath = ExtractShaderPath(ascii);
+        var shaderName = shaderPath is null
+            ? string.Empty
+            : Path.GetFileNameWithoutExtension(shaderPath.Replace('\\', Path.DirectorySeparatorChar));
+        var slots = TextureSlotPattern
+            .Matches(ascii)
+            .Cast<Match>()
+            .Select(match => match.Value)
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+        var character = ascii.Contains("[Character]", StringComparison.OrdinalIgnoreCase)
+            && ascii.Contains("Albedo/Metallic/Shininess/Normal/", StringComparison.OrdinalIgnoreCase);
+        var isAoSss = shaderName.Contains("Character_AMSN_[AO_SSS]", StringComparison.OrdinalIgnoreCase);
+        var isDetailBlend = shaderName.Contains("Character_AMSN_[DetailBlend]", StringComparison.OrdinalIgnoreCase);
+        var hasMask1 = slots.Any(slot => slot.Contains("Mask1Map", StringComparison.OrdinalIgnoreCase));
+        var hasAoSssLayers = HasTextureSlotIndex(slots, 2, "AlbedoMap")
+            && HasTextureSlotIndex(slots, 7, "AlbedoMap");
+        var hasDetailBlendLayers = HasTextureSlotIndex(slots, 1, "AlbedoMap")
+            && HasTextureSlotIndex(slots, 7, "AlbedoMap");
+        var isNativeMeshDecal = character
+            && ContainsNativeCharacterDecalSemantics(source, shaderName);
+
+        // These values are the narrow sampler facts already cross-checked
+        // against the installed SDT shader contracts: AO/SSS uses the base
+        // layer on UV0 and damage/detail on UV1; DetailBlend exposes both the
+        // primary Texture2D_7 and secondary Texture2D_1 on UV0 (the latter is
+        // a separate UV group, not a separate vertex UV attribute). A shader
+        // that only happens to contain two albedo strings is not enough
+        // authority.
+        var hasDiffuseBlend = !isNativeMeshDecal
+            && ((isAoSss && hasAoSssLayers) || (isDetailBlend && hasDetailBlendLayers));
+        var alphaMode = isAoSss && !isNativeMeshDecal ? "opaque" : "cutout";
+        var diffuseBlend = hasDiffuseBlend
+            ? new CharacterTextureDiffuseBlend(
+                "multiply",
+                isDetailBlend ? 0 : 1,
+                0,
+                1f,
+                isDetailBlend,
+                false)
+            : null;
+
+        return new NativeMtdPreviewSemantics(
+            shaderPath,
+            shaderName,
+            character,
+            isNativeMeshDecal,
+            hasMask1,
+            alphaMode,
+            diffuseBlend);
+    }
+
+    private static string? ExtractShaderPath(string ascii)
+    {
+        var match = Regex.Match(
+            ascii,
+            @"(?<path>(?:[A-Za-z]:)?[\\/][^\x00-\x1f\x7f#]{1,768}?\.spx)#?",
+            RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+        return match.Success ? match.Groups["path"].Value : null;
+    }
+
+    private static bool HasTextureSlotIndex(
+        IReadOnlyList<string> slots,
+        int index,
+        string semantic)
+    {
+        return slots.Any(slot => ExtractTextureSlotIndex(slot) == index
+            && slot.Contains(semantic, StringComparison.OrdinalIgnoreCase));
+    }
+
+    private static bool ContainsNativeTextureSlot(byte[] source, string slotToken)
+    {
+        if (source.Length <= 0 || source.Length > MaxMtdBytes) return false;
+        var ascii = Encoding.ASCII.GetString(source);
+        return TextureSlotPattern
+            .Matches(ascii)
+            .Cast<Match>()
+            .Any(match => match.Value.Contains(slotToken, StringComparison.OrdinalIgnoreCase));
     }
 
     private static int ExtractTextureSlotIndex(string slotName)
@@ -510,4 +738,27 @@ internal static class NativeMtdTextureLocator
     private sealed record DirectorySignature(string Path, long LastWriteTicks);
 
     private sealed record FileSignature(long Length, long LastWriteTicks);
+}
+
+/// <summary>
+/// Narrow, source-backed MTD4 projection consumed by the read-only FLVER
+/// preview. It is intentionally not the full MTD document model.
+/// </summary>
+internal sealed record NativeMtdPreviewSemantics(
+    string? ShaderPath,
+    string ShaderName,
+    bool IsCharacterShader,
+    bool IsNativeMeshDecal,
+    bool HasMask1Slot,
+    string AlphaMode,
+    CharacterTextureDiffuseBlend? DiffuseBlend)
+{
+    public static NativeMtdPreviewSemantics Unknown { get; } = new(
+        null,
+        string.Empty,
+        false,
+        false,
+        false,
+        "cutout",
+        null);
 }

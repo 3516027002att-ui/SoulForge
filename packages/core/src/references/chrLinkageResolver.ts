@@ -221,7 +221,7 @@ export async function resolveChrLinkage(
                     hasMinibossDefeat ? 'HandleMinibossDefeat (2003[15])' : 'HandleBossDefeat (2003[12])',
                     hasMinibossBar ? 'DisplayMinibossHealthBar (2003[87])' : 'DisplayBossHealthBar (2003[11])'
                   ],
-                  description: '首领/精英怪击败与死亡结算：负责关闭血条与击败处理。大首领在此等待SpEffect 201000特殊忍杀；改为精英怪时需换用 HandleMinibossDefeat 并直接监听实体死亡。'
+                  description: '首领/精英怪击败与死亡结算：负责关闭血条与击败处理。'
                 });
               } else if (hasBossBar || hasMinibossBar || evStr.endsWith('10')) {
                 result.associatedBossEvents.push({
@@ -234,7 +234,7 @@ export async function resolveChrLinkage(
                     hasMinibossBar ? 'DisplayMinibossHealthBar (2003[87])' : 'DisplayBossHealthBar (2003[11])',
                     ...(hasImmortality ? ['SetCharacterImmortality (2004[12])'] : [])
                   ],
-                  description: '开战与血条初始化：负责全屏血条显示。大首领在此开启 SetCharacterImmortality(1) 导致特殊忍杀；改为精英怪需换用 DisplayMinibossHealthBar 并移除不死锁。'
+                  description: '开战与血条初始化：负责全屏血条显示与开战状态设置。'
                 });
               } else if (hasImmortality || evStr.endsWith('20')) {
                 result.associatedBossEvents.push({
@@ -244,7 +244,7 @@ export async function resolveChrLinkage(
                   role: 'immortality_control',
                   instructionName: 'SetCharacterImmortality (2004[12])',
                   keyInstructions: ['SetCharacterImmortality (2004[12])'],
-                  description: '不死锁状态维护：控制角色不死。改为精英怪时需确保不赋予不死(0)，使清空红点后可直接致命忍杀死亡。'
+                  description: '不死锁状态维护：控制角色的不死身状态。'
                 });
               }
             }

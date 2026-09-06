@@ -19,15 +19,113 @@ export interface AgentToolActivityRowProps {
 }
 
 function statusLabel(status: AgentToolActivityStatus): string {
-  return ({ running: '进行中', succeeded: '成功', failed: '失败' } as const)[status];
+  return ({ running: '进行中', succeeded: '成功', failed: '失败' } as const)[status] ?? '完成';
+}
+
+export interface ToolCallSemantic {
+  icon: string;
+  action: string;
+  target: string;
+  isTag: boolean;
+  fullDetail: string;
+}
+
+/** 对照图 2：将工具原始调用名与入参解析为语义动词与对象 */
+export function parseToolCallSemantic(toolName: string, argumentsJson?: string | null): ToolCallSemantic {
+  const name = (toolName || '').toLowerCase();
+  let parsed: Record<string, unknown> = {};
+  if (argumentsJson) {
+    try {
+      parsed = JSON.parse(argumentsJson);
+    } catch {
+      // 忽略无法解析的 JSON
+    }
+  }
+
+  // 1. 命令行类：>_ 已运行 git status ...
+  if (name.includes('run') || name.includes('cmd') || name.includes('command') || name.includes('bash') || name.includes('exec')) {
+    const cmd = String(parsed.CommandLine ?? parsed.command ?? parsed.cmd ?? '').trim();
+    return {
+      icon: '>_',
+      action: '已运行',
+      target: cmd || toolName,
+      isTag: false,
+      fullDetail: cmd || argumentsJson || ''
+    };
+  }
+
+  // 2. 读取 / 查看文件类：📖 已读取 SKILL.md
+  if (name.includes('read') || name.includes('view') || name.includes('open') || name.includes('cat')) {
+    const rawPath = String(parsed.AbsolutePath ?? parsed.TargetFile ?? parsed.targetPath ?? parsed.path ?? parsed.filePath ?? '').trim();
+    const fileName = rawPath ? rawPath.split(/[\\/]/).pop() || rawPath : '';
+    if (name.includes('task_record')) {
+      return { icon: '📖', action: '已读取', target: '任务记录', isTag: true, fullDetail: rawPath };
+    }
+    if (name.includes('stats')) {
+      return { icon: '📊', action: '已读取', target: '工作区统计', isTag: true, fullDetail: rawPath };
+    }
+    return {
+      icon: '📖',
+      action: '已读取',
+      target: fileName || toolName,
+      isTag: !!fileName,
+      fullDetail: rawPath || argumentsJson || ''
+    };
+  }
+
+  // 3. 编辑 / 写入文件类：✏️ 已编辑 x.dcx
+  if (name.includes('write') || name.includes('edit') || name.includes('replace') || name.includes('mutate') || name.includes('patch')) {
+    const rawPath = String(parsed.TargetFile ?? parsed.targetPath ?? parsed.path ?? parsed.filePath ?? '').trim();
+    const fileName = rawPath ? rawPath.split(/[\\/]/).pop() || rawPath : '';
+    if (name.includes('task_record')) {
+      return { icon: '📝', action: '已更新', target: '任务记录', isTag: true, fullDetail: rawPath };
+    }
+    return {
+      icon: '✏️',
+      action: '已编辑',
+      target: fileName || toolName,
+      isTag: !!fileName,
+      fullDetail: rawPath || argumentsJson || ''
+    };
+  }
+
+  // 4. 检索 / 查询类：🔍 已检索 query
+  if (name.includes('search') || name.includes('grep') || name.includes('find') || name.includes('query') || name.includes('retrieve')) {
+    const query = String(parsed.Query ?? parsed.query ?? parsed.Pattern ?? parsed.pattern ?? parsed.paramName ?? parsed.keyword ?? '').trim();
+    if (name.includes('map_object')) {
+      return { icon: '🗺️', action: '已查询', target: '地图对象', isTag: true, fullDetail: query };
+    }
+    if (name.includes('references')) {
+      return { icon: '🔗', action: '已查找', target: '引用关系', isTag: true, fullDetail: query };
+    }
+    if (name.includes('evidence')) {
+      return { icon: '🔍', action: '已检索', target: '工作区证据', isTag: true, fullDetail: query };
+    }
+    return {
+      icon: '🔍',
+      action: '已检索',
+      target: query || toolName,
+      isTag: false,
+      fullDetail: query || argumentsJson || ''
+    };
+  }
+
+  // 5. 记忆类
+  if (name.includes('memories') || name.includes('memory')) {
+    return { icon: '🧠', action: '已读取', target: '会话记忆', isTag: true, fullDetail: argumentsJson || '' };
+  }
+
+  return {
+    icon: '🔧',
+    action: '已调用',
+    target: toolName,
+    isTag: true,
+    fullDetail: argumentsJson || ''
+  };
 }
 
 /**
- * §12.10 组件树里的 AgentToolActivityRow：消息流中的工具调用行。
- *
- * 默认单行折叠（`<details>` 不带 open，§12.5「工具调用默认折叠为单行摘要」）；
- * 展开后才显示参数/错误码详情。status 与状态徽标分离成独立元素，
- * 便于单元测试与 e2e 断言「折叠态只看到单行摘要」。
+ * §12.10 组件树里的 AgentToolActivityRow：消息流中的工具调用单行流水（图 2 样式）。
  */
 export function AgentToolActivityRow(props: AgentToolActivityRowProps): ReactElement {
   const {
@@ -39,9 +137,8 @@ export function AgentToolActivityRow(props: AgentToolActivityRowProps): ReactEle
     defaultOpen = false,
     step
   } = props;
-  // 内部状态承载展开态：`open` 受控但 onToggle 回写，用户可自由展开/收起；
-  // SSR 初始渲染按 defaultOpen 决定是否带 open 属性（默认折叠）。
   const [isOpen, setIsOpen] = useState(defaultOpen);
+  const semantic = parseToolCallSemantic(summary, detail);
 
   return (
     <div
@@ -54,10 +151,18 @@ export function AgentToolActivityRow(props: AgentToolActivityRowProps): ReactEle
         open={isOpen}
         onToggle={(event) => setIsOpen(event.currentTarget.open)}
       >
-        <summary className="agent-tool-activity__summary">
-          <span className={`agent-tool-activity__dot is-${status}`} aria-hidden="true"></span>
-          <span className="agent-tool-activity__name">{summary}</span>
-          <span className={`agent-tool-status agent-tool-status--${status}`} data-testid={`agent-tool-status-${id}`}>
+        <summary className="agent-tool-activity__summary" title={semantic.fullDetail || summary}>
+          {semantic.icon === '>_' ? (
+            <span className="agent-terminal-badge" aria-hidden="true">&gt;_</span>
+          ) : (
+            <span className="agent-tool-activity__icon" aria-hidden="true">{semantic.icon}</span>
+          )}
+          <span className="agent-tool-activity__action">{semantic.action}</span>
+          <span className={`agent-tool-activity__target${semantic.isTag ? ' is-tag' : ''}`}>
+            {semantic.target}
+          </span>
+          <span className="sr-only agent-tool-activity__name">{summary}</span>
+          <span className={`sr-only agent-tool-status agent-tool-status--${status}`} data-testid={`agent-tool-status-${id}`}>
             {statusLabel(status)}
           </span>
         </summary>
@@ -71,3 +176,4 @@ export function AgentToolActivityRow(props: AgentToolActivityRowProps): ReactEle
     </div>
   );
 }
+

@@ -918,4 +918,24 @@ describe('S9：Ask 菜单 portal 后 CSS 用 fixed（锚点是 viewport 坐标�
     assert.match(source, /document\.body/);
     assert.match(source, /getBoundingClientRect\(\)/);
   });
+
+  it('发送指令后时间线视图正常渲染，不抛出异常', () => {
+    const html = render({
+      goal: '修改这个页面',
+      task: {
+        ...render0Task(),
+        task: {
+          ...INITIAL_AGENT_TASK_STATE,
+          sessionId: 'session-123',
+          phase: 'running',
+          startedAt: Date.now() - 5000,
+          thinkingText: '正在分析页面结构',
+          narrations: [{ step: 1, text: '我正在为您处理' }],
+          toolCalls: [{ callId: 'c1', step: 1, name: 'read_file', status: 'running' }]
+        }
+      }
+    });
+    assert.match(html, /修改这个页面/);
+  });
 });
+

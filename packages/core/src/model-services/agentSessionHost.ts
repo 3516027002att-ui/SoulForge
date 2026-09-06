@@ -189,8 +189,20 @@ export async function runAgentSession(params: AgentSessionRunParams): Promise<Ag
     messages.push(...resumedMessages);
   } else if (systemPrompt !== undefined && systemPrompt.length > 0) {
     messages.push({ role: 'system', content: systemPrompt });
+    if (params.permissionMode === 'full') {
+      messages.push({
+        role: 'system',
+        content: '【系统运行模式通知】：当前环境已分配完整写入权限（fullPermission 模式）。用户指令为明确的修改任务；在完成必要的名称、参数和事件原生定位与核对后，应直接调用写入工具（如 mutate_param_fields、apply_emevd_dsl 等）实施修改、提交并原生回读验证，无须停下等待二次确认。'
+      });
+    }
     messages.push(...resumedMessages);
   } else {
+    if (params.permissionMode === 'full') {
+      messages.push({
+        role: 'system',
+        content: '【系统运行模式通知】：当前环境已分配完整写入权限（fullPermission 模式）。用户指令为明确的修改任务；在完成必要的名称、参数和事件原生定位与核对后，应直接调用写入工具（如 mutate_param_fields、apply_emevd_dsl 等）实施修改、提交并原生回读验证，无须停下等待二次确认。'
+      });
+    }
     messages.push(...resumedMessages);
   }
   messages.push({

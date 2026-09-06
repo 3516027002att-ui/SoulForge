@@ -2499,7 +2499,7 @@ export function App(): ReactElement {
     setMsgRows(extractMsgRows(nextPreview));
     const openPlan = planResourceOpen(file);
     if (openPlan.ipcMethods.includes('readTaeDocument') && typeof bridge.readTaeDocument === 'function') {
-      const result = await (bridge.readTaeDocument as (uri: string, opts?: { animationPage?: number; animationPageSize?: number }) => Promise<unknown>)(file.sourceUri, { animationPage: 0, animationPageSize: 1000 }) as { ok: boolean; data?: Record<string, unknown> };
+      const result = await (bridge.readTaeDocument as (uri: string, opts?: { animationPage?: number; animationPageSize?: number }) => Promise<unknown>)(file.sourceUri) as { ok: boolean; data?: Record<string, unknown> };
       if (result.ok && result.data) setTaeData(result.data);
     }
     if (openPlan.ipcMethods.includes('readEsdDocument') && typeof bridge.readEsdDocument === 'function') {
@@ -2892,6 +2892,7 @@ export function App(): ReactElement {
       ...(agentResources.length > 0 ? { resources: agentResources } : {}),
       ...(agentAttachments.length > 0 ? { attachments: agentAttachments } : {}),
       streaming: true,
+      timeoutMs: 180_000,
       // 工作区 Agent 默认启用一次性 RAG 预检；main 会优先使用内存
       // active corpus，并等待正在进行的那一次语义分析完成，不会按查询重扫。
       useRagSearch: true,
@@ -4389,88 +4390,91 @@ export function App(): ReactElement {
         {/* ══════════ Agent 面板 ══════════ */}
         {/* resize 已内聚到 AgentDockResizer（AgentSidebar 内部）；宽度状态仍由 App
             持有，因为 overlay 判定与 workspace 持久化都要读它。 */}
-        <AgentSidebar
-          open={agentOpen}
-          style={agentStyle}
-          expanded={agentExpanded}
-          agentWidth={agentWidth}
-          agentMinWidth={AGENT_MIN_WIDTH}
-          agentMaxWidth={AGENT_MAX_WIDTH}
-          onAgentWidthChange={(width) => {
-            setAgentWidth(width);
-            setAgentExpanded(false);
-          }}
-          busy={aiBusy}
-          provider={aiProvider}
-          thinking={aiThinking}
-          protocol={activeAgentProtocol}
-          permissionMode={aiMode}
-          permissionLockReason={AI_PERMISSION_LOCK_REASON}
-          goal={agentGoal}
-          idleNotice={agentIdleNotice}
-          draft={aiDraft}
-          prompt={aiPrompt}
-          contextLabel={domainLabel(activeDomain)}
-          selectedFilePath={selectedFile?.relativePath ?? null}
-          onResourcesChange={setAgentResources}
-          onAttachmentsChange={(chips) => setAgentAttachments(chips.map((chip) => ({
-            token: chip.token,
-            mediaType: chip.mediaType,
-            byteLength: chip.byteLength,
-            expiresAt: chip.expiresAt
-          })))}
-          tools={agentTools.length > 0 ? agentTools : tools}
-          toolOutput={toolOutput}
-          task={{
-            task: agentTask,
-            services: agentServices,
-            selectedServiceId: agentServiceId,
-            runBlocker: describeRunBlocker({
-              hasBridge: bridge !== null,
-              configId: agentServiceId,
-              prompt: aiPrompt,
-              active: isAgentTaskActive(agentTask)
-            }),
-            sessions: agentSessions,
-            sessionsError: agentSessionsError,
-            sessionDetail: agentSessionDetail,
-            onSelectService: setAgentServiceId,
-            onRun: () => void runAgentTask(),
-            onCancel: () => void cancelAgentTask(),
-            onRefreshSessions: () => void refreshAgentSessions(),
-            onLoadSession: (sessionPath) => void loadAgentSession(sessionPath),
-            onResumeSession: (sessionPath) => void runAgentTask(sessionPath),
-            onRespondApproval: (callId, decision) => void respondAgentApproval(callId, decision),
-            respondingApprovalCallId,
-            approvalError
-          }}
-          eventUri={eventUri}
-          onEventUriChange={setEventUri}
-          onProviderChange={setAiProvider}
-          onThinkingChange={setAiThinking}
-          onPromptChange={setAiPrompt}
-          onSend={() => void sendAgentPrompt()}
-          citeSelecting={citeSelecting}
-          onToggleCiteSelect={() => setCiteSelecting((selecting) => !selecting)}
-          pendingCiteHits={pendingCiteHits}
-          onCiteHitsConsumed={() => setPendingCiteHits(null)}
-          onNewTask={startNewAgentTask}
-          onToggleExpand={() => {
-            setAgentExpanded((expanded) => !expanded);
-            setAgentWidth((width) => width >= AGENT_MAX_WIDTH ? AGENT_DEFAULT_WIDTH : AGENT_MAX_WIDTH);
-          }}
-          interactionMode={agentInteractionMode}
-          onInteractionModeChange={(mode) => {
-            setAgentInteractionMode(mode);
-            try {
-              window.localStorage.setItem('soulforge:agentInteractionMode', mode);
-            } catch {}
-          }}
-          onClose={() => setAgentOpen(false)}
-          onRunToolSearch={(toolQuery) => void runToolSearch(toolQuery)}
-          onExplainEvent={(uri) => void explainEvent(uri)}
-        />
+        <PanelErrorBoundary key="panel-boundary:agent" label="Agent 面板">
+          <AgentSidebar
+            open={agentOpen}
+            style={agentStyle}
+            expanded={agentExpanded}
+            agentWidth={agentWidth}
+            agentMinWidth={AGENT_MIN_WIDTH}
+            agentMaxWidth={AGENT_MAX_WIDTH}
+            onAgentWidthChange={(width) => {
+              setAgentWidth(width);
+              setAgentExpanded(false);
+            }}
+            busy={aiBusy}
+            provider={aiProvider}
+            thinking={aiThinking}
+            protocol={activeAgentProtocol}
+            permissionMode={aiMode}
+            permissionLockReason={AI_PERMISSION_LOCK_REASON}
+            goal={agentGoal}
+            idleNotice={agentIdleNotice}
+            draft={aiDraft}
+            prompt={aiPrompt}
+            contextLabel={domainLabel(activeDomain)}
+            selectedFilePath={selectedFile?.relativePath ?? null}
+            onResourcesChange={setAgentResources}
+            onAttachmentsChange={(chips) => setAgentAttachments(chips.map((chip) => ({
+              token: chip.token,
+              mediaType: chip.mediaType,
+              byteLength: chip.byteLength,
+              expiresAt: chip.expiresAt
+            })))}
+            tools={agentTools.length > 0 ? agentTools : tools}
+            toolOutput={toolOutput}
+            task={{
+              task: agentTask,
+              services: agentServices,
+              selectedServiceId: agentServiceId,
+              runBlocker: describeRunBlocker({
+                hasBridge: bridge !== null,
+                configId: agentServiceId,
+                prompt: aiPrompt,
+                active: isAgentTaskActive(agentTask)
+              }),
+              sessions: agentSessions,
+              sessionsError: agentSessionsError,
+              sessionDetail: agentSessionDetail,
+              onSelectService: setAgentServiceId,
+              onRun: () => void runAgentTask(),
+              onCancel: () => void cancelAgentTask(),
+              onRefreshSessions: () => void refreshAgentSessions(),
+              onLoadSession: (sessionPath) => void loadAgentSession(sessionPath),
+              onResumeSession: (sessionPath) => void runAgentTask(sessionPath),
+              onRespondApproval: (callId, decision) => void respondAgentApproval(callId, decision),
+              respondingApprovalCallId,
+              approvalError
+            }}
+            eventUri={eventUri}
+            onEventUriChange={setEventUri}
+            onProviderChange={setAiProvider}
+            onThinkingChange={setAiThinking}
+            onPromptChange={setAiPrompt}
+            onSend={() => void sendAgentPrompt()}
+            citeSelecting={citeSelecting}
+            onToggleCiteSelect={() => setCiteSelecting((selecting) => !selecting)}
+            pendingCiteHits={pendingCiteHits}
+            onCiteHitsConsumed={() => setPendingCiteHits(null)}
+            onNewTask={startNewAgentTask}
+            onToggleExpand={() => {
+              setAgentExpanded((expanded) => !expanded);
+              setAgentWidth((width) => width >= AGENT_MAX_WIDTH ? AGENT_DEFAULT_WIDTH : AGENT_MAX_WIDTH);
+            }}
+            interactionMode={agentInteractionMode}
+            onInteractionModeChange={(mode) => {
+              setAgentInteractionMode(mode);
+              try {
+                window.localStorage.setItem('soulforge:agentInteractionMode', mode);
+              } catch {}
+            }}
+            onClose={() => setAgentOpen(false)}
+            onRunToolSearch={(toolQuery) => void runToolSearch(toolQuery)}
+            onExplainEvent={(uri) => void explainEvent(uri)}
+          />
+        </PanelErrorBoundary>
       </div>
+
 
       {/* ══════════ 命令面板 ══════════ */}
       <div

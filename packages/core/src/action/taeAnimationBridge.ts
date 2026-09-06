@@ -10,6 +10,11 @@ import { runBridge } from '../bridge/runBridge.js';
 export interface LoadTaeAnimationClipOptions {
   filePath: string;
   animId: number;
+  /** Explicit TAE child identity; animId alone is not unique in an ANIBND. */
+  taeEntryIndex?: number | undefined;
+  taeEntryId?: number | undefined;
+  taeEntryName?: string | undefined;
+  taeGroup?: string | undefined;
   /** Explicit ANIBND that contains the HKX entry for this TAE motion. */
   animationContainerPath?: string | undefined;
   /** Explicit ANIBND that contains skeleton.hkx when it is not in the animation container. */
@@ -24,6 +29,11 @@ export interface SampleTaeAnimationPoseOptions {
   filePath: string;
   animId: number;
   timeSeconds: number;
+  /** Explicit TAE child identity; animId alone is not unique in an ANIBND. */
+  taeEntryIndex?: number | undefined;
+  taeEntryId?: number | undefined;
+  taeEntryName?: string | undefined;
+  taeGroup?: string | undefined;
   animationContainerPath?: string | undefined;
   skeletonContainerPath?: string | undefined;
   loop?: boolean | undefined;
@@ -53,6 +63,10 @@ export async function loadTaeAnimationClip(
     filePath: options.filePath,
     commandOptions: {
       animId: options.animId,
+      ...(options.taeEntryIndex !== undefined ? { taeEntryIndex: options.taeEntryIndex } : {}),
+      ...(options.taeEntryId !== undefined ? { taeEntryId: options.taeEntryId } : {}),
+      ...(options.taeEntryName !== undefined ? { taeEntryName: options.taeEntryName } : {}),
+      ...(options.taeGroup !== undefined ? { taeGroup: options.taeGroup } : {}),
       ...(options.animationContainerPath ? { animationContainerPath: options.animationContainerPath } : {}),
       ...(options.skeletonContainerPath ? { skeletonContainerPath: options.skeletonContainerPath } : {}),
       ...(options.flverBoneNames?.length ? { flverBoneNames: options.flverBoneNames } : {})
@@ -73,6 +87,10 @@ export async function sampleTaeAnimationPose(
       animId: options.animId,
       timeSeconds: options.timeSeconds,
       loop: options.loop ?? true,
+      ...(options.taeEntryIndex !== undefined ? { taeEntryIndex: options.taeEntryIndex } : {}),
+      ...(options.taeEntryId !== undefined ? { taeEntryId: options.taeEntryId } : {}),
+      ...(options.taeEntryName !== undefined ? { taeEntryName: options.taeEntryName } : {}),
+      ...(options.taeGroup !== undefined ? { taeGroup: options.taeGroup } : {}),
       ...(options.animationContainerPath ? { animationContainerPath: options.animationContainerPath } : {}),
       ...(options.skeletonContainerPath ? { skeletonContainerPath: options.skeletonContainerPath } : {}),
       ...(options.flverBoneNames?.length ? { flverBoneNames: options.flverBoneNames } : {}),

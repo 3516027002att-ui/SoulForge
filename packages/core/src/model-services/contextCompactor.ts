@@ -143,7 +143,10 @@ const CONTEXT_OVERFLOW_PATTERNS: readonly RegExp[] = [
   /maximum\s+context/i,
   /prompt\s+is\s+too\s+long/i,
   /token\s*(limit|length|budget|exceeded|too\s+(long|large))/i,
-  /reduce\s+the\s+(length|size)\s+of\s+(the\s+)?(messages|prompt|input)/i
+  /reduce\s+the\s+(length|size)\s+of\s+(the\s+)?(messages|prompt|input)/i,
+  /request\s*(content|payload)?\s*(is\s+)?too\s*(large|long)/i,
+  /exceeds?\s+(the\s+)?(maximum|model'?s?)\s*(context|token)/i,
+  /The request con/i
 ];
 
 export function isContextOverflowDiagnostic(

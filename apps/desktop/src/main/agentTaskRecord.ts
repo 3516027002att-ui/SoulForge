@@ -193,26 +193,12 @@ export function createAgentTaskRecordGateway(root: string, sessionId: string): A
 
   return {
     read: readEntries,
-    beforeSearch: async ({ toolName, query }) => withRecordLock(async () => {
+    beforeSearch: async ({ query }) => withRecordLock(async () => {
       if (clean(query) === '') {
         return {
           ok: false as const,
           code: 'TASK_RECORD_SEARCH_QUERY_REQUIRED',
           message: '搜索前必须提供非空查询；不能用空查询反复扫描任务记录。'
-        };
-      }
-      const parsed = await loadDocument();
-      const hasTarget = parsed.entries.some((entry) => (
-        entry.kind === 'target'
-        && entry.status !== 'blocked'
-        && normalizeObjectName(entry.objectName).length > 0
-      ));
-      if (!hasTarget) {
-        return {
-          ok: false as const,
-          code: 'TASK_RECORD_TARGETS_REQUIRED',
-          message: `调用 ${toolName} 前必须先在 Evidence 台账列出可能需要修改的对象；请先写入 kind=target 的对象清单。`,
-          details: { query }
         };
       }
       return { ok: true as const };

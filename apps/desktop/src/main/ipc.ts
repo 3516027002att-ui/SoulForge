@@ -8,6 +8,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import type { TrustedIpcHandle } from './ipc/registration.js';
 import { registerAgentIpcHandlers, hasActiveAgentRuns, isAgentSessionActive, scheduleInternalRagEmbedding } from './ipc/agent.js';
 import { registerResourceIpcHandlers } from './ipc/resource.js';
+import { resolveWorkspaceStoragePaths, type WorkspaceStoragePaths } from './workspaceStorage.js';
 import {
   analyzeWorkspace,
   buildAiSidebarDraft,
@@ -898,7 +899,7 @@ function legacyOperationLogPathForWorkspace(workspaceId: string): string {
 }
 
 async function ensureActiveOperationLog(session: WorkspaceSession): Promise<OperationLogUtilityClient> {
-  const storage = workspaceStoragePaths(session.meta.workspaceId);
+  const storage = workspaceStoragePaths(session.meta.workspaceId, session.layers.overlayRoot);
   await operationLogUtility.openWorkspace({
     appDatabasePath: join(app.getPath('userData'), 'app.db'),
     databasePath: join(storage.root, 'workspace.db'),
@@ -1269,7 +1270,7 @@ async function refreshActiveIndexAfterNativeWrite(
     },
     persist: async (index) => {
       applyWorkspaceIndexSnapshot(index);
-      await refreshRagAfterAnalyze(database, index);
+      await refreshRagAfterAnalyze(database, index, undefined, requestedSources);
     }
   });
   applyWorkspaceIndexSnapshot(output.index);
@@ -1297,36 +1298,15 @@ function resolveKnowledgeSourceUris(sourceIds: readonly string[], files: readonl
   return [...new Set(resolved)];
 }
 
-function workspaceStoragePaths(workspaceId: string): {
-  root: string;
-  backupBaseDir: string;
-  recoveryDir: string;
-  stagingRoot: string;
-} {
-  const safeWorkspaceKey = createHash('sha256').update(workspaceId).digest('hex').slice(0, 24);
-  const root = join(localApplicationDataRoot(), 'workspaces', safeWorkspaceKey);
-  return {
-    root,
-    backupBaseDir: join(root, 'backups'),
-    recoveryDir: join(root, 'recovery'),
-    stagingRoot: join(root, 'staging')
-  };
+function workspaceStoragePaths(workspaceId: string, workspaceRoot?: string): WorkspaceStoragePaths {
+  const session = getWorkspaceSession();
+  const resolvedRoot = workspaceRoot
+    ?? ((session && session.meta.workspaceId === workspaceId) ? session.layers.overlayRoot : undefined);
+  return resolveWorkspaceStoragePaths(workspaceId, resolvedRoot);
 }
 
-function localApplicationDataRoot(): string {
-  if (process.platform === 'win32') {
-    return join(dirname(app.getPath('appData')), 'Local', 'SoulForge');
-  }
-  return join(app.getPath('userData'), 'local-data');
-}
-
-function durableStoragePaths(workspaceId: string): {
-  root: string;
-  backupBaseDir: string;
-  recoveryDir: string;
-  stagingRoot: string;
-} {
-  return workspaceStoragePaths(workspaceId);
+function durableStoragePaths(workspaceId: string, workspaceRoot?: string): WorkspaceStoragePaths {
+  return workspaceStoragePaths(workspaceId, workspaceRoot);
 }
 
 /**

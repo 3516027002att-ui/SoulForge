@@ -92,7 +92,15 @@ async function verifyMesh(
     command: 'read-flver-mesh',
     filePath: out,
     allowedRoots: [dirname(out)],
-    commandOptions: { meshIndex },
+    // The single-mesh command keeps a conservative interactive default of
+    // 10,000 vertices / 30,000 indices. This corpus smoke is a native
+    // coverage gate, not an interactive request: several real c8010 meshes
+    // exceed that UI bound and must be read in full here.
+    commandOptions: {
+      meshIndex,
+      maxVertices: 1_000_000,
+      maxIndices: 3_000_000
+    },
     timeoutMs: 120_000
   });
   if (r.parseStatus === 'failed' || !r.data) {
@@ -102,7 +110,10 @@ async function verifyMesh(
   const failures: string[] = [];
   if (!d.positionsBase64) return [`mesh[${meshIndex}] missing positions`];
   const pos = toF32(d.positionsBase64);
-  const vertexCount = Math.min(d.vertexCount, 10_000);
+  // This smoke requests the complete mesh above, so the returned position
+  // buffer must cover the native vertex count rather than the interactive
+  // command's former 10,000-vertex default.
+  const vertexCount = d.vertexCount;
   if (pos.length !== vertexCount * 3) {
     return [`mesh[${meshIndex}] position size mismatch: ${pos.length} floats vs ${vertexCount} vertices`];
   }
@@ -113,8 +124,13 @@ async function verifyMesh(
   }
   if (!allFinite) failures.push(`mesh[${meshIndex}] non-finite positions`);
 
-  // Bone weights: every skinned vertex must sum to ~1 (quantized bytes → tolerance 0.02);
-  // all-zero weights are valid for static/aux meshes.
+  // Bone weights are native quantized shader inputs, not a normalized Three.js
+  // attribute. Mature FLVER shaders divide by the native sum; for example,
+  // real c8010 auxiliary meshes contain a valid rigid influence of 127/255.
+  // The renderer normalizes only its projection copy. Validate the actual
+  // native contract here: finite non-negative channels, a non-zero influence
+  // sum, and exact component/index arity. Requiring sum===1 would reject
+  // valid source data and turn this coverage smoke into a renderer-policy test.
   if (d.boneWeightsBase64) {
     const wt = toF32(d.boneWeightsBase64);
     if (!d.boneIndicesBase64) {
@@ -133,8 +149,11 @@ async function verifyMesh(
     }
     for (let i = 0; i < Math.min(vertexCount, 400); i++) {
       const w0 = wt[i * 4] ?? 0, w1 = wt[i * 4 + 1] ?? 0, w2 = wt[i * 4 + 2] ?? 0, w3 = wt[i * 4 + 3] ?? 0;
-      if (Math.max(w0, w1, w2, w3) > 0 && Math.abs(w0 + w1 + w2 + w3 - 1) > 0.02) {
-        failures.push(`mesh[${meshIndex}] bone weights sum ${(w0 + w1 + w2 + w3).toFixed(3)} != 1 (quantized)`);
+      const sum = w0 + w1 + w2 + w3;
+      if (![w0, w1, w2, w3, sum].every(Number.isFinite)
+        || [w0, w1, w2, w3].some((weight) => weight < -1e-6 || weight > 1 + 1e-6)
+        || sum <= 1e-6) {
+        failures.push(`mesh[${meshIndex}] invalid native bone weights at vertex ${i}: [${w0},${w1},${w2},${w3}] sum=${sum}`);
         break;
       }
     }

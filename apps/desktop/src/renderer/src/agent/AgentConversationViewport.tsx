@@ -60,6 +60,57 @@ export interface AgentConversationViewportProps {
   children?: ReactNode;
 }
 
+function renderInlineMarkdown(text: string): ReactNode {
+  if (!text || (!text.includes('`') && !text.includes('**'))) return text;
+  const parts = text.split(/(\*\*[^*]+\*\*|`[^`\n]+`)/g);
+  return parts.map((part, i) => {
+    if (part.startsWith('`') && part.endsWith('`') && part.length > 2) {
+      return <code key={i} className="agent-inline-code">{part.slice(1, -1)}</code>;
+    }
+    if (part.startsWith('**') && part.endsWith('**') && part.length > 4) {
+      return <strong key={i}>{part.slice(2, -2)}</strong>;
+    }
+    return part;
+  });
+}
+
+function AgentThinkingItem({ label, text, live }: { label: string; text: string; live: boolean }): ReactElement {
+  const [userOpened, setUserOpened] = useState<boolean | null>(null);
+  const isOpen = userOpened !== null ? userOpened : live;
+
+  if (live && text === '') {
+    return (
+      <div className="agent-thinking is-live" data-testid="agent-thinking">
+        <span className="spinner" aria-hidden="true"></span>
+        <span>{label}</span>
+      </div>
+    );
+  }
+
+  if (!live && text === '') {
+    return (
+      <div className="agent-thinking" data-testid="agent-thinking">
+        <span>{label}</span>
+      </div>
+    );
+  }
+
+  return (
+    <details
+      className={`agent-thinking${live ? ' is-live' : ''}`}
+      data-testid="agent-thinking"
+      open={isOpen}
+      onToggle={(e) => setUserOpened(e.currentTarget.open)}
+    >
+      <summary>
+        {live && <span className="spinner" aria-hidden="true"></span>}
+        <span>{label}</span>
+      </summary>
+      <div className="agent-thinking__body">{text}</div>
+    </details>
+  );
+}
+
 function renderConversationItem(item: AgentConversationItem, index: number): ReactElement {
   switch (item.kind) {
     case 'user':
@@ -76,36 +127,18 @@ function renderConversationItem(item: AgentConversationItem, index: number): Rea
         </div>
       );
     case 'thinking':
-      if (item.live && item.text === '') {
-        return (
-          <div className="agent-thinking is-live" key={`thinking-${index}`} data-testid="agent-thinking">
-            <span className="spinner" aria-hidden="true"></span>
-            <span>{item.label}</span>
-          </div>
-        );
-      }
-      if (!item.live && item.text === '') {
-        return (
-          <div className="agent-thinking" key={`thinking-${index}`} data-testid="agent-thinking">
-            {item.label}
-          </div>
-        );
-      }
       return (
-        <details
-          className={`agent-thinking${item.live ? ' is-live' : ''}`}
+        <AgentThinkingItem
           key={`thinking-${index}`}
-          data-testid="agent-thinking"
-          open={item.live ? true : undefined}
-        >
-          <summary>{item.label}</summary>
-          <div className="agent-thinking__body">{item.text}</div>
-        </details>
+          label={item.label}
+          text={item.text}
+          live={item.live}
+        />
       );
     case 'assistant':
       return (
         <article className="agent-message agent-message--agent" key={`assistant-${item.step}-${index}`}>
-          <p className="agent-message__markdown">{item.text}</p>
+          <p className="agent-message__markdown">{renderInlineMarkdown(item.text)}</p>
         </article>
       );
     case 'tools':
@@ -137,6 +170,8 @@ function renderConversationItem(item: AgentConversationItem, index: number): Rea
           )}
         </article>
       );
+    default:
+      return <></>;
   }
 }
 
@@ -184,15 +219,35 @@ export function AgentConversationViewport(props: AgentConversationViewportProps)
   // 粘性滚动：贴底才跟随新内容；用户上滚阅读时不再被拽回底部（「回到底部」
   // 钮用同一 48px 阈值现身）。无条件滚底会让滚动条「往下吸」，读不了历史。
   const stickToBottomRef = useRef(true);
+  const userScrolledUpAtRef = useRef<number>(0);
+
   function handleScroll(): void {
     const el = scrollRef.current;
     if (!el) return;
-    stickToBottomRef.current = shouldAgentAutoScroll({
-      scrollTop: el.scrollTop,
-      scrollHeight: el.scrollHeight,
-      clientHeight: el.clientHeight
-    });
+    const distanceToBottom = el.scrollHeight - (el.scrollTop + el.clientHeight);
+    if (Date.now() - userScrolledUpAtRef.current < 1000 || distanceToBottom > 24) {
+      stickToBottomRef.current = false;
+    } else if (distanceToBottom <= 8) {
+      stickToBottomRef.current = true;
+    }
   }
+
+  function handleWheel(event: React.WheelEvent<HTMLDivElement>): void {
+    if (event.deltaY < 0) {
+      // 用户明确向上滑动滚轮：立即解除粘底吸附，并记录时间戳防回弹
+      userScrolledUpAtRef.current = Date.now();
+      stickToBottomRef.current = false;
+    } else if (event.deltaY > 0) {
+      const el = scrollRef.current;
+      if (el) {
+        const distanceToBottom = el.scrollHeight - (el.scrollTop + el.clientHeight);
+        if (distanceToBottom <= 12) {
+          stickToBottomRef.current = true;
+        }
+      }
+    }
+  }
+
   // 新会话（用户目标变化）时恢复跟随，保证发送后能看到最新尾部。
   const firstUserText = conversationItems.find((item) => item.kind === 'user')?.text ?? '';
   const prevUserTextRef = useRef(firstUserText);
@@ -209,6 +264,10 @@ export function AgentConversationViewport(props: AgentConversationViewportProps)
     el.scrollTop = el.scrollHeight;
   }, [messages, conversationItems, approvals, status, failure]);
 
+  const isLiveTask = status !== null || thinkingLive;
+  const safeItems = (conversationItems ?? []).filter(Boolean);
+  const lastAssistantIndex = safeItems.map((item) => item?.kind).lastIndexOf('assistant');
+
   return (
     <div
       className="agent-conversation"
@@ -217,6 +276,7 @@ export function AgentConversationViewport(props: AgentConversationViewportProps)
       aria-label="Agent 会话记录"
       ref={scrollRef}
       onScroll={handleScroll}
+      onWheel={handleWheel}
     >
       {failure !== null && (
         <section className="agent-failure-card" data-testid="agent-failure" role="alert">
@@ -228,7 +288,21 @@ export function AgentConversationViewport(props: AgentConversationViewportProps)
       )}
 
       {useTimeline ? (
-        conversationItems.map((item, index) => renderConversationItem(item, index))
+        safeItems.map((item, index) => {
+          if (!item) return null;
+          if (item.kind === 'assistant') {
+            const isStreamingNow = isLiveTask && index === lastAssistantIndex;
+            return (
+              <article className="agent-message agent-message--agent" key={`assistant-${item.step ?? index}-${index}`}>
+                <p className="agent-message__markdown">
+                  {renderInlineMarkdown(item.text)}
+                  {isStreamingNow && <span className="agent-stream-cursor" aria-hidden="true" />}
+                </p>
+              </article>
+            );
+          }
+          return renderConversationItem(item, index);
+        })
       ) : hasMessages ? (
         <AgentMessageList messages={messages} />
       ) : idle && !hasTimeline ? (
@@ -265,7 +339,12 @@ export function AgentConversationViewport(props: AgentConversationViewportProps)
 
       {footer}
 
-      <AgentScrollToBottom scrollRef={scrollRef} />
+      <AgentScrollToBottom
+        scrollRef={scrollRef}
+        onScrollToBottom={() => {
+          stickToBottomRef.current = true;
+        }}
+      />
     </div>
   );
 }

@@ -22,4 +22,13 @@ describe('ACTION motion identity cache', () => {
     assert.equal(cache.get('file:///chr/c0000.tae', 'rev-1', 10), 1_000_000_010);
     assert.equal(cache.get('file:///chr/c0000.tae', 'rev-2', 10), undefined);
   });
+
+  it('keeps the same animId isolated across TAE sections', () => {
+    const cache = new ActionMotionIdentityCache<number>();
+    cache.set('file:///chr/c0000.anibnd.dcx', 'rev-1', 10, 1_000_000_010, 'section-a00');
+    cache.set('file:///chr/c0000.anibnd.dcx', 'rev-1', 10, 1_000_002_010, 'section-a50');
+
+    assert.equal(cache.get('file:///chr/c0000.anibnd.dcx', 'rev-1', 10, 'section-a00'), 1_000_000_010);
+    assert.equal(cache.get('file:///chr/c0000.anibnd.dcx', 'rev-1', 10, 'section-a50'), 1_000_002_010);
+  });
 });

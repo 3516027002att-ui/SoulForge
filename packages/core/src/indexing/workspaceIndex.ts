@@ -104,6 +104,13 @@ export type TaeAnimationLookup =
       matchCount: number;
     };
 
+export interface TaeAnimationIdentitySelector {
+  taeEntryIndex?: number;
+  taeEntryId?: number;
+  taeEntryName?: string;
+  taeGroup?: string;
+}
+
 export class WorkspaceIndex {
   readonly workspaceId: string;
 
@@ -411,17 +418,23 @@ export class WorkspaceIndex {
   }
 
   /**
-   * 按精确 sourceUri + animId 读取一个 TAE animation identity。
+   * 按精确 sourceUri + TAE entry selector + animId 读取一个 TAE animation identity。
    *
    * sourceUri 不做 alias/fuzzy 匹配，animId 也不跨来源合并；同一来源出现
-   * 多个相同 animId 时返回 AMBIGUOUS，调用方不得取首项继续解析。
+   * 多个相同 animId 时，未带 selector 返回 AMBIGUOUS，调用方不得取首项继续解析。
    */
-  lookupTaeAnimation(sourceUri: string, animId: number): TaeAnimationLookup {
+  lookupTaeAnimation(
+    sourceUri: string,
+    animId: number,
+    selector: TaeAnimationIdentitySelector = {}
+  ): TaeAnimationLookup {
     const matches: Array<{ exportItem: TaeExport; animation: TaeAnimSymbol }> = [];
     for (const exportItem of this.taeExports) {
       if (exportItem.sourceUri !== sourceUri) continue;
       for (const animation of exportItem.animations) {
-        if (animation.animId === animId) matches.push({ exportItem, animation });
+        if (animation.animId !== animId) continue;
+        if (!matchesTaeEntryIdentity(animation, selector)) continue;
+        matches.push({ exportItem, animation });
       }
     }
     if (matches.length === 0) return { status: 'NOT_FOUND', sourceUri, animId };
@@ -601,6 +614,17 @@ export class WorkspaceIndex {
     const report = collectEventEvidence(event, references);
     return { event, report, markdown: renderEventEvidenceMarkdown(report), references };
   }
+}
+
+function matchesTaeEntryIdentity(
+  animation: Pick<TaeAnimSymbol, 'taeEntryIndex' | 'taeEntryId' | 'taeEntryName' | 'taeGroup'>,
+  selector: TaeAnimationIdentitySelector
+): boolean {
+  if (selector.taeEntryIndex !== undefined && animation.taeEntryIndex !== selector.taeEntryIndex) return false;
+  if (selector.taeEntryId !== undefined && animation.taeEntryId !== selector.taeEntryId) return false;
+  if (selector.taeEntryName !== undefined && animation.taeEntryName !== selector.taeEntryName) return false;
+  if (selector.taeGroup !== undefined && animation.taeGroup !== selector.taeGroup) return false;
+  return true;
 }
 
 function paramExportKey(value: ParamExport): string {
@@ -893,6 +917,42 @@ function sortAndLimit<T>(results: Array<SearchResult<T>>, limit: number): Array<
  * BehaviorParam/AtkParam cluster cannot hide NpcParam or ItemLotParam.
  * Explicit paramNames that resolve to one table are unchanged.
  */
+function selectDiversifiedMatches(
+  matches: Array<SearchResult<ParamRowSymbol>>,
+  maxCount: number
+): Array<SearchResult<ParamRowSymbol>> {
+  if (matches.length <= maxCount) return matches;
+  const groups = new Map<string, Array<SearchResult<ParamRowSymbol>>>();
+  for (const match of matches) {
+    const groupName = normalizeParamName(match.item.paramName || match.item.entryName || 'unknown');
+    const group = groups.get(groupName) ?? [];
+    group.push(match);
+    groups.set(groupName, group);
+  }
+  if (groups.size <= 1) return matches.slice(0, maxCount);
+  for (const group of groups.values()) group.sort((left, right) => right.score - left.score);
+  const orderedGroups = [...groups.values()].sort((left, right) => {
+    const scoreDelta = (right[0]?.score ?? 0) - (left[0]?.score ?? 0);
+    if (scoreDelta !== 0) return scoreDelta;
+    return normalizeParamName(left[0]?.item.paramName ?? '').localeCompare(
+      normalizeParamName(right[0]?.item.paramName ?? '')
+    );
+  });
+  const selected: Array<SearchResult<ParamRowSymbol>> = [];
+  for (let offset = 0; selected.length < maxCount; offset += 1) {
+    let added = false;
+    for (const group of orderedGroups) {
+      const result = group[offset];
+      if (!result) continue;
+      selected.push(result);
+      added = true;
+      if (selected.length >= maxCount) break;
+    }
+    if (!added) break;
+  }
+  return selected;
+}
+
 function diversifyParamSearchResults(
   results: Array<SearchResult<ParamRowSymbol>>,
   limit: number,
@@ -908,7 +968,7 @@ function diversifyParamSearchResults(
       return rowName.length > 0 && phraseTerms.some((term) => rowName.includes(term));
     })
     .sort((left, right) => right.score - left.score);
-  const phrasePriority = rowNamePhraseMatches.slice(0, Math.min(12, limit));
+  const phrasePriority = selectDiversifiedMatches(rowNamePhraseMatches, Math.min(12, limit));
   if (phrasePriority.length > 0) {
     const selected = new Set(phrasePriority.map((result) => result.item.uri));
     const remainder = results.filter((result) => !selected.has(result.item.uri));
@@ -918,12 +978,13 @@ function diversifyParamSearchResults(
   const topScore = results.reduce((highest, result) => Math.max(highest, result.score), 0);
   const topScoreMatches = results
     .filter((result) => result.score === topScore)
-    .slice(0, Math.min(12, limit));
-  if (topScoreMatches.length > 1) {
-    const selected = new Set(topScoreMatches.map((result) => result.item.uri));
+    .sort((left, right) => right.score - left.score);
+  const diversifiedTopScores = selectDiversifiedMatches(topScoreMatches, Math.min(12, limit));
+  if (diversifiedTopScores.length > 1) {
+    const selected = new Set(diversifiedTopScores.map((result) => result.item.uri));
     const remainder = results.filter((result) => !selected.has(result.item.uri));
-    const diversifiedRemainder = diversifyParamSearchResults(remainder, limit - topScoreMatches.length, query);
-    return [...topScoreMatches, ...diversifiedRemainder].slice(0, limit);
+    const diversifiedRemainder = diversifyParamSearchResults(remainder, limit - diversifiedTopScores.length, query);
+    return [...diversifiedTopScores, ...diversifiedRemainder].slice(0, limit);
   }
   const groups = new Map<string, Array<SearchResult<ParamRowSymbol>>>();
   for (const result of results) {

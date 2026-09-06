@@ -49,17 +49,18 @@ describe('action preview compatibility planning', () => {
     assert.ok(planned.every((candidate) => candidate.name.startsWith('am_')));
   });
 
-  it('keeps the native Wolf face/hair component ahead of cape and other form variants', () => {
+  it('keeps the native SDT Wolf face/hair component ahead of cape and other form variants', () => {
     assert.deepEqual(
       planC0000CompatibilityCandidates(
         'fc',
         ['fc_m_0000.partsbnd.dcx'],
-        ['fc_m_0000.partsbnd.dcx', 'fc_m_0100.partsbnd.dcx', 'fc_m_0200.partsbnd.dcx']
+        ['fc_m_0000.partsbnd.dcx', 'fc_m_0100.partsbnd.dcx', 'fc_m_0200.partsbnd.dcx', 'fc_m_0210.partsbnd.dcx']
       ),
       [
         { origin: 'base', name: 'fc_m_0200.partsbnd.dcx' },
         { origin: 'overlay', name: 'fc_m_0000.partsbnd.dcx' },
-        { origin: 'base', name: 'fc_m_0100.partsbnd.dcx' }
+        { origin: 'base', name: 'fc_m_0100.partsbnd.dcx' },
+        { origin: 'base', name: 'fc_m_0210.partsbnd.dcx' }
       ]
     );
   });
@@ -94,5 +95,10 @@ describe('action preview compatibility planning', () => {
     assert.match(actionSource, /ACTION_PREVIEW_LEADER_REMAP_FAILED/);
     assert.match(actionSource, /ACTION_COMPATIBILITY_PREVIEW_ASSEMBLED/);
     assert.doesNotMatch(actionSource, /(?:bd|am|lg)_m_\d{4}/i);
+  });
+
+  it('does not inject the unverified FC texture as an ACTION head projection', () => {
+    assert.doesNotMatch(actionSource, /compatibilityProjectionTextureName\s*:/);
+    assert.doesNotMatch(actionSource, /FC_M_0000_head_a/);
   });
 });

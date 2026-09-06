@@ -132,6 +132,13 @@ internal static class CharacterTexturePreviewService
         var bindings = new List<CharacterTexturePreviewBinding>();
         foreach (var material in flver.Materials)
         {
+            // The MTD basename only locates an entry. Alpha/blend semantics
+            // must come from the same bounded MTD4 body; if the source cannot
+            // be read, keep the conservative surface contract below.
+            var nativeSemantics = NativeMtdTextureLocator.ResolvePreviewSemantics(
+                material.MtdPath,
+                gameRoot,
+                materialRoots);
             var ranked = candidates
                 .Select(candidate => new
                 {
@@ -201,7 +208,7 @@ internal static class CharacterTexturePreviewService
             // the two source-mapped material families whose native MTD
             // declares the same-TPF companion; the generic renderer must
             // not reinterpret it as alphaMap.
-            var mask1 = UsesNativeBlendMask(material.MtdPath)
+            var mask1 = nativeSemantics?.HasMask1Slot == true
                 ? TryDecodeCompanion(primaryCandidate, "1m", "linear", decoded)
                 : null;
             bindings.Add(new CharacterTexturePreviewBinding(
@@ -214,61 +221,12 @@ internal static class CharacterTexturePreviewService
                     Albedo2 = albedo2,
                     Normal2 = normal2,
                     DiffuseBlend = albedo2 is not null
-                        ? ResolveDiffuseBlend(material.MtdPath)
+                        ? nativeSemantics?.DiffuseBlend
                         : null,
-                    AlphaMode = ResolvePreviewAlphaMode(material.MtdPath)
+                    AlphaMode = nativeSemantics?.AlphaMode ?? "cutout"
                 }));
         }
         return bindings;
-    }
-
-    /// <summary>
-    /// Preserve the alpha policy declared by the native shader family.
-    ///
-    /// The mature DSAnimStudio SDT config for Character_AMSN_[AO_SSS]_[Cs]
-    /// sets EnableAlphas=false. Sekiro's FC_M_0200 HeadA_a consequently uses
-    /// its RGBA payload as color data; treating that alpha as a cutout removes
-    /// almost the entire face and leaves the eye/mouth cards floating on a
-    /// black surface. Unknown MTD families stay conservative and remain
-    /// cutout-rendered until their shader semantics are known.
-    /// </summary>
-    private static string ResolvePreviewAlphaMode(string? materialMtdPath)
-    {
-        var name = Path.GetFileNameWithoutExtension(
-            (materialMtdPath ?? string.Empty).Replace('\\', Path.DirectorySeparatorChar));
-        return name.Contains("_[AO_SSS]", StringComparison.OrdinalIgnoreCase)
-            && !name.Contains("decal", StringComparison.OrdinalIgnoreCase)
-            ? "opaque"
-            : "cutout";
-    }
-
-    private static bool UsesNativeBlendMask(string? materialMtdPath)
-    {
-        var name = Path.GetFileNameWithoutExtension(
-            (materialMtdPath ?? string.Empty).Replace('\\', Path.DirectorySeparatorChar));
-        return name.Contains("CatEye", StringComparison.OrdinalIgnoreCase)
-            || name.EndsWith("_Mouth", StringComparison.OrdinalIgnoreCase)
-            || name.Equals("Mouth", StringComparison.OrdinalIgnoreCase);
-    }
-
-    private static CharacterTextureDiffuseBlend? ResolveDiffuseBlend(string? materialMtdPath)
-    {
-        var name = Path.GetFileNameWithoutExtension(
-            (materialMtdPath ?? string.Empty).Replace('\\', Path.DirectorySeparatorChar));
-        // These values come from the mature DSAnimStudio SDT configs for the
-        // Character_AMSN_[AO_SSS] family: Albedo1 uses UV0, Albedo2 uses UV1,
-        // undefined blend mask is 1, and diffuse blending is Multiply. The
-        // [Cs] variant does not consume texture alpha; the base variant also
-        // multiplies the blend amount by Albedo2 alpha.
-        if (name.Contains("_[AO_SSS]_[Cs]", StringComparison.OrdinalIgnoreCase))
-        {
-            return new CharacterTextureDiffuseBlend("multiply", 1, 0, 1f, false, false);
-        }
-        if (name.EndsWith("_[AO_SSS]", StringComparison.OrdinalIgnoreCase))
-        {
-            return new CharacterTextureDiffuseBlend("multiply", 1, 0, 1f, false, true);
-        }
-        return null;
     }
 
     private static List<TextureCandidate> ReadColorTextureCandidates(
@@ -331,16 +289,20 @@ internal static class CharacterTexturePreviewService
         // scoring. Companion lookup is different: `_a`/`_n`/`_m` are an exact
         // filename convention, so preserve underscores and compare basenames.
         var stem = TextureBasename(albedo.TextureName);
+        var hasL = stem.EndsWith("_l", StringComparison.OrdinalIgnoreCase);
+        if (hasL) stem = stem[..^2];
         var baseStem = stem.EndsWith("_a", StringComparison.OrdinalIgnoreCase)
             ? stem[..^2]
             : stem;
-        var target = $"{baseStem}_{suffix}";
+        var target1 = hasL ? $"{baseStem}_{suffix}_l" : $"{baseStem}_{suffix}";
+        var target2 = $"{baseStem}_{suffix}";
         for (var index = 0; index < albedo.Document.Textures.Count; index++)
         {
             var name = albedo.Document.Textures[index].Name;
-            if (!string.Equals(TextureBasename(name), target, StringComparison.OrdinalIgnoreCase))
-                continue;
-            return new TextureCandidate(albedo.Document, index, albedo.LeafName, albedo.Order, name);
+            var bName = TextureBasename(name);
+            if (string.Equals(bName, target1, StringComparison.OrdinalIgnoreCase)
+                || string.Equals(bName, target2, StringComparison.OrdinalIgnoreCase))
+                return new TextureCandidate(albedo.Document, index, albedo.LeafName, albedo.Order, name);
         }
         return null;
     }
@@ -532,6 +494,8 @@ internal static class CharacterTexturePreviewService
                 break;
             stem = stem[..^extension.Length];
         }
+        if (stem.EndsWith("_l", StringComparison.OrdinalIgnoreCase))
+            stem = stem[..^2];
         return Compact(stem);
     }
 
@@ -570,6 +534,8 @@ internal static class CharacterTexturePreviewService
     private static bool IsAlbedoTexture(string name)
     {
         var lower = name.ToLowerInvariant();
+        if (lower.EndsWith("_l", StringComparison.Ordinal))
+            lower = lower[..^2];
         if (lower.Contains("normal", StringComparison.Ordinal)
             || lower.Contains("mask", StringComparison.Ordinal)
             || lower.Contains("rough", StringComparison.Ordinal)
@@ -595,11 +561,15 @@ internal static class CharacterTexturePreviewService
         modelStem.StartsWith("HD_", StringComparison.OrdinalIgnoreCase)
         || modelStem.StartsWith("HEAD_", StringComparison.OrdinalIgnoreCase);
 
-    private static bool HasAlbedoSuffix(string name) =>
-        name.EndsWith("_a", StringComparison.OrdinalIgnoreCase)
-        || name.EndsWith("_albedo", StringComparison.OrdinalIgnoreCase)
-        || name.EndsWith("_diffuse", StringComparison.OrdinalIgnoreCase)
-        || name.EndsWith("_color", StringComparison.OrdinalIgnoreCase);
+    private static bool HasAlbedoSuffix(string name)
+    {
+        if (name.EndsWith("_l", StringComparison.OrdinalIgnoreCase))
+            name = name[..^2];
+        return name.EndsWith("_a", StringComparison.OrdinalIgnoreCase)
+            || name.EndsWith("_albedo", StringComparison.OrdinalIgnoreCase)
+            || name.EndsWith("_diffuse", StringComparison.OrdinalIgnoreCase)
+            || name.EndsWith("_color", StringComparison.OrdinalIgnoreCase);
+    }
 
     private sealed record TextureCandidate(
         TpfNativeDocument Document,

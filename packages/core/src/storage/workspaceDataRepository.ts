@@ -8,7 +8,8 @@ import type {
   ReferenceConfidence,
   ReferenceEdge,
   ResourceFormatKind,
-  ResourceKind
+  ResourceKind,
+  SymbolBundle
 } from '@soulforge/shared';
 import type { SqliteDatabase } from './sqliteDatabase.js';
 
@@ -504,6 +505,116 @@ FROM reference_edges WHERE workspace_id = ? ORDER BY from_uri, to_uri, kind`)
       reason: String(row.reason),
       evidence: parseJson(String(row.evidenceJson), 'reference evidence')
     }));
+  }
+
+  getSemanticFileCache(relativePath: string, fileSha256: string): SymbolBundle | null {
+    const row = this.database.prepare<[string, string, string], { payload_json: string }>(`
+SELECT payload_json FROM semantic_file_cache
+WHERE workspace_id = ? AND relative_path = ? AND file_sha256 = ?`).get(this.workspaceId, relativePath, fileSha256);
+    if (!row) return null;
+    try {
+      return JSON.parse(row.payload_json) as SymbolBundle;
+    } catch {
+      return null;
+    }
+  }
+
+  getAllSemanticFileCacheRows(): Array<{
+    relativePath: string;
+    fileSha256: string;
+    resourceKind: string;
+    payloadJson: string;
+    mtimeMs: number;
+    updatedAt: string;
+  }> {
+    const rows = this.database.prepare<[string], {
+      relative_path: string;
+      file_sha256: string;
+      resource_kind: string;
+      payload_json: string;
+      mtime_ms: number;
+      updated_at: string;
+    }>(`
+SELECT relative_path, file_sha256, resource_kind, payload_json, mtime_ms, updated_at
+FROM semantic_file_cache WHERE workspace_id = ?`).all(this.workspaceId);
+    return rows.map((r) => ({
+      relativePath: r.relative_path,
+      fileSha256: r.file_sha256,
+      resourceKind: r.resource_kind,
+      payloadJson: r.payload_json,
+      mtimeMs: r.mtime_ms,
+      updatedAt: r.updated_at
+    }));
+  }
+
+  getAllSemanticFileCache(): Map<string, { fileSha256: string; payload: SymbolBundle }> {
+    const rows = this.getAllSemanticFileCacheRows();
+    const map = new Map<string, { fileSha256: string; payload: SymbolBundle }>();
+    for (const row of rows) {
+      try {
+        map.set(row.relativePath, {
+          fileSha256: row.fileSha256,
+          payload: JSON.parse(row.payloadJson) as SymbolBundle
+        });
+      } catch {}
+    }
+    return map;
+  }
+
+  upsertSemanticFileCacheRow(entry: {
+    relativePath: string;
+    fileSha256: string;
+    resourceKind: string;
+    payloadJson: string;
+    mtimeMs: number;
+  }): void {
+    const now = new Date().toISOString();
+    this.database.prepare(`
+INSERT INTO semantic_file_cache (
+  workspace_id, relative_path, file_sha256, resource_kind, payload_json, mtime_ms, updated_at
+) VALUES (?, ?, ?, ?, ?, ?, ?)
+ON CONFLICT(workspace_id, relative_path) DO UPDATE SET
+  file_sha256 = excluded.file_sha256,
+  resource_kind = excluded.resource_kind,
+  payload_json = excluded.payload_json,
+  mtime_ms = excluded.mtime_ms,
+  updated_at = excluded.updated_at
+`).run(
+      this.workspaceId,
+      entry.relativePath,
+      entry.fileSha256,
+      entry.resourceKind,
+      entry.payloadJson,
+      entry.mtimeMs,
+      now
+    );
+  }
+
+  upsertSemanticFileCache(entry: {
+    relativePath: string;
+    fileSha256: string;
+    resourceKind: ResourceKind;
+    payload: SymbolBundle;
+    mtimeMs: number;
+  }): void {
+    this.upsertSemanticFileCacheRow({
+      relativePath: entry.relativePath,
+      fileSha256: entry.fileSha256,
+      resourceKind: entry.resourceKind,
+      payloadJson: JSON.stringify(entry.payload),
+      mtimeMs: entry.mtimeMs
+    });
+  }
+
+  deleteSemanticFileCache(relativePaths: readonly string[]): void {
+    if (relativePaths.length === 0) return;
+    const stmt = this.database.prepare(`
+DELETE FROM semantic_file_cache WHERE workspace_id = ? AND relative_path = ?`);
+    this.database.transaction(() => {
+      for (const relPath of relativePaths) {
+        stmt.run(this.workspaceId, relPath);
+      }
+    }).immediate();
   }
 
   private assertWorkspace(workspaceId: string): void {

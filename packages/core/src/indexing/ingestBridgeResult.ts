@@ -464,23 +464,116 @@ function parseTaeExport(value: unknown, sourceUri: string, sourcePath: string | 
     };
   }
 
+  const taeEntryCount = asNumber(record.taeEntryCount);
+  if (taeEntryCount !== null && (!Number.isSafeInteger(taeEntryCount) || taeEntryCount < 0)) {
+    return {
+      diagnostics: [invalidField(sourceUri, 'taeEntryCount')]
+    };
+  }
+  const taeEntriesRaw = record.taeEntries;
+  const taeEntries: NonNullable<TaeExport['taeEntries']> = [];
+  if (taeEntriesRaw !== undefined) {
+    if (!Array.isArray(taeEntriesRaw)) {
+      return { diagnostics: [invalidField(sourceUri, 'taeEntries')] };
+    }
+    for (let entryIndex = 0; entryIndex < taeEntriesRaw.length; entryIndex += 1) {
+      const entry = asRecord(taeEntriesRaw[entryIndex]);
+      const parsed = parseTaeEntryMetadata(entry);
+      if (!parsed) {
+        return { diagnostics: [invalidField(sourceUri, `taeEntries[${entryIndex}]`)] };
+      }
+      taeEntries.push(parsed);
+    }
+  }
+  const aggregateEntryCount = taeEntryCount !== null && taeEntryCount > 1;
+  if (taeEntryCount !== null && taeEntries.length !== taeEntryCount) {
+    return {
+      diagnostics: [{
+        severity: 'error',
+        code: 'TAE_INDEX_ENTRY_INVENTORY_INCOMPLETE',
+        message: `TAE 聚合 entry inventory 不完整：声明 ${taeEntryCount}，实际 ${taeEntries.length}。`,
+        sourceUri
+      }]
+    };
+  }
+
+  const inventoryKeys = new Set<string>();
+  for (const entry of taeEntries) {
+    const key = taeEntryMetadataKey(entry);
+    if (inventoryKeys.has(key)) {
+      return {
+        diagnostics: [{
+          severity: 'error',
+          code: 'TAE_INDEX_ENTRY_IDENTITY_DUPLICATE',
+          message: `TAE entry inventory 含重复的物理身份：${key}。`,
+          sourceUri
+        }]
+      };
+    }
+    inventoryKeys.add(key);
+  }
+
+  // A native read that explicitly reports a failed round-trip is not safe to
+  // index.  Older envelopes may omit this field, so absence remains a
+  // compatibility case; an explicit false is a hard rejection.
+  const roundTrip = asRecord(record.roundTrip);
+  if (roundTrip.byteIdentical === false || roundTrip.semanticIdentical === false) {
+    return {
+      diagnostics: [{
+        severity: 'error',
+        code: 'TAE_INDEX_ROUNDTRIP_FAILED',
+        message: 'TAE native round-trip 报告不一致，禁止把该文档写入动作索引。',
+        sourceUri
+      }]
+    };
+  }
+
   const animations: TaeExport['animations'] = [];
-  const seenAnimIds = new Set<number>();
+  const seenAnimationKeys = new Set<string>();
+  const actualAnimationCounts = new Map<string, number>();
+  const entryIdentityRequired = taeEntries.length > 0 || aggregateEntryCount;
   for (let animIndex = 0; animIndex < animationsRaw.length; animIndex += 1) {
     const anim = asRecord(animationsRaw[animIndex]);
     const animId = asNumber(anim.animId);
     if (animId === null) {
       return { diagnostics: [invalidField(sourceUri, `animations[${animIndex}].animId`)] };
     }
-    if (seenAnimIds.has(animId)) {
+    const identity = parseTaeAnimationIdentity(anim, sourceUri, animIndex, diagnostics);
+    if (entryIdentityRequired && !identity) {
+      if (diagnostics.length === 0 || diagnostics[diagnostics.length - 1]?.code !== 'TAE_ANIMATION_ENTRY_IDENTITY_INVALID') {
+        diagnostics.push({
+          severity: 'error',
+          code: 'TAE_ANIMATION_ENTRY_IDENTITY_INVALID',
+          message: `TAE animations[${animIndex}] 缺少完整 child identity，禁止把聚合动画当作单一 animId 索引。`,
+          sourceUri
+        });
+      }
+      return { diagnostics };
+    }
+    if (identity) {
+      const entryKey = taeAnimationEntryKey(identity);
+      if (taeEntries.length > 0 && !inventoryKeys.has(entryKey)) {
+        return {
+          diagnostics: [{
+            severity: 'error',
+            code: 'TAE_INDEX_ANIMATION_ENTRY_NOT_IN_INVENTORY',
+            message: `TAE animation animId=${animId} 引用了 inventory 中不存在的 child：${entryKey}。`,
+            sourceUri
+          }]
+        };
+      }
+      actualAnimationCounts.set(entryKey, (actualAnimationCounts.get(entryKey) ?? 0) + 1);
+    }
+    const animationKey = `${identity?.taeEntryIndex ?? identity?.taeEntryId ?? identity?.taeEntryName ?? 'tae'}:${animId}`;
+    if (seenAnimationKeys.has(animationKey)) {
       diagnostics.push({
         severity: 'warning',
         code: 'TAE_ANIMATION_ID_DUPLICATE',
-        message: `TAE 文档中的 animId=${animId} 重复；按 sourceUri + animId 的读取必须失败关闭。`,
+        message: `TAE 文档中的动画身份 ${animationKey} 重复；按 sourceUri + TAE entry + animId 的读取必须失败关闭。`,
         sourceUri
       });
     } else {
-      seenAnimIds.add(animId);
+      seenAnimationKeys.add(animationKey);
     }
     const motionAnimId = isSafeMotionAnimId(anim.motionAnimId) ? anim.motionAnimId : null;
     if (anim.motionAnimId !== undefined && anim.motionAnimId !== null && motionAnimId === null) {
@@ -527,9 +620,10 @@ function parseTaeExport(value: unknown, sourceUri: string, sourcePath: string | 
         })
         : [];
       const result: TaeEventSymbol = {
-        uri: `action://${chrId}/${code}/e${String(eventIndex)}`,
+        uri: taeEventSymbolUri(chrId, identity, code, eventIndex),
         index: eventIndex,
         eventTypeId: eventTypeId ?? 0,
+        ...(identity ?? {}),
         ...(asString(event.typeName) ? { typeName: asString(event.typeName) } : {}),
         startTime,
         endTime,
@@ -544,16 +638,149 @@ function parseTaeExport(value: unknown, sourceUri: string, sourcePath: string | 
     animations.push({
       animId,
       code,
+      ...(identity ?? {}),
       ...(motionAnimId === null ? {} : { motionAnimId }),
       ...(asString(anim.hkxName) ? { hkxName: asString(anim.hkxName) } : {}),
       events
     });
   }
 
+  if (taeEntries.length > 0) {
+    for (const entry of taeEntries) {
+      const key = taeEntryMetadataKey(entry);
+      const actualCount = actualAnimationCounts.get(key) ?? 0;
+      if (actualCount !== entry.animationCount) {
+        return {
+          diagnostics: [{
+            severity: 'error',
+            code: 'TAE_INDEX_ENTRY_ANIMATION_COUNT_MISMATCH',
+            message: `TAE child ${key} 的 animationCount 不一致：inventory=${entry.animationCount}，animations=${actualCount}。`,
+            sourceUri
+          }]
+        };
+      }
+    }
+  }
+
   return {
-    value: { chrId, sourceUri, ...exportProvenance, animations },
+    value: {
+      chrId,
+      sourceUri,
+      ...exportProvenance,
+      ...(taeEntryCount !== null ? { taeEntryCount } : {}),
+      ...(taeEntries.length > 0 ? { taeEntries } : {}),
+      animations
+    },
     diagnostics
   };
+}
+
+type TaeEntryIdentity = {
+  taeEntryIndex: number;
+  taeEntryId: number;
+  taeEntryName: string;
+  taeGroup: string;
+};
+
+type TaeEntryMetadata = {
+  entryIndex: number;
+  entryId: number;
+  entryName: string;
+  taeGroup: string;
+  animationCount: number;
+  sourceSize: number;
+  sourceHash: string;
+};
+
+function parseTaeEntryMetadata(record: Record<string, unknown>): TaeEntryMetadata | null {
+  const taeEntryIndex = asNumber(record.entryIndex);
+  const taeEntryId = asNumber(record.entryId);
+  const taeEntryName = asString(record.entryName);
+  const taeGroup = asString(record.taeGroup);
+  const animationCount = asNumber(record.animationCount);
+  const sourceSize = asNumber(record.sourceSize);
+  const sourceHash = asString(record.sourceHash);
+  if (
+    taeEntryIndex === null || !Number.isSafeInteger(taeEntryIndex) || taeEntryIndex < 0
+    || taeEntryId === null || !Number.isSafeInteger(taeEntryId)
+    || !taeEntryName || !taeGroup
+    || animationCount === null || !Number.isSafeInteger(animationCount) || animationCount < 0
+    || sourceSize === null || !Number.isSafeInteger(sourceSize) || sourceSize < 0
+    || !sourceHash
+  ) return null;
+  return {
+    entryIndex: taeEntryIndex,
+    entryId: taeEntryId,
+    entryName: taeEntryName,
+    taeGroup,
+    animationCount,
+    sourceSize,
+    sourceHash
+  };
+}
+
+function taeEntryMetadataKey(entry: TaeEntryMetadata): string {
+  return JSON.stringify([
+    entry.entryIndex,
+    entry.entryId,
+    entry.entryName.toLowerCase(),
+    entry.taeGroup.toLowerCase()
+  ]);
+}
+
+function taeAnimationEntryKey(identity: TaeEntryIdentity): string {
+  return JSON.stringify([
+    identity.taeEntryIndex,
+    identity.taeEntryId,
+    identity.taeEntryName.toLowerCase(),
+    identity.taeGroup.toLowerCase()
+  ]);
+}
+
+function parseTaeEntryIdentity(record: Record<string, unknown>): TaeEntryIdentity | null {
+  const taeEntryIndex = asNumber(record.taeEntryIndex);
+  const taeEntryId = asNumber(record.taeEntryId);
+  const taeEntryName = asString(record.taeEntryName);
+  const taeGroup = asString(record.taeGroup);
+  if (
+    taeEntryIndex === null || !Number.isSafeInteger(taeEntryIndex) || taeEntryIndex < 0
+    || taeEntryId === null || !Number.isSafeInteger(taeEntryId)
+    || !taeEntryName || !taeGroup
+  ) return null;
+  return { taeEntryIndex, taeEntryId, taeEntryName, taeGroup };
+}
+
+function parseTaeAnimationIdentity(
+  record: Record<string, unknown>,
+  sourceUri: string,
+  animIndex: number,
+  diagnostics: Diagnostic[]
+): TaeEntryIdentity | null {
+  const hasAny = ['taeEntryIndex', 'taeEntryId', 'taeEntryName', 'taeGroup']
+    .some((field) => record[field] !== undefined && record[field] !== null);
+  if (!hasAny) return null;
+  const identity = parseTaeEntryIdentity(record);
+  if (!identity) {
+    diagnostics.push({
+      severity: 'error',
+      code: 'TAE_ANIMATION_ENTRY_IDENTITY_INVALID',
+      message: `TAE animations[${animIndex}] 的子项身份不完整，已拒绝跨 section 读取。`,
+      sourceUri
+    });
+    return null;
+  }
+  return identity;
+}
+
+function taeEventSymbolUri(
+  chrId: string,
+  identity: TaeEntryIdentity | null,
+  code: string,
+  eventIndex: number
+): string {
+  return identity
+    ? `action://${chrId}/tae/${String(identity.taeEntryIndex)}/${code}/e${String(eventIndex)}`
+    : `action://${chrId}/${code}/e${String(eventIndex)}`;
 }
 
 /**

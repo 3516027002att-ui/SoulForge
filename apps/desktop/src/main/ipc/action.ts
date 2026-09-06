@@ -170,34 +170,12 @@ interface CompatibilityPartCandidate {
   absolutePath: string;
 }
 
-// c0000 的这组身份来自当前原版资源的 native FLVER/MTD 读取：
-// HD_M_9510 使用 Character_MeshDecal 接收面，而成熟查看器用
-// FC_M_0000_head_a 作为该只读兼容投影的颜色源。它不是“第一个 head 纹理”
-// 或语义相似名回退；只有 exact parts 文件名命中时才可启用。
-const C0000_VERIFIED_HEAD_PROJECTION_PART = 'hd_m_9510.partsbnd.dcx';
-const C0000_VERIFIED_HEAD_PROJECTION_TEXTURE = 'FC_M_0000_head_a';
-
-function c0000CompatibilityProjectionTextureName(
-  slot: typeof C0000_COMPATIBILITY_PART_SLOTS[number],
-  candidateName: string
-): string | undefined {
-  return slot === 'hd'
-    && candidateName.toLowerCase() === C0000_VERIFIED_HEAD_PROJECTION_PART
-    ? C0000_VERIFIED_HEAD_PROJECTION_TEXTURE
-    : undefined;
-}
-
-function hasCompatibilityProjection(
-  bundle: CharacterPreviewBundle,
-  textureName: string
-): boolean {
-  return bundle.models.some((model) => model.meshes.some((mesh) =>
-    mesh.renderMode === 'compatibility-projected'
-    && mesh.projectionTextureName === textureName
-    && typeof mesh.projectionTexturePreviewToken === 'string'
-    && mesh.projectionTexturePreviewToken.length > 0
-  ));
-}
+// c0000 的兼容装配只负责把有界的原生 parts 合并到 leader 骨骼。
+// 不在这里为 HD_M_9510 注入通用 FC 头部纹理：该材质仍按 native
+// projected-decal 返回，但 generic Three renderer 没有原生 projector，
+// 用普通 UV 把 FC 颜色贴到 HD 接收面会产生黑色断裂条带。Bridge 的通用
+// compatibilityProjectionTextureName 选项仍保留给已有的、单独验证过的
+// native material-local/测试路径；ACTION c0000 不得自动传入它。
 
 async function readDirectoryNames(directory: string | null): Promise<string[]> {
   if (!directory) return [];
@@ -865,9 +843,10 @@ function findIndexedActionMotionIdentity(
   index: WorkspaceIndex | null,
   sourceUri: string,
   animId: number,
-  sourceRevision: ActionFileRevision
+  sourceRevision: ActionFileRevision,
+  selector?: { taeEntryIndex?: number; taeEntryId?: number; taeEntryName?: string; taeGroup?: string }
 ): number | undefined {
-  const lookup = index?.lookupTaeAnimation(sourceUri, animId);
+  const lookup = index?.lookupTaeAnimation(sourceUri, animId, selector);
   if (!lookup || lookup.status !== 'UNIQUE' || lookup.sourceRevision !== sourceRevision.mtimeMs) return undefined;
   const motionAnimId = lookup.animation.motionAnimId;
   return typeof motionAnimId === 'number'
@@ -903,6 +882,22 @@ export function characterTexturePackagePaths(
     const stem = modelPath.slice(0, -'.chrbnd'.length);
     add(`${stem}.texbnd`);
     add(`${stem}.texbnd.dcx`);
+  } else if (lower.endsWith('_l.partsbnd.dcx')) {
+    const stem = modelPath.slice(0, -'_l.partsbnd.dcx'.length);
+    add(`${stem}.partsbnd.dcx`);
+    add(`${stem}.partsbnd`);
+  } else if (lower.endsWith('_l.partsbnd')) {
+    const stem = modelPath.slice(0, -'_l.partsbnd'.length);
+    add(`${stem}.partsbnd`);
+    add(`${stem}.partsbnd.dcx`);
+  } else if (lower.endsWith('.partsbnd.dcx')) {
+    const stem = modelPath.slice(0, -'.partsbnd.dcx'.length);
+    add(`${stem}_l.partsbnd.dcx`);
+    add(`${stem}_l.partsbnd`);
+  } else if (lower.endsWith('.partsbnd')) {
+    const stem = modelPath.slice(0, -'.partsbnd'.length);
+    add(`${stem}_l.partsbnd`);
+    add(`${stem}_l.partsbnd.dcx`);
   }
   const modelDirectory = dirname(modelPath);
   const partsDirectories = new Set<string>();
@@ -967,7 +962,6 @@ export async function assembleC0000CompatibilityPreview(input: {
     let selected = false;
     for (const candidate of candidates) {
       attemptedCandidates += 1;
-      const projectionTextureName = c0000CompatibilityProjectionTextureName(slot, candidate.name);
       try {
         const partResult = await runBridge<unknown>({
           command: 'read-chrbnd-flver-preview',
@@ -978,22 +972,12 @@ export async function assembleC0000CompatibilityPreview(input: {
           commandOptions: {
             maxVertices: 1_000_000,
             maxIndices: 3_000_000,
-            texturePackagePaths: characterTexturePackagePaths(candidate.absolutePath),
-            ...(projectionTextureName
-              ? { compatibilityProjectionTextureName: projectionTextureName }
-              : {})
+            texturePackagePaths: characterTexturePackagePaths(candidate.absolutePath)
           }
         });
         if (partResult.parseStatus === 'failed'
           || !isCharacterPreviewBundle(partResult.data)
           || partResult.data.meshCount === 0) {
-          rejectedCandidates += 1;
-          continue;
-        }
-        if (projectionTextureName && !hasCompatibilityProjection(partResult.data, projectionTextureName)) {
-          // The exact native component was found, but its explicitly required
-          // texture source was not proved by the same Bridge read. Do not
-          // silently accept a textureless head and call it a completed face.
           rejectedCandidates += 1;
           continue;
         }
@@ -1048,7 +1032,7 @@ export async function assembleC0000CompatibilityPreview(input: {
     diagnostics: [{
       severity: 'warning',
       code: 'ACTION_COMPATIBILITY_PREVIEW_ASSEMBLED',
-       message: `c0000 本体只含骨骼；当前按原版 face/hair 组件优先、overlay 覆盖与确定性候选从 bd/am/lg/hd/fc 装配兼容预览（${selectedParts.join('、')}）。这不是存档当前装备。`,
+      message: `c0000 本体只含骨骼；当前按原版 face/hair 组件优先、overlay 覆盖与确定性候选从 bd/am/lg/hd/fc 装配兼容预览（${selectedParts.join('、')}）。native projected-decal 保持只读，不注入通用 FC 纹理投影；这不是存档当前装备。`,
       details: { attemptedCandidates, rejectedCandidates, selectedParts, missingSlots }
     }]
   };
@@ -1093,8 +1077,12 @@ export function registerActionIpcHandlers(deps: ActionIpcDeps): void {
     sourceRevisionKey: string;
     allowedRoots: string[];
     effectiveBase: string | null;
+    taeEntrySelector?: { taeEntryIndex?: number; taeEntryId?: number; taeEntryName?: string; taeGroup?: string };
   }): Promise<ActionMotionIdentityResult> => {
-    const cached = taeMotionIdentityCache.get(input.sourceUri, input.sourceRevisionKey, input.animId);
+    const selectorKey = input.taeEntrySelector
+      ? `${input.taeEntrySelector.taeEntryIndex ?? ''}:${input.taeEntrySelector.taeEntryId ?? ''}:${input.taeEntrySelector.taeGroup ?? ''}:${input.taeEntrySelector.taeEntryName ?? ''}`
+      : '';
+    const cached = taeMotionIdentityCache.get(input.sourceUri, input.sourceRevisionKey, input.animId, selectorKey);
     if (cached) return cached;
 
     const promise = (async (): Promise<ActionMotionIdentityResult> => {
@@ -1102,9 +1090,9 @@ export function registerActionIpcHandlers(deps: ActionIpcDeps): void {
         const indexed = findIndexedActionMotionIdentity(
           deps.activeIndex,
           input.sourceUri,
-          // The caller validates this before entering the resolver.
           input.animId,
-          input.sourceRevision
+          input.sourceRevision,
+          input.taeEntrySelector
         );
         if (indexed !== undefined) return { ok: true, motionAnimId: indexed };
 
@@ -1145,7 +1133,15 @@ export function registerActionIpcHandlers(deps: ActionIpcDeps): void {
         }
         const matches = data.animations.filter((raw) => {
           const animation = asRecord(raw);
-          return asSafeInteger(animation?.animId) === input.animId;
+          if (asSafeInteger(animation?.animId) !== input.animId) return false;
+          if (input.taeEntrySelector) {
+            const { taeEntryIndex, taeEntryId, taeEntryName, taeGroup } = input.taeEntrySelector;
+            if (typeof taeEntryIndex === 'number' && animation?.taeEntryIndex !== taeEntryIndex) return false;
+            if (typeof taeEntryId === 'number' && animation?.taeEntryId !== taeEntryId) return false;
+            if (typeof taeEntryName === 'string' && animation?.taeEntryName !== taeEntryName) return false;
+            if (typeof taeGroup === 'string' && animation?.taeGroup !== taeGroup) return false;
+          }
+          return true;
         });
         if (matches.length > 1) {
           return {
@@ -1204,13 +1200,14 @@ export function registerActionIpcHandlers(deps: ActionIpcDeps): void {
     })();
     // Keep source URI, source revision, and selected animId in the identity;
     // a TAE file is a multi-animation source and cannot cache one motion per URI.
-    taeMotionIdentityCache.set(input.sourceUri, input.sourceRevisionKey, input.animId, promise);
+    taeMotionIdentityCache.set(input.sourceUri, input.sourceRevisionKey, input.animId, promise, selectorKey);
     return promise;
   };
 
   const resolveActionAnimationContext = async (
     sourceUri: string,
-    animId: number
+    animId: number,
+    taeEntrySelector?: { taeEntryIndex?: number; taeEntryId?: number; taeEntryName?: string; taeGroup?: string }
   ): Promise<ActionAnimationContextResult> => {
     const file = deps.indexedFiles.find((item) => item.sourceUri === sourceUri);
     const session = deps.activeSession;
@@ -1295,7 +1292,8 @@ export function registerActionIpcHandlers(deps: ActionIpcDeps): void {
       sourceRevision: sourceRevisionResult.revision,
       sourceRevisionKey,
       allowedRoots: [...roots.allowedRoots],
-      effectiveBase
+      effectiveBase,
+      ...(taeEntrySelector ? { taeEntrySelector } : {})
     });
     if (!motionIdentity.ok) return motionIdentity;
     if (deps.activeSession !== session || deps.activeWorkspaceSessionId !== sessionId) {
@@ -1562,7 +1560,11 @@ export function registerActionIpcHandlers(deps: ActionIpcDeps): void {
       _event,
       sourceUri: string,
       animId: number,
-      eventIndex: number
+      eventIndex: number,
+      taeEntryIndex?: number,
+      taeEntryId?: number,
+      taeEntryName?: string,
+      taeGroup?: string
     ): Promise<{
       ok: boolean;
       sourceUri?: string;
@@ -1580,6 +1582,14 @@ export function registerActionIpcHandlers(deps: ActionIpcDeps): void {
       if (!file) {
         return { ok: false, diagnostics: [{ severity: 'error' as const, code: 'RESOURCE_NOT_INDEXED', message: '资源未索引，无法读取 TAE 事件参数。', sourceUri }] };
       }
+      const selector = (typeof taeEntryIndex === 'number' || typeof taeEntryId === 'number' || taeEntryName || taeGroup)
+        ? {
+            ...(typeof taeEntryIndex === 'number' ? { taeEntryIndex } : {}),
+            ...(typeof taeEntryId === 'number' ? { taeEntryId } : {}),
+            ...(typeof taeEntryName === 'string' ? { taeEntryName } : {}),
+            ...(typeof taeGroup === 'string' ? { taeGroup } : {})
+          }
+        : undefined;
       const roots = await deps.verifiedReadRoots(deps.activeSession, dirname(file.absolutePath));
       if (roots.diagnostics.length > 0) return { ok: false, diagnostics: roots.diagnostics };
       const catalog = getTaeTemplateCatalog();
@@ -1596,7 +1606,14 @@ export function registerActionIpcHandlers(deps: ActionIpcDeps): void {
         ...(deps.activeSession?.layers.baseRoot
           ? { oodleRuntimeRoot: deps.activeSession.layers.baseRoot }
           : {}),
-        commandOptions: { animId, eventIndex }
+        commandOptions: {
+          animId,
+          eventIndex,
+          ...(typeof selector?.taeEntryIndex === 'number' ? { taeEntryIndex: selector.taeEntryIndex } : {}),
+          ...(typeof selector?.taeEntryId === 'number' ? { taeEntryId: selector.taeEntryId } : {}),
+            ...(typeof selector?.taeEntryName === 'string' ? { taeEntryName: selector.taeEntryName } : {}),
+            ...(typeof selector?.taeGroup === 'string' ? { taeGroup: selector.taeGroup } : {})
+        }
       });
       if (result.parseStatus === 'failed' || !result.data) {
         return { ok: false, diagnostics: result.diagnostics };
@@ -1615,7 +1632,15 @@ export function registerActionIpcHandlers(deps: ActionIpcDeps): void {
             ...(deps.activeSession?.layers.baseRoot
               ? { oodleRuntimeRoot: deps.activeSession.layers.baseRoot }
               : {}),
-            commandOptions: { animId, eventIndex, paramSize }
+            commandOptions: {
+              animId,
+              eventIndex,
+              paramSize,
+              ...(typeof selector?.taeEntryIndex === 'number' ? { taeEntryIndex: selector.taeEntryIndex } : {}),
+              ...(typeof selector?.taeEntryId === 'number' ? { taeEntryId: selector.taeEntryId } : {}),
+              ...(typeof selector?.taeEntryName === 'string' ? { taeEntryName: selector.taeEntryName } : {}),
+              ...(typeof selector?.taeGroup === 'string' ? { taeGroup: selector.taeGroup } : {})
+            }
           })
         : null;
       if (exact && (exact.parseStatus === 'failed' || !exact.data?.paramHex)) {
@@ -1819,7 +1844,11 @@ export function registerActionIpcHandlers(deps: ActionIpcDeps): void {
         translation: [number, number, number];
         rotation: [number, number, number, number];
         scale: [number, number, number];
-      }>
+      }>,
+      taeEntryIndex?: number,
+      taeEntryId?: number,
+      taeEntryName?: string,
+      taeGroup?: string
     ): Promise<{
       ok: boolean;
       sourceUri?: string;
@@ -1827,7 +1856,15 @@ export function registerActionIpcHandlers(deps: ActionIpcDeps): void {
       data?: Record<string, unknown>;
       diagnostics: Diagnostic[];
     }> => {
-      const context = await resolveActionAnimationContext(sourceUri, animId);
+      const selector = (typeof taeEntryIndex === 'number' || typeof taeEntryId === 'number' || taeEntryName || taeGroup)
+        ? {
+            ...(typeof taeEntryIndex === 'number' ? { taeEntryIndex } : {}),
+            ...(typeof taeEntryId === 'number' ? { taeEntryId } : {}),
+            ...(taeEntryName ? { taeEntryName } : {}),
+            ...(taeGroup ? { taeGroup } : {})
+          }
+        : undefined;
+      const context = await resolveActionAnimationContext(sourceUri, animId, selector);
       if (!context.ok) return { ok: false, sourceUri, diagnostics: context.diagnostics };
       const beforeDiagnostics = await validateActionContextCurrent(context);
       if (beforeDiagnostics.length > 0) return { ok: false, sourceUri, diagnostics: beforeDiagnostics };
@@ -1843,6 +1880,13 @@ export function registerActionIpcHandlers(deps: ActionIpcDeps): void {
         commandOptions: {
           animId,
           animationContainerPath: context.binder.absolutePath,
+          ...(ACTION_ANIBND_FILE_PATTERN.test(context.file.relativePath)
+            ? { skeletonContainerPath: context.file.absolutePath }
+            : {}),
+          ...(typeof taeEntryIndex === 'number' ? { taeEntryIndex } : {}),
+          ...(typeof taeEntryId === 'number' ? { taeEntryId } : {}),
+            ...(typeof taeEntryName === 'string' ? { taeEntryName } : {}),
+            ...(typeof taeGroup === 'string' ? { taeGroup } : {}),
           ...(flverBoneNames?.length ? { flverBoneNames } : {}),
           ...(flverBoneParents?.length ? { flverBoneParents } : {}),
           ...(flverReferencePose?.length ? { flverReferencePose } : {})
@@ -1878,7 +1922,11 @@ export function registerActionIpcHandlers(deps: ActionIpcDeps): void {
         translation: [number, number, number];
         rotation: [number, number, number, number];
         scale: [number, number, number];
-      }>
+      }>,
+      taeEntryIndex?: number,
+      taeEntryId?: number,
+      taeEntryName?: string,
+      taeGroup?: string
     ): Promise<{
       ok: boolean;
       sourceUri?: string;
@@ -1886,7 +1934,15 @@ export function registerActionIpcHandlers(deps: ActionIpcDeps): void {
       data?: Record<string, unknown>;
       diagnostics: Diagnostic[];
     }> => {
-      const context = await resolveActionAnimationContext(sourceUri, animId);
+      const selector = (typeof taeEntryIndex === 'number' || typeof taeEntryId === 'number' || taeEntryName || taeGroup)
+        ? {
+            ...(typeof taeEntryIndex === 'number' ? { taeEntryIndex } : {}),
+            ...(typeof taeEntryId === 'number' ? { taeEntryId } : {}),
+            ...(taeEntryName ? { taeEntryName } : {}),
+            ...(taeGroup ? { taeGroup } : {})
+          }
+        : undefined;
+      const context = await resolveActionAnimationContext(sourceUri, animId, selector);
       if (!context.ok) return { ok: false, sourceUri, diagnostics: context.diagnostics };
       const beforeDiagnostics = await validateActionContextCurrent(context);
       if (beforeDiagnostics.length > 0) return { ok: false, sourceUri, diagnostics: beforeDiagnostics };
@@ -1904,6 +1960,13 @@ export function registerActionIpcHandlers(deps: ActionIpcDeps): void {
           timeSeconds,
           loop: loop ?? true,
           animationContainerPath: context.binder.absolutePath,
+          ...(ACTION_ANIBND_FILE_PATTERN.test(context.file.relativePath)
+            ? { skeletonContainerPath: context.file.absolutePath }
+            : {}),
+          ...(typeof taeEntryIndex === 'number' ? { taeEntryIndex } : {}),
+          ...(typeof taeEntryId === 'number' ? { taeEntryId } : {}),
+            ...(typeof taeEntryName === 'string' ? { taeEntryName } : {}),
+            ...(typeof taeGroup === 'string' ? { taeGroup } : {}),
           ...(flverBoneNames?.length ? { flverBoneNames } : {}),
           ...(flverBoneParents?.length ? { flverBoneParents } : {}),
           ...(flverReferencePose?.length ? { flverReferencePose } : {})

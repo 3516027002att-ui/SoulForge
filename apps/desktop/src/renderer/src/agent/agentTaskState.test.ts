@@ -505,6 +505,8 @@ describe('对话时间线：口播与工具按步交织，思考可折叠', () =
     const done = feed(started, { type: 'session-done', finishReason: 'stop', steps: 1, rolloutFileName: 'x.jsonl' });
     const label = describeAgentThinkingLabel({ ...done, startedAt: 1_000, endedAt: 13_000 }, 13_000);
     assert.equal(label, '已思考 12s');
+    const stepLabel = describeAgentThinkingLabel({ ...done, startedAt: 1_000, endedAt: 13_000 }, 13_000, 1);
+    assert.equal(stepLabel, '已思考');
   });
 
   it('时间线顺序：用户 → 思考 → 口播 → 工具，不含会话文件名', () => {
@@ -619,5 +621,80 @@ describe('对话时间线：口播与工具按步交织，思考可折叠', () =
     assert.equal(reset.historyItems.length, 0);
     assert.equal(reset.lastRolloutPath, null);
     assert.equal(reset.sessionId, null);
+  });
+
+  it('Codex 风格交织：多轮次思考与工具调用按步骤穿插，不再在顶部堆积全部思考', () => {
+    const state = feed(
+      startAgentTask(SESSION, 1_000),
+      { type: 'turn-started', step: 1 },
+      { type: 'agent-thinking-delta', step: 1, text: '思考步骤 1：定位声音参数' },
+      { type: 'tool-call-begin', step: 1, callId: 'c1', name: 'search_param_rows' },
+      { type: 'tool-call-end', step: 1, callId: 'c1', name: 'search_param_rows', ok: true },
+      { type: 'turn-started', step: 2 },
+      { type: 'agent-thinking-delta', step: 2, text: '思考步骤 2：读取 Sound 参数' },
+      { type: 'tool-call-begin', step: 2, callId: 'c2', name: 'read_param_fields' },
+      { type: 'tool-call-end', step: 2, callId: 'c2', name: 'read_param_fields', ok: true },
+      { type: 'turn-started', step: 3 },
+      { type: 'agent-thinking-delta', step: 3, text: '思考步骤 3：总结排查结果' },
+      { type: 'agent-message-delta', step: 3, text: '已找到拼刀成功与失败的音效参数。' },
+      { type: 'session-done', finishReason: 'stop', steps: 3, rolloutFileName: 'rollout-test.jsonl' }
+    );
+
+    const items = buildAgentConversationItems({
+      goal: '分析拼刀音效',
+      task: { ...state, startedAt: 1_000, endedAt: 8_000 }
+    });
+
+    const kinds = items.map((item) => item.kind);
+    assert.deepEqual(kinds, [
+      'user',
+      'thinking',
+      'tools',
+      'thinking',
+      'tools',
+      'thinking',
+      'assistant'
+    ]);
+
+    // 验证各步骤思考内容隔离
+    const thinkingItems = items.filter((item) => item.kind === 'thinking');
+    assert.equal(thinkingItems.length, 3);
+    assert.equal(thinkingItems[0]?.kind === 'thinking' ? thinkingItems[0].text : '', '思考步骤 1：定位声音参数');
+    assert.equal(thinkingItems[1]?.kind === 'thinking' ? thinkingItems[1].text : '', '思考步骤 2：读取 Sound 参数');
+    assert.equal(thinkingItems[2]?.kind === 'thinking' ? thinkingItems[2].text : '', '思考步骤 3：总结排查结果');
+
+    // 验证各步骤工具隔离
+    const toolItems = items.filter((item) => item.kind === 'tools');
+    assert.equal(toolItems.length, 2);
+    assert.equal(toolItems[0]?.kind === 'tools' ? toolItems[0].calls[0]?.name : '', 'search_param_rows');
+    assert.equal(toolItems[1]?.kind === 'tools' ? toolItems[1].calls[0]?.name : '', 'read_param_fields');
+  });
+
+  it('多步执行时当前运行步无延迟立即显示思考中占位，避免出现无反馈空隙', () => {
+    // 步骤 1 完成并调用了工具，步骤 2 刚启动（turn-started），尚未有 delta 或工具到达
+    const state = feed(
+      startAgentTask(SESSION, 1_000),
+      { type: 'turn-started', step: 1 },
+      { type: 'agent-thinking-delta', step: 1, text: '第一步思考' },
+      { type: 'tool-call-begin', step: 1, callId: 'c1', name: 'search_param_rows' },
+      { type: 'tool-call-end', step: 1, callId: 'c1', name: 'search_param_rows', ok: true },
+      { type: 'turn-started', step: 2 }
+    );
+
+    const items = buildAgentConversationItems({
+      goal: '修改参数',
+      task: { ...state, startedAt: 1_000, currentStepStartedAt: 3_000 }
+    });
+
+    const thinkingItems = items.filter((item) => item.kind === 'thinking');
+    assert.equal(thinkingItems.length, 2, '步骤 1 与正在进行的步骤 2 均有思考项');
+    // 步骤 1 已结束
+    assert.equal(thinkingItems[0]?.live, false);
+    assert.equal(thinkingItems[0]?.label, '已思考');
+    assert.equal(thinkingItems[0]?.text, '第一步思考');
+    // 步骤 2 正在进行，即使尚未收到 delta，也立即呈现 live 思考项
+    assert.equal(thinkingItems[1]?.live, true);
+    assert.equal(thinkingItems[1]?.label.startsWith('正在思考'), true);
+    assert.equal(thinkingItems[1]?.text, '');
   });
 });

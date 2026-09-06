@@ -1,15 +1,19 @@
 import { readFile } from 'node:fs/promises';
 import type { BridgeCommand } from '../bridge/runBridge.js';
-import type { BridgeResult, Diagnostic, IndexedFile, ResourceKind } from '@soulforge/shared';
+import type { BridgeResult, Diagnostic, IndexedFile, ResourceKind, SymbolBundle } from '@soulforge/shared';
 import { runBridge } from '../bridge/runBridge.js';
 import { ingestBridgeResult } from '../indexing/ingestBridgeResult.js';
 import { WorkspaceIndex } from '../indexing/workspaceIndex.js';
 import { parseEventText } from '../parsers/eventTextParser.js';
 import { parseMsgText } from '../parsers/msgTextParser.js';
 import { scanWorkspace } from '../workspace/scanWorkspace.js';
+import { makeWorkspaceId } from '../workspace/resourceUri.js';
+import { extractFileSymbolBundle, loadSymbolBundleIntoIndex, type SemanticCacheProvider } from '../workspace/semanticFileCache.js';
 
 export interface AnalyzeWorkspaceOptions {
   workspaceRoot: string;
+  files?: readonly IndexedFile[];
+  semanticCache?: SemanticCacheProvider;
   parseTextResources?: boolean;
   parseJsonFixtures?: boolean;
   inspectNativeResources?: boolean;
@@ -72,17 +76,24 @@ export interface AnalyzeWorkspaceResult {
  */
 export async function analyzeWorkspace(options: AnalyzeWorkspaceOptions): Promise<AnalyzeWorkspaceResult> {
   const diagnostics: Diagnostic[] = [];
-  const scan = await scanWorkspace({
-    workspaceRoot: options.workspaceRoot,
-    ...(options.signal ? { signal: options.signal } : {}),
-    onProgress: (progress) => {
-      options.onProgress?.({
-        phase: 'scan',
-        current: progress.scannedFiles,
-        ...(progress.currentPath ? { message: progress.currentPath } : {})
+  const scan = options.files
+    ? {
+        workspaceId: makeWorkspaceId(options.workspaceRoot),
+        workspaceRoot: options.workspaceRoot,
+        files: [...options.files],
+        diagnostics: []
+      }
+    : await scanWorkspace({
+        workspaceRoot: options.workspaceRoot,
+        ...(options.signal ? { signal: options.signal } : {}),
+        onProgress: (progress) => {
+          options.onProgress?.({
+            phase: 'scan',
+            current: progress.scannedFiles,
+            ...(progress.currentPath ? { message: progress.currentPath } : {})
+          });
+        }
       });
-    }
-  });
 
   diagnostics.push(...scan.diagnostics);
   const index = new WorkspaceIndex(scan.workspaceId);
@@ -126,9 +137,37 @@ export async function analyzeWorkspace(options: AnalyzeWorkspaceOptions): Promis
     throwIfAborted(options.signal);
     const file = parseLimited[i]!;
     options.onProgress?.({ phase: 'parse', current: i + 1, total: parseLimited.length, message: file.relativePath });
-    const parsed = await parseKnownResource(file, index, options);
-    diagnostics.push(...parsed.diagnostics);
-    if (parsed.accepted) parsedFiles += 1;
+
+    let accepted = false;
+    let cachedBundle: SymbolBundle | null = null;
+    if (options.semanticCache) {
+      try {
+        cachedBundle = await options.semanticCache.load(file);
+      } catch {
+        cachedBundle = null;
+      }
+    }
+
+    if (cachedBundle) {
+      loadSymbolBundleIntoIndex(index, cachedBundle);
+      accepted = true;
+    } else {
+      const parsed = await parseKnownResource(file, index, options);
+      diagnostics.push(...parsed.diagnostics);
+      if (parsed.accepted) {
+        accepted = true;
+        if (options.semanticCache) {
+          try {
+            const bundle = extractFileSymbolBundle(index, file.sourceUri);
+            await options.semanticCache.save(file, bundle);
+          } catch {
+            // Non-fatal cache write failure
+          }
+        }
+      }
+    }
+
+    if (accepted) parsedFiles += 1;
     // PARAM/MSG are ordered first, so on a real game workspace this normally
     // publishes immediately after the first native PARAM/MSG export instead
     // of waiting for every map/event Bridge read.  If those families are

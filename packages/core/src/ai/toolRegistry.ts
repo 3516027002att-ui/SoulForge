@@ -550,7 +550,22 @@ export function createDefaultToolRegistry(): ToolRegistry {
     permissionLevel: 'read',
     run: async (_input, context) => {
       if (!context.taskRecord) return fail('TASK_RECORD_UNAVAILABLE', '本次运行没有可用的任务记录。');
-      return ok(await context.taskRecord.read());
+      const snapshot = await context.taskRecord.read();
+      return ok({
+        path: snapshot.path,
+        totalEntries: snapshot.entries.length,
+        entries: snapshot.entries.map((e) => ({
+          entryId: e.entryId,
+          objectName: e.objectName,
+          propertyKey: e.propertyKey,
+          kind: e.kind,
+          status: e.status,
+          mutationBudget: e.mutationBudget,
+          mutationUsed: e.mutationUsed,
+          ...(e.searchId ? { searchId: e.searchId } : {})
+        })),
+        updatedAt: snapshot.updatedAt
+      });
     }
   });
 
@@ -608,7 +623,21 @@ export function createDefaultToolRegistry(): ToolRegistry {
         update.status = value.status;
       }
       try {
-        return ok(await context.taskRecord.update(update));
+        const snapshot = await context.taskRecord.update(update);
+        const latestEntry = snapshot.entries.find((e) => e.objectName === objectName && e.propertyKey === propertyKey) ?? snapshot.entries.at(-1);
+        return ok({
+          message: `台账词条已登记：${objectName} -> ${propertyKey}`,
+          entry: latestEntry ? {
+            entryId: latestEntry.entryId,
+            objectName: latestEntry.objectName,
+            propertyKey: latestEntry.propertyKey,
+            kind: latestEntry.kind,
+            status: latestEntry.status,
+            mutationBudget: latestEntry.mutationBudget,
+            mutationUsed: latestEntry.mutationUsed
+          } : null,
+          totalEntries: snapshot.entries.length
+        });
       } catch (error) {
         const structured = asTaskRecordFailure(error);
         return structured
@@ -821,7 +850,7 @@ export function createDefaultToolRegistry(): ToolRegistry {
     name: 'search_event_reference',
     description: 'Search the community-maintained Sekiro event-experience glossary by Chinese behavior, English instruction '
       + 'name, or alias. This is a non-authoritative reference map: it guides semantic planning but never proves an instruction exists '
-      + 'in the current EMEVD. Always follow with search_events and read_emevd_outline using the returned names, '
+      + 'in the current EMEVD. Always follow with search_events and read_emevd_event using the returned names, '
       + 'file, eventId, and native source evidence.',
     permission: 'read',
     permissionLevel: 'read',
@@ -1840,13 +1869,28 @@ export function createDefaultToolRegistry(): ToolRegistry {
         const sourceFile = context.workspaceIndex.getFile(sourceUri);
         const sourceHash = result.sourceHash;
         const sourceRevision = sourceFile?.mtimeMs;
-        const animations = new Map<number, TaeAnimSymbol>();
+        // 同一 TAE source 内不同 section 可以复用 animId；不能按裸数字合并，
+        // 否则 AI 看到的事件会跨 a00/a50 串线。
+        const animations = new Map<string, TaeAnimSymbol>();
         for (const event of result.events) {
-          const animation = animations.get(event.animId) ?? { animId: event.animId, code: event.code, events: [] as TaeEventSymbol[] };
+          const animationKey = `${event.taeEntryIndex ?? event.taeEntryId ?? event.taeEntryName ?? 'tae'}:${event.animId}`;
+          const animation = animations.get(animationKey) ?? {
+            animId: event.animId,
+            code: event.code,
+            ...(event.taeEntryIndex === undefined ? {} : { taeEntryIndex: event.taeEntryIndex }),
+            ...(event.taeEntryId === undefined ? {} : { taeEntryId: event.taeEntryId }),
+            ...(event.taeEntryName === undefined ? {} : { taeEntryName: event.taeEntryName }),
+            ...(event.taeGroup === undefined ? {} : { taeGroup: event.taeGroup }),
+            events: [] as TaeEventSymbol[]
+          };
           animation.events.push({
             uri: event.uri,
             index: event.eventIndex,
             eventTypeId: event.eventTypeId,
+            ...(event.taeEntryIndex === undefined ? {} : { taeEntryIndex: event.taeEntryIndex }),
+            ...(event.taeEntryId === undefined ? {} : { taeEntryId: event.taeEntryId }),
+            ...(event.taeEntryName === undefined ? {} : { taeEntryName: event.taeEntryName }),
+            ...(event.taeGroup === undefined ? {} : { taeGroup: event.taeGroup }),
             ...(event.typeName ? { typeName: event.typeName } : {}),
             startTime: event.startTime,
             endTime: event.endTime,
@@ -1857,13 +1901,15 @@ export function createDefaultToolRegistry(): ToolRegistry {
             ...(event.fields ? { fields: event.fields } : {}),
             ...(event.parameterBytesHex ? { parameterBytesHex: event.parameterBytesHex } : {})
           });
-          animations.set(event.animId, animation);
+          animations.set(animationKey, animation);
         }
         context.workspaceIndex.upsertTaeExport({
           chrId: result.chrId,
           sourceUri,
           ...(sourceHash ? { sourceHash } : {}),
           ...(sourceRevision !== undefined ? { sourceRevision } : {}),
+          ...(result.taeEntryCount !== undefined ? { taeEntryCount: result.taeEntryCount } : {}),
+          ...(result.taeEntries ? { taeEntries: result.taeEntries } : {}),
           animations: [...animations.values()]
         });
         context.workspaceIndex.rebuildReferences();
@@ -2465,16 +2511,17 @@ export function createDefaultToolRegistry(): ToolRegistry {
     inputSchema: { mode: 'string', reason: 'string?' },
     run: (input, context) => {
       const value = asRecord(input);
-      const targetMode = asString(value.mode).trim();
+      const rawMode = asString(value.mode).trim();
+      const targetMode = rawMode === 'edit' ? 'fullPermission' : rawMode;
       if (targetMode === 'plan' || targetMode === 'normal' || targetMode === 'fullPermission') {
         context.mode = targetMode;
         return ok({
           switched: true,
-          currentMode: targetMode,
-          note: `操作模式已成功切换为「${targetMode}」。现在可以执行该模式允许的操作。`
+          currentMode: rawMode === 'edit' ? 'edit' : targetMode,
+          note: `操作模式已成功切换为「${rawMode}」。现在可以执行该模式允许的操作。`
         });
       }
-      return fail('INVALID_MODE', `不支持的目标模式: "${targetMode}"，可选值为: "plan" | "normal" | "fullPermission"。`);
+      return fail('INVALID_MODE', `不支持的目标模式: "${rawMode}"，可选值为: "plan" | "edit" | "normal" | "fullPermission"。`);
     }
   });
 

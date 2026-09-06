@@ -6,7 +6,9 @@ import type {
   PatchHistoryEntry,
   IndexedFile,
   RagChunk,
-  ReferenceEdge
+  ReferenceEdge,
+  ResourceKind,
+  SymbolBundle
 } from '@soulforge/shared';
 import type { OperationLogStore } from '@soulforge/core';
 import type {
@@ -255,6 +257,38 @@ export class OperationLogUtilityClient implements OperationLogStore {
     return this.request('listJobs', {});
   }
 
+  async getAllSemanticFileCache(): Promise<Map<string, { fileSha256: string; payload: SymbolBundle }>> {
+    const result = await this.request('getAllSemanticFileCache', {});
+    const map = new Map<string, { fileSha256: string; payload: SymbolBundle }>();
+    for (const item of result.entries) {
+      try {
+        map.set(item.relativePath, {
+          fileSha256: item.fileSha256,
+          payload: JSON.parse(item.payloadJson) as SymbolBundle
+        });
+      } catch {}
+    }
+    return map;
+  }
+
+  async upsertSemanticFileCache(entry: {
+    relativePath: string;
+    fileSha256: string;
+    resourceKind: ResourceKind;
+    payload: SymbolBundle;
+    mtimeMs: number;
+  }): Promise<void> {
+    await this.request('upsertSemanticFileCache', {
+      entry: {
+        relativePath: entry.relativePath,
+        fileSha256: entry.fileSha256,
+        resourceKind: entry.resourceKind,
+        payloadJson: JSON.stringify(entry.payload),
+        mtimeMs: entry.mtimeMs
+      }
+    });
+  }
+
   async health(): Promise<{ ready: boolean; appReady: boolean; workspaceId?: string }> {
     return this.request('health', {});
   }
@@ -401,7 +435,9 @@ export class OperationLogUtilityClient implements OperationLogStore {
     switch (method) {
       case 'openWorkspace':
       case 'replaceFiles':
+      case 'loadRagChunks':
       case 'replaceRagChunks':
+      case 'mergeRagChunkDelta':
       case 'replaceReferences':
       case 'replaceDiagnostics':
       case 'planRecoveryCleanup':

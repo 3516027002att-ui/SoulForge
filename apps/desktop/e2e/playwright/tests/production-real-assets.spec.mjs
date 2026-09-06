@@ -47,11 +47,19 @@ test.describe('真实只狼资源：ACTION / MAP / 纹理渲染链', () => {
     });
     await window.waitForLoadState('domcontentloaded');
     const cleanup = async () => {
+      // Playwright disposes the ElectronApplication process handle during
+      // app.close(); capture it before closing so cleanup stays compatible
+      // with both the current and older Electron adapters.
+      let child;
+      try {
+        child = app.process();
+      } catch {
+        child = undefined;
+      }
       await app.close().catch(() => undefined);
       // Electron/Bridge 子进程在 app.close() 返回后可能还持有 Chromium
       // user-data 文件句柄。先等待宿主进程退出，再对明确的临时目录做
       // 有界重试；清理失败只能留下本次临时目录，不能把真实资源断言判成失败。
-      const child = app.process();
       if (child && child.exitCode === null) {
         const deadline = Date.now() + 5_000;
         while (child.exitCode === null && Date.now() < deadline) {
@@ -101,6 +109,12 @@ test.describe('真实只狼资源：ACTION / MAP / 纹理渲染链', () => {
     await input.fill(query);
     await expect(window.locator('.cmdk-item').filter({ hasText: query })).toHaveCount(1, { timeout: 30_000 });
     await window.keyboard.press('Enter');
+  }
+
+  async function expandActionGroup(window, groupLabel) {
+    const header = window.locator('.tae-animation-group__header').filter({ hasText: groupLabel }).first();
+    await expect(header).toHaveCount(1, { timeout: 120_000 });
+    if (await header.getAttribute('aria-expanded') !== 'true') await header.click();
   }
 
   test('真实 ACTION 与 MAP 读取含完整网格/贴图，并能进入可视化工作台', async () => {
@@ -165,6 +179,9 @@ test.describe('真实只狼资源：ACTION / MAP / 纹理渲染链', () => {
               .length,
             projectionIndexBytes: c0000CompatibilityProjectionMeshes
               .map((mesh) => typeof mesh?.indicesBase64 === 'string' ? mesh.indicesBase64.length : 0),
+            assemblyParts: Array.isArray(actionC0000?.data?.assemblyParts)
+              ? actionC0000.data.assemblyParts
+              : [],
             diagnostics: (actionC0000?.diagnostics ?? []).map((diagnostic) => diagnostic.code)
           },
           action: {
@@ -196,11 +213,13 @@ test.describe('真实只狼资源：ACTION / MAP / 纹理渲染链', () => {
 
       expect(probe.ok, JSON.stringify(probe)).toBe(true);
       expect(probe.c0000.ok, JSON.stringify(probe.c0000)).toBe(true);
+      // Native projected-decal remains read-only in the generic Three
+      // renderer. ACTION c0000 must therefore preserve the native receiver
+      // classification while refusing the old generic FC head projection.
       expect(probe.c0000.nativeProjectedMeshes, JSON.stringify(probe.c0000)).toBeGreaterThan(0);
-      expect(probe.c0000.compatibilityProjectionMeshes, JSON.stringify(probe.c0000)).toBeGreaterThan(0);
-      expect(probe.c0000.projectionTextureNames, JSON.stringify(probe.c0000)).toContain('FC_M_0000_head_a');
-      expect(probe.c0000.projectionTextureTokens, JSON.stringify(probe.c0000)).toBeGreaterThan(0);
-      expect(probe.c0000.projectionIndexBytes.some((length) => length > 0), JSON.stringify(probe.c0000)).toBe(true);
+      expect(probe.c0000.projectionTextureNames, JSON.stringify(probe.c0000))
+        .not.toContain('FC_M_0000_head_a');
+      expect(probe.c0000.assemblyParts, JSON.stringify(probe.c0000)).toContain('parts/fc_m_0200.partsbnd.dcx');
       expect(probe.action.meshCount).toBeGreaterThan(0);
       expect(probe.action.meshPayloads).toBeGreaterThan(0);
       expect(probe.action.texturePreviews, JSON.stringify(probe.action)).toBeGreaterThan(0);
@@ -299,7 +318,93 @@ test.describe('真实只狼资源：ACTION / MAP / 纹理渲染链', () => {
       await expect(window.getByLabel('动作工作台')).toBeVisible();
       await expect(window.getByTestId('tae-preview-viewport')).toBeVisible({ timeout: 120_000 });
 
+      // a200 contains native animations whose hkxName is absent. The UI
+      // fallback must retain the physical child prefix instead of relabeling
+      // them as a000, which made the loaded partition look incomplete.
+      const bankSelector = window.getByTestId('tae-bank-selector');
       const animations = window.getByRole('region', { name: 'Animations' });
+      const bankLabels = await bankSelector.locator('option').allTextContents();
+      expect(bankLabels).toEqual(expect.arrayContaining([
+        'a00 (939)',
+        'a50 (223)',
+        'a100 (4)',
+        'a200 (66)'
+      ]));
+      await bankSelector.selectOption({ label: 'a200 (66)' });
+      await expandActionGroup(window, 'a200');
+      await expect(animations.locator('.wb-row').filter({ hasText: 'a200_501010' })).toHaveCount(1);
+      await expect(animations.locator('.wb-row').filter({ hasText: 'a000_501010' })).toHaveCount(0);
+      await bankSelector.selectOption('all');
+      await expandActionGroup(window, 'a00');
+      const actionView = window.locator('.tae-preview-body');
+      await expect(actionView.getByTestId('flver-toggle-skeleton')).toHaveCount(0);
+      await expect(actionView).not.toContainText('FLVER 3D 预览');
+      await expect(actionView).not.toContainText('兼容预览');
+      await expect(actionView).not.toContainText('authority=');
+
+      // The four-column action workbench must keep the viewport inside the
+      // main work area when the Agent dock consumes the right side.
+      await window.getByRole('button', { name: 'AI Agent 面板', exact: true }).click();
+      const narrowLayout = await window.evaluate(() => {
+        const workbench = document.querySelector('.tae-workbench');
+        const viewport = document.querySelector('.tae-preview__viewport');
+        if (!workbench || !viewport) return null;
+        const workbenchRect = workbench.getBoundingClientRect();
+        const viewportRect = viewport.getBoundingClientRect();
+        return {
+          workbenchLeft: workbenchRect.left,
+          workbenchRight: workbenchRect.right,
+          viewportLeft: viewportRect.left,
+          viewportRight: viewportRect.right,
+          viewportWidth: viewportRect.width,
+          viewportHeight: viewportRect.height
+        };
+      });
+      expect(narrowLayout, 'ACTION 紧凑布局未找到工作台或预览').not.toBeNull();
+      expect(narrowLayout.viewportWidth).toBeGreaterThan(0);
+      expect(narrowLayout.viewportHeight).toBeGreaterThan(0);
+      expect(narrowLayout.viewportLeft).toBeGreaterThanOrEqual(narrowLayout.workbenchLeft - 1);
+      expect(narrowLayout.viewportRight).toBeLessThanOrEqual(narrowLayout.workbenchRight + 1);
+      await closeAgent(window);
+
+      // The UI row carries the physical TAE child identity. Exercise the
+      // production preload -> main -> Bridge path directly for a non-a00
+      // child whose animId namespace is otherwise easy to confuse with a00.
+      const selectorProbe = await window.evaluate(async () => {
+        const api = globalThis.soulforge;
+        const files = await api.searchResources('c0000.anibnd.dcx');
+        const file = files.find((candidate) => /(^|\/)chr\/c0000\.anibnd\.dcx$/i.test(candidate.relativePath));
+        if (!file) return { ok: false, reason: 'c0000 动作未进入生产索引' };
+        const clip = await api.readTaeAnimationClip(
+          file.sourceUri,
+          2011,
+          undefined,
+          undefined,
+          undefined,
+          3,
+          5000050,
+          'a50.tae',
+          'a50'
+        );
+        return {
+          ok: Boolean(clip?.ok),
+          motionAnimId: clip?.data?.motionAnimId,
+          taeEntryIndex: clip?.data?.taeEntryIndex,
+          taeEntryId: clip?.data?.taeEntryId,
+          taeEntryName: clip?.data?.taeEntryName,
+          taeGroup: clip?.data?.taeGroup,
+          hkxBoneCount: clip?.data?.hkxBoneCount,
+          diagnostics: (clip?.diagnostics ?? []).map((diagnostic) => diagnostic.code)
+        };
+      });
+      expect(selectorProbe.ok, JSON.stringify(selectorProbe)).toBe(true);
+      expect(selectorProbe.motionAnimId, JSON.stringify(selectorProbe)).toBe(50002010);
+      expect(selectorProbe.taeEntryIndex, JSON.stringify(selectorProbe)).toBe(3);
+      expect(selectorProbe.taeEntryId, JSON.stringify(selectorProbe)).toBe(5000050);
+      expect(selectorProbe.taeEntryName, JSON.stringify(selectorProbe)).toBe('a50.tae');
+      expect(selectorProbe.taeGroup, JSON.stringify(selectorProbe)).toBe('a50');
+      expect(selectorProbe.hkxBoneCount, JSON.stringify(selectorProbe)).toBe(146);
+
       const animation = animations.locator('.wb-row').filter({ hasText: 'a000_201802' });
       await expect(animation).toHaveCount(1, { timeout: 120_000 });
       await animation.click();
@@ -335,6 +440,8 @@ test.describe('真实只狼资源：ACTION / MAP / 纹理渲染链', () => {
 
     async function selectAndCapture(animationName, filePrefix) {
       const animations = window.getByRole('region', { name: 'Animations' });
+      const groupPrefix = /^(a\d{3})_/i.exec(animationName)?.[1];
+      await expandActionGroup(window, groupPrefix ? groupPrefix.replace(/^a0/, 'a') : animationName.split('_')[0]);
       const row = animations.locator('.wb-row').filter({ hasText: animationName }).first();
       await expect(row).toHaveCount(1, { timeout: 120_000 });
       await row.click();

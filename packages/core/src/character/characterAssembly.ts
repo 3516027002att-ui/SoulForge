@@ -18,11 +18,11 @@ function buildLeaderNameToIndex(leaderBones: readonly FlverPreviewBone[]): Map<s
 }
 
 function hierarchyIdFor(bones: readonly FlverPreviewBone[], index: number): string {
-  const bone = bones[index];
+  const bone = bones.find((candidate) => candidate.index === index);
   if (!bone) return '';
   if (bone.hierarchyId) return bone.hierarchyId;
-  // fallback: name#occurrence
-  return `${bone.name}#${index}`;
+  // Fallback stays anchored to native bone identity, not array position.
+  return `${bone.name}#${bone.index}`;
 }
 
 function cloneBone(
@@ -53,9 +53,11 @@ function cloneBone(
  */
 function rebuildBoneLinks(bones: readonly FlverPreviewBone[]): FlverPreviewBone[] {
   const result = bones.map((bone) => cloneBone(bone, bone.index));
+  const byIndex = new Map<number, FlverPreviewBone>();
+  for (const bone of result) byIndex.set(bone.index, bone);
   const children = new Map<number, number[]>();
   for (const bone of result) {
-    if (bone.parentIndex < 0 || bone.parentIndex >= result.length || bone.parentIndex === bone.index) continue;
+    if (bone.parentIndex < 0 || !byIndex.has(bone.parentIndex) || bone.parentIndex === bone.index) continue;
     const list = children.get(bone.parentIndex) ?? [];
     list.push(bone.index);
     children.set(bone.parentIndex, list);
@@ -65,11 +67,11 @@ function rebuildBoneLinks(bones: readonly FlverPreviewBone[]): FlverPreviewBone[
     bone.nextSiblingIndex = -1;
   }
   for (const [parentIndex, childIndexes] of children) {
-    const parent = result[parentIndex];
+    const parent = byIndex.get(parentIndex);
     if (!parent || childIndexes.length === 0) continue;
     parent.childIndex = childIndexes[0]!;
     for (let index = 0; index + 1 < childIndexes.length; index += 1) {
-      const child = result[childIndexes[index]!];
+      const child = byIndex.get(childIndexes[index]!);
       if (child) child.nextSiblingIndex = childIndexes[index + 1]!;
     }
   }
@@ -96,6 +98,9 @@ export function remapCharacterBundleToLeader(
   // Keep the leader authoritative, but allow exact native part bones and their
   // exact parent chain to be appended to the read-only compatibility skeleton.
   const leaderBones = leaderModel.bones.map((bone) => cloneBone(bone, bone.index));
+  const leaderByIndex = new Map<number, FlverPreviewBone>(
+    leaderBones.map((bone) => [bone.index, bone])
+  );
   const leaderByName = buildLeaderNameToIndex(leaderBones);
   const leaderByHierarchy = new Map<string, number>();
   for (const bone of leaderBones) {
@@ -119,6 +124,7 @@ export function remapCharacterBundleToLeader(
 
   const sourceHierarchyToLeader = new Map<string, number>();
   let appendedBoneCount = 0;
+  let nextLeaderBoneIndex = Math.max(-1, ...leaderBones.map((bone) => bone.index)) + 1;
   const remappedPartModels: FlverPreviewModel[] = [];
 
   for (const part of bodyPartModels) {
@@ -174,7 +180,7 @@ export function remapCharacterBundleToLeader(
 
       let leaderIndex = leaderByHierarchy.get(hid);
       if (leaderIndex !== undefined) {
-        const target = leaderBones[leaderIndex];
+        const target = leaderByIndex.get(leaderIndex);
         if (!target || target.name !== bone.name) {
           resolvingPartBones.delete(partIndex);
           return failBone(
@@ -188,7 +194,7 @@ export function remapCharacterBundleToLeader(
       if (leaderIndex === undefined) {
         leaderIndex = sourceHierarchyToLeader.get(hid);
         if (leaderIndex !== undefined) {
-          const target = leaderBones[leaderIndex];
+          const target = leaderByIndex.get(leaderIndex);
           if (!target || target.name !== bone.name) {
             resolvingPartBones.delete(partIndex);
             return failBone(
@@ -241,7 +247,8 @@ export function remapCharacterBundleToLeader(
           );
         }
 
-        const appendedIndex = leaderBones.length;
+        const appendedIndex = nextLeaderBoneIndex;
+        nextLeaderBoneIndex += 1;
         const appended = cloneBone(
           bone,
           appendedIndex,
@@ -251,6 +258,7 @@ export function remapCharacterBundleToLeader(
           hid || `${bone.name}#${appendedIndex}`
         );
         leaderBones.push(appended);
+        leaderByIndex.set(appendedIndex, appended);
         leaderByHierarchy.set(appended.hierarchyId, appendedIndex);
         const nameList = leaderByName.get(appended.name) ?? [];
         nameList.push(appendedIndex);
@@ -260,6 +268,10 @@ export function remapCharacterBundleToLeader(
         appendedBoneCount += 1;
       }
 
+      if (bone.parentIndex >= 0 && !partIndexToLeader.has(bone.parentIndex)) {
+        resolvePartBone(bone.parentIndex);
+      }
+
       partIndexToLeader.set(partIndex, leaderIndex);
       resolvingPartBones.delete(partIndex);
       return leaderIndex;
@@ -267,11 +279,27 @@ export function remapCharacterBundleToLeader(
 
     const maxPartBoneIndex = partBones.reduce((max, bone) => Math.max(max, bone.index), -1);
     const bindingBoneMap = Array.from({ length: maxPartBoneIndex + 1 }, () => -1);
+
+    // Pre-resolve all part bones that have unique hierarchy or name matches in the leader skeleton
+    for (const partBone of partBones) {
+      if (!partIndexToLeader.has(partBone.index)) {
+        const hid = hierarchyIdFor(partBones, partBone.index);
+        if (leaderByHierarchy.has(hid) || sourceHierarchyToLeader.has(hid)) {
+          resolvePartBone(partBone.index);
+        } else {
+          const candidates = leaderByName.get(partBone.name) ?? [];
+          if (candidates.length === 1) {
+            resolvePartBone(partBone.index);
+          }
+        }
+      }
+    }
+
     const remappedMeshes: FlverPreviewMesh[] = [];
     for (const mesh of part.meshes) {
       if (mesh.skinningMode === 'static' || !mesh.boneIndicesBase64 || !mesh.boneWeightsBase64) {
         // static meshes: no remapping needed, but assign leader skeletonId for consistency
-        remappedMeshes.push({ ...mesh, boneIndexSpace: 'none' as const } as FlverPreviewMesh);
+        remappedMeshes.push({ ...mesh, skeletonId: leaderModel.modelId, boneIndexSpace: 'none' as const } as FlverPreviewMesh);
         continue;
       }
       // Decode base64 to check positive-weight mapping
@@ -334,10 +362,10 @@ export function remapCharacterBundleToLeader(
         }
         remappedMeshes.push({
           ...mesh,
-          // Keep the native part-local indices. The renderer uses these with
-          // the part's own bind inverses and follows the leader through the
-          // binding map below; rewriting the indices alone loses the native
-          // follower reference pose.
+          // Keep the source FLVER indices for the follower skeleton. The
+          // leader-space projection is retained as diagnostic data, but the
+          // renderer must consume the native part indices together with the
+          // part's native bind/inverse matrices.
           sourceBoneIndicesBase64: mesh.boneIndicesBase64,
           boneIndicesBase64: indicesBase64,
           boneIndexSpace: 'flver-global' as const,
@@ -405,22 +433,7 @@ export function remapCharacterBundleToLeader(
     vertexCount,
     boneCount: finalLeaderBones.length,
     leaderModelId: leaderModel.modelId,
-    models: remappedModels.map((m) => ({
-      ...m,
-      // Follower-bound parts keep their own skeleton namespace. Models that
-      // have no retained source skeleton continue using the leader namespace
-      // for compatibility with the older remapped payload.
-      meshes: m.meshes.map((mesh) => ({
-        ...mesh,
-        ...(mesh.skinningMode !== 'static'
-          ? {
-              skeletonId: m.bindingBones !== undefined
-                ? m.modelId
-                : leaderModel.modelId
-            }
-          : {})
-      }))
-    }))
+    models: remappedModels
   };
 
   return { ok: true, bundle, diagnostics };

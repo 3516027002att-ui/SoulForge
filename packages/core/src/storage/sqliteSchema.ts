@@ -598,6 +598,28 @@ CREATE INDEX IF NOT EXISTS idx_rag_chunks_workspace_source_hash
       // 旧 embedding 行没有内容指纹，只能被内部管理器视为过期并重建。
       { table: 'rag_embeddings', column: 'content_hash', definition: 'TEXT' }
     ]
+  },
+  {
+    id: 12,
+    name: 'v0_5_semantic_file_cache',
+    sql: `
+PRAGMA foreign_keys = ON;
+
+CREATE TABLE IF NOT EXISTS semantic_file_cache (
+  workspace_id TEXT NOT NULL,
+  relative_path TEXT NOT NULL,
+  file_sha256 TEXT NOT NULL,
+  resource_kind TEXT NOT NULL,
+  payload_json TEXT NOT NULL,
+  mtime_ms REAL NOT NULL,
+  updated_at TEXT NOT NULL,
+  PRIMARY KEY (workspace_id, relative_path),
+  FOREIGN KEY (workspace_id) REFERENCES workspaces(workspace_id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_semantic_file_cache_workspace_kind
+  ON semantic_file_cache(workspace_id, resource_kind);
+`
   }
 ];
 

@@ -93,6 +93,7 @@ export type AgentAttachmentCreateIpcResult = { ok: true; reference: { token: str
 const DEFAULT_AGENT_CONTEXT_WINDOW_TOKENS = 500_000;
 const AGENT_CONTEXT_COMPACTION_RATIO = 0.8;
 const APPROVAL_TIMEOUT_MS = 600_000;
+const DEFAULT_REQUEST_TIMEOUT_MS = 180_000;
 const AGENT_EVENT_HISTORY_LIMIT = 4_096;
 const AGENT_EVENT_HISTORY_TTL_MS = 5 * 60_000;
 
@@ -841,13 +842,11 @@ export function registerAgentIpcHandlers(deps: AgentIpcDeps): void {
         resolveApprovalDiff,
         ...(Array.isArray(request.approvalRequiredLevels)
           ? { approvalRequiredLevels: request.approvalRequiredLevels }
-          : mode === 'fullPermission'
-            ? { approvalRequiredLevels: [] }
-            : {}),
+          : { approvalRequiredLevels: [] }),
         ...(request.streaming === true ? { streaming: true } : {}),
-        ...(request.timeoutMs != null && request.timeoutMs > 0
-          ? { timeoutMs: Math.trunc(request.timeoutMs) }
-          : {}),
+        timeoutMs: request.timeoutMs != null && request.timeoutMs > 0
+          ? Math.trunc(request.timeoutMs)
+          : DEFAULT_REQUEST_TIMEOUT_MS,
         ...(request.maxTotalOutputTokens != null && request.maxTotalOutputTokens > 0
           ? { maxTotalOutputTokens: Math.trunc(request.maxTotalOutputTokens) }
           : {}),

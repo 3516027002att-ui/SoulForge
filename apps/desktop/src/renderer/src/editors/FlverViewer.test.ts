@@ -1,7 +1,12 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 import type { CharacterPreviewBundle, FlverPreviewBone } from '@soulforge/shared';
-import { buildBundleSemanticScene } from './FlverViewer.js';
+import {
+  buildBundleSemanticScene,
+  createFlverSkeletonErrorState,
+  describeFlverSkeletonLoadState,
+  resolveFlverSkeletonLoadState
+} from './FlverViewer.js';
 
 function float32Base64(values: readonly number[]): string {
   const bytes = Buffer.alloc(values.length * 4);
@@ -27,6 +32,67 @@ const leaderBone: FlverPreviewBone = {
   scale: [1, 1, 1],
   rotationOrder: 'XZY'
 };
+
+describe('FLVER skeleton IPC load state', () => {
+  it('Bridge 失败保留结构化诊断并显示 code/message', () => {
+    const state = resolveFlverSkeletonLoadState({
+      ok: false,
+      diagnostics: [{ severity: 'error', code: 'RESOURCE_NOT_INDEXED', message: '资源未索引。' }]
+    });
+
+    assert.equal(state.status, 'error');
+    assert.deepEqual(state.bones, []);
+    assert.deepEqual(state.diagnostics, [{
+      severity: 'error',
+      code: 'RESOURCE_NOT_INDEXED',
+      message: '资源未索引。'
+    }]);
+    assert.equal(describeFlverSkeletonLoadState(state), '骨骼加载失败：RESOURCE_NOT_INDEXED · 资源未索引。');
+  });
+
+  it('Bridge 返回空 bones 时进入 empty，而不是继续 loading', () => {
+    const state = resolveFlverSkeletonLoadState({ ok: true, data: { bones: [] } });
+
+    assert.equal(state.status, 'empty');
+    assert.deepEqual(state.bones, []);
+    assert.equal(describeFlverSkeletonLoadState(state), '骨骼为空：Bridge 返回 0 根骨骼');
+  });
+
+  it('Bridge 返回骨骼时进入 ready 并保留原生层级数据', () => {
+    const state = resolveFlverSkeletonLoadState({
+      ok: true,
+      data: {
+        bones: [{
+          name: 'Root',
+          parentIndex: -1,
+          translation: [1, 2, 3],
+          rotation: [0.1, 0.2, 0.3],
+          scale: [1, 1, 1],
+          rotationOrder: 'XZY'
+        }]
+      }
+    });
+
+    assert.equal(state.status, 'ready');
+    assert.deepEqual(state.bones[0], {
+      name: 'Root',
+      parentIndex: -1,
+      translation: [1, 2, 3],
+      rotation: [0.1, 0.2, 0.3],
+      scale: [1, 1, 1],
+      rotationOrder: 'XZY'
+    });
+    assert.equal(describeFlverSkeletonLoadState(state), '骨骼已加载：1 bones');
+  });
+
+  it('Bridge 异常也转成可读的 error 诊断', () => {
+    const state = createFlverSkeletonErrorState(new Error('IPC channel closed'));
+
+    assert.equal(state.status, 'error');
+    assert.equal(state.diagnostics[0]?.code, 'FLVER_SKELETON_READ_EXCEPTION');
+    assert.equal(state.diagnostics[0]?.message, 'IPC channel closed');
+  });
+});
 
 describe('buildBundleSemanticScene action assembly projection', () => {
   it('按 material index 绑定不同 albedo，不用首张纹理覆盖未匹配材质', () => {
@@ -182,6 +248,52 @@ describe('buildBundleSemanticScene action assembly projection', () => {
     assert.equal(scene.skeletons?.[0]?.id, 'leader');
   });
 
+  it('keeps follower binding authoritative when a legacy bundle labels its mesh as leader', () => {
+    const bundle: CharacterPreviewBundle = {
+      meshCount: 1,
+      vertexCount: 1,
+      boneCount: 1,
+      leaderModelId: 'leader',
+      models: [
+        {
+          modelId: 'leader',
+          entry: { index: 0, id: 1, name: 'c0000.flver', duplicateOrdinal: 0, contentHash: 'leader-hash' },
+          meshCount: 0,
+          boneCount: 1,
+          meshes: [],
+          bones: [leaderBone]
+        },
+        {
+          modelId: 'body-part',
+          entry: { index: 0, id: 2, name: 'bd_preview.flver', duplicateOrdinal: 0, contentHash: 'part-hash' },
+          meshCount: 1,
+          boneCount: 0,
+          bones: [],
+          bindingBones: [{ ...leaderBone, name: 'PartRoot', translation: [2, 0, 0], hierarchyId: 'PartRoot#0' }],
+          bindingBoneMap: [0],
+          meshes: [{
+            meshIndex: 0,
+            vertexCount: 1,
+            indexSize: 16,
+            positionsBase64: float32Base64([0, 0, 0]),
+            indicesBase64: '',
+            boneIndicesBase64: uint16Base64([7, 7, 7, 7]),
+            sourceBoneIndicesBase64: uint16Base64([0, 0, 0, 0]),
+            boneWeightsBase64: float32Base64([1, 0, 0, 0]),
+            skinningMode: 'weighted',
+            boneIndexSpace: 'flver-global',
+            skeletonId: 'leader'
+          }]
+        }
+      ]
+    };
+
+    const scene = buildBundleSemanticScene(bundle);
+    assert.equal(scene.meshes[0]?.skeletonId, 'body-part');
+    assert.equal(scene.meshes[0]?.skinIndices?.[0], 0);
+    assert.equal(scene.skeletonBindings?.length, 1);
+  });
+
   it('为保留原生绑定姿态的部件建立 follower 语义并消费源索引', () => {
     const partBone: FlverPreviewBone = {
       ...leaderBone,
@@ -236,6 +348,105 @@ describe('buildBundleSemanticScene action assembly projection', () => {
     assert.equal(scene.skeletonBindings?.length, 1);
     assert.equal(scene.skeletonBindings?.[0]?.leaderSkeletonId, 'leader');
     assert.equal(scene.skeletonBindings?.[0]?.bones[0]?.translation[0], 2);
+  });
+
+  it('按原生骨骼 index 集合校验稀疏/重排骨骼，不把数组长度当作上界', () => {
+    const sparseBones: FlverPreviewBone[] = [
+      { ...leaderBone, index: 9, name: 'Hand.R', hierarchyId: 'Hand.R#9' },
+      { ...leaderBone, index: 4, name: 'Root', hierarchyId: 'Root#4' }
+    ];
+    const bundle: CharacterPreviewBundle = {
+      meshCount: 1,
+      vertexCount: 1,
+      boneCount: sparseBones.length,
+      leaderModelId: 'sparse',
+      models: [{
+        modelId: 'sparse',
+        entry: { index: 0, id: 1, name: 'sparse.flver', duplicateOrdinal: 0, contentHash: 'sparse-hash' },
+        meshCount: 1,
+        boneCount: sparseBones.length,
+        meshes: [{
+          meshIndex: 0,
+          vertexCount: 1,
+          indexSize: 16,
+          positionsBase64: float32Base64([0, 0, 0]),
+          indicesBase64: '',
+          boneIndicesBase64: uint16Base64([9, 9, 9, 9]),
+          boneWeightsBase64: float32Base64([1, 0, 0, 0]),
+          skinningMode: 'weighted',
+          boneIndexSpace: 'flver-global'
+        }],
+        bones: sparseBones
+      }]
+    };
+
+    const scene = buildBundleSemanticScene(bundle);
+    assert.equal(scene.meshes[0]?.skinIndices?.[0], 9);
+    assert.deepEqual(scene.skeletons?.[0]?.bones.map((bone) => bone.index), [9, 4]);
+  });
+
+  it('接受原生 Byte4C 蒙皮权重的量化误差', () => {
+    const quantizedWeights = [4, 50, 146, 52].map((value) => value / 255);
+    const bundle: CharacterPreviewBundle = {
+      meshCount: 1,
+      vertexCount: 1,
+      boneCount: 1,
+      leaderModelId: 'quantized',
+      models: [{
+        modelId: 'quantized',
+        entry: { index: 0, id: 1, name: 'quantized.flver', duplicateOrdinal: 0, contentHash: 'quantized-hash' },
+        meshCount: 1,
+        boneCount: 1,
+        meshes: [{
+          meshIndex: 0,
+          vertexCount: 1,
+          indexSize: 16,
+          positionsBase64: float32Base64([0, 0, 0]),
+          indicesBase64: '',
+          boneIndicesBase64: uint16Base64([0, 0, 0, 0]),
+          boneWeightsBase64: float32Base64(quantizedWeights),
+          skinningMode: 'weighted',
+          boneIndexSpace: 'flver-global'
+        }],
+        bones: [leaderBone]
+      }]
+    };
+
+    const scene = buildBundleSemanticScene(bundle);
+    assert.ok(Math.abs((scene.meshes[0]?.skinWeights?.[0] ?? 0) - quantizedWeights[0]!) < 1e-6);
+    assert.ok(Array.from(scene.meshes[0]?.skinWeights ?? []).reduce((sum, weight) => sum + weight, 0) < 1);
+  });
+
+  it('仍拒绝非原生量化且明显不归一的蒙皮权重', () => {
+    const bundle: CharacterPreviewBundle = {
+      meshCount: 1,
+      vertexCount: 1,
+      boneCount: 1,
+      leaderModelId: 'invalid-weights',
+      models: [{
+        modelId: 'invalid-weights',
+        entry: { index: 0, id: 1, name: 'invalid-weights.flver', duplicateOrdinal: 0, contentHash: 'invalid-weights-hash' },
+        meshCount: 1,
+        boneCount: 1,
+        meshes: [{
+          meshIndex: 0,
+          vertexCount: 1,
+          indexSize: 16,
+          positionsBase64: float32Base64([0, 0, 0]),
+          indicesBase64: '',
+          boneIndicesBase64: uint16Base64([0, 0, 0, 0]),
+          boneWeightsBase64: float32Base64([0.49, 0.49, 0, 0]),
+          skinningMode: 'weighted',
+          boneIndexSpace: 'flver-global'
+        }],
+        bones: [leaderBone]
+      }]
+    };
+
+    assert.throws(
+      () => buildBundleSemanticScene(bundle),
+      /FLVER_SKIN_WEIGHT_SUM_INVALID/
+    );
   });
 
   it('preserves native projected-decal classification without letting it distort preview bounds', () => {

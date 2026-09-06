@@ -146,6 +146,12 @@ async function selectFileItem(window, text) {
   await window.keyboard.press('Enter');
 }
 
+async function expandTaeAnimationGroup(window, groupLabel) {
+  const header = window.locator('.tae-animation-group__header').filter({ hasText: groupLabel }).first();
+  await expect(header).toHaveCount(1);
+  if (await header.getAttribute('aria-expanded') !== 'true') await header.click();
+}
+
 test('空工作区：无演示数据，变更队列为空态', async () => {
   const { app, window } = await launchApp();
   await expect(window.locator('.change-queue')).toContainText('没有候选变更');
@@ -548,15 +554,15 @@ test('动作工作台三栏（TAE）：动画 → 词条事件选择链，事件
   await openFixtureWorkspace(window);
 
   // T3（2026-08-15）：行为 + 动画合并为「动作」。TAE 资源从开始侧栏资源树选择，
-  // 进入三栏动作工作台（Animations | Events / 词条 + 详情 | 预览（只读））。
+  // 进入四栏动作工作台（Animations | Events / 词条 + 详情 | 动作视图）。
   await selectFileItem(window, 'action/c0000.tae');
   // WorkbenchLayout 根是 div(.workbench)带 aria-label,不是 section/region。
   await expect(window.getByLabel('动作工作台')).toBeVisible();
 
-  // 三栏（grok T3，无 Inspector 第三栏 / 无 Tools 空栏 / 无时间轴图）。
+  // 四栏（无 Inspector / Tools 空栏；动作视图保留真实只读画布与时间轴）。
   await expect(window.getByRole('region', { name: 'Animations' })).toBeVisible();
   await expect(window.getByRole('region', { name: 'Events / 词条' })).toBeVisible();
-  await expect(window.getByRole('region', { name: '预览（只读）' })).toBeVisible();
+  await expect(window.getByRole('region', { name: '动作视图' })).toBeVisible();
   await expect(window.getByRole('region', { name: 'Inspector' })).toHaveCount(0);
   await expect(window.getByRole('region', { name: 'Timeline / Events' })).toHaveCount(0);
   await expect(window.getByRole('region', { name: 'Tools' })).toHaveCount(0);
@@ -564,6 +570,7 @@ test('动作工作台三栏（TAE）：动画 → 词条事件选择链，事件
   // 动画列表由 fixture envelope 的 pages 投影派生（不按 chr/action 目录分类），
   // hkxName 去扩展作主标签。
   const left = window.getByRole('region', { name: 'Animations' });
+  await expandTaeAnimationGroup(window, 'a00');
   await expect(left.getByRole('row', { name: /a0000/ })).toBeVisible();
   // S17：无 hkxName 的动画行名改用干净数字 id（禁止「动画 N」）——第二动画行
   // 显示为「1」（meta「1 事件」），不再是「动画 1」。
@@ -593,11 +600,11 @@ test('动作工作台三栏（TAE）：动画 → 词条事件选择链，事件
   await expect(details.getByText('参数体', { exact: true })).toBeVisible();
   await expect(details.getByText(/未解码/)).toBeVisible();
 
-  // 右栏是只读预览空态 + 诊断（不挂伴生 chrbnd 的 FLVER）。
+  // 右栏是只读动作视图空态（不挂伴生 chrbnd 的 FLVER）。
   await expect(window.getByTestId('tae-preview-unavailable')).toBeVisible();
   await expect(window.getByTestId('tae-preview-unavailable')).toContainText('预览不可用');
   // 右栏始终只读：无输入、无按钮。
-  const preview = window.getByRole('region', { name: '预览（只读）' });
+  const preview = window.getByRole('region', { name: '动作视图' });
   await expect(preview.locator('input[type="number"], input[type="text"], textarea')).toHaveCount(0);
   await expect(preview.getByTestId('tae-timeline-ctrl')).toBeVisible();
   await expect(preview.getByRole('button', { name: '播放' })).toBeVisible();
@@ -629,6 +636,7 @@ test('问题4-D：动作工作台动画长列表全量渲染，栏内可滚到�
   await expect(window.getByLabel('动作工作台')).toBeVisible();
 
   const left = window.getByRole('region', { name: 'Animations' });
+  await expandTaeAnimationGroup(window, 'a999');
   // 栏头 hint 报真实总数（213 animations），不是被砍掉的 200。
   await expect(left.getByText('213 animations')).toBeVisible();
   // 全量渲染：Animations 栏里 213 个动画行都进 DOM，不许 slice(0, 200)。
@@ -645,7 +653,7 @@ test('问题4-D：动作工作台动画长列表全量渲染，栏内可滚到�
   await app.close();
 });
 
-test('anibnd 容器打开走动作工作台：不落 BND4 容器页，提取来源诊断可见', async () => {
+test('anibnd 容器打开走动作工作台：不落 BND4 容器页，动作视图保持简洁', async () => {
   const { app, window } = await launchApp();
   await openFixtureWorkspace(window);
 
@@ -657,13 +665,15 @@ test('anibnd 容器打开走动作工作台：不落 BND4 容器页，提取来�
   // 禁止落 BND4 通用容器页。
   await expect(window.getByLabel('BND4 容器工作台')).toHaveCount(0);
 
-  // 三栏就位 + 动画列表（hkxName 去扩展：a000_003013）。
+  // 动作视图就位 + 动画列表（hkxName 去扩展：a000_003013）。
   const left = window.getByRole('region', { name: 'Animations' });
+  await expandTaeAnimationGroup(window, 'a00');
   await expect(left.getByRole('row', { name: /a000_003013/ })).toBeVisible();
   await expect(left.getByText(/anibnd/)).not.toBeVisible();
 
-  // 提取来源诊断在右栏预览区可见（TAE_FROM_ANIBND_EXTRACTED）。
-  await expect(window.getByTestId('tae-preview-diagnostics')).toBeVisible();
+  // 原生提取诊断留在读链数据，不把内部诊断长文铺在动作视图。
+  await expect(window.getByTestId('tae-preview-diagnostics')).toHaveCount(0);
+  await expect(window.getByLabel('动作视图')).not.toContainText('authority=');
 
   // 选中动画 0 → 中栏词条事件列表可用（动作/词条/预览三栏联动）。
   await left.getByRole('row', { name: /a000_003013/ }).click();

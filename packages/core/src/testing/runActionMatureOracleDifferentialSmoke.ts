@@ -23,6 +23,11 @@ const DEFAULT_ORACLE_ROOT = 'D:/mystream/Sekiro Shadows Die Twice/tools/DSAnimSt
 const ORACLE_REPOSITORY = 'Meowmaritus/SoulsAssetPipeline';
 const ORACLE_COMMIT = 'd11caf989c917c7a43e2c7559915b1c5af218153';
 const ORACLE_LICENSE = 'GPL-3.0 (external runtime only; no GPL source or binary is committed)';
+// The TAE animation id and the ANIBND HKX logical id are different native
+// namespaces. In c0000/a00, TAE animId=11 owns a000_000010.hkt, which is the
+// same clip that the external oracle addresses as logical HKX id 10.
+const TAE_ANIMATION_ID = 11;
+const ORACLE_HKX_ANIMATION_ID = 10;
 // SoulsAssetPipeline exposes float transforms through a separate runtime
 // path; the real fixture's worst static translation delta is 2.8834882e-4.
 // Keep the observed, bounded 5e-4 envelope explicit rather than silently
@@ -210,7 +215,12 @@ export async function runActionMatureOracleDifferentialSmoke(): Promise<void> {
       command: 'read-tae-animation-clip',
       filePath: sourceFilePath,
       commandOptions: {
-        animId: 10,
+        animId: TAE_ANIMATION_ID,
+        // c0000.anibnd.dcx contains multiple TAE children with the same
+        // animation ids. The mature oracle path points at c0000_a000_lo, so
+        // bind the Bridge read to the same native child instead of relying on
+        // a bare animId.
+        taeEntryName: 'a00.tae',
         includeRawSplinePayload: true,
         animationContainerPath,
         skeletonContainerPath: sourceFilePath
@@ -240,7 +250,7 @@ export async function runActionMatureOracleDifferentialSmoke(): Promise<void> {
     }
     if (clip.animationType !== 'SplineCompressed' || !clip.splineBlocks?.length) {
       throw new Error(
-        `真实 animId=10 没有可差分的 SplineCompressed payload：type=${clip.animationType}, blocks=${clip.splineBlocks?.length ?? 0}`
+        `真实 TAE animId=${TAE_ANIMATION_ID} 没有可差分的 SplineCompressed payload：type=${clip.animationType}, blocks=${clip.splineBlocks?.length ?? 0}`
       );
     }
     const rawPayload = decodeRawSplinePayload(clip);
@@ -256,7 +266,7 @@ export async function runActionMatureOracleDifferentialSmoke(): Promise<void> {
       oracleRoot,
       sourceContainer,
       baseContainer: sourceFilePath,
-      animId: clip.animId,
+      animId: ORACLE_HKX_ANIMATION_ID,
       points
     });
     const report = compareClipToOracle({
@@ -408,7 +418,9 @@ function compareClipToOracle(options: {
   if (clip.animationContainerHash !== oracle.sourceContainerHash) {
     issues.push(`Bridge animationContainerHash mismatch: bridge=${clip.animationContainerHash ?? '<missing>'} oracle=${oracle.sourceContainerHash}`);
   }
-  if (clip.animId !== oracle.animId) issues.push(`animId mismatch: bridge=${clip.animId} oracle=${oracle.animId}`);
+  if (clip.motionAnimId !== oracle.animId) {
+    issues.push(`motionAnimId mismatch: bridge=${clip.motionAnimId ?? '<missing>'} oracle=${oracle.animId}`);
+  }
   if (clip.animationType !== oracle.animationType) {
     issues.push(`animation type mismatch: bridge=${clip.animationType} oracle=${oracle.animationType}`);
   }
@@ -618,7 +630,7 @@ function compareClipToOracle(options: {
     },
     ...(issues.length ? { diagnostics: issues } : {}),
     nonClaims: [
-      '仅证明当前真实 c0000 animId=10 与外部成熟 runtime 的 clip/pose differential；不代表全 corpus 或 renderer mesh deformation 已完成。',
+      `仅证明当前真实 c0000 TAE animId=${TAE_ANIMATION_ID}（motionAnimId=${ORACLE_HKX_ANIMATION_ID}）与外部成熟 runtime 的 clip/pose differential；不代表全 corpus 或 renderer mesh deformation 已完成。`,
       'raw mask、block offsets、scalar/rotation quantization 与 compressed controls 已由独立 clean-room decoder 重建并与 Bridge pose 对比；当前样本只覆盖 position/rotation/scale quantization=1，不代表全部 Havok quantization。',
       '外部 GPL runtime 仅在开发期测试进程中加载；仓库不包含其源代码、DLL 或真实游戏资产。',
       'oracle.commit 是外部源码版本记录，runtimeAssemblySha256 是实际加载 DLL 的身份指纹；二者共同提供 provenance，但不单独证明该 DLL 必然由该 commit 构建。',

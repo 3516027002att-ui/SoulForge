@@ -396,14 +396,16 @@ function scoreParamFieldDefinition(
 function expandParamFieldQuery(query: string): string[] {
   const terms = new Set(query.toLocaleLowerCase().split(/[\s,，、/]+/u).filter(Boolean));
   const aliases: ReadonlyArray<[RegExp, string]> = [
-    [/血条|生命|生命值/u, 'hp health vitality hitpoint'],
-    [/精英|首领|boss/u, 'elite boss difficulty'],
-    [/攻击|敌对|阵营|目标/u, 'attack hostile team target faction'],
-    [/落雷|雷|特效|效果/u, 'lightning effect sfx spawn'],
-    [/掉落|奖励|铃铛|物品/u, 'drop reward item lot goods']
+    [/血条|生命|生命值|生命槽|忍杀|忍殺|血量|红点|hp|health|vitality|hitpoint|life/ui, 'hp health vitality hitpoint ninsatu ninsatsu 忍殺 忍杀 maxhp'],
+    [/精英|首领|头目|boss|elite|miniboss/ui, 'elite boss miniboss difficulty rank'],
+    [/攻击|敌对|阵营|队伍|目标|attack|hostile|team|target|faction/ui, 'attack hostile team target faction teamtype 所属 敵対'],
+    [/落雷|雷|特效|效果|lightning|effect|sfx|spawn/ui, 'lightning effect sfx spawn 特効'],
+    [/掉落|奖励|抽选|抽選|物品|道具|铃铛|drop|reward|item|lot|goods|loot/ui, 'drop reward item lot goods itemlot 抽選 抽选 報酬']
   ];
   for (const [pattern, replacement] of aliases) {
-    if (pattern.test(query)) replacement.split(' ').forEach((term) => terms.add(term));
+    if (pattern.test(query)) {
+      replacement.split(' ').filter(Boolean).forEach((term) => terms.add(term.toLocaleLowerCase()));
+    }
   }
   return [...terms];
 }

@@ -125,7 +125,8 @@ const BOUNDED_DISCOVERY_TOOLS = new Set([
   'read_fmg_entries',
   'read_emevd_outline',
   'read_emevd_event',
-  'read_msb_parts'
+  'read_msb_parts',
+  'export_map_for_blender'
 ]);
 const SUMMARY_ARRAY_LIMIT = 16;
 const SUMMARY_STRING_LIMIT = 320;
@@ -216,7 +217,7 @@ function summarizeToolValue(value: unknown, depth = 0): unknown {
  */
 const DISCOVERY_ARRAY_KEYS = new Set([
   'items', 'hits', 'matches', 'rows', 'entries', 'events', 'parts', 'entities',
-  'results', 'fields', 'instructions', 'topics'
+  'results', 'fields', 'instructions', 'topics', 'models'
 ]);
 const DISCOVERY_DETAIL_KEYS = new Set([
   'id', 'uri', 'sourceUri', 'sourcePath', 'relativePath', 'symbolUri', 'chunkId',
@@ -706,7 +707,7 @@ function boundedToolContent(name: string, data: unknown, repeatedQuery = false):
   const raw = JSON.stringify({ ok: true, state: 'completed', data: data ?? null, evidence });
   const identifiers = collectStableIdentifiers(data);
   const window = resultWindowMetadata(data);
-  const byteBounded = BOUNDED_DISCOVERY_TOOLS.has(name) && raw.length > MAX_BOUNDED_TOOL_RESULT_CHARS;
+  const byteBounded = (BOUNDED_DISCOVERY_TOOLS.has(name) || raw.length > MAX_BOUNDED_TOOL_RESULT_CHARS * 4) && raw.length > MAX_BOUNDED_TOOL_RESULT_CHARS;
   if (!byteBounded) {
     const sourceSummary = truncationSummary(name, window, false);
     return JSON.stringify(createResultEnvelope(

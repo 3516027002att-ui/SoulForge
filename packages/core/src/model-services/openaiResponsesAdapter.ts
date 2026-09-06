@@ -187,9 +187,20 @@ export class OpenAiResponsesAdapter implements ModelServiceAdapter {
           }
           const eventType = event.type ?? '';
           if (
+            eventType === 'response.reasoning_summary_part.added'
+            && typeof event.summary_index === 'number'
+            && event.summary_index > 0
+          ) {
+            yield { type: 'thinking-delta', text: '\n\n' };
+            continue;
+          }
+          if (
             (eventType === 'response.reasoning_summary_text.delta'
               || eventType === 'response.reasoning_text.delta'
-              || eventType === 'response.reasoning.delta')
+              || eventType === 'response.reasoning.delta'
+              || eventType === 'response.thinking.delta'
+              || eventType === 'response.reasoning_content.delta'
+              || eventType === 'response.thought.delta')
             && typeof event.delta === 'string'
             && event.delta.length > 0
           ) {
@@ -338,8 +349,10 @@ interface ResponsesPayload {
 interface ResponsesStreamEvent {
   type?: string;
   delta?: string;
+  text?: string;
   item_id?: string;
   output_index?: number;
+  summary_index?: number;
   name?: string;
   message?: string;
   error?: { message?: string };

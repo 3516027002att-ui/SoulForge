@@ -81,6 +81,8 @@ export interface WorkbenchColumnSpec {
 export interface WorkbenchLayoutProps {
   /** 工作台的可访问名，例如「PARAM 工作台」。 */
   label: string;
+  /** 可选的面板专用 class；通用布局行为仍由 `.workbench` 提供。 */
+  className?: string;
   /** 各栏，从左到右。 */
   columns: WorkbenchColumnSpec[];
   /**
@@ -302,7 +304,10 @@ export function WorkbenchLayout(props: WorkbenchLayoutProps): ReactElement {
   }
 
   return (
-    <div className="workbench" aria-label={props.label}>
+    <div
+      className={['workbench', props.className].filter(Boolean).join(' ')}
+      aria-label={props.label}
+    >
       {props.toolbar && <div className="workbench__toolbar">{props.toolbar}</div>}
       <div className="workbench__columns" ref={columnsRef}>
         {props.columns.map((column, index) => {

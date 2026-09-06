@@ -22,7 +22,9 @@ import {
   type WorkspaceSession,
   type FingerprintStoreState,
   type RagCorpus,
+  type SemanticCacheProvider,
 } from '@soulforge/core';
+import { localApplicationDataRoot, resolveWorkspaceStoragePaths, type WorkspaceStoragePaths } from '../workspaceStorage.js';
 import { Me3RuntimeAdapter } from '@soulforge/core';
 import { MainMe3RuntimeGateway } from '../me3RuntimeGateway.js';
 import { clearRecentPath, readRecentPath, writeRecentPath } from '../recentPaths.js';
@@ -128,16 +130,15 @@ const directorySelections = new Map<string, DirectorySelectionRecord>();
 const recentPathsFile = join(app.getPath('userData'), 'recent-paths.json');
 const toolRegistry = createDefaultToolRegistry();
 
-function localApplicationDataRoot(): string {
-  if (process.platform === 'win32') return join(dirname(app.getPath('appData')), 'Local', 'SoulForge');
-  return join(app.getPath('userData'), 'local-data');
+function workspaceStoragePaths(workspaceId: string, workspaceRoot?: string): WorkspaceStoragePaths {
+  const session = activeSession;
+  const resolvedRoot = workspaceRoot
+    ?? ((session && session.meta.workspaceId === workspaceId) ? session.layers.overlayRoot : undefined);
+  return resolveWorkspaceStoragePaths(workspaceId, resolvedRoot);
 }
-function workspaceStoragePaths(workspaceId: string) {
-  const safeWorkspaceKey = createHash('sha256').update(workspaceId).digest('hex').slice(0, 24);
-  const root = join(localApplicationDataRoot(), 'workspaces', safeWorkspaceKey);
-  return { root, backupBaseDir: join(root, 'backups'), recoveryDir: join(root, 'recovery'), stagingRoot: join(root, 'staging') };
+function durableStoragePaths(workspaceId: string, workspaceRoot?: string): WorkspaceStoragePaths {
+  return workspaceStoragePaths(workspaceId, workspaceRoot);
 }
-function durableStoragePaths(workspaceId: string) { return workspaceStoragePaths(workspaceId); }
 function bridgeRootSession(session: WorkspaceSession, storage: { root: string }): BridgeRootSession {
   return { overlayRoot: session.layers.overlayRoot, baseRoot: session.layers.baseRoot ?? null, storageRoot: storage.root };
 }
@@ -532,7 +533,7 @@ export function registerWorkspaceIpcHandlers(deps: WorkspaceIpcDeps): void {
     const physicalOverlayHash = workspacePhysicalRootHash(physicalOverlayRoot);
     const physicalBaseHash = activeSession.layers.baseRoot ? workspacePhysicalRootHash(await (async () => { try { const { realpath } = await import('node:fs/promises'); return await realpath(activeSession.layers.baseRoot!); } catch { return activeSession.layers.baseRoot!; } })()) : undefined;
     const workspacePersistentIdentityHash = makeWorkspacePersistentIdentityHash({ workspaceId: activeSession.meta.workspaceId, game: activeSession.meta.game, physicalOverlayRootHash: physicalOverlayHash, ...(physicalBaseHash ? { physicalBaseRootHash: physicalBaseHash } : {}) });
-    const storageRoot = durableStoragePaths(activeSession.meta.workspaceId).root;
+    const storageRoot = durableStoragePaths(activeSession.meta.workspaceId, activeSession.layers.overlayRoot).root;
     let fingerprintStore = await loadFingerprintStore({ workspacePersistentIdentityHash, storageRoot, fingerprintStoreGeneration: FINGERPRINT_STORE_GENERATION });
     activeFingerprintStore = fingerprintStore;
     const continuity = fingerprintStore.continuity;
@@ -726,8 +727,42 @@ export function registerWorkspaceIpcHandlers(deps: WorkspaceIpcDeps): void {
       if (sessionId !== activeWorkspaceSessionId || generation !== activeWorkspaceSessionGeneration) {
         throw new Error('工作区已切换，分析结果已丢弃。');
       }
+      const database = await deps.ensureActiveOperationLog(session);
+      let semanticCache: SemanticCacheProvider | undefined;
+      try {
+        const cacheMap = await database.getAllSemanticFileCache();
+        semanticCache = {
+          load: (file) => {
+            const cached = cacheMap.get(file.relativePath);
+            if (cached && file.sha256 && cached.fileSha256 === file.sha256) {
+              return cached.payload;
+            }
+            return null;
+          },
+          save: async (file, bundle) => {
+            if (!file.sha256) return;
+            try {
+              await database.upsertSemanticFileCache({
+                relativePath: file.relativePath,
+                fileSha256: file.sha256,
+                resourceKind: file.resourceKind,
+                payload: bundle,
+                mtimeMs: file.mtimeMs
+              });
+              cacheMap.set(file.relativePath, { fileSha256: file.sha256, payload: bundle });
+            } catch {
+              // Non-fatal cache write failure
+            }
+          }
+        };
+      } catch {
+        // Fallback without semantic cache if DB query failed
+      }
+
       const result = await analyzeWorkspace({
         workspaceRoot: session.layers.overlayRoot,
+        files: indexedFiles,
+        ...(semanticCache ? { semanticCache } : {}),
         ...(session.layers.baseRoot ? { oodleRuntimeRoot: session.layers.baseRoot } : {}),
         onSemanticIndexReady: async (stage) => {
           if (semanticStagePublished) return;
@@ -743,7 +778,6 @@ export function registerWorkspaceIpcHandlers(deps: WorkspaceIpcDeps): void {
           activeIndex = stage.index;
           indexedFiles = stage.index.getFiles();
           try {
-            const database = await deps.ensureActiveOperationLog(session);
             // The full analysis will publish again at the end.  Do not start
             // embedding during this transitional slice: it would compete with
             // the remaining native EVENT/MAP pass and is not needed for the
@@ -769,7 +803,6 @@ export function registerWorkspaceIpcHandlers(deps: WorkspaceIpcDeps): void {
       // 仍保留上一份可用索引，动作读取不会短暂撞上“未就绪”空投影。
       activeIndex = result.index;
       indexedFiles = result.index.getFiles();
-      const database = await deps.ensureActiveOperationLog(session);
       await refreshRagAfterAnalyze(database, result.index, result.diagnostics.map((diagnostic) => ({
         severity: diagnostic.severity,
         code: diagnostic.code,

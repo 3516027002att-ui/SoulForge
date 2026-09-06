@@ -131,7 +131,16 @@ export function classifyHttpError(
   protocol: string,
   retryAfterHeader?: string | null
 ): ModelServiceDiagnostic {
-  const truncated = bodyText.slice(0, 200);
+  let detail = bodyText;
+  try {
+    const parsed = JSON.parse(bodyText) as { error?: { message?: unknown } };
+    if (parsed && typeof parsed.error?.message === 'string') {
+      detail = parsed.error.message;
+    }
+  } catch {
+    // raw text
+  }
+  const truncated = detail.length > 800 ? `${detail.slice(0, 800)}…` : detail;
   if (status === 429) {
     const retryAfterMs = parseRetryAfterHeader(retryAfterHeader);
     return {
