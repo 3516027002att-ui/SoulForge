@@ -12,3 +12,4 @@ export * from './contextCompactor.js';
 export * from './fileRolloutStorage.js';
 export * from './agentSessionHost.js';
 export * from './embeddingClient.js';
+export * from './toolScheduler.js';

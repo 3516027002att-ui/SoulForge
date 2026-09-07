@@ -1,0 +1,11 @@
+{
+  "scope": "documentation HTML rendering only",
+  "passed": true,
+  "viewport": {
+    "screen": 1440,
+    "scroll": 1440
+  },
+  "matchingTocEntries": 2,
+  "brokenTocAnchors": 0,
+  "pageErrors": []
+}

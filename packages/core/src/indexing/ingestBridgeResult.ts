@@ -793,6 +793,8 @@ export function mapExportFromMsbDocument(input: {
   sourceUri: string;
   sourceHash?: string;
   sourceRevision?: number;
+  readerSchemaRevision?: number;
+  derivedKey?: string;
   parts?: Array<{
     name?: string | number;
     typeId?: number;
@@ -806,6 +808,8 @@ export function mapExportFromMsbDocument(input: {
     scaleX?: number;
     scaleY?: number;
     scaleZ?: number;
+    internalEntryId?: number;
+    entityId?: number;
   }>;
   regions?: Array<{
     name?: string | number;
@@ -813,6 +817,8 @@ export function mapExportFromMsbDocument(input: {
     posX?: number;
     posY?: number;
     posZ?: number;
+    internalEntryId?: number;
+    entityId?: number;
   }>;
 }): MapExport {
   const entities: MapExport['entities'] = (input.parts ?? []).map((part) => {
@@ -829,6 +835,8 @@ export function mapExportFromMsbDocument(input: {
       ...(input.sourceRevision !== undefined ? { sourceRevision: input.sourceRevision } : {}),
       name,
       kind,
+      ...(part.internalEntryId !== undefined ? { internalEntryId: part.internalEntryId } : {}),
+      ...(part.entityId !== undefined ? { entityId: part.entityId } : {}),
       ...(part.modelIndex === undefined ? {} : { modelIndex: part.modelIndex }),
       ...(position ? { position } : {}),
       ...(rotation ? { rotation } : {}),
@@ -845,6 +853,8 @@ export function mapExportFromMsbDocument(input: {
       ...(input.sourceHash ? { sourceHash: input.sourceHash } : {}),
       ...(input.sourceRevision !== undefined ? { sourceRevision: input.sourceRevision } : {}),
       name,
+      ...(region.internalEntryId !== undefined ? { internalEntryId: region.internalEntryId } : {}),
+      ...(region.entityId !== undefined ? { entityId: region.entityId } : {}),
       ...(vector3(region.posX, region.posY, region.posZ) ? { position: vector3(region.posX, region.posY, region.posZ)! } : {})
     };
   });
@@ -852,6 +862,8 @@ export function mapExportFromMsbDocument(input: {
     mapId: input.mapId,
     ...(input.sourceHash ? { sourceHash: input.sourceHash } : {}),
     ...(input.sourceRevision !== undefined ? { sourceRevision: input.sourceRevision } : {}),
+    ...(input.readerSchemaRevision !== undefined ? { readerSchemaRevision: input.readerSchemaRevision } : {}),
+    ...(input.derivedKey !== undefined ? { derivedKey: input.derivedKey } : {}),
     entities,
     regions
   };

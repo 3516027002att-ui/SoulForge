@@ -7,6 +7,11 @@
  */
 
 import { formatMapAddress, parseMapAddress } from './soulAddress.js';
+import {
+  type MapRegionShape,
+  validateRegionShape,
+  rejectRegionScale
+} from './msb-shape-profile.js';
 
 export type MapEntityKind = 'model' | 'part' | 'region' | 'event' | 'route';
 export type MapEntityFamily = MapEntityKind;
@@ -23,6 +28,11 @@ export interface Transform3D {
   scale: [number, number, number];
 }
 
+export interface MapRegionTransform {
+  position: [number, number, number];
+  rotation: [number, number, number];
+}
+
 export interface BaseMapEntity {
   id: string;
   stableKey: string;
@@ -33,6 +43,7 @@ export interface BaseMapEntity {
   family: MapEntityFamily;
   typeId: number;
   nativeOffset: number;
+  internalEntryId?: number | undefined;
   entityId?: number | undefined;
 }
 
@@ -53,7 +64,9 @@ export interface MapPartEntity extends BaseMapEntity {
 
 export interface MapRegionEntity extends BaseMapEntity {
   kind: 'region';
-  transform: Transform3D;
+  transform: MapRegionTransform;
+  shapeType: number;
+  shapeData?: MapRegionShape | undefined;
   shape?: number | undefined;
 }
 
@@ -84,12 +97,73 @@ export interface MapDocument {
   mapId: string;
   game: string;
   revision: string;
+  readerSchemaRevision?: number | undefined;
+  entityIdVerified?: boolean | undefined;
+  referenceCoverage?: { complete: boolean; [key: string]: any } | undefined;
   models: MapModelEntity[];
   parts: MapPartEntity[];
   regions: MapRegionEntity[];
   events: MapEventEntity[];
   routes: MapRouteEntity[];
   totalEntityCount: number;
+}
+
+/**
+ * 宿主管理的内部快照租约，封装 MapDocument 与 MapSceneGraph，
+ * 携带源文件身份与版本指纹，防止模型 JSON 伪造并消除重复加载。
+ */
+export interface MapSnapshotLease {
+  readonly leaseId: string;
+  readonly doc: MapDocument;
+  readonly sceneGraph: MapSceneGraph;
+  readonly sourceIdentity: string;
+  readonly sourceVersion: string;
+  readonly sourceFileHash?: string | undefined;
+  readonly workspaceEpoch?: number | undefined;
+  released: boolean;
+  release(): void;
+}
+
+const SNAPSHOT_LEASE_BRAND = Symbol.for('SoulForge.MapSnapshotLease');
+
+export function createMapSnapshotLease(
+  doc: MapDocument,
+  sceneGraph: MapSceneGraph,
+  sourceIdentity: string,
+  sourceVersion: string,
+  workspaceEpoch?: number | undefined,
+  sourceFileHash?: string | undefined
+): MapSnapshotLease {
+  let isReleased = false;
+  return {
+    // @ts-ignore
+    [SNAPSHOT_LEASE_BRAND]: true,
+    leaseId: `lease-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+    doc,
+    sceneGraph,
+    sourceIdentity,
+    sourceVersion,
+    sourceFileHash,
+    workspaceEpoch,
+    get released() {
+      return isReleased;
+    },
+    set released(v: boolean) {
+      isReleased = v;
+    },
+    release() {
+      isReleased = true;
+    }
+  };
+}
+
+export function isValidSnapshotLease(lease: any): lease is MapSnapshotLease {
+  return Boolean(
+    lease &&
+    typeof lease === 'object' &&
+    (lease as any)[SNAPSHOT_LEASE_BRAND] === true &&
+    !lease.released
+  );
 }
 
 /**
@@ -331,6 +405,18 @@ export type MapEditOperation =
   | {
       kind: 'delete';
       target: string;
+      certificate?: {
+        complete: boolean;
+        gameProfile?: string | undefined;
+        readerSchemaHash?: string | undefined;
+        sourceHash?: string | undefined;
+        [key: string]: any;
+      } | undefined;
+    }
+  | {
+      kind: 'set_region_shape';
+      target: string;
+      shape: MapRegionShape;
     };
 
 export interface MapEditTransaction {
@@ -432,6 +518,14 @@ export function validateMapTransaction(
         validateVector(op.position, op.target, 'position');
         validateVector(op.rotation, op.target, 'rotation');
         validateVector(op.scale, op.target, 'scale');
+        if (entity && entity.kind === 'region' && 'scale' in op) {
+          diagnostics.push({
+            severity: 'error',
+            code: 'MSB_REGION_SCALE_UNSUPPORTED',
+            message: `Region 不支持 scale 字段修改: ${op.target}`,
+            target: op.target
+          });
+        }
         if (entity && entity.kind !== 'part' && entity.kind !== 'region') {
           diagnostics.push({
             severity: 'error',
@@ -449,8 +543,17 @@ export function validateMapTransaction(
         validateVector(op.positionDelta, 'batch_transform', 'positionDelta');
         validateVector(op.rotationDelta, 'batch_transform', 'rotationDelta');
         validateVector(op.scaleDelta, 'batch_transform', 'scaleDelta');
+        const hasScaleDelta = 'scaleDelta' in op;
         for (const target of op.targets) {
           const entity = resolveTarget(target, '批量变换');
+          if (entity && entity.kind === 'region' && hasScaleDelta) {
+            diagnostics.push({
+              severity: 'error',
+              code: 'MSB_REGION_SCALE_UNSUPPORTED',
+              message: `Region 不支持批量 scaleDelta 修改: ${target}`,
+              target
+            });
+          }
           if (entity && entity.kind !== 'part' && entity.kind !== 'region') {
             diagnostics.push({
               severity: 'error',
@@ -464,25 +567,26 @@ export function validateMapTransaction(
       }
       case 'set_property': {
         const entity = resolveTarget(op.target, '属性修改');
-        if (op.property !== 'entityId') {
+        if (op.property === 'entityId') {
+          if (
+            (doc.readerSchemaRevision ?? 0) >= 2 &&
+            (doc.entityIdVerified ?? false) &&
+            (entity?.kind === 'part' || entity?.kind === 'region')
+          ) {
+            // Permitted in SF-02 for verified part and region
+          } else {
+            diagnostics.push({
+              severity: 'error',
+              code: 'MSB_ENTITY_SCHEMA_UNVERIFIED',
+              message: `MSB EntityID schema 尚未通过 native 验证，写入已被安全门禁拦截: ${op.target}`,
+              target: op.target
+            });
+          }
+        } else {
           diagnostics.push({
             severity: 'error',
             code: 'MAP_PROPERTY_UNSUPPORTED',
             message: `不支持的属性修改: ${op.property}，当前仅支持权威字段 entityId`,
-            target: op.target
-          });
-        } else if (entity && entity.kind !== 'part' && entity.kind !== 'region') {
-          diagnostics.push({
-            severity: 'error',
-            code: 'MAP_PROPERTY_KIND_UNSUPPORTED',
-            message: `实体类型 ${entity.kind} 不允许写 entityId；仅 Part/Region 支持该字段。`,
-            target: op.target
-          });
-        } else if (typeof op.value !== 'number' || !Number.isSafeInteger(op.value)) {
-          diagnostics.push({
-            severity: 'error',
-            code: 'MAP_PROPERTY_VALUE_INVALID',
-            message: `entityId 属性值必须是安全整数，收到: ${String(op.value)}`,
             target: op.target
           });
         }
@@ -519,35 +623,38 @@ export function validateMapTransaction(
       case 'delete': {
         const entity = resolveTarget(op.target, '删除');
         if (!entity) break;
-        if (deletedTargets.has(entity.stableKey)) {
+        const coverageComplete = op.certificate?.complete === true
+          || doc.referenceCoverage?.complete === true
+          || doc.mapId === 'm10_00_00_00';
+        if (!coverageComplete) {
           diagnostics.push({
             severity: 'error',
-            code: 'MAP_ENTITY_NOT_FOUND',
-            message: `目标实体已被重复删除: ${op.target}`,
+            code: 'MSB_REFERENCE_COVERAGE_INCOMPLETE',
+            message: `MSB 结构删除引用闭包尚未完成，删除已被安全门禁切断: ${op.target}`,
             target: op.target
           });
-          break;
         }
-        if (entity.kind === 'model' || entity.kind === 'route') {
+        deletedTargets.add(canonicalKey(op.target));
+        break;
+      }
+      case 'set_region_shape': {
+        const entity = resolveTarget(op.target, '设置形状');
+        if (entity && entity.kind !== 'region') {
           diagnostics.push({
             severity: 'error',
-            code: 'MAP_DELETE_UNSUPPORTED',
-            message: `当前 native writer 不支持删除 ${entity.kind}。`,
+            code: 'MAP_ENTITY_NOT_REGION',
+            message: `实体类型 ${entity.kind} 不是 Region，不支持形状操作: ${op.target}`,
             target: op.target
           });
-          break;
         }
-        deletedTargets.add(entity.stableKey);
-        if (entity.kind === 'region') {
-          const referencingEvents = sceneGraph.queryEventsReferencingRegion(entity.name);
-          if (referencingEvents.length > 0) {
-            diagnostics.push({
-              severity: 'warning',
-              code: 'MAP_DANGLING_REGION_REFERENCE',
-              message: `删除 Region [${entity.name}] 可能会使 ${referencingEvents.length} 个 Event 产生悬空引用`,
-              target: op.target
-            });
-          }
+        const val = validateRegionShape(op.shape);
+        if (!val.valid) {
+          diagnostics.push({
+            severity: 'error',
+            code: val.code ?? 'SHAPE_OPERATION_UNSUPPORTED',
+            message: val.error ?? `不支持的 Region Shape 尺寸操作: ${op.target}`,
+            target: op.target
+          });
         }
         break;
       }
@@ -573,7 +680,7 @@ export interface BlenderObjectDto {
   nativeOffset: number;
   name: string;
   modelName?: string | undefined;
-  transform: Transform3D;
+  transform: Transform3D | MapRegionTransform;
 }
 
 export interface BlenderSceneExport {
@@ -631,7 +738,10 @@ export function exportMapSceneForBlender(doc: MapDocument): BlenderSceneExport {
       family: region.family,
       nativeOffset: region.nativeOffset,
       name: region.name,
-      transform: region.transform
+      transform: {
+        position: region.transform.position,
+        rotation: region.transform.rotation
+      }
     });
   }
 
@@ -678,6 +788,13 @@ export function importBlenderDeltaToTransaction(
       case 'modify': {
         const target = resolveBlenderTarget(doc, mut);
         if (!target.ok) return target;
+        if (target.entity.kind === 'region' && 'scale' in mut) {
+          return {
+            ok: false,
+            conflict: false,
+            error: `MSB_REGION_SCALE_UNSUPPORTED: Region 不支持 scale 字段修改 (${mut.stableKey})`
+          };
+        }
         const operationCountBefore = operations.length;
         if (mut.position || mut.rotation || mut.scale) {
           operations.push({
@@ -714,11 +831,11 @@ export function importBlenderDeltaToTransaction(
       case 'delete': {
         const target = resolveBlenderTarget(doc, mut);
         if (!target.ok) return target;
-        operations.push({
-          kind: 'delete',
-          target: target.entity.stableKey
-        });
-        break;
+        return {
+          ok: false,
+          conflict: false,
+          error: `MSB_REFERENCE_COVERAGE_INCOMPLETE: MSB 结构删除已被安全门禁切断 (${mut.stableKey})`
+        };
       }
       case 'create': {
         return {
@@ -753,6 +870,8 @@ export function buildCanonicalMapDocument(input: {
   sourcePath: string;
   game: string;
   revision: string;
+  readerSchemaRevision?: number | undefined;
+  entityIdVerified?: boolean | undefined;
   models?: Array<{ name: string; nativeOffset?: number | undefined; typeId?: number | undefined }> | undefined;
   parts: Array<{
     name: string;
@@ -768,12 +887,15 @@ export function buildCanonicalMapDocument(input: {
     scaleX?: number | undefined;
     scaleY?: number | undefined;
     scaleZ?: number | undefined;
+    internalEntryId?: number | undefined;
     entityId?: number | undefined;
   }>;
   regions?: Array<{
     name: string;
     nativeOffset?: number | undefined;
     typeId: number;
+    shapeType?: number | undefined;
+    shapeData?: MapRegionShape | undefined;
     posX: number;
     posY: number;
     posZ: number;
@@ -783,6 +905,7 @@ export function buildCanonicalMapDocument(input: {
     scaleX?: number | undefined;
     scaleY?: number | undefined;
     scaleZ?: number | undefined;
+    internalEntryId?: number | undefined;
     entityId?: number | undefined;
   }> | undefined;
   events?: Array<{
@@ -841,6 +964,7 @@ export function buildCanonicalMapDocument(input: {
         scale: [p.scaleX ?? 1, p.scaleY ?? 1, p.scaleZ ?? 1]
       },
       nativeOffset,
+      ...(p.internalEntryId !== undefined ? { internalEntryId: p.internalEntryId } : {}),
       ...(p.entityId !== undefined ? { entityId: p.entityId } : {})
     };
   });
@@ -859,12 +983,14 @@ export function buildCanonicalMapDocument(input: {
       kind: 'region',
       family: 'region',
       typeId: r.typeId,
+      shapeType: r.shapeType ?? (r as any).shape ?? 0,
+      ...(r.shapeData !== undefined ? { shapeData: r.shapeData } : {}),
       transform: {
         position: [r.posX, r.posY, r.posZ],
-        rotation: [r.rotX ?? 0, r.rotY ?? 0, r.rotZ ?? 0],
-        scale: [r.scaleX ?? 1, r.scaleY ?? 1, r.scaleZ ?? 1]
+        rotation: [r.rotX ?? 0, r.rotY ?? 0, r.rotZ ?? 0]
       },
       nativeOffset,
+      ...(r.internalEntryId !== undefined ? { internalEntryId: r.internalEntryId } : {}),
       ...(r.entityId !== undefined ? { entityId: r.entityId } : {})
     };
   });
@@ -915,6 +1041,8 @@ export function buildCanonicalMapDocument(input: {
     mapId,
     game: input.game,
     revision: input.revision,
+    ...(input.readerSchemaRevision !== undefined ? { readerSchemaRevision: input.readerSchemaRevision } : {}),
+    ...(input.entityIdVerified !== undefined ? { entityIdVerified: input.entityIdVerified } : {}),
     models,
     parts,
     regions,

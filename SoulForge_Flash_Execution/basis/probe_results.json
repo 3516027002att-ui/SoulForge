@@ -1,0 +1,110 @@
+{
+  "baseline_commit": "f9cb0cd76a11bfa2857b48acbc779bfac0355d96",
+  "method": "Manually transcribed minimal logic/layout counterexamples; no product acceptance claim.",
+  "counterexamples_demonstrated": 10,
+  "results": [
+    {
+      "probe": "MSB_ENTITY_ID_WRONG_FIELD",
+      "counterexample_demonstrated": true,
+      "scope": "extracted_logic_not_repository_integration",
+      "observed": {
+        "requested_entity_id": 2000,
+        "own_header_based_read": 2000,
+        "independent_layout_read": 1000
+      }
+    },
+    {
+      "probe": "MSB_REGION_SCALE_POINTER_CORRUPTION",
+      "counterexample_demonstrated": true,
+      "scope": "extracted_logic_not_repository_integration",
+      "observed": {
+        "pointer_before": 256,
+        "pointer_after": 1073741824,
+        "file_length": 512
+      }
+    },
+    {
+      "probe": "MSB_DELETE_INDEX_REFERENCE_DRIFT",
+      "counterexample_demonstrated": true,
+      "scope": "extracted_logic_not_repository_integration",
+      "observed": {
+        "before_target": "B",
+        "after_target_without_remap": "C"
+      }
+    },
+    {
+      "probe": "RAG_EXPANSION_LIMIT_PLUS_ONE",
+      "counterexample_demonstrated": true,
+      "scope": "extracted_logic_not_repository_integration",
+      "observed": {
+        "limit": 8,
+        "returned": 9
+      }
+    },
+    {
+      "probe": "RAG_VECTOR_FAMILY_FILTER_BYPASS",
+      "counterexample_demonstrated": true,
+      "scope": "extracted_logic_not_repository_integration",
+      "observed": {
+        "requested_families": [
+          "param"
+        ],
+        "vector_candidate_families": [
+          "map"
+        ]
+      }
+    },
+    {
+      "probe": "BROKER_NEW_DISTINCT_EVIDENCE_OMITTED",
+      "counterexample_demonstrated": true,
+      "scope": "extracted_logic_not_repository_integration",
+      "observed": {
+        "newest": "unique-evidence-17",
+        "visible_count": 16,
+        "newest_visible": false
+      }
+    },
+    {
+      "probe": "BROKER_BYTES_ARE_CODE_UNITS",
+      "counterexample_demonstrated": true,
+      "scope": "extracted_logic_not_repository_integration",
+      "observed": {
+        "reported_body_units": 9600,
+        "utf8_body_bytes": 28800,
+        "nominal_byte_budget": 12000
+      }
+    },
+    {
+      "probe": "MAP_BATCH_SILENT_PARTIAL_SELECTION",
+      "counterexample_demonstrated": true,
+      "scope": "extracted_logic_not_repository_integration",
+      "observed": {
+        "requested_count": 2,
+        "applied_count": 1,
+        "success_possible": true
+      }
+    },
+    {
+      "probe": "PARAM_FINAL_STATE_VS_INTERMEDIATE_PATCH_CHECK",
+      "counterexample_demonstrated": true,
+      "scope": "extracted_logic_not_repository_integration",
+      "observed": {
+        "per_patch_matches": [
+          false,
+          true
+        ],
+        "final_state_is_last_write": true
+      }
+    },
+    {
+      "probe": "PARAM_PHYSICAL_DELETE_VERIFIER_GAP",
+      "counterexample_demonstrated": true,
+      "scope": "extracted_logic_not_repository_integration",
+      "observed": {
+        "row_index": 0,
+        "target_still_present_in_injected_result": true,
+        "verifier_would_reject": false
+      }
+    }
+  ]
+}

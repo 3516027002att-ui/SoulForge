@@ -1,0 +1,27 @@
+{
+  "format": "FXR",
+  "command": "write-fxr-document",
+  "productionSymbol": "BridgeCommandService.DispatchAsync",
+  "sourceFile": "bridge/SoulForge.Bridge/BridgeCommandService.cs",
+  "variant": "effect-tree",
+  "writableOperations": [
+    "profile-confirmed-mutation-only"
+  ],
+  "writerProfile": "candidate",
+  "preconditions": [
+    "confirmed FXR locator"
+  ],
+  "postconditions": [
+    "native reread",
+    "array/reference validation"
+  ],
+  "independentOracle": "missing",
+  "productTrace": "not_run",
+  "missingEvidence": [
+    "independent FXR layout oracle",
+    "variant corpus",
+    "production source anchor missing"
+  ],
+  "readable": false,
+  "nativeFixtures": []
+}

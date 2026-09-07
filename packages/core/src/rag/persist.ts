@@ -1,6 +1,7 @@
 import type { RagChunk, RagCorpus, ReferenceEdge } from '@soulforge/shared';
 import type { WorkspaceDataRepository } from '../storage/workspaceDataRepository.js';
 import { createRagCorpus } from './chunkBuilder.js';
+import { invalidateRetrievalCache } from './retrievalScope.js';
 
 export interface RagChunkDelta {
   sourceUri: string;
@@ -51,7 +52,8 @@ function groupChunksBySource(chunks: readonly RagChunk[]): Map<string, RagChunk[
 
 export function persistRagCorpus(repository: WorkspaceDataRepository, corpus: RagCorpus): void {
   const previous = loadRagCorpus(repository, corpus.workspaceId);
-  for (const delta of diffRagCorpusBySource(previous, corpus)) {
+  const deltas = diffRagCorpusBySource(previous, corpus);
+  for (const delta of deltas) {
     for (let dStart = 0; dStart < delta.deletedChunkIds.length; dStart += PERSIST_BATCH_SIZE) {
       repository.mergeRagChunkDelta({
         sourceUri: delta.sourceUri,
@@ -67,9 +69,15 @@ export function persistRagCorpus(repository: WorkspaceDataRepository, corpus: Ra
       });
     }
   }
-  if (!sameRagReferences(previous.references, corpus.references)) {
+  const referencesChanged = !sameRagReferences(previous.references, corpus.references);
+  if (referencesChanged) {
     repository.replaceReferences(corpus.references);
   }
+  // A source/relation refresh must not leave an earlier retrieval result in a
+  // write-planning cache.  The corpus fingerprint also guards callers that
+  // do not persist through this function, while this explicit invalidation
+  // handles the normal incremental persistence path immediately.
+  if (deltas.length > 0 || referencesChanged) invalidateRetrievalCache(corpus.workspaceId);
 }
 
 /** Reference rows are loaded from SQLite in a stable sort order, while the

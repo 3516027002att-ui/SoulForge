@@ -2,6 +2,7 @@
  * Anthropic Messages API compatible adapter.
  */
 
+import { randomUUID } from 'node:crypto';
 import type {
   ChatMessage,
   ModelCompleteRequest,
@@ -27,6 +28,7 @@ export interface AnthropicCompatibleAdapterOptions {
   baseUrl: string;
   apiKey: string;
   model: string;
+  sessionId?: string | undefined;
   fetchImpl?: typeof fetch;
   apiVersion?: string;
 }
@@ -36,6 +38,7 @@ export class AnthropicCompatibleAdapter implements ModelServiceAdapter {
   private readonly baseUrl: string;
   private readonly apiKey: string;
   private readonly model: string;
+  private readonly defaultSessionId?: string | undefined;
   private readonly fetchImpl: typeof fetch;
   private readonly apiVersion: string;
 
@@ -43,8 +46,13 @@ export class AnthropicCompatibleAdapter implements ModelServiceAdapter {
     this.baseUrl = normalizeServiceBaseUrl(options.baseUrl);
     this.apiKey = options.apiKey;
     this.model = options.model;
+    this.defaultSessionId = options.sessionId;
     this.fetchImpl = options.fetchImpl ?? fetch;
     this.apiVersion = options.apiVersion ?? '2023-06-01';
+  }
+
+  private resolveSessionId(explicitSessionId?: string): string {
+    return explicitSessionId?.trim() || this.defaultSessionId?.trim() || randomUUID();
   }
 
   async complete(request: ModelCompleteRequest): Promise<ModelCompleteResult> {
@@ -57,7 +65,8 @@ export class AnthropicCompatibleAdapter implements ModelServiceAdapter {
         headers: {
           'content-type': 'application/json',
           'x-api-key': this.apiKey,
-          'anthropic-version': this.apiVersion
+          'anthropic-version': this.apiVersion,
+          'x-opencode-session': this.resolveSessionId(request.sessionId)
         },
         body: JSON.stringify(body),
         ...(signal ? { signal } : {})
@@ -118,7 +127,7 @@ export class AnthropicCompatibleAdapter implements ModelServiceAdapter {
     };
   }
 
-  async listModels(options?: { signal?: AbortSignal; timeoutMs?: number }): Promise<ModelListResult> {
+  async listModels(options?: { signal?: AbortSignal; timeoutMs?: number; sessionId?: string }): Promise<ModelListResult> {
     const { signal, cleanup } = createRequestSignal(options?.signal, options?.timeoutMs);
     let response: Response;
     try {
@@ -126,7 +135,8 @@ export class AnthropicCompatibleAdapter implements ModelServiceAdapter {
         method: 'GET',
         headers: {
           'x-api-key': this.apiKey,
-          'anthropic-version': this.apiVersion
+          'anthropic-version': this.apiVersion,
+          'x-opencode-session': this.resolveSessionId(options?.sessionId)
         },
         ...(signal ? { signal } : {})
       });
@@ -176,7 +186,8 @@ export class AnthropicCompatibleAdapter implements ModelServiceAdapter {
         headers: {
           'content-type': 'application/json',
           'x-api-key': this.apiKey,
-          'anthropic-version': this.apiVersion
+          'anthropic-version': this.apiVersion,
+          'x-opencode-session': this.resolveSessionId(request.sessionId)
         },
         body: JSON.stringify(body),
         ...(signal ? { signal } : {})

@@ -191,6 +191,8 @@ async function dispatch(request: OperationLogUtilityRequest): Promise<unknown> {
       return null;
     case 'listJobs':
       return requireWorkspaceDataRepository().listJobs();
+    case 'getSemanticFileCache':
+      return requireWorkspaceDataRepository().getSemanticFileCacheRow(request.payload.relativePath);
     case 'getAllSemanticFileCache':
       return {
         entries: requireWorkspaceDataRepository().getAllSemanticFileCacheRows()

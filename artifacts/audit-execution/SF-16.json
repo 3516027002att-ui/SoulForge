@@ -1,0 +1,57 @@
+{
+  "ok": true,
+  "mode": "run",
+  "message": "2 条套件真实执行并通过",
+  "tiers": [
+    "governance",
+    "unit",
+    "synthetic",
+    "native",
+    "release"
+  ],
+  "filter": "audit-sf-16",
+  "requireExecuted": true,
+  "counts": {
+    "passed": 2,
+    "skipped": 0,
+    "partial": 0,
+    "failed": 0,
+    "not-attempted": 0
+  },
+  "executedAndPassed": [
+    "test:audit-sf-16-unit",
+    "test:audit-sf-16-native"
+  ],
+  "skippedEntirely": [],
+  "partiallySkipped": [],
+  "failed": [],
+  "notAttemptedDueToBail": [],
+  "results": [
+    {
+      "scriptName": "test:audit-sf-16-unit",
+      "tier": "unit",
+      "requirements": [
+        "dotnet",
+        "native-env"
+      ],
+      "outcome": "passed",
+      "treatedAsFailure": false,
+      "exitCode": 0,
+      "durationMs": 5134,
+      "skippedLegs": []
+    },
+    {
+      "scriptName": "test:audit-sf-16-native",
+      "tier": "native",
+      "requirements": [
+        "dotnet",
+        "native-env"
+      ],
+      "outcome": "passed",
+      "treatedAsFailure": false,
+      "exitCode": 0,
+      "durationMs": 7561,
+      "skippedLegs": []
+    }
+  ]
+}

@@ -1,0 +1,51 @@
+{
+  "schemaVersion": 1,
+  "taskId": "SF-26",
+  "baseCommit": "f9cb0cd76a11bfa2857b48acbc779bfac0355d96",
+  "implementationCommit": "f9cb0cd76a11bfa2857b48acbc779bfac0355d96+local",
+  "status": {
+    "implementation": "completed",
+    "algorithm": "verified_algorithm",
+    "native": "partial",
+    "product": "not_run"
+  },
+  "changedFiles": [
+    "package.json",
+    "packages/core/package.json",
+    "packages/core/src/scene/blenderJobService.ts",
+    "packages/core/src/testing/runAuditBlenderJobSmoke.ts",
+    "packages/core/src/testing/runAuditSf26Smoke.ts",
+    "packages/shared/src/blender-job-protocol.ts",
+    "scripts/verify/tiers.mjs",
+    "tools/blender/soulforge_adapter.py"
+  ],
+  "productionSymbols": [
+    "BlenderJobService",
+    "SceneEditService",
+    "runBlenderJobSmoke"
+  ],
+  "tests": [
+    {
+      "suite": "test:audit-sf-26-unit",
+      "layer": "unit",
+      "outcome": "passed",
+      "executedCases": null,
+      "artifactHash": "A3FC9ED8D909A678F736838D28253F9A9432BBA7D5A1A35B86833194F4DDCE71"
+    },
+    {
+      "suite": "test:audit-sf-26-native",
+      "layer": "native",
+      "outcome": "passed",
+      "executedCases": null,
+      "artifactHash": "A3FC9ED8D909A678F736838D28253F9A9432BBA7D5A1A35B86833194F4DDCE71",
+      "detail": "runner通过Blender/scene contract smoke；真实 FLVER/game-load proof仍被 profile gate。"
+    }
+  ],
+  "schemaMigrations": [],
+  "frontendContract": null,
+  "remainingBlocks": [
+    "native runner明确保留“native FLVER/game-load proof remains profile-gated”，不能提升为 native-verified。",
+    "本任务没有任务专属 Electron renderer trace；product 保持 not_run。"
+  ]
+}
+

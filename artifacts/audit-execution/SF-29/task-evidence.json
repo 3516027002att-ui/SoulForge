@@ -1,0 +1,60 @@
+{
+  "schemaVersion": 1,
+  "taskId": "SF-29",
+  "baseCommit": "f9cb0cd76a11bfa2857b48acbc779bfac0355d96",
+  "implementationCommit": "f9cb0cd76a11bfa2857b48acbc779bfac0355d96+local",
+  "status": {
+    "implementation": "completed",
+    "algorithm": "verified_algorithm",
+    "native": "partial",
+    "product": "partial"
+  },
+  "changedFiles": [
+    "docs/audit-execution/product-acceptance.md",
+    "package.json",
+    "packages/core/package.json",
+    "packages/core/src/testing/runAuditSf29Smoke.ts",
+    "scripts/verify/tiers.mjs",
+    "apps/desktop/e2e/playwright/tests/production-real-assets.spec.mjs",
+    "apps/desktop/src/renderer/src/editors/FmgWorkbenchPanel.tsx",
+    "apps/desktop/src/renderer/src/editors/FmgWorkbenchPanel.test.tsx",
+    "apps/desktop/src/renderer/src/agent/agentTaskState.ts",
+    "apps/desktop/src/renderer/src/agent/agentTaskState.test.ts"
+  ],
+  "productionSymbols": [
+    "acceptance-map",
+    "registered audit suites",
+    "renderer-e2e-real-entry"
+  ],
+  "tests": [
+    {
+      "suite": "test:audit-sf-29-unit",
+      "layer": "unit",
+      "outcome": "passed",
+      "executedCases": 92,
+      "artifactHash": "4F0FA831DF8CFA5A440ECF241A2598A07F0AE146D9325584B863DE0270BE104A"
+    },
+    {
+      "suite": "test:audit-sf-29-native",
+      "layer": "native",
+      "outcome": "passed",
+      "executedCases": 88,
+      "artifactHash": "4F0FA831DF8CFA5A440ECF241A2598A07F0AE146D9325584B863DE0270BE104A",
+      "detail": "aggregate native suite passed；产品交互与真实 native reread仍需单独 evidence。"
+    },
+    {
+      "suite": "test:renderer-playwright-production-real-assets",
+      "layer": "product",
+      "outcome": "passed",
+      "executedCases": 5,
+      "artifactHash": "EF6FD87C8218D406CE43E93CCCEA87AB1F065C28B63376AAEAECEE191E02A820",
+      "detail": "真实只狼语料的生产 Electron 只读验收 5/5 通过：ACTION+MAP、PARAM+FMG、c5400/c5409 材质绑定、C0000 动画、跨角色动作；测试内 pageErrors/consoleErrors 为空。"
+    }
+  ],
+  "schemaMigrations": [],
+  "frontendContract": null,
+  "remainingBlocks": [
+    "SF-29 native runner只验证 acceptance map 与已登记任务 suite 委托；native reread/rollback、写入后的 renderer consumer revision 与游戏内加载仍未绑定到本 task evidence。",
+    "本次 product evidence 是真实语料的只读 Electron 路径：证明五类工作台/可视化入口可读取并渲染，不证明写回、回滚、游戏实际加载、性能样本或外部分发。"
+  ]
+}

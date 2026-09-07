@@ -1,0 +1,44 @@
+[
+  {
+    "id": "R01",
+    "title": "固定提交 core package 的测试入口",
+    "url": "https://github.com/3516027002att-ui/SoulForge/blob/f9cb0cd76a11bfa2857b48acbc779bfac0355d96/packages/core/package.json",
+    "purpose": "薄入口、测试脚本、既有回归名称；补核源码"
+  },
+  {
+    "id": "R02",
+    "title": "固定提交 verify.mjs",
+    "url": "https://github.com/3516027002att-ui/SoulForge/blob/f9cb0cd76a11bfa2857b48acbc779bfac0355d96/scripts/verify.mjs",
+    "purpose": "真实flag及JSON输出shape；不得发明--json或自建runner"
+  },
+  {
+    "id": "R03",
+    "title": "固定提交 Native MSB writer smoke",
+    "url": "https://github.com/3516027002att-ui/SoulForge/blob/f9cb0cd76a11bfa2857b48acbc779bfac0355d96/packages/core/src/testing/runNativeMsbWriterSmoke.ts",
+    "purpose": "复用nativeFixtureRegistry与smokeWorkspace；补核源码"
+  },
+  {
+    "id": "R04",
+    "title": "Blender 4.2 LTS官方命令行参数",
+    "url": "https://docs.blender.org/manual/id/4.2/advanced/command_line/arguments.html",
+    "purpose": "核对background/factory-startup/disable-autoexec/python-exit-code及参数顺序；运行版本仍需pin"
+  },
+  {
+    "id": "R05",
+    "title": "Node.js官方child_process文档",
+    "url": "https://nodejs.org/api/child_process.html",
+    "purpose": "spawn参数数组和shell:false；不等于OS沙箱"
+  },
+  {
+    "id": "R06",
+    "title": "固定提交 desktop package",
+    "url": "https://github.com/3516027002att-ui/SoulForge/blob/f9cb0cd76a11bfa2857b48acbc779bfac0355d96/apps/desktop/package.json",
+    "purpose": "现有Playwright入口与配置路径；没有执行Electron"
+  },
+  {
+    "id": "R07",
+    "title": "固定提交 MSB reader补核片段",
+    "url": "https://github.com/3516027002att-ui/SoulForge/blob/f9cb0cd76a11bfa2857b48acbc779bfac0355d96/bridge/SoulForge.Bridge/MsbNativeDocument.cs#L235-L335",
+    "purpose": "核对+0x0C旧EntityID读取和同源clone往返"
+  }
+]

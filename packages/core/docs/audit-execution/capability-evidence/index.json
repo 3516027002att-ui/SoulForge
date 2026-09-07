@@ -1,0 +1,203 @@
+{
+  "schemaVersion": 1,
+  "layer": "native",
+  "formats": [
+    "ESD",
+    "FXR",
+    "GPARAM",
+    "MTD",
+    "TPF/DDS",
+    "BND/DCX",
+    "FLVER/HKX"
+  ],
+  "evidence": [
+    {
+      "format": "ESD",
+      "command": "write-esd-document",
+      "productionSymbol": "BridgeCommandService.DispatchAsync",
+      "sourceFile": "bridge/SoulForge.Bridge/BridgeCommandService.cs",
+      "variant": "state-group-expression-tree",
+      "writableOperations": [
+        "existing-node-mutation"
+      ],
+      "writerProfile": "candidate",
+      "preconditions": [
+        "confirmed ESD locator",
+        "writer profile for the exact variant"
+      ],
+      "postconditions": [
+        "native reread",
+        "state/condition/jump targets remain valid"
+      ],
+      "independentOracle": "missing",
+      "productTrace": "not_run",
+      "missingEvidence": [
+        "independent ESD semantic oracle",
+        "product IPC trace",
+        "production source anchor missing"
+      ],
+      "readable": false,
+      "nativeFixtures": []
+    },
+    {
+      "format": "FXR",
+      "command": "write-fxr-document",
+      "productionSymbol": "BridgeCommandService.DispatchAsync",
+      "sourceFile": "bridge/SoulForge.Bridge/BridgeCommandService.cs",
+      "variant": "effect-tree",
+      "writableOperations": [
+        "profile-confirmed-mutation-only"
+      ],
+      "writerProfile": "candidate",
+      "preconditions": [
+        "confirmed FXR locator"
+      ],
+      "postconditions": [
+        "native reread",
+        "array/reference validation"
+      ],
+      "independentOracle": "missing",
+      "productTrace": "not_run",
+      "missingEvidence": [
+        "independent FXR layout oracle",
+        "variant corpus",
+        "production source anchor missing"
+      ],
+      "readable": false,
+      "nativeFixtures": []
+    },
+    {
+      "format": "GPARAM",
+      "command": "write-gparam",
+      "productionSymbol": "ParamNativeWriter",
+      "sourceFile": "bridge/SoulForge.Bridge/ParamNativeWriter.cs",
+      "variant": "group-field-value",
+      "writableOperations": [
+        "field-value-set"
+      ],
+      "writerProfile": "native-verified",
+      "preconditions": [
+        "Paramdex-compatible metadata",
+        "current source hash"
+      ],
+      "postconditions": [
+        "native reread",
+        "unknown field preservation"
+      ],
+      "independentOracle": "native-reader-only",
+      "productTrace": "not_run",
+      "missingEvidence": [
+        "independent layout oracle",
+        "production source anchor missing"
+      ],
+      "readable": false,
+      "nativeFixtures": []
+    },
+    {
+      "format": "MTD",
+      "command": "write-mtd-document",
+      "productionSymbol": "BridgeCommandService.DispatchAsync",
+      "sourceFile": "bridge/SoulForge.Bridge/BridgeCommandService.cs",
+      "variant": "material-properties",
+      "writableOperations": [
+        "profile-confirmed-property-set"
+      ],
+      "writerProfile": "candidate",
+      "preconditions": [
+        "confirmed MTD locator"
+      ],
+      "postconditions": [
+        "native reread",
+        "texture reference validation"
+      ],
+      "independentOracle": "missing",
+      "productTrace": "not_run",
+      "missingEvidence": [
+        "independent MTD oracle",
+        "production source anchor missing"
+      ],
+      "readable": false,
+      "nativeFixtures": []
+    },
+    {
+      "format": "TPF/DDS",
+      "command": "write-tpf-texture-replace",
+      "productionSymbol": "BridgeCommandService.DispatchAsync",
+      "sourceFile": "bridge/SoulForge.Bridge/BridgeCommandService.cs",
+      "variant": "texture-mip-chain",
+      "writableOperations": [
+        "profile-confirmed-texture-replace"
+      ],
+      "writerProfile": "candidate",
+      "preconditions": [
+        "format/dimension/mip validation"
+      ],
+      "postconditions": [
+        "native reread",
+        "mip and byte-length validation"
+      ],
+      "independentOracle": "native-reader-only",
+      "productTrace": "not_run",
+      "missingEvidence": [
+        "independent compression oracle",
+        "production source anchor missing"
+      ],
+      "readable": false,
+      "nativeFixtures": []
+    },
+    {
+      "format": "BND/DCX",
+      "command": "write-bnd4",
+      "productionSymbol": "BridgeCommandService.DispatchAsync",
+      "sourceFile": "bridge/SoulForge.Bridge/BridgeCommandService.cs",
+      "variant": "outer-container-child",
+      "writableOperations": [
+        "child-replace"
+      ],
+      "writerProfile": "native-verified",
+      "preconditions": [
+        "outer hash and child identity"
+      ],
+      "postconditions": [
+        "outer reread",
+        "unchanged child hash"
+      ],
+      "independentOracle": "native-reader-only",
+      "productTrace": "not_run",
+      "missingEvidence": [
+        "Oodle/variant independent oracle where required",
+        "production source anchor missing"
+      ],
+      "readable": false,
+      "nativeFixtures": []
+    },
+    {
+      "format": "FLVER/HKX",
+      "command": "write-flver",
+      "productionSymbol": "FlverNativeWriter",
+      "sourceFile": "bridge/SoulForge.Bridge/FlverNativeDocument.cs",
+      "variant": "material-slot-or-profile-confirmed-channel",
+      "writableOperations": [
+        "material-slot-set"
+      ],
+      "writerProfile": "native-verified",
+      "preconditions": [
+        "exact FLVER writer profile",
+        "mesh/layout identity"
+      ],
+      "postconditions": [
+        "native reread",
+        "mesh topology and non-target bytes preserved"
+      ],
+      "independentOracle": "native-reader-only",
+      "productTrace": "not_run",
+      "missingEvidence": [
+        "independent FLVER/HKX geometry oracle",
+        "game-load proof",
+        "production source anchor missing"
+      ],
+      "readable": false,
+      "nativeFixtures": []
+    }
+  ]
+}

@@ -1,0 +1,27 @@
+{
+  "format": "GPARAM",
+  "command": "write-gparam",
+  "productionSymbol": "ParamNativeWriter",
+  "sourceFile": "bridge/SoulForge.Bridge/ParamNativeWriter.cs",
+  "variant": "group-field-value",
+  "writableOperations": [
+    "field-value-set"
+  ],
+  "writerProfile": "native-verified",
+  "preconditions": [
+    "Paramdex-compatible metadata",
+    "current source hash"
+  ],
+  "postconditions": [
+    "native reread",
+    "unknown field preservation"
+  ],
+  "independentOracle": "native-reader-only",
+  "productTrace": "not_run",
+  "missingEvidence": [
+    "independent layout oracle",
+    "production source anchor missing"
+  ],
+  "readable": false,
+  "nativeFixtures": []
+}

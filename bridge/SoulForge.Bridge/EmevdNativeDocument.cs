@@ -345,7 +345,7 @@ internal sealed class EmevdNativeDocument
     /// Full document GC rebuild: events + instructions + args + parameters; preserves linked/strings.
     /// Layer bank must be empty (layerCount==0).
     /// </summary>
-    public byte[] RebuildWithEventBuilds(IReadOnlyList<EmevdEventBuild> builds)
+    public byte[] RebuildWithEventBuilds(IReadOnlyList<EmevdEventBuild> builds, byte[]? customStringBytes = null)
     {
         if (LayerCount != 0)
             throw new NotSupportedException("EMEVD GC 重建不支持含 layer 表的文档；就地 mutation 仍可用。");
@@ -361,9 +361,10 @@ internal sealed class EmevdNativeDocument
         var linkedBytes = SourceBytes.AsSpan(
             checked((int)LinkedFilesOffset),
             checked((int)(StringsOffset - LinkedFilesOffset))).ToArray();
-        var stringBytes = SourceBytes.AsSpan(
+        var stringBytes = customStringBytes ?? SourceBytes.AsSpan(
             checked((int)StringsOffset),
             checked((int)StringsLength)).ToArray();
+
 
         using var ms = new MemoryStream();
         using var bw = new BinaryWriter(ms);
@@ -528,6 +529,7 @@ internal sealed class EmevdNativeDocument
     {
         var builds = CaptureEventBuilds();
         var needsGc = false;
+        byte[]? customStringBytes = null;
         byte[]? workingInPlace = null;
 
         foreach (var patch in patches)
@@ -555,8 +557,48 @@ internal sealed class EmevdNativeDocument
                     builds[idx] = cur with { Id = patch.NewEventId.Value };
                     break;
                 }
+                case "batch_rename":
+                {
+                    if (patch.BatchRenames is null || patch.BatchRenames.Count == 0)
+                        throw new InvalidDataException("batch_rename 需要非空的 batchRenames 列表。");
+                    var oldIds = new HashSet<long>();
+                    foreach (var (oldId, newId) in patch.BatchRenames)
+                    {
+                        if (!oldIds.Add(oldId))
+                            throw new InvalidDataException($"EMEVD 批重命名在同批次中对同一事件重复命名：{oldId}。");
+                        if (!builds.Any(e => e.Id == oldId))
+                            throw new InvalidDataException($"EMEVD 批重命名找不到事件：{oldId}。");
+                    }
+                    var finalIds = new HashSet<long>();
+                    var renameDict = patch.BatchRenames.ToDictionary(p => p.OldId, p => p.NewId);
+                    foreach (var b in builds)
+                    {
+                        var targetId = renameDict.TryGetValue(b.Id, out var mapped) ? mapped : b.Id;
+                        if (!finalIds.Add(targetId))
+                            throw new InvalidDataException($"EMEVD 批重命名导致目标事件 ID 碰撞：{targetId}。");
+                    }
+                    for (var i = 0; i < builds.Count; i++)
+                    {
+                        var cur = builds[i];
+                        if (renameDict.TryGetValue(cur.Id, out var mapped))
+                        {
+                            builds[i] = cur with { Id = mapped };
+                        }
+                    }
+                    break;
+                }
+                case "set_strings":
+                {
+                    if (patch.StringsBytes is null)
+                        throw new InvalidDataException("set_strings 需要 stringsBytes。");
+                    customStringBytes = patch.StringsBytes;
+                    needsGc = true;
+                    break;
+                }
                 case "set_instruction_args":
                 {
+                    if (patch.IsUnknown == true)
+                        throw new InvalidDataException("EMEVD unknown / opaque 指令拒绝修改参数。");
                     if (patch.InstructionIndex is null)
                         throw new InvalidDataException("set_instruction_args 需要 instructionIndex。");
                     if (patch.ArgsBase64 is null)
@@ -688,8 +730,9 @@ internal sealed class EmevdNativeDocument
             }
         }
 
-        if (needsGc)
-            return RebuildWithEventBuilds(builds);
+        if (needsGc || customStringBytes is not null)
+            return RebuildWithEventBuilds(builds, customStringBytes);
+
 
         // In-place path when event count unchanged: rewrite event table + optional args
         // First apply event field changes
@@ -951,7 +994,11 @@ internal sealed record EmevdPatch(
     string? ArgsBase64 = null,
     long? Bank = null,
     long? Id = null,
-    List<EmevdParameter>? Parameters = null);
+    List<EmevdParameter>? Parameters = null,
+    List<(long OldId, long NewId)>? BatchRenames = null,
+    byte[]? StringsBytes = null,
+    bool? IsUnknown = null);
+
 
 internal sealed record EmevdRoundTripReport(
     bool ByteIdentical,

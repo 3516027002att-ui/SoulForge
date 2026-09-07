@@ -729,7 +729,8 @@ export function registerEventIpcHandlers(deps: EventIpcDeps): void {
         // expectedOuterFileHash，是写回的前置条件，要的是此刻磁盘上的真实内容。
         cachePolicy: 'bypass' as const,
         timeoutMs: 120_000,
-        attachIdentity: true
+        attachIdentity: true,
+        ...(deps.activeSession?.layers?.baseRoot ? { oodleRuntimeRoot: deps.activeSession.layers.baseRoot } : {})
       });
       if (!full.ok || !full.document) {
         return {
@@ -766,6 +767,7 @@ export function registerEventIpcHandlers(deps: EventIpcDeps): void {
         workspaceId: deps.activeSession.meta.workspaceId,
         workspaceRoot: deps.activeSession.layers.overlayRoot,
         stagingRoot: storage.stagingRoot,
+        ...(deps.activeSession?.layers?.baseRoot ? { oodleRuntimeRoot: deps.activeSession.layers.baseRoot } : {}),
         ...(deps.activeSession ? { session: deps.activeSession } : {}),
         operationLog,
         backupBaseDir: storage.backupBaseDir,

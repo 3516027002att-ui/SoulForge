@@ -257,6 +257,19 @@ export class OperationLogUtilityClient implements OperationLogStore {
     return this.request('listJobs', {});
   }
 
+  async getSemanticFileCache(relativePath: string): Promise<{ fileSha256: string; payload: SymbolBundle } | null> {
+    const result = await this.request('getSemanticFileCache', { relativePath });
+    if (!result) return null;
+    try {
+      return {
+        fileSha256: result.fileSha256,
+        payload: JSON.parse(result.payloadJson) as SymbolBundle
+      };
+    } catch {
+      return null;
+    }
+  }
+
   async getAllSemanticFileCache(): Promise<Map<string, { fileSha256: string; payload: SymbolBundle }>> {
     const result = await this.request('getAllSemanticFileCache', {});
     const map = new Map<string, { fileSha256: string; payload: SymbolBundle }>();
@@ -441,6 +454,12 @@ export class OperationLogUtilityClient implements OperationLogStore {
       case 'replaceReferences':
       case 'replaceDiagnostics':
       case 'planRecoveryCleanup':
+      case 'getSemanticFileCache':
+      case 'getAllSemanticFileCache':
+      case 'record':
+      case 'createTransaction':
+      case 'transitionTransaction':
+      case 'finalizeCommit':
         return Math.max(this.requestTimeoutMs, 120_000);
       default:
         return this.requestTimeoutMs;

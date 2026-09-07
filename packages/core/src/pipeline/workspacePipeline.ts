@@ -110,6 +110,10 @@ export async function analyzeWorkspace(options: AnalyzeWorkspaceOptions): Promis
     .sort((left, right) => parsePriority(left.file) - parsePriority(right.file) || left.order - right.order)
     .slice(0, options.maxFilesToParse ?? 500)
     .map(({ file }) => file);
+  const hasParamCandidates = parseCandidates.some((file) => file.resourceKind === 'param');
+  if (hasParamCandidates && index.getStats().paramRows === 0) {
+    index.setParamSemanticState('warming_up');
+  }
   let parsedFiles = 0;
   let semanticIndexNotified = false;
 
@@ -173,7 +177,16 @@ export async function analyzeWorkspace(options: AnalyzeWorkspaceOptions): Promis
     // of waiting for every map/event Bridge read.  If those families are
     // absent, the first accepted semantic family still unblocks the same
     // contract.
+    if (index.getStats().paramRows > 0) {
+      index.setParamSemanticState('ready');
+    }
     await notifySemanticIndexReady(false);
+  }
+
+  if (index.getStats().paramRows === 0) {
+    index.setParamSemanticState(hasParamCandidates ? 'failed' : 'empty');
+  } else {
+    index.setParamSemanticState('ready');
   }
 
   // Resolve the staged-readiness contract even when every candidate failed or

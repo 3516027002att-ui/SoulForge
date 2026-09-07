@@ -12,19 +12,26 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { logicalFmgTableName, type Diagnostic } from '@soulforge/shared';
 import { runBridge } from '../bridge/runBridge.js';
 import { applyNativeMutation } from './editorMutationService.js';
-import { commitFmgMutationsViaBridge, type FmgBridgeMutation } from './fmgBridgeCommit.js';
+import {
+  commitFmgMutationsViaBridge,
+  commitFmgMultiTableViaBridge,
+  type FmgBridgeMutation,
+  type FmgTableMutationBatch
+} from './fmgBridgeCommit.js';
 import type { NativeEditSession } from './nativeEditSession.js';
 
 export interface FmgEntryEdit {
   table: string;
   id: number;
-  text: string;
+  text: string | null;
+  slotIndex?: number;
 }
 
 export interface FmgEntrySnapshot {
   table: string;
   id: number;
-  text: string;
+  text: string | null;
+  slotIndex?: number;
   /** Provenance returned by the same native catalog read. */
   sourceHash?: string;
   sourceRevision?: number;
@@ -47,6 +54,7 @@ export type FmgSetResult =
       before: FmgEntrySnapshot[];
       after: FmgEntrySnapshot[];
       diagnostics: Diagnostic[];
+      opId?: string;
     }
   | { ok: false; error: FmgEditFailure; diagnostics: Diagnostic[]; before?: FmgEntrySnapshot[] };
 
@@ -66,7 +74,7 @@ interface CatalogEnvelope {
     entryName?: string;
     entryCount?: number;
   }>;
-  entries?: Array<{ id?: number; text?: string }>;
+  entries?: Array<{ id?: number; text?: string | null }>;
 }
 
 /** 用户口语 / 英文表名 → 本机 BND 逻辑名（只狼 zhocn 包是日文文件名）。 */
@@ -183,61 +191,86 @@ export async function setFmgEntries(input: {
     return { ok: false, error: { code: 'FMG_EDIT_EMPTY', message: '没有要写入的词条。' }, diagnostics: [] };
   }
   const grouped = groupFmgEdits(input.edits);
-  if (grouped.size !== 1 && !input.containerPath) {
-    // 多表可以分次提交，但一次 CLI 调用只允许一张表，避免跨容器哈希串扰。
-    const tables = [...grouped.keys()];
-    if (tables.length > 1) {
+  const resolvedTables: Array<{
+    table: string;
+    containerPath: string;
+    entryIndex: number;
+    outerHash: string;
+    edits: FmgEntryEdit[];
+  }> = [];
+
+  let commonContainer: string | undefined;
+  const allDiagnostics: Diagnostic[] = [];
+
+  for (const [tableName, edits] of grouped.entries()) {
+    const resolved = await resolveFmgTable(input.edit, tableName, input.containerPath, input.lang);
+    if (!resolved.ok) return resolved;
+    if (commonContainer === undefined) {
+      commonContainer = resolved.containerPath;
+    } else if (commonContainer !== resolved.containerPath) {
       return {
         ok: false,
-        error: { code: 'FMG_MULTI_TABLE', message: `一次 set 只支持一张表，收到：${tables.join(', ')}` },
-        diagnostics: []
+        error: {
+          code: 'FMG_CROSS_CONTAINER',
+          message: `一次原子提交只支持同一个容器内的表修改；收到不同容器：${commonContainer} 与 ${resolved.containerPath}`
+        },
+        diagnostics: allDiagnostics
       };
     }
+    resolvedTables.push({
+      table: resolved.table,
+      containerPath: resolved.containerPath,
+      entryIndex: resolved.entryIndex,
+      outerHash: resolved.outerHash,
+      edits
+    });
   }
-  const table = input.edits[0]!.table;
-  const resolved = await resolveFmgTable(input.edit, table, input.containerPath, input.lang);
-  if (!resolved.ok) return resolved;
-  const loaded = await loadTableEntries(input.edit, resolved);
-  if (!loaded.ok) return { ok: false, error: loaded.error, diagnostics: loaded.diagnostics };
 
+  const containerPath = commonContainer!;
   const before: FmgEntrySnapshot[] = [];
   const after: FmgEntrySnapshot[] = [];
-  const mutations: FmgBridgeMutation[] = [];
-  const seenIds = new Set<number>();
-  for (const edit of input.edits) {
-    if (seenIds.has(edit.id)) {
-      return {
-        ok: false,
-        error: { code: 'FMG_DUPLICATE_EDIT_ID', message: `同一次请求重复编辑 ${resolved.table}#${edit.id}。` },
-        diagnostics: loaded.diagnostics,
-        before
-      };
+  const tableBatches: FmgTableMutationBatch[] = [];
+
+  for (const t of resolvedTables) {
+    const loaded = await loadTableEntries(input.edit, t);
+    if (!loaded.ok) return { ok: false, error: loaded.error, diagnostics: loaded.diagnostics };
+    allDiagnostics.push(...loaded.diagnostics);
+
+    const mutations: FmgBridgeMutation[] = [];
+    for (const edit of t.edits) {
+      const current = loaded.byId.get(edit.id);
+      const slotOpt = edit.slotIndex !== undefined ? { slotIndex: edit.slotIndex } : {};
+      if (current === undefined) {
+        after.push({ table: t.table, id: edit.id, text: edit.text, ...slotOpt });
+        mutations.push({ kind: 'add', id: edit.id, text: edit.text, ...slotOpt });
+        continue;
+      }
+      before.push({ table: t.table, id: edit.id, text: current, ...slotOpt });
+      after.push({ table: t.table, id: edit.id, text: edit.text, ...slotOpt });
+      mutations.push({ kind: 'upsert', id: edit.id, text: edit.text, ...slotOpt });
     }
-    seenIds.add(edit.id);
-    const current = loaded.byId.get(edit.id);
-    if (current === undefined) {
-      after.push({ table: resolved.table, id: edit.id, text: edit.text });
-      mutations.push({ kind: 'add', id: edit.id, text: edit.text });
-      continue;
-    }
-    before.push({ table: resolved.table, id: edit.id, text: current });
-    after.push({ table: resolved.table, id: edit.id, text: edit.text });
-    if (current !== edit.text) {
-      mutations.push({ kind: 'upsert', id: edit.id, text: edit.text });
+    if (mutations.length > 0) {
+      tableBatches.push({
+        entryIndex: t.entryIndex,
+        mutations
+      });
     }
   }
-  if (mutations.length === 0) {
+
+  if (tableBatches.length === 0) {
     return {
       ok: true,
-      containerPath: resolved.containerPath,
+      containerPath,
       before,
       after,
-      diagnostics: loaded.diagnostics
+      diagnostics: allDiagnostics
     };
   }
 
-  const file = await input.edit.indexFile(resolved.containerPath, 'msg');
-  const expectedHash = resolved.outerHash || file.sha256 || await sha256Of(resolved.containerPath);
+  const file = await input.edit.indexFile(containerPath, 'msg');
+  const expectedHash = resolvedTables[0]?.outerHash || file.sha256 || await sha256Of(containerPath);
+  const totalMutations = tableBatches.reduce((acc, b) => acc + b.mutations.length, 0);
+
   const outcome = await applyNativeMutation({
     file: { ...file, sha256: expectedHash },
     sourceUri: file.sourceUri,
@@ -245,19 +278,19 @@ export async function setFmgEntries(input: {
     stagingRoot: input.edit.stagingRoot,
     allowedRoots: () => [...input.edit.allowedRoots()],
     stagingPrefix: 'fmg',
-    stagingFileName: `${basename(resolved.containerPath)}.mut.fmg`,
-    stageWrite: (context) => commitFmgMutationsViaBridge({
-      sourcePath: resolved.containerPath,
+    stagingFileName: `${basename(containerPath)}.mut.fmg`,
+    stageWrite: (context) => commitFmgMultiTableViaBridge({
+      sourcePath: containerPath,
       outputPath: context.outputPath,
       expectedDocumentHash: expectedHash,
       allowedRoots: context.allowedRoots,
       writableRoots: context.writableRoots,
-      mutations,
-      entryIndex: resolved.entryIndex,
+      tables: tableBatches,
+      disallowAmbiguous: true,
       timeoutMs: 120_000,
       ...(input.edit.oodleRuntimeRoot ? { oodleRuntimeRoot: input.edit.oodleRuntimeRoot } : {})
     }),
-    title: `FMG upsert ${mutations.length} in ${resolved.table}`,
+    title: `FMG mut ${totalMutations} across ${tableBatches.length} tables in ${basename(containerPath)}`,
     confirmActionLabel: '提交 FMG 变更'
   }, { commit: input.edit.commitPort });
 
@@ -281,10 +314,11 @@ export async function setFmgEntries(input: {
   }
   return {
     ok: true,
-    containerPath: resolved.containerPath,
+    containerPath,
     before,
     after,
-    diagnostics: [...loaded.diagnostics, ...outcome.result.diagnostics]
+    diagnostics: [...allDiagnostics, ...outcome.result.diagnostics],
+    ...(outcome.result.opId ? { opId: outcome.result.opId } : {})
   };
 }
 
@@ -377,7 +411,7 @@ async function loadTableEntries(
   edit: NativeEditSession,
   resolved: { containerPath: string; table: string; entryIndex: number }
 ): Promise<
-  | { ok: true; byId: Map<number, string>; diagnostics: Diagnostic[] }
+  | { ok: true; byId: Map<number, string | null>; diagnostics: Diagnostic[] }
   | { ok: false; error: FmgEditFailure; diagnostics: Diagnostic[] }
 > {
   const catalog = await readCatalog(edit, resolved.containerPath, resolved.entryIndex);
@@ -399,7 +433,7 @@ async function readCatalog(
   ok: boolean;
   outerHash: string;
   tables: CatalogTable[];
-  entries: Map<number, string>;
+  entries: Map<number, string | null>;
   diagnostics: Diagnostic[];
 }> {
   const result = await runBridge<CatalogEnvelope>({
@@ -421,10 +455,10 @@ async function readCatalog(
     entryIndex: table.entryIndex ?? 0,
     entryCount: table.entryCount ?? 0
   }));
-  const entries = new Map<number, string>();
+  const entries = new Map<number, string | null>();
   for (const entry of result.data.entries ?? []) {
-    if (typeof entry.id === 'number' && typeof entry.text === 'string') {
-      entries.set(entry.id, entry.text);
+    if (typeof entry.id === 'number') {
+      entries.set(entry.id, typeof entry.text === 'string' ? entry.text : null);
     }
   }
   return {

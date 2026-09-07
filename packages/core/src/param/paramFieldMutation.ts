@@ -56,6 +56,29 @@ export function applyParamFieldMutation(
     };
   }
 
+  const field = request.definition.fields.find((f) => f.id === request.fieldId);
+  if (!field) {
+    return { ok: false, code: 'PARAMDEF_FIELD_NOT_FOUND', message: `字段 ${request.fieldId} 不存在。` };
+  }
+
+  if (field.bitfield !== undefined) {
+    const { bitOffset, bitWidth } = field.bitfield;
+    if (!Number.isSafeInteger(bitOffset) || bitOffset < 0) {
+      return { ok: false, code: 'PARAM_BITFIELD_INVALID_OFFSET', message: `bitfield 偏移无效：${bitOffset}` };
+    }
+    if (!Number.isSafeInteger(bitWidth) || bitWidth <= 0) {
+      return { ok: false, code: 'PARAM_BITFIELD_INVALID_WIDTH', message: `bitfield 位宽无效：${bitWidth}` };
+    }
+    const maxStorageBits = field.size * 8;
+    if (bitOffset + bitWidth > maxStorageBits) {
+      return {
+        ok: false,
+        code: 'PARAM_BITFIELD_OVERFLOW',
+        message: `bitfield 范围 [${bitOffset}, ${bitOffset + bitWidth}) 超出存储大小 ${maxStorageBits} 位。`
+      };
+    }
+  }
+
   const result = encodeFieldMutation(rowData, request.definition, request.fieldId, request.value);
   if (!result.ok) {
     return { ok: false, code: result.code, message: result.message };

@@ -135,6 +135,7 @@ export interface OperationLogUtilityPayloadMap {
   listDiagnostics: Record<string, never>;
   upsertJob: { job: Omit<BackgroundJobRecord, 'workspaceId'> };
   listJobs: Record<string, never>;
+  getSemanticFileCache: { relativePath: string };
   getAllSemanticFileCache: Record<string, never>;
   upsertSemanticFileCache: {
     entry: {
@@ -221,6 +222,14 @@ export interface OperationLogUtilityResultMap {
   listDiagnostics: PersistedDiagnostic[];
   upsertJob: null;
   listJobs: BackgroundJobRecord[];
+  getSemanticFileCache: {
+    relativePath: string;
+    fileSha256: string;
+    resourceKind: string;
+    payloadJson: string;
+    mtimeMs: number;
+    updatedAt: string;
+  } | null;
   getAllSemanticFileCache: {
     entries: Array<{
       relativePath: string;

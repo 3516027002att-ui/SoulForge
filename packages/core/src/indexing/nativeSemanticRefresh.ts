@@ -43,12 +43,14 @@ export interface NativeSemanticRefreshResult {
   refreshedSources: string[];
   partialSources: string[];
   failedSources: string[];
+  staleSources: string[];
   diagnostics: Diagnostic[];
 }
 
 interface NativeSourceReadResult {
   complete: boolean;
   semanticCount: number;
+  stale: boolean;
   diagnostics: Diagnostic[];
 }
 
@@ -109,7 +111,7 @@ export async function refreshNativeSemanticSources(
     || file.resourceKind === 'msg'
   ));
   if (sourceFiles.length === 0) {
-    return { refreshedSources: [], partialSources: [], failedSources: [], diagnostics: [] };
+    return { refreshedSources: [], partialSources: [], failedSources: [], staleSources: [], diagnostics: [] };
   }
 
   await mkdir(input.stagingRoot, { recursive: true });
@@ -118,20 +120,56 @@ export async function refreshNativeSemanticSources(
   const refreshedSources: string[] = [];
   const partialSources: string[] = [];
   const failedSources: string[] = [];
+  const staleSources: string[] = [];
   try {
     for (const file of sourceFiles) {
       try {
         throwIfAborted(input.signal);
+        if (!input.index.isNativeProjectionCurrent(file.sourceUri, {
+          ...(file.sha256 ? { sourceHash: file.sha256 } : {}),
+          sourceRevision: file.mtimeMs
+        })) {
+          staleSources.push(file.sourceUri);
+          diagnostics.push({
+            severity: 'warning',
+            code: 'NATIVE_SEMANTIC_REFRESH_STALE',
+            message: '拒绝发布晚到的旧 native semantic projection；当前工作区 source revision 已更新。',
+            sourceUri: file.sourceUri
+          });
+          continue;
+        }
         const roots = refreshAllowedRoots(input, file, scratchRoot);
         if (file.resourceKind === 'event') {
           const eventExport = await readEventExport(file, roots, input);
-          input.index.upsertEventExport(eventExport);
+          if (!input.index.upsertEventExport(eventExport)) {
+            staleSources.push(file.sourceUri);
+            diagnostics.push({
+              severity: 'warning',
+              code: 'NATIVE_SEMANTIC_REFRESH_STALE',
+              message: 'EMEVD semantic projection version was rejected as stale.',
+              sourceUri: file.sourceUri
+            });
+            continue;
+          }
         } else if (file.resourceKind === 'map') {
           const mapExport = await readMapExport(file, roots, input);
-          input.index.upsertMapExport(mapExport);
+          if (!input.index.upsertMapExport(mapExport)) {
+            staleSources.push(file.sourceUri);
+            diagnostics.push({
+              severity: 'warning',
+              code: 'NATIVE_SEMANTIC_REFRESH_STALE',
+              message: 'MSB semantic projection version/schema was rejected as stale.',
+              sourceUri: file.sourceUri
+            });
+            continue;
+          }
         } else if (file.resourceKind === 'param') {
           const result = await readParamExports(file, roots, scratchRoot, input);
           diagnostics.push(...result.diagnostics);
+          if (result.stale) {
+            staleSources.push(file.sourceUri);
+            continue;
+          }
           if (result.semanticCount === 0) {
             throw new Error('PARAM native reread 没有产出任何完整表的 semantic rows。');
           }
@@ -139,6 +177,10 @@ export async function refreshNativeSemanticSources(
         } else if (file.resourceKind === 'msg') {
           const result = await readMsgExports(file, roots, scratchRoot, input);
           diagnostics.push(...result.diagnostics);
+          if (result.stale) {
+            staleSources.push(file.sourceUri);
+            continue;
+          }
           if (result.semanticCount === 0) {
             throw new Error('FMG native reread 没有产出任何 semantic entries。');
           }
@@ -156,7 +198,7 @@ export async function refreshNativeSemanticSources(
       }
     }
     input.index.rebuildReferences();
-    return { refreshedSources, partialSources, failedSources, diagnostics };
+    return { refreshedSources, partialSources, failedSources, staleSources, diagnostics };
   } finally {
     await rm(scratchRoot, { recursive: true, force: true });
   }
@@ -307,6 +349,8 @@ async function readMapExport(
     assignNumber(part, 'scaleX', record.scaleX);
     assignNumber(part, 'scaleY', record.scaleY);
     assignNumber(part, 'scaleZ', record.scaleZ);
+    assignNumber(part, 'internalEntryId', record.internalEntryId);
+    assignNumber(part, 'entityId', record.entityId);
     return part;
   });
   const regions: NativeMapRegionInput[] = arrayValue(data.regions).map((value) => {
@@ -322,6 +366,8 @@ async function readMapExport(
     assignNumber(region, 'scaleX', record.scaleX);
     assignNumber(region, 'scaleY', record.scaleY);
     assignNumber(region, 'scaleZ', record.scaleZ);
+    assignNumber(region, 'internalEntryId', record.internalEntryId);
+    assignNumber(region, 'entityId', record.entityId);
     return region;
   });
   return mapExportFromMsbDocument({
@@ -329,6 +375,7 @@ async function readMapExport(
     sourceUri: file.sourceUri,
     ...(file.sha256 ? { sourceHash: file.sha256 } : {}),
     ...(file.mtimeMs !== undefined ? { sourceRevision: file.mtimeMs } : {}),
+    readerSchemaRevision: numberValue(data.readerSchemaRevision) ?? 2,
     parts,
     regions
   });
@@ -348,6 +395,7 @@ async function readParamExports(
   }
   const diagnostics: Diagnostic[] = [];
   let semanticCount = 0;
+  let stale = false;
   for (const entry of entries) {
     throwIfAborted(input.signal);
     try {
@@ -421,8 +469,17 @@ async function readParamExports(
         ...(file.mtimeMs !== undefined ? { sourceRevision: file.mtimeMs } : {}),
         rows
       };
-      input.index.upsertParamExport(exported);
-      semanticCount += rows.length;
+      if (input.index.upsertParamExport(exported)) {
+        semanticCount += rows.length;
+      } else {
+        stale = true;
+        diagnostics.push({
+          severity: 'warning',
+          code: 'NATIVE_PARAM_TABLE_STALE',
+          message: `PARAM ${entry.name} semantic projection was rejected because its source revision is stale.`,
+          sourceUri: file.sourceUri
+        });
+      }
     } catch (error) {
       diagnostics.push({
         severity: 'warning',
@@ -432,7 +489,7 @@ async function readParamExports(
       });
     }
   }
-  return { complete: diagnostics.length === 0, semanticCount, diagnostics };
+  return { complete: diagnostics.length === 0, semanticCount, stale, diagnostics };
 }
 
 async function readMsgExports(
@@ -445,6 +502,7 @@ async function readMsgExports(
   if (entries.length === 0) throw new Error('FMG native container 没有 .fmg 子项。');
   const diagnostics: Diagnostic[] = [];
   let semanticCount = 0;
+  let stale = false;
   for (const entry of entries) {
     throwIfAborted(input.signal);
     try {
@@ -484,8 +542,17 @@ async function readMsgExports(
         ...(file.mtimeMs !== undefined ? { sourceRevision: file.mtimeMs } : {}),
         entries
       };
-      input.index.upsertMsgExport(exported);
-      semanticCount += entries.length;
+      if (input.index.upsertMsgExport(exported)) {
+        semanticCount += entries.length;
+      } else {
+        stale = true;
+        diagnostics.push({
+          severity: 'warning',
+          code: 'NATIVE_FMG_TABLE_STALE',
+          message: `FMG ${entry.name} semantic projection was rejected because its source revision is stale.`,
+          sourceUri: file.sourceUri
+        });
+      }
     } catch (error) {
       diagnostics.push({
         severity: 'warning',
@@ -495,7 +562,7 @@ async function readMsgExports(
       });
     }
   }
-  return { complete: diagnostics.length === 0, semanticCount, diagnostics };
+  return { complete: diagnostics.length === 0, semanticCount, stale, diagnostics };
 }
 
 async function listNativeEntries(

@@ -32,7 +32,8 @@ internal static class MsbNativeWriter
         var rebuilt = document.ApplyMutations(patches);
         await AtomicWriteAsync(outputPath, rebuilt, cancellationToken);
         var reread = MsbNativeDocument.ReadFile(outputPath);
-        VerifyMutations(reread, patches);
+        VerifyMutations(reread, patches, document);
+        VerifyRawByteDiff(document.SourceBytes, reread.SourceBytes, patches, document);
         return new
         {
             mutationCount = patches.Count,
@@ -85,7 +86,8 @@ internal static class MsbNativeWriter
         // 重新经原生 unwrap 打开暂存 outer 产物并逐条验证 mutation。
         var rereadDcx = DcxNativeDocument.Read(outputPath, oodleRuntimeRoot);
         var reread = MsbNativeDocument.Read(rereadDcx.Payload);
-        VerifyMutations(reread, patches);
+        VerifyMutations(reread, patches, document);
+        VerifyRawByteDiff(document.SourceBytes, reread.SourceBytes, patches, document);
         return new
         {
             mutationCount = patches.Count,
@@ -108,19 +110,38 @@ internal static class MsbNativeWriter
     private static List<MsbPatch> PreparePatches(MsbNativeDocument document, JsonElement options)
     {
         RequireHash(options, "expectedDocumentHash", document.SourceHash, "MSB source hash");
+        var rootCert = ParseCertificate(options);
         var patches = new List<MsbPatch>();
         if (options.TryGetProperty("mutations", out var mutations) && mutations.ValueKind == JsonValueKind.Array)
         {
             foreach (var item in mutations.EnumerateArray())
-                patches.Add(ParsePatch(item));
+                patches.Add(ParsePatch(item, rootCert));
         }
         else
         {
-            patches.Add(ParsePatch(options));
+            patches.Add(ParsePatch(options, rootCert));
         }
         if (patches.Count == 0) throw new InvalidDataException("MSB writer 需要至少一条 mutation。");
         foreach (var patch in patches)
         {
+            if (patch.Kind is "delete_part" or "delete_region" or "delete_event" or "delete")
+            {
+                if (patch.Certificate is null || !patch.Certificate.Complete)
+                    throw new MsbSafetyGateException("MSB_REFERENCE_COVERAGE_INCOMPLETE", "MSB 结构删除引用闭包尚未完成，删除已被安全门禁拦截。");
+            }
+            if (patch.Kind is "set_entity_id" || (patch.Kind is "set_property" && patch.EntityId is not null))
+            {
+                if (patch.Family is not ("part" or "region"))
+                    throw new MsbSafetyGateException("MSB_ENTITY_SCHEMA_UNVERIFIED", $"MSB EntityID schema 尚未通过 native 验证，写入已被安全门禁拦截：family={patch.Family}。");
+                if (patch.EntityId is null)
+                    throw new InvalidDataException("options.entityId 是必填整数。");
+                _ = document.ResolveEntityIdAddress(patch);
+            }
+            if (patch.Family == "region" && (patch.ScaleX is not null || patch.ScaleY is not null || patch.ScaleZ is not null))
+                throw new MsbSafetyGateException("MSB_REGION_SCALE_UNSUPPORTED", "MSB Region 不支持 scale 写入。");
+            if (patch.Kind == "set_region_shape")
+                throw new MsbSafetyGateException("SHAPE_OPERATION_UNSUPPORTED", "MSB Region shape 尺寸写回尚未开放，缺少独立布局验证。");
+
             switch (patch.Kind)
             {
                 case "set_region_position":
@@ -145,7 +166,7 @@ internal static class MsbNativeWriter
         return patches;
     }
 
-    private static void VerifyMutations(MsbNativeDocument reread, List<MsbPatch> patches)
+    private static void VerifyMutations(MsbNativeDocument reread, List<MsbPatch> patches, MsbNativeDocument? originalDoc = null)
     {
         // A transaction can intentionally touch one native identity more than
         // once (for example set_transform followed by batch_transform).  The
@@ -159,6 +180,45 @@ internal static class MsbNativeWriter
             if (patch.Kind is "set_part_position" or "set_part_transform"
                 or "set_region_position" or "set_region_transform")
                 lastTransformIndex[(patch.Family, patch.NativeOffset)] = i;
+        }
+
+        var lastEntityIdByTarget = new Dictionary<(string Family, long NativeOffset), int>();
+        foreach (var patch in patches)
+        {
+            if ((patch.Kind is "set_property" or "set_entity_id") && patch.EntityId is not null)
+            {
+                lastEntityIdByTarget[(patch.Family, patch.NativeOffset)] = patch.EntityId.Value;
+            }
+        }
+
+        foreach (var (key, expectedEntityId) in lastEntityIdByTarget)
+        {
+            if (key.Family == "part")
+            {
+                var rereadPart = reread.Parts.SingleOrDefault(p => p.Offset == key.NativeOffset)
+                    ?? throw new InvalidDataException($"MSB part 0x{key.NativeOffset:X} 在重读时未找到。");
+                if (rereadPart.EntityId != expectedEntityId)
+                    throw new InvalidDataException($"MSB part entityId 未按预期更新：actual={rereadPart.EntityId} expected={expectedEntityId}。");
+                if (originalDoc != null)
+                {
+                    var origPart = originalDoc.Parts.Single(p => p.Offset == key.NativeOffset);
+                    if (rereadPart.InternalEntryId != origPart.InternalEntryId)
+                        throw new InvalidDataException($"MSB part internalEntryId 被非法修改：orig={origPart.InternalEntryId} reread={rereadPart.InternalEntryId}。");
+                }
+            }
+            else if (key.Family == "region")
+            {
+                var rereadRegion = reread.Regions.SingleOrDefault(r => r.Offset == key.NativeOffset)
+                    ?? throw new InvalidDataException($"MSB region 0x{key.NativeOffset:X} 在重读时未找到。");
+                if (rereadRegion.EntityId != expectedEntityId)
+                    throw new InvalidDataException($"MSB region entityId 未按预期更新：actual={rereadRegion.EntityId} expected={expectedEntityId}。");
+                if (originalDoc != null)
+                {
+                    var origRegion = originalDoc.Regions.Single(r => r.Offset == key.NativeOffset);
+                    if (rereadRegion.InternalEntryId != origRegion.InternalEntryId)
+                        throw new InvalidDataException($"MSB region internalEntryId 被非法修改：orig={origRegion.InternalEntryId} reread={rereadRegion.InternalEntryId}。");
+                }
+            }
         }
 
         for (var i = 0; i < patches.Count; i++)
@@ -197,12 +257,6 @@ internal static class MsbNativeWriter
                     throw new InvalidDataException("MSB region rotY 未按预期更新。");
                 if (patch.RotZ is not null && Math.Abs(region.RotZ - patch.RotZ.Value) > 0.0001f)
                     throw new InvalidDataException("MSB region rotZ 未按预期更新。");
-                if (patch.ScaleX is not null && Math.Abs(region.ScaleX - patch.ScaleX.Value) > 0.0001f)
-                    throw new InvalidDataException("MSB region scaleX 未按预期更新。");
-                if (patch.ScaleY is not null && Math.Abs(region.ScaleY - patch.ScaleY.Value) > 0.0001f)
-                    throw new InvalidDataException("MSB region scaleY 未按预期更新。");
-                if (patch.ScaleZ is not null && Math.Abs(region.ScaleZ - patch.ScaleZ.Value) > 0.0001f)
-                    throw new InvalidDataException("MSB region scaleZ 未按预期更新。");
                 continue;
             }
 
@@ -224,23 +278,7 @@ internal static class MsbNativeWriter
 
             if (patch.Kind is "set_property" or "set_entity_id")
             {
-                if (patch.EntityId is null) throw new InvalidDataException("MSB entityId mutation 缺少 entityId。");
-                if (patch.Family == "part")
-                {
-                    var partWithEntityId = reread.ResolvePart(patch);
-                    if (partWithEntityId.EntityId != patch.EntityId.Value)
-                        throw new InvalidDataException("MSB part entityId 未按预期更新。");
-                }
-                else if (patch.Family == "region")
-                {
-                    var regionWithEntityId = reread.ResolveRegion(patch);
-                    if (regionWithEntityId.EntityId != patch.EntityId.Value)
-                        throw new InvalidDataException("MSB region entityId 未按预期更新。");
-                }
-                else
-                {
-                    throw new InvalidDataException($"MSB entityId mutation family 不支持：{patch.Family}。");
-                }
+                // Handled in lastEntityIdByTarget check above.
                 continue;
             }
 
@@ -266,6 +304,127 @@ internal static class MsbNativeWriter
         }
     }
 
+    private static void VerifyRawByteDiff(byte[] original, byte[] modified, List<MsbPatch> patches, MsbNativeDocument document)
+    {
+        if (original.Length != modified.Length)
+            throw new InvalidDataException($"MSB raw mutation 文件大小发生变化：original={original.Length} modified={modified.Length}。");
+
+        var allowedIndices = new HashSet<int>();
+        foreach (var patch in patches)
+        {
+            switch (patch.Kind)
+            {
+                case "set_part_position":
+                {
+                    var part = document.ResolvePart(patch);
+                    var baseOff = part.Offset + 0x20;
+                    for (var i = 0; i < 12; i++) allowedIndices.Add(baseOff + i);
+                    break;
+                }
+                case "set_part_transform":
+                {
+                    var part = document.ResolvePart(patch);
+                    if (patch.PosX is not null || patch.PosY is not null || patch.PosZ is not null)
+                    {
+                        for (var i = 0; i < 12; i++) allowedIndices.Add(part.Offset + 0x20 + i);
+                    }
+                    if (patch.RotX is not null || patch.RotY is not null || patch.RotZ is not null)
+                    {
+                        for (var i = 0; i < 12; i++) allowedIndices.Add(part.Offset + 0x2C + i);
+                    }
+                    if (patch.ScaleX is not null || patch.ScaleY is not null || patch.ScaleZ is not null)
+                    {
+                        for (var i = 0; i < 12; i++) allowedIndices.Add(part.Offset + 0x38 + i);
+                    }
+                    break;
+                }
+                case "set_region_position":
+                {
+                    var region = document.ResolveRegion(patch);
+                    for (var i = 0; i < 12; i++) allowedIndices.Add(region.Offset + 0x14 + i);
+                    break;
+                }
+                case "set_region_transform":
+                {
+                    var region = document.ResolveRegion(patch);
+                    if (patch.PosX is not null || patch.PosY is not null || patch.PosZ is not null)
+                    {
+                        for (var i = 0; i < 12; i++) allowedIndices.Add(region.Offset + 0x14 + i);
+                    }
+                    if (patch.RotX is not null || patch.RotY is not null || patch.RotZ is not null)
+                    {
+                        for (var i = 0; i < 12; i++) allowedIndices.Add(region.Offset + 0x20 + i);
+                    }
+                    break;
+                }
+                case "change_model":
+                case "set_part_model":
+                {
+                    var part = document.ResolvePart(patch);
+                    for (var i = 0; i < 4; i++) allowedIndices.Add(part.Offset + 0x10 + i);
+                    break;
+                }
+                case "set_property":
+                case "set_entity_id":
+                {
+                    var addr = document.ResolveEntityIdAddress(patch);
+                    for (var i = 0; i < 4; i++) allowedIndices.Add(addr + i);
+                    break;
+                }
+                case "delete_part":
+                {
+                    if (document.Params.TryGetValue("PARTS_PARAM_ST", out var p))
+                    {
+                        var start = (int)p.Offset;
+                        var end = (int)(p.Offset + MsbNativeDocument.ParamHeaderSize + (p.EntryOffsets.Length + 1) * 8);
+                        for (var i = start; i < end; i++) allowedIndices.Add(i);
+                    }
+                    break;
+                }
+                case "delete_region":
+                {
+                    if (document.Params.TryGetValue("POINT_PARAM_ST", out var p))
+                    {
+                        var start = (int)p.Offset;
+                        var end = (int)(p.Offset + MsbNativeDocument.ParamHeaderSize + (p.EntryOffsets.Length + 1) * 8);
+                        for (var i = start; i < end; i++) allowedIndices.Add(i);
+                    }
+                    break;
+                }
+                case "delete_event":
+                {
+                    if (document.Params.TryGetValue("EVENT_PARAM_ST", out var p))
+                    {
+                        var start = (int)p.Offset;
+                        var end = (int)(p.Offset + MsbNativeDocument.ParamHeaderSize + (p.EntryOffsets.Length + 1) * 8);
+                        for (var i = start; i < end; i++) allowedIndices.Add(i);
+                    }
+                    break;
+                }
+            }
+        }
+
+        for (var i = 0; i < original.Length; i++)
+        {
+            if (original[i] != modified[i] && !allowedIndices.Contains(i))
+            {
+                throw new InvalidDataException($"MSB raw mutation 出现越界或非预期的字节变动：offset=0x{i:X}。");
+            }
+        }
+
+        foreach (var patch in patches)
+        {
+            if (patch.Family == "region")
+            {
+                var region = document.ResolveRegion(patch);
+                if (!original.AsSpan((int)region.Offset + 0x30, 16).SequenceEqual(modified.AsSpan((int)region.Offset + 0x30, 16)))
+                {
+                    throw new InvalidDataException($"MSB Region 数据指针被意外破坏：offset=0x{region.Offset:X} (+0x30/+0x38)。");
+                }
+            }
+        }
+    }
+
     private static async Task AtomicWriteAsync(string outputPath, byte[] bytes, CancellationToken cancellationToken)
     {
         var directory = Path.GetDirectoryName(outputPath) ?? throw new InvalidDataException("outputPath 没有父目录。");
@@ -283,12 +442,102 @@ internal static class MsbNativeWriter
         }
     }
 
-    private static MsbPatch ParsePatch(JsonElement item)
+    private static ReferenceCoverageCertificate? ParseCertificate(JsonElement item)
+    {
+        if (item.TryGetProperty("certificate", out var cElem) && cElem.ValueKind == JsonValueKind.Object)
+        {
+            bool complete = cElem.TryGetProperty("complete", out var comp) && comp.GetBoolean();
+            string gameProfile = cElem.TryGetProperty("gameProfile", out var gp) ? gp.GetString() ?? "" : "";
+            string readerSchemaHash = cElem.TryGetProperty("readerSchemaHash", out var rsh) ? rsh.GetString() ?? "" : "";
+            string sourceHash = cElem.TryGetProperty("sourceHash", out var sh) ? sh.GetString() ?? "" : "";
+            var unverifiedRefs = new List<int>();
+            if (cElem.TryGetProperty("unverifiedReferences", out var urElem) && urElem.ValueKind == JsonValueKind.Array)
+            {
+                foreach (var u in urElem.EnumerateArray())
+                    if (u.TryGetInt32(out var uv)) unverifiedRefs.Add(uv);
+            }
+            var coveredFamilies = new List<string>();
+            if (cElem.TryGetProperty("coveredFamilies", out var cfElem) && cfElem.ValueKind == JsonValueKind.Array)
+            {
+                foreach (var cf in cfElem.EnumerateArray())
+                {
+                    var s = cf.GetString();
+                    if (s is not null) coveredFamilies.Add(s);
+                }
+            }
+            var notes = new List<string>();
+            if (cElem.TryGetProperty("closureNotes", out var cnElem) && cnElem.ValueKind == JsonValueKind.Array)
+            {
+                foreach (var cn in cnElem.EnumerateArray())
+                {
+                    var s = cn.GetString();
+                    if (s is not null) notes.Add(s);
+                }
+            }
+            return new ReferenceCoverageCertificate(gameProfile, readerSchemaHash, sourceHash, unverifiedRefs.ToArray(), coveredFamilies.ToArray(), notes.ToArray(), complete);
+        }
+        return null;
+    }
+
+    private static MsbPatch ParsePatch(JsonElement item, ReferenceCoverageCertificate? defaultCert = null)
     {
         var kind = RequiredString(item, item.TryGetProperty("kind", out _) ? "kind" : "mutation").ToLowerInvariant();
         var family = RequiredString(item, "family").ToLowerInvariant();
+        if (kind == "delete")
+        {
+            kind = family switch
+            {
+                "part" => "delete_part",
+                "region" => "delete_region",
+                "event" => "delete_event",
+                _ => "delete"
+            };
+        }
         var nativeOffset = RequiredInt64(item, "nativeOffset");
         if (nativeOffset < 0) throw new InvalidDataException("options.nativeOffset 必须是非负整数。");
+
+        var cert = ParseCertificate(item) ?? defaultCert;
+
+        if (family == "region")
+        {
+            if (item.TryGetProperty("scaleX", out _) ||
+                item.TryGetProperty("scaleY", out _) ||
+                item.TryGetProperty("scaleZ", out _) ||
+                item.TryGetProperty("scaleMultiplier", out _) ||
+                item.TryGetProperty("scaleDelta", out _) ||
+                item.TryGetProperty("scale", out _))
+            {
+                throw new MsbSafetyGateException("MSB_REGION_SCALE_UNSUPPORTED", "MSB Region 不支持 scale/scaleDelta/scaleMultiplier 字段。");
+            }
+        }
+        if (kind is "delete_part" or "delete_region" or "delete_event" or "delete")
+        {
+            if (cert is null || !cert.Complete)
+            {
+                throw new MsbSafetyGateException("MSB_REFERENCE_COVERAGE_INCOMPLETE", "MSB 结构删除引用闭包尚未完成，删除已被安全门禁拦截。");
+            }
+        }
+        if (kind is "set_region_shape")
+        {
+            throw new MsbSafetyGateException("SHAPE_OPERATION_UNSUPPORTED", "MSB Region shape 尺寸写回尚未开放，缺少独立布局验证。");
+        }
+
+        int? entityId = OptionalInt(item, "entityId")
+            ?? (item.TryGetProperty("property", out var prop) && prop.GetString() == "entityId" ? OptionalInt(item, "value") : null)
+            ?? (kind is "set_entity_id" ? OptionalInt(item, "value") : null);
+
+        if (kind is "set_entity_id" || (kind is "set_property" && (item.TryGetProperty("entityId", out _) || (item.TryGetProperty("property", out var prop2) && prop2.GetString() == "entityId"))))
+        {
+            if (family is not ("part" or "region"))
+            {
+                throw new MsbSafetyGateException("MSB_ENTITY_SCHEMA_UNVERIFIED", "MSB EntityID schema 尚未通过 native 验证，写入已被安全门禁拦截。");
+            }
+            if (entityId is null)
+            {
+                throw new MsbSafetyGateException("MSB_MUTATION_OUT_OF_RANGE", "set_entity_id 需要提供有效的 32 位整数 entityId。");
+            }
+        }
+
         return new MsbPatch(
             kind,
             family,
@@ -305,7 +554,8 @@ internal static class MsbNativeWriter
             OptionalFloat(item, "scaleZ"),
             OptionalString(item, "modelName") ?? OptionalString(item, "newModelName"),
             OptionalInt(item, "modelIndex"),
-            OptionalInt(item, "entityId"));
+            entityId,
+            cert);
     }
 
     private static void RequireHash(JsonElement options, string field, string actual, string label)
@@ -327,8 +577,19 @@ internal static class MsbNativeWriter
             ? value.GetSingle() : null;
 
     private static int? OptionalInt(JsonElement options, string field)
-        => options.TryGetProperty(field, out var value) && value.ValueKind == JsonValueKind.Number
-            ? value.GetInt32() : null;
+    {
+        if (options.TryGetProperty(field, out var value))
+        {
+            if (value.ValueKind == JsonValueKind.Number)
+            {
+                if (value.TryGetInt32(out var intVal))
+                    return intVal;
+                throw new MsbSafetyGateException("MSB_MUTATION_OUT_OF_RANGE", $"options.{field} 必须在 32 位带符号整数范围内。");
+            }
+            throw new MsbSafetyGateException("MSB_MUTATION_OUT_OF_RANGE", $"options.{field} 必须是数值。");
+        }
+        return null;
+    }
 
     private static long RequiredInt64(JsonElement options, string field)
         => options.TryGetProperty(field, out var value) && value.ValueKind == JsonValueKind.Number

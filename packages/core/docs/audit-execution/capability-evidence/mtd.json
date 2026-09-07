@@ -1,0 +1,26 @@
+{
+  "format": "MTD",
+  "command": "write-mtd-document",
+  "productionSymbol": "BridgeCommandService.DispatchAsync",
+  "sourceFile": "bridge/SoulForge.Bridge/BridgeCommandService.cs",
+  "variant": "material-properties",
+  "writableOperations": [
+    "profile-confirmed-property-set"
+  ],
+  "writerProfile": "candidate",
+  "preconditions": [
+    "confirmed MTD locator"
+  ],
+  "postconditions": [
+    "native reread",
+    "texture reference validation"
+  ],
+  "independentOracle": "missing",
+  "productTrace": "not_run",
+  "missingEvidence": [
+    "independent MTD oracle",
+    "production source anchor missing"
+  ],
+  "readable": false,
+  "nativeFixtures": []
+}

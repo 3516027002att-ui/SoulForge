@@ -141,11 +141,11 @@ export async function runAgentSession(params: AgentSessionRunParams): Promise<Ag
 
   const trackedAdapter: ModelServiceAdapter = {
     protocol: params.adapter.protocol,
-    listModels: (options) => params.adapter.listModels(options),
+    listModels: (options) => params.adapter.listModels({ ...options, sessionId: options?.sessionId ?? sessionId }),
     complete: async (request) => {
       const callIndex = ++providerCallIndex;
       const estimated = estimateContextTokens(request.messages);
-      const result = await params.adapter.complete(request);
+      const result = await params.adapter.complete({ ...request, sessionId: request.sessionId ?? sessionId });
       await persistUsage(callIndex, estimated, result.usage);
       return result;
     },
@@ -155,7 +155,7 @@ export async function runAgentSession(params: AgentSessionRunParams): Promise<Ag
       let inputTokens: number | undefined;
       let outputTokens: number | undefined;
       try {
-        for await (const event of params.adapter.stream(request)) {
+        for await (const event of params.adapter.stream({ ...request, sessionId: request.sessionId ?? sessionId })) {
           if (event.type === 'usage') {
             if (event.inputTokens !== undefined) inputTokens = event.inputTokens;
             if (event.outputTokens !== undefined) outputTokens = event.outputTokens;
@@ -226,6 +226,7 @@ export async function runAgentSession(params: AgentSessionRunParams): Promise<Ag
     config: params.config,
     apiKey: params.apiKey,
     messages,
+    sessionId,
     taskQuery: params.prompt,
     tools: params.tools,
     permissionMode: params.permissionMode,

@@ -1,0 +1,48 @@
+{
+  "schemaVersion": 1,
+  "taskId": "SF-17",
+  "baseCommit": "f9cb0cd76a11bfa2857b48acbc779bfac0355d96",
+  "implementationCommit": "f9cb0cd76a11bfa2857b48acbc779bfac0355d96+local",
+  "status": {
+    "implementation": "completed",
+    "algorithm": "verified_algorithm",
+    "native": "partial",
+    "product": "not_run"
+  },
+  "changedFiles": [
+    "package.json",
+    "packages/core/package.json",
+    "packages/core/src/editing/editorDocumentStore.ts",
+    "packages/core/src/testing/runAuditSf17Smoke.ts",
+    "scripts/verify/tiers.mjs"
+  ],
+  "productionSymbols": [
+    "scanWorkspace",
+    "EditorDocumentStore",
+    "createParamSessionMaterializationTracker"
+  ],
+  "tests": [
+    {
+      "suite": "test:audit-sf-17-unit",
+      "layer": "unit",
+      "outcome": "passed",
+      "executedCases": null,
+      "artifactHash": "CDBA4E4C6FCBBEA04ADCF815A73EC43AFDC4BACFEBA86265D372A59988E37279"
+    },
+    {
+      "suite": "test:audit-sf-17-native",
+      "layer": "native",
+      "outcome": "passed",
+      "executedCases": null,
+      "artifactHash": "CDBA4E4C6FCBBEA04ADCF815A73EC43AFDC4BACFEBA86265D372A59988E37279",
+      "detail": "native runner委托给 PARAM session suites，而非独立 native proof。"
+    }
+  ],
+  "schemaMigrations": [],
+  "frontendContract": null,
+  "remainingBlocks": [
+    "native 入口显式报告 nativeProof=delegated-to-param-session-suites，未形成独立 native 资源读回证据。",
+    "本任务没有任务专属 Electron renderer trace；product 保持 not_run。"
+  ]
+}
+

@@ -1,7 +1,9 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 import { WorkspaceIndex } from './workspaceIndex.js';
-import type { TaeExport } from '@soulforge/shared';
+import { createDefaultToolRegistry } from '../ai/toolRegistry.js';
+import { loadSymbolBundleIntoIndex } from '../workspace/semanticFileCache.js';
+import type { SymbolBundle, TaeExport } from '@soulforge/shared';
 
 function makeTaeExport(): TaeExport {
   const entry = (entryIndex: number, entryId: number, entryName: string, taeGroup: string) => ({
@@ -65,5 +67,87 @@ describe('WorkspaceIndex TAE section identity', () => {
       index.lookupTaeAnimation('file:///chr/c0000.anibnd.dcx', 10, { taeEntryIndex: 25 }).status,
       'NOT_FOUND'
     );
+  });
+
+  it('ParamSemanticState 状态机正确流转并在首批数据载入时自动就绪', () => {
+    const index = new WorkspaceIndex('fixture-param-state');
+    assert.equal(index.getParamSemanticState(), 'uninitialized');
+
+    index.setParamSemanticState('warming_up');
+    assert.equal(index.getParamSemanticState(), 'warming_up');
+
+    // 载入参数后自动转为 ready
+    index.upsertParamExport({
+      paramName: 'NpcParam',
+      sourceUri: 'file:///param/gameparam/gameparam.parambnd.dcx',
+      rows: [
+        {
+          uri: 'file:///param/gameparam/gameparam.parambnd.dcx#NpcParam/5090000',
+          sourceUri: 'file:///param/gameparam/gameparam.parambnd.dcx',
+          paramName: 'NpcParam',
+          rowId: 5090000,
+          rowName: '鬼刑部',
+          fields: []
+        }
+      ]
+    });
+    assert.equal(index.getParamSemanticState(), 'ready');
+  });
+
+  it('search_param_rows 在 warming_up 状态下返回 DEFER_PARAM_QUERY 状态机调度指令', async () => {
+    const index = new WorkspaceIndex('fixture-param-defer');
+    index.setParamSemanticState('warming_up');
+
+    const registry = createDefaultToolRegistry();
+    const result = await registry.run(
+      'search_param_rows',
+      { query: '鬼刑部' },
+      { workspaceIndex: index, mode: 'plan' }
+    );
+
+    assert.equal(result.ok, true);
+    assert.equal((result.data as any)?.status, 'warming_up');
+    assert.equal((result.data as any)?.directive, 'DEFER_PARAM_QUERY');
+    assert.match((result.data as any)?.message, /状态机调度/);
+  });
+
+  it('loadSymbolBundleIntoIndex 水合后使 warming_up 状态即时跃迁至 ready 且参数可查', async () => {
+    const index = new WorkspaceIndex('fixture-param-hydrate');
+    index.setParamSemanticState('warming_up');
+    assert.equal(index.getParamSemanticState(), 'warming_up');
+
+    const bundle: SymbolBundle = {
+      params: [
+        {
+          paramName: 'NpcParam',
+          sourceUri: 'file:///param/gameparam/gameparam.parambnd.dcx',
+          rows: [
+            {
+              uri: 'file:///param/gameparam/gameparam.parambnd.dcx#NpcParam/5090000',
+              sourceUri: 'file:///param/gameparam/gameparam.parambnd.dcx',
+              paramName: 'NpcParam',
+              rowId: 5090000,
+              rowName: '鬼刑部',
+              fields: []
+            }
+          ]
+        }
+      ]
+    };
+
+    loadSymbolBundleIntoIndex(index, bundle);
+    index.setParamSemanticState('ready');
+    assert.equal(index.getParamSemanticState(), 'ready');
+
+    const registry = createDefaultToolRegistry();
+    const result = await registry.run(
+      'search_param_rows',
+      { query: '鬼刑部', paramNames: ['NpcParam'] },
+      { workspaceIndex: index, mode: 'plan' }
+    );
+
+    assert.equal(result.ok, true);
+    assert.equal(Array.isArray(result.data), true);
+    assert.equal((result.data as any[])[0]?.item?.rowId, 5090000);
   });
 });

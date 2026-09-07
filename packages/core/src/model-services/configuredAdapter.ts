@@ -10,6 +10,7 @@ import type {
 export interface ConfiguredModelServiceAdapterOptions {
   config?: ModelServiceConfig | null;
   apiKey?: string | null;
+  sessionId?: string;
   fetchImpl?: typeof fetch;
 }
 
@@ -82,6 +83,7 @@ export function createConfiguredModelServiceAdapter(
     baseUrl: endpoint.toString().replace(/\/$/, ''),
     apiKey,
     model: config.model.trim(),
+    ...(options.sessionId ? { sessionId: options.sessionId } : {}),
     ...(options.fetchImpl ? { fetchImpl: options.fetchImpl } : {})
   };
   let adapter: ModelServiceAdapter;

@@ -36,8 +36,17 @@ const PACKAGE_FILES = Object.freeze([
  * 这里刻意不做「按前缀批量豁免」：批量豁免会让新增孤儿自动隐身。
  */
 const EXCLUDED = Object.freeze({
-  // 由其他 smoke 以模块方式 import 复用的共享装置，本身不是独立入口。
-  // 目前为空：本轮把全部 5 个孤儿都接成了真实入口，而不是豁免掉。
+  // 下面这些是由对应 SF 任务入口 import 并实际执行的共享模块；为它们
+  // 再造一层 npm script 只会把同一断言重复跑一遍。这里逐项列名，避免
+  // 新增模块被「前缀批量豁免」隐藏。
+  'runAuditBlenderJobSmoke.ts': '由 runAuditSf26Smoke.ts import 并执行 Blender 进程控制断言。',
+  'runAuditKnowledgeInvalidationSmoke.ts': '由 runAuditSf23Smoke.ts import 并执行知识 claim 失效闭包断言。',
+  'runAuditKnowledgeStoreSmoke.ts': '由 runAuditSf23Smoke.ts import 并执行 KnowledgeStore/CAS 断言。',
+  'runAuditMapSelectionSmoke.ts': '由 runAuditSf05Smoke.ts import 并按 unit/native 分支执行 Map 断言。',
+  'runAuditMsbSafetyGateSmoke.ts': '由 runAuditSf01Smoke.ts import 并执行 MSB 安全门禁 native 断言。',
+  'runAuditParamFinalStateSmoke.ts': '由 runAuditSf06Smoke.ts import 并按 unit/native 分支执行 PARAM 断言。',
+  'runAuditRagScopeSmoke.ts': '由 runAuditSf18Smoke.ts import 并执行 RAG scope 断言。',
+  'runAuditSceneRoundTripSmoke.ts': '由 runAuditSf25Smoke.ts 与 runAuditSf26Smoke.ts import 并执行场景往返断言。'
 });
 
 /** scripts/ 下的门禁脚本目录。 */
@@ -56,10 +65,15 @@ const SCRIPTS_DIR = join(repoRoot, 'scripts');
  * （语料根扫成整个游戏根，extraFiles 7849），而它从来不被任何入口调度
  * ——修好也不会有人跑到。
  *
- * 目前为空：那个孤岛已接成真实入口，而不是豁免掉。与上面 EXCLUDED 同一口径
- * ——批量或随手豁免会让新增孤岛自动隐身。
+ * A1 只有在 A0 trust root 已验证且用户显式 --resume 时才能运行；Mission1
+ * corpus V2 也必须绑定本机真实语料。两者都不应被常规 verify tier 自动调度，
+ * 否则会把 blocked/无语料状态误读成普通回归失败；这里保留逐项理由而不是
+ * 批量豁免，让手工入口仍由审阅者显式选择。
  */
-const EXCLUDED_SCRIPTS = Object.freeze({});
+const EXCLUDED_SCRIPTS = Object.freeze({
+  'verify-mission1-a1.mjs': '受 A0 trust root 与显式 --resume 约束的 Mission1 后续 runner，按需手工运行。',
+  'verify-mission1-corpus-v2.mjs': '依赖本机 Mission1 语料与 manifest 的独立复核，按需手工运行。'
+});
 
 function collectScriptText() {
   const parts = [];

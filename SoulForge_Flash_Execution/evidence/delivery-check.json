@@ -1,0 +1,13 @@
+{
+  "ok": true,
+  "scope": "delivery structure + reference tests only; no SoulForge product execution",
+  "taskCount": 30,
+  "findingCount": 22,
+  "acceptanceCaseCount": 60,
+  "referenceTestCount": 175,
+  "referenceTestsPassed": 175,
+  "referenceTestsFailed": 0,
+  "referenceTestsSkipped": 0,
+  "referenceTapSha256": "6e8cadc1e9cf1d327ebf3dc1b80c379a138c89abd23a30f42dcebe145e42f02a",
+  "findings": []
+}

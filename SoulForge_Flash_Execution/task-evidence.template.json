@@ -1,0 +1,18 @@
+{
+  "schemaVersion": 1,
+  "taskId": "SF-00",
+  "baseCommit": "f9cb0cd76a11bfa2857b48acbc779bfac0355d96",
+  "implementationCommit": null,
+  "status": {
+    "implementation": "not_started",
+    "algorithm": "not_run",
+    "native": "not_run",
+    "product": "not_run"
+  },
+  "changedFiles": [],
+  "productionSymbols": [],
+  "tests": [],
+  "schemaMigrations": [],
+  "frontendContract": null,
+  "remainingBlocks": []
+}

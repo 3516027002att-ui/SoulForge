@@ -1,0 +1,51 @@
+{
+  "schemaVersion": 1,
+  "taskId": "SF-04",
+  "baseCommit": "f9cb0cd76a11bfa2857b48acbc779bfac0355d96",
+  "implementationCommit": "f9cb0cd76a11bfa2857b48acbc779bfac0355d96+local",
+  "status": {
+    "implementation": "completed",
+    "algorithm": "verified_algorithm",
+    "native": "verified_native",
+    "product": "not_run"
+  },
+  "changedFiles": [
+    "bridge/SoulForge.Bridge/MsbNativeDocument.cs",
+    "bridge/SoulForge.Bridge/MsbNativeWriter.cs",
+    "bridge/SoulForge.Bridge/MsbReferencePlan.cs",
+    "packages/shared/src/map-document.ts",
+    "packages/core/src/editing/mapService.ts",
+    "packages/core/src/editing/msbReferenceCoverage.ts",
+    "packages/core/src/testing/runAuditSf04Smoke.ts",
+    "packages/core/package.json",
+    "package.json",
+    "scripts/verify/tiers.mjs"
+  ],
+  "productionSymbols": [
+    "MsbReferenceDescriptor",
+    "ReferenceCoverageCertificate",
+    "computeReferenceCoverageCertificate",
+    "remapReferences",
+    "evaluateStructuralDeletion",
+    "MsbReferencePlan"
+  ],
+  "tests": [
+    {
+      "suite": "test:audit-sf-04-unit",
+      "layer": "unit",
+      "outcome": "passed",
+      "executedCases": 14,
+      "artifactHash": "47ADBDF592A5CEAE962D0CD83EDB25D7A80986795EDDF0FE4ADC0249A716B3FB"
+    },
+    {
+      "suite": "test:audit-sf-04-native",
+      "layer": "native",
+      "outcome": "passed",
+      "executedCases": 4,
+      "artifactHash": "47ADBDF592A5CEAE962D0CD83EDB25D7A80986795EDDF0FE4ADC0249A716B3FB"
+    }
+  ],
+  "schemaMigrations": [],
+  "frontendContract": null,
+  "remainingBlocks": []
+}

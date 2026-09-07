@@ -238,6 +238,64 @@ function normalizeStagingDiagnostics(
   }));
 }
 
+export interface NativeMutationCandidate {
+  ok: boolean;
+  artifactHandle: string;
+  stagingPath: string;
+  payloadHash: string;
+  sourceVersion: string;
+  bytes: Buffer;
+  newContentBase64: string;
+  writerVerificationInfo?: Record<string, unknown>;
+  diagnostics: Diagnostic[];
+}
+
+/**
+ * 内部候选构建出口：只返回 main-owned artifactHandle、hash、源版本、writer 验证信息；不执行 commit。
+ */
+export async function buildNativeMutationCandidate<T extends { ok: boolean }>(
+  request: NativeMutationRequest<T>
+): Promise<NativeMutationCandidate> {
+  const staged = await stageBridgeOutput({
+    stagingRoot: request.stagingRoot,
+    allowedRoots: request.allowedRoots,
+    prefix: request.stagingPrefix,
+    fileName: request.stagingFileName,
+    write: request.stageWrite
+  });
+  if (!staged.ok) {
+    return {
+      ok: false,
+      artifactHandle: '',
+      stagingPath: '',
+      payloadHash: '',
+      sourceVersion: request.expectedHash,
+      bytes: Buffer.alloc(0),
+      newContentBase64: '',
+      diagnostics: normalizeStagingDiagnostics(staged, request.sourceUri)
+    };
+  }
+
+  const bytes = staged.bytes;
+  const newContentBase64 = bytes.toString('base64');
+  const payloadHash = createHash('sha256').update(bytes).digest('hex');
+  const artifactHandle = `artifact:${payloadHash.slice(0, 16)}`;
+
+  return {
+    ok: true,
+    artifactHandle,
+    stagingPath: artifactHandle,
+    payloadHash,
+    sourceVersion: request.expectedHash,
+    bytes,
+    newContentBase64,
+    ...(staged.result && typeof staged.result === 'object'
+      ? { writerVerificationInfo: staged.result as Record<string, unknown> }
+      : {}),
+    diagnostics: []
+  };
+}
+
 /**
  * 执行一次原生语义 mutation 的完整写链。
  *
@@ -251,25 +309,15 @@ export async function applyNativeMutation<T extends { ok: boolean }>(
   request: NativeMutationRequest<T>,
   ports: { confirm?: WriteConfirmationPort; commit: RawReplaceCommitPort }
 ): Promise<NativeMutationOutcome> {
-  const staged = await stageBridgeOutput({
-    stagingRoot: request.stagingRoot,
-    allowedRoots: request.allowedRoots,
-    prefix: request.stagingPrefix,
-    fileName: request.stagingFileName,
-    write: request.stageWrite
-  });
-  if (!staged.ok) {
-    return { status: 'failed', diagnostics: normalizeStagingDiagnostics(staged, request.sourceUri) };
+  const candidate = await buildNativeMutationCandidate(request);
+  if (!candidate.ok) {
+    return { status: 'failed', diagnostics: candidate.diagnostics };
   }
-
-  const bytes = staged.bytes;
-  const newContentBase64 = bytes.toString('base64');
-  const payloadHash = createHash('sha256').update(bytes).digest('hex');
 
   let result = await ports.commit.commit({
     file: request.file,
     expectedHash: request.expectedHash,
-    newContentBase64,
+    newContentBase64: candidate.newContentBase64,
     title: request.title
   });
 
@@ -278,18 +326,18 @@ export async function applyNativeMutation<T extends { ok: boolean }>(
       resourceLabel: request.file.relativePath,
       sourceUri: request.sourceUri,
       actionLabel: request.confirmActionLabel,
-      payloadHash,
+      payloadHash: candidate.payloadHash,
       ...(request.confirmExtraSubjects ? { extraSubjects: request.confirmExtraSubjects } : {})
     });
     if (!confirmation) return { status: 'cancelled', sourceUri: request.sourceUri };
     result = await ports.commit.commit({
       file: request.file,
       expectedHash: request.expectedHash,
-      newContentBase64,
+      newContentBase64: candidate.newContentBase64,
       title: request.title,
       confirmation
     });
   }
 
-  return { status: 'committed', result, payloadHash };
+  return { status: 'committed', result, payloadHash: candidate.payloadHash };
 }

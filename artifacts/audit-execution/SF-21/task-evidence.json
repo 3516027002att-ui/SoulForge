@@ -1,0 +1,39 @@
+{
+  "schemaVersion": 1,
+  "taskId": "SF-21",
+  "baseCommit": "f9cb0cd76a11bfa2857b48acbc779bfac0355d96",
+  "implementationCommit": "f9cb0cd76a11bfa2857b48acbc779bfac0355d96+local",
+  "status": {
+    "implementation": "completed",
+    "algorithm": "verified_algorithm",
+    "native": "not_run",
+    "product": "not_run"
+  },
+  "changedFiles": [
+    "package.json",
+    "packages/core/package.json",
+    "packages/core/src/ai/agentToolBridge.ts",
+    "packages/core/src/model-services/agentLoop.ts",
+    "packages/core/src/model-services/toolScheduler.ts",
+    "packages/core/src/model-services/types.ts",
+    "packages/core/src/testing/runAuditSf21Smoke.ts",
+    "scripts/verify/tiers.mjs"
+  ],
+  "productionSymbols": [
+    "runScheduledTools",
+    "effectForTool"
+  ],
+  "tests": [
+    {
+      "suite": "test:audit-sf-21-unit",
+      "layer": "unit",
+      "outcome": "passed",
+      "executedCases": 9,
+      "artifactHash": "4BAB3105638D6485A871E2EE84438F0EC6D01FF68061B5B4DD47049934AE59BF"
+    }
+  ],
+  "schemaMigrations": [],
+  "frontendContract": null,
+  "remainingBlocks": []
+}
+

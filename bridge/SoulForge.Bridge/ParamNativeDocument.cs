@@ -516,125 +516,13 @@ internal sealed class ParamNativeDocument
 
     public byte[] ApplyMutations(IReadOnlyList<ParamPatch> patches)
     {
-        return Layout == ParamLayout.Standard32
-            ? ApplyStandard32Mutations(patches)
-            : ApplyCompactMutations(patches);
+        var plan = ParamMutationPlan.Build(this, patches);
+        return plan.RebuiltBytes;
     }
 
-    private byte[] ApplyCompactMutations(IReadOnlyList<ParamPatch> patches)
+    public ParamMutationPlan PlanMutations(IReadOnlyList<ParamPatch> patches)
     {
-        var rows = Rows.Select(r => new ParamRow(
-            r.Id, r.Data.ToArray(), r.Name, r.NameBytes, r.NameEncoding,
-            r.OriginalNameOffset, r.OriginalDataOffset)).ToList();
-        foreach (var patch in patches)
-        {
-            switch (patch.Kind)
-            {
-                case "upsert":
-                {
-                    if (patch.DataBase64 is null) throw new InvalidDataException("PARAM upsert 需要 dataBase64。");
-                    var data = Convert.FromBase64String(patch.DataBase64);
-                    if (data.Length != RowDataSize) throw new InvalidDataException("PARAM upsert 行宽不匹配。");
-                    var idx = ResolveExistingRowIndex(rows, patch);
-                    var prev = idx >= 0 ? rows[idx] : null;
-                    var nextName = patch.Name ?? prev?.Name;
-                    // 名称未被 patch 修改（或补丁未带 name）时保留原始字节，保证无修改往返字节一致。
-                    var keepOriginal = prev is not null && string.Equals(nextName, prev.Name, StringComparison.Ordinal);
-                    var next = new ParamRow(
-                        patch.Id,
-                        data,
-                        nextName,
-                        keepOriginal ? prev!.NameBytes : null,
-                        keepOriginal ? prev!.NameEncoding : prev?.NameEncoding,
-                        keepOriginal ? prev!.OriginalNameOffset : 0,
-                        prev?.OriginalDataOffset ?? 0);
-                    if (idx >= 0) rows[idx] = next; else rows.Add(next);
-                    break;
-                }
-                case "delete":
-                {
-                    var idx = ResolveExistingRowIndex(rows, patch);
-                    if (idx < 0) throw new InvalidDataException($"PARAM 删除目标 ID {patch.Id} 不存在。");
-                    rows.RemoveAt(idx);
-                    break;
-                }
-                case "add":
-                {
-                    if (rows.Any(r => r.Id == patch.Id)) throw new InvalidDataException($"PARAM 新增 ID {patch.Id} 已存在。");
-                    if (patch.DataBase64 is null) throw new InvalidDataException("PARAM add 需要 dataBase64。");
-                    var data = Convert.FromBase64String(patch.DataBase64);
-                    if (data.Length != RowDataSize) throw new InvalidDataException("PARAM add 行宽不匹配。");
-                    rows.Add(new ParamRow(patch.Id, data, patch.Name, null, null));
-                    break;
-                }
-                default:
-                    throw new InvalidDataException($"未知 PARAM mutation：{patch.Kind}。");
-            }
-        }
-        // Preserve binder row order. PARAM row IDs are not guaranteed to be sorted,
-        // and silently sorting them makes a field edit rewrite unrelated structure.
-        return Rebuild(rows);
-    }
-
-    private static int ResolveExistingRowIndex(IReadOnlyList<ParamRow> rows, ParamPatch patch)
-    {
-        if (patch.RowIndex is int rowIndex)
-        {
-            if (rowIndex < 0 || rowIndex >= rows.Count)
-                throw new InvalidDataException($"PARAM 物理行索引 {rowIndex} 越界。");
-            var row = rows[rowIndex];
-            if (row.Id != patch.Id)
-                throw new InvalidDataException(
-                    $"PARAM 物理行索引 {rowIndex} 的 ID 已变化：expected={patch.Id}，actual={row.Id}。");
-            if (patch.ExpectedDataHash is not null
-                && !Hash(row.Data).Equals(patch.ExpectedDataHash, StringComparison.OrdinalIgnoreCase))
-                throw new InvalidDataException($"PARAM 物理行索引 {rowIndex} 的数据哈希已变化。");
-            return rowIndex;
-        }
-
-        var match = -1;
-        for (var i = 0; i < rows.Count; i++)
-        {
-            if (rows[i].Id != patch.Id) continue;
-            if (match >= 0)
-                throw new InvalidDataException(
-                    $"PARAM ID {patch.Id} 存在重复行；mutation 必须携带 rowIndex 和 expectedDataHash。");
-            match = i;
-        }
-        return match;
-    }
-
-    private byte[] ApplyStandard32Mutations(IReadOnlyList<ParamPatch> patches)
-    {
-        var rows = Rows.Select(r => new ParamRow(
-            r.Id, r.Data.ToArray(), r.Name, r.NameBytes, r.NameEncoding,
-            r.OriginalNameOffset, r.OriginalDataOffset)).ToList();
-        foreach (var patch in patches)
-        {
-            switch (patch.Kind)
-            {
-                case "upsert":
-                {
-                    if (patch.DataBase64 is null) throw new InvalidDataException("PARAM upsert 需要 dataBase64。");
-                    var data = Convert.FromBase64String(patch.DataBase64);
-                    if (data.Length != RowDataSize) throw new InvalidDataException("PARAM upsert 行宽不匹配。");
-                    var idx = ResolveExistingRowIndex(rows, patch);
-                    if (idx < 0)
-                        throw new InvalidDataException($"PARAM 32 位布局不支持新增行 upsert：ID {patch.Id} 不存在。");
-                    if (patch.Name is not null && patch.Name != rows[idx].Name)
-                        throw new InvalidDataException("PARAM 32 位布局不支持行名变更（字符串区按字节保留）。");
-                    rows[idx] = rows[idx] with { Data = data };
-                    break;
-                }
-                case "delete":
-                    throw new InvalidDataException("PARAM 32 位布局不支持 delete：结构重排未经该格式变体验证。");
-                case "add":
-                    throw new InvalidDataException("PARAM 32 位布局不支持 add：结构重排未经该格式变体验证。");
-                default:
-                    throw new InvalidDataException($"未知 PARAM mutation：{patch.Kind}。");
-            }
-        }
-        return Rebuild(rows);
+        return ParamMutationPlan.Build(this, patches);
     }
 
     public object ToEnvelope(ParamRoundTripReport? report = null, int rowPreviewLimit = 32, int rowPage = 0, int rowPageSize = 0, bool includeAllPayloads = false, int[]? rowIds = null, bool includeRowHashes = true)
@@ -1013,7 +901,7 @@ internal sealed class ParamNativeDocument
     private static void WriteInt64(byte[] target, int offset, long value) => BinaryPrimitives.WriteInt64LittleEndian(target.AsSpan(offset, 8), value);
     private static void WriteUInt16(byte[] target, int offset, ushort value) => BinaryPrimitives.WriteUInt16LittleEndian(target.AsSpan(offset, 2), value);
     private static int Align16(int value) => checked((value + 0x0f) & ~0x0f);
-    private static string Hash(byte[] bytes) => Convert.ToHexString(SHA256.HashData(bytes)).ToLowerInvariant();
+    internal static string Hash(byte[] bytes) => Convert.ToHexString(SHA256.HashData(bytes)).ToLowerInvariant();
     internal static string ComputeRowDataHash(byte[] rowData) => Hash(rowData);
 }
 
@@ -1025,13 +913,6 @@ internal sealed record ParamRow(
     string? NameEncoding,
     int OriginalNameOffset = 0,
     int OriginalDataOffset = 0);
-internal sealed record ParamPatch(
-    string Kind,
-    int Id,
-    string? DataBase64,
-    string? Name,
-    int? RowIndex = null,
-    string? ExpectedDataHash = null);
 internal sealed record ParamRoundTripReport(
     bool ByteIdentical,
     bool SemanticIdentical,

@@ -1,0 +1,37 @@
+{
+  "schemaVersion": 1,
+  "taskId": "SF-28",
+  "baseCommit": "f9cb0cd76a11bfa2857b48acbc779bfac0355d96",
+  "implementationCommit": "f9cb0cd76a11bfa2857b48acbc779bfac0355d96+local",
+  "status": {
+    "implementation": "completed",
+    "algorithm": "verified_algorithm",
+    "native": "not_run",
+    "product": "not_run"
+  },
+  "changedFiles": [
+    "package.json",
+    "packages/core/package.json",
+    "packages/core/src/index.ts",
+    "packages/core/src/testing/runAuditSf28Smoke.ts",
+    "scripts/audit-execution/inventory-redundancy.mjs",
+    "scripts/verify/tiers.mjs"
+  ],
+  "productionSymbols": [
+    "inventoryRedundancy",
+    "parseGitLsFiles"
+  ],
+  "tests": [
+    {
+      "suite": "test:audit-sf-28-unit",
+      "layer": "unit",
+      "outcome": "passed",
+      "executedCases": 8,
+      "artifactHash": "5498836281F71E8673BAD370C7EED41663248D05FB4D520CD7C11B75C6E99DE4"
+    }
+  ],
+  "schemaMigrations": [],
+  "frontendContract": null,
+  "remainingBlocks": []
+}
+

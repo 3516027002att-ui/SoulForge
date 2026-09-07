@@ -12,9 +12,50 @@ import { executePatchIrThroughTransaction } from './durablePatchCommit.js';
 import type { OperationLogStore } from './operationLog.js';
 import { isValidResourceEntryInverse } from './containerChildInverse.js';
 
+/**
+ * 回滚阶段的可判定分类。它只比较当前文件与本事务的 before/after image，
+ * 不会把第三种版本覆盖掉；供恢复扫描与 UI 共同使用。
+ */
+export type RollbackReconciliation = 'NOOP' | 'NOT_APPLIED' | 'APPLIED' | 'CONFLICT';
+
+export function classifyRollbackState(
+  beforeHash: string,
+  afterHash: string,
+  currentHash: string
+): RollbackReconciliation {
+  if (!beforeHash || !afterHash || !currentHash) throw new Error('HASH_REQUIRED');
+  if (beforeHash === afterHash && currentHash === beforeHash) return 'NOOP';
+  if (currentHash === beforeHash) return 'NOT_APPLIED';
+  if (currentHash === afterHash) return 'APPLIED';
+  return 'CONFLICT';
+}
+
+export function rollbackIdempotencyKey(
+  operationId: string,
+  scope: 'operation' | 'file' | 'resource_entry',
+  target?: string
+): string {
+  if (!operationId) throw new Error('OPERATION_ID_REQUIRED');
+  return `rollback:${operationId}:${scope}:${target ?? '*'}`;
+}
+
+export function assertRollbackMayWrite(
+  state: RollbackReconciliation,
+  target: string
+): void {
+  if (state === 'CONFLICT') {
+    throw Object.assign(
+      new Error(`RECOVERY_REQUIRED: refusing to overwrite externally changed target ${target}`),
+      { code: 'RECOVERY_REQUIRED', target }
+    );
+  }
+}
+
 export interface RollbackOperationOptions {
   opId: string;
   store: OperationLogStore;
+  /** Optional explicit workspace root for CLI/core callers without a session object. */
+  workspaceRoot?: string;
   session?: WorkspaceSession;
   backupBaseDir?: string;
   recoveryDir?: string;
@@ -128,6 +169,7 @@ export async function rollbackResourceEntry(
   });
   const committed = await executePatchIrThroughTransaction(inversePatch, {
     ...(options.session ? { session: options.session } : {}),
+    ...(options.workspaceRoot ? { workspaceRoot: options.workspaceRoot } : {}),
     ...(options.session?.layers.overlayRoot ? { workspaceRoot: options.session.layers.overlayRoot } : {}),
     operationLog: options.store,
     ...(options.backupBaseDir ? { backupBaseDir: options.backupBaseDir } : {}),
@@ -355,6 +397,7 @@ async function rollbackSelected(
 
   const committed = await executePatchIrThroughTransaction(inversePatch, {
     ...(options.session ? { session: options.session } : {}),
+    ...(options.workspaceRoot ? { workspaceRoot: options.workspaceRoot } : {}),
     ...(options.session?.layers.overlayRoot
       ? { workspaceRoot: options.session.layers.overlayRoot }
       : {}),

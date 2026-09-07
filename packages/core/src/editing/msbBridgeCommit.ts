@@ -102,6 +102,7 @@ function serializeMsbMutation(m: MsbBridgeMutation): Record<string, unknown> {
   if ('modelName' in m && m.modelName !== undefined) item.modelName = m.modelName;
   if ('modelIndex' in m && m.modelIndex !== undefined) item.modelIndex = m.modelIndex;
   if ('entityId' in m && m.entityId !== undefined) item.entityId = m.entityId;
+  if ('certificate' in m && (m as any).certificate !== undefined) item.certificate = (m as any).certificate;
   return item;
 }
 

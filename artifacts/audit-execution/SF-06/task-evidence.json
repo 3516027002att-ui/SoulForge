@@ -1,0 +1,52 @@
+{
+  "schemaVersion": 1,
+  "taskId": "SF-06",
+  "baseCommit": "f9cb0cd76a11bfa2857b48acbc779bfac0355d96",
+  "implementationCommit": "f9cb0cd76a11bfa2857b48acbc779bfac0355d96+local",
+  "status": {
+    "implementation": "completed",
+    "algorithm": "verified_algorithm",
+    "native": "verified_native",
+    "product": "not_run"
+  },
+  "changedFiles": [
+    "bridge/SoulForge.Bridge/ParamMutationPlan.cs",
+    "bridge/SoulForge.Bridge/ParamNativeDocument.cs",
+    "bridge/SoulForge.Bridge/ParamNativeWriter.cs",
+    "packages/core/src/param/containerParamEdit.ts",
+    "packages/core/src/param/paramFieldMutation.ts",
+    "packages/core/src/testing/runAuditParamFinalStateSmoke.ts",
+    "packages/core/src/testing/runAuditSf06Smoke.ts",
+    "packages/core/package.json",
+    "package.json",
+    "scripts/verify/tiers.mjs"
+  ],
+  "productionSymbols": [
+    "ParamMutationPlan",
+    "ParamNameAction",
+    "ParamFinalRowProjection",
+    "ParamPatch",
+    "ParamRowSlot",
+    "setParamFields",
+    "loadTableRows"
+  ],
+  "tests": [
+    {
+      "suite": "test:audit-sf-06-unit",
+      "layer": "unit",
+      "outcome": "passed",
+      "executedCases": 8,
+      "artifactHash": "B9BD072464DD1ED3DFCF6128B208B9291B6AE3F0BD34950E7CC7C81D205551CD"
+    },
+    {
+      "suite": "test:audit-sf-06-native",
+      "layer": "native",
+      "outcome": "passed",
+      "executedCases": 5,
+      "artifactHash": "B9BD072464DD1ED3DFCF6128B208B9291B6AE3F0BD34950E7CC7C81D205551CD"
+    }
+  ],
+  "schemaMigrations": [],
+  "frontendContract": null,
+  "remainingBlocks": []
+}

@@ -34,6 +34,7 @@
  * 工作区的暂存区。结论的覆盖面是 **mod 侧**,不是全量。
  */
 
+import { createHash } from 'node:crypto';
 import type { StructuredDiagnostic } from '@soulforge/shared';
 import { createDiagnostic } from '@soulforge/shared';
 
@@ -522,3 +523,115 @@ function firstNonAsciiIndex(text: string): number {
   }
   return -1;
 }
+
+/* ------------------------------------------------------------------ */
+/*  Range Patch 算法                                                  */
+/* ------------------------------------------------------------------ */
+
+export interface ScriptRangePatch {
+  /** 起始字符偏移量（含）。 */
+  start: number;
+  /** 终止字符偏移量（不含）。 */
+  end: number;
+  /** 原始切片内容（text.slice(start, end)）的 SHA-256 哈希。 */
+  expectedSliceHash: string;
+  /** 替换的新内容。 */
+  replacement: string;
+}
+
+export type ScriptRangePatchResult =
+  | {
+      ok: true;
+      text: string;
+      appliedCount: number;
+    }
+  | {
+      ok: false;
+      code: string;
+      message: string;
+      diagnostics: StructuredDiagnostic[];
+    };
+
+function patchFail(code: string, message: string): ScriptRangePatchResult {
+  return {
+    ok: false,
+    code,
+    message,
+    diagnostics: [createDiagnostic({ severity: 'error', code, message })]
+  };
+}
+
+/**
+ * 把一组不相交的 range patch 应用于原文。
+ *
+ * 算法保证：
+ * 1. 验证所有 patch 的范围在 [0, originalText.length] 之内且 start <= end；
+ * 2. 严格按 start 排序检测重叠（end > next.start 即拒绝）；
+ * 3. 逐个验证切片的 SHA-256 与 expectedSliceHash 是否一致，不一致即拒绝；
+ * 4. 验证通过后按 start 逆序（从后向前）应用替换，杜绝前序长度变化导致后续 offset 漂移。
+ */
+export function applyRangePatches(
+  originalText: string,
+  patches: readonly ScriptRangePatch[]
+): ScriptRangePatchResult {
+  if (patches.length === 0) {
+    return { ok: true, text: originalText, appliedCount: 0 };
+  }
+
+  // 1. 基础合法性
+  for (let i = 0; i < patches.length; i++) {
+    const p = patches[i]!;
+    if (
+      !Number.isSafeInteger(p.start) ||
+      !Number.isSafeInteger(p.end) ||
+      p.start < 0 ||
+      p.end < p.start ||
+      p.end > originalText.length
+    ) {
+      return patchFail(
+        'SCRIPT_PATCH_RANGE_INVALID',
+        `Range patch [${p.start}, ${p.end}] 超出原文有效范围 [0, ${originalText.length}]。`
+      );
+    }
+  }
+
+  // 2. 排序与重叠检测
+  const sorted = [...patches].sort((a, b) => a.start - b.start || a.end - b.end);
+  for (let i = 0; i < sorted.length - 1; i++) {
+    const curr = sorted[i]!;
+    const next = sorted[i + 1]!;
+    if (curr.end > next.start) {
+      return patchFail(
+        'SCRIPT_PATCH_RANGES_OVERLAP',
+        `Range patch 存在重叠：[${curr.start}, ${curr.end}] 与 [${next.start}, ${next.end}]。重叠 patch 必须默认拒绝。`
+      );
+    }
+  }
+
+  // 3. 切片哈希校验
+  for (let i = 0; i < sorted.length; i++) {
+    const p = sorted[i]!;
+    const slice = originalText.slice(p.start, p.end);
+    const hash = createHash('sha256').update(slice, 'utf8').digest('hex');
+    if (p.expectedSliceHash.toLowerCase() !== hash.toLowerCase()) {
+      return patchFail(
+        'SCRIPT_PATCH_SLICE_HASH_MISMATCH',
+        `Range patch [${p.start}, ${p.end}] 切片哈希不匹配：预期 ${p.expectedSliceHash}，实际 ${hash}。`
+      );
+    }
+  }
+
+  // 4. 按起点逆序从后往前应用
+  let result = originalText;
+  const reversePatches = [...sorted].sort((a, b) => b.start - a.start);
+  for (const p of reversePatches) {
+    result = result.slice(0, p.start) + p.replacement + result.slice(p.end);
+  }
+
+  return {
+    ok: true,
+    text: result,
+    appliedCount: reversePatches.length
+  };
+}
+

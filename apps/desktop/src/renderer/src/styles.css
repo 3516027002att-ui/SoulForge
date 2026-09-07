@@ -2122,6 +2122,66 @@ details.agent-block > summary.agent-block__label { cursor: pointer; }
 .agent-mutter.is-visible { opacity: 1; transform: translateY(0); }
 .agent-mutter__mark { flex: none; color: var(--ember-text); font-size: 11px; }
 .agent-mutter__text { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+.agent-plan-switch-banner {
+  padding: 8px 10px;
+  background: var(--forge-1);
+  border: 1px solid var(--ember);
+  border-radius: var(--radius-m);
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  box-shadow: var(--shadow-s, 0 1px 3px rgba(0,0,0,0.2));
+}
+.agent-plan-switch-banner__header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+}
+.agent-plan-switch-banner__title {
+  font-size: 11.5px;
+  font-weight: 600;
+  color: var(--ember-text);
+}
+.agent-plan-switch-banner__badge {
+  font-size: 10px;
+  color: var(--ink-2);
+  background: var(--forge-2);
+  padding: 1px 6px;
+  border-radius: var(--radius-s);
+}
+.agent-plan-switch-banner__desc {
+  font-size: 11px;
+  color: var(--ink-1);
+  line-height: 1.4;
+}
+.agent-plan-switch-banner__actions {
+  display: flex;
+  gap: 8px;
+}
+.agent-plan-switch-banner__btn {
+  flex: 1;
+  padding: 4px 8px;
+  font-size: 11px;
+  font-weight: 500;
+  border-radius: var(--radius-s);
+  cursor: pointer;
+  border: 1px solid var(--line-strong);
+  background: var(--forge-2);
+  color: var(--ink-0);
+  transition: background var(--dur-micro) var(--ease-standard), border-color var(--dur-micro) var(--ease-standard);
+}
+.agent-plan-switch-banner__btn:hover {
+  background: var(--control-hover-bg);
+  border-color: var(--ember);
+  color: var(--ember-text);
+}
+.agent-plan-switch-banner__btn--bypass:hover {
+  border-color: #22c55e;
+  color: #4ade80;
+}
+
 .agent-composer__participant { display: flex; align-items: center; gap: 7px; row-gap: 2px; min-height: 24px; flex-wrap: wrap; }
 /* 三层 Composer 的中间层：context chips + prompt editor，超限时内部滚动。 */
 .agent-composer__body {

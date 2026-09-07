@@ -12,7 +12,7 @@ import { mkdir, readFile, stat } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { basename, dirname, extname, join, relative, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
-import type { ConfirmationReceipt, IndexedFile, ResourceFormatKind, ResourceKind } from '@soulforge/shared';
+import type { ConfirmationReceipt, IndexedFile, NativeEditDomain, ResourceFormatKind, ResourceKind } from '@soulforge/shared';
 import { MemoryOperationLogStore, type OperationLogStore } from '../patch/operationLog.js';
 import { createConfirmationReceipt } from '../patch/writerContract.js';
 import {
@@ -22,6 +22,17 @@ import {
 } from '../workspace/workspaceSession.js';
 import { saveRawReplace } from './saveRawResource.js';
 import type { RawReplaceCommitPort, WriteConfirmationPort } from './editorMutationService.js';
+
+export interface HostNativeHandleEntry {
+  handle: string;
+  sourceUri: string;
+  domain: NativeEditDomain;
+  sourceHash: string;
+  sourceRevision?: number | string;
+  readFields: Set<string>;
+  requiredFields?: Set<string>;
+  createdAt: number;
+}
 
 export interface NativeEditSession {
   session: WorkspaceSession;
@@ -37,6 +48,9 @@ export interface NativeEditSession {
   allowedRoots(): string[];
   mintReceipt(sourceUri: string, title: string): ConfirmationReceipt;
   indexFile(absolutePath: string, kind?: ResourceKind): Promise<IndexedFile>;
+  registerReadHandle(entry: HostNativeHandleEntry): void;
+  resolveReadHandle(handle: string): HostNativeHandleEntry | undefined;
+  verifyReadCoverage(handle: string, requiredFields: string[]): { ok: true } | { ok: false; code: string; message: string };
 }
 
 export interface OpenNativeEditSessionOptions {
@@ -82,6 +96,8 @@ export function nativeEditSessionFromContext(input: {
   const probedOodleRoot = input.session.layers.baseRoot
     ?? (existsSync(join(overlayParent, 'oo2core_6_win64.dll')) || existsSync(join(overlayParent, 'sekiro.exe')) ? overlayParent : undefined);
 
+  const hostHandles = new Map<string, HostNativeHandleEntry>();
+
   return {
     session: input.session,
     ...(input.session.emedfPath ? { emedfPath: input.session.emedfPath } : {}),
@@ -99,7 +115,30 @@ export function nativeEditSessionFromContext(input: {
       join(input.backupBaseDir, '..')
     ],
     mintReceipt: mintNativeEditReceipt,
-    indexFile: (absolutePath, kind) => indexOverlayFile(input.session, absolutePath, kind)
+    indexFile: (absolutePath, kind) => indexOverlayFile(input.session, absolutePath, kind),
+    registerReadHandle: (entry) => {
+      hostHandles.set(entry.handle, entry);
+    },
+    resolveReadHandle: (handle) => hostHandles.get(handle),
+    verifyReadCoverage: (handle, requiredFields) => {
+      const entry = hostHandles.get(handle);
+      if (!entry) {
+        return {
+          ok: false,
+          code: 'NATIVE_HANDLE_UNKNOWN',
+          message: `Native handle '${handle}' is unknown to host session table.`
+        };
+      }
+      const missing = requiredFields.filter((req) => !entry.readFields.has(req));
+      if (missing.length > 0) {
+        return {
+          ok: false,
+          code: 'READ_COVERAGE_INCOMPLETE',
+          message: `Precondition failed for handle '${handle}': missing required read coverage for fields: ${missing.join(', ')}.`
+        };
+      }
+      return { ok: true };
+    }
   };
 }
 
@@ -138,6 +177,8 @@ export async function openNativeEditSession(
     }
   };
 
+  const hostHandles = new Map<string, HostNativeHandleEntry>();
+
   return {
     session,
     ...(session.emedfPath ? { emedfPath: session.emedfPath } : {}),
@@ -153,7 +194,30 @@ export async function openNativeEditSession(
       storage.root
     ],
     mintReceipt: mintNativeEditReceipt,
-    indexFile: (absolutePath, kind) => indexOverlayFile(session, absolutePath, kind)
+    indexFile: (absolutePath, kind) => indexOverlayFile(session, absolutePath, kind),
+    registerReadHandle: (entry) => {
+      hostHandles.set(entry.handle, entry);
+    },
+    resolveReadHandle: (handle) => hostHandles.get(handle),
+    verifyReadCoverage: (handle, requiredFields) => {
+      const entry = hostHandles.get(handle);
+      if (!entry) {
+        return {
+          ok: false,
+          code: 'NATIVE_HANDLE_UNKNOWN',
+          message: `Native handle '${handle}' is unknown to host session table.`
+        };
+      }
+      const missing = requiredFields.filter((req) => !entry.readFields.has(req));
+      if (missing.length > 0) {
+        return {
+          ok: false,
+          code: 'READ_COVERAGE_INCOMPLETE',
+          message: `Precondition failed for handle '${handle}': missing required read coverage for fields: ${missing.join(', ')}.`
+        };
+      }
+      return { ok: true };
+    }
   };
 }
 

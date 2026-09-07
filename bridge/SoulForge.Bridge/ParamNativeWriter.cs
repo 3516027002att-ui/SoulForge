@@ -31,7 +31,8 @@ internal static class ParamNativeWriter
         }
         if (patches.Count == 0) throw new InvalidDataException("PARAM writer 需要至少一条 mutation。");
         cancellationToken.ThrowIfCancellationRequested();
-        var rebuilt = document.ApplyMutations(patches);
+        var plan = document.PlanMutations(patches);
+        var rebuilt = plan.RebuiltBytes;
         var directory = Path.GetDirectoryName(outputPath) ?? throw new InvalidDataException("outputPath 没有父目录。");
         Directory.CreateDirectory(directory);
         var temporary = Path.Combine(directory, $".soulforge-{Guid.NewGuid():N}.tmp");
@@ -47,32 +48,7 @@ internal static class ParamNativeWriter
         }
 
         var reread = ParamNativeDocument.ReadFile(outputPath, document.RowDataSize > 0 ? document.RowDataSize : null);
-        foreach (var patch in patches)
-        {
-            var row = patch.RowIndex is int rowIndex
-                && rowIndex >= 0
-                && rowIndex < reread.Rows.Count
-                    ? reread.Rows[rowIndex]
-                    : reread.Rows.Count(r => r.Id == patch.Id) == 1
-                        ? reread.Rows.First(r => r.Id == patch.Id)
-                        : null;
-            if (patch.Kind is "delete")
-            {
-                if (patch.RowIndex is null && row is not null)
-                    throw new InvalidDataException($"PARAM delete 后 ID {patch.Id} 仍存在。");
-            }
-            else
-            {
-                if (row is null || row.Id != patch.Id)
-                    throw new InvalidDataException($"PARAM mutation 后缺少目标物理行（ID {patch.Id}）。");
-                if (patch.DataBase64 is not null)
-                {
-                    var expected = Convert.FromBase64String(patch.DataBase64);
-                    if (!row.Data.AsSpan().SequenceEqual(expected))
-                        throw new InvalidDataException($"PARAM mutation 后 ID {patch.Id} 数据不匹配。");
-                }
-            }
-        }
+        ParamMutationPlan.VerifyFinalParamProjection(plan.ExpectedProjection, reread);
 
         return new
         {
@@ -93,9 +69,26 @@ internal static class ParamNativeWriter
         string? data = null;
         if (item.TryGetProperty("dataBase64", out var dataElement) && dataElement.ValueKind == JsonValueKind.String)
             data = dataElement.GetString();
+        
+        var nameAction = ParamNameAction.Keep;
         string? name = null;
-        if (item.TryGetProperty("name", out var nameElement) && nameElement.ValueKind == JsonValueKind.String)
-            name = nameElement.GetString();
+        if (item.TryGetProperty("name", out var nameElement))
+        {
+            if (nameElement.ValueKind == JsonValueKind.Null)
+            {
+                nameAction = ParamNameAction.Clear;
+            }
+            else if (nameElement.ValueKind == JsonValueKind.String)
+            {
+                nameAction = ParamNameAction.Set;
+                name = nameElement.GetString();
+            }
+            else
+            {
+                throw new InvalidDataException("PARAM patch 'name' 属性必须是字符串或 null。");
+            }
+        }
+
         int? rowIndex = null;
         if (item.TryGetProperty("rowIndex", out var rowIndexElement)
             && rowIndexElement.ValueKind == JsonValueKind.Number)
@@ -104,7 +97,7 @@ internal static class ParamNativeWriter
         if (item.TryGetProperty("expectedDataHash", out var hashElement)
             && hashElement.ValueKind == JsonValueKind.String)
             expectedDataHash = hashElement.GetString();
-        return new ParamPatch(kind, id, data, name, rowIndex, expectedDataHash);
+        return new ParamPatch(kind, id, data, name, rowIndex, expectedDataHash, nameAction);
     }
 
     private static void RequireHash(JsonElement options, string field, string actual, string label)

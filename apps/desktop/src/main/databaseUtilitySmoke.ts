@@ -248,6 +248,14 @@ app.whenReady().then(async () => {
     if (!cacheMap.has('event/test.emevd.dcx') || cacheMap.get('event/test.emevd.dcx')?.fileSha256 !== 'sha-test-123') {
       throw new Error('Database utility semantic file cache round trip failed.');
     }
+    const singleCache = await client.getSemanticFileCache('event/test.emevd.dcx');
+    if (!singleCache || singleCache.fileSha256 !== 'sha-test-123' || !singleCache.payload.events?.length) {
+      throw new Error('Database utility single semantic file cache round trip failed.');
+    }
+    const missingCache = await client.getSemanticFileCache('non/existent/file.dcx');
+    if (missingCache !== null) {
+      throw new Error('Database utility missing semantic file cache should return null.');
+    }
     if ((await client.searchFiles('test EMEVD')).length !== 1
       || (await client.searchRagChunks('emevd', 8)).length !== 1
       || (await client.listDiagnostics())[0]?.code !== 'PARSE_PARTIAL'

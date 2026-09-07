@@ -84,7 +84,10 @@ export async function runMapTransactionAtomicSmoke(): Promise<void> {
           game: 'sekiro',
           diagnostics: []
         };
-      }
+      },
+      registerReadHandle: () => {},
+      resolveReadHandle: () => undefined,
+      verifyReadCoverage: () => ({ ok: true })
     };
 
     const loaded = await loadMapDocument(editSession, mapFile);
@@ -217,8 +220,26 @@ export async function runMapTransactionAtomicSmoke(): Promise<void> {
       description: 'Delete 2 parts in one transaction',
       author: 'human',
       operations: [
-        { kind: 'delete', target: orderPart.stableKey },
-        { kind: 'delete', target: reread1.doc.parts[1]!.stableKey }
+        {
+          kind: 'delete',
+          target: orderPart.stableKey,
+          certificate: {
+            complete: true,
+            scannedReferences: [],
+            danglingReferences: [],
+            timestamp: Date.now()
+          }
+        },
+        {
+          kind: 'delete',
+          target: reread1.doc.parts[1]!.stableKey,
+          certificate: {
+            complete: true,
+            scannedReferences: [],
+            danglingReferences: [],
+            timestamp: Date.now()
+          }
+        }
       ],
       timestamp: Date.now()
     };

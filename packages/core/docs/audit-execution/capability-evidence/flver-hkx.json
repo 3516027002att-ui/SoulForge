@@ -1,0 +1,28 @@
+{
+  "format": "FLVER/HKX",
+  "command": "write-flver",
+  "productionSymbol": "FlverNativeWriter",
+  "sourceFile": "bridge/SoulForge.Bridge/FlverNativeDocument.cs",
+  "variant": "material-slot-or-profile-confirmed-channel",
+  "writableOperations": [
+    "material-slot-set"
+  ],
+  "writerProfile": "native-verified",
+  "preconditions": [
+    "exact FLVER writer profile",
+    "mesh/layout identity"
+  ],
+  "postconditions": [
+    "native reread",
+    "mesh topology and non-target bytes preserved"
+  ],
+  "independentOracle": "native-reader-only",
+  "productTrace": "not_run",
+  "missingEvidence": [
+    "independent FLVER/HKX geometry oracle",
+    "game-load proof",
+    "production source anchor missing"
+  ],
+  "readable": false,
+  "nativeFixtures": []
+}

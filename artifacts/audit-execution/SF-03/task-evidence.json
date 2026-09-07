@@ -1,0 +1,59 @@
+{
+  "schemaVersion": 1,
+  "taskId": "SF-03",
+  "baseCommit": "f9cb0cd76a11bfa2857b48acbc779bfac0355d96",
+  "implementationCommit": "f9cb0cd76a11bfa2857b48acbc779bfac0355d96+local",
+  "status": {
+    "implementation": "completed",
+    "algorithm": "verified_algorithm",
+    "native": "verified_native",
+    "product": "not_run"
+  },
+  "changedFiles": [
+    "bridge/SoulForge.Bridge/MsbNativeDocument.cs",
+    "bridge/SoulForge.Bridge/MsbNativeWriter.cs",
+    "packages/shared/src/map-document.ts",
+    "packages/shared/src/msb-shape-profile.ts",
+    "packages/shared/src/index.ts",
+    "packages/core/src/editing/mapService.ts",
+    "packages/core/src/testing/runAuditSf03Smoke.ts",
+    "packages/core/package.json",
+    "package.json",
+    "scripts/verify/tiers.mjs"
+  ],
+  "productionSymbols": [
+    "MapRegionTransform",
+    "MapRegionShape",
+    "POINT_SHAPE_PROFILE",
+    "SPHERE_SHAPE_PROFILE",
+    "CYLINDER_SHAPE_PROFILE",
+    "BOX_SHAPE_PROFILE",
+    "rejectRegionScale",
+    "validateRegionShape",
+    "scaleRegionShape",
+    "getShapeProfile",
+    "isShapeSupported",
+    "set_region_shape"
+  ],
+  "tests": [
+    {
+      "suite": "test:audit-sf-03-unit",
+      "layer": "unit",
+      "outcome": "passed",
+      "executedCases": 6,
+      "artifactHash": "3861742EB7E1855C4D24DD42183ACD6586C33C1231F7E48BBD94909F0C35C70F"
+    },
+    {
+      "suite": "test:audit-sf-03-native",
+      "layer": "native",
+      "outcome": "passed",
+      "executedCases": 4,
+      "artifactHash": "3861742EB7E1855C4D24DD42183ACD6586C33C1231F7E48BBD94909F0C35C70F"
+    }
+  ],
+  "schemaMigrations": [],
+  "frontendContract": null,
+  "remainingBlocks": [
+    "F04: Structural deletion awaiting referential integrity profile (SF-04)"
+  ]
+}

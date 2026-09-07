@@ -25,7 +25,20 @@
  */
 
 import type { ToolCall, ToolDefinition as AgentToolDefinition } from '../model-services/types.js';
+import {
+  utf8CodepointPrefix,
+  defaultReadSessionManager,
+  createOpaqueCursor,
+  parseOpaqueCursor,
+  type NativeReadCompleteness,
+  type NativeEditDomain
+} from '@soulforge/shared';
 import { toolInputShapeToJsonSchema, type ToolContext, type ToolRegistry } from './toolRegistry.js';
+import {
+  projectEvidenceClaims,
+  type EvidenceClaim
+} from '../model-services/evidenceIdentity.js';
+import { evidenceKey } from '../model-services/evidenceSelection.js';
 
 export interface AgentToolBridgeOptions {
   registry: ToolRegistry;
@@ -111,6 +124,7 @@ const MUTATION_TOOLS = new Set([
  * stable identifiers/cursors to request the next page explicitly.
  */
 export const MAX_BOUNDED_TOOL_RESULT_CHARS = 8_192;
+export const MAX_BOUNDED_TOOL_RESULT_BYTES = 8_192;
 const BOUNDED_DISCOVERY_TOOLS = new Set([
   'search_resources',
   'search_events',
@@ -149,6 +163,8 @@ export interface AgentEvidenceMetadata {
   sourceRevisions: Array<number | string>;
   nextActions: string[];
   repeatedQuery: boolean;
+  /** Typed claim projections; raw result remains in the tool message/rollout. */
+  claims?: EvidenceClaim[];
 }
 
 export interface AgentToolResultEnvelope {
@@ -162,6 +178,7 @@ export interface AgentToolResultEnvelope {
   };
   pagination: {
     originalChars: number;
+    originalBytes?: number;
     returnedCount: number | null;
     totalCount: number | null;
     /** Native/logical result total when the tool exposes a page window. */
@@ -173,7 +190,9 @@ export interface AgentToolResultEnvelope {
     /** Whether the underlying tool result has more data beyond this window. */
     truncated: boolean;
     cursors: Record<string, string>;
+    continuationParams?: Record<string, unknown>;
   };
+  completeness?: NativeReadCompleteness;
   truncated: boolean;
   identifiers: string[];
   evidence: AgentEvidenceMetadata;
@@ -292,7 +311,7 @@ function summarizeDiscoveryChild(value: unknown, depth: number): unknown {
 function compactDiscoveryScalar(value: unknown): unknown {
   if (typeof value === 'string') {
     return value.length > DISCOVERY_STRING_LIMIT
-      ? `${value.slice(0, DISCOVERY_STRING_LIMIT)}…`
+      ? `${utf8CodepointPrefix(value, DISCOVERY_STRING_LIMIT)}…`
       : value;
   }
   return value;
@@ -521,12 +540,69 @@ function hasMeaningfulResult(value: unknown): boolean {
   ));
 }
 
-function buildEvidenceMetadata(name: string, data: unknown, repeatedQuery = false): AgentEvidenceMetadata {
+function buildEvidenceClaims(
+  name: string,
+  data: unknown,
+  context?: ToolContext
+): EvidenceClaim[] {
+  const root = data && typeof data === 'object' && !Array.isArray(data)
+    ? data as Record<string, unknown>
+    : { items: Array.isArray(data) ? data : [data] };
+  const workspaceId = context?.session?.meta.workspaceId
+    ?? context?.workspaceIndex?.workspaceId
+    ?? (typeof root.workspaceId === 'string' ? root.workspaceId : undefined);
+  if (!workspaceId) return [];
+  const native = NATIVE_READ_TOOLS.has(name);
+  const nativeVerified = collectEvidenceFacts(data).sourceHashes.length > 0;
+  const authorityClass: EvidenceClaim['authorityClass'] = native
+    ? 'native'
+    : DISCOVERY_TOOLS.has(name) ? 'candidate' : undefined;
+  const authority = native ? 3 : DISCOVERY_TOOLS.has(name) ? 1 : 0;
+  const claims = projectEvidenceClaims(root, {
+    workspaceId,
+    domain: /param/i.test(name)
+      ? 'param'
+      : /fmg|text/i.test(name)
+        ? 'fmg'
+        : /emevd|event/i.test(name)
+          ? 'emevd'
+          : /tae|animation/i.test(name)
+            ? 'tae'
+            : /map|msb/i.test(name)
+              ? 'map'
+              : /lua|script/i.test(name) ? 'script' : 'evidence',
+    authorityClass,
+    authority,
+    versionState: nativeVerified ? 'current' : 'candidate',
+    observationSequence: Date.now()
+  });
+  return claims.map((claim) => ({
+    ...claim,
+    key: evidenceKey(claim.identity),
+    ...(authorityClass ? { authorityClass } : {}),
+    authority,
+    versionState: nativeVerified ? 'current' : 'candidate',
+    // Requiredness is always computed by the host plan, never from a model
+    // result or arbitrary tool payload.
+    required: false
+  }));
+}
+
+function buildEvidenceMetadata(
+  name: string,
+  data: unknown,
+  repeatedQuery = false,
+  context?: ToolContext
+): AgentEvidenceMetadata {
   const facts = collectEvidenceFacts(data);
+  const claims = buildEvidenceClaims(name, data, context);
+  const withClaims = <T extends AgentEvidenceMetadata>(metadata: T): T => (
+    claims.length > 0 ? { ...metadata, claims } : metadata
+  );
   if (DISCOVERY_TOOLS.has(name)) {
     const hasHits = hasMeaningfulResult(data);
     const isRag = name === 'retrieve_evidence';
-    return {
+    return withClaims({
       ...facts,
       status: hasHits ? 'candidate' : 'insufficient_evidence',
       kind: isRag ? 'rag' : 'discovery',
@@ -542,11 +618,11 @@ function buildEvidenceMetadata(name: string, data: unknown, repeatedQuery = fals
                 : '当前查询没有命中；这只结束本次查询，不代表对象不存在。继续使用正式名称、参数备注、数字 ID、资源来源或引用关系定位。'
             ],
       repeatedQuery
-    };
+    });
   }
   if (NATIVE_READ_TOOLS.has(name)) {
     const nativeVerified = facts.sourceHashes.length > 0;
-    return {
+    return withClaims({
       ...facts,
       status: nativeVerified ? 'native-verified' : 'insufficient_evidence',
       kind: 'native-read',
@@ -554,51 +630,51 @@ function buildEvidenceMetadata(name: string, data: unknown, repeatedQuery = fals
         ? ['已取得带 sourceHash 的原生快照；写入前仍须使用该哈希和 sourceRevision 做前置条件校验。']
         : ['原生读取没有返回 sourceHash，不能把本次结果作为写入前置依据。'],
       repeatedQuery: false
-    };
+    });
   }
   if (PROPOSAL_TOOLS.has(name)) {
-    return {
+    return withClaims({
       ...facts,
       status: 'candidate',
       kind: 'proposal',
       nextActions: ['这是候选方案，不是已写入结果；先完成原生读取、校验和用户确认，再进入写入。'],
       repeatedQuery: false
-    };
+    });
   }
   if (VALIDATION_TOOLS.has(name)) {
-    return {
+    return withClaims({
       ...facts,
       status: 'not_applicable',
       kind: 'validation',
       nextActions: ['校验结果只说明当前补丁检查结果；原生格式仍须保留 sourceHash/sourceRevision 并在写入后回读。'],
       repeatedQuery: false
-    };
+    });
   }
   if (MUTATION_TOOLS.has(name)) {
-    return {
+    return withClaims({
       ...facts,
       status: 'not_applicable',
       kind: 'mutation',
       nextActions: ['写入完成后必须原生回读目标资源，确认语义、哈希变化和可回滚记录。'],
       repeatedQuery: false
-    };
+    });
   }
   if (name === 'list_memories' || name === 'read_memory') {
-    return {
+    return withClaims({
       ...facts,
       status: 'not_applicable',
       kind: 'memory',
       nextActions: [],
       repeatedQuery: false
-    };
+    });
   }
-  return {
+  return withClaims({
     ...facts,
     status: 'not_applicable',
     kind: 'other',
     nextActions: [],
     repeatedQuery: false
-  };
+  });
 }
 
 function discoveryNextActions(name: string, repeatedQuery: boolean): string[] {
@@ -653,20 +729,36 @@ function createResultEnvelope(
   window = resultWindowMetadata(data)
 ): AgentToolResultEnvelope {
   const counts = collectionCounts(data);
+  let continuationParams: Record<string, unknown> | undefined;
+  if (window.truncated && window.offset !== null && window.returned !== null) {
+    continuationParams = {
+      instructionOffset: window.offset + window.returned,
+      instructionLimit: window.limit ?? window.returned,
+      offset: window.offset + window.returned,
+      limit: window.limit ?? window.returned
+    };
+  }
+  const completeness: NativeReadCompleteness = window.truncated
+    ? (window.offset !== null ? 'windowed' : 'partial')
+    : (summary ? 'summary_only' : 'complete');
+
   return {
     ok: true,
     state: 'completed',
     data: normalizeEnvelopeData(data, summary),
     pagination: {
       originalChars,
+      ...(typeof data === 'string' ? { originalBytes: Buffer.byteLength(data, 'utf8') } : {}),
       returnedCount: window.returned ?? counts.returnedCount,
       totalCount: window.total ?? counts.totalCount,
       total: window.total,
       offset: window.offset,
       limit: window.limit,
       truncated: window.truncated,
-      cursors: identifiers.cursors
+      cursors: identifiers.cursors,
+      ...(continuationParams ? { continuationParams } : {})
     },
+    completeness,
     truncated,
     identifiers: identifiers.ids,
     evidence
@@ -702,12 +794,38 @@ function truncationSummary(name: string, window: ResultWindowMetadata, byteBound
   return messages.length > 0 ? messages.join('；') : null;
 }
 
-function boundedToolContent(name: string, data: unknown, repeatedQuery = false): string {
-  const evidence = buildEvidenceMetadata(name, data, repeatedQuery);
+function boundedToolContent(
+  name: string,
+  data: unknown,
+  repeatedQuery = false,
+  context?: ToolContext
+): string {
+  const evidence = buildEvidenceMetadata(name, data, repeatedQuery, context);
   const raw = JSON.stringify({ ok: true, state: 'completed', data: data ?? null, evidence });
+  const rawBytes = Buffer.byteLength(raw, 'utf8');
   const identifiers = collectStableIdentifiers(data);
   const window = resultWindowMetadata(data);
-  const byteBounded = (BOUNDED_DISCOVERY_TOOLS.has(name) || raw.length > MAX_BOUNDED_TOOL_RESULT_CHARS * 4) && raw.length > MAX_BOUNDED_TOOL_RESULT_CHARS;
+
+  // If identity itself exceeds the byte budget, fail fast without truncating hash or handle
+  const identityJson = JSON.stringify({
+    ok: true,
+    state: 'completed',
+    identifiers: identifiers.ids,
+    evidence
+  });
+  const identityBytes = Buffer.byteLength(identityJson, 'utf8');
+  if (identityBytes > MAX_BOUNDED_TOOL_RESULT_BYTES) {
+    return JSON.stringify({
+      ok: false,
+      state: 'failed',
+      error: {
+        code: 'RESULT_IDENTITY_TOO_LARGE',
+        message: `结果身份与版本自身大小（${identityBytes} 字节）超过字节预算（${MAX_BOUNDED_TOOL_RESULT_BYTES} 字节），不能截断稳定哈希或对象句柄。`
+      }
+    });
+  }
+
+  const byteBounded = (BOUNDED_DISCOVERY_TOOLS.has(name) || rawBytes > MAX_BOUNDED_TOOL_RESULT_BYTES * 4) && rawBytes > MAX_BOUNDED_TOOL_RESULT_BYTES;
   if (!byteBounded) {
     const sourceSummary = truncationSummary(name, window, false);
     return JSON.stringify(createResultEnvelope(
@@ -742,10 +860,10 @@ function boundedToolContent(name: string, data: unknown, repeatedQuery = false):
         window
       );
       const encoded = JSON.stringify(summarizedEnvelope);
-      if (encoded.length <= MAX_BOUNDED_TOOL_RESULT_CHARS) return encoded;
+      if (Buffer.byteLength(encoded, 'utf8') <= MAX_BOUNDED_TOOL_RESULT_BYTES && encoded.length <= MAX_BOUNDED_TOOL_RESULT_CHARS) return encoded;
     }
   }
-  // Try progressively smaller candidate sets.  A single native row/chunk can
+  // Try progressively smaller candidate sets. A single native row/chunk can
   // be wide, but the first few stable candidates are more useful than an
   // opaque "truncated" result with no data at all.
   for (const itemLimit of [DISCOVERY_ITEM_LIMIT, 4, 2]) {
@@ -760,7 +878,7 @@ function boundedToolContent(name: string, data: unknown, repeatedQuery = false):
       window
     );
     const encoded = JSON.stringify(summarizedEnvelope);
-    if (encoded.length <= MAX_BOUNDED_TOOL_RESULT_CHARS) return encoded;
+    if (Buffer.byteLength(encoded, 'utf8') <= MAX_BOUNDED_TOOL_RESULT_BYTES && encoded.length <= MAX_BOUNDED_TOOL_RESULT_CHARS) return encoded;
   }
   // Keep the same envelope even when the identifier-rich summary itself is
   // too large. The compact form retains the first stable follow-up keys.
@@ -775,7 +893,7 @@ function boundedToolContent(name: string, data: unknown, repeatedQuery = false):
     window
   );
   const compactEncoded = JSON.stringify(compactEnvelope);
-  if (compactEncoded.length <= MAX_BOUNDED_TOOL_RESULT_CHARS) return compactEncoded;
+  if (Buffer.byteLength(compactEncoded, 'utf8') <= MAX_BOUNDED_TOOL_RESULT_BYTES && compactEncoded.length <= MAX_BOUNDED_TOOL_RESULT_CHARS) return compactEncoded;
 
   return JSON.stringify(createResultEnvelope(
     null,
@@ -821,6 +939,50 @@ export function createAgentToolBridge(options: AgentToolBridgeOptions): AgentToo
         })
       };
     }
+
+    const inputRec = input && typeof input === 'object' && !Array.isArray(input)
+      ? (input as Record<string, unknown>)
+      : {};
+
+    // Guard against model free-form crafted nativeOffset on pagination tools
+    if (
+      typeof inputRec.nativeOffset === 'number' &&
+      typeof inputRec.cursor !== 'string'
+    ) {
+      return {
+        ok: false,
+        code: 'NATIVE_OFFSET_CRAFTING_FORBIDDEN',
+        content: JSON.stringify({
+          ok: false,
+          state: 'failed',
+          error: {
+            code: 'NATIVE_OFFSET_CRAFTING_FORBIDDEN',
+            message: '不能由模型自由构造 nativeOffset；请使用宿主返回的 opaque cursor 进行安全分页。'
+          }
+        })
+      };
+    }
+
+    // Validate cursor token if passed
+    if (typeof inputRec.cursor === 'string') {
+      try {
+        parseOpaqueCursor(inputRec.cursor);
+      } catch (err: any) {
+        return {
+          ok: false,
+          code: err?.code ?? 'INVALID_READ_CURSOR',
+          content: JSON.stringify({
+            ok: false,
+            state: 'failed',
+            error: {
+              code: err?.code ?? 'INVALID_READ_CURSOR',
+              message: err?.message ?? '无效的 cursor token。'
+            }
+          })
+        };
+      }
+    }
+
     const dynamicContext = options.contextProvider?.();
     const effectiveContext: ToolContext = {
       ...context,
@@ -854,7 +1016,10 @@ export function createAgentToolBridge(options: AgentToolBridgeOptions): AgentToo
           if (attemptedDiscoveryQueries.length > 64) attemptedDiscoveryQueries.shift();
         }
       }
-      return { ok: true, content: boundedToolContent(call.name, result.data, repeatedQuery) };
+      return {
+        ok: true,
+        content: boundedToolContent(call.name, result.data, repeatedQuery, effectiveContext)
+      };
     }
     return {
       ok: false,

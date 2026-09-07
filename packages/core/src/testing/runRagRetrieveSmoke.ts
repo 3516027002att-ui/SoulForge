@@ -410,7 +410,7 @@ VALUES (?, ?, ?, ?, ?)`).run(index.workspaceId, workspace.root, 'sekiro', now, n
       protocol: 'openai-compatible',
       async complete(request) {
         for (const message of request.messages) {
-          if (message.role === 'system' && message.content.startsWith('[rag-evidence')) {
+          if (message.content.includes('[rag-evidence')) {
             injected.push({ role: message.role, content: message.content });
           }
         }
@@ -487,7 +487,7 @@ VALUES (?, ?, ?, ?, ?)`).run(index.workspaceId, workspace.root, 'sekiro', now, n
       async complete(request) {
         retryCalls += 1;
         retryInjected.push(request.messages.filter((message) =>
-          message.role === 'system' && message.content.startsWith('[rag-evidence')
+          message.content.includes('[rag-evidence')
         ).map((message) => message.content).join('\n'));
         if (retryCalls === 1) {
           return {

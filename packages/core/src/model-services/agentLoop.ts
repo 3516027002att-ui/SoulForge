@@ -40,7 +40,18 @@ import {
   sleepWithSignal
 } from './retryPolicy.js';
 import { estimateContextTokens, isContextOverflowDiagnostic, runCompaction } from './contextCompactor.js';
-import { upsertContextEvidenceSources } from './contextBroker.js';
+import {
+  DYNAMIC_EVIDENCE_SYSTEM_PREFIX,
+  upsertContextEvidenceSources
+} from './contextBroker.js';
+import {
+  evidenceKey,
+  evidenceResourceKey,
+  type EvidenceClaim,
+  type EvidenceRevision,
+  type EvidenceVersion
+} from './evidenceSelection.js';
+import { normalizeEvidenceVersion } from './evidenceIdentity.js';
 import { APPROVAL_DECISIONS_DENYING } from './types.js';
 
 /** 连续工具调用失败上限门禁：达到该阈值时自动终止循环以防死循环。 */
@@ -285,6 +296,73 @@ function canonicalFailureContent(
       ...(details && Object.keys(details).length > 0 ? { details } : {})
     }
   }));
+}
+
+/**
+ * Read only bridge-produced structured claims from a tool envelope. The raw
+ * tool message remains in the normal history; this projection is the bounded
+ * queue input and never grants requiredness from model text.
+ */
+function evidenceCandidatesFromToolContent(content: string): EvidenceClaim[] {
+  try {
+    const parsed = JSON.parse(content) as unknown;
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return [];
+    const evidence = (parsed as Record<string, unknown>).evidence;
+    if (!evidence || typeof evidence !== 'object' || Array.isArray(evidence)) return [];
+    const claims = (evidence as Record<string, unknown>).claims;
+    if (!Array.isArray(claims)) return [];
+    const output: EvidenceClaim[] = [];
+    for (const value of claims) {
+      if (!value || typeof value !== 'object' || Array.isArray(value)) continue;
+      const candidate = value as Record<string, unknown>;
+      const identity = candidate.identity;
+      const version = candidate.version;
+      if (!identity || typeof identity !== 'object' || Array.isArray(identity)
+        || typeof candidate.handle !== 'string'
+        || typeof candidate.text !== 'string'
+        || (version !== undefined
+          && version !== null
+          && typeof version !== 'string'
+          && typeof version !== 'number'
+          && (typeof version !== 'object' || Array.isArray(version)))) continue;
+      const claim = candidate as unknown as EvidenceClaim;
+      try {
+        // Requiredness is host-plan state, so model/tool payloads cannot seed it.
+        const normalizedVersion = normalizeEvidenceVersion(
+          (version ?? {}) as EvidenceVersion | EvidenceRevision
+        );
+        output.push({
+          ...claim,
+          key: evidenceKey(claim.identity),
+          resourceKey: evidenceResourceKey(claim.identity),
+          version: normalizedVersion,
+          required: false
+        });
+      } catch {
+        // Invalid or incomplete claims remain in the raw transcript but do not
+        // enter the structured evidence queue.
+      }
+    }
+    return output;
+  } catch {
+    return [];
+  }
+}
+
+function makeToolEvidenceSource(
+  toolName: string,
+  content: string,
+  meta?: Record<string, unknown>,
+  allowStructuredClaims = false
+): ContextEvidenceSource {
+  const claims = allowStructuredClaims ? evidenceCandidatesFromToolContent(content) : [];
+  return {
+    kind: 'toolResult',
+    uri: toolName,
+    text: content,
+    ...(meta ? { meta } : {}),
+    ...(claims.length > 0 ? { evidenceCandidates: claims } : {})
+  };
 }
 
 /** Normalize legacy host denials before they enter history, rollout, or RAG. */
@@ -861,6 +939,7 @@ export async function runAgentToolLoop(
     }
 
     const ephemeralMessages: ChatMessage[] = [];
+    let evidencePolicyInjected = false;
 
     // Context Broker: assemble accumulated workspace evidence into a bounded,
     // redacted fragment injected before the model call. No evidence is
@@ -871,7 +950,14 @@ export async function runAgentToolLoop(
       assembledEvidenceVersion = evidenceVersion;
       assembledEvidenceWindow = compactionWindows;
       if (assembled.ok) {
-        ephemeralMessages.push({ role: 'system', content: assembled.context });
+        if (assembled.systemPrefix && !evidencePolicyInjected) {
+          ephemeralMessages.push({ role: 'system', content: assembled.systemPrefix });
+          evidencePolicyInjected = true;
+        }
+        ephemeralMessages.push({
+          role: assembled.dynamic ? 'user' : 'system',
+          content: assembled.context
+        });
         diagnostics.push({
           severity: 'info',
           code: 'CONTEXT_BROKER_ASSEMBLED',
@@ -880,7 +966,10 @@ export async function runAgentToolLoop(
         contextAssemblies.push({
           ok: true,
           sections: assembled.sections.length,
-          totalBytes: assembled.totalBytes
+          totalBytes: assembled.totalBytes,
+          ...(assembled.dynamic !== undefined ? { dynamic: assembled.dynamic } : {}),
+          ...(assembled.actualWireBytes !== undefined ? { actualWireBytes: assembled.actualWireBytes } : {}),
+          ...(assembled.omitted !== undefined ? { omitted: assembled.omitted } : {})
         });
         emit({
           type: 'context-assembled',
@@ -890,11 +979,11 @@ export async function runAgentToolLoop(
         });
       } else {
         diagnostics.push(...assembled.diagnostics);
-        contextAssemblies.push({
-          ok: false,
-          sections: 0,
-          totalBytes: 0,
-          ...(assembled.code ? { code: assembled.code } : {})
+          contextAssemblies.push({
+            ok: false,
+            sections: 0,
+            totalBytes: 0,
+            ...(assembled.code ? { code: assembled.code } : {})
         });
         ephemeralMessages.push({
           role: 'system',
@@ -919,9 +1008,13 @@ export async function runAgentToolLoop(
             `-- hit ${index + 1} (score=${hit.score}, family=${hit.chunk.family}, uri=${hit.chunk.symbolUri}) --`,
             hit.excerpt
           ].join('\n'));
+          if (!evidencePolicyInjected) {
+            ephemeralMessages.push({ role: 'system', content: DYNAMIC_EVIDENCE_SYSTEM_PREFIX });
+            evidencePolicyInjected = true;
+          }
           ephemeralMessages.push({
-            role: 'system',
-            content: `[rag-evidence query="${ragQuery.replaceAll('"', '\\"')}" hits=${ragHits.length}]\n${ragLines.join('\n')}`
+            role: 'user',
+            content: `[UNTRUSTED_RAG_EVIDENCE_BEGIN]\n[rag-evidence query="${ragQuery.replaceAll('"', '\\"')}" hits=${ragHits.length}]\n${ragLines.join('\n')}\n[UNTRUSTED_RAG_EVIDENCE_END]`
           });
           diagnostics.push({
             severity: 'info',
@@ -982,7 +1075,8 @@ export async function runAgentToolLoop(
               tools: forcedConclusion ? [] : request.tools,
               ...samplingFields,
               ...(request.signal ? { signal: request.signal } : {}),
-              ...(request.timeoutMs != null ? { timeoutMs: request.timeoutMs } : {})
+              ...(request.timeoutMs != null ? { timeoutMs: request.timeoutMs } : {}),
+              ...(request.sessionId ? { sessionId: request.sessionId } : {})
             },
             (text) => emit({ type: 'agent-message-delta', step: steps, text }),
             (text) => emit({ type: 'agent-thinking-delta', step: steps, text })
@@ -992,7 +1086,8 @@ export async function runAgentToolLoop(
             tools: forcedConclusion ? [] : request.tools,
             ...samplingFields,
             ...(request.signal ? { signal: request.signal } : {}),
-            ...(request.timeoutMs != null ? { timeoutMs: request.timeoutMs } : {})
+            ...(request.timeoutMs != null ? { timeoutMs: request.timeoutMs } : {}),
+            ...(request.sessionId ? { sessionId: request.sessionId } : {})
           });
       if (completion.finishReason !== 'error' || request.signal?.aborted) break;
       // Context-overflow 错误不走退避重试（OpenCode retry.ts：overflow 不参与
@@ -1012,6 +1107,8 @@ export async function runAgentToolLoop(
       }
       const decision = decideRetry(completion.diagnostics, attempt, activeRetryPolicy);
       if (!decision.retry) break;
+      const errDiag = [...completion.diagnostics].reverse().find((d) => d.severity === 'error');
+      const retryMessage = errDiag?.message;
       retriesAudit.push({
         step: steps,
         attempt,
@@ -1021,7 +1118,7 @@ export async function runAgentToolLoop(
       diagnostics.push({
         severity: 'info',
         code: 'MODEL_SERVICE_RETRY_SCHEDULED',
-        message: `第 ${attempt} 次调用失败（${decision.code}），${decision.delayMs}ms 后重试。`
+        message: `第 ${attempt} 次调用失败（${decision.code}${retryMessage ? `: ${retryMessage}` : ''}），${decision.delayMs}ms 后重试。`
       });
       emit({
         type: 'retry-scheduled',
@@ -1029,7 +1126,8 @@ export async function runAgentToolLoop(
         attempt,
         maxAttempts: activeRetryPolicy.maxAttempts,
         delayMs: decision.delayMs,
-        code: decision.code ?? 'UNKNOWN'
+        code: decision.code ?? 'UNKNOWN',
+        ...(retryMessage ? { message: retryMessage } : {})
       });
       const rested = await sleepWithSignal(decision.delayMs, request.signal);
       if (rested === 'cancelled') {
@@ -1440,17 +1538,17 @@ export async function runAgentToolLoop(
         };
         // Feed executed tool results into the broker evidence queue for the
         // next model call. Only redacted text and the tool name are retained.
-        evidenceAdditions.push({
-          kind: 'toolResult',
-          uri: batchEntry.call.name,
-          text: redactedContent,
-          meta: {
+        evidenceAdditions.push(makeToolEvidenceSource(
+          batchEntry.call.name,
+          redactedContent,
+          {
             ...(batchEntry.call.name === 'read_agent_task_record'
               || batchEntry.call.name === 'update_agent_task_record'
               ? { evidenceKey: 'agent-task-record' }
               : {})
-          }
-        });
+          },
+          Boolean(brokerOptions?.currentVersionByResource ?? brokerOptions?.currentRevisionByResource)
+        ));
         if (batchEntry.call.name === 'switch_mode' && result.ok) {
           const switchedMode = extractSwitchedAgentPermissionMode(result.content);
           if (switchedMode) {
@@ -1488,11 +1586,12 @@ export async function runAgentToolLoop(
       recordMessage(steps, message);
       const plannedEntry = planned[index];
       if (!plannedEntry || plannedEntry.kind !== 'execute') {
-        evidenceAdditions.push({
-          kind: 'toolResult',
-          uri: plannedEntry?.call.name ?? auditEntry.name,
-          text: message.content
-        });
+        evidenceAdditions.push(makeToolEvidenceSource(
+          plannedEntry?.call.name ?? auditEntry.name,
+          message.content,
+          undefined,
+          Boolean(brokerOptions?.currentVersionByResource ?? brokerOptions?.currentRevisionByResource)
+        ));
         turnHasNonDiscovery = true;
       } else if (NATIVE_READ_TOOLS.has(plannedEntry.call.name)) {
         turnHasNativeRead = true;
@@ -1579,7 +1678,14 @@ export async function runAgentToolLoop(
       }
     }
     if (broker && evidenceAdditions.length
-      && upsertContextEvidenceSources(evidenceQueue, evidenceAdditions)) {
+      && upsertContextEvidenceSources(evidenceQueue, evidenceAdditions, {
+        ...(brokerOptions?.maxActiveClaims !== undefined
+          ? { maxActiveClaims: brokerOptions.maxActiveClaims }
+          : {}),
+        ...(brokerOptions?.requiredClaimKeys !== undefined
+          ? { requiredClaimKeys: brokerOptions.requiredClaimKeys }
+          : {})
+      })) {
       evidenceVersion += 1;
     }
     if (consecutiveIdenticalToolFailures >= MAX_CONSECUTIVE_TOOL_FAILURES) {

@@ -1,0 +1,432 @@
+[
+  {
+    "id": "S01",
+    "kind": "inspected_repository_source",
+    "repository": "3516027002att-ui/SoulForge",
+    "commit": "f9cb0cd76a11bfa2857b48acbc779bfac0355d96",
+    "path": "README.md",
+    "line_start": 1,
+    "line_end": 200,
+    "url": "https://github.com/3516027002att-ui/SoulForge/blob/f9cb0cd76a11bfa2857b48acbc779bfac0355d96/README.md#L1-L200",
+    "note": "项目声明与范围"
+  },
+  {
+    "id": "S02",
+    "kind": "inspected_repository_source",
+    "repository": "3516027002att-ui/SoulForge",
+    "commit": "f9cb0cd76a11bfa2857b48acbc779bfac0355d96",
+    "path": "package.json",
+    "line_start": 1,
+    "line_end": 150,
+    "url": "https://github.com/3516027002att-ui/SoulForge/blob/f9cb0cd76a11bfa2857b48acbc779bfac0355d96/package.json#L1-L150",
+    "note": "版本与已有验收入口"
+  },
+  {
+    "id": "S03",
+    "kind": "inspected_repository_source",
+    "repository": "3516027002att-ui/SoulForge",
+    "commit": "f9cb0cd76a11bfa2857b48acbc779bfac0355d96",
+    "path": "bridge/SoulForge.Bridge/MsbNativeDocument.cs",
+    "line_start": 1,
+    "line_end": 190,
+    "url": "https://github.com/3516027002att-ui/SoulForge/blob/f9cb0cd76a11bfa2857b48acbc779bfac0355d96/bridge/SoulForge.Bridge/MsbNativeDocument.cs#L1-L190",
+    "note": "MSB 布局声明与读取入口"
+  },
+  {
+    "id": "S04",
+    "kind": "inspected_repository_source",
+    "repository": "3516027002att-ui/SoulForge",
+    "commit": "f9cb0cd76a11bfa2857b48acbc779bfac0355d96",
+    "path": "bridge/SoulForge.Bridge/MsbNativeDocument.cs",
+    "line_start": 330,
+    "line_end": 580,
+    "url": "https://github.com/3516027002att-ui/SoulForge/blob/f9cb0cd76a11bfa2857b48acbc779bfac0355d96/bridge/SoulForge.Bridge/MsbNativeDocument.cs#L330-L580",
+    "note": "MSB mutation、EntityID、Region scale、删除算法"
+  },
+  {
+    "id": "S05",
+    "kind": "inspected_repository_source",
+    "repository": "3516027002att-ui/SoulForge",
+    "commit": "f9cb0cd76a11bfa2857b48acbc779bfac0355d96",
+    "path": "bridge/SoulForge.Bridge/MsbNativeWriter.cs",
+    "line_start": 1,
+    "line_end": 250,
+    "url": "https://github.com/3516027002att-ui/SoulForge/blob/f9cb0cd76a11bfa2857b48acbc779bfac0355d96/bridge/SoulForge.Bridge/MsbNativeWriter.cs#L1-L250",
+    "note": "MSB 写回与自身重读验证"
+  },
+  {
+    "id": "S06",
+    "kind": "inspected_repository_source",
+    "repository": "3516027002att-ui/SoulForge",
+    "commit": "f9cb0cd76a11bfa2857b48acbc779bfac0355d96",
+    "path": "packages/core/src/editing/mapService.ts",
+    "line_start": 1,
+    "line_end": 255,
+    "url": "https://github.com/3516027002att-ui/SoulForge/blob/f9cb0cd76a11bfa2857b48acbc779bfac0355d96/packages/core/src/editing/mapService.ts#L1-L255",
+    "note": "地图加载与查询"
+  },
+  {
+    "id": "S07",
+    "kind": "inspected_repository_source",
+    "repository": "3516027002att-ui/SoulForge",
+    "commit": "f9cb0cd76a11bfa2857b48acbc779bfac0355d96",
+    "path": "packages/core/src/editing/mapService.ts",
+    "line_start": 255,
+    "line_end": 450,
+    "url": "https://github.com/3516027002att-ui/SoulForge/blob/f9cb0cd76a11bfa2857b48acbc779bfac0355d96/packages/core/src/editing/mapService.ts#L255-L450",
+    "note": "批量变换与事务前置校验"
+  },
+  {
+    "id": "S08",
+    "kind": "inspected_repository_source",
+    "repository": "3516027002att-ui/SoulForge",
+    "commit": "f9cb0cd76a11bfa2857b48acbc779bfac0355d96",
+    "path": "packages/core/src/editing/mapService.ts",
+    "line_start": 500,
+    "line_end": 775,
+    "url": "https://github.com/3516027002att-ui/SoulForge/blob/f9cb0cd76a11bfa2857b48acbc779bfac0355d96/packages/core/src/editing/mapService.ts#L500-L775",
+    "note": "地图事务写入、提交后验证"
+  },
+  {
+    "id": "S09",
+    "kind": "inspected_repository_source",
+    "repository": "3516027002att-ui/SoulForge",
+    "commit": "f9cb0cd76a11bfa2857b48acbc779bfac0355d96",
+    "path": "packages/shared/src/map-document.ts",
+    "line_start": 650,
+    "line_end": 885,
+    "url": "https://github.com/3516027002att-ui/SoulForge/blob/f9cb0cd76a11bfa2857b48acbc779bfac0355d96/packages/shared/src/map-document.ts#L650-L885",
+    "note": "Blender delta 导入与 canonical 地图实体"
+  },
+  {
+    "id": "S10",
+    "kind": "inspected_repository_source",
+    "repository": "3516027002att-ui/SoulForge",
+    "commit": "f9cb0cd76a11bfa2857b48acbc779bfac0355d96",
+    "path": "bridge/SoulForge.Bridge/MapStaticGeometryService.cs",
+    "line_start": 1,
+    "line_end": 260,
+    "url": "https://github.com/3516027002att-ui/SoulForge/blob/f9cb0cd76a11bfa2857b48acbc779bfac0355d96/bridge/SoulForge.Bridge/MapStaticGeometryService.cs#L1-L260",
+    "note": "地图分块服务的实际分配与锁"
+  },
+  {
+    "id": "S11",
+    "kind": "inspected_repository_source",
+    "repository": "3516027002att-ui/SoulForge",
+    "commit": "f9cb0cd76a11bfa2857b48acbc779bfac0355d96",
+    "path": "bridge/SoulForge.Bridge/FlverMatureSkinning.cs",
+    "line_start": 1,
+    "line_end": 300,
+    "url": "https://github.com/3516027002att-ui/SoulForge/blob/f9cb0cd76a11bfa2857b48acbc779bfac0355d96/bridge/SoulForge.Bridge/FlverMatureSkinning.cs#L1-L300",
+    "note": "NormalW、palette、FK 与蒙皮"
+  },
+  {
+    "id": "S12",
+    "kind": "inspected_repository_source",
+    "repository": "3516027002att-ui/SoulForge",
+    "commit": "f9cb0cd76a11bfa2857b48acbc779bfac0355d96",
+    "path": "bridge/SoulForge.Bridge/BridgeDaemonHost.cs",
+    "line_start": 1,
+    "line_end": 230,
+    "url": "https://github.com/3516027002att-ui/SoulForge/blob/f9cb0cd76a11bfa2857b48acbc779bfac0355d96/bridge/SoulForge.Bridge/BridgeDaemonHost.cs#L1-L230",
+    "note": "NDJSON、握手与并发"
+  },
+  {
+    "id": "S13",
+    "kind": "inspected_repository_source",
+    "repository": "3516027002att-ui/SoulForge",
+    "commit": "f9cb0cd76a11bfa2857b48acbc779bfac0355d96",
+    "path": "bridge/SoulForge.Bridge/BridgeDaemonHost.cs",
+    "line_start": 245,
+    "line_end": 435,
+    "url": "https://github.com/3516027002att-ui/SoulForge/blob/f9cb0cd76a11bfa2857b48acbc779bfac0355d96/bridge/SoulForge.Bridge/BridgeDaemonHost.cs#L245-L435",
+    "note": "写命令注册表、路径边界、deadline"
+  },
+  {
+    "id": "S14",
+    "kind": "inspected_repository_source",
+    "repository": "3516027002att-ui/SoulForge",
+    "commit": "f9cb0cd76a11bfa2857b48acbc779bfac0355d96",
+    "path": "packages/core/src/transactions/workspaceTransaction.ts",
+    "line_start": 1,
+    "line_end": 260,
+    "url": "https://github.com/3516027002att-ui/SoulForge/blob/f9cb0cd76a11bfa2857b48acbc779bfac0355d96/packages/core/src/transactions/workspaceTransaction.ts#L1-L260",
+    "note": "事务状态与 staging"
+  },
+  {
+    "id": "S15",
+    "kind": "inspected_repository_source",
+    "repository": "3516027002att-ui/SoulForge",
+    "commit": "f9cb0cd76a11bfa2857b48acbc779bfac0355d96",
+    "path": "packages/core/src/transactions/workspaceTransaction.ts",
+    "line_start": 390,
+    "line_end": 665,
+    "url": "https://github.com/3516027002att-ui/SoulForge/blob/f9cb0cd76a11bfa2857b48acbc779bfac0355d96/packages/core/src/transactions/workspaceTransaction.ts#L390-L665",
+    "note": "多文件提交、恢复点与校验"
+  },
+  {
+    "id": "S16",
+    "kind": "inspected_repository_source",
+    "repository": "3516027002att-ui/SoulForge",
+    "commit": "f9cb0cd76a11bfa2857b48acbc779bfac0355d96",
+    "path": "packages/core/src/patch/durablePatchCommit.ts",
+    "line_start": 1,
+    "line_end": 235,
+    "url": "https://github.com/3516027002att-ui/SoulForge/blob/f9cb0cd76a11bfa2857b48acbc779bfac0355d96/packages/core/src/patch/durablePatchCommit.ts#L1-L235",
+    "note": "持久日志与提交前恢复信息"
+  },
+  {
+    "id": "S17",
+    "kind": "inspected_repository_source",
+    "repository": "3516027002att-ui/SoulForge",
+    "commit": "f9cb0cd76a11bfa2857b48acbc779bfac0355d96",
+    "path": "bridge/SoulForge.Bridge/ParamNativeWriter.cs",
+    "line_start": 1,
+    "line_end": 150,
+    "url": "https://github.com/3516027002att-ui/SoulForge/blob/f9cb0cd76a11bfa2857b48acbc779bfac0355d96/bridge/SoulForge.Bridge/ParamNativeWriter.cs#L1-L150",
+    "note": "PARAM 写入与验证"
+  },
+  {
+    "id": "S18",
+    "kind": "inspected_repository_source",
+    "repository": "3516027002att-ui/SoulForge",
+    "commit": "f9cb0cd76a11bfa2857b48acbc779bfac0355d96",
+    "path": "bridge/SoulForge.Bridge/ParamNativeDocument.cs",
+    "line_start": 320,
+    "line_end": 580,
+    "url": "https://github.com/3516027002att-ui/SoulForge/blob/f9cb0cd76a11bfa2857b48acbc779bfac0355d96/bridge/SoulForge.Bridge/ParamNativeDocument.cs#L320-L580",
+    "note": "PARAM 重建、编码、变长列表修改"
+  },
+  {
+    "id": "S19",
+    "kind": "inspected_repository_source",
+    "repository": "3516027002att-ui/SoulForge",
+    "commit": "f9cb0cd76a11bfa2857b48acbc779bfac0355d96",
+    "path": "bridge/SoulForge.Bridge/TaeNativeWriter.cs",
+    "line_start": 1,
+    "line_end": 265,
+    "url": "https://github.com/3516027002att-ui/SoulForge/blob/f9cb0cd76a11bfa2857b48acbc779bfac0355d96/bridge/SoulForge.Bridge/TaeNativeWriter.cs#L1-L265",
+    "note": "TAE 支持范围、整文件快照"
+  },
+  {
+    "id": "S20",
+    "kind": "inspected_repository_source",
+    "repository": "3516027002att-ui/SoulForge",
+    "commit": "f9cb0cd76a11bfa2857b48acbc779bfac0355d96",
+    "path": "bridge/SoulForge.Bridge/FmgNativeWriter.cs",
+    "line_start": 1,
+    "line_end": 145,
+    "url": "https://github.com/3516027002att-ui/SoulForge/blob/f9cb0cd76a11bfa2857b48acbc779bfac0355d96/bridge/SoulForge.Bridge/FmgNativeWriter.cs#L1-L145",
+    "note": "FMG 编码、容器写回、sibling 保留"
+  },
+  {
+    "id": "S21",
+    "kind": "inspected_repository_source",
+    "repository": "3516027002att-ui/SoulForge",
+    "commit": "f9cb0cd76a11bfa2857b48acbc779bfac0355d96",
+    "path": "bridge/SoulForge.Bridge/EmevdNativeWriter.cs",
+    "line_start": 1,
+    "line_end": 195,
+    "url": "https://github.com/3516027002att-ui/SoulForge/blob/f9cb0cd76a11bfa2857b48acbc779bfac0355d96/bridge/SoulForge.Bridge/EmevdNativeWriter.cs#L1-L195",
+    "note": "EMEVD outer/payload 写回与验证"
+  },
+  {
+    "id": "S22",
+    "kind": "inspected_repository_source",
+    "repository": "3516027002att-ui/SoulForge",
+    "commit": "f9cb0cd76a11bfa2857b48acbc779bfac0355d96",
+    "path": "packages/core/src/script/scriptSourceWriteback.ts",
+    "line_start": 1,
+    "line_end": 230,
+    "url": "https://github.com/3516027002att-ui/SoulForge/blob/f9cb0cd76a11bfa2857b48acbc779bfac0355d96/packages/core/src/script/scriptSourceWriteback.ts#L1-L230",
+    "note": "脚本编码与 Lua 字节码转明文"
+  },
+  {
+    "id": "S23",
+    "kind": "inspected_repository_source",
+    "repository": "3516027002att-ui/SoulForge",
+    "commit": "f9cb0cd76a11bfa2857b48acbc779bfac0355d96",
+    "path": "packages/core/src/model-services/agentLoop.ts",
+    "line_start": 1,
+    "line_end": 230,
+    "url": "https://github.com/3516027002att-ui/SoulForge/blob/f9cb0cd76a11bfa2857b48acbc779bfac0355d96/packages/core/src/model-services/agentLoop.ts#L1-L230",
+    "note": "Agent 预算与进展工具分类"
+  },
+  {
+    "id": "S24",
+    "kind": "inspected_repository_source",
+    "repository": "3516027002att-ui/SoulForge",
+    "commit": "f9cb0cd76a11bfa2857b48acbc779bfac0355d96",
+    "path": "packages/core/src/model-services/agentLoop.ts",
+    "line_start": 500,
+    "line_end": 750,
+    "url": "https://github.com/3516027002att-ui/SoulForge/blob/f9cb0cd76a11bfa2857b48acbc779bfac0355d96/packages/core/src/model-services/agentLoop.ts#L500-L750",
+    "note": "Agent 步数上限与固定 RAG 查询"
+  },
+  {
+    "id": "S25",
+    "kind": "inspected_repository_source",
+    "repository": "3516027002att-ui/SoulForge",
+    "commit": "f9cb0cd76a11bfa2857b48acbc779bfac0355d96",
+    "path": "packages/core/src/model-services/agentLoop.ts",
+    "line_start": 1350,
+    "line_end": 1580,
+    "url": "https://github.com/3516027002att-ui/SoulForge/blob/f9cb0cd76a11bfa2857b48acbc779bfac0355d96/packages/core/src/model-services/agentLoop.ts#L1350-L1580",
+    "note": "Agent Promise.all 并行批次"
+  },
+  {
+    "id": "S26",
+    "kind": "inspected_repository_source",
+    "repository": "3516027002att-ui/SoulForge",
+    "commit": "f9cb0cd76a11bfa2857b48acbc779bfac0355d96",
+    "path": "packages/core/src/model-services/contextBroker.ts",
+    "line_start": 1,
+    "line_end": 270,
+    "url": "https://github.com/3516027002att-ui/SoulForge/blob/f9cb0cd76a11bfa2857b48acbc779bfac0355d96/packages/core/src/model-services/contextBroker.ts#L1-L270",
+    "note": "Broker 身份与预算"
+  },
+  {
+    "id": "S27",
+    "kind": "inspected_repository_source",
+    "repository": "3516027002att-ui/SoulForge",
+    "commit": "f9cb0cd76a11bfa2857b48acbc779bfac0355d96",
+    "path": "packages/core/src/model-services/contextBroker.ts",
+    "line_start": 330,
+    "line_end": 620,
+    "url": "https://github.com/3516027002att-ui/SoulForge/blob/f9cb0cd76a11bfa2857b48acbc779bfac0355d96/packages/core/src/model-services/contextBroker.ts#L330-L620",
+    "note": "Broker 去重、顺序与证据装配"
+  },
+  {
+    "id": "S28",
+    "kind": "inspected_repository_source",
+    "repository": "3516027002att-ui/SoulForge",
+    "commit": "f9cb0cd76a11bfa2857b48acbc779bfac0355d96",
+    "path": "packages/core/src/rag/hybridRetrieve.ts",
+    "line_start": 1,
+    "line_end": 170,
+    "url": "https://github.com/3516027002att-ui/SoulForge/blob/f9cb0cd76a11bfa2857b48acbc779bfac0355d96/packages/core/src/rag/hybridRetrieve.ts#L1-L170",
+    "note": "向量与词法融合"
+  },
+  {
+    "id": "S29",
+    "kind": "inspected_repository_source",
+    "repository": "3516027002att-ui/SoulForge",
+    "commit": "f9cb0cd76a11bfa2857b48acbc779bfac0355d96",
+    "path": "packages/core/src/rag/retrieve.ts",
+    "line_start": 1,
+    "line_end": 285,
+    "url": "https://github.com/3516027002att-ui/SoulForge/blob/f9cb0cd76a11bfa2857b48acbc779bfac0355d96/packages/core/src/rag/retrieve.ts#L1-L285",
+    "note": "词法分数与引用扩展"
+  },
+  {
+    "id": "S30",
+    "kind": "inspected_repository_source",
+    "repository": "3516027002att-ui/SoulForge",
+    "commit": "f9cb0cd76a11bfa2857b48acbc779bfac0355d96",
+    "path": "packages/core/src/ai/agentToolBridge.ts",
+    "line_start": 1,
+    "line_end": 215,
+    "url": "https://github.com/3516027002att-ui/SoulForge/blob/f9cb0cd76a11bfa2857b48acbc779bfac0355d96/packages/core/src/ai/agentToolBridge.ts#L1-L215",
+    "note": "工具 envelope、权限分类与摘要"
+  },
+  {
+    "id": "S31",
+    "kind": "inspected_repository_source",
+    "repository": "3516027002att-ui/SoulForge",
+    "commit": "f9cb0cd76a11bfa2857b48acbc779bfac0355d96",
+    "path": "packages/core/src/ai/toolRegistry.ts",
+    "line_start": 1,
+    "line_end": 180,
+    "url": "https://github.com/3516027002att-ui/SoulForge/blob/f9cb0cd76a11bfa2857b48acbc779bfac0355d96/packages/core/src/ai/toolRegistry.ts#L1-L180",
+    "note": "工具到编辑服务、任务台账契约"
+  },
+  {
+    "id": "S32",
+    "kind": "inspected_repository_source",
+    "repository": "3516027002att-ui/SoulForge",
+    "commit": "f9cb0cd76a11bfa2857b48acbc779bfac0355d96",
+    "path": "prompt/system.md",
+    "line_start": 1,
+    "line_end": 150,
+    "url": "https://github.com/3516027002att-ui/SoulForge/blob/f9cb0cd76a11bfa2857b48acbc779bfac0355d96/prompt/system.md#L1-L150",
+    "note": "已读取的 system prompt 主体；长响应截断，不作全文件覆盖声明"
+  },
+  {
+    "id": "S33",
+    "kind": "inspected_repository_source",
+    "repository": "3516027002att-ui/SoulForge",
+    "commit": "f9cb0cd76a11bfa2857b48acbc779bfac0355d96",
+    "path": "packages/core/src/workspace/scanWorkspace.ts",
+    "line_start": 1,
+    "line_end": 270,
+    "url": "https://github.com/3516027002att-ui/SoulForge/blob/f9cb0cd76a11bfa2857b48acbc779bfac0355d96/packages/core/src/workspace/scanWorkspace.ts#L1-L270",
+    "note": "工作区扫描与可选 SHA"
+  },
+  {
+    "id": "S34",
+    "kind": "inspected_repository_source",
+    "repository": "3516027002att-ui/SoulForge",
+    "commit": "f9cb0cd76a11bfa2857b48acbc779bfac0355d96",
+    "path": "packages/shared/src/index.ts",
+    "line_start": 1,
+    "line_end": 160,
+    "url": "https://github.com/3516027002att-ui/SoulForge/blob/f9cb0cd76a11bfa2857b48acbc779bfac0355d96/packages/shared/src/index.ts#L1-L160",
+    "note": "共享协议与模块出口"
+  },
+  {
+    "id": "X01",
+    "kind": "external_primary_source",
+    "url": "https://github.com/JKAnderson/SoulsFormats/blob/master/SoulsFormats/Formats/MSB/MSBS/PartsParam.cs#L330-L585",
+    "note": "MSBS Part 的独立布局证据；读取时 blob 175e0dcbe1ec9385cef4bae45437e8d7fbe4ea1e",
+    "access_date": "2026-09-06"
+  },
+  {
+    "id": "X02",
+    "kind": "external_primary_source",
+    "url": "https://github.com/JKAnderson/SoulsFormats/blob/master/SoulsFormats/Formats/MSB/MSBS/PointParam.cs#L330-L570",
+    "note": "MSBS Region 的独立布局证据；读取时 blob c13eacf67560381fd450fa82f6fed95e396fdd29",
+    "access_date": "2026-09-06"
+  },
+  {
+    "id": "X03",
+    "kind": "external_primary_source",
+    "url": "https://github.com/vawser/Smithbox",
+    "note": "成熟编辑器官方能力说明",
+    "access_date": "2026-09-06"
+  },
+  {
+    "id": "X04",
+    "kind": "external_primary_source",
+    "url": "https://github.com/Meowmaritus/DSAnimStudio",
+    "note": "成熟动作编辑器官方能力说明",
+    "access_date": "2026-09-06"
+  },
+  {
+    "id": "X05",
+    "kind": "external_primary_source",
+    "url": "https://github.com/Grimrukh/soulstruct-blender",
+    "note": "Blender 插件官方游戏/格式支持矩阵",
+    "access_date": "2026-09-06"
+  },
+  {
+    "id": "X06",
+    "kind": "external_primary_source",
+    "url": "https://docs.blender.org/api/main/info_gotchas_threading.html",
+    "note": "Blender 官方线程限制",
+    "access_date": "2026-09-06"
+  },
+  {
+    "id": "X07",
+    "kind": "external_primary_source",
+    "url": "https://gist.github.com/karpathy/442a6bf555914893e9891c11519de94f",
+    "note": "Karpathy LLM Wiki 原始想法文件；创建于 2026-04-04",
+    "access_date": "2026-09-06"
+  },
+  {
+    "id": "S35",
+    "kind": "inspected_repository_tree",
+    "commit": "f9cb0cd76a11bfa2857b48acbc779bfac0355d96",
+    "url": "https://api.github.com/repos/3516027002att-ui/SoulForge/git/trees/7092856dc63d647c27f541a533d8152fc6a8d632?recursive=1",
+    "note": "renderer 目录元数据；App.tsx 的记录大小为 215779 bytes，不等于已逐行审计。"
+  }
+]

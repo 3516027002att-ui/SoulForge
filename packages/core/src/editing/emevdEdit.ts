@@ -71,7 +71,14 @@ export interface EmevdEventReadDto {
   truncated: boolean;
   /** DarkScript is safe to feed back into apply only when this is true. */
   darkScriptComplete: boolean;
+  /** Effective instruction window read range: [start, end). */
+  readRange?: { start: number; end: number } | undefined;
+  /** True when the paged slice does not align with or splits condition groups or basic blocks. */
+  crossesBlockBoundary?: boolean | undefined;
+  /** Basic blocks within this event or window. */
+  blocks?: Array<{ index: number; start: number; end: number; conditionGroup?: number | undefined }> | undefined;
   sourceHash?: string;
+
   outerFileHash?: string;
   sourceRevision?: number;
   game: string;
@@ -366,6 +373,32 @@ export async function readEmevdEvent(input: {
   const fileRevision = await stat(resolved.path).then((value) => value.mtimeMs).catch(() => undefined);
   const fingerprint = fingerprintEmedfRegistry(registry.registry);
   const eventForRead = { ...event, instructions: event.instructions.slice(offset, end) };
+
+  // Compute basic blocks and condition group boundaries across the whole event
+  const blocks: Array<{ index: number; start: number; end: number; conditionGroup?: number | undefined }> = [];
+  let blockStart = 0;
+  for (let i = 0; i < total; i++) {
+    const instr = event.instructions[i]!;
+    const isTerminal = (instr.bank === 2003 && (instr.id === 1 || instr.id === 2))
+      || (instr.bank === 1000 && instr.id === 0)
+      || (instr.bank === 1003)
+      || (i === total - 1);
+    if (isTerminal) {
+      blocks.push({
+        index: blocks.length,
+        start: blockStart,
+        end: i + 1
+      });
+      blockStart = i + 1;
+    }
+  }
+  if (blockStart < total) {
+    blocks.push({ index: blocks.length, start: blockStart, end: total });
+  }
+  const crossesBlockBoundary = blocks.some((b) =>
+    (offset > b.start && offset < b.end) || (end > b.start && end < b.end)
+  );
+
   const dto: EmevdEventReadDto = {
     ok: true,
     sourceUri: full.document.resourceUri,
@@ -380,6 +413,9 @@ export async function readEmevdEvent(input: {
     returned: instructions.length,
     truncated,
     darkScriptComplete: !truncated,
+    readRange: { start: offset, end },
+    crossesBlockBoundary,
+    blocks,
     ...(full.sourceHash ? { sourceHash: full.sourceHash } : {}),
     ...(full.outerFileHash ? { outerFileHash: full.outerFileHash } : {}),
     ...(fileRevision !== undefined ? { sourceRevision: fileRevision } : {}),
@@ -403,6 +439,7 @@ export async function readEmevdEvent(input: {
     ]
   };
   return dto;
+
 }
 
 export async function readEmevdOutline(input: {
@@ -575,6 +612,7 @@ export async function applyEmevdDsl(input: {
     workspaceId: input.edit.session.meta.workspaceId,
     workspaceRoot: input.edit.session.layers.overlayRoot,
     stagingRoot: input.edit.stagingRoot,
+    ...(input.edit.oodleRuntimeRoot !== undefined ? { oodleRuntimeRoot: input.edit.oodleRuntimeRoot } : {}),
     targetUri: sourceUri,
     title: `EMEVD DSL ${basename(resolved.path)}`,
     session: input.edit.session,

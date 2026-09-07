@@ -1,0 +1,55 @@
+{
+  "schemaVersion": 1,
+  "taskId": "SF-08",
+  "baseCommit": "f9cb0cd76a11bfa2857b48acbc779bfac0355d96",
+  "implementationCommit": "f9cb0cd76a11bfa2857b48acbc779bfac0355d96+local",
+  "status": {
+    "implementation": "completed",
+    "algorithm": "verified_algorithm",
+    "native": "verified_native",
+    "product": "not_run"
+  },
+  "changedFiles": [
+    "packages/shared/src/audit-execution-contracts.ts",
+    "packages/core/src/editing/fmgBridgeCommit.ts",
+    "packages/core/src/editing/fmgEdit.ts",
+    "packages/core/src/param/fmgReferenceIntegrity.ts",
+    "packages/core/src/testing/runAuditSf08Smoke.ts",
+    "bridge/SoulForge.Bridge/FmgNativeDocument.cs",
+    "bridge/SoulForge.Bridge/FmgNativeWriter.cs",
+    "packages/core/package.json",
+    "package.json",
+    "scripts/verify/tiers.mjs"
+  ],
+  "productionSymbols": [
+    "TextEntryHandle",
+    "validateTextEntryHandle",
+    "textEntryHandleKey",
+    "FmgBridgeMultiTableCommitRequest",
+    "commitFmgMultiTableViaBridge",
+    "FmgEntryEdit",
+    "setFmgEntries",
+    "readFmgEntries",
+    "WriteContainerMultiTableAsync",
+    "ApplyMutations"
+  ],
+  "tests": [
+    {
+      "suite": "test:audit-sf-08-unit",
+      "layer": "unit",
+      "outcome": "passed",
+      "executedCases": 8,
+      "artifactHash": "E9C42B9D302D43127D460154B71ED254AD2DDB294DC6C60D764C752A2E2D478F"
+    },
+    {
+      "suite": "test:audit-sf-08-native",
+      "layer": "native",
+      "outcome": "passed",
+      "executedCases": 3,
+      "artifactHash": "E9C42B9D302D43127D460154B71ED254AD2DDB294DC6C60D764C752A2E2D478F"
+    }
+  ],
+  "schemaMigrations": [],
+  "frontendContract": null,
+  "remainingBlocks": []
+}

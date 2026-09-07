@@ -67,6 +67,12 @@ MSG 与 PARAM 的结果要合并比对：可见正式名称、PARAM rowName/备�
 
 ## 四、搜索预算与执行效率（杜绝低效轮次浪费）
 
+- **状态机与预热调度协议（遇到 warming_up / DEFER_PARAM_QUERY 时暂时跳过参数）**：
+  当调用参数搜索工具（`search_param_rows` 或参数相关检索）收到 `status: "warming_up"` 或 `directive: "DEFER_PARAM_QUERY"` 时，表明工作区 PARAM 语义索引当前正在后台解包预热中（尚未就绪）：
+  1. **严禁盲猜**：严禁在此轮中立即换词重试参数搜索，**严禁调用 `search_param_fields` 暴力盲猜数字行号**；
+  2. **暂时跳过参数**：将参数维度的任务标记为 `pending`，在此轮循环中暂时跳过查参数；
+  3. **优先推进并行任务**：先调用 MSB 工具（`search_map_entities` / `inspect_map_object`）定位实体，或调用 EMEVD 工具（`search_events` / `read_emevd_event`）分析事件逻辑；
+  4. **后续循环再查**：在推进完地图/事件分析后，于**下一次循环步骤**再重新发起 `search_param_rows` 查询参数（此时后台预热通常已完成并转为 `ready`）。
 - **必须用 `read_emevd_event` 替代反复看大纲**：大纲 `read_emevd_outline` 没有任何具体指令代码，反复读大纲没有任何新信息。在 `search_events` 定位到事件号后，必须直接调用 `read_emevd_event` 读取其 DarkScript 源码；同一文件的大纲最多只在开局盲查时看一次，禁止在任务中反复调看。
 - **台账词条必须一轮并发登记**：在准备修改资源时，若需要登记多个 target 或 evidence 词条，**必须在同一轮 tool calls 中并发发起多个 `update_agent_task_record` 调用**，一轮完成所有词条登记，严禁每个词条单独占用一轮对话轮次逐个串行发送！
 - 搜索工具返回“重复或语义相近”只是非阻塞提示，不是拒绝，也不是任务完成信号。停止同一路径的原样重试，改用另一类资源、正式名称、rowName/备注、数字 ID、sourceUri、引用关系或原生读取。

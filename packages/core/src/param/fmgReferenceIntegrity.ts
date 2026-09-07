@@ -24,7 +24,7 @@
 
 export interface FmgReferenceEntry {
   id: number;
-  text: string;
+  text?: string | null;
 }
 
 export interface FmgReferenceDocument {
@@ -92,7 +92,8 @@ const FMG_REFERENCE_PATTERN = /<\?([A-Za-z][A-Za-z0-9_]*)(?:@(-?\d+))?\?>/g;
  * Extracts all `<?tag...?>` references from a single FMG entry text.
  * Deterministic; never mutates its input.
  */
-export function extractFmgReferences(text: string): FmgReferenceMatch[] {
+export function extractFmgReferences(text?: string | null): FmgReferenceMatch[] {
+  if (!text) return [];
   const matches: FmgReferenceMatch[] = [];
   FMG_REFERENCE_PATTERN.lastIndex = 0;
   for (const match of text.matchAll(FMG_REFERENCE_PATTERN)) {

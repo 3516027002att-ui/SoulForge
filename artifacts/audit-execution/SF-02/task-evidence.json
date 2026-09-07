@@ -1,0 +1,74 @@
+{
+  "schemaVersion": 1,
+  "taskId": "SF-02",
+  "baseCommit": "f9cb0cd76a11bfa2857b48acbc779bfac0355d96",
+  "implementationCommit": "f9cb0cd76a11bfa2857b48acbc779bfac0355d96+local",
+  "status": {
+    "implementation": "completed",
+    "algorithm": "verified_algorithm",
+    "native": "verified_native",
+    "product": "not_run"
+  },
+  "changedFiles": [
+    "bridge/SoulForge.Bridge/MsbNativeDocument.cs",
+    "bridge/SoulForge.Bridge/MsbNativeWriter.cs",
+    "packages/shared/src/map-document.ts",
+    "packages/shared/src/resourceSymbols.ts",
+    "packages/core/src/editing/msbBridgeRead.ts",
+    "packages/core/src/editing/mapService.ts",
+    "packages/core/src/indexing/ingestBridgeResult.ts",
+    "packages/core/src/indexing/nativeSemanticRefresh.ts",
+    "packages/core/src/indexing/workspaceIndex.ts",
+    "packages/core/src/testing/msbsIndependentEntityOracle.ts",
+    "packages/core/src/testing/runAuditSf02Smoke.ts",
+    "packages/core/src/testing/runAuditMsbSafetyGateSmoke.ts",
+    "packages/core/package.json",
+    "package.json",
+    "scripts/verify/tiers.mjs"
+  ],
+  "productionSymbols": [
+    "ResolveRelativeInt32Field",
+    "BuildEntrySectionEnds",
+    "MsbPart.InternalEntryId",
+    "MsbPart.EntityId",
+    "MsbRegion.InternalEntryId",
+    "MsbRegion.EntityId",
+    "computeMapDerivedKey",
+    "migrateMsbReaderSchema",
+    "MSB_READER_SCHEMA_REVISION",
+    "MSB_READER_SCHEMA_HASH",
+    "BaseMapEntity.internalEntryId",
+    "MapDocument.readerSchemaRevision",
+    "MapDocument.entityIdVerified",
+    "readMsbDocumentViaBridge",
+    "mapExportFromMsbDocument"
+  ],
+  "tests": [
+    {
+      "suite": "test:audit-sf-02-unit",
+      "layer": "unit",
+      "outcome": "passed",
+      "executedCases": 5,
+      "artifactHash": "D33833E1EEE703F9A91853531EA23E2CABEC60518E037016DC60BE0A46D124A1"
+    },
+    {
+      "suite": "test:audit-sf-02-native",
+      "layer": "native",
+      "outcome": "passed",
+      "executedCases": 4,
+      "artifactHash": "D33833E1EEE703F9A91853531EA23E2CABEC60518E037016DC60BE0A46D124A1"
+    }
+  ],
+  "schemaMigrations": [
+    {
+      "name": "msb-reader-schema-revision-2",
+      "targetRevision": 2,
+      "description": "Evicts stale MapExport entries from reader revision < 2, marks dependent references stale and rebuilds references table."
+    }
+  ],
+  "frontendContract": null,
+  "remainingBlocks": [
+    "F03: Region scale and non-box shapes awaiting geometric schema verification (SF-03)",
+    "F04: Structural deletion awaiting referential integrity profile (SF-04)"
+  ]
+}

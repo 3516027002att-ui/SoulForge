@@ -39,6 +39,8 @@ export interface MapExport {
   mapId: string;
   sourceHash?: string;
   sourceRevision?: number;
+  readerSchemaRevision?: number;
+  derivedKey?: string;
   entities: MapEntitySymbol[];
   regions: MapRegionSymbol[];
 }
@@ -48,6 +50,7 @@ export interface MapEntitySymbol {
   sourceUri: string;
   mapId: string;
   entityId?: number;
+  internalEntryId?: number;
   name: string;
   sourceHash?: string;
   sourceRevision?: number;
@@ -68,6 +71,7 @@ export interface MapRegionSymbol {
   sourceUri: string;
   mapId: string;
   entityId?: number;
+  internalEntryId?: number;
   name: string;
   sourceHash?: string;
   sourceRevision?: number;

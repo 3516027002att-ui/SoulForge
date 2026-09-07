@@ -822,6 +822,7 @@ export type AiAgentSessionLoadIpcResult =
 
 export type AiAgentSessionLifecycleEvent =
   | { type: 'session-accepted'; mode: 'plan' | 'normal' | 'fullPermission' }
+  | { type: 'session-mode-switched'; mode: 'plan' | 'normal' | 'fullPermission' }
   | { type: 'session-done'; finishReason: string; steps: number; rolloutFileName: string }
   | { type: 'session-error'; code: string; message: string };
 

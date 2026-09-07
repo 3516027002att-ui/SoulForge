@@ -4,6 +4,7 @@
  * Credentials never appear in diagnostics or returned DTOs.
  */
 
+import { randomUUID } from 'node:crypto';
 import type {
   ChatMessage,
   ModelCompleteRequest,
@@ -30,6 +31,7 @@ export interface OpenAiResponsesAdapterOptions {
   baseUrl: string;
   apiKey: string;
   model: string;
+  sessionId?: string | undefined;
   fetchImpl?: typeof fetch;
 }
 
@@ -39,20 +41,26 @@ export class OpenAiResponsesAdapter implements ModelServiceAdapter {
   private readonly baseUrl: string;
   private readonly apiKey: string;
   private readonly model: string;
+  private readonly defaultSessionId?: string | undefined;
   private readonly fetchImpl: typeof fetch;
 
   constructor(options: OpenAiResponsesAdapterOptions) {
     this.baseUrl = normalizeServiceBaseUrl(options.baseUrl);
     this.apiKey = options.apiKey;
     this.model = options.model;
+    this.defaultSessionId = options.sessionId;
     this.fetchImpl = options.fetchImpl ?? fetch;
+  }
+
+  private resolveSessionId(explicitSessionId?: string): string {
+    return explicitSessionId?.trim() || this.defaultSessionId?.trim() || randomUUID();
   }
 
   async complete(request: ModelCompleteRequest): Promise<ModelCompleteResult> {
     const body = buildResponsesBody(this.model, request, false);
     const { signal, cleanup } = createRequestSignal(request.signal, request.timeoutMs);
     const attempt = await fetchResponsesWithReasoningFallback({
-      fetchResponse: (nextBody) => this.fetchResponses(nextBody, signal),
+      fetchResponse: (nextBody) => this.fetchResponses(nextBody, signal, request.sessionId),
       model: this.model,
       request,
       stream: false,
@@ -81,14 +89,15 @@ export class OpenAiResponsesAdapter implements ModelServiceAdapter {
     return parseResponsesPayload(json);
   }
 
-  async listModels(options?: { signal?: AbortSignal; timeoutMs?: number }): Promise<ModelListResult> {
+  async listModels(options?: { signal?: AbortSignal; timeoutMs?: number; sessionId?: string }): Promise<ModelListResult> {
     const { signal, cleanup } = createRequestSignal(options?.signal, options?.timeoutMs);
     let response: Response;
     try {
       response = await this.fetchImpl(`${this.baseUrl}/v1/models`, {
         method: 'GET',
         headers: {
-          authorization: `Bearer ${this.apiKey}`
+          authorization: `Bearer ${this.apiKey}`,
+          'x-opencode-session': this.resolveSessionId(options?.sessionId)
         },
         ...(signal ? { signal } : {})
       });
@@ -127,7 +136,7 @@ export class OpenAiResponsesAdapter implements ModelServiceAdapter {
     const body = buildResponsesBody(this.model, request, true);
     const { signal, cleanup } = createRequestSignal(request.signal, request.timeoutMs);
     const attempt = await fetchResponsesWithReasoningFallback({
-      fetchResponse: (nextBody) => this.fetchResponses(nextBody, signal),
+      fetchResponse: (nextBody) => this.fetchResponses(nextBody, signal, request.sessionId),
       model: this.model,
       request,
       stream: true,
@@ -318,12 +327,13 @@ export class OpenAiResponsesAdapter implements ModelServiceAdapter {
     }
   }
 
-  private fetchResponses(body: Record<string, unknown>, signal?: AbortSignal): Promise<Response> {
+  private fetchResponses(body: Record<string, unknown>, signal?: AbortSignal, sessionId?: string): Promise<Response> {
     return this.fetchImpl(`${this.baseUrl}/v1/responses`, {
       method: 'POST',
       headers: {
         'content-type': 'application/json',
-        authorization: `Bearer ${this.apiKey}`
+        authorization: `Bearer ${this.apiKey}`,
+        'x-opencode-session': this.resolveSessionId(sessionId)
       },
       body: JSON.stringify(body),
       ...(signal ? { signal } : {})
@@ -524,7 +534,7 @@ function toResponsesTool(tool: ToolDefinition): Record<string, unknown> {
     type: 'function',
     name: tool.name,
     description: tool.description,
-    parameters: tool.parametersJsonSchema
+    parameters: tool.parametersJsonSchema ?? { type: 'object', properties: {} }
   };
 }
 

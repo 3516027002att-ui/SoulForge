@@ -497,6 +497,7 @@ export function App(): ReactElement {
   const agentEventReplaySessionRef = useRef<string | null>(null);
   const agentEventSeenSeqsRef = useRef(new Map<string, Set<number>>());
   const pendingAgentEventsRef = useRef(new Map<string, AiAgentEventEnvelope[]>());
+  const agentCancelRequestedRef = useRef<boolean>(false);
   const [agentServices, setAgentServices] = useState<ModelServiceChoice[]>([]);
   const [agentServiceId, setAgentServiceId] = useState<string | null>(null);
   const [agentSessions, setAgentSessions] = useState<AgentSessionRow[]>([]);
@@ -988,6 +989,16 @@ export function App(): ReactElement {
     if (!bridge) return undefined;
     return bridge.onAiAgentEvent((envelope) => {
       if (!Number.isSafeInteger(envelope.seq) || envelope.seq < 1) return;
+      if (envelope.event.type === 'session-mode-switched') {
+        const raw = (envelope.event as { mode?: string }).mode;
+        const target = raw === 'fullPermission' || raw === 'full' ? 'bypass'
+          : raw === 'normal' || raw === 'edit' ? 'edit'
+          : 'plan';
+        setAgentInteractionMode(target);
+        try {
+          window.localStorage.setItem('soulforge:agentInteractionMode', target);
+        } catch {}
+      }
       if (
         envelope.sessionId !== agentEventExpectedSessionRef.current
         || envelope.sessionId !== agentEventReadySessionRef.current
@@ -1002,7 +1013,7 @@ export function App(): ReactElement {
   // state 已提交后先补回放，回放完成后才开放实时折叠；这样即使终态事件
   // 先抵达，也不会在更早的 turn-started/口播之前把状态提前结算。
   useEffect(() => {
-    if (!bridge || !agentTask.sessionId) return undefined;
+    if (!bridge || !agentTask.sessionId || agentTask.sessionId.startsWith('optimistic-')) return undefined;
     const sessionId = agentTask.sessionId;
     if (agentEventReplaySessionRef.current === sessionId) return undefined;
     agentEventReplaySessionRef.current = sessionId;
@@ -2096,6 +2107,7 @@ export function App(): ReactElement {
   }
 
   function startNewAgentTask(): void {
+    agentCancelRequestedRef.current = false;
     setAgentGoal(null);
     setAiDraft(null);
     setAgentIdleNotice(null);
@@ -2268,7 +2280,7 @@ export function App(): ReactElement {
           const inspected = nextAnalysis?.inspectedFiles ?? 0;
           setStatus(`${restoredPrefix}已就绪：已索引 ${result.files.length} 个文件，解析 ${parsed} 个文本/资源${baseLabel}`);
           pushToast(
-            `RAG 知识库与符号索引构建完成（已解析 ${parsed} 个，已检查 ${inspected} 个）`,
+            `工作区符号与数据索引构建完成（已解析 ${parsed} 个，已检查 ${inspected} 个）`,
             'ok'
           );
         } catch {
@@ -2874,38 +2886,62 @@ export function App(): ReactElement {
       canAutoResumeAgentTask(agentTask) ? agentTask.rolloutFileName! : undefined
     );
 
+    // 0ms 乐观响应：点击“发送”按钮瞬间立即切换至对话时间线，渲染用户提问气泡与等待动画，杜绝界面停留欢迎页干等
+    const previousTask = agentTask;
+    const previousGoal = agentGoal;
+    const optimisticSessionId = `optimistic-${Date.now()}`;
+    agentCancelRequestedRef.current = false;
+    setAgentGoal(prompt);
+    setAgentIdleNotice(null);
+    setAgentTask(startAgentTask(optimisticSessionId, Date.now(), previousTask, previousGoal));
     setStatus('正在发起 AI 任务...');
-    const result = await bridge.runAiAgent({
-      configId: agentServiceId,
-      prompt,
-      ...(effectiveResumePath !== undefined ? { resumeSessionPath: effectiveResumePath } : {}),
-      // T6-3：选区逻辑名/资源 kind 作为可选元数据随任务提交给模型；不自动插入
-      // `#路径` chip（那会污染 prompt 文本，且选区只是参考不是默认任务对象）。
-      ...(selectedFile
-        ? { selection: { label: selectedFile.relativePath, resourceKind: selectedFile.resourceKind } }
-        : {}),
-      // S15/S19 失败面：最近一次打开失败（KRAK 缺 Oodle / 读取失败）随任务提交，
-      // main 校验后进系统提示；Agent 能直接解释原因和下一步，不等用户复制日志。
-      ...(lastOpenFailure ? { openFailure: lastOpenFailure } : {}),
-      // AGENT-60D：已添加的 §12.11 opaque 资源引用随任务提交（main 校验
-      // agentReferenceRegistry 的跨 sender；空数组 = 无引用）。
-      ...(agentResources.length > 0 ? { resources: agentResources } : {}),
-      ...(agentAttachments.length > 0 ? { attachments: agentAttachments } : {}),
-      streaming: true,
-      timeoutMs: 180_000,
-      // 工作区 Agent 默认启用一次性 RAG 预检；main 会优先使用内存
-      // active corpus，并等待正在进行的那一次语义分析完成，不会按查询重扫。
-      useRagSearch: true,
-      // S32：输入条的思考强度随任务提交（优先于服务级默认）。
-      thinkingLevel: aiThinking,
-      // Ask/Plan = 只读计划；Edit = 可经 Patch Engine 提交（需审批卡）；Bypass = 全自动提交（免审批）。
-      mode: agentInteractionMode === 'bypass'
-        ? 'fullPermission'
-        : agentInteractionMode === 'edit'
-          ? 'normal'
-          : 'plan',
-      ...(agentInteractionMode === 'bypass' ? { approvalRequiredLevels: [] } : {})
-    });
+
+    let result: Awaited<ReturnType<NonNullable<typeof bridge>['runAiAgent']>>;
+    try {
+      result = await bridge.runAiAgent({
+        configId: agentServiceId,
+        prompt,
+        ...(effectiveResumePath !== undefined ? { resumeSessionPath: effectiveResumePath } : {}),
+        // T6-3：选区逻辑名/资源 kind 作为可选元数据随任务提交给模型；不自动插入
+        // `#路径` chip（那会污染 prompt 文本，且选区只是参考不是默认任务对象）。
+        ...(selectedFile
+          ? { selection: { label: selectedFile.relativePath, resourceKind: selectedFile.resourceKind } }
+          : {}),
+        // S15/S19 失败面：最近一次打开失败（KRAK 缺 Oodle / 读取失败）随任务提交，
+        // main 校验后进系统提示；Agent 能直接解释原因和下一步，不等用户复制日志。
+        ...(lastOpenFailure ? { openFailure: lastOpenFailure } : {}),
+        // AGENT-60D：已添加的 §12.11 opaque 资源引用随任务提交（main 校验
+        // agentReferenceRegistry 的跨 sender；空数组 = 无引用）。
+        ...(agentResources.length > 0 ? { resources: agentResources } : {}),
+        ...(agentAttachments.length > 0 ? { attachments: agentAttachments } : {}),
+        streaming: true,
+        timeoutMs: 180_000,
+        // 工作区 Agent 默认启用一次性 RAG 预检；main 会优先使用内存
+        // active corpus，并等待正在进行的那一次语义分析完成，不会按查询重扫。
+        useRagSearch: true,
+        // S32：输入条的思考强度随任务提交（优先于服务级默认）。
+        thinkingLevel: aiThinking,
+        // Ask/Plan = 只读计划；Edit = 可经 Patch Engine 提交（需审批卡）；Bypass = 全自动提交（免审批）。
+        mode: agentInteractionMode === 'bypass'
+          ? 'fullPermission'
+          : agentInteractionMode === 'edit'
+            ? 'normal'
+            : 'plan',
+        ...(agentInteractionMode === 'bypass' ? { approvalRequiredLevels: [] } : {})
+      });
+    } catch (error) {
+      setAgentTask((current) => ({
+        ...current,
+        phase: 'error',
+        error: {
+          code: 'RUN_AGENT_FAILED',
+          message: error instanceof Error ? error.message : String(error)
+        }
+      }));
+      setStatus('AI 任务发起异常');
+      return;
+    }
+
     if (!result.ok) {
       setAgentTask((current) => ({
         ...current,
@@ -2916,14 +2952,33 @@ export function App(): ReactElement {
       pushToast(`AI 任务未发起：${result.error.message}`, 'warn');
       return;
     }
-    const previousTask = agentTask;
-    const previousGoal = agentGoal;
-    setAgentGoal(prompt);
+
+    // 成功受理：更新为真实主进程 sessionId，开放事件回放与接收
     agentEventExpectedSessionRef.current = result.sessionId;
     agentEventReadySessionRef.current = null;
     agentEventReplaySessionRef.current = null;
     agentEventSeenSeqsRef.current.delete(result.sessionId);
-    setAgentTask(startAgentTask(result.sessionId, Date.now(), previousTask, previousGoal));
+
+    // 若在发起等待期间用户已点击取消，立即向主进程补发 cancel
+    if (agentCancelRequestedRef.current) {
+      void bridge.cancelAiAgent(result.sessionId);
+      setAgentTask((current) => markAgentTaskCancelling({
+        ...current,
+        sessionId: result.sessionId
+      }));
+      setStatus('已发出取消请求，等待当前步骤让出');
+      return;
+    }
+
+    setAgentTask((current) => {
+      if (current.sessionId === optimisticSessionId) {
+        return {
+          ...current,
+          sessionId: result.sessionId
+        };
+      }
+      return current;
+    });
     setStatus('AI 任务已发起，进度会在 Agent 面板更新');
   }
 
@@ -2942,9 +2997,12 @@ export function App(): ReactElement {
       announceDesktopOnly('取消 AI 任务');
       return;
     }
+    agentCancelRequestedRef.current = true;
     setAgentTask((current) => markAgentTaskCancelling(current));
     setStatus('已发出取消请求，等待当前步骤让出');
-    await bridge.cancelAiAgent(sessionId);
+    if (!sessionId.startsWith('optimistic-')) {
+      await bridge.cancelAiAgent(sessionId);
+    }
   }
 
   /**

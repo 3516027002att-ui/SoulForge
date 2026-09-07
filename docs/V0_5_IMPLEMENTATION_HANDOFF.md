@@ -1247,14 +1247,15 @@ npm run build
 
 <!-- SOULFORGE_PROJECTION_BEGIN:command-index -->
 
-全部 210 条已登记验证命令按层级列出。层级顺序即执行顺序（先快后慢，早失败早停）。
+全部 278 条已登记验证命令按层级列出。层级顺序即执行顺序（先快后慢，早失败早停）。
 
 一次跑完某一层：`node scripts/verify.mjs --tier <层级>`；跑全部：`npm run verify:all`。
 
-**governance**（20 条）
+**governance**（21 条）
 
 ~~~powershell
 npm run handoff:fingerprint
+npm run test:agent-task-record-gate
 npm run test:cross-machine-fixtures
 npm run test:gov-cli
 npm run test:governance
@@ -1276,7 +1277,7 @@ npm run test:verify-entrypoint
 npm run verify:audit
 ~~~
 
-**unit**（74 条）
+**unit**（112 条）
 
 ~~~powershell
 npm run test
@@ -1285,13 +1286,46 @@ npm run test:action-motion-identity
 npm run test:agent-approval-gate
 npm run test:agent-capability-wiring
 npm run test:agent-knowledge-refresh
+npm run test:agent-performance-fixes
 npm run test:agent-permission-unified
+npm run test:agent-production-scenario
 npm run test:agent-tool-schema
 npm run test:ai-conformance
 npm run test:ai-fake-loop
 npm run test:ai-tool-permission
 npm run test:ai-tool-write-path
 npm run test:animation-playback-clock
+npm run test:audit-change-set-commit
+npm run test:audit-sf-00-unit
+npm run test:audit-sf-01-unit
+npm run test:audit-sf-02-unit
+npm run test:audit-sf-03-unit
+npm run test:audit-sf-04-unit
+npm run test:audit-sf-05-unit
+npm run test:audit-sf-06-unit
+npm run test:audit-sf-07-unit
+npm run test:audit-sf-08-unit
+npm run test:audit-sf-09-unit
+npm run test:audit-sf-10-unit
+npm run test:audit-sf-11-unit
+npm run test:audit-sf-12-unit
+npm run test:audit-sf-13-unit
+npm run test:audit-sf-14-unit
+npm run test:audit-sf-15-unit
+npm run test:audit-sf-16-unit
+npm run test:audit-sf-17-unit
+npm run test:audit-sf-18-unit
+npm run test:audit-sf-19-unit
+npm run test:audit-sf-20-unit
+npm run test:audit-sf-21-unit
+npm run test:audit-sf-22-unit
+npm run test:audit-sf-23-unit
+npm run test:audit-sf-24-unit
+npm run test:audit-sf-25-unit
+npm run test:audit-sf-26-unit
+npm run test:audit-sf-27-unit
+npm run test:audit-sf-28-unit
+npm run test:audit-sf-29-unit
 npm run test:bridge-command-advertisement
 npm run test:bridge-optional-args
 npm run test:bridge-roots
@@ -1308,6 +1342,10 @@ npm run test:editor-layout
 npm run test:editor-mutation-service
 npm run test:emedf-completion-catalog
 npm run test:emedf-schema
+npm run test:emedf-session-wiring
+npm run test:emevd-agent-event-read
+npm run test:emevd-agent-tools
+npm run test:emevd-cross-file-index
 npm run test:emevd-dark-script-compiler
 npm run test:emevd-dark-script-compiler-s14
 npm run test:emevd-dsl-compiler
@@ -1351,6 +1389,7 @@ npm run test:ui-localization
 npm run test:vault-encrypt-contract
 npm run test:vault-ipc-contract
 npm run test:workbench-projections
+npm run test:workspace-startup
 npm run test:yapped-param-metadata-source
 npm run typecheck
 ~~~
@@ -1412,11 +1451,12 @@ npm run test:upgrade-recovery
 npm run test:writer-failure-matrix
 ~~~
 
-**native**（54 条）
+**native**（83 条）
 
 ~~~powershell
 npm run bridge:verify:bnd4-transaction
 npm run bridge:verify:bnd4-writer
+npm run bridge:verify:character-preview
 npm run bridge:verify:collision-nav
 npm run bridge:verify:dcx-documents
 npm run bridge:verify:emevd
@@ -1429,6 +1469,7 @@ npm run bridge:verify:flver-writer
 npm run bridge:verify:fmg
 npm run bridge:verify:gparam
 npm run bridge:verify:gparam-writer
+npm run bridge:verify:luabnd
 npm run bridge:verify:msb
 npm run bridge:verify:msb-all
 npm run bridge:verify:msb-writer
@@ -1441,6 +1482,32 @@ npm run bridge:verify:tpf-writer
 npm run probe:behavior-headers
 npm run test:action-mature-oracle
 npm run test:action-real-corpus
+npm run test:audit-sf-01-native
+npm run test:audit-sf-02-native
+npm run test:audit-sf-03-native
+npm run test:audit-sf-04-native
+npm run test:audit-sf-05-native
+npm run test:audit-sf-06-native
+npm run test:audit-sf-07-native
+npm run test:audit-sf-08-native
+npm run test:audit-sf-09-native
+npm run test:audit-sf-10-native
+npm run test:audit-sf-11-native
+npm run test:audit-sf-12-native
+npm run test:audit-sf-13-native
+npm run test:audit-sf-14-native
+npm run test:audit-sf-15-native
+npm run test:audit-sf-16-native
+npm run test:audit-sf-17-native
+npm run test:audit-sf-20-native
+npm run test:audit-sf-21-native
+npm run test:audit-sf-22-native
+npm run test:audit-sf-23-native
+npm run test:audit-sf-24-native
+npm run test:audit-sf-25-native
+npm run test:audit-sf-26-native
+npm run test:audit-sf-27-native
+npm run test:audit-sf-29-native
 npm run test:bridge-exit-hygiene
 npm run test:corpus-manifest
 npm run test:emevd-corpus-matrix
@@ -1452,6 +1519,7 @@ npm run test:krak-combination-mutation
 npm run test:me3-sekiro-session
 npm run test:native-corpus-writeback
 npm run test:native-knowledge-refresh
+npm run test:native-luabnd
 npm run test:native-map-rollback
 npm run test:native-preview
 npm run test:native-writer-failure-matrix
@@ -1486,12 +1554,13 @@ npm run test:release-cross-machine
 npm run test:release-reproducible
 ~~~
 
-另有 21 条 script 显式排除在验证调度之外（写入命令、外部工具或入口自身）：
+另有 22 条 script 显式排除在验证调度之外（写入命令、外部工具或入口自身）：
 
 - `verify`：统一验证入口本身，自调度会无限递归
 - `verify:all`：同上（全层级别名）
 - `verify:list`：同上（只列计划，不是验证）
 - `dev`：交互式开发服务器，不是验证
+- `agent:simulate`：真实 Agent 链路模拟入口，依赖真实模型与本地 Mod 交互，按需手工运行
 - `ai-logs:sync`：用于从 Antigravity 提取或同步真实 AI 会话日志到 testdata/ai-audit-transcripts 的离线同步工具，不是验证
 - `bridge:publish`：发布产物构建。**当前无任何调用方**（release 层 10 条脚本均不调它，实测 2026-08-08）；跑一次 Release publish 要几分钟且产物不参与任何验证判据，故不进 tier。若将来 release 链要用它，请一并把 runBridge.ts 的 Release 候选路径纳入验证——那两条路径至今从未被生成过。
 - `launcher:build`：启动器二进制发布构建，不是验证

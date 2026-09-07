@@ -1,0 +1,50 @@
+{
+  "schemaVersion": 1,
+  "taskId": "SF-00",
+  "baseCommit": "f9cb0cd76a11bfa2857b48acbc779bfac0355d96",
+  "implementationCommit": "f9cb0cd76a11bfa2857b48acbc779bfac0355d96+local",
+  "status": {
+    "implementation": "completed",
+    "algorithm": "verified_algorithm",
+    "native": "not_run",
+    "product": "not_run"
+  },
+  "changedFiles": [
+    "packages/shared/src/audit-execution-contracts.ts",
+    "packages/shared/src/index.ts",
+    "scripts/audit-execution/check-verify-summary.mjs",
+    "docs/audit-execution/tasks/SF-00.required-suites.json",
+    "packages/core/src/testing/runAuditSf00Smoke.ts",
+    "packages/core/package.json",
+    "package.json",
+    "scripts/verify/tiers.mjs"
+  ],
+  "productionSymbols": [
+    "stableJson",
+    "ResourceIdentity",
+    "resourceIdentityKey",
+    "ObjectIdentity",
+    "objectIdentityKey",
+    "ClaimIdentity",
+    "claimIdentityKey",
+    "SnapshotVersion",
+    "snapshotVersionKey",
+    "AuditConfirmationReceipt",
+    "confirmationReceiptKey",
+    "AUDIT_EXECUTION_ERROR_CODES",
+    "isAuditExecutionErrorCode",
+    "checkVerifySummary"
+  ],
+  "tests": [
+    {
+      "suite": "test:audit-sf-00-unit",
+      "layer": "unit",
+      "outcome": "passed",
+      "executedCases": 1,
+      "artifactHash": "248EA76FBECBF75F62CA22F5D4CF2A410A05D83854634A73425CE81ECA6080BE"
+    }
+  ],
+  "schemaMigrations": [],
+  "frontendContract": null,
+  "remainingBlocks": []
+}

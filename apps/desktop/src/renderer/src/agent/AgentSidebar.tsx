@@ -416,11 +416,34 @@ export function AgentSidebar(props: AgentSidebarProps): ReactElement {
 
   const selectedService = task.services.find((service) => service.id === task.selectedServiceId);
   void selectedService;
+
+  const planReady = (messages ?? []).some((m) => {
+    if (m.kind !== 'assistant') return false;
+    const text = m.markdown;
+    return (
+      text.includes('【修改栏目清单】')
+      || text.includes('修改栏目清单')
+      || text.includes('Plan 只读规划')
+      || (text.includes('若确认执行') && text.includes('模式'))
+    );
+  }) || conversationItems.some((item) => {
+    if (item.kind !== 'assistant') return false;
+    const text = item.text;
+    return (
+      text.includes('【修改栏目清单】')
+      || text.includes('修改栏目清单')
+      || text.includes('Plan 只读规划')
+      || (text.includes('若确认执行') && text.includes('模式'))
+    );
+  });
+
   const headerState = awaitingApproval
     ? (elapsedText ? `等待批准 (${elapsedText})` : '等待批准')
-    : taskRunning
-      ? (elapsedText ? `执行中 (${elapsedText})` : '执行中')
-      : undefined;
+    : taskState.retry !== null
+      ? (elapsedText ? `重试中 (${elapsedText})` : '重试中')
+      : taskRunning
+        ? (elapsedText ? `执行中 (${elapsedText})` : '执行中')
+        : undefined;
 
   return (
     <aside
@@ -506,6 +529,7 @@ export function AgentSidebar(props: AgentSidebarProps): ReactElement {
             onThinkingChange={onThinkingChange}
             protocol={protocol}
             testActive={task.selectedServiceId === 'test-service' || task.services.some((s) => s.id === 'test-service')}
+            planReady={planReady}
           />
         </>
       ) : (

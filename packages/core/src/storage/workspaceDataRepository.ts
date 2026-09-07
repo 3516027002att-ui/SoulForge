@@ -519,6 +519,35 @@ WHERE workspace_id = ? AND relative_path = ? AND file_sha256 = ?`).get(this.work
     }
   }
 
+  getSemanticFileCacheRow(relativePath: string): {
+    relativePath: string;
+    fileSha256: string;
+    resourceKind: string;
+    payloadJson: string;
+    mtimeMs: number;
+    updatedAt: string;
+  } | null {
+    const row = this.database.prepare<[string, string], {
+      relative_path: string;
+      file_sha256: string;
+      resource_kind: string;
+      payload_json: string;
+      mtime_ms: number;
+      updated_at: string;
+    }>(`
+SELECT relative_path, file_sha256, resource_kind, payload_json, mtime_ms, updated_at
+FROM semantic_file_cache WHERE workspace_id = ? AND relative_path = ?`).get(this.workspaceId, relativePath);
+    if (!row) return null;
+    return {
+      relativePath: row.relative_path,
+      fileSha256: row.file_sha256,
+      resourceKind: row.resource_kind,
+      payloadJson: row.payload_json,
+      mtimeMs: row.mtime_ms,
+      updatedAt: row.updated_at
+    };
+  }
+
   getAllSemanticFileCacheRows(): Array<{
     relativePath: string;
     fileSha256: string;

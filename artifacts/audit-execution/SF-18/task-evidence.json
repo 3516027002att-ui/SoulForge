@@ -1,0 +1,50 @@
+{
+  "schemaVersion": 1,
+  "taskId": "SF-18",
+  "baseCommit": "f9cb0cd76a11bfa2857b48acbc779bfac0355d96",
+  "implementationCommit": "f9cb0cd76a11bfa2857b48acbc779bfac0355d96+local",
+  "status": {
+    "implementation": "completed",
+    "algorithm": "verified_algorithm",
+    "native": "not_run",
+    "product": "not_run"
+  },
+  "changedFiles": [
+    "package.json",
+    "packages/core/package.json",
+    "packages/core/src/rag/retrieve.ts",
+    "packages/core/src/rag/hybridRetrieve.ts",
+    "packages/core/src/rag/lookupIndex.ts",
+    "packages/core/src/rag/persist.ts",
+    "packages/core/src/rag/retrievalScope.ts",
+    "packages/core/src/rag/topK.ts",
+    "packages/core/src/testing/runAuditRagScopeSmoke.ts",
+    "packages/core/src/testing/runAuditSf18Smoke.ts",
+    "scripts/verify/tiers.mjs"
+  ],
+  "productionSymbols": [
+    "normalizeRetrievalScope",
+    "isChunkEligible",
+    "retrievalCandidateLimit",
+    "topK",
+    "cosine",
+    "retrieveEvidence",
+    "retrieveEvidenceHybrid",
+    "fuseRrf",
+    "ensureLookupIndex",
+    "refreshReferenceAdjacency",
+    "persistRagCorpus"
+  ],
+  "tests": [
+    {
+      "suite": "test:audit-sf-18-unit",
+      "layer": "unit",
+      "outcome": "passed",
+      "executedCases": 15,
+      "artifactHash": "EF9EBC30B5295060B0195DCBBBCE9A02F7CD011780786FF06CE10578B73AE034"
+    }
+  ],
+  "schemaMigrations": [],
+  "frontendContract": null,
+  "remainingBlocks": []
+}

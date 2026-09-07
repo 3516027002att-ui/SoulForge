@@ -29,6 +29,19 @@ internal sealed class BridgeCommandService
     {
         var command = rawCommand.Trim().ToLowerInvariant();
 
+        // The daemon performs the same admission check, but the standalone
+        // production CLI must not expose a second command universe. The
+        // descriptor catalog is the dispatch source for both entry points;
+        // unknown names fail before any file probing or writer is reached.
+        if (!BridgeCommandDescriptorCatalog.TryGet(command, out _))
+        {
+            return BridgeResult<object>.Failed(
+                file,
+                "unknown",
+                "UNKNOWN_COMMAND",
+                $"Unknown bridge command: {command}");
+        }
+
         // options 的默认值是 default(JsonElement)，其 ValueKind 为 Undefined。
         // 对 Undefined 调 TryGetProperty 抛 InvalidOperationException
         // ("Operation is not valid due to the current state of the object.")。
@@ -3036,7 +3049,16 @@ internal sealed class BridgeCommandService
             }
             catch (TaeWriteBlockedException ex)
             {
-                return BridgeResult<object>.Failed(file, "action", "TAE_WRITE_BLOCKED_UNKNOWN_STRUCTURE", ex.Message, ex.Details);
+                var primaryCode = ex.Code ?? "TAE_WRITE_BLOCKED_UNKNOWN_STRUCTURE";
+                var diags = new List<Diagnostic>
+                {
+                    new("error", primaryCode, ex.Message, BridgeResult<object>.MakeSourceUri(file), ex.Details)
+                };
+                if (primaryCode != "TAE_WRITE_BLOCKED_UNKNOWN_STRUCTURE")
+                {
+                    diags.Add(new("error", "TAE_WRITE_BLOCKED_UNKNOWN_STRUCTURE", ex.Message, BridgeResult<object>.MakeSourceUri(file), ex.Details));
+                }
+                return BridgeResult<object>.Failed(file, "action", diags, ex.Details);
             }
             catch (Exception ex) when (ex is InvalidDataException or NotSupportedException or IOException)
             {
@@ -3094,6 +3116,10 @@ internal sealed class BridgeCommandService
                     "map",
                     "MSB_STAGING_WRITE_KRAK_OODLE_UNAVAILABLE",
                     "这份地图是 KRAK 压缩，写回需要 Oodle 运行库：到「开始」页选择含 sekiro.exe 的原版目录后再保存。");
+            }
+            catch (MsbSafetyGateException ex)
+            {
+                return BridgeResult<object>.Failed(file, "map", ex.Code, ex.Message);
             }
             catch (MsbUnregisteredEntityException ex)
             {
@@ -3451,13 +3477,13 @@ internal sealed class BridgeCommandService
     {
         if (result.Status is "absent" or "decoded") return;
         var severity = result.Status == "invalid" ? "error" : "warning";
-        var code = result.Status switch
-        {
-            "unsupported" => "FLVER_VERTEX_COLOR_UNSUPPORTED_LAYOUT",
-            "truncated" => "FLVER_VERTEX_COLOR_TRUNCATED",
-            "invalid" => "FLVER_VERTEX_COLOR_INVALID",
-            _ => "FLVER_VERTEX_COLOR_UNAVAILABLE"
-        };
+        var code = result.Status == "unsupported"
+            ? "FLVER_VERTEX_COLOR_UNSUPPORTED_LAYOUT"
+            : result.Status == "truncated"
+                ? "FLVER_VERTEX_COLOR_TRUNCATED"
+                : result.Status == "invalid"
+                    ? "FLVER_VERTEX_COLOR_INVALID"
+                    : "FLVER_VERTEX_COLOR_UNAVAILABLE";
         diagnostics.Add(new Diagnostic(
             severity,
             code,

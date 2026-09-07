@@ -1,0 +1,26 @@
+{
+  "format": "TPF/DDS",
+  "command": "write-tpf-texture-replace",
+  "productionSymbol": "BridgeCommandService.DispatchAsync",
+  "sourceFile": "bridge/SoulForge.Bridge/BridgeCommandService.cs",
+  "variant": "texture-mip-chain",
+  "writableOperations": [
+    "profile-confirmed-texture-replace"
+  ],
+  "writerProfile": "candidate",
+  "preconditions": [
+    "format/dimension/mip validation"
+  ],
+  "postconditions": [
+    "native reread",
+    "mip and byte-length validation"
+  ],
+  "independentOracle": "native-reader-only",
+  "productTrace": "not_run",
+  "missingEvidence": [
+    "independent compression oracle",
+    "production source anchor missing"
+  ],
+  "readable": false,
+  "nativeFixtures": []
+}

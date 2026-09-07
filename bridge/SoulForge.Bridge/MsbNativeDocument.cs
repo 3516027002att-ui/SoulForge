@@ -43,7 +43,14 @@ internal sealed class MsbNativeDocument
     private const int EventTypeOffset = 0x0C;
     private const int RouteTypeOffset = 0x10;
 
-    private const int ParamHeaderSize = 0x10;
+    // Relative pointer & EntityID layout constants (Sekiro MSBS verified layout).
+    private const int PartEntityDataOffsetField = 0x60;
+    private const int RegionBaseData3OffsetField = 0x50;
+    private const int InternalEntryIdOffset = 0x0C;
+    private const int PartMinimumHeaderBytes = 0xA0;
+    private const int RegionMinimumHeaderBytes = 0x60;
+
+    internal const int ParamHeaderSize = 0x10;
     private const int FirstParamOffset = 0x10;
 
     private MsbNativeDocument(
@@ -55,6 +62,7 @@ internal sealed class MsbNativeDocument
         IReadOnlyList<MsbMapEvent> events,
         IReadOnlyList<MsbRoute> routes,
         IReadOnlyDictionary<string, MsbParam> paramsByFamily,
+        IReadOnlyDictionary<long, long> entrySectionEnds,
         int partsSectionOffset,
         int firstPartOffset)
     {
@@ -66,6 +74,7 @@ internal sealed class MsbNativeDocument
         Events = events;
         Routes = routes;
         Params = paramsByFamily;
+        EntrySectionEnds = entrySectionEnds;
         PartsSectionOffset = partsSectionOffset;
         FirstPartOffset = firstPartOffset;
     }
@@ -78,7 +87,8 @@ internal sealed class MsbNativeDocument
     public IReadOnlyList<MsbMapEvent> Events { get; }
     public IReadOnlyList<MsbRoute> Routes { get; }
     /// <summary>8 个 param 链的原始索引，delete mutation 需要重写偏移表。</summary>
-    private IReadOnlyDictionary<string, MsbParam> Params { get; }
+    internal IReadOnlyDictionary<string, MsbParam> Params { get; }
+    public IReadOnlyDictionary<long, long> EntrySectionEnds { get; }
     public int PartsSectionOffset { get; }
     public int FirstPartOffset { get; }
     public string SourceHash => Hash(SourceBytes);
@@ -94,13 +104,14 @@ internal sealed class MsbNativeDocument
             throw new NotSupportedException($"不支持的 MSB 版本 {version}。");
 
         var paramsByFamily = ReadParams(source);
+        var entrySectionEnds = BuildEntrySectionEnds(source, paramsByFamily);
 
         var models = ReadModels(source, paramsByFamily["MODEL_PARAM_ST"]);
         var events = ReadEvents(source, paramsByFamily["EVENT_PARAM_ST"]);
-        var regions = ReadRegions(source, paramsByFamily["POINT_PARAM_ST"]);
+        var regions = ReadRegions(source, paramsByFamily["POINT_PARAM_ST"], entrySectionEnds);
         var routes = ReadRoutes(source, paramsByFamily["ROUTE_PARAM_ST"]);
         var partsParam = paramsByFamily["PARTS_PARAM_ST"];
-        var parts = ReadParts(source, partsParam);
+        var parts = ReadParts(source, partsParam, entrySectionEnds);
 
         return new MsbNativeDocument(
             source,
@@ -111,6 +122,7 @@ internal sealed class MsbNativeDocument
             events,
             routes,
             paramsByFamily,
+            entrySectionEnds,
             partsParam.Offset,
             parts.Count > 0 ? (int)partsParam.EntryOffsets[0] : 0);
     }
@@ -162,6 +174,60 @@ internal sealed class MsbNativeDocument
         return result;
     }
 
+    private static Dictionary<long, long> BuildEntrySectionEnds(byte[] source, Dictionary<string, MsbParam> paramsByFamily)
+    {
+        var sectionEnds = new Dictionary<long, long>();
+        foreach (var param in paramsByFamily.Values)
+        {
+            var distinctOffsets = new HashSet<long>();
+            foreach (var off in param.EntryOffsets)
+            {
+                if (off <= 0)
+                    throw new InvalidDataException($"MSB param {param.Name} entry offset 非法：0x{off:X}。");
+                if (!distinctOffsets.Add(off))
+                    throw new InvalidDataException($"MSB param {param.Name} 包含重复的 entry offset: 0x{off:X}。");
+            }
+            var sortedOffsets = param.EntryOffsets.ToArray();
+            Array.Sort(sortedOffsets);
+            long paramEnd = param.NextOffset > 0 && param.NextOffset <= source.Length ? param.NextOffset : source.Length;
+            for (var i = 0; i < sortedOffsets.Length; i++)
+            {
+                long nextEntryStart = (i + 1 < sortedOffsets.Length) ? sortedOffsets[i + 1] : paramEnd;
+                long sectionEnd = Math.Min(nextEntryStart, paramEnd);
+                if (sectionEnd <= sortedOffsets[i])
+                    throw new InvalidDataException($"MSB entry 0x{sortedOffsets[i]:X} 物理边界无效：sectionEnd=0x{sectionEnd:X}");
+                sectionEnds[sortedOffsets[i]] = sectionEnd;
+            }
+        }
+        return sectionEnds;
+    }
+
+    internal static int ResolveRelativeInt32Field(
+        byte[] source, long entryStart, int pointerFieldOffset,
+        int innerOffset, int minimumHeaderBytes, long sectionEnd)
+    {
+        try
+        {
+            if (entryStart < 0 || sectionEnd > source.LongLength || sectionEnd <= entryStart)
+                throw new InvalidDataException("MSB_ENTITY_SECTION_INVALID");
+            long pointerAt = checked(entryStart + pointerFieldOffset);
+            if (pointerAt < entryStart || pointerAt > sectionEnd - sizeof(long))
+                throw new InvalidDataException("MSB_ENTITY_POINTER_FIELD_OOB");
+            long relative = BinaryPrimitives.ReadInt64LittleEndian(
+                source.AsSpan(checked((int)pointerAt), sizeof(long)));
+            if (relative < minimumHeaderBytes)
+                throw new InvalidDataException("MSB_ENTITY_POINTER_INVALID");
+            long absolute = checked(checked(entryStart + relative) + innerOffset);
+            if (absolute < entryStart || absolute > sectionEnd - sizeof(int) || (absolute & 3) != 0)
+                throw new InvalidDataException("MSB_ENTITY_TARGET_OOB_OR_UNALIGNED");
+            return checked((int)absolute);
+        }
+        catch (OverflowException)
+        {
+            throw new InvalidDataException("MSB_ENTITY_POINTER_OVERFLOW");
+        }
+    }
+
     private static List<MsbModel> ReadModels(byte[] source, MsbParam param)
     {
         var models = new List<MsbModel>(param.EntryOffsets.Length);
@@ -197,7 +263,7 @@ internal sealed class MsbNativeDocument
         return events;
     }
 
-    private static List<MsbRegion> ReadRegions(byte[] source, MsbParam param)
+    private static List<MsbRegion> ReadRegions(byte[] source, MsbParam param, IReadOnlyDictionary<long, long> sectionEnds)
     {
         var regions = new List<MsbRegion>(param.EntryOffsets.Length);
         foreach (var rawOff in param.EntryOffsets)
@@ -207,21 +273,22 @@ internal sealed class MsbNativeDocument
             var name = ReadEntryName(source, off, nameRel);
             if (name.Contains("PARAM_ST", StringComparison.Ordinal)) continue;
             var typeId = ReadInt32(source, off + RegionTypeOffset);
+            var shapeType = ReadInt32(source, off + 0x10);
             var t = off + RegionTransformOffset;
             var posX = ReadFloat(source, t);
             var posY = ReadFloat(source, t + 4);
             var posZ = ReadFloat(source, t + 8);
             if (!IsFinite(posX) || !IsFinite(posY) || !IsFinite(posZ))
                 throw new InvalidDataException($"MSB region {name} 位置不是有限浮点。");
-            // Region rotation/scale 位于 t+0x0C/0x1C，与 Part 同布局，后续 scene-ir 可用。
             var rotX = ReadFloat(source, t + 12);
             var rotY = ReadFloat(source, t + 16);
             var rotZ = ReadFloat(source, t + 20);
-            var scaleX = ReadFloat(source, t + 28);
-            var scaleY = ReadFloat(source, t + 32);
-            var scaleZ = ReadFloat(source, t + 36);
-            var entityId = ReadInt32(source, off + 0x0C);
-            regions.Add(new MsbRegion(off, name, typeId, posX, posY, posZ, rotX, rotY, rotZ, scaleX, scaleY, scaleZ, entityId));
+            var internalEntryId = ReadInt32(source, off + InternalEntryIdOffset);
+            if (!sectionEnds.TryGetValue(off, out var sectionEnd))
+                throw new InvalidDataException($"MSB region 0x{off:X} 缺少物理边界信息。");
+            var entityIdAddress = ResolveRelativeInt32Field(source, off, RegionBaseData3OffsetField, 4, RegionMinimumHeaderBytes, sectionEnd);
+            var entityId = ReadInt32(source, entityIdAddress);
+            regions.Add(new MsbRegion(off, name, typeId, shapeType, posX, posY, posZ, rotX, rotY, rotZ, internalEntryId, entityId));
         }
         return regions;
     }
@@ -244,7 +311,7 @@ internal sealed class MsbNativeDocument
         return routes;
     }
 
-    private static List<MsbPart> ReadParts(byte[] source, MsbParam param)
+    private static List<MsbPart> ReadParts(byte[] source, MsbParam param, IReadOnlyDictionary<long, long> sectionEnds)
     {
         var parts = new List<MsbPart>(param.EntryOffsets.Length);
         foreach (var rawOff in param.EntryOffsets)
@@ -267,8 +334,12 @@ internal sealed class MsbNativeDocument
             var scaleX = ReadFloat(source, off + PartScaleOffset);
             var scaleY = ReadFloat(source, off + PartScaleOffset + 4);
             var scaleZ = ReadFloat(source, off + PartScaleOffset + 8);
-            var entityId = ReadInt32(source, off + 0x0C);
-            parts.Add(new MsbPart(off, name, typeId, modelIndex, posX, posY, posZ, rotX, rotY, rotZ, scaleX, scaleY, scaleZ, entityId));
+            var internalEntryId = ReadInt32(source, off + InternalEntryIdOffset);
+            if (!sectionEnds.TryGetValue(off, out var sectionEnd))
+                throw new InvalidDataException($"MSB part 0x{off:X} 缺少物理边界信息。");
+            var entityIdAddress = ResolveRelativeInt32Field(source, off, PartEntityDataOffsetField, 0, PartMinimumHeaderBytes, sectionEnd);
+            var entityId = ReadInt32(source, entityIdAddress);
+            parts.Add(new MsbPart(off, name, typeId, modelIndex, posX, posY, posZ, rotX, rotY, rotZ, scaleX, scaleY, scaleZ, internalEntryId, entityId));
         }
         return parts;
     }
@@ -317,6 +388,8 @@ internal sealed class MsbNativeDocument
                 pair.First.Offset == pair.Second.Offset
                 && pair.First.Name == pair.Second.Name
                 && pair.First.TypeId == pair.Second.TypeId
+                && pair.First.InternalEntryId == pair.Second.InternalEntryId
+                && pair.First.EntityId == pair.Second.EntityId
                 && Nearly(pair.First.PosX, pair.Second.PosX)
                 && Nearly(pair.First.PosY, pair.Second.PosY)
                 && Nearly(pair.First.PosZ, pair.Second.PosZ));
@@ -325,6 +398,8 @@ internal sealed class MsbNativeDocument
                 pair.First.Offset == pair.Second.Offset
                 && pair.First.Name == pair.Second.Name
                 && pair.First.TypeId == pair.Second.TypeId
+                && pair.First.InternalEntryId == pair.Second.InternalEntryId
+                && pair.First.EntityId == pair.Second.EntityId
                 && Nearly(pair.First.PosX, pair.Second.PosX)
                 && Nearly(pair.First.PosY, pair.Second.PosY)
                 && Nearly(pair.First.PosZ, pair.Second.PosZ));
@@ -412,9 +487,8 @@ internal sealed class MsbNativeDocument
                         if (patch.RotX is not null) WriteFloat(rebuilt, t + 12, patch.RotX.Value);
                         if (patch.RotY is not null) WriteFloat(rebuilt, t + 16, patch.RotY.Value);
                         if (patch.RotZ is not null) WriteFloat(rebuilt, t + 20, patch.RotZ.Value);
-                        if (patch.ScaleX is not null) WriteFloat(rebuilt, t + 28, patch.ScaleX.Value);
-                        if (patch.ScaleY is not null) WriteFloat(rebuilt, t + 32, patch.ScaleY.Value);
-                        if (patch.ScaleZ is not null) WriteFloat(rebuilt, t + 36, patch.ScaleZ.Value);
+                        if (patch.ScaleX is not null || patch.ScaleY is not null || patch.ScaleZ is not null)
+                            throw new MsbSafetyGateException("MSB_REGION_SCALE_UNSUPPORTED", "MSB Region 不支持 scale 写入，已被安全门禁拦截。");
                     }
                     break;
                 }
@@ -438,43 +512,33 @@ internal sealed class MsbNativeDocument
                 case "set_property":
                 case "set_entity_id":
                 {
-                    if (patch.EntityId is null) throw new InvalidDataException("set_property/set_entity_id 需要 entityId。");
-                    if (patch.Family == "part")
-                    {
-                        var part = ResolvePart(patch);
-                        GuardRegisteredPart(part);
-                        WriteInt32(rebuilt, part.Offset + 0x0C, patch.EntityId.Value);
-                        break;
-                    }
-                    if (patch.Family == "region")
-                    {
-                        var reg = ResolveRegion(patch);
-                        GuardRegisteredRegion(reg);
-                        WriteInt32(rebuilt, reg.Offset + 0x0C, patch.EntityId.Value);
-                        break;
-                    }
-                    // Event +0x08 is eventId, not entityId. Do not silently
-                    // reinterpret an event identity mutation as an entityId write.
-                    throw new InvalidDataException($"MSB entityId 目标 family 不支持：{patch.Family}");
+                    if (patch.EntityId is null)
+                        throw new InvalidDataException("set_entity_id 需要提供 entityId。");
+                    var targetAddress = ResolveEntityIdAddress(patch);
+                    WriteInt32(rebuilt, targetAddress, patch.EntityId.Value);
+                    break;
                 }
                 case "delete_part":
                 {
+                    if (patch.Certificate is null || !patch.Certificate.Complete)
+                        throw new MsbSafetyGateException("MSB_REFERENCE_COVERAGE_INCOMPLETE", "MSB 结构删除引用闭包尚未完成，删除已被安全门禁拦截。");
                     var part = ResolvePart(patch);
-                    GuardRegisteredPart(part);
                     deletedPartOffsets.Add(part.Offset);
                     break;
                 }
                 case "delete_region":
                 {
+                    if (patch.Certificate is null || !patch.Certificate.Complete)
+                        throw new MsbSafetyGateException("MSB_REFERENCE_COVERAGE_INCOMPLETE", "MSB 结构删除引用闭包尚未完成，删除已被安全门禁拦截。");
                     var region = ResolveRegion(patch);
-                    GuardRegisteredRegion(region);
                     deletedRegionOffsets.Add(region.Offset);
                     break;
                 }
                 case "delete_event":
                 {
+                    if (patch.Certificate is null || !patch.Certificate.Complete)
+                        throw new MsbSafetyGateException("MSB_REFERENCE_COVERAGE_INCOMPLETE", "MSB 结构删除引用闭包尚未完成，删除已被安全门禁拦截。");
                     var ev = ResolveEvent(patch);
-                    GuardRegisteredEvent(ev);
                     deletedEventOffsets.Add(ev.Offset);
                     break;
                 }
@@ -492,6 +556,27 @@ internal sealed class MsbNativeDocument
             BatchRemoveEntriesFromParam(rebuilt, Params["EVENT_PARAM_ST"], deletedEventOffsets);
 
         return rebuilt;
+    }
+
+    public int ResolveEntityIdAddress(MsbPatch patch)
+    {
+        if (patch.Family == "part")
+        {
+            var part = ResolvePart(patch);
+            GuardRegisteredPart(part);
+            if (!EntrySectionEnds.TryGetValue(part.Offset, out var sectionEnd))
+                throw new InvalidDataException($"MSB part 0x{part.Offset:X} 缺少物理边界信息。");
+            return ResolveRelativeInt32Field(SourceBytes, part.Offset, PartEntityDataOffsetField, 0, PartMinimumHeaderBytes, sectionEnd);
+        }
+        if (patch.Family == "region")
+        {
+            var region = ResolveRegion(patch);
+            GuardRegisteredRegion(region);
+            if (!EntrySectionEnds.TryGetValue(region.Offset, out var sectionEnd))
+                throw new InvalidDataException($"MSB region 0x{region.Offset:X} 缺少物理边界信息。");
+            return ResolveRelativeInt32Field(SourceBytes, region.Offset, RegionBaseData3OffsetField, 4, RegionMinimumHeaderBytes, sectionEnd);
+        }
+        throw new MsbSafetyGateException("MSB_ENTITY_SCHEMA_UNVERIFIED", $"MSB EntityID schema 尚未通过 native 验证，仅支持 Part 和 Region：family={patch.Family}。");
     }
 
     internal MsbPart ResolvePart(MsbPatch patch)
@@ -579,6 +664,7 @@ internal sealed class MsbNativeDocument
     {
         format = "MSB",
         version = Version,
+        readerSchemaRevision = 2,
         sourceSize = SourceBytes.Length,
         sourceHash = SourceHash,
         modelCount = Models.Count,
@@ -606,6 +692,7 @@ internal sealed class MsbNativeDocument
             p.ScaleX,
             p.ScaleY,
             p.ScaleZ,
+            internalEntryId = p.InternalEntryId,
             entityId = p.EntityId
         }).ToArray(),
         regions = Regions.Select(r => new
@@ -615,15 +702,14 @@ internal sealed class MsbNativeDocument
             offset = r.Offset,
             nativeOffset = r.Offset,
             r.TypeId,
+            shapeType = r.ShapeType,
             r.PosX,
             r.PosY,
             r.PosZ,
             r.RotX,
             r.RotY,
             r.RotZ,
-            r.ScaleX,
-            r.ScaleY,
-            r.ScaleZ,
+            internalEntryId = r.InternalEntryId,
             entityId = r.EntityId
         }).ToArray(),
         events = Events.Select(e => new
@@ -653,7 +739,7 @@ internal sealed class MsbNativeDocument
         roundTrip = report ?? VerifyRoundTrip(),
         authority = "native-verified",
         authorityScope = "entries+types+transforms（偏移表驱动全枚举）；per-type 内层载荷未语义解析，源字节重写保持无损",
-        entityEdit = "part-transform+region-position-supported",
+        entityEdit = "part-transform+part-entityId+region-position+region-entityId-supported",
         sceneProjection = "pending-p4-gpu-chunks"
     };
 
@@ -681,7 +767,20 @@ internal sealed class MsbNativeDocument
     private static void WriteInt64(byte[] target, int offset, long value) => BinaryPrimitives.WriteInt64LittleEndian(target.AsSpan(offset, 8), value);
     private static string Hash(byte[] bytes) => Convert.ToHexString(SHA256.HashData(bytes)).ToLowerInvariant();
 
-    private sealed record MsbParam(int Offset, int Version, string Name, long NameOffset, long[] EntryOffsets, long NextOffset);
+    internal sealed record MsbParam(int Offset, int Version, string Name, long NameOffset, long[] EntryOffsets, long NextOffset);
+}
+
+/// <summary>
+/// MSB 安全门禁异常：针对未经验证的 EntityID 写入、Region scale 覆盖或未完成引用闭包的删除操作，
+/// 依施工图 SF-01 规范直接切断并返回结构化门禁错误码。
+/// </summary>
+internal sealed class MsbSafetyGateException : Exception
+{
+    public string Code { get; }
+    public MsbSafetyGateException(string code, string message) : base(message)
+    {
+        Code = code;
+    }
 }
 
 /// <summary>
@@ -728,21 +827,29 @@ internal sealed record MsbPart(
     float ScaleX,
     float ScaleY,
     float ScaleZ,
-    int EntityId = 0);
+    int InternalEntryId,
+    int EntityId);
 internal sealed record MsbRegion(
     int Offset,
     string Name,
     int TypeId,
+    int ShapeType,
     float PosX,
     float PosY,
     float PosZ,
     float RotX,
     float RotY,
     float RotZ,
-    float ScaleX,
-    float ScaleY,
-    float ScaleZ,
-    int EntityId = 0);
+    int InternalEntryId,
+    int EntityId)
+{
+    [Obsolete("Region does not support scale; returns 1.0f")]
+    public float ScaleX => 1.0f;
+    [Obsolete("Region does not support scale; returns 1.0f")]
+    public float ScaleY => 1.0f;
+    [Obsolete("Region does not support scale; returns 1.0f")]
+    public float ScaleZ => 1.0f;
+}
 internal sealed record MsbMapEvent(
     int Offset,
     string Name,
@@ -771,7 +878,8 @@ internal sealed record MsbPatch(
     float? ScaleZ,
     string? ModelName = null,
     int? ModelIndex = null,
-    int? EntityId = null);
+    int? EntityId = null,
+    ReferenceCoverageCertificate? Certificate = null);
 internal sealed record MsbRoundTripReport(
     bool ByteIdentical,
     bool SemanticIdentical,

@@ -1,0 +1,28 @@
+{
+  "format": "ESD",
+  "command": "write-esd-document",
+  "productionSymbol": "BridgeCommandService.DispatchAsync",
+  "sourceFile": "bridge/SoulForge.Bridge/BridgeCommandService.cs",
+  "variant": "state-group-expression-tree",
+  "writableOperations": [
+    "existing-node-mutation"
+  ],
+  "writerProfile": "candidate",
+  "preconditions": [
+    "confirmed ESD locator",
+    "writer profile for the exact variant"
+  ],
+  "postconditions": [
+    "native reread",
+    "state/condition/jump targets remain valid"
+  ],
+  "independentOracle": "missing",
+  "productTrace": "not_run",
+  "missingEvidence": [
+    "independent ESD semantic oracle",
+    "product IPC trace",
+    "production source anchor missing"
+  ],
+  "readable": false,
+  "nativeFixtures": []
+}

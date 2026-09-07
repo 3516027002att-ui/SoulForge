@@ -17,6 +17,7 @@ export interface EmevdBridgeMutationRequest {
   /** Optional global instruction index when applying args from Bridge sample indices. */
   instructionIndex?: number;
   timeoutMs?: number;
+  oodleRuntimeRoot?: string | undefined;
 }
 
 /** Native Bridge mutation shapes (beyond editor IR). */
@@ -83,6 +84,7 @@ export interface EmevdBridgeBatchRequest {
   writableRoots: string[];
   mutations: EmevdBridgeNativeMutation[];
   timeoutMs?: number;
+  oodleRuntimeRoot?: string | undefined;
 }
 
 /**
@@ -97,6 +99,7 @@ export async function commitEmevdMutationViaBridge(
     allowedRoots: request.allowedRoots,
     writableRoots: request.writableRoots,
     ...(request.timeoutMs !== undefined ? { timeoutMs: request.timeoutMs } : {}),
+    ...(request.oodleRuntimeRoot !== undefined ? { oodleRuntimeRoot: request.oodleRuntimeRoot } : {}),
     commandOptions
   });
 }
@@ -119,6 +122,7 @@ export async function commitEmevdBatchViaBridge(
     allowedRoots: request.allowedRoots,
     writableRoots: request.writableRoots,
     ...(request.timeoutMs !== undefined ? { timeoutMs: request.timeoutMs } : {}),
+    ...(request.oodleRuntimeRoot !== undefined ? { oodleRuntimeRoot: request.oodleRuntimeRoot } : {}),
     commandOptions
   });
 }
@@ -128,6 +132,7 @@ async function runEmevdWriteCommand(input: {
   allowedRoots: string[];
   writableRoots: string[];
   timeoutMs?: number;
+  oodleRuntimeRoot?: string | undefined;
   commandOptions: Record<string, unknown>;
 }): Promise<EmevdBridgeCommitResult> {
   const result = await runBridge<{
@@ -144,6 +149,7 @@ async function runEmevdWriteCommand(input: {
     allowedRoots: input.allowedRoots,
     writableRoots: input.writableRoots,
     timeoutMs: input.timeoutMs ?? 120_000,
+    ...(input.oodleRuntimeRoot !== undefined ? { oodleRuntimeRoot: input.oodleRuntimeRoot } : {}),
     commandOptions: input.commandOptions
   });
   const ok = result.diagnostics.some(

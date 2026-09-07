@@ -1,0 +1,815 @@
+{
+  "ok": true,
+  "mode": "run",
+  "message": "56 条套件真实执行并通过",
+  "tiers": [
+    "governance",
+    "unit",
+    "synthetic",
+    "native",
+    "release"
+  ],
+  "filter": "audit-sf-",
+  "requireExecuted": true,
+  "counts": {
+    "passed": 56,
+    "skipped": 0,
+    "partial": 0,
+    "failed": 0,
+    "not-attempted": 0
+  },
+  "executedAndPassed": [
+    "test:audit-sf-00-unit",
+    "test:audit-sf-01-unit",
+    "test:audit-sf-02-unit",
+    "test:audit-sf-03-unit",
+    "test:audit-sf-04-unit",
+    "test:audit-sf-05-unit",
+    "test:audit-sf-06-unit",
+    "test:audit-sf-07-unit",
+    "test:audit-sf-08-unit",
+    "test:audit-sf-09-unit",
+    "test:audit-sf-10-unit",
+    "test:audit-sf-11-unit",
+    "test:audit-sf-12-unit",
+    "test:audit-sf-13-unit",
+    "test:audit-sf-14-unit",
+    "test:audit-sf-15-unit",
+    "test:audit-sf-16-unit",
+    "test:audit-sf-17-unit",
+    "test:audit-sf-18-unit",
+    "test:audit-sf-19-unit",
+    "test:audit-sf-20-unit",
+    "test:audit-sf-21-unit",
+    "test:audit-sf-22-unit",
+    "test:audit-sf-23-unit",
+    "test:audit-sf-24-unit",
+    "test:audit-sf-25-unit",
+    "test:audit-sf-26-unit",
+    "test:audit-sf-27-unit",
+    "test:audit-sf-28-unit",
+    "test:audit-sf-29-unit",
+    "test:audit-sf-01-native",
+    "test:audit-sf-02-native",
+    "test:audit-sf-03-native",
+    "test:audit-sf-04-native",
+    "test:audit-sf-05-native",
+    "test:audit-sf-06-native",
+    "test:audit-sf-07-native",
+    "test:audit-sf-08-native",
+    "test:audit-sf-09-native",
+    "test:audit-sf-10-native",
+    "test:audit-sf-11-native",
+    "test:audit-sf-12-native",
+    "test:audit-sf-13-native",
+    "test:audit-sf-14-native",
+    "test:audit-sf-15-native",
+    "test:audit-sf-16-native",
+    "test:audit-sf-17-native",
+    "test:audit-sf-20-native",
+    "test:audit-sf-21-native",
+    "test:audit-sf-22-native",
+    "test:audit-sf-23-native",
+    "test:audit-sf-24-native",
+    "test:audit-sf-25-native",
+    "test:audit-sf-26-native",
+    "test:audit-sf-27-native",
+    "test:audit-sf-29-native"
+  ],
+  "skippedEntirely": [],
+  "partiallySkipped": [],
+  "failed": [],
+  "notAttemptedDueToBail": [],
+  "results": [
+    {
+      "scriptName": "test:audit-sf-00-unit",
+      "tier": "unit",
+      "requirements": [
+        "none"
+      ],
+      "outcome": "passed",
+      "treatedAsFailure": false,
+      "exitCode": 0,
+      "durationMs": 663,
+      "skippedLegs": []
+    },
+    {
+      "scriptName": "test:audit-sf-01-unit",
+      "tier": "unit",
+      "requirements": [
+        "dotnet",
+        "native-env"
+      ],
+      "outcome": "passed",
+      "treatedAsFailure": false,
+      "exitCode": 0,
+      "durationMs": 689,
+      "skippedLegs": []
+    },
+    {
+      "scriptName": "test:audit-sf-02-unit",
+      "tier": "unit",
+      "requirements": [
+        "dotnet",
+        "native-env"
+      ],
+      "outcome": "passed",
+      "treatedAsFailure": false,
+      "exitCode": 0,
+      "durationMs": 1346,
+      "skippedLegs": []
+    },
+    {
+      "scriptName": "test:audit-sf-03-unit",
+      "tier": "unit",
+      "requirements": [
+        "dotnet",
+        "emedf",
+        "native-env"
+      ],
+      "outcome": "passed",
+      "treatedAsFailure": false,
+      "exitCode": 0,
+      "durationMs": 685,
+      "skippedLegs": []
+    },
+    {
+      "scriptName": "test:audit-sf-04-unit",
+      "tier": "unit",
+      "requirements": [
+        "dotnet",
+        "native-env"
+      ],
+      "outcome": "passed",
+      "treatedAsFailure": false,
+      "exitCode": 0,
+      "durationMs": 661,
+      "skippedLegs": []
+    },
+    {
+      "scriptName": "test:audit-sf-05-unit",
+      "tier": "unit",
+      "requirements": [
+        "dotnet",
+        "emedf",
+        "native-env"
+      ],
+      "outcome": "passed",
+      "treatedAsFailure": false,
+      "exitCode": 0,
+      "durationMs": 686,
+      "skippedLegs": []
+    },
+    {
+      "scriptName": "test:audit-sf-06-unit",
+      "tier": "unit",
+      "requirements": [
+        "dotnet",
+        "native-env"
+      ],
+      "outcome": "passed",
+      "treatedAsFailure": false,
+      "exitCode": 0,
+      "durationMs": 648,
+      "skippedLegs": []
+    },
+    {
+      "scriptName": "test:audit-sf-07-unit",
+      "tier": "unit",
+      "requirements": [
+        "dotnet",
+        "emedf",
+        "native-env"
+      ],
+      "outcome": "passed",
+      "treatedAsFailure": false,
+      "exitCode": 0,
+      "durationMs": 720,
+      "skippedLegs": []
+    },
+    {
+      "scriptName": "test:audit-sf-08-unit",
+      "tier": "unit",
+      "requirements": [
+        "dotnet",
+        "emedf",
+        "native-env"
+      ],
+      "outcome": "passed",
+      "treatedAsFailure": false,
+      "exitCode": 0,
+      "durationMs": 979,
+      "skippedLegs": []
+    },
+    {
+      "scriptName": "test:audit-sf-09-unit",
+      "tier": "unit",
+      "requirements": [
+        "dotnet",
+        "emedf",
+        "native-env"
+      ],
+      "outcome": "passed",
+      "treatedAsFailure": false,
+      "exitCode": 0,
+      "durationMs": 1248,
+      "skippedLegs": []
+    },
+    {
+      "scriptName": "test:audit-sf-10-unit",
+      "tier": "unit",
+      "requirements": [
+        "dotnet",
+        "emedf",
+        "native-env"
+      ],
+      "outcome": "passed",
+      "treatedAsFailure": false,
+      "exitCode": 0,
+      "durationMs": 739,
+      "skippedLegs": []
+    },
+    {
+      "scriptName": "test:audit-sf-11-unit",
+      "tier": "unit",
+      "requirements": [
+        "dotnet",
+        "native-env"
+      ],
+      "outcome": "passed",
+      "treatedAsFailure": false,
+      "exitCode": 0,
+      "durationMs": 1324,
+      "skippedLegs": []
+    },
+    {
+      "scriptName": "test:audit-sf-12-unit",
+      "tier": "unit",
+      "requirements": [
+        "dotnet",
+        "emedf",
+        "native-env"
+      ],
+      "outcome": "passed",
+      "treatedAsFailure": false,
+      "exitCode": 0,
+      "durationMs": 695,
+      "skippedLegs": []
+    },
+    {
+      "scriptName": "test:audit-sf-13-unit",
+      "tier": "unit",
+      "requirements": [
+        "dotnet",
+        "emedf",
+        "native-env"
+      ],
+      "outcome": "passed",
+      "treatedAsFailure": false,
+      "exitCode": 0,
+      "durationMs": 711,
+      "skippedLegs": []
+    },
+    {
+      "scriptName": "test:audit-sf-14-unit",
+      "tier": "unit",
+      "requirements": [
+        "dotnet",
+        "native-env"
+      ],
+      "outcome": "passed",
+      "treatedAsFailure": false,
+      "exitCode": 0,
+      "durationMs": 1329,
+      "skippedLegs": []
+    },
+    {
+      "scriptName": "test:audit-sf-15-unit",
+      "tier": "unit",
+      "requirements": [
+        "dotnet",
+        "emedf",
+        "native-env"
+      ],
+      "outcome": "passed",
+      "treatedAsFailure": false,
+      "exitCode": 0,
+      "durationMs": 650,
+      "skippedLegs": []
+    },
+    {
+      "scriptName": "test:audit-sf-16-unit",
+      "tier": "unit",
+      "requirements": [
+        "dotnet",
+        "native-env"
+      ],
+      "outcome": "passed",
+      "treatedAsFailure": false,
+      "exitCode": 0,
+      "durationMs": 5439,
+      "skippedLegs": []
+    },
+    {
+      "scriptName": "test:audit-sf-17-unit",
+      "tier": "unit",
+      "requirements": [
+        "dotnet",
+        "emedf",
+        "native-env"
+      ],
+      "outcome": "passed",
+      "treatedAsFailure": false,
+      "exitCode": 0,
+      "durationMs": 767,
+      "skippedLegs": []
+    },
+    {
+      "scriptName": "test:audit-sf-18-unit",
+      "tier": "unit",
+      "requirements": [
+        "none"
+      ],
+      "outcome": "passed",
+      "treatedAsFailure": false,
+      "exitCode": 0,
+      "durationMs": 658,
+      "skippedLegs": []
+    },
+    {
+      "scriptName": "test:audit-sf-19-unit",
+      "tier": "unit",
+      "requirements": [
+        "none"
+      ],
+      "outcome": "passed",
+      "treatedAsFailure": false,
+      "exitCode": 0,
+      "durationMs": 669,
+      "skippedLegs": []
+    },
+    {
+      "scriptName": "test:audit-sf-20-unit",
+      "tier": "unit",
+      "requirements": [
+        "dotnet"
+      ],
+      "outcome": "passed",
+      "treatedAsFailure": false,
+      "exitCode": 0,
+      "durationMs": 656,
+      "skippedLegs": []
+    },
+    {
+      "scriptName": "test:audit-sf-21-unit",
+      "tier": "unit",
+      "requirements": [
+        "none"
+      ],
+      "outcome": "passed",
+      "treatedAsFailure": false,
+      "exitCode": 0,
+      "durationMs": 643,
+      "skippedLegs": []
+    },
+    {
+      "scriptName": "test:audit-sf-22-unit",
+      "tier": "unit",
+      "requirements": [
+        "none"
+      ],
+      "outcome": "passed",
+      "treatedAsFailure": false,
+      "exitCode": 0,
+      "durationMs": 646,
+      "skippedLegs": []
+    },
+    {
+      "scriptName": "test:audit-sf-23-unit",
+      "tier": "unit",
+      "requirements": [
+        "none"
+      ],
+      "outcome": "passed",
+      "treatedAsFailure": false,
+      "exitCode": 0,
+      "durationMs": 630,
+      "skippedLegs": []
+    },
+    {
+      "scriptName": "test:audit-sf-24-unit",
+      "tier": "unit",
+      "requirements": [
+        "dotnet",
+        "emedf",
+        "native-env"
+      ],
+      "outcome": "passed",
+      "treatedAsFailure": false,
+      "exitCode": 0,
+      "durationMs": 713,
+      "skippedLegs": []
+    },
+    {
+      "scriptName": "test:audit-sf-25-unit",
+      "tier": "unit",
+      "requirements": [
+        "none"
+      ],
+      "outcome": "passed",
+      "treatedAsFailure": false,
+      "exitCode": 0,
+      "durationMs": 658,
+      "skippedLegs": []
+    },
+    {
+      "scriptName": "test:audit-sf-26-unit",
+      "tier": "unit",
+      "requirements": [
+        "none"
+      ],
+      "outcome": "passed",
+      "treatedAsFailure": false,
+      "exitCode": 0,
+      "durationMs": 675,
+      "skippedLegs": []
+    },
+    {
+      "scriptName": "test:audit-sf-27-unit",
+      "tier": "unit",
+      "requirements": [
+        "none"
+      ],
+      "outcome": "passed",
+      "treatedAsFailure": false,
+      "exitCode": 0,
+      "durationMs": 654,
+      "skippedLegs": []
+    },
+    {
+      "scriptName": "test:audit-sf-28-unit",
+      "tier": "unit",
+      "requirements": [
+        "none"
+      ],
+      "outcome": "passed",
+      "treatedAsFailure": false,
+      "exitCode": 0,
+      "durationMs": 778,
+      "skippedLegs": []
+    },
+    {
+      "scriptName": "test:audit-sf-29-unit",
+      "tier": "unit",
+      "requirements": [
+        "none"
+      ],
+      "outcome": "passed",
+      "treatedAsFailure": false,
+      "exitCode": 0,
+      "durationMs": 28464,
+      "skippedLegs": []
+    },
+    {
+      "scriptName": "test:audit-sf-01-native",
+      "tier": "native",
+      "requirements": [
+        "dotnet",
+        "native-env"
+      ],
+      "outcome": "passed",
+      "treatedAsFailure": false,
+      "exitCode": 0,
+      "durationMs": 1323,
+      "skippedLegs": []
+    },
+    {
+      "scriptName": "test:audit-sf-02-native",
+      "tier": "native",
+      "requirements": [
+        "dotnet",
+        "native-env"
+      ],
+      "outcome": "passed",
+      "treatedAsFailure": false,
+      "exitCode": 0,
+      "durationMs": 1253,
+      "skippedLegs": []
+    },
+    {
+      "scriptName": "test:audit-sf-03-native",
+      "tier": "native",
+      "requirements": [
+        "dotnet",
+        "emedf",
+        "native-env"
+      ],
+      "outcome": "passed",
+      "treatedAsFailure": false,
+      "exitCode": 0,
+      "durationMs": 1584,
+      "skippedLegs": []
+    },
+    {
+      "scriptName": "test:audit-sf-04-native",
+      "tier": "native",
+      "requirements": [
+        "dotnet",
+        "native-env"
+      ],
+      "outcome": "passed",
+      "treatedAsFailure": false,
+      "exitCode": 0,
+      "durationMs": 1500,
+      "skippedLegs": []
+    },
+    {
+      "scriptName": "test:audit-sf-05-native",
+      "tier": "native",
+      "requirements": [
+        "dotnet",
+        "emedf",
+        "native-env"
+      ],
+      "outcome": "passed",
+      "treatedAsFailure": false,
+      "exitCode": 0,
+      "durationMs": 1548,
+      "skippedLegs": []
+    },
+    {
+      "scriptName": "test:audit-sf-06-native",
+      "tier": "native",
+      "requirements": [
+        "dotnet",
+        "native-env"
+      ],
+      "outcome": "passed",
+      "treatedAsFailure": false,
+      "exitCode": 0,
+      "durationMs": 1407,
+      "skippedLegs": []
+    },
+    {
+      "scriptName": "test:audit-sf-07-native",
+      "tier": "native",
+      "requirements": [
+        "dotnet",
+        "emedf",
+        "native-env"
+      ],
+      "outcome": "passed",
+      "treatedAsFailure": false,
+      "exitCode": 0,
+      "durationMs": 1045,
+      "skippedLegs": []
+    },
+    {
+      "scriptName": "test:audit-sf-08-native",
+      "tier": "native",
+      "requirements": [
+        "dotnet",
+        "emedf",
+        "native-env"
+      ],
+      "outcome": "passed",
+      "treatedAsFailure": false,
+      "exitCode": 0,
+      "durationMs": 1347,
+      "skippedLegs": []
+    },
+    {
+      "scriptName": "test:audit-sf-09-native",
+      "tier": "native",
+      "requirements": [
+        "dotnet",
+        "emedf",
+        "native-env"
+      ],
+      "outcome": "passed",
+      "treatedAsFailure": false,
+      "exitCode": 0,
+      "durationMs": 2554,
+      "skippedLegs": []
+    },
+    {
+      "scriptName": "test:audit-sf-10-native",
+      "tier": "native",
+      "requirements": [
+        "dotnet",
+        "emedf",
+        "native-env"
+      ],
+      "outcome": "passed",
+      "treatedAsFailure": false,
+      "exitCode": 0,
+      "durationMs": 1552,
+      "skippedLegs": []
+    },
+    {
+      "scriptName": "test:audit-sf-11-native",
+      "tier": "native",
+      "requirements": [
+        "dotnet",
+        "native-env"
+      ],
+      "outcome": "passed",
+      "treatedAsFailure": false,
+      "exitCode": 0,
+      "durationMs": 2087,
+      "skippedLegs": []
+    },
+    {
+      "scriptName": "test:audit-sf-12-native",
+      "tier": "native",
+      "requirements": [
+        "dotnet",
+        "emedf",
+        "native-env"
+      ],
+      "outcome": "passed",
+      "treatedAsFailure": false,
+      "exitCode": 0,
+      "durationMs": 855,
+      "skippedLegs": []
+    },
+    {
+      "scriptName": "test:audit-sf-13-native",
+      "tier": "native",
+      "requirements": [
+        "dotnet",
+        "emedf",
+        "native-env"
+      ],
+      "outcome": "passed",
+      "treatedAsFailure": false,
+      "exitCode": 0,
+      "durationMs": 884,
+      "skippedLegs": []
+    },
+    {
+      "scriptName": "test:audit-sf-14-native",
+      "tier": "native",
+      "requirements": [
+        "dotnet",
+        "native-env"
+      ],
+      "outcome": "passed",
+      "treatedAsFailure": false,
+      "exitCode": 0,
+      "durationMs": 1901,
+      "skippedLegs": []
+    },
+    {
+      "scriptName": "test:audit-sf-15-native",
+      "tier": "native",
+      "requirements": [
+        "dotnet",
+        "emedf",
+        "native-env"
+      ],
+      "outcome": "passed",
+      "treatedAsFailure": false,
+      "exitCode": 0,
+      "durationMs": 1695,
+      "skippedLegs": []
+    },
+    {
+      "scriptName": "test:audit-sf-16-native",
+      "tier": "native",
+      "requirements": [
+        "dotnet",
+        "native-env"
+      ],
+      "outcome": "passed",
+      "treatedAsFailure": false,
+      "exitCode": 0,
+      "durationMs": 8931,
+      "skippedLegs": []
+    },
+    {
+      "scriptName": "test:audit-sf-17-native",
+      "tier": "native",
+      "requirements": [
+        "dotnet",
+        "emedf",
+        "native-env"
+      ],
+      "outcome": "passed",
+      "treatedAsFailure": false,
+      "exitCode": 0,
+      "durationMs": 843,
+      "skippedLegs": []
+    },
+    {
+      "scriptName": "test:audit-sf-20-native",
+      "tier": "native",
+      "requirements": [
+        "dotnet"
+      ],
+      "outcome": "passed",
+      "treatedAsFailure": false,
+      "exitCode": 0,
+      "durationMs": 694,
+      "skippedLegs": []
+    },
+    {
+      "scriptName": "test:audit-sf-21-native",
+      "tier": "native",
+      "requirements": [
+        "none"
+      ],
+      "outcome": "passed",
+      "treatedAsFailure": false,
+      "exitCode": 0,
+      "durationMs": 652,
+      "skippedLegs": []
+    },
+    {
+      "scriptName": "test:audit-sf-22-native",
+      "tier": "native",
+      "requirements": [
+        "none"
+      ],
+      "outcome": "passed",
+      "treatedAsFailure": false,
+      "exitCode": 0,
+      "durationMs": 648,
+      "skippedLegs": []
+    },
+    {
+      "scriptName": "test:audit-sf-23-native",
+      "tier": "native",
+      "requirements": [
+        "none"
+      ],
+      "outcome": "passed",
+      "treatedAsFailure": false,
+      "exitCode": 0,
+      "durationMs": 738,
+      "skippedLegs": []
+    },
+    {
+      "scriptName": "test:audit-sf-24-native",
+      "tier": "native",
+      "requirements": [
+        "dotnet",
+        "emedf",
+        "native-env"
+      ],
+      "outcome": "passed",
+      "treatedAsFailure": false,
+      "exitCode": 0,
+      "durationMs": 760,
+      "skippedLegs": []
+    },
+    {
+      "scriptName": "test:audit-sf-25-native",
+      "tier": "native",
+      "requirements": [
+        "none"
+      ],
+      "outcome": "passed",
+      "treatedAsFailure": false,
+      "exitCode": 0,
+      "durationMs": 685,
+      "skippedLegs": []
+    },
+    {
+      "scriptName": "test:audit-sf-26-native",
+      "tier": "native",
+      "requirements": [
+        "none"
+      ],
+      "outcome": "passed",
+      "treatedAsFailure": false,
+      "exitCode": 0,
+      "durationMs": 743,
+      "skippedLegs": []
+    },
+    {
+      "scriptName": "test:audit-sf-27-native",
+      "tier": "native",
+      "requirements": [
+        "none"
+      ],
+      "outcome": "passed",
+      "treatedAsFailure": false,
+      "exitCode": 0,
+      "durationMs": 685,
+      "skippedLegs": []
+    },
+    {
+      "scriptName": "test:audit-sf-29-native",
+      "tier": "native",
+      "requirements": [
+        "none"
+      ],
+      "outcome": "passed",
+      "treatedAsFailure": false,
+      "exitCode": 0,
+      "durationMs": 39052,
+      "skippedLegs": []
+    }
+  ]
+}

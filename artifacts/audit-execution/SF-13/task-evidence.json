@@ -1,0 +1,48 @@
+{
+  "schemaVersion": 1,
+  "taskId": "SF-13",
+  "baseCommit": "f9cb0cd76a11bfa2857b48acbc779bfac0355d96",
+  "implementationCommit": "f9cb0cd76a11bfa2857b48acbc779bfac0355d96+local",
+  "status": {
+    "implementation": "completed",
+    "algorithm": "verified_algorithm",
+    "native": "partial",
+    "product": "not_run"
+  },
+  "changedFiles": [
+    "package.json",
+    "packages/core/package.json",
+    "packages/core/src/patch/rollback.ts",
+    "packages/core/src/testing/runAuditSf13Smoke.ts",
+    "scripts/verify/tiers.mjs"
+  ],
+  "productionSymbols": [
+    "rollbackOperation",
+    "classifyRollbackState",
+    "MemoryOperationLogStore"
+  ],
+  "tests": [
+    {
+      "suite": "test:audit-sf-13-unit",
+      "layer": "unit",
+      "outcome": "passed",
+      "executedCases": 9,
+      "artifactHash": "D84945BCF48A2A59737FF7B35EEC6DA583884D4B57E3C7B192BFDA33155A6B5A"
+    },
+    {
+      "suite": "test:audit-sf-13-native",
+      "layer": "native",
+      "outcome": "passed",
+      "executedCases": 9,
+      "artifactHash": "D84945BCF48A2A59737FF7B35EEC6DA583884D4B57E3C7B192BFDA33155A6B5A",
+      "detail": "native runner执行的是隔离回滚 smoke；未读取真实游戏原生资源。"
+    }
+  ],
+  "schemaMigrations": [],
+  "frontendContract": null,
+  "remainingBlocks": [
+    "native required suite在隔离文件事务 fixture 上运行，未形成真实游戏原生格式读回/回滚证据。",
+    "本任务没有任务专属 Electron renderer trace；product 保持 not_run。"
+  ]
+}
+

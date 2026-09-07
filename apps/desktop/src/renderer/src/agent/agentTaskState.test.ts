@@ -229,6 +229,52 @@ describe('状态文案回答四个问题：在跑/进度/失败原因/可否取�
     assert.match(text, /可随时取消/);
   });
 
+  it('运行中若遇到重试则显示重试错误码、原因与倒计时', () => {
+    const text = describeAgentTaskStatus(feed(
+      startAgentTask(SESSION),
+      { type: 'turn-started', step: 1 },
+      {
+        type: 'retry-scheduled',
+        step: 1,
+        attempt: 2,
+        maxAttempts: 5,
+        delayMs: 1500,
+        code: 'MODEL_SERVICE_RATE_LIMITED',
+        message: 'Rate limit exceeded'
+      }
+    ));
+    assert.match(text, /接口响应异常/);
+    assert.match(text, /MODEL_SERVICE_RATE_LIMITED/);
+    assert.match(text, /Rate limit exceeded/);
+    assert.match(text, /第 2\/5 次/);
+    assert.match(text, /可随时取消/);
+  });
+
+  it('运行中重试时卡片标签显示重试中与次数，新输出到达时清除重试', () => {
+    const retrying = feed(
+      startAgentTask(SESSION),
+      { type: 'turn-started', step: 1 },
+      {
+        type: 'retry-scheduled',
+        step: 1,
+        attempt: 1,
+        maxAttempts: 3,
+        delayMs: 500,
+        code: 'MODEL_SERVICE_RATE_LIMITED'
+      }
+    );
+    assert.equal(describeAgentThinkingLabel(retrying, Date.now(), 1), '⚠️ 响应异常，重试中 (1/3)');
+
+    // 收到正常 delta 后重试状态清除
+    const recovered = feed(retrying, {
+      type: 'agent-thinking-delta',
+      step: 1,
+      text: '收到思考数据'
+    });
+    assert.equal(recovered.retry, null);
+    assert.equal(describeAgentThinkingLabel(recovered, Date.now(), 1), '正在思考');
+  });
+
   it('结束时报正常结束原因，取消时报已被取消', () => {
     const stopped = describeAgentTaskStatus(feed(
       startAgentTask(SESSION),
@@ -696,5 +742,21 @@ describe('对话时间线：口播与工具按步交织，思考可折叠', () =
     assert.equal(thinkingItems[1]?.live, true);
     assert.equal(thinkingItems[1]?.label.startsWith('正在思考'), true);
     assert.equal(thinkingItems[1]?.text, '');
+  });
+
+  it('终态没有显式 thinking delta 时仍显示已思考收口', () => {
+    const state = feed(
+      startAgentTask(SESSION, 1_000),
+      { type: 'turn-started', step: 1 },
+      { type: 'tool-call-begin', step: 1, callId: 'cancel-call', name: 'search_resources' },
+      { type: 'tool-call-end', step: 1, callId: 'cancel-call', name: 'search_resources', ok: true },
+      { type: 'session-done', finishReason: 'cancelled', steps: 1, rolloutFileName: 'cancelled.jsonl' }
+    );
+    const items = buildAgentConversationItems({ goal: '取消任务', task: state });
+    const thinking = items.find((item) => item.kind === 'thinking');
+    assert.equal(thinking?.kind, 'thinking');
+    assert.equal(thinking?.label, '已思考');
+    assert.equal(thinking?.text, '');
+    assert.equal(thinking?.live, false);
   });
 });

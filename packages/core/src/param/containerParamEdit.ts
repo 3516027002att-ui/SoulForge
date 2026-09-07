@@ -23,22 +23,35 @@ import { applyParamFieldMutation } from './paramFieldMutation.js';
 import { decodeRowFields } from './paramdefLayout.js';
 import { importPinnedSmithboxSdtParamMetadata } from './smithboxParamMetadataSource.js';
 
+export interface ParamRowSlot {
+  rowIndex: number;
+  id: number;
+  dataBase64: string;
+  dataHash: string;
+  name?: string;
+}
+
 export interface ParamFieldEdit {
   table: string;
   rowId: number;
   fieldId: string;
   value: number | string | boolean;
+  rowIndex?: number;
+  expectedDataHash?: string;
 }
 
 export interface ParamFieldReadQuery {
   table: string;
   rowIds: number[];
   fieldIds: string[];
+  rowIndex?: number;
 }
 
 export interface ParamFieldSnapshot {
   table: string;
   rowId: number;
+  rowIndex?: number;
+  dataHash?: string;
   /** Physical BND4 child identity returned by the native read. */
   entryName?: string;
   entryIndex?: number;
@@ -239,51 +252,62 @@ export async function readParamFields(input: {
     if (!loaded.ok) return { ok: false, error: loaded.error, diagnostics: [...diagnostics, ...loaded.diagnostics] };
     diagnostics.push(...loaded.diagnostics);
     for (const rowId of query.rowIds) {
-      const row = loaded.rows.get(rowId);
-      if (!row) {
+      const candidateSlots = loaded.slotsById.get(rowId);
+      if (!candidateSlots || candidateSlots.length === 0) {
         missingRows.push({ table: loaded.tableName, rowId });
         continue;
       }
-      let foundAnyField = false;
-      // An empty fieldIds list is an explicit request for the complete
-      // trusted row projection. This lets the agent inspect a richly named
-      // PARAM row before it has to guess a field id, while the writer still
-      // requires explicit field ids for mutations.
-      const requestedFieldIds = query.fieldIds.length > 0
-        ? query.fieldIds
-        : loaded.definition.fields.map((field) => field.id);
-      for (const fieldId of requestedFieldIds) {
-        const field = loaded.definition.fields.find((item) => item.id === fieldId);
-        if (!field) {
-          diagnostics.push({
-            severity: 'warning',
-            code: 'PARAM_FIELD_NOT_FOUND',
-            message: `${query.table}.${fieldId} 不在授信定义里。`
-          });
-          continue;
-        }
-        foundAnyField = true;
-        fields.push({
-          table: loaded.tableName,
-          rowId,
-          entryName: loaded.entry.name,
-          entryIndex: loaded.entry.index,
-          ...(row.name ? { rowName: row.name } : {}),
-          fieldId,
-          ...(field.name && field.name !== fieldId ? { displayName: field.name } : {}),
-          ...(field.description ? { description: field.description } : {}),
-          ...(field.refs ? { refs: field.refs } : {}),
-          sourceHash: loaded.sourceHash,
-          ...(sourceRevision !== undefined ? { sourceRevision } : {}),
-          value: readFieldValue(row.dataBase64, loaded.definition, fieldId)
-        });
+      const targetSlots = query.rowIndex !== undefined
+        ? candidateSlots.filter((s) => s.rowIndex === query.rowIndex)
+        : candidateSlots;
+      if (targetSlots.length === 0) {
+        missingRows.push({ table: loaded.tableName, rowId });
+        continue;
       }
-      if (!foundAnyField && requestedFieldIds.length > 0) {
-        return {
-          ok: false,
-          error: { code: 'PARAM_FIELD_NOT_FOUND', message: `${query.table} 请求的字段均不在授信定义里（${requestedFieldIds.join(', ')}）。` },
-          diagnostics
-        };
+      for (const row of targetSlots) {
+        let foundAnyField = false;
+        // An empty fieldIds list is an explicit request for the complete
+        // trusted row projection. This lets the agent inspect a richly named
+        // PARAM row before it has to guess a field id, while the writer still
+        // requires explicit field ids for mutations.
+        const requestedFieldIds = query.fieldIds.length > 0
+          ? query.fieldIds
+          : loaded.definition.fields.map((field) => field.id);
+        for (const fieldId of requestedFieldIds) {
+          const field = loaded.definition.fields.find((item) => item.id === fieldId);
+          if (!field) {
+            diagnostics.push({
+              severity: 'warning',
+              code: 'PARAM_FIELD_NOT_FOUND',
+              message: `${query.table}.${fieldId} 不在授信定义里。`
+            });
+            continue;
+          }
+          foundAnyField = true;
+          fields.push({
+            table: loaded.tableName,
+            rowId,
+            rowIndex: row.rowIndex,
+            dataHash: row.dataHash,
+            entryName: loaded.entry.name,
+            entryIndex: loaded.entry.index,
+            ...(row.name ? { rowName: row.name } : {}),
+            fieldId,
+            ...(field.name && field.name !== fieldId ? { displayName: field.name } : {}),
+            ...(field.description ? { description: field.description } : {}),
+            ...(field.refs ? { refs: field.refs } : {}),
+            sourceHash: loaded.sourceHash,
+            ...(sourceRevision !== undefined ? { sourceRevision } : {}),
+            value: readFieldValue(row.dataBase64, loaded.definition, fieldId)
+          });
+        }
+        if (!foundAnyField && requestedFieldIds.length > 0) {
+          return {
+            ok: false,
+            error: { code: 'PARAM_FIELD_NOT_FOUND', message: `${query.table} 请求的字段均不在授信定义里（${requestedFieldIds.join(', ')}）。` },
+            diagnostics
+          };
+        }
       }
     }
   }
@@ -439,32 +463,110 @@ export async function setParamFields(input: {
       return { ok: false, error: loaded.error, diagnostics: [...diagnostics, ...loaded.diagnostics], before };
     }
     diagnostics.push(...loaded.diagnostics);
-    const mutations: Array<{ kind: 'upsert'; id: number; dataBase64: string }> = [];
-    const byRow = new Map<number, ParamFieldEdit[]>();
+    const mutations: Array<{ kind: 'upsert'; id: number; dataBase64: string; rowIndex?: number; expectedDataHash?: string }> = [];
+    const bySlot = new Map<number, { slot: ParamRowSlot; edits: ParamFieldEdit[] }>();
     for (const edit of tableEdits) {
-      const list = byRow.get(edit.rowId) ?? [];
-      list.push(edit);
-      byRow.set(edit.rowId, list);
-    }
-    for (const [rowId, rowEdits] of byRow) {
-      const row = loaded.rows.get(rowId);
-      if (!row) {
+      let slot: ParamRowSlot | undefined;
+      if (edit.rowIndex !== undefined) {
+        slot = loaded.slots.find((s) => s.rowIndex === edit.rowIndex);
+        if (!slot) {
+          return {
+            ok: false,
+            error: { code: 'PARAM_ROW_NOT_FOUND', message: `${table} 物理行索引 ${edit.rowIndex} 不存在。` },
+            diagnostics,
+            before
+          };
+        }
+        if (slot.id !== edit.rowId) {
+          return {
+            ok: false,
+            error: {
+              code: 'PARAM_ROW_ID_MISMATCH',
+              message: `${table} 物理行索引 ${edit.rowIndex} 的 ID (${slot.id}) 与请求 ID (${edit.rowId}) 不匹配。`
+            },
+            diagnostics,
+            before
+          };
+        }
+        if (edit.expectedDataHash && !slot.dataHash.toLowerCase().includes(edit.expectedDataHash.toLowerCase())) {
+          return {
+            ok: false,
+            error: {
+              code: 'PARAM_ROW_HASH_MISMATCH',
+              message: `${table} 物理行索引 ${edit.rowIndex} 的数据哈希已过期。`
+            },
+            diagnostics,
+            before
+          };
+        }
+      } else {
+        const candidates = loaded.slotsById.get(edit.rowId) ?? [];
+        if (candidates.length === 0) {
+          return {
+            ok: false,
+            error: { code: 'PARAM_ROW_NOT_FOUND', message: `${table}#${edit.rowId} 不存在。` },
+            diagnostics,
+            before
+          };
+        }
+        if (candidates.length > 1) {
+          return {
+            ok: false,
+            error: {
+              code: 'PARAM_ROW_AMBIGUOUS',
+              message: `${table}#${edit.rowId} 存在重复行 (${candidates.length} 个物理槽)；修改必须指定 rowIndex 和 expectedDataHash。`
+            },
+            diagnostics,
+            before
+          };
+        }
+        const candidate = candidates[0];
+        if (!candidate) {
+          return {
+            ok: false,
+            error: { code: 'PARAM_ROW_NOT_FOUND', message: `${table}#${edit.rowId} 不存在。` },
+            diagnostics,
+            before
+          };
+        }
+        slot = candidate;
+        if (edit.expectedDataHash && !slot.dataHash.toLowerCase().includes(edit.expectedDataHash.toLowerCase())) {
+          return {
+            ok: false,
+            error: {
+              code: 'PARAM_ROW_HASH_MISMATCH',
+              message: `${table}#${edit.rowId} 的数据哈希已过期。`
+            },
+            diagnostics,
+            before
+          };
+        }
+      }
+
+      if (!slot) {
         return {
           ok: false,
-          error: { code: 'PARAM_ROW_NOT_FOUND', message: `${table}#${rowId} 不存在。` },
+          error: { code: 'PARAM_ROW_NOT_FOUND', message: `${table}#${edit.rowId} 不存在。` },
           diagnostics,
           before
         };
       }
+
+      const entry = bySlot.get(slot.rowIndex) ?? { slot, edits: [] as ParamFieldEdit[] };
+      entry.edits.push(edit);
+      bySlot.set(slot.rowIndex, entry);
+    }
+
+    for (const [, { slot, edits: rowEdits }] of bySlot) {
       const applied = applyEditsToRowBytes({
-        rowDataBase64: row.dataBase64,
+        rowDataBase64: slot.dataBase64,
         definition: loaded.definition,
         edits: rowEdits.map((item) => ({ fieldId: item.fieldId, value: item.value }))
       });
       if (!applied.ok) {
         return {
           ok: false,
-          error: { code: applied.code, message: `${table}#${rowId}: ${applied.message}` },
+          error: { code: applied.code, message: `${table}#${slot.id} (row ${slot.rowIndex}): ${applied.message}` },
           diagnostics,
           before
         };
@@ -473,8 +575,10 @@ export async function setParamFields(input: {
         const field = loaded.definition.fields.find((item) => item.id === edit.fieldId);
         before.push({
           table: loaded.tableName,
-          rowId,
-          ...(row.name ? { rowName: row.name } : {}),
+          rowId: slot.id,
+          rowIndex: slot.rowIndex,
+          dataHash: slot.dataHash,
+          ...(slot.name ? { rowName: slot.name } : {}),
           fieldId: edit.fieldId,
           ...(field?.name && field.name !== edit.fieldId ? { displayName: field.name } : {}),
           ...(field?.description ? { description: field.description } : {}),
@@ -482,16 +586,24 @@ export async function setParamFields(input: {
         });
         after.push({
           table: loaded.tableName,
-          rowId,
-          ...(row.name ? { rowName: row.name } : {}),
+          rowId: slot.id,
+          rowIndex: slot.rowIndex,
+          dataHash: createHash('sha256').update(Buffer.from(applied.nextDataBase64, 'base64')).digest('hex').toLowerCase(),
+          ...(slot.name ? { rowName: slot.name } : {}),
           fieldId: edit.fieldId,
           ...(field?.name && field.name !== edit.fieldId ? { displayName: field.name } : {}),
           ...(field?.description ? { description: field.description } : {}),
           value: applied.after[edit.fieldId] ?? null
         });
       }
-      if (applied.nextDataBase64 !== row.dataBase64) {
-        mutations.push({ kind: 'upsert', id: rowId, dataBase64: applied.nextDataBase64 });
+      if (applied.nextDataBase64 !== slot.dataBase64) {
+        mutations.push({
+          kind: 'upsert',
+          id: slot.id,
+          dataBase64: applied.nextDataBase64,
+          rowIndex: slot.rowIndex,
+          expectedDataHash: slot.dataHash
+        });
       }
     }
     if (mutations.length === 0) continue;
@@ -536,7 +648,7 @@ async function commitTableMutations(input: {
   entry: ContainerEntry;
   unpackedPath: string;
   unpackedHash: string;
-  mutations: Array<{ kind: 'upsert'; id: number; dataBase64: string }>;
+  mutations: Array<{ kind: 'upsert'; id: number; dataBase64: string; rowIndex?: number; expectedDataHash?: string }>;
   title: string;
 }): Promise<
   | { ok: true; nextContainerHash: string; diagnostics: Diagnostic[] }
@@ -656,7 +768,9 @@ async function loadTableRows(
       tableName: string;
       entry: ContainerEntry;
       definition: ParamDefDocument;
-      rows: Map<number, { id: number; dataBase64: string; name?: string }>;
+      slots: ParamRowSlot[];
+      slotsById: Map<number, ParamRowSlot[]>;
+      rows: Map<number, ParamRowSlot>;
       unpackedPath: string;
       sourceHash: string;
       missingRows: number[];
@@ -717,46 +831,59 @@ async function loadTableRows(
   if (!definition.ok) return { ok: false, error: definition.error, diagnostics: documentDiagnostics };
 
   let sourceHash = document.data.sourceHash;
-  const rows = new Map<number, { id: number; dataBase64: string; name?: string }>();
-  const ingest = (items: Array<{ id: number; dataBase64: string; name?: string }>): void => {
+  const slots: ParamRowSlot[] = [];
+  const slotsById = new Map<number, ParamRowSlot[]>();
+  const rows = new Map<number, ParamRowSlot>();
+  const ingest = (items: Array<{ rowIndex?: number; id: number; dataBase64: string; dataHash?: string; name?: string }>): void => {
+    slots.length = 0;
+    slotsById.clear();
     rows.clear();
-    for (const row of items) {
+    for (let i = 0; i < items.length; i++) {
+      const row = items[i];
+      if (!row) continue;
       if (typeof row.dataBase64 === 'string' && row.dataBase64.length > 0) {
-        rows.set(row.id, {
+        const slot: ParamRowSlot = {
+          rowIndex: row.rowIndex ?? i,
           id: row.id,
           dataBase64: row.dataBase64,
+          dataHash: row.dataHash ?? createHash('sha256').update(Buffer.from(row.dataBase64, 'base64')).digest('hex').toLowerCase(),
           ...(row.name ? { name: row.name } : {})
-        });
+        };
+        slots.push(slot);
+        const list = slotsById.get(row.id) ?? [];
+        list.push(slot);
+        slotsById.set(row.id, list);
+        rows.set(row.id, slot);
       }
     }
   };
   ingest(document.data.rows);
-  let missing = rowIds.filter((id) => !rows.has(id));
+  let missing = rowIds.filter((id) => !slotsById.has(id));
   if (missing.length > 0) {
     const full = await readOnce(true);
     documentDiagnostics.push(...asDiagnostics(full.diagnostics));
     if (full.ok && full.data) {
       sourceHash = full.data.sourceHash;
       ingest(full.data.rows);
-      missing = rowIds.filter((id) => !rows.has(id));
+      missing = rowIds.filter((id) => !slotsById.has(id));
     }
   }
   if (missing.length > 0) {
-    if (allowMissingRows && rows.size > 0) {
+    if (allowMissingRows && slots.length > 0) {
       documentDiagnostics.push({
         severity: 'warning',
         code: 'PARAM_ROWS_PARTIAL_MISSING',
         message: `${basename(entry.name.replace(/\\/g, '/'))} 未找到行：${missing.join(', ')}`
       });
     } else {
-    return {
-      ok: false,
-      error: {
-        code: 'PARAM_ROW_NOT_FOUND',
-        message: `${basename(entry.name.replace(/\\/g, '/'))} 缺少行：${missing.join(', ')}`
-      },
-      diagnostics: documentDiagnostics
-    };
+      return {
+        ok: false,
+        error: {
+          code: 'PARAM_ROW_NOT_FOUND',
+          message: `${basename(entry.name.replace(/\\/g, '/'))} 缺少行：${missing.join(', ')}`
+        },
+        diagnostics: documentDiagnostics
+      };
     }
   }
   return {
@@ -764,6 +891,8 @@ async function loadTableRows(
     tableName: basename(entry.name.replace(/\\/g, '/')).replace(/\.param$/i, ''),
     entry,
     definition: definition.document,
+    slots,
+    slotsById,
     rows,
     unpackedPath,
     sourceHash,

@@ -1,0 +1,53 @@
+{
+  "schemaVersion": 1,
+  "taskId": "SF-12",
+  "baseCommit": "f9cb0cd76a11bfa2857b48acbc779bfac0355d96",
+  "implementationCommit": "f9cb0cd76a11bfa2857b48acbc779bfac0355d96+local",
+  "status": {
+    "implementation": "completed",
+    "algorithm": "verified_algorithm",
+    "native": "partial",
+    "product": "not_run"
+  },
+  "changedFiles": [
+    "package.json",
+    "packages/core/package.json",
+    "packages/core/src/editing/editorMutationService.ts",
+    "packages/core/src/editing/nativeEditSession.ts",
+    "packages/core/src/testing/runAuditChangeSetCommitSmoke.ts",
+    "packages/core/src/testing/runAuditSf12Smoke.ts",
+    "packages/core/src/transactions/changeSetPlan.ts",
+    "packages/core/src/transactions/resourceLockSet.ts",
+    "scripts/verify/tiers.mjs"
+  ],
+  "productionSymbols": [
+    "ChangeSetPlan",
+    "ResourceLockManager",
+    "WorkspaceTransaction",
+    "evaluatePostconditions"
+  ],
+  "tests": [
+    {
+      "suite": "test:audit-sf-12-unit",
+      "layer": "unit",
+      "outcome": "passed",
+      "executedCases": 10,
+      "artifactHash": "87D695BF010990B18B610129501FB258684B2C15AD81D52B9DBEBB748E97AE0B"
+    },
+    {
+      "suite": "test:audit-sf-12-native",
+      "layer": "native",
+      "outcome": "passed",
+      "executedCases": 10,
+      "artifactHash": "87D695BF010990B18B610129501FB258684B2C15AD81D52B9DBEBB748E97AE0B",
+      "detail": "native runner执行的是隔离事务 smoke；未读取真实游戏原生资源。"
+    }
+  ],
+  "schemaMigrations": [],
+  "frontendContract": null,
+  "remainingBlocks": [
+    "native required suite在隔离 smoke workspace中复用交易/补丁路径，未形成真实游戏原生格式读回证据。",
+    "本任务没有任务专属 Electron renderer trace；product 保持 not_run。"
+  ]
+}
+

@@ -32,6 +32,26 @@ import {
   collectParamTextLinks,
   paramTextLinkSearchText
 } from '../references/paramTextReferences.js';
+import {
+  CoverageStateStore,
+  deriveCoverageState,
+  type CoverageSourceVersion,
+  type CoverageState
+} from './coverageState.js';
+
+export const MSB_READER_SCHEMA_REVISION = 2;
+export const MSB_READER_SCHEMA_HASH = 'msb-schema-rev-2-entityid-verified';
+export const METADATA_SCHEMA_HASH = 'meta-schema-rev-1-sekiro';
+
+export function computeMapDerivedKey(input: {
+  outerHash: string;
+  readerSchemaHash?: string;
+  metadataSchemaHash?: string;
+}): string {
+  const reader = input.readerSchemaHash ?? MSB_READER_SCHEMA_HASH;
+  const meta = input.metadataSchemaHash ?? METADATA_SCHEMA_HASH;
+  return `map-derived:${input.outerHash}:${reader}:${meta}`;
+}
 
 export interface SearchResourcesOptions {
   query: string;
@@ -111,6 +131,15 @@ export interface TaeAnimationIdentitySelector {
   taeGroup?: string;
 }
 
+export type ParamSemanticState = 'uninitialized' | 'scanning' | 'warming_up' | 'ready' | 'empty' | 'failed';
+
+export interface NativeProjectionAcceptance {
+  accepted: boolean;
+  sourceUri: string;
+  code?: 'NATIVE_PROJECTION_STALE' | 'NATIVE_PROJECTION_VERSION_CONFLICT';
+  reason?: string;
+}
+
 export class WorkspaceIndex {
   readonly workspaceId: string;
 
@@ -125,9 +154,16 @@ export class WorkspaceIndex {
   private actionBinderMembershipReady = false;
   /** Families whose foreground membership projection is complete. */
   private actionBinderMembershipReadyFamilies = new Set<string>();
+  private paramSemanticState: ParamSemanticState = 'uninitialized';
+  private readonly coverageStore = new CoverageStateStore();
+  /** Changed sources remain stale until a current-version projection is published. */
+  private readonly staleSources = new Set<string>();
+  /** Highest accepted semantic version per physical source. */
+  private readonly latestProjectionVersions = new Map<string, CoverageSourceVersion>();
 
   constructor(workspaceId: string) {
     this.workspaceId = workspaceId;
+    this.recomputeCoverageStates();
   }
 
   setFiles(files: readonly IndexedFile[]): void {
@@ -147,6 +183,7 @@ export class WorkspaceIndex {
     // replacement. Scoped foreground projections remain usable and are still
     // checked against the live file revision by the ACTION IPC layer.
     this.actionBinderMembershipReady = false;
+    this.recomputeCoverageStates();
   }
 
   /**
@@ -226,6 +263,114 @@ export class WorkspaceIndex {
       || this.actionBinderMembershipReadyFamilies.has(characterFamily.toLowerCase());
   }
 
+  getParamSemanticState(): ParamSemanticState {
+    if (this.paramExports.length > 0) return 'ready';
+    return this.paramSemanticState;
+  }
+
+  setParamSemanticState(state: ParamSemanticState): void {
+    this.paramSemanticState = state;
+  }
+
+  /** Return the workspace-wide coverage certificate. */
+  getCoverageState(scope = 'workspace', domain?: string): CoverageState {
+    const existing = this.coverageStore.get(scope, domain)
+      ?? (domain === undefined && scope !== 'workspace' ? this.coverageStore.get('workspace', scope) : undefined);
+    if (existing) return existing;
+    this.recomputeCoverageStates();
+    return this.coverageStore.get(scope, domain)
+      ?? (domain === undefined && scope !== 'workspace' ? this.coverageStore.get('workspace', scope) : undefined)
+      ?? deriveCoverageState({
+      scope,
+      ...(domain ? { domain } : {}),
+      files: [],
+      expectedResourceIds: []
+    });
+  }
+
+  /** Alias used by discovery consumers that name a certificate a coverage record. */
+  getCoverage(domain = 'workspace', scope = 'workspace'): CoverageState {
+    return this.getCoverageState(scope, domain === 'workspace' ? undefined : domain);
+  }
+
+  getCoverageSnapshot(): CoverageState[] {
+    return this.coverageStore.list();
+  }
+
+  setCoverageState(state: CoverageState): void {
+    this.coverageStore.set(state);
+  }
+
+  markCoverageStale(sourceUris: readonly string[], reason = 'source revision changed'): CoverageState[] {
+    const normalized = sourceUris.filter((sourceUri) => sourceUri.trim().length > 0);
+    for (const sourceUri of normalized) this.staleSources.add(sourceUri);
+    const marked = this.coverageStore.markStale(normalized, reason);
+    this.recomputeCoverageStates();
+    return marked;
+  }
+
+  /**
+   * Gate semantic projection publication.  An async native read may finish
+   * after a newer read or a commit; an older projection must never replace the
+   * newer one.  Missing provenance remains usable for synthetic/catalog-only
+   * callers, but concrete conflicting versions fail closed.
+   */
+  acceptNativeProjection(
+    sourceUri: string,
+    version: Omit<CoverageSourceVersion, 'sourceUri'> = {}
+  ): NativeProjectionAcceptance {
+    const canonicalSourceUri = this.canonicalSourceUri(sourceUri);
+    const incoming: CoverageSourceVersion = {
+      sourceUri: canonicalSourceUri,
+      ...(version.sourceHash ? { sourceHash: version.sourceHash } : {}),
+      ...(version.sourceRevision !== undefined ? { sourceRevision: version.sourceRevision } : {}),
+      ...(version.readerSchemaVersion !== undefined ? { readerSchemaVersion: version.readerSchemaVersion } : {}),
+      ...(version.metadataSchemaVersion ? { metadataSchemaVersion: version.metadataSchemaVersion } : {})
+    };
+    const currentFile = findUniqueSourceFile(this.filesByUri, sourceUri);
+    const fileConflict = currentFile ? compareToIndexedFile(incoming, currentFile) : undefined;
+    if (fileConflict) {
+      return {
+        accepted: false,
+        sourceUri: canonicalSourceUri,
+        ...(fileConflict.code ? { code: fileConflict.code } : {}),
+        reason: fileConflict.reason
+      };
+    }
+
+    const previous = this.latestProjectionVersions.get(canonicalSourceUri);
+    const previousConflict = previous ? compareProjectionVersions(previous, incoming) : undefined;
+    if (previousConflict) {
+      return {
+        accepted: false,
+        sourceUri: canonicalSourceUri,
+        ...(previousConflict.code ? { code: previousConflict.code } : {}),
+        reason: previousConflict.reason
+      };
+    }
+
+    if (hasConcreteVersion(incoming)) this.latestProjectionVersions.set(canonicalSourceUri, incoming);
+    this.staleSources.delete(canonicalSourceUri);
+    if (canonicalSourceUri !== sourceUri) this.staleSources.delete(sourceUri);
+    this.recomputeCoverageStates();
+    return { accepted: true, sourceUri: canonicalSourceUri };
+  }
+
+  isNativeProjectionCurrent(sourceUri: string, version: Omit<CoverageSourceVersion, 'sourceUri'> = {}): boolean {
+    const canonicalSourceUri = this.canonicalSourceUri(sourceUri);
+    const incoming: CoverageSourceVersion = {
+      sourceUri: canonicalSourceUri,
+      ...(version.sourceHash ? { sourceHash: version.sourceHash } : {}),
+      ...(version.sourceRevision !== undefined ? { sourceRevision: version.sourceRevision } : {}),
+      ...(version.readerSchemaVersion !== undefined ? { readerSchemaVersion: version.readerSchemaVersion } : {}),
+      ...(version.metadataSchemaVersion ? { metadataSchemaVersion: version.metadataSchemaVersion } : {})
+    };
+    const currentFile = findUniqueSourceFile(this.filesByUri, sourceUri);
+    return !currentFile || (!compareToIndexedFile(incoming, currentFile)
+      && !(this.latestProjectionVersions.get(canonicalSourceUri)
+        && compareProjectionVersions(this.latestProjectionVersions.get(canonicalSourceUri)!, incoming)));
+  }
+
   lookupActionBinderMembership(query: BinderMembershipQuery): BinderMembershipResult {
     return resolveBinderMembership({
       query,
@@ -258,6 +403,8 @@ export class WorkspaceIndex {
    */
   invalidateChangedSources(sourceUris: readonly string[]): SourceInvalidationResult {
     const uniqueSources = [...new Set(sourceUris.filter((sourceUri) => sourceUri.trim().length > 0))];
+    for (const sourceUri of uniqueSources) this.staleSources.add(sourceUri);
+    this.coverageStore.markStale(uniqueSources, 'source invalidated before semantic refresh');
     const changedFiles = uniqueSources
       .map((sourceUri) => findUniqueSourceFile(this.filesByUri, sourceUri))
       .filter((file): file is IndexedFile => file !== undefined);
@@ -317,6 +464,7 @@ export class WorkspaceIndex {
     });
 
     const referencesRebuilt = uniqueSources.length > 0 ? this.rebuildReferences().edges.length : this.references.length;
+    this.recomputeCoverageStates();
     return { sourceUris: uniqueSources, removed, referencesRebuilt };
   }
 
@@ -324,18 +472,21 @@ export class WorkspaceIndex {
     return this.invalidateChangedSources([sourceUri]);
   }
 
-  upsertEventExport(value: EventExport): void {
+  upsertEventExport(value: EventExport): boolean {
     // An empty outline has no source URI in EventExport and therefore cannot
     // identify a replacement. Treat it as an incomplete observation so it
     // cannot erase an already indexed rich event body.
-    if (value.events.length === 0) return;
+    if (value.events.length === 0) return false;
+    const sourceUri = value.events[0]?.sourceUri;
+    if (sourceUri && !this.acceptNativeProjection(sourceUri, projectionVersion(value))) return false;
     const key = eventExportKey(value);
     // An export without one unambiguous source identity cannot safely replace
     // another export. Keep it as a separate candidate instead of collapsing it
     // under a shared "unknown" key.
     if (!key || !hasUniqueEventIds(value.events)) {
       this.eventExports = [...this.eventExports, value];
-      return;
+      this.recomputeCoverageStates();
+      return true;
     }
     const matches = this.eventExports
       .map((item, index) => ({ item, index }))
@@ -345,24 +496,80 @@ export class WorkspaceIndex {
     // the source and ingest a fresh export to resolve the ambiguity.
     if (matches.length > 1) {
       this.eventExports = [...this.eventExports, value];
-      return;
+      this.recomputeCoverageStates();
+      return true;
     }
     if (matches.length === 0) {
       this.eventExports = [...this.eventExports, value];
-      return;
+      this.recomputeCoverageStates();
+      return true;
     }
     const match = matches[0]!;
     const copy = [...this.eventExports];
     copy[match.index] = mergeEventExport(match.item, value);
     this.eventExports = copy;
+    this.recomputeCoverageStates();
+    return true;
   }
 
-  upsertMapExport(value: MapExport): void {
-    this.mapExports = replaceByKey(this.mapExports, value.mapId, (item) => item.mapId, value);
+  upsertMapExport(value: MapExport): boolean {
+    const sourceUri = mapExportSourceUri(value);
+    if (sourceUri && !this.acceptNativeProjection(sourceUri, {
+      ...(value.sourceHash ? { sourceHash: value.sourceHash } : {}),
+      ...(value.sourceRevision !== undefined ? { sourceRevision: value.sourceRevision } : {}),
+      readerSchemaVersion: value.readerSchemaRevision ?? MSB_READER_SCHEMA_REVISION,
+      metadataSchemaVersion: METADATA_SCHEMA_HASH
+    })) return false;
+    const derivedKey = value.derivedKey ?? (value.sourceHash ? computeMapDerivedKey({ outerHash: value.sourceHash }) : undefined);
+    const enriched: MapExport = {
+      ...value,
+      readerSchemaRevision: value.readerSchemaRevision ?? MSB_READER_SCHEMA_REVISION,
+      ...(derivedKey ? { derivedKey } : {})
+    };
+    this.mapExports = replaceByKey(this.mapExports, enriched.mapId, (item) => item.mapId, enriched);
+    this.recomputeCoverageStates();
+    return true;
   }
 
-  upsertParamExport(value: ParamExport): void {
+  /**
+   * Idempotent migration of MSB reader schema (SF-02: revision 1 -> revision 2).
+   * Stale map EntityID projections from schema revision < 2 are evicted/invalidated,
+   * and dependent references are rebuilt. Returns the number of invalidated map sources.
+   */
+  migrateMsbReaderSchema(targetRevision: number = MSB_READER_SCHEMA_REVISION): {
+    migratedSources: string[];
+    staleMapExportsRemoved: number;
+    referencesRebuilt: number;
+  } {
+    const staleMapSources: string[] = [];
+    this.mapExports = this.mapExports.filter((mapExport) => {
+      const rev = mapExport.readerSchemaRevision ?? 1;
+      if (rev < targetRevision) {
+        const sourceUri = mapExport.entities[0]?.sourceUri ?? mapExport.regions[0]?.sourceUri;
+        if (sourceUri) staleMapSources.push(sourceUri);
+        return false;
+      }
+      return true;
+    });
+    const referencesRebuilt = staleMapSources.length > 0 ? this.rebuildReferences().edges.length : this.references.length;
+    for (const sourceUri of staleMapSources) this.staleSources.add(sourceUri);
+    this.recomputeCoverageStates();
+    return {
+      migratedSources: staleMapSources,
+      staleMapExportsRemoved: staleMapSources.length,
+      referencesRebuilt
+    };
+  }
+
+  upsertParamExport(value: ParamExport): boolean {
+    const sourceUri = paramExportSourceUri(value);
+    if (sourceUri && !this.acceptNativeProjection(sourceUri, projectionVersion(value))) return false;
     this.paramExports = replaceByKey(this.paramExports, paramExportKey(value), paramExportKey, value);
+    if (this.paramExports.length > 0) {
+      this.paramSemanticState = 'ready';
+    }
+    this.recomputeCoverageStates();
+    return true;
   }
 
   /** Merge a partial live PARAM read without erasing rows indexed earlier. */
@@ -388,9 +595,13 @@ export class WorkspaceIndex {
     });
   }
 
-  upsertMsgExport(value: MsgExport): void {
+  upsertMsgExport(value: MsgExport): boolean {
+    const sourceUri = msgExportSourceUri(value);
+    if (sourceUri && !this.acceptNativeProjection(sourceUri, projectionVersion(value))) return false;
     const key = value.category ?? 'default';
     this.msgExports = replaceByKey(this.msgExports, key, (item) => item.category ?? 'default', value);
+    this.recomputeCoverageStates();
+    return true;
   }
 
   /** Merge a partial live FMG read without erasing entries indexed earlier. */
@@ -413,8 +624,11 @@ export class WorkspaceIndex {
   }
 
   /** 照 upsertMapExport 抄：TAE 一份 anibnd 一个 TaeExport，按 sourceUri 替换。 */
-  upsertTaeExport(value: TaeExport): void {
+  upsertTaeExport(value: TaeExport): boolean {
+    if (!this.acceptNativeProjection(value.sourceUri, projectionVersion(value))) return false;
     this.taeExports = replaceByKey(this.taeExports, value.sourceUri, (item) => item.sourceUri, value);
+    this.recomputeCoverageStates();
+    return true;
   }
 
   /**
@@ -614,6 +828,215 @@ export class WorkspaceIndex {
     const report = collectEventEvidence(event, references);
     return { event, report, markdown: renderEventEvidenceMarkdown(report), references };
   }
+
+  private canonicalSourceUri(sourceUri: string): string {
+    return findUniqueSourceFile(this.filesByUri, sourceUri)?.sourceUri ?? sourceUri;
+  }
+
+  private recomputeCoverageStates(): void {
+    this.coverageStore.clear();
+    const domains: ResourceKind[] = ['event', 'map', 'param', 'msg', 'action'];
+    for (const domain of domains) {
+      const files = [...this.filesByUri.values()].filter((file) => file.resourceKind === domain);
+      const projectedSourceUris = semanticSourceUris(this, domain);
+      const expectedResourceIds = files.map((file) => file.sourceUri);
+      const coveredResourceIds = projectedSourceUris.length > 0
+        ? projectedSourceUris
+        : files
+          .filter((file) => file.parseStatus === 'parsed')
+          .map((file) => file.sourceUri);
+      const sourceVersions = files.map((file) => {
+        const version: CoverageSourceVersion = {
+          sourceUri: file.sourceUri,
+          ...(file.sha256 ? { sourceHash: file.sha256 } : {}),
+          sourceRevision: file.mtimeMs
+        };
+        if (domain === 'map') {
+          const map = this.mapExports.find((item) => mapExportSourceUri(item) === file.sourceUri);
+          return {
+            ...version,
+            readerSchemaVersion: map?.readerSchemaRevision ?? MSB_READER_SCHEMA_REVISION,
+            metadataSchemaVersion: METADATA_SCHEMA_HASH
+          };
+        }
+        return version;
+      });
+      const stale = [...this.staleSources].filter((sourceUri) => (
+        files.some((file) => sourceUriMatchesFile(sourceUri, file))
+          || projectedSourceUris.includes(sourceUri)
+      ));
+      this.coverageStore.set(deriveCoverageState({
+        scope: 'workspace',
+        domain,
+        files,
+        coveredResourceIds,
+        expectedResourceIds,
+        sourceVersions,
+        staleSources: stale,
+        sourceUnavailable: files.length === 0 && projectedSourceUris.length > 0,
+        diagnostics: files.length === 0 && projectedSourceUris.length > 0
+          ? ['semantic projection exists without a current file catalog']
+          : []
+      }));
+    }
+
+    const files = [...this.filesByUri.values()];
+    const allProjectedSourceUris = uniqueStrings([
+      ...semanticSourceUris(this, 'event'),
+      ...semanticSourceUris(this, 'map'),
+      ...semanticSourceUris(this, 'param'),
+      ...semanticSourceUris(this, 'msg'),
+      ...semanticSourceUris(this, 'action')
+    ]);
+    const allExpected = files.map((file) => file.sourceUri);
+    const allCovered = allProjectedSourceUris.length > 0
+      ? allProjectedSourceUris
+      : files.filter((file) => file.parseStatus === 'parsed').map((file) => file.sourceUri);
+    this.coverageStore.set(deriveCoverageState({
+      scope: 'workspace',
+      files,
+      coveredResourceIds: allCovered,
+      expectedResourceIds: allExpected,
+      staleSources: [...this.staleSources],
+      sourceVersions: files.map((file) => ({
+        sourceUri: file.sourceUri,
+        ...(file.sha256 ? { sourceHash: file.sha256 } : {}),
+        sourceRevision: file.mtimeMs
+      }))
+    }));
+  }
+}
+
+function semanticSourceUris(index: WorkspaceIndex, domain: ResourceKind): string[] {
+  const bundle = index.toSymbolBundle();
+  if (domain === 'event') {
+    return uniqueStrings((bundle.events ?? []).flatMap((item) => item.events.map((event) => event.sourceUri)));
+  }
+  if (domain === 'map') {
+    return uniqueStrings((bundle.maps ?? []).flatMap((item) => [
+      ...item.entities.map((entity) => entity.sourceUri),
+      ...item.regions.map((region) => region.sourceUri)
+    ]));
+  }
+  if (domain === 'param') {
+    return uniqueStrings((bundle.params ?? []).flatMap((item) => [
+      ...(item.sourceUri ? [item.sourceUri] : []),
+      ...item.rows.map((row) => row.sourceUri)
+    ]));
+  }
+  if (domain === 'msg') {
+    return uniqueStrings((bundle.msgs ?? []).flatMap((item) => item.entries.map((entry) => entry.sourceUri)));
+  }
+  if (domain === 'action') {
+    return uniqueStrings((bundle.tae ?? []).map((item) => item.sourceUri));
+  }
+  return [];
+}
+
+function eventExportSourceUri(value: EventExport): string | undefined {
+  return value.events[0]?.sourceUri;
+}
+
+function mapExportSourceUri(value: MapExport): string | undefined {
+  return value.entities[0]?.sourceUri ?? value.regions[0]?.sourceUri;
+}
+
+function paramExportSourceUri(value: ParamExport): string | undefined {
+  return value.sourceUri ?? value.rows[0]?.sourceUri;
+}
+
+function msgExportSourceUri(value: MsgExport): string | undefined {
+  return value.entries[0]?.sourceUri;
+}
+
+function projectionVersion(value: {
+  sourceHash?: string;
+  sourceRevision?: number;
+  readerSchemaRevision?: number;
+}): Omit<CoverageSourceVersion, 'sourceUri'> {
+  return {
+    ...(value.sourceHash ? { sourceHash: value.sourceHash } : {}),
+    ...(value.sourceRevision !== undefined ? { sourceRevision: value.sourceRevision } : {}),
+    ...(value.readerSchemaRevision !== undefined ? { readerSchemaVersion: value.readerSchemaRevision } : {})
+  };
+}
+
+function compareToIndexedFile(
+  incoming: CoverageSourceVersion,
+  file: Pick<IndexedFile, 'sourceUri' | 'sha256' | 'mtimeMs'>
+): { code: NativeProjectionAcceptance['code']; reason: string } | undefined {
+  if (incoming.sourceHash && file.sha256 && incoming.sourceHash !== file.sha256) {
+    return {
+      code: 'NATIVE_PROJECTION_STALE',
+      reason: `native projection hash ${incoming.sourceHash} does not match current file ${file.sha256}`
+    };
+  }
+  if (incoming.sourceRevision !== undefined
+    && typeof incoming.sourceRevision === 'number'
+    && incoming.sourceRevision !== file.mtimeMs) {
+    return {
+      code: 'NATIVE_PROJECTION_STALE',
+      reason: `native projection revision ${String(incoming.sourceRevision)} does not match current file ${String(file.mtimeMs)}`
+    };
+  }
+  return undefined;
+}
+
+function compareProjectionVersions(
+  previous: CoverageSourceVersion,
+  incoming: CoverageSourceVersion
+): { code: NativeProjectionAcceptance['code']; reason: string } | undefined {
+  const previousRevision = comparableRevision(previous.sourceRevision);
+  const incomingRevision = comparableRevision(incoming.sourceRevision);
+  if (previousRevision !== undefined && incomingRevision !== undefined) {
+    if (incomingRevision < previousRevision) {
+      return {
+        code: 'NATIVE_PROJECTION_STALE',
+        reason: `late native projection revision ${String(incoming.sourceRevision)} < accepted ${String(previous.sourceRevision)}`
+      };
+    }
+    if (incomingRevision === previousRevision
+      && previous.sourceHash
+      && incoming.sourceHash
+      && previous.sourceHash !== incoming.sourceHash) {
+      return {
+        code: 'NATIVE_PROJECTION_VERSION_CONFLICT',
+        reason: 'same source revision carries conflicting source hashes'
+      };
+    }
+  } else if (previous.sourceHash && incoming.sourceHash && previous.sourceHash !== incoming.sourceHash) {
+    return {
+      code: 'NATIVE_PROJECTION_VERSION_CONFLICT',
+      reason: 'native projection carries a conflicting source hash without comparable revisions'
+    };
+  }
+
+  const previousSchema = comparableRevision(previous.readerSchemaVersion);
+  const incomingSchema = comparableRevision(incoming.readerSchemaVersion);
+  if (previousSchema !== undefined && incomingSchema !== undefined && incomingSchema < previousSchema) {
+    return {
+      code: 'NATIVE_PROJECTION_STALE',
+      reason: `late reader schema ${String(incoming.readerSchemaVersion)} < accepted ${String(previous.readerSchemaVersion)}`
+    };
+  }
+  return undefined;
+}
+
+function comparableRevision(value: number | string | undefined): number | string | undefined {
+  if (typeof value === 'number' && Number.isFinite(value)) return value;
+  if (typeof value === 'string' && value.length > 0) return value;
+  return undefined;
+}
+
+function hasConcreteVersion(value: CoverageSourceVersion): boolean {
+  return value.sourceHash !== undefined
+    || value.sourceRevision !== undefined
+    || value.readerSchemaVersion !== undefined
+    || value.metadataSchemaVersion !== undefined;
+}
+
+function uniqueStrings(values: readonly string[]): string[] {
+  return [...new Set(values.filter((value) => value.trim().length > 0))];
 }
 
 function matchesTaeEntryIdentity(

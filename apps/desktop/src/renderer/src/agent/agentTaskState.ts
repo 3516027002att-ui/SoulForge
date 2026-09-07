@@ -17,6 +17,7 @@ import type { AgentEvent } from '@soulforge/core';
 /** 主进程为会话生命周期额外推的三种事件（apps/desktop/src/main/ipc.ts:528-531）。 */
 export type AgentSessionLifecycleEvent =
   | { type: 'session-accepted'; mode: 'plan' | 'normal' | 'fullPermission' }
+  | { type: 'session-mode-switched'; mode: 'plan' | 'normal' | 'fullPermission' }
   | { type: 'session-done'; finishReason: string; steps: number; rolloutFileName: string }
   | { type: 'session-error'; code: string; message: string };
 
@@ -60,11 +61,19 @@ export interface AgentThinkingView {
   text: string;
 }
 
+export interface AgentTaskRetryState {
+  attempt: number;
+  maxAttempts: number;
+  delayMs: number;
+  code: string;
+  message?: string;
+}
+
 /** 对话区时间线条目（纯数据，由 viewport 渲染）。 */
 export type AgentConversationItem =
   | { kind: 'user'; text: string }
   | { kind: 'notice'; text: string }
-  | { kind: 'thinking'; step?: number; label: string; text: string; live: boolean }
+  | { kind: 'thinking'; step?: number; label: string; text: string; live: boolean; retry?: AgentTaskRetryState | null }
   | { kind: 'assistant'; step: number; text: string }
   | {
       kind: 'tools';
@@ -289,7 +298,7 @@ export interface AgentTaskState {
   endedAt: number | null;
   /** 当前正在执行的步骤（turn-started）的开始时刻（epoch ms）。 */
   currentStepStartedAt: number | null;
-  retry: { attempt: number; maxAttempts: number; delayMs: number; code: string } | null;
+  retry: AgentTaskRetryState | null;
   compactedWindows: number;
   contextBytes: number | null;
   rolloutFileName: string | null;
@@ -339,7 +348,8 @@ export function extractCompletedTurnItems(
     items.push({ kind: 'user', text: goal });
   }
 
-  appendTaskTimeline(items, task, false, now);
+  // 终态占位卡只服务于当前轮次的展示，不应被持久化进下一轮历史。
+  appendTaskTimeline(items, task, false, now, false);
 
   if (task.compactedWindows > 0) {
     items.push({ kind: 'compacted', windows: task.compactedWindows });
@@ -419,7 +429,7 @@ export function reduceAgentTaskEvent(
       };
     case 'agent-message-delta': {
       const narrations = appendNarration(state.narrations, event.step, event.text);
-      return { ...state, deltaChars: state.deltaChars + event.text.length, narrations };
+      return { ...state, deltaChars: state.deltaChars + event.text.length, narrations, retry: null };
     }
     case 'agent-thinking-delta': {
       const step = typeof event.step === 'number' && event.step > 0 ? event.step : (state.step > 0 ? state.step : 1);
@@ -430,12 +440,14 @@ export function reduceAgentTaskEvent(
       return {
         ...state,
         thinkings,
-        thinkingText: (state.thinkingText ?? '') + event.text
+        thinkingText: (state.thinkingText ?? '') + event.text,
+        retry: null
       };
     }
     case 'tool-call-begin':
       return {
         ...state,
+        retry: null,
         toolCalls: [
           ...state.toolCalls,
           {
@@ -504,7 +516,8 @@ export function reduceAgentTaskEvent(
           attempt: event.attempt,
           maxAttempts: event.maxAttempts,
           delayMs: event.delayMs,
-          code: event.code
+          code: event.code,
+          ...(event.message ? { message: event.message } : {})
         }
       };
     case 'context-assembled':
@@ -630,6 +643,10 @@ export function describeAgentTaskStatus(state: AgentTaskState, now: number = Dat
         return `等待你批准${duration}：要执行 ${first?.toolName ?? '未知工具'}`
           + `（${first?.permissionLevel ?? '未知等级'}）${more}。批准或拒绝后任务才会继续。`;
       }
+      if (state.retry !== null) {
+        const retryReason = state.retry.message ? `：${state.retry.message}` : '';
+        return `⚠️ 接口响应异常（${state.retry.code}${retryReason}），正在重试（第 ${state.retry.attempt}/${state.retry.maxAttempts} 次）${duration}。可随时取消。`;
+      }
       const output = state.deltaChars > 0 ? `，已产出 ${state.deltaChars} 字符` : '';
       return `任务进行中${duration}${output}。可随时取消。`;
     }
@@ -724,6 +741,9 @@ export function describeAgentThinkingLabel(
     const duration = start === null ? null : formatAgentDuration(end - start);
     return duration === null ? '已思考' : `已思考 ${duration}`;
   }
+  if (state.retry !== null) {
+    return `⚠️ 响应异常，重试中 (${state.retry.attempt}/${state.retry.maxAttempts})`;
+  }
   // 方案 B：各步骤折叠卡片统一展示静态「正在思考」，避免单步倒计时每轮重置让人困惑；
   // 全局总时长统一在顶栏「SoulForge 执行中 (Xm Ys)」与底栏状态中呈现。
   if (step !== undefined) {
@@ -739,7 +759,8 @@ function appendTaskTimeline(
   items: AgentConversationItem[],
   task: AgentTaskState,
   live: boolean,
-  now: number = Date.now()
+  now: number = Date.now(),
+  includeTerminalThinkingPlaceholder: boolean = true
 ): void {
   const steps = new Set<number>();
   for (const t of task.thinkings ?? []) steps.add(t.step);
@@ -754,6 +775,18 @@ function appendTaskTimeline(
   if (legacyThinking) steps.add(1);
 
   const orderedSteps = [...steps].sort((a, b) => a - b);
+  // 某些兼容模型/测试 provider 不发送显式 thinking delta，但终态仍需要
+  // 给用户一个可见的思考收口。否则取消或完成后只剩工具行，UI 会像没有
+  // 经历过模型步骤；空文本的静态卡片由 AgentThinkingItem 渲染为「已思考」。
+  if (includeTerminalThinkingPlaceholder && !live && orderedSteps.length > 0 && !hasThinkings && !legacyThinking) {
+    items.push({
+      kind: 'thinking',
+      step: orderedSteps[0]!,
+      label: describeAgentThinkingLabel(task, now, orderedSteps[0]),
+      text: '',
+      live: false
+    });
+  }
   let pendingCalls: AgentToolCallView[] = [];
   let pendingStartStep = 0;
 
@@ -788,7 +821,8 @@ function appendTaskTimeline(
         step,
         label: describeAgentThinkingLabel(task, now, step),
         text: thinking?.text ?? '',
-        live: isStepLive
+        live: isStepLive,
+        retry: isStepLive ? task.retry : null
       });
     }
 

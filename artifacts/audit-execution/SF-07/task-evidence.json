@@ -1,0 +1,61 @@
+{
+  "schemaVersion": 1,
+  "taskId": "SF-07",
+  "baseCommit": "f9cb0cd76a11bfa2857b48acbc779bfac0355d96",
+  "implementationCommit": "f9cb0cd76a11bfa2857b48acbc779bfac0355d96+local",
+  "status": {
+    "implementation": "completed",
+    "algorithm": "verified_algorithm",
+    "native": "verified_native",
+    "product": "not_run"
+  },
+  "changedFiles": [
+    "packages/shared/src/native-evidence-contract.ts",
+    "packages/shared/src/index.ts",
+    "packages/core/src/ai/agentToolBridge.ts",
+    "packages/core/src/ai/toolRegistry.ts",
+    "packages/core/src/editing/nativeEditSession.ts",
+    "packages/core/src/rag/retrieve.ts",
+    "packages/core/src/testing/runMapTransactionAtomicSmoke.ts",
+    "packages/core/src/testing/runAuditSf07Smoke.ts",
+    "packages/core/package.json",
+    "package.json",
+    "scripts/verify/tiers.mjs"
+  ],
+  "productionSymbols": [
+    "computeEvidenceKey",
+    "computeEvidenceResourceKey",
+    "utf8CodepointPrefix",
+    "createOpaqueCursor",
+    "parseOpaqueCursor",
+    "NativeReadSessionManager",
+    "budgetStructuredJson",
+    "assertEditDomain",
+    "assertWritableField",
+    "assertWritePrecondition",
+    "boundedToolContent",
+    "createResultEnvelope",
+    "registerReadHandle",
+    "resolveReadHandle",
+    "verifyReadCoverage"
+  ],
+  "tests": [
+    {
+      "suite": "test:audit-sf-07-unit",
+      "layer": "unit",
+      "outcome": "passed",
+      "executedCases": 9,
+      "artifactHash": "9F6DA389F5E9657B171462A03A928F98A35709E7FF5EDBB680F1B04FF20594CF"
+    },
+    {
+      "suite": "test:audit-sf-07-native",
+      "layer": "native",
+      "outcome": "passed",
+      "executedCases": 5,
+      "artifactHash": "9F6DA389F5E9657B171462A03A928F98A35709E7FF5EDBB680F1B04FF20594CF"
+    }
+  ],
+  "schemaMigrations": [],
+  "frontendContract": null,
+  "remainingBlocks": []
+}

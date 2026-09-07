@@ -1,0 +1,41 @@
+{
+  "ok": true,
+  "mode": "run",
+  "message": "1 条套件真实执行并通过",
+  "tiers": [
+    "unit"
+  ],
+  "filter": "agent-performance-fixes",
+  "requireExecuted": true,
+  "counts": {
+    "passed": 1,
+    "skipped": 0,
+    "partial": 0,
+    "failed": 0,
+    "not-attempted": 0
+  },
+  "executedAndPassed": [
+    "test:agent-performance-fixes"
+  ],
+  "skippedEntirely": [],
+  "partiallySkipped": [],
+  "failed": [],
+  "notAttemptedDueToBail": [],
+  "results": [
+    {
+      "scriptName": "test:agent-performance-fixes",
+      "tier": "unit",
+      "requirements": [
+        "dotnet",
+        "emedf",
+        "native-env",
+        "opt-in"
+      ],
+      "outcome": "passed",
+      "treatedAsFailure": false,
+      "exitCode": 0,
+      "durationMs": 511,
+      "skippedLegs": []
+    }
+  ]
+}

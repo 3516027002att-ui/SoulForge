@@ -44,7 +44,8 @@ mcps/
 .workbuddy/
 .kiro/
 .zcode/
-output/
+output/*
+!output/agent-real/
 .ai-bridge/
 problem/
 docx/

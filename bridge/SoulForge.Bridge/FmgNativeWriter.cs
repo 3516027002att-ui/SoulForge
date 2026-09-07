@@ -28,6 +28,12 @@ internal static class FmgNativeWriter
         CancellationToken cancellationToken,
         string? oodleRuntimeRoot = null)
     {
+        if (options.TryGetProperty("tables", out var tablesElement) && tablesElement.ValueKind == JsonValueKind.Array)
+        {
+            return await WriteContainerMultiTableAsync(
+                sourcePath, outputPath, options, tablesElement, cancellationToken, oodleRuntimeRoot);
+        }
+
         var patches = ReadPatches(options);
         if (patches.Count == 0) throw new InvalidDataException("FMG writer 需要至少一条 mutation。");
         ValidateEncoding(patches);
@@ -57,7 +63,8 @@ internal static class FmgNativeWriter
         var document = FmgNativeDocument.Read(source);
         RequireHash(options, "expectedDocumentHash", document.SourceHash, "FMG source hash");
         var originalSlots = document.Entries.ToList();
-        var rebuilt = document.ApplyMutations(patches);
+        var disallowAmbiguous = options.TryGetProperty("disallowAmbiguous", out var da) && (da.ValueKind == JsonValueKind.True);
+        var rebuilt = document.ApplyMutations(patches, disallowAmbiguous);
         await WriteOutput(outputPath, rebuilt, cancellationToken);
         var reread = Reopen(outputPath);
         VerifyMutations(reread, patches);
@@ -101,7 +108,8 @@ internal static class FmgNativeWriter
             throw new NotSupportedException("FMG 容器目标 child 不是 FMG v2；写链拒绝。");
         var childDoc = FmgNativeDocument.Read(childBytes);
         var childBefore = childDoc.Entries.ToList();
-        var rebuiltChild = childDoc.ApplyMutations(patches);
+        var disallowAmbiguous = options.TryGetProperty("disallowAmbiguous", out var da) && (da.ValueKind == JsonValueKind.True);
+        var rebuiltChild = childDoc.ApplyMutations(patches, disallowAmbiguous);
         var childVerification = FmgNativeDocument.Read(rebuiltChild);
         VerifyMutations(childVerification, patches);
         VerifySiblingPreservation(childBefore, childVerification, patches);
@@ -139,6 +147,87 @@ internal static class FmgNativeWriter
         };
     }
 
+    private static async Task<object> WriteContainerMultiTableAsync(
+        string sourcePath,
+        string outputPath,
+        JsonElement options,
+        JsonElement tablesElement,
+        CancellationToken cancellationToken,
+        string? oodleRuntimeRoot)
+    {
+        var containerBefore = DcxNativeDocument.Read(sourcePath, oodleRuntimeRoot);
+        RequireHash(options, "expectedDocumentHash", containerBefore.SourceHash, "FMG msgbnd/DCX source hash");
+        if (containerBefore.CompressionFormat is not ("DFLT" or "KRAK"))
+            throw new NotSupportedException($"FMG 容器写不支持 {containerBefore.CompressionFormat} 外层压缩。");
+        var binder = Bnd4NativeDocument.Read(containerBefore.Payload);
+
+        var bnd4Mutations = new List<object>();
+        var tableVerifications = new List<(int entryIndex, IReadOnlyList<FmgEntry> childBefore, IReadOnlyList<FmgPatch> patches)>();
+        var totalMutationCount = 0;
+        var disallowAmbiguous = options.TryGetProperty("disallowAmbiguous", out var da) && (da.ValueKind == JsonValueKind.True);
+
+        foreach (var tableItem in tablesElement.EnumerateArray())
+        {
+            if (!TryGetEntryIndex(tableItem, out var entryIndex))
+                throw new InvalidDataException("FMG 容器多表写每一项必须指定 entryIndex。");
+            if (entryIndex < 0 || entryIndex >= binder.Entries.Count)
+                throw new InvalidDataException($"FMG 容器目标 entryIndex {entryIndex} 越界。");
+
+            var patches = ReadPatches(tableItem);
+            ValidateEncoding(patches);
+            totalMutationCount += patches.Count;
+
+            var childBytes = binder.GetStoredBytes(entryIndex);
+            if (childBytes.Length < 0x28 || BinaryPrimitives.ReadInt32LittleEndian(childBytes.AsSpan(0, 4)) != 0x00020000)
+                throw new NotSupportedException($"FMG 容器目标 child (index {entryIndex}) 不是 FMG v2；写链拒绝。");
+
+            var childDoc = FmgNativeDocument.Read(childBytes);
+            var childBefore = childDoc.Entries.ToList();
+            var rebuiltChild = childDoc.ApplyMutations(patches, disallowAmbiguous);
+            var childVerification = FmgNativeDocument.Read(rebuiltChild);
+            VerifyMutations(childVerification, patches);
+            VerifySiblingPreservation(childBefore, childVerification, patches);
+
+            bnd4Mutations.Add(new
+            {
+                mutation = "replace",
+                entryIndex,
+                expectedChildHash = binder.Entries[entryIndex].ContentHash,
+                contentBase64 = Convert.ToBase64String(rebuiltChild)
+            });
+            tableVerifications.Add((entryIndex, childBefore, patches));
+        }
+
+        var replaceOptions = JsonSerializer.SerializeToElement(new
+        {
+            expectedContainerHash = containerBefore.SourceHash,
+            mutations = bnd4Mutations
+        });
+        await Bnd4NativeWriter.WriteAsync(sourcePath, outputPath, replaceOptions, cancellationToken, oodleRuntimeRoot);
+
+        // 容器级 reopen：输出重读 → 每一个目标表验证 → sibling（其余 child）原样
+        var outDcx = DcxNativeDocument.Read(outputPath, oodleRuntimeRoot);
+        var outBinder = Bnd4NativeDocument.Read(outDcx.Payload);
+        foreach (var (entryIndex, childBefore, patches) in tableVerifications)
+        {
+            var outChildBytes = outBinder.GetStoredBytes(entryIndex);
+            var outChild = FmgNativeDocument.Read(outChildBytes);
+            VerifyMutations(outChild, patches);
+            VerifySiblingPreservation(childBefore, outChild, patches);
+        }
+
+        return new
+        {
+            mutationCount = totalMutationCount,
+            tableCount = tableVerifications.Count,
+            outputHash = outDcx.SourceHash,
+            outputSize = outDcx.SourceBytes.Length,
+            rereadVerified = true,
+            storageProfile = "msgbnd",
+            containerChildCount = outBinder.Entries.Count
+        };
+    }
+
     private static async Task WriteOutput(string outputPath, byte[] bytes, CancellationToken cancellationToken)
     {
         var directory = Path.GetDirectoryName(outputPath) ?? throw new InvalidDataException("outputPath 没有父目录。");
@@ -170,9 +259,28 @@ internal static class FmgNativeWriter
                 var kind = RequiredString(item, "kind").ToLowerInvariant();
                 var id = RequiredInt(item, "id");
                 string? text = null;
-                if (item.TryGetProperty("text", out var textElement) && textElement.ValueKind == JsonValueKind.String)
-                    text = textElement.GetString();
-                patches.Add(new FmgPatch(kind, id, text));
+                if (item.TryGetProperty("text", out var textElement))
+                {
+                    if (textElement.ValueKind == JsonValueKind.String)
+                    {
+                        try
+                        {
+                            text = textElement.GetString();
+                        }
+                        catch (InvalidOperationException ex)
+                        {
+                            throw new InvalidDataException($"FMG_ENCODING_UNSUPPORTED: 文本含孤立代理项（unpaired surrogate）: {ex.Message}");
+                        }
+                    }
+                    else if (textElement.ValueKind == JsonValueKind.Null)
+                        text = null;
+                    else
+                        throw new InvalidDataException("FMG patch text 必须是字符串或 null。");
+                }
+                int? slotIndex = null;
+                if (item.TryGetProperty("slotIndex", out var slotEl) && slotEl.ValueKind == JsonValueKind.Number)
+                    slotIndex = slotEl.GetInt32();
+                patches.Add(new FmgPatch(kind, id, text, slotIndex));
             }
         }
         else
@@ -180,9 +288,28 @@ internal static class FmgNativeWriter
             var kind = RequiredString(options, "mutation").ToLowerInvariant();
             var id = RequiredInt(options, "id");
             string? text = null;
-            if (options.TryGetProperty("text", out var textElement) && textElement.ValueKind == JsonValueKind.String)
-                text = textElement.GetString();
-            patches.Add(new FmgPatch(kind, id, text));
+            if (options.TryGetProperty("text", out var textElement))
+            {
+                if (textElement.ValueKind == JsonValueKind.String)
+                {
+                    try
+                    {
+                        text = textElement.GetString();
+                    }
+                    catch (InvalidOperationException ex)
+                    {
+                        throw new InvalidDataException($"FMG_ENCODING_UNSUPPORTED: 文本含孤立代理项（unpaired surrogate）: {ex.Message}");
+                    }
+                }
+                else if (textElement.ValueKind == JsonValueKind.Null)
+                    text = null;
+                else
+                    throw new InvalidDataException("FMG patch text 必须是字符串或 null。");
+            }
+            int? slotIndex = null;
+            if (options.TryGetProperty("slotIndex", out var slotEl) && slotEl.ValueKind == JsonValueKind.Number)
+                slotIndex = slotEl.GetInt32();
+            patches.Add(new FmgPatch(kind, id, text, slotIndex));
         }
         return patches;
     }
@@ -246,17 +373,51 @@ internal static class FmgNativeWriter
 
     private static void VerifyMutations(FmgNativeDocument reread, IReadOnlyList<FmgPatch> patches)
     {
+        // 同目标多次更新采用最后状态：按目标 (slotIndex or id) 聚合成有效最终状态
+        var effectivePatches = new Dictionary<string, FmgPatch>();
         foreach (var patch in patches)
         {
-            var entry = reread.Entries.FirstOrDefault(e => e.Id == patch.Id);
+            var key = patch.SlotIndex.HasValue ? $"slot:{patch.SlotIndex.Value}" : $"id:{patch.Id}";
+            effectivePatches[key] = patch;
+        }
+
+        foreach (var patch in effectivePatches.Values)
+        {
             if (patch.Kind is "delete")
             {
-                if (entry is not null) throw new InvalidDataException($"FMG delete 后 ID {patch.Id} 仍存在。");
+                if (patch.SlotIndex.HasValue)
+                {
+                    var targetSlot = patch.SlotIndex.Value;
+                    if (targetSlot < reread.Entries.Count && reread.Entries[targetSlot].Id == patch.Id)
+                        throw new InvalidDataException($"FMG delete 后 slotIndex {targetSlot} 处 ID {patch.Id} 仍存在。");
+                }
+                else
+                {
+                    var entry = reread.Entries.FirstOrDefault(e => e.Id == patch.Id);
+                    if (entry is not null) throw new InvalidDataException($"FMG delete 后 ID {patch.Id} 仍存在。");
+                }
             }
             else
             {
-                if (entry is null || entry.Text != (patch.Text ?? string.Empty))
-                    throw new InvalidDataException($"FMG mutation 后 ID {patch.Id} 内容不匹配。");
+                FmgEntry? entry;
+                if (patch.SlotIndex.HasValue)
+                {
+                    var targetSlot = patch.SlotIndex.Value;
+                    if (targetSlot < 0 || targetSlot >= reread.Entries.Count)
+                        throw new InvalidDataException($"FMG mutation 后 slotIndex {targetSlot} 越界。");
+                    entry = reread.Entries[targetSlot];
+                    if (entry.Id != patch.Id)
+                        throw new InvalidDataException($"FMG mutation 后 slotIndex {targetSlot} 的 ID 为 {entry.Id}，与期望 {patch.Id} 不一致。");
+                }
+                else
+                {
+                    entry = reread.Entries.FirstOrDefault(e => e.Id == patch.Id);
+                }
+
+                if (entry is null)
+                    throw new InvalidDataException($"FMG mutation 后 ID {patch.Id} 不存在。");
+                if (entry.Text != patch.Text)
+                    throw new InvalidDataException($"FMG mutation 后 ID {patch.Id} 内容不匹配（期望 '{(patch.Text is null ? "<null>" : patch.Text)}'，实际 '{(entry.Text is null ? "<null>" : entry.Text)}'）。");
             }
         }
     }
@@ -271,17 +432,28 @@ internal static class FmgNativeWriter
         FmgNativeDocument reread,
         IReadOnlyList<FmgPatch> patches)
     {
-        var targeted = new HashSet<int>(patches.Select(p => p.Id));
-        var expected = new Dictionary<(int, string), int>();
-        foreach (var entry in original)
+        var targetedSlots = new HashSet<int>();
+        var targetedIds = new HashSet<int>();
+        foreach (var patch in patches)
         {
-            if (targeted.Contains(entry.Id)) continue;
+            if (patch.SlotIndex.HasValue)
+                targetedSlots.Add(patch.SlotIndex.Value);
+            else
+                targetedIds.Add(patch.Id);
+        }
+
+        var expected = new Dictionary<(int Id, string? Text), int>();
+        for (var i = 0; i < original.Count; i++)
+        {
+            var entry = original[i];
+            if (targetedSlots.Contains(i) || targetedIds.Contains(entry.Id)) continue;
             var key = (entry.Id, entry.Text);
             expected[key] = expected.GetValueOrDefault(key) + 1;
         }
+
         foreach (var entry in reread.Entries)
         {
-            if (targeted.Contains(entry.Id)) continue;
+            if (targetedSlots.Contains(entry.StringIndex) || targetedIds.Contains(entry.Id)) continue;
             var key = (entry.Id, entry.Text);
             if (!expected.TryGetValue(key, out var count) || count == 0)
                 throw new InvalidDataException("FMG_SIBLING_PRESERVATION_FAILED: 非目标条目被改变。");

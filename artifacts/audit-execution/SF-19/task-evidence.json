@@ -1,0 +1,49 @@
+{
+  "schemaVersion": 1,
+  "taskId": "SF-19",
+  "baseCommit": "f9cb0cd76a11bfa2857b48acbc779bfac0355d96",
+  "implementationCommit": "f9cb0cd76a11bfa2857b48acbc779bfac0355d96+local",
+  "status": {
+    "implementation": "completed",
+    "algorithm": "verified_algorithm",
+    "native": "not_run",
+    "product": "not_run"
+  },
+  "changedFiles": [
+    "package.json",
+    "packages/core/package.json",
+    "packages/core/src/ai/agentToolBridge.ts",
+    "packages/core/src/model-services/agentLoop.ts",
+    "packages/core/src/model-services/contextBroker.ts",
+    "packages/core/src/model-services/types.ts",
+    "packages/core/src/model-services/evidenceIdentity.ts",
+    "packages/core/src/model-services/evidenceSelection.ts",
+    "packages/core/src/testing/runAuditSf19Smoke.ts",
+    "scripts/verify/tiers.mjs"
+  ],
+  "productionSymbols": [
+    "normalizeEvidenceIdentity",
+    "evidenceKey",
+    "evidenceResourceKey",
+    "projectEvidenceClaims",
+    "selectEvidence",
+    "chooseEvidence",
+    "mergeEvidenceCandidates",
+    "createContextBroker",
+    "upsertContextEvidenceSources",
+    "runAgentToolLoop",
+    "buildEvidenceClaims"
+  ],
+  "tests": [
+    {
+      "suite": "test:audit-sf-19-unit",
+      "layer": "unit",
+      "outcome": "passed",
+      "executedCases": 11,
+      "artifactHash": "BB1A8143D1B7E5610E13FA942E71F033951800A58EA456207F16FB4EA3FF8734"
+    }
+  ],
+  "schemaMigrations": [],
+  "frontendContract": null,
+  "remainingBlocks": []
+}

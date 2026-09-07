@@ -1,0 +1,50 @@
+{
+  "schemaVersion": 1,
+  "taskId": "SF-15",
+  "baseCommit": "f9cb0cd76a11bfa2857b48acbc779bfac0355d96",
+  "implementationCommit": "f9cb0cd76a11bfa2857b48acbc779bfac0355d96+local",
+  "status": {
+    "implementation": "completed",
+    "algorithm": "verified_algorithm",
+    "native": "verified_native",
+    "product": "not_run"
+  },
+  "changedFiles": [
+    "bridge/SoulForge.Bridge/BridgeDaemonHost.cs",
+    "bridge/SoulForge.Bridge/MapStaticGeometryService.cs",
+    "bridge/SoulForge.Bridge/ResourceLeaseCache.cs",
+    "package.json",
+    "packages/core/package.json",
+    "packages/core/src/editing/editorDocumentStore.ts",
+    "packages/core/src/testing/runAuditSf15Smoke.ts",
+    "scripts/verify/tiers.mjs"
+  ],
+  "productionSymbols": [
+    "ResourceLeaseCache",
+    "EditorDocumentStore",
+    "MapStaticGeometryService",
+    "readStaticPage"
+  ],
+  "tests": [
+    {
+      "suite": "test:audit-sf-15-unit",
+      "layer": "unit",
+      "outcome": "passed",
+      "executedCases": 5,
+      "artifactHash": "1A88ACBE8B40C2A840E82C3B3FF6998C44A0D5A08BC4573E64D5B06280461941"
+    },
+    {
+      "suite": "test:audit-sf-15-native",
+      "layer": "native",
+      "outcome": "passed",
+      "executedCases": null,
+      "artifactHash": "1A88ACBE8B40C2A840E82C3B3FF6998C44A0D5A08BC4573E64D5B06280461941"
+    }
+  ],
+  "schemaMigrations": [],
+  "frontendContract": null,
+  "remainingBlocks": [
+    "本任务没有任务专属 Electron renderer trace；product 保持 not_run。"
+  ]
+}
+

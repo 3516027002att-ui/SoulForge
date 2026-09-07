@@ -2,6 +2,7 @@ import {
   AnthropicCompatibleAdapter,
   isAllowedEndpoint,
   OpenAiCompatibleAdapter,
+  OpenAiResponsesAdapter,
   type ModelListResult
 } from '@soulforge/core';
 import type { ModelServiceCredentialVault } from '../modelServiceCredentials.js';
@@ -96,13 +97,13 @@ export function registerModelServiceIpcHandlers(deps: ModelServiceIpcDeps): void
   deps.handle(
     'modelService.listModels',
     async (_event, input: {
-      protocol: 'openai-compatible' | 'anthropic-compatible';
+      protocol: 'openai-compatible' | 'openai-responses' | 'anthropic-compatible';
       baseUrl: string;
       apiKey?: string;
     }): Promise<ModelListResult> => {
       const protocol = input?.protocol;
       const baseUrl = input?.baseUrl;
-      if (protocol !== 'openai-compatible' && protocol !== 'anthropic-compatible') {
+      if (protocol !== 'openai-compatible' && protocol !== 'openai-responses' && protocol !== 'anthropic-compatible') {
         return { ok: false, error: { code: 'MODEL_SERVICE_PROTOCOL_UNSUPPORTED', message: '模型服务协议不受支持。' } };
       }
       if (typeof baseUrl !== 'string' || baseUrl.trim() === '') {
@@ -129,11 +130,17 @@ export function registerModelServiceIpcHandlers(deps: ModelServiceIpcDeps): void
             apiKey: input.apiKey?.trim() ?? '',
             model: 'list-models'
           })
-        : new AnthropicCompatibleAdapter({
-            baseUrl: endpoint.toString().replace(/\/$/, ''),
-            apiKey: input.apiKey?.trim() ?? '',
-            model: 'list-models'
-          });
+        : protocol === 'openai-responses'
+          ? new OpenAiResponsesAdapter({
+              baseUrl: endpoint.toString().replace(/\/$/, ''),
+              apiKey: input.apiKey?.trim() ?? '',
+              model: 'list-models'
+            })
+          : new AnthropicCompatibleAdapter({
+              baseUrl: endpoint.toString().replace(/\/$/, ''),
+              apiKey: input.apiKey?.trim() ?? '',
+              model: 'list-models'
+            });
       try {
         return await adapter.listModels({ timeoutMs: 15_000 });
       } catch (error) {

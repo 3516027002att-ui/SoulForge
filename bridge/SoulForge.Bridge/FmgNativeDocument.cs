@@ -102,8 +102,8 @@ internal sealed class FmgNativeDocument
                 var index = group.OffsetIndex + (id - group.FirstId);
                 covered[index] = true;
                 var offset = offsets[index];
-                string text;
-                if (offset == 0) text = string.Empty;
+                string? text;
+                if (offset == 0) text = null;
                 else
                 {
                     if (offset < 0 || offset + 2 > source.Length)
@@ -134,7 +134,7 @@ internal sealed class FmgNativeDocument
 
     public FmgRoundTripReport VerifyRoundTrip()
     {
-        var rebuilt = Rebuild(Entries.Select(e => new FmgMutationEntry(e.Id, e.Text)).ToList());
+        var rebuilt = Rebuild(Entries.Select(e => new FmgMutationEntry(e.Id, e.Text, e.StringIndex)).ToList());
         var reparsed = Read(rebuilt);
         var entriesEqual = reparsed.Entries.Count == Entries.Count
             && reparsed.Entries.Zip(Entries).All(pair => pair.First.Id == pair.Second.Id && pair.First.Text == pair.Second.Text);
@@ -149,9 +149,9 @@ internal sealed class FmgNativeDocument
             Groups.Count);
     }
 
-    private static Dictionary<int, string> LastWinsMap(IEnumerable<FmgEntry> entries)
+    private static Dictionary<int, string?> LastWinsMap(IEnumerable<FmgEntry> entries)
     {
-        var map = new Dictionary<int, string>();
+        var map = new Dictionary<int, string?>();
         foreach (var entry in entries) map[entry.Id] = entry.Text;
         return map;
     }
@@ -198,8 +198,8 @@ internal sealed class FmgNativeDocument
         var cursor = stringPoolStart;
         for (var i = 0; i < ordered.Count; i++)
         {
-            var text = ordered[i].Text ?? string.Empty;
-            if (text.Length == 0)
+            var text = ordered[i].Text;
+            if (text is null)
             {
                 offsets[i] = 0;
                 stringBytes.Add(Array.Empty<byte>());
@@ -244,39 +244,88 @@ internal sealed class FmgNativeDocument
         return rebuilt;
     }
 
-    public byte[] ApplyMutations(IReadOnlyList<FmgPatch> patches)
+    public byte[] ApplyMutations(IReadOnlyList<FmgPatch> patches, bool disallowAmbiguous = false)
     {
-        // Work on ordered slots so duplicate IDs stay addressable; last-wins for upsert by id.
-        var slots = Entries.Select(e => new FmgMutationEntry(e.Id, e.Text)).ToList();
+        // Work on ordered slots so duplicate IDs stay addressable; physical slot targeting via SlotIndex
+        var slots = Entries.Select((e, idx) => new FmgMutationEntry(e.Id, e.Text, idx)).ToList();
         foreach (var patch in patches)
         {
             switch (patch.Kind)
             {
                 case "upsert":
                 {
-                    var updated = false;
-                    for (var i = 0; i < slots.Count; i++)
+                    if (patch.SlotIndex.HasValue)
                     {
-                        if (slots[i].Id != patch.Id) continue;
-                        slots[i] = new FmgMutationEntry(patch.Id, patch.Text ?? string.Empty);
-                        updated = true;
+                        var targetSlot = patch.SlotIndex.Value;
+                        if (targetSlot < 0 || targetSlot >= slots.Count)
+                            throw new InvalidDataException($"FMG slotIndex {targetSlot} 越界 (总槽数 {slots.Count})。");
+                        if (slots[targetSlot].Id != patch.Id)
+                            throw new InvalidDataException($"FMG 物理槽 slotIndex={targetSlot} 的 ID 为 {slots[targetSlot].Id}，与期望 ID {patch.Id} 不一致。");
+                        slots[targetSlot] = new FmgMutationEntry(patch.Id, patch.Text, targetSlot);
                     }
-                    if (!updated) slots.Add(new FmgMutationEntry(patch.Id, patch.Text ?? string.Empty));
+                    else
+                    {
+                        var matchIndices = new List<int>();
+                        for (var i = 0; i < slots.Count; i++)
+                        {
+                            if (slots[i].Id == patch.Id) matchIndices.Add(i);
+                        }
+                        if (disallowAmbiguous && matchIndices.Count > 1)
+                        {
+                            throw new InvalidDataException($"FMG_ID_AMBIGUOUS: 目标 ID {patch.Id} 在 FMG 中存在多个物理槽 ({matchIndices.Count} 个)，必须指定 slotIndex 进行物理槽消歧义，不能隐式猜测。");
+                        }
+                        if (matchIndices.Count > 0)
+                        {
+                            foreach (var idx in matchIndices)
+                            {
+                                slots[idx] = new FmgMutationEntry(patch.Id, patch.Text, idx);
+                            }
+                        }
+                        else
+                        {
+                            slots.Add(new FmgMutationEntry(patch.Id, patch.Text, slots.Count));
+                        }
+                    }
                     break;
                 }
                 case "delete":
                 {
-                    var before = slots.Count;
-                    slots = slots.Where(s => s.Id != patch.Id).ToList();
-                    if (slots.Count == before)
-                        throw new InvalidDataException($"FMG 删除目标 ID {patch.Id} 不存在。");
+                    if (patch.SlotIndex.HasValue)
+                    {
+                        var targetSlot = patch.SlotIndex.Value;
+                        if (targetSlot < 0 || targetSlot >= slots.Count)
+                            throw new InvalidDataException($"FMG 删除目标 slotIndex {targetSlot} 越界。");
+                        if (slots[targetSlot].Id != patch.Id)
+                            throw new InvalidDataException($"FMG 删除物理槽 slotIndex={targetSlot} 的 ID 为 {slots[targetSlot].Id}，与期望 ID {patch.Id} 不一致。");
+                        slots.RemoveAt(targetSlot);
+                    }
+                    else
+                    {
+                        var matchIndices = new List<int>();
+                        for (var i = 0; i < slots.Count; i++)
+                        {
+                            if (slots[i].Id == patch.Id) matchIndices.Add(i);
+                        }
+                        if (disallowAmbiguous && matchIndices.Count > 1)
+                        {
+                            throw new InvalidDataException($"FMG_ID_AMBIGUOUS: 删除目标 ID {patch.Id} 在 FMG 中存在多个物理槽 ({matchIndices.Count} 个)，必须指定 slotIndex 消歧义。");
+                        }
+                        if (matchIndices.Count == 0)
+                            throw new InvalidDataException($"FMG 删除目标 ID {patch.Id} 不存在。");
+                        for (var i = matchIndices.Count - 1; i >= 0; i--)
+                        {
+                            slots.RemoveAt(matchIndices[i]);
+                        }
+                    }
                     break;
                 }
                 case "add":
+                {
                     if (slots.Any(s => s.Id == patch.Id))
                         throw new InvalidDataException($"FMG 新增 ID {patch.Id} 已存在。");
-                    slots.Add(new FmgMutationEntry(patch.Id, patch.Text ?? string.Empty));
+                    slots.Add(new FmgMutationEntry(patch.Id, patch.Text, slots.Count));
                     break;
+                }
                 default:
                     throw new InvalidDataException($"未知 FMG mutation：{patch.Kind}。");
             }
@@ -319,9 +368,9 @@ internal sealed class FmgNativeDocument
 }
 
 internal sealed record FmgGroup(int OffsetIndex, int FirstId, int LastId, int Unk);
-internal sealed record FmgEntry(int Id, string Text, int StringIndex, int SourceOffset);
-internal sealed record FmgMutationEntry(int Id, string Text);
-internal sealed record FmgPatch(string Kind, int Id, string? Text);
+internal sealed record FmgEntry(int Id, string? Text, int StringIndex, int SourceOffset);
+internal sealed record FmgMutationEntry(int Id, string? Text, int SlotIndex = -1);
+internal sealed record FmgPatch(string Kind, int Id, string? Text, int? SlotIndex = null);
 internal sealed record FmgRoundTripReport(
     bool ByteIdentical,
     bool SemanticIdentical,
@@ -501,4 +550,4 @@ internal sealed record FmgTextCatalogDto(
     string Authority);
 
 internal sealed record FmgTextTableDto(string StableId, int EntryIndex, string EntryName, int EntryCount, int FilledCount, int FormatVersion);
-internal sealed record FmgTextEntryDto(int Id, string Text);
+internal sealed record FmgTextEntryDto(int Id, string? Text);

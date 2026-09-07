@@ -1,0 +1,26 @@
+{
+  "format": "BND/DCX",
+  "command": "write-bnd4",
+  "productionSymbol": "BridgeCommandService.DispatchAsync",
+  "sourceFile": "bridge/SoulForge.Bridge/BridgeCommandService.cs",
+  "variant": "outer-container-child",
+  "writableOperations": [
+    "child-replace"
+  ],
+  "writerProfile": "native-verified",
+  "preconditions": [
+    "outer hash and child identity"
+  ],
+  "postconditions": [
+    "outer reread",
+    "unchanged child hash"
+  ],
+  "independentOracle": "native-reader-only",
+  "productTrace": "not_run",
+  "missingEvidence": [
+    "Oodle/variant independent oracle where required",
+    "production source anchor missing"
+  ],
+  "readable": false,
+  "nativeFixtures": []
+}

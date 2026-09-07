@@ -258,6 +258,88 @@ test.describe('真实只狼资源：ACTION / MAP / 纹理渲染链', () => {
     }
   });
 
+  test('真实 PARAM 与 FMG 读取进入对应产品工作台', async () => {
+    const { window, pageErrors, consoleErrors, cleanup } = await launchProduction();
+    try {
+      await openWorkspace(window);
+
+      const probe = await window.evaluate(async () => {
+        const api = globalThis.soulforge;
+        const fmgFiles = await api.searchResources('msg/engus/item.msgbnd.dcx');
+        const paramFiles = await api.searchResources('param/gameparam/gameparam.parambnd.dcx');
+        const fmgFile = fmgFiles.find((file) => /(^|\/)msg\/engus\/item\.msgbnd\.dcx$/i.test(file.relativePath));
+        const paramFile = paramFiles.find((file) => /(^|\/)param\/gameparam\/gameparam\.parambnd\.dcx$/i.test(file.relativePath));
+        if (!fmgFile || !paramFile) {
+          return {
+            ok: false,
+            reason: '真实 PARAM/FM G 资源未进入生产索引',
+            fmgPaths: fmgFiles.map((file) => file.relativePath),
+            paramPaths: paramFiles.map((file) => file.relativePath)
+          };
+        }
+
+        const fmg = await api.readFmgDocument(fmgFile.sourceUri);
+        const params = await api.listContainerParams(paramFile.sourceUri);
+        const firstParam = params?.ok && Array.isArray(params.params) ? params.params[0] : null;
+        const rows = firstParam
+          ? await api.readContainerParamRowIndex(paramFile.sourceUri, firstParam.entryIndex)
+          : null;
+        return {
+          ok: Boolean(fmg?.ok && fmg?.data?.sourceHash && params?.ok && firstParam && rows?.ok),
+          fmg: {
+            ok: Boolean(fmg?.ok),
+            sourceHash: typeof fmg?.data?.sourceHash === 'string' ? fmg.data.sourceHash.length : 0,
+            entryCount: fmg?.data?.entryCount ?? fmg?.data?.entries?.length ?? 0,
+            diagnostics: (fmg?.diagnostics ?? []).map((diagnostic) => diagnostic.code)
+          },
+          param: {
+            ok: Boolean(params?.ok),
+            count: Array.isArray(params?.params) ? params.params.length : 0,
+            firstName: firstParam?.name ?? null,
+            firstEntryIndex: firstParam?.entryIndex ?? null,
+            rowsOk: Boolean(rows?.ok),
+            rowCount: rows?.rowCount ?? rows?.rows?.length ?? 0,
+            sessionToken: typeof rows?.sessionToken === 'string' ? rows.sessionToken.length : 0,
+            diagnostics: [
+              ...(params?.diagnostics ?? []),
+              ...(rows?.diagnostics ?? [])
+            ].map((diagnostic) => diagnostic.code)
+          }
+        };
+      });
+
+      expect(probe.ok, JSON.stringify(probe)).toBe(true);
+      expect(probe.fmg.entryCount, JSON.stringify(probe.fmg)).toBeGreaterThan(0);
+      expect(probe.param.count, JSON.stringify(probe.param)).toBeGreaterThan(0);
+      expect(probe.param.rowCount, JSON.stringify(probe.param)).toBeGreaterThan(0);
+      expect(probe.param.sessionToken, JSON.stringify(probe.param)).toBeGreaterThan(0);
+
+      await openResource(window, 'msg/engus/item.msgbnd.dcx');
+      const fmgPanel = window.getByRole('region', { name: 'FMG 本地化工作台' });
+      await expect(fmgPanel).toBeVisible({ timeout: 120_000 });
+      await expect(fmgPanel.getByRole('region', { name: 'Text Categories' })).toBeVisible();
+      await expect(fmgPanel.getByRole('region', { name: 'Text Entries' })).toContainText(/\S/, { timeout: 120_000 });
+
+      await openResource(window, 'param/gameparam/gameparam.parambnd.dcx');
+      const paramPanel = window.getByLabel('PARAM 工作台');
+      await expect(paramPanel).toBeVisible({ timeout: 120_000 });
+      const paramsColumn = paramPanel.getByRole('region', { name: 'Params' });
+      const rowsColumn = paramPanel.getByRole('region', { name: 'Rows' });
+      await expect(paramsColumn.locator('.wb-row').first()).toBeVisible({ timeout: 120_000 });
+      await paramsColumn.locator('.wb-row').first().click();
+      await expect(rowsColumn.locator('.wb-row').first()).toBeVisible({ timeout: 120_000 });
+      await rowsColumn.locator('.wb-row').first().click();
+      await expect(paramPanel.getByRole('region', { name: 'Fields' })).toBeVisible();
+
+      mkdirSync(resolve(repoRoot, 'output/playwright'), { recursive: true });
+      await window.screenshot({ path: resolve(repoRoot, 'output/playwright/real-param-fmg-workbenches.png'), fullPage: false });
+      expect(pageErrors).toEqual([]);
+      expect(consoleErrors).toEqual([]);
+    } finally {
+      await cleanup();
+    }
+  });
+
   test('真实 c5400 按 FLVER MTD 身份绑定 c5409 纹理，而不是公共材质回退', async () => {
     test.skip(!hasC5400Corpus, '本机没有 c5400.chrbnd 与 c5409.texbnd，跳过 c5400 原生纹理身份回归。');
     const { window, cleanup } = await launchProduction();

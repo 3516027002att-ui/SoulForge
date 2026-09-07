@@ -1,0 +1,55 @@
+{
+  "ok": true,
+  "mode": "run",
+  "message": "2 条套件真实执行并通过",
+  "tiers": [
+    "governance",
+    "unit",
+    "synthetic",
+    "native",
+    "release"
+  ],
+  "filter": "audit-sf-26",
+  "requireExecuted": true,
+  "counts": {
+    "passed": 2,
+    "skipped": 0,
+    "partial": 0,
+    "failed": 0,
+    "not-attempted": 0
+  },
+  "executedAndPassed": [
+    "test:audit-sf-26-unit",
+    "test:audit-sf-26-native"
+  ],
+  "skippedEntirely": [],
+  "partiallySkipped": [],
+  "failed": [],
+  "notAttemptedDueToBail": [],
+  "results": [
+    {
+      "scriptName": "test:audit-sf-26-unit",
+      "tier": "unit",
+      "requirements": [
+        "none"
+      ],
+      "outcome": "passed",
+      "treatedAsFailure": false,
+      "exitCode": 0,
+      "durationMs": 709,
+      "skippedLegs": []
+    },
+    {
+      "scriptName": "test:audit-sf-26-native",
+      "tier": "native",
+      "requirements": [
+        "none"
+      ],
+      "outcome": "passed",
+      "treatedAsFailure": false,
+      "exitCode": 0,
+      "durationMs": 698,
+      "skippedLegs": []
+    }
+  ]
+}

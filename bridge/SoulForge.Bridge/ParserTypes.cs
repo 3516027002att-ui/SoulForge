@@ -51,6 +51,18 @@ sealed record BridgeResult<T>(string SourceUri, string SourcePath, string Game, 
             new[] { new Diagnostic("error", code, message, MakeSourceUri(sourcePath), details) });
     }
 
+    public static BridgeResult<T> Failed(string sourcePath, string resourceKind, IEnumerable<Diagnostic> diagnostics, object? details = null)
+    {
+        return new BridgeResult<T>(
+            MakeSourceUri(sourcePath),
+            sourcePath,
+            GameUnknown,
+            resourceKind,
+            "failed",
+            diagnostics.ToArray(),
+            default);
+    }
+
     public static BridgeResult<T> Partial(string sourcePath, string resourceKind, IEnumerable<Diagnostic> diagnostics, T? data)
     {
         return new BridgeResult<T>(MakeSourceUri(sourcePath), sourcePath, GameUnknown, resourceKind, "partial", diagnostics.ToArray(), data);

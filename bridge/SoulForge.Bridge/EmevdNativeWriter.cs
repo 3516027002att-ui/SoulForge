@@ -134,12 +134,27 @@ internal static class EmevdNativeWriter
         var renameMap = new Dictionary<long, long>();
         foreach (var patch in patches)
         {
-            if (patch.Kind != "update_id" || patch.EventId == patch.NewEventId) continue;
-            var sourceId = patch.EventId;
-            var guard = 0;
-            while (renameMap.TryGetValue(sourceId, out var mapped) && mapped != patch.NewEventId!.Value && guard++ < 64)
-                sourceId = mapped;
-            renameMap[sourceId] = patch.NewEventId!.Value;
+            if (patch.Kind == "update_id" && patch.EventId != patch.NewEventId)
+            {
+                var sourceId = patch.EventId;
+                var visited = new HashSet<long> { sourceId };
+                while (renameMap.TryGetValue(sourceId, out var mapped) && mapped != patch.NewEventId!.Value)
+                {
+                    if (!visited.Add(mapped))
+                    {
+                        throw new InvalidDataException("EMEVD 重命名链包含循环，拒绝追链。");
+                    }
+                    sourceId = mapped;
+                }
+                renameMap[sourceId] = patch.NewEventId!.Value;
+            }
+            else if (patch.Kind == "batch_rename" && patch.BatchRenames != null)
+            {
+                foreach (var (oldId, newId) in patch.BatchRenames)
+                {
+                    renameMap[oldId] = newId;
+                }
+            }
         }
 
         foreach (var patch in patches)
@@ -153,6 +168,14 @@ internal static class EmevdNativeWriter
                 if (patch.Kind == "set_rest_behavior" && patch.RestBehavior is not null
                     && ev.RestBehavior != (uint)patch.RestBehavior.Value)
                     throw new InvalidDataException("EMEVD restBehavior 未按预期更新。");
+            }
+            else if (patch.Kind == "batch_rename" && patch.BatchRenames != null)
+            {
+                foreach (var (_, newId) in patch.BatchRenames)
+                {
+                    if (!reread.Events.Any(e => e.Id == newId))
+                        throw new InvalidDataException($"EMEVD batch_rename 后找不到新事件 ID {newId}。");
+                }
             }
             else if (patch.Kind == "set_instruction_args")
             {
@@ -227,6 +250,12 @@ internal static class EmevdNativeWriter
                     }
                 }
             }
+            else if (patch.Kind == "set_strings" && patch.StringsBytes is not null)
+            {
+                var actual = reread.SourceBytes.AsSpan(checked((int)reread.StringsOffset), checked((int)reread.StringsLength)).ToArray();
+                if (!actual.AsSpan().SequenceEqual(patch.StringsBytes))
+                    throw new InvalidDataException("EMEVD set_strings 校验失败：字符串段未按预期更新。");
+            }
         }
     }
 
@@ -234,11 +263,16 @@ internal static class EmevdNativeWriter
     private static long ResolveFinalId(long id, IReadOnlyDictionary<long, long> renameMap)
     {
         var current = id;
-        var guard = 0;
-        while (renameMap.TryGetValue(current, out var next) && guard++ < 64)
+        var visited = new HashSet<long> { current };
+        while (renameMap.TryGetValue(current, out var next))
+        {
+            if (!visited.Add(next))
+                throw new InvalidDataException("EMEVD 重命名链包含循环，拒绝追链。");
             current = next;
+        }
         return current;
     }
+
 
     private static List<EmevdPatch> ParsePatches(JsonElement options)
     {
@@ -263,10 +297,33 @@ internal static class EmevdNativeWriter
         {
             var instructionIndex = RequiredLong(item, "instructionIndex");
             var argsBase64 = RequiredString(item, "argsBase64");
+            var isUnknown = item.TryGetProperty("unknown", out var uEl) && uEl.ValueKind == JsonValueKind.True;
             long eventId = 0;
-            if (item.TryGetProperty("eventId", out var eid) && eid.ValueKind == JsonValueKind.Number)
-                eventId = eid.GetInt64();
-            return new EmevdPatch(kind, eventId, null, null, instructionIndex, argsBase64);
+            if (item.TryGetProperty("eventId", out var eid) && (eid.ValueKind == JsonValueKind.Number || eid.ValueKind == JsonValueKind.String))
+                eventId = RequiredLong(item, "eventId");
+            return new EmevdPatch(kind, eventId, null, null, instructionIndex, argsBase64, IsUnknown: isUnknown);
+        }
+
+        if (kind is "batch_rename")
+        {
+            var renames = new List<(long OldId, long NewId)>();
+            if (item.TryGetProperty("renames", out var arr) && arr.ValueKind == JsonValueKind.Array)
+            {
+                foreach (var r in arr.EnumerateArray())
+                {
+                    var oldId = RequiredLong(r, "oldId");
+                    var newId = RequiredLong(r, "newId");
+                    renames.Add((oldId, newId));
+                }
+            }
+            return new EmevdPatch(kind, 0, null, null, BatchRenames: renames);
+        }
+
+        if (kind is "set_strings")
+        {
+            var b64 = RequiredString(item, "stringsBase64");
+            var sBytes = Convert.FromBase64String(b64);
+            return new EmevdPatch(kind, 0, null, null, StringsBytes: sBytes);
         }
 
         if (kind is "add_event")
@@ -332,8 +389,8 @@ internal static class EmevdNativeWriter
         var eventIdRequired = RequiredLong(item, "eventId");
         var restBehavior = OptionalUInt32(item, "restBehavior");
         long? newEventId = null;
-        if (item.TryGetProperty("newEventId", out var newEl) && newEl.ValueKind == JsonValueKind.Number)
-            newEventId = newEl.GetInt64();
+        if (item.TryGetProperty("newEventId", out var newEl) && (newEl.ValueKind == JsonValueKind.Number || newEl.ValueKind == JsonValueKind.String))
+            newEventId = RequiredLong(item, "newEventId");
         return new EmevdPatch(kind, eventIdRequired, restBehavior, newEventId);
     }
 
@@ -350,9 +407,30 @@ internal static class EmevdNativeWriter
             : throw new InvalidDataException($"options.{field} 是必填字符串。");
 
     private static long RequiredLong(JsonElement options, string field)
-        => options.TryGetProperty(field, out var value) && value.ValueKind == JsonValueKind.Number
-            ? value.GetInt64()
-            : throw new InvalidDataException($"options.{field} 是必填整数。");
+    {
+        if (!options.TryGetProperty(field, out var value))
+            throw new InvalidDataException($"options.{field} 是必填整数。");
+        long parsed;
+        if (value.ValueKind == JsonValueKind.Number)
+        {
+            if (!value.TryGetInt64(out parsed))
+                throw new InvalidDataException($"options.{field} 超出 int64 范围。");
+        }
+        else if (value.ValueKind == JsonValueKind.String)
+        {
+            if (!long.TryParse(value.GetString(), out parsed))
+                throw new InvalidDataException($"options.{field} 字符串无法解析为整数。");
+        }
+        else
+        {
+            throw new InvalidDataException($"options.{field} 必须是整数。");
+        }
+
+        // JavaScript Number.MAX_SAFE_INTEGER 校验: [ -9007199254740991, 9007199254740991 ]
+        if (parsed > 9007199254740991L || parsed < -9007199254740991L)
+            throw new InvalidDataException($"options.{field} 数值 {parsed} 超出安全整数范围 (MAX_SAFE_INTEGER)。");
+        return parsed;
+    }
 
     private static long? OptionalUInt32(JsonElement options, string field)
     {
@@ -363,3 +441,4 @@ internal static class EmevdNativeWriter
         return parsed;
     }
 }
+

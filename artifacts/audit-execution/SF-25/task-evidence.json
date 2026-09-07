@@ -1,0 +1,56 @@
+{
+  "schemaVersion": 1,
+  "taskId": "SF-25",
+  "baseCommit": "f9cb0cd76a11bfa2857b48acbc779bfac0355d96",
+  "implementationCommit": "f9cb0cd76a11bfa2857b48acbc779bfac0355d96+local",
+  "status": {
+    "implementation": "completed",
+    "algorithm": "verified_algorithm",
+    "native": "partial",
+    "product": "not_run"
+  },
+  "changedFiles": [
+    "package.json",
+    "packages/core/package.json",
+    "packages/core/src/ai/toolRegistry.ts",
+    "packages/core/src/editing/mapService.ts",
+    "packages/core/src/scene/coordinateTransform.ts",
+    "packages/core/src/scene/sceneEditService.ts",
+    "packages/core/src/scene/sceneExportLeaseStore.ts",
+    "packages/core/src/testing/runAuditSceneRoundTripSmoke.ts",
+    "packages/core/src/testing/runAuditSf25Smoke.ts",
+    "packages/shared/src/map-document.ts",
+    "packages/shared/src/scene-edit-protocol.ts",
+    "scripts/verify/tiers.mjs"
+  ],
+  "productionSymbols": [
+    "SceneEditService",
+    "SceneExportLeaseStore",
+    "createCoordinateProfile",
+    "convertBlenderMatrixToNative"
+  ],
+  "tests": [
+    {
+      "suite": "test:audit-sf-25-unit",
+      "layer": "unit",
+      "outcome": "passed",
+      "executedCases": 16,
+      "artifactHash": "17B36C6C845E85E48AD20D33901C8D7874FD7F50C6BE590C97BE941371503268"
+    },
+    {
+      "suite": "test:audit-sf-25-native",
+      "layer": "native",
+      "outcome": "passed",
+      "executedCases": 16,
+      "artifactHash": "17B36C6C845E85E48AD20D33901C8D7874FD7F50C6BE590C97BE941371503268",
+      "detail": "native layer与unit共享scene round-trip fixture；未进行真实游戏资源读回。"
+    }
+  ],
+  "schemaMigrations": [],
+  "frontendContract": null,
+  "remainingBlocks": [
+    "native runner执行场景 round-trip/坐标 fixture，未形成真实 MSB/FLVER native reread；unsupported sub-capabilities仍受 profile gate。",
+    "本任务没有任务专属 Electron renderer trace；product 保持 not_run。"
+  ]
+}
+

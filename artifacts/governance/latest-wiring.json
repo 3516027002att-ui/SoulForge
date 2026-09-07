@@ -1,0 +1,312 @@
+{
+  "ok": false,
+  "mode": "run",
+  "message": "2 条套件失败",
+  "tiers": [
+    "governance"
+  ],
+  "filter": null,
+  "requireExecuted": false,
+  "counts": {
+    "passed": 19,
+    "skipped": 0,
+    "partial": 0,
+    "failed": 2,
+    "not-attempted": 0
+  },
+  "executedAndPassed": [
+    "handoff:fingerprint",
+    "test:agent-task-record-gate",
+    "test:cross-machine-fixtures",
+    "test:gov-cli",
+    "test:governance-data-fixtures",
+    "test:governance-equivalence",
+    "test:handoff-integrity:fixtures",
+    "test:handoff-projection",
+    "test:orphan-smoke-gate",
+    "test:probe-residual-gate",
+    "test:release-scope",
+    "test:release-scope-fixtures",
+    "test:release-scope-proposal",
+    "test:seal-cli",
+    "test:smoke-temp-cleanup",
+    "test:stale-tfm-gate",
+    "test:v06-deferral-index",
+    "test:verify-entrypoint",
+    "verify:audit"
+  ],
+  "skippedEntirely": [],
+  "partiallySkipped": [],
+  "failed": [
+    "test:governance",
+    "test:handoff-integrity"
+  ],
+  "notAttemptedDueToBail": [],
+  "results": [
+    {
+      "scriptName": "handoff:fingerprint",
+      "tier": "governance",
+      "requirements": [
+        "none"
+      ],
+      "outcome": "passed",
+      "treatedAsFailure": false,
+      "exitCode": 0,
+      "durationMs": 631,
+      "skippedLegs": []
+    },
+    {
+      "scriptName": "test:agent-task-record-gate",
+      "tier": "governance",
+      "requirements": [
+        "dotnet",
+        "emedf",
+        "native-env",
+        "opt-in"
+      ],
+      "outcome": "passed",
+      "treatedAsFailure": false,
+      "exitCode": 0,
+      "durationMs": 511,
+      "skippedLegs": []
+    },
+    {
+      "scriptName": "test:cross-machine-fixtures",
+      "tier": "governance",
+      "requirements": [
+        "none"
+      ],
+      "outcome": "passed",
+      "treatedAsFailure": false,
+      "exitCode": 0,
+      "durationMs": 1449,
+      "skippedLegs": []
+    },
+    {
+      "scriptName": "test:gov-cli",
+      "tier": "governance",
+      "requirements": [
+        "none"
+      ],
+      "outcome": "passed",
+      "treatedAsFailure": false,
+      "exitCode": 0,
+      "durationMs": 12801,
+      "skippedLegs": []
+    },
+    {
+      "scriptName": "test:governance",
+      "tier": "governance",
+      "requirements": [
+        "none"
+      ],
+      "outcome": "failed",
+      "treatedAsFailure": true,
+      "exitCode": 1,
+      "durationMs": 26244,
+      "skippedLegs": [],
+      "tailStdout": "      \"where\": \"docs/governance/gates.json REL-G\",\n      \"message\": \"passed Gate 的 sealed Evidence 锚点之后，相关主题域发生变化。若冻结范围语义未变，由工程侧重跑验证并重封存；只有实际范围变化才需要新的用户裁定。\"\n    },\n    {\n      \"severity\": \"error\",\n      \"code\": \"GATE_EVIDENCE_STALE\",\n      \"where\": \"docs/governance/gates.json REL-I\",\n      \"message\": \"passed Gate 的 sealed Evidence 锚点之后，相关主题域发生变化。若冻结范围语义未变，由工程侧重跑验证并重封存；只有实际范围变化才需要新的用户裁定。\"\n    },\n    {\n      \"severity\": \"error\",\n      \"code\": \"GATE_EVIDENCE_STALE\",\n      \"where\": \"docs/governance/gates.json REL-COMPLIANCE\",\n      \"message\": \"passed Gate 的 sealed Evidence 锚点之后，相关主题域发生变化。若冻结范围语义未变，由工程侧重跑验证并重封存；只有实际范围变化才需要新的用户裁定。\"\n    },\n    {\n      \"severity\": \"info\",\n      \"code\": \"FREEZE_UNFROZEN_BY_RULING\",\n      \"where\": \"docs/governance/releases.json\",\n      \"message\": \"V0.5 声明了 unfreezeRuling，已按条目放开冻结拦截：SCOPE-BEHAVIOR-ANIMATION, SCOPE-BEHAVIOR-TAE, SCOPE-BEHAVIOR-ESD, SCOPE-BEHAVIOR-SCRIPT, SCOPE-RUNTIME, SCOPE-EDITORS。其余条目继续比对 git 基线；该裁定的真实性由工程复核负责。\"\n    }\n  ],\n  \"note\": \"通过只表示列出的确定性检查成立；剩余语义复核由工程方负责，不构成用户介入项。\"\n}\n",
+      "tailStderr": ""
+    },
+    {
+      "scriptName": "test:governance-data-fixtures",
+      "tier": "governance",
+      "requirements": [
+        "none"
+      ],
+      "outcome": "passed",
+      "treatedAsFailure": false,
+      "exitCode": 0,
+      "durationMs": 1590,
+      "skippedLegs": []
+    },
+    {
+      "scriptName": "test:governance-equivalence",
+      "tier": "governance",
+      "requirements": [
+        "none"
+      ],
+      "outcome": "passed",
+      "treatedAsFailure": false,
+      "exitCode": 0,
+      "durationMs": 372,
+      "skippedLegs": []
+    },
+    {
+      "scriptName": "test:handoff-integrity",
+      "tier": "governance",
+      "requirements": [
+        "native-env"
+      ],
+      "outcome": "failed",
+      "treatedAsFailure": true,
+      "exitCode": 1,
+      "durationMs": 26314,
+      "skippedLegs": [],
+      "tailStdout": "      \"message\": \"passed Gate 的 sealed Evidence 锚点之后，相关主题域发生变化。若冻结范围语义未变，由工程侧重跑验证并重封存；只有实际范围变化才需要新的用户裁定。\"\n    },\n    {\n      \"severity\": \"error\",\n      \"code\": \"GATE_EVIDENCE_STALE\",\n      \"where\": \"docs/V0_5_IMPLEMENTATION_HANDOFF.md §18.3 REL-I\",\n      \"message\": \"passed Gate 的 sealed Evidence 锚点之后，相关主题域发生变化。若冻结范围语义未变，由工程侧重跑验证并重封存；只有实际范围变化才需要新的用户裁定。\"\n    },\n    {\n      \"severity\": \"error\",\n      \"code\": \"GATE_EVIDENCE_STALE\",\n      \"where\": \"docs/V0_5_IMPLEMENTATION_HANDOFF.md §18.3 REL-COMPLIANCE\",\n      \"message\": \"passed Gate 的 sealed Evidence 锚点之后，相关主题域发生变化。若冻结范围语义未变，由工程侧重跑验证并重封存；只有实际范围变化才需要新的用户裁定。\"\n    }\n  ],\n  \"engineeringReviewStillRequired\": [\n    \"Evidence 的命令、样本、结论、Git 引用和用户范围批准是否真实，实施记录是否完整，而不只是结构合法\",\n    \"路线 capability、当前前沿、production 调用链和 authority 上限是否与当前实现语义一致\",\n    \"是否引入了交接书禁止的平行 milestone、task、status 或 next-actions 文档\"\n  ],\n  \"reviewOwner\": \"engineering-agent\",\n  \"userActionRequired\": false,\n  \"note\": \"通过只表示列出的确定性检查成立；剩余语义复核由工程方负责，不构成用户介入项。\"\n}\n",
+      "tailStderr": ""
+    },
+    {
+      "scriptName": "test:handoff-integrity:fixtures",
+      "tier": "governance",
+      "requirements": [
+        "none"
+      ],
+      "outcome": "passed",
+      "treatedAsFailure": false,
+      "exitCode": 0,
+      "durationMs": 324,
+      "skippedLegs": []
+    },
+    {
+      "scriptName": "test:handoff-projection",
+      "tier": "governance",
+      "requirements": [
+        "native-env"
+      ],
+      "outcome": "passed",
+      "treatedAsFailure": false,
+      "exitCode": 0,
+      "durationMs": 547,
+      "skippedLegs": []
+    },
+    {
+      "scriptName": "test:orphan-smoke-gate",
+      "tier": "governance",
+      "requirements": [
+        "none"
+      ],
+      "outcome": "passed",
+      "treatedAsFailure": false,
+      "exitCode": 0,
+      "durationMs": 291,
+      "skippedLegs": []
+    },
+    {
+      "scriptName": "test:probe-residual-gate",
+      "tier": "governance",
+      "requirements": [
+        "none"
+      ],
+      "outcome": "passed",
+      "treatedAsFailure": false,
+      "exitCode": 0,
+      "durationMs": 450,
+      "skippedLegs": []
+    },
+    {
+      "scriptName": "test:release-scope",
+      "tier": "governance",
+      "requirements": [
+        "none"
+      ],
+      "outcome": "passed",
+      "treatedAsFailure": false,
+      "exitCode": 0,
+      "durationMs": 293,
+      "skippedLegs": []
+    },
+    {
+      "scriptName": "test:release-scope-fixtures",
+      "tier": "governance",
+      "requirements": [
+        "none"
+      ],
+      "outcome": "passed",
+      "treatedAsFailure": false,
+      "exitCode": 0,
+      "durationMs": 4890,
+      "skippedLegs": []
+    },
+    {
+      "scriptName": "test:release-scope-proposal",
+      "tier": "governance",
+      "requirements": [
+        "none"
+      ],
+      "outcome": "passed",
+      "treatedAsFailure": false,
+      "exitCode": 0,
+      "durationMs": 272,
+      "skippedLegs": []
+    },
+    {
+      "scriptName": "test:seal-cli",
+      "tier": "governance",
+      "requirements": [
+        "none"
+      ],
+      "outcome": "passed",
+      "treatedAsFailure": false,
+      "exitCode": 0,
+      "durationMs": 1169,
+      "skippedLegs": []
+    },
+    {
+      "scriptName": "test:smoke-temp-cleanup",
+      "tier": "governance",
+      "requirements": [
+        "none"
+      ],
+      "outcome": "passed",
+      "treatedAsFailure": false,
+      "exitCode": 0,
+      "durationMs": 336,
+      "skippedLegs": []
+    },
+    {
+      "scriptName": "test:stale-tfm-gate",
+      "tier": "governance",
+      "requirements": [
+        "none"
+      ],
+      "outcome": "passed",
+      "treatedAsFailure": false,
+      "exitCode": 0,
+      "durationMs": 308,
+      "skippedLegs": []
+    },
+    {
+      "scriptName": "test:v06-deferral-index",
+      "tier": "governance",
+      "requirements": [
+        "none"
+      ],
+      "outcome": "passed",
+      "treatedAsFailure": false,
+      "exitCode": 0,
+      "durationMs": 302,
+      "skippedLegs": []
+    },
+    {
+      "scriptName": "test:verify-entrypoint",
+      "tier": "governance",
+      "requirements": [
+        "dotnet",
+        "emedf",
+        "native-env",
+        "opt-in"
+      ],
+      "outcome": "passed",
+      "treatedAsFailure": false,
+      "exitCode": 0,
+      "durationMs": 320,
+      "skippedLegs": []
+    },
+    {
+      "scriptName": "verify:audit",
+      "tier": "governance",
+      "requirements": [
+        "dotnet",
+        "emedf",
+        "native-env",
+        "opt-in"
+      ],
+      "outcome": "passed",
+      "treatedAsFailure": false,
+      "exitCode": 0,
+      "durationMs": 317,
+      "skippedLegs": []
+    }
+  ]
+}

@@ -4,6 +4,11 @@
  */
 
 import type { RagRetrieveResult } from '@soulforge/shared';
+import type {
+  EvidenceClaim,
+  EvidenceRevision,
+  EvidenceVersion
+} from './evidenceSelection.js';
 
 export type ModelServiceProtocol = 'openai-compatible' | 'openai-responses' | 'anthropic-compatible';
 
@@ -191,6 +196,8 @@ export interface ModelCompleteRequest {
   signal?: AbortSignal;
   /** Per-request timeout in milliseconds. When elapsed, the request is aborted. */
   timeoutMs?: number;
+  /** 会话标识，透传给需要会话路由/Prompt Caching的提供商（如 OpenCode x-opencode-session）。 */
+  sessionId?: string;
 }
 
 export interface ModelCompleteResult {
@@ -237,7 +244,7 @@ export interface ModelServiceAdapter {
    * 拉取该服务可用模型列表（GET /v1/models）。失败返回结构化诊断，
    * 绝不吞异常 —— 调用方用它决定「显示错误」还是「退回手填模型名」。
    */
-  listModels(options?: { signal?: AbortSignal; timeoutMs?: number }): Promise<ModelListResult>;
+  listModels(options?: { signal?: AbortSignal; timeoutMs?: number; sessionId?: string }): Promise<ModelListResult>;
 }
 
 /**
@@ -379,7 +386,15 @@ export type AgentEvent =
       /** True when answered from the session memory rather than a fresh prompt. */
       fromMemory: boolean;
     }
-  | { type: 'retry-scheduled'; step: number; attempt: number; maxAttempts: number; delayMs: number; code: string }
+  | {
+      type: 'retry-scheduled';
+      step: number;
+      attempt: number;
+      maxAttempts: number;
+      delayMs: number;
+      code: string;
+      message?: string;
+    }
   | { type: 'context-assembled'; step: number; sections: number; totalBytes: number }
   | { type: 'context-compacted'; step: number; reason: 'auto' | 'overflow'; tokenLimit: number }
   | { type: 'step-complete'; step: number; finishReason: string }
@@ -458,6 +473,8 @@ export interface AgentRunRequest {
   /** Resolved only in main/core — never passed to renderer. */
   apiKey: string;
   messages: ChatMessage[];
+  /** 会话标识，透传给需要会话路由/Prompt Caching的提供商（如 OpenCode x-opencode-session）。 */
+  sessionId?: string;
   /**
    * Fixed external user query captured by the host at run start. Internal
    * retry/continuation messages are durable history but must never become a
@@ -590,7 +607,20 @@ export interface AgentRunResult {
       ok: boolean;
       sections: number;
       totalBytes: number;
-      code?: 'insufficient_evidence' | 'CONTEXT_LIMIT_EXCEEDED' | 'CONTEXT_CANCELLED' | 'CONTEXT_TIMEOUT';
+      code?:
+        | 'insufficient_evidence'
+        | 'CONTEXT_LIMIT_EXCEEDED'
+        | 'CONTEXT_CANCELLED'
+        | 'CONTEXT_TIMEOUT'
+        | 'REQUIRED_EVIDENCE_EXCEEDS_BUDGET'
+        | 'CONFLICTING_CURRENT_EVIDENCE'
+        | 'EVIDENCE_CURRENT_VERSION_REQUIRED'
+        | 'EVIDENCE_ALL_STALE'
+        | 'BYTE_BUDGET_INTERNAL';
+      dynamic?: boolean;
+      actualWireBytes?: number;
+      estimatedTokens?: number;
+      omitted?: number;
     }>;
   };
 }
@@ -624,6 +654,12 @@ export interface ContextEvidenceSource {
   meta?: Record<string, unknown>;
   /** Original byte size; estimated from text length when absent. */
   sourceBytes?: number;
+  /** Structured claims created by a native/source adapter; never guessed from all IDs. */
+  evidenceCandidates?: readonly EvidenceClaim[];
+  /** Host-confirmed current versions for the claims in this source. */
+  currentVersionByResource?: ReadonlyMap<string, EvidenceVersion | EvidenceRevision>;
+  /** Requiredness comes from the host plan/dependency graph, not model prose. */
+  requiredClaimKeys?: readonly string[];
 }
 
 export interface ContextBrokerOptions {
@@ -636,6 +672,18 @@ export interface ContextBrokerOptions {
   /** Assembly timeout in milliseconds. */
   timeoutMs?: number;
   signal?: AbortSignal;
+  /** Host-owned current version map; version tokens are opaque, never sorted. */
+  currentVersionByResource?: ReadonlyMap<string, EvidenceVersion | EvidenceRevision>;
+  /** Reference-compatible alias for a map containing simple revisions. */
+  currentRevisionByResource?: ReadonlyMap<string, EvidenceVersion | EvidenceRevision>;
+  /** Required claim keys computed from the confirmed plan and verification dependencies. */
+  requiredClaimKeys?: ReadonlySet<string> | readonly string[];
+  /** Active claim queue cap; optional cold claims retain their rollout handles. */
+  maxActiveClaims?: number;
+  /** Stable user-visible subgoal references used only for deterministic ranking. */
+  activeGoalRefs?: readonly string[];
+  /** Reader schemas revoked by the host are never eligible for native evidence. */
+  revokedReaderSchemas?: ReadonlySet<string>;
 }
 
 export interface ContextSectionRecord {
@@ -645,6 +693,8 @@ export interface ContextSectionRecord {
   sourceBytes: number;
   truncated: boolean;
   redacted: boolean;
+  claimKey?: string;
+  required?: boolean;
 }
 
 export type ContextBrokerResult =
@@ -653,11 +703,26 @@ export type ContextBrokerResult =
       context: string;
       sections: ContextSectionRecord[];
       totalBytes: number;
+      /** Stable policy prefix is separate from dynamic evidence data. */
+      systemPrefix?: string;
+      /** True when context contains structured untrusted claims. */
+      dynamic?: boolean;
+      actualWireBytes?: number;
+      omitted?: number;
       diagnostics: [];
     }
   | {
       ok: false;
-      code: 'insufficient_evidence' | 'CONTEXT_LIMIT_EXCEEDED' | 'CONTEXT_CANCELLED' | 'CONTEXT_TIMEOUT';
+      code:
+        | 'insufficient_evidence'
+        | 'CONTEXT_LIMIT_EXCEEDED'
+        | 'CONTEXT_CANCELLED'
+        | 'CONTEXT_TIMEOUT'
+        | 'REQUIRED_EVIDENCE_EXCEEDS_BUDGET'
+        | 'CONFLICTING_CURRENT_EVIDENCE'
+        | 'EVIDENCE_CURRENT_VERSION_REQUIRED'
+        | 'EVIDENCE_ALL_STALE'
+        | 'BYTE_BUDGET_INTERNAL';
       message: string;
       diagnostics: [{ severity: 'error'; code: string; message: string }];
     };

@@ -112,6 +112,25 @@ try {
   // before the temporary test workspace is removed.
   await gateway.read();
 
+  // 承接测试：验证多轮对话跨轮时，子会话通过 inheritFromSessionId 继承父会话的 ticket 与 evidence
+  const childGateway = createAgentTaskRecordGateway(root, 'child-smoke', { inheritFromSessionId: 'gate-smoke' });
+  await childGateway.read();
+
+  // 子会话能够使用父会话搜索票据直接登记新的 Evidence
+  await childGateway.update({
+    objectName: '义父的铃铛',
+    propertyKey: 'EquipParamGoods',
+    value: 'rowId=3080 child-round',
+    evidence: ['EquipParamGoods#3080 fieldId=nameId child'],
+    searchId: ticket.searchId,
+    mutationBudget: 1
+  });
+
+  const childWriteAssert = await childGateway.assertMutationTarget('mutate_param_fields', {
+    edits: [{ table: 'EquipParamGoods', rowId: 3080, fieldId: 'nameId', value: 1 }]
+  });
+  assert.equal(childWriteAssert.ok, true, '子会话应完整继承父会话登记的 SearchTicket 并支持写入门禁');
+
   console.log('agent task-record gate smoke passed');
 } finally {
   await rm(root, { recursive: true, force: true });

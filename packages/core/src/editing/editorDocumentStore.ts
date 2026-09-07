@@ -93,6 +93,9 @@ interface OpenDocumentRecord {
   readonly locator: NativeDocumentLocator;
   revision: number;
   lastAccessedAt: number;
+  closed: boolean;
+  /** Serialize commit-side mutations without holding a lock across native I/O. */
+  mutationTail: Promise<void>;
 }
 
 /** query kind → item kind（§14.4：page 返回的 item kind 必须与 query kind 匹配）。 */
@@ -127,6 +130,9 @@ function fail(code: EditorDocumentErrorCode, retryable: boolean): EditorDocument
 
 export class EditorDocumentStore implements EditorDocumentStoreContract {
   private readonly documents = new Map<string, OpenDocumentRecord>();
+  /** Same snapshot/query reads share one data-source call. */
+  private readonly pageFlights = new Map<string, Promise<Awaited<ReturnType<EditorDocumentDataSource['loadPage']>>>>();
+  private readonly contentFlights = new Map<string, Promise<EditorContentValue | null>>();
   private readonly ttlMs: number;
   private readonly now: () => number;
   private readonly dataSource: EditorDocumentDataSource;
@@ -164,10 +170,60 @@ export class EditorDocumentStore implements EditorDocumentStoreContract {
     if (this.now() - record.lastAccessedAt > this.ttlMs) {
       // 过期即废弃：后续访问也一律 expired，不再复活。
       this.documents.delete(documentHandle);
+      record.closed = true;
       return fail('expired', true);
     }
     record.lastAccessedAt = this.now();
     return ok(record);
+  }
+
+  private isCurrent(record: OpenDocumentRecord): boolean {
+    return !record.closed && this.documents.get(record.handle) === record;
+  }
+
+  private pageFlightKey(
+    record: OpenDocumentRecord,
+    request: PageEditorDocumentRequestLike
+  ): string {
+    return JSON.stringify([
+      record.handle,
+      this.revisionOf(record),
+      request.query,
+      request.cursor,
+      request.limit
+    ]);
+  }
+
+  private async loadPageOnce(
+    record: OpenDocumentRecord,
+    request: PageEditorDocumentRequestLike
+  ): Promise<Awaited<ReturnType<EditorDocumentDataSource['loadPage']>>> {
+    const key = this.pageFlightKey(record, request);
+    const existing = this.pageFlights.get(key);
+    if (existing) return existing;
+    const flight = this.dataSource.loadPage(request.query, request.cursor, request.limit);
+    this.pageFlights.set(key, flight);
+    try {
+      return await flight;
+    } finally {
+      if (this.pageFlights.get(key) === flight) this.pageFlights.delete(key);
+    }
+  }
+
+  private async readContentOnce(
+    record: OpenDocumentRecord,
+    request: ReadEditorContentRequest
+  ): Promise<EditorContentValue | null> {
+    const key = JSON.stringify([record.handle, this.revisionOf(record), request.query]);
+    const existing = this.contentFlights.get(key);
+    if (existing) return existing;
+    const flight = this.dataSource.readContent(request.query);
+    this.contentFlights.set(key, flight);
+    try {
+      return await flight;
+    } finally {
+      if (this.contentFlights.get(key) === flight) this.contentFlights.delete(key);
+    }
   }
 
   async open(ownerKey: string, locator: NativeDocumentLocator): Promise<EditorDocumentResult<OpenEditorDocumentValue>> {
@@ -176,15 +232,22 @@ export class EditorDocumentStore implements EditorDocumentStoreContract {
     );
     if (existing) {
       if (existing.ownerKey !== ownerKey) return fail('owner-mismatch', false);
-      existing.lastAccessedAt = this.now();
-      return ok(this.toOpenValue(existing));
+      if (existing.closed || this.now() - existing.lastAccessedAt > this.ttlMs) {
+        existing.closed = true;
+        this.documents.delete(existing.handle);
+      } else {
+        existing.lastAccessedAt = this.now();
+        return ok(this.toOpenValue(existing));
+      }
     }
     const record: OpenDocumentRecord = {
       handle: randomUUID(),
       ownerKey,
       locator,
       revision: 0,
-      lastAccessedAt: this.now()
+      lastAccessedAt: this.now(),
+      closed: false,
+      mutationTail: Promise.resolve()
     };
     this.documents.set(record.handle, record);
     return ok(this.toOpenValue(record));
@@ -209,7 +272,11 @@ export class EditorDocumentStore implements EditorDocumentStoreContract {
     const requiredOperation = readOperationForQuery(request.query.kind);
     if (!readOperations.includes(requiredOperation)) return fail('capability-blocked', false);
 
-    const loaded = await this.dataSource.loadPage(request.query, request.cursor, request.limit);
+    const loaded = await this.loadPageOnce(record, request);
+    // A tab/workspace can close or mutate while native I/O is in flight. Never
+    // let that late result re-enter the caller as a page for the old snapshot.
+    if (!this.isCurrent(record)) return fail('expired', true);
+    if (this.revisionOf(record) !== request.expectedRevision) return fail('stale-revision', false);
     if (loaded.items === null) return fail('capability-blocked', false);
     if (loaded.items.length > request.limit) return fail('invalid-request', false);
 
@@ -244,7 +311,9 @@ export class EditorDocumentStore implements EditorDocumentStoreContract {
     const requiredOperation = READ_OPERATION_FOR_CONTENT[request.query.kind];
     if (!readOperations.includes(requiredOperation)) return fail('capability-blocked', false);
 
-    const content = await this.dataSource.readContent(request.query);
+    const content = await this.readContentOnce(record, request);
+    if (!this.isCurrent(record)) return fail('expired', true);
+    if (this.revisionOf(record) !== request.expectedRevision) return fail('stale-revision', false);
     if (content === null) return fail('capability-blocked', false);
     return ok(content);
   }
@@ -263,26 +332,35 @@ export class EditorDocumentStore implements EditorDocumentStoreContract {
       return fail('capability-blocked', false);
     }
 
-    const outcome = await this.applyPort.apply(request.mutation);
-    if (outcome.kind === 'cancelled') return fail('cancelled', false);
-    if (outcome.kind === 'rejected') return fail('mutation-rejected', false);
+    const operation = record.mutationTail.then(async () => {
+      if (!this.isCurrent(record)) return fail('expired', true);
+      if (request.expectedRevision !== this.revisionOf(record)) return fail('stale-revision', false);
 
-    record.revision += 1;
-    const transactionState: EditTransactionState = {
-      kind: 'committed',
-      operationId: outcome.operationId,
-      committedRevision: this.revisionOf(record)
-    };
-    return ok({
-      documentHandle: record.handle,
-      revision: this.revisionOf(record),
-      transactionState
+      const outcome = await this.applyPort.apply(request.mutation);
+      if (!this.isCurrent(record)) return fail('expired', true);
+      if (outcome.kind === 'cancelled') return fail('cancelled', false);
+      if (outcome.kind === 'rejected') return fail('mutation-rejected', false);
+
+      record.revision += 1;
+      const transactionState: EditTransactionState = {
+        kind: 'committed',
+        operationId: outcome.operationId,
+        committedRevision: this.revisionOf(record)
+      };
+      return ok({
+        documentHandle: record.handle,
+        revision: this.revisionOf(record),
+        transactionState
+      });
     });
+    record.mutationTail = operation.then(() => undefined, () => undefined);
+    return operation;
   }
 
   async close(ownerKey: string, documentHandle: string): Promise<EditorDocumentResult<{ closed: true }>> {
     const resolved = this.resolve(ownerKey, documentHandle);
     if (!resolved.ok) return resolved;
+    resolved.value.closed = true;
     this.documents.delete(documentHandle);
     return ok({ closed: true });
   }

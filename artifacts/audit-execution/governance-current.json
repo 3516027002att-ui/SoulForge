@@ -1,0 +1,320 @@
+{
+  "ok": false,
+  "mode": "run",
+  "message": "6 条套件失败",
+  "tiers": [
+    "governance"
+  ],
+  "filter": null,
+  "requireExecuted": false,
+  "counts": {
+    "passed": 15,
+    "skipped": 0,
+    "partial": 0,
+    "failed": 6,
+    "not-attempted": 0
+  },
+  "executedAndPassed": [
+    "handoff:fingerprint",
+    "test:agent-task-record-gate",
+    "test:cross-machine-fixtures",
+    "test:gov-cli",
+    "test:governance-data-fixtures",
+    "test:governance-equivalence",
+    "test:handoff-integrity:fixtures",
+    "test:probe-residual-gate",
+    "test:release-scope",
+    "test:release-scope-fixtures",
+    "test:release-scope-proposal",
+    "test:seal-cli",
+    "test:v06-deferral-index",
+    "test:verify-entrypoint",
+    "verify:audit"
+  ],
+  "skippedEntirely": [],
+  "partiallySkipped": [],
+  "failed": [
+    "test:governance",
+    "test:handoff-integrity",
+    "test:handoff-projection",
+    "test:orphan-smoke-gate",
+    "test:smoke-temp-cleanup",
+    "test:stale-tfm-gate"
+  ],
+  "notAttemptedDueToBail": [],
+  "results": [
+    {
+      "scriptName": "handoff:fingerprint",
+      "tier": "governance",
+      "requirements": [
+        "none"
+      ],
+      "outcome": "passed",
+      "treatedAsFailure": false,
+      "exitCode": 0,
+      "durationMs": 647,
+      "skippedLegs": []
+    },
+    {
+      "scriptName": "test:agent-task-record-gate",
+      "tier": "governance",
+      "requirements": [
+        "dotnet",
+        "emedf",
+        "native-env",
+        "opt-in"
+      ],
+      "outcome": "passed",
+      "treatedAsFailure": false,
+      "exitCode": 0,
+      "durationMs": 516,
+      "skippedLegs": []
+    },
+    {
+      "scriptName": "test:cross-machine-fixtures",
+      "tier": "governance",
+      "requirements": [
+        "none"
+      ],
+      "outcome": "passed",
+      "treatedAsFailure": false,
+      "exitCode": 0,
+      "durationMs": 1278,
+      "skippedLegs": []
+    },
+    {
+      "scriptName": "test:gov-cli",
+      "tier": "governance",
+      "requirements": [
+        "none"
+      ],
+      "outcome": "passed",
+      "treatedAsFailure": false,
+      "exitCode": 0,
+      "durationMs": 11661,
+      "skippedLegs": []
+    },
+    {
+      "scriptName": "test:governance",
+      "tier": "governance",
+      "requirements": [
+        "none"
+      ],
+      "outcome": "failed",
+      "treatedAsFailure": true,
+      "exitCode": 1,
+      "durationMs": 24491,
+      "skippedLegs": [],
+      "tailStdout": "      \"where\": \"docs/governance/gates.json REL-G\",\n      \"message\": \"passed Gate 的 sealed Evidence 锚点之后，相关主题域发生变化。若冻结范围语义未变，由工程侧重跑验证并重封存；只有实际范围变化才需要新的用户裁定。\"\n    },\n    {\n      \"severity\": \"error\",\n      \"code\": \"GATE_EVIDENCE_STALE\",\n      \"where\": \"docs/governance/gates.json REL-I\",\n      \"message\": \"passed Gate 的 sealed Evidence 锚点之后，相关主题域发生变化。若冻结范围语义未变，由工程侧重跑验证并重封存；只有实际范围变化才需要新的用户裁定。\"\n    },\n    {\n      \"severity\": \"error\",\n      \"code\": \"GATE_EVIDENCE_STALE\",\n      \"where\": \"docs/governance/gates.json REL-COMPLIANCE\",\n      \"message\": \"passed Gate 的 sealed Evidence 锚点之后，相关主题域发生变化。若冻结范围语义未变，由工程侧重跑验证并重封存；只有实际范围变化才需要新的用户裁定。\"\n    },\n    {\n      \"severity\": \"info\",\n      \"code\": \"FREEZE_UNFROZEN_BY_RULING\",\n      \"where\": \"docs/governance/releases.json\",\n      \"message\": \"V0.5 声明了 unfreezeRuling，已按条目放开冻结拦截：SCOPE-BEHAVIOR-ANIMATION, SCOPE-BEHAVIOR-TAE, SCOPE-BEHAVIOR-ESD, SCOPE-BEHAVIOR-SCRIPT, SCOPE-RUNTIME, SCOPE-EDITORS。其余条目继续比对 git 基线；该裁定的真实性由工程复核负责。\"\n    }\n  ],\n  \"note\": \"通过只表示列出的确定性检查成立；剩余语义复核由工程方负责，不构成用户介入项。\"\n}\n",
+      "tailStderr": ""
+    },
+    {
+      "scriptName": "test:governance-data-fixtures",
+      "tier": "governance",
+      "requirements": [
+        "none"
+      ],
+      "outcome": "passed",
+      "treatedAsFailure": false,
+      "exitCode": 0,
+      "durationMs": 1465,
+      "skippedLegs": []
+    },
+    {
+      "scriptName": "test:governance-equivalence",
+      "tier": "governance",
+      "requirements": [
+        "none"
+      ],
+      "outcome": "passed",
+      "treatedAsFailure": false,
+      "exitCode": 0,
+      "durationMs": 385,
+      "skippedLegs": []
+    },
+    {
+      "scriptName": "test:handoff-integrity",
+      "tier": "governance",
+      "requirements": [
+        "native-env"
+      ],
+      "outcome": "failed",
+      "treatedAsFailure": true,
+      "exitCode": 1,
+      "durationMs": 1067,
+      "skippedLegs": [],
+      "tailStdout": "    \"分叉判定与行尾无关（autocrlf=true 的 checkout 会整篇转 CRLF），写回沿用原文件主导行尾；放宽行尾不放过真实分叉\",\n    \"引用提案 marker 的文件集由仓库扫描双向比对，不是只遍历登记表自身\"\n  ],\n  \"findings\": [\n    {\n      \"severity\": \"error\",\n      \"code\": \"PROJECTION_FIXTURE_FAILED\",\n      \"where\": \"projection/idempotent\",\n      \"message\": \"当前交接书应已是最新投影；先运行 npm run handoff:project。\"\n    },\n    {\n      \"severity\": \"error\",\n      \"code\": \"PROJECTION_FIXTURE_FAILED\",\n      \"where\": \"projection/eol-lf-not-drifted\",\n      \"message\": \"全 LF 的交接书不应判为分叉，实际 drifted=true\"\n    },\n    {\n      \"severity\": \"error\",\n      \"code\": \"PROJECTION_FIXTURE_FAILED\",\n      \"where\": \"projection/eol-crlf-not-drifted\",\n      \"message\": \"全 CRLF 的交接书不应判为分叉（autocrlf=true 时 checkout 必然产生这种形态），实际 drifted=true\"\n    }\n  ]\n}\n",
+      "tailStderr": ""
+    },
+    {
+      "scriptName": "test:handoff-integrity:fixtures",
+      "tier": "governance",
+      "requirements": [
+        "none"
+      ],
+      "outcome": "passed",
+      "treatedAsFailure": false,
+      "exitCode": 0,
+      "durationMs": 291,
+      "skippedLegs": []
+    },
+    {
+      "scriptName": "test:handoff-projection",
+      "tier": "governance",
+      "requirements": [
+        "native-env"
+      ],
+      "outcome": "failed",
+      "treatedAsFailure": true,
+      "exitCode": 1,
+      "durationMs": 446,
+      "skippedLegs": [],
+      "tailStdout": "    \"分叉判定与行尾无关（autocrlf=true 的 checkout 会整篇转 CRLF），写回沿用原文件主导行尾；放宽行尾不放过真实分叉\",\n    \"引用提案 marker 的文件集由仓库扫描双向比对，不是只遍历登记表自身\"\n  ],\n  \"findings\": [\n    {\n      \"severity\": \"error\",\n      \"code\": \"PROJECTION_FIXTURE_FAILED\",\n      \"where\": \"projection/idempotent\",\n      \"message\": \"当前交接书应已是最新投影；先运行 npm run handoff:project。\"\n    },\n    {\n      \"severity\": \"error\",\n      \"code\": \"PROJECTION_FIXTURE_FAILED\",\n      \"where\": \"projection/eol-lf-not-drifted\",\n      \"message\": \"全 LF 的交接书不应判为分叉，实际 drifted=true\"\n    },\n    {\n      \"severity\": \"error\",\n      \"code\": \"PROJECTION_FIXTURE_FAILED\",\n      \"where\": \"projection/eol-crlf-not-drifted\",\n      \"message\": \"全 CRLF 的交接书不应判为分叉（autocrlf=true 时 checkout 必然产生这种形态），实际 drifted=true\"\n    }\n  ]\n}\n",
+      "tailStderr": ""
+    },
+    {
+      "scriptName": "test:orphan-smoke-gate",
+      "tier": "governance",
+      "requirements": [
+        "none"
+      ],
+      "outcome": "failed",
+      "treatedAsFailure": true,
+      "exitCode": 1,
+      "durationMs": 266,
+      "skippedLegs": [],
+      "tailStdout": "",
+      "tailStderr": "      \"lines\": 158,\n      \"code\": \"SMOKE_UNREACHABLE\",\n      \"message\": \"该 smoke 没有任何 npm script 入口，永远不会被执行；请注册 script 并登记层级，或在本门禁的 EXCLUDED 中写明理由。\"\n    },\n    {\n      \"file\": \"scripts/verify-agent-performance-fixes.mjs\",\n      \"lines\": 324,\n      \"code\": \"GATE_SCRIPT_UNREACHABLE\",\n      \"message\": \"该门禁脚本没有任何 npm script 入口，永远不会被调度执行；请注册 script 并登记层级，或在本门禁的 EXCLUDED_SCRIPTS 中写明理由。 注意 --audit 看不见这一类：它只检查「已存在的 npm script 是否登记层级」。\"\n    },\n    {\n      \"file\": \"scripts/verify-mission1-a1.mjs\",\n      \"lines\": 159,\n      \"code\": \"GATE_SCRIPT_UNREACHABLE\",\n      \"message\": \"该门禁脚本没有任何 npm script 入口，永远不会被调度执行；请注册 script 并登记层级，或在本门禁的 EXCLUDED_SCRIPTS 中写明理由。 注意 --audit 看不见这一类：它只检查「已存在的 npm script 是否登记层级」。\"\n    },\n    {\n      \"file\": \"scripts/verify-mission1-corpus-v2.mjs\",\n      \"lines\": 286,\n      \"code\": \"GATE_SCRIPT_UNREACHABLE\",\n      \"message\": \"该门禁脚本没有任何 npm script 入口，永远不会被调度执行；请注册 script 并登记层级，或在本门禁的 EXCLUDED_SCRIPTS 中写明理由。 注意 --audit 看不见这一类：它只检查「已存在的 npm script 是否登记层级」。\"\n    }\n  ]\n}\n"
+    },
+    {
+      "scriptName": "test:probe-residual-gate",
+      "tier": "governance",
+      "requirements": [
+        "none"
+      ],
+      "outcome": "passed",
+      "treatedAsFailure": false,
+      "exitCode": 0,
+      "durationMs": 998,
+      "skippedLegs": []
+    },
+    {
+      "scriptName": "test:release-scope",
+      "tier": "governance",
+      "requirements": [
+        "none"
+      ],
+      "outcome": "passed",
+      "treatedAsFailure": false,
+      "exitCode": 0,
+      "durationMs": 269,
+      "skippedLegs": []
+    },
+    {
+      "scriptName": "test:release-scope-fixtures",
+      "tier": "governance",
+      "requirements": [
+        "none"
+      ],
+      "outcome": "passed",
+      "treatedAsFailure": false,
+      "exitCode": 0,
+      "durationMs": 4730,
+      "skippedLegs": []
+    },
+    {
+      "scriptName": "test:release-scope-proposal",
+      "tier": "governance",
+      "requirements": [
+        "none"
+      ],
+      "outcome": "passed",
+      "treatedAsFailure": false,
+      "exitCode": 0,
+      "durationMs": 282,
+      "skippedLegs": []
+    },
+    {
+      "scriptName": "test:seal-cli",
+      "tier": "governance",
+      "requirements": [
+        "none"
+      ],
+      "outcome": "passed",
+      "treatedAsFailure": false,
+      "exitCode": 0,
+      "durationMs": 1030,
+      "skippedLegs": []
+    },
+    {
+      "scriptName": "test:smoke-temp-cleanup",
+      "tier": "governance",
+      "requirements": [
+        "none"
+      ],
+      "outcome": "failed",
+      "treatedAsFailure": true,
+      "exitCode": 1,
+      "durationMs": 294,
+      "skippedLegs": [],
+      "tailStdout": "",
+      "tailStderr": "{\n  \"ok\": false,\n  \"code\": \"SMOKE_TEMP_DIR_LEAK\",\n  \"message\": \"新增了不清理临时目录的 smoke。忘记清理不会让任何断言失败，只会静默累积。\",\n  \"newViolations\": [\n    {\n      \"file\": \"packages/core/src/testing/runWorkspaceStartupSmoke.ts\",\n      \"code\": \"SMOKE_TEMP_DIR_LEAK\",\n      \"message\": \"该 smoke 自己调了 2 处 mkdtemp( 但没有就地清理证据。 请改用 packages/core/src/testing/harness/smokeWorkspace.ts 的 withSmokeWorkspace， 或在 finally 中 rm(root, { recursive: true, force: true })。\"\n    }\n  ],\n  \"staleDebtEntries\": []\n}\n"
+    },
+    {
+      "scriptName": "test:stale-tfm-gate",
+      "tier": "governance",
+      "requirements": [
+        "none"
+      ],
+      "outcome": "failed",
+      "treatedAsFailure": true,
+      "exitCode": 1,
+      "durationMs": 288,
+      "skippedLegs": [],
+      "tailStdout": "",
+      "tailStderr": "  ],\n  \"scannedConfigs\": 2,\n  \"staleCount\": 2,\n  \"findings\": [\n    {\n      \"path\": \"bridge/SoulForge.Bridge/bin/Debug/net6.0\",\n      \"tfm\": \"net6.0\",\n      \"config\": \"Debug\",\n      \"fileCount\": 0,\n      \"hasExecutable\": false,\n      \"code\": \"STALE_TFM_OUTPUT\",\n      \"message\": \"与 csproj 声明的 TargetFramework(net10.0) 不符的构建产物目录。 它不含可执行产物，但仍是无人清理的堆积。 被 .gitignore 覆盖，git status 看不见；删除即可。\"\n    },\n    {\n      \"path\": \"bridge/SoulForge.Bridge/bin/Debug/net8.0\",\n      \"tfm\": \"net8.0\",\n      \"config\": \"Debug\",\n      \"fileCount\": 187,\n      \"hasExecutable\": true,\n      \"code\": \"STALE_TFM_OUTPUT\",\n      \"message\": \"与 csproj 声明的 TargetFramework(net10.0) 不符的构建产物目录。 它含可执行产物——那是能跑起来的旧版 Bridge，有人手误指向它会拿到旧解析行为。 被 .gitignore 覆盖，git status 看不见；删除即可。\"\n    }\n  ]\n}\n"
+    },
+    {
+      "scriptName": "test:v06-deferral-index",
+      "tier": "governance",
+      "requirements": [
+        "none"
+      ],
+      "outcome": "passed",
+      "treatedAsFailure": false,
+      "exitCode": 0,
+      "durationMs": 270,
+      "skippedLegs": []
+    },
+    {
+      "scriptName": "test:verify-entrypoint",
+      "tier": "governance",
+      "requirements": [
+        "dotnet",
+        "emedf",
+        "native-env",
+        "opt-in"
+      ],
+      "outcome": "passed",
+      "treatedAsFailure": false,
+      "exitCode": 0,
+      "durationMs": 276,
+      "skippedLegs": []
+    },
+    {
+      "scriptName": "verify:audit",
+      "tier": "governance",
+      "requirements": [
+        "dotnet",
+        "emedf",
+        "native-env",
+        "opt-in"
+      ],
+      "outcome": "passed",
+      "treatedAsFailure": false,
+      "exitCode": 0,
+      "durationMs": 307,
+      "skippedLegs": []
+    }
+  ]
+}

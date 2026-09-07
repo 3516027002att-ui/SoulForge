@@ -14,8 +14,11 @@ import { scanWorkspace } from '../workspace/scanWorkspace.js';
 
 async function run() {
   console.log('[workspace-startup-smoke] 1-8');
+  let dir1 = '';
+  let dir4 = '';
+  try {
   // Test 1: 270 files first scan does not read content when includeContentHashes=false
-  const dir1 = await mkdtemp(join(tmpdir(), 'sf-ws-1-'));
+  dir1 = await mkdtemp(join(tmpdir(), 'sf-ws-1-'));
   await mkdir(join(dir1, 'param'), {recursive:true});
   // create 270 files
   for (let i=0;i<270;i++){ await writeFile(join(dir1, `param/file_${i}.txt`), `content ${i}`.repeat(50)); }
@@ -68,7 +71,7 @@ async function run() {
   console.log(`  test3 ok: 1 file changed => hashRead 1`);
 
   // Test 4: hash failure keeps file with FILE_HASH_FAILED
-  const dir4 = await mkdtemp(join(tmpdir(), 'sf-ws-4-'));
+  dir4 = await mkdtemp(join(tmpdir(), 'sf-ws-4-'));
   await writeFile(join(dir4,'good.txt'),'good');
   await writeFile(join(dir4,'bad.txt'),'bad');
   // monkey patch sha path: simulate failure by making file unreadable? Instead test scanWorkspace hash failure path directly: create a broken symlink that scanWorkspace will classify as file but hash will fail
@@ -148,10 +151,13 @@ async function run() {
   assert.equal(checkBumped.reuse,false,'pathSourceGeneration bump must force rehash');
   console.log('  pathSourceGeneration bump forces rehash ok');
 
-  // cleanup
-  await rm(dir1,{recursive:true, force:true});
-  await rm(dir4,{recursive:true, force:true});
   console.log('[workspace-startup-smoke] all 1-8 passed');
+  } finally {
+    await Promise.all([
+      ...(dir1 ? [rm(dir1, { recursive: true, force: true })] : []),
+      ...(dir4 ? [rm(dir4, { recursive: true, force: true })] : [])
+    ]);
+  }
 }
 
 run().catch(e=>{ console.error(e); process.exit(1); });

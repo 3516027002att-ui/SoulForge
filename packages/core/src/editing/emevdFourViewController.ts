@@ -504,6 +504,7 @@ export interface EmevdDslPlanSubmitRequest {
   workspaceRoot: string;
   /** Root where Bridge staging temp dirs are created. */
   stagingRoot: string;
+  oodleRuntimeRoot?: string | undefined;
   targetUri?: string;
   title?: string;
   session?: WorkspaceSession;
@@ -583,6 +584,7 @@ export async function submitEmevdDslPlanViaFourView(
     workspaceId: input.workspaceId,
     workspaceRoot: input.workspaceRoot,
     stagingRoot: input.stagingRoot,
+    ...(input.oodleRuntimeRoot !== undefined ? { oodleRuntimeRoot: input.oodleRuntimeRoot } : {}),
     ...(input.targetUri !== undefined ? { targetUri: input.targetUri } : {}),
     ...(input.title !== undefined ? { title: input.title } : {}),
     ...(input.session !== undefined ? { session: input.session } : {}),

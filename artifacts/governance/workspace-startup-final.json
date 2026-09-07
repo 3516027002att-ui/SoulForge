@@ -1,0 +1,38 @@
+{
+  "ok": true,
+  "mode": "run",
+  "message": "1 条套件真实执行并通过",
+  "tiers": [
+    "unit"
+  ],
+  "filter": "workspace-startup",
+  "requireExecuted": true,
+  "counts": {
+    "passed": 1,
+    "skipped": 0,
+    "partial": 0,
+    "failed": 0,
+    "not-attempted": 0
+  },
+  "executedAndPassed": [
+    "test:workspace-startup"
+  ],
+  "skippedEntirely": [],
+  "partiallySkipped": [],
+  "failed": [],
+  "notAttemptedDueToBail": [],
+  "results": [
+    {
+      "scriptName": "test:workspace-startup",
+      "tier": "unit",
+      "requirements": [
+        "none"
+      ],
+      "outcome": "passed",
+      "treatedAsFailure": false,
+      "exitCode": 0,
+      "durationMs": 1099,
+      "skippedLegs": []
+    }
+  ]
+}

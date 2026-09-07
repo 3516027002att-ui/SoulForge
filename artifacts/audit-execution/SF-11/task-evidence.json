@@ -1,0 +1,52 @@
+{
+  "schemaVersion": 1,
+  "taskId": "SF-11",
+  "baseCommit": "f9cb0cd76a11bfa2857b48acbc779bfac0355d96",
+  "implementationCommit": "f9cb0cd76a11bfa2857b48acbc779bfac0355d96+local",
+  "status": {
+    "implementation": "completed",
+    "algorithm": "verified_algorithm",
+    "native": "verified_native",
+    "product": "not_run"
+  },
+  "changedFiles": [
+    "bridge/SoulForge.Bridge/ByteRangeWritePlan.cs",
+    "bridge/SoulForge.Bridge/TaeNativeWriter.cs",
+    "bridge/SoulForge.Bridge/BridgeCommandService.cs",
+    "bridge/SoulForge.Bridge/ParserTypes.cs",
+    "packages/shared/src/audit-execution-contracts.ts",
+    "packages/core/src/testing/runAuditSf11Smoke.ts",
+    "packages/core/package.json",
+    "package.json",
+    "scripts/verify/tiers.mjs",
+    "docs/audit-execution/tasks/SF-11.required-suites.json"
+  ],
+  "productionSymbols": [
+    "WriteInterval",
+    "AppendBlock",
+    "ByteRangeWritePlan",
+    "TaeNativeWriter",
+    "TaeEventHandle",
+    "validateTaeEventHandle",
+    "taeEventHandleKey"
+  ],
+  "tests": [
+    {
+      "suite": "test:audit-sf-11-unit",
+      "layer": "unit",
+      "outcome": "passed",
+      "executedCases": 10,
+      "artifactHash": "489D195472826E3490ED644EF8952F67E949A6A183B589CBA44BF5685CB9181B"
+    },
+    {
+      "suite": "test:audit-sf-11-native",
+      "layer": "native",
+      "outcome": "passed",
+      "executedCases": 1,
+      "artifactHash": "489D195472826E3490ED644EF8952F67E949A6A183B589CBA44BF5685CB9181B"
+    }
+  ],
+  "schemaMigrations": [],
+  "frontendContract": null,
+  "remainingBlocks": []
+}

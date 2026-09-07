@@ -1,0 +1,584 @@
+[
+  {
+    "id": "T01",
+    "name": "Part EntityID 改写",
+    "assertion": "真实 EntityID 改变，头部 internal ID 不变",
+    "tasks": [
+      "SF-01",
+      "SF-02",
+      "SF-29"
+    ]
+  },
+  {
+    "id": "T02",
+    "name": "Region EntityID 改写",
+    "assertion": "baseData3 中目标值改变，其他字段不变",
+    "tasks": [
+      "SF-01",
+      "SF-02",
+      "SF-29"
+    ]
+  },
+  {
+    "id": "T03",
+    "name": "Region 通用 scale",
+    "assertion": "受限接口拒绝，两个数据指针逐字节不变",
+    "tasks": [
+      "SF-01",
+      "SF-03",
+      "SF-29"
+    ]
+  },
+  {
+    "id": "T04",
+    "name": "Region shape 尺寸",
+    "assertion": "已支持类型正确写入；未知类型拒绝",
+    "tasks": [
+      "SF-03",
+      "SF-29"
+    ]
+  },
+  {
+    "id": "T05",
+    "name": "删除第一个 Part",
+    "assertion": "所有保留引用仍指向原对象或明确冲突",
+    "tasks": [
+      "SF-01",
+      "SF-04",
+      "SF-29"
+    ]
+  },
+  {
+    "id": "T06",
+    "name": "删除被引用对象",
+    "assertion": "不产生静默悬空引用",
+    "tasks": [
+      "SF-01",
+      "SF-04",
+      "SF-29"
+    ]
+  },
+  {
+    "id": "T07",
+    "name": "批量目标部分不存在",
+    "assertion": "默认整笔失败，磁盘零变化",
+    "tasks": [
+      "SF-05",
+      "SF-29"
+    ]
+  },
+  {
+    "id": "T08",
+    "name": "地图同名对象",
+    "assertion": "canonical handle 精确区分",
+    "tasks": [
+      "SF-05",
+      "SF-29"
+    ]
+  },
+  {
+    "id": "T09",
+    "name": "组合查询 modelName+entityId",
+    "assertion": "求交集或拒绝，不忽略条件",
+    "tasks": [
+      "SF-05",
+      "SF-29"
+    ]
+  },
+  {
+    "id": "T10",
+    "name": "Blender 旧 revision",
+    "assertion": "conflict，磁盘零变化",
+    "tasks": [
+      "SF-25",
+      "SF-26",
+      "SF-29"
+    ]
+  },
+  {
+    "id": "T11",
+    "name": "Blender 别的 workspace",
+    "assertion": "拒绝，即便 mapId/hash 相同",
+    "tasks": [
+      "SF-25",
+      "SF-26",
+      "SF-29"
+    ]
+  },
+  {
+    "id": "T12",
+    "name": "Blender create/duplicate",
+    "assertion": "未支持能力明确拒绝",
+    "tasks": [
+      "SF-25",
+      "SF-26",
+      "SF-29"
+    ]
+  },
+  {
+    "id": "T13",
+    "name": "PARAM 重复 ID",
+    "assertion": "指定物理身份；id-only 歧义写拒绝",
+    "tasks": [
+      "SF-06",
+      "SF-29"
+    ]
+  },
+  {
+    "id": "T14",
+    "name": "PARAM 物理行删除失效注入",
+    "assertion": "verifier 必须失败",
+    "tasks": [
+      "SF-06",
+      "SF-29"
+    ]
+  },
+  {
+    "id": "T15",
+    "name": "PARAM 删除后再改后续行",
+    "assertion": "原快照身份未漂移",
+    "tasks": [
+      "SF-06",
+      "SF-29"
+    ]
+  },
+  {
+    "id": "T16",
+    "name": "PARAM 同行两次更新",
+    "assertion": "模拟最终状态；或写前明确拒绝",
+    "tasks": [
+      "SF-06",
+      "SF-29"
+    ]
+  },
+  {
+    "id": "T17",
+    "name": "PARAM 只改名称",
+    "assertion": "名称和编码后置条件通过",
+    "tasks": [
+      "SF-06",
+      "SF-29"
+    ]
+  },
+  {
+    "id": "T18",
+    "name": "PARAM 未触及字节",
+    "assertion": "合理范围外保持或经 schema 证明重建等价",
+    "tasks": [
+      "SF-06",
+      "SF-29"
+    ]
+  },
+  {
+    "id": "T19",
+    "name": "FMG 同 ID 不同语言/表",
+    "assertion": "只修改指定目标",
+    "tasks": [
+      "SF-07",
+      "SF-08",
+      "SF-29"
+    ]
+  },
+  {
+    "id": "T20",
+    "name": "FMG null/空串/Unicode",
+    "assertion": "不混淆，不做静默替换",
+    "tasks": [
+      "SF-08",
+      "SF-29"
+    ]
+  },
+  {
+    "id": "T21",
+    "name": "FMG 同 outer 多表编辑",
+    "assertion": "单一提交且 sibling 不丢失",
+    "tasks": [
+      "SF-08",
+      "SF-12",
+      "SF-29"
+    ]
+  },
+  {
+    "id": "T22",
+    "name": "EMEVD 插入/删除组合",
+    "assertion": "指令、参数绑定、字符串与调用关系正确",
+    "tasks": [
+      "SF-09",
+      "SF-29"
+    ]
+  },
+  {
+    "id": "T23",
+    "name": "EMEVD 重命名链",
+    "assertion": "解析到最终事件并保留引用一致性",
+    "tasks": [
+      "SF-09",
+      "SF-29"
+    ]
+  },
+  {
+    "id": "T24",
+    "name": "大事件分页",
+    "assertion": "可取得完整必需代码，不用摘要猜逻辑",
+    "tasks": [
+      "SF-07",
+      "SF-09",
+      "SF-17",
+      "SF-29"
+    ]
+  },
+  {
+    "id": "T25",
+    "name": "Lua 混合编码",
+    "assertion": "非编辑区字节不变；非法修改拒绝",
+    "tasks": [
+      "SF-10",
+      "SF-29"
+    ]
+  },
+  {
+    "id": "T26",
+    "name": "Lua bytecode→source",
+    "assertion": "仅已验证 profile 允许，游戏加载验证",
+    "tasks": [
+      "SF-10",
+      "SF-27",
+      "SF-29"
+    ]
+  },
+  {
+    "id": "T27",
+    "name": "TAE 共享时间槽",
+    "assertion": "不误改 sibling，跨动画别名有覆盖",
+    "tasks": [
+      "SF-07",
+      "SF-11",
+      "SF-29"
+    ]
+  },
+  {
+    "id": "T28",
+    "name": "TAE 插入模板",
+    "assertion": "参数体、事件组和总数符合 profile",
+    "tasks": [
+      "SF-11",
+      "SF-27",
+      "SF-29"
+    ]
+  },
+  {
+    "id": "T29",
+    "name": "TAE 批量编辑内存",
+    "assertion": "不随操作数保留整文件副本",
+    "tasks": [
+      "SF-11",
+      "SF-29"
+    ]
+  },
+  {
+    "id": "T30",
+    "name": "FLVER strip/restart/索引位宽",
+    "assertion": "独立几何与拓扑一致",
+    "tasks": [
+      "SF-14",
+      "SF-26",
+      "SF-27",
+      "SF-29"
+    ]
+  },
+  {
+    "id": "T31",
+    "name": "FLVER rigid/weighted/mixed",
+    "assertion": "静态与参考姿态一致",
+    "tasks": [
+      "SF-26",
+      "SF-27",
+      "SF-29"
+    ]
+  },
+  {
+    "id": "T32",
+    "name": "畸形骨骼/权重",
+    "assertion": "返回错误，无 NaN/Infinity GPU 数据",
+    "tasks": [
+      "SF-26",
+      "SF-27",
+      "SF-29"
+    ]
+  },
+  {
+    "id": "T33",
+    "name": "地图重复模型",
+    "assertion": "源解析/投影次数符合设计；不重复整容器工作",
+    "tasks": [
+      "SF-14",
+      "SF-15",
+      "SF-17",
+      "SF-29"
+    ]
+  },
+  {
+    "id": "T34",
+    "name": "工作区切换/关闭 tab",
+    "assertion": "旧异步结果不回灌，资源被释放",
+    "tasks": [
+      "SF-15",
+      "SF-17",
+      "SF-29"
+    ]
+  },
+  {
+    "id": "T35",
+    "name": "超大 NDJSON 无换行帧",
+    "assertion": "在预算内拒绝，内存有界",
+    "tasks": [
+      "SF-16",
+      "SF-29"
+    ]
+  },
+  {
+    "id": "T36",
+    "name": "Bridge 排队超限",
+    "assertion": "backpressure，不无限累积",
+    "tasks": [
+      "SF-16",
+      "SF-29"
+    ]
+  },
+  {
+    "id": "T37",
+    "name": "路径越界/符号链接",
+    "assertion": "读写边界均拒绝；不依赖 UI",
+    "tasks": [
+      "SF-16",
+      "SF-26",
+      "SF-27",
+      "SF-29"
+    ]
+  },
+  {
+    "id": "T38",
+    "name": "多 outer 第 N 文件失败",
+    "assertion": "恢复或明确 recovery_required，不能假原子成功",
+    "tasks": [
+      "SF-12",
+      "SF-13",
+      "SF-29"
+    ]
+  },
+  {
+    "id": "T39",
+    "name": "提交后校验失败",
+    "assertion": "状态诚实；补偿与日志一致",
+    "tasks": [
+      "SF-12",
+      "SF-13",
+      "SF-29"
+    ]
+  },
+  {
+    "id": "T40",
+    "name": "A→B→C 回滚第一笔",
+    "assertion": "conflict，不覆盖 C",
+    "tasks": [
+      "SF-13",
+      "SF-29"
+    ]
+  },
+  {
+    "id": "T41",
+    "name": "崩溃在 replace/journal 窗口",
+    "assertion": "重启后可判定并恢复",
+    "tasks": [
+      "SF-13",
+      "SF-29"
+    ]
+  },
+  {
+    "id": "T42",
+    "name": "同一 mutation 重试",
+    "assertion": "不重复创建/应用",
+    "tasks": [
+      "SF-13",
+      "SF-29"
+    ]
+  },
+  {
+    "id": "T43",
+    "name": "RAG family 过滤",
+    "assertion": "词法、向量、扩展都遵守规定",
+    "tasks": [
+      "SF-07",
+      "SF-18",
+      "SF-29"
+    ]
+  },
+  {
+    "id": "T44",
+    "name": "RAG primary 满额再扩展",
+    "assertion": "返回不超过 finalLimit",
+    "tasks": [
+      "SF-18",
+      "SF-29"
+    ]
+  },
+  {
+    "id": "T45",
+    "name": "第 17 条新证据",
+    "assertion": "能按任务相关性进入上下文",
+    "tasks": [
+      "SF-19",
+      "SF-29"
+    ]
+  },
+  {
+    "id": "T46",
+    "name": "Broker 同 ID 不同资源",
+    "assertion": "不合并成同一事实",
+    "tasks": [
+      "SF-19",
+      "SF-29"
+    ]
+  },
+  {
+    "id": "T47",
+    "name": "Broker 中文预算",
+    "assertion": "字节和 token 单位对应实际计算",
+    "tasks": [
+      "SF-19",
+      "SF-29"
+    ]
+  },
+  {
+    "id": "T48",
+    "name": "连续空搜索",
+    "assertion": "coverage 明确，不推断“对象不存在”",
+    "tasks": [
+      "SF-20",
+      "SF-22",
+      "SF-24",
+      "SF-29"
+    ]
+  },
+  {
+    "id": "T49",
+    "name": "并行工具一个抛错",
+    "assertion": "其他结果与轨迹仍可结算",
+    "tasks": [
+      "SF-21",
+      "SF-29"
+    ]
+  },
+  {
+    "id": "T50",
+    "name": "一个慢工具",
+    "assertion": "UI 可见独立完成状态，无不必要整批沉默",
+    "tasks": [
+      "SF-21",
+      "SF-29"
+    ]
+  },
+  {
+    "id": "T51",
+    "name": "停止时正在提交",
+    "assertion": "状态与实际磁盘结果一致",
+    "tasks": [
+      "SF-13",
+      "SF-21",
+      "SF-29"
+    ]
+  },
+  {
+    "id": "T52",
+    "name": "Agent 无 mutation 宣称完成",
+    "assertion": "completion contract 拒绝 success",
+    "tasks": [
+      "SF-22",
+      "SF-29"
+    ]
+  },
+  {
+    "id": "T53",
+    "name": "用户确认旧计划",
+    "assertion": "计划变化导致重新授权",
+    "tasks": [
+      "SF-12",
+      "SF-22",
+      "SF-29"
+    ]
+  },
+  {
+    "id": "T54",
+    "name": "Wiki 过期 source/schema",
+    "assertion": "禁用写依据，标 stale 并重查",
+    "tasks": [
+      "SF-02",
+      "SF-19",
+      "SF-20",
+      "SF-23",
+      "SF-24",
+      "SF-29"
+    ]
+  },
+  {
+    "id": "T55",
+    "name": "Wiki 多来源重复错误",
+    "assertion": "不当独立证据累加",
+    "tasks": [
+      "SF-23",
+      "SF-24",
+      "SF-29"
+    ]
+  },
+  {
+    "id": "T56",
+    "name": "Wiki 并发写同页",
+    "assertion": "无丢更新，冲突可追踪",
+    "tasks": [
+      "SF-23",
+      "SF-29"
+    ]
+  },
+  {
+    "id": "T57",
+    "name": "Wiki 提示注入",
+    "assertion": "不执行文档命令，不提升权限",
+    "tasks": [
+      "SF-23",
+      "SF-24",
+      "SF-29"
+    ]
+  },
+  {
+    "id": "T58",
+    "name": "Wiki native 值冲突",
+    "assertion": "当前读取优先；schema 冲突独立复核",
+    "tasks": [
+      "SF-19",
+      "SF-20",
+      "SF-23",
+      "SF-24",
+      "SF-29"
+    ]
+  },
+  {
+    "id": "T59",
+    "name": "发布包缺 Bridge/模板",
+    "assertion": "关键验收失败，不静默降级",
+    "tasks": [
+      "SF-00",
+      "SF-27",
+      "SF-28",
+      "SF-29"
+    ]
+  },
+  {
+    "id": "T60",
+    "name": "反馈日志含 secret",
+    "assertion": "secret 被移除，诊断身份与版本信息保留",
+    "tasks": [
+      "SF-27",
+      "SF-29"
+    ]
+  }
+]

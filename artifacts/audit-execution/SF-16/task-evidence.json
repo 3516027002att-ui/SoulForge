@@ -1,0 +1,187 @@
+{
+  "schemaVersion": 1,
+  "taskId": "SF-16",
+  "baseCommit": "f9cb0cd76a11bfa2857b48acbc779bfac0355d96",
+  "implementationCommit": null,
+  "workingTreeHead": "f9cb0cd76a11bfa2857b48acbc779bfac0355d96",
+  "status": {
+    "implementation": "native-verified",
+    "algorithm": "passed",
+    "native": "native-verified",
+    "product": "partial"
+  },
+  "changedFiles": [
+    "bridge/SoulForge.Bridge/BridgeDaemonHost.cs",
+    "bridge/SoulForge.Bridge/BridgeCommandService.cs",
+    "bridge/SoulForge.Bridge/BoundedNdjsonReader.cs",
+    "bridge/SoulForge.Bridge/BridgeCommandDescriptor.cs",
+    "packages/shared/src/bridge-protocol.ts",
+    "packages/core/src/testing/runAuditSf16Smoke.ts",
+    "packages/core/src/testing/audit/sf-16/bridgeProtocolSf16Helper.ts"
+  ],
+  "productionSymbols": [
+    "BridgeDaemonHost.RunAsync",
+    "BoundedNdjsonReader.ReadFrameAsync",
+    "BoundedNdjsonReader.SetMaxFrameBytes",
+    "BridgeCommandDescriptorCatalog",
+    "BridgeDaemonHost.AcceptRequestAsync",
+    "BridgeRequestScheduler",
+    "BoundedOutputQueue",
+    "BridgeDaemonHost.HandleCancelAsync",
+    "BridgeDaemonHost.HandleWorkspaceCloseAsync",
+    "BridgeDaemonHost.BuildCapabilities",
+    "BridgeCommandService.ExecuteAsync"
+  ],
+  "tests": [
+    {
+      "name": "SF-16 registered unit suite",
+      "suite": "test:audit-sf-16-unit",
+      "command": "SOULFORGE_BRIDGE_EXECUTABLE=bridge/SoulForge.Bridge/bin/Release/net10.0/win-x64/publish/SoulForge.Bridge.exe node scripts/verify.mjs --tier all --filter audit-sf-16 --require-executed --no-bail --json-out artifacts/audit-execution/SF-16.json",
+      "layer": "unit",
+      "outcome": "passed",
+      "executedCases": 1,
+      "artifactHash": "E47E3AC94E0C14D03BFC1ECEE948B27D24C225FEF91D9088726A2477878E5283",
+      "result": {
+        "advertisedCount": 56,
+        "descriptorCount": 56,
+        "invalidUtf8": "BRIDGE_INVALID_UTF8",
+        "incompleteEof": "BRIDGE_EOF_INCOMPLETE_FRAME",
+        "oversizedFrame": "BRIDGE_FRAME_TOO_LARGE",
+        "queueBusyObserved": 189,
+        "cancellationObserved": true,
+        "maxActiveObserved": 2
+      }
+    },
+    {
+      "name": "SF-16 registered native suite",
+      "suite": "test:audit-sf-16-native",
+      "command": "SOULFORGE_BRIDGE_EXECUTABLE=bridge/SoulForge.Bridge/bin/Release/net10.0/win-x64/publish/SoulForge.Bridge.exe node scripts/verify.mjs --tier all --filter audit-sf-16 --require-executed --no-bail --json-out artifacts/audit-execution/SF-16.json",
+      "layer": "native",
+      "outcome": "passed",
+      "executedCases": 1,
+      "artifactHash": "E47E3AC94E0C14D03BFC1ECEE948B27D24C225FEF91D9088726A2477878E5283",
+      "fixture": "D:\\mystream\\Sekiro Shadows Die Twice\\Sekiro\\mods\\event\\common.emevd.dcx",
+      "result": {
+        "parseStatus": "partial",
+        "diagnosticCodes": [
+          "EMEVD_NATIVE_SEMANTIC_EXPORT",
+          "BRIDGE_RESULT_FILE_BACKED",
+          "BRIDGE_FILE_BACKED_RESULT_MATERIALIZED"
+        ],
+        "advertisedCount": 56,
+        "descriptorCount": 56,
+        "invalidUtf8": "BRIDGE_INVALID_UTF8",
+        "incompleteEof": "BRIDGE_EOF_INCOMPLETE_FRAME",
+        "oversizedFrame": "BRIDGE_FRAME_TOO_LARGE",
+        "queueBusyObserved": 189,
+        "cancellationObserved": true,
+        "maxActiveObserved": 2
+      }
+    },
+    {
+      "name": "verify summary",
+      "command": "node scripts/audit-execution/check-verify-summary.mjs artifacts/audit-execution/SF-16.json docs/audit-execution/tasks/SF-16.required-suites.json",
+      "layer": "governance",
+      "outcome": "passed",
+      "result": {
+        "requiredSuites": [
+          "test:audit-sf-16-unit",
+          "test:audit-sf-16-native"
+        ],
+        "validatedSuites": [
+          "test:audit-sf-16-unit",
+          "test:audit-sf-16-native"
+        ]
+      }
+    },
+    {
+      "name": "Bridge inbound frame smoke",
+      "command": "npm run test:bridge-inbound-frame -w @soulforge/core",
+      "layer": "unit",
+      "outcome": "passed",
+      "result": {
+        "manyFramesResolved": 200,
+        "manyTotalBytesExceedsLimit": true,
+        "oversizedInboundFrame": "BRIDGE_FRAME_TOO_LARGE"
+      }
+    },
+    {
+      "name": "Bridge daemon client smoke",
+      "command": "npm run test:bridge-daemon-client -w @soulforge/core",
+      "layer": "unit",
+      "outcome": "passed",
+      "result": {
+        "firstStatus": "partial",
+        "secondStatus": "partial",
+        "progressFrames": 2
+      }
+    },
+    {
+      "name": "project typecheck",
+      "command": "npm run typecheck",
+      "layer": "product",
+      "outcome": "passed"
+    },
+    {
+      "name": "public regression",
+      "command": "npm test",
+      "layer": "product",
+      "outcome": "passed"
+    },
+    {
+      "name": "synthetic Bridge regression",
+      "command": "npm run bridge:verify:synthetic",
+      "layer": "synthetic",
+      "outcome": "passed",
+      "result": "synthetic core fixtures: ok"
+    },
+    {
+      "name": "workspace build",
+      "command": "npm run build",
+      "layer": "product",
+      "outcome": "passed",
+      "result": "shared/core/desktop build and release manifest generated"
+    },
+    {
+      "name": "EXE build",
+      "command": "npm run exe:build",
+      "layer": "product",
+      "outcome": "passed",
+      "result": {
+        "bridgePublish": "bridge/SoulForge.Bridge/bin/Release/net10.0/win-x64/publish/SoulForge.Bridge.exe",
+        "doctor": "SoulForge.Doctor.exe",
+        "launcher": "SoulForge.Launcher.exe",
+        "devLauncher": "SoulForge.exe"
+      }
+    }
+  ],
+  "testHashes": {
+    "artifacts/audit-execution/SF-16.json": "CD88BD34E0E8C85AEFAB4C193841BD98934DF4FAE53F5D47763597DC0B7A4138",
+    "bridge/SoulForge.Bridge/bin/Release/net10.0/win-x64/publish/SoulForge.Bridge.exe": "3CE8373DBE18629C6C0F453B41734947B797A1DF36CE445F783BD64A32C9D971",
+    "bridge/SoulForge.Bridge/BridgeDaemonHost.cs": "18E79618D3A7FA3FD79A7E9B95CDF2138C0AB826FF5907F0A9AFA8DBBA163316",
+    "bridge/SoulForge.Bridge/BridgeCommandService.cs": "485A1B38FCE9E89E854B039676FA78AC3C4FD4B0CE55158ECB0811CA3F72F572",
+    "bridge/SoulForge.Bridge/BoundedNdjsonReader.cs": "3EC301DABF253EDC56FD7C7FE7F26EAD6BC248726E7F052A12EC145EF56859E0",
+    "bridge/SoulForge.Bridge/BridgeCommandDescriptor.cs": "CDEFF88219F3686DA5F64B11A789DE88E8EC8E10E0F6A9325340F99D96535102",
+    "packages/shared/src/bridge-protocol.ts": "32445A23EC03E156B23C03F698F5F5215CFB2655225F31DF3E0AA8CAE7B6A829",
+    "packages/core/src/testing/runAuditSf16Smoke.ts": "400ED4FA0E921F440AF58DF4BBCD586C8BA43E76C887F7D7BC29C76F44890074",
+    "packages/core/src/testing/audit/sf-16/bridgeProtocolSf16Helper.ts": "04F6ACD76018B883A244064F6705600517077E774C1CF8B1EEFFEF99981E8D54"
+  },
+  "schemaMigrations": [
+    "BridgeDaemonFrameKind adds workspace/close and workspace/closed control frames.",
+    "BridgeRequestPayload adds bounded scheduling priority.",
+    "capabilities now projects commandDescriptors, queueLimit and scheduling metadata."
+  ],
+  "frontendContract": null,
+  "scopeNotes": [
+    "The TypeScript client already forwards BridgeRequestPayload and closes the daemon stdin; no source diff was required in bridgeDaemonClient.ts for this daemon-side slice.",
+    "Package scripts and tier registration were already present in the shared worktree and were not edited in this pass.",
+    "A concurrent shared-host revision temporarily exposed a static registry initialization failure; the final BridgeDaemonHost revision uses an explicit local DiskWritingCommands HashSet and the rebuilt native smoke passed.",
+    "No commit, reset, or broad working-tree cleanup was performed."
+  ],
+  "remainingBlocks": [
+    "The required desktop-main-resource-loading binding was not changed or claimed; this slice verifies the production daemon protocol and explicit native EMEVD path only.",
+    "The native export result is parseStatus=partial by design; this does not claim complete EMEVD semantic coverage or release authority.",
+    "The SF-15 concurrent BridgeDaemonClient run emitted Node MaxListenersExceededWarning under ten parallel requests; it did not fail the native result and remains outside this daemon-side repair.",
+    "Existing unrelated working-tree changes remain outside the SF-16 changed-file list."
+  ]
+}

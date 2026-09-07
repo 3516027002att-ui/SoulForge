@@ -305,7 +305,7 @@ internal sealed class FlverNativeDocument
     // ------------------------------------------------------------------
 
     /// <summary>单个语义在某个 vertex buffer 中的访问计划。</summary>
-    private sealed class VertexMemberAccess
+    internal sealed class VertexMemberAccess
     {
         public int MemberIndex;
         public int VertexBufferIndex;
@@ -318,7 +318,7 @@ internal sealed class FlverNativeDocument
     }
 
     /// <summary>一个原生 VertexColor member；保留所有 member，不折叠重复语义。</summary>
-    private sealed class VertexColorMemberCandidate
+    internal sealed class VertexColorMemberCandidate
     {
         public int MemberIndex;
         public uint Type;
@@ -329,7 +329,7 @@ internal sealed class FlverNativeDocument
     }
 
     /// <summary>一个 mesh 的顶点解码计划：按语义从该 mesh 各 vertex buffer 合并取址。</summary>
-    private sealed class MeshDataPlan
+    internal sealed class MeshDataPlan
     {
         public int VertexCount;
         public VertexMemberAccess? Position;
@@ -344,6 +344,350 @@ internal sealed class FlverNativeDocument
         public VertexMemberAccess? Weights;
         public VertexMemberAccess? BoneIndices;
     }
+    /// <summary>
+    /// Lazy geometry descriptor. It references the native document's immutable
+    /// layout plan and FaceSet metadata; it owns no expanded vertex/index arrays.
+    /// </summary>
+    internal sealed class FlverMeshGeometryDescriptor
+    {
+        internal FlverMeshGeometryDescriptor(
+            int meshIndex,
+            MeshDataPlan dataPlan,
+            int sourceVertexCount,
+            int sourceIndexCount,
+            int indexElementBytes,
+            bool triangleStrip,
+            bool primitiveRestartEnabled,
+            int displayFaceSetOrdinal,
+            bool cullBackfaces,
+            float[] nativeBoundsMin,
+            float[] nativeBoundsMax,
+            bool hasNativeBounds)
+        {
+            MeshIndex = meshIndex;
+            DataPlan = dataPlan;
+            SourceVertexCount = sourceVertexCount;
+            SourceIndexCount = sourceIndexCount;
+            IndexElementBytes = indexElementBytes;
+            TriangleStrip = triangleStrip;
+            PrimitiveRestartEnabled = primitiveRestartEnabled;
+            DisplayFaceSetOrdinal = displayFaceSetOrdinal;
+            CullBackfaces = cullBackfaces;
+            NativeBoundsMin = nativeBoundsMin;
+            NativeBoundsMax = nativeBoundsMax;
+            HasNativeBounds = hasNativeBounds;
+        }
+
+        public int MeshIndex { get; }
+        public int SourceVertexCount { get; }
+        public int SourceIndexCount { get; }
+        public int IndexElementBytes { get; }
+        public bool TriangleStrip { get; }
+        public bool PrimitiveRestartEnabled { get; }
+        public int DisplayFaceSetOrdinal { get; }
+        public bool CullBackfaces { get; }
+        public float[] NativeBoundsMin { get; }
+        public float[] NativeBoundsMax { get; }
+        public bool HasNativeBounds { get; }
+        internal MeshDataPlan DataPlan { get; }
+        internal int UvSetCount => DataPlan.UVs.Sum(access => UVSetCount(access.Type));
+    }
+
+    internal readonly record struct FlverDisplayTriangle(
+        uint A,
+        uint B,
+        uint C,
+        int SourceIndexStart,
+        int NextSourceIndexPosition,
+        int EmittedTriangleOrdinal);
+
+    internal struct FlverDisplayTriangleCursor
+    {
+        public int SourceIndexPosition;
+        public int EmittedTriangleCount;
+        public uint StripA;
+        public uint StripB;
+        public bool HasStripA;
+        public bool HasStripB;
+        public bool StripParity;
+    }
+
+    /// <summary>
+    /// Returns the same native display FaceSet chosen by the existing
+    /// GetMeshIndicesBase64 path without decoding any vertex/index payload.
+    /// </summary>
+    internal FlverMeshGeometryDescriptor? GetMeshGeometryDescriptor(int meshIndex)
+    {
+        if (meshIndex < 0 || meshIndex >= Meshes.Count) return null;
+        var mesh = Meshes[meshIndex];
+        var selection = SelectDisplayFaceSet(meshIndex, mesh);
+        if (selection.Failure == FaceSetSelectionFailure.NoCandidate) return null;
+        if (selection.Failure == FaceSetSelectionFailure.NotDecodable)
+            throw new InvalidDataException(selection.Diagnostic!);
+
+        var faceSet = selection.FaceSet!;
+        if (faceSet.IndexSize != 16 && faceSet.IndexSize != 32)
+            throw new InvalidDataException(
+                "FLVER_FACESET_EDGE_COMPRESSED_UNSUPPORTED: IndexSize must be 16 or 32.");
+        if (faceSet.IndexCount <= 0 || faceSet.IndexCount > MaxIndexCount)
+            return null;
+
+        var plan = BuildMeshPlan(meshIndex);
+        if (plan is null || plan.Position is null || plan.VertexCount <= 0)
+            return null;
+
+        var hasBounds = float.IsFinite(BoundingBoxMinX)
+            && float.IsFinite(BoundingBoxMinY)
+            && float.IsFinite(BoundingBoxMinZ)
+            && float.IsFinite(BoundingBoxMaxX)
+            && float.IsFinite(BoundingBoxMaxY)
+            && float.IsFinite(BoundingBoxMaxZ)
+            && BoundingBoxMinX <= BoundingBoxMaxX
+            && BoundingBoxMinY <= BoundingBoxMaxY
+            && BoundingBoxMinZ <= BoundingBoxMaxZ;
+
+        return new FlverMeshGeometryDescriptor(
+            meshIndex,
+            plan,
+            mesh.VertexCount,
+            faceSet.IndexCount,
+            faceSet.IndexSize / 8,
+            faceSet.TriangleStrip,
+            faceSet.TriangleStrip && mesh.VertexCount < ushort.MaxValue,
+            selection.GlobalIndex,
+            faceSet.CullBackfaces,
+            new[] { BoundingBoxMinX, BoundingBoxMinY, BoundingBoxMinZ },
+            new[] { BoundingBoxMaxX, BoundingBoxMaxY, BoundingBoxMaxZ },
+            hasBounds);
+    }
+
+    internal int CountDisplayTriangles(FlverMeshGeometryDescriptor descriptor)
+    {
+        var cursor = CreateDisplayTriangleCursor(descriptor, 0);
+        var count = 0;
+        while (TryReadDisplayTriangle(descriptor, ref cursor, out _))
+            count = checked(count + 1);
+        return count;
+    }
+
+    internal FlverDisplayTriangleCursor CreateDisplayTriangleCursor(
+        FlverMeshGeometryDescriptor descriptor,
+        int sourceIndexPosition)
+    {
+        if (sourceIndexPosition < 0 || sourceIndexPosition > descriptor.SourceIndexCount)
+            throw new InvalidDataException(
+                "FLVER_CURSOR_SOURCE_INDEX_INVALID: source position is outside FaceSet.");
+
+        var cursor = new FlverDisplayTriangleCursor();
+        if (sourceIndexPosition == 0) return cursor;
+
+        while (cursor.SourceIndexPosition < sourceIndexPosition)
+        {
+            var before = cursor.SourceIndexPosition;
+            _ = TryReadDisplayTriangle(descriptor, ref cursor, out _);
+            if (cursor.SourceIndexPosition > sourceIndexPosition)
+                throw new InvalidDataException(
+                    "FLVER_CURSOR_NOT_AT_TRIANGLE_BOUNDARY: source position falls inside topology.");
+            if (cursor.SourceIndexPosition == before)
+                break;
+        }
+
+        if (cursor.SourceIndexPosition != sourceIndexPosition)
+            throw new InvalidDataException(
+                "FLVER_CURSOR_NOT_AT_TRIANGLE_BOUNDARY: strip state cannot be restored.");
+        return cursor;
+    }
+
+    internal bool TryReadDisplayTriangle(
+        FlverMeshGeometryDescriptor descriptor,
+        ref FlverDisplayTriangleCursor cursor,
+        out FlverDisplayTriangle triangle)
+    {
+        triangle = default;
+        if (!descriptor.TriangleStrip)
+        {
+            while (cursor.SourceIndexPosition < descriptor.SourceIndexCount)
+            {
+                var sourceStart = cursor.SourceIndexPosition;
+                if (descriptor.SourceIndexCount - sourceStart < 3)
+                    throw new InvalidDataException(
+                        "FLVER_FACESET_TRIANGLE_LIST_TRUNCATED: partial triangle.");
+                var a = ReadDisplayIndex(descriptor, cursor.SourceIndexPosition++);
+                var b = ReadDisplayIndex(descriptor, cursor.SourceIndexPosition++);
+                var c = ReadDisplayIndex(descriptor, cursor.SourceIndexPosition++);
+                if (a == b || b == c || c == a) continue;
+                var ordinal = cursor.EmittedTriangleCount++;
+                triangle = new FlverDisplayTriangle(
+                    a, b, c, sourceStart, cursor.SourceIndexPosition, ordinal);
+                return true;
+            }
+
+            return false;
+        }
+
+        while (cursor.SourceIndexPosition < descriptor.SourceIndexCount)
+        {
+            var value = ReadDisplayIndex(descriptor, cursor.SourceIndexPosition++);
+            if (descriptor.PrimitiveRestartEnabled && value == ushort.MaxValue)
+            {
+                cursor.HasStripA = false;
+                cursor.HasStripB = false;
+                cursor.StripParity = false;
+                continue;
+            }
+
+            if (!cursor.HasStripA)
+            {
+                cursor.StripA = value;
+                cursor.HasStripA = true;
+                continue;
+            }
+
+            if (!cursor.HasStripB)
+            {
+                cursor.StripB = value;
+                cursor.HasStripB = true;
+                continue;
+            }
+
+            var a = cursor.StripA;
+            var b = cursor.StripB;
+            var c = value;
+            var sourceStart = cursor.SourceIndexPosition - 3;
+            var flip = cursor.StripParity;
+            // Parity advances even when the candidate is degenerate.
+            cursor.StripParity = !cursor.StripParity;
+            cursor.StripA = b;
+            cursor.StripB = c;
+            if (a == b || b == c || c == a) continue;
+
+            var ordinal = cursor.EmittedTriangleCount++;
+            triangle = flip
+                ? new FlverDisplayTriangle(c, b, a, sourceStart, cursor.SourceIndexPosition, ordinal)
+                : new FlverDisplayTriangle(a, b, c, sourceStart, cursor.SourceIndexPosition, ordinal);
+            return true;
+        }
+
+        return false;
+    }
+
+    private uint ReadDisplayIndex(
+        FlverMeshGeometryDescriptor descriptor,
+        int sourceIndexPosition)
+    {
+        if (sourceIndexPosition < 0 || sourceIndexPosition >= descriptor.SourceIndexCount)
+            throw new InvalidDataException(
+                "FLVER_INDEX_POSITION_INVALID: source position is outside FaceSet.");
+
+        var faceSet = _faceSets[descriptor.DisplayFaceSetOrdinal];
+        var offset = checked((long)DataStart
+            + faceSet.IndicesOffset
+            + (long)sourceIndexPosition * descriptor.IndexElementBytes);
+        if (offset < 0 || offset + descriptor.IndexElementBytes > _source.Length)
+            throw new InvalidDataException(
+                "FLVER_INDEX_DATA_OUT_OF_BOUNDS: source index bytes are outside FLVER.");
+
+        System.Threading.Interlocked.Increment(ref BridgeTelemetry.MapTypedIndexReadCount);
+        var value = descriptor.IndexElementBytes == 4
+            ? ReadUInt32(_source, checked((int)offset))
+            : ReadUInt16(_source, checked((int)offset));
+        if (descriptor.PrimitiveRestartEnabled && value == ushort.MaxValue)
+            return value;
+        if (value >= (uint)descriptor.SourceVertexCount)
+            throw new InvalidDataException(
+                "FLVER_INDEX_OUT_OF_BOUNDS: source index exceeds vertex count.");
+        return value;
+    }
+
+    internal bool DecodePositionInto(
+        FlverMeshGeometryDescriptor descriptor,
+        int sourceVertexIndex,
+        Span<float> destination)
+    {
+        System.Threading.Interlocked.Increment(ref BridgeTelemetry.MapTypedPositionDecodeCount);
+        if (destination.Length < 3
+            || sourceVertexIndex < 0
+            || sourceVertexIndex >= descriptor.SourceVertexCount
+            || descriptor.DataPlan.Position is null)
+            return false;
+        if (!TryExtractFloat3(
+                descriptor.DataPlan.Position,
+                sourceVertexIndex,
+                out var x,
+                out var y,
+                out var z))
+            return false;
+        destination[0] = x;
+        destination[1] = y;
+        destination[2] = z;
+        return true;
+    }
+
+    internal bool DecodeNormalInto(
+        FlverMeshGeometryDescriptor descriptor,
+        int sourceVertexIndex,
+        Span<float> destination)
+    {
+        System.Threading.Interlocked.Increment(ref BridgeTelemetry.MapTypedNormalDecodeCount);
+        if (destination.Length < 3
+            || sourceVertexIndex < 0
+            || sourceVertexIndex >= descriptor.SourceVertexCount
+            || descriptor.DataPlan.Normal is null)
+            return false;
+        if (!TryExtractFloat3(
+                descriptor.DataPlan.Normal,
+                sourceVertexIndex,
+                out var x,
+                out var y,
+                out var z))
+            return false;
+        destination[0] = x;
+        destination[1] = y;
+        destination[2] = z;
+        return true;
+    }
+
+    internal bool DecodeUvInto(
+        FlverMeshGeometryDescriptor descriptor,
+        int uvSetIndex,
+        int sourceVertexIndex,
+        Span<float> destination)
+    {
+        System.Threading.Interlocked.Increment(ref BridgeTelemetry.MapTypedUvDecodeCount);
+        if (destination.Length < 2
+            || uvSetIndex < 0
+            || sourceVertexIndex < 0
+            || sourceVertexIndex >= descriptor.SourceVertexCount)
+            return false;
+
+        var remaining = uvSetIndex;
+        Span<float> values = stackalloc float[4];
+        foreach (var access in descriptor.DataPlan.UVs)
+        {
+            var setCount = UVSetCount(access.Type);
+            if (remaining >= setCount)
+            {
+                remaining -= setCount;
+                continue;
+            }
+
+            if (!TryReadUVValues(
+                    access,
+                    sourceVertexIndex,
+                    InternalVersion >= 0x2000F ? 2048f : 1024f,
+                    values,
+                    out var decodedCount)
+                || remaining >= decodedCount)
+                return false;
+
+            destination[0] = values[remaining * 2];
+            destination[1] = values[remaining * 2 + 1];
+            return float.IsFinite(destination[0]) && float.IsFinite(destination[1]);
+        }
+
+        return false;
+    }
+
 
     private MeshDataPlan? BuildMeshPlan(int meshIndex)
     {
@@ -509,41 +853,33 @@ internal sealed class FlverNativeDocument
     /// <summary>提取网格顶点位置（float[3] 每顶点）为 base64。stride 与 position 偏移取自真实 layout。</summary>
     public string? GetMeshPositionsBase64(int meshIndex, int maxVertices = 10_000, bool allowTruncation = false)
     {
-        var plan = BuildMeshPlan(meshIndex);
-        if (plan?.Position == null || plan.VertexCount <= 0) return null;
-        if (!allowTruncation && plan.VertexCount > maxVertices) return null;
-        var vertexCount = Math.Min(plan.VertexCount, maxVertices);
+        var descriptor = GetMeshGeometryDescriptor(meshIndex);
+        if (descriptor is null || descriptor.DataPlan.Position is null || descriptor.SourceVertexCount <= 0)
+            return null;
+        if (!allowTruncation && descriptor.SourceVertexCount > maxVertices) return null;
+        var vertexCount = Math.Min(descriptor.SourceVertexCount, maxVertices);
         var positions = new float[vertexCount * 3];
         for (var v = 0; v < vertexCount; v++)
         {
-            if (!TryExtractFloat3(plan.Position, v, out var x, out var y, out var z)) return null;
-            positions[v * 3] = x;
-            positions[v * 3 + 1] = y;
-            positions[v * 3 + 2] = z;
+            if (!DecodePositionInto(descriptor, v, positions.AsSpan(v * 3, 3))) return null;
         }
-        var bytes = new byte[positions.Length * 4];
-        Buffer.BlockCopy(positions, 0, bytes, 0, bytes.Length);
-        return Convert.ToBase64String(bytes);
+        return EncodeFloatArray(positions);
     }
 
     /// <summary>提取网格顶点法线（float[3] 每顶点，已按布局类型解码）为 base64。</summary>
     public string? GetMeshNormalsBase64(int meshIndex, int maxVertices = 10_000, bool allowTruncation = false)
     {
-        var plan = BuildMeshPlan(meshIndex);
-        if (plan?.Normal == null || plan.VertexCount <= 0) return null;
-        if (!allowTruncation && plan.VertexCount > maxVertices) return null;
-        var vertexCount = Math.Min(plan.VertexCount, maxVertices);
+        var descriptor = GetMeshGeometryDescriptor(meshIndex);
+        if (descriptor is null || descriptor.DataPlan.Normal is null || descriptor.SourceVertexCount <= 0)
+            return null;
+        if (!allowTruncation && descriptor.SourceVertexCount > maxVertices) return null;
+        var vertexCount = Math.Min(descriptor.SourceVertexCount, maxVertices);
         var normals = new float[vertexCount * 3];
         for (var v = 0; v < vertexCount; v++)
         {
-            if (!TryExtractFloat3(plan.Normal, v, out var x, out var y, out var z)) return null;
-            normals[v * 3] = x;
-            normals[v * 3 + 1] = y;
-            normals[v * 3 + 2] = z;
+            if (!DecodeNormalInto(descriptor, v, normals.AsSpan(v * 3, 3))) return null;
         }
-        var bytes = new byte[normals.Length * 4];
-        Buffer.BlockCopy(normals, 0, bytes, 0, bytes.Length);
-        return Convert.ToBase64String(bytes);
+        return EncodeFloatArray(normals);
     }
 
     /// <summary>
@@ -553,46 +889,28 @@ internal sealed class FlverNativeDocument
     /// </summary>
     public IReadOnlyList<string>? GetMeshUVSetsBase64(int meshIndex, int maxVertices = 10_000, bool allowTruncation = false)
     {
-        var plan = BuildMeshPlan(meshIndex);
-        if (plan is null || plan.UVs.Count == 0 || plan.VertexCount <= 0) return null;
-        if (!allowTruncation && plan.VertexCount > maxVertices) return null;
-        var vertexCount = Math.Min(plan.VertexCount, maxVertices);
-        var uvFactor = InternalVersion >= 0x2000F ? 2048f : 1024f;
-        var sets = new List<float[]>();
-        Span<float> values = stackalloc float[4];
-        foreach (var access in plan.UVs)
+        var descriptor = GetMeshGeometryDescriptor(meshIndex);
+        if (descriptor is null || descriptor.UvSetCount == 0 || descriptor.SourceVertexCount <= 0)
+            return null;
+        if (!allowTruncation && descriptor.SourceVertexCount > maxVertices) return null;
+        var vertexCount = Math.Min(descriptor.SourceVertexCount, maxVertices);
+        var sets = Enumerable.Range(0, descriptor.UvSetCount)
+            .Select(_ => new float[vertexCount * 2])
+            .ToArray();
+        for (var vertex = 0; vertex < vertexCount; vertex++)
         {
-            var setCount = UVSetCount(access.Type);
-            if (setCount <= 0)
+            for (var set = 0; set < sets.Length; set++)
             {
-                AddUnparsedGap($"vertex-semantic:UV type=0x{access.Type:X} 未支持；无法导出 UV 组");
-                return null;
-            }
-            var decodedSets = new float[setCount][];
-            for (var set = 0; set < setCount; set++)
-                decodedSets[set] = new float[vertexCount * 2];
-
-            for (var vertex = 0; vertex < vertexCount; vertex++)
-            {
-                if (!TryReadUVValues(access, vertex, uvFactor, values, out var decodedCount)
-                    || decodedCount != setCount)
+                if (!DecodeUvInto(
+                        descriptor,
+                        set,
+                        vertex,
+                        sets[set].AsSpan(vertex * 2, 2)))
                     return null;
-                for (var set = 0; set < decodedCount; set++)
-                {
-                    var target = decodedSets[set];
-                    target[vertex * 2] = values[set * 2];
-                    target[vertex * 2 + 1] = values[set * 2 + 1];
-                }
             }
-            sets.AddRange(decodedSets);
         }
 
-        return sets.Select(values =>
-        {
-            var bytes = new byte[values.Length * sizeof(float)];
-            Buffer.BlockCopy(values, 0, bytes, 0, bytes.Length);
-            return Convert.ToBase64String(bytes);
-        }).ToArray();
+        return sets.Select(EncodeFloatArray).ToArray();
     }
 
     /// <summary>提取网格第一组 UV（float[2] 每顶点）为 base64，兼容旧调用方。</summary>
@@ -939,6 +1257,7 @@ internal sealed class FlverNativeDocument
     {
         var bytes = new byte[checked(values.Length * sizeof(float))];
         Buffer.BlockCopy(values, 0, bytes, 0, bytes.Length);
+        System.Threading.Interlocked.Increment(ref BridgeTelemetry.FlverBase64EncodeCount);
         return Convert.ToBase64String(bytes);
     }
 
@@ -1119,75 +1438,39 @@ internal sealed class FlverNativeDocument
     /// </summary>
     public string? GetMeshIndicesBase64(int meshIndex, int maxIndices = 30_000, bool allowTruncation = false)
     {
-        if (meshIndex < 0 || meshIndex >= Meshes.Count) return null;
-        var mesh = Meshes[meshIndex];
-
-        // 与 GetMeshIndexSize 共用同一个选择规则，保证两个函数永远选中同一个 FaceSet。
-        var selection = SelectDisplayFaceSet(meshIndex, mesh);
-        // 没有候选（mesh 未引用 FaceSet / 引用越界）保持原有「跳过该 mesh」行为，不伪造 geometry。
-        if (selection.Failure == FaceSetSelectionFailure.NoCandidate) return null;
-        // 无法被当前 parser 解码 -> fail closed，不向后扫描找「碰巧能画」的面集。
-        if (selection.Failure == FaceSetSelectionFailure.NotDecodable)
-            throw new InvalidDataException(selection.Diagnostic!);
-        var fs = selection.FaceSet!;
-        if (fs.IndexSize != 16 && fs.IndexSize != 32) throw new InvalidDataException($"FLVER_FACESET_EDGE_COMPRESSED_UNSUPPORTED: IndexSize {fs.IndexSize} not in {{16,32}}");
-        if (fs.IndexCount <= 0 || fs.IndexCount > MaxIndexCount || maxIndices < 3) return null;
-        var indexDataOffset = (long)DataStart + fs.IndicesOffset;
-        var byteLen = fs.IndexCount * (fs.IndexSize / 8);
-        if (indexDataOffset < 0 || indexDataOffset + byteLen > _source.Length) return null;
-
-        var sourceIndices = new uint[fs.IndexCount];
-        var stride = fs.IndexSize / 8;
-        for (var i = 0; i < fs.IndexCount; i++)
+        var descriptor = GetMeshGeometryDescriptor(meshIndex);
+        if (descriptor is null || maxIndices < 3) return null;
+        var triangleList = new List<uint>(Math.Min(maxIndices, 30_000));
+        var cursor = CreateDisplayTriangleCursor(descriptor, 0);
+        while (TryReadDisplayTriangle(descriptor, ref cursor, out var triangle))
         {
-            var offset = checked((int)indexDataOffset + i * stride);
-            sourceIndices[i] = fs.IndexSize == 32
-                ? ReadUInt32(_source, offset)
-                : ReadUInt16(_source, offset);
-        }
-
-        // Bounds validation: every source index must be < vertexCount before triangulation
-        for (var i = 0; i < sourceIndices.Length; i++)
-        {
-            var idx = sourceIndices[i];
-            if (idx == ushort.MaxValue && fs.TriangleStrip && mesh.VertexCount < 65535) continue; // sentinel allowed only when restart enabled
-            if (idx >= (uint)mesh.VertexCount)
-                throw new InvalidDataException($"FLVER_INDEX_OUT_OF_BOUNDS: mesh[{meshIndex}] index {idx} >= vertexCount {mesh.VertexCount}");
-        }
-
-        uint[] triangleList;
-        if (fs.TriangleStrip)
-        {
-            var allowPrimitiveRestarts = mesh.VertexCount < 65535;
-            triangleList = TriangulateFaceSet(sourceIndices, fs.IndexSize, allowPrimitiveRestarts);
-        }
-        else
-        {
-            // A non-strip face set is already a triangle list. A trailing partial
-            // triangle is malformed and must not leak to Three.js as plausible data.
-            if (sourceIndices.Length % 3 != 0) return null;
-            triangleList = sourceIndices;
-        }
-
-        // Post-triangulation bounds: triangle list indices already bounds-checked via source, but degenerate removal keeps subset
-        if (!allowTruncation && triangleList.Length > maxIndices) return null;
-        var outputCount = Math.Min(triangleList.Length, maxIndices);
-        outputCount -= outputCount % 3;
-        if (outputCount <= 0) return null;
-        var output = new byte[checked(outputCount * stride)];
-        for (var i = 0; i < outputCount; i++)
-        {
-            var value = triangleList[i];
-            if (fs.IndexSize == 16)
+            if (triangleList.Count + 3 > maxIndices)
             {
-                if (value > ushort.MaxValue) return null;
-                BinaryPrimitives.WriteUInt16LittleEndian(output.AsSpan(i * stride, stride), (ushort)value);
+                if (!allowTruncation) return null;
+                break;
+            }
+            triangleList.Add(triangle.A);
+            triangleList.Add(triangle.B);
+            triangleList.Add(triangle.C);
+        }
+        if (triangleList.Count == 0) return null;
+
+        var output = new byte[checked(triangleList.Count * descriptor.IndexElementBytes)];
+        for (var i = 0; i < triangleList.Count; i++)
+        {
+            if (descriptor.IndexElementBytes == 2)
+            {
+                if (triangleList[i] > ushort.MaxValue) return null;
+                BinaryPrimitives.WriteUInt16LittleEndian(
+                    output.AsSpan(i * 2, 2), (ushort)triangleList[i]);
             }
             else
             {
-                BinaryPrimitives.WriteUInt32LittleEndian(output.AsSpan(i * stride, stride), value);
+                BinaryPrimitives.WriteUInt32LittleEndian(
+                    output.AsSpan(i * 4, 4), triangleList[i]);
             }
         }
+        System.Threading.Interlocked.Increment(ref BridgeTelemetry.FlverBase64EncodeCount);
         return Convert.ToBase64String(output);
     }
 
@@ -1462,6 +1745,7 @@ internal sealed class FlverNativeDocument
 
     public static FlverNativeDocument Read(byte[] source)
     {
+        System.Threading.Interlocked.Increment(ref BridgeTelemetry.FlverParseCount);
         if (source.Length < HeaderSize || source.Length > MaxSourceBytes)
             throw new InvalidDataException($"FLVER 大小 {source.Length} 超出安全范围。");
 
@@ -2119,6 +2403,7 @@ internal sealed class FlverNativeDocument
             // 上层若把两者混为一谈，就会把「我没读」误报成「文件坏了」。
             unparsedGaps = gaps,
             roundTrip = rt,
+            telemetry = BridgeTelemetry.Snapshot(),
             authority
         };
     }

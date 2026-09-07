@@ -27,6 +27,8 @@ export type BridgeDaemonFrameKind =
   | 'failed'
   | 'cancelled'
   | 'cancel'
+  | 'workspace/close'
+  | 'workspace/closed'
   | 'health'
   | 'capabilities';
 
@@ -52,11 +54,15 @@ export interface BridgeHandshakePayload {
   maxConcurrency?: number;
 }
 
+export type BridgeRequestPriority = 'interactive' | 'foreground' | 'background';
+
 export interface BridgeRequestPayload {
   command: BridgeCommandName;
   /** Main-process-resolved path checked against handshake allowedRoots. */
   filePath: string;
   options?: Record<string, unknown>;
+  /** Scheduling hint; the daemon still applies its own bounded policy. */
+  priority?: BridgeRequestPriority;
 }
 
 /**
@@ -255,6 +261,14 @@ export interface BridgeCommandDescriptor {
   supportsCancellation: boolean;
   supportsProgress: boolean;
   resourceKinds: ResourceKind[] | ['*'];
+  /** Daemon admission/effect projection. Optional for older capability fixtures. */
+  effect?: 'read' | 'write' | 'export' | 'control';
+  advertised?: boolean;
+  requiredInputFields?: string[];
+  requiresOutputPath?: boolean;
+  costClass?: BridgeRequestPriority;
+  cancelMode?: 'cooperative' | 'immediate' | 'none';
+  handler?: string;
 }
 
 export interface BridgeCapabilityCell {

@@ -415,19 +415,20 @@ async function run() {
     let ragCorpus = Core.buildRagCorpus(index);
     log(`RAG 快照就绪：chunks=${ragCorpus.chunks.length}, references=${ragCorpus.references.length}, availability=${ragCorpus.availability}。`);
 
+    const sessionId = randomUUID();
     const provider = chooseProvider();
     const adapterResult = createConfiguredModelServiceAdapter({
       config: provider.config,
-      apiKey: provider.apiKey
+      apiKey: provider.apiKey,
+      sessionId
     });
     if (!adapterResult.ok) {
       throw new Error(`REAL_AGENT_ADAPTER_INVALID: ${JSON.stringify(adapterResult.diagnostics)}`);
     }
-    const modelList = await adapterResult.adapter.listModels({ timeoutMs: 30_000 });
+    const modelList = await adapterResult.adapter.listModels({ timeoutMs: 30_000, sessionId });
     if (!modelList.ok) log(`模型列表请求失败，但继续使用已配置模型：${modelList.error.code}`);
     else log(`真实 API 已连通：可用模型 ${modelList.models.length} 个；本次使用 ${provider.config.model}。`);
 
-    const sessionId = randomUUID();
     const taskRecord = createAgentTaskRecordGateway(taskRecordDir, sessionId);
     const taskRecordSnapshot = await taskRecord.read();
     const memoryStore = new InMemoryMemoryStore(await readFile(join(MOD_ROOT, '.soulforge', 'MEMORY.md'), 'utf8').catch(() => ''));

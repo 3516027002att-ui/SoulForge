@@ -1,0 +1,11 @@
+{
+  "taskCount": 30,
+  "findingCount": 22,
+  "originalAcceptanceCount": 60,
+  "referenceTestCount": 175,
+  "unicodeCharacters": 175748,
+  "cjkCharacters": 40470,
+  "bytesUtf8": 268945,
+  "headings": 228,
+  "scope": "specification, reference algorithms and own checks; no production repository changes"
+}

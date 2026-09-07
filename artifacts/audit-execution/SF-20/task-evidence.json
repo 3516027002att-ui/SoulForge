@@ -1,0 +1,53 @@
+{
+  "schemaVersion": 1,
+  "taskId": "SF-20",
+  "baseCommit": "f9cb0cd76a11bfa2857b48acbc779bfac0355d96",
+  "implementationCommit": "f9cb0cd76a11bfa2857b48acbc779bfac0355d96+local",
+  "status": {
+    "implementation": "completed",
+    "algorithm": "verified_algorithm",
+    "native": "partial",
+    "product": "not_run"
+  },
+  "changedFiles": [
+    "package.json",
+    "packages/core/package.json",
+    "packages/core/src/ai/entityResolution.ts",
+    "packages/core/src/ai/toolRegistry.ts",
+    "packages/core/src/indexing/coverageState.ts",
+    "packages/core/src/indexing/knowledgeRefresh.ts",
+    "packages/core/src/indexing/nativeSemanticRefresh.ts",
+    "packages/core/src/indexing/workspaceIndex.ts",
+    "packages/core/src/references/chrLinkageResolver.ts",
+    "packages/core/src/testing/runAuditSf20Smoke.ts",
+    "scripts/verify/tiers.mjs"
+  ],
+  "productionSymbols": [
+    "createCoverageState",
+    "resolveEntity",
+    "notFoundCode"
+  ],
+  "tests": [
+    {
+      "suite": "test:audit-sf-20-unit",
+      "layer": "unit",
+      "outcome": "passed",
+      "executedCases": 8,
+      "artifactHash": "F43FF270B9248B1FC7CA9F5B3E72904F412239166DDEBA338197ED0DEF2F6EBD"
+    },
+    {
+      "suite": "test:audit-sf-20-native",
+      "layer": "native",
+      "outcome": "passed",
+      "executedCases": 8,
+      "artifactHash": "F43FF270B9248B1FC7CA9F5B3E72904F412239166DDEBA338197ED0DEF2F6EBD",
+      "detail": "native layer与unit共享合成 WorkspaceIndex/nativeRead callback 场景。"
+    }
+  ],
+  "schemaMigrations": [],
+  "frontendContract": null,
+  "remainingBlocks": [
+    "native required suite复用同一 synthetic resolver 场景，未形成真实工作区全量覆盖或 native 读回证据。"
+  ]
+}
+

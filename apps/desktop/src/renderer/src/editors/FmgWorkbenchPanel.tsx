@@ -36,8 +36,13 @@ export interface FmgEntryRow {
  */
 const FMG_TAG_PATTERN = /<\?([A-Za-z][A-Za-z0-9_]*)(?:@(-?\d+))?\?>/g;
 
-export function projectFmgDisplayText(text: string): string {
-  return text.replace(FMG_TAG_PATTERN, (_whole, name: string, num?: string) => {
+export function projectFmgDisplayText(text: string | null | undefined): string {
+  // Native FMG uses a null/zero offset for empty slots. Depending on the
+  // Bridge/structured-clone path an absent slot can arrive as null or as an
+  // omitted text property; both are the same display-level empty value and
+  // must not take down the whole workbench.
+  const source = typeof text === 'string' ? text : '';
+  return source.replace(FMG_TAG_PATTERN, (_whole, name: string, num?: string) => {
     if (name === 'null') return '';
     const suffix = num !== undefined ? ` ${num}` : '';
     switch (name) {
@@ -54,7 +59,7 @@ export function projectFmgDisplayText(text: string): string {
  * 是合法形态，main 的 decodeCiteHit 按非路径校验）；text 用显示投影文本
  * （前 80 字，图标/地名标签已投影）。未选表时不挂 data-cite（诚实态）。
  */
-function citeEntryAttr(entryId: number, tableId: string | null, text: string): Record<string, string> {
+function citeEntryAttr(entryId: number, tableId: string | null, text: string | null | undefined): Record<string, string> {
   if (tableId === null) return {};
   const projected = projectFmgDisplayText(text).slice(0, 80);
   return {
@@ -299,7 +304,10 @@ export function FmgWorkbenchPanel(props: FmgWorkbenchPanelProps): ReactElement {
           setPageError(result.diagnostics?.[0]?.message ?? 'FMG 表读取失败。');
           setPageEntries([]);
         } else {
-          setPageEntries(result.entries);
+          setPageEntries(result.entries.map((entry) => ({
+            id: entry.id,
+            text: typeof entry.text === 'string' ? entry.text : ''
+          })));
           setEntryCount(result.entryCount);
           setMaxId(result.maxId);
           setPage(0);
@@ -322,7 +330,8 @@ export function FmgWorkbenchPanel(props: FmgWorkbenchPanelProps): ReactElement {
     const q = query.trim().toLowerCase();
     if (!q) return props.entries;
     return props.entries.filter(
-      (row) => String(row.id).includes(q) || row.text.toLowerCase().includes(q)
+      (row) => String(row.id).includes(q)
+        || (typeof row.text === 'string' ? row.text : '').toLowerCase().includes(q)
     );
   }, [props.entries, query]);
 
@@ -665,7 +674,7 @@ export function FmgWorkbenchPanel(props: FmgWorkbenchPanelProps): ReactElement {
       <label className="stack gap" style={{ flex: 1, display: 'flex', flexDirection: 'column', minHeight: 0 }}>
         编辑 ID {selected.id}
         <textarea
-          value={draftText ?? selected.text}
+          value={draftText ?? (typeof selected.text === 'string' ? selected.text : '')}
           onChange={(e) => updateText(e.target.value)}
           onBlur={() => commitDraftRef.current()}
           onKeyDown={(e) => {

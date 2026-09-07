@@ -1,0 +1,60 @@
+{
+  "schemaVersion": 1,
+  "taskId": "SF-01",
+  "baseCommit": "f9cb0cd76a11bfa2857b48acbc779bfac0355d96",
+  "implementationCommit": "f9cb0cd76a11bfa2857b48acbc779bfac0355d96+local",
+  "status": {
+    "implementation": "completed",
+    "algorithm": "verified_algorithm",
+    "native": "verified_native",
+    "product": "not_run"
+  },
+  "changedFiles": [
+    "bridge/SoulForge.Bridge/MsbNativeDocument.cs",
+    "bridge/SoulForge.Bridge/MsbNativeWriter.cs",
+    "bridge/SoulForge.Bridge/BridgeCommandService.cs",
+    "packages/shared/src/map-document.ts",
+    "packages/core/src/editing/mapService.ts",
+    "packages/core/src/testing/runAuditMsbSafetyGateSmoke.ts",
+    "packages/core/src/testing/runAuditSf01Smoke.ts",
+    "packages/core/src/testing/runNativeMsbWriterSmoke.ts",
+    "docs/audit-execution/tasks/SF-01.required-suites.json",
+    "packages/core/package.json",
+    "package.json",
+    "scripts/verify/tiers.mjs"
+  ],
+  "productionSymbols": [
+    "MsbSafetyGateException",
+    "MSB_ENTITY_SCHEMA_UNVERIFIED",
+    "MSB_REGION_SCALE_UNSUPPORTED",
+    "MSB_REFERENCE_COVERAGE_INCOMPLETE",
+    "validateMapTransaction",
+    "importBlenderDeltaToTransaction",
+    "pushTransformMutation",
+    "applyTransform",
+    "applyDelta"
+  ],
+  "tests": [
+    {
+      "suite": "test:audit-sf-01-unit",
+      "layer": "unit",
+      "outcome": "passed",
+      "executedCases": 5,
+      "artifactHash": "92562FD719036BE2DFBD0C951905998DDB617020FE3F3EDDC0831E2356DFDC71"
+    },
+    {
+      "suite": "test:audit-sf-01-native",
+      "layer": "native",
+      "outcome": "passed",
+      "executedCases": 5,
+      "artifactHash": "92562FD719036BE2DFBD0C951905998DDB617020FE3F3EDDC0831E2356DFDC71"
+    }
+  ],
+  "schemaMigrations": [],
+  "frontendContract": null,
+  "remainingBlocks": [
+    "F02: EntityID write awaiting verified relative offset layout (SF-02)",
+    "F03: Region scale and non-box shapes awaiting geometric schema verification (SF-03)",
+    "F04: Structural deletion awaiting referential integrity profile (SF-04)"
+  ]
+}

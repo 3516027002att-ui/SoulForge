@@ -1,0 +1,42 @@
+{
+  "schemaVersion": 1,
+  "taskId": "SF-24",
+  "baseCommit": "f9cb0cd76a11bfa2857b48acbc779bfac0355d96",
+  "implementationCommit": "f9cb0cd76a11bfa2857b48acbc779bfac0355d96+local",
+  "status": {
+    "implementation": "completed",
+    "algorithm": "verified_algorithm",
+    "native": "not_run",
+    "product": "not_run"
+  },
+  "changedFiles": [
+    "package.json",
+    "packages/core/package.json",
+    "packages/core/src/ai/toolRegistry.ts",
+    "packages/core/src/indexing/knowledgeRefresh.ts",
+    "packages/core/src/testing/runAuditSf24Smoke.ts",
+    "scripts/verify/tiers.mjs"
+  ],
+  "productionSymbols": [
+    "KnowledgeStore",
+    "queryKnowledgeClaims",
+    "query_knowledge",
+    "read_knowledge_claims",
+    "sanitizeKnowledgeText"
+  ],
+  "tests": [
+    {
+      "suite": "test:audit-sf-24-unit",
+      "layer": "unit",
+      "outcome": "passed",
+      "executedCases": 12,
+      "artifactHash": "CD1411A94FE55B4D3F376C9B12F42AA1BAD223411FF8223E03699312D2103D83"
+    }
+  ],
+  "schemaMigrations": [],
+  "frontendContract": null,
+  "remainingBlocks": [
+    "任务卡的 product 层没有任务专属真实 Agent/renderer trace；product 保持 not_run。"
+  ]
+}
+

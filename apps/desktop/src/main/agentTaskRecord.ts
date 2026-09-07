@@ -62,7 +62,15 @@ class TaskRecordError extends Error {
   }
 }
 
-export function createAgentTaskRecordGateway(root: string, sessionId: string): AgentTaskRecordGateway {
+export interface AgentTaskRecordGatewayOptions {
+  inheritFromSessionId?: string | undefined;
+}
+
+export function createAgentTaskRecordGateway(
+  root: string,
+  sessionId: string,
+  options?: AgentTaskRecordGatewayOptions
+): AgentTaskRecordGateway {
   const filePath = join(root, `${sessionId}.md`);
   const searchTickets = new Map<string, SearchTicket>();
   const reservations = new Map<string, MutationReservation>();
@@ -106,8 +114,20 @@ export function createAgentTaskRecordGateway(root: string, sessionId: string): A
       content = await readFile(filePath, 'utf8');
     } catch (error) {
       if ((error as { code?: string }).code !== 'ENOENT') throw error;
-      content = HEADER;
-      await writeFile(filePath, content, 'utf8');
+      const inheritId = options?.inheritFromSessionId?.trim();
+      if (inheritId && inheritId !== sessionId) {
+        const parentPath = join(root, `${inheritId}.md`);
+        try {
+          content = await readFile(parentPath, 'utf8');
+          await writeFile(filePath, content, 'utf8');
+        } catch {
+          content = HEADER;
+          await writeFile(filePath, content, 'utf8');
+        }
+      } else {
+        content = HEADER;
+        await writeFile(filePath, content, 'utf8');
+      }
     }
     cachedDocument = parseDocument(content);
     searchTickets.clear();

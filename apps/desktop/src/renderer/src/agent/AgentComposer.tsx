@@ -40,6 +40,8 @@ export interface AgentComposerProps {
   /** 是否已激活 test 免配置模式 */
   testActive?: boolean | undefined;
   placeholder?: string | undefined;
+  /** 会话中已有完整规划方案且当前仍在 Plan 模式时透传，展示快捷切换横幅。 */
+  planReady?: boolean | undefined;
 }
 
 /**
@@ -69,7 +71,8 @@ export function AgentComposer(props: AgentComposerProps): ReactElement {
     onThinkingChange,
     protocol,
     testActive = false,
-    placeholder
+    placeholder,
+    planReady = false
   } = props;
 
   const action = composerActionState({ prompt, streaming, awaitingApproval });
@@ -88,6 +91,35 @@ export function AgentComposer(props: AgentComposerProps): ReactElement {
   return (
     <div className="agent__composer" data-testid="agent-composer" aria-label="Agent 输入区">
       <MutterBanner />
+      {planReady && interactionMode === 'plan' && !streaming && !awaitingApproval && (
+        <div className="agent-plan-switch-banner" role="status" data-testid="agent-plan-switch-banner">
+          <div className="agent-plan-switch-banner__header">
+            <span className="agent-plan-switch-banner__title">📋 方案已规划就绪</span>
+            <span className="agent-plan-switch-banner__badge">Plan 模式（只读中）</span>
+          </div>
+          <div className="agent-plan-switch-banner__desc">
+            当前处于只读 Plan 模式，模型无法执行修改。若确认执行方案，请切换为写入模式：
+          </div>
+          <div className="agent-plan-switch-banner__actions">
+            <button
+              type="button"
+              className="agent-plan-switch-banner__btn agent-plan-switch-banner__btn--edit"
+              onClick={() => onInteractionModeChange?.('edit')}
+              title="切换为 Edit 模式：模型提出修改，逐项由您人工审批确认后写入"
+            >
+              切换为 Edit 模式（审批写入）
+            </button>
+            <button
+              type="button"
+              className="agent-plan-switch-banner__btn agent-plan-switch-banner__btn--bypass"
+              onClick={() => onInteractionModeChange?.('bypass')}
+              title="切换为 Bypass 模式：免审批全自动执行修改"
+            >
+              切换为 Bypass 模式（免审批执行）
+            </button>
+          </div>
+        </div>
+      )}
       <div className="agent-composer__body">
         <AgentContextChipList
           chips={chips}

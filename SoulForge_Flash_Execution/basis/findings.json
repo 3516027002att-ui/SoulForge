@@ -1,0 +1,332 @@
+{
+  "baseline_commit": "f9cb0cd76a11bfa2857b48acbc779bfac0355d96",
+  "scope": "Static review and extracted-logic probes; runtime acceptance not performed.",
+  "findings": [
+    {
+      "id": "F01",
+      "priority": "P0",
+      "evidence_level": "A+B",
+      "title": "MSB EntityID 写入内部条目 ID",
+      "source_ids": [
+        "S03",
+        "S04",
+        "S05",
+        "X01",
+        "X02"
+      ],
+      "acceptance_tests": [
+        "T01",
+        "T02"
+      ],
+      "recommendation": "分离 internalEntryId/entityId，按子块指针定位，使用独立 reader 验证并使旧语义索引失效。",
+      "product_runtime_reproduced": false
+    },
+    {
+      "id": "F02",
+      "priority": "P0",
+      "evidence_level": "A+B",
+      "title": "Region scale 覆盖数据块指针",
+      "source_ids": [
+        "S04",
+        "X02"
+      ],
+      "acceptance_tests": [
+        "T03",
+        "T04"
+      ],
+      "recommendation": "关闭 Region 通用 scale；按 shape 类型编辑尺寸，保护数据块指针。",
+      "product_runtime_reproduced": false
+    },
+    {
+      "id": "F03",
+      "priority": "P0-risk",
+      "evidence_level": "A+C",
+      "title": "MSB 删除缺少索引引用闭包",
+      "source_ids": [
+        "S04",
+        "S08",
+        "X02"
+      ],
+      "acceptance_tests": [
+        "T05",
+        "T06"
+      ],
+      "recommendation": "完整引用重映射之前限制删除；枚举入边并验证所有幸存引用。",
+      "product_runtime_reproduced": false
+    },
+    {
+      "id": "F04",
+      "priority": "P1",
+      "evidence_level": "A+B",
+      "title": "地图批量目标静默部分成功",
+      "source_ids": [
+        "S07"
+      ],
+      "acceptance_tests": [
+        "T07"
+      ],
+      "recommendation": "先解析全部目标；默认任何目标无效则整笔拒绝；显式 best-effort 才允许部分执行。",
+      "product_runtime_reproduced": false
+    },
+    {
+      "id": "F05",
+      "priority": "P1",
+      "evidence_level": "A",
+      "title": "地图查询组合条件被优先级吞掉",
+      "source_ids": [
+        "S06"
+      ],
+      "acceptance_tests": [
+        "T09"
+      ],
+      "recommendation": "明确互斥 schema 或交集语义，不忽略给出的条件。",
+      "product_runtime_reproduced": false
+    },
+    {
+      "id": "F06",
+      "priority": "P1",
+      "evidence_level": "A+B",
+      "title": "PARAM 物理行删除后置验证缺口",
+      "source_ids": [
+        "S17"
+      ],
+      "acceptance_tests": [
+        "T14"
+      ],
+      "recommendation": "构造预期最终对象集合，拒绝注入的删除未生效结果。",
+      "product_runtime_reproduced": false
+    },
+    {
+      "id": "F07",
+      "priority": "P1",
+      "evidence_level": "A+B",
+      "title": "PARAM 中间 mutation 与最终状态比较冲突",
+      "source_ids": [
+        "S17"
+      ],
+      "acceptance_tests": [
+        "T16"
+      ],
+      "recommendation": "模拟批次并比较最终 post-image，或在 staging 前拒绝重复目标。",
+      "product_runtime_reproduced": false
+    },
+    {
+      "id": "F08",
+      "priority": "P1-risk",
+      "evidence_level": "C",
+      "title": "PARAM 删除后 rowIndex 漂移",
+      "source_ids": [
+        "S18"
+      ],
+      "acceptance_tests": [
+        "T15"
+      ],
+      "recommendation": "在原快照绑定 RowHandle，维护句柄到当前位置映射。",
+      "product_runtime_reproduced": false
+    },
+    {
+      "id": "F09",
+      "priority": "P2",
+      "evidence_level": "A",
+      "title": "PARAM 名称验证不完整",
+      "source_ids": [
+        "S17"
+      ],
+      "acceptance_tests": [
+        "T17"
+      ],
+      "recommendation": "验证 patch.Name、编码和 null/空串语义。",
+      "product_runtime_reproduced": false
+    },
+    {
+      "id": "F10",
+      "priority": "P1",
+      "evidence_level": "A",
+      "title": "TAE 每条 mutation 保留整文件副本",
+      "source_ids": [
+        "S19"
+      ],
+      "acceptance_tests": [
+        "T29"
+      ],
+      "recommendation": "使用 immutable baseline、修改区间和 append ranges；最终状态验证。",
+      "product_runtime_reproduced": false
+    },
+    {
+      "id": "F11",
+      "priority": "P1",
+      "evidence_level": "A",
+      "title": "地图分块前全量解码与 Base64 往返",
+      "source_ids": [
+        "S10"
+      ],
+      "acceptance_tests": [
+        "T33"
+      ],
+      "recommendation": "native typed-buffer 接口、按 mesh 惰性投影、传输边界才编码。",
+      "product_runtime_reproduced": false
+    },
+    {
+      "id": "F12",
+      "priority": "P1",
+      "evidence_level": "A",
+      "title": "地图全局锁覆盖高成本构建",
+      "source_ids": [
+        "S10"
+      ],
+      "acceptance_tests": [
+        "T33",
+        "T34"
+      ],
+      "recommendation": "per-resource single-flight、短发布锁、按字节淘汰。",
+      "product_runtime_reproduced": false
+    },
+    {
+      "id": "F13",
+      "priority": "P1",
+      "evidence_level": "A",
+      "title": "地图高层链路重复全量读取",
+      "source_ids": [
+        "S06",
+        "S07",
+        "S08"
+      ],
+      "acceptance_tests": [
+        "T33"
+      ],
+      "recommendation": "传 snapshot lease，事务返回 verified post-state，保留必要独立验证。",
+      "product_runtime_reproduced": false
+    },
+    {
+      "id": "F14",
+      "priority": "P2",
+      "evidence_level": "A",
+      "title": "ParseCount 指标与真实解析入口不一致",
+      "source_ids": [
+        "S10"
+      ],
+      "acceptance_tests": [
+        "T33"
+      ],
+      "recommendation": "分开 container/decompress/parse/projection/wire/GPU 计数。",
+      "product_runtime_reproduced": false
+    },
+    {
+      "id": "F15",
+      "priority": "P1-risk",
+      "evidence_level": "C",
+      "title": "NDJSON 完整分配后才检查帧大小",
+      "source_ids": [
+        "S12"
+      ],
+      "acceptance_tests": [
+        "T35"
+      ],
+      "recommendation": "有界增量 framing，超过预算时停止累积。",
+      "product_runtime_reproduced": false
+    },
+    {
+      "id": "F16",
+      "priority": "P1-risk",
+      "evidence_level": "C",
+      "title": "执行并发上限不等于排队上限",
+      "source_ids": [
+        "S12",
+        "S13"
+      ],
+      "acceptance_tests": [
+        "T36"
+      ],
+      "recommendation": "限制队列、加 backpressure 与交互请求优先级。",
+      "product_runtime_reproduced": false
+    },
+    {
+      "id": "F17",
+      "priority": "P1-risk",
+      "evidence_level": "C",
+      "title": "Agent Promise.all 缺少 loop 级独立结算",
+      "source_ids": [
+        "S25",
+        "S30"
+      ],
+      "acceptance_tests": [
+        "T49",
+        "T50"
+      ],
+      "recommendation": "审计 executeTool 抛错路径；按效果/成本调度并逐项结算。",
+      "product_runtime_reproduced": false
+    },
+    {
+      "id": "F18",
+      "priority": "P1",
+      "evidence_level": "A+B",
+      "title": "向量候选没有沿用 family 过滤",
+      "source_ids": [
+        "S28"
+      ],
+      "acceptance_tests": [
+        "T43"
+      ],
+      "recommendation": "混合检索启用时统一过滤词法/向量/扩展候选。",
+      "product_runtime_reproduced": false
+    },
+    {
+      "id": "F19",
+      "priority": "P2",
+      "evidence_level": "A+B",
+      "title": "RAG 引用扩展超过 limit",
+      "source_ids": [
+        "S29"
+      ],
+      "acceptance_tests": [
+        "T44"
+      ],
+      "recommendation": "加入前检查剩余预算，finalLimit 统一硬限制。",
+      "product_runtime_reproduced": false
+    },
+    {
+      "id": "F20",
+      "priority": "P1",
+      "evidence_level": "A+B",
+      "title": "Broker 去重后仍保留旧顺序",
+      "source_ids": [
+        "S27"
+      ],
+      "acceptance_tests": [
+        "T45"
+      ],
+      "recommendation": "组件启用时按相关性、版本、权威与新近程度选择。",
+      "product_runtime_reproduced": false
+    },
+    {
+      "id": "F21",
+      "priority": "P2",
+      "evidence_level": "A+B",
+      "title": "Broker 字节预算使用 code units",
+      "source_ids": [
+        "S26",
+        "S27"
+      ],
+      "acceptance_tests": [
+        "T47"
+      ],
+      "recommendation": "区分 UTF-8 wireBytes 与模型 token，明确计数单位。",
+      "product_runtime_reproduced": false
+    },
+    {
+      "id": "F22",
+      "priority": "P1-risk",
+      "evidence_level": "C",
+      "title": "Broker 证据键未强制包含资源命名空间",
+      "source_ids": [
+        "S26",
+        "S27"
+      ],
+      "acceptance_tests": [
+        "T46"
+      ],
+      "recommendation": "EvidenceKey 包含 workspace/resource/domain/namespace/object/claim。",
+      "product_runtime_reproduced": false
+    }
+  ]
+}

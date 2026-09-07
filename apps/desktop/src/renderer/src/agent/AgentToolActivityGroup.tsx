@@ -79,6 +79,7 @@ export function AgentToolActivityGroup(props: AgentToolActivityGroupProps): Reac
   const status = groupStatus(safeCalls);
   const names = [...new Set(safeCalls.map((call) => call.name || '工具'))];
   const action = describeToolGroupAction(safeCalls);
+  const activityTestId = safeCalls[0]?.callId ?? groupId;
 
   // 下一段模型口播或 session 终态确保保持自动压缩收起
   useEffect(() => {
@@ -88,7 +89,9 @@ export function AgentToolActivityGroup(props: AgentToolActivityGroupProps): Reac
   return (
     <details
       className={`agent-tool-group is-${status}${live ? ' is-live' : ''}`}
-      data-testid={`agent-tool-group-${groupId}`}
+      // 工具活动的可见锚点属于组摘要；组内详情在收起时按 HTML 语义 hidden。
+      data-testid={`agent-tool-activity-${activityTestId}`}
+      data-group-testid={`agent-tool-group-${groupId}`}
       open={isOpen}
       onToggle={(event) => setIsOpen(event.currentTarget.open)}
     >

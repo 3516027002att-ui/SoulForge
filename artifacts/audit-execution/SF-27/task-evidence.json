@@ -1,0 +1,46 @@
+{
+  "schemaVersion": 1,
+  "taskId": "SF-27",
+  "baseCommit": "f9cb0cd76a11bfa2857b48acbc779bfac0355d96",
+  "implementationCommit": "f9cb0cd76a11bfa2857b48acbc779bfac0355d96+local",
+  "status": {
+    "implementation": "completed",
+    "algorithm": "verified_algorithm",
+    "native": "partial",
+    "product": "not_run"
+  },
+  "changedFiles": [
+    "package.json",
+    "packages/core/package.json",
+    "packages/core/src/testing/runAuditSf27Smoke.ts",
+    "scripts/verify/tiers.mjs"
+  ],
+  "productionSymbols": [
+    "capability-evidence-chain",
+    "BridgeCommandService.dispatch"
+  ],
+  "tests": [
+    {
+      "suite": "test:audit-sf-27-unit",
+      "layer": "unit",
+      "outcome": "passed",
+      "executedCases": 10,
+      "artifactHash": "529711345970242A7BBBF5B9DEC42C83F2BE1DEDF1BB0E7E36BE2E857F00312E"
+    },
+    {
+      "suite": "test:audit-sf-27-native",
+      "layer": "native",
+      "outcome": "passed",
+      "executedCases": 10,
+      "artifactHash": "529711345970242A7BBBF5B9DEC42C83F2BE1DEDF1BB0E7E36BE2E857F00312E",
+      "detail": "native layer检查 capability evidence contract，不等于全部格式的真实 native write/readback。"
+    }
+  ],
+  "schemaMigrations": [],
+  "frontendContract": null,
+  "remainingBlocks": [
+    "native runner只生成 capability evidence 并登记 candidate/writer profile，独立 oracle、variant corpus 与 game-load/product trace仍缺失。",
+    "本任务没有任务专属 Electron renderer trace；product 保持 not_run。"
+  ]
+}
+

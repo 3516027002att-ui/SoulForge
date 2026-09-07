@@ -1,0 +1,45 @@
+{
+  "schemaVersion": 1,
+  "taskId": "SF-23",
+  "baseCommit": "f9cb0cd76a11bfa2857b48acbc779bfac0355d96",
+  "implementationCommit": "f9cb0cd76a11bfa2857b48acbc779bfac0355d96+local",
+  "status": {
+    "implementation": "completed",
+    "algorithm": "verified_algorithm",
+    "native": "not_run",
+    "product": "not_run"
+  },
+  "changedFiles": [
+    "package.json",
+    "packages/core/package.json",
+    "packages/core/src/ai/toolRegistry.ts",
+    "packages/core/src/knowledge/claimGraph.ts",
+    "packages/core/src/knowledge/knowledgeIngest.ts",
+    "packages/core/src/knowledge/knowledgeLint.ts",
+    "packages/core/src/knowledge/knowledgeQuery.ts",
+    "packages/core/src/knowledge/knowledgeStore.ts",
+    "packages/core/src/knowledge/knowledgeTypes.ts",
+    "packages/core/src/testing/runAuditKnowledgeInvalidationSmoke.ts",
+    "packages/core/src/testing/runAuditKnowledgeStoreSmoke.ts",
+    "packages/core/src/testing/runAuditSf23Smoke.ts",
+    "scripts/verify/tiers.mjs"
+  ],
+  "productionSymbols": [
+    "KnowledgeStore",
+    "ingestKnowledgeSource",
+    "invalidateClaimClosure"
+  ],
+  "tests": [
+    {
+      "suite": "test:audit-sf-23-unit",
+      "layer": "unit",
+      "outcome": "passed",
+      "executedCases": 14,
+      "artifactHash": "7D2956CB030F3AB63C74192E94F5FA92E0E866C2D12BA309B37948CF8486CEB4"
+    }
+  ],
+  "schemaMigrations": [],
+  "frontendContract": null,
+  "remainingBlocks": []
+}
+

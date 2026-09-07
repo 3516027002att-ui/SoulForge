@@ -1,0 +1,60 @@
+{
+  "schemaVersion": 1,
+  "taskId": "SF-09",
+  "baseCommit": "f9cb0cd76a11bfa2857b48acbc779bfac0355d96",
+  "implementationCommit": "f9cb0cd76a11bfa2857b48acbc779bfac0355d96+local",
+  "status": {
+    "implementation": "completed",
+    "algorithm": "verified_algorithm",
+    "native": "verified_native",
+    "product": "not_run"
+  },
+  "changedFiles": [
+    "packages/shared/src/audit-execution-contracts.ts",
+    "packages/core/src/emevd/mutationSimulation.ts",
+    "packages/core/src/index.ts",
+    "packages/core/src/editing/emevdEdit.ts",
+    "packages/core/src/editing/emevdBridgeCommit.ts",
+    "packages/core/src/testing/runAuditSf09Smoke.ts",
+    "bridge/SoulForge.Bridge/EmevdNativeDocument.cs",
+    "bridge/SoulForge.Bridge/EmevdNativeWriter.cs",
+    "packages/core/package.json",
+    "package.json",
+    "scripts/verify/tiers.mjs",
+    "docs/audit-execution/tasks/SF-09.required-suites.json"
+  ],
+  "productionSymbols": [
+    "EventHandle",
+    "InstructionHandle",
+    "ParameterBinding",
+    "validateEventHandle",
+    "validateInstructionHandle",
+    "validateParameterBinding",
+    "eventHandleKey",
+    "instructionHandleKey",
+    "parameterBindingKey",
+    "EmevdMutationSimulator",
+    "readEmevdEvent",
+    "commitEmevdBatchViaBridge",
+    "EmevdNativeWriter"
+  ],
+  "tests": [
+    {
+      "suite": "test:audit-sf-09-unit",
+      "layer": "unit",
+      "outcome": "passed",
+      "executedCases": 10,
+      "artifactHash": "F5A43E28498623FA5987E30C4D1B83653CF35B80353765D8E7E77B56516C0594"
+    },
+    {
+      "suite": "test:audit-sf-09-native",
+      "layer": "native",
+      "outcome": "passed",
+      "executedCases": 3,
+      "artifactHash": "F5A43E28498623FA5987E30C4D1B83653CF35B80353765D8E7E77B56516C0594"
+    }
+  ],
+  "schemaMigrations": [],
+  "frontendContract": null,
+  "remainingBlocks": []
+}

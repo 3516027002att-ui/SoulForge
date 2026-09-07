@@ -10,6 +10,7 @@ import {
   fileIdentityFromStat,
   getPathSourceGeneration,
   loadFingerprintStore,
+  loadSymbolBundleIntoIndex,
   makeFileFingerprint,
   makeWorkspacePersistentIdentityHash,
   normalizeCtimeNs,
@@ -28,7 +29,7 @@ import { localApplicationDataRoot, resolveWorkspaceStoragePaths, type WorkspaceS
 import { Me3RuntimeAdapter } from '@soulforge/core';
 import { MainMe3RuntimeGateway } from '../me3RuntimeGateway.js';
 import { clearRecentPath, readRecentPath, writeRecentPath } from '../recentPaths.js';
-import type { Diagnostic, IndexedFile, ResourceKind } from '@soulforge/shared';
+import type { Diagnostic, IndexedFile, ResourceKind, SymbolBundle } from '@soulforge/shared';
 import { sanitizeDiagnostics, sanitizeRendererValue, toRendererIndexedFile } from '../rendererDto.js';
 import type { RendererIndexedFile } from '../rendererDto.js';
 import { prepareBridgeRoots, type BridgeRootSession, type PrepareBridgeRootsResult } from '../bridgeRoots.js';
@@ -544,6 +545,9 @@ export function registerWorkspaceIpcHandlers(deps: WorkspaceIpcDeps): void {
     activeOverlayLabel = overlaySelection.label;
     activeIndex = new WorkspaceIndex(activeSession.meta.workspaceId);
     activeIndex.setFiles(lightResult.files);
+    if (lightResult.files.some((f) => f.resourceKind === 'param' || f.relativePath.toLowerCase().includes('.param'))) {
+      activeIndex.setParamSemanticState('warming_up');
+    }
     const indexForSession = activeIndex;
     const scanJobId = randomUUID();
     const scanStartedAt = new Date().toISOString();
@@ -630,6 +634,24 @@ export function registerWorkspaceIpcHandlers(deps: WorkspaceIpcDeps): void {
         if (controller.signal.aborted) { await cancelCurrentJob('工作区扫描被新任务取消。'); await releaseAll(); return; }
         if (currentGeneration !== activeWorkspaceSessionGeneration || currentSession !== activeSession || currentSessionId !== activeWorkspaceSessionId) { await cancelCurrentJob('工作区会话已切换，旧扫描结果已丢弃。'); await releaseAll(); return; }
         indexedFiles = enriched as unknown as IndexedFile[]; indexForSession.setFiles(enriched as unknown as IndexedFile[]); await database.replaceFiles(enriched as unknown as IndexedFile[]);
+        const quickHydrateFiles = (enriched as unknown as IndexedFile[]).filter(
+          (f) => f.resourceKind === 'param' || f.resourceKind === 'msg' || f.relativePath.toLowerCase().includes('gameparam.parambnd')
+        );
+        for (const file of quickHydrateFiles) {
+          if (file.sha256) {
+            try {
+              const cached = await database.getSemanticFileCache(file.relativePath);
+              if (cached && cached.fileSha256 === file.sha256) {
+                loadSymbolBundleIntoIndex(indexForSession, cached.payload);
+              }
+            } catch {
+              // 忽略单点缓存读取失败
+            }
+          }
+        }
+        if (indexForSession.getStats().paramRows > 0) {
+          indexForSession.setParamSemanticState('ready');
+        }
         // ACTION membership is an on-demand projection.  Building every
         // original/mod *.anibnd.dcx here forces full DCX+BND4 materialization
         // for unrelated character families while the user is merely opening a
@@ -728,36 +750,41 @@ export function registerWorkspaceIpcHandlers(deps: WorkspaceIpcDeps): void {
         throw new Error('工作区已切换，分析结果已丢弃。');
       }
       const database = await deps.ensureActiveOperationLog(session);
-      let semanticCache: SemanticCacheProvider | undefined;
-      try {
-        const cacheMap = await database.getAllSemanticFileCache();
-        semanticCache = {
-          load: (file) => {
-            const cached = cacheMap.get(file.relativePath);
-            if (cached && file.sha256 && cached.fileSha256 === file.sha256) {
+      const memoryCacheMap = new Map<string, { fileSha256: string; payload: SymbolBundle }>();
+      const semanticCache: SemanticCacheProvider = {
+        load: async (file) => {
+          if (!file.sha256) return null;
+          const inMemory = memoryCacheMap.get(file.relativePath);
+          if (inMemory && inMemory.fileSha256 === file.sha256) {
+            return inMemory.payload;
+          }
+          try {
+            const cached = await database.getSemanticFileCache(file.relativePath);
+            if (cached && cached.fileSha256 === file.sha256) {
+              memoryCacheMap.set(file.relativePath, cached);
               return cached.payload;
             }
+          } catch {
             return null;
-          },
-          save: async (file, bundle) => {
-            if (!file.sha256) return;
-            try {
-              await database.upsertSemanticFileCache({
-                relativePath: file.relativePath,
-                fileSha256: file.sha256,
-                resourceKind: file.resourceKind,
-                payload: bundle,
-                mtimeMs: file.mtimeMs
-              });
-              cacheMap.set(file.relativePath, { fileSha256: file.sha256, payload: bundle });
-            } catch {
-              // Non-fatal cache write failure
-            }
           }
-        };
-      } catch {
-        // Fallback without semantic cache if DB query failed
-      }
+          return null;
+        },
+        save: async (file, bundle) => {
+          if (!file.sha256) return;
+          try {
+            await database.upsertSemanticFileCache({
+              relativePath: file.relativePath,
+              fileSha256: file.sha256,
+              resourceKind: file.resourceKind,
+              payload: bundle,
+              mtimeMs: file.mtimeMs
+            });
+            memoryCacheMap.set(file.relativePath, { fileSha256: file.sha256, payload: bundle });
+          } catch {
+            // Non-fatal cache write failure
+          }
+        }
+      };
 
       const result = await analyzeWorkspace({
         workspaceRoot: session.layers.overlayRoot,
@@ -775,6 +802,9 @@ export function registerWorkspaceIpcHandlers(deps: WorkspaceIpcDeps): void {
           // sourceHash/sourceRevision checks remain available to the Agent.
           stage.index.setFiles(indexedFiles);
           stage.index.rebuildReferences({ enableNumericFallback: true });
+          if (stage.index.getStats().paramRows > 0) {
+            stage.index.setParamSemanticState('ready');
+          }
           activeIndex = stage.index;
           indexedFiles = stage.index.getFiles();
           try {
@@ -801,6 +831,9 @@ export function registerWorkspaceIpcHandlers(deps: WorkspaceIpcDeps): void {
       }
       // 只有完整 ACTION membership 已装入新索引后才发布它。这样分析期间
       // 仍保留上一份可用索引，动作读取不会短暂撞上“未就绪”空投影。
+      if (result.index.getStats().paramRows > 0) {
+        result.index.setParamSemanticState('ready');
+      }
       activeIndex = result.index;
       indexedFiles = result.index.getFiles();
       await refreshRagAfterAnalyze(database, result.index, result.diagnostics.map((diagnostic) => ({

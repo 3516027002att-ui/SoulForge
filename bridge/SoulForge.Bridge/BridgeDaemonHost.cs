@@ -11,6 +11,8 @@ internal static class BridgeDaemonHost
     // Large PARAM/MSB child snapshots are base64-framed over NDJSON.
     private const int AbsoluteMaxFrameBytes = 32 * 1024 * 1024;
     private const int MaxAllowedRoots = 16;
+    private const int MaxQueuedRequests = 64;
+    private const int MaxOutputQueueBytes = 64 * 1024 * 1024;
 
     private static readonly JsonSerializerOptions JsonOptions = new()
     {
@@ -20,115 +22,172 @@ internal static class BridgeDaemonHost
         WriteIndented = false
     };
 
+    // This is intentionally a source-visible declaration. The advertisement
+    // gate reads this exact set and reconciles it with service dispatch and
+    // both TypeScript command unions. BridgeCommandDescriptorCatalog provides
+    // the descriptor projection, and the startup check below keeps both
+    // runtime projections closed over the same names.
+    internal static readonly string[] AdvertisedCommands =
+    {
+        "inspect",
+        "validate",
+        "probe-oodle",
+        "probe-document-locator",
+        "read-dcx-document",
+        "list-bnd4-entries",
+        "snapshot-bnd4-child",
+        "extract-bnd4-child",
+        "write-bnd4",
+        "inventory-asset-resources",
+        "read-fmg-document",
+        "write-fmg",
+        "read-param-document",
+        "write-param",
+        "read-gparam-document",
+        "write-gparam",
+        "read-text-catalog",
+        "read-emevd-document",
+        "write-emevd",
+        "read-msb-document",
+        "write-msb",
+        "read-tpf-document",
+        "export-tpf-texture",
+        "read-tpf-texture-preview",
+        "write-tpf-texture-replace",
+        "read-tae-document",
+        "read-tae-event-params",
+        "read-tae-animation-clip",
+        "sample-tae-animation-pose",
+        "read-bridge-artifact",
+        "read-chrbnd-flver-preview",
+        "read-map-part-flver-preview",
+        "read-map-static-geometry",
+        "read-flver-document",
+        "write-flver",
+        "read-flver-mesh",
+        "read-flver-skeleton",
+        "read-flver-texture-slots",
+        "read-flver-dummies",
+        "read-esd-document",
+        "write-esd-document",
+        "write-tae-document",
+        "write-fxr-document",
+        "read-mtd-document",
+        "write-mtd-document",
+        "read-fxr-document",
+        "list-ffxbnd-entries",
+        "read-luabnd-document",
+        "inspect-luabnd",
+        "read-luabnd-script",
+        "write-luabnd-script",
+        "export-luabnd",
+        "export-event",
+        "export-map",
+        "export-param",
+        "export-msg"
+    };
+
     public static async Task RunAsync(
         TextReader input,
         TextWriter output,
         CancellationToken cancellationToken)
     {
-        // 启动期自检：写盘命令注册表必须与能力声明一致。
-        // 放在读第一帧之前——注册表漂移意味着某个写命令可能完全跳过 writable-root
-        // 校验，那种状态下不应该开始服务任何请求。抛出即拒绝启动（fail-closed）。
+        // 启动期自检：描述源必须覆盖能力、实际入口和所有输出路径。
+        // 漂移时 fail-closed，不能在尚未确认写路径边界的状态下接收请求。
         VerifyDiskWriteRegistry();
 
-        var state = new DaemonState(output);
-        var running = new ConcurrentDictionary<string, Task>(StringComparer.Ordinal);
-
-        while (!cancellationToken.IsCancellationRequested)
+        using var reader = BoundedNdjsonReader.FromTextReader(
+            input,
+            DefaultMaxFrameBytes,
+            AbsoluteMaxFrameBytes);
+        var resourceCache = MapStaticGeometryService.CreateResourceCache();
+        var state = new DaemonState(output, resourceCache);
+        try
         {
-            var line = await input.ReadLineAsync(cancellationToken);
-            if (line is null) break;
-            if (string.IsNullOrWhiteSpace(line)) continue;
-
-            if (Encoding.UTF8.GetByteCount(line) > state.MaxFrameBytes)
+            while (!cancellationToken.IsCancellationRequested)
             {
-                await state.WriteFailureAsync(null, null, "BRIDGE_FRAME_TOO_LARGE", "NDJSON frame exceeds the negotiated byte limit.");
-                continue;
-            }
-
-            BridgeInboundFrame? frame;
-            try
-            {
-                frame = JsonSerializer.Deserialize<BridgeInboundFrame>(line, JsonOptions);
-            }
-            catch (JsonException ex)
-            {
-                await state.WriteFailureAsync(null, null, "BRIDGE_INVALID_FRAME", ex.Message);
-                continue;
-            }
-
-            if (frame is null || string.IsNullOrWhiteSpace(frame.Kind))
-            {
-                await state.WriteFailureAsync(frame?.RequestId, frame?.WorkspaceSessionId, "BRIDGE_INVALID_FRAME", "Frame kind is required.");
-                continue;
-            }
-            if (!string.Equals(frame.ProtocolVersion, ProtocolVersion, StringComparison.Ordinal))
-            {
-                await state.WriteFailureAsync(frame.RequestId, frame.WorkspaceSessionId, "BRIDGE_PROTOCOL_MISMATCH", $"Expected protocol {ProtocolVersion}.");
-                continue;
-            }
-
-            switch (frame.Kind)
-            {
-                case "handshake":
-                    await HandleHandshakeAsync(frame, state);
+                string? line;
+                try
+                {
+                    line = await reader.ReadFrameAsync(cancellationToken).ConfigureAwait(false);
+                }
+                catch (BoundedNdjsonException ex)
+                {
+                    await state.WriteFailureAsync(null, null, ex.Code, ex.Message, new { byteCount = ex.ByteCount });
                     break;
-                case "health":
-                    await EnsureSessionAndWriteAsync(frame, state, "health", new
-                    {
-                        status = "ok",
-                        processId = Environment.ProcessId,
-                        runtime = Environment.Version.ToString(),
-                        activeRequests = state.ActiveRequestCount,
-                        oodleRuntime = OodleRuntimeLocator.Probe(state.OodleRuntimeRoot).Runtime
-                    });
-                    break;
-                case "capabilities":
-                    await EnsureSessionAndWriteAsync(frame, state, "capabilities", BuildCapabilities(state.OodleRuntimeRoot));
-                    break;
-                case "cancel":
-                    await HandleCancelAsync(frame, state);
-                    break;
-                case "request":
-                    if (!state.IsSessionValid(frame.WorkspaceSessionId))
-                    {
-                        await state.WriteFailureAsync(frame.RequestId, frame.WorkspaceSessionId, "BRIDGE_SESSION_INVALID", "A valid handshake is required before requests.");
+                }
+
+                if (line is null) break;
+                if (string.IsNullOrWhiteSpace(line)) continue;
+
+                BridgeInboundFrame? frame;
+                try
+                {
+                    frame = JsonSerializer.Deserialize<BridgeInboundFrame>(line, JsonOptions);
+                }
+                catch (JsonException ex)
+                {
+                    await state.WriteFailureAsync(null, null, "BRIDGE_INVALID_FRAME", ex.Message);
+                    continue;
+                }
+
+                if (frame is null || string.IsNullOrWhiteSpace(frame.Kind))
+                {
+                    await state.WriteFailureAsync(frame?.RequestId, frame?.WorkspaceSessionId, "BRIDGE_INVALID_FRAME", "Frame kind is required.");
+                    continue;
+                }
+                if (!string.Equals(frame.ProtocolVersion, ProtocolVersion, StringComparison.Ordinal))
+                {
+                    await state.WriteFailureAsync(frame.RequestId, frame.WorkspaceSessionId, "BRIDGE_PROTOCOL_MISMATCH", $"Expected protocol {ProtocolVersion}.");
+                    continue;
+                }
+
+                switch (frame.Kind)
+                {
+                    case "handshake":
+                        await HandleHandshakeAsync(frame, state, reader);
                         break;
-                    }
-                    if (string.IsNullOrWhiteSpace(frame.RequestId))
-                    {
-                        await state.WriteFailureAsync(null, frame.WorkspaceSessionId, "BRIDGE_REQUEST_ID_REQUIRED", "requestId is required.");
+                    case "health":
+                        await EnsureSessionAndWriteAsync(frame, state, "health", new
+                        {
+                            status = "ok",
+                            processId = Environment.ProcessId,
+                            runtime = Environment.Version.ToString(),
+                            activeRequests = state.ActiveRequestCount,
+                            queuedRequests = state.QueuedRequestCount,
+                            queueLimit = MaxQueuedRequests,
+                            oodleRuntime = OodleRuntimeLocator.Probe(state.OodleRuntimeRoot).Runtime
+                        });
                         break;
-                    }
-                    if (running.ContainsKey(frame.RequestId))
-                    {
-                        await state.WriteFailureAsync(frame.RequestId, frame.WorkspaceSessionId, "BRIDGE_DUPLICATE_REQUEST", "requestId is already active.");
+                    case "capabilities":
+                        await EnsureSessionAndWriteAsync(frame, state, "capabilities", BuildCapabilities(state.OodleRuntimeRoot));
                         break;
-                    }
-
-                    var requestId = frame.RequestId!;
-                    await state.WriteAsync("request/accepted", requestId, frame.WorkspaceSessionId, frame.ResourceUri, new
-                    {
-                        acceptedAt = DateTimeOffset.UtcNow
-                    });
-                    var requestTask = HandleRequestAsync(frame, state);
-                    running[requestId] = requestTask;
-                    _ = requestTask.ContinueWith(
-                        completedTask => running.TryRemove(requestId, out _),
-                        CancellationToken.None,
-                        TaskContinuationOptions.ExecuteSynchronously,
-                        TaskScheduler.Default);
-                    break;
-                default:
-                    await state.WriteFailureAsync(frame.RequestId, frame.WorkspaceSessionId, "BRIDGE_FRAME_KIND_UNKNOWN", $"Unknown frame kind: {frame.Kind}");
-                    break;
+                    case "cancel":
+                        await HandleCancelAsync(frame, state);
+                        break;
+                    case "workspace/close":
+                        await HandleWorkspaceCloseAsync(frame, state);
+                        break;
+                    case "request":
+                        await AcceptRequestAsync(frame, state);
+                        break;
+                    default:
+                        await state.WriteFailureAsync(frame.RequestId, frame.WorkspaceSessionId, "BRIDGE_FRAME_KIND_UNKNOWN", $"Unknown frame kind: {frame.Kind}");
+                        break;
+                }
             }
         }
-
-        await Task.WhenAll(running.Values);
-        state.Dispose();
+        finally
+        {
+            await state.StopAsync().ConfigureAwait(false);
+            state.Dispose();
+        }
     }
 
-    private static async Task HandleHandshakeAsync(BridgeInboundFrame frame, DaemonState state)
+    private static async Task HandleHandshakeAsync(
+        BridgeInboundFrame frame,
+        DaemonState state,
+        BoundedNdjsonReader reader)
     {
         if (state.IsConfigured)
         {
@@ -209,6 +268,17 @@ internal static class BridgeDaemonHost
             oodleRuntimeRoot = boundary.CanonicalPath;
         }
 
+        if (payload.MaxFrameBytes is { } requestedMaxFrameBytes
+            && (requestedMaxFrameBytes < 64 * 1024 || requestedMaxFrameBytes > AbsoluteMaxFrameBytes))
+        {
+            await state.WriteFailureAsync(
+                frame.RequestId,
+                frame.WorkspaceSessionId,
+                "BRIDGE_HANDSHAKE_INVALID",
+                $"maxFrameBytes must be between 65536 and {AbsoluteMaxFrameBytes}.");
+            return;
+        }
+
         state.Configure(
             frame.WorkspaceSessionId,
             roots,
@@ -216,6 +286,7 @@ internal static class BridgeDaemonHost
             Math.Clamp(payload.MaxFrameBytes ?? DefaultMaxFrameBytes, 64 * 1024, AbsoluteMaxFrameBytes),
             Math.Clamp(payload.MaxConcurrency ?? 2, 1, 8),
             oodleRuntimeRoot);
+        reader.SetMaxFrameBytes(state.MaxFrameBytes);
 
         await state.WriteAsync("handshake", frame.RequestId, frame.WorkspaceSessionId, null, new
         {
@@ -244,24 +315,25 @@ internal static class BridgeDaemonHost
     /// 也不会有测试失败。注册表把它变成一处显式声明，并由 VerifyDiskWriteRegistry
     /// 在启动时与能力声明对账，失败关闭。
     /// </summary>
+    // Keep this declaration source-visible for the runtime write-boundary
+    // gate. The descriptor catalog is checked against it during startup, so a
+    // new output-path command cannot silently skip writable-root validation.
     private static readonly HashSet<string> DiskWritingCommands = new(StringComparer.OrdinalIgnoreCase)
     {
+        "extract-bnd4-child",
         "write-bnd4",
+        "export-tpf-texture",
         "write-fmg",
         "write-param",
         "write-emevd",
         "write-msb",
-        "write-gparam",
         "write-flver",
+        "write-gparam",
         "write-tpf-texture-replace",
         "write-mtd-document",
         "write-esd-document",
         "write-tae-document",
         "write-fxr-document",
-        // list-ffxbnd-entries 是纯只读列目录，不得进写盘集合。
-        // 误登记会强制 options.outputPath，IPC 不传时左栏永远 BRIDGE_OUTPUT_PATH_REQUIRED。
-        "export-tpf-texture",
-        "extract-bnd4-child",
         "write-luabnd-script",
         "export-luabnd"
     };
@@ -297,25 +369,45 @@ internal static class BridgeDaemonHost
     /// </summary>
     private static void VerifyDiskWriteRegistry()
     {
-        var capabilities = BuildCapabilities(null);
-        var declared = (string[])capabilities.GetType()
-            .GetProperty("commands")!.GetValue(capabilities)!;
+        BridgeCommandDescriptorCatalog.Verify();
 
-        var missing = declared
-            .Where(name => name.StartsWith("write-", StringComparison.OrdinalIgnoreCase))
-            .Where(name => !DiskWritingCommands.Contains(name))
+        var advertisedFromDescriptors = BridgeCommandDescriptorCatalog.All
+            .Where(item => item.Advertised)
+            .Select(item => item.Name)
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var advertisedFromCapabilities = AdvertisedCommands.ToHashSet(StringComparer.OrdinalIgnoreCase);
+        if (!advertisedFromDescriptors.SetEquals(advertisedFromCapabilities))
+            throw new InvalidOperationException("BRIDGE_COMMAND_ADVERTISEMENT_PROJECTION_DRIFT");
+
+        var diskFromDescriptors = BridgeCommandDescriptorCatalog.All
+            .Where(item => item.RequiresOutputPath)
+            .Select(item => item.Name)
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+        if (!diskFromDescriptors.SetEquals(DiskWritingCommands))
+            throw new InvalidOperationException("BRIDGE_DISK_WRITE_PROJECTION_DRIFT");
+
+        var unbound = BridgeCommandDescriptorCatalog.All
+            .Where(item => !BridgeCommandDescriptorCatalog.DispatchCommands.Contains(item.Name))
+            .Select(item => item.Name)
             .ToArray();
-        if (missing.Length > 0)
-        {
+        if (unbound.Length > 0)
             throw new InvalidOperationException(
-                "BRIDGE_DISK_WRITE_REGISTRY_INCOMPLETE: 能力声明里的写命令未登记进"
-                + $" DiskWritingCommands：{string.Join(", ", missing)}。"
-                + "未登记的写命令会完全跳过 writable-root 校验，写入会落到未打开的路径。");
-        }
+                $"BRIDGE_COMMAND_DISPATCH_REGISTRY_INCOMPLETE: {string.Join(", ", unbound)}");
     }
 
-    private static async Task HandleRequestAsync(BridgeInboundFrame frame, DaemonState state)
+    private static async Task AcceptRequestAsync(BridgeInboundFrame frame, DaemonState state)
     {
+        if (!state.IsSessionValid(frame.WorkspaceSessionId))
+        {
+            await state.WriteFailureAsync(frame.RequestId, frame.WorkspaceSessionId, "BRIDGE_SESSION_INVALID", "A valid handshake is required before requests.");
+            return;
+        }
+        if (string.IsNullOrWhiteSpace(frame.RequestId))
+        {
+            await state.WriteFailureAsync(null, frame.WorkspaceSessionId, "BRIDGE_REQUEST_ID_REQUIRED", "requestId is required.");
+            return;
+        }
+
         BridgeRequestPayload? payload;
         try
         {
@@ -338,6 +430,13 @@ internal static class BridgeDaemonHost
             return;
         }
 
+        var command = payload.Command.Trim().ToLowerInvariant();
+        if (!BridgeCommandDescriptorCatalog.TryGet(command, out var descriptor))
+        {
+            await state.WriteFailureAsync(frame.RequestId, frame.WorkspaceSessionId, "UNKNOWN_COMMAND", $"Unknown bridge command: {command}");
+            return;
+        }
+
         var boundary = BridgePathBoundary.Verify(payload.FilePath, state.AllowedRoots);
         if (!boundary.Ok)
         {
@@ -346,14 +445,14 @@ internal static class BridgeDaemonHost
         }
 
         string? outputPath = null;
-        if (DiskWritingCommands.Contains(payload.Command))
+        if (descriptor.RequiresOutputPath)
         {
             if (payload.Options is not { ValueKind: JsonValueKind.Object }
                 || !payload.Options.Value.TryGetProperty("outputPath", out var outputElement)
                 || outputElement.ValueKind != JsonValueKind.String
                 || string.IsNullOrWhiteSpace(outputElement.GetString()))
             {
-                await state.WriteFailureAsync(frame.RequestId, frame.WorkspaceSessionId, "BRIDGE_OUTPUT_PATH_REQUIRED", "Bridge writer command requires options.outputPath.");
+                await state.WriteFailureAsync(frame.RequestId, frame.WorkspaceSessionId, "BRIDGE_OUTPUT_PATH_REQUIRED", "Bridge writer/export command requires options.outputPath.");
                 return;
             }
             outputPath = outputElement.GetString();
@@ -365,85 +464,158 @@ internal static class BridgeDaemonHost
             var outputBoundary = BridgePathBoundary.Verify(outputPath!, state.WritableRoots);
             if (!outputBoundary.Ok)
             {
-                await state.WriteFailureAsync(frame.RequestId, frame.WorkspaceSessionId, "BRIDGE_OUTPUT_OUTSIDE_WRITABLE_ROOTS", "Bridge writer output must stay inside a negotiated writable root.");
+                await state.WriteFailureAsync(frame.RequestId, frame.WorkspaceSessionId, "BRIDGE_OUTPUT_OUTSIDE_WRITABLE_ROOTS", "Bridge writer/export output must stay inside a negotiated writable root.");
                 return;
             }
             outputPath = outputBoundary.CanonicalPath;
         }
 
-        using var requestCts = CancellationTokenSource.CreateLinkedTokenSource(state.ShutdownToken);
+        if (!BridgeRequestPriorityParser.TryParse(payload.Priority, descriptor.CostClass, out var priority))
+        {
+            await state.WriteFailureAsync(frame.RequestId, frame.WorkspaceSessionId, "BRIDGE_PRIORITY_INVALID", "priority must be interactive, foreground or background.");
+            return;
+        }
+
+        var requestCts = CancellationTokenSource.CreateLinkedTokenSource(state.ShutdownToken);
         if (frame.DeadlineUtc is { } deadline)
         {
             var remaining = deadline - DateTimeOffset.UtcNow;
             if (remaining <= TimeSpan.Zero)
             {
                 await state.WriteFailureAsync(frame.RequestId, frame.WorkspaceSessionId, "BRIDGE_DEADLINE_EXCEEDED", "Request deadline has already elapsed.");
+                requestCts.Dispose();
                 return;
             }
             requestCts.CancelAfter(remaining);
         }
 
-        if (!state.TryAddRequest(frame.RequestId!, requestCts))
+        var work = new BridgeRequestWorkItem
         {
-            await state.WriteFailureAsync(frame.RequestId, frame.WorkspaceSessionId, "BRIDGE_DUPLICATE_REQUEST", "requestId is already active.");
+            Frame = frame,
+            Payload = payload,
+            Descriptor = descriptor,
+            CanonicalFilePath = boundary.CanonicalPath,
+            OutputPath = outputPath,
+            CancellationSource = requestCts,
+            Priority = priority,
+            EnqueuedAt = DateTimeOffset.UtcNow
+        };
+
+        if (state.HasRequest(frame.RequestId))
+        {
+            await state.WriteFailureAsync(frame.RequestId, frame.WorkspaceSessionId, "BRIDGE_DUPLICATE_REQUEST", "requestId is already queued or active.");
+            requestCts.Dispose();
+            return;
+        }
+
+        if (!state.TryReserveRequest(work))
+        {
+            await state.WriteFailureAsync(
+                frame.RequestId,
+                frame.WorkspaceSessionId,
+                "BRIDGE_BUSY",
+                "Bridge request queue is full; retry with bounded backoff before the deadline.",
+                new
+                {
+                    retryAfterMs = 100,
+                    queueLimit = MaxQueuedRequests,
+                    queuedRequests = state.QueuedRequestCount,
+                    activeRequests = state.ActiveRequestCount
+                });
+            requestCts.Dispose();
             return;
         }
 
         try
         {
-            await state.Concurrency.WaitAsync(requestCts.Token);
-            try
+            await state.WriteAsync("request/accepted", frame.RequestId, frame.WorkspaceSessionId, frame.ResourceUri, new
             {
-                await state.WriteAsync("progress", frame.RequestId, frame.WorkspaceSessionId, frame.ResourceUri, new
-                {
-                    phase = "started",
-                    completed = 0,
-                    total = 1
-                });
-                BridgeResult<object> result;
-                if (string.Equals(payload.Command, "read-bridge-artifact", StringComparison.OrdinalIgnoreCase))
-                {
-                    result = await state.ReadArtifactAsync(
-                        payload.Options,
-                        boundary.CanonicalPath,
-                        requestCts.Token);
-                }
-                else
-                {
-                    var service = new BridgeCommandService();
-                    result = await service.ExecuteAsync(
-                        payload.Command,
-                        boundary.CanonicalPath,
-                        requestCts.Token,
-                        state.OodleRuntimeRoot,
-                        payload.Options ?? default,
-                        outputPath,
-                        state.AllowedRoots,
-                        frame.WorkspaceSessionId);
-                }
-                requestCts.Token.ThrowIfCancellationRequested();
-                await state.WriteAsync("progress", frame.RequestId, frame.WorkspaceSessionId, frame.ResourceUri, new
-                {
-                    phase = "completed",
-                    completed = 1,
-                    total = 1
-                });
-                var authority = result.Diagnostics.Any(item => item.Code.Contains("SYNTHETIC", StringComparison.OrdinalIgnoreCase))
-                    ? "fixture-confirmed"
-                    : result.ParseStatus == "unsupported" ? "unsupported" : "candidate";
-                await state.WriteResultAsync(frame, payload.Command, authority, result);
-            }
-            finally
+                acceptedAt = DateTimeOffset.UtcNow,
+                queuePosition = state.QueuedRequestCount,
+                priority = priority.ToString().ToLowerInvariant()
+            });
+            state.CommitRequest(work);
+        }
+        catch
+        {
+            state.AbortReservation(work);
+            throw;
+        }
+    }
+
+    private static async Task ExecuteRequestAsync(BridgeRequestWorkItem work, DaemonState state)
+    {
+        var frame = work.Frame;
+        var payload = work.Payload;
+        try
+        {
+            if (frame.DeadlineUtc is { } deadline && deadline <= DateTimeOffset.UtcNow)
             {
-                state.Concurrency.Release();
+                await state.WriteFailureAsync(frame.RequestId, frame.WorkspaceSessionId, "BRIDGE_DEADLINE_EXCEEDED", "Request deadline elapsed while it was queued.");
+                return;
             }
+
+            await state.WriteAsync("progress", frame.RequestId, frame.WorkspaceSessionId, frame.ResourceUri, new
+            {
+                phase = "started",
+                completed = 0,
+                total = 1
+            });
+            using var resourceScope = MapStaticGeometryService.EnterRequestScope(
+                work.CancellationSource.Token,
+                frame.WorkspaceSessionId ?? string.Empty);
+            BridgeResult<object> result;
+            if (string.Equals(payload.Command, "read-bridge-artifact", StringComparison.OrdinalIgnoreCase))
+            {
+                result = await state.ReadArtifactAsync(
+                    payload.Options,
+                    work.CanonicalFilePath,
+                    work.CancellationSource.Token);
+            }
+            else
+            {
+                var service = new BridgeCommandService();
+                result = await service.ExecuteAsync(
+                    payload.Command,
+                    work.CanonicalFilePath,
+                    work.CancellationSource.Token,
+                    state.OodleRuntimeRoot,
+                    payload.Options ?? default,
+                    work.OutputPath,
+                    state.AllowedRoots,
+                    frame.WorkspaceSessionId);
+            }
+            work.CancellationSource.Token.ThrowIfCancellationRequested();
+            if (string.Equals(payload.Command, "read-map-static-geometry", StringComparison.OrdinalIgnoreCase))
+            {
+                var cache = MapStaticGeometryService.ResourceCacheObservation();
+                result = result with
+                {
+                    Diagnostics = result.Diagnostics.Append(new Diagnostic(
+                        "info",
+                        "MAP_RESOURCE_CACHE_SNAPSHOT",
+                        "地图静态几何资源 lease cache 状态快照。",
+                        result.SourceUri,
+                        cache)).ToArray()
+                };
+            }
+            await state.WriteAsync("progress", frame.RequestId, frame.WorkspaceSessionId, frame.ResourceUri, new
+            {
+                phase = "completed",
+                completed = 1,
+                total = 1
+            });
+            var authority = result.Diagnostics.Any(item => item.Code.Contains("SYNTHETIC", StringComparison.OrdinalIgnoreCase))
+                ? "fixture-confirmed"
+                : result.ParseStatus == "unsupported" ? "unsupported" : "candidate";
+            await state.WriteResultAsync(frame, payload.Command, authority, result);
         }
         catch (OperationCanceledException)
         {
             await state.WriteAsync("cancelled", frame.RequestId, frame.WorkspaceSessionId, frame.ResourceUri, new
             {
                 code = "BRIDGE_REQUEST_CANCELLED",
-                message = "Bridge request was cancelled or exceeded its deadline."
+                message = "Bridge request was cancelled, queued past its deadline, or exceeded its deadline."
             });
         }
         catch (BridgeOutboundFrameTooLargeException ex)
@@ -455,7 +627,7 @@ internal static class BridgeDaemonHost
                 "Bridge result exceeds the negotiated frame-size limit; use a file-backed command instead.",
                 new
                 {
-                    command = payload?.Command,
+                    command = payload.Command,
                     frameKind = ex.FrameKind,
                     serializedBytes = ex.SerializedBytes,
                     maxFrameBytes = ex.MaxFrameBytes,
@@ -464,14 +636,6 @@ internal static class BridgeDaemonHost
         }
         catch (Exception ex)
         {
-            // 带上异常类型名与首行堆栈。
-            //
-            // 此前只回 ex.Message，实测踩过一次：PARAM 读取失败回的是
-            // "Operation is not valid due to the current state of the object."
-            // ——那是 InvalidOperationException 的默认文案，既看不出类型也看不出
-            // 出处，而 read-param-document 的 catch 只捕获 InvalidDataException /
-            // NotSupportedException / IOException，于是真实原因被兜底吞掉。
-            // 兜底 catch 的职责是「不让进程崩」，不是「让原因消失」。
             var origin = (ex.StackTrace ?? string.Empty)
                 .Split('\n')
                 .FirstOrDefault(line => line.Contains("SoulForge.Bridge", StringComparison.Ordinal))
@@ -484,7 +648,7 @@ internal static class BridgeDaemonHost
         }
         finally
         {
-            state.RemoveRequest(frame.RequestId!);
+            state.FinishRequest(work);
         }
     }
 
@@ -515,10 +679,41 @@ internal static class BridgeDaemonHost
             await state.WriteFailureAsync(frame.RequestId, frame.WorkspaceSessionId, "BRIDGE_CANCEL_INVALID", "targetRequestId is required.");
             return;
         }
-        if (!state.CancelRequest(payload.TargetRequestId))
+        var cancellation = state.CancelRequest(payload.TargetRequestId);
+        if (cancellation == BridgeCancelDisposition.Queued)
+        {
+            await state.WriteAsync("cancelled", payload.TargetRequestId, frame.WorkspaceSessionId, frame.ResourceUri, new
+            {
+                code = "BRIDGE_REQUEST_CANCELLED",
+                message = "Queued Bridge request was cancelled before it acquired an active slot."
+            });
+            return;
+        }
+        if (cancellation != BridgeCancelDisposition.Active)
         {
             await state.WriteFailureAsync(frame.RequestId, frame.WorkspaceSessionId, "BRIDGE_REQUEST_NOT_ACTIVE", "The target request is not active.");
         }
+    }
+
+    private static async Task HandleWorkspaceCloseAsync(BridgeInboundFrame frame, DaemonState state)
+    {
+        if (!state.IsSessionValid(frame.WorkspaceSessionId))
+        {
+            await state.WriteFailureAsync(frame.RequestId, frame.WorkspaceSessionId, "BRIDGE_SESSION_INVALID", "A valid handshake is required.");
+            return;
+        }
+
+        await state.WriteAsync("workspace/closed", frame.RequestId, frame.WorkspaceSessionId, frame.ResourceUri, new
+        {
+            status = "closing",
+            activeRequests = state.ActiveRequestCount,
+            queuedRequests = state.QueuedRequestCount
+        });
+        state.CompleteAcceptingRequests();
+        // Workspace close is a cache-generation boundary.  Clear the session
+        // table and retire in-flight/ready geometry before a late builder can
+        // publish a value belonging to the closed workspace.
+        MapStaticGeometryService.Reset();
     }
 
     private static async Task EnsureSessionAndWriteAsync(
@@ -551,56 +746,39 @@ internal static class BridgeDaemonHost
     /// 语义边界：广告表示「该命令会被受理」，**不表示**对应格式具备 native
     /// parser/writer authority——authority 由各能力格自行裁定。
     /// </summary>
-    internal static readonly string[] AdvertisedCommands =
-    {
-        "inspect", "validate", "read-dcx-document", "list-bnd4-entries", "snapshot-bnd4-child",
-        "extract-bnd4-child", "write-bnd4", "inventory-asset-resources",
-        "read-fmg-document", "write-fmg", "read-param-document", "write-param",
-        "read-gparam-document", "write-gparam", "write-flver", "read-text-catalog",
-        "read-emevd-document", "write-emevd", "read-msb-document", "write-msb",
-        "read-tpf-document", "export-tpf-texture", "read-tpf-texture-preview",
-        "write-tpf-texture-replace", "read-tae-document",
-        "read-tae-event-params", "read-tae-animation-clip", "sample-tae-animation-pose",
-        "read-bridge-artifact",
-        "read-chrbnd-flver-preview",
-        "read-map-part-flver-preview",
-        "read-map-static-geometry",
-        "read-flver-document", "read-flver-mesh", "read-flver-skeleton",
-        "read-flver-texture-slots", "read-flver-dummies", "read-esd-document",
-        "write-esd-document", "write-tae-document",
-        "write-fxr-document",
-        "list-ffxbnd-entries",
-        "read-mtd-document", "write-mtd-document", "read-fxr-document",
-        "export-event", "export-map", "export-param",
-        "export-msg", "probe-oodle", "probe-document-locator",
-        "read-luabnd-document", "inspect-luabnd", "read-luabnd-script",
-        "write-luabnd-script", "export-luabnd"
-    };
-
     private static object BuildCapabilities(string? oodleRuntimeRoot) => new
     {
         authority = "candidate",
         nativeFormatAuthority = false,
         commands = AdvertisedCommands,
+        commandDescriptors = BridgeCommandDescriptorCatalog.AdvertisedDescriptors,
         envelopes = new[] { "DFLT-candidate", "KRAK-runtime-dependent", "BND4-unsupported" },
         oodleRuntime = OodleRuntimeLocator.Probe(oodleRuntimeRoot).Runtime,
         cancellation = true,
-        progress = true
+        progress = true,
+        queueLimit = MaxQueuedRequests,
+        scheduling = new { priorities = new[] { "interactive", "foreground", "background" }, quota = new[] { 5, 2, 1 }, aging = true }
     };
 
     private sealed class DaemonState : IDisposable
     {
         private readonly TextWriter _output;
-        private readonly SemaphoreSlim _outputLock = new(1, 1);
-        private readonly ConcurrentDictionary<string, CancellationTokenSource> _requests = new(StringComparer.Ordinal);
+        private readonly ResourceLeaseCache<MapStaticGeometryService.GeometryResource> _resourceCache;
+        private readonly BoundedOutputQueue _outputQueue = new(MaxOutputQueueBytes);
+        private readonly Task _outputPump;
         private readonly CancellationTokenSource _shutdown = new();
         private readonly BridgeArtifactStore _artifacts = new();
+        private BridgeRequestScheduler? _scheduler;
         private string? _workspaceSessionId;
 
-        public DaemonState(TextWriter output)
+        public DaemonState(
+            TextWriter output,
+            ResourceLeaseCache<MapStaticGeometryService.GeometryResource> resourceCache)
         {
             _output = output;
-            Concurrency = new SemaphoreSlim(1, 1);
+            _resourceCache = resourceCache;
+            MapStaticGeometryService.AttachResourceCache(resourceCache);
+            _outputPump = PumpOutputAsync();
         }
 
         public int MaxFrameBytes { get; private set; } = DefaultMaxFrameBytes;
@@ -608,9 +786,9 @@ internal static class BridgeDaemonHost
         public IReadOnlyList<string> AllowedRoots { get; private set; } = Array.Empty<string>();
         public IReadOnlyList<string> WritableRoots { get; private set; } = Array.Empty<string>();
         public string? OodleRuntimeRoot { get; private set; }
-        public SemaphoreSlim Concurrency { get; private set; }
         public CancellationToken ShutdownToken => _shutdown.Token;
-        public int ActiveRequestCount => _requests.Count;
+        public int ActiveRequestCount => _scheduler?.ActiveCount ?? 0;
+        public int QueuedRequestCount => _scheduler?.QueuedCount ?? 0;
         public bool IsConfigured => !string.IsNullOrWhiteSpace(_workspaceSessionId);
 
         public void Configure(
@@ -627,22 +805,44 @@ internal static class BridgeDaemonHost
             MaxFrameBytes = maxFrameBytes;
             MaxConcurrency = maxConcurrency;
             OodleRuntimeRoot = oodleRuntimeRoot;
-            var previous = Concurrency;
-            Concurrency = new SemaphoreSlim(maxConcurrency, maxConcurrency);
-            previous.Dispose();
+            _scheduler = new BridgeRequestScheduler(
+                maxConcurrency,
+                MaxQueuedRequests,
+                work => ExecuteRequestAsync(work, this));
+            _scheduler.Start();
         }
 
         public bool IsSessionValid(string? workspaceSessionId) =>
             !string.IsNullOrWhiteSpace(_workspaceSessionId)
             && string.Equals(_workspaceSessionId, workspaceSessionId, StringComparison.Ordinal);
 
-        public bool TryAddRequest(string requestId, CancellationTokenSource cts) => _requests.TryAdd(requestId, cts);
-        public void RemoveRequest(string requestId) => _requests.TryRemove(requestId, out _);
-        public bool CancelRequest(string requestId)
+        public bool TryReserveRequest(BridgeRequestWorkItem work) =>
+            _scheduler?.TryReserve(work) == true;
+
+        public bool HasRequest(string requestId) => _scheduler?.Contains(requestId) == true;
+
+        public void CommitRequest(BridgeRequestWorkItem work) =>
+            (_scheduler ?? throw new InvalidOperationException("Bridge scheduler is not configured.")).Commit(work);
+
+        public void AbortReservation(BridgeRequestWorkItem work) =>
+            _scheduler?.AbortReservation(work);
+
+        public void FinishRequest(BridgeRequestWorkItem work)
         {
-            if (!_requests.TryGetValue(requestId, out var cts)) return false;
-            cts.Cancel();
-            return true;
+            _scheduler?.Finish(work);
+        }
+
+        public BridgeCancelDisposition CancelRequest(string requestId) =>
+            _scheduler?.Cancel(requestId) ?? BridgeCancelDisposition.NotFound;
+
+        public void CompleteAcceptingRequests() => _scheduler?.Complete();
+
+        public async Task StopAsync()
+        {
+            if (_scheduler is not null)
+                await _scheduler.StopAsync().ConfigureAwait(false);
+            _outputQueue.Complete();
+            await _outputPump.ConfigureAwait(false);
         }
 
         public async Task WriteFailureAsync(
@@ -656,7 +856,7 @@ internal static class BridgeDaemonHost
             {
                 code,
                 message,
-                retryable = code is "BRIDGE_REQUEST_FAILED" or "BRIDGE_REQUEST_NOT_ACTIVE",
+                retryable = code is "BRIDGE_REQUEST_FAILED" or "BRIDGE_REQUEST_NOT_ACTIVE" or "BRIDGE_BUSY",
                 details
             });
         }
@@ -678,7 +878,7 @@ internal static class BridgeDaemonHost
             var serializedBytes = Encoding.UTF8.GetByteCount(json);
             if (serializedBytes <= MaxFrameBytes)
             {
-                await WriteSerializedAsync(json);
+                await WriteSerializedAsync(json, "result", request.RequestId);
                 return;
             }
 
@@ -787,7 +987,7 @@ internal static class BridgeDaemonHost
             var serializedBytes = Encoding.UTF8.GetByteCount(json);
             if (serializedBytes > MaxFrameBytes)
                 throw new BridgeOutboundFrameTooLargeException(kind, requestId, serializedBytes, MaxFrameBytes);
-            await WriteSerializedAsync(json);
+            await WriteSerializedAsync(json, kind, requestId);
         }
 
         private BridgeOutboundFrame CreateFrame(
@@ -806,17 +1006,18 @@ internal static class BridgeDaemonHost
             Payload = payload
         };
 
-        private async Task WriteSerializedAsync(string json)
+        private Task WriteSerializedAsync(string json, string kind, string? requestId) =>
+            _outputQueue.EnqueueAsync(
+                new BridgeOutputItem(json, kind == "progress", requestId),
+                _shutdown.Token);
+
+        private async Task PumpOutputAsync()
         {
-            await _outputLock.WaitAsync();
-            try
+            await foreach (var item in _outputQueue.ReadAllAsync(_shutdown.Token).ConfigureAwait(false))
             {
-                await _output.WriteLineAsync(json);
-                await _output.FlushAsync();
-            }
-            finally
-            {
-                _outputLock.Release();
+                await _output.WriteAsync(item.Json.AsMemory()).ConfigureAwait(false);
+                await _output.WriteAsync("\n".AsMemory()).ConfigureAwait(false);
+                await _output.FlushAsync().ConfigureAwait(false);
             }
         }
 
@@ -841,13 +1042,445 @@ internal static class BridgeDaemonHost
         public void Dispose()
         {
             _shutdown.Cancel();
-            foreach (var cts in _requests.Values) cts.Cancel();
-            Concurrency.Dispose();
-            _outputLock.Dispose();
+            _scheduler?.CancelAll();
+            _outputQueue.Complete();
+            MapStaticGeometryService.DetachResourceCache(_resourceCache);
+            _resourceCache.Dispose();
             _shutdown.Dispose();
             _artifacts.Dispose();
         }
     }
+}
+
+internal enum BridgeRequestPriority
+{
+    Interactive = 0,
+    Foreground = 1,
+    Background = 2
+}
+
+internal static class BridgeRequestPriorityParser
+{
+    public static bool TryParse(
+        string? requested,
+        string descriptorCostClass,
+        out BridgeRequestPriority priority)
+    {
+        var value = string.IsNullOrWhiteSpace(requested) ? descriptorCostClass : requested.Trim();
+        if (string.Equals(value, "interactive", StringComparison.OrdinalIgnoreCase))
+        {
+            priority = BridgeRequestPriority.Interactive;
+            return true;
+        }
+        if (string.Equals(value, "foreground", StringComparison.OrdinalIgnoreCase))
+        {
+            priority = BridgeRequestPriority.Foreground;
+            return true;
+        }
+        if (string.Equals(value, "background", StringComparison.OrdinalIgnoreCase))
+        {
+            priority = BridgeRequestPriority.Background;
+            return true;
+        }
+        priority = default;
+        return false;
+    }
+}
+
+internal sealed class BridgeRequestWorkItem
+{
+    public required BridgeInboundFrame Frame { get; init; }
+    public required BridgeRequestPayload Payload { get; init; }
+    public required BridgeCommandDescriptor Descriptor { get; init; }
+    public required string CanonicalFilePath { get; init; }
+    public string? OutputPath { get; init; }
+    public required CancellationTokenSource CancellationSource { get; init; }
+    public required BridgeRequestPriority Priority { get; init; }
+    public required DateTimeOffset EnqueuedAt { get; init; }
+    public LinkedListNode<BridgeRequestWorkItem>? QueueNode { get; set; }
+}
+
+internal enum BridgeCancelDisposition
+{
+    NotFound,
+    Queued,
+    Active
+}
+
+internal sealed class BridgeRequestScheduler
+{
+    private static readonly int[] WeightedQuota = { 0, 0, 0, 0, 0, 1, 1, 2 };
+    private static readonly TimeSpan AgingThreshold = TimeSpan.FromMilliseconds(250);
+
+    private readonly object _gate = new();
+    private readonly int _maxConcurrency;
+    private readonly int _queueLimit;
+    private readonly Func<BridgeRequestWorkItem, Task> _execute;
+    private readonly LinkedList<BridgeRequestWorkItem>[] _queues =
+    {
+        new(), new(), new()
+    };
+    private readonly Dictionary<string, BridgeRequestWorkItem> _requests = new(StringComparer.Ordinal);
+    private readonly List<Task> _workers = new();
+    private TaskCompletionSource<bool> _signal = NewSignal();
+    private bool _started;
+    private bool _completed;
+    private int _queuedCount;
+    private int _activeCount;
+    private int _quotaCursor;
+
+    public BridgeRequestScheduler(
+        int maxConcurrency,
+        int queueLimit,
+        Func<BridgeRequestWorkItem, Task> execute)
+    {
+        _maxConcurrency = Math.Clamp(maxConcurrency, 1, 8);
+        _queueLimit = Math.Max(1, queueLimit);
+        _execute = execute;
+    }
+
+    public int ActiveCount
+    {
+        get { lock (_gate) return _activeCount; }
+    }
+
+    public int QueuedCount
+    {
+        get { lock (_gate) return _queuedCount; }
+    }
+
+    public void Start()
+    {
+        lock (_gate)
+        {
+            if (_started) return;
+            _started = true;
+            for (var i = 0; i < _maxConcurrency; i++)
+                _workers.Add(WorkerLoopAsync());
+        }
+    }
+
+    public bool TryReserve(BridgeRequestWorkItem work)
+    {
+        lock (_gate)
+        {
+            if (!_started || _completed || _queuedCount >= _queueLimit)
+                return false;
+            if (_requests.ContainsKey(work.Frame.RequestId!))
+                return false;
+            _requests.Add(work.Frame.RequestId!, work);
+            _queuedCount++;
+            return true;
+        }
+    }
+
+    public bool Contains(string requestId)
+    {
+        lock (_gate) return _requests.ContainsKey(requestId);
+    }
+
+    public void Commit(BridgeRequestWorkItem work)
+    {
+        lock (_gate)
+        {
+            if (_completed)
+            {
+                _requests.Remove(work.Frame.RequestId!);
+                _queuedCount = Math.Max(0, _queuedCount - 1);
+                work.CancellationSource.Cancel();
+                return;
+            }
+            var node = _queues[(int)work.Priority].AddLast(work);
+            work.QueueNode = node;
+            Pulse_NoLock();
+        }
+    }
+
+    public void AbortReservation(BridgeRequestWorkItem work)
+    {
+        lock (_gate)
+        {
+            if (_requests.Remove(work.Frame.RequestId!))
+                _queuedCount = Math.Max(0, _queuedCount - 1);
+        }
+        work.CancellationSource.Dispose();
+    }
+
+    public BridgeCancelDisposition Cancel(string requestId)
+    {
+        BridgeRequestWorkItem? removed = null;
+        lock (_gate)
+        {
+            if (!_requests.TryGetValue(requestId, out var work))
+                return BridgeCancelDisposition.NotFound;
+
+            if (work.QueueNode is not null)
+            {
+                _queues[(int)work.Priority].Remove(work.QueueNode);
+                work.QueueNode = null;
+                _requests.Remove(requestId);
+                _queuedCount = Math.Max(0, _queuedCount - 1);
+                removed = work;
+                Pulse_NoLock();
+            }
+            else
+            {
+                work.CancellationSource.Cancel();
+                return BridgeCancelDisposition.Active;
+            }
+        }
+
+        removed!.CancellationSource.Cancel();
+        removed.CancellationSource.Dispose();
+        return BridgeCancelDisposition.Queued;
+    }
+
+    public void Finish(BridgeRequestWorkItem work)
+    {
+        lock (_gate)
+        {
+            _requests.Remove(work.Frame.RequestId!);
+        }
+    }
+
+    public void Complete()
+    {
+        lock (_gate)
+        {
+            _completed = true;
+            Pulse_NoLock();
+        }
+    }
+
+    public async Task StopAsync()
+    {
+        Complete();
+        Task[] workers;
+        lock (_gate) workers = _workers.ToArray();
+        await Task.WhenAll(workers).ConfigureAwait(false);
+    }
+
+    public void CancelAll()
+    {
+        lock (_gate)
+        {
+            foreach (var work in _requests.Values)
+                work.CancellationSource.Cancel();
+            _completed = true;
+            Pulse_NoLock();
+        }
+    }
+
+    private async Task WorkerLoopAsync()
+    {
+        while (true)
+        {
+            BridgeRequestWorkItem? work;
+            Task waitTask;
+            lock (_gate)
+            {
+                work = TakeNext_NoLock();
+                if (work is null)
+                {
+                    if (_completed) return;
+                    waitTask = _signal.Task;
+                }
+                else
+                {
+                    _activeCount++;
+                    waitTask = Task.CompletedTask;
+                }
+            }
+
+            if (work is null)
+            {
+                await waitTask.ConfigureAwait(false);
+                continue;
+            }
+
+            try
+            {
+                await _execute(work).ConfigureAwait(false);
+            }
+            finally
+            {
+                lock (_gate)
+                {
+                    _activeCount = Math.Max(0, _activeCount - 1);
+                    _requests.Remove(work.Frame.RequestId!);
+                }
+                work.CancellationSource.Dispose();
+            }
+        }
+    }
+
+    private BridgeRequestWorkItem? TakeNext_NoLock()
+    {
+        BridgeRequestWorkItem? oldest = null;
+        foreach (var queue in _queues)
+        {
+            var candidate = queue.First?.Value;
+            if (candidate is null) continue;
+            if (oldest is null || candidate.EnqueuedAt < oldest.EnqueuedAt)
+                oldest = candidate;
+        }
+
+        if (oldest is not null && DateTimeOffset.UtcNow - oldest.EnqueuedAt >= AgingThreshold)
+            return RemoveFirstMatching_NoLock(oldest);
+
+        for (var attempt = 0; attempt < WeightedQuota.Length; attempt++)
+        {
+            var index = (_quotaCursor + attempt) % WeightedQuota.Length;
+            var queueIndex = WeightedQuota[index];
+            if (_queues[queueIndex].First is null) continue;
+            _quotaCursor = (index + 1) % WeightedQuota.Length;
+            var node = _queues[queueIndex].First!;
+            _queues[queueIndex].RemoveFirst();
+            node.Value.QueueNode = null;
+            _queuedCount = Math.Max(0, _queuedCount - 1);
+            return node.Value;
+        }
+
+        return null;
+    }
+
+    private BridgeRequestWorkItem RemoveFirstMatching_NoLock(BridgeRequestWorkItem target)
+    {
+        var queue = _queues[(int)target.Priority];
+        var node = target.QueueNode ?? queue.First!;
+        queue.Remove(node);
+        target.QueueNode = null;
+        _queuedCount = Math.Max(0, _queuedCount - 1);
+        return target;
+    }
+
+    private void Pulse_NoLock()
+    {
+        _signal.TrySetResult(true);
+        _signal = NewSignal();
+    }
+
+    private static TaskCompletionSource<bool> NewSignal() =>
+        new(TaskCreationOptions.RunContinuationsAsynchronously);
+}
+
+internal sealed record BridgeOutputItem(string Json, bool IsProgress, string? RequestId)
+{
+    public int ByteLength => Encoding.UTF8.GetByteCount(Json) + 1;
+}
+
+internal sealed class BoundedOutputQueue
+{
+    private readonly object _gate = new();
+    private readonly long _capacityBytes;
+    private readonly LinkedList<BridgeOutputItem> _items = new();
+    private readonly Dictionary<string, LinkedListNode<BridgeOutputItem>> _progress = new(StringComparer.Ordinal);
+    private TaskCompletionSource<bool> _signal = NewSignal();
+    private long _bytes;
+    private bool _completed;
+
+    public BoundedOutputQueue(long capacityBytes)
+    {
+        _capacityBytes = Math.Max(1, capacityBytes);
+    }
+
+    public async Task EnqueueAsync(BridgeOutputItem item, CancellationToken cancellationToken)
+    {
+        if (item.ByteLength > _capacityBytes)
+            throw new InvalidDataException("Bridge output frame exceeds the bounded output queue capacity.");
+
+        while (true)
+        {
+            Task waitTask;
+            lock (_gate)
+            {
+                if (_completed)
+                    throw new ObjectDisposedException(nameof(BoundedOutputQueue));
+
+                if (item.IsProgress && !string.IsNullOrWhiteSpace(item.RequestId)
+                    && _progress.TryGetValue(item.RequestId!, out var previous))
+                {
+                    _items.Remove(previous);
+                    _bytes -= previous.Value.ByteLength;
+                    _progress.Remove(item.RequestId!);
+                }
+
+                if (_bytes + item.ByteLength <= _capacityBytes)
+                {
+                    var node = _items.AddLast(item);
+                    _bytes += item.ByteLength;
+                    if (item.IsProgress && !string.IsNullOrWhiteSpace(item.RequestId))
+                        _progress[item.RequestId!] = node;
+                    Pulse_NoLock();
+                    return;
+                }
+
+                waitTask = _signal.Task;
+            }
+            await waitTask.WaitAsync(cancellationToken).ConfigureAwait(false);
+        }
+    }
+
+    public async IAsyncEnumerable<BridgeOutputItem> ReadAllAsync(
+        [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken cancellationToken)
+    {
+        while (true)
+        {
+            BridgeOutputItem? item = null;
+            Task waitTask;
+            var completed = false;
+            lock (_gate)
+            {
+                if (_items.First is not null)
+                {
+                    var node = _items.First;
+                    _items.RemoveFirst();
+                    item = node.Value;
+                    _bytes -= item.ByteLength;
+                    if (item.IsProgress && !string.IsNullOrWhiteSpace(item.RequestId)
+                        && _progress.TryGetValue(item.RequestId!, out var progressNode)
+                        && ReferenceEquals(progressNode, node))
+                    {
+                        _progress.Remove(item.RequestId!);
+                    }
+                    Pulse_NoLock();
+                    waitTask = Task.CompletedTask;
+                }
+                else
+                {
+                    completed = _completed;
+                    waitTask = completed ? Task.CompletedTask : _signal.Task;
+                }
+            }
+
+            if (completed) yield break;
+
+            if (item is not null)
+            {
+                yield return item;
+                continue;
+            }
+            await waitTask.WaitAsync(cancellationToken).ConfigureAwait(false);
+        }
+    }
+
+    public void Complete()
+    {
+        lock (_gate)
+        {
+            _completed = true;
+            Pulse_NoLock();
+        }
+    }
+
+    private void Pulse_NoLock()
+    {
+        _signal.TrySetResult(true);
+        _signal = NewSignal();
+    }
+
+    private static TaskCompletionSource<bool> NewSignal() =>
+        new(TaskCreationOptions.RunContinuationsAsynchronously);
 }
 
 internal sealed class BridgeOutboundFrameTooLargeException : Exception
@@ -969,6 +1602,7 @@ internal sealed class BridgeRequestPayload
     public string? Command { get; init; }
     public string? FilePath { get; init; }
     public JsonElement? Options { get; init; }
+    public string? Priority { get; init; }
 }
 
 internal sealed class BridgeCancelPayload

@@ -8,7 +8,16 @@ import type {
   ReferenceEdge,
   ResourceKind,
   TaeAnimSymbol,
-  TaeEventSymbol
+  TaeEventSymbol,
+  NativeEditDomain,
+  FieldValueKind
+} from '@soulforge/shared';
+import {
+  assertEditDomain,
+  assertWritableField,
+  defaultReadSessionManager,
+  createOpaqueCursor,
+  parseOpaqueCursor
 } from '@soulforge/shared';
 import { basename, isAbsolute, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -57,6 +66,8 @@ import { retrieveEvidence } from '../rag/retrieve.js';
 import { type MemoryStore } from '../memory/memoryStore.js';
 import { EVENT_REFERENCE_SOURCE_URI, searchEventReference } from './eventReference.js';
 import { resolveChrLinkage, type ChrLinkageResult } from '../references/chrLinkageResolver.js';
+import { resolveEntity, type EntityRelationRequest } from './entityResolution.js';
+import { queryKnowledgeClaims, readKnowledgePage } from '../knowledge/knowledgeQuery.js';
 /** @deprecated Prefer AiToolPermissionLevel. Kept for older UI labels. */
 export type ToolPermission = 'read' | 'plan' | 'write' | AiToolPermissionLevel;
 
@@ -147,6 +158,11 @@ export interface AgentTaskRecordGateway {
   /** Persist a session search ticket which may be cited by one or more Evidence entries. */
   recordSearch(input: AgentTaskRecordSearchInput): Promise<AgentTaskRecordSearchTicket>;
   update(input: AgentTaskRecordUpdate): Promise<AgentTaskRecordSnapshot>;
+  /** Atomic multi-entry CAS used by the goal ledger; optional for old hosts. */
+  updateMany?(input: {
+    expectedVersion: number;
+    entries: readonly AgentTaskRecordUpdate[];
+  }): Promise<AgentTaskRecordSnapshot | { ok: false; code: string; message: string; details?: unknown }>;
   /**
    * Write tools reserve one mutation count for every matching Evidence key.
    * Presence of the normalized key is the authority; the free-form note is
@@ -198,6 +214,8 @@ export interface ToolContext {
   onNativeWriteCommitted?: (changedSources: KnowledgeSourceChange) => Promise<KnowledgeRefreshResult | void>;
   /** Abort the current Agent tool call when the host cancels the run. */
   signal?: AbortSignal;
+  /** Curator-only knowledge staging store; never a game resource writer. */
+  knowledgeStore?: import('../knowledge/knowledgeStore.js').KnowledgeStore;
 }
 
 export interface ToolDescriptor {
@@ -512,7 +530,10 @@ const EVIDENCE_SEARCH_TOOLS = new Set([
   'search_text_entries',
   'search_event_reference',
   'retrieve_evidence',
-  'list_luabnd_scripts'
+  'resolve_entity',
+  'list_luabnd_scripts',
+  'query_knowledge',
+  'read_knowledge_claims'
 ]);
 
 function getEvidenceSearchQuery(name: string, input: unknown): string | null {
@@ -530,6 +551,16 @@ function getEvidenceSearchQuery(name: string, input: unknown): string | null {
   if (name === 'list_luabnd_scripts') {
     const file = asOptionalString(value.file)?.trim();
     if (file) return file;
+  }
+  if (name === 'resolve_entity') {
+    const handle = asOptionalString(value.handle) ?? asOptionalString(value.nativeHandle);
+    if (handle) return handle;
+  }
+  if (name === 'read_knowledge_claims') {
+    const claimIds = Array.isArray(value.claimIds)
+      ? value.claimIds.filter((entry): entry is string => typeof entry === 'string')
+      : [];
+    return claimIds.join(',');
   }
   return '';
 }
@@ -691,11 +722,12 @@ export function createDefaultToolRegistry(): ToolRegistry {
       if (ws === null) return fail('WORKSPACE_REQUIRED', '这次工具需要先打开 Mod 工作区。');
       const stats = ws.getStats();
       const corpus = resolveRagCorpus(context);
-      if (!corpus) return ok(stats);
+      if (!corpus) return ok({ ...stats, coverage: ws.getCoverageSnapshot() });
       // 轻量索引可能尚未把所有符号投影到内存，但宿主注入的 RAG 快照
       // 仍是带来源的语义语料；不能把内存计数为 0 误报成数据不存在。
       return ok({
         ...stats,
+        coverage: ws.getCoverageSnapshot(),
         events: Math.max(stats.events, corpus.stats.byFamily.event),
         mapEntities: Math.max(stats.mapEntities, corpus.stats.byFamily.map_entity),
         mapRegions: Math.max(stats.mapRegions, corpus.stats.byFamily.map_region),
@@ -757,6 +789,55 @@ export function createDefaultToolRegistry(): ToolRegistry {
         if (result.code === 'insufficient_evidence') return ok({ query, hits: [], totalHits: 0, note: result.message });
         return fail(result.code, result.message);
       }
+      return ok(result);
+    }
+  });
+
+  registry.register({
+    name: 'resolve_entity',
+    description:
+      'Resolve a fuzzy object name or an exact native handle into bounded candidates, identity chains, '
+        + 'declared/verified relationship edges, coverage and a next-read plan. Exact handles are checked '
+        + 'against current source versions. Fuzzy zero-hit is never proof that an entity does not exist; '
+        + 'unregistered numeric joins remain hypotheses and never enter mutation targets.',
+    permission: 'read',
+    permissionLevel: 'read',
+    inputSchema: {
+      query: 'string?',
+      handle: 'string?',
+      nativeHandle: 'string?',
+      domain: 'string?',
+      relations: 'array?',
+      maxCandidates: 'safe-integer?',
+      maxEdges: 'safe-integer?',
+      maxSteps: 'safe-integer?'
+    },
+    run: async (input, context) => {
+      const ws = context.workspaceIndex;
+      if (ws === null) return fail('WORKSPACE_REQUIRED', '这次工具需要先打开 Mod 工作区。');
+      const value = asRecord(input);
+      const query = asOptionalString(value.query)?.trim();
+      const handle = asOptionalString(value.handle)?.trim() ?? asOptionalString(value.nativeHandle)?.trim();
+      if (!query && !handle) return fail('INVALID_INPUT', 'resolve_entity 需要 query 或 handle/nativeHandle。');
+      const relations = asEntityRelations(value.relations);
+      const linkageRoot = context.session?.layers.overlayRoot;
+      const domain = asOptionalString(value.domain);
+      const result = await resolveEntity({
+        index: ws,
+        ...(query ? { query } : {}),
+        ...(handle ? { nativeHandle: handle } : {}),
+        ...(domain ? { domain } : {}),
+        ...(relations.length > 0 ? { requiredRelations: relations } : {}),
+        ...(typeof value.maxCandidates === 'number' ? { maxCandidates: value.maxCandidates } : {}),
+        ...(typeof value.maxEdges === 'number' ? { maxEdges: value.maxEdges } : {}),
+        ...(typeof value.maxSteps === 'number' ? { maxSteps: value.maxSteps } : {}),
+        ...(linkageRoot ? {
+          linkageResolver: async (rowId: number) => resolveChrLinkage(rowId, {
+            workspaceRoot: linkageRoot,
+            ...(context.session?.layers.baseRoot ? { oodleRuntimeRoot: context.session.layers.baseRoot } : {})
+          })
+        } : {})
+      });
       return ok(result);
     }
   });
@@ -924,6 +1005,17 @@ export function createDefaultToolRegistry(): ToolRegistry {
     run: (input, context) => {
       const ws = context.workspaceIndex;
       if (ws === null) return fail('WORKSPACE_REQUIRED', '这次工具需要先打开 Mod 工作区。');
+      const paramState = typeof ws.getParamSemanticState === 'function' ? ws.getParamSemanticState() : 'ready';
+      if (paramState === 'warming_up') {
+        return ok({
+          status: 'warming_up',
+          directive: 'DEFER_PARAM_QUERY',
+          state: 'warming_up',
+          totalHits: 0,
+          hits: [],
+          message: '【状态机调度】PARAM 语义索引当前正在后台解包预热中（尚未就绪）。请当前循环暂时跳过参数查询流程，优先执行其他可独立推进的任务（如 MSB 地图分析、EMEVD 事件逻辑校验、任务规划等）；请在下一次循环或后续步骤中再重新查询参数。'
+        });
+      }
       const value = asRecord(input);
       const paramNames = asStringList(value.paramNames);
       const query = asString(value.query, '');
@@ -1406,7 +1498,8 @@ export function createDefaultToolRegistry(): ToolRegistry {
       table: 'string',
       rowIds: 'array',
       fieldIds: 'array',
-      containerPath: 'string?'
+      containerPath: 'string?',
+      cursor: 'string?'
     },
     run: async (input, context) => {
       const value = asRecord(input);
@@ -1505,11 +1598,26 @@ export function createDefaultToolRegistry(): ToolRegistry {
       containerPath: 'string?'
     },
     run: async (input, context) => {
-      const edit = requireEditSession(context, 'write');
-      if (!('session' in edit)) return edit;
       const value = asRecord(input);
+      if (value.domain && value.domain !== 'param') {
+        return fail('DOMAIN_CROSSOVER_REJECTED', `PARAM 写入工具不能接收 ${value.domain} 领域的请求。`);
+      }
+      if (value.fieldKind && value.fieldKind !== 'native_value') {
+        return fail('FIELD_KIND_NON_NATIVE', `${value.fieldKind} 不是原生字段类型，不能写入 PARAM。`);
+      }
       const edits = asParamEdits(value.edits);
       if (!edits.ok) return fail(edits.code, edits.message);
+      for (const e of edits.edits) {
+        if (/^m\d\d_/i.test(e.table) || /^c\d\d/i.test(e.table) || /#A\d\d/i.test(e.table)) {
+          return fail('DOMAIN_CROSSOVER_REJECTED', `PARAM 写入工具不能接收地图或 TAE 目标：${e.table}`);
+        }
+        const record = e as unknown as Record<string, unknown>;
+        if (record.valueKind === 'display_label' || record.valueKind === 'external_metadata') {
+          return fail('FIELD_KIND_NON_NATIVE', 'display_label / external_metadata 不能作为 PARAM 原生字段写入。');
+        }
+      }
+      const edit = requireEditSession(context, 'write');
+      if (!('session' in edit)) return edit;
       const containerPath = asOptionalString(value.containerPath);
       const result = await setParamFields({
         edit: edit.session,
@@ -1532,7 +1640,8 @@ export function createDefaultToolRegistry(): ToolRegistry {
       table: 'string',
       ids: 'array',
       containerPath: 'string?',
-      lang: 'string?'
+      lang: 'string?',
+      cursor: 'string?'
     },
     run: async (input, context) => {
       if (!context.session) return ok({ table: asString(asRecord(input).table), entries: [], note: 'no workspace session, guard relaxed, empty' });
@@ -1569,7 +1678,7 @@ export function createDefaultToolRegistry(): ToolRegistry {
             sourceUri,
             category: result.table,
             textId: entry.id,
-            text: entry.text,
+            text: entry.text ?? '',
             confidence: 'high',
             ...(entry.sourceHash ? { sourceHash: entry.sourceHash } : {}),
             ...(entry.sourceRevision !== undefined ? { sourceRevision: entry.sourceRevision } : {})
@@ -1594,11 +1703,29 @@ export function createDefaultToolRegistry(): ToolRegistry {
       lang: 'string?'
     },
     run: async (input, context) => {
-      const edit = requireEditSession(context, 'write');
-      if (!('session' in edit)) return edit;
       const value = asRecord(input);
+      if (value.domain && value.domain !== 'fmg') {
+        return fail('DOMAIN_CROSSOVER_REJECTED', `FMG 写入工具不能接收 ${value.domain} 领域的请求。`);
+      }
+      if (value.fieldKind && value.fieldKind !== 'native_value') {
+        return fail('FIELD_KIND_NON_NATIVE', `${value.fieldKind} 不是原生字段类型，不能写入 FMG。`);
+      }
       const edits = asFmgEdits(value.edits);
       if (!edits.ok) return fail(edits.code, edits.message);
+      for (const e of edits.edits) {
+        if (/^m\d\d_/i.test(e.table) || /^c\d\d/i.test(e.table) || /#c\d\d/i.test(e.table) || /#A\d\d/i.test(e.table)) {
+          return fail('DOMAIN_CROSSOVER_REJECTED', `FMG 写入工具不能接收地图或 TAE 目标：${e.table}`);
+        }
+        const record = e as unknown as Record<string, unknown>;
+        if (record.valueKind === 'display_label' || record.fieldId === 'displayLabel') {
+          return fail('FIELD_KIND_NON_NATIVE', 'display_label 是界面显示标签，不能作为 FMG 原生文本写入。');
+        }
+        if (record.valueKind === 'external_metadata' || record.fieldId === 'externalMetadata') {
+          return fail('FIELD_KIND_NON_NATIVE', 'external_metadata 是外部元数据，不能作为 FMG 原生文本写入。');
+        }
+      }
+      const edit = requireEditSession(context, 'write');
+      if (!('session' in edit)) return edit;
       const containerPath = asOptionalString(value.containerPath);
       const lang = asOptionalString(value.lang);
       const result = await setFmgEntries({
@@ -1625,7 +1752,8 @@ export function createDefaultToolRegistry(): ToolRegistry {
       eventId: 'safe-integer',
       format: 'enum:darkscript|json?',
       instructionOffset: 'safe-integer?',
-      instructionLimit: 'safe-integer?'
+      instructionLimit: 'safe-integer?',
+      cursor: 'string?'
     },
     run: async (input, context) => {
       const value = asRecord(input);
@@ -1849,7 +1977,7 @@ export function createDefaultToolRegistry(): ToolRegistry {
       + 'Use cXXXX#AXXXX.eN addresses; omitted addresses return the bounded native event projection.',
     permission: 'read',
     permissionLevel: 'read',
-    inputSchema: { file: 'string', addresses: 'array?' },
+    inputSchema: { file: 'string', addresses: 'array?', cursor: 'string?' },
     run: async (input, context) => {
       if (!context.session) return ok({ file: asString(asRecord(input).file), events: [], note: 'no workspace session, guard relaxed, empty' });
       const edit = requireEditSession(context, 'read');
@@ -1927,13 +2055,28 @@ export function createDefaultToolRegistry(): ToolRegistry {
     permissionLevel: 'commit',
     inputSchema: { file: 'string', edits: 'array' },
     run: async (input, context) => {
-      const edit = requireEditSession(context, 'write');
-      if (!('session' in edit)) return edit;
       const value = asRecord(input);
+      if (value.domain && value.domain !== 'tae') {
+        return fail('DOMAIN_CROSSOVER_REJECTED', `TAE 写入工具不能接收 ${value.domain} 领域的请求。`);
+      }
+      if (value.fieldKind && value.fieldKind !== 'native_value') {
+        return fail('FIELD_KIND_NON_NATIVE', `${value.fieldKind} 不是原生字段类型，不能写入 TAE。`);
+      }
       const file = asString(value.file);
       const edits = asTaeTimeEdits(value.edits);
       if (!file) return fail('INVALID_INPUT', 'mutate_tae_event_times 需要 file。');
       if (!edits.ok) return fail(edits.code, edits.message);
+      for (const e of edits.edits) {
+        if (/^m\d\d_/i.test(e.address) || !/^[a-z0-9_]+#A/i.test(e.address)) {
+          return fail('DOMAIN_CROSSOVER_REJECTED', `TAE 写入工具只能接收 TAE 动作事件地址（如 cXXXX#AXXXX.eN），不能接收地图或其它领域地址：${e.address}`);
+        }
+        const record = e as unknown as Record<string, unknown>;
+        if (record.valueKind === 'display_label' || record.valueKind === 'external_metadata') {
+          return fail('FIELD_KIND_NON_NATIVE', 'display_label / external_metadata 不能作为 TAE 原生时间写入。');
+        }
+      }
+      const edit = requireEditSession(context, 'write');
+      if (!('session' in edit)) return edit;
       const result = await setTaeEventTimes({ edit: edit.session, file, edits: edits.edits });
       if (!result.ok) return fail(result.error.code, result.error.message, result.diagnostics);
       const knowledgeRefresh = await context.onNativeWriteCommitted?.([result.filePath]);
@@ -2052,7 +2195,7 @@ export function createDefaultToolRegistry(): ToolRegistry {
       + 'the expected name for later writes.',
     permission: 'read',
     permissionLevel: 'read',
-    inputSchema: { file: 'string', addresses: 'array?' },
+    inputSchema: { file: 'string', addresses: 'array?', cursor: 'string?' },
     run: async (input, context) => {
       if (!context.session) return ok({ file: asString(asRecord(input).file), parts: [], note: 'no workspace session, guard relaxed, empty' });
       const edit = requireEditSession(context, 'read');
@@ -2087,14 +2230,29 @@ export function createDefaultToolRegistry(): ToolRegistry {
     permissionLevel: 'commit',
     inputSchema: { file: 'string', edits: 'array' },
     run: async (input, context) => {
-      const edit = requireEditSession(context, 'write');
-      if (!('session' in edit)) return edit;
       const value = asRecord(input);
+      if (value.domain && value.domain !== 'map') {
+        return fail('DOMAIN_CROSSOVER_REJECTED', `MSB 变换工具不能接收 ${value.domain} 领域的请求。`);
+      }
+      if (value.fieldKind && value.fieldKind !== 'native_value') {
+        return fail('FIELD_KIND_NON_NATIVE', `${value.fieldKind} 不是原生字段类型，不能写入 MSB。`);
+      }
       const file = asString(value.file);
       const edits = asMsbTransformEdits(value.edits);
       if (!file) return fail('INVALID_INPUT', 'mutate_msb_part_transform 需要 file。');
       if (!edits.ok) return fail(edits.code, edits.message);
       if (edits.edits.length === 0) return fail('INVALID_INPUT', 'mutate_msb_part_transform 需要非空 edits 数组。');
+      for (const item of edits.edits) {
+        if (/^[a-z0-9_]+#A\d/i.test(item.address)) {
+          return fail('DOMAIN_CROSSOVER_REJECTED', `MSB 变换工具不能接收 TAE 动作地址：${item.address}`);
+        }
+        const record = item as unknown as Record<string, unknown>;
+        if (record.valueKind === 'display_label' || record.valueKind === 'external_metadata') {
+          return fail('FIELD_KIND_NON_NATIVE', 'display_label / external_metadata 不能作为 MSB 原生坐标写入。');
+        }
+      }
+      const edit = requireEditSession(context, 'write');
+      if (!('session' in edit)) return edit;
       const resolvedFile = resolveIndexedResourceFile(context, file, 'map');
       if (!resolvedFile.ok) return fail(resolvedFile.code, resolvedFile.message, resolvedFile.details);
       const loaded = await loadMapDocument(edit.session, resolvedFile.path);
@@ -2240,7 +2398,9 @@ export function createDefaultToolRegistry(): ToolRegistry {
       const file = asString(value.file);
       const targets = asStringList(value.targets);
       if (!file || targets.length === 0) return fail('INVALID_INPUT', 'batch_transform_map_objects 需要 file 和非空 targets 数组。');
-      const result = await batchTransformMapParts(edit.session, file, {
+      const resolvedFile = resolveIndexedResourceFile(context, file, 'map');
+      if (!resolvedFile.ok) return fail(resolvedFile.code, resolvedFile.message, resolvedFile.details);
+      const result = await batchTransformMapParts(edit.session, resolvedFile.path, {
         targets,
         ...(typeof value.deltaX === 'number' ? { deltaX: Number(value.deltaX) } : {}),
         ...(typeof value.deltaY === 'number' ? { deltaY: Number(value.deltaY) } : {}),
@@ -2251,7 +2411,7 @@ export function createDefaultToolRegistry(): ToolRegistry {
         ...(typeof value.scaleMultiplier === 'number' ? { scaleMultiplier: Number(value.scaleMultiplier) } : {})
       });
       if (!result.ok) return fail(result.error?.code ?? 'BATCH_TRANSFORM_FAILED', result.error?.message ?? '批量变换失败');
-      const knowledgeRefresh = await context.onNativeWriteCommitted?.([file]);
+      const knowledgeRefresh = await context.onNativeWriteCommitted?.([resolvedFile.path]);
       return ok({ ...result, ...(knowledgeRefresh ? { knowledgeRefresh } : {}) });
     }
   });
@@ -2500,6 +2660,76 @@ export function createDefaultToolRegistry(): ToolRegistry {
       if (!store) return fail('MEMORY_STORE_REQUIRED', '宿主未提供持久记忆存储，拒绝返回临时空列表。');
       const list = store.list();
       return ok({ count: list.length, topics: list.map((e) => ({ id: e.id, topic: e.topic, summary: e.summary, updatedAt: e.updatedAt })) });
+    }
+  });
+
+  registry.register({
+    name: 'query_knowledge',
+    description: '只读查询受版本、游戏 profile 和 workspace scope 约束的知识 claims；知识候选不能替代当前 native 读取或写入授权。',
+    permission: 'read',
+    permissionLevel: 'read',
+    inputSchema: {
+      query: 'string',
+      workspaceId: 'string',
+      gameProfile: 'string?',
+      namespace: 'string?',
+      includeHistorical: 'boolean?',
+      limit: 'number?'
+    },
+    run: (input, context) => {
+      if (!context.knowledgeStore) return fail('KNOWLEDGE_STORE_UNAVAILABLE', '宿主未提供知识 store，不能伪装成空知识结果。');
+      const value = asRecord(input);
+      const query = asString(value.query).trim();
+      const workspaceId = asString(value.workspaceId).trim();
+      if (!query || !workspaceId) return fail('INVALID_INPUT', 'query_knowledge 需要非空 query 和 workspaceId。');
+      const results = queryKnowledgeClaims(context.knowledgeStore, query, {
+        workspaceId,
+        ...(asOptionalString(value.gameProfile) ? { gameProfile: asString(value.gameProfile) } : {}),
+        ...(asOptionalString(value.namespace) ? { namespace: asString(value.namespace) } : {}),
+        includeHistorical: value.includeHistorical === true,
+        limit: asNumber(value.limit, 8)
+      });
+      return ok({
+        query,
+        scope: { workspaceId, ...(asOptionalString(value.gameProfile) ? { gameProfile: asString(value.gameProfile) } : {}) },
+        count: results.length,
+        claims: results,
+        note: '知识内容仅是候选证据；执行修改前仍需当前 native handle、source version 和独立验证。'
+      });
+    }
+  });
+
+  registry.register({
+    name: 'read_knowledge_claims',
+    description: '只读读取已登记 claim/page 的完整来源和发布状态；stale/contradicted/quarantined 默认不作为正面依据。',
+    permission: 'read',
+    permissionLevel: 'read',
+    inputSchema: { workspaceId: 'string', claimIds: 'array?', pageId: 'string?', includeHistorical: 'boolean?', limit: 'number?' },
+    run: (input, context) => {
+      if (!context.knowledgeStore) return fail('KNOWLEDGE_STORE_UNAVAILABLE', '宿主未提供知识 store，不能伪装成空知识结果。');
+      const value = asRecord(input);
+      const workspaceId = asString(value.workspaceId).trim();
+      const pageId = asOptionalString(value.pageId)?.trim();
+      const claimIds = Array.isArray(value.claimIds)
+        ? value.claimIds.filter((entry): entry is string => typeof entry === 'string' && entry.trim().length > 0)
+        : [];
+      if (!workspaceId || (!pageId && claimIds.length === 0)) return fail('INVALID_INPUT', 'read_knowledge_claims 需要 workspaceId 与 claimIds/pageId 之一。');
+      const generation = context.knowledgeStore.getCurrent();
+      const includeHistorical = value.includeHistorical === true;
+      const claims = claimIds
+        .map((claimId) => generation.claims[claimId])
+        .filter((claim): claim is NonNullable<typeof claim> => Boolean(claim))
+        .filter((claim) => includeHistorical || ['draft', 'accepted'].includes(claim.publicationState))
+        .filter((claim) => claim.scope.visibility === 'global' || claim.scope.workspaceId === workspaceId)
+        .slice(0, Math.max(1, Math.min(64, asNumber(value.limit, 16))));
+      const page = pageId ? readKnowledgePage(context.knowledgeStore, pageId, { workspaceId, includeHistorical }) : undefined;
+      return ok({
+        workspaceId,
+        claims,
+        ...(page ? { page } : {}),
+        ...(pageId && !page ? { pageMissingOrOutOfScope: true } : {}),
+        count: claims.length
+      });
     }
   });
 
@@ -2766,6 +2996,25 @@ function asStringList(value: unknown): string[] {
   return value.filter((item): item is string => typeof item === 'string' && item.length > 0);
 }
 
+function asEntityRelations(value: unknown): EntityRelationRequest[] {
+  if (!Array.isArray(value)) return [];
+  return value.flatMap((item): EntityRelationRequest[] => {
+    if (typeof item === 'string' && item.trim().length > 0) return [item.trim()];
+    if (!item || typeof item !== 'object' || Array.isArray(item)) return [];
+    const record = item as Record<string, unknown>;
+    if (typeof record.relation !== 'string' || record.relation.trim().length === 0) return [];
+    return [{
+      relation: record.relation.trim(),
+      ...(typeof record.targetNamespace === 'string' && record.targetNamespace.trim().length > 0
+        ? { targetNamespace: record.targetNamespace.trim() }
+        : {}),
+      ...(typeof record.ruleId === 'string' && record.ruleId.trim().length > 0
+        ? { ruleId: record.ruleId.trim() }
+        : {})
+    }];
+  });
+}
+
 function asParamEdits(value: unknown): { ok: true; edits: ParamFieldEdit[] } | { ok: false; code: string; message: string } {
   const items = Array.isArray(value) ? value : (value && typeof value === 'object' && 'table' in value ? [value] : null);
   if (!items || items.length === 0) {
@@ -2923,8 +3172,26 @@ function ragSearchFallback(
   toolName: string,
   paramNames?: readonly string[]
 ): ToolResult<unknown> {
+  const isParamWarmingUp = families.includes('param_row')
+    && context.workspaceIndex?.getParamSemanticState?.() === 'warming_up';
+
   const corpus = resolveRagCorpus(context);
   if (!corpus) {
+    if (isParamWarmingUp) {
+      return ok({
+        status: 'warming_up',
+        directive: 'DEFER_PARAM_QUERY',
+        state: 'warming_up',
+        source: 'rag-fallback',
+        tool: toolName,
+        query,
+        availability: 'unavailable',
+        totalHits: 0,
+        hits: [],
+        diagnostics: [],
+        message: '【状态机调度】PARAM 语义索引当前正在后台解包预热中（尚未就绪）。请当前循环暂时跳过参数查询流程，优先执行其他可独立推进的任务（如 MSB 地图分析、EMEVD 事件逻辑校验、任务规划等）；请在下一次循环或后续步骤中再重新查询参数。'
+      });
+    }
     return fail(
       'RAG_UNAVAILABLE',
       '原生搜索没有命中，且当前没有可用的 RAG 语料；请先完成工作区分析后再定位。'
@@ -2938,6 +3205,21 @@ function ragSearchFallback(
   });
   if (!result.ok) {
     if (result.code === 'RAG_UNAVAILABLE') {
+      if (isParamWarmingUp) {
+        return ok({
+          status: 'warming_up',
+          directive: 'DEFER_PARAM_QUERY',
+          state: 'warming_up',
+          source: 'rag-fallback',
+          tool: toolName,
+          query,
+          availability: corpus.availability,
+          totalHits: 0,
+          hits: [],
+          diagnostics: corpus.diagnostics,
+          message: '【状态机调度】PARAM 语义索引当前正在后台解包预热中（尚未就绪）。请当前循环暂时跳过参数查询流程，优先执行其他可独立推进的任务（如 MSB 地图分析、EMEVD 事件逻辑校验、任务规划等）；请在下一次循环或后续步骤中再重新查询参数。'
+        });
+      }
       return fail(result.code, result.message, {
         ragAvailability: corpus.availability,
         ragStats: corpus.stats,

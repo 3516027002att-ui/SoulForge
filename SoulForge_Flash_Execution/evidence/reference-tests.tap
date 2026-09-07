@@ -1,0 +1,1060 @@
+TAP version 13
+# Subtest: T01/T02 part: independent address, internal ID and other bytes preserved
+ok 1 - T01/T02 part: independent address, internal ID and other bytes preserved
+  ---
+  duration_ms: 7.372249
+  type: 'test'
+  ...
+# Subtest: part rejects pointer 0
+ok 2 - part rejects pointer 0
+  ---
+  duration_ms: 0.901108
+  type: 'test'
+  ...
+# Subtest: part rejects pointer -1
+ok 3 - part rejects pointer -1
+  ---
+  duration_ms: 0.187425
+  type: 'test'
+  ...
+# Subtest: part rejects pointer 9007199254740993
+ok 4 - part rejects pointer 9007199254740993
+  ---
+  duration_ms: 0.3201
+  type: 'test'
+  ...
+# Subtest: part rejects pointer 321
+ok 5 - part rejects pointer 321
+  ---
+  duration_ms: 0.305679
+  type: 'test'
+  ...
+# Subtest: T01/T02 region: independent address, internal ID and other bytes preserved
+ok 6 - T01/T02 region: independent address, internal ID and other bytes preserved
+  ---
+  duration_ms: 0.335865
+  type: 'test'
+  ...
+# Subtest: region rejects pointer 0
+ok 7 - region rejects pointer 0
+  ---
+  duration_ms: 0.305679
+  type: 'test'
+  ...
+# Subtest: region rejects pointer -1
+ok 8 - region rejects pointer -1
+  ---
+  duration_ms: 0.145996
+  type: 'test'
+  ...
+# Subtest: region rejects pointer 9007199254740993
+ok 9 - region rejects pointer 9007199254740993
+  ---
+  duration_ms: 0.668999
+  type: 'test'
+  ...
+# Subtest: region rejects pointer 321
+ok 10 - region rejects pointer 321
+  ---
+  duration_ms: 0.779179
+  type: 'test'
+  ...
+# Subtest: T03 rejects region scale, including null/identity values
+ok 11 - T03 rejects region scale, including null/identity values
+  ---
+  duration_ms: 0.579668
+  type: 'test'
+  ...
+# Subtest: T03 rejects region scaleX, including null/identity values
+ok 12 - T03 rejects region scaleX, including null/identity values
+  ---
+  duration_ms: 0.180573
+  type: 'test'
+  ...
+# Subtest: T03 rejects region scaleY, including null/identity values
+ok 13 - T03 rejects region scaleY, including null/identity values
+  ---
+  duration_ms: 0.192355
+  type: 'test'
+  ...
+# Subtest: T03 rejects region scaleZ, including null/identity values
+ok 14 - T03 rejects region scaleZ, including null/identity values
+  ---
+  duration_ms: 0.169692
+  type: 'test'
+  ...
+# Subtest: T03 rejects region scaleMultiplier, including null/identity values
+ok 15 - T03 rejects region scaleMultiplier, including null/identity values
+  ---
+  duration_ms: 0.190641
+  type: 'test'
+  ...
+# Subtest: T03 rejects region scaleDelta, including null/identity values
+ok 16 - T03 rejects region scaleDelta, including null/identity values
+  ---
+  duration_ms: 0.246427
+  type: 'test'
+  ...
+# Subtest: T03 part scale remains permitted
+ok 17 - T03 part scale remains permitted
+  ---
+  duration_ms: 0.189278
+  type: 'test'
+  ...
+# Subtest: T05 remaps kept target identity after first deletion
+ok 18 - T05 remaps kept target identity after first deletion
+  ---
+  duration_ms: 2.024086
+  type: 'test'
+  ...
+# Subtest: T06 referenced deletion default reject
+ok 19 - T06 referenced deletion default reject
+  ---
+  duration_ms: 0.319962
+  type: 'test'
+  ...
+# Subtest: T06 explicit nullable clearing
+ok 20 - T06 explicit nullable clearing
+  ---
+  duration_ms: 0.239843
+  type: 'test'
+  ...
+# Subtest: T06 empty edge list is not coverage
+ok 21 - T06 empty edge list is not coverage
+  ---
+  duration_ms: 0.215909
+  type: 'test'
+  ...
+# Subtest: T06 duplicate deletion rejected
+ok 22 - T06 duplicate deletion rejected
+  ---
+  duration_ms: 0.703033
+  type: 'test'
+  ...
+# Subtest: T07 invalid target aborts before any work
+ok 23 - T07 invalid target aborts before any work
+  ---
+  duration_ms: 0.417344
+  type: 'test'
+  ...
+# Subtest: T08 aliases resolving same target rejected
+ok 24 - T08 aliases resolving same target rejected
+  ---
+  duration_ms: 0.332086
+  type: 'test'
+  ...
+# Subtest: T09 query AND semantics
+ok 25 - T09 query AND semantics
+  ---
+  duration_ms: 0.362705
+  type: 'test'
+  ...
+# Subtest: T15 delete first, modify subsequent immutable handle
+ok 26 - T15 delete first, modify subsequent immutable handle
+  ---
+  duration_ms: 1.546195
+  type: 'test'
+  ...
+# Subtest: T16 two updates verify only final value
+ok 27 - T16 two updates verify only final value
+  ---
+  duration_ms: 0.492668
+  type: 'test'
+  ...
+# Subtest: T14 injected no-delete output is rejected
+ok 28 - T14 injected no-delete output is rejected
+  ---
+  duration_ms: 0.35677
+  type: 'test'
+  ...
+# Subtest: T17 injected old name is rejected
+ok 29 - T17 injected old name is rejected
+  ---
+  duration_ms: 0.586154
+  type: 'test'
+  ...
+# Subtest: T17 explicit null and empty are distinct
+ok 30 - T17 explicit null and empty are distinct
+  ---
+  duration_ms: 0.35425
+  type: 'test'
+  ...
+# Subtest: T15 update after delete is rejected
+ok 31 - T15 update after delete is rejected
+  ---
+  duration_ms: 0.386131
+  type: 'test'
+  ...
+# Subtest: T13 add occupied ID is rejected
+ok 32 - T13 add occupied ID is rejected
+  ---
+  duration_ms: 0.344526
+  type: 'test'
+  ...
+# Subtest: T18 row width mismatch is rejected
+ok 33 - T18 row width mismatch is rejected
+  ---
+  duration_ms: 0.301362
+  type: 'test'
+  ...
+# Subtest: T29 interval storage grows by changed bytes, not m*B
+ok 34 - T29 interval storage grows by changed bytes, not m*B
+  ---
+  duration_ms: 13.951358
+  type: 'test'
+  ...
+# Subtest: T29 overlapping writes use final operation
+ok 35 - T29 overlapping writes use final operation
+  ---
+  duration_ms: 0.323118
+  type: 'test'
+  ...
+# Subtest: T29 append can be updated without whole-file snapshot
+ok 36 - T29 append can be updated without whole-file snapshot
+  ---
+  duration_ms: 0.46388
+  type: 'test'
+  ...
+# Subtest: T29 unmodified range corruption detected
+ok 37 - T29 unmodified range corruption detected
+  ---
+  duration_ms: 0.5339
+  type: 'test'
+  ...
+# Subtest: T29 out of range rejected before output
+ok 38 - T29 out of range rejected before output
+  ---
+  duration_ms: 0.247334
+  type: 'test'
+  ...
+# Subtest: TopK differential n=0 k=0
+ok 39 - TopK differential n=0 k=0
+  ---
+  duration_ms: 0.429971
+  type: 'test'
+  ...
+# Subtest: TopK differential n=0 k=1
+ok 40 - TopK differential n=0 k=1
+  ---
+  duration_ms: 0.198918
+  type: 'test'
+  ...
+# Subtest: TopK differential n=0 k=5
+ok 41 - TopK differential n=0 k=5
+  ---
+  duration_ms: 0.137529
+  type: 'test'
+  ...
+# Subtest: TopK differential n=0 k=32
+ok 42 - TopK differential n=0 k=32
+  ---
+  duration_ms: 0.172231
+  type: 'test'
+  ...
+# Subtest: TopK differential n=1 k=0
+ok 43 - TopK differential n=1 k=0
+  ---
+  duration_ms: 0.290353
+  type: 'test'
+  ...
+# Subtest: TopK differential n=1 k=1
+ok 44 - TopK differential n=1 k=1
+  ---
+  duration_ms: 0.301911
+  type: 'test'
+  ...
+# Subtest: TopK differential n=1 k=5
+ok 45 - TopK differential n=1 k=5
+  ---
+  duration_ms: 0.168778
+  type: 'test'
+  ...
+# Subtest: TopK differential n=1 k=32
+ok 46 - TopK differential n=1 k=32
+  ---
+  duration_ms: 0.159016
+  type: 'test'
+  ...
+# Subtest: TopK differential n=2 k=0
+ok 47 - TopK differential n=2 k=0
+  ---
+  duration_ms: 0.208394
+  type: 'test'
+  ...
+# Subtest: TopK differential n=2 k=1
+ok 48 - TopK differential n=2 k=1
+  ---
+  duration_ms: 0.212237
+  type: 'test'
+  ...
+# Subtest: TopK differential n=2 k=5
+ok 49 - TopK differential n=2 k=5
+  ---
+  duration_ms: 0.328982
+  type: 'test'
+  ...
+# Subtest: TopK differential n=2 k=32
+ok 50 - TopK differential n=2 k=32
+  ---
+  duration_ms: 0.170553
+  type: 'test'
+  ...
+# Subtest: TopK differential n=7 k=0
+ok 51 - TopK differential n=7 k=0
+  ---
+  duration_ms: 0.231086
+  type: 'test'
+  ...
+# Subtest: TopK differential n=7 k=1
+ok 52 - TopK differential n=7 k=1
+  ---
+  duration_ms: 0.165671
+  type: 'test'
+  ...
+# Subtest: TopK differential n=7 k=5
+ok 53 - TopK differential n=7 k=5
+  ---
+  duration_ms: 3.405468
+  type: 'test'
+  ...
+# Subtest: TopK differential n=7 k=32
+ok 54 - TopK differential n=7 k=32
+  ---
+  duration_ms: 0.095419
+  type: 'test'
+  ...
+# Subtest: TopK differential n=64 k=0
+ok 55 - TopK differential n=64 k=0
+  ---
+  duration_ms: 0.161309
+  type: 'test'
+  ...
+# Subtest: TopK differential n=64 k=1
+ok 56 - TopK differential n=64 k=1
+  ---
+  duration_ms: 0.127222
+  type: 'test'
+  ...
+# Subtest: TopK differential n=64 k=5
+ok 57 - TopK differential n=64 k=5
+  ---
+  duration_ms: 0.308552
+  type: 'test'
+  ...
+# Subtest: TopK differential n=64 k=32
+ok 58 - TopK differential n=64 k=32
+  ---
+  duration_ms: 0.192903
+  type: 'test'
+  ...
+# Subtest: TopK differential n=1024 k=0
+ok 59 - TopK differential n=1024 k=0
+  ---
+  duration_ms: 1.075417
+  type: 'test'
+  ...
+# Subtest: TopK differential n=1024 k=1
+ok 60 - TopK differential n=1024 k=1
+  ---
+  duration_ms: 1.276538
+  type: 'test'
+  ...
+# Subtest: TopK differential n=1024 k=5
+ok 61 - TopK differential n=1024 k=5
+  ---
+  duration_ms: 2.94782
+  type: 'test'
+  ...
+# Subtest: TopK differential n=1024 k=32
+ok 62 - TopK differential n=1024 k=32
+  ---
+  duration_ms: 2.821001
+  type: 'test'
+  ...
+# Subtest: vector dimension mismatch rejected
+ok 63 - vector dimension mismatch rejected
+  ---
+  duration_ms: 1.060161
+  type: 'test'
+  ...
+# Subtest: vector zero norm rejected
+ok 64 - vector zero norm rejected
+  ---
+  duration_ms: 0.464357
+  type: 'test'
+  ...
+# Subtest: cosine known basis
+ok 65 - cosine known basis
+  ---
+  duration_ms: 0.224742
+  type: 'test'
+  ...
+# Subtest: T43 vector rank-one outsider does not enter RRF
+ok 66 - T43 vector rank-one outsider does not enter RRF
+  ---
+  duration_ms: 0.934789
+  type: 'test'
+  ...
+# Subtest: T43 explicit empty filter rejected, not broadened
+ok 67 - T43 explicit empty filter rejected, not broadened
+  ---
+  duration_ms: 0.257275
+  type: 'test'
+  ...
+# Subtest: T43 stale chunk excluded
+ok 68 - T43 stale chunk excluded
+  ---
+  duration_ms: 0.279007
+  type: 'test'
+  ...
+# Subtest: T44 full primary never gets limit+1
+ok 69 - T44 full primary never gets limit+1
+  ---
+  duration_ms: 0.458002
+  type: 'test'
+  ...
+# Subtest: T43 expansion respects hard scope
+ok 70 - T43 expansion respects hard scope
+  ---
+  duration_ms: 0.285641
+  type: 'test'
+  ...
+# Subtest: T46 same object ID in different resources remains separate
+ok 71 - T46 same object ID in different resources remains separate
+  ---
+  duration_ms: 0.688693
+  type: 'test'
+  ...
+# Subtest: T46 workspace identity preserved
+ok 72 - T46 workspace identity preserved
+  ---
+  duration_ms: 0.256883
+  type: 'test'
+  ...
+# Subtest: T46 delimiter collision avoided
+ok 73 - T46 delimiter collision avoided
+  ---
+  duration_ms: 0.263217
+  type: 'test'
+  ...
+# Subtest: T47 UTF8 prefix byte budget 0
+ok 74 - T47 UTF8 prefix byte budget 0
+  ---
+  duration_ms: 0.542951
+  type: 'test'
+  ...
+# Subtest: T47 UTF8 prefix byte budget 1
+ok 75 - T47 UTF8 prefix byte budget 1
+  ---
+  duration_ms: 0.159724
+  type: 'test'
+  ...
+# Subtest: T47 UTF8 prefix byte budget 2
+ok 76 - T47 UTF8 prefix byte budget 2
+  ---
+  duration_ms: 0.142035
+  type: 'test'
+  ...
+# Subtest: T47 UTF8 prefix byte budget 3
+ok 77 - T47 UTF8 prefix byte budget 3
+  ---
+  duration_ms: 0.338155
+  type: 'test'
+  ...
+# Subtest: T47 UTF8 prefix byte budget 4
+ok 78 - T47 UTF8 prefix byte budget 4
+  ---
+  duration_ms: 0.139786
+  type: 'test'
+  ...
+# Subtest: T47 UTF8 prefix byte budget 5
+ok 79 - T47 UTF8 prefix byte budget 5
+  ---
+  duration_ms: 0.427276
+  type: 'test'
+  ...
+# Subtest: T47 UTF8 prefix byte budget 6
+ok 80 - T47 UTF8 prefix byte budget 6
+  ---
+  duration_ms: 0.244871
+  type: 'test'
+  ...
+# Subtest: T47 UTF8 prefix byte budget 7
+ok 81 - T47 UTF8 prefix byte budget 7
+  ---
+  duration_ms: 0.223527
+  type: 'test'
+  ...
+# Subtest: T47 UTF8 prefix byte budget 8
+ok 82 - T47 UTF8 prefix byte budget 8
+  ---
+  duration_ms: 0.169472
+  type: 'test'
+  ...
+# Subtest: T47 UTF8 prefix byte budget 12
+ok 83 - T47 UTF8 prefix byte budget 12
+  ---
+  duration_ms: 0.260316
+  type: 'test'
+  ...
+# Subtest: T47 UTF8 prefix byte budget 20
+ok 84 - T47 UTF8 prefix byte budget 20
+  ---
+  duration_ms: 0.170638
+  type: 'test'
+  ...
+# Subtest: T45 seventeenth relevant evidence selected
+ok 85 - T45 seventeenth relevant evidence selected
+  ---
+  duration_ms: 8.184867
+  type: 'test'
+  ...
+# Subtest: T47 serialized JSON, not just body, is budgeted
+ok 86 - T47 serialized JSON, not just body, is budgeted
+  ---
+  duration_ms: 0.452682
+  type: 'test'
+  ...
+# Subtest: required evidence cannot silently vanish
+ok 87 - required evidence cannot silently vanish
+  ---
+  duration_ms: 0.245091
+  type: 'test'
+  ...
+# Subtest: T54 stale native tag cannot beat current snapshot
+ok 88 - T54 stale native tag cannot beat current snapshot
+  ---
+  duration_ms: 0.211231
+  type: 'test'
+  ...
+# Subtest: effects use outer resource locks
+ok 89 - effects use outer resource locks
+  ---
+  duration_ms: 0.16656
+  type: 'test'
+  ...
+# Subtest: independent outer resources can run together
+ok 90 - independent outer resources can run together
+  ---
+  duration_ms: 0.088755
+  type: 'test'
+  ...
+# Subtest: T49 thrown task does not lose sibling result
+ok 91 - T49 thrown task does not lose sibling result
+  ---
+  duration_ms: 0.887957
+  type: 'test'
+  ...
+# Subtest: T49 explicit ok:false remains false
+ok 92 - T49 explicit ok:false remains false
+  ---
+  duration_ms: 0.250994
+  type: 'test'
+  ...
+# Subtest: T50 result order preserved but UI gets fast completion first
+ok 93 - T50 result order preserved but UI gets fast completion first
+  ---
+  duration_ms: 53.211484
+  type: 'test'
+  ...
+# Subtest: conflicting tasks serialize in emission order
+ok 94 - conflicting tasks serialize in emission order
+  ---
+  duration_ms: 2.165072
+  type: 'test'
+  ...
+# Subtest: cancelled uncooperative running task keeps slot until settlement
+ok 95 - cancelled uncooperative running task keeps slot until settlement
+  ---
+  duration_ms: 1.910168
+  type: 'test'
+  ...
+# Subtest: dependency cycles rejected before side effects
+ok 96 - dependency cycles rejected before side effects
+  ---
+  duration_ms: 0.580267
+  type: 'test'
+  ...
+# Subtest: failed explicit dependency blocks its consumer
+ok 97 - failed explicit dependency blocks its consumer
+  ---
+  duration_ms: 0.405927
+  type: 'test'
+  ...
+# Subtest: notification exception cannot erase tool outcome
+ok 98 - notification exception cannot erase tool outcome
+  ---
+  duration_ms: 0.249183
+  type: 'test'
+  ...
+# Subtest: T41 recovery current=a
+ok 99 - T41 recovery current=a
+  ---
+  duration_ms: 0.110876
+  type: 'test'
+  ...
+# Subtest: T41 recovery current=b
+ok 100 - T41 recovery current=b
+  ---
+  duration_ms: 0.044915
+  type: 'test'
+  ...
+# Subtest: T41 recovery current=c
+ok 101 - T41 recovery current=c
+  ---
+  duration_ms: 0.036461
+  type: 'test'
+  ...
+# Subtest: T52 mutation without verified transaction cannot be success
+ok 102 - T52 mutation without verified transaction cannot be success
+  ---
+  duration_ms: 0.224443
+  type: 'test'
+  ...
+# Subtest: already-satisfied goal needs fresh proof but not dummy mutation
+ok 103 - already-satisfied goal needs fresh proof but not dummy mutation
+  ---
+  duration_ms: 0.116763
+  type: 'test'
+  ...
+# Subtest: T39 recovery_required dominates partial success
+ok 104 - T39 recovery_required dominates partial success
+  ---
+  duration_ms: 0.103039
+  type: 'test'
+  ...
+# Subtest: T54 schema invalidation propagates only dependency closure
+ok 105 - T54 schema invalidation propagates only dependency closure
+  ---
+  duration_ms: 0.696703
+  type: 'test'
+  ...
+# Subtest: claim dependency cycle rejected
+ok 106 - claim dependency cycle rejected
+  ---
+  duration_ms: 0.204398
+  type: 'test'
+  ...
+# Subtest: T56 stale generation cannot overwrite wiki
+ok 107 - T56 stale generation cannot overwrite wiki
+  ---
+  duration_ms: 0.236353
+  type: 'test'
+  ...
+# Subtest: T56 stale page revision rejected even in current generation
+ok 108 - T56 stale page revision rejected even in current generation
+  ---
+  duration_ms: 0.175922
+  type: 'test'
+  ...
+# Subtest: T54 same bytes different reader schema differ
+ok 109 - T54 same bytes different reader schema differ
+  ---
+  duration_ms: 0.115005
+  type: 'test'
+  ...
+# Subtest: cache evicts unpinned by bytes, not by count
+ok 110 - cache evicts unpinned by bytes, not by count
+  ---
+  duration_ms: 0.425468
+  type: 'test'
+  ...
+# Subtest: pinned lease is not evicted
+ok 111 - pinned lease is not evicted
+  ---
+  duration_ms: 0.186114
+  type: 'test'
+  ...
+# Subtest: oversize cache entry rejected
+ok 112 - oversize cache entry rejected
+  ---
+  duration_ms: 0.094954
+  type: 'test'
+  ...
+# Subtest: single-flight shares actual build
+ok 113 - single-flight shares actual build
+  ---
+  duration_ms: 0.499734
+  type: 'test'
+  ...
+# Subtest: one subscriber cancellation preserves other build
+ok 114 - one subscriber cancellation preserves other build
+  ---
+  duration_ms: 7.22329
+  type: 'test'
+  ...
+# Subtest: cancelled shared build cannot be replaced while still running
+ok 115 - cancelled shared build cannot be replaced while still running
+  ---
+  duration_ms: 1.957833
+  type: 'test'
+  ...
+# Subtest: scene basis round trip for nonuniform transform
+ok 116 - scene basis round trip for nonuniform transform
+  ---
+  duration_ms: 1.081709
+  type: 'test'
+  ...
+# Subtest: scene transformed point commutes with basis
+ok 117 - scene transformed point commutes with basis
+  ---
+  duration_ms: 0.300629
+  type: 'test'
+  ...
+# Subtest: scene reflection changes winding once
+ok 118 - scene reflection changes winding once
+  ---
+  duration_ms: 0.379168
+  type: 'test'
+  ...
+# Subtest: scene inverse transpose handles nonuniform normal
+ok 119 - scene inverse transpose handles nonuniform normal
+  ---
+  duration_ms: 0.297824
+  type: 'test'
+  ...
+# Subtest: scene shear detected instead of silently discarded
+ok 120 - scene shear detected instead of silently discarded
+  ---
+  duration_ms: 0.272798
+  type: 'test'
+  ...
+# Subtest: scene singular matrix rejected
+ok 121 - scene singular matrix rejected
+  ---
+  duration_ms: 0.264704
+  type: 'test'
+  ...
+# Subtest: T35 fragmented UTF8 NDJSON chunks=1
+ok 122 - T35 fragmented UTF8 NDJSON chunks=1
+  ---
+  duration_ms: 0.701907
+  type: 'test'
+  ...
+# Subtest: T35 fragmented UTF8 NDJSON chunks=2
+ok 123 - T35 fragmented UTF8 NDJSON chunks=2
+  ---
+  duration_ms: 0.260163
+  type: 'test'
+  ...
+# Subtest: T35 fragmented UTF8 NDJSON chunks=3
+ok 124 - T35 fragmented UTF8 NDJSON chunks=3
+  ---
+  duration_ms: 0.103075
+  type: 'test'
+  ...
+# Subtest: T35 fragmented UTF8 NDJSON chunks=4
+ok 125 - T35 fragmented UTF8 NDJSON chunks=4
+  ---
+  duration_ms: 0.071119
+  type: 'test'
+  ...
+# Subtest: T35 fragmented UTF8 NDJSON chunks=7
+ok 126 - T35 fragmented UTF8 NDJSON chunks=7
+  ---
+  duration_ms: 0.062613
+  type: 'test'
+  ...
+# Subtest: T35 fragmented UTF8 NDJSON chunks=100
+ok 127 - T35 fragmented UTF8 NDJSON chunks=100
+  ---
+  duration_ms: 0.100128
+  type: 'test'
+  ...
+# Subtest: T35 no newline stream fails at byte budget
+ok 128 - T35 no newline stream fails at byte budget
+  ---
+  duration_ms: 0.255655
+  type: 'test'
+  ...
+# Subtest: T35 incomplete EOF rejected
+ok 129 - T35 incomplete EOF rejected
+  ---
+  duration_ms: 0.262962
+  type: 'test'
+  ...
+# Subtest: T35 invalid UTF8 rejected
+ok 130 - T35 invalid UTF8 rejected
+  ---
+  duration_ms: 0.238208
+  type: 'test'
+  ...
+# Subtest: stable JSON rejects nonfinite and cycles
+ok 131 - stable JSON rejects nonfinite and cycles
+  ---
+  duration_ms: 0.21157
+  type: 'test'
+  ...
+# Subtest: AR cache failed disposal keeps physical reservation charged
+ok 132 - AR cache failed disposal keeps physical reservation charged
+  ---
+  duration_ms: 0.186937
+  type: 'test'
+  ...
+# Subtest: AR cache can evict another resource without resurrecting quarantined one
+ok 133 - AR cache can evict another resource without resurrecting quarantined one
+  ---
+  duration_ms: 0.50043
+  type: 'test'
+  ...
+# Subtest: AR PARAM untouched rows share immutable data, updates copy
+ok 134 - AR PARAM untouched rows share immutable data, updates copy
+  ---
+  duration_ms: 0.148332
+  type: 'test'
+  ...
+# Subtest: AR ordinary add cannot disguise replacement of a deleted original ID
+ok 135 - AR ordinary add cannot disguise replacement of a deleted original ID
+  ---
+  duration_ms: 0.15915
+  type: 'test'
+  ...
+# Subtest: AR required evidence survives authority promotion
+ok 136 - AR required evidence survives authority promotion
+  ---
+  duration_ms: 0.324846
+  type: 'test'
+  ...
+# Subtest: AR conflicting current facts are not chosen by timestamp
+ok 137 - AR conflicting current facts are not chosen by timestamp
+  ---
+  duration_ms: 0.180023
+  type: 'test'
+  ...
+# Subtest: AR oversized tool batch rejected before side effects
+ok 138 - AR oversized tool batch rejected before side effects
+  ---
+  duration_ms: 0.245242
+  type: 'test'
+  ...
+# Subtest: AR pointer cannot cross into next entry while still inside same PARAM
+ok 139 - AR pointer cannot cross into next entry while still inside same PARAM
+  ---
+  duration_ms: 0.251984
+  type: 'test'
+  ...
+# Subtest: AR entity pointer cannot alias a header field
+ok 140 - AR entity pointer cannot alias a header field
+  ---
+  duration_ms: 0.193686
+  type: 'test'
+  ...
+# Subtest: AR current versions distinguish two children of the same outer
+ok 141 - AR current versions distinguish two children of the same outer
+  ---
+  duration_ms: 0.203902
+  type: 'test'
+  ...
+# Subtest: accepts complete selected execution
+ok 142 - accepts complete selected execution
+  ---
+  duration_ms: 2.768047
+  type: 'test'
+  ...
+# Subtest: rejects outcome skipped
+ok 143 - rejects outcome skipped
+  ---
+  duration_ms: 0.488303
+  type: 'test'
+  ...
+# Subtest: rejects outcome partial
+ok 144 - rejects outcome partial
+  ---
+  duration_ms: 0.243198
+  type: 'test'
+  ...
+# Subtest: rejects outcome not-attempted
+ok 145 - rejects outcome not-attempted
+  ---
+  duration_ms: 0.628058
+  type: 'test'
+  ...
+# Subtest: rejects outcome failed
+ok 146 - rejects outcome failed
+  ---
+  duration_ms: 0.338897
+  type: 'test'
+  ...
+# Subtest: rejects outcome done
+ok 147 - rejects outcome done
+  ---
+  duration_ms: 0.237133
+  type: 'test'
+  ...
+# Subtest: rejects outcome undefined
+ok 148 - rejects outcome undefined
+  ---
+  duration_ms: 0.392167
+  type: 'test'
+  ...
+# Subtest: empty suites
+ok 149 - empty suites
+  ---
+  duration_ms: 0.334828
+  type: 'test'
+  ...
+# Subtest: list instead of run
+ok 150 - list instead of run
+  ---
+  duration_ms: 0.743445
+  type: 'test'
+  ...
+# Subtest: require flag omitted
+ok 151 - require flag omitted
+  ---
+  duration_ms: 1.090721
+  type: 'test'
+  ...
+# Subtest: forged ok
+ok 152 - forged ok
+  ---
+  duration_ms: 3.638459
+  type: 'test'
+  ...
+# Subtest: nonzero process
+ok 153 - nonzero process
+  ---
+  duration_ms: 0.143318
+  type: 'test'
+  ...
+# Subtest: missing exit code
+ok 154 - missing exit code
+  ---
+  duration_ms: 0.161143
+  type: 'test'
+  ...
+# Subtest: timed out
+ok 155 - timed out
+  ---
+  duration_ms: 0.1793
+  type: 'test'
+  ...
+# Subtest: spawn error
+ok 156 - spawn error
+  ---
+  duration_ms: 0.161536
+  type: 'test'
+  ...
+# Subtest: skipped subtest
+ok 157 - skipped subtest
+  ---
+  duration_ms: 0.112814
+  type: 'test'
+  ...
+# Subtest: missing subtest accounting
+ok 158 - missing subtest accounting
+  ---
+  duration_ms: 0.155151
+  type: 'test'
+  ...
+# Subtest: duplicate suite
+ok 159 - duplicate suite
+  ---
+  duration_ms: 0.108278
+  type: 'test'
+  ...
+# Subtest: wrong suite
+ok 160 - wrong suite
+  ---
+  duration_ms: 0.095302
+  type: 'test'
+  ...
+# Subtest: forged passed set
+ok 161 - forged passed set
+  ---
+  duration_ms: 0.182393
+  type: 'test'
+  ...
+# Subtest: duplicate passed set
+ok 162 - duplicate passed set
+  ---
+  duration_ms: 0.155669
+  type: 'test'
+  ...
+# Subtest: bail suppression
+ok 163 - bail suppression
+  ---
+  duration_ms: 0.153208
+  type: 'test'
+  ...
+# Subtest: partial summary
+ok 164 - partial summary
+  ---
+  duration_ms: 0.255509
+  type: 'test'
+  ...
+# Subtest: forged counts
+ok 165 - forged counts
+  ---
+  duration_ms: 0.197312
+  type: 'test'
+  ...
+# Subtest: unknown missing counts
+ok 166 - unknown missing counts
+  ---
+  duration_ms: 0.481401
+  type: 'test'
+  ...
+# Subtest: skipped count hidden
+ok 167 - skipped count hidden
+  ---
+  duration_ms: 0.128068
+  type: 'test'
+  ...
+# Subtest: unknown failed layer count
+ok 168 - unknown failed layer count
+  ---
+  duration_ms: 0.101399
+  type: 'test'
+  ...
+# Subtest: null suite
+ok 169 - null suite
+  ---
+  duration_ms: 0.092142
+  type: 'test'
+  ...
+# Subtest: missing failure classification
+ok 170 - missing failure classification
+  ---
+  duration_ms: 0.094049
+  type: 'test'
+  ...
+# Subtest: invalid required []
+ok 171 - invalid required []
+  ---
+  duration_ms: 0.200537
+  type: 'test'
+  ...
+# Subtest: invalid required undefined
+ok 172 - invalid required undefined
+  ---
+  duration_ms: 0.073297
+  type: 'test'
+  ...
+# Subtest: invalid required ["a","a"]
+ok 173 - invalid required ["a","a"]
+  ---
+  duration_ms: 0.093835
+  type: 'test'
+  ...
+# Subtest: invalid required [""]
+ok 174 - invalid required [""]
+  ---
+  duration_ms: 0.054395
+  type: 'test'
+  ...
+# Subtest: null summary
+ok 175 - null summary
+  ---
+  duration_ms: 0.087587
+  type: 'test'
+  ...
+1..175
+# tests 175
+# suites 0
+# pass 175
+# fail 0
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 424.136764

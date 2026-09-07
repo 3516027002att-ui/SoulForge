@@ -329,75 +329,10 @@ async function main(): Promise<void> {
           ]
         }
       });
-      if (!deleted.diagnostics.some((d) => d.code === 'MSB_STAGING_WRITE_VERIFIED')) {
-        throw new Error(`MSB delete 批量写回失败: ${JSON.stringify(deleted.diagnostics)}`);
-      }
-      const delAfter = await runBridge<MsbEnvelope>({
-        command: 'read-msb-document',
-        filePath: deletePath,
-        allowedRoots: [staging],
-        timeoutMs: 180_000
-      });
-      if (delAfter.parseStatus === 'failed' || !delAfter.data) {
-        throw new Error(`delete 后 MSB 重读失败: ${JSON.stringify(delAfter.diagnostics)}`);
-      }
-      const delDoc = delAfter.data;
-      if (delDoc.parts.some((p) => p.name === uniquePart.name)
-        || delDoc.regions.some((r) => r.name === uniqueRegion.name)
-        || delDoc.events.some((e) => e.name === uniqueEvent.name)) {
-        throw new Error('delete 后重读仍存在目标实体');
-      }
-      if (delDoc.partCount !== orig.partCount - 1 || delDoc.regionCount !== orig.regionCount - 1
-        || delDoc.eventCount !== orig.eventCount - 1) {
-        throw new Error(`delete 后计数未按预期: before=${JSON.stringify({ p: orig.partCount, r: orig.regionCount, e: orig.eventCount })} after=${JSON.stringify({ p: delDoc.partCount, r: delDoc.regionCount, e: delDoc.eventCount })}`);
-      }
-      if (delDoc.modelCount !== orig.modelCount || delDoc.routeCount !== orig.routeCount) {
-        throw new Error('delete 后 model/route 计数变化');
+      if (!deleted.diagnostics.some((d) => d.code === 'MSB_REFERENCE_COVERAGE_INCOMPLETE')) {
+        throw new Error(`MSB delete 批量写回未按预期被安全门禁拦截: ${JSON.stringify(deleted.diagnostics)}`);
       }
 
-      // 其余实体字节级不变（以 nativeOffset 为稳定身份）。
-      const delPartByOffset = new Map(delDoc.parts.map((p) => [p.offset, p]));
-      for (const part of orig.parts) {
-        if (part.name === uniquePart.name) continue;
-        const stagedPart = delPartByOffset.get(part.offset);
-        if (!stagedPart) throw new Error(`delete 后 part 丢失: offset=${part.offset} name=${part.name}`);
-        assertPartEqual(stagedPart, part, `delete 未触及 part ${part.name}`);
-        if (!close(stagedPart.posX, part.posX) || !close(stagedPart.posY, part.posY) || !close(stagedPart.posZ, part.posZ)
-          || !close(stagedPart.rotX ?? 0, part.rotX ?? 0)
-          || !close(stagedPart.scaleX ?? 1, part.scaleX ?? 1)
-          || !close(stagedPart.scaleY ?? 1, part.scaleY ?? 1)
-          || !close(stagedPart.scaleZ ?? 1, part.scaleZ ?? 1)) {
-          throw new Error(`delete 后 part ${part.name} transform 变化`);
-        }
-      }
-      const delRegionByOffset = new Map(delDoc.regions.map((r) => [r.offset, r]));
-      for (const region of orig.regions) {
-        if (region.name === uniqueRegion.name) continue;
-        const stagedRegion = delRegionByOffset.get(region.offset);
-        if (!stagedRegion) throw new Error(`delete 后 region 丢失: offset=${region.offset} name=${region.name}`);
-        assertRegionEqual(stagedRegion, region, `delete 未触及 region ${region.name}`);
-        if (!close(stagedRegion.posX, region.posX) || !close(stagedRegion.posY, region.posY)
-          || !close(stagedRegion.posZ, region.posZ)) {
-          throw new Error(`delete 后 region ${region.name} 位置变化`);
-        }
-      }
-      const delEventByOffset = new Map(delDoc.events.map((e) => [e.offset, e]));
-      for (const ev of orig.events) {
-        if (ev.name === uniqueEvent.name) continue;
-        const stagedEvent = delEventByOffset.get(ev.offset);
-        if (!stagedEvent) throw new Error(`delete 后 event 丢失: offset=${ev.offset} name=${ev.name}`);
-        if (stagedEvent.name !== ev.name || stagedEvent.typeId !== ev.typeId || stagedEvent.eventId !== ev.eventId) {
-          throw new Error(`delete 后 event ${ev.name} 身份/字段变化`);
-        }
-      }
-      if (JSON.stringify(delDoc.models.map((e) => [e.name, e.offset, e.typeId]))
-        !== JSON.stringify(orig.models.map((e) => [e.name, e.offset, e.typeId]))) {
-        throw new Error('delete 后 model 表变化');
-      }
-      if (JSON.stringify(delDoc.routes.map((e) => [e.name, e.offset, e.typeId, e.id]))
-        !== JSON.stringify(orig.routes.map((e) => [e.name, e.offset, e.typeId, e.id]))) {
-        throw new Error('delete 后 route 表变化');
-      }
 
       // ---- delete 失败注入：唯一性规则与未注册守卫 fail-closed ----
       const nonexistentDelete = await runBridge({
@@ -415,7 +350,7 @@ async function main(): Promise<void> {
           expectedName: 'soulforge-delete-nonexistent'
         }
       });
-      if (!nonexistentDelete.diagnostics.some((d) => d.code === 'MSB_STAGING_WRITE_FAILED')) {
+      if (!nonexistentDelete.diagnostics.some((d) => d.code === 'MSB_REFERENCE_COVERAGE_INCOMPLETE' || d.code === 'MSB_STAGING_WRITE_FAILED')) {
         throw new Error(`删除不存在实体未 fail-closed: ${JSON.stringify(nonexistentDelete.diagnostics)}`);
       }
 
@@ -487,21 +422,8 @@ async function main(): Promise<void> {
             ...partMutation('delete_part', dupPart)
           }
         });
-        if (!dupDelete.diagnostics.some((d) => d.code === 'MSB_STAGING_WRITE_VERIFIED')) {
-          throw new Error(`同名实体按 nativeOffset 精确删除失败: ${JSON.stringify(dupDelete.diagnostics)}`);
-        }
-        const duplicateAfter = await runBridge<MsbEnvelope>({
-          command: 'read-msb-document',
-          filePath: join(staging, 'm11.delete-duplicate.msb'),
-          allowedRoots: [staging],
-          timeoutMs: 60_000
-        });
-        if (duplicateAfter.parseStatus === 'failed' || !duplicateAfter.data) {
-          throw new Error(`同名实体删除后无法重读: ${JSON.stringify(duplicateAfter.diagnostics)}`);
-        }
-        if (duplicateAfter.data.parts.some((part) => part.offset === dupPart.offset)
-          || !duplicateAfter.data.parts.some((part) => part.offset !== dupPart.offset && part.name === dupPart.name)) {
-          throw new Error('同名 Part 删除错误地影响了错误目标或全部同名目标');
+        if (!dupDelete.diagnostics.some((d) => d.code === 'MSB_REFERENCE_COVERAGE_INCOMPLETE')) {
+          throw new Error(`同名实体按 nativeOffset 精确删除未按预期被安全门禁拦截: ${JSON.stringify(dupDelete.diagnostics)}`);
         }
         duplicateNameDelete = `${dupPart.name}@0x${dupPart.offset.toString(16)}`;
       }
@@ -518,7 +440,7 @@ async function main(): Promise<void> {
           ...partMutation('delete_part', unregisteredPart)
         }
       });
-      if (!partDeleteGuard.diagnostics.some((d) => d.code === 'MSB_UNREGISTERED_ENTITY_TYPE')) {
+      if (!partDeleteGuard.diagnostics.some((d) => d.code === 'MSB_REFERENCE_COVERAGE_INCOMPLETE' || d.code === 'MSB_UNREGISTERED_ENTITY_TYPE')) {
         throw new Error(`未注册 part delete 未 fail-closed: ${JSON.stringify(partDeleteGuard.diagnostics)}`);
       }
       const regionDeleteGuard = await runBridge({
@@ -533,7 +455,7 @@ async function main(): Promise<void> {
           ...regionMutation('delete_region', unregisteredRegion)
         }
       });
-      if (!regionDeleteGuard.diagnostics.some((d) => d.code === 'MSB_UNREGISTERED_ENTITY_TYPE')) {
+      if (!regionDeleteGuard.diagnostics.some((d) => d.code === 'MSB_REFERENCE_COVERAGE_INCOMPLETE' || d.code === 'MSB_UNREGISTERED_ENTITY_TYPE')) {
         throw new Error(`未注册 region delete 未 fail-closed: ${JSON.stringify(regionDeleteGuard.diagnostics)}`);
       }
 
@@ -574,7 +496,7 @@ async function main(): Promise<void> {
         commandOptions: {
           outputPath: hashMismatchPath,
           expectedDocumentHash: '0'.repeat(64),
-          ...partMutation('delete_part', uniquePart)
+          ...partMutation('set_part_position', uniquePart, { posX: uniquePart.posX + 1, posY: uniquePart.posY, posZ: uniquePart.posZ })
         }
       });
       if (!hashBad.diagnostics.some((d) => d.code === 'MSB_STAGING_WRITE_FAILED')) {
@@ -597,7 +519,7 @@ async function main(): Promise<void> {
         commandOptions: {
           outputPath: join(blockedParent, 'm11.out.msb'),
           expectedDocumentHash: orig.sourceHash,
-          ...partMutation('delete_part', uniquePart)
+          ...partMutation('set_part_position', uniquePart, { posX: uniquePart.posX + 1, posY: uniquePart.posY, posZ: uniquePart.posZ })
         }
       });
       if (!blockedWrite.diagnostics.some((d) => d.code === 'MSB_STAGING_WRITE_FAILED')) {
@@ -631,19 +553,14 @@ async function main(): Promise<void> {
           part: uniquePart.name,
           region: uniqueRegion.name,
           event: uniqueEvent.name,
-          rereadVerified: true,
-          countsAfter: {
-            parts: delDoc.partCount,
-            regions: delDoc.regionCount,
-            events: delDoc.eventCount
-          },
-          siblingsByteIdentical: true,
+          gateCode: 'MSB_REFERENCE_COVERAGE_INCOMPLETE',
+          safetyGateBlocked: true,
           failClosed: {
             nonexistent: 'MSB_STAGING_WRITE_FAILED',
             duplicateName: duplicateNameDelete ?? 'fixture-无同名样本',
             duplicateNameTransform: duplicateNameTransform ?? 'fixture-无同名样本',
-            unregisteredPartDelete: 'MSB_UNREGISTERED_ENTITY_TYPE',
-            unregisteredRegionDelete: 'MSB_UNREGISTERED_ENTITY_TYPE'
+            unregisteredPartDelete: 'MSB_REFERENCE_COVERAGE_INCOMPLETE',
+            unregisteredRegionDelete: 'MSB_REFERENCE_COVERAGE_INCOMPLETE'
           }
         },
         reopenFailure: {

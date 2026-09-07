@@ -13,6 +13,10 @@ import type { Diagnostic } from '@soulforge/shared';
 import { runBridge } from '../bridge/runBridge.js';
 import { applyNativeMutation } from './editorMutationService.js';
 import type { NativeEditSession } from './nativeEditSession.js';
+import {
+  resolveScriptLoaderProfile,
+  canEditScriptAsSource
+} from '../script/scriptLoaderProfile.js';
 
 export interface LuabndScriptSnapshot {
   sanitizedName: string;
@@ -24,14 +28,21 @@ export interface LuabndScriptSnapshot {
   variant: string;
   isPlainText: boolean;
   embeddedSymbols: string[];
-  textPreview?: string;
+  textPreview?: string | undefined;
   sourceHash: string;
+  representation?: 'plaintext' | 'bytecode' | 'unknown' | undefined;
+  detectedEncoding?: string | undefined;
+  canWriteBack?: boolean | undefined;
+  derivedSource?: string | undefined;
+  decompilerVersion?: string | undefined;
+  warnings?: string[] | undefined;
+  loaderProfileId?: string | undefined;
 }
 
 export interface LuabndEditFailure {
   code: string;
   message: string;
-  details?: unknown;
+  details?: unknown | undefined;
 }
 
 export type LuabndReadResult =
@@ -249,18 +260,39 @@ export async function readLuabndScript(input: {
   }
 
   const data = bridgeResult.data as any;
+  const isBytecode = Boolean(data.isBytecode);
+  const profile = resolveScriptLoaderProfile({
+    game: 'sekiro',
+    containerPath,
+    entryName: input.childPath,
+    isBytecode
+  });
+  const representation: 'plaintext' | 'bytecode' | 'unknown' = isBytecode
+    ? 'bytecode'
+    : (data.isPlainText ? 'plaintext' : 'unknown');
+  const canWriteBack = isBytecode
+    ? (profile?.bytecodeToSourceAllowed ?? false)
+    : (profile?.supportsPlaintextSourceEdit ?? true);
+
   const scriptSnapshot: LuabndScriptSnapshot = {
     sanitizedName: data.sanitizedName ?? input.childPath,
     size: data.size ?? 0,
     uncompressedSize: data.uncompressedSize ?? 0,
     contentHash: data.contentHash ?? '',
-    isBytecode: Boolean(data.isBytecode),
+    isBytecode,
     magic: data.magic ?? '',
     variant: data.variant ?? '',
     isPlainText: Boolean(data.isPlainText),
     embeddedSymbols: Array.isArray(data.embeddedSymbols) ? data.embeddedSymbols : [],
     textPreview: typeof data.textPreview === 'string' ? data.textPreview : undefined,
-    sourceHash: data.sourceHash || data.contentHash || ''
+    sourceHash: data.sourceHash || data.contentHash || '',
+    representation,
+    detectedEncoding: isBytecode ? undefined : (data.detectedEncoding ?? 'shift_jis'),
+    canWriteBack,
+    derivedSource: typeof data.derivedSource === 'string' ? data.derivedSource : undefined,
+    decompilerVersion: typeof data.decompilerVersion === 'string' ? data.decompilerVersion : undefined,
+    warnings: Array.isArray(data.warnings) ? data.warnings : undefined,
+    loaderProfileId: profile?.id
   };
 
   return {
@@ -299,9 +331,44 @@ export async function setLuabndScript(input: {
   if (input.text === undefined && input.contentBase64 === undefined) {
     return {
       ok: false,
-      error: { code: 'INVALID_INPUT', message: 'setLuabndScript ��Ҫ text �� contentBase64��' },
+      error: { code: 'INVALID_INPUT', message: 'setLuabndScript Ҫ text  contentBase64' },
       diagnostics: []
     };
+  }
+
+  if (input.text !== undefined) {
+    const existing = await readLuabndScript({
+      edit: input.edit,
+      file: containerPath,
+      childPath: input.childPath
+    });
+    if (existing.ok) {
+      const isBytecode = existing.script.isBytecode;
+      const profile = resolveScriptLoaderProfile({
+        game: 'sekiro',
+        containerPath,
+        entryName: input.childPath,
+        isBytecode
+      });
+      const check = canEditScriptAsSource(profile, isBytecode);
+      if (!check.allowed) {
+        return {
+          ok: false,
+          error: {
+            code: check.code ?? 'SCRIPT_SOURCE_EDIT_PROHIBITED',
+            message: check.message ?? '该条目不允许作为源码文本写回。'
+          },
+          diagnostics: [
+            {
+              severity: 'error',
+              code: check.code ?? 'SCRIPT_SOURCE_EDIT_PROHIBITED',
+              message: check.message ?? '该条目不允许作为源码文本写回。',
+              sourceUri: pathToFileURL(resolve(containerPath)).href
+            }
+          ]
+        };
+      }
+    }
   }
 
   const diskBytes = await readFile(containerPath);

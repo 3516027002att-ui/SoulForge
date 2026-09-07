@@ -46,6 +46,7 @@ export interface EmevdPlanCommitRequest {
    */
   expectedOuterFileHash?: string;
   allowedRoots: string[];
+  oodleRuntimeRoot?: string | undefined;
   timeoutMs?: number;
 }
 
@@ -427,7 +428,8 @@ export async function stageEmevdPlanViaBridge(
       allowedRoots: context.allowedRoots,
       writableRoots: context.writableRoots,
       mutations: converted.mutations,
-      ...(request.timeoutMs !== undefined ? { timeoutMs: request.timeoutMs } : {})
+      ...(request.timeoutMs !== undefined ? { timeoutMs: request.timeoutMs } : {}),
+      ...(request.oodleRuntimeRoot !== undefined ? { oodleRuntimeRoot: request.oodleRuntimeRoot } : {})
     })
   });
 
@@ -680,7 +682,8 @@ export async function commitEmevdPlanViaPatchEngine(
     command: 'read-emevd-document',
     filePath: request.sourcePath,
     allowedRoots: request.allowedRoots,
-    timeoutMs: request.timeoutMs ?? 120_000
+    timeoutMs: request.timeoutMs ?? 120_000,
+    ...(request.oodleRuntimeRoot !== undefined ? { oodleRuntimeRoot: request.oodleRuntimeRoot } : {})
   });
   const sourceFormat = staged.result.sourceFormat ?? 'emevd';
   const reReadSourceHash = reRead.data?.sourceHash ?? '';

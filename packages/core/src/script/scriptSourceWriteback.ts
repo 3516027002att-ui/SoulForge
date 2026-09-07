@@ -2,8 +2,8 @@
  * 脚本 IDE 写回：打开时用哪套解码，保存必须用回那套。
  *
  * 明文：ascii / utf8 / utf8-bom / shift_jis（CP932）走 encodePlaintext。
- * 混合编码：只允许改纯 ASCII 行，非 ASCII 字节原样复制。
- * Lua 字节码：社区流程是把反编译文本当明文写回，不要自研编译器。
+ * 混合编码：只允许改纯 ASCII 行，非 ASCII 字节原样复制（O(B+E) 纯字节 line span 算法）。
+ * Lua 字节码：受 ScriptLoaderProfile 守卫，未开放反编译写回的条目一律拒绝。
  */
 import { createDiagnostic, type StructuredDiagnostic } from '@soulforge/shared';
 import {
@@ -13,8 +13,17 @@ import {
   type PlaintextEncodeResult,
   type PlaintextEncoding
 } from './plaintextScriptEntry.js';
+import {
+  type ScriptLoaderProfile,
+  canEditScriptAsSource
+} from './scriptLoaderProfile.js';
 
 export type ScriptSourceWritebackKind = 'plaintext' | 'decompiled-as-utf8' | 'mixed-ascii';
+
+export interface ScriptWritebackOptions {
+  profile?: ScriptLoaderProfile;
+  requireProfile?: boolean;
+}
 
 export type ScriptSourceWritebackResult =
   | {
@@ -62,74 +71,201 @@ function encodeFail(code: string, message: string): PlaintextEncodeResult {
   };
 }
 
-function encodeMixedAsciiLines(content: Uint8Array, newText: string): PlaintextEncodeResult {
-  const oldDisplay = decodePlaintext(content, 'mixed-unknown');
-  if (oldDisplay === newText) {
-    return { ok: true, bytes: content, encoding: 'mixed-unknown' };
+interface ByteLineSpan {
+  start: number;
+  end: number;
+  newlineStart: number;
+  newlineEnd: number;
+  isAscii: boolean;
+}
+
+function scanByteLineSpans(content: Uint8Array): ByteLineSpan[] {
+  const spans: ByteLineSpan[] = [];
+  let lineStart = 0;
+  let isAscii = true;
+  const len = content.length;
+
+  for (let i = 0; i < len; i++) {
+    const b = content[i]!;
+    if (b >= 0x80) {
+      isAscii = false;
+    }
+    if (b === 0x0a) {
+      let lineEnd = i;
+      let newlineStart = i;
+      if (i > lineStart && content[i - 1] === 0x0d) {
+        lineEnd = i - 1;
+        newlineStart = i - 1;
+      }
+      spans.push({
+        start: lineStart,
+        end: lineEnd,
+        newlineStart,
+        newlineEnd: i + 1,
+        isAscii
+      });
+      lineStart = i + 1;
+      isAscii = true;
+    }
   }
-  const oldLines = oldDisplay.split('\n');
-  const newLines = newText.split('\n');
-  if (oldLines.length !== newLines.length) {
+  if (lineStart <= len) {
+    spans.push({
+      start: lineStart,
+      end: len,
+      newlineStart: len,
+      newlineEnd: len,
+      isAscii
+    });
+  }
+  return spans;
+}
+
+function encodeMixedAsciiLines(content: Uint8Array, newText: string): PlaintextEncodeResult {
+  const spans = scanByteLineSpans(content);
+  const newLines = newText.split(/\r?\n/);
+
+  if (newLines.length !== spans.length) {
     return encodeFail(
       'SCRIPT_MIXED_LINE_COUNT_CHANGED',
       '该条目是混合编码（日文/GBK 等和非 ASCII 混在一起）。只能改纯 ASCII 行，不能增删行。'
     );
   }
-  const latin = Buffer.from(content).toString('latin1');
-  const latinLines = latin.split('\n');
-  if (latinLines.length !== oldLines.length) {
-    return encodeFail(
-      'SCRIPT_MIXED_NEWLINE_MISALIGN',
-      '混合编码条目的换行无法与显示文本对齐，拒绝写回以免撕字节。'
-    );
-  }
-  const next = latinLines.slice();
-  for (let i = 0; i < oldLines.length; i += 1) {
-    if (oldLines[i] === newLines[i]) continue;
-    const oldLine = oldLines[i] ?? '';
-    const newLine = newLines[i] ?? '';
-    const latinLine = latinLines[i] ?? '';
-    if (!isPureAscii(oldLine) || !isPureAscii(newLine) || !isPureAscii(latinLine) || latinLine !== oldLine) {
-      return encodeFail(
-        'SCRIPT_MIXED_NON_ASCII_LINE_EDIT',
-        `第 ${i + 1} 行含非 ASCII 或与原字节对不齐。混合编码文件只能改纯 ASCII 行。`
-      );
+
+  const changed: boolean[] = new Array(spans.length);
+
+  for (let i = 0; i < spans.length; i++) {
+    const span = spans[i]!;
+    const newLine = newLines[i]!;
+
+    if (span.isAscii) {
+      const origLen = span.end - span.start;
+      let isSame = origLen === newLine.length;
+      if (isSame) {
+        for (let j = 0; j < origLen; j++) {
+          if (content[span.start + j] !== newLine.charCodeAt(j)) {
+            isSame = false;
+            break;
+          }
+        }
+      }
+      if (!isSame) {
+        if (!isPureAscii(newLine)) {
+          return encodeFail(
+            'SCRIPT_MIXED_NON_ASCII_LINE_EDIT',
+            `第 ${i + 1} 行含非 ASCII 或与原字节对不齐。混合编码文件只能改纯 ASCII 行。`
+          );
+        }
+        changed[i] = true;
+      } else {
+        changed[i] = false;
+      }
+    } else {
+      // Non-ASCII line. Decode only this line to check whether caller kept it identical.
+      const origDecoded = decodePlaintext(content.subarray(span.start, span.end), 'mixed-unknown');
+      if (newLine !== origDecoded) {
+        return encodeFail(
+          'SCRIPT_MIXED_NON_ASCII_LINE_EDIT',
+          `第 ${i + 1} 行含非 ASCII 或与原字节对不齐。混合编码文件只能改纯 ASCII 行。`
+        );
+      }
+      changed[i] = false;
     }
-    next[i] = newLine;
   }
-  const edited = Buffer.from(next.join('\n'), 'latin1');
-  const originalHigh = [...content].filter((byte) => byte >= 0x80);
-  const editedHigh = [...edited].filter((byte) => byte >= 0x80);
-  if (
-    originalHigh.length !== editedHigh.length
-    || originalHigh.some((byte, index) => byte !== editedHigh[index])
-  ) {
-    return encodeFail(
-      'SCRIPT_MIXED_HIGH_BYTES_CHANGED',
-      '写回会改动非 ASCII 字节，已拒绝。混合编码文件禁止整篇 UTF-8 碾压。'
-    );
+
+  // Calculate exact total bytes
+  let totalBytes = 0;
+  for (let i = 0; i < spans.length; i++) {
+    const span = spans[i]!;
+    const newlineLen = span.newlineEnd - span.newlineStart;
+    if (changed[i]) {
+      totalBytes += newLines[i]!.length + newlineLen;
+    } else {
+      totalBytes += (span.end - span.start) + newlineLen;
+    }
   }
-  return { ok: true, bytes: new Uint8Array(edited), encoding: 'mixed-unknown' };
+
+  // Single allocation and sequential copy: O(B + E)
+  const out = new Uint8Array(totalBytes);
+  let writePos = 0;
+  for (let i = 0; i < spans.length; i++) {
+    const span = spans[i]!;
+    const newlineLen = span.newlineEnd - span.newlineStart;
+    if (changed[i]) {
+      const str = newLines[i]!;
+      for (let j = 0; j < str.length; j++) {
+        out[writePos++] = str.charCodeAt(j);
+      }
+    } else {
+      out.set(content.subarray(span.start, span.end), writePos);
+      writePos += (span.end - span.start);
+    }
+    if (newlineLen > 0) {
+      out.set(content.subarray(span.newlineStart, span.newlineEnd), writePos);
+      writePos += newlineLen;
+    }
+  }
+
+  return { ok: true, bytes: out, encoding: 'mixed-unknown' };
 }
 
 export function encodeScriptSourceForWriteback(
   originalBytes: Uint8Array,
-  newText: string
+  newText: string,
+  options?: ScriptWritebackOptions
 ): ScriptSourceWritebackResult {
   const verdict = classifyPlaintextBytes(originalBytes);
   const padding = verdict.trailingPaddingBytes;
   const content = originalBytes.subarray(0, originalBytes.length - padding);
 
   if (verdict.luaBytecodeMagic) {
+    if (options?.requireProfile || options?.profile !== undefined) {
+      const profile = options.profile;
+      const check = canEditScriptAsSource(profile, true);
+      if (!check.allowed) {
+        return fail(
+          check.code ?? 'SCRIPT_BYTECODE_SOURCE_EDIT_PROHIBITED',
+          check.message ?? '该条目是 Lua 字节码，当前 Profile 未开放源码编辑写回。'
+        );
+      }
+      if (profile?.matchingSyntaxValidator) {
+        const validator = profile.matchingSyntaxValidator;
+        if (validator.validate) {
+          const valRes = validator.validate(newText);
+          if (!valRes.ok) {
+            return fail(
+              'SCRIPT_SYNTAX_VALIDATION_FAILED',
+              valRes.error ?? `Lua 语法校验失败（${validator.toolName}）。`
+            );
+          }
+        } else if (!validator.validatorPath) {
+          return fail(
+            'SCRIPT_SYNTAX_VALIDATOR_UNAVAILABLE',
+            `未找到匹配的 Lua 语法校验工具（${validator.toolName}，目标版本 ${validator.targetLuaVersion}）。`
+          );
+        }
+      }
+    }
     const body = new TextEncoder().encode(newText);
-    return { ok: true, bytes: body, encoding: 'utf8', writeKind: 'decompiled-as-utf8' };
+    return { ok: true, bytes: appendPadding(body, padding), encoding: 'utf8', writeKind: 'decompiled-as-utf8' };
   }
+
   if (!verdict.isPlaintext) {
     return fail(
       'SCRIPT_SOURCE_NOT_PLAINTEXT',
       '该条目不是明文，不能当源码写回。打开失败的条目仍然不能写。'
     );
   }
+
+  if (options?.requireProfile || options?.profile !== undefined) {
+    const check = canEditScriptAsSource(options.profile, false);
+    if (!check.allowed) {
+      return fail(
+        check.code ?? 'SCRIPT_PLAINTEXT_SOURCE_EDIT_PROHIBITED',
+        check.message ?? 'Profile 未开放该条目的明文源码编辑。'
+      );
+    }
+  }
+
   if (verdict.detectedEncoding === 'mixed-unknown') {
     const mixed = encodeMixedAsciiLines(content, newText);
     if (!mixed.ok) {
@@ -142,6 +278,7 @@ export function encodeScriptSourceForWriteback(
       writeKind: 'mixed-ascii'
     };
   }
+
   const encoded = encodePlaintext(newText, verdict.detectedEncoding);
   if (!encoded.ok) {
     return { ok: false, code: encoded.code, message: encoded.message, diagnostics: encoded.diagnostics };

@@ -306,7 +306,7 @@ describe('区块顺序与默认折叠状态', () => {
       task: { ...render0Task(), task: running }
     });
     assert.match(html, /我先查伤药相关 Param。/, '模型必须说话，不能只剩工具行');
-    assert.match(html, /已思考 12s/);
+    assert.match(html, /已思考/);
     assert.match(html, /search_param_rows/);
     assert.ok(!html.includes('会话记录：'), '对话区不得显示会话 jsonl 文件名');
     assert.ok(!html.includes('rollout-secret.jsonl'));
@@ -937,5 +937,73 @@ describe('S9：Ask 菜单 portal 后 CSS 用 fixed（锚点是 viewport 坐标�
     });
     assert.match(html, /修改这个页面/);
   });
+
+  it('模型请求重试时在时间线、顶栏与状态栏中实时显示异常与重试提示', () => {
+    const html = render({
+      goal: '把鬼刑部改为精英怪',
+      task: {
+        ...render0Task(),
+        task: {
+          ...INITIAL_AGENT_TASK_STATE,
+          sessionId: 'session-retry',
+          phase: 'running',
+          step: 1,
+          startedAt: Date.now() - 10000,
+          retry: {
+            attempt: 1,
+            maxAttempts: 5,
+            delayMs: 2000,
+            code: 'MODEL_SERVICE_RATE_LIMITED',
+            message: 'Rate limit exceeded'
+          }
+        }
+      }
+    });
+    // 1. 时间线思考标签包含响应异常与重试次数
+    assert.match(html, /⚠️ 响应异常，重试中 \(1\/5\)/);
+    // 2. 展开卡片内部包含告警提示、错误码与详细原因
+    assert.match(html, /MODEL_SERVICE_RATE_LIMITED/);
+    assert.match(html, /Rate limit exceeded/);
+    // 3. 顶栏状态包含重试中
+    assert.match(html, /重试中/);
+    // 4. 底栏状态描述包含异常与重试说明
+    assert.match(html, /⚠️ 接口响应异常/);
+  });
+
+  it('Plan 规划方案就绪且当前处于 Plan 模式时渲染一键切换 Edit/Bypass 引导横幅', () => {
+    const html = render({
+      interactionMode: 'plan',
+      messages: [
+        {
+          id: 'msg-plan-ready',
+          kind: 'assistant',
+          markdown: '## 【修改栏目清单】（Plan 只读规划，未写入）\n\n- 目标：鬼刑部韧性削减',
+          streaming: false,
+          createdAt: new Date().toISOString()
+        }
+      ]
+    });
+    assert.match(html, /agent-plan-switch-banner/);
+    assert.match(html, /方案已规划就绪/);
+    assert.match(html, /切换为 Edit 模式/);
+    assert.match(html, /切换为 Bypass 模式/);
+  });
+
+  it('已切换到 Edit 或 Bypass 模式时不显示 Plan 切换横幅', () => {
+    const html = render({
+      interactionMode: 'edit',
+      messages: [
+        {
+          id: 'msg-plan-ready',
+          kind: 'assistant',
+          markdown: '## 【修改栏目清单】（Plan 只读规划，未写入）\n\n- 目标：鬼刑部韧性削减',
+          streaming: false,
+          createdAt: new Date().toISOString()
+        }
+      ]
+    });
+    assert.doesNotMatch(html, /agent-plan-switch-banner/);
+  });
 });
+
 

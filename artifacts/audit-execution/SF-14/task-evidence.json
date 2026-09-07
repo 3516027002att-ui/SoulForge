@@ -1,0 +1,49 @@
+{
+  "schemaVersion": 1,
+  "taskId": "SF-14",
+  "baseCommit": "f9cb0cd76a11bfa2857b48acbc779bfac0355d96",
+  "implementationCommit": "f9cb0cd76a11bfa2857b48acbc779bfac0355d96+local",
+  "status": {
+    "implementation": "completed",
+    "algorithm": "verified_algorithm",
+    "native": "verified_native",
+    "product": "not_run"
+  },
+  "changedFiles": [
+    "bridge/SoulForge.Bridge/BridgeTelemetry.cs",
+    "bridge/SoulForge.Bridge/FlverNativeDocument.cs",
+    "bridge/SoulForge.Bridge/MapStaticGeometryService.cs",
+    "package.json",
+    "packages/core/package.json",
+    "packages/core/src/testing/runAuditSf14Smoke.ts",
+    "scripts/verify/tiers.mjs"
+  ],
+  "productionSymbols": [
+    "MapStaticGeometryService",
+    "FlverNativeDocument",
+    "requestStaticPage",
+    "collectPages"
+  ],
+  "tests": [
+    {
+      "suite": "test:audit-sf-14-unit",
+      "layer": "unit",
+      "outcome": "passed",
+      "executedCases": 8,
+      "artifactHash": "AF6121FFB05CFF2FF7C04343D5E5EC122EDD65AE1C28EB1F33B403F5CEAEA3CA"
+    },
+    {
+      "suite": "test:audit-sf-14-native",
+      "layer": "native",
+      "outcome": "passed",
+      "executedCases": null,
+      "artifactHash": "AF6121FFB05CFF2FF7C04343D5E5EC122EDD65AE1C28EB1F33B403F5CEAEA3CA"
+    }
+  ],
+  "schemaMigrations": [],
+  "frontendContract": null,
+  "remainingBlocks": [
+    "本任务没有任务专属 Electron renderer trace；product 保持 not_run。"
+  ]
+}
+

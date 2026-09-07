@@ -1,4 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto';
+import { existsSync, readdirSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
 import { app } from 'electron';
 import type { WebContents, IpcMainInvokeEvent } from 'electron';
@@ -11,6 +12,7 @@ import {
   createContextBroker,
   createUnifiedDiff,
   retrieveEvidence,
+  retrieveEvidenceHybrid,
   createRagCorpus,
   listRolloutSessions,
   loadRolloutSession,
@@ -85,7 +87,7 @@ export type AiAgentEventReplayIpcResult = { ok: true; events: AiAgentEventEnvelo
 export interface AiAgentSessionSummaryIpc { sessionPath: string; fileName: string; sessionId: string | null; startedAt: string | null; messageCount: number; parseErrors: number; interrupted: boolean; compactedWindows: number; sizeBytes: number; modifiedAt: string; }
 export type AiAgentSessionListIpcResult = { ok: true; sessions: AiAgentSessionSummaryIpc[] } | { ok: false; error: { code: string; message: string } };
 export type AiAgentSessionLoadIpcResult = { ok: true; meta: RolloutSessionMeta | null; messageCount: number; parseErrors: number; interrupted: boolean; compactedWindows: number; messagesPage: ChatMessage[]; } | { ok: false; error: { code: string; message: string } };
-export type AiAgentSessionLifecycleEvent = { type: 'session-accepted'; mode: 'plan' | 'normal' | 'fullPermission' } | { type: 'session-done'; finishReason: string; steps: number; rolloutFileName: string } | { type: 'session-error'; code: string; message: string };
+export type AiAgentSessionLifecycleEvent = { type: 'session-accepted'; mode: 'plan' | 'normal' | 'fullPermission' } | { type: 'session-mode-switched'; mode: 'plan' | 'normal' | 'fullPermission' } | { type: 'session-done'; finishReason: string; steps: number; rolloutFileName: string } | { type: 'session-error'; code: string; message: string };
 export interface AiAgentEventEnvelope { sessionId: string; seq: number; event: AgentEvent | AiAgentSessionLifecycleEvent; }
 export type AgentResourceReferenceCreateIpcResult = { ok: true; reference: AgentResourceReference } | { ok: false; error: { code: string; message: string; diagnostics?: readonly { code: string; path: string; message: string }[]; }; };
 export type AgentAttachmentCreateIpcResult = { ok: true; reference: { token: string; mediaType: 'image/png' | 'image/jpeg' | 'image/webp' | 'text/plain'; byteLength: number; expiresAt: string; }; label: string; } | { ok: false; cancelled?: boolean; error: { code: string; message: string }; };
@@ -146,10 +148,51 @@ const sendAgentEvent = (sessionId: string, event: AgentEvent | AiAgentSessionLif
   if (!boundWebContents || boundWebContents.isDestroyed()) return;
   boundWebContents.send('ai:agent:event', envelope);
 };
+function findRolloutInSessions(base: string, targetFileName: string): string | null {
+  const root = join(base, 'sessions');
+  if (!existsSync(root)) return null;
+  try {
+    const years = readdirSync(root);
+    for (const year of years) {
+      const yearPath = join(root, year);
+      const months = readdirSync(yearPath);
+      for (const month of months) {
+        const monthPath = join(yearPath, month);
+        const days = readdirSync(monthPath);
+        for (const day of days) {
+          const candidate = join(monthPath, day, targetFileName);
+          if (existsSync(candidate)) return candidate;
+        }
+      }
+    }
+  } catch {
+    // 目录并发或权限异常静默跳过
+  }
+  return null;
+}
+
 const resolveSessionPath = (sessionPath: string): { ok: true; absolute: string } | { ok: false; error: { code: string; message: string } } => {
   const base = resolve(agentSessionsBaseDir);
-  const absolute = resolve(base, sessionPath);
-  if (absolute !== base && !absolute.startsWith(base + sep)) return { ok: false, error: { code: 'ROLLOUT_PATH_FORBIDDEN', message: '会话路径必须位于会话目录内。' } };
+  const normalized = sessionPath.replace(/^[\\/]+/, '');
+  const absolute = resolve(base, normalized);
+  if (absolute !== base && !absolute.startsWith(base + sep)) {
+    return { ok: false, error: { code: 'ROLLOUT_PATH_FORBIDDEN', message: '会话路径必须位于会话目录内。' } };
+  }
+  if (existsSync(absolute)) return { ok: true, absolute };
+
+  // 兼容直接传入纯文件名（如 rollout-2026-09-06T...jsonl）：优先按时间戳解析 sessions/YYYY/MM/DD/ 子目录
+  const fileName = basename(normalized);
+  const match = /^rollout-(\d{4})-(\d{2})-(\d{2})T/i.exec(fileName);
+  if (match) {
+    const candidate = join(base, 'sessions', match[1]!, match[2]!, match[3]!, fileName);
+    if (existsSync(candidate)) return { ok: true, absolute: candidate };
+  }
+  const candidateDirect = join(base, 'sessions', fileName);
+  if (existsSync(candidateDirect)) return { ok: true, absolute: candidateDirect };
+
+  const searched = findRolloutInSessions(base, fileName);
+  if (searched && existsSync(searched)) return { ok: true, absolute: searched };
+
   return { ok: true, absolute };
 };
 export function isAgentSessionActive(sessionId: string): boolean { return activeAgentRuns.has(sessionId); }
@@ -315,6 +358,30 @@ export function registerAgentIpcHandlers(deps: AgentIpcDeps): void {
       return { ok: true, embedded: result.embedded, reused: result.reused, failed: result.failed, model: result.model, dim: result.dim };
     });
   
+  const loadWorkspaceVectorMap = async (
+    corpus: RagCorpus,
+    database: OperationLogUtilityClient | null
+  ): Promise<Map<string, Float32Array> | null> => {
+    const cached = internalRagEmbedding.getCachedVectors(corpus);
+    if (cached && cached.size > 0) return cached;
+    if (!database) return null;
+    try {
+      const model = await database.ragEmbeddingModel();
+      if (!model) return null;
+      const records = await database.loadRagEmbeddingRecords();
+      if (records.length === 0) return null;
+      const vectorMap = new Map<string, Float32Array>();
+      for (const record of records) {
+        if (record.vector && record.vector.length > 0) {
+          vectorMap.set(record.chunkId, record.vector);
+        }
+      }
+      return vectorMap.size > 0 ? vectorMap : null;
+    } catch {
+      return null;
+    }
+  };
+
   const searchWorkspaceEvidence = async (
     database: OperationLogUtilityClient | null,
     query: string,
@@ -342,29 +409,35 @@ export function registerAgentIpcHandlers(deps: AgentIpcDeps): void {
       chunks: await database!.loadRagChunks(),
       references: await database!.loadReferences()
     });
-    // Agent 默认只走本地 lexical + 结构化 ID + 引用扩展。
-    // embedding 实验能力仍可独立保留，但不应成为普通用户的查询前置条件，
-    // 也不应因为一次 Agent 查询触发额外模型/API 调用。
-    const result = retrieveEvidence(corpus, query, {
-      ...(options.limit != null && options.limit > 0 ? { limit: Math.trunc(options.limit) } : {}),
-      ...(options.expandReferences === undefined ? {} : { expandReferences: options.expandReferences === true }),
-      ...(options.families && options.families.length > 0 ? { families: options.families } : {})
-    });
-    if (result.ok) {
+
+    // 没有配置 embedding 就不启用 RAG 相关功能（静默不启用，不产生额外提示）
+    const vectorMap = await loadWorkspaceVectorMap(corpus, database);
+    if (!vectorMap || vectorMap.size === 0) {
       return {
-        ...result,
-        retrievalMode: 'lexical',
-        diagnostics: [
-          ...(result.diagnostics ?? []),
-          {
-            severity: 'info',
-            code: 'LEXICAL_EVIDENCE_ONLY',
-            message: '当前 Agent 未调用 embedding；已使用本地词法、结构化 ID 和引用扩展检索。'
-          }
-        ]
+        ok: false,
+        code: 'RAG_UNAVAILABLE',
+        message: 'RAG 检索未启用。'
       };
     }
-    return result;
+
+    const queryVector = await internalRagEmbedding.embedQuery(query, options.signal);
+    if (!queryVector) {
+      return {
+        ok: false,
+        code: 'RAG_UNAVAILABLE',
+        message: 'RAG 检索未启用。'
+      };
+    }
+
+    return retrieveEvidenceHybrid(corpus, query, {
+      ...(options.limit != null && options.limit > 0 ? { limit: Math.trunc(options.limit) } : {}),
+      ...(options.expandReferences === undefined ? {} : { expandReferences: options.expandReferences === true }),
+      ...(options.families && options.families.length > 0 ? { families: options.families } : {}),
+      vectors: {
+        vectors: vectorMap,
+        queryVector
+      }
+    });
   };
 
   deps.handle('rag.searchEvidence', async (_event, input: {
@@ -481,7 +554,35 @@ export function registerAgentIpcHandlers(deps: AgentIpcDeps): void {
               : DEFAULT_AGENT_CONTEXT_WINDOW_TOKENS) * AGENT_CONTEXT_COMPACTION_RATIO
           )
         );
-      const adapterResult = createConfiguredModelServiceAdapter({ config: modelConfig, apiKey });
+
+      let resumeFrom: ResumedRollout | undefined;
+      let inheritTaskRecordSessionId: string | undefined;
+      if (request.resumeSessionPath !== undefined) {
+        const resolved = resolveSessionPath(request.resumeSessionPath);
+        if (resolved.ok) {
+          const loaded = await loadRolloutSession(resolved.absolute);
+          if (loaded.ok) {
+            const { ok: _ok, path: _path, ...resumed } = loaded;
+            resumeFrom = resumed;
+            const metaSessionId = resumed.meta?.sessionId;
+            if (typeof metaSessionId === 'string' && metaSessionId.trim() !== '') {
+              inheritTaskRecordSessionId = metaSessionId.trim();
+            } else {
+              const fileNameMatch = /([0-9a-fA-F-]{36})\.jsonl$/i.exec(basename(resolved.absolute));
+              if (fileNameMatch) {
+                inheritTaskRecordSessionId = fileNameMatch[1];
+              }
+            }
+          } else {
+            console.warn(`[SoulForge Agent] 尝试承接会话未找到或读取失败（${loaded.code}：${loaded.message}），平滑降级为新会话启动。`);
+          }
+        } else {
+          console.warn(`[SoulForge Agent] 尝试承接会话路径非法（${resolved.error.code}：${resolved.error.message}），平滑降级为新会话启动。`);
+        }
+      }
+
+      const sessionId = randomUUID();
+      const adapterResult = createConfiguredModelServiceAdapter({ config: modelConfig, apiKey, sessionId });
       if (!adapterResult.ok) {
         const diagnostic = adapterResult.diagnostics[0];
         return { ok: false, error: { code: diagnostic?.code ?? 'MODEL_SERVICE_INVALID', message: diagnostic?.message ?? '模型服务配置无效。' } };
@@ -500,8 +601,11 @@ export function registerAgentIpcHandlers(deps: AgentIpcDeps): void {
       const mode: ToolContext['mode'] = request.mode === 'normal' || request.mode === 'fullPermission'
         ? request.mode
         : 'plan';
-      const sessionId = randomUUID();
-      const taskRecord = createAgentTaskRecordGateway(deps.taskRecordDirectory(), sessionId);
+      const taskRecord = createAgentTaskRecordGateway(
+        deps.taskRecordDirectory(),
+        sessionId,
+        inheritTaskRecordSessionId ? { inheritFromSessionId: inheritTaskRecordSessionId } : undefined
+      );
       await taskRecord.read();
       // 无工作区时 deps.getActiveIndex() 为 null：工具层按工具守卫（WORKSPACE_REQUIRED），
       // 需要工作区的工具干净失败，不整次拒绝（T6）。
@@ -529,12 +633,13 @@ export function registerAgentIpcHandlers(deps: AgentIpcDeps): void {
       // 「确认这一次具体回滚」——双重防线，回滚是高危险不可逆操作。
       let agentSignal: AbortSignal | undefined;
       {
+        let currentRunMode: 'plan' | 'normal' | 'fullPermission' = mode;
         const rawExecuteTool = bridge.executeTool;
         const executeLiveTool = (call: Parameters<typeof rawExecuteTool>[0], extra: Partial<ToolContext> = {}) => {
           return rawExecuteTool(call, {
             // The run's mode and task ledger are stable for its lifetime; all
             // workspace/RAG/session state must be refreshed per tool call.
-            mode,
+            mode: currentRunMode,
             allowMemoryWrite: false,
             taskRecord,
             requireTaskRecord: true,
@@ -543,6 +648,28 @@ export function registerAgentIpcHandlers(deps: AgentIpcDeps): void {
           });
         };
         bridge.executeTool = async (call, contextOverride = {}) => {
+          if (call.name === 'switch_mode') {
+            const result = await executeLiveTool(call, contextOverride);
+            if (result.ok) {
+              try {
+                const parsed = JSON.parse(result.content);
+                const record = parsed?.data?.record ?? parsed?.record ?? parsed;
+                const switched = record?.switched;
+                const target = record?.currentMode;
+                if (switched === true && typeof target === 'string') {
+                  const effective = target === 'edit' ? 'normal' : target;
+                  if (effective === 'plan' || effective === 'normal' || effective === 'fullPermission') {
+                    currentRunMode = effective;
+                    sendAgentEvent(sessionId, {
+                      type: 'session-mode-switched',
+                      mode: effective
+                    });
+                  }
+                }
+              } catch {}
+            }
+            return result;
+          }
           if (call.name === 'commit_patch' || call.name === 'mutate_param_fields'
             || call.name === 'mutate_fmg_entries' || call.name === 'apply_emevd_dsl') {
             if (!deps.getActiveSession() || !deps.operationLogUtility) return executeLiveTool(call, contextOverride);
@@ -612,22 +739,35 @@ export function registerAgentIpcHandlers(deps: AgentIpcDeps): void {
           });
         };
       }
-  
-      let resumeFrom: ResumedRollout | undefined;
-      if (request.resumeSessionPath !== undefined) {
-        const resolved = resolveSessionPath(request.resumeSessionPath);
-        if (!resolved.ok) return { ok: false, error: resolved.error };
-        const loaded = await loadRolloutSession(resolved.absolute);
-        if (!loaded.ok) {
-          return { ok: false, error: { code: loaded.code, message: loaded.message } };
-        }
-        const { ok: _ok, path: _path, ...resumed } = loaded;
-        resumeFrom = resumed;
+
+      // 模式指令注入：显式置顶告知模型当前所处的交互模式与操作边界，严格约束行为
+      let modeInstruction: string;
+      if (mode === 'plan') {
+        modeInstruction = [
+          '【当前运行模式：Plan 规划模式（只读方案设计与自主流转）】',
+          '你当前初始处于 Plan 规划模式。请遵循以下规则：',
+          '1. 在此模式下，核心任务是通过搜索与原生读取工具（如 search_workspace_symbols, search_param_rows, read_param_fields, search_events, read_emevd_event 等）彻底核实所有相关资源并定位真实行号与字段，不要仅凭记忆猜测。',
+          '2. 完成核实后，在回复中直接向用户输出清晰、结构完整、字段详尽的【修改栏目清单】表格（包含修改目标、目标文件/表、行号/ID、字段名称、当前值、拟改值、人话说明与推演逻辑），供用户审阅。',
+          '3. 【模型自主修改模式】：当你已输出方案且用户表达了执行、确认或允许写入的意图（例如“允许写入”、“确认”、“执行”、“按此修改”等），或者你需要从规划阶段正式进入写入阶段时：你必须主动调用 switch_mode 工具（例如 switch_mode({ mode: "normal", reason: "方案规划完毕，用户允许写入，切换至编辑执行模式" })）自行修改模式！系统将立即生效并同步前端界面，随后即可调用写入工具执行修改。严禁在方案就绪后陷入无休止的只读工具重复搜索。'
+        ].join('\n');
+      } else if (mode === 'fullPermission') {
+        modeInstruction = [
+          '【当前运行模式：Bypass 模式（免审批全自动执行）】',
+          '你当前处于免审批全自动执行模式。调用的写入工具将直接提交生效，无需用户逐项人工审批。',
+          '请务必在写入前通过原生读取核实真实行号、字段名与当前值，确保修改精准安全。需要切换模式时可主动调用 switch_mode 工具。'
+        ].join('\n');
+      } else {
+        modeInstruction = [
+          '【当前运行模式：Edit 模式（审批交互修改）】',
+          '你当前处于编辑修改模式。在经过充分的原生读取核实后，可以调用写入工具（如 mutate_param_fields, apply_emevd_dsl 等）提出修改。',
+          '在写入前必须使用原生读取工具核对真实行号、字段名与当前值，严禁臆测。',
+          '你的每次写入工具调用都会自动生成变更 diff 并弹出审批卡，由用户人工确认后方可提交。需要切换模式时可主动调用 switch_mode 工具。'
+        ].join('\n');
       }
-  
+
       // T6-2：系统提示由 main 读入并装配（renderer 不拼）。选区作为可选元数据
       // 附在系统提示里供模型参考，不是默认任务对象，也不自动写进 prompt 文本。
-      const systemPromptParts = [deps.readSystemPrompt() ?? ''];
+      const systemPromptParts = [modeInstruction, deps.readSystemPrompt() ?? ''];
       const fullUserMemory = deps.memoryManager.getFullMemoryForSystemPrompt(
         deps.getActiveIndex()?.workspaceId
       );
@@ -816,6 +956,31 @@ export function registerAgentIpcHandlers(deps: AgentIpcDeps): void {
         };
       };
   
+      const hasRagEmbedding = async (): Promise<boolean> => {
+        if (!deps.getActiveIndex() || !deps.getActiveSession()) return false;
+        const activeRag = deps.getActiveRag();
+        if (activeRag) {
+          const cached = internalRagEmbedding.getCachedVectors(activeRag);
+          if (cached && cached.size > 0) return true;
+        }
+        try {
+          // 只做轻量只读检查，不执行耗时的 recovery cleanup 全盘扫描
+          const model = await Promise.race([
+            deps.operationLogUtility.ragEmbeddingModel(),
+            new Promise<null>((resolve) => setTimeout(() => resolve(null), 100))
+          ]);
+          if (!model) return false;
+          const records = await Promise.race([
+            deps.operationLogUtility.loadRagEmbeddingRecords(),
+            new Promise<unknown[]>((resolve) => setTimeout(() => resolve([]), 100))
+          ]);
+          return records.length > 0;
+        } catch {
+          return false;
+        }
+      };
+      const ragEmbeddingAvailable = request.useRagSearch === true ? await hasRagEmbedding() : false;
+
       void runAgentSession({
         sessionsDir: agentSessionsBaseDir,
         sessionId,
@@ -862,14 +1027,14 @@ export function registerAgentIpcHandlers(deps: AgentIpcDeps): void {
             : effectiveAutoCompactTokenLimit
         },
         ...(Object.keys(sampling).length > 0 ? { sampling } : {}),
-        ...(request.useRagSearch === true
+        ...(ragEmbeddingAvailable
           ? {
               ragSearch: {
                 ...(request.ragSearchMaxHits != null && request.ragSearchMaxHits > 0
                   ? { maxHits: Math.min(8, Math.trunc(request.ragSearchMaxHits)) }
                   : {}),
-                // RAG 自动注入：每次模型调用前用最近用户消息检索工作区证据。
-                // 无工作区时返回 WORKSPACE_REQUIRED（loop 不注入，不阻断会话）。
+                // RAG 自动注入：仅在已就绪真实 embedding 向量时启用。
+                // 每次模型调用前用最近用户消息检索工作区证据；无工作区时返回 WORKSPACE_REQUIRED。
                 retrieve: async (query: string) => {
                   if (!deps.getActiveIndex() || !deps.getActiveSession()) {
                     return { ok: false as const, code: 'WORKSPACE_REQUIRED' as const, message: '先打开 Mod 工作区。' };
@@ -884,8 +1049,13 @@ export function registerAgentIpcHandlers(deps: AgentIpcDeps): void {
                   // submitted in that race window; waiting only when the
                   // corpus is unavailable would accept an older partial corpus
                   // that happens to contain text/event/map rows but no PARAM.
+                  // 设定有界等待超时（至多 3 秒），防止大工作区深度解析（如全量 MSB/PARAM 需数分钟）导致 Agent 对话死等挂起。
+                  const indexingAbort = new AbortController();
+                  const onParentAbort = () => indexingAbort.abort();
+                  controller.signal.addEventListener('abort', onParentAbort, { once: true });
+                  const indexingTimer = setTimeout(() => indexingAbort.abort(), 3_000);
                   try {
-                    await deps.waitForWorkspaceIndexing(controller.signal);
+                    await deps.waitForWorkspaceIndexing(indexingAbort.signal);
                   } catch (error) {
                     if (controller.signal.aborted) {
                       return {
@@ -894,7 +1064,10 @@ export function registerAgentIpcHandlers(deps: AgentIpcDeps): void {
                         message: '等待工作区语义索引期间任务已取消。'
                       };
                     }
-                    throw error;
+                    // 超时未完成则降级直接利用已有索引检索，绝不长时间挂起会话
+                  } finally {
+                    clearTimeout(indexingTimer);
+                    controller.signal.removeEventListener('abort', onParentAbort);
                   }
                   return searchWorkspaceEvidence(deps.operationLogUtility, query, { signal: controller.signal });
                 }
@@ -922,11 +1095,12 @@ export function registerAgentIpcHandlers(deps: AgentIpcDeps): void {
       }).then((result) => {
         activeAgentRuns.delete(sessionId);
         rejectSessionApprovals(sessionId, '会话已结束，未回答的审批按拒绝处理。');
+        const relativeRolloutPath = relative(agentSessionsBaseDir, result.rolloutPath).replace(/\\/g, '/');
         sendAgentEvent(sessionId, {
           type: 'session-done',
           finishReason: result.run.finishReason,
           steps: result.run.steps,
-          rolloutFileName: basename(result.rolloutPath)
+          rolloutFileName: relativeRolloutPath
         });
       }).catch((error: unknown) => {
         activeAgentRuns.delete(sessionId);

@@ -143,7 +143,7 @@ export function AgentToolActivityRow(props: AgentToolActivityRowProps): ReactEle
   return (
     <div
       className={`agent-tool-activity is-${status}`}
-      data-testid={`agent-tool-activity-${id}`}
+      data-testid={`agent-tool-activity-row-${id}`}
       data-status={status}
     >
       <details
@@ -176,4 +176,3 @@ export function AgentToolActivityRow(props: AgentToolActivityRowProps): ReactEle
     </div>
   );
 }
-

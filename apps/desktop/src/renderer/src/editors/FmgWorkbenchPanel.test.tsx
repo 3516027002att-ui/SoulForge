@@ -108,15 +108,19 @@ describe('Negative source tests（TEXT-20B 五类失败覆盖）', () => {
   });
 
   it('S30：FMG 标签投影（011833）—— 图标/地名/BMSG 显示为占位，<?null?> 为空槽', () => {
+    // 真实 msgbnd 的空槽可能在 structured-clone 后表现为 null/缺省字段；
+    // 它们都是合法空内容，不能让列表渲染在 String.prototype.replace 上崩溃。
+    assert.equal(projectFmgDisplayText(null), '');
+    assert.equal(projectFmgDisplayText(undefined), '');
     assert.equal(projectFmgDisplayText('<?null?>'), '');
     assert.equal(projectFmgDisplayText('<?kgiconKc@18?>'), '[图标 18]');
     assert.equal(projectFmgDisplayText('<?placeName@1000?>'), '[地名 1000]');
     assert.equal(projectFmgDisplayText('<?bmsg?>'), '[BMSG]');
     assert.equal(projectFmgDisplayText('获得 <?kgiconKc@18?> 后可用'), '获得 [图标 18] 后可用');
     // 投影只影响显示层：面板里列表走投影，编辑框仍绑原文（写回保真）。
-    // S29 草稿编辑：绑 draftText ?? selected.text —— 草稿也存原文，未编辑时回落选中行原文。
+    // S29 草稿编辑：仍优先绑定原文；空槽缺省时回落到空字符串，保持受控 textarea。
     assert.match(panelSource, /projectFmgDisplayText\(row\.text\)/);
-    assert.match(panelSource, /value=\{draftText \?\? selected\.text\}/);
+    assert.match(panelSource, /value=\{draftText \?\? \(typeof selected\.text === 'string' \? selected\.text : ''\)\}/);
   });
 
   it('S30：空槽行与 ID 照常在场，文本列弱化为 —（地名 47 槽的 41 个空槽可见）', () => {

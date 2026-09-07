@@ -99,6 +99,23 @@ export async function refreshKnowledgeAfterCommit(
     const reanalyzed = reanalyzedOutput instanceof WorkspaceIndex
       ? { index: reanalyzedOutput, semanticState: 'reanalyzed' as const }
       : reanalyzedOutput;
+    const staleSources = findStaleReanalysisSources(reanalyzed.index, input.afterFiles, changedSources);
+    if (staleSources.length > 0) {
+      // A late async read is not allowed to become the persisted semantic
+      // truth.  Keep the already-invalidated index and make the caller retry
+      // from the current file catalog.
+      await input.persist?.(input.index);
+      return {
+        index: input.index,
+        result: {
+          status: 'invalidated',
+          changedSources,
+          invalidated,
+          semanticState: 'empty',
+          error: `NATIVE_REFRESH_STALE_REVISION: ${staleSources.join(', ')}`
+        }
+      };
+    }
     const semanticState = reanalyzed.semanticState;
     reanalyzed.index.rebuildReferences();
     await input.persist?.(reanalyzed.index);
@@ -125,6 +142,39 @@ export async function refreshKnowledgeAfterCommit(
       }
     };
   }
+}
+
+function findStaleReanalysisSources(
+  reanalyzed: WorkspaceIndex,
+  afterFiles: readonly IndexedFile[],
+  changedSources: readonly string[]
+): string[] {
+  const stale: string[] = [];
+  for (const sourceUri of changedSources) {
+    const expected = findCurrentFile(afterFiles, sourceUri);
+    if (!expected) continue;
+    const actual = reanalyzed.getFile(sourceUri);
+    if (!actual
+      || (expected.sha256 !== undefined && actual.sha256 !== expected.sha256)
+      || expected.mtimeMs !== actual.mtimeMs) {
+      stale.push(sourceUri);
+    }
+  }
+  return stale;
+}
+
+function findCurrentFile(files: readonly IndexedFile[], sourceUri: string): IndexedFile | undefined {
+  const direct = files.find((file) => file.sourceUri === sourceUri);
+  if (direct) return direct;
+  const normalized = normalizeSourceToken(sourceUri);
+  const matches = files.filter((file) => [file.sourceUri, file.sourcePath, file.relativePath, file.absolutePath]
+    .map(normalizeSourceToken)
+    .includes(normalized));
+  return matches.length === 1 ? matches[0] : undefined;
+}
+
+function normalizeSourceToken(value: string): string {
+  return value.trim().replaceAll('\\', '/').replace(/^file:\/\//iu, '').toLocaleLowerCase();
 }
 
 export function detectChangedSourceUris(

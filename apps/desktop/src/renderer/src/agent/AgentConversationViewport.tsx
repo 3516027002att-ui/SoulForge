@@ -1,6 +1,6 @@
 import { useEffect, useLayoutEffect, useRef, useState, type ReactElement, type ReactNode } from 'react';
 import { shouldAgentAutoScroll, type AgentMessageDto } from '@soulforge/shared';
-import type { AgentApprovalDiffView, AgentApprovalPreview, AgentConversationItem } from './agentTaskState.js';
+import type { AgentApprovalDiffView, AgentApprovalPreview, AgentConversationItem, AgentTaskRetryState } from './agentTaskState.js';
 import { AgentWelcome } from './AgentWelcome.js';
 import { AgentMessageList } from './AgentMessageList.js';
 import { AgentToolActivityGroup } from './AgentToolActivityGroup.js';
@@ -74,15 +74,44 @@ function renderInlineMarkdown(text: string): ReactNode {
   });
 }
 
-function AgentThinkingItem({ label, text, live }: { label: string; text: string; live: boolean }): ReactElement {
+function AgentThinkingItem({
+  label,
+  text,
+  live,
+  retry
+}: {
+  label: string;
+  text: string;
+  live: boolean;
+  retry?: AgentTaskRetryState | null | undefined;
+}): ReactElement {
   const [userOpened, setUserOpened] = useState<boolean | null>(null);
   const isOpen = userOpened !== null ? userOpened : live;
+
+  if (retry) {
+    return (
+      <div className="agent-thinking is-live is-retry" data-testid="agent-thinking">
+        <span className="spinner" aria-hidden="true"></span>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: '4px', width: '100%' }}>
+          <span style={{ fontWeight: 600, color: 'var(--forge-warn-text, #e6a23c)' }}>{label}</span>
+          <span style={{ fontSize: '12px', opacity: 0.85, wordBreak: 'break-word' }}>
+            {retry.message || `接口错误码: ${retry.code}`}（约 {Math.max(1, Math.round(retry.delayMs / 1000))} 秒后自动重试）
+          </span>
+        </div>
+      </div>
+    );
+  }
 
   if (live && text === '') {
     return (
       <div className="agent-thinking is-live" data-testid="agent-thinking">
         <span className="spinner" aria-hidden="true"></span>
-        <span>{label}</span>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: '2px' }}>
+          <span>{label}</span>
+          <span style={{ fontSize: '11px', opacity: 0.65 }}>
+            等待模型生成响应（若当前模型未开启显式思考，将在构思后直接输出）
+          </span>
+        </div>
       </div>
     );
   }
@@ -133,6 +162,7 @@ function renderConversationItem(item: AgentConversationItem, index: number): Rea
           label={item.label}
           text={item.text}
           live={item.live}
+          retry={item.retry}
         />
       );
     case 'assistant':

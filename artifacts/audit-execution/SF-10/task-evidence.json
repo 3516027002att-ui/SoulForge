@@ -1,0 +1,58 @@
+{
+  "schemaVersion": 1,
+  "taskId": "SF-10",
+  "baseCommit": "f9cb0cd76a11bfa2857b48acbc779bfac0355d96",
+  "implementationCommit": "f9cb0cd76a11bfa2857b48acbc779bfac0355d96+local",
+  "status": {
+    "implementation": "completed",
+    "algorithm": "verified_algorithm",
+    "native": "verified_native",
+    "product": "not_run"
+  },
+  "changedFiles": [
+    "packages/core/src/script/scriptLoaderProfile.ts",
+    "packages/core/src/script/plaintextScriptEntry.ts",
+    "packages/core/src/script/scriptSourceWriteback.ts",
+    "packages/core/src/editing/luabndEdit.ts",
+    "packages/core/src/index.ts",
+    "packages/core/src/testing/runAuditSf10Smoke.ts",
+    "packages/core/package.json",
+    "package.json",
+    "scripts/verify/tiers.mjs",
+    "docs/audit-execution/tasks/SF-10.required-suites.json"
+  ],
+  "productionSymbols": [
+    "ScriptLoaderProfile",
+    "ScriptSyntaxValidator",
+    "ScriptDecompilerTool",
+    "REGISTERED_SCRIPT_LOADER_PROFILES",
+    "resolveScriptLoaderProfile",
+    "canEditScriptAsSource",
+    "ScriptRangePatch",
+    "applyRangePatches",
+    "ByteLineSpan",
+    "scanByteLineSpans",
+    "encodeMixedAsciiLines",
+    "ScriptWritebackOptions",
+    "encodeScriptSourceForWriteback"
+  ],
+  "tests": [
+    {
+      "suite": "test:audit-sf-10-unit",
+      "layer": "unit",
+      "outcome": "passed",
+      "executedCases": 10,
+      "artifactHash": "535977EEC416A5339E8A42418B6BA3332BEBD1785872728A6C9FF9B12C038FE6"
+    },
+    {
+      "suite": "test:audit-sf-10-native",
+      "layer": "native",
+      "outcome": "passed",
+      "executedCases": 4,
+      "artifactHash": "535977EEC416A5339E8A42418B6BA3332BEBD1785872728A6C9FF9B12C038FE6"
+    }
+  ],
+  "schemaMigrations": [],
+  "frontendContract": null,
+  "remainingBlocks": []
+}
