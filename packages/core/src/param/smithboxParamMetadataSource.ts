@@ -42,6 +42,49 @@ const INTEGER_RANGES: Partial<Record<ParamFieldScalarType, readonly [number, num
   s32: [-0x80000000, 0x7fffffff]
 };
 
+/**
+ * Metadata import is read-only, but the pinned source contains hundreds of
+ * small files.  Keep the filesystem fan-out bounded while preserving the
+ * original deterministic order for hashing, duplicate detection, and error
+ * selection.
+ */
+const METADATA_IO_CONCURRENCY = 8;
+
+async function mapBounded<T, R>(
+  items: readonly T[],
+  workerCount: number,
+  worker: (item: T, index: number) => Promise<R>
+): Promise<R[]> {
+  if (items.length === 0) return [];
+  const results = new Array<R | undefined>(items.length);
+  let nextIndex = 0;
+  let firstFailureIndex = Number.POSITIVE_INFINITY;
+  let firstFailure: unknown;
+
+  const runWorker = async (): Promise<void> => {
+    while (true) {
+      const index = nextIndex;
+      nextIndex += 1;
+      if (index >= items.length) return;
+      try {
+        results[index] = await worker(items[index]!, index);
+      } catch (error) {
+        // Let all already-started reads settle, then report the first failure
+        // in input order instead of whichever worker happened to finish first.
+        if (index < firstFailureIndex) {
+          firstFailureIndex = index;
+          firstFailure = error;
+        }
+      }
+    }
+  };
+
+  const concurrency = Math.max(1, Math.min(items.length, Math.trunc(workerCount)));
+  await Promise.all(Array.from({ length: concurrency }, () => runWorker()));
+  if (firstFailureIndex !== Number.POSITIVE_INFINITY) throw firstFailure;
+  return results as R[];
+}
+
 export interface SmithboxSdtSourcePolicy {
   policyId: string;
   release: string;
@@ -215,9 +258,21 @@ export async function importSmithboxSdtParamMetadata(
       throw sourceError('SMITHBOX_LICENSE_DIGEST_MISMATCH', 'Smithbox license text does not match the reviewed digest.');
     }
 
-    const enumIndex = await loadEnumIndex(join(metadataRoot, 'Param Enums'));
-    const annotations = await loadAnnotationIndex(join(metadataRoot, 'Param Annotations', 'English'));
-    const refIndex = await loadParamMetaRefIndex(join(metadataRoot, 'Param Meta'));
+    // These indexes are independent read-only projections of the pinned tree.
+    // Run them together, but choose a rejection in the historical stage order
+    // so malformed input still reports deterministically.
+    const indexResults = await Promise.allSettled([
+      loadEnumIndex(join(metadataRoot, 'Param Enums')),
+      loadAnnotationIndex(join(metadataRoot, 'Param Annotations', 'English')),
+      loadParamMetaRefIndex(join(metadataRoot, 'Param Meta'))
+    ]);
+    const [enumResult, annotationResult, refResult] = indexResults;
+    if (enumResult.status === 'rejected') throw enumResult.reason;
+    if (annotationResult.status === 'rejected') throw annotationResult.reason;
+    if (refResult.status === 'rejected') throw refResult.reason;
+    const enumIndex = enumResult.value;
+    const annotations = annotationResult.value;
+    const refIndex = refResult.value;
     const definitionFiles = (await readdir(join(metadataRoot, 'Defs'), { withFileTypes: true }))
       .filter((entry) => entry.isFile() && entry.name.toLowerCase().endsWith('.xml'))
       .map((entry) => entry.name)
@@ -226,57 +281,69 @@ export async function importSmithboxSdtParamMetadata(
       throw sourceError('SMITHBOX_DEFINITION_COUNT_MISMATCH', 'Smithbox PARAM definition count is not the pinned value.');
     }
 
+    const projectedDefinitions = await mapBounded(
+      definitionFiles,
+      METADATA_IO_CONCURRENCY,
+      async (fileName) => {
+        const path = await resolveContainedFile(
+          metadataRoot,
+          join(metadataRoot, 'Defs', fileName),
+          'SMITHBOX_DEFINITION_MISSING'
+        );
+        const xml = await readBoundedText(path, MAX_XML_BYTES, 'SMITHBOX_DEFINITION_TOO_LARGE');
+        let parsed: ParsedParamdef;
+        try {
+          parsed = parseParamdefXml(xml);
+        } catch (error) {
+          if (error instanceof SmithboxSourceError) {
+            throw sourceError(error.code, `Smithbox definition ${fileName} was rejected: ${error.message}`);
+          }
+          throw error;
+        }
+        /*
+         * Refs 按 **Defs 文件名** 取，不按 ParamType。
+         *
+         * `Param Meta` 与 `Defs` 在钉住的发布中按文件名一一对应；用文件名
+         * 连接可避免未来发布出现同名 ParamType 时静默错配。
+         */
+        const projected = projectParamdef(
+          parsed,
+          annotations.get(parsed.typeName),
+          enumIndex,
+          refIndex.get(fileName.slice(0, -4))
+        );
+        const key = {
+          game: 'sekiro',
+          gameBuild: policy.gameBuild,
+          typeName: projected.document.typeName,
+          dataVersion: projected.document.version,
+          rowDataSize: projected.document.rowDataSize
+        };
+        const payload = { key, document: projected.document };
+        return {
+          definition: {
+            ...payload,
+            definitionDigest: computeParamMetadataDefinitionDigest(payload)
+          } satisfies ParamMetadataDefinition,
+          fieldCount: projected.document.fields.length,
+          resolvedEnumCount: projected.resolvedEnumCount,
+          unresolvedEnumCount: projected.unresolvedEnumCount,
+          refFieldCount: projected.refFieldCount
+        };
+      }
+    );
+
     const definitions: ParamMetadataDefinition[] = [];
     let fieldCount = 0;
     let resolvedEnumCount = 0;
     let unresolvedEnumCount = 0;
     let refFieldCount = 0;
-    for (const fileName of definitionFiles) {
-      const path = await resolveContainedFile(
-        metadataRoot,
-        join(metadataRoot, 'Defs', fileName),
-        'SMITHBOX_DEFINITION_MISSING'
-      );
-      const xml = await readBoundedText(path, MAX_XML_BYTES, 'SMITHBOX_DEFINITION_TOO_LARGE');
-      let parsed: ParsedParamdef;
-      try {
-        parsed = parseParamdefXml(xml);
-      } catch (error) {
-        if (error instanceof SmithboxSourceError) {
-          throw sourceError(error.code, `Smithbox definition ${fileName} was rejected: ${error.message}`);
-        }
-        throw error;
-      }
-      /*
-       * Refs 按 **Defs 文件名** 取，不按 ParamType。
-       *
-       * 实测依据：`Param Meta` 与 `Defs` 各 160 个文件，文件名双向一一对应（无差
-       * 集），且 `Param Meta` 里 7028 个字段节点的 id **全部**能在同名 Defs 里找到
-       * （漂移 0）。而 ParamType 虽然在本发布里也恰好唯一，却是文件**内容**，
-       * 用它当连接键会让「换个发布出现两文件同 ParamType」变成静默错配。
-       */
-      const projected = projectParamdef(
-        parsed,
-        annotations.get(parsed.typeName),
-        enumIndex,
-        refIndex.get(fileName.slice(0, -4))
-      );
-      fieldCount += projected.document.fields.length;
-      resolvedEnumCount += projected.resolvedEnumCount;
-      unresolvedEnumCount += projected.unresolvedEnumCount;
-      refFieldCount += projected.refFieldCount;
-      const key = {
-        game: 'sekiro',
-        gameBuild: policy.gameBuild,
-        typeName: projected.document.typeName,
-        dataVersion: projected.document.version,
-        rowDataSize: projected.document.rowDataSize
-      };
-      const payload = { key, document: projected.document };
-      definitions.push({
-        ...payload,
-        definitionDigest: computeParamMetadataDefinitionDigest(payload)
-      });
+    for (const result of projectedDefinitions) {
+      definitions.push(result.definition);
+      fieldCount += result.fieldCount;
+      resolvedEnumCount += result.resolvedEnumCount;
+      unresolvedEnumCount += result.unresolvedEnumCount;
+      refFieldCount += result.refFieldCount;
     }
 
     const packagePayload: Omit<ParamMetadataPackage, 'packageDigest'> = {
@@ -432,11 +499,22 @@ async function computeSourceTreeDigest(extractedRoot: string): Promise<{ fileCou
     await walkTree(extractedRoot, root, files);
   }
   files.sort(compareOrdinal);
+  const fileDigests = await mapBounded(
+    files,
+    METADATA_IO_CONCURRENCY,
+    async (relativePath) => {
+      const path = join(extractedRoot, ...relativePath.split('/'));
+      const bytes = await readFile(path);
+      return {
+        relativePath,
+        byteLength: bytes.length,
+        digest: createHash('sha256').update(bytes).digest('hex')
+      };
+    }
+  );
   const hash = createHash('sha256');
-  for (const relativePath of files) {
-    const path = join(extractedRoot, ...relativePath.split('/'));
-    const bytes = await readFile(path);
-    hash.update(`${relativePath}\0${bytes.length}\0${createHash('sha256').update(bytes).digest('hex')}\n`);
+  for (const file of fileDigests) {
+    hash.update(`${file.relativePath}\0${file.byteLength}\0${file.digest}\n`);
   }
   return { fileCount: files.length, sha256: hash.digest('hex') };
 }
@@ -464,19 +542,25 @@ async function walkTree(root: string, relativePath: string, output: string[]): P
 async function loadAnnotationIndex(directory: string): Promise<Map<string, Map<string, AnnotationField>>> {
   const index = new Map<string, Map<string, AnnotationField>>();
   const entries = await readdir(directory, { withFileTypes: true });
-  for (const entry of entries.sort((left, right) => compareOrdinal(left.name, right.name))) {
-    if (!entry.isFile() || !entry.name.toLowerCase().endsWith('.json')) continue;
+  const jsonEntries = entries
+    .filter((entry) => entry.isFile() && entry.name.toLowerCase().endsWith('.json'))
+    .sort((left, right) => compareOrdinal(left.name, right.name));
+  const parsed = await mapBounded(jsonEntries, METADATA_IO_CONCURRENCY, async (entry) => {
     const input = await readJson<AnnotationFile>(join(directory, entry.name));
-    if (typeof input.Type !== 'string' || !Array.isArray(input.Fields)) continue;
-    if (index.has(input.Type)) {
-      throw sourceError('SMITHBOX_ANNOTATION_DUPLICATE', 'Smithbox annotations contain a duplicate PARAM type.');
-    }
+    if (typeof input.Type !== 'string' || !Array.isArray(input.Fields)) return null;
     const fields = new Map<string, AnnotationField>();
     for (const field of input.Fields) {
       if (!isRecord(field) || typeof field.Field !== 'string' || fields.has(field.Field)) continue;
       fields.set(field.Field, field as AnnotationField);
     }
-    index.set(input.Type, fields);
+    return { type: input.Type, fields };
+  });
+  for (const item of parsed) {
+    if (!item) continue;
+    if (index.has(item.type)) {
+      throw sourceError('SMITHBOX_ANNOTATION_DUPLICATE', 'Smithbox annotations contain a duplicate PARAM type.');
+    }
+    index.set(item.type, item.fields);
   }
   return index;
 }
@@ -506,18 +590,23 @@ async function loadParamMetaRefIndex(directory: string): Promise<Map<string, Par
   } catch {
     return index;
   }
-  for (const entry of entries.sort((left, right) => compareOrdinal(left.name, right.name))) {
-    if (!entry.isFile() || !entry.name.toLowerCase().endsWith('.xml')) continue;
+  const xmlEntries = entries
+    .filter((entry) => entry.isFile() && entry.name.toLowerCase().endsWith('.xml'))
+    .sort((left, right) => compareOrdinal(left.name, right.name));
+  const parsed = await mapBounded(xmlEntries, METADATA_IO_CONCURRENCY, async (entry) => {
     const path = join(directory, entry.name);
     let xml: string;
     try {
       xml = await readBoundedBomText(path, MAX_XML_BYTES, 'SMITHBOX_PARAM_META_TOO_LARGE');
     } catch (error) {
       if (error instanceof SmithboxSourceError) throw error;
-      continue;
+      return null;
     }
     const refs = parseParamMetaRefs(xml);
-    if (refs.size > 0) index.set(entry.name.slice(0, -4), refs);
+    return refs.size > 0 ? { key: entry.name.slice(0, -4), refs } : null;
+  });
+  for (const item of parsed) {
+    if (item) index.set(item.key, item.refs);
   }
   return index;
 }
@@ -592,10 +681,12 @@ async function readBoundedBomText(path: string, maxBytes: number, code: string):
 async function loadEnumIndex(directory: string): Promise<Map<string, ParamEnumDef>> {
   const index = new Map<string, ParamEnumDef>();
   const entries = await readdir(directory, { withFileTypes: true });
-  for (const entry of entries.sort((left, right) => compareOrdinal(left.name, right.name))) {
-    if (!entry.isFile() || !entry.name.toLowerCase().endsWith('.json')) continue;
+  const jsonEntries = entries
+    .filter((entry) => entry.isFile() && entry.name.toLowerCase().endsWith('.json'))
+    .sort((left, right) => compareOrdinal(left.name, right.name));
+  const parsed = await mapBounded(jsonEntries, METADATA_IO_CONCURRENCY, async (entry) => {
     const input = await readJson<EnumFile>(join(directory, entry.name));
-    if (typeof input.Key !== 'string' || !Array.isArray(input.Options) || index.has(input.Key)) {
+    if (typeof input.Key !== 'string' || !Array.isArray(input.Options)) {
       throw sourceError('SMITHBOX_ENUM_INVALID', 'Smithbox enum metadata is malformed or duplicated.');
     }
     const values: ParamEnumDef['values'] = [];
@@ -611,11 +702,20 @@ async function loadEnumIndex(directory: string): Promise<Map<string, ParamEnumDe
       seen.add(value);
       values.push({ value, label: localizedName(option.Names) ?? option.Key });
     }
-    index.set(input.Key, {
+    return {
+      key: input.Key,
+      value: {
       id: input.Key,
       name: localizedName(input.Names) ?? input.Key,
       values
-    });
+      }
+    };
+  });
+  for (const item of parsed) {
+    if (index.has(item.key)) {
+      throw sourceError('SMITHBOX_ENUM_INVALID', 'Smithbox enum metadata is malformed or duplicated.');
+    }
+    index.set(item.key, item.value);
   }
   return index;
 }

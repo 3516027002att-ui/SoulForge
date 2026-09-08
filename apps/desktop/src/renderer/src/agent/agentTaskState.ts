@@ -593,7 +593,7 @@ export function describeApprovalLevel(permissionLevel: string): string {
   return ({
     stage: '写入暂存区（不改动原文件）',
     validate: '对暂存产物跑校验',
-    commit: '经 Patch Engine 提交到工作区',
+    commit: '提交到工作区',
     rollback: '从备份回滚一次已提交的操作',
     write: '写入资源'
   } as Record<string, string>)[permissionLevel] ?? permissionLevel;
@@ -603,6 +603,7 @@ function describeFinishReason(reason: string): string {
   return ({
     stop: '正常结束',
     cancelled: '已被取消',
+    partial: '部分完成/未完成验证',
     length: '达到输出上限',
     tool_use: '停在工具调用',
     error: '因错误结束'

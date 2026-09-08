@@ -95,7 +95,7 @@ export function AgentComposer(props: AgentComposerProps): ReactElement {
         <div className="agent-plan-switch-banner" role="status" data-testid="agent-plan-switch-banner">
           <div className="agent-plan-switch-banner__header">
             <span className="agent-plan-switch-banner__title">📋 方案已规划就绪</span>
-            <span className="agent-plan-switch-banner__badge">Plan 模式（只读中）</span>
+            <span className="agent-plan-switch-banner__badge">计划（只读）</span>
           </div>
           <div className="agent-plan-switch-banner__desc">
             当前处于只读 Plan 模式，模型无法执行修改。若确认执行方案，请切换为写入模式：
@@ -105,17 +105,17 @@ export function AgentComposer(props: AgentComposerProps): ReactElement {
               type="button"
               className="agent-plan-switch-banner__btn agent-plan-switch-banner__btn--edit"
               onClick={() => onInteractionModeChange?.('edit')}
-              title="切换为 Edit 模式：模型提出修改，逐项由您人工审批确认后写入"
+              title="切换为编辑模式：模型提出修改，逐项由您人工审批确认后写入"
             >
-              切换为 Edit 模式（审批写入）
+              切换为编辑模式（逐项审批）
             </button>
             <button
               type="button"
               className="agent-plan-switch-banner__btn agent-plan-switch-banner__btn--bypass"
               onClick={() => onInteractionModeChange?.('bypass')}
-              title="切换为 Bypass 模式：免审批全自动执行修改"
+              title="切换为自动执行模式：免逐项审批执行修改"
             >
-              切换为 Bypass 模式（免审批执行）
+              自动执行模式（免逐项审批）
             </button>
           </div>
         </div>
@@ -153,7 +153,7 @@ export function AgentComposer(props: AgentComposerProps): ReactElement {
             ? '添加附件仅在 SoulForge 桌面版可用。'
             : attachmentCreating
               ? '正在添加附件…'
-              : '添加图片或文本附件（由主进程签发 opaque 引用，不暴露路径）'
+              : '添加图片或文本附件（由应用安全引用，不暴露路径）'
         }
         interactionMode={interactionMode}
         onInteractionModeChange={onInteractionModeChange ?? (() => undefined)}

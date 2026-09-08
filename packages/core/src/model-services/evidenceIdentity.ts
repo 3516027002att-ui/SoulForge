@@ -7,7 +7,7 @@
  * are never promoted to object identity here.
  */
 
-import { stableJson } from '@soulforge/shared';
+import { stableJson, utf8CodepointPrefix } from '@soulforge/shared';
 
 export type EvidenceRevision = number | string;
 
@@ -295,11 +295,73 @@ function collectionItems(record: Record<string, unknown>): unknown[] {
   return [record];
 }
 
+const CLAIM_TEXT_MAX_CHARS = 640;
+const CLAIM_SUMMARY_KEYS = new Set([
+  'sourceUri', 'sourcePath', 'filePath', 'containerPath', 'file', 'uri',
+  'eventId', 'rowId', 'textId', 'entityId', 'id', 'mapId', 'paramName',
+  'entryName', 'category', 'format', 'resourceKind', 'game', 'restBehavior',
+  'instructionCount', 'total', 'offset', 'limit', 'returned', 'truncated',
+  'darkScriptComplete', 'crossesBlockBoundary', 'registryOrigin',
+  'registryFingerprint', 'sourceHash', 'sourceRevision'
+]);
+const CLAIM_SUMMARY_ARRAY_KEYS = new Set([
+  'instructions', 'fields', 'entries', 'rows', 'events', 'parts', 'entities', 'items', 'hits', 'matches'
+]);
+
+function boundedClaimString(value: string): string {
+  return value.length <= CLAIM_TEXT_MAX_CHARS
+    ? value
+    : `${utf8CodepointPrefix(value, CLAIM_TEXT_MAX_CHARS - 1)}…`;
+}
+
+/**
+ * Build a small semantic fallback for structured claims.  A native event
+ * payload can contain the complete DarkScript and hundreds of typed
+ * instructions; copying that root JSON into evidence.claims.text duplicates
+ * the model-facing data and can consume the entire bridge budget.  Claims are
+ * identity/context hints, not a second raw payload, so retain stable scalar
+ * facts and bounded collection shape only.
+ */
+function summarizeClaimRecord(record: Record<string, unknown>): string {
+  const summary: Record<string, unknown> = {};
+  // Put semantic labels first.  Native event records carry long hashes and
+  // paths before their instruction array; iterating the original object order
+  // could otherwise consume the bound before the names became visible.
+  const instructions = record.instructions;
+  if (Array.isArray(instructions)) {
+    const names = instructions
+      .slice(0, 16)
+      .map((item) => item && typeof item === 'object' && !Array.isArray(item)
+        ? (item as Record<string, unknown>).emedfName
+        : undefined)
+      .filter((name): name is string => typeof name === 'string' && name.length > 0);
+    summary.instructions = {
+      count: instructions.length,
+      names,
+      ...(instructions.length > names.length ? { namesTruncated: true } : {})
+    };
+  }
+  for (const [key, value] of Object.entries(record)) {
+    if (key === 'instructions') continue;
+    if (CLAIM_SUMMARY_KEYS.has(key)
+      && (typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean')) {
+      summary[key] = typeof value === 'string' ? boundedClaimString(value) : value;
+      continue;
+    }
+    if (CLAIM_SUMMARY_ARRAY_KEYS.has(key) && Array.isArray(value)) {
+      summary[key] = { count: value.length };
+    }
+  }
+  if (Object.keys(summary).length === 0) return 'structured evidence (raw payload retained in tool result)';
+  return boundedClaimString(JSON.stringify(summary));
+}
+
 function claimText(item: Record<string, unknown>, fallback: unknown): string {
   const value = firstRecordValue(item, ['text', 'value', 'body', 'excerpt', 'summary', 'description']);
-  if (typeof value === 'string') return value;
-  if (value !== undefined) return JSON.stringify(value) ?? String(value);
-  return typeof fallback === 'string' ? fallback : JSON.stringify(item) ?? '';
+  if (typeof value === 'string') return boundedClaimString(value);
+  if (value !== undefined) return boundedClaimString(JSON.stringify(value) ?? String(value));
+  if (typeof fallback === 'string') return boundedClaimString(fallback);
+  return summarizeClaimRecord(item);
 }
 
 /**
@@ -358,12 +420,30 @@ export function projectEvidenceClaims(
     const field = firstString(record, ['propertyKey', 'claimKey', 'claimKind', 'fieldId', 'fieldName', 'name']);
     const claimKind = field ?? (items.length > 1 ? 'object' : 'value');
     const version = firstVersion(record, parentVersion);
+    // A container result may contain multiple native children/tables. Root
+    // defaults identify their parent, not every field's table or child entry.
+    // Without this scope, equal row/field IDs in NpcParam and Bullet collide.
+    const itemNamespace = options.namespace
+      ?? firstString(record, ['namespace', 'paramName', 'table', 'category', 'format', 'resourceKind'])
+      ?? namespace;
+    const itemChildValue = firstRecordValue(record, ['childChain']);
+    const itemChild = firstString(record, ['entryName', 'childId', 'containerEntry']);
+    const itemChildChain = options.childChain
+      ?? (Array.isArray(itemChildValue)
+        ? itemChildValue
+        : itemChild
+          ? childChain.length === 1 && childChain[0] === 'root'
+            ? [itemChild]
+            : childChain[childChain.length - 1] === itemChild
+              ? childChain
+              : [...childChain, itemChild]
+          : childChain);
     const identity = normalizeEvidenceIdentity({
       workspaceId,
       canonicalOuterId,
-      childChain,
+      childChain: itemChildChain,
       domain,
-      namespace,
+      namespace: itemNamespace,
       objectHandle,
       claimKind,
       ...(options.language ?? firstString(record, ['language', 'lang'])

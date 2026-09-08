@@ -10,6 +10,7 @@ import type {
   MsgExport,
   ParamExport,
   ParamRowSymbol,
+  RagChunk,
   ReferenceEdge,
   ResourceKind,
   SymbolBundle,
@@ -158,12 +159,52 @@ export class WorkspaceIndex {
   private readonly coverageStore = new CoverageStateStore();
   /** Changed sources remain stale until a current-version projection is published. */
   private readonly staleSources = new Set<string>();
-  /** Highest accepted semantic version per physical source. */
+  /** Highest accepted semantic version per physical source/child identity. */
   private readonly latestProjectionVersions = new Map<string, CoverageSourceVersion>();
+  /** Monotonic identity epoch used by host-side RAG freshness masks. */
+  private nativeVersionEpoch = 0;
 
   constructor(workspaceId: string) {
     this.workspaceId = workspaceId;
     this.recomputeCoverageStates();
+  }
+
+  /**
+   * Clone the complete semantic snapshot for an isolated refresh candidate.
+   *
+   * Native post-commit refreshes may spend minutes outside the event loop
+   * while reading Bridge data and persisting RAG deltas.  A candidate must not
+   * share the live index's mutable arrays or scoped ACTION membership: a late
+   * or failed refresh must leave the live snapshot at its already-invalidated
+   * state.  Keep this copy operation here, where all private projection state
+   * is available, instead of reconstructing a partial bundle at each caller.
+   */
+  cloneForRefresh(): WorkspaceIndex {
+    const clone = new WorkspaceIndex(this.workspaceId);
+    clone.filesByUri.clear();
+    for (const [sourceUri, file] of this.filesByUri) {
+      clone.filesByUri.set(sourceUri, structuredClone(file));
+    }
+    clone.eventExports = structuredClone(this.eventExports);
+    clone.mapExports = structuredClone(this.mapExports);
+    clone.paramExports = structuredClone(this.paramExports);
+    clone.msgExports = structuredClone(this.msgExports);
+    clone.taeExports = structuredClone(this.taeExports);
+    clone.references = structuredClone(this.references);
+    clone.actionBinderMembershipCandidates = structuredClone(this.actionBinderMembershipCandidates);
+    clone.actionBinderMembershipReady = this.actionBinderMembershipReady;
+    clone.actionBinderMembershipReadyFamilies = new Set(this.actionBinderMembershipReadyFamilies);
+    clone.paramSemanticState = this.paramSemanticState;
+    clone.staleSources.clear();
+    for (const sourceUri of this.staleSources) clone.staleSources.add(sourceUri);
+    clone.latestProjectionVersions.clear();
+    for (const [sourceUri, version] of this.latestProjectionVersions) {
+      clone.latestProjectionVersions.set(sourceUri, structuredClone(version));
+    }
+    clone.nativeVersionEpoch = this.nativeVersionEpoch;
+    clone.coverageStore.clear();
+    for (const state of this.coverageStore.list()) clone.coverageStore.set(state);
+    return clone;
   }
 
   setFiles(files: readonly IndexedFile[]): void {
@@ -171,19 +212,94 @@ export class WorkspaceIndex {
     // background scanner is replacing the light catalog with hashed files.
     // Keep that read-only projection alive, but refresh the catalog half of
     // each source revision so later source validation remains exact.
+    const previousFiles = [...this.filesByUri.values()];
     const previousMembership = this.actionBinderMembershipCandidates;
+    const nextFiles = [...files];
+    // Resolve removed sources against one alias index.  Calling
+    // sourceUriMatchesFile for every previous/next pair turns a large scan
+    // replacement into O(fileCount^2) work.
+    const nextSourceKeyCounts = new Map<string, number>();
+    for (const next of nextFiles) {
+      for (const key of [next.sourceUri, next.sourcePath, next.relativePath, next.absolutePath]
+        .flatMap((value) => sourceReferenceKeys(value))) {
+        nextSourceKeyCounts.set(key, (nextSourceKeyCounts.get(key) ?? 0) + 1);
+      }
+    }
+    const removedSourceUris = previousFiles
+      .filter((previous) => ![previous.sourceUri, previous.sourcePath, previous.relativePath, previous.absolutePath]
+        .flatMap((value) => sourceReferenceKeys(value))
+        .some((key) => nextSourceKeyCounts.get(key) === 1))
+      .flatMap((file) => [file.sourceUri, file.sourcePath, file.relativePath, file.absolutePath]);
     this.filesByUri.clear();
-    for (const file of files) this.filesByUri.set(file.sourceUri, file);
+    for (const file of nextFiles) this.filesByUri.set(file.sourceUri, file);
     this.actionBinderMembershipCandidates = previousMembership.map((candidate) => ({
       characterFamily: candidate.characterFamily,
-      source: this.refreshActionBinderSourceRevision(candidate.source, files),
+      source: this.refreshActionBinderSourceRevision(candidate.source, nextFiles),
       entries: candidate.entries.map((entry) => ({ ...entry }))
     }));
     // The full projection is no longer authoritative after a catalog
     // replacement. Scoped foreground projections remain usable and are still
     // checked against the live file revision by the ACTION IPC layer.
     this.actionBinderMembershipReady = false;
+    for (const sourceUri of removedSourceUris) {
+      this.staleSources.add(sourceUri);
+      this.deleteProjectionVersionsForSource(sourceUri);
+    }
+    if (removedSourceUris.length > 0) {
+      this.coverageStore.markStale(removedSourceUris, 'source removed from indexed catalog');
+    }
+    this.nativeVersionEpoch += 1;
     this.recomputeCoverageStates();
+  }
+
+  /**
+   * Version of the native source identity snapshot used by host-side RAG
+   * freshness masks.  It changes when the file catalog, invalidation state, or
+   * an accepted native projection changes; callers can therefore cache a mask
+   * per (WorkspaceIndex, RagCorpus, epoch) instead of rescanning all chunks on
+   * every query.
+   */
+  getNativeVersionEpoch(): number {
+    return this.nativeVersionEpoch;
+  }
+
+  /**
+   * Return semantic/file chunks that cannot be proven to describe the current
+   * native source identity.  This is deliberately chunk-level: a partial read
+   * may publish a fresh row while durable storage still contains old rows from
+   * the same source.  Fresh rows survive; only the old/missing-provenance rows
+   * are excluded.
+   */
+  getRagStaleChunkIds(chunks: readonly RagChunk[]): string[] {
+    const staleSources = new Set(
+      this.getStaleSourceUris().flatMap((sourceUri) => sourceReferenceKeys(sourceUri))
+    );
+    const sourceState = new Map<string, { file?: IndexedFile; stale: boolean }>();
+    const staleIds = new Set<string>();
+    for (const chunk of chunks) {
+      let state = sourceState.get(chunk.sourceUri);
+      if (!state) {
+        const file = findUniqueSourceFile(this.filesByUri, chunk.sourceUri);
+        state = {
+          ...(file ? { file } : {}),
+          stale: sourceReferenceKeys(chunk.sourceUri).some((key) => staleSources.has(key))
+        };
+        sourceState.set(chunk.sourceUri, state);
+      }
+      const file = state.file;
+      if (state.stale) {
+        staleIds.add(chunk.chunkId);
+        continue;
+      }
+      if (!file) continue;
+      const chunkOuterHash = chunk.outerFileHash ?? chunk.sourceHash;
+      if (file.sha256 !== undefined && chunkOuterHash !== file.sha256) {
+        staleIds.add(chunk.chunkId);
+        continue;
+      }
+      if (chunk.sourceRevision !== file.mtimeMs) staleIds.add(chunk.chunkId);
+    }
+    return [...staleIds];
   }
 
   /**
@@ -304,6 +420,7 @@ export class WorkspaceIndex {
   markCoverageStale(sourceUris: readonly string[], reason = 'source revision changed'): CoverageState[] {
     const normalized = sourceUris.filter((sourceUri) => sourceUri.trim().length > 0);
     for (const sourceUri of normalized) this.staleSources.add(sourceUri);
+    if (normalized.length > 0) this.nativeVersionEpoch += 1;
     const marked = this.coverageStore.markStale(normalized, reason);
     this.recomputeCoverageStates();
     return marked;
@@ -317,11 +434,13 @@ export class WorkspaceIndex {
    */
   acceptNativeProjection(
     sourceUri: string,
-    version: Omit<CoverageSourceVersion, 'sourceUri'> = {}
+    version: Omit<CoverageSourceVersion, 'sourceUri'> = {},
+    projectionKey = sourceUri
   ): NativeProjectionAcceptance {
     const canonicalSourceUri = this.canonicalSourceUri(sourceUri);
     const incoming: CoverageSourceVersion = {
       sourceUri: canonicalSourceUri,
+      ...(version.outerFileHash ? { outerFileHash: version.outerFileHash } : {}),
       ...(version.sourceHash ? { sourceHash: version.sourceHash } : {}),
       ...(version.sourceRevision !== undefined ? { sourceRevision: version.sourceRevision } : {}),
       ...(version.readerSchemaVersion !== undefined ? { readerSchemaVersion: version.readerSchemaVersion } : {}),
@@ -338,7 +457,7 @@ export class WorkspaceIndex {
       };
     }
 
-    const previous = this.latestProjectionVersions.get(canonicalSourceUri);
+    const previous = this.latestProjectionVersions.get(projectionKey);
     const previousConflict = previous ? compareProjectionVersions(previous, incoming) : undefined;
     if (previousConflict) {
       return {
@@ -349,9 +468,15 @@ export class WorkspaceIndex {
       };
     }
 
-    if (hasConcreteVersion(incoming)) this.latestProjectionVersions.set(canonicalSourceUri, incoming);
+    if (hasConcreteVersion(incoming)) this.latestProjectionVersions.set(projectionKey, incoming);
     this.staleSources.delete(canonicalSourceUri);
     if (canonicalSourceUri !== sourceUri) this.staleSources.delete(sourceUri);
+    if (currentFile) {
+      for (const alias of [currentFile.sourceUri, currentFile.sourcePath, currentFile.relativePath, currentFile.absolutePath]) {
+        this.staleSources.delete(alias);
+      }
+    }
+    this.nativeVersionEpoch += 1;
     this.recomputeCoverageStates();
     return { accepted: true, sourceUri: canonicalSourceUri };
   }
@@ -360,6 +485,7 @@ export class WorkspaceIndex {
     const canonicalSourceUri = this.canonicalSourceUri(sourceUri);
     const incoming: CoverageSourceVersion = {
       sourceUri: canonicalSourceUri,
+      ...(version.outerFileHash ? { outerFileHash: version.outerFileHash } : {}),
       ...(version.sourceHash ? { sourceHash: version.sourceHash } : {}),
       ...(version.sourceRevision !== undefined ? { sourceRevision: version.sourceRevision } : {}),
       ...(version.readerSchemaVersion !== undefined ? { readerSchemaVersion: version.readerSchemaVersion } : {}),
@@ -403,7 +529,11 @@ export class WorkspaceIndex {
    */
   invalidateChangedSources(sourceUris: readonly string[]): SourceInvalidationResult {
     const uniqueSources = [...new Set(sourceUris.filter((sourceUri) => sourceUri.trim().length > 0))];
-    for (const sourceUri of uniqueSources) this.staleSources.add(sourceUri);
+    for (const sourceUri of uniqueSources) {
+      this.staleSources.add(sourceUri);
+      this.deleteProjectionVersionsForSource(sourceUri);
+    }
+    if (uniqueSources.length > 0) this.nativeVersionEpoch += 1;
     this.coverageStore.markStale(uniqueSources, 'source invalidated before semantic refresh');
     const changedFiles = uniqueSources
       .map((sourceUri) => findUniqueSourceFile(this.filesByUri, sourceUri))
@@ -468,6 +598,15 @@ export class WorkspaceIndex {
     return { sourceUris: uniqueSources, removed, referencesRebuilt };
   }
 
+  private deleteProjectionVersionsForSource(sourceUri: string): void {
+    const candidates = new Set([sourceUri, this.canonicalSourceUri(sourceUri)]);
+    for (const key of this.latestProjectionVersions.keys()) {
+      const separator = key.indexOf('\u0000');
+      const keySource = separator < 0 ? key : key.slice(0, separator);
+      if (candidates.has(keySource)) this.latestProjectionVersions.delete(key);
+    }
+  }
+
   invalidateSource(sourceUri: string): SourceInvalidationResult {
     return this.invalidateChangedSources([sourceUri]);
   }
@@ -478,7 +617,7 @@ export class WorkspaceIndex {
     // cannot erase an already indexed rich event body.
     if (value.events.length === 0) return false;
     const sourceUri = value.events[0]?.sourceUri;
-    if (sourceUri && !this.acceptNativeProjection(sourceUri, projectionVersion(value))) return false;
+    if (sourceUri && !this.acceptNativeProjection(sourceUri, projectionVersion(value)).accepted) return false;
     const key = eventExportKey(value);
     // An export without one unambiguous source identity cannot safely replace
     // another export. Keep it as a separate candidate instead of collapsing it
@@ -515,18 +654,26 @@ export class WorkspaceIndex {
   upsertMapExport(value: MapExport): boolean {
     const sourceUri = mapExportSourceUri(value);
     if (sourceUri && !this.acceptNativeProjection(sourceUri, {
+      ...(value.outerFileHash ? { outerFileHash: value.outerFileHash } : {}),
       ...(value.sourceHash ? { sourceHash: value.sourceHash } : {}),
       ...(value.sourceRevision !== undefined ? { sourceRevision: value.sourceRevision } : {}),
       readerSchemaVersion: value.readerSchemaRevision ?? MSB_READER_SCHEMA_REVISION,
       metadataSchemaVersion: METADATA_SCHEMA_HASH
-    })) return false;
-    const derivedKey = value.derivedKey ?? (value.sourceHash ? computeMapDerivedKey({ outerHash: value.sourceHash }) : undefined);
+    }).accepted) return false;
+    const derivedKey = value.derivedKey
+      ?? ((value.outerFileHash ?? value.sourceHash)
+        ? computeMapDerivedKey({ outerHash: value.outerFileHash ?? value.sourceHash! })
+        : undefined);
     const enriched: MapExport = {
       ...value,
       readerSchemaRevision: value.readerSchemaRevision ?? MSB_READER_SCHEMA_REVISION,
       ...(derivedKey ? { derivedKey } : {})
     };
-    this.mapExports = replaceByKey(this.mapExports, enriched.mapId, (item) => item.mapId, enriched);
+    // A map block name is not a physical identity: base/overlay (or two MSB
+    // containers with the same mapId) may legitimately expose the same block.
+    // Keep one projection per source+mapId so an incoming source cannot erase
+    // the other source before RAG chunk identity/persistence sees it.
+    this.mapExports = replaceByKey(this.mapExports, mapExportKey(enriched), mapExportKey, enriched);
     this.recomputeCoverageStates();
     return true;
   }
@@ -563,7 +710,7 @@ export class WorkspaceIndex {
 
   upsertParamExport(value: ParamExport): boolean {
     const sourceUri = paramExportSourceUri(value);
-    if (sourceUri && !this.acceptNativeProjection(sourceUri, projectionVersion(value))) return false;
+    if (sourceUri && !this.acceptNativeProjection(sourceUri, projectionVersion(value), paramExportKey(value)).accepted) return false;
     this.paramExports = replaceByKey(this.paramExports, paramExportKey(value), paramExportKey, value);
     if (this.paramExports.length > 0) {
       this.paramSemanticState = 'ready';
@@ -579,16 +726,21 @@ export class WorkspaceIndex {
     // Row IDs are only unique inside one native source.  Keying by rowId alone
     // used to let a live read from source B overwrite source A, and could then
     // carry source A's old semantic body under source B's hash.
-    const rows = new Map((existing?.rows ?? []).map((row) => [`${row.sourceUri}#${row.rowId}`, row]));
-    for (const row of value.rows) rows.set(`${row.sourceUri}#${row.rowId}`, row);
+    // Row IDs are scoped by the physical PARAM child, not merely by the
+    // packed source URI.  Two BND4 tables commonly contain the same numeric
+    // row ID; keep their identities separate while merging a slim live read.
+    const rows = new Map((existing?.rows ?? []).map((row) => [paramRowKey(row), row]));
+    for (const row of value.rows) rows.set(paramRowKey(row), row);
     const mergedRows = [...rows.values()];
     const sourceHashes = new Set(mergedRows.map((row) => row.sourceHash).filter((item): item is string => Boolean(item)));
+    const outerFileHashes = new Set(mergedRows.map((row) => row.outerFileHash).filter((item): item is string => Boolean(item)));
     const sourceRevisions = new Set(mergedRows.map((row) => row.sourceRevision).filter((item): item is number => item !== undefined));
     this.upsertParamExport({
       ...(value.sourceUri !== undefined ? { sourceUri: value.sourceUri } : existing?.sourceUri !== undefined ? { sourceUri: existing.sourceUri } : {}),
       ...(value.entryIndex !== undefined ? { entryIndex: value.entryIndex } : existing?.entryIndex !== undefined ? { entryIndex: existing.entryIndex } : {}),
       ...(value.entryName !== undefined ? { entryName: value.entryName } : existing?.entryName !== undefined ? { entryName: existing.entryName } : {}),
       paramName: value.paramName,
+      ...(outerFileHashes.size === 1 ? { outerFileHash: [...outerFileHashes][0] } : {}),
       ...(sourceHashes.size === 1 ? { sourceHash: [...sourceHashes][0] } : {}),
       ...(sourceRevisions.size === 1 ? { sourceRevision: [...sourceRevisions][0] } : {}),
       rows: mergedRows
@@ -597,7 +749,7 @@ export class WorkspaceIndex {
 
   upsertMsgExport(value: MsgExport): boolean {
     const sourceUri = msgExportSourceUri(value);
-    if (sourceUri && !this.acceptNativeProjection(sourceUri, projectionVersion(value))) return false;
+    if (sourceUri && !this.acceptNativeProjection(sourceUri, projectionVersion(value), msgProjectionKey(value)).accepted) return false;
     const key = value.category ?? 'default';
     this.msgExports = replaceByKey(this.msgExports, key, (item) => item.category ?? 'default', value);
     this.recomputeCoverageStates();
@@ -614,9 +766,11 @@ export class WorkspaceIndex {
     for (const entry of value.entries) entries.set(`${entry.sourceUri}#${entry.textId}`, entry);
     const mergedEntries = [...entries.values()];
     const sourceHashes = new Set(mergedEntries.map((entry) => entry.sourceHash).filter((item): item is string => Boolean(item)));
+    const outerFileHashes = new Set(mergedEntries.map((entry) => entry.outerFileHash).filter((item): item is string => Boolean(item)));
     const sourceRevisions = new Set(mergedEntries.map((entry) => entry.sourceRevision).filter((item): item is number => item !== undefined));
     this.upsertMsgExport({
       ...(value.category ? { category: value.category } : {}),
+      ...(outerFileHashes.size === 1 ? { outerFileHash: [...outerFileHashes][0] } : {}),
       ...(sourceHashes.size === 1 ? { sourceHash: [...sourceHashes][0] } : {}),
       ...(sourceRevisions.size === 1 ? { sourceRevision: [...sourceRevisions][0] } : {}),
       entries: mergedEntries
@@ -625,7 +779,7 @@ export class WorkspaceIndex {
 
   /** 照 upsertMapExport 抄：TAE 一份 anibnd 一个 TaeExport，按 sourceUri 替换。 */
   upsertTaeExport(value: TaeExport): boolean {
-    if (!this.acceptNativeProjection(value.sourceUri, projectionVersion(value))) return false;
+    if (!this.acceptNativeProjection(value.sourceUri, projectionVersion(value)).accepted) return false;
     this.taeExports = replaceByKey(this.taeExports, value.sourceUri, (item) => item.sourceUri, value);
     this.recomputeCoverageStates();
     return true;
@@ -801,6 +955,24 @@ export class WorkspaceIndex {
     return findUniqueSourceFile(this.filesByUri, uri);
   }
 
+  /**
+   * Return stale source identities plus every indexed alias for the same
+   * physical file.  RAG retrieval uses this small set to exclude the old
+   * durable corpus while a post-commit semantic refresh is in flight; it does
+   * not rebuild or clear the durable corpus.
+   */
+  getStaleSourceUris(): string[] {
+    const stale = new Set(this.staleSources);
+    for (const sourceUri of [...this.staleSources]) {
+      const file = findUniqueSourceFile(this.filesByUri, sourceUri);
+      if (!file) continue;
+      for (const alias of [file.sourceUri, file.sourcePath, file.relativePath, file.absolutePath]) {
+        if (alias.trim().length > 0) stale.add(alias);
+      }
+    }
+    return [...stale];
+  }
+
   listReferences(): ReferenceEdge[] {
     return [...this.references];
   }
@@ -846,8 +1018,9 @@ export class WorkspaceIndex {
           .filter((file) => file.parseStatus === 'parsed')
           .map((file) => file.sourceUri);
       const sourceVersions = files.map((file) => {
-        const version: CoverageSourceVersion = {
+      const version: CoverageSourceVersion = {
           sourceUri: file.sourceUri,
+          ...(file.sha256 ? { outerFileHash: file.sha256 } : {}),
           ...(file.sha256 ? { sourceHash: file.sha256 } : {}),
           sourceRevision: file.mtimeMs
         };
@@ -900,6 +1073,7 @@ export class WorkspaceIndex {
       staleSources: [...this.staleSources],
       sourceVersions: files.map((file) => ({
         sourceUri: file.sourceUri,
+        ...(file.sha256 ? { outerFileHash: file.sha256 } : {}),
         ...(file.sha256 ? { sourceHash: file.sha256 } : {}),
         sourceRevision: file.mtimeMs
       }))
@@ -941,6 +1115,10 @@ function mapExportSourceUri(value: MapExport): string | undefined {
   return value.entities[0]?.sourceUri ?? value.regions[0]?.sourceUri;
 }
 
+function mapExportKey(value: MapExport): string {
+  return `${mapExportSourceUri(value) ?? ''}\u0000${value.mapId}`;
+}
+
 function paramExportSourceUri(value: ParamExport): string | undefined {
   return value.sourceUri ?? value.rows[0]?.sourceUri;
 }
@@ -951,10 +1129,12 @@ function msgExportSourceUri(value: MsgExport): string | undefined {
 
 function projectionVersion(value: {
   sourceHash?: string;
+  outerFileHash?: string;
   sourceRevision?: number;
   readerSchemaRevision?: number;
 }): Omit<CoverageSourceVersion, 'sourceUri'> {
   return {
+    ...(value.outerFileHash ? { outerFileHash: value.outerFileHash } : {}),
     ...(value.sourceHash ? { sourceHash: value.sourceHash } : {}),
     ...(value.sourceRevision !== undefined ? { sourceRevision: value.sourceRevision } : {}),
     ...(value.readerSchemaRevision !== undefined ? { readerSchemaVersion: value.readerSchemaRevision } : {})
@@ -965,10 +1145,15 @@ function compareToIndexedFile(
   incoming: CoverageSourceVersion,
   file: Pick<IndexedFile, 'sourceUri' | 'sha256' | 'mtimeMs'>
 ): { code: NativeProjectionAcceptance['code']; reason: string } | undefined {
-  if (incoming.sourceHash && file.sha256 && incoming.sourceHash !== file.sha256) {
+  // Native `sourceHash` is the decoded leaf payload identity.  Packed files
+  // (DCX/BND4) therefore cannot be compared to the catalog hash directly.
+  // Bridge semantic exports must carry the independently computed outer file
+  // hash; sourceHash remains available for leaf-level CAS/conflict checks.
+  const comparableOuterHash = incoming.outerFileHash ?? incoming.sourceHash;
+  if (comparableOuterHash && file.sha256 && comparableOuterHash !== file.sha256) {
     return {
       code: 'NATIVE_PROJECTION_STALE',
-      reason: `native projection hash ${incoming.sourceHash} does not match current file ${file.sha256}`
+      reason: `native projection outer hash ${comparableOuterHash} does not match current file ${file.sha256}`
     };
   }
   if (incoming.sourceRevision !== undefined
@@ -1004,10 +1189,24 @@ function compareProjectionVersions(
         reason: 'same source revision carries conflicting source hashes'
       };
     }
+    if (incomingRevision === previousRevision
+      && previous.outerFileHash
+      && incoming.outerFileHash
+      && previous.outerFileHash !== incoming.outerFileHash) {
+      return {
+        code: 'NATIVE_PROJECTION_VERSION_CONFLICT',
+        reason: 'same source revision carries conflicting outer file hashes'
+      };
+    }
   } else if (previous.sourceHash && incoming.sourceHash && previous.sourceHash !== incoming.sourceHash) {
     return {
       code: 'NATIVE_PROJECTION_VERSION_CONFLICT',
       reason: 'native projection carries a conflicting source hash without comparable revisions'
+    };
+  } else if (previous.outerFileHash && incoming.outerFileHash && previous.outerFileHash !== incoming.outerFileHash) {
+    return {
+      code: 'NATIVE_PROJECTION_VERSION_CONFLICT',
+      reason: 'native projection carries a conflicting outer file hash without comparable revisions'
     };
   }
 
@@ -1029,7 +1228,8 @@ function comparableRevision(value: number | string | undefined): number | string
 }
 
 function hasConcreteVersion(value: CoverageSourceVersion): boolean {
-  return value.sourceHash !== undefined
+  return value.outerFileHash !== undefined
+    || value.sourceHash !== undefined
     || value.sourceRevision !== undefined
     || value.readerSchemaVersion !== undefined
     || value.metadataSchemaVersion !== undefined;
@@ -1058,6 +1258,18 @@ function paramExportKey(value: ParamExport): string {
   // typeName can differ between export/read paths (NPC_PARAM_ST vs NpcParam),
   // so including both would duplicate the same live row after a native read.
   return `${sourceUri}\u0000${entryIdentity.toLowerCase()}`;
+}
+
+function paramRowKey(value: Pick<ParamRowSymbol, 'sourceUri' | 'entryName' | 'entryIndex' | 'rowId'>): string {
+  const entryIdentity = value.entryName
+    ?? (value.entryIndex === undefined ? '' : `#${value.entryIndex}`);
+  return `${value.sourceUri}\u0000${entryIdentity.toLowerCase()}\u0000${value.rowId}`;
+}
+
+function msgProjectionKey(value: MsgExport): string {
+  const sourceUri = msgExportSourceUri(value) ?? '';
+  const category = value.category ?? value.entries[0]?.category ?? 'default';
+  return `${sourceUri}\u0000${category.toLowerCase()}`;
 }
 
 function eventExportKey(value: EventExport): string | undefined {

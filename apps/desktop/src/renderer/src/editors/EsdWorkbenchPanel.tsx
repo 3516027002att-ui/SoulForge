@@ -87,6 +87,18 @@ export interface EsdTransitionEditOutcome {
   refreshed?: EsdDocument | null;
 }
 
+/** 主界面显示用户能理解的读取级别，原始字段名不进入常驻状态文案。 */
+function esdReadLevelLabel(authority: string | null | undefined): string {
+  switch (authority) {
+    case 'partial': return '读取不完整';
+    case 'candidate': return '候选读取';
+    case 'fixture-confirmed': return '样本已确认';
+    case 'native-verified': return '原生读取已验证';
+    case 'unverified': return '尚未验证';
+    default: return authority ?? '未报告';
+  }
+}
+
 /** 解析用户输入的目标偏移：0x 前缀按十六进制，其余按十进制；-1 表示清空转移。 */
 export function parseEsdTargetOffset(text: string): number | null {
   const trimmed = text.trim();
@@ -402,8 +414,8 @@ export function EsdWorkbenchPanel(props: EsdWorkbenchPanelProps): ReactElement {
       ['已解析条件数', String(conditions?.parsedConditionCount ?? 0)],
       ['命令调用（声明）', String(document?.declaredCommandCallCount ?? 0)],
       ['命令调用（已解析）', String(document?.parsedCommandCallCount ?? 0)],
-      ['coverageComplete', document?.coverageComplete ? '是' : '否'],
-      ['authority', authority ?? '—']
+      ['覆盖范围完整', document?.coverageComplete ? '是' : '否'],
+      ['读取级别', esdReadLevelLabel(authority)]
     ];
   }
 
@@ -413,12 +425,12 @@ export function EsdWorkbenchPanel(props: EsdWorkbenchPanelProps): ReactElement {
 
   return (
     <WorkbenchLayout
-      label="Behavior 工作台"
+      label="行为工作台"
       columns={[
         {
           id: 'files-machines-states',
-          title: 'Files / Machines / States',
-          hint: `${states?.stateGroupCount ?? 0} machines · ${states?.stateCount ?? 0} states`,
+           title: '文件 / 状态机 / 状态',
+           hint: `${states?.stateGroupCount ?? 0} 个状态组 · ${states?.stateCount ?? 0} 个状态`,
           initialFlex: 0.28,
           minWidth: 200,
           children: (
@@ -427,7 +439,7 @@ export function EsdWorkbenchPanel(props: EsdWorkbenchPanelProps): ReactElement {
                 <p className="wb-empty">选择 .esd 文件以查看状态机数据。</p>
               ) : (
                 <>
-                  <div className="wb-list__group-label">Files</div>
+                   <div className="wb-list__group-label">文件</div>
                   <div
                     className="wb-row"
                     {...selectableRowAttributes({
@@ -438,7 +450,7 @@ export function EsdWorkbenchPanel(props: EsdWorkbenchPanelProps): ReactElement {
                   >
                     <span className="wb-row__name">{fileLabel(props.resourceUri)}</span>
                   </div>
-                  <div className="wb-list__group-label">Machines</div>
+                   <div className="wb-list__group-label">状态机</div>
                   {visibleStateGroups.map((group) => (
                     <div
                       key={group.groupId}
@@ -453,7 +465,7 @@ export function EsdWorkbenchPanel(props: EsdWorkbenchPanelProps): ReactElement {
                       <span className="wb-row__meta">{group.stateCount} 状态</span>
                     </div>
                   ))}
-                  <div className="wb-list__group-label">States</div>
+                   <div className="wb-list__group-label">状态</div>
                   {selectedMachineRow ? (
                     <div className="wb-row">
                       <span className="wb-row__name">状态组 {selectedMachineRow.groupId} 的状态</span>
@@ -483,8 +495,8 @@ export function EsdWorkbenchPanel(props: EsdWorkbenchPanelProps): ReactElement {
         },
         {
           id: 'conditions-commands',
-          title: 'Conditions / Commands',
-          hint: `${conditionSamples.length} conds · ${commandSamples.length} cmds`,
+           title: '条件与命令',
+           hint: `${conditionSamples.length} 个条件 · ${commandSamples.length} 个命令`,
           initialFlex: 0.32,
           minWidth: 220,
           children: (
@@ -492,7 +504,7 @@ export function EsdWorkbenchPanel(props: EsdWorkbenchPanelProps): ReactElement {
               {document === null && <p className="wb-empty">先选择 .esd 文件。</p>}
               {document !== null && (
                 <>
-                  <div className="wb-list__group-label">Conditions（转移载体）</div>
+                   <div className="wb-list__group-label">转移条件（决定跳转）</div>
                   {activeMachine !== null && (
                     <p className="muted" style={{ fontSize: 11 }}>
                       已按状态组 {activeMachine} 过滤
@@ -519,7 +531,7 @@ export function EsdWorkbenchPanel(props: EsdWorkbenchPanelProps): ReactElement {
                   {visibleConditions.length === 0 && (
                     <p className="wb-empty">没有可显示的条件样本。</p>
                   )}
-                  <div className="wb-list__group-label">Commands</div>
+                   <div className="wb-list__group-label">命令</div>
                   {visibleCommands.map(({ sample, index }) => (
                     <div
                       key={`${sample.sourceGroupId}-${sample.slot}-${sample.commandId}-${index}`}
@@ -544,7 +556,7 @@ export function EsdWorkbenchPanel(props: EsdWorkbenchPanelProps): ReactElement {
         },
         {
           id: 'inspector',
-          title: 'Inspector',
+           title: '详细信息',
           ...(selected ? { hint: selected.label } : {}),
           initialFlex: 0.4,
           minWidth: 260,
@@ -567,7 +579,7 @@ export function EsdWorkbenchPanel(props: EsdWorkbenchPanelProps): ReactElement {
                   {isPartial && (gapCount > 0 || shortfallCount > 0 || graphClosed === false) && (
                     <details className="esd-partial" data-testid="esd-partial-gaps">
                       <summary>
-                        authority={authority}
+                         读取级别：{esdReadLevelLabel(authority)}
                         {gapCount > 0 ? ` · 未解析区间 ${gapCount} 项` : ''}
                         {shortfallCount > 0 ? ` · 覆盖率缺口 ${shortfallCount} 项` : ''}
                         {graphClosed === false ? ' · 跳转图未闭合' : ''}
@@ -582,7 +594,7 @@ export function EsdWorkbenchPanel(props: EsdWorkbenchPanelProps): ReactElement {
                       </ul>
                     </details>
                   )}
-                  <div className="wb-list__group-label">写回（transition upsert）</div>
+                   <div className="wb-list__group-label">写回</div>
                   {selectedConditionSample ? (
                     <div data-testid="esd-transition-edit">
                       <div className="wb-prop">
@@ -602,7 +614,7 @@ export function EsdWorkbenchPanel(props: EsdWorkbenchPanelProps): ReactElement {
                         </span>
                       </div>
                       <p className="muted" style={{ fontSize: 11 }}>
-                        修改该条件的跳转目标；0x 前缀按十六进制，-1 清空转移。RPN 参数体永久不解码，不做假编辑。
+                         修改该条件的跳转目标；0x 前缀按十六进制，-1 清空转移。条件表达式保持只读。
                       </p>
                       {targetOffsetError && (
                         <p className="wb-empty diag-error" data-testid="esd-transition-edit-error">{targetOffsetError}</p>
@@ -619,12 +631,12 @@ export function EsdWorkbenchPanel(props: EsdWorkbenchPanelProps): ReactElement {
                         disabled={!canSubmit}
                         onClick={() => { void handleSubmitTransition(); }}
                       >
-                        {submitting ? '提交中…' : '提交转移目标'}
+                         {submitting ? '保存中…' : '保存跳转目标'}
                       </button>
                     </div>
                   ) : (
                     <p className="wb-empty">
-                      选中一条条件后，此处出现「重定向目标偏移」编辑入口（BEHAVIOR-55C transition upsert）；RPN 参数体永久不解码，不做假编辑。
+                      选中一条条件后，此处出现「重定向目标偏移」编辑入口；条件表达式保持只读，不提供未确认的编辑能力。
                     </p>
                   )}
                 </>

@@ -239,7 +239,8 @@ internal static class MapStaticGeometryService
         string ownerLeaseId = "",
         string resourceCacheKey = "",
         string resourceCacheKeySha256 = "",
-        string pathSourceGeneration = "")
+        string pathSourceGeneration = "",
+        MapTimingCollector? mapTiming = null)
     {
         ReleaseLeases(CollectExpiredSessions());
 
@@ -275,29 +276,33 @@ internal static class MapStaticGeometryService
         var reservationBytes = EstimateReservationBytes(flver);
         var cancellationToken =
             CurrentRequestContext.Value?.CancellationToken ?? CancellationToken.None;
-        var acquiredLease = cache.AcquireAsync(
-            canonicalKey,
-            reservationBytes,
-            expectedGeneration,
-            token =>
-            {
-                token.ThrowIfCancellationRequested();
-                var meshes = BuildMeshInfos(flver);
-                var totalTris = checked(meshes.Sum(item => item.Descriptor.TriangleStrip
-                    ? Math.Max(0, item.SourceIndexCount - 2)
-                    : item.SourceIndexCount / 3));
-                var residentBytes = EstimateResidentBytes(flver, meshes);
-                return ValueTask.FromResult(new ResourceLeaseCache<GeometryResource>.BuildResult(
-                    new GeometryResource
-                    {
-                        Flver = flver,
-                        Meshes = meshes,
-                        TotalTriangles = totalTris,
-                        ResidentBytes = residentBytes
-                    },
-                    residentBytes));
-            },
-            cancellationToken: cancellationToken).GetAwaiter().GetResult();
+        ResourceLeaseCache<GeometryResource>.Lease acquiredLease;
+        using (mapTiming?.Measure("resourceAcquireMs"))
+        {
+            acquiredLease = cache.AcquireAsync(
+                canonicalKey,
+                reservationBytes,
+                expectedGeneration,
+                token =>
+                {
+                    token.ThrowIfCancellationRequested();
+                    var meshes = BuildMeshInfos(flver);
+                    var totalTris = checked(meshes.Sum(item => item.Descriptor.TriangleStrip
+                        ? Math.Max(0, item.SourceIndexCount - 2)
+                        : item.SourceIndexCount / 3));
+                    var residentBytes = EstimateResidentBytes(flver, meshes);
+                    return ValueTask.FromResult(new ResourceLeaseCache<GeometryResource>.BuildResult(
+                        new GeometryResource
+                        {
+                            Flver = flver,
+                            Meshes = meshes,
+                            TotalTriangles = totalTris,
+                            ResidentBytes = residentBytes
+                        },
+                        residentBytes));
+                },
+                cancellationToken: cancellationToken).GetAwaiter().GetResult();
+        }
 
         ResourceLeaseCache<GeometryResource>.Lease? leaseToDispose = acquiredLease;
         try

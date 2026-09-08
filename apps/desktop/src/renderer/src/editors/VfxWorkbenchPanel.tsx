@@ -131,6 +131,18 @@ export function parseUnknownFxrTypes(gaps: string[]): FxrUnknownTypeSets {
   return { section4, section6, section7 };
 }
 
+/** 把解析器的内部缺口码转成可行动的用户说明，保留节号与类型编号。 */
+export function vfxGapLabel(gap: string): string {
+  const match = /^unknown-type:section(4|6|7):(\d+)$/.exec(gap);
+  if (match) {
+    const section = match[1] === '4' ? '节点' : match[1] === '6' ? '粒子宿主' : '属性';
+    return `第 ${match[1]} 节的${section}类型未识别（类型编号：${match[2]}）`;
+  }
+  if (gap.startsWith('section9-not-verified')) return '第 9 节布局尚未确认。';
+  if (gap.startsWith('section12-14:opaque-int-array')) return '第 12–14 节包含尚未确认的原始整数数据。';
+  return gap;
+}
+
 /** 递归节点树扁平化：给每个节点稳定路径 id 与深度（纯函数，可单测）。 */
 export function flattenFxrNodes(nodes: FxrNodeWire[]): FlatFxrNode[] {
   const out: FlatFxrNode[] = [];
@@ -251,19 +263,19 @@ export function fxrWriteBlockReasons(document: FxrDocument): FxrWriteBlockReason
   if (unknownTypes.length > 0) {
     reasons.push({
       code: 'unknown-node-types',
-      message: `存在 ${unknownTypes.length} 个未识别的 node type（unknown/unexpected-type gap）。`
+        message: `存在 ${unknownTypes.length} 个未识别的节点类型。`
     });
   }
   if (gaps.some((gap) => gap.startsWith('section9-not-verified'))) {
     reasons.push({
       code: 'section9-not-verified',
-      message: 'Section9 布局从未在真实样本验证，拒绝写回。'
+      message: '分区 9 的布局尚未在真实样本中验证，拒绝写回。'
     });
   }
   if (gaps.some((gap) => gap.startsWith('section12-14:opaque-int-array'))) {
     reasons.push({
       code: 'section12-14-nonempty',
-      message: 'Section12-14 非空布局未验证，拒绝写回。'
+      message: '分区 12–14 的非空布局尚未验证，拒绝写回。'
     });
   }
   return reasons;
@@ -285,10 +297,10 @@ export function fxrCommitNotice(
   }
   return {
     kind: 'failure',
-    title: 'FXR 写回失败（vfx-field-set 未生效）。',
+    title: 'FXR 写回失败。',
     lines: [
       ...outcome.diagnostics.map((d) => `${d.code}：${d.message}`),
-      '如已部分落盘将由 Patch Engine 回滚；已读节点树保留，未清空。'
+      '如已部分写入将自动回滚；已读节点树保留，未清空。'
     ]
   };
 }
@@ -515,7 +527,7 @@ export function VfxWorkbenchPanel(props: VfxWorkbenchPanelProps): ReactElement {
     setSelection({
       kind: 'host',
       id: String(index),
-      label: `host ${host.typeId}${known ? '' : '（未知类型）'}`
+          label: `粒子宿主 ${host.typeId}${known ? '' : '（未知类型）'}`
     });
   }
 
@@ -549,7 +561,7 @@ export function VfxWorkbenchPanel(props: VfxWorkbenchPanelProps): ReactElement {
         diagnostics: [{
           severity: 'error',
           code: 'FXR_WRITE_BRIDGE_UNAVAILABLE',
-          message: 'FXR 写回桥接能力缺失，无法提交 vfx-field-set。'
+          message: 'FXR 写回桥接能力缺失，无法修改特效字段。'
         }]
       });
       return;
@@ -639,28 +651,28 @@ export function VfxWorkbenchPanel(props: VfxWorkbenchPanelProps): ReactElement {
       const node = selectedNode.node;
       const known = !unknownTypes.section4.has(node.typeId);
       return [
-        ['typeId', String(node.typeId)],
-        ['状态', known ? '已知类型' : '未知类型（未识别，不给字段含义假数据）'],
-        ['childCount', String(node.childCount)],
-        ['drawEntityCount', String(node.drawEntityCount)],
-        ['drawEntityRefCount', String(node.drawEntityRefCount)],
-        ['childrenTruncated', node.childrenTruncated ? '是（上游已截断）' : '否']
+        ['类型编号', String(node.typeId)],
+        ['状态', known ? '已知类型' : '未知类型'],
+        ['子节点数', String(node.childCount)],
+        ['绘制实体数', String(node.drawEntityCount)],
+        ['绘制实体引用数', String(node.drawEntityRefCount)],
+        ['子节点是否截断', node.childrenTruncated ? '是（上游已截断）' : '否']
       ];
     }
     if (selection?.kind === 'host' && selectedHost) {
       const host = selectedHost;
       const known = !unknownTypes.section6.has(host.typeId);
       return [
-        ['typeId', String(host.typeId)],
-        ['状态', known ? '已知类型' : '未知类型（未识别，不给字段含义假数据）'],
-        ['unk02', `0x${host.unk02.toString(16)}`],
-        ['unk03', `0x${host.unk03.toString(16)}`],
-        ['unk04', String(host.unk04)],
-        ['section11Count', String(host.section11Count)],
-        ['section10Count', String(host.section10Count)],
-        ['section7Count', String(host.section7Count)],
-        ['properties', `${host.properties.length} 项`],
-        ['values', `${host.values.length} 个（Section11 不透明 int 数组）`]
+        ['类型编号', String(host.typeId)],
+        ['状态', known ? '已知类型' : '未知类型'],
+        ['原始字段 02', `0x${host.unk02.toString(16)}`],
+        ['原始字段 03', `0x${host.unk03.toString(16)}`],
+        ['原始字段 04', String(host.unk04)],
+        ['第 11 节数量', String(host.section11Count)],
+        ['第 10 节数量', String(host.section10Count)],
+        ['第 7 节数量', String(host.section7Count)],
+        ['属性数', `${host.properties.length} 项`],
+        ['数值数', `${host.values.length} 个（原始整数数组）`]
       ];
     }
     // file / 未选中：文件级统计。
@@ -673,10 +685,7 @@ export function VfxWorkbenchPanel(props: VfxWorkbenchPanelProps): ReactElement {
       ['rootNodeCount', String(document?.rootNodeCount ?? 0)],
       ['totalNodeCount', String(document?.totalNodeCount ?? 0)],
       ['hostCount', String(document?.hostCount ?? 0)],
-      ['propertyCount', String(document?.propertyCount ?? 0)],
-      ['section11ValueCount', String(document?.section11ValueCount ?? 0)],
-      ['roundTrip', document?.roundTrip?.consistent ? '一致 ✓' : '—'],
-      ['authority', document?.authority ?? '—']
+      ['propertyCount', String(document?.propertyCount ?? 0)]
     ];
   }
 
@@ -690,12 +699,12 @@ export function VfxWorkbenchPanel(props: VfxWorkbenchPanelProps): ReactElement {
       columns={[
         {
           id: 'effect-particles',
-          title: 'Effect / Particle list',
+          title: '效果与粒子',
           ...(document
             ? {
-                hint: `${document.totalNodeCount} nodes · ${document.hostCount} particles`
+                hint: `${document.totalNodeCount} 个节点 · ${document.hostCount} 个粒子`
               }
-            : { hint: `${props.files.length} files` }),
+            : { hint: `${props.files.length} 个文件` }),
           initialFlex: 0.3,
           minWidth: 220,
           children: (
@@ -747,7 +756,7 @@ export function VfxWorkbenchPanel(props: VfxWorkbenchPanelProps): ReactElement {
               {selectedUri !== null && loading && <p className="wb-empty">加载中…</p>}
               {selectedUri !== null && !loading && readFailure && (
                 <>
-                  <div className="wb-list__group-label">Effect 节点</div>
+                  <div className="wb-list__group-label">效果节点</div>
                   <p className="wb-empty diag-error" data-testid="vfx-read-failure">
                     {readFailure.message}
                   </p>
@@ -762,10 +771,10 @@ export function VfxWorkbenchPanel(props: VfxWorkbenchPanelProps): ReactElement {
               {selectedUri !== null && !loading && !readFailure && document !== null && (
                 <>
                   <div className="wb-list__group-label">
-                    Effect 节点（{document.effect.rootNodeCount} 根 · {flatNodes.length} 扁平）
+                     效果节点（{document.effect.rootNodeCount} 根 · {flatNodes.length} 个）
                   </div>
                   {visibleFlatNodes.length === 0 && (
-                    <p className="wb-empty">这个 effect 没有节点。</p>
+                    <p className="wb-empty">这个效果没有节点。</p>
                   )}
                   {visibleFlatNodes.map((item) => {
                     const unknown = unknownTypes.section4.has(item.node.typeId);
@@ -782,18 +791,18 @@ export function VfxWorkbenchPanel(props: VfxWorkbenchPanelProps): ReactElement {
                         style={{ paddingLeft: `${10 + item.depth * 14}px` }}
                       >
                         <span className="wb-row__name">
-                          {item.depth === 0 ? 'effect ' : 'node '}type {item.node.typeId}
+                          {item.depth === 0 ? '效果 ' : '节点 '}类型 {item.node.typeId}
                         </span>
                         <span className="wb-row__meta">
-                          {item.node.childCount} 子 · {item.node.drawEntityCount} draw
+                          {item.node.childCount} 个子节点 · {item.node.drawEntityCount} 个绘制实体
                         </span>
                         {unknown && <span className="wb-row__meta diag-warn">未知类型</span>}
                       </div>
                     );
                   })}
-                  <div className="wb-list__group-label">Particles（Section6 host · {hosts.length}）</div>
+                  <div className="wb-list__group-label">粒子（{hosts.length} 个）</div>
                   {visibleHosts.length === 0 && (
-                    <p className="wb-empty">这个 effect 没有可显示的粒子 host 样本。</p>
+                    <p className="wb-empty">这个效果没有可显示的粒子样本。</p>
                   )}
                   {visibleHosts.map((host, hostIndex) => {
                     const unknown = unknownTypes.section6.has(host.typeId);
@@ -808,7 +817,7 @@ export function VfxWorkbenchPanel(props: VfxWorkbenchPanelProps): ReactElement {
                         })}
                         data-testid={unknown ? 'vfx-unknown-host' : 'vfx-known-host'}
                       >
-                        <span className="wb-row__name">host {host.typeId}</span>
+                        <span className="wb-row__name">粒子宿主 {host.typeId}</span>
                         <span className="wb-row__meta">{host.section7Count} 属性</span>
                         {unknown && <span className="wb-row__meta diag-warn">未知类型</span>}
                       </div>
@@ -821,8 +830,7 @@ export function VfxWorkbenchPanel(props: VfxWorkbenchPanelProps): ReactElement {
         },
         {
           id: 'preview',
-          title: '真实预览',
-          ...(document ? { hint: document.authority } : {}),
+          title: '预览',
           initialFlex: 0.3,
           minWidth: 200,
           children: (
@@ -833,40 +841,14 @@ export function VfxWorkbenchPanel(props: VfxWorkbenchPanelProps): ReactElement {
                 FXR 粒子当前没有可用的实时预览渲染器。
               </p>
               <p className="muted" style={{ fontSize: 11, padding: '0 10px' }}>
-                本工作台不渲染伪造的 3D viewport、粒子回放或假 graph。选中节点/粒子的
-                结构详情见右侧 Inspector。
+                当前没有实时 3D 预览或粒子回放。选中节点或粒子后，结构详情会显示在右侧。
               </p>
-              {document && (
-                <>
-                  <div className="wb-list__group-label">文档状态</div>
-                  <div className="wb-props">
-                    <div className="wb-prop">
-                      <span className="wb-prop__name">authority</span>
-                      <span className="wb-prop__value wb-prop__value--readonly">
-                        {document.authority}
-                      </span>
-                    </div>
-                    <div className="wb-prop">
-                      <span className="wb-prop__name">roundTrip</span>
-                      <span className="wb-prop__value wb-prop__value--readonly">
-                        {document.roundTrip?.consistent ? '一致 ✓' : '不一致'}
-                      </span>
-                    </div>
-                    <div className="wb-prop">
-                      <span className="wb-prop__name">Section11 值</span>
-                      <span className="wb-prop__value wb-prop__value--readonly">
-                        {document.section11ValueCount} 个（不透明 int 数组，无 schema）
-                      </span>
-                    </div>
-                  </div>
-                </>
-              )}
             </div>
           )
         },
         {
           id: 'inspector',
-          title: 'Inspector',
+          title: '检查信息',
           ...(selection ? { hint: selection.label } : {}),
           initialFlex: 0.4,
           minWidth: 280,
@@ -887,16 +869,6 @@ export function VfxWorkbenchPanel(props: VfxWorkbenchPanelProps): ReactElement {
                   </div>
                   {/* 未知 node：明确标 blocked，不给假字段含义。原始结构字段仍可看
                       （它们是解析出来的真实值，但代表什么含义未知）。 */}
-                  {selectedNodeUnknown && (
-                    <div className="wb-notice" data-testid="vfx-unknown-node-block">
-                      <span className="diag-warn">
-                        该节点类型未识别（unknown-type:section4:{selectedNode?.node.typeId}）
-                      </span>
-                      <span className="muted">
-                        不提供该类型的字段含义数据；下方为已解析的原始结构字段。
-                      </span>
-                    </div>
-                  )}
                   <div className="wb-props">
                     {inspectorRows().map(([name, value]) => (
                       <div key={name} className="wb-prop">
@@ -907,19 +879,9 @@ export function VfxWorkbenchPanel(props: VfxWorkbenchPanelProps): ReactElement {
                   </div>
                   {selectedHost && (
                     <>
-                      {selectedHostUnknown && (
-                        <div className="wb-notice" data-testid="vfx-unknown-host-block">
-                          <span className="diag-warn">
-                            该 host 类型未识别（unknown-type:section6:{selectedHost.typeId}）
-                          </span>
-                          <span className="muted">
-                            不提供该类型的字段含义数据；下方为已解析的原始结构字段。
-                          </span>
-                        </div>
-                      )}
                       {writeBlocked && (
                         <div className="wb-notice" data-testid="vfx-write-blocked">
-                          <span className="diag-warn">该文件不满足已知布局门，写回已预先禁用。</span>
+                          <span className="diag-warn">写回不可用。</span>
                           {writeBlockReasons.map((reason) => (
                             <span
                               key={reason.code}
@@ -931,9 +893,9 @@ export function VfxWorkbenchPanel(props: VfxWorkbenchPanelProps): ReactElement {
                           ))}
                         </div>
                       )}
-                      <div className="wb-list__group-label">属性（Section7 · {selectedHost.properties.length}）</div>
+                      <div className="wb-list__group-label">属性（第 7 节 · {selectedHost.properties.length} 项）</div>
                       {visibleProperties.length === 0 && (
-                        <p className="wb-empty">这个 host 没有可显示的属性样本。</p>
+                        <p className="wb-empty">这个粒子宿主没有可显示的属性样本。</p>
                       )}
                       {visibleProperties.map((prop, propIndex) => {
                         const propUnknown = unknownTypes.section7.has(prop.typeId);
@@ -945,9 +907,9 @@ export function VfxWorkbenchPanel(props: VfxWorkbenchPanelProps): ReactElement {
                               data-testid={propUnknown ? 'vfx-unknown-property' : 'vfx-known-property'}
                             >
                               <span className="wb-prop__name">
-                                property {prop.typeId}
+                                属性类型 {prop.typeId}
                                 {propUnknown ? <span className="wb-prop__enum"> 未知类型</span> : null}
-                                <span className="wb-prop__enum"> · s11×{prop.section11Count} · s8×{prop.section8Count}</span>
+                                <span className="wb-prop__enum"> · 第11节×{prop.section11Count} · 第8节×{prop.section8Count}</span>
                               </span>
                               <span className="wb-prop__value wb-prop__value--readonly">
                                 {fxrValuePreview(prop.values)}
@@ -967,8 +929,8 @@ export function VfxWorkbenchPanel(props: VfxWorkbenchPanelProps): ReactElement {
                                   <div key={`${prop.typeId}-s8-${section8Index}`}>
                                     <div className="wb-prop">
                                       <span className="wb-prop__name">
-                                        section8 {section8.typeId} · s11×{section8.section11Count}
-                                        <span className="wb-prop__enum"> · {section8.section9.length} s9</span>
+                                         第8节 {section8.typeId} · 第11节×{section8.section11Count}
+                                         <span className="wb-prop__enum"> · {section8.section9.length} 个第9节项</span>
                                       </span>
                                     </div>
                                     {renderValueRows({
@@ -989,7 +951,7 @@ export function VfxWorkbenchPanel(props: VfxWorkbenchPanelProps): ReactElement {
                       })}
                       {!selectedHostUnknown && (
                         <>
-                          <div className="wb-list__group-label">host Section11 值（container=host）</div>
+                           <div className="wb-list__group-label">粒子宿主数值</div>
                           {renderValueRows({
                             container: 'host',
                             hostIndex: selectedHostIndex,
@@ -1004,12 +966,12 @@ export function VfxWorkbenchPanel(props: VfxWorkbenchPanelProps): ReactElement {
                   {isPartial && (unparsedGaps.length > 0 || layoutWarnings.length > 0) && (
                     <details className="mtd-partial" data-testid="vfx-partial-gaps">
                       <summary>
-                        authority={document.authority} · 未解析区间 {unparsedGaps.length} 项
+                         未解析区间 {unparsedGaps.length} 项
                         {layoutWarnings.length > 0 ? ` · 布局警告 ${layoutWarnings.length} 条` : ''}
                       </summary>
                       <ul>
                         {visibleGaps.map((gap, gapIndex) => (
-                          <li key={`gap-${gapIndex}`} className="muted">{gap}</li>
+                          <li key={`gap-${gapIndex}`} className="muted">{vfxGapLabel(gap)}</li>
                         ))}
                         {visibleWarnings.map((warning, warningIndex) => (
                           <li key={`warn-${warningIndex}`} className="muted">{warning}</li>
@@ -1017,20 +979,19 @@ export function VfxWorkbenchPanel(props: VfxWorkbenchPanelProps): ReactElement {
                       </ul>
                     </details>
                   )}
-                  <div className="wb-list__group-label">写回（vfx-field-set）</div>
+                  <div className="wb-list__group-label">修改特效字段</div>
                   {commitOutcome && <VfxCommitNotice outcome={commitOutcome} />}
                   {selectedHost && !selectedHostUnknown && !writeBlocked && (
                     <p className="muted" style={{ fontSize: 10, padding: '0 10px' }}>
-                      Section11 值是混合 int/float 位模式的 int32（无 schema），按不透明
-                      int32 编辑，可输入 -2147483648…4294967295。
+                       这些数值按原始 32 位整数处理，字段含义尚未确认；可输入 -2147483648…4294967295。
                     </p>
                   )}
                   {!selectedHost && (
-                    <p className="wb-empty">选中一个粒子（host）后即可编辑其数值字段。</p>
+                    <p className="wb-empty">选中一个粒子宿主后即可编辑其数值字段。</p>
                   )}
                   {writeBlocked && (
                     <p className="muted" style={{ fontSize: 10, padding: '0 10px' }}>
-                      已知布局门未满足时编辑控件为禁用态，不做假写回。
+                       布局信息未充分确认时，编辑控件保持禁用，避免写入不确定字段。
                     </p>
                   )}
                 </>

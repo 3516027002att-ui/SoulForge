@@ -44,9 +44,9 @@ export interface AgentSessionRunParams {
   apiKey: string;
   prompt: string;
   /**
-   * Optional system prompt prepended ahead of every message in this run. Only
-   * injected when no `role === 'system'` message already exists (a resumed
-   * session may carry one from an earlier run).
+   * Current host policy for this run. Resumed system messages are discarded:
+   * old policy, permission notices and transient host instructions never
+   * outrank the current host configuration.
    */
   systemPrompt?: string;
   permissionMode: AgentPermissionMode;
@@ -171,45 +171,37 @@ export async function runAgentSession(params: AgentSessionRunParams): Promise<Ag
     }
   };
 
-  // The loop records only messages it appends; seed the durable record with
-  // any prior messages from a resumed session plus this run's user prompt so
-  // resume chains stay complete across multiple turns.
-  if (params.resumeFrom?.messages && params.resumeFrom.messages.length > 0) {
-    for (const message of params.resumeFrom.messages) {
-      recorder.enqueue({ type: 'message', step: 0, message });
-    }
-  }
-  recorder.enqueue({ type: 'message', step: 0, message: { role: 'user', content: params.prompt } });
-
   const messages: ChatMessage[] = [];
-  const systemPrompt = params.systemPrompt;
-  const resumedMessages = params.resumeFrom ? params.resumeFrom.messages : [];
-  const hasResumedSystem = resumedMessages.some((message) => message.role === 'system');
-  if (hasResumedSystem) {
-    messages.push(...resumedMessages);
-  } else if (systemPrompt !== undefined && systemPrompt.length > 0) {
-    messages.push({ role: 'system', content: systemPrompt });
-    if (params.permissionMode === 'full') {
-      messages.push({
-        role: 'system',
-        content: '【系统运行模式通知】：当前环境已分配完整写入权限（fullPermission 模式）。用户指令为明确的修改任务；在完成必要的名称、参数和事件原生定位与核对后，应直接调用写入工具（如 mutate_param_fields、apply_emevd_dsl 等）实施修改、提交并原生回读验证，无须停下等待二次确认。'
-      });
-    }
-    messages.push(...resumedMessages);
-  } else {
-    if (params.permissionMode === 'full') {
-      messages.push({
-        role: 'system',
-        content: '【系统运行模式通知】：当前环境已分配完整写入权限（fullPermission 模式）。用户指令为明确的修改任务；在完成必要的名称、参数和事件原生定位与核对后，应直接调用写入工具（如 mutate_param_fields、apply_emevd_dsl 等）实施修改、提交并原生回读验证，无须停下等待二次确认。'
-      });
-    }
-    messages.push(...resumedMessages);
+  const resumedMessages = (params.resumeFrom?.messages ?? [])
+    .filter((message) => message.role !== 'system');
+  if (params.systemPrompt !== undefined && params.systemPrompt.length > 0) {
+    messages.push({ role: 'system', content: params.systemPrompt });
   }
+  if (params.permissionMode === 'full') {
+    messages.push({
+      role: 'system',
+      content: '【系统运行模式通知】：当前环境已分配完整写入权限（fullPermission 模式）。用户指令为明确的修改任务；在完成必要的名称、参数和事件原生定位与核对后，应直接调用写入工具（如 mutate_param_fields、apply_emevd_dsl 等）实施修改、提交并原生回读验证，无须停下等待二次确认。'
+    });
+  }
+  messages.push(...resumedMessages);
   messages.push({
     role: 'user',
     content: params.prompt,
     ...(params.userImages && params.userImages.length > 0 ? { images: params.userImages } : {})
   });
+
+  // runAgentToolLoop records only messages appended during execution. Seed the
+  // durable rollout with the exact normalized history sent to the provider,
+  // excluding this turn's transient image payload.
+  for (const message of messages) {
+    recorder.enqueue({
+      type: 'message',
+      step: 0,
+      message: message.role === 'user' && message.content === params.prompt
+        ? { role: 'user', content: params.prompt }
+        : message
+    });
+  }
 
   // Deltas are transient UI payloads but still cross a process boundary —
   // redact secret-shaped text before emission, matching the durable policy.

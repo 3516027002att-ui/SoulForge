@@ -1105,7 +1105,7 @@ test('设置归属：通用设置无模型控件，Agent 顶栏齿轮打开模�
 
 test('模型服务高级选项：默认收起，展开可配置采样参数并保存；可拉取模型列表', async () => {
   const { app, window } = await launchApp();
-  await window.getByRole('button', { name: '打开 Agent 历史' }).click();
+  await window.getByRole('button', { name: '打开任务历史' }).click();
   const history = window.locator('.agent-secondary-drawer:not(.is-hidden)');
   await history.getByRole('button', { name: '模型设置' }).click();
   const drawer = window.locator('.agent-secondary-drawer:not(.is-hidden)');
@@ -1894,7 +1894,7 @@ test('AI 任务：会话历史全量渲染、载入与承接各自走对应 IPC'
   const { app, window } = await launchApp();
   await openFixtureWorkspace(window);
 
-  await window.getByRole('button', { name: '打开 Agent 历史' }).click();
+  await window.getByRole('button', { name: '打开任务历史' }).click();
   const history = window.locator('.agent-history');
   await history.getByRole('button', { name: '刷新' }).click();
   await expect.poll(async () => (await ipcCalls(app))['ai.agent.sessions'] ?? 0).toBeGreaterThan(0);
@@ -1906,16 +1906,11 @@ test('AI 任务：会话历史全量渲染、载入与承接各自走对应 IPC'
   await expect(history.getByRole('button', { name: '下一页' })).toHaveCount(0);
   await expect(history.getByText('会话 1–', { exact: false })).toHaveCount(0);
 
-  // 数据源上限必须明说：主进程只回最近 50 个会话文件。
-  await expect(window.locator('[data-testid="agent-sessions-source-limit"]')).toContainText('最近 50 个会话文件');
-
-  // 载入：走 ai.agent.session.load，详情报出真实条数与「只取尾部若干条」。
+  // 载入：走 ai.agent.session.load，详情只显示载入/中断状态。
   await history.getByRole('button', { name: '查看' }).first().click();
   await expect.poll(async () => (await ipcCalls(app))['ai.agent.session.load'] ?? 0).toBeGreaterThan(0);
   const detail = window.locator('[data-testid="agent-session-detail"]');
-  await expect(detail).toContainText('共 12 条消息');
-  await expect(detail).toContainText('尾部 1 条');
-  await expect(detail).toContainText('plan');
+  await expect(detail).toContainText('已载入任务记录。');
 
   // 承接：走 ai.agent.run 并带 resumeSessionPath。
   await history.getByRole('button', { name: '承接' }).first().click();
@@ -2046,6 +2041,53 @@ test('T6 冷启动：不打开工作区也能发送并收到模型回答', async
   expect(bodyText).not.toContain('WORKSPACE_NOT_ANALYZED');
 
   await window.screenshot({ path: 'test-results/14-t6-cold-start-send.png' });
+  await app.close();
+});
+
+test('Agent 附件：空闲空草稿不循环重渲染，附件变动随发送上送', async () => {
+  const { app, window, pageErrors, consoleErrors } = await launchApp({
+    FIXTURE_AGENT_ATTACHMENT_SUCCESS: '1'
+  });
+
+  // fixture-only React commit probe：通过 BrowserContext init script 在 reload 前
+  // 安装最小 DevTools hook；它不改生产 DOM，只记录 React root commit 次数。
+  // 这样可以区分「没有 console error」与「effect 仍在持续提交」两种情况。
+  await window.context().addInitScript(() => {
+    const hook = globalThis.__REACT_DEVTOOLS_GLOBAL_HOOK__ ?? {};
+    hook.supportsFiber = true;
+    hook.inject ??= () => 1;
+    hook.onCommitFiberUnmount ??= () => undefined;
+    hook.onCommitFiberRoot = () => {
+      globalThis.__sfReactCommitCount = (globalThis.__sfReactCommitCount ?? 0) + 1;
+    };
+    globalThis.__REACT_DEVTOOLS_GLOBAL_HOOK__ = hook;
+    globalThis.__sfReactCommitCount = 0;
+  });
+  await window.reload();
+
+  // 空闲态先保持一段时间：旧的非稳定 onAttachmentsChange 会在空数组 effect
+  // 中持续 setState。这里只看真实 Electron 页面与 React commit 结果，不以
+  // App.tsx 字符串断言代替行为验证。
+  await expect(window.locator('.agent__composer textarea')).toBeVisible();
+  await window.waitForTimeout(1_200);
+  const commitsAtIdleBaseline = await window.evaluate(() => globalThis.__sfReactCommitCount ?? 0);
+  expect(commitsAtIdleBaseline).toBeGreaterThan(0);
+  await window.waitForTimeout(800);
+  const commitsAfterIdleWindow = await window.evaluate(() => globalThis.__sfReactCommitCount ?? 0);
+  expect(commitsAfterIdleWindow).toBe(commitsAtIdleBaseline);
+  expect(pageErrors, `pageerror: ${pageErrors.join('\n')}`).toEqual([]);
+  expect(consoleErrors, `console error: ${consoleErrors.join('\n')}`).toEqual([]);
+
+  const attachmentButton = window.getByRole('button', { name: '添加附件' });
+  await expect(attachmentButton).toBeEnabled();
+  await attachmentButton.click();
+  await expect(window.locator('.composer-context .ctx-chip')).toContainText('fixture-note.txt');
+
+  await window.locator('.agent__composer textarea').fill('带附件运行一次');
+  await window.locator('.agent__composer').getByRole('button', { name: '发送' }).click();
+  await expect.poll(async () => (await ipcCalls(app))['ai.agent.run:attachments=1'] ?? 0)
+    .toBeGreaterThan(0);
+
   await app.close();
 });
 

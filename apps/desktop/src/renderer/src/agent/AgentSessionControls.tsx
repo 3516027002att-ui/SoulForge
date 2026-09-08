@@ -55,12 +55,12 @@ export function AgentSessionControls({
         {/* 标签是「草稿生成器」而不是「模型服务」：这三个选项只作用于计划草稿，
             真实任务用哪个服务由「AI 任务」区的下拉决定。同名会让用户以为在这里
             选了就生效。 */}
-        <label className="agent-controls__label" htmlFor="agent-provider">草稿生成器</label>
+        <label className="agent-controls__label" htmlFor="agent-provider">计划生成模型</label>
         <select
           id="agent-provider"
           value={provider}
           onChange={(event) => onProviderChange(event.target.value as AiProvider)}
-          aria-label="计划草稿生成器"
+          aria-label="计划生成模型"
         >
           <option value="mock">离线计划（不调用模型）</option>
           <option value="openai">OpenAI</option>

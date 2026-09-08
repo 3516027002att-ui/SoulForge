@@ -142,7 +142,9 @@ export function ActionAnimationList(props: ActionAnimationListProps): ReactEleme
       {flattenedAnimations.length === 0 && <p className="wb-empty">无匹配动画</p>}
       {props.animationsTruncated && (
         <div className="wb-list__group-label" data-testid="tae-animations-truncated">
-          动画列表已截断（仍有未加载项）
+          {props.onLoadMore
+            ? '当前仅显示部分动画，点击加载更多'
+            : '当前仅显示部分动画，仍有条目未加载'}
         </div>
       )}
       {props.paginationNotice && (
@@ -163,4 +165,3 @@ export function ActionAnimationList(props: ActionAnimationListProps): ReactEleme
     </div>
   );
 }
-

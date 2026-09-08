@@ -124,7 +124,6 @@ export function AgentTaskPanel({
   sessionsError,
   sessionDetail,
   permissionLockReason,
-  tools,
   onSelectService,
   onRun,
   onCancel,
@@ -177,7 +176,7 @@ export function AgentTaskPanel({
           语义时，Playwright 的严格模式会把它变成一条真实的回归。
         */}
         <p className="agent-task__lock" data-testid="agent-task-permission">
-          权限模式：{task.mode ?? '计划模式（主进程锁定）'}。{permissionLockReason}
+          权限模式：{task.mode ?? '计划模式（不可直接写入）'}。{permissionLockReason}
         </p>
       </div>
 
@@ -240,11 +239,6 @@ export function AgentTaskPanel({
             <span>本步上下文 {formatBytes(task.contextBytes)}</span>
           </div>
         )}
-        {task.compactedWindows > 0 && (
-          <div className="agent-log__row is-warn">
-            <span>历史已压缩 {task.compactedWindows} 次，早期消息不再逐字参与推理</span>
-          </div>
-        )}
         {task.rolloutFileName !== null && (
           <div className="agent-log__row">
             <span>会话记录：{task.rolloutFileName}</span>
@@ -278,31 +272,9 @@ export function AgentTaskPanel({
         </div>
       )}
 
-      {/* 工具清单来自 ai.tools（listAiTools），是权限阶梯的展示侧。真实权限判定
-          在主进程，这里只显示 main 已注册的工具及其等级。 */}
-      <details data-testid="agent-tool-inventory">
-        <summary>已注册工具 {tools.length} 个</summary>
-        <div className="agent-log">
-          {tools.length === 0
-            ? <div className="agent-log__row"><span className="muted">主进程未回报任何已注册工具</span></div>
-            : tools.map((tool) => (
-                <div key={tool.name} className="agent-log__row">
-                  <span title={tool.description}>
-                    {tool.name} · {tool.permissionLevel ?? tool.permission}
-                  </span>
-                </div>
-              ))}
-        </div>
-      </details>
-
       <details data-testid="agent-session-history">
-        <summary>会话历史 {sessions.length} 条</summary>
+        <summary>任务历史 {sessions.length} 条</summary>
         {sessionsError !== null && <p className="danger">{sessionsError}</p>}
-        {/* 主进程只回最近 50 条（ipc.ts:3034 的 listRolloutSessions(dir, 50)）。
-            这不是渲染截断而是数据源上限，必须说明，否则用户会把 50 当成全部。 */}
-        <p className="muted" data-testid="agent-sessions-source-limit">
-          会话列表只回报最近 50 个会话文件；更早的记录仍在磁盘上，但不在此列表内。
-        </p>
         <div className="agent-log">
           {sessions.length === 0
             ? <div className="agent-log__row"><span className="muted">没有会话记录</span></div>
@@ -336,17 +308,7 @@ export function AgentTaskPanel({
         {sessionDetail !== null && (
           <div className="agent-log" data-testid="agent-session-detail">
             <div className="agent-log__row">
-              <span>
-                已载入 {sessionDetail.sessionPath}：共 {sessionDetail.messageCount} 条消息，
-                本次只取尾部 {sessionDetail.loadedMessages} 条
-              </span>
-            </div>
-            <div className="agent-log__row">
-              <span>
-                权限模式 {sessionDetail.permissionMode ?? '未记录'} · 协议 {sessionDetail.protocol ?? '未记录'}
-                {sessionDetail.interrupted ? ' · 曾中断' : ''}
-                {sessionDetail.compactedWindows > 0 ? ` · 压缩 ${sessionDetail.compactedWindows} 次` : ''}
-              </span>
+              <span>{sessionDetail.interrupted ? '该任务曾中断。' : '已载入任务记录。'}</span>
             </div>
             {sessionDetail.parseErrors > 0 && (
               <div className="agent-log__row is-warn">

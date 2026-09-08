@@ -1,4 +1,5 @@
 using System.Text;
+using System.Security.Cryptography;
 using System.Text.RegularExpressions;
 
 static class SemanticCandidateExports
@@ -19,6 +20,9 @@ static class SemanticCandidateExports
 
     private static BridgeResult<object>? TryExportEvent(string sourcePath, string? oodleRuntimeRoot)
     {
+        // Keep candidate detection bounded.  Native export below takes one
+        // complete receipt only after this magic check, so its outer hash and
+        // decoded leaf always describe the same read.
         var sample = ReadPrefix(sourcePath);
 
         var synthetic = SyntheticFixtureExports.TryExport(sourcePath, "event");
@@ -28,12 +32,14 @@ static class SemanticCandidateExports
 
         try
         {
-            var payload = NativeLeafPayload.Resolve(sourcePath, oodleRuntimeRoot, ".emevd");
+            var sourceBytes = File.ReadAllBytes(sourcePath);
+            var payload = NativeLeafPayload.Resolve(sourceBytes, sourcePath, oodleRuntimeRoot, ".emevd");
             if (!StartsWith(payload, (byte)'E', (byte)'V', (byte)'D', 0))
                 return NativeUnsupported(sourcePath, "event", "Resolved payload is not a Sekiro EMEVD document.");
 
             var document = EmevdNativeDocument.Read(payload);
             var sourceUri = BridgeResult<object>.MakeSourceUri(sourcePath);
+            var outerFileHash = HashHex(sourceBytes);
             var mapId = InferMapId(sourcePath);
             var events = new object[document.Events.Count];
             for (var eventIndex = 0; eventIndex < document.Events.Count; eventIndex++)
@@ -108,7 +114,7 @@ static class SemanticCandidateExports
                         sourceUri,
                         new { parser = "sekiro-emevd-native-v1", events = events.Length, instructions = document.Instructions.Count, sourceHash = document.SourceHash })
                 },
-                new { mapId, sourceHash = document.SourceHash, events });
+                new { mapId, sourceHash = document.SourceHash, outerFileHash, events });
         }
         catch (Exception ex) when (IsNativeReadException(ex))
         {
@@ -177,12 +183,14 @@ static class SemanticCandidateExports
         {
             try
             {
-                var payload = NativeLeafPayload.Resolve(sourcePath, oodleRuntimeRoot, ".msb");
+                var sourceBytes = File.ReadAllBytes(sourcePath);
+                var payload = NativeLeafPayload.Resolve(sourceBytes, sourcePath, oodleRuntimeRoot, ".msb");
                 if (!StartsWith(payload, (byte)'M', (byte)'S', (byte)'B', (byte)' '))
                     return NativeUnsupported(sourcePath, "map", "Resolved payload is not a Sekiro MSB document.");
 
                 var document = MsbNativeDocument.Read(payload);
                 var sourceUri = BridgeResult<object>.MakeSourceUri(sourcePath);
+                var outerFileHash = HashHex(sourceBytes);
                 var mapId = InferMapId(sourcePath) ?? Path.GetFileNameWithoutExtension(sourcePath).ToLowerInvariant();
                 var partOccurrences = new Dictionary<string, int>(StringComparer.Ordinal);
                 var regionOccurrences = new Dictionary<string, int>(StringComparer.Ordinal);
@@ -263,7 +271,7 @@ static class SemanticCandidateExports
                             sourceUri,
                             new { parser = "sekiro-msb-native-v1", mapId, parts = entities.Length, regions = regions.Length, models = document.Models.Count, sourceHash = document.SourceHash })
                     },
-                    new { mapId, sourceHash = document.SourceHash, entities, regions });
+                    new { mapId, sourceHash = document.SourceHash, outerFileHash, entities, regions });
             }
             catch (Exception ex) when (IsNativeReadException(ex))
             {
@@ -309,12 +317,14 @@ static class SemanticCandidateExports
             new { mapId = mapIdFallback, entities = entitiesFallback, regions = Array.Empty<object>() });
     }
 
-    private static BridgeResult<object> TryExportNativeParams(string sourcePath, string? oodleRuntimeRoot)
+    private static BridgeResult<object> TryExportNativeParams(string sourcePath, string? oodleRuntimeRoot, byte[]? sourceBytes = null)
     {
         var sourceUri = BridgeResult<object>.MakeSourceUri(sourcePath);
         try
         {
-            var leaves = NativeLeafPayload.ResolveAll(sourcePath, oodleRuntimeRoot, ".param");
+            sourceBytes ??= File.ReadAllBytes(sourcePath);
+            var outerFileHash = HashHex(sourceBytes);
+            var leaves = NativeLeafPayload.ResolveAll(sourceBytes, sourcePath, oodleRuntimeRoot, ".param");
             var projections = new List<NativeParamProjection>(leaves.Count);
             var diagnostics = new List<Diagnostic>();
             foreach (var leaf in leaves)
@@ -347,7 +357,12 @@ static class SemanticCandidateExports
                             {
                                 parser = "sekiro-param-native-v1",
                                 entryIndex = leaf.Index,
-                                entryName = NativeLeafBaseName(leaf.Name),
+                                // The physical BND4 child name is the stable
+                                // projection identity. Keep its full native
+                                // name here; ParamName remains the display/type
+                                // fallback above and must not be used as the
+                                // container key.
+                                entryName = leaf.Name,
                                 rowIndex,
                                 nativeNameOffset = row.OriginalNameOffset,
                                 nativeDataOffset = row.OriginalDataOffset,
@@ -362,7 +377,7 @@ static class SemanticCandidateExports
                         paramName,
                         document.SourceHash,
                         leaf.Index,
-                        NativeLeafBaseName(leaf.Name),
+                        leaf.Name,
                         rows));
                 }
                 catch (Exception ex) when (IsNativeReadException(ex))
@@ -372,7 +387,7 @@ static class SemanticCandidateExports
                         "PARAM_NATIVE_CHILD_SKIPPED",
                         "BND4 中的 PARAM 子项无法由原生解析器读取，已保留结构化诊断并继续其它子项。",
                         sourceUri,
-                        new { entryIndex = leaf.Index, entryName = NativeLeafBaseName(leaf.Name), error = ex.Message }));
+                        new { entryIndex = leaf.Index, entryName = leaf.Name, error = ex.Message }));
                 }
             }
 
@@ -404,7 +419,8 @@ static class SemanticCandidateExports
                 "PARAM_NATIVE_SEMANTIC_EXPORT",
                 "已由原生 PARAM 文档解析器展开 BND4 子项、行 ID、行名和原始行身份；字段值等待 Paramdef 投影。",
                 sourceUri,
-                new { parser = "sekiro-param-native-v1", paramsCount = projections.Count, rows = projections.Sum(item => item.Rows.Length) }));
+                new { parser = "sekiro-param-native-v1", paramsCount = projections.Count, rows = projections.Sum(item => item.Rows.Length), outerFileHash }));
+            data["outerFileHash"] = outerFileHash;
             return BridgeResult<object>.Partial(sourcePath, "param", diagnostics, data);
         }
         catch (Exception ex) when (IsNativeReadException(ex))
@@ -439,6 +455,9 @@ static class SemanticCandidateExports
         var slash = normalized.LastIndexOf('/');
         return slash >= 0 ? normalized[(slash + 1)..] : normalized;
     }
+
+    private static string HashHex(byte[] bytes) =>
+        Convert.ToHexString(SHA256.HashData(bytes)).ToLowerInvariant();
 
     private static BridgeResult<object> NativeUnsupported(string sourcePath, string resourceKind, string message)
     {

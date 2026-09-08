@@ -159,7 +159,7 @@ describe('Composer 结构（§12.6 / S32 输入卡）', () => {
       'aria-label="引用框选"', // S10：@/# 合成「引用」框选钮
       'aria-label="添加附件"', // attachment
       'class="agent-mode-select"', // Ask/Plan/Edit 下拉（2-B 后不再携带权限锁定）
-      'aria-label="effort"', // 2-D：思考强度标签与 aria-label 都是 effort
+      'aria-label="思考强度"', // 2-D：思考强度控件使用用户可读中文标签
       '>发送<' // send/stop
     ];
     let prev = -1;
@@ -249,7 +249,7 @@ describe('区块顺序与默认折叠状态', () => {
     assert.match(html, /面向 Sekiro Mod 的安全协作编辑/);
     assert.match(html, /理解当前参数、文本、事件与资源选区/);
     assert.match(html, /先分析与规划，再生成可审查的修改/);
-    assert.match(html, /经 Patch Engine 提交，验证失败自动回滚/);
+     assert.doesNotMatch(html, /经 Patch Engine 提交，验证失败自动回滚/);
     // 旧欢迎文案不得残留。
     assert.ok(!html.includes('先读取工作区证据'), '旧欢迎文案已替换');
     assert.ok(!html.includes('从证据出发'), '旧欢迎文案已替换');
@@ -311,6 +311,29 @@ describe('区块顺序与默认折叠状态', () => {
     assert.ok(!html.includes('会话记录：'), '对话区不得显示会话 jsonl 文件名');
     assert.ok(!html.includes('rollout-secret.jsonl'));
     assert.ok(!html.includes('data-testid="agent-task-status"'), '正常结束后不再挂一条思考已完成状态行');
+  });
+
+  it('partial 终态保留状态行，明确提示未完成验证；正常 stop 仍隐藏', () => {
+    const partial = {
+      ...INITIAL_AGENT_TASK_STATE,
+      sessionId: 's-partial',
+      phase: 'done' as const,
+      finishReason: 'partial',
+      startedAt: 1_000,
+      endedAt: 3_000,
+      narrations: [{ step: 1, text: '已完成部分检查。' }]
+    };
+    const partialHtml = render({ task: { ...render0Task(), task: partial } });
+    assert.match(partialHtml, /data-testid="agent-task-status"/);
+    assert.match(partialHtml, /部分完成\/未完成验证/);
+
+    const stopped = {
+      ...partial,
+      sessionId: 's-stop',
+      finishReason: 'stop'
+    };
+    const stoppedHtml = render({ task: { ...render0Task(), task: stopped } });
+    assert.ok(!stoppedHtml.includes('data-testid="agent-task-status"'), '正常 stop 仍不显示结束状态行');
   });
 
   it('工具消息存在时仍保留任务时间线里的模型口播', () => {
@@ -419,7 +442,7 @@ describe('空状态保持克制且可执行', () => {
     assert.match(html, /面向 Sekiro Mod 的安全协作编辑/);
     assert.match(html, /理解当前参数、文本、事件与资源选区/);
     assert.match(html, /先分析与规划，再生成可审查的修改/);
-    assert.match(html, /经 Patch Engine 提交，验证失败自动回滚/);
+     assert.doesNotMatch(html, /经 Patch Engine 提交，验证失败自动回滚/);
     assert.ok(!html.includes('可以这样问'), '空状态不展示示例教程');
     assert.ok(!html.includes('推荐问题'), '禁止推荐问题按钮');
   });
@@ -614,7 +637,7 @@ describe('AGENT-60D 消息流四态与 Change Review（§12.5/§12.9/§12.10）'
       }
     });
     assert.match(html, /approval-unavailable/, '目标/diff/影响缺数据时如实显示不可用');
-    assert.match(html, /主进程未能为该调用生成 diff/, 'diff 缺失的说明存在');
+    assert.match(html, /暂时无法生成这次改动的预览/, 'diff 缺失的说明存在');
   });
 
   it('提交失败显示失败阶段与回滚结果（结构化诊断，不吞异常）', () => {
@@ -693,7 +716,7 @@ describe('AGENT-60D 消息流四态与 Change Review（§12.5/§12.9/§12.10）'
     assert.ok(html.includes('agent-failure-card'), '失败卡 class 存在');
   });
 
-  it('模型/工具/历史迁到二级抽屉，主栏不再常驻', () => {
+  it('模型/历史迁到二级抽屉，工具库存不再显示', () => {
     const running = {
       ...INITIAL_AGENT_TASK_STATE,
       sessionId: 's',
@@ -703,12 +726,12 @@ describe('AGENT-60D 消息流四态与 Change Review（§12.5/§12.9/§12.10）'
       }]
     };
     const html = render({ task: { ...render0Task(), task: running } });
-    // S11：抽屉收起时不渲染（整列换页）——主栏不常驻任务面板/工具库存，抽屉
+    // S11：抽屉收起时不渲染（整列换页）——主栏不常驻任务面板，抽屉
     // 只在打开时作为第二个面出现。
     assert.ok(!html.includes('data-testid="agent-secondary-drawer"'), '抽屉收起时不占 DOM');
     assert.ok(!html.includes('data-testid="agent-task-panel"'), '主栏不再常驻任务面板');
     assert.ok(!html.includes('data-testid="agent-tool-inventory"'), '工具库存不在主栏');
-    // 工具库存确实在抽屉内：直接渲染抽屉历史视图验证归属。
+    // 工具权限仍由主进程管理，但不在历史抽屉渲染工具库存。
     const drawerHtml = renderToStaticMarkup(
       <AgentSecondaryDrawer
         open={true}
@@ -726,8 +749,8 @@ describe('AGENT-60D 消息流四态与 Change Review（§12.5/§12.9/§12.10）'
         }}
       />
     );
-    assert.match(drawerHtml, /data-testid="agent-tool-inventory"/, '工具库存迁入抽屉');
-    assert.match(drawerHtml, /search_resources/, '抽屉内显示工具名');
+    assert.doesNotMatch(drawerHtml, /data-testid="agent-tool-inventory"/);
+    assert.doesNotMatch(drawerHtml, /search_resources/);
   });
 
   it('S11 抽屉整列换页：打开面只有抽屉，不含欢迎/composer/资源引用', () => {
@@ -985,8 +1008,8 @@ describe('S9：Ask 菜单 portal 后 CSS 用 fixed（锚点是 viewport 坐标�
     });
     assert.match(html, /agent-plan-switch-banner/);
     assert.match(html, /方案已规划就绪/);
-    assert.match(html, /切换为 Edit 模式/);
-    assert.match(html, /切换为 Bypass 模式/);
+    assert.match(html, /切换为编辑模式/);
+    assert.match(html, /切换为自动执行模式/);
   });
 
   it('已切换到 Edit 或 Bypass 模式时不显示 Plan 切换横幅', () => {

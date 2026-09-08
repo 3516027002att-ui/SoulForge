@@ -50,10 +50,10 @@ describe('TpfWorkbenchPanel 初始结构（挂载即有的骨架）', () => {
 
   it('四栏 Containers/Textures/Viewer/Properties 同时存在（TEXTURE-52B）', () => {
     const html = render();
-    assert.match(html, /aria-label="Containers"/);
-    assert.match(html, /aria-label="Textures"/);
-    assert.match(html, /aria-label="Viewer"/);
-    assert.match(html, /aria-label="Properties"/);
+    assert.match(html, /aria-label="容器"/);
+    assert.match(html, /aria-label="纹理"/);
+    assert.match(html, /aria-label="预览"/);
+    assert.match(html, /aria-label="属性"/);
   });
 
   it('Containers 栏列出全部容器，显示名去扩展，物理路径只在 title', () => {

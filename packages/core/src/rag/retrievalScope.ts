@@ -218,6 +218,7 @@ export function corpusRevision(corpus: RagCorpus): string {
       chunk.symbolUri,
       chunk.family,
       chunk.contentHash,
+      chunk.outerFileHash ?? null,
       chunk.sourceHash ?? null,
       chunk.sourceRevision ?? null
     ]));
@@ -242,6 +243,9 @@ export interface RetrievalCacheKeyInput {
   candidateLimit: number;
   excerptChars: number;
   expandReferences: boolean;
+  excludeSourceUris?: readonly string[];
+  excludeChunkIds?: readonly string[];
+  excludeChunkMaskKey?: string;
   mode?: 'lexical' | 'hybrid';
 }
 
@@ -258,6 +262,13 @@ export function retrievalCacheKey(input: RetrievalCacheKeyInput): string {
     candidateLimit: input.candidateLimit,
     excerptChars: input.excerptChars,
     expandReferences: input.expandReferences,
+    excludeSourceUris: input.excludeSourceUris
+      ? [...new Set(input.excludeSourceUris.map(normalizeSourceIdentity).filter(Boolean))].sort()
+      : [],
+    excludeChunkMaskKey: input.excludeChunkMaskKey ?? null,
+    excludeChunkIds: input.excludeChunkMaskKey === undefined && input.excludeChunkIds
+      ? [...new Set(input.excludeChunkIds.filter((chunkId) => chunkId.trim().length > 0))].sort()
+      : [],
     mode: input.mode ?? 'lexical'
   });
 }
@@ -304,6 +315,15 @@ function normalizeFamilies(
     selected.add(family as RagChunkFamily);
   }
   return selected;
+}
+
+function normalizeSourceIdentity(value: string): string {
+  return value
+    .trim()
+    .replaceAll('\\', '/')
+    .replace(/^file:\/\//iu, '')
+    .replace(/\/+/gu, '/')
+    .toLocaleLowerCase();
 }
 
 function normalizeOptionalSet(

@@ -37,6 +37,8 @@ export interface RagChunk {
   numericIds: number[];
   contentHash: string;
   sourceRevision?: number;
+  /** SHA-256 of the packed/outer source file; sourceHash remains leaf identity. */
+  outerFileHash?: string;
   sourceHash?: string;
   relativePath?: string;
   resourceKind?: ResourceKind;
@@ -97,4 +99,8 @@ export interface RagRetrieveOptions {
   excerptChars?: number;
   families?: readonly RagChunkFamily[];
   expandReferences?: boolean;
+  /** Source identities that are known stale in the live workspace index. */
+  excludeSourceUris?: readonly string[];
+  /** Chunk identities rejected by a host-side source provenance mask. */
+  excludeChunkIds?: readonly string[];
 }

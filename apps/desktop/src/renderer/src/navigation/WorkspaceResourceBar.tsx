@@ -21,7 +21,6 @@ export function WorkspaceResourceBar({ mode, counts, onSelect }: WorkspaceResour
     ? RESOURCE_FAMILIES.reduce((sum, family) =>
       family.id === 'all' ? sum : sum + (counts[family.id] ?? 0), 0) + (counts.unknown ?? 0)
     : null;
-  const unknownCount = counts?.unknown ?? 0;
 
   function handleTabKeyDown(event: KeyboardEvent<HTMLButtonElement>, index: number): void {
     let next: number | null = null;
@@ -61,15 +60,6 @@ export function WorkspaceResourceBar({ mode, counts, onSelect }: WorkspaceResour
           );
         })}
       </div>
-      {unknownCount > 0 && (
-        <span
-          className="resource-bar__unknown"
-          role="note"
-          title="存在未归类资源；仅在 all 中显示，不合并进 other"
-        >
-          unknown {unknownCount}
-        </span>
-      )}
     </nav>
   );
 }

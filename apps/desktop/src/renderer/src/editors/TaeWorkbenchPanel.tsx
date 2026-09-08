@@ -541,14 +541,14 @@ export function TaeEventDetail(props: TaeEventDetailProps): ReactElement {
         </div>
       ) : params.undecodedHex ? (
         <p className="muted" style={{ fontSize: 11 }} data-testid="tae-params-undecoded">
-          未解码（模板无此事件类型定义）：{params.undecodedHex}
+          {params.undecodedHex}
         </p>
       ) : (
         <p className="muted" style={{ fontSize: 11 }}>该事件类型没有参数。</p>
       )}
       {params && params.tailHex && (
         <p className="muted" style={{ fontSize: 11 }} data-testid="tae-params-tail">
-          未解码尾部：{params.tailHex}
+          {params.tailHex}
         </p>
       )}
       <div className="wb-list__group-label">编辑事件时间</div>
@@ -1305,8 +1305,8 @@ export function TaeWorkbenchPanel(props: TaeWorkbenchPanelProps): ReactElement {
       columns={[
         {
           id: 'animations',
-          title: 'Animations',
-          hint: `${pages?.animations.animationCount ?? 0} animations`,
+           title: '动画',
+           hint: `${pages?.animations.animationCount ?? 0} 个动画`,
           initialFlex: 0.22,
           minWidth: 220,
           children: (
@@ -1353,8 +1353,8 @@ export function TaeWorkbenchPanel(props: TaeWorkbenchPanelProps): ReactElement {
         },
         {
           id: 'events',
-          title: 'Events / 词条',
-          hint: selectedAnimation ? `${selectedAnimationEvents.length} events` : '—',
+           title: '事件 / 词条',
+           hint: selectedAnimation ? `${selectedAnimationEvents.length} 个事件` : '—',
           initialFlex: 0.28,
           minWidth: 220,
           children: (
@@ -1464,7 +1464,7 @@ export function TaeWorkbenchPanel(props: TaeWorkbenchPanelProps): ReactElement {
                   />
                   {clipLoading && (
                     <p className="muted" style={{ fontSize: 11 }} data-testid="tae-clip-loading">
-                      正在读取当前动画 Clip…
+                       正在读取当前动画片段…
                     </p>
                   )}
                   {clipError && (

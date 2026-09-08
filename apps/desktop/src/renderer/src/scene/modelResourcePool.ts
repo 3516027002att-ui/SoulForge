@@ -19,10 +19,15 @@ type ThreeModule = typeof import('three');
 
 export interface MeshGeometryWire {
   positionsBase64: string;
+  /** Renderer-local decoded bytes. These never cross the IPC boundary. */
+  positionsBytes?: Uint8Array | undefined;
   indicesBase64?: string | undefined;
+  indicesBytes?: Uint8Array | undefined;
   indexSize?: 16 | 32 | undefined;
   uvsBase64?: string | undefined;
+  uvsBytes?: Uint8Array | undefined;
   normalsBase64?: string | undefined;
+  normalsBytes?: Uint8Array | undefined;
   vertexCount: number;
   texturePreviewToken?: string | undefined;
   textureColorSpace?: string | undefined;
@@ -42,8 +47,22 @@ export function normalizeModelResourceKey(modelName: string): string {
   return base.toLowerCase().replace(/\.(flver|mapbnd|objbnd|chrbnd)(\.dcx)?$/i, '');
 }
 
-function decodeBase64F32(base64: string, expectedCount: number): Float32Array {
-  const bytes = decodeBase64ToUint8Array(base64);
+function normalizeTypedByteView(bytes: Uint8Array, alignment: 2 | 4, label: string): Uint8Array {
+  if (bytes.byteLength % alignment !== 0) {
+    throw new Error(`MAP_STATIC_GEOMETRY_INVALID: ${label} byteLength is not ${alignment}-byte aligned`);
+  }
+  // Native IPC payloads are copied into offset-zero arrays. Keep the renderer
+  // seam safe for callers that provide a legal subview with a non-zero offset.
+  return bytes.byteOffset % alignment === 0 ? bytes : new Uint8Array(bytes);
+}
+
+function decodeBase64F32(base64: string, expectedCount: number, decodedBytes?: Uint8Array, label = 'float32'): Float32Array {
+  const bytes = decodedBytes
+    ? normalizeTypedByteView(decodedBytes, 4, label)
+    : decodeBase64ToUint8Array(base64);
+  if (decodedBytes && bytes.byteLength !== expectedCount * Float32Array.BYTES_PER_ELEMENT) {
+    throw new Error(`MAP_STATIC_GEOMETRY_INVALID: ${label} byteLength does not match vertex count`);
+  }
   const view = new Float32Array(bytes.buffer, bytes.byteOffset, Math.floor(bytes.length / 4));
   return view.length >= expectedCount ? view : new Float32Array(expectedCount);
 }
@@ -92,12 +111,19 @@ function assertOwnerInvariant(entry: { owners: Set<string>; refCount: number }, 
 }
 
 export class ModelResourcePool {
+  private static readonly maxTextureTokenHashes = 2048;
+  // Data-URI keys are often large PNG payloads. Bound total retained key text
+  // as well as entry count; a single over-budget token is hashed but not cached.
+  private static readonly maxTextureTokenHashChars = 4 * 1024 * 1024;
   // outer by rendererContextGeneration, inner by content key (no zero-padding)
   private readonly contextPools = new Map<number, ContextPools>();
   // legacy single-context compat for existing Proxy path
   private legacyGeometries = new Map<string, BufferGeometry>();
   private legacyMaterials = new Map<string, Material>();
   private legacyTextures = new Map<string, import('three').Texture>();
+  /** Bounded validation/hash cache; values are null for rejected tokens. */
+  private readonly textureTokenKeys = new Map<string, string | null>();
+  private textureTokenKeyChars = 0;
   private primitiveBox: BufferGeometry | null = null;
   private primitiveSphere: BufferGeometry | null = null;
   private wireframeMaterial: Material | null = null;
@@ -233,12 +259,17 @@ export class ModelResourcePool {
     const geometry = track(new three.BufferGeometry());
     geometry.setAttribute(
       'position',
-      new three.BufferAttribute(decodeBase64F32(data.positionsBase64, data.vertexCount * 3), 3)
+      new three.BufferAttribute(
+        decodeBase64F32(data.positionsBase64, data.vertexCount * 3, data.positionsBytes, 'positions'),
+        3
+      )
     );
 
-    if (data.indicesBase64) {
-      const indexBytes = decodeBase64ToUint8Array(data.indicesBase64);
+    if (data.indicesBase64 || data.indicesBytes) {
       const is32 = data.indexSize === 32;
+      const indexBytes = data.indicesBytes
+        ? normalizeTypedByteView(data.indicesBytes, is32 ? 4 : 2, 'indices')
+        : decodeBase64ToUint8Array(data.indicesBase64 ?? '');
       if (is32) {
         const view = new Uint32Array(indexBytes.buffer, indexBytes.byteOffset, Math.floor(indexBytes.length / 4));
         geometry.setIndex(new three.Uint32BufferAttribute(view, 1));
@@ -251,14 +282,25 @@ export class ModelResourcePool {
     if (data.uvsBase64) {
       geometry.setAttribute(
         'uv',
-        new three.BufferAttribute(decodeBase64F32(data.uvsBase64, data.vertexCount * 2), 2)
+        new three.BufferAttribute(
+          decodeBase64F32(data.uvsBase64, data.vertexCount * 2, data.uvsBytes, 'uvs'),
+          2
+        )
+      );
+    } else if (data.uvsBytes) {
+      geometry.setAttribute(
+        'uv',
+        new three.BufferAttribute(decodeBase64F32('', data.vertexCount * 2, data.uvsBytes, 'uvs'), 2)
       );
     }
 
-    if (data.normalsBase64) {
+    if (data.normalsBase64 || data.normalsBytes) {
       geometry.setAttribute(
         'normal',
-        new three.BufferAttribute(decodeBase64F32(data.normalsBase64, data.vertexCount * 3), 3)
+        new three.BufferAttribute(
+          decodeBase64F32(data.normalsBase64 ?? '', data.vertexCount * 3, data.normalsBytes, 'normals'),
+          3
+        )
       );
     } else {
       geometry.computeVertexNormals();
@@ -345,10 +387,28 @@ export class ModelResourcePool {
     texturePreviewToken: string,
     colorSpace = 'srgb'
   ): Material {
-    if (!/^data:image\/png;base64,[A-Za-z0-9+/=]+$/.test(texturePreviewToken)) {
+    let tokenKey: string | null | undefined = this.textureTokenKeys.get(texturePreviewToken);
+    if (tokenKey === undefined && !this.textureTokenKeys.has(texturePreviewToken)) {
+      tokenKey = /^data:image\/png;base64,[A-Za-z0-9+/=]+$/.test(texturePreviewToken)
+        ? hashTextureToken(texturePreviewToken)
+        : null;
+      if (texturePreviewToken.length <= ModelResourcePool.maxTextureTokenHashChars) {
+        while (
+          this.textureTokenKeys.size >= ModelResourcePool.maxTextureTokenHashes
+          || this.textureTokenKeyChars + texturePreviewToken.length > ModelResourcePool.maxTextureTokenHashChars
+        ) {
+          const oldest = this.textureTokenKeys.keys().next().value;
+          if (typeof oldest !== 'string') break;
+          this.textureTokenKeys.delete(oldest);
+          this.textureTokenKeyChars -= oldest.length;
+        }
+        this.textureTokenKeys.set(texturePreviewToken, tokenKey);
+        this.textureTokenKeyChars += texturePreviewToken.length;
+      }
+    }
+    if (!tokenKey) {
       return this.getDefaultRealMaterial(three, track);
     }
-    const tokenKey = hashTextureToken(texturePreviewToken);
     const normalizedColorSpace = colorSpace.toLowerCase() === 'linear' ? 'linear' : 'srgb';
     // The material state is fully described by the preview identity and color
     // space. Do not include the model name: the same map texture is commonly
@@ -451,6 +511,8 @@ export class ModelResourcePool {
     this.legacyMaterials.clear();
     for (const texture of this.legacyTextures.values()) texture.dispose();
     this.legacyTextures.clear();
+    this.textureTokenKeys.clear();
+    this.textureTokenKeyChars = 0;
     this.primitiveBox = null;
     this.primitiveSphere = null;
     this.wireframeMaterial = null;

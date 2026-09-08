@@ -1,4 +1,5 @@
 using System.Collections.Concurrent;
+using System.Diagnostics;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
@@ -498,7 +499,8 @@ internal static class BridgeDaemonHost
             OutputPath = outputPath,
             CancellationSource = requestCts,
             Priority = priority,
-            EnqueuedAt = DateTimeOffset.UtcNow
+            EnqueuedAt = DateTimeOffset.UtcNow,
+            EnqueuedTimestamp = Stopwatch.GetTimestamp()
         };
 
         if (state.HasRequest(frame.RequestId))
@@ -547,6 +549,10 @@ internal static class BridgeDaemonHost
     {
         var frame = work.Frame;
         var payload = work.Payload;
+        var mapTiming = MapTimingCollector.TryCreate(
+            payload.Command,
+            payload.Options ?? default,
+            work.EnqueuedTimestamp);
         try
         {
             if (frame.DeadlineUtc is { } deadline && deadline <= DateTimeOffset.UtcNow)
@@ -576,27 +582,38 @@ internal static class BridgeDaemonHost
             {
                 var service = new BridgeCommandService();
                 result = await service.ExecuteAsync(
-                    payload.Command,
+                    payload.Command!,
                     work.CanonicalFilePath,
                     work.CancellationSource.Token,
                     state.OodleRuntimeRoot,
                     payload.Options ?? default,
                     work.OutputPath,
                     state.AllowedRoots,
-                    frame.WorkspaceSessionId);
+                    frame.WorkspaceSessionId,
+                    mapTiming);
             }
             work.CancellationSource.Token.ThrowIfCancellationRequested();
             if (string.Equals(payload.Command, "read-map-static-geometry", StringComparison.OrdinalIgnoreCase))
             {
                 var cache = MapStaticGeometryService.ResourceCacheObservation();
+                var diagnostics = result.Diagnostics.Append(new Diagnostic(
+                    "info",
+                    "MAP_RESOURCE_CACHE_SNAPSHOT",
+                    "地图静态几何资源 lease cache 状态快照。",
+                    result.SourceUri,
+                    cache));
+                if (mapTiming is not null)
+                {
+                    diagnostics = diagnostics.Append(new Diagnostic(
+                        "info",
+                        "MAP_NATIVE_TIMINGS",
+                        "地图静态几何 native 读链路的 opt-in 计时快照。",
+                        result.SourceUri,
+                        mapTiming.Snapshot()));
+                }
                 result = result with
                 {
-                    Diagnostics = result.Diagnostics.Append(new Diagnostic(
-                        "info",
-                        "MAP_RESOURCE_CACHE_SNAPSHOT",
-                        "地图静态几何资源 lease cache 状态快照。",
-                        result.SourceUri,
-                        cache)).ToArray()
+                    Diagnostics = diagnostics.ToArray()
                 };
             }
             await state.WriteAsync("progress", frame.RequestId, frame.WorkspaceSessionId, frame.ResourceUri, new
@@ -608,7 +625,7 @@ internal static class BridgeDaemonHost
             var authority = result.Diagnostics.Any(item => item.Code.Contains("SYNTHETIC", StringComparison.OrdinalIgnoreCase))
                 ? "fixture-confirmed"
                 : result.ParseStatus == "unsupported" ? "unsupported" : "candidate";
-            await state.WriteResultAsync(frame, payload.Command, authority, result);
+            await state.WriteResultAsync(frame, payload.Command!, authority, result);
         }
         catch (OperationCanceledException)
         {
@@ -1097,6 +1114,7 @@ internal sealed class BridgeRequestWorkItem
     public required CancellationTokenSource CancellationSource { get; init; }
     public required BridgeRequestPriority Priority { get; init; }
     public required DateTimeOffset EnqueuedAt { get; init; }
+    public required long EnqueuedTimestamp { get; init; }
     public LinkedListNode<BridgeRequestWorkItem>? QueueNode { get; set; }
 }
 

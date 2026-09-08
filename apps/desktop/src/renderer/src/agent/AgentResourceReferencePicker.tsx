@@ -31,14 +31,14 @@ export function AgentResourceReferencePicker(props: AgentResourceReferencePicker
   const canCreate = selection !== null && onCreate !== undefined && !creating && !atCapacity;
 
   const title = creating
-    ? '正在向主进程申请 opaque 引用 token…'
+    ? undefined
     : atCapacity
       ? `资源引用最多 ${AGENT_RESOURCE_REFERENCE_MAX} 个（§12.11）。`
       : selection === null
         ? '没有可引用的语义选区（先打开一个逻辑资源）'
         : onCreate === undefined
           ? '引用能力尚未接线'
-          : '把当前语义选区作为 opaque 资源引用加入（main 签发 token）';
+          : '把当前语义选区加入资源引用';
 
   return (
     <div

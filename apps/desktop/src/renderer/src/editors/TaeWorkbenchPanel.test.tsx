@@ -128,8 +128,8 @@ describe('TaeWorkbenchPanel 初始结构（挂载即有的四栏骨架）', () =
 
   it('四栏 Animations | Events / 词条 | 详情 | 动作视图同时存在，无 Timeline/Inspector/Tools', () => {
     const html = render();
-    assert.match(html, /aria-label="Animations"/);
-    assert.match(html, /aria-label="Events \/ 词条"/);
+    assert.match(html, /aria-label="动画"/);
+    assert.match(html, /aria-label="事件 \/ 词条"/);
     assert.match(html, /aria-label="详情"/);
     assert.match(html, /aria-label="动作视图"/);
     assert.doesNotMatch(html, /aria-label="Timeline \/ Events"/);
@@ -233,7 +233,7 @@ describe('TaeWorkbenchPanel 初始结构（挂载即有的四栏骨架）', () =
     assert.match(previewSource, /externalSkeletonPoses=\{props\.skeletonPoses\}/);
     // 模型挂上后保留真实播放控制与 Clip 状态，不能再用“未接入”静态文案掩盖能力。
     assert.match(panelSource, /tae-timeline-ctrl/);
-    assert.match(panelSource, /正在读取当前动画 Clip/);
+    assert.match(panelSource, /正在读取当前动画片段/);
     // 无「见底部日志」推诿句；「预览不可用」不再是必须空态（有可行动错误句时才有）。
     assert.doesNotMatch(panelSource, /见底部日志/);
     assert.doesNotMatch(panelSource, /本夜不挂/);

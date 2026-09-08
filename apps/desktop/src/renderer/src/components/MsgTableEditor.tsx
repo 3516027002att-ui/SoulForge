@@ -45,7 +45,6 @@ export function MsgTableEditor({
           <button type="button" onClick={() => onRemove(index)}>删除</button>
         </div>
       ))}
-      <p className="muted">表格编辑会同步生成规范 TSV 文本；保存仍走 Patch Engine，并会自动备份原文件。</p>
     </section>
   );
 }

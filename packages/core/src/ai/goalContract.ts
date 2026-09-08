@@ -27,7 +27,7 @@ export function validateGoalContract(goals: readonly GoalContract[]): void {
   for (const goal of goals) {
     if (!goal.goalId || ids.has(goal.goalId) || !goal.targetScope || !goal.expectedCondition) throw new Error('GOAL_CONTRACT_INVALID');
     ids.add(goal.goalId);
-    if (!goal.required && goal.state === 'verified' && goal.currentNativeProof !== true) throw new Error('GOAL_VERIFIED_WITHOUT_PROOF');
+    if (goal.state === 'verified' && goal.currentNativeProof !== true) throw new Error('GOAL_VERIFIED_WITHOUT_PROOF');
     for (const dependency of goal.dependencies) if (!ids.has(dependency) && !goals.some((candidate) => candidate.goalId === dependency)) throw new Error('GOAL_DEPENDENCY_UNKNOWN');
   }
 }

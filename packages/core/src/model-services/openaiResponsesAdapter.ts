@@ -301,7 +301,7 @@ export class OpenAiResponsesAdapter implements ModelServiceAdapter {
             yield {
               type: 'error',
               code: 'MODEL_SERVICE_STREAM_FAILED',
-              message: event.message ?? event.error?.message ?? 'Responses 流失败。'
+              message: formatResponsesStreamErrorMessage(event, this.apiKey)
             };
             return;
           }
@@ -364,8 +364,9 @@ interface ResponsesStreamEvent {
   output_index?: number;
   summary_index?: number;
   name?: string;
-  message?: string;
-  error?: { message?: string };
+  code?: unknown;
+  message?: unknown;
+  error?: unknown;
   item?: {
     type?: string;
     id?: string;
@@ -375,7 +376,61 @@ interface ResponsesStreamEvent {
   };
   response?: {
     usage?: { input_tokens?: number; output_tokens?: number };
+    error?: unknown;
   };
+}
+
+const MAX_RESPONSES_STREAM_ERROR_MESSAGE_LENGTH = 800;
+const DEFAULT_RESPONSES_STREAM_ERROR_MESSAGE = 'Responses 流失败。';
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null;
+}
+
+function readErrorMessage(value: unknown): unknown {
+  return isRecord(value) ? value.message : undefined;
+}
+
+function readErrorCode(value: unknown): unknown {
+  return isRecord(value) ? value.code : undefined;
+}
+
+/**
+ * Responses providers have emitted both top-level stream errors and errors
+ * nested under response.failed. Keep the diagnostic deliberately narrow:
+ * callers receive only the fixed stream-failure code and a bounded, redacted
+ * message, never the provider event object.
+ */
+function formatResponsesStreamErrorMessage(event: ResponsesStreamEvent, apiKey: string): string {
+  const nestedResponseError = isRecord(event.response) ? event.response.error : undefined;
+  const providerCode = [
+    readErrorCode(nestedResponseError),
+    readErrorCode(event.error),
+    event.code
+  ].find((value): value is string => typeof value === 'string' && value.trim().length > 0)?.trim();
+  const rawMessage = [
+    readErrorMessage(nestedResponseError),
+    readErrorMessage(event.error),
+    event.message
+  ].find((value): value is string => typeof value === 'string' && value.trim().length > 0)
+    ?? DEFAULT_RESPONSES_STREAM_ERROR_MESSAGE;
+
+  let message = providerCode
+    ? rawMessage === DEFAULT_RESPONSES_STREAM_ERROR_MESSAGE
+      ? `Responses 流失败 [${providerCode}]`
+      : `Responses 流失败 [${providerCode}]：${rawMessage}`
+    : rawMessage;
+  if (apiKey.length > 0) {
+    message = message.split(apiKey).join('[REDACTED]');
+  }
+  message = message
+    .replace(/\bBearer\s+[^\s,;)}\]>"']+/giu, 'Bearer [REDACTED]')
+    .replace(/\bsk-[A-Za-z0-9_-]+\b/gu, '[REDACTED]')
+    .replace(/\b(?:x[-_])?api[-_]?key["']?\s*[:=]\s*["']?[^\s,;)}\]>"']+["']?/giu, '[REDACTED]');
+
+  return message.length > MAX_RESPONSES_STREAM_ERROR_MESSAGE_LENGTH
+    ? `${message.slice(0, MAX_RESPONSES_STREAM_ERROR_MESSAGE_LENGTH - 1)}…`
+    : message;
 }
 
 function buildResponsesBody(

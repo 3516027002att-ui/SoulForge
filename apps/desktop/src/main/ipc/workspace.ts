@@ -9,6 +9,7 @@ import {
   disposeBridgeDaemonPool,
   fileIdentityFromStat,
   getPathSourceGeneration,
+  isNativeSemanticBundleCurrent,
   loadFingerprintStore,
   loadSymbolBundleIntoIndex,
   makeFileFingerprint,
@@ -125,6 +126,8 @@ let workspaceAnalyzeInFlight: {
   generation: number;
   promise: Promise<AnalyzeWorkspaceSummary>;
 } | null = null;
+let workspaceAnalyzeAbort: AbortController | null = null;
+let workspaceAnalysisRequestedGeneration = -1;
 let workspaceAnalysisStarter: (() => Promise<void>) | null = null;
 let activeOverlayLabel = '';
 const directorySelections = new Map<string, DirectorySelectionRecord>();
@@ -144,7 +147,7 @@ function bridgeRootSession(session: WorkspaceSession, storage: { root: string })
   return { overlayRoot: session.layers.overlayRoot, baseRoot: session.layers.baseRoot ?? null, storageRoot: storage.root };
 }
 function bridgeRootsDiagnostic(code: string, result: Extract<PrepareBridgeRootsResult, { ok: false }>): Diagnostic {
-  return { severity: 'error', code, message: `${result.message}。操作：重试 / 打开 Problems / 检查工作区存储权限。`, ...(result.details !== undefined ? { details: result.details } : {}) };
+  return { severity: 'error', code, message: `${result.message}。操作：重试 / 打开诊断 / 检查工作区存储权限。`, ...(result.details !== undefined ? { details: result.details } : {}) };
 }
 async function persistActiveRag(
   database: OperationLogUtilityClient,
@@ -153,10 +156,17 @@ async function persistActiveRag(
   signal?: AbortSignal,
   scheduleEmbedding = true
 ): Promise<void> {
+  const publishingSessionId = activeWorkspaceSessionId;
+  const publishingGeneration = activeWorkspaceSessionGeneration;
   await persistRagCorpusBySourceDelta(database, corpus, previous, signal);
   // Publish only after the source delta is durable.  Publishing first would
   // make a cancelled bounded refresh look committed and could cause the next
   // retry to skip SQLite batches that were not written yet.
+  throwIfRagRefreshAborted(signal);
+  if (publishingSessionId !== activeWorkspaceSessionId || publishingGeneration !== activeWorkspaceSessionGeneration
+    || activeIndex?.workspaceId !== corpus.workspaceId) {
+    throw new Error('工作区已切换，旧语义语料不会发布到新会话。');
+  }
   activeRag = corpus;
   if (scheduleEmbedding) scheduleRagEmbedding?.(corpus, database);
 }
@@ -379,12 +389,27 @@ export async function ensureActionBinderMembershipForFamily(
  * 全量解析，可能持续数分钟。只等待它的首批语义阶段；需要原生字段时，仍
  * 由对应工具按精确 sourceUri/ID 失败关闭或懒读取。
  */
+function awaitWorkspaceReadiness(task: Promise<void>, signal?: AbortSignal): Promise<void> {
+  if (!signal) return task;
+  if (signal.aborted) return Promise.reject(Object.assign(new Error('等待工作区语义索引时任务已取消。'), { name: 'AbortError' }));
+  return new Promise<void>((resolveTask, rejectTask) => {
+    const abort = () => {
+      signal.removeEventListener('abort', abort);
+      rejectTask(Object.assign(new Error('等待工作区语义索引时任务已取消。'), { name: 'AbortError' }));
+    };
+    signal.addEventListener('abort', abort, { once: true });
+    task.then(() => { signal.removeEventListener('abort', abort); resolveTask(); },
+      error => { signal.removeEventListener('abort', abort); rejectTask(error); });
+  });
+}
+
 export async function waitForWorkspaceIndexing(signal?: AbortSignal): Promise<void> {
   // The renderer normally starts workspace.analyze after the shell is visible,
   // but an Agent can be submitted in that small interval. Start the one
   // existing single-flight analysis here as well, so RAG never settles on a
   // file-only/old corpus merely because the UI request has not arrived yet.
-  if (workspaceAnalysisStarter && activeSession && activeWorkspaceSessionId && activeIndex && !workspaceSemanticIndexingTask) {
+  if (workspaceAnalysisStarter && activeSession && activeWorkspaceSessionId && activeIndex
+    && workspaceAnalysisRequestedGeneration !== activeWorkspaceSessionGeneration && !workspaceSemanticIndexingTask) {
     void workspaceAnalysisStarter().catch(() => {
       // The owning workspace job keeps the structured diagnostics; the Agent
       // receives RAG_UNAVAILABLE rather than an unhandled rejection.
@@ -400,14 +425,14 @@ export async function waitForWorkspaceIndexing(signal?: AbortSignal): Promise<vo
     const semanticTask = workspaceSemanticIndexingTask;
     if (scanTask) {
       try {
-        await scanTask;
+        await awaitWorkspaceReadiness(scanTask, signal);
       } catch {
         // 失败状态由 workspace scan job / active index diagnostics 负责暴露。
       }
     }
     if (semanticTask) {
       try {
-        await semanticTask.promise;
+        await awaitWorkspaceReadiness(semanticTask.promise, signal);
       } catch {
         // 分析失败时由 activeRag/诊断保持失败关闭；等待者不能永久悬挂。
       }
@@ -424,6 +449,9 @@ export async function waitForWorkspaceIndexing(signal?: AbortSignal): Promise<vo
 }
 
 export function clearWorkspaceIpcCaches(): void {
+  workspaceAnalyzeAbort?.abort();
+  workspaceAnalyzeAbort = null;
+  workspaceAnalysisRequestedGeneration = -1;
   directorySelections.clear();
   actionMembershipForegroundTasks.clear();
   resolveWorkspaceSemanticIndexingTask();
@@ -513,6 +541,10 @@ export function registerWorkspaceIpcHandlers(deps: WorkspaceIpcDeps): void {
       }
     }
     const effectiveBaseRecord = (baseSelection as DirectorySelectionRecord | undefined) ?? autoBaseRecord ?? null;
+    // Cancel the native analysis and its bounded persistence requests before
+    // replacing session state. The old analysis must not keep consuming the
+    // Bridge/SQLite queue after the user opens another workspace.
+    workspaceAnalyzeAbort?.abort();
     if (workspaceIndexingAbort) { try { workspaceIndexingAbort.abort(); } catch {} }
     if (workspaceIndexingTask) { try { await workspaceIndexingTask; } catch {} }
     resolveWorkspaceSemanticIndexingTask();
@@ -641,7 +673,8 @@ export function registerWorkspaceIpcHandlers(deps: WorkspaceIpcDeps): void {
           if (file.sha256) {
             try {
               const cached = await database.getSemanticFileCache(file.relativePath);
-              if (cached && cached.fileSha256 === file.sha256) {
+              if (cached && cached.fileSha256 === file.sha256
+                && isNativeSemanticBundleCurrent(file, cached.payload)) {
                 loadSymbolBundleIntoIndex(indexForSession, cached.payload);
               }
             } catch {
@@ -686,6 +719,7 @@ export function registerWorkspaceIpcHandlers(deps: WorkspaceIpcDeps): void {
   handle('workspace.remountBase', async (event, baseSelectionId: string | null): Promise<{ workspaceSessionId: string; session: RendererWorkspaceSession }> => {
     if (!activeSession) throw new Error('请先打开工作区。');
     const baseSelection = baseSelectionId ? consumeDirectorySelection(event, baseSelectionId, 'base') : undefined;
+    workspaceAnalyzeAbort?.abort();
     if (workspaceIndexingAbort) { try { workspaceIndexingAbort.abort(); } catch {} }
     if (workspaceIndexingTask) { try { await workspaceIndexingTask; } catch {} }
     resolveWorkspaceSemanticIndexingTask();
@@ -719,6 +753,14 @@ export function registerWorkspaceIpcHandlers(deps: WorkspaceIpcDeps): void {
     if (workspaceAnalyzeInFlight && workspaceAnalyzeInFlight.sessionId === sessionId && workspaceAnalyzeInFlight.generation === generation) {
       return workspaceAnalyzeInFlight.promise;
     }
+    workspaceAnalyzeAbort?.abort();
+    const analyzeController = new AbortController();
+    workspaceAnalyzeAbort = analyzeController;
+    // Readiness consumers may call this waiter for every native read. Once a
+    // generation has attempted analysis, do not silently launch a new full
+    // workspace pass after a failed analysis. Completed analyses already have
+    // lastAnalyze reuse above; an explicit workspace.analyze retries failures.
+    workspaceAnalysisRequestedGeneration = generation;
     // workspace.scan deliberately returns after the light directory scan so the
     // shell can become interactive.  Its background task still hashes every
     // file, builds ACTION membership, and publishes the file-only RAG corpus.
@@ -788,6 +830,7 @@ export function registerWorkspaceIpcHandlers(deps: WorkspaceIpcDeps): void {
 
       const result = await analyzeWorkspace({
         workspaceRoot: session.layers.overlayRoot,
+        signal: analyzeController.signal,
         files: indexedFiles,
         ...(semanticCache ? { semanticCache } : {}),
         ...(session.layers.baseRoot ? { oodleRuntimeRoot: session.layers.baseRoot } : {}),
@@ -812,7 +855,7 @@ export function registerWorkspaceIpcHandlers(deps: WorkspaceIpcDeps): void {
             // embedding during this transitional slice: it would compete with
             // the remaining native EVENT/MAP pass and is not needed for the
             // default lexical/structured Agent path.
-            await refreshRagAfterAnalyze(database, stage.index, stage.diagnostics, undefined, false);
+            await refreshRagAfterAnalyze(database, stage.index, stage.diagnostics, analyzeController.signal, false);
           } finally {
             resolveWorkspaceSemanticIndexingTask(semanticStage);
           }
@@ -841,7 +884,7 @@ export function registerWorkspaceIpcHandlers(deps: WorkspaceIpcDeps): void {
         code: diagnostic.code,
         message: diagnostic.message,
         ...(diagnostic.sourceUri ? { sourceUri: diagnostic.sourceUri } : {})
-      })));
+      })), analyzeController.signal);
       const summary: AnalyzeWorkspaceSummary = {
         parsedFiles: result.parsedFiles,
         inspectedFiles: result.inspectedFiles,
@@ -873,6 +916,7 @@ export function registerWorkspaceIpcHandlers(deps: WorkspaceIpcDeps): void {
       return await promise;
     } finally {
       if (workspaceAnalyzeInFlight?.promise === promise) workspaceAnalyzeInFlight = null;
+      if (workspaceAnalyzeAbort === analyzeController) workspaceAnalyzeAbort = null;
       resolveWorkspaceSemanticIndexingTask(semanticStage);
     }
   };
@@ -895,6 +939,9 @@ export function getWorkspaceActiveIndex(): WorkspaceIndex | null {
 }
 export function getActiveWorkspaceSessionIdState(): string | null {
   return activeWorkspaceSessionId;
+}
+export function getActiveWorkspaceSessionGenerationState(): number {
+  return activeWorkspaceSessionGeneration;
 }
 export function getWorkspaceRag(): RagCorpus | null {
   return activeRag;

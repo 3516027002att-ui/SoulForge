@@ -43,6 +43,8 @@ export interface PredicateCompleteness {
 
 export interface CoverageSourceVersion {
   sourceUri: string;
+  /** SHA-256 of the packed/outer catalog file. */
+  outerFileHash?: string;
   sourceHash?: string;
   sourceRevision?: number | string;
   readerSchemaVersion?: number | string;
@@ -314,6 +316,7 @@ function normalizeSourceVersions(values: readonly CoverageSourceVersion[]): Cove
     seen.add(value.sourceUri);
     return [{
       sourceUri: value.sourceUri,
+      ...(value.outerFileHash ? { outerFileHash: value.outerFileHash } : {}),
       ...(value.sourceHash ? { sourceHash: value.sourceHash } : {}),
       ...(value.sourceRevision !== undefined ? { sourceRevision: value.sourceRevision } : {}),
       ...(value.readerSchemaVersion !== undefined ? { readerSchemaVersion: value.readerSchemaVersion } : {}),

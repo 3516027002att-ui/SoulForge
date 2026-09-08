@@ -25,7 +25,8 @@ internal sealed class BridgeCommandService
         JsonElement options = default,
         string? outputPath = null,
         IReadOnlyList<string>? allowedRoots = null,
-        string? workspaceSessionId = null)
+        string? workspaceSessionId = null,
+        MapTimingCollector? mapTiming = null)
     {
         var command = rawCommand.Trim().ToLowerInvariant();
 
@@ -2215,97 +2216,122 @@ internal sealed class BridgeCommandService
                 var sessionToken = OptionString("sessionToken", "");
                 var cursor = OptionString("cursor", "");
                 // Resolve file hash for session validation
-                var fileBytesForHash = File.ReadAllBytes(file);
-                var fileHash = Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(fileBytesForHash)).ToLowerInvariant();
+                byte[] fileBytesForHash;
+                using (mapTiming?.Measure("fileReadMs"))
+                {
+                    fileBytesForHash = File.ReadAllBytes(file);
+                }
+                string fileHash;
+                using (mapTiming?.Measure("sourceHashMs"))
+                {
+                    fileHash = Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(fileBytesForHash)).ToLowerInvariant();
+                }
 
                 MapStaticGeometryService.SessionEntry? session = null;
                 string? entryNameForNew = null;
                 FlverNativeDocument? flverForNew = null;
 
-                if (!string.IsNullOrWhiteSpace(sessionToken) && MapStaticGeometryService.TryGet(sessionToken, out var existing))
+                MapStaticGeometryService.SessionEntry? existing = null;
+                var hasExistingSession = false;
+                using (mapTiming?.Measure("sessionLookupMs"))
                 {
-                    // Validate cursor if provided
-                    if (!string.IsNullOrWhiteSpace(cursor))
+                    hasExistingSession = !string.IsNullOrWhiteSpace(sessionToken)
+                        && MapStaticGeometryService.TryGet(sessionToken, out existing);
+                    if (hasExistingSession)
                     {
-                        // nextCursor is an opaque random token bound to this exact session.
-                        // The legacy Base64 "mesh:triangle" decoder cannot decode it and
-                        // caused every multi-page model to fail on page two.
-                        if (!MapStaticGeometryService.TryDecodeOpaqueCursor(existing!, cursor, out _, out _))
-                            return BridgeResult<object>.Failed(file, "map", "MAP_STATIC_CURSOR_INVALID", "cursor 无法解析。");
+                        // Validate cursor if provided
+                        if (!string.IsNullOrWhiteSpace(cursor))
+                        {
+                            // nextCursor is an opaque random token bound to this exact session.
+                            // The legacy Base64 "mesh:triangle" decoder cannot decode it and
+                            // caused every multi-page model to fail on page two.
+                            if (!MapStaticGeometryService.TryDecodeOpaqueCursor(existing!, cursor, out _, out _))
+                                return BridgeResult<object>.Failed(file, "map", "MAP_STATIC_CURSOR_INVALID", "cursor 无法解析。");
+                        }
+                        session = existing;
+                        // Ensure file hash matches session's hash (stale content)
+                        if (session!.FileHash != fileHash)
+                            return BridgeResult<object>.Failed(file, "map", "MAP_STATIC_SESSION_EXPIRED", "文件内容已变化，session 已过期。");
                     }
-                    session = existing;
-                    // Ensure file hash matches session's hash (stale content)
-                    if (session!.FileHash != fileHash)
-                        return BridgeResult<object>.Failed(file, "map", "MAP_STATIC_SESSION_EXPIRED", "文件内容已变化，session 已过期。");
                 }
-                else
+                if (!hasExistingSession)
                 {
                     if (string.IsNullOrWhiteSpace(modelName))
                         return BridgeResult<object>.Failed(file, "map", "MAPBND_MODEL_NAME_MISSING", "需要 modelName 才能定位 mapbnd 内的 FLVER 条目。");
 
-                    // Resolve FLVER payload: BND4 container or direct FLVER
-                    var sourceBytes = fileBytesForHash;
-                    byte[] payload = sourceBytes;
-                    Bnd4NativeDocument? cachedBinder = null;
-                    bool isDcx = payload.Length >= 4 && payload.AsSpan(0, 4).SequenceEqual("DCX\0"u8);
-                    if (isDcx && IsLikelyBnd4ContainerPath(file))
-                    {
-                        var cached = Bnd4NativeWriter.GetCachedBinder(file, oodleRuntimeRoot);
-                        payload = cached.Dcx.Payload;
-                        cachedBinder = cached.Binder;
-                    }
-                    else if (isDcx)
-                    {
-                        payload = DcxNativeDocument.Read(file, oodleRuntimeRoot).Payload;
-                    }
                     string resolvedEntryName = modelName;
                     byte[]? flverBytes = null;
-                    if (payload.Length >= 4 && payload.AsSpan(0, 4).SequenceEqual("BND4"u8))
+                    using (mapTiming?.Measure("bndResolveMs"))
                     {
-                        var binder = cachedBinder ?? Bnd4NativeDocument.Read(payload);
-                        var variants = new List<string> { modelName };
-                        var baseName = System.IO.Path.GetFileName(modelName.Replace('\\', '/'));
-                        if (!string.Equals(baseName, modelName, StringComparison.Ordinal)) variants.Add(baseName);
-                        var shortMatch = System.Text.RegularExpressions.Regex.Match(baseName, @"^m(\d{6})$", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
-                        if (shortMatch.Success)
+                        // Resolve FLVER payload: BND4 container or direct FLVER
+                        var sourceBytes = fileBytesForHash;
+                        byte[] payload = sourceBytes;
+                        Bnd4NativeDocument? cachedBinder = null;
+                        bool isDcx = payload.Length >= 4 && payload.AsSpan(0, 4).SequenceEqual("DCX\0"u8);
+                        if (isDcx && IsLikelyBnd4ContainerPath(file))
                         {
-                            var suffix = shortMatch.Groups[1].Value;
-                            variants.Add(suffix);
-                            variants.Add(suffix + ".flver");
+                            var cached = Bnd4NativeWriter.GetCachedBinder(file, oodleRuntimeRoot);
+                            payload = cached.Dcx.Payload;
+                            cachedBinder = cached.Binder;
                         }
-                        Bnd4Entry? entry = null;
-                        foreach (var variant in variants)
+                        else if (isDcx)
                         {
-                            entry = binder.Entries.FirstOrDefault(item =>
-                                item.Name.EndsWith(variant, StringComparison.OrdinalIgnoreCase)
-                                || item.Name.EndsWith(variant + ".flver", StringComparison.OrdinalIgnoreCase));
-                            if (entry is not null) break;
+                            payload = DcxNativeDocument.Read(file, oodleRuntimeRoot).Payload;
                         }
-                        if (entry is null)
+
+                        if (payload.Length >= 4 && payload.AsSpan(0, 4).SequenceEqual("BND4"u8))
                         {
+                            var binder = cachedBinder ?? Bnd4NativeDocument.Read(payload);
+                            var variants = new List<string> { modelName };
+                            var baseName = System.IO.Path.GetFileName(modelName.Replace('\\', '/'));
+                            if (!string.Equals(baseName, modelName, StringComparison.Ordinal)) variants.Add(baseName);
+                            var shortMatch = System.Text.RegularExpressions.Regex.Match(baseName, @"^m(\d{6})$", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+                            if (shortMatch.Success)
+                            {
+                                var suffix = shortMatch.Groups[1].Value;
+                                variants.Add(suffix);
+                                variants.Add(suffix + ".flver");
+                            }
+                            Bnd4Entry? entry = null;
                             foreach (var variant in variants)
                             {
                                 entry = binder.Entries.FirstOrDefault(item =>
-                                    item.Name.IndexOf(variant, StringComparison.OrdinalIgnoreCase) >= 0
-                                    && item.Name.EndsWith(".flver", StringComparison.OrdinalIgnoreCase));
+                                    item.Name.EndsWith(variant, StringComparison.OrdinalIgnoreCase)
+                                    || item.Name.EndsWith(variant + ".flver", StringComparison.OrdinalIgnoreCase));
                                 if (entry is not null) break;
                             }
+                            if (entry is null)
+                            {
+                                foreach (var variant in variants)
+                                {
+                                    entry = binder.Entries.FirstOrDefault(item =>
+                                        item.Name.IndexOf(variant, StringComparison.OrdinalIgnoreCase) >= 0
+                                        && item.Name.EndsWith(".flver", StringComparison.OrdinalIgnoreCase));
+                                    if (entry is not null) break;
+                                }
+                            }
+                            if (entry is null)
+                                return BridgeResult<object>.Failed(file, "map", "MAPBND_MODEL_NOT_FOUND", $"mapbnd 里没有找到 {modelName} 的模型（.flver 条目）；该 part 用线框占位显示。");
+                            flverBytes = binder.GetStoredBytes(entry.Index);
+                            resolvedEntryName = entry.Name;
                         }
-                        if (entry is null)
-                            return BridgeResult<object>.Failed(file, "map", "MAPBND_MODEL_NOT_FOUND", $"mapbnd 里没有找到 {modelName} 的模型（.flver 条目）；该 part 用线框占位显示。");
-                        flverBytes = binder.GetStoredBytes(entry.Index);
-                        resolvedEntryName = entry.Name;
+                        else
+                        {
+                            flverBytes = payload;
+                        }
                     }
-                    else
+                    using (mapTiming?.Measure("flverReadMs"))
                     {
-                        flverBytes = payload;
+                        flverForNew = FlverNativeDocument.Read(flverBytes);
                     }
-                    flverForNew = FlverNativeDocument.Read(flverBytes);
                     entryNameForNew = resolvedEntryName;
                     var ownerLeaseId = OptionString("ownerLeaseId", "");
                     var resourceCacheKey = OptionString("resourceCacheKey", "");
                     // Create session
-                    session = MapStaticGeometryService.GetOrCreate(file, modelName, null, fileHash, flverForNew, entryNameForNew, ownerLeaseId, resourceCacheKey);
+                    using (mapTiming?.Measure("sessionCreateMs"))
+                    {
+                        session = MapStaticGeometryService.GetOrCreate(file, modelName, null, fileHash, flverForNew, entryNameForNew, ownerLeaseId, resourceCacheKey, mapTiming: mapTiming);
+                    }
                     // If cursor was supplied with new session, validate it starts at 0
                     if (!string.IsNullOrWhiteSpace(cursor) && cursor != MapStaticGeometryService.EncodeCursor(0,0))
                         return BridgeResult<object>.Failed(file, "map", "MAP_STATIC_CURSOR_MISMATCH", "新 session 的 cursor 必须为空或指向起点。");
@@ -2328,23 +2354,33 @@ internal sealed class BridgeCommandService
                 // implementation always used the first material-bearing mesh, so
                 // later meshes silently inherited the first mesh's texture.
                 var textureMesh = MapStaticGeometryService.GetMeshForChunk(session!, startMesh, startTri);
-                var texturePreview = textureMesh is null
-                    ? MapTexturePreviewResult.Missing("MAP_TEXTURE_MATERIAL_NAME_EMPTY", "FLVER mesh 没有可用于纹理查找的 material name 或 texture slot path。")
-                    : MapTexturePreviewService.ResolveMany(
-                        file,
-                        textureMesh.MaterialName,
-                        textureMesh.MaterialMtdPath,
-                        oodleRuntimeRoot,
-                        textureMesh.TexturePaths,
-                        mapGroupName);
-                var chunkObj = MapStaticGeometryService.BuildChunk(
-                    session!,
-                    startMesh,
-                    startTri,
-                    out var nextCursor,
-                    out var complete,
-                    texturePreview.Preview?.PreviewToken,
-                    texturePreview.Preview?.ColorSpace);
+                MapTexturePreviewResult texturePreview;
+                using (mapTiming?.Measure("textureResolveManyMs"))
+                {
+                    texturePreview = textureMesh is null
+                        ? MapTexturePreviewResult.Missing("MAP_TEXTURE_MATERIAL_NAME_EMPTY", "FLVER mesh 没有可用于纹理查找的 material name 或 texture slot path。")
+                        : MapTexturePreviewService.ResolveMany(
+                            file,
+                            textureMesh.MaterialName,
+                            textureMesh.MaterialMtdPath,
+                            oodleRuntimeRoot,
+                            textureMesh.TexturePaths,
+                            mapGroupName);
+                }
+                object? chunkObj;
+                string? nextCursor;
+                bool complete;
+                using (mapTiming?.Measure("buildChunkMs"))
+                {
+                    chunkObj = MapStaticGeometryService.BuildChunk(
+                        session!,
+                        startMesh,
+                        startTri,
+                        out nextCursor,
+                        out complete,
+                        texturePreview.Preview?.PreviewToken,
+                        texturePreview.Preview?.ColorSpace);
+                }
                 // If no chunk (empty), return complete
                 if (chunkObj == null)
                 {
@@ -2377,7 +2413,11 @@ internal sealed class BridgeCommandService
                     telemetry = new { skin = MapStaticGeometryService.SkinCalls, skeleton = MapStaticGeometryService.SkeletonCalls, parse = MapStaticGeometryService.ParseCount }
                 };
                 // Quick size check: serialize and check byte count
-                var json = System.Text.Json.JsonSerializer.Serialize(payloadObj);
+                string json;
+                using (mapTiming?.Measure("serializeMs"))
+                {
+                    json = System.Text.Json.JsonSerializer.Serialize(payloadObj);
+                }
                 if (System.Text.Encoding.UTF8.GetByteCount(json) >= 8 * 1024 * 1024)
                     return BridgeResult<object>.Failed(file, "map", "MAP_STATIC_CHUNK_TOO_LARGE", "单个静态几何响应超过 8 MiB 限制。");
 

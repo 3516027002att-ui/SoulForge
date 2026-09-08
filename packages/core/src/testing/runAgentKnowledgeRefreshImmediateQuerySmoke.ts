@@ -60,12 +60,18 @@ async function main(): Promise<void> {
 
   const oldIndex = makeIndex('v1', 'old-value');
   const newIndex = makeIndex('v2', 'new-value');
+  // refreshKnowledgeAfterCommit updates the input index's catalog in place.
+  // Keep immutable file snapshots for the rollback fixture; reusing
+  // oldIndex.getFiles() after the commit would hand rollback the v2 catalog
+  // and correctly trigger NATIVE_REFRESH_STALE_REVISION.
+  const oldFiles = oldIndex.getFiles();
+  const newFiles = newIndex.getFiles();
   let persisted: ReturnType<typeof buildRagCorpus> | undefined;
 
   const committed = await refreshKnowledgeAfterCommit({
     index: oldIndex,
-    beforeFiles: oldIndex.getFiles(),
-    afterFiles: newIndex.getFiles(),
+    beforeFiles: oldFiles,
+    afterFiles: newFiles,
     requestedSources: Object.values(SOURCES),
     reanalyze: async () => newIndex,
     persist: async (index) => {
@@ -81,8 +87,8 @@ async function main(): Promise<void> {
   // boundary and make the restored revision visible before the next query.
   const rolledBack = await refreshKnowledgeAfterCommit({
     index: newIndex,
-    beforeFiles: newIndex.getFiles(),
-    afterFiles: oldIndex.getFiles(),
+    beforeFiles: newFiles,
+    afterFiles: oldFiles,
     requestedSources: Object.values(SOURCES),
     reanalyze: async () => makeIndex('v1', 'old-value'),
     persist: async (index) => {

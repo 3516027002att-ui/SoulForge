@@ -91,7 +91,10 @@ internal sealed class MsbNativeDocument
     public IReadOnlyDictionary<long, long> EntrySectionEnds { get; }
     public int PartsSectionOffset { get; }
     public int FirstPartOffset { get; }
-    public string SourceHash => Hash(SourceBytes);
+    // Parts/regions share one immutable source snapshot. Reuse its identity
+    // instead of hashing the entire MSB again for every exported entity.
+    private string? sourceHashMemo;
+    public string SourceHash => sourceHashMemo ??= Hash(SourceBytes);
 
     public static MsbNativeDocument Read(byte[] source)
     {

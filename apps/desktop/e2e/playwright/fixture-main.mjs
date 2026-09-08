@@ -2481,6 +2481,18 @@ function registerFixtureIpc() {
   // Hex dump 域拒绝（生产是 selectionRendererSafetyIssues）。token 不携带路径。
   handleTrusted('agent.attachment.create', () => {
     track('agent.attachment.create');
+    if (process.env.FIXTURE_AGENT_ATTACHMENT_SUCCESS === '1') {
+      return {
+        ok: true,
+        label: 'fixture-note.txt',
+        reference: {
+          token: 'agent-attachment:fixture:note',
+          mediaType: 'text/plain',
+          byteLength: 12,
+          expiresAt: '2099-12-31T00:00:00.000Z'
+        }
+      };
+    }
     return {
       ok: false,
       cancelled: true,
@@ -2586,6 +2598,9 @@ function registerFixtureIpc() {
     // S10：opaque 资源引用随任务提交（App 在 resources 非空时透传）。
     if (Array.isArray(request.resources) && request.resources.length > 0) {
       track(`ai.agent.run:resources=${request.resources.length}`);
+    }
+    if (Array.isArray(request.attachments) && request.attachments.length > 0) {
+      track(`ai.agent.run:attachments=${request.attachments.length}`);
     }
     agentSessionSeq += 1;
     const sessionId = `fixture-session-${agentSessionSeq}`;

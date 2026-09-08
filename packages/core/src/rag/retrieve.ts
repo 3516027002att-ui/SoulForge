@@ -32,6 +32,30 @@ const DEFAULT_LIMIT = 8;
 const MAX_LIMIT = 32;
 const DEFAULT_EXCERPT = 420;
 
+export interface RagChunkExclusionMask {
+  readonly ids: readonly string[];
+  /** Process-local collision-free cache identity; never derived from caller input. */
+  readonly cacheKey: string;
+  readonly has: (chunkId: string) => boolean;
+}
+
+let nextExclusionMaskId = 1;
+const trustedExclusionMasks = new WeakSet<object>();
+
+export function createRagChunkExclusionMask(ids: readonly string[]): RagChunkExclusionMask {
+  const normalized = Object.freeze([...new Set(ids.filter((id) => typeof id === 'string' && id.trim().length > 0))].sort());
+  const membership = new Set(normalized);
+  const mask: RagChunkExclusionMask = Object.freeze({
+    ids: normalized,
+    cacheKey: `rag-chunk-mask:${nextExclusionMaskId++}`,
+    has: (chunkId: string): boolean => membership.has(chunkId)
+  });
+  trustedExclusionMasks.add(mask);
+  return mask;
+}
+
+const EMPTY_RAG_CHUNK_EXCLUSION_MASK = createRagChunkExclusionMask([]);
+
 export interface Sf18RetrieveOptions extends RagRetrieveOptions {
   /** Scope is supplied by the host and may only be narrowed by the caller. */
   scope?: RetrievalScopeInput | NormalizedRetrievalScope;
@@ -50,6 +74,10 @@ export interface Sf18RetrieveOptions extends RagRetrieveOptions {
   embeddingModel?: string;
   embeddingProfile?: string;
   corpusRevision?: string;
+  /** Host-computed per-chunk freshness mask for mixed-version corpora. */
+  excludeChunkIds?: readonly string[];
+  /** Trusted host mask; unlike the array fallback this is immutable and reusable. */
+  excludeChunkMask?: RagChunkExclusionMask;
   /** Internal continuation and candidate controls; finalLimit remains strict. */
   cursor?: string;
   candidateLimit?: number;
@@ -64,6 +92,8 @@ export interface LexicalCandidateSet {
   readonly finalLimit: number;
   readonly candidateLimit: number;
   readonly excerptChars: number;
+  readonly excludedSourceUris: ReadonlySet<string>;
+  readonly excludedChunkIds: RagChunkExclusionMask;
   readonly scopedCandidates: readonly RagChunk[];
   readonly lexicalHits: readonly RagHit[];
   readonly exactHits: readonly RagHit[];
@@ -103,6 +133,8 @@ export function prepareLexicalCandidates(
   }
   const candidateLimit = retrievalCandidateLimit(finalLimit);
   const excerptChars = clampInt(options.excerptChars, DEFAULT_EXCERPT, 120, 1_200);
+  const excludedSourceUris = normalizeExcludedSourceUris(options.excludeSourceUris);
+  const excludedChunkIds = normalizeExcludedChunkMask(options);
 
   if (corpus.availability !== 'available') {
     const detail = corpus.diagnostics.find((diagnostic) => diagnostic.code === 'RAG_SEMANTIC_CORPUS_EMPTY')?.message
@@ -116,9 +148,13 @@ export function prepareLexicalCandidates(
   const parsed = parseRagQuery(trimmed);
   const lookup = ensureLookupIndex(corpus);
   const hasKeys = parsed.numericIds.length + parsed.terms.length + parsed.phrases.length + parsed.uris.length > 0;
-  const scopedCandidates = hasKeys
+  const indexedCandidates = hasKeys
     ? collectIndexedCandidates(corpus.chunks, lookup, parsed, scope)
     : corpus.chunks.filter((chunk) => isChunkEligible(chunk, scope));
+  const scopedCandidates = indexedCandidates.filter((chunk) => (
+    !isExcludedSource(chunk, excludedSourceUris)
+    && !excludedChunkIds.has(chunk.chunkId)
+  ));
   const scored: RagHit[] = [];
   const seenChunkIds = new Set<string>();
   for (const chunk of scopedCandidates) {
@@ -167,6 +203,8 @@ export function prepareLexicalCandidates(
       finalLimit,
       candidateLimit,
       excerptChars,
+      excludedSourceUris,
+      excludedChunkIds,
       scopedCandidates,
       lexicalHits,
       exactHits,
@@ -196,6 +234,8 @@ export function retrieveEvidence(
     candidateLimit: value.candidateLimit,
     excerptChars: value.excerptChars,
     expandReferences: options.expandReferences !== false,
+    excludeSourceUris: [...value.excludedSourceUris],
+    ...(value.excludedChunkIds.ids.length > 0 ? { excludeChunkMaskKey: value.excludedChunkIds.cacheKey } : {}),
     mode: 'lexical'
   });
   const cached = getRetrievalCache<RagRetrieveResult>(cacheKey);
@@ -214,12 +254,16 @@ export function expandScopedHits(
   scope: NormalizedRetrievalScope,
   finalLimit: number,
   expandReferences: boolean,
-  exactCandidates: readonly RagHit[] = []
+  exactCandidates: readonly RagHit[] = [],
+  excludedSourceUris: ReadonlySet<string> = new Set(),
+  excludedChunkIds: RagChunkExclusionMask = EMPTY_RAG_CHUNK_EXCLUSION_MASK
 ): { hits: RagHit[]; expanded: number; outOfScopeEdges: number } {
   if (primaryCandidates.length > finalLimit) {
     throw new RetrievalScopeError('PRIMARY_OVER_LIMIT', 'primary 结果不能超过 finalLimit。');
   }
-  if (!primaryCandidates.every((hit) => isChunkEligible(hit.chunk, scope))) {
+  if (!primaryCandidates.every((hit) => isChunkEligible(hit.chunk, scope)
+    && !isExcludedSource(hit.chunk, excludedSourceUris)
+    && !excludedChunkIds.has(hit.chunk.chunkId))) {
     throw new RetrievalScopeError('PRIMARY_SCOPE_VIOLATION', 'primary 结果包含 scope 外 chunk。');
   }
 
@@ -242,7 +286,9 @@ export function expandScopedHits(
         if (relatedChunks.length === 0) continue;
         for (const related of [...relatedChunks].sort((left, right) => compareCodePointText(left.chunkId, right.chunkId))) {
           if (seen.has(related.chunkId)) continue;
-          if (!isChunkEligible(related, scope)) {
+          if (!isChunkEligible(related, scope)
+            || isExcludedSource(related, excludedSourceUris)
+            || excludedChunkIds.has(related.chunkId)) {
             outOfScopeEdges += 1;
             continue;
           }
@@ -268,7 +314,9 @@ export function expandScopedHits(
   for (const candidate of lexicalCandidates) {
     if (result.length >= finalLimit) break;
     if (seen.has(candidate.chunk.chunkId)) continue;
-    if (!isChunkEligible(candidate.chunk, scope)) continue;
+    if (!isChunkEligible(candidate.chunk, scope)
+      || isExcludedSource(candidate.chunk, excludedSourceUris)
+      || excludedChunkIds.has(candidate.chunk.chunkId)) continue;
     seen.add(candidate.chunk.chunkId);
     result.push(candidate);
   }
@@ -286,7 +334,9 @@ export function finalizeLexicalCandidates(value: LexicalCandidateSet, expandRefe
       value.scope,
       value.finalLimit,
       expandReferences,
-      value.exactHits
+      value.exactHits,
+      value.excludedSourceUris,
+      value.excludedChunkIds
     );
     if (expansion.hits.length === 0) {
       return { ok: false, code: 'insufficient_evidence', message: `查询「${value.query}」没有命中已索引的事件、地图、参数、文本或文件。` };
@@ -457,6 +507,58 @@ function isIdPrefixMatch(queryId: number, candidate: number): boolean {
   const candidateText = String(candidate);
   if (candidateText.length - queryText.length > 2 || candidateText.length <= queryText.length) return false;
   return candidateText.startsWith(queryText);
+}
+
+function normalizeExcludedSourceUris(sourceUris: readonly string[] | undefined): ReadonlySet<string> {
+  const normalized = new Set<string>();
+  for (const sourceUri of sourceUris ?? []) {
+    for (const key of sourceIdentityKeys(sourceUri)) normalized.add(key);
+  }
+  return normalized;
+}
+
+function normalizeExcludedChunkMask(options: Sf18RetrieveOptions): RagChunkExclusionMask {
+  if (options.excludeChunkMask && trustedExclusionMasks.has(options.excludeChunkMask)) {
+    return options.excludeChunkMask;
+  }
+  return options.excludeChunkIds && options.excludeChunkIds.length > 0
+    ? createRagChunkExclusionMask(options.excludeChunkIds)
+    : EMPTY_RAG_CHUNK_EXCLUSION_MASK;
+}
+
+function isExcludedSource(chunk: RagChunk, excludedSourceUris: ReadonlySet<string>): boolean {
+  return isRagSourceExcluded(chunk.sourceUri, excludedSourceUris);
+}
+
+export function isRagSourceExcluded(sourceUri: string, excludedSourceUris: ReadonlySet<string>): boolean {
+  if (excludedSourceUris.size === 0) return false;
+  return sourceIdentityKeys(sourceUri).some((key) => excludedSourceUris.has(key));
+}
+
+function sourceIdentityKeys(value: string): string[] {
+  const trimmed = value.trim();
+  if (trimmed.length === 0) return [];
+  const keys = new Set<string>();
+  const add = (candidate: string): void => {
+    const normalized = candidate
+      .replaceAll('\\', '/')
+      .replace(/\/+/gu, '/')
+      .replace(/^\/([A-Za-z]:\/)/, '$1')
+      .replace(/\/$/u, '')
+      .toLocaleLowerCase();
+    if (normalized.length > 0) keys.add(normalized);
+  };
+  add(trimmed);
+  if (/^file:\/\//iu.test(trimmed)) {
+    let pathPart = trimmed.slice('file://'.length);
+    try {
+      pathPart = decodeURIComponent(pathPart);
+    } catch {
+      // Keep the encoded fallback; retrieval must fail closed, not fail open.
+    }
+    add(pathPart);
+  }
+  return [...keys];
 }
 
 function countExactPrimary(primary: readonly RagHit[], exact: readonly RagHit[]): number {

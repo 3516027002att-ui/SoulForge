@@ -547,7 +547,7 @@ export function registerRawIpcHandlers(deps: RawIpcDeps): void {
           diagnostics: [{
             severity: 'error' as const,
             code: 'RESOURCE_NOT_INDEXED',
-            message: 'Resource must be indexed before raw range read.',
+            message: '请先索引资源，再读取原始范围。',
             sourceUri
           }]
         };
@@ -576,7 +576,7 @@ export function registerRawIpcHandlers(deps: RawIpcDeps): void {
         diagnostics: [{
           severity: 'error' as const,
           code: 'RESOURCE_NOT_INDEXED',
-          message: 'Resource must be indexed before container inspect.',
+          message: '请先索引资源，再检查容器。',
           sourceUri
         }]
       };
@@ -595,7 +595,7 @@ export function registerRawIpcHandlers(deps: RawIpcDeps): void {
           diagnostics: [{
             severity: 'error' as const,
             code: 'RESOURCE_NOT_INDEXED',
-            message: 'Resource must be indexed before listing container children.',
+          message: '请先索引资源，再列出容器条目。',
             sourceUri
           }]
         };
@@ -729,7 +729,7 @@ export function registerRawIpcHandlers(deps: RawIpcDeps): void {
         diagnostics: [{
           severity: 'error' as const,
           code: 'RESOURCE_NOT_INDEXED',
-          message: 'Resource must be indexed before container roundtrip.',
+          message: '请先索引资源，再执行容器往返校验。',
           sourceUri
         }]
       };
@@ -746,7 +746,7 @@ export function registerRawIpcHandlers(deps: RawIpcDeps): void {
         diagnostics: [{
           severity: 'error' as const,
           code: 'RESOURCE_NOT_INDEXED',
-          message: 'Resource must be indexed before container validate.',
+          message: '请先索引资源，再验证容器。',
           sourceUri
         }]
       };
@@ -779,7 +779,7 @@ export function registerRawIpcHandlers(deps: RawIpcDeps): void {
         diagnostics: [{
           severity: 'error' as const,
           code: 'RESOURCE_NOT_INDEXED',
-          message: 'Resource must be indexed before script evidence.',
+          message: '请先索引资源，再获取脚本证据。',
           sourceUri
         }]
       };

@@ -568,7 +568,7 @@ export function FmgWorkbenchPanel(props: FmgWorkbenchPanelProps): ReactElement {
           <p className="wb-empty">先选择语言。</p>
         )}
         {catalog && !catalogLoading && !props.resourceUri && (
-          <p className="wb-empty">在左侧资源浏览器点 item 或 menu</p>
+           <p className="wb-empty">请在左侧资源浏览器中选择文本容器。</p>
         )}
         {categoryContainer && categoryContainer.parseStatus !== 'confirmed' && (
           <p className="wb-empty diag-warn">该容器读取失败，查看中栏诊断。</p>
@@ -698,15 +698,15 @@ export function FmgWorkbenchPanel(props: FmgWorkbenchPanelProps): ReactElement {
   const columns: WorkbenchColumnSpec[] = [
     {
       id: 'categories',
-      title: 'Text Categories',
-      hint: catalog ? `${catalog.languages.length} languages` : '',
+       title: '文本分类',
+       hint: catalog ? `${catalog.languages.length} 个语言` : '',
       initialWidth: 300,
       minWidth: 200,
       children: <div className="fmg-categories">{categoriesColumn}</div>
     },
     {
       id: 'entries',
-      title: 'Text Entries',
+       title: '文本条目',
       // 3-A：hint 不再报「槽 · 有字」；总数如要报只给光秃数字（3-C），不加单位。
       hint: selectedTableId !== null && entryCount > 0 ? String(entryCount) : '',
       initialFlex: 2,
@@ -715,7 +715,7 @@ export function FmgWorkbenchPanel(props: FmgWorkbenchPanelProps): ReactElement {
     },
     {
       id: 'text',
-      title: 'Text',
+       title: '文本',
       initialFlex: 2,
       minWidth: 240,
       children: textColumn

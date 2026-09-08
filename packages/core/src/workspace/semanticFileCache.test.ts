@@ -1,7 +1,11 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 import { WorkspaceIndex } from '../indexing/workspaceIndex.js';
-import { extractFileSymbolBundle, loadSymbolBundleIntoIndex } from './semanticFileCache.js';
+import {
+  extractFileSymbolBundle,
+  isNativeSemanticBundleCurrent,
+  loadSymbolBundleIntoIndex
+} from './semanticFileCache.js';
 import type { EventExport, ParamExport } from '@soulforge/shared';
 
 describe('semanticFileCache', () => {
@@ -61,5 +65,65 @@ describe('semanticFileCache', () => {
     assert.equal(freshIndex.getStats().events, 1);
     assert.equal(freshIndex.lookupEvents(100).length, 1);
     assert.equal(freshIndex.lookupEvents(100)[0]?.name, 'MainEvent');
+  });
+
+  it('rejects native cache hits without outer hash and source revision proof', () => {
+    const file = {
+      id: 'file://param/gameparam/gameparam.parambnd.dcx',
+      workspaceId: 'test-ws',
+      sourceUri: 'file://param/gameparam/gameparam.parambnd.dcx',
+      sourcePath: 'param/gameparam/gameparam.parambnd.dcx',
+      absolutePath: 'param/gameparam/gameparam.parambnd.dcx',
+      relativePath: 'param/gameparam/gameparam.parambnd.dcx',
+      game: 'sekiro',
+      resourceKind: 'param' as const,
+      extension: '.dcx',
+      compoundExtension: '.parambnd.dcx',
+      formatKind: 'param' as const,
+      formatLabel: 'PARAM BND DCX',
+      size: 32,
+      mtimeMs: 123,
+      sha256: 'outer-v2',
+      parseStatus: 'partial' as const,
+      diagnostics: []
+    };
+    const oldBundle = {
+      params: [{
+        paramName: 'NpcParam',
+        sourceUri: file.sourceUri,
+        rows: [{
+          uri: 'param://NpcParam/1',
+          sourceUri: file.sourceUri,
+          paramName: 'NpcParam',
+          rowId: 1,
+          fields: []
+        }]
+      }]
+    };
+    assert.equal(isNativeSemanticBundleCurrent(file, oldBundle), false);
+
+    const currentBundle = {
+      params: [{
+        paramName: 'NpcParam',
+        sourceUri: file.sourceUri,
+        outerFileHash: file.sha256,
+        sourceRevision: file.mtimeMs,
+        rows: [{
+          uri: 'param://NpcParam/1',
+          sourceUri: file.sourceUri,
+          paramName: 'NpcParam',
+          rowId: 1,
+          outerFileHash: file.sha256,
+          sourceRevision: file.mtimeMs,
+          fields: []
+        }]
+      }]
+    };
+    assert.equal(isNativeSemanticBundleCurrent(file, currentBundle), true);
+    assert.equal(isNativeSemanticBundleCurrent({
+      ...file,
+      relativePath: 'param/mockparam.json',
+      absolutePath: 'param/mockparam.json'
+    }, oldBundle), true);
   });
 });

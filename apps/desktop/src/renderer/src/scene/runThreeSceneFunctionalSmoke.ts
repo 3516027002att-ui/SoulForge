@@ -29,6 +29,7 @@ import {
   type RendererBackend,
   type ThreeRendererLike
 } from './threeSceneController.js';
+import { FrameTaskQueue } from './mapModelLoadScheduler.js';
 import type { SceneDrawList } from './sceneManifestBrowser.js';
 
 // ---------------------------------------------------------------------------
@@ -242,6 +243,14 @@ function installDisposeCounter(): void {
 // ---------------------------------------------------------------------------
 class FakeRenderer implements ThreeRendererLike {
   readonly calls: string[] = [];
+  lastScene: three.Scene | null = null;
+  readonly renderMetrics: Array<{
+    meshObjects: number;
+    instancedMeshes: number;
+    instanceCount: number;
+    highlightMeshes: number;
+    drawCallEstimate: number;
+  }> = [];
   disposed = false;
   setPixelRatio(): void {
     this.calls.push('setPixelRatio');
@@ -249,13 +258,50 @@ class FakeRenderer implements ThreeRendererLike {
   setSize(): void {
     this.calls.push('setSize');
   }
-  render(): void {
+  render(scene: three.Scene): void {
     this.calls.push('render');
+    this.lastScene = scene;
+    let meshObjects = 0;
+    let instancedMeshes = 0;
+    let instanceCount = 0;
+    let highlightMeshes = 0;
+    scene.traverse((object) => {
+      const candidate = object as unknown as {
+        isMesh?: boolean;
+        isInstancedMesh?: boolean;
+        count?: number;
+        material?: unknown;
+      };
+      if (candidate.isInstancedMesh) {
+        instancedMeshes += 1;
+        instanceCount += candidate.count ?? 0;
+      } else if (candidate.isMesh) {
+        meshObjects += 1;
+        const material = candidate.material as { wireframe?: boolean; transparent?: boolean } | undefined;
+        if (material?.wireframe === true && material.transparent === true) highlightMeshes += 1;
+      }
+    });
+    this.renderMetrics.push({
+      meshObjects,
+      instancedMeshes,
+      instanceCount,
+      highlightMeshes,
+      // Keep selection's diagnostic wireframe overlay separate from map geometry.
+      drawCallEstimate: meshObjects - highlightMeshes + instancedMeshes
+    });
   }
   dispose(): void {
     this.disposed = true;
     this.calls.push('dispose');
   }
+}
+
+function findInstancedMesh(scene: three.Scene | null): three.InstancedMesh | null {
+  let found: three.InstancedMesh | null = null;
+  scene?.traverse((object) => {
+    if (!found && object instanceof three.InstancedMesh) found = object;
+  });
+  return found;
 }
 
 // ---------------------------------------------------------------------------
@@ -573,14 +619,35 @@ async function testProxyScene(record: (name: string) => void): Promise<void> {
 
 async function testProxyModelReplacement(record: (name: string) => void): Promise<void> {
   const audits: Array<{ phase: string; items: Array<{ id: string; state: string }> }> = [];
+  const rendererState: { renderer: FakeRenderer | null } = { renderer: null };
   const handle = await mountThreeProxyScene({
     container: new FakeElement() as unknown as HTMLElement,
     drawList: buildModelReplacementDrawList(),
-    rendererFactory: () => new FakeRenderer(),
+    rendererFactory: () => {
+      const renderer = new FakeRenderer();
+      rendererState.renderer = renderer;
+      return renderer;
+    },
     renderAudit: (phase, items) => {
       audits.push({ phase, items: items.map((item) => ({ id: item.id, state: item.state })) });
     }
   });
+
+  pumpFrames(2);
+  const proxyMetrics = rendererState.renderer?.renderMetrics.at(-1);
+  console.log(JSON.stringify({ mapReplacementProxyMetrics: proxyMetrics }));
+  assert(proxyMetrics !== undefined, '代理批次至少提交一帧用于性能基线');
+  assertEqual(proxyMetrics.instancedMeshes, 1, '代理阶段只有一个 InstancedMesh');
+  assertEqual(proxyMetrics.instanceCount, 2, '代理批次保留两个 placement 实例');
+  assertEqual(proxyMetrics.drawCallEstimate, 1, '代理批次估算为一个 draw call');
+  const proxyBatch = findInstancedMesh(rendererState.renderer?.lastScene ?? null);
+  assert(proxyBatch !== null, '代理场景可定位共享 InstancedMesh');
+  const proxyGeometry = proxyBatch.geometry;
+  const proxyMaterial = proxyBatch.material;
+  const proxyPlacementMatrix = new three.Matrix4();
+  proxyBatch.getMatrixAt(1, proxyPlacementMatrix);
+  handle.setSelected('part-001');
+  assertEqual(handle.selectedId, 'part-001', '批次更新前可选中第二个 placement');
 
   const positionsBase64 = Buffer.from(new Float32Array([
     0, 0, 0,
@@ -595,12 +662,56 @@ async function testProxyModelReplacement(record: (name: string) => void): Promis
     vertexCount: 3
   }) ?? 0;
   assertEqual(replaced, 2, 'canonical modelName 命中同一 instance batch 的两个 placement');
+  pumpFrames(2);
+  const replacementMetrics = rendererState.renderer?.renderMetrics.at(-1);
+  assert(replacementMetrics !== undefined, '几何替换后提交一帧用于 draw-call 量测');
+  console.log(JSON.stringify({ mapReplacementMetrics: { proxy: proxyMetrics, replacement: replacementMetrics } }));
+  assertEqual(replacementMetrics.instancedMeshes, 1, '真实几何替换后仍只有一个 InstancedMesh');
+  assertEqual(replacementMetrics.instanceCount, 2, '真实几何替换后仍保留两个 placement 实例');
+  assertEqual(replacementMetrics.drawCallEstimate, 1, '真实几何替换后仍估算为一个 draw call');
+  const replacementBatch = findInstancedMesh(rendererState.renderer?.lastScene ?? null);
+  assert(replacementBatch !== null, '真实几何替换后仍可定位共享 InstancedMesh');
+  assertEqual(replacementBatch, proxyBatch, '几何热替换不重建批次对象');
+  assert(replacementBatch.geometry !== proxyGeometry, '几何热替换更新共享 BufferGeometry');
+  assert(replacementBatch.material !== proxyMaterial, '几何热替换更新真实材质');
+  const replacementPlacementMatrix = new three.Matrix4();
+  replacementBatch.getMatrixAt(1, replacementPlacementMatrix);
+  assert(replacementPlacementMatrix.elements.every((value, index) => value === proxyPlacementMatrix.elements[index]),
+    '几何热替换保留 placement transform 映射');
+  assertEqual(handle.selectedId, 'part-001', '几何热替换保留当前选中 placement');
   const ready = audits.filter((entry) => entry.phase === 'mesh-ready').at(-1);
   assert(ready !== undefined, 'model geometry replacement 发出 mesh-ready audit');
-  assert(ready.items.every((item) => item.state === 'mesh'), 'replacement 后所有 placement 都是 mesh，不再是 proxy');
+  assert(ready.items.every((item) => item.state === 'proxy'), 'replacement 后 placement 仍由 proxy binding 管理');
 
   handle.dispose();
   record('proxy-model-batch-replacement');
+}
+
+async function testFrameUploadCancellation(record: (name: string) => void): Promise<void> {
+  let scheduled: FrameRequestCallback | null = null;
+  let cancelCount = 0;
+  let taskRan = false;
+  const queue = new FrameTaskQueue(
+    (callback) => {
+      scheduled = callback;
+      return 1;
+    },
+    () => {
+      cancelCount += 1;
+    },
+    () => 0,
+    6
+  );
+  const pending = queue.enqueue(() => {
+    taskRan = true;
+    return true;
+  });
+  assert(scheduled !== null, '上传任务入队后已预约帧回调');
+  queue.dispose();
+  assertEqual(await pending, false, '队列 dispose 将尚未执行的上传任务标记为取消');
+  assertEqual(taskRan, false, '队列 dispose 不执行已取消的上传任务');
+  assertEqual(cancelCount, 1, '队列 dispose 取消了预约的帧回调');
+  record('frame-upload-cancellation');
 }
 
 async function testFlverScene(record: (name: string) => void): Promise<void> {
@@ -913,6 +1024,7 @@ async function main(): Promise<void> {
   await testBackendResolution(record);
   await testProxyScene(record);
   await testProxyModelReplacement(record);
+  await testFrameUploadCancellation(record);
   await testFlverScene(record);
   await testMultiSkeletonPoseBatch(record);
   await testFollowerBindingPreservesReferencePose(record);

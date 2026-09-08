@@ -56,6 +56,9 @@ const CONTROLLED_ENTRIES = Object.freeze([
   'setParamFields',
   'setFmgEntries',
   'applyEmevdDsl',
+  // LuaBND facade: setLuabndScript stages the native write through
+  // applyNativeMutation, whose commit is owned by Patch Engine.
+  'setLuabndScript',
   // TAE / MSB 门面（问题 6-F）：mutate_tae_event_times → setTaeEventTimes（包
   // write-tae-document update-event-times）、mutate_msb_part_transform →
   // setMsbPartTransform（包 write-msb），落盘均经 applyNativeMutation → Patch

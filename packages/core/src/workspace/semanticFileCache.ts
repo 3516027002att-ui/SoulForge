@@ -24,6 +24,46 @@ export interface SemanticCacheProvider {
 }
 
 /**
+ * Native semantic caches are only reusable when the cached projection carries
+ * the same verified packed-file identity and scan revision as the current
+ * catalog.  Older cache rows predate outerFileHash/sourceRevision; treating
+ * those rows as a hit would silently skip the Bridge export and leave RAG
+ * without a freshness proof.  Text/JSON fixture caches intentionally retain
+ * the historical cache behavior because they are not native byte projections.
+ */
+export function isNativeSemanticBundleCurrent(file: IndexedFile, bundle: SymbolBundle): boolean {
+  if (!isNativeSemanticCacheCandidate(file)) return true;
+  if (!file.sha256) return false;
+
+  const proven = [
+    ...(bundle.events ?? []).flatMap((item) => [item, ...item.events]),
+    ...(bundle.maps ?? []).flatMap((item) => [item, ...item.entities, ...item.regions]),
+    ...(bundle.params ?? []).flatMap((item) => [item, ...item.rows]),
+    ...(bundle.msgs ?? []).flatMap((item) => [item, ...item.entries]),
+    ...(bundle.tae ?? []).flatMap((item) => [item, ...item.animations.flatMap((anim) => [item, ...anim.events])])
+  ] as Array<{ sourceRevision?: number; outerFileHash?: string }>;
+  if (proven.length === 0) return false;
+  return proven.every((value) => (
+    value.sourceRevision === file.mtimeMs
+      && value.outerFileHash === file.sha256
+  ));
+}
+
+function isNativeSemanticCacheCandidate(file: IndexedFile): boolean {
+  const path = file.relativePath.toLowerCase();
+  if (file.resourceKind === 'event') return path.includes('.emevd');
+  if (file.resourceKind === 'map') return path.includes('.msb');
+  if (file.resourceKind === 'param') return path.includes('.param');
+  if (file.resourceKind === 'msg') {
+    return path.endsWith('.fmg')
+      || path.endsWith('.fmg.dcx')
+      || path.includes('msgbnd')
+      || path.includes('.msgbnd');
+  }
+  return false;
+}
+
+/**
  * Extract symbols belonging to a single file from the populated WorkspaceIndex.
  */
 export function extractFileSymbolBundle(index: WorkspaceIndex, sourceUri: string): SymbolBundle {

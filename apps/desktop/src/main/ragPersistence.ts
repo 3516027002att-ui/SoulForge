@@ -1,5 +1,10 @@
 import type { RagChunk, RagCorpus, ReferenceEdge } from '@soulforge/shared';
 import { diffRagCorpusBySource, sameRagReferences } from '@soulforge/core';
+import {
+  measureSemanticRefreshStage,
+  measureSemanticRefreshStageSync,
+  type SemanticRefreshTelemetry
+} from './semanticRefreshTelemetry.js';
 
 const RAG_PERSIST_BATCH_SIZE = 512;
 
@@ -21,31 +26,64 @@ export async function persistRagCorpusBySourceDelta(
   store: RagDeltaStore,
   corpus: RagCorpus,
   previous: RagCorpus | null = null,
-  signal?: AbortSignal
+  signal?: AbortSignal,
+  telemetry?: SemanticRefreshTelemetry
 ): Promise<void> {
-  const deltas = diffRagCorpusBySource(previous, corpus);
+  const deltas = telemetry
+    ? measureSemanticRefreshStageSync(telemetry, 'diff', () => diffRagCorpusBySource(previous, corpus), (value) => ({
+        changedSourceCountInDiff: value.length,
+        upsertChunks: value.reduce((sum, delta) => sum + delta.upserts.length, 0),
+        deletedChunks: value.reduce((sum, delta) => sum + delta.deletedChunkIds.length, 0)
+      }))
+    : diffRagCorpusBySource(previous, corpus);
   for (const delta of deltas) {
     throwIfAborted(signal);
     for (let dStart = 0; dStart < delta.deletedChunkIds.length; dStart += RAG_PERSIST_BATCH_SIZE) {
       throwIfAborted(signal);
-      await store.mergeRagChunkDelta({
+      const deletedChunkIds = delta.deletedChunkIds.slice(dStart, dStart + RAG_PERSIST_BATCH_SIZE);
+      const persist = () => store.mergeRagChunkDelta({
         sourceUri: delta.sourceUri,
         upserts: [],
-        deletedChunkIds: delta.deletedChunkIds.slice(dStart, dStart + RAG_PERSIST_BATCH_SIZE)
+        deletedChunkIds
       });
+      if (telemetry) {
+        await measureSemanticRefreshStage(telemetry, 'persistBatch', persist, () => ({
+          batchCount: 1,
+          deletedChunks: deletedChunkIds.length
+        }));
+      } else {
+        await persist();
+      }
     }
     for (let start = 0; start < delta.upserts.length; start += RAG_PERSIST_BATCH_SIZE) {
       throwIfAborted(signal);
-      await store.mergeRagChunkDelta({
+      const upserts = delta.upserts.slice(start, start + RAG_PERSIST_BATCH_SIZE);
+      const persist = () => store.mergeRagChunkDelta({
         sourceUri: delta.sourceUri,
-        upserts: delta.upserts.slice(start, start + RAG_PERSIST_BATCH_SIZE),
+        upserts,
         deletedChunkIds: []
       });
+      if (telemetry) {
+        await measureSemanticRefreshStage(telemetry, 'persistBatch', persist, () => ({
+          batchCount: 1,
+          upsertChunks: upserts.length
+        }));
+      } else {
+        await persist();
+      }
     }
   }
   throwIfAborted(signal);
   if (previous === null || !sameRagReferences(previous.references, corpus.references)) {
-    await store.replaceReferences(corpus.references);
+    const persistReferences = () => store.replaceReferences(corpus.references);
+    if (telemetry) {
+      await measureSemanticRefreshStage(telemetry, 'persistBatch', persistReferences, () => ({
+        batchCount: 1,
+        referenceCount: corpus.references.length
+      }));
+    } else {
+      await persistReferences();
+    }
   }
 }
 

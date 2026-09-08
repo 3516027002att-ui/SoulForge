@@ -171,7 +171,7 @@ export function AgentMemoryDrawer(_props: AgentMemoryDrawerProps): ReactElement 
             主题 / 关键词 (Topic)
             <input
               type="text"
-              placeholder="例如: character_ids 或 speffect_rules"
+              placeholder="例如：角色、特效、参数"
               value={editTopic}
               onChange={(e) => setEditTopic(e.target.value)}
               autoFocus
@@ -199,7 +199,7 @@ export function AgentMemoryDrawer(_props: AgentMemoryDrawerProps): ReactElement 
             标签 (Tags, 逗号分隔)
             <input
               type="text"
-              placeholder="speffect, character, param"
+              placeholder="例如：特效、角色、参数"
               value={editTags}
               onChange={(e) => setEditTags(e.target.value)}
             />

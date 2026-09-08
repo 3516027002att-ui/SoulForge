@@ -127,6 +127,10 @@ import { AmbientField } from './theme/AmbientField.js';
 import { shouldShowEditorWelcome } from './theme/editorWelcome.js';
 import { Me3RuntimePanel } from './runtime/Me3RuntimePanel.js';
 import { AgentSidebar } from './agent/AgentSidebar.js';
+import {
+  toAgentAttachmentReferences,
+  type AgentAttachmentChip
+} from './agent/agentAttachments.js';
 import { CiteSelectScrim } from './agent/CiteSelectScrim.js';
 import { clampAgentDockWidth } from './agent/AgentDockResizer.js';
 import { resolveKeybinding } from './keybindings/applyKeybinding.js';
@@ -179,7 +183,7 @@ type SidebarView = 'explorer' | 'search' | 'staging' | 'audit' | 'settings';
 type CenterView = 'project' | 'resource' | 'operations' | 'settings';
 
 /** P0 安全收口：权限模式由主进程锁定，renderer 不得自行切换。 */
-const AI_PERMISSION_LOCK_REASON = 'P0 安全收口期间由主进程锁定为计划模式；renderer 不能抬高授权。';
+const AI_PERMISSION_LOCK_REASON = '权限由应用安全设置控制。';
 
 /** SoulForge 产品图标：标题栏和欢迎页使用透明 S 形标志。 */
 const SOULFORGE_ICON_URL = new URL('./assets/soulforge-icon.png', import.meta.url).href;
@@ -189,6 +193,18 @@ function eventDocumentTitle(relativePath: string): string {
   const normalized = relativePath.replace(/\\/g, '/');
   const base = normalized.slice(normalized.lastIndexOf('/') + 1);
   return base.replace(/\.emevd(?:\.dcx)?$/i, '') || base;
+}
+
+/** 状态值仍来自 native envelope，但主状态栏不把协议字段名当作文案。 */
+function readLevelLabel(authority: string | null | undefined): string {
+  switch (authority) {
+    case 'partial': return '读取不完整';
+    case 'candidate': return '候选读取';
+    case 'fixture-confirmed': return '样本已确认';
+    case 'native-verified': return '原生读取已验证';
+    case 'unverified': return '尚未验证';
+    default: return authority ?? '未报告';
+  }
 }
 
 /** 无实时 MSB 数据时的空 parts（真实数据经 Bridge 读取后填充）。 */
@@ -359,6 +375,20 @@ export function App(): ReactElement {
   // App，runAgentTask 时随 runAiAgent 提交（main 按 agentReferenceRegistry 校验）。
   const [agentResources, setAgentResources] = useState<readonly AgentResourceReference[]>([]);
   const [agentAttachments, setAgentAttachments] = useState<readonly AgentAttachmentReference[]>([]);
+  const handleAgentAttachmentsChange = useCallback((chips: readonly AgentAttachmentChip[]) => {
+    const next = toAgentAttachmentReferences(chips);
+    setAgentAttachments((current) => {
+      if (current.length !== next.length) return next;
+      return current.every((item, index) => {
+        const candidate = next[index];
+        return candidate !== undefined
+          && item.token === candidate.token
+          && item.mediaType === candidate.mediaType
+          && item.byteLength === candidate.byteLength
+          && item.expiresAt === candidate.expiresAt;
+      }) ? current : next;
+    });
+  }, []);
   /**
    * S10 引用框选：citeSelecting = 中央编辑区暗幕开/关（「引用」钮与暗幕共享这一
    * 状态）；pendingCiteHits = 暗幕结算出的命中，交 AgentSidebar 经
@@ -1343,7 +1373,7 @@ export function App(): ReactElement {
         setFmgLive(true);
         setStatus(
           `已加载 FMG：${result.data.entryCount ?? loadedEntries.length} 条`
-          + (result.data.authority ? ` · authority=${result.data.authority}` : '')
+           + (result.data.authority ? ` · 读取级别：${readLevelLabel(result.data.authority)}` : '')
         );
       } catch (error) {
         if (cancelled) return;
@@ -1516,7 +1546,7 @@ export function App(): ReactElement {
           `已加载 MSB：${result.data.partCount ?? result.data.parts.length} parts`
           + (result.data.regionCount !== undefined ? ` / ${result.data.regionCount} regions` : '')
           + (result.data.routeCount !== undefined ? ` / ${result.data.routeCount} routes` : '')
-          + (result.data.authority ? ` · ${result.data.authority}` : '')
+           + (result.data.authority ? ` · 读取级别：${readLevelLabel(result.data.authority)}` : '')
         );
       } catch (error) {
         if (cancelled) return;
@@ -1669,7 +1699,7 @@ export function App(): ReactElement {
         setStatus(
           `已加载 EMEVD：${full.eventCount ?? full.outline?.eventCount ?? 0} 事件 / `
           + `${full.instructionCount ?? full.outline?.instructionTotal ?? 0} 指令`
-          + `（authority=${full.authority ?? 'unknown'}）`
+           + `（读取级别：${readLevelLabel(full.authority)}）`
         );
       } catch (error) {
         if (cancelled) return;
@@ -2461,7 +2491,7 @@ export function App(): ReactElement {
     const capability = domainSummaries.find((entry) => entry.domain === domain)?.capability ?? 'deferred';
     setStatus(capability === 'read-ready'
       ? `${domainLabel(domain)}：等待成熟工作台接线`
-      : `${domainLabel(domain)}：${capability === 'deferred' ? 'read contract 尚未接线' : '运行条件不满足'}`);
+      : `${domainLabel(domain)}：${capability === 'deferred' ? '暂未提供读取能力' : '当前条件不满足'}`);
   }
 
   function openOperationsView(): void {
@@ -3107,17 +3137,27 @@ export function App(): ReactElement {
     { id: 'toggle-agent', icon: '✦', label: '切换 AI Agent 面板', hint: 'Ctrl J', run: (): void => { setAgentOpen((open) => !open); } },
     { id: 'toggle-sidebar', icon: '◨', label: '切换侧栏', hint: 'Ctrl B', run: (): void => { setSidebarCollapsed((collapsed) => !collapsed); } }
   ];
-  const cmdkNormalized = normalizeCommandSearchText(cmdkQuery);
-  const filteredCmdkCommands = cmdkCommands.filter(
-    (command) => matchesCommandSearch(command.label, cmdkNormalized)
+  const cmdkNormalized = useMemo(
+    () => normalizeCommandSearchText(cmdkQuery),
+    [cmdkQuery]
+  );
+  const filteredCmdkCommands = useMemo(
+    () => cmdkCommands.filter((command) => matchesCommandSearch(command.label, cmdkNormalized)),
+    [cmdkCommands, cmdkNormalized]
   );
   /**
    * 命令面板的资源命中：全量渲染（显示不设限）。此前按 8 条上限截断并补说明，
    * 命令面板列由 .cmdk__list 自身滚动，匹配项一次给全。
    */
-  const cmdkAllResourceMatches = workspace && cmdkNormalized
-    ? filterCommandPaletteResources(indexedFiles, cmdkNormalized)
-    : [];
+  const cmdkAllResourceMatches = useMemo(() => {
+    // `cmdkQuery` is intentionally retained while the modal closes so opening
+    // it can restore/reset focus predictably.  Do not scan every indexed file
+    // during unrelated App renders while that query is not visible; when the
+    // palette is open, indexedFiles remains a dependency so newly indexed or
+    // refreshed resources are still included in sorted results.
+    if (!cmdkOpen || !workspace || !cmdkNormalized) return [];
+    return filterCommandPaletteResources(indexedFiles, cmdkNormalized);
+  }, [cmdkOpen, workspace, indexedFiles, cmdkNormalized]);
   const cmdkItemCount = filteredCmdkCommands.length + cmdkAllResourceMatches.length;
   const selectedCmdkIndex = Math.min(cmdkIndex, Math.max(0, cmdkItemCount - 1));
 
@@ -3518,9 +3558,7 @@ export function App(): ReactElement {
                           {entry.changedPaths.map((path) => (
                             <div key={`${entry.opId}:${path}`} className="audit-entry__file">
                               <span className="audit-entry__file-path" title={path}>{shortenPath(path)}</span>
-                              {path === '[本机路径已隐藏]' ? (
-                                <span className="audit-entry__file-hint">路径未脱敏映射，不可单文件回滚</span>
-                              ) : (
+                              {path === '[本机路径已隐藏]' ? null : (
                                 <button
                                   type="button"
                                   className="btn btn--ghost btn--sm"
@@ -3572,17 +3610,11 @@ export function App(): ReactElement {
                 )}
               </div>
               <div className="setting-row">
-                <div>
-                  <div className="setting-name">写入路径</div>
-                  <div className="setting-desc">变更必须经暂存与备份后写入（内部：PatchIR / Patch Engine）</div>
-                </div>
+                <div className="setting-name">写入路径</div>
                 <span className="pill pill--ok">强制</span>
               </div>
               <div className="setting-row">
-                <div>
-                  <div className="setting-name">回滚</div>
-                  <div className="setting-desc">写入前自动备份，可按操作回滚</div>
-                </div>
+                <div className="setting-name">回滚</div>
                 <span className="pill pill--ok">可用</span>
               </div>
               <div className="setting-row">
@@ -3701,7 +3733,7 @@ export function App(): ReactElement {
           )}
           {activeDomain === 'gparam' && activeEditor === 'empty' && gparamBanks.length === 0 && (
             <section className="domain-placeholder" data-testid="gparam-placeholder" aria-label="GPARAM 工作域">
-              <span className="domain-placeholder__eyebrow">GPARAM / CAPABILITY</span>
+              <span className="domain-placeholder__eyebrow">GPARAM</span>
               <h2>GPARAM 工作台</h2>
               <p>工作区中没有 GPARAM 文件。挂载包含 drawparam 的 Mod 工作区后这里会列出所有 bank。</p>
             </section>
@@ -3714,7 +3746,7 @@ export function App(): ReactElement {
           )}
           {activeDomain === 'texture' && activeEditor === 'empty' && textureContainers.length === 0 && (
             <section className="domain-placeholder" data-testid="texture-placeholder" aria-label="纹理工作域">
-              <span className="domain-placeholder__eyebrow">TEXTURE / CAPABILITY</span>
+              <span className="domain-placeholder__eyebrow">TEXTURE</span>
               <h2>Texture 工作台</h2>
               <p>工作区中没有 TPF 文件。挂载包含纹理包的 Mod 工作区后这里会列出所有容器。</p>
             </section>
@@ -3727,9 +3759,9 @@ export function App(): ReactElement {
           )}
           {activeDomain === 'vfx' && activeEditor === 'empty' && vfxFiles.length === 0 && (
             <section className="domain-placeholder" data-testid="vfx-placeholder" aria-label="VFX 工作域">
-              <span className="domain-placeholder__eyebrow">VFX / CAPABILITY</span>
+              <span className="domain-placeholder__eyebrow">VFX</span>
               <h2>VFX 工作台</h2>
-              <p>工作区中没有 FXR 文件。挂载包含特效文件（.fxr）的 Mod 工作区后这里会列出所有 effect。</p>
+              <p>工作区中没有 FXR 文件。挂载包含特效文件（.fxr）的 Mod 工作区后这里会列出所有特效条目。</p>
             </section>
           )}
           {activeDomain === 'material' && activeEditor === 'empty' && materialFiles.length > 0 && (
@@ -3740,7 +3772,7 @@ export function App(): ReactElement {
           )}
           {activeDomain === 'material' && activeEditor === 'empty' && materialFiles.length === 0 && (
             <section className="domain-placeholder" data-testid="material-placeholder" aria-label="材质工作域">
-              <span className="domain-placeholder__eyebrow">MATERIAL / CAPABILITY</span>
+              <span className="domain-placeholder__eyebrow">MATERIAL</span>
               <h2>Material 工作台</h2>
               <p>工作区中没有 MTD 文件。挂载包含材质定义的 Mod 工作区后这里会列出所有文件。</p>
             </section>
@@ -4118,15 +4150,9 @@ export function App(): ReactElement {
                   void run();
                 }}
               />
-              {/* 字段定义的来源与限制必须写在字段表旁边，而不是只存在状态里。
-                  没有定义时说清原因（哪一步失败），有定义时说清为什么只读
-                  ——否则用户看到一列灰掉的字段无从判断是坏了还是没权限。 */}
-              {paramLive && paramFieldDefinition !== null && (
+              {paramLive && paramFieldDefinition !== null && paramFieldDefsOrigin === 'fixture' && (
                 <p className="muted" data-testid="param-fielddefs-readonly">
-                  字段定义来自 Smithbox SDT 2.2.4（{paramFieldDefinition.fields.length} 个字段）。
-                  {paramFieldDefsOrigin === 'fixture'
-                    ? '字段写入未放行：尚未确认信任该元数据包，在 param 容器工作台里确认一次即可启用。行级编辑不受影响。'
-                    : '字段写入已放行：该定义已通过包校验、行宽核对与用户信任策略。'}
+                  字段当前只读。
                 </p>
               )}
               {paramLive && paramFieldDefinition === null && paramFieldDefsDiagnostic !== null && (
@@ -4177,7 +4203,7 @@ export function App(): ReactElement {
             <>
               <p className="muted">
                 {selectedFile
-                  ? 'BND4 容器工作台（只读条目树 + 用户提供字节的整个子项替换）'
+                   ? 'BND4 容器工作台'
                   : '选择左侧容器资源后显示工作台'}
               </p>
               <Bnd4WorkbenchPanel
@@ -4258,14 +4284,12 @@ export function App(): ReactElement {
               initialUri={selectedFile.sourceUri}
             />
           )}
-          {activeEditor === 'binary' && !isMaterialFile && !isVfxFile && selectedFile && (
+          {activeEditor === 'binary' && !isMaterialFile && !isVfxFile && selectedFile && classifyWorkspaceOpen(selectedFile.relativePath).openKind !== 'history' && (
             <p className="muted">
               {classifyWorkspaceOpen(selectedFile.relativePath).openKind === 'blocked-scope'
-                ? '这个容器的语义读被范围裁定挡住（HKX 不在本版解析范围）。'
+                 ? '当前版本暂不支持 HKX 语义解析。'
                 : classifyWorkspaceOpen(selectedFile.relativePath).openKind === 'blocked-no-parser'
                   ? '这个格式还没有确认过的 parser，不能声称已经读懂。'
-                  : classifyWorkspaceOpen(selectedFile.relativePath).openKind === 'history'
-                    ? '这是备份/历史副本，只出现在历史里，不进语义编辑器。'
                     : '这个格式还没有专用编辑器。'}
             </p>
           )}
@@ -4473,12 +4497,7 @@ export function App(): ReactElement {
             contextLabel={domainLabel(activeDomain)}
             selectedFilePath={selectedFile?.relativePath ?? null}
             onResourcesChange={setAgentResources}
-            onAttachmentsChange={(chips) => setAgentAttachments(chips.map((chip) => ({
-              token: chip.token,
-              mediaType: chip.mediaType,
-              byteLength: chip.byteLength,
-              expiresAt: chip.expiresAt
-            })))}
+            onAttachmentsChange={handleAgentAttachmentsChange}
             tools={agentTools.length > 0 ? agentTools : tools}
             toolOutput={toolOutput}
             task={{

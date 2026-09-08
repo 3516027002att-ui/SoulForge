@@ -49,6 +49,50 @@ test('ModelResourcePool：indexSize 为 16/32 时精准创建 Uint16/Uint32 缓�
   assert.ok(geo32.index instanceof THREE.Uint32BufferAttribute);
 });
 
+test('ModelResourcePool：renderer-local typed bytes 路径不需要重新 base64 解码', () => {
+  const pool = new ModelResourcePool();
+  const positionsBytes = new Uint8Array(new Float32Array([0, 0, 0, 1, 0, 0, 0, 1, 0]).buffer);
+  const indicesBytes = new Uint8Array(new Uint16Array([0, 1, 2]).buffer);
+  const result = pool.updateModelGeometry(THREE, tracker, 'm-bytes', {
+    positionsBase64: '',
+    positionsBytes,
+    indicesBytes,
+    indexSize: 16,
+    vertexCount: 3
+  });
+
+  assert.deepEqual(
+    Array.from(result.geometry.getAttribute('position').array as ArrayLike<number>),
+    [0, 0, 0, 1, 0, 0, 0, 1, 0]
+  );
+  assert.ok(result.geometry.index instanceof THREE.Uint16BufferAttribute);
+  assert.deepEqual(Array.from(result.geometry.index.array), [0, 1, 2]);
+});
+
+test('ModelResourcePool：typed bytes 只读取合法 subview，并校验 UV/normal/index 对齐', () => {
+  const pool = new ModelResourcePool();
+  const withSentinels = (source: ArrayBuffer): Uint8Array => {
+    const wrapped = new Uint8Array(source.byteLength + 3);
+    wrapped.fill(0xa5);
+    wrapped.set(new Uint8Array(source), 1);
+    return wrapped.subarray(1, 1 + source.byteLength);
+  };
+  const result = pool.updateModelGeometry(THREE, tracker, 'm-bytes-32', {
+    positionsBase64: '',
+    positionsBytes: withSentinels(new Float32Array([0, 0, 0, 1, 0, 0, 0, 1, 0]).buffer),
+    indicesBytes: withSentinels(new Uint32Array([0, 1, 2]).buffer),
+    uvsBytes: withSentinels(new Float32Array([0, 0, 1, 0, 0, 1]).buffer),
+    normalsBytes: withSentinels(new Float32Array([0, 0, 1, 0, 0, 1, 0, 0, 1]).buffer),
+    indexSize: 32,
+    vertexCount: 3
+  });
+
+  assert.deepEqual(Array.from(result.geometry.getAttribute('uv').array as ArrayLike<number>), [0, 0, 1, 0, 0, 1]);
+  assert.deepEqual(Array.from(result.geometry.getAttribute('normal').array as ArrayLike<number>), [0, 0, 1, 0, 0, 1, 0, 0, 1]);
+  assert.ok(result.geometry.index instanceof THREE.Uint32BufferAttribute);
+  assert.deepEqual(Array.from(result.geometry.index.array), [0, 1, 2]);
+});
+
 test('ModelResourcePool：复用单例 Proxy 盒子与球体原型几何体', () => {
   const pool = new ModelResourcePool();
 

@@ -18,7 +18,11 @@ import {
   sampleAuthoritativePose
 } from '@soulforge/shared';
 import { flverEulerXzyToQuaternion } from './flverSkeletonMapping.js';
-import { ModelResourcePool, normalizeModelResourceKey } from './modelResourcePool.js';
+import {
+  ModelResourcePool,
+  normalizeModelResourceKey,
+  type MeshGeometryWire
+} from './modelResourcePool.js';
 import type {
   BufferGeometry,
   CompressedPixelFormat,
@@ -73,18 +77,7 @@ export interface ProxySceneHandle extends ThreeSceneHandle {
   /** 用真实 FLVER 网格替换某个 proxy 盒子；找不到 id 则忽略。 */
   replaceItemMesh: (id: string, mesh: FlverSceneMesh) => void;
   /** 按 modelName 批量更新场景内所有引用该模型的 Mesh 几何体（对齐 Smithbox 几何共享池）。返回实际替换数。 */
-  updateModelGeometry?: (modelName: string, geometryData: {
-    positionsBase64: string;
-    indicesBase64?: string | undefined;
-    indexSize?: 16 | 32 | undefined;
-    uvsBase64?: string | undefined;
-    normalsBase64?: string | undefined;
-    vertexCount: number;
-    texturePreviewToken?: string | undefined;
-    textureColorSpace?: string | undefined;
-    materialGroups?: Array<{ start: number; count: number; materialIndex: number }> | undefined;
-    texturePreviews?: Array<{ materialIndex: number; texturePreviewToken: string; colorSpace?: string }> | undefined;
-  }) => number;
+  updateModelGeometry?: (modelName: string, geometryData: MeshGeometryWire) => number;
 }
 
 export interface FlverSceneHandle extends ThreeSceneHandle {
@@ -669,6 +662,10 @@ export async function mountThreeProxyScene(
           : resourcePool.getProxyMaterial(core.three, core.track, first.colorRgb);
         core.addInstanceBatch(batch.key, batch.items, geometry, material);
       }
+      // setDrawList mutates the scene after mountSceneCore's initial tick may
+      // already have rendered the empty scene. Request exactly one bounded
+      // frame so proxy content appears without waiting for resize/input.
+      core.requestRender?.();
       hasContent = true;
       if (!initialFramed) {
         core.frameToBounds(computeRobustInitialCameraBounds(list));
@@ -706,7 +703,7 @@ export async function mountThreeProxyScene(
       emitRenderAudit('mesh-ready');
     },
     updateModelGeometry: (modelName, geometryData) => {
-      if (!geometryData.positionsBase64 || geometryData.vertexCount <= 0) return 0;
+      if ((!geometryData.positionsBase64 && !geometryData.positionsBytes) || geometryData.vertexCount <= 0) return 0;
       // 1. 使用共享资源池获取或创建 BufferGeometry 和 Material
       const { geometry, material } = resourcePool.updateModelGeometry(
         core.three,
@@ -719,6 +716,10 @@ export async function mountThreeProxyScene(
       if (replaced === 0) {
         throw new Error(`MAP_RENDERER_MODEL_BATCH_NOT_FOUND: ${modelName} (expected batch key model:${normalizeModelName(modelName)})`);
       }
+      // Geometry replacement mutates the scene outside input/pointer handlers;
+      // explicitly schedule the bounded render loop so the new shared batch is
+      // visible without waiting for an unrelated camera or resize event.
+      core.requestRender?.();
       emitRenderAudit('mesh-ready');
       return replaced;
     },
@@ -1686,10 +1687,10 @@ async function mountSceneCore(input: MountInput): Promise<SceneCore> {
   const updateInstanceBatchGeometry = (
     batchKey: string,
     geometry: BufferGeometry,
-    material: Material
-  ): void => {
+    material: Material | Material[]
+  ): number => {
     const batch = instanceBatches.get(batchKey);
-    if (!batch) return;
+    if (!batch) return 0;
     batch.mesh.geometry = geometry;
     batch.mesh.material = material;
     // Real FLVER geometry uses its authored/default material rather than the
@@ -1708,6 +1709,7 @@ async function mountSceneCore(input: MountInput): Promise<SceneCore> {
       clearHighlightObjects();
       applyHighlight(selectedId);
     }
+    return batch.ids.length;
   };
 
   const replaceModelGeometry = (
@@ -1718,87 +1720,36 @@ async function mountSceneCore(input: MountInput): Promise<SceneCore> {
     const modelKey = normalizeModelName(modelName);
     const batchKey = `model:${modelKey}`;
     const batches = [...instanceBatches.values()].filter((batch) => batch.key === batchKey);
-    const replacements: Array<{ id: string; object: Object3D }> = [];
 
-    // Build every real object while the proxy batch is still intact. No scene
-    // mutation occurs until all placements can be represented, so a renderer
-    // allocation/geometry error leaves the original proxy available.
-    for (const batch of batches) {
-      for (const id of batch.ids) {
-        const binding = instanceBindings.get(id);
-        if (!binding) continue;
-        const object = new three.Mesh(geometry, material);
-        object.userData.itemId = id;
-        object.userData.modelName = modelName;
-        object.position.copy(binding.target.position);
-        object.quaternion.copy(binding.target.quaternion);
-        object.scale.copy(binding.target.scale);
-        replacements.push({ id, object });
-      }
+    // Keep the proxy InstancedMesh as the production map representation. The
+    // placement bindings already carry transforms, pick bounds, and selection
+    // targets, so replacing the shared geometry/material is enough; creating
+    // one Mesh per placement turns a highly-instanced map into N draw calls.
+    if (batches.length > 0) {
+      return batches.reduce(
+        (replaced, batch) => replaced + updateInstanceBatchGeometry(batch.key, geometry, material),
+        0
+      );
     }
 
-    // A repeated READY notification updates the existing real meshes without
-    // resurrecting a proxy or creating duplicate scene entities.
-    if (batches.length === 0) {
-      const existing = [...meshes.entries()].filter(([id, object]) => (
-        renderStates.get(id) === 'mesh'
-        && normalizeModelName(String(object.userData.modelName ?? '')) === modelKey
-      ));
-      for (const [id, object] of existing) {
-        const mesh = object as Mesh;
-        mesh.geometry = geometry;
-        mesh.material = material;
-        updateObjectBounds(id, mesh);
-      }
-      if (selectedId && existing.some(([id]) => id === selectedId)) {
-        clearHighlightObjects();
-        applyHighlight(selectedId);
-      }
-      return existing.length;
+    // A repeated READY notification may target a real mesh created by another
+    // scene projection path. Keep that compatibility branch without changing
+    // the map batch representation above.
+    const existing = [...meshes.entries()].filter(([id, object]) => (
+      renderStates.get(id) === 'mesh'
+      && normalizeModelName(String(object.userData.modelName ?? '')) === modelKey
+    ));
+    for (const [id, object] of existing) {
+      const mesh = object as Mesh;
+      mesh.geometry = geometry;
+      mesh.material = material;
+      updateObjectBounds(id, mesh);
     }
-
-    if (replacements.length === 0) return 0;
-
-    const replacementIds = new Set(replacements.map(({ id }) => id));
-    const selectedReplacement = selectedId !== null && replacementIds.has(selectedId);
-    if (selectedReplacement) {
-      detachUniversalControls();
+    if (selectedId && existing.some(([id]) => id === selectedId)) {
       clearHighlightObjects();
+      applyHighlight(selectedId);
     }
-
-    for (const batch of batches) {
-      root.remove(batch.mesh);
-      instanceBatches.delete(batch.key);
-      for (const id of batch.ids) {
-        const binding = instanceBindings.get(id);
-        if (binding?.target.parent) binding.target.parent.remove(binding.target);
-        instanceBindings.delete(id);
-        placementToAllChunkBindings.delete(id);
-        removePlacementSpatialIndex(id);
-        meshes.delete(id);
-        renderStates.delete(id);
-      }
-    }
-
-    // Commit the replacement as one synchronous scene operation: the old
-    // InstancedMesh is removed and every real placement is added in this same
-    // turn, before the next render frame can observe the scene.
-    for (const { id, object } of replacements) {
-      root.add(object);
-      pickables.add(object);
-      meshes.set(id, object);
-      renderStates.set(id, 'mesh');
-      updateObjectBounds(id, object);
-    }
-
-    if (selectedReplacement && selectedId) {
-      const selectedObject = meshes.get(selectedId);
-      if (selectedObject) {
-        applyHighlight(selectedId);
-        attachUniversalControls(selectedObject);
-      }
-    }
-    return replacements.length;
+    return existing.length;
   };
 
   const getItemRenderState = (id: string): ProxySceneRenderState => renderStates.get(id) ?? 'missing';

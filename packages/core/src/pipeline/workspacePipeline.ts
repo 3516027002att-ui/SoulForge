@@ -1,4 +1,4 @@
-import { readFile } from 'node:fs/promises';
+import { readFile, stat } from 'node:fs/promises';
 import type { BridgeCommand } from '../bridge/runBridge.js';
 import type { BridgeResult, Diagnostic, IndexedFile, ResourceKind, SymbolBundle } from '@soulforge/shared';
 import { runBridge } from '../bridge/runBridge.js';
@@ -8,7 +8,12 @@ import { parseEventText } from '../parsers/eventTextParser.js';
 import { parseMsgText } from '../parsers/msgTextParser.js';
 import { scanWorkspace } from '../workspace/scanWorkspace.js';
 import { makeWorkspaceId } from '../workspace/resourceUri.js';
-import { extractFileSymbolBundle, loadSymbolBundleIntoIndex, type SemanticCacheProvider } from '../workspace/semanticFileCache.js';
+import {
+  extractFileSymbolBundle,
+  isNativeSemanticBundleCurrent,
+  loadSymbolBundleIntoIndex,
+  type SemanticCacheProvider
+} from '../workspace/semanticFileCache.js';
 
 export interface AnalyzeWorkspaceOptions {
   workspaceRoot: string;
@@ -150,6 +155,14 @@ export async function analyzeWorkspace(options: AnalyzeWorkspaceOptions): Promis
       } catch {
         cachedBundle = null;
       }
+    }
+
+    if (cachedBundle && !isNativeSemanticBundleCurrent(file, cachedBundle)) {
+      // A legacy native cache may match the catalog SHA while lacking the
+      // outer-file/source-revision proof introduced for native RAG freshness.
+      // Treat it as a miss so export-* rehydrates the source instead of
+      // loading an unprovable bundle and skipping the Bridge path.
+      cachedBundle = null;
     }
 
     if (cachedBundle) {
@@ -311,6 +324,8 @@ async function parseKnownResource(
     if (isNativeMsgResource(file) || isNativeCandidateResource(file)) {
       const command = exportCommandFor(file);
       if (!command) return { accepted: false, diagnostics: [] };
+      const beforeReceipt = await verifyNativeScanReceipt(file, 'before Bridge export');
+      if (!beforeReceipt.ok) return beforeReceipt;
       const semanticTimeoutMs = options.bridgeTimeoutMs
         ?? (command === 'export-param' ? DEFAULT_PARAM_EXPORT_TIMEOUT_MS : DEFAULT_SEMANTIC_EXPORT_TIMEOUT_MS);
       const result = await runBridge({
@@ -324,11 +339,39 @@ async function parseKnownResource(
         ...(options.bridgeExecutablePath ? { bridgeExecutablePath: options.bridgeExecutablePath } : {}),
         timeoutMs: semanticTimeoutMs
       });
+      const afterReceipt = await verifyNativeScanReceipt(file, 'after Bridge export');
+      if (!afterReceipt.ok) return afterReceipt;
+      if (result.data && typeof result.data === 'object' && !Array.isArray(result.data)
+        && result.parseStatus !== 'failed' && result.parseStatus !== 'unsupported') {
+        const outerFileHash = bridgeOuterFileHash(result.data, file);
+        if (!file.sha256 || !outerFileHash || outerFileHash !== file.sha256) {
+          return {
+            accepted: false,
+            diagnostics: [nativePipelineStaleDiagnostic(
+              file,
+              'Bridge export 没有提供与扫描期 IndexedFile.sha256 精确相同的 outer/source hash，拒绝把扫描期 revision 绑定到该语义读取。',
+              { expectedOuterFileHash: file.sha256 ?? null, reportedOuterFileHash: outerFileHash ?? null }
+            )]
+          };
+        }
+        if (!index.isNativeProjectionCurrent(file.sourceUri, {
+          outerFileHash,
+          sourceRevision: afterReceipt.mtimeMs
+        })) {
+          return {
+            accepted: false,
+            diagnostics: [nativePipelineStaleDiagnostic(
+              file,
+              'Bridge export 返回后工作区 source identity 已变化，拒绝发布晚到的初始 native 语义投影。'
+            )]
+          };
+        }
+      }
       // Bridge emits an absolute file URI because it is also used by native
       // diagnostics. WorkspaceIndex/RAG uses the workspace-relative URI as
       // its stable source key. Rebind only equal-to-envelope sourceUri
       // fields; never rewrite unrelated evidence from a nested payload.
-      const ingest = ingestBridgeResult(index, canonicalizeBridgeSource(result, file.sourceUri));
+      const ingest = ingestBridgeResult(index, canonicalizeBridgeSource(result, file.sourceUri, afterReceipt.mtimeMs));
       return { accepted: ingest.accepted, diagnostics: ingest.diagnostics };
     }
 
@@ -379,7 +422,11 @@ async function parseKnownResource(
   }
 }
 
-function canonicalizeBridgeSource(result: BridgeResult<unknown>, sourceUri: string): BridgeResult<unknown> {
+function canonicalizeBridgeSource(
+  result: BridgeResult<unknown>,
+  sourceUri: string,
+  sourceRevision?: number
+): BridgeResult<unknown> {
   const nativeSourceUri = result.sourceUri;
   const rewrite = (value: unknown): unknown => {
     if (Array.isArray(value)) return value.map(rewrite);
@@ -390,14 +437,114 @@ function canonicalizeBridgeSource(result: BridgeResult<unknown>, sourceUri: stri
     }
     return output;
   };
+  const canonicalData = result.data === undefined ? undefined : rewrite(result.data);
+  // Bridge semantic exports carry the native leaf sourceHash and, for packed
+  // resources, the independently computed outerFileHash.  The Bridge does
+  // not own the workspace catalog mtime, however, so attach the scan receipt
+  // as a fallback sourceRevision at the export envelope.  Ingest propagates
+  // this envelope provenance to every PARAM/MSG child and event/map symbol.
+  // Do not synthesize an outer/source hash from the catalog: leaf and packed
+  // byte identities remain Bridge-owned and are checked by WorkspaceIndex.
+  if (canonicalData && typeof canonicalData === 'object' && !Array.isArray(canonicalData)
+    && Number.isFinite(sourceRevision)) {
+    const record = canonicalData as Record<string, unknown>;
+    if (record.sourceRevision === undefined) record.sourceRevision = sourceRevision;
+  }
   return {
     ...result,
     sourceUri,
     diagnostics: result.diagnostics.map((diagnostic) => (
       diagnostic.sourceUri === nativeSourceUri ? { ...diagnostic, sourceUri } : diagnostic
     )),
-    ...(result.data === undefined ? {} : { data: rewrite(result.data) })
+    ...(canonicalData === undefined ? {} : { data: canonicalData })
   };
+}
+
+interface NativeScanReceipt {
+  ok: true;
+  mtimeMs: number;
+  size: number;
+}
+
+interface NativeScanReceiptFailure {
+  ok: false;
+  accepted: false;
+  diagnostics: Diagnostic[];
+}
+
+async function verifyNativeScanReceipt(
+  file: IndexedFile,
+  phase: string
+): Promise<NativeScanReceipt | NativeScanReceiptFailure> {
+  try {
+    const current = await stat(file.absolutePath);
+    if (current.mtimeMs !== file.mtimeMs || current.size !== file.size) {
+      return {
+        ok: false,
+        accepted: false,
+        diagnostics: [nativePipelineStaleDiagnostic(
+          file,
+          `在 ${phase} 时文件已偏离扫描期 IndexedFile identity，拒绝继续 native 语义摄取。`,
+          {
+            expectedMtimeMs: file.mtimeMs,
+            actualMtimeMs: current.mtimeMs,
+            expectedSize: file.size,
+            actualSize: current.size
+          }
+        )]
+      };
+    }
+    return { ok: true, mtimeMs: current.mtimeMs, size: current.size };
+  } catch (error) {
+    return {
+      ok: false,
+      accepted: false,
+      diagnostics: [nativePipelineStaleDiagnostic(
+        file,
+        `无法在 ${phase} 校验文件 identity，拒绝 native 语义摄取。`,
+        { error: error instanceof Error ? error.message : String(error) }
+      )]
+    };
+  }
+}
+
+function nativePipelineStaleDiagnostic(
+  file: IndexedFile,
+  message: string,
+  details?: Record<string, unknown>
+): Diagnostic {
+  return {
+    severity: 'warning',
+    code: 'NATIVE_SEMANTIC_PIPELINE_SOURCE_STALE',
+    message,
+    sourceUri: file.sourceUri,
+    ...(details ? { details } : {})
+  };
+}
+
+function bridgeOuterFileHash(value: unknown, file: IndexedFile): string | undefined {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined;
+  const record = value as Record<string, unknown>;
+  if (typeof record.outerFileHash === 'string' && record.outerFileHash.length > 0) {
+    return record.outerFileHash;
+  }
+  // For an unpacked native leaf, Bridge's document sourceHash is the hash of
+  // exactly the file that scanWorkspace catalogued. Packed resources must
+  // expose outerFileHash explicitly; a child/leaf hash cannot stand in for it.
+  if (!isPackedNativeSource(file) && typeof record.sourceHash === 'string' && record.sourceHash.length > 0) {
+    return record.sourceHash;
+  }
+  return undefined;
+}
+
+function isPackedNativeSource(file: IndexedFile): boolean {
+  const path = file.relativePath.toLowerCase();
+  return file.formatKind === 'dcx'
+    || file.formatKind === 'bnd'
+    || path.endsWith('.dcx')
+    || path.endsWith('.bnd')
+    || path.includes('.bnd.dcx')
+    || path.includes('bnd4');
 }
 
 function isNativeMsgResource(file: IndexedFile): boolean {

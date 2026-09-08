@@ -166,6 +166,19 @@ describe('MAP static geometry chunk 重组', () => {
     ]);
   });
 
+  it('生产上传路径保留 typed bytes，避免合并后再次 base64 编解码', () => {
+    const merged = mergeMapStaticGeometryChunks(
+      [staticGeometryChunk(0), staticGeometryChunk(10)],
+      { encodeBase64: false }
+    );
+
+    assert.equal(merged.positionsBase64, undefined);
+    assert.ok(merged.positionsBytes instanceof Uint8Array);
+    assert.ok(merged.indicesBytes instanceof Uint8Array);
+    assert.equal(merged.positionsBytes!.byteLength, 2 * 3 * 3 * Float32Array.BYTES_PER_ELEMENT);
+    assert.equal(merged.indicesBytes!.byteLength, 2 * 3 * Uint16Array.BYTES_PER_ELEMENT);
+  });
+
   it('合并 chunk 保留每个材质的 draw group 与纹理预览绑定', () => {
     const merged = mergeMapStaticGeometryChunks([
       staticGeometryChunk(0, 2, {
@@ -218,9 +231,9 @@ describe('MsbScenePanel 初始结构（挂载即有的三栏骨架）', () => {
 
   it('三栏 Map Object List | Viewport | Properties 同时存在', () => {
     const html = render();
-    assert.match(html, /aria-label="Map Object List"/);
-    assert.match(html, /aria-label="Viewport"/);
-    assert.match(html, /aria-label="Properties"/);
+    assert.match(html, /aria-label="地图对象"/);
+    assert.match(html, /aria-label="视图"/);
+    assert.match(html, /aria-label="属性"/);
   });
 
   it('没有为凑四栏造 Tools 空栏', () => {
@@ -431,6 +444,8 @@ describe('Negative source tests（MAP-50B 五类覆盖）', () => {
     assert.doesNotMatch(panelSource, /\.slice\(0,\s*40\)/);
     assert.doesNotMatch(panelSource, /data-testid="msb-region-truncation"/);
     assert.match(panelSource, /useVirtualizer/);
+    assert.match(panelSource, /const virtualizerOptions = useMemo\(\(\) =>/);
+    assert.match(panelSource, /return changed \? next : current/);
     assert.match(panelSource, /for \(const entity of group\.entries\)/);
     assert.match(panelSource, /getVirtualItems\(\)/);
     assert.match(panelSource, /title=\{row\.entity\.label\}/);

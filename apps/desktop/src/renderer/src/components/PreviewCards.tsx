@@ -118,15 +118,15 @@ function EditCapabilityStrip({ preview }: { preview: ResourceStructuredPreview }
   const hasContainerData = Boolean(preview.container);
 
   return (
-    <div className="edit-capability-strip" aria-label="edit capability">
-      <span className={preview.editable ? 'capability-pill ready' : 'capability-pill blocked'}>
-        text: {preview.editable ? 'editable via Patch Engine' : 'read-only'}
+    <div className="edit-capability-strip" aria-label="编辑能力">
+       <span className={preview.editable ? 'capability-pill ready' : 'capability-pill blocked'}>
+         {preview.editable ? '可编辑' : '只读'}
       </span>
-      <span className="capability-pill blocked">
-        native: {hasNativeSemanticData ? 'parsed preview only' : 'no writer contract'}
-      </span>
-      <span className="capability-pill blocked">
-        container: {hasContainerData ? 'child replacement disabled' : 'not a container preview'}
+       <span className="capability-pill blocked">
+         语义读取：{hasNativeSemanticData ? '已读取，当前仅提供预览' : '暂无可用读取结果'}
+       </span>
+       <span className="capability-pill blocked">
+         容器内容：{hasContainerData ? '子项替换请打开容器工作台' : '不是容器预览'}
       </span>
     </div>
   );
@@ -147,7 +147,7 @@ function collectMapEntities(maps: MapExport[] | undefined): MapExport['entities'
  * 只列 6 个却不说，读 tooltip 的人会以为该行就这 6 个字段。
  */
 function formatParamFieldPreview(fields: ParamExport['rows'][number]['fields']): string {
-  if (!fields || fields.length === 0) return 'No typed fields are available yet.';
+   if (!fields || fields.length === 0) return '暂时没有可用的字段。';
   const shown = fields.slice(0, PARAM_FIELDS_TOOLTIP_MAX);
   const summary = shown.map((field) => `${field.name}=${String(field.value)}`).join(', ');
   const hidden = fields.length - shown.length;
@@ -157,7 +157,7 @@ function formatParamFieldPreview(fields: ParamExport['rows'][number]['fields']):
 }
 
 function formatVectorPreview(value: [number, number, number] | undefined): string {
-  return value ? `position=${value.map((item) => item.toFixed(3)).join(', ')}` : 'No transform evidence is available yet.';
+   return value ? `位置：${value.map((item) => item.toFixed(3)).join(', ')}` : '暂时没有变换信息。';
 }
 
 function ContainerReadCard({ container }: { container: ContainerReadSummary }): ReactElement {
@@ -168,17 +168,17 @@ function ContainerReadCard({ container }: { container: ContainerReadSummary }): 
   return (
     <section className="container-read-card">
       <div className="container-read-title">
-        <strong>Container read</strong>
-        <span>{container.rootFormat ?? 'unknown'}</span>
+         <strong>容器读取</strong>
+         <span>{container.rootFormat ?? '未知'}</span>
       </div>
       <div className="container-read-grid">
-        <span>file: {container.fileName ?? 'unknown'}</span>
-        <span>size: {container.fileSize !== undefined ? `${(container.fileSize / 1024).toFixed(1)} KB` : 'unknown'}</span>
-        <span>paths: {container.pathHintCount}</span>
-        <span>candidate children: {container.binderChildCandidateCount}</span>
-        <span>confirmed tables: {(container.binderChildTableCount ?? 0) + (container.dcxNestedBinderChildTableCount ?? 0)}</span>
-        <span>nested magic: {container.nestedMagicCandidateCount}</span>
-        <span>ext: {container.extensionChain.join(' ') || 'none'}</span>
+         <span>文件：{container.fileName ?? '未知'}</span>
+         <span>大小：{container.fileSize !== undefined ? `${(container.fileSize / 1024).toFixed(1)} KB` : '未知'}</span>
+         <span>路径提示：{container.pathHintCount}</span>
+         <span>候选子项：{container.binderChildCandidateCount}</span>
+         <span>已确认表：{(container.binderChildTableCount ?? 0) + (container.dcxNestedBinderChildTableCount ?? 0)}</span>
+         <span>嵌套格式提示：{container.nestedMagicCandidateCount}</span>
+         <span>扩展名链：{container.extensionChain.join(' ') || '无'}</span>
       </div>
       {confirmedBinderHints.length > 0 && <BinderChildTable hints={confirmedBinderHints} />}
       {childHints.length > 0 && <ContainerHintList title="Path / child candidates" hints={childHints} />}
@@ -219,15 +219,15 @@ function BinderChildTable({ hints }: { hints: ContainerReadHint[] }): ReactEleme
         {rows.map((row, index) => (
           <div className="binder-child-row" role="row" key={`${row.name ?? 'child'}-${row.id ?? index}-${index}`}>
             <span>{row.id ?? '—'}</span>
-            <span title={row.name ?? ''}>{row.name ?? 'unknown'}</span>
-            <span>{row.resourceKind ?? 'unknown'}</span>
+            <span title={row.name ?? ''}>{row.name ?? '未知'}</span>
+            <span>{row.resourceKind ?? '未知'}</span>
             <span>{formatMaybeNumber(row.offset)}</span>
             <span>{formatMaybeNumber(row.packedSize)}</span>
             <span>{formatMaybeNumber(row.unpackedSize)}</span>
           </div>
         ))}
       </div>
-      <p className="muted">子文件表是只读 inventory。替换 child、重打包和写回要等 BND writer contract。</p>
+       <p className="muted">子文件表目前只读；替换子项和重新打包请在容器工作台中操作。</p>
     </details>
   );
 }
@@ -286,7 +286,7 @@ function ContainerHintList({ title, hints }: { title: string; hints: ContainerRe
       <div className="container-hint-list">
         {hints.map((hint, index) => (
           <span key={`${hint.kind}-${hint.offset}-${index}`} title={JSON.stringify(hint.raw ?? {})}>
-            {hint.offset.toString(16).padStart(8, '0')} · {hint.label} · {hint.resourceKind ?? hint.rootFormat ?? 'unknown'} · {hint.confidence}
+            {hint.offset.toString(16).padStart(8, '0')} · {hint.label} · {hint.resourceKind ?? hint.rootFormat ?? '未知'} · {hint.confidence}
           </span>
         ))}
       </div>
@@ -370,7 +370,7 @@ export function NativeInspectionCard({ inspection }: { inspection: RendererBridg
       )}
       {nextSteps.length > 0 && (
         <details>
-          <summary>Bridge notes</summary>
+           <summary>处理建议</summary>
           <ol>
             {nextSteps.map((step) => <li key={step}>{step}</li>)}
           </ol>

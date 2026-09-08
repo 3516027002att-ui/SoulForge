@@ -214,7 +214,7 @@ export function registerParamIpcHandlers(deps: ParamIpcDeps): void {
     if (isParamBackupPath(file.relativePath)) {
       return sanitizeRendererValue({
         ok: false,
-        diagnostics: [{ severity: 'error' as const, code: 'BACKUP_READ_FORBIDDEN', message: 'backup 文件只能在 History & Recovery 中以只读方式查看。', sourceUri }]
+        diagnostics: [{ severity: 'error' as const, code: 'BACKUP_READ_FORBIDDEN', message: '备份文件只能在“历史与恢复”中只读查看。', sourceUri }]
       });
     }
     const session = getSession();
@@ -1324,7 +1324,7 @@ let paramMetadataCache: {
         diagnostics: [{
           severity: 'error' as const,
           code: 'BACKUP_READ_FORBIDDEN',
-          message: 'backup 文件只能在 History & Recovery 中以只读方式查看，不能作为 PARAM 文档读取。',
+          message: '备份文件只能在“历史与恢复”中只读查看，不能作为 PARAM 文档读取。',
           sourceUri
         }]
       };
@@ -1496,7 +1496,7 @@ let paramMetadataCache: {
       // PARAM-10A「backup 不读」：与 readParamDocument 同一把锁。backup 只经
       // History & Recovery 只读打开（ROUTE-06），分页通道不提供绕过出口。
       if (isParamBackupPath(file.relativePath)) {
-        return failure('backup 文件只能在 History & Recovery 中以只读方式查看，不能分页读取 PARAM。', 'BACKUP_READ_FORBIDDEN');
+        return failure('备份文件只能在“历史与恢复”中只读查看，不能分页读取 PARAM。', 'BACKUP_READ_FORBIDDEN');
       }
           // Legacy renderer compatibility path; remove only after renderer cutover and value-search replacement.
     let cached = loadAll ? paramAllCache.get(sourceUri) : paramPageCache.get(sourceUri);

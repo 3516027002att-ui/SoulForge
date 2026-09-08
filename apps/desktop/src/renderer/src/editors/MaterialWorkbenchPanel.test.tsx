@@ -89,9 +89,9 @@ describe('MaterialWorkbenchPanel 初始结构（挂载即有的三栏骨架）',
 
   it('三栏 File list | Material list | Properties / Values 同时存在', () => {
     const html = render();
-    assert.match(html, /aria-label="File list"/);
-    assert.match(html, /aria-label="Material list"/);
-    assert.match(html, /aria-label="Properties \/ Values"/);
+    assert.match(html, /aria-label="文件列表"/);
+    assert.match(html, /aria-label="材质列表"/);
+    assert.match(html, /aria-label="属性与数值"/);
   });
 
   it('没有为凑四栏造 Preview 空栏（§2.5 MATERIAL 无 viewport）', () => {

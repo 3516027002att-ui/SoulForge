@@ -155,8 +155,8 @@ FROM background_jobs WHERE workspace_id = ? ORDER BY created_at DESC, job_id`).a
 INSERT INTO rag_chunks (
  chunk_id, workspace_id, source_uri, symbol_uri, family, title, body,
  numeric_ids_json, relative_path, resource_kind, confidence, content_hash,
- source_revision, source_hash, created_at
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`);
+ source_revision, source_hash, outer_file_hash, created_at
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`);
     const insertFts = this.database.prepare(`
 INSERT INTO rag_chunks_fts (chunk_id, title, body) VALUES (?, ?, ?)`);
     const insertTrigram = this.database.prepare(`
@@ -175,7 +175,7 @@ INSERT INTO rag_chunks_fts_trigram (chunk_id, title, body) VALUES (?, ?, ?)`);
           chunk.chunkId, this.workspaceId, chunk.sourceUri, chunk.symbolUri, chunk.family,
           chunk.title, chunk.body, JSON.stringify(chunk.numericIds),
           chunk.relativePath ?? null, chunk.resourceKind ?? null, chunk.confidence ?? null,
-          chunk.contentHash, chunk.sourceRevision ?? null, chunk.sourceHash ?? null, createdAt
+          chunk.contentHash, chunk.sourceRevision ?? null, chunk.sourceHash ?? null, chunk.outerFileHash ?? null, createdAt
         );
         insertFts.run(chunk.chunkId, chunk.title, chunk.body);
         insertTrigram.run(chunk.chunkId, chunk.title, chunk.body);
@@ -197,7 +197,8 @@ INSERT INTO rag_chunks_fts_trigram (chunk_id, title, body) VALUES (?, ?, ?)`);
 SELECT chunk_id AS chunkId, workspace_id AS workspaceId, source_uri AS sourceUri,
  symbol_uri AS symbolUri, family, title, body, numeric_ids_json AS numericIdsJson,
  relative_path AS relativePath, resource_kind AS resourceKind, confidence,
- content_hash AS contentHash, source_revision AS sourceRevision, source_hash AS sourceHash
+ content_hash AS contentHash, source_revision AS sourceRevision, source_hash AS sourceHash,
+ outer_file_hash AS outerFileHash
 FROM rag_chunks WHERE workspace_id = ?`).all(this.workspaceId)
       .map((row) => [row.chunkId, row] as const));
     const desired = new Map(chunks.map((chunk) => [chunk.chunkId, chunk] as const));
@@ -216,7 +217,8 @@ FROM rag_chunks WHERE workspace_id = ?`).all(this.workspaceId)
         || (row.confidence ?? null) !== (chunk.confidence ?? null)
         || row.contentHash !== chunk.contentHash
         || (row.sourceRevision ?? null) !== (chunk.sourceRevision ?? null)
-        || (row.sourceHash ?? null) !== (chunk.sourceHash ?? null);
+        || (row.sourceHash ?? null) !== (chunk.sourceHash ?? null)
+        || (row.outerFileHash ?? null) !== (chunk.outerFileHash ?? null);
     });
     if (deleted.length === 0 && changed.length === 0) return;
 
@@ -228,14 +230,15 @@ FROM rag_chunks WHERE workspace_id = ?`).all(this.workspaceId)
 INSERT INTO rag_chunks (
  chunk_id, workspace_id, source_uri, symbol_uri, family, title, body,
  numeric_ids_json, relative_path, resource_kind, confidence, content_hash,
- source_revision, source_hash, created_at
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+ source_revision, source_hash, outer_file_hash, created_at
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT(chunk_id) DO UPDATE SET workspace_id=excluded.workspace_id,
  source_uri=excluded.source_uri, symbol_uri=excluded.symbol_uri, family=excluded.family,
  title=excluded.title, body=excluded.body, numeric_ids_json=excluded.numeric_ids_json,
  relative_path=excluded.relative_path, resource_kind=excluded.resource_kind,
  confidence=excluded.confidence, content_hash=excluded.content_hash,
  source_revision=excluded.source_revision, source_hash=excluded.source_hash,
+ outer_file_hash=excluded.outer_file_hash,
  created_at=excluded.created_at`);
     const insertFts = this.database.prepare(
       'INSERT INTO rag_chunks_fts (chunk_id, title, body) VALUES (?, ?, ?)');
@@ -258,7 +261,7 @@ ON CONFLICT(chunk_id) DO UPDATE SET workspace_id=excluded.workspace_id,
           chunk.chunkId, this.workspaceId, chunk.sourceUri, chunk.symbolUri, chunk.family,
           chunk.title, chunk.body, JSON.stringify(chunk.numericIds),
           chunk.relativePath ?? null, chunk.resourceKind ?? null, chunk.confidence ?? null,
-          chunk.contentHash, chunk.sourceRevision ?? null, chunk.sourceHash ?? null, createdAt
+          chunk.contentHash, chunk.sourceRevision ?? null, chunk.sourceHash ?? null, chunk.outerFileHash ?? null, createdAt
         );
         insertFts.run(chunk.chunkId, chunk.title, chunk.body);
         insertTrigram.run(chunk.chunkId, chunk.title, chunk.body);
@@ -288,23 +291,91 @@ ON CONFLICT(chunk_id) DO UPDATE SET workspace_id=excluded.workspace_id,
         throw new Error(`RAG source delta 的 chunk ${chunk.chunkId} 不属于 ${sourceUri}。`);
       }
     }
+    // Resolve duplicate IDs to the final value in this batch before deciding
+    // whether the indexed text changed.  A source refresh can legally emit
+    // the same chunk more than once while a native projection is merged; the
+    // main row and FTS must describe the final value, not an intermediate one.
+    const finalUpsertsById = new Map<string, RagChunk>();
+    for (const chunk of input.upserts) finalUpsertsById.set(chunk.chunkId, chunk);
+    const finalUpserts = [...finalUpsertsById.values()];
+    const upsertIds = [...finalUpsertsById.keys()];
+    const deletedChunkIds = [...new Set(input.deletedChunkIds)];
+    const existingRows = new Map<string, RagChunkRow>();
+    const loadExistingRows = (chunkIds: readonly string[]): void => {
+      if (chunkIds.length === 0) return;
+      const placeholders = chunkIds.map(() => '?').join(', ');
+      const rows = this.database.prepare(
+        `SELECT chunk_id AS chunkId, workspace_id AS workspaceId, source_uri AS sourceUri,
+ symbol_uri AS symbolUri, family, title, body, numeric_ids_json AS numericIdsJson,
+ relative_path AS relativePath, resource_kind AS resourceKind, confidence,
+ content_hash AS contentHash, source_revision AS sourceRevision, source_hash AS sourceHash,
+ outer_file_hash AS outerFileHash
+FROM rag_chunks WHERE workspace_id = ? AND chunk_id IN (${placeholders})`
+      ).all(this.workspaceId, ...chunkIds) as RagChunkRow[];
+      for (const row of rows) existingRows.set(row.chunkId, row);
+    };
+    // Keep each lookup at the existing 512-row bound.  Besides avoiding a
+    // SQLite bind-limit regression, this keeps source-guarded deletion
+    // decisions based on the row's current source URI.
+    loadExistingRows(upsertIds);
+    loadExistingRows(deletedChunkIds);
+    const existingUpsertIds = finalUpserts
+      .filter((chunk) => existingRows.has(chunk.chunkId))
+      .map((chunk) => chunk.chunkId);
+    const sourceDeletedChunkIds = deletedChunkIds.filter((chunkId) => (
+      existingRows.get(chunkId)?.sourceUri === sourceUri
+    ));
+    // FTS is contentless: provenance/numeric metadata can be updated in the
+    // main table without rebuilding either text index.  contentHash is also
+    // checked conservatively so an inconsistent producer cannot leave an old
+    // indexed body behind.  A delete+reinsert in the same batch is treated as
+    // a rebuild even when its final title/body/hash equals the old row.
+    const sourceDeletedSet = new Set(sourceDeletedChunkIds);
+    const ftsRebuildIds = finalUpserts
+      .filter((chunk) => {
+        const row = existingRows.get(chunk.chunkId);
+        return !row
+          || sourceDeletedSet.has(chunk.chunkId)
+          || row.title !== chunk.title
+          || row.body !== chunk.body
+          || row.contentHash !== chunk.contentHash;
+      })
+      .map((chunk) => chunk.chunkId);
+    const ftsRebuildIdSet = new Set(ftsRebuildIds);
+    // New chunks have no old FTS row to delete.  Keep deletes restricted to
+    // existing rows so cold-start batches do not scan both virtual tables for
+    // every fresh ID.  Standalone deletes still clear their source-guarded
+    // FTS rows below.
+    const ftsRebuildExistingIds = finalUpserts
+      .filter((chunk) => existingRows.has(chunk.chunkId) && ftsRebuildIdSet.has(chunk.chunkId))
+      .map((chunk) => chunk.chunkId);
+    const standaloneDeletedIds = sourceDeletedChunkIds
+      .filter((chunkId) => !finalUpsertsById.has(chunkId));
     const deleteChunk = this.database.prepare(
       'DELETE FROM rag_chunks WHERE workspace_id = ? AND source_uri = ? AND chunk_id = ?');
-    const deleteFts = this.database.prepare('DELETE FROM rag_chunks_fts WHERE chunk_id = ?');
-    const deleteTrigram = this.database.prepare('DELETE FROM rag_chunks_fts_trigram WHERE chunk_id = ?');
+    // FTS5's chunk_id is UNINDEXED, so one DELETE per changed row scans the
+    // whole virtual table repeatedly.  Keep per-row statements for repeated
+    // upserts below, but collapse the normal batch invalidation into one scan
+    // per table.  The batch limit keeps SQLite bind parameters bounded.
+    const deleteFtsBatch = (table: 'rag_chunks_fts' | 'rag_chunks_fts_trigram', chunkIds: readonly string[]): void => {
+      if (chunkIds.length === 0) return;
+      const placeholders = chunkIds.map(() => '?').join(', ');
+      this.database.prepare(`DELETE FROM ${table} WHERE chunk_id IN (${placeholders})`).run(...chunkIds);
+    };
     const deleteEmbedding = this.database.prepare('DELETE FROM rag_embeddings WHERE chunk_id = ?');
     const insert = this.database.prepare(`
 INSERT INTO rag_chunks (
  chunk_id, workspace_id, source_uri, symbol_uri, family, title, body,
  numeric_ids_json, relative_path, resource_kind, confidence, content_hash,
- source_revision, source_hash, created_at
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+ source_revision, source_hash, outer_file_hash, created_at
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT(chunk_id) DO UPDATE SET workspace_id=excluded.workspace_id,
  source_uri=excluded.source_uri, symbol_uri=excluded.symbol_uri, family=excluded.family,
  title=excluded.title, body=excluded.body, numeric_ids_json=excluded.numeric_ids_json,
  relative_path=excluded.relative_path, resource_kind=excluded.resource_kind,
  confidence=excluded.confidence, content_hash=excluded.content_hash,
  source_revision=excluded.source_revision, source_hash=excluded.source_hash,
+ outer_file_hash=excluded.outer_file_hash,
  created_at=excluded.created_at`);
     const insertFts = this.database.prepare(
       'INSERT INTO rag_chunks_fts (chunk_id, title, body) VALUES (?, ?, ?)');
@@ -312,25 +383,29 @@ ON CONFLICT(chunk_id) DO UPDATE SET workspace_id=excluded.workspace_id,
       'INSERT INTO rag_chunks_fts_trigram (chunk_id, title, body) VALUES (?, ?, ?)');
     const createdAt = new Date().toISOString();
     this.database.transaction(() => {
-      for (const chunkId of input.deletedChunkIds) {
-        deleteFts.run(chunkId);
-        deleteTrigram.run(chunkId);
+      deleteFtsBatch('rag_chunks_fts', standaloneDeletedIds);
+      deleteFtsBatch('rag_chunks_fts_trigram', standaloneDeletedIds);
+      deleteFtsBatch('rag_chunks_fts', ftsRebuildExistingIds);
+      deleteFtsBatch('rag_chunks_fts_trigram', ftsRebuildExistingIds);
+      for (const chunkId of deletedChunkIds) {
         deleteChunk.run(this.workspaceId, sourceUri, chunkId);
       }
-      for (const chunk of input.upserts) {
-        // A changed chunk invalidates its old vector.  The next embedding run
-        // must regenerate it under the current content and model revision.
-        deleteFts.run(chunk.chunkId);
-        deleteTrigram.run(chunk.chunkId);
-        deleteEmbedding.run(chunk.chunkId);
+      for (const chunkId of existingUpsertIds) deleteEmbedding.run(chunkId);
+      for (const chunk of finalUpserts) {
+        // Preserve the existing embedding invalidation contract even when
+        // only provenance changed.  The embedding scheduler decides whether
+        // and when to regenerate the vector; this delta only avoids needless
+        // FTS rebuilds for metadata-only changes.
         insert.run(
           chunk.chunkId, this.workspaceId, chunk.sourceUri, chunk.symbolUri, chunk.family,
           chunk.title, chunk.body, JSON.stringify(chunk.numericIds),
           chunk.relativePath ?? null, chunk.resourceKind ?? null, chunk.confidence ?? null,
-          chunk.contentHash, chunk.sourceRevision ?? null, chunk.sourceHash ?? null, createdAt
+          chunk.contentHash, chunk.sourceRevision ?? null, chunk.sourceHash ?? null, chunk.outerFileHash ?? null, createdAt
         );
-        insertFts.run(chunk.chunkId, chunk.title, chunk.body);
-        insertTrigram.run(chunk.chunkId, chunk.title, chunk.body);
+        if (ftsRebuildIdSet.has(chunk.chunkId)) {
+          insertFts.run(chunk.chunkId, chunk.title, chunk.body);
+          insertTrigram.run(chunk.chunkId, chunk.title, chunk.body);
+        }
       }
     }).immediate();
   }
@@ -340,7 +415,8 @@ ON CONFLICT(chunk_id) DO UPDATE SET workspace_id=excluded.workspace_id,
 SELECT chunk_id AS chunkId, workspace_id AS workspaceId, source_uri AS sourceUri,
  symbol_uri AS symbolUri, family, title, body, numeric_ids_json AS numericIdsJson,
  relative_path AS relativePath, resource_kind AS resourceKind, confidence,
- content_hash AS contentHash, source_revision AS sourceRevision, source_hash AS sourceHash
+ content_hash AS contentHash, source_revision AS sourceRevision, source_hash AS sourceHash,
+ outer_file_hash AS outerFileHash
 FROM rag_chunks WHERE workspace_id = ? ORDER BY family, title, chunk_id`)
       .all(this.workspaceId);
     return rows.map(hydrateRagChunk);
@@ -356,7 +432,8 @@ FROM rag_chunks WHERE workspace_id = ? ORDER BY family, title, chunk_id`)
 SELECT c.chunk_id AS chunkId, c.workspace_id AS workspaceId, c.source_uri AS sourceUri,
  c.symbol_uri AS symbolUri, c.family, c.title, c.body, c.numeric_ids_json AS numericIdsJson,
  c.relative_path AS relativePath, c.resource_kind AS resourceKind, c.confidence,
- c.content_hash AS contentHash, c.source_revision AS sourceRevision, c.source_hash AS sourceHash
+ c.content_hash AS contentHash, c.source_revision AS sourceRevision, c.source_hash AS sourceHash,
+ c.outer_file_hash AS outerFileHash
 FROM rag_chunks c
 JOIN rag_chunks_fts x ON x.chunk_id = c.chunk_id
 WHERE c.workspace_id = ? AND rag_chunks_fts MATCH ? ORDER BY rank LIMIT ?`;
@@ -374,7 +451,8 @@ WHERE c.workspace_id = ? AND rag_chunks_fts MATCH ? ORDER BY rank LIMIT ?`;
 SELECT c.chunk_id AS chunkId, c.workspace_id AS workspaceId, c.source_uri AS sourceUri,
  c.symbol_uri AS symbolUri, c.family, c.title, c.body, c.numeric_ids_json AS numericIdsJson,
  c.relative_path AS relativePath, c.resource_kind AS resourceKind, c.confidence,
- c.content_hash AS contentHash, c.source_revision AS sourceRevision, c.source_hash AS sourceHash
+ c.content_hash AS contentHash, c.source_revision AS sourceRevision, c.source_hash AS sourceHash,
+ c.outer_file_hash AS outerFileHash
 FROM rag_chunks c
 JOIN rag_chunks_fts_trigram x ON x.chunk_id = c.chunk_id
 WHERE c.workspace_id = ? AND rag_chunks_fts_trigram MATCH ? ORDER BY rank LIMIT ?`)
@@ -387,7 +465,8 @@ WHERE c.workspace_id = ? AND rag_chunks_fts_trigram MATCH ? ORDER BY rank LIMIT 
 SELECT chunk_id AS chunkId, workspace_id AS workspaceId, source_uri AS sourceUri,
  symbol_uri AS symbolUri, family, title, body, numeric_ids_json AS numericIdsJson,
  relative_path AS relativePath, resource_kind AS resourceKind, confidence,
- content_hash AS contentHash, source_revision AS sourceRevision, source_hash AS sourceHash
+ content_hash AS contentHash, source_revision AS sourceRevision, source_hash AS sourceHash,
+ outer_file_hash AS outerFileHash
 FROM rag_chunks
 WHERE workspace_id = ? AND (title LIKE ? OR body LIKE ?)
 ORDER BY family, title LIMIT ?`).all(this.workspaceId, needle, needle, boundedLimit);
@@ -666,6 +745,7 @@ interface RagChunkRow {
   contentHash: string;
   sourceRevision: number | null;
   sourceHash: string | null;
+  outerFileHash: string | null;
 }
 
 function hydrateRagChunk(row: RagChunkRow): RagChunk {
@@ -681,6 +761,7 @@ function hydrateRagChunk(row: RagChunkRow): RagChunk {
     contentHash: row.contentHash,
     ...(row.sourceRevision !== null ? { sourceRevision: row.sourceRevision } : {}),
     ...(row.sourceHash !== null ? { sourceHash: row.sourceHash } : {}),
+    ...(row.outerFileHash !== null ? { outerFileHash: row.outerFileHash } : {}),
     ...(row.relativePath ? { relativePath: row.relativePath } : {}),
     ...(row.resourceKind ? { resourceKind: row.resourceKind as ResourceKind } : {}),
     ...(row.confidence ? { confidence: row.confidence as ReferenceConfidence } : {})

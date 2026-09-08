@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { performance } from 'node:perf_hooks';
 import { utilityProcess, type UtilityProcess } from 'electron';
 import type {
   OperationLogRecord,
@@ -34,14 +35,48 @@ import {
 } from './operationLogUtilityProtocol.js';
 
 interface PendingRequest {
+  requestId: string;
+  method: OperationLogUtilityMethod;
+  enqueuedAt: number;
+  dispatchedAt: number;
+  depth: number;
   resolve(value: unknown): void;
   reject(error: Error): void;
   timer: NodeJS.Timeout;
 }
 
+interface LateRequest {
+  requestId: string;
+  method: OperationLogUtilityMethod;
+  enqueuedAt: number;
+  dispatchedAt: number;
+  depth: number;
+  expiresAt: number;
+}
+
+type UtilityTraceEvent = 'enqueue' | 'dispatch' | 'finish' | 'timeout' | 'late-completion' | 'workerfail' | 'close';
+
+interface UtilityTrace {
+  side: 'client';
+  event: UtilityTraceEvent;
+  requestId: string;
+  method: string;
+  enqueue: number;
+  start: number | null;
+  finish: number | null;
+  depth: number;
+  queueWaitMs: number | null;
+  dbDurationMs: number | null;
+  timeout: boolean;
+  timeoutMs?: number;
+  outcome?: 'ok' | 'timeout' | 'request-failed' | 'workerfail' | 'close' | 'post-error' | 'late-completion';
+  errorCode?: string;
+}
+
 export class OperationLogUtilityClient implements OperationLogStore {
   private process: UtilityProcess | null = null;
   private readonly pending = new Map<string, PendingRequest>();
+  private readonly lateRequests = new Map<string, LateRequest>();
   private activeWorkspace: OpenWorkspaceDatabasePayload | null = null;
   private activeAppDatabasePath: string | null = null;
   private opening: Promise<void> | null = null;
@@ -386,11 +421,14 @@ export class OperationLogUtilityClient implements OperationLogStore {
       this.process = null;
       this.activeWorkspace = null;
       this.activeAppDatabasePath = null;
-      this.rejectAll(new Error(`数据库后台进程意外退出（代码 ${code}）。`));
+      this.rejectAll(
+        new Error(`数据库后台进程意外退出（代码 ${code}）。`),
+        code === 0 ? 'close' : 'workerfail'
+      );
     });
     child.on('error', (_type, location) => {
       if (this.process !== child) return;
-      this.rejectAll(new Error(`数据库后台进程发生致命错误：${location}`));
+      this.rejectAll(new Error(`数据库后台进程发生致命错误：${location}`), 'workerfail');
     });
     child.stderr?.on('data', (chunk: Buffer | string) => {
       try {
@@ -417,6 +455,7 @@ export class OperationLogUtilityClient implements OperationLogStore {
     payload: OperationLogUtilityPayloadMap[Method]
   ): Promise<OperationLogUtilityResultMap[Method]> {
     const requestId = randomUUID();
+    const enqueuedAt = performance.now();
     const request = {
       protocolVersion: OPERATION_LOG_UTILITY_PROTOCOL,
       requestId,
@@ -425,20 +464,93 @@ export class OperationLogUtilityClient implements OperationLogStore {
     } as OperationLogUtilityRequest;
     return new Promise((resolve, reject) => {
       const timeout = this.timeoutForMethod(method);
+      const depth = this.pending.size + 1;
+      const dispatchedAt = performance.now();
       const timer = setTimeout(() => {
         this.pending.delete(requestId);
+        this.rememberLateRequest({
+          requestId,
+          method,
+          enqueuedAt,
+          dispatchedAt,
+          depth
+        });
+        writeUtilityTrace({
+          side: 'client',
+          event: 'timeout',
+          requestId,
+          method,
+          enqueue: enqueuedAt,
+          start: null,
+          finish: null,
+          depth,
+          queueWaitMs: null,
+          dbDurationMs: null,
+          timeout: true,
+          timeoutMs: timeout,
+          outcome: 'timeout'
+        });
         reject(new Error(`数据库后台请求超时：${method}`));
       }, timeout);
       this.pending.set(requestId, {
+        requestId,
+        method,
+        enqueuedAt,
+        dispatchedAt,
+        depth,
         resolve: resolve as (value: unknown) => void,
         reject,
         timer
       });
+      writeUtilityTrace({
+        side: 'client',
+        event: 'enqueue',
+        requestId,
+        method,
+        enqueue: enqueuedAt,
+        start: null,
+        finish: null,
+        depth,
+        queueWaitMs: null,
+        dbDurationMs: null,
+        timeout: false,
+        timeoutMs: timeout
+      });
       try {
         child.postMessage(request);
+        writeUtilityTrace({
+          side: 'client',
+          event: 'dispatch',
+          requestId,
+          method,
+          enqueue: enqueuedAt,
+          start: null,
+          finish: null,
+          depth,
+          queueWaitMs: null,
+          dbDurationMs: null,
+          timeout: false,
+          timeoutMs: timeout
+        });
       } catch (error) {
         clearTimeout(timer);
         this.pending.delete(requestId);
+        writeUtilityTrace({
+          side: 'client',
+          event: 'finish',
+          requestId,
+          method,
+          enqueue: enqueuedAt,
+          start: null,
+          finish: performance.now(),
+          depth: this.pending.size,
+          queueWaitMs: null,
+          dbDurationMs: null,
+          timeout: false,
+          timeoutMs: timeout,
+          outcome: 'post-error',
+          errorCode: 'UTILITY_POST_MESSAGE_FAILED'
+        });
         reject(error instanceof Error ? error : new Error(String(error)));
       }
     });
@@ -468,10 +580,46 @@ export class OperationLogUtilityClient implements OperationLogStore {
 
   private onMessage(message: unknown): void {
     if (!isOperationLogUtilityResponse(message)) return;
+    this.pruneLateRequests();
     const pending = this.pending.get(message.requestId);
-    if (!pending) return;
+    if (!pending) {
+      const late = this.lateRequests.get(message.requestId);
+      if (!late) return;
+      this.lateRequests.delete(message.requestId);
+      writeUtilityTrace({
+        side: 'client',
+        event: 'late-completion',
+        requestId: late.requestId,
+        method: late.method,
+        enqueue: late.enqueuedAt,
+        start: null,
+        finish: performance.now(),
+        depth: late.depth,
+        queueWaitMs: null,
+        dbDurationMs: null,
+        timeout: true,
+        outcome: 'late-completion',
+        ...(message.ok ? {} : { errorCode: message.error?.code ?? 'DATABASE_UTILITY_FAILED' })
+      });
+      return;
+    }
     clearTimeout(pending.timer);
     this.pending.delete(message.requestId);
+    writeUtilityTrace({
+      side: 'client',
+      event: 'finish',
+      requestId: pending.requestId,
+      method: pending.method,
+      enqueue: pending.enqueuedAt,
+      start: null,
+      finish: performance.now(),
+      depth: this.pending.size,
+      queueWaitMs: null,
+      dbDurationMs: null,
+      timeout: false,
+      outcome: message.ok ? (pending.method === 'close' ? 'close' : 'ok') : 'request-failed',
+      ...(message.ok ? {} : { errorCode: message.error?.code ?? 'DATABASE_UTILITY_FAILED' })
+    });
     if (message.ok) {
       pending.resolve(message.result);
       return;
@@ -483,13 +631,74 @@ export class OperationLogUtilityClient implements OperationLogStore {
     pending.reject(error);
   }
 
-  private rejectAll(error: Error): void {
+  private rejectAll(error: Error, outcome: 'workerfail' | 'close' = 'workerfail'): void {
     for (const pending of this.pending.values()) {
       clearTimeout(pending.timer);
+      writeUtilityTrace({
+        side: 'client',
+        event: outcome,
+        requestId: pending.requestId,
+        method: pending.method,
+        enqueue: pending.enqueuedAt,
+        start: null,
+        finish: performance.now(),
+        depth: this.pending.size,
+        queueWaitMs: null,
+        dbDurationMs: null,
+        timeout: false,
+        outcome,
+        errorCode: outcome === 'close' ? 'UTILITY_PROCESS_CLOSED' : 'UTILITY_PROCESS_FAILED'
+      });
       pending.reject(error);
     }
     this.pending.clear();
   }
+
+  private rememberLateRequest(request: Omit<LateRequest, 'expiresAt'>): void {
+    this.pruneLateRequests();
+    this.lateRequests.set(request.requestId, {
+      ...request,
+      expiresAt: performance.now() + 60_000
+    });
+    while (this.lateRequests.size > 128) {
+      const oldest = this.lateRequests.keys().next().value;
+      if (!oldest) break;
+      this.lateRequests.delete(oldest);
+    }
+  }
+
+  private pruneLateRequests(): void {
+    const now = performance.now();
+    for (const [requestId, request] of this.lateRequests) {
+      if (request.expiresAt <= now) this.lateRequests.delete(requestId);
+    }
+  }
+}
+
+function writeUtilityTrace(trace: UtilityTrace): void {
+  try {
+    process.stderr.write(`[SoulForge database utility trace] ${JSON.stringify({
+      ...trace,
+      requestId: boundedTraceString(trace.requestId, 128),
+      method: boundedTraceString(trace.method, 64),
+      ...(trace.errorCode ? { errorCode: boundedTraceString(trace.errorCode, 96) } : {}),
+      enqueue: boundedTraceNumber(trace.enqueue),
+      start: trace.start === null ? null : boundedTraceNumber(trace.start),
+      finish: trace.finish === null ? null : boundedTraceNumber(trace.finish),
+      queueWaitMs: trace.queueWaitMs === null ? null : boundedTraceNumber(trace.queueWaitMs),
+      dbDurationMs: trace.dbDurationMs === null ? null : boundedTraceNumber(trace.dbDurationMs)
+    })}\n`);
+  } catch {
+    // 诊断输出不能影响数据库 RPC。
+  }
+}
+
+function boundedTraceNumber(value: number): number {
+  return Math.min(Math.max(Math.round(value * 100) / 100, 0), 86_400_000);
+}
+
+function boundedTraceString(value: string, maxLength: number): string {
+  return value.length <= maxLength ? value : value.slice(0, maxLength);
 }
 
 function sameWorkspace(

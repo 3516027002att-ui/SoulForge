@@ -27,10 +27,25 @@ import {
 } from '@soulforge/shared';
 import { sanitizeRendererValue, type RendererSaveResult } from '../rendererDto.js';
 import type { OperationLogUtilityClient } from '../operationLogUtilityClient.js';
+import {
+  MAP_NATIVE_TIMING_CODE,
+  MAP_NATIVE_TIMING_SUMMARY_CODE,
+  beginMapNativeTimingSession,
+  bindNativeTimingSession,
+  recordMapNativeTiming,
+  timingKeyForNativeSession,
+  clearMapNativeTimingSession
+} from '../mapTimingTelemetry.js';
 // Forensics counters (V1, pure diagnostic — no business logic change).
 const _forensicsMapCounters = new Map<string, number>();
 function _forensicsMapInc(key: string, delta = 1): void { _forensicsMapCounters.set(key, (_forensicsMapCounters.get(key) ?? 0) + delta); }
 export function getMapForensicsCounters(): Record<string, number> { return Object.fromEntries(_forensicsMapCounters); }
+
+// Native MAP timing is explicitly opt-in for the production probe. The main
+// process consumes request-local Bridge diagnostics and forwards only one
+// bounded summary on a model's final page; renderer responses never receive
+// the per-page timing payload.
+const MAP_NATIVE_TIMING_ENABLED = process.env.SF_MAP_NATIVE_TIMING === '1';
 import type { TrustedIpcHandle } from './registration.js';
 import {
   assembleC0000CompatibilityPreview,
@@ -998,6 +1013,12 @@ export function registerMapIpcHandlers(deps: MapIpcDeps): void {
 
       const readStaticPath = async (modelPath: string, modelKind: 'flver' | 'chrbnd' = 'flver') => {
         if (modelKind === 'chrbnd') return readCharacterPath(modelPath);
+        const timingKey = MAP_NATIVE_TIMING_ENABLED
+          ? sessionToken
+            ? (timingKeyForNativeSession(sessionToken) ?? `native:${sessionToken}`)
+            : `pending:${randomUUID()}`
+          : '';
+        if (MAP_NATIVE_TIMING_ENABLED && !sessionToken && !cursor) beginMapNativeTimingSession(timingKey);
         const result = await runBridge({
           command: 'read-map-static-geometry',
           filePath: modelPath,
@@ -1016,15 +1037,35 @@ export function registerMapIpcHandlers(deps: MapIpcDeps): void {
             sessionToken: sessionToken ?? undefined,
             cursor: cursor ?? undefined,
             ownerLeaseId: deps.activeWorkspaceSessionId ?? '',
-            resourceCacheKey: JSON.stringify({ modelName, mapId })
+            resourceCacheKey: JSON.stringify({ modelName, mapId }),
+            ...(MAP_NATIVE_TIMING_ENABLED ? { diagnosticTimings: true } : {})
           }
         });
+        const nativeTimingSummary = MAP_NATIVE_TIMING_ENABLED
+          ? recordMapNativeTiming(timingKey, result.diagnostics)
+          : null;
+        const nativeSessionToken = (result.data as { sessionToken?: unknown } | null)?.sessionToken;
+        if (MAP_NATIVE_TIMING_ENABLED && typeof nativeSessionToken === 'string') {
+          bindNativeTimingSession(nativeSessionToken, timingKey);
+        }
         if (result.parseStatus === 'failed' || !result.data) return null;
+        const responseDiagnostics = result.diagnostics.filter((item) => item.code !== MAP_NATIVE_TIMING_CODE);
+        const complete = Boolean((result.data as { complete?: unknown } | null)?.complete);
+        if (nativeTimingSummary && complete) {
+          responseDiagnostics.push({
+            severity: 'info',
+            code: nativeTimingSummary.code,
+            message: nativeTimingSummary.message,
+            sourceUri: result.sourceUri,
+            details: nativeTimingSummary.details
+          });
+          clearMapNativeTimingSession(timingKey);
+        }
         const wireBytes = Buffer.byteLength(JSON.stringify(result.data), 'utf8');
         if (wireBytes >= 8 * 1024 * 1024) {
           return { ok: false, diagnostics: [{ severity: 'error', code: 'MAP_STATIC_WIRE_BUDGET_EXCEEDED', message: 'wire bytes exceed 8 MiB', sourceUri: msbSourceUri }] };
         }
-        return { ok: true, sourceUri: msbSourceUri, data: result.data, diagnostics: result.diagnostics };
+        return { ok: true, sourceUri: msbSourceUri, data: result.data, diagnostics: responseDiagnostics };
       };
 
       // The legacy route already knows the exact short-name -> mapbnd/chrbnd/objbnd

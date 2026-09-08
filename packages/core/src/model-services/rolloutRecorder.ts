@@ -119,11 +119,26 @@ export class RolloutRecorder implements RolloutSink {
 
   async flush(): Promise<void> {
     await this.drainChain;
+    // A previous append may have failed after enqueue scheduled its only
+    // drain. A barrier must actively retry retained items; merely awaiting the
+    // old chain would silently leave them in memory.
+    this.drainChain = this.drainChain.then(() => this.drain());
+    await this.drainChain;
+    if (!this.metaWritten || this.queue.length > 0 || this.lastError !== null) {
+      const cause = this.lastError ?? '仍有未持久化的 rollout 条目。';
+      const error = new Error(`ROLLOUT_FLUSH_FAILED: ${cause}`);
+      (error as Error & { code: string }).code = 'ROLLOUT_FLUSH_FAILED';
+      throw error;
+    }
     try {
       await this.storage.flush();
     } catch (error) {
       this.lastError = error instanceof Error ? error.message : String(error);
+      const failure = new Error(`ROLLOUT_FLUSH_FAILED: ${this.lastError}`);
+      (failure as Error & { code: string }).code = 'ROLLOUT_FLUSH_FAILED';
+      throw failure;
     }
+    this.lastError = null;
   }
 
   async close(): Promise<void> {

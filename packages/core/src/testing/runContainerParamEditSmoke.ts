@@ -3,13 +3,16 @@
  * 不落盘到用户 mods，不声明 native authority。
  */
 import { readFileSync } from 'node:fs';
+import { access, mkdtemp, mkdir, rm, stat } from 'node:fs/promises';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { tmpdir } from 'node:os';
 import type { ParamDefDocument } from '@soulforge/shared';
 import { createDefaultToolRegistry, type ToolContext } from '../ai/toolRegistry.js';
 import { WorkspaceIndex } from '../indexing/workspaceIndex.js';
 import {
   applyEditsToRowBytes,
+  cleanupParamTempDirectory,
   groupParamEdits,
   normalizeTableToken
 } from '../param/containerParamEdit.js';
@@ -87,8 +90,81 @@ check('encode/missing-field', missing.ok === false && missing.code === 'PARAMDEF
 const source = readFileSync(resolve(dirname(fileURLToPath(import.meta.url)), '../../src/param/containerParamEdit.ts'), 'utf8');
 check('source/uses-write-param', source.includes("command: 'write-param'") || source.includes('commitParamMutationsViaBridge'));
 check('source/uses-write-bnd4', source.includes("command: 'write-bnd4'"));
+check('source/uses-scoped-bridge-read', source.includes('createBridgeDaemonScope') && source.includes('bridgeScope.run'));
+check('source/disposes-scoped-bridge-read', source.includes('await bridgeScope.dispose()') && source.includes('finally'));
 check('source/no-smithbox-regex', !source.includes('FIELD_DEF ='));
 check('source/no-index-scan', !source.includes('index < 180'));
+
+// Cleanup contract fixture: concurrent reads get independent directories, a
+// transient remove failure retries once, and a persistent filesystem failure
+// becomes a structured warning instead of replacing the read/write result.
+const cleanupRoot = await mkdtemp(resolve(tmpdir(), 'soulforge-param-cleanup-smoke-'));
+try {
+  const concurrentDirs = await Promise.all(
+    Array.from({ length: 4 }, async () => {
+      const directory = await mkdtemp(resolve(cleanupRoot, 'param-read-'));
+      await mkdir(resolve(directory, 'payload'), { recursive: true });
+      return directory;
+    })
+  );
+  const concurrentDiagnostics = await Promise.all(concurrentDirs.map((directory) => cleanupParamTempDirectory({
+    stagingRoot: cleanupRoot,
+    tempDirectory: directory,
+    containerPath: resolve(cleanupRoot, 'gameparam.parambnd.dcx')
+  })));
+  check('cleanup/concurrent-independent', concurrentDiagnostics.every((diagnostic) => diagnostic === undefined));
+  const leftovers = await Promise.all(concurrentDirs.map(async (directory) => {
+    try {
+      await access(directory);
+      return true;
+    } catch {
+      return false;
+    }
+  }));
+  check('cleanup/concurrent-no-leftovers', leftovers.every((exists) => !exists));
+
+  const retryDirectory = await mkdtemp(resolve(cleanupRoot, 'param-read-'));
+  let retryAttempts = 0;
+  const retryDiagnostic = await cleanupParamTempDirectory({
+    stagingRoot: cleanupRoot,
+    tempDirectory: retryDirectory,
+    containerPath: resolve(cleanupRoot, 'gameparam.parambnd.dcx'),
+    remove: async (path) => {
+      retryAttempts += 1;
+      if (retryAttempts === 1) throw Object.assign(new Error('sharing violation'), { code: 'EBUSY' });
+      await rm(path, { recursive: true, force: true });
+    }
+  });
+  check('cleanup/transient-retry', retryDiagnostic === undefined && retryAttempts === 2, JSON.stringify({ retryDiagnostic, retryAttempts }));
+
+  const failureDirectory = await mkdtemp(resolve(cleanupRoot, 'param-read-'));
+  let failureAttempts = 0;
+  const failureDiagnostic = await cleanupParamTempDirectory({
+    stagingRoot: cleanupRoot,
+    tempDirectory: failureDirectory,
+    containerPath: resolve(cleanupRoot, 'gameparam.parambnd.dcx'),
+    remove: async () => {
+      failureAttempts += 1;
+      throw Object.assign(new Error('access denied'), { code: 'EACCES' });
+    }
+  });
+  check(
+    'cleanup/persistent-failure-structured',
+    failureDiagnostic?.code === 'PARAM_TEMP_CLEANUP_FAILED' && failureAttempts === 2,
+    JSON.stringify({ failureDiagnostic, failureAttempts })
+  );
+  check('cleanup/persistent-failure-does-not-throw', failureDiagnostic?.severity === 'warning');
+
+  const rejected = await cleanupParamTempDirectory({
+    stagingRoot: cleanupRoot,
+    tempDirectory: resolve(cleanupRoot, '..', 'param-read-outside'),
+    containerPath: resolve(cleanupRoot, 'gameparam.parambnd.dcx')
+  });
+  check('cleanup/path-boundary', rejected?.code === 'PARAM_TEMP_CLEANUP_PATH_REJECTED', JSON.stringify(rejected));
+  check('cleanup/path-boundary-no-io', !(await stat(cleanupRoot).then(() => false).catch(() => true)));
+} finally {
+  await rm(cleanupRoot, { recursive: true, force: true });
+}
 
 const registry = createDefaultToolRegistry();
 const listed = new Set(registry.list().map((tool) => tool.name));

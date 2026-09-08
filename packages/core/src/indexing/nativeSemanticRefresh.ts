@@ -8,7 +8,8 @@
  * outer file hash.
  */
 
-import { mkdir, mkdtemp, rm } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
+import { createHash } from 'node:crypto';
 import { basename, dirname, join, resolve } from 'node:path';
 import type {
   Diagnostic,
@@ -17,14 +18,18 @@ import type {
   IndexedFile,
   MapExport,
   MsgExport,
+  ParamDefDocument,
   ParamMetadataPackage,
+  ParamMetadataTrustPolicy,
   ParamExport,
   ParamFieldSymbol,
   ParamRowSymbol,
   BridgeResult
 } from '@soulforge/shared';
 import { runBridge } from '../bridge/runBridge.js';
+import { readParamDocumentViaBridge } from '../editing/paramBridgeCommit.js';
 import { decodeRowFields } from '../param/paramdefLayout.js';
+import { matchParamMetadataPackage, resolveParamMetadataRowWidth } from '../param/paramMetadata.js';
 import { importPinnedSmithboxSdtParamMetadata } from '../param/smithboxParamMetadataSource.js';
 import { mapExportFromMsbDocument } from './ingestBridgeResult.js';
 import { WorkspaceIndex } from './workspaceIndex.js';
@@ -57,6 +62,11 @@ interface NativeSourceReadResult {
 interface NativeContainerEntry {
   index: number;
   name: string;
+}
+
+interface NativeSourceSnapshot {
+  path: string;
+  outerFileHash: string;
 }
 
 interface ParamMetadataCache {
@@ -94,6 +104,8 @@ interface NativeMapRegionInput {
   scaleZ?: number;
 }
 
+const PARAM_DECODE_YIELD_BATCH_SIZE = 64;
+
 let paramMetadataCache: ParamMetadataCache | undefined;
 
 /**
@@ -125,8 +137,26 @@ export async function refreshNativeSemanticSources(
     for (const file of sourceFiles) {
       try {
         throwIfAborted(input.signal);
+        // Freeze one complete source receipt before asking Bridge to enumerate
+        // or extract anything.  Every subsequent native read uses this copy,
+        // so a mutable mod workspace cannot mix catalog-v1 and readback-v2
+        // bytes between list/extract/parse calls.
+        const snapshot = await captureNativeSourceSnapshot(file, scratchRoot, input.signal);
+        if (!snapshot) {
+          staleSources.push(file.sourceUri);
+          diagnostics.push({
+            severity: 'warning',
+            code: 'NATIVE_SEMANTIC_REFRESH_SOURCE_STALE',
+            message: 'native refresh source 在建立固定读取副本时已变化，拒绝把活动路径的后续读取当作同一版本。',
+            sourceUri: file.sourceUri
+          });
+          continue;
+        }
         if (!input.index.isNativeProjectionCurrent(file.sourceUri, {
-          ...(file.sha256 ? { sourceHash: file.sha256 } : {}),
+          // IndexedFile.sha256 is the packed/outer catalog identity.  A
+          // semantic child hash must never be compared to it as if it were
+          // the same byte domain.
+          outerFileHash: snapshot.outerFileHash,
           sourceRevision: file.mtimeMs
         })) {
           staleSources.push(file.sourceUri);
@@ -138,9 +168,17 @@ export async function refreshNativeSemanticSources(
           });
           continue;
         }
-        const roots = refreshAllowedRoots(input, file, scratchRoot);
+        const snapshotFile = {
+          ...file,
+          absolutePath: snapshot.path,
+          // From this point on `sha256` is the verified snapshot receipt, not
+          // an unchecked catalog fallback.  Child projections copy it only as
+          // their outerFileHash; their sourceHash remains the native leaf hash.
+          sha256: snapshot.outerFileHash
+        };
+        const roots = refreshAllowedRoots(input, snapshotFile, scratchRoot);
         if (file.resourceKind === 'event') {
-          const eventExport = await readEventExport(file, roots, input);
+          const eventExport = await readEventExport(snapshotFile, roots, input, snapshot.outerFileHash);
           if (!input.index.upsertEventExport(eventExport)) {
             staleSources.push(file.sourceUri);
             diagnostics.push({
@@ -152,7 +190,7 @@ export async function refreshNativeSemanticSources(
             continue;
           }
         } else if (file.resourceKind === 'map') {
-          const mapExport = await readMapExport(file, roots, input);
+          const mapExport = await readMapExport(snapshotFile, roots, input, snapshot.outerFileHash);
           if (!input.index.upsertMapExport(mapExport)) {
             staleSources.push(file.sourceUri);
             diagnostics.push({
@@ -164,7 +202,7 @@ export async function refreshNativeSemanticSources(
             continue;
           }
         } else if (file.resourceKind === 'param') {
-          const result = await readParamExports(file, roots, scratchRoot, input);
+          const result = await readParamExports(snapshotFile, roots, scratchRoot, input, snapshot.outerFileHash);
           diagnostics.push(...result.diagnostics);
           if (result.stale) {
             staleSources.push(file.sourceUri);
@@ -175,7 +213,7 @@ export async function refreshNativeSemanticSources(
           }
           if (!result.complete) partialSources.push(file.sourceUri);
         } else if (file.resourceKind === 'msg') {
-          const result = await readMsgExports(file, roots, scratchRoot, input);
+          const result = await readMsgExports(snapshotFile, roots, scratchRoot, input, snapshot.outerFileHash);
           diagnostics.push(...result.diagnostics);
           if (result.stale) {
             staleSources.push(file.sourceUri);
@@ -207,7 +245,8 @@ export async function refreshNativeSemanticSources(
 async function readEventExport(
   file: IndexedFile,
   allowedRoots: string[],
-  input: NativeSemanticRefreshOptions
+  input: NativeSemanticRefreshOptions,
+  expectedOuterFileHash: string
 ): Promise<EventExport> {
   const result = await runBridge<Record<string, unknown>>({
     // The outline document is deliberately bounded and has no per-event
@@ -226,11 +265,16 @@ async function readEventExport(
     commandOptions: { cachePolicy: 'bypass' }
   });
   const data = requireBridgeData(result, file.sourceUri, 'EMEVD');
+  const reportedOuterFileHash = stringValue(data.outerFileHash);
+  if (reportedOuterFileHash && reportedOuterFileHash !== expectedOuterFileHash) {
+    throw new Error('EMEVD native read outer hash 与固定 source receipt 不一致。');
+  }
   const eventsRaw = arrayValue(data.events);
   if (eventsRaw.length === 0 && numberValue(data.eventCount) !== 0) {
     throw new Error('EMEVD native read returned no event table.');
   }
-  const sourceHash = stringValue(data.sourceHash) ?? file.sha256;
+  const sourceHash = stringValue(data.sourceHash) || undefined;
+  const outerFileHash = reportedOuterFileHash || expectedOuterFileHash;
   const sourceRevision = file.mtimeMs;
   const mapId = stripNativeExtension(file.relativePath || file.absolutePath, 'emevd');
   const events = eventsRaw.map((value, index) => {
@@ -255,6 +299,7 @@ async function readEventExport(
       eventId,
       ...(stringValue(record.name) ? { name: stringValue(record.name) } : {}),
       ...(sourceHash ? { sourceHash } : {}),
+      ...(outerFileHash ? { outerFileHash } : {}),
       ...(sourceRevision !== undefined ? { sourceRevision } : {}),
       instructions: semanticInstructions,
       raw
@@ -263,6 +308,7 @@ async function readEventExport(
   return {
     mapId,
     ...(sourceHash ? { sourceHash } : {}),
+    ...(outerFileHash ? { outerFileHash } : {}),
     ...(sourceRevision !== undefined ? { sourceRevision } : {}),
     events
   };
@@ -321,7 +367,8 @@ function nativeSemanticArg(value: unknown): EventInstruction['args'][number][] {
 async function readMapExport(
   file: IndexedFile,
   allowedRoots: string[],
-  input: NativeSemanticRefreshOptions
+  input: NativeSemanticRefreshOptions,
+  expectedOuterFileHash: string
 ): Promise<MapExport> {
   const result = await runBridge<Record<string, unknown>>({
     command: 'read-msb-document',
@@ -334,7 +381,13 @@ async function readMapExport(
     maxFrameBytes: 32 * 1024 * 1024
   });
   const data = requireBridgeData(result, file.sourceUri, 'MSB');
+  const reportedOuterFileHash = stringValue(data.outerFileHash);
+  if (reportedOuterFileHash && reportedOuterFileHash !== expectedOuterFileHash) {
+    throw new Error('MSB native read outer hash 与固定 source receipt 不一致。');
+  }
   const mapId = stripNativeExtension(file.relativePath || file.absolutePath, 'msb');
+  const sourceHash = stringValue(data.sourceHash) || undefined;
+  const outerFileHash = reportedOuterFileHash || expectedOuterFileHash;
   const parts: NativeMapPartInput[] = arrayValue(data.parts).map((value) => {
     const record = recordValue(value);
     const part: NativeMapPartInput = { name: stringValue(record.name) };
@@ -373,7 +426,8 @@ async function readMapExport(
   return mapExportFromMsbDocument({
     mapId,
     sourceUri: file.sourceUri,
-    ...(file.sha256 ? { sourceHash: file.sha256 } : {}),
+    ...(sourceHash ? { sourceHash } : {}),
+    ...(outerFileHash ? { outerFileHash } : {}),
     ...(file.mtimeMs !== undefined ? { sourceRevision: file.mtimeMs } : {}),
     readerSchemaRevision: numberValue(data.readerSchemaRevision) ?? 2,
     parts,
@@ -381,13 +435,100 @@ async function readMapExport(
   });
 }
 
+/**
+ * Decode one native PARAM table into semantic rows in bounded event-loop
+ * batches.  Keeping this loop as a small runtime unit makes its cancellation
+ * and output-equivalence contract directly testable without needing a full
+ * DCX/BND fixture.
+ */
+export async function decodeNativeParamRows(input: {
+  file: Pick<IndexedFile, 'sourceUri' | 'sha256' | 'mtimeMs'>;
+  /** Hash of the decoded PARAM child payload, when known. */
+  sourceHash?: string;
+  /** Hash of the packed/outer source file, when known. */
+  outerFileHash?: string;
+  tableName: string;
+  entryName: string;
+  entryIndex: number;
+  typeName: string;
+  definition: ParamDefDocument;
+  rows: readonly unknown[];
+  signal?: AbortSignal;
+}): Promise<ParamRowSymbol[]> {
+  const fieldsById = new Map(input.definition.fields.map((field) => [field.id, field]));
+  // Keep backwards-compatible fixture callers (which only supplied
+  // file.sha256) while making the packed/native path explicit.  Once either
+  // identity is supplied, do not copy one hash into the other domain.
+  const sourceHash = input.sourceHash ?? (input.outerFileHash === undefined ? input.file.sha256 : undefined);
+  const outerFileHash = input.outerFileHash ?? (input.sourceHash === undefined ? input.file.sha256 : undefined);
+  const rows: ParamRowSymbol[] = [];
+  for (let index = 0; index < input.rows.length; index += 1) {
+    throwIfAborted(input.signal);
+    const value = input.rows[index];
+    const record = recordValue(value);
+    const rowId = numberValue(record.id);
+    const dataBase64 = stringValue(record.dataBase64);
+    if (rowId === undefined || !Number.isSafeInteger(rowId) || dataBase64.length === 0) {
+      throw new Error(`PARAM ${input.entryName} rows[${index}] 缺少合法 id/dataBase64。`);
+    }
+    const bytes = Buffer.from(dataBase64, 'base64');
+    if (bytes.length !== input.definition.rowDataSize) {
+      throw new Error(`PARAM ${input.entryName}#${rowId} 行宽 ${bytes.length} != ${input.definition.rowDataSize}。`);
+    }
+    // Bridge's rowIndex is the physical position in the complete native
+    // table, not the position in this page/array.  Preserve that receipt for
+    // downstream physical identities; never substitute the local `index`.
+    const nativeRowIndex = numberValue(record.rowIndex);
+    const rowIndex = nativeRowIndex !== undefined
+      && Number.isSafeInteger(nativeRowIndex)
+      && nativeRowIndex >= 0
+      ? nativeRowIndex
+      : undefined;
+    const fields: ParamFieldSymbol[] = decodeRowFields(bytes, input.definition).map((field) => {
+      const definitionField = fieldsById.get(field.fieldId);
+      return {
+        fieldId: field.fieldId,
+        name: field.name,
+        type: field.type,
+        ...(definitionField?.description ? { description: definitionField.description } : {}),
+        value: field.value
+      };
+    });
+    rows.push({
+      uri: `${input.file.sourceUri}#${input.tableName}/${rowId}`,
+      sourceUri: input.file.sourceUri,
+      paramName: input.tableName,
+      entryName: input.entryName,
+      entryIndex: input.entryIndex,
+      rowId,
+      ...(stringValue(record.name) ? { rowName: stringValue(record.name) } : {}),
+      ...(sourceHash ? { sourceHash } : {}),
+      ...(outerFileHash ? { outerFileHash } : {}),
+      ...(input.file.mtimeMs !== undefined ? { sourceRevision: input.file.mtimeMs } : {}),
+      fields,
+      raw: {
+        typeName: input.typeName,
+        dataHash: stringValue(record.dataHash),
+        ...(rowIndex === undefined ? {} : { rowIndex })
+      }
+    });
+    if ((index + 1) % PARAM_DECODE_YIELD_BATCH_SIZE === 0) {
+      throwIfAborted(input.signal);
+      await yieldNativeSemanticRefresh();
+    }
+  }
+  throwIfAborted(input.signal);
+  return rows;
+}
+
 async function readParamExports(
   file: IndexedFile,
   allowedRoots: string[],
   scratchRoot: string,
-  input: NativeSemanticRefreshOptions
+  input: NativeSemanticRefreshOptions,
+  expectedOuterFileHash: string
 ): Promise<NativeSourceReadResult> {
-  const entries = await listNativeEntries(file, allowedRoots, input, '.param');
+  const entries = await listNativeEntries(file, allowedRoots, input, '.param', expectedOuterFileHash);
   if (entries.length === 0) throw new Error('PARAM native container 没有 .param 子项。');
   const metadata = await loadParamMetadata();
   if (!metadata.ok || !metadata.package) {
@@ -400,72 +541,57 @@ async function readParamExports(
     throwIfAborted(input.signal);
     try {
       const childPath = await materializeNativeEntry(file, entry, allowedRoots, scratchRoot, input);
-      const result = await runBridge<Record<string, unknown>>({
-        command: 'read-param-document',
-        filePath: childPath,
+      const result = await readParamDocumentViaBridge({
+        sourcePath: childPath,
         allowedRoots: [...allowedRoots, scratchRoot],
         ...(input.timeoutMs ? { timeoutMs: input.timeoutMs } : {}),
         ...(input.signal ? { signal: input.signal } : {}),
+        maxRows: 100_000,
+        includeAllPayloads: true,
         maxFrameBytes: 32 * 1024 * 1024,
-        commandOptions: { includeAllPayloads: true, rowPage: 0, rowPageSize: 100_000 }
+        resolveRowDataSize: async (header) => resolveTrustedParamRowWidth(metadata.package!, header)
       });
-      const data = requireBridgeData(result, file.sourceUri, `PARAM ${entry.name}`);
-      if (data.rowsTruncated === true) {
-        throw new Error(`PARAM ${entry.name} 返回截断行表，拒绝把不完整语义写入 RAG。`);
+      if (!result.ok || !result.data) {
+        const first = result.diagnostics[0];
+        throw new Error(`PARAM ${entry.name} native reread failed: ${first?.code ?? 'PARAM_READ_FAILED'} ${first?.message ?? file.sourceUri}`);
+      }
+      const data = result.data;
+      if (data.rows.length < data.rowCount) {
+        throw new Error(`PARAM ${entry.name} 返回截断行表 ${data.rows.length}/${data.rowCount}，拒绝把不完整语义写入 RAG。`);
       }
       const typeName = stringValue(data.typeName);
       const rowDataSize = numberValue(data.rowDataSize);
-      const definition = metadata.package.definitions.find((candidate) => (
-        candidate.document.typeName === typeName
-        && candidate.document.rowDataSize === rowDataSize
-      ))?.document;
+      const dataVersion = numberValue(data.dataVersion);
+      const definition = dataVersion !== undefined && Number.isSafeInteger(dataVersion) && rowDataSize !== undefined
+        ? resolveTrustedParamDefinition(metadata.package, {
+            typeName,
+            dataVersion,
+            rowDataSize
+          })
+        : undefined;
       if (!definition) {
-        throw new Error(`PARAM ${entry.name} 缺少匹配的授信字段定义：${typeName}/${rowDataSize ?? 'unknown'}。`);
+        throw new Error(`PARAM ${entry.name} 缺少严格匹配的授信字段定义：${typeName}/${dataVersion ?? 'unknown-version'}/${rowDataSize ?? 'unknown-width'}。`);
       }
       const tableName = stripLeafExtension(entry.name, '.param');
-      const rowsRaw = arrayValue(data.rows);
-      const rows: ParamRowSymbol[] = rowsRaw.map((value, index) => {
-        const record = recordValue(value);
-        const rowId = numberValue(record.id);
-        const dataBase64 = stringValue(record.dataBase64);
-        if (rowId === undefined || !Number.isSafeInteger(rowId) || dataBase64.length === 0) {
-          throw new Error(`PARAM ${entry.name} rows[${index}] 缺少合法 id/dataBase64。`);
-        }
-        const bytes = Buffer.from(dataBase64, 'base64');
-        if (bytes.length !== definition.rowDataSize) {
-          throw new Error(`PARAM ${entry.name}#${rowId} 行宽 ${bytes.length} != ${definition.rowDataSize}。`);
-        }
-        const fields: ParamFieldSymbol[] = decodeRowFields(bytes, definition).map((field) => {
-          const definitionField = definition.fields.find((candidate) => candidate.id === field.fieldId);
-          return {
-            fieldId: field.fieldId,
-            name: field.name,
-            type: field.type,
-            ...(definitionField?.description ? { description: definitionField.description } : {}),
-            value: field.value
-          };
-        });
-        const row: ParamRowSymbol = {
-          uri: `${file.sourceUri}#${tableName}/${rowId}`,
-          sourceUri: file.sourceUri,
-          paramName: tableName,
-          entryName: entry.name,
-          entryIndex: entry.index,
-          rowId,
-          ...(stringValue(record.name) ? { rowName: stringValue(record.name) } : {}),
-          ...(file.sha256 ? { sourceHash: file.sha256 } : {}),
-          ...(file.mtimeMs !== undefined ? { sourceRevision: file.mtimeMs } : {}),
-          fields,
-          raw: { typeName, dataHash: stringValue(record.dataHash) }
-        };
-        return row;
+      const rows = await decodeNativeParamRows({
+        file,
+        sourceHash: data.sourceHash,
+        outerFileHash: expectedOuterFileHash,
+        tableName,
+        entryName: entry.name,
+        entryIndex: entry.index,
+        typeName,
+        definition,
+        rows: arrayValue(data.rows),
+        ...(input.signal ? { signal: input.signal } : {})
       });
       const exported: ParamExport = {
         paramName: tableName,
         sourceUri: file.sourceUri,
         entryName: entry.name,
         entryIndex: entry.index,
-        ...(file.sha256 ? { sourceHash: file.sha256 } : {}),
+        ...(data.sourceHash ? { sourceHash: data.sourceHash } : {}),
+        outerFileHash: expectedOuterFileHash,
         ...(file.mtimeMs !== undefined ? { sourceRevision: file.mtimeMs } : {}),
         rows
       };
@@ -496,9 +622,10 @@ async function readMsgExports(
   file: IndexedFile,
   allowedRoots: string[],
   scratchRoot: string,
-  input: NativeSemanticRefreshOptions
+  input: NativeSemanticRefreshOptions,
+  expectedOuterFileHash: string
 ): Promise<NativeSourceReadResult> {
-  const entries = await listNativeEntries(file, allowedRoots, input, '.fmg');
+  const entries = await listNativeEntries(file, allowedRoots, input, '.fmg', expectedOuterFileHash);
   if (entries.length === 0) throw new Error('FMG native container 没有 .fmg 子项。');
   const diagnostics: Diagnostic[] = [];
   let semanticCount = 0;
@@ -531,14 +658,16 @@ async function readMsgExports(
           textId,
           text: stringValue(record.text),
           confidence: 'high' as const,
-          ...(file.sha256 ? { sourceHash: file.sha256 } : {}),
+          ...(stringValue(data.sourceHash) ? { sourceHash: stringValue(data.sourceHash) } : {}),
+          outerFileHash: expectedOuterFileHash,
           ...(file.mtimeMs !== undefined ? { sourceRevision: file.mtimeMs } : {}),
           raw: { child: entry.name }
         };
       });
       const exported: MsgExport = {
         category,
-        ...(file.sha256 ? { sourceHash: file.sha256 } : {}),
+        ...(stringValue(data.sourceHash) ? { sourceHash: stringValue(data.sourceHash) } : {}),
+        outerFileHash: expectedOuterFileHash,
         ...(file.mtimeMs !== undefined ? { sourceRevision: file.mtimeMs } : {}),
         entries
       };
@@ -569,7 +698,8 @@ async function listNativeEntries(
   file: IndexedFile,
   allowedRoots: string[],
   input: NativeSemanticRefreshOptions,
-  extension: string
+  extension: string,
+  expectedOuterFileHash: string
 ): Promise<NativeContainerEntry[]> {
   const lower = file.absolutePath.toLowerCase();
   if (lower.endsWith(extension)) {
@@ -586,6 +716,10 @@ async function listNativeEntries(
     maxFrameBytes: 32 * 1024 * 1024
   });
   const data = requireBridgeData(result, file.sourceUri, 'native container');
+  const reportedOuterFileHash = stringValue(data.outerFileHash) || stringValue(data.sourceHash);
+  if (reportedOuterFileHash !== expectedOuterFileHash) {
+    throw new Error('native container read outer hash 与固定 source receipt 不一致。');
+  }
   const nested = recordValue(data.nested);
   return arrayValue(nested.entries).flatMap((value) => {
     const record = recordValue(value);
@@ -609,6 +743,7 @@ async function materializeNativeEntry(
   const result = await runBridge<Record<string, unknown>>({
     command: 'extract-bnd4-child',
     filePath: file.absolutePath,
+    resourceUri: file.sourceUri,
     allowedRoots: [...allowedRoots, scratchRoot],
     writableRoots: [scratchRoot],
     ...(input.oodleRuntimeRoot ? { oodleRuntimeRoot: input.oodleRuntimeRoot } : {}),
@@ -646,6 +781,52 @@ async function loadParamMetadata(): Promise<ParamMetadataCache> {
   return paramMetadataCache;
 }
 
+function paramMetadataTrustPolicy(metadata: ParamMetadataPackage): ParamMetadataTrustPolicy {
+  return {
+    schemaVersion: 1,
+    policyId: 'smithbox-sdt-2.2.4.native-semantic-refresh',
+    trustedPackages: [{
+      packageId: metadata.packageId,
+      packageVersion: metadata.packageVersion,
+      packageDigest: metadata.packageDigest,
+      sourceIdentity: metadata.source.identity,
+      sourceRevision: metadata.source.revision,
+      sourceContentDigest: metadata.source.contentDigest,
+      licenseSpdxExpression: metadata.license.spdxExpression,
+      licenseTextDigest: metadata.license.textDigest
+    }]
+  };
+}
+
+function resolveTrustedParamRowWidth(
+  metadata: ParamMetadataPackage,
+  header: { typeName: string; dataVersion: number }
+): number | undefined {
+  return resolveParamMetadataRowWidth(
+    metadata,
+    { game: 'sekiro', gameBuild: '1.6', typeName: header.typeName, dataVersion: header.dataVersion },
+    paramMetadataTrustPolicy(metadata)
+  );
+}
+
+function resolveTrustedParamDefinition(
+  metadata: ParamMetadataPackage,
+  input: { typeName: string; dataVersion: number; rowDataSize: number }
+): ParamDefDocument | undefined {
+  const matched = matchParamMetadataPackage(
+    metadata,
+    {
+      game: 'sekiro',
+      gameBuild: '1.6',
+      typeName: input.typeName,
+      dataVersion: input.dataVersion,
+      rowDataSize: input.rowDataSize
+    },
+    paramMetadataTrustPolicy(metadata)
+  );
+  return matched.ok ? matched.definition.document : undefined;
+}
+
 function requireBridgeData<T>(result: BridgeResult<T>, sourceUri: string, label: string): T {
   if (result.parseStatus === 'failed' || result.data === null || result.data === undefined) {
     const first = result.diagnostics[0];
@@ -665,6 +846,36 @@ function refreshAllowedRoots(
     scratchRoot,
     ...(input.oodleRuntimeRoot ? [input.oodleRuntimeRoot] : [])
   ]);
+}
+
+/**
+ * Capture one immutable source receipt for a refresh.  The catalog hash is
+ * checked against the bytes actually copied; all Bridge calls then target the
+ * copy, never the mutable workspace path.  A stat-before/stat-after mismatch
+ * is treated as stale and does not publish a partial semantic projection.
+ */
+async function captureNativeSourceSnapshot(
+  file: IndexedFile,
+  scratchRoot: string,
+  signal?: AbortSignal
+): Promise<NativeSourceSnapshot | undefined> {
+  throwIfAborted(signal);
+  const before = await stat(file.absolutePath);
+  const bytes = await readFile(file.absolutePath);
+  throwIfAborted(signal);
+  const after = await stat(file.absolutePath);
+  if (before.size !== after.size || before.mtimeMs !== after.mtimeMs) return undefined;
+
+  const outerFileHash = createHash('sha256').update(bytes).digest('hex');
+  if (file.sha256 && file.sha256 !== outerFileHash) return undefined;
+
+  const sourceToken = createHash('sha256').update(file.sourceUri).digest('hex').slice(0, 16);
+  const snapshotPath = join(
+    scratchRoot,
+    `${sourceToken}-${safeSegment(basename(file.absolutePath))}`
+  );
+  await writeFile(snapshotPath, bytes);
+  return { path: snapshotPath, outerFileHash };
 }
 
 function uniqueFiles(files: readonly IndexedFile[]): IndexedFile[] {
@@ -740,4 +951,8 @@ function escapeRegExp(value: string): string {
 
 function throwIfAborted(signal?: AbortSignal): void {
   if (signal?.aborted) throw new Error('native semantic refresh aborted');
+}
+
+function yieldNativeSemanticRefresh(): Promise<void> {
+  return new Promise((resolve) => setImmediate(resolve));
 }

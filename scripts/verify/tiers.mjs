@@ -78,7 +78,13 @@ export const TIER_BY_SCRIPT = Object.freeze({
   typecheck: 'unit',
   test: 'unit',
   'test:ai-conformance': 'unit',
+  'test:agent-tool-envelope': 'unit',
+  'test:agent-task-status': 'unit',
+  'test:real-agent-harness': 'unit',
+  'test:ai-log-sync': 'unit',
+  'test:agent-production-build': 'unit',
   'test:agent-production-scenario': 'unit',
+  'test:agent-param-dependency-batch': 'unit',
   // Agent/RAG/CPU 回归门禁：离线确定性 adapter + 生产 task-record gateway，
   // 不宣称 provider/native authority，代码改动时必须随 unit 层执行。
   'test:agent-performance-fixes': 'unit',
@@ -88,6 +94,7 @@ export const TIER_BY_SCRIPT = Object.freeze({
   'test:emedf-session-wiring': 'unit',
   'test:rag': 'unit',
   'test:agent-knowledge-refresh': 'unit',
+  'test:native-projection-acceptance': 'unit',
   'test:emevd-stable-identity': 'unit',
   'test:emevd-dark-script-compiler': 'unit',
   'test:emevd-dark-script-compiler-s14': 'unit',
@@ -203,10 +210,14 @@ export const TIER_BY_SCRIPT = Object.freeze({
   'test:audit-change-set-commit': 'unit',
   // 工作区启动阶段的指纹复用/取消/清理 smoke，不依赖真实游戏语料。
   'test:workspace-startup': 'unit',
+  'test:workspace-analysis-lifecycle': 'unit',
+  'test:rag-persistence-performance': 'unit',
+  'test:param-metadata-read-bridge': 'unit',
 
   // ---- synthetic：合成 native 契约与恢复矩阵。需 dotnet，不需真实资源 ----
   'bridge:build': 'synthetic',
   'bridge:verify:synthetic': 'synthetic',
+  'bridge:verify:source-hash-performance': 'synthetic',
   'bridge:verify:client': 'synthetic',
   'bridge:verify:crash': 'synthetic',
   'bridge:verify:daemon': 'synthetic',
@@ -564,6 +575,9 @@ export const TIER_BY_SCRIPT = Object.freeze({
   'test:native-writer-failure-matrix': 'native',
   'test:param-duplicate-native': 'native',
   'test:param-metadata-native': 'native',
+  'test:native-semantic-param-rows': 'native',
+  'test:workspace-readiness-native': 'native',
+  'test:map-streaming-native': 'native',
   'test:param-session-projection': 'native',
   'test:native-map-rollback': 'native',
   'test:script-container-evidence': 'native',
@@ -648,6 +662,7 @@ export const EXCLUDED = Object.freeze({
   'verify:list': '同上（只列计划，不是验证）',
   dev: '交互式开发服务器，不是验证',
   'agent:simulate': '真实 Agent 链路模拟入口，依赖真实模型与本地 Mod 交互，按需手工运行',
+  'preagent:simulate': 'agent:simulate 的 npm 生命周期构建前置，只生成生产产物；真实链路判定由 agent:simulate 自身负责',
   'ai-logs:sync': '用于从 Antigravity 提取或同步真实 AI 会话日志到 testdata/ai-audit-transcripts 的离线同步工具，不是验证',
   // ⚠️ 排除理由已按实测改写（2026-08-08）。原文写的是「由 release 链按需调用」，
   // 而实测 release 层 10 条脚本（build / release:installer:manifest /

@@ -88,7 +88,10 @@ internal sealed class ParamNativeDocument
     public int RowDataSize { get; }
     public IReadOnlyList<ParamRow> Rows { get; }
     public ParamLayout Layout { get; }
-    public string SourceHash => Hash(SourceBytes);
+    // SourceBytes is the immutable read snapshot. Semantic export requests
+    // this identity for every row; hashing the full document per row is O(n²).
+    private string? sourceHashMemo;
+    public string SourceHash => sourceHashMemo ??= Hash(SourceBytes);
 
     public static ParamNativeDocument Read(byte[] source, int? expectedRowDataSize = null)
     {

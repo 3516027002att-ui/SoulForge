@@ -52,6 +52,7 @@ import {
   type EvidenceVersion
 } from './evidenceSelection.js';
 import { normalizeEvidenceVersion } from './evidenceIdentity.js';
+import { expandEvidenceClaims } from './evidenceTransport.js';
 import { APPROVAL_DECISIONS_DENYING } from './types.js';
 
 /** 连续工具调用失败上限门禁：达到该阈值时自动终止循环以防死循环。 */
@@ -103,6 +104,55 @@ function envelopeEvidenceStatus(content: string): string | undefined {
   } catch {
     return undefined;
   }
+}
+
+/**
+ * A committed mutation can still return ok=true when the post-commit
+ * knowledge refresh failed.  Preserve that degraded state for the whole
+ * Agent run: a later ordinary read must not wash it into a false completed
+ * terminal result.
+ */
+function envelopeKnowledgeRefreshStatus(content: string): string | undefined {
+  try {
+    const root = JSON.parse(content) as Record<string, unknown>;
+    const data = root.data && typeof root.data === 'object' && !Array.isArray(root.data)
+      ? root.data as Record<string, unknown>
+      : undefined;
+    const record = data?.record && typeof data.record === 'object' && !Array.isArray(data.record)
+      ? data.record as Record<string, unknown>
+      : undefined;
+    const candidates: unknown[] = [
+      record?.lifecycle,
+      record?.knowledgeRefresh,
+      data?.lifecycle,
+      data?.knowledgeRefresh,
+      root.lifecycle,
+      root.knowledgeRefresh
+    ];
+    const readStatus = (candidate: unknown, depth = 0): string | undefined => {
+      if (depth > 3 || candidate === null || candidate === undefined) return undefined;
+      if (typeof candidate === 'string') {
+        const status = candidate.trim();
+        return status.length > 0 ? status : undefined;
+      }
+      if (typeof candidate !== 'object' || Array.isArray(candidate)) return undefined;
+      const value = candidate as Record<string, unknown>;
+      const nested = readStatus(value.knowledgeRefresh, depth + 1);
+      if (nested !== undefined) return nested;
+      return readStatus(value.status, depth + 1);
+    };
+    for (const candidate of candidates) {
+      const status = readStatus(candidate);
+      if (status !== undefined) return status;
+    }
+    return undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function isHealthyKnowledgeRefreshStatus(status: string): boolean {
+  return status === 'completed' || status === 'converged' || status === 'preserved' || status === 'not_requested';
 }
 
 /** Whether a bounded search_param_fields envelope contains a real field ID. */
@@ -309,8 +359,7 @@ function evidenceCandidatesFromToolContent(content: string): EvidenceClaim[] {
     if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return [];
     const evidence = (parsed as Record<string, unknown>).evidence;
     if (!evidence || typeof evidence !== 'object' || Array.isArray(evidence)) return [];
-    const claims = (evidence as Record<string, unknown>).claims;
-    if (!Array.isArray(claims)) return [];
+    const claims = expandEvidenceClaims(evidence);
     const output: EvidenceClaim[] = [];
     for (const value of claims) {
       if (!value || typeof value !== 'object' || Array.isArray(value)) continue;
@@ -525,6 +574,43 @@ export function looksLikeIncompleteConclusion(content: string): boolean {
     return false;
   }
   return INCOMPLETE_CONCLUSION_PATTERNS.some((pattern) => pattern.test(normalized));
+}
+
+/** A terminal handoff can end sampling successfully while the task is partial. */
+function reportsCurrentTaskPartial(content: string, taskQuery: string, mode: AgentPermissionMode): boolean {
+  const readOnlyRequest = /(?:只|仅)(?:做|进行)?(?:读|分析|审计|审查|检查|排查|诊断|解释|规划|查看)|(?:不要|无需|不需要|禁止|勿)[^。！？\n]{0,12}(?:修改|写入|写回|修复)/u.test(taskQuery)
+    || /\b(?:read[- ]only|do not (?:edit|write|modify)|analysis only)\b/i.test(taskQuery)
+    || (/^(?:请|帮我|麻烦)?(?:解释|分析|审计|审查|检查|诊断|查看|评估|排查)/u.test(taskQuery.trim())
+      && !/(?:并|然后|同时|接着|再)(?:请|直接)?(?:修改|修复|写入|写回|实现)/u.test(taskQuery));
+  const mutationRequested = mode !== 'plan' && !readOnlyRequest
+    && /(?:改为|改成|修改|修复|写入|写回|设置为|设置成|替换|删除|添加|实现)|\b(?:modify|edit|fix|implement|write|replace|delete|add)\b/i.test(taskQuery);
+  let inFence = false;
+  for (const rawLine of content.split(/\r?\n/u)) {
+    const trimmed = rawLine.trim();
+    if (/^(?:```|~~~)/u.test(trimmed)) {
+      inFence = !inFence;
+      continue;
+    }
+    if (inFence || /^>/u.test(trimmed)) continue;
+    const line = trimmed
+      .replace(/“[^”]*”|‘[^’]*’|「[^」]*」|"[^"\n]*"|'[^'\n]*'/gu, '')
+      .replace(/`([^`\n]*)`/gu, (_match, body: string) => /^(?:partial|blocked|insufficient_evidence)$/iu.test(body.trim()) ? body : '')
+      .replace(/^[#*\-\s]+/u, '')
+      .replace(/[*`]/gu, '');
+    // Diagnostic explanations and quoted historical status are not statements
+    // about this run. Restrict classification to explicit current result prose.
+    if (/^(?:历史|旧(?:的|版|报告|记录)|此前|先前|上次|之前|曾经|当时|引用|示例|例如|错误码|代码|说明|解释|假如|如果|若)|^(?:previous|historical|example|if|error code)\b/iu.test(line)) continue;
+    for (const sentence of line.split(/[。！？；;\n]/u)) {
+      const text = sentence.trim();
+      if (/^(?:状态|结果|status|result)\s*[:：]\s*(?:blocked|partial|insufficient_evidence)\s*(?:表示|是|意为|意味着|means\b|denotes\b)/iu.test(text)) continue;
+      if (/^(?:(?:本次|这次|当前)(?:的)?(?:任务|请求|运行|执行|修改|结果|状态)?|任务(?:状态)?|执行结果|修改结果|结果|状态)\s*[:：=—-]?\s*(?:仍然?|尚|还)?(?:未完成|没有完成|无法完成|不能完成|未能完成|部分完成|仅部分完成|被?阻塞|受阻|blocked\b|partial\b|insufficient_evidence\b)/iu.test(text)
+        || /^(?:blocked|partial|insufficient_evidence)(?:$|\s*[:：（(，,])/iu.test(text)
+        || /^(?:(?:this|current) (?:task|run)|task status|status|result)\s*(?:is\s+|:\s*)?(?:blocked|partial|incomplete|not completed)\b/iu.test(text)) return true;
+      if (mutationRequested
+        && /(?:^(?:执行结果|修改结果|结果)\s*[:：]\s*(?:未能|无法|不能|尚未)(?:写入|写回|修改)|(?:本次|这次|当前)(?:修改|执行|运行)?(?:仍|尚)?(?:未(?:做(?:任何)?|进行(?:任何)?)?|没有(?:进行(?:任何)?)?|未能)(?:写入|写回|修改))/u.test(text)) return true;
+    }
+  }
+  return false;
 }
 
 const SECRET_PATTERNS = [
@@ -764,6 +850,7 @@ export async function runAgentToolLoop(
   let consecutiveDiscoveryOnlyTurns = 0;
   let forcedConclusion = false;
   let lengthConclusionAttempted = false;
+  let stickyKnowledgeRefreshDegraded: { status: string; toolName: string } | null = null;
   // A successful field-metadata lookup is the last discovery step before the
   // mandatory bounded native read.  Give the provider one extra turn at the
   // research boundary to consume that metadata; the generic discovery guard
@@ -1064,9 +1151,12 @@ export async function runAgentToolLoop(
       ...(request.sampling?.topK !== undefined ? { topK: request.sampling.topK } : {}),
       ...(request.sampling?.thinkingLevel !== undefined ? { thinkingLevel: request.sampling.thinkingLevel } : {})
     };
-    const callMessages = [...messages, ...ephemeralMessages];
     for (;;) {
       attempt += 1;
+      // Overflow recovery can replace `messages` with a compacted history.
+      // Rebuild the request snapshot for every attempt so the retry actually
+      // uses that replacement instead of resending the over-limit payload.
+      const callMessages = [...messages, ...ephemeralMessages];
       completion = request.streaming
         ? await collectStreamCompletion(
             adapter,
@@ -1272,7 +1362,30 @@ export async function runAgentToolLoop(
         });
         break;
       }
-      finishReason = completion.finishReason;
+      const modelReportedPartial = completion.finishReason === 'stop'
+        && reportsCurrentTaskPartial(safeMessage.content, initialUserQuery, currentMode);
+      if (modelReportedPartial || stickyKnowledgeRefreshDegraded !== null) {
+        // step-complete retains the provider's stop. Run/session completion and
+        // durable taskStatus must agree that this explicit handoff is partial;
+        // do not resample a genuinely blocked task merely to obtain a final.
+        finishReason = 'partial';
+        if (modelReportedPartial) {
+          diagnostics.push({
+            severity: 'warning',
+            code: 'AGENT_REPORTED_TASK_PARTIAL',
+            message: '模型最终汇报明确本次任务未完成；模型调用已结束，任务按 partial 收口。'
+          });
+        }
+        if (stickyKnowledgeRefreshDegraded !== null) {
+          diagnostics.push({
+            severity: 'warning',
+            code: 'AGENT_KNOWLEDGE_REFRESH_DEGRADED_STICKY',
+            message: `写入后的知识刷新状态为 ${stickyKnowledgeRefreshDegraded.status}（工具 ${stickyKnowledgeRefreshDegraded.toolName}）；即使后续普通读取成功，本次任务仍按 partial 收口。`
+          });
+        }
+      } else {
+        finishReason = completion.finishReason;
+      }
       break;
     }
     if (completion.finishReason === 'stop') {
@@ -1471,6 +1584,13 @@ export async function runAgentToolLoop(
     let toolPhaseCancelled = false;
     let cursor = 0;
     while (cursor < planned.length) {
+      // A dependency barrier may split one model turn into multiple batches.
+      // Do not start the dependent batch after cancellation, even when the
+      // preceding discovery batch has just settled successfully.
+      if (request.signal?.aborted) {
+        toolPhaseCancelled = true;
+        break;
+      }
       const entry = planned[cursor]!;
       if (entry.kind === 'denied') {
         orderedResults[cursor] = {
@@ -1484,10 +1604,48 @@ export async function runAgentToolLoop(
       }
       const batchIndices: number[] = [cursor];
       if (entry.parallel) {
+        // Search results are persisted into the task record only after the
+        // handler returns. Keep every later PARAM consumer behind any valid
+        // row-search in this model turn: the result may carry a logical native
+        // type (ATK_PARAM_ST) and a different physical entry (AtkParam_Npc),
+        // so scheduler-side table aliasing would either race or invent
+        // authority. This is only a sequencing barrier; the registry/task
+        // record remains the authority for whether the read is allowed.
+        let hasParamEvidenceSearch = false;
+        const addParamEvidenceSearch = (call: ToolCall): void => {
+          if (call.name !== 'search_param_rows') return;
+          let input: unknown;
+          try {
+            input = call.argumentsJson.trim() === '' ? {} : JSON.parse(call.argumentsJson);
+          } catch {
+            // The actual bridge will reject malformed JSON. It cannot grant a
+            // PARAM row receipt, so it must not create a scheduler barrier.
+            return;
+          }
+          if (!input || typeof input !== 'object' || Array.isArray(input)) return;
+          const value = input as Record<string, unknown>;
+          if (typeof value.query !== 'string' || value.query.trim() === '') return;
+          if (value.paramNames !== undefined && !Array.isArray(value.paramNames)) return;
+          if (value.limit !== undefined
+            && (typeof value.limit !== 'number' || !Number.isFinite(value.limit))) return;
+          hasParamEvidenceSearch = true;
+        };
+        const isParamConsumer = (call: ToolCall): boolean => (
+          call.name === 'read_param_fields' || call.name === 'search_param_fields'
+        );
+        addParamEvidenceSearch(entry.call);
         let next = cursor + 1;
         while (next < planned.length) {
           const candidate = planned[next]!;
           if (candidate.kind === 'execute' && candidate.parallel) {
+            if (hasParamEvidenceSearch && isParamConsumer(candidate.call)) {
+              // A search ticket is persisted only after the search handler
+              // returns. Keep every later PARAM gate out of this Promise.all
+              // batch so it observes the ticket (or correctly rejects on no
+              // hit), without trying to infer a table/entry alias here.
+              break;
+            }
+            addParamEvidenceSearch(candidate.call);
             batchIndices.push(next);
             next += 1;
             continue;
@@ -1509,7 +1667,7 @@ export async function runAgentToolLoop(
           });
         }
       }
-      const settled = await Promise.all(
+      const settled = await Promise.allSettled(
         batchIndices.map((index) => {
           const batchEntry = planned[index]!;
           if (batchEntry.kind !== 'execute') {
@@ -1519,10 +1677,25 @@ export async function runAgentToolLoop(
           return request.executeTool(batchEntry.call, { mode: modeOverride });
         })
       );
-      settled.forEach((result, position) => {
+      settled.forEach((settlement, position) => {
         const index = batchIndices[position]!;
         const batchEntry = planned[index]!;
         if (batchEntry.kind !== 'execute') return;
+        const result = settlement.status === 'fulfilled'
+          ? settlement.value
+          : {
+              ok: false,
+              code: 'TOOL_EXECUTION_THROWN',
+              content: canonicalFailureContent(
+                'TOOL_EXECUTION_THROWN',
+                '工具执行抛出异常；同批次其他工具结果仍已保留。',
+                {
+                  error: settlement.reason instanceof Error
+                    ? settlement.reason.message.slice(0, 1_000)
+                    : String(settlement.reason).slice(0, 1_000)
+                }
+              )
+            };
         const redactedContent = canonicalizeToolFailureContent(result);
         orderedResults[index] = {
           role: 'tool',
@@ -1585,6 +1758,17 @@ export async function runAgentToolLoop(
       toolAudit.push(auditEntry);
       recordMessage(steps, message);
       const plannedEntry = planned[index];
+      if (auditEntry.ok) {
+        const knowledgeRefreshStatus = envelopeKnowledgeRefreshStatus(message.content);
+        if (knowledgeRefreshStatus !== undefined
+          && !isHealthyKnowledgeRefreshStatus(knowledgeRefreshStatus)
+          && stickyKnowledgeRefreshDegraded === null) {
+          stickyKnowledgeRefreshDegraded = {
+            status: knowledgeRefreshStatus,
+            toolName: plannedEntry?.kind === 'execute' ? plannedEntry.call.name : auditEntry.name
+          };
+        }
+      }
       if (!plannedEntry || plannedEntry.kind !== 'execute') {
         evidenceAdditions.push(makeToolEvidenceSource(
           plannedEntry?.call.name ?? auditEntry.name,
@@ -1909,6 +2093,7 @@ export function extractSwitchedAgentPermissionMode(content: unknown): AgentPermi
   const mode = record?.currentMode ?? envelopeData?.currentMode ?? root.currentMode;
   if (switched !== true || typeof mode !== 'string') return undefined;
   if (mode === 'plan' || mode === 'normal') return mode;
-  if (mode === 'fullPermission' || mode === 'full' || mode === 'edit') return 'full';
+  if (mode === 'fullPermission' || mode === 'full') return 'full';
+  if (mode === 'edit') return 'normal';
   return undefined;
 }

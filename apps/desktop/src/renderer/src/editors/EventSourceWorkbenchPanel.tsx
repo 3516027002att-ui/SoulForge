@@ -672,14 +672,14 @@ export function EventMeaningPane(props: {
         })}
       >
         <strong>$Event({inspection.eventId})</strong>
-        <p className="muted">事件块头。rest 是 Default / Restart。</p>
+        <p className="muted">事件块头；rest 遵循默认或重启规则。</p>
       </div>
     );
   }
   if (inspection.kind === 'undecoded') {
     return (
       <div className="esw-meaning__block">
-        <strong>未解码</strong>
+        <strong>暂不支持解析</strong>
         <p className="muted">{inspection.text}</p>
       </div>
     );
@@ -687,7 +687,7 @@ export function EventMeaningPane(props: {
   if (inspection.kind === 'wait-for') {
     return (
       <div className="esw-meaning__block">
-        <strong>WaitFor</strong>
+        <strong>等待条件</strong>
         <p className="muted">条件折叠。下面是被折进去的谓词，不是单独一条可写指令。</p>
         {inspection.predicates.length === 0
           ? <p className="muted">谓词无法解析。</p>
@@ -707,8 +707,8 @@ export function EventMeaningPane(props: {
 
   const instructionName = signatureHelp?.instructionName ?? (inspection.kind === 'instruction' ? inspection.name : '');
   const bankInfo = signatureHelp?.bank !== undefined
-    ? `bank ${signatureHelp.bank}:${signatureHelp.id}`
-    : (inspection.kind === 'instruction' && inspection.bank !== undefined ? `bank ${inspection.bank}:${inspection.id}` : 'EMEDF 指令');
+    ? `事件组 ${signatureHelp.bank}：${signatureHelp.id}`
+    : (inspection.kind === 'instruction' && inspection.bank !== undefined ? `事件组 ${inspection.bank}：${inspection.id}` : 'EMEDF 指令');
 
   return (
     <div className="esw-meaning__block">
@@ -738,7 +738,7 @@ export function EventMeaningPane(props: {
                 )}
                 {enumMembers && enumMembers.length > 0 && (
                   <div className="muted esw-meaning__enum-list">
-                    可选值: {enumMembers.slice(0, 4).map((m) => `${m.name}(${m.value})`).join(', ')}
+                    可选值：{enumMembers.slice(0, 4).map((m) => `${m.name}（${m.value}）`).join('、')}
                     {enumMembers.length > 4 ? '…' : ''}
                   </div>
                 )}
@@ -1502,7 +1502,7 @@ export function EventSourceWorkbenchPanel(props: EventSourceWorkbenchPanelProps)
     ? ` · 已加载 ${activeTab.sourceLoadedLines.toLocaleString()} / ${activeTab.sourceTotalLines.toLocaleString()} 行，后台拉取剩余`
     : '';
   const visibleStatus = props.opening
-    ? '正在读取 EMEVD（Bridge → worker 反汇编 → 首帧前缀，全文按视口续载）…'
+     ? '正在读取事件源码（较长内容会按视口继续加载）…'
     : `${status}${incrementalInfo}`;
 
   // Current active event symbol at cursor position
@@ -1511,7 +1511,7 @@ export function EventSourceWorkbenchPanel(props: EventSourceWorkbenchPanelProps)
   }, [documentSymbols, cursorPos]);
 
   return (
-    <section className="event-source-workbench" aria-label="Event 源码工作台">
+    <section className="event-source-workbench" aria-label="事件源码工作台">
 
       <div className="esw-tabs" role="tablist" aria-label="事件文档标签">
         {tabs.map((tab) => (
@@ -1546,7 +1546,7 @@ export function EventSourceWorkbenchPanel(props: EventSourceWorkbenchPanelProps)
       </div>
 
       <WorkbenchLayout
-        label="Event 源码工作台主区"
+        label="事件源码工作台主区"
         toolbar={(
           <div className="esw-toolbar__group">
             {!readOnly && (
@@ -1602,7 +1602,7 @@ export function EventSourceWorkbenchPanel(props: EventSourceWorkbenchPanelProps)
                   <option value="">关</option>
                   {tabs.map((tab) => (
                     <option key={tab.tabId} value={tab.tabId}>
-                      {tab.title}{tab.tabId === activeTabId ? '（本文件第二视口）' : ''}
+                      {tab.title}{tab.tabId === activeTabId ? '（本文件辅助视图）' : ''}
                     </option>
                   ))}
                 </select>
@@ -1655,13 +1655,6 @@ export function EventSourceWorkbenchPanel(props: EventSourceWorkbenchPanelProps)
                     )}
                   </div>
                 )}
-                {activeTab?.live && activeTab.dslTemplate === null && !activeTab.sourceToken && (
-                  <div className="event-source__notice event-source__notice--blocked" role="alert">
-                    事件源码反汇编已失败关闭：未找到用户本机 EMEDF（DarkScript3 的
-                    sekiro-common.emedf.json）。配置后重新打开即可看到 DarkScript3 式源码。
-                  </div>
-                )}
-
               </section>
             )
           },

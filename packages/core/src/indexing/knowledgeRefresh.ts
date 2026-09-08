@@ -21,12 +21,16 @@ export interface RefreshKnowledgeAfterCommitInput {
    * deliberately required by production callers: scanning the file catalog
    * alone is not a semantic refresh.
    */
-  reanalyze?: () => Promise<WorkspaceIndex | {
+  reanalyze?: (changedSources: readonly string[], signal?: AbortSignal) => Promise<WorkspaceIndex | {
     index: WorkspaceIndex;
     semanticState: 'reanalyzed' | 'partial';
     error?: string;
   }>;
-  persist?: (index: WorkspaceIndex) => Promise<void>;
+  /** Publish a validated candidate into the live index after freshness checks. */
+  publish?: (index: WorkspaceIndex, changedSources: readonly string[], signal?: AbortSignal) => Promise<WorkspaceIndex> | WorkspaceIndex;
+  persist?: (index: WorkspaceIndex, changedSources: readonly string[], signal?: AbortSignal) => Promise<void>;
+  /** Abort a bounded post-commit refresh without undoing the committed write. */
+  signal?: AbortSignal;
 }
 
 export interface RefreshKnowledgeAfterCommitOutput {
@@ -64,12 +68,13 @@ export async function refreshKnowledgeAfterCommit(
   input: RefreshKnowledgeAfterCommitInput
 ): Promise<RefreshKnowledgeAfterCommitOutput> {
   const changedSources = detectChangedSourceUris(input.beforeFiles, input.afterFiles, input.requestedSources ?? []);
+  throwIfRefreshAborted(input.signal);
   const invalidated = input.index.invalidateChangedSources(changedSources);
   input.index.setFiles(input.afterFiles);
   input.index.rebuildReferences();
 
   if (changedSources.length === 0) {
-    await input.persist?.(input.index);
+    await input.persist?.(input.index, changedSources, input.signal);
     return {
       index: input.index,
       result: {
@@ -82,7 +87,7 @@ export async function refreshKnowledgeAfterCommit(
   }
 
   if (!input.reanalyze) {
-    await input.persist?.(input.index);
+    await input.persist?.(input.index, changedSources, input.signal);
     return {
       index: input.index,
       result: {
@@ -95,7 +100,9 @@ export async function refreshKnowledgeAfterCommit(
   }
 
   try {
-    const reanalyzedOutput = await input.reanalyze();
+    throwIfRefreshAborted(input.signal);
+    const reanalyzedOutput = await input.reanalyze(changedSources, input.signal);
+    throwIfRefreshAborted(input.signal);
     const reanalyzed = reanalyzedOutput instanceof WorkspaceIndex
       ? { index: reanalyzedOutput, semanticState: 'reanalyzed' as const }
       : reanalyzedOutput;
@@ -104,7 +111,7 @@ export async function refreshKnowledgeAfterCommit(
       // A late async read is not allowed to become the persisted semantic
       // truth.  Keep the already-invalidated index and make the caller retry
       // from the current file catalog.
-      await input.persist?.(input.index);
+      await input.persist?.(input.index, changedSources, input.signal);
       return {
         index: input.index,
         result: {
@@ -117,10 +124,15 @@ export async function refreshKnowledgeAfterCommit(
       };
     }
     const semanticState = reanalyzed.semanticState;
-    reanalyzed.index.rebuildReferences();
-    await input.persist?.(reanalyzed.index);
+    throwIfRefreshAborted(input.signal);
+    const publishedIndex = input.publish
+      ? await input.publish(reanalyzed.index, changedSources, input.signal)
+      : reanalyzed.index;
+    throwIfRefreshAborted(input.signal);
+    publishedIndex.rebuildReferences();
+    await input.persist?.(publishedIndex, changedSources, input.signal);
     return {
-      index: reanalyzed.index,
+      index: publishedIndex,
       result: {
         status: semanticState === 'partial' ? 'partial' : 'converged',
         changedSources,
@@ -130,7 +142,25 @@ export async function refreshKnowledgeAfterCommit(
       }
     };
   } catch (error) {
-    await input.persist?.(input.index);
+    try {
+      // Keep the committed bytes visible as invalidated even when reanalysis
+      // timed out or the workspace generation changed. A persistence failure
+      // must not escape and turn a committed write into an apparent rollback.
+      await input.persist?.(input.index, changedSources, input.signal);
+    } catch (persistError) {
+      const refreshError = error instanceof Error ? error.message : String(error);
+      const persistenceError = persistError instanceof Error ? persistError.message : String(persistError);
+      return {
+        index: input.index,
+        result: {
+          status: 'failed',
+          changedSources,
+          invalidated,
+          semanticState: 'empty',
+          error: `${refreshError}; invalidated-state persistence failed: ${persistenceError}`
+        }
+      };
+    }
     return {
       index: input.index,
       result: {
@@ -142,6 +172,13 @@ export async function refreshKnowledgeAfterCommit(
       }
     };
   }
+}
+
+function throwIfRefreshAborted(signal?: AbortSignal): void {
+  if (!signal?.aborted) return;
+  const error = new Error('post-commit knowledge refresh exceeded its deadline or was cancelled');
+  error.name = 'AbortError';
+  throw error;
 }
 
 function findStaleReanalysisSources(

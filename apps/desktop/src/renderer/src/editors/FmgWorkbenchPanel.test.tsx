@@ -49,9 +49,9 @@ describe('FmgWorkbenchPanel 初始结构（挂载即有的 §9.1 S13 骨架：Ca
 
   it('S13 拓扑：Text Categories | Text Entries | Text 三列竖排，不是左树 + 右上下两块', () => {
     const html = render();
-    assert.match(html, /aria-label="Text Categories"/);
-    assert.match(html, /aria-label="Text Entries"/);
-    assert.match(html, /aria-label="Text"/);
+    assert.match(html, /aria-label="文本分类"/);
+    assert.match(html, /aria-label="文本条目"/);
+    assert.match(html, /aria-label="文本"/);
     // 右区不再是 fmg-right 上下两块；左栏底下没有空 Tools 块。
     assert.doesNotMatch(html, /fmg-right__pane--entries/);
     assert.doesNotMatch(html, /fmg-right__pane--text/);
@@ -155,7 +155,7 @@ describe('Negative source tests（TEXT-20B 五类失败覆盖）', () => {
     assert.doesNotMatch(panelSource, /containerKind\.toLowerCase\(\) === 'item'/);
     // 没有 resourceUri 时不列任何容器（不回落「默认 item 组」），走空态等用户在
     // 资源浏览器点 item / menu。live 的跨容器过滤由 e2e 覆盖（SSR 无目录可证）。
-    assert.match(panelSource, /在左侧资源浏览器点 item 或 menu/);
+    assert.match(panelSource, /左侧资源浏览器点 item \/ menu/);
     // 读取失败的容器保留诊断面（不伪装成 0 张表）。
     assert.match(panelSource, /parseStatus !== 'confirmed'/);
   });

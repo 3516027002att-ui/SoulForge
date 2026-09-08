@@ -15,10 +15,25 @@ internal static class NativeLeafPayload
         params string[] childNameSuffixes)
     {
         var sourceBytes = File.ReadAllBytes(path);
+        return ResolveAll(sourceBytes, path, oodleRuntimeRoot, childNameSuffixes);
+    }
+
+    /// <summary>
+    /// Resolve from one caller-owned outer byte receipt.  The outer hash, DCX
+    /// inflate, BND4 enumeration and leaf parse must all describe this same
+    /// byte array; reopening the path between those steps would create a
+    /// TOCTOU gap for a mutable mod workspace.
+    /// </summary>
+    public static IReadOnlyList<NativeLeafEntry> ResolveAll(
+        byte[] sourceBytes,
+        string path,
+        string? oodleRuntimeRoot,
+        params string[] childNameSuffixes)
+    {
         var payload = sourceBytes;
         if (payload.Length >= 4 && payload.AsSpan(0, 4).SequenceEqual("DCX\0"u8))
         {
-            payload = DcxNativeDocument.Read(path, oodleRuntimeRoot).Payload;
+            payload = DcxNativeDocument.Read(sourceBytes, oodleRuntimeRoot, path).Payload;
         }
         if (payload.Length < 4 || !payload.AsSpan(0, 4).SequenceEqual("BND4"u8))
         {
@@ -69,10 +84,20 @@ internal static class NativeLeafPayload
     public static byte[] Resolve(string path, string? oodleRuntimeRoot, params string[] childNameSuffixes)
     {
         var sourceBytes = File.ReadAllBytes(path);
+        return Resolve(sourceBytes, path, oodleRuntimeRoot, childNameSuffixes);
+    }
+
+    /// <summary>Resolve a leaf from the same outer byte receipt.</summary>
+    public static byte[] Resolve(
+        byte[] sourceBytes,
+        string path,
+        string? oodleRuntimeRoot,
+        params string[] childNameSuffixes)
+    {
         var payload = sourceBytes;
         if (payload.Length >= 4 && payload.AsSpan(0, 4).SequenceEqual("DCX\0"u8))
         {
-            payload = DcxNativeDocument.Read(path, oodleRuntimeRoot).Payload;
+            payload = DcxNativeDocument.Read(sourceBytes, oodleRuntimeRoot, path).Payload;
         }
         if (payload.Length >= 4 && payload.AsSpan(0, 4).SequenceEqual("BND4"u8))
         {

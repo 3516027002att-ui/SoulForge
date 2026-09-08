@@ -58,11 +58,11 @@ describe('GparamWorkbench 初始结构（挂载即有的五区骨架）', () => 
 
   it('五区 Files/Groups/Fields/Values/Toolbar 同时存在（GPARAM-11B §8.1）', () => {
     const html = render();
-    assert.match(html, /aria-label="Files"/);
-    assert.match(html, /aria-label="Groups"/);
-    assert.match(html, /aria-label="Fields"/);
-    assert.match(html, /aria-label="Values"/);
-    assert.match(html, /aria-label="Toolbar"/);
+    assert.match(html, /aria-label="文件"/);
+    assert.match(html, /aria-label="组"/);
+    assert.match(html, /aria-label="字段"/);
+    assert.match(html, /aria-label="数值"/);
+    assert.match(html, /aria-label="操作"/);
     // 五区 = 5 个带 aria-label 的 section（region），不是四栏。
     const regions = html.match(/<section class="workbench__column"/g) ?? [];
     assert.equal(regions.length, 5);
@@ -70,10 +70,10 @@ describe('GparamWorkbench 初始结构（挂载即有的五区骨架）', () => 
 
   it('Fields 与 Values 是两栏独立，不存在合并的 Fields/Values 单栏', () => {
     const html = render();
-    assert.match(html, /aria-label="Fields"/);
-    assert.match(html, /aria-label="Values"/);
-    assert.doesNotMatch(html, /aria-label="Fields\/Values"/);
-    assert.doesNotMatch(html, /Fields\/Values/);
+    assert.match(html, /aria-label="字段"/);
+    assert.match(html, /aria-label="数值"/);
+    assert.doesNotMatch(html, /aria-label="字段\/数值"/);
+    assert.doesNotMatch(html, /字段\/数值/);
   });
 
   it('每栏独立滚动：5 个 .workbench__column-body 滚动宿主并存（硬约束 17）', () => {
@@ -95,22 +95,22 @@ describe('GparamWorkbench 初始结构（挂载即有的五区骨架）', () => 
 
   it('Toolbar 栏诚实空态：未选中无保存按钮（11C 编辑入口只随 drafts 出现）', () => {
     const html = render();
-    assert.match(html, /暂无已接通的工具/);
+    assert.match(html, /当前没有可用的字段写入操作/);
     // 11C 说明存在：编辑入口只在有 drafts 时出现，不做假按钮占位。
-    assert.match(html, /没有 bytes replace fallback/);
+    assert.match(html, /暂不支持字段定位时的原始字节替换/);
     assert.doesNotMatch(html, /type="button"/);
   });
 
   it('read-only gating：初始无选中的值编辑控件（§8.3 writer 未通/未选时隐藏）', () => {
     const html = render();
     // 未选 field 时 Values 栏给出引导空态，且没有任何值编辑输入框。
-    assert.match(html, /先在 Fields 栏选择一个 field/);
+    assert.match(html, /先在字段栏选择一个字段/);
     assert.doesNotMatch(html, /gparam-values__input/);
   });
 
   it('未选 bank 时 Groups 栏给出引导空态', () => {
     const html = render();
-    assert.match(html, /先在 Files 栏选择一个 bank/);
+    assert.match(html, /先在文件栏选择一个参数文件/);
   });
 });
 

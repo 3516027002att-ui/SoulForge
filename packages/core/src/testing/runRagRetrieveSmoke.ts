@@ -1,5 +1,6 @@
+import { createHash } from 'node:crypto';
 import { join } from 'node:path';
-import type { BridgeResult, IndexedFile, RagChunk, RagCorpus } from '@soulforge/shared';
+import type { BridgeResult, IndexedFile, MapExport, RagChunk, RagCorpus } from '@soulforge/shared';
 import { ingestBridgeResult } from '../indexing/ingestBridgeResult.js';
 import { WorkspaceIndex } from '../indexing/workspaceIndex.js';
 import { createDefaultToolRegistry } from '../ai/toolRegistry.js';
@@ -7,6 +8,7 @@ import { runAgentToolLoop } from '../model-services/agentLoop.js';
 import type { ModelServiceAdapter, ModelServiceConfig } from '../model-services/types.js';
 import { buildRagCorpus, createRagCorpus, mergeCatalogAndPersisted } from '../rag/chunkBuilder.js';
 import { retrieveEvidence } from '../rag/retrieve.js';
+import { getRagStaleChunkMaskCached } from '../rag/freshness.js';
 import { parseRagQuery } from '../rag/queryParse.js';
 import { diffRagCorpusBySource, loadRagCorpus, persistRagCorpus, sameRagReferences } from '../rag/persist.js';
 import { openWorkspaceDatabase } from '../storage/sqliteDatabase.js';
@@ -256,35 +258,271 @@ function main(): Promise<void> {
       throw new Error(`M11 must retrieve the m11 part: ${JSON.stringify(mapAreaHit)}`);
     }
 
+    // A map name/part URI may repeat across physical MSB sources. Chunk
+    // identity must include sourceUri, otherwise the second source overwrites
+    // the first in SQLite and source-scoped refreshes cannot converge.
+    const mapSourceA = 'file://synthetic/map/duplicate-a.msb';
+    const mapSourceB = 'file://synthetic/map/duplicate-b.msb';
+    const dualMapIndex = new WorkspaceIndex('workspace-rag-map-sources');
+    assertAccepted(ingestBridgeResult(dualMapIndex, makeMapExport(mapSourceA)));
+    assertAccepted(ingestBridgeResult(dualMapIndex, makeMapExport(mapSourceB)));
+    const currentMapA = ingestBridgeResult(dualMapIndex, makeMapExport(mapSourceA, 'map-a-v2', 2, 'source-a-v2'));
+    assertAccepted(currentMapA);
+    const currentMapExport = dualMapIndex.toSymbolBundle().maps?.find((map) => (
+      map.entities.some((entity) => entity.sourceUri === mapSourceA)
+    ));
+    if (!currentMapExport) throw new Error('current source-A map projection missing before stale rejection check');
+    const staleMapExport: MapExport = {
+      ...currentMapExport,
+      sourceHash: 'map-a-v1',
+      sourceRevision: 1
+    };
+    if (dualMapIndex.upsertMapExport(staleMapExport)) {
+      throw new Error('stale map projection must be rejected without replacing current source');
+    }
+    const dualMapCatalog = buildRagCorpus(dualMapIndex);
+    const mapChunkA = dualMapCatalog.chunks.find((chunk) => chunk.family === 'map_entity' && chunk.sourceUri === mapSourceA);
+    const mapChunkB = dualMapCatalog.chunks.find((chunk) => chunk.family === 'map_entity' && chunk.sourceUri === mapSourceB);
+    const mapRegionA = dualMapCatalog.chunks.find((chunk) => chunk.family === 'map_region' && chunk.sourceUri === mapSourceA);
+    const mapRegionB = dualMapCatalog.chunks.find((chunk) => chunk.family === 'map_region' && chunk.sourceUri === mapSourceB);
+    if (!mapChunkA || !mapChunkB || !mapRegionA || !mapRegionB || mapChunkA.chunkId === mapChunkB.chunkId
+      || mapChunkA.sourceUri !== mapSourceA || mapChunkB.sourceUri !== mapSourceB
+      || !mapChunkA.body.includes('source-a-v2') || mapChunkB.body.includes('source-a-v1')) {
+      throw new Error(`map chunk identity must include physical source: ${JSON.stringify({ mapChunkA, mapChunkB, mapRegionA, mapRegionB, catalog: dualMapCatalog.stats })}`);
+    }
+
+    // PARAM typeName/rowId is only a logical address.  Two physical BND4
+    // children can expose the same address, so both rows must remain
+    // searchable and durable without changing the native row URI used by
+    // read/write tools.
+    const paramMigrationWorkspaceId = 'workspace-rag-param-migration';
+    const paramMigrationSource = 'file://synthetic/param/collision.parambnd.dcx';
+    const paramMigrationIndex = new WorkspaceIndex(paramMigrationWorkspaceId);
+    paramMigrationIndex.setFiles([{
+      ...makeFile('param/collision.parambnd.dcx', 'param', paramMigrationSource, 'param-source-v1', 1),
+      workspaceId: paramMigrationWorkspaceId,
+      id: `${paramMigrationWorkspaceId}:param/collision.parambnd.dcx`
+    }]);
+    assertAccepted(ingestBridgeResult(paramMigrationIndex, {
+      sourceUri: paramMigrationSource,
+      sourcePath: 'param/collision.parambnd.dcx',
+      game: 'sekiro',
+      resourceKind: 'param',
+      parseStatus: 'partial',
+      diagnostics: [],
+      data: {
+        sourceHash: 'param-source-v1',
+        outerFileHash: 'param-source-v1',
+        sourceRevision: 1,
+        params: [
+          {
+            paramName: 'ATK_PARAM_ST',
+            entryName: 'AtkParam_Npc.param',
+            entryIndex: 4,
+            rows: [{
+              uri: 'param://ATK_PARAM_ST/42',
+              rowId: 42,
+              rowName: 'npc_child_row_42',
+              raw: { rowIndex: 0 },
+              fields: [{ name: 'damage', type: 'int32', value: 100 }]
+            }]
+          },
+          {
+            paramName: 'ATK_PARAM_ST',
+            entryName: 'AtkParam_Pc.param',
+            entryIndex: 5,
+            rows: [{
+              uri: 'param://ATK_PARAM_ST/42',
+              rowId: 42,
+              rowName: 'pc_child_row_42',
+              raw: { rowIndex: 0 },
+              fields: [{ name: 'damage', type: 'int32', value: 200 }]
+            }]
+          }
+        ]
+      }
+    }));
+    const paramMigrationCorpus = buildRagCorpus(paramMigrationIndex);
+    const paramMigrationChunks = paramMigrationCorpus.chunks.filter((chunk) => chunk.family === 'param_row');
+    if (paramMigrationChunks.length !== 2
+      || new Set(paramMigrationChunks.map((chunk) => chunk.chunkId)).size !== 2
+      || new Set(paramMigrationChunks.map((chunk) => chunk.symbolUri)).size !== 1
+      || !paramMigrationChunks.some((chunk) => chunk.body.includes('entry AtkParam_Npc.param'))
+      || !paramMigrationChunks.some((chunk) => chunk.body.includes('entry AtkParam_Pc.param'))) {
+      throw new Error(`PARAM child-aware RAG identity failed: ${JSON.stringify(paramMigrationChunks)}`);
+    }
+    // A symbol-scoped refresh may have only child A while durable RAG already
+    // contains a fresh child B with the same logical row URI.  The merge must
+    // preserve B; only the old pre-child-aware ID is eligible for migration.
+    const partialParamCatalog = createRagCorpus({
+      workspaceId: paramMigrationWorkspaceId,
+      builtAt: paramMigrationCorpus.builtAt,
+      chunks: paramMigrationCorpus.chunks.filter((chunk) => (
+        chunk.family === 'file' || chunk.body.includes('entry AtkParam_Npc.param')
+      )),
+      references: paramMigrationCorpus.references
+    });
+    const persistedNewParamChild = createRagCorpus({
+      workspaceId: paramMigrationWorkspaceId,
+      builtAt: paramMigrationCorpus.builtAt,
+      chunks: paramMigrationCorpus.chunks.filter((chunk) => (
+        chunk.family === 'file' || chunk.body.includes('entry AtkParam_Pc.param')
+      )),
+      references: paramMigrationCorpus.references
+    });
+    const partialParamMerge = mergeCatalogAndPersisted(partialParamCatalog, persistedNewParamChild);
+    const partialParamRows = partialParamMerge.chunks.filter((chunk) => chunk.family === 'param_row');
+    if (partialParamRows.length !== 2
+      || !partialParamRows.some((chunk) => chunk.body.includes('entry AtkParam_Npc.param'))
+      || !partialParamRows.some((chunk) => chunk.body.includes('entry AtkParam_Pc.param'))
+      || new Set(partialParamRows.map((chunk) => chunk.chunkId)).size !== 2) {
+      throw new Error(`partial PARAM child merge dropped a fresh sibling: ${JSON.stringify(partialParamRows)}`);
+    }
+    // This is the exact ID emitted by the pre-child-aware sourceUri+row.uri
+    // identity.  Both physical children used to collapse onto this key.
+    const legacyCollisionId = `rag:param_row:${createHash('sha256')
+      .update(`${paramMigrationChunks[0]!.sourceUri}\u0000${paramMigrationChunks[0]!.symbolUri}`)
+      .digest('hex').slice(0, 24)}`;
+    const legacyCollisionCorpus = createRagCorpus({
+      workspaceId: paramMigrationWorkspaceId,
+      builtAt: paramMigrationCorpus.builtAt,
+      chunks: paramMigrationCorpus.chunks.map((chunk) => chunk.family === 'param_row'
+        ? { ...chunk, chunkId: legacyCollisionId }
+        : chunk),
+      references: paramMigrationCorpus.references
+    });
+
     const leaked = findPathLeak(corpus, workspace.root) ?? findPathLeak(eventHit, 'D:\\') ?? findPathLeak(eventHit, 'C:\\');
     if (leaked) throw new Error(`RAG payload leaked a filesystem path at ${leaked}`);
 
     const dbPath = join(workspace.root, 'workspace.db');
     const database = openWorkspaceDatabase(dbPath);
-    const now = new Date().toISOString();
-    database.prepare(`
+    let reloadedChunkCount = 0;
+    try {
+      const now = new Date().toISOString();
+      database.prepare(`
 INSERT INTO workspaces (workspace_id, root_path, game, created_at, updated_at)
-VALUES (?, ?, ?, ?, ?)`).run(index.workspaceId, workspace.root, 'sekiro', now, now);
-    const repository = new WorkspaceDataRepository(database, index.workspaceId);
-    persistRagCorpus(repository, corpus);
-    if (!sameRagReferences(corpus.references, [...corpus.references].reverse())) {
-      throw new Error('reference comparison must ignore SQLite/discovery ordering');
-    }
-    const fts = repository.searchRagChunks('义手', 10);
-    if (!fts.some((chunk) => chunk.family === 'text_entry')) {
-      throw new Error(`FTS persist search missed CJK text: ${fts.map((chunk) => chunk.title).join(',')}`);
-    }
-    // 阶段1 trigram 子串检索：3 字 CJK 子串命中（migration 8 trigram 索引）。
-    const trigram = repository.searchRagChunks('狼的义', 10);
-    if (!trigram.some((chunk) => chunk.family === 'text_entry')) {
-      throw new Error(`trigram search missed CJK substring: ${trigram.map((chunk) => chunk.title).join(',')}`);
-    }
-    const reloaded = loadRagCorpus(repository, index.workspaceId);
-    if (reloaded.chunks.length !== corpus.chunks.length) {
-      throw new Error(`reload lost chunks: ${reloaded.chunks.length} != ${corpus.chunks.length}`);
-    }
-    const reloadedHit = retrieveEvidence(reloaded, '71000000');
-    if (!reloadedHit.ok) throw new Error(`reloaded retrieve failed: ${reloadedHit.message}`);
+      VALUES (?, ?, ?, ?, ?)`).run(index.workspaceId, workspace.root, 'sekiro', now, now);
+      database.prepare(`
+INSERT INTO workspaces (workspace_id, root_path, game, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?)`).run(paramMigrationWorkspaceId, workspace.root, 'sekiro', now, now);
+      const repository = new WorkspaceDataRepository(database, index.workspaceId);
+      const paramMigrationRepository = new WorkspaceDataRepository(database, paramMigrationWorkspaceId);
+
+      // Start with the pre-fix durable shape: both physical children share
+      // one legacy chunk ID, so SQLite necessarily leaves one winner.
+      persistRagCorpus(paramMigrationRepository, legacyCollisionCorpus);
+      const legacyReloaded = loadRagCorpus(paramMigrationRepository, paramMigrationWorkspaceId);
+      const legacyRows = legacyReloaded.chunks.filter((chunk) => chunk.family === 'param_row');
+      if (legacyRows.length !== 1 || legacyRows[0]?.chunkId !== legacyCollisionId) {
+        throw new Error(`legacy collision fixture did not reproduce one persisted winner: ${JSON.stringify(legacyRows)}`);
+      }
+      const mergedParamMigration = mergeCatalogAndPersisted(paramMigrationCorpus, legacyReloaded);
+      const mergedParamRows = mergedParamMigration.chunks.filter((chunk) => chunk.family === 'param_row');
+      if (mergedParamRows.length !== 2 || mergedParamMigration.chunks.some((chunk) => chunk.chunkId === legacyCollisionId)
+        || new Set(mergedParamRows.map((chunk) => chunk.chunkId)).size !== 2) {
+        throw new Error(`legacy collision ID survived catalog merge: ${JSON.stringify(mergedParamRows)}`);
+      }
+      persistRagCorpus(paramMigrationRepository, mergedParamMigration);
+      const migratedParamCorpus = loadRagCorpus(paramMigrationRepository, paramMigrationWorkspaceId);
+      const migratedParamRows = migratedParamCorpus.chunks.filter((chunk) => chunk.family === 'param_row');
+      if (migratedParamRows.length !== 2 || migratedParamCorpus.chunks.some((chunk) => chunk.chunkId === legacyCollisionId)
+        || new Set(migratedParamRows.map((chunk) => chunk.chunkId)).size !== 2) {
+        throw new Error(`legacy collision ID was not deleted/rebuilt in SQLite: ${JSON.stringify(migratedParamRows)}`);
+      }
+      for (const childEntryName of ['AtkParam_Npc.param', 'AtkParam_Pc.param']) {
+        const childHit = retrieveEvidence(migratedParamCorpus, childEntryName, {
+          families: ['param_row'],
+          limit: 8,
+          expandReferences: false
+        });
+        if (!childHit.ok || !childHit.hits.some((hit) => hit.chunk.body.includes(`entry ${childEntryName}`))) {
+          throw new Error(`migrated PARAM child was not retrievable: ${childEntryName} ${JSON.stringify(childHit)}`);
+        }
+      }
+
+      persistRagCorpus(repository, corpus);
+      const dualSourceCorpus = createRagCorpus({
+        workspaceId: index.workspaceId,
+        builtAt: now,
+        chunks: [
+          ...corpus.chunks,
+          { ...mapChunkA, workspaceId: index.workspaceId },
+          { ...mapChunkB, workspaceId: index.workspaceId },
+          { ...mapRegionA, workspaceId: index.workspaceId },
+          { ...mapRegionB, workspaceId: index.workspaceId }
+        ],
+        references: corpus.references
+      });
+      persistRagCorpus(repository, dualSourceCorpus);
+      const dualSourceReloaded = loadRagCorpus(repository, index.workspaceId);
+      const dualMapChunks = dualSourceReloaded.chunks.filter((chunk) => (
+        chunk.family === 'map_entity' && (chunk.sourceUri === mapSourceA || chunk.sourceUri === mapSourceB)
+      ));
+      if (dualMapChunks.length !== 2
+        || new Set(dualMapChunks.map((chunk) => chunk.sourceUri)).size !== 2
+        || new Set(dualMapChunks.map((chunk) => chunk.chunkId)).size !== 2) {
+        throw new Error(`dual-source map persistence collapsed physical sources: ${JSON.stringify(dualMapChunks)}`);
+      }
+      const dualMapRegions = dualSourceReloaded.chunks.filter((chunk) => (
+        chunk.family === 'map_region' && (chunk.sourceUri === mapSourceA || chunk.sourceUri === mapSourceB)
+      ));
+      if (dualMapRegions.length !== 2
+        || new Set(dualMapRegions.map((chunk) => chunk.sourceUri)).size !== 2
+        || new Set(dualMapRegions.map((chunk) => chunk.chunkId)).size !== 2) {
+        throw new Error(`dual-source map region persistence collapsed physical sources: ${JSON.stringify(dualMapRegions)}`);
+      }
+      const updatedDualSourceCorpus = createRagCorpus({
+        workspaceId: index.workspaceId,
+        builtAt: now,
+        chunks: dualSourceCorpus.chunks.map((chunk) => chunk.sourceUri === mapSourceA && chunk.family === 'map_entity'
+          ? { ...chunk, body: `${chunk.body}\nsource-a-updated`, contentHash: 'map-source-a-updated' }
+          : chunk),
+        references: dualSourceCorpus.references
+      });
+      persistRagCorpus(repository, updatedDualSourceCorpus);
+      const afterDualUpdate = loadRagCorpus(repository, index.workspaceId);
+      const sourceBAfterUpdate = afterDualUpdate.chunks.find((chunk) => chunk.sourceUri === mapSourceB && chunk.family === 'map_entity');
+      const sourceAAfterUpdate = afterDualUpdate.chunks.find((chunk) => chunk.sourceUri === mapSourceA && chunk.family === 'map_entity');
+      if (!sourceBAfterUpdate || !sourceAAfterUpdate || !sourceAAfterUpdate.body.includes('source-a-updated')
+        || sourceBAfterUpdate.body.includes('source-a-updated')) {
+        throw new Error(`source-scoped map update affected the other source: ${JSON.stringify({ sourceAAfterUpdate, sourceBAfterUpdate })}`);
+      }
+      const dualSourceHit = retrieveEvidence(afterDualUpdate, '1100800', { limit: 8, expandReferences: false });
+      const dualSourceHits = dualSourceHit.ok
+        ? dualSourceHit.hits.filter((hit) => hit.chunk.sourceUri === mapSourceA || hit.chunk.sourceUri === mapSourceB)
+        : [];
+      if (!dualSourceHit.ok || dualSourceHits.length !== 2
+        || !dualSourceHits.some((hit) => hit.chunk.sourceUri === mapSourceA && hit.chunk.body.includes('source-a-updated'))
+        || !dualSourceHits.some((hit) => hit.chunk.sourceUri === mapSourceB && !hit.chunk.body.includes('source-a-updated'))) {
+        throw new Error(`dual-source map retrieve did not preserve source identity: ${JSON.stringify(dualSourceHit)}`);
+      }
+      const dualRegionHit = retrieveEvidence(afterDualUpdate, 'boss_phase_2', { limit: 8, expandReferences: false });
+      const dualRegionHits = dualRegionHit.ok
+        ? dualRegionHit.hits.filter((hit) => hit.chunk.sourceUri === mapSourceA || hit.chunk.sourceUri === mapSourceB)
+        : [];
+      if (!dualRegionHit.ok || dualRegionHits.length !== 2) {
+        throw new Error(`dual-source map region retrieve did not preserve source identity: ${JSON.stringify(dualRegionHit)}`);
+      }
+      if (!sameRagReferences(corpus.references, [...corpus.references].reverse())) {
+        throw new Error('reference comparison must ignore SQLite/discovery ordering');
+      }
+      const fts = repository.searchRagChunks('义手', 10);
+      if (!fts.some((chunk) => chunk.family === 'text_entry')) {
+        throw new Error(`FTS persist search missed CJK text: ${fts.map((chunk) => chunk.title).join(',')}`);
+      }
+      // 阶段1 trigram 子串检索：3 字 CJK 子串命中（migration 8 trigram 索引）。
+      const trigram = repository.searchRagChunks('狼的义', 10);
+      if (!trigram.some((chunk) => chunk.family === 'text_entry')) {
+        throw new Error(`trigram search missed CJK substring: ${trigram.map((chunk) => chunk.title).join(',')}`);
+      }
+      const reloaded = loadRagCorpus(repository, index.workspaceId);
+      reloadedChunkCount = reloaded.chunks.length;
+      if (reloaded.chunks.length !== dualSourceCorpus.chunks.length) {
+        throw new Error(`reload lost chunks: ${reloaded.chunks.length} != ${dualSourceCorpus.chunks.length}`);
+      }
+      const reloadedHit = retrieveEvidence(reloaded, '71000000');
+      if (!reloadedHit.ok) throw new Error(`reloaded retrieve failed: ${reloadedHit.message}`);
 
     const catalogOnly = buildRagCorpus(fileOnlyIndex(index.workspaceId));
     const merged = mergeCatalogAndPersisted(catalogOnly, reloaded);
@@ -343,25 +581,25 @@ VALUES (?, ?, ?, ?, ?)`).run(index.workspaceId, workspace.root, 'sekiro', now, n
       workspaceId: index.workspaceId,
       builtAt: reloaded.builtAt,
       chunks: reloaded.chunks.map((chunk) => chunk.family === 'event'
-        ? { ...chunk, sourceHash: 'stale-source-hash' }
+        ? { ...chunk, sourceHash: 'stale-source-hash', outerFileHash: 'stale-outer-file-hash' }
         : chunk),
       references: reloaded.references
     });
     const staleMerged = mergeCatalogAndPersisted(catalogOnly, stalePersisted);
     if (staleMerged.chunks.some((chunk) => chunk.family === 'event')) {
-      throw new Error('scan merge retained an event chunk from a stale source hash');
+      throw new Error('scan merge retained an event chunk from a stale outer file hash');
     }
     const missingHashPersisted = createRagCorpus({
       workspaceId: index.workspaceId,
       builtAt: reloaded.builtAt,
       chunks: reloaded.chunks.map((chunk) => chunk === persistedEvent
-        ? withoutSourceHash(chunk)
+        ? withoutOuterFileHash(chunk)
         : chunk),
       references: reloaded.references
     });
     const missingHashMerged = mergeCatalogAndPersisted(catalogOnly, missingHashPersisted);
     if (missingHashMerged.chunks.some((chunk) => chunk.chunkId === persistedEvent.chunkId)) {
-      throw new Error('scan merge retained a semantic chunk with missing source hash');
+      throw new Error('scan merge retained a semantic chunk with missing outer file hash');
     }
     const missingRevisionPersisted = createRagCorpus({
       workspaceId: index.workspaceId,
@@ -387,13 +625,106 @@ VALUES (?, ?, ?, ?, ?)`).run(index.workspaceId, workspace.root, 'sekiro', now, n
     if (mismatchedRevisionMerged.chunks.some((chunk) => chunk.chunkId === persistedEvent.chunkId)) {
       throw new Error('scan merge retained a semantic chunk from a mismatched source revision');
     }
-    database.close();
+    } finally {
+      if (database.open) database.close();
+    }
 
     const registry = createDefaultToolRegistry();
     const missing = await registry.run('retrieve_evidence', { query: 'x' }, { workspaceIndex: null, mode: 'plan' });
     if (missing.ok || missing.error?.code !== 'WORKSPACE_REQUIRED') {
       throw new Error(`retrieve_evidence must require a workspace, got ${JSON.stringify(missing)}`);
     }
+
+    // P0 regression: a durable corpus may still contain the previous native
+    // projection while the live index is stale between commit and refresh.
+    // The tool path must fail closed for that source instead of returning the
+    // old semantic value from context.rag.
+    const staleToolSource = 'file://synthetic/event/stale-tool.emevd.dcx';
+    const staleToolIndex = new WorkspaceIndex('workspace-rag-stale-tool');
+    staleToolIndex.setFiles([makeFile('event/stale-tool.emevd.dcx', 'event', staleToolSource, 'stale-tool-v1')]);
+    const staleToolExport = makeEventExport('stale-tool-v1', 'stale-tool-old-value', staleToolSource);
+    staleToolExport.sourcePath = 'event/stale-tool.emevd.dcx';
+    assertAccepted(ingestBridgeResult(staleToolIndex, staleToolExport));
+    const staleDurableCorpus = buildRagCorpus(staleToolIndex);
+    staleToolIndex.invalidateSource(staleToolSource);
+    staleToolIndex.setFiles([makeFile('event/stale-tool.emevd.dcx', 'event', staleToolSource, 'stale-tool-v2')]);
+    const staleToolResult = await registry.run(
+      'retrieve_evidence',
+      { query: 'stale-tool-old-value', limit: 5 },
+      { workspaceIndex: staleToolIndex, mode: 'plan', rag: staleDurableCorpus }
+    );
+    if (!staleToolResult.ok) throw new Error(`stale retrieve_evidence tool failed: ${JSON.stringify(staleToolResult.error)}`);
+    const staleToolHits = (staleToolResult.data as { hits?: Array<{ chunk: RagChunk }> } | undefined)?.hits ?? [];
+    if (staleToolHits.some((hit) => hit.chunk.body.includes('stale-tool-old-value'))) {
+      throw new Error(`retrieve_evidence returned old durable RAG content for a stale source: ${JSON.stringify(staleToolResult)}`);
+    }
+
+    // P0 mixed-version regression: a durable corpus can retain an old row and
+    // a fresh partial-upsert row for the same physical source.  Source-level
+    // exclusion would hide both; the host freshness mask must reject only the
+    // old/missing-provenance chunk and preserve the fresh row.
+    const mixedSource = 'file://synthetic/event/mixed-version.emevd.dcx';
+    const mixedIndex = new WorkspaceIndex(index.workspaceId);
+    mixedIndex.setFiles([makeFile('event/mixed-version.emevd.dcx', 'event', mixedSource, 'mixed-version-v1', 1)]);
+    assertAccepted(ingestBridgeResult(mixedIndex, makeEventExport('mixed-version-v1', 'mixed-version-old-value', mixedSource, 1)));
+    const mixedOldCorpus = buildRagCorpus(mixedIndex);
+    mixedIndex.setFiles([makeFile('event/mixed-version.emevd.dcx', 'event', mixedSource, 'mixed-version-v2', 2)]);
+    assertAccepted(ingestBridgeResult(mixedIndex, makeEventExport('mixed-version-v2', 'mixed-version-new-value', mixedSource, 2)));
+    const mixedFreshChunk = buildRagCorpus(mixedIndex).chunks.find((chunk) => chunk.family === 'event');
+    const mixedOldChunk = mixedOldCorpus.chunks.find((chunk) => chunk.family === 'event');
+    if (!mixedFreshChunk || !mixedOldChunk) throw new Error('mixed-version fixture did not build event chunks');
+    const mixedOldRow: RagChunk = {
+      ...mixedOldChunk,
+      // A partial-upsert row may carry a distinct locator while sharing the
+      // physical source and symbol URI with the fresh native row.
+      chunkId: `${mixedOldChunk.chunkId}:old-partial`,
+      sourceHash: 'mixed-version-v1'
+    };
+    const mixedDurableCorpus = createRagCorpus({
+      workspaceId: index.workspaceId,
+      builtAt: mixedFreshChunk.sourceHash ?? new Date().toISOString(),
+      chunks: [mixedOldRow, mixedFreshChunk]
+    });
+    const mixedStaleIds = mixedIndex.getRagStaleChunkIds(mixedDurableCorpus.chunks);
+    if (!mixedStaleIds.includes(mixedOldRow.chunkId) || mixedStaleIds.includes(mixedFreshChunk.chunkId)) {
+      throw new Error(`mixed-version mask classified the wrong rows: ${JSON.stringify({ mixedStaleIds, old: mixedOldRow, fresh: mixedFreshChunk })}`);
+    }
+    const cachedMixedMask = getRagStaleChunkMaskCached(mixedIndex, mixedDurableCorpus);
+    const reusedMixedMask = getRagStaleChunkMaskCached(mixedIndex, mixedDurableCorpus);
+    if (!cachedMixedMask || cachedMixedMask !== reusedMixedMask) {
+      throw new Error('mixed-version freshness mask was not reused within one native epoch');
+    }
+    mixedIndex.setFiles([makeFile('event/mixed-version.emevd.dcx', 'event', mixedSource, 'mixed-version-v2', 2)]);
+    const nextEpochMask = getRagStaleChunkMaskCached(mixedIndex, mixedDurableCorpus);
+    if (!nextEpochMask || nextEpochMask === cachedMixedMask) {
+      throw new Error('mixed-version freshness mask was reused across a native epoch change');
+    }
+    const mixedOldHit = retrieveEvidence(mixedDurableCorpus, 'mixed-version-old-value', {
+      expandReferences: false,
+      excludeChunkIds: mixedStaleIds
+    });
+    if (mixedOldHit.ok && mixedOldHit.hits.some((hit) => (
+      hit.chunk.chunkId === mixedOldRow.chunkId || hit.chunk.body.includes('mixed-version-old-value')
+    ))) {
+      throw new Error(`direct RAG returned an excluded old mixed-version row: ${JSON.stringify(mixedOldHit)}`);
+    }
+    const mixedFreshHit = retrieveEvidence(mixedDurableCorpus, 'mixed-version-new-value', {
+      expandReferences: false,
+      excludeChunkIds: mixedStaleIds
+    });
+    if (!mixedFreshHit.ok || !mixedFreshHit.hits.some((hit) => hit.chunk.chunkId === mixedFreshChunk.chunkId)) {
+      throw new Error(`direct RAG dropped the fresh mixed-version row: ${JSON.stringify(mixedFreshHit)}`);
+    }
+    const mixedToolResult = await registry.run(
+      'retrieve_evidence',
+      { query: 'mixed-version-new-value', limit: 5 },
+      { workspaceIndex: mixedIndex, mode: 'plan', rag: mixedDurableCorpus }
+    );
+    if (!mixedToolResult.ok || !((mixedToolResult.data as { hits?: Array<{ chunk: RagChunk }> } | undefined)?.hits
+      ?? []).some((hit) => hit.chunk.chunkId === mixedFreshChunk.chunkId)) {
+      throw new Error(`tool RAG did not preserve the fresh mixed-version row: ${JSON.stringify(mixedToolResult)}`);
+    }
+
     const tool = await registry.run(
       'retrieve_evidence',
       { query: 'synthetic_event_1000', limit: 5 },
@@ -574,7 +905,7 @@ VALUES (?, ?, ?, ?, ?)`).run(index.workspaceId, workspace.root, 'sekiro', now, n
       references: corpus.references.length,
       idHits: eventHit.hits.length,
       cjkHits: textHit.hits.length,
-      reloaded: reloaded.chunks.length,
+      reloaded: reloadedChunkCount,
       ragLoopInjected: injected.length,
       nonClaims: [
         'lexical + structured ID + one-hop graph, not embedding similarity',
@@ -609,6 +940,8 @@ async function assertParamNameAliases(): Promise<void> {
       // name the model receives from read-dcx-document.
       paramName: 'NPC_PARAM_ST',
       entryName: 'NpcParam.param',
+      sourceHash: 'event-source-v1',
+      sourceRevision: 1,
       rows: [{
         uri: `${sourceUri}#NpcParam/50800000`,
         sourceUri,
@@ -772,7 +1105,8 @@ function makeFile(
   relativePath: string,
   resourceKind: IndexedFile['resourceKind'],
   sourceUri: string,
-  sha256 = 'event-source-v1'
+  sha256 = 'event-source-v1',
+  mtimeMs = 1
 ): IndexedFile {
   return {
     id: sourceUri,
@@ -788,16 +1122,16 @@ function makeFile(
     formatKind: 'emevd',
     formatLabel: 'EMEVD',
     size: 32,
-    mtimeMs: 1,
+    mtimeMs,
     sha256,
     parseStatus: 'partial',
     diagnostics: []
   };
 }
 
-function withoutSourceHash(chunk: RagChunk): RagChunk {
+function withoutOuterFileHash(chunk: RagChunk): RagChunk {
   const copy = { ...chunk };
-  delete copy.sourceHash;
+  delete copy.outerFileHash;
   return copy;
 }
 
@@ -807,9 +1141,14 @@ function withoutSourceRevision(chunk: RagChunk): RagChunk {
   return copy;
 }
 
-function makeEventExport(sourceHash = 'event-source-v1', eventName = 'synthetic_event_1000'): BridgeResult<unknown> {
+function makeEventExport(
+  sourceHash = 'event-source-v1',
+  eventName = 'synthetic_event_1000',
+  sourceUri = 'file://synthetic/event/common.emevd.dcx',
+  sourceRevision = 1
+): BridgeResult<unknown> {
   return {
-    sourceUri: 'file://synthetic/event/common.emevd.dcx',
+    sourceUri,
     sourcePath: 'event/common.emevd.dcx',
     game: 'sekiro',
     resourceKind: 'event',
@@ -818,10 +1157,11 @@ function makeEventExport(sourceHash = 'event-source-v1', eventName = 'synthetic_
     data: {
       mapId: 'm10_00_00_00',
       sourceHash,
-      sourceRevision: 1,
+      outerFileHash: sourceHash,
+      sourceRevision,
       events: [{
         uri: 'event://m10_00_00_00/1000',
-        sourceUri: 'file://synthetic/event/common.emevd.dcx',
+        sourceUri,
         mapId: 'm10_00_00_00',
         eventId: 1000,
         name: eventName,
@@ -841,9 +1181,14 @@ function makeEventExport(sourceHash = 'event-source-v1', eventName = 'synthetic_
   };
 }
 
-function makeMapExport(): BridgeResult<unknown> {
+function makeMapExport(
+  sourceUri = 'file://synthetic/map/m10_00_00_00.msb',
+  sourceHash?: string,
+  sourceRevision?: number,
+  name = 'synthetic_entity_1100800'
+): BridgeResult<unknown> {
   return {
-    sourceUri: 'file://synthetic/map/m10_00_00_00.msb',
+    sourceUri,
     sourcePath: 'map/m10_00_00_00.msb',
     game: 'sekiro',
     resourceKind: 'map',
@@ -851,20 +1196,26 @@ function makeMapExport(): BridgeResult<unknown> {
     diagnostics: [],
     data: {
       mapId: 'm10_00_00_00',
+      ...(sourceHash !== undefined ? { sourceHash } : {}),
+      ...(sourceRevision !== undefined ? { sourceRevision } : {}),
       entities: [{
         uri: 'map://m10_00_00_00/entity/1100800',
-        sourceUri: 'file://synthetic/map/m10_00_00_00.msb',
+        sourceUri,
         mapId: 'm10_00_00_00',
         entityId: 1100800,
-        name: 'synthetic_entity_1100800',
+        name,
+        ...(sourceHash !== undefined ? { sourceHash } : {}),
+        ...(sourceRevision !== undefined ? { sourceRevision } : {}),
         kind: 'character'
       }],
       regions: [{
         uri: 'map://m10_00_00_00/region/boss_phase_2',
-        sourceUri: 'file://synthetic/map/m10_00_00_00.msb',
+        sourceUri,
         mapId: 'm10_00_00_00',
         entityId: 1100900,
         name: 'boss_phase_2',
+        ...(sourceHash !== undefined ? { sourceHash } : {}),
+        ...(sourceRevision !== undefined ? { sourceRevision } : {}),
         shape: 'box'
       }]
     }
@@ -956,6 +1307,8 @@ function makeParamExport(): BridgeResult<unknown> {
     diagnostics: [],
     data: {
       paramName: 'SpEffectParam',
+      sourceHash: 'event-source-v1',
+      sourceRevision: 1,
       rows: [{
         uri: 'param://SpEffectParam/2000',
         sourceUri: 'file://synthetic/param/SpEffectParam.param',
@@ -978,6 +1331,8 @@ function makeMsgExport(): BridgeResult<unknown> {
     diagnostics: [],
     data: {
       category: 'Goods',
+      sourceHash: 'event-source-v1',
+      sourceRevision: 1,
       entries: [{
         uri: 'msg://Goods/1000',
         sourceUri: 'file://synthetic/msg/Goods.fmg',

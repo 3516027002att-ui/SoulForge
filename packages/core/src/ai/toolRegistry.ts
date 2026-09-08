@@ -39,7 +39,8 @@ import {
   readParamFields,
   searchParamFieldDefinitions,
   setParamFields,
-  type ParamFieldEdit
+  type ParamFieldEdit,
+  type ParamFieldSnapshot
 } from '../param/containerParamEdit.js';
 import { readFmgEntries, setFmgEntries, type FmgEntryEdit } from '../editing/fmgEdit.js';
 import * as emevdEdit from '../editing/emevdEdit.js';
@@ -62,7 +63,8 @@ import {
 import { parseMapAddress } from '@soulforge/shared';
 import { decideAiToolPermission, legacyPermissionToLevel } from './toolPermissions.js';
 import { buildRagCorpus, mergeCatalogAndPersisted } from '../rag/chunkBuilder.js';
-import { retrieveEvidence } from '../rag/retrieve.js';
+import { retrieveEvidence, type RagChunkExclusionMask } from '../rag/retrieve.js';
+import { getRagStaleChunkMaskCached } from '../rag/freshness.js';
 import { type MemoryStore } from '../memory/memoryStore.js';
 import { EVENT_REFERENCE_SOURCE_URI, searchEventReference } from './eventReference.js';
 import { resolveChrLinkage, type ChrLinkageResult } from '../references/chrLinkageResolver.js';
@@ -140,6 +142,27 @@ export interface AgentTaskRecordSearchTicket {
   query: string;
 }
 
+/**
+ * Host-resolved identity for one EMEVD event.  This is deliberately not a
+ * model-facing field: the registry derives it from the current workspace
+ * index and the physical path accepted by the native reader.
+ */
+export interface HostResolvedEmevdEventTarget {
+  resourceKind: 'event';
+  sourceUri: string;
+  sourcePath: string;
+  eventId: number;
+  /** False when the resolver had to preserve an unindexed input token. */
+  canonical: boolean;
+}
+
+export interface NativeEmevdReadProofRequest {
+  input: unknown;
+  rawResult: unknown;
+  envelope: unknown;
+  target: HostResolvedEmevdEventTarget;
+}
+
 export interface AgentTaskRecordMutationRelease {
   objectName?: string;
   propertyKey: string;
@@ -158,17 +181,16 @@ export interface AgentTaskRecordGateway {
   /** Persist a session search ticket which may be cited by one or more Evidence entries. */
   recordSearch(input: AgentTaskRecordSearchInput): Promise<AgentTaskRecordSearchTicket>;
   update(input: AgentTaskRecordUpdate): Promise<AgentTaskRecordSnapshot>;
-  /** Atomic multi-entry CAS used by the goal ledger; optional for old hosts. */
-  updateMany?(input: {
-    expectedVersion: number;
-    entries: readonly AgentTaskRecordUpdate[];
-  }): Promise<AgentTaskRecordSnapshot | { ok: false; code: string; message: string; details?: unknown }>;
+  /** Promote matching candidate evidence only after a host-observed native PARAM read. */
+  recordNativeParamRead(input: unknown, result: unknown): Promise<AgentTaskRecordSnapshot>;
+  /** Promote one complete, host-observed EMEVD event read after final delivery. */
+  recordNativeEmevdRead?(proof: NativeEmevdReadProofRequest): Promise<AgentTaskRecordSnapshot>;
   /**
    * Write tools reserve one mutation count for every matching Evidence key.
    * Presence of the normalized key is the authority; the free-form note is
    * not parsed as a second schema.
    */
-  assertMutationTarget(toolName: string, input: unknown): Promise<
+  assertMutationTarget(toolName: string, input: unknown, target?: HostResolvedEmevdEventTarget): Promise<
     { ok: true; reservationId: string } | { ok: false; code: string; message: string; details?: unknown }
   >;
   finalizeMutation(reservationId: string): Promise<void>;
@@ -190,6 +212,12 @@ export interface ToolContext {
   taskRecord?: AgentTaskRecordGateway;
   requireTaskRecord?: boolean;
   mode: 'plan' | 'normal' | 'fullPermission';
+  /**
+   * Immutable host grant for this run. `switch_mode` may lower/equal the
+   * active mode but can never raise it above this ceiling. When omitted, the
+   * initial context mode is the ceiling for backward-compatible hosts.
+   */
+  modeCeiling?: 'plan' | 'normal' | 'fullPermission';
   /** Agent sessions are read-only with respect to the persistent memory layer. */
   allowMemoryWrite?: boolean;
   /** Optional durable/in-memory RAG corpus. Absent falls back to building from the index. */
@@ -216,6 +244,8 @@ export interface ToolContext {
   signal?: AbortSignal;
   /** Curator-only knowledge staging store; never a game resource writer. */
   knowledgeStore?: import('../knowledge/knowledgeStore.js').KnowledgeStore;
+  /** Private host target attached by ToolRegistry for the current event call. */
+  hostResolvedEmevdEventTarget?: HostResolvedEmevdEventTarget;
 }
 
 export interface ToolDescriptor {
@@ -242,6 +272,8 @@ export interface ToolResult<T = unknown> {
     message: string;
     details?: unknown;
   };
+  /** Non-enumerable host-only target; never included in model-facing data. */
+  __hostResolvedEmevdEventTarget?: HostResolvedEmevdEventTarget;
 }
 
 type ToolHandler = (input: unknown, context: ToolContext) => Promise<ToolResult> | ToolResult;
@@ -306,6 +338,14 @@ export function validateToolInput(
       }
       continue;
     }
+    if (expectedType === 'string[]' && Array.isArray(value)) {
+      value.forEach((item, index) => {
+        if (typeof item !== 'string' || item.trim().length === 0) {
+          problems.push(`字段 ${key}[${index}] 必须是非空字符串，不能传入对象`);
+        }
+      });
+      continue;
+    }
     if (!matchesDeclaredType(value, expectedType)) {
       problems.push(`字段 ${key} 类型应为 ${expectedType}`);
     }
@@ -368,6 +408,8 @@ function jsonSchemaForDeclaredType(declaredType: string): Record<string, unknown
       return { type: 'boolean' };
     case 'array':
       return { type: 'array' };
+    case 'string[]':
+      return { type: 'array', items: { type: 'string', pattern: '\\S' } };
     case 'object':
       return { type: 'object' };
     default:
@@ -387,6 +429,8 @@ function matchesDeclaredType(value: unknown, expectedType: string): boolean {
       return typeof value === 'boolean';
     case 'array':
       return Array.isArray(value);
+    case 'string[]':
+      return Array.isArray(value) && value.every((item) => typeof item === 'string' && item.trim().length > 0);
     case 'object':
       return typeof value === 'object' && value !== null && !Array.isArray(value);
     default:
@@ -448,7 +492,7 @@ export class ToolRegistry {
       }
     }
 
-    if (name === 'read_param_fields') {
+    if (name === 'read_param_fields' || name === 'search_param_fields') {
       if (context.requireTaskRecord && !context.taskRecord) {
         return fail('TASK_RECORD_UNAVAILABLE', '生产 Agent 原生 PARAM 读取前必须提供本次运行的任务记录。');
       }
@@ -467,10 +511,30 @@ export class ToolRegistry {
     if (MUTATING_AGENT_TOOLS.has(name) && context.requireTaskRecord && !context.taskRecord) {
       return fail('TASK_RECORD_UNAVAILABLE', '生产 Agent 写入前必须读取本次任务记录；任务记录不可用，已拒绝写入。');
     }
+    const rawEventInput = asRecord(input);
+    const hasEventIdentity = typeof rawEventInput.file === 'string'
+      && rawEventInput.file.trim() !== ''
+      && typeof rawEventInput.eventId === 'number'
+      && Number.isSafeInteger(rawEventInput.eventId);
+    const hostResolvedEmevdEventTarget = hasEventIdentity && (name === 'read_emevd_event'
+      || (name === 'apply_emevd_dsl' && rawEventInput.scope === 'event'))
+      ? resolveHostResolvedEmevdEventTarget(context, input)
+      : undefined;
+    if (hostResolvedEmevdEventTarget && !hostResolvedEmevdEventTarget.ok) {
+      return fail(
+        hostResolvedEmevdEventTarget.code,
+        hostResolvedEmevdEventTarget.message,
+        hostResolvedEmevdEventTarget.details
+      );
+    }
+    const resolvedEmevdTarget = hostResolvedEmevdEventTarget?.ok
+      ? hostResolvedEmevdEventTarget.target
+      : undefined;
+
     let mutationReservationId: string | undefined;
     if (MUTATING_AGENT_TOOLS.has(name) && context.taskRecord) {
       try {
-        const targetCheck = await context.taskRecord.assertMutationTarget(name, input);
+        const targetCheck = await context.taskRecord.assertMutationTarget(name, input, resolvedEmevdTarget);
         if (!targetCheck.ok) return fail(targetCheck.code, targetCheck.message, targetCheck.details);
         mutationReservationId = targetCheck.reservationId;
       } catch (error) {
@@ -479,7 +543,19 @@ export class ToolRegistry {
     }
 
     try {
-      const result = await tool.run(input, context);
+      const executionContext = resolvedEmevdTarget
+        ? { ...context, hostResolvedEmevdEventTarget: resolvedEmevdTarget }
+        : context;
+      const result = await tool.run(input, executionContext);
+      if (resolvedEmevdTarget) {
+        // Keep this host-only and non-enumerable: result.data is the only
+        // object that can cross the bounded model-facing projection.
+        Object.defineProperty(result, '__hostResolvedEmevdEventTarget', {
+          value: resolvedEmevdTarget,
+          enumerable: false,
+          configurable: true
+        });
+      }
       if (mutationReservationId && context.taskRecord) {
         if (result.ok) {
           await context.taskRecord.finalizeMutation(mutationReservationId);
@@ -565,6 +641,145 @@ function getEvidenceSearchQuery(name: string, input: unknown): string | null {
   return '';
 }
 
+export type NativePostWriteVerification =
+  | { ok: true; details?: unknown }
+  | { ok: false; code: string; message: string; details?: unknown };
+
+/**
+ * Preserve the irreversible transaction fact even when post-commit work
+ * fails.  Knowledge refresh is deliberately best-effort after the Patch
+ * Engine has committed; it must never turn the tool into a pre-commit
+ * failure or release the task-record reservation.
+ */
+export async function finalizeCommittedToolResult<T extends object>(input: {
+  data: T;
+  changedSources: KnowledgeSourceChange;
+  context: ToolContext;
+  verifyNative?: () => Promise<NativePostWriteVerification>;
+}): Promise<ToolResult<T & Record<string, unknown>>> {
+  let nativeVerification: Record<string, unknown> = { status: 'not_performed' };
+  if (input.verifyNative) {
+    try {
+      const verification = await input.verifyNative();
+      nativeVerification = verification.ok
+        ? { status: 'verified', ...(verification.details === undefined ? {} : { details: verification.details }) }
+        : {
+            status: 'failed',
+            code: verification.code,
+            message: verification.message,
+            ...(verification.details === undefined ? {} : { details: verification.details })
+          };
+    } catch (error) {
+      nativeVerification = {
+        status: 'failed',
+        code: 'POST_COMMIT_NATIVE_READ_EXCEPTION',
+        message: error instanceof Error ? error.message : String(error)
+      };
+    }
+  }
+
+  let knowledgeRefresh: KnowledgeRefreshResult | Record<string, unknown> | undefined;
+  let knowledgeRefreshStatus = input.context.onNativeWriteCommitted ? 'completed' : 'not_requested';
+  if (input.context.onNativeWriteCommitted) {
+    try {
+      const refreshed = await input.context.onNativeWriteCommitted(input.changedSources);
+      if (refreshed) knowledgeRefresh = refreshed;
+      if (knowledgeRefresh && 'status' in knowledgeRefresh && typeof knowledgeRefresh.status === 'string') {
+        knowledgeRefreshStatus = knowledgeRefresh.status;
+      }
+    } catch (error) {
+      knowledgeRefreshStatus = 'failed';
+      knowledgeRefresh = {
+        status: 'failed',
+        code: 'KNOWLEDGE_REFRESH_FAILED',
+        message: error instanceof Error ? error.message : String(error),
+        changedSources: [...input.changedSources]
+      };
+    }
+  }
+
+  const state = nativeVerification.status === 'failed' ? 'verification_failed' : 'committed';
+  return {
+    ok: true,
+    state,
+    data: {
+      ...input.data,
+      ...(knowledgeRefresh ? { knowledgeRefresh } : {}),
+      lifecycle: {
+        transaction: 'committed',
+        nativeVerification,
+        knowledgeRefresh: knowledgeRefreshStatus
+      }
+    }
+  };
+}
+
+async function verifyCommittedParamFields(input: {
+  edit: ReturnType<typeof nativeEditSessionFromContext>;
+  edits: readonly ParamFieldEdit[];
+  expected: readonly ParamFieldSnapshot[];
+  containerPath: string;
+}): Promise<NativePostWriteVerification> {
+  const reread = await readParamFields({
+    edit: input.edit,
+    containerPath: input.containerPath,
+    queries: input.edits.map((edit) => ({
+      table: edit.table,
+      rowIds: [edit.rowId],
+      fieldIds: [edit.fieldId],
+      ...(edit.rowIndex === undefined ? {} : { rowIndex: edit.rowIndex })
+    }))
+  });
+  if (!reread.ok) {
+    return {
+      ok: false,
+      code: 'PARAM_POST_COMMIT_READ_FAILED',
+      message: reread.error.message,
+      details: reread.error.details
+    };
+  }
+
+  const normalizeTable = (value: string): string => value.toLocaleLowerCase().replace(/[^a-z0-9]/gu, '');
+  const mismatches: Array<Record<string, unknown>> = [];
+  const verifiedFields: Array<Record<string, unknown>> = [];
+  for (const expected of input.expected) {
+    const observed = reread.fields.find((field) => (
+      normalizeTable(field.table) === normalizeTable(expected.table)
+      && field.rowId === expected.rowId
+      && field.fieldId === expected.fieldId
+      && (expected.rowIndex === undefined || field.rowIndex === expected.rowIndex)
+    ));
+    if (!observed || !observed.sourceHash || !Object.is(observed.value, expected.value)) {
+      mismatches.push({
+        table: expected.table,
+        rowId: expected.rowId,
+        fieldId: expected.fieldId,
+        expected: expected.value,
+        observed: observed?.value ?? null,
+        sourceHash: observed?.sourceHash ?? null
+      });
+      continue;
+    }
+    verifiedFields.push({
+      table: observed.table,
+      rowId: observed.rowId,
+      fieldId: observed.fieldId,
+      value: observed.value,
+      sourceHash: observed.sourceHash,
+      ...(observed.sourceRevision === undefined ? {} : { sourceRevision: observed.sourceRevision })
+    });
+  }
+  if (mismatches.length > 0) {
+    return {
+      ok: false,
+      code: 'PARAM_POST_COMMIT_VERIFICATION_MISMATCH',
+      message: 'PARAM 已提交，但原生复读值或 sourceHash 与预期不一致；操作保留为 committed，必须回滚或恢复。',
+      details: { mismatches }
+    };
+  }
+  return { ok: true, details: { fields: verifiedFields } };
+}
+
 function attachEvidenceSearchId(data: unknown, searchId: string): unknown {
   if (Array.isArray(data)) return { results: data, searchId };
   if (data && typeof data === 'object') return { ...(data as Record<string, unknown>), searchId };
@@ -602,7 +817,7 @@ export function createDefaultToolRegistry(): ToolRegistry {
 
   registry.register({
     name: 'update_agent_task_record',
-    description: '写入本次任务的 Evidence 台账。先登记 target 对象；kind=evidence 时必须同时传入非空 evidence 字符串数组、当前搜索返回的 searchId 和正整数 mutationBudget。value/evidence 不得脱离当前搜索或原生读取证据。',
+    description: '写入本次任务的 Evidence 台账。kind=target 时 propertyKey 必须精确为 target，value 写原始意图：首次 objectName 逐字取自用户请求并省略 searchId/evidence/mutationBudget；搜索后新增规范目标必须传入该次真实 searchId。搜索前先完成所有用户目标登记。kind=evidence 时 objectName 必须复用已登记的真实修改目标，propertyKey 使用真实表名（如 NpcParam 或 SpEffectParam），只能含字母数字下划线；同一 PARAM 行准备一次 mutate_param_fields 时合并全部待写字段。evidence 必须是非空字符串数组，例如 ["NpcParam#50800000 fieldId=ninsatuNum"] 或 ["SpEffectParam#9003 fieldId=poizonAttackPower"]，不能传对象数组；searchId 必须来自包含该目标的当前搜索、mutationBudget 必须精确为 1。只读对照对象及 _ref/_elite 近义属性不进台账。模型只能写 candidate/blocked；verified 由宿主在成功原生读取后自动晋升。',
     permission: 'analyze',
     permissionLevel: 'analyze',
     inputSchema: {
@@ -610,8 +825,8 @@ export function createDefaultToolRegistry(): ToolRegistry {
       propertyKey: 'string',
       value: 'string',
       kind: 'enum:target|evidence?',
-      status: 'enum:candidate|verified|blocked?',
-      evidence: 'array?',
+      status: 'enum:candidate|blocked?',
+      evidence: 'string[]?',
       mutationBudget: 'number?',
       searchId: 'string?'
     },
@@ -625,16 +840,16 @@ export function createDefaultToolRegistry(): ToolRegistry {
         return fail('INVALID_INPUT', '任务记录需要非空 objectName、propertyKey 和 value；不能用空值占位。');
       }
       const kind = value.kind === 'target' ? 'target' : 'evidence';
-      const evidence = asStringList(value.evidence);
+      const evidence = asStringList(value.evidence).map((item) => item.trim());
       const searchId = asOptionalString(value.searchId)?.trim();
       const mutationBudget = value.mutationBudget;
       if (kind === 'evidence') {
         if (evidence.length === 0 || !searchId
-          || typeof mutationBudget !== 'number' || !Number.isInteger(mutationBudget) || mutationBudget < 1) {
+          || mutationBudget !== 1) {
           return fail(
             'TASK_RECORD_EVIDENCE_REQUIRED',
-            'Evidence 台账词条必须同时传入非空 evidence 数组、当前搜索返回的 searchId 和正整数 mutationBudget；缺少任何一项都请继续寻找后按完整格式更新。',
-            { required: ['evidence', 'searchId', 'mutationBudget'] }
+            'Evidence 台账词条必须同时传入非空 evidence 数组、当前搜索返回的 searchId，并固定 mutationBudget=1；缺少或扩大预算都会被拒绝。',
+            { required: ['evidence', 'searchId', 'mutationBudget=1'] }
           );
         }
       } else if (mutationBudget !== undefined && mutationBudget !== 0) {
@@ -646,8 +861,9 @@ export function createDefaultToolRegistry(): ToolRegistry {
         value: propertyValue,
         kind,
         evidence,
+        ...(searchId ? { searchId } : {}),
         ...(kind === 'evidence'
-          ? { mutationBudget: mutationBudget as number, searchId: searchId as string }
+          ? { mutationBudget: mutationBudget as number }
           : {})
       };
       if (value.status === 'candidate' || value.status === 'verified' || value.status === 'blocked') {
@@ -679,40 +895,6 @@ export function createDefaultToolRegistry(): ToolRegistry {
   });
 
   registry.register({
-    name: 'rollback_agent_task_record_mutation',
-    description: '在实际资源已完成回退，或写入工具明确失败后，释放 Evidence 台账已消耗的修改次数。它只回退台账计数，不替代 rollback_operation，也不直接修改 Mod。',
-    permission: 'analyze',
-    permissionLevel: 'analyze',
-    inputSchema: {
-      objectName: 'string?',
-      propertyKey: 'string',
-      count: 'number?',
-      reason: 'string?'
-    },
-    run: async (input, context) => {
-      if (!context.taskRecord) return fail('TASK_RECORD_UNAVAILABLE', '本次运行没有可用的任务记录。');
-      const value = asRecord(input);
-      const propertyKey = asString(value.propertyKey).trim();
-      const objectName = asOptionalString(value.objectName)?.trim();
-      const count = value.count;
-      if (!propertyKey) return fail('INVALID_INPUT', '回退台账计数需要非空 propertyKey。');
-      if (count !== undefined && (typeof count !== 'number' || !Number.isInteger(count) || count < 1)) {
-        return fail('INVALID_INPUT', '回退台账计数 count 必须是正整数。');
-      }
-      const reason = asOptionalString(value.reason)?.trim();
-      const released = await context.taskRecord.releaseMutationCount({
-        ...(objectName ? { objectName } : {}),
-        propertyKey,
-        ...(count !== undefined ? { count } : {}),
-        ...(reason ? { reason } : {})
-      });
-      return released.ok
-        ? ok(released)
-        : fail(released.code, released.message, released.details);
-    }
-  });
-
-  registry.register({
     name: 'workspace_stats',
     description: 'Return indexed workspace counts for files, symbols, and references.',
     permission: 'read',
@@ -722,12 +904,30 @@ export function createDefaultToolRegistry(): ToolRegistry {
       if (ws === null) return fail('WORKSPACE_REQUIRED', '这次工具需要先打开 Mod 工作区。');
       const stats = ws.getStats();
       const corpus = resolveRagCorpus(context);
-      if (!corpus) return ok({ ...stats, coverage: ws.getCoverageSnapshot() });
+      // Statistics expose coverage counts, not every resource identity. The
+      // full source list belongs to resource discovery/native evidence tools.
+      const coverage = ws.getCoverageSnapshot().map((item) => ({
+        scope: item.scope,
+        ...(item.domain ? { domain: item.domain } : {}),
+        status: item.status,
+        coveredResources: item.coveredResources,
+        expectedResources: item.expectedResources,
+        staleSourceCount: item.staleSources.length,
+        sourceVersionCount: item.sourceVersions.length,
+        diagnosticCount: item.diagnostics.length,
+        predicateCompleteness: {
+          kind: item.predicateCompleteness.kind,
+          status: item.predicateCompleteness.status,
+          exhaustive: item.predicateCompleteness.exhaustive
+        },
+        detail: 'summary-only'
+      }));
+      if (!corpus) return ok({ ...stats, coverage });
       // 轻量索引可能尚未把所有符号投影到内存，但宿主注入的 RAG 快照
       // 仍是带来源的语义语料；不能把内存计数为 0 误报成数据不存在。
       return ok({
         ...stats,
-        coverage: ws.getCoverageSnapshot(),
+        coverage,
         events: Math.max(stats.events, corpus.stats.byFamily.event),
         mapEntities: Math.max(stats.mapEntities, corpus.stats.byFamily.map_entity),
         mapRegions: Math.max(stats.mapRegions, corpus.stats.byFamily.map_region),
@@ -783,7 +983,8 @@ export function createDefaultToolRegistry(): ToolRegistry {
       const result = retrieveEvidence(corpus, query, {
         limit: asNumber(value.limit, 8),
         ...(value.expandReferences === undefined ? {} : { expandReferences: value.expandReferences === true }),
-        ...(families ? { families } : {})
+        ...(families ? { families } : {}),
+        ...staleRagChunkOption(context, corpus)
       });
       if (!result.ok) {
         if (result.code === 'insufficient_evidence') return ok({ query, hits: [], totalHits: 0, note: result.message });
@@ -1509,7 +1710,6 @@ export function createDefaultToolRegistry(): ToolRegistry {
       if (!table || rowIds.length === 0 || fieldIds.length === 0) {
         return fail('PARAM_FIELD_IDS_REQUIRED', 'read_param_fields 必须提供 table、非空 rowIds 和非空 fieldIds；请先从候选或元数据中确认真实字段 ID。');
       }
-      if (!context.session) return ok({ table, rows: [], note: 'no workspace session, guard relaxed, empty' });
       const edit = requireEditSession(context, 'read');
       if (!('session' in edit)) return edit;
       const containerPath = asOptionalString(value.containerPath);
@@ -1519,6 +1719,31 @@ export function createDefaultToolRegistry(): ToolRegistry {
         ...(containerPath ? { containerPath } : {})
       });
       if (!result.ok) return fail(result.error.code, result.error.message, result.error.details);
+      let taskRecordProof: { status: 'not-recorded'; code: string; message: string } | undefined;
+      if (context.taskRecord) {
+        try {
+          await context.taskRecord.recordNativeParamRead(input, result);
+        } catch (error) {
+          const structured = asTaskRecordFailure(error);
+          if (structured?.code === 'TASK_RECORD_NATIVE_PROOF_TARGET_MISSING') {
+            // Reference reads need no write ledger entry. Preserve native
+            // values without granting any mutation authority.
+            taskRecordProof = {
+              status: 'not-recorded',
+              code: structured.code,
+              message: '原生读取成功；没有匹配的待晋升 Evidence，未授予写入权限。需要写入时先登记精确表、行、字段的 Evidence，再重新原生读取。'
+            };
+          } else {
+            return fail(
+              'TASK_RECORD_NATIVE_PROOF_FAILED',
+              `原生 PARAM 已读取，但 Evidence 台账未能记录该证明：${error instanceof Error ? error.message : String(error)}`,
+              { nativeRead: result, ...(structured ? { taskRecordError: structured } : {}) }
+            );
+          }
+        }
+      } else if (context.requireTaskRecord) {
+        return fail('TASK_RECORD_NATIVE_PROOF_GATE_UNAVAILABLE', '生产 Agent 缺少原生读取证明写入门禁，已拒绝继续。');
+      }
       if (context.workspaceIndex && result.fields.length > 0) {
         const sourceUri = pathToFileURL(result.containerPath).href;
         const rowsById = new Map<number, typeof result.fields>();
@@ -1581,6 +1806,7 @@ export function createDefaultToolRegistry(): ToolRegistry {
       }
       return ok({
         ...result,
+        ...(taskRecordProof ? { taskRecordProof } : {}),
         ...(crossReferences ? { crossReferences } : {})
       });
     }
@@ -1625,8 +1851,18 @@ export function createDefaultToolRegistry(): ToolRegistry {
         ...(containerPath ? { containerPath } : {})
       });
       if (!result.ok) return fail(result.error.code, result.error.message, result.error.details);
-      const knowledgeRefresh = await context.onNativeWriteCommitted?.([result.containerPath]);
-      return ok({ ...result, ...(knowledgeRefresh ? { knowledgeRefresh } : {}) });
+      if (result.changedTables.length === 0) return ok(result);
+      return finalizeCommittedToolResult({
+        data: result,
+        changedSources: [result.containerPath],
+        context,
+        verifyNative: () => verifyCommittedParamFields({
+          edit: edit.session,
+          edits: edits.edits,
+          expected: result.after,
+          containerPath: result.containerPath
+        })
+      });
     }
   });
 
@@ -1644,7 +1880,6 @@ export function createDefaultToolRegistry(): ToolRegistry {
       cursor: 'string?'
     },
     run: async (input, context) => {
-      if (!context.session) return ok({ table: asString(asRecord(input).table), entries: [], note: 'no workspace session, guard relaxed, empty' });
       const edit = requireEditSession(context, 'read');
       if (!('session' in edit)) return edit;
       const value = asRecord(input);
@@ -1735,16 +1970,17 @@ export function createDefaultToolRegistry(): ToolRegistry {
         ...(lang ? { lang } : {})
       });
       if (!result.ok) return fail(result.error.code, result.error.message, result.error.details);
-      const knowledgeRefresh = await context.onNativeWriteCommitted?.([result.containerPath]);
-      return ok({ ...result, ...(knowledgeRefresh ? { knowledgeRefresh } : {}) });
+      return finalizeCommittedToolResult({ data: result, changedSources: [result.containerPath], context });
     }
   });
 
   registry.register({
     name: 'read_emevd_event',
     description: 'Read exactly one EMEVD event through the native core readEmevdEvent authority. '
-      + 'Returns the requested event-level DarkScript view (format=darkscript) or JSON projection, a bounded machine-instruction DTO, and native evidence/provenance; '
-      + 'it never uses RAG or an index projection as a native-read substitute. format defaults to darkscript.',
+      + 'A complete format=darkscript read from instructionOffset=0 through the native total returns data.record.projection=complete_native_dsl: '
+      + 'the full DarkScript, native evidence/provenance and native identity are retained while auxiliary machine DTO is omitted; this is the only event read view that can mint a write receipt. '
+      + 'Use format=json or instructionOffset/instructionLimit paging when machine instructions are needed, but JSON, tail, partial, or incomplete windows remain inspect-only and cannot authorize event writes. '
+      + 'It never uses RAG or an index projection as a native-read substitute. format defaults to darkscript.',
     permission: 'read',
     permissionLevel: 'read',
     inputSchema: {
@@ -1765,9 +2001,17 @@ export function createDefaultToolRegistry(): ToolRegistry {
         return fail('INVALID_INPUT', 'read_emevd_event 需要 file 与安全整数 eventId。');
       }
       if (!context.session) return fail('WORKSPACE_REQUIRED', '这次原生 EMEVD 事件读取需要先打开 Mod 工作区。');
-      const resolvedFile = resolveIndexedResourceFile(context, file, 'event');
+      const resolvedFile = context.hostResolvedEmevdEventTarget
+        ? {
+            ok: true as const,
+            path: context.hostResolvedEmevdEventTarget.sourcePath,
+            sourceUri: context.hostResolvedEmevdEventTarget.sourceUri,
+            canonical: context.hostResolvedEmevdEventTarget.canonical
+          }
+        : resolveIndexedResourceFile(context, file, 'event');
       if (!resolvedFile.ok) return fail(resolvedFile.code, resolvedFile.message, resolvedFile.details);
-      const nativeFile = nativePathFromFileToken(resolvedFile.path);
+      const nativeFile = context.hostResolvedEmevdEventTarget?.sourcePath
+        ?? nativePathFromFileToken(resolvedFile.path);
       const edit = requireEditSession(context, 'read');
       if (!('session' in edit)) return edit;
       const reader = resolveReadEmevdEvent();
@@ -1813,9 +2057,16 @@ export function createDefaultToolRegistry(): ToolRegistry {
         );
       }
       const resultRecord = result as Record<string, unknown>;
-      const provenance = resultRecord.provenance ?? {
+      // Bind the model-facing/native receipt to the workspace-indexed URI.
+      // The facade's URI is derived from its physical path and may otherwise
+      // contain a sanitized-but-user-specific path rather than the canonical
+      // resource identity used by search_events.
+      const canonicalSourceUri = context.hostResolvedEmevdEventTarget?.sourceUri
+        ?? resolvedFile.sourceUri;
+      const provenance = {
+        ...(asRecord(resultRecord.provenance)),
         authority: 'native-emevd-event',
-        sourceUri: resultRecord.sourceUri,
+        sourceUri: canonicalSourceUri,
         ...(typeof resultRecord.sourceHash === 'string' ? { sourceHash: resultRecord.sourceHash } : {}),
         ...(typeof resultRecord.sourceRevision === 'number' || typeof resultRecord.sourceRevision === 'string'
           ? { sourceRevision: resultRecord.sourceRevision }
@@ -1824,22 +2075,30 @@ export function createDefaultToolRegistry(): ToolRegistry {
           ? { registryFingerprint: resultRecord.registryFingerprint }
           : {})
       };
-      return ok({ ...resultRecord, provenance });
+      return ok({ ...resultRecord, sourceUri: canonicalSourceUri, provenance });
     }
   });
 
   registry.register({
     name: 'read_emevd_outline',
     description: 'Read event IDs and instruction counts from an overlay EMEVD file. '
+      + 'Pass offset (default 0) and limit (default 8, maximum 16) to page through all events using nextOffset. '
+      + 'The outline is read-only metadata, not a complete DarkScript write receipt. '
       + 'Does not parse a second native format; uses Bridge read-emevd-document.',
     permission: 'read',
     permissionLevel: 'read',
-    inputSchema: { file: 'string' },
+    inputSchema: { file: 'string', offset: 'safe-integer?', limit: 'safe-integer?' },
     run: async (input, context) => {
-      if (!context.session) return ok({ file: asString(asRecord(input).file), events: [], note: 'no workspace session, guard relaxed, empty' });
+      const value = asRecord(input);
+      const offset = value.offset ?? 0;
+      const limit = value.limit ?? 8;
+      if (typeof offset !== 'number' || !Number.isSafeInteger(offset) || offset < 0
+        || typeof limit !== 'number' || !Number.isSafeInteger(limit) || limit < 1 || limit > 16) {
+        return fail('INVALID_INPUT', 'read_emevd_outline 的 offset 必须是非负安全整数，limit 必须是 1 到 16 的安全整数。');
+      }
       const edit = requireEditSession(context, 'read');
       if (!('session' in edit)) return edit;
-      const file = asString(asRecord(input).file);
+      const file = asString(value.file);
       if (!file) return fail('INVALID_INPUT', 'read_emevd_outline 需要 file。');
       const resolvedFile = resolveIndexedResourceFile(context, file, 'event');
       if (!resolvedFile.ok) return fail(resolvedFile.code, resolvedFile.message, resolvedFile.details);
@@ -1877,7 +2136,27 @@ export function createDefaultToolRegistry(): ToolRegistry {
         context.workspaceIndex.rebuildReferences();
         await context.onSemanticEvidenceUpdated?.([sourceUri]);
       }
-      return ok(result);
+      // The index above always consumes the complete native outline. Only the
+      // model-facing result is paged; no event disappears from future windows.
+      const allEvents = result.events ?? [];
+      const events = allEvents.slice(offset, offset + limit);
+      const truncated = offset + events.length < allEvents.length;
+      return ok({
+        ...result,
+        events,
+        total: allEvents.length,
+        totalCount: allEvents.length,
+        offset,
+        limit,
+        returned: events.length,
+        returnedCount: events.length,
+        truncated,
+        darkScriptComplete: false,
+        ...(truncated ? {
+          nextOffset: offset + events.length,
+          continuationParams: { file, offset: offset + events.length, limit }
+        } : {})
+      });
     }
   });
 
@@ -1885,7 +2164,7 @@ export function createDefaultToolRegistry(): ToolRegistry {
     name: 'apply_emevd_dsl',
     description: 'Compile and commit EMEVD DSL through the native Bridge four-view path. '
       + '完整文件模式 scope=file 可提交文件内 DSL；event-only 模式 scope=event 必须同时给出安全整数 eventId，核心只允许该事件作用域，禁止误删其他事件。'
-      + ' event-scope 还必须回传最近一次完整 read_emevd_event 的 sourceHash 与 darkScriptComplete=true，底层会做 source identity CAS。'
+      + ' event-scope 还必须回传最近一次完整 read_emevd_event 的 sourceHash、outerFileHash、sourceRevision 与 darkScriptComplete=true；读取必须是 offset=0 到 native total 的完整 darkscript 事件视图，底层会做 source identity CAS。JSON、tail、分页或缺少任一 identity 字段都不能写回。'
       + ' The DSL is not a binary text patch; unknown/ambiguous parameter bindings and invalid scope inputs fail closed.',
     permission: 'commit',
     permissionLevel: 'commit',
@@ -1937,21 +2216,40 @@ export function createDefaultToolRegistry(): ToolRegistry {
       if (value.darkScriptComplete !== undefined && darkScriptComplete === undefined) {
         return fail('INVALID_INPUT', 'apply_emevd_dsl 的 darkScriptComplete 必须是布尔值。');
       }
-      if (scope === 'event' && (sourceHash === undefined || darkScriptComplete !== true)) {
+      if (scope === 'event' && (
+        sourceHash === undefined
+        || outerFileHash === undefined
+        || sourceRevision === undefined
+        || !Number.isFinite(sourceRevision)
+        || darkScriptComplete !== true
+      )) {
         return fail(
           'EMEVD_DSL_READ_RECEIPT_REQUIRED',
-          'event-scope 写回必须携带最近一次完整 read_emevd_event 的 sourceHash 与 darkScriptComplete=true。'
+          `event-scope 写回必须携带最近一次完整 read_emevd_event 的 sourceHash、outerFileHash、sourceRevision 与 darkScriptComplete=true；当前缺少或不满足：${[
+            sourceHash === undefined ? 'sourceHash' : null,
+            outerFileHash === undefined ? 'outerFileHash' : null,
+            sourceRevision === undefined || !Number.isFinite(sourceRevision) ? 'sourceRevision' : null,
+            darkScriptComplete !== true ? 'darkScriptComplete=true' : null
+          ].filter((item): item is string => item !== null).join('、') || '完整 native DarkScript 视图'}。`
         );
       }
       const edit = requireEditSession(context, 'write');
       if (!('session' in edit)) return edit;
-      const resolvedFile = resolveIndexedResourceFile(context, file, 'event');
+      const resolvedFile = context.hostResolvedEmevdEventTarget
+        ? {
+            ok: true as const,
+            path: context.hostResolvedEmevdEventTarget.sourcePath,
+            sourceUri: context.hostResolvedEmevdEventTarget.sourceUri,
+            canonical: context.hostResolvedEmevdEventTarget.canonical
+          }
+        : resolveIndexedResourceFile(context, file, 'event');
       if (!resolvedFile.ok) return fail(resolvedFile.code, resolvedFile.message, resolvedFile.details);
       const mode = value.mode === 'dark-script' ? 'dark-script' : 'patch';
       const emedfPath = asOptionalString(value.emedfPath);
       const applyInput: Parameters<typeof emevdEdit.applyEmevdDsl>[0] = {
         edit: edit.session,
-        file: nativePathFromFileToken(resolvedFile.path),
+        file: context.hostResolvedEmevdEventTarget?.sourcePath
+          ?? nativePathFromFileToken(resolvedFile.path),
         dsl,
         mode,
         ...(safeEventId === undefined ? {} : { eventId: safeEventId }),
@@ -1966,8 +2264,7 @@ export function createDefaultToolRegistry(): ToolRegistry {
       };
       const result = await emevdEdit.applyEmevdDsl(applyInput);
       if (!result.ok) return fail(result.error?.code ?? 'EMEVD_DSL_FAILED', result.error?.message ?? 'EMEVD DSL 提交失败。', result.diagnostics);
-      const knowledgeRefresh = await context.onNativeWriteCommitted?.([result.filePath ?? file]);
-      return ok({ ...result, ...(knowledgeRefresh ? { knowledgeRefresh } : {}) });
+      return finalizeCommittedToolResult({ data: result, changedSources: [result.filePath ?? file], context });
     }
   });
 
@@ -1979,7 +2276,6 @@ export function createDefaultToolRegistry(): ToolRegistry {
     permissionLevel: 'read',
     inputSchema: { file: 'string', addresses: 'array?', cursor: 'string?' },
     run: async (input, context) => {
-      if (!context.session) return ok({ file: asString(asRecord(input).file), events: [], note: 'no workspace session, guard relaxed, empty' });
       const edit = requireEditSession(context, 'read');
       if (!('session' in edit)) return edit;
       const value = asRecord(input);
@@ -2079,8 +2375,7 @@ export function createDefaultToolRegistry(): ToolRegistry {
       if (!('session' in edit)) return edit;
       const result = await setTaeEventTimes({ edit: edit.session, file, edits: edits.edits });
       if (!result.ok) return fail(result.error.code, result.error.message, result.diagnostics);
-      const knowledgeRefresh = await context.onNativeWriteCommitted?.([result.filePath]);
-      return ok({ ...result, ...(knowledgeRefresh ? { knowledgeRefresh } : {}) });
+      return finalizeCommittedToolResult({ data: result, changedSources: [result.filePath], context });
     }
   });
 
@@ -2094,7 +2389,6 @@ export function createDefaultToolRegistry(): ToolRegistry {
       file: 'string'
     },
     run: async (input, context) => {
-      if (!context.session) return ok({ file: asString(asRecord(input).file), scripts: [], note: 'no workspace session' });
       const edit = requireEditSession(context, 'read');
       if (!('session' in edit)) return edit;
       const value = asRecord(input);
@@ -2120,7 +2414,6 @@ export function createDefaultToolRegistry(): ToolRegistry {
       expectedChildHash: 'string?'
     },
     run: async (input, context) => {
-      if (!context.session) return ok({ file: asString(asRecord(input).file), script: null, note: 'no workspace session' });
       const edit = requireEditSession(context, 'read');
       if (!('session' in edit)) return edit;
       const value = asRecord(input);
@@ -2181,8 +2474,7 @@ export function createDefaultToolRegistry(): ToolRegistry {
         ...(expectedChildHash ? { expectedChildHash } : {})
       });
       if (!result.ok) return fail(result.error.code, result.error.message, result.diagnostics);
-      const knowledgeRefresh = await context.onNativeWriteCommitted?.([result.containerPath]);
-      return ok({ ...result, ...(knowledgeRefresh ? { knowledgeRefresh } : {}) });
+      return finalizeCommittedToolResult({ data: result, changedSources: [result.containerPath], context });
     }
   });
 
@@ -2197,7 +2489,6 @@ export function createDefaultToolRegistry(): ToolRegistry {
     permissionLevel: 'read',
     inputSchema: { file: 'string', addresses: 'array?', cursor: 'string?' },
     run: async (input, context) => {
-      if (!context.session) return ok({ file: asString(asRecord(input).file), parts: [], note: 'no workspace session, guard relaxed, empty' });
       const edit = requireEditSession(context, 'read');
       if (!('session' in edit)) return edit;
       const value = asRecord(input);
@@ -2311,8 +2602,11 @@ export function createDefaultToolRegistry(): ToolRegistry {
       };
       const result = await executeMapTransaction(edit.session, resolvedFile.path, transaction);
       if (!result.ok) return fail(result.error?.code ?? 'MSB_TRANSACTION_FAILED', result.error?.message ?? 'MSB 地图事务失败。', result.error?.details);
-      const knowledgeRefresh = await context.onNativeWriteCommitted?.([resolvedFile.path]);
-      return ok({ ...result, status: result.verification ?? 'completed', ...(knowledgeRefresh ? { knowledgeRefresh } : {}) });
+      return finalizeCommittedToolResult({
+        data: { ...result, status: result.verification ?? 'completed' },
+        changedSources: [resolvedFile.path],
+        context
+      });
     }
   });
 
@@ -2411,8 +2705,7 @@ export function createDefaultToolRegistry(): ToolRegistry {
         ...(typeof value.scaleMultiplier === 'number' ? { scaleMultiplier: Number(value.scaleMultiplier) } : {})
       });
       if (!result.ok) return fail(result.error?.code ?? 'BATCH_TRANSFORM_FAILED', result.error?.message ?? '批量变换失败');
-      const knowledgeRefresh = await context.onNativeWriteCommitted?.([resolvedFile.path]);
-      return ok({ ...result, ...(knowledgeRefresh ? { knowledgeRefresh } : {}) });
+      return finalizeCommittedToolResult({ data: result, changedSources: [resolvedFile.path], context });
     }
   });
 
@@ -2454,12 +2747,14 @@ export function createDefaultToolRegistry(): ToolRegistry {
       if (!translation.ok) return fail(translation.conflict ? 'REVISION_CONFLICT' : 'IMPORT_FAILED', translation.error);
       const result = await executeMapTransaction(edit.session, file, translation.transaction);
       if (!result.ok) return fail(result.error?.code ?? 'IMPORT_COMMIT_FAILED', result.error?.message ?? 'Blender 地图事务提交失败。', result.error?.details);
-      const knowledgeRefresh = await context.onNativeWriteCommitted?.([file]);
-      return ok({
-        transaction: translation.transaction,
-        status: result.verification ?? 'completed',
-        result,
-        ...(knowledgeRefresh ? { knowledgeRefresh } : {})
+      return finalizeCommittedToolResult({
+        data: {
+          transaction: translation.transaction,
+          status: result.verification ?? 'completed',
+          result
+        },
+        changedSources: [file],
+        context
       });
     }
   });
@@ -2536,8 +2831,7 @@ export function createDefaultToolRegistry(): ToolRegistry {
           { opId: result.opId, diagnostics: result.diagnostics }
         );
       }
-      const knowledgeRefresh = await context.onNativeWriteCommitted?.(result.changedFiles);
-      return ok({ ...result, ...(knowledgeRefresh ? { knowledgeRefresh } : {}) });
+      return finalizeCommittedToolResult({ data: result, changedSources: result.changedFiles, context });
     }
   });
 
@@ -2599,8 +2893,7 @@ export function createDefaultToolRegistry(): ToolRegistry {
           { opId: result.opId }
         );
       }
-      const knowledgeRefresh = await context.onNativeWriteCommitted?.(result.restoredFiles);
-      return ok({ ...result, ...(knowledgeRefresh ? { knowledgeRefresh } : {}) });
+      return finalizeCommittedToolResult({ data: result, changedSources: result.restoredFiles, context });
     }
   });
 
@@ -2735,20 +3028,29 @@ export function createDefaultToolRegistry(): ToolRegistry {
 
   registry.register({
     name: 'switch_mode',
-    description: 'Switch the agent operation mode dynamically (e.g. from "plan" to "normal" or "fullPermission" to perform edits/mutations, or back to "plan").',
+    description: 'Lower the active agent operation mode within the immutable host grant. Raising permission requires the user to choose Edit or Bypass in the host and start/resume a run.',
     permission: 'read',
     permissionLevel: 'read',
     inputSchema: { mode: 'string', reason: 'string?' },
     run: (input, context) => {
       const value = asRecord(input);
       const rawMode = asString(value.mode).trim();
-      const targetMode = rawMode === 'edit' ? 'fullPermission' : rawMode;
+      const targetMode = rawMode === 'edit' ? 'normal' : rawMode;
       if (targetMode === 'plan' || targetMode === 'normal' || targetMode === 'fullPermission') {
+        const rank = { plan: 0, normal: 1, fullPermission: 2 } as const;
+        const ceiling = context.modeCeiling ?? context.mode;
+        if (rank[targetMode] > rank[ceiling]) {
+          return fail(
+            'MODE_ESCALATION_REQUIRES_HOST_GRANT',
+            `不能由模型把模式从 ${context.mode} 提升到 ${targetMode}；请由用户在宿主中选择 Edit 或 Bypass 后开始或承接新一轮。`,
+            { currentMode: context.mode, modeCeiling: ceiling, requestedMode: targetMode }
+          );
+        }
         context.mode = targetMode;
         return ok({
           switched: true,
-          currentMode: rawMode === 'edit' ? 'edit' : targetMode,
-          note: `操作模式已成功切换为「${rawMode}」。现在可以执行该模式允许的操作。`
+          currentMode: targetMode,
+          note: `操作模式已在宿主授权上限内切换为「${targetMode}」。`
         });
       }
       return fail('INVALID_MODE', `不支持的目标模式: "${rawMode}"，可选值为: "plan" | "edit" | "normal" | "fullPermission"。`);
@@ -2847,8 +3149,43 @@ function requireEditSession(
 }
 
 type IndexedFileResolution =
-  | { ok: true; path: string; sourceUri: string }
+  | { ok: true; path: string; sourceUri: string; canonical?: boolean }
   | { ok: false; code: string; message: string; details?: unknown };
+
+type HostResolvedEmevdEventTargetResult =
+  | { ok: true; target: HostResolvedEmevdEventTarget }
+  | { ok: false; code: string; message: string; details?: unknown };
+
+function resolveHostResolvedEmevdEventTarget(
+  context: ToolContext,
+  input: unknown
+): HostResolvedEmevdEventTargetResult {
+  const value = asRecord(input);
+  const file = typeof value.file === 'string' ? value.file.trim() : '';
+  const eventId = typeof value.eventId === 'number' && Number.isSafeInteger(value.eventId)
+    ? value.eventId
+    : undefined;
+  if (!file || eventId === undefined) {
+    return {
+      ok: false,
+      code: 'INVALID_INPUT',
+      message: 'EMEVD event identity 需要 file 与安全整数 eventId。'
+    };
+  }
+  const resolved = resolveIndexedResourceFile(context, file, 'event');
+  if (!resolved.ok) return resolved;
+  const sourcePath = nativePathFromFileToken(resolved.path);
+  return {
+    ok: true,
+    target: {
+      resourceKind: 'event',
+      sourceUri: resolved.sourceUri,
+      sourcePath,
+      eventId,
+      canonical: resolved.canonical === true
+    }
+  };
+}
 
 function nativePathFromFileToken(token: string): string {
   if (!/^file:/iu.test(token)) return token;
@@ -2883,7 +3220,7 @@ function resolveIndexedResourceFile(
         message: '逻辑地图 ID 不能直接作为文件；请先打开工作区并用 search_map_entities 获取 sourceUri。'
       };
     }
-    return { ok: true, path: token, sourceUri: token };
+    return { ok: true, path: token, sourceUri: token, canonical: false };
   }
 
   const files = index.getFiles().filter((file) => file.resourceKind === resourceKind);
@@ -2891,7 +3228,7 @@ function resolveIndexedResourceFile(
   const direct = files.filter((file) => [file.sourceUri, file.sourcePath, file.relativePath, file.absolutePath]
     .some((candidate) => normalizeFileToken(candidate) === normalized));
   if (direct.length === 1) {
-    return { ok: true, path: direct[0]!.absolutePath, sourceUri: direct[0]!.sourceUri };
+    return { ok: true, path: direct[0]!.absolutePath, sourceUri: direct[0]!.sourceUri, canonical: true };
   }
   if (direct.length > 1) {
     return ambiguousIndexedFiles(resourceKind, token, direct);
@@ -2904,7 +3241,7 @@ function resolveIndexedResourceFile(
         || mapIdFromFileToken(file.sourcePath) === mapId
         || mapIdFromFileToken(file.sourceUri) === mapId);
       if (byMapId.length === 1) {
-        return { ok: true, path: byMapId[0]!.absolutePath, sourceUri: byMapId[0]!.sourceUri };
+        return { ok: true, path: byMapId[0]!.absolutePath, sourceUri: byMapId[0]!.sourceUri, canonical: true };
       }
       if (byMapId.length > 1) return ambiguousIndexedFiles(resourceKind, token, byMapId);
       if (isLogicalMapToken(token)) {
@@ -2919,7 +3256,7 @@ function resolveIndexedResourceFile(
 
   // Preserve the existing path resolver for callers that already supplied a
   // concrete relative/absolute file but whose catalog is partial.
-  return { ok: true, path: token, sourceUri: token };
+  return { ok: true, path: token, sourceUri: token, canonical: false };
 }
 
 function ambiguousIndexedFiles(
@@ -3201,7 +3538,8 @@ function ragSearchFallback(
   const result = retrieveEvidence(corpus, query, {
     limit: Math.max(1, Math.min(100, Math.trunc(limit))),
     families,
-    expandReferences: false
+    expandReferences: false,
+    ...staleRagChunkOption(context, corpus)
   });
   if (!result.ok) {
     if (result.code === 'RAG_UNAVAILABLE') {
@@ -3259,6 +3597,17 @@ function ragSearchFallback(
     diagnostics: corpus.diagnostics,
     note: '原生专用搜索未命中；以上是已校验来源的 RAG 候选，只能用于定位，必须继续原生读取确认。'
   });
+}
+
+function staleRagChunkOption(
+  context: ToolContext,
+  corpus: RagCorpus | null
+): { excludeChunkMask?: RagChunkExclusionMask } {
+  if (!corpus) return {};
+  const index = context.workspaceIndex;
+  if (!index || index.workspaceId !== corpus.workspaceId) return {};
+  const staleChunkMask = getRagStaleChunkMaskCached(index, corpus);
+  return staleChunkMask ? { excludeChunkMask: staleChunkMask } : {};
 }
 
 function normalizeParamNameForFallback(value: string): string {

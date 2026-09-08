@@ -17,6 +17,8 @@ import {
   type ProviderUsageEventPayload,
   type ProviderUsageSummary
 } from './operationLogUtilityProtocol.js';
+import { performance } from 'node:perf_hooks';
+import { createQueueObservationWriter } from './databaseUtilityTelemetry.js';
 
 let store: SqliteOperationLogStore | null = null;
 let appDatabase: SqliteDatabase | null = null;
@@ -25,17 +27,76 @@ let workspaceId: string | null = null;
 let durableRepository: DurableWorkspaceRepository | null = null;
 let workspaceDataRepository: WorkspaceDataRepository | null = null;
 let queue: Promise<void> = Promise.resolve();
+let queueDepth = 0;
+
+const writeUtilityTrace = createQueueObservationWriter({ side: 'worker' });
 
 const utilityParentPort = process.parentPort;
 
 utilityParentPort.on('message', (event) => {
   const request = event.data as unknown;
-  queue = queue.then(() => handleRequest(request)).catch((error) => {
-    process.stderr.write(`SoulForge database utility queue failure: ${formatError(error)}\n`);
+  const enqueuedAt = performance.now();
+  const depth = ++queueDepth;
+  const requestId = requestIdOrUnknown(request);
+  const method = methodOrUnknown(request);
+  writeUtilityTrace({
+    event: 'enqueue',
+    requestId,
+    method,
+    enqueue: enqueuedAt,
+    start: null,
+    finish: null,
+    depth,
+    queueWaitMs: null,
+    dbDurationMs: null,
+    timeout: false
+  });
+  queue = queue.then(async () => {
+    const startedAt = performance.now();
+    writeUtilityTrace({
+      event: 'start',
+      requestId,
+      method,
+      enqueue: enqueuedAt,
+      start: startedAt,
+      finish: null,
+      depth,
+      queueWaitMs: boundedDuration(startedAt - enqueuedAt),
+      dbDurationMs: null,
+      timeout: false
+    });
+    let outcome: 'ok' | 'request-failed' | 'workerfail' = 'ok';
+    let failureCode: string | undefined;
+    try {
+      outcome = await handleRequest(request);
+    } catch (error) {
+      outcome = 'workerfail';
+      failureCode = errorCode(error);
+      throw error;
+    } finally {
+      const finishedAt = performance.now();
+      writeUtilityTrace({
+        event: 'finish',
+        requestId,
+        method,
+        enqueue: enqueuedAt,
+        start: startedAt,
+        finish: finishedAt,
+        depth,
+        queueWaitMs: boundedDuration(startedAt - enqueuedAt),
+        dbDurationMs: boundedDuration(finishedAt - startedAt),
+        timeout: false,
+        outcome,
+        ...(failureCode ? { errorCode: failureCode } : {})
+      });
+      queueDepth -= 1;
+    }
+  }).catch((error) => {
+    process.stderr.write(`SoulForge database utility queue failure: ${errorCode(error)}\n`);
   });
 });
 
-async function handleRequest(value: unknown): Promise<void> {
+async function handleRequest(value: unknown): Promise<'ok' | 'request-failed'> {
   if (!isRequest(value)) {
     post({
       protocolVersion: OPERATION_LOG_UTILITY_PROTOCOL,
@@ -46,7 +107,7 @@ async function handleRequest(value: unknown): Promise<void> {
         message: '数据库后台进程收到了无效请求。'
       }
     });
-    return;
+    return 'request-failed';
   }
 
   try {
@@ -57,6 +118,7 @@ async function handleRequest(value: unknown): Promise<void> {
       ok: true,
       result
     });
+    return 'ok';
   } catch (error) {
     post({
       protocolVersion: OPERATION_LOG_UTILITY_PROTOCOL,
@@ -67,6 +129,7 @@ async function handleRequest(value: unknown): Promise<void> {
         message: formatError(error)
       }
     });
+    return 'request-failed';
   }
 }
 
@@ -453,6 +516,21 @@ function requestIdOrUnknown(value: unknown): string {
   return value && typeof value === 'object' && typeof (value as { requestId?: unknown }).requestId === 'string'
     ? (value as { requestId: string }).requestId
     : 'unknown';
+}
+
+function methodOrUnknown(value: unknown): string {
+  return value && typeof value === 'object' && typeof (value as { method?: unknown }).method === 'string'
+    ? (value as { method: string }).method
+    : 'unknown';
+}
+
+function boundedDuration(value: number): number {
+  return boundedTraceNumber(value);
+}
+
+function boundedTraceNumber(value: number): number {
+  if (!Number.isFinite(value)) return 0;
+  return Math.min(Math.max(Math.round(value * 100) / 100, 0), 86_400_000);
 }
 
 function codedError(code: string, message: string): Error & { code: string } {

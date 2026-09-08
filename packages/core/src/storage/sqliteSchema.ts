@@ -620,6 +620,20 @@ CREATE TABLE IF NOT EXISTS semantic_file_cache (
 CREATE INDEX IF NOT EXISTS idx_semantic_file_cache_workspace_kind
   ON semantic_file_cache(workspace_id, resource_kind);
 `
+  },
+  {
+    id: 13,
+    name: 'v0_5_rag_outer_file_identity',
+    sql: 'PRAGMA foreign_keys = ON;',
+    addColumns: [
+      // source_hash is the decoded native leaf identity. Packed resources need
+      // a separate outer container hash for catalog freshness/CAS checks.
+      { table: 'rag_chunks', column: 'outer_file_hash', definition: 'TEXT' }
+    ],
+    sqlAfterColumns: `
+CREATE INDEX IF NOT EXISTS idx_rag_chunks_workspace_outer_hash
+  ON rag_chunks(workspace_id, source_uri, outer_file_hash);
+`
   }
 ];
 

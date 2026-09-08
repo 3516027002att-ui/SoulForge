@@ -45,7 +45,20 @@ export interface RunBridgeOptions {
 
 const DEFAULT_TIMEOUT_MS = 15_000;
 const BRIDGE_PROJECT_RELATIVE_PATH = 'bridge/SoulForge.Bridge/SoulForge.Bridge.csproj';
-const clients = new Map<string, Promise<BridgeDaemonClient>>();
+type BridgeClientPool = Map<string, Promise<BridgeDaemonClient>>;
+
+const clients: BridgeClientPool = new Map();
+
+export type BridgeRunner = <T = unknown>(options: RunBridgeOptions) => Promise<BridgeResult<T>>;
+
+export interface BridgeDaemonScope {
+  run: BridgeRunner;
+  dispose: () => Promise<void>;
+}
+
+interface DisposableBridgeClient {
+  dispose: () => Promise<void>;
+}
 
 /**
  * Production Bridge entry. Requests are multiplexed over a pooled NDJSON
@@ -53,6 +66,85 @@ const clients = new Map<string, Promise<BridgeDaemonClient>>();
  * fixture scripts and manual diagnostics.
  */
 export async function runBridge<T = unknown>(options: RunBridgeOptions): Promise<BridgeResult<T>> {
+  return runBridgeWithPool(options, clients);
+}
+
+/**
+ * Create a short-lived Bridge client scope for operations that intentionally
+ * add a unique, per-operation root (for example a PARAM unpack directory).
+ *
+ * The production pool remains process-wide and is not touched by this scope.
+ * A scope owns every daemon it starts and drains in-flight requests before
+ * disposing them, so callers can safely use it around a complete read flow,
+ * including header/row-width retries and file-backed result materialization.
+ */
+export function createBridgeDaemonScope(): BridgeDaemonScope {
+  const scopedClients: BridgeClientPool = new Map();
+  let activeRuns = 0;
+  let closing = false;
+  let drainResolve: (() => void) | undefined;
+  let disposePromise: Promise<void> | undefined;
+
+  const run: BridgeRunner = async <T>(options: RunBridgeOptions): Promise<BridgeResult<T>> => {
+    if (closing) {
+      return failedBridgeResult<T>(options, 'BRIDGE_SCOPE_CLOSED', 'Bridge scope 已关闭，不能继续发起请求。');
+    }
+    activeRuns += 1;
+    try {
+      return await runBridgeWithPool<T>(options, scopedClients);
+    } finally {
+      activeRuns -= 1;
+      if (closing && activeRuns === 0) drainResolve?.();
+    }
+  };
+
+  const dispose = (): Promise<void> => {
+    if (disposePromise) return disposePromise;
+    closing = true;
+    disposePromise = (async () => {
+      if (activeRuns > 0) {
+        await new Promise<void>((resolveDrain) => {
+          drainResolve = resolveDrain;
+        });
+      }
+      const active = [...scopedClients.values()];
+      scopedClients.clear();
+      await disposeBridgeClientPromises(active);
+    })();
+    return disposePromise;
+  };
+
+  return { run, dispose };
+}
+
+/**
+ * Drain every client promise before reporting cleanup failure.  A rejected
+ * dispose must not make callers tear down their temporary workspace while a
+ * sibling daemon is still closing; all results are observed and failures are
+ * rethrown after every client has settled.
+ */
+export async function disposeBridgeClientPromises(
+  active: Iterable<Promise<DisposableBridgeClient | undefined>>
+): Promise<void> {
+  const settled = await Promise.allSettled([...active].map(async (promise) => {
+    const client = await promise.catch(() => undefined);
+    if (client) await client.dispose();
+  }));
+  const failures = settled
+    .filter((item): item is PromiseRejectedResult => item.status === 'rejected')
+    .map((item) => item.reason);
+  if (failures.length === 0) return;
+  if (failures.length === 1) {
+    const failure = failures[0];
+    throw failure instanceof Error ? failure : new Error(String(failure));
+  }
+  throw new AggregateError(failures, 'One or more Bridge daemon clients failed to dispose.');
+}
+
+async function runBridgeWithPool<T = unknown>(
+  options: RunBridgeOptions,
+  clientPool: BridgeClientPool
+): Promise<BridgeResult<T>> {
   const bridgeProjectPath = resolveBridgeProjectPath(options.bridgeProjectPath, options.cwd);
   const allowedRoots = uniqueResolvedRoots([
     ...(options.allowedRoots?.length ? options.allowedRoots : [dirname(options.filePath)]),
@@ -88,7 +180,7 @@ export async function runBridge<T = unknown>(options: RunBridgeOptions): Promise
       maxFrameBytes: options.maxFrameBytes ?? 16 * 1024 * 1024,
       maxConcurrency,
       startupTimeoutMs: options.timeoutMs ?? DEFAULT_TIMEOUT_MS
-    }, launch);
+    }, launch, clientPool);
     const payload = await client.request<BridgeResult<T>>({
       payload: {
         command: options.command,
@@ -103,8 +195,8 @@ export async function runBridge<T = unknown>(options: RunBridgeOptions): Promise
     if (options.command === 'read-bridge-artifact') return payload.result;
     return materializeFileBackedResult(client, payload.result, options);
   } catch (error) {
-    const client = await clients.get(poolKey)?.catch(() => undefined);
-    if (!client || client.isClosed) clients.delete(poolKey);
+    const client = await clientPool.get(poolKey)?.catch(() => undefined);
+    if (!client || client.isClosed) clientPool.delete(poolKey);
     const bridgeError = error instanceof BridgeDaemonError
       ? error
       : new BridgeDaemonError(
@@ -283,6 +375,7 @@ export async function disposeBridgeDaemonPool(): Promise<void> {
 }
 
 async function findCoveringClient(
+  clientPool: BridgeClientPool,
   launch: { executable: string; args: string[] },
   workspaceSessionId: string,
   allowedRoots: string[],
@@ -293,11 +386,11 @@ async function findCoveringClient(
 ): Promise<BridgeDaemonClient | undefined> {
   const normAllowed = allowedRoots.map((r) => resolve(r));
   const normWritable = writableRoots.map((r) => resolve(r));
-  for (const [key, promise] of clients.entries()) {
+  for (const [key, promise] of clientPool.entries()) {
     try {
       const client = await promise;
       if (client.isClosed) {
-        clients.delete(key);
+        clientPool.delete(key);
         continue;
       }
       if (client.options.executable !== launch.executable) continue;
@@ -320,7 +413,7 @@ async function findCoveringClient(
 
       return client;
     } catch {
-      clients.delete(key);
+      clientPool.delete(key);
     }
   }
   return undefined;
@@ -337,9 +430,11 @@ function isCoveredBy(target: string, roots: string[]): boolean {
 async function getOrCreateClient(
   key: string,
   options: Parameters<typeof BridgeDaemonClient.start>[0],
-  launch: { executable: string; args: string[] }
+  launch: { executable: string; args: string[] },
+  clientPool: BridgeClientPool
 ): Promise<BridgeDaemonClient> {
   const covering = await findCoveringClient(
+    clientPool,
     launch,
     options.workspaceSessionId,
     options.allowedRoots,
@@ -350,19 +445,19 @@ async function getOrCreateClient(
   );
   if (covering) return covering;
 
-  const existing = clients.get(key);
+  const existing = clientPool.get(key);
   if (existing) {
     const client = await existing;
     if (!client.isClosed) return client;
-    clients.delete(key);
+    clientPool.delete(key);
   }
 
   const created = BridgeDaemonClient.start(options);
-  clients.set(key, created);
+  clientPool.set(key, created);
   try {
     return await created;
   } catch (error) {
-    clients.delete(key);
+    clientPool.delete(key);
     throw error;
   }
 }

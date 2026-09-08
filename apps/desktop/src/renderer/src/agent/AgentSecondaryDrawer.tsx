@@ -45,7 +45,6 @@ export function AgentSecondaryDrawer(props: AgentSecondaryDrawerProps): ReactEle
     onClose,
     onSwitchView,
     task,
-    tools,
     permissionLockReason,
     settings
   } = props;
@@ -73,7 +72,7 @@ export function AgentSecondaryDrawer(props: AgentSecondaryDrawerProps): ReactEle
 
   if (!open) return <div className="agent-secondary-drawer is-hidden" data-testid="agent-secondary-drawer" aria-hidden="true" />;
 
-  const title = view === 'history' ? 'Agent 历史' : view === 'memory' ? '长期记忆 (Memory)' : '模型服务设置';
+  const title = view === 'history' ? '任务历史' : view === 'memory' ? '长期记忆' : '模型服务设置';
 
   return (
     <div
@@ -144,7 +143,7 @@ export function AgentSecondaryDrawer(props: AgentSecondaryDrawerProps): ReactEle
               ))}
             </select>
             <p className="agent-task__lock" data-testid="agent-task-permission">
-              权限模式：{task.task.mode ?? '计划模式（主进程锁定）'}。{permissionLockReason}
+              权限模式：{task.task.mode ?? '计划模式（不可直接写入）'}。{permissionLockReason}
             </p>
           </div>
           <div className="row gap">
@@ -177,7 +176,6 @@ export function AgentSecondaryDrawer(props: AgentSecondaryDrawerProps): ReactEle
             <button type="button" className="btn btn--ghost btn--sm" onClick={() => onSwitchView('settings')}>模型设置</button>
           </div>
           {task.sessionsError !== null && <p className="danger">{task.sessionsError}</p>}
-          <p className="muted" data-testid="agent-sessions-source-limit">会话列表只回报最近 50 个会话文件。</p>
           {task.sessions.length === 0 && <p className="empty-hint">暂无会话记录。</p>}
           {task.sessions.map((session) => (
             <div className="agent-history__item" key={session.sessionPath}>
@@ -193,24 +191,16 @@ export function AgentSecondaryDrawer(props: AgentSecondaryDrawerProps): ReactEle
           ))}
           {task.sessionDetail !== null && (
             <div className="agent-log" data-testid="agent-session-detail">
-              <div className="agent-log__row"><span>已载入会话：共 {task.sessionDetail.messageCount} 条消息，本次只取尾部 {task.sessionDetail.loadedMessages} 条</span></div>
-              <div className="agent-log__row"><span>权限模式 {task.sessionDetail.permissionMode ?? '未记录'} · 协议 {task.sessionDetail.protocol ?? '未记录'}</span></div>
+              <div className="agent-log__row">
+                <span>{task.sessionDetail.interrupted ? '该任务曾中断。' : '已载入任务记录。'}</span>
+              </div>
+              {task.sessionDetail.parseErrors > 0 && (
+                <div className="agent-log__row is-warn">
+                  <span>{task.sessionDetail.parseErrors} 行无法解析，已跳过——该会话记录不完整</span>
+                </div>
+              )}
             </div>
           )}
-
-          {/* 工具库存迁入抽屉（§12.10）。真实权限判定在主进程，这里只显示已注册工具。 */}
-          <details data-testid="agent-tool-inventory">
-            <summary>已注册工具 {tools.length} 个</summary>
-            <div className="agent-log">
-              {tools.length === 0
-                ? <div className="agent-log__row"><span className="muted">主进程未回报任何已注册工具</span></div>
-                : tools.map((tool) => (
-                  <div key={tool.name} className="agent-log__row">
-                    <span title={tool.description}>{tool.name} · {tool.permissionLevel ?? tool.permission}</span>
-                  </div>
-                ))}
-            </div>
-          </details>
         </div>
       ) : (
         // S25：设置页只放模型服务表单——运行任务/取消/草稿生成器/思考强度/

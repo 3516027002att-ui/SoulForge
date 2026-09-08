@@ -256,9 +256,9 @@ export function GparamWorkbench(props: GparamWorkbenchProps): ReactElement {
   const columns: WorkbenchColumnSpec[] = [
     {
       id: 'files',
-      title: 'Files',
+       title: '文件',
       // bank 数量按当前索引实测（任务开始时 34 个是快照，不是验收常量）。
-      hint: `${props.banks.length} banks`,
+       hint: `${props.banks.length} 个参数文件`,
       // §2.5 停靠：Files 707 | Groups 340 | Fields 449 | Values 636 | Toolbar 515，
       // 折算比例 ≈ 0.27 / 0.13 / 0.17 / 0.24 / 0.19。
       initialFlex: 0.27,
@@ -288,13 +288,13 @@ export function GparamWorkbench(props: GparamWorkbenchProps): ReactElement {
     },
     {
       id: 'groups',
-      title: 'Groups',
-      hint: `${groups.length} groups`,
+       title: '组',
+       hint: `${groups.length} 个组`,
       initialFlex: 0.13,
       minWidth: 180,
       children: (
         <div className="wb-list">
-          {selectedBankUri === null && <p className="wb-empty">先在 Files 栏选择一个 bank。</p>}
+           {selectedBankUri === null && <p className="wb-empty">先在文件栏选择一个参数文件。</p>}
           {selectedBankUri !== null && loading && <p className="wb-empty">加载中…</p>}
           {selectedBankUri !== null && !loading && bankError && (
             <p className="wb-empty diag-error">{bankError.message}</p>
@@ -313,9 +313,9 @@ export function GparamWorkbench(props: GparamWorkbenchProps): ReactElement {
               })}
             >
               <span className="wb-row__name" title={group.name2 || undefined}>
-                {group.name1 || `Group ${group.groupId}`}
+                 {group.name1 || `组 ${group.groupId}`}
               </span>
-              <span className="wb-row__meta">{group.paramCount} params</span>
+               <span className="wb-row__meta">{group.paramCount} 个字段</span>
             </div>
           ))}
           {groups.length === 0 && selectedBankUri !== null && !loading && !bankError && document !== null && (
@@ -326,13 +326,13 @@ export function GparamWorkbench(props: GparamWorkbenchProps): ReactElement {
     },
     {
       id: 'fields',
-      title: 'Fields',
-      hint: selectedGroup ? `${selectedGroup.name1} · ${fields.length} params` : 'params',
+       title: '字段',
+       hint: selectedGroup ? `${selectedGroup.name1} · ${fields.length} 个字段` : '字段',
       initialFlex: 0.17,
       minWidth: 220,
       children: (
         <div className="wb-list">
-          {selectedGroupId === null && <p className="wb-empty">先在中栏选择一个 group。</p>}
+           {selectedGroupId === null && <p className="wb-empty">先在组栏选择一个组。</p>}
           {selectedGroupId !== null && fields.map((param, index) => (
             <div
               key={param.paramId}
@@ -350,31 +350,31 @@ export function GparamWorkbench(props: GparamWorkbenchProps): ReactElement {
             </div>
           ))}
           {selectedGroupId !== null && fields.length === 0 && (
-            <p className="wb-empty">这个 group 没有字段。</p>
+             <p className="wb-empty">这个组没有字段。</p>
           )}
         </div>
       )
     },
     {
       id: 'values',
-      title: 'Values',
+       title: '数值',
       hint: selectedParam ? `${selectedParam.type} · ${selectedParam.valueCount} 值` : '值',
       initialFlex: 0.24,
       minWidth: 260,
       children: (
         <div className="wb-list">
-          {selectedParamId === null && <p className="wb-empty">先在 Fields 栏选择一个 field。</p>}
+           {selectedParamId === null && <p className="wb-empty">先在字段栏选择一个字段。</p>}
           {selectedParamId !== null && selectedParam && (
             <div className="gparam-values">
               <div className="wb-list__group-label">
-                {selectedParam.name1 || `Param ${selectedParam.paramId}`}
+                 {selectedParam.name1 || `字段 ${selectedParam.paramId}`}
                 {selectedParam.name2 ? ` · ${selectedParam.name2}` : ''}
               </div>
               <div className="gparam-values__head">
                 <span>#</span>
                 <span>值</span>
-                <span>valueId</span>
-                <span>unk f32</span>
+                 <span>值 ID</span>
+                 <span>未命名的浮点值</span>
               </div>
               {valueLines.map((line) => {
                 const comps = componentCount(selectedParam.type);
@@ -412,7 +412,7 @@ export function GparamWorkbench(props: GparamWorkbenchProps): ReactElement {
                   </div>
                 );
               })}
-              {valueLines.length === 0 && <p className="wb-empty">该 field 没有值。</p>}
+               {valueLines.length === 0 && <p className="wb-empty">该字段没有值。</p>}
             </div>
           )}
         </div>
@@ -420,7 +420,7 @@ export function GparamWorkbench(props: GparamWorkbenchProps): ReactElement {
     },
     {
       id: 'toolbar',
-      title: 'Toolbar',
+       title: '操作',
       initialFlex: 0.19,
       minWidth: 200,
       children: (
@@ -430,8 +430,8 @@ export function GparamWorkbench(props: GparamWorkbenchProps): ReactElement {
           {saveNotice && <p className="wb-empty">{saveNotice}</p>}
           {draftCount > 0 && document !== null ? (
             <>
-              <div className="wb-list__group-label">字段写入（typed field-set）</div>
-              <p className="wb-empty">共 {draftCount} 处修改，提交后经 write-gparam 重读验证。</p>
+               <div className="wb-list__group-label">写入字段</div>
+               <p className="wb-empty">共 {draftCount} 处修改，提交后会重新读取验证。</p>
               {saveError && <p className="wb-empty diag-error">{saveError}</p>}
               {!allFinite && <p className="wb-empty diag-error">存在非数字输入，无法提交。</p>}
               <button
@@ -445,10 +445,7 @@ export function GparamWorkbench(props: GparamWorkbenchProps): ReactElement {
             </>
           ) : (
             <>
-              <p className="wb-empty">暂无已接通的工具</p>
-              <p className="wb-empty">
-                选中 field 后修改值，此处出现 typed 保存入口（没有 bytes replace fallback）。
-              </p>
+               <p className="wb-empty">当前没有可用的字段写入操作；暂不支持字段定位时的原始字节替换。</p>
             </>
           )}
         </div>

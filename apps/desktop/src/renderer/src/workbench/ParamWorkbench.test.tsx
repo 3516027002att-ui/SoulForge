@@ -25,7 +25,12 @@ import { renderToStaticMarkup } from 'react-dom/server';
 // require 直接崩）。isParamBackupPath 定义在 paramBridgeCommit.ts，ipc.ts 经
 // 包主入口 re-export 的同一导出，行为一致。
 import { isParamBackupPath } from '@soulforge/core/dist/editing/paramBridgeCommit.js';
-import { ParamWorkbench } from './ParamWorkbench.js';
+import {
+  mergeParamPayloadRows,
+  ParamPageInFlightCache,
+  ParamWorkbench,
+  type ParamPageResult
+} from './ParamWorkbench.js';
 
 // node 环境没有 window，而 getRendererRuntime 会读 window.soulforge —— 不设
 // 会在渲染时 ReferenceError。设为空对象 → browser-preview 表面 → bridge 为
@@ -70,9 +75,9 @@ describe('ParamWorkbench 初始结构（挂载即有的骨架）', () => {
 
   it('三栏 Params/Rows/Fields 同时存在（T5-4 删第四栏 Tools）', () => {
     const html = render();
-    assert.match(html, /aria-label="Params"/);
-    assert.match(html, /aria-label="Rows"/);
-    assert.match(html, /aria-label="Fields"/);
+    assert.match(html, /aria-label="参数文件"/);
+    assert.match(html, /aria-label="行"/);
+    assert.match(html, /aria-label="字段"/);
     assert.ok(!html.includes('aria-label="Tools"'), '第四栏 Tools 必须删除');
   });
 
@@ -94,7 +99,7 @@ describe('ParamWorkbench 初始结构（挂载即有的骨架）', () => {
   it('未选中 param 时行栏与字段栏给出空态提示而不是空白', () => {
     const html = render();
     // 两处（Rows 栏与 Fields 栏）都应出现「先在左栏选择一个 param。」
-    assert.equal(html.match(/先在左栏选择一个 param。/g)?.length ?? 0, 2);
+    assert.equal(html.match(/先在左栏选择一个参数文件。/g)?.length ?? 0, 2);
   });
 
   it('工具条（T5-4 + 问题 4）：新建行/复制当前行/删除当前行 + 导出行/导入行/导出备注/导入备注 七个真实按钮，未选表时禁用', () => {
@@ -106,8 +111,8 @@ describe('ParamWorkbench 初始结构（挂载即有的骨架）', () => {
     assert.ok(html.includes('>删除当前行</button>'), '缺少删除当前行按钮');
     assert.ok(html.includes('>导出行</button>'), '缺少导出行按钮');
     assert.ok(html.includes('>导入行</button>'), '缺少导入行按钮');
-    assert.ok(html.includes('>导出备注</button>'), '缺少导出备注按钮');
-    assert.ok(html.includes('>导入备注</button>'), '缺少导入备注按钮');
+    assert.ok(html.includes('>导出行名</button>'), '缺少导出行名按钮');
+    assert.ok(html.includes('>导入行名</button>'), '缺少导入行名按钮');
     const buttons = html.match(/<button/g) ?? [];
     assert.equal(buttons.length, 7, '工具条应恰好 7 个按钮');
   });
@@ -198,9 +203,9 @@ describe('PARAM-10A negative source tests（§18.14）', () => {
     assert.ok(fxrWrite.includes('isParamBackupPath('), 'commitFxrFieldSet 未调用 isParamBackupPath');
   });
 
-  it('backup 拒绝的诊断指向 History & Recovery（不冒充普通读取失败）', () => {
+  it('backup 拒绝的诊断指向历史与恢复（不冒充普通读取失败）', () => {
     const doc = sliceHandler(paramIpcSource, 'resource.readParamDocument');
-    assert.match(doc, /History & Recovery/);
+    assert.match(doc, /历史与恢复/);
   });
 
   it('失败非 empty：组件失败路径渲染结构化诊断而不是空表', () => {
@@ -210,7 +215,7 @@ describe('PARAM-10A negative source tests（§18.14）', () => {
     assert.match(workbenchSource, /className="wb-empty diag-error">\{paramsError\}/);
     assert.match(workbenchSource, /className="wb-empty diag-error">\{rowsError\}/);
     assert.ok(workbenchSource.includes('这个 param 读不出来'), '选中失败的 param 必须给出明确失败文案');
-    assert.ok(workbenchSource.includes('容器内其他 param 不受影响'), '失败说明不能夸大影响范围');
+    assert.ok(workbenchSource.includes('容器内其他参数不受影响'), '失败说明不能夸大影响范围');
   });
 
   it('加载指示器在虚拟容器外、无行数守卫（问题 5-A）', () => {
@@ -279,6 +284,109 @@ describe('PARAM-10A negative source tests（§18.14）', () => {
     // 1bit 传 '1'/'0' 字符串。
     assert.match(workbenchSource, /commitField\(field, field\.type === 'bool' \? checked : next\)/);
     assert.doesNotMatch(workbenchSource, /type === 's32'[\s\S]{0,40}checkbox/);
+  });
+});
+
+describe('PARAM payload 请求代际与物理身份', () => {
+  function deferred<T>(): {
+    promise: Promise<T>;
+    resolve: (value: T) => void;
+  } {
+    let resolve!: (value: T) => void;
+    const promise = new Promise<T>((next) => { resolve = next; });
+    return { promise, resolve };
+  }
+
+  function pageResult(): ParamPageResult {
+    return {
+      ok: true,
+      containerUri: 'container',
+      entryIndex: 0,
+      sourceUri: 'param',
+      sourceHash: null,
+      typeName: 'TestParam',
+      rowCount: 1,
+      page: 0,
+      pageSize: 256,
+      pageCount: 1,
+      rows: [],
+      rowsTruncated: false,
+      diagnostics: []
+    };
+  }
+
+  it('同页在途切行只复用一个请求，完成后自动释放去重项', async () => {
+    const cache = new ParamPageInFlightCache();
+    const pending = deferred<ParamPageResult>();
+    let calls = 0;
+    const create = (): Promise<ParamPageResult> => {
+      calls += 1;
+      return pending.promise;
+    };
+
+    const first = cache.getOrCreate('container#entry#session-a#page-0', create);
+    const second = cache.getOrCreate('container#entry#session-a#page-0', create);
+    assert.strictEqual(first, second, '同页在途切行必须复用同一个 Promise');
+    assert.equal(calls, 0, '请求工厂在微任务中启动，避免同步重入');
+    pending.resolve(pageResult());
+    await first;
+    await Promise.resolve();
+    const afterCompletion = cache.getOrCreate('container#entry#session-a#page-0', () => {
+      calls += 1;
+      return Promise.resolve(pageResult());
+    });
+    assert.notStrictEqual(afterCompletion, first, '完成后不应永久缓存 completed page');
+    await afterCompletion;
+    assert.equal(calls, 2, '完成后新请求允许重新读取');
+  });
+
+  it('切表时旧页晚到不会与新表同 page key 去重或回填', async () => {
+    const cache = new ParamPageInFlightCache();
+    const oldPending = deferred<ParamPageResult>();
+    const newPending = deferred<ParamPageResult>();
+    let calls = 0;
+    const oldRequest = cache.getOrCreate('container#old-entry#session#page-0', () => {
+      calls += 1;
+      return oldPending.promise;
+    });
+    await Promise.resolve();
+    cache.beginSession();
+    const newRequest = cache.getOrCreate('container#old-entry#session#page-0', () => {
+      calls += 1;
+      return newPending.promise;
+    });
+    assert.notStrictEqual(newRequest, oldRequest, '新 session 不得复用旧页在途请求');
+    await Promise.resolve();
+    oldPending.resolve(pageResult());
+    await oldRequest;
+    await Promise.resolve();
+    const stillInFlight = cache.getOrCreate('container#old-entry#session#page-0', () => {
+      calls += 1;
+      return newPending.promise;
+    });
+    assert.strictEqual(stillInFlight, newRequest, '旧请求完成不得删除新代际的在途项');
+    newPending.resolve(pageResult());
+    await newRequest;
+    assert.equal(calls, 2, '切表/重建 session 后应各自只有一条在途请求');
+  });
+
+  it('新 session 的同 rowIndex 不接受旧 id/dataHash payload', () => {
+    const current = [{ rowIndex: 12, id: 900, dataHash: 'hash-new' }];
+    const oldPayload = new Map([[12, {
+      id: 900,
+      dataHash: 'hash-old',
+      dataBase64: 'b2xk'
+    }]]);
+    const rejected = mergeParamPayloadRows(current, oldPayload);
+    assert.equal(rejected[0]?.dataBase64, undefined, '旧 hash 到达时不得填入新 session 的行');
+
+    const freshPayload = new Map([[12, {
+      id: 900,
+      dataHash: 'hash-new',
+      dataBase64: 'bmV3'
+    }]]);
+    const accepted = mergeParamPayloadRows(current, freshPayload);
+    assert.equal(accepted[0]?.dataBase64, 'bmV3', '新 session 的匹配 payload 应正常合并');
   });
 });
 

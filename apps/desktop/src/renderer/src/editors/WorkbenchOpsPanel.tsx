@@ -61,11 +61,11 @@ export function WorkbenchOpsPanel(props: WorkbenchOpsPanelProps): ReactElement {
     { id: 'jobs', label: '任务' },
     { id: 'history', label: '历史' },
     { id: 'diagnostics', label: '诊断' },
-    { id: 'patch', label: '补丁影响' }
+    { id: 'patch', label: '变更预览' }
   ], []);
 
   return (
-    <section className="panel" aria-label="工作台运维">
+    <section className="panel" aria-label="操作记录">
       <header className="panel-header">
         <h3>工作台：任务 / 历史 / 诊断</h3>
         <span className="muted">
@@ -96,7 +96,7 @@ export function WorkbenchOpsPanel(props: WorkbenchOpsPanelProps): ReactElement {
             <span>操作</span>
           </div>
           {props.jobs.length === 0 && (
-            <p className="muted">暂无任务。索引、Bridge 与验证任务会出现在此。</p>
+            <p className="muted">暂无任务记录。</p>
           )}
           {props.jobs.map((job) => (
             <div key={job.id} className="binder-child-row" role="row">
@@ -132,7 +132,7 @@ export function WorkbenchOpsPanel(props: WorkbenchOpsPanelProps): ReactElement {
             <span>操作</span>
           </div>
           {props.history.length === 0 && (
-            <p className="muted">暂无补丁历史。提交后可在此回滚。</p>
+            <p className="muted">暂无变更历史。提交后可在此回滚。</p>
           )}
           {props.history.map((row) => (
             <div key={row.opId} className="binder-child-row" role="row">
@@ -178,7 +178,7 @@ export function WorkbenchOpsPanel(props: WorkbenchOpsPanelProps): ReactElement {
       {tab === 'patch' && (
         <div>
           {!props.patchImpact && (
-            <p className="muted">尚无待提交补丁影响图。生成 PatchIR 后显示引用与验证范围。</p>
+            <p className="muted">尚无待提交变更预览。</p>
           )}
           {props.patchImpact && (
             <div className="stack gap">

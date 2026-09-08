@@ -13,6 +13,7 @@ import {
   computeParamMetadataDigest,
   computeParamMetadataPackageDigest,
   matchParamMetadataPackage,
+  resolveParamMetadataRowWidth,
   PARAM_METADATA_MAX_CANONICAL_UTF8_BYTES,
   PARAM_METADATA_MAX_DEFINITIONS,
   PARAM_METADATA_MAX_DIAGNOSTICS,
@@ -31,6 +32,15 @@ import {
 
 function main(): void {
   const fixture = buildFixture();
+  if (resolveParamMetadataRowWidth(fixture.package, fixture.key, fixture.policy) !== fixture.key.rowDataSize
+    || resolveParamMetadataRowWidth(fixture.package, { ...fixture.key, dataVersion: -1 }, fixture.policy) !== undefined
+    || resolveParamMetadataRowWidth(fixture.package, { ...fixture.key, game: 'other' }, fixture.policy) !== undefined
+    || resolveParamMetadataRowWidth(fixture.package, { ...fixture.key, gameBuild: 'other' }, fixture.policy) !== undefined
+    || resolveParamMetadataRowWidth(fixture.package, { ...fixture.key, typeName: 'OTHER' }, fixture.policy) !== undefined
+    || resolveParamMetadataRowWidth(fixture.package, fixture.key, { ...fixture.policy, trustedPackages: [] }) !== undefined
+    || resolveParamMetadataRowWidth({ ...fixture.package, definitions: [...fixture.package.definitions, ...fixture.package.definitions] }, fixture.key, fixture.policy) !== undefined) {
+    throw new Error('PARAM native header metadata width resolution must be unique, exact and trusted.');
+  }
   expectRejected(
     validateParamMetadataPackage({ source: { kind: Object.create(null) } }),
     'PARAM_METADATA_SOURCE_KIND_INVALID'

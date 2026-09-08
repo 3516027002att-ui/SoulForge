@@ -360,7 +360,8 @@ export async function readEmevdEvent(input: {
   }
 
   const total = event.instructions.length;
-  const offset = Math.min(input.instructionOffset ?? 0, total);
+  const requestedOffset = input.instructionOffset ?? 0;
+  const offset = Math.min(requestedOffset, total);
   const limit = Math.min(
     input.instructionLimit ?? MAX_EVENT_INSTRUCTION_WINDOW,
     MAX_EVENT_INSTRUCTION_WINDOW
@@ -370,6 +371,11 @@ export async function readEmevdEvent(input: {
     readEventInstruction(instruction, offset + index, registry.registry)
   );
   const truncated = end < total;
+  // A DarkScript write receipt is complete only for the entire event: it must
+  // begin at instruction zero and end exactly at the native instruction total.
+  // A tail page (or an offset beyond EOF) is still a valid read, but it is not
+  // safe to feed back into event-scope DSL compilation.
+  const darkScriptComplete = requestedOffset === 0 && offset === 0 && end === total;
   const fileRevision = await stat(resolved.path).then((value) => value.mtimeMs).catch(() => undefined);
   const fingerprint = fingerprintEmedfRegistry(registry.registry);
   const eventForRead = { ...event, instructions: event.instructions.slice(offset, end) };
@@ -412,7 +418,7 @@ export async function readEmevdEvent(input: {
     limit,
     returned: instructions.length,
     truncated,
-    darkScriptComplete: !truncated,
+    darkScriptComplete,
     readRange: { start: offset, end },
     crossesBlockBoundary,
     blocks,

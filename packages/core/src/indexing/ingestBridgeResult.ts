@@ -75,36 +75,43 @@ export function ingestBridgeResult(index: WorkspaceIndex, result: BridgeResult<u
   if (result.resourceKind === 'event') {
     const parsed = parseEventExport(result.data, result.sourceUri);
     diagnostics.push(...parsed.diagnostics);
-    if (parsed.value) index.upsertEventExport(parsed.value);
-    return { accepted: Boolean(parsed.value), parseStatus: parsed.value ? result.parseStatus : 'partial', diagnostics };
+    const accepted = parsed.value ? index.upsertEventExport(parsed.value) : false;
+    if (parsed.value && !accepted) diagnostics.push(projectionRejected(result.sourceUri));
+    return { accepted, parseStatus: accepted ? result.parseStatus : 'partial', diagnostics };
   }
 
   if (result.resourceKind === 'map') {
     const parsed = parseMapExport(result.data, result.sourceUri);
     diagnostics.push(...parsed.diagnostics);
-    if (parsed.value) index.upsertMapExport(parsed.value);
-    return { accepted: Boolean(parsed.value), parseStatus: parsed.value ? result.parseStatus : 'partial', diagnostics };
+    const accepted = parsed.value ? index.upsertMapExport(parsed.value) : false;
+    if (parsed.value && !accepted) diagnostics.push(projectionRejected(result.sourceUri));
+    return { accepted, parseStatus: accepted ? result.parseStatus : 'partial', diagnostics };
   }
 
   if (result.resourceKind === 'param') {
     const parsed = parseParamExports(result.data, result.sourceUri);
     diagnostics.push(...parsed.diagnostics);
-    for (const value of parsed.values) index.upsertParamExport(value);
-    return { accepted: parsed.values.length > 0, parseStatus: parsed.values.length > 0 ? result.parseStatus : 'partial', diagnostics };
+    const acceptedCount = parsed.values.reduce((count, value) => count + (index.upsertParamExport(value) ? 1 : 0), 0);
+    if (acceptedCount < parsed.values.length) diagnostics.push(projectionRejected(result.sourceUri));
+    const fullyAccepted = parsed.values.length > 0 && acceptedCount === parsed.values.length;
+    return { accepted: acceptedCount > 0, parseStatus: fullyAccepted ? result.parseStatus : 'partial', diagnostics };
   }
 
   if (result.resourceKind === 'msg') {
     const parsed = parseMsgExports(result.data, result.sourceUri);
     diagnostics.push(...parsed.diagnostics);
-    for (const value of parsed.values) index.upsertMsgExport(value);
-    return { accepted: parsed.values.length > 0, parseStatus: parsed.values.length > 0 ? result.parseStatus : 'partial', diagnostics };
+    const acceptedCount = parsed.values.reduce((count, value) => count + (index.upsertMsgExport(value) ? 1 : 0), 0);
+    if (acceptedCount < parsed.values.length) diagnostics.push(projectionRejected(result.sourceUri));
+    const fullyAccepted = parsed.values.length > 0 && acceptedCount === parsed.values.length;
+    return { accepted: acceptedCount > 0, parseStatus: fullyAccepted ? result.parseStatus : 'partial', diagnostics };
   }
 
   if (result.resourceKind === 'action') {
     const parsed = parseTaeExport(result.data, result.sourceUri, result.sourcePath);
     diagnostics.push(...parsed.diagnostics);
-    if (parsed.value) index.upsertTaeExport(parsed.value);
-    return { accepted: Boolean(parsed.value), parseStatus: parsed.value ? result.parseStatus : 'partial', diagnostics };
+    const accepted = parsed.value ? index.upsertTaeExport(parsed.value) : false;
+    if (parsed.value && !accepted) diagnostics.push(projectionRejected(result.sourceUri));
+    return { accepted, parseStatus: accepted ? result.parseStatus : 'partial', diagnostics };
   }
 
   // 到这里的 resourceKind 一定在契约内（越界已在上面失败关闭），所以这条
@@ -127,6 +134,15 @@ interface ParsedValue<T> {
 interface ParsedValues<T> {
   values: T[];
   diagnostics: Diagnostic[];
+}
+
+function projectionRejected(sourceUri: string): Diagnostic {
+  return {
+    severity: 'warning',
+    code: 'NATIVE_PROJECTION_REJECTED',
+    message: '原生语义投影因来源版本过旧或冲突被拒绝，旧投影保持不变。',
+    sourceUri
+  };
 }
 
 function parseEventExport(value: unknown, sourceUri: string): ParsedValue<EventExport> {
@@ -342,9 +358,9 @@ function parseMapExport(value: unknown, sourceUri: string): ParsedValue<MapExpor
   };
 }
 
-function parseParamExport(value: unknown, sourceUri: string): ParsedValue<ParamExport> {
+function parseParamExport(value: unknown, sourceUri: string, fallbackProvenance: SourceProvenance = {}): ParsedValue<ParamExport> {
   const record = asRecord(value);
-  const exportProvenance = sourceProvenance(record);
+  const exportProvenance = sourceProvenance(record, fallbackProvenance);
   const paramName = asString(record.paramName);
   if (!paramName) return { diagnostics: [missingField(sourceUri, 'paramName')] };
   const entryIndex = asNumber(record.entryIndex);
@@ -376,15 +392,16 @@ function parseParamExport(value: unknown, sourceUri: string): ParsedValue<ParamE
 
 function parseParamExports(value: unknown, sourceUri: string): ParsedValues<ParamExport> {
   const record = asRecord(value);
+  const exportProvenance = sourceProvenance(record);
   if (!Array.isArray(record.params)) {
-    const parsed = parseParamExport(value, sourceUri);
+    const parsed = parseParamExport(value, sourceUri, exportProvenance);
     return { values: parsed.value ? [parsed.value] : [], diagnostics: parsed.diagnostics };
   }
 
   const values: ParamExport[] = [];
   const diagnostics: Diagnostic[] = [];
   record.params.forEach((item, index) => {
-    const parsed = parseParamExport(item, sourceUri);
+    const parsed = parseParamExport(item, sourceUri, exportProvenance);
     diagnostics.push(...parsed.diagnostics.map((diagnostic) => ({
       ...diagnostic,
       message: `params[${index}]: ${diagnostic.message}`
@@ -394,9 +411,9 @@ function parseParamExports(value: unknown, sourceUri: string): ParsedValues<Para
   return { values, diagnostics };
 }
 
-function parseMsgExport(value: unknown, sourceUri: string): ParsedValue<MsgExport> {
+function parseMsgExport(value: unknown, sourceUri: string, fallbackProvenance: SourceProvenance = {}): ParsedValue<MsgExport> {
   const record = asRecord(value);
-  const exportProvenance = sourceProvenance(record);
+  const exportProvenance = sourceProvenance(record, fallbackProvenance);
   return {
     value: {
       ...(asString(record.category) ? { category: asString(record.category) } : {}),
@@ -409,15 +426,16 @@ function parseMsgExport(value: unknown, sourceUri: string): ParsedValue<MsgExpor
 
 function parseMsgExports(value: unknown, sourceUri: string): ParsedValues<MsgExport> {
   const record = asRecord(value);
+  const exportProvenance = sourceProvenance(record);
   if (!Array.isArray(record.msgs)) {
-    const parsed = parseMsgExport(value, sourceUri);
+    const parsed = parseMsgExport(value, sourceUri, exportProvenance);
     return { values: parsed.value ? [parsed.value] : [], diagnostics: parsed.diagnostics };
   }
 
   const values: MsgExport[] = [];
   const diagnostics: Diagnostic[] = [];
   record.msgs.forEach((item, index) => {
-    const parsed = parseMsgExport(item, sourceUri);
+    const parsed = parseMsgExport(item, sourceUri, exportProvenance);
     diagnostics.push(...parsed.diagnostics.map((diagnostic) => ({
       ...diagnostic,
       message: `msgs[${index}]: ${diagnostic.message}`
@@ -792,6 +810,8 @@ export function mapExportFromMsbDocument(input: {
   mapId: string;
   sourceUri: string;
   sourceHash?: string;
+  /** SHA-256 of the packed/outer file opened by the Bridge. */
+  outerFileHash?: string;
   sourceRevision?: number;
   readerSchemaRevision?: number;
   derivedKey?: string;
@@ -831,6 +851,7 @@ export function mapExportFromMsbDocument(input: {
       uri: `map://${input.mapId}/part/${name}`,
       sourceUri: input.sourceUri,
       mapId: input.mapId,
+      ...(input.outerFileHash ? { outerFileHash: input.outerFileHash } : {}),
       ...(input.sourceHash ? { sourceHash: input.sourceHash } : {}),
       ...(input.sourceRevision !== undefined ? { sourceRevision: input.sourceRevision } : {}),
       name,
@@ -850,6 +871,7 @@ export function mapExportFromMsbDocument(input: {
       uri: `map://${input.mapId}/region/${name}`,
       sourceUri: input.sourceUri,
       mapId: input.mapId,
+      ...(input.outerFileHash ? { outerFileHash: input.outerFileHash } : {}),
       ...(input.sourceHash ? { sourceHash: input.sourceHash } : {}),
       ...(input.sourceRevision !== undefined ? { sourceRevision: input.sourceRevision } : {}),
       name,
@@ -860,6 +882,7 @@ export function mapExportFromMsbDocument(input: {
   });
   return {
     mapId: input.mapId,
+    ...(input.outerFileHash ? { outerFileHash: input.outerFileHash } : {}),
     ...(input.sourceHash ? { sourceHash: input.sourceHash } : {}),
     ...(input.sourceRevision !== undefined ? { sourceRevision: input.sourceRevision } : {}),
     ...(input.readerSchemaRevision !== undefined ? { readerSchemaRevision: input.readerSchemaRevision } : {}),
@@ -1025,16 +1048,18 @@ function parseTextEntry(
   }];
 }
 
-type SourceProvenance = { sourceHash?: string; sourceRevision?: number };
+type SourceProvenance = { sourceHash?: string; outerFileHash?: string; sourceRevision?: number };
 
 function sourceProvenance(
   record: Record<string, unknown>,
   fallback: SourceProvenance = {}
 ): SourceProvenance {
   const sourceHash = asString(record.sourceHash) || fallback.sourceHash;
+  const outerFileHash = asString(record.outerFileHash) || fallback.outerFileHash;
   const sourceRevision = asNumber(record.sourceRevision) ?? fallback.sourceRevision;
   return {
     ...(sourceHash ? { sourceHash } : {}),
+    ...(outerFileHash ? { outerFileHash } : {}),
     ...(sourceRevision !== undefined ? { sourceRevision } : {})
   };
 }

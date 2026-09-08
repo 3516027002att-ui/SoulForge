@@ -270,11 +270,11 @@ describe('VfxWorkbenchPanel 初始结构（挂载即有的三栏骨架）', () =
     assert.match(render(), /aria-label="VFX 工作台"/);
   });
 
-  it('三栏 Effect / Particle list | 真实预览 | Inspector 同时存在', () => {
+  it('三栏 效果与粒子 | 预览 | 检查信息 同时存在', () => {
     const html = render();
-    assert.match(html, /aria-label="Effect \/ Particle list"/);
-    assert.match(html, /aria-label="真实预览"/);
-    assert.match(html, /aria-label="Inspector"/);
+    assert.match(html, /aria-label="效果与粒子"/);
+    assert.match(html, /aria-label="预览"/);
+    assert.match(html, /aria-label="检查信息"/);
   });
 
   it('没有为凑四栏造 Tools 空栏', () => {
@@ -476,9 +476,11 @@ describe('VFX-54C vfx-field-set 接线', () => {
     assert.doesNotMatch(html, /vfx-value-input-host:0:-:-:0"[^>]*disabled/);
   });
 
-  it('unknown host:无任何编辑控件,保留 blocked 提示', () => {
+  it('unknown host:无任何编辑控件,保留未知类型状态', () => {
     const html = renderLoaded(makeUnknownHostDocument(), { kind: 'host', id: '0', label: 'host 7777' });
-    assert.match(html, /vfx-unknown-host-block/);
+    assert.match(html, /未知类型/);
+    assert.doesNotMatch(html, /vfx-unknown-host-block/);
+    assert.match(html, /wb-prop__value--readonly/);
     assert.doesNotMatch(html, /vfx-value-input-/);
     assert.doesNotMatch(html, /type="number"/);
   });

@@ -423,23 +423,23 @@ export function TpfWorkbenchPanel(props: TpfWorkbenchPanelProps): ReactElement {
 
   const properties: Array<readonly [string, string]> = selectedTexture
     ? [
-        ['Name', selectedTexture.name],
-        ['Index', String(selectedTexture.index)],
+        ['名称', selectedTexture.name],
+        ['序号', String(selectedTexture.index)],
         ['Format（条目表）', selectedTexture.format],
         ['DDS FourCC（真实封装）', selectedTexture.ddsFourCC],
         ['尺寸', `${selectedTexture.width}×${selectedTexture.height}`],
-        ['Mip Levels', String(selectedTexture.mipCount)],
-        ['Data Size', formatBytes(selectedTexture.dataSize)],
-        ['Data Offset', `0x${selectedTexture.dataOffset.toString(16)}`],
-        ['Format Byte', `0x${selectedTexture.formatByte.toString(16).padStart(2, '0')}`]
+        ['Mip 层数', String(selectedTexture.mipCount)],
+        ['数据大小', formatBytes(selectedTexture.dataSize)],
+        ['数据偏移', `0x${selectedTexture.dataOffset.toString(16)}`],
+        ['格式字节', `0x${selectedTexture.formatByte.toString(16).padStart(2, '0')}`]
       ]
     : [];
 
   const columns: WorkbenchColumnSpec[] = [
     {
       id: 'containers',
-      title: 'Containers',
-      hint: `${props.containers.length} containers`,
+      title: '容器',
+      hint: `${props.containers.length} 个容器`,
       initialFlex: 0.16,
       minWidth: 150,
       children: (
@@ -467,8 +467,8 @@ export function TpfWorkbenchPanel(props: TpfWorkbenchPanelProps): ReactElement {
     },
     {
       id: 'textures',
-      title: 'Textures',
-      hint: `${textures.length} textures`,
+      title: '纹理',
+      hint: `${textures.length} 张纹理`,
       initialFlex: 0.24,
       minWidth: 200,
       children: (
@@ -493,7 +493,7 @@ export function TpfWorkbenchPanel(props: TpfWorkbenchPanelProps): ReactElement {
                     onSelect: () => setSelectedTextureIndex(tex.index)
                   })}
                 >
-                  <span className="wb-row__name" title={tex.name}>{tex.name || `Texture ${tex.index}`}</span>
+          <span className="wb-row__name" title={tex.name}>{tex.name || `纹理 ${tex.index}`}</span>
                   <span className="wb-row__meta">{tex.width}×{tex.height} · {tex.ddsFourCC}</span>
                 </div>
               ))}
@@ -505,7 +505,7 @@ export function TpfWorkbenchPanel(props: TpfWorkbenchPanelProps): ReactElement {
     },
     {
       id: 'viewer',
-      title: 'Viewer',
+      title: '预览',
       initialFlex: 0.40,
       minWidth: 240,
       children: (
@@ -537,7 +537,7 @@ export function TpfWorkbenchPanel(props: TpfWorkbenchPanelProps): ReactElement {
     },
     {
       id: 'properties',
-      title: 'Properties',
+      title: '属性',
       initialFlex: 0.20,
       minWidth: 200,
       children: (
@@ -546,7 +546,7 @@ export function TpfWorkbenchPanel(props: TpfWorkbenchPanelProps): ReactElement {
           {selectedTextureIndex !== null && (
             <>
               <div className="wb-list__group-label">
-                {selectedTexture?.name || `Texture ${selectedTextureIndex}`}
+                {selectedTexture?.name || `纹理 ${selectedTextureIndex}`}
               </div>
               <div className="wb-props">
                 {properties.map(([name, value]) => (

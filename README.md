@@ -188,3 +188,23 @@ To be honest, apart from comments from other repos' maintainers, this inbox rare
 So, as long as I restrict you to only emailing me, I'll never receive any feedback.
 That way, my project naturally has zero bugs looooooolllll
 
+
+我决定提供我的测试题和agent的测试脚本，调用会话记录，以供大家参考（如果你有这个能力的话2333）
+魂游mod的编辑不像普通的RAG知识问答库那般有容错，为了保证模型在模糊需求下也能做到准确的查找并可靠的修改，我需要更多真实生产环境下的真实任务来尽量全面的测试agent的能力。
+我在项目中设置了一个一键发送会话记录的按钮，点击这个按钮就能贡献你宝贵的会话记录以供我分析并改进SoulForge。
+我计划创建LLM Wiki功能，使得部署在各个电脑并执行各个任务的agent能够记录其宝贵的真实开发经验，可以通过点击按钮汇总到这里，同时我将提供一个查询接口，使得别人也能够调用这个知识库。
+这并不是空穴来风，事实上，你可以很清楚的从源码中发现这个功能已经初具雏形，不过我需要继续完善测试才能上线。
+为了更好的优化项目，我将为积极的用户提供充足的额度，如果你愿意积极向我分享你的经验，请点击一下star之后联系我，联系方式你懂的。
+
+I have decided to share my test prompts, Agent test scripts, and session logs for everyone to use as references (assuming you have the ability to make sense of them, lol).
+Editing Souls game mods is far less forgiving than querying an ordinary RAG knowledge base. To ensure that the model can still find the right data and make reliable changes from vague requests, I need many more real tasks from actual production environments to test the Agent's capabilities as thoroughly as possible.
+I have added a one-click session-log submission button to the project. By clicking it, you can contribute your valuable session logs for me to analyze and use to improve SoulForge.
+I also plan to build an LLM Wiki, where Agents deployed across different computers and working on different tasks can preserve the valuable experience they gain from real-world work. That experience could then be collected here with the click of a button, and I would provide a query interface so others could use this knowledge base as well.
+This is not just wishful thinking. In fact, you can already see from the source code that the feature is beginning to take shape, though I still need to improve and test it further before it can go live.
+To help improve the project, I will provide generous usage credits to active users. If you are willing to share your experience with me, please star the repository and then get in touch — you know how to reach me.
+
+会话记录：[全部会话](docs/ai-logs/README.md)
+
+- [鬼型部修改 Markdown](docs/ai-logs/markdown/2026/08/23/rollout-2026-08-23T12-40-06-359Z-fdc9e1e0-62ee-4ac8-9168-e5966252fdde.md) · [原始 JSONL](docs/ai-logs/sessions/2026/08/23/rollout-2026-08-23T12-40-06-359Z-fdc9e1e0-62ee-4ac8-9168-e5966252fdde.jsonl)
+- [道具/商店崩溃只读排查 Markdown](docs/ai-logs/markdown/2026/08/21/rollout-2026-08-21T02-37-13-611Z-27acb304-a895-4fe7-8701-07a2552340d7.md) · [原始 JSONL](docs/ai-logs/sessions/2026/08/21/rollout-2026-08-21T02-37-13-611Z-27acb304-a895-4fe7-8701-07a2552340d7.jsonl)
+

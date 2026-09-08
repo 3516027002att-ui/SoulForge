@@ -408,7 +408,7 @@ export function ScriptContainerPanel(props: ScriptContainerPanelProps): ReactEle
             <span>{source.logicalName}</span>
             <span>{sourceKindLabel(source)}</span>
             {source.kind === 'decompiled' && source.decompiler && (
-              <span title="反编译在 main 进程进行，renderer 只收文本">{source.decompiler}</span>
+              <span title="源码由桌面组件处理">{source.decompiler}</span>
             )}
             {source.encoding && <span className="muted">{source.encoding}</span>}
             {source.ok && source.writeSupported && (
@@ -457,8 +457,8 @@ export function ScriptContainerPanel(props: ScriptContainerPanelProps): ReactEle
       {mode === null
         ? '脚本资源 · 识别中…'
         : mode === 'container'
-          ? `脚本容器 · ${entryCount} 条条目 · Files | Source`
-          : '独立脚本文件 · Source'}
+          ? `脚本容器 · ${entryCount} 条条目 · 条目 | 源码`
+          : '独立脚本文件 · 源码'}
     </span>
   );
 
@@ -468,11 +468,11 @@ export function ScriptContainerPanel(props: ScriptContainerPanelProps): ReactEle
       toolbar={toolbar}
       columns={mode === 'container'
         ? [
-            { id: 'files', title: 'Files', hint: `${entryCount} 条`, initialWidth: 320, minWidth: 220, children: filesColumn },
-            { id: 'source', title: 'Source', initialFlex: 2, minWidth: 260, children: sourceColumn }
+            { id: 'files', title: '条目', hint: `${entryCount} 条`, initialWidth: 320, minWidth: 220, children: filesColumn },
+            { id: 'source', title: '源码', initialFlex: 2, minWidth: 260, children: sourceColumn }
           ]
         : [
-            { id: 'source', title: 'Source', children: sourceColumn }
+            { id: 'source', title: '源码', children: sourceColumn }
           ]}
     />
   );

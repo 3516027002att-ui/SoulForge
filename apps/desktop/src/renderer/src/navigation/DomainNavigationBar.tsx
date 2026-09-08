@@ -63,7 +63,6 @@ export function DomainNavigationBar({ domain, domains, onSelect, resourceSidebar
 
 /** §3.2：入口可操作性的 title 说明；不显示任何无单位文件数（§3.3）。 */
 function capabilityDescription(entry: DomainSummary): string {
-  if (entry.capability === 'deferred') return `${entry.label}：read contract 尚未接线`;
-  if (entry.capability === 'runtime-blocked') return `${entry.label}：read contract 已注册，但当前运行条件不满足`;
+  if (entry.capability === 'deferred' || entry.capability === 'runtime-blocked') return entry.label;
   return `${entry.label}：${entry.defaultTarget ? '可直接打开' : '从左侧打开一个文件'}`;
 }

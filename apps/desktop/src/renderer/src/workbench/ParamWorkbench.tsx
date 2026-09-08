@@ -35,6 +35,7 @@
 import { memo, useCallback, useEffect, useMemo, useRef, useState, type ReactElement } from 'react';
 import { useVirtualizer } from '@tanstack/react-virtual';
 import type { ParamDefDocument, ParamFieldDef } from '@soulforge/shared';
+import type { SoulForgeApi } from '../../../preload/index.js';
 import { getRendererBridge } from '../runtime/rendererRuntime.js';
 import { isRowTabEntry, selectableRowAttributes } from '../a11y/selectableRow.js';
 import { base64ToUint8Array, uint8ArrayToBase64 } from '../utils/binary.js';
@@ -85,6 +86,74 @@ export interface ParamRowLine {
   name?: string;
   dataBase64?: string;
   dataHexPreview?: string;
+}
+
+type ParamPagePayload = {
+  id: number;
+  dataHash?: string;
+  dataBase64?: string;
+  dataHexPreview?: string;
+};
+export type ParamPageResult = Awaited<ReturnType<SoulForgeApi['readContainerParamPage']>>;
+
+/**
+ * 只保留在途请求去重，不缓存已完成页：loadedRows 已经持有成功合并的行字节，
+ * 再建一个 completed-page cache 会让写回/重开 session 的旧页无界滞留在 renderer。
+ * generation 是 session 代际；切表、重读索引或写入后重建 native session 时递增，
+ * 因而旧请求即使晚到也不能被新 session 复用。
+ */
+export class ParamPageInFlightCache {
+  private generation = 0;
+  private readonly requests = new Map<string, Promise<ParamPageResult>>();
+
+  get currentGeneration(): number {
+    return this.generation;
+  }
+
+  beginSession(): void {
+    this.generation += 1;
+    this.requests.clear();
+  }
+
+  getOrCreate(
+    pageKey: string,
+    create: () => Promise<ParamPageResult>
+  ): Promise<ParamPageResult> {
+    const key = `${this.generation}\u0000${pageKey}`;
+    const existing = this.requests.get(key);
+    if (existing) return existing;
+
+    const request = Promise.resolve().then(create);
+    this.requests.set(key, request);
+    void request.finally(() => {
+      if (this.requests.get(key) === request) this.requests.delete(key);
+    }).catch(() => undefined);
+    return request;
+  }
+}
+
+/**
+ * 按物理身份合并页 payload。rowIndex 只是定位索引，id + dataHash 仍必须同时
+ * 匹配；这条检查阻止旧 native session 的晚到结果污染新 session 的同一行。
+ */
+export function mergeParamPayloadRows(
+  current: ParamRowLine[],
+  payloadByIndex: ReadonlyMap<number, ParamPagePayload>
+): ParamRowLine[] {
+  return current.map((row) => {
+    const payload = payloadByIndex.get(row.rowIndex);
+    if (
+      !payload
+      || payload.id !== row.id
+      || payload.dataHash !== row.dataHash
+      || typeof payload.dataBase64 !== 'string'
+    ) return row;
+    return {
+      ...row,
+      dataBase64: payload.dataBase64,
+      ...(payload.dataHexPreview ? { dataHexPreview: payload.dataHexPreview } : {})
+    };
+  });
 }
 
 /**
@@ -306,7 +375,7 @@ const ParamRowsColumn = memo(function ParamRowsColumn({
 
   return (
     <div className="wb-list wb-list--virtual">
-      {selectedEntry === null && <p className="wb-empty">先在左栏选择一个 param。</p>}
+           {selectedEntry === null && <p className="wb-empty">先在左栏选择一个参数文件。</p>}
       {selectedEntry !== null && (
         <>
           <div style={{ padding: '4px 8px', display: 'flex', gap: 6, alignItems: 'center' }}>
@@ -489,6 +558,12 @@ export function ParamWorkbench(props: ParamWorkbenchProps): ReactElement {
   const [selectedRowIndex, setSelectedRowIndex] = useState<number | null>(null);
   /** 防止 StrictMode/重复渲染对同一物理行重复发起 payload 请求。 */
   const payloadRequestRef = useRef<string | null>(null);
+  /**
+   * 一个 native session 内的页字节是不可变快照：同一页的多个行共享一条
+   * 在途 IPC 请求。只做 in-flight 去重；loadedRows 已经持有成功合并的 payload，
+   * 不再另建 completed-page cache，避免写回/换 session 后旧页无界滞留。
+   */
+  const payloadPageInFlightRef = useRef<ParamPageInFlightCache>(new ParamPageInFlightCache());
   /** 行级写入后按稳定 row id 重新定位，不能把 row id 当成物理 rowIndex。 */
   const pendingSelectedRowIdRef = useRef<number | null>(null);
   const [drafts, setDrafts] = useState<Record<string, string>>({});
@@ -568,7 +643,8 @@ export function ParamWorkbench(props: ParamWorkbenchProps): ReactElement {
     setPageFieldEnums(null);
     setPageFieldDefsDiagnostic(null);
     setPageFieldDefsOrigin('fixture');
-  }, [selectedEntry]);
+    payloadPageInFlightRef.current.beginSession();
+  }, [props.containerUri, selectedEntry]);
 
   useEffect(() => {
     setDrafts({});
@@ -602,6 +678,9 @@ export function ParamWorkbench(props: ParamWorkbenchProps): ReactElement {
       return;
     }
     let cancelled = false;
+    // 写回/重读索引也会得到新的 native session；旧页请求只能完成后被丢弃，
+    // 不能与新 session 的同一 pageKey 去重。
+    payloadPageInFlightRef.current.beginSession();
     payloadRequestRef.current = null;
     setDocumentSessionToken(null);
     setRowsLoading(true);
@@ -831,18 +910,49 @@ export function ParamWorkbench(props: ParamWorkbenchProps): ReactElement {
 
     let cancelled = false;
     const page = Math.floor(selectedRow.rowIndex / PARAM_PAGE_SIZE);
-    setPayloadLoading(true);
-    bridge.readContainerParamPage(
+    const pageRequestKey = [
       props.containerUri,
       selectedEntry,
-      page,
-      PARAM_PAGE_SIZE,
-      '',
-      false,
-      documentSessionToken
-    )
+      documentSessionToken,
+      page
+    ].join('#');
+    const extractPayloads = (result: ParamPageResult): Map<number, ParamPagePayload> => {
+      const payloadByIndex = new Map<number, ParamPagePayload>();
+      if (!result.ok) return payloadByIndex;
+      for (const row of result.rows) {
+        if (
+          Number.isSafeInteger(row.rowIndex)
+          && typeof row.dataBase64 === 'string'
+          && typeof row.dataHash === 'string'
+        ) {
+          payloadByIndex.set(row.rowIndex, {
+            id: row.id,
+            dataHash: row.dataHash,
+            dataBase64: row.dataBase64,
+            ...(row.dataHexPreview ? { dataHexPreview: row.dataHexPreview } : {})
+          });
+        }
+      }
+      return payloadByIndex;
+    };
+
+    setPayloadLoading(true);
+    const payloadGeneration = payloadPageInFlightRef.current.currentGeneration;
+    const request = payloadPageInFlightRef.current.getOrCreate(pageRequestKey, () =>
+      bridge.readContainerParamPage(
+        props.containerUri,
+        selectedEntry,
+        page,
+        PARAM_PAGE_SIZE,
+        '',
+        false,
+        documentSessionToken
+      )
+    );
+
+    request
       .then((result) => {
-        if (cancelled) return;
+        if (cancelled || payloadPageInFlightRef.current.currentGeneration !== payloadGeneration) return;
         if (!result.ok) {
           const first = result.diagnostics?.[0];
           setPageDiagnostics([
@@ -851,43 +961,9 @@ export function ParamWorkbench(props: ParamWorkbenchProps): ReactElement {
           return;
         }
 
-        const payloadByIndex = new Map<number, {
-          id: number;
-          dataHash?: string;
-          dataBase64?: string;
-          dataHexPreview?: string;
-        }>();
-        for (const row of result.rows) {
-          if (
-            Number.isSafeInteger(row.rowIndex)
-            && typeof row.dataBase64 === 'string'
-            && typeof row.dataHash === 'string'
-          ) {
-            payloadByIndex.set(row.rowIndex, {
-              id: row.id,
-              dataHash: row.dataHash,
-              dataBase64: row.dataBase64,
-              ...(row.dataHexPreview ? { dataHexPreview: row.dataHexPreview } : {})
-            });
-          }
-        }
-
-        const mergePayload = (current: ParamRowLine[]): ParamRowLine[] => current.map((row) => {
-          const payload = payloadByIndex.get(row.rowIndex);
-          if (
-            !payload
-            || payload.id !== row.id
-            || payload.dataHash !== row.dataHash
-            || typeof payload.dataBase64 !== 'string'
-          ) return row;
-          return {
-            ...row,
-            dataBase64: payload.dataBase64,
-            ...(payload.dataHexPreview ? { dataHexPreview: payload.dataHexPreview } : {})
-          };
-        });
-        setRows(mergePayload);
-        setLoadedRows(mergePayload);
+        const payloadByIndex = extractPayloads(result);
+        setRows((current) => mergeParamPayloadRows(current, payloadByIndex));
+        setLoadedRows((current) => mergeParamPayloadRows(current, payloadByIndex));
         setTypeName(result.typeName ?? typeName);
         setRowDataSize(result.rowDataSize ?? rowDataSize);
         setParamName(result.paramName ?? paramName);
@@ -928,13 +1004,15 @@ export function ParamWorkbench(props: ParamWorkbenchProps): ReactElement {
         );
       })
       .catch((error: unknown) => {
-        if (cancelled) return;
+        if (cancelled || payloadPageInFlightRef.current.currentGeneration !== payloadGeneration) return;
         setPageDiagnostics([
           `PARAM_PAGE_PAYLOAD_READ_FAILED：${error instanceof Error ? error.message : '选中行 payload 读取异常。'}`
         ]);
       })
       .finally(() => {
-        if (!cancelled) setPayloadLoading(false);
+        if (!cancelled && payloadPageInFlightRef.current.currentGeneration === payloadGeneration) {
+          setPayloadLoading(false);
+        }
       });
     return () => { cancelled = true; };
   }, [
@@ -1284,9 +1362,9 @@ export function ParamWorkbench(props: ParamWorkbenchProps): ReactElement {
   const columns: WorkbenchColumnSpec[] = [
     {
       id: 'params',
-      title: 'Params',
+       title: '参数文件',
       // §7.3：table 数量只在栏头以 N tables 显示（Smithbox 形态）。
-      hint: `${params.length} tables`,
+       hint: `${params.length} 个表`,
       // §7.1 固定比例（T5-4 删第四栏 Tools 后沿用前三角）：20/29/35，
       // 最小宽 180/260/320。比例模式随窗口缩放跟随，拖拽后转像素。
       initialFlex: 0.2,
@@ -1334,7 +1412,7 @@ export function ParamWorkbench(props: ParamWorkbenchProps): ReactElement {
     },
     {
       id: 'rows',
-      title: 'Rows',
+       title: '行',
       // 索引首屏：列表一次拿到完整轻量行表，hint 直接报总数。
       // typeName 移到工具栏 —— 它是文档级信息，不是这一列的属性。
       hint: `${visibleRows.length > 0 || rowQueryDebounced === '' ? rowCount : visibleRows.length} 行`,
@@ -1361,7 +1439,7 @@ export function ParamWorkbench(props: ParamWorkbenchProps): ReactElement {
     },
     {
       id: 'fields',
-      title: 'Fields',
+       title: '字段',
       hint: definition ? `${fields.length} 个字段` : (typeName ? '无字段定义' : ''),
       initialFlex: 0.35,
       // 问题 3：320 → 240（与 FMG 文本列同档）。Agent 拉宽后主区装不下
@@ -1385,14 +1463,14 @@ export function ParamWorkbench(props: ParamWorkbenchProps): ReactElement {
                 {entryFailures.get(selectedEntry)?.code}
               </span>
               <span className="muted" style={{ fontSize: 11 }}>
-                容器内其他 param 不受影响；完整诊断见底部日志。
+                容器内其他参数不受影响；完整诊断见运行日志。
               </span>
             </div>
           )}
           {selectedRowIndex === null && selectedEntry !== null && !entryFailures.has(selectedEntry) && (
             <p className="wb-empty">先在中栏选择一行。</p>
           )}
-          {selectedEntry === null && <p className="wb-empty">先在左栏选择一个 param。</p>}
+           {selectedEntry === null && <p className="wb-empty">先在左栏选择一个参数文件。</p>}
           {selectedRowIndex !== null && payloadLoading && (
             <p className="wb-empty" role="status">读取选中行字节…</p>
           )}
@@ -1408,7 +1486,7 @@ export function ParamWorkbench(props: ParamWorkbenchProps): ReactElement {
           )}
           {selectedRowIndex !== null && !payloadLoading && definition !== null && selectedRow?.dataBase64 === undefined && (
             <p className="wb-empty">
-              本行没有行字节，字段值无法解码（选中行 payload 未返回；请查看底部诊断）。
+              本行没有行字节，字段值无法解码（选中行数据未返回；请查看运行诊断）。
             </p>
           )}
           {selectedRowIndex !== null && definition !== null && (
@@ -1594,7 +1672,7 @@ export function ParamWorkbench(props: ParamWorkbenchProps): ReactElement {
       ? [
           selectedRow?.dataBase64 === undefined
             ? (payloadLoading ? '字段值读取中：等待选中行 payload。' : '字段写入未放行：本行字节未按需下发。')
-            : '字段写入未放行：字段编辑出口未接通。数值可读，提交已关闭。'
+            : '当前暂不支持编辑这些字段。数值可读，提交已关闭。'
         ]
       : [])
   ];
@@ -1645,7 +1723,7 @@ export function ParamWorkbench(props: ParamWorkbenchProps): ReactElement {
             type="button"
             className="toolbar-button"
             disabled={rowMutationBusy || selectedEntry === null || selectedRow === null}
-            title="删除当前行（经 Patch Engine，含备份与回滚）"
+            title="删除当前行（含备份与回滚）"
             onClick={() => { void commitRowMutation('delete'); }}
           >删除当前行</button>
           <button
@@ -1665,7 +1743,7 @@ export function ParamWorkbench(props: ParamWorkbenchProps): ReactElement {
             type="button"
             className="toolbar-button"
             disabled={ioBusy || selectedEntry === null}
-            title="从 CSV 导入行数据（表头 id,name,字段内部 id…；空单元格不改）"
+            title="从 CSV 导入行数据（表头 id,name,字段标识；空单元格不改）"
             onClick={() => {
               if (!bridge || selectedEntry === null) return;
               void runCsvIo(() =>
@@ -1680,7 +1758,7 @@ export function ParamWorkbench(props: ParamWorkbenchProps): ReactElement {
             type="button"
             className="toolbar-button"
             disabled={ioBusy || selectedEntry === null}
-            title="导出当前表行名（id,name）为 CSV，对照 Yapped Export Names"
+            title="导出当前表行名（id,name）为 CSV"
             onClick={() => {
               if (!bridge || selectedEntry === null) return;
               void runCsvIo(() =>
@@ -1688,12 +1766,12 @@ export function ParamWorkbench(props: ParamWorkbenchProps): ReactElement {
                 '已导出'
               );
             }}
-          >导出备注</button>
+          >导出行名</button>
           <button
             type="button"
             className="toolbar-button"
             disabled={ioBusy || selectedEntry === null}
-            title="从 CSV 导入行名（表头 id,name），对照 Yapped Import Names"
+            title="从 CSV 导入行名（表头 id,name）"
             onClick={() => {
               if (!bridge || selectedEntry === null) return;
               void runCsvIo(() =>
@@ -1703,7 +1781,7 @@ export function ParamWorkbench(props: ParamWorkbenchProps): ReactElement {
                 '已保存'
               );
             }}
-          >导入备注</button>
+          >导入行名</button>
         </>
       }
       {...(footerMessages.length > 0

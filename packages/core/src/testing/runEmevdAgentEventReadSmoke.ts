@@ -77,6 +77,14 @@ async function run(): Promise<void> {
       assert.equal(tail.offset, 2);
       assert.equal(tail.returned, 1);
       assert.equal(tail.truncated, false);
+      assert.equal(tail.darkScriptComplete, false, 'tail page must not authorize a complete DarkScript write');
+
+      const beyondEnd = await readEmevdEvent({ edit, file, eventId: 50, instructionOffset: 99, format: 'json' });
+      assert.equal(beyondEnd.ok, true, JSON.stringify(beyondEnd));
+      if (!beyondEnd.ok) return;
+      assert.equal(beyondEnd.offset, 3);
+      assert.equal(beyondEnd.returned, 0);
+      assert.equal(beyondEnd.darkScriptComplete, false, 'out-of-range page must not claim complete DarkScript');
 
       const jsonRead = await readEmevdEvent({ edit, file, eventId: 50, format: 'json' });
       assert.equal(jsonRead.ok, true, JSON.stringify(jsonRead));

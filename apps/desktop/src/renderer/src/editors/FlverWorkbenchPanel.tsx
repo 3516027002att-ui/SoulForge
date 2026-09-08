@@ -304,7 +304,7 @@ export function FlverWorkbenchPanel(props: FlverWorkbenchPanelProps): ReactEleme
               {isPartial && (unparsedGapCount > 0 || layoutWarningCount > 0) && (
                 <details className="flver-partial">
                   <summary>
-                    authority=partial · 已识别未解析结构 {unparsedGapCount} 项
+                     解析不完整：仍有 {unparsedGapCount} 项结构未解析
                     {layoutWarningCount > 0 ? ` · 数据警告 ${layoutWarningCount} 条` : ''}
                   </summary>
                   <ul>
@@ -319,7 +319,7 @@ export function FlverWorkbenchPanel(props: FlverWorkbenchPanelProps): ReactEleme
         },
         {
           id: 'properties',
-          title: 'Properties',
+          title: '属性',
           ...(selected ? { hint: selected.label } : {}),
           initialFlex: 0.3,
           minWidth: 240,
@@ -352,10 +352,10 @@ export function FlverWorkbenchPanel(props: FlverWorkbenchPanelProps): ReactEleme
                       onClick={() => submitMaterialSlot(meshes[selected.index])}
                       disabled={props.saving || materials.length === 0}
                     >
-                      {props.saving ? '提交中…' : '应用材质槽'}
+                    {props.saving ? '保存中…' : '应用材质槽'}
                     </button>
                   </label>
-                  <p className="muted">写回 mesh[{selected.index}] 的材质引用（slot 0），直接进 Patch Engine，可回滚。</p>
+                  <p className="muted">保存材质引用（槽位 0）。</p>
                 </div>
               )}
             </div>
@@ -368,7 +368,7 @@ export function FlverWorkbenchPanel(props: FlverWorkbenchPanelProps): ReactEleme
         <div className="row gap">
           <p className="muted" role="note">
             {props.onMaterialSlotSet
-              ? '材质槽修改在 Properties 栏点「应用材质槽」直接写入，经 Patch Engine 提交、可回滚。'
+              ? '点击“应用材质槽”保存材质引用。'
               : '仅提供只读预览与网格/材质槽选择；写入口未开放。'}
           </p>
         </div>

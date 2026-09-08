@@ -82,7 +82,7 @@ export function AgentApprovalCard(props: AgentApprovalCardProps): ReactElement {
     <section
       className={`agent-approval-card is-${approvalSeverity(permissionLevel)}`}
       data-testid="agent-approval-card"
-      aria-label={`Change Review：${operation}`}
+      aria-label={`修改确认：${operation}`}
     >
       <div className="agent-approval-card__head">
         <strong>{toolName}</strong>
@@ -100,7 +100,7 @@ export function AgentApprovalCard(props: AgentApprovalCardProps): ReactElement {
           <dd>{target === null ? unavailable('该审批未携带逻辑目标') : <code>{target}</code>}</dd>
         </div>
         <div className="agent-approval-card__row" data-testid="approval-row-diff">
-          <dt>diff</dt>
+          <dt>改动预览</dt>
           <dd>
             {diff === null
               ? (preview?.newText !== null && preview?.newText !== undefined
@@ -111,7 +111,7 @@ export function AgentApprovalCard(props: AgentApprovalCardProps): ReactElement {
                     </pre>
                   </div>
                 )
-                : unavailable('主进程未能为该调用生成 diff'))
+                : unavailable('暂时无法生成这次改动的预览'))
               : (
                 <div className="agent-approval-card__diff">
                   <pre className="agent-approval-card__diff-body" data-testid="agent-approval-card-diff-body">
@@ -186,7 +186,7 @@ export function AgentApprovalCard(props: AgentApprovalCardProps): ReactElement {
             自动回滚：{commitFailure.rolledBack ? '已执行' : '未执行'}
           </p>
           <p className="muted">{commitFailure.message}</p>
-          <p className="muted">下一步：检查 Problems 诊断；确认目标状态后重试，或先恢复备份。</p>
+          <p className="muted">下一步：查看诊断信息；确认目标状态后重试，或先恢复备份。</p>
         </div>
       )}
     </section>

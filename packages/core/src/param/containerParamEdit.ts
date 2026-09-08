@@ -7,11 +7,11 @@
  * Do not parse Smithbox XML here and do not scan BND by brute-force index.
  */
 import { createHash } from 'node:crypto';
-import { mkdir, readdir, readFile, stat } from 'node:fs/promises';
-import { basename, dirname, isAbsolute, join, resolve } from 'node:path';
+import { mkdir, mkdtemp, readdir, readFile, rm, stat } from 'node:fs/promises';
+import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import type { Diagnostic, ParamDefDocument } from '@soulforge/shared';
-import { runBridge } from '../bridge/runBridge.js';
+import type { Diagnostic, ParamDefDocument, ParamMetadataTrustPolicy } from '@soulforge/shared';
+import { createBridgeDaemonScope, runBridge } from '../bridge/runBridge.js';
 import { applyNativeMutation } from '../editing/editorMutationService.js';
 import {
   commitParamMutationsViaBridge,
@@ -22,6 +22,7 @@ import type { NativeEditSession } from '../editing/nativeEditSession.js';
 import { applyParamFieldMutation } from './paramFieldMutation.js';
 import { decodeRowFields } from './paramdefLayout.js';
 import { importPinnedSmithboxSdtParamMetadata } from './smithboxParamMetadataSource.js';
+import { matchParamMetadataPackage, resolveParamMetadataRowWidth } from './paramMetadata.js';
 
 export interface ParamRowSlot {
   rowIndex: number;
@@ -126,6 +127,57 @@ interface ContainerEntry {
 }
 
 let metadataCache: Awaited<ReturnType<typeof importPinnedSmithboxSdtParamMetadata>> | null = null;
+
+/**
+ * Remove one PARAM read handoff directory without ever accepting an arbitrary
+ * path from a caller.  The remove operation is injectable only for the small
+ * contract smoke: production always uses fs.rm, while the smoke can exercise
+ * retry and failure diagnostics deterministically without changing ACLs on a
+ * real workspace.
+ */
+export async function cleanupParamTempDirectory(input: {
+  stagingRoot: string;
+  tempDirectory: string;
+  containerPath: string;
+  remove?: (path: string) => Promise<void>;
+}): Promise<Diagnostic | undefined> {
+  const root = resolve(input.stagingRoot);
+  const candidate = resolve(input.tempDirectory);
+  const relativeCandidate = relative(root, candidate);
+  if (!relativeCandidate || relativeCandidate.includes('\\') || relativeCandidate.includes('/')
+    || !relativeCandidate.startsWith('param-read-')) {
+    return {
+      severity: 'warning',
+      code: 'PARAM_TEMP_CLEANUP_PATH_REJECTED',
+      message: 'PARAM 临时目录清理路径未通过 stagingRoot 边界校验。',
+      sourceUri: pathToFileURL(input.containerPath).href,
+      details: { stagingRoot: root, candidate }
+    };
+  }
+  const remove = input.remove ?? ((path: string) => rm(path, { recursive: true, force: true }));
+  let lastError: unknown;
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    try {
+      await remove(candidate);
+      return undefined;
+    } catch (error) {
+      lastError = error;
+      if (attempt === 0) await new Promise<void>((resolveNext) => setImmediate(resolveNext));
+    }
+  }
+  return {
+    severity: 'warning',
+    code: 'PARAM_TEMP_CLEANUP_FAILED',
+    message: 'PARAM 临时目录清理失败，已保留本次读写结果。',
+    sourceUri: pathToFileURL(input.containerPath).href,
+    details: {
+      path: candidate,
+      errorName: lastError instanceof Error ? lastError.name : undefined,
+      systemCode: lastError && typeof lastError === 'object' && 'code' in lastError
+        && typeof lastError.code === 'string' ? lastError.code : undefined
+    }
+  };
+}
 
 export function groupParamEdits(edits: ParamFieldEdit[]): Map<string, ParamFieldEdit[]> {
   const groups = new Map<string, ParamFieldEdit[]>();
@@ -458,10 +510,11 @@ export async function setParamFields(input: {
   for (const [, tableEdits] of grouped) {
     const table = tableEdits[0]!.table;
     const rowIds = [...new Set(tableEdits.map((item) => item.rowId))];
-    const loaded = await loadTableRows(input.edit, container.path, entries.entries, table, rowIds);
+    const loaded = await loadTableRows(input.edit, container.path, entries.entries, table, rowIds, false, true);
     if (!loaded.ok) {
       return { ok: false, error: loaded.error, diagnostics: [...diagnostics, ...loaded.diagnostics], before };
     }
+    try {
     diagnostics.push(...loaded.diagnostics);
     const mutations: Array<{ kind: 'upsert'; id: number; dataBase64: string; rowIndex?: number; expectedDataHash?: string }> = [];
     const bySlot = new Map<number, { slot: ParamRowSlot; edits: ParamFieldEdit[] }>();
@@ -616,6 +669,7 @@ export async function setParamFields(input: {
       entry: loaded.entry,
       unpackedPath: loaded.unpackedPath,
       unpackedHash: loaded.sourceHash,
+      expectedRowDataSize: loaded.definition.rowDataSize,
       mutations,
       title: `PARAM set ${mutations.length} row(s) in ${loaded.tableName}`
     });
@@ -628,6 +682,10 @@ export async function setParamFields(input: {
     file.sha256 = containerHash;
     const refreshed = entries.entries.find((item) => item.index === loaded.entry.index);
     if (refreshed) refreshed.contentHash = '';
+    } finally {
+      const cleanupDiagnostic = await loaded.cleanup();
+      if (cleanupDiagnostic) diagnostics.push(cleanupDiagnostic);
+    }
   }
 
   return {
@@ -648,6 +706,7 @@ async function commitTableMutations(input: {
   entry: ContainerEntry;
   unpackedPath: string;
   unpackedHash: string;
+  expectedRowDataSize: number;
   mutations: Array<{ kind: 'upsert'; id: number; dataBase64: string; rowIndex?: number; expectedDataHash?: string }>;
   title: string;
 }): Promise<
@@ -665,6 +724,7 @@ async function commitTableMutations(input: {
       sourcePath: input.unpackedPath,
       outputPath: context.outputPath,
       expectedDocumentHash: input.unpackedHash,
+      expectedRowDataSize: input.expectedRowDataSize,
       allowedRoots: context.allowedRoots,
       writableRoots: context.writableRoots,
       mutations: input.mutations,
@@ -761,7 +821,8 @@ async function loadTableRows(
   entries: ContainerEntry[],
   table: string,
   rowIds: number[],
-  allowMissingRows = false
+  allowMissingRows = false,
+  retainUnpackedPath = false
 ): Promise<
   | {
       ok: true;
@@ -775,6 +836,7 @@ async function loadTableRows(
       sourceHash: string;
       missingRows: number[];
       diagnostics: Diagnostic[];
+      cleanup: () => Promise<Diagnostic | undefined>;
     }
   | { ok: false; error: ParamEditFailure; diagnostics: Diagnostic[] }
 > {
@@ -790,10 +852,31 @@ async function loadTableRows(
       diagnostics: []
     };
   }
-  const unpackedDir = join(edit.stagingRoot, 'param-read');
-  await mkdir(unpackedDir, { recursive: true });
+  // A single edit session can service concurrent reads (the Agent commonly
+  // issues several PARAM probes in parallel).  Reusing one deterministic
+  // output path lets extract-bnd4-child calls overwrite each other's bytes,
+  // producing a misleading PARAM_UNPACK_FAILED or a mixed sourceHash.  Give
+  // every load its own staging directory; the returned path remains available
+  // to the writer when this read is followed by a mutation.
+  await mkdir(edit.stagingRoot, { recursive: true });
+  const unpackedDir = await mkdtemp(join(edit.stagingRoot, 'param-read-'));
+  let cleaned = false;
+  const cleanup = async (): Promise<Diagnostic | undefined> => {
+    if (cleaned) return;
+    cleaned = true;
+    return cleanupParamTempDirectory({
+      stagingRoot: edit.stagingRoot,
+      tempDirectory: unpackedDir,
+      containerPath
+    });
+  };
   const unpackedPath = join(unpackedDir, `${safeSegment(basename(entry.name.replace(/\\/g, '/')))}.${entry.index}.param`);
-  const extracted = await runBridge<{ name?: string; contentHash?: string }>({
+  const bridgeScope = createBridgeDaemonScope();
+  let handedOff = false;
+  let documentDiagnostics: Diagnostic[] = [];
+  let resultDiagnostics: Diagnostic[] = documentDiagnostics;
+  try {
+  const extracted = await bridgeScope.run<{ name?: string; contentHash?: string }>({
     command: 'extract-bnd4-child',
     filePath: containerPath,
     allowedRoots: [...edit.allowedRoots(), unpackedDir],
@@ -803,10 +886,11 @@ async function loadTableRows(
     commandOptions: { entryIndex: entry.index, outputPath: unpackedPath }
   });
   if (extracted.parseStatus === 'failed') {
+    resultDiagnostics = extracted.diagnostics;
     return {
       ok: false,
       error: { code: 'PARAM_UNPACK_FAILED', message: `解包 ${entry.name} 失败。` },
-      diagnostics: extracted.diagnostics
+      diagnostics: resultDiagnostics
     };
   }
   if (extracted.data?.contentHash) entry.contentHash = extracted.data.contentHash;
@@ -815,11 +899,18 @@ async function loadTableRows(
     sourcePath: unpackedPath,
     allowedRoots: [...edit.allowedRoots(), unpackedDir],
     ...(includeAllPayloads ? { includeAllPayloads: true } : { rowIds }),
+    resolveRowDataSize: async (header) => {
+      const definition = await loadTrustedDefinition(
+        header.typeName, undefined, header.dataVersion, edit.session.meta.game
+      );
+      return definition.ok ? definition.document.rowDataSize : undefined;
+    },
     timeoutMs: 120_000,
     maxFrameBytes: includeAllPayloads ? 32 * 1024 * 1024 : 8 * 1024 * 1024
-  });
+  }, bridgeScope.run);
   let document = await readOnce(false);
-  const documentDiagnostics = asDiagnostics(document.diagnostics);
+  documentDiagnostics = asDiagnostics(document.diagnostics);
+  resultDiagnostics = documentDiagnostics;
   if (!document.ok || !document.data) {
     return {
       ok: false,
@@ -827,7 +918,9 @@ async function loadTableRows(
       diagnostics: documentDiagnostics
     };
   }
-  const definition = await loadTrustedDefinition(document.data.typeName, document.data.rowDataSize);
+  const definition = await loadTrustedDefinition(
+    document.data.typeName, document.data.rowDataSize, document.data.dataVersion, edit.session.meta.game
+  );
   if (!definition.ok) return { ok: false, error: definition.error, diagnostics: documentDiagnostics };
 
   let sourceHash = document.data.sourceHash;
@@ -886,6 +979,7 @@ async function loadTableRows(
       };
     }
   }
+  handedOff = retainUnpackedPath;
   return {
     ok: true,
     tableName: basename(entry.name.replace(/\\/g, '/')).replace(/\.param$/i, ''),
@@ -897,8 +991,26 @@ async function loadTableRows(
     unpackedPath,
     sourceHash,
     missingRows: missing,
-    diagnostics: documentDiagnostics
+    diagnostics: documentDiagnostics,
+    cleanup
   };
+  } finally {
+    try {
+      await bridgeScope.dispose();
+    } catch (error) {
+      resultDiagnostics.push({
+        severity: 'warning',
+        code: 'BRIDGE_SCOPE_DISPOSE_FAILED',
+        message: 'PARAM 读取专用 Bridge scope 清理失败，已保留本次读写结果。',
+        sourceUri: pathToFileURL(containerPath).href,
+        details: { errorName: error instanceof Error ? error.name : undefined }
+      });
+    }
+    if (!retainUnpackedPath || !handedOff) {
+      const cleanupDiagnostic = await cleanup();
+      if (cleanupDiagnostic) resultDiagnostics.push(cleanupDiagnostic);
+    }
+  }
 }
 
 async function listParamEntries(
@@ -997,7 +1109,9 @@ function readFieldValue(
 
 async function loadTrustedDefinition(
   typeName: string,
-  rowDataSize: number
+  rowDataSize: number | undefined,
+  dataVersion: number | undefined,
+  game: string
 ): Promise<{ ok: true; document: ParamDefDocument } | { ok: false; error: ParamEditFailure }> {
   if (!metadataCache) {
     const local = process.env.LOCALAPPDATA;
@@ -1021,23 +1135,36 @@ async function loadTrustedDefinition(
       }
     };
   }
-  const entry = metadataCache.package.definitions.find((item) => item.document.typeName === typeName);
-  if (!entry) {
+  const metadata = metadataCache.package;
+  // Import already pins archive, source tree, license and immutable revision.
+  const trustPolicy: ParamMetadataTrustPolicy = {
+    schemaVersion: 1, policyId: 'smithbox-sdt-2.2.4.container-param',
+    trustedPackages: [{
+      packageId: metadata.packageId, packageVersion: metadata.packageVersion,
+      packageDigest: metadata.packageDigest, sourceIdentity: metadata.source.identity,
+      sourceRevision: metadata.source.revision, sourceContentDigest: metadata.source.contentDigest,
+      licenseSpdxExpression: metadata.license.spdxExpression, licenseTextDigest: metadata.license.textDigest
+    }]
+  };
+  const descriptor = { game, gameBuild: '1.6', typeName, dataVersion: dataVersion ?? -1 };
+  const width = rowDataSize ?? resolveParamMetadataRowWidth(metadata, descriptor, trustPolicy);
+  if (width === undefined) {
     return {
       ok: false,
-      error: { code: 'PARAM_METADATA_TYPE_NOT_FOUND', message: `元数据包里没有类型 ${typeName}。` }
+      error: { code: 'PARAM_METADATA_TYPE_NOT_FOUND', message: `元数据包里没有唯一匹配类型 ${typeName} 和版本 ${dataVersion} 的定义。` }
     };
   }
-  if (entry.document.rowDataSize !== rowDataSize) {
+  const matched = matchParamMetadataPackage(metadata, { ...descriptor, rowDataSize: width }, trustPolicy);
+  if (!matched.ok) {
     return {
       ok: false,
       error: {
-        code: 'PARAM_METADATA_ROW_WIDTH_MISMATCH',
-        message: `字段定义行宽（${entry.document.rowDataSize}）与真实 PARAM（${rowDataSize}）不一致。`
+        code: matched.diagnostics[0]?.code ?? 'PARAM_METADATA_MATCH_REJECTED',
+        message: matched.diagnostics[0]?.message ?? '真实 PARAM 与可信字段定义不匹配。'
       }
     };
   }
-  return { ok: true, document: { ...entry.document, origin: 'imported' } };
+  return { ok: true, document: { ...matched.definition.document, origin: 'imported' } };
 }
 
 async function findParamBnd(root: string): Promise<string[]> {

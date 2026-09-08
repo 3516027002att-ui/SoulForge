@@ -43,9 +43,9 @@ describe('Bnd4WorkbenchPanel 初始结构（挂载即有的三栏骨架）', () 
 
   it('三栏 Containers | Entries | Preview / Source 同时存在', () => {
     const html = render();
-    assert.match(html, /aria-label="Containers"/);
-    assert.match(html, /aria-label="Entries"/);
-    assert.match(html, /aria-label="Preview \/ Source"/);
+    assert.match(html, /aria-label="容器"/);
+    assert.match(html, /aria-label="条目"/);
+    assert.match(html, /aria-label="预览与来源"/);
   });
 
   it('没有为凑四栏造 Tools 空栏', () => {
@@ -75,11 +75,11 @@ describe('Negative source tests（CONTAINER-40 五类覆盖）', () => {
     assert.ok(selectChildStart >= 0 && selectChildEnd > selectChildStart, 'selectChild 函数未找到，负向断言失锚');
     assert.doesNotMatch(panelSource.slice(selectChildStart, selectChildEnd), /readContainerChild/);
     assert.match(panelSource, /showBytes/);
-    assert.match(panelSource, /查看原始字节（Bytes）/);
+    assert.match(panelSource, /查看原始字节/);
   });
 
   it('未确认子项只读展示，不制造专属能力', () => {
-    assert.match(panelSource, /未接入专属编辑器，仅在此只读预览，不制造专属能力/);
+    assert.match(panelSource, /未接入专属编辑器，仅在此只读预览，不提供专属编辑能力/);
     // projection 只标注目标，不自建解析：formatKind 来自 core，renderer 不扫字节
     // （注释里提及函数名只是职责说明，负向断言针对调用——带左括号）。
     assert.doesNotMatch(panelSource, /detectNestedFormat\(/);

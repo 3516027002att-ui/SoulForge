@@ -234,6 +234,23 @@ export function validateParamMetadataPackage(input: unknown): ParamMetadataPacka
   });
 }
 
+/** A width hint for native parsing, not a native-read receipt or write authority. */
+export function resolveParamMetadataRowWidth(
+  metadata: ParamMetadataPackage,
+  descriptor: Omit<ParamMetadataDefinitionKey, 'rowDataSize'>,
+  trustPolicy: ParamMetadataTrustPolicy
+): number | undefined {
+  const candidates = metadata.definitions.filter(({ key }) => key.game === descriptor.game
+    && key.gameBuild === descriptor.gameBuild && key.typeName === descriptor.typeName
+    && key.dataVersion === descriptor.dataVersion);
+  if (candidates.length !== 1) return undefined;
+  const candidate = candidates[0]!;
+  const matched = matchParamMetadataPackage(metadata, {
+    ...descriptor, rowDataSize: candidate.key.rowDataSize
+  }, trustPolicy);
+  return matched.ok ? matched.definition.document.rowDataSize : undefined;
+}
+
 export function matchParamMetadataPackage(
   input: unknown,
   descriptor: ParamMetadataDefinitionKey,

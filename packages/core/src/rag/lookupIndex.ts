@@ -259,6 +259,12 @@ function referenceSignature(edges: readonly ReferenceEdge[]): string {
 }
 
 function chunkSignature(chunks: readonly RagChunk[]): string {
+  // The inverted maps store positions into `chunks`, so a reorder is a real
+  // index change even when the same chunk identities/content are present.  An
+  // ordered signature also avoids sorting every chunk signature with the
+  // code-point comparator on every ensureLookupIndex call.  Keep the source
+  // and content identity fields here; provenance changes must still rebuild
+  // the index.
   return chunks.map((chunk) => JSON.stringify([
     chunk.chunkId,
     chunk.workspaceId,
@@ -266,7 +272,8 @@ function chunkSignature(chunks: readonly RagChunk[]): string {
     chunk.symbolUri,
     chunk.family,
     chunk.contentHash,
+    chunk.outerFileHash,
     chunk.sourceRevision,
     chunk.sourceHash
-  ])).sort(compareCodePointText).join('\u0000');
+  ])).join('\u0000');
 }

@@ -44,7 +44,7 @@ describe('ScriptContainerPanel 初始结构（挂载未识别形态，单 Source
 
   it('Source 栏挂载即有；Files/Metadata 不在未识别形态出现', () => {
     const html = render();
-    assert.match(html, /aria-label="Source"/);
+    assert.match(html, /aria-label="源码"/);
     assert.doesNotMatch(html, /aria-label="Files"/);
     assert.doesNotMatch(html, /aria-label="Metadata"/);
   });
@@ -131,8 +131,8 @@ describe('Negative source tests（S16 契约）', () => {
     assert.doesNotMatch(panelSource, /title: 'Container \/ Files'/);
     assert.doesNotMatch(panelSource, /title: 'Metadata'/);
     assert.doesNotMatch(panelSource, /'Source \/ 只读反汇编'/);
-    assert.match(panelSource, /id: 'files', title: 'Files'/);
-    assert.match(panelSource, /id: 'source', title: 'Source'/);
+    assert.match(panelSource, /id: 'files', title: '条目'/);
+    assert.match(panelSource, /id: 'source', title: '源码'/);
   });
 });
 

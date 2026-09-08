@@ -290,6 +290,14 @@ describe('状态文案回答四个问题：在跑/进度/失败原因/可否取�
     assert.match(cancelled, /已被取消/);
   });
 
+  it('partial 终态明确提示部分完成且未完成验证', () => {
+    const partial = describeAgentTaskStatus(feed(
+      startAgentTask(SESSION),
+      { type: 'session-done', finishReason: 'partial', steps: 2, rolloutFileName: 'partial.jsonl' }
+    ));
+    assert.match(partial, /部分完成\/未完成验证/);
+  });
+
   it('不使用无证据形容词（anti-ai-design §2）', () => {
     const samples = [
       INITIAL_AGENT_TASK_STATE,

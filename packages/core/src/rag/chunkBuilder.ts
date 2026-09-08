@@ -68,6 +68,7 @@ export function buildRagCorpus(
         index.workspaceId,
         event,
         event.sourceHash ?? eventExport.sourceHash,
+        event.outerFileHash ?? eventExport.outerFileHash,
         event.sourceRevision ?? eventExport.sourceRevision
       ));
     }
@@ -79,6 +80,7 @@ export function buildRagCorpus(
         index.workspaceId,
         entity,
         entity.sourceHash ?? mapExport.sourceHash,
+        entity.outerFileHash ?? mapExport.outerFileHash,
         entity.sourceRevision ?? mapExport.sourceRevision
       ));
     }
@@ -88,6 +90,7 @@ export function buildRagCorpus(
         index.workspaceId,
         region,
         region.sourceHash ?? mapExport.sourceHash,
+        region.outerFileHash ?? mapExport.outerFileHash,
         region.sourceRevision ?? mapExport.sourceRevision
       ));
     }
@@ -103,6 +106,7 @@ export function buildRagCorpus(
           anim,
           event,
           event.sourceHash ?? taeExport.sourceHash,
+          event.outerFileHash ?? taeExport.outerFileHash,
           event.sourceRevision ?? taeExport.sourceRevision
         ));
       }
@@ -116,6 +120,7 @@ export function buildRagCorpus(
         row,
         textEntryLookup,
         row.sourceHash ?? paramExport.sourceHash,
+        row.outerFileHash ?? paramExport.outerFileHash,
         row.sourceRevision ?? paramExport.sourceRevision
       ));
     }
@@ -127,6 +132,7 @@ export function buildRagCorpus(
         index.workspaceId,
         entry,
         entry.sourceHash ?? msgExport.sourceHash,
+        entry.outerFileHash ?? msgExport.outerFileHash,
         entry.sourceRevision ?? msgExport.sourceRevision
       ));
     }
@@ -190,7 +196,7 @@ export function mergeCatalogAndPersisted(catalog: RagCorpus, persisted: RagCorpu
     catalog.chunks
       .filter((chunk) => chunk.family === 'file')
       .map((chunk) => [chunk.sourceUri, {
-        sourceHash: chunk.sourceHash,
+        outerFileHash: chunk.outerFileHash,
         sourceRevision: chunk.sourceRevision
       }] as const)
   );
@@ -202,8 +208,11 @@ export function mergeCatalogAndPersisted(catalog: RagCorpus, persisted: RagCorpu
       // proves both content and revision.  Missing provenance is stale, never
       // an invitation to merge an old row/event under a new export hash.
       if (!current) return false;
-      if (current.sourceHash === undefined || current.sourceRevision === undefined) return false;
-      return chunk.sourceHash === current.sourceHash
+      // Older durable semantic chunks only carried the leaf/source hash and
+      // cannot be proven current against a packed catalog file. Rebuild them
+      // instead of treating the outer catalog hash as their missing leaf hash.
+      if (current.outerFileHash === undefined || current.sourceRevision === undefined) return false;
+      return chunk.outerFileHash === current.outerFileHash
         && chunk.sourceRevision === current.sourceRevision;
     }
   );
@@ -212,9 +221,21 @@ export function mergeCatalogAndPersisted(catalog: RagCorpus, persisted: RagCorpu
   // silently discarding every newly decoded PARAM/MAP/MSG/EVENT row.  Keep
   // current semantic chunks first; valid persisted chunks fill only gaps.
   const currentSymbols = catalog.chunks.filter((chunk) => chunk.family !== 'file');
+  // A pre-fix PARAM corpus may contain one durable collision row under the old
+  // `sourceUri + row.uri` chunk ID.  The new child-aware ID cannot match that
+  // legacy key, so remove only IDs that are provably one of those old PARAM
+  // identities.  Do not match by logical URI: a symbol-scoped refresh may
+  // contain child A while the durable corpus already contains fresh child B
+  // for the same logical PARAM URI, and B must survive the merge.
+  const legacyParamRowIds = new Set(
+    currentSymbols
+      .filter((chunk) => chunk.family === 'param_row')
+      .map((chunk) => legacyParamRowChunkId(chunk))
+  );
   const symbolsById = new Map<string, RagChunk>();
   for (const chunk of currentSymbols) symbolsById.set(chunk.chunkId, chunk);
   for (const chunk of keptSymbols) {
+    if (chunk.family === 'param_row' && legacyParamRowIds.has(chunk.chunkId)) continue;
     if (!symbolsById.has(chunk.chunkId)) symbolsById.set(chunk.chunkId, chunk);
   }
   const symbols = [...symbolsById.values()];
@@ -260,11 +281,12 @@ function fileChunk(workspaceId: string, file: IndexedFile): RagChunk {
     relativePath: file.relativePath,
     resourceKind: file.resourceKind,
     ...(file.sha256 ? { sourceHash: file.sha256 } : {}),
+    ...(file.sha256 ? { outerFileHash: file.sha256 } : {}),
     sourceRevision: file.mtimeMs
   });
 }
 
-function eventChunk(workspaceId: string, event: EventSymbol, sourceHash?: string, sourceRevision?: number): RagChunk {
+function eventChunk(workspaceId: string, event: EventSymbol, sourceHash?: string, outerFileHash?: string, sourceRevision?: number): RagChunk {
   const instructions = event.instructions.slice(0, MAX_INSTRUCTIONS).map((instruction) => {
     const args = instruction.args
       .map((arg) => `${arg.name ?? 'arg'}=${stringifyValue(arg.value)}${arg.role ? `@${arg.role}` : ''}`)
@@ -300,6 +322,7 @@ function eventChunk(workspaceId: string, event: EventSymbol, sourceHash?: string
     ]),
     resourceKind: 'event',
     ...(sourceRevision !== undefined ? { sourceRevision } : {}),
+    ...(outerFileHash ? { outerFileHash } : {}),
     ...(sourceHash ? { sourceHash } : {})
   });
 }
@@ -310,7 +333,7 @@ function recordNumber(value: unknown, key: string): number | undefined {
   return typeof candidate === 'number' && Number.isFinite(candidate) ? candidate : undefined;
 }
 
-function mapEntityChunk(workspaceId: string, entity: MapEntitySymbol, sourceHash?: string, sourceRevision?: number): RagChunk {
+function mapEntityChunk(workspaceId: string, entity: MapEntitySymbol, sourceHash?: string, outerFileHash?: string, sourceRevision?: number): RagChunk {
   const block = formatMapBlock(entity.mapId) ?? entity.mapId.toLowerCase();
   const area = formatMapArea(block) || entity.areaId || '';
   const modelSuffix = entity.modelIndex !== undefined ? ` modelIndex ${entity.modelIndex}` : '';
@@ -329,17 +352,23 @@ function mapEntityChunk(workspaceId: string, entity: MapEntitySymbol, sourceHash
     workspaceId,
     sourceUri: entity.sourceUri,
     symbolUri: entity.uri,
+    // Map names/URIs are not globally unique across physical MSB sources
+    // (overlays and alternate map containers can expose the same mapId/name).
+    // Keep the native source in the chunk identity so persistence cannot
+    // overwrite one source with another.
+    identityKey: `${entity.sourceUri}\u0000${entity.uri}`,
     family: 'map_entity',
     title: formatMapAddress({ block, name: entity.name }),
     body,
     numericIds: collectNumbers([entity.entityId]),
     resourceKind: 'map',
     ...(sourceRevision !== undefined ? { sourceRevision } : {}),
+    ...(outerFileHash ? { outerFileHash } : {}),
     ...(sourceHash ? { sourceHash } : {})
   });
 }
 
-function mapRegionChunk(workspaceId: string, region: MapRegionSymbol, sourceHash?: string, sourceRevision?: number): RagChunk {
+function mapRegionChunk(workspaceId: string, region: MapRegionSymbol, sourceHash?: string, outerFileHash?: string, sourceRevision?: number): RagChunk {
   const block = formatMapBlock(region.mapId) ?? region.mapId.toLowerCase();
   const area = formatMapArea(block);
   const body = [
@@ -355,12 +384,14 @@ function mapRegionChunk(workspaceId: string, region: MapRegionSymbol, sourceHash
     workspaceId,
     sourceUri: region.sourceUri,
     symbolUri: region.uri,
+    identityKey: `${region.sourceUri}\u0000${region.uri}`,
     family: 'map_region',
     title: formatMapAddress({ block, name: region.name }),
     body,
     numericIds: collectNumbers([region.entityId]),
     resourceKind: 'map',
     ...(sourceRevision !== undefined ? { sourceRevision } : {}),
+    ...(outerFileHash ? { outerFileHash } : {}),
     ...(sourceHash ? { sourceHash } : {})
   });
 }
@@ -377,6 +408,7 @@ function taeEventChunk(
   anim: TaeAnimSymbol,
   event: TaeEventSymbol,
   sourceHash?: string,
+  outerFileHash?: string,
   sourceRevision?: number
 ): RagChunk {
   const address = formatActionAddress({ chr: taeExport.chrId, animId: anim.animId, eventIndex: event.index });
@@ -413,6 +445,7 @@ function taeEventChunk(
     ]),
     resourceKind: 'action',
     ...(sourceRevision !== undefined ? { sourceRevision } : {}),
+    ...(outerFileHash ? { outerFileHash } : {}),
     ...(sourceHash ? { sourceHash } : {})
   });
 }
@@ -432,6 +465,7 @@ function paramRowChunk(
   row: ParamRowSymbol,
   textEntryLookup: ReturnType<typeof buildTextEntryLookup>,
   sourceHash?: string,
+  outerFileHash?: string,
   sourceRevision?: number
 ): RagChunk {
   const linkedText = collectParamTextLinks(row, textEntryLookup);
@@ -471,10 +505,59 @@ function paramRowChunk(
     // typeName (for example multiple ATK_PARAM_ST tables). Keep the physical
     // source in the chunk identity so one table cannot overwrite another in
     // SQLite/RAG merely because rowId and typeName match.
-    identityKey: `${row.sourceUri}\u0000${row.uri}`,
+    // `row.uri` is a logical PARAM type/id address and is intentionally kept
+    // stable for native read/write routing.  A packed PARAM container may,
+    // however, contain several children with the same typeName and row ID
+    // (for example AtkParam_Npc and AtkParam_Pc).  Include the already
+    // ingested physical child identity in the RAG key so SQLite cannot make
+    // one child overwrite another.  The raw row index is only a fallback for
+    // legacy/synthetic envelopes which omit both child fields.
+    identityKey: paramRowChunkIdentity(row),
     ...(sourceRevision !== undefined ? { sourceRevision } : {}),
+    ...(outerFileHash ? { outerFileHash } : {}),
     ...(sourceHash ? { sourceHash } : {})
   });
+}
+
+function paramRowChunkIdentity(row: ParamRowSymbol): string {
+  const raw = row.raw && typeof row.raw === 'object' && !Array.isArray(row.raw)
+    ? row.raw as Record<string, unknown>
+    : undefined;
+  const rawRowIndex = typeof raw?.rowIndex === 'number' && Number.isInteger(raw.rowIndex)
+    && Number.isSafeInteger(raw.rowIndex) && raw.rowIndex >= 0
+    ? raw.rowIndex
+    : undefined;
+  const entryName = typeof row.entryName === 'string' && row.entryName.trim() !== ''
+    ? row.entryName
+    : undefined;
+  const entryIndex = typeof row.entryIndex === 'number'
+    && Number.isSafeInteger(row.entryIndex) && row.entryIndex >= 0
+    ? row.entryIndex
+    : undefined;
+  if (entryName !== undefined && entryIndex !== undefined && rawRowIndex !== undefined) {
+    // This is the stable physical identity shared by the first native
+    // projection and the later semantic refresh.  Their display/type name
+    // and logical URI may legitimately differ (NPC_PARAM_ST vs NpcParam),
+    // while child name/index + complete-table rowIndex + rowId do not.
+    return JSON.stringify([row.sourceUri, entryName, entryIndex, rawRowIndex, row.rowId]);
+  }
+  if (entryName !== undefined || entryIndex !== undefined || rawRowIndex !== undefined) {
+    // Old durable rows may expose only part of the physical locator.  Retain
+    // the prior five-slot JSON identity (including nulls and the logical URI)
+    // so child isolation is not lost while waiting for a complete reread.
+    return JSON.stringify([
+      row.sourceUri,
+      row.entryName ?? null,
+      row.entryIndex ?? null,
+      rawRowIndex ?? null,
+      row.uri
+    ]);
+  }
+  return `${row.sourceUri}\u0000${row.uri}`;
+}
+
+function legacyParamRowChunkId(chunk: Pick<RagChunk, 'sourceUri' | 'symbolUri'>): string {
+  return `rag:param_row:${stableId(`${chunk.sourceUri}\u0000${chunk.symbolUri}`)}`;
 }
 
 function mergeReferenceEdges(primary: readonly ReferenceEdge[], derived: readonly ReferenceEdge[]): ReferenceEdge[] {
@@ -489,7 +572,7 @@ function mergeReferenceEdges(primary: readonly ReferenceEdge[], derived: readonl
   return merged;
 }
 
-function textEntryChunk(workspaceId: string, entry: TextEntrySymbol, sourceHash?: string, sourceRevision?: number): RagChunk {
+function textEntryChunk(workspaceId: string, entry: TextEntrySymbol, sourceHash?: string, outerFileHash?: string, sourceRevision?: number): RagChunk {
   const body = [
     `textId ${entry.textId}`,
     entry.category ? `category ${entry.category}` : '',
@@ -506,6 +589,7 @@ function textEntryChunk(workspaceId: string, entry: TextEntrySymbol, sourceHash?
     resourceKind: 'msg',
     ...(entry.confidence ? { confidence: entry.confidence } : {}),
     ...(sourceRevision !== undefined ? { sourceRevision } : {}),
+    ...(outerFileHash ? { outerFileHash } : {}),
     ...(sourceHash ? { sourceHash } : {})
   });
 }
@@ -519,6 +603,7 @@ function makeChunk(input: {
   body: string;
   numericIds: number[];
   sourceRevision?: number;
+  outerFileHash?: string;
   sourceHash?: string;
   relativePath?: string;
   resourceKind?: ResourceKind;
@@ -537,6 +622,7 @@ function makeChunk(input: {
     numericIds: input.numericIds,
     contentHash: sha256(body),
     ...(input.sourceRevision !== undefined ? { sourceRevision: input.sourceRevision } : {}),
+    ...(input.outerFileHash ? { outerFileHash: input.outerFileHash } : {}),
     ...(input.sourceHash ? { sourceHash: input.sourceHash } : {}),
     ...(input.relativePath ? { relativePath: input.relativePath } : {}),
     ...(input.resourceKind ? { resourceKind: input.resourceKind } : {}),

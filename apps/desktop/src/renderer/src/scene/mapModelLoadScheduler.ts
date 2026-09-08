@@ -59,9 +59,9 @@ export interface ReadyResourceManifestV1 {
   lastUsedFrame: number;
 }
 
-interface InFlightEntry {
+interface InFlightEntry<TGeometry extends MapMeshGeometry> {
   controller: AbortController;
-  promise: Promise<MapMeshGeometry | null>;
+  promise: Promise<TGeometry | null>;
   resourceCacheKeySha256: string;
 }
 
@@ -72,20 +72,20 @@ interface InFlightEntry {
  * - inFlight coalesces by operationKeySha256 (resourceCacheKeySha256 + context)
  * - dispose aborts via AbortController and clears inFlight
  */
-export class MapModelLoadCache {
+export class MapModelLoadCache<TGeometry extends MapMeshGeometry = MapMeshGeometry> {
   // For production keys: small manifest only, no wire retained.
   private readonly resolvedManifests = new Map<string, ReadyResourceManifestV1 | null>();
   // Legacy synthetic keys (tests): retain small mesh for backward compat.
-  private readonly legacyResolved = new Map<string, MapMeshGeometry | null>();
-  private readonly inFlight = new Map<string, InFlightEntry>();
-  private readonly inFlightLegacy = new Map<string, Promise<MapMeshGeometry | null>>();
+  private readonly legacyResolved = new Map<string, TGeometry | null>();
+  private readonly inFlight = new Map<string, InFlightEntry<TGeometry>>();
+  private readonly inFlightLegacy = new Map<string, Promise<TGeometry | null>>();
   private disposed = false;
 
   public constructor(
-    private readonly loader: (modelName: string, signal: AbortSignal) => Promise<MapMeshGeometry | null>
+    private readonly loader: (modelName: string, signal: AbortSignal) => Promise<TGeometry | null>
   ) {}
 
-  public load(modelName: string): Promise<MapMeshGeometry | null> {
+  public load(modelName: string): Promise<TGeometry | null> {
     if (this.disposed) {
       return Promise.reject(new Error(`MAP_MESH_LOAD_CACHE_DISPOSED: cannot load ${modelName}`));
     }
@@ -122,12 +122,12 @@ export class MapModelLoadCache {
         this.inFlightLegacy.delete(sha);
       });
     // store controller for abort
-    this.inFlight.set(sha, { controller, promise: request as Promise<MapMeshGeometry | null>, resourceCacheKeySha256: sha });
+    this.inFlight.set(sha, { controller, promise: request, resourceCacheKeySha256: sha });
     this.inFlightLegacy.set(sha, request);
     return request;
   }
 
-  public loadByKey(key: ResourceCacheKeyV1, modelName: string): Promise<MapMeshGeometry | null> {
+  public loadByKey(key: ResourceCacheKeyV1, modelName: string): Promise<TGeometry | null> {
     if (this.disposed) {
       return Promise.reject(new Error(`MAP_MESH_LOAD_CACHE_DISPOSED: cannot load ${modelName}`));
     }

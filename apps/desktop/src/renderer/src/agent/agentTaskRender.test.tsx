@@ -221,10 +221,11 @@ describe('会话历史全量渲染与数据源上限说明', () => {
     assert.equal(visibleCount, 23, '23 条会话应全部渲染');
   });
 
-  it('明说数据源只回最近 50 个会话（不是渲染截断）', () => {
+  it('不在任务面板承诺未验证的历史分页入口', () => {
     const html = render({ sessions });
-    assert.match(html, /data-testid="agent-sessions-source-limit"/);
-    assert.match(html, /最近 50 个会话文件/, '不说明上限，用户会把 50 当成全部');
+    assert.doesNotMatch(html, /data-testid="agent-sessions-source-limit"/);
+    assert.doesNotMatch(html, /最近 50 个会话文件/);
+    assert.match(html, /任务历史 23 条/);
   });
 
   it('会话读取失败时保留结构化原因', () => {

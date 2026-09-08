@@ -17,7 +17,8 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { runBridge, disposeBridgeDaemonPool } from '../bridge/runBridge.js';
 import { importPinnedSmithboxSdtParamMetadata } from '../param/smithboxParamMetadataSource.js';
-import { matchParamMetadataPackage } from '../param/paramMetadata.js';
+import { matchParamMetadataPackage, resolveParamMetadataRowWidth } from '../param/paramMetadata.js';
+import { readParamDocumentViaBridge } from '../editing/paramBridgeCommit.js';
 import { decodeRowFields, validateParamDef } from '../param/paramdefLayout.js';
 import { resolveNativeFixture } from './nativeFixtureRegistry.js';
 import type {
@@ -169,6 +170,9 @@ async function main(): Promise<void> {
     let mismatchedCount = 0;
     let expectedUnsupportedCount = 0;
     let readFailedCount = 0;
+    const metadataWidthReads: Array<{
+      index: number; typeName: string; dataVersion: number; rowDataSize: number; sourceHash: string;
+    }> = [];
     const expectedUnsupportedDetails: ExpectedUnsupportedDetail[] = [];
     // Dynamic set of indices that actually remained structurally excluded.
     const stillUnsupportedIndices = new Set<number>();
@@ -215,15 +219,20 @@ async function main(): Promise<void> {
       }
 
       // Read the extracted PARAM via Bridge.
-      const doc = await runBridge<ParamEnvelope>({
-        command: 'read-param-document',
-        filePath: tmpParam,
+      const doc = await readParamDocumentViaBridge({
+        sourcePath: tmpParam,
         allowedRoots: [staging],
         timeoutMs: 60_000,
-        // 显式空 options：规避 Bridge default-options 缺陷（read-param-document 分页读取行无 ValueKind 防护）。
-        commandOptions: {}
+        resolveRowDataSize: async (header) => {
+          const width = resolveParamMetadataRowWidth(imported.package, {
+            game: SEKIRO_METADATA_GAME, gameBuild: SEKIRO_METADATA_GAME_BUILD,
+            typeName: header.typeName, dataVersion: header.dataVersion
+          }, trustPolicy);
+          if (width !== undefined) metadataWidthReads.push({ index: i, ...header, rowDataSize: width });
+          return width;
+        }
       });
-      if (!doc.data?.typeName) {
+      if (!doc.ok || !doc.data?.typeName) {
         if (!isKnownUnsupported) readFailedCount += 1;
         const diagnostic = {
           code: doc.diagnostics[0]?.code ?? 'READ_FAILED',
@@ -252,7 +261,7 @@ async function main(): Promise<void> {
       }
 
       const nativeTypeName = doc.data.typeName;
-      const nativeDataVersion = doc.data.dataVersion;
+      const nativeDataVersion = doc.data.dataVersion ?? -1;
       const nativeRowDataSize = doc.data.rowDataSize;
 
       // 4. 5-key strict match —— 必须调**生产** matcher。
@@ -378,6 +387,9 @@ async function main(): Promise<void> {
       },
       expectedUnsupportedIndices: [...stillUnsupportedIndices].sort((a, b) => a - b),
       expectedUnsupportedDetails,
+      metadataWidthReads: metadataWidthReads.map((item) => ({
+        ...item, verified: results.some((result) => result.index === item.index && result.status === 'matched')
+      })),
       failures: failures.slice(0, 10).map((f) => ({
         index: f.index,
         typeName: f.typeName,

@@ -186,7 +186,8 @@ describe('命令面板资源搜索', () => {
   ] as const;
 
   it('App 只在已打开工作区的 indexedFiles 中渲染资源候选，并保留区分空态', () => {
-    assert.match(appSource, /const cmdkAllResourceMatches = workspace && cmdkNormalized/);
+    assert.match(appSource, /const cmdkAllResourceMatches = useMemo\(\(\) =>/);
+    assert.match(appSource, /if \(!cmdkOpen \|\| !workspace \|\| !cmdkNormalized\) return \[\];/);
     assert.match(appSource, /filterCommandPaletteResources\(indexedFiles, cmdkNormalized\)/);
     assert.match(appSource, /workspace \? '无匹配命令或资源。' : '请先打开 Mod 工作区；打开后可搜索资源。'/);
   });

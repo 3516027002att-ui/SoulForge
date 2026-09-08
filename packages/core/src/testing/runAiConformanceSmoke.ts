@@ -62,7 +62,8 @@
  * - loop retry: two 500s then success (3 hits, 2 audit retries, retry
  *   events); non-retryable 401 fails fast with exactly 1 hit
  * - parallel tool calls: supportsParallel tools overlap at runtime while
- *   results are recorded in model emission order; exclusive tools stay serial
+ *   results are recorded in model emission order; one rejection is normalized
+ *   without discarding successful siblings; exclusive tools stay serial
  * - streaming path: SSE text deltas surface as agent-message-delta events and
  *   assemble into the final message; SSE tool_calls drive one tool step;
  *   a failed first stream attempt is retried at the stream budget
@@ -85,7 +86,7 @@
  * - session cancellation leaves a durable interrupted marker
  * - no open Mod workspace: workspace-backed tools fail cleanly with
  *   WORKSPACE_REQUIRED while workspace-free tools keep running; the session
- *   host injects systemPrompt only when the history has no system message
+ *   host rebuilds current system policy instead of inheriting stale policy
  *
  * All cases use local fake HTTP servers or injected fetch failures.
  * No real provider credentials or network access required.
@@ -136,7 +137,13 @@ import {
   DEFAULT_SUMMARIZATION_PROMPT,
   DEFAULT_SUMMARY_PREFIX
 } from '../model-services/contextCompactor.js';
-import { createDefaultToolRegistry, ToolRegistry, validateToolInput, type ToolContext } from '../ai/toolRegistry.js';
+import {
+  createDefaultToolRegistry,
+  finalizeCommittedToolResult,
+  ToolRegistry,
+  validateToolInput,
+  type ToolContext
+} from '../ai/toolRegistry.js';
 import { createAgentToolBridge, MAX_BOUNDED_TOOL_RESULT_CHARS } from '../ai/agentToolBridge.js';
 import { searchEventReference } from '../ai/eventReference.js';
 import { WorkspaceIndex } from '../indexing/workspaceIndex.js';
@@ -370,12 +377,15 @@ function assertStableToolEnvelope(content: string, label: string, truncated: boo
     throw new Error(`${label}: result must be valid JSON: ${String(error)}`);
   }
   const topKeys = Object.keys(parsed).sort();
-  const expectedTopKeys = ['data', 'evidence', 'identifiers', 'ok', 'pagination', 'state', 'truncated'];
+  const expectedTopKeys = ['completeness', 'data', 'evidence', 'identifiers', 'ok', 'pagination', 'state', 'truncated'];
   if (JSON.stringify(topKeys) !== JSON.stringify(expectedTopKeys)) {
     throw new Error(`${label}: unstable envelope keys ${JSON.stringify(topKeys)}`);
   }
   if (parsed.ok !== true || parsed.state !== 'completed' || parsed.truncated !== truncated) {
     throw new Error(`${label}: invalid status fields ${JSON.stringify(parsed)}`);
+  }
+  if (!['complete', 'windowed', 'partial', 'summary_only'].includes(String(parsed.completeness))) {
+    throw new Error(`${label}: invalid completeness ${JSON.stringify(parsed.completeness)}`);
   }
   if (!Array.isArray(parsed.identifiers)) throw new Error(`${label}: identifiers must be an array.`);
   const evidence = parsed.evidence;
@@ -519,7 +529,7 @@ async function runScriptedMatrix(
 
 async function main(): Promise<void> {
   let passed = 0;
-  const total = 65;
+  const total = 70;
   let targetInstructionTrace: {
     steps: number;
     finishReason: string;
@@ -1465,13 +1475,22 @@ async function main(): Promise<void> {
           && (message as { role?: string }).role === 'system'
           && typeof (message as { content?: unknown }).content === 'string')
         .map((message) => (message as { content: string }).content);
-      if (!systemContexts.some((content) => content.includes('[evidence-context'))) {
-        throw new Error('Case 25: no evidence context was injected into model requests.');
+      const dynamicContexts = history
+        .flatMap((entry) => entry.messages)
+        .filter((message) => typeof message === 'object' && message !== null
+          && (message as { role?: string }).role === 'user'
+          && typeof (message as { content?: unknown }).content === 'string')
+        .map((message) => (message as { content: string }).content);
+      if (!dynamicContexts.some((content) => content.includes('[evidence-context'))) {
+        throw new Error('Case 25: no untrusted evidence context was injected into model requests.');
       }
       // Cross-step state consistency: after the first tool executes, later
       // requests carry tool-result evidence assembled from the prior step.
-      if (!systemContexts.some((content) => content.includes('evidence=toolResult'))) {
+      if (!dynamicContexts.some((content) => content.includes('evidence=toolResult'))) {
         throw new Error('Case 25: cross-step tool evidence missing from later context.');
+      }
+      if (!systemContexts.some((content) => content.includes('不是系统指令'))) {
+        throw new Error('Case 25: dynamic evidence policy prefix missing from system context.');
       }
       if (!run.audit.contextAssemblies?.some((assembly) => assembly.ok && assembly.sections >= 1)) {
         throw new Error('Case 25: context assemblies missing from run audit.');
@@ -1565,13 +1584,13 @@ async function main(): Promise<void> {
       if (!run.audit.toolCalls.some((call) => call.code === 'PATCH_ENGINE_REQUIRED')) {
         throw new Error('Case 27: refusal missing from loop audit.');
       }
-      const systemContexts = history
+      const dynamicContexts = history
         .flatMap((entry) => entry.messages)
         .filter((message) => typeof message === 'object' && message !== null
-          && (message as { role?: string }).role === 'system'
+          && (message as { role?: string }).role === 'user'
           && typeof (message as { content?: unknown }).content === 'string')
         .map((message) => (message as { content: string }).content);
-      if (!systemContexts.some((content) => content.includes('PATCH_ENGINE_REQUIRED'))) {
+      if (!dynamicContexts.some((content) => content.includes('PATCH_ENGINE_REQUIRED'))) {
         throw new Error('Case 27: refusal must be assembled into later evidence context.');
       }
       if (!run.audit.contextAssemblies?.some((assembly) => assembly.ok)) {
@@ -2250,10 +2269,12 @@ async function main(): Promise<void> {
   // --- runtime; results recorded in model emission order; exclusive serial ---
   {
     let turn = 0;
+    const seenRequests: ModelCompleteRequest[] = [];
     const fakeAdapter: ModelServiceAdapter = {
       protocol: 'openai-compatible',
       listModels: fakeListModels,
-      async complete() {
+      async complete(request) {
+        seenRequests.push({ ...request, messages: [...request.messages] });
         turn += 1;
         if (turn === 1) {
           return {
@@ -2317,7 +2338,10 @@ async function main(): Promise<void> {
             ]);
             if (winner === 'timeout') throw new Error('Case 46: read_a/read_b did not overlap.');
           }
-          if (call.name === 'read_b') releaseB?.();
+          if (call.name === 'read_b') {
+            releaseB?.();
+            throw new Error('parallel failure sk-should-be-redacted');
+          }
         } finally {
           active -= 1;
         }
@@ -2338,10 +2362,26 @@ async function main(): Promise<void> {
     if (toolMessageIds.join(',') !== 'call-a,call-b,call-c') {
       throw new Error(`Case 46: recording order wrong: ${toolMessageIds.join(',')}`);
     }
+    const secondRequestTools = (seenRequests[1]?.messages ?? [])
+      .filter((message) => message.role === 'tool');
+    if (secondRequestTools.length !== 2
+      || !secondRequestTools[0]?.content.includes('read_a-result')
+      || !secondRequestTools[1]?.content.includes('TOOL_EXECUTION_THROWN')
+      || secondRequestTools[1]?.content.includes('sk-should-be-redacted')) {
+      throw new Error(`Case 46: rejected sibling was not normalized/redacted in order: ${JSON.stringify(secondRequestTools)}`);
+    }
+    const failedAudit = result.audit.toolCalls.find((entry) => entry.name === 'read_b');
+    if (failedAudit?.ok !== false || failedAudit.code !== 'TOOL_EXECUTION_THROWN') {
+      throw new Error(`Case 46: rejected sibling audit missing: ${JSON.stringify(failedAudit)}`);
+    }
     const begins = events.flatMap((event) => (event.type === 'tool-call-begin' ? [event.callId] : []));
     const ends = events.flatMap((event) => (event.type === 'tool-call-end' ? [event.callId] : []));
     if (begins.join(',') !== 'call-a,call-b,call-c' || ends.join(',') !== 'call-a,call-b,call-c') {
       throw new Error(`Case 46: tool span events wrong: begins=${begins.join(',')} ends=${ends.join(',')}`);
+    }
+    const rejectedEnd = events.find((event) => event.type === 'tool-call-end' && event.callId === 'call-b');
+    if (rejectedEnd?.type !== 'tool-call-end' || rejectedEnd.code !== 'TOOL_EXECUTION_THROWN') {
+      throw new Error(`Case 46: rejected sibling end event missing: ${JSON.stringify(rejectedEnd)}`);
     }
     passed++;
   }
@@ -2563,6 +2603,65 @@ async function main(): Promise<void> {
       throw new Error('Case 50: corrupt line tolerance failed.');
     }
     await recorder.close();
+
+    const transientLines: string[] = [];
+    let transientAttempts = 0;
+    let transientClosed = false;
+    const transientRecorder = new RolloutRecorder({
+      async appendLines(nextLines: string[]) {
+        transientAttempts += 1;
+        if (transientAttempts === 1) throw new Error('transient append failure');
+        transientLines.push(...nextLines);
+      },
+      async readLines() { return [...transientLines]; },
+      async flush() {},
+      async close() { transientClosed = true; }
+    }, {
+      sessionId: 'sess-transient',
+      startedAt: new Date().toISOString(),
+      configId: 'cfg-1',
+      protocol: 'openai-compatible',
+      permissionMode: 'normal'
+    });
+    transientRecorder.enqueue({ type: 'message', step: 0, message: { role: 'user', content: 'kept' } });
+    await transientRecorder.flush();
+    if (transientAttempts !== 2
+      || transientLines.filter((line) => line.includes('session-meta')).length !== 1
+      || transientLines.filter((line) => line.includes('"content":"kept"')).length !== 1) {
+      throw new Error(`Case 50: transient flush retry was not exactly-once: ${JSON.stringify({ transientAttempts, transientLines })}`);
+    }
+    await transientRecorder.close();
+    if (!transientClosed) throw new Error('Case 50: recovered recorder storage was not closed.');
+
+    let persistentClosed = false;
+    const persistentRecorder = new RolloutRecorder({
+      async appendLines() { throw new Error('persistent append failure'); },
+      async readLines() { return []; },
+      async flush() {},
+      async close() { persistentClosed = true; }
+    }, {
+      sessionId: 'sess-persistent',
+      startedAt: new Date().toISOString(),
+      configId: 'cfg-1',
+      protocol: 'openai-compatible',
+      permissionMode: 'normal'
+    });
+    persistentRecorder.enqueue({ type: 'message', step: 0, message: { role: 'user', content: 'must-not-drop' } });
+    let persistentFlushRejected = false;
+    try {
+      await persistentRecorder.flush();
+    } catch (error) {
+      persistentFlushRejected = String(error).includes('ROLLOUT_FLUSH_FAILED');
+    }
+    let persistentCloseRejected = false;
+    try {
+      await persistentRecorder.close();
+    } catch (error) {
+      persistentCloseRejected = String(error).includes('ROLLOUT_FLUSH_FAILED');
+    }
+    if (!persistentFlushRejected || !persistentCloseRejected || persistentClosed) {
+      throw new Error('Case 50: permanent rollout failure must reject flush/close without closing storage.');
+    }
     passed++;
   }
 
@@ -2742,10 +2841,12 @@ async function main(): Promise<void> {
   // --- 不参与退避重试，压缩历史后重试一次；压缩后仍溢出则失败关闭）---
   {
     let callNo = 0;
+    const overflowRequests: ModelCompleteRequest[] = [];
     const overflowAdapter: ModelServiceAdapter = {
       protocol: 'openai-compatible',
       async complete(request) {
         callNo += 1;
+        overflowRequests.push({ ...request, messages: [...request.messages] });
         const last = request.messages[request.messages.length - 1];
         if (callNo === 1) {
           return {
@@ -2777,7 +2878,11 @@ async function main(): Promise<void> {
       apiKey: 'sk-test',
       messages: [
         { role: 'system', content: 'SYS' },
-        { role: 'user', content: '很长的历史' }
+        { role: 'user', content: '旧问题-1' },
+        { role: 'assistant', content: 'OLD_ASSISTANT_SHOULD_BE_COMPACTED' },
+        { role: 'user', content: '旧问题-2' },
+        { role: 'assistant', content: '较新回答' },
+        { role: 'user', content: '当前问题' }
       ],
       tools: [],
       permissionMode: 'normal',
@@ -2795,6 +2900,12 @@ async function main(): Promise<void> {
     }
     if (!overflowResult.diagnostics.some((entry) => entry.code === 'CONTEXT_OVERFLOW_RECOVERY')) {
       throw new Error('Case 53b: CONTEXT_OVERFLOW_RECOVERY diagnostic missing.');
+    }
+    const retryMessages = overflowRequests[2]?.messages ?? [];
+    if (!retryMessages.some((message) => message.role === 'user'
+      && message.content.includes(DEFAULT_SUMMARY_PREFIX))
+      || retryMessages.some((message) => message.content.includes('OLD_ASSISTANT_SHOULD_BE_COMPACTED'))) {
+      throw new Error(`Case 53b: retry did not use compacted replacement history: ${JSON.stringify(retryMessages)}`);
     }
     passed++;
   }
@@ -2900,30 +3011,40 @@ async function main(): Promise<void> {
     const okCall = await bridge.executeTool({ id: 'c1', name: 'read_thing', argumentsJson: '{"q":"x"}' });
     if (!okCall.ok || !okCall.content.includes('42')) throw new Error('Case 54: ok mapping wrong.');
     assertStableToolEnvelope(okCall.content, 'Case 54 small result', false);
-    const switchRegistry = new ToolRegistry();
-    switchRegistry.register({
-      name: 'switch_mode',
-      description: 'switch operation mode',
-      permission: 'read',
-      permissionLevel: 'read',
-      inputSchema: { mode: 'enum:plan|normal|fullPermission' },
-      run: (input, context) => {
-        const mode = (input as { mode: 'plan' | 'normal' | 'fullPermission' }).mode;
-        context.mode = mode;
-        return { ok: true, data: { switched: true, currentMode: mode } };
-      }
-    });
+    const switchRegistry = createDefaultToolRegistry();
+    const planSwitchContext: ToolContext = {
+      workspaceIndex: null,
+      mode: 'plan',
+      modeCeiling: 'plan'
+    };
     const switchBridge = createAgentToolBridge({
       registry: switchRegistry,
-      context: { workspaceIndex: {} as never, mode: 'plan' }
+      context: planSwitchContext
     });
-    const switched = await switchBridge.executeTool({
-      id: 'switch-full',
+    for (const targetMode of ['normal', 'fullPermission', 'edit']) {
+      const deniedSwitch = await switchBridge.executeTool({
+        id: `switch-${targetMode}`,
+        name: 'switch_mode',
+        argumentsJson: JSON.stringify({ mode: targetMode })
+      });
+      if (deniedSwitch.ok || deniedSwitch.code !== 'MODE_ESCALATION_REQUIRES_HOST_GRANT') {
+        throw new Error(`Case 54: plan must not self-escalate to ${targetMode}: ${deniedSwitch.content}`);
+      }
+    }
+    if (planSwitchContext.mode !== 'plan') {
+      throw new Error(`Case 54: denied switch mutated plan mode to ${planSwitchContext.mode}.`);
+    }
+    const fullSwitchBridge = createAgentToolBridge({
+      registry: switchRegistry,
+      context: { workspaceIndex: null, mode: 'fullPermission', modeCeiling: 'fullPermission' }
+    });
+    const lowered = await fullSwitchBridge.executeTool({
+      id: 'switch-normal',
       name: 'switch_mode',
-      argumentsJson: '{"mode":"fullPermission"}'
+      argumentsJson: '{"mode":"normal"}'
     });
-    if (!switched.ok || extractSwitchedAgentPermissionMode(switched.content) !== 'full') {
-      throw new Error(`Case 54: switch_mode envelope must update loop mode: ${switched.content}`);
+    if (!lowered.ok || extractSwitchedAgentPermissionMode(lowered.content) !== 'normal') {
+      throw new Error(`Case 54: host-granted full mode must allow lowering to normal: ${lowered.content}`);
     }
     const failCall = await bridge.executeTool({ id: 'c2', name: 'propose_thing', argumentsJson: '{"t":"y"}' });
     if (failCall.ok || failCall.code !== 'WRITE_GATE_CLOSED') throw new Error('Case 54: error mapping wrong.');
@@ -4155,7 +4276,7 @@ async function main(): Promise<void> {
 
   // --- Case 59: no open Mod workspace — workspace-backed tools fail cleanly
   // --- with WORKSPACE_REQUIRED, workspace-free tools keep running; the session
-  // --- host injects systemPrompt only when the history lacks a system message ---
+  // --- host rebuilds current system policy and drops resumed system messages ---
   {
     const base = await mkdtemp(join(tmpdir(), 'soulforge-agent-wsnull-'));
     try {
@@ -4184,6 +4305,21 @@ async function main(): Promise<void> {
       const listOps = await registry.run('list_operations', {}, nullContext);
       if (listOps.ok || listOps.error?.code !== 'WORKSPACE_REQUIRED') {
         throw new Error('Case 59: list_operations must fail with WORKSPACE_REQUIRED when no workspace.');
+      }
+      const nativeReaders: Array<[string, unknown]> = [
+        ['read_param_fields', { table: 'NpcParam', rowIds: [1], fieldIds: ['hp'] }],
+        ['read_fmg_entries', { table: 'Title', ids: [1] }],
+        ['read_emevd_outline', { file: 'event/test.emevd.dcx' }],
+        ['read_tae_events', { file: 'action/test.anibnd.dcx' }],
+        ['list_luabnd_scripts', { file: 'script/test.luabnd.dcx' }],
+        ['read_luabnd_script', { file: 'script/test.luabnd.dcx', entryName: 'test.lua' }],
+        ['read_msb_parts', { file: 'map/test.msb.dcx' }]
+      ];
+      for (const [name, input] of nativeReaders) {
+        const nativeRead = await registry.run(name, input, nullContext);
+        if (nativeRead.ok || nativeRead.error?.code !== 'WORKSPACE_REQUIRED') {
+          throw new Error(`Case 59: ${name} must fail with WORKSPACE_REQUIRED, got ${JSON.stringify(nativeRead)}`);
+        }
       }
 
       // 不读 workspaceIndex 的工具在 null 下照常运行 —— 守卫只拦工作区工具，不误伤无状态工具。
@@ -4233,7 +4369,7 @@ async function main(): Promise<void> {
         throw new Error('Case 59: user prompt missing after system injection.');
       }
 
-      // resume 旧会话已带 system：新 systemPrompt 不得重复注入，保留原 system 在最前。
+      // resume 旧会话已带 system：旧 policy 不继承，当前 policy 与授权通知重建。
       const seen2: ModelCompleteRequest[] = [];
       const resumedWithSystem: ResumedRollout = {
         meta: null,
@@ -4263,16 +4399,19 @@ async function main(): Promise<void> {
         apiKey: 'sk-test',
         prompt: '新问题。',
         systemPrompt: '新 system。',
-        permissionMode: 'normal',
+        permissionMode: 'full',
         tools: [],
         executeTool: async () => ({ ok: false, content: 'unused' }),
         resumeFrom: resumedWithSystem
       });
       if (resumed.run.finishReason !== 'stop') throw new Error(`Case 59: resume run ${resumed.run.finishReason}`);
       const resumedMessages = seen2[0]?.messages ?? [];
-      const systemCount = resumedMessages.filter((message) => message.role === 'system').length;
-      if (systemCount !== 1 || resumedMessages[0]?.content !== '旧 system。') {
-        throw new Error(`Case 59: resumed system message must be kept and not duplicated, got ${JSON.stringify(resumedMessages)}`);
+      const systemMessages = resumedMessages.filter((message) => message.role === 'system');
+      if (systemMessages.length !== 2
+        || systemMessages[0]?.content !== '新 system。'
+        || !systemMessages[1]?.content.includes('fullPermission')
+        || systemMessages.some((message) => message.content.includes('旧 system。'))) {
+        throw new Error(`Case 59: resumed system policy was not rebuilt from current host state: ${JSON.stringify(resumedMessages)}`);
       }
       if (!resumedMessages.some((message) => message.role === 'user' && message.content === '新问题。')) {
         throw new Error('Case 59: resumed run must include the new user prompt.');
@@ -4281,6 +4420,83 @@ async function main(): Promise<void> {
     } finally {
       await rm(base, { recursive: true, force: true });
     }
+  }
+
+  // --- Case 65: committed lifecycle survives refresh/native verification failures ---
+  {
+    const registry = new ToolRegistry();
+    registry.register({
+      name: 'mutate_param_fields',
+      description: 'post-commit lifecycle fixture',
+      permission: 'commit',
+      permissionLevel: 'commit',
+      run: (input, context) => finalizeCommittedToolResult({
+        data: { opId: 'op-lifecycle-fixture' },
+        changedSources: ['file:///fixture.parambnd.dcx'],
+        context,
+        verifyNative: async () => (
+          (input as { failVerification?: boolean }).failVerification
+            ? { ok: false, code: 'FIXTURE_REREAD_MISMATCH', message: 'fixture mismatch' }
+            : { ok: true, details: { sourceHash: 'fixture-native-hash' } }
+        )
+      })
+    });
+    let finalized = 0;
+    let released = 0;
+    const taskRecord = {
+      read: async () => ({ path: '', entries: [], updatedAt: null }),
+      beforeSearch: async () => ({ ok: true as const }),
+      recordSearch: async ({ toolName, query }: { toolName: string; query: string }) => ({ searchId: 'unused', toolName, query }),
+      update: async () => ({ path: '', entries: [], updatedAt: null }),
+      recordNativeParamRead: async () => ({ path: '', entries: [], updatedAt: null }),
+      assertMutationTarget: async () => ({ ok: true as const, reservationId: `reservation-${finalized + released}` }),
+      finalizeMutation: async () => { finalized += 1; },
+      releaseMutationReservation: async () => { released += 1; },
+      releaseMutationCount: async () => ({
+        ok: true as const,
+        released: 0,
+        snapshot: { path: '', entries: [], updatedAt: null }
+      })
+    };
+    const context: ToolContext = {
+      workspaceIndex: null,
+      mode: 'fullPermission',
+      taskRecord,
+      requireTaskRecord: true,
+      onNativeWriteCommitted: async () => { throw new Error('fixture refresh failed'); }
+    };
+    const committed = await registry.run('mutate_param_fields', {}, context);
+    if (!committed.ok || committed.state !== 'committed') {
+      throw new Error(`Case 65: refresh failure must preserve committed state, got ${JSON.stringify(committed)}`);
+    }
+    const committedData = committed.data as { lifecycle?: { transaction?: string; knowledgeRefresh?: string } };
+    if (committedData.lifecycle?.transaction !== 'committed'
+      || committedData.lifecycle.knowledgeRefresh !== 'failed'
+      || finalized !== 1
+      || released !== 0) {
+      throw new Error(`Case 65: committed reservation/lifecycle mismatch ${JSON.stringify({ committedData, finalized, released })}`);
+    }
+
+    const bridge = createAgentToolBridge({ registry, context });
+    const verificationFailed = await bridge.executeTool({
+      id: 'call-lifecycle-fixture',
+      name: 'mutate_param_fields',
+      argumentsJson: JSON.stringify({ failVerification: true })
+    });
+    const envelope = JSON.parse(verificationFailed.content) as {
+      ok?: boolean;
+      state?: string;
+      data?: { record?: { lifecycle?: { transaction?: string; nativeVerification?: { status?: string } } } };
+    };
+    if (!verificationFailed.ok
+      || envelope.state !== 'verification_failed'
+      || envelope.data?.record?.lifecycle?.transaction !== 'committed'
+      || envelope.data.record.lifecycle.nativeVerification?.status !== 'failed'
+      || Number(finalized) !== 2
+      || released !== 0) {
+      throw new Error(`Case 65: bridge lost post-commit failure state ${JSON.stringify({ verificationFailed, envelope, finalized, released })}`);
+    }
+    passed++;
   }
 
   console.log(JSON.stringify({

@@ -51,7 +51,7 @@ export function AgentHistoryUploadControl(): ReactElement {
     <section className="agent-history-upload" data-testid="agent-history-upload">
       <div className="agent-history-upload__head">
         <strong>反馈与会话记录</strong>
-        <span className="muted">上传前会自动清洗凭据，保留工具与资源证据。</span>
+        <span className="muted">上传前会清除凭据，同时保留必要的操作证据。</span>
       </div>
       <p className="agent-history-upload__endpoint" data-testid="agent-feedback-status">
         {bridge === null
@@ -67,7 +67,7 @@ export function AgentHistoryUploadControl(): ReactElement {
         className="btn btn--ghost btn--sm"
         data-testid="agent-feedback-submit-all"
         disabled={bridge === null || typeof bridge.submitAllHistory !== 'function' || submitting || configured === false}
-        title={configured === false ? '反馈 endpoint 尚未配置' : '逐会话提交全部历史'}
+        title={configured === false ? '反馈地址尚未配置' : '逐会话提交全部历史'}
         onClick={() => void submitAllHistory()}
       >
         {submitting ? '上传全部历史中…' : '提交全部会话历史'}

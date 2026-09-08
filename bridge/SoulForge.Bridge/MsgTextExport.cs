@@ -1,4 +1,5 @@
 using System.Text;
+using System.Security.Cryptography;
 
 static class MsgTextExport
 {
@@ -7,8 +8,10 @@ static class MsgTextExport
 
     public static BridgeResult<object> Export(string sourcePath, string? oodleRuntimeRoot = null)
     {
-        var info = new FileInfo(sourcePath);
-        var sample = ReadPrefix(sourcePath, (int)Math.Min(info.Length, MaxReadBytes));
+        // Candidate detection stays bounded.  A full read is only allowed
+        // after the magic check selects the native path, where the same byte
+        // receipt is needed for outer-file hashing and native child parsing.
+        var sample = ReadPrefix(sourcePath, MaxReadBytes);
         var sourceUri = BridgeResult<object>.MakeSourceUri(sourcePath);
         var category = SafeCategory(Path.GetFileNameWithoutExtension(sourcePath));
 
@@ -75,12 +78,14 @@ static class MsgTextExport
             new { category, entries });
     }
 
-    private static BridgeResult<object> ExportNative(string sourcePath, string? oodleRuntimeRoot)
+    private static BridgeResult<object> ExportNative(string sourcePath, string? oodleRuntimeRoot, byte[]? sourceBytes = null)
     {
         var sourceUri = BridgeResult<object>.MakeSourceUri(sourcePath);
+        sourceBytes ??= File.ReadAllBytes(sourcePath);
+        var outerFileHash = HashHex(sourceBytes);
         try
         {
-            var leaves = NativeLeafPayload.ResolveAll(sourcePath, oodleRuntimeRoot, ".fmg", ".msg");
+            var leaves = NativeLeafPayload.ResolveAll(sourceBytes, sourcePath, oodleRuntimeRoot, ".fmg", ".msg");
             var tables = new List<NativeMsgTable>(leaves.Count);
             var diagnostics = new List<Diagnostic>();
             foreach (var leaf in leaves)
@@ -154,7 +159,8 @@ static class MsgTextExport
             }).ToArray();
             var data = new Dictionary<string, object?>(StringComparer.Ordinal)
             {
-                ["msgs"] = msgPayload
+                ["msgs"] = msgPayload,
+                ["outerFileHash"] = outerFileHash
             };
             // 保留单 FMG 调用方的旧形状；多表结果通过 msgs[] 明确表达。
             if (tables.Count == 1)
@@ -169,7 +175,7 @@ static class MsgTextExport
                 "MSG_FMG_NATIVE_SEMANTIC_EXPORT",
                 "已由原生 FMG v2 解析器展开消息容器中的全部文本表、文本 ID 和 UTF-16 文本。",
                 sourceUri,
-                new { parser = "sekiro-fmg-native-v2", tables = tables.Count, entries = tables.Sum(table => table.Entries.Length) }));
+                new { parser = "sekiro-fmg-native-v2", tables = tables.Count, entries = tables.Sum(table => table.Entries.Length), outerFileHash }));
             return BridgeResult<object>.Partial(sourcePath, "msg", diagnostics, data);
         }
         catch (Exception ex) when (IsNativeReadException(ex))
@@ -207,6 +213,9 @@ static class MsgTextExport
         var slash = normalized.LastIndexOf('/');
         return slash >= 0 ? normalized[(slash + 1)..] : normalized;
     }
+
+    private static string HashHex(byte[] bytes) =>
+        Convert.ToHexString(SHA256.HashData(bytes)).ToLowerInvariant();
 
     private static bool IsNativeFmg(byte[] sample)
     {

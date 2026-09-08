@@ -81,7 +81,7 @@ export function AgentComposerToolbar(props: AgentComposerToolbarProps): ReactEle
   const effectiveThinking = convergeThinkingLevel(thinking, protocol);
 
   return (
-    <div className="agent-composer__toolbar" role="toolbar" aria-label="Composer 工具栏">
+    <div className="agent-composer__toolbar" role="toolbar" aria-label="输入工具栏">
       <button
         type="button"
         className={`composer-tool-btn${citeSelecting ? ' is-active' : ''}`}
@@ -133,10 +133,10 @@ export function AgentComposerToolbar(props: AgentComposerToolbarProps): ReactEle
         onModeChange={(mode) => onInteractionModeChange?.(mode)}
       />
       <span className="composer-spacer"></span>
-      <label className="composer-thinking" title="effort（作用于下一次任务）">
-        <span className="composer-tool-label">effort</span>
+      <label className="composer-thinking" title="思考强度（作用于下一次任务）">
+        <span className="composer-tool-label">思考强度</span>
         <select
-          aria-label="effort"
+          aria-label="思考强度"
           value={effectiveThinking}
           onChange={(event) => onThinkingChange(event.target.value as ModelThinkingLevel)}
         >

@@ -4,12 +4,39 @@
 import http from 'node:http';
 import { OpenAiResponsesAdapter } from '../model-services/openaiResponsesAdapter.js';
 import { runAgentToolLoop } from '../model-services/agentLoop.js';
-import type { ModelServiceConfig, ToolDefinition } from '../model-services/types.js';
+import type { ModelServiceConfig, StreamEvent, ToolDefinition } from '../model-services/types.js';
 
 const API_KEY = 'sk-fake-responses-001';
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+async function readStreamEvents(events: readonly unknown[], apiKey = API_KEY): Promise<StreamEvent[]> {
+  const adapter = new OpenAiResponsesAdapter({
+    baseUrl: 'http://127.0.0.1',
+    apiKey,
+    model: 'fake-responses',
+    fetchImpl: async () => new Response(
+      events.map((event) => `data: ${JSON.stringify(event)}\n\n`).join(''),
+      { status: 200, headers: { 'content-type': 'text/event-stream' } }
+    )
+  });
+  const result: StreamEvent[] = [];
+  for await (const streamEvent of adapter.stream({ messages: [{ role: 'user', content: 'failure probe' }] })) {
+    result.push(streamEvent);
+  }
+  return result;
+}
+
+async function readStreamError(
+  event: unknown,
+  apiKey = API_KEY
+): Promise<Extract<StreamEvent, { type: 'error' }>> {
+  const events = await readStreamEvents([event], apiKey);
+  const failure = events.find((streamEvent): streamEvent is Extract<StreamEvent, { type: 'error' }> => streamEvent.type === 'error');
+  if (failure) return failure;
+  throw new Error('Responses stream failure event was not emitted');
 }
 
 function startResponsesFake(): Promise<{
@@ -275,6 +302,115 @@ async function main(): Promise<void> {
     }
     if (stats.nestedFunctionCallRejected !== 0 || stats.topLevelFunctionCallSeen < 1) {
       throw new Error(`Responses tool-call input shape was not normalized: ${JSON.stringify(stats)}`);
+    }
+
+    const nestedFailure = await readStreamError({
+      type: 'response.failed',
+      response: {
+        error: {
+          code: 'q1',
+          message: 'nested response failure'
+        }
+      }
+    });
+    if (
+      nestedFailure.code !== 'MODEL_SERVICE_STREAM_FAILED'
+      || nestedFailure.message !== 'Responses 流失败 [q1]：nested response failure'
+      || Object.keys(nestedFailure).some((key) => !['type', 'code', 'message'].includes(key))
+    ) {
+      throw new Error(`nested response.failed diagnostic was not normalized: ${JSON.stringify(nestedFailure)}`);
+    }
+
+    const redactedFailure = await readStreamError({
+      type: 'error',
+      code: 'server_error',
+      message: `top-level ${API_KEY} Bearer sk-stream-secret api-key=header-secret "api_key":"json-secret"`
+    });
+    if (
+      redactedFailure.code !== 'MODEL_SERVICE_STREAM_FAILED'
+      || !redactedFailure.message.includes('[server_error]')
+      || redactedFailure.message.includes(API_KEY)
+      || /Bearer\s+sk-/iu.test(redactedFailure.message)
+      || redactedFailure.message.includes('sk-stream-secret')
+      || /api-key\s*[:=]\s*header-secret/iu.test(redactedFailure.message)
+      || redactedFailure.message.includes('header-secret')
+      || /api_key\s*[:=]\s*json-secret/iu.test(redactedFailure.message)
+      || redactedFailure.message.includes('json-secret')
+    ) {
+      throw new Error(`stream diagnostic redaction failed: ${JSON.stringify(redactedFailure)}`);
+    }
+
+    const customApiKey = 'custom/key.value+with=punctuation';
+    const customKeyFailure = await readStreamError({
+      type: 'error',
+      error: {
+        code: `provider-${customApiKey}`,
+        message: `custom ${customApiKey} api-key=header-secret`
+      }
+    }, customApiKey);
+    if (
+      customKeyFailure.message.includes(customApiKey)
+      || /api-key\s*[:=]\s*header-secret/iu.test(customKeyFailure.message)
+    ) {
+      throw new Error(`custom API key was not redacted: ${JSON.stringify(customKeyFailure)}`);
+    }
+
+    const codeOnlyFailure = await readStreamError({
+      type: 'error',
+      code: 'provider_only'
+    });
+    if (!codeOnlyFailure.message.includes('[provider_only]')) {
+      throw new Error(`provider code-only stream diagnostic was lost: ${JSON.stringify(codeOnlyFailure)}`);
+    }
+
+    const legacyFailure = await readStreamError({ type: 'error', message: 'legacy event message' });
+    if (legacyFailure.message !== 'legacy event message') {
+      throw new Error(`legacy stream diagnostic changed unexpectedly: ${JSON.stringify(legacyFailure)}`);
+    }
+
+    const partialFunctionFailureEvents = await readStreamEvents([
+      {
+        type: 'response.function_call_arguments.delta',
+        item_id: 'fc_partial',
+        name: 'search_workspace',
+        delta: '{"query":"unfinished"'
+      },
+      {
+        type: 'response.failed',
+        response: { error: { code: 'server_error', message: 'partial function call failed' } }
+      }
+    ]);
+    const partialFunctionFailure = partialFunctionFailureEvents.find(
+      (streamEvent): streamEvent is Extract<StreamEvent, { type: 'error' }> => streamEvent.type === 'error'
+    );
+    if (
+      !partialFunctionFailure
+      || partialFunctionFailure.code !== 'MODEL_SERVICE_STREAM_FAILED'
+      || partialFunctionFailureEvents.some((streamEvent) => streamEvent.type === 'tool-call' || streamEvent.type === 'message-stop')
+    ) {
+      throw new Error(`partial function-call failure emitted success events: ${JSON.stringify(partialFunctionFailureEvents)}`);
+    }
+
+    const unknownFailure = await readStreamError({
+      type: 'response.failed',
+      response: { error: { code: 42, message: { unexpected: true } } },
+      error: 17,
+      message: false
+    });
+    if (unknownFailure.message !== 'Responses 流失败。') {
+      throw new Error(`unknown stream diagnostic fields were not tolerated: ${JSON.stringify(unknownFailure)}`);
+    }
+
+    const boundedFailure = await readStreamError({
+      type: 'response.failed',
+      response: { error: { code: `${API_KEY}-${'c'.repeat(900)}`, message: 'bounded' } }
+    });
+    if (
+      boundedFailure.message.length > 800
+      || !boundedFailure.message.endsWith('…')
+      || boundedFailure.message.includes(API_KEY)
+    ) {
+      throw new Error(`stream diagnostic was not bounded: ${JSON.stringify(boundedFailure)}`);
     }
 
     console.log(JSON.stringify({

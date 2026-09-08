@@ -7,6 +7,7 @@ import { isChunkEligible, RetrievalScopeError, type NormalizedRetrievalScope } f
 import {
   expandScopedHits,
   finalizeLexicalCandidates,
+  isRagSourceExcluded,
   prepareLexicalCandidates,
   type LexicalCandidateSet,
   type Sf18RetrieveOptions
@@ -69,7 +70,10 @@ export function retrieveEvidenceHybrid(
   // lookup from the whole corpus, then apply the same hard scope predicate
   // immediately before scoring.
   for (const chunk of value.corpus.chunks) {
-    if (isChunkEligible(chunk, value.scope) && !chunksById.has(chunk.chunkId)) chunksById.set(chunk.chunkId, chunk);
+    if (isChunkEligible(chunk, value.scope)
+      && !isRagSourceExcluded(chunk.sourceUri, value.excludedSourceUris)
+      && !value.excludedChunkIds.has(chunk.chunkId)
+      && !chunksById.has(chunk.chunkId)) chunksById.set(chunk.chunkId, chunk);
   }
   const vectorRanks: VectorRank[] = [];
   let invalidVectorCount = 0;
@@ -123,7 +127,9 @@ export function retrieveEvidenceHybrid(
     value.scope,
     value.finalLimit,
     options.expandReferences !== false,
-    value.exactHits
+    value.exactHits,
+    value.excludedSourceUris,
+    value.excludedChunkIds
   );
   if (expansion.outOfScopeEdges > 0) {
     diagnostics.push({
@@ -156,7 +162,8 @@ export function fuseRrf(
   vectorIds: readonly string[],
   scope: NormalizedRetrievalScope,
   limit: number,
-  exactIds: readonly string[] = []
+  exactIds: readonly string[] = [],
+  excludedChunkIds: ReadonlySet<string> = new Set()
 ): RagChunk[] {
   if (!Number.isSafeInteger(limit) || limit < 1 || limit > 32) {
     throw new RetrievalScopeError('INVALID_LIMIT', 'finalLimit 必须是 1..32 的安全整数。');
@@ -167,11 +174,11 @@ export function fuseRrf(
     byId.set(chunk.chunkId, chunk);
   }
   const fused = new Map<string, number>();
-  addRrfRanks(fused, uniqueIds(lexicalIds), byId, scope);
-  addRrfRanks(fused, uniqueIds(vectorIds), byId, scope);
+  addRrfRanks(fused, uniqueIds(lexicalIds), byId, scope, excludedChunkIds);
+  addRrfRanks(fused, uniqueIds(vectorIds), byId, scope, excludedChunkIds);
   const exact = uniqueIds(exactIds).filter((id) => {
     const chunk = byId.get(id);
-    return !!chunk && isChunkEligible(chunk, scope);
+    return !!chunk && isChunkEligible(chunk, scope) && !excludedChunkIds.has(id);
   });
   if (exact.length > limit) throw new RetrievalScopeError('EXACT_MATCH_SET_EXCEEDS_LIMIT', '精确候选超过 finalLimit。');
   const rest = topK(
@@ -251,14 +258,15 @@ function addRrfRanks(
   target: Map<string, number>,
   ids: readonly string[],
   byId: ReadonlyMap<string, RagChunk>,
-  scope: NormalizedRetrievalScope
+  scope: NormalizedRetrievalScope,
+  excludedChunkIds: ReadonlySet<string> = new Set()
 ): void {
   // Scope filtering is part of rank-list construction.  An out-of-scope id
   // must not consume a rank slot and thereby change an authorized candidate's
   // RRF score.
   const eligibleIds = ids.filter((id) => {
     const chunk = byId.get(id);
-    return chunk !== undefined && isChunkEligible(chunk, scope);
+    return chunk !== undefined && isChunkEligible(chunk, scope) && !excludedChunkIds.has(id);
   });
   eligibleIds.forEach((id, rank) => {
     const chunk = byId.get(id);

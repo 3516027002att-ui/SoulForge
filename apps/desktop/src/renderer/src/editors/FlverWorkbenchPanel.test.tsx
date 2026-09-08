@@ -96,11 +96,11 @@ describe('FlverWorkbenchPanel 初始结构（挂载即有的三栏骨架）', ()
     assert.match(render(), /aria-label="FLVER 模型工作台"/);
   });
 
-  it('三栏 模型层级 | Viewport | Properties 同时存在', () => {
+  it('三栏 模型层级 | Viewport | 属性同时存在', () => {
     const html = render();
     assert.match(html, /aria-label="模型层级"/);
     assert.match(html, /aria-label="Viewport"/);
-    assert.match(html, /aria-label="Properties"/);
+    assert.match(html, /aria-label="属性"/);
   });
 
   it('没有为凑四栏造 Tools 空栏', () => {
@@ -201,7 +201,7 @@ describe('Negative source tests（MODEL-51B 四类覆盖）', () => {
         onMaterialSlotSet={() => undefined}
       />
     );
-    assert.match(html, /材质槽修改在 Properties 栏点「应用材质槽」直接写入/);
+    assert.match(html, /点击“应用材质槽”保存材质引用/);
     assert.doesNotMatch(html, /已延期至/);
   });
 
@@ -228,8 +228,7 @@ describe('Negative source tests（MODEL-51B 四类覆盖）', () => {
       unparsedGaps: ['skeletonTransform 8 字节未解析', 'tangent 语义未解析'],
       layoutWarnings: []
     }));
-    assert.match(html, /authority=partial/);
-    assert.match(html, /已识别未解析结构 2 项/);
+    assert.match(html, /解析不完整：仍有 2 项结构未解析/);
     assert.match(html, /skeletonTransform 8 字节未解析/);
     assert.match(html, /tangent 语义未解析/);
   });

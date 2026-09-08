@@ -45,7 +45,7 @@ function childProjectionLabel(child: RendererContainerChild): string | null {
     return `已确认格式（${child.formatKind}）：可投影到${label}。在左侧资源树中打开对应资源进入编辑。`;
   }
   if (child.formatKind && child.formatKind !== 'unknown') {
-    return `格式 ${child.formatKind}：未接入专属编辑器，仅在此只读预览，不制造专属能力。`;
+    return `格式 ${child.formatKind}：未接入专属编辑器，仅在此只读预览，不提供专属编辑能力。`;
   }
   return null;
 }
@@ -358,7 +358,7 @@ export function Bnd4WorkbenchPanel(props: Bnd4WorkbenchPanelProps): ReactElement
       setReplaceResult({
         ok,
         message: ok
-          ? '子项已替换并提交（Patch Engine 事务 + 已建立可回滚备份）。'
+          ? '子项已替换并提交；已建立可回滚备份。'
           : (result.diagnostics?.[0]?.message ?? '子项替换失败。'),
         diagnostics: result.diagnostics ?? []
       });
@@ -390,11 +390,11 @@ export function Bnd4WorkbenchPanel(props: Bnd4WorkbenchPanelProps): ReactElement
         <>
           <div className="structured-preview-grid">
             <span>格式：{root.root.format}</span>
-            <span>authority：{root.root.authority}</span>
+            <span>读取级别：{root.root.authority}</span>
             <span>大小：{root.root.size} 字节</span>
-            <span>magic：{root.root.magic || '—'}</span>
+            <span>格式标识：{root.root.magic || '—'}</span>
             <span>容器校验：{shortHash(root.root.hash)}</span>
-            <span>round-trip 安全：{root.root.containerRoundTripSafe ? '是' : '否'}</span>
+            <span>往返一致性：{root.root.containerRoundTripSafe ? '是' : '否'}</span>
             <span>可列出子项：{root.root.canListChildren ? '是' : '否'}</span>
             <span>可替换子项：{root.root.canReplaceChild ? '是' : '否'}</span>
           </div>
@@ -410,7 +410,7 @@ export function Bnd4WorkbenchPanel(props: Bnd4WorkbenchPanelProps): ReactElement
             一次全量往返。失败必须可见且带诊断码，静默失败会让用户以为容器没问题。
           */}
           <details className="container-diag">
-            <summary>逐项容器诊断（按需读取）</summary>
+            <summary>条目诊断（按需读取）</summary>
             {diagnostics === null && (
               <button
                 type="button"
@@ -435,12 +435,12 @@ export function Bnd4WorkbenchPanel(props: Bnd4WorkbenchPanelProps): ReactElement
                     : diagnostics.validation?.ok === false ? '未通过' : '未报告'}
                 </span>
                 <span>
-                  能力探测 rawWritable：
+                  原始数据可写：
                   {diagnostics.capabilities?.rawWritable === true ? '是'
                     : diagnostics.capabilities?.rawWritable === false ? '否' : '未报告'}
                 </span>
                 <span>
-                  semanticReadTier：
+                  语义读取级别：
                   {String(diagnostics.capabilities?.semanticReadTier ?? '未报告')}
                 </span>
               </div>
@@ -548,7 +548,7 @@ export function Bnd4WorkbenchPanel(props: Bnd4WorkbenchPanelProps): ReactElement
 
           <div className="row gap">
             <button type="button" onClick={() => void toggleBytes()}>
-              {showBytes ? '收起原始字节（Bytes）' : '查看原始字节（Bytes）'}
+              {showBytes ? '收起原始字节' : '查看原始字节'}
             </button>
             <button
               type="button"
@@ -558,7 +558,7 @@ export function Bnd4WorkbenchPanel(props: Bnd4WorkbenchPanelProps): ReactElement
                 setReplaceResult(null);
               }}
             >
-              {replaceOpen ? '收起替换表单' : '替换子项（用户提供字节）'}
+              {replaceOpen ? '收起替换表单' : '替换子项'}
             </button>
             {!canReplace && <span className="muted">当前容器不支持权威子项替换。</span>}
           </div>
@@ -570,7 +570,7 @@ export function Bnd4WorkbenchPanel(props: Bnd4WorkbenchPanelProps): ReactElement
                 title={`${selectedChild.name ?? '子项'} 只读 Hex 证据${childHash ? ` · ${shortHash(childHash)}` : ''}`}
                 initialBytesBase64={childHexBase64}
               />
-              <p className="muted">子项字节为只读证据视图；替换须由用户提供字节，SoulForge 不生成内容。</p>
+              <p className="muted">子项字节为只读证据视图；替换数据由你提供，SoulForge 不生成内容。</p>
             </>
           )}
           {showBytes && !loadingChild && !childHexBase64 && childReadDiagnostics.length > 0 && (
@@ -613,7 +613,7 @@ export function Bnd4WorkbenchPanel(props: Bnd4WorkbenchPanelProps): ReactElement
                   disabled={replacing || replaceBytes.trim().length === 0}
                   onClick={() => void submitReplace()}
                 >
-                  {replacing ? '提交中…' : '经 Patch Engine 替换并提交'}
+                  {replacing ? '提交中…' : '替换并提交'}
                 </button>
                 <button type="button" disabled={replacing} onClick={() => setReplaceOpen(false)}>
                   取消
@@ -631,7 +631,7 @@ export function Bnd4WorkbenchPanel(props: Bnd4WorkbenchPanelProps): ReactElement
                   ))}
                 </div>
               )}
-              <p className="muted">整个子项替换会经 Patch Engine 事务并弹出主进程确认对话框；不提供 typed add/delete（bnd4 contract mutationKinds=[]）。</p>
+              <p className="muted">当前仅支持替换，不支持新增或删除条目。</p>
             </div>
           )}
         </>
@@ -643,9 +643,9 @@ export function Bnd4WorkbenchPanel(props: Bnd4WorkbenchPanelProps): ReactElement
     <WorkbenchLayout
       label="BND4 容器工作台"
       columns={[
-        { id: 'containers', title: 'Containers', initialWidth: 280, minWidth: 200, children: containersColumn },
-        { id: 'entries', title: 'Entries', initialFlex: 1, minWidth: 260, children: entriesColumn },
-        { id: 'preview', title: 'Preview / Source', initialFlex: 1, minWidth: 240, children: previewColumn }
+        { id: 'containers', title: '容器', initialWidth: 280, minWidth: 200, children: containersColumn },
+        { id: 'entries', title: '条目', initialFlex: 1, minWidth: 260, children: entriesColumn },
+        { id: 'preview', title: '预览与来源', initialFlex: 1, minWidth: 240, children: previewColumn }
       ]}
     />
   );

@@ -90,7 +90,7 @@ export function registerOperationIpcHandlers(deps: OperationIpcDeps): void {
         diagnostics: [{
           severity: 'error',
           code: 'WORKSPACE_NOT_OPEN',
-          message: 'Open a workspace before rolling back an operation.'
+          message: '请先打开工作区，再回滚操作。'
         }]
       };
     }
@@ -193,7 +193,7 @@ export function registerOperationIpcHandlers(deps: OperationIpcDeps): void {
         diagnostics: [{
           severity: 'error',
           code: 'WORKSPACE_NOT_OPEN',
-          message: 'Open a workspace before rolling back a file.'
+          message: '请先打开工作区，再回滚文件。'
         }]
       };
     }

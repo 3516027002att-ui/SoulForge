@@ -302,7 +302,7 @@ deps.handle('resource.readFlverDocument', async (_event, sourceUri: string) => {
         diagnostics: [{
           severity: 'error' as const,
           code: 'BACKUP_READ_FORBIDDEN',
-          message: 'backup 文件只能在 History & Recovery 中以只读方式查看，不能作为 GPARAM 文档读取。',
+          message: '备份文件只能在“历史与恢复”中只读查看，不能作为 GPARAM 文档读取。',
           sourceUri
         }]
       };
@@ -532,7 +532,7 @@ deps.handle('resource.readFlverDocument', async (_event, sourceUri: string) => {
           diagnostics: [{
             severity: 'error',
             code: 'BACKUP_READ_FORBIDDEN',
-            message: 'backup 文件只能在 History & Recovery 中以只读方式查看，不能写入 GPARAM。',
+            message: '备份文件只能在“历史与恢复”中只读查看，不能写入 GPARAM。',
             sourceUri
           }]
         };
@@ -617,7 +617,7 @@ deps.handle('resource.readFlverDocument', async (_event, sourceUri: string) => {
           diagnostics: [{
             severity: 'error',
             code: 'BACKUP_READ_FORBIDDEN',
-            message: 'backup 文件只能在 History & Recovery 中以只读方式查看，不能写入 MTD。',
+            message: '备份文件只能在“历史与恢复”中只读查看，不能写入 MTD。',
             sourceUri
           }]
         };
@@ -702,7 +702,7 @@ deps.handle('resource.readFlverDocument', async (_event, sourceUri: string) => {
           diagnostics: [{
             severity: 'error',
             code: 'BACKUP_READ_FORBIDDEN',
-            message: 'backup 文件只能在 History & Recovery 中以只读方式查看，不能写入 ESD。',
+            message: '备份文件只能在“历史与恢复”中只读查看，不能写入 ESD。',
             sourceUri
           }]
         };
@@ -786,7 +786,7 @@ deps.handle('resource.readFlverDocument', async (_event, sourceUri: string) => {
           diagnostics: [{
             severity: 'error',
             code: 'BACKUP_READ_FORBIDDEN',
-            message: 'backup 文件只能在 History & Recovery 中以只读方式查看，不能写入 TAE。',
+            message: '备份文件只能在“历史与恢复”中只读查看，不能写入 TAE。',
             sourceUri
           }]
         };
@@ -870,7 +870,7 @@ deps.handle('resource.readFlverDocument', async (_event, sourceUri: string) => {
           diagnostics: [{
             severity: 'error',
             code: 'BACKUP_READ_FORBIDDEN',
-            message: 'backup 文件只能在 History & Recovery 中以只读方式查看，不能写入 FXR。',
+            message: '备份文件只能在“历史与恢复”中只读查看，不能写入 FXR。',
             sourceUri
           }]
         };

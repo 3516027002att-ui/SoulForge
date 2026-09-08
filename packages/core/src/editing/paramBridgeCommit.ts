@@ -151,12 +151,17 @@ export async function readParamDocumentViaBridge(input: {
   sourcePath: string;
   allowedRoots: string[];
   timeoutMs?: number;
+  signal?: AbortSignal;
   maxRows?: number;
   /** When set, Bridge returns only these rows with payloads. */
   rowIds?: number[];
   includeAllPayloads?: boolean;
   maxFrameBytes?: number;
-}): Promise<{
+  /** Resolve only from verified metadata; never infer ambiguous single-row boundaries. */
+  resolveRowDataSize?: (header: {
+    sourceHash: string; typeName: string; dataVersion: number;
+  }) => Promise<number | undefined>;
+}, bridge: typeof runBridge = runBridge): Promise<{
   ok: boolean;
   data?: {
     sourceHash: string;
@@ -170,7 +175,7 @@ export async function readParamDocumentViaBridge(input: {
   };
   diagnostics: Array<{ severity: string; code: string; message: string }>;
 }> {
-  const result = await runBridge<{
+  type Envelope = {
     sourceHash?: string;
     typeName?: string;
     dataVersion?: number;
@@ -178,17 +183,47 @@ export async function readParamDocumentViaBridge(input: {
     rowDataSize?: number;
     rows?: Array<{ rowIndex: number; id: number; dataBase64: string; dataHash: string; name?: string }>;
     authority?: string;
-  }>({
+  };
+  const read = (commandOptions: Record<string, unknown>) => bridge<Envelope>({
     command: 'read-param-document',
     filePath: input.sourcePath,
     allowedRoots: input.allowedRoots,
     timeoutMs: input.timeoutMs ?? 60_000,
+    ...(input.signal ? { signal: input.signal } : {}),
     ...(input.maxFrameBytes !== undefined ? { maxFrameBytes: input.maxFrameBytes } : {}),
-    commandOptions: {
-      ...(input.rowIds && input.rowIds.length > 0 ? { rowIds: input.rowIds } : {}),
-      ...(input.includeAllPayloads ? { includeAllPayloads: true } : {})
-    }
+    commandOptions
   });
+  const options = {
+    ...(input.rowIds && input.rowIds.length > 0 ? { rowIds: input.rowIds } : {}),
+    ...(input.includeAllPayloads ? { includeAllPayloads: true } : {})
+  };
+  let result = await read(options);
+  if (result.diagnostics.some((d) => d.code === 'PARAM_ROW_SIZE_REQUIRED') && input.resolveRowDataSize) {
+    const headerResult = await read({ headerOnly: true });
+    const header = headerResult.data;
+    if (headerResult.parseStatus === 'failed' || !header?.sourceHash || !header.typeName
+      || !Number.isInteger(header.dataVersion)) {
+      return { ok: false, diagnostics: [...result.diagnostics, ...headerResult.diagnostics] };
+    }
+    const width = await input.resolveRowDataSize({
+      sourceHash: header.sourceHash, typeName: header.typeName, dataVersion: header.dataVersion!
+    });
+    if (!Number.isSafeInteger(width) || width! <= 0) {
+      return { ok: false, diagnostics: [...result.diagnostics, {
+        severity: 'error', code: 'PARAM_METADATA_ROW_WIDTH_UNRESOLVED',
+        message: '原生 PARAM 头部未唯一匹配可信字段定义，不能推测单行数据边界。'
+      }] };
+    }
+    result = await read({ ...options, expectedRowDataSize: width });
+    if (result.parseStatus !== 'failed' && result.data?.sourceHash
+      && (result.data.sourceHash !== header.sourceHash || result.data.typeName !== header.typeName
+        || result.data.dataVersion !== header.dataVersion || result.data.rowDataSize !== width)) {
+      return { ok: false, diagnostics: [{
+        severity: 'error', code: 'PARAM_METADATA_READ_IDENTITY_MISMATCH',
+        message: 'PARAM 完整读取与头部的来源、类型、版本或可信行宽不一致。'
+      }] };
+    }
+  }
   if (result.parseStatus === 'failed' || !result.data?.sourceHash) {
     return {
       ok: false,

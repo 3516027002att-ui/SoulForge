@@ -172,7 +172,7 @@ export function registerResourceIpcHandlers(deps: ResourceIpcDeps): void {
             {
               severity: 'error',
               code: 'RESOURCE_NOT_INDEXED',
-              message: 'Resource must be indexed before script source save.',
+              message: '请先索引资源，再保存脚本源码。',
               sourceUri
             }
           ]
@@ -383,7 +383,7 @@ export function registerResourceIpcHandlers(deps: ResourceIpcDeps): void {
             {
               severity: 'error',
               code: 'RESOURCE_NOT_INDEXED',
-              message: 'Resource must be indexed before it can be saved.',
+              message: '请先索引资源，再保存文件。',
               sourceUri
             }
           ]

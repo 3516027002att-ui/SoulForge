@@ -84,8 +84,8 @@ function render(pendingTab: EventSourceTabData | null = null): string {
 }
 
 describe('EventSourceWorkbenchPanel SSR 结构（DarkScript3 式骨架挂载即有）', () => {
-  it('区域名是「Event 源码工作台」', () => {
-    assert.match(render(), /aria-label="Event 源码工作台"/);
+  it('区域名是「事件源码工作台」', () => {
+    assert.match(render(), /aria-label="事件源码工作台"/);
   });
 
   it('文档标签栏 role=tablist 存在，未打开文档时是显式空态', () => {
@@ -464,11 +464,11 @@ describe('S35 增量源（event-common-load.md §3.2：首帧前缀 + 按视口�
     assert.equal(isSourceReadOnly({ ...incrementalTab, live: false }), true);
   });
 
-  it('12-A：EMEDF 缺失横幅只留给真没 token 的 live tab（增量源 tab 不渲染）', () => {
-    // SSR 不跑 effect（tabs 为空、activeTab 为 null），横幅 JSX 需源码级锁定：
-    // 条件带上 !activeTab.sourceToken —— 增量源 tab（dslTemplate null 但持
-    // sourceToken）加载中不得画「未找到用户本机 EMEDF」，那是不全的错归因。
-    assert.match(panelSource, /activeTab\?\.live && activeTab\.dslTemplate === null && !activeTab\.sourceToken/);
+  it('12-A：EMEDF 缺失时不渲染常驻内部说明，但失败关闭仍只读', () => {
+    // 缺失 EMEDF 的只读/禁写判据仍由 isSourceReadOnly 与结构化诊断负责；
+    // 工作台不再把组件路径和实现说明铺在主视图。
+    assert.doesNotMatch(panelSource, /event-source__notice--blocked/);
+    assert.match(panelSource, /return !tab\.live \|\| \(tab\.dslTemplate === null && !tab\.sourceToken\)/);
   });
 
   it('12-A：打开/切回不自动拉齐，只有用户滚动近底才按片续载', () => {
@@ -623,9 +623,9 @@ describe('IDE Components & Semantic Panel Tests', () => {
     );
 
     assert.match(html, /IfParameterComparison/);
-    assert.match(html, /bank 0:1/);
+    assert.match(html, /事件组 0：1/);
     assert.match(html, /\[ComparisonType\]/);
     assert.match(html, /is-active/);
-    assert.match(html, /Equal\(0\)/);
+    assert.match(html, /Equal（0）/);
   });
 });

@@ -95,7 +95,7 @@ function AgentThinkingItem({
         <div style={{ display: 'flex', flexDirection: 'column', gap: '4px', width: '100%' }}>
           <span style={{ fontWeight: 600, color: 'var(--forge-warn-text, #e6a23c)' }}>{label}</span>
           <span style={{ fontSize: '12px', opacity: 0.85, wordBreak: 'break-word' }}>
-            {retry.message || `接口错误码: ${retry.code}`}（约 {Math.max(1, Math.round(retry.delayMs / 1000))} 秒后自动重试）
+            {retry.message || `请求失败（${retry.code}）`}（约 {Math.max(1, Math.round(retry.delayMs / 1000))} 秒后自动重试）
           </span>
         </div>
       </div>
@@ -109,7 +109,7 @@ function AgentThinkingItem({
         <div style={{ display: 'flex', flexDirection: 'column', gap: '2px' }}>
           <span>{label}</span>
           <span style={{ fontSize: '11px', opacity: 0.65 }}>
-            等待模型生成响应（若当前模型未开启显式思考，将在构思后直接输出）
+            等待模型生成响应（若当前模型未开启深度思考，将在构思后直接输出）
           </span>
         </div>
       </div>
@@ -313,7 +313,7 @@ export function AgentConversationViewport(props: AgentConversationViewportProps)
           <strong>任务失败</strong>
           <p data-testid="agent-failure-code">错误码：{failure.code}</p>
           <p className="muted">{failure.message}</p>
-          <p className="muted">失败只影响本次运行，不会替换整个面板；请检查 Problems 诊断后重试。</p>
+          <p className="muted">失败只影响本次运行，不会替换整个面板；请查看诊断信息后重试。</p>
         </section>
       )}
 

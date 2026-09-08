@@ -108,15 +108,15 @@ function render(data: EsdDocument | null = makeDocument()): string {
 }
 
 describe('EsdWorkbenchPanel 初始结构（挂载即有的三栏骨架）', () => {
-  it('工作台根的可访问名是「Behavior 工作台」', () => {
-    assert.match(render(), /aria-label="Behavior 工作台"/);
+  it('工作台根的可访问名是「行为工作台」', () => {
+    assert.match(render(), /aria-label="行为工作台"/);
   });
 
   it('三栏 Files / Machines / States | Conditions / Commands | Inspector 同时存在', () => {
     const html = render();
-    assert.match(html, /aria-label="Files \/ Machines \/ States"/);
-    assert.match(html, /aria-label="Conditions \/ Commands"/);
-    assert.match(html, /aria-label="Inspector"/);
+    assert.match(html, /aria-label="文件 \/ 状态机 \/ 状态"/);
+    assert.match(html, /aria-label="条件与命令"/);
+    assert.match(html, /aria-label="详细信息"/);
   });
 
   it('没有为凑四栏造 Tools 空栏', () => {
@@ -144,7 +144,7 @@ describe('EsdWorkbenchPanel 初始结构（挂载即有的三栏骨架）', () =
     assert.match(html, />6</);
   });
 
-  it('Conditions 组列出条件样本（转移载体），Commands 组列出命令调用', () => {
+  it('转移条件组列出条件样本，命令组列出命令调用', () => {
     const html = render();
     assert.match(html, /条件 @0x10/);
     assert.match(html, /条件 @0x20/);
@@ -157,7 +157,7 @@ describe('EsdWorkbenchPanel 初始结构（挂载即有的三栏骨架）', () =
     const html = render();
     assert.match(html, /文件统计/);
     assert.match(html, /已解析条件数/);
-    assert.match(html, /authority/);
+    assert.match(html, /读取级别/);
   });
 
   it('未选中条件时不渲染任何按钮/输入框（55C 编辑入口只随条件选中出现）', () => {
@@ -369,7 +369,7 @@ describe('BEHAVIOR-55C 编辑入口（条件选中才出现，evaluator 不做�
 
   it('Inspector 写回区不再说「尚未接通」，说明编辑入口随条件选中出现', () => {
     const html = render();
-    assert.match(html, /写回（transition upsert）/);
+    assert.match(html, /写回/);
     assert.match(html, /选中一条条件后/);
     assert.doesNotMatch(html, /尚未接通/);
   });

@@ -242,7 +242,7 @@ export function MaterialWorkbenchPanel(props: MaterialWorkbenchPanelProps): Reac
     const material = pages?.material;
     return material?.name || material?.rootElement || (selectedUri
       ? materialFileDisplayName({ sourceUri: selectedUri, relativePath: selectedUri })
-      : 'material');
+      : '材质');
   }, [pages, selectedUri]);
 
   // 文档加载完成后把选中态落到材质（材质在左侧 Material list 是唯一默认行）。
@@ -324,15 +324,15 @@ export function MaterialWorkbenchPanel(props: MaterialWorkbenchPanelProps): Reac
     }
     const material = pages?.material;
     return [
-      ['name', material?.name ?? ''],
-      ['rootElement', material?.rootElement ?? ''],
-      ['version', material?.version ?? ''],
-      ['header', material?.header ?? ''],
-      ['shaderPath', material?.shaderPath ?? ''],
-      ['materialCount', String(material?.materialCount ?? 0)],
-      ['formatId', material?.formatId ?? ''],
-      ['authority', material?.authority ?? ''],
-      ['roundTrip', document?.roundTrip?.consistent ? '一致 ✓' : '—']
+      ['原始名称', material?.name ?? ''],
+      ['根元素', material?.rootElement ?? ''],
+      ['版本', material?.version ?? ''],
+      ['文件头', material?.header ?? ''],
+      ['着色器路径', material?.shaderPath ?? ''],
+      ['材质数量', String(material?.materialCount ?? 0)],
+      ['格式编号', material?.formatId ?? ''],
+      ['读取级别', material?.authority ?? ''],
+      ['往返一致性', document?.roundTrip?.consistent ? '一致 ✓' : '—']
     ];
   }
 
@@ -342,8 +342,8 @@ export function MaterialWorkbenchPanel(props: MaterialWorkbenchPanelProps): Reac
       columns={[
         {
           id: 'files',
-          title: 'File list',
-          hint: `${props.files.length} files`,
+          title: '文件列表',
+          hint: `${props.files.length} 个文件`,
           initialFlex: 0.2,
           minWidth: 150,
           children: (
@@ -369,8 +369,8 @@ export function MaterialWorkbenchPanel(props: MaterialWorkbenchPanelProps): Reac
         },
         {
           id: 'materials',
-          title: 'Material list',
-          ...(document ? { hint: `${document.materialCount} material` } : {}),
+          title: '材质列表',
+          ...(document ? { hint: `${document.materialCount} 个材质` } : {}),
           initialFlex: 0.3,
           minWidth: 200,
           children: (
@@ -396,7 +396,7 @@ export function MaterialWorkbenchPanel(props: MaterialWorkbenchPanelProps): Reac
                   >
                     <span className="wb-row__name" title={materialLabel}>{materialLabel}</span>
                     <span className="wb-row__meta">
-                      {pages?.material.rootElement ?? 'material'} · v{pages?.material.version ?? '—'}
+                       {pages?.material.rootElement ?? '材质'} · v{pages?.material.version ?? '—'}
                     </span>
                   </div>
                   <div className="wb-list__group-label">纹理引用（{textureRefs.length}）</div>
@@ -424,7 +424,7 @@ export function MaterialWorkbenchPanel(props: MaterialWorkbenchPanelProps): Reac
         },
         {
           id: 'properties',
-          title: 'Properties / Values',
+          title: '属性与数值',
           ...(selection ? { hint: selection.label } : {}),
           initialFlex: 0.5,
           minWidth: 240,
@@ -491,7 +491,7 @@ export function MaterialWorkbenchPanel(props: MaterialWorkbenchPanelProps): Reac
                   {isPartial && (unparsedGaps.length > 0 || layoutWarnings.length > 0) && (
                     <details className="mtd-partial" data-testid="mtd-partial-gaps">
                       <summary>
-                        authority={authority} · 未识别结构 {unparsedGaps.length} 项
+                         读取级别：{authority} · 未识别结构 {unparsedGaps.length} 项
                         {layoutWarnings.length > 0 ? ` · 布局警告 ${layoutWarnings.length} 条` : ''}
                       </summary>
                       <ul>

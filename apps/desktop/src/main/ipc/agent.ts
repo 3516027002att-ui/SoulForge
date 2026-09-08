@@ -11,6 +11,7 @@ import {
   createConfirmationReceipt,
   createContextBroker,
   createUnifiedDiff,
+  getRagStaleChunkMaskCached,
   retrieveEvidence,
   retrieveEvidenceHybrid,
   createRagCorpus,
@@ -225,6 +226,7 @@ export interface AgentIpcDeps {
   getActiveIndex: () => WorkspaceIndex | null;
   getActiveSession: () => WorkspaceSession | null;
   getActiveWorkspaceSessionId: () => string | null;
+  getActiveWorkspaceSessionGeneration: () => number;
   getActiveRag: () => RagCorpus | null;
   /** 等待当前一次性工作区分析；不会为每次 RAG 查询重新扫描。 */
   waitForWorkspaceIndexing: (signal?: AbortSignal) => Promise<void>;
@@ -392,10 +394,15 @@ export function registerAgentIpcHandlers(deps: AgentIpcDeps): void {
       signal?: AbortSignal;
     }
   ): Promise<RagRetrieveResult> => {
-    if (!deps.getActiveIndex()) {
+    const initialIndex = deps.getActiveIndex();
+    const initialSession = deps.getActiveSession();
+    const initialSessionId = deps.getActiveWorkspaceSessionId();
+    const initialGeneration = deps.getActiveWorkspaceSessionGeneration();
+    const initialRag = deps.getActiveRag();
+    if (!initialIndex) {
       return { ok: false as const, code: 'WORKSPACE_REQUIRED' as const, message: '先打开 Mod 工作区。' };
     }
-    const activeRag = deps.getActiveRag();
+    const activeRag = initialRag;
     if (!activeRag && !database) {
       return {
         ok: false,
@@ -404,7 +411,7 @@ export function registerAgentIpcHandlers(deps: AgentIpcDeps): void {
       };
     }
     const corpus = activeRag ?? createRagCorpus({
-      workspaceId: deps.getActiveIndex()!.workspaceId,
+      workspaceId: initialIndex.workspaceId,
       builtAt: new Date().toISOString(),
       chunks: await database!.loadRagChunks(),
       references: await database!.loadReferences()
@@ -429,10 +436,29 @@ export function registerAgentIpcHandlers(deps: AgentIpcDeps): void {
       };
     }
 
+    // All inputs above may await database/vector/embedding work.  A remount,
+    // scan replacement, or semantic RAG publication during that window must
+    // not let an old workspace snapshot reach the Agent evidence preflight.
+    const currentIndex = deps.getActiveIndex();
+    const workspaceStillCurrent = currentIndex === initialIndex
+      && deps.getActiveSession() === initialSession
+      && deps.getActiveWorkspaceSessionId() === initialSessionId
+      && deps.getActiveWorkspaceSessionGeneration() === initialGeneration
+      && deps.getActiveRag() === initialRag;
+    if (!workspaceStillCurrent || !currentIndex) {
+      return {
+        ok: false,
+        code: 'RAG_UNAVAILABLE',
+        message: '工作区会话或 RAG 语料已切换，已丢弃旧检索结果；请重试。'
+      };
+    }
+
+    const staleChunkMask = getRagStaleChunkMaskCached(currentIndex, corpus);
     return retrieveEvidenceHybrid(corpus, query, {
       ...(options.limit != null && options.limit > 0 ? { limit: Math.trunc(options.limit) } : {}),
       ...(options.expandReferences === undefined ? {} : { expandReferences: options.expandReferences === true }),
       ...(options.families && options.families.length > 0 ? { families: options.families } : {}),
+      ...(staleChunkMask ? { excludeChunkMask: staleChunkMask } : {}),
       vectors: {
         vectors: vectorMap,
         queryVector
@@ -594,7 +620,7 @@ export function registerAgentIpcHandlers(deps: AgentIpcDeps): void {
           ok: false,
           error: {
             code: 'PROVIDER_USAGE_STORAGE_UNAVAILABLE',
-            message: `provider token 用量数据库不可用，未发起模型请求：${error instanceof Error ? error.message : String(error)}`
+            message: `模型服务用量记录暂时不可用，因此未发起请求：${error instanceof Error ? error.message : String(error)}`
           }
         };
       }
@@ -604,7 +630,10 @@ export function registerAgentIpcHandlers(deps: AgentIpcDeps): void {
       const taskRecord = createAgentTaskRecordGateway(
         deps.taskRecordDirectory(),
         sessionId,
-        inheritTaskRecordSessionId ? { inheritFromSessionId: inheritTaskRecordSessionId } : undefined
+        {
+          ...(inheritTaskRecordSessionId ? { inheritFromSessionId: inheritTaskRecordSessionId } : {}),
+          frozenRequest: request.prompt
+        }
       );
       await taskRecord.read();
       // 无工作区时 deps.getActiveIndex() 为 null：工具层按工具守卫（WORKSPACE_REQUIRED），
@@ -617,6 +646,7 @@ export function registerAgentIpcHandlers(deps: AgentIpcDeps): void {
         context: {
           ...deps.currentToolContext(),
           mode,
+          modeCeiling: mode,
           allowMemoryWrite: false,
           taskRecord,
           requireTaskRecord: true
@@ -640,6 +670,7 @@ export function registerAgentIpcHandlers(deps: AgentIpcDeps): void {
             // The run's mode and task ledger are stable for its lifetime; all
             // workspace/RAG/session state must be refreshed per tool call.
             mode: currentRunMode,
+            modeCeiling: mode,
             allowMemoryWrite: false,
             taskRecord,
             requireTaskRecord: true,
@@ -744,24 +775,24 @@ export function registerAgentIpcHandlers(deps: AgentIpcDeps): void {
       let modeInstruction: string;
       if (mode === 'plan') {
         modeInstruction = [
-          '【当前运行模式：Plan 规划模式（只读方案设计与自主流转）】',
+          '【当前运行模式：Plan 规划模式（只读方案设计）】',
           '你当前初始处于 Plan 规划模式。请遵循以下规则：',
           '1. 在此模式下，核心任务是通过搜索与原生读取工具（如 search_workspace_symbols, search_param_rows, read_param_fields, search_events, read_emevd_event 等）彻底核实所有相关资源并定位真实行号与字段，不要仅凭记忆猜测。',
           '2. 完成核实后，在回复中直接向用户输出清晰、结构完整、字段详尽的【修改栏目清单】表格（包含修改目标、目标文件/表、行号/ID、字段名称、当前值、拟改值、人话说明与推演逻辑），供用户审阅。',
-          '3. 【模型自主修改模式】：当你已输出方案且用户表达了执行、确认或允许写入的意图（例如“允许写入”、“确认”、“执行”、“按此修改”等），或者你需要从规划阶段正式进入写入阶段时：你必须主动调用 switch_mode 工具（例如 switch_mode({ mode: "normal", reason: "方案规划完毕，用户允许写入，切换至编辑执行模式" })）自行修改模式！系统将立即生效并同步前端界面，随后即可调用写入工具执行修改。严禁在方案就绪后陷入无休止的只读工具重复搜索。'
+          '3. Plan 轮次的授权上限是只读；switch_mode 不能自行提权。若用户要求执行，请明确告知其在宿主选择 Edit 或 Bypass 后开始或承接新一轮。'
         ].join('\n');
       } else if (mode === 'fullPermission') {
         modeInstruction = [
           '【当前运行模式：Bypass 模式（免审批全自动执行）】',
           '你当前处于免审批全自动执行模式。调用的写入工具将直接提交生效，无需用户逐项人工审批。',
-          '请务必在写入前通过原生读取核实真实行号、字段名与当前值，确保修改精准安全。需要切换模式时可主动调用 switch_mode 工具。'
+          '请务必在写入前通过原生读取核实真实行号、字段名与当前值，确保修改精准安全。switch_mode 仅可在宿主已授予的 Bypass 上限内降级。'
         ].join('\n');
       } else {
         modeInstruction = [
           '【当前运行模式：Edit 模式（审批交互修改）】',
           '你当前处于编辑修改模式。在经过充分的原生读取核实后，可以调用写入工具（如 mutate_param_fields, apply_emevd_dsl 等）提出修改。',
           '在写入前必须使用原生读取工具核对真实行号、字段名与当前值，严禁臆测。',
-          '你的每次写入工具调用都会自动生成变更 diff 并弹出审批卡，由用户人工确认后方可提交。需要切换模式时可主动调用 switch_mode 工具。'
+          '你的每次写入工具调用都会自动生成变更 diff 并弹出审批卡，由用户人工确认后方可提交。switch_mode 不能把当前轮次提升到 Bypass。'
         ].join('\n');
       }
 

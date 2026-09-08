@@ -401,7 +401,7 @@ export function AgentSidebar(props: AgentSidebarProps): ReactElement {
     ? { code: taskState.error.code, message: taskState.error.message }
     : null;
   const statusText = taskState.phase === 'idle'
-    || (taskState.phase === 'done' && taskState.finishReason !== 'cancelled')
+    || (taskState.phase === 'done' && taskState.finishReason === 'stop')
     ? null
     : describeAgentTaskStatus(taskState, now);
   const conversationItems = buildAgentConversationItems({

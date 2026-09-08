@@ -2,6 +2,8 @@ export interface EventExport {
   mapId?: string;
   /** Revision actually used to decode this export; never infer from the file catalog. */
   sourceHash?: string;
+  /** SHA-256 of the packed/outer source file read by Bridge. */
+  outerFileHash?: string;
   sourceRevision?: number;
   events: EventSymbol[];
 }
@@ -13,6 +15,7 @@ export interface EventSymbol {
   eventId: number;
   name?: string;
   sourceHash?: string;
+  outerFileHash?: string;
   sourceRevision?: number;
   instructions: EventInstruction[];
   raw?: unknown;
@@ -38,6 +41,7 @@ export interface EventArg {
 export interface MapExport {
   mapId: string;
   sourceHash?: string;
+  outerFileHash?: string;
   sourceRevision?: number;
   readerSchemaRevision?: number;
   derivedKey?: string;
@@ -53,6 +57,7 @@ export interface MapEntitySymbol {
   internalEntryId?: number;
   name: string;
   sourceHash?: string;
+  outerFileHash?: string;
   sourceRevision?: number;
   kind: 'character' | 'object' | 'asset' | 'collision' | 'mapPiece' | 'unknown';
   model?: string;
@@ -74,6 +79,7 @@ export interface MapRegionSymbol {
   internalEntryId?: number;
   name: string;
   sourceHash?: string;
+  outerFileHash?: string;
   sourceRevision?: number;
   shape?: string;
   position?: [number, number, number];
@@ -89,6 +95,7 @@ export interface ParamExport {
   entryIndex?: number;
   entryName?: string;
   sourceHash?: string;
+  outerFileHash?: string;
   sourceRevision?: number;
   rows: ParamRowSymbol[];
 }
@@ -103,6 +110,7 @@ export interface ParamRowSymbol {
   rowId: number;
   rowName?: string;
   sourceHash?: string;
+  outerFileHash?: string;
   sourceRevision?: number;
   fields?: ParamFieldSymbol[];
   raw?: unknown;
@@ -121,6 +129,7 @@ export interface ParamFieldSymbol {
 export interface MsgExport {
   category?: string;
   sourceHash?: string;
+  outerFileHash?: string;
   sourceRevision?: number;
   entries: TextEntrySymbol[];
 }
@@ -133,6 +142,7 @@ export interface TextEntrySymbol {
   text: string;
   confidence?: 'high' | 'medium' | 'low';
   sourceHash?: string;
+  outerFileHash?: string;
   sourceRevision?: number;
   raw?: unknown;
 }
@@ -146,6 +156,7 @@ export interface TaeExport {
   chrId: string;
   sourceUri: string;
   sourceHash?: string;
+  outerFileHash?: string;
   sourceRevision?: number;
   /** ANIBND 内原生 TAE 子项目录；裸 .tae 时可缺省。 */
   taeEntryCount?: number;
@@ -198,6 +209,7 @@ export interface TaeEventSymbol {
   startFrame: number;
   endFrame: number;
   sourceHash?: string;
+  outerFileHash?: string;
   sourceRevision?: number;
   /** 模板解码字段（name / value）；未解码时缺省。 */
   fields?: Array<{ name: string; value: string | number | boolean }>;

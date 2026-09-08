@@ -1247,7 +1247,7 @@ npm run build
 
 <!-- SOULFORGE_PROJECTION_BEGIN:command-index -->
 
-全部 278 条已登记验证命令按层级列出。层级顺序即执行顺序（先快后慢，早失败早停）。
+全部 289 条已登记验证命令按层级列出。层级顺序即执行顺序（先快后慢，早失败早停）。
 
 一次跑完某一层：`node scripts/verify.mjs --tier <层级>`；跑全部：`npm run verify:all`。
 
@@ -1277,7 +1277,7 @@ npm run test:verify-entrypoint
 npm run verify:audit
 ~~~
 
-**unit**（112 条）
+**unit**（120 条）
 
 ~~~powershell
 npm run test
@@ -1288,10 +1288,14 @@ npm run test:agent-capability-wiring
 npm run test:agent-knowledge-refresh
 npm run test:agent-performance-fixes
 npm run test:agent-permission-unified
+npm run test:agent-production-build
 npm run test:agent-production-scenario
+npm run test:agent-task-status
+npm run test:agent-tool-envelope
 npm run test:agent-tool-schema
 npm run test:ai-conformance
 npm run test:ai-fake-loop
+npm run test:ai-log-sync
 npm run test:ai-tool-permission
 npm run test:ai-tool-write-path
 npm run test:animation-playback-clock
@@ -1368,12 +1372,15 @@ npm run test:me3-runtime-gateway
 npm run test:model-service-configuration
 npm run test:model-service-vault-contract
 npm run test:openai-responses
+npm run test:param-metadata-read-bridge
 npm run test:param-msb-write-ipc-contract
 npm run test:param-slim-ipc
 npm run test:path-sanitizer
 npm run test:performance-baseline
 npm run test:preload-surface-ruling
 npm run test:rag
+npm run test:rag-persistence-performance
+npm run test:real-agent-harness
 npm run test:recent-paths
 npm run test:renderer-reachability
 npm run test:renderer-unit
@@ -1389,12 +1396,13 @@ npm run test:ui-localization
 npm run test:vault-encrypt-contract
 npm run test:vault-ipc-contract
 npm run test:workbench-projections
+npm run test:workspace-analysis-lifecycle
 npm run test:workspace-startup
 npm run test:yapped-param-metadata-source
 npm run typecheck
 ~~~
 
-**synthetic**（52 条）
+**synthetic**（53 条）
 
 ~~~powershell
 npm run bridge:build
@@ -1406,6 +1414,7 @@ npm run bridge:verify:fxr
 npm run bridge:verify:fxr-writer
 npm run bridge:verify:mtd
 npm run bridge:verify:mtd-writer
+npm run bridge:verify:source-hash-performance
 npm run bridge:verify:synthetic
 npm run bridge:verify:tae-writer
 npm run test:asset-import
@@ -1451,7 +1460,7 @@ npm run test:upgrade-recovery
 npm run test:writer-failure-matrix
 ~~~
 
-**native**（83 条）
+**native**（85 条）
 
 ~~~powershell
 npm run bridge:verify:bnd4-transaction
@@ -1516,6 +1525,7 @@ npm run test:emevd-imported-production
 npm run test:emevd-multi-corpus-matrix
 npm run test:fmg-reference-integrity
 npm run test:krak-combination-mutation
+npm run test:map-streaming-native
 npm run test:me3-sekiro-session
 npm run test:native-corpus-writeback
 npm run test:native-knowledge-refresh
@@ -1537,6 +1547,7 @@ npm run test:script-container-replace
 npm run test:section28-sekiro-gate
 npm run test:verify-map-action-open
 npm run test:workspace-completeness
+npm run test:workspace-readiness-native
 ~~~
 
 **release**（10 条）
@@ -1554,13 +1565,14 @@ npm run test:release-cross-machine
 npm run test:release-reproducible
 ~~~
 
-另有 22 条 script 显式排除在验证调度之外（写入命令、外部工具或入口自身）：
+另有 23 条 script 显式排除在验证调度之外（写入命令、外部工具或入口自身）：
 
 - `verify`：统一验证入口本身，自调度会无限递归
 - `verify:all`：同上（全层级别名）
 - `verify:list`：同上（只列计划，不是验证）
 - `dev`：交互式开发服务器，不是验证
 - `agent:simulate`：真实 Agent 链路模拟入口，依赖真实模型与本地 Mod 交互，按需手工运行
+- `preagent:simulate`：agent:simulate 的 npm 生命周期构建前置，只生成生产产物；真实链路判定由 agent:simulate 自身负责
 - `ai-logs:sync`：用于从 Antigravity 提取或同步真实 AI 会话日志到 testdata/ai-audit-transcripts 的离线同步工具，不是验证
 - `bridge:publish`：发布产物构建。**当前无任何调用方**（release 层 10 条脚本均不调它，实测 2026-08-08）；跑一次 Release publish 要几分钟且产物不参与任何验证判据，故不进 tier。若将来 release 链要用它，请一并把 runBridge.ts 的 Release 候选路径纳入验证——那两条路径至今从未被生成过。
 - `launcher:build`：启动器二进制发布构建，不是验证

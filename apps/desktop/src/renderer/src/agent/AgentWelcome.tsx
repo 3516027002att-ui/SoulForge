@@ -21,7 +21,6 @@ export function AgentWelcome(props: AgentWelcomeProps): ReactElement {
       <ul>
         <li>理解当前参数、文本、事件与资源选区</li>
         <li>先分析与规划，再生成可审查的修改</li>
-        <li>经 Patch Engine 提交，验证失败自动回滚</li>
         {testActive && (
           <li style={{ color: 'var(--forge-accent, #60a5fa)', fontWeight: 500 }}>
             已加载 test 模型，无需设置 API 即可直接使用

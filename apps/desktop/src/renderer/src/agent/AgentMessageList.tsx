@@ -6,6 +6,19 @@ export interface AgentMessageListProps {
   messages: readonly AgentMessageDto[];
 }
 
+function messageStatusLabel(status: string): string {
+  return ({
+    running: '进行中',
+    queued: '排队中',
+    pending: '等待中',
+    ok: '成功',
+    failed: '失败',
+    approved: '已批准',
+    rejected: '已拒绝',
+    cancelled: '已取消'
+  } as Record<string, string>)[status] ?? status;
+}
+
 function messageBody(message: AgentMessageDto): ReactElement {
   switch (message.kind) {
     case 'user':
@@ -35,7 +48,7 @@ function messageBody(message: AgentMessageDto): ReactElement {
         <>
           <div className="agent-message__meta">工具</div>
           <p>{message.summary}</p>
-          <span className={`agent-tool-status agent-tool-status--${message.status}`}>{message.status}</span>
+          <span className={`agent-tool-status agent-tool-status--${message.status}`}>{messageStatusLabel(message.status)}</span>
         </>
       );
     case 'approval':
@@ -43,7 +56,7 @@ function messageBody(message: AgentMessageDto): ReactElement {
         <>
           <div className="agent-message__meta">审批</div>
           <p>评审 {message.reviewId}</p>
-          <span className={`agent-approval-status agent-approval-status--${message.status}`}>{message.status}</span>
+          <span className={`agent-approval-status agent-approval-status--${message.status}`}>{messageStatusLabel(message.status)}</span>
         </>
       );
   }

@@ -14,7 +14,7 @@
 
 import { existsSync, readdirSync, readFileSync, writeFileSync, mkdirSync, copyFileSync, statSync } from 'node:fs';
 import { join, resolve, basename, dirname, relative } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -29,10 +29,6 @@ const DEFAULT_SOURCE_DIRS = [
   join(appData, 'Electron', 'agent', 'sessions'),
   join(appData, 'SoulForge', 'agent', 'sessions')
 ];
-
-// 允许命令行传入额外目录
-const customDirs = process.argv.slice(2).filter((arg) => !arg.startsWith('-'));
-const sourceDirs = [...customDirs, ...DEFAULT_SOURCE_DIRS].filter((d) => existsSync(d));
 
 function findJsonlFiles(dir) {
   const results = [];
@@ -52,7 +48,7 @@ function findJsonlFiles(dir) {
   return results;
 }
 
-function parseSessionFile(filePath) {
+export function parseSessionFile(filePath) {
   const content = readFileSync(filePath, 'utf8');
   const lines = content.split(/\r?\n/).filter((l) => l.trim().length > 0);
 
@@ -61,6 +57,10 @@ function parseSessionFile(filePath) {
   let userPrompts = [];
   let totalSteps = 0;
   let finishReason = null;
+  let taskStatus = null;
+  let terminalSource = null;
+  let durableTerminalSeen = false;
+  let parseErrors = 0;
 
   for (const line of lines) {
     try {
@@ -77,11 +77,23 @@ function parseSessionFile(filePath) {
           const text = typeof item.message.content === 'string' ? item.message.content : JSON.stringify(item.message.content);
           userPrompts.push(text);
         }
-      } else if (item.type === 'session-done') {
+      } else if (item.type === 'turn-complete') {
+        durableTerminalSeen = true;
+        finishReason = typeof item.finishReason === 'string' ? item.finishReason : null;
+        taskStatus = typeof item.taskStatus === 'string' ? item.taskStatus : null;
+        terminalSource = 'turn-complete';
+        if (Number.isFinite(item.steps)) totalSteps = Math.max(totalSteps, item.steps);
+      } else if (item.type === 'session-done' && !durableTerminalSeen) {
+        // Legacy desktop exports used a session-done line. Keep reading them,
+        // but a later durable turn-complete remains authoritative.
         finishReason = item.finishReason;
+        taskStatus = typeof item.taskStatus === 'string' ? item.taskStatus : inferTaskStatus(item.finishReason);
+        terminalSource = 'session-done';
+        if (Number.isFinite(item.steps)) totalSteps = Math.max(totalSteps, item.steps);
       }
     } catch {
       // 容忍单行解析失败
+      parseErrors += 1;
     }
   }
 
@@ -122,12 +134,23 @@ function parseSessionFile(filePath) {
     primaryPrompt,
     shortTitle,
     totalSteps,
-    finishReason: finishReason || meta?.finishReason || 'done',
+    finishReason: finishReason || null,
+    taskStatus: taskStatus || (terminalSource ? inferTaskStatus(finishReason) : 'in_progress'),
+    terminalSource,
+    terminalMissing: terminalSource === null,
+    parseErrors,
     sizeBytes: statSync(filePath).size
   };
 }
 
-function generateMarkdown(session) {
+function inferTaskStatus(finishReason) {
+  if (finishReason === 'stop') return 'completed';
+  if (finishReason === 'cancelled') return 'cancelled';
+  if (finishReason === 'error') return 'error';
+  return 'partial';
+}
+
+export function generateMarkdown(session) {
   const d = new Date(session.startedAt);
   const dateStr = isNaN(d.getTime()) ? session.startedAt : d.toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai' });
 
@@ -137,7 +160,10 @@ function generateMarkdown(session) {
   mdLines.push(`> 📅 **记录时间**: ${dateStr} (${session.startedAt})  `);
   mdLines.push(`> 🆔 **会话 ID**: \`${session.sessionId}\`  `);
   mdLines.push(`> 📊 **总步数**: ${session.totalSteps} 步 | **文件大小**: ${(session.sizeBytes / 1024).toFixed(1)} KB  `);
-  mdLines.push(`> 🏁 **结束状态**: \`${session.finishReason}\`  `);
+  mdLines.push(`> 🏁 **终态**: \`${session.taskStatus}\`${session.finishReason ? ` / finishReason=\`${session.finishReason}\`` : ''}  `);
+  if (session.terminalMissing) {
+    mdLines.push('> ⚠️ **终态缺失**：该 rollout 可能仍在进行、被截断或未完成 flush；不得解读为会话完成。  ');
+  }
   mdLines.push('');
   mdLines.push('---');
   mdLines.push('');
@@ -198,8 +224,11 @@ function generateMarkdown(session) {
     } else if (item.type === 'interrupted') {
       mdLines.push(`> ⚠️ **会话中断**: ${item.reason || '用户或系统中断'}`);
       mdLines.push('');
+    } else if (item.type === 'turn-complete') {
+      mdLines.push(`> **耐久终态**: 步数 ${item.steps ?? session.totalSteps}, taskStatus=\`${item.taskStatus ?? 'unknown'}\`, finishReason=\`${item.finishReason ?? 'unknown'}\``);
+      mdLines.push('');
     } else if (item.type === 'session-done') {
-      mdLines.push(`> ✅ **会话完成**: 步数 ${item.steps || session.totalSteps}, 状态: \`${item.finishReason}\``);
+      mdLines.push(`> **兼容终态**: 步数 ${item.steps ?? session.totalSteps}, finishReason=\`${item.finishReason ?? 'unknown'}\``);
       mdLines.push('');
     }
   }
@@ -207,7 +236,8 @@ function generateMarkdown(session) {
   return mdLines.join('\n');
 }
 
-function sync() {
+export function sync(inputDirs = process.argv.slice(2).filter((arg) => !arg.startsWith('-'))) {
+  const sourceDirs = [...inputDirs, ...DEFAULT_SOURCE_DIRS].filter((d) => existsSync(d));
   console.log('🔍 正在扫描本地 AI 侧边栏会话记录...');
   const allJsonlFiles = [];
   for (const dir of sourceDirs) {
@@ -283,7 +313,7 @@ function sync() {
     const localTimeStr = isNaN(d.getTime()) ? session.startedAt : d.toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai' });
 
     indexRows.push(
-      `| ${localTimeStr} | ${safePrompt} | ${session.totalSteps} | [📖 查看对话 Markdown](${relMdPath}) | [📦 原始 JSONL](${relJsonlPath}) |`
+      `| ${localTimeStr} | ${safePrompt} | ${session.taskStatus}${session.terminalMissing ? ' (terminal missing)' : ''} | ${session.totalSteps} | [📖 查看对话 Markdown](${relMdPath}) | [📦 原始 JSONL](${relJsonlPath}) |`
     );
   }
 
@@ -305,8 +335,8 @@ function sync() {
     '',
     '## 📑 会话历史索引 (按时间倒序)',
     '',
-    '| 记录时间 (Local Time) | 会话摘要 (Prompt / Goal) | 步数 | Markdown 详情 | 原始记录 |',
-    '| :--- | :--- | :--- | :--- | :--- |',
+    '| 记录时间 (Local Time) | 会话摘要 (Prompt / Goal) | 终态 | 步数 | Markdown 详情 | 原始记录 |',
+    '| :--- | :--- | :--- | :--- | :--- | :--- |',
     ...indexRows,
     '',
     '---',
@@ -317,4 +347,5 @@ function sync() {
   console.log(`✅ 同步完成！已生成 ${uniqueSessions.length} 篇 Markdown 对话记录及 README 索引。`);
 }
 
-sync();
+const invokedPath = process.argv[1] ? pathToFileURL(resolve(process.argv[1])).href : '';
+if (import.meta.url === invokedPath) sync();

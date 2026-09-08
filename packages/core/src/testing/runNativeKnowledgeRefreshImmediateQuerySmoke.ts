@@ -8,7 +8,7 @@ import { createHash } from 'node:crypto';
 import { copyFile, mkdir, mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { basename, dirname, join } from 'node:path';
-import type { IndexedFile, ParamDefDocument, RagChunkFamily } from '@soulforge/shared';
+import type { IndexedFile, ParamDefDocument, ParamRowSymbol, RagChunkFamily } from '@soulforge/shared';
 import { pathToFileURL } from 'node:url';
 import { runBridge, disposeBridgeDaemonPool } from '../bridge/runBridge.js';
 import { decodeRowFields, encodeFieldMutation } from '../param/paramdefLayout.js';
@@ -16,6 +16,7 @@ import { importPinnedSmithboxSdtParamMetadata } from '../param/smithboxParamMeta
 import { buildRagCorpus } from '../rag/chunkBuilder.js';
 import { retrieveEvidence } from '../rag/retrieve.js';
 import { WorkspaceIndex } from '../indexing/workspaceIndex.js';
+import { ingestBridgeResult } from '../indexing/ingestBridgeResult.js';
 import { refreshKnowledgeAfterCommit } from '../indexing/knowledgeRefresh.js';
 import { refreshNativeSemanticSources } from '../indexing/nativeSemanticRefresh.js';
 import { scanWorkspace } from '../workspace/scanWorkspace.js';
@@ -67,6 +68,14 @@ interface NativeTestState {
 const GAME_ROOT = process.env.SOULFORGE_SEKIRO_GAME_ROOT?.trim()
   || process.env.SOULFORGE_NATIVE_FIXTURE_ROOT?.trim()
   || '';
+const BRIDGE_EXECUTABLE_OVERRIDE = process.env.SOULFORGE_NATIVE_BRIDGE_EXECUTABLE?.trim() || undefined;
+
+function runNativeBridge<T = unknown>(options: Parameters<typeof runBridge>[0]) {
+  return runBridge<T>({
+    ...options,
+    ...(BRIDGE_EXECUTABLE_OVERRIDE ? { bridgeExecutablePath: BRIDGE_EXECUTABLE_OVERRIDE } : {})
+  });
+}
 
 async function main(): Promise<void> {
   if (!GAME_ROOT) {
@@ -107,6 +116,13 @@ async function main(): Promise<void> {
       files: new Map(scan.files.map((file) => [file.sourceUri, file]))
     };
 
+    // Seed the empty index through the same production Bridge semantic export
+    // used by ordinary analyze/search flows before exercising the native
+    // refresh path.  The refresh must replace these PARAM projections by the
+    // physical child identity, not append a second copy under another name.
+    const paramFile = findFile(state, 'param', 'gameparam.parambnd.dcx');
+    const paramAnalyzeReceipt = await seedParamProjectionFromProductionExport(state, paramFile);
+
     const initial = await refreshNativeSemanticSources({
       index,
       sourceFiles: scan.files,
@@ -118,6 +134,7 @@ async function main(): Promise<void> {
     if (initial.failedSources.length > 0) {
       throw new Error(`initial native semantic refresh failed: ${JSON.stringify(initial.diagnostics)}`);
     }
+    const paramRefreshReceipt = assertParamRefreshIdentity(state.index, paramAnalyzeReceipt);
 
     const eventResult = await mutateEvent(state);
     state.index = await refreshAfterCommit(state, eventResult.sourceUri);
@@ -141,11 +158,182 @@ async function main(): Promise<void> {
       authority: 'native-verified',
       sources: ['EMEVD', 'MSB', 'PARAM', 'FMG'],
       immediateQueries: 4,
+      paramAnalyzeReceipt: paramRefreshReceipt,
       note: '真实 native writer 暂存产物经 Patch Engine 写入临时 overlay；每次提交后立即 refresh + retrieve_evidence。'
     }, null, 2));
   } finally {
     await disposeBridgeDaemonPool();
     await rm(root, { recursive: true, force: true });
+  }
+}
+
+interface ParamAnalyzeReceipt {
+  sourceUri: string;
+  physicalEntries: Array<{ index: number; name: string }>;
+  seededExportCount: number;
+  seededRowCount: number;
+  seededIdentities: string[];
+}
+
+interface ParamRefreshReceipt {
+  sourceUri: string;
+  physicalEntryCount: number;
+  before: {
+    exportCount: number;
+    rowCount: number;
+    physicalIdentityCount: number;
+  };
+  after: {
+    exportCount: number;
+    rowCount: number;
+    physicalIdentityCount: number;
+  };
+  physicalIdentitiesMatch: true;
+}
+
+async function seedParamProjectionFromProductionExport(
+  state: NativeTestState,
+  file: IndexedFile
+): Promise<ParamAnalyzeReceipt> {
+  const container = await bridgeRead<BndEnvelope>({
+    command: 'read-dcx-document',
+    filePath: file.absolutePath,
+    allowedRoots: [state.overlay],
+    oodleRuntimeRoot: state.gameRoot
+  });
+  const physicalEntries = (container.nested?.entries ?? []).flatMap((entry) => (
+    Number.isSafeInteger(entry.index)
+      && typeof entry.name === 'string'
+      && entry.name.toLowerCase().endsWith('.param')
+      ? [{ index: entry.index as number, name: entry.name }]
+      : []
+  ));
+  if (physicalEntries.length === 0) throw new Error('真实 PARAM BND4 没有可验证的 .param 物理子项。');
+
+  const exported = await runNativeBridge<Record<string, unknown>>({
+    command: 'export-param',
+    filePath: file.absolutePath,
+    resourceUri: file.sourceUri,
+    allowedRoots: [state.overlay],
+    ...(state.gameRoot ? { oodleRuntimeRoot: state.gameRoot } : {}),
+    timeoutMs: 180_000,
+    maxFrameBytes: 32 * 1024 * 1024
+  });
+  if (exported.parseStatus === 'failed' || !exported.data) {
+    throw new Error(`production PARAM export failed: ${JSON.stringify(exported.diagnostics)}`);
+  }
+  // Bridge derives sourceUri from the temporary absolute path, while the
+  // workspace index owns the relative sourceUri assigned by scanWorkspace.
+  // Production analyze canonicalizes this envelope before ingest; mirror that
+  // boundary here so the before/after comparison exercises the same key.
+  const ingested = ingestBridgeResult(state.index, {
+    ...exported,
+    sourceUri: file.sourceUri,
+    sourcePath: file.absolutePath
+  });
+  if (!ingested.accepted) {
+    throw new Error(`production PARAM export was not accepted: ${JSON.stringify(ingested.diagnostics)}`);
+  }
+
+  const projections = paramExportsFor(state.index, file.sourceUri);
+  const seededIdentities = projectionIdentities(projections);
+  assertPhysicalParamIdentities(projections, physicalEntries, 'production export');
+  if (seededIdentities.length === 0 || seededIdentities.length !== new Set(seededIdentities).size) {
+    const dataRecord = exported.data && typeof exported.data === 'object'
+      ? exported.data as Record<string, unknown>
+      : undefined;
+    const indexedParams = state.index.toSymbolBundle().params ?? [];
+    throw new Error(`production PARAM export has missing/duplicate physical identities: ${JSON.stringify({
+      result: {
+        parseStatus: exported.parseStatus,
+        resourceKind: exported.resourceKind,
+        sourceUri: exported.sourceUri,
+        sourcePath: exported.sourcePath,
+        expectedSourceUri: file.sourceUri,
+        dataKeys: dataRecord ? Object.keys(dataRecord).slice(0, 16) : [],
+        dataParamsCount: Array.isArray(dataRecord?.params) ? dataRecord.params.length : undefined,
+        dataParamName: typeof dataRecord?.paramName === 'string' ? dataRecord.paramName : undefined
+      },
+      ingest: {
+        accepted: ingested.accepted,
+        parseStatus: ingested.parseStatus,
+        diagnosticCodes: ingested.diagnostics.map((diagnostic) => diagnostic.code).slice(0, 16)
+      },
+      indexed: {
+        sourceCount: indexedParams.length,
+        sourceUris: [...new Set(indexedParams.map((item) => item.sourceUri))].slice(0, 8),
+        matchingSourceCount: projections.length
+      }
+    })}`);
+  }
+  return {
+    sourceUri: file.sourceUri,
+    physicalEntries,
+    seededExportCount: projections.length,
+    seededRowCount: projections.reduce((count, item) => count + item.rows.length, 0),
+    seededIdentities
+  };
+}
+
+function assertParamRefreshIdentity(index: WorkspaceIndex, receipt: ParamAnalyzeReceipt): ParamRefreshReceipt {
+  const projections = paramExportsFor(index, receipt.sourceUri);
+  const identities = projectionIdentities(projections);
+  if (projections.length !== receipt.seededExportCount) {
+    throw new Error(`PARAM export count changed during native refresh: ${receipt.seededExportCount} -> ${projections.length}`);
+  }
+  const rowCount = projections.reduce((count, item) => count + item.rows.length, 0);
+  if (rowCount !== receipt.seededRowCount) {
+    throw new Error(`PARAM row count changed during native refresh: ${receipt.seededRowCount} -> ${rowCount}`);
+  }
+  if (JSON.stringify([...identities].sort()) !== JSON.stringify([...receipt.seededIdentities].sort())) {
+    throw new Error(`PARAM physical identities changed during native refresh: ${JSON.stringify({ before: receipt.seededIdentities, after: identities })}`);
+  }
+  assertPhysicalParamIdentities(projections, receipt.physicalEntries, 'native refresh');
+
+  // Native refresh must enrich the production projection with typed fields;
+  // an identity-only replacement with empty field arrays is not convergence.
+  const actionGuide = projections.find((item) => item.entryIndex === 1
+    && item.entryName?.toLowerCase().endsWith('actionguideparam.param'));
+  if (!actionGuide || actionGuide.rows.length === 0
+    || actionGuide.rows.some((row) => !Array.isArray(row.fields) || row.fields.length === 0)) {
+    throw new Error('ActionGuideParam native refresh did not retain complete typed fields.');
+  }
+  return {
+    sourceUri: receipt.sourceUri,
+    physicalEntryCount: receipt.physicalEntries.length,
+    before: {
+      exportCount: receipt.seededExportCount,
+      rowCount: receipt.seededRowCount,
+      physicalIdentityCount: receipt.seededIdentities.length
+    },
+    after: {
+      exportCount: projections.length,
+      rowCount,
+      physicalIdentityCount: identities.length
+    },
+    physicalIdentitiesMatch: true
+  };
+}
+
+function paramExportsFor(index: WorkspaceIndex, sourceUri: string) {
+  return (index.toSymbolBundle().params ?? []).filter((item) => item.sourceUri === sourceUri);
+}
+
+function projectionIdentities(projections: ReturnType<typeof paramExportsFor>): string[] {
+  return projections.map((item) => `${item.entryIndex ?? ''}\u0000${item.entryName ?? ''}`);
+}
+
+function assertPhysicalParamIdentities(
+  projections: ReturnType<typeof paramExportsFor>,
+  physicalEntries: Array<{ index: number; name: string }>,
+  phase: string
+): void {
+  const physical = new Set(physicalEntries.map((entry) => `${entry.index}\u0000${entry.name}`));
+  const invalid = projections
+    .map((item) => `${item.entryIndex ?? ''}\u0000${item.entryName ?? ''}`)
+    .filter((identity) => !physical.has(identity));
+  if (invalid.length > 0) {
+    throw new Error(`PARAM ${phase} projection identity is not present in read-dcx entries: ${JSON.stringify(invalid.slice(0, 8))}`);
   }
 }
 
@@ -162,7 +350,7 @@ async function mutateEvent(state: NativeTestState): Promise<MutationQuery> {
   if (!target) throw new Error('真实 EMEVD 没有可变更事件。');
   const nextRest = target.restBehavior === 0 ? 1 : 0;
   const staged = join(state.staging, 'event-rest.emevd.dcx');
-  const written = await runBridge({
+  const written = await runNativeBridge({
     command: 'write-emevd',
     filePath: file.absolutePath,
     allowedRoots: [state.overlay, state.staging],
@@ -200,7 +388,7 @@ async function mutateMap(state: NativeTestState): Promise<MutationQuery> {
   if (!target) throw new Error('真实 MSB 没有可变更 Part。');
   const nextX = target.posX + 1.25;
   const staged = join(state.staging, 'map-position.msb.dcx');
-  const written = await runBridge({
+  const written = await runNativeBridge({
     command: 'write-msb',
     filePath: file.absolutePath,
     allowedRoots: [state.overlay, state.staging],
@@ -273,7 +461,7 @@ async function mutateParam(state: NativeTestState): Promise<MutationQuery> {
   );
   if (!encoded.ok) throw new Error(encoded.message);
   const stagedChild = join(state.staging, 'ActionGuideParam.mutated.param');
-  const writtenParam = await runBridge({
+  const writtenParam = await runNativeBridge({
     command: 'write-param',
     filePath: child,
     allowedRoots: [state.staging],
@@ -288,7 +476,7 @@ async function mutateParam(state: NativeTestState): Promise<MutationQuery> {
   });
   assertStaged(writtenParam.diagnostics, 'PARAM');
   const stagedContainer = join(state.staging, 'gameparam.parambnd.dcx');
-  const writtenBnd = await runBridge({
+  const writtenBnd = await runNativeBridge({
     command: 'write-bnd4',
     filePath: file.absolutePath,
     allowedRoots: [state.overlay, state.staging],
@@ -306,12 +494,36 @@ async function mutateParam(state: NativeTestState): Promise<MutationQuery> {
   });
   assertStaged(writtenBnd.diagnostics, 'PARAM BND4');
   await commitStaged(state, file, stagedContainer, 'PARAM field');
+  const symbolUri = `${file.sourceUri}#ActionGuideParam/${first.id}`;
   return {
     sourceUri: file.sourceUri,
-    oldQuery: `ActionGuideParam ${first.id} ${targetField.name} ${targetField.value}`,
-    newQuery: `ActionGuideParam ${first.id} ${targetField.name} ${nextValue}`,
-    oldNeedles: [`param ActionGuideParam`, `row ${first.id}`, `${targetField.name}=${targetField.value}`],
-    newNeedles: [`param ActionGuideParam`, `row ${first.id}`, `${targetField.name}=${nextValue}`]
+    // Keep the query tied to the native row/field identity.  The RAG body is
+    // emitted as `${fieldId} ${displayName} value=...`; querying only the
+    // display label (for example `Text ID`) made a legitimate row/value look
+    // absent even though the refreshed chunk was present.
+    // Include the exact typed symbol URI so a small numeric value such as 0
+    // cannot turn every PARAM row containing zero into an exact candidate.
+    // The field/value terms remain in the query for the immediate evidence
+    // check, while URI identity is what bounds retrieval to this row.
+    oldQuery: `${symbolUri} fieldId ${targetField.fieldId} value=${targetField.value}`,
+    newQuery: `${symbolUri} fieldId ${targetField.fieldId} value=${nextValue}`,
+    oldNeedles: [
+      `param ActionGuideParam`,
+      `row ${first.id}`,
+      `${targetField.fieldId} ${targetField.name} value=${targetField.value}`
+    ],
+    newNeedles: [
+      `param ActionGuideParam`,
+      `row ${first.id}`,
+      `${targetField.fieldId} ${targetField.name} value=${nextValue}`
+    ],
+    paramIdentity: {
+      table: 'ActionGuideParam',
+      rowId: first.id,
+      fieldId: targetField.fieldId,
+      oldValue: targetField.value,
+      newValue: nextValue
+    }
   };
 }
 
@@ -332,11 +544,12 @@ async function mutateFmg(state: NativeTestState): Promise<MutationQuery> {
     filePath: child,
     allowedRoots: [state.staging]
   });
-  const target = read.entries.find((item) => item.text.length > 0 && item.text !== '<?null?>');
+  const target = read.entries.find((item) => typeof item.text === 'string'
+    && item.text.length > 0 && item.text !== '<?null?>');
   if (!target) throw new Error('真实 FMG 没有可变更文本。');
   const nextText = `${target.text} SoulForgeRefreshProbe`;
   const stagedChild = join(state.staging, 'weapon_names.mutated.fmg');
-  const writtenFmg = await runBridge({
+  const writtenFmg = await runNativeBridge({
     command: 'write-fmg',
     filePath: child,
     allowedRoots: [state.staging],
@@ -351,7 +564,7 @@ async function mutateFmg(state: NativeTestState): Promise<MutationQuery> {
   });
   assertStaged(writtenFmg.diagnostics, 'FMG');
   const stagedContainer = join(state.staging, 'item.msgbnd.dcx');
-  const writtenBnd = await runBridge({
+  const writtenBnd = await runNativeBridge({
     command: 'write-bnd4',
     filePath: file.absolutePath,
     allowedRoots: [state.overlay, state.staging],
@@ -450,7 +663,7 @@ async function extractChild(
   index: number,
   outputPath: string
 ): Promise<void> {
-  const result = await runBridge({
+  const result = await runNativeBridge({
     command: 'extract-bnd4-child',
     filePath: file.absolutePath,
     allowedRoots: [state.overlay, state.staging],
@@ -468,7 +681,7 @@ async function bridgeRead<T>(input: {
   oodleRuntimeRoot?: string;
   commandOptions?: Record<string, unknown>;
 }): Promise<T> {
-  const result = await runBridge<T>({
+  const result = await runNativeBridge<T>({
     command: input.command,
     filePath: input.filePath,
     resourceUri: pathToFileURL(input.filePath).href,
@@ -486,19 +699,92 @@ async function bridgeRead<T>(input: {
 
 function assertOnlyNew(index: WorkspaceIndex, family: RagChunkFamily, query: MutationQuery): void {
   const corpus = buildRagCorpus(index);
-  const oldResult = retrieveEvidence(corpus, query.oldQuery, { families: [family], expandReferences: false });
+  const retrieveOptions = {
+    families: [family],
+    sourceUris: [query.sourceUri],
+    expandReferences: false,
+    limit: 8
+  } as const;
+  const oldResult = retrieveEvidence(corpus, query.oldQuery, retrieveOptions);
   const oldHit = oldResult.ok ? oldResult.hits.find((hit) => hit.chunk.sourceUri === query.sourceUri
-    && query.oldNeedles.every((needle) => hit.chunk.body.includes(needle))
+    && (!query.paramIdentity || hit.chunk.symbolUri === paramSymbolUri(query.paramIdentity, query.sourceUri))
+    && (!query.paramIdentity
+      ? query.oldNeedles.every((needle) => hit.chunk.body.includes(needle))
+      : hasParamRowAndField(hit.chunk.body, query.paramIdentity.rowId, query.paramIdentity.fieldId, query.paramIdentity.oldValue))
     && (!query.oldLine || hit.chunk.body.split('\n').includes(query.oldLine))) : undefined;
   if (oldHit) {
     throw new Error(`old ${family} evidence survived immediate refresh: ${query.oldQuery} ${JSON.stringify({ symbolUri: oldHit.chunk.symbolUri, body: oldHit.chunk.body })}`);
   }
-  const newResult = retrieveEvidence(corpus, query.newQuery, { families: [family], expandReferences: false });
-  if (!newResult.ok || !newResult.hits.some((hit) => hit.chunk.sourceUri === query.sourceUri
-    && query.newNeedles.every((needle) => hit.chunk.body.includes(needle))
-    && (!query.newLine || hit.chunk.body.split('\n').includes(query.newLine)))) {
-    throw new Error(`new ${family} evidence missing after immediate refresh: ${query.newQuery}`);
+  const newResult = retrieveEvidence(corpus, query.newQuery, retrieveOptions);
+  const newHit = newResult.ok ? newResult.hits.find((hit) => hit.chunk.sourceUri === query.sourceUri
+    && (!query.paramIdentity || hit.chunk.symbolUri === paramSymbolUri(query.paramIdentity, query.sourceUri))
+    && (!query.paramIdentity
+      ? query.newNeedles.every((needle) => hit.chunk.body.includes(needle))
+      : hasParamRowAndField(hit.chunk.body, query.paramIdentity.rowId, query.paramIdentity.fieldId, query.paramIdentity.newValue))
+    && (!query.newLine || hit.chunk.body.split('\n').includes(query.newLine))) : undefined;
+  if (query.paramIdentity) {
+    const oldTypedField = findParamField(index, query.paramIdentity, query.sourceUri, query.paramIdentity.oldValue);
+    if (oldTypedField) {
+      throw new Error(`old PARAM typed projection survived immediate refresh: ${query.oldQuery} ${JSON.stringify(oldTypedField)}`);
+    }
+    const newTypedField = findParamField(index, query.paramIdentity, query.sourceUri, query.paramIdentity.newValue);
+    if (!newTypedField) {
+      throw new Error(`new PARAM typed projection missing after immediate refresh: ${query.newQuery} ${JSON.stringify({
+        expectedSymbolUri: paramSymbolUri(query.paramIdentity, query.sourceUri),
+        rows: getParamRows(index, query.paramIdentity, query.sourceUri)
+      })}`);
+    }
   }
+  if (!newHit) {
+    throw new Error(`new ${family} evidence missing after immediate refresh: ${query.newQuery} ${JSON.stringify({
+      sourceUri: query.sourceUri,
+      expectedSymbolUri: query.paramIdentity ? paramSymbolUri(query.paramIdentity, query.sourceUri) : undefined,
+      result: newResult.ok ? newResult.hits.map((hit) => ({ symbolUri: hit.chunk.symbolUri, body: hit.chunk.body })) : newResult
+    })}`);
+  }
+}
+
+function paramSymbolUri(identity: NonNullable<MutationQuery['paramIdentity']>, sourceUri: string): string {
+  return `${sourceUri}#${identity.table}/${identity.rowId}`;
+}
+
+/**
+ * PARAM evidence is line-oriented.  Match the native field id at the start
+ * of one field line and require the serialized value at the line end.  This
+ * deliberately ignores displayName and description: both are presentation
+ * metadata and may contain arbitrary text (including the expected value).
+ */
+function hasParamRowAndField(body: string, rowId: number, fieldId: string, value: string | number | boolean): boolean {
+  const lines = body.split('\n');
+  const fieldPrefix = `${fieldId} `;
+  const valueSuffix = ` value=${String(value)}`;
+  return lines.includes(`row ${rowId}`)
+    && lines.some((line) => line.startsWith(fieldPrefix) && line.endsWith(valueSuffix));
+}
+
+function getParamRows(
+  index: WorkspaceIndex,
+  identity: NonNullable<MutationQuery['paramIdentity']>,
+  sourceUri: string
+): ParamRowSymbol[] {
+  return (index.toSymbolBundle().params ?? [])
+    .filter((table) => table.sourceUri === sourceUri && table.paramName === identity.table)
+    .flatMap((table) => table.rows)
+    .filter((row) => row.sourceUri === sourceUri
+      && row.paramName === identity.table
+      && row.rowId === identity.rowId
+      && row.uri === paramSymbolUri(identity, sourceUri));
+}
+
+function findParamField(
+  index: WorkspaceIndex,
+  identity: NonNullable<MutationQuery['paramIdentity']>,
+  sourceUri: string,
+  value: string | number | boolean
+): NonNullable<ParamRowSymbol['fields']>[number] | undefined {
+  const rows = getParamRows(index, identity, sourceUri);
+  if (rows.length !== 1) return undefined;
+  return rows[0]?.fields?.find((field) => field.fieldId === identity.fieldId && Object.is(field.value, value));
 }
 
 function findFile(state: NativeTestState, kind: IndexedFile['resourceKind'], suffix: string): IndexedFile {
@@ -541,6 +827,13 @@ interface MutationQuery {
   newNeedles: string[];
   oldLine?: string;
   newLine?: string;
+  paramIdentity?: {
+    table: string;
+    rowId: number;
+    fieldId: string;
+    oldValue: number | string | boolean;
+    newValue: number | string | boolean;
+  };
 }
 
 void main().catch(async (error) => {
