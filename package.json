@@ -1,0 +1,24 @@
+{
+  "name": "soulforge",
+  "version": "0.9.0",
+  "private": true,
+  "type": "module",
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "dev": "npm run dev -w @soulforge/desktop",
+    "build": "npm run build:release",
+    "build:release": "npm run build -w @soulforge/shared && npm run build -w @soulforge/core && npm run build -w @soulforge/desktop",
+    "bridge:build": "node scripts/run-dotnet.mjs build bridge/SoulForge.Bridge/SoulForge.Bridge.csproj --nologo",
+    "bridge:publish": "node scripts/run-dotnet.mjs publish bridge/SoulForge.Bridge/SoulForge.Bridge.csproj -c Release --nologo --self-contained true -r win-x64",
+    "dev-launcher:build": "node scripts/build-dev-launcher.mjs",
+    "exe:build": "npm run bridge:publish && npm run dev-launcher:build"
+  },
+  "devDependencies": {
+    "@types/node": "^22.13.1",
+    "ajv": "8.20.0",
+    "typescript": "^5.7.3"
+  }
+}

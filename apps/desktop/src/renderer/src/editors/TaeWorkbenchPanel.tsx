@@ -1,0 +1,1576 @@
+/**
+ * ANIMATION-56B / T3（2026-08-15）：动作工作台（grok T3，对照 DSAS）。
+ *
+ * 四栏工作台：`[动作 | 词条 | 详情 | 动作视图]`；动作组按原生 TAE child 折叠。
+ *
+ * ── T3 重构（行为 + 动画合并为「动作」）+ 底部 IDE 终端式详情 ──
+ *
+ * 左栏列动画 id（hkxName 去扩展，如 a000_003013；无 hkxName 用 a000_ + 6位 id）。
+ * 次栏列当前动画的词条事件列表——envelope 只有 eventTypeId 与起止时间，词条文本名
+ * （PlaySound_ByStateInfo 等）当前未解码，诚实显示「事件类型 N」；选中后详情在
+ * 底部独立面板展示（起止帧 / 事件类型 / 下标与能解出的全部字段；解不出的字段写
+ * 「未解码」+ 原始数值，禁止编造 SoundType 含义），支持拖拽调高、独立滚动。
+ * 右栏是只读动作视图（S17）：
+ * `read-chrbnd-flver-preview`（已登记进 AdvertisedCommands）从 overlay 或原版
+ * chr/<id>.chrbnd.dcx 取伴生 FLVER，renderer 按 meshIndex=0..meshCount-1 循环读齐
+ * 全部网格拼成完整模型（问题4-A），挂进现有 FlverViewer 画网格；选中动画后由真实
+ * TAE Clip 驱动连续骨骼采样和播放控制。动作目录、事件图和预览分别由 action/ 下的
+ * 独立模块承载；两边都没有 chrbnd 时给可行动空态（去「开始」页挂原版）。
+ *
+ * ── 事件参数体未解码是刻意边界 ──
+ *
+ * 每个事件只导出 startTime / endTime / eventTypeId 与计数，paramDataOffset 指向的
+ * 参数体一字节未读（C# 侧刻意边界）。UI 不得把「读出了事件在时间轴上的位置」
+ * 伪装成「读出了 hitbox/SFX/VFX 参数」——缺 eventTypeId 逐类布局就不能开放参数
+ * 编辑。ANIMATION-56C 写回只开放已解码字段（事件时间 / 按模板新增事件）。
+ *
+ * ── 写回（ANIMATION-56C 保留，收进详情栏）──
+ *
+ * 详情栏在选中事件时保留「编辑事件时间」（问题4-C：独立第四栏前的第三栏、可关，
+ * 起始帧/结束帧只留一套、**按帧编辑**、提交时 /30 换秒），经 preload 的
+ * commitTaeEvent（write-tae-document）提交。mutation 定位用 animId + 事件表下标：
+ * eventIndex 是选中事件在其动画 events 数组内的下标（中栏词条列表就是该动画的
+ * events，下标直接可回推）；templateEventIndex 同理用于新增事件。expectedDocumentHash
+ * 取读信封的 sourceHash。提交成功后经 readTaeDocument 重读并覆盖本地文档
+ * （refreshedDocument）；失败展示 diagnostics + 回滚提示。提交期间禁用重复提交。
+ * 写回不经过通用文本保存/字节直写，只有 commitTaeEvent 一个 typed 出口。右栏始终只读。
+ *
+ * ── 词条详情（底部 IDE 终端式面板，对照 DSAS）──
+ *
+ * 点一条词条，详情沉到底部独立面板展示（独立滚动，不与词条/动画列表共享滚动）；
+ * 未选中时显示「选中词条以编辑」空态。必须能关：栏内 × 或再点同一条词条取消
+ * （两者都支持），关闭后 selected.kind 回到 animation，详情卸掉。面板高度受控
+ * state（默认 280px，min 160 max 60% 视口），顶部 6px drag handle 支持 pointer
+ * 拖拽调高。起始帧/结束帧只留一套（主单位帧、旁边小字 ≈ 秒），禁止
+ * 「编辑事件时间（update-event-times，内部秒）」协议名上屏，内部 mutation 仍走秒。
+ *
+ * ── 分页 ──
+ *
+ * 首次加载用 pageSize=1000 拉全量（覆盖 c0000 939）；若 envelope 仍截断
+ * （animationsTruncated），展示警示并提供「加载更多」分页按钮逐页追加。
+ *
+ * ── invalid time range ──
+ *
+ * 存在 startTime > endTime、非有限时间、或 endTime 超过合理动画长度（> 3600 秒，
+ * 问题4-C 防 1.02e+40 科学计数法）时，C# 侧降 partial 并在 diagnostics 里给
+ * TAE_INVALID_TIME_RANGE。主动作区只保留非法时间行和可行动的写回错误提示，不把
+ * authority/内部诊断长文铺在预览下方；时间编辑本身可用来修复非法范围。
+ * 提交后仍非法、或时间槽被兄弟事件共享时 C# 侧 fail-closed，面板展示诊断并保持
+ * 事件表原状（失败不清空）。
+ */
+
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactElement } from 'react';
+import {
+  isTaeDocument,
+  projectTaeDocumentPages,
+  AnimationPlaybackClock,
+  ActionContinuousSampler,
+  isCharacterPreviewBundle,
+  actionAnimationGroupKey,
+  actionAnimationGroupLabel,
+  buildActionTimeline,
+  filterActionAnimations,
+  groupActionAnimations,
+  type CharacterPreviewBundle,
+  type TaeAnimationClipData,
+  type BoneTransformData,
+  taeAnimationIdentityKey,
+  type Diagnostic,
+  type TaeAnimationWire,
+  type TaeDocument,
+  type TaeTimelineEventRow,
+  type TaeTimelineEventWire
+} from '@soulforge/shared';
+import { flverEulerXzyToQuaternion } from '../scene/flverSkeletonMapping.js';
+import { isRowTabEntry, selectableRowAttributes } from '../a11y/selectableRow.js';
+import { getRendererBridge } from '../runtime/rendererRuntime.js';
+import { WorkbenchLayout } from '../workbench/WorkbenchLayout.js';
+import { ActionAnimationList } from './action/ActionAnimationList.js';
+import { ActionPreviewModule } from './action/ActionPreviewModule.js';
+import { ActionTimelineGraph } from './action/ActionTimelineGraph.js';
+
+// 保留旧编辑器对这些纯函数的导出，外部深链/测试不需要改 API。
+export { actionAnimationGroupLabel, actionAnimationGroupKey } from '@soulforge/shared';
+export { groupActionAnimations as groupTaeAnimations } from '@soulforge/shared';
+
+/** 帧率换算（Sekiro 常见 30fps；frame = second × 30）。 */
+const FRAME_RATE = 30;
+/**
+ * 合理动画长度上界（秒）：endTime 超过它判「非法时间」。
+ * 问题4-C：JumpTable 会给出 1.02e+40 这类垃圾时间，Number.isFinite 拦不住，
+ * 也禁止把科学计数法打上屏——> 3600 秒就不像任何动画长度。
+ */
+const MAX_ANIMATION_SECONDS = 3600;
+
+function PlayIcon(): ReactElement {
+  return (
+    <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+      <path d="M8 5v14l11-7z" />
+    </svg>
+  );
+}
+
+function PauseIcon(): ReactElement {
+  return (
+    <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+      <path d="M6 19h4V5H6v14zm8-14v14h4V5h-4z" />
+    </svg>
+  );
+}
+
+function StopIcon(): ReactElement {
+  return (
+    <svg width="11" height="11" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+      <path d="M6 6h12v12H6z" />
+    </svg>
+  );
+}
+
+function PrevFrameIcon(): ReactElement {
+  return (
+    <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+      <path d="M6 6h2v12H6zm3.5 6l8.5 6V6z" />
+    </svg>
+  );
+}
+
+function NextFrameIcon(): ReactElement {
+  return (
+    <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+      <path d="M6 18l8.5-6L6 6v12zM16 6v12h2V6h-2z" />
+    </svg>
+  );
+}
+
+function LoopIcon(): ReactElement {
+  return (
+    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <path d="M17 2l4 4-4 4" />
+      <path d="M3 11v-1a4 4 0 0 1 4-4h14" />
+      <path d="M7 22l-4-4 4-4" />
+      <path d="M21 13v1a4 4 0 0 1-4 4H3" />
+    </svg>
+  );
+}
+
+/**
+ * TAE 动画分页的 renderer 状态。
+ *
+ * `hasMore` 只接受 Bridge 当前页的 `animationsTruncated`，不根据本地已加载数量
+ * 推断 EOF。`nextPage` 也由页号推进，避免在去重或重读后用动画数量反推页码。
+ */
+export interface TaeAnimationPaginationState {
+  documentKey: string;
+  /** 已在首屏出现的完整动画身份键；同一 animId 可属于多个 TAE child。 */
+  baseAnimationIds: readonly string[];
+  animations: readonly TaeAnimationWire[];
+  nextPage: number;
+  hasMore: boolean;
+}
+
+export function createTaeAnimationPaginationState(
+  documentKey: string,
+  document: TaeDocument
+): TaeAnimationPaginationState {
+  return {
+    documentKey,
+    baseAnimationIds: document.animations.map((animation) => taeAnimationIdentityKey(animation)),
+    animations: [],
+    nextPage: 1,
+    hasMore: document.animationsTruncated === true
+  };
+}
+
+/**
+ * 追加一个服务端动画页。页号不匹配时保持旧状态，调用方可安全忽略迟到响应；
+ * 完整 TAE identity 去重保证重试/重复响应不会把同一 child 动画插入两次，
+ * 同时保留不同 TAE child 中可重复的 animId。
+ */
+export function appendTaeAnimationPage(
+  state: TaeAnimationPaginationState,
+  page: TaeDocument,
+  pageNumber: number
+): TaeAnimationPaginationState {
+  if (!state.hasMore || pageNumber !== state.nextPage) return state;
+  const seen = new Set<string>([
+    ...state.baseAnimationIds,
+    ...state.animations.map((animation) => taeAnimationIdentityKey(animation))
+  ]);
+  const additions = page.animations.filter((animation) => {
+    const identityKey = taeAnimationIdentityKey(animation);
+    if (seen.has(identityKey)) return false;
+    seen.add(identityKey);
+    return true;
+  });
+  return {
+    ...state,
+    animations: [...state.animations, ...additions],
+    nextPage: pageNumber + 1,
+    hasMore: page.animationsTruncated === true
+  };
+}
+
+export interface TaeWorkbenchPanelProps {
+  resourceUri: string;
+  data: TaeDocument | null;
+  /** 可选初始选中（测试/深链用）；不传等价于只读初始态。 */
+  initialSelection?: TaeSelection;
+}
+
+type TaeSelectionKind = 'animation' | 'event';
+
+export interface TaeSelection {
+  kind: TaeSelectionKind;
+  id: string;
+  label: string;
+  /** 选中动画的 animId。 */
+  animationId: number;
+  /** 选中事件在该动画 events 数组内的下标（写回定位用）。 */
+  eventIndex?: number | undefined;
+  taeEntryIndex?: number | undefined;
+  taeEntryId?: number | undefined;
+  taeEntryName?: string | undefined;
+  taeGroup?: string | undefined;
+}
+
+/** 时间编辑草稿（字符串输入态，主单位是**帧**；提交时 /30 换秒再解析）。 */
+export interface TaeTimeDraft {
+  startText: string;
+  endText: string;
+}
+
+/** 新增事件草稿（字符串输入态）。 */
+export interface TaeInsertDraft {
+  eventTypeIdText: string;
+  startText: string;
+  endText: string;
+}
+
+/** 写回结果提示：成功或失败诊断。 */
+export interface TaeWriteNotice {
+  kind: 'success' | 'error';
+  message: string;
+}
+
+/** 文件显示名：取 sourceUri 的 basename。 */
+function fileLabel(resourceUri: string): string {
+  const base = resourceUri.split(/[/\\]/).pop() ?? resourceUri;
+  return base || resourceUri;
+}
+
+/**
+ * hkx 茎是否「合法文件名字符」：ASCII 字母数字开头，仅含字母数字 / _ / - / .，
+ * 非空、无空白。S17：乱码（旧 UTF-16 误读）、空串、含空白的占位名（如 "AE "）
+ * 一律不认作合法茎。
+ */
+export function isLegalHkxStem(value: string): boolean {
+  if (value.length < 3) return false;
+  return /^[A-Za-z0-9][A-Za-z0-9_.-]*$/.test(value);
+}
+
+/**
+ * 无 hkxName 时按所属 TAE child 生成回退前缀。a00 的文件名约定是 a000_，
+ * a50 是 a050_；不能把所有 child 的缺失名称都归回 a000_，否则 a200 的动作
+ * 会在 UI 中看起来像被加载进了错误分区。
+ */
+function animationFallbackPrefix(animation: Pick<TaeAnimationWire, 'taeGroup' | 'taeEntryName'>): string {
+  const group = (animation.taeGroup ?? animation.taeEntryName?.replace(/\.tae$/i, '') ?? '').trim();
+  const match = /^a(\d+)$/i.exec(group);
+  return match ? `a${match[1]!.padStart(3, '0')}` : 'a000';
+}
+
+/**
+ * 动画 id 显示名（S17）：
+ * - 合法 hkx 茎（去 .hkx/.hkt 扩展，如 a000_003013）直接用；
+ * - 乱码 / 空 / 过短（"a"）/ 非文件名字符一律丢弃，回退为当前 TAE child
+ *   对应的前缀 + 6位 animId。
+ */
+export function animationIdLabel(animation: TaeAnimationWire): string {
+  const base = (animation.hkxName ?? '').replace(/\.(hkx|hkt)$/i, '');
+  if (isLegalHkxStem(base)) return base;
+  return `${animationFallbackPrefix(animation)}_${String(animation.animId).padStart(6, '0')}`;
+}
+
+/** 秒 → 帧（30fps）。非有限返回 '—'，不编造数值。 */
+export function secondsToFrame(value: number): string {
+  return Number.isFinite(value) ? String(Math.round(value * FRAME_RATE)) : '—';
+}
+
+/** 时间数值格式化：有限数保留两位小数，非法值明说。 */
+function formatTime(value: number): string {
+  return Number.isFinite(value) ? String(Math.round(value * 100) / 100) : '非法';
+}
+
+/** 时间范围非法：startTime > endTime、任一非有限，或 endTime 超过合理动画长度。 */
+export function isInvalidTimeRange(startTime: number, endTime: number): boolean {
+  return !Number.isFinite(startTime)
+    || !Number.isFinite(endTime)
+    || startTime > endTime
+    || endTime > MAX_ANIMATION_SECONDS;
+}
+
+export function findSelectedTaeAnimation(
+  animations: readonly TaeAnimationWire[],
+  selection: TaeSelection | null | undefined
+): TaeAnimationWire | undefined {
+  if (!selection) return undefined;
+  const matches = animations.filter((animation) => animation.animId === selection.animationId);
+  if (matches.length === 0) return undefined;
+  const hasSelector = selection.taeEntryIndex !== undefined
+    || selection.taeEntryId !== undefined
+    || selection.taeEntryName !== undefined
+    || selection.taeGroup !== undefined;
+
+  // 单一候选可以兼容旧的裸 animId 深链；同 animId 多候选时必须有 child selector，
+  // 否则宁可不选中，也不能静默落到第一个 TAE。
+  if (!hasSelector) return matches.length === 1 ? matches[0] : undefined;
+
+  const requestedIdentityKey = taeAnimationIdentityKey({
+    animId: selection.animationId,
+    ...(typeof selection.taeEntryIndex === 'number' ? { taeEntryIndex: selection.taeEntryIndex } : {}),
+    ...(typeof selection.taeEntryId === 'number' ? { taeEntryId: selection.taeEntryId } : {}),
+    ...(selection.taeEntryName ? { taeEntryName: selection.taeEntryName } : {}),
+    ...(selection.taeGroup ? { taeGroup: selection.taeGroup } : {})
+  });
+  const matchesSelector = (animation: TaeAnimationWire): boolean => {
+    if (selection.taeEntryIndex !== undefined && animation.taeEntryIndex !== selection.taeEntryIndex) return false;
+    if (selection.taeEntryId !== undefined && animation.taeEntryId !== selection.taeEntryId) return false;
+    if (selection.taeEntryName !== undefined && animation.taeEntryName !== selection.taeEntryName) return false;
+    if (selection.taeGroup !== undefined && animation.taeGroup !== selection.taeGroup) return false;
+    return true;
+  };
+
+  // 完整 key 先定位，但仍必须通过每个显式 selector 字段，避免 index 优先级
+  // 掩盖冲突的 entryId/name/group；部分 selector 则要求字段匹配唯一。
+  const identityMatches = matches.filter((animation) => (
+    taeAnimationIdentityKey(animation) === requestedIdentityKey && matchesSelector(animation)
+  ));
+  if (identityMatches.length === 1) return identityMatches[0];
+
+  const fieldMatches = matches.filter(matchesSelector);
+  return fieldMatches.length === 1 ? fieldMatches[0] : undefined;
+}
+
+/**
+ * 时间轴行在其所属动画 events 数组内的下标。
+ *
+ * timeline 页是各动画 events 的有序展平（projectTaeDocumentPages 按 animId 分组
+ * 顺序 push），所以「同一 TAE child + animId 的此前行数」就是该行在动画 events
+ * 数组里的下标。
+ * 用计数而非值匹配，避免同一动画内重复事件（同 start/end/type）取错下标。
+ */
+export function eventIndexOfTimelineRow(
+  rows: readonly TaeTimelineEventRow[],
+  index: number
+): number | undefined {
+  const row = rows[index];
+  if (!row) return undefined;
+  const rowIdentityKey = taeAnimationIdentityKey(row);
+  let count = 0;
+  for (let i = 0; i < index; i += 1) {
+    const previous = rows[i];
+    if (previous && taeAnimationIdentityKey(previous) === rowIdentityKey) count += 1;
+  }
+  return count;
+}
+
+/**
+ * 把时间编辑草稿（**帧**）解析成 update-event-times mutation；时间非法（非有限）
+ * 返回 null。UI 主单位是帧，这里 /FRAME_RATE 换成秒再发 C#（内部 mutation 仍走秒）。
+ * startTime > endTime 不在这里拦截：时间编辑可能正用于修复现存非法范围，C# 侧
+ * 对非有限/start>end/共享时间槽 fail-closed，失败由提交诊断回显。
+ */
+export function buildUpdateEventTimesMutation(
+  row: TaeTimelineEventRow,
+  eventIndex: number,
+  draft: TaeTimeDraft
+): { mutation: 'update-event-times'; animId: number; eventIndex: number; startTime: number; endTime: number } | null {
+  const startFrame = Number(draft.startText);
+  const endFrame = Number(draft.endText);
+  if (!Number.isFinite(startFrame) || !Number.isFinite(endFrame)) return null;
+  return {
+    mutation: 'update-event-times',
+    animId: row.animId,
+    eventIndex,
+    startTime: startFrame / FRAME_RATE,
+    endTime: endFrame / FRAME_RATE
+  };
+}
+
+/**
+ * 把新增事件草稿解析成 insert-event mutation；类型或时间非法返回 null。
+ * 参数体按模板逐字节拷贝，eventTypeId 与模板不一致时由 C# 侧 fail-closed。
+ */
+export function buildInsertEventMutation(
+  row: TaeTimelineEventRow,
+  templateEventIndex: number,
+  draft: TaeInsertDraft
+): { mutation: 'insert-event'; animId: number; templateEventIndex: number; eventTypeId: number; startTime: number; endTime: number } | null {
+  const eventTypeId = Number(draft.eventTypeIdText);
+  const startTime = Number(draft.startText);
+  const endTime = Number(draft.endText);
+  if (!Number.isFinite(eventTypeId) || !Number.isFinite(startTime) || !Number.isFinite(endTime)) return null;
+  return { mutation: 'insert-event', animId: row.animId, templateEventIndex, eventTypeId, startTime, endTime };
+}
+
+/** 诊断列表 → 用户可见文案（空列表给兜底句，不吞失败）。 */
+export function formatWriteDiagnostics(diagnostics: readonly Diagnostic[] | undefined): string {
+  const list = diagnostics ?? [];
+  if (list.length === 0) return '写入被拒绝';
+  return list.map((diag) => `[${diag.code}] ${diag.message}`).join('；');
+}
+
+/**
+ * 详情栏里的写回区：时间编辑（update-event-times）+ 新增事件
+ * （insert-event，以当前事件为模板）。参数体未解码，这里不出现任何参数编辑控件。
+ * 详情栏独立滚动，不与词条列表共享滚动容器。
+ */
+
+/**
+ * 词条详情（独立第三栏，对照 DSAS）。详情在独立栏展示，未选中显示空态。
+ *
+ * 起始帧 / 结束帧**只留一套**：主单位帧（可编辑 number 输入），旁边小字 ≈ 秒。
+ * 禁止「编辑事件时间（update-event-times，内部秒）」协议名上屏；内部 mutation
+ * 仍走秒（buildUpdateEventTimesMutation 内 /30 换秒）。
+ */
+export interface TaeEventDetailProps {
+  event: TaeTimelineEventWire;
+  eventIndex: number | undefined;
+  eventTypeName: string;
+  /** 按需拉取的参数体（null = 未选中/加载中态由字段自身表达）。 */
+  eventParams: {
+    loading: boolean;
+    error: string | null;
+    templateName: string | null;
+    fields: Array<{ name: string; type: string; value: string }>;
+    tailHex: string | null;
+    undecodedHex: string | null;
+  } | null;
+  timeDraft: TaeTimeDraft | null;
+  saving: boolean;
+  writeNotice: TaeWriteNotice | null;
+  onTimeDraftChange: (draft: TaeTimeDraft) => void;
+  onSubmitTime: () => void;
+  onClose: () => void;
+}
+
+export function TaeEventDetail(props: TaeEventDetailProps): ReactElement {
+  const { event, eventIndex, saving } = props;
+  const startText = props.timeDraft?.startText ?? secondsToFrame(event.startTime);
+  const endText = props.timeDraft?.endText ?? secondsToFrame(event.endTime);
+  const params = props.eventParams;
+  // 旁边小字 ≈ 秒：主单位是帧，秒只是换算（帧 / 30）。
+  const startSeconds = Number(startText) / FRAME_RATE;
+  const endSeconds = Number(endText) / FRAME_RATE;
+
+  return (
+    <div className="tae-event-detail" data-testid="tae-details">
+      <div className="tae-event-detail__header">
+        <div className="wb-list__group-label">
+          事件详情 · {event.eventTypeId} {props.eventTypeName}
+        </div>
+        <button
+          type="button"
+          className="tae-event-detail__close"
+          aria-label="关闭词条详情"
+          onClick={props.onClose}
+        >
+          ×
+        </button>
+      </div>
+      {props.writeNotice && (
+        <p className={props.writeNotice.kind === 'error' ? 'diag-error' : 'muted'} data-testid="tae-write-notice">
+          {props.writeNotice.message}
+        </p>
+      )}
+      <div className="wb-props">
+        <div className="wb-prop">
+          <span className="wb-prop__name">起始帧</span>
+          <span className="wb-prop__value">
+            <input
+              type="number"
+              step="any"
+              aria-label="新起始帧"
+              value={startText}
+              disabled={saving}
+              onChange={(eventArea) => props.onTimeDraftChange({ startText: eventArea.target.value, endText })}
+            />
+            <span className="muted"> ≈ {formatTime(startSeconds)}s</span>
+          </span>
+        </div>
+        <div className="wb-prop">
+          <span className="wb-prop__name">结束帧</span>
+          <span className="wb-prop__value">
+            <input
+              type="number"
+              step="any"
+              aria-label="新结束帧"
+              value={endText}
+              disabled={saving}
+              onChange={(eventArea) => props.onTimeDraftChange({ startText, endText: eventArea.target.value })}
+            />
+            <span className="muted"> ≈ {formatTime(endSeconds)}s</span>
+          </span>
+        </div>
+        <div className="wb-prop">
+          <span className="wb-prop__name">事件类型</span>
+          <span className="wb-prop__value wb-prop__value--readonly">
+            {event.eventTypeId} {props.eventTypeName}
+          </span>
+        </div>
+        <div className="wb-prop">
+          <span className="wb-prop__name">事件下标</span>
+          <span className="wb-prop__value wb-prop__value--readonly">
+            {eventIndex === undefined ? '—' : String(eventIndex)}
+          </span>
+        </div>
+      </div>
+      <div className="wb-list__group-label">参数体</div>
+      {params === null || params.loading ? (
+        <p className="muted" style={{ fontSize: 11 }}>读取参数体…</p>
+      ) : params.error !== null ? (
+        <p className="diag-error" data-testid="tae-params-error">{params.error}</p>
+      ) : params.fields.length > 0 ? (
+        <div className="wb-props" data-testid="tae-params-fields">
+          {params.fields.map((field) => (
+            <div key={`${field.name}-${field.type}`} className="wb-prop">
+              <span className="wb-prop__name">{field.name}</span>
+              <span className="wb-prop__value wb-prop__value--readonly">{field.value}</span>
+            </div>
+          ))}
+        </div>
+      ) : params.undecodedHex ? (
+        <p className="muted" style={{ fontSize: 11 }} data-testid="tae-params-undecoded">
+          {params.undecodedHex}
+        </p>
+      ) : (
+        <p className="muted" style={{ fontSize: 11 }}>该事件类型没有参数。</p>
+      )}
+      {params && params.tailHex && (
+        <p className="muted" style={{ fontSize: 11 }} data-testid="tae-params-tail">
+          {params.tailHex}
+        </p>
+      )}
+      <div className="wb-list__group-label">编辑事件时间</div>
+      {eventIndex === undefined && (
+        <p className="wb-empty diag-error" data-testid="tae-event-index-missing">
+          无法确定该事件在动画事件表中的下标，写回已禁用。
+        </p>
+      )}
+      <div className="wb-prop" data-testid="tae-event-editor">
+        <span className="wb-prop__name" />
+        <span className="wb-prop__value">
+          <button type="button" disabled={saving || eventIndex === undefined} onClick={props.onSubmitTime}>
+            更新事件时间
+          </button>
+        </span>
+      </div>
+    </div>
+  );
+}
+
+
+export function TaeWorkbenchPanel(props: TaeWorkbenchPanelProps): ReactElement {
+  const [selected, setSelected] = useState<TaeSelection | null>(props.initialSelection ?? null);
+  const [selectedBankKey, setSelectedBankKey] = useState<string>('all');
+  const [animationSearchQuery, setAnimationSearchQuery] = useState<string>('');
+  /** 动作分组默认收起；按键名保存，适用于所有 TAE/ANIBND 对象。 */
+  const [expandedAnimationGroups, setExpandedAnimationGroups] = useState<Set<string>>(() => new Set());
+  const [detailsCollapsed, setDetailsCollapsed] = useState(false);
+  /** 提交成功后本地重读的文档（优先于 props.data；换文件/App 重读时清空）。 */
+  const [refreshedDocument, setRefreshedDocument] = useState<TaeDocument | null>(null);
+  /** App 传入的原始文档之外，分页「加载更多」追加的增量文档片段。 */
+  const [pagination, setPagination] = useState<TaeAnimationPaginationState | null>(null);
+  const [paginationNotice, setPaginationNotice] = useState<string | null>(null);
+  const [paginationLoading, setPaginationLoading] = useState(false);
+  /** 令迟到的旧文件/旧页响应失效，不得污染当前文档。 */
+  const paginationRequestRef = useRef(0);
+  /** 选中事件的时间编辑草稿（null = 未编辑/未选中）。 */
+  const [timeDraft, setTimeDraft] = useState<TaeTimeDraft | null>(null);
+  /** 提交进行中：禁用重复提交。 */
+  const [saving, setSaving] = useState(false);
+  /** 最近一次写回结果提示（失败诊断/成功确认；跨选区清空）。 */
+  const [writeNotice, setWriteNotice] = useState<TaeWriteNotice | null>(null);
+  /** S17：词条名目录（eventTypeId → 模板名；无模板的类型不在表内 → 「未命名」）。 */
+  const [eventTypeNames, setEventTypeNames] = useState<ReadonlyMap<number, string>>(new Map());
+  /** 动画播放器状态 */
+  const [isPlaying, setIsPlaying] = useState(false);
+  const [playbackTime, setPlaybackTime] = useState(0);
+  const [playbackSpeed, setPlaybackSpeed] = useState<number>(1.0);
+  const [isLooping, setIsLooping] = useState(true);
+  /** S17：选中词条事件的参数体（按需拉取；无模板时 undecodedHex 非空）。 */
+  const [eventParams, setEventParams] = useState<{
+    loading: boolean;
+    error: string | null;
+    templateName: string | null;
+    fields: Array<{ name: string; type: string; value: string }>;
+    tailHex: string | null;
+    undecodedHex: string | null;
+  } | null>(null);
+  /** S17 / 问题4-A：伴生 chrbnd 预览状态（一次读取完整角色 bundle，不再逐 mesh 循环）。 */
+  const [preview, setPreview] = useState<{
+    loading: boolean;
+    error: string | null;
+    bundle: CharacterPreviewBundle | null;
+  }>({ loading: true, error: null, bundle: null });
+
+  const document = useMemo(() => {
+    const source = refreshedDocument ?? props.data;
+    return source && isTaeDocument(source) ? source : null;
+  }, [refreshedDocument, props.data]);
+  const documentKey = document
+    ? `${props.resourceUri}\u0000${document.sourceHash}`
+    : props.resourceUri;
+  const documentKeyRef = useRef(documentKey);
+  documentKeyRef.current = documentKey;
+  const activePagination = pagination?.documentKey === documentKey ? pagination : null;
+  const mergedDocument = useMemo(() => {
+    if (!document) return null;
+    if (!activePagination) return document;
+    return {
+      ...document,
+      animations: [...document.animations, ...activePagination.animations],
+      // 这是服务端页的 authority，不是 renderer 根据本地数量推断出来的状态。
+      animationsTruncated: activePagination.hasMore
+    } as TaeDocument;
+  }, [activePagination, document]);
+  const pages = useMemo(
+    () => (mergedDocument ? projectTaeDocumentPages(mergedDocument) : null),
+    [mergedDocument]
+  );
+
+  // 换文件或 App 重新传入数据时丢弃本地重读缓存（避免跨文件残留旧文档）。
+  useEffect(() => {
+    paginationRequestRef.current += 1;
+    setRefreshedDocument(null);
+    setPagination(null);
+    setPaginationNotice(null);
+    setPaginationLoading(false);
+    setEventParams(null);
+    setPreview({ loading: false, error: null, bundle: null });
+    setSelectedBankKey('all');
+    setAnimationSearchQuery('');
+    setExpandedAnimationGroups(new Set());
+  }, [props.resourceUri, props.data]);
+
+  // 首次文档进入/提交重读后建立页 1 的权威游标；资源切换 effect 会先把旧状态清掉。
+  useEffect(() => {
+    if (!document) {
+      setPagination(null);
+      return;
+    }
+    setPagination(createTaeAnimationPaginationState(documentKey, document));
+  }, [document, documentKey]);
+
+  /** S17：词条名目录一次拉取（模板只读本机；失败时列表显示数字 id + 「未命名」）。 */
+  useEffect(() => {
+    const bridge = getRendererBridge();
+    if (!bridge || typeof bridge.readTaeTemplateCatalog !== 'function') return;
+    let cancelled = false;
+    bridge.readTaeTemplateCatalog().then((raw) => {
+      if (cancelled) return;
+      const result = raw as { ok?: boolean; events?: Array<{ eventTypeId: number; name: string }> };
+      if (result.ok && Array.isArray(result.events)) {
+        setEventTypeNames(new Map(result.events.map((item) => [item.eventTypeId, item.name])));
+      }
+    }).catch(() => {
+      // 目录拉取失败只影响词条名，不阻断动作工作台。
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [props.resourceUri]);
+
+  /** S17：选中词条时按需拉取参数体（footer 展示；无模板类型给未解码 + hex）。 */
+  useEffect(() => {
+    if (selected?.kind !== 'event' || selected.eventIndex === undefined) {
+      setEventParams(null);
+      return;
+    }
+    const bridge = getRendererBridge();
+    if (!bridge || typeof bridge.readTaeEventParams !== 'function') return;
+    let cancelled = false;
+    setEventParams({ loading: true, error: null, templateName: null, fields: [], tailHex: null, undecodedHex: null });
+    bridge.readTaeEventParams(
+      props.resourceUri,
+      selected.animationId,
+      selected.eventIndex,
+      selected.taeEntryIndex,
+      selected.taeEntryId,
+      selected.taeEntryName,
+      selected.taeGroup
+    ).then((raw) => {
+      if (cancelled) return;
+      const result = raw as {
+        ok?: boolean;
+        data?: {
+          eventTypeId?: number;
+          templateName?: string | null;
+          fields?: Array<{ name: string; type: string; value: string }>;
+          tailHex?: string | null;
+          undecodedHex?: string | null;
+        };
+        diagnostics?: Array<{ message?: string }>;
+      };
+      if (result.ok && result.data) {
+        setEventParams({
+          loading: false,
+          error: null,
+          templateName: result.data.templateName ?? null,
+          fields: result.data.fields ?? [],
+          tailHex: result.data.tailHex ?? null,
+          undecodedHex: result.data.undecodedHex ?? null
+        });
+      } else {
+        setEventParams({
+          loading: false,
+          error: result.diagnostics?.[0]?.message ?? '参数体读取失败。',
+          templateName: null,
+          fields: [],
+          tailHex: null,
+          undecodedHex: null
+        });
+      }
+    }).catch(() => {
+      if (!cancelled) setEventParams({ loading: false, error: '参数体读取异常。', templateName: null, fields: [], tailHex: null, undecodedHex: null });
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [
+    props.resourceUri,
+    selected?.kind,
+    selected?.eventIndex,
+    selected?.animationId,
+    selected?.taeEntryIndex,
+    selected?.taeEntryId,
+    selected?.taeEntryName,
+    selected?.taeGroup
+  ]);
+
+  /** S17 / 问题4-A：伴生 chrbnd FLVER 预览（一次读取完整角色 bundle，不再逐 mesh 循环）。 */
+  useEffect(() => {
+    if (!document) {
+      setPreview({ loading: false, error: null, bundle: null });
+      return;
+    }
+    const bridge = getRendererBridge();
+    if (!bridge || typeof bridge.readTaeChrbndPreview !== 'function') return;
+    let cancelled = false;
+    setPreview({ loading: true, error: null, bundle: null });
+    void (async () => {
+      try {
+        const result = await bridge.readTaeChrbndPreview(props.resourceUri) as { ok?: boolean; data?: unknown; diagnostics?: Array<{ message?: string }> };
+        if (cancelled) return;
+        if (!result.ok || !result.data || !isCharacterPreviewBundle(result.data)) {
+          setPreview({
+            loading: false,
+            error: (result as any).diagnostics?.[0]?.message ?? '模型预览不可用。',
+            bundle: null
+          });
+          return;
+        }
+        if (cancelled) return;
+        setPreview({ loading: false, error: null, bundle: result.data });
+      } catch {
+        if (!cancelled) setPreview({ loading: false, error: '模型预览读取异常。', bundle: null });
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [props.resourceUri, document]);
+
+  // 离开事件选择时清空编辑草稿与写回提示（避免跨选区残留）。
+  useEffect(() => {
+    if (selected?.kind !== 'event') {
+      setTimeDraft(null);
+      setWriteNotice(null);
+    }
+  }, [selected]);
+
+  // 底部 IDE 终端式详情面板（高度受控，拖拽 handle 调整）。
+  const BOTTOM_DETAILS_MIN = 160;
+  const BOTTOM_DETAILS_DEFAULT = 280;
+  const [detailsHeight, setDetailsHeight] = useState(BOTTOM_DETAILS_DEFAULT);
+  const detailsDragRef = useRef<{ startY: number; startHeight: number } | null>(null);
+
+  const handleBottomDetailsPointerDown = useCallback((event: React.PointerEvent) => {
+    detailsDragRef.current = { startY: event.clientY, startHeight: detailsHeight };
+    try {
+      (event.currentTarget as HTMLElement).setPointerCapture?.(event.pointerId);
+    } catch {
+      // 非 pointer 环境忽略。
+    }
+  }, [detailsHeight]);
+
+  useEffect(() => {
+    function onMove(event: PointerEvent): void {
+      const drag = detailsDragRef.current;
+      if (!drag) return;
+      const delta = drag.startY - event.clientY; // 向上拖 → 高度增加
+      const viewportH = typeof window !== 'undefined' ? window.innerHeight : 900;
+      const max = Math.max(BOTTOM_DETAILS_MIN, Math.floor(viewportH * 0.6));
+      const next = Math.min(max, Math.max(BOTTOM_DETAILS_MIN, drag.startHeight + delta));
+      setDetailsHeight(next);
+    }
+    function onUp(): void {
+      detailsDragRef.current = null;
+    }
+    window.addEventListener('pointermove', onMove);
+    window.addEventListener('pointerup', onUp);
+    return () => {
+      window.removeEventListener('pointermove', onMove);
+      window.removeEventListener('pointerup', onUp);
+    };
+  }, []);
+
+  const animations: TaeAnimationWire[] = pages?.animations.animations ?? [];
+
+  const animationGroups = useMemo(() => groupActionAnimations(animations), [animations]);
+  const animationView = useMemo(
+    () => filterActionAnimations(animations, {
+      bankKey: selectedBankKey,
+      query: animationSearchQuery
+    }),
+    [animations, selectedBankKey, animationSearchQuery]
+  );
+  const filteredAnimations = animationView.animations;
+  const filteredAnimationGroups = animationView.groups;
+  const selectedBankGroup = animationView.selectedGroup;
+
+  const selectedAnimation = findSelectedTaeAnimation(animations, selected);
+  const selectedAnimationEvents = selectedAnimation?.events ?? [];
+
+  // 深链/事件选择与搜索结果必须自动展开所属分组，否则选中项会被折叠在视图外。
+  useEffect(() => {
+    const selectedGroupKey = selectedAnimation ? actionAnimationGroupKey(selectedAnimation) : null;
+    const query = animationSearchQuery.trim();
+    const keysToOpen = new Set<string>();
+    if (selectedGroupKey) keysToOpen.add(selectedGroupKey);
+    if (query) {
+      for (const group of filteredAnimationGroups) keysToOpen.add(group.key);
+    }
+    if (keysToOpen.size === 0) return;
+    setExpandedAnimationGroups((current) => {
+      let changed = false;
+      const next = new Set(current);
+      for (const key of keysToOpen) {
+        if (!next.has(key)) {
+          next.add(key);
+          changed = true;
+        }
+      }
+      return changed ? next : current;
+    });
+  }, [animationSearchQuery, filteredAnimationGroups, selectedAnimation]);
+
+  const isAnimationsTruncated = mergedDocument?.animationsTruncated === true;
+
+  const selectedEventIndex = selected?.kind === 'event'
+    ? (selected.eventIndex ?? undefined)
+    : undefined;
+  const selectedEvent = selected?.kind === 'event'
+    ? selectedAnimationEvents[selectedEventIndex ?? -1]
+    : undefined;
+
+  function selectAnimation(animation: TaeAnimationWire): void {
+    setSelected({
+      kind: 'animation',
+      id: `anim-${taeAnimationIdentityKey(animation)}`,
+      label: animationIdLabel(animation),
+      animationId: animation.animId,
+      taeEntryIndex: animation.taeEntryIndex,
+      taeEntryId: animation.taeEntryId,
+      taeEntryName: animation.taeEntryName,
+      taeGroup: animation.taeGroup
+    });
+  }
+
+  /** 关闭词条详情（问题4-C）：selected.kind 回到 animation，详情卸掉。 */
+  function closeEventDetail(): void {
+    if (selected?.kind === 'event' && selectedAnimation) {
+      setSelected({
+        kind: 'animation',
+        id: `anim-${taeAnimationIdentityKey(selectedAnimation)}`,
+        label: animationIdLabel(selectedAnimation),
+        animationId: selectedAnimation.animId,
+        taeEntryIndex: selectedAnimation.taeEntryIndex,
+        taeEntryId: selectedAnimation.taeEntryId,
+        taeEntryName: selectedAnimation.taeEntryName,
+        taeGroup: selectedAnimation.taeGroup
+      });
+    }
+  }
+
+  function selectEvent(index: number): void {
+    const event = selectedAnimationEvents[index];
+    if (!event || !selectedAnimation) return;
+    // 问题4-C：再点同一条词条取消选中（关闭详情，回到该动画）。
+    if (selected?.kind === 'event' && selected.eventIndex === index) {
+      closeEventDetail();
+      return;
+    }
+    setSelected({
+      kind: 'event',
+      id: `ev-${taeAnimationIdentityKey(selectedAnimation)}-${index}`,
+      label: `事件类型 ${event.eventTypeId} @${formatTime(event.startTime)}s`,
+      animationId: selectedAnimation.animId,
+      eventIndex: index,
+      taeEntryIndex: selectedAnimation.taeEntryIndex,
+      taeEntryId: selectedAnimation.taeEntryId,
+      taeEntryName: selectedAnimation.taeEntryName,
+      taeGroup: selectedAnimation.taeGroup
+    });
+    // 问题4-C：主单位帧（输入框存帧，「帧 = 秒 × 30」）。
+    setTimeDraft({ startText: secondsToFrame(event.startTime), endText: secondsToFrame(event.endTime) });
+    setWriteNotice(null);
+  }
+
+  async function loadMoreAnimations(): Promise<void> {
+    const bridge = getRendererBridge();
+    const currentPagination = pagination?.documentKey === documentKey ? pagination : null;
+    if (
+      !bridge
+      || typeof bridge.readTaeDocument !== 'function'
+      || !mergedDocument
+      || !currentPagination
+      || !currentPagination.hasMore
+      || paginationLoading
+    ) return;
+    const pageSize = 1000;
+    const nextPage = currentPagination.nextPage;
+    const requestDocumentKey = documentKey;
+    const requestId = ++paginationRequestRef.current;
+    setPaginationLoading(true);
+    setPaginationNotice(null);
+    try {
+      const raw = await (bridge.readTaeDocument as (uri: string, opts?: { animationPage?: number; animationPageSize?: number }) => Promise<unknown>)(props.resourceUri, { animationPage: nextPage, animationPageSize: pageSize }) as { ok?: boolean; data?: unknown };
+      if (requestId !== paginationRequestRef.current || documentKeyRef.current !== requestDocumentKey) return;
+      if (raw.ok && raw.data && isTaeDocument(raw.data)) {
+        const nextDoc = raw.data as TaeDocument;
+        const next = appendTaeAnimationPage(currentPagination, nextDoc, nextPage);
+        setPagination((previous) => (
+          previous
+            && previous.documentKey === requestDocumentKey
+            && previous.nextPage === nextPage
+            ? next
+            : previous
+        ));
+        setPaginationNotice(
+          next.hasMore
+            ? `已加载 ${mergedDocument.animations.length + next.animations.length - currentPagination.animations.length} / ${nextDoc.animationCount}，仍有剩余。`
+            : (next.animations.length === currentPagination.animations.length ? '没有更多动画。' : null)
+        );
+      } else {
+        setPaginationNotice('加载更多失败。');
+      }
+    } catch {
+      setPaginationNotice('加载更多异常。');
+    } finally {
+      if (requestId === paginationRequestRef.current) setPaginationLoading(false);
+    }
+  }
+
+  /** 提交成功后的重读：经 bridge 直读最新 envelope 并放入本地缓存。 */
+  async function refreshAfterCommit(): Promise<boolean> {
+    const bridge = getRendererBridge();
+    if (!bridge || typeof bridge.readTaeDocument !== 'function') return false;
+    try {
+      const raw = await (bridge.readTaeDocument as (uri: string) => Promise<unknown>)(props.resourceUri) as { ok?: boolean; data?: unknown };
+      if (raw.ok && raw.data && isTaeDocument(raw.data)) {
+        const refreshed = raw.data as TaeDocument;
+        paginationRequestRef.current += 1;
+        setRefreshedDocument(refreshed);
+        setPagination(createTaeAnimationPaginationState(
+          `${props.resourceUri}\u0000${refreshed.sourceHash}`,
+          refreshed
+        ));
+        setPaginationNotice(null);
+        return true;
+      }
+    } catch {
+      // 落入统一失败提示。
+    }
+    return false;
+  }
+
+  /** 统一写回入口：typed mutations → commitTaeEvent → 成功重读 / 失败诊断回显。 */
+  async function commitMutations(
+    mutations: Array<{
+      mutation: string;
+      animId?: number;
+      eventIndex?: number;
+      templateEventIndex?: number;
+      eventTypeId?: number;
+      startTime?: number;
+      endTime?: number;
+    }>,
+    successMessage: string
+  ): Promise<void> {
+    if (mergedDocument === null) {
+      setWriteNotice({ kind: 'error', message: '当前没有可写回的 TAE 文档。' });
+      return;
+    }
+    const bridge = getRendererBridge();
+    if (!bridge || typeof bridge.commitTaeEvent !== 'function') {
+      setWriteNotice({ kind: 'error', message: 'TAE 写回能力不可用（需要桌面桥接）。' });
+      return;
+    }
+    setSaving(true);
+    setWriteNotice(null);
+    try {
+      const raw = await bridge.commitTaeEvent(props.resourceUri, mergedDocument.sourceHash, mutations);
+      const result = raw as { ok?: boolean; diagnostics?: Diagnostic[] };
+      if (result.ok) {
+        const refreshed = await refreshAfterCommit();
+        if (refreshed) {
+          setWriteNotice({ kind: 'success', message: successMessage });
+        } else {
+          setWriteNotice({ kind: 'error', message: '写入成功，但重读失败；请重新打开文件确认最新状态。' });
+        }
+      } else {
+        setWriteNotice({
+          kind: 'error',
+          message: `${formatWriteDiagnostics(result.diagnostics)}，已回滚，事件表保持原状。`
+        });
+      }
+    } catch (error) {
+      setWriteNotice({ kind: 'error', message: error instanceof Error ? error.message : 'TAE 写入异常。' });
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  /** 提交 update-event-times：选中事件的 animId + 事件表下标 + 新起止时间。 */
+  async function submitTimeEdit(): Promise<void> {
+    if (selected?.kind !== 'event' || !selectedEvent || selectedEventIndex === undefined) return;
+    if (!timeDraft) return;
+    const row: TaeTimelineEventRow = { animId: selected.animationId, ...selectedEvent };
+    const mutation = buildUpdateEventTimesMutation(row, selectedEventIndex, timeDraft);
+    if (!mutation) {
+      setWriteNotice({ kind: 'error', message: '时间必须是有限数字。' });
+      return;
+    }
+    await commitMutations([mutation], '事件时间已更新并重读验证。');
+  }
+
+  // 权威动画 Clip 数据与连续采样器
+  const [activeClip, setActiveClip] = useState<TaeAnimationClipData | null>(null);
+  const [activeSampler, setActiveSampler] = useState<ActionContinuousSampler | null>(null);
+  const [clipLoading, setClipLoading] = useState(false);
+  const [clipError, setClipError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!selectedAnimation || !props.resourceUri) {
+      setActiveClip(null);
+      setActiveSampler(null);
+      setClipLoading(false);
+      setClipError(null);
+      return;
+    }
+    const bridge = getRendererBridge();
+    if (!bridge || typeof (bridge as any).readTaeAnimationClip !== 'function') {
+      setActiveClip(null);
+      setActiveSampler(null);
+      setClipLoading(false);
+      setClipError(null);
+      return;
+    }
+
+    let cancelled = false;
+    setActiveClip(null);
+    setActiveSampler(null);
+    setClipLoading(true);
+    setClipError(null);
+    const leaderBones = (() => {
+      if (!preview.bundle) return [] as Array<{
+        name: string;
+        parentIndex: number;
+        translation: [number, number, number];
+        rotation: [number, number, number];
+        scale: [number, number, number];
+      }>;
+      const leader = preview.bundle.models.find((m) => m.modelId === preview.bundle!.leaderModelId) ?? preview.bundle.models[0];
+      return leader?.bones ?? [];
+    })();
+    const boneNames = leaderBones.map((b) => b.name);
+    const boneParents = leaderBones.map((b) => b.parentIndex);
+    const referencePose = leaderBones.map((b) => ({
+      translation: b.translation,
+      rotation: flverEulerXzyToQuaternion(b.rotation),
+      scale: b.scale ?? [1, 1, 1] as [number, number, number]
+    }));
+
+    void (async () => {
+      try {
+        const res = (await (bridge as any).readTaeAnimationClip(
+          props.resourceUri,
+          selectedAnimation.animId,
+          boneNames.length > 0 ? boneNames : undefined,
+          boneParents.length > 0 ? boneParents : undefined,
+          referencePose.length > 0 ? referencePose : undefined,
+          selectedAnimation.taeEntryIndex,
+          selectedAnimation.taeEntryId,
+          selectedAnimation.taeEntryName,
+          selectedAnimation.taeGroup
+        )) as {
+          ok?: boolean;
+          data?: TaeAnimationClipData;
+          diagnostics?: Array<{ code?: string; message?: string }>;
+        };
+
+        if (cancelled) return;
+        if (res.ok && res.data) {
+          setActiveClip(res.data);
+          setActiveSampler(new ActionContinuousSampler(res.data));
+        } else {
+          setActiveClip(null);
+          setActiveSampler(null);
+          const diagnostic = res.diagnostics?.find((item) => item.message) ?? res.diagnostics?.[0];
+          setClipError(diagnostic
+            ? `[${diagnostic.code ?? 'TAE_ANIMATION_CLIP_READ_FAILED'}] ${diagnostic.message ?? '动画 Clip 读取失败。'}`
+            : '动画 Clip 读取失败，已关闭播放。');
+        }
+      } catch (error) {
+        if (!cancelled) {
+          setActiveClip(null);
+          setActiveSampler(null);
+          setClipError(error instanceof Error ? error.message : '动画 Clip 读取异常，已关闭播放。');
+        }
+      } finally {
+        if (!cancelled) setClipLoading(false);
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [
+    props.resourceUri,
+    selectedAnimation?.animId,
+    selectedAnimation?.taeEntryIndex,
+    selectedAnimation?.taeEntryId,
+    selectedAnimation?.taeEntryName,
+    selectedAnimation?.taeGroup,
+    preview.bundle
+  ]);
+
+  // 采样 FLVER 骨骼位姿
+  const sampledPose = useMemo(() => {
+    const leaderBones = (() => {
+      if (!preview.bundle) return [] as Array<{
+        parentIndex: number;
+        translation: [number, number, number];
+        rotation: [number, number, number];
+        scale: [number, number, number];
+      }>;
+      const leader = preview.bundle.models.find((m) => m.modelId === preview.bundle!.leaderModelId) ?? preview.bundle.models[0];
+      return leader?.bones ?? [];
+    })();
+    if (!activeSampler || leaderBones.length === 0) return undefined;
+    const refPose: BoneTransformData[] = leaderBones.map((b) => ({
+      translation: b.translation,
+      rotation: flverEulerXzyToQuaternion(b.rotation),
+      scale: b.scale ?? [1, 1, 1] as [number, number, number]
+    }));
+    return activeSampler.sampleFlverPose(
+      playbackTime,
+      leaderBones.length,
+      refPose,
+      isLooping,
+      leaderBones.map((bone) => bone.parentIndex)
+    );
+  }, [
+    activeSampler,
+    playbackTime,
+    preview.bundle,
+    isLooping,
+    selectedAnimation?.taeEntryIndex,
+    selectedAnimation?.taeEntryId,
+    selectedAnimation?.taeEntryName,
+    selectedAnimation?.taeGroup
+  ]);
+
+  // Pose updates must carry the same skeleton identity used by the semantic
+  // bundle.  An unkeyed setPose falls back to the first runtime skeleton and
+  // silently leaves the actual TAE leader (and its meshes) unchanged.
+  const sampledSkeletonPoses = useMemo(() => {
+    if (!sampledPose || !preview.bundle) return undefined;
+    return { [preview.bundle.leaderModelId]: sampledPose };
+  }, [preview.bundle, sampledPose]);
+
+  // 计算当前选中动画的总时长（根据真实 clip 时长，或事件最大 endTime，或默认 2.0s）
+  const animDuration = useMemo(() => {
+    if (activeClip && activeClip.duration > 0) {
+      return activeClip.duration;
+    }
+    if (!selectedAnimationEvents || selectedAnimationEvents.length === 0) return 2.0;
+    let max = 0;
+    for (const ev of selectedAnimationEvents) {
+      if (Number.isFinite(ev.endTime) && ev.endTime > 0 && ev.endTime < MAX_ANIMATION_SECONDS) {
+        if (ev.endTime > max) max = ev.endTime;
+      }
+    }
+    return max > 0 ? Math.max(0.5, max) : 2.0;
+  }, [activeClip, selectedAnimationEvents]);
+
+  // 权威播放时钟实例
+  const clockRef = useRef<AnimationPlaybackClock>(
+    new AnimationPlaybackClock({ fps: FRAME_RATE, duration: animDuration, loop: isLooping, playbackRate: playbackSpeed })
+  );
+
+  // 同步 duration / loop / speed 到权威时钟
+  useEffect(() => {
+    clockRef.current.setDuration(animDuration);
+  }, [animDuration]);
+
+  useEffect(() => {
+    clockRef.current.setLoop(isLooping);
+  }, [isLooping]);
+
+  useEffect(() => {
+    clockRef.current.setPlaybackRate(playbackSpeed);
+  }, [playbackSpeed]);
+
+  // 订阅时钟状态
+  useEffect(() => {
+    const unsub = clockRef.current.subscribe((state) => {
+      setPlaybackTime(state.currentTime);
+      setIsPlaying(state.isPlaying);
+    });
+    return unsub;
+  }, []);
+
+  // 切换动画时重置播放进度
+  useEffect(() => {
+    clockRef.current.stop();
+  }, [
+    selected?.animationId,
+    selected?.taeEntryIndex,
+    selected?.taeEntryId,
+    selected?.taeEntryName,
+    selected?.taeGroup
+  ]);
+
+  // 播放器 rAF 驱动权威时钟
+  useEffect(() => {
+    if (!isPlaying) return;
+    let last = performance.now();
+    let frameId: number;
+
+    const tick = (now: number) => {
+      const delta = (now - last) / 1000;
+      last = now;
+      clockRef.current.tick(delta);
+      frameId = requestAnimationFrame(tick);
+    };
+
+    frameId = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(frameId);
+  }, [isPlaying]);
+
+  // 快捷键监听：空格键切换播放/暂停
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      const target = e.target as HTMLElement | null;
+      if (target && (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA')) return;
+      if (e.code === 'Space') {
+        e.preventDefault();
+        clockRef.current.togglePlay();
+      }
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, []);
+
+  const totalFrames = Math.round(animDuration * FRAME_RATE);
+  const currentFrame = Math.round(playbackTime * FRAME_RATE);
+
+  const togglePlay = () => clockRef.current.togglePlay();
+  const resetPlayback = () => clockRef.current.stop();
+  const stepFrame = (frames: number) => clockRef.current.stepFrame(frames);
+  const seekSeconds = (secs: number) => clockRef.current.seek(secs);
+
+  // 动作模块统一负责事件行与时间轴轨道的投影；native identity 和诊断原样下传。
+  const timelineTracks = useMemo(
+    () => buildActionTimeline(selectedAnimation, mergedDocument?.diagnostics, FRAME_RATE),
+    [selectedAnimation, mergedDocument?.diagnostics]
+  );
+
+  return (
+    <WorkbenchLayout
+      label="动作工作台"
+      className="tae-workbench"
+      columns={[
+        {
+          id: 'animations',
+           title: '动画',
+           hint: `${pages?.animations.animationCount ?? 0} 个动画`,
+          initialFlex: 0.22,
+          minWidth: 220,
+          children: (
+            mergedDocument === null ? (
+              <div className="wb-list">
+                <p className="wb-empty">选择 .tae / .anibnd.dcx 文件以查看动画事件数据。</p>
+              </div>
+            ) : (
+              <ActionAnimationList
+                animations={animations}
+                groups={animationGroups}
+                selectedBankKey={selectedBankKey}
+                searchQuery={animationSearchQuery}
+                selectedAnimation={selectedAnimation}
+                selectedKind={selected?.kind}
+                expandedGroups={expandedAnimationGroups}
+                animationLabel={animationIdLabel}
+                onBankChange={(nextKey) => {
+                  setSelectedBankKey(nextKey);
+                  if (nextKey !== 'all') {
+                    setExpandedAnimationGroups((current) => {
+                      if (current.has(nextKey)) return current;
+                      return new Set(current).add(nextKey);
+                    });
+                  }
+                }}
+                onSearchChange={setAnimationSearchQuery}
+                onToggleGroup={(groupKey) => {
+                  setExpandedAnimationGroups((current) => {
+                    const next = new Set(current);
+                    if (next.has(groupKey)) next.delete(groupKey);
+                    else next.add(groupKey);
+                    return next;
+                  });
+                }}
+                onSelectAnimation={selectAnimation}
+                animationsTruncated={isAnimationsTruncated}
+                paginationLoading={paginationLoading}
+                paginationNotice={paginationNotice}
+                onLoadMore={() => void loadMoreAnimations()}
+              />
+            )
+          )
+        },
+        {
+          id: 'events',
+           title: '事件 / 词条',
+           hint: selectedAnimation ? `${selectedAnimationEvents.length} 个事件` : '—',
+          initialFlex: 0.28,
+          minWidth: 220,
+          children: (
+            <div className="wb-list">
+              {mergedDocument === null && <p className="wb-empty">先选择 .tae / .anibnd.dcx 文件。</p>}
+              {mergedDocument !== null && selectedAnimation === undefined && (
+                <p className="wb-empty" data-testid="tae-events-pick-animation">
+                  选中左侧动画以查看其词条事件列表。
+                </p>
+              )}
+              {mergedDocument !== null && selectedAnimation !== undefined && (
+                <>
+                  <div className="wb-list__group-label">
+                    词条 · 动画 {selectedAnimation.animId}
+                    {' · '}{actionAnimationGroupLabel(selectedAnimation)}
+                    {selectedAnimation.hkxName ? `（${animationIdLabel(selectedAnimation)}）` : ''}
+                  </div>
+                  {selectedAnimationEvents.map((event, index) => {
+                    const invalid = isInvalidTimeRange(event.startTime, event.endTime);
+                    const typeName = eventTypeNames.get(event.eventTypeId) ?? '未命名';
+                    const isTriggering = !invalid && event.startTime <= playbackTime && playbackTime <= event.endTime;
+                    const rowClass = [
+                      'wb-row',
+                      invalid ? 'wb-row--failed' : '',
+                      isTriggering ? 'is-triggering' : ''
+                    ].filter(Boolean).join(' ');
+                    return (
+                      <div
+                        key={`${taeAnimationIdentityKey(selectedAnimation)}-${index}`}
+                        className={rowClass}
+                        {...selectableRowAttributes({
+                          selected: selected?.kind === 'event' && selected.eventIndex === index,
+                          isTabEntry: false,
+                          onSelect: () => selectEvent(index)
+                        })}
+                        title={`${event.eventTypeId} ${typeName}`}
+                      >
+                        <span className="wb-row__name" title={`${event.eventTypeId} ${typeName}`}>
+                          {event.eventTypeId} {typeName}
+                        </span>
+                        <span className="wb-row__meta">
+                          {invalid ? '非法时间' : `帧 ${secondsToFrame(event.startTime)}–${secondsToFrame(event.endTime)}`}
+                        </span>
+                      </div>
+                    );
+                  })}
+                  {selectedAnimationEvents.length === 0 && (
+                    <p className="wb-empty">该动画没有可显示的词条事件。</p>
+                  )}
+                </>
+              )}
+            </div>
+          )
+        },
+        {
+          id: 'details',
+          title: '详情',
+          hint: selected?.kind === 'event' ? '词条详情' : '—',
+          headerAction: {
+            label: detailsCollapsed ? '展开' : '收起',
+            ariaLabel: detailsCollapsed ? '展开详情栏' : '收起详情栏',
+            onClick: () => setDetailsCollapsed((collapsed) => !collapsed)
+          },
+          initialFlex: 0.28,
+          minWidth: 240,
+          children: (
+            <div className="wb-list">
+              {detailsCollapsed ? (
+                <p className="wb-empty" data-testid="tae-details-collapsed">详情栏已收起，点击“展开”继续查看。</p>
+              ) : selected?.kind === 'event' && selectedEvent ? (
+                <TaeEventDetail
+                  event={selectedEvent}
+                  eventIndex={selectedEventIndex}
+                  eventTypeName={eventTypeNames.get(selectedEvent.eventTypeId) ?? '未命名'}
+                  eventParams={eventParams}
+                  timeDraft={timeDraft}
+                  saving={saving}
+                  writeNotice={writeNotice}
+                  onTimeDraftChange={(draft) => setTimeDraft(draft)}
+                  onSubmitTime={() => void submitTimeEdit()}
+                  onClose={closeEventDetail}
+                />
+              ) : (
+                <p className="wb-empty" data-testid="tae-details-empty">选中词条以编辑</p>
+              )}
+            </div>
+          )
+        },
+        {
+          id: 'preview',
+          title: '动作视图',
+          ariaLabel: '动作视图',
+          hideHeader: true,
+          initialFlex: 0.22,
+          minWidth: 220,
+          children: (
+            <div className="wb-list tae-preview-body">
+              {mergedDocument === null && <p className="wb-empty">选择 .tae / .anibnd.dcx 文件后查看预览。</p>}
+              {mergedDocument !== null && (
+                <>
+                  <ActionPreviewModule
+                    bundle={preview.bundle}
+                    loading={preview.loading}
+                    error={preview.error}
+                    playbackTime={playbackTime}
+                    skeletonPoses={sampledSkeletonPoses}
+                  />
+                  {clipLoading && (
+                    <p className="muted" style={{ fontSize: 11 }} data-testid="tae-clip-loading">
+                       正在读取当前动画片段…
+                    </p>
+                  )}
+                  {clipError && (
+                    <p className="diag-error" style={{ fontSize: 11 }} data-testid="tae-clip-error" role="alert">
+                      {clipError}
+                    </p>
+                  )}
+                  {/* 统一 Authoritative 播放控制栏与 Timeline 轨道 */}
+                  <div className="tae-timeline-ctrl" data-testid="tae-timeline-ctrl">
+                    <div className="tae-transport-bar">
+                      <div className="tae-transport-group">
+                        <button
+                          type="button"
+                          className="tae-transport-btn tae-transport-btn--play"
+                          disabled={clipLoading || activeSampler === null}
+                          onClick={togglePlay}
+                          aria-label={isPlaying ? '暂停' : '播放'}
+                          title={clipError ?? '空格键播放/暂停'}
+                        >
+                          {isPlaying ? <PauseIcon /> : <PlayIcon />}
+                          <span>{isPlaying ? '暂停' : '播放'}</span>
+                        </button>
+                        <button
+                          type="button"
+                          className="tae-transport-btn"
+                          onClick={resetPlayback}
+                          aria-label="重置到开头"
+                          title="重置到开头"
+                        >
+                          <StopIcon />
+                        </button>
+                        <button
+                          type="button"
+                          className="tae-transport-btn"
+                          onClick={() => stepFrame(-1)}
+                          aria-label="上一帧"
+                          title="上一帧"
+                        >
+                          <PrevFrameIcon />
+                        </button>
+                        <button
+                          type="button"
+                          className="tae-transport-btn"
+                          onClick={() => stepFrame(1)}
+                          aria-label="下一帧"
+                          title="下一帧"
+                        >
+                          <NextFrameIcon />
+                        </button>
+                        <button
+                          type="button"
+                          className={`tae-transport-btn ${isLooping ? 'is-active' : ''}`}
+                          onClick={() => setIsLooping(!isLooping)}
+                          aria-label={isLooping ? '循环开启' : '循环关闭'}
+                          aria-pressed={isLooping}
+                          title="循环播放"
+                        >
+                          <LoopIcon />
+                        </button>
+                        <select
+                          className="tae-speed-select"
+                          value={playbackSpeed}
+                          onChange={(e) => setPlaybackSpeed(Number(e.target.value))}
+                          aria-label="播放速度"
+                          title="播放速度"
+                        >
+                          <option value={0.25}>0.25x</option>
+                          <option value={0.5}>0.5x</option>
+                          <option value={1.0}>1.0x</option>
+                          <option value={2.0}>2.0x</option>
+                        </select>
+                      </div>
+                      <div className="tae-time-display">
+                        帧 {currentFrame} / {totalFrames} ({formatTime(playbackTime)}s / {formatTime(animDuration)}s)
+                      </div>
+                    </div>
+                    <div className="tae-timeline-slider-row">
+                      <input
+                        type="range"
+                        className="tae-timeline-slider"
+                        min={0}
+                        max={totalFrames > 0 ? totalFrames : 100}
+                        value={currentFrame}
+                        onChange={(e) => {
+                          const f = Number(e.target.value);
+                          clockRef.current.seekFrame(f);
+                        }}
+                        aria-label="时间轴进度"
+                      />
+                    </div>
+                    <ActionTimelineGraph
+                      tracks={timelineTracks}
+                      totalFrames={totalFrames}
+                      playbackTime={playbackTime}
+                      frameRate={FRAME_RATE}
+                      selectedEventIndex={selectedEventIndex}
+                      onSelectEvent={selectEvent}
+                    />
+                  </div>
+
+                </>
+              )}
+            </div>
+          )
+        }
+      ]}
+    />
+  );
+}

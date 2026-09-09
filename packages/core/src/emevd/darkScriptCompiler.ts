@@ -1,0 +1,1593 @@
+/**
+ * DarkScript3 式源码 → 现有 typed mutation plan。
+ *
+ * 对齐规则：$Event 块按「反汇编形状」逐事件对齐；事件体内做 LCS 行对齐 —
+ * 已对齐的行只写参数/id/rest 差异；多出来的行编码成 insert_instruction（EMEDF
+ * 可编码的固定参数指令），删掉行生成 delete_instruction；新增/删除 $Event 块
+ * 生成 insert_event / delete_event。写不了的行（新增 WaitFor 折叠块、vararg
+ * 指令、EMEDF 里查不到的名字、改了未解码注释）标 warning「未解码」，并且该事件
+ * 的结构性改动整体抑制（只保留已对齐行的参数写入），不锁整份文件、不假成功。
+ */
+
+import { createHash } from 'node:crypto';
+import type {
+  EmevdDslCompileRequest,
+  EmevdDslCompileResult,
+  EmevdDslDiagnostic,
+  EmevdDslDocument,
+  EmevdDslLiteral,
+  EmevdDslSourcePosition,
+  EmevdDslSourceSpan,
+  EmevdEditorDocument,
+  EmevdMutationPlan,
+  EmevdNodeAnchor,
+  EmevdPlannedMutation
+} from '@soulforge/shared';
+import {
+  analyzeDarkScriptEvent,
+  darkScriptInstructionName,
+  type DarkScriptEventItem
+} from './darkScriptRenderer.js';
+import { fingerprintEmedfRegistry } from './dslCompiler.js';
+import {
+  align,
+  byteLengthOf,
+  encodeEmedfArgs,
+  findInstructionDef,
+  hasVararg,
+  type DecodedArg,
+  type EmedfInstructionDef,
+  type EmedfRegistry
+} from './emedfSchema.js';
+import {
+  computeEmevdEventFingerprint,
+  computeEmevdInstructionFingerprint,
+  formatEmevdAnchor
+} from './stableIdentity.js';
+
+export function looksLikeDarkScript(source: string): boolean {
+  return /\$Event\s*\(/.test(source);
+}
+
+interface ParsedArg {
+  value: EmevdDslLiteral | string;
+  span: EmevdDslSourceSpan;
+}
+
+interface ParsedCall {
+  name: string;
+  args: ParsedArg[];
+  span: EmevdDslSourceSpan;
+}
+
+type ParsedStatement =
+  | { kind: 'call'; call: ParsedCall; span: EmevdDslSourceSpan }
+  | { kind: 'wait-for'; predicates: ParsedCall[]; span: EmevdDslSourceSpan }
+  | { kind: 'comment'; text: string; span: EmevdDslSourceSpan };
+
+interface ParsedEvent {
+  eventId: number;
+  restBehavior: number;
+  parameterNames: string[];
+  statements: ParsedStatement[];
+  span: EmevdDslSourceSpan;
+}
+
+interface SourceIndex {
+  positionAt(offset: number): EmevdDslSourcePosition;
+  span(from: number, to: number): EmevdDslSourceSpan;
+}
+
+export function compileEmevdDarkScript(
+  request: EmevdDslCompileRequest,
+  document: EmevdEditorDocument,
+  registry?: EmedfRegistry
+): EmevdDslCompileResult {
+  const source = request.sourceText;
+  const index = makeSourceIndex(source);
+  const fileSpan = index.span(0, source.length);
+  const diagnostics: EmevdDslDiagnostic[] = [];
+  const add = (item: EmevdDslDiagnostic): void => { diagnostics.push(item); };
+
+  if (request.mode !== 'patch' && request.mode !== 'dark-script') {
+    add(error('EMEVD_DSL_MODE_UNSUPPORTED', `Unsupported compile mode: ${String(request.mode)}.`, fileSpan));
+  }
+  if (request.resourceUri !== document.resourceUri) {
+    add(error('EMEVD_DSL_RESOURCE_MISMATCH', 'Resource URI does not match the opened document.', fileSpan, {
+      resourceUri: request.resourceUri
+    }));
+  }
+  if (document.documentInstanceId === undefined || request.documentInstanceId !== document.documentInstanceId) {
+    add(error('EMEVD_DSL_DOCUMENT_INSTANCE_MISMATCH', 'Document instance is missing or stale.', fileSpan, {
+      resourceUri: request.resourceUri
+    }));
+  }
+  if (request.baseRevision !== document.revision) {
+    add(error('EMEVD_DSL_STALE_REVISION', 'Base revision is stale.', fileSpan, {
+      resourceUri: request.resourceUri
+    }));
+  }
+  if (!registry) {
+    add(error('EMEVD_DSL_SCHEMA_REQUIRED', 'EMEDF schema is required.', fileSpan, {
+      resourceUri: request.resourceUri
+    }));
+  }
+
+  const actualSchemaFingerprint = registry ? fingerprintEmedfRegistry(registry) : undefined;
+  if (
+    actualSchemaFingerprint !== undefined
+    && request.emedfSchemaFingerprint !== actualSchemaFingerprint
+  ) {
+    add(error('EMEVD_DSL_SCHEMA_CHANGED', 'EMEDF schema fingerprint changed.', fileSpan, {
+      resourceUri: request.resourceUri
+    }));
+  }
+
+  const parsed = parseDarkScriptEvents(source, index, add);
+  const ast = emptyAst(request, fileSpan);
+
+  // Event-scoped DarkScript is deliberately stricter than whole-file mode:
+  // one source block must identify one existing event. Pairing against a
+  // one-event projection below makes it impossible for omitted sibling events
+  // to turn into delete_event operations.
+  let scopedDocumentEvents: readonly EmevdEditorDocument['events'][number][] = document.events;
+  if (request.scopeEventId !== undefined) {
+    if (!Number.isSafeInteger(request.scopeEventId)) {
+      add(error(
+        'EMEVD_DSL_SCOPE_EVENT_ID_INVALID',
+        '事件作用域 eventId 必须是安全整数。',
+        fileSpan,
+        { resourceUri: request.resourceUri }
+      ));
+    }
+    const target = document.events.find((event) => event.eventId === request.scopeEventId);
+    if (!target) {
+      add(error(
+        'EMEVD_DSL_SCOPE_EVENT_NOT_FOUND',
+        `目标事件 ${request.scopeEventId} 不存在，拒绝作用域写回。`,
+        fileSpan,
+        { resourceUri: request.resourceUri }
+      ));
+    }
+    if (parsed.length !== 1) {
+      add(error(
+        'EMEVD_DSL_SCOPE_REQUIRES_SINGLE_EVENT',
+        `事件作用域要求源码恰好包含一个 $Event 块，实际为 ${parsed.length} 个。`,
+        fileSpan,
+        { resourceUri: request.resourceUri }
+      ));
+    } else if (parsed[0]!.eventId !== request.scopeEventId) {
+      add(error(
+        'EMEVD_DSL_SCOPE_EVENT_MISMATCH',
+        `源码事件 ${parsed[0]!.eventId} 与目标作用域事件 ${request.scopeEventId} 不一致。`,
+        parsed[0]!.span,
+        { resourceUri: request.resourceUri }
+      ));
+    } else if (target) {
+      scopedDocumentEvents = [target];
+    }
+  }
+
+  if (diagnostics.some((item) => item.severity === 'error') || !registry || !actualSchemaFingerprint) {
+    return { ok: false, ast, diagnostics: diagnostics.sort(compareDiagnostics) };
+  }
+
+  const operations: EmevdPlannedMutation[] = [];
+  const pairing = pairEvents(parsed, scopedDocumentEvents);
+  for (const pair of pairing.pairs) {
+    compilePairedEvent(pair.parsed, pair.documentEvent, registry, operations, add, request.resourceUri);
+  }
+  // 新增事件：先 insert_event，再按源码顺序 insert_instruction。有任何一行
+  // 编码不了就整个新事件抑制（不写半截事件），各行给「未解码」warning。
+  for (const added of pairing.added) {
+    compileAddedEvent(added, document, registry, operations, add, request.resourceUri);
+  }
+  // 删除事件：源码里整块没出现的权威文档事件。
+  for (const missing of pairing.deleted) {
+    if (!missing.anchor) {
+      add(warn('DARKSCRIPT_LINE_UNDECODED', `事件 ${missing.eventId} 没有稳定锚，删除不能写入。`, fileSpan, {
+        resourceUri: request.resourceUri
+      }));
+      continue;
+    }
+    operations.push({
+      kind: 'delete_event',
+      eventAnchor: formatEmevdAnchor('event', missing.anchor),
+      eventId: missing.eventId,
+      target: missing.anchor,
+      targetPreconditionHash: computeEmevdEventFingerprint(missing),
+      sourceSpan: fileSpan
+    });
+  }
+
+  if (
+    request.scopeEventId !== undefined
+    && operations.some((operation) => operation.kind === 'insert_event' || operation.kind === 'delete_event')
+  ) {
+    add(error(
+      'EMEVD_DSL_SCOPE_EVENT_MUTATION_LEAK',
+      '事件作用域编译产生了越界的事件结构 mutation，拒绝提交。',
+      fileSpan,
+      { resourceUri: request.resourceUri }
+    ));
+  }
+
+  if (diagnostics.some((item) => item.severity === 'error')) {
+    return { ok: false, ast, diagnostics: diagnostics.sort(compareDiagnostics) };
+  }
+
+  const hasUndecoded = diagnostics.some((item) => item.code === 'DARKSCRIPT_LINE_UNDECODED');
+  if (operations.length === 0 && hasUndecoded) {
+    return { ok: false, ast, diagnostics: diagnostics.sort(compareDiagnostics) };
+  }
+
+  const touchedEvents = unique(operations.map((operation) =>
+    operation.kind === 'insert_event' ? `new:${operation.eventId}` : operation.eventAnchor
+  ).filter((anchor) => anchor.length > 0));
+  const touchedInstructions = unique(operations.flatMap((operation) =>
+    operation.kind === 'set_instruction_arg' || operation.kind === 'delete_instruction'
+      ? [operation.instructionAnchor]
+      : []
+  ));
+  const sourceFingerprint = hashText(source);
+  const planWithoutFingerprint = {
+    schemaVersion: 1 as const,
+    resourceUri: request.resourceUri,
+    documentInstanceId: request.documentInstanceId,
+    baseRevision: request.baseRevision,
+    sourceFingerprint,
+    schemaFingerprint: actualSchemaFingerprint,
+    operations,
+    impact: {
+      touchedEvents,
+      touchedInstructions,
+      inserts: operations.filter((operation) =>
+        operation.kind === 'insert_event' || operation.kind === 'insert_instruction').length,
+      deletes: operations.filter((operation) =>
+        operation.kind === 'delete_event' || operation.kind === 'delete_instruction').length,
+      argumentWrites: operations.filter((operation) => operation.kind === 'set_instruction_arg').length
+    }
+  };
+  const plan: EmevdMutationPlan = {
+    ...planWithoutFingerprint,
+    planFingerprint: hashText(stableJson(planWithoutFingerprint))
+  };
+  return { ok: true, ast, plan, diagnostics: diagnostics.sort(compareDiagnostics) };
+}
+
+function compilePairedEvent(
+  parsed: ParsedEvent,
+  event: EmevdEditorDocument['events'][number],
+  registry: EmedfRegistry,
+  operations: EmevdPlannedMutation[],
+  add: (item: EmevdDslDiagnostic) => void,
+  resourceUri: string
+): void {
+  if (!event.anchor) {
+    add(warn('DARKSCRIPT_LINE_UNDECODED', '事件没有稳定锚，不能写入。', parsed.span, {
+      resourceUri
+    }));
+    return;
+  }
+  const eventAnchor = formatEmevdAnchor('event', event.anchor);
+  const eventHash = computeEmevdEventFingerprint(event);
+
+  if (parsed.eventId !== event.eventId) {
+    operations.push({
+      kind: 'set_event_id',
+      eventAnchor,
+      target: event.anchor,
+      targetPreconditionHash: eventHash,
+      sourceSpan: parsed.span,
+      before: event.eventId,
+      after: parsed.eventId
+    });
+  }
+  if (parsed.restBehavior !== event.restBehavior) {
+    operations.push({
+      kind: 'set_event_rest_behavior',
+      eventAnchor,
+      target: event.anchor,
+      targetPreconditionHash: eventHash,
+      sourceSpan: parsed.span,
+      before: event.restBehavior,
+      after: parsed.restBehavior
+    });
+  }
+
+  const shape = analyzeDarkScriptEvent(event, registry);
+  const diff = alignStatements(parsed.statements, shape);
+
+  // 先把插入行全部试编码；任何一行编码不了，本事件的结构性改动（增/删）整体
+  // 抑制，只保留已对齐行的参数写入 —— 不写「删了旧的却写不进新的」的半截状态。
+  const encodings = new Map<ParsedStatement, { bank: number; id: number; argsBase64: string; def: EmedfInstructionDef }>();
+  let blocked = false;
+  for (const entry of diff) {
+    if (entry.kind !== 'insert') continue;
+    if (entry.statement.kind === 'comment') continue; // 纯注释，无二进制语义，忽略
+    if (entry.statement.kind === 'wait-for') {
+      add(warn(
+        'DARKSCRIPT_LINE_UNDECODED',
+        '新增 WaitFor 折叠块本版不能写入（条件组簿记无法从源码重建），该块未解码。',
+        entry.statement.span,
+        { resourceUri, targetAnchor: eventAnchor }
+      ));
+      blocked = true;
+      continue;
+    }
+    const encoded = encodeInsertedCall(entry.statement.call, registry);
+    if (!encoded.ok) {
+      add(warn('DARKSCRIPT_LINE_UNDECODED', `新增指令 ${entry.statement.call.name} 不能写入：${encoded.reason}`, entry.statement.span, {
+        resourceUri,
+        targetAnchor: eventAnchor
+      }));
+      blocked = true;
+      continue;
+    }
+    encodings.set(entry.statement, { bank: encoded.bank, id: encoded.id, argsBase64: encoded.argsBase64, def: encoded.def });
+  }
+
+  // If an inserted structural line could not be encoded, do not continue into
+  // the match/delete/parameter-rebuild phase.  Otherwise an ambiguous rename
+  // can pair a later repeated instruction with the wrong native row, or delete
+  // the old row while silently dropping the replacement.  The whole
+  // structural edit is fail-closed as one unit.
+  if (blocked) return;
+
+  // 已对齐行：照旧逐行编参数差异。只有确认没有未编码的结构行后才执行，
+  // 避免 LCS 在重复指令名场景下给出“看似匹配”但身份不安全的参数写入。
+  for (const entry of diff) {
+    if (entry.kind === 'match') {
+      compileStatement(entry.statement, entry.item, eventAnchor, operations, add, resourceUri);
+    }
+  }
+
+  // 模拟最终指令语义序列（Final Instruction Sequence）并统一重建 Event Parameter table
+  const finalInstructions: FinalInstructionSemantic[] = [];
+  let currentFinalIdx = 0;
+
+  for (const entry of diff) {
+    if (entry.kind === 'delete') {
+      // 被删除的指令不进入最终序列
+      continue;
+    }
+
+    if (entry.kind === 'insert') {
+      if (entry.statement.kind === 'comment') continue;
+      if (entry.statement.kind === 'wait-for') continue;
+      if (entry.statement.kind === 'call') {
+        const call = entry.statement.call;
+        const candidates = registry.instructions.filter((def) => darkScriptInstructionName(def.name) === call.name);
+        const def = candidates.length === 1 ? candidates[0]! : undefined;
+        const layout = def ? getInstructionArgLayout(def) : [];
+        const argsInfo: FinalInstructionSemantic['args'] = [];
+
+        for (let i = 0; i < call.args.length; i++) {
+          const parsedArg = call.args[i]!;
+          const l = layout[i];
+          argsInfo.push({
+            name: l?.name ?? `arg${i}`,
+            targetStartByte: l?.targetStartByte,
+            byteCount: l?.byteCount,
+            value: parsedArg.value
+          });
+        }
+
+        const encoded = encodings.get(entry.statement);
+        finalInstructions.push({
+          finalInstructionIndex: currentFinalIdx++,
+          bank: def ? def.bank : 0,
+          id: def ? def.id : 0,
+          argsBase64: encoded?.argsBase64,
+          source: 'inserted',
+          call,
+          args: argsInfo
+        });
+      }
+      continue;
+    }
+
+    if (entry.kind === 'match') {
+      if (entry.statement.kind === 'comment' && entry.item.kind === 'opaque') {
+        finalInstructions.push({
+          finalInstructionIndex: currentFinalIdx++,
+          bank: entry.item.instruction.bank,
+          id: entry.item.instruction.id,
+          argsBase64: entry.item.instruction.argsBase64,
+          source: 'opaque',
+          instruction: entry.item.instruction,
+          args: []
+        });
+      } else if (entry.statement.kind === 'call' && entry.item.kind === 'call') {
+        const call = entry.statement.call;
+        const origInstrIdx = event.instructions.indexOf(entry.item.instruction);
+        const origParams = event.parameters?.filter((p) => p.instructionIndex === origInstrIdx) ?? [];
+        const decodedArgs = entry.item.args;
+        const def = findInstructionDef(registry, entry.item.instruction.bank, entry.item.instruction.id);
+        const layout = def ? getInstructionArgLayout(def) : [];
+
+        const argsInfo: FinalInstructionSemantic['args'] = [];
+        for (let i = 0; i < call.args.length && i < decodedArgs.length; i++) {
+          const parsedArg = call.args[i]!;
+          const decodedArg = decodedArgs[i]!;
+          const l = layout[i];
+          const startByte = decodedArg.startByte ?? l?.targetStartByte;
+          const byteCount = decodedArg.byteCount ?? l?.byteCount ?? (decodedArg.type ? byteLengthOf(decodedArg.type) : 4);
+          const origParam = startByte !== undefined ? origParams.find((p) => p.targetStartByte === startByte) : undefined;
+
+          argsInfo.push({
+            name: decodedArg.name,
+            targetStartByte: startByte,
+            byteCount,
+            value: parsedArg.value,
+            originalParam: origParam ? {
+              sourceStartByte: origParam.sourceStartByte,
+              byteCount: origParam.byteCount,
+              unkId: origParam.unkId ?? 0
+            } : undefined
+          });
+        }
+
+        finalInstructions.push({
+          finalInstructionIndex: currentFinalIdx++,
+          bank: entry.item.instruction.bank,
+          id: entry.item.instruction.id,
+          argsBase64: entry.item.instruction.argsBase64,
+          source: 'matched',
+          call,
+          instruction: entry.item.instruction,
+          args: argsInfo
+        });
+      } else if (entry.statement.kind === 'wait-for' && entry.item.kind === 'wait-for') {
+        for (let pIdx = 0; pIdx < entry.item.predicates.length; pIdx++) {
+          const predItem = entry.item.predicates[pIdx]!;
+          const predStmt = entry.statement.predicates[pIdx];
+          const origInstrIdx = event.instructions.indexOf(predItem.instruction);
+          const origParams = event.parameters?.filter((p) => p.instructionIndex === origInstrIdx) ?? [];
+          const def = findInstructionDef(registry, predItem.instruction.bank, predItem.instruction.id);
+          const layout = def ? getInstructionArgLayout(def) : [];
+
+          const argsInfo: FinalInstructionSemantic['args'] = [];
+          for (let i = 0; i < predItem.visibleArgs.length; i++) {
+            const arg = predItem.visibleArgs[i]!;
+            const parsedVal = predStmt?.args[i]?.value ?? arg.value;
+            const l = layout[i];
+            const startByte = arg.startByte ?? l?.targetStartByte;
+            const byteCount = arg.byteCount ?? l?.byteCount ?? (arg.type ? byteLengthOf(arg.type) : 4);
+            const origParam = startByte !== undefined ? origParams.find((p) => p.targetStartByte === startByte) : undefined;
+
+            argsInfo.push({
+              name: arg.name,
+              targetStartByte: startByte,
+              byteCount,
+              value: parsedVal,
+              originalParam: origParam ? {
+                sourceStartByte: origParam.sourceStartByte,
+                byteCount: origParam.byteCount,
+                unkId: origParam.unkId ?? 0
+              } : undefined
+            });
+          }
+
+          finalInstructions.push({
+            finalInstructionIndex: currentFinalIdx++,
+            bank: predItem.instruction.bank,
+            id: predItem.instruction.id,
+            argsBase64: predItem.instruction.argsBase64,
+            source: 'matched',
+            call: predStmt,
+            instruction: predItem.instruction,
+            args: argsInfo
+          });
+        }
+
+        // wait-for anchor 指令（如 EndIf/Wait）
+        finalInstructions.push({
+          finalInstructionIndex: currentFinalIdx++,
+          bank: entry.item.anchor.bank,
+          id: entry.item.anchor.id,
+          argsBase64: entry.item.anchor.argsBase64,
+          source: 'matched',
+          instruction: entry.item.anchor,
+          args: []
+        });
+      }
+    }
+  }
+
+  const parameterBuild = buildEventParameterBindings(
+    finalInstructions,
+    event.instructions,
+    event.parameters ?? [],
+    add,
+    resourceUri,
+    eventAnchor,
+    parsed.span
+  );
+  if (!parameterBuild.ok) return;
+  const newParameters = parameterBuild.parameters;
+
+  const oldParams = event.parameters ?? [];
+  const paramsChanged = oldParams.length !== newParameters.length ||
+    newParameters.some((np, idx) => {
+      const op = oldParams[idx];
+      return !op || op.instructionIndex !== np.instructionIndex || op.targetStartByte !== np.targetStartByte || op.sourceStartByte !== np.sourceStartByte || op.byteCount !== np.byteCount || (op.unkId ?? 0) !== np.unkId;
+    });
+
+  if (paramsChanged && (newParameters.length > 0 || oldParams.length > 0)) {
+    operations.push({
+      kind: 'set_event_parameters',
+      eventAnchor,
+      eventId: event.eventId,
+      parameters: newParameters,
+      target: event.anchor,
+      targetPreconditionHash: eventHash,
+      sourceSpan: parsed.span
+    });
+  }
+
+  // 删除：原始文档里有、源码里没了的行（wait-for 块 = 谓词 + anchor 全部指令）。
+  for (const entry of diff) {
+    if (entry.kind !== 'delete') continue;
+    for (const instruction of itemInstructions(entry.item)) {
+      if (!instruction.anchor) {
+        add(warn('DARKSCRIPT_LINE_UNDECODED', '待删指令没有稳定锚，删除不能写入。', parsed.span, {
+          resourceUri,
+          targetAnchor: eventAnchor
+        }));
+        continue;
+      }
+      const index = event.instructions.indexOf(instruction);
+      if (index < 0) continue;
+      operations.push({
+        kind: 'delete_instruction',
+        eventAnchor,
+        eventId: event.eventId,
+        instructionAnchor: formatEmevdAnchor('instruction', instruction.anchor),
+        index,
+        bank: instruction.bank,
+        id: instruction.id,
+        target: instruction.anchor,
+        targetPreconditionHash: computeEmevdInstructionFingerprint(instruction),
+        sourceSpan: parsed.span
+      });
+    }
+  }
+
+  // 插入：位置按「删除已应用后」的指令列表计算。
+  let slot = 0;
+  for (const entry of diff) {
+    if (entry.kind === 'match') {
+      slot += itemInstructions(entry.item).length;
+      continue;
+    }
+    if (entry.kind !== 'insert') continue;
+    if (entry.statement.kind !== 'call') continue;
+    const encoded = encodings.get(entry.statement);
+    if (!encoded) continue;
+    operations.push({
+      kind: 'insert_instruction',
+      eventAnchor,
+      eventId: event.eventId,
+      index: slot,
+      bank: encoded.bank,
+      id: encoded.id,
+      argsBase64: encoded.argsBase64,
+      target: event.anchor!,
+      targetPreconditionHash: eventHash,
+      sourceSpan: entry.statement.span
+    });
+    slot += 1;
+  }
+}
+
+interface FinalInstructionSemantic {
+  finalInstructionIndex: number;
+  bank: number;
+  id: number;
+  argsBase64?: string | undefined;
+  source: 'matched' | 'inserted' | 'opaque';
+  call?: ParsedCall | undefined;
+  instruction?: EmevdEditorDocument['events'][number]['instructions'][number] | undefined;
+  args: Array<{
+    name: string;
+    targetStartByte?: number | undefined;
+    byteCount?: number | undefined;
+    value: EmevdDslLiteral | string;
+    originalParam?: { sourceStartByte: number; byteCount: number; unkId: number } | undefined;
+  }>;
+}
+
+type EventParameterBinding = NonNullable<EmevdEditorDocument['events'][number]['parameters']>[number];
+
+interface ParameterBuildResult {
+  ok: true;
+  parameters: EventParameterBinding[];
+}
+
+interface ParameterBuildFailure {
+  ok: false;
+}
+
+/**
+ * Rebuild the native event-parameter table from the final instruction sequence.
+ * Existing instruction objects are the identity proof; inserted instructions
+ * have no preserved bindings. Explicit X bindings replace a preserved binding
+ * at the same target offset, while hidden bindings on an identity-proven
+ * instruction remain untouched.
+ */
+function buildEventParameterBindings(
+  finalInstructions: readonly FinalInstructionSemantic[],
+  originalInstructions: readonly EmevdEditorDocument['events'][number]['instructions'][number][],
+  originalParameters: readonly EventParameterBinding[],
+  add: (item: EmevdDslDiagnostic) => void,
+  resourceUri: string,
+  targetAnchor: string | undefined,
+  fallbackSpan: EmevdDslSourceSpan
+): ParameterBuildResult | ParameterBuildFailure {
+  const originalArgsLengths = new Map<number, number>();
+  for (let index = 0; index < originalInstructions.length; index += 1) {
+    const argsLength = strictBase64ByteLength(originalInstructions[index]!.argsBase64);
+    if (argsLength !== undefined) originalArgsLengths.set(index, argsLength);
+  }
+
+  let originalParametersValid = true;
+  for (const parameter of originalParameters) {
+    if (!Number.isSafeInteger(parameter.instructionIndex)
+      || parameter.instructionIndex < 0
+      || parameter.instructionIndex >= originalInstructions.length) {
+      addParameterError(
+        add,
+        'EMEVD_PARAMETER_INSTRUCTION_INDEX_INVALID',
+        `原有事件参数 instructionIndex=${String(parameter.instructionIndex)} 超出原始指令范围，禁止写入。`,
+        fallbackSpan,
+        resourceUri,
+        targetAnchor
+      );
+      originalParametersValid = false;
+      continue;
+    }
+    if (!validateParameterRange(parameter, originalArgsLengths.get(parameter.instructionIndex), add, fallbackSpan, resourceUri, targetAnchor, '原有')) {
+      originalParametersValid = false;
+    }
+  }
+
+  if (!originalParametersValid) return { ok: false };
+
+  const result: EventParameterBinding[] = [];
+  let finalParametersValid = true;
+  for (let finalIndex = 0; finalIndex < finalInstructions.length; finalIndex += 1) {
+    const instruction = finalInstructions[finalIndex]!;
+    if (instruction.finalInstructionIndex !== finalIndex || !Number.isSafeInteger(instruction.finalInstructionIndex)) {
+      addParameterError(
+        add,
+        'EMEVD_PARAMETER_INSTRUCTION_INDEX_INVALID',
+        `最终事件指令索引 ${String(instruction.finalInstructionIndex)} 不连续，禁止写入。`,
+        instruction.call?.span ?? fallbackSpan,
+        resourceUri,
+        targetAnchor
+      );
+      finalParametersValid = false;
+      continue;
+    }
+
+    const finalArgsLength = strictBase64ByteLength(instruction.argsBase64);
+    const explicitByTarget = new Map<number, { sourceStartByte: number; byteCount: number; unkId: number }>();
+    const explicitOrder: number[] = [];
+    const literalTargets = new Set<number>();
+    let instructionBlocked = false;
+
+    for (const arg of instruction.args) {
+      if (arg.targetStartByte !== undefined && typeof arg.value !== 'string') {
+        if (!Number.isSafeInteger(arg.targetStartByte) || arg.targetStartByte < 0) {
+          addParameterError(
+            add,
+            'EMEVD_PARAMETER_TARGET_OFFSET_UNRESOLVED',
+            `指令 ${instruction.call?.name ?? instruction.id} 的参数 ${arg.name} targetStartByte 无效，禁止写入。`,
+            instruction.call?.span ?? fallbackSpan,
+            resourceUri,
+            targetAnchor
+          );
+          instructionBlocked = true;
+        } else {
+          literalTargets.add(arg.targetStartByte);
+        }
+      }
+      if (typeof arg.value !== 'string') continue;
+      const match = /^X(\d+)_(\d+)$/.exec(arg.value);
+      if (!match) continue;
+      const sourceStartByte = Number(match[1]);
+      const byteCount = Number(match[2]);
+      if (!Number.isSafeInteger(sourceStartByte) || sourceStartByte < 0
+        || !Number.isSafeInteger(byteCount) || byteCount <= 0) {
+        addParameterError(
+          add,
+          'EMEVD_PARAMETER_RANGE_INVALID',
+          `指令 ${instruction.call?.name ?? instruction.id} 的参数 ${arg.name} ${arg.value} 超出安全范围，禁止写入。`,
+          instruction.call?.span ?? fallbackSpan,
+          resourceUri,
+          targetAnchor
+        );
+        instructionBlocked = true;
+        continue;
+      }
+      if (arg.targetStartByte === undefined || !Number.isSafeInteger(arg.targetStartByte) || arg.targetStartByte < 0) {
+        addParameterError(
+          add,
+          'EMEVD_PARAMETER_TARGET_OFFSET_UNRESOLVED',
+          `指令 ${instruction.call?.name ?? instruction.id} 的参数 ${arg.name} 无法解析 targetStartByte，禁止写入。`,
+          instruction.call?.span ?? fallbackSpan,
+          resourceUri,
+          targetAnchor
+        );
+        instructionBlocked = true;
+        continue;
+      }
+      if (arg.byteCount === undefined || !Number.isSafeInteger(arg.byteCount) || arg.byteCount <= 0) {
+        addParameterError(
+          add,
+          'EMEVD_PARAMETER_WIDTH_UNRESOLVED',
+          `指令 ${instruction.call?.name ?? instruction.id} 的参数 ${arg.name} 未解析出原生字节宽度，禁止写入。`,
+          instruction.call?.span ?? fallbackSpan,
+          resourceUri,
+          targetAnchor
+        );
+        instructionBlocked = true;
+        continue;
+      }
+      if (byteCount !== arg.byteCount) {
+        addParameterError(
+          add,
+          'EMEVD_PARAMETER_WIDTH_MISMATCH',
+          `指令 ${instruction.call?.name ?? instruction.id} 的参数 ${arg.name} 声明宽度 ${byteCount} 与原生宽度 ${arg.byteCount} 不一致，禁止写入。`,
+          instruction.call?.span ?? fallbackSpan,
+          resourceUri,
+          targetAnchor
+        );
+        instructionBlocked = true;
+        continue;
+      }
+      if (explicitByTarget.has(arg.targetStartByte)) {
+        addParameterError(
+          add,
+          'EMEVD_PARAMETER_DUPLICATE_TARGET',
+          `指令 ${instruction.call?.name ?? instruction.id} 的 targetStartByte=${arg.targetStartByte} 被多个 X 绑定声明，禁止写入。`,
+          instruction.call?.span ?? fallbackSpan,
+          resourceUri,
+          targetAnchor
+        );
+        instructionBlocked = true;
+        continue;
+      }
+      explicitByTarget.set(arg.targetStartByte, { sourceStartByte, byteCount, unkId: 0 });
+      explicitOrder.push(arg.targetStartByte);
+    }
+
+    const originalIndex = instruction.instruction === undefined
+      ? -1
+      : originalInstructions.indexOf(instruction.instruction);
+    const oldForInstruction = originalIndex >= 0
+      ? originalParameters.filter((parameter) => parameter.instructionIndex === originalIndex)
+      : [];
+    const oldByTarget = new Map(oldForInstruction.map((parameter) => [parameter.targetStartByte, parameter]));
+
+    for (const old of oldForInstruction) {
+      if (explicitByTarget.has(old.targetStartByte)) continue;
+      if (literalTargets.has(old.targetStartByte)) continue;
+      const remapped = { ...old, instructionIndex: finalIndex };
+      if (!validateParameterRange(remapped, finalArgsLength, add, instruction.call?.span ?? fallbackSpan, resourceUri, targetAnchor, '保留')) {
+        instructionBlocked = true;
+        continue;
+      }
+      result.push(remapped);
+    }
+
+    for (const targetStartByte of explicitOrder) {
+      const explicit = explicitByTarget.get(targetStartByte)!;
+      const old = oldByTarget.get(targetStartByte);
+      const binding: EventParameterBinding = {
+        instructionIndex: finalIndex,
+        targetStartByte,
+        sourceStartByte: explicit.sourceStartByte,
+        byteCount: explicit.byteCount,
+        unkId: old?.unkId ?? explicit.unkId
+      };
+      if (!validateParameterRange(binding, finalArgsLength, add, instruction.call?.span ?? fallbackSpan, resourceUri, targetAnchor, '显式')) {
+        instructionBlocked = true;
+        continue;
+      }
+      result.push(binding);
+    }
+
+    if (instructionBlocked) finalParametersValid = false;
+  }
+
+  if (!finalParametersValid) return { ok: false };
+  if (result.some((parameter) => !Number.isSafeInteger(parameter.instructionIndex)
+    || parameter.instructionIndex < 0
+    || parameter.instructionIndex >= finalInstructions.length)) {
+    addParameterError(
+      add,
+      'EMEVD_PARAMETER_INSTRUCTION_INDEX_INVALID',
+      '生成的事件参数 instructionIndex 超出最终指令范围，禁止写入。',
+      fallbackSpan,
+      resourceUri,
+      targetAnchor
+    );
+    return { ok: false };
+  }
+  return { ok: true, parameters: result };
+}
+
+function validateParameterRange(
+  parameter: EventParameterBinding,
+  argsLength: number | undefined,
+  add: (item: EmevdDslDiagnostic) => void,
+  span: EmevdDslSourceSpan,
+  resourceUri: string,
+  targetAnchor: string | undefined,
+  label: string
+): boolean {
+  if (isValidParameterRange(parameter, argsLength)) return true;
+  addParameterError(
+    add,
+    'EMEVD_PARAMETER_BYTE_RANGE_INVALID',
+    `${label}事件参数的 source/target 字节范围无效，禁止写入。`,
+    span,
+    resourceUri,
+    targetAnchor
+  );
+  return false;
+}
+
+function isValidParameterRange(parameter: EventParameterBinding, argsLength: number | undefined): boolean {
+  if (!Number.isSafeInteger(parameter.targetStartByte) || parameter.targetStartByte < 0) return false;
+  if (!Number.isSafeInteger(parameter.sourceStartByte) || parameter.sourceStartByte < 0) return false;
+  if (!Number.isSafeInteger(parameter.byteCount) || parameter.byteCount <= 0) return false;
+  const targetEnd = parameter.targetStartByte + parameter.byteCount;
+  const sourceEnd = parameter.sourceStartByte + parameter.byteCount;
+  if (!Number.isSafeInteger(targetEnd) || !Number.isSafeInteger(sourceEnd)) return false;
+  return argsLength !== undefined && targetEnd <= argsLength;
+}
+
+function strictBase64ByteLength(value: string | undefined): number | undefined {
+  if (value === undefined || value.length === 0) return 0;
+  if (value.length % 4 !== 0 || !/^[A-Za-z0-9+/]*={0,2}$/.test(value)) return undefined;
+  const padding = value.endsWith('==') ? 2 : value.endsWith('=') ? 1 : 0;
+  const decoded = Buffer.from(value, 'base64');
+  if (decoded.toString('base64') !== value) return undefined;
+  return (value.length / 4) * 3 - padding;
+}
+
+function addParameterError(
+  add: (item: EmevdDslDiagnostic) => void,
+  code: string,
+  message: string,
+  span: EmevdDslSourceSpan,
+  resourceUri: string,
+  targetAnchor: string | undefined
+): void {
+  add(error(code, message, span, { resourceUri, ...(targetAnchor !== undefined ? { targetAnchor } : {}) }));
+}
+
+function getInstructionArgLayout(def: EmedfInstructionDef): Array<{ name: string; targetStartByte: number; byteCount: number }> {
+  let offset = 0;
+  const layout: Array<{ name: string; targetStartByte: number; byteCount: number }> = [];
+  for (const arg of def.args) {
+    if (arg.vararg) continue;
+    offset = align(offset, arg.type);
+    const startByte = offset;
+    const count = byteLengthOf(arg.type);
+    layout.push({ name: arg.name, targetStartByte: startByte, byteCount: count });
+    offset += count;
+  }
+  return layout;
+}
+
+/** 一个 shape 行对应事件指令列表里的指令（wait-for = 谓词们 + anchor）。 */
+function itemInstructions(item: DarkScriptEventItem): EmevdEditorDocument['events'][number]['instructions'][number][] {
+  if (item.kind === 'wait-for') {
+    return [...item.predicates.map((predicate) => predicate.instruction), item.anchor];
+  }
+  return [item.instruction];
+}
+
+/**
+ * 新增事件的编译：insert_event + 逐行 insert_instruction + set_event_parameters。
+ * 任一行编码不了 → 整个事件抑制（不写空壳/半截事件），各行给「未解码」warning。
+ */
+function compileAddedEvent(
+  parsed: ParsedEvent,
+  document: EmevdEditorDocument,
+  registry: EmedfRegistry,
+  operations: EmevdPlannedMutation[],
+  add: (item: EmevdDslDiagnostic) => void,
+  resourceUri: string
+): void {
+  const encodable: Array<{ call: ParsedCall; bank: number; id: number; argsBase64: string; def: EmedfInstructionDef }> = [];
+  let blocked = false;
+  for (const statement of parsed.statements) {
+    if (statement.kind === 'comment') continue;
+    if (statement.kind === 'wait-for') {
+      add(warn('DARKSCRIPT_LINE_UNDECODED', '新增事件里的 WaitFor 折叠块不能写入，该事件未解码。', statement.span, { resourceUri }));
+      blocked = true;
+      continue;
+    }
+    const encoded = encodeInsertedCall(statement.call, registry);
+    if (!encoded.ok) {
+      add(warn('DARKSCRIPT_LINE_UNDECODED', `新增事件 ${parsed.eventId} 的 ${statement.call.name} 不能写入：${encoded.reason}`, statement.span, { resourceUri }));
+      blocked = true;
+      continue;
+    }
+    encodable.push({ call: statement.call, bank: encoded.bank, id: encoded.id, argsBase64: encoded.argsBase64, def: encoded.def });
+  }
+  if (blocked) return;
+  if (document.events.some((event) => event.eventId === parsed.eventId)) {
+    add(warn('DARKSCRIPT_LINE_UNDECODED', `事件 ID ${parsed.eventId} 已存在，新增事件未写入。`, parsed.span, { resourceUri }));
+    return;
+  }
+  const syntheticAnchor: EmevdNodeAnchor = {
+    documentInstanceId: document.documentInstanceId ?? '',
+    localNodeId: `new-event-${parsed.eventId}`,
+    sourceFingerprint: ''
+  };
+
+  const finalInstructions: FinalInstructionSemantic[] = encodable.map((entry, instructionIndex) => {
+    const layout = getInstructionArgLayout(entry.def);
+    return {
+      finalInstructionIndex: instructionIndex,
+      bank: entry.bank,
+      id: entry.id,
+      argsBase64: entry.argsBase64,
+      source: 'inserted',
+      call: entry.call,
+      args: entry.call.args.map((arg, argIndex) => ({
+        name: layout[argIndex]?.name ?? `arg${argIndex}`,
+        targetStartByte: layout[argIndex]?.targetStartByte,
+        byteCount: layout[argIndex]?.byteCount,
+        value: arg.value
+      }))
+    };
+  });
+  const parameterBuild = buildEventParameterBindings(
+    finalInstructions,
+    [],
+    [],
+    add,
+    resourceUri,
+    undefined,
+    parsed.span
+  );
+  if (!parameterBuild.ok) return;
+
+  operations.push({
+    kind: 'insert_event',
+    eventId: parsed.eventId,
+    restBehavior: parsed.restBehavior,
+    target: syntheticAnchor,
+    targetPreconditionHash: '',
+    sourceSpan: parsed.span
+  });
+  for (const [index, entry] of encodable.entries()) {
+    operations.push({
+      kind: 'insert_instruction',
+      eventAnchor: '',
+      eventId: parsed.eventId,
+      index,
+      bank: entry.bank,
+      id: entry.id,
+      argsBase64: entry.argsBase64,
+      target: syntheticAnchor,
+      targetPreconditionHash: '',
+      sourceSpan: entry.call.span
+    });
+  }
+
+  if (parameterBuild.parameters.length > 0) {
+    operations.push({
+      kind: 'set_event_parameters',
+      eventAnchor: '',
+      eventId: parsed.eventId,
+      parameters: parameterBuild.parameters,
+      target: syntheticAnchor,
+      targetPreconditionHash: '',
+      sourceSpan: parsed.span
+    });
+  }
+}
+
+/**
+ * 把新增的指令调用行编码成（bank, id, args, def）。
+ * 只有 EMEDF 里名字唯一、无 vararg、参数个数/类型全对上的指令可以插入。
+ */
+function encodeInsertedCall(
+  call: ParsedCall,
+  registry: EmedfRegistry
+): { ok: true; bank: number; id: number; argsBase64: string; def: EmedfInstructionDef } | { ok: false; reason: string } {
+  const candidates = registry.instructions.filter((def) => darkScriptInstructionName(def.name) === call.name);
+  if (candidates.length === 0) return { ok: false, reason: 'EMEDF 里查不到这个指令名' };
+  if (candidates.length > 1) return { ok: false, reason: 'EMEDF 里同名指令不唯一，无法确定 bank/id' };
+  const def: EmedfInstructionDef = candidates[0]!;
+  if (hasVararg(def)) return { ok: false, reason: 'vararg 指令的尾部长度由观察值决定，本版不能新增' };
+  if (call.args.length !== def.args.length) {
+    return { ok: false, reason: `参数个数对不上（源码 ${call.args.length}，schema ${def.args.length}）` };
+  }
+  const values: Record<string, number | boolean> = {};
+  for (let i = 0; i < def.args.length; i += 1) {
+    const argDef = def.args[i]!;
+    const got = call.args[i]!;
+    if (typeof got.value === 'string' && /^X\d+_\d+$/.test(got.value)) {
+      values[argDef.name] = argDef.type === 'bool' ? false : 0;
+      continue;
+    }
+    if (typeof got.value === 'string') {
+      return { ok: false, reason: `参数 ${argDef.name} 类型不匹配` };
+    }
+    if (argDef.type === 'bool' ? typeof got.value !== 'boolean' : typeof got.value !== 'number') {
+      return { ok: false, reason: `参数 ${argDef.name} 类型不匹配` };
+    }
+    values[argDef.name] = got.value;
+  }
+  const encoded = encodeEmedfArgs(def, values);
+  if (!encoded.ok) return { ok: false, reason: encoded.message };
+  return { ok: true, bank: def.bank, id: def.id, argsBase64: encoded.args.toString('base64'), def };
+}
+
+type StatementDiffEntry =
+  | { kind: 'match'; statement: ParsedStatement; item: DarkScriptEventItem }
+  | { kind: 'delete'; item: DarkScriptEventItem }
+  | { kind: 'insert'; statement: ParsedStatement };
+
+function statementKey(statement: ParsedStatement): string {
+  if (statement.kind === 'comment') return 'opaque';
+  if (statement.kind === 'wait-for') return `wait-for:${statement.predicates.map((predicate) => predicate.name).join(',')}`;
+  return `call:${statement.call.name}`;
+}
+
+function itemKey(item: DarkScriptEventItem): string {
+  if (item.kind === 'opaque') return 'opaque';
+  if (item.kind === 'wait-for') return `wait-for:${item.predicates.map((predicate) => predicate.displayName).join(',')}`;
+  return `call:${item.displayName}`;
+}
+
+/**
+ * LCS 行对齐：把源码语句序列和反汇编形状序列按行身份对齐。
+ * 输出是源码顺序的 match/delete/insert 混合序列（delete 插在被删行的原位置）。
+ */
+function alignStatements(statements: ParsedStatement[], items: DarkScriptEventItem[]): StatementDiffEntry[] {
+  const n = statements.length;
+  const m = items.length;
+  if (n === 0 && m === 0) return [];
+  if (n === 0) return items.map((item) => ({ kind: 'delete' as const, item }));
+  if (m === 0) return statements.map((statement) => ({ kind: 'insert' as const, statement }));
+  const a = statements.map(statementKey);
+  const b = items.map(itemKey);
+  // 超大事件（>2000×2000）退化为「公共前缀 + 公共后缀 + 中段全替换」，
+  // 避免 LCS 全表内存；中段 replace 等价于 delete-all + insert-all。
+  if (n * m > 4_000_000) {
+    let prefix = 0;
+    while (prefix < n && prefix < m && a[prefix] === b[prefix]) prefix += 1;
+    let suffix = 0;
+    while (suffix < n - prefix && suffix < m - prefix && a[n - 1 - suffix] === b[m - 1 - suffix]) suffix += 1;
+    const out: StatementDiffEntry[] = [];
+    for (let i = 0; i < prefix; i += 1) out.push({ kind: 'match', statement: statements[i]!, item: items[i]! });
+    for (let j = prefix; j < m - suffix; j += 1) out.push({ kind: 'delete', item: items[j]! });
+    for (let i = prefix; i < n - suffix; i += 1) out.push({ kind: 'insert', statement: statements[i]! });
+    for (let k = 0; k < suffix; k += 1) {
+      out.push({ kind: 'match', statement: statements[n - suffix + k]!, item: items[m - suffix + k]! });
+    }
+    return out;
+  }
+  const width = m + 1;
+  const table = new Int32Array((n + 1) * width);
+  for (let i = n - 1; i >= 0; i -= 1) {
+    for (let j = m - 1; j >= 0; j -= 1) {
+      table[i * width + j] = a[i] === b[j]
+        ? table[(i + 1) * width + j + 1]! + 1
+        : Math.max(table[(i + 1) * width + j]!, table[i * width + j + 1]!);
+    }
+  }
+  const out: StatementDiffEntry[] = [];
+  let i = 0;
+  let j = 0;
+  while (i < n && j < m) {
+    if (a[i] === b[j]) {
+      out.push({ kind: 'match', statement: statements[i]!, item: items[j]! });
+      i += 1;
+      j += 1;
+    } else if (table[(i + 1) * width + j]! >= table[i * width + j + 1]!) {
+      out.push({ kind: 'insert', statement: statements[i]! });
+      i += 1;
+    } else {
+      out.push({ kind: 'delete', item: items[j]! });
+      j += 1;
+    }
+  }
+  while (i < n) { out.push({ kind: 'insert', statement: statements[i]! }); i += 1; }
+  while (j < m) { out.push({ kind: 'delete', item: items[j]! }); j += 1; }
+  return out;
+}
+
+function compileStatement(
+  statement: ParsedStatement,
+  item: DarkScriptEventItem,
+  eventAnchor: string,
+  operations: EmevdPlannedMutation[],
+  add: (item: EmevdDslDiagnostic) => void,
+  resourceUri: string
+): void {
+  if (statement.kind === 'comment' && item.kind === 'opaque') {
+    if (normalizeComment(statement.text) !== normalizeComment(item.comment)) {
+      add(warn('DARKSCRIPT_LINE_UNDECODED', '未解码指令只能保持原注释，不能改写成别的内容。', statement.span, {
+        resourceUri,
+        targetAnchor: eventAnchor
+      }));
+    }
+    return;
+  }
+  if (statement.kind === 'wait-for' && item.kind === 'wait-for') {
+    if (statement.predicates.length !== item.predicates.length) {
+      add(warn('DARKSCRIPT_LINE_UNDECODED', 'WaitFor 谓词数量对不上，该行未解码。', statement.span, {
+        resourceUri,
+        targetAnchor: eventAnchor
+      }));
+      return;
+    }
+    for (let i = 0; i < item.predicates.length; i += 1) {
+      emitCallArgMutations(
+        statement.predicates[i]!,
+        item.predicates[i]!.displayName,
+        item.predicates[i]!.visibleArgs,
+        item.predicates[i]!.instruction,
+        eventAnchor,
+        operations,
+        add,
+        resourceUri
+      );
+    }
+    return;
+  }
+  if (statement.kind === 'call' && item.kind === 'call') {
+    emitCallArgMutations(
+      statement.call,
+      item.displayName,
+      item.args,
+      item.instruction,
+      eventAnchor,
+      operations,
+      add,
+      resourceUri
+    );
+    return;
+  }
+  add(warn('DARKSCRIPT_LINE_UNDECODED', '这一行对不上权威文档里的指令，未解码。', statement.span, {
+    resourceUri,
+    targetAnchor: eventAnchor
+  }));
+}
+
+function emitCallArgMutations(
+  call: ParsedCall,
+  expectedName: string,
+  expectedArgs: readonly DecodedArg[],
+  instruction: EmevdEditorDocument['events'][number]['instructions'][number],
+  eventAnchor: string,
+  operations: EmevdPlannedMutation[],
+  add: (item: EmevdDslDiagnostic) => void,
+  resourceUri: string
+): void {
+  if (call.name !== expectedName) {
+    add(warn(
+      'DARKSCRIPT_LINE_UNDECODED',
+      `指令名 ${call.name} 对不上 ${expectedName}，该行未解码。`,
+      call.span,
+      { resourceUri, targetAnchor: eventAnchor }
+    ));
+    return;
+  }
+  if (!instruction.anchor) {
+    add(warn('DARKSCRIPT_LINE_UNDECODED', '指令没有稳定锚，不能写入。', call.span, {
+      resourceUri,
+      targetAnchor: eventAnchor
+    }));
+    return;
+  }
+  if (call.args.length !== expectedArgs.length) {
+    add(warn(
+      'DARKSCRIPT_LINE_UNDECODED',
+      `参数个数对不上（源码 ${call.args.length}，文档 ${expectedArgs.length}），该行未解码。`,
+      call.span,
+      { resourceUri, targetAnchor: eventAnchor }
+    ));
+    return;
+  }
+  const instructionAnchor = formatEmevdAnchor('instruction', instruction.anchor);
+  const hash = computeEmevdInstructionFingerprint(instruction);
+  for (let i = 0; i < expectedArgs.length; i += 1) {
+    const expected = expectedArgs[i]!;
+    const got = call.args[i]!;
+    const expectedSym = expected.parameterSymbol;
+    const gotVal = got.value;
+
+    if (typeof gotVal === 'string') {
+      if (/^X\d+_\d+$/.test(gotVal)) {
+        if (expectedSym === gotVal) {
+          continue;
+        }
+        continue;
+      }
+      add(error(
+        'DARKSCRIPT_ARG_TYPE',
+        `参数 ${expected.name} 类型不匹配。`,
+        got.span,
+        { resourceUri, targetAnchor: instructionAnchor }
+      ));
+      continue;
+    }
+    if (expectedSym !== undefined) {
+      operations.push({
+        kind: 'set_instruction_arg',
+        eventAnchor,
+        instructionAnchor,
+        target: instruction.anchor,
+        targetPreconditionHash: hash,
+        sourceSpan: got.span,
+        bank: instruction.bank,
+        id: instruction.id,
+        argument: expected.name,
+        before: expected.value,
+        after: gotVal
+      });
+      continue;
+    }
+    if (typeof expected.value !== typeof gotVal) {
+      add(error(
+        'DARKSCRIPT_ARG_TYPE',
+        `参数 ${expected.name} 类型不匹配。`,
+        got.span,
+        { resourceUri, targetAnchor: instructionAnchor }
+      ));
+      continue;
+    }
+    if (!Object.is(expected.value, gotVal)) {
+      operations.push({
+        kind: 'set_instruction_arg',
+        eventAnchor,
+        instructionAnchor,
+        target: instruction.anchor,
+        targetPreconditionHash: hash,
+        sourceSpan: got.span,
+        bank: instruction.bank,
+        id: instruction.id,
+        argument: expected.name,
+        before: expected.value,
+        after: gotVal
+      });
+    }
+  }
+}
+
+interface EventPairing {
+  pairs: Array<{ parsed: ParsedEvent; documentEvent: EmevdEditorDocument['events'][number] }>;
+  /** 源码里有、文档里没有的事件（等数量时优先按位置当成改 id）。 */
+  added: ParsedEvent[];
+  /** 文档里有、源码里没有的事件。 */
+  deleted: EmevdEditorDocument['events'][number][];
+}
+
+function pairEvents(
+  parsed: ParsedEvent[],
+  documentEvents: readonly EmevdEditorDocument['events'][number][]
+): EventPairing {
+  const remaining = [...documentEvents];
+  const pairs: EventPairing['pairs'] = [];
+  const leftovers: ParsedEvent[] = [];
+  for (const event of parsed) {
+    const index = remaining.findIndex((item) => item.eventId === event.eventId);
+    if (index >= 0) {
+      pairs.push({ parsed: event, documentEvent: remaining.splice(index, 1)[0]! });
+    } else {
+      leftovers.push(event);
+    }
+  }
+  // 数量相等的「多出来 ↔ 缺下来」按位置配对：这是改事件 id 的场景，
+  // 配对后走 set_event_id，保留原事件的全部指令。
+  while (leftovers.length > 0 && remaining.length > 0) {
+    pairs.push({ parsed: leftovers.shift()!, documentEvent: remaining.shift()! });
+  }
+  return { pairs, added: leftovers, deleted: remaining };
+}
+
+function parseDarkScriptEvents(
+  source: string,
+  index: SourceIndex,
+  add: (item: EmevdDslDiagnostic) => void
+): ParsedEvent[] {
+  const events: ParsedEvent[] = [];
+  let offset = 0;
+  const header = /\$Event\(\s*(-?\d+)\s*,\s*(Default|Restart|-?\d+)(?:\s*\/\*[\s\S]*?\*\/)?\s*,\s*function\s*\(([^)]*)\)\s*\{/g;
+  while (offset <= source.length) {
+    header.lastIndex = offset;
+    const match = header.exec(source);
+    if (!match) break;
+    const headerStart = match.index;
+    const headerEnd = header.lastIndex;
+    const close = findEventClose(source, headerEnd);
+    if (close < 0) {
+      add(error('DARKSCRIPT_PARSE', '事件块没有对应的 `});`。', index.span(headerStart, source.length)));
+      break;
+    }
+    const restRaw = match[2]!;
+    const restBehavior = restRaw === 'Default' ? 0 : restRaw === 'Restart' ? 1 : Number(restRaw);
+    const paramStr = match[3]?.trim() ?? '';
+    const parameterNames = paramStr.length > 0
+      ? paramStr.split(',').map((s) => s.trim()).filter((s) => s.length > 0)
+      : [];
+    const body = source.slice(headerEnd, close);
+    const statements = parseStatements(body, headerEnd, index, add);
+    events.push({
+      eventId: Number(match[1]),
+      restBehavior,
+      parameterNames,
+      statements,
+      span: index.span(headerStart, close + 3)
+    });
+    offset = close + 3;
+  }
+  if (events.length === 0 && /\$Event\s*\(/.test(source)) {
+    add(error('DARKSCRIPT_PARSE', '没有解析到完整的 $Event 块。', index.span(0, source.length)));
+  }
+  return events;
+}
+
+function findEventClose(source: string, from: number): number {
+  const needle = '\n});';
+  let search = from;
+  while (search < source.length) {
+    const at = source.indexOf(needle, search);
+    if (at < 0) {
+      return source.startsWith('});', from) ? from : source.endsWith('\n});') ? source.lastIndexOf('\n});') + 1 : -1;
+    }
+    return at + 1;
+  }
+  return -1;
+}
+
+function parseStatements(
+  body: string,
+  bodyStart: number,
+  index: SourceIndex,
+  add: (item: EmevdDslDiagnostic) => void
+): ParsedStatement[] {
+  const statements: ParsedStatement[] = [];
+  let i = 0;
+  while (i < body.length) {
+    while (i < body.length && /\s/.test(body[i]!)) i += 1;
+    if (i >= body.length) break;
+    if (body.startsWith('//', i)) {
+      const nl = body.indexOf('\n', i);
+      const end = nl < 0 ? body.length : nl;
+      const text = body.slice(i, end).trim();
+      statements.push({
+        kind: 'comment',
+        text,
+        span: index.span(bodyStart + i, bodyStart + end)
+      });
+      i = end;
+      continue;
+    }
+    const start = i;
+    const sliced = scanBalancedStatement(body, i);
+    if (!sliced) {
+      add(error('DARKSCRIPT_PARSE', '无法解析的语句。', index.span(bodyStart + i, bodyStart + body.length)));
+      break;
+    }
+    i = sliced.end;
+    const raw = body.slice(start, sliced.end).trim();
+    const span = index.span(bodyStart + start, bodyStart + sliced.end);
+    const wait = parseWaitFor(raw, span, bodyStart + start, index, add);
+    if (wait) {
+      statements.push(wait);
+      continue;
+    }
+    const call = parseCall(raw, span);
+    if (call) {
+      statements.push({ kind: 'call', call, span });
+      continue;
+    }
+    add(warn('DARKSCRIPT_LINE_UNDECODED', '无法识别的语句，未解码。', span));
+  }
+  return statements;
+}
+
+function scanBalancedStatement(body: string, start: number): { end: number } | null {
+  let depth = 0;
+  let i = start;
+  while (i < body.length) {
+    const ch = body[i]!;
+    if (ch === '(') depth += 1;
+    else if (ch === ')') depth -= 1;
+    else if (ch === ';' && depth === 0) return { end: i + 1 };
+    i += 1;
+  }
+  return null;
+}
+
+function parseWaitFor(
+  raw: string,
+  span: EmevdDslSourceSpan,
+  absoluteStart: number,
+  index: SourceIndex,
+  add: (item: EmevdDslDiagnostic) => void
+): ParsedStatement | null {
+  const match = /^WaitFor\s*\(([\s\S]*)\)\s*;$/.exec(raw);
+  if (!match) return null;
+  const inner = match[1]!.trim();
+  if (/^[A-Z][A-Za-z0-9_]*\s*\(/.test(inner) && !inner.includes('&&')) {
+    const call = parseCall(`${inner};`, span);
+    if (!call) {
+      add(warn('DARKSCRIPT_LINE_UNDECODED', 'WaitFor 里的谓词无法解析，未解码。', span));
+      return { kind: 'wait-for', predicates: [], span };
+    }
+    return { kind: 'wait-for', predicates: [call], span };
+  }
+  const parts = splitTopLevel(inner, '&&');
+  const predicates: ParsedCall[] = [];
+  let cursor = raw.indexOf('(') + 1;
+  for (const part of parts) {
+    const local = part.trim();
+    const rel = raw.indexOf(local, cursor);
+    const callSpan = rel >= 0
+      ? index.span(absoluteStart + rel, absoluteStart + rel + local.length)
+      : span;
+    const call = parseCall(`${local};`, callSpan);
+    if (!call) {
+      add(warn('DARKSCRIPT_LINE_UNDECODED', 'WaitFor 里的谓词无法解析，未解码。', callSpan));
+      return { kind: 'wait-for', predicates: [], span };
+    }
+    predicates.push(call);
+    cursor = rel >= 0 ? rel + local.length : cursor;
+  }
+  return { kind: 'wait-for', predicates, span };
+}
+
+function parseCall(raw: string, span: EmevdDslSourceSpan): ParsedCall | null {
+  const match = /^([A-Z][A-Za-z0-9_]*)\s*\(([\s\S]*)\)\s*;$/.exec(raw.trim());
+  if (!match) return null;
+  const argsRaw = match[2]!.trim();
+  if (argsRaw.length === 0) return { name: match[1]!, args: [], span };
+  const parts = splitTopLevel(argsRaw, ',');
+  const args: ParsedArg[] = [];
+  for (const part of parts) {
+    const literal = parseLiteral(part.trim());
+    if (literal === undefined) return null;
+    args.push({ value: literal, span });
+  }
+  return { name: match[1]!, args, span };
+}
+
+function parseLiteral(text: string): EmevdDslLiteral | string | undefined {
+  if (text === 'true') return true;
+  if (text === 'false') return false;
+  if (text === '-0') return -0;
+  if (/^-?\d+$/.test(text)) {
+    const value = Number(text);
+    return Number.isSafeInteger(value) ? value : undefined;
+  }
+  if (/^-?\d+\.\d+(?:e[+-]?\d+)?$/i.test(text)) {
+    const value = Number(text);
+    return Number.isFinite(value) ? value : undefined;
+  }
+  if (/^X\d+_\d+$/.test(text)) {
+    return text;
+  }
+  return undefined;
+}
+
+function splitTopLevel(text: string, separator: string): string[] {
+  const parts: string[] = [];
+  let depth = 0;
+  let start = 0;
+  for (let i = 0; i < text.length; i += 1) {
+    const ch = text[i]!;
+    if (ch === '(') depth += 1;
+    else if (ch === ')') depth -= 1;
+    else if (depth === 0 && text.startsWith(separator, i)) {
+      parts.push(text.slice(start, i));
+      i += separator.length - 1;
+      start = i + 1;
+    }
+  }
+  parts.push(text.slice(start));
+  return parts.filter((part) => part.trim().length > 0);
+}
+
+function normalizeComment(text: string): string {
+  return text.replace(/^\s*\/\/\s*/, '').trim();
+}
+
+function makeSourceIndex(source: string): SourceIndex {
+  const starts = [0];
+  for (let i = 0; i < source.length; i += 1) {
+    if (source[i] === '\n') starts.push(i + 1);
+  }
+  const positionAt = (offset: number): EmevdDslSourcePosition => {
+    const clamped = Math.max(0, Math.min(offset, source.length));
+    let low = 0;
+    let high = starts.length - 1;
+    while (low < high) {
+      const mid = Math.ceil((low + high + 1) / 2);
+      if (starts[mid]! <= clamped) low = mid;
+      else high = mid - 1;
+    }
+    return { offset: clamped, line: low + 1, column: clamped - starts[low]! + 1 };
+  };
+  return {
+    positionAt,
+    span(from: number, to: number) {
+      return { start: positionAt(from), end: positionAt(to) };
+    }
+  };
+}
+
+function emptyAst(request: EmevdDslCompileRequest, span: EmevdDslSourceSpan): EmevdDslDocument {
+  return {
+    schemaVersion: 1,
+    resourceUri: request.resourceUri,
+    baseRevision: request.baseRevision,
+    emedfSchemaFingerprint: request.emedfSchemaFingerprint,
+    events: [],
+    span
+  };
+}
+
+function error(
+  code: string,
+  message: string,
+  span: EmevdDslSourceSpan,
+  extra?: { resourceUri?: string; targetAnchor?: string }
+): EmevdDslDiagnostic {
+  return {
+    severity: 'error',
+    code,
+    message,
+    span,
+    ...(extra?.resourceUri !== undefined ? { resourceUri: extra.resourceUri } : {}),
+    ...(extra?.targetAnchor !== undefined ? { targetAnchor: extra.targetAnchor } : {})
+  };
+}
+
+function warn(
+  code: string,
+  message: string,
+  span: EmevdDslSourceSpan,
+  extra?: { resourceUri?: string; targetAnchor?: string }
+): EmevdDslDiagnostic {
+  return {
+    severity: 'warning',
+    code,
+    message,
+    span,
+    ...(extra?.resourceUri !== undefined ? { resourceUri: extra.resourceUri } : {}),
+    ...(extra?.targetAnchor !== undefined ? { targetAnchor: extra.targetAnchor } : {})
+  };
+}
+
+function compareDiagnostics(left: EmevdDslDiagnostic, right: EmevdDslDiagnostic): number {
+  return left.span.start.offset - right.span.start.offset || left.code.localeCompare(right.code);
+}
+
+function unique(values: string[]): string[] {
+  return [...new Set(values)];
+}
+
+function hashText(value: string): string {
+  return `sha256:${createHash('sha256').update(value).digest('hex')}`;
+}
+
+function stableJson(value: unknown): string {
+  if (value === null || typeof value !== 'object') return JSON.stringify(value);
+  if (Array.isArray(value)) return `[${value.map(stableJson).join(',')}]`;
+  const record = value as Record<string, unknown>;
+  return `{${Object.keys(record).sort().map((key) => `${JSON.stringify(key)}:${stableJson(record[key])}`).join(',')}}`;
+}

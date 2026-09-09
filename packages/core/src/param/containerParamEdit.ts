@@ -1,0 +1,1215 @@
+/**
+ * Agent / CLI PARAM field facade.
+ *
+ * Read and set named fields on rows inside gameparam.parambnd.dcx.
+ * Encoding uses applyParamFieldMutation; unpack uses extract-bnd4-child;
+ * write uses write-param mutations[] then write-bnd4 + applyNativeMutation.
+ * Do not parse Smithbox XML here and do not scan BND by brute-force index.
+ */
+import { createHash } from 'node:crypto';
+import { mkdir, mkdtemp, readdir, readFile, rm, stat } from 'node:fs/promises';
+import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path';
+import { fileURLToPath, pathToFileURL } from 'node:url';
+import type { Diagnostic, ParamDefDocument, ParamMetadataTrustPolicy } from '@soulforge/shared';
+import { createBridgeDaemonScope, runBridge } from '../bridge/runBridge.js';
+import { applyNativeMutation } from '../editing/editorMutationService.js';
+import {
+  commitParamMutationsViaBridge,
+  readParamDocumentViaBridge
+} from '../editing/paramBridgeCommit.js';
+import { stageBridgeOutput } from '../editing/bridgeStaging.js';
+import type { NativeEditSession } from '../editing/nativeEditSession.js';
+import { applyParamFieldMutation } from './paramFieldMutation.js';
+import { decodeRowFields } from './paramdefLayout.js';
+import { importPinnedSmithboxSdtParamMetadata } from './smithboxParamMetadataSource.js';
+import { matchParamMetadataPackage, resolveParamMetadataRowWidth } from './paramMetadata.js';
+
+export interface ParamRowSlot {
+  rowIndex: number;
+  id: number;
+  dataBase64: string;
+  dataHash: string;
+  name?: string;
+}
+
+export interface ParamFieldEdit {
+  table: string;
+  rowId: number;
+  fieldId: string;
+  value: number | string | boolean;
+  rowIndex?: number;
+  expectedDataHash?: string;
+}
+
+export interface ParamFieldReadQuery {
+  table: string;
+  rowIds: number[];
+  fieldIds: string[];
+  rowIndex?: number;
+}
+
+export interface ParamFieldSnapshot {
+  table: string;
+  rowId: number;
+  rowIndex?: number;
+  dataHash?: string;
+  /** Physical BND4 child identity returned by the native read. */
+  entryName?: string;
+  entryIndex?: number;
+  /** Native row name returned by the PARAM document, when available. */
+  rowName?: string;
+  fieldId: string;
+  displayName?: string;
+  description?: string;
+  /** Native metadata reference target, for example ResourceItemLotParam. */
+  refs?: string;
+  /** Provenance returned by the same native document read, never a cached index fallback. */
+  sourceHash?: string;
+  sourceRevision?: number;
+  value: number | string | boolean | null;
+}
+
+export interface ParamEditFailure {
+  code: string;
+  message: string;
+  details?: unknown;
+}
+
+export type ParamReadResult =
+  | {
+      ok: true;
+      containerPath: string;
+      fields: ParamFieldSnapshot[];
+      missingRows: Array<{ table: string; rowId: number }>;
+      diagnostics: Diagnostic[];
+    }
+  | { ok: false; error: ParamEditFailure; diagnostics: Diagnostic[] };
+
+export interface ParamFieldDefinitionSnapshot {
+  fieldId: string;
+  name: string;
+  type: string;
+  description?: string;
+  /** Native metadata reference target, for example ResourceItemLotParam. */
+  refs?: string;
+}
+
+export type ParamFieldDefinitionResult =
+  | {
+      ok: true;
+      containerPath: string;
+      table: string;
+      entryName: string;
+      entryIndex: number;
+      rowIds: number[];
+      sourceHash: string;
+      sourceRevision?: number;
+      fields: ParamFieldDefinitionSnapshot[];
+      diagnostics: Diagnostic[];
+    }
+  | { ok: false; error: ParamEditFailure; diagnostics: Diagnostic[] };
+
+export type ParamSetResult =
+  | {
+      ok: true;
+      containerPath: string;
+      before: ParamFieldSnapshot[];
+      after: ParamFieldSnapshot[];
+      changedTables: string[];
+      diagnostics: Diagnostic[];
+    }
+  | { ok: false; error: ParamEditFailure; diagnostics: Diagnostic[]; before?: ParamFieldSnapshot[] };
+
+interface ContainerEntry {
+  index: number;
+  name: string;
+  contentHash: string;
+}
+
+let metadataCache: Awaited<ReturnType<typeof importPinnedSmithboxSdtParamMetadata>> | null = null;
+
+/**
+ * Remove one PARAM read handoff directory without ever accepting an arbitrary
+ * path from a caller.  The remove operation is injectable only for the small
+ * contract smoke: production always uses fs.rm, while the smoke can exercise
+ * retry and failure diagnostics deterministically without changing ACLs on a
+ * real workspace.
+ */
+export async function cleanupParamTempDirectory(input: {
+  stagingRoot: string;
+  tempDirectory: string;
+  containerPath: string;
+  remove?: (path: string) => Promise<void>;
+}): Promise<Diagnostic | undefined> {
+  const root = resolve(input.stagingRoot);
+  const candidate = resolve(input.tempDirectory);
+  const relativeCandidate = relative(root, candidate);
+  if (!relativeCandidate || relativeCandidate.includes('\\') || relativeCandidate.includes('/')
+    || !relativeCandidate.startsWith('param-read-')) {
+    return {
+      severity: 'warning',
+      code: 'PARAM_TEMP_CLEANUP_PATH_REJECTED',
+      message: 'PARAM 临时目录清理路径未通过 stagingRoot 边界校验。',
+      sourceUri: pathToFileURL(input.containerPath).href,
+      details: { stagingRoot: root, candidate }
+    };
+  }
+  const remove = input.remove ?? ((path: string) => rm(path, { recursive: true, force: true }));
+  let lastError: unknown;
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    try {
+      await remove(candidate);
+      return undefined;
+    } catch (error) {
+      lastError = error;
+      if (attempt === 0) await new Promise<void>((resolveNext) => setImmediate(resolveNext));
+    }
+  }
+  return {
+    severity: 'warning',
+    code: 'PARAM_TEMP_CLEANUP_FAILED',
+    message: 'PARAM 临时目录清理失败，已保留本次读写结果。',
+    sourceUri: pathToFileURL(input.containerPath).href,
+    details: {
+      path: candidate,
+      errorName: lastError instanceof Error ? lastError.name : undefined,
+      systemCode: lastError && typeof lastError === 'object' && 'code' in lastError
+        && typeof lastError.code === 'string' ? lastError.code : undefined
+    }
+  };
+}
+
+export function groupParamEdits(edits: ParamFieldEdit[]): Map<string, ParamFieldEdit[]> {
+  const groups = new Map<string, ParamFieldEdit[]>();
+  for (const edit of edits) {
+    const key = normalizeTableToken(edit.table);
+    const list = groups.get(key) ?? [];
+    list.push(edit);
+    groups.set(key, list);
+  }
+  return groups;
+}
+
+export function applyEditsToRowBytes(input: {
+  rowDataBase64: string;
+  definition: ParamDefDocument;
+  edits: Array<{ fieldId: string; value: number | string | boolean }>;
+}):
+  | { ok: true; nextDataBase64: string; before: Record<string, number | string | boolean | null>; after: Record<string, number | string | boolean | null> }
+  | { ok: false; code: string; message: string } {
+  let data = input.rowDataBase64;
+  const before: Record<string, number | string | boolean | null> = {};
+  const after: Record<string, number | string | boolean | null> = {};
+  for (const edit of input.edits) {
+    const current = readFieldValue(data, input.definition, edit.fieldId);
+    before[edit.fieldId] = current;
+    const applied = applyParamFieldMutation({
+      rowDataBase64: data,
+      definition: input.definition,
+      fieldId: edit.fieldId,
+      value: edit.value
+    });
+    if (!applied.ok) return applied;
+    data = applied.nextDataBase64;
+    after[edit.fieldId] = readFieldValue(data, input.definition, edit.fieldId);
+  }
+  return { ok: true, nextDataBase64: data, before, after };
+}
+
+export async function resolveGameparamContainer(
+  overlayRoot: string,
+  explicit?: string
+): Promise<{ ok: true; path: string } | { ok: false; error: ParamEditFailure }> {
+  if (explicit) {
+    let cleanPath = explicit.trim();
+    if (cleanPath.startsWith('file:///')) {
+      try {
+        cleanPath = fileURLToPath(cleanPath);
+      } catch {
+        cleanPath = cleanPath.slice(8);
+      }
+    } else if (cleanPath.startsWith('file://')) {
+      cleanPath = cleanPath.slice(7);
+    }
+    const resolved = isAbsolute(cleanPath)
+      ? resolve(cleanPath)
+      : resolve(overlayRoot, cleanPath);
+    try {
+      const info = await stat(resolved);
+      if (!info.isFile()) {
+        return { ok: false, error: { code: 'PARAM_CONTAINER_NOT_FILE', message: `不是文件：${resolved}` } };
+      }
+    } catch {
+      return { ok: false, error: { code: 'PARAM_CONTAINER_MISSING', message: `找不到容器：${resolved}` } };
+    }
+    return { ok: true, path: resolved };
+  }
+  const preferred = [
+    join(overlayRoot, 'param', 'gameparam', 'gameparam.parambnd.dcx'),
+    join(overlayRoot, 'param', 'gameparam.parambnd.dcx')
+  ];
+  for (const candidate of preferred) {
+    try {
+      const info = await stat(candidate);
+      if (info.isFile()) return { ok: true, path: candidate };
+    } catch {
+      // try next
+    }
+  }
+  const found = await findParamBnd(overlayRoot);
+  if (found.length === 1) return { ok: true, path: found[0]! };
+  if (found.length === 0) {
+    return {
+      ok: false,
+      error: {
+        code: 'PARAM_CONTAINER_NOT_FOUND',
+        message: '工作区里没有 gameparam.parambnd.dcx。请传 --container。'
+      }
+    };
+  }
+  return {
+    ok: false,
+    error: {
+      code: 'PARAM_CONTAINER_AMBIGUOUS',
+      message: `找到多份 parambnd，请指定 --container：${found.join(' | ')}`
+    }
+  };
+}
+
+export async function readParamFields(input: {
+  edit: NativeEditSession;
+  queries: ParamFieldReadQuery[];
+  containerPath?: string;
+}): Promise<ParamReadResult> {
+  const container = await resolveGameparamContainer(input.edit.session.layers.overlayRoot, input.containerPath);
+  if (!container.ok) return { ok: false, error: container.error, diagnostics: [] };
+  const diagnostics: Diagnostic[] = [];
+  const fields: ParamFieldSnapshot[] = [];
+  const missingRows: Array<{ table: string; rowId: number }> = [];
+  let sourceRevision: number | undefined;
+  try {
+    sourceRevision = (await stat(container.path)).mtimeMs;
+  } catch (error) {
+    diagnostics.push({
+      severity: 'warning',
+      code: 'PARAM_SOURCE_REVISION_UNAVAILABLE',
+      message: error instanceof Error ? error.message : '无法读取 PARAM 容器的 source revision。',
+      sourceUri: pathToFileURL(container.path).href
+    });
+  }
+  const entries = await listParamEntries(input.edit, container.path);
+  if (!entries.ok) return { ok: false, error: entries.error, diagnostics: entries.diagnostics };
+  for (const query of input.queries) {
+    const loaded = await loadTableRows(input.edit, container.path, entries.entries, query.table, query.rowIds, true);
+    if (!loaded.ok) return { ok: false, error: loaded.error, diagnostics: [...diagnostics, ...loaded.diagnostics] };
+    diagnostics.push(...loaded.diagnostics);
+    for (const rowId of query.rowIds) {
+      const candidateSlots = loaded.slotsById.get(rowId);
+      if (!candidateSlots || candidateSlots.length === 0) {
+        missingRows.push({ table: loaded.tableName, rowId });
+        continue;
+      }
+      const targetSlots = query.rowIndex !== undefined
+        ? candidateSlots.filter((s) => s.rowIndex === query.rowIndex)
+        : candidateSlots;
+      if (targetSlots.length === 0) {
+        missingRows.push({ table: loaded.tableName, rowId });
+        continue;
+      }
+      for (const row of targetSlots) {
+        let foundAnyField = false;
+        // An empty fieldIds list is an explicit request for the complete
+        // trusted row projection. This lets the agent inspect a richly named
+        // PARAM row before it has to guess a field id, while the writer still
+        // requires explicit field ids for mutations.
+        const requestedFieldIds = query.fieldIds.length > 0
+          ? query.fieldIds
+          : loaded.definition.fields.map((field) => field.id);
+        for (const fieldId of requestedFieldIds) {
+          const field = loaded.definition.fields.find((item) => item.id === fieldId);
+          if (!field) {
+            diagnostics.push({
+              severity: 'warning',
+              code: 'PARAM_FIELD_NOT_FOUND',
+              message: `${query.table}.${fieldId} 不在授信定义里。`
+            });
+            continue;
+          }
+          foundAnyField = true;
+          fields.push({
+            table: loaded.tableName,
+            rowId,
+            rowIndex: row.rowIndex,
+            dataHash: row.dataHash,
+            entryName: loaded.entry.name,
+            entryIndex: loaded.entry.index,
+            ...(row.name ? { rowName: row.name } : {}),
+            fieldId,
+            ...(field.name && field.name !== fieldId ? { displayName: field.name } : {}),
+            ...(field.description ? { description: field.description } : {}),
+            ...(field.refs ? { refs: field.refs } : {}),
+            sourceHash: loaded.sourceHash,
+            ...(sourceRevision !== undefined ? { sourceRevision } : {}),
+            value: readFieldValue(row.dataBase64, loaded.definition, fieldId)
+          });
+        }
+        if (!foundAnyField && requestedFieldIds.length > 0) {
+          return {
+            ok: false,
+            error: { code: 'PARAM_FIELD_NOT_FOUND', message: `${query.table} 请求的字段均不在授信定义里（${requestedFieldIds.join(', ')}）。` },
+            diagnostics
+          };
+        }
+      }
+    }
+  }
+  if (fields.length === 0 && missingRows.length > 0) {
+    return {
+      ok: false,
+      error: {
+        code: 'PARAM_ROW_NOT_FOUND',
+        message: `请求的 PARAM 行均不存在：${missingRows.map((row) => `${row.table}#${row.rowId}`).join(', ')}`
+      },
+      diagnostics
+    };
+  }
+  return { ok: true, containerPath: container.path, fields, missingRows, diagnostics };
+}
+
+/**
+ * Search the trusted definition for fields relevant to an already resolved
+ * native row. This is deliberately separate from read_param_fields: it lets
+ * the Agent obtain real field IDs without sending an unbounded full-row read,
+ * while the subsequent value read still requires an explicit non-empty list.
+ */
+export async function searchParamFieldDefinitions(input: {
+  edit: NativeEditSession;
+  table: string;
+  rowIds: number[];
+  query: string;
+  limit?: number;
+  containerPath?: string;
+}): Promise<ParamFieldDefinitionResult> {
+  const query = input.query.trim();
+  if (!query || input.rowIds.length === 0) {
+    return {
+      ok: false,
+      error: {
+        code: 'PARAM_FIELD_QUERY_REQUIRED',
+        message: 'search_param_fields 需要已定位的 table、rowIds 和非空 query。'
+      },
+      diagnostics: []
+    };
+  }
+  const container = await resolveGameparamContainer(input.edit.session.layers.overlayRoot, input.containerPath);
+  if (!container.ok) return { ok: false, error: container.error, diagnostics: [] };
+  const entries = await listParamEntries(input.edit, container.path);
+  if (!entries.ok) return { ok: false, error: entries.error, diagnostics: entries.diagnostics };
+  const loaded = await loadTableRows(input.edit, container.path, entries.entries, input.table, input.rowIds);
+  if (!loaded.ok) return loaded;
+
+  const queryTerms = expandParamFieldQuery(query);
+  const scored = loaded.definition.fields.map((field) => ({
+    field,
+    score: scoreParamFieldDefinition(field, queryTerms)
+  }))
+    .filter((item) => item.score > 0)
+    .sort((left, right) => right.score - left.score || left.field.id.localeCompare(right.field.id))
+    .slice(0, Math.max(1, Math.min(32, Math.trunc(input.limit ?? 12))))
+    .map(({ field }) => ({
+      fieldId: field.id,
+      name: field.name,
+      type: field.type,
+      ...(field.description ? { description: field.description } : {}),
+      ...(field.refs ? { refs: field.refs } : {})
+    }));
+
+  let sourceRevision: number | undefined;
+  try {
+    sourceRevision = (await stat(container.path)).mtimeMs;
+  } catch {
+    // source revision is useful provenance, but failure to stat must not turn
+    // a metadata lookup into an unstructured exception.
+  }
+  return {
+    ok: true,
+    containerPath: container.path,
+    table: loaded.tableName,
+    entryName: loaded.entry.name,
+    entryIndex: loaded.entry.index,
+    rowIds: [...input.rowIds],
+    sourceHash: loaded.sourceHash,
+    ...(sourceRevision !== undefined ? { sourceRevision } : {}),
+    fields: scored,
+    diagnostics: loaded.diagnostics
+  };
+}
+
+function scoreParamFieldDefinition(
+  field: ParamDefDocument['fields'][number],
+  queryTerms: readonly string[]
+): number {
+  const id = field.id.toLocaleLowerCase();
+  const name = field.name?.toLocaleLowerCase() ?? '';
+  const description = field.description?.toLocaleLowerCase() ?? '';
+  const type = field.type.toLocaleLowerCase();
+  return queryTerms.reduce((sum, term) => {
+    const normalized = term.toLocaleLowerCase();
+    // A term in the stable field id is stronger than a prose mention in a
+    // description. For example, ResourceItemLotParam descriptions mention
+    // `resourceItemCategory01` on itemNum/lotBasePoint fields; returning those
+    // first hid the actual category field behind the result limit.
+    if (id === normalized) return sum + 100;
+    if (id.includes(normalized)) return sum + 60;
+    if (name === normalized) return sum + 40;
+    if (name.includes(normalized)) return sum + 30;
+    if (description.includes(normalized)) return sum + 10;
+    if (type.includes(normalized)) return sum + 5;
+    return sum;
+  }, 0);
+}
+
+function expandParamFieldQuery(query: string): string[] {
+  const terms = new Set(query.toLocaleLowerCase().split(/[\s,，、/]+/u).filter(Boolean));
+  const aliases: ReadonlyArray<[RegExp, string]> = [
+    [/血条|生命|生命值|生命槽|忍杀|忍殺|血量|红点|hp|health|vitality|hitpoint|life/ui, 'hp health vitality hitpoint ninsatu ninsatsu 忍殺 忍杀 maxhp'],
+    [/精英|首领|头目|boss|elite|miniboss/ui, 'elite boss miniboss difficulty rank'],
+    [/攻击|敌对|阵营|队伍|目标|attack|hostile|team|target|faction/ui, 'attack hostile team target faction teamtype 所属 敵対'],
+    [/落雷|雷|特效|效果|lightning|effect|sfx|spawn/ui, 'lightning effect sfx spawn 特効'],
+    [/掉落|奖励|抽选|抽選|物品|道具|铃铛|drop|reward|item|lot|goods|loot/ui, 'drop reward item lot goods itemlot 抽選 抽选 報酬']
+  ];
+  for (const [pattern, replacement] of aliases) {
+    if (pattern.test(query)) {
+      replacement.split(' ').filter(Boolean).forEach((term) => terms.add(term.toLocaleLowerCase()));
+    }
+  }
+  return [...terms];
+}
+
+export async function setParamFields(input: {
+  edit: NativeEditSession;
+  edits: ParamFieldEdit[];
+  containerPath?: string;
+}): Promise<ParamSetResult> {
+  if (input.edits.length === 0) {
+    return { ok: false, error: { code: 'PARAM_EDIT_EMPTY', message: '没有要写入的字段。' }, diagnostics: [] };
+  }
+  const container = await resolveGameparamContainer(input.edit.session.layers.overlayRoot, input.containerPath);
+  if (!container.ok) return { ok: false, error: container.error, diagnostics: [] };
+  const file = await input.edit.indexFile(container.path, 'param');
+  const entries = await listParamEntries(input.edit, container.path);
+  if (!entries.ok) return { ok: false, error: entries.error, diagnostics: entries.diagnostics };
+
+  const grouped = groupParamEdits(input.edits);
+  const before: ParamFieldSnapshot[] = [];
+  const after: ParamFieldSnapshot[] = [];
+  const changedTables: string[] = [];
+  const diagnostics: Diagnostic[] = [];
+  let containerHash = file.sha256 ?? await sha256Of(container.path);
+
+  for (const [, tableEdits] of grouped) {
+    const table = tableEdits[0]!.table;
+    const rowIds = [...new Set(tableEdits.map((item) => item.rowId))];
+    const loaded = await loadTableRows(input.edit, container.path, entries.entries, table, rowIds, false, true);
+    if (!loaded.ok) {
+      return { ok: false, error: loaded.error, diagnostics: [...diagnostics, ...loaded.diagnostics], before };
+    }
+    try {
+    diagnostics.push(...loaded.diagnostics);
+    const mutations: Array<{ kind: 'upsert'; id: number; dataBase64: string; rowIndex?: number; expectedDataHash?: string }> = [];
+    const bySlot = new Map<number, { slot: ParamRowSlot; edits: ParamFieldEdit[] }>();
+    for (const edit of tableEdits) {
+      let slot: ParamRowSlot | undefined;
+      if (edit.rowIndex !== undefined) {
+        slot = loaded.slots.find((s) => s.rowIndex === edit.rowIndex);
+        if (!slot) {
+          return {
+            ok: false,
+            error: { code: 'PARAM_ROW_NOT_FOUND', message: `${table} 物理行索引 ${edit.rowIndex} 不存在。` },
+            diagnostics,
+            before
+          };
+        }
+        if (slot.id !== edit.rowId) {
+          return {
+            ok: false,
+            error: {
+              code: 'PARAM_ROW_ID_MISMATCH',
+              message: `${table} 物理行索引 ${edit.rowIndex} 的 ID (${slot.id}) 与请求 ID (${edit.rowId}) 不匹配。`
+            },
+            diagnostics,
+            before
+          };
+        }
+        if (edit.expectedDataHash && !slot.dataHash.toLowerCase().includes(edit.expectedDataHash.toLowerCase())) {
+          return {
+            ok: false,
+            error: {
+              code: 'PARAM_ROW_HASH_MISMATCH',
+              message: `${table} 物理行索引 ${edit.rowIndex} 的数据哈希已过期。`
+            },
+            diagnostics,
+            before
+          };
+        }
+      } else {
+        const candidates = loaded.slotsById.get(edit.rowId) ?? [];
+        if (candidates.length === 0) {
+          return {
+            ok: false,
+            error: { code: 'PARAM_ROW_NOT_FOUND', message: `${table}#${edit.rowId} 不存在。` },
+            diagnostics,
+            before
+          };
+        }
+        if (candidates.length > 1) {
+          return {
+            ok: false,
+            error: {
+              code: 'PARAM_ROW_AMBIGUOUS',
+              message: `${table}#${edit.rowId} 存在重复行 (${candidates.length} 个物理槽)；修改必须指定 rowIndex 和 expectedDataHash。`
+            },
+            diagnostics,
+            before
+          };
+        }
+        const candidate = candidates[0];
+        if (!candidate) {
+          return {
+            ok: false,
+            error: { code: 'PARAM_ROW_NOT_FOUND', message: `${table}#${edit.rowId} 不存在。` },
+            diagnostics,
+            before
+          };
+        }
+        slot = candidate;
+        if (edit.expectedDataHash && !slot.dataHash.toLowerCase().includes(edit.expectedDataHash.toLowerCase())) {
+          return {
+            ok: false,
+            error: {
+              code: 'PARAM_ROW_HASH_MISMATCH',
+              message: `${table}#${edit.rowId} 的数据哈希已过期。`
+            },
+            diagnostics,
+            before
+          };
+        }
+      }
+
+      if (!slot) {
+        return {
+          ok: false,
+          error: { code: 'PARAM_ROW_NOT_FOUND', message: `${table}#${edit.rowId} 不存在。` },
+          diagnostics,
+          before
+        };
+      }
+
+      const entry = bySlot.get(slot.rowIndex) ?? { slot, edits: [] as ParamFieldEdit[] };
+      entry.edits.push(edit);
+      bySlot.set(slot.rowIndex, entry);
+    }
+
+    for (const [, { slot, edits: rowEdits }] of bySlot) {
+      const applied = applyEditsToRowBytes({
+        rowDataBase64: slot.dataBase64,
+        definition: loaded.definition,
+        edits: rowEdits.map((item) => ({ fieldId: item.fieldId, value: item.value }))
+      });
+      if (!applied.ok) {
+        return {
+          ok: false,
+          error: { code: applied.code, message: `${table}#${slot.id} (row ${slot.rowIndex}): ${applied.message}` },
+          diagnostics,
+          before
+        };
+      }
+      for (const edit of rowEdits) {
+        const field = loaded.definition.fields.find((item) => item.id === edit.fieldId);
+        before.push({
+          table: loaded.tableName,
+          rowId: slot.id,
+          rowIndex: slot.rowIndex,
+          dataHash: slot.dataHash,
+          ...(slot.name ? { rowName: slot.name } : {}),
+          fieldId: edit.fieldId,
+          ...(field?.name && field.name !== edit.fieldId ? { displayName: field.name } : {}),
+          ...(field?.description ? { description: field.description } : {}),
+          value: applied.before[edit.fieldId] ?? null
+        });
+        after.push({
+          table: loaded.tableName,
+          rowId: slot.id,
+          rowIndex: slot.rowIndex,
+          dataHash: createHash('sha256').update(Buffer.from(applied.nextDataBase64, 'base64')).digest('hex').toLowerCase(),
+          ...(slot.name ? { rowName: slot.name } : {}),
+          fieldId: edit.fieldId,
+          ...(field?.name && field.name !== edit.fieldId ? { displayName: field.name } : {}),
+          ...(field?.description ? { description: field.description } : {}),
+          value: applied.after[edit.fieldId] ?? null
+        });
+      }
+      if (applied.nextDataBase64 !== slot.dataBase64) {
+        mutations.push({
+          kind: 'upsert',
+          id: slot.id,
+          dataBase64: applied.nextDataBase64,
+          rowIndex: slot.rowIndex,
+          expectedDataHash: slot.dataHash
+        });
+      }
+    }
+    if (mutations.length === 0) continue;
+
+    const committed = await commitTableMutations({
+      edit: input.edit,
+      file: { ...file, sha256: containerHash },
+      containerPath: container.path,
+      containerHash,
+      entry: loaded.entry,
+      unpackedPath: loaded.unpackedPath,
+      unpackedHash: loaded.sourceHash,
+      expectedRowDataSize: loaded.definition.rowDataSize,
+      mutations,
+      title: `PARAM set ${mutations.length} row(s) in ${loaded.tableName}`
+    });
+    if (!committed.ok) {
+      return { ok: false, error: committed.error, diagnostics: [...diagnostics, ...committed.diagnostics], before };
+    }
+    diagnostics.push(...committed.diagnostics);
+    changedTables.push(loaded.tableName);
+    containerHash = committed.nextContainerHash;
+    file.sha256 = containerHash;
+    const refreshed = entries.entries.find((item) => item.index === loaded.entry.index);
+    if (refreshed) refreshed.contentHash = '';
+    } finally {
+      const cleanupDiagnostic = await loaded.cleanup();
+      if (cleanupDiagnostic) diagnostics.push(cleanupDiagnostic);
+    }
+  }
+
+  return {
+    ok: true,
+    containerPath: container.path,
+    before,
+    after,
+    changedTables,
+    diagnostics
+  };
+}
+
+async function commitTableMutations(input: {
+  edit: NativeEditSession;
+  file: Awaited<ReturnType<NativeEditSession['indexFile']>>;
+  containerPath: string;
+  containerHash: string;
+  entry: ContainerEntry;
+  unpackedPath: string;
+  unpackedHash: string;
+  expectedRowDataSize: number;
+  mutations: Array<{ kind: 'upsert'; id: number; dataBase64: string; rowIndex?: number; expectedDataHash?: string }>;
+  title: string;
+}): Promise<
+  | { ok: true; nextContainerHash: string; diagnostics: Diagnostic[] }
+  | { ok: false; error: ParamEditFailure; diagnostics: Diagnostic[] }
+> {
+  const { edit } = input;
+  const allowedRoots = () => [...edit.allowedRoots(), dirname(input.unpackedPath)];
+  const paramStage = await stageBridgeOutput({
+    stagingRoot: edit.stagingRoot,
+    prefix: 'param-field',
+    fileName: `${safeSegment(input.entry.name)}.mutated`,
+    allowedRoots,
+    write: async (context) => commitParamMutationsViaBridge({
+      sourcePath: input.unpackedPath,
+      outputPath: context.outputPath,
+      expectedDocumentHash: input.unpackedHash,
+      expectedRowDataSize: input.expectedRowDataSize,
+      allowedRoots: context.allowedRoots,
+      writableRoots: context.writableRoots,
+      mutations: input.mutations,
+      timeoutMs: 120_000
+    })
+  });
+  if (!paramStage.ok || !paramStage.bytes) {
+    const diagnostics: Diagnostic[] = [
+      ...paramStage.diagnostics.map((item) => ({
+        severity: item.severity as Diagnostic['severity'],
+        code: item.code,
+        message: item.message,
+        sourceUri: input.file.sourceUri
+      })),
+      ...(paramStage.result?.diagnostics ?? []).map((item) => ({
+        severity: item.severity as Diagnostic['severity'],
+        code: item.code,
+        message: item.message,
+        sourceUri: input.file.sourceUri
+      }))
+    ];
+    return {
+      ok: false,
+      error: { code: 'PARAM_FIELD_STAGE_FAILED', message: '字段改动未能产出裸 param 暂存文件，容器未被修改。' },
+      diagnostics
+    };
+  }
+
+  const childBase64 = paramStage.bytes.toString('base64');
+  const outcome = await applyNativeMutation({
+    file: input.file,
+    sourceUri: input.file.sourceUri,
+    expectedHash: input.containerHash,
+    stagingRoot: edit.stagingRoot,
+    allowedRoots: () => [...edit.allowedRoots()],
+    stagingPrefix: 'parambnd',
+    stagingFileName: `${basename(input.containerPath)}.repacked`,
+    stageWrite: async (context) => {
+      const written = await runBridge<Record<string, unknown>>({
+        command: 'write-bnd4',
+        filePath: input.containerPath,
+        resourceUri: input.file.sourceUri,
+        allowedRoots: context.allowedRoots,
+        writableRoots: context.writableRoots,
+        timeoutMs: 180_000,
+        maxFrameBytes: 32 * 1024 * 1024,
+        ...(edit.oodleRuntimeRoot ? { oodleRuntimeRoot: edit.oodleRuntimeRoot } : {}),
+        commandOptions: {
+          outputPath: context.outputPath,
+          mutation: 'replace',
+          expectedContainerHash: input.containerHash,
+          entryIndex: input.entry.index,
+          expectedChildHash: input.entry.contentHash || await sha256Of(input.unpackedPath),
+          contentBase64: childBase64
+        }
+      });
+      return {
+        ok: written.parseStatus !== 'failed'
+          && written.diagnostics.some((item) => item.code === 'BND4_STAGING_WRITE_VERIFIED'),
+        diagnostics: written.diagnostics
+      };
+    },
+    title: input.title,
+    confirmActionLabel: '提交容器内 PARAM 字段变更'
+  }, { commit: edit.commitPort });
+
+  if (outcome.status !== 'committed' || !outcome.result.ok) {
+    const diagnostics = outcome.status === 'failed'
+      ? outcome.diagnostics
+      : outcome.status === 'committed'
+        ? outcome.result.diagnostics
+        : [{
+          severity: 'error' as const,
+          code: 'PARAM_WRITE_CANCELLED',
+          message: '写入被取消。',
+          sourceUri: input.file.sourceUri
+        }];
+    return {
+      ok: false,
+      error: { code: diagnostics[0]?.code ?? 'PARAM_WRITE_FAILED', message: diagnostics[0]?.message ?? '容器写入失败。' },
+      diagnostics
+    };
+  }
+  return {
+    ok: true,
+    nextContainerHash: await sha256Of(input.containerPath),
+    diagnostics: outcome.result.diagnostics
+  };
+}
+
+async function loadTableRows(
+  edit: NativeEditSession,
+  containerPath: string,
+  entries: ContainerEntry[],
+  table: string,
+  rowIds: number[],
+  allowMissingRows = false,
+  retainUnpackedPath = false
+): Promise<
+  | {
+      ok: true;
+      tableName: string;
+      entry: ContainerEntry;
+      definition: ParamDefDocument;
+      slots: ParamRowSlot[];
+      slotsById: Map<number, ParamRowSlot[]>;
+      rows: Map<number, ParamRowSlot>;
+      unpackedPath: string;
+      sourceHash: string;
+      missingRows: number[];
+      diagnostics: Diagnostic[];
+      cleanup: () => Promise<Diagnostic | undefined>;
+    }
+  | { ok: false; error: ParamEditFailure; diagnostics: Diagnostic[] }
+> {
+  const entry = findTableEntry(entries, table);
+  if (!entry) {
+    return {
+      ok: false,
+      error: {
+        code: 'PARAM_TABLE_NOT_FOUND',
+        message: `容器内没有表 ${table}。`,
+        details: { available: entries.map((item) => basename(item.name.replace(/\\/g, '/'))) }
+      },
+      diagnostics: []
+    };
+  }
+  // A single edit session can service concurrent reads (the Agent commonly
+  // issues several PARAM probes in parallel).  Reusing one deterministic
+  // output path lets extract-bnd4-child calls overwrite each other's bytes,
+  // producing a misleading PARAM_UNPACK_FAILED or a mixed sourceHash.  Give
+  // every load its own staging directory; the returned path remains available
+  // to the writer when this read is followed by a mutation.
+  await mkdir(edit.stagingRoot, { recursive: true });
+  const unpackedDir = await mkdtemp(join(edit.stagingRoot, 'param-read-'));
+  let cleaned = false;
+  const cleanup = async (): Promise<Diagnostic | undefined> => {
+    if (cleaned) return;
+    cleaned = true;
+    return cleanupParamTempDirectory({
+      stagingRoot: edit.stagingRoot,
+      tempDirectory: unpackedDir,
+      containerPath
+    });
+  };
+  const unpackedPath = join(unpackedDir, `${safeSegment(basename(entry.name.replace(/\\/g, '/')))}.${entry.index}.param`);
+  const bridgeScope = createBridgeDaemonScope();
+  let handedOff = false;
+  let documentDiagnostics: Diagnostic[] = [];
+  let resultDiagnostics: Diagnostic[] = documentDiagnostics;
+  try {
+  const extracted = await bridgeScope.run<{ name?: string; contentHash?: string }>({
+    command: 'extract-bnd4-child',
+    filePath: containerPath,
+    allowedRoots: [...edit.allowedRoots(), unpackedDir],
+    writableRoots: [unpackedDir],
+    ...(edit.oodleRuntimeRoot ? { oodleRuntimeRoot: edit.oodleRuntimeRoot } : {}),
+    timeoutMs: 60_000,
+    commandOptions: { entryIndex: entry.index, outputPath: unpackedPath }
+  });
+  if (extracted.parseStatus === 'failed') {
+    resultDiagnostics = extracted.diagnostics;
+    return {
+      ok: false,
+      error: { code: 'PARAM_UNPACK_FAILED', message: `解包 ${entry.name} 失败。` },
+      diagnostics: resultDiagnostics
+    };
+  }
+  if (extracted.data?.contentHash) entry.contentHash = extracted.data.contentHash;
+
+  const readOnce = (includeAllPayloads: boolean) => readParamDocumentViaBridge({
+    sourcePath: unpackedPath,
+    allowedRoots: [...edit.allowedRoots(), unpackedDir],
+    ...(includeAllPayloads ? { includeAllPayloads: true } : { rowIds }),
+    resolveRowDataSize: async (header) => {
+      const definition = await loadTrustedDefinition(
+        header.typeName, undefined, header.dataVersion, edit.session.meta.game
+      );
+      return definition.ok ? definition.document.rowDataSize : undefined;
+    },
+    timeoutMs: 120_000,
+    maxFrameBytes: includeAllPayloads ? 32 * 1024 * 1024 : 8 * 1024 * 1024
+  }, bridgeScope.run);
+  let document = await readOnce(false);
+  documentDiagnostics = asDiagnostics(document.diagnostics);
+  resultDiagnostics = documentDiagnostics;
+  if (!document.ok || !document.data) {
+    return {
+      ok: false,
+      error: { code: 'PARAM_READ_FAILED', message: `读取 ${entry.name} 失败。` },
+      diagnostics: documentDiagnostics
+    };
+  }
+  const definition = await loadTrustedDefinition(
+    document.data.typeName, document.data.rowDataSize, document.data.dataVersion, edit.session.meta.game
+  );
+  if (!definition.ok) return { ok: false, error: definition.error, diagnostics: documentDiagnostics };
+
+  let sourceHash = document.data.sourceHash;
+  const slots: ParamRowSlot[] = [];
+  const slotsById = new Map<number, ParamRowSlot[]>();
+  const rows = new Map<number, ParamRowSlot>();
+  const ingest = (items: Array<{ rowIndex?: number; id: number; dataBase64: string; dataHash?: string; name?: string }>): void => {
+    slots.length = 0;
+    slotsById.clear();
+    rows.clear();
+    for (let i = 0; i < items.length; i++) {
+      const row = items[i];
+      if (!row) continue;
+      if (typeof row.dataBase64 === 'string' && row.dataBase64.length > 0) {
+        const slot: ParamRowSlot = {
+          rowIndex: row.rowIndex ?? i,
+          id: row.id,
+          dataBase64: row.dataBase64,
+          dataHash: row.dataHash ?? createHash('sha256').update(Buffer.from(row.dataBase64, 'base64')).digest('hex').toLowerCase(),
+          ...(row.name ? { name: row.name } : {})
+        };
+        slots.push(slot);
+        const list = slotsById.get(row.id) ?? [];
+        list.push(slot);
+        slotsById.set(row.id, list);
+        rows.set(row.id, slot);
+      }
+    }
+  };
+  ingest(document.data.rows);
+  let missing = rowIds.filter((id) => !slotsById.has(id));
+  if (missing.length > 0) {
+    const full = await readOnce(true);
+    documentDiagnostics.push(...asDiagnostics(full.diagnostics));
+    if (full.ok && full.data) {
+      sourceHash = full.data.sourceHash;
+      ingest(full.data.rows);
+      missing = rowIds.filter((id) => !slotsById.has(id));
+    }
+  }
+  if (missing.length > 0) {
+    if (allowMissingRows && slots.length > 0) {
+      documentDiagnostics.push({
+        severity: 'warning',
+        code: 'PARAM_ROWS_PARTIAL_MISSING',
+        message: `${basename(entry.name.replace(/\\/g, '/'))} 未找到行：${missing.join(', ')}`
+      });
+    } else {
+      return {
+        ok: false,
+        error: {
+          code: 'PARAM_ROW_NOT_FOUND',
+          message: `${basename(entry.name.replace(/\\/g, '/'))} 缺少行：${missing.join(', ')}`
+        },
+        diagnostics: documentDiagnostics
+      };
+    }
+  }
+  handedOff = retainUnpackedPath;
+  return {
+    ok: true,
+    tableName: basename(entry.name.replace(/\\/g, '/')).replace(/\.param$/i, ''),
+    entry,
+    definition: definition.document,
+    slots,
+    slotsById,
+    rows,
+    unpackedPath,
+    sourceHash,
+    missingRows: missing,
+    diagnostics: documentDiagnostics,
+    cleanup
+  };
+  } finally {
+    try {
+      await bridgeScope.dispose();
+    } catch (error) {
+      resultDiagnostics.push({
+        severity: 'warning',
+        code: 'BRIDGE_SCOPE_DISPOSE_FAILED',
+        message: 'PARAM 读取专用 Bridge scope 清理失败，已保留本次读写结果。',
+        sourceUri: pathToFileURL(containerPath).href,
+        details: { errorName: error instanceof Error ? error.name : undefined }
+      });
+    }
+    if (!retainUnpackedPath || !handedOff) {
+      const cleanupDiagnostic = await cleanup();
+      if (cleanupDiagnostic) resultDiagnostics.push(cleanupDiagnostic);
+    }
+  }
+}
+
+async function listParamEntries(
+  edit: NativeEditSession,
+  containerPath: string
+): Promise<{ ok: true; entries: ContainerEntry[]; diagnostics: Diagnostic[] } | { ok: false; error: ParamEditFailure; diagnostics: Diagnostic[] }> {
+  const dcx = await runBridge<{
+    nested?: { entries?: Array<{ index?: number; name?: string; contentHash?: string }> };
+  }>({
+    command: 'read-dcx-document',
+    filePath: containerPath,
+    resourceUri: pathToFileURL(containerPath).href,
+    allowedRoots: edit.allowedRoots(),
+    ...(edit.oodleRuntimeRoot ? { oodleRuntimeRoot: edit.oodleRuntimeRoot } : {}),
+    timeoutMs: 120_000
+  });
+  if (dcx.parseStatus === 'failed') {
+    return {
+      ok: false,
+      error: { code: 'PARAM_CONTAINER_READ_FAILED', message: '无法枚举 parambnd 条目。' },
+      diagnostics: dcx.diagnostics
+    };
+  }
+  const raw = dcx.data?.nested?.entries ?? [];
+  const entries: ContainerEntry[] = [];
+  for (const [position, item] of raw.entries()) {
+    const name = item.name ?? `entry_${position}`;
+    if (!name.toLowerCase().endsWith('.param')) continue;
+    entries.push({
+      index: item.index ?? position,
+      name,
+      contentHash: item.contentHash ?? ''
+    });
+  }
+  if (entries.length === 0) {
+    return {
+      ok: false,
+      error: { code: 'PARAM_CONTAINER_EMPTY', message: '容器内没有 .param 条目。' },
+      diagnostics: dcx.diagnostics
+    };
+  }
+  return { ok: true, entries, diagnostics: dcx.diagnostics };
+}
+
+function findTableEntry(entries: ContainerEntry[], wanted: string): ContainerEntry | undefined {
+  const token = normalizeTableToken(wanted);
+  const exact = entries.find((entry) => normalizeTableToken(entry.name) === token);
+  if (exact) return exact;
+
+  // Bridge PARAM rows may expose the native type name (BEHAVIOR_PARAM_ST)
+  // while the live container entry is the physical child (BehaviorParam.param).
+  // Accept that alias only when it resolves to exactly one child.  In
+  // particular, ATK_PARAM_ST can back multiple physical tables, so it must
+  // remain unresolved instead of selecting the first sibling.
+  const wantedVariants = new Set(tableTokenVariants(wanted));
+  const identityMatches = entries.filter((entry) =>
+    tableTokenVariants(entry.name).some((variant) => wantedVariants.has(variant))
+  );
+  if (identityMatches.length === 1) return identityMatches[0];
+
+  // Preserve the older prefix compatibility for callers that provide a
+  // shortened physical name, but make it fail closed if more than one child
+  // matches rather than silently choosing an arbitrary table.
+  const prefixMatches = entries.filter((entry) => {
+    const name = normalizeTableToken(entry.name);
+    return name.startsWith(`${token}param`) || token.startsWith(name);
+  });
+  return prefixMatches.length === 1 ? prefixMatches[0] : undefined;
+}
+
+export function normalizeTableToken(value: string): string {
+  return basename(value.replace(/\\/g, '/'))
+    .replace(/\.param$/i, '')
+    .toLowerCase();
+}
+
+function tableTokenVariants(value: string): string[] {
+  const token = normalizeTableToken(value);
+  const compact = token.replace(/[^a-z0-9]+/gi, '');
+  if (compact.length === 0) return [];
+  const variants = new Set([compact]);
+  if (compact.endsWith('st') && compact.length > 2) {
+    variants.add(compact.slice(0, -2));
+  }
+  return [...variants];
+}
+
+function readFieldValue(
+  rowDataBase64: string,
+  definition: ParamDefDocument,
+  fieldId: string
+): number | string | boolean | null {
+  const values = decodeRowFields(Buffer.from(rowDataBase64, 'base64'), definition);
+  return values.find((item) => item.fieldId === fieldId)?.value ?? null;
+}
+
+async function loadTrustedDefinition(
+  typeName: string,
+  rowDataSize: number | undefined,
+  dataVersion: number | undefined,
+  game: string
+): Promise<{ ok: true; document: ParamDefDocument } | { ok: false; error: ParamEditFailure }> {
+  if (!metadataCache) {
+    const local = process.env.LOCALAPPDATA;
+    if (!local) {
+      return {
+        ok: false,
+        error: { code: 'PARAM_METADATA_NO_LOCALAPPDATA', message: '无法定位 LOCALAPPDATA，未加载 PARAM 字段定义。' }
+      };
+    }
+    metadataCache = await importPinnedSmithboxSdtParamMetadata({
+      cacheRoot: join(local, 'SoulForge', 'tools', 'smithbox', '2.2.4')
+    });
+  }
+  if (!metadataCache.ok) {
+    const first = metadataCache.diagnostics[0];
+    return {
+      ok: false,
+      error: {
+        code: first?.code ?? 'PARAM_METADATA_IMPORT_REJECTED',
+        message: first?.message ?? 'PARAM 字段定义导入被拒绝。'
+      }
+    };
+  }
+  const metadata = metadataCache.package;
+  // Import already pins archive, source tree, license and immutable revision.
+  const trustPolicy: ParamMetadataTrustPolicy = {
+    schemaVersion: 1, policyId: 'smithbox-sdt-2.2.4.container-param',
+    trustedPackages: [{
+      packageId: metadata.packageId, packageVersion: metadata.packageVersion,
+      packageDigest: metadata.packageDigest, sourceIdentity: metadata.source.identity,
+      sourceRevision: metadata.source.revision, sourceContentDigest: metadata.source.contentDigest,
+      licenseSpdxExpression: metadata.license.spdxExpression, licenseTextDigest: metadata.license.textDigest
+    }]
+  };
+  const descriptor = { game, gameBuild: '1.6', typeName, dataVersion: dataVersion ?? -1 };
+  const width = rowDataSize ?? resolveParamMetadataRowWidth(metadata, descriptor, trustPolicy);
+  if (width === undefined) {
+    return {
+      ok: false,
+      error: { code: 'PARAM_METADATA_TYPE_NOT_FOUND', message: `元数据包里没有唯一匹配类型 ${typeName} 和版本 ${dataVersion} 的定义。` }
+    };
+  }
+  const matched = matchParamMetadataPackage(metadata, { ...descriptor, rowDataSize: width }, trustPolicy);
+  if (!matched.ok) {
+    return {
+      ok: false,
+      error: {
+        code: matched.diagnostics[0]?.code ?? 'PARAM_METADATA_MATCH_REJECTED',
+        message: matched.diagnostics[0]?.message ?? '真实 PARAM 与可信字段定义不匹配。'
+      }
+    };
+  }
+  return { ok: true, document: { ...matched.definition.document, origin: 'imported' } };
+}
+
+async function findParamBnd(root: string): Promise<string[]> {
+  const hits: string[] = [];
+  const walk = async (dir: string, depth: number): Promise<void> => {
+    if (depth > 6 || hits.length > 8) return;
+    let items: string[] = [];
+    try {
+      items = await readdir(dir);
+    } catch {
+      return;
+    }
+    for (const name of items) {
+      const full = join(dir, name);
+      let info;
+      try {
+        info = await stat(full);
+      } catch {
+        continue;
+      }
+      if (info.isDirectory()) {
+        await walk(full, depth + 1);
+      } else if (name.toLowerCase().endsWith('.parambnd.dcx')) {
+        hits.push(full);
+      }
+    }
+  };
+  await walk(root, 0);
+  return hits;
+}
+
+function asDiagnostics(
+  items: Array<{ severity: string; code: string; message: string }>
+): Diagnostic[] {
+  return items.map((item) => ({
+    severity: item.severity === 'warning' || item.severity === 'info' ? item.severity : 'error',
+    code: item.code,
+    message: item.message
+  }));
+}
+
+function safeSegment(name: string): string {
+  return name.replace(/[^A-Za-z0-9._-]+/g, '_').slice(0, 80) || 'param';
+}
+
+async function sha256Of(path: string): Promise<string> {
+  return createHash('sha256').update(await readFile(path)).digest('hex');
+}

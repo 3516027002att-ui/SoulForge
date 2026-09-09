@@ -1,0 +1,1390 @@
+import { useEffect, useRef, useState, type ReactElement } from 'react';
+import type {
+  BoneTransformData,
+  CharacterPreviewBundle,
+  FlverPreviewMesh,
+  FlverPreviewModel,
+  FlverPreviewTexture
+} from '@soulforge/shared';
+import {
+  mountFlverScene,
+  type FlverSceneHandle,
+  type FlverSceneMesh,
+  type FlverSceneMaterialTextures,
+  type FlverSceneDiffuseBlend,
+  type FlverSemanticScene,
+  type FlverSceneBone,
+  type FlverSceneTexture
+} from '../scene/threeSceneController.js';
+import { getRendererBridge } from '../runtime/rendererRuntime.js';
+import { decodeBase64ToUint8Array } from '../utils/binary.js';
+
+/** P3 裁定：atob 只经严格校验的出口（decodeBase64ToUint8Array）。 */
+function decodeBase64Safe(base64: string): Uint8Array {
+  return decodeBase64ToUint8Array(base64);
+}
+
+export interface FlverViewerProps {
+  sourceUri?: string;
+  meshIndex?: number;
+  boundingBox?: { min: number[]; max: number[] } | undefined;
+  boneCount?: number;
+  meshCount?: number;
+  bones?: Array<{ name: string; position: [number, number, number]; parentIndex: number }> | undefined;
+  textureBase64?: string | undefined;
+  boneWeightsBase64?: string | undefined;
+  boneIndicesBase64?: string | undefined;
+  /** Atomic multi-FLVER character/parts payload. Main/core may remap parts to the leader namespace. */
+  externalBundle?: CharacterPreviewBundle | undefined;
+  /** Per-FLVER local poses keyed by CharacterPreviewBundle.models[].modelId. */
+  externalSkeletonPoses?: Readonly<Record<string, BoneTransformData[]>> | undefined;
+  /** 显示跟随当前姿态更新的骨骼线/joint 诊断层；默认关闭普通 FLVER 预览。 */
+  showSkeletonMarkers?: boolean | undefined;
+  /** 是否显示视口内的调试字报、选择提示和交互说明；动作工作台默认隐藏。 */
+  showViewerHud?: boolean | undefined;
+  /** 是否显示视口网格与红/绿坐标轴等编辑器辅助线；动作工作台默认隐藏。 */
+  showSceneGuides?: boolean | undefined;
+  /**
+   * S17：动作预览——chrbnd 里 FLVER 的网格数据由 `read-chrbnd-flver-preview`
+   * 一次性返回（base64 typed buffers），提供时不再走 readFlverMesh IPC。
+   * sourceUri 仍可同时给（dummies 拉取不适用 chrbnd 场景，跳过）。
+   */
+  externalMeshData?: {
+    positionsBase64: string;
+    indicesBase64: string;
+    indexSize?: number | undefined;
+    uvsBase64?: string | undefined;
+    uvSetsBase64?: string[] | undefined;
+    normalsBase64?: string | undefined;
+    vertexAlphaBase64?: string | undefined;
+    cullBackfaces?: boolean | undefined;
+    boneWeightsBase64?: string | undefined;
+    boneIndicesBase64?: string | undefined;
+    skinningMode?: 'weighted' | 'rigid' | 'static' | undefined;
+    boneIndexSpace?: 'flver-global' | 'none' | undefined;
+    skinningTransformMode?: 'absolute' | 'delta' | undefined;
+    renderMode?: 'surface' | 'projected-decal' | 'compatibility-projected' | undefined;
+    /** Bridge 根据当前 mesh 的 material 解析出的 PNG data URI。 */
+    texturePreviewToken?: string | undefined;
+    textureColorSpace?: string | undefined;
+    textureAlphaMode?: 'opaque' | 'cutout' | undefined;
+    albedo2TextureName?: string | undefined;
+    albedo2TexturePreviewToken?: string | undefined;
+    albedo2TextureColorSpace?: string | undefined;
+    normal2TextureName?: string | undefined;
+    normal2TexturePreviewToken?: string | undefined;
+    normal2TextureColorSpace?: string | undefined;
+    diffuseBlend?: FlverSceneDiffuseBlend | undefined;
+    projectionTextureName?: string | null | undefined;
+    projectionTexturePreviewToken?: string | null | undefined;
+    projectionTextureColorSpace?: string | null | undefined;
+    vertexCount: number;
+  } | undefined;
+  /**
+   * 问题4-A：chrbnd 里 FLVER 的**全部网格**（Bridge 一次构建完整 bundle）。
+   * 提供时把每个网格都投进同一个语义场景，相机框全覆盖；
+   * 不播动画、不做假播放头。externalMeshData 只用于单网格回退。
+   */
+  externalMeshes?: Array<{
+    positionsBase64: string;
+    indicesBase64: string;
+    indexSize?: number | undefined;
+    uvsBase64?: string | undefined;
+    uvSetsBase64?: string[] | undefined;
+    normalsBase64?: string | undefined;
+    vertexAlphaBase64?: string | undefined;
+    cullBackfaces?: boolean | undefined;
+    boneWeightsBase64?: string | undefined;
+    boneIndicesBase64?: string | undefined;
+    skinningMode?: 'weighted' | 'rigid' | 'static' | undefined;
+    boneIndexSpace?: 'flver-global' | 'none' | undefined;
+    skinningTransformMode?: 'absolute' | 'delta' | undefined;
+    renderMode?: 'surface' | 'projected-decal' | 'compatibility-projected' | undefined;
+    texturePreviewToken?: string | undefined;
+    textureColorSpace?: string | undefined;
+    textureAlphaMode?: 'opaque' | 'cutout' | undefined;
+    albedo2TextureName?: string | undefined;
+    albedo2TexturePreviewToken?: string | undefined;
+    albedo2TextureColorSpace?: string | undefined;
+    normal2TextureName?: string | undefined;
+    normal2TexturePreviewToken?: string | undefined;
+    normal2TextureColorSpace?: string | undefined;
+    diffuseBlend?: FlverSceneDiffuseBlend | undefined;
+    projectionTextureName?: string | null | undefined;
+    projectionTexturePreviewToken?: string | null | undefined;
+    projectionTextureColorSpace?: string | null | undefined;
+    vertexCount: number;
+  }> | undefined;
+  /** S17：外部骨骼层级（与 externalMeshData 同源），提供时跳过 readFlverSkeleton。 */
+  externalBones?: Array<{
+    name: string;
+    parentIndex: number;
+    translation: [number, number, number];
+    rotation: [number, number, number];
+    scale?: [number, number, number] | undefined;
+    referenceFkMatrix?: number[] | undefined;
+    rotationOrder?: 'YZX' | 'XYZ' | 'XZY' | undefined;
+  }> | undefined;
+  /** 动画播放时间点（驱动骨骼蒙皮动画位姿） */
+  playbackTime?: number | undefined;
+  /** 真实采样骨骼位姿（由 TAE / HKX 动画驱动） */
+  externalPose?: Array<{
+    translation: [number, number, number];
+    rotation: [number, number, number, number] | [number, number, number];
+    scale?: [number, number, number] | undefined;
+  }> | undefined;
+}
+
+interface ViewerPoseState {
+  playbackTime: FlverViewerProps['playbackTime'];
+  externalPose: FlverViewerProps['externalPose'];
+  externalSkeletonPoses: FlverViewerProps['externalSkeletonPoses'];
+}
+
+function applyViewerPose(handle: FlverSceneHandle, state: ViewerPoseState, resetIfEmpty = false): void {
+  if (state.externalSkeletonPoses !== undefined) {
+    handle.setSkeletonPoses?.(state.externalSkeletonPoses);
+  } else if (state.externalPose?.length) {
+    handle.setPose?.(state.externalPose);
+  } else if (typeof state.playbackTime === 'number') {
+    handle.setPlaybackTime?.(state.playbackTime);
+  } else if (resetIfEmpty) {
+    handle.setSkeletonPoses?.({});
+  }
+}
+
+interface MeshData {
+  positionsBase64: string;
+  indicesBase64: string;
+  indexSize?: number | undefined;
+  uvsBase64?: string | undefined;
+  uvSetsBase64?: string[] | undefined;
+  normalsBase64?: string | undefined;
+  vertexAlphaBase64?: string | undefined;
+  cullBackfaces?: boolean | undefined;
+  boneWeightsBase64?: string | undefined;
+  boneIndicesBase64?: string | undefined;
+  skinningMode?: 'weighted' | 'rigid' | 'static' | undefined;
+  boneIndexSpace?: 'flver-global' | 'none' | undefined;
+  skinningTransformMode?: 'absolute' | 'delta' | undefined;
+  renderMode?: 'surface' | 'projected-decal' | 'compatibility-projected' | undefined;
+  texturePreviewToken?: string | undefined;
+  textureColorSpace?: string | undefined;
+  textureAlphaMode?: 'opaque' | 'cutout' | undefined;
+  albedo2TextureName?: string | undefined;
+  albedo2TexturePreviewToken?: string | undefined;
+  albedo2TextureColorSpace?: string | undefined;
+  normal2TextureName?: string | undefined;
+  normal2TexturePreviewToken?: string | undefined;
+  normal2TextureColorSpace?: string | undefined;
+  diffuseBlend?: FlverSceneDiffuseBlend | undefined;
+  projectionTextureName?: string | null | undefined;
+  projectionTexturePreviewToken?: string | null | undefined;
+  projectionTextureColorSpace?: string | null | undefined;
+  vertexCount: number;
+}
+
+interface SkeletonBone {
+  name: string;
+  parentIndex: number;
+  translation: [number, number, number];
+  rotation: [number, number, number];
+  scale?: [number, number, number] | undefined;
+  referenceFkMatrix?: number[] | undefined;
+  rotationOrder?: 'YZX' | 'XYZ' | 'XZY' | undefined;
+}
+
+export interface FlverSkeletonDiagnostic {
+  severity: string;
+  code: string;
+  message: string;
+}
+
+export type FlverSkeletonLoadStatus = 'idle' | 'loading' | 'ready' | 'empty' | 'error' | 'external';
+
+export interface FlverSkeletonLoadState {
+  status: FlverSkeletonLoadStatus;
+  bones: SkeletonBone[];
+  diagnostics: FlverSkeletonDiagnostic[];
+}
+
+function asRecord(value: unknown): Record<string, unknown> | null {
+  return typeof value === 'object' && value !== null ? value as Record<string, unknown> : null;
+}
+
+function normalizeSkeletonDiagnostics(
+  value: unknown,
+  fallback: FlverSkeletonDiagnostic
+): FlverSkeletonDiagnostic[] {
+  const diagnostics = Array.isArray(value)
+    ? value.flatMap((item): FlverSkeletonDiagnostic[] => {
+        const diagnostic = asRecord(item);
+        if (!diagnostic) return [];
+        const code = typeof diagnostic.code === 'string' && diagnostic.code.length > 0
+          ? diagnostic.code
+          : fallback.code;
+        const message = typeof diagnostic.message === 'string' && diagnostic.message.length > 0
+          ? diagnostic.message
+          : code;
+        return [{
+          severity: typeof diagnostic.severity === 'string' && diagnostic.severity.length > 0
+            ? diagnostic.severity
+            : fallback.severity,
+          code,
+          message
+        }];
+      })
+    : [];
+  return diagnostics.length > 0 ? diagnostics : [fallback];
+}
+
+function normalizeSkeletonVector(value: unknown, fallback: [number, number, number], label: string): [number, number, number] {
+  if (!Array.isArray(value)) throw new Error(`FLVER_SKELETON_BONE_INVALID: ${label} 不是向量`);
+  return [0, 1, 2].map((axis) => {
+    const component = value[axis];
+    if (typeof component !== 'number' || !Number.isFinite(component)) {
+      if (component === undefined) return fallback[axis];
+      throw new Error(`FLVER_SKELETON_BONE_INVALID: ${label}[${axis}] 不是有限数值`);
+    }
+    return component;
+  }) as [number, number, number];
+}
+
+function normalizeSkeletonBones(value: unknown): SkeletonBone[] {
+  if (value === undefined) return [];
+  if (!Array.isArray(value)) throw new Error('FLVER_SKELETON_RESPONSE_INVALID: bones 不是数组');
+  return value.map((item, index) => {
+    const bone = asRecord(item);
+    if (!bone || typeof bone.name !== 'string' || typeof bone.parentIndex !== 'number' || !Number.isInteger(bone.parentIndex)) {
+      throw new Error(`FLVER_SKELETON_BONE_INVALID: bones[${index}] 缺少有效 name 或 parentIndex`);
+    }
+    const rotationOrder = bone.rotationOrder === 'YZX' || bone.rotationOrder === 'XYZ' || bone.rotationOrder === 'XZY'
+      ? bone.rotationOrder
+      : 'XZY';
+    return {
+      name: bone.name,
+      parentIndex: bone.parentIndex,
+      translation: normalizeSkeletonVector(bone.translation, [0, 0, 0], `bones[${index}].translation`),
+      rotation: normalizeSkeletonVector(bone.rotation, [0, 0, 0], `bones[${index}].rotation`),
+      scale: bone.scale === undefined || bone.scale === null
+        ? [1, 1, 1]
+        : normalizeSkeletonVector(bone.scale, [1, 1, 1], `bones[${index}].scale`),
+      ...(Array.isArray(bone.referenceFkMatrix)
+        && bone.referenceFkMatrix.length === 16
+        && bone.referenceFkMatrix.every((value) => typeof value === 'number' && Number.isFinite(value))
+        ? { referenceFkMatrix: [...bone.referenceFkMatrix] }
+        : {}),
+      rotationOrder
+    };
+  });
+}
+
+export function createFlverSkeletonErrorState(
+  error: unknown,
+  fallback: Pick<FlverSkeletonDiagnostic, 'code' | 'message'> = {
+    code: 'FLVER_SKELETON_READ_EXCEPTION',
+    message: 'FLVER 骨骼读取异常。'
+  }
+): FlverSkeletonLoadState {
+  const record = asRecord(error);
+  const errorMessage = error instanceof Error
+    ? error.message
+    : typeof record?.message === 'string' && record.message.length > 0
+      ? record.message
+      : typeof error === 'string' && error.length > 0
+        ? error
+        : fallback.message;
+  const diagnosticFallback: FlverSkeletonDiagnostic = {
+    severity: 'error',
+    code: typeof record?.code === 'string' && record.code.length > 0 ? record.code : fallback.code,
+    message: errorMessage
+  };
+  return {
+    status: 'error',
+    bones: [],
+    diagnostics: normalizeSkeletonDiagnostics(record?.diagnostics, diagnosticFallback)
+  };
+}
+
+export function resolveFlverSkeletonLoadState(result: unknown): FlverSkeletonLoadState {
+  const record = asRecord(result);
+  if (!record || record.ok !== true) {
+    const fallback = {
+      code: 'FLVER_SKELETON_READ_FAILED',
+      message: 'FLVER 骨骼读取失败。'
+    } as const;
+    return createFlverSkeletonErrorState(record ?? result, fallback);
+  }
+  try {
+    const data = asRecord(record.data);
+    const bones = normalizeSkeletonBones(data?.bones);
+    return {
+      status: bones.length > 0 ? 'ready' : 'empty',
+      bones,
+      diagnostics: []
+    };
+  } catch (error) {
+    return createFlverSkeletonErrorState(error, {
+      code: 'FLVER_SKELETON_RESPONSE_INVALID',
+      message: 'Bridge 返回的 FLVER 骨骼数据无效。'
+    });
+  }
+}
+
+export function describeFlverSkeletonLoadState(state: FlverSkeletonLoadState): string | null {
+  switch (state.status) {
+    case 'loading':
+      return '骨骼加载中…';
+    case 'ready':
+      return `骨骼已加载：${state.bones.length} bones`;
+    case 'empty':
+      return '骨骼为空：Bridge 返回 0 根骨骼';
+    case 'error': {
+      const diagnostic = state.diagnostics[0];
+      const details = diagnostic ? `${diagnostic.code} · ${diagnostic.message}` : '未知错误';
+      const additional = state.diagnostics.length > 1 ? `（另有 ${state.diagnostics.length - 1} 条诊断）` : '';
+      return `骨骼加载失败：${details}${additional}`;
+    }
+    case 'idle':
+    case 'external':
+      return null;
+  }
+}
+
+interface DummyPoint {
+  referenceId: number;
+  position: [number, number, number];
+}
+
+const EMPTY_SCENE: FlverSemanticScene = {
+  meshes: [],
+  bounds: { min: [-50, -50, -50], max: [50, 50, 50], center: [0, 0, 0] }
+};
+
+/**
+ * FLVER 3D 预览器：真实 FLVER mesh 渲染（WebGPU-first / WebGL2 fallback）。
+ *
+ * 权威场景是渲染器无关的语义场景（typed buffer + 变换，由 IPC readFlverMesh
+ * 读入的原始数据构建），投影层（threeSceneController）只消费它并持有全部
+ * renderer 对象；本组件不创建任何 THREE 对象，遵守硬约束 18。
+ */
+export function FlverViewer(props: FlverViewerProps): ReactElement {
+  const containerRef = useRef<HTMLDivElement>(null);
+  const handleRef = useRef<FlverSceneHandle | null>(null);
+  const contentRef = useRef<FlverSemanticScene>(EMPTY_SCENE);
+  const poseStateRef = useRef<ViewerPoseState>({
+    playbackTime: props.playbackTime,
+    externalPose: props.externalPose,
+    externalSkeletonPoses: props.externalSkeletonPoses
+  });
+  poseStateRef.current = {
+    playbackTime: props.playbackTime,
+    externalPose: props.externalPose,
+    externalSkeletonPoses: props.externalSkeletonPoses
+  };
+  const [meshDataList, setMeshDataList] = useState<MeshData[] | null>(null);
+  const [meshError, setMeshError] = useState<string | null>(null);
+  const [skeletonLoadState, setSkeletonLoadState] = useState<FlverSkeletonLoadState>({
+    status: 'idle',
+    bones: [],
+    diagnostics: []
+  });
+  const skeletonBones = skeletonLoadState.bones;
+  const [dummyPoints, setDummyPoints] = useState<DummyPoint[] | null>(null);
+  const [texture, setTexture] = useState<FlverSceneTexture | null>(null);
+  const [selected, setSelected] = useState<{ id: string; label: string } | null>(null);
+  const [backend, setBackend] = useState<'webgpu' | 'webgl2' | 'detecting'>('detecting');
+  const [sceneError, setSceneError] = useState<string | null>(null);
+  const [skeletonMarkersVisible, setSkeletonMarkersVisible] = useState(props.showSkeletonMarkers === true);
+
+  useEffect(() => {
+    setSkeletonMarkersVisible(props.showSkeletonMarkers === true);
+  }, [props.showSkeletonMarkers]);
+
+  const bridge = getRendererBridge();
+
+  // Load dummy attachment points via IPC when sourceUri changes.
+  useEffect(() => {
+    if (props.externalBundle) {
+      setDummyPoints([]);
+      return;
+    }
+    if (!props.sourceUri || bridge === null || typeof bridge.readFlverDummies !== 'function') return;
+    setDummyPoints(null);
+    void (async () => {
+      try {
+        const result = await bridge.readFlverDummies(props.sourceUri!) as {
+          ok: boolean;
+          data?: { dummies?: Array<{ referenceId: number; position: number[] }> };
+        };
+        const raw = result.ok ? result.data?.dummies ?? [] : [];
+        if (raw.length === 0) return;
+        setDummyPoints(
+          raw.map((d) => ({
+            referenceId: d.referenceId,
+            position: [d.position[0] ?? 0, d.position[1] ?? 0, d.position[2] ?? 0]
+          }))
+        );
+      } catch {
+        // Dummy load failed; leave markers hidden.
+      }
+    })();
+  }, [props.sourceUri, props.externalBundle, bridge]);
+
+  // Load skeleton hierarchy via IPC when sourceUri changes.
+  // Parent-relative transforms; world transforms are projected by the scene
+  // controller (renderer layer), keeping the semantic scene pure typed data.
+  // S17：externalBones（chrbnd 预览）直接使用，不走 IPC。
+  useEffect(() => {
+    if (props.externalBundle) {
+      setSkeletonLoadState({ status: 'external', bones: [], diagnostics: [] });
+      return;
+    }
+    if (props.externalBones) {
+      setSkeletonLoadState({ status: 'external', bones: props.externalBones, diagnostics: [] });
+      return;
+    }
+    if (!props.sourceUri) {
+      setSkeletonLoadState({ status: 'idle', bones: [], diagnostics: [] });
+      return;
+    }
+    if (bridge === null || typeof bridge.readFlverSkeleton !== 'function') {
+      setSkeletonLoadState(createFlverSkeletonErrorState(null, {
+        code: 'FLVER_SKELETON_BRIDGE_UNAVAILABLE',
+        message: '无法读取 FLVER 骨骼：桌面桥接能力不可用。'
+      }));
+      return;
+    }
+    const readFlverSkeleton = bridge.readFlverSkeleton;
+    setSkeletonLoadState({ status: 'loading', bones: [], diagnostics: [] });
+    let cancelled = false;
+    void (async () => {
+      try {
+        const result = await readFlverSkeleton(props.sourceUri!) as unknown;
+        if (!cancelled) setSkeletonLoadState(resolveFlverSkeletonLoadState(result));
+      } catch (error) {
+        if (!cancelled) setSkeletonLoadState(createFlverSkeletonErrorState(error));
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [props.sourceUri, props.externalBones, props.externalBundle, bridge]);
+
+  // Load mesh data via IPC when sourceUri or meshIndex changes.
+  // S17：externalMeshData（chrbnd 预览）直接使用，不走 IPC；
+  // 问题4-A：externalMeshes（chrbnd 全部网格）同样直接使用，不走 IPC。
+  useEffect(() => {
+    if (props.externalBundle) {
+      setMeshDataList([]);
+      setMeshError(null);
+      return;
+    }
+    if (props.externalMeshes && props.externalMeshes.length > 0) {
+      setMeshDataList(props.externalMeshes.map(toMeshData));
+      setMeshError(null);
+      return;
+    }
+    if (props.externalMeshData) {
+      setMeshDataList([toMeshData(props.externalMeshData)]);
+      setMeshError(null);
+      return;
+    }
+    if (!props.sourceUri || bridge === null || typeof bridge.readFlverMesh !== 'function') return;
+    setMeshDataList(null);
+    setMeshError(null);
+    const idx = props.meshIndex ?? 0;
+    void (async () => {
+      try {
+        const result = await bridge.readFlverMesh(props.sourceUri!, idx) as {
+          ok: boolean;
+          data?: { positionsBase64?: string; indicesBase64?: string; indexSize?: number; uvsBase64?: string; uvSetsBase64?: string[]; normalsBase64?: string; vertexAlphaBase64?: string; cullBackfaces?: boolean; boneWeightsBase64?: string; boneIndicesBase64?: string; skinningMode?: 'weighted' | 'rigid' | 'static'; boneIndexSpace?: 'flver-global' | 'none'; skinningTransformMode?: 'absolute' | 'delta'; renderMode?: 'surface' | 'projected-decal' | 'compatibility-projected'; texturePreviewToken?: string; textureColorSpace?: string; textureAlphaMode?: 'opaque' | 'cutout'; albedo2TextureName?: string; albedo2TexturePreviewToken?: string; albedo2TextureColorSpace?: string; normal2TextureName?: string; normal2TexturePreviewToken?: string; normal2TextureColorSpace?: string; diffuseBlend?: FlverSceneDiffuseBlend; projectionTextureName?: string | null; projectionTexturePreviewToken?: string | null; projectionTextureColorSpace?: string | null; vertexCount?: number };
+          diagnostics?: Array<{ message: string }>;
+        };
+        if (result.ok && result.data?.positionsBase64) {
+          setMeshDataList([{
+            positionsBase64: result.data.positionsBase64,
+            indicesBase64: result.data.indicesBase64 ?? '',
+            indexSize: result.data.indexSize,
+            ...(result.data.uvsBase64 ? { uvsBase64: result.data.uvsBase64 } : {}),
+            ...(result.data.uvSetsBase64 ? { uvSetsBase64: result.data.uvSetsBase64 } : {}),
+             ...(result.data.normalsBase64 ? { normalsBase64: result.data.normalsBase64 } : {}),
+             ...(result.data.vertexAlphaBase64 ? { vertexAlphaBase64: result.data.vertexAlphaBase64 } : {}),
+             ...(result.data.cullBackfaces !== undefined ? { cullBackfaces: result.data.cullBackfaces } : {}),
+             ...(result.data.projectionTextureName !== undefined ? { projectionTextureName: result.data.projectionTextureName } : {}),
+             ...(result.data.projectionTexturePreviewToken !== undefined ? { projectionTexturePreviewToken: result.data.projectionTexturePreviewToken } : {}),
+             ...(result.data.projectionTextureColorSpace !== undefined ? { projectionTextureColorSpace: result.data.projectionTextureColorSpace } : {}),
+             ...(result.data.boneWeightsBase64 ? { boneWeightsBase64: result.data.boneWeightsBase64 } : {}),
+            ...(result.data.boneIndicesBase64 ? { boneIndicesBase64: result.data.boneIndicesBase64 } : {}),
+            skinningMode: result.data.skinningMode,
+            boneIndexSpace: result.data.boneIndexSpace,
+            skinningTransformMode: result.data.skinningTransformMode,
+            ...(result.data.renderMode ? { renderMode: result.data.renderMode } : {}),
+            ...(result.data.texturePreviewToken ? { texturePreviewToken: result.data.texturePreviewToken } : {}),
+            ...(result.data.textureColorSpace ? { textureColorSpace: result.data.textureColorSpace } : {}),
+            ...(result.data.textureAlphaMode ? { textureAlphaMode: result.data.textureAlphaMode } : {}),
+            ...(result.data.albedo2TextureName ? { albedo2TextureName: result.data.albedo2TextureName } : {}),
+            ...(result.data.albedo2TexturePreviewToken ? { albedo2TexturePreviewToken: result.data.albedo2TexturePreviewToken } : {}),
+            ...(result.data.albedo2TextureColorSpace ? { albedo2TextureColorSpace: result.data.albedo2TextureColorSpace } : {}),
+            ...(result.data.normal2TextureName ? { normal2TextureName: result.data.normal2TextureName } : {}),
+            ...(result.data.normal2TexturePreviewToken ? { normal2TexturePreviewToken: result.data.normal2TexturePreviewToken } : {}),
+            ...(result.data.normal2TextureColorSpace ? { normal2TextureColorSpace: result.data.normal2TextureColorSpace } : {}),
+            ...(result.data.diffuseBlend ? { diffuseBlend: result.data.diffuseBlend } : {}),
+            vertexCount: result.data.vertexCount ?? 0
+          }]);
+        } else {
+          setMeshError(result.diagnostics?.[0]?.message ?? '网格数据不可用');
+        }
+      } catch (error) {
+        setMeshError(error instanceof Error ? error.message : '网格加载失败');
+      }
+    })();
+  }, [props.sourceUri, props.meshIndex, props.externalMeshData, props.externalMeshes, props.externalBundle, bridge]);
+
+  // Decode texture bytes (base64 → DDS parse / RGBA fallback) into semantic form.
+  // 渲染器对象（CompressedTexture / DataTexture）由投影层构造并纳入 dispose。
+  useEffect(() => {
+    if (!props.textureBase64) {
+      setTexture(null);
+      return;
+    }
+    let cancelled = false;
+    void (async () => {
+      const decoded = await decodeFlverTexture(props.textureBase64!);
+      if (!cancelled) setTexture(decoded);
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [props.textureBase64]);
+
+  // Rebuild the renderer-independent semantic scene whenever source data changes.
+  useEffect(() => {
+    try {
+      const scene = props.externalBundle
+        ? buildBundleSemanticScene(props.externalBundle, props.boundingBox, texture, skeletonMarkersVisible)
+        : buildSemanticScene({
+            meshes: meshDataList ?? [],
+            skeleton: skeletonBones ?? [],
+            dummies: dummyPoints ?? [],
+            boundingBox: props.boundingBox,
+            texture,
+            showSkeletonMarkers: skeletonMarkersVisible
+          });
+      contentRef.current = scene;
+      const handle = handleRef.current;
+      if (handle) {
+        handle.setScene(scene);
+        applyViewerPose(handle, poseStateRef.current);
+      }
+      setSceneError(null);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'FLVER 语义数据无效';
+      setSceneError(message);
+    }
+  }, [meshDataList, skeletonBones, dummyPoints, props.boundingBox, props.externalBundle, texture, skeletonMarkersVisible]);
+
+  // Mount the Three projection layer once; later data updates flow through setScene.
+  useEffect(() => {
+    const container = containerRef.current;
+    if (!container) return;
+    let cancelled = false;
+    void (async () => {
+      try {
+        const handle = await mountFlverScene({
+          container,
+          scene: contentRef.current,
+          showSceneGuides: props.showSceneGuides !== false,
+          onSelect: (id) => {
+            if (!id) {
+              setSelected(null);
+              return;
+            }
+            const label = id.startsWith('mesh-')
+              ? `mesh[${id.slice('mesh-'.length)}]`
+              : id;
+            setSelected({ id, label });
+          }
+        });
+        if (cancelled) {
+          handle.dispose();
+          return;
+        }
+        handleRef.current = handle;
+        setBackend(handle.rendererBackend);
+        // Content may have arrived while the mount promise was pending.
+        handle.setScene(contentRef.current);
+        // Pose updates can arrive before the asynchronous Three mount resolves.
+        applyViewerPose(handle, poseStateRef.current);
+      } catch (error) {
+        setSceneError(error instanceof Error ? error.message : 'FLVER 3D 场景初始化失败');
+      }
+    })();
+    return () => {
+      cancelled = true;
+      handleRef.current?.dispose();
+      handleRef.current = null;
+    };
+  }, []);
+
+  // Replay the latest pose source; multi-skeleton retargeting has priority.
+  useEffect(() => {
+    const handle = handleRef.current;
+    if (handle) applyViewerPose(handle, poseStateRef.current, true);
+  }, [props.playbackTime, props.externalPose, props.externalSkeletonPoses]);
+
+  // 真实动画采样位姿驱动骨骼蒙皮
+
+  // 多网格（问题4-A）：叠加字报「全部网格 + 总顶点数」，不显示假播放头。
+  const summaryMeshes = props.externalBundle
+    ? props.externalBundle.models.flatMap((model) => model.meshes)
+    : meshDataList;
+  const meshSummary = summaryMeshes && summaryMeshes.length > 0
+    ? (summaryMeshes.length === 1
+        ? `${summaryMeshes[0]?.vertexCount ?? 0} verts`
+        : `${summaryMeshes.length} meshes · 总 ${
+            summaryMeshes.reduce((sum, mesh) => sum + (mesh.vertexCount || 0), 0)
+          } verts`)
+    : null;
+  const skeletonStatusMessage = describeFlverSkeletonLoadState(skeletonLoadState);
+  const hasSkeleton = (props.externalBundle?.boneCount ?? props.boneCount ?? skeletonBones.length) > 0;
+  const canToggleSkeletonMarkers = props.showSkeletonMarkers !== undefined;
+  const showViewerHud = props.showViewerHud !== false;
+
+  return (
+    <div className="flver-viewer" style={{ position: 'relative', width: '100%', height: '100%', minWidth: 0, minHeight: 0, overflow: 'hidden', background: '#1a1d23', borderRadius: 4 }}>
+      <div ref={containerRef} style={{ width: '100%', height: '100%', minWidth: 0, minHeight: 0 }} />
+      {showViewerHud && (
+        <>
+          <div style={{
+            position: 'absolute', top: 8, left: 8, color: '#8899aa', fontSize: 12,
+            background: 'rgba(0,0,0,0.5)', padding: '4px 8px', borderRadius: 4
+          }}>
+            FLVER 3D 预览 · {props.externalBundle?.boneCount ?? props.boneCount ?? 0} bones · {props.externalBundle?.meshCount ?? props.meshCount ?? 0} meshes
+            {' · '}{backend === 'detecting' ? 'backend…' : `backend ${backend}`}
+            {meshSummary ? ` · ${meshSummary}` : meshError ? ` · ${meshError}` : ''}
+            {sceneError ? ` · ${sceneError}` : ''}
+          </div>
+          {skeletonStatusMessage ? (
+            <div
+              data-testid="flver-skeleton-status"
+              role={skeletonLoadState.status === 'error' ? 'alert' : 'status'}
+              aria-live={skeletonLoadState.status === 'error' ? 'assertive' : 'polite'}
+              aria-busy={skeletonLoadState.status === 'loading'}
+              style={{
+                position: 'absolute', top: 36, left: 8, maxWidth: 'calc(100% - 16px)',
+                color: skeletonLoadState.status === 'error' ? '#ffb4a8' : '#b7c7d8',
+                fontSize: 11, background: 'rgba(0,0,0,0.55)', padding: '3px 8px', borderRadius: 4
+              }}
+            >
+              {skeletonStatusMessage}
+            </div>
+          ) : null}
+          {selected ? (
+            <div style={{
+              position: 'absolute', top: hasSkeleton ? 40 : 8, right: 8, color: '#9fd0ff', fontSize: 12,
+              background: 'rgba(0,0,0,0.5)', padding: '4px 8px', borderRadius: 4
+            }}>
+              已选择 {selected.label}
+            </div>
+          ) : null}
+          {hasSkeleton && canToggleSkeletonMarkers ? (
+            <button
+              type="button"
+              className="flver-viewer__skeleton-toggle"
+              data-testid="flver-toggle-skeleton"
+              aria-pressed={skeletonMarkersVisible}
+              onClick={() => setSkeletonMarkersVisible((visible) => !visible)}
+            >
+              {skeletonMarkersVisible ? '隐藏骨架' : '显示骨架'}
+            </button>
+          ) : null}
+          <div style={{
+            position: 'absolute', bottom: 8, left: 8, color: '#6a7686', fontSize: 11,
+            background: 'rgba(0,0,0,0.45)', padding: '2px 8px', borderRadius: 4
+          }}>
+            点击网格选中 / 再次点击取消 · 网格数据只读
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
+function buildSemanticScene(input: {
+  meshes: MeshData[];
+  skeleton: SkeletonBone[];
+  dummies: DummyPoint[];
+  boundingBox?: { min: number[]; max: number[] } | undefined;
+  texture: FlverSceneTexture | null;
+  showSkeletonMarkers?: boolean | undefined;
+}): FlverSemanticScene {
+  const meshes: FlverSceneMesh[] = [];
+  for (const [index, meshData] of input.meshes.entries()) {
+    const positions = decodeFloat32Array(meshData.positionsBase64, `mesh[${index}].positions`);
+    const vertexCount = meshData.vertexCount || Math.floor(positions.length / 3);
+    assertVertexAttributeLength(positions.length, vertexCount, 3, `mesh[${index}].positions`);
+    const mesh: FlverSceneMesh = {
+      id: `mesh-${index}`,
+      label: `mesh[${index}]`,
+      position: [0, 0, 0],
+      rotation: [0, 0, 0],
+      scale: [1, 1, 1],
+      positions,
+      vertexCount,
+      indexSize: meshData.indexSize === 32 ? 32 : 16,
+      skinningMode: meshData.skinningMode ?? (
+        meshData.boneIndicesBase64 && meshData.boneWeightsBase64 ? 'weighted' : 'static'
+      ),
+      boneIndexSpace: meshData.boneIndexSpace ?? (
+        meshData.boneIndicesBase64 && meshData.boneWeightsBase64 ? 'flver-global' : 'none'
+      ),
+      ...(meshData.skinningTransformMode
+        ? { skinningTransformMode: meshData.skinningTransformMode }
+        : {}),
+      previewRenderMode: meshData.renderMode,
+      cullBackfaces: meshData.cullBackfaces,
+      materialAlphaMode: meshData.textureAlphaMode,
+      wireframeOverlay: false
+    };
+    if (meshData.uvSetsBase64 && meshData.uvSetsBase64.length > 0) {
+      mesh.uvSets = meshData.uvSetsBase64.map((base64, uvIndex) => {
+        const values = decodeFloat32Array(base64, `mesh[${index}].uv${uvIndex}`);
+        assertVertexAttributeLength(values.length, vertexCount, 2, `mesh[${index}].uv${uvIndex}`);
+        return values;
+      });
+      const [firstUvSet] = mesh.uvSets;
+      if (firstUvSet) mesh.uvs = firstUvSet;
+    } else if (meshData.uvsBase64) {
+      mesh.uvs = decodeFloat32Array(meshData.uvsBase64, `mesh[${index}].uvs`);
+      assertVertexAttributeLength(mesh.uvs.length, vertexCount, 2, `mesh[${index}].uvs`);
+    }
+    if (meshData.normalsBase64) {
+      mesh.normals = decodeFloat32Array(meshData.normalsBase64, `mesh[${index}].normals`);
+      assertVertexAttributeLength(mesh.normals.length, vertexCount, 3, `mesh[${index}].normals`);
+    }
+    if (meshData.vertexAlphaBase64) {
+      mesh.vertexAlpha = decodeFloat32Array(meshData.vertexAlphaBase64, `mesh[${index}].vertexAlpha`);
+      assertVertexAttributeLength(mesh.vertexAlpha.length, vertexCount, 1, `mesh[${index}].vertexAlpha`);
+      assertVertexAlpha(mesh.vertexAlpha, `mesh[${index}].vertexAlpha`);
+    }
+    if (meshData.renderMode === 'compatibility-projected') {
+      if (typeof meshData.projectionTexturePreviewToken !== 'string') {
+        throw new Error(`FLVER_COMPATIBILITY_PROJECTION_SOURCE_MISSING: mesh[${index}]`);
+      }
+      mesh.projectionTexture = {
+        kind: 'image-uri',
+        uri: meshData.projectionTexturePreviewToken,
+        colorSpace: normalizeTextureColorSpace(meshData.projectionTextureColorSpace ?? undefined),
+        ...(meshData.projectionTextureName ? { label: meshData.projectionTextureName } : {})
+      };
+    }
+    if (meshData.indicesBase64) {
+      mesh.indices = decodeMeshIndices(meshData.indicesBase64, mesh.indexSize, `mesh[${index}].indices`);
+      assertTriangleIndices(mesh.indices, vertexCount, `mesh[${index}].indices`);
+    }
+
+    // 真正的 GPU Skinning Attributes（4 components / vertex）
+    if (meshData.boneIndicesBase64) {
+      mesh.skinIndices = decodeSkinIndices(meshData.boneIndicesBase64, vertexCount);
+    }
+    if (meshData.boneWeightsBase64) {
+      mesh.skinWeights = decodeSkinWeights(meshData.boneWeightsBase64, vertexCount);
+    }
+
+    if (input.texture) {
+      mesh.texture = input.texture;
+    } else if (meshData.texturePreviewToken) {
+      mesh.texture = {
+        kind: 'image-uri',
+        uri: meshData.texturePreviewToken,
+        colorSpace: normalizeTextureColorSpace(meshData.textureColorSpace)
+      };
+    }
+    if (meshData.albedo2TexturePreviewToken) {
+      mesh.albedo2Texture = {
+        kind: 'image-uri',
+        uri: meshData.albedo2TexturePreviewToken,
+        colorSpace: normalizeTextureColorSpace(meshData.albedo2TextureColorSpace),
+        ...(meshData.albedo2TextureName ? { label: meshData.albedo2TextureName } : {})
+      };
+    }
+    if (meshData.normal2TexturePreviewToken) {
+      mesh.normal2Texture = {
+        kind: 'image-uri',
+        uri: meshData.normal2TexturePreviewToken,
+        colorSpace: normalizeTextureColorSpace(meshData.normal2TextureColorSpace),
+        ...(meshData.normal2TextureName ? { label: meshData.normal2TextureName } : {})
+      };
+    }
+    if (meshData.diffuseBlend) mesh.diffuseBlend = meshData.diffuseBlend;
+    meshes.push(mesh);
+  }
+  const bounds = computeSceneBounds(input.boundingBox, meshes, input.skeleton.length > 0 ? 15 : 100);
+  const bones = input.skeleton.map((bone, index) => ({
+    id: `bone-${index}`,
+    name: bone.name,
+    parentIndex: bone.parentIndex,
+    translation: bone.translation,
+    rotation: bone.rotation,
+    scale: bone.scale ?? [1, 1, 1],
+    ...(bone.referenceFkMatrix ? { referenceFkMatrix: [...bone.referenceFkMatrix] } : {}),
+    rotationOrder: bone.rotationOrder ?? 'XZY'
+  }));
+  const dummies = input.dummies.map((dummy, index) => ({
+    id: `dummy-${index}`,
+    referenceId: dummy.referenceId,
+    position: dummy.position
+  }));
+  return {
+    meshes,
+    ...(bones.length > 0 ? { bones } : {}),
+    ...(dummies.length > 0 ? { dummies } : {}),
+    ...(bones.length > 0 && (input.showSkeletonMarkers === true || meshes.length === 0)
+      ? { showSkeletonMarkers: true }
+      : {}),
+    bounds
+  };
+}
+
+export function buildBundleSemanticScene(
+  bundle: CharacterPreviewBundle,
+  boundingBox?: { min: number[]; max: number[] } | undefined,
+  texture: FlverSceneTexture | null = null,
+  showSkeletonMarkers = false
+): FlverSemanticScene {
+  const meshes: FlverSceneMesh[] = [];
+  const toSceneBones = (
+    modelId: string,
+    sourceBones: readonly FlverPreviewModel['bones'][number][]
+  ): FlverSceneBone[] => sourceBones.map((bone) => ({
+    id: `${modelId}:bone:${bone.index}`,
+    index: bone.index,
+    name: bone.name,
+    parentIndex: bone.parentIndex,
+    childIndex: bone.childIndex,
+    nextSiblingIndex: bone.nextSiblingIndex,
+    hierarchyId: bone.hierarchyId,
+    translation: bone.translation,
+    rotation: bone.rotation,
+    scale: bone.scale,
+    ...(bone.referenceFkMatrix ? { referenceFkMatrix: [...bone.referenceFkMatrix] } : {}),
+    rotationOrder: bone.rotationOrder as 'YZX' | 'XYZ' | 'XZY'
+  }));
+  const skeletons = bundle.models
+    .filter((model) => model.bones.length > 0)
+    .map((model) => ({
+      id: model.modelId,
+      bones: toSceneBones(model.modelId, model.bones)
+    }));
+  const skeletonBindings = bundle.models.flatMap((model) => {
+    if (!model.bindingBones || !model.bindingBoneMap) return [];
+    return [{
+      id: model.modelId,
+      leaderSkeletonId: bundle.leaderModelId,
+      bones: toSceneBones(model.modelId, model.bindingBones),
+      sourceToLeader: [...model.bindingBoneMap]
+    }];
+  });
+
+  for (const model of bundle.models) {
+    const materialTextures = new Map<number, FlverSceneMaterialTextures>();
+    for (const texturePreview of model.texturePreviews ?? []) {
+      materialTextures.set(texturePreview.materialIndex, toSceneMaterialTextures(texturePreview));
+    }
+    // `texturePreviewToken` is the legacy first-texture projection. It is a
+    // valid compatibility fallback only when this model has no per-material
+    // table at all; using it for an unmatched material paints (for example)
+    // the head with the body's first albedo. An explicitly supplied legacy
+    // texture follows the same rule so it cannot override material bindings.
+    const legacyTexture = texture ?? (model.texturePreviewToken
+      ? {
+          kind: 'image-uri' as const,
+          uri: model.texturePreviewToken,
+          colorSpace: normalizeTextureColorSpace(model.textureColorSpace)
+        }
+      : null);
+    const legacyMaterialTextures: FlverSceneMaterialTextures | null = legacyTexture
+      ? { albedo: legacyTexture }
+      : null;
+    const hasMaterialTextures = materialTextures.size > 0;
+    for (const meshData of model.meshes) {
+      const usesFollowerBinding = model.bindingBones !== undefined
+        && model.bindingBoneMap !== undefined;
+      const skeletonId = usesFollowerBinding ? model.modelId : (meshData.skeletonId ?? model.modelId);
+      const targetSkeleton = bundle.models.find((candidate) => candidate.modelId === skeletonId);
+      // FLVER skin indices are native bone identities, not positions in the
+      // JSON array.  A sparse/reordered table such as [9, 4] is valid; using
+      // length here rejects a valid index 9 and can leave an otherwise
+      // complete character invisible.
+      const targetSkeletonBoneIndices = new Set(
+        (usesFollowerBinding ? model.bindingBones! : targetSkeleton?.bones ?? model.bones)
+          .map((bone) => bone.index)
+      );
+      const selectedMeshTextures = meshData.materialIndex !== undefined && meshData.materialIndex >= 0
+        ? materialTextures.get(meshData.materialIndex) ?? (hasMaterialTextures ? null : legacyMaterialTextures)
+        : (hasMaterialTextures ? null : legacyMaterialTextures);
+      const mesh = decodeBundleMesh(
+        model,
+        meshData,
+        selectedMeshTextures,
+        targetSkeletonBoneIndices,
+        usesFollowerBinding
+      );
+      meshes.push(mesh);
+    }
+  }
+  if (meshes.length !== bundle.meshCount) {
+    throw new Error(`FLVER_BUNDLE_MESH_COUNT_MISMATCH: expected=${bundle.meshCount} actual=${meshes.length}`);
+  }
+  return {
+    meshes,
+    ...(skeletons.length > 0 ? { skeletons } : {}),
+    ...(skeletonBindings.length > 0 ? { skeletonBindings } : {}),
+    ...(skeletons.length > 0 && (showSkeletonMarkers || meshes.length === 0)
+      ? { showSkeletonMarkers: true }
+      : {}),
+    bounds: computeSceneBounds(boundingBox, meshes, skeletons.length > 0 ? 15 : 100)
+  };
+}
+
+function decodeBundleMesh(
+  model: FlverPreviewModel,
+  meshData: FlverPreviewMesh,
+  materialTextures: FlverSceneMaterialTextures | null,
+  targetSkeletonBoneIndices: ReadonlySet<number>,
+  usesFollowerBinding: boolean
+): FlverSceneMesh {
+  const label = `${model.entry.name}:mesh[${meshData.meshIndex}]`;
+  const positions = decodeFloat32Array(meshData.positionsBase64, `${label}.positions`);
+  const vertexCount = meshData.vertexCount;
+  assertVertexAttributeLength(positions.length, vertexCount, 3, `${label}.positions`);
+  const mesh: FlverSceneMesh = {
+    id: `${model.modelId}:mesh:${meshData.meshIndex}`,
+    label,
+    position: [0, 0, 0],
+    rotation: [0, 0, 0],
+    scale: [1, 1, 1],
+    positions,
+    indexSize: meshData.indexSize,
+    skinningMode: meshData.skinningMode,
+    boneIndexSpace: meshData.boneIndexSpace,
+    ...(meshData.skinningTransformMode
+      ? { skinningTransformMode: meshData.skinningTransformMode }
+      : {}),
+    previewRenderMode: meshData.renderMode,
+    cullBackfaces: meshData.cullBackfaces,
+    materialAlphaMode: materialTextures?.alphaMode,
+    skeletonId: usesFollowerBinding ? model.modelId : (meshData.skeletonId ?? model.modelId),
+    vertexCount,
+    wireframeOverlay: false
+  };
+  if (meshData.indicesBase64) {
+    mesh.indices = decodeMeshIndices(meshData.indicesBase64, meshData.indexSize, `${label}.indices`);
+    assertTriangleIndices(mesh.indices, vertexCount, `${label}.indices`);
+  }
+  if (meshData.uvSetsBase64 && meshData.uvSetsBase64.length > 0) {
+    mesh.uvSets = meshData.uvSetsBase64.map((base64, uvIndex) => {
+      const values = decodeFloat32Array(base64, `${label}.uv${uvIndex}`);
+      assertVertexAttributeLength(values.length, vertexCount, 2, `${label}.uv${uvIndex}`);
+      return values;
+    });
+    const [firstUvSet] = mesh.uvSets;
+    if (firstUvSet) mesh.uvs = firstUvSet;
+  } else if (meshData.uvsBase64) {
+    mesh.uvs = decodeFloat32Array(meshData.uvsBase64, `${label}.uvs`);
+    assertVertexAttributeLength(mesh.uvs.length, vertexCount, 2, `${label}.uvs`);
+  }
+  if (meshData.normalsBase64) {
+    mesh.normals = decodeFloat32Array(meshData.normalsBase64, `${label}.normals`);
+    assertVertexAttributeLength(mesh.normals.length, vertexCount, 3, `${label}.normals`);
+  }
+  if (meshData.vertexAlphaBase64) {
+    mesh.vertexAlpha = decodeFloat32Array(meshData.vertexAlphaBase64, `${label}.vertexAlpha`);
+    assertVertexAttributeLength(mesh.vertexAlpha.length, vertexCount, 1, `${label}.vertexAlpha`);
+    assertVertexAlpha(mesh.vertexAlpha, `${label}.vertexAlpha`);
+  }
+  if (meshData.renderMode === 'compatibility-projected') {
+    if (typeof meshData.projectionTexturePreviewToken !== 'string') {
+      throw new Error(`FLVER_COMPATIBILITY_PROJECTION_SOURCE_MISSING: ${label}`);
+    }
+    mesh.projectionTexture = {
+      kind: 'image-uri',
+      uri: meshData.projectionTexturePreviewToken,
+      colorSpace: normalizeTextureColorSpace(meshData.projectionTextureColorSpace ?? undefined),
+      ...(meshData.projectionTextureName ? { label: meshData.projectionTextureName } : {})
+    };
+  }
+  const hasSkinPayload = Boolean(meshData.boneIndicesBase64 && meshData.boneWeightsBase64);
+  if (meshData.skinningMode === 'static') {
+    if (hasSkinPayload) throw new Error(`FLVER_STATIC_MESH_HAS_SKIN_PAYLOAD: ${label}`);
+  } else {
+    const skinIndicesBase64 = usesFollowerBinding
+      ? meshData.sourceBoneIndicesBase64
+      : meshData.boneIndicesBase64;
+    if (usesFollowerBinding && !skinIndicesBase64) {
+      throw new Error(`FLVER_FOLLOWER_SOURCE_INDICES_MISSING: ${label}`);
+    }
+    if (!skinIndicesBase64 || !meshData.boneWeightsBase64) {
+      throw new Error(`FLVER_SKIN_BINDING_INCOMPLETE: ${label}`);
+    }
+    if (meshData.boneIndexSpace !== 'flver-global') {
+      throw new Error(`FLVER_SKIN_INDEX_SPACE_UNSUPPORTED: ${label}`);
+    }
+    mesh.skinIndices = decodeSkinIndices(skinIndicesBase64, vertexCount);
+    mesh.skinWeights = decodeSkinWeights(meshData.boneWeightsBase64, vertexCount);
+    assertSkinIndices(mesh.skinIndices, mesh.skinWeights, targetSkeletonBoneIndices, label);
+  }
+  if (materialTextures) {
+    mesh.texture = materialTextures.albedo;
+    mesh.materialAlphaMode = materialTextures.alphaMode;
+    if (materialTextures.albedo2) mesh.albedo2Texture = materialTextures.albedo2;
+    if (materialTextures.normal) mesh.normalTexture = materialTextures.normal;
+    if (materialTextures.normal2) mesh.normal2Texture = materialTextures.normal2;
+    if (materialTextures.blendMask) mesh.blendMaskTexture = materialTextures.blendMask;
+    if (materialTextures.diffuseBlend) mesh.diffuseBlend = materialTextures.diffuseBlend;
+    if (materialTextures.metalness) mesh.metalnessTexture = materialTextures.metalness;
+  }
+  return mesh;
+}
+
+function normalizeTextureColorSpace(value: string | undefined): 'linear' | 'srgb' {
+  return value?.toLowerCase() === 'linear' ? 'linear' : 'srgb';
+}
+
+function toSceneTexture(texture: FlverPreviewTexture): FlverSceneTexture {
+  return {
+    kind: 'image-uri',
+    uri: texture.texturePreviewToken,
+    colorSpace: normalizeTextureColorSpace(texture.colorSpace),
+    label: texture.textureName
+  };
+}
+
+function toSceneTextureLayer(texture: {
+  textureName: string;
+  texturePreviewToken: string;
+  colorSpace: string;
+}): FlverSceneTexture {
+  return {
+    kind: 'image-uri',
+    uri: texture.texturePreviewToken,
+    colorSpace: normalizeTextureColorSpace(texture.colorSpace),
+    label: texture.textureName
+  };
+}
+
+function toSceneMaterialTextures(texture: FlverPreviewTexture): FlverSceneMaterialTextures {
+  const result: FlverSceneMaterialTextures = {
+    albedo: toSceneTexture(texture),
+    ...(texture.alphaMode ? { alphaMode: texture.alphaMode } : {})
+  };
+  if (texture.albedo2) result.albedo2 = toSceneTextureLayer(texture.albedo2);
+  if (texture.normal2) result.normal2 = toSceneTextureLayer(texture.normal2);
+  if (texture.diffuseBlend) result.diffuseBlend = texture.diffuseBlend;
+  if (texture.normalTexturePreviewToken) {
+    result.normal = {
+      kind: 'image-uri',
+      uri: texture.normalTexturePreviewToken,
+      colorSpace: normalizeTextureColorSpace(texture.normalTextureColorSpace)
+    };
+  }
+  if (texture.metalnessTexturePreviewToken) {
+    result.metalness = {
+      kind: 'image-uri',
+      uri: texture.metalnessTexturePreviewToken,
+      colorSpace: normalizeTextureColorSpace(texture.metalnessTextureColorSpace)
+    };
+  }
+  // Mask1 is a native colour-blend input, not generic surface opacity. It is
+  // only projected when the Bridge also supplies a source-mapped diffuse
+  // blend contract; otherwise it remains evidence-only.
+  if (texture.mask1TexturePreviewToken && texture.diffuseBlend) {
+    result.blendMask = {
+      kind: 'image-uri',
+      uri: texture.mask1TexturePreviewToken,
+      colorSpace: normalizeTextureColorSpace(texture.mask1TextureColorSpace),
+      ...(texture.mask1TextureName ? { label: texture.mask1TextureName } : {})
+    };
+  }
+  return result;
+}
+
+/** 把外部/IPC 返回的单个网格的 DTO 规整成内部 MeshData（问题4-A 参数复用）。 */
+function toMeshData(input: {
+  positionsBase64: string;
+  indicesBase64: string;
+  indexSize?: number | undefined;
+  uvsBase64?: string | undefined;
+  uvSetsBase64?: string[] | undefined;
+  normalsBase64?: string | undefined;
+  vertexAlphaBase64?: string | undefined;
+  cullBackfaces?: boolean | undefined;
+  boneWeightsBase64?: string | undefined;
+  boneIndicesBase64?: string | undefined;
+  skinningMode?: 'weighted' | 'rigid' | 'static' | undefined;
+  boneIndexSpace?: 'flver-global' | 'none' | undefined;
+  skinningTransformMode?: 'absolute' | 'delta' | undefined;
+  renderMode?: 'surface' | 'projected-decal' | 'compatibility-projected' | undefined;
+  texturePreviewToken?: string | undefined;
+  textureColorSpace?: string | undefined;
+  textureAlphaMode?: 'opaque' | 'cutout' | undefined;
+  albedo2TextureName?: string | undefined;
+  albedo2TexturePreviewToken?: string | undefined;
+  albedo2TextureColorSpace?: string | undefined;
+  normal2TextureName?: string | undefined;
+  normal2TexturePreviewToken?: string | undefined;
+  normal2TextureColorSpace?: string | undefined;
+  diffuseBlend?: FlverSceneDiffuseBlend | undefined;
+  projectionTextureName?: string | null | undefined;
+  projectionTexturePreviewToken?: string | null | undefined;
+  projectionTextureColorSpace?: string | null | undefined;
+  vertexCount: number;
+}): MeshData {
+  return {
+    positionsBase64: input.positionsBase64,
+    indicesBase64: input.indicesBase64,
+    indexSize: input.indexSize ?? undefined,
+    uvsBase64: input.uvsBase64 ?? undefined,
+    uvSetsBase64: input.uvSetsBase64 ?? undefined,
+    normalsBase64: input.normalsBase64 ?? undefined,
+    vertexAlphaBase64: input.vertexAlphaBase64 ?? undefined,
+    cullBackfaces: input.cullBackfaces,
+    projectionTextureName: input.projectionTextureName ?? undefined,
+    projectionTexturePreviewToken: input.projectionTexturePreviewToken ?? undefined,
+    projectionTextureColorSpace: input.projectionTextureColorSpace ?? undefined,
+    boneWeightsBase64: input.boneWeightsBase64 ?? undefined,
+    boneIndicesBase64: input.boneIndicesBase64 ?? undefined,
+    skinningMode: input.skinningMode,
+    boneIndexSpace: input.boneIndexSpace,
+    skinningTransformMode: input.skinningTransformMode,
+    renderMode: input.renderMode,
+    texturePreviewToken: input.texturePreviewToken ?? undefined,
+    textureColorSpace: input.textureColorSpace ?? undefined,
+    textureAlphaMode: input.textureAlphaMode ?? undefined,
+    albedo2TextureName: input.albedo2TextureName ?? undefined,
+    albedo2TexturePreviewToken: input.albedo2TexturePreviewToken ?? undefined,
+    albedo2TextureColorSpace: input.albedo2TextureColorSpace ?? undefined,
+    normal2TextureName: input.normal2TextureName ?? undefined,
+    normal2TexturePreviewToken: input.normal2TexturePreviewToken ?? undefined,
+    normal2TextureColorSpace: input.normal2TextureColorSpace ?? undefined,
+    diffuseBlend: input.diffuseBlend ?? undefined,
+    vertexCount: input.vertexCount
+  };
+}
+
+function computeSceneBounds(
+  boundingBox: { min: number[]; max: number[] } | undefined,
+  meshes: FlverSceneMesh[],
+  emptyFallbackSpan = 100
+): FlverSemanticScene['bounds'] {
+  const min: [number, number, number] = [Infinity, Infinity, Infinity];
+  const max: [number, number, number] = [-Infinity, -Infinity, -Infinity];
+  const hasProjectedDecal = meshes.some((mesh) => mesh.previewRenderMode === 'projected-decal');
+  if (boundingBox && !hasProjectedDecal) {
+    min[0] = boundingBox.min[0] ?? 0;
+    min[1] = boundingBox.min[1] ?? 0;
+    min[2] = boundingBox.min[2] ?? 0;
+    max[0] = boundingBox.max[0] ?? 0;
+    max[1] = boundingBox.max[1] ?? 0;
+    max[2] = boundingBox.max[2] ?? 0;
+  }
+  for (const mesh of meshes) {
+    if (mesh.previewRenderMode === 'projected-decal') continue;
+    for (let index = 0; index < mesh.positions.length; index += 3) {
+      const x = mesh.positions[index] ?? 0;
+      const y = mesh.positions[index + 1] ?? 0;
+      const z = mesh.positions[index + 2] ?? 0;
+      if (x < min[0]) min[0] = x;
+      if (y < min[1]) min[1] = y;
+      if (z < min[2]) min[2] = z;
+      if (x > max[0]) max[0] = x;
+      if (y > max[1]) max[1] = y;
+      if (z > max[2]) max[2] = z;
+    }
+  }
+  if (!Number.isFinite(min[0])) {
+    const halfSpan = emptyFallbackSpan / 2;
+    min[0] = -halfSpan;
+    min[1] = -halfSpan;
+    min[2] = -halfSpan;
+    max[0] = halfSpan;
+    max[1] = halfSpan;
+    max[2] = halfSpan;
+  }
+  const [minX, minY, minZ] = min;
+  const [maxX, maxY, maxZ] = max;
+  return {
+    min: [minX, minY, minZ],
+    max: [maxX, maxY, maxZ],
+    center: [(minX + maxX) / 2, (minY + maxY) / 2, (minZ + maxZ) / 2]
+  };
+}
+
+function decodeFloat32Array(base64: string, label: string): Float32Array {
+  const bytes = decodeBase64Safe(base64);
+  if (bytes.byteLength % Float32Array.BYTES_PER_ELEMENT !== 0) {
+    throw new Error(`FLVER_ATTRIBUTE_ALIGNMENT_INVALID: ${label} bytes=${bytes.byteLength}`);
+  }
+  const copy = (bytes.buffer as ArrayBuffer).slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
+  const values = new Float32Array(copy);
+  for (const value of values) {
+    if (!Number.isFinite(value)) throw new Error(`FLVER_ATTRIBUTE_NONFINITE: ${label}`);
+  }
+  return values;
+}
+
+function decodeMeshIndices(base64: string, indexSize: number = 16, label = 'indices'): Uint16Array | Uint32Array {
+  const bytes = decodeBase64Safe(base64);
+  const width = indexSize === 32 ? Uint32Array.BYTES_PER_ELEMENT : Uint16Array.BYTES_PER_ELEMENT;
+  if (bytes.byteLength % width !== 0) {
+    throw new Error(`FLVER_INDEX_ALIGNMENT_INVALID: ${label} bytes=${bytes.byteLength} width=${width}`);
+  }
+  const copy = (bytes.buffer as ArrayBuffer).slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
+  return indexSize === 32 ? new Uint32Array(copy) : new Uint16Array(copy);
+}
+
+function assertVertexAttributeLength(
+  actualComponents: number,
+  vertexCount: number,
+  itemSize: number,
+  label: string
+): void {
+  const expected = vertexCount * itemSize;
+  if (actualComponents !== expected) {
+    throw new Error(`FLVER_ATTRIBUTE_LENGTH_MISMATCH: ${label} expected=${expected} actual=${actualComponents}`);
+  }
+}
+
+function assertVertexAlpha(values: Float32Array, label: string): void {
+  for (const value of values) {
+    if (value < 0 || value > 1) {
+      throw new Error(`FLVER_VERTEX_ALPHA_INVALID: ${label} value=${value}`);
+    }
+  }
+}
+
+function assertTriangleIndices(
+  indices: Uint16Array | Uint32Array,
+  vertexCount: number,
+  label: string
+): void {
+  if (indices.length % 3 !== 0) {
+    throw new Error(`FLVER_TRIANGLE_LIST_LENGTH_INVALID: ${label} count=${indices.length}`);
+  }
+  for (const index of indices) {
+    if (index >= vertexCount) {
+      throw new Error(`FLVER_INDEX_OUT_OF_RANGE: ${label} index=${index} vertices=${vertexCount}`);
+    }
+  }
+}
+
+function decodeSkinIndices(base64: string, vertexCount: number): Uint16Array {
+  const bytes = decodeBase64Safe(base64);
+  const expectedBytes = vertexCount * 4 * Uint16Array.BYTES_PER_ELEMENT;
+  if (bytes.byteLength !== expectedBytes) {
+    throw new Error(`FLVER_SKIN_INDEX_LENGTH_MISMATCH: expected=${expectedBytes} actual=${bytes.byteLength}`);
+  }
+  const copy = (bytes.buffer as ArrayBuffer).slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
+  return new Uint16Array(copy);
+}
+
+function decodeSkinWeights(base64: string, vertexCount: number): Float32Array {
+  const bytes = decodeBase64Safe(base64);
+  const expectedBytes = vertexCount * 4 * Float32Array.BYTES_PER_ELEMENT;
+  if (bytes.byteLength !== expectedBytes) {
+    throw new Error(`FLVER_SKIN_WEIGHT_LENGTH_MISMATCH: expected=${expectedBytes} actual=${bytes.byteLength}`);
+  }
+  const copy = (bytes.buffer as ArrayBuffer).slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
+  return new Float32Array(copy);
+}
+
+/**
+ * Native FLVER weight members are commonly Byte4C (byte / 255). Each channel
+ * is quantized independently, so a valid vertex can arrive with a sum such as
+ * 252 / 255 instead of exactly 1. The renderer normalizes its projection copy;
+ * this check must validate the native payload without rejecting that evidence.
+ */
+function isNativeQuantizedWeightVector(weights: Float32Array, offset: number): boolean {
+  for (const denominator of [255, 127, 32767]) {
+    const quantized = [0, 1, 2, 3].every((influence) => {
+      const value = weights[offset + influence] ?? 0;
+      return Math.abs(value * denominator - Math.round(value * denominator)) <= 1e-3;
+    });
+    if (quantized) return true;
+  }
+  return false;
+}
+
+function assertSkinIndices(
+  indices: Uint16Array,
+  weights: Float32Array,
+  boneIndices: ReadonlySet<number>,
+  label: string
+): void {
+  for (let vertex = 0; vertex < weights.length / 4; vertex += 1) {
+    let sum = 0;
+    for (let influence = 0; influence < 4; influence += 1) {
+      const offset = vertex * 4 + influence;
+      const weight = weights[offset]!;
+      if (!Number.isFinite(weight) || weight < 0) {
+        throw new Error(`FLVER_SKIN_WEIGHT_INVALID: ${label} vertex=${vertex}`);
+      }
+      sum += weight;
+      if (weight > 1e-6 && !boneIndices.has(indices[offset]!)) {
+        throw new Error(`FLVER_SKIN_INDEX_OUT_OF_RANGE: ${label} vertex=${vertex} bone=${indices[offset]} knownBones=${boneIndices.size}`);
+      }
+    }
+    const sumError = Math.abs(sum - 1);
+    const quantizedWeightSumAllowed = isNativeQuantizedWeightVector(weights, vertex * 4)
+      && sumError <= (4 / 255) + 1e-5;
+    if (!Number.isFinite(sum) || (sumError > 0.001 && !quantizedWeightSumAllowed)) {
+      throw new Error(`FLVER_SKIN_WEIGHT_SUM_INVALID: ${label} vertex=${vertex} sum=${sum}`);
+    }
+  }
+}
+
+/**
+ * 将 base64 纹理字节解码为语义纹理（DDS mipmaps 或 RGBA bytes）。
+ * 纯数据解析（DDSLoader.parse），不创建渲染器对象。
+ */
+async function decodeFlverTexture(textureBase64: string): Promise<FlverSceneTexture | null> {
+  try {
+    const texBytes = decodeBase64Safe(textureBase64);
+    // DDS magic "DDS " (0x20534444)。
+    const isDds = texBytes.length > 4
+      && texBytes[0] === 0x44 && texBytes[1] === 0x44 && texBytes[2] === 0x53 && texBytes[3] === 0x20;
+    if (isDds && texBytes.length > 128) {
+      const ddsLoaderModule = await import('three/examples/jsm/loaders/DDSLoader.js');
+      const dds = new ddsLoaderModule.DDSLoader().parse(
+        (texBytes.buffer as ArrayBuffer).slice(texBytes.byteOffset, texBytes.byteOffset + texBytes.byteLength),
+        true
+      );
+      return {
+        kind: 'dds',
+        width: dds.width,
+        height: dds.height,
+        mipmaps: dds.mipmaps,
+        format: dds.format as import('three').CompressedPixelFormat,
+        mipmapCount: dds.mipmapCount
+      };
+    }
+    // 非 DDS / 过小：RGBA 渐变占位纹理（语义形态，投影层建 DataTexture）。
+    const dv = new DataView(texBytes.buffer);
+    const width = dv.getUint32(12, true) || 256;
+    const height = dv.getUint32(16, true) || 256;
+    const size = Math.min(256, Math.max(1, Math.min(width, height)));
+    const data = new Uint8Array(size * size * 4);
+    for (let index = 0; index < data.length; index += 4) {
+      const x = (index / 4) % size;
+      const y = Math.floor(index / 4 / size);
+      data[index] = Math.floor((x / size) * 255);
+      data[index + 1] = Math.floor((y / size) * 255);
+      data[index + 2] = 200;
+      data[index + 3] = 255;
+    }
+    return { kind: 'rgba', width: size, height: size, rgbaBytes: data };
+  } catch {
+    return null;
+  }
+}

@@ -1,0 +1,44 @@
+{
+  "name": "@soulforge/desktop",
+  "version": "0.9.0",
+  "private": true,
+  "description": "SoulForge — Sekiro Mod Editor",
+  "author": "SoulForge contributors",
+  "type": "module",
+  "main": "out/main/index.js",
+  "scripts": {
+    "dev": "electron-vite dev",
+    "predev": "npm run prepare:database-native",
+    "prebuild": "npm run prepare:database-native",
+    "build": "npm run typecheck && electron-vite build",
+    "prepare:database-native": "node ../../scripts/prepare-electron-sqlite-binding.mjs",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "@codemirror/autocomplete": "6.20.3",
+    "@codemirror/commands": "6.10.4",
+    "@codemirror/language": "6.12.4",
+    "@codemirror/search": "6.7.1",
+    "@codemirror/state": "6.7.1",
+    "@codemirror/view": "6.43.8",
+    "@huggingface/transformers": "3.7.2",
+    "@lezer/highlight": "1.2.3",
+    "@soulforge/core": "0.0.0",
+    "@soulforge/shared": "0.0.0",
+    "@tanstack/react-virtual": "3.14.9",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0",
+    "three": "^0.172.0"
+  },
+  "devDependencies": {
+    "@electron/rebuild": "^4.2.0",
+    "@playwright/test": "^1.49.0",
+    "@types/react": "^19.0.8",
+    "@types/react-dom": "^19.0.3",
+    "@types/three": "^0.172.0",
+    "@vitejs/plugin-react": "^4.3.4",
+    "electron": "43.0.0",
+    "electron-vite": "^3.0.0",
+    "vite": "^6.0.11"
+  }
+}

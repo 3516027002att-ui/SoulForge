@@ -1,0 +1,380 @@
+import { useEffect, useLayoutEffect, useRef, useState, type ReactElement, type ReactNode } from 'react';
+import { shouldAgentAutoScroll, type AgentMessageDto } from '@soulforge/shared';
+import type { AgentApprovalDiffView, AgentApprovalPreview, AgentConversationItem, AgentTaskRetryState } from './agentTaskState.js';
+import { AgentWelcome } from './AgentWelcome.js';
+import { AgentMessageList } from './AgentMessageList.js';
+import { AgentToolActivityGroup } from './AgentToolActivityGroup.js';
+import {
+  AgentApprovalCard,
+  type AgentApprovalCommitFailure
+} from './AgentApprovalCard.js';
+import { AgentScrollToBottom } from './AgentScrollToBottom.js';
+
+/** 任务态派生的工具活动行（AgentToolActivityRow 的输入）。 */
+export interface AgentConversationToolActivity {
+  id: string;
+  summary: string;
+  status: 'running' | 'succeeded' | 'failed';
+  detail: string | null;
+  step: number;
+}
+
+/** 待审批（AgentApprovalCard 的输入；onApprove/onReject 走真实 IPC）。 */
+export interface AgentConversationApproval {
+  id: string;
+  toolName: string;
+  permissionLevel: string;
+  step: number;
+  argumentsJson: string;
+  diff: AgentApprovalDiffView | null;
+  preview: AgentApprovalPreview | null;
+  onApprove: () => void;
+  onReject: () => void;
+  submitting: boolean;
+  commitFailure: AgentApprovalCommitFailure | null;
+}
+
+/** 失败态结构化诊断（有界展示，不替换整个 dock）。 */
+export interface AgentConversationFailure {
+  code: string;
+  message: string;
+}
+
+export interface AgentConversationViewportProps {
+  /** 空闲欢迎态（无消息且无活动任务）是否显示。 */
+  idle: boolean;
+  /** 是否已激活 test 模型免配置状态 */
+  testActive?: boolean | undefined;
+  /** §12.11 已装配消息流；非空时优先渲染 AgentMessageList（全量渲染）。 */
+  messages?: readonly AgentMessageDto[];
+  /** 任务态派生的对话时间线（口播与工具按步交织）。 */
+  conversationItems?: readonly AgentConversationItem[];
+  /** 待审批（Change Review 是消息流唯一强边界卡）。 */
+  approvals?: readonly AgentConversationApproval[];
+  /** 失败态诊断；null 表示无失败。 */
+  failure?: AgentConversationFailure | null;
+  /** 任务进行中的状态文案（describeAgentTaskStatus 产出）。 */
+  status?: string | null;
+  /** 当前会话结束后的附属操作（例如反馈），仍属于会话滚动区。 */
+  footer?: ReactNode;
+  children?: ReactNode;
+}
+
+function renderInlineMarkdown(text: string): ReactNode {
+  if (!text || (!text.includes('`') && !text.includes('**'))) return text;
+  const parts = text.split(/(\*\*[^*]+\*\*|`[^`\n]+`)/g);
+  return parts.map((part, i) => {
+    if (part.startsWith('`') && part.endsWith('`') && part.length > 2) {
+      return <code key={i} className="agent-inline-code">{part.slice(1, -1)}</code>;
+    }
+    if (part.startsWith('**') && part.endsWith('**') && part.length > 4) {
+      return <strong key={i}>{part.slice(2, -2)}</strong>;
+    }
+    return part;
+  });
+}
+
+function AgentThinkingItem({
+  label,
+  text,
+  live,
+  retry
+}: {
+  label: string;
+  text: string;
+  live: boolean;
+  retry?: AgentTaskRetryState | null | undefined;
+}): ReactElement {
+  const [userOpened, setUserOpened] = useState<boolean | null>(null);
+  const isOpen = userOpened !== null ? userOpened : live;
+
+  if (retry) {
+    return (
+      <div className="agent-thinking is-live is-retry" data-testid="agent-thinking">
+        <span className="spinner" aria-hidden="true"></span>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: '4px', width: '100%' }}>
+          <span style={{ fontWeight: 600, color: 'var(--forge-warn-text, #e6a23c)' }}>{label}</span>
+          <span style={{ fontSize: '12px', opacity: 0.85, wordBreak: 'break-word' }}>
+            {retry.message || `请求失败（${retry.code}）`}（约 {Math.max(1, Math.round(retry.delayMs / 1000))} 秒后自动重试）
+          </span>
+        </div>
+      </div>
+    );
+  }
+
+  if (live && text === '') {
+    return (
+      <div className="agent-thinking is-live" data-testid="agent-thinking">
+        <span className="spinner" aria-hidden="true"></span>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: '2px' }}>
+          <span>{label}</span>
+          <span style={{ fontSize: '11px', opacity: 0.65 }}>
+            等待模型生成响应（若当前模型未开启深度思考，将在构思后直接输出）
+          </span>
+        </div>
+      </div>
+    );
+  }
+
+  if (!live && text === '') {
+    return (
+      <div className="agent-thinking" data-testid="agent-thinking">
+        <span>{label}</span>
+      </div>
+    );
+  }
+
+  return (
+    <details
+      className={`agent-thinking${live ? ' is-live' : ''}`}
+      data-testid="agent-thinking"
+      open={isOpen}
+      onToggle={(e) => setUserOpened(e.currentTarget.open)}
+    >
+      <summary>
+        {live && <span className="spinner" aria-hidden="true"></span>}
+        <span>{label}</span>
+      </summary>
+      <div className="agent-thinking__body">{text}</div>
+    </details>
+  );
+}
+
+function renderConversationItem(item: AgentConversationItem, index: number): ReactElement {
+  switch (item.kind) {
+    case 'user':
+      return (
+        <article className="agent-message agent-message--user" key={`user-${index}`}>
+          <div className="agent-message__meta">你</div>
+          <p>{item.text}</p>
+        </article>
+      );
+    case 'notice':
+      return (
+        <div className="agent-message agent-message--system" role="status" key={`notice-${index}`}>
+          <span>{item.text}</span>
+        </div>
+      );
+    case 'thinking':
+      return (
+        <AgentThinkingItem
+          key={`thinking-${index}`}
+          label={item.label}
+          text={item.text}
+          live={item.live}
+          retry={item.retry}
+        />
+      );
+    case 'assistant':
+      return (
+        <article className="agent-message agent-message--agent" key={`assistant-${item.step}-${index}`}>
+          <p className="agent-message__markdown">{renderInlineMarkdown(item.text)}</p>
+        </article>
+      );
+    case 'tools':
+      return (
+        <AgentToolActivityGroup
+          key={item.groupId}
+          groupId={item.groupId}
+          calls={item.calls}
+          live={item.live}
+          collapsed={item.collapsed}
+        />
+      );
+    case 'compacted':
+      return (
+        <div className="agent-compact-summary" key={`compacted-${index}`} data-testid="agent-context-compacted">
+          上下文已自动压缩 {item.windows} 次
+        </div>
+      );
+    case 'draft':
+      return (
+        <article className="agent-message agent-message--agent" key={`draft-${index}`}>
+          <div className="agent-message__meta">Agent · 计划草稿</div>
+          <strong>{item.title}</strong>
+          <p>{item.summary}</p>
+          {item.nextActions.length > 0 && (
+            <ul className="agent-message__actions">
+              {item.nextActions.map((action) => <li key={action}>{action}</li>)}
+            </ul>
+          )}
+        </article>
+      );
+    default:
+      return <></>;
+  }
+}
+
+/**
+ * dock 中段滚动区（§12.1 的 `minmax(0, 1fr)` 行）—— 四态渲染的汇聚点：
+ *
+ *  1. conversation：时间线（口播与工具按步交织）或 AgentMessageList；
+ *  2. tool-running：时间线里的工具行（单行折叠）；
+ *  3. approval：AgentApprovalCard（七要素 Change Review，唯一强边界卡）；
+ *  4. failure：有界失败诊断（折叠/限高，不替换整个 dock）。
+ */
+export function AgentConversationViewport(props: AgentConversationViewportProps): ReactElement {
+  const {
+    idle,
+    messages = [],
+    conversationItems = [],
+    approvals = [],
+    failure = null,
+    status = null,
+    footer = null,
+    children
+  } = props;
+  const scrollRef = useRef<HTMLDivElement>(null);
+  const hasMessages = messages.length > 0;
+  const hasTimeline = conversationItems.length > 0;
+  // 任务态时间线包含模型口播与工具调用的步序关系。只要时间线里有
+  // assistant 正文，就不能被旧的「messages 非空优先」分支遮掉；否则用户
+  // 只能看到工具行，看不到模型为什么调用工具、得出了什么结论。
+  const hasAssistantTimeline = conversationItems.some(
+    (item) => item.kind === 'assistant' && item.text.trim() !== ''
+  );
+  const hasAssistantMessages = messages.some(
+    (message) => message.kind === 'assistant' && message.markdown.trim() !== ''
+  );
+  const useTimeline = hasTimeline && (hasAssistantTimeline || !hasAssistantMessages);
+  const [nowTick, setNowTick] = useState(0);
+
+  const thinkingLive = conversationItems.some((item) => item.kind === 'thinking' && item.live);
+  useEffect(() => {
+    if (!thinkingLive) return undefined;
+    const timer = window.setInterval(() => setNowTick((value) => value + 1), 1000);
+    return () => window.clearInterval(timer);
+  }, [thinkingLive]);
+
+  // 粘性滚动：贴底才跟随新内容；用户上滚阅读时不再被拽回底部（「回到底部」
+  // 钮用同一 48px 阈值现身）。无条件滚底会让滚动条「往下吸」，读不了历史。
+  const stickToBottomRef = useRef(true);
+  const userScrolledUpAtRef = useRef<number>(0);
+
+  function handleScroll(): void {
+    const el = scrollRef.current;
+    if (!el) return;
+    const distanceToBottom = el.scrollHeight - (el.scrollTop + el.clientHeight);
+    if (Date.now() - userScrolledUpAtRef.current < 1000 || distanceToBottom > 24) {
+      stickToBottomRef.current = false;
+    } else if (distanceToBottom <= 8) {
+      stickToBottomRef.current = true;
+    }
+  }
+
+  function handleWheel(event: React.WheelEvent<HTMLDivElement>): void {
+    if (event.deltaY < 0) {
+      // 用户明确向上滑动滚轮：立即解除粘底吸附，并记录时间戳防回弹
+      userScrolledUpAtRef.current = Date.now();
+      stickToBottomRef.current = false;
+    } else if (event.deltaY > 0) {
+      const el = scrollRef.current;
+      if (el) {
+        const distanceToBottom = el.scrollHeight - (el.scrollTop + el.clientHeight);
+        if (distanceToBottom <= 12) {
+          stickToBottomRef.current = true;
+        }
+      }
+    }
+  }
+
+  // 新会话（用户目标变化）时恢复跟随，保证发送后能看到最新尾部。
+  const firstUserText = conversationItems.find((item) => item.kind === 'user')?.text ?? '';
+  const prevUserTextRef = useRef(firstUserText);
+  useEffect(() => {
+    if (prevUserTextRef.current !== firstUserText) {
+      prevUserTextRef.current = firstUserText;
+      stickToBottomRef.current = true;
+    }
+  }, [firstUserText]);
+
+  useLayoutEffect(() => {
+    const el = scrollRef.current;
+    if (!el || !stickToBottomRef.current) return;
+    el.scrollTop = el.scrollHeight;
+  }, [messages, conversationItems, approvals, status, failure]);
+
+  const isLiveTask = status !== null || thinkingLive;
+  const safeItems = (conversationItems ?? []).filter(Boolean);
+  const lastAssistantIndex = safeItems.map((item) => item?.kind).lastIndexOf('assistant');
+
+  return (
+    <div
+      className="agent-conversation"
+      role="log"
+      aria-live="polite"
+      aria-label="Agent 会话记录"
+      ref={scrollRef}
+      onScroll={handleScroll}
+      onWheel={handleWheel}
+    >
+      {failure !== null && (
+        <section className="agent-failure-card" data-testid="agent-failure" role="alert">
+          <strong>任务失败</strong>
+          <p data-testid="agent-failure-code">错误码：{failure.code}</p>
+          <p className="muted">{failure.message}</p>
+          <p className="muted">失败只影响本次运行，不会替换整个面板；请查看诊断信息后重试。</p>
+        </section>
+      )}
+
+      {useTimeline ? (
+        safeItems.map((item, index) => {
+          if (!item) return null;
+          if (item.kind === 'assistant') {
+            const isStreamingNow = isLiveTask && index === lastAssistantIndex;
+            return (
+              <article className="agent-message agent-message--agent" key={`assistant-${item.step ?? index}-${index}`}>
+                <p className="agent-message__markdown">
+                  {renderInlineMarkdown(item.text)}
+                  {isStreamingNow && <span className="agent-stream-cursor" aria-hidden="true" />}
+                </p>
+              </article>
+            );
+          }
+          return renderConversationItem(item, index);
+        })
+      ) : hasMessages ? (
+        <AgentMessageList messages={messages} />
+      ) : idle && !hasTimeline ? (
+        <AgentWelcome testActive={props.testActive} />
+      ) : (
+        children
+      )}
+
+      {approvals.map((approval) => (
+        <AgentApprovalCard
+          key={approval.id}
+          id={approval.id}
+          toolName={approval.toolName}
+          permissionLevel={approval.permissionLevel}
+          step={approval.step}
+          argumentsJson={approval.argumentsJson}
+          diff={approval.diff}
+          preview={approval.preview}
+          onApprove={approval.onApprove}
+          onReject={approval.onReject}
+          submitting={approval.submitting}
+          commitFailure={approval.commitFailure}
+        />
+      ))}
+
+      {status !== null && (
+        <div className="agent-log" role="status" aria-live="polite">
+          <div className="agent-log__row" data-testid="agent-task-status">
+            {thinkingLive && <span className="spinner" aria-hidden="true"></span>}
+            <span>{status}</span>
+          </div>
+        </div>
+      )}
+
+      {footer}
+
+      <AgentScrollToBottom
+        scrollRef={scrollRef}
+        onScrollToBottom={() => {
+          stickToBottomRef.current = true;
+        }}
+      />
+    </div>
+  );
+}

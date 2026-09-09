@@ -1,0 +1,240 @@
+import type { IndexedFile, KnowledgeRefreshSummary } from '@soulforge/shared';
+import { WorkspaceIndex, type SourceInvalidationResult } from './workspaceIndex.js';
+
+export type KnowledgeRefreshStatus = 'converged' | 'partial' | 'invalidated' | 'failed' | 'preserved';
+
+export interface KnowledgeRefreshResult {
+  status: KnowledgeRefreshStatus;
+  changedSources: string[];
+  invalidated: SourceInvalidationResult;
+  semanticState: 'reanalyzed' | 'partial' | 'empty' | 'preserved';
+  error?: string;
+}
+
+export interface RefreshKnowledgeAfterCommitInput {
+  index: WorkspaceIndex;
+  beforeFiles: readonly IndexedFile[];
+  afterFiles: readonly IndexedFile[];
+  requestedSources?: readonly string[];
+  /**
+   * Rebuild semantic projections from the post-commit bytes.  A callback is
+   * deliberately required by production callers: scanning the file catalog
+   * alone is not a semantic refresh.
+   */
+  reanalyze?: (changedSources: readonly string[], signal?: AbortSignal) => Promise<WorkspaceIndex | {
+    index: WorkspaceIndex;
+    semanticState: 'reanalyzed' | 'partial';
+    error?: string;
+  }>;
+  /** Publish a validated candidate into the live index after freshness checks. */
+  publish?: (index: WorkspaceIndex, changedSources: readonly string[], signal?: AbortSignal) => Promise<WorkspaceIndex> | WorkspaceIndex;
+  persist?: (index: WorkspaceIndex, changedSources: readonly string[], signal?: AbortSignal) => Promise<void>;
+  /** Abort a bounded post-commit refresh without undoing the committed write. */
+  signal?: AbortSignal;
+}
+
+export interface RefreshKnowledgeAfterCommitOutput {
+  index: WorkspaceIndex;
+  result: KnowledgeRefreshResult;
+}
+
+export function summarizeKnowledgeRefresh(result: KnowledgeRefreshResult): KnowledgeRefreshSummary {
+  const removed = result.invalidated.removed;
+  return {
+    status: result.status,
+    semanticState: result.semanticState,
+    changedSourceCount: result.changedSources.length,
+    invalidatedSourceCount: result.invalidated.sourceUris.length,
+    removedSemanticCount: removed.events
+      + removed.mapEntities
+      + removed.mapRegions
+      + removed.paramRows
+      + removed.textEntries
+      + removed.taeExports,
+    ...(result.error ? { error: result.error } : {})
+  };
+}
+
+/**
+ * The single post-commit knowledge boundary.
+ *
+ * The order is intentional and must not be weakened to `scan -> setFiles`:
+ * changed sources lose their old semantic projections before a new file
+ * catalog or persisted RAG corpus can be considered current.  Reanalysis is
+ * allowed to fail, but the returned status then remains `invalidated`/`failed`
+ * and the caller must not report semantic convergence.
+ */
+export async function refreshKnowledgeAfterCommit(
+  input: RefreshKnowledgeAfterCommitInput
+): Promise<RefreshKnowledgeAfterCommitOutput> {
+  const changedSources = detectChangedSourceUris(input.beforeFiles, input.afterFiles, input.requestedSources ?? []);
+  throwIfRefreshAborted(input.signal);
+  const invalidated = input.index.invalidateChangedSources(changedSources);
+  input.index.setFiles(input.afterFiles);
+  input.index.rebuildReferences();
+
+  if (changedSources.length === 0) {
+    await input.persist?.(input.index, changedSources, input.signal);
+    return {
+      index: input.index,
+      result: {
+        status: 'preserved',
+        changedSources,
+        invalidated,
+        semanticState: 'preserved'
+      }
+    };
+  }
+
+  if (!input.reanalyze) {
+    await input.persist?.(input.index, changedSources, input.signal);
+    return {
+      index: input.index,
+      result: {
+        status: 'invalidated',
+        changedSources,
+        invalidated,
+        semanticState: 'empty'
+      }
+    };
+  }
+
+  try {
+    throwIfRefreshAborted(input.signal);
+    const reanalyzedOutput = await input.reanalyze(changedSources, input.signal);
+    throwIfRefreshAborted(input.signal);
+    const reanalyzed = reanalyzedOutput instanceof WorkspaceIndex
+      ? { index: reanalyzedOutput, semanticState: 'reanalyzed' as const }
+      : reanalyzedOutput;
+    const staleSources = findStaleReanalysisSources(reanalyzed.index, input.afterFiles, changedSources);
+    if (staleSources.length > 0) {
+      // A late async read is not allowed to become the persisted semantic
+      // truth.  Keep the already-invalidated index and make the caller retry
+      // from the current file catalog.
+      await input.persist?.(input.index, changedSources, input.signal);
+      return {
+        index: input.index,
+        result: {
+          status: 'invalidated',
+          changedSources,
+          invalidated,
+          semanticState: 'empty',
+          error: `NATIVE_REFRESH_STALE_REVISION: ${staleSources.join(', ')}`
+        }
+      };
+    }
+    const semanticState = reanalyzed.semanticState;
+    throwIfRefreshAborted(input.signal);
+    const publishedIndex = input.publish
+      ? await input.publish(reanalyzed.index, changedSources, input.signal)
+      : reanalyzed.index;
+    throwIfRefreshAborted(input.signal);
+    publishedIndex.rebuildReferences();
+    await input.persist?.(publishedIndex, changedSources, input.signal);
+    return {
+      index: publishedIndex,
+      result: {
+        status: semanticState === 'partial' ? 'partial' : 'converged',
+        changedSources,
+        invalidated,
+        semanticState,
+        ...(reanalyzed.error ? { error: reanalyzed.error } : {})
+      }
+    };
+  } catch (error) {
+    try {
+      // Keep the committed bytes visible as invalidated even when reanalysis
+      // timed out or the workspace generation changed. A persistence failure
+      // must not escape and turn a committed write into an apparent rollback.
+      await input.persist?.(input.index, changedSources, input.signal);
+    } catch (persistError) {
+      const refreshError = error instanceof Error ? error.message : String(error);
+      const persistenceError = persistError instanceof Error ? persistError.message : String(persistError);
+      return {
+        index: input.index,
+        result: {
+          status: 'failed',
+          changedSources,
+          invalidated,
+          semanticState: 'empty',
+          error: `${refreshError}; invalidated-state persistence failed: ${persistenceError}`
+        }
+      };
+    }
+    return {
+      index: input.index,
+      result: {
+        status: 'failed',
+        changedSources,
+        invalidated,
+        semanticState: 'empty',
+        error: error instanceof Error ? error.message : String(error)
+      }
+    };
+  }
+}
+
+function throwIfRefreshAborted(signal?: AbortSignal): void {
+  if (!signal?.aborted) return;
+  const error = new Error('post-commit knowledge refresh exceeded its deadline or was cancelled');
+  error.name = 'AbortError';
+  throw error;
+}
+
+function findStaleReanalysisSources(
+  reanalyzed: WorkspaceIndex,
+  afterFiles: readonly IndexedFile[],
+  changedSources: readonly string[]
+): string[] {
+  const stale: string[] = [];
+  for (const sourceUri of changedSources) {
+    const expected = findCurrentFile(afterFiles, sourceUri);
+    if (!expected) continue;
+    const actual = reanalyzed.getFile(sourceUri);
+    if (!actual
+      || (expected.sha256 !== undefined && actual.sha256 !== expected.sha256)
+      || expected.mtimeMs !== actual.mtimeMs) {
+      stale.push(sourceUri);
+    }
+  }
+  return stale;
+}
+
+function findCurrentFile(files: readonly IndexedFile[], sourceUri: string): IndexedFile | undefined {
+  const direct = files.find((file) => file.sourceUri === sourceUri);
+  if (direct) return direct;
+  const normalized = normalizeSourceToken(sourceUri);
+  const matches = files.filter((file) => [file.sourceUri, file.sourcePath, file.relativePath, file.absolutePath]
+    .map(normalizeSourceToken)
+    .includes(normalized));
+  return matches.length === 1 ? matches[0] : undefined;
+}
+
+function normalizeSourceToken(value: string): string {
+  return value.trim().replaceAll('\\', '/').replace(/^file:\/\//iu, '').toLocaleLowerCase();
+}
+
+export function detectChangedSourceUris(
+  before: readonly IndexedFile[],
+  after: readonly IndexedFile[],
+  requestedSources: readonly string[] = []
+): string[] {
+  const beforeByUri = new Map(before.map((file) => [file.sourceUri, file] as const));
+  const changed = new Set(requestedSources.filter((sourceUri) => sourceUri.trim().length > 0));
+
+  for (const file of after) {
+    const previous = beforeByUri.get(file.sourceUri);
+    if (!previous
+      || previous.sha256 !== file.sha256
+      || previous.size !== file.size
+      || previous.mtimeMs !== file.mtimeMs
+      || previous.parseStatus !== file.parseStatus) {
+      changed.add(file.sourceUri);
+    }
+  }
+  const afterUris = new Set(after.map((file) => file.sourceUri));
+  for (const previous of before) {
+    if (!afterUris.has(previous.sourceUri)) changed.add(previous.sourceUri);
+  }
+  return [...changed];
+}

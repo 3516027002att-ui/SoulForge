@@ -1,0 +1,60 @@
+{
+  "schema": "sekiro-face-set-rules-v1",
+  "game": "sekiro",
+  "profiles": [
+    {
+      "profileId": "sekiro-map-static-highest-detail-v1",
+      "game": "sekiro",
+      "workflow": "map-static",
+      "requiredFlagsExact": 0,
+      "selector": "first-exact-flags-in-mesh-reference-order",
+      "fallback": "fail",
+      "evidenceArtifactHashes": ["sha256:placeholder-sekiro-map-static-evidence"]
+    },
+    {
+      "profileId": "sekiro-character-preview-highest-detail-v1",
+      "game": "sekiro",
+      "workflow": "character-preview",
+      "requiredFlagsExact": 0,
+      "selector": "first-exact-flags-in-mesh-reference-order",
+      "fallback": "fail",
+      "evidenceArtifactHashes": ["sha256:placeholder-sekiro-character-preview-evidence"]
+    }
+  ],
+  "rules": [
+    {
+      "ruleId": "sekiro-flver-strip-restart-v1",
+      "game": "sekiro",
+      "internalVersion": { "minInclusive": 8192, "maxInclusive": 131100 },
+      "nativePredicate": {
+        "triangleStrip": true,
+        "flagsMask": 0,
+        "flagsValue": 0,
+        "sourceIndexBits": null,
+        "edgeCompressedFlag": false
+      },
+      "primitiveRestart": {
+        "mode": "sentinel-if-parent-vertex-count-less-than",
+        "sentinel": 65535,
+        "thresholdExclusive": 65535
+      },
+      "winding": "a-b-c_then_c-b-a_alternating",
+      "evidenceArtifactHashes": ["sha256:placeholder-strip-restart-evidence"]
+    },
+    {
+      "ruleId": "sekiro-flver-list-no-restart-v1",
+      "game": "sekiro",
+      "internalVersion": { "minInclusive": 8192, "maxInclusive": 131100 },
+      "nativePredicate": {
+        "triangleStrip": false,
+        "flagsMask": 0,
+        "flagsValue": 0,
+        "sourceIndexBits": null,
+        "edgeCompressedFlag": false
+      },
+      "primitiveRestart": { "mode": "disabled" },
+      "winding": "a-b-c_then_c-b-a_alternating",
+      "evidenceArtifactHashes": ["sha256:placeholder-list-evidence"]
+    }
+  ]
+}

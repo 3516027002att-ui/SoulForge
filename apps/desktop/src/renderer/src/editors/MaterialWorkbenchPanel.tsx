@@ -1,0 +1,527 @@
+/**
+ * MATERIAL-53B：Smithbox Material 工作台（§2.5）。
+ *
+ * 三栏：`File list | Material list | Properties / Values`。
+ *
+ * ── 为什么是它 ──
+ *
+ * MATERIAL-53A 已在 Bridge 侧给出 read-mtd-document（MTD XML 结构投影、round-trip
+ * 一致性、属性/纹理引用三页投影）。本组件是 read-mtd-document 的消费方，与
+ * GparamWorkbench 对 read-gparam-document、TpfWorkbenchPanel 对 read-tpf-document
+ * 的关系相同。
+ *
+ * ── 层级 ──
+ *
+ * 文件（.mtd 包文件）→ 材质（单文件 = 单材质定义）→ 属性/值（右侧展示选中材质的
+ * 属性行）。无 3D viewport（§2.5：MATERIAL 无 viewport，不要发明 Preview 第四栏）。
+ *
+ * ── known 可编辑、unknown 可见但不可编辑（MATERIAL-53C）──
+ *
+ * 53C 接线 typed 属性写回：known（非 unknown）属性行渲染为输入框，blur/Enter 提交，
+ * 经 resource.commitMtdPropertySet（write-mtd-document）落盘——只有 typed paramId
+ * 定位才有写入口，没有通用 XML 文本替换 fallback。param 元素上的未识别属性由 C#
+ * 原样保留在 MaterialPropertyWire.unknown 里，同时进 unparsedGaps 并降 partial；
+ * unknown 属性必须**可见**（渲染为只读值行，不能丢弃）且**不可编辑**（unknown
+ * 分支不渲染任何写控件/输入框）。
+ *
+ * ── partial 不能伪装成完整解析 ──
+ *
+ * authority 为 partial 时（unknown 属性/复数材质容器/未识别 XML 元素），unparsedGaps
+ * 必须对用户可见（gap 区段），不能把「读出来了」显示成「完整解析的空文档」。
+ *
+ * ── 失败 ──
+ *
+ * 读取失败的文件保留在列表并标记失败，Material list 栏给出结构化诊断，不能把 read
+ * failure 显示成空包。属性写回失败显示结构化诊断（severity/code/message）与回滚
+ * 提示，保留已读内容与用户输入，不静默丢弃（局部失败不清空）。
+ */
+
+import { useEffect, useMemo, useState, type ReactElement } from 'react';
+import {
+  isMtdDocument,
+  projectMaterialDocumentPages,
+  type MaterialPropertyWire,
+  type MtdDocument
+} from '@soulforge/shared';
+import { getRendererBridge } from '../runtime/rendererRuntime.js';
+import { isRowTabEntry, selectableRowAttributes } from '../a11y/selectableRow.js';
+import { WorkbenchLayout } from '../workbench/WorkbenchLayout.js';
+
+/** File list 栏的一个条目：工作区索引里的 MTD 文件。 */
+export interface MaterialFileView {
+  /** 稳定标识（文件浏览器与索引共用）。 */
+  sourceUri: string;
+  /** 物理相对路径（仅进 metadata details，不做显示名）。 */
+  relativePath: string;
+}
+
+export interface MaterialWorkbenchPanelProps {
+  /** 该域的全部 MTD 文件（files）。 */
+  files: MaterialFileView[];
+  /** 打开时默认选中的文件（当前选中资源）。 */
+  initialUri?: string;
+}
+
+// 属性 / 纹理引用一律全量渲染，栏自身滚动，不做条数上限。
+
+/** MTD 显示名：文件名去 .mtd，物理路径只在 title/details。 */
+function materialFileDisplayName(file: MaterialFileView): string {
+  const base = file.relativePath.split(/[\\/]/).pop() ?? file.relativePath;
+  return base.replace(/\.mtd$/i, '');
+}
+
+type MaterialSelectionKind = 'material' | 'texture';
+
+interface MaterialSelection {
+  kind: MaterialSelectionKind;
+  /** 材质名（或文件显示名退化）；同时作为 Inspector 标题与选中行 label。 */
+  label: string;
+  /** 纹理引用索引；kind === 'texture' 时有效。 */
+  textureIndex?: number;
+}
+
+/** 属性 → 展示行投影：unknown 属性展开为独立只读行，不可丢弃。 */
+export interface MaterialPropertyRow {
+  id: string;
+  name: string;
+  value: string;
+  /** 属性 value 的声明类型（param type 属性），可能缺失。 */
+  type?: string;
+  /** 未识别属性行：可见但不可编辑（unknown 分支不渲染输入框，保留只读标注）。 */
+  unknown?: boolean;
+}
+
+export function materialPropertyRows(properties: MaterialPropertyWire[]): MaterialPropertyRow[] {
+  const rows: MaterialPropertyRow[] = [];
+  for (const prop of properties) {
+    const label = prop.name || prop.id || '未命名属性';
+    rows.push({
+      id: prop.id ?? label,
+      name: label,
+      value: prop.value ?? '',
+      ...(prop.type ? { type: prop.type } : {})
+    });
+    if (prop.unknown && Object.keys(prop.unknown).length > 0) {
+      for (const [key, value] of Object.entries(prop.unknown)) {
+        rows.push({
+          id: `${prop.id ?? label}.${key}`,
+          name: `${key}（未识别）`,
+          value,
+          unknown: true
+        });
+      }
+    }
+  }
+  return rows;
+}
+
+/** MTD 属性写回的 typed set 载荷：paramId + newValue。
+ *  sourceUri/sourceHash 由调用点拼接（commitMtdPropertySet(selectedUri,
+ *  document.sourceHash, set)），并发保护依赖 read 时的 sourceHash 未漂移。 */
+export function mtdPropertySetPayload(rowId: string, newValue: string): { paramId: string; newValue: string } {
+  return { paramId: rowId, newValue };
+}
+
+/** commit 结果的 renderer 侧窄视图：只读 ok 与 diagnostics。 */
+export interface MtdPropertyCommitResult {
+  ok?: boolean;
+  diagnostics?: Array<{ severity?: string; code?: string; message?: string }>;
+}
+
+export interface MtdPropertyCommitDiagnostic {
+  severity?: string;
+  code: string;
+  message: string;
+}
+
+/** commit 失败 → 第一条诊断；ok → null。无诊断给 fail-closed 默认值，不吞失败。 */
+export function mtdPropertyCommitError(result: MtdPropertyCommitResult): MtdPropertyCommitDiagnostic | null {
+  if (result.ok) return null;
+  const first = result.diagnostics?.[0];
+  return {
+    ...(first?.severity ? { severity: first.severity } : {}),
+    code: first?.code ?? 'MTD_COMMIT_FAILED',
+    message: first?.message ?? 'MTD 写入被拒绝。'
+  };
+}
+
+export interface MtdCommitApplied {
+  notice: string | null;
+  error: MtdPropertyCommitDiagnostic | null;
+  /** ok 时 true：组件应触发重读并清空该行 draft。 */
+  refresh: boolean;
+}
+
+/** 把 commit 结果归约成 UI 状态迁移（纯逻辑，可测）。失败不触发重读、不丢内容。 */
+export function reduceMtdCommitResult(result: MtdPropertyCommitResult, label: string): MtdCommitApplied {
+  if (result.ok) {
+    return { notice: `已保存 ${label} 并重读验证。`, error: null, refresh: true };
+  }
+  return { notice: null, error: mtdPropertyCommitError(result), refresh: false };
+}
+
+export function MaterialWorkbenchPanel(props: MaterialWorkbenchPanelProps): ReactElement {
+  const bridge = getRendererBridge();
+
+  const [selectedUri, setSelectedUri] = useState<string | null>(props.initialUri ?? null);
+  /** 选中文件的读取结果；null 表示未选或失败。 */
+  const [document, setDocument] = useState<MtdDocument | null>(null);
+  /** 文件 → 读取失败诊断；失败文件保留在列表并标记。 */
+  const [readFailure, setReadFailure] = useState<{ code: string; message: string } | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [selection, setSelection] = useState<MaterialSelection | null>(null);
+
+  /** 每行当前编辑值（rowId → 输入文本）；未编辑时回退到行投影值。 */
+  const [drafts, setDrafts] = useState<Map<string, string>>(new Map());
+  /** 正在提交的属性行 id；非 null 期间禁用重复提交。 */
+  const [committingId, setCommittingId] = useState<string | null>(null);
+  /** 最近一次属性写回的失败诊断（成功时清空）。 */
+  const [commitError, setCommitError] = useState<MtdPropertyCommitDiagnostic | null>(null);
+  /** 最近一次属性写回的成功提示。 */
+  const [commitNotice, setCommitNotice] = useState<string | null>(null);
+  /** 提交成功后强制重读（read effect 的 deps 触发器）。 */
+  const [refreshKey, setRefreshKey] = useState(0);
+
+  // ── 读取选中文件 ──
+  useEffect(() => {
+    if (!bridge || typeof bridge.readMtdDocument !== 'function') return;
+    if (selectedUri === null) {
+      setDocument(null);
+      setReadFailure(null);
+      return;
+    }
+    let cancelled = false;
+    setLoading(true);
+    bridge.readMtdDocument(selectedUri)
+      .then((raw) => {
+        if (cancelled) return;
+        const result = raw as {
+          ok: boolean;
+          data?: unknown;
+          diagnostics?: Array<{ code?: string; message?: string }>;
+        };
+        if (result.ok && result.data && isMtdDocument(result.data)) {
+          setDocument(result.data);
+          setReadFailure(null);
+        } else {
+          setDocument(null);
+          const first = result.diagnostics?.[0];
+          setReadFailure({
+            code: first?.code ?? 'MTD_READ_FAILED',
+            message: first?.message ?? 'MTD 读取失败。'
+          });
+        }
+        setLoading(false);
+      })
+      .catch((error: unknown) => {
+        if (cancelled) return;
+        setDocument(null);
+        setReadFailure({
+          code: 'MTD_READ_EXCEPTION',
+          message: error instanceof Error ? error.message : 'MTD 读取异常。'
+        });
+        setLoading(false);
+      });
+    return () => { cancelled = true; };
+  }, [bridge, selectedUri, refreshKey]);
+
+  // 新文件 → 选中态回到材质本身，编辑草稿与提交状态一并清空（避免跨文件漂移）。
+  useEffect(() => {
+    setSelection(null);
+    setDrafts(new Map());
+    setCommitError(null);
+    setCommitNotice(null);
+  }, [selectedUri]);
+
+  const pages = useMemo(
+    () => (document ? projectMaterialDocumentPages(document) : null),
+    [document]
+  );
+
+  const materialLabel = useMemo(() => {
+    const material = pages?.material;
+    return material?.name || material?.rootElement || (selectedUri
+      ? materialFileDisplayName({ sourceUri: selectedUri, relativePath: selectedUri })
+      : '材质');
+  }, [pages, selectedUri]);
+
+  // 文档加载完成后把选中态落到材质（材质在左侧 Material list 是唯一默认行）。
+  useEffect(() => {
+    if (document && selection === null) {
+      setSelection({ kind: 'material', label: materialLabel });
+    }
+  }, [document, selection, materialLabel]);
+
+  const properties = pages?.properties.properties ?? [];
+  const textureRefs = pages?.textureReferences.textureRefs ?? [];
+  const propertyRows = useMemo(() => materialPropertyRows(properties), [properties]);
+
+  const visiblePropertyRows = propertyRows;
+  const visibleTextureRefs = textureRefs;
+
+  const authority = document?.authority;
+  // MTD 的正常 authority 上限就是 candidate（schema 禁止推断）；只有 partial 才
+  // 表示存在未识别结构，此时缺口必须对用户可见，不能伪装成完整解析。
+  const isPartial = authority === 'partial';
+  const unparsedGaps = document?.unparsedGaps ?? [];
+  const layoutWarnings = document?.layoutWarnings ?? [];
+  const visibleGaps = unparsedGaps;
+
+  function selectMaterial(): void {
+    setSelection({ kind: 'material', label: materialLabel });
+  }
+
+  function selectTextureRef(index: number, label: string): void {
+    setSelection({ kind: 'texture', label, textureIndex: index });
+  }
+
+  /** 单行 known 属性写回：blur/Enter 触发。typed set 载荷只含 paramId + newValue，
+   *  sourceUri/sourceHash 用 read 时选定拼接，哈希漂移由 main 侧并发保护拒绝。
+   *  提交期间 committingId 非 null，禁止重复提交。 */
+  function commitProperty(row: MaterialPropertyRow): void {
+    if (!bridge || typeof bridge.commitMtdPropertySet !== 'function') return;
+    if (selectedUri === null || document === null) return;
+    if (row.unknown || committingId !== null) return;
+    const newValue = drafts.get(row.id) ?? row.value;
+    setCommittingId(row.id);
+    setCommitError(null);
+    setCommitNotice(null);
+    bridge.commitMtdPropertySet(selectedUri, document.sourceHash, mtdPropertySetPayload(row.id, newValue))
+      .then((raw) => {
+        const applied = reduceMtdCommitResult(raw as MtdPropertyCommitResult, row.name);
+        if (applied.error) setCommitError(applied.error);
+        if (applied.notice) setCommitNotice(applied.notice);
+        if (applied.refresh) {
+          setDrafts((current) => {
+            const next = new Map(current);
+            next.delete(row.id);
+            return next;
+          });
+          setRefreshKey((key) => key + 1);
+        }
+      })
+      .catch((caught: unknown) => {
+        setCommitError({
+          code: 'MTD_COMMIT_EXCEPTION',
+          message: caught instanceof Error ? caught.message : 'MTD 写入异常。'
+        });
+      })
+      .finally(() => {
+        setCommittingId(null);
+      });
+  }
+
+  /** Inspector 栏内容：材质 → 属性行；纹理引用 → 该引用元数据。 */
+  function inspectorRows(): Array<readonly [string, string]> {
+    if (selection?.kind === 'texture') {
+      const ref = selection.textureIndex === undefined ? undefined : textureRefs[selection.textureIndex];
+      if (!ref) return [['未识别引用', '—']];
+      return [
+        ['路径', ref.path ?? ''],
+        ['类型', ref.type ?? ''],
+        ['名称', ref.name ?? '']
+      ];
+    }
+    const material = pages?.material;
+    return [
+      ['原始名称', material?.name ?? ''],
+      ['根元素', material?.rootElement ?? ''],
+      ['版本', material?.version ?? ''],
+      ['文件头', material?.header ?? ''],
+      ['着色器路径', material?.shaderPath ?? ''],
+      ['材质数量', String(material?.materialCount ?? 0)],
+      ['格式编号', material?.formatId ?? ''],
+      ['读取级别', material?.authority ?? ''],
+      ['往返一致性', document?.roundTrip?.consistent ? '一致 ✓' : '—']
+    ];
+  }
+
+  return (
+    <WorkbenchLayout
+      label="Material 工作台"
+      columns={[
+        {
+          id: 'files',
+          title: '文件列表',
+          hint: `${props.files.length} 个文件`,
+          initialFlex: 0.2,
+          minWidth: 150,
+          children: (
+            <div className="wb-list">
+              {props.files.length === 0 && <p className="wb-empty">工作区中没有 MTD 文件。</p>}
+              {props.files.map((file, index) => (
+                <div
+                  key={file.sourceUri}
+                  className="wb-row"
+                  {...selectableRowAttributes({
+                    selected: selectedUri === file.sourceUri,
+                    isTabEntry: isRowTabEntry(index, selectedUri !== null),
+                    onSelect: () => setSelectedUri(file.sourceUri)
+                  })}
+                >
+                  <span className="wb-row__name" title={file.relativePath}>
+                    {materialFileDisplayName(file)}
+                  </span>
+                </div>
+              ))}
+            </div>
+          )
+        },
+        {
+          id: 'materials',
+          title: '材质列表',
+          ...(document ? { hint: `${document.materialCount} 个材质` } : {}),
+          initialFlex: 0.3,
+          minWidth: 200,
+          children: (
+            <div className="wb-list">
+              {selectedUri === null && <p className="wb-empty">先在最左栏选择一个 MTD 文件。</p>}
+              {selectedUri !== null && loading && <p className="wb-empty">加载中…</p>}
+              {selectedUri !== null && !loading && readFailure && (
+                <p className="wb-empty diag-error">{readFailure.message}</p>
+              )}
+              {selectedUri !== null && !loading && !readFailure && document === null && (
+                <p className="wb-empty">这个文件读不出来。</p>
+              )}
+              {selectedUri !== null && !loading && !readFailure && document !== null && (
+                <>
+                  <div className="wb-list__group-label">材质</div>
+                  <div
+                    className="wb-row"
+                    {...selectableRowAttributes({
+                      selected: selection?.kind === 'material',
+                      isTabEntry: isRowTabEntry(0, selection !== null),
+                      onSelect: selectMaterial
+                    })}
+                  >
+                    <span className="wb-row__name" title={materialLabel}>{materialLabel}</span>
+                    <span className="wb-row__meta">
+                       {pages?.material.rootElement ?? '材质'} · v{pages?.material.version ?? '—'}
+                    </span>
+                  </div>
+                  <div className="wb-list__group-label">纹理引用（{textureRefs.length}）</div>
+                  {visibleTextureRefs.map((ref, refIndex) => (
+                    <div
+                      key={`${ref.path ?? ''}-${refIndex}`}
+                      className="wb-row"
+                      {...selectableRowAttributes({
+                        selected: selection?.kind === 'texture' && selection.textureIndex === refIndex,
+                        isTabEntry: false,
+                        onSelect: () => selectTextureRef(refIndex, ref.path || `纹理引用 ${refIndex}`)
+                      })}
+                    >
+                      <span className="wb-row__name" title={ref.path ?? ''}>{ref.path || `纹理引用 ${refIndex}`}</span>
+                      <span className="wb-row__meta">{ref.type ?? '—'}</span>
+                    </div>
+                  ))}
+                  {visibleTextureRefs.length === 0 && (
+                    <p className="wb-empty">这个材质没有纹理引用。</p>
+                  )}
+                </>
+              )}
+            </div>
+          )
+        },
+        {
+          id: 'properties',
+          title: '属性与数值',
+          ...(selection ? { hint: selection.label } : {}),
+          initialFlex: 0.5,
+          minWidth: 240,
+          children: (
+            <div className="wb-list">
+              {selection === null && <p className="wb-empty">在中间选择一个材质查看属性。</p>}
+              {selection !== null && (
+                <>
+                  <div className="wb-list__group-label">
+                    {selection.kind === 'texture' ? `纹理引用 · ${selection.label}` : `${selection.label} 属性`}
+                  </div>
+                  <div className="wb-props">
+                    {selection.kind === 'texture'
+                      ? inspectorRows().map(([name, value]) => (
+                          <div key={name} className="wb-prop">
+                            <span className="wb-prop__name">{name}</span>
+                            <span className="wb-prop__value wb-prop__value--readonly">{value}</span>
+                          </div>
+                        ))
+                      : visiblePropertyRows.map((row) => {
+                        const nameCell = (
+                          <span className="wb-prop__name">
+                            {row.name}
+                            {row.type ? <span className="wb-prop__enum"> · {row.type}</span> : null}
+                          </span>
+                        );
+                        const valueCell = row.unknown ? (
+                          <span className="wb-prop__value wb-prop__value--readonly mtd-unknown-value">
+                            {row.value}
+                          </span>
+                        ) : (
+                          <span className="wb-prop__value">
+                            <input
+                              type="text"
+                              aria-label={`${row.name} 值`}
+                              value={drafts.get(row.id) ?? row.value}
+                              disabled={committingId === row.id}
+                              onChange={(event) => {
+                                const next = new Map(drafts);
+                                next.set(row.id, event.target.value);
+                                setDrafts(next);
+                                setCommitNotice(null);
+                              }}
+                              onBlur={() => commitProperty(row)}
+                              onKeyDown={(event) => {
+                                if (event.key === 'Enter') event.currentTarget.blur();
+                              }}
+                            />
+                          </span>
+                        );
+                        return row.unknown ? (
+                          <div key={row.id} className="wb-prop" data-testid="mtd-unknown-prop">
+                            {nameCell}
+                            {valueCell}
+                          </div>
+                        ) : (
+                          <div key={row.id} className="wb-prop">
+                            {nameCell}
+                            {valueCell}
+                          </div>
+                        );
+                      })}
+                  </div>
+                  {isPartial && (unparsedGaps.length > 0 || layoutWarnings.length > 0) && (
+                    <details className="mtd-partial" data-testid="mtd-partial-gaps">
+                      <summary>
+                         读取级别：{authority} · 未识别结构 {unparsedGaps.length} 项
+                        {layoutWarnings.length > 0 ? ` · 布局警告 ${layoutWarnings.length} 条` : ''}
+                      </summary>
+                      <ul>
+                        {visibleGaps.map((gap, gapIndex) => (
+                          <li key={gapIndex} className="muted">{gap}</li>
+                        ))}
+                      </ul>
+                    </details>
+                  )}
+                  <div className="wb-list__group-label">写回</div>
+                  {commitNotice && (
+                    <p className="muted" data-testid="mtd-commit-success">{commitNotice}</p>
+                  )}
+                  {commitError && (
+                    <p className="wb-empty diag-error" data-testid="mtd-commit-error">
+                      [{commitError.severity ?? 'error'}] {commitError.code}: {commitError.message}
+                      {' · '}写入失败已回滚，当前内容未清除。
+                    </p>
+                  )}
+                  {!commitNotice && !commitError && (
+                    <p className="wb-empty">
+                      修改 known 属性值后按 Enter 或移开焦点提交；unknown 属性保留且只读。
+                    </p>
+                  )}
+                </>
+              )}
+            </div>
+          )
+        }
+      ]}
+    />
+  );
+}
