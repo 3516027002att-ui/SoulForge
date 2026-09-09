@@ -38,19 +38,45 @@ SoulForge 是给魂游（FromSoftware 的《只狼》《黑暗之魂》《艾尔
 
 ## 快速开始
 
-### 方式一：直接双击智能启动器（推荐，零配置）
+### 方式一：V0.9 完整 Release 源码包（推荐）
 
-如果你拿到的是编译好的发行包或本地仓库：
+请优先下载 GitHub Release 中的
+[`SoulForge-v0.9.0-win-x64-source.zip`](https://github.com/3516027002att-ui/SoulForge/releases/download/v0.9.0/SoulForge-v0.9.0-win-x64-source.zip)。完整包已
+附带当前编译后的 Electron `out`、workspace `dist`、SQLite native binding、
+自包含 Bridge 和根目录 `SoulForge.exe`；它不是安装包，也不包含游戏文件、mods
+或私有语料。
 
-1. **直接双击根目录下的 `SoulForge.Launcher.exe`**；
-2. 启动器会自动扫描并检测：
-   - 🎮 **《只狼》安装路径**（自动扫描 Steam 库、注册表与常见盘符）
-   - 🧩 **Oodle 解密库 (`oo2core_6_win64.dll`)**（自动从只狼目录安全提取与校验）
-   - ⚙️ **Mod 工作区**（自动初始化标准 `mods/` 文件夹与 `project.json`）
-   - 💻 **系统运行库**（VC++ 2015-2022 x64）
-3. 检测并自动补全完毕后，**将直接拉起 SoulForge 编辑器并自动载入工作区**，无需任何前置配置！
+首次运行（Windows x64）：
 
-> 提示：如果你只想进行环境体检，可在终端中执行 `.\SoulForge.Launcher.exe --check`。
+1. 安装 Node.js 24，并确认 npm 11 可用；
+2. 在解压后的根目录打开 PowerShell，执行：
+
+   ```powershell
+   npm ci
+   node node_modules/electron/install.js
+   ```
+
+3. 双击根目录的 `SoulForge.exe`。完整包首次启动不需要 .NET SDK。
+
+GitHub 自动生成的 Source code ZIP/tar.gz 与上述完整包不同：自动归档只含源码、
+配置、许可证、构建脚本和根启动器，不含预编译 `out`、`dist`、SQLite native
+binding 或自包含 Bridge。使用自动归档需 Node.js 24、npm 11 及 `global.json`
+所要求的 .NET 10 SDK；先执行 `npm ci` 和
+`node node_modules/electron/install.js`，再运行 `npm run build` 与
+`npm run exe:build`。SQLite 原生绑定重建可能还需要 Windows C++ 构建工具。
+
+本预发行范围已完成脱离原始仓库的首启与 Bridge 隔离验证，包括不读取根仓库
+test 配置或预置模型，以及 preload、IPC、Bridge、隔离和 staging 路径检查；这
+只说明该发布快照的启动边界可用，不代表 V1 已全部完成。
+
+已知限制：仅支持 Windows x64；后台分析退出协调仍有已知问题；大型 MAP 前台、
+跨机器与真实游戏完整验收尚未完成，不作完整通过声明。主动点击反馈会上传脱敏
+会话，发送前请确认会话中没有敏感内容。生产依赖扫描仍报告 2 项高危节点
+（`@huggingface/transformers` → `sharp` 依赖链，对应
+GHSA-f88m-g3jw-g9cj 与 GHSA-rgj7-g3m4-5g8c）；本预发行版尚未修复，请避免
+处理不可信输入。
+
+> 提示：完整 Release 包默认按上面的四步启动；需要诊断时请保留终端中的完整报错与命令输出。
 
 ---
 
@@ -77,7 +103,7 @@ PowerShell 就是 Windows 自带的“黑窗口”，用来敲命令，不用怕
 
 Node.js 是运行本项目前端/构建脚本的环境，`npm` 是它自带的包管理器。
 
-1. 打开 https://nodejs.org/zh-cn → 下载 **LTS（长期支持版）**，一路“下一步”安装（保持默认勾选即可）。
+1. 打开 https://nodejs.org/zh-cn → 安装 **Node.js 24**，并确认 npm 11 可用，一路“下一步”安装（保持默认勾选即可）。
 2. 装完**重新打开**一个 PowerShell 窗口，粘贴以下命令验证：
 
 ~~~powershell
@@ -85,13 +111,13 @@ node -v
 npm -v
 ~~~
 
-能看到类似 `v22.x.x` 和 `10.x.x` 的版本号即成功。若提示“不是内部命令”，说明没装好或没重启终端，重装一次并重启电脑再试。
+能看到类似 `v24.x.x` 和 `11.x.x` 的版本号即成功。若提示“不是内部命令”，说明没装好或没重启终端，重装一次并重启电脑再试。
 
 #### 第 3 步：安装 .NET SDK
 
 .NET SDK 是编译桌面端底层 Native Bridge 与启动器必需的工具。
 
-1. 打开 https://dotnet.microsoft.com/download/dotnet → 下载 **.NET SDK**（.NET 6 / 8 / 10 均可），一路“下一步”安装。
+1. 打开 https://dotnet.microsoft.com/download/dotnet → 下载 `global.json` 所要求的 **.NET 10 SDK**，一路“下一步”安装。
 2. 装完同样**重新打开** PowerShell，验证：
 
 ~~~powershell
@@ -120,32 +146,35 @@ cd SoulForge
 在 SoulForge 根目录（能看到 `package.json` 的那层）依次执行，每行粘贴后按回车，等上一条跑完再跑下一条：
 
 ~~~powershell
-# 1. 安装依赖（第一次会比较慢，耐心等到出现 done / completed）
-npm install
+# 1. 按锁文件安装依赖（第一次会比较慢，耐心等到完成）
+npm ci
 
-# 2. 检查类型（确保代码没写错，没报错即通过）
+# 2. 下载锁定的 Electron 43 运行时
+node node_modules/electron/install.js
+
+# 3. 检查类型（确保代码没写错，没报错即通过）
 npm run typecheck
 
-# 3. 跑一遍测试（可选，新手可跳过）
+# 4. 跑一遍测试（可选，新手可跳过）
 npm test
 
-# 4. 编译出桌面应用
+# 5. 编译出桌面应用
 npm run build
 
-# 5. 编译根目录智能启动器（生成 SoulForge.Launcher.exe）
-npm run launcher:build
+# 6. 刷新根启动器、自包含 Bridge 及相关 EXE
+npm run exe:build
 ~~~
 
 > 常见报错：
 > - `npm : 无法加载文件 ... 因为在此系统上禁止运行脚本` → 以管理员身份打开 PowerShell 执行 `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned` 后重试。
-> - 网络超时/ `ECONNRESET` → 多试几次 `npm install`，或切换网络/开代理。
+> - 网络超时/ `ECONNRESET` → 重试 `npm ci` 或 Electron 下载步骤，或切换网络/开代理。
 > - `dotnet: command not found` → 没装好 .NET SDK，回到第 3 步。
 
 #### 第 6 步：运行
 
 编译成功后：
 
-- **直接双击根目录的 `SoulForge.Launcher.exe` 即可全自动检测、自愈环境并启动！**
+- **直接双击根目录的 `SoulForge.exe` 启动；如果缺少编译产物，root launcher 会回退到 `npm run dev`。**
 - 或想边看前端控制台日志边跑（开发者常用）：
 
 ~~~powershell
