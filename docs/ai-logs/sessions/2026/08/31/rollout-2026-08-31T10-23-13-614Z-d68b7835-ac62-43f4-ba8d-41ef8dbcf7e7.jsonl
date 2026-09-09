@@ -1,0 +1,4 @@
+{"type":"session-meta","meta":{"sessionId":"d68b7835-ac62-43f4-ba8d-41ef8dbcf7e7","startedAt":"2026-08-31T10:23:13.614Z","configId":"test-service","protocol":"openai-responses","permissionMode":"normal","model":"muse-spark-1.2-contributor"}}
+{"type":"message","step":0,"message":{"role":"user","content":"修改鬼刑部敌人类型为精英怪，新增一个掉落物为义父的铃铛"}}
+{"type":"provider-usage","callIndex":1,"currentContextTokens":33,"contextSource":"estimated","providerReported":false,"recordedAt":"2026-08-31T10:23:14.831Z"}
+{"type":"turn-complete","at":"2026-08-31T10:23:14.835Z","finishReason":"error","taskStatus":"error","steps":1,"diagnostics":[{"severity":"error","code":"MODEL_SERVICE_HTTP_ERROR","message":"OpenAI Responses 请求失败：HTTP 400 "}]}

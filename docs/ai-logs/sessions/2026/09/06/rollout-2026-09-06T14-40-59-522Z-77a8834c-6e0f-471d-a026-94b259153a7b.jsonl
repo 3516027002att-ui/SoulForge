@@ -1,0 +1,2 @@
+{"type":"session-meta","meta":{"sessionId":"77a8834c-6e0f-471d-a026-94b259153a7b","startedAt":"2026-09-06T14:40:59.522Z","configId":"test-service","protocol":"openai-responses","permissionMode":"plan","model":"muse-spark-1.3-contributor"}}
+{"type":"message","step":0,"message":{"role":"user","content":"把鬼刑部改为精英怪，血条改为2，死亡后掉落靛蓝星陨"}}

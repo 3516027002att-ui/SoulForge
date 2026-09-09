@@ -1,9 +1,9 @@
 import assert from 'node:assert/strict';
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import { generateMarkdown, parseSessionFile } from './sync-ai-logs.mjs';
+import { assertPublishableSession, generateMarkdown, parseSessionFile, refreshArchiveIndex, renderArchiveIndex, sync } from './sync-ai-logs.mjs';
 
 const root = await mkdtemp(join(tmpdir(), 'soulforge-ai-log-sync-'));
 
@@ -76,6 +76,50 @@ try {
   assert.equal(legacy.terminalSource, 'session-done');
   assert.equal(legacy.taskStatus, 'cancelled');
   assert.equal(legacy.terminalMissing, false);
+
+  const archiveRoot = join(root, 'archive');
+  await mkdir(join(archiveRoot, 'sessions'), { recursive: true });
+  const archivedPath = join(archiveRoot, 'sessions', 'fixture.jsonl');
+  const archivedBytes = [meta, user].map((item) => JSON.stringify(item)).join('\n');
+  await writeFile(archivedPath, archivedBytes, 'utf8');
+  const fixedTime = new Date('2026-09-09T00:00:00.000Z');
+  const refreshed = refreshArchiveIndex(archiveRoot, fixedTime);
+  assert.deepEqual(refreshed, { mode: 'index-only', archiveFiles: 1, sourceScanned: false, sessionFilesWritten: 0 });
+  assert.equal(await readFile(archivedPath, 'utf8'), archivedBytes, 'index refresh must not rewrite raw sessions');
+  assert.deepEqual((await readdir(archiveRoot)).sort(), ['README.md', 'sessions'], 'index refresh must not export or render private sessions');
+  const index = await readFile(join(archiveRoot, 'README.md'), 'utf8');
+  assert.match(index, /terminal missing/);
+  assert.match(index, /未生成/);
+  assert.match(index, /不是客户端实时会话列表/);
+  assert.match(index, /不复制或改写会话原文/);
+  assert.match(index, /不会自动脱敏/);
+  assert.match(index, /2026-09-09T00:00:00.000Z/);
+  assert.match(index, /本次索引收录 1 个会话/);
+  assert.doesNotMatch(index, /的全量历史对话/);
+  const emptyIndex = renderArchiveIndex([], 0, fixedTime);
+  assert.match(emptyIndex, /本次索引收录 0 个会话/);
+
+  const simulation = await fixture('simulation.rollout', [meta, user]);
+  assert.equal(simulation.sourceKind, 'simulation');
+  assert.match(generateMarkdown(simulation), /自动模拟/);
+  assert.equal(missing.sourceKind, 'desktop');
+  const sourceRoot = join(root, 'sources');
+  await mkdir(sourceRoot);
+  await writeFile(join(sourceRoot, 'desktop.jsonl'), archivedBytes);
+  await writeFile(join(sourceRoot, 'test.rollout.jsonl'), archivedBytes);
+  await writeFile(join(sourceRoot, 'agent-supervisor.log.jsonl'), '{"event":"not a conversation"}');
+  const synced = sync([sourceRoot], { targetBase: archiveRoot, defaultSourceDirs: [] });
+  assert.equal(synced.sessionFilesWritten, 2, 'same ID in desktop and simulation must not collapse');
+  assert.equal(synced.archiveFiles, 3, 'old archives must remain indexed');
+  const fullIndex = await readFile(join(archiveRoot, 'README.md'), 'utf8');
+  assert.match(fullIndex, /桌面会话 \*\*2\*\* 份、自动模拟 \*\*1\*\*/);
+  assert.doesNotMatch(fullIndex, /not a conversation/);
+  assert.equal(await readFile(join(archiveRoot, 'sessions/simulations/2026/09/07/test.rollout.jsonl'), 'utf8'), archivedBytes);
+  const repeated = sync([sourceRoot], { targetBase: archiveRoot, defaultSourceDirs: [] });
+  assert.equal(repeated.archiveFiles, 3, 'repeated sync must not duplicate records');
+  const credential = await fixture('credential', [meta, { type: 'message', message: { role: 'user', content: 'Bearer ' + 'x'.repeat(24) } }]);
+  assert.throws(() => assertPublishableSession(credential), /Possible credential/);
+  assert.throws(() => assertPublishableSession(truncated), /Invalid rollout/);
 
   console.log('sync-ai-logs fixture verification passed');
 } finally {
