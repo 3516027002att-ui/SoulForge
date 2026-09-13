@@ -364,7 +364,7 @@ export function createAgentTaskRecordGateway(
             );
           }
         }
-        if (!ticketMatchesObject(ticket, objectName, parsed.entries)) {
+        if (!ticketMatchesObject(ticket, objectName, parsed.entries, [value, ...evidence])) {
           throw new TaskRecordError(
             'TASK_RECORD_SEARCH_OBJECT_MISSING',
             `searchId ${searchId} 的搜索结果没有出现对象 ${objectName} 且未关联该对象的已知 ID；不能用该搜索结果登记 Evidence。`,
@@ -411,7 +411,7 @@ export function createAgentTaskRecordGateway(
         const derivedTarget = Boolean(
           ticket
           && hasDeclaredUserTarget
-          && ticketMatchesObject(ticket, objectName, parsed.entries)
+          && ticketMatchesObject(ticket, objectName, parsed.entries, [value, ...evidence])
         );
         if (!directUserTarget && !derivedTarget) {
           throw new TaskRecordError(
@@ -600,13 +600,21 @@ export function createAgentTaskRecordGateway(
           && hasNativeProof(entry, target)
         ));
         if (!match) {
-          const hasUnverifiedNativeTarget = parsed.entries.some((entry) => (
+          const unverifiedNativeEntries = parsed.entries.filter((entry) => (
             entry.kind === 'evidence'
             && (entry.status === 'candidate' || (entry.status === 'verified' && !hasNativeProof(entry, target)))
             && (target.resourceKind === 'event'
               ? mutationPropertyKeyMatches(entry.propertyKey, target.key)
               : mutationEvidenceMatches(entry, target, searchTickets))
           ));
+          const hasUnverifiedNativeTarget = unverifiedNativeEntries.length > 0;
+          const nativeProofState = target.resourceKind === 'event'
+            ? undefined
+            : unverifiedNativeEntries.some((entry) => entry.status === 'verified')
+            ? 'verified_missing_native_proof' as const
+            : unverifiedNativeEntries.some((entry) => entry.status === 'candidate')
+            ? 'candidate' as const
+            : undefined;
           const hasKey = parsed.entries.some((entry) => (
             entry.kind === 'evidence'
             && mutationPropertyKeyMatches(entry.propertyKey, target.key)
@@ -640,7 +648,9 @@ export function createAgentTaskRecordGateway(
                   : emevdReceiptIssues?.mismatch
                     ? '提交的 sourceHash、outerFileHash 或 sourceRevision 与最近原生读取不一致；'
                     : ''}请重新读取完整 darkscript 事件（offset=0、returned=total、darkScriptComplete=true），再写回。`
-                : `Evidence ${target.key} 仍是 candidate；必须先完成匹配表、行和字段的原生读取，由宿主晋升为 verified 后才能写入。`
+                : nativeProofState === 'verified_missing_native_proof'
+                ? `Evidence ${target.key} 已登记为 verified，但 ${target.table}#${target.rowId}.${target.fieldId} 缺少当前 session 的 native read proof；请重新读取该精确表、行和字段后再写入。`
+                : `Evidence ${target.key} 对 ${target.table}#${target.rowId}.${target.fieldId} 仍是 candidate；必须先完成匹配表、行和字段的原生读取，由宿主晋升为 verified 后才能写入。`
               : hasKey && !hasTable
               ? `任务记录已有 ${target.key} 属性，但没有找到 ${target.table}#${target.rowId}${target.fieldId ? `.${target.fieldId}` : ''} 的证据；已拒绝写入，请继续寻找并更新任务记录。`
               : hasKey
@@ -651,6 +661,24 @@ export function createAgentTaskRecordGateway(
               propertyKey: target.key,
               ...(target.fieldId ? { fieldId: target.fieldId } : {}),
               availablePropertyKeys,
+              ...(target.resourceKind === 'event' ? {} : {
+                target: {
+                  resourceKind: 'param' as const,
+                  table: target.table,
+                  rowId: target.rowId,
+                  fieldId: target.fieldId
+                },
+                ...(nativeProofState ? { nativeProofState } : {}),
+                ...(target.table !== undefined && target.rowId !== undefined && target.fieldId !== undefined
+                  ? {
+                    requiredRead: {
+                      table: target.table,
+                      rowIds: [target.rowId],
+                      fieldIds: [target.fieldId]
+                    }
+                  }
+                  : {})
+              }),
               ...(emevdReceiptIssues ? {
                 requiredIdentity: ['sourceHash', 'outerFileHash', 'sourceRevision', 'darkScriptComplete=true'],
                 missingIdentity: emevdReceiptIssues.missing,
@@ -1471,11 +1499,60 @@ function containsObject(value: string, objectName: string): boolean {
   return normalizeObjectName(value).includes(normalizeObjectName(objectName));
 }
 
+function parseStandaloneEventId(value: string): number | undefined {
+  const candidate = value.trim();
+  if (!/^-?\d+$/u.test(candidate)) return undefined;
+  const eventId = Number(candidate);
+  return Number.isSafeInteger(eventId) ? eventId : undefined;
+}
+
+/**
+ * A numeric EMEVD target may be derived only from the structured identity
+ * emitted by search_events.  The bounded resultText is intentionally not a
+ * fallback here: it is a model-facing projection and may be truncated.
+ *
+ * A ticket can contain the same eventId in more than one file.  The existing
+ * resolver therefore requires either one candidate or an exact sourceUri
+ * hint; without that hint the case stays fail-closed.  If the target's
+ * value/evidence quotes an eventId or sourceUri, those hints must agree with
+ * the exact candidate; conflicting hints must never be hidden by a text
+ * match.
+ */
+function ticketMatchesStructuredEmevdObject(
+  ticket: SearchTicket,
+  objectName: string,
+  relatedValues: readonly string[]
+): boolean {
+  if (normalizeKey(ticket.toolName) !== 'search_events') return false;
+  const eventId = parseStandaloneEventId(objectName);
+  if (eventId === undefined) return false;
+
+  const eventHints = extractEmevdEventIdHints(relatedValues);
+  if (eventHints.length > 0 && (eventHints.length !== 1 || eventHints[0] !== eventId)) return false;
+  const sourceHints = extractEmevdSourceUriHints(relatedValues);
+  // Multiple source hints are ambiguous even if one happens to match a
+  // candidate.  This prevents a conflicting source from being hidden by the
+  // resolver's exact-match branch.
+  if (sourceHints.length > 1) return false;
+  const resolution = resolveEmevdTicketTarget(ticket, relatedValues, eventId);
+  if (!resolution.ok) return false;
+  return sourceHints.length === 0 || sourceHints[0] === resolution.target.sourceUri;
+}
+
 function ticketMatchesObject(
   ticket: SearchTicket,
   objectName: string,
-  existingEntries: AgentTaskRecordEntry[]
+  existingEntries: AgentTaskRecordEntry[],
+  relatedValues: readonly string[] = []
 ): boolean {
+  // Numeric event targets are a separate identity path.  In particular, do
+  // not let a search_events resultText mention, stale text-id, or free-form
+  // prose authorize an event that is absent from structured emevdTargets.
+  if (normalizeKey(ticket.toolName) === 'search_events'
+    && parseStandaloneEventId(objectName) !== undefined) {
+    return ticketMatchesStructuredEmevdObject(ticket, objectName, relatedValues);
+  }
+
   const ticketText = `${ticket.query}\n${ticket.resultText ?? ''}`;
   if (containsObject(ticketText, objectName)) {
     return true;

@@ -7,6 +7,16 @@ import { groupSceneDrawItems } from './threeSceneController.js';
 const dummyPositions = Buffer.from(new Float32Array([0, 0, 0, 1, 0, 0, 0, 1, 0]).buffer).toString('base64');
 const dummyIndices16 = Buffer.from(new Uint16Array([0, 1, 2]).buffer).toString('base64');
 const dummyIndices32 = Buffer.from(new Uint32Array([0, 1, 2]).buffer).toString('base64');
+const variantPositions = Buffer.from(new Float32Array([
+  0, 0, 0, 1, 0, 0, 0, 1, 0,
+  2, 0, 0, 3, 0, 0, 2, 1, 0,
+  4, 0, 0, 5, 0, 0, 4, 1, 0
+]).buffer).toString('base64');
+const variantIndices16 = Buffer.from(new Uint16Array([
+  0, 1, 2,
+  3, 4, 5,
+  6, 7, 8
+]).buffer).toString('base64');
 
 const tracker = <T extends { dispose(): void }>(resource: T): T => resource;
 
@@ -67,6 +77,91 @@ test('ModelResourcePool：renderer-local typed bytes 路径不需要重新 base6
   );
   assert.ok(result.geometry.index instanceof THREE.Uint16BufferAttribute);
   assert.deepEqual(Array.from(result.geometry.index.array), [0, 1, 2]);
+});
+
+test('ModelResourcePool：相同 normalized model 的不同 prepare cacheKey 不复用旧几何，但仍共享默认材质', () => {
+  const pool = new ModelResourcePool();
+  const meshWire: MeshGeometryWire = {
+    positionsBase64: dummyPositions,
+    indicesBase64: dummyIndices16,
+    indexSize: 16,
+    vertexCount: 3
+  };
+  const preparedA = pool.updateModelGeometry(THREE, tracker, 'M000010.FLVER', meshWire, { cacheKey: 'prepare-a' });
+  const preparedB = pool.updateModelGeometry(THREE, tracker, 'm000010.mapbnd.dcx', meshWire, { cacheKey: 'prepare-b' });
+
+  assert.notEqual(preparedA.geometry, preparedB.geometry);
+  assert.equal(preparedA.material, preparedB.material);
+});
+
+test('ModelResourcePool：地图 FaceSet true/false/unknown 使用独立连续 variant 槽位并映射 WebGL2 side', () => {
+  const pool = new ModelResourcePool();
+  const result = pool.updateModelGeometry(THREE, tracker, 'm-cull-variants', {
+    positionsBase64: variantPositions,
+    indicesBase64: variantIndices16,
+    indexSize: 16,
+    vertexCount: 9,
+    materialGroups: [
+      { start: 0, count: 3, materialIndex: 4, cullBackfaces: true },
+      { start: 3, count: 3, materialIndex: 4, cullBackfaces: false },
+      { start: 6, count: 3, materialIndex: 4 }
+    ]
+  });
+
+  assert.ok(Array.isArray(result.material));
+  assert.equal(result.material.length, 3);
+  assert.notEqual(result.material[0], result.material[1]);
+  assert.notEqual(result.material[1], result.material[2]);
+  assert.deepEqual(
+    result.geometry.groups.map((group) => ({ start: group.start, count: group.count, materialIndex: group.materialIndex })),
+    [
+      { start: 0, count: 3, materialIndex: 0 },
+      { start: 3, count: 3, materialIndex: 1 },
+      { start: 6, count: 3, materialIndex: 2 }
+    ]
+  );
+  assert.deepEqual(
+    result.material.map((material) => material.side),
+    [THREE.BackSide, THREE.DoubleSide, THREE.DoubleSide]
+  );
+
+  const trueOnly = pool.updateModelGeometry(THREE, tracker, 'm-cull-cache', {
+    positionsBase64: dummyPositions,
+    indicesBase64: dummyIndices16,
+    indexSize: 16,
+    vertexCount: 3,
+    materialGroups: [{ start: 0, count: 3, materialIndex: 4, cullBackfaces: true }]
+  });
+  const falseOnly = pool.updateModelGeometry(THREE, tracker, 'm-cull-cache', {
+    positionsBase64: dummyPositions,
+    indicesBase64: dummyIndices16,
+    indexSize: 16,
+    vertexCount: 3,
+    materialGroups: [{ start: 0, count: 3, materialIndex: 4, cullBackfaces: false }]
+  });
+  assert.notEqual(trueOnly.geometry, falseOnly.geometry);
+  assert.notEqual(trueOnly.material, falseOnly.material);
+
+  const ambiguousWithTopLevelTrue = pool.updateModelGeometry(THREE, tracker, 'm-cull-ambiguous', {
+    positionsBase64: dummyPositions,
+    indicesBase64: dummyIndices16,
+    indexSize: 16,
+    vertexCount: 3,
+    cullBackfaces: true,
+    materialGroups: [{ start: 0, count: 3, materialIndex: 4 }]
+  });
+  const confirmedTrue = pool.updateModelGeometry(THREE, tracker, 'm-cull-ambiguous', {
+    positionsBase64: dummyPositions,
+    indicesBase64: dummyIndices16,
+    indexSize: 16,
+    vertexCount: 3,
+    cullBackfaces: true,
+    materialGroups: [{ start: 0, count: 3, materialIndex: 4, cullBackfaces: true }]
+  });
+  assert.notEqual(ambiguousWithTopLevelTrue.geometry, confirmedTrue.geometry);
+  assert.notEqual(ambiguousWithTopLevelTrue.material, confirmedTrue.material);
+  assert.equal((ambiguousWithTopLevelTrue.material as THREE.Material).side, THREE.DoubleSide);
+  assert.equal((confirmedTrue.material as THREE.Material).side, THREE.BackSide);
 });
 
 test('ModelResourcePool：typed bytes 只读取合法 subview，并校验 UV/normal/index 对齐', () => {

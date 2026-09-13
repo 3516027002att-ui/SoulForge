@@ -3,14 +3,21 @@ import { access, mkdtemp, mkdir, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import type { OperationLogRecord } from '@soulforge/shared';
+import type { OperationLogRecord, RagChunk } from '@soulforge/shared';
 import { OperationLogUtilityClient } from './operationLogUtilityClient.js';
 import { executeRecoveryCleanup } from './recoveryCleanup.js';
 import {
+  createRagCorpus,
   createPatchIr,
   executePatchIrThroughTransaction,
-  openWorkspaceSession
+  openWorkspaceSession,
+  type RagChunkDeltaStats
 } from '@soulforge/core';
+import { persistRagCorpusBySourceDelta } from './ragPersistence.js';
+import {
+  createSemanticRefreshTelemetry,
+  type SemanticRefreshTelemetrySnapshot
+} from './semanticRefreshTelemetry.js';
 
 const here = dirname(fileURLToPath(import.meta.url));
 
@@ -211,7 +218,7 @@ app.whenReady().then(async () => {
       progress: { current: 1, total: 1 }, payload: {}, result: { indexed: 1 },
       createdAt: now, startedAt: now, completedAt: now, updatedAt: now
     });
-    await client.replaceRagChunks([{
+    const utilityChunk: RagChunk = {
       chunkId: 'rag:file:utility',
       workspaceId,
       sourceUri: 'file://event/test.emevd.dcx',
@@ -223,7 +230,149 @@ app.whenReady().then(async () => {
       contentHash: 'utility-rag',
       relativePath: 'event/test.emevd.dcx',
       resourceKind: 'event'
-    }]);
+    };
+    await client.replaceRagChunks([utilityChunk]);
+
+    const metadataChunk = {
+      ...utilityChunk,
+      sourceRevision: 1,
+      sourceHash: 'utility-source-v1',
+      outerFileHash: 'utility-outer-v1'
+    };
+    const metadataStats = await client.mergeRagChunkDelta({
+      sourceUri: utilityChunk.sourceUri,
+      upserts: [metadataChunk],
+      deletedChunkIds: []
+    });
+    assertRagChunkDeltaStats(metadataStats, {
+      finalUpserts: 1,
+      newUpserts: 0,
+      bodyChangedUpserts: 0,
+      metadataOnlyUpserts: 1,
+      ftsRebuilds: 0,
+      embeddingDeletes: 1
+    });
+
+    const bodyChunk = {
+      ...metadataChunk,
+      body: `${metadataChunk.body} utility-body-change`,
+      contentHash: 'utility-rag-body'
+    };
+    const bodyStats = await client.mergeRagChunkDelta({
+      sourceUri: utilityChunk.sourceUri,
+      upserts: [bodyChunk],
+      deletedChunkIds: []
+    });
+    assertRagChunkDeltaStats(bodyStats, {
+      finalUpserts: 1,
+      newUpserts: 0,
+      bodyChangedUpserts: 1,
+      metadataOnlyUpserts: 0,
+      ftsRebuilds: 1,
+      embeddingDeletes: 1
+    });
+
+    const seededChunk: RagChunk = {
+      ...metadataChunk,
+      chunkId: 'rag:file:utility-seeded',
+      symbolUri: 'file://event/test.emevd.dcx#seeded',
+      title: 'event/test.emevd.dcx seeded',
+      body: 'seeded utility body',
+      contentHash: 'utility-rag-seeded'
+    };
+    const seededStats = await client.mergeRagChunkDelta({
+      sourceUri: utilityChunk.sourceUri,
+      upserts: [seededChunk],
+      deletedChunkIds: []
+    });
+    assertRagChunkDeltaStats(seededStats, {
+      finalUpserts: 1,
+      newUpserts: 1,
+      bodyChangedUpserts: 0,
+      metadataOnlyUpserts: 0,
+      ftsRebuilds: 1,
+      embeddingDeletes: 0
+    });
+
+    const refreshState: { snapshot: SemanticRefreshTelemetrySnapshot | null } = { snapshot: null };
+    const refreshTelemetry = createSemanticRefreshTelemetry('postcommit', (snapshot) => {
+      refreshState.snapshot = snapshot;
+    });
+    const aggregatePrevious = createRagCorpus({
+      workspaceId,
+      builtAt: now,
+      chunks: [bodyChunk, seededChunk],
+      references: []
+    });
+    const aggregateNext = createRagCorpus({
+      workspaceId,
+      builtAt: now,
+      chunks: [
+        {
+          ...bodyChunk,
+          body: `${bodyChunk.body} aggregate-body-change`,
+          contentHash: 'utility-rag-body-v2'
+        },
+        {
+          ...seededChunk,
+          sourceRevision: 2,
+          sourceHash: 'utility-source-v2',
+          outerFileHash: 'utility-outer-v2'
+        },
+        {
+          ...utilityChunk,
+          chunkId: 'rag:file:utility-new',
+          symbolUri: 'file://event/test.emevd.dcx#new',
+          title: 'event/test.emevd.dcx new',
+          body: 'new utility body',
+          contentHash: 'utility-rag-new'
+        }
+      ],
+      references: []
+    });
+    await persistRagCorpusBySourceDelta(
+      client,
+      aggregateNext,
+      aggregatePrevious,
+      undefined,
+      refreshTelemetry
+    );
+    refreshTelemetry.finish('completed');
+    const aggregateStats = refreshState.snapshot?.stages.persistBatch;
+    assertRagChunkDeltaStats({
+      finalUpserts: aggregateStats?.finalUpserts ?? Number.NaN,
+      newUpserts: aggregateStats?.newUpserts ?? Number.NaN,
+      bodyChangedUpserts: aggregateStats?.bodyChangedUpserts ?? Number.NaN,
+      metadataOnlyUpserts: aggregateStats?.metadataOnlyUpserts ?? Number.NaN,
+      ftsRebuilds: aggregateStats?.ftsRebuilds ?? Number.NaN,
+      embeddingDeletes: aggregateStats?.embeddingDeletes ?? Number.NaN
+    }, {
+      finalUpserts: 3,
+      newUpserts: 1,
+      bodyChangedUpserts: 1,
+      metadataOnlyUpserts: 1,
+      ftsRebuilds: 2,
+      embeddingDeletes: 2
+    });
+    const unavailableState: { snapshot: SemanticRefreshTelemetrySnapshot | null } = { snapshot: null };
+    const unavailableTelemetry = createSemanticRefreshTelemetry('postcommit', (snapshot) => {
+      unavailableState.snapshot = snapshot;
+    });
+    await persistRagCorpusBySourceDelta(
+      {
+        mergeRagChunkDelta: async () => null,
+        replaceReferences: async () => undefined
+      },
+      aggregateNext,
+      aggregatePrevious,
+      undefined,
+      unavailableTelemetry
+    );
+    unavailableTelemetry.finish('completed');
+    const unavailableStats = unavailableState.snapshot?.stages.persistBatch;
+    if (!unavailableStats?.ragStatsUnavailable || unavailableStats.finalUpserts !== undefined) {
+      throw new Error('缺失 RAG delta stats 未显式标记 unavailable。');
+    }
     await client.upsertSemanticFileCache({
       relativePath: 'event/test.emevd.dcx',
       fileSha256: 'sha-test-123',
@@ -257,7 +406,7 @@ app.whenReady().then(async () => {
       throw new Error('Database utility missing semantic file cache should return null.');
     }
     if ((await client.searchFiles('test EMEVD')).length !== 1
-      || (await client.searchRagChunks('emevd', 8)).length !== 1
+      || (await client.searchRagChunks('seeded', 8)).length !== 1
       || (await client.listDiagnostics())[0]?.code !== 'PARSE_PARTIAL'
       || (await client.listJobs())[0]?.status !== 'completed') {
       throw new Error('Database utility file/diagnostic/job/rag repository round trip failed.');
@@ -307,6 +456,52 @@ function makeRecord(workspaceId: string, opId: string): OperationLogRecord {
     files: [],
     diagnostics: []
   };
+}
+
+const RAG_DELTA_STAT_KEYS: readonly (keyof RagChunkDeltaStats)[] = [
+  'finalUpserts',
+  'newUpserts',
+  'bodyChangedUpserts',
+  'metadataOnlyUpserts',
+  'ftsRebuilds',
+  'embeddingDeletes'
+];
+
+function assertRagChunkDeltaStats(
+  value: unknown,
+  expected: Partial<RagChunkDeltaStats>
+): asserts value is RagChunkDeltaStats {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    throw new Error('Database utility RAG delta stats 缺失，不能把缺失结果归零。');
+  }
+  const stats = value as Record<string, unknown>;
+  const actualKeys = Object.keys(stats).sort();
+  const expectedKeys = [...RAG_DELTA_STAT_KEYS].sort();
+  if (actualKeys.join(',') !== expectedKeys.join(',')) {
+    throw new Error(`Database utility RAG delta stats keys 不完整或包含额外字段：${actualKeys.join(',')}`);
+  }
+  for (const key of RAG_DELTA_STAT_KEYS) {
+    const stat = stats[key];
+    if (typeof stat !== 'number' || !Number.isSafeInteger(stat) || stat < 0 || stat > 512) {
+      throw new Error(`Database utility RAG delta stats ${key} 不是有限非负整数：${String(stat)}`);
+    }
+  }
+  const finalUpserts = stats.finalUpserts as number;
+  const metadataOnlyUpserts = stats.metadataOnlyUpserts as number;
+  const ftsRebuilds = stats.ftsRebuilds as number;
+  const newUpserts = stats.newUpserts as number;
+  const bodyChangedUpserts = stats.bodyChangedUpserts as number;
+  const embeddingDeletes = stats.embeddingDeletes as number;
+  if (metadataOnlyUpserts + ftsRebuilds !== finalUpserts
+    || newUpserts + embeddingDeletes !== finalUpserts
+    || bodyChangedUpserts > ftsRebuilds - newUpserts) {
+    throw new Error('Database utility RAG delta stats 分类不守恒。');
+  }
+  for (const [key, expectedValue] of Object.entries(expected)) {
+    if (stats[key] !== expectedValue) {
+      throw new Error(`Database utility RAG delta stats ${key} 不符合预期：${String(stats[key])} != ${String(expectedValue)}`);
+    }
+  }
 }
 
 async function exists(path: string): Promise<boolean> {

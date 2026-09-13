@@ -12,10 +12,94 @@
 import type {
   BufferGeometry,
   Material,
+  Side,
 } from 'three';
 import { decodeBase64ToUint8Array } from '../utils/binary.js';
+import type {
+  MapGeometryPrepareDiagnostic,
+  MapMaterialGroup,
+  PreparedGeometryBounds,
+  PreparedTextureIdentity
+} from './mapGeometryPrepare.js';
 
 type ThreeModule = typeof import('three');
+
+/**
+ * Native FaceSet culling is retained as a three-state renderer identity.
+ * `unknown` is deliberate: incomplete provenance never inherits a top-level
+ * compatibility flag. The WebGL2 map probe proves that native cull=true
+ * winding needs BackSide; false and unknown remain DoubleSide. WebGPU has not
+ * been independently exercised by the current evidence.
+ */
+export type MapCullBackfaceState = boolean | 'unknown';
+
+function mapCullBackfaceStateKey(state: MapCullBackfaceState): string {
+  return state === 'unknown' ? 'unknown' : state ? 'backfaces' : 'double-sided';
+}
+
+function mapCullBackfaceSide(three: ThreeModule, state: MapCullBackfaceState): Side {
+  return state === true ? three.BackSide : three.DoubleSide;
+}
+
+function resolveMapCullBackfaceState(
+  group: MapMaterialGroup | undefined,
+  topLevelState: boolean | undefined
+): MapCullBackfaceState {
+  // Once a draw group exists, its missing cull flag is an explicit unknown.
+  // Do not promote an ambiguous/multi-FaceSet group from a compatibility
+  // top-level flag that belongs only to a single-surface payload.
+  if (group) return typeof group.cullBackfaces === 'boolean' ? group.cullBackfaces : 'unknown';
+  if (typeof topLevelState === 'boolean') return topLevelState;
+  return 'unknown';
+}
+
+interface MapMaterialVariant {
+  materialIndex: number;
+  cullBackfaces: MapCullBackfaceState;
+}
+
+interface MapMaterialVariantGroup {
+  start: number;
+  count: number;
+  materialSlot: number;
+}
+
+interface MapMaterialVariantLayout {
+  /** Bounded numeric/state key used only for renderer-local geometry caching. */
+  key: string;
+  groups: MapMaterialVariantGroup[];
+  variants: MapMaterialVariant[];
+}
+
+function getMapMaterialVariantLayout(data: MeshGeometryWire): MapMaterialVariantLayout {
+  const groups: MapMaterialVariantGroup[] = [];
+  const variants: MapMaterialVariant[] = [];
+  const variantSlots = new Map<string, number>();
+  const layoutParts: string[] = [];
+  for (const group of data.materialGroups ?? []) {
+    if (!Number.isInteger(group.start) || group.start < 0
+      || !Number.isInteger(group.count) || group.count <= 0
+      || !Number.isInteger(group.materialIndex) || group.materialIndex < 0) continue;
+    const cullBackfaces = resolveMapCullBackfaceState(group, data.cullBackfaces);
+    const variantKey = `${group.materialIndex}:${mapCullBackfaceStateKey(cullBackfaces)}`;
+    let materialSlot = variantSlots.get(variantKey);
+    if (materialSlot === undefined) {
+      materialSlot = variants.length;
+      variantSlots.set(variantKey, materialSlot);
+      variants.push({ materialIndex: group.materialIndex, cullBackfaces });
+    }
+    groups.push({ start: group.start, count: group.count, materialSlot });
+    // Include group bounds as well as native material/cull identity. This is
+    // not a texture hash; it only prevents a model's group layout from being
+    // reused when a later response has different draw ranges.
+    layoutParts.push(`${group.start}:${group.count}:${variantKey}`);
+  }
+  return {
+    key: layoutParts.join('|'),
+    groups,
+    variants
+  };
+}
 
 export interface MeshGeometryWire {
   positionsBase64: string;
@@ -31,10 +115,20 @@ export interface MeshGeometryWire {
   vertexCount: number;
   texturePreviewToken?: string | undefined;
   textureColorSpace?: string | undefined;
-  materialGroups?: Array<{ start: number; count: number; materialIndex: number }> | undefined;
+  /** Top-level compatibility cull state for a single-surface payload. */
+  cullBackfaces?: boolean | undefined;
+  materialGroups?: MapMaterialGroup[] | undefined;
   texturePreviews?: Array<{ materialIndex: number; texturePreviewToken: string; colorSpace?: string }> | undefined;
+  diagnostics?: MapGeometryPrepareDiagnostic[] | undefined;
   boundingBoxMin?: [number, number, number] | undefined;
   boundingBoxMax?: [number, number, number] | undefined;
+}
+
+/** Renderer-local hints produced by the CPU prepare worker. */
+export interface PreparedGeometryHints {
+  textureIdentities?: readonly PreparedTextureIdentity[];
+  bounds?: PreparedGeometryBounds;
+  cacheKey?: string;
 }
 
 /**
@@ -127,7 +221,7 @@ export class ModelResourcePool {
   private primitiveBox: BufferGeometry | null = null;
   private primitiveSphere: BufferGeometry | null = null;
   private wireframeMaterial: Material | null = null;
-  private defaultRealMaterial: Material | null = null;
+  private readonly defaultRealMaterials = new Map<MapCullBackfaceState, Material>();
 
   private getOrCreateContextPool(rendererContextGeneration: number): ContextPools {
     let pool = this.contextPools.get(rendererContextGeneration);
@@ -251,9 +345,16 @@ export class ModelResourcePool {
     three: ThreeModule,
     track: TrackFunction,
     key: string,
-    data: MeshGeometryWire
+    data: MeshGeometryWire,
+    preparedHints?: PreparedGeometryHints
   ): BufferGeometry {
-    const existing = this.legacyGeometries.get(key);
+    const variantLayout = getMapMaterialVariantLayout(data);
+    const resourceKey = [
+      key,
+      ...(preparedHints?.cacheKey ? [`prepare:${preparedHints.cacheKey}`] : []),
+      ...(variantLayout.key ? [`layout:${variantLayout.key}`] : [])
+    ].join(':');
+    const existing = this.legacyGeometries.get(resourceKey);
     if (existing) return existing;
 
     const geometry = track(new three.BufferGeometry());
@@ -272,10 +373,14 @@ export class ModelResourcePool {
         : decodeBase64ToUint8Array(data.indicesBase64 ?? '');
       if (is32) {
         const view = new Uint32Array(indexBytes.buffer, indexBytes.byteOffset, Math.floor(indexBytes.length / 4));
-        geometry.setIndex(new three.Uint32BufferAttribute(view, 1));
+        geometry.setIndex(preparedHints
+          ? new three.BufferAttribute(view, 1)
+          : new three.Uint32BufferAttribute(view, 1));
       } else {
         const view = new Uint16Array(indexBytes.buffer, indexBytes.byteOffset, Math.floor(indexBytes.length / 2));
-        geometry.setIndex(new three.Uint16BufferAttribute(view, 1));
+        geometry.setIndex(preparedHints
+          ? new three.BufferAttribute(view, 1)
+          : new three.Uint16BufferAttribute(view, 1));
       }
     }
 
@@ -306,17 +411,26 @@ export class ModelResourcePool {
       geometry.computeVertexNormals();
     }
 
-    if (data.materialGroups && data.materialGroups.length > 0) {
+    if (variantLayout.groups.length > 0) {
       geometry.clearGroups();
-      for (const group of data.materialGroups) {
-        if (!Number.isInteger(group.start) || group.start < 0
-          || !Number.isInteger(group.count) || group.count <= 0
-          || !Number.isInteger(group.materialIndex) || group.materialIndex < 0) continue;
-        geometry.addGroup(group.start, group.count, group.materialIndex);
+      for (const group of variantLayout.groups) {
+        geometry.addGroup(group.start, group.count, group.materialSlot);
       }
     }
 
-    this.legacyGeometries.set(key, geometry);
+    if (preparedHints?.bounds) {
+      const bounds = preparedHints.bounds;
+      geometry.boundingBox = new three.Box3(
+        new three.Vector3(...bounds.min),
+        new three.Vector3(...bounds.max)
+      );
+      geometry.boundingSphere = new three.Sphere(
+        new three.Vector3(...bounds.sphereCenter),
+        bounds.sphereRadius
+      );
+    }
+
+    this.legacyGeometries.set(resourceKey, geometry);
     return geometry;
   }
 
@@ -339,20 +453,25 @@ export class ModelResourcePool {
 
   public getDefaultRealMaterial(
     three: ThreeModule,
-    track: TrackFunction
+    track: TrackFunction,
+    cullBackfaces: MapCullBackfaceState = 'unknown'
   ): Material {
-    if (!this.defaultRealMaterial) {
-      this.defaultRealMaterial = track(
-        new three.MeshStandardMaterial({
-          color: new three.Color(0x8e97a3),
-          roughness: 0.55,
-          metalness: 0.12,
-          side: three.DoubleSide,
-          wireframe: false
-        })
-      );
-    }
-    return this.defaultRealMaterial;
+    const existing = this.defaultRealMaterials.get(cullBackfaces);
+    if (existing) return existing;
+    // Native o114670 map chunks were rendered through the real WebGL2 path:
+    // cull=true is opposite to the native normal winding and is visible with
+    // BackSide; false/unknown remain DoubleSide. WebGPU parity is unverified.
+    const material = track(
+      new three.MeshStandardMaterial({
+        color: new three.Color(0x8e97a3),
+        roughness: 0.55,
+        metalness: 0.12,
+        side: mapCullBackfaceSide(three, cullBackfaces),
+        wireframe: false
+      })
+    );
+    this.defaultRealMaterials.set(cullBackfaces, material);
+    return material;
   }
 
   public getProxyMaterial(
@@ -385,29 +504,34 @@ export class ModelResourcePool {
     three: ThreeModule,
     track: TrackFunction,
     texturePreviewToken: string,
-    colorSpace = 'srgb'
+    colorSpace = 'srgb',
+    preparedTextureKey?: string | null,
+    cullBackfaces: MapCullBackfaceState = 'unknown'
   ): Material {
-    let tokenKey: string | null | undefined = this.textureTokenKeys.get(texturePreviewToken);
-    if (tokenKey === undefined && !this.textureTokenKeys.has(texturePreviewToken)) {
-      tokenKey = /^data:image\/png;base64,[A-Za-z0-9+/=]+$/.test(texturePreviewToken)
-        ? hashTextureToken(texturePreviewToken)
-        : null;
-      if (texturePreviewToken.length <= ModelResourcePool.maxTextureTokenHashChars) {
-        while (
-          this.textureTokenKeys.size >= ModelResourcePool.maxTextureTokenHashes
-          || this.textureTokenKeyChars + texturePreviewToken.length > ModelResourcePool.maxTextureTokenHashChars
-        ) {
-          const oldest = this.textureTokenKeys.keys().next().value;
-          if (typeof oldest !== 'string') break;
-          this.textureTokenKeys.delete(oldest);
-          this.textureTokenKeyChars -= oldest.length;
+    let tokenKey: string | null | undefined = preparedTextureKey;
+    if (preparedTextureKey === undefined) {
+      tokenKey = this.textureTokenKeys.get(texturePreviewToken);
+      if (tokenKey === undefined && !this.textureTokenKeys.has(texturePreviewToken)) {
+        tokenKey = /^data:image\/png;base64,[A-Za-z0-9+/=]+$/.test(texturePreviewToken)
+          ? hashTextureToken(texturePreviewToken)
+          : null;
+        if (texturePreviewToken.length <= ModelResourcePool.maxTextureTokenHashChars) {
+          while (
+            this.textureTokenKeys.size >= ModelResourcePool.maxTextureTokenHashes
+            || this.textureTokenKeyChars + texturePreviewToken.length > ModelResourcePool.maxTextureTokenHashChars
+          ) {
+            const oldest = this.textureTokenKeys.keys().next().value;
+            if (typeof oldest !== 'string') break;
+            this.textureTokenKeys.delete(oldest);
+            this.textureTokenKeyChars -= oldest.length;
+          }
+          this.textureTokenKeys.set(texturePreviewToken, tokenKey);
+          this.textureTokenKeyChars += texturePreviewToken.length;
         }
-        this.textureTokenKeys.set(texturePreviewToken, tokenKey);
-        this.textureTokenKeyChars += texturePreviewToken.length;
       }
     }
     if (!tokenKey) {
-      return this.getDefaultRealMaterial(three, track);
+      return this.getDefaultRealMaterial(three, track, cullBackfaces);
     }
     const normalizedColorSpace = colorSpace.toLowerCase() === 'linear' ? 'linear' : 'srgb';
     // The material state is fully described by the preview identity and color
@@ -415,7 +539,7 @@ export class ModelResourcePool {
     // used by hundreds of placements/models, and Smithbox's texture/material
     // pool keeps those resources shared instead of allocating one material per
     // model. Geometry remains keyed by model, so this cannot mix vertex data.
-    const key = `real:texture:${tokenKey}:${normalizedColorSpace}`;
+    const key = `real:texture:${tokenKey}:${normalizedColorSpace}:${mapCullBackfaceStateKey(cullBackfaces)}`;
     const existing = this.legacyMaterials.get(key);
     if (existing) return existing;
 
@@ -423,7 +547,7 @@ export class ModelResourcePool {
       color: new three.Color(0xffffff),
       roughness: 0.78,
       metalness: 0.04,
-      side: three.DoubleSide,
+      side: mapCullBackfaceSide(three, cullBackfaces),
       wireframe: false,
       // Map foliage, banners and several decal-like materials use cut-out
       // alpha. Without an alpha test Chromium draws the transparent texels as
@@ -466,10 +590,12 @@ export class ModelResourcePool {
     three: ThreeModule,
     track: TrackFunction,
     modelName: string,
-    geometryData: MeshGeometryWire
+    geometryData: MeshGeometryWire,
+    preparedHints?: PreparedGeometryHints
   ): { geometry: BufferGeometry; material: Material | Material[] } {
     const key = normalizeModelResourceKey(modelName);
-    const geometry = this.getOrCreateGeometry(three, track, key, geometryData);
+    const geometry = this.getOrCreateGeometry(three, track, key, geometryData, preparedHints);
+    const variantLayout = getMapMaterialVariantLayout(geometryData);
     const previews = new Map(
       (geometryData.texturePreviews ?? [])
         .filter((preview) => Number.isInteger(preview.materialIndex) && preview.materialIndex >= 0)
@@ -478,14 +604,44 @@ export class ModelResourcePool {
     const groupIndices = (geometryData.materialGroups ?? [])
       .map((group) => group.materialIndex)
       .filter((index) => Number.isInteger(index) && index >= 0);
+    const preparedTextureKeys = new Map(
+      (preparedHints?.textureIdentities ?? []).map((identity) => [identity.materialIndex, identity.textureKey])
+    );
+    if (variantLayout.variants.length > 0) {
+      const materials = variantLayout.variants.map(({ materialIndex, cullBackfaces }) => {
+        const preview = previews.get(materialIndex);
+        return preview
+          ? this.getTexturedRealMaterial(
+            three,
+            track,
+            preview.texturePreviewToken,
+            preview.colorSpace,
+            preparedTextureKeys.get(materialIndex),
+            cullBackfaces
+          )
+          : this.getDefaultRealMaterial(three, track, cullBackfaces);
+      });
+      return {
+        geometry,
+        material: materials.length === 1 ? materials[0]! : materials
+      };
+    }
     if (previews.size > 0 || groupIndices.length > 0) {
       const previewIndices = [...previews.keys()];
       const maxMaterialIndex = Math.max(-1, ...previewIndices, ...groupIndices);
+      const cullBackfaces = resolveMapCullBackfaceState(undefined, geometryData.cullBackfaces);
       const materials = Array.from({ length: maxMaterialIndex + 1 }, (_, materialIndex) => {
         const preview = previews.get(materialIndex);
         return preview
-          ? this.getTexturedRealMaterial(three, track, preview.texturePreviewToken, preview.colorSpace)
-          : this.getDefaultRealMaterial(three, track);
+          ? this.getTexturedRealMaterial(
+            three,
+            track,
+            preview.texturePreviewToken,
+            preview.colorSpace,
+            preparedTextureKeys.get(materialIndex),
+            cullBackfaces
+          )
+          : this.getDefaultRealMaterial(three, track, cullBackfaces);
       });
       return {
         geometry,
@@ -493,8 +649,19 @@ export class ModelResourcePool {
       };
     }
     const material = geometryData.texturePreviewToken
-      ? this.getTexturedRealMaterial(three, track, geometryData.texturePreviewToken, geometryData.textureColorSpace)
-      : this.getDefaultRealMaterial(three, track);
+      ? this.getTexturedRealMaterial(
+        three,
+        track,
+        geometryData.texturePreviewToken,
+        geometryData.textureColorSpace,
+        preparedTextureKeys.get(0),
+        resolveMapCullBackfaceState(undefined, geometryData.cullBackfaces)
+      )
+      : this.getDefaultRealMaterial(
+        three,
+        track,
+        resolveMapCullBackfaceState(undefined, geometryData.cullBackfaces)
+      );
     return { geometry, material };
   }
 
@@ -516,6 +683,6 @@ export class ModelResourcePool {
     this.primitiveBox = null;
     this.primitiveSphere = null;
     this.wireframeMaterial = null;
-    this.defaultRealMaterial = null;
+    this.defaultRealMaterials.clear();
   }
 }

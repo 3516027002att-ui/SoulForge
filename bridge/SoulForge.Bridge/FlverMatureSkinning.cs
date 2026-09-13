@@ -217,6 +217,28 @@ internal static class FlverMatureSkinning
         => referenceFk * BuildShaderMatrix(referenceFk, currentFk);
 
     /// <summary>
+    /// Build the row-vector normal matrix for a reference-pose transform.
+    /// Positions use <c>p * referenceFk</c>; normals must use the inverse
+    /// transpose of the linear part so a non-uniform native scale does not
+    /// shear or incorrectly scale the normal. <see cref="Vector3.TransformNormal"/>
+    /// ignores the translation components of this affine matrix.
+    /// </summary>
+    internal static Matrix4x4 BuildReferenceNormalMatrix(Matrix4x4 referenceFk)
+    {
+        if (!Matrix4x4.Invert(referenceFk, out var inverse))
+            throw new InvalidDataException("FLVER_REFERENCE_FK_SINGULAR");
+        return Matrix4x4.Transpose(inverse);
+    }
+
+    internal static Matrix4x4[] BuildReferenceNormalMatrices(IReadOnlyList<Matrix4x4> referenceFk)
+    {
+        var result = new Matrix4x4[referenceFk.Count];
+        for (var index = 0; index < referenceFk.Count; index++)
+            result[index] = BuildReferenceNormalMatrix(referenceFk[index]);
+        return result;
+    }
+
+    /// <summary>
     /// DirectBoneMap traversal used by character parts. Mapped bones receive
     /// the leader FK; follower-only descendants retain their native local
     /// transform and are recomputed below the already-synchronized parent.

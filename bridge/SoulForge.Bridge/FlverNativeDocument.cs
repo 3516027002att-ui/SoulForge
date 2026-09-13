@@ -1157,6 +1157,83 @@ internal sealed class FlverNativeDocument
             Convert.ToBase64String(indexBytes));
     }
 
+    /// <summary>
+    /// Decode one source vertex using the same native skinning contract as the
+    /// mature FLVER preview, without allocating a complete mesh skin payload.
+    /// MAP reference-pose baking uses this bounded operation while decoding a
+    /// page. A caller must reject <see cref="FlverMatureSkinning.VertexMode.Weighted"/>
+    /// explicitly when it only has evidence for rigid absolute vertices.
+    /// </summary>
+    internal FlverMatureSkinning.VertexMode DecodeMapVertexSkinning(
+        FlverMeshGeometryDescriptor descriptor,
+        int sourceVertexIndex,
+        Span<float> outputWeights,
+        Span<ushort> outputIndices,
+        out string? failure)
+    {
+        failure = null;
+        var meshIndex = descriptor.MeshIndex;
+        if (meshIndex < 0 || meshIndex >= Meshes.Count)
+        {
+            failure = $"FLVER_SKINNING_MESH_INDEX_INVALID:{meshIndex}";
+            return FlverMatureSkinning.VertexMode.Invalid;
+        }
+
+        var mesh = Meshes[meshIndex];
+        var plan = descriptor.DataPlan;
+        if (plan is null || plan.VertexCount <= 0)
+        {
+            failure = "FLVER_SKINNING_LAYOUT_UNREADABLE";
+            return FlverMatureSkinning.VertexMode.Invalid;
+        }
+        if (sourceVertexIndex < 0 || sourceVertexIndex >= plan.VertexCount)
+        {
+            failure = $"FLVER_SKINNING_VERTEX_INDEX_INVALID:{sourceVertexIndex}";
+            return FlverMatureSkinning.VertexMode.Invalid;
+        }
+        if (Bones.Count == 0)
+        {
+            failure = "FLVER_SKINNING_NO_BONES";
+            return FlverMatureSkinning.VertexMode.Invalid;
+        }
+
+        Span<float> rawWeights = stackalloc float[4];
+        Span<int> rawIndices = stackalloc int[4];
+        rawWeights.Clear();
+        rawIndices.Clear();
+        var hasDecodedWeights = plan.Weights is not null
+            && TryReadBoneWeights(plan.Weights, sourceVertexIndex, rawWeights);
+        if (plan.Weights is not null && !hasDecodedWeights)
+        {
+            failure = "FLVER_SKINNING_WEIGHTS_UNREADABLE";
+            return FlverMatureSkinning.VertexMode.Invalid;
+        }
+
+        var hasDecodedIndices = plan.BoneIndices is not null
+            && TryReadBoneIndices(plan.BoneIndices, sourceVertexIndex, rawIndices);
+        if (plan.BoneIndices is not null && !hasDecodedIndices)
+        {
+            failure = "FLVER_SKINNING_INDICES_UNREADABLE";
+            return FlverMatureSkinning.VertexMode.Invalid;
+        }
+
+        var hasNormalW = TryReadNormalW(plan.Normal, sourceVertexIndex, out var normalW);
+        return FlverMatureSkinning.DecodeVertex(
+            InternalVersion,
+            Bones.Count,
+            mesh,
+            plan.BoneIndices is not null,
+            hasDecodedWeights,
+            rawWeights,
+            hasDecodedIndices,
+            rawIndices,
+            hasNormalW,
+            normalW,
+            outputWeights,
+            outputIndices,
+            out failure);
+    }
+
     public string? GetMeshBoneWeightsBase64(int meshIndex, int maxVertices = 10_000)
         => GetMeshSkinning(meshIndex, maxVertices).BoneWeightsBase64;
 

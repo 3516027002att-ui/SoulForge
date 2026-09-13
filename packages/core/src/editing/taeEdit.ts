@@ -14,7 +14,7 @@ import { readFile, access } from 'node:fs/promises';
 import { basename, join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import type { ActionAddress, Diagnostic, TaeEntryWire } from '@soulforge/shared';
-import { formatActionAddress, parseActionAddress } from '@soulforge/shared';
+import { formatActionAddress, formatAnimCode, parseActionAddress } from '@soulforge/shared';
 import { runBridge } from '../bridge/runBridge.js';
 import { applyNativeMutation } from './editorMutationService.js';
 import { commitTaeEventViaBridge, type TaeEventUpsertMutation } from './taeBridgeCommit.js';
@@ -310,7 +310,7 @@ function projectEvents(chrId: string, animations: EnvelopeAnim[]): TaeEventSnaps
   const out: TaeEventSnapshot[] = [];
   for (const anim of animations) {
     if (anim.animId === undefined) continue;
-    const code = `A${String(anim.animId).padStart(4, '0')}`;
+    const code = formatAnimCode(anim.animId);
     for (let index = 0; index < (anim.events ?? []).length; index += 1) {
       const event = anim.events![index]!;
       const startTime = typeof event.startTime === 'number' && Number.isFinite(event.startTime) ? event.startTime : 0;
@@ -402,6 +402,25 @@ async function readTaeEnvelope(
       result: {
         ok: false,
         error: { code: 'TAE_READ_FAILED', message: `无法读取 TAE 文档：${filePath}` },
+        diagnostics
+      }
+    };
+  }
+  const invalidAnimationIndex = result.data.animations.findIndex((anim) => {
+    if (anim === null || typeof anim !== 'object') return true;
+    const animId = anim.animId;
+    return typeof animId !== 'number' || !Number.isSafeInteger(animId) || animId < 0;
+  });
+  if (invalidAnimationIndex >= 0) {
+    const invalidAnim = result.data.animations[invalidAnimationIndex];
+    return {
+      ok: false,
+      result: {
+        ok: false,
+        error: {
+          code: 'TAE_ANIM_ID_INVALID',
+          message: `原生 TAE 动画 ${invalidAnimationIndex} 的 animId 必须是非负 safe integer：${String(invalidAnim?.animId)}`
+        },
         diagnostics
       }
     };

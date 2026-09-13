@@ -21,6 +21,11 @@ import { prepareBridgeRoots, type BridgeRootSession, type PrepareBridgeRootsResu
 import { sanitizeRendererValue, type RendererSaveResult } from '../rendererDto.js';
 import type { OperationLogUtilityClient } from '../operationLogUtilityClient.js';
 import type { TrustedIpcHandle } from './registration.js';
+import {
+  appendPostCommitFailureDiagnostic,
+  runCallerOwnedPostCommit,
+  type KnowledgeRefreshOwner
+} from '../knowledgeRefreshOwnership.js';
 
 /* ------------------------------------------------------------------ */
 /*  Text/FMG domain caches (hard constraint 17)                        */
@@ -206,7 +211,8 @@ export interface TextIpcDeps {
   sessionCommitPort(
     session: WorkspaceSession,
     operationLog: OperationLogUtilityClient,
-    storage: { backupBaseDir: string; recoveryDir: string }
+    storage: { backupBaseDir: string; recoveryDir: string },
+    options?: { knowledgeRefreshOwner?: KnowledgeRefreshOwner }
   ): RawReplaceCommitPort;
   toSaveResultFromOutcome(outcome: NativeMutationOutcome, files: readonly IndexedFile[]): RendererSaveResult;
   refreshActiveIndexAfterNativeWrite(
@@ -709,16 +715,26 @@ export function registerTextIpcHandlers(deps: TextIpcDeps): void {
         confirmActionLabel: '提交 FMG 变更'
       }, {
         // S29：日常 FMG 写入不弹「高风险确认」；备份/回滚仍经 Patch Engine。
-        commit: deps.sessionCommitPort(deps.activeSession, operationLog, storage)
+        commit: deps.sessionCommitPort(deps.activeSession, operationLog, storage, { knowledgeRefreshOwner: 'caller' })
       });
       if (outcome.status === 'committed' && outcome.result.ok) {
-        // 容器写会更新整容器 DCX hash → 同容器内所有表缓存都失效，逐表清；
-        // 裸 fmg 的页缓存照旧清。
-        fmgPageCache.delete(sourceUri);
-        for (const [cachedTableId, ref] of textTableRefs) {
-          if (ref.sourceUri === sourceUri) fmgTableCache.delete(cachedTableId);
-        }
-        await deps.refreshActiveIndexAfterNativeWrite([sourceUri], outcome.result);
+        await runCallerOwnedPostCommit(outcome.result, {
+          prepare: () => {
+            // 容器写会更新整容器 DCX hash → 同容器内所有表缓存都失效，逐表清；
+            // 裸 fmg 的页缓存照旧清。
+            fmgPageCache.delete(sourceUri);
+            for (const [cachedTableId, ref] of textTableRefs) {
+              if (ref.sourceUri === sourceUri) fmgTableCache.delete(cachedTableId);
+            }
+          },
+          refresh: (result) => deps.refreshActiveIndexAfterNativeWrite([sourceUri], result),
+          onRefreshError: (result, error) => appendPostCommitFailureDiagnostic(
+            result,
+            'POSTCOMMIT_REFRESH_FAILED',
+            sourceUri,
+            error
+          )
+        });
       }
       return deps.toSaveResultFromOutcome(outcome, deps.indexedFiles);
     }

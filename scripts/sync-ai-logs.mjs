@@ -236,6 +236,54 @@ export function generateMarkdown(session) {
   return mdLines.join('\n');
 }
 
+export function renderArchiveIndex(indexRows, sessionCount, updatedAt = new Date()) {
+  return [
+    '# SoulForge 本地 AI 助手会话归档 (AI Conversation Logs)',
+    '',
+    '本索引仅描述本目录已归档的会话快照，不是客户端实时会话列表、本机历史总数或 Agent 成功率统计。桌面会话与 `output/agent-real/*.rollout.jsonl` 自动化模拟记录分开统计。',
+    '',
+    '## 同步方式与隐私边界',
+    '',
+    '只重建已有归档的索引（不扫描客户端目录，不复制或改写会话原文）：',
+    '',
+    '```powershell',
+    'npm run ai-logs:sync -- --index-only',
+    '```',
+    '',
+    '完整同步命令 `npm run ai-logs:sync` 会扫描本机 Electron、SoulForge 和历史 @soulforge/desktop 的 Agent 会话目录，复制原始 JSONL 并生成 Markdown；它不会自动脱敏。只有明确需要导出时才运行，提交或分享前必须审查对话、工具返回中的私人路径、凭据及 Mod 内容。',
+    '',
+    '索引由 [生成脚本](../../scripts/sync-ai-logs.mjs) 维护。缺失终态不能解释为完成；`completed` 等终态也是记录中的状态，不替代任务结果或原生写回验收。',
+    '',
+    '## 会话历史索引（按开始时间倒序，北京时间）',
+    '',
+    '| 记录时间 | 会话摘要 | 记录终态 | 步数 | Markdown 详情 | 原始记录 |',
+    '| :--- | :--- | :--- | :--- | :--- | :--- |',
+    ...indexRows,
+    '',
+    '---',
+    `*本次索引收录 ${sessionCount} 个会话。索引生成时间：${updatedAt.toISOString()}。归档覆盖时间见表格，不因重建索引而变成当前全量会话。*`
+  ].join('\n');
+}
+
+export function refreshArchiveIndex(targetBase = TARGET_BASE, updatedAt = new Date()) {
+  // Deliberately read only the existing repository archive: never default
+  // source directories. Refreshing documentation must not export private logs.
+  const archived = findJsonlFiles(join(targetBase, 'sessions')).map(parseSessionFile);
+  archived.sort((a, b) => new Date(b.startedAt).getTime() - new Date(a.startedAt).getTime());
+  const rows = archived.map((session) => {
+    const relJsonlPath = relative(targetBase, session.filePath).replace(/\\/g, '/');
+    const relMdPath = `markdown/${relative(join(targetBase, 'sessions'), session.filePath).replace(/\\/g, '/').replace(/\.jsonl$/, '.md')}`;
+    const mdLink = existsSync(join(targetBase, relMdPath)) ? `[查看 Markdown](${relMdPath})` : '未生成';
+    const date = new Date(session.startedAt);
+    const dateText = Number.isNaN(date.getTime()) ? session.startedAt : date.toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai' });
+    const title = session.shortTitle.replace(/\|/g, '\\|');
+    return `| ${dateText} | ${title} | ${session.taskStatus}${session.terminalMissing ? ' (terminal missing)' : ''} | ${session.totalSteps} | ${mdLink} | [原始 JSONL](${relJsonlPath}) |`;
+  });
+  mkdirSync(targetBase, { recursive: true });
+  writeFileSync(join(targetBase, 'README.md'), renderArchiveIndex(rows, archived.length, updatedAt), 'utf8');
+  return { mode: 'index-only', archiveFiles: archived.length, sourceScanned: false, sessionFilesWritten: 0 };
+}
+
 export function sync(inputDirs = process.argv.slice(2).filter((arg) => !arg.startsWith('-'))) {
   const sourceDirs = [...inputDirs, ...DEFAULT_SOURCE_DIRS].filter((d) => existsSync(d));
   console.log('🔍 正在扫描本地 AI 侧边栏会话记录...');
@@ -318,34 +366,12 @@ export function sync(inputDirs = process.argv.slice(2).filter((arg) => !arg.star
   }
 
   // 生成 docs/ai-logs/README.md
-  const readmeLines = [
-    '# SoulForge 本地 AI 助手会话归档 (AI Conversation Logs)',
-    '',
-    '本目录由 `npm run ai-logs:sync` 自动生成，收录 SoulForge 客户端侧边栏 AI Agent 的全量历史对话与操作记录（包括修改鬼型部 BOSS/精英怪属性、掉落物、忍具、参数搜索与错误排查等）。',
-    '',
-    '## 🛠️ 同步方式',
-    '',
-    '每次在 SoulForge 客户端与侧边栏 AI 助手完成对话后，在项目根目录运行以下命令即可自动同步最新会话：',
-    '',
-    '```bash',
-    'npm run ai-logs:sync',
-    '```',
-    '',
-    '同步后会自动生成易于阅读的 Markdown 格式对话流以及原始的 Rollout `.jsonl` 记录，并更新本索引表。',
-    '',
-    '## 📑 会话历史索引 (按时间倒序)',
-    '',
-    '| 记录时间 (Local Time) | 会话摘要 (Prompt / Goal) | 终态 | 步数 | Markdown 详情 | 原始记录 |',
-    '| :--- | :--- | :--- | :--- | :--- | :--- |',
-    ...indexRows,
-    '',
-    '---',
-    `*总计收录 ${uniqueSessions.length} 个会话。最后更新时间: ${new Date().toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai' })}*`
-  ];
-
-  writeFileSync(join(TARGET_BASE, 'README.md'), readmeLines.join('\n'), 'utf8');
+  writeFileSync(join(TARGET_BASE, 'README.md'), renderArchiveIndex(indexRows, uniqueSessions.length), 'utf8');
   console.log(`✅ 同步完成！已生成 ${uniqueSessions.length} 篇 Markdown 对话记录及 README 索引。`);
 }
 
 const invokedPath = process.argv[1] ? pathToFileURL(resolve(process.argv[1])).href : '';
-if (import.meta.url === invokedPath) sync();
+if (import.meta.url === invokedPath) {
+  if (process.argv.includes('--index-only')) console.log(JSON.stringify(refreshArchiveIndex()));
+  else sync();
+}

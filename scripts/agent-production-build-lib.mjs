@@ -58,6 +58,10 @@ const SNAPSHOT_FILE_PATHS = [
   AGENT_PRODUCTION_BUILD_MANIFEST,
   'apps/desktop/out/release-compliance.json',
   'apps/desktop/e2e/playwright/production-main.mjs',
+  'scripts/map-native-timing-aggregate.mjs',
+  'scripts/character-native-timing-aggregate.mjs',
+  'scripts/character-main-timing-aggregate.mjs',
+  'scripts/bridge-transport-timing-aggregate.mjs',
   'prompt/system.md',
   'bridge/SoulForge.Bridge/SoulForge.Bridge.csproj'
 ];
@@ -240,6 +244,10 @@ async function computeSnapshotRuntimeRaceFingerprint(root) {
   const bridgePublish = 'bridge/SoulForge.Bridge/bin/Release/net10.0/win-x64/publish';
   const paths = await expandInputs(root, [bridgePublish, 'apps/desktop/.native'], [
     'apps/desktop/e2e/playwright/production-main.mjs',
+    'scripts/map-native-timing-aggregate.mjs',
+    'scripts/character-native-timing-aggregate.mjs',
+    'scripts/character-main-timing-aggregate.mjs',
+    'scripts/bridge-transport-timing-aggregate.mjs',
     'bridge/SoulForge.Bridge/SoulForge.Bridge.csproj'
   ]);
   return fingerprintFiles(root, paths);

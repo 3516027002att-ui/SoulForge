@@ -56,6 +56,11 @@ import { prepareBridgeRoots, type BridgeRootSession, type PrepareBridgeRootsResu
 import type { NativeBnd4EntryLike, NativeDcxEnvelopeLike } from './bridgeEnvelopes.js';
 import { sanitizeDiagnostics, sanitizeRendererValue, type RendererSaveResult } from '../rendererDto.js';
 import type { TrustedIpcHandle } from './registration.js';
+import {
+  appendPostCommitFailureDiagnostic,
+  runCallerOwnedPostCommit,
+  type KnowledgeRefreshOwner
+} from '../knowledgeRefreshOwnership.js';
 import type { OperationLogUtilityClient } from '../operationLogUtilityClient.js';
 // Forensics counters (V1, pure diagnostic — no business logic change).
 const _forensicsCounters = new Map<string, number>();
@@ -177,12 +182,13 @@ export interface ParamIpcDeps {
   verifiedStageRoots(session: WorkspaceSession, storage: { root: string }, code: string): Promise<{ allowedRoots: string[]; writableRoots: string[]; diagnostics: Diagnostic[] }>;
   rejectNonSekiroNativeWrite(sourceUri: string, file?: IndexedFile): RendererSaveResult | null;
   ensureActiveOperationLog(session: WorkspaceSession): Promise<OperationLogUtilityClient>;
-  sessionCommitPort(session: WorkspaceSession, operationLog: OperationLogUtilityClient, storage: { root: string; backupBaseDir: string; recoveryDir: string; stagingRoot: string }): RawReplaceCommitPort;
+  sessionCommitPort(session: WorkspaceSession, operationLog: OperationLogUtilityClient, storage: { root: string; backupBaseDir: string; recoveryDir: string; stagingRoot: string }, options?: { knowledgeRefreshOwner?: KnowledgeRefreshOwner }): RawReplaceCommitPort;
   electronConfirmationPort(event: IpcMainInvokeEvent): import("@soulforge/core").WriteConfirmationPort;
   toSaveResultFromOutcome(outcome: NativeMutationOutcome, files: readonly IndexedFile[]): RendererSaveResult;
   refreshActiveIndexAfterNativeWrite(changedSources?: readonly string[], carrier?: unknown): Promise<unknown>;
   sha256FileNow(filePath: string): Promise<string>;
 }
+
 export function clearParamIpcCaches(): void {
   sessionBindings.clear();
   paramPageCache.clear();
@@ -1841,9 +1847,20 @@ let paramMetadataCache: {
         confirmActionLabel: '提交 PARAM 变更'
       }, {
         confirm: deps.electronConfirmationPort(event),
-        commit: deps.sessionCommitPort(getSession()!, operationLog, storage)
+        commit: deps.sessionCommitPort(getSession()!, operationLog, storage, { knowledgeRefreshOwner: 'caller' })
       });
-      if (outcome.status === 'committed' && outcome.result.ok) paramPageCache.delete(sourceUri);
+      if (outcome.status === 'committed' && outcome.result.ok) {
+        await runCallerOwnedPostCommit(outcome.result, {
+          prepare: () => { paramPageCache.delete(sourceUri); },
+          refresh: (result) => deps.refreshActiveIndexAfterNativeWrite([sourceUri], result),
+          onRefreshError: (result, error) => appendPostCommitFailureDiagnostic(
+            result,
+            'POSTCOMMIT_REFRESH_FAILED',
+            sourceUri,
+            error
+          )
+        });
+      }
       return deps.toSaveResultFromOutcome(outcome, getFiles());
     }
   );
@@ -1939,9 +1956,20 @@ let paramMetadataCache: {
         confirmActionLabel: '提交 PARAM 字段变更'
       }, {
         confirm: deps.electronConfirmationPort(event),
-        commit: deps.sessionCommitPort(getSession()!, operationLog, storage)
+        commit: deps.sessionCommitPort(getSession()!, operationLog, storage, { knowledgeRefreshOwner: 'caller' })
       });
-      if (outcome.status === 'committed' && outcome.result.ok) paramPageCache.delete(sourceUri);
+      if (outcome.status === 'committed' && outcome.result.ok) {
+        await runCallerOwnedPostCommit(outcome.result, {
+          prepare: () => { paramPageCache.delete(sourceUri); },
+          refresh: (result) => deps.refreshActiveIndexAfterNativeWrite([sourceUri], result),
+          onRefreshError: (result, error) => appendPostCommitFailureDiagnostic(
+            result,
+            'POSTCOMMIT_REFRESH_FAILED',
+            sourceUri,
+            error
+          )
+        });
+      }
       return deps.toSaveResultFromOutcome(outcome, getFiles());
     }
   );
@@ -2185,17 +2213,27 @@ let paramMetadataCache: {
       }, {
         // S29：确认端口不再接入 —— writerContract 不再要求「高风险写入」确认，
         // 弹窗由 applyNativeMutation 的 requiresConfirmation 分支驱动，端口已无效果。
-        commit: deps.sessionCommitPort(getSession()!, operationLog, storage)
+        commit: deps.sessionCommitPort(getSession()!, operationLog, storage, { knowledgeRefreshOwner: 'caller' })
       });
 
       if (outcome.status === 'committed' && outcome.result.ok) {
-        // 容器变了：行缓存、条目缓存与解包缓存全部失效，否则下一次读会拿到旧字节。
-        paramPageCache.delete(containerUri);
-        containerChildrenCache.clear();
-        paramEntryTableCache.clear();
-        containerParamAllCache.clear();
-        unpackedParamCache.clear();
-        await deps.refreshActiveIndexAfterNativeWrite([containerUri], outcome.result);
+        await runCallerOwnedPostCommit(outcome.result, {
+          prepare: () => {
+            // 容器变了：行缓存、条目缓存与解包缓存全部失效，否则下一次读会拿到旧字节。
+            paramPageCache.delete(containerUri);
+            containerChildrenCache.clear();
+            paramEntryTableCache.clear();
+            containerParamAllCache.clear();
+            unpackedParamCache.clear();
+          },
+          refresh: (result) => deps.refreshActiveIndexAfterNativeWrite([containerUri], result),
+          onRefreshError: (result, error) => appendPostCommitFailureDiagnostic(
+            result,
+            'POSTCOMMIT_REFRESH_FAILED',
+            containerUri,
+            error
+          )
+        });
       }
       return deps.toSaveResultFromOutcome(outcome, getFiles());
     }
@@ -2405,16 +2443,26 @@ let paramMetadataCache: {
         confirmActionLabel: '提交容器内 PARAM 行名变更'
       }, {
         // S29：不再接确认端口（见字段链注释）。
-        commit: deps.sessionCommitPort(getSession()!, operationLog, storage)
+        commit: deps.sessionCommitPort(getSession()!, operationLog, storage, { knowledgeRefreshOwner: 'caller' })
       });
 
       if (outcome.status === 'committed' && outcome.result.ok) {
-        paramPageCache.delete(containerUri);
-        containerChildrenCache.clear();
-        paramEntryTableCache.clear();
-        containerParamAllCache.clear();
-        unpackedParamCache.clear();
-        await deps.refreshActiveIndexAfterNativeWrite([containerUri], outcome.result);
+        await runCallerOwnedPostCommit(outcome.result, {
+          prepare: () => {
+            paramPageCache.delete(containerUri);
+            containerChildrenCache.clear();
+            paramEntryTableCache.clear();
+            containerParamAllCache.clear();
+            unpackedParamCache.clear();
+          },
+          refresh: (result) => deps.refreshActiveIndexAfterNativeWrite([containerUri], result),
+          onRefreshError: (result, error) => appendPostCommitFailureDiagnostic(
+            result,
+            'POSTCOMMIT_REFRESH_FAILED',
+            containerUri,
+            error
+          )
+        });
       }
       return deps.toSaveResultFromOutcome(outcome, getFiles());
     }
@@ -2626,14 +2674,24 @@ let paramMetadataCache: {
         confirmActionLabel: '提交容器内 PARAM 行级变更'
       }, {
         // S29：不再接确认端口（见字段链注释）。
-        commit: deps.sessionCommitPort(getSession()!, operationLog, storage)
+        commit: deps.sessionCommitPort(getSession()!, operationLog, storage, { knowledgeRefreshOwner: 'caller' })
       });
 
       if (outcome.status === 'committed' && outcome.result.ok) {
-        paramPageCache.delete(containerUri);
-        containerChildrenCache.clear();
-        unpackedParamCache.clear();
-        await deps.refreshActiveIndexAfterNativeWrite([containerUri], outcome.result);
+        await runCallerOwnedPostCommit(outcome.result, {
+          prepare: () => {
+            paramPageCache.delete(containerUri);
+            containerChildrenCache.clear();
+            unpackedParamCache.clear();
+          },
+          refresh: (result) => deps.refreshActiveIndexAfterNativeWrite([containerUri], result),
+          onRefreshError: (result, error) => appendPostCommitFailureDiagnostic(
+            result,
+            'POSTCOMMIT_REFRESH_FAILED',
+            containerUri,
+            error
+          )
+        });
       }
       return deps.toSaveResultFromOutcome(outcome, getFiles());
     }
@@ -2855,17 +2913,27 @@ let paramMetadataCache: {
       confirmActionLabel: input.confirmActionLabel
     }, {
       // S29：不再接确认端口（见字段链注释）。
-      commit: deps.sessionCommitPort(session!, operationLog, storage)
+      commit: deps.sessionCommitPort(session!, operationLog, storage, { knowledgeRefreshOwner: 'caller' })
     });
 
     if (outcome.status === 'committed' && outcome.result.ok) {
-      paramPageCache.delete(input.containerUri);
-      paramAllCache.delete(input.containerUri);
-      containerChildrenCache.clear();
-      paramEntryTableCache.clear();
-      containerParamAllCache.clear();
-      unpackedParamCache.clear();
-      await deps.refreshActiveIndexAfterNativeWrite([input.containerUri], outcome.result);
+      await runCallerOwnedPostCommit(outcome.result, {
+        prepare: () => {
+          paramPageCache.delete(input.containerUri);
+          paramAllCache.delete(input.containerUri);
+          containerChildrenCache.clear();
+          paramEntryTableCache.clear();
+          containerParamAllCache.clear();
+          unpackedParamCache.clear();
+        },
+        refresh: (result) => deps.refreshActiveIndexAfterNativeWrite([input.containerUri], result),
+        onRefreshError: (result, error) => appendPostCommitFailureDiagnostic(
+          result,
+          'POSTCOMMIT_REFRESH_FAILED',
+          input.containerUri,
+          error
+        )
+      });
     }
     return deps.toSaveResultFromOutcome(outcome, getFiles());
   };

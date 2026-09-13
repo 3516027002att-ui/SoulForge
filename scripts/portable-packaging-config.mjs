@@ -1,3 +1,6 @@
+import { existsSync } from 'node:fs';
+import { resolve } from 'node:path';
+
 const EXPECTED_POLICY_INPUTS = [
   {
     kind: 'directory',
@@ -20,25 +23,75 @@ const EXPECTED_POLICY_INPUTS = [
 
 // Frozen electron-builder `files` list. `!src/**/*` only matches the app root,
 // so `!**/src/**/*` is what actually keeps workspace TypeScript sources out of
-// app.asar; `!**/dist/testing/**/*` and `!**/dist/_tmp/**/*` keep harness and
-// scratch output out. Any change here must be mirrored in
+// app.asar; the test/docs/log/source-map exclusions below keep development
+// material out. Any change here must be mirrored in
 // apps/desktop/electron-builder.json — the gate compares them exactly.
 const EXPECTED_FILE_PATTERNS = [
   'out/**/*',
   '!out/release-compliance.json',
+  '!out/agent-production-build.json',
   'package.json',
   '!**/*.map',
   '!src/**/*',
   '!**/src/**/*',
+  '!**/test/**/*',
+  '!**/tests/**/*',
+  '!**/testing/**/*',
+  '!**/__tests__/**/*',
+  '!**/test-utils*',
+  '!**/*test-utils*',
+  '!**/*.test.*',
+  '!**/*.spec.*',
+  '!**/*playwright*',
+  '!**/*vitest*',
+  '!**/*jest*',
+  '!**/*cypress*',
   '!**/dist/testing/**/*',
   '!**/dist/_tmp/**/*',
+  '!**/probe_tmp.*',
+  '!**/_tmp/**/*',
   '!**/*.tsbuildinfo',
   '!**/tsconfig*.json',
+  '!**/package-lock.json',
+  '!**/*.log',
+  '!**/*.jsonl',
+  '!**/docs/**/*',
+  '!**/锐评/**/*',
+  '!**/*handoff*.md',
+  '!**/*交接*.md',
+  '!**/AGENTS.md',
+  '!**/SKILL.md',
   '!.native/**/*',
   '!mods/**/*',
   '!**/oo2core*.dll',
   '!**/*secret*',
   '!**/*api*key*'
+];
+
+// Only these resources may leave the repository as unpacked runtime/legal
+// files. The prompt directory is intentionally reduced to the four shipped
+// Markdown inputs consumed by the production agent; source, review, and test
+// material is never copied by a broad directory rule.
+const EXPECTED_EXTRA_RESOURCES = [
+  {
+    from: '.native',
+    to: 'native',
+    filter: ['better_sqlite3.node', 'better_sqlite3.json']
+  },
+  {
+    from: '../../prompt',
+    to: 'prompt',
+    filter: ['system.md', 'rag-embedding.md', 'event-reference.md', 'agent-task-record.md']
+  },
+  { from: '../../mutter.md', to: 'mutter.md', filter: ['mutter.md'] },
+  {
+    from: '../../bridge/SoulForge.Bridge/bin/Release/net10.0/win-x64/publish/SoulForge.Bridge.exe',
+    to: 'bridge/SoulForge.Bridge.exe',
+    filter: ['SoulForge.Bridge.exe']
+  },
+  { from: '../../LICENSE', to: 'LICENSE', filter: ['LICENSE'] },
+  { from: '../../NOTICE', to: 'NOTICE', filter: ['NOTICE'] },
+  { from: '../../licenses', to: 'licenses', filter: ['**/*'] }
 ];
 
 // Development-only surfaces that must never appear inside app.asar. Each entry
@@ -47,8 +100,26 @@ const EXPECTED_FILE_PATTERNS = [
 export const FORBIDDEN_SHIPPED_DEV_SURFACES = [
   { code: 'DEV_SURFACE_HARNESS', test: (path) => /(?:^|\/)dist\/testing\//.test(path) },
   { code: 'DEV_SURFACE_SCRATCH', test: (path) => /(?:^|\/)dist\/_tmp\//.test(path) },
+  { code: 'DEV_SURFACE_PROBE_SCRATCH', test: (path) => /(?:^|\/)(?:probe_tmp|_tmp)(?:\.|\/)/i.test(path) },
   { code: 'DEV_SURFACE_WORKSPACE_SOURCE', test: (path) => /^node_modules\/@soulforge\/[^/]+\/src\//.test(path) },
-  { code: 'DEV_SURFACE_BUILD_INFO', test: (path) => /\.tsbuildinfo$/.test(path) }
+  { code: 'DEV_SURFACE_BUILD_INFO', test: (path) => /\.tsbuildinfo$/.test(path) },
+  { code: 'DEV_SURFACE_SOURCE_MAP', test: (path) => /\.map$/i.test(path) },
+  {
+    code: 'DEV_SURFACE_INTERNAL_DOCS',
+    test: (path) => /(?:^|\/)(?:docs?|锐评|AGENTS\.md|SKILL\.md)(?:\/|$)/i.test(path)
+      || /(?:handoff|交接书)/i.test(path)
+  },
+  {
+    code: 'DEV_SURFACE_TEST_MATERIAL',
+    test: (path) => /(?:^|\/)(?:test|tests|testing|__tests__)(?:\/|$)/i.test(path)
+      || /(?:\.test|\.spec)\.[^/]+$/i.test(path)
+      || /(?:playwright|vitest|jest|cypress)/i.test(path)
+  },
+  {
+    code: 'DEV_SURFACE_LOG',
+    test: (path) => /(?:^|\/)(?:logs?|ai-logs|output)(?:\/|$)/i.test(path)
+      || /\.(?:log|jsonl|trace)$/i.test(path)
+  }
 ];
 
 const EXPECTED_OUTPUT_DIRECTORY = 'release';
@@ -128,8 +199,7 @@ export function validatePortableBuilderConfig(config, releasePolicy) {
       name: 'package-inputs-closed',
       ok: sameStringArray(filePatterns, EXPECTED_FILE_PATTERNS)
         && !hasOwn(config, 'extraFiles')
-        && Array.isArray(config?.extraResources)
-        && config.extraResources.length === 1
+        && sameExtraResources(config?.extraResources, EXPECTED_EXTRA_RESOURCES)
     },
     {
       name: 'output-directory-approved',
@@ -148,6 +218,7 @@ export function validatePortableBuilderConfig(config, releasePolicy) {
       ok: Object.entries(EXPECTED_NSIS).every(([key, value]) => config?.nsis?.[key] === value)
     },
     { name: 'excludes-compliance-manifest', ok: filePatterns.includes('!out/release-compliance.json') },
+    { name: 'excludes-agent-build-manifest', ok: filePatterns.includes('!out/agent-production-build.json') },
     { name: 'excludes-mods', ok: filePatterns.includes('!mods/**/*') },
     { name: 'excludes-oodle', ok: filePatterns.includes('!**/oo2core*.dll') },
     {
@@ -159,6 +230,10 @@ export function validatePortableBuilderConfig(config, releasePolicy) {
       ok: sqliteFilters.length === 2
         && sqliteFilters.includes('better_sqlite3.node')
         && sqliteFilters.includes('better_sqlite3.json')
+    },
+    {
+      name: 'includes-approved-runtime-resources',
+      ok: sameExtraResources(config?.extraResources, EXPECTED_EXTRA_RESOURCES)
     },
     { name: 'excludes-native-build-cache', ok: filePatterns.includes('!.native/**/*') },
     {
@@ -183,6 +258,28 @@ export function validatePortableBuilderConfig(config, releasePolicy) {
   ];
 }
 
+/**
+ * Verify each `extraResources.from` against the directory that owns the
+ * electron-builder config (apps/desktop). This is intentionally separate from
+ * the structural config check so fixtures can test malformed configs without
+ * requiring generated Bridge output, while a real packaging run can fail
+ * closed before invoking electron-builder.
+ */
+export function validatePortableBuilderResourceSources(config, configDirectory) {
+  const resources = Array.isArray(config?.extraResources) ? config.extraResources : [];
+  return resources.map((resource, index) => {
+    const source = typeof resource?.from === 'string'
+      ? resolve(configDirectory, resource.from)
+      : null;
+    return {
+      name: `resource-source-${index + 1}`,
+      ok: source !== null && existsSync(source),
+      source: resource?.from ?? null,
+      resolvedSource: source
+    };
+  });
+}
+
 function sameStringSet(actual, expected) {
   return actual.length === expected.length
     && [...new Set(actual)].length === actual.length
@@ -193,6 +290,20 @@ function sameStringArray(actual, expected) {
   return Array.isArray(actual)
     && actual.length === expected.length
     && actual.every((item, index) => typeof item === 'string' && item === expected[index]);
+}
+
+function sameExtraResources(actual, expected) {
+  if (!Array.isArray(actual) || actual.length !== expected.length) return false;
+  return actual.every((item, index) => {
+    const expectedItem = expected[index];
+    return item !== null
+      && typeof item === 'object'
+      && !Array.isArray(item)
+      && hasExactKeys(item, ['from', 'to', 'filter'])
+      && item.from === expectedItem.from
+      && item.to === expectedItem.to
+      && sameStringArray(item.filter, expectedItem.filter);
+  });
 }
 
 function samePolicyInputs(actual, expected) {

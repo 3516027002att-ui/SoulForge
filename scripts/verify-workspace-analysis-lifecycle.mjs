@@ -2,11 +2,16 @@
  * This bounded race test is not an Electron/native readiness acceptance test.
  */
 import assert from 'node:assert/strict';
+import { mkdtemp, rm } from 'node:fs/promises';
 import { readFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import vm from 'node:vm';
 import ts from 'typescript';
 import { diffRagCorpusBySource, sameRagReferences } from '../packages/core/dist/rag/persist.js';
 import { createRagCorpus, mergeCatalogAndPersisted } from '../packages/core/dist/rag/chunkBuilder.js';
+import { openWorkspaceDatabase } from '../packages/core/dist/storage/sqliteDatabase.js';
+import { WorkspaceDataRepository } from '../packages/core/dist/storage/workspaceDataRepository.js';
 
 function productionFunctions(path, names) {
   const source = readFileSync(new URL(path, import.meta.url), 'utf8');
@@ -192,6 +197,40 @@ const restarted = mergeCatalogAndPersisted(
 );
 assert.equal(restarted.chunks.some(chunk => chunk.body === 'stale persisted body'), false);
 assert.equal(restarted.chunks.find(chunk => chunk.chunkId === currentChunk.chunkId)?.body, 'fresh semantic body');
+
+// Exercise the same durable delta shape used by refreshRagAfterAnalyze:
+// filter the merge view, but diff against the unfiltered SQLite snapshot so a
+// failed PARAM leaf is deleted from both rag_chunks and FTS.  A stage->final
+// reuse with identical canonical bodies must then submit no FTS/upsert work.
+const deltaRoot = await mkdtemp(join(tmpdir(), 'soulforge-workspace-analysis-delta-'));
+const deltaDatabase = openWorkspaceDatabase(join(deltaRoot, 'workspace.db'));
+const deltaWorkspaceId = 'workspace-analysis-delta';
+const deltaSourceUri = 'file://synthetic/param/gameparam.parambnd.dcx';
+const deltaNow = new Date().toISOString();
+deltaDatabase.prepare(`
+  INSERT INTO workspaces (workspace_id, root_path, game, created_at, updated_at)
+  VALUES (?, ?, ?, ?, ?)
+`).run(deltaWorkspaceId, deltaRoot, 'sekiro', deltaNow, deltaNow);
+const deltaRepository = new WorkspaceDataRepository(deltaDatabase, deltaWorkspaceId);
+const durableFailed = { ...makeRagChunk(2001), workspaceId: deltaWorkspaceId, sourceUri: deltaSourceUri, symbolUri: 'param://FailedLeaf/1', body: 'generic failed leaf', contentHash: 'generic-failed' };
+const durableGood = { ...makeRagChunk(2002), workspaceId: deltaWorkspaceId, sourceUri: deltaSourceUri, symbolUri: 'param://GoodLeaf/1', body: 'generic good leaf', contentHash: 'generic-good' };
+const canonicalGood = { ...durableGood, body: 'native canonical good leaf', contentHash: 'native-good' };
+const durableCorpus = createRagCorpus({ workspaceId: deltaWorkspaceId, builtAt: deltaNow, chunks: [durableFailed, durableGood], references: [] });
+const stageCorpus = createRagCorpus({ workspaceId: deltaWorkspaceId, builtAt: deltaNow, chunks: [canonicalGood], references: [] });
+const mergeView = createRagCorpus({ workspaceId: deltaWorkspaceId, builtAt: deltaNow, chunks: [], references: [] });
+const desiredCorpus = mergeCatalogAndPersisted(stageCorpus, mergeView);
+deltaRepository.mergeRagChunkDelta({ sourceUri: deltaSourceUri, upserts: [durableFailed, durableGood], deletedChunkIds: [] });
+for (const delta of diffRagCorpusBySource(durableCorpus, desiredCorpus)) {
+  deltaRepository.mergeRagChunkDelta(delta);
+}
+assert.equal(deltaRepository.loadRagChunks().some(chunk => chunk.chunkId === durableFailed.chunkId), false, 'failed PARAM leaf must be removed from durable rows');
+assert.equal(deltaDatabase.prepare('SELECT 1 AS present FROM rag_chunks_fts WHERE chunk_id = ?').get(durableFailed.chunkId), undefined, 'failed PARAM leaf must be removed from FTS');
+assert.equal(deltaRepository.loadRagChunks().find(chunk => chunk.chunkId === canonicalGood.chunkId)?.body, canonicalGood.body);
+const stageFinalDeltas = diffRagCorpusBySource(stageCorpus, createRagCorpus({ workspaceId: deltaWorkspaceId, builtAt: new Date().toISOString(), chunks: [canonicalGood], references: [] }));
+assert.equal(stageFinalDeltas.reduce((sum, delta) => sum + delta.upserts.length, 0), 0, 'stage->final canonical reuse must not upsert');
+assert.equal(stageFinalDeltas.reduce((sum, delta) => sum + delta.deletedChunkIds.length, 0), 0, 'stage->final canonical reuse must not rebuild FTS');
+deltaDatabase.close();
+await rm(deltaRoot, { recursive: true, force: true });
 
 for (const change of ['session', 'generation', 'workspace', 'cancel']) {
   state.activeWorkspaceSessionId = 'session-a';

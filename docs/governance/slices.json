@@ -1045,6 +1045,74 @@
       ],
       "requiredValidation": "SOULFORGE_INSTALLER_LIFECYCLE_RUN=1 node scripts/verify-installer-lifecycle.mjs；跨机 me3 会话 smoke",
       "declaresUnfrozenValidation": true
+    },
+    {
+      "sliceId": "W-REL-V09-PUBLIC-PREVIEW-01",
+      "targetRelease": "V0.9",
+      "lifecycle": "ready",
+      "authority": "partial",
+      "authorityCap": "partial",
+      "authorityCapNote": "cap=partial；只覆盖当前 V0.9 Windows x64 clean 源码 ZIP、启动 EXE/native 必需组件与源码归档边界，不提升旧 Gate 或 native/runtime authority",
+      "capabilityIds": [
+        "V09-PUBLIC-PREVIEW"
+      ],
+      "blockerRefs": [],
+      "goal": "完成 V0.9 Windows x64 公开预发行的 clean 源码 ZIP、启动 EXE/native 必需组件与许可证 notices，并审计源码归档完整性、启动路径、内部文件排除及哈希",
+      "hardPrerequisites": "现有功能源代码构建入口、启动器/native 构建入口、许可证目录与不携带真实游戏资产/私有语料/凭据的 clean 源码 ZIP 策略保持可审计；NSIS 安装包不属于本轮交付",
+      "entryPoints": [
+        "docs/governance/releases.json",
+        "docs/governance/scope.json",
+        "package.json",
+        "scripts/release-compliance-policy.json",
+        "scripts/release-compliance-lib.mjs",
+        "scripts/generate-release-compliance-manifest.mjs"
+      ],
+      "requiredValidation": "npm run build；npm run exe:build；npm run release:manifest；node scripts/verify-governance.mjs；validation-unfrozen：实际 V0.9 clean 源码 ZIP 完整性、启动 EXE/native 必需组件启动路径、内部文件排除、源码与产物哈希、必要许可证 notices 及 GitHub source archive exclusion audit；本轮不要求 NSIS installer build/install/upgrade/uninstall，旧跨机与真实 Sekiro 验收仍不声称完成",
+      "declaresUnfrozenValidation": true
+    },
+    {
+      "sliceId": "W-MAP-PREVIEW-CORRECTNESS-03",
+      "targetRelease": "V0.9",
+      "lifecycle": "completed",
+      "authority": "partial",
+      "authorityCap": "partial",
+      "authorityCapNote": "cap=partial；覆盖地图预览缓存身份、完成/重试与场景隔离、native 诊断保真、FaceSet/cull 字段，以及已验证 FLVER 布局上的有界 C# absolute-rigid 参考姿态 FK bake、delta/static 不变与 weighted fail-closed；不提升完整地图可见性、全流式架构、游戏内加载或发布 authority",
+      "capabilityIds": [
+        "I-RENDER",
+        "C-MSB"
+      ],
+      "blockerRefs": [],
+      "goal": "修复 MSB 地图预览 legacy cache 身份碰撞并封闭完成/失败重试/旧场景结果隔离；保真核验 native 诊断、地图 FaceSet/cull 字段与一个异常 part 的有界证据；补齐并验证已验证 FLVER 布局上的有界 C# absolute-rigid 参考姿态 FK bake，保持 delta/static 不变并对 weighted skinning 失败关闭",
+      "hardPrerequisites": "每次 mounted scene 继续创建独立 MapModelLoadCache，cleanup 继续取消请求并 dispose cache/worker/upload queue；native MAP static geometry 诊断与 FaceSet/cull 字段保持现有只读入口；单个异常 part 证据必须标为 partial，不得外推为整张地图、全硬件或游戏内可见性",
+      "entryPoints": [
+        "apps/desktop/src/renderer/src/scene/mapModelLoadScheduler.ts",
+        "apps/desktop/src/renderer/src/scene/mapModelLoadScheduler.test.ts",
+        "apps/desktop/src/renderer/src/scene/mapGeometryPrepare.ts",
+        "apps/desktop/src/renderer/src/scene/mapGeometryPrepareClient.ts",
+        "apps/desktop/src/renderer/src/scene/mapGeometryPrepareClient.test.ts",
+        "apps/desktop/src/renderer/src/scene/mapGeometryPrepareWorker.ts",
+        "apps/desktop/src/renderer/src/scene/modelResourcePool.ts",
+        "apps/desktop/src/renderer/src/scene/modelResourcePool.test.ts",
+        "apps/desktop/src/renderer/src/scene/threeSceneController.ts",
+        "apps/desktop/src/renderer/src/editors/MsbScenePanel.tsx",
+        "apps/desktop/src/renderer/src/editors/MsbScenePanel.test.tsx",
+        "apps/desktop/src/main/ipc/map.ts",
+        "apps/desktop/src/main/ipc/mapRequestCancellation.ts",
+        "apps/desktop/src/main/ipc/mapRequestCancellation.test.ts",
+        "apps/desktop/src/main/ipc/mapStaticReadDecision.ts",
+        "apps/desktop/src/main/ipc/mapStaticReadDecision.test.ts",
+        "bridge/SoulForge.Bridge/FlverNativeDocument.cs",
+        "bridge/SoulForge.Bridge/FlverMatureSkinning.cs",
+        "bridge/SoulForge.Bridge/MapStaticGeometryService.cs",
+        "packages/core/src/testing/audit/sf-14/flverFixture.ts",
+        "packages/core/src/testing/runAuditSf14Smoke.ts",
+        "scripts/verify-map-streaming-native.mjs",
+        "scripts/verify-map-timing-contract.mjs",
+        "scripts/map-native-timing-aggregate.mjs",
+        "packages/shared/src/scene-ir.ts"
+      ],
+      "requiredValidation": "npm run test:renderer-unit、npm run test:scene-draw-list、npm run test:three-scene-module、npm run test:map-static-pagination-contract、npm run test:map-streaming-contract、npm run test:audit-sf-14-unit；最低回归：npm run typecheck、npm test、npm run bridge:verify:synthetic、npm run build、npm run exe:build；有界 native/Electron：单个异常 part 的原生/画面对照；validation-unfrozen：单个异常 part 原生诊断与画面对照尚未冻结",
+      "declaresUnfrozenValidation": true
     }
   ],
   "activeClaims": [],

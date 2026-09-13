@@ -37,12 +37,25 @@ const MAX_BODY_CHARS = 1_800;
 const MAX_INSTRUCTIONS = 24;
 const MAX_FIELDS = 24;
 
+/**
+ * Controls whether corpus construction also materializes the in-memory
+ * inverted lookup maps.  The default stays eager for every existing caller;
+ * only explicitly marked intermediate corpora may defer that work until
+ * retrieval calls `ensureLookupIndex`.
+ */
+export type RagCorpusLookupIndexMode = 'eager' | 'deferred';
+
+export interface RagCorpusBuildOptions {
+  lookupIndex?: RagCorpusLookupIndexMode;
+}
+
 export function buildRagCorpus(
   index: WorkspaceIndex,
   now = new Date().toISOString(),
   diagnostics: readonly Diagnostic[] = [],
   sourceUris?: readonly string[],
-  symbolUris?: readonly string[]
+  symbolUris?: readonly string[],
+  options: RagCorpusBuildOptions = {}
 ): RagCorpus {
   const sourceFilter = sourceUris && sourceUris.length > 0 ? new Set(sourceUris) : null;
   const symbolFilter = symbolUris && symbolUris.length > 0 ? new Set(symbolUris) : null;
@@ -149,7 +162,8 @@ export function buildRagCorpus(
       index.listReferences(),
       buildParamTextReferenceEdges(symbols.params ?? [], symbols.msgs ?? [])
     ),
-    diagnostics
+    diagnostics,
+    ...(options.lookupIndex ? { lookupIndex: options.lookupIndex } : {})
   });
 }
 
@@ -159,6 +173,8 @@ export function createRagCorpus(input: {
   chunks: readonly RagChunk[];
   references?: readonly ReferenceEdge[];
   diagnostics?: readonly Diagnostic[];
+  /** Defaults to eager; use deferred only for an intermediate, non-retrieval corpus. */
+  lookupIndex?: RagCorpusLookupIndexMode;
 }): RagCorpus {
   const byFamily = emptyFamilyCounts();
   for (const chunk of input.chunks) byFamily[chunk.family] += 1;
@@ -186,7 +202,7 @@ export function createRagCorpus(input: {
     availability: semanticCount > 0 ? 'available' : 'unavailable',
     diagnostics
   };
-  attachLookupIndex(corpus);
+  if (input.lookupIndex !== 'deferred') attachLookupIndex(corpus);
   return corpus;
 }
 

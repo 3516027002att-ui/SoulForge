@@ -2,7 +2,7 @@
 
 SoulForge 的 C# 原生格式辅助进程。
 
-Bridge 使用 .NET 10、自包含 `win-x64` 与 `1.0.0` NDJSON 常驻协议。当前已具备登记 DFLT/BND4/KRAK 容器路径、FMG/PARAM/EMEVD/MSB 的不同程度 native document/writer，以及 TAE/ESD/FLVER/TPF 的登记样本只读 native document；各格式 authority 仍必须以当前治理数据和真实 smoke 为准，不能由命令存在、synthetic fixture 或 parser 名称外推。
+Bridge 使用 .NET 10、自包含 `win-x64` 与 `1.0.0` NDJSON 常驻协议。当前已具备登记 DFLT/BND4/KRAK 容器路径，以及 FMG/PARAM/EMEVD/MSB、TAE/ESD/FLVER/TPF/MTD/GPARAM/FXR 的不同程度 native document 与受限 writer 入口；TAE/ESD/FLVER/TPF 已不能笼统描述为“只有只读解析”。具体操作、布局与 corpus 的 authority 仍必须以当前治理数据和真实 smoke 为准，不能由命令存在、synthetic fixture 或 parser 名称外推。
 
 本机没有全局 .NET 10 SDK 时：
 
@@ -34,6 +34,10 @@ npm run bridge:verify:client
 plus next steps. It does not decompress, unpack, or semantically parse resources.
 
 ## 当前命令
+
+生产 daemon 的完整分派见 [BridgeCommandService.cs](BridgeCommandService.cs)。例如 `write-tae-document`、`write-esd-document`、`write-flver`、`write-tpf-texture-replace`、`write-mtd-document`、`write-gparam` 和 `write-fxr-document` 均有受控入口；调用方仍须提供合法文档身份、操作参数与 main 暂存路径，再经 Patch Engine 提交。它们不表示任意未知结构可重编码。
+
+下面列出的是兼容的一次性 CLI，不是生产能力总表：
 
 ```bash
 dotnet run --project bridge/SoulForge.Bridge -- inspect <file>

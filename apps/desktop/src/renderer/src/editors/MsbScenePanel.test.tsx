@@ -24,12 +24,15 @@ import { describe, it } from 'node:test';
 import { renderToStaticMarkup } from 'react-dom/server';
 import {
   MsbScenePanel,
+  classifyMapUnavailableGeometry,
   filterCollisionDrawItems,
   isCollisionMapModel,
+  isMapReadCancellationResponse,
   isMapMeshUnavailableResponse,
   mapModelLoadPriority,
   mergeMapStaticGeometryChunks,
   orderMapModelLoadGroups,
+  stableMapDiagnosticCodes,
   toMapMeshGeometry
 } from './MsbScenePanel.js';
 
@@ -134,6 +137,33 @@ describe('MAP static geometry chunk 重组', () => {
       diagnostics: [{ severity: 'warning', code: 'MAP_CHARACTER_GEOMETRY_UNAVAILABLE', message: 'skeleton-only' }],
       data: {}
     }), null);
+  });
+
+  it('取消诊断是独立状态，不被归类为 unavailable 或 loader failure', () => {
+    assert.equal(isMapReadCancellationResponse({
+      diagnostics: [{ code: 'MAP_REQUEST_CANCELLED' }]
+    }), true);
+    assert.equal(isMapReadCancellationResponse({
+      diagnostics: [{ code: 'MAP_STATIC_GEOMETRY_COMPLETE' }]
+    }), false);
+  });
+
+  it('逐模型 unavailable telemetry 只投影稳定诊断码与空几何分类', () => {
+    const detail = {
+      diagnostics: [
+        { severity: 'warning', code: 'MAP_CHARACTER_GEOMETRY_UNAVAILABLE', message: 'native path must not escape' },
+        { severity: 'info', code: 'MAP_STATIC_GEOMETRY_COMPLETE', message: 'empty' },
+        { severity: 'info', code: 'not-a-stable-code', message: 'ignored' },
+        { severity: 'info', code: 'MAP_CHARACTER_GEOMETRY_UNAVAILABLE', message: 'duplicate' }
+      ]
+    };
+    assert.deepEqual(stableMapDiagnosticCodes(detail), [
+      'MAP_CHARACTER_GEOMETRY_UNAVAILABLE',
+      'MAP_STATIC_GEOMETRY_COMPLETE'
+    ]);
+    assert.equal(classifyMapUnavailableGeometry(detail), 'skeleton-only');
+    assert.equal(classifyMapUnavailableGeometry({ diagnostics: [{ code: 'MAP_STATIC_GEOMETRY_COMPLETE' }] }), 'empty-geometry');
+    assert.equal(classifyMapUnavailableGeometry({ diagnostics: [{ code: 'MAP_FLVER_NOT_FOUND' }] }), 'unclassified');
   });
 
   it('单 chunk 保留原始几何数据', () => {
@@ -351,6 +381,10 @@ describe('Negative source tests（MAP-50B 五类覆盖）', () => {
     join(repoRoot, 'apps', 'desktop', 'src', 'renderer', 'src', 'editors', 'MsbScenePanel.tsx'),
     'utf8'
   );
+  const preloadSource = readFileSync(
+    join(repoRoot, 'apps', 'desktop', 'src', 'preload', 'index.ts'),
+    'utf8'
+  );
 
   it('问题4-B：footer 整段移除——不出现实时模式/提交按钮/微调输入', () => {
     const html = render();
@@ -411,6 +445,31 @@ describe('Negative source tests（MAP-50B 五类覆盖）', () => {
     // S23 去重：按 modelName 去重后串行拉取，同一 FLVER 只读一次
     assert.match(panelSource, /byModel/);
     assert.match(panelSource, /distinctModels/);
+  });
+
+  it('MAP 读取取消：每个 renderer 请求使用 opaque requestId，迟到响应不发布', () => {
+    assert.match(panelSource, /const activeMapRequestIds = new Set<string>\(\)/);
+    assert.match(panelSource, /const activePageRequestIds = new Set<string>\(\)/);
+    assert.match(panelSource, /const requestId = createMapRequestId\(\);[\s\S]*activePageRequestIds\.add\(requestId\)/);
+    assert.match(panelSource, /cancelMapStaticGeometry/);
+    assert.match(panelSource, /requestId\)/);
+    assert.match(panelSource, /loadSignal\.aborted/);
+    assert.match(panelSource, /isMapReadCancellationResponse/);
+    assert.match(panelSource, /cancelActiveMapRequests\(\)/);
+  });
+
+  it('MAP prepared envelope 上传后释放：选中补载复用可见资源，失败仍可重试', () => {
+    assert.match(panelSource, /loadCache\.markUploaded\(modelName, geometry\)/);
+    assert.match(panelSource, /loadCache\.release\(modelName, geometry\)/);
+    assert.match(panelSource, /if \(loadCache\.isUploaded\(modelName\)\) return Promise\.resolve\(true\)/);
+    assert.match(panelSource, /else if \(loadCache\.isUploaded\(modelName\)\)/);
+    assert.match(panelSource, /if \(loadCache\.isUploaded\(modelName\)\) return;/);
+  });
+
+  it('MAP preload 保留旧四参数调用，同时向新调用追加可序列化 requestId', () => {
+    assert.match(preloadSource, /readMapStaticGeometry:[\s\S]*requestId\?: string/);
+    assert.match(preloadSource, /sessionToken \?\? null,[\s\S]*requestId \?\? null/);
+    assert.match(preloadSource, /cancelMapStaticGeometry:/);
   });
 
   it('左栏对象列表由 scene manifest 派生，renderer 不扫字节、不猜格式', () => {

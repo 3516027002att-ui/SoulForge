@@ -1282,6 +1282,55 @@
         "matbin-format-spec-or-reverse-evidence",
         "confirmed-native-parser"
       ]
+    },
+    {
+      "scopeItemId": "SCOPE-V09-PUBLIC-PREVIEW",
+      "capabilityId": "V09-PUBLIC-PREVIEW",
+      "gateIds": [
+        "REL-H",
+        "REL-COMPLIANCE"
+      ],
+      "subjectKind": "public-preview-release",
+      "scope": "现有功能的 Windows x64 公开预发行：clean 源码 ZIP、启动 EXE 与 native 必需组件；GitHub 自动源码归档排除内部资料，保留简短已知限制并提供必要许可证 notices；NSIS 安装包不在本轮交付",
+      "decisionStatus": "user-approved",
+      "proposedSupport": "supported",
+      "operations": [
+        "build-windows-x64-clean-source-zip",
+        "build-launcher-exe",
+        "include-native-required-components",
+        "publish-github-prerelease",
+        "provide-github-source-archive",
+        "exclude-internal-materials",
+        "include-license-notices",
+        "publish-known-limitations"
+      ],
+      "unsupportedOperations": [
+        "build-windows-x64-nsis-installer-this-round",
+        "claim-v05-gate-completion",
+        "claim-v06-gate-completion",
+        "ship-private-corpus",
+        "ship-oodle-runtime",
+        "ship-credentials",
+        "claim-cross-machine-acceptance",
+        "claim-real-sekiro-game-load",
+        "claim-large-map-foreground-responsiveness",
+        "claim-backend-analysis-error-free-shutdown"
+      ],
+      "authorityAtRuling": "partial",
+      "evidenceRefs": [],
+      "registryRefs": [],
+      "openRulings": [],
+      "nonClaims": [
+        "rulingRef=user-ruling-2026-09-09-v09-public-prerelease-and-clean-source；该裁定只批准本 V0.9 公开预发行边界。",
+        "用户批准的是现有功能的 Windows x64 公开预发行边界，不是 V0.5/V0.6 完成声明，也不改变既有 Gate、scopeItem 或 authority。",
+        "本轮交付仅含 clean 源码 ZIP、启动 EXE/native 必需组件、GitHub 自动源码归档与必要许可证 notices；NSIS 安装包及其安装、升级、卸载验证不在本轮范围，不因未 build installer 形成阻碍。",
+        "V0.9 仍须以实际源码归档完整性、启动路径、内部文件排除、产物哈希、许可证 notice inventory 与自动源码归档扫描结果为准；当前用户机器上的 typecheck、workspace 回归与构建成功不替代干净机、跨机或真实 Sekiro 会话验收。",
+        "已知限制须在发布说明中保留：部分 backend analysis 退出问题、large-map 前台响应性尚未验证、跨机/真实游戏接受不完整；不得把这些限制写成已通过。"
+      ],
+      "targetRelease": "V0.9",
+      "deferredToRelease": null,
+      "deferredTrack": null,
+      "resumeRequires": []
     }
   ]
 }

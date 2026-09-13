@@ -30,17 +30,45 @@ export interface BridgeDaemonRequestOptions<T = unknown> {
   timeoutMs: number;
   onProgress?: (payload: T) => void | Promise<void>;
   signal?: AbortSignal;
+  /**
+   * Optional request-local receipt for a daemon terminal frame that arrives
+   * after this request was locally aborted or timed out.  The callback only
+   * receives a redacted transport receipt; the main request promise keeps its
+   * existing immediate rejection semantics.
+   */
+  onCancellationTerminal?: (receipt: BridgeCancellationTerminalReceipt) => void | Promise<void>;
 }
+
+export interface BridgeCancellationTerminalReceipt {
+  requestId: string;
+  outcome: 'result' | 'failed' | 'cancelled';
+  receivedAt: string;
+  /** True when caller/client cancellation was requested (abort or timeout); not proof a cancel frame reached the daemon. */
+  cancelRequested: boolean;
+}
+
+const MAX_CANCELLATION_TERMINAL_OBSERVERS = 64;
+// Native cancellation may only become observable after a long synchronous
+// section; keep the receipt window finite without making a ref'ed timer.
+const CANCELLATION_TERMINAL_OBSERVER_MAX_TTL_MS = 30_000;
 
 interface PendingRequest {
   terminalKinds: Set<string>;
   resolve: (frame: BridgeDaemonFrame<unknown>) => void;
   reject: (error: Error) => void;
   onProgress?: (payload: unknown) => void | Promise<void>;
+  onCancellationTerminal?: (receipt: BridgeCancellationTerminalReceipt) => void | Promise<void>;
   progressChain: Promise<void>;
   terminalFrame?: BridgeDaemonFrame<unknown>;
   timer?: ReturnType<typeof setTimeout>;
   abortCleanup?: () => void;
+  requestFrameDispatched: boolean;
+}
+
+interface CancellationTerminalObserver {
+  onTerminal: (receipt: BridgeCancellationTerminalReceipt) => void | Promise<void>;
+  cancelRequested: boolean;
+  timer?: ReturnType<typeof setTimeout>;
 }
 
 export class BridgeDaemonError extends Error {
@@ -56,6 +84,7 @@ export class BridgeDaemonError extends Error {
 export class BridgeDaemonClient {
   private readonly child: ChildProcessWithoutNullStreams;
   private readonly pending = new Map<string, PendingRequest>();
+  private readonly cancellationTerminalObservers = new Map<string, CancellationTerminalObserver>();
   private stdoutBuffer = '';
   /** stdoutBuffer 的 UTF-8 字节数，增量维护，避免每 chunk 重算。 */
   private stdoutBufferBytes = 0;
@@ -155,7 +184,8 @@ export class BridgeDaemonClient {
       options.timeoutMs,
       options.resourceUri,
       options.onProgress as ((payload: unknown) => void | Promise<void>) | undefined,
-      options.signal
+      options.signal,
+      options.onCancellationTerminal
     );
     if (frame.kind === 'failed') throw failureFromFrame(frame);
     if (frame.kind === 'cancelled') {
@@ -205,7 +235,8 @@ export class BridgeDaemonClient {
     timeoutMs: number,
     resourceUri?: string,
     onProgress?: (payload: unknown) => void | Promise<void>,
-    signal?: AbortSignal
+    signal?: AbortSignal,
+    onCancellationTerminal?: (receipt: BridgeCancellationTerminalReceipt) => void | Promise<void>
   ): Promise<BridgeDaemonFrame<unknown>> {
     if (this.closed) throw new BridgeDaemonError('BRIDGE_CLIENT_CLOSED', 'Bridge client is closed.');
     if (signal?.aborted) {
@@ -214,7 +245,14 @@ export class BridgeDaemonClient {
     this.retain();
     try {
       return await this.sendAndWaitInner(
-        kind, payload, terminalKinds, timeoutMs, resourceUri, onProgress, signal
+        kind,
+        payload,
+        terminalKinds,
+        timeoutMs,
+        resourceUri,
+        onProgress,
+        signal,
+        onCancellationTerminal
       );
     } finally {
       this.release();
@@ -261,7 +299,8 @@ export class BridgeDaemonClient {
     timeoutMs: number,
     resourceUri?: string,
     onProgress?: (payload: unknown) => void | Promise<void>,
-    signal?: AbortSignal
+    signal?: AbortSignal,
+    onCancellationTerminal?: (receipt: BridgeCancellationTerminalReceipt) => void | Promise<void>
   ): Promise<BridgeDaemonFrame<unknown>> {
     const requestId = randomUUID();
     const deadlineUtc = new Date(Date.now() + timeoutMs).toISOString();
@@ -273,14 +312,22 @@ export class BridgeDaemonClient {
         resolve,
         reject,
         progressChain: Promise.resolve(),
-        ...(onProgress ? { onProgress } : {})
+        requestFrameDispatched: false,
+        ...(onProgress ? { onProgress } : {}),
+        ...(onCancellationTerminal ? { onCancellationTerminal } : {})
       };
       registeredPending = pending;
       pending.timer = setTimeout(() => {
+        if (this.pending.get(requestId) !== pending) return;
         this.pending.delete(requestId);
         pending.abortCleanup?.();
         writeController.abort('timeout');
-        void this.sendCancel(requestId);
+        if (pending.terminalFrame !== undefined) {
+          this.invokeCancellationTerminalObserver(pending.terminalFrame, pending, true);
+        } else {
+          this.registerCancellationTerminalObserver(requestId, pending, true);
+          void this.sendCancel(requestId);
+        }
         reject(new BridgeDaemonError(
           'BRIDGE_TIMEOUT',
           `Bridge request timed out after ${timeoutMs}ms.`,
@@ -289,10 +336,18 @@ export class BridgeDaemonClient {
       }, timeoutMs);
       if (signal) {
         const onAbort = () => {
+          const requestFrameDispatched = pending.requestFrameDispatched;
           this.pending.delete(requestId);
           if (pending.timer) clearTimeout(pending.timer);
           writeController.abort('cancelled');
-          void this.sendCancel(requestId);
+          if (pending.terminalFrame !== undefined) {
+            this.invokeCancellationTerminalObserver(pending.terminalFrame, pending, true);
+          } else if (requestFrameDispatched) {
+            this.registerCancellationTerminalObserver(requestId, pending, true);
+            void this.sendCancel(requestId);
+          } else {
+            void this.sendCancel(requestId);
+          }
           reject(new BridgeDaemonError('BRIDGE_REQUEST_CANCELLED', 'Bridge request was cancelled.', true));
         };
         if (signal.aborted) onAbort();
@@ -319,6 +374,11 @@ export class BridgeDaemonClient {
         ...(resourceUri ? { resourceUri } : {}),
         payload
       }, writeController.signal);
+      // A write that is still backpressured when cancellation fires is not
+      // strong enough evidence that the daemon received the request.  Keep
+      // that conservative case receipt-free rather than fabricating native
+      // observation; only a completed frame write is dispatch evidence.
+      registeredPending.requestFrameDispatched = true;
     } catch (error) {
       const pending = this.pending.get(requestId);
       if (pending !== undefined && pending === registeredPending) {
@@ -457,7 +517,10 @@ export class BridgeDaemonClient {
       && frame.workspaceSessionId !== this.options.workspaceSessionId) return;
     if (!frame.requestId) return;
     const pending = this.pending.get(frame.requestId);
-    if (!pending) return;
+    if (!pending) {
+      this.observeCancellationTerminal(frame);
+      return;
+    }
     if (frame.kind === 'progress') {
       if (pending.terminalFrame !== undefined || pending.onProgress === undefined) return;
       const onProgress = pending.onProgress;
@@ -474,6 +537,75 @@ export class BridgeDaemonClient {
       () => this.resolvePending(frame.requestId!, pending, frame),
       () => this.failProgressHandler(frame.requestId!, pending)
     );
+  }
+
+  private registerCancellationTerminalObserver(
+    requestId: string,
+    pending: PendingRequest,
+    cancelRequested: boolean
+  ): void {
+    if (!pending.onCancellationTerminal || !pending.requestFrameDispatched) return;
+    if (this.cancellationTerminalObservers.size >= MAX_CANCELLATION_TERMINAL_OBSERVERS) return;
+
+    const observer: CancellationTerminalObserver = {
+      onTerminal: pending.onCancellationTerminal,
+      cancelRequested
+    };
+    observer.timer = setTimeout(() => {
+      if (this.cancellationTerminalObservers.get(requestId) !== observer) return;
+      this.cancellationTerminalObservers.delete(requestId);
+    }, CANCELLATION_TERMINAL_OBSERVER_MAX_TTL_MS);
+    const timerWithUnref = observer.timer as ReturnType<typeof setTimeout> & { unref?: () => void };
+    timerWithUnref.unref?.();
+    this.cancellationTerminalObservers.set(requestId, observer);
+  }
+
+  private observeCancellationTerminal(frame: BridgeDaemonFrame<unknown>): void {
+    // Normal pending requests preserve the historical leniency for fixture
+    // frames without a workspace session id.  A late receipt is stronger
+    // evidence, so it must carry the exact session identity.
+    if (frame.workspaceSessionId !== this.options.workspaceSessionId) return;
+    if (frame.kind !== 'result' && frame.kind !== 'failed' && frame.kind !== 'cancelled') return;
+    if (!frame.requestId) return;
+    const observer = this.cancellationTerminalObservers.get(frame.requestId);
+    if (!observer) return;
+    this.cancellationTerminalObservers.delete(frame.requestId);
+    if (observer.timer) clearTimeout(observer.timer);
+    this.invokeCancellationTerminalObserver(frame, observer);
+  }
+
+  private invokeCancellationTerminalObserver(
+    frame: BridgeDaemonFrame<unknown>,
+    pending: PendingRequest | CancellationTerminalObserver,
+    cancelRequested?: boolean
+  ): void {
+    if (frame.workspaceSessionId !== this.options.workspaceSessionId) return;
+    if (frame.kind !== 'result' && frame.kind !== 'failed' && frame.kind !== 'cancelled') return;
+    if (!frame.requestId) return;
+    const onTerminal = 'onTerminal' in pending
+      ? pending.onTerminal
+      : pending.onCancellationTerminal;
+    if (!onTerminal) return;
+    const receipt: BridgeCancellationTerminalReceipt = {
+      requestId: frame.requestId,
+      outcome: frame.kind,
+      receivedAt: new Date().toISOString(),
+      cancelRequested: cancelRequested ?? (
+        'cancelRequested' in pending ? pending.cancelRequested : false
+      )
+    };
+    try {
+      void Promise.resolve(onTerminal(receipt)).catch(() => undefined);
+    } catch {
+      // A receipt observer is diagnostic-only and must never affect transport.
+    }
+  }
+
+  private clearCancellationTerminalObservers(): void {
+    for (const observer of this.cancellationTerminalObservers.values()) {
+      if (observer.timer) clearTimeout(observer.timer);
+    }
+    this.cancellationTerminalObservers.clear();
   }
 
   private resolvePending(
@@ -501,7 +633,7 @@ export class BridgeDaemonClient {
   }
 
   private failAll(error: Error): void {
-    if (this.closed && this.pending.size === 0) return;
+    if (this.closed && this.pending.size === 0 && this.cancellationTerminalObservers.size === 0) return;
     this.closed = true;
     for (const pending of this.pending.values()) {
       if (pending.timer) clearTimeout(pending.timer);
@@ -509,6 +641,7 @@ export class BridgeDaemonClient {
       pending.reject(error);
     }
     this.pending.clear();
+    this.clearCancellationTerminalObservers();
   }
 }
 

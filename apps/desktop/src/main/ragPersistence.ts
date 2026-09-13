@@ -1,5 +1,10 @@
 import type { RagChunk, RagCorpus, ReferenceEdge } from '@soulforge/shared';
-import { diffRagCorpusBySource, sameRagReferences } from '@soulforge/core';
+import {
+  diffRagCorpusBySource,
+  isRagChunkDeltaStats,
+  sameRagReferences,
+  type RagChunkDeltaStats
+} from '@soulforge/core';
 import {
   measureSemanticRefreshStage,
   measureSemanticRefreshStageSync,
@@ -13,7 +18,7 @@ interface RagDeltaStore {
     sourceUri: string;
     upserts: RagChunk[];
     deletedChunkIds: string[];
-  }): Promise<void>;
+  }): Promise<RagChunkDeltaStats | null>;
   replaceReferences(references: ReferenceEdge[]): Promise<void>;
 }
 
@@ -47,9 +52,10 @@ export async function persistRagCorpusBySourceDelta(
         deletedChunkIds
       });
       if (telemetry) {
-        await measureSemanticRefreshStage(telemetry, 'persistBatch', persist, () => ({
+        await measureSemanticRefreshStage(telemetry, 'persistBatch', persist, (stats) => ({
           batchCount: 1,
-          deletedChunks: deletedChunkIds.length
+          deletedChunks: deletedChunkIds.length,
+          ...(isRagChunkDeltaStats(stats) ? stats : { ragStatsUnavailable: true })
         }));
       } else {
         await persist();
@@ -64,9 +70,10 @@ export async function persistRagCorpusBySourceDelta(
         deletedChunkIds: []
       });
       if (telemetry) {
-        await measureSemanticRefreshStage(telemetry, 'persistBatch', persist, () => ({
+        await measureSemanticRefreshStage(telemetry, 'persistBatch', persist, (stats) => ({
           batchCount: 1,
-          upsertChunks: upserts.length
+          upsertChunks: upserts.length,
+          ...(isRagChunkDeltaStats(stats) ? stats : { ragStatsUnavailable: true })
         }));
       } else {
         await persist();

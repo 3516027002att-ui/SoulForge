@@ -31,8 +31,11 @@ import {
   assertAgentProductionBuildFresh
 } from './agent-production-build-lib.mjs';
 import {
+  decideScratchCleanup,
   evaluateGoalCoverage,
+  evaluateRollbackVerification,
   planSemanticCorpus,
+  rollbackCommittedOperations,
   safeHarnessFileLabel,
   SEMANTIC_CORPUS_KINDS,
   waitForSemanticReadiness
@@ -396,6 +399,15 @@ function diffTrees(before, after) {
   const right = new Map(after.entries.map((entry) => [entry.path, JSON.stringify(entry)]));
   const paths = [...new Set([...left.keys(), ...right.keys()])].sort((a, b) => a.localeCompare(b, 'en'));
   return paths.filter((path) => left.get(path) !== right.get(path)).slice(0, 100);
+}
+
+function summarizeTree(tree) {
+  if (!tree) return null;
+  return {
+    sha256: tree.sha256,
+    fileCount: tree.fileCount,
+    totalBytes: tree.totalBytes
+  };
 }
 
 function isWithin(base, target) {
@@ -1113,6 +1125,14 @@ async function run() {
   let electronOwnership = null;
   let cleanupResult = { status: 'pending', reason: 'cleanup-not-started' };
   let rollbackResult = { status: 'unverified', attempted: false, reason: 'run-did-not-reach-rollback' };
+  let operationsBefore = null;
+  let operationsAfterRun = null;
+  let operationsAfterRollback = null;
+  let newCommittedOperations = [];
+  let rollbackResults = [];
+  let treeBefore = null;
+  let treeAfterRun = null;
+  let treeAfterRollback = null;
   const pageErrors = [];
   const consoleErrors = [];
   const electronDiagnostics = {
@@ -1135,7 +1155,7 @@ async function run() {
   await mkdir(reportDir, { recursive: true });
   try {
     corpusManifest = await copySemanticWorkspace(overlayRoot);
-    const treeBefore = await snapshotTree(overlayRoot);
+    treeBefore = await snapshotTree(overlayRoot);
     await mkdir(userDataDir, { recursive: true });
     await mkdir(taskRecordDir, { recursive: true });
 
@@ -1261,7 +1281,7 @@ async function run() {
     }
 
     phase = 'baseline-operations';
-    const operationsBefore = await window.evaluate(() => globalThis.soulforge.listOperations());
+    operationsBefore = await window.evaluate(() => globalThis.soulforge.listOperations());
     await window.evaluate(() => {
       globalThis.__sfAgentHarnessEvents = [];
       globalThis.__sfAgentHarnessUnsubscribe?.();
@@ -1318,12 +1338,12 @@ async function run() {
 
     phase = 'verify-native-goals';
     const nativeGoals = await verifyGoalsThroughNativeTool(window, goals);
-    const operationsAfterRun = await window.evaluate(() => globalThis.soulforge.listOperations());
+    operationsAfterRun = await window.evaluate(() => globalThis.soulforge.listOperations());
     const priorOperationIds = new Set(operationsBefore.map((operation) => operation.opId));
-    const newCommittedOperations = operationsAfterRun.filter((operation) => (
+    newCommittedOperations = operationsAfterRun.filter((operation) => (
       operation.status === 'committed' && !priorOperationIds.has(operation.opId)
     ));
-    const treeAfterRun = await snapshotTree(overlayRoot);
+    treeAfterRun = await snapshotTree(overlayRoot);
 
     phase = 'copy-durable-evidence';
     const rolloutSource = resolveWithin(join(userDataDir, 'agent'), terminal.rolloutFileName, 'ROLLOUT_PATH_FORBIDDEN');
@@ -1340,16 +1360,72 @@ async function run() {
     const evidenceHasEntries = /^##\s+\S+/mu.test(taskRecordRaw);
 
     phase = 'rollback';
-    const rollbackResults = [];
-    for (const operation of [...newCommittedOperations].reverse()) {
-      const result = await window.evaluate((opId) => globalThis.soulforge.rollbackOperation(opId), operation.opId);
-      rollbackResults.push({ opId: operation.opId, result });
+    const attemptedOperationIds = [];
+    rollbackResult = {
+      status: 'unverified',
+      attempted: false,
+      committedOperationCount: newCommittedOperations.length,
+      reason: newCommittedOperations.length > 0 ? 'rollback-in-progress' : 'no-committed-operations-awaiting-verification',
+      evidence: {
+        committedOperationIds: newCommittedOperations.map((operation) => operation.opId),
+        attemptedOperationIds,
+        treeBeforeSha256: treeBefore.sha256,
+        treeAfterRunSha256: treeAfterRun.sha256,
+        rollbackResults: []
+      }
+    };
+    rollbackResults = await rollbackCommittedOperations(
+      newCommittedOperations,
+      (opId) => {
+        attemptedOperationIds.push(opId);
+        rollbackResult = {
+          ...rollbackResult,
+          attempted: true,
+          evidence: {
+            ...rollbackResult.evidence,
+            attemptedOperationIds: [...attemptedOperationIds]
+          }
+        };
+        return window.evaluate((operationId) => globalThis.soulforge.rollbackOperation(operationId), opId);
+      }
+    );
+    const rollbackThrown = rollbackResults.some((entry) => entry.error);
+    const failedRollback = rollbackResults.find((entry) => entry.error) ?? null;
+    rollbackResult = {
+      ...rollbackResult,
+      reason: rollbackThrown
+        ? 'rollback-operation-threw'
+        : newCommittedOperations.length > 0
+          ? 'rollback-results-collected-awaiting-verification'
+          : rollbackResult.reason,
+      ...(failedRollback ? {
+        failedOperationId: failedRollback.opId,
+        rollbackError: failedRollback.error
+      } : {}),
+      evidence: {
+        ...rollbackResult.evidence,
+        rollbackResults
+      }
+    };
+    let rollbackStatuses = new Map();
+    let workspaceAnalysis = null;
+    // A thrown inverse is indeterminate. Do not enqueue more database work
+    // that can mask the failed operation; the catch report already contains
+    // the committed IDs, attempted IDs and completed/failed results.
+    if (!rollbackThrown) {
+      operationsAfterRollback = await window.evaluate(() => globalThis.soulforge.listOperations());
+      treeAfterRollback = await snapshotTree(overlayRoot);
+      rollbackStatuses = new Map(operationsAfterRollback.map((operation) => [operation.opId, operation.status]));
+      workspaceAnalysis = await window.evaluate(() => globalThis.__sfAgentHarnessAnalysis ?? null);
     }
-    const operationsAfterRollback = await window.evaluate(() => globalThis.soulforge.listOperations());
-    const treeAfterRollback = await snapshotTree(overlayRoot);
-    const rollbackStatuses = new Map(operationsAfterRollback.map((operation) => [operation.opId, operation.status]));
-    const workspaceAnalysis = await window.evaluate(() => globalThis.__sfAgentHarnessAnalysis ?? null);
 
+    const treeRestoredExactly = Boolean(treeAfterRollback && treeAfterRollback.sha256 === treeBefore.sha256);
+    const rollbackVerification = evaluateRollbackVerification({
+      operations: newCommittedOperations,
+      results: rollbackResults,
+      statuses: rollbackStatuses,
+      treeRestoredExactly
+    });
     const lifecycleOk = terminal.type === 'session-done'
       && terminal.finishReason === 'stop'
       && durableRollout.terminal?.finishReason === 'stop'
@@ -1359,10 +1435,8 @@ async function run() {
     const committedOperationOk = newCommittedOperations.length > 0;
     const writeObserved = treeAfterRun.sha256 !== treeBefore.sha256;
     const treeUnchangedBeforeRollback = treeAfterRun.sha256 === treeBefore.sha256;
-    const rollbackOperationsOk = rollbackResults.length === newCommittedOperations.length
-      && rollbackResults.every((entry) => entry.result?.ok === true)
-      && newCommittedOperations.every((operation) => rollbackStatuses.get(operation.opId) === 'rolled_back');
-    const rollbackOk = newCommittedOperations.length > 0 && rollbackOperationsOk;
+    const rollbackOperationsOk = !rollbackThrown && rollbackVerification.verified;
+    const rollbackOk = rollbackOperationsOk;
     const rollbackNoMutationEvidence = {
       committedOperationCount: newCommittedOperations.length,
       operationDeltaObserved: operationsAfterRun.some((operation) => (
@@ -1370,32 +1444,48 @@ async function run() {
       )),
       treeBeforeSha256: treeBefore.sha256,
       treeAfterRunSha256: treeAfterRun.sha256,
-      treeUnchanged: treeUnchangedBeforeRollback
+      treeAfterRollbackSha256: treeAfterRollback?.sha256 ?? null,
+      treeUnchanged: treeUnchangedBeforeRollback,
+      treeRestoredExactly
     };
-    rollbackResult = newCommittedOperations.length === 0
-      ? {
-          status: treeUnchangedBeforeRollback ? 'not_applicable' : 'unverified',
-          attempted: false,
-          committedOperationCount: 0,
-          reason: treeUnchangedBeforeRollback
-            ? 'no-committed-operations-and-overlay-unchanged'
-            : 'no-committed-operations-but-overlay-changed',
-          evidence: rollbackNoMutationEvidence
-        }
-      : {
-          status: rollbackOk ? 'verified' : 'unverified',
-          attempted: rollbackResults.length > 0,
-          committedOperationCount: newCommittedOperations.length,
-          reason: rollbackOk ? 'all-committed-operations-rolled-back' : 'rollback-check-failed',
-          evidence: {
-            committedOperationIds: newCommittedOperations.map((operation) => operation.opId),
-            rollbackStatuses: Object.fromEntries(newCommittedOperations.map((operation) => [
-              operation.opId,
-              rollbackStatuses.get(operation.opId) ?? null
-            ]))
+    if (!rollbackThrown) {
+      const noMutationVerified = newCommittedOperations.length === 0
+        && treeUnchangedBeforeRollback
+        && treeRestoredExactly;
+      rollbackResult = newCommittedOperations.length === 0
+        ? {
+            status: noMutationVerified ? 'not_applicable' : 'unverified',
+            attempted: false,
+            committedOperationCount: 0,
+            reason: noMutationVerified
+              ? 'no-committed-operations-and-overlay-unchanged'
+              : treeUnchangedBeforeRollback
+                ? 'no-committed-operations-but-tree-not-restored'
+                : 'no-committed-operations-but-overlay-changed',
+            evidence: rollbackNoMutationEvidence
           }
-        };
-    const treeRestoredExactly = treeAfterRollback.sha256 === treeBefore.sha256;
+        : {
+            status: rollbackOk ? 'verified' : 'unverified',
+            attempted: rollbackResults.some((entry) => entry.attempted === true),
+            committedOperationCount: newCommittedOperations.length,
+            reason: rollbackOk ? 'all-committed-operations-rolled-back' : 'rollback-check-failed',
+            evidence: {
+              committedOperationIds: newCommittedOperations.map((operation) => operation.opId),
+              attemptedOperationIds: rollbackResults
+                .filter((entry) => entry.attempted === true)
+                .map((entry) => entry.opId),
+              rollbackStatuses: Object.fromEntries(newCommittedOperations.map((operation) => [
+                operation.opId,
+                rollbackStatuses.get(operation.opId) ?? null
+              ])),
+              treeBeforeSha256: treeBefore.sha256,
+              treeAfterRunSha256: treeAfterRun.sha256,
+              treeAfterRollbackSha256: treeAfterRollback?.sha256 ?? null,
+              treeRestoredExactly,
+              rollbackResults
+            }
+          };
+    }
     const durableEvidenceOk = durableRollout.parseErrors === 0
       && durableRollout.terminal !== null
       && evidenceHasEntries;
@@ -1453,11 +1543,11 @@ async function run() {
         sourceModRoot: portablePath(relative(REPO_ROOT, MOD_ROOT)),
         semanticKinds: corpusManifest.copiedKinds,
         corpusManifest,
-        before: { sha256: treeBefore.sha256, fileCount: treeBefore.fileCount, totalBytes: treeBefore.totalBytes },
-        afterRun: { sha256: treeAfterRun.sha256, fileCount: treeAfterRun.fileCount, totalBytes: treeAfterRun.totalBytes },
-        afterRollback: { sha256: treeAfterRollback.sha256, fileCount: treeAfterRollback.fileCount, totalBytes: treeAfterRollback.totalBytes },
+        before: summarizeTree(treeBefore),
+        afterRun: summarizeTree(treeAfterRun),
+        afterRollback: summarizeTree(treeAfterRollback),
         changedAfterRun: diffTrees(treeBefore, treeAfterRun),
-        residualAfterRollback: diffTrees(treeBefore, treeAfterRollback)
+        residualAfterRollback: treeAfterRollback ? diffTrees(treeBefore, treeAfterRollback) : null
       },
       session: {
         sessionId,
@@ -1564,6 +1654,27 @@ async function run() {
       }),
       interruptedEvidence,
       electronDiagnostics,
+      isolatedWorkspace: {
+        sourceModRoot: portablePath(relative(REPO_ROOT, MOD_ROOT)),
+        scratchRoot: portablePath(scratchRoot),
+        overlayRoot: portablePath(overlayRoot),
+        userDataDir: portablePath(userDataDir),
+        taskRecordDir: portablePath(taskRecordDir),
+        semanticKinds: corpusManifest?.copiedKinds ?? [],
+        corpusManifest,
+        before: summarizeTree(treeBefore),
+        afterRun: summarizeTree(treeAfterRun),
+        afterRollback: summarizeTree(treeAfterRollback),
+        changedAfterRun: treeBefore && treeAfterRun ? diffTrees(treeBefore, treeAfterRun) : null,
+        residualAfterRollback: treeBefore && treeAfterRollback ? diffTrees(treeBefore, treeAfterRollback) : null
+      },
+      operations: {
+        before: operationsBefore,
+        afterRun: operationsAfterRun,
+        newCommitted: newCommittedOperations,
+        rollbackResults,
+        afterRollback: operationsAfterRollback
+      },
       error: {
         code: error?.code ?? 'REAL_AGENT_HARNESS_FAILED',
         message: error instanceof Error ? error.message : String(error),
@@ -1586,7 +1697,8 @@ async function run() {
         sleep(CLEANUP_EVALUATE_TIMEOUT_MS)
       ]).catch(() => undefined);
     }
-    const allowOwnedTreeKill = ['verified', 'not_applicable'].includes(report?.rollback?.status);
+    const rollbackStatus = report?.rollback?.status ?? rollbackResult.status;
+    const allowOwnedTreeKill = ['verified', 'not_applicable'].includes(rollbackStatus);
     let electronCleanup;
     let scratchCleanup;
     try {
@@ -1596,19 +1708,27 @@ async function run() {
         ownership: electronOwnership,
         allowOwnedTreeKill
       });
-      const canRemoveScratch = electronCleanup.status === 'succeeded'
-        || electronCleanup.status === 'not-started';
-      scratchCleanup = canRemoveScratch
+      const scratchDecision = decideScratchCleanup({
+        electronStatus: electronCleanup.status,
+        rollbackStatus
+      });
+      scratchCleanup = scratchDecision.remove
         ? await removeScratchRoot(scratchRoot)
         : {
             status: 'preserved',
             path: portablePath(scratchRoot),
-            reason: 'ELECTRON_TREE_NOT_CONFIRMED_EXITED'
+            reason: scratchDecision.reason,
+            rollbackStatus,
+            electronStatus: electronCleanup.status
           };
+      const cleanupStatus = electronCleanup.status === 'succeeded' && scratchCleanup.status === 'succeeded'
+        ? 'succeeded'
+        : scratchCleanup.status === 'preserved'
+          && (electronCleanup.status === 'succeeded' || electronCleanup.status === 'not-started')
+          ? 'preserved'
+          : 'failed';
       cleanupResult = {
-        status: electronCleanup.status === 'succeeded' && scratchCleanup.status === 'succeeded'
-          ? 'succeeded'
-          : 'failed',
+        status: cleanupStatus,
         allowOwnedTreeKill,
         electron: electronCleanup,
         scratch: scratchCleanup

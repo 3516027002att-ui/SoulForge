@@ -444,8 +444,24 @@ const api = {
   readMapPartMesh: (msbSourceUri: string, modelName: string): Promise<unknown> =>
     ipcRenderer.invoke('resource.readMapPartMesh', msbSourceUri, modelName),
   // 24.10 D-2：流式静态几何（chunked, cursor opaque with daemon/owner/sourceHash/resourceCacheKey, wire bytes budget 8 MiB）
-  readMapStaticGeometry: (msbSourceUri: string, modelName: string, cursor?: string | null, sessionToken?: string | null): Promise<unknown> =>
-    ipcRenderer.invoke('resource.readMapStaticGeometry', msbSourceUri, modelName, cursor ?? null, sessionToken ?? null),
+  // requestId is an opaque, renderer-serializable handle. AbortController stays in main.
+  readMapStaticGeometry: (
+    msbSourceUri: string,
+    modelName: string,
+    cursor?: string | null,
+    sessionToken?: string | null,
+    requestId?: string
+  ): Promise<unknown> =>
+    ipcRenderer.invoke(
+      'resource.readMapStaticGeometry',
+      msbSourceUri,
+      modelName,
+      cursor ?? null,
+      sessionToken ?? null,
+      requestId ?? null
+    ),
+  cancelMapStaticGeometry: (requestId: string): Promise<MapReadCancellationResult> =>
+    ipcRenderer.invoke('resource.cancelMapStaticGeometry', requestId),
   readEsdDocument: (sourceUri: string): Promise<unknown> =>
     ipcRenderer.invoke('resource.readEsdDocument', sourceUri),
   readMtdDocument: (sourceUri: string): Promise<unknown> =>
@@ -1088,3 +1104,11 @@ const api = {
 contextBridge.exposeInMainWorld('soulforge', api);
 
 export type SoulForgeApi = typeof api;
+
+export interface MapReadCancellationResult {
+  ok: boolean;
+  cancelled?: boolean;
+  status?: 'cancelled' | 'already-cancelled' | 'not-found';
+  requestId?: string;
+  diagnostics?: Array<{ severity?: string; code?: string; message?: string; details?: unknown }>;
+}

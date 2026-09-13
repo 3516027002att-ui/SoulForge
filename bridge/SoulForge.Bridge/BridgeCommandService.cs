@@ -26,7 +26,8 @@ internal sealed class BridgeCommandService
         string? outputPath = null,
         IReadOnlyList<string>? allowedRoots = null,
         string? workspaceSessionId = null,
-        MapTimingCollector? mapTiming = null)
+        MapTimingCollector? mapTiming = null,
+        CharacterTimingCollector? characterTiming = null)
     {
         var command = rawCommand.Trim().ToLowerInvariant();
 
@@ -1787,28 +1788,44 @@ internal sealed class BridgeCommandService
                 // enumerate and parse each entry once rather than restarting the Bridge per mesh.
                 var maxVertices = OptionInt("maxVertices", 1_000_000);
                 var maxIndices = OptionInt("maxIndices", 3_000_000);
-                var leaves = NativeLeafPayload.ResolveAll(file, oodleRuntimeRoot, ".flver");
+                IReadOnlyList<NativeLeafEntry> leaves;
+                using (characterTiming?.Measure("resolveFlverLeavesMs"))
+                {
+                    leaves = NativeLeafPayload.ResolveAll(file, oodleRuntimeRoot, ".flver");
+                }
                 // FLVER 的材质 MTD 是纹理包身份的原生线索。不能只按 chrbnd
                 // basename 猜同名 texbnd：c5400 的 FLVER 明确引用 c5409_* MTD，
                 // 对应的真实纹理包就是 chr/c5409.texbnd.dcx。
-                var flverSources = leaves
-                    .Select(leaf => (Leaf: leaf, Document: FlverNativeDocument.Read(leaf.Payload)))
-                    .ToArray();
+                IReadOnlyList<(NativeLeafEntry Leaf, FlverNativeDocument Document)> flverSources;
+                using (characterTiming?.Measure("flverReadMs"))
+                {
+                    flverSources = leaves
+                        .Select(leaf => (Leaf: leaf, Document: FlverNativeDocument.Read(leaf.Payload)))
+                        .ToArray();
+                }
                 var texturePackagePaths = OptionPaths("texturePackagePaths", 8);
-                var textureLeaves = ResolveCharacterTextureLeaves(
-                    file,
-                    oodleRuntimeRoot,
-                    allowedRoots,
-                    texturePackagePaths,
-                    flverSources.Select(source => source.Document).ToArray());
+                IReadOnlyList<NativeLeafEntry> textureLeaves;
+                using (characterTiming?.Measure("texturePackageResolveMs"))
+                {
+                    textureLeaves = ResolveCharacterTextureLeaves(
+                        file,
+                        oodleRuntimeRoot,
+                        allowedRoots,
+                        texturePackagePaths,
+                        flverSources.Select(source => source.Document).ToArray());
+                }
                 // Compatibility assembly may provide an explicitly verified
                 // projection source for a native decal material. It is exact
                 // basename lookup only; ordinary FLVER material resolution
                 // remains native-identity gated.
                 var compatibilityProjectionTextureName = OptionString("compatibilityProjectionTextureName", string.Empty);
-                var compatibilityProjection = CharacterTexturePreviewService.ResolveExact(
-                    textureLeaves,
-                    compatibilityProjectionTextureName);
+                CharacterTexturePreview? compatibilityProjection;
+                using (characterTiming?.Measure("texturePreviewMs"))
+                {
+                    compatibilityProjection = CharacterTexturePreviewService.ResolveExact(
+                        textureLeaves,
+                        compatibilityProjectionTextureName);
+                }
                 var models = new List<object>(leaves.Count);
                 var diagnostics = new List<Diagnostic>();
                 var totalMeshes = 0;
@@ -1821,62 +1838,71 @@ internal sealed class BridgeCommandService
                     cancellationToken.ThrowIfCancellationRequested();
                     var leaf = source.Leaf;
                     var flver = source.Document;
-                    var textureBindings = CharacterTexturePreviewService.ResolveAll(
-                        flver,
-                        leaf.Name,
-                        textureLeaves,
-                        oodleRuntimeRoot,
-                        allowedRoots);
+                    IReadOnlyList<CharacterTexturePreviewBinding> textureBindings;
+                    using (characterTiming?.Measure("texturePreviewMs"))
+                    {
+                        textureBindings = CharacterTexturePreviewService.ResolveAll(
+                            flver,
+                            leaf.Name,
+                            textureLeaves,
+                            oodleRuntimeRoot,
+                            allowedRoots);
+                    }
                     // Material identity is resolved from the bounded native
                     // MTD4 catalog before any render-mode decision. A basename
                     // containing "decal" is only a locating token; it is not
                     // shader authority.
-                    var nativeMeshDecalMaterialIndices = flver.Materials
-                        .Where(material => NativeMtdTextureLocator.HasNativeMeshDecalSemantics(
-                            material.MtdPath,
-                            oodleRuntimeRoot,
-                            allowedRoots))
-                        .Select(material => material.Index)
-                        .ToHashSet();
-                    // A native projected-decal still cannot be rendered by the
-                    // generic Three shader, but a material-local albedo is a
-                    // source-backed compatibility input when the same FLVER
-                    // material resolves it exactly from its MTD/TPF identity.
-                    // Do not reuse one explicit assembly texture for every
-                    // projected material: the native material index wins.
+                    HashSet<int> nativeMeshDecalMaterialIndices;
                     var nativeProjectionByMaterial = new Dictionary<int, CharacterTexturePreview>();
-                    foreach (var binding in textureBindings)
+                    object[] nativeProjectedMaterialSemantics;
+                    using (characterTiming?.Measure("materialResolveMs"))
                     {
-                        if (binding.MaterialIndex >= 0
-                            && binding.MaterialIndex < flver.Materials.Count
-                            && ResolveFlverPreviewRenderMode(flver, binding.MaterialIndex, nativeMeshDecalMaterialIndices) == "projected-decal")
-                        {
-                            nativeProjectionByMaterial[binding.MaterialIndex] = binding.Preview;
-                        }
-                    }
-                    var nativeProjectedMaterialSemantics = flver.Materials
-                        .Where(material => ResolveFlverPreviewRenderMode(flver, material.Index, nativeMeshDecalMaterialIndices) == "projected-decal")
-                        .Select(material => new
-                        {
-                            materialIndex = material.Index,
-                            mtdPath = material.MtdPath,
-                            nativeMeshDecal = nativeMeshDecalMaterialIndices.Contains(material.Index),
-                            previewSemantics = NativeMtdTextureLocator.ResolvePreviewSemantics(
+                        nativeMeshDecalMaterialIndices = flver.Materials
+                            .Where(material => NativeMtdTextureLocator.HasNativeMeshDecalSemantics(
                                 material.MtdPath,
                                 oodleRuntimeRoot,
-                                allowedRoots) is { } semantics
-                                ? new
-                                {
-                                    shaderName = semantics.ShaderName,
-                                    alphaMode = semantics.AlphaMode,
-                                    hasMask1Slot = semantics.HasMask1Slot,
-                                    diffuseBlend = semantics.DiffuseBlend is null
-                                        ? null
-                                        : semantics.DiffuseBlend.Mode
-                                }
-                                : null
-                        })
-                        .ToArray();
+                                allowedRoots))
+                            .Select(material => material.Index)
+                            .ToHashSet();
+                        // A native projected-decal still cannot be rendered by the
+                        // generic Three shader, but a material-local albedo is a
+                        // source-backed compatibility input when the same FLVER
+                        // material resolves it exactly from its MTD/TPF identity.
+                        // Do not reuse one explicit assembly texture for every
+                        // projected material: the native material index wins.
+                        foreach (var binding in textureBindings)
+                        {
+                            if (binding.MaterialIndex >= 0
+                                && binding.MaterialIndex < flver.Materials.Count
+                                && ResolveFlverPreviewRenderMode(flver, binding.MaterialIndex, nativeMeshDecalMaterialIndices) == "projected-decal")
+                            {
+                                nativeProjectionByMaterial[binding.MaterialIndex] = binding.Preview;
+                            }
+                        }
+                        nativeProjectedMaterialSemantics = flver.Materials
+                            .Where(material => ResolveFlverPreviewRenderMode(flver, material.Index, nativeMeshDecalMaterialIndices) == "projected-decal")
+                            .Select(material => (object)new
+                            {
+                                materialIndex = material.Index,
+                                mtdPath = material.MtdPath,
+                                nativeMeshDecal = nativeMeshDecalMaterialIndices.Contains(material.Index),
+                                previewSemantics = NativeMtdTextureLocator.ResolvePreviewSemantics(
+                                    material.MtdPath,
+                                    oodleRuntimeRoot,
+                                    allowedRoots) is { } semantics
+                                    ? new
+                                    {
+                                        shaderName = semantics.ShaderName,
+                                        alphaMode = semantics.AlphaMode,
+                                        hasMask1Slot = semantics.HasMask1Slot,
+                                        diffuseBlend = semantics.DiffuseBlend is null
+                                            ? null
+                                            : semantics.DiffuseBlend.Mode
+                                    }
+                                    : null
+                            })
+                            .ToArray();
+                    }
                     if (nativeProjectedMaterialSemantics.Length > 0)
                     {
                         diagnostics.Add(new Diagnostic(
@@ -1889,14 +1915,18 @@ internal sealed class BridgeCommandService
                                 materials = nativeProjectedMaterialSemantics
                             }));
                     }
-                    var meshes = BuildFlverMeshBundle(
-                        flver,
-                        maxVertices,
-                        maxIndices,
-                        cancellationToken,
-                        compatibilityProjection,
-                        nativeProjectionByMaterial,
-                        nativeMeshDecalMaterialIndices);
+                    object[] meshes;
+                    using (characterTiming?.Measure("buildOutputMs"))
+                    {
+                        meshes = BuildFlverMeshBundle(
+                            flver,
+                            maxVertices,
+                            maxIndices,
+                            cancellationToken,
+                            compatibilityProjection,
+                            nativeProjectionByMaterial,
+                            nativeMeshDecalMaterialIndices);
+                    }
                     var modelId = $"entry:{leaf.Index}:{leaf.Id}:{leaf.DuplicateOrdinal}:{leaf.ContentHash[..Math.Min(16, leaf.ContentHash.Length)]}";
                     if (flver.BoneCount > leaderBoneCount)
                     {
@@ -1966,70 +1996,73 @@ internal sealed class BridgeCommandService
                             BridgeResult<object>.MakeSourceUri(file),
                             new { materialCount = flver.Materials.Count, bindingCount = textureBindings.Count }));
                     }
-                    models.Add(new
+                    using (characterTiming?.Measure("buildOutputMs"))
                     {
-                        modelId,
-                        entry = new
+                        models.Add(new
                         {
-                            index = leaf.Index,
-                            id = leaf.Id,
-                            name = leaf.Name,
-                            duplicateOrdinal = leaf.DuplicateOrdinal,
-                            contentHash = leaf.ContentHash
-                        },
-                        meshCount = flver.MeshCount,
-                        boneCount = flver.BoneCount,
-                        meshes,
-                        bones = BuildFlverSkeleton(flver),
-                        texturePreviewToken = firstTexture?.PreviewToken,
-                        textureWidth = firstTexture?.Width,
-                        textureHeight = firstTexture?.Height,
-                        textureColorSpace = firstTexture?.ColorSpace,
-                        texturePreviews = textureBindings.Select(binding => new
-                        {
-                            materialIndex = binding.MaterialIndex,
-                            textureName = binding.Preview.TextureName,
-                            texturePreviewToken = binding.Preview.PreviewToken,
-                            width = binding.Preview.Width,
-                            height = binding.Preview.Height,
-                            colorSpace = binding.Preview.ColorSpace,
-                            alphaMode = binding.Preview.AlphaMode,
-                            normalTextureName = binding.Preview.Normal?.TextureName,
-                            normalTexturePreviewToken = binding.Preview.Normal?.PreviewToken,
-                            normalTextureColorSpace = binding.Preview.Normal?.ColorSpace,
-                            metalnessTextureName = binding.Preview.Metalness?.TextureName,
-                            metalnessTexturePreviewToken = binding.Preview.Metalness?.PreviewToken,
-                            metalnessTextureColorSpace = binding.Preview.Metalness?.ColorSpace,
-                            mask1TextureName = binding.Preview.Mask1?.TextureName,
-                            mask1TexturePreviewToken = binding.Preview.Mask1?.PreviewToken,
-                            mask1TextureColorSpace = binding.Preview.Mask1?.ColorSpace,
-                            albedo2 = binding.Preview.Albedo2 is null ? null : new
+                            modelId,
+                            entry = new
                             {
-                                textureName = binding.Preview.Albedo2.TextureName,
-                                texturePreviewToken = binding.Preview.Albedo2.PreviewToken,
-                                width = binding.Preview.Albedo2.Width,
-                                height = binding.Preview.Albedo2.Height,
-                                colorSpace = binding.Preview.Albedo2.ColorSpace
+                                index = leaf.Index,
+                                id = leaf.Id,
+                                name = leaf.Name,
+                                duplicateOrdinal = leaf.DuplicateOrdinal,
+                                contentHash = leaf.ContentHash
                             },
-                            normal2 = binding.Preview.Normal2 is null ? null : new
+                            meshCount = flver.MeshCount,
+                            boneCount = flver.BoneCount,
+                            meshes,
+                            bones = BuildFlverSkeleton(flver),
+                            texturePreviewToken = firstTexture?.PreviewToken,
+                            textureWidth = firstTexture?.Width,
+                            textureHeight = firstTexture?.Height,
+                            textureColorSpace = firstTexture?.ColorSpace,
+                            texturePreviews = textureBindings.Select(binding => new
                             {
-                                textureName = binding.Preview.Normal2.TextureName,
-                                texturePreviewToken = binding.Preview.Normal2.PreviewToken,
-                                width = binding.Preview.Normal2.Width,
-                                height = binding.Preview.Normal2.Height,
-                                colorSpace = binding.Preview.Normal2.ColorSpace
-                            },
-                            diffuseBlend = binding.Preview.DiffuseBlend is null ? null : new
-                            {
-                                mode = binding.Preview.DiffuseBlend.Mode,
-                                albedo2UvIndex = binding.Preview.DiffuseBlend.Albedo2UvIndex,
-                                blendMaskUvIndex = binding.Preview.DiffuseBlend.BlendMaskUvIndex,
-                                undefinedBlendMaskValue = binding.Preview.DiffuseBlend.UndefinedBlendMaskValue,
-                                enableTextureAlpha = binding.Preview.DiffuseBlend.EnableTextureAlpha,
-                                multiplyBlendMaskByAlbedo2Alpha = binding.Preview.DiffuseBlend.MultiplyBlendMaskByAlbedo2Alpha
-                            }
-                        }).ToArray()
-                    });
+                                materialIndex = binding.MaterialIndex,
+                                textureName = binding.Preview.TextureName,
+                                texturePreviewToken = binding.Preview.PreviewToken,
+                                width = binding.Preview.Width,
+                                height = binding.Preview.Height,
+                                colorSpace = binding.Preview.ColorSpace,
+                                alphaMode = binding.Preview.AlphaMode,
+                                normalTextureName = binding.Preview.Normal?.TextureName,
+                                normalTexturePreviewToken = binding.Preview.Normal?.PreviewToken,
+                                normalTextureColorSpace = binding.Preview.Normal?.ColorSpace,
+                                metalnessTextureName = binding.Preview.Metalness?.TextureName,
+                                metalnessTexturePreviewToken = binding.Preview.Metalness?.PreviewToken,
+                                metalnessTextureColorSpace = binding.Preview.Metalness?.ColorSpace,
+                                mask1TextureName = binding.Preview.Mask1?.TextureName,
+                                mask1TexturePreviewToken = binding.Preview.Mask1?.PreviewToken,
+                                mask1TextureColorSpace = binding.Preview.Mask1?.ColorSpace,
+                                albedo2 = binding.Preview.Albedo2 is null ? null : new
+                                {
+                                    textureName = binding.Preview.Albedo2.TextureName,
+                                    texturePreviewToken = binding.Preview.Albedo2.PreviewToken,
+                                    width = binding.Preview.Albedo2.Width,
+                                    height = binding.Preview.Albedo2.Height,
+                                    colorSpace = binding.Preview.Albedo2.ColorSpace
+                                },
+                                normal2 = binding.Preview.Normal2 is null ? null : new
+                                {
+                                    textureName = binding.Preview.Normal2.TextureName,
+                                    texturePreviewToken = binding.Preview.Normal2.PreviewToken,
+                                    width = binding.Preview.Normal2.Width,
+                                    height = binding.Preview.Normal2.Height,
+                                    colorSpace = binding.Preview.Normal2.ColorSpace
+                                },
+                                diffuseBlend = binding.Preview.DiffuseBlend is null ? null : new
+                                {
+                                    mode = binding.Preview.DiffuseBlend.Mode,
+                                    albedo2UvIndex = binding.Preview.DiffuseBlend.Albedo2UvIndex,
+                                    blendMaskUvIndex = binding.Preview.DiffuseBlend.BlendMaskUvIndex,
+                                    undefinedBlendMaskValue = binding.Preview.DiffuseBlend.UndefinedBlendMaskValue,
+                                    enableTextureAlpha = binding.Preview.DiffuseBlend.EnableTextureAlpha,
+                                    multiplyBlendMaskByAlbedo2Alpha = binding.Preview.DiffuseBlend.MultiplyBlendMaskByAlbedo2Alpha
+                                }
+                            }).ToArray()
+                        });
+                    }
                 }
                 diagnostics.Insert(0, new Diagnostic(
                     "info",

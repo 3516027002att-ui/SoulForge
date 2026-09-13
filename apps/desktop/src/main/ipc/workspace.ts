@@ -21,6 +21,8 @@ import {
   scanWorkspace,
   workspacePhysicalRootHash,
   WorkspaceIndex,
+  type NativeSemanticRefreshOptions,
+  type NativeSemanticRefreshResult,
   type WorkspaceSession,
   type FingerprintStoreState,
   type RagCorpus,
@@ -38,6 +40,12 @@ import type { OperationLogUtilityClient } from '../operationLogUtilityClient.js'
 import type { TrustedIpcHandle } from './registration.js';
 import { persistRagCorpusBySourceDelta } from '../ragPersistence.js';
 import { buildRagCorpus, createRagCorpus, mergeCatalogAndPersisted } from '@soulforge/core';
+import {
+  createParamCanonicalProjectionCache,
+  mergeCanonicalParamExports,
+  persistCanonicalRagProjection,
+  prepareParamCanonicalProjection
+} from './workspaceParamCanonical.js';
 import {
   buildActionBinderMembershipIndex,
   resolveActionEffectiveBaseRoot
@@ -197,22 +205,35 @@ async function refreshRagAfterAnalyze(
   index: WorkspaceIndex,
   diagnostics: readonly Diagnostic[] = [],
   signal?: AbortSignal,
-  scheduleEmbedding = true
+  scheduleEmbedding = true,
+  attemptedParamSourceUris: readonly string[] = []
 ): Promise<void> {
-  throwIfRagRefreshAborted(signal);
-  const catalog = buildRagCorpus(index, new Date().toISOString(), diagnostics);
-  throwIfRagRefreshAborted(signal);
-  const chunks = await database.loadRagChunks();
-  throwIfRagRefreshAborted(signal);
-  const references = await database.loadReferences();
-  throwIfRagRefreshAborted(signal);
-  const persisted = createRagCorpus({
-    workspaceId: index.workspaceId,
-    builtAt: catalog.builtAt,
-    chunks,
-    references
+  await persistCanonicalRagProjection({
+    index,
+    diagnostics,
+    attemptedParamSourceUris,
+    ...(signal ? { signal } : {}),
+    loadPersisted: async () => {
+      throwIfRagRefreshAborted(signal);
+      const chunks = await database.loadRagChunks();
+      throwIfRagRefreshAborted(signal);
+      const references = await database.loadReferences();
+      throwIfRagRefreshAborted(signal);
+      return { chunks, references };
+    },
+    persist: (corpus, previous) => persistActiveRag(database, corpus, previous, signal, scheduleEmbedding)
   });
-  await persistActiveRag(database, mergeCatalogAndPersisted(catalog, persisted), persisted, signal, scheduleEmbedding);
+}
+
+function parsedParamSourceFiles(index: WorkspaceIndex): IndexedFile[] {
+  const parsedSourceUris = new Set<string>();
+  for (const exported of index.toSymbolBundle().params ?? []) {
+    if (exported.sourceUri) parsedSourceUris.add(exported.sourceUri);
+    for (const row of exported.rows) parsedSourceUris.add(row.sourceUri);
+  }
+  return index.getFiles().filter((file) => (
+    file.resourceKind === 'param' && parsedSourceUris.has(file.sourceUri)
+  ));
 }
 
 function resolveWorkspaceSemanticIndexingTask(task: WorkspaceSemanticIndexingTask | null = workspaceSemanticIndexingTask): void {
@@ -792,6 +813,45 @@ export function registerWorkspaceIpcHandlers(deps: WorkspaceIpcDeps): void {
         throw new Error('工作区已切换，分析结果已丢弃。');
       }
       const database = await deps.ensureActiveOperationLog(session);
+      const bridgeRootPreparation = await prepareBridgeRoots(
+        bridgeRootSession(session, durableStoragePaths(session.meta.workspaceId, session.layers.overlayRoot)),
+        'stage'
+      );
+      const paramCanonicalCache = createParamCanonicalProjectionCache();
+      const paramCanonicalStagingRoot = bridgeRootPreparation.ok
+        ? bridgeRootPreparation.writableRoots[0]!
+        : join(durableStoragePaths(session.meta.workspaceId, session.layers.overlayRoot).root, 'staging');
+      const paramCanonicalRefresh: ((input: NativeSemanticRefreshOptions) => Promise<NativeSemanticRefreshResult>) | undefined = bridgeRootPreparation.ok
+        ? undefined
+        : async (input) => ({
+            refreshedSources: [],
+            partialSources: [],
+            failedSources: input.sourceFiles.map((file) => file.sourceUri),
+            staleSources: [],
+            diagnostics: input.sourceFiles.map((file) => ({
+              ...bridgeRootsDiagnostic('PARAM_CANONICAL_BRIDGE_ROOTS_UNAVAILABLE', bridgeRootPreparation),
+              sourceUri: file.sourceUri
+            }))
+          });
+      const prepareCanonicalParamProjection = async (index: WorkspaceIndex) => prepareParamCanonicalProjection({
+        index,
+        // Stage only refreshes PARAM containers that have already yielded a
+        // parsed semantic export.  The final pass naturally adds containers
+        // parsed later by analyzeWorkspace.
+        sourceFiles: parsedParamSourceFiles(index),
+        stagingRoot: paramCanonicalStagingRoot,
+        allowedRoots: bridgeRootPreparation.ok ? bridgeRootPreparation.allowedRoots : [],
+        ...(session.layers.baseRoot ? { oodleRuntimeRoot: session.layers.baseRoot } : {}),
+        signal: analyzeController.signal,
+        cache: paramCanonicalCache,
+        ...(paramCanonicalRefresh ? { refresh: paramCanonicalRefresh } : {})
+      });
+      const assertAnalyzeGenerationCurrent = (message: string): void => {
+        throwIfRagRefreshAborted(analyzeController.signal);
+        if (sessionId !== activeWorkspaceSessionId || generation !== activeWorkspaceSessionGeneration) {
+          throw new Error(message);
+        }
+      };
       const memoryCacheMap = new Map<string, { fileSha256: string; payload: SymbolBundle }>();
       const semanticCache: SemanticCacheProvider = {
         load: async (file) => {
@@ -845,17 +905,34 @@ export function registerWorkspaceIpcHandlers(deps: WorkspaceIpcDeps): void {
           // sourceHash/sourceRevision checks remain available to the Agent.
           stage.index.setFiles(indexedFiles);
           stage.index.rebuildReferences({ enableNumericFallback: true });
-          if (stage.index.getStats().paramRows > 0) {
-            stage.index.setParamSemanticState('ready');
-          }
-          activeIndex = stage.index;
-          indexedFiles = stage.index.getFiles();
           try {
+            const canonicalProjection = await prepareCanonicalParamProjection(stage.index);
+            assertAnalyzeGenerationCurrent('工作区已切换，阶段 PARAM canonical projection 已丢弃。');
+            if (!canonicalProjection.publishable) throw new Error('PARAM canonical projection 未发布。');
+            // Keep the structured candidate index useful for Agent reads, but
+            // use the isolated PARAM-only projection for the first RAG body.
+            // Failed PARAM leaves therefore remain visible as candidates while
+            // never being promoted to generic RAG evidence.
+            mergeCanonicalParamExports(stage.index, canonicalProjection.canonicalExports);
+            if (stage.index.getStats().paramRows > 0) {
+              stage.index.setParamSemanticState('ready');
+            }
+            assertAnalyzeGenerationCurrent('工作区已切换，阶段语义索引已丢弃。');
             // The full analysis will publish again at the end.  Do not start
             // embedding during this transitional slice: it would compete with
             // the remaining native EVENT/MAP pass and is not needed for the
             // default lexical/structured Agent path.
-            await refreshRagAfterAnalyze(database, stage.index, stage.diagnostics, analyzeController.signal, false);
+            await refreshRagAfterAnalyze(
+              database,
+              canonicalProjection.canonicalIndex,
+              [...stage.diagnostics, ...canonicalProjection.diagnostics],
+              analyzeController.signal,
+              false,
+              canonicalProjection.attemptedSourceUris
+            );
+            assertAnalyzeGenerationCurrent('工作区已切换，阶段语义索引已丢弃。');
+            activeIndex = stage.index;
+            indexedFiles = stage.index.getFiles();
           } finally {
             resolveWorkspaceSemanticIndexingTask(semanticStage);
           }
@@ -877,19 +954,39 @@ export function registerWorkspaceIpcHandlers(deps: WorkspaceIpcDeps): void {
       if (result.index.getStats().paramRows > 0) {
         result.index.setParamSemanticState('ready');
       }
-      activeIndex = result.index;
-      indexedFiles = result.index.getFiles();
-      await refreshRagAfterAnalyze(database, result.index, result.diagnostics.map((diagnostic) => ({
+      const canonicalProjection = await prepareCanonicalParamProjection(result.index);
+      assertAnalyzeGenerationCurrent('工作区已切换，最终 PARAM canonical projection 已丢弃。');
+      if (!canonicalProjection.publishable) throw new Error('PARAM canonical projection 未发布。');
+      mergeCanonicalParamExports(result.index, canonicalProjection.canonicalExports);
+      if (result.index.getStats().paramRows > 0) {
+        result.index.setParamSemanticState('ready');
+      }
+      assertAnalyzeGenerationCurrent('工作区已切换，最终语义索引已丢弃。');
+      const finalDiagnostics = [
+        ...result.diagnostics.map((diagnostic) => ({
         severity: diagnostic.severity,
         code: diagnostic.code,
         message: diagnostic.message,
         ...(diagnostic.sourceUri ? { sourceUri: diagnostic.sourceUri } : {})
-      })), analyzeController.signal);
+        })),
+        ...canonicalProjection.diagnostics
+      ];
+      await refreshRagAfterAnalyze(
+        database,
+        canonicalProjection.canonicalIndex,
+        finalDiagnostics,
+        analyzeController.signal,
+        true,
+        canonicalProjection.attemptedSourceUris
+      );
+      assertAnalyzeGenerationCurrent('工作区已切换，最终 RAG 语料已丢弃。');
+      activeIndex = result.index;
+      indexedFiles = result.index.getFiles();
       const summary: AnalyzeWorkspaceSummary = {
         parsedFiles: result.parsedFiles,
         inspectedFiles: result.inspectedFiles,
         referenceStats: result.referenceStats,
-        diagnostics: sanitizeDiagnostics(result.diagnostics),
+        diagnostics: sanitizeDiagnostics(finalDiagnostics),
         rag: activeRag
           ? {
               stats: activeRag.stats,

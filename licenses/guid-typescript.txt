@@ -1,0 +1,30 @@
+guid-typescript@1.0.9 — ISC license metadata reference
+
+This project-level notice covers the production dependency `guid-typescript@1.0.9`.
+Its package.json declares `license: "ISC"` and author metadata `nicolas`.
+The package metadata and version are recorded at:
+https://registry.npmjs.org/guid-typescript/-/guid-typescript-1.0.9.tgz
+The upstream repository is:
+https://github.com/NicolasDeveloper/guid-typescript
+
+The upstream package does not provide a separate copyright or license file in
+the package tree inspected for this version. The ISC text below is included as
+a standard-license reference for the declared SPDX expression; it is not
+represented as a verbatim copy of an upstream LICENSE file. No copyright
+holder or year is asserted here.
+The standard ISC reference text is sourced from SPDX:
+https://spdx.org/licenses/ISC.html
+
+ISC License
+
+Permission to use, copy, modify, and/or distribute this software for any
+purpose with or without fee is hereby granted, provided that the above
+copyright notice and this permission notice appear in all copies.
+
+THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES
+WITH REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF
+MERCHANTABILITY AND FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR
+ANY SPECIAL, DIRECT, INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES
+WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN
+ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
+OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.

@@ -8,22 +8,59 @@
  *   - 在 renderer 侧只安装观测夹具，记录 draw-call、RAF 长帧和切图 cleanup。
  *
  * 它不调用任何写回 API，不复制/改写 mods，不修改 package.json/tiers。
- * 默认运行 normal；传 --cancel 可运行切图取消观测。真实 native 请求没有
- * AbortSignal 公共入口，因此报告会把 renderer cleanup 与 native IPC 取消严格分开。
+ * 默认运行 normal；传 --cancel 可运行切图取消观测。native 取消只按 main
+ * 侧结构化 Bridge 终端回执判定，renderer cleanup 与 command/artifact 终态严格分开。
  * 传 --fixture 只运行本文件内的累计窗口/状态夹具，不启动 Electron 或读取资源。
  */
-import { existsSync } from 'node:fs';
+import { existsSync, writeFileSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve, sep } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { _electron as electron } from 'playwright';
 import {
   assertAgentProductionArtifactSnapshotFresh,
   createAgentProductionArtifactSnapshot
 } from './agent-production-build-lib.mjs';
+import {
+  createMapNativeTimingAccumulator,
+  recordMapNativeTimingCall,
+  snapshotMapNativeTimingAccumulator
+} from './map-native-timing-aggregate.mjs';
+import {
+  createCharacterNativeTimingAccumulator,
+  recordCharacterNativeTimingCall,
+  snapshotCharacterNativeTimingAccumulator,
+  validateCharacterNativeTimingSummary
+} from './character-native-timing-aggregate.mjs';
+import {
+  createCharacterMainTimingAccumulator,
+  recordCharacterMainTimingCall,
+  snapshotCharacterMainTimingAccumulator,
+  validateCharacterMainTimingSummary
+} from './character-main-timing-aggregate.mjs';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
+const MAP_STREAMING_USAGE = [
+  'Usage: node scripts/verify-map-streaming-native.mjs [--fixture] [--cancel]',
+  '',
+  '  --fixture  run local telemetry/state fixtures without Electron or native resources',
+  '  --cancel   run the real MAP switch/cancellation observation instead of normal load',
+  '  -h, --help show this usage'
+].join('\n');
+const CLI_ARGS = new Set(['--fixture', '--cancel', '-h', '--help']);
+const cliArgs = process.argv.slice(2);
+const unknownCliArgs = cliArgs.filter((argument) => !CLI_ARGS.has(argument));
+if (unknownCliArgs.length > 0) {
+  process.stderr.write(`[SF_MAP_ARGS] unknown argument(s): ${unknownCliArgs.join(', ')}\n`);
+  process.exit(2);
+}
+if (cliArgs.includes('-h') || cliArgs.includes('--help')) {
+  process.stdout.write(`${MAP_STREAMING_USAGE}\n`);
+  process.exit(0);
+}
+
 const GAME_ROOT = process.env.SOULFORGE_SEKIRO_ROOT?.trim()
   || 'D:\\mystream\\Sekiro Shadows Die Twice\\Sekiro';
 const OVERLAY_ROOT = process.env.SOULFORGE_SEKIRO_MOD_ROOT?.trim() || join(GAME_ROOT, 'mods');
@@ -39,6 +76,8 @@ const MAP_RELATIVE_PATH = `map/mapstudio/${MAP_ID}.msb.dcx`;
 const DEFAULT_TIMEOUT_MS = 240_000;
 const DEFAULT_DIRECT_TIMEOUT_MS = 180_000;
 const DEFAULT_CANCEL_DELAY_MS = 1_000;
+const CANCEL_OBSERVATION_MIN_MS = 5_000;
+const CANCEL_OBSERVATION_MAX_MS = 30_000;
 // 单阶段 timeout 仍保留用于区分具体卡点；总 deadline 防止 workspace scan、
 // 两次 native read、Electron UI 等阶段叠加后无限延长。15 分钟足够覆盖真实
 // m11 大地图的冷启动和分页，同时让 Ctrl+C/外部 runner 能在有界时间内收口。
@@ -82,6 +121,492 @@ function bounded(promise, timeoutMs, code) {
       timer = setTimeout(() => reject(new Error(code)), timeoutMs);
     })
   ]).finally(() => clearTimeout(timer));
+}
+
+const finiteTimingNumber = (value) => (
+  typeof value === 'number' && Number.isFinite(value) ? value : null
+);
+
+/**
+ * Page timing is kept only when the page supplied every finite numeric field
+ * and its monotonic clock did not move backwards.  The page and Node wall
+ * clocks are different domains; consumers must use pageDurationMs for an
+ * exact duration and must not infer a cross-process delay from the wall times.
+ */
+function normalizePageTaskTiming(timing) {
+  if (!timing || typeof timing !== 'object') return null;
+  const normalized = {
+    pageStartedAtUTC: finiteTimingNumber(timing.pageStartedAtUTC),
+    pageCompletedAtUTC: finiteTimingNumber(timing.pageCompletedAtUTC),
+    pageStartedAt: finiteTimingNumber(timing.pageStartedAt),
+    pageCompletedAt: finiteTimingNumber(timing.pageCompletedAt),
+    pageDurationMs: finiteTimingNumber(timing.pageDurationMs)
+  };
+  if (Object.values(normalized).some((value) => value === null)) return null;
+  const monotonicDurationMs = normalized.pageCompletedAt - normalized.pageStartedAt;
+  if (
+    monotonicDurationMs < 0
+    || Math.abs(normalized.pageDurationMs - monotonicDurationMs) > 0.5
+  ) return null;
+  normalized.pageDurationMs = monotonicDurationMs;
+  return normalized;
+}
+
+/**
+ * Run a bounded observation with at most one underlying operation in flight.
+ *
+ * Promise.race (used by bounded()) limits how long the caller waits, but it
+ * cannot cancel Playwright's page.evaluate.  The normal MAP polling loop must
+ * therefore retain the timed-out operation as the single-flight owner: later
+ * polls return a structured pending-deadline record until that operation
+ * settles.  This keeps a renderer stall from turning one slow evaluate into a
+ * queue of evaluates and locator requests.
+ */
+function createSingleFlightBounded(
+  name,
+  { now = () => Date.now(), inFlightCode = 'SINGLE_FLIGHT_IN_FLIGHT' } = {}
+) {
+  let nextCallId = 0;
+  let pending = null;
+  const records = [];
+  const counts = {
+    started: 0,
+    completed: 0,
+    slow: 0,
+    timedOut: 0,
+    failed: 0,
+    lateSettled: 0,
+    lateFailed: 0,
+    pendingDeadline: 0
+  };
+
+  const safeError = (error) => ({
+    name: error instanceof Error && error.name ? error.name : 'Error',
+    message: error instanceof Error ? error.message : String(error)
+  });
+  const remember = (record) => {
+    records.push(record);
+    if (records.length > 256) records.shift();
+  };
+  const pendingRecord = (status, reason, requestedAt, pendingCallId = null) => {
+    const record = {
+      operation: name,
+      callId: null,
+      status,
+      reason,
+      requestedAt,
+      startedAt: null,
+      settledAt: null,
+      elapsedMs: 0,
+      receivedAt: null,
+      complete: false,
+      slow: false,
+      failed: false,
+      timedOut: false,
+      lateSettled: false,
+      underlyingPending: pendingCallId !== null,
+      pendingCallId,
+      lateOutcome: null,
+      taskTiming: null,
+      error: null,
+      timeoutMs: null,
+      effectiveTimeoutMs: null,
+      deadlineAt: null
+    };
+    counts.pendingDeadline += 1;
+    remember(record);
+    return record;
+  };
+
+  const run = (task, options = {}) => {
+    const requestedAt = now();
+    const timeoutMs = Number.isFinite(options.timeoutMs) ? Math.max(1, options.timeoutMs) : 5_000;
+    const slowMs = Number.isFinite(options.slowMs) ? Math.max(0, options.slowMs) : timeoutMs;
+    if (pending) {
+      const deadlineReached = Number.isFinite(options.deadlineAt) && requestedAt >= options.deadlineAt;
+      const record = pendingRecord(
+        'pending-deadline',
+        deadlineReached ? `${inFlightCode}_AT_DEADLINE` : inFlightCode,
+        requestedAt,
+        pending.callId
+      );
+      record.timeoutMs = timeoutMs;
+      record.deadlineAt = Number.isFinite(options.deadlineAt) ? options.deadlineAt : null;
+      return Promise.resolve({ value: null, record });
+    }
+    if (Number.isFinite(options.deadlineAt) && requestedAt >= options.deadlineAt) {
+      const record = pendingRecord('pending-deadline', 'deadline-reached', requestedAt);
+      record.timeoutMs = timeoutMs;
+      record.deadlineAt = options.deadlineAt;
+      return Promise.resolve({ value: null, record });
+    }
+
+    const deadlineRemainingMs = Number.isFinite(options.deadlineAt)
+      ? Math.max(1, options.deadlineAt - requestedAt)
+      : Number.POSITIVE_INFINITY;
+    const effectiveTimeoutMs = Math.max(1, Math.min(timeoutMs, deadlineRemainingMs));
+
+    const callId = ++nextCallId;
+    const record = {
+      operation: name,
+      callId,
+      status: 'pending',
+      reason: null,
+      requestedAt,
+      startedAt: requestedAt,
+      settledAt: null,
+      elapsedMs: 0,
+      receivedAt: null,
+      complete: false,
+      slow: false,
+      failed: false,
+      timedOut: false,
+      lateSettled: false,
+      underlyingPending: true,
+      pendingCallId: null,
+      lateOutcome: null,
+      taskTiming: null,
+      error: null,
+      timeoutMs,
+      effectiveTimeoutMs,
+      deadlineAt: Number.isFinite(options.deadlineAt) ? options.deadlineAt : null
+    };
+    remember(record);
+    counts.started += 1;
+    let resolveSettlement;
+    const settlementPromise = new Promise((resolve) => {
+      resolveSettlement = resolve;
+    });
+    const owner = {
+      callId,
+      startedAt: requestedAt,
+      record,
+      settlementPromise,
+      resolveSettlement,
+      settled: false
+    };
+    pending = owner;
+    let timer = null;
+    let resolveResult;
+    let callerSettled = false;
+    const resultPromise = new Promise((resolve) => {
+      resolveResult = resolve;
+    });
+    const settle = (outcome, value, error) => {
+      const receivedAt = finiteTimingNumber(now());
+      const elapsedMs = receivedAt === null || !Number.isFinite(owner.startedAt)
+        ? null
+        : Math.max(0, receivedAt - owner.startedAt);
+      const taskTiming = outcome === 'fulfilled'
+        ? normalizePageTaskTiming(value?.timing)
+        : null;
+      record.receivedAt = receivedAt;
+      record.settledAt = receivedAt;
+      record.elapsedMs = elapsedMs;
+      record.taskTiming = taskTiming;
+      record.underlyingPending = false;
+      if (pending === owner) pending = null;
+      if (timer !== null) clearTimeout(timer);
+      owner.settled = true;
+      resolveSettlement({ value: outcome === 'fulfilled' ? value : null, record });
+      if (record.timedOut) {
+        record.lateSettled = true;
+        record.lateOutcome = outcome;
+        if (outcome === 'failed') {
+          counts.lateFailed += 1;
+          record.failed = true;
+          record.error = safeError(error);
+        }
+        counts.lateSettled += 1;
+        return;
+      }
+      counts.completed += 1;
+      if (outcome === 'failed') {
+        counts.failed += 1;
+        record.status = 'failed';
+        record.failed = true;
+        record.error = safeError(error);
+        callerSettled = true;
+        resolveResult({ value: null, record });
+        return;
+      }
+      record.slow = elapsedMs >= slowMs;
+      record.complete = true;
+      record.status = record.slow ? 'slow' : 'completed';
+      if (record.slow) counts.slow += 1;
+      callerSettled = true;
+      resolveResult({ value, record });
+    };
+    let taskPromise;
+    try {
+      taskPromise = Promise.resolve().then(task);
+    } catch (error) {
+      taskPromise = Promise.reject(error);
+    }
+    // Always attach both handlers.  A timed-out operation is deliberately
+    // allowed to settle later, but must never become an unhandled rejection.
+    taskPromise.then(
+      (value) => settle('fulfilled', value, null),
+      (error) => settle('failed', null, error)
+    );
+    timer = setTimeout(() => {
+      if (callerSettled || record.timedOut) return;
+      counts.timedOut += 1;
+      record.status = 'timeout';
+      record.reason = options.timeoutCode ?? 'SINGLE_FLIGHT_TIMEOUT';
+      record.timedOut = true;
+      record.complete = false;
+      record.underlyingPending = true;
+      callerSettled = true;
+      resolveResult({ value: null, record });
+    }, effectiveTimeoutMs);
+    return resultPromise;
+  };
+
+  const waitForPending = async (timeoutMs = 5_000, deadlineAt = null) => {
+    const owner = pending;
+    if (!owner) return { settled: true, record: null };
+    const requestedAt = now();
+    const remainingMs = Number.isFinite(deadlineAt)
+      ? deadlineAt - requestedAt
+      : Number.POSITIVE_INFINITY;
+    if (remainingMs <= 0) {
+      return {
+        settled: false,
+        record: {
+          ...owner.record,
+          status: 'pending-deadline',
+          reason: 'pending-settlement-deadline',
+          pendingCallId: owner.callId,
+          underlyingPending: true
+        }
+      };
+    }
+    const effectiveTimeoutMs = Math.max(1, Math.min(
+      Number.isFinite(timeoutMs) ? timeoutMs : 5_000,
+      remainingMs
+    ));
+    let timer;
+    const timeout = new Promise((resolve) => {
+      timer = setTimeout(() => resolve({ settled: false }), effectiveTimeoutMs);
+    });
+    const outcome = await Promise.race([
+      owner.settlementPromise.then(() => ({ settled: true, record: owner.record })),
+      timeout
+    ]);
+    clearTimeout(timer);
+    if (outcome.settled) return outcome;
+    return {
+      settled: false,
+      record: {
+        ...owner.record,
+        status: 'pending-deadline',
+        reason: 'pending-settlement-deadline',
+        pendingCallId: owner.callId,
+        underlyingPending: true
+      }
+    };
+  };
+
+  return {
+    run,
+    waitForPending,
+    snapshot() {
+      return {
+        operation: name,
+        counts: { ...counts },
+        pending: pending
+          ? { callId: pending.callId, startedAt: pending.startedAt, ageMs: Math.max(0, now() - pending.startedAt) }
+          : null,
+        records: records.map((record) => ({ ...record }))
+      };
+    }
+  };
+}
+
+function createMapCrashEvidencePaths(reportRoot) {
+  const root = resolve(reportRoot);
+  return Object.freeze({
+    crashDumps: join(root, 'crashes'),
+    receipt: join(root, 'crash-reporter-receipt.json'),
+    parentExit: join(root, 'electron-exit.json'),
+    entryExit: join(root, 'electron-entry-exit.json')
+  });
+}
+
+/**
+ * Generate the private Electron entry used by the real MAP probe.
+ *
+ * Crashpad must be configured before production-main is imported.  The entry
+ * deliberately does not call app.whenReady(): production-main owns that
+ * lifecycle and must keep its normal startup ordering.  The generated file is
+ * placed in this run's scratch directory, while the receipt, crash dumps, and
+ * child-exit evidence are kept in reportDir so scratch cleanup cannot erase
+ * diagnostics.
+ */
+function createOfflineCrashpadEntrySource({
+  productionMain,
+  artifactId,
+  crashDumpsPath,
+  receiptPath,
+  entryExitInfoPath
+}) {
+  const config = {
+    artifactId,
+    crashDumpsPath,
+    entryExitInfoPath,
+    productionMainUrl: pathToFileURL(productionMain).href,
+    receiptPath
+  };
+  return `import { app, crashReporter } from 'electron';
+import { writeFileSync, mkdirSync } from 'node:fs';
+
+const config = ${JSON.stringify(config)};
+const startedAtUTC = new Date().toISOString();
+const receipt = {
+  schemaVersion: 1,
+  mode: 'offline-crashpad',
+  startedAtUTC,
+  pid: process.pid,
+  artifactId: config.artifactId,
+  crashDumpsPath: config.crashDumpsPath,
+  crashDumpsConfigured: false,
+  started: false,
+  uploadToServer: false,
+  compress: false,
+  importProductionMain: config.productionMainUrl,
+  error: null
+};
+
+function writeDiagnostic(operation, path, error) {
+  try {
+    process.stderr.write(\`[SF_MAP_OFFLINE_CRASHPAD] \${JSON.stringify({
+      code: 'SF_MAP_OFFLINE_CRASHPAD_WRITE_ERROR',
+      operation,
+      path,
+      error: error instanceof Error ? error.message : String(error),
+      atUTC: new Date().toISOString(),
+      pid: process.pid
+    })}\\n\`);
+  } catch {
+    // Diagnostics must never change the Electron startup/exit path.
+  }
+}
+
+function writeJson(path, value, operation) {
+  try {
+    writeFileSync(path, \`${'${JSON.stringify(value, null, 2)}'}\\n\`, 'utf8');
+  } catch (error) {
+    writeDiagnostic(operation, path, error);
+  }
+}
+
+function writeExitInfo(exitCode) {
+  writeJson(config.entryExitInfoPath, {
+    schemaVersion: 1,
+    source: 'electron-offline-crashpad-entry',
+    atUTC: new Date().toISOString(),
+    pid: process.pid,
+    exitCode,
+    signal: null,
+    crashDumpsPath: config.crashDumpsPath,
+    artifactId: config.artifactId,
+    settled: true
+  }, 'write-entry-exit');
+}
+
+mkdirSync(config.crashDumpsPath, { recursive: true });
+process.once('exit', writeExitInfo);
+try {
+  app.setPath('crashDumps', config.crashDumpsPath);
+  receipt.crashDumpsConfigured = true;
+} catch (error) {
+  receipt.error = error instanceof Error ? error.message : String(error);
+}
+try {
+  crashReporter.start({
+    productName: 'SoulForge-map-streaming-native',
+    companyName: 'SoulForge-offline-diagnostic',
+    uploadToServer: false,
+    compress: false,
+    ignoreSystemCrashHandler: false
+  });
+  receipt.started = true;
+  receipt.uploadToServer = typeof crashReporter.getUploadToServer === 'function'
+    ? crashReporter.getUploadToServer()
+    : false;
+} catch (error) {
+  receipt.error = receipt.error ?? (error instanceof Error ? error.message : String(error));
+}
+writeJson(config.receiptPath, receipt, 'write-receipt');
+
+try {
+  await import(config.productionMainUrl);
+} catch (error) {
+  receipt.importError = error instanceof Error ? error.stack ?? error.message : String(error);
+  writeJson(config.receiptPath, receipt, 'write-receipt-import-error');
+  throw error;
+}
+`;
+}
+
+function runOfflineCrashpadEntryFixture() {
+  const crashEvidencePaths = createMapCrashEvidencePaths('D:/report');
+  const source = createOfflineCrashpadEntrySource({
+    productionMain: 'D:/snapshot/apps/desktop/e2e/playwright/production-main.mjs',
+    artifactId: 'fixture-artifact',
+    crashDumpsPath: crashEvidencePaths.crashDumps,
+    receiptPath: crashEvidencePaths.receipt,
+    entryExitInfoPath: crashEvidencePaths.entryExit
+  });
+  const syntax = spawnSync(process.execPath, ['--check', '--input-type=module'], {
+    input: source,
+    cwd: ROOT,
+    encoding: 'utf8',
+    windowsHide: true,
+    maxBuffer: 1 * 1024 * 1024,
+    timeout: 10_000
+  });
+  const setPathAt = source.indexOf("app.setPath('crashDumps'");
+  const startAt = source.indexOf('crashReporter.start(');
+  const importAt = source.indexOf('await import(config.productionMainUrl)');
+  const entryExitPath = crashEvidencePaths.entryExit;
+  const parentExitPath = crashEvidencePaths.parentExit;
+  const launchBeforeAppEvidence = new Map([
+    [entryExitPath, { source: 'electron-offline-crashpad-entry', exitCode: 4294930435, settled: true }],
+    [parentExitPath, { source: 'playwright-parent-finally', exitCode: null, settled: false }]
+  ]);
+  const launchBeforeAppIsolation = launchBeforeAppEvidence.get(entryExitPath)?.exitCode === 4294930435
+    && launchBeforeAppEvidence.get(entryExitPath)?.settled === true
+    && launchBeforeAppEvidence.get(parentExitPath)?.exitCode === null
+    && launchBeforeAppEvidence.get(parentExitPath)?.settled === false
+    && entryExitPath !== parentExitPath;
+  const pass = setPathAt >= 0
+    && startAt > setPathAt
+    && importAt > startAt
+    && source.includes('uploadToServer: false')
+    && source.includes('compress: false')
+    && !source.includes('app.whenReady')
+    && source.includes('electron-offline-crashpad-entry')
+    && source.includes('write-entry-exit')
+    && source.includes('SF_MAP_OFFLINE_CRASHPAD_WRITE_ERROR')
+    && source.includes('operation,')
+    && source.includes('path,')
+    && source.includes('error: error instanceof Error')
+    && !syntax.error
+    && syntax.status === 0
+    && launchBeforeAppIsolation;
+  return {
+    ordering: {
+      crashDumpsBeforeCrashReporter: setPathAt >= 0 && startAt > setPathAt,
+      crashReporterBeforeProductionMain: startAt >= 0 && importAt > startAt
+    },
+    offline: source.includes('uploadToServer: false') && source.includes('compress: false'),
+    noWhenReady: !source.includes('app.whenReady'),
+    launchBeforeAppIsolation,
+    generatedEntrySyntax: syntax.error?.message ?? syntax.stderr?.trim() ?? null,
+    pass
+  };
 }
 
 /**
@@ -149,6 +674,29 @@ function diagnosticsCodes(value) {
 const MAP_TELEMETRY_BOUNDARY_NAMES = Object.freeze(['total', 'mapCanvas', 'streamLoad']);
 const MAP_WINDOW_OBSERVER_KEY = '__soulforgeMapForegroundObserverV1';
 const MAP_WINDOW_OBSERVER_EVENT_LIMIT = 1_024;
+const MAP_MAIN_TIMING_PHASE_KEY = '__soulforgeMapMainTimingV1';
+const MAIN_MAP_TELEMETRY_MAX_LINE_CHARS = 512 * 1024;
+const MAP_API_OBSERVER_MAX_DIAGNOSTICS = 16;
+const MAP_API_OBSERVER_MAX_CODE_CHARS = 96;
+const MAP_API_OBSERVER_CODE_PATTERN = /^[A-Z][A-Z0-9_]{0,95}$/;
+
+function stableMapApiObserverCode(value) {
+  return typeof value === 'string' && MAP_API_OBSERVER_CODE_PATTERN.test(value) ? value : null;
+}
+
+function projectMapApiObserverResult(result) {
+  const responseError = result?.error && typeof result.error === 'object' ? result.error : null;
+  const diagnostics = Array.isArray(result?.diagnostics) ? result.diagnostics : [];
+  const diagnosticCodes = [];
+  for (const item of diagnostics.slice(0, MAP_API_OBSERVER_MAX_DIAGNOSTICS)) {
+    const code = stableMapApiObserverCode(item?.code);
+    if (code !== null) diagnosticCodes.push(code);
+  }
+  return {
+    resultErrorCode: stableMapApiObserverCode(responseError?.code),
+    diagnosticCodes
+  };
+}
 
 function makeRafBoundary(name, startAt, startFrame) {
   return {
@@ -991,6 +1539,31 @@ async function snapshotTelemetry(page, options = {}) {
   return page.evaluate((snapshotOptions) => globalThis.__sfMapTelemetry?.snapshot?.(snapshotOptions) ?? null, options).catch(() => null);
 }
 
+async function snapshotTelemetryWithProgress(page, options = {}) {
+  return page.evaluate((snapshotOptions) => {
+    const pageStartedAtUTC = Date.now();
+    const pageStartedAt = performance.now();
+    const telemetry = globalThis.__sfMapTelemetry?.snapshot?.(snapshotOptions) ?? null;
+    const progressElement = document.querySelector('progress[aria-label="地图模型加载进度"]');
+    const progress = progressElement?.getAttribute('value') ?? null;
+    const max = progressElement?.getAttribute('max') ?? null;
+    const pageCompletedAt = performance.now();
+    const pageCompletedAtUTC = Date.now();
+    return {
+      telemetry,
+      progress: progress === null ? null : Number(progress),
+      max: max === null ? null : Number(max),
+      timing: {
+        pageStartedAtUTC,
+        pageCompletedAtUTC,
+        pageStartedAt,
+        pageCompletedAt,
+        pageDurationMs: pageCompletedAt - pageStartedAt
+      }
+    };
+  }, options);
+}
+
 async function transitionMapTelemetryBoundaries(page, transition) {
   return page.evaluate((next) => {
     const telemetry = globalThis.__sfMapTelemetry;
@@ -1143,6 +1716,22 @@ async function installMapApiTimingTelemetry(page) {
       globalThis.__sfMapApiTiming = { snapshot: () => unavailable };
       return unavailable;
     }
+    const maxDiagnosticCount = 16;
+    const stableCodePattern = /^[A-Z][A-Z0-9_]{0,95}$/;
+    const projectResultDiagnostics = (result) => {
+      const responseError = result?.error && typeof result.error === 'object' ? result.error : null;
+      const diagnostics = Array.isArray(result?.diagnostics) ? result.diagnostics : [];
+      const diagnosticCodes = [];
+      for (const item of diagnostics.slice(0, maxDiagnosticCount)) {
+        if (typeof item?.code === 'string' && stableCodePattern.test(item.code)) diagnosticCodes.push(item.code);
+      }
+      return {
+        resultErrorCode: typeof responseError?.code === 'string' && stableCodePattern.test(responseError.code)
+          ? responseError.code
+          : null,
+        diagnosticCodes
+      };
+    };
     const state = {
       installed: false,
       reason: null,
@@ -1178,6 +1767,7 @@ async function installMapApiTimingTelemetry(page) {
         const ok = !thrown && result?.ok === true;
         const data = result?.data ?? null;
         const chunks = Array.isArray(data?.chunks) ? data.chunks : [];
+        const resultDiagnostics = projectResultDiagnostics(result);
         const wireBase64Chars = chunks.reduce((sum, chunk) => sum + [
           chunk?.positionsBase64,
           chunk?.indicesBase64,
@@ -1220,7 +1810,8 @@ async function installMapApiTimingTelemetry(page) {
           nextCursorPresent: Boolean(data?.nextCursor),
           chunkCount: chunks.length,
           wireBase64Chars,
-          error: thrown ? String(thrown?.message ?? thrown) : null
+          error: thrown ? String(thrown?.message ?? thrown) : null,
+          ...resultDiagnostics
         });
         if (state.recent.length > 200) state.recent.shift();
       }
@@ -1294,6 +1885,23 @@ async function setMapApiTimingPhase(page, phase) {
 
 async function snapshotMapApiTiming(page) {
   return page.evaluate(() => globalThis.__sfMapApiTiming?.snapshot?.() ?? null).catch(() => null);
+}
+
+/**
+ * Set the phase captured by production-main's test-only MAP timing harness.
+ * This is intentionally main-process state rather than a new renderer/API
+ * channel, so an IPC request keeps the phase it had at invocation start even
+ * if the probe advances to the next boundary while it is still in flight.
+ */
+async function setMainMapTimingPhase(app, phase) {
+  if (!app) return { ok: false, reason: 'MAP_MAIN_TIMING_APP_MISSING' };
+  return app.evaluate((_electron, options) => {
+    const control = globalThis[options?.key];
+    if (!control || typeof control.setPhase !== 'function') {
+      return { ok: false, reason: 'MAP_MAIN_TIMING_CONTROL_UNAVAILABLE' };
+    }
+    return control.setPhase(options.phase);
+  }, { key: MAP_MAIN_TIMING_PHASE_KEY, phase });
 }
 
 async function summarizeMsb(page, sourceUri) {
@@ -1467,12 +2075,617 @@ function extractLoaderEvent(events, phrase) {
   return events.filter((entry) => entry.text.includes(phrase));
 }
 
-function extractNativeAbortEvidence(events, stdoutTail) {
-  const explicit = events.filter((entry) => /nativeAbortObserved\s*[:=]\s*true/i.test(entry.text));
-  if (/nativeAbortObserved\s*[:=]\s*true/i.test(stdoutTail)) {
-    explicit.push({ source: 'main-stdout', text: 'nativeAbortObserved: true' });
+const MAP_LOAD_RETENTION_MARKER = '[SF_MAP_LOAD_RETENTION]';
+const MAP_LOAD_RETENTION_COUNT_KEYS = [
+  'preparedEnvelopeCount',
+  'inFlightCount',
+  'legacyInFlightCount',
+  'uploadedCount'
+];
+
+function parseMapLoadRetentionMarker(text) {
+  if (typeof text !== 'string') return null;
+  const markerIndex = text.indexOf(MAP_LOAD_RETENTION_MARKER);
+  if (markerIndex < 0) return null;
+  const payload = text.slice(markerIndex + MAP_LOAD_RETENTION_MARKER.length).trim();
+  try {
+    const parsed = JSON.parse(payload);
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return null;
+    const counts = {};
+    for (const key of MAP_LOAD_RETENTION_COUNT_KEYS) {
+      const value = parsed[key];
+      if (!Number.isSafeInteger(value) || value < 0) return null;
+      counts[key] = value;
+    }
+    return counts;
+  } catch {
+    return null;
   }
-  return explicit;
+}
+
+function extractMapLoadRetentionEvents(events) {
+  return events.flatMap((entry) => {
+    const counts = parseMapLoadRetentionMarker(entry?.text);
+    if (!counts) return [];
+    return [{
+      atMs: Number.isFinite(entry?.atMs) ? entry.atMs : null,
+      ...counts
+    }];
+  });
+}
+
+const MAP_CANCELLATION_TERMINAL_MARKER = '[SF_MAP_CANCELLATION_TERMINAL]';
+const MAP_CANCELLATION_REQUESTED_MARKER = '[SF_MAP_CANCELLATION_REQUESTED]';
+
+/**
+ * Read the main-process cancellation terminal marker as a structured stream.
+ * A renderer cleanup is not native evidence: only a receipt with the exact
+ * schema/source, this run's opaque owner/request handle, outcome=cancelled,
+ * and requestPhase=command can establish command cancellation. Artifact
+ * receipts remain visible but are never promoted to native command evidence.
+ */
+function createMapCancellationTelemetryCollector() {
+  const maxLineChars = 128 * 1024;
+  const receiptLimit = 256;
+  const state = {
+    buffer: '',
+    discardingOversizeLine: false,
+    droppedOversizeLineCount: 0,
+    ignoredOversizeLineCount: 0,
+    malformedCount: 0,
+    invalidTimestampCount: 0,
+    invalidIdentityCount: 0,
+    receipts: [],
+    cancelRequests: [],
+    overflow: false
+  };
+  const consumeLine = (line) => {
+    // Markers are emitted as complete lines by main.  Requiring the prefix
+    // prevents arbitrary application text containing the marker from becoming
+    // cancellation evidence.
+    const candidate = line.trimStart();
+    const terminalIndex = candidate.startsWith(MAP_CANCELLATION_TERMINAL_MARKER) ? 0 : -1;
+    const requestedIndex = candidate.startsWith(MAP_CANCELLATION_REQUESTED_MARKER) ? 0 : -1;
+    const isTerminal = terminalIndex >= 0 && (requestedIndex < 0 || terminalIndex < requestedIndex);
+    const markerIndex = isTerminal ? terminalIndex : requestedIndex;
+    if (markerIndex < 0) return;
+    const marker = isTerminal ? MAP_CANCELLATION_TERMINAL_MARKER : MAP_CANCELLATION_REQUESTED_MARKER;
+    const payload = candidate.slice(markerIndex + marker.length).trim();
+    let value;
+    try {
+      value = JSON.parse(payload);
+    } catch {
+      state.malformedCount += 1;
+      return;
+    }
+    const expectedSource = isTerminal
+      ? 'soulforge.main.map.runBridge'
+      : 'soulforge.main.map.cancelMapStaticGeometry';
+    const timestampField = isTerminal ? value?.receivedAt : value?.atUTC;
+    const timestampMs = typeof timestampField === 'string' ? Date.parse(timestampField) : Number.NaN;
+    const identityValid = value && typeof value === 'object'
+      && value.schemaVersion === 1
+      && value.source === expectedSource
+      && Number.isSafeInteger(value.ownerId)
+      && typeof value.requestId === 'string' && value.requestId.length > 0;
+    const terminalShapeValid = !isTerminal || (
+      typeof value.bridgeRequestId === 'string' && value.bridgeRequestId.length > 0
+      && ['result', 'failed', 'cancelled'].includes(value.outcome)
+      && ['command', 'artifact'].includes(value.requestPhase)
+      && typeof value.cancelRequested === 'boolean'
+    );
+    const requestedShapeValid = isTerminal
+      || Boolean(value && ['cancelled', 'already-cancelled', 'not-found'].includes(value.status));
+    if (!identityValid) state.invalidIdentityCount += 1;
+    if (!Number.isFinite(timestampMs)) state.invalidTimestampCount += 1;
+    if (!identityValid || !terminalShapeValid || !requestedShapeValid || !Number.isFinite(timestampMs)) {
+      state.malformedCount += 1;
+      return;
+    }
+    if (isTerminal && state.receipts.length >= receiptLimit) {
+      state.overflow = true;
+      return;
+    }
+    if (!isTerminal && state.cancelRequests.length >= receiptLimit) {
+      state.overflow = true;
+      return;
+    }
+    if (isTerminal) state.receipts.push({ ...value, receivedAtMs: timestampMs });
+    else state.cancelRequests.push({ ...value, atMs: timestampMs });
+  };
+  const recordOversize = (relevant) => {
+    if (relevant) state.droppedOversizeLineCount += 1;
+    else state.ignoredOversizeLineCount += 1;
+  };
+  return {
+    ingest(chunk) {
+      let remaining = String(chunk ?? '');
+      while (remaining.length > 0) {
+        if (state.discardingOversizeLine) {
+          const newlineIndex = remaining.indexOf('\n');
+          if (newlineIndex < 0) return;
+          remaining = remaining.slice(newlineIndex + 1);
+          state.discardingOversizeLine = false;
+          continue;
+        }
+        const newlineIndex = remaining.indexOf('\n');
+        if (newlineIndex < 0) {
+          if (state.buffer.length + remaining.length > maxLineChars) {
+            const candidate = `${state.buffer}${remaining}`.trimStart();
+            state.buffer = '';
+            state.discardingOversizeLine = true;
+            recordOversize(candidate.startsWith(MAP_CANCELLATION_TERMINAL_MARKER)
+              || candidate.startsWith(MAP_CANCELLATION_REQUESTED_MARKER));
+          } else {
+            state.buffer += remaining;
+          }
+          return;
+        }
+        const linePart = remaining.slice(0, newlineIndex);
+        if (state.buffer.length + linePart.length > maxLineChars) {
+          const candidate = `${state.buffer}${linePart}`.trimStart();
+          state.buffer = '';
+          recordOversize(candidate.startsWith(MAP_CANCELLATION_TERMINAL_MARKER)
+            || candidate.startsWith(MAP_CANCELLATION_REQUESTED_MARKER));
+        } else {
+          const line = `${state.buffer}${linePart}`;
+          state.buffer = '';
+          consumeLine(line.endsWith('\r') ? line.slice(0, -1) : line);
+        }
+        remaining = remaining.slice(newlineIndex + 1);
+      }
+    },
+    snapshot() {
+      return {
+        receipts: state.receipts.slice(),
+        receiptCount: state.receipts.length,
+        cancelRequests: state.cancelRequests.slice(),
+        cancelRequestCount: state.cancelRequests.length,
+        overflow: state.overflow,
+        malformedCount: state.malformedCount,
+        invalidTimestampCount: state.invalidTimestampCount,
+        invalidIdentityCount: state.invalidIdentityCount,
+        droppedOversizeLineCount: state.droppedOversizeLineCount,
+        ignoredOversizeLineCount: state.ignoredOversizeLineCount,
+        pendingLineChars: state.buffer.length,
+        discardingOversizeLine: state.discardingOversizeLine
+      };
+    }
+  };
+}
+
+function cancellationObservationHasTerminalForEveryAcceptedRequest(
+  snapshot,
+  requestStart,
+  receiptStart
+) {
+  const accepted = (snapshot?.cancelRequests ?? []).slice(requestStart)
+    .filter((request) => request?.status === 'cancelled' || request?.status === 'already-cancelled');
+  if (accepted.length === 0) return false;
+  const terminalKeys = new Set((snapshot?.receipts ?? []).slice(receiptStart)
+    .map((receipt) => `${receipt?.ownerId}\u0000${receipt?.requestId}`));
+  return [...new Set(accepted.map((request) => `${request?.ownerId}\u0000${request?.requestId}`))]
+    .every((key) => terminalKeys.has(key));
+}
+
+function requestIdsFromRendererEvents(events) {
+  const ids = new Set();
+  for (const event of events ?? []) {
+    const match = String(event?.text ?? '').match(/"requestId"\s*:\s*"([^"]+)"/);
+    if (match?.[1]) ids.add(match[1]);
+    const active = String(event?.text ?? '').match(/"activeRequestIds"\s*:\s*\[([^\]]*)\]/);
+    if (active?.[1]) {
+      for (const id of active[1].matchAll(/"([^"]+)"/g)) ids.add(id[1]);
+    }
+  }
+  return ids;
+}
+
+function extractStructuredNativeCancellationEvidence({
+  receipts,
+  cancelRequests,
+  eventsBeforeSwitch,
+  eventsAfterSwitch,
+  switchStartedAtMs = 0,
+  switchFinishedAtMs = Number.POSITIVE_INFINITY,
+  collectorIntegrity = {}
+}) {
+  // Renderer logs are retained for diagnostics only.  They are not an
+  // authority for cancellation ownership; only the main cancel IPC marker
+  // can establish which owner/request this switch actually cancelled.
+  const startedRequestIds = requestIdsFromRendererEvents(eventsBeforeSwitch);
+  const cleanupRequestIds = requestIdsFromRendererEvents(eventsAfterSwitch);
+  const validCancelRequests = (cancelRequests ?? []).filter((request) =>
+    (request.status === 'cancelled' || request.status === 'already-cancelled')
+    && request.atMs >= switchStartedAtMs
+    && request.atMs <= switchFinishedAtMs
+  );
+  const cancelKeys = new Set(validCancelRequests.map((request) => `${request.ownerId}\u0000${request.requestId}`));
+  const postSwitchReceipts = (receipts ?? []).filter((receipt) => {
+    const key = `${receipt.ownerId}\u0000${receipt.requestId}`;
+    return cancelKeys.has(key)
+      && receipt.receivedAtMs >= switchStartedAtMs
+      && receipt.receivedAtMs <= switchFinishedAtMs;
+  });
+  const acceptedRequestKeys = [...cancelKeys];
+  const terminalRequestKeys = [...new Set(postSwitchReceipts.map((receipt) => `${receipt.ownerId}\u0000${receipt.requestId}`))];
+  const terminalRequestKeySet = new Set(terminalRequestKeys);
+  const missingTerminalRequestKeys = acceptedRequestKeys.filter((key) => !terminalRequestKeySet.has(key));
+  const acceptedRequestCoverage = {
+    acceptedRequestCount: acceptedRequestKeys.length,
+    terminalRequestCount: acceptedRequestKeys.filter((key) => terminalRequestKeySet.has(key)).length,
+    missingTerminalRequestKeys,
+    complete: acceptedRequestKeys.length > 0 && missingTerminalRequestKeys.length === 0
+  };
+  const commandCancelled = postSwitchReceipts.filter((receipt) =>
+    receipt.outcome === 'cancelled'
+    && receipt.requestPhase === 'command'
+    && receipt.cancelRequested === true
+  );
+  const artifactCancelled = postSwitchReceipts.filter((receipt) =>
+    receipt.outcome === 'cancelled'
+    && receipt.requestPhase === 'artifact'
+    && receipt.cancelRequested === true
+  );
+  const unmatched = (receipts ?? []).filter((receipt) => !postSwitchReceipts.includes(receipt));
+  const terminalGroups = new Map();
+  for (const receipt of postSwitchReceipts) {
+    const key = [receipt.ownerId, receipt.requestId, receipt.bridgeRequestId, receipt.requestPhase].join('\u0000');
+    const group = terminalGroups.get(key) ?? [];
+    group.push(receipt);
+    terminalGroups.set(key, group);
+  }
+  const duplicateTerminalGroups = [...terminalGroups.values()].filter((group) => group.length > 1);
+  const contradictoryTerminalGroups = duplicateTerminalGroups.filter((group) =>
+    new Set(group.map((receipt) => receipt.outcome)).size > 1
+  );
+  const integrityIssue = Boolean(
+    collectorIntegrity.overflow
+    || collectorIntegrity.malformedCount > 0
+    || collectorIntegrity.invalidIdentityCount > 0
+    || collectorIntegrity.invalidTimestampCount > 0
+    || collectorIntegrity.droppedOversizeLineCount > 0
+    || duplicateTerminalGroups.length > 0
+    || contradictoryTerminalGroups.length > 0
+    || unmatched.length > 0
+  );
+  const nativeCommandCancellationObserved = commandCancelled.length > 0;
+  const completeAcceptedRequestCoverage = acceptedRequestCoverage.complete;
+  return {
+    startedRequestIds: [...startedRequestIds],
+    cleanupRequestIds: [...cleanupRequestIds],
+    cancelRequests: validCancelRequests,
+    correlatedRequestIds: [...new Set(validCancelRequests.map((request) => request.requestId))],
+    acceptedRequestCoverage,
+    receipts: postSwitchReceipts,
+    commandCancelled,
+    artifactCancelled,
+    unmatched,
+    duplicateTerminalGroups,
+    contradictoryTerminalGroups,
+    nativeCommandCancellationObserved,
+    nativeAbortObserved: nativeCommandCancellationObserved && completeAcceptedRequestCoverage && !integrityIssue,
+    verification: integrityIssue
+      ? nativeCommandCancellationObserved ? 'partial-integrity-unverified' : 'unverified-integrity'
+      : !completeAcceptedRequestCoverage
+        ? nativeCommandCancellationObserved ? 'partial-missing-terminal-unverified' : 'unverified-missing-terminal'
+      : nativeCommandCancellationObserved
+        ? 'observed'
+      : artifactCancelled.length > 0
+        ? 'unverified-artifact-only'
+        : postSwitchReceipts.length > 0
+          ? 'unverified-no-command-cancelled'
+          : 'unverified-missing-or-unmatched'
+  };
+}
+
+function runMapCancellationTelemetryFixture() {
+  const collector = createMapCancellationTelemetryCollector();
+  const command = {
+    schemaVersion: 1,
+    source: 'soulforge.main.map.runBridge',
+    ownerId: 41,
+    requestId: 'page-command',
+    bridgeRequestId: 'bridge-command',
+    outcome: 'cancelled',
+    requestPhase: 'command',
+    cancelRequested: true,
+    receivedAt: '2026-09-09T00:00:00.000Z'
+  };
+  const artifact = {
+    ...command,
+    requestId: 'page-artifact',
+    bridgeRequestId: 'bridge-artifact',
+    requestPhase: 'artifact'
+  };
+  const commandCancel = {
+    schemaVersion: 1,
+    source: 'soulforge.main.map.cancelMapStaticGeometry',
+    ownerId: 41,
+    requestId: 'page-command',
+    status: 'cancelled',
+    atUTC: '2026-09-09T00:00:00.000Z'
+  };
+  const artifactCancel = {
+    ...commandCancel,
+    requestId: 'page-artifact',
+    status: 'already-cancelled'
+  };
+  const crossOwnerCancel = {
+    ...commandCancel,
+    requestId: 'cross-owner'
+  };
+  const startOnly = {
+    ...command,
+    requestId: 'start-only',
+    bridgeRequestId: 'bridge-start-only'
+  };
+  const invalidTimestampCancel = {
+    ...commandCancel,
+    requestId: 'invalid-time',
+    atUTC: 'not-a-timestamp'
+  };
+  const crossOwnerTerminal = {
+    ...command,
+    ownerId: 99,
+    requestId: 'cross-owner',
+    bridgeRequestId: 'bridge-cross-owner'
+  };
+  const duplicateTerminal = {
+    ...command,
+    outcome: 'result'
+  };
+  const missingIdentity = { ...command };
+  delete missingIdentity.ownerId;
+  const lines = [
+    `${MAP_CANCELLATION_REQUESTED_MARKER} ${JSON.stringify(commandCancel)}\n`,
+    `${MAP_CANCELLATION_REQUESTED_MARKER} ${JSON.stringify(artifactCancel)}\n`,
+    `${MAP_CANCELLATION_REQUESTED_MARKER} ${JSON.stringify(crossOwnerCancel)}\n`,
+    `${MAP_CANCELLATION_REQUESTED_MARKER} ${JSON.stringify(invalidTimestampCancel)}\n`,
+    `${MAP_CANCELLATION_TERMINAL_MARKER} ${JSON.stringify(command)}\n`,
+    `${MAP_CANCELLATION_TERMINAL_MARKER} ${JSON.stringify(artifact)}\n`,
+    `${MAP_CANCELLATION_TERMINAL_MARKER} ${JSON.stringify(crossOwnerTerminal)}\n`,
+    `${MAP_CANCELLATION_TERMINAL_MARKER} ${JSON.stringify(startOnly)}\n`,
+    `${MAP_CANCELLATION_TERMINAL_MARKER} ${JSON.stringify(duplicateTerminal)}\n`,
+    `${MAP_CANCELLATION_TERMINAL_MARKER} ${JSON.stringify(missingIdentity)}\n`,
+    `${MAP_CANCELLATION_TERMINAL_MARKER} not-json\n`,
+    `unrelated-log ${MAP_CANCELLATION_TERMINAL_MARKER} ${JSON.stringify(command)}\n`,
+    `${'x'.repeat(128 * 1024 + 32)}\n`
+  ].join('');
+  for (let offset = 0; offset < lines.length; offset += 7) collector.ingest(lines.slice(offset, offset + 7));
+  const snapshot = collector.snapshot();
+  const evidence = extractStructuredNativeCancellationEvidence({
+    receipts: snapshot.receipts,
+    cancelRequests: snapshot.cancelRequests,
+    eventsBeforeSwitch: [{ text: '[MsbScenePanel] MAP mesh page start {"requestId":"page-command"}' }, { text: '[MsbScenePanel] MAP mesh page start {"requestId":"page-artifact"}' }],
+    eventsAfterSwitch: [{ text: '[MsbScenePanel] MAP mesh effect cleanup {"activeRequestIds":["page-command","page-artifact"]}' }],
+    collectorIntegrity: snapshot
+  });
+  const cleanCollector = createMapCancellationTelemetryCollector();
+  cleanCollector.ingest(`${MAP_CANCELLATION_REQUESTED_MARKER} ${JSON.stringify(commandCancel)}\n${MAP_CANCELLATION_TERMINAL_MARKER} ${JSON.stringify(command)}\n`);
+  const cleanSnapshot = cleanCollector.snapshot();
+  const cleanEvidence = extractStructuredNativeCancellationEvidence({
+    receipts: cleanSnapshot.receipts,
+    cancelRequests: cleanSnapshot.cancelRequests,
+    eventsBeforeSwitch: [],
+    eventsAfterSwitch: [],
+    collectorIntegrity: cleanSnapshot
+  });
+  const droppedLineEvidence = extractStructuredNativeCancellationEvidence({
+    receipts: cleanSnapshot.receipts,
+    cancelRequests: cleanSnapshot.cancelRequests,
+    eventsBeforeSwitch: [],
+    eventsAfterSwitch: [],
+    collectorIntegrity: { ...cleanSnapshot, droppedOversizeLineCount: 1 }
+  });
+  return {
+    receiptCount: snapshot.receiptCount,
+    cancelRequestCount: snapshot.cancelRequestCount,
+    malformedCount: snapshot.malformedCount,
+    invalidTimestampCount: snapshot.invalidTimestampCount,
+    invalidIdentityCount: snapshot.invalidIdentityCount,
+    ignoredOversizeLineCount: snapshot.ignoredOversizeLineCount,
+    commandCancellationCount: evidence.commandCancelled.length,
+    artifactCancellationCount: evidence.artifactCancelled.length,
+    acceptedRequestCoverage: evidence.acceptedRequestCoverage,
+    unmatchedCount: evidence.unmatched.length,
+    duplicateTerminalGroupCount: evidence.duplicateTerminalGroups.length,
+    contradictoryTerminalGroupCount: evidence.contradictoryTerminalGroups.length,
+    cleanVerification: cleanEvidence.verification,
+    droppedLineVerification: droppedLineEvidence.verification,
+    verification: evidence.verification,
+    pass: snapshot.receiptCount === 5
+      && snapshot.cancelRequestCount === 3
+      && snapshot.malformedCount === 3
+      && snapshot.invalidTimestampCount === 1
+      && snapshot.invalidIdentityCount === 1
+      && snapshot.ignoredOversizeLineCount >= 1
+      && evidence.commandCancelled.length === 1
+      && evidence.artifactCancelled.length === 1
+      && evidence.nativeCommandCancellationObserved === true
+      && evidence.nativeAbortObserved === false
+      && evidence.verification === 'partial-integrity-unverified'
+      && evidence.acceptedRequestCoverage.acceptedRequestCount === 3
+      && evidence.acceptedRequestCoverage.terminalRequestCount === 2
+      && evidence.acceptedRequestCoverage.complete === false
+      && evidence.unmatched.length === 2
+      && evidence.duplicateTerminalGroups.length === 1
+      && evidence.contradictoryTerminalGroups.length === 1
+      && cleanEvidence.nativeAbortObserved === true
+      && cleanEvidence.acceptedRequestCoverage.complete === true
+      && cleanEvidence.verification === 'observed'
+      && droppedLineEvidence.nativeAbortObserved === false
+      && droppedLineEvidence.verification === 'partial-integrity-unverified'
+  };
+}
+
+const MAP_MODEL_UNAVAILABLE_TELEMETRY_MARKER = '[SF_MAP_MODEL_UNAVAILABLE]';
+const MAP_MODEL_UNAVAILABLE_TELEMETRY_LIMIT = 256;
+const STABLE_MAP_DIAGNOSTIC_CODE = /^[A-Z][A-Z0-9_]{2,}$/;
+
+/**
+ * Keep normal-run per-model unavailable evidence bounded and structured. The
+ * renderer emits only a model name, stable diagnostic codes, and an empty
+ * geometry classification; this collector does not reread native data or
+ * infer a missing path from diagnostic text.
+ */
+function createMapModelUnavailableTelemetryCollector() {
+  const state = {
+    records: [],
+    seenModelNames: new Set(),
+    overflow: false,
+    malformedCount: 0
+  };
+  const consumeLine = (line) => {
+    const candidate = String(line ?? '').trimStart();
+    if (!candidate.startsWith(MAP_MODEL_UNAVAILABLE_TELEMETRY_MARKER)) return;
+    const payload = candidate.slice(MAP_MODEL_UNAVAILABLE_TELEMETRY_MARKER.length).trim();
+    let value;
+    try {
+      value = JSON.parse(payload);
+    } catch {
+      state.malformedCount += 1;
+      return;
+    }
+    const modelName = typeof value?.modelName === 'string' && value.modelName.length > 0
+      && value.modelName.length <= 512
+      ? value.modelName
+      : null;
+    const diagnosticCodes = Array.isArray(value?.diagnosticCodes)
+      && value.diagnosticCodes.length <= 32
+      && value.diagnosticCodes.every((code) => typeof code === 'string' && STABLE_MAP_DIAGNOSTIC_CODE.test(code))
+      ? [...new Set(value.diagnosticCodes)].sort()
+      : null;
+    const geometryClassification = value?.geometryClassification;
+    if (!modelName || !diagnosticCodes || !['empty-geometry', 'skeleton-only', 'unclassified'].includes(geometryClassification)) {
+      state.malformedCount += 1;
+      return;
+    }
+    if (state.seenModelNames.has(modelName)) return;
+    state.seenModelNames.add(modelName);
+    if (state.records.length >= MAP_MODEL_UNAVAILABLE_TELEMETRY_LIMIT) {
+      state.overflow = true;
+      return;
+    }
+    state.records.push({ modelName, diagnosticCodes, geometryClassification });
+  };
+  return {
+    ingest(chunk) {
+      for (const line of String(chunk ?? '').split(/\r?\n/)) consumeLine(line);
+    },
+    snapshot() {
+      return {
+        records: state.records.slice(),
+        recordCount: state.records.length,
+        overflow: state.overflow,
+        malformedCount: state.malformedCount
+      };
+    }
+  };
+}
+
+function runMapModelUnavailableTelemetryFixture() {
+  const collector = createMapModelUnavailableTelemetryCollector();
+  collector.ingest(`${MAP_MODEL_UNAVAILABLE_TELEMETRY_MARKER} ${JSON.stringify({
+    modelName: 'o000100',
+    diagnosticCodes: ['MAP_STATIC_GEOMETRY_COMPLETE'],
+    geometryClassification: 'empty-geometry'
+  })}\n`);
+  collector.ingest(`${MAP_MODEL_UNAVAILABLE_TELEMETRY_MARKER} ${JSON.stringify({
+    modelName: 'c0000',
+    diagnosticCodes: ['MAP_CHARACTER_GEOMETRY_UNAVAILABLE'],
+    geometryClassification: 'skeleton-only'
+  })}\n`);
+  // Duplicate model entries are not a second unavailable model.
+  collector.ingest(`${MAP_MODEL_UNAVAILABLE_TELEMETRY_MARKER} ${JSON.stringify({
+    modelName: 'o000100',
+    diagnosticCodes: ['MAP_STATIC_GEOMETRY_COMPLETE'],
+    geometryClassification: 'empty-geometry'
+  })}\n`);
+  collector.ingest(`${MAP_MODEL_UNAVAILABLE_TELEMETRY_MARKER} not-json\n`);
+  for (let index = 0; index <= MAP_MODEL_UNAVAILABLE_TELEMETRY_LIMIT; index += 1) {
+    collector.ingest(`${MAP_MODEL_UNAVAILABLE_TELEMETRY_MARKER} ${JSON.stringify({
+      modelName: `h${String(index).padStart(6, '0')}`,
+      diagnosticCodes: [],
+      geometryClassification: 'unclassified'
+    })}\n`);
+  }
+  const snapshot = collector.snapshot();
+  return {
+    recordCount: snapshot.recordCount,
+    overflow: snapshot.overflow,
+    malformedCount: snapshot.malformedCount,
+    pass: snapshot.recordCount === MAP_MODEL_UNAVAILABLE_TELEMETRY_LIMIT
+      && snapshot.overflow === true
+      && snapshot.malformedCount === 1
+      && snapshot.records[0]?.modelName === 'o000100'
+      && snapshot.records[0]?.geometryClassification === 'empty-geometry'
+      && snapshot.records[1]?.geometryClassification === 'skeleton-only'
+  };
+}
+
+function runMapLoadRetentionTelemetryFixture() {
+  const first = {
+    preparedEnvelopeCount: 3,
+    inFlightCount: 2,
+    legacyInFlightCount: 1,
+    uploadedCount: 7
+  };
+  const second = {
+    preparedEnvelopeCount: 0,
+    inFlightCount: 0,
+    legacyInFlightCount: 0,
+    uploadedCount: 8,
+    // Payload-like fields must never be copied into the probe report.
+    modelNames: ['o000100']
+  };
+  const events = extractMapLoadRetentionEvents([
+    { atMs: 11, text: `${MAP_LOAD_RETENTION_MARKER} ${JSON.stringify(first)}` },
+    { atMs: 12, text: `${MAP_LOAD_RETENTION_MARKER} ${JSON.stringify(second)}` },
+    { atMs: 13, text: `${MAP_LOAD_RETENTION_MARKER} not-json` },
+    { atMs: 14, text: '[MsbScenePanel] unrelated console object' }
+  ]);
+  const expected = [
+    { atMs: 11, ...first },
+    {
+      atMs: 12,
+      preparedEnvelopeCount: 0,
+      inFlightCount: 0,
+      legacyInFlightCount: 0,
+      uploadedCount: 8
+    }
+  ];
+  return {
+    events,
+    malformedIgnored: events.length === 2,
+    countsOnly: JSON.stringify(events) === JSON.stringify(expected),
+    pass: JSON.stringify(events) === JSON.stringify(expected)
+  };
+}
+
+function runMapApiObserverProjectionFixture() {
+  const projection = projectMapApiObserverResult({
+    ok: false,
+    error: { code: 'MAP_RESPONSE_ERROR', message: 'native path and payload must not be copied' },
+    diagnostics: Array.from({ length: 20 }, (_, index) => ({
+      code: index === 19 ? `MAP_DIAGNOSTIC_${'X'.repeat(100)}` : `MAP_DIAGNOSTIC_${String(index).padStart(2, '0')}`,
+      message: `diagnostic message ${index}`,
+      sourceUri: 'file:///native/path/that-must-not-be-observed',
+      details: { geometryBytes: 'omitted' }
+    }))
+  });
+  const keys = Object.keys(projection).sort();
+  return {
+    resultErrorCodeLength: projection.resultErrorCode?.length ?? null,
+    diagnosticCount: projection.diagnosticCodes.length,
+    firstDiagnosticCode: projection.diagnosticCodes[0] ?? null,
+    keys,
+    pass: projection.resultErrorCode === 'MAP_RESPONSE_ERROR'
+      && projection.diagnosticCodes.length === MAP_API_OBSERVER_MAX_DIAGNOSTICS
+      && projection.diagnosticCodes.at(-1) === 'MAP_DIAGNOSTIC_15'
+      && !projection.diagnosticCodes.some((code) => code.length > 96)
+      && JSON.stringify(keys) === JSON.stringify(['diagnosticCodes', 'resultErrorCode'])
+  };
 }
 
 /**
@@ -1483,8 +2696,13 @@ function extractNativeAbortEvidence(events, stdoutTail) {
  */
 function createMainMapTelemetryCollector() {
   const marker = '[SF_MAP_MAIN_TELEMETRY]';
+  const maxLineChars = MAIN_MAP_TELEMETRY_MAX_LINE_CHARS;
+  const diagnosticLimit = 32;
   const state = {
     buffer: '',
+    discardingOversizeLine: false,
+    droppedOversizeLineCount: 0,
+    diagnostics: [],
     markerCount: 0,
     installed: false,
     handlerWrapped: false,
@@ -1501,6 +2719,15 @@ function createMainMapTelemetryCollector() {
     transitionLimit: 128,
     topSlowCallLimit: 16,
     timeBucketLimit: 3600
+  };
+  const recordOversizeLine = () => {
+    state.droppedOversizeLineCount += 1;
+    state.diagnostics.push({
+      code: 'MAP_MAIN_TELEMETRY_OVERSIZE_LINE_DROPPED',
+      maxLineChars,
+      count: state.droppedOversizeLineCount
+    });
+    if (state.diagnostics.length > diagnosticLimit) state.diagnostics.shift();
   };
   const stateShape = (entry) => ({
     visible: entry?.visible ?? null,
@@ -1598,13 +2825,42 @@ function createMainMapTelemetryCollector() {
   };
   return {
     ingest(chunk) {
-      state.buffer += String(chunk ?? '');
-      const lines = state.buffer.split(/\r?\n/);
-      state.buffer = lines.pop() ?? '';
-      for (const line of lines) consumeLine(line);
-      // A renderer/native failure must not let an unterminated child line grow
-      // without bound while the probe is waiting for its phase timeout.
-      if (state.buffer.length > 64_000) state.buffer = state.buffer.slice(-64_000);
+      let remaining = String(chunk ?? '');
+      while (remaining.length > 0) {
+        if (state.discardingOversizeLine) {
+          const newlineIndex = remaining.indexOf('\n');
+          if (newlineIndex < 0) return;
+          remaining = remaining.slice(newlineIndex + 1);
+          state.discardingOversizeLine = false;
+          continue;
+        }
+
+        const newlineIndex = remaining.indexOf('\n');
+        if (newlineIndex < 0) {
+          // An unterminated line is retained only while it remains within the
+          // fixed bound. Once exceeded, clear it and discard until newline;
+          // never keep a tail that could be mistaken for a JSON marker.
+          if (state.buffer.length + remaining.length > maxLineChars) {
+            state.buffer = '';
+            state.discardingOversizeLine = true;
+            recordOversizeLine();
+          } else {
+            state.buffer += remaining;
+          }
+          return;
+        }
+
+        const linePart = remaining.slice(0, newlineIndex);
+        if (state.buffer.length + linePart.length > maxLineChars) {
+          state.buffer = '';
+          recordOversizeLine();
+        } else {
+          const line = `${state.buffer}${linePart}`;
+          state.buffer = '';
+          consumeLine(line.endsWith('\r') ? line.slice(0, -1) : line);
+        }
+        remaining = remaining.slice(newlineIndex + 1);
+      }
     },
     snapshot() {
       const lastCall = state.recentCallMarkers.at(-1) ?? null;
@@ -1645,6 +2901,10 @@ function createMainMapTelemetryCollector() {
       return {
         observed: state.markerCount > 0,
         markerCount: state.markerCount,
+        droppedOversizeLineCount: state.droppedOversizeLineCount,
+        diagnostics: state.diagnostics.slice(),
+        pendingLineChars: state.buffer.length,
+        discardingOversizeLine: state.discardingOversizeLine,
         installed: state.installed,
         handlerWrapped: state.handlerWrapped,
         instrumentationError: state.instrumentationError,
@@ -1656,6 +2916,90 @@ function createMainMapTelemetryCollector() {
         stateTransitions: state.stateTransitions.slice(-state.transitionLimit)
       };
     }
+  };
+}
+
+function runMainMapTelemetryCollectorFixture() {
+  const marker = '[SF_MAP_MAIN_TELEMETRY]';
+  const chunkSize = 8_191;
+  const timingSummary = {
+    schemaVersion: 1,
+    unit: 'ms',
+    requestCount: 1,
+    unavailablePhases: [],
+    phases: {
+      queueWaitMs: { count: 1, totalMs: 3, minMs: 3, maxMs: 3, topSlowMs: [3] }
+    }
+  };
+  const nativeAccumulator = createMapNativeTimingAccumulator();
+  recordMapNativeTimingCall(nativeAccumulator, 'direct', timingSummary);
+  recordMapNativeTimingCall(nativeAccumulator, 'ui-load', timingSummary);
+  const nativeTimingSummaryByPhase = snapshotMapNativeTimingAccumulator(nativeAccumulator);
+  const largeSummary = {
+    installed: true,
+    handlerWrapped: true,
+    calls: 2,
+    nativeTimingSummaryByPhase,
+    // Real main summaries contain bounded call/time-bucket details. Keep this
+    // fixture line above the old 64 KiB tail limit while below the new bound.
+    padding: 'x'.repeat(70_000)
+  };
+  const largeLine = `${marker} ${JSON.stringify({ type: 'summary', summary: largeSummary })}\n`;
+  const normalCollector = createMainMapTelemetryCollector();
+  for (let offset = 0; offset < largeLine.length; offset += chunkSize) {
+    normalCollector.ingest(largeLine.slice(offset, offset + chunkSize));
+  }
+  const normalSnapshot = normalCollector.snapshot();
+  const normalNative = normalSnapshot.summary?.nativeTimingSummaryByPhase;
+  const normalPass = largeLine.length > 64 * 1024
+    && largeLine.length < MAIN_MAP_TELEMETRY_MAX_LINE_CHARS
+    && normalSnapshot.droppedOversizeLineCount === 0
+    && normalSnapshot.markerCount === 1
+    && normalSnapshot.summary?.padding?.length === 70_000
+    && normalNative?.buckets?.direct?.summaryCount === 1
+    && normalNative?.buckets?.['ui-load']?.summaryCount === 1;
+
+  const oversizeCollector = createMainMapTelemetryCollector();
+  const oversizeBody = `${marker}${'x'.repeat(MAIN_MAP_TELEMETRY_MAX_LINE_CHARS + 1_024)}`;
+  for (let offset = 0; offset < oversizeBody.length; offset += chunkSize) {
+    oversizeCollector.ingest(oversizeBody.slice(offset, offset + chunkSize));
+  }
+  const beforeRecovery = oversizeCollector.snapshot();
+  const recoverySummary = { recovered: true, nativeTimingSummaryByPhase };
+  const recoveryLine = `${marker} ${JSON.stringify({ type: 'summary', summary: recoverySummary })}\n`;
+  oversizeCollector.ingest(`\n${recoveryLine}`);
+  const recoverySnapshot = oversizeCollector.snapshot();
+  const recoveryPass = beforeRecovery.droppedOversizeLineCount === 1
+    && beforeRecovery.diagnostics.some((item) => item.code === 'MAP_MAIN_TELEMETRY_OVERSIZE_LINE_DROPPED')
+    && beforeRecovery.pendingLineChars === 0
+    && beforeRecovery.discardingOversizeLine === true
+    && recoverySnapshot.droppedOversizeLineCount === 1
+    && recoverySnapshot.markerCount === 1
+    && recoverySnapshot.summary?.recovered === true
+    && recoverySnapshot.summary?.nativeTimingSummaryByPhase?.buckets?.direct?.summaryCount === 1
+    && recoverySnapshot.discardingOversizeLine === false
+    && recoverySnapshot.pendingLineChars === 0;
+
+  return {
+    maxLineChars: MAIN_MAP_TELEMETRY_MAX_LINE_CHARS,
+    chunkSize,
+    normal: {
+      lineChars: largeLine.length,
+      chunkCount: Math.ceil(largeLine.length / chunkSize),
+      droppedOversizeLineCount: normalSnapshot.droppedOversizeLineCount,
+      markerCount: normalSnapshot.markerCount,
+      nativeBuckets: Object.keys(normalNative?.buckets ?? {}),
+      pass: normalPass
+    },
+    oversizeRecovery: {
+      bodyChars: oversizeBody.length,
+      droppedOversizeLineCount: recoverySnapshot.droppedOversizeLineCount,
+      diagnosticCodes: recoverySnapshot.diagnostics.map((item) => item.code),
+      markerCount: recoverySnapshot.markerCount,
+      recovered: recoverySnapshot.summary?.recovered === true,
+      pass: recoveryPass
+    },
+    pass: normalPass && recoveryPass
   };
 }
 
@@ -2021,6 +3365,55 @@ function evaluateMapForegroundConditions(observedWindow) {
   };
 }
 
+function summarizeTelemetrySamplingErrors(errors) {
+  const summary = {
+    total: 0,
+    timeout: 0,
+    inFlightSkip: 0,
+    failed: 0,
+    unknown: 0,
+    legacyMessages: []
+  };
+  const legacyMessages = new Set();
+  for (const entry of Array.isArray(errors) ? errors : []) {
+    summary.total += 1;
+    const status = typeof entry?.status === 'string' ? entry.status : '';
+    const message = typeof entry?.message === 'string'
+      ? entry.message
+      : typeof entry?.reason === 'string' ? entry.reason : '';
+    const legacy = status === '';
+    if (legacy && message) legacyMessages.add(message);
+    if (status === 'timeout' || entry?.timedOut === true || message === 'MAP_UI_TELEMETRY_SAMPLE_TIMEOUT') {
+      summary.timeout += 1;
+    } else if (
+      status === 'pending-deadline'
+      && (entry?.pendingCallId !== null && entry?.pendingCallId !== undefined
+        || message.includes('IN_FLIGHT'))
+    ) {
+      summary.inFlightSkip += 1;
+    } else if (status === 'failed' || entry?.failed === true) {
+      summary.failed += 1;
+    } else {
+      summary.unknown += 1;
+    }
+  }
+  summary.legacyMessages = [...legacyMessages].slice(0, 8);
+  return summary;
+}
+
+function formatTelemetrySamplingIncompleteReason(summary) {
+  const parts = [];
+  if (summary.timeout > 0) parts.push(`${summary.timeout} timeout(s)`);
+  if (summary.inFlightSkip > 0) parts.push(`${summary.inFlightSkip} in-flight skip(s)`);
+  if (summary.failed > 0) parts.push(`${summary.failed} failed`);
+  if (summary.unknown > 0) parts.push(`${summary.unknown} unknown`);
+  if (summary.legacyMessages.length > 0) {
+    parts.push(`legacy=${summary.legacyMessages.join('|')}`);
+  }
+  if (parts.length === 0) parts.push(`${summary.total} unknown`);
+  return `telemetry sampling incomplete (${parts.join(', ')})`;
+}
+
 function finalizeMapStatus(report, mode = MODE) {
   const functionalLoadOk = Boolean(
     report.msb?.ok
@@ -2064,7 +3457,8 @@ function finalizeMapStatus(report, mode = MODE) {
     && maxLongTaskMsKnown
     && typeof telemetry?.visibility?.currentState === 'string'
   );
-  const sampleErrors = Array.isArray(report.telemetrySamplingErrors) ? report.telemetrySamplingErrors.length : 0;
+  const telemetrySamplingSummary = summarizeTelemetrySamplingErrors(report.telemetrySamplingErrors);
+  const sampleErrors = telemetrySamplingSummary.total;
   const foregroundLongGaps = Number(raf?.visibleLongGapCount ?? 0);
   const hiddenLongGaps = Number(raf?.hiddenLongGapCount ?? 0);
   const visibleStateKnown = telemetry?.visibility?.currentState === 'visible'
@@ -2090,7 +3484,7 @@ function finalizeMapStatus(report, mode = MODE) {
   } else if (!metricsValid) {
     responsivenessReason = 'telemetry boundary metrics incomplete or RAF accounting fixture failed';
   } else if (sampleErrors > 0) {
-    responsivenessReason = `telemetry sampling incomplete (${sampleErrors} timeout(s))`;
+    responsivenessReason = formatTelemetrySamplingIncompleteReason(telemetrySamplingSummary);
   } else if (!visibleStateKnown) {
     responsivenessReason = 'document visibility state unavailable';
   } else if (foregroundConditions.valid !== true) {
@@ -2112,6 +3506,7 @@ function finalizeMapStatus(report, mode = MODE) {
     foregroundConditionsValid: foregroundConditions.valid === true,
     foregroundConditionsVerified: foregroundConditions.verified === true,
     foregroundConditionsReason: foregroundConditions.reason,
+    telemetrySampling: telemetrySamplingSummary,
     nativeCancellation: report.cancellation?.nativeAbortObserved === true ? 'observed' : 'unverified'
   };
   // Legacy process exit remains a functional-load result. Explicit status
@@ -2334,11 +3729,54 @@ function runMapStatusFixture() {
   });
   const report = makeReport({ uiLoad: { complete: false } });
   finalizeMapStatus(report, 'normal');
+  const timeoutSamplingErrors = [
+    {
+      elapsedMs: 1_000,
+      message: 'MAP_UI_TELEMETRY_SAMPLE_TIMEOUT',
+      status: 'timeout',
+      callId: 57,
+      pendingCallId: null,
+      timedOut: true,
+      lateSettled: false,
+      failed: false,
+      pendingDeadline: false,
+      error: null
+    },
+    ...Array.from({ length: 19 }, (_, index) => ({
+      elapsedMs: 1_015 + index,
+      message: 'MAP_UI_TELEMETRY_SAMPLE_IN_FLIGHT',
+      status: 'pending-deadline',
+      callId: null,
+      pendingCallId: 57,
+      timedOut: false,
+      lateSettled: false,
+      failed: false,
+      pendingDeadline: true,
+      error: null
+    })),
+    {
+      elapsedMs: 2_000,
+      message: 'MAP_UI_TELEMETRY_SAMPLE_TIMEOUT',
+      status: 'timeout',
+      callId: 92,
+      pendingCallId: null,
+      timedOut: true,
+      lateSettled: false,
+      failed: false,
+      pendingDeadline: false,
+      error: null
+    }
+  ];
   const timeoutReport = makeReport({
     mapTelemetry: { total: completeMapDelta },
-    telemetrySamplingErrors: [{ phase: 'fixture', message: 'MAP_UI_TELEMETRY_SAMPLE_TIMEOUT' }]
+    telemetrySamplingErrors: timeoutSamplingErrors
   });
   finalizeMapStatus(timeoutReport, 'normal');
+  const legacySamplingReport = makeReport({
+    mapTelemetry: { total: completeMapDelta },
+    telemetrySamplingErrors: [{ phase: 'fixture', message: 'LEGACY_SAMPLE_ERROR' }]
+  });
+  finalizeMapStatus(legacySamplingReport, 'normal');
   // A legacy diff can look clean when only the final 2,000-frame tail was
   // retained. It must never satisfy the new cumulative-boundary gate.
   const legacyTailReport = makeReport({
@@ -2501,8 +3939,15 @@ function runMapStatusFixture() {
     timeout: {
       responsivenessVerified: timeoutReport.status.responsivenessVerified,
       responsivenessReason: timeoutReport.status.responsivenessReason,
+      samplingSummary: timeoutReport.status.telemetrySampling,
       pass: timeoutReport.status.responsivenessVerified === false
-        && timeoutReport.status.responsivenessReason.includes('sampling incomplete')
+        && timeoutReport.status.responsivenessReason === 'telemetry sampling incomplete (2 timeout(s), 19 in-flight skip(s))'
+    },
+    legacySampling: {
+      responsivenessReason: legacySamplingReport.status.responsivenessReason,
+      samplingSummary: legacySamplingReport.status.telemetrySampling,
+      pass: legacySamplingReport.status.responsivenessReason.includes('unknown')
+        && legacySamplingReport.status.responsivenessReason.includes('legacy=LEGACY_SAMPLE_ERROR')
     },
     legacyTail: {
       responsivenessVerified: legacyTailReport.status.responsivenessVerified,
@@ -2583,7 +4028,8 @@ function runMapStatusFixture() {
     },
     pass: report.status.responsivenessVerified === false
       && timeoutReport.status.responsivenessVerified === false
-      && timeoutReport.status.responsivenessReason.includes('sampling incomplete')
+      && timeoutReport.status.responsivenessReason === 'telemetry sampling incomplete (2 timeout(s), 19 in-flight skip(s))'
+      && legacySamplingReport.status.responsivenessReason.includes('legacy=LEGACY_SAMPLE_ERROR')
       && legacyTailReport.status.responsivenessVerified === false
       && legacyTailReport.status.metricsValid === false
       && completeReport.status.responsivenessVerified === true
@@ -2602,21 +4048,704 @@ function runMapStatusFixture() {
   };
 }
 
+function runProductionMapTimingSummaryFixture() {
+  const moduleUrl = new URL('../apps/desktop/src/main/mapTimingTelemetry.ts', import.meta.url).href;
+  const childSource = String.raw`
+import {
+  MAP_NATIVE_TIMING_CODE,
+  beginMapNativeTimingSession,
+  clearMapNativeTimingSession,
+  recordMapNativeTiming
+} from ${JSON.stringify(moduleUrl)};
+
+const diagnostic = (details) => [{ code: MAP_NATIVE_TIMING_CODE, details }];
+const key = 'map-streaming-native-fixture';
+beginMapNativeTimingSession(key);
+let first = null;
+let continuation = null;
+for (let index = 0; index < 32; index += 1) {
+  const queueWaitMs = index < 16 ? 85 + index : 185 + (index - 16);
+  const details = {
+    schemaVersion: 1,
+    unit: 'ms',
+    queueWaitMs,
+    totalMs: queueWaitMs + 12
+  };
+  if (index === 0) details.flverReadMs = 12;
+  else details.unavailablePhases = ['flverReadMs'];
+  const summary = recordMapNativeTiming(key, diagnostic(details));
+  if (!summary) throw new Error('production timing summary missing');
+  if (index === 0) first = summary.details;
+  continuation = summary.details;
+}
+clearMapNativeTimingSession(key);
+console.log(JSON.stringify({ first, continuation }));
+`;
+  const result = spawnSync(process.execPath, [
+    '--experimental-strip-types',
+    '--input-type=module',
+    '-e',
+    childSource
+  ], {
+    cwd: ROOT,
+    encoding: 'utf8',
+    windowsHide: true,
+    maxBuffer: 4 * 1024 * 1024,
+    timeout: 60_000
+  });
+  if (result.error || result.status !== 0) {
+    return {
+      pass: false,
+      error: result.error?.message ?? result.stderr?.trim() ?? `child exited with ${result.status}`,
+      first: null,
+      continuation: null
+    };
+  }
+  const line = result.stdout
+    .trim()
+    .split(/\r?\n/)
+    .findLast((item) => item.trim().startsWith('{'));
+  if (!line) {
+    return { pass: false, error: 'production timing fixture returned no JSON', first: null, continuation: null };
+  }
+  try {
+    const output = JSON.parse(line);
+    const first = output.first ?? null;
+    const continuation = output.continuation ?? null;
+    return {
+      pass: first?.requestCount === 1
+        && continuation?.requestCount === 32
+        && continuation?.phases?.queueWaitMs?.count === 32
+        && continuation?.phases?.queueWaitMs?.totalMs === 4560
+        && continuation?.phases?.queueWaitMs?.topSlowMs?.length === 16
+        && continuation?.phases?.queueWaitMs?.topSlowMs?.[0] === 200
+        && continuation?.phases?.queueWaitMs?.topSlowMs?.at(-1) === 185
+        && continuation?.phases?.flverReadMs?.count === 1
+        && continuation?.unavailablePhases?.includes('flverReadMs') === true,
+      first,
+      continuation,
+      error: null
+    };
+  } catch (error) {
+    return {
+      pass: false,
+      error: error instanceof Error ? error.message : String(error),
+      first: null,
+      continuation: null
+    };
+  }
+}
+
+async function runMapMainTimingPhaseFixture() {
+  const hadOriginal = Object.prototype.hasOwnProperty.call(globalThis, MAP_MAIN_TIMING_PHASE_KEY);
+  const original = globalThis[MAP_MAIN_TIMING_PHASE_KEY];
+  const transitions = [];
+  let setterCalls = 0;
+  let currentPhase = 'outside';
+  const control = {
+    setPhase(nextPhase) {
+      setterCalls += 1;
+      currentPhase = nextPhase;
+      transitions.push(nextPhase);
+      return { ok: true, phase: nextPhase };
+    },
+    snapshot() {
+      return { phase: currentPhase };
+    }
+  };
+  const app = {
+    evaluate(callback, arg) {
+      // ElectronApplication.evaluate supplies the Electron module first and
+      // the caller argument second. Keeping both positions here catches a
+      // probe callback that accidentally reads the module as `options`.
+      return callback({ fixtureElectron: true }, arg);
+    }
+  };
+  globalThis[MAP_MAIN_TIMING_PHASE_KEY] = control;
+  try {
+    const phases = ['direct', 'ui-load', 'done'];
+    const results = [];
+    for (const phase of phases) results.push(await setMainMapTimingPhase(app, phase));
+    return {
+      phases,
+      results,
+      transitions,
+      setterCalls,
+      finalPhase: currentPhase,
+      pass: results.every((result, index) => result?.ok === true && result.phase === phases[index])
+        && transitions.join('|') === phases.join('|')
+        && setterCalls === phases.length
+        && currentPhase === 'done'
+    };
+  } catch (error) {
+    return {
+      phases: ['direct', 'ui-load', 'done'],
+      results: [],
+      transitions,
+      setterCalls,
+      finalPhase: currentPhase,
+      pass: false,
+      error: error instanceof Error ? error.message : String(error)
+    };
+  } finally {
+    if (hadOriginal) globalThis[MAP_MAIN_TIMING_PHASE_KEY] = original;
+    else delete globalThis[MAP_MAIN_TIMING_PHASE_KEY];
+  }
+}
+
+function runMapNativeTimingAggregationFixture() {
+  const productionContract = runProductionMapTimingSummaryFixture();
+  const phase = (count, totalMs, minMs, maxMs, topSlowMs) => ({
+    count,
+    totalMs,
+    minMs,
+    maxMs,
+    topSlowMs
+  });
+  const makeSummary = ({ requestCount, unavailablePhases = [], phases }) => ({
+    schemaVersion: 1,
+    unit: 'ms',
+    requestCount,
+    unavailablePhases,
+    phases
+  });
+  const directSummaryA = makeSummary({
+    requestCount: 2,
+    phases: {
+      queueWaitMs: phase(16, 1480, 85, 100, Array.from({ length: 16 }, (_, index) => 100 - index)),
+      flverReadMs: phase(1, 12, 12, 12, [12])
+    }
+  });
+  const directSummaryB = makeSummary({
+    requestCount: 3,
+    unavailablePhases: ['flverReadMs'],
+    phases: {
+      queueWaitMs: phase(16, 3080, 185, 200, Array.from({ length: 16 }, (_, index) => 200 - index)),
+      // Production main keeps the phase aggregate from earlier pages while
+      // the session-wide unavailable union also contains this phase.
+      flverReadMs: phase(1, 12, 12, 12, [12])
+    }
+  });
+  const uiSummary = makeSummary({
+    requestCount: 4,
+    phases: {
+      queueWaitMs: phase(1, 4, 4, 4, [4]),
+      totalMs: phase(1, 20, 20, 20, [20])
+    }
+  });
+
+  const aggregate = createMapNativeTimingAccumulator();
+  // Capture the phase at request start.  The simulated current phase changes
+  // before the in-flight request resolves; recording still uses direct.
+  const requestStartPhase = 'direct';
+  let currentPhase = requestStartPhase;
+  const directA = recordMapNativeTimingCall(aggregate, requestStartPhase, directSummaryA);
+  currentPhase = 'ui-load';
+  const directInFlight = recordMapNativeTimingCall(aggregate, requestStartPhase, directSummaryB);
+  const ui = recordMapNativeTimingCall(aggregate, currentPhase, uiSummary);
+
+  const invalidSchema = recordMapNativeTimingCall(
+    aggregate,
+    'ui-load',
+    { ...uiSummary, schemaVersion: 2 }
+  );
+  const invalidUnit = recordMapNativeTimingCall(
+    aggregate,
+    'ui-load',
+    { ...uiSummary, unit: 'seconds' }
+  );
+  const invalidPhase = recordMapNativeTimingCall(
+    aggregate,
+    'ui-load',
+    { ...uiSummary, phases: { unknownMs: phase(1, 1, 1, 1, [1]) } }
+  );
+  const invalidNumber = recordMapNativeTimingCall(
+    aggregate,
+    'ui-load',
+    { ...uiSummary, phases: { queueWaitMs: phase(1, Number.POSITIVE_INFINITY, 1, 1, [1]) } }
+  );
+  const noSummary = recordMapNativeTimingCall(aggregate, 'ui-load', null);
+  const snapshot = snapshotMapNativeTimingAccumulator(aggregate);
+  const direct = snapshot.buckets.direct;
+  const uiBucket = snapshot.buckets['ui-load'];
+  const queue = direct.phases.queueWaitMs;
+  const flverCoverage = direct.coverage.phaseCoverage.flverReadMs;
+  const invalidReasons = [
+    invalidSchema.reason,
+    invalidUnit.reason,
+    invalidPhase.reason,
+    invalidNumber.reason
+  ];
+  const pass = directA.accepted === true
+    && directInFlight.accepted === true
+    && ui.accepted === true
+    && direct.callCount === 2
+    && direct.summaryCount === 2
+    && direct.requestCount === 5
+    && uiBucket.callCount === 6
+    && uiBucket.summaryCount === 1
+    && uiBucket.requestCount === 4
+    && uiBucket.callsWithoutSummary === 1
+    && uiBucket.invalidSummaryCount === 4
+    && invalidReasons.every((reason) => typeof reason === 'string')
+    && queue.count === 32
+    && queue.totalMs === 4560
+    && queue.minMs === 85
+    && queue.maxMs === 200
+    && queue.topSlowMs.length === 16
+    && queue.topSlowMs[0] === 200
+    && queue.topSlowMs.at(-1) === 185
+    && flverCoverage.coverage === 'partial-coverage'
+    && flverCoverage.observedSummaryCount === 2
+    && flverCoverage.unavailableSummaryCount === 1
+    && direct.coverage.partialUnavailablePhases.includes('flverReadMs')
+    && !direct.coverage.unavailablePhases.includes('flverReadMs')
+    && uiBucket.coverage.status === 'partial-coverage';
+
+  const noObservationAccumulator = createMapNativeTimingAccumulator();
+  recordMapNativeTimingCall(noObservationAccumulator, 'ui-load', null);
+  const noObservation = snapshotMapNativeTimingAccumulator(noObservationAccumulator).buckets['ui-load'];
+  const noObservationPass = noObservation.summaryCount === 0
+    && noObservation.callCount === 1
+    && noObservation.callsWithoutSummary === 1
+    && noObservation.coverage.status === 'no-observations'
+    && noObservation.coverage.unavailablePhases.length === 0
+    && noObservation.coverage.phaseCoverage.queueWaitMs.coverage === 'no-observations';
+
+  const productionAccumulator = createMapNativeTimingAccumulator();
+  const productionRecord = recordMapNativeTimingCall(
+    productionAccumulator,
+    'direct',
+    productionContract.continuation
+  );
+  const productionBucket = snapshotMapNativeTimingAccumulator(productionAccumulator).buckets.direct;
+  const productionFlverCoverage = productionBucket.coverage.phaseCoverage.flverReadMs;
+  const productionPass = productionContract.pass
+    && productionRecord.accepted === true
+    && productionBucket.requestCount === 32
+    && productionBucket.phases.queueWaitMs.count === 32
+    && productionBucket.phases.queueWaitMs.totalMs === 4560
+    && productionBucket.phases.queueWaitMs.topSlowMs.length === 16
+    && productionFlverCoverage.observedSummaryCount === 1
+    && productionFlverCoverage.unavailableSummaryCount === 1
+    && productionFlverCoverage.coverage === 'partial-coverage';
+
+  return {
+    directUiIsolation: {
+      directCallCount: direct.callCount,
+      directSummaryCount: direct.summaryCount,
+      directRequestCount: direct.requestCount,
+      uiCallCount: uiBucket.callCount,
+      uiSummaryCount: uiBucket.summaryCount,
+      uiRequestCount: uiBucket.requestCount,
+      inFlightResolvedTo: requestStartPhase,
+      pass: direct.callCount === 2 && uiBucket.summaryCount === 1 && requestStartPhase === 'direct'
+    },
+    validation: {
+      invalidReasons,
+      invalidSummaryCount: uiBucket.invalidSummaryCount,
+      pass: invalidReasons.every((reason) => typeof reason === 'string') && uiBucket.invalidSummaryCount === 4
+    },
+    aggregation: {
+      queue,
+      flverCoverage,
+      topSlowBound: queue.topSlowMs.length <= 16,
+      pass: pass
+    },
+    noObservations: {
+      bucket: noObservation,
+      pass: noObservationPass
+    },
+    productionContract: {
+      firstRequestCount: productionContract.first?.requestCount ?? null,
+      continuationRequestCount: productionContract.continuation?.requestCount ?? null,
+      continuationUnavailablePhases: productionContract.continuation?.unavailablePhases ?? [],
+      continuationFlverCount: productionContract.continuation?.phases?.flverReadMs?.count ?? null,
+      helperFlverCoverage: productionFlverCoverage,
+      error: productionContract.error ?? null,
+      pass: productionPass
+    },
+    pass: pass && noObservationPass && productionPass
+  };
+}
+
+function runCharacterNativeTimingAggregationFixture() {
+  const phase = (totalMs, scopeCount = 1) => ({
+    count: 1,
+    scopeCount,
+    totalMs,
+    minMs: totalMs,
+    maxMs: totalMs,
+    topSlowMs: [totalMs]
+  });
+  const summary = {
+    schemaVersion: 1,
+    unit: 'ms',
+    requestCount: 1,
+    unavailablePhases: [],
+    phases: {
+      queueWaitMs: phase(2),
+      resolveFlverLeavesMs: phase(8),
+      flverReadMs: phase(4),
+      texturePackageResolveMs: phase(12),
+      texturePreviewMs: phase(31, 2),
+      materialResolveMs: phase(17, 2),
+      buildOutputMs: phase(9, 2),
+      totalMs: phase(85)
+    }
+  };
+  const accumulator = createCharacterNativeTimingAccumulator();
+  const first = recordCharacterNativeTimingCall(accumulator, 'ui-load', summary, 143);
+  // Cached continuation and repeated first-page replay are IPC calls, but
+  // neither carries the first native summary and therefore must not add a
+  // second native request or main-wall sample.
+  const continuation = recordCharacterNativeTimingCall(accumulator, 'ui-load', null, 7);
+  const repeatedFirstPage = recordCharacterNativeTimingCall(accumulator, 'ui-load', null, 11);
+  const bucket = snapshotCharacterNativeTimingAccumulator(accumulator).buckets['ui-load'];
+  const malformed = [
+    { ...summary, requestCount: 0 },
+    { ...summary, phases: {} },
+    { ...summary, phases: { ...summary.phases, totalMs: undefined } },
+    { ...summary, unavailablePhases: ['texturePreviewMs'] },
+    { ...summary, unavailablePhases: ['queueWaitMs'] },
+    { ...summary, phases: { ...summary.phases, texturePreviewMs: { ...summary.phases.texturePreviewMs, count: 2 } } }
+  ].map((candidate) => validateCharacterNativeTimingSummary(candidate));
+  const pass = first.accepted === true
+    && continuation.accepted === false
+    && repeatedFirstPage.accepted === false
+    && bucket.ipcCallCount === 3
+    && bucket.nativeRequestCount === 1
+    && bucket.nativeTotalMs === 85
+    && bucket.mainWallMs.requestCount === 1
+    && bucket.mainWallMs.totalMs === 143
+    && bucket.phases.texturePreviewMs.count === 1
+    && bucket.phases.texturePreviewMs.scopeCount === 2
+    && bucket.phases.materialResolveMs.count === 1
+    && bucket.phases.materialResolveMs.scopeCount === 2
+    && bucket.phases.buildOutputMs.count === 1
+    && bucket.phases.buildOutputMs.scopeCount === 2
+    && bucket.callsWithoutSummary === 2
+    && malformed.every((result) => result.ok === false);
+  return {
+    firstRequestCount: bucket.nativeRequestCount,
+    ipcCallCount: bucket.ipcCallCount,
+    nativeTotalMs: bucket.nativeTotalMs,
+    mainWallMs: bucket.mainWallMs,
+    phases: {
+      texturePreviewMs: bucket.phases.texturePreviewMs,
+      materialResolveMs: bucket.phases.materialResolveMs,
+      buildOutputMs: bucket.phases.buildOutputMs
+    },
+    malformedReasons: malformed.map((result) => result.reason),
+    pass
+  };
+}
+
+function runCharacterMainTimingAggregationFixture() {
+  const phases = [
+    'optionsPrepareMs',
+    'bridgeAwaitMs',
+    'bundleValidateMs',
+    'compatibilityMs',
+    'chunkBuildMs',
+    'pageFirstMs',
+    'totalMs'
+  ];
+  const measured = (totalMs) => ({
+    count: 1,
+    totalMs,
+    minMs: totalMs,
+    maxMs: totalMs,
+    topSlowMs: [totalMs]
+  });
+  const empty = () => ({ count: 0, totalMs: 0, minMs: null, maxMs: null, topSlowMs: [] });
+  const makeSummary = ({ outcome = 'ok', compatibilityStatus = 'skipped' } = {}) => ({
+    schemaVersion: 1,
+    unit: 'ms',
+    requestCount: 1,
+    outcome,
+    phaseOrder: phases,
+    unavailablePhases: outcome === 'failed'
+      ? ['compatibilityMs', 'chunkBuildMs', 'pageFirstMs']
+      : [],
+    skippedPhases: outcome === 'failed'
+      ? []
+      : compatibilityStatus === 'skipped' ? ['compatibilityMs'] : [],
+    phaseStatus: {
+      optionsPrepareMs: outcome === 'failed' ? 'measured' : 'measured',
+      bridgeAwaitMs: 'measured',
+      bundleValidateMs: 'measured',
+      compatibilityMs: outcome === 'failed' ? 'unavailable' : compatibilityStatus,
+      chunkBuildMs: outcome === 'failed' ? 'unavailable' : 'measured',
+      pageFirstMs: outcome === 'failed' ? 'unavailable' : 'measured',
+      totalMs: 'measured'
+    },
+    phases: {
+      optionsPrepareMs: measured(2),
+      bridgeAwaitMs: measured(85),
+      bundleValidateMs: measured(1),
+      compatibilityMs: compatibilityStatus === 'measured' ? measured(14) : empty(),
+      chunkBuildMs: outcome === 'failed' ? empty() : measured(10),
+      pageFirstMs: outcome === 'failed' ? empty() : measured(3),
+      totalMs: measured(outcome === 'failed' ? 90 : 118)
+    }
+  });
+  const accumulator = createCharacterMainTimingAccumulator();
+  const first = recordCharacterMainTimingCall(accumulator, 'ui-load', makeSummary(), 143);
+  const failed = recordCharacterMainTimingCall(
+    accumulator,
+    'ui-load',
+    makeSummary({ outcome: 'failed' }),
+    97
+  );
+  const continuation = recordCharacterMainTimingCall(accumulator, 'ui-load', null, 7);
+  const bucket = snapshotCharacterMainTimingAccumulator(accumulator).buckets['ui-load'];
+  const malformed = [
+    { ...makeSummary(), schemaVersion: 2 },
+    { ...makeSummary(), phaseStatus: { ...makeSummary().phaseStatus, compatibilityMs: 'measured' } },
+    { ...makeSummary(), phases: { ...makeSummary().phases, totalMs: empty() } },
+    { ...makeSummary(), unavailablePhases: ['compatibilityMs'], skippedPhases: ['compatibilityMs'] }
+  ].map((candidate) => validateCharacterMainTimingSummary(candidate));
+  const pass = first.accepted === true
+    && failed.accepted === true
+    && continuation.accepted === false
+    && bucket.ipcCallCount === 3
+    && bucket.requestCount === 2
+    && bucket.summarySeenCount === 2
+    && bucket.callsWithoutSummary === 1
+    && bucket.totalMs === 208
+    && bucket.mainWallMs.requestCount === 2
+    && bucket.mainWallMs.totalMs === 240
+    && bucket.mainWallMs.minMs === 97
+    && bucket.mainWallMs.maxMs === 143
+    && bucket.phases.bridgeAwaitMs.count === 2
+    && bucket.phases.compatibilityMs.count === 0
+    && bucket.phaseCoverage.compatibilityMs.skippedSummaryCount === 1
+    && bucket.phaseCoverage.compatibilityMs.unavailableSummaryCount === 1
+    && malformed.every((result) => result.ok === false);
+  return {
+    requestCount: bucket.requestCount,
+    ipcCallCount: bucket.ipcCallCount,
+    callsWithoutSummary: bucket.callsWithoutSummary,
+    mainWallMs: bucket.mainWallMs,
+    compatibilityCoverage: bucket.phaseCoverage.compatibilityMs,
+    malformedReasons: malformed.map((result) => result.reason),
+    pass
+  };
+}
+
+async function runMapTelemetrySingleFlightFixture() {
+  let active = 0;
+  let maxActive = 0;
+  let startedTasks = 0;
+  const track = async (task) => {
+    active += 1;
+    startedTasks += 1;
+    maxActive = Math.max(maxActive, active);
+    try {
+      return await task();
+    } finally {
+      active -= 1;
+    }
+  };
+  const sampler = createSingleFlightBounded('map-telemetry-fixture');
+  const normalTiming = {
+    pageStartedAtUTC: 10_000,
+    pageCompletedAtUTC: 10_006,
+    pageStartedAt: 100,
+    pageCompletedAt: 106,
+    pageDurationMs: 6
+  };
+  const lateFulfilledTiming = {
+    pageStartedAtUTC: 20_000,
+    pageCompletedAtUTC: 20_012,
+    pageStartedAt: 200,
+    pageCompletedAt: 212,
+    pageDurationMs: 12
+  };
+  const invalidTiming = {
+    pageStartedAtUTC: 30_000,
+    pageCompletedAtUTC: 30_010,
+    pageStartedAt: 300,
+    pageCompletedAt: 310,
+    pageDurationMs: 999
+  };
+  let resolveLateTask;
+  const lateTask = new Promise((resolve) => { resolveLateTask = resolve; });
+  const first = await sampler.run(
+    () => track(() => lateTask),
+    {
+    timeoutMs: 10,
+    timeoutCode: 'MAP_UI_TELEMETRY_SAMPLE_TIMEOUT',
+    slowMs: 1
+    }
+  );
+  const blockedWhilePending = await sampler.run(
+    () => ({ shouldNotStart: true }),
+    { timeoutMs: 10, deadlineAt: Date.now() + 100 }
+  );
+  resolveLateTask({ telemetry: 'late-settlement', timing: lateFulfilledTiming });
+  await sleep(0);
+  const slow = await sampler.run(
+    () => track(async () => {
+      await sleep(8);
+      return { telemetry: 'slow-success', timing: normalTiming };
+    }),
+    { timeoutMs: 100, slowMs: 1 }
+  );
+  const invalid = await sampler.run(
+    () => track(() => ({ telemetry: 'invalid-timing', timing: invalidTiming })),
+    { timeoutMs: 100, slowMs: 1 }
+  );
+  const failed = await sampler.run(
+    () => track(() => Promise.reject(new Error('fixture failure'))),
+    { timeoutMs: 100, slowMs: 1 }
+  );
+  let resolveNearDeadline;
+  const nearDeadlineTask = new Promise((resolve) => { resolveNearDeadline = resolve; });
+  const nearDeadlineAt = Date.now() + 10;
+  const nearDeadline = await sampler.run(
+    () => track(() => nearDeadlineTask),
+    { timeoutMs: 100, deadlineAt: nearDeadlineAt, slowMs: 1 }
+  );
+  resolveNearDeadline({ telemetry: 'near-deadline-late-settlement' });
+  await sleep(0);
+  let rejectLateTask;
+  const lateRejectTask = new Promise((_, reject) => { rejectLateTask = reject; });
+  const lateReject = await sampler.run(
+    () => track(() => lateRejectTask),
+    { timeoutMs: 10, timeoutCode: 'MAP_UI_TELEMETRY_SAMPLE_TIMEOUT', slowMs: 1 }
+  );
+  rejectLateTask(new Error('fixture late rejection'));
+  await sleep(0);
+  const deadline = await sampler.run(
+    () => ({ shouldNotStart: true }),
+    { timeoutMs: 100, deadlineAt: Date.now() - 1 }
+  );
+  await sleep(0);
+  const summary = sampler.snapshot();
+  const pass = first.record.status === 'timeout'
+    && first.record.complete === false
+    && first.record.timedOut === true
+    && first.record.lateSettled === true
+    && first.record.lateOutcome === 'fulfilled'
+    && first.record.taskTiming?.pageDurationMs === lateFulfilledTiming.pageDurationMs
+    && Number.isFinite(first.record.receivedAt)
+    && blockedWhilePending.record.status === 'pending-deadline'
+    && blockedWhilePending.record.reason === 'SINGLE_FLIGHT_IN_FLIGHT'
+    && blockedWhilePending.record.pendingCallId === first.record.callId
+    && slow.record.status === 'slow'
+    && slow.record.complete === true
+    && slow.record.taskTiming?.pageDurationMs === normalTiming.pageDurationMs
+    && Number.isFinite(slow.record.receivedAt)
+    && invalid.record.status === 'completed'
+    && invalid.record.taskTiming === null
+    && Number.isFinite(invalid.record.receivedAt)
+    && failed.record.status === 'failed'
+    && failed.record.failed === true
+    && failed.record.taskTiming === null
+    && nearDeadline.record.status === 'timeout'
+    && nearDeadline.record.effectiveTimeoutMs <= 15
+    && nearDeadline.record.timedOut === true
+    && nearDeadline.record.lateSettled === true
+    && lateReject.record.status === 'timeout'
+    && lateReject.record.lateSettled === true
+    && lateReject.record.lateOutcome === 'failed'
+    && lateReject.record.failed === true
+    && deadline.record.status === 'pending-deadline'
+    && deadline.record.reason === 'deadline-reached'
+    && startedTasks === 6
+    && active === 0
+    && maxActive === 1
+    && summary.counts.started === 6
+    && summary.counts.timedOut === 3
+    && summary.counts.lateSettled === 3
+    && summary.counts.lateFailed === 1
+    && summary.counts.slow === 1
+    && summary.counts.failed === 1
+    && summary.counts.pendingDeadline === 2
+    && summary.pending === null;
+  return {
+    statuses: {
+      timeout: first.record.status,
+      lateSettled: first.record.lateSettled,
+      lateOutcome: first.record.lateOutcome,
+      pendingDeadlineWhileInFlight: blockedWhilePending.record.status,
+      pendingCallId: blockedWhilePending.record.pendingCallId,
+      ownerCallId: first.record.callId,
+      slow: slow.record.status,
+      failed: failed.record.status,
+      invalidTiming: invalid.record.taskTiming,
+      nearDeadline: nearDeadline.record.status,
+      nearDeadlineEffectiveTimeoutMs: nearDeadline.record.effectiveTimeoutMs,
+      lateReject: lateReject.record.lateOutcome,
+      deadline: deadline.record.status
+    },
+    timing: {
+      normal: slow.record.taskTiming,
+      lateFulfilled: first.record.taskTiming,
+      failed: failed.record.taskTiming,
+      invalid: invalid.record.taskTiming,
+      lateReceivedAt: first.record.receivedAt,
+      normalReceivedAt: slow.record.receivedAt
+    },
+    concurrency: { active, maxActive, startedTasks },
+    counts: summary.counts,
+    pass
+  };
+}
+
 async function runMapTelemetryFixtures() {
   const raf = runRafAccountingFixture();
   const boundaries = runRafBoundaryFixture();
   const status = runMapStatusFixture();
+  const offlineCrashpadEntry = runOfflineCrashpadEntryFixture();
+  const nativeTimingAggregation = runMapNativeTimingAggregationFixture();
+  const nativeTimingPhaseControl = await runMapMainTimingPhaseFixture();
+  const nativeTiming = {
+    ...nativeTimingAggregation,
+    mainPhaseControl: nativeTimingPhaseControl,
+    pass: nativeTimingAggregation.pass === true && nativeTimingPhaseControl.pass === true
+  };
+  const characterNativeTiming = runCharacterNativeTimingAggregationFixture();
+  const characterMainTiming = runCharacterMainTimingAggregationFixture();
+  const mainTelemetryCollector = runMainMapTelemetryCollectorFixture();
+  const cancellationTelemetry = runMapCancellationTelemetryFixture();
+  const unavailableModelTelemetry = runMapModelUnavailableTelemetryFixture();
+  const loadRetentionTelemetry = runMapLoadRetentionTelemetryFixture();
+  const mapApiObserverProjection = runMapApiObserverProjectionFixture();
   const windowObserver = await runMapWindowObserverFixture();
+  const singleFlight = await runMapTelemetrySingleFlightFixture();
   return {
     mode: 'fixture',
     raf,
     boundaries,
     status,
+    offlineCrashpadEntry,
+    nativeTiming,
+    characterNativeTiming,
+    characterMainTiming,
+    mainTelemetryCollector,
+    cancellationTelemetry,
+    unavailableModelTelemetry,
+    loadRetentionTelemetry,
+    mapApiObserverProjection,
     windowObserver,
+    singleFlight,
     pass: raf.pass === true
       && boundaries.pass === true
       && status.pass === true
+      && offlineCrashpadEntry.pass === true
+      && nativeTiming.pass === true
+      && characterNativeTiming.pass === true
+      && characterMainTiming.pass === true
+      && mainTelemetryCollector.pass === true
+      && cancellationTelemetry.pass === true
+      && unavailableModelTelemetry.pass === true
+      && loadRetentionTelemetry.pass === true
+      && mapApiObserverProjection.pass === true
       && windowObserver.pass === true
+      && singleFlight.pass === true
   };
 }
 
@@ -2764,6 +4893,11 @@ async function stopRendererCpuProfiler(profiler, reportDir, phase = 'main') {
 async function main() {
   const overlayMsb = join(OVERLAY_ROOT, MAP_RELATIVE_PATH.replaceAll('/', '\\'));
   const baseMsb = join(GAME_ROOT, MAP_RELATIVE_PATH.replaceAll('/', '\\'));
+  const crashEvidencePaths = createMapCrashEvidencePaths(reportDir);
+  const crashDumpsPath = crashEvidencePaths.crashDumps;
+  const crashReporterReceiptPath = crashEvidencePaths.receipt;
+  const electronEntryExitInfoPath = crashEvidencePaths.entryExit;
+  const electronExitInfoPath = crashEvidencePaths.parentExit;
 
   const report = {
     ok: false,
@@ -2774,6 +4908,15 @@ async function main() {
     gameRoot: GAME_ROOT,
     overlayRoot: OVERLAY_ROOT,
     sourceModWrites: false,
+    crashReporter: {
+      mode: 'offline-crashpad',
+      crashDumpsPath,
+      receiptPath: crashReporterReceiptPath,
+      entryExitInfoPath: electronEntryExitInfoPath,
+      exitInfoPath: electronExitInfoPath,
+      entryPath: null,
+      productionMain: null
+    },
     loadCondition: {
       agentConcurrent: AGENT_CONCURRENT_LOAD === 'true'
         ? true
@@ -2793,7 +4936,7 @@ async function main() {
         names: [...MAP_TELEMETRY_BOUNDARY_NAMES],
         accounting: 'cumulative per-window counters; 2000-sample ring is debug-only'
       },
-      cancellation: 'renderer effect cleanup/queue result only; public API has no AbortSignal'
+      cancellation: 'renderer cleanup plus main structured Bridge terminal receipts; command cancellation is native evidence, artifact-only remains unverified'
     },
     rafAccountingFixture: runRafAccountingFixture(),
     statusFixture: runMapStatusFixture(),
@@ -2815,6 +4958,9 @@ async function main() {
       installError: null,
       finishError: null
     },
+    nativeTimingSummaryByPhase: null,
+    characterNativeTimingSummaryByPhase: null,
+    characterMainTimingSummaryByPhase: null,
     timings: {},
     errors: []
   };
@@ -2824,11 +4970,35 @@ async function main() {
   let productionMain = LIVE_PRODUCTION_MAIN;
   let productionSnapshotRoot = null;
   let rendererProfiler = null;
+  let suppressPostLoadTelemetry = false;
+  let normalTelemetryPoll = null;
   let mapWindowObserverFinished = false;
   const consoleEvents = [];
   const pageErrors = [];
   const processDiagnostics = { pid: null, exitCode: null, signal: null, stdoutTail: '', stderrTail: [] };
   const mainTelemetryCollector = createMainMapTelemetryCollector();
+  const cancellationTelemetryCollector = createMapCancellationTelemetryCollector();
+  const unavailableModelTelemetryCollector = createMapModelUnavailableTelemetryCollector();
+  const writeElectronExitInfo = (source) => {
+    const settled = Number.isInteger(processDiagnostics.exitCode)
+      || typeof processDiagnostics.signal === 'string';
+    try {
+      writeFileSync(electronExitInfoPath, `${JSON.stringify({
+        schemaVersion: 1,
+        source,
+        atUTC: new Date().toISOString(),
+        pid: processDiagnostics.pid,
+        exitCode: processDiagnostics.exitCode,
+        signal: processDiagnostics.signal,
+        settled,
+        crashDumpsPath,
+        receiptPath: crashReporterReceiptPath,
+        artifactId: report.artifactSnapshot?.artifactId ?? null
+      }, null, 2)}\n`, 'utf8');
+    } catch (error) {
+      report.crashReporter.exitInfoWriteError = error instanceof Error ? error.message : String(error);
+    }
+  };
   const startedAt = Date.now();
   const deadlineAt = startedAt + TOTAL_TIMEOUT_MS;
   report.deadline = {
@@ -2836,6 +5006,7 @@ async function main() {
     at: new Date(deadlineAt).toISOString()
   };
   const captureScreenshot = async (name) => {
+    if (skipRendererObservationIfBlocked(`screenshot:${name}`)) return null;
     if (!page) return null;
     const target = join(reportDir, `${name}.png`);
     try {
@@ -2859,7 +5030,35 @@ async function main() {
       message: error instanceof Error ? error.message : String(error)
     });
   };
+  const syncNativeTimingSummary = () => {
+    report.nativeTimingSummaryByPhase = report.mainTelemetry?.summary?.nativeTimingSummaryByPhase ?? null;
+    report.characterNativeTimingSummaryByPhase = report.mainTelemetry?.summary?.characterNativeTimingSummaryByPhase ?? null;
+    report.characterMainTimingSummaryByPhase = report.mainTelemetry?.summary?.characterMainTimingSummaryByPhase ?? null;
+  };
+  const syncUnavailableModelTelemetry = () => {
+    report.mapModelUnavailableTelemetry = unavailableModelTelemetryCollector.snapshot();
+  };
+  const syncNormalTelemetryPoll = () => {
+    if (normalTelemetryPoll) report.telemetrySamplingSingleFlight = normalTelemetryPoll.snapshot();
+  };
+  const skipRendererObservationIfBlocked = (phase) => {
+    if (MODE !== 'normal') return null;
+    const pending = normalTelemetryPoll?.snapshot()?.pending ?? null;
+    if (!suppressPostLoadTelemetry && !pending) return null;
+    const reason = suppressPostLoadTelemetry
+      ? 'MAP_UI_TELEMETRY_PENDING_DEADLINE'
+      : 'MAP_UI_TELEMETRY_SAMPLE_IN_FLIGHT';
+    const skip = {
+      phase,
+      reason,
+      pendingCallId: pending?.callId ?? null
+    };
+    report.telemetryObservationSkips ??= [];
+    report.telemetryObservationSkips.push(skip);
+    return skip;
+  };
   const snapshotTelemetryBounded = async (phase, options = {}) => {
+    if (skipRendererObservationIfBlocked(phase)) return null;
     if (!page) return null;
     try {
       return await bounded(
@@ -2876,6 +5075,7 @@ async function main() {
     }
   };
   const transitionMapBoundariesBounded = async (phase, transition) => {
+    if (skipRendererObservationIfBlocked(phase)) return null;
     if (!page) return null;
     try {
       const result = await bounded(
@@ -2893,6 +5093,7 @@ async function main() {
     }
   };
   const closeOpenMapBoundariesBounded = async (phase) => {
+    if (skipRendererObservationIfBlocked(phase)) return null;
     if (!page) return null;
     try {
       return await bounded(
@@ -2906,6 +5107,7 @@ async function main() {
     }
   };
   const snapshotMapApiTimingBounded = async (phase) => {
+    if (skipRendererObservationIfBlocked(phase)) return null;
     if (!page) return null;
     try {
       return await bounded(
@@ -2919,6 +5121,7 @@ async function main() {
     }
   };
   const setMapApiTimingPhaseBounded = async (phase) => {
+    if (skipRendererObservationIfBlocked(`api-phase:${phase}`)) return null;
     if (!page) return null;
     try {
       return await bounded(
@@ -2928,6 +5131,41 @@ async function main() {
       );
     } catch (error) {
       recordBoundedObservationError('nativeTelemetrySamplingErrors', `set-phase:${phase}`, error);
+      return null;
+    }
+  };
+  const setMainMapTimingPhaseBounded = async (phase) => {
+    if (!app) return null;
+    try {
+      const result = await bounded(
+        setMainMapTimingPhase(app, phase),
+        MAP_PAGE_SNAPSHOT_TIMEOUT_MS,
+        `MAP_MAIN_TIMING_PHASE_TIMEOUT: ${phase}`
+      );
+      report.mainNativeTimingPhaseControl ??= {
+        key: MAP_MAIN_TIMING_PHASE_KEY,
+        transitions: [],
+        errors: []
+      };
+      report.mainNativeTimingPhaseControl.transitions.push({ phase, result });
+      if (result?.ok !== true) {
+        report.mainNativeTimingPhaseControl.errors.push({
+          phase,
+          reason: result?.reason ?? 'MAP_MAIN_TIMING_PHASE_FAILED'
+        });
+      }
+      return result;
+    } catch (error) {
+      recordBoundedObservationError('nativeTelemetrySamplingErrors', `main-phase:${phase}`, error);
+      report.mainNativeTimingPhaseControl ??= {
+        key: MAP_MAIN_TIMING_PHASE_KEY,
+        transitions: [],
+        errors: []
+      };
+      report.mainNativeTimingPhaseControl.errors.push({
+        phase,
+        reason: error instanceof Error ? error.message : String(error)
+      });
       return null;
     }
   };
@@ -3058,6 +5296,21 @@ async function main() {
     };
     report.loadCondition.productionMain = productionMain;
     if (!existsSync(productionMain)) throw new Error(`PRODUCTION_MAIN_MISSING: ${productionMain}`);
+    await mkdir(crashDumpsPath, { recursive: true });
+    const offlineCrashpadEntryPath = join(scratchRoot, 'electron-offline-crashpad-entry.mjs');
+    await writeFile(
+      offlineCrashpadEntryPath,
+      createOfflineCrashpadEntrySource({
+        productionMain,
+        artifactId: artifactSnapshot.manifest.artifactId,
+        crashDumpsPath,
+        receiptPath: crashReporterReceiptPath,
+        entryExitInfoPath: electronEntryExitInfoPath
+      }),
+      'utf8'
+    );
+    report.crashReporter.entryPath = offlineCrashpadEntryPath;
+    report.crashReporter.productionMain = productionMain;
     app = await runPhase(
       report,
       'electron-launch',
@@ -3066,7 +5319,7 @@ async function main() {
       startedAt,
       () => electron.launch({
         cwd: productionSnapshotRoot,
-        args: [productionMain, `--user-data-dir=${userDataDir}`],
+        args: [offlineCrashpadEntryPath, `--user-data-dir=${userDataDir}`],
         env: {
           ...process.env,
           NODE_ENV: 'production',
@@ -3086,6 +5339,7 @@ async function main() {
     child.stdout?.on('data', (chunk) => {
       const text = String(chunk);
       mainTelemetryCollector.ingest(text);
+      cancellationTelemetryCollector.ingest(text);
       processDiagnostics.stdoutTail = (processDiagnostics.stdoutTail + text).slice(-32_768);
     });
     child.stderr?.on('data', (chunk) => {
@@ -3095,12 +5349,14 @@ async function main() {
     child.on('exit', (code, signal) => {
       processDiagnostics.exitCode = code;
       processDiagnostics.signal = signal;
+      writeElectronExitInfo('child-exit');
     });
     page = await runPhase(report, 'electron-first-window', 60_000, deadlineAt, startedAt, () => app.firstWindow());
     page.on('pageerror', (error) => pageErrors.push(String(error)));
     page.on('crash', () => pageErrors.push('RENDERER_CRASH'));
     page.on('console', (message) => {
       const text = message.text();
+      unavailableModelTelemetryCollector.ingest(text);
       if (text.includes('MAP') || text.includes('MsbScenePanel') || /nativeAbortObserved/i.test(text)) {
         consoleEvents.push({ atMs: Date.now() - startedAt, type: message.type(), text: text.slice(0, 4000) });
         if (consoleEvents.length > 5000) consoleEvents.shift();
@@ -3141,6 +5397,7 @@ async function main() {
 
     const modelSelection = chooseModel(Array.isArray(report.msb.modelNames) ? report.msb.modelNames : []);
     report.modelSelection = modelSelection;
+    await setMainMapTimingPhaseBounded('direct');
     if (modelSelection.selectedModel) {
       await setMapApiTimingPhaseBounded('native-geometry');
       const geometryStarted = Date.now();
@@ -3158,6 +5415,7 @@ async function main() {
     }
 
     await setMapApiTimingPhaseBounded('ui-load');
+    await setMainMapTimingPhaseBounded('ui-load');
     try {
       rendererProfiler = await runPhase(
         report,
@@ -3258,6 +5516,8 @@ async function main() {
       const switchStarted = Date.now();
       const otherQuery = process.env.SF_MAP_CANCEL_TARGET?.trim() || 'map/mapstudio/m10_00_00_00.msb.dcx';
       const beforeSwitchCount = consoleEvents.length;
+      const cancellationReceiptStart = cancellationTelemetryCollector.snapshot().receiptCount;
+      const cancellationRequestStart = cancellationTelemetryCollector.snapshot().cancelRequestCount;
       const cancelTargetCandidates = await runPhase(
         report,
         'cancel-target-search',
@@ -3276,45 +5536,137 @@ async function main() {
           await page.getByLabel('MSB 地图工作台').waitFor({ state: 'visible', timeout: 120_000 });
         });
         report.timings.cancelSwitchMs = Date.now() - switchStarted;
-        await runPhase(report, 'cancel-cleanup-observation-window', 15_000, deadlineAt, startedAt, () => page.waitForTimeout(5_000));
+        const cancellationObservationStartedAt = Date.now();
+        let cancellationObservationCompleted = false;
+        await runPhase(
+          report,
+          'cancel-cleanup-observation-window',
+          CANCEL_OBSERVATION_MAX_MS + 5_000,
+          deadlineAt,
+          startedAt,
+          async () => {
+            while (true) {
+              const elapsedMs = Date.now() - cancellationObservationStartedAt;
+              const snapshot = cancellationTelemetryCollector.snapshot();
+              const terminalReady = cancellationObservationHasTerminalForEveryAcceptedRequest(
+                snapshot,
+                cancellationRequestStart,
+                cancellationReceiptStart
+              );
+              // Keep the original cleanup observation floor, then stop as soon
+              // as every accepted cancel request has a real terminal receipt.
+              if (elapsedMs >= CANCEL_OBSERVATION_MIN_MS && terminalReady) {
+                cancellationObservationCompleted = true;
+                break;
+              }
+              if (elapsedMs >= CANCEL_OBSERVATION_MAX_MS || Date.now() >= deadlineAt) break;
+              await sleep(Math.min(250, CANCEL_OBSERVATION_MAX_MS - elapsedMs));
+            }
+          }
+        );
+        report.cancellationObservation = {
+          elapsedMs: Date.now() - cancellationObservationStartedAt,
+          maxMs: CANCEL_OBSERVATION_MAX_MS,
+          terminalCompletedEarly: cancellationObservationCompleted
+        };
         await captureScreenshot('cancel-after-switch');
       } else {
         report.cancelTarget.skipped = 'CANCEL_TARGET_NOT_INDEXED';
       }
-      const nativeAbortEvidence = extractNativeAbortEvidence(consoleEvents.slice(beforeSwitchCount), processDiagnostics.stdoutTail);
+      const cancellationTelemetry = cancellationTelemetryCollector.snapshot();
+      const terminalReceipts = cancellationTelemetry.receipts.slice(cancellationReceiptStart);
+      const cancelRequests = cancellationTelemetry.cancelRequests.slice(cancellationRequestStart);
+      const switchFinishedAtMs = Date.now();
+      const nativeCancellationEvidence = extractStructuredNativeCancellationEvidence({
+        receipts: terminalReceipts,
+        cancelRequests,
+        eventsBeforeSwitch: consoleEvents.slice(0, beforeSwitchCount),
+        eventsAfterSwitch: consoleEvents.slice(beforeSwitchCount),
+        switchStartedAtMs: switchStarted,
+        switchFinishedAtMs,
+        collectorIntegrity: cancellationTelemetry
+      });
       report.cancellation = {
         delayMs: CANCEL_DELAY_MS,
         eventsBeforeSwitch: consoleEvents.slice(0, beforeSwitchCount).length,
         cleanupEvents: extractLoaderEvent(consoleEvents.slice(beforeSwitchCount), 'MAP mesh effect cleanup'),
         loaderCompleteEvents: extractLoaderEvent(consoleEvents.slice(beforeSwitchCount), 'MAP mesh loader complete'),
-        nativeAbortObserved: nativeAbortEvidence.length > 0,
-        nativeAbortEvidence,
-        note: '只有明确的 nativeAbortObserved:true 证据才会置 true；renderer cleanup/loader cancelled 不会被当作 native IPC abort。当前 readMapStaticGeometry 公共 API 不接收 AbortSignal。'
+        loadRetentionEvents: extractMapLoadRetentionEvents(consoleEvents.slice(beforeSwitchCount)),
+        nativeAbortObserved: nativeCancellationEvidence.nativeAbortObserved,
+        nativeAbortEvidence: nativeCancellationEvidence.commandCancelled,
+        terminalReceipts,
+        cancelRequests,
+        artifactCancellationReceipts: nativeCancellationEvidence.artifactCancelled,
+        unmatchedTerminalReceipts: nativeCancellationEvidence.unmatched,
+        duplicateTerminalGroups: nativeCancellationEvidence.duplicateTerminalGroups,
+        contradictoryTerminalGroups: nativeCancellationEvidence.contradictoryTerminalGroups,
+        receiptCollector: {
+          malformedCount: cancellationTelemetry.malformedCount,
+          invalidIdentityCount: cancellationTelemetry.invalidIdentityCount,
+          invalidTimestampCount: cancellationTelemetry.invalidTimestampCount,
+          droppedOversizeLineCount: cancellationTelemetry.droppedOversizeLineCount,
+          overflow: cancellationTelemetry.overflow
+        },
+        correlation: {
+          startedRequestIds: nativeCancellationEvidence.startedRequestIds,
+          cleanupRequestIds: nativeCancellationEvidence.cleanupRequestIds,
+          correlatedRequestIds: nativeCancellationEvidence.correlatedRequestIds,
+          acceptedRequestCoverage: nativeCancellationEvidence.acceptedRequestCoverage,
+          verification: nativeCancellationEvidence.verification,
+          nativeCommandCancellationObserved: nativeCancellationEvidence.nativeCommandCancellationObserved
+        },
+        note: '仅本次时间窗内 main 接受的 cancel owner/request 与真实 terminal receipt 完整对应，且 outcome=cancelled、requestPhase=command 的终态才计入 nativeAbortObserved；单个终态被观察不等于全部 native active work 已停止，artifact 或缺失/未匹配终态保持 unverified。'
       };
     } else {
       const loadStarted = Date.now();
       const snapshots = [];
+      const telemetryPoll = createSingleFlightBounded('map-ui-telemetry', {
+        inFlightCode: 'MAP_UI_TELEMETRY_SAMPLE_IN_FLIGHT'
+      });
+      normalTelemetryPoll = telemetryPoll;
       let complete = false;
       const uiBudgetMs = Math.min(UI_TIMEOUT_MS, Math.max(0, deadlineAt - Date.now()));
       while (Date.now() - loadStarted < uiBudgetMs) {
         if (Date.now() >= deadlineAt) throw new Error('MAP_PROBE_DEADLINE_EXCEEDED: ui-map-load');
         const sampleBudgetMs = Math.min(5_000, Math.max(1_000, deadlineAt - Date.now()));
-        let snapshot = null;
-        try {
-          snapshot = await bounded(snapshotTelemetry(page), sampleBudgetMs, 'MAP_UI_TELEMETRY_SAMPLE_TIMEOUT');
-        } catch (error) {
-          // 大地图上传/解码会暂时占满 renderer 主线程；观察快照超时本身是
-          // 长帧证据，但不应让探针在 UI 仍可继续完成时提前终止。保留每次
-          // 超时及时间点，最终报告明确标记 telemetry 采样不完整。
+        const sample = await telemetryPoll.run(
+          () => snapshotTelemetryWithProgress(page),
+          {
+            timeoutMs: sampleBudgetMs,
+            timeoutCode: 'MAP_UI_TELEMETRY_SAMPLE_TIMEOUT',
+            deadlineAt,
+            slowMs: 1_000
+          }
+        );
+        const snapshot = sample.value?.telemetry ?? null;
+        const progress = sample.value?.progress ?? null;
+        const max = sample.value?.max ?? null;
+        if (sample.record.complete !== true) {
+          // 大地图上传/解码会暂时占满 renderer 主线程；观察快照超时、
+          // underlying evaluate 的晚到终态、失败和 single-flight 等待都
+          // 必须保留，最终报告明确标记 telemetry 采样不完整。
           report.telemetrySamplingErrors ??= [];
           report.telemetrySamplingErrors.push({
             elapsedMs: Date.now() - loadStarted,
-            message: error instanceof Error ? error.message : String(error)
+            message: sample.record.reason ?? sample.record.status,
+            status: sample.record.status,
+            callId: sample.record.callId,
+            pendingCallId: sample.record.pendingCallId,
+            timedOut: sample.record.timedOut,
+            lateSettled: sample.record.lateSettled,
+            failed: sample.record.failed,
+            pendingDeadline: sample.record.status === 'pending-deadline',
+            error: sample.record.error
           });
         }
-        const progress = await page.locator('progress[aria-label="地图模型加载进度"]').getAttribute('value', { timeout: 2_000 }).catch(() => null);
-        const max = await page.locator('progress[aria-label="地图模型加载进度"]').getAttribute('max', { timeout: 2_000 }).catch(() => null);
-        snapshots.push({ elapsedMs: Date.now() - loadStarted, progress: progress === null ? null : Number(progress), max: max === null ? null : Number(max), telemetry: snapshot });
+        snapshots.push({
+          elapsedMs: Date.now() - loadStarted,
+          progress: progress === null ? null : Number(progress),
+          max: max === null ? null : Number(max),
+          telemetry: snapshot,
+          sampling: sample.record
+        });
+        report.telemetrySamplingSingleFlight = telemetryPoll.snapshot();
         if (snapshots.length % 15 === 0) {
           console.log(JSON.stringify({
             type: 'map-probe-progress',
@@ -3332,17 +5684,55 @@ async function main() {
         await sleep(1_000);
       }
       if (!complete && Date.now() >= deadlineAt) throw new Error('MAP_PROBE_DEADLINE_EXCEEDED: ui-map-load');
-      await transitionMapBoundariesBounded('stream-load-end', {
-        end: ['streamLoad', 'total']
-      });
-      const streamLoadEndTelemetry = await snapshotTelemetryBounded('ui-load-complete', mapBoundarySnapshotOptions);
+      let postLoadTelemetry = {
+        ready: true,
+        wait: null,
+        skipped: false,
+        reason: null
+      };
+      if (telemetryPoll.snapshot().pending) {
+        const pendingSettlement = await telemetryPoll.waitForPending(5_000, deadlineAt);
+        report.telemetrySamplingSingleFlight = telemetryPoll.snapshot();
+        postLoadTelemetry.wait = pendingSettlement;
+        if (pendingSettlement.settled !== true) {
+          postLoadTelemetry = {
+            ...postLoadTelemetry,
+            ready: false,
+            skipped: true,
+            reason: 'MAP_UI_TELEMETRY_PENDING_DEADLINE'
+          };
+          suppressPostLoadTelemetry = true;
+          report.telemetrySamplingErrors ??= [];
+          report.telemetrySamplingErrors.push({
+            elapsedMs: Date.now() - loadStarted,
+            message: postLoadTelemetry.reason,
+            status: 'pending-deadline',
+            pendingCallId: pendingSettlement.record?.pendingCallId ?? telemetryPoll.snapshot().pending?.callId ?? null,
+            timedOut: true,
+            lateSettled: false,
+            failed: false,
+            pendingDeadline: true,
+            error: null
+          });
+        }
+      }
+      let streamLoadEndTelemetry = null;
+      if (postLoadTelemetry.ready) {
+        await transitionMapBoundariesBounded('stream-load-end', {
+          end: ['streamLoad', 'total']
+        });
+        streamLoadEndTelemetry = await snapshotTelemetryBounded('ui-load-complete', mapBoundarySnapshotOptions);
+      }
       report.uiLoad = {
         complete,
         elapsedMs: Date.now() - loadStarted,
         snapshots,
+        telemetrySamplingSingleFlight: telemetryPoll.snapshot(),
+        postLoadTelemetry,
         loaderPlanEvents: extractLoaderEvent(consoleEvents, 'MAP mesh loader plan'),
         loaderStartCount: extractLoaderEvent(consoleEvents, 'MAP mesh loader start').length,
         loaderCompleteEvents: extractLoaderEvent(consoleEvents, 'MAP mesh loader complete'),
+        loadRetentionEvents: extractMapLoadRetentionEvents(consoleEvents),
         telemetryDelta: diffMapTelemetry(mapCanvasEndTelemetry, streamLoadEndTelemetry, 'streamLoad')
       };
       report.mapTelemetry.streamLoad = {
@@ -3365,9 +5755,11 @@ async function main() {
         report.rendererProfiler.stages.loaderPlanAtMs = report.uiLoad.loaderPlanAtMs;
         report.rendererProfiler.stages.loaderCompleteAtMs = report.uiLoad.loaderCompleteAtMs;
       }
-      await captureScreenshot('normal-final');
+      if (postLoadTelemetry.ready) await captureScreenshot('normal-final');
+      else report.screenshotSkipped = 'MAP_UI_TELEMETRY_PENDING_DEADLINE';
     }
 
+    await setMainMapTimingPhaseBounded('done');
     // Normal mode closes streamLoad/total at loader completion. Cancel mode
     // has no full-load completion edge, so close only whatever remains open at
     // the final observation point; already-closed windows are untouched.
@@ -3379,14 +5771,19 @@ async function main() {
     await finishAndRecordMapWindowObserver('normal-complete');
     await stopAndRecordRendererProfiler(MODE === 'cancel' ? 'cancel' : 'ui-load');
     report.renderer = {
-      finalTelemetry: await runPhase(
-        report,
-        'telemetry-final',
-        15_000,
-        deadlineAt,
-        startedAt,
-        () => snapshotTelemetryBounded('telemetry-final', mapBoundarySnapshotOptions)
-      ),
+      finalTelemetry: suppressPostLoadTelemetry
+        ? null
+        : await runPhase(
+          report,
+          'telemetry-final',
+          15_000,
+          deadlineAt,
+          startedAt,
+          () => snapshotTelemetryBounded('telemetry-final', mapBoundarySnapshotOptions)
+        ),
+      finalTelemetrySkipped: suppressPostLoadTelemetry
+        ? 'MAP_UI_TELEMETRY_PENDING_DEADLINE'
+        : null,
       renderPlanEvents: extractLoaderEvent(consoleEvents, 'MAP mesh render plan'),
       mapConsoleEventCount: consoleEvents.length
     };
@@ -3405,6 +5802,9 @@ async function main() {
     report.process = processDiagnostics;
     report.consoleTail = consoleEvents.slice(-200);
     report.mainTelemetry = mainTelemetryCollector.snapshot();
+    syncNativeTimingSummary();
+    syncUnavailableModelTelemetry();
+    syncNormalTelemetryPoll();
     finalizeMapStatus(report);
   } catch (error) {
     report.error = error instanceof Error ? error.message : String(error);
@@ -3425,6 +5825,10 @@ async function main() {
       }
     }
     report.nativeRequestTelemetry = await snapshotMapApiTimingBounded('failure-native-api');
+    report.mainTelemetry = mainTelemetryCollector.snapshot();
+    syncNativeTimingSummary();
+    syncUnavailableModelTelemetry();
+    syncNormalTelemetryPoll();
     finalizeMapStatus(report);
     await captureScreenshot('failure');
   } finally {
@@ -3444,6 +5848,10 @@ async function main() {
     // the functional/renderer evidence and every marker consumed so far remain
     // recoverable on disk.
     report.mainTelemetry = mainTelemetryCollector.snapshot();
+    syncNativeTimingSummary();
+    syncUnavailableModelTelemetry();
+    syncNormalTelemetryPoll();
+    writeElectronExitInfo('before-app-close');
     await writeFile(report.reportPath, JSON.stringify(safeJson(report), null, 2), 'utf8');
     if (app) {
       await bounded(app.close().catch(() => undefined), 10_000, 'ELECTRON_CLOSE_TIMEOUT').catch(() => undefined);
@@ -3452,7 +5860,11 @@ async function main() {
       // report, while keeping the wait short and bounded.
       await sleep(100);
     }
+    writeElectronExitInfo('after-app-close');
     report.mainTelemetry = mainTelemetryCollector.snapshot();
+    syncNativeTimingSummary();
+    syncUnavailableModelTelemetry();
+    syncNormalTelemetryPoll();
     report.elapsedMs = Date.now() - startedAt;
     await writeFile(report.reportPath, JSON.stringify(safeJson(report), null, 2), 'utf8');
     const safeScratch = resolve(scratchRoot);
@@ -3469,9 +5881,26 @@ async function main() {
       mode: report.mode,
       mapId: report.mapId,
       artifactId: report.artifactSnapshot?.artifactId ?? null,
+      crashReporter: report.crashReporter ? {
+        mode: report.crashReporter.mode,
+        crashDumpsPath: report.crashReporter.crashDumpsPath,
+        receiptPath: report.crashReporter.receiptPath,
+        entryExitPath: report.crashReporter.entryExitInfoPath,
+        exitInfoPath: report.crashReporter.exitInfoPath,
+        receiptWritten: existsSync(report.crashReporter.receiptPath),
+        entryExitWritten: existsSync(report.crashReporter.entryExitInfoPath),
+        exitInfoWritten: existsSync(report.crashReporter.exitInfoPath)
+      } : null,
       msb: report.msb ? { ok: report.msb.ok, elapsedMs: report.msb.elapsedMs, modelCount: report.msb.modelCount, partCount: report.msb.partCount } : null,
       geometry: report.geometry ? { ok: report.geometry.ok, pageCount: report.geometry.pageCount, chunkCount: report.geometry.chunkCount, vertexCount: report.geometry.vertexCount } : null,
       uiLoad: report.uiLoad ? { complete: report.uiLoad.complete, elapsedMs: report.uiLoad.elapsedMs, loaderStartCount: report.uiLoad.loaderStartCount } : null,
+      mapModelUnavailableTelemetry: report.mapModelUnavailableTelemetry
+        ? {
+            recordCount: report.mapModelUnavailableTelemetry.recordCount,
+            overflow: report.mapModelUnavailableTelemetry.overflow,
+            malformedCount: report.mapModelUnavailableTelemetry.malformedCount
+          }
+        : null,
       cancellation: report.cancellation ? { cleanupEvents: report.cancellation.cleanupEvents.length, loaderCompleteEvents: report.cancellation.loaderCompleteEvents.length, nativeAbortObserved: report.cancellation.nativeAbortObserved } : null,
       nativeRequestTelemetry: report.nativeRequestTelemetry ? {
         installed: report.nativeRequestTelemetry.installed,
@@ -3485,6 +5914,8 @@ async function main() {
         installed: report.mainTelemetry.installed,
         handlerWrapped: report.mainTelemetry.handlerWrapped,
         markerCount: report.mainTelemetry.markerCount,
+        droppedOversizeLineCount: report.mainTelemetry.droppedOversizeLineCount,
+        diagnostics: report.mainTelemetry.diagnostics,
         summary: report.mainTelemetry.summary
           ? {
               calls: report.mainTelemetry.summary.calls,
@@ -3502,10 +5933,15 @@ async function main() {
               backgroundThrottlingSources: [...new Set((report.mainTelemetry.summary.recentCalls ?? [])
                 .map((entry) => entry.backgroundThrottlingSource)
                 .filter((value) => typeof value === 'string'))],
-              stateTransitions: (report.mainTelemetry.summary.stateTransitions ?? []).slice(-16)
+              stateTransitions: (report.mainTelemetry.summary.stateTransitions ?? []).slice(-16),
+              characterNativeTimingSummaryByPhase: report.mainTelemetry.summary.characterNativeTimingSummaryByPhase ?? null,
+              characterMainTimingSummaryByPhase: report.mainTelemetry.summary.characterMainTimingSummaryByPhase ?? null
             }
           : null
       } : null,
+      nativeTimingSummaryByPhase: report.nativeTimingSummaryByPhase,
+      characterNativeTimingSummaryByPhase: report.characterNativeTimingSummaryByPhase,
+      characterMainTimingSummaryByPhase: report.characterMainTimingSummaryByPhase,
       rendererProfiler: report.rendererProfiler ? {
         target: report.rendererProfiler.target,
         profiles: report.rendererProfiler.profiles?.map((profile) => ({

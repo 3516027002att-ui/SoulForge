@@ -2,7 +2,11 @@ import { mkdtemp, readFile, readdir, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { BridgeDaemonClient, BridgeDaemonError } from '../bridge/bridgeDaemonClient.js';
+import {
+  BridgeDaemonClient,
+  BridgeDaemonError,
+  type BridgeCancellationTerminalReceipt
+} from '../bridge/bridgeDaemonClient.js';
 import { stageBridgeOutput } from '../editing/bridgeStaging.js';
 import {
   BRIDGE_RECOVERY_FAULT_OPTION,
@@ -14,6 +18,15 @@ import {
 import { findPathLeak } from './assertNoPathLeak.js';
 
 const FIXTURE_DAEMON = fileURLToPath(new URL('./bridgeRecoveryFixtureDaemon.js', import.meta.url));
+type CancellationTerminalOutcome = BridgeCancellationTerminalReceipt['outcome'];
+type FixtureCancellationTerminal = CancellationTerminalOutcome | 'hold';
+type FixtureCancellationTerminalSession = 'valid' | 'missing' | 'wrong';
+
+interface CancellationObserverInternals {
+  cancellationTerminalObservers: Map<string, {
+    timer?: { _idleTimeout?: unknown; _onTimeout?: () => void };
+  }>;
+}
 
 async function main(): Promise<void> {
   const root = await mkdtemp(join(tmpdir(), 'soulforge-bridge-recovery-harness-'));
@@ -23,6 +36,7 @@ async function main(): Promise<void> {
   let replacement: BridgeDaemonClient | undefined;
   let backpressureClient: BridgeDaemonClient | undefined;
   let backpressureAbortClient: BridgeDaemonClient | undefined;
+  let closeObserverClient: BridgeDaemonClient | undefined;
   try {
     client = await startFixtureClient(root, eventLogPath);
     const phaseResults: Array<{ phase: string; code: string }> = [];
@@ -101,12 +115,16 @@ async function main(): Promise<void> {
       .filter((event) => event.kind === 'request').length;
     const cancelCountBeforeRegistrationRace = eventsBeforeRegistrationRace
       .filter((event) => event.kind === 'cancel').length;
+    let preAbortedReceiptCount = 0;
     const registrationRaceError = await expectBridgeError(requestFault(
       client,
       sourcePath,
       'stage',
       2_000,
-      createRegistrationRaceSignal()
+      createRegistrationRaceSignal(),
+      undefined,
+      undefined,
+      () => { preAbortedReceiptCount += 1; }
     ));
     assertBridgeError(registrationRaceError, 'BRIDGE_REQUEST_CANCELLED', true);
     await waitForCancelCount(eventLogPath, cancelCountBeforeRegistrationRace + 1);
@@ -115,19 +133,48 @@ async function main(): Promise<void> {
     if (requestCountAfterRegistrationRace !== requestCountBeforeRegistrationRace) {
       throw new Error('Registration-race cancellation still emitted its request frame.');
     }
+    if (preAbortedReceiptCount !== 0) {
+      throw new Error('Pre-aborted request fabricated a cancellation terminal receipt.');
+    }
     if (client.isClosed || typeof (await client.health(2_000)).processId !== 'number') {
       throw new Error('Registration-race cancellation closed the reusable Bridge client.');
     }
 
-    const timeoutError = await expectBridgeError(
-      requestFault(client, sourcePath, 'timeout', 100)
-    );
+    const observedCancellationTerminalOutcomes: string[] = [];
+    let resolveTimeoutReceipt!: (receipt: BridgeCancellationTerminalReceipt) => void;
+    const timeoutReceiptPromise = new Promise<BridgeCancellationTerminalReceipt>((resolve) => {
+      resolveTimeoutReceipt = resolve;
+    });
+    const timeoutError = await expectBridgeError(requestFault(
+      client,
+      sourcePath,
+      'timeout',
+      100,
+      undefined,
+      undefined,
+      'cancelled',
+      (receipt) => {
+        observedCancellationTerminalOutcomes.push(
+          `timeout:${receipt.outcome}:${String(receipt.cancelRequested)}`
+        );
+        resolveTimeoutReceipt(receipt);
+      }
+    ));
     assertBridgeError(timeoutError, 'BRIDGE_TIMEOUT', true);
     await waitForCancel(eventLogPath, 'timeout');
+    assertCancellationReceipt(
+      await settleWithin(timeoutReceiptPromise, 1_000, 'Timed-out cancellation terminal was not observed.'),
+      'cancelled',
+      true
+    );
     if (client.isClosed) throw new Error('Timed-out request closed the Bridge client.');
 
     const controller = new AbortController();
     let cancelProgressFrames = 0;
+    let resolveCancellationReceipt!: (receipt: BridgeCancellationTerminalReceipt) => void;
+    const cancellationReceiptPromise = new Promise<BridgeCancellationTerminalReceipt>((resolve) => {
+      resolveCancellationReceipt = resolve;
+    });
     const cancellationError = await expectBridgeError(requestFault(
       client,
       sourcePath,
@@ -137,6 +184,13 @@ async function main(): Promise<void> {
       () => {
         cancelProgressFrames += 1;
         controller.abort('deterministic-recovery-harness');
+      },
+      'cancelled',
+      (receipt) => {
+        observedCancellationTerminalOutcomes.push(
+          `cancel:${receipt.outcome}:${String(receipt.cancelRequested)}`
+        );
+        resolveCancellationReceipt(receipt);
       }
     ));
     assertBridgeError(cancellationError, 'BRIDGE_REQUEST_CANCELLED', true);
@@ -144,7 +198,278 @@ async function main(): Promise<void> {
       throw new Error(`Cancellation fixture observed ${cancelProgressFrames} progress frames.`);
     }
     await waitForCancel(eventLogPath, 'cancel');
+    assertCancellationReceipt(
+      await settleWithin(cancellationReceiptPromise, 1_000, 'Cancelled terminal was not observed.'),
+      'cancelled',
+      true
+    );
     if (client.isClosed) throw new Error('Cancelled request closed the Bridge client.');
+
+    for (const outcome of ['result', 'failed'] as const) {
+      const lateController = new AbortController();
+      let lateProgressFrames = 0;
+      let resolveLateReceipt!: (receipt: BridgeCancellationTerminalReceipt) => void;
+      const lateReceiptPromise = new Promise<BridgeCancellationTerminalReceipt>((resolve) => {
+        resolveLateReceipt = resolve;
+      });
+      const lateError = await expectBridgeError(requestFault(
+        client,
+        sourcePath,
+        'cancel',
+        2_000,
+        lateController.signal,
+        () => {
+          lateProgressFrames += 1;
+          lateController.abort(`late-${outcome}`);
+        },
+        outcome,
+        (receipt) => {
+          observedCancellationTerminalOutcomes.push(
+            `late-${outcome}:${receipt.outcome}:${String(receipt.cancelRequested)}`
+          );
+          resolveLateReceipt(receipt);
+        }
+      ));
+      assertBridgeError(lateError, 'BRIDGE_REQUEST_CANCELLED', true);
+      if (lateProgressFrames !== 1) {
+        throw new Error(`Late ${outcome} fixture observed ${lateProgressFrames} progress frames.`);
+      }
+      assertCancellationReceipt(
+        await settleWithin(lateReceiptPromise, 1_000, `Late ${outcome} terminal was not observed.`),
+        outcome,
+        true
+      );
+    }
+
+    let duplicateTerminalCallbackCount = 0;
+    let resolveDuplicateTerminalReceipt!: (receipt: BridgeCancellationTerminalReceipt) => void;
+    const duplicateTerminalReceiptPromise = new Promise<BridgeCancellationTerminalReceipt>((resolve) => {
+      resolveDuplicateTerminalReceipt = resolve;
+    });
+    const duplicateTerminalController = new AbortController();
+    const duplicateTerminalError = await expectBridgeError(requestFault(
+      client,
+      sourcePath,
+      'cancel',
+      2_000,
+      duplicateTerminalController.signal,
+      () => duplicateTerminalController.abort('duplicate-terminal'),
+      'cancelled',
+      (receipt) => {
+        duplicateTerminalCallbackCount += 1;
+        resolveDuplicateTerminalReceipt(receipt);
+      },
+      undefined,
+      true
+    ));
+    assertBridgeError(duplicateTerminalError, 'BRIDGE_REQUEST_CANCELLED', true);
+    assertCancellationReceipt(
+      await settleWithin(duplicateTerminalReceiptPromise, 1_000, 'Duplicate-terminal receipt was not observed.'),
+      'cancelled',
+      true
+    );
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    if (duplicateTerminalCallbackCount !== 1) {
+      throw new Error(`Duplicate terminal invoked the observer ${duplicateTerminalCallbackCount} times.`);
+    }
+
+    let ttlObserverCallbackCount = 0;
+    const ttlController = new AbortController();
+    const ttlError = await expectBridgeError(requestFault(
+      client,
+      sourcePath,
+      'cancel',
+      2_000,
+      ttlController.signal,
+      () => ttlController.abort('observer-ttl'),
+      'hold',
+      () => { ttlObserverCallbackCount += 1; }
+    ));
+    assertBridgeError(ttlError, 'BRIDGE_REQUEST_CANCELLED', true);
+    await waitForCancel(eventLogPath, 'cancel');
+    const ttlObservers = cancellationObserverInternals(client).cancellationTerminalObservers;
+    if (ttlObservers.size !== 1) {
+      throw new Error(`Expected one bounded TTL observer, got ${ttlObservers.size}.`);
+    }
+    const ttlObserver = [...ttlObservers.values()][0];
+    if (!ttlObserver) throw new Error('Bounded TTL observer entry disappeared.');
+    const ttlMs = Number(ttlObserver.timer?._idleTimeout);
+    if (ttlMs !== 30_000) {
+      throw new Error(`Cancellation observer TTL drifted: ${String(ttlObserver.timer?._idleTimeout)}.`);
+    }
+    expireCancellationTerminalObservers(client);
+    if (Number(ttlObservers.size) !== 0 || ttlObserverCallbackCount !== 0) {
+      throw new Error('Expired cancellation observer was not cleaned without a callback.');
+    }
+
+    let capacityObserverCallbackCount = 0;
+    const capacityCancelCountBefore = (await readEvents(eventLogPath))
+      .filter((event) => event.kind === 'cancel').length;
+    for (let index = 0; index < 65; index += 1) {
+      const capacityController = new AbortController();
+      const capacityError = await expectBridgeError(requestFault(
+        client,
+        sourcePath,
+        'cancel',
+        2_000,
+        capacityController.signal,
+        () => capacityController.abort(`observer-capacity-${index}`),
+        'hold',
+        () => { capacityObserverCallbackCount += 1; }
+      ));
+      assertBridgeError(capacityError, 'BRIDGE_REQUEST_CANCELLED', true);
+    }
+    await waitForCancelCount(eventLogPath, capacityCancelCountBefore + 65);
+    const capacityObservers = cancellationObserverInternals(client).cancellationTerminalObservers;
+    if (capacityObservers.size !== 64) {
+      throw new Error(`Cancellation observer capacity was ${capacityObservers.size}, expected 64.`);
+    }
+    expireCancellationTerminalObservers(client);
+    if (Number(capacityObservers.size) !== 0 || capacityObserverCallbackCount !== 0) {
+      throw new Error('Bounded cancellation observer capacity leaked callbacks or entries.');
+    }
+
+    for (const session of ['missing', 'wrong'] as const) {
+      let invalidSessionCallbackCount = 0;
+      const invalidSessionController = new AbortController();
+      const invalidSessionError = await expectBridgeError(requestFault(
+        client,
+        sourcePath,
+        'cancel',
+        2_000,
+        invalidSessionController.signal,
+        () => invalidSessionController.abort(`invalid-session-${session}`),
+        'cancelled',
+        () => { invalidSessionCallbackCount += 1; },
+        session
+      ));
+      assertBridgeError(invalidSessionError, 'BRIDGE_REQUEST_CANCELLED', true);
+      await waitForCancel(eventLogPath, 'cancel');
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      const invalidSessionObservers = cancellationObserverInternals(client)
+        .cancellationTerminalObservers;
+      if (invalidSessionCallbackCount !== 0 || Number(invalidSessionObservers.size) !== 1) {
+        throw new Error(`Invalid ${session} session was accepted as a cancellation receipt.`);
+      }
+      expireCancellationTerminalObservers(client);
+      if (invalidSessionObservers.size !== 0) {
+        throw new Error(`Invalid ${session} session observer was not bounded-cleaned.`);
+      }
+    }
+
+    const observerUnhandledRejections: unknown[] = [];
+    const onObserverUnhandledRejection = (reason: unknown): void => {
+      observerUnhandledRejections.push(reason);
+    };
+    process.on('unhandledRejection', onObserverUnhandledRejection);
+    let observerCallbackCount = 0;
+    let resolveObserverCallback!: () => void;
+    const observerCallbackPromise = new Promise<void>((resolve) => {
+      resolveObserverCallback = resolve;
+    });
+    try {
+      const observerController = new AbortController();
+      const observerError = await expectBridgeError(requestFault(
+        client,
+        sourcePath,
+        'cancel',
+        2_000,
+        observerController.signal,
+        () => observerController.abort('observer-sync-throw'),
+        'cancelled',
+        () => {
+          observerCallbackCount += 1;
+          resolveObserverCallback();
+          throw new Error(`observer leaked ${root}`);
+        }
+      ));
+      assertBridgeError(observerError, 'BRIDGE_REQUEST_CANCELLED', true);
+      await settleWithin(observerCallbackPromise, 1_000, 'Synchronous receipt observer was not invoked.');
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    } finally {
+      process.removeListener('unhandledRejection', onObserverUnhandledRejection);
+    }
+    if (observerCallbackCount !== 1 || observerUnhandledRejections.length !== 0) {
+      throw new Error('Synchronous receipt observer was not isolated from the request promise.');
+    }
+
+    const asyncObserverUnhandledRejections: unknown[] = [];
+    const onAsyncObserverUnhandledRejection = (reason: unknown): void => {
+      asyncObserverUnhandledRejections.push(reason);
+    };
+    process.on('unhandledRejection', onAsyncObserverUnhandledRejection);
+    let asyncObserverCallbackCount = 0;
+    let resolveAsyncObserverCallback!: () => void;
+    const asyncObserverCallbackPromise = new Promise<void>((resolve) => {
+      resolveAsyncObserverCallback = resolve;
+    });
+    try {
+      const asyncObserverController = new AbortController();
+      const asyncObserverError = await expectBridgeError(requestFault(
+        client,
+        sourcePath,
+        'cancel',
+        2_000,
+        asyncObserverController.signal,
+        () => asyncObserverController.abort('observer-async-reject'),
+        'cancelled',
+        async () => {
+          asyncObserverCallbackCount += 1;
+          resolveAsyncObserverCallback();
+          throw new Error(`async observer leaked ${root}`);
+        }
+      ));
+      assertBridgeError(asyncObserverError, 'BRIDGE_REQUEST_CANCELLED', true);
+      await settleWithin(asyncObserverCallbackPromise, 1_000, 'Async receipt observer was not invoked.');
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    } finally {
+      process.removeListener('unhandledRejection', onAsyncObserverUnhandledRejection);
+    }
+    if (asyncObserverCallbackCount !== 1 || asyncObserverUnhandledRejections.length !== 0) {
+      throw new Error('Async receipt observer was not isolated from the request promise.');
+    }
+
+    let resolveTerminalRaceProgress!: () => void;
+    const terminalRaceProgressStarted = new Promise<void>((resolve) => {
+      resolveTerminalRaceProgress = resolve;
+    });
+    let releaseTerminalRaceProgress!: () => void;
+    const terminalRaceProgressGate = new Promise<void>((resolve) => {
+      releaseTerminalRaceProgress = resolve;
+    });
+    let resolveTerminalRaceReceipt!: (receipt: BridgeCancellationTerminalReceipt) => void;
+    const terminalRaceReceiptPromise = new Promise<BridgeCancellationTerminalReceipt>((resolve) => {
+      resolveTerminalRaceReceipt = resolve;
+    });
+    const terminalRaceController = new AbortController();
+    const cancellationTerminalRaceRequest = requestFault(
+      client,
+      sourcePath,
+      'progress-terminal-race',
+      2_000,
+      terminalRaceController.signal,
+      async () => {
+        resolveTerminalRaceProgress();
+        await terminalRaceProgressGate;
+      },
+      'result',
+      resolveTerminalRaceReceipt
+    );
+    await terminalRaceProgressStarted;
+    await waitForEvent(eventLogPath, 'terminal', 'progress-terminal-race');
+    terminalRaceController.abort('terminal-already-received');
+    const cancellationTerminalRaceError = await expectBridgeError(cancellationTerminalRaceRequest);
+    assertBridgeError(cancellationTerminalRaceError, 'BRIDGE_REQUEST_CANCELLED', true);
+    assertCancellationReceipt(
+      await settleWithin(
+        terminalRaceReceiptPromise,
+        1_000,
+        'Already-received terminal was not delivered to the cancellation observer.'
+      ),
+      'result',
+      true
+    );
+    releaseTerminalRaceProgress();
 
     const cancelCountBeforeProgressFailure = (await readEvents(eventLogPath))
       .filter((event) => event.kind === 'cancel').length;
@@ -299,6 +624,7 @@ async function main(): Promise<void> {
       assertBridgeError(backpressureTimeoutError, 'BRIDGE_TIMEOUT', true);
 
       const backpressureAbortController = new AbortController();
+      let backpressureAbortReceiptCount = 0;
       const backpressureCancellation = backpressureAbortClient.request({
         payload: {
           command: 'validate',
@@ -307,7 +633,8 @@ async function main(): Promise<void> {
         },
         resourceUri: 'file://synthetic-protocol-only.bin',
         timeoutMs: 1_000,
-        signal: backpressureAbortController.signal
+        signal: backpressureAbortController.signal,
+        onCancellationTerminal: () => { backpressureAbortReceiptCount += 1; }
       });
       backpressureAbortController.abort('backpressure-cancel-fixture');
       backpressureCancelError = await settleWithin(
@@ -317,6 +644,9 @@ async function main(): Promise<void> {
       );
       assertBridgeError(backpressureCancelError, 'BRIDGE_REQUEST_CANCELLED', true);
       await new Promise((resolve) => setTimeout(resolve, 150));
+      if (backpressureAbortReceiptCount !== 0) {
+        throw new Error('Backpressured pre-dispatch cancellation fabricated a terminal receipt.');
+      }
     } finally {
       process.removeListener('unhandledRejection', onBackpressureAbortUnhandledRejection);
     }
@@ -324,6 +654,27 @@ async function main(): Promise<void> {
       throw new Error(
         `Backpressure timeout/cancel left an unhandled rejection: ${String(backpressureAbortUnhandledRejections[0])}`
       );
+    }
+
+    closeObserverClient = await startFixtureClient(root, eventLogPath, 'close-after-cancel');
+    let closeObserverCallbackCount = 0;
+    const closeObserverController = new AbortController();
+    const closeObserverError = await expectBridgeError(requestFault(
+      closeObserverClient,
+      sourcePath,
+      'cancel',
+      2_000,
+      closeObserverController.signal,
+      () => closeObserverController.abort('observer-close'),
+      'hold',
+      () => { closeObserverCallbackCount += 1; }
+    ));
+    assertBridgeError(closeObserverError, 'BRIDGE_REQUEST_CANCELLED', true);
+    await waitForCancel(eventLogPath, 'cancel');
+    await new Promise((resolve) => setTimeout(resolve, 150));
+    if (!closeObserverClient.isClosed || closeObserverCallbackCount !== 0
+      || cancellationObserverInternals(closeObserverClient).cancellationTerminalObservers.size !== 0) {
+      throw new Error('Bridge child close did not clear the cancellation observer.');
     }
 
     const healthBeforeCrash = await client.health(2_000);
@@ -352,6 +703,29 @@ async function main(): Promise<void> {
       throw new Error('Explicit recovery did not start a distinct fixture process.');
     }
 
+    let disposeObserverCallbackCount = 0;
+    const disposeObserverController = new AbortController();
+    const disposeObserverError = await expectBridgeError(requestFault(
+      replacement,
+      sourcePath,
+      'cancel',
+      2_000,
+      disposeObserverController.signal,
+      () => disposeObserverController.abort('observer-dispose'),
+      'hold',
+      () => { disposeObserverCallbackCount += 1; }
+    ));
+    assertBridgeError(disposeObserverError, 'BRIDGE_REQUEST_CANCELLED', true);
+    await waitForCancel(eventLogPath, 'cancel');
+    const disposeObservers = cancellationObserverInternals(replacement).cancellationTerminalObservers;
+    if (disposeObservers.size !== 1) {
+      throw new Error(`Expected one observer before dispose, got ${disposeObservers.size}.`);
+    }
+    await replacement.dispose();
+    if (Number(disposeObservers.size) !== 0 || disposeObserverCallbackCount !== 0) {
+      throw new Error('Bridge dispose did not clear the cancellation observer.');
+    }
+
     console.log(JSON.stringify({
       ok: true,
       status: 'fixture-confirmed',
@@ -366,8 +740,19 @@ async function main(): Promise<void> {
         outboundFramePendingCleaned: true,
         registrationRaceCancellation: registrationRaceError.code,
         registrationRaceRequestSuppressed: true,
+        preAbortedReceiptSuppressed: true,
         timeout: timeoutError.code,
         cancellation: cancellationError.code,
+        cancellationTerminalObserver: observedCancellationTerminalOutcomes,
+        cancellationTerminalObserverSyncThrowIsolated: true,
+        cancellationTerminalObserverAsyncRejectIsolated: true,
+        cancellationTerminalObserverTerminalRace: true,
+        cancellationTerminalObserverDuplicateSuppressed: true,
+        cancellationTerminalObserverTtlBounded: true,
+        cancellationTerminalObserverCapacity: 64,
+        cancellationTerminalObserverInvalidSessionSuppressed: true,
+        cancellationTerminalObserverCloseCleanup: true,
+        cancellationTerminalObserverDisposeCleanup: true,
         progressHandlerFailure: progressHandlerError.code,
         asyncProgressHandlerFailure: asyncProgressHandlerError.code,
         terminalRaceProgressFailure: terminalRaceError.code,
@@ -386,6 +771,7 @@ async function main(): Promise<void> {
       ]
     }, null, 2));
   } finally {
+    await closeObserverClient?.dispose();
     await backpressureAbortClient?.dispose();
     await backpressureClient?.dispose();
     await replacement?.dispose();
@@ -394,10 +780,14 @@ async function main(): Promise<void> {
   }
 }
 
-function startFixtureClient(root: string, eventLogPath: string): Promise<BridgeDaemonClient> {
+function startFixtureClient(
+  root: string,
+  eventLogPath: string,
+  fixtureMode?: string
+): Promise<BridgeDaemonClient> {
   return BridgeDaemonClient.start({
     executable: process.execPath,
-    args: [FIXTURE_DAEMON, eventLogPath],
+    args: [FIXTURE_DAEMON, eventLogPath, ...(fixtureMode ? [fixtureMode] : [])],
     cwd: root,
     workspaceSessionId: 'bridge-recovery-harness',
     allowedRoots: [root],
@@ -445,19 +835,51 @@ function requestFault(
   fault: BridgeRecoveryHarnessFault,
   timeoutMs: number,
   signal?: AbortSignal,
-  onProgress?: () => void | Promise<void>
+  onProgress?: () => void | Promise<void>,
+  cancellationTerminal?: FixtureCancellationTerminal,
+  onCancellationTerminal?: (receipt: BridgeCancellationTerminalReceipt) => void | Promise<void>,
+  cancellationTerminalSession?: FixtureCancellationTerminalSession,
+  cancellationTerminalDuplicate = false
 ) {
   return client.request({
     payload: {
       command: 'validate',
       filePath: sourcePath,
-      options: { [BRIDGE_RECOVERY_FAULT_OPTION]: fault }
+      options: {
+        [BRIDGE_RECOVERY_FAULT_OPTION]: fault,
+        ...(cancellationTerminal ? { cancellationTerminal } : {}),
+        ...(cancellationTerminalSession ? { cancellationTerminalSession } : {}),
+        ...(cancellationTerminalDuplicate ? { cancellationTerminalDuplicate: true } : {})
+      }
     },
     resourceUri: 'file://synthetic-protocol-only.bin',
     timeoutMs,
     ...(signal ? { signal } : {}),
-    ...(onProgress ? { onProgress } : {})
+    ...(onProgress ? { onProgress } : {}),
+    ...(onCancellationTerminal ? { onCancellationTerminal } : {})
   });
+}
+
+function assertCancellationReceipt(
+  receipt: BridgeCancellationTerminalReceipt,
+  outcome: CancellationTerminalOutcome,
+  cancelRequested: boolean
+): void {
+  if (receipt.outcome !== outcome
+    || receipt.cancelRequested !== cancelRequested
+    || !receipt.requestId
+    || !Number.isFinite(Date.parse(receipt.receivedAt))) {
+    throw new Error(`Unexpected cancellation terminal receipt: ${JSON.stringify(receipt)}`);
+  }
+}
+
+function cancellationObserverInternals(client: BridgeDaemonClient): CancellationObserverInternals {
+  return client as unknown as CancellationObserverInternals;
+}
+
+function expireCancellationTerminalObservers(client: BridgeDaemonClient): void {
+  const observers = cancellationObserverInternals(client).cancellationTerminalObservers;
+  for (const observer of [...observers.values()]) observer.timer?._onTimeout?.();
 }
 
 function createRegistrationRaceSignal(): AbortSignal {

@@ -4,7 +4,7 @@
 > - 状态、切片、Evidence 的权威是 `docs/governance/*.json`；`docs/V0_5_IMPLEMENTATION_HANDOFF.md`（下称"交接书"）的对应章节是它们的投影，冲突时以 JSON 为准。读这些状态一律走 `node scripts/gov.mjs next` / `status`，不要手工读投影表格。
 > - 交接书仍是唯一完整实施规范与技术地图；需要背景、区域地图或格式细节时查它。
 > - 适用对象：**写代码稳定、但规划与自我编排较弱**的 Agent。
-> - 与交接书的关系：交接书是"地图 + 参考手册"，本文是"照着走的操作规程"。二者冲突时以交接书为准。
+> - 与交接书的关系：交接书是"地图 + 参考手册"，本文是"照着走的操作规程"。状态、范围和证据冲突时以治理 JSON 为准；其他实施边界先核对当前 AGENTS.md，再查交接书相关区域。
 > - 本文不新建 milestone / task / status / next-actions 口径；它把交接书 §0.3 的决策协议和 §13.2 的切片模板，翻译成可机械执行的流程。
 
 ---
@@ -29,7 +29,7 @@
 
 - [ ] 我没有在 Patch Engine 之外用 `fs.writeFile` 改 Mod 资源；writer/converter 只写 main 控制的暂存根。
 - [ ] renderer 不碰文件系统、不拿真实绝对路径；`THREE.Object3D` / React state 不作权威场景文档。
-- [ ] 只写当前打开的工作区；数据库/缓存/日志/恢复元数据不写进 Mod 工作区。
+- [ ] Mod 资源仅写当前打开的工作区且经过 Patch Engine；工作区伴生数据库与缓存可写入根目录 `.soulforge/`，权限拒绝时降级独立本地目录；日志和全局备份仍隔离管理。
 - [ ] 未知字段无法无损保留 → 不开 writer；no-op roundtrip 不成立 → 停。
 - [ ] 不让 fixture / candidate 冒充 native；不让 raw replace 冒充 native writer。
 - [ ] `unsupported` / `failed` / `partial` / `blocked` 返回**结构化诊断**，不吞异常、不猜默认值。
@@ -52,7 +52,7 @@
 | **L3 拆解** | 按 §4 模板把切片拆成有序微步骤；只取**第一个未完成**微步骤作为本轮目标 | 一个微步骤 |
 | **L4 实现** | 严格在"允许改的入口"内实现该微步骤；命中压舱石红线即回 §1 | 代码改动 |
 | **L5 验证** | 跑该切片 required validation（交接书 §15.1 矩阵）；按 §5 二值判定是否真完成；未过则修，不放宽断言 | 通过/失败 + 样本范围 |
-| **L6 沉淀** | 按 §6 判断是否命中写回触发器；命中才更新交接书 §17（及必要时 §13、§4~§12），否则只保留本轮验证结果；跑门禁确认无断链 | 必要的唯一事实源更新，或明确无写回 |
+| **L6 沉淀** | 按 §6 判断是否命中写回触发器；命中时通过治理源与 CLI 更新状态、Evidence 和投影，否则只保留本轮验证结果；跑门禁确认无断链 | 必要的唯一事实源更新，或明确无写回 |
 
 走完 L6 回到 L0。**一轮只前进一个微步骤**——这是把"规划"换成"稳定编码"的关键：你每次只需正确做一件小事。
 
@@ -62,7 +62,7 @@
 
 严格按顺序回答，命中即停，输出唯一切片。不要在多个候选间反复权衡。
 
-**Q1 与 Q2 已由 CLI 机械完成**：`node scripts/gov.mjs next` 的 `claimable` 列表已排除他人认领、已完成、被阻塞与其他版本的切片，`activeSlices` 列出在飞 claim 及其持有者。直接从 `claimable` 进入 Q3，不要手工比对交接书表格——那些表格是 `docs/governance/slices.json` 的投影，手工读只是多一次转录机会。
+**Q1 与 Q2 已由 CLI 机械完成**：`node scripts/gov.mjs next` 的 `claimable` 列表按生命周期与并发占用过滤，默认不按发布版本排除切片；只有显式 `--release` 才按发布归属筛选。`activeSlices` 列出在飞 claim 及其持有者。直接从 `claimable` 进入 Q3，不要手工比对交接书表格——那些表格是 `docs/governance/slices.json` 的投影，手工读只是多一次转录机会。
 
 若 `claimable` 为空，`message` 会指出实际原因与对应出路（deferred 指向 `scope.json` 的 `resumeRequires`，active 指向 release/complete，blocked 指向 `blockers.json`）；按它走，必要时去 §8。
 
@@ -72,7 +72,7 @@ Q1 gov next 的 activeSlices 里是否有一条由我持有？
    否 → 核对其他 active claim 的任务/进程状态与工作树变化；仍可验证运行中的不复制，
         已结束或无法验证且无相关写进程的用 gov release --slice <id> --force 原子回退，然后 Q2。
 
-Q2 取 gov next 的 claimable 列表（已按 lifecycle=ready 与当前版本过滤）。
+Q2 取 gov next 的 claimable 列表（按可开发生命周期与占用状态过滤，不默认按版本过滤）。
    为空 → 按 message 指出的出路处理，或去 §8；非空 → Q3。
 
 Q3 剩余切片里，是否有"能解锁多条下游路线的共同底座"(如 A-RECOVERY)？
@@ -85,8 +85,8 @@ Q4 是否有"能关闭高风险未知的只读研究 / validator / diagnostics"(
 
 Q5 仍有多个并列 → 取交接书 §3.1 依赖表中**行序最靠上**者，去 Q6。
 
-Q6 选定后立即把该行 lifecycle 从 `ready` 改为 `active`，并在 §13.1.1 原子登记
-   claimId/owner/claimedAt/heartbeatAt/recoveryTrigger；不改 authority、不追加 Evidence；
+Q6 选定后用 gov claim --slice <id> --owner <你> 原子登记占用，
+   由 CLI 更新 lifecycle 与 claim 信息及投影；不手改 §13.1.1，不改 authority、不追加 Evidence；
    跑 `npm run test:handoff-integrity` 后才能进入 L2。
 ~~~
 
@@ -113,7 +113,7 @@ Q6 选定后立即把该行 lifecycle 从 `ready` 改为 `active`，并在 §13.
 ### K1 只读勘察 / candidate inventory
 
 1. 确认合法输入样本来源；先穷尽公开来源调查、已有本机 registry、external-only adapter 与可独立验证的失败关闭路径。只有这些工程替代均不可行且 §18.4 已定义真实外部输入时，才把 lifecycle 改为 `blocked`；不能把来源研究本身交给用户。
-2. 在 core 只读探测层写最小 parser：只提取可确认字段 + `diagnostics`。
+2. 原生格式解析在 C# Bridge 扩展；core 只组织探测结果和投影，不维护第二套 production native parser。只提取可确认字段并返回 `diagnostics`。
 3. 对可确认字段写断言；不确定的标 `candidate`，不猜。
 4. 冲突 / 未知变体 → 结构化记 `unsupported` 并留证据，停在只读。
 5. 写 smoke 测试，接入对应 `test:*` 脚本。
@@ -169,7 +169,7 @@ Q6 选定后立即把该行 lifecycle 从 `ready` 改为 `active`，并在 §13.
 1. 前置：凭据只经 main + safeStorage；无合法环境则该切片 `blocked`，回 §3。
 2. 固定无写 / 受控写工具集，写工具仍复用 native validator + Patch Engine。
 3. 跑真实只读循环 + 取消 / 超时 / 错误 / 审计 / 凭据脱敏。
-4. 采集真实数据，但**不得自行把观测值定义为发布标准**；V0.5 只使用交接书已冻结的功能正确性标准，不恢复已删除的量化阈值。
+4. 采集真实数据，但**不得自行把观测值定义为发布标准**；按当前范围裁定、validation registry 与相应测试契约判定，不从历史版本恢复已删除标准，也不为了通过而放宽现有断言。
 5. L6 记脱敏结果为 provider loop `partial`；不提升生产写 Agent。
 
 **套不上模板？** 回 §3 按交接书 §3 缩小范围，或把切片拆到能套上为止。宁可缩小，不要硬闯。
@@ -194,7 +194,7 @@ Q6 选定后立即把该行 lifecycle 从 `ready` 改为 `active`，并在 §13.
 
 ## 6. 沉淀：唯一合规通道
 
-进度只能沉淀进**交接书**，禁止新建平行清单，但普通微步骤不应让唯一事实源膨胀。L6 先判断本轮是否发生任一写回触发器：
+进度沉淀进**治理 JSON 与其交接书投影**，禁止新建平行清单，但普通微步骤不应让唯一事实源膨胀。L6 先判断本轮是否发生任一写回触发器：
 
 - 切片完成；
 - authority 变化；
@@ -228,8 +228,8 @@ Q6 选定后立即把该行 lifecycle 从 `ready` 改为 `active`，并在 §13.
 | 环境缺失仍硬做真实服务 | 改走 K1/K2/K6 只读或研究模式 |
 | 遇未知字段填默认值 | 记 `unsupported` + 证据，停 |
 | 为过测试放宽/删断言 | 如实记 `failed`/`partial`，修根因 |
-| 每个微步骤都追加状态日志 | 只在 §6 五类触发器命中时写交接书；普通微步骤不追加 Evidence |
-| 完成后新建 status 文档 | 按触发器写交接书 §17，跑门禁 |
+| 每个微步骤都追加状态日志 | 只在 §6 五类触发器命中时更新治理源和投影；普通微步骤不追加 Evidence |
+| 完成后新建 status 文档 | 按触发器走 gov seal 与治理更新，跑门禁 |
 | 凭记忆续接上一轮 | L0 重新读真实工作树 + 交接书 |
 
 ---
@@ -269,9 +269,10 @@ S4 护栏自检（全过才可自主追加，否则退回 S2 记 `blocked`）：
    [ ] authority 上限已设，且不越级；
    [ ] 不依赖 §18.4 仍未解锁的 blocker。
 
-S5 把新切片按 §13.1 十列格式**自主追加**到面板，分配 `W-<GATE>-NN` 形式的 ID；
-   lifecycle 初始为 `ready`，authority 按现有证据填写，blockerRefs 为 `—`。
-   在 §18.3 对应 Gate 行更新"当前切片"引用，并保持 gateState=`open`。
+S5 按当前 schema 在 docs/governance/slices.json 登记新切片，分配 W-<GATE>-NN 形式的 ID；
+   lifecycle 初始为 `ready`，authority 按现有证据填写，无阻塞时 blockerRefs 为 []。
+   在 docs/governance/gates.json 更新对应 Gate 的切片引用，并保持 gateState=`open`；
+   用 npm run handoff:project 生成面板与 Gate 投影，不手写交接书表格。
 
 S6 跑 `npm run test:handoff-integrity`：Gate 状态机必须仍通过，
    新切片 ID 必须被面板与矩阵一致引用，`completed` / `superseded` 不得覆盖 open Gate。
@@ -293,19 +294,19 @@ T1 分开聚合未完成 Gate：
    - gateState=`open` 且只有 active → 引用 §13.1.1 claimId/owner/heartbeatAt，标明“由其他 Agent 推进”，
      不伪造 blocker；先按 recoveryTrigger 排除 orphan claim。
 T2 只有活动 blockerRefs 明确引用 `reason=user-ruling` 时才报告用户裁定；Evidence freshness 维护、来源调查和已删除的量化阈值都不能冒充 user-ruling。
-T3 若 blocker 发生变化，按 §6 触发器写入 §17，并同步 §18.4；不新建平行文档：
+T3 若 blocker 发生变化，按 §6 触发器更新治理源、封存 Evidence 并生成投影；不新建平行文档：
    - 已推进到的边界；
    - 每个 Gate 的 blockerId、所需输入、责任方、解锁验证和复查触发器；
    - 建议用户或环境维护者提供的最小输入。
-T4 若全部 Gate 均 `passed`，按当前 freshness 有效的 sealed Evidence 宣布 V0.5 完成；
+T4 若目标范围的全部 Gate 均合法通过，按明确的发布登记与 freshness 有效的 sealed Evidence 声明该范围完成；
    若全部未完成 Gate 均 blocked，声明“当前可推进面已耗尽，等待结构化 blocker 输入”；
    若仍有 open+active，声明“无可认领切片，已有其他 Agent 正在推进”，并停止，不能写成等待 blocker。
 ~~~
 
 停止时仅在命中 §6 触发器时写回；无 blocker 或 authority 变化就不重复追加同一等待记录。下一轮命中 §18.4 的复查触发器后，从 §2 的 L0 重新进入并实际运行解锁验证。
 
-**耗尽 ≠ 完成**：只有交接书 §18.3 全部 Gate 都是合法 `passed`（包括经 sealed 范围证据批准的功能排除），才是 V0.5 完成；"可推进面耗尽"只说明此刻缺结构化外部输入或已有其他 active 工作。
+**耗尽 ≠ 完成**：只有明确目标范围的 Gate 均合法通过（包括经 sealed 范围证据批准的功能排除），才可声明该范围完成；不得从交接书文件名推断当前发布版本。"可推进面耗尽"只说明此刻缺结构化外部输入或已有其他 active 工作。
 
 ---
 
-本手册只提供方法，不产生新范围、状态或 authority。与交接书冲突时，以交接书为准。
+本手册只提供方法，不产生新范围、状态或 authority。状态、范围与证据以治理 JSON 为准；交接书相关区块仅为投影。

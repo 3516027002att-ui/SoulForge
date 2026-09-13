@@ -1001,6 +1001,8 @@ V0.5 不要求代表性硬件档位、真实大地图性能预算或原生后端
 | `W-REL-C-PARAM-04` | `completed` | `partial` | — | `C-PARAM` | 全部 ParamType 读往返矩阵与写路径扩展：对 gameparam.parambnd.dcx 全部子项执行 native 读+语义往返（大文件条目经 file-backed extract-bnd4-child 绕开 snapshot base64 帧上限），并扩展多布局 ParamType 的字段级 staged upsert 写验证 | `W-EMEVD-FMG-PARAM-03` 完成（bridge:verify:param corpus 40/40 + 3 legacy 已通）；真实 gameparam.parambnd.dcx 在本机，138 子项全部可经 file-backed extract 读取 | `bridge/SoulForge.Bridge/Bnd4NativeWriter.cs`、`packages/core/src/testing/runNativeParamSmoke.ts` | `npm run bridge:verify:param` | cap=`partial`；只覆盖 gameparam.parambnd.dcx 实际注册的 ParamType 布局 |
 | `W-REL-D-GAMELOAD-01` | `ready` | `candidate` | — | `D-BEHAVIOR` | 真实 Sekiro 游戏内加载确认：替换后 script 容器放入真实 mods/script 后游戏能读到脚本阶段不崩溃 | `W-SCRIPT-READONLY-01` 完成（preflight 已过）；需用户游戏内确认（SOULFORGE_SCRIPT_REAL_LOAD_CONFIRMED） | `packages/core/src/testing/runScriptContainerLoadPreflightSmoke.ts`、`packages/core/src/script/scriptContainerEvidence.ts` | `node scripts/with-local-has-game-env.mjs` `npm run test:script-container-load-preflight`；`validation-unfrozen`：真实游戏内加载确认 | cap=`candidate`；真实游戏内加载确认前 authority 保持 candidate |
 | `W-REL-H-CROSSMACHINE-01` | `ready` | `partial` | — | `H-RUNTIME` | 跨机/干净机 NSIS 安装、升级、卸载复现与真实 me3 会话跨机验证 | 本机 NSIS 安装/升级/卸载已过；需第二台 Windows x64 机器或干净机环境 | `scripts/verify-installer-lifecycle.mjs`、`scripts/verify-me3-sekiro-session.mjs` | SOULFORGE_INSTALLER_LIFECYCLE_RUN=1 `node scripts/verify-installer-lifecycle.mjs`；跨机 me3 会话 smoke | cap=`partial`；只覆盖实际执行的跨机/干净机复现 |
+| `W-REL-V09-PUBLIC-PREVIEW-01` | `ready` | `partial` | — | `V09-PUBLIC-PREVIEW` | 完成 V0.9 Windows x64 公开预发行的 clean 源码 ZIP、启动 EXE/native 必需组件与许可证 notices，并审计源码归档完整性、启动路径、内部文件排除及哈希 | 现有功能源代码构建入口、启动器/native 构建入口、许可证目录与不携带真实游戏资产/私有语料/凭据的 clean 源码 ZIP 策略保持可审计；NSIS 安装包不属于本轮交付 | `docs/governance/releases.json`、`docs/governance/scope.json`、`package.json`、`scripts/release-compliance-policy.json`、`scripts/release-compliance-lib.mjs`、`scripts/generate-release-compliance-manifest.mjs` | `npm run build`；`npm run exe:build`；`npm run release:manifest`；`node scripts/verify-governance.mjs`；`validation-unfrozen`：实际 V0.9 clean 源码 ZIP 完整性、启动 EXE/native 必需组件启动路径、内部文件排除、源码与产物哈希、必要许可证 notices 及 GitHub source archive exclusion audit；本轮不要求 NSIS installer build/install/upgrade/uninstall，旧跨机与真实 Sekiro 验收仍不声称完成 | cap=`partial`；只覆盖当前 V0.9 Windows x64 clean 源码 ZIP、启动 EXE/native 必需组件与源码归档边界，不提升旧 Gate 或 native/runtime authority |
+| `W-MAP-PREVIEW-CORRECTNESS-03` | `completed` | `partial` | — | `I-RENDER` / `C-MSB` | 修复 MSB 地图预览 legacy cache 身份碰撞并封闭完成/失败重试/旧场景结果隔离；保真核验 native 诊断、地图 FaceSet/cull 字段与一个异常 part 的有界证据；补齐并验证已验证 FLVER 布局上的有界 C# absolute-rigid 参考姿态 FK bake，保持 delta/static 不变并对 weighted skinning 失败关闭 | 每次 mounted scene 继续创建独立 MapModelLoadCache，cleanup 继续取消请求并 dispose cache/worker/upload queue；native MAP static geometry 诊断与 FaceSet/cull 字段保持现有只读入口；单个异常 part 证据必须标为 partial，不得外推为整张地图、全硬件或游戏内可见性 | `apps/desktop/src/renderer/src/scene/mapModelLoadScheduler.ts`、`apps/desktop/src/renderer/src/scene/mapModelLoadScheduler.test.ts`、`apps/desktop/src/renderer/src/scene/mapGeometryPrepare.ts`、`apps/desktop/src/renderer/src/scene/mapGeometryPrepareClient.ts`、`apps/desktop/src/renderer/src/scene/mapGeometryPrepareClient.test.ts`、`apps/desktop/src/renderer/src/scene/mapGeometryPrepareWorker.ts`、`apps/desktop/src/renderer/src/scene/modelResourcePool.ts`、`apps/desktop/src/renderer/src/scene/modelResourcePool.test.ts`、`apps/desktop/src/renderer/src/scene/threeSceneController.ts`、`apps/desktop/src/renderer/src/editors/MsbScenePanel.tsx`、`apps/desktop/src/renderer/src/editors/MsbScenePanel.test.tsx`、`apps/desktop/src/main/ipc/map.ts`、`apps/desktop/src/main/ipc/mapRequestCancellation.ts`、`apps/desktop/src/main/ipc/mapRequestCancellation.test.ts`、`apps/desktop/src/main/ipc/mapStaticReadDecision.ts`、`apps/desktop/src/main/ipc/mapStaticReadDecision.test.ts`、`bridge/SoulForge.Bridge/FlverNativeDocument.cs`、`bridge/SoulForge.Bridge/FlverMatureSkinning.cs`、`bridge/SoulForge.Bridge/MapStaticGeometryService.cs`、`packages/core/src/testing/audit/sf-14/flverFixture.ts`、`packages/core/src/testing/runAuditSf14Smoke.ts`、`scripts/verify-map-streaming-native.mjs`、`scripts/verify-map-timing-contract.mjs`、`scripts/map-native-timing-aggregate.mjs`、`packages/shared/src/scene-ir.ts` | `npm run test:renderer-unit`、`npm run test:scene-draw-list`、`npm run test:three-scene-module`、`npm run test:map-static-pagination-contract`、`npm run test:map-streaming-contract`、`npm run test:audit-sf-14-unit`；最低回归：`npm run typecheck`、`npm test`、`npm run bridge:verify:synthetic`、`npm run build`、`npm run exe:build`；有界 native/Electron：单个异常 part 的原生/画面对照；`validation-unfrozen`：单个异常 part 原生诊断与画面对照尚未冻结 | cap=`partial`；覆盖地图预览缓存身份、完成/重试与场景隔离、native 诊断保真、FaceSet/cull 字段，以及已验证 FLVER 布局上的有界 C# absolute-rigid 参考姿态 FK bake、delta/static 不变与 weighted fail-closed；不提升完整地图可见性、全流式架构、游戏内加载或发布 authority |
 
 <!-- SOULFORGE_PROJECTION_END:slice-panel -->
 
@@ -1098,6 +1100,7 @@ exitSemantics # pass=exit 0 且断言执行；skip/unfrozen 语义明确
 
 - `W-REL-D-GAMELOAD-01`：真实 Sekiro 游戏内加载确认（script 容器替换后游戏读取不崩溃）；
 - `W-REL-H-CROSSMACHINE-01`：跨机/干净机 NSIS 安装、升级、卸载复现；
+- `W-REL-V09-PUBLIC-PREVIEW-01`：V0.9 clean 源码 ZIP 与启动 EXE/native 必需组件的归档完整性、启动路径、内部文件排除、源码与产物哈希、许可证 notices 及 GitHub 自动源码归档排除验证尚未冻结；NSIS 安装包不在本轮交付，旧跨机与真实游戏验收仍不声称完成；
 
 （`W-ME3-INSTALL-04`、`W-REL-F-ACCEPT-02`、`W-BEHAVIOR-MAP-01`、`W-REL-C-MULTILANG-03` 已 completed，不再列入未冻结清单。MULTILANG-03 的未冻结条目已由 EV-FMG-CONTAINER-CLOSED-LOOP-20260814 封存后随 complete 移除。）
 
@@ -1247,7 +1250,7 @@ npm run build
 
 <!-- SOULFORGE_PROJECTION_BEGIN:command-index -->
 
-全部 289 条已登记验证命令按层级列出。层级顺序即执行顺序（先快后慢，早失败早停）。
+全部 301 条已登记验证命令按层级列出。层级顺序即执行顺序（先快后慢，早失败早停）。
 
 一次跑完某一层：`node scripts/verify.mjs --tier <层级>`；跑全部：`npm run verify:all`。
 
@@ -1277,7 +1280,7 @@ npm run test:verify-entrypoint
 npm run verify:audit
 ~~~
 
-**unit**（120 条）
+**unit**（128 条）
 
 ~~~powershell
 npm run test
@@ -1286,6 +1289,7 @@ npm run test:action-motion-identity
 npm run test:agent-approval-gate
 npm run test:agent-capability-wiring
 npm run test:agent-knowledge-refresh
+npm run test:agent-param-dependency-batch
 npm run test:agent-performance-fixes
 npm run test:agent-permission-unified
 npm run test:agent-production-build
@@ -1365,13 +1369,19 @@ npm run test:flver-pages
 npm run test:fmg-msb-ipc-contract
 npm run test:hex-scene
 npm run test:map-document-scale
+npm run test:map-request-cancellation
 npm run test:map-static-pagination-contract
+npm run test:map-streaming-contract
+npm run test:map-timing-contract
 npm run test:map-transaction-atomic
 npm run test:me3-runtime-adapter
 npm run test:me3-runtime-gateway
 npm run test:model-service-configuration
 npm run test:model-service-vault-contract
+npm run test:native-projection-acceptance
 npm run test:openai-responses
+npm run test:param-canonical-projection
+npm run test:param-export-clone
 npm run test:param-metadata-read-bridge
 npm run test:param-msb-write-ipc-contract
 npm run test:param-slim-ipc
@@ -1389,6 +1399,7 @@ npm run test:s40-live
 npm run test:scene-asset-inventory
 npm run test:scene-draw-list
 npm run test:subprocess-control
+npm run test:tae-anim-id-guards
 npm run test:three-scene-functional
 npm run test:three-scene-module
 npm run test:tpf-pages
@@ -1402,7 +1413,7 @@ npm run test:yapped-param-metadata-source
 npm run typecheck
 ~~~
 
-**synthetic**（53 条）
+**synthetic**（54 条）
 
 ~~~powershell
 npm run bridge:build
@@ -1422,6 +1433,7 @@ npm run test:asset-writeback
 npm run test:bc3-color-block
 npm run test:bc7-decode
 npm run test:bnd4-repack-scope
+npm run test:bridge-cancellation-terminal-phase
 npm run test:bridge-recovery-harness
 npm run test:bridge-staging
 npm run test:bridge-write-boundary
@@ -1460,7 +1472,7 @@ npm run test:upgrade-recovery
 npm run test:writer-failure-matrix
 ~~~
 
-**native**（85 条）
+**native**（87 条）
 
 ~~~powershell
 npm run bridge:verify:bnd4-transaction
@@ -1491,6 +1503,7 @@ npm run bridge:verify:tpf-writer
 npm run probe:behavior-headers
 npm run test:action-mature-oracle
 npm run test:action-real-corpus
+npm run test:agent-tae-indexed-uri
 npm run test:audit-sf-01-native
 npm run test:audit-sf-02-native
 npm run test:audit-sf-03-native
@@ -1532,6 +1545,7 @@ npm run test:native-knowledge-refresh
 npm run test:native-luabnd
 npm run test:native-map-rollback
 npm run test:native-preview
+npm run test:native-semantic-param-rows
 npm run test:native-writer-failure-matrix
 npm run test:param-duplicate-native
 npm run test:param-field-write-matrix
@@ -1550,13 +1564,14 @@ npm run test:workspace-completeness
 npm run test:workspace-readiness-native
 ~~~
 
-**release**（10 条）
+**release**（11 条）
 
 ~~~powershell
 npm run build
 npm run release:installer:manifest
 npm run release:manifest
 npm run test:installer-lifecycle
+npm run test:packaged-bridge-runtime
 npm run test:portable-packaging-config-fixtures
 npm run test:portable-packaging-gate
 npm run test:release-compliance-fixtures
@@ -2031,6 +2046,7 @@ V0.5 完成不是路线状态的主观汇总。发布候选必须提交一张按
 | `SCOPE-RENDERING` | `I-RENDER` | `REL-I`（`passed`） | `supported` | `V0.6` | `partial` | 5 | 6 | renderer-independent semantic scene、Three.js WebGPU 主后端与 WebGL2 自动回退（V0.6 承接交付） |
 | `SCOPE-COMPLIANCE` | `H-RUNTIME` | `REL-COMPLIANCE`（`passed`） | `supported` | `V0.5` | `partial` | 6 | 6 | 项目所有者控制机器上的内部测试构建、内容安全、installer manifest/hash、许可证 inventory 与禁止外部分发边界；代码签名不属于验收范围 |
 | `SCOPE-MATBIN-53DE-DEFERRAL` | `E-ASSET` | `REL-SCOPE`（`passed`） | `deferred` | `V0.5` → 延期 `V0.6` | `unverified` | 0 | 5 | MATBIN read/write(MATERIAL-53D/53E):Mod Engine 2 专用序列化格式,非 FromSoftware 原生;Sekiro 原生与测试 Mod 语料 0 个 .matbin |
+| `SCOPE-V09-PUBLIC-PREVIEW` | `V09-PUBLIC-PREVIEW` | `REL-H`（`open`）、`REL-COMPLIANCE`（`passed`） | `supported` | `V0.9` | `partial` | 8 | 10 | 现有功能的 Windows x64 公开预发行：clean 源码 ZIP、启动 EXE 与 native 必需组件；GitHub 自动源码归档排除内部资料，保留简短已知限制并提供必要许可证 notices；NSIS 安装包不在本轮交付 |
 
 <!-- SOULFORGE_PROJECTION_END:scope-proposal -->
 

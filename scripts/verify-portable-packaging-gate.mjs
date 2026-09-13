@@ -13,7 +13,10 @@ import {
   readTimeoutMs,
   runProcess
 } from './subprocess-control.mjs';
-import { validatePortableBuilderConfig } from './portable-packaging-config.mjs';
+import {
+  validatePortableBuilderConfig,
+  validatePortableBuilderResourceSources
+} from './portable-packaging-config.mjs';
 import {
   resolveSafeScratchRoot,
   scratchBoundaryFailure
@@ -103,6 +106,11 @@ try {
   const checks = validatePortableBuilderConfig(config, releasePolicy);
   for (const c of checks) {
     report.steps.push({ name: `config:${c.name}`, ok: c.ok });
+    if (!c.ok) report.ok = false;
+  }
+  const sourceChecks = validatePortableBuilderResourceSources(config, dirname(builderConfigPath));
+  for (const c of sourceChecks) {
+    report.steps.push({ name: `resource-source:${c.name}`, ok: c.ok, source: c.source });
     if (!c.ok) report.ok = false;
   }
   report.steps.push({ name: 'electron-builder-config', ok: true, path: 'apps/desktop/electron-builder.json' });

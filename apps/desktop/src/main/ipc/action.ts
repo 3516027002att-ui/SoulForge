@@ -10,6 +10,7 @@ import {
   runBridge,
   type BinderMembershipMatch,
   type BinderMembershipCandidate,
+  type RunBridgeCancellationTerminalReceipt,
   type TaeEventTemplateInfo,
   type WorkspaceIndex,
   type WorkspaceSession
@@ -923,7 +924,17 @@ export async function assembleC0000CompatibilityPreview(input: {
   basePartsDirectory: string | null;
   allowedRoots: string[];
   oodleRuntimeRoot: string | null;
+  /** Optional caller-owned cancellation; no signal means legacy ACTION behavior. */
+  signal?: AbortSignal;
+  /** Native transport terminal receipt observer for the owning MAP request. */
+  onCancellationTerminal?: (
+    receipt: RunBridgeCancellationTerminalReceipt
+  ) => void | Promise<void>;
 }): Promise<{ bundle: CharacterPreviewBundle | null; diagnostics: Diagnostic[] }> {
+  const throwIfCancelled = (): void => {
+    if (input.signal?.aborted) throw new Error('MAP_REQUEST_CANCELLED');
+  };
+  throwIfCancelled();
   const leader = input.leaderBundle.models.find((model) => model.modelId === input.leaderBundle.leaderModelId)
     ?? input.leaderBundle.models[0];
   if (!leader || leader.bones.length === 0) {
@@ -948,6 +959,7 @@ export async function assembleC0000CompatibilityPreview(input: {
   let rejectedCandidates = 0;
 
   for (const slot of C0000_COMPATIBILITY_PART_SLOTS) {
+    throwIfCancelled();
     const candidates: CompatibilityPartCandidate[] = planC0000CompatibilityCandidates(
       slot,
       overlayNames,
@@ -961,6 +973,7 @@ export async function assembleC0000CompatibilityPreview(input: {
     }));
     let selected = false;
     for (const candidate of candidates) {
+      throwIfCancelled();
       attemptedCandidates += 1;
       try {
         const partResult = await runBridge<unknown>({
@@ -973,8 +986,13 @@ export async function assembleC0000CompatibilityPreview(input: {
             maxVertices: 1_000_000,
             maxIndices: 3_000_000,
             texturePackagePaths: characterTexturePackagePaths(candidate.absolutePath)
-          }
+          },
+          ...(input.signal ? { signal: input.signal } : {}),
+          ...(input.onCancellationTerminal
+            ? { onCancellationTerminal: input.onCancellationTerminal }
+            : {})
         });
+        throwIfCancelled();
         if (partResult.parseStatus === 'failed'
           || !isCharacterPreviewBundle(partResult.data)
           || partResult.data.meshCount === 0) {
@@ -990,7 +1008,8 @@ export async function assembleC0000CompatibilityPreview(input: {
         selectedParts.push(`parts/${candidate.name}`);
         selected = true;
         break;
-      } catch {
+      } catch (error) {
+        if (input.signal?.aborted) throw error;
         rejectedCandidates += 1;
       }
     }

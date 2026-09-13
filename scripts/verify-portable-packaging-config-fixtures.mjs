@@ -4,7 +4,8 @@ import { tmpdir } from 'node:os';
 import { join, parse, resolve } from 'node:path';
 import {
   EXECUTABLE_BUILDER_HOOK_FIELDS,
-  validatePortableBuilderConfig
+  validatePortableBuilderConfig,
+  validatePortableBuilderResourceSources
 } from './portable-packaging-config.mjs';
 import { processSucceeded } from './subprocess-control.mjs';
 import { resolveSafeScratchRoot } from './scratch-boundary.mjs';
@@ -16,6 +17,8 @@ const config = JSON.parse(configText);
 const policy = JSON.parse(policyText);
 const valid = validatePortableBuilderConfig(config, policy);
 assert.deepEqual(valid.filter((item) => !item.ok), []);
+const sourceChecks = validatePortableBuilderResourceSources(config, resolve(root, 'apps/desktop'));
+assert.deepEqual(sourceChecks.filter((item) => !item.ok), []);
 
 const commentOnly = {
   appId: 'fixture.invalid',

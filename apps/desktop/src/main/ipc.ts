@@ -6,6 +6,11 @@ import { app, BrowserWindow, dialog, ipcMain, type IpcMainInvokeEvent, type WebC
 import { basename, dirname, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import type { TrustedIpcHandle } from './ipc/registration.js';
+import {
+  appendPostCommitFailureDiagnostic,
+  commitWithKnowledgeRefresh,
+  type KnowledgeRefreshOwner
+} from './knowledgeRefreshOwnership.js';
 import { registerAgentIpcHandlers, hasActiveAgentRuns, isAgentSessionActive, scheduleInternalRagEmbedding } from './ipc/agent.js';
 import { registerResourceIpcHandlers } from './ipc/resource.js';
 import { resolveWorkspaceStoragePaths, type WorkspaceStoragePaths } from './workspaceStorage.js';
@@ -1878,7 +1883,10 @@ function electronConfirmationPort(event: IpcMainInvokeEvent): WriteConfirmationP
 function sessionCommitPort(
   session: WorkspaceSession,
   operationLog: OperationLogUtilityClient,
-  storage: { backupBaseDir: string; recoveryDir: string }
+  storage: { backupBaseDir: string; recoveryDir: string },
+  // Domain handlers that must invalidate their own preview/page caches first
+  // explicitly take ownership of the one post-commit knowledge refresh.
+  options: { knowledgeRefreshOwner?: KnowledgeRefreshOwner } = {}
 ): RawReplaceCommitPort {
   return {
     commit: async (input) => {
@@ -1897,22 +1905,30 @@ function sessionCommitPort(
         sourceUri: input.file.sourceUri,
         note: '工作台提交视为已确认'
       });
-      const result = await saveRawReplace({
-        file: input.file,
-        expectedHash: input.expectedHash,
-        newContentBase64: input.newContentBase64,
-        title: input.title,
-        confirmation,
-        session,
-        operationLog,
-        backupBaseDir: storage.backupBaseDir,
-        recoveryDir: storage.recoveryDir
-      });
       // All native writers that use applyNativeMutation share this commit port.
       // Refresh only after Patch Engine reports a committed replacement; a
       // staged/failed write must never invalidate live evidence speculatively.
-      if (result.ok) await refreshActiveIndexAfterNativeWrite([input.file.sourceUri], result);
-      return result;
+      return commitWithKnowledgeRefresh(
+        () => saveRawReplace({
+          file: input.file,
+          expectedHash: input.expectedHash,
+          newContentBase64: input.newContentBase64,
+          title: input.title,
+          confirmation,
+          session,
+          operationLog,
+          backupBaseDir: storage.backupBaseDir,
+          recoveryDir: storage.recoveryDir
+        }),
+        options.knowledgeRefreshOwner ?? 'port',
+        (result) => refreshActiveIndexAfterNativeWrite([input.file.sourceUri], result),
+        (result, error) => appendPostCommitFailureDiagnostic(
+          result,
+          'POSTCOMMIT_REFRESH_FAILED',
+          input.file.sourceUri,
+          error
+        )
+      );
     }
   };
 }

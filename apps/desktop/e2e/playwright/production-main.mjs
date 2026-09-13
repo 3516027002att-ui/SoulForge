@@ -36,6 +36,21 @@ import { app, BrowserWindow, dialog, ipcMain, powerMonitor } from 'electron';
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
+import {
+  createMapNativeTimingAccumulator,
+  recordMapNativeTimingCall,
+  snapshotMapNativeTimingAccumulator
+} from '../../../../scripts/map-native-timing-aggregate.mjs';
+import {
+  createCharacterNativeTimingAccumulator,
+  recordCharacterNativeTimingCall,
+  snapshotCharacterNativeTimingAccumulator
+} from '../../../../scripts/character-native-timing-aggregate.mjs';
+import {
+  createCharacterMainTimingAccumulator,
+  recordCharacterMainTimingCall,
+  snapshotCharacterMainTimingAccumulator
+} from '../../../../scripts/character-main-timing-aggregate.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const configuredSnapshotRoot = process.env.SF_PRODUCTION_ARTIFACT_SNAPSHOT_ROOT?.trim();
@@ -171,6 +186,8 @@ const CANCEL_DIALOG = process.env.SF_E2E_DIALOG_CANCEL === '1';
  */
 const MAP_MAIN_TELEMETRY_ENABLED = process.env.SF_MAP_MAIN_TELEMETRY === '1';
 const MAP_MAIN_TELEMETRY_MARKER = '[SF_MAP_MAIN_TELEMETRY]';
+const MAP_MAIN_TIMING_PHASES = new Set(['outside', 'direct', 'ui-load', 'done']);
+const MAP_MAIN_TIMING_PHASE_KEY = '__soulforgeMapMainTimingV1';
 const mapMainTelemetry = {
   enabled: MAP_MAIN_TELEMETRY_ENABLED,
   startedAtMs: Date.now(),
@@ -182,6 +199,10 @@ const mapMainTelemetry = {
   stateTransitionLimit: 128,
   topSlowCallLimit: 16,
   timeBucketLimit: 3600,
+  timingPhase: 'outside',
+  nativeTiming: createMapNativeTimingAccumulator(),
+  characterNativeTiming: createCharacterNativeTimingAccumulator(),
+  characterMainTiming: createCharacterMainTimingAccumulator(),
   calls: [],
   topSlowCalls: [],
   timeBuckets: new Map(),
@@ -251,6 +272,24 @@ function mapMainWindowState(event) {
   };
 }
 
+const MAP_MAIN_OBSERVER_MAX_DIAGNOSTICS = 16;
+const MAP_MAIN_OBSERVER_CODE_PATTERN = /^[A-Z][A-Z0-9_]{0,95}$/;
+
+function projectMapMainResult(result) {
+  const responseError = result?.error && typeof result.error === 'object' ? result.error : null;
+  const diagnostics = Array.isArray(result?.diagnostics) ? result.diagnostics : [];
+  const diagnosticCodes = [];
+  for (const item of diagnostics.slice(0, MAP_MAIN_OBSERVER_MAX_DIAGNOSTICS)) {
+    if (typeof item?.code === 'string' && MAP_MAIN_OBSERVER_CODE_PATTERN.test(item.code)) diagnosticCodes.push(item.code);
+  }
+  return {
+    resultErrorCode: typeof responseError?.code === 'string' && MAP_MAIN_OBSERVER_CODE_PATTERN.test(responseError.code)
+      ? responseError.code
+      : null,
+    diagnosticCodes
+  };
+}
+
 function emitMapMainTelemetry(payload) {
   if (!MAP_MAIN_TELEMETRY_ENABLED) return;
   try {
@@ -261,6 +300,21 @@ function emitMapMainTelemetry(payload) {
   }
 }
 
+function setMapMainTimingPhase(phase) {
+  if (!MAP_MAIN_TIMING_PHASES.has(phase)) return { ok: false, reason: 'MAP_MAIN_TIMING_PHASE_INVALID' };
+  mapMainTelemetry.timingPhase = phase;
+  return { ok: true, phase };
+}
+
+if (MAP_MAIN_TELEMETRY_ENABLED) {
+  // Test-harness-only control.  The probe calls this through Electron's main
+  // process evaluator; it is never exposed through preload or production IPC.
+  globalThis[MAP_MAIN_TIMING_PHASE_KEY] = Object.freeze({
+    setPhase: setMapMainTimingPhase,
+    snapshot: () => ({ phase: mapMainTelemetry.timingPhase })
+  });
+}
+
 function mapMainTelemetrySummary() {
   const durations = mapMainTelemetry.calls.map((entry) => entry.elapsedMs);
   const firstRetainedCall = mapMainTelemetry.calls[0]?.index ?? null;
@@ -268,6 +322,7 @@ function mapMainTelemetrySummary() {
   return {
     enabled: mapMainTelemetry.enabled,
     startedAtUTC: mapMainTelemetry.startedAtUTC,
+    timingPhase: mapMainTelemetry.timingPhase,
     installed: mapMainTelemetry.installed,
     handlerWrapped: mapMainTelemetry.handlerWrapped,
     instrumentationError: mapMainTelemetry.instrumentationError,
@@ -293,7 +348,10 @@ function mapMainTelemetrySummary() {
     recentCalls: mapMainTelemetry.calls.slice(-64),
     topSlowCalls: mapMainTelemetry.topSlowCalls.slice(),
     timeBuckets: [...mapMainTelemetry.timeBuckets.values()],
-    stateTransitions: mapMainTelemetry.stateTransitions.slice(-mapMainTelemetry.stateTransitionLimit)
+    stateTransitions: mapMainTelemetry.stateTransitions.slice(-mapMainTelemetry.stateTransitionLimit),
+    nativeTimingSummaryByPhase: snapshotMapNativeTimingAccumulator(mapMainTelemetry.nativeTiming),
+    characterNativeTimingSummaryByPhase: snapshotCharacterNativeTimingAccumulator(mapMainTelemetry.characterNativeTiming),
+    characterMainTimingSummaryByPhase: snapshotCharacterMainTimingAccumulator(mapMainTelemetry.characterMainTiming)
   };
 }
 
@@ -384,6 +442,9 @@ function installMapMainTelemetry() {
     }
     mapMainTelemetry.handlerWrapped = true;
     return originalHandle(channel, async (...args) => {
+      // Capture the phase at request start.  A later direct -> ui-load phase
+      // transition must never reclassify an in-flight IPC request in finally.
+      const requestTimingPhase = mapMainTelemetry.timingPhase;
       const startedAt = process.hrtime.bigint();
       const startedAtMs = Date.now();
       let result;
@@ -398,6 +459,7 @@ function installMapMainTelemetry() {
         const elapsedMs = Number(process.hrtime.bigint() - startedAt) / 1_000_000;
         const completedAtMs = Date.now();
         const state = mapMainWindowState(args[0]);
+        const resultDiagnostics = projectMapMainResult(result);
         const entry = {
           index: mapMainTelemetry.totalCalls + 1,
           elapsedMs,
@@ -409,9 +471,36 @@ function installMapMainTelemetry() {
           modelName: typeof args[2] === 'string' ? args[2] : null,
           cursorPresent: Boolean(args[3]),
           sessionPresent: Boolean(args[4]),
+          mapTimingPhase: requestTimingPhase,
           ...state,
-          error: thrown ? String(thrown?.message ?? thrown) : null
+          error: thrown ? String(thrown?.message ?? thrown) : null,
+          ...resultDiagnostics
         };
+        const nativeTimingSummary = result?.diagnostics?.find?.(
+          (item) => item?.code === 'MAP_NATIVE_TIMING_SUMMARY'
+        )?.details ?? null;
+        const characterNativeTimingSummary = result?.diagnostics?.find?.(
+          (item) => item?.code === 'CHARACTER_NATIVE_TIMING_SUMMARY'
+        )?.details ?? null;
+        // One summary appears only on a native timing session's final page.
+        // The shared accumulator records it once and keeps calls without a
+        // summary visible as a separate coverage count.
+        recordMapNativeTimingCall(mapMainTelemetry.nativeTiming, requestTimingPhase, nativeTimingSummary);
+        recordCharacterNativeTimingCall(
+          mapMainTelemetry.characterNativeTiming,
+          requestTimingPhase,
+          characterNativeTimingSummary,
+          elapsedMs
+        );
+        const characterMainTimingSummary = result?.diagnostics?.find?.(
+          (item) => item?.code === 'CHARACTER_MAIN_TIMING_SUMMARY'
+        )?.details ?? null;
+        recordCharacterMainTimingCall(
+          mapMainTelemetry.characterMainTiming,
+          requestTimingPhase,
+          characterMainTimingSummary,
+          elapsedMs
+        );
         mapMainTelemetry.totalCalls += 1;
         if (entry.ok) mapMainTelemetry.okCount += 1;
         else mapMainTelemetry.failedCount += 1;
