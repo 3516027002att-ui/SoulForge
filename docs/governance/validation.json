@@ -21,7 +21,7 @@
     {
       "sliceId": "W-REL-V09-PUBLIC-PREVIEW-01",
       "targetRelease": "V0.9",
-      "reason": "V0.9 clean 源码 ZIP 与启动 EXE/native 必需组件的归档完整性、启动路径、内部文件排除、源码与产物哈希、许可证 notices 及 GitHub 自动源码归档排除验证尚未冻结；NSIS 安装包不在本轮交付，旧跨机与真实游戏验收仍不声称完成"
+      "reason": "V0.9 发布线 V0.9.1 clean 源码 ZIP、启动 EXE/native 必需组件与 NSIS 安装包的归档/内容完整性、安装包哈希、安装/覆盖升级/卸载/已安装启动路径、内部文件排除、许可证 notices 及 GitHub 自动源码归档排除验证尚未冻结；旧跨机与真实游戏验收仍不声称完成"
     }
   ],
   "frozen": [
