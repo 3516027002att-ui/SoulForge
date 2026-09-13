@@ -54,10 +54,9 @@ Windows CI 对文档和治理数据变更只跑治理检查；代码变更共用
 
 ## 快速开始
 
-### 方式一：V0.9 完整 Release 源码包（推荐）
+### 方式一：V0.9.1 完整 Release 源码包（推荐）
 
-请优先下载 GitHub Release 中的
-[`SoulForge-v0.9.0-win-x64-source.zip`](https://github.com/3516027002att-ui/SoulForge/releases/download/v0.9.0/SoulForge-v0.9.0-win-x64-source.zip)。完整包已
+当前发布线为 `V0.9.1`。请从 [GitHub Releases 页面](https://github.com/3516027002att-ui/SoulForge/releases) 选择对应的完整源码包。完整包已
 附带当前编译后的 Electron `out`、workspace `dist`、SQLite native binding、
 自包含 Bridge 和根目录 `SoulForge.exe`；它不是安装包，也不包含游戏文件、mods
 或私有语料。
