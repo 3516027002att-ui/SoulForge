@@ -17,7 +17,12 @@ function main(): void {
     resolve('../../apps/desktop/src/main/modelServiceCredentials.ts'),
     'utf8'
   );
-  const ipc = readFileSync(resolve('../../apps/desktop/src/main/ipc.ts'), 'utf8');
+  // modelService IPC handlers live in the split domain module; ipc.ts only
+  // composes and registers that module now.
+  const modelServiceIpc = readFileSync(
+    resolve('../../apps/desktop/src/main/ipc/modelServices.ts'),
+    'utf8'
+  );
 
   // 加密/解密/可用性探测三个落点必须都在。原先这段写成
   //   if (!vault.includes(token) && !vault.includes(<某个 base64 变体>)) { ... }
@@ -40,7 +45,7 @@ function main(): void {
   if (vault.includes('apiKey:') && /interface StoredModelServiceConfig[\s\S]*apiKey\s*:/.test(vault)) {
     throw new Error('持久化 DTO 不得存储 apiKey');
   }
-  if (!ipc.includes('modelServiceVault.upsertConfig')) {
+  if (!modelServiceIpc.includes('vault.upsertConfig')) {
     throw new Error('main 必须经 vault upsertConfig 写入，不得旁路');
   }
 

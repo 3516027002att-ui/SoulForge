@@ -1,14 +1,8 @@
-/**
- * npm script 图。把根 package.json 的 script 名解析到真实入口源文件，
- * 跨 workspace 转发链一并跟进。
- *
- * 为什么需要：根 package.json 里 82 条 test:* 有 60+ 条只是
- * `npm run X -w @soulforge/core` 转发，真正的依赖藏在被转发的入口里。
- * 不跟进转发链，依赖判定必然错。
- */
+/** npm script 与 workspace 转发图；依赖按真实入口文件判定。 */
 import { existsSync, readdirSync, readFileSync } from 'node:fs';
-import { resolve } from 'node:path';
+import { relative, resolve } from 'node:path';
 import { analyzeEntry, parseScriptCommand } from './classify.mjs';
+import { forwardTargets } from './commandPlan.mjs';
 
 function readJson(path) {
   return JSON.parse(readFileSync(path, 'utf8'));
@@ -48,7 +42,7 @@ export function loadWorkspaces(repoRoot) {
     byName.set(pkg.name, { dir, scripts: pkg.scripts ?? {} });
     byDir.set(dir, { name: pkg.name, scripts: pkg.scripts ?? {} });
   }
-  return { rootScripts: rootPkg.scripts ?? {}, byName, byDir };
+  return { rootScripts: rootPkg.scripts ?? {}, byName, byDir, analysisCache: new Map() };
 }
 
 /**
@@ -61,13 +55,15 @@ export function resolveScriptEntries(repoRoot, workspaces, scriptName) {
   const unresolved = [];
   const cycles = [];
   const visited = new Set();
+  const active = new Set();
 
   const walk = (name, workspaceDir, scriptTable) => {
     const key = `${workspaceDir}::${name}`;
-    if (visited.has(key)) {
+    if (active.has(key)) {
       cycles.push(key);
       return;
     }
+    if (visited.has(key)) return;
     visited.add(key);
 
     const command = scriptTable[name];
@@ -75,28 +71,34 @@ export function resolveScriptEntries(repoRoot, workspaces, scriptName) {
       unresolved.push(`${workspaceDir || '.'}:${name}（script 不存在）`);
       return;
     }
+    active.add(key);
 
     const { entries, forwards } = parseScriptCommand(command, workspaceDir);
     for (const entry of entries) {
       const normalized = entry.file.replaceAll('\\', '/');
-      const source = normalized.startsWith('dist/')
-        ? resolve(repoRoot, entry.workspaceDir, 'src', normalized.slice(5).replace(/\.js$/, '.ts'))
-        : resolve(repoRoot, entry.workspaceDir, normalized);
+      const absolute = resolve(repoRoot, entry.workspaceDir, normalized);
+      const repositoryPath = relative(repoRoot, absolute).replaceAll('\\', '/');
+      const sourceDir = [...workspaces.byDir.keys()].find((dir) => repositoryPath.startsWith(`${dir}/dist/`));
+      const source = sourceDir
+        ? resolve(repoRoot, sourceDir, 'src', repositoryPath.slice(`${sourceDir}/dist/`.length).replace(/\.js$/, '.ts'))
+        : absolute;
       if (existsSync(source)) entryFiles.add(source);
       else unresolved.push(`${entry.workspaceDir || '.'}/${entry.file}（文件不存在）`);
     }
     for (const forward of forwards) {
-      if (forward.workspace === null) {
-        walk(forward.script, workspaceDir, scriptTable);
-        continue;
+      try {
+        for (const target of forwardTargets(workspaces, forward, workspaceDir)) {
+          if (forward.ifPresent && !(forward.script in target.scripts)) continue;
+          walk(forward.script, target.dir, target.scripts);
+        }
+      } catch (error) {
+        unresolved.push(error.message);
       }
-      const target = workspaces.byName.get(forward.workspace);
-      if (!target) {
-        unresolved.push(`workspace ${forward.workspace}（未登记）`);
-        continue;
-      }
-      walk(forward.script, target.dir, target.scripts);
     }
+    for (const hook of [`pre${name}`, `post${name}`]) {
+      if (scriptTable[hook]) walk(hook, workspaceDir, scriptTable);
+    }
+    active.delete(key);
   };
 
   walk(scriptName, '', workspaces.rootScripts);
@@ -110,7 +112,8 @@ export function classifyScript(repoRoot, workspaces, scriptName) {
   const envVars = new Set();
   let analyzedFiles = 0;
   for (const entry of entryFiles) {
-    const analysis = analyzeEntry(entry);
+    const analysis = workspaces.analysisCache?.get(entry) ?? analyzeEntry(entry);
+    workspaces.analysisCache?.set(entry, analysis);
     analyzedFiles += analysis.analyzedFiles;
     for (const requirement of analysis.requirements) requirements.add(requirement);
     for (const envVar of analysis.envVars) envVars.add(envVar);

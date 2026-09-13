@@ -17,7 +17,7 @@ export const TIER_ORDER = Object.freeze(['governance', 'unit', 'synthetic', 'nat
  * 归属原则：按「改了什么就该跑什么」而非按依赖强度划分。
  */
 export const TIER_BY_SCRIPT = Object.freeze({
-  // ---- governance：治理数据、交接书、范围裁定。秒级，任何改动都该跑 ----
+  // ---- governance：治理数据、投影和验证工具变更时选用 ----
   'test:governance': 'governance',
   'test:governance-data-fixtures': 'governance',
   'test:governance-equivalence': 'governance',
@@ -36,6 +36,11 @@ export const TIER_BY_SCRIPT = Object.freeze({
   // 验证入口自身的负向 fixture：跳过检测一旦失效，入口会把「什么都没跑」
   // 报成通过而退出码依旧是 0，退化后与正常表现完全一致，因此必须门禁化。
   'test:verify-entrypoint': 'governance',
+  'test:verify-scheduling': 'governance',
+  'test:ci-change-scope': 'governance',
+  'test:editor-layout-fixtures': 'governance',
+  'test:v06-deferral-index-fixtures': 'governance',
+  'test:required-validation': 'governance',
   'verify:audit': 'governance',
   // 治理锁与 claim CLI 的负向 fixture：坏锁与好锁在顺序执行下表现一致，
   // 只有并发与崩溃场景能区分，不门禁化就等于没有锁。
@@ -74,7 +79,7 @@ export const TIER_BY_SCRIPT = Object.freeze({
   'test:cross-machine-fixtures': 'governance',
   'test:agent-task-record-gate': 'governance',
 
-  // ---- unit：编译 + 跨包单元与契约。代码改动必跑 ----
+  // ---- unit：编译、单元与契约；按改动范围选取 ----
   typecheck: 'unit',
   test: 'unit',
   'test:ai-conformance': 'unit',
@@ -83,6 +88,10 @@ export const TIER_BY_SCRIPT = Object.freeze({
   'test:real-agent-harness': 'unit',
   'test:ai-log-sync': 'unit',
   'test:agent-production-build': 'unit',
+  'test:bridge-production-build': 'unit',
+  'test:param-rag-identity-convergence': 'unit',
+  'test:agent-emevd-proof-gate': 'unit',
+  'test:bridge-artifact-chunking': 'synthetic',
   'test:agent-production-scenario': 'unit',
   'test:tae-anim-id-guards': 'unit',
   'test:agent-param-dependency-batch': 'unit',
@@ -99,7 +108,6 @@ export const TIER_BY_SCRIPT = Object.freeze({
   'test:emevd-stable-identity': 'unit',
   'test:emevd-dark-script-compiler': 'unit',
   'test:emevd-dark-script-compiler-s14': 'unit',
-  'test:emevd-session-cache': 'unit',
   'test:map-transaction-atomic': 'unit',
   'test:action-motion-identity': 'unit',
   'test:map-static-pagination-contract': 'unit',
@@ -115,7 +123,7 @@ export const TIER_BY_SCRIPT = Object.freeze({
   'test:csv': 'unit',
   'test:emedf-completion-catalog': 'unit',
   'test:emevd-instruction-structural': 'unit',
-  'test:s40-live': 'unit',
+  'test:s40-live': 'native',
   'test:yapped-param-metadata-source': 'unit',
   'test:citations': 'unit',
   'test:path-sanitizer': 'unit',
@@ -272,6 +280,7 @@ export const TIER_BY_SCRIPT = Object.freeze({
   'test:native-edit-facade': 'synthetic',
   'test:emevd-plan-production': 'synthetic',
   'test:emevd-full-document': 'synthetic',
+  'test:emevd-session-cache': 'synthetic', // 旧名称兼容到 full-document 的当前缓存契约。
   'test:emevd-coverage': 'synthetic',
   'test:release-editor-acceptance': 'synthetic',
   'test:desktop-live-editor-contract': 'synthetic',
@@ -672,25 +681,11 @@ export const EXCLUDED = Object.freeze({
   'verify:all': '同上（全层级别名）',
   'verify:list': '同上（只列计划，不是验证）',
   dev: '交互式开发服务器，不是验证',
+  'benchmark:rag-fts-delta': '50,000 行 RAG/FTS 性能诊断，按需运行；不作为常规回归或已免验的发布性能门槛',
   'agent:simulate': '真实 Agent 链路模拟入口，依赖真实模型与本地 Mod 交互，按需手工运行',
   'preagent:simulate': 'agent:simulate 的 npm 生命周期构建前置，只生成生产产物；真实链路判定由 agent:simulate 自身负责',
   'ai-logs:sync': '用于从 Antigravity 提取或同步真实 AI 会话日志到 testdata/ai-audit-transcripts 的离线同步工具，不是验证',
-  // ⚠️ 排除理由已按实测改写（2026-08-08）。原文写的是「由 release 链按需调用」，
-  // 而实测 release 层 10 条脚本（build / release:installer:manifest /
-  // release:manifest / test:installer-lifecycle / test:portable-packaging-* /
-  // test:release-compliance-fixtures / test:release-content /
-  // test:release-cross-machine / test:release-reproducible）**没有任何一条调它**，
-  // 全仓也只有 package.json 的定义处与本行提到它。错误的排除理由比没有理由更糟：
-  // 它让审阅者以为这条脚本在别处有覆盖。
-  //
-  // 它确实不该进任何 tier（跑一次 Release publish 要几分钟且产物不参与验证判据），
-  // 但真实原因是「当前没有消费方」。附带后果：runBridge.ts 的 exe 候选链里前两条
-  // Release 路径实测都不存在，永远回落到第三条 Debug——那不是死代码（publish 一跑
-  // 就会命中），但「Release 产物从未被生成过」这个事实此前只写在锐评里、不在代码旁。
-  'bridge:publish': '发布产物构建。**当前无任何调用方**（release 层 10 条脚本均不调它，'
-    + '实测 2026-08-08）；跑一次 Release publish 要几分钟且产物不参与任何验证判据，'
-    + '故不进 tier。若将来 release 链要用它，请一并把 runBridge.ts 的 Release 候选路径'
-    + '纳入验证——那两条路径至今从未被生成过。',
+  'bridge:publish': '由 exe:build 消费的 Bridge 发布构建前置；按应用输入变化或交付任务执行，不是独立验证套件',
   'launcher:build': '启动器二进制发布构建，不是验证',
   'exe:build': 'Bridge、启动器和开发 launcher 的显式构建命令；由交付流程直接调用，不是独立验证套件',
   'dev-launcher:build': '开发 launcher 产物构建；由 exe:build 调用，不是独立验证套件',

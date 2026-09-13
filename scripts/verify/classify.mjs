@@ -11,6 +11,7 @@
  */
 import { existsSync, readFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
+import { parseNpmForward, tokenizeCommands } from './commandPlan.mjs';
 
 /** 环境变量 → 需求类别。未列出的 SOULFORGE_* 不构成外部依赖。 */
 const ENV_REQUIREMENT = Object.freeze({
@@ -45,14 +46,11 @@ const DOTNET_MODULE_HINTS = Object.freeze([
 export function parseScriptCommand(command, workspaceDir) {
   const entries = [];
   const forwards = [];
-  for (const segment of command.split('&&').map((part) => part.trim()).filter(Boolean)) {
-    const tokens = segment.split(/\s+/);
-    if (tokens[0] === 'npm' && tokens[1] === 'run' && tokens[2]) {
-      const wsIndex = tokens.findIndex((token) => token === '-w' || token === '--workspace');
-      forwards.push({
-        script: tokens[2],
-        workspace: wsIndex >= 0 ? (tokens[wsIndex + 1] ?? null) : null
-      });
+  for (const tokens of tokenizeCommands(command) ?? []) {
+    const forward = parseNpmForward(tokens);
+    if (forward) {
+      const { args, ...target } = forward;
+      forwards.push({ ...target, ...(args.length ? { args } : {}) });
       continue;
     }
     if (tokens[0] === 'node') {

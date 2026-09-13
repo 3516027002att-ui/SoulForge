@@ -896,6 +896,17 @@ const SCOPE_SUBJECT_SET = Object.freeze({
     // 把一条 script 从层级表挪进 EXCLUDED 就能让它不再被调度，
     // 漏登记这个文件就能在 REL-SCOPE 仍显示 fresh 的前提下关掉一整条验证。
     'scripts/verify/tiers.mjs',
+    'scripts/verify.mjs',
+    'scripts/verify/commandPlan.mjs',
+    'scripts/verify/runner.mjs',
+    'scripts/verify/scriptGraph.mjs',
+    'scripts/verify/classify.mjs',
+    'scripts/verify-scheduling-fixtures.mjs',
+    'scripts/governance/requiredValidation.mjs',
+    'scripts/verify-required-validation-fixtures.mjs',
+    'scripts/verify-v06-deferral-index.mjs',
+    'scripts/governance/deferrals.mjs',
+    'scripts/verify-v06-deferral-index-fixtures.mjs',
     // 治理 CLI 与其组件、fixture。gov.mjs 是唯一能写 evidence.jsonl 与 gates.json
     // 的命令：seal 决定一条证据长什么样、挂到哪个 Gate、指纹怎么算，claim/complete
     // 决定执行面板状态。漏登记的后果是可以在 REL-SCOPE 仍显示 fresh 的前提下改变

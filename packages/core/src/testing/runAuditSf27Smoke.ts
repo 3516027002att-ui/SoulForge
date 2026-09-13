@@ -1,6 +1,8 @@
 import { strict as assert } from 'node:assert';
-import { access, mkdir, readFile, writeFile } from 'node:fs/promises';
-import { join } from 'node:path';
+import { access, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { dirname, join, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 type CapabilityEvidence = {
   format: string;
@@ -36,35 +38,50 @@ function selectedLayer(): 'unit' | 'native' {
   return value;
 }
 
+function jsonOutDirectory(): string | undefined {
+  const index = process.argv.indexOf('--json-out');
+  if (index < 0) return undefined;
+  const value = process.argv[index + 1];
+  if (!value || value.startsWith('--')) throw new Error('SF-27 --json-out requires an output directory');
+  return resolve(value);
+}
+
 async function pathExists(root: string, path: string): Promise<boolean> {
   try { await access(join(root, path)); return true; } catch { return false; }
 }
 
 async function main(): Promise<void> {
   const layer = selectedLayer();
-  const root = process.cwd();
-  const packageJson = JSON.parse(await readFile(join(root, 'package.json'), 'utf8')) as { scripts?: Record<string, string> };
-  const repositoryPackageJson = JSON.parse(await readFile(join(root, '..', '..', 'package.json'), 'utf8')) as { scripts?: Record<string, string> };
+  const repositoryRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..', '..', '..');
+  const repositoryPackageJson = JSON.parse(await readFile(join(repositoryRoot, 'package.json'), 'utf8')) as { scripts?: Record<string, string> };
   assert(repositoryPackageJson.scripts?.['bridge:verify:flver'] || repositoryPackageJson.scripts?.['bridge:verify:flver-writer']);
-  const outDir = join(root, 'docs', 'audit-execution', 'capability-evidence');
-  await mkdir(outDir, { recursive: true });
-  const evidence: CapabilityEvidence[] = [];
-  for (const chain of FORMAT_CHAINS) {
-    const sourceExists = await pathExists(root, chain.sourceFile);
-    const item: CapabilityEvidence = {
-      ...chain,
-      readable: sourceExists,
-      nativeFixtures: sourceExists ? ['Sekiro local corpus (fixture selection required at runtime)'] : [],
-      missingEvidence: sourceExists ? chain.missingEvidence : [...chain.missingEvidence, 'production source anchor missing']
-    };
-    evidence.push(item);
-    await writeFile(join(outDir, `${chain.format.toLowerCase().replaceAll('/', '-')}.json`), JSON.stringify(item, null, 2) + '\n', 'utf8');
+  const explicitOutDir = jsonOutDirectory();
+  const temporaryOutDir = explicitOutDir
+    ? undefined
+    : await mkdtemp(join(tmpdir(), 'soulforge-sf27-'));
+  const outDir = explicitOutDir ?? temporaryOutDir!;
+  try {
+    await mkdir(outDir, { recursive: true });
+    const evidence: CapabilityEvidence[] = [];
+    for (const chain of FORMAT_CHAINS) {
+      const sourceExists = await pathExists(repositoryRoot, chain.sourceFile);
+      const item: CapabilityEvidence = {
+        ...chain,
+        readable: sourceExists,
+        nativeFixtures: sourceExists ? ['Sekiro local corpus (fixture selection required at runtime)'] : [],
+        missingEvidence: sourceExists ? chain.missingEvidence : [...chain.missingEvidence, 'production source anchor missing']
+      };
+      evidence.push(item);
+      await writeFile(join(outDir, `${chain.format.toLowerCase().replaceAll('/', '-')}.json`), JSON.stringify(item, null, 2) + '\n', 'utf8');
+    }
+    await writeFile(join(outDir, 'index.json'), JSON.stringify({ schemaVersion: 1, layer, formats: evidence.map((item) => item.format), evidence }, null, 2) + '\n', 'utf8');
+    assert.equal(evidence.length, 7);
+    assert(evidence.every((item) => item.command && item.productionSymbol && item.sourceFile && item.missingEvidence.length > 0));
+    assert(evidence.some((item) => item.writerProfile === 'candidate'));
+    console.log(JSON.stringify({ ok: true, taskId: 'SF-27', layer, executedCases: evidence.length + 3, evidenceDirectory: explicitOutDir ? outDir : 'temporary (cleaned)', formats: evidence.map((item) => ({ format: item.format, writerProfile: item.writerProfile, readable: item.readable })), production: ['capability-evidence-chain', 'BridgeCommandService.dispatch'] }));
+  } finally {
+    if (temporaryOutDir) await rm(temporaryOutDir, { recursive: true, force: true });
   }
-  await writeFile(join(outDir, 'index.json'), JSON.stringify({ schemaVersion: 1, layer, formats: evidence.map((item) => item.format), evidence }, null, 2) + '\n', 'utf8');
-  assert.equal(evidence.length, 7);
-  assert(evidence.every((item) => item.command && item.productionSymbol && item.sourceFile && item.missingEvidence.length > 0));
-  assert(evidence.some((item) => item.writerProfile === 'candidate'));
-  console.log(JSON.stringify({ ok: true, taskId: 'SF-27', layer, executedCases: evidence.length + 3, evidenceDirectory: 'docs/audit-execution/capability-evidence', formats: evidence.map((item) => ({ format: item.format, writerProfile: item.writerProfile, readable: item.readable })), production: ['capability-evidence-chain', 'BridgeCommandService.dispatch'] }));
 }
 
 void main();

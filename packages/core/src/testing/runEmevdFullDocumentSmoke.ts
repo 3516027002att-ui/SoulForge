@@ -7,8 +7,9 @@
  *    projection + unknown-as-read-only + absolute-path desensitization).
  * 2) Bridge 文档缓存回归（always）：缓存身份必须绑内容哈希（等长改写 + 回写原
  *    mtime 后重读要看见新 args 与新 sourceHash）；同文件并发只解析一次；不同
- *    文件不在全局锁上串行；`cachePolicy: bypass` 无条件重读磁盘，既不命中也
- *    不写入陈旧条目。判据全部走 `EMEVD_DOCUMENT_CACHE_STATE` 的计数，不看时钟。
+ *    文件不在全局锁上串行；10 页 session 只共享一次装载；暂存写不影响源缓存；
+ *    相同内容的不同路径保持独立键；`cachePolicy: bypass` 无条件重读磁盘，既不
+ *    命中也不写入陈旧条目。判据全部走 `EMEVD_DOCUMENT_CACHE_STATE` 的计数，不看时钟。
  * 3) Real corpus (env-injected): common.emevd.dcx opened as the outer resource
  *    — Bridge unwraps DCX natively (sourceFormat=dcx, outerFileHash = the .dcx
  *    file hash, sourceHash = the decompressed payload hash, cross-checked
@@ -347,6 +348,137 @@ async function cacheCoalescesConcurrentSameFile(root: string): Promise<Record<st
     states,
     loads: maxLoads,
     peakConcurrentLoads: peak
+  };
+}
+
+/**
+ * 场景 B2 —— 10 页 session 只装载一次，暂存写不影响源缓存，路径键独立。
+ *
+ * 这是旧 session-cache smoke 的有效契约迁移：分页与写入都走当前 Bridge
+ * 入口，缓存判据统一读取 `EMEVD_DOCUMENT_CACHE_STATE`。写入请求带
+ * `writableRoots`，因此使用独立 writer daemon；随后对原文件的默认读取必须
+ * 仍命中读 daemon 中的同一缓存条目。
+ */
+async function cacheSessionPagesAndStagedWriteIsolation(root: string): Promise<Record<string, unknown>> {
+  const dir = join(root, 'cache-session-contract');
+  await mkdir(dir, { recursive: true });
+  const emevdPath = join(dir, 'common.emevd');
+  const bytes = buildSyntheticEmevd([{
+    id: 50,
+    restBehavior: 0,
+    instructions: Array.from({ length: 10 }, (_unused, index) => ({
+      bank: 1000 + index,
+      id: 0,
+      args: Buffer.from([0xff, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00])
+    }))
+  }]);
+  await writeFile(emevdPath, bytes);
+
+  const allowedRoots = [dir];
+  let documentSession: string | undefined;
+  let firstPage: CacheProbe | undefined;
+  for (let page = 0; page < 10; page += 1) {
+    const pageResult = await probeEmevdCache({
+      filePath: emevdPath,
+      allowedRoots,
+      pageSize: 1,
+      instructionPage: page,
+      ...(documentSession ? { documentSession } : {})
+    });
+    assert(
+      pageResult.envelope.instructionPageCount === 10,
+      `第 ${page + 1} 页应属于 10 页文档，实得 ${pageResult.envelope.instructionPageCount}`
+    );
+    assert(
+      pageResult.envelope.instructionsSample?.length === 1,
+      `第 ${page + 1} 页应返回 1 条指令`
+    );
+    assert(pageResult.cache.loads === 1, `第 ${page + 1} 页后累计装载应为 1，实得 ${pageResult.cache.loads}`);
+    if (page === 0) {
+      assert(pageResult.cache.state === 'loaded', `首个 session 页应为 loaded，实得 ${pageResult.cache.state}`);
+      assert(typeof pageResult.envelope.documentSession === 'string', '首个 session 页必须签发 documentSession');
+      documentSession = pageResult.envelope.documentSession;
+      firstPage = pageResult;
+    } else {
+      assert(pageResult.cache.state === 'session', `第 ${page + 1} 页应复用 session，实得 ${pageResult.cache.state}`);
+      assert(pageResult.envelope.sourceHash === firstPage?.envelope.sourceHash, 'session 页必须保持同一 sourceHash');
+    }
+  }
+  assert(firstPage !== undefined && documentSession !== undefined, '10 页 session 缺少首个页面结果');
+
+  const outputPath = join(dir, 'staged-common.emevd');
+  const sourceHash = firstPage.envelope.sourceHash;
+  assert(sourceHash !== '', '首个页面未返回 sourceHash（写回校验需要）');
+  const writeResult = await runBridge<unknown>({
+    command: 'write-emevd',
+    filePath: emevdPath,
+    allowedRoots,
+    writableRoots: [dir],
+    timeoutMs: 120_000,
+    commandOptions: {
+      sourceFormat: 'emevd',
+      outputPath,
+      expectedDocumentHash: sourceHash,
+      mutations: [{
+        kind: 'set_instruction_args',
+        instructionIndex: 0,
+        eventId: 50,
+        argsBase64: Buffer.alloc(8).toString('base64')
+      }]
+    }
+  });
+  assert(
+    writeResult.diagnostics.some((diagnostic) => diagnostic.code === 'EMEVD_STAGING_WRITE_VERIFIED'),
+    `暂存写入失败：${JSON.stringify(writeResult.diagnostics)}`
+  );
+  const stagedBytes = await readFile(outputPath);
+  assert(!stagedBytes.equals(bytes), '暂存 mutation 未改变输出，写入回归没有实际覆盖 mutation');
+  assert((await readFile(emevdPath)).equals(bytes), '暂存写入不得改动源文件');
+
+  // writer daemon 的失效不能污染读 daemon；默认读取应继续命中原缓存条目。
+  const afterWrite = await probeEmevdCache({
+    filePath: emevdPath,
+    allowedRoots,
+    pageSize: 1,
+    instructionPage: 0
+  });
+  assert(afterWrite.cache.state === 'hit', `暂存写后源文件应命中缓存，实得 ${afterWrite.cache.state}`);
+  assert(afterWrite.cache.loads === 1, `暂存写后源文件累计装载应仍为 1，实得 ${afterWrite.cache.loads}`);
+  assert(afterWrite.envelope.sourceHash === sourceHash, '暂存写后源读取必须保持源 sourceHash');
+
+  // 相同内容换路径必须建立独立缓存键；随后复读同一第二路径要复用它自己的 session。
+  const secondPath = join(dir, 'common_func.emevd');
+  await writeFile(secondPath, bytes);
+  const secondFirst = await probeEmevdCache({
+    filePath: secondPath,
+    allowedRoots,
+    pageSize: 1,
+    instructionPage: 0
+  });
+  assert(secondFirst.cache.state === 'loaded', `相同内容的第二路径首读应为 loaded，实得 ${secondFirst.cache.state}`);
+  assert(secondFirst.cache.loads === 2, `第二路径应触发独立装载，累计应为 2，实得 ${secondFirst.cache.loads}`);
+  assert(secondFirst.envelope.sourceHash === sourceHash, '相同内容的第二路径 sourceHash 应一致');
+  const secondSession = secondFirst.envelope.documentSession;
+  assert(typeof secondSession === 'string', '第二路径首读必须签发 documentSession');
+  const secondAgain = await probeEmevdCache({
+    filePath: secondPath,
+    allowedRoots,
+    pageSize: 1,
+    instructionPage: 1,
+    documentSession: secondSession
+  });
+  assert(secondAgain.cache.state === 'session', `第二路径复读应为 session，实得 ${secondAgain.cache.state}`);
+  assert(secondAgain.cache.loads === 2, `第二路径复读不应再次装载，累计应为 2，实得 ${secondAgain.cache.loads}`);
+  assert(secondAgain.envelope.sourceHash === secondFirst.envelope.sourceHash, '第二路径 session 必须保持同一快照');
+
+  return {
+    scenario: 'B2 10 页 session / 暂存写隔离 / 路径独立键',
+    pagesRead: 10,
+    sourceLoadsAfterPages: firstPage.cache.loads,
+    sourceStateAfterStagedWrite: afterWrite.cache.state,
+    sourceLoadsAfterStagedWrite: afterWrite.cache.loads,
+    secondPathLoads: secondFirst.cache.loads,
+    secondPathStateAfterReuse: secondAgain.cache.state
   };
 }
 
@@ -1091,6 +1223,7 @@ async function bridgeDocumentCacheRegressions(root: string): Promise<void> {
   const scenarios = [
     await cacheIdentitySurvivesEqualLengthRewrite(root),
     await cacheCoalescesConcurrentSameFile(root),
+    await cacheSessionPagesAndStagedWriteIsolation(root),
     await cacheParallelizesDistinctFiles(root),
     await cacheBypassAlwaysRereadsDisk(root),
     await pagedReadRejectsMidReadRewrite(root),
@@ -1105,8 +1238,9 @@ async function bridgeDocumentCacheRegressions(root: string): Promise<void> {
   console.log(JSON.stringify({
     ok: true,
     message: 'Bridge EMEVD 文档缓存回归通过'
-      + '（内容身份 / 同文件单飞 / 跨文件并行 / bypass 重读 / 读取期间改写不混版本'
-      + ' / 同快照字节 / 取消 waiter / session 分页 / 超预算不缓存）',
+      + '（内容身份 / 同文件单飞 / 10 页 session / 暂存写隔离 / 路径独立键'
+      + ' / 跨文件并行 / bypass 重读 / 读取期间改写不混版本 / 同快照字节'
+      + ' / 取消 waiter / 超预算不缓存）',
     scenarios
   }, null, 2));
 }
@@ -1205,6 +1339,15 @@ async function realCorpusAssembly(root: string, sourceDcx: string): Promise<void
   await mkdir(staging, { recursive: true });
   const dcxBytes = await readFile(sourceDcx);
   const payload = decompressDfltDcx(dcxBytes);
+  // Test-only independent count oracle for the supported Sekiro LE64 header.
+  // The operator's current common.emevd may be a Mod, not the old 33,266-instruction corpus.
+  assert(payload.length >= 0x90 && payload.subarray(0, 4).equals(Buffer.from('EVD\0')), 'native EMEVD header');
+  assert(payload[4] === 0 && payload[5] === 0xff && payload.readUInt32LE(8) === 0xcd, 'native fixture must use Sekiro LE64 layout');
+  const expectedEvents = Number(payload.readBigUInt64LE(0x10));
+  const expectedInstructions = Number(payload.readBigUInt64LE(0x20));
+  assert(Number.isSafeInteger(expectedEvents) && expectedEvents > 5, 'common corpus must contain enough events for bounded-outline coverage');
+  assert(Number.isSafeInteger(expectedInstructions) && expectedInstructions > 0, 'common corpus instruction header count');
+  const expectedPages = Math.ceil(expectedInstructions / 1000);
 
   const registry = createSekiroFixtureEmedf();
   // Production path: pass the .dcx outer resource directly; Bridge unwraps DFLT
@@ -1221,9 +1364,11 @@ async function realCorpusAssembly(root: string, sourceDcx: string): Promise<void
   assert(dcxResult.sourceFormat === 'dcx', `dcx input must read as sourceFormat=dcx, got ${dcxResult.sourceFormat}`);
   assert(dcxResult.outerFileHash === hashOf(dcxBytes), 'outerFileHash must hash the .dcx file bytes as opened');
   assert(dcxResult.sourceHash === hashOf(payload), 'Bridge native payload hash must equal TypeScript decompressed payload hash');
-  assert(dcxResult.instructionTotal === 33_266, `dcx instruction total ${dcxResult.instructionTotal}`);
+  assert(dcxResult.instructionTotal === expectedInstructions, `dcx instruction total ${dcxResult.instructionTotal}, header ${expectedInstructions}`);
   const dcxDocument = dcxResult.document!;
-  assert(expectedInstructionTotal(dcxDocument.events) === 33_266, 'dcx event slice total mismatch');
+  assert(expectedInstructionTotal(dcxDocument.events) === expectedInstructions, 'dcx event slice total mismatch');
+  assert(dcxDocument.events.length === expectedEvents, 'dcx event count must match file header');
+  assert(dcxResult.pageCount === expectedPages, 'dcx page count must cover the file header instruction count');
   assert(
     dcxDocument.events.every((event) => event.anchor === undefined)
       && dcxDocument.events.every((event) => event.instructions.every((item) => item.anchor === undefined)),
@@ -1233,10 +1378,10 @@ async function realCorpusAssembly(root: string, sourceDcx: string): Promise<void
   // Bounded outline over the real corpus.
   const outline = dcxResult.outline;
   assert(outline !== undefined, 'dcx outline missing');
-  assert(outline.eventCount === 1730, 'outline eventCount');
-  assert(outline.instructionTotal === 33_266, 'outline instructionTotal');
-  assert(outline.truncated === false, `outline must fit under limit ${outline.limit} for 1730 events`);
-  assert(outline.events.length === 1730, 'outline row count');
+  assert(outline.eventCount === expectedEvents, 'outline eventCount');
+  assert(outline.instructionTotal === expectedInstructions, 'outline instructionTotal');
+  assert(outline.truncated === (expectedEvents > outline.limit), 'outline truncation must follow the current corpus size');
+  assert(outline.events.length === Math.min(expectedEvents, outline.limit), 'outline row count');
   const firstOutline = outline.events[0]!;
   assert(firstOutline.eventUri.startsWith('file://event/common.emevd#event/'), 'outline eventUri must be resource-relative');
   assert(firstOutline.instructionCount >= 0, 'outline instructionCount');
@@ -1287,10 +1432,10 @@ async function realCorpusAssembly(root: string, sourceDcx: string): Promise<void
   const assemblyMs = performance.now() - assemblyStart;
   const assemblyGap = assemblyWatch.stop();
   assert(result.ok, `real assembly failed: ${JSON.stringify(result.diagnostics)}`);
-  assert(result.instructionTotal === 33_266, `native instruction total ${result.instructionTotal}`);
-  assert(result.pageCount === 34, `expected 34 pages at pageSize 1000, got ${result.pageCount}`);
-  assert(result.document!.events.length === 1730, 'native events');
-  assert(expectedInstructionTotal(result.document!.events) === 33_266, 'event slice total mismatch');
+  assert(result.instructionTotal === expectedInstructions, `native instruction total ${result.instructionTotal}, header ${expectedInstructions}`);
+  assert(result.pageCount === expectedPages, `expected ${expectedPages} pages at pageSize 1000, got ${result.pageCount}`);
+  assert(result.document!.events.length === expectedEvents, 'native events');
+  assert(expectedInstructionTotal(result.document!.events) === expectedInstructions, 'event slice total mismatch');
 
   const longFrames = await measureRealCommonLongFrames(result.document!);
 

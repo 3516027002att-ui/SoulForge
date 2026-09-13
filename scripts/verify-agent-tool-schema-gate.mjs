@@ -134,6 +134,7 @@ const PLACEHOLDER = {
   'safe-integer': 1,
   boolean: true,
   array: [],
+  'string[]': ['x'],
   object: {}
 };
 
@@ -207,6 +208,7 @@ for (const descriptor of descriptors) {
     const bare = declared.endsWith('?') ? declared.slice(0, -1) : declared;
     if (enumValuesOf(bare) !== null) return 'string';
     if (bare === 'safe-integer') return 'integer';
+    if (bare === 'string[]') return 'array';
     return ['string', 'number', 'boolean', 'array', 'object'].includes(bare) ? bare : null;
   };
 

@@ -21,12 +21,6 @@ node scripts/gov.mjs help      # 全部命令与 seal 四步流程
 
 为什么入口在 CLI 而不在正文：**可 claim 与否由 `docs/governance/slices.json` 的 lifecycle 决定，通读全文也读不出来**。本文的治理区块是那些 JSON 的投影。`gov next` 的输出自带闭环——每条切片给出 `goal`、`hardPrerequisites`、`entryPoints`、`requiredValidation`，外加 claim → 实现 → 验证 → 封存 → complete 的流程骨架，足以开始工作。
 
-体量差随每次封存变化，别信写死的数字，要用时现测：
-
-~~~powershell
-node -e "const {execSync}=require('child_process');const h=require('fs').statSync('docs/V0_5_IMPLEMENTATION_HANDOFF.md').size;const c=execSync('node scripts/gov.mjs next').length+execSync('node scripts/gov.mjs help').length;console.log({handoff:h,cli:c,ratio:+(h/c).toFixed(1)})"
-~~~
-
 选定切片后再回本文，按该切片的 `capabilityIds` 查对应区域地图（第 4～12 节）、当前技术前沿（第 13 节）和相关证据（第 17 节）。
 
 本文不是固定工单，不要求 Agent 按机械顺序逐项执行。
@@ -47,7 +41,7 @@ node -e "const {execSync}=require('child_process');const h=require('fs').statSyn
 2. 只在需要背景时读本文的相关区域地图；连续开发另可重读全局线路图与当前技术前沿。
 3. 检查 `git status`、`HEAD`、本机环境和相关测试。
 4. 根据依赖关系、真实证据、风险和当前可用环境，自主选择合理推进路径。
-5. 收尾走 CLI：先提交主题域改动 → `gov seal` 追加证据 → `gov complete` 收尾。**不要手写本文的执行面板、Gate 状态或实施证据记录**，那些区块是 `docs/governance/*.json` 的投影，手写会被投影门禁判为分叉（详见 §13.3）。
+5. 需要更新切片状态或恢复 Gate freshness 时走 CLI：先提交主题域改动 → `gov seal` 追加证据 → 对已完成的切片用 `gov complete` 收尾。普通微步骤不重复封存。**不要手写本文的执行面板、Gate 状态或实施证据记录**，那些区块是 `docs/governance/*.json` 的投影，手写会被投影门禁判为分叉（详见 §13.3）。
 6. 不新建平行的 milestone、fork、next-actions、project-state、task 或 status 文档。
 
 需要机械化的选点决策树和拆解模板时，配合 `docs/AGENT_EXECUTION_PLAYBOOK.md` 使用。它只是方法手册，不承载任何状态、范围或 authority。
@@ -82,7 +76,7 @@ node -e "const {execSync}=require('child_process');const h=require('fs').statSyn
 
 ### 0.2 状态声明契约
 
-任何 `partial`、`native-verified`、`blocked` 或 `unverified` 声明都必须能还原为以下字段：
+正式能力或治理状态声明须能从当前治理记录与验证报告还原以下字段。普通进度回复不必逐项复述；只需说明本次结果、证据与未验证项：
 
 ~~~text
 capabilityId
@@ -999,9 +993,9 @@ V0.5 不要求代表性硬件档位、真实大地图性能预算或原生后端
 | `W-REL-C-MULTILANG-02` | `completed` | `partial` | — | `C-FMG` | 全官方语言 FMG 写验证：对每个官方语言目录执行 native write-fmg mutations 派生样本并写回重读验证 | 本机 mods/msg 仅 zhocn 展开，其余官方语言文本位于原版 .bdt/.bhd 归档内不可直接访问；FMG v2 格式语言无关（id→UTF-16 文本表），语言是目录级概念，`W-REL-C-MULTILANG-01` 已用 zhocn+enus 派生+menu 验证写路径，本切片需真实多语言语料才能封闭全语言矩阵 | `bridge/SoulForge.Bridge/FmgNativeWriter.cs`、`packages/core/src/testing/runNativeFmgSmoke.ts` | `npm run bridge:verify:fmg`；`validation-unfrozen`：全官方语言 FMG 写验证 | cap=`partial`；只覆盖实际注册的官方语言布局 |
 | `W-REL-C-MULTILANG-03` | `completed` | `partial` | — | `C-FMG` | 全官方语言 FMG 容器闭环：补 item/menu 容器级 Patch Engine 提交、独立重读、回滚与跨语言引用矩阵 | `W-REL-C-MULTILANG-02` 已完成 14/14 官方语言真实 item FMG staged 写入/重读且原容器哈希不变；本切片只使用系统临时 overlay，不触碰原版或 live Mod，真实游戏加载另由后继切片失败关闭 | `packages/core/src/testing/runNativeFmgSmoke.ts`、`packages/core/src/testing/runFmgReferenceIntegritySmoke.ts`、`packages/core/src/editing/fmgBridgeCommit.ts`、`apps/desktop/src/main/ipc.ts` | `npm run bridge:verify:fmg`；`npm run test:fmg-reference-integrity`；`validation-unfrozen`：全官方语言 item/menu 容器提交/回滚与跨语言引用矩阵 | cap=`partial`；只覆盖经 Patch Engine 提交/回滚与引用扫描的实际语言和容器 |
 | `W-REL-C-PARAM-04` | `completed` | `partial` | — | `C-PARAM` | 全部 ParamType 读往返矩阵与写路径扩展：对 gameparam.parambnd.dcx 全部子项执行 native 读+语义往返（大文件条目经 file-backed extract-bnd4-child 绕开 snapshot base64 帧上限），并扩展多布局 ParamType 的字段级 staged upsert 写验证 | `W-EMEVD-FMG-PARAM-03` 完成（bridge:verify:param corpus 40/40 + 3 legacy 已通）；真实 gameparam.parambnd.dcx 在本机，138 子项全部可经 file-backed extract 读取 | `bridge/SoulForge.Bridge/Bnd4NativeWriter.cs`、`packages/core/src/testing/runNativeParamSmoke.ts` | `npm run bridge:verify:param` | cap=`partial`；只覆盖 gameparam.parambnd.dcx 实际注册的 ParamType 布局 |
-| `W-REL-D-GAMELOAD-01` | `ready` | `candidate` | — | `D-BEHAVIOR` | 真实 Sekiro 游戏内加载确认：替换后 script 容器放入真实 mods/script 后游戏能读到脚本阶段不崩溃 | `W-SCRIPT-READONLY-01` 完成（preflight 已过）；需用户游戏内确认（SOULFORGE_SCRIPT_REAL_LOAD_CONFIRMED） | `packages/core/src/testing/runScriptContainerLoadPreflightSmoke.ts`、`packages/core/src/script/scriptContainerEvidence.ts` | `node scripts/with-local-has-game-env.mjs` `npm run test:script-container-load-preflight`；`validation-unfrozen`：真实游戏内加载确认 | cap=`candidate`；真实游戏内加载确认前 authority 保持 candidate |
-| `W-REL-H-CROSSMACHINE-01` | `ready` | `partial` | — | `H-RUNTIME` | 跨机/干净机 NSIS 安装、升级、卸载复现与真实 me3 会话跨机验证 | 本机 NSIS 安装/升级/卸载已过；需第二台 Windows x64 机器或干净机环境 | `scripts/verify-installer-lifecycle.mjs`、`scripts/verify-me3-sekiro-session.mjs` | SOULFORGE_INSTALLER_LIFECYCLE_RUN=1 `node scripts/verify-installer-lifecycle.mjs`；跨机 me3 会话 smoke | cap=`partial`；只覆盖实际执行的跨机/干净机复现 |
-| `W-REL-V09-PUBLIC-PREVIEW-01` | `ready` | `partial` | — | `H-RUNTIME` | 完成 V0.9 发布线 V0.9.1 Windows x64 公开预发行的 clean 源码 ZIP、启动 EXE/native 必需组件、NSIS x64 安装包与许可证 notices，并审计源码归档、安装包内容、启动路径、安装/升级/卸载、内部文件排除及哈希 | 现有功能源代码、启动器/native 与 NSIS 构建入口、许可证目录和不携带真实游戏资产/私有语料/凭据的 clean 源码 ZIP 策略保持可审计；安装包必须能在临时干净目标完成安装、覆盖升级、卸载、残留清理与已安装启动 | `docs/governance/releases.json`、`docs/governance/scope.json`、`package.json`、`scripts/release-compliance-policy.json`、`scripts/release-compliance-lib.mjs`、`scripts/generate-release-compliance-manifest.mjs` | `npm run build`；`npm run exe:build`；`npm run release:manifest`；`npm run test:release-compliance-fixtures`；`npm run test:release-content`；SOULFORGE_INSTALLER_LIFECYCLE_RUN=1 `npm run test:installer-lifecycle`；`node scripts/verify-governance.mjs`；`validation-unfrozen`：实际 V0.9.1 clean 源码 ZIP 与 NSIS 安装包完整性、安装包内容、安装/覆盖升级/卸载/已安装启动路径、内部文件排除、源码与产物哈希、必要许可证 notices 及 GitHub source archive exclusion audit；旧跨机与真实 Sekiro 验收仍不声称完成 | cap=`partial`；只覆盖当前 V0.9 发布线 V0.9.1 的 Windows x64 clean 源码 ZIP、启动 EXE/native 必需组件与 NSIS 安装包生命周期边界，不提升旧 Gate 或 native/runtime authority |
+| `W-REL-D-GAMELOAD-01` | `ready` | `candidate` | — | `D-BEHAVIOR` | 真实 Sekiro 游戏内加载确认：替换后 script 容器放入真实 mods/script 后游戏能读到脚本阶段不崩溃 | `W-SCRIPT-READONLY-01` 完成（preflight 已过）；需用户游戏内确认（SOULFORGE_SCRIPT_REAL_LOAD_CONFIRMED） | `packages/core/src/testing/runScriptContainerLoadPreflightSmoke.ts`、`packages/core/src/script/scriptContainerEvidence.ts` | `npm run test:script-container-load-preflight`；manualChecks：真实游戏内加载确认；notes：原流程通过 `node scripts/with-local-has-game-env.mjs` 注入本机环境后运行；`validation-unfrozen`。 | cap=`candidate`；真实游戏内加载确认前 authority 保持 candidate |
+| `W-REL-H-CROSSMACHINE-01` | `ready` | `partial` | — | `H-RUNTIME` | 跨机/干净机 NSIS 安装、升级、卸载复现与真实 me3 会话跨机验证 | 本机 NSIS 安装/升级/卸载已过；需第二台 Windows x64 机器或干净机环境 | `scripts/verify-installer-lifecycle.mjs`、`scripts/verify-me3-sekiro-session.mjs` | SOULFORGE_INSTALLER_LIFECYCLE_RUN=1 `npm run test:installer-lifecycle`；manualChecks：跨机 me3 会话 smoke；notes：原流程运行 `scripts/verify-installer-lifecycle.mjs`，并要求第二台 Windows x64 机器或干净机环境。 | cap=`partial`；只覆盖实际执行的跨机/干净机复现 |
+| `W-REL-V09-PUBLIC-PREVIEW-01` | `ready` | `partial` | — | `H-RUNTIME` | 完成 V0.9 发布线 V0.9.1 Windows x64 公开预发行的 clean 源码 ZIP、启动 EXE/native 必需组件、NSIS x64 安装包与许可证 notices，并审计源码归档、安装包内容、启动路径、安装/升级/卸载、内部文件排除及哈希 | 现有功能源代码、启动器/native 与 NSIS 构建入口、许可证目录和不携带真实游戏资产/私有语料/凭据的 clean 源码 ZIP 策略保持可审计；安装包必须能在临时干净目标完成安装、覆盖升级、卸载、残留清理与已安装启动 | `docs/governance/releases.json`、`docs/governance/scope.json`、`package.json`、`scripts/release-compliance-policy.json`、`scripts/release-compliance-lib.mjs`、`scripts/generate-release-compliance-manifest.mjs` | `npm run build`；`npm run exe:build`；`npm run release:manifest`；`npm run test:release-compliance-fixtures`；`npm run test:release-content`；SOULFORGE_INSTALLER_LIFECYCLE_RUN=1 `npm run test:installer-lifecycle`；`npm run test:governance`；manualChecks：`validation-unfrozen`：实际 V0.9.1 clean 源码 ZIP 与 NSIS 安装包完整性、安装包内容、安装/覆盖升级/卸载/已安装启动路径、内部文件排除、源码与产物哈希、必要许可证 notices 及 GitHub source archive exclusion audit；旧跨机与真实 Sekiro 验收仍不声称完成；notes：保留原始命令顺序；原始 `node scripts/verify-governance.mjs` 由当前根 suite `test:governance` 承担。 | cap=`partial`；只覆盖当前 V0.9 发布线 V0.9.1 的 Windows x64 clean 源码 ZIP、启动 EXE/native 必需组件与 NSIS 安装包生命周期边界，不提升旧 Gate 或 native/runtime authority |
 | `W-MAP-PREVIEW-CORRECTNESS-03` | `completed` | `partial` | — | `I-RENDER` / `C-MSB` | 修复 MSB 地图预览 legacy cache 身份碰撞并封闭完成/失败重试/旧场景结果隔离；保真核验 native 诊断、地图 FaceSet/cull 字段与一个异常 part 的有界证据；补齐并验证已验证 FLVER 布局上的有界 C# absolute-rigid 参考姿态 FK bake，保持 delta/static 不变并对 weighted skinning 失败关闭 | 每次 mounted scene 继续创建独立 MapModelLoadCache，cleanup 继续取消请求并 dispose cache/worker/upload queue；native MAP static geometry 诊断与 FaceSet/cull 字段保持现有只读入口；单个异常 part 证据必须标为 partial，不得外推为整张地图、全硬件或游戏内可见性 | `apps/desktop/src/renderer/src/scene/mapModelLoadScheduler.ts`、`apps/desktop/src/renderer/src/scene/mapModelLoadScheduler.test.ts`、`apps/desktop/src/renderer/src/scene/mapGeometryPrepare.ts`、`apps/desktop/src/renderer/src/scene/mapGeometryPrepareClient.ts`、`apps/desktop/src/renderer/src/scene/mapGeometryPrepareClient.test.ts`、`apps/desktop/src/renderer/src/scene/mapGeometryPrepareWorker.ts`、`apps/desktop/src/renderer/src/scene/modelResourcePool.ts`、`apps/desktop/src/renderer/src/scene/modelResourcePool.test.ts`、`apps/desktop/src/renderer/src/scene/threeSceneController.ts`、`apps/desktop/src/renderer/src/editors/MsbScenePanel.tsx`、`apps/desktop/src/renderer/src/editors/MsbScenePanel.test.tsx`、`apps/desktop/src/main/ipc/map.ts`、`apps/desktop/src/main/ipc/mapRequestCancellation.ts`、`apps/desktop/src/main/ipc/mapRequestCancellation.test.ts`、`apps/desktop/src/main/ipc/mapStaticReadDecision.ts`、`apps/desktop/src/main/ipc/mapStaticReadDecision.test.ts`、`bridge/SoulForge.Bridge/FlverNativeDocument.cs`、`bridge/SoulForge.Bridge/FlverMatureSkinning.cs`、`bridge/SoulForge.Bridge/MapStaticGeometryService.cs`、`packages/core/src/testing/audit/sf-14/flverFixture.ts`、`packages/core/src/testing/runAuditSf14Smoke.ts`、`scripts/verify-map-streaming-native.mjs`、`scripts/verify-map-timing-contract.mjs`、`scripts/map-native-timing-aggregate.mjs`、`packages/shared/src/scene-ir.ts` | `npm run test:renderer-unit`、`npm run test:scene-draw-list`、`npm run test:three-scene-module`、`npm run test:map-static-pagination-contract`、`npm run test:map-streaming-contract`、`npm run test:audit-sf-14-unit`；最低回归：`npm run typecheck`、`npm test`、`npm run bridge:verify:synthetic`、`npm run build`、`npm run exe:build`；有界 native/Electron：单个异常 part 的原生/画面对照；`validation-unfrozen`：单个异常 part 原生诊断与画面对照尚未冻结 | cap=`partial`；覆盖地图预览缓存身份、完成/重试与场景隔离、native 诊断保真、FaceSet/cull 字段，以及已验证 FLVER 布局上的有界 C# absolute-rigid 参考姿态 FK bake、delta/static 不变与 weighted fail-closed；不提升完整地图可见性、全流式架构、游戏内加载或发布 authority |
 
 <!-- SOULFORGE_PROJECTION_END:slice-panel -->
@@ -1250,16 +1244,18 @@ npm run build
 
 <!-- SOULFORGE_PROJECTION_BEGIN:command-index -->
 
-全部 302 条已登记验证命令按层级列出。层级顺序即执行顺序（先快后慢，早失败早停）。
+全部 311 条已登记验证命令按层级列出。层级顺序即执行顺序（先快后慢，早失败早停）。
 
 一次跑完某一层：`node scripts/verify.mjs --tier <层级>`；跑全部：`npm run verify:all`。
 
-**governance**（21 条）
+**governance**（26 条）
 
 ~~~powershell
 npm run handoff:fingerprint
 npm run test:agent-task-record-gate
+npm run test:ci-change-scope
 npm run test:cross-machine-fixtures
+npm run test:editor-layout-fixtures
 npm run test:gov-cli
 npm run test:governance
 npm run test:governance-data-fixtures
@@ -1272,15 +1268,18 @@ npm run test:probe-residual-gate
 npm run test:release-scope
 npm run test:release-scope-fixtures
 npm run test:release-scope-proposal
+npm run test:required-validation
 npm run test:seal-cli
 npm run test:smoke-temp-cleanup
 npm run test:stale-tfm-gate
 npm run test:v06-deferral-index
+npm run test:v06-deferral-index-fixtures
 npm run test:verify-entrypoint
+npm run test:verify-scheduling
 npm run verify:audit
 ~~~
 
-**unit**（129 条）
+**unit**（130 条）
 
 ~~~powershell
 npm run test
@@ -1288,6 +1287,7 @@ npm run test:action-deterministic-seek
 npm run test:action-motion-identity
 npm run test:agent-approval-gate
 npm run test:agent-capability-wiring
+npm run test:agent-emevd-proof-gate
 npm run test:agent-knowledge-refresh
 npm run test:agent-param-dependency-batch
 npm run test:agent-performance-fixes
@@ -1336,6 +1336,7 @@ npm run test:audit-sf-28-unit
 npm run test:audit-sf-29-unit
 npm run test:bridge-command-advertisement
 npm run test:bridge-optional-args
+npm run test:bridge-production-build
 npm run test:bridge-roots
 npm run test:citations
 npm run test:core-journal-wiring
@@ -1363,7 +1364,6 @@ npm run test:emevd-four-view
 npm run test:emevd-instruction-structural
 npm run test:emevd-ipc-contract
 npm run test:emevd-plan-commit
-npm run test:emevd-session-cache
 npm run test:emevd-stable-identity
 npm run test:flver-pages
 npm run test:fmg-msb-ipc-contract
@@ -1384,6 +1384,7 @@ npm run test:param-canonical-projection
 npm run test:param-export-clone
 npm run test:param-metadata-read-bridge
 npm run test:param-msb-write-ipc-contract
+npm run test:param-rag-identity-convergence
 npm run test:param-slim-ipc
 npm run test:path-sanitizer
 npm run test:performance-baseline
@@ -1395,7 +1396,6 @@ npm run test:recent-paths
 npm run test:renderer-reachability
 npm run test:renderer-unit
 npm run test:resource-index-diagnostics
-npm run test:s40-live
 npm run test:scene-asset-inventory
 npm run test:scene-draw-list
 npm run test:subprocess-control
@@ -1414,7 +1414,7 @@ npm run test:yapped-param-metadata-source
 npm run typecheck
 ~~~
 
-**synthetic**（54 条）
+**synthetic**（56 条）
 
 ~~~powershell
 npm run bridge:build
@@ -1434,6 +1434,7 @@ npm run test:asset-writeback
 npm run test:bc3-color-block
 npm run test:bc7-decode
 npm run test:bnd4-repack-scope
+npm run test:bridge-artifact-chunking
 npm run test:bridge-cancellation-terminal-phase
 npm run test:bridge-recovery-harness
 npm run test:bridge-staging
@@ -1451,6 +1452,7 @@ npm run test:editor-bounded-access
 npm run test:emevd-coverage
 npm run test:emevd-full-document
 npm run test:emevd-plan-production
+npm run test:emevd-session-cache
 npm run test:esd-gap-visibility
 npm run test:flver-candidate
 npm run test:flver-gap-visibility
@@ -1473,7 +1475,7 @@ npm run test:upgrade-recovery
 npm run test:writer-failure-matrix
 ~~~
 
-**native**（87 条）
+**native**（88 条）
 
 ~~~powershell
 npm run bridge:verify:bnd4-transaction
@@ -1556,6 +1558,7 @@ npm run test:plaintext-script-edit
 npm run test:plaintext-script-write
 npm run test:private-native-gate
 npm run test:real-mod-readonly-preview
+npm run test:s40-live
 npm run test:script-container-evidence
 npm run test:script-container-load-preflight
 npm run test:script-container-replace
@@ -1581,16 +1584,17 @@ npm run test:release-cross-machine
 npm run test:release-reproducible
 ~~~
 
-另有 26 条 script 显式排除在验证调度之外（写入命令、外部工具或入口自身）：
+另有 27 条 script 显式排除在验证调度之外（写入命令、外部工具或入口自身）：
 
 - `verify`：统一验证入口本身，自调度会无限递归
 - `verify:all`：同上（全层级别名）
 - `verify:list`：同上（只列计划，不是验证）
 - `dev`：交互式开发服务器，不是验证
+- `benchmark:rag-fts-delta`：50,000 行 RAG/FTS 性能诊断，按需运行；不作为常规回归或已免验的发布性能门槛
 - `agent:simulate`：真实 Agent 链路模拟入口，依赖真实模型与本地 Mod 交互，按需手工运行
 - `preagent:simulate`：agent:simulate 的 npm 生命周期构建前置，只生成生产产物；真实链路判定由 agent:simulate 自身负责
 - `ai-logs:sync`：用于从 Antigravity 提取或同步真实 AI 会话日志到 testdata/ai-audit-transcripts 的离线同步工具，不是验证
-- `bridge:publish`：发布产物构建。**当前无任何调用方**（release 层 10 条脚本均不调它，实测 2026-08-08）；跑一次 Release publish 要几分钟且产物不参与任何验证判据，故不进 tier。若将来 release 链要用它，请一并把 runBridge.ts 的 Release 候选路径纳入验证——那两条路径至今从未被生成过。
+- `bridge:publish`：由 exe:build 消费的 Bridge 发布构建前置；按应用输入变化或交付任务执行，不是独立验证套件
 - `launcher:build`：启动器二进制发布构建，不是验证
 - `exe:build`：Bridge、启动器和开发 launcher 的显式构建命令；由交付流程直接调用，不是独立验证套件
 - `dev-launcher:build`：开发 launcher 产物构建；由 exe:build 调用，不是独立验证套件
@@ -1928,6 +1932,7 @@ entries[]:
 | `EV-MISSION1-REVALIDATE-20260825` | revalidates=`EV-V05-CONVERGENCE-FINAL-20260824`; `scope-ruling:user-approved`; scope-deferral:`REL-E`:V0.6:user-approved; scope-deferral:`REL-I`:V0.6:user-approved; mission1 MAP/EVENT/AGENT-RAG safety and native write-path revalidation |
 | `EV-FLASH-AUDIT-REVALIDATE-20260907` | revalidates=`EV-MISSION1-REVALIDATE-20260825`; `scope-ruling:user-approved`; scope-deferral:`REL-E`:V0.6:user-approved; scope-deferral:`REL-I`:V0.6:user-approved; Flash Execution SF-00..SF-29 governance freshness revalidation after commit `34a6513d`; frozen scope semantics unchanged; user-approved commit and re-seal, no push |
 | `EV-REL-V091-NSIS-SCOPE-20260913` | revalidates=`EV-FLASH-AUDIT-REVALIDATE-20260907`; `scope-ruling:user-approved`; scope-deferral:`REL-E`:V0.6:user-approved; scope-deferral:`REL-I`:V0.6:user-approved; user-ruling-2026-09-13-v091-nsis-installer-public-release：V0.9 发布线 V0.9.1 公开范围纳入 unsigned NSIS x64 安装包及 manifest/hash、安装、覆盖升级、卸载、已安装启动；`REL-E` 与 `REL-G` 不属于该发布范围 |
+| `EV-VALIDATION-TUNING-20260913` | revalidates=`EV-REL-V091-NSIS-SCOPE-20260913`;`scope-ruling:user-approved`;scope-deferral:`REL-E`:V0.6:user-approved;scope-deferral:`REL-I`:V0.6:user-approved;验证调度与 `requiredValidation` 兼容迁移：同批成功操作去重、普通 CI 与安装验收分层、当前 JSON 驱动延期投影、AST 布局门禁；冻结范围、发布权限、authority 上限与人工验收语义未变。 |
 
 <!-- SOULFORGE_PROJECTION_END:evidence-index -->
 
@@ -2100,7 +2105,7 @@ Gate 只有在全部合法最小下一切片都受外部 blocker 阻塞时才能
 
 | Gate ID | capability | 当前切片 | gateState | applicability | Evidence/blockerRefs | 后继要求 |
 |---|---|---|---|---|---|---|
-| `REL-SCOPE` | V0.5 范围冻结 | `W-REL-SCOPE-RULING-05` | `passed` | `in-scope` | `EV-REL-SCOPE-20260731-TEXT-FIRST`、`EV-REL-SCOPE-20260801-GOVERNANCE-JSON`、`EV-REL-SCOPE-20260801-SEAL-CLI`、`EV-REL-SCOPE-20260801-HANDOFF-PROJECTION`、`EV-REL-SCOPE-20260801-SCOPE-PROJECTION`、`EV-REL-SCOPE-20260801-COMMAND-INDEX`、`EV-REL-SCOPE-20260801-PARSER-REGISTRY`、`EV-REL-SCOPE-20260801-DIAGNOSTIC-ROOTCAUSE`、`EV-REL-SCOPE-20260801-CLI-CLOSURE`、`EV-REL-SCOPE-20260801-RELEASE-SCOPING`、`EV-REL-SCOPE-20260801-EMPTY-GUIDANCE`、`EV-REL-SCOPE-20260801-COMMAND-EXISTENCE`、`EV-REL-SCOPE-20260802-SEAL-COMMIT-WARNING`、`EV-REL-SCOPE-20260802-UNCOMMITTED-PATH-FIX`、`EV-REL-SCOPE-20260802-DEFERRED-RESUME-PROJECTION`、`EV-REL-SCOPE-20260802-ENTRYPOINT-OPENABLE`、`EV-REL-SCOPE-20260802-CONSTRAINT-SPEC`、`EV-REL-SCOPE-20260802-STALE-CLAIM-VISIBILITY`、`EV-REL-SCOPE-20260802-FIXTURE-RESTORE`、`EV-REL-SCOPE-20260802-FIXTURE-PREMISE`、`EV-REL-SCOPE-20260802-EMPTY-CLAIM-STATE`、`EV-REL-SCOPE-20260802-STATUS-STALENESS`、`EV-REL-SCOPE-20260802-PROCESS-SELF-OPTIMIZATION`、`EV-REL-SCOPE-20260802-STATUS-FALSE-GREEN`、`EV-REL-SCOPE-20260802-EVIDENCE-INDEX-COMPACTION`、`EV-REL-SCOPE-20260802-MECH-TASKS-CLOSEOUT`、`EV-REL-SCOPE-20260802-PLAN-DIRECTORY-EXIT`、`EV-REL-SCOPE-20260803-HANDOFF-ENTRY-SECTION`、`EV-REL-SCOPE-20260803-V05-SLICES-BATCH`、`EV-REL-SCOPE-20260803-RENDERER-REMOVAL`、`EV-REL-SCOPE-20260803-RENDERER-RESTORE`、`EV-REL-SCOPE-20260804-SUBJECT-SET`、`EV-V06-RESUME-20260804`、`EV-REL-SCOPE-20260804-V06-FIXTURE-FIX`、`EV-REL-SCOPE-20260805-V06-RESUME-SCOPE-FIXTURES`、`EV-TPF-SCAFFOLD-CI-20260806`、`EV-VERIFY-SKIPDETECT-IPCDIR-20260807`、`EV-SECURITY-BOUNDARY-RUNTIME-20260807`、`EV-GATE-HARDENING-20260807`、`EV-SEAL-POLARITY-FIXTURE-20260807`、`EV-RENDERER-UNIT-SPLIT-20260807`、`EV-ROUNDTRIP-PAGINATION-20260807`、`EV-RECOVERY-AIPERM-COVERAGE-20260807`、`EV-REPACK-A11Y-20260807`、`EV-PRELOAD-SURFACE-RULING-20260807`、`EV-NAMING-HONESTY-ROUNDTRIP-20260807`、`EV-PRELOAD-FIX-CODEXPRO-REMOVAL-20260808`、`EV-REBASE-REANCHOR-20260808`、`EV-PROD-E2E-REACHABILITY-20260808`、`EV-CORPUS-ROOT-ORPHAN-20260808`、`EV-GATE-COVERAGE-FRESHNESS-20260808`、`EV-SILENT-DISCARD-WRITEPATH-20260808`、`EV-CMDSET-STAGINGCODE-MTD-20260808`、`EV-BC7-PAGINATION-ESD-SENTINEL-20260808`、`EV-BC3-FLVERGAP-AIWIRE-NATIVEROOT-20260808`、`EV-T14-WIRING-COMPLETE-FLVER-PARTIAL-20260808`、`EV-PNGCOLORSPACE-DDSTRUNC-TFMGATE-20260808`、`EV-ESDGAP-XMACHINE-PARAMKRAK-20260808`、`EV-ESD-SUPPORTED-TRANSITION-EDGES-20260808`、`EV-SCRIPT-PLAINTEXT-SOURCE-EDIT-RULING-20260808`、`EV-AGENT-TOOL-SCHEMA-EXPOSURE-20260808`、`EV-AGENTIC-APPROVAL-WIRING-PLAINTEXT-20260808`、`EV-PERMISSION-JUDGE-UNIFIED-20260808`、`EV-PENDING-RULINGS-RECORDED-20260808`、`EV-CODEX-DECISION-PARITY-20260808`、`EV-PLAINTEXT-RW-CHAIN-COMPLETE-20260809`、`EV-MIXED-ENCODING-BYTE-EDIT-20260809`、`EV-SMITHBOX-PARAM-FIELDS-EDITOR-LAYOUT-20260810`、`EV-CONTAINER-PARAM-WRITEBACK-20260810`、`EV-WORKBENCH-EDITOR-SELECTION-RECENTPATHS-20260810`、`EV-ROOT07-BRIDGE-ROOTS-20260813`、`EV-PARAM-10A-PRIMARY-READ-20260813`、`EV-PARAM-10BC-SMITHBOX-FOURCOLUMN-WRITEBACK-20260813`、`EV-GPARAM-11A-NATIVE-READ-20260813`、`EV-GPARAM-11B-WORKBENCH-20260813`、`EV-GPARAM-11C-WRITEBACK-20260813`、`EV-MODEL51-TEXTURE52-20260813`、`EV-MATERIAL53-BEHAVIOR55-ANIMATION56-READ-20260814`、`EV-MATBIN-53DE-DEFERRED-20260814`、`EV-MATERIAL53C-WRITEBACK-20260814`、`EV-MAP50C-MSB-WRITEBACK-20260814`、`EV-VFX54B-WORKBENCH-20260814`、`EV-MATERIAL53B-BEHAVIOR55B-ANIMATION56B-WORKBENCH-20260814`、`EV-AGENT60A-DOCK-SHELL-20260814`、`EV-BEHAVIOR55C-ESD-WRITEBACK-20260814`、`EV-AGENT60B-COMPOSER-20260814`、`EV-ANIMATION56C-TAE-WRITEBACK-20260814`、`EV-AGENT60C-SELECTION-STREAM-20260814`、`EV-AGENT60D-TOOL-APPROVAL-DRAWER-20260814`、`EV-REL-SCOPE-MATBIN-CLASSIFY-20260814`、`EV-VFX54C-GPARAM11B-20260814`、`EV-REL-SCOPE-GOVCLI-MULTIGATE-20260814`、`EV-MODLOADER-BAN-REVOKE-20260818`、`EV-MAP-ANIM-SCALE-20260823`、`EV-MAP-ANIM-SCALE-20260823-FINAL`、`EV-V05-CONVERGENCE-FINAL-20260824`、`EV-V05-TIER-AUDIT-SEAL-20260824`、`EV-V05-UNFREEZE-SCOPE-SEAL-20260824`、`EV-V05-TEMP-CLEANUP-SEAL-20260824`、`EV-V05-TIER-NATIVE-SEAL-20260824`、`EV-MAIN-MERGE-CONVERGENCE-20260824`、`EV-FLASH-AUDIT-REVALIDATE-20260907`、`EV-REL-V091-NSIS-SCOPE-20260913` | 28 项范围矩阵继续冻结，其中 13 项已裁定延期 V0.6（`SCOPE-MSB`、animation/TAE/ESD 三项、资产线 7 项、`SCOPE-RENDERING`、`SCOPE-MATBIN-53DE`）；V0.5 收窄为 BND4/FMG/PARAM(gameparam)/EMEVD/script 五编辑器的文本优先边界，script 为只读 + 整内层文件替换；Sekiro 1.6 版本族、只读 Hex、固定 Smithbox 本机 metadata、空模型凭据、无编辑器/installer 量化预算与允许未签名 NSIS 的内部测试边界不变；工程复核与普通工程提交不得触发用户重新授权 |
+| `REL-SCOPE` | V0.5 范围冻结 | `W-REL-SCOPE-RULING-05` | `passed` | `in-scope` | `EV-REL-SCOPE-20260731-TEXT-FIRST`、`EV-REL-SCOPE-20260801-GOVERNANCE-JSON`、`EV-REL-SCOPE-20260801-SEAL-CLI`、`EV-REL-SCOPE-20260801-HANDOFF-PROJECTION`、`EV-REL-SCOPE-20260801-SCOPE-PROJECTION`、`EV-REL-SCOPE-20260801-COMMAND-INDEX`、`EV-REL-SCOPE-20260801-PARSER-REGISTRY`、`EV-REL-SCOPE-20260801-DIAGNOSTIC-ROOTCAUSE`、`EV-REL-SCOPE-20260801-CLI-CLOSURE`、`EV-REL-SCOPE-20260801-RELEASE-SCOPING`、`EV-REL-SCOPE-20260801-EMPTY-GUIDANCE`、`EV-REL-SCOPE-20260801-COMMAND-EXISTENCE`、`EV-REL-SCOPE-20260802-SEAL-COMMIT-WARNING`、`EV-REL-SCOPE-20260802-UNCOMMITTED-PATH-FIX`、`EV-REL-SCOPE-20260802-DEFERRED-RESUME-PROJECTION`、`EV-REL-SCOPE-20260802-ENTRYPOINT-OPENABLE`、`EV-REL-SCOPE-20260802-CONSTRAINT-SPEC`、`EV-REL-SCOPE-20260802-STALE-CLAIM-VISIBILITY`、`EV-REL-SCOPE-20260802-FIXTURE-RESTORE`、`EV-REL-SCOPE-20260802-FIXTURE-PREMISE`、`EV-REL-SCOPE-20260802-EMPTY-CLAIM-STATE`、`EV-REL-SCOPE-20260802-STATUS-STALENESS`、`EV-REL-SCOPE-20260802-PROCESS-SELF-OPTIMIZATION`、`EV-REL-SCOPE-20260802-STATUS-FALSE-GREEN`、`EV-REL-SCOPE-20260802-EVIDENCE-INDEX-COMPACTION`、`EV-REL-SCOPE-20260802-MECH-TASKS-CLOSEOUT`、`EV-REL-SCOPE-20260802-PLAN-DIRECTORY-EXIT`、`EV-REL-SCOPE-20260803-HANDOFF-ENTRY-SECTION`、`EV-REL-SCOPE-20260803-V05-SLICES-BATCH`、`EV-REL-SCOPE-20260803-RENDERER-REMOVAL`、`EV-REL-SCOPE-20260803-RENDERER-RESTORE`、`EV-REL-SCOPE-20260804-SUBJECT-SET`、`EV-V06-RESUME-20260804`、`EV-REL-SCOPE-20260804-V06-FIXTURE-FIX`、`EV-REL-SCOPE-20260805-V06-RESUME-SCOPE-FIXTURES`、`EV-TPF-SCAFFOLD-CI-20260806`、`EV-VERIFY-SKIPDETECT-IPCDIR-20260807`、`EV-SECURITY-BOUNDARY-RUNTIME-20260807`、`EV-GATE-HARDENING-20260807`、`EV-SEAL-POLARITY-FIXTURE-20260807`、`EV-RENDERER-UNIT-SPLIT-20260807`、`EV-ROUNDTRIP-PAGINATION-20260807`、`EV-RECOVERY-AIPERM-COVERAGE-20260807`、`EV-REPACK-A11Y-20260807`、`EV-PRELOAD-SURFACE-RULING-20260807`、`EV-NAMING-HONESTY-ROUNDTRIP-20260807`、`EV-PRELOAD-FIX-CODEXPRO-REMOVAL-20260808`、`EV-REBASE-REANCHOR-20260808`、`EV-PROD-E2E-REACHABILITY-20260808`、`EV-CORPUS-ROOT-ORPHAN-20260808`、`EV-GATE-COVERAGE-FRESHNESS-20260808`、`EV-SILENT-DISCARD-WRITEPATH-20260808`、`EV-CMDSET-STAGINGCODE-MTD-20260808`、`EV-BC7-PAGINATION-ESD-SENTINEL-20260808`、`EV-BC3-FLVERGAP-AIWIRE-NATIVEROOT-20260808`、`EV-T14-WIRING-COMPLETE-FLVER-PARTIAL-20260808`、`EV-PNGCOLORSPACE-DDSTRUNC-TFMGATE-20260808`、`EV-ESDGAP-XMACHINE-PARAMKRAK-20260808`、`EV-ESD-SUPPORTED-TRANSITION-EDGES-20260808`、`EV-SCRIPT-PLAINTEXT-SOURCE-EDIT-RULING-20260808`、`EV-AGENT-TOOL-SCHEMA-EXPOSURE-20260808`、`EV-AGENTIC-APPROVAL-WIRING-PLAINTEXT-20260808`、`EV-PERMISSION-JUDGE-UNIFIED-20260808`、`EV-PENDING-RULINGS-RECORDED-20260808`、`EV-CODEX-DECISION-PARITY-20260808`、`EV-PLAINTEXT-RW-CHAIN-COMPLETE-20260809`、`EV-MIXED-ENCODING-BYTE-EDIT-20260809`、`EV-SMITHBOX-PARAM-FIELDS-EDITOR-LAYOUT-20260810`、`EV-CONTAINER-PARAM-WRITEBACK-20260810`、`EV-WORKBENCH-EDITOR-SELECTION-RECENTPATHS-20260810`、`EV-ROOT07-BRIDGE-ROOTS-20260813`、`EV-PARAM-10A-PRIMARY-READ-20260813`、`EV-PARAM-10BC-SMITHBOX-FOURCOLUMN-WRITEBACK-20260813`、`EV-GPARAM-11A-NATIVE-READ-20260813`、`EV-GPARAM-11B-WORKBENCH-20260813`、`EV-GPARAM-11C-WRITEBACK-20260813`、`EV-MODEL51-TEXTURE52-20260813`、`EV-MATERIAL53-BEHAVIOR55-ANIMATION56-READ-20260814`、`EV-MATBIN-53DE-DEFERRED-20260814`、`EV-MATERIAL53C-WRITEBACK-20260814`、`EV-MAP50C-MSB-WRITEBACK-20260814`、`EV-VFX54B-WORKBENCH-20260814`、`EV-MATERIAL53B-BEHAVIOR55B-ANIMATION56B-WORKBENCH-20260814`、`EV-AGENT60A-DOCK-SHELL-20260814`、`EV-BEHAVIOR55C-ESD-WRITEBACK-20260814`、`EV-AGENT60B-COMPOSER-20260814`、`EV-ANIMATION56C-TAE-WRITEBACK-20260814`、`EV-AGENT60C-SELECTION-STREAM-20260814`、`EV-AGENT60D-TOOL-APPROVAL-DRAWER-20260814`、`EV-REL-SCOPE-MATBIN-CLASSIFY-20260814`、`EV-VFX54C-GPARAM11B-20260814`、`EV-REL-SCOPE-GOVCLI-MULTIGATE-20260814`、`EV-MODLOADER-BAN-REVOKE-20260818`、`EV-MAP-ANIM-SCALE-20260823`、`EV-MAP-ANIM-SCALE-20260823-FINAL`、`EV-V05-CONVERGENCE-FINAL-20260824`、`EV-V05-TIER-AUDIT-SEAL-20260824`、`EV-V05-UNFREEZE-SCOPE-SEAL-20260824`、`EV-V05-TEMP-CLEANUP-SEAL-20260824`、`EV-V05-TIER-NATIVE-SEAL-20260824`、`EV-MAIN-MERGE-CONVERGENCE-20260824`、`EV-FLASH-AUDIT-REVALIDATE-20260907`、`EV-REL-V091-NSIS-SCOPE-20260913`、`EV-VALIDATION-TUNING-20260913` | 28 项范围矩阵继续冻结，其中 13 项已裁定延期 V0.6（`SCOPE-MSB`、animation/TAE/ESD 三项、资产线 7 项、`SCOPE-RENDERING`、`SCOPE-MATBIN-53DE`）；V0.5 收窄为 BND4/FMG/PARAM(gameparam)/EMEVD/script 五编辑器的文本优先边界，script 为只读 + 整内层文件替换；Sekiro 1.6 版本族、只读 Hex、固定 Smithbox 本机 metadata、空模型凭据、无编辑器/installer 量化预算与允许未签名 NSIS 的内部测试边界不变；工程复核与普通工程提交不得触发用户重新授权 |
 | `REL-A` | 全部 writer 与事务 | `W-A-RECOVERY-INTEGRATION-04` | `passed` | `in-scope` | `EV-A-RECOVERY-INTEGRATION-04-20260803`、`EV-SECURITY-BOUNDARY-RUNTIME-20260807`、`EV-RECOVERY-AIPERM-COVERAGE-20260807`、`EV-REBASE-REANCHOR-20260808`、`EV-FAILOPEN-PATHLEAK-20260808`、`EV-MODEL51-TEXTURE52-20260813`、`EV-FLASH-AUDIT-REVALIDATE-20260907` | BND4/FMG/PARAM 12 case + EMEVD/MSB 8 case 已通过；继续真实断电/大容量/安装升级恢复 |
 | `REL-B` | 容器发布 corpus | `W-REL-B-CORPUS-02` | `passed` | `in-scope` | `EV-REL-B-CORPUS-02-20260803`、`EV-ROUNDTRIP-PAGINATION-20260807`、`EV-REPACK-A11Y-20260807`、`EV-REBASE-REANCHOR-20260808`、`EV-PROD-E2E-REACHABILITY-20260808`、`EV-CORPUS-ROOT-ORPHAN-20260808`、`EV-RELB-SCHEMAVER-COMPAT-20260808`、`EV-BC3-FLVERGAP-AIWIRE-NATIVEROOT-20260808` | KRAK 重压/写回/roundtrip 已完成；继续组合 mutation/repack 和完整 corpus 验证 |
 | `REL-C` | 核心语义 mutation 矩阵 | `W-REL-D-GAMELOAD-01` | `open` | `in-scope` | `EV-EMEVD-FMG-PARAM-03-20260803`、`EV-FMG-MULTILANG-WRITE-20260804`、`EV-PARAM-CORPUS-138-20260804`、`EV-FMG-OFFICIAL-LANGUAGES-20260805`、`EV-FMG-CONTAINER-CLOSED-LOOP-20260814` | EMEVD DSL production Bridge/PatchIR transaction 与 138 ParamType corpus 已完成；FMG 已完成 14/14 官方语言真实 item staged 写入/重读。继续全语言 item/menu 容器级 Patch Engine 提交/独立重读/回滚与跨语言引用矩阵；完成后再单列真实 Sekiro 游戏加载确认 |
@@ -2140,11 +2145,11 @@ blocker `reason` 只允许：`private-corpus | credential | hardware | user-ruli
 
 ### 18.5 V0.6 延期承接索引
 
-本节是**派生索引**，不是新的 milestone、范围口径或进度文档。唯一权威仍是 §18.2.1 范围矩阵的 `proposedSupport=deferred` + `deferredToRelease` 字段、§18.3 的 `gateState=deferred` 与 §13.1 的 `lifecycle=deferred`。本节只把这些已有记录汇总成可读清单，避免接手者从散落条目里反推 V0.6 范围。
+本节是**派生索引**，不是新的 milestone、范围口径或进度文档。唯一机器可读权威是 `docs/governance/scope.json`、`docs/governance/gates.json` 与 `docs/governance/slices.json` 中的延期记录；本节只把它们汇总成可读投影。
 
-`npm run test:v06-deferral-index` 校验本节与上述权威记录逐项一致：条目缺失、多写、目标版本不符或权威侧状态变化后未同步，都会失败关闭。因此本节不能成为独立漂移的第二口径。
+`npm run test:v06-deferral-index` 只校验本节与上述治理 JSON 逐项一致。条目缺失、多写、目标版本、authority 或归属线不一致都会失败关闭，因此本节不能成为独立漂移的第二口径。
 
-当前仍延期到 V0.6 的 6 个范围条目（全部 `operations=[]`，`authorityAtRuling` 为裁定当时的真实上限，不是承诺）：
+当前延期的 6 个范围条目（目标版本：V0.6；全部 `operations=[]`，每条 `resumeRequires` 保留在 scope.json，`authorityAtRuling` 只记录裁定时上限）：
 
 | 范围条目 | 目标版本 | 裁定时 authority | 归属线 |
 |---|---|---|---|
@@ -2153,22 +2158,22 @@ blocker `reason` 只允许：`private-corpus | credential | hardware | user-ruli
 | `SCOPE-ASSET-COLLISION` | V0.6 | `unverified` | E-ASSET |
 | `SCOPE-ASSET-NAVIGATION` | V0.6 | `unverified` | E-ASSET |
 | `SCOPE-ASSET-OPEN-CONVERSION` | V0.6 | `candidate` | E-ASSET |
-| `SCOPE-MATBIN-53DE-DEFERRAL` | V0.6 | `unverified` | E-ASSET |
+| `SCOPE-MATBIN-53DE-DEFERRAL` | V0.6 | `unverified` | material-matbin |
 
-延期 Gate：无。V0.6 承接后 `REL-E`（资产只读与导出矩阵）与 `REL-I`（渲染功能闭环）已由 `deferred-v0.6` 恢复为 `passed`/`in-scope`，不再属于延期索引。`REL-C`、`REL-D` 与 `REL-H` 保持 `open`：它们各自仍有留在 V0.5 的支持条目（EMEVD/FMG/PARAM、`SCOPE-BEHAVIOR-SCRIPT` 与跨机复现），因此不整体延期。
+延期 Gate：无。
 
-延期切片：无。V0.6 承接后 `W-MSB-SCENE-01`、`W-FLVER-READ-01`、`W-RENDER-FUNCTIONAL-02` 已全部完成（lifecycle=completed），不再属于延期索引。
+延期切片：无。
 
-延期只读预览编辑器：当前无。TAE、ESD 及其他已解除版本延期的编辑器不再由
-`DEFERRED_PREVIEW_EDITOR_KINDS` 或主进程 deferred-preview 门禁阻断；它们的实际
-写入仍须经过 native authority、Patch Engine、revision、重读与恢复验证。
+延期只读预览编辑器：无。
 
-V0.6 恢复任一条目时的强制顺序（已应用于本轮承接的 `SCOPE-MSB`/`SCOPE-ASSET-FLVER`/`SCOPE-ASSET-TPF`/`SCOPE-RENDERING`，其余 8 个延期条目后续恢复时同样适用）：
+恢复时按该条目在 scope.json 登记的全部 `resumeRequires` 验证；旧证据仅在当前输入、适用范围与 `fresh` 均一致时可复用，否则重新验证。
 
-1. 取得用户裁定，把范围条目从 `deferred` 改回 `supported` 并写回真实 `operations`；
-2. 同步 §18.3 Gate 与 §13.1 切片脱离 `deferred`，其 `required validation` 重新进入 §13.4 未冻结清单；
-3. 需要写能力时，先补齐对应 parser / writer / validator / 恢复与 authority 门槛，再翻开 `releaseWriteEnabled`；
-4. 重新封存 Evidence。**已延期期间保留的"曾经验证过"记录不能直接当作恢复后的验证证据，必须重跑。**本轮承接在封存前已对 MSB/FLVER/TPF/渲染全部 12 组 native smoke 与功能 smoke 重跑并逐项核对。
+- `SCOPE-ASSETS`（目标 V0.6）：按 `scopeDeferralPolicy` 走通用承接流程（用户裁定改回 supported、同步 gates/slices 脱离 deferred、补齐 parser/writer/validator/恢复与 authority 门槛、重新封存 Evidence）；五类资产（FLVER/TPF/MTD/collision/navigation）各自的只读 authority 必须分别成立；聚合条目不能靠其中一类的结论代表全部；native-to-open 导出矩阵只做单向导出；open-format-to-native-import 是永久禁令；任何 native writer 在缺少 validator 时不得开放（unvalidated-native-writer 永久禁令）
+- `SCOPE-ASSET-MTD`（目标 V0.6）：按 `scopeDeferralPolicy` 走通用承接流程（用户裁定改回 supported、同步 gates/slices 脱离 deferred、补齐 parser/writer/validator/恢复与 authority 门槛、重新封存 Evidence）；MTD schema 必须从真实字节建立，禁止推断（infer-mtd-schema 永久禁令）；texture slot 需与 `SCOPE-ASSET-TPF` 的 native texture 引用双向对齐；mtd-write 与 open-format-to-mtd 永久禁止；proxy material 不能充当 native
+- `SCOPE-ASSET-COLLISION`（目标 V0.6）：按 `scopeDeferralPolicy` 走通用承接流程（用户裁定改回 supported、同步 gates/slices 脱离 deferred、补齐 parser/writer/validator/恢复与 authority 门槛、重新封存 Evidence）；碰撞格式必须先在真实 Sekiro corpus 中确认，禁止假定（assume-collision-format 永久禁令）；层级与地图关联需与 MSB 侧实体对齐，否则碰撞读取无法定位到场景；collision-write 永久禁止；proxy mesh 不能充当碰撞数据
+- `SCOPE-ASSET-NAVIGATION`（目标 V0.6）：按 `scopeDeferralPolicy` 走通用承接流程（用户裁定改回 supported、同步 gates/slices 脱离 deferred、补齐 parser/writer/validator/恢复与 authority 门槛、重新封存 Evidence）；导航格式必须先在真实 Sekiro corpus 中确认，禁止假定（assume-navigation-format 永久禁令）；连接关系需构成可校验图并与地图引用对齐；navigation-write 永久禁止；proxy graph 不能充当导航数据
+- `SCOPE-ASSET-OPEN-CONVERSION`（目标 V0.6）：按 `scopeDeferralPolicy` 走通用承接流程（用户裁定改回 supported、同步 gates/slices 脱离 deferred、补齐 parser/writer/validator/恢复与 authority 门槛、重新封存 Evidence）；导出矩阵依赖 `SCOPE-ASSET-FLVER` / TPF / MTD 三条的只读 authority 先成立，否则导出的是未经证实的解读；导出必须只写开放格式（glTF/GLB/PNG/TGA/DDS/描述清单），不得回写或替换 native 输出（永久禁令）；raw-file-replace 不构成转换；open-format-to-native-import 永久禁止
+- `SCOPE-MATBIN-53DE-DEFERRAL`（目标 V0.6）：mod-engine-mods-parts-matbin-corpus；matbin-format-spec-or-reverse-evidence；confirmed-native-parser
 
 延期不清偿技术缺口，不降低 native authority、验证、回滚或生态集成标准。
 

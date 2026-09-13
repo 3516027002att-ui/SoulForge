@@ -36,7 +36,10 @@ const subjectRefsByGate = new Map(registry.gates.map((gate) => [
 const baseOptions = {
   parseSealBaseline,
   subjectRefsOf: (gateId) => subjectRefsByGate.get(gateId) ?? null,
-  freezeBaselineRef: null
+  freezeBaselineRef: null,
+  // structured requiredValidation 的 suiteId 直接对账根 package.json；沙箱只复制
+  // docs/governance，因此把同一份根脚本集合显式注入，避免测试夹具依赖沙箱外的 cwd。
+  rootPackage: JSON.parse(readFileSync(join(root, 'package.json'), 'utf8'))
 };
 
 /**

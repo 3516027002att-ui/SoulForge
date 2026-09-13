@@ -127,7 +127,7 @@ function syntheticChecks(): void {
   assert(ifCondGroup!.args[0]!.name === 'resultConditionGroup', `arg0: ${ifCondGroup!.args[0]!.name}`);
   assert(ifCondGroup!.args[0]!.type === 's8', `arg0 type: ${ifCondGroup!.args[0]!.type}`);
   assert(ifCondGroup!.args[1]!.type === 'u8', `arg1 type: ${ifCondGroup!.args[1]!.type}`);
-  assert(ifCondGroup!.args[0]!.description === 'enum:Condition Group', 'enum description');
+  assert(ifCondGroup!.args[0]!.description === 'enum:ConditionGroup', 'normalized enum description');
 
   // Check vararg instruction
   const initEvent = findInstructionDef(registry, 2000, 0);

@@ -68,7 +68,7 @@
     "test:emevd-dark-script-renderer": "tsc -b ../shared . && node dist/testing/runEmevdDarkScriptRendererSmoke.js",
     "test:emevd-dark-script-compiler": "tsc -b ../shared . && node dist/testing/runDarkScriptCompilerSmoke.js",
     "test:emevd-dark-script-compiler-s14": "tsc -b ../shared . && node dist/testing/runEmevdDarkScriptCompilerSmoke.js",
-    "test:emevd-session-cache": "tsc -b ../shared . && node dist/testing/runEmevdSessionCacheSmoke.js",
+    "test:emevd-session-cache": "npm run test:emevd-full-document",
     "test:map-transaction-atomic": "tsc -b ../shared . && node dist/testing/runMapTransactionAtomicSmoke.js",
     "test:native-map-rollback": "tsc -b ../shared . && node dist/testing/runNativeMapRollbackSmoke.js",
     "test:emevd-stable-identity": "tsc -b ../shared . && node dist/testing/runEmevdStableIdentitySmoke.js",
@@ -219,7 +219,8 @@
     "test:audit-sf-27-native": "tsc -b ../shared . && node dist/testing/runAuditSf27Smoke.js --layer native",
     "test:audit-sf-28-unit": "tsc -b ../shared . && node dist/testing/runAuditSf28Smoke.js --layer unit",
     "test:audit-sf-29-unit": "tsc -b ../shared . && node dist/testing/runAuditSf29Smoke.js --layer unit",
-    "test:audit-sf-29-native": "tsc -b ../shared . && node dist/testing/runAuditSf29Smoke.js --layer native"
+    "test:audit-sf-29-native": "tsc -b ../shared . && node dist/testing/runAuditSf29Smoke.js --layer native",
+    "test:param-rag-identity-convergence": "tsc -b ../shared . && node dist/testing/runParamRagIdentityConvergenceSmoke.js"
   },
   "dependencies": {
     "@soulforge/shared": "0.0.0",

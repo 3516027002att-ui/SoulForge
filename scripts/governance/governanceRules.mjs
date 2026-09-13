@@ -20,6 +20,15 @@
  *               evidenceIds, successor }
  */
 
+import { validateRequiredValidations as validateRequiredValidationSpecs } from './requiredValidation.mjs';
+
+// requiredValidation 的结构/根 npm suite 引用规则仍属于治理语义层；独立导出
+// 让 JSON 校验入口和需要复用同一判据的工具不各自复制一份。
+export { validateRequiredValidation, normalizeRequiredValidation, formatRequiredValidation,
+  requiredValidationFreeText, rootNpmSuiteIds } from './requiredValidation.mjs';
+
+export const validateRequiredValidations = validateRequiredValidationSpecs;
+
 export const ALLOWED_SLICE_LIFECYCLES = new Set([
   'ready',
   'active',

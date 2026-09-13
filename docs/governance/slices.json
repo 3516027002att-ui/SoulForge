@@ -1023,7 +1023,15 @@
         "packages/core/src/testing/runScriptContainerLoadPreflightSmoke.ts",
         "packages/core/src/script/scriptContainerEvidence.ts"
       ],
-      "requiredValidation": "node scripts/with-local-has-game-env.mjs npm run test:script-container-load-preflight；validation-unfrozen：真实游戏内加载确认",
+      "requiredValidation": {
+        "suiteId": "test:script-container-load-preflight",
+        "args": [],
+        "env": {},
+        "manualChecks": [
+          "真实游戏内加载确认"
+        ],
+        "notes": "原流程通过 node scripts/with-local-has-game-env.mjs 注入本机环境后运行；validation-unfrozen。"
+      },
       "declaresUnfrozenValidation": true
     },
     {
@@ -1043,7 +1051,17 @@
         "scripts/verify-installer-lifecycle.mjs",
         "scripts/verify-me3-sekiro-session.mjs"
       ],
-      "requiredValidation": "SOULFORGE_INSTALLER_LIFECYCLE_RUN=1 node scripts/verify-installer-lifecycle.mjs；跨机 me3 会话 smoke",
+      "requiredValidation": {
+        "suiteId": "test:installer-lifecycle",
+        "args": [],
+        "env": {
+          "SOULFORGE_INSTALLER_LIFECYCLE_RUN": "1"
+        },
+        "manualChecks": [
+          "跨机 me3 会话 smoke"
+        ],
+        "notes": "原流程运行 scripts/verify-installer-lifecycle.mjs，并要求第二台 Windows x64 机器或干净机环境。"
+      },
       "declaresUnfrozenValidation": true
     },
     {
@@ -1067,7 +1085,52 @@
         "scripts/release-compliance-lib.mjs",
         "scripts/generate-release-compliance-manifest.mjs"
       ],
-      "requiredValidation": "npm run build；npm run exe:build；npm run release:manifest；npm run test:release-compliance-fixtures；npm run test:release-content；SOULFORGE_INSTALLER_LIFECYCLE_RUN=1 npm run test:installer-lifecycle；node scripts/verify-governance.mjs；validation-unfrozen：实际 V0.9.1 clean 源码 ZIP 与 NSIS 安装包完整性、安装包内容、安装/覆盖升级/卸载/已安装启动路径、内部文件排除、源码与产物哈希、必要许可证 notices 及 GitHub source archive exclusion audit；旧跨机与真实 Sekiro 验收仍不声称完成",
+      "requiredValidation": {
+        "steps": [
+          {
+            "suiteId": "build",
+            "args": [],
+            "env": {}
+          },
+          {
+            "suiteId": "exe:build",
+            "args": [],
+            "env": {}
+          },
+          {
+            "suiteId": "release:manifest",
+            "args": [],
+            "env": {}
+          },
+          {
+            "suiteId": "test:release-compliance-fixtures",
+            "args": [],
+            "env": {}
+          },
+          {
+            "suiteId": "test:release-content",
+            "args": [],
+            "env": {}
+          },
+          {
+            "suiteId": "test:installer-lifecycle",
+            "args": [],
+            "env": {
+              "SOULFORGE_INSTALLER_LIFECYCLE_RUN": "1"
+            }
+          },
+          {
+            "suiteId": "test:governance",
+            "args": [],
+            "env": {}
+          }
+        ],
+        "manualChecks": [
+          "validation-unfrozen：实际 V0.9.1 clean 源码 ZIP 与 NSIS 安装包完整性、安装包内容、安装/覆盖升级/卸载/已安装启动路径、内部文件排除、源码与产物哈希、必要许可证 notices 及 GitHub source archive exclusion audit",
+          "旧跨机与真实 Sekiro 验收仍不声称完成"
+        ],
+        "notes": "保留原始命令顺序；原始 node scripts/verify-governance.mjs 由当前根 suite test:governance 承担。"
+      },
       "declaresUnfrozenValidation": true
     },
     {
