@@ -147,7 +147,8 @@
         "EV-V05-TEMP-CLEANUP-SEAL-20260824",
         "EV-V05-TIER-NATIVE-SEAL-20260824",
         "EV-MAIN-MERGE-CONVERGENCE-20260824",
-        "EV-FLASH-AUDIT-REVALIDATE-20260907"
+        "EV-FLASH-AUDIT-REVALIDATE-20260907",
+        "EV-REL-V091-NSIS-SCOPE-20260913"
       ],
       "blockerRefs": [],
       "scopeItemIds": [
@@ -178,7 +179,8 @@
         "SCOPE-RELEASE",
         "SCOPE-RENDERING",
         "SCOPE-COMPLIANCE",
-        "SCOPE-MATBIN-53DE-DEFERRAL"
+        "SCOPE-MATBIN-53DE-DEFERRAL",
+        "SCOPE-V09-PUBLIC-PREVIEW"
       ],
       "openRulings": [
         "用户逐项裁定已冻结；scope target 不提升实时 authority，技术缺口由后继 Gate 与 blocker 继续失败关闭。"
@@ -389,7 +391,8 @@
         "EV-MAP-ANIM-SCALE-20260823",
         "EV-MAP-ANIM-SCALE-20260823-FINAL",
         "EV-V05-CONVERGENCE-FINAL-20260824",
-        "EV-FLASH-AUDIT-REVALIDATE-20260907"
+        "EV-FLASH-AUDIT-REVALIDATE-20260907",
+        "EV-REL-V091-NSIS-SCOPE-20260913"
       ],
       "blockerRefs": [],
       "scopeItemIds": [
@@ -490,7 +493,8 @@
         "EV-MAP-ANIM-SCALE-20260823-FINAL",
         "EV-V05-CONVERGENCE-FINAL-20260824",
         "EV-MISSION1-REVALIDATE-20260825",
-        "EV-FLASH-AUDIT-REVALIDATE-20260907"
+        "EV-FLASH-AUDIT-REVALIDATE-20260907",
+        "EV-REL-V091-NSIS-SCOPE-20260913"
       ],
       "blockerRefs": [],
       "scopeItemIds": [
@@ -517,7 +521,8 @@
       "scopeItemIds": [
         "SCOPE-SEKIRO-BUILD",
         "SCOPE-RUNTIME",
-        "SCOPE-RELEASE"
+        "SCOPE-RELEASE",
+        "SCOPE-V09-PUBLIC-PREVIEW"
       ],
       "openRulings": [
         "需完成 me3 能力探测运行闭环及 Windows 10/11 x64 NSIS 的 manifest/hash、安装、升级、卸载和干净机验证；代码签名不属于验收范围。"
@@ -580,7 +585,8 @@
         "EV-ALIGN-MATURE-WORKBENCH-20260823-01",
         "EV-V05-CONVERGENCE-FINAL-20260824",
         "EV-MAIN-MERGE-CONVERGENCE-20260824",
-        "EV-FLASH-AUDIT-REVALIDATE-20260907"
+        "EV-FLASH-AUDIT-REVALIDATE-20260907",
+        "EV-REL-V091-NSIS-SCOPE-20260913"
       ],
       "blockerRefs": [],
       "scopeItemIds": [
@@ -604,11 +610,13 @@
         "EV-REL-COMPLIANCE-02-20260803",
         "EV-SILENT-DISCARD-WRITEPATH-20260808",
         "EV-MODLOADER-BAN-REVOKE-20260818",
-        "EV-FLASH-AUDIT-REVALIDATE-20260907"
+        "EV-FLASH-AUDIT-REVALIDATE-20260907",
+        "EV-REL-V091-NSIS-SCOPE-20260913"
       ],
       "blockerRefs": [],
       "scopeItemIds": [
-        "SCOPE-COMPLIANCE"
+        "SCOPE-COMPLIANCE",
+        "SCOPE-V09-PUBLIC-PREVIEW"
       ],
       "openRulings": [
         "仅允许项目所有者内部测试；外部分发仍由 notices、再分发权利与完整发行合规失败关闭。"

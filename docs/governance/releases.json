@@ -58,7 +58,7 @@
       "frozenScopeRulingRef": null,
       "frozenEvidenceRef": null,
       "frozenFields": [],
-      "frozenFieldsNote": "V0.9 公开预发行边界已由 scope.json 的独立 scopeItem 登记，用户裁定引用为 user-ruling-2026-09-09-v09-public-prerelease-and-clean-source；本轮交付为 clean 源码 ZIP、启动 EXE/native 必需组件与 GitHub 自动源码归档，NSIS 安装包不在本轮交付；源码归档、启动路径、内部文件排除、哈希与许可证 notices 验证尚未冻结，不提升既有 V0.5/V0.6 Gate 或 authority。",
+      "frozenFieldsNote": "V0.9 发布线的 V0.9.1 公开预发行边界已由 scope.json 的独立 scopeItem 登记，用户裁定引用为 user-ruling-2026-09-13-v091-nsis-installer-public-release；本轮交付为 clean 源码 ZIP、启动 EXE/native 必需组件、NSIS x64 安装包与 GitHub 自动源码归档；源码归档、安装包内容与哈希、安装/升级/卸载/已安装启动路径、内部文件排除与许可证 notices 验证尚未冻结，不提升既有 V0.5/V0.6 Gate 或 authority。",
       "unfreezeRuling": null
     }
   ],
