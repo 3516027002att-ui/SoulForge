@@ -29,6 +29,8 @@ async function expectStale(label, mutate) {
 
 try {
   for (const path of [
+    'tsconfig.base.json',
+    'scripts/prepare-electron-sqlite-binding.mjs',
     'prompt/system.md',
     'package.json',
     'package-lock.json',
@@ -56,6 +58,8 @@ try {
 
   await expectStale('源码变化必须拒绝旧产物', () => seed('packages/core/src/index.ts', 'changed source'));
   await expectStale('Electron 产物变化必须拒绝旧清单', () => seed('apps/desktop/out/main/index.js', 'changed output'));
+  await expectStale('根 TypeScript 配置变化必须拒绝旧产物', () => seed('tsconfig.base.json', 'changed config'));
+  await expectStale('原生绑定构建输入变化必须拒绝旧产物', () => seed('scripts/prepare-electron-sqlite-binding.mjs', 'changed preparation'));
 
   console.log('agent production build manifest fixtures passed');
 } finally {

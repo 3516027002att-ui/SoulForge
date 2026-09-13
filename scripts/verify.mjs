@@ -1,33 +1,17 @@
 #!/usr/bin/env node
 /**
- * SoulForge 统一验证入口。
- *
- * 解决的问题：仓库有 117 条 npm script。agent 面对「该跑哪些」「跑完到底
- * 验证了什么」两个问题时只能靠命名猜测，而 19 个 smoke 在缺少本机资源时
- * 输出 ok:true + exit 0 的结构化跳过——退出码无法区分「通过」和「什么都
- * 没跑」。于是绿色不代表被验证过，agent 会把未验证的东西当成已验证推进。
- *
- * 本入口提供：
- * - 分层执行（governance/unit/synthetic/native/release），先快后慢；
- * - 四态结果（passed/skipped/partial/failed）+ 机器可读 JSON 摘要；
- * - 默认经 with-local-has-game-env wrapper，本机有资源就真跑，无需记命令；
- * - --require-executed：把 skipped/partial 当失败，用于「必须真跑过」的场合；
- * - --audit：核对每条 script 都已登记层级或写明排除理由，失败关闭。
- *
- * 用法：
- *   node scripts/verify.mjs                     默认跑 governance+unit
- *   node scripts/verify.mjs --tier all          全部层级
- *   node scripts/verify.mjs --tier native       只跑真实资源层
- *   node scripts/verify.mjs --filter emevd      只跑名字含 emevd 的
- *   node scripts/verify.mjs --require-executed  跳过即失败
- *   node scripts/verify.mjs --audit             只做登记审计
- *   node scripts/verify.mjs --list              只列出计划，不执行
+ * 统一验证入口：按层级、suite 或结构化切片计划执行。
+ * 同批次复用相同操作，保留 passed/skipped/partial/failed/not-attempted。
+ * --list 展示计划；--audit 校验登记；--require-executed 拒绝跳过。
+ * 参数和使用示例见根 README 的“按改动选择验证”。
  */
-import { mkdirSync, writeFileSync } from 'node:fs';
+import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { classifyScript, loadWorkspaces } from './verify/scriptGraph.mjs';
 import { EXCLUDED, TIER_BY_SCRIPT, TIER_ORDER } from './verify/tiers.mjs';
-import { OUTCOME, runSuite } from './verify/runner.mjs';
+import { OUTCOME, runPlannedSuite } from './verify/runner.mjs';
+import { planScript, summarizePlan } from './verify/commandPlan.mjs';
+import { normalizeRequiredValidation, validateRequiredValidation } from './governance/requiredValidation.mjs';
 
 const DEFAULT_TIERS = ['governance', 'unit'];
 const DEFAULT_TIMEOUT_MS = 900_000;
@@ -36,7 +20,12 @@ function parseArgs(argv) {
   const options = {
     tiers: DEFAULT_TIERS,
     filter: null,
+    slice: null,
+    suites: [],
+    exclude: [],
     requireExecuted: false,
+    requireTiers: [],
+    requireSuites: [],
     audit: false,
     list: false,
     timeoutMs: DEFAULT_TIMEOUT_MS,
@@ -46,6 +35,8 @@ function parseArgs(argv) {
   for (let index = 0; index < argv.length; index += 1) {
     const arg = argv[index];
     const next = () => argv[index + 1];
+    if (['--tier', '--slice', '--suite', '--filter', '--exclude', '--require-tier', '--require-suite', '--timeout-ms', '--json-out'].includes(arg)
+      && (!next() || next().startsWith('--'))) return { error: `${arg} 缺少值。` };
     switch (arg) {
       case '--tier': {
         const value = next();
@@ -55,6 +46,18 @@ function parseArgs(argv) {
       }
       case '--filter':
         options.filter = next();
+        index += 1;
+        break;
+      case '--slice':
+        options.slice = next();
+        index += 1;
+        break;
+      case '--suite':
+        options.suites.push(...next().split(',').map((part) => part.trim()));
+        index += 1;
+        break;
+      case '--exclude':
+        options.exclude.push(...next().split(',').map((part) => part.trim()).filter(Boolean));
         index += 1;
         break;
       case '--timeout-ms':
@@ -67,6 +70,14 @@ function parseArgs(argv) {
         break;
       case '--require-executed':
         options.requireExecuted = true;
+        break;
+      case '--require-tier':
+        options.requireTiers.push(...next().split(','));
+        index += 1;
+        break;
+      case '--require-suite':
+        options.requireSuites.push(...next().split(','));
+        index += 1;
         break;
       case '--no-bail':
         options.bail = false;
@@ -81,12 +92,18 @@ function parseArgs(argv) {
         return { error: `未知参数：${arg}` };
     }
   }
-  const unknownTiers = options.tiers.filter((tier) => !TIER_ORDER.includes(tier));
+  const unknownTiers = [...options.tiers, ...options.requireTiers].filter((tier) => !TIER_ORDER.includes(tier));
   if (unknownTiers.length > 0) {
     return { error: `未知层级：${unknownTiers.join(', ')}（可选 ${TIER_ORDER.join('/')}/all）` };
   }
   if (!Number.isInteger(options.timeoutMs) || options.timeoutMs <= 0) {
     return { error: '--timeout-ms 必须是正整数毫秒。' };
+  }
+  if (options.slice && (argv.includes('--tier') || options.suites.length || options.filter || options.exclude.length || options.audit)) {
+    return { error: '--slice 按有序 requiredValidation 选取，不能与 --tier/--filter/--exclude/--audit 混用。' };
+  }
+  if (options.suites.length && (argv.includes('--tier') || options.filter || options.exclude.length || options.audit)) {
+    return { error: '--suite 按给定顺序选取，不能与 --tier/--filter/--exclude/--audit 混用。' };
   }
   return { options };
 }
@@ -207,6 +224,12 @@ if (error) {
 const repoRoot = process.cwd();
 const workspaces = loadWorkspaces(repoRoot);
 const auditFindings = auditRegistration(workspaces);
+for (const name of [...options.suites, ...options.exclude, ...options.requireSuites]) {
+  if (!TIER_BY_SCRIPT[name]) {
+    console.error(JSON.stringify({ ok: false, code: 'VERIFY_ARGUMENT_INVALID', message: `未登记套件：${name}` }));
+    process.exit(2);
+  }
+}
 
 if (options.audit) {
   const ok = auditFindings.length === 0;
@@ -236,25 +259,61 @@ if (auditFindings.length > 0) {
 }
 
 const plan = [];
-for (const tier of TIER_ORDER) {
+function addSuite(name, tier, invocation = {}) {
+  try {
+    const classification = classifyScript(repoRoot, workspaces, name);
+    plan.push({ scriptName: name, tier, requirements: classification.requirements,
+      steps: planScript(repoRoot, workspaces, name, invocation) });
+  } catch (error) {
+    console.error(JSON.stringify({ ok: false, code: 'VERIFY_PLAN_INVALID', scriptName: name, message: error.message }));
+    process.exit(1);
+  }
+}
+let sliceValidation = null;
+if (options.slice) {
+  const slice = JSON.parse(readFileSync(resolve(repoRoot, 'docs/governance/slices.json'), 'utf8'))
+    .slices.find((item) => item.sliceId === options.slice);
+  const findings = slice ? validateRequiredValidation(slice.requiredValidation, { rootPackage: { scripts: workspaces.rootScripts } }) : [];
+  sliceValidation = slice ? normalizeRequiredValidation(slice.requiredValidation) : null;
+  if (!sliceValidation || findings.length || sliceValidation.kind !== 'structured') {
+    console.error(JSON.stringify({ ok: false, code: 'VERIFY_SLICE_PLAN_UNAVAILABLE', sliceId: options.slice,
+      message: '切片不存在或尚未提供有效的结构化 requiredValidation；旧自由文本不会被当作 shell 执行。', findings }));
+    process.exit(1);
+  }
+  for (const step of sliceValidation.steps) {
+    if (['verify', 'verify:all', 'verify:list', 'gov', 'gov:seal', 'handoff:project'].includes(step.suiteId)) {
+      console.error(JSON.stringify({ ok: false, code: 'VERIFY_SLICE_PLAN_UNSAFE', suiteId: step.suiteId }));
+      process.exit(1);
+    }
+    addSuite(step.suiteId, TIER_BY_SCRIPT[step.suiteId] ?? 'slice-prerequisite', step);
+  }
+}
+for (const name of options.suites) {
+  addSuite(name, TIER_BY_SCRIPT[name]);
+}
+for (const tier of options.slice || options.suites.length ? [] : TIER_ORDER) {
   if (!options.tiers.includes(tier)) continue;
   const names = Object.keys(TIER_BY_SCRIPT)
     .filter((name) => TIER_BY_SCRIPT[name] === tier)
     .filter((name) => (options.filter ? name.includes(options.filter) : true))
+    .filter((name) => !options.exclude.includes(name))
     .sort();
   for (const name of names) {
-    const classification = classifyScript(repoRoot, workspaces, name);
-    plan.push({ scriptName: name, tier, requirements: classification.requirements });
+    addSuite(name, tier);
   }
 }
+const selectedTiers = [...new Set(plan.map((entry) => entry.tier))];
 
 if (options.list) {
   console.log(JSON.stringify({
     ok: true,
     mode: 'list',
-    tiers: options.tiers,
+    tiers: selectedTiers,
     filter: options.filter,
+    excluded: options.exclude,
     suiteCount: plan.length,
+    ...(options.slice ? { sliceId: options.slice, manualChecks: sliceValidation.manualChecks, notes: sliceValidation.notes } : {}),
+    scheduling: summarizePlan(plan),
     suites: plan
   }, null, 2));
   process.exit(0);
@@ -272,22 +331,25 @@ if (plan.length === 0) {
 }
 
 const results = [];
+const operationCache = new Map();
 let bailed = false;
 for (const entry of plan) {
   if (bailed) {
-    results.push({ ...entry, outcome: OUTCOME.NOT_ATTEMPTED, durationMs: 0, skippedLegs: [] });
+    const { steps, ...unattempted } = entry;
+    results.push({ ...unattempted, outcome: OUTCOME.NOT_ATTEMPTED, durationMs: 0, skippedLegs: [] });
     // 终端逐条输出是人最先看到的地方：这里必须显式说「没跑」，否则被 bail 掩掉的
     // 条目在屏幕上完全不出现，读者会以为本层只有前几条。
     console.error(`SKIPPED-BY-BAIL [${entry.tier}] ${entry.scriptName} (未执行)`);
     continue;
   }
-  const result = await runSuite({
+  const result = await runPlannedSuite({
     repoRoot,
-    scriptName: entry.scriptName,
-    timeoutMs: options.timeoutMs
+    entry,
+    timeoutMs: options.timeoutMs,
+    cache: operationCache
   });
   const treatedAsFailure = result.outcome === OUTCOME.FAILED
-    || (options.requireExecuted
+    || ((options.requireExecuted || options.requireTiers.includes(entry.tier) || options.requireSuites.includes(entry.scriptName))
       && (result.outcome === OUTCOME.SKIPPED || result.outcome === OUTCOME.PARTIAL));
 
   results.push({
@@ -299,6 +361,7 @@ for (const entry of plan) {
     exitCode: result.exitCode,
     durationMs: result.durationMs,
     skippedLegs: result.skippedLegs,
+    steps: result.steps,
     ...(result.timedOut ? { timedOut: true } : {}),
     ...(result.spawnError ? { spawnError: result.spawnError } : {}),
     ...(treatedAsFailure
@@ -337,15 +400,26 @@ const bailNote = notAttempted.length > 0
 const summary = {
   ok,
   mode: 'run',
+  ...(options.slice ? { sliceId: options.slice, manualChecks: sliceValidation.manualChecks,
+    sliceValidationStatus: sliceValidation.manualChecks.length ? 'manual-pending' : 'automated-results-only',
+    notes: sliceValidation.notes } : {}),
   message: (ok
-    ? `${counts.passed} 条套件真实执行并通过`
+    ? `${counts.passed} 条套件由本次执行结果覆盖并通过（相同操作的复用见 steps）`
       + (counts.skipped > 0 || counts.partial > 0
         ? `；${counts.skipped} 条整体跳过、${counts.partial} 条部分跳过（缺本机资源，不构成 native 完成声明）`
         : '')
     : `${failures.length} 条套件失败`) + bailNote,
-  tiers: options.tiers,
+  tiers: selectedTiers,
   filter: options.filter,
+  excluded: options.exclude,
+  scheduling: {
+    ...summarizePlan(plan),
+    executedOperations: results.flatMap((r) => r.steps ?? []).filter((s) => s.execution === 'executed').length,
+    reusedOperations: results.flatMap((r) => r.steps ?? []).filter((s) => s.execution === 'reused').length
+  },
   requireExecuted: options.requireExecuted,
+  requireTiers: options.requireTiers,
+  requireSuites: options.requireSuites,
   counts,
   // 明确回答「这次到底验证了什么」：只有 passed 是真正执行且通过的。
   executedAndPassed: results.filter((r) => r.outcome === OUTCOME.PASSED).map((r) => r.scriptName),

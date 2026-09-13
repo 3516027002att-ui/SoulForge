@@ -68,12 +68,12 @@ const RULED_FAMILY = Object.freeze({
     'readEditorDocumentContent', 'applyEditorMutation', 'closeEditorDocument',
   ],
   'format-read-primitive': [
-    'readFmgPage', 'readFlverTextureSlots', 'readContainerParamRowIndex',
+    'readFmgPage', 'readFlverTextureSlots',
   ],
 });
 
 /**
- * 已裁定但尚未接线的暴露方法。**2026-08-14 接线 6 项后剩 9 条。**
+ * 已裁定但尚未接线的暴露方法。**2026-08-14 接线 6 项后剩 8 条。**
  *
  * 历史：2026-08-08 曾清零（57/57 全引用，EV-T14-WIRING-COMPLETE）；08-10 前端施工
  * 期间 write 能力切片把 IPC 入口暴露进 preload，但各 write 切片 Allowed 不含
@@ -83,7 +83,7 @@ const RULED_FAMILY = Object.freeze({
  * 2026-08-14：format-write-ui 5 条 + agent-resource-reference 1 条**已全部接线**
  * （Material 属性编辑 / ESD transition / TAE event / FXR field / TPF texture
  * replace / Agent 资源引用，各工作台经 getRendererBridge 直连 bridge.commit*），
- * 从本表与族划分一并删除——接线即收缩，不留永久豁免。剩余 9 条属
+ * 从本表与族划分一并删除——接线即收缩，不留永久豁免。剩余 8 条属
  * editor-document-facade 与 format-read-primitive 两族，均需未来切片收敛。
  *
  * 判据 5 要求本表与 RULED_FAMILY 双向一致：一条方法在其中之一出现而另一处没有，
@@ -114,9 +114,6 @@ const RULED_NOT_YET_WIRED = Object.freeze({
   readFlverTextureSlots:
     'FLVER 纹理槽读取原语，main handler 存在，Model 工作台未消费。'
     + '接线前置：未来 Model 工作台的纹理槽检查器。',
-  readContainerParamRowIndex:
-    '容器 param 行索引查询原语；ParamWorkbench 用 readContainerParamPage + '
-    + 'applyContainerParamFieldMutation，未消费行索引。接线前置：未来行级导航。',
 });
 
 const WIRING_PRIORITY = Object.freeze([
@@ -168,12 +165,14 @@ if (exposed.length === 0) {
   }, 1);
 }
 
-let rendererSource;
+let rendererSources;
 try {
   const files = execSync('git ls-files apps/desktop/src/renderer', { cwd: root, encoding: 'utf8' })
     .trim().split('\n').filter((line) => line.length > 0);
   if (files.length === 0) throw new Error('renderer 文件列表为空');
-  rendererSource = files.map((file) => readFileSync(join(root, file), 'utf8')).join('\n');
+  // 每个文件独立剥离，避免一个文件内的引号/模板字面量状态跨文件吞掉后续
+  // renderer。源码文本仍用于同一套词法剥离规则，边界只负责防止误入状态泄漏。
+  rendererSources = files.map((file) => readFileSync(join(root, file), 'utf8'));
 } catch (error) {
   report({
     ok: false, gate: LABEL, status: 'failed', code: 'RENDERER_SOURCE_UNREADABLE',
@@ -276,7 +275,7 @@ function stripCommentsAndStrings(source) {
   return out;
 }
 
-const rendererCode = stripCommentsAndStrings(rendererSource);
+const rendererCode = rendererSources.map((source) => stripCommentsAndStrings(source)).join('\n');
 const referenced = new Set(
   exposed.filter((name) => new RegExp(`\\b${name}\\b`).test(rendererCode))
 );

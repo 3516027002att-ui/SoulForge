@@ -1,267 +1,334 @@
 #!/usr/bin/env node
 /**
- * §18.5 V0.6 延期承接索引一致性门禁。
+ * §18.5 延期承接索引投影校验。
  *
- * §18.5 是派生索引，不是第二范围口径。权威来源始终是：
- *   - docs/governance/scope.json：proposedSupport=deferred + deferredToRelease
- *   - §18.3 Gate 覆盖矩阵：gateState=deferred + applicability=deferred-v0.6
- *   - §13.1 执行面板：lifecycle=deferred
- *   - packages/shared/src/editor-protocol.ts：DEFERRED_PREVIEW_EDITOR_KINDS（若有）
- *
- * 本脚本逐项双向比对索引与权威记录。缺失、多写、目标版本不符或权威侧
- * 变化后未同步索引，全部失败关闭 —— 否则索引会独立漂移成假口径。
+ * scope.json、gates.json、slices.json 是唯一机器可读权威；§18.5 只是一份
+ * 人读投影。这里不固定 V0.6，也不把其它 handoff 表、editor protocol 或
+ * 历史文字当成延期状态来源。旧入口 `node scripts/verify-v06-deferral-index.mjs`
+ * 仍然有效，并额外支持 `--input=` 与 `--governance-root=` 供 fixture 使用。
  */
 
 import { readFileSync } from 'node:fs';
+import {
+  collectDeferredAuthority,
+  extractSection,
+  GATES_AUTHORITY,
+  loadGovernanceSources,
+  parseGateRows,
+  parsePreviewRows,
+  parseScopeRows,
+  parseSliceRows,
+  SCOPE_AUTHORITY,
+  SLICES_AUTHORITY,
+  targetVersionsOf,
+  VERSION_PATTERN
+} from './governance/deferrals.mjs';
 
 const HANDOFF = 'docs/V0_5_IMPLEMENTATION_HANDOFF.md';
-const SCOPE_AUTHORITY = 'docs/governance/scope.json';
-const EDITOR_PROTOCOL = 'packages/shared/src/editor-protocol.ts';
-const TARGET_RELEASE = 'V0.6';
+const root = process.cwd();
+const cliArgs = process.argv.slice(2);
+const inputArgs = cliArgs.filter((arg) => arg.startsWith('--input='));
+const governanceArgs = cliArgs.filter((arg) => arg.startsWith('--governance-root='));
+const handoffInput = inputArgs.length === 1
+  ? inputArgs[0].slice('--input='.length)
+  : HANDOFF;
+const governanceRoot = governanceArgs.length === 1
+  ? governanceArgs[0].slice('--governance-root='.length)
+  : null;
 
 const findings = [];
-const add = (code, where, message) => findings.push({ severity: 'error', code, where, message });
+const add = (code, where, message, details = undefined) => findings.push({
+  severity: 'error',
+  code,
+  where,
+  message,
+  ...(details === undefined ? {} : { details })
+});
 
-function extractSection(markdown, sectionId) {
-  const pattern = new RegExp(
-    `\\n#{3,4}\\s*${sectionId.replace('.', '\\.')}\\s[^\\n]*\\n([\\s\\S]*?)(?=\\n#{2,4}\\s|$)`
+const emptySources = {
+  paths: {
+    scope: governanceRoot ?? SCOPE_AUTHORITY,
+    gates: governanceRoot ?? GATES_AUTHORITY,
+    slices: governanceRoot ?? SLICES_AUTHORITY
+  },
+  scopeData: null,
+  gatesData: null,
+  slicesData: null
+};
+
+let sources = emptySources;
+try {
+  sources = loadGovernanceSources(root, governanceRoot);
+} catch (error) {
+  add(
+    'GOVERNANCE_AUTHORITY_UNREADABLE',
+    governanceRoot ?? 'docs/governance',
+    `延期权威 JSON 读取失败：${error.message}`
   );
-  return pattern.exec(markdown)?.[1] ?? null;
 }
 
-function sortedList(values) {
-  return [...values].sort().join(', ') || '(空)';
+let markdown = null;
+try {
+  markdown = readFileSync(handoffInput, 'utf8');
+} catch (error) {
+  add('HANDOFF_INPUT_UNREADABLE', handoffInput, `交接书投影读取失败：${error.message}`);
 }
 
-/** 双向集合比对：缺失与多写都是错误，方向不同诊断不同。 */
-/**
- * 每一路对账的规模。两侧皆空时 compareSets 恒真——那不是「校验通过」，
- * 而是「当前没有这类记录可校验」。两者必须在输出里区分开。
- *
- * 实测：source 2（延期 Gate）与 source 3（延期切片）两侧皆为 0，因为
- * gates.json 现存 gateState 只有 passed/open、slices.json 的 lifecycle 只有
- * completed/superseded/ready —— deferred 已不在现存枚举内。而门禁把这两路
- * 一并列进 checkedSources 并声明「与全部权威记录逐项一致」，读者会以为它们
- * 被逐项校验过。这是记忆库里「承接后 fixture 靶标会失去前提」的复发。
- */
+const indexSection = markdown === null ? null : extractSection(markdown, '18.5');
+if (indexSection === null) {
+  add(
+    'DEFERRAL_INDEX_SECTION_MISSING',
+    `${handoffInput} §18.5`,
+    '未找到 §18.5 延期承接索引投影。'
+  );
+}
+
+const scopeItems = Array.isArray(sources.scopeData?.scopeItems)
+  ? sources.scopeData.scopeItems
+  : null;
+const gates = Array.isArray(sources.gatesData?.gates) ? sources.gatesData.gates : null;
+const slices = Array.isArray(sources.slicesData?.slices) ? sources.slicesData.slices : null;
+if (scopeItems === null) {
+  add('SCOPE_AUTHORITY_SHAPE_INVALID', SCOPE_AUTHORITY, 'scope.json 缺少 scopeItems 数组。');
+}
+if (gates === null) {
+  add('GATES_AUTHORITY_SHAPE_INVALID', GATES_AUTHORITY, 'gates.json 缺少 gates 数组。');
+}
+if (slices === null) {
+  add('SLICES_AUTHORITY_SHAPE_INVALID', SLICES_AUTHORITY, 'slices.json 缺少 slices 数组。');
+}
+
+const authority = collectDeferredAuthority(sources);
+const authorityScopeIds = new Set(authority.scopeItems.map((item) => item.id));
+const authoritySliceIds = new Set(authority.slices.map((slice) => slice.id));
+
+function checkUniqueIds(entries, label, where) {
+  const seen = new Set();
+  for (const entry of entries) {
+    if (typeof entry.id !== 'string' || entry.id.length === 0) {
+      add('DEFERRED_AUTHORITY_ID_INVALID', where, `${label} 的延期记录缺少有效 ID。`);
+      continue;
+    }
+    if (seen.has(entry.id)) {
+      add('DEFERRED_AUTHORITY_ID_DUPLICATE', `${where} ${entry.id}`, `${label} 的延期 ID 重复。`);
+    }
+    seen.add(entry.id);
+  }
+}
+
+function checkTarget(entry, label, where) {
+  if (typeof entry.targetRelease !== 'string' || !VERSION_PATTERN.test(entry.targetRelease)) {
+    add(
+      'DEFERRED_TARGET_RELEASE_INVALID',
+      `${where} ${entry.id ?? '(unknown)'}`,
+      `${label} 必须声明形如 V<major>.<minor> 的 deferredToRelease/targetRelease，实际为 ${entry.targetRelease ?? '(空)' }。`
+    );
+  }
+}
+
+checkUniqueIds(authority.scopeItems, '范围条目', SCOPE_AUTHORITY);
+for (const item of authority.scopeItems) {
+  checkTarget(item, '延期范围条目', SCOPE_AUTHORITY);
+  if (!Array.isArray(item.operations) || item.operations.length !== 0) {
+    add(
+      'DEFERRED_SCOPE_OPERATIONS_NONEMPTY',
+      `${SCOPE_AUTHORITY} ${item.id}`,
+      'deferred 范围条目的 operations 必须为空。'
+    );
+  }
+  if (!Array.isArray(item.resumeRequires)
+    || item.resumeRequires.length === 0
+    || item.resumeRequires.some((requirement) => typeof requirement !== 'string' || requirement.trim().length === 0)) {
+    add(
+      'DEFERRED_RESUME_REQUIREMENTS_MISSING',
+      `${SCOPE_AUTHORITY} ${item.id}`,
+      '每个 deferred 范围条目必须保留至少一个非空 resumeRequires。'
+    );
+  }
+}
+
+checkUniqueIds(authority.gates, 'Gate', GATES_AUTHORITY);
+for (const gate of authority.gates) {
+  checkTarget(gate, '延期 Gate', GATES_AUTHORITY);
+  if (gate.gateState !== 'deferred' || gate.applicability !== 'deferred') {
+    add(
+      'DEFERRED_GATE_STATE_PAIR_INVALID',
+      `${GATES_AUTHORITY} ${gate.id}`,
+      '延期 Gate 必须同时使用 gateState=deferred 与 applicability=deferred。'
+    );
+  }
+  if (Array.isArray(gate.scopeItemIds)) {
+    for (const id of gate.scopeItemIds) {
+      if (!authorityScopeIds.has(id)) {
+        add(
+          'DEFERRED_GATE_SCOPE_NOT_DEFERRED',
+          `${GATES_AUTHORITY} ${gate.id}`,
+          `延期 Gate 引用了非 deferred 范围条目：${id}。`
+        );
+      }
+    }
+  }
+  if (Array.isArray(gate.sliceRefs)) {
+    for (const id of gate.sliceRefs) {
+      if (!authoritySliceIds.has(id)) {
+        add(
+          'DEFERRED_GATE_SLICE_NOT_DEFERRED',
+          `${GATES_AUTHORITY} ${gate.id}`,
+          `延期 Gate 引用了非 deferred 切片：${id}。`
+        );
+      }
+    }
+  }
+}
+
+checkUniqueIds(authority.slices, '切片', SLICES_AUTHORITY);
+for (const slice of authority.slices) checkTarget(slice, '延期切片', SLICES_AUTHORITY);
+checkUniqueIds(authority.previews, '延期只读预览编辑器', SCOPE_AUTHORITY);
+for (const preview of authority.previews) checkTarget(preview, '延期只读预览编辑器', SCOPE_AUTHORITY);
+
 const reconciliationScale = [];
-
-function compareSets(label, where, authoritative, indexed) {
+function compareIds(label, where, authoritativeEntries, indexedEntries) {
+  const authoritative = new Set(authoritativeEntries.map((entry) => entry.id));
+  const indexed = new Set(indexedEntries.keys());
+  const missing = [...authoritative].filter((id) => !indexed.has(id)).sort();
+  const extra = [...indexed].filter((id) => !authoritative.has(id)).sort();
+  const vacuous = authoritative.size === 0 && indexed.size === 0;
   reconciliationScale.push({
     label,
     authoritative: authoritative.size,
     indexed: indexed.size,
-    vacuous: authoritative.size === 0 && indexed.size === 0
+    vacuous
   });
-  const missing = [...authoritative].filter((value) => !indexed.has(value));
-  const extra = [...indexed].filter((value) => !authoritative.has(value));
   if (missing.length > 0) {
     add(
       'DEFERRAL_INDEX_MISSING_ENTRY',
       where,
-      `§18.5 索引缺少${label}：${sortedList(missing)}；权威记录已延期但索引未列出。`
+      `§18.5 索引缺少${label}：${missing.join(', ')}。`
     );
   }
   if (extra.length > 0) {
     add(
       'DEFERRAL_INDEX_EXTRA_ENTRY',
       where,
-      `§18.5 索引多列了${label}：${sortedList(extra)}；权威记录中它们并非 deferred。`
+      `§18.5 索引多列了${label}：${extra.join(', ')}。`
     );
   }
 }
 
-const markdown = readFileSync(HANDOFF, 'utf8');
-const indexSection = extractSection(markdown, '18.5');
-if (!indexSection) {
-  add('DEFERRAL_INDEX_SECTION_MISSING', `${HANDOFF} §18.5`, '未找到 §18.5 V0.6 延期承接索引。');
-  process.stdout.write(`${JSON.stringify({ ok: false, findings }, null, 2)}\n`);
-  process.exit(1);
-}
-
-// 索引必须自述为派生，不得被当作独立 milestone 范围文档。
-if (!indexSection.includes('派生索引')) {
-  add(
-    'DEFERRAL_INDEX_NOT_MARKED_DERIVED',
-    `${HANDOFF} §18.5`,
-    '§18.5 必须显式声明自身为派生索引，否则会被读成第二范围口径。'
-  );
-}
-
-// ---- 权威来源 1：docs/governance/scope.json ----
-//
-// 此前读的是 §18.2.1 的内嵌 JSON 块，用的还是通用 fence 正则
-// （/```json\s*(\{[\s\S]*?"scopeItems"...)/），既不含投影 marker 字面量，
-// 也就不在 verify-handoff-projection-fixtures 的解析方登记表里——那份登记表
-// 按 marker 判定，对这里完全是盲的。
-//
-// 那个块是 scope.json 的逐字复制（1467 行，实测 27/27 条与权威分叉），现已退成
-// 人读摘要表。直读权威后这处盲区消失：延期口径只有一个来源。
-{
-  let scope;
-  try {
-    scope = JSON.parse(readFileSync(SCOPE_AUTHORITY, 'utf8'));
-  } catch (error) {
-    add('SCOPE_AUTHORITY_UNPARSEABLE', SCOPE_AUTHORITY, `范围权威读取失败：${error.message}`);
-  }
-
-  if (scope) {
-    const proposal = scope;
-    const deferredItems = (proposal.scopeItems ?? []).filter(
-      (item) => item?.proposedSupport === 'deferred'
-    );
-    const authoritativeIds = new Set(deferredItems.map((item) => item.scopeItemId));
-    const indexedIds = new Set(
-      [...indexSection.matchAll(/^\|\s*`(SCOPE-[A-Z0-9-]+)`\s*\|/gm)].map((match) => match[1])
-    );
-    compareSets('范围条目', `${HANDOFF} §18.5`, authoritativeIds, indexedIds);
-
-    // 每个条目的目标版本与裁定 authority 必须与权威记录逐项一致。
-    for (const item of deferredItems) {
-      const row = new RegExp(
-        `^\\|\\s*\`${item.scopeItemId}\`\\s*\\|([^|]*)\\|([^|]*)\\|`,
-        'm'
-      ).exec(indexSection);
-      if (!row) continue;
-      const [, releaseCell, authorityCell] = row;
-      if (!releaseCell.includes(item.deferredToRelease)) {
-        add(
-          'DEFERRAL_INDEX_RELEASE_MISMATCH',
-          `${HANDOFF} §18.5 ${item.scopeItemId}`,
-          `索引目标版本与权威记录不一致：索引="${releaseCell.trim()}"、`
-            + `权威=${item.deferredToRelease}。`
-        );
-      }
-      if (item.authorityAtRuling && !authorityCell.includes(item.authorityAtRuling)) {
-        add(
-          'DEFERRAL_INDEX_AUTHORITY_MISMATCH',
-          `${HANDOFF} §18.5 ${item.scopeItemId}`,
-          `索引裁定 authority 与权威记录不一致：索引="${authorityCell.trim()}"、`
-            + `权威=${item.authorityAtRuling}。`
-        );
-      }
-      // 延期条目必须无操作；索引不得暗示本版仍有可用操作。
-      if (Array.isArray(item.operations) && item.operations.length > 0) {
-        add(
-          'DEFERRAL_INDEX_ITEM_CLAIMS_OPERATIONS',
-          `${SCOPE_AUTHORITY} ${item.scopeItemId}`,
-          `deferred 条目必须 operations=[]，实际为 ${JSON.stringify(item.operations)}。`
-        );
-      }
-    }
-
-    if (deferredItems.length > 0 && !indexSection.includes(`${deferredItems.length} 个范围条目`)) {
+function compareProjectedTargets(label, where, authoritativeEntries, indexedEntries) {
+  for (const entry of authoritativeEntries) {
+    const row = indexedEntries.get(entry.id);
+    if (!row) continue;
+    if (!row.targetVersions.includes(entry.targetRelease)) {
       add(
-        'DEFERRAL_INDEX_COUNT_MISMATCH',
-        `${HANDOFF} §18.5`,
-        `索引未声明与权威一致的条目总数（权威为 ${deferredItems.length} 个）。`
+        'DEFERRAL_INDEX_TARGET_MISMATCH',
+        `${where} ${entry.id}`,
+        `${label} 投影目标版本不一致：索引=${row.targetVersions.join(', ') || '(未声明)'}，权威=${entry.targetRelease}。`
       );
     }
   }
 }
 
-// ---- 权威来源 2：§18.3 Gate 覆盖矩阵 ----
-const gateSection = extractSection(markdown, '18.3');
-if (!gateSection) {
-  add('GATE_MATRIX_MISSING', `${HANDOFF} §18.3`, '未找到 Gate 覆盖矩阵。');
-} else {
-  const authoritativeGates = new Set(
-    [...gateSection.matchAll(
-      /^\|\s*`(REL-[A-Z-]+)`\s*\|[^|]*\|[^|]*\|\s*`deferred`\s*\|\s*`deferred-v0\.6`\s*\|/gm
-    )].map((match) => match[1])
-  );
-  // 只取到第一个句号：清单是首句，后续句子用于说明未延期 Gate 为何保持 open，
-  // 若把整行纳入比对，那些解释性引用会被误判成索引条目。
-  const gateLine = /延期 Gate[：:]([^\n。]*)/.exec(indexSection)?.[1] ?? '';
-  const indexedGates = new Set(
-    [...gateLine.matchAll(/`(REL-[A-Z-]+)`/g)].map((match) => match[1])
-  );
-  compareSets('延期 Gate', `${HANDOFF} §18.5`, authoritativeGates, indexedGates);
-}
+const scopeProjection = parseScopeRows(indexSection);
+const gateProjection = parseGateRows(indexSection);
+const sliceProjection = parseSliceRows(indexSection);
+const previewProjection = parsePreviewRows(indexSection);
 
-// ---- 权威来源 3：§13.1 执行面板 ----
-const sliceSection = extractSection(markdown, '13.1');
-if (!sliceSection) {
-  add('SLICE_TABLE_MISSING', `${HANDOFF} §13.1`, '未找到执行面板。');
-} else {
-  const authoritativeSlices = new Set(
-    [...sliceSection.matchAll(/^\|\s*`(W-[A-Z0-9-]+)`\s*\|\s*`deferred`\s*\|/gm)]
-      .map((match) => match[1])
-  );
-  const sliceLine = /延期切片[：:]([^\n。]*)/.exec(indexSection)?.[1] ?? '';
-  const indexedSlices = new Set(
-    [...sliceLine.matchAll(/`(W-[A-Z0-9-]+)`/g)].map((match) => match[1])
-  );
-  compareSets('延期切片', `${HANDOFF} §18.5`, authoritativeSlices, indexedSlices);
-}
-
-// ---- 权威来源 4：shared 延期预览编辑器清单 ----
-const protocolSource = readFileSync(EDITOR_PROTOCOL, 'utf8');
-const kindsBlock = /DEFERRED_PREVIEW_EDITOR_KINDS\s*=\s*\[([\s\S]*?)\]/.exec(protocolSource);
-if (!kindsBlock) {
-  add(
-    'PREVIEW_EDITOR_LIST_MISSING',
-    EDITOR_PROTOCOL,
-    '未找到 DEFERRED_PREVIEW_EDITOR_KINDS 清单。'
-  );
-} else {
-  const authoritativeKinds = new Set(
-    [...kindsBlock[1].matchAll(/'([a-z0-9_]+)'/g)].map((match) => match[1])
-  );
-  const previewLine = /延期只读预览编辑器[：:]([^\n。]*)/.exec(indexSection)?.[1] ?? '';
-  const indexedKinds = new Set(
-    [...previewLine.matchAll(/`([a-z0-9_]+)`/g)].map((match) => match[1])
-  );
-  compareSets('延期预览编辑器', `${HANDOFF} §18.5`, authoritativeKinds, indexedKinds);
-
-  const releaseConstant = /DEFERRED_PREVIEW_TARGET_RELEASE\s*=\s*'([^']+)'/.exec(protocolSource)?.[1];
-  // 过渡期可以没有延期预览编辑器；此时旧版 target-release 常量也不再是
-  // 必需的治理输入。若未来重新登记预览编辑器，再恢复目标版本校验。
-  if (authoritativeKinds.size > 0 && releaseConstant !== TARGET_RELEASE) {
+compareIds('范围条目', `${handoffInput} §18.5`, authority.scopeItems, scopeProjection.rows);
+compareProjectedTargets('范围条目', `${handoffInput} §18.5`, authority.scopeItems, scopeProjection.rows);
+for (const item of authority.scopeItems) {
+  const row = scopeProjection.rows.get(item.id);
+  if (!row) continue;
+  if (typeof item.authorityAtRuling === 'string' && !row.authority.includes(item.authorityAtRuling)) {
     add(
-      'PREVIEW_TARGET_RELEASE_MISMATCH',
-      EDITOR_PROTOCOL,
-      `DEFERRED_PREVIEW_TARGET_RELEASE 必须为 ${TARGET_RELEASE}，实际为 ${releaseConstant ?? '(未找到)'}。`
+      'DEFERRAL_INDEX_AUTHORITY_MISMATCH',
+      `${handoffInput} §18.5 ${item.id}`,
+      `索引裁定 authority 与权威记录不一致：索引=${row.authority || '(空)'}，权威=${item.authorityAtRuling}。`
+    );
+  }
+  if (typeof item.deferredTrack === 'string' && !row.track.includes(item.deferredTrack)) {
+    add(
+      'DEFERRAL_INDEX_TRACK_MISMATCH',
+      `${handoffInput} §18.5 ${item.id}`,
+      `索引归属线与权威记录不一致：索引=${row.track || '(空)'}，权威=${item.deferredTrack}。`
+    );
+  }
+}
+if (scopeProjection.duplicates.length > 0) {
+  add(
+    'DEFERRAL_INDEX_DUPLICATE_ENTRY',
+    `${handoffInput} §18.5`,
+    `范围条目在投影中重复：${[...new Set(scopeProjection.duplicates)].join(', ')}。`
+  );
+}
+
+compareIds('延期 Gate', `${handoffInput} §18.5`, authority.gates, gateProjection.rows);
+compareProjectedTargets('延期 Gate', `${handoffInput} §18.5`, authority.gates, gateProjection.rows);
+compareIds('延期切片', `${handoffInput} §18.5`, authority.slices, sliceProjection.rows);
+compareProjectedTargets('延期切片', `${handoffInput} §18.5`, authority.slices, sliceProjection.rows);
+compareIds('延期只读预览编辑器', `${handoffInput} §18.5`, authority.previews, previewProjection.rows);
+compareProjectedTargets('延期只读预览编辑器', `${handoffInput} §18.5`, authority.previews, previewProjection.rows);
+for (const [label, projection] of [
+  ['延期 Gate', gateProjection],
+  ['延期切片', sliceProjection],
+  ['延期只读预览编辑器', previewProjection]
+]) {
+  if (projection.duplicates.length > 0) {
+    add(
+      'DEFERRAL_INDEX_DUPLICATE_ENTRY',
+      `${handoffInput} §18.5`,
+      `${label} 在投影中重复：${[...new Set(projection.duplicates)].join(', ')}。`
     );
   }
 }
 
-// 索引必须保留"延期 != 完成"与恢复须重新验证的边界，否则会被读成已交付承诺。
-if (!/延期不清偿技术缺口/.test(indexSection)) {
-  add(
-    'DEFERRAL_INDEX_MISSING_NONCLAIM',
-    `${HANDOFF} §18.5`,
-    '§18.5 必须保留"延期不清偿技术缺口"的非声明，避免被读成能力承诺。'
-  );
-}
-if (!/必须重跑/.test(indexSection)) {
-  add(
-    'DEFERRAL_INDEX_MISSING_REVERIFY_RULE',
-    `${HANDOFF} §18.5`,
-    '§18.5 必须写明延期期间保留的历史验证记录在恢复后必须重跑。'
-  );
+const allTargets = targetVersionsOf(authority);
+if (markdown !== null) {
+  const heading = /(?:^|\n)#{3,4}\s*18\.5\s*([^\n]*)/m.exec(markdown)?.[1] ?? '';
+  const headingTargets = new Set([...heading.matchAll(/V\d+\.\d+/g)].map((match) => match[0]));
+  if (headingTargets.size > 0 && (headingTargets.size !== allTargets.length
+    || [...headingTargets].some((target) => !allTargets.includes(target)))) {
+    add(
+      'DEFERRAL_INDEX_HEADING_TARGET_MISMATCH',
+      `${handoffInput} §18.5`,
+      `标题中的目标版本 ${[...headingTargets].join(', ')} 与权威延期目标 ${allTargets.join(', ') || '(无)'} 不一致。`
+    );
+  }
 }
 
+// §18.5 的说明文字是人读边界，不是第三份状态权威。延期身份、目标版本、
+// authority、归属线与 resumeRequires 已在上面的 JSON 对账中结构化校验；这里
+// 不用固定中文措辞判断投影是否正确，避免同义改写把有效投影误判为失败。
+
 const ok = findings.length === 0;
+const deferredCounts = {
+  scopeItems: authority.scopeItems.length,
+  gates: authority.gates.length,
+  slices: authority.slices.length,
+  previews: authority.previews.length
+};
 process.stdout.write(`${JSON.stringify({
   ok,
+  authority: 'docs/governance/scope.json + docs/governance/gates.json + docs/governance/slices.json',
   checkedSources: [
-    `${SCOPE_AUTHORITY}（proposedSupport/deferredToRelease/authorityAtRuling/operations）`,
-    `${HANDOFF} §18.3 Gate 覆盖矩阵（gateState/applicability）`,
-    `${HANDOFF} §13.1 执行面板（lifecycle）`,
-    `${EDITOR_PROTOCOL}（DEFERRED_PREVIEW_EDITOR_KINDS；存在延期预览编辑器时校验目标版本）`
+    `${SCOPE_AUTHORITY}（proposedSupport/deferredToRelease/authorityAtRuling/deferredTrack/operations/resumeRequires/deferredPreviewEditors）`,
+    `${GATES_AUTHORITY}（gateState/applicability/targetRelease/scopeItemIds/sliceRefs）`,
+    `${SLICES_AUTHORITY}（lifecycle/targetRelease）`
   ],
-  // 逐路对账规模。vacuous=true 表示该路两侧皆空——compareSets 恒真，
-  // 「通过」只说明当前没有这类记录，不说明判据被行使过。
+  projection: `${handoffInput} §18.5`,
+  deferredCounts,
+  targetVersions: allTargets,
+  resumeRequirements: {
+    checkedScopeItems: authority.scopeItems.length,
+    nonEmptyPerDeferredScope: authority.scopeItems.every((item) => Array.isArray(item.resumeRequires) && item.resumeRequires.length > 0)
+  },
   reconciliationScale,
   vacuousSources: reconciliationScale.filter((entry) => entry.vacuous).map((entry) => entry.label),
   findings,
   note: ok
     ? (reconciliationScale.some((entry) => entry.vacuous)
-      ? '§18.5 派生索引与**当前存在的**权威记录逐项一致。注意 vacuousSources 列出的'
-        + '路径两侧皆空（现存枚举里已无 deferred 记录），那些路径的判据本轮未被行使'
-        + '——它们的「通过」不构成覆盖证明。索引不构成独立范围口径或能力声明。'
-      : '§18.5 派生索引与全部权威记录逐项一致；索引不构成独立范围口径或能力声明。')
-    : '§18.5 与权威记录不一致，失败关闭。'
+      ? '§18.5 仅作为三份治理 JSON 的正确投影通过；vacuousSources 表示对应权威与投影当前均为空，不构成覆盖证明。'
+      : '§18.5 仅作为三份治理 JSON 的正确投影通过；延期索引不构成独立范围、进度或能力声明。')
+    : '§18.5 与治理 JSON 投影不一致，失败关闭。'
 }, null, 2)}\n`);
 process.exit(ok ? 0 : 1);

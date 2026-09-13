@@ -56,6 +56,22 @@ SoulForge 是给魂游（FromSoftware 的《只狼》《黑暗之魂》《艾尔
 
 本地验证产物位于 `output/validation/`、`output/playwright/`、`output/agent-real/`，不保证随源码分发。核对时检查报告的源码/产物身份、实际退出码、具体断言和未验证项；旧 PASS 不自动覆盖后续改动，`GATE_EVIDENCE_STALE` 也不能用文档改成通过。
 
+### 按改动选择验证
+
+优先使用统一入口组合本次所需验证；层级是选择工具，不表示每次修改都需要全跑。先用 `--list` 查看具体操作和环境需求：
+
+```powershell
+node scripts/verify.mjs --tier governance --list
+node scripts/verify.mjs --suite typecheck,test:agent-tool-envelope
+node scripts/verify.mjs --slice W-REL-V09-PUBLIC-PREVIEW-01 --list
+```
+
+`--suite` 保留给定顺序；`--slice` 只执行结构化 `requiredValidation` 的自动步骤，人工检查单独显示为 `manual-pending`，历史自由文本不能自动执行。单项调试仍可直接用 `npm run <名称>`。
+
+同一计划按工作目录、命令参数和显式环境复用已通过的操作，共享重复的 TypeScript 编译；JSON 报告的 `steps.execution` 区分执行与复用。构建、npm 生命周期和无法安全展开的 shell 命令会清除复用结果。复用不跨运行保存，也不用于把 skip/partial 改成 passed。需要全部实际通过时用 `--require-executed`；混合层级可用 `--require-tier governance,unit` 或 `--require-suite test:renderer-e2e` 指定严格范围。
+
+Windows CI 对文档和治理数据变更只跑治理检查；代码变更共用一次公开验证计划，renderer e2e 只执行一次。打包输入变化或手动选择安装验收时，独立运行 NSIS、内容完整性和安装生命周期。真实游戏语料、签名和跨机验收仍按各自前置执行。Agent 模拟和数据库 smoke 在源文件与产物 SHA-256 都匹配时复用生产构建；缺少所需 smoke 入口或指纹变化时重建。
+
 ## 快速开始
 
 ### 方式一：使用已构建的启动器

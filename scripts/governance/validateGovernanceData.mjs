@@ -5,6 +5,8 @@
  * 只是数据来自 JSON。等价性由 scripts/verify-governance-equivalence.mjs
  * 在真实数据上逐 finding 证明。
  */
+import { existsSync, readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { loadGovernanceData } from './loadGovernance.mjs';
 import { projectGovernance } from './projectGovernance.mjs';
 import {
@@ -14,12 +16,14 @@ import {
   validateBlockers,
   validateEvidence,
   validateGateMatrix,
+  validateRequiredValidations,
   validateReleaseGateIds,
   validateSlices,
   validateUnfrozenValidations
 } from './governanceRules.mjs';
 import { validateCrossVersionFreeze } from './freezeRules.mjs';
 import { buildFreshnessContext, collectSealAnchorsFromRecords } from './freshnessContext.mjs';
+import { requiredValidationFreeText } from './requiredValidation.mjs';
 
 /**
  * 收集治理数据内部所有 EV- 与 BLK- 引用，用于「引用了未定义 ID」检查。
@@ -69,10 +73,27 @@ function sliceFreeText(slicesData) {
       source.evidence,
       source.hardPrerequisites,
       (source.entryPoints ?? []).join(' '),
-      source.requiredValidation,
+      requiredValidationFreeText(source.requiredValidation),
       source.authorityCapNote
     ].filter(Boolean).join(' ');
   };
+}
+
+/**
+ * 结构化 requiredValidation 的 suiteId 只对账当前根 package.json；历史 legacy
+ * string 不需要该文件，故缺失根 package 只会在确有 structured 引用时由规则报错。
+ */
+function loadRootPackage(root, options) {
+  if (Object.prototype.hasOwnProperty.call(options, 'rootPackage')) {
+    return options.rootPackage;
+  }
+  const packagePath = join(root, 'package.json');
+  if (!existsSync(packagePath)) return null;
+  try {
+    return JSON.parse(readFileSync(packagePath, 'utf8'));
+  } catch {
+    return null;
+  }
 }
 
 /**
@@ -158,6 +179,12 @@ export function validateGovernanceData(root, options = {}) {
     findings,
     sliceFreeText(data.slices)
   );
+
+  findings.push(...validateRequiredValidations(
+    data.slices,
+    loadRootPackage(root, options),
+    'docs/governance/slices.json'
+  ));
 
   validateActiveClaims(
     projection.activeClaims,

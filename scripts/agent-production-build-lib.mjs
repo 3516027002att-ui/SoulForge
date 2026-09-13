@@ -19,6 +19,8 @@ const SOURCE_DIRECTORIES = [
 ];
 
 const SOURCE_FILES = [
+  'tsconfig.base.json',
+  'scripts/prepare-electron-sqlite-binding.mjs',
   'prompt/system.md',
   'package.json',
   'package-lock.json',

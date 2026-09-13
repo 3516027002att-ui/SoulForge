@@ -1,5 +1,6 @@
 import { strict as assert } from 'node:assert';
-import { access, mkdir, writeFile } from 'node:fs/promises';
+import { access, mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { pathToFileURL, fileURLToPath } from 'node:url';
 
@@ -31,6 +32,14 @@ function selectedLayer(): 'unit' | 'native' {
   return value;
 }
 
+function jsonOutPath(): string | undefined {
+  const index = process.argv.indexOf('--json-out');
+  if (index < 0) return undefined;
+  const value = process.argv[index + 1];
+  if (!value || value.startsWith('--')) throw new Error('SF-28 --json-out requires a file path');
+  return resolve(value);
+}
+
 async function main(): Promise<void> {
   const layer = selectedLayer();
   const sourceRoot = resolve(dirnameFromModule(), '..', '..', '..', '..');
@@ -56,10 +65,19 @@ async function main(): Promise<void> {
     assert(group.classification === 'exact_duplicate' || group.classification === 'license_required');
   }
 
-  const reportPath = join(sourceRoot, 'docs', 'audit-execution', 'redundancy-inventory.json');
-  await mkdir(resolve(reportPath, '..'), { recursive: true });
-  await writeFile(reportPath, JSON.stringify({ ...inventory, generatedBy: 'test:audit-sf-28-unit', generatedAt: new Date().toISOString() }, null, 2) + '\n', 'utf8');
-  const reportExists = await access(reportPath).then(() => true).catch(() => false);
+  const explicitReportPath = jsonOutPath();
+  const temporaryReportDir = explicitReportPath
+    ? undefined
+    : await mkdtemp(join(tmpdir(), 'soulforge-sf28-'));
+  const reportPath = explicitReportPath ?? join(temporaryReportDir!, 'redundancy-inventory.json');
+  let reportExists = false;
+  try {
+    await mkdir(dirname(reportPath), { recursive: true });
+    await writeFile(reportPath, JSON.stringify({ ...inventory, generatedBy: 'test:audit-sf-28-unit', generatedAt: new Date().toISOString() }, null, 2) + '\n', 'utf8');
+    reportExists = await access(reportPath).then(() => true).catch(() => false);
+  } finally {
+    if (temporaryReportDir) await rm(temporaryReportDir, { recursive: true, force: true });
+  }
   console.log(JSON.stringify({
     ok: true,
     taskId: 'SF-28',

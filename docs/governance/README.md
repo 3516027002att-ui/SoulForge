@@ -50,6 +50,8 @@
 
 ## 修改约束
 
+`slices.json.requiredValidation` 可使用 `{ suiteId, args?, env?, manualChecks?, notes? }`，或以 `steps` 数组表达有序的多个自动步骤。`suiteId` 直接引用根 `package.json` 的脚本名，治理校验会拒绝不存在的引用；人工检查不转换为 shell 命令。当前可开发切片优先采用结构化形式，历史字符串保持可读。`node scripts/verify.mjs --slice <sliceId> --list` 可查看计划，不执行测试或人工验收。
+
 1. 改数据前先读对应 schema。schema 是 `additionalProperties: false`，加字段必须同步改 schema。
 2. `releases.json` 中 `frozen: true` 的版本，其 `frozenFields` 列出的字段由门禁物理拦截；
    需要变更必须先有新的用户裁定并登记 `scope-ruling:user-approved` 证据。

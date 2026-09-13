@@ -25,6 +25,7 @@ import {
   formatBaseline
 } from './gov/seal.mjs';
 import { projectHandoff } from './generate-handoff-projection.mjs';
+import { formatRequiredValidation } from './governance/requiredValidation.mjs';
 import { validateGovernanceData } from './governance/validateGovernanceData.mjs';
 import {
   gateSubjectRegistry,
@@ -352,7 +353,8 @@ function cmdNext(args) {
       goal: slice.goal,
       hardPrerequisites: slice.hardPrerequisites,
       entryPoints: slice.entryPoints,
-      requiredValidation: slice.requiredValidation,
+      requiredValidation: formatRequiredValidation(slice.requiredValidation),
+      requiredValidationSpec: slice.requiredValidation,
       // 已完成证据刻意不投影到选点输出：它是留痕，不是指令。原先 goal 里混着两
       // 者，实测让可推进切片的 goal 平均膨胀到 921 字、待做陈述被埋在末尾。
       // 需要读历史证据时直接查 slices.json 的 evidence 字段。
@@ -585,7 +587,8 @@ function cmdClaim(args) {
         goal: slice.goal,
         hardPrerequisites: slice.hardPrerequisites,
         entryPoints: slice.entryPoints,
-        requiredValidation: slice.requiredValidation,
+        requiredValidation: formatRequiredValidation(slice.requiredValidation),
+        requiredValidationSpec: slice.requiredValidation,
         authorityCap: slice.authorityCap,
         authorityCapNote: slice.authorityCapNote,
         note: 'claim 不提升 authority；完成后必须以真实运行的 requiredValidation 作为 Evidence 才能 complete。'
@@ -759,7 +762,8 @@ function cmdComplete(args) {
         lifecycle: 'completed',
         authority: slice.authority,
         authorityCap: slice.authorityCap,
-        requiredValidation: slice.requiredValidation,
+        requiredValidation: formatRequiredValidation(slice.requiredValidation),
+        requiredValidationSpec: slice.requiredValidation,
         unfrozenValidationEntriesRemoved: unfrozenRemoved,
         detachedFromOpenGates: detachedFromGates,
         note: 'authority 与 gateState 均未被本命令改动。若本轮真实运行了 requiredValidation 并要提升 authority 或推进 Gate，请单独改数据并追加封存 Evidence，由治理门禁校验。'

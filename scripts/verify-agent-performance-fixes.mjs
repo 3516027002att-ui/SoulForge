@@ -292,7 +292,7 @@ async function testTaskRecordBatchBoundary() {
     const ticket = await gateway.recordSearch({
       toolName: 'search_param_rows',
       query: '鬼刑部',
-      result: { items: [{ table: 'NpcParam', rowId: 50800000 }] }
+      result: { items: [{ table: 'NpcParam', rowId: 50800000, rowName: '鬼形部' }] }
     });
     await Promise.all(Array.from({ length: 8 }, () => gateway.update({
       objectName: '鬼刑部',

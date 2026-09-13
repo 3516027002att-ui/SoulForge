@@ -24,6 +24,8 @@
 import { readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { TIER_ORDER, TIER_BY_SCRIPT, EXCLUDED } from './verify/tiers.mjs';
+import { formatRequiredValidation } from './governance/requiredValidation.mjs';
+import { collectDeferredAuthority, targetVersionsOf } from './governance/deferrals.mjs';
 
 export const HANDOFF = 'docs/V0_5_IMPLEMENTATION_HANDOFF.md';
 
@@ -129,6 +131,93 @@ function table(header, rows) {
   ].join('\n');
 }
 
+function inlineToken(value) {
+  if (value === null || value === undefined || String(value).length === 0) return '—';
+  return `\`${String(value).replaceAll('`', '')}\``;
+}
+
+function deferredEntriesByTarget(entries) {
+  const groups = new Map();
+  for (const entry of entries) {
+    const target = typeof entry.targetRelease === 'string' && entry.targetRelease.length > 0
+      ? entry.targetRelease
+      : '未声明目标版本';
+    const group = groups.get(target) ?? [];
+    group.push(entry);
+    groups.set(target, group);
+  }
+  return [...groups.entries()].sort(([a], [b]) => a.localeCompare(b));
+}
+
+function deferredEntryLines(label, entries) {
+  if (entries.length === 0) return [`${label}：无。`];
+  return deferredEntriesByTarget(entries).map(([target, group]) =>
+    `${label}（${target}）：${group.map((entry) => inlineToken(entry.id)).join('、')}。`
+  );
+}
+
+/**
+ * §18.5 没有历史 BEGIN/END 标记，避免新增 marker 破坏旧 Evidence 锚点。
+ * 它仍是三份治理 JSON 的窄投影，由标题边界替换，不能成为第四份状态来源。
+ */
+export function buildDeferralIndexSection(scopeData, gatesData, slicesData) {
+  const authority = collectDeferredAuthority({ scopeData, gatesData, slicesData });
+  const targets = targetVersionsOf(authority);
+  const heading = `### 18.5${targets.length > 0 ? ` ${targets.join(' / ')}` : ''} 延期承接索引`;
+  const lines = [
+    heading,
+    '',
+    '本节是**派生索引**，不是新的 milestone、范围口径或进度文档。唯一机器可读权威是 `docs/governance/scope.json`、`docs/governance/gates.json` 与 `docs/governance/slices.json` 中的延期记录；本节只把它们汇总成可读投影。',
+    '',
+    '`npm run test:v06-deferral-index` 只校验本节与上述治理 JSON 逐项一致。条目缺失、多写、目标版本、authority 或归属线不一致都会失败关闭，因此本节不能成为独立漂移的第二口径。',
+    ''
+  ];
+
+  if (authority.scopeItems.length === 0) {
+    lines.push('当前没有 `proposedSupport=deferred` 的范围条目；该路的空集合只表示 vacuous，不构成覆盖证明。', '');
+  } else {
+    lines.push(
+      `当前延期的 ${authority.scopeItems.length} 个范围条目（目标版本：${targets.join('、')}；全部 \`operations=[]\`，每条 \`resumeRequires\` 保留在 scope.json，\`authorityAtRuling\` 只记录裁定时上限）：`,
+      '',
+      table(
+        ['范围条目', '目标版本', '裁定时 authority', '归属线'],
+        authority.scopeItems.map((item) => [
+          inlineToken(item.id),
+          item.targetRelease ?? '—',
+          inlineToken(item.authorityAtRuling),
+          item.deferredTrack ?? '—'
+        ])
+      ),
+      ''
+    );
+  }
+
+  lines.push(...deferredEntryLines('延期 Gate', authority.gates), '');
+  lines.push(...deferredEntryLines('延期切片', authority.slices), '');
+  lines.push(...deferredEntryLines('延期只读预览编辑器', authority.previews), '');
+  lines.push(
+    '恢复时按该条目在 scope.json 登记的全部 `resumeRequires` 验证；旧证据仅在当前输入、适用范围与 `fresh` 均一致时可复用，否则重新验证。',
+    ''
+  );
+  if (authority.scopeItems.length === 0) {
+    lines.push('- 当前没有 deferred 范围条目，暂无待满足的 `resumeRequires`。');
+  } else {
+    for (const item of authority.scopeItems) {
+      const requirements = Array.isArray(item.resumeRequires) && item.resumeRequires.length > 0
+        ? item.resumeRequires.map((requirement) => cell(requirement)).join('；')
+        : '未声明';
+      lines.push(`- ${inlineToken(item.id)}（目标 ${item.targetRelease ?? '未声明'}）：${requirements}`);
+    }
+  }
+  lines.push(
+    '',
+    '延期不清偿技术缺口，不降低 native authority、验证、回滚或生态集成标准。',
+    '',
+    '---'
+  );
+  return lines.join('\n');
+}
+
 /** 读取治理数据。抽成函数而不是模块顶层常量，fixture 才能对任意工作树取投影。 */
 export function loadProjectionSources(root) {
   const readJson = (relativePath) => JSON.parse(readFileSync(join(root, relativePath), 'utf8'));
@@ -177,7 +266,7 @@ export const BLOCKS = ({ slicesData, gatesData, blockersData, evidenceRecords, s
         : slice.goal),
       cell(slice.hardPrerequisites),
       entryPointList(slice.entryPoints),
-      cell(slice.requiredValidation),
+      cell(formatRequiredValidation(slice.requiredValidation)),
       cell(slice.authorityCapNote)
     ])
   ),
@@ -446,6 +535,33 @@ function replaceBlock(markdown, name, body) {
   };
 }
 
+function replaceDeferralSection(markdown, body) {
+  const headings = [...markdown.matchAll(/^###\s+18\.5[^\n]*$/gm)];
+  if (headings.length === 0) {
+    return {
+      ok: false,
+      code: 'DEFERRAL_INDEX_SECTION_MISSING',
+      message: '交接书缺少 §18.5 延期承接索引标题；无法确定生成区边界。'
+    };
+  }
+  if (headings.length > 1) {
+    return {
+      ok: false,
+      code: 'DEFERRAL_INDEX_SECTION_DUPLICATE',
+      message: '交接书 §18.5 延期承接索引标题出现多次；生成区必须唯一。'
+    };
+  }
+  const start = headings[0].index;
+  const nextHeadingPattern = /^#{2,3}\s+[^\n]*$/gm;
+  nextHeadingPattern.lastIndex = start + headings[0][0].length;
+  const nextHeading = nextHeadingPattern.exec(markdown);
+  const end = nextHeading?.index ?? markdown.length;
+  return {
+    ok: true,
+    markdown: `${markdown.slice(0, start)}${body.trimEnd()}\n\n${markdown.slice(end).replace(/^\n+/, '')}`
+  };
+}
+
 /** 统计 CRLF 与裸 LF，用于判定文件的主导行尾。 */
 function countCrlf(text) {
   return (text.match(/\r\n/g) ?? []).length;
@@ -488,12 +604,27 @@ export function projectHandoff(root) {
     next = outcome.markdown;
   }
 
+  const deferralOutcome = replaceDeferralSection(
+    next,
+    buildDeferralIndexSection(sources.scopeData, sources.gatesData, sources.slicesData)
+  );
+  if (deferralOutcome.ok === false) {
+    findings.push({
+      severity: 'error',
+      code: deferralOutcome.code,
+      where: `${HANDOFF} §18.5`,
+      message: deferralOutcome.message
+    });
+  } else {
+    next = deferralOutcome.markdown;
+  }
+
   return {
     original,
     projected: dominantEol === '\r\n' ? next.replaceAll('\n', '\r\n') : next,
     drifted: next !== original,
     findings,
-    blocks: Object.keys(blocks),
+    blocks: [...Object.keys(blocks), 'deferral-index'],
     counts: {
       slices: sources.slicesData.slices.length,
       activeClaims: sources.slicesData.activeClaims.length,
@@ -529,7 +660,7 @@ if (invokedDirectly) {
         : '交接书投影区与治理 JSON 一致。',
       blocks: outcome.blocks,
       counts: outcome.counts,
-      note: '本检查只覆盖 BEGIN/END 标记内的生成区；标记外的散文由工程复核负责。'
+      note: '本检查覆盖 BEGIN/END 标记内的生成区与 §18.5 延期索引；其余散文由工程复核负责。'
     }, null, 2));
     process.exitCode = outcome.drifted ? 1 : 0;
   } else {

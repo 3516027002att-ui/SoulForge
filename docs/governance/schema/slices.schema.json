@@ -92,7 +92,13 @@
           "evidence": { "type": "string", "minLength": 1 },
           "hardPrerequisites": { "type": "string", "minLength": 1 },
           "entryPoints": { "type": "array", "minItems": 1, "items": { "type": "string", "minLength": 1 } },
-          "requiredValidation": { "type": "string", "minLength": 1 },
+          "requiredValidation": {
+            "oneOf": [
+              { "type": "string", "minLength": 1 },
+              { "$ref": "#/definitions/requiredValidationSingle" },
+              { "$ref": "#/definitions/requiredValidationSequence" }
+            ]
+          },
           "declaresUnfrozenValidation": { "type": "boolean" }
         }
       }
@@ -114,5 +120,55 @@
       }
     },
     "invariants": { "type": "array", "minItems": 1, "items": { "type": "string", "minLength": 1 } }
+  },
+  "definitions": {
+    "requiredValidationEnv": {
+      "type": "object",
+      "additionalProperties": { "type": "string" }
+    },
+    "requiredValidationArgs": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "requiredValidationManualChecks": {
+      "type": "array",
+      "items": { "type": "string", "minLength": 1 }
+    },
+    "requiredValidationStep": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["suiteId"],
+      "properties": {
+        "suiteId": { "type": "string", "minLength": 1 },
+        "args": { "$ref": "#/definitions/requiredValidationArgs" },
+        "env": { "$ref": "#/definitions/requiredValidationEnv" }
+      }
+    },
+    "requiredValidationSingle": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["suiteId"],
+      "properties": {
+        "suiteId": { "type": "string", "minLength": 1 },
+        "args": { "$ref": "#/definitions/requiredValidationArgs" },
+        "env": { "$ref": "#/definitions/requiredValidationEnv" },
+        "manualChecks": { "$ref": "#/definitions/requiredValidationManualChecks" },
+        "notes": { "type": "string", "minLength": 1 }
+      }
+    },
+    "requiredValidationSequence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["steps"],
+      "properties": {
+        "steps": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "$ref": "#/definitions/requiredValidationStep" }
+        },
+        "manualChecks": { "$ref": "#/definitions/requiredValidationManualChecks" },
+        "notes": { "type": "string", "minLength": 1 }
+      }
+    }
   }
 }

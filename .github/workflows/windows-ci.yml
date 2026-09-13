@@ -1,9 +1,3 @@
-# SoulForge V0.5 Windows CI — automated gates only (no private game assets).
-#
-# 验证入口统一走 scripts/verify.mjs：
-# - governance + unit 使用 --require-executed：跳过/部分跳过算失败（公开 CI 必须真跑）
-# - synthetic / release 不强制 require-executed：缺私有语料时可诚实 skip
-# - native 仅跑公开可跳过门禁，绝不用 --require-executed 冒充 native 完成
 name: windows-ci
 
 on:
@@ -12,135 +6,129 @@ on:
   pull_request:
     branches: [main, master]
   workflow_dispatch:
+    inputs:
+      installer:
+        description: Run unsigned NSIS and installer lifecycle acceptance
+        type: boolean
+        default: false
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
+  changes:
+    runs-on: ubuntu-latest
+    outputs:
+      build: ${{ steps.scope.outputs.build }}
+      installer: ${{ steps.scope.outputs.installer }}
+      tiers: ${{ steps.scope.outputs.tiers }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Select checks from changed paths
+        id: scope
+        env:
+          CI_BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before || github.sha }}
+          CI_HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          CI_INSTALLER: ${{ inputs.installer || false }}
+          CI_MANUAL: ${{ github.event_name == 'workflow_dispatch' }}
+        run: node scripts/ci-change-scope.mjs
+
   verify:
+    needs: changes
     runs-on: windows-latest
     timeout-minutes: 90
     steps:
-      # fetch-depth 0：治理门禁（GATE_FRESHNESS）需要验证交接书 Evidence
-      # 锚点的 Git 祖先关系，shallow clone 会使祖先不可见而 fail-closed。
-      - name: Checkout
-        uses: actions/checkout@v4
+      # Freshness checks need the Evidence anchor's Git ancestry.
+      - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
+      - uses: actions/setup-node@v4
         with:
           node-version: '22'
           cache: npm
-
-      - name: Setup .NET
-        uses: actions/setup-dotnet@v4
+      - uses: actions/setup-dotnet@v4
+        if: needs.changes.outputs.build == 'true'
         with:
           dotnet-version: '10.0.x'
-
-      - name: Install dependencies
-        run: npm ci
-
-      # 层级登记表与 package.json 漂移时拒绝继续；空登记等于没人跑。
-      - name: Verify registry audit
-        run: node scripts/verify.mjs --audit
-
-      # verify --json-out 会自动建父目录；此处预建便于人工查看与 artifact 收集。
-      - name: Ensure output directory
-        run: mkdir output -Force
-
-      # 治理 + 单元/契约层：必须真实执行。typecheck、AI conformance、桌面安全、
-      # renderer 纯逻辑单元测试、core `test` 聚合 smoke 等都在这两层登记表内，
-      # 不再散装 40+ 条 npm script。
-      - name: Governance + unit (require executed)
-        run: node scripts/verify.mjs --tier governance,unit --require-executed --json-out output/verify-ci-governance-unit.json --timeout-ms 1200000
-
-      # synthetic 层的 desktop-ipc-contract / desktop-contract-mutations 观测的是
-      # apps/desktop/out 生产产物。此前产物只是 unit 层 test:database-utility 顺带
-      # `npm run build -w @soulforge/desktop` 的副作用——那条 smoke 一旦被挪走、
-      # 跳过或改实现，两条最强的运行期契约门禁就会一起静默跳过，而 synthetic 层
-      # 不带 --require-executed，CI 依旧全绿。依赖必须显式。
-      - name: Build desktop bundles (required by contract gates)
-        run: npm run build -w @soulforge/desktop
-
-      # 合成层：允许缺私有 Smithbox/语料时诚实 skip，但不接受 exit 非 0。
-      # SOULFORGE_CONTRACT_REQUIRE_BUNDLES=1：干净 runner 上产物缺失一定是流水线
-      # 配置错误而非环境限制，故不允许跳过冒充通过（本机开发仍允许诚实跳过）。
-      - name: Synthetic (orchestrator; skip allowed)
+      - run: npm ci
+      - run: node scripts/verify.mjs --audit
+      # One build includes the database smoke entry. That smoke verifies source
+      # and output fingerprints before reusing this exact artifact.
+      - name: Build shared production artifacts
+        if: needs.changes.outputs.build == 'true'
+        run: node scripts/ensure-agent-production-build.mjs --database-smoke
+      - name: Public checks (single execution plan)
         env:
+          VERIFY_TIERS: ${{ needs.changes.outputs.tiers }}
           SOULFORGE_CONTRACT_REQUIRE_BUNDLES: '1'
-        run: node scripts/verify.mjs --tier synthetic --json-out output/verify-ci-synthetic.json --timeout-ms 1200000
-
-      # Public CI 无游戏 corpus：只跑会诚实 skip 的 native 门禁，验证 skip 检测链路本身。
-      - name: Native honest-skip — private-native-gate
-        run: node scripts/verify.mjs --tier native --filter private-native-gate --json-out output/verify-ci-native-private.json
-
-      - name: Native honest-skip — section28-sekiro-gate
-        run: node scripts/verify.mjs --tier native --filter section28-sekiro-gate --json-out output/verify-ci-native-section28.json
-
-      - name: Native honest-skip — me3-sekiro-session
-        run: node scripts/verify.mjs --tier native --filter me3-sekiro-session --json-out output/verify-ci-native-me3.json
-
-      - name: Build
-        run: npm run build
-
-      # Renderer end-to-end: real Electron + production preload + built renderer,
-      # synthetic fixtures only (no private game assets). Covers the
-      # candidate → approve → staged → validate → write state machine.
-      # 经 verify 入口调度而不是直调 npm：直调绕开五态判定，「什么都没跑」与
-      # 「真实执行并通过」在退出码上不可区分。--require-executed 让 skip 算失败
-      # ——干净 runner 上产物齐备，e2e 没有诚实跳过的理由。
-      - name: Renderer e2e (Playwright + Electron fixture)
-        run: node scripts/verify.mjs --tier synthetic --filter renderer-e2e --require-executed --json-out output/verify-ci-renderer-e2e.json --timeout-ms 900000
-
-      - name: Upload verify + e2e artifacts
+        run: node scripts/verify.mjs --tier $env:VERIFY_TIERS --require-tier governance,unit --require-suite test:renderer-e2e --json-out output/verify-ci-public.json --timeout-ms 1200000
+      # Public runners have no private corpus. Keep the honest skip reports.
+      - name: Native honest-skip contracts
+        if: needs.changes.outputs.build == 'true'
+        run: |
+          node scripts/verify.mjs --tier native --filter private-native-gate --json-out output/verify-ci-native-private.json
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          node scripts/verify.mjs --tier native --filter section28-sekiro-gate --json-out output/verify-ci-native-section28.json
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          node scripts/verify.mjs --tier native --filter me3-sekiro-session --json-out output/verify-ci-native-me3.json
+      - name: Upload verification evidence
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: renderer-e2e-report
+          name: public-verification
           path: |
             apps/desktop/e2e/playwright/playwright-report/
             apps/desktop/e2e/playwright/test-results/
             output/verify-ci-*.json
           if-no-files-found: ignore
 
-      # Public CI previously produced no NSIS artifact, so test:release-content
-      # failed structurally with INSTALLER_MISSING. Building the unsigned NSIS
-      # installer here restores the installer integrity chain on every run.
-      # CSC_IDENTITY_AUTO_DISCOVERY=false keeps electron-builder from probing for
-      # a signing identity on a runner that has none (unsigned build is honest).
-      - name: Build NSIS installer (unsigned, for integrity chain)
+  installer:
+    needs: [changes, verify]
+    if: needs.changes.outputs.installer == 'true'
+    runs-on: windows-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+      - run: npm ci
+      # Rebuild in isolation without test-only entrypoints for the release checks.
+      - run: npm run bridge:publish
+      - run: npm run build
+      - name: Build unsigned NSIS installer
         working-directory: apps/desktop
         env:
           CSC_IDENTITY_AUTO_DISCOVERY: 'false'
-        run: npx electron-builder --win nsis
-
-      - name: Record installer compliance manifest
-        run: npm run release:installer:manifest
-
-      - name: Release — compliance fixtures
-        run: node scripts/verify.mjs --tier release --filter release-compliance --json-out output/verify-ci-release-compliance.json
-
-      - name: Release — portable packaging
-        run: node scripts/verify.mjs --tier release --filter portable-packaging --json-out output/verify-ci-release-portable.json
-
-      - name: Release — package content
-        run: node scripts/verify.mjs --tier release --filter release-content --json-out output/verify-ci-release-content.json
-
-      - name: Release — reproducible fingerprint
-        run: node scripts/verify.mjs --tier release --filter release-reproducible --json-out output/verify-ci-release-reproducible.json
-
-      # Execute-mode installer lifecycle on the clean runner: install → upgrade →
-      # uninstall → clean-target in an owner-controlled temp target. Honest skip
-      # is NOT acceptable here because the runner is disposable and isolated.
+        run: npx --yes electron-builder@26.16.1 --win nsis
+      - run: npm run release:installer:manifest
+      - name: Package integrity and reproducibility
+        run: |
+          node scripts/verify.mjs --tier release --filter release- --exclude release:manifest,release:installer:manifest,test:release-cross-machine --json-out output/verify-ci-release.json
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          node scripts/verify.mjs --tier release --filter portable-packaging --json-out output/verify-ci-portable.json
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          node scripts/verify.mjs --suite test:packaged-bridge-runtime --require-executed --json-out output/verify-ci-packaged-bridge.json
       - name: Installer lifecycle (execute mode)
         env:
           SOULFORGE_INSTALLER_LIFECYCLE_RUN: '1'
-        run: npm run test:installer-lifecycle
-
-      # Intentionally NOT run with --require-executed in public CI:
-      # - full native tier (private mods / Oodle / real Sekiro)
-      # - signed installer / real Sekiro launch
-      # - SOULFORGE_PORTABLE_PACK=1 unsigned pack (optional local only)
+        run: node scripts/verify.mjs --tier release --filter installer-lifecycle --require-executed --json-out output/verify-ci-installer.json
+      - name: Upload installer evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: installer-verification
+          path: output/verify-ci-*.json
+          if-no-files-found: ignore

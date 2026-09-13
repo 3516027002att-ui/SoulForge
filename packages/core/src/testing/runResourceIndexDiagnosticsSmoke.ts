@@ -41,7 +41,8 @@ function main(): void {
   const index = new WorkspaceIndex('ws-1');
   index.setFiles([{
     sourceUri: 'file://a.fmg',
-    sourcePath: 'a.fmg',
+    sourcePath: 'C:/fixture/a.fmg',
+    absolutePath: 'C:/fixture/a.fmg',
     relativePath: 'a.fmg',
     resourceKind: 'msg',
     sizeBytes: 10,

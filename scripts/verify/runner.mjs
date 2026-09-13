@@ -14,7 +14,7 @@
  * partial 做出选择（--require-executed 时它们算失败）。
  */
 import { spawn, spawnSync } from 'node:child_process';
-import { dirname, resolve } from 'node:path';
+import { delimiter, dirname, resolve } from 'node:path';
 import { SILENT_ON_SUCCESS } from './tiers.mjs';
 
 /**
@@ -272,22 +272,35 @@ export function classifyOutcome(exitCode, stdout, stderr = '', scriptName = '') 
  * @param {number} options.timeoutMs
  * @param {boolean} [options.injectEnv] 是否经 env wrapper（默认 true）。
  */
-export function runSuite({ repoRoot, scriptName, timeoutMs, injectEnv = true }) {
+export function runSuite({ repoRoot, scriptName, timeoutMs, injectEnv = true, operation, env = {}, args: extraArgs = [] }) {
   return new Promise((resolvePromise) => {
-    const npmArgs = ['run', scriptName, '--silent'];
+    const npmArgs = ['run', scriptName, '--silent', ...(extraArgs.length ? ['--', ...extraArgs] : [])];
     // 始终用 process.execPath 执行 JS 入口，不依赖 shell 解析 `npm`：
     // Windows 下 npm 是 .cmd，spawn 不带 shell 时无法直接执行。
     const npmCli = process.env.npm_execpath?.trim()
       || resolve(dirname(process.execPath), 'node_modules/npm/bin/npm-cli.js');
+    const directArgs = !operation ? [npmCli, ...npmArgs]
+      : operation.command === 'npm' ? [npmCli, ...operation.args]
+        : operation.command === 'tsc'
+          ? [resolve(repoRoot, 'node_modules/typescript/bin/tsc'), ...operation.args]
+          : operation.args;
     const args = injectEnv
-      ? ['scripts/with-local-has-game-env.mjs', 'npm', ...npmArgs]
-      : [npmCli, ...npmArgs];
+      ? [resolve(repoRoot, 'scripts/with-local-has-game-env.mjs'), process.execPath, ...directArgs]
+      : directArgs;
+    const cwd = operation?.cwd ?? repoRoot;
+    const childEnv = { ...process.env, ...env, ...operation?.env };
+    // npm normally supplies local binaries on PATH. Expanded node commands may
+    // invoke them too, so retain that workspace/root lookup without using a shell.
+    const pathKey = Object.keys(childEnv).find((key) => key.toLowerCase() === 'path') ?? 'PATH';
+    childEnv[pathKey] = [resolve(cwd, 'node_modules/.bin'), resolve(repoRoot, 'node_modules/.bin'), childEnv[pathKey] ?? ''].join(delimiter);
+    childEnv.npm_execpath = npmCli;
 
     const child = spawn(process.execPath, args, {
-      cwd: repoRoot,
-      env: process.env,
+      cwd,
+      env: childEnv,
       stdio: ['ignore', 'pipe', 'pipe'],
-      windowsHide: true
+      windowsHide: true,
+      detached: process.platform !== 'win32'
     });
 
     let stdout = '';
@@ -320,7 +333,7 @@ export function runSuite({ repoRoot, scriptName, timeoutMs, injectEnv = true }) 
       clearTimeout(timer);
       const { outcome, skippedLegs } = timedOut
         ? { outcome: OUTCOME.FAILED, skippedLegs: [] }
-        : classifyOutcome(exitCode, stdout, stderr, scriptName);
+        : classifyOutcome(exitCode, stdout, stderr, operation?.command === 'tsc' ? 'typecheck' : scriptName);
       resolvePromise({
         scriptName,
         outcome,
@@ -333,4 +346,46 @@ export function runSuite({ repoRoot, scriptName, timeoutMs, injectEnv = true }) 
       });
     });
   });
+}
+
+// Cache only successful operations within this invocation. A build/generator is
+// a barrier. Failed/skipped work is never promoted by reuse, and && still stops
+// the remaining operations of that suite on a nonzero exit or timeout.
+export async function runPlannedSuite({ repoRoot, entry, timeoutMs, cache, injectEnv = true, execute = runSuite }) {
+  const startedAt = Date.now();
+  const steps = [];
+  const outputs = [];
+  for (const operation of entry.steps) {
+    if (operation.kind === 'barrier') cache.clear();
+    const cached = cache.get(operation.key);
+    const remaining = timeoutMs - (Date.now() - startedAt);
+    const result = cached ?? (remaining <= 0
+      ? { outcome: OUTCOME.FAILED, exitCode: null, durationMs: 0, skippedLegs: [], timedOut: true, stdout: '', stderr: 'Suite timeout budget exhausted.' }
+      : await execute({ repoRoot, scriptName: entry.scriptName, timeoutMs: remaining, injectEnv, operation }));
+    if (!cached && result.outcome === OUTCOME.PASSED && operation.kind !== 'barrier') {
+      cache.set(operation.key, { ...result, reusedFrom: entry.scriptName });
+    }
+    steps.push({ key: operation.key, command: operation.command, args: operation.args, cwd: operation.cwd,
+      outcome: result.outcome, execution: cached ? 'reused' : 'executed',
+      durationMs: cached ? 0 : result.durationMs, ...(cached ? { reusedFrom: cached.reusedFrom } : {}) });
+    outputs.push(result);
+    if (result.exitCode !== 0 || result.timedOut) break;
+  }
+  const failed = outputs.find((r) => r.outcome === OUTCOME.FAILED);
+  const skipped = outputs.filter((r) => r.outcome === OUTCOME.SKIPPED);
+  const partial = outputs.some((r) => r.outcome === OUTCOME.PARTIAL);
+  const testOutputs = outputs.filter((_, i) => entry.steps[i].kind !== 'prepare');
+  const allSkipped = testOutputs.length > 0 && testOutputs.every((r) => r.outcome === OUTCOME.SKIPPED);
+  return {
+    scriptName: entry.scriptName,
+    outcome: failed ? OUTCOME.FAILED : allSkipped ? OUTCOME.SKIPPED
+      : skipped.length || partial ? OUTCOME.PARTIAL : OUTCOME.PASSED,
+    exitCode: failed ? failed.exitCode : 0,
+    durationMs: Date.now() - startedAt,
+    skippedLegs: outputs.flatMap((r, i) => r.outcome === OUTCOME.SKIPPED || r.outcome === OUTCOME.PARTIAL
+      ? [`${steps[i].key}:${r.skippedLegs.join(',') || r.outcome}`] : []),
+    ...(failed?.timedOut ? { timedOut: true } : {}),
+    ...(failed?.spawnError ? { spawnError: failed.spawnError } : {}),
+    stdout: outputs.map((r) => r.stdout).join('\n'), stderr: outputs.map((r) => r.stderr).join('\n'), steps
+  };
 }
