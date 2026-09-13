@@ -54,24 +54,34 @@ Windows CI 对文档和治理数据变更只跑治理检查；代码变更共用
 
 ## 快速开始
 
-### 方式一：V0.9.1 完整 Release 源码包（推荐）
+### 方式一：V0.9.1 Windows x64 安装包（推荐）
 
-当前发布线为 `V0.9.1`。请从 [GitHub Releases 页面](https://github.com/3516027002att-ui/SoulForge/releases) 选择对应的完整源码包。完整包已
-附带当前编译后的 Electron `out`、workspace `dist`、SQLite native binding、
-自包含 Bridge 和根目录 `SoulForge.exe`；它不是安装包，也不包含游戏文件、mods
-或私有语料。
+请从 [GitHub Releases 页面](https://github.com/3516027002att-ui/SoulForge/releases) 下载
+`SoulForge-0.9.1-x64.exe`，双击安装包并按向导完成安装，然后从桌面或开始菜单启动
+`SoulForge`。
 
-首次运行（Windows x64）：
+安装包已经内置 Electron 运行时、编译后的桌面端、SQLite native binding 和自包含
+Bridge。安装包用户不需要安装 Node.js 24、npm、Electron 或 .NET SDK，也不需要打开
+PowerShell 或运行任何 `npm` 命令；首次启动不需要 .NET SDK。
 
-1. 安装 Node.js 24，并确认 npm 11 可用；
-2. 在解压后的根目录打开 PowerShell，执行：
+> 当前仓库 `main` 是 `V0.9.1` 代码线；如果 Releases 页面尚未出现上述安装包，说明该
+> 安装包还没有上传，不要把 GitHub 自动生成的 Source code ZIP 当作安装包。
+> 安装包尚未做代码签名，暂不适合作为稳定工具分发。
 
-   ```powershell
-   npm ci
-   node node_modules/electron/install.js
-   ```
+### 方式二：完整 Release 源码包（开发/诊断用）
 
-3. 双击根目录的 `SoulForge.exe`。完整包首次启动不需要 .NET SDK。
+完整源码包附带当前编译后的 Electron `out`、workspace `dist`、SQLite native binding、
+自包含 Bridge 和根目录 `SoulForge.exe`；它不是安装包，也不包含游戏文件、mods 或私有
+语料。
+
+使用完整源码包需要 Node.js 24、npm 11。请在解压后的根目录打开 PowerShell，执行：
+
+```powershell
+npm ci
+node node_modules/electron/install.js
+```
+
+然后双击根目录的 `SoulForge.exe`。完整源码包首次启动不需要 .NET SDK。
 
 GitHub 自动生成的 Source code ZIP/tar.gz 与上述完整包不同：自动归档只含源码、
 配置、许可证、构建脚本和根启动器，不含预编译 `out`、`dist`、SQLite native
@@ -91,11 +101,12 @@ test 配置或预置模型，以及 preload、IPC、Bridge、隔离和 staging �
 GHSA-f88m-g3jw-g9cj 与 GHSA-rgj7-g3m4-5g8c）；本预发行版尚未修复，请避免
 处理不可信输入。
 
-> 提示：完整 Release 包默认按上面的四步启动；需要诊断时请保留终端中的完整报错与命令输出。
+> 提示：安装包走方式一；完整源码包和自动归档走方式二，不要混用两套启动方式。需要
+> 诊断时请保留终端中的完整报错与命令输出。
 
 ---
 
-### 方式二：从源码编译（开发者模式）
+### 方式三：从源码编译（开发者模式）
 
 > 本节假设你**没用过 PowerShell、Node.js、.NET**。跟着一步步点鼠标就行，不懂原理也能跑起来。
 
