@@ -1,0 +1,7589 @@
+# AI 会话记录: 修改绣丸 最后一刀切换斩，使其拥有80的追斩追踪距离
+
+> 📅 **记录时间**: 2026/9/8 01:48:46 (2026-09-07T17:48:46.408Z)  
+> 🆔 **会话 ID**: `a6eb27cd-b864-4b7c-bc07-8d55d150af27`  
+> **来源**: 自动模拟（临时 overlay）  
+> 📊 **总步数**: 20 步 | **文件大小**: 211.2 KB  
+> 🏁 **终态**: `partial` / finishReason=`partial`  
+
+---
+
+## 👤 用户输入 (User)
+
+```text
+修改绣丸 最后一刀切换斩，使其拥有80的追斩追踪距离
+```
+
+### 🤖 助手响应 (Step 1)
+
+收到——给绣丸终结技加80追踪，我先定位本体再直写生效。
+
+#### 🛠️ 发起工具调用:
+- **工具名称**: `read_agent_task_record` (ID: `call_01a07cfcc0887b4080ac9bf18a064f10`)
+  ```json
+  {}
+  ```
+- **工具名称**: `workspace_stats` (ID: `call_01a07cfcc18a7430bc59f23fe24a9ea3`)
+  ```json
+  {}
+  ```
+- **工具名称**: `search_param_rows` (ID: `call_01a07cfcc2d27cd1a9fa8d491cb79262`)
+  ```json
+  {
+    "limit": 20,
+    "query": "绣丸"
+  }
+  ```
+- **工具名称**: `search_text_entries` (ID: `call_01a07cfcc4d37842ad55026cecf3b94b`)
+  ```json
+  {
+    "limit": 20,
+    "query": "绣丸"
+  }
+  ```
+
+> **🛠️ 工具返回** (ToolCall ID: `call_01a07cfcc0887b4080ac9bf18a064f10`)
+```json
+{
+  "ok": true,
+  "state": "completed",
+  "data": {
+    "items": [],
+    "record": {
+      "path": "C:\\Users\\ASUS\\AppData\\Local\\Temp\\soulforge-real-agent-2026-09-07T17-48-44-698Z-Rllz1M\\task-records\\a6eb27cd-b864-4b7c-bc07-8d55d150af27.md",
+      "totalEntries": 0,
+      "entries": [],
+      "updatedAt": null
+    },
+    "scalar": null,
+    "summary": null
+  },
+  "pagination": {
+    "originalChars": 391,
+    "returnedCount": null,
+    "totalCount": null,
+    "total": null,
+    "offset": null,
+    "limit": null,
+    "truncated": false,
+    "cursors": {}
+  },
+  "completeness": "complete",
+  "truncated": false,
+  "identifiers": [],
+  "evidence": {
+    "sourceUris": [],
+    "sourceHashes": [],
+    "sourceRevisions": [],
+    "status": "not_applicable",
+    "kind": "other",
+    "nextActions": [],
+    "repeatedQuery": false
+  }
+}
+```
+
+> **🛠️ 工具返回** (ToolCall ID: `call_01a07cfcc18a7430bc59f23fe24a9ea3`)
+```json
+{
+  "ok": false,
+  "state": "failed",
+  "error": {
+    "code": "RESULT_IDENTITY_TOO_LARGE",
+    "message": "结果身份与版本自身大小（8628 字节）超过字节预算（8192 字节），不能截断稳定哈希或对象句柄。"
+  }
+}
+```
+
+> **🛠️ 工具返回** (ToolCall ID: `call_01a07cfcc2d27cd1a9fa8d491cb79262`)
+```json
+{
+  "ok": false,
+  "state": "failed",
+  "error": {
+    "code": "TASK_RECORD_TARGET_REQUIRED",
+    "message": "搜索前必须先从当前用户指令逐字登记至少一个 target；模型不能用任意搜索替换宿主冻结的请求范围。"
+  }
+}
+```
+
+> **🛠️ 工具返回** (ToolCall ID: `call_01a07cfcc4d37842ad55026cecf3b94b`)
+```json
+{
+  "ok": false,
+  "state": "failed",
+  "error": {
+    "code": "TASK_RECORD_TARGET_REQUIRED",
+    "message": "搜索前必须先从当前用户指令逐字登记至少一个 target；模型不能用任意搜索替换宿主冻结的请求范围。"
+  }
+}
+```
+
+### 🤖 助手响应 (Step 2)
+
+登记目标后立刻定位绣丸终结技本体。
+
+#### 🛠️ 发起工具调用:
+- **工具名称**: `update_agent_task_record` (ID: `call_01a07cfcdbc97dc2854c03a8c3431e81`)
+  ```json
+  {
+    "kind": "target",
+    "objectName": "绣丸 最后一刀切换斩",
+    "propertyKey": "target",
+    "value": "修改绣丸 最后一刀切换斩，使其拥有80的追斩追踪距离"
+  }
+  ```
+
+> **🛠️ 工具返回** (ToolCall ID: `call_01a07cfcdbc97dc2854c03a8c3431e81`)
+```json
+{
+  "ok": true,
+  "state": "completed",
+  "data": {
+    "items": [],
+    "record": {
+      "message": "台账词条已登记：绣丸 最后一刀切换斩 -> target",
+      "entry": {
+        "entryId": "entry-0585b98b-6ae1-4b07-97af-af0c9a281612",
+        "objectName": "绣丸 最后一刀切换斩",
+        "propertyKey": "target",
+        "kind": "target",
+        "status": "candidate",
+        "mutationBudget": 0,
+        "mutationUsed": 0
+      },
+      "totalEntries": 1
+    },
+    "scalar": null,
+    "summary": null
+  },
+  "pagination": {
+    "originalChars": 433,
+    "returnedCount": null,
+    "totalCount": null,
+    "total": null,
+    "offset": null,
+    "limit": null,
+    "truncated": false,
+    "cursors": {}
+  },
+  "completeness": "complete",
+  "truncated": false,
+  "identifiers": [
+    "entryId=entry-0585b98b-6ae1-4b07-97af-af0c9a281612"
+  ],
+  "evidence": {
+    "sourceUris": [],
+    "sourceHashes": [],
+    "sourceRevisions": [],
+    "status": "not_applicable",
+    "kind": "other",
+    "nextActions": [],
+    "repeatedQuery": false
+  }
+}
+```
+
+### 🤖 助手响应 (Step 3)
+
+已登记目标,正在搜索绣丸的定位信息。
+
+#### 🛠️ 发起工具调用:
+- **工具名称**: `search_param_rows` (ID: `call_01a07cfceda47a638a71220f0c40d6fe`)
+  ```json
+  {
+    "limit": 20,
+    "query": "绣丸"
+  }
+  ```
+- **工具名称**: `search_text_entries` (ID: `call_01a07cfcef687e03b76be6a8d8456d54`)
+  ```json
+  {
+    "limit": 20,
+    "query": "绣丸"
+  }
+  ```
+- **工具名称**: `retrieve_evidence` (ID: `call_01a07cfcf17a77708f7e4092ff9b7fc4`)
+  ```json
+  {
+    "limit": 20,
+    "query": "绣丸 切换斩 追斩"
+  }
+  ```
+
+> **🛠️ 工具返回** (ToolCall ID: `call_01a07cfceda47a638a71220f0c40d6fe`)
+```json
+{
+  "ok": true,
+  "state": "completed",
+  "data": {
+    "items": [],
+    "record": {
+      "status": "warming_up",
+      "directive": "DEFER_PARAM_QUERY",
+      "state": "warming_up",
+      "totalHits": 0,
+      "hits": [],
+      "message": "【状态机调度】PARAM 语义索引当前正在后台解包预热中（尚未就绪）。请当前循环暂时跳过参数查询流程，优先执行其他可独立推进的任务（如 MSB 地图分析、EMEVD 事件逻辑校验、任务规划等）；请在下一次循环或后续步骤中再重新查询参数。",
+      "searchId": "search-40f13284-0789-4430-b676-528f8b6b5522"
+    },
+    "scalar": null,
+    "summary": null
+  },
+  "pagination": {
+    "originalChars": 547,
+    "returnedCount": null,
+    "totalCount": 0,
+    "total": 0,
+    "offset": null,
+    "limit": null,
+    "truncated": false,
+    "cursors": {}
+  },
+  "completeness": "complete",
+  "truncated": false,
+  "identifiers": [
+    "searchId=search-40f13284-0789-4430-b676-528f8b6b5522"
+  ],
+  "evidence": {
+    "sourceUris": [],
+    "sourceHashes": [],
+    "sourceRevisions": [],
+    "status": "insufficient_evidence",
+    "kind": "discovery",
+    "nextActions": [
+      "当前查询没有命中；这只结束本次查询，不代表对象不存在。继续使用正式名称、参数备注、数字 ID、资源来源或引用关系定位。"
+    ],
+    "repeatedQuery": false
+  }
+}
+```
+
+> **🛠️ 工具返回** (ToolCall ID: `call_01a07cfcef687e03b76be6a8d8456d54`)
+```json
+{
+  "ok": false,
+  "state": "failed",
+  "error": {
+    "code": "RAG_UNAVAILABLE",
+    "message": "RAG 语义语料为空；仅有文件目录不能用于对象定位。",
+    "details": {
+      "ragAvailability": "unavailable",
+      "ragStats": {
+        "total": 136,
+        "byFamily": {
+          "file": 136,
+          "event": 0,
+          "map_entity": 0,
+          "map_region": 0,
+          "param_row": 0,
+          "text_entry": 0,
+          "tae_event": 0
+        }
+      },
+      "diagnostics": [
+        {
+          "severity": "warning",
+          "code": "RAG_SEMANTIC_CORPUS_EMPTY",
+          "message": "RAG 语义语料为空；仅有文件目录不能用于对象定位。"
+        },
+        {
+          "severity": "warning",
+          "code": "RAG_SEMANTIC_CORPUS_EMPTY",
+          "message": "RAG 语义语料为空；仅有文件目录不能用于对象定位。"
+        }
+      ]
+    }
+  }
+}
+```
+
+> **🛠️ 工具返回** (ToolCall ID: `call_01a07cfcf17a77708f7e4092ff9b7fc4`)
+```json
+{
+  "ok": false,
+  "state": "failed",
+  "error": {
+    "code": "RAG_UNAVAILABLE",
+    "message": "RAG 语义语料为空；仅有文件目录不能用于对象定位。"
+  }
+}
+```
+
+### 🤖 助手响应 (Step 4)
+
+已锁定要改的终结追踪，我来深挖绣丸切换斩的参数位置。
+
+#### 🛠️ 发起工具调用:
+- **工具名称**: `resolve_entity` (ID: `call_01a07cfd165a7430aac565234686e4c8`)
+  ```json
+  {
+    "maxCandidates": 20,
+    "query": "绣丸"
+  }
+  ```
+- **工具名称**: `search_resources` (ID: `call_01a07cfd18167670b855d666d36a5cb5`)
+  ```json
+  {
+    "limit": 30,
+    "query": "绣丸"
+  }
+  ```
+- **工具名称**: `search_map_entities` (ID: `call_01a07cfd1a447cd1ad9915674da9a40d`)
+  ```json
+  {
+    "limit": 30,
+    "query": "绣丸"
+  }
+  ```
+- **工具名称**: `search_events` (ID: `call_01a07cfd1c707331ad6b517d836755c6`)
+  ```json
+  {
+    "limit": 30,
+    "query": "绣丸"
+  }
+  ```
+
+> **🛠️ 工具返回** (ToolCall ID: `call_01a07cfd165a7430aac565234686e4c8`)
+```json
+{
+  "ok": false,
+  "state": "failed",
+  "error": {
+    "code": "RESULT_IDENTITY_TOO_LARGE",
+    "message": "结果身份与版本自身大小（8628 字节）超过字节预算（8192 字节），不能截断稳定哈希或对象句柄。"
+  }
+}
+```
+
+> **🛠️ 工具返回** (ToolCall ID: `call_01a07cfd18167670b855d666d36a5cb5`)
+```json
+{
+  "ok": true,
+  "state": "completed",
+  "data": {
+    "items": [],
+    "record": {
+      "results": [],
+      "searchId": "search-1eea3696-e32b-47c8-9f4d-f867f06ecc39"
+    },
+    "scalar": null,
+    "summary": null
+  },
+  "pagination": {
+    "originalChars": 330,
+    "returnedCount": null,
+    "totalCount": null,
+    "total": null,
+    "offset": null,
+    "limit": null,
+    "truncated": false,
+    "cursors": {}
+  },
+  "completeness": "complete",
+  "truncated": false,
+  "identifiers": [
+    "searchId=search-1eea3696-e32b-47c8-9f4d-f867f06ecc39"
+  ],
+  "evidence": {
+    "sourceUris": [],
+    "sourceHashes": [],
+    "sourceRevisions": [],
+    "status": "insufficient_evidence",
+    "kind": "discovery",
+    "nextActions": [
+      "当前查询没有命中；这只结束本次查询，不代表对象不存在。继续使用正式名称、参数备注、数字 ID、资源来源或引用关系定位。"
+    ],
+    "repeatedQuery": false
+  }
+}
+```
+
+> **🛠️ 工具返回** (ToolCall ID: `call_01a07cfd1a447cd1ad9915674da9a40d`)
+```json
+{
+  "ok": false,
+  "state": "failed",
+  "error": {
+    "code": "RAG_UNAVAILABLE",
+    "message": "RAG 语义语料为空；仅有文件目录不能用于对象定位。",
+    "details": {
+      "ragAvailability": "unavailable",
+      "ragStats": {
+        "total": 136,
+        "byFamily": {
+          "file": 136,
+          "event": 0,
+          "map_entity": 0,
+          "map_region": 0,
+          "param_row": 0,
+          "text_entry": 0,
+          "tae_event": 0
+        }
+      },
+      "diagnostics": [
+        {
+          "severity": "warning",
+          "code": "RAG_SEMANTIC_CORPUS_EMPTY",
+          "message": "RAG 语义语料为空；仅有文件目录不能用于对象定位。"
+        },
+        {
+          "severity": "warning",
+          "code": "RAG_SEMANTIC_CORPUS_EMPTY",
+          "message": "RAG 语义语料为空；仅有文件目录不能用于对象定位。"
+        }
+      ]
+    }
+  }
+}
+```
+
+> **🛠️ 工具返回** (ToolCall ID: `call_01a07cfd1c707331ad6b517d836755c6`)
+```json
+{
+  "ok": false,
+  "state": "failed",
+  "error": {
+    "code": "RAG_UNAVAILABLE",
+    "message": "RAG 语义语料为空；仅有文件目录不能用于对象定位。",
+    "details": {
+      "ragAvailability": "unavailable",
+      "ragStats": {
+        "total": 136,
+        "byFamily": {
+          "file": 136,
+          "event": 0,
+          "map_entity": 0,
+          "map_region": 0,
+          "param_row": 0,
+          "text_entry": 0,
+          "tae_event": 0
+        }
+      },
+      "diagnostics": [
+        {
+          "severity": "warning",
+          "code": "RAG_SEMANTIC_CORPUS_EMPTY",
+          "message": "RAG 语义语料为空；仅有文件目录不能用于对象定位。"
+        },
+        {
+          "severity": "warning",
+          "code": "RAG_SEMANTIC_CORPUS_EMPTY",
+          "message": "RAG 语义语料为空；仅有文件目录不能用于对象定位。"
+        }
+      ]
+    }
+  }
+}
+```
+
+### 🤖 助手响应 (Step 5)
+
+终结追踪80码——我正在全力定位绣丸那一刀的参数。
+
+#### 🛠️ 发起工具调用:
+- **工具名称**: `search_param_rows` (ID: `call_01a07cfd86407a4096f2ec99475d82cf`)
+  ```json
+  {
+    "limit": 30,
+    "query": "切换斩"
+  }
+  ```
+- **工具名称**: `search_param_rows` (ID: `call_01a07cfd894a734288c1f6eb908e6979`)
+  ```json
+  {
+    "limit": 30,
+    "query": "追斩"
+  }
+  ```
+- **工具名称**: `search_param_rows` (ID: `call_01a07cfd8c4e7350bc6b259284b146ee`)
+  ```json
+  {
+    "limit": 30,
+    "query": "Hidamaru"
+  }
+  ```
+- **工具名称**: `search_resources` (ID: `call_01a07cfd907e7522929e191397c9ca80`)
+  ```json
+  {
+    "limit": 50,
+    "query": "param"
+  }
+  ```
+
+> **🛠️ 工具返回** (ToolCall ID: `call_01a07cfd86407a4096f2ec99475d82cf`)
+```json
+{
+  "ok": true,
+  "state": "completed",
+  "data": {
+    "items": [],
+    "record": {
+      "results": [
+        {
+          "item": {
+            "uri": "param://SP_EFFECT_PARAM_ST/4401",
+            "sourceUri": "file://param/gameparam/gameparam.parambnd.dcx",
+            "paramName": "SP_EFFECT_PARAM_ST",
+            "entryName": "SpEffectParam.param",
+            "entryIndex": 118,
+            "rowId": 4401,
+            "sourceHash": "1d3c66aea588cdb859884bd33141cc48d7c04649a7e0b7baa1def840e050989d",
+            "rowName": "刀光切换特效 4401-4410"
+          },
+          "score": 6,
+          "highlights": [
+            "切",
+            "换"
+          ]
+        },
+        {
+          "item": {
+            "uri": "param://SP_EFFECT_VFX_PARAM_ST/32403",
+            "sourceUri": "file://param/gameparam/gameparam.parambnd.dcx",
+            "paramName": "SP_EFFECT_VFX_PARAM_ST",
+            "entryName": "SpEffectVfxParam.param",
+            "entryIndex": 119,
+            "rowId": 32403,
+            "sourceHash": "c9c4dd2a942162ae40f9b9f99f939a8cfbd1e1c25d0816ba963d5c0bbe8e84d6",
+            "rowName": "火锈丸切换特效"
+          },
+          "score": 6,
+          "highlights": [
+            "切",
+            "换"
+          ]
+        },
+        {
+          "item": {
+            "uri": "param://SP_EFFECT_PARAM_ST/4402",
+            "sourceUri": "file://param/gameparam/gameparam.parambnd.dcx",
+            "paramName": "SP_EFFECT_PARAM_ST",
+            "entryName": "SpEffectParam.param",
+            "entryIndex": 118,
+            "rowId": 4402,
+            "sourceHash": "1d3c66aea588cdb859884bd33141cc48d7c04649a7e0b7baa1def840e050989d",
+            "rowName": "刀光切换特效"
+          },
+          "score": 6,
+          "highlights": [
+            "切",
+            "换"
+          ]
+        },
+        {
+          "item": {
+            "uri": "param://SP_EFFECT_PARAM_ST/4403",
+            "sourceUri": "file://param/gameparam/gameparam.parambnd.dcx",
+            "paramName": "SP_EFFECT_PARAM_ST",
+            "entryName": "SpEffectParam.param",
+            "entryIndex": 118,
+            "rowId": 4403,
+            "sourceHash": "1d3c66aea588cdb859884bd33141cc48d7c04649a7e0b7baa1def840e050989d",
+            "rowName": "刀光切换特效"
+          },
+          "score": 6,
+          "highlights": [
+            "切",
+            "换"
+          ]
+        },
+        {
+          "item": {
+            "uri": "param://SP_EFFECT_PARAM_ST/4404",
+            "sourceUri": "file://param/gameparam/gameparam.parambnd.dcx",
+            "paramName": "SP_EFFECT_PARAM_ST",
+            "entryName": "SpEffectParam.param",
+            "entryIndex": 118,
+            "rowId": 4404,
+            "sourceHash": "1d3c66aea588cdb859884bd33141cc48d7c04649a7e0b7baa1def840e050989d",
+            "rowName": "刀光切换特效"
+          },
+          "score": 6,
+          "highlights": [
+            "切",
+            "换"
+          ]
+        },
+        {
+          "item": {
+            "uri": "param://SP_EFFECT_PARAM_ST/4405",
+            "sourceUri": "file://param/gameparam/gameparam.parambnd.dcx",
+            "paramName": "SP_EFFECT_PARAM_ST",
+            "entryName": "SpEffectParam.param",
+            "entryIndex": 118,
+            "rowId": 4405,
+            "sourceHash": "1d3c66aea588cdb859884bd33141cc48d7c04649a7e0b7baa1def840e050989d",
+            "rowName": "刀光切换特效"
+          },
+          "score": 6,
+          "highlights": [
+            "切",
+            "换"
+          ]
+        }
+      ],
+      "resultsReturnedCount": 6,
+      "resultsTotalCount": 20,
+      "resultsTruncated": true,
+      "searchId": "search-336386f4-90a5-4f3b-b236-47f9612c2320"
+    },
+    "scalar": null,
+    "summary": "工具 search_param_rows 输出过大，已返回摘要；请使用返回的 ID 或游标继续分页查询。"
+  },
+  "pagination": {
+    "originalChars": 13400,
+    "returnedCount": null,
+    "totalCount": null,
+    "total": null,
+    "offset": null,
+    "limit": null,
+    "truncated": false,
+    "cursors": {}
+  },
+  "completeness": "summary_only",
+  "truncated": true,
+  "identifiers": [
+    "uri=param://SP_EFFECT_PARAM_ST/4401",
+    "sourceUri=file://param/gameparam/gameparam.parambnd.dcx",
+    "rowId=4401",
+    "uri=param://SP_EFFECT_VFX_PARAM_ST/32403",
+    "rowId=32403",
+    "uri=param://SP_EFFECT_PARAM_ST/4402",
+    "rowId=4402",
+    "uri=param://SP_EFFECT_PARAM_ST/4403",
+    "rowId=4403",
+    "uri=param://SP_EFFECT_PARAM_ST/4404",
+    "rowId=4404",
+    "uri=param://SP_EFFECT_PARAM_ST/4405"
+  ],
+  "evidence": {
+    "sourceUris": [
+      "file://param/gameparam/gameparam.parambnd.dcx"
+    ],
+    "sourceHashes": [
+      "1d3c66aea588cdb859884bd33141cc48d7c04649a7e0b7baa1def840e050989d",
+      "c9c4dd2a942162ae40f9b9f99f939a8cfbd1e1c25d0816ba963d5c0bbe8e84d6"
+    ],
+    "sourceRevisions": [],
+    "status": "candidate",
+    "kind": "discovery",
+    "nextActions": [
+      "这是 PARAM 候选；优先使用返回的 paramName、rowName、fieldId、字段显示名/备注和 sourceUri。",
+      "如果结果没有 fieldId，下一步先用同一 table/rowIds 调用 search_param_fields，并使用 health/hp、elite/boss、hostile/team/target、lightning/effect 或 drop/reward/item 等字段语义词；拿到真实 fieldId 后再调用 read_param_fields。"
+    ],
+    "repeatedQuery": false
+  }
+}
+```
+
+> **🛠️ 工具返回** (ToolCall ID: `call_01a07cfd894a734288c1f6eb908e6979`)
+```json
+{
+  "ok": true,
+  "state": "completed",
+  "data": {
+    "items": [],
+    "record": {
+      "results": [
+        {
+          "item": {
+            "uri": "param://EQUIP_MTRL_SET_PARAM_ST/301000",
+            "sourceUri": "file://param/gameparam/gameparam.parambnd.dcx",
+            "paramName": "EQUIP_MTRL_SET_PARAM_ST",
+            "entryName": "EquipMtrlSetParam.param",
+            "entryIndex": 37,
+            "rowId": 301000,
+            "sourceHash": "d8d772ae17896faad74672b9682e3c733295bcbca3113f6697c573767ae464a2",
+            "rowName": "派生攻击·追斩",
+            "fields": [],
+            "raw": {
+              "parser": "sekiro-param-native-v1",
+              "entryIndex": 37,
+              "entryName": "EquipMtrlSetParam.param",
+              "rowIndex": 45,
+              "nativeNameOffset": 7942,
+              "nativeDataOffset": 4312,
+              "dataLength": 32,
+              "dataHash": "6a197c1553d0d28bd02e4a710d41bdc07245cfd40053babeb0eaf5f9c40da4df",
+              "confidence": "high"
+            }
+          },
+          "score": 12,
+          "highlights": [
+            "追斩"
+          ]
+        },
+        {
+          "item": {
+            "uri": "param://SKILL_PARAM_ST/100",
+            "sourceUri": "file://param/gameparam/gameparam.parambnd.dcx",
+            "paramName": "SKILL_PARAM_ST",
+            "entryName": "SkillParam.param",
+            "entryIndex": 117,
+            "rowId": 100,
+            "sourceHash": "e23082e65a15ac6755cb30654a0f9c40088a3fa7d2ab3fb73c6fefc352bf5d48",
+            "rowName": "派生攻击：追斩",
+            "fields": [],
+            "raw": {
+              "parser": "sekiro-param-native-v1",
+              "entryIndex": 117,
+              "entryName": "SkillParam.param",
+              "rowIndex": 13,
+              "nativeNameOffset": 14379,
+              "nativeDataOffset": 4144,
+              "dataLength": 96,
+              "dataHash": "44d7b9ba71528fbe07eca1106faad0d5f1ba48a28e47140f429c45da85e8b275",
+              "confidence": "high"
+            }
+          },
+          "score": 12,
+          "highlights": [
+            "追斩"
+          ]
+        },
+        {
+          "item": {
+            "uri": "param://SP_EFFECT_PARAM_ST/3709",
+            "sourceUri": "file://param/gameparam/gameparam.parambnd.dcx",
+            "paramName": "SP_EFFECT_PARAM_ST",
+            "entryName": "SpEffectParam.param",
+            "entryIndex": 118,
+            "rowId": 3709,
+            "sourceHash": "1d3c66aea588cdb859884bd33141cc48d7c04649a7e0b7baa1def840e050989d",
+            "rowName": "三冲追斩白血刀附魔",
+            "fields": [],
+            "raw": {
+              "parser": "sekiro-param-native-v1",
+              "entryIndex": 118,
+              "entryName": "SpEffectParam.param",
+              "rowIndex": 1207,
+              "nativeNameOffset": 8693687,
+              "nativeDataOffset": 1500240,
+              "dataLength": 1088,
+              "dataHash": "6f85d1796ae0076e8dad1650060efac8c6cd30f0e85128ab97bbb9c66255b020",
+              "confidence": "high"
+            }
+          },
+          "score": 12,
+          "highlights": [
+            "追斩"
+          ]
+        },
+        {
+          "item": {
+            "uri": "param://BEHAVIOR_PARAM_ST/250600727",
+            "sourceUri": "file://param/gameparam/gameparam.parambnd.dcx",
+            "paramName": "BEHAVIOR_PARAM_ST",
+            "entryName": "BehaviorParam.param",
+            "entryIndex": 7,
+            "rowId": 250600727,
+            "sourceHash": "b74b265ebf1bf0a71b46718aefd4cfbbbeb0e5bbba7c58d5a8cbe028fd0c42e4",
+            "rowName": "横斩 危 追加紫煙爆彈 發射延遲",
+            "fields": [],
+            "raw": {
+              "parser": "sekiro-param-native-v1",
+              "entryIndex": 7,
+              "entryName": "BehaviorParam.param",
+              "rowIndex": 3536,
+              "nativeNameOffset": 328900,
+              "nativeDataOffset": 242984,
+              "dataLength": 32,
+              "dataHash": "7078cfe9e1bd92b9bcc5c93da42e3c8ccbea983807fd0b2344a9770845363a03",
+              "confidence": "high"
+            }
+          },
+          "score": 6,
+          "highlights": [
+            "追",
+            "斩"
+          ]
+        },
+        {
+          "item": {
+            "uri": "param://BULLET_PARAM_ST/50600727",
+            "sourceUri": "file://param/gameparam/gameparam.parambnd.dcx",
+            "paramName": "BULLET_PARAM_ST",
+            "entryName": "Bullet.param",
+            "entryIndex": 11,
+            "rowId": 50600727,
+            "sourceHash": "7b4327ff4a78fddb7b13576cb7e3d88e7ed0f167cf6a21694db92a826a84564d",
+            "rowName": "横斩 危 追加紫煙爆彈 發射延遲",
+            "fields": [],
+            "raw": {
+              "parser": "sekiro-param-native-v1",
+              "entryIndex": 11,
+              "entryName": "Bullet.param",
+              "rowIndex": 2029,
+              "nativeNameOffset": 914200,
+              "nativeDataOffset": 594824,
+              "dataLength": 256,
+              "dataHash": "c9f9005a3e08e4b179d8636ed8874a964fb1428abc446a69847d859407b72b0f",
+              "confidence": "high"
+            }
+          },
+          "score": 6,
+          "highlights": [
+            "追",
+            "斩"
+          ]
+        },
+        {
+          "item": {
+            "uri": "param://BULLET_PARAM_ST/50600728",
+            "sourceUri": "file://param/gameparam/gameparam.parambnd.dcx",
+            "paramName": "BULLET_PARAM_ST",
+            "entryName": "Bullet.param",
+            "entryIndex": 11,
+            "rowId": 50600728,
+            "sourceHash": "7b4327ff4a78fddb7b13576cb7e3d88e7ed0f167cf6a21694db92a826a84564d",
+            "rowName": "横斩 危 追加紫煙爆彈",
+            "fields": [],
+            "raw": {
+              "parser": "sekiro-param-native-v1",
+              "entryIndex": 11,
+              "entryName": "Bullet.param",
+              "rowIndex": 2030,
+              "nativeNameOffset": 914234,
+              "nativeDataOffset": 595080,
+              "dataLength": 256,
+              "dataHash": "970ce33fcebba1cb51628131bdc2e78b9c8c4b61e48b285c33d6cf33cd2b36cf",
+              "confidence": "high"
+            }
+          },
+          "score": 6,
+          "highlights": [
+            "追",
+            "斩"
+          ]
+        },
+        {
+          "item": {
+            "uri": "param://BULLET_PARAM_ST/50600729",
+            "sourceUri": "file://param/gameparam/gameparam.parambnd.dcx",
+            "paramName": "BULLET_PARAM_ST",
+            "entryName": "Bullet.param",
+            "entryIndex": 11,
+            "rowId": 50600729,
+            "sourceHash": "7b4327ff4a78fddb7b13576cb7e3d88e7ed0f167cf6a21694db92a826a84564d",
+            "rowName": "横斩 危 追加紫煙爆彈",
+            "fields": [],
+            "raw": {
+              "parser": "sekiro-param-native-v1",
+              "entryIndex": 11,
+              "entryName": "Bullet.param",
+              "rowIndex": 2031,
+              "nativeNameOffset": 914258,
+              "nativeDataOffset": 595336,
+              "dataLength": 256,
+              "dataHash": "b6a1e17e0776b2eb557f6d0da9a6827768d6798c0e50cc240598c6ad0c146d6b",
+              "confidence": "high"
+            }
+          },
+          "score": 6,
+          "highlights": [
+            "追",
+            "斩"
+          ]
+        }
+      ],
+      "searchId": "search-5992c859-bb3f-4c78-b004-109260aff9d4"
+    },
+    "scalar": null,
+    "summary": null
+  },
+  "pagination": {
+    "originalChars": 5083,
+    "returnedCount": null,
+    "totalCount": null,
+    "total": null,
+    "offset": null,
+    "limit": null,
+    "truncated": false,
+    "cursors": {}
+  },
+  "completeness": "complete",
+  "truncated": false,
+  "identifiers": [
+    "uri=param://EQUIP_MTRL_SET_PARAM_ST/301000",
+    "sourceUri=file://param/gameparam/gameparam.parambnd.dcx",
+    "rowId=301000",
+    "uri=param://SKILL_PARAM_ST/100",
+    "rowId=100",
+    "uri=param://SP_EFFECT_PARAM_ST/3709",
+    "rowId=3709",
+    "uri=param://BEHAVIOR_PARAM_ST/250600727",
+    "rowId=250600727",
+    "uri=param://BULLET_PARAM_ST/50600727",
+    "rowId=50600727",
+    "uri=param://BULLET_PARAM_ST/50600728",
+    "rowId=50600728",
+    "uri=param://BULLET_PARAM_ST/50600729",
+    "rowId=50600729",
+    "searchId=search-5992c859-bb3f-4c78-b004-109260aff9d4"
+  ],
+  "evidence": {
+    "sourceUris": [
+      "file://param/gameparam/gameparam.parambnd.dcx"
+    ],
+    "sourceHashes": [
+      "d8d772ae17896faad74672b9682e3c733295bcbca3113f6697c573767ae464a2",
+      "e23082e65a15ac6755cb30654a0f9c40088a3fa7d2ab3fb73c6fefc352bf5d48",
+      "1d3c66aea588cdb859884bd33141cc48d7c04649a7e0b7baa1def840e050989d",
+      "b74b265ebf1bf0a71b46718aefd4cfbbbeb0e5bbba7c58d5a8cbe028fd0c42e4",
+      "7b4327ff4a78fddb7b13576cb7e3d88e7ed0f167cf6a21694db92a826a84564d"
+    ],
+    "sourceRevisions": [],
+    "status": "candidate",
+    "kind": "discovery",
+    "nextActions": [
+      "已命中相同或语义相近的定位词；停止重复同义词搜索，停止继续扩大同一路径，改用另一类资源或已有结果的稳定 ID/sourceUri。"
+    ],
+    "repeatedQuery": true
+  }
+}
+```
+
+> **🛠️ 工具返回** (ToolCall ID: `call_01a07cfd8c4e7350bc6b259284b146ee`)
+```json
+{
+  "ok": false,
+  "state": "failed",
+  "error": {
+    "code": "RAG_UNAVAILABLE",
+    "message": "RAG 语义语料为空；仅有文件目录不能用于对象定位。",
+    "details": {
+      "ragAvailability": "unavailable",
+      "ragStats": {
+        "total": 136,
+        "byFamily": {
+          "file": 136,
+          "event": 0,
+          "map_entity": 0,
+          "map_region": 0,
+          "param_row": 0,
+          "text_entry": 0,
+          "tae_event": 0
+        }
+      },
+      "diagnostics": [
+        {
+          "severity": "warning",
+          "code": "RAG_SEMANTIC_CORPUS_EMPTY",
+          "message": "RAG 语义语料为空；仅有文件目录不能用于对象定位。"
+        },
+        {
+          "severity": "warning",
+          "code": "RAG_SEMANTIC_CORPUS_EMPTY",
+          "message": "RAG 语义语料为空；仅有文件目录不能用于对象定位。"
+        }
+      ]
+    }
+  }
+}
+```
+
+> **🛠️ 工具返回** (ToolCall ID: `call_01a07cfd907e7522929e191397c9ca80`)
+```json
+{
+  "ok": false,
+  "state": "failed",
+  "error": {
+    "code": "RESULT_IDENTITY_TOO_LARGE",
+    "message": "结果身份与版本自身大小（9900 字节）超过字节预算（8192 字节），不能截断稳定哈希或对象句柄。"
+  }
+}
+```
+
+### 🤖 助手响应 (Step 6)
+
+已找到追斩相关候选，正在确认80追踪距离对应的具体字段。
+
+#### 🛠️ 发起工具调用:
+- **工具名称**: `search_param_fields` (ID: `call_01a07cfdc36574b18a194d3c58629094`)
+  ```json
+  {
+    "limit": 30,
+    "query": "track distance lock chase",
+    "rowIds": [
+      100
+    ],
+    "table": "SKILL_PARAM_ST"
+  }
+  ```
+- **工具名称**: `search_param_fields` (ID: `call_01a07cfdc6e17590a531f5298d6136f8`)
+  ```json
+  {
+    "limit": 30,
+    "query": "track distance lock chase",
+    "rowIds": [
+      301000
+    ],
+    "table": "EQUIP_MTRL_SET_PARAM_ST"
+  }
+  ```
+- **工具名称**: `search_param_fields` (ID: `call_01a07cfdca4979019a5742b070d63b26`)
+  ```json
+  {
+    "limit": 30,
+    "query": "track distance lock chase",
+    "rowIds": [
+      3709
+    ],
+    "table": "SP_EFFECT_PARAM_ST"
+  }
+  ```
+
+> **🛠️ 工具返回** (ToolCall ID: `call_01a07cfdc36574b18a194d3c58629094`)
+```json
+{
+  "ok": true,
+  "state": "completed",
+  "data": {
+    "items": [],
+    "record": {
+      "ok": true,
+      "containerPath": "C:\\Users\\ASUS\\AppData\\Local\\Temp\\soulforge-real-agent-2026-09-07T17-48-44-698Z-Rllz1M\\overlay\\param\\gameparam\\gameparam.parambnd.dcx",
+      "table": "SkillParam",
+      "entryName": "N:\\NTC\\data\\Target\\INTERROOT_win64\\param\\GameParam\\SkillParam.param",
+      "entryIndex": 117,
+      "rowIds": [
+        100
+      ],
+      "sourceHash": "e23082e65a15ac6755cb30654a0f9c40088a3fa7d2ab3fb73c6fefc352bf5d48",
+      "sourceRevision": 1788456409864.9424,
+      "fields": [
+        {
+          "fieldId": "unlockEventFlag",
+          "name": "表示許可イベントフラグ",
+          "type": "s32",
+          "description": "This skill will be locked until this event flag is on"
+        },
+        {
+          "fieldId": "parent1",
+          "name": "親スキルID_1",
+          "type": "s32",
+          "description": "Skill needed to unlock this skill",
+          "refs": "SkillParam"
+        },
+        {
+          "fieldId": "parent2",
+          "name": "親スキルID_2",
+          "type": "s32",
+          "description": "Skill needed to unlock this skill",
+          "refs": "SkillParam"
+        },
+        {
+          "fieldId": "parent3",
+          "name": "親スキルID_3",
+          "type": "s32",
+          "description": "Skill needed to unlock this skill",
+          "refs": "SkillParam"
+        },
+        {
+          "fieldId": "spEffect1",
+          "name": "解禁後常駐特殊効果ID1",
+          "type": "s32",
+          "description": "Applies SpEffect to the player when this skill is unlocked",
+          "refs": "SpEffectParam"
+        },
+        {
+          "fieldId": "spEffect2",
+          "name": "解禁後常駐特殊効果ID2",
+          "type": "s32",
+          "description": "Applies SpEffect to the player when this skill is unlocked",
+          "refs": "SpEffectParam"
+        },
+        {
+          "fieldId": "spEffect3",
+          "name": "解禁後常駐特殊効果ID3",
+          "type": "s32",
+          "description": "Applies SpEffect to the player when this skill is unlocked",
+          "refs": "SpEffectParam"
+        },
+        {
+          "fieldId": "unenforementWepId",
+          "name": "仮想武器ID_未解禁",
+          "type": "s32",
+          "description": "Dummy weapon used to hide the skill until viewing is unlocked, this one specifies the type of skill",
+          "refs": "EquipParamWeapon"
+        },
+        {
+          "fieldId": "unlovkViewSkill0",
+          "name": "解禁許可スキルID_0",
+          "type": "s32",
+          "description": "Skills needed to view what the skill is, only one is needed to unlock viewing",
+          "refs": "SkillParam"
+        },
+        {
+          "fieldId": "unlovkViewSkill1",
+          "name": "解禁許可スキルID_1",
+          "type": "s32",
+          "description": "Skills needed to view what the skill is, only one is needed to unlock viewing",
+          "refs": "SkillParam"
+        },
+        {
+          "fieldId": "unlovkViewSkill2",
+          "name": "解禁許可スキルID_2",
+          "type": "s32",
+          "description": "Skills needed to view what the skill is, only one is needed to unlock viewing",
+          "refs": "SkillParam"
+        },
+        {
+          "fieldId": "unlovkViewSkill3",
+          "name": "解禁許可スキルID_3",
+          "type": "s32",
+          "description": "Skills needed to view what the skill is, only one is needed to unlock viewing",
+          "refs": "SkillParam"
+        },
+        {
+          "fieldId": "unlovkViewSkill4",
+          "name": "解禁許可スキルID_4",
+          "type": "s32",
+          "description": "Skills needed to view what the skill is, only one is needed to unlock viewing",
+          "refs": "SkillParam"
+        },
+        {
+          "fieldId": "unlovkViewSkill5",
+          "name": "解禁許可スキルID_5",
+          "type": "s32",
+          "description": "Skills needed to view what the skill is, only one is needed to unlock viewing",
+          "refs": "SkillParam"
+        },
+        {
+          "fieldId": "unlovkViewSkill6",
+          "name": "解禁許可スキルID_6",
+          "type": "s32",
+          "description": "Skills needed to view what the skill is, only one is needed to unlock viewing",
+          "refs": "SkillParam"
+        },
+        {
+          "fieldId": "unlovkViewSkill7",
+          "name": "解禁許可スキルID_7",
+          "type": "s32",
+          "description": "Skills needed to view what the skill is, only one is needed to unlock viewing",
+          "refs": "SkillParam"
+        },
+        {
+          "fieldId": "unreleaseWepId",
+          "name": "仮想武器ID_非公開",
+          "type": "s32",
+          "description": "Dummy weapon used to hide the skill until viewing is unlocked, this one doesn't specify the type of skill",
+          "refs": "EquipParamWeapon"
+        }
+      ],
+      "diagnostics": [
+        {
+          "severity": "info",
+          "code": "PARAM_DOCUMENT_ROUNDTRIP_SEMANTIC_VERIFIED",
+          "message": "PARAM 无修改往返字节级一致。"
+        },
+        {
+          "severity": "info",
+          "code": "PARAM_DOCUMENT_SESSION",
+          "message": "session 7c8020363f62e2dec1d2607ec3d28ec4 gen 0 parse 1"
+        }
+      ],
+      "searchId": "search-2db04d13-d138-476a-8ee3-ceb8e86efd37"
+    },
+    "scalar": null,
+    "summary": null
+  },
+  "pagination": {
+    "originalChars": 3894,
+    "returnedCount": null,
+    "totalCount": null,
+    "total": null,
+    "offset": null,
+    "limit": null,
+    "truncated": false,
+    "cursors": {}
+  },
+  "completeness": "complete",
+  "truncated": false,
+  "identifiers": [
+    "fieldId=unlockEventFlag",
+    "fieldId=parent1",
+    "fieldId=parent2",
+    "fieldId=parent3",
+    "fieldId=spEffect1",
+    "fieldId=spEffect2",
+    "fieldId=spEffect3",
+    "fieldId=unenforementWepId",
+    "fieldId=unlovkViewSkill0",
+    "fieldId=unlovkViewSkill1",
+    "fieldId=unlovkViewSkill2",
+    "fieldId=unlovkViewSkill3",
+    "fieldId=unlovkViewSkill4",
+    "fieldId=unlovkViewSkill5",
+    "fieldId=unlovkViewSkill6",
+    "fieldId=unlovkViewSkill7",
+    "fieldId=unreleaseWepId",
+    "searchId=search-2db04d13-d138-476a-8ee3-ceb8e86efd37"
+  ],
+  "evidence": {
+    "sourceUris": [],
+    "sourceHashes": [
+      "e23082e65a15ac6755cb30654a0f9c40088a3fa7d2ab3fb73c6fefc352bf5d48"
+    ],
+    "sourceRevisions": [
+      1788456409864.9424
+    ],
+    "status": "candidate",
+    "kind": "discovery",
+    "nextActions": [
+      "已命中相同或语义相近的定位词；停止重复同义词搜索，停止继续扩大同一路径，改用另一类资源或已有结果的稳定 ID/sourceUri。"
+    ],
+    "repeatedQuery": true
+  }
+}
+```
+
+> **🛠️ 工具返回** (ToolCall ID: `call_01a07cfdc6e17590a531f5298d6136f8`)
+```json
+{
+  "ok": true,
+  "state": "completed",
+  "data": {
+    "items": [],
+    "record": {
+      "ok": true,
+      "containerPath": "C:\\Users\\ASUS\\AppData\\Local\\Temp\\soulforge-real-agent-2026-09-07T17-48-44-698Z-Rllz1M\\overlay\\param\\gameparam\\gameparam.parambnd.dcx",
+      "table": "EquipMtrlSetParam",
+      "entryName": "N:\\NTC\\data\\Target\\INTERROOT_win64\\param\\GameParam\\EquipMtrlSetParam.param",
+      "entryIndex": 37,
+      "rowIds": [
+        301000
+      ],
+      "sourceHash": "d8d772ae17896faad74672b9682e3c733295bcbca3113f6697c573767ae464a2",
+      "sourceRevision": 1788456409864.9424,
+      "fields": [],
+      "diagnostics": [
+        {
+          "severity": "info",
+          "code": "PARAM_DOCUMENT_ROUNDTRIP_SEMANTIC_VERIFIED",
+          "message": "PARAM 无修改往返字节级一致。"
+        },
+        {
+          "severity": "info",
+          "code": "PARAM_DOCUMENT_SESSION",
+          "message": "session 2c44cf0657954242ca92b1662e534db0 gen 0 parse 1"
+        }
+      ],
+      "searchId": "search-015d8494-282b-4480-bc00-dcea02de1b16"
+    },
+    "scalar": null,
+    "summary": null
+  },
+  "pagination": {
+    "originalChars": 1177,
+    "returnedCount": null,
+    "totalCount": null,
+    "total": null,
+    "offset": null,
+    "limit": null,
+    "truncated": false,
+    "cursors": {}
+  },
+  "completeness": "complete",
+  "truncated": false,
+  "identifiers": [
+    "searchId=search-015d8494-282b-4480-bc00-dcea02de1b16"
+  ],
+  "evidence": {
+    "sourceUris": [],
+    "sourceHashes": [
+      "d8d772ae17896faad74672b9682e3c733295bcbca3113f6697c573767ae464a2"
+    ],
+    "sourceRevisions": [
+      1788456409864.9424
+    ],
+    "status": "insufficient_evidence",
+    "kind": "discovery",
+    "nextActions": [
+      "当前字段语义查询没有命中；不能调用 read_param_fields，因为没有真实 fieldId。改用 health/hp、elite/boss、hostile/team/target、lightning/effect 或 drop/reward/item 等字段语义词重新检索。"
+    ],
+    "repeatedQuery": true
+  }
+}
+```
+
+> **🛠️ 工具返回** (ToolCall ID: `call_01a07cfdca4979019a5742b070d63b26`)
+```json
+{
+  "ok": true,
+  "state": "completed",
+  "data": {
+    "items": [],
+    "record": {
+      "ok": true,
+      "containerPath": "C:\\Users\\ASUS\\AppData\\Local\\Temp\\soulforge-real-agent-2026-09-07T17-48-44-698Z-Rllz1M\\overlay\\param\\gameparam\\gameparam.parambnd.dcx",
+      "table": "SpEffectParam",
+      "entryName": "N:\\NTC\\data\\Target\\INTERROOT_win64\\param\\GameParam\\SpEffectParam.param",
+      "entryIndex": 118,
+      "rowIds": [
+        3709
+      ],
+      "sourceHash": "1d3c66aea588cdb859884bd33141cc48d7c04649a7e0b7baa1def840e050989d",
+      "sourceRevision": 1788456409864.9424,
+      "fields": [
+        {
+          "fieldId": "unlockThresholdCamouflage",
+          "name": "Camouflage Block Lock Threshold",
+          "type": "s8",
+          "description": "Alpha value that makes it impossible to lock while hidden"
+        },
+        {
+          "fieldId": "bowDistRate",
+          "name": "Attenuation Distance %",
+          "type": "s16",
+          "description": "Multiplies the attenuation range of bullets, requires stateInfo 168"
+        },
+        {
+          "fieldId": "antiDarkSightRadius",
+          "name": "Full View in Darkness - Radius",
+          "type": "f32",
+          "description": "Darkness radius [m]. If you are within this distance, you will be able to see at normal distance even in dark places."
+        },
+        {
+          "fieldId": "hearingSearchRate",
+          "name": "AI Hearing Adjustment",
+          "type": "f32",
+          "description": "Multiply the AI ​​hearing distance by the set magnification factor"
+        },
+        {
+          "fieldId": "mapVisibilityOverrideDark",
+          "name": "AI Judgment: Dark Visibility",
+          "type": "u8",
+          "description": "When performing lock judgment or AI visibility judgment, if the map visibility type of the hit where the target character is standing is 'darkness', replace it with this value before making the judgment."
+        },
+        {
+          "fieldId": "mapVisibilityOverrideGood",
+          "name": "AI Judgment: Good Visibility",
+          "type": "u8",
+          "description": "When performing a lock judgment or AI visibility judgment, if the map visibility type of the hit where the target character is standing is 'good', replace it with this value before making the judgment."
+        },
+        {
+          "fieldId": "mapVisibilityOverridePitchDark",
+          "name": "AI Judgment: Pitch Black Visibility",
+          "type": "u8",
+          "description": "When performing lock judgment or AI visibility judgment, if the map visibility type of the hit where the target character is standing is 'pitch darkness', replace it with this value before making the judgment."
+        },
+        {
+          "fieldId": "sightSearchRate",
+          "name": "AI Vision Correction",
+          "type": "f32",
+          "description": "Give it to the viewer. Multiply your own AI visual distance by the set magnification factor"
+        }
+      ],
+      "diagnostics": [
+        {
+          "severity": "info",
+          "code": "PARAM_DOCUMENT_ROUNDTRIP_SEMANTIC_VERIFIED",
+          "message": "PARAM 无修改往返字节级一致。"
+        },
+        {
+          "severity": "info",
+          "code": "PARAM_DOCUMENT_SESSION",
+          "message": "session 9c7680969f7c18a00910a5ae4d23930e gen 0 parse 1"
+        }
+      ],
+      "searchId": "search-ba9ebf15-f513-4108-a0e1-07682f50f1ea"
+    },
+    "scalar": null,
+    "summary": null
+  },
+  "pagination": {
+    "originalChars": 3056,
+    "returnedCount": null,
+    "totalCount": null,
+    "total": null,
+    "offset": null,
+    "limit": null,
+    "truncated": false,
+    "cursors": {}
+  },
+  "completeness": "complete",
+  "truncated": false,
+  "identifiers": [
+    "fieldId=unlockThresholdCamouflage",
+    "fieldId=bowDistRate",
+    "fieldId=antiDarkSightRadius",
+    "fieldId=hearingSearchRate",
+    "fieldId=mapVisibilityOverrideDark",
+    "fieldId=mapVisibilityOverrideGood",
+    "fieldId=mapVisibilityOverridePitchDark",
+    "fieldId=sightSearchRate",
+    "searchId=search-ba9ebf15-f513-4108-a0e1-07682f50f1ea"
+  ],
+  "evidence": {
+    "sourceUris": [],
+    "sourceHashes": [
+      "1d3c66aea588cdb859884bd33141cc48d7c04649a7e0b7baa1def840e050989d"
+    ],
+    "sourceRevisions": [
+      1788456409864.9424
+    ],
+    "status": "candidate",
+    "kind": "discovery",
+    "nextActions": [
+      "这是授信 PARAM 字段元数据候选；使用返回的真实 fieldId 继续 read_param_fields。",
+      "如果 fields 为空，不能调用 read_param_fields；改用 health/hp、elite/boss、hostile/team/target、lightning/effect 或 drop/reward/item 等字段语义词重新检索。",
+      "本工具不读取或写入字段值，不能替代原生字段读取。"
+    ],
+    "repeatedQuery": false
+  }
+}
+```
+
+### 🤖 助手响应 (Step 7)
+
+终结追踪80码我来搞定——刚摸到追斩和切换特效两条线，这就把绣丸本体那一刀揪出来。
+
+#### 🛠️ 发起工具调用:
+- **工具名称**: `search_param_rows` (ID: `call_01a07cfe5a96753287989ed44adc5f6a`)
+  ```json
+  {
+    "limit": 30,
+    "query": "锈丸"
+  }
+  ```
+- **工具名称**: `search_param_rows` (ID: `call_01a07cfe5ca6766382699e67d7bf971b`)
+  ```json
+  {
+    "limit": 30,
+    "query": "刀光切换"
+  }
+  ```
+- **工具名称**: `search_param_rows` (ID: `call_01a07cfe5f0e71e181ca01f2c2a7676d`)
+  ```json
+  {
+    "limit": 30,
+    "query": "派生攻击"
+  }
+  ```
+
+> **🛠️ 工具返回** (ToolCall ID: `call_01a07cfe5a96753287989ed44adc5f6a`)
+```json
+{
+  "ok": true,
+  "state": "completed",
+  "data": {
+    "items": [],
+    "record": {
+      "results": [
+        {
+          "item": {
+            "uri": "param://EQUIP_MTRL_SET_PARAM_ST/100050",
+            "sourceUri": "file://param/gameparam/gameparam.parambnd.dcx",
+            "paramName": "EQUIP_MTRL_SET_PARAM_ST",
+            "entryName": "EquipMtrlSetParam.param",
+            "entryIndex": 37,
+            "rowId": 100050,
+            "sourceHash": "d8d772ae17896faad74672b9682e3c733295bcbca3113f6697c573767ae464a2",
+            "rowName": "锈丸"
+          },
+          "score": 12,
+          "highlights": [
+            "锈丸"
+          ]
+        },
+        {
+          "item": {
+            "uri": "param://EQUIP_PARAM_GOODS_ST/3352",
+            "sourceUri": "file://param/gameparam/gameparam.parambnd.dcx",
+            "paramName": "EQUIP_PARAM_GOODS_ST",
+            "entryName": "EquipParamGoods.param",
+            "entryIndex": 39,
+            "rowId": 3352,
+            "sourceHash": "5d1b914f13ea54bd5cec56cc28af21ec1394622f3077445751006e79759d158a",
+            "rowName": "“锈丸刀光”检测物品"
+          },
+          "score": 12,
+          "highlights": [
+            "锈丸"
+          ]
+        },
+        {
+          "item": {
+            "uri": "param://SHOP_LINEUP_PARAM/1100406",
+            "sourceUri": "file://param/gameparam/gameparam.parambnd.dcx",
+            "paramName": "SHOP_LINEUP_PARAM",
+            "entryName": "ShopLineupParam.param",
+            "entryIndex": 115,
+            "rowId": 1100406,
+            "sourceHash": "bdafbc6ba8cc3d8c85017932d750b34fced294ce6ae557be7753ec8ec3fc5fd5",
+            "rowName": "锈丸的笔记★"
+          },
+          "score": 12,
+          "highlights": [
+            "锈丸"
+          ]
+        },
+        {
+          "item": {
+            "uri": "param://SP_EFFECT_PARAM_ST/3352",
+            "sourceUri": "file://param/gameparam/gameparam.parambnd.dcx",
+            "paramName": "SP_EFFECT_PARAM_ST",
+            "entryName": "SpEffectParam.param",
+            "entryIndex": 118,
+            "rowId": 3352,
+            "sourceHash": "1d3c66aea588cdb859884bd33141cc48d7c04649a7e0b7baa1def840e050989d",
+            "rowName": "“锈丸刀光”状态机3352"
+          },
+          "score": 12,
+          "highlights": [
+            "锈丸"
+          ]
+        },
+        {
+          "item": {
+            "uri": "param://SP_EFFECT_VFX_PARAM_ST/6206",
+            "sourceUri": "file://param/gameparam/gameparam.parambnd.dcx",
+            "paramName": "SP_EFFECT_VFX_PARAM_ST",
+            "entryName": "SpEffectVfxParam.param",
+            "entryIndex": 119,
+            "rowId": 6206,
+            "sourceHash": "c9c4dd2a942162ae40f9b9f99f939a8cfbd1e1c25d0816ba963d5c0bbe8e84d6",
+            "rowName": "锈丸"
+          },
+          "score": 12,
+          "highlights": [
+            "锈丸"
+          ]
+        },
+        {
+          "item": {
+            "uri": "param://EQUIP_MTRL_SET_PARAM_ST/751000",
+            "sourceUri": "file://param/gameparam/gameparam.parambnd.dcx",
+            "paramName": "EQUIP_MTRL_SET_PARAM_ST",
+            "entryName": "EquipMtrlSetParam.param",
+            "entryIndex": 37,
+            "rowId": 751000,
+            "sourceHash": "d8d772ae17896faad74672b9682e3c733295bcbca3113f6697c573767ae464a2",
+            "rowName": "表里锈丸"
+          },
+          "score": 12,
+          "highlights": [
+            "锈丸"
+          ]
+        }
+      ],
+      "resultsReturnedCount": 6,
+      "resultsTotalCount": 13,
+      "resultsTruncated": true,
+      "searchId": "search-290c9a24-ccca-4339-b0c1-15ceb0b781d2"
+    },
+    "scalar": null,
+    "summary": "工具 search_param_rows 输出过大，已返回摘要；请使用返回的 ID 或游标继续分页查询。"
+  },
+  "pagination": {
+    "originalChars": 8943,
+    "returnedCount": null,
+    "totalCount": null,
+    "total": null,
+    "offset": null,
+    "limit": null,
+    "truncated": false,
+    "cursors": {}
+  },
+  "completeness": "summary_only",
+  "truncated": true,
+  "identifiers": [
+    "uri=param://EQUIP_MTRL_SET_PARAM_ST/100050",
+    "sourceUri=file://param/gameparam/gameparam.parambnd.dcx",
+    "rowId=100050",
+    "uri=param://EQUIP_PARAM_GOODS_ST/3352",
+    "rowId=3352",
+    "uri=param://SHOP_LINEUP_PARAM/1100406",
+    "rowId=1100406",
+    "uri=param://SP_EFFECT_PARAM_ST/3352",
+    "uri=param://SP_EFFECT_VFX_PARAM_ST/6206",
+    "rowId=6206",
+    "uri=param://EQUIP_MTRL_SET_PARAM_ST/751000",
+    "rowId=751000"
+  ],
+  "evidence": {
+    "sourceUris": [
+      "file://param/gameparam/gameparam.parambnd.dcx"
+    ],
+    "sourceHashes": [
+      "d8d772ae17896faad74672b9682e3c733295bcbca3113f6697c573767ae464a2",
+      "5d1b914f13ea54bd5cec56cc28af21ec1394622f3077445751006e79759d158a",
+      "bdafbc6ba8cc3d8c85017932d750b34fced294ce6ae557be7753ec8ec3fc5fd5",
+      "1d3c66aea588cdb859884bd33141cc48d7c04649a7e0b7baa1def840e050989d",
+      "c9c4dd2a942162ae40f9b9f99f939a8cfbd1e1c25d0816ba963d5c0bbe8e84d6"
+    ],
+    "sourceRevisions": [],
+    "status": "candidate",
+    "kind": "discovery",
+    "nextActions": [
+      "已命中相同或语义相近的定位词；停止重复同义词搜索，停止继续扩大同一路径，改用另一类资源或已有结果的稳定 ID/sourceUri。"
+    ],
+    "repeatedQuery": true
+  }
+}
+```
+
+> **🛠️ 工具返回** (ToolCall ID: `call_01a07cfe5ca6766382699e67d7bf971b`)
+```json
+{
+  "ok": true,
+  "state": "completed",
+  "data": {
+    "items": [],
+    "record": {
+      "results": [
+        {
+          "item": {
+            "uri": "param://SP_EFFECT_PARAM_ST/4401",
+            "sourceUri": "file://param/gameparam/gameparam.parambnd.dcx",
+            "paramName": "SP_EFFECT_PARAM_ST",
+            "entryName": "SpEffectParam.param",
+            "entryIndex": 118,
+            "rowId": 4401,
+            "sourceHash": "1d3c66aea588cdb859884bd33141cc48d7c04649a7e0b7baa1def840e050989d",
+            "rowName": "刀光切换特效 4401-4410"
+          },
+          "score": 12,
+          "highlights": [
+            "刀光切换"
+          ]
+        },
+        {
+          "item": {
+            "uri": "param://SP_EFFECT_PARAM_ST/4402",
+            "sourceUri": "file://param/gameparam/gameparam.parambnd.dcx",
+            "paramName": "SP_EFFECT_PARAM_ST",
+            "entryName": "SpEffectParam.param",
+            "entryIndex": 118,
+            "rowId": 4402,
+            "sourceHash": "1d3c66aea588cdb859884bd33141cc48d7c04649a7e0b7baa1def840e050989d",
+            "rowName": "刀光切换特效"
+          },
+          "score": 12,
+          "highlights": [
+            "刀光切换"
+          ]
+        },
+        {
+          "item": {
+            "uri": "param://SP_EFFECT_PARAM_ST/4403",
+            "sourceUri": "file://param/gameparam/gameparam.parambnd.dcx",
+            "paramName": "SP_EFFECT_PARAM_ST",
+            "entryName": "SpEffectParam.param",
+            "entryIndex": 118,
+            "rowId": 4403,
+            "sourceHash": "1d3c66aea588cdb859884bd33141cc48d7c04649a7e0b7baa1def840e050989d",
+            "rowName": "刀光切换特效"
+          },
+          "score": 12,
+          "highlights": [
+            "刀光切换"
+          ]
+        },
+        {
+          "item": {
+            "uri": "param://SP_EFFECT_PARAM_ST/4404",
+            "sourceUri": "file://param/gameparam/gameparam.parambnd.dcx",
+            "paramName": "SP_EFFECT_PARAM_ST",
+            "entryName": "SpEffectParam.param",
+            "entryIndex": 118,
+            "rowId": 4404,
+            "sourceHash": "1d3c66aea588cdb859884bd33141cc48d7c04649a7e0b7baa1def840e050989d",
+            "rowName": "刀光切换特效"
+          },
+          "score": 12,
+          "highlights": [
+            "刀光切换"
+          ]
+        },
+        {
+          "item": {
+            "uri": "param://SP_EFFECT_PARAM_ST/4405",
+            "sourceUri": "file://param/gameparam/gameparam.parambnd.dcx",
+            "paramName": "SP_EFFECT_PARAM_ST",
+            "entryName": "SpEffectParam.param",
+            "entryIndex": 118,
+            "rowId": 4405,
+            "sourceHash": "1d3c66aea588cdb859884bd33141cc48d7c04649a7e0b7baa1def840e050989d",
+            "rowName": "刀光切换特效"
+          },
+          "score": 12,
+          "highlights": [
+            "刀光切换"
+          ]
+        },
+        {
+          "item": {
+            "uri": "param://SP_EFFECT_PARAM_ST/4406",
+            "sourceUri": "file://param/gameparam/gameparam.parambnd.dcx",
+            "paramName": "SP_EFFECT_PARAM_ST",
+            "entryName": "SpEffectParam.param",
+            "entryIndex": 118,
+            "rowId": 4406,
+            "sourceHash": "1d3c66aea588cdb859884bd33141cc48d7c04649a7e0b7baa1def840e050989d",
+            "rowName": "刀光切换特效"
+          },
+          "score": 12,
+          "highlights": [
+            "刀光切换"
+          ]
+        }
+      ],
+      "resultsReturnedCount": 6,
+      "resultsTotalCount": 30,
+      "resultsTruncated": true,
+      "searchId": "search-90cad264-fea4-410a-a7b3-861b60fdb554"
+    },
+    "scalar": null,
+    "summary": "工具 search_param_rows 输出过大，已返回摘要；请使用返回的 ID 或游标继续分页查询。"
+  },
+  "pagination": {
+    "originalChars": 19708,
+    "returnedCount": null,
+    "totalCount": null,
+    "total": null,
+    "offset": null,
+    "limit": null,
+    "truncated": false,
+    "cursors": {}
+  },
+  "completeness": "summary_only",
+  "truncated": true,
+  "identifiers": [
+    "uri=param://SP_EFFECT_PARAM_ST/4401",
+    "sourceUri=file://param/gameparam/gameparam.parambnd.dcx",
+    "rowId=4401",
+    "uri=param://SP_EFFECT_PARAM_ST/4402",
+    "rowId=4402",
+    "uri=param://SP_EFFECT_PARAM_ST/4403",
+    "rowId=4403",
+    "uri=param://SP_EFFECT_PARAM_ST/4404",
+    "rowId=4404",
+    "uri=param://SP_EFFECT_PARAM_ST/4405",
+    "rowId=4405",
+    "uri=param://SP_EFFECT_PARAM_ST/4406"
+  ],
+  "evidence": {
+    "sourceUris": [
+      "file://param/gameparam/gameparam.parambnd.dcx"
+    ],
+    "sourceHashes": [
+      "1d3c66aea588cdb859884bd33141cc48d7c04649a7e0b7baa1def840e050989d",
+      "b74b265ebf1bf0a71b46718aefd4cfbbbeb0e5bbba7c58d5a8cbe028fd0c42e4",
+      "7b4327ff4a78fddb7b13576cb7e3d88e7ed0f167cf6a21694db92a826a84564d",
+      "5d1b914f13ea54bd5cec56cc28af21ec1394622f3077445751006e79759d158a",
+      "c9c4dd2a942162ae40f9b9f99f939a8cfbd1e1c25d0816ba963d5c0bbe8e84d6"
+    ],
+    "sourceRevisions": [],
+    "status": "candidate",
+    "kind": "discovery",
+    "nextActions": [
+      "已命中相同或语义相近的定位词；停止重复同义词搜索，停止继续扩大同一路径，改用另一类资源或已有结果的稳定 ID/sourceUri。"
+    ],
+    "repeatedQuery": true
+  }
+}
+```
+
+> **🛠️ 工具返回** (ToolCall ID: `call_01a07cfe5f0e71e181ca01f2c2a7676d`)
+```json
+{
+  "ok": true,
+  "state": "completed",
+  "data": {
+    "items": [],
+    "record": {
+      "results": [
+        {
+          "item": {
+            "uri": "param://ATK_PARAM_ST/5000152",
+            "sourceUri": "file://param/gameparam/gameparam.parambnd.dcx",
+            "paramName": "ATK_PARAM_ST",
+            "entryName": "AtkParam_Pc.param",
+            "entryIndex": 5,
+            "rowId": 5000152,
+            "sourceHash": "15d797817bbff32e6cdcf42158e7c88673f77991df4097fdfc7c8282679c1a90",
+            "rowName": "机关伞派生攻击"
+          },
+          "score": 12,
+          "highlights": [
+            "派生攻击"
+          ]
+        },
+        {
+          "item": {
+            "uri": "param://BULLET_PARAM_ST/500052",
+            "sourceUri": "file://param/gameparam/gameparam.parambnd.dcx",
+            "paramName": "BULLET_PARAM_ST",
+            "entryName": "Bullet.param",
+            "entryIndex": 11,
+            "rowId": 500052,
+            "sourceHash": "7b4327ff4a78fddb7b13576cb7e3d88e7ed0f167cf6a21694db92a826a84564d",
+            "rowName": "机关伞派生攻击"
+          },
+          "score": 12,
+          "highlights": [
+            "派生攻击"
+          ]
+        },
+        {
+          "item": {
+            "uri": "param://EQUIP_MTRL_SET_PARAM_ST/301000",
+            "sourceUri": "file://param/gameparam/gameparam.parambnd.dcx",
+            "paramName": "EQUIP_MTRL_SET_PARAM_ST",
+            "entryName": "EquipMtrlSetParam.param",
+            "entryIndex": 37,
+            "rowId": 301000,
+            "sourceHash": "d8d772ae17896faad74672b9682e3c733295bcbca3113f6697c573767ae464a2",
+            "rowName": "派生攻击·追斩"
+          },
+          "score": 12,
+          "highlights": [
+            "派生攻击"
+          ]
+        },
+        {
+          "item": {
+            "uri": "param://EQUIP_MTRL_SET_PARAM_ST/301100",
+            "sourceUri": "file://param/gameparam/gameparam.parambnd.dcx",
+            "paramName": "EQUIP_MTRL_SET_PARAM_ST",
+            "entryName": "EquipMtrlSetParam.param",
+            "entryIndex": 37,
+            "rowId": 301100,
+            "sourceHash": "d8d772ae17896faad74672b9682e3c733295bcbca3113f6697c573767ae464a2",
+            "rowName": "派生攻击·连斩"
+          },
+          "score": 12,
+          "highlights": [
+            "派生攻击"
+          ]
+        },
+        {
+          "item": {
+            "uri": "param://EQUIP_MTRL_SET_PARAM_ST/301200",
+            "sourceUri": "file://param/gameparam/gameparam.parambnd.dcx",
+            "paramName": "EQUIP_MTRL_SET_PARAM_ST",
+            "entryName": "EquipMtrlSetParam.param",
+            "entryIndex": 37,
+            "rowId": 301200,
+            "sourceHash": "d8d772ae17896faad74672b9682e3c733295bcbca3113f6697c573767ae464a2",
+            "rowName": "派生攻击·释放斩"
+          },
+          "score": 12,
+          "highlights": [
+            "派生攻击"
+          ]
+        },
+        {
+          "item": {
+            "uri": "param://SKILL_PARAM_ST/100",
+            "sourceUri": "file://param/gameparam/gameparam.parambnd.dcx",
+            "paramName": "SKILL_PARAM_ST",
+            "entryName": "SkillParam.param",
+            "entryIndex": 117,
+            "rowId": 100,
+            "sourceHash": "e23082e65a15ac6755cb30654a0f9c40088a3fa7d2ab3fb73c6fefc352bf5d48",
+            "rowName": "派生攻击：追斩"
+          },
+          "score": 12,
+          "highlights": [
+            "派生攻击"
+          ]
+        }
+      ],
+      "resultsReturnedCount": 6,
+      "resultsTotalCount": 30,
+      "resultsTruncated": true,
+      "searchId": "search-a8fbef88-1142-488c-bc87-8ca74f486c27"
+    },
+    "scalar": null,
+    "summary": "工具 search_param_rows 输出过大，已返回摘要；请使用返回的 ID 或游标继续分页查询。"
+  },
+  "pagination": {
+    "originalChars": 19847,
+    "returnedCount": null,
+    "totalCount": null,
+    "total": null,
+    "offset": null,
+    "limit": null,
+    "truncated": false,
+    "cursors": {}
+  },
+  "completeness": "summary_only",
+  "truncated": true,
+  "identifiers": [
+    "uri=param://ATK_PARAM_ST/5000152",
+    "sourceUri=file://param/gameparam/gameparam.parambnd.dcx",
+    "rowId=5000152",
+    "uri=param://BULLET_PARAM_ST/500052",
+    "rowId=500052",
+    "uri=param://EQUIP_MTRL_SET_PARAM_ST/301000",
+    "rowId=301000",
+    "uri=param://EQUIP_MTRL_SET_PARAM_ST/301100",
+    "rowId=301100",
+    "uri=param://EQUIP_MTRL_SET_PARAM_ST/301200",
+    "rowId=301200",
+    "uri=param://SKILL_PARAM_ST/100"
+  ],
+  "evidence": {
+    "sourceUris": [
+      "file://param/gameparam/gameparam.parambnd.dcx"
+    ],
+    "sourceHashes": [
+      "15d797817bbff32e6cdcf42158e7c88673f77991df4097fdfc7c8282679c1a90",
+      "7b4327ff4a78fddb7b13576cb7e3d88e7ed0f167cf6a21694db92a826a84564d",
+      "d8d772ae17896faad74672b9682e3c733295bcbca3113f6697c573767ae464a2",
+      "e23082e65a15ac6755cb30654a0f9c40088a3fa7d2ab3fb73c6fefc352bf5d48",
+      "1d3c66aea588cdb859884bd33141cc48d7c04649a7e0b7baa1def840e050989d",
+      "c7e4013c981aa118b9e8a11cfbc3a9002d6c32a4d7c4e0f2d22373ef9b768863",
+      "b74b265ebf1bf0a71b46718aefd4cfbbbeb0e5bbba7c58d5a8cbe028fd0c42e4"
+    ],
+    "sourceRevisions": [],
+    "status": "candidate",
+    "kind": "discovery",
+    "nextActions": [
+      "已命中相同或语义相近的定位词；停止重复同义词搜索，停止继续扩大同一路径，改用另一类资源或已有结果的稳定 ID/sourceUri。"
+    ],
+    "repeatedQuery": true
+  }
+}
+```
+
+### 🤖 助手响应 (Step 8)
+
+绣丸终结那刀我来加追踪——正顺着锈丸和刀光切换两条线索找80距离该落在哪。
+
+#### 🛠️ 发起工具调用:
+- **工具名称**: `search_param_rows` (ID: `call_01a07cff05b27161b81add5bdeb2c8ed`)
+  ```json
+  {
+    "limit": 30,
+    "paramNames": [
+      "AtkParam_Pc"
+    ],
+    "query": "锈丸"
+  }
+  ```
+- **工具名称**: `search_param_rows` (ID: `call_01a07cff08a37951add9411d5c38065f`)
+  ```json
+  {
+    "limit": 30,
+    "paramNames": [
+      "BehaviorParam"
+    ],
+    "query": "锈丸"
+  }
+  ```
+- **工具名称**: `search_param_rows` (ID: `call_01a07cff0b1677d281a002ccf992bf26`)
+  ```json
+  {
+    "limit": 30,
+    "paramNames": [
+      "Bullet"
+    ],
+    "query": "锈丸"
+  }
+  ```
+- **工具名称**: `search_param_rows` (ID: `call_01a07cff0d877cc290f6190d4d335a9a`)
+  ```json
+  {
+    "limit": 30,
+    "query": "刀光"
+  }
+  ```
+
+> **🛠️ 工具返回** (ToolCall ID: `call_01a07cff05b27161b81add5bdeb2c8ed`)
+```json
+{
+  "ok": false,
+  "state": "failed",
+  "error": {
+    "code": "RAG_UNAVAILABLE",
+    "message": "RAG 语义语料为空；仅有文件目录不能用于对象定位。",
+    "details": {
+      "ragAvailability": "unavailable",
+      "ragStats": {
+        "total": 136,
+        "byFamily": {
+          "file": 136,
+          "event": 0,
+          "map_entity": 0,
+          "map_region": 0,
+          "param_row": 0,
+          "text_entry": 0,
+          "tae_event": 0
+        }
+      },
+      "diagnostics": [
+        {
+          "severity": "warning",
+          "code": "RAG_SEMANTIC_CORPUS_EMPTY",
+          "message": "RAG 语义语料为空；仅有文件目录不能用于对象定位。"
+        },
+        {
+          "severity": "warning",
+          "code": "RAG_SEMANTIC_CORPUS_EMPTY",
+          "message": "RAG 语义语料为空；仅有文件目录不能用于对象定位。"
+        }
+      ]
+    }
+  }
+}
+```
+
+> **🛠️ 工具返回** (ToolCall ID: `call_01a07cff08a37951add9411d5c38065f`)
+```json
+{
+  "ok": false,
+  "state": "failed",
+  "error": {
+    "code": "RAG_UNAVAILABLE",
+    "message": "RAG 语义语料为空；仅有文件目录不能用于对象定位。",
+    "details": {
+      "ragAvailability": "unavailable",
+      "ragStats": {
+        "total": 136,
+        "byFamily": {
+          "file": 136,
+          "event": 0,
+          "map_entity": 0,
+          "map_region": 0,
+          "param_row": 0,
+          "text_entry": 0,
+          "tae_event": 0
+        }
+      },
+      "diagnostics": [
+        {
+          "severity": "warning",
+          "code": "RAG_SEMANTIC_CORPUS_EMPTY",
+          "message": "RAG 语义语料为空；仅有文件目录不能用于对象定位。"
+        },
+        {
+          "severity": "warning",
+          "code": "RAG_SEMANTIC_CORPUS_EMPTY",
+          "message": "RAG 语义语料为空；仅有文件目录不能用于对象定位。"
+        }
+      ]
+    }
+  }
+}
+```
+
+> **🛠️ 工具返回** (ToolCall ID: `call_01a07cff0b1677d281a002ccf992bf26`)
+```json
+{
+  "ok": false,
+  "state": "failed",
+  "error": {
+    "code": "RAG_UNAVAILABLE",
+    "message": "RAG 语义语料为空；仅有文件目录不能用于对象定位。",
+    "details": {
+      "ragAvailability": "unavailable",
+      "ragStats": {
+        "total": 136,
+        "byFamily": {
+          "file": 136,
+          "event": 0,
+          "map_entity": 0,
+          "map_region": 0,
+          "param_row": 0,
+          "text_entry": 0,
+          "tae_event": 0
+        }
+      },
+      "diagnostics": [
+        {
+          "severity": "warning",
+          "code": "RAG_SEMANTIC_CORPUS_EMPTY",
+          "message": "RAG 语义语料为空；仅有文件目录不能用于对象定位。"
+        },
+        {
+          "severity": "warning",
+          "code": "RAG_SEMANTIC_CORPUS_EMPTY",
+          "message": "RAG 语义语料为空；仅有文件目录不能用于对象定位。"
+        }
+      ]
+    }
+  }
+}
+```
+
+> **🛠️ 工具返回** (ToolCall ID: `call_01a07cff0d877cc290f6190d4d335a9a`)
+```json
+{
+  "ok": true,
+  "state": "completed",
+  "data": {
+    "items": [],
+    "record": {
+      "results": [
+        {
+          "item": {
+            "uri": "param://BEHAVIOR_PARAM_ST/254000404",
+            "sourceUri": "file://param/gameparam/gameparam.parambnd.dcx",
+            "paramName": "BEHAVIOR_PARAM_ST",
+            "entryName": "BehaviorParam.param",
+            "entryIndex": 7,
+            "rowId": 254000404,
+            "sourceHash": "b74b265ebf1bf0a71b46718aefd4cfbbbeb0e5bbba7c58d5a8cbe028fd0c42e4",
+            "rowName": "劍聖SFX 次元斬 刀光"
+          },
+          "score": 12,
+          "highlights": [
+            "刀光"
+          ]
+        },
+        {
+          "item": {
+            "uri": "param://BULLET_PARAM_ST/54000404",
+            "sourceUri": "file://param/gameparam/gameparam.parambnd.dcx",
+            "paramName": "BULLET_PARAM_ST",
+            "entryName": "Bullet.param",
+            "entryIndex": 11,
+            "rowId": 54000404,
+            "sourceHash": "7b4327ff4a78fddb7b13576cb7e3d88e7ed0f167cf6a21694db92a826a84564d",
+            "rowName": "劍聖SFX 次元斬 刀光"
+          },
+          "score": 12,
+          "highlights": [
+            "刀光"
+          ]
+        },
+        {
+          "item": {
+            "uri": "param://EQUIP_PARAM_GOODS_ST/3352",
+            "sourceUri": "file://param/gameparam/gameparam.parambnd.dcx",
+            "paramName": "EQUIP_PARAM_GOODS_ST",
+            "entryName": "EquipParamGoods.param",
+            "entryIndex": 39,
+            "rowId": 3352,
+            "sourceHash": "5d1b914f13ea54bd5cec56cc28af21ec1394622f3077445751006e79759d158a",
+            "rowName": "“锈丸刀光”检测物品"
+          },
+          "score": 12,
+          "highlights": [
+            "刀光"
+          ]
+        },
+        {
+          "item": {
+            "uri": "param://SP_EFFECT_PARAM_ST/1232",
+            "sourceUri": "file://param/gameparam/gameparam.parambnd.dcx",
+            "paramName": "SP_EFFECT_PARAM_ST",
+            "entryName": "SpEffectParam.param",
+            "entryIndex": 118,
+            "rowId": 1232,
+            "sourceHash": "1d3c66aea588cdb859884bd33141cc48d7c04649a7e0b7baa1def840e050989d",
+            "rowName": "群星之子追加突刺刀光SFX"
+          },
+          "score": 12,
+          "highlights": [
+            "刀光"
+          ]
+        },
+        {
+          "item": {
+            "uri": "param://SP_EFFECT_VFX_PARAM_ST/5925",
+            "sourceUri": "file://param/gameparam/gameparam.parambnd.dcx",
+            "paramName": "SP_EFFECT_VFX_PARAM_ST",
+            "entryName": "SpEffectVfxParam.param",
+            "entryIndex": 119,
+            "rowId": 5925,
+            "sourceHash": "c9c4dd2a942162ae40f9b9f99f939a8cfbd1e1c25d0816ba963d5c0bbe8e84d6",
+            "rowName": "阿凜SFX 下盤砍刀光"
+          },
+          "score": 12,
+          "highlights": [
+            "刀光"
+          ]
+        },
+        {
+          "item": {
+            "uri": "param://BEHAVIOR_PARAM_ST/254000582",
+            "sourceUri": "file://param/gameparam/gameparam.parambnd.dcx",
+            "paramName": "BEHAVIOR_PARAM_ST",
+            "entryName": "BehaviorParam.param",
+            "entryIndex": 7,
+            "rowId": 254000582,
+            "sourceHash": "b74b265ebf1bf0a71b46718aefd4cfbbbeb0e5bbba7c58d5a8cbe028fd0c42e4",
+            "rowName": "劍聖SFX居和收刀 刀光"
+          },
+          "score": 12,
+          "highlights": [
+            "刀光"
+          ]
+        }
+      ],
+      "resultsReturnedCount": 6,
+      "resultsTotalCount": 30,
+      "resultsTruncated": true,
+      "searchId": "search-b9e19ea2-1cf5-4e19-b136-a7aed9c71dd9"
+    },
+    "scalar": null,
+    "summary": "工具 search_param_rows 输出过大，已返回摘要；请使用返回的 ID 或游标继续分页查询。"
+  },
+  "pagination": {
+    "originalChars": 19733,
+    "returnedCount": null,
+    "totalCount": null,
+    "total": null,
+    "offset": null,
+    "limit": null,
+    "truncated": false,
+    "cursors": {}
+  },
+  "completeness": "summary_only",
+  "truncated": true,
+  "identifiers": [
+    "uri=param://BEHAVIOR_PARAM_ST/254000404",
+    "sourceUri=file://param/gameparam/gameparam.parambnd.dcx",
+    "rowId=254000404",
+    "uri=param://BULLET_PARAM_ST/54000404",
+    "rowId=54000404",
+    "uri=param://EQUIP_PARAM_GOODS_ST/3352",
+    "rowId=3352",
+    "uri=param://SP_EFFECT_PARAM_ST/1232",
+    "rowId=1232",
+    "uri=param://SP_EFFECT_VFX_PARAM_ST/5925",
+    "rowId=5925",
+    "uri=param://BEHAVIOR_PARAM_ST/254000582"
+  ],
+  "evidence": {
+    "sourceUris": [
+      "file://param/gameparam/gameparam.parambnd.dcx"
+    ],
+    "sourceHashes": [
+      "b74b265ebf1bf0a71b46718aefd4cfbbbeb0e5bbba7c58d5a8cbe028fd0c42e4",
+      "7b4327ff4a78fddb7b13576cb7e3d88e7ed0f167cf6a21694db92a826a84564d",
+      "5d1b914f13ea54bd5cec56cc28af21ec1394622f3077445751006e79759d158a",
+      "1d3c66aea588cdb859884bd33141cc48d7c04649a7e0b7baa1def840e050989d",
+      "c9c4dd2a942162ae40f9b9f99f939a8cfbd1e1c25d0816ba963d5c0bbe8e84d6"
+    ],
+    "sourceRevisions": [],
+    "status": "candidate",
+    "kind": "discovery",
+    "nextActions": [
+      "已命中相同或语义相近的定位词；停止重复同义词搜索，停止继续扩大同一路径，改用另一类资源或已有结果的稳定 ID/sourceUri。"
+    ],
+    "repeatedQuery": true
+  }
+}
+```
+
+### 🤖 助手响应 (Step 9)
+
+绣丸终结追踪80——我顺着锈丸和刀光切换的线索来找那一刀的落点。
+
+#### 🛠️ 发起工具调用:
+- **工具名称**: `search_param_fields` (ID: `call_01a07cff5a717942988a54247d662d9b`)
+  ```json
+  {
+    "limit": 30,
+    "query": "track homing lock distance",
+    "rowIds": [
+      500052,
+      54000404
+    ],
+    "table": "BULLET_PARAM_ST"
+  }
+  ```
+- **工具名称**: `search_param_fields` (ID: `call_01a07cff5e917242b7f55accf0d1392b`)
+  ```json
+  {
+    "limit": 30,
+    "query": "track homing lock distance",
+    "rowIds": [
+      4401,
+      4402
+    ],
+    "table": "SP_EFFECT_PARAM_ST"
+  }
+  ```
+- **工具名称**: `search_param_fields` (ID: `call_01a07cff62b5751085e98023ce78c41b`)
+  ```json
+  {
+    "limit": 30,
+    "query": "track homing lock distance chase",
+    "rowIds": [
+      254000404
+    ],
+    "table": "BEHAVIOR_PARAM_ST"
+  }
+  ```
+
+> **🛠️ 工具返回** (ToolCall ID: `call_01a07cff5a717942988a54247d662d9b`)
+```json
+{
+  "ok": true,
+  "state": "completed",
+  "data": {
+    "items": [],
+    "record": {
+      "ok": true,
+      "containerPath": "C:\\Users\\ASUS\\AppData\\Local\\Temp\\soulforge-real-agent-2026-09-07T17-48-44-698Z-Rllz1M\\overlay\\param\\gameparam\\gameparam.parambnd.dcx",
+      "table": "Bullet",
+      "entryName": "N:\\NTC\\data\\Target\\INTERROOT_win64\\param\\GameParam\\Bullet.param",
+      "entryIndex": 11,
+      "rowIds": [
+        500052,
+        54000404
+      ],
+      "sourceHash": "7b4327ff4a78fddb7b13576cb7e3d88e7ed0f167cf6a21694db92a826a84564d",
+      "sourceRevision": 1788456409864.9424,
+      "fields": [
+        {
+          "fieldId": "isEnableAutoHoming",
+          "name": "弾丸自動捕捉許可",
+          "type": "u8",
+          "description": "Whether to automatically follow when unlocked"
+        },
+        {
+          "fieldId": "disappearDistanceToTarget",
+          "name": "接近消滅距離[m]",
+          "type": "f32",
+          "description": "When the bullet approaches the specified value (m) from the guidance target, the bullet disappears"
+        },
+        {
+          "fieldId": "homingAngle",
+          "name": "誘導性能[deg/s]",
+          "type": "s16",
+          "description": "The amount of corrections applied to the bullet trajectory every second"
+        },
+        {
+          "fieldId": "homingAngleX",
+          "name": "誘導性能（X軸個別）[deg/s]",
+          "type": "s16",
+          "description": "誘導性能のX軸成分だけを変えます。-1で変えません"
+        },
+        {
+          "fieldId": "homingBeginDist",
+          "name": "誘導開始距離[m]",
+          "type": "f32",
+          "description": "How many meters ahead do you want to start homing?"
+        },
+        {
+          "fieldId": "isIntervalCreateTargetLockOn",
+          "name": "間隔指定弾丸の場合ターゲットに向けて飛ばすか",
+          "type": "u8",
+          "description": "If bullets are created at regular intervals, should they be shot at the target? If OFF, fly to the parent posture"
+        },
+        {
+          "fieldId": "isUseParentAngForlockShootLimitAng",
+          "name": "親弾丸の向きを使って制限角度を計算する",
+          "type": "u8",
+          "description": "ロック方向を向かせるときの制限角度の基準方向を親弾丸の向きにする"
+        },
+        {
+          "fieldId": "lockShootLimitAng",
+          "name": "ロック方向制限角度",
+          "type": "u8",
+          "description": "ロック方向を向かせるときの制限角度"
+        },
+        {
+          "fieldId": "hormingStopRange",
+          "name": "誘導停止距離[m]",
+          "type": "f32",
+          "description": "The distance to the target at which to stop homing"
+        },
+        {
+          "fieldId": "damageDamp",
+          "name": "物理攻撃力減衰率[%/s]",
+          "type": "s8",
+          "description": "Reduces physical damage of the bullet when the bullet travels past the attenuation distance"
+        },
+        {
+          "fieldId": "darkDamageDamp",
+          "name": "闇攻撃力減衰率[%/s]",
+          "type": "s8",
+          "description": "Reduces dark damage of the bullet when the bullet travels past the attenuation distance"
+        },
+        {
+          "fieldId": "dist",
+          "name": "射程距離[m]",
+          "type": "f32",
+          "description": "Attenuation Distance, distance the bullet can travel before gravity and damage dampaning take effect"
+        },
+        {
+          "fieldId": "fireDamageDamp",
+          "name": "炎攻撃力減衰率[%/s]",
+          "type": "s8",
+          "description": "Reduces fire damage of the bullet when the bullet travels past the attenuation distance"
+        },
+        {
+          "fieldId": "generationMaxDistWhenOwner",
+          "name": "発生限界距離[m]",
+          "type": "f32",
+          "description": "If the bullet's spawn point is more than this distance away from the owner's position, it will not be fired"
+        },
+        {
+          "fieldId": "gravityInRange",
+          "name": "射程距離内重力[m/s^2]",
+          "type": "f32",
+          "description": "Gravity applied before the attenuation distance"
+        },
+        {
+          "fieldId": "gravityOutRange",
+          "name": "射程距離外重力[m/s^2]",
+          "type": "f32",
+          "description": "Gravity applied before the atenuantion distance"
+        },
+        {
+          "fieldId": "knockbackDamp",
+          "name": "ノックバック減衰率[%/s]",
+          "type": "s8",
+          "description": "Reduces knockback damage of the bullet when the bullet travels past the attenuation distance"
+        },
+        {
+          "fieldId": "sfxId_Flick",
+          "name": "SFXID【ガード/ジャスガ】",
+          "type": "s32",
+          "description": "Sfx spawned when the bullet is blocked"
+        },
+        {
+          "fieldId": "spelDamageDamp",
+          "name": "魔法攻撃力減衰率[%/s]",
+          "type": "s8",
+          "description": "Reduces magic damage of the bullet when the bullet travels past the attenuation distance"
+        },
+        {
+          "fieldId": "staminaDamp",
+          "name": "スタミナダメージ減衰率[%/s]",
+          "type": "s8",
+          "description": "Reduces stamina damage of the bullet when the bullet travels past the attenuation distance"
+        },
+        {
+          "fieldId": "targetYOffsetRange",
+          "name": "目標上下オフセット[m]",
+          "type": "f32",
+          "description": "Vertical offset of the impact position. Shifts the target position up and down when firing and homing"
+        },
+        {
+          "fieldId": "thunderDamageDamp",
+          "name": "電撃攻撃力減衰率[%/s]",
+          "type": "s8",
+          "description": "Reduces lightning damage of the bullet when the bullet travels past the attenuation distance"
+        }
+      ],
+      "diagnostics": [
+        {
+          "severity": "info",
+          "code": "PARAM_DOCUMENT_ROUNDTRIP_SEMANTIC_VERIFIED",
+          "message": "PARAM 无修改往返字节级一致。"
+        },
+        {
+          "severity": "info",
+          "code": "PARAM_DOCUMENT_SESSION",
+          "message": "session 9a09e55692b45f6daec6fe0fda90c2ca gen 0 parse 1"
+        }
+      ],
+      "searchId": "search-e02ad698-8a83-42c5-b1bb-e94f5f4fc846"
+    },
+    "scalar": null,
+    "summary": null
+  },
+  "pagination": {
+    "originalChars": 4475,
+    "returnedCount": null,
+    "totalCount": null,
+    "total": null,
+    "offset": null,
+    "limit": null,
+    "truncated": false,
+    "cursors": {}
+  },
+  "completeness": "complete",
+  "truncated": false,
+  "identifiers": [
+    "fieldId=isEnableAutoHoming",
+    "fieldId=disappearDistanceToTarget",
+    "fieldId=homingAngle",
+    "fieldId=homingAngleX",
+    "fieldId=homingBeginDist",
+    "fieldId=isIntervalCreateTargetLockOn",
+    "fieldId=isUseParentAngForlockShootLimitAng",
+    "fieldId=lockShootLimitAng",
+    "fieldId=hormingStopRange",
+    "fieldId=damageDamp",
+    "fieldId=darkDamageDamp",
+    "fieldId=dist",
+    "fieldId=fireDamageDamp",
+    "fieldId=generationMaxDistWhenOwner",
+    "fieldId=gravityInRange",
+    "fieldId=gravityOutRange",
+    "fieldId=knockbackDamp",
+    "fieldId=sfxId_Flick",
+    "fieldId=spelDamageDamp",
+    "fieldId=staminaDamp",
+    "fieldId=targetYOffsetRange",
+    "fieldId=thunderDamageDamp",
+    "searchId=search-e02ad698-8a83-42c5-b1bb-e94f5f4fc846"
+  ],
+  "evidence": {
+    "sourceUris": [],
+    "sourceHashes": [
+      "7b4327ff4a78fddb7b13576cb7e3d88e7ed0f167cf6a21694db92a826a84564d"
+    ],
+    "sourceRevisions": [
+      1788456409864.9424
+    ],
+    "status": "candidate",
+    "kind": "discovery",
+    "nextActions": [
+      "已命中相同或语义相近的定位词；停止重复同义词搜索，停止继续扩大同一路径，改用另一类资源或已有结果的稳定 ID/sourceUri。"
+    ],
+    "repeatedQuery": true
+  }
+}
+```
+
+> **🛠️ 工具返回** (ToolCall ID: `call_01a07cff5e917242b7f55accf0d1392b`)
+```json
+{
+  "ok": true,
+  "state": "completed",
+  "data": {
+    "items": [],
+    "record": {
+      "ok": true,
+      "containerPath": "C:\\Users\\ASUS\\AppData\\Local\\Temp\\soulforge-real-agent-2026-09-07T17-48-44-698Z-Rllz1M\\overlay\\param\\gameparam\\gameparam.parambnd.dcx",
+      "table": "SpEffectParam",
+      "entryName": "N:\\NTC\\data\\Target\\INTERROOT_win64\\param\\GameParam\\SpEffectParam.param",
+      "entryIndex": 118,
+      "rowIds": [
+        4401,
+        4402
+      ],
+      "sourceHash": "1d3c66aea588cdb859884bd33141cc48d7c04649a7e0b7baa1def840e050989d",
+      "sourceRevision": 1788456409864.9424,
+      "fields": [
+        {
+          "fieldId": "unlockThresholdCamouflage",
+          "name": "Camouflage Block Lock Threshold",
+          "type": "s8",
+          "description": "Alpha value that makes it impossible to lock while hidden"
+        },
+        {
+          "fieldId": "bowDistRate",
+          "name": "Attenuation Distance %",
+          "type": "s16",
+          "description": "Multiplies the attenuation range of bullets, requires stateInfo 168"
+        },
+        {
+          "fieldId": "antiDarkSightRadius",
+          "name": "Full View in Darkness - Radius",
+          "type": "f32",
+          "description": "Darkness radius [m]. If you are within this distance, you will be able to see at normal distance even in dark places."
+        },
+        {
+          "fieldId": "hearingSearchRate",
+          "name": "AI Hearing Adjustment",
+          "type": "f32",
+          "description": "Multiply the AI ​​hearing distance by the set magnification factor"
+        },
+        {
+          "fieldId": "mapVisibilityOverrideDark",
+          "name": "AI Judgment: Dark Visibility",
+          "type": "u8",
+          "description": "When performing lock judgment or AI visibility judgment, if the map visibility type of the hit where the target character is standing is 'darkness', replace it with this value before making the judgment."
+        },
+        {
+          "fieldId": "mapVisibilityOverrideGood",
+          "name": "AI Judgment: Good Visibility",
+          "type": "u8",
+          "description": "When performing a lock judgment or AI visibility judgment, if the map visibility type of the hit where the target character is standing is 'good', replace it with this value before making the judgment."
+        },
+        {
+          "fieldId": "mapVisibilityOverridePitchDark",
+          "name": "AI Judgment: Pitch Black Visibility",
+          "type": "u8",
+          "description": "When performing lock judgment or AI visibility judgment, if the map visibility type of the hit where the target character is standing is 'pitch darkness', replace it with this value before making the judgment."
+        },
+        {
+          "fieldId": "sightSearchRate",
+          "name": "AI Vision Correction",
+          "type": "f32",
+          "description": "Give it to the viewer. Multiply your own AI visual distance by the set magnification factor"
+        }
+      ],
+      "diagnostics": [
+        {
+          "severity": "info",
+          "code": "PARAM_DOCUMENT_ROUNDTRIP_SEMANTIC_VERIFIED",
+          "message": "PARAM 无修改往返字节级一致。"
+        },
+        {
+          "severity": "info",
+          "code": "PARAM_DOCUMENT_SESSION",
+          "message": "session 9c7680969f7c18a00910a5ae4d23930e gen 0 parse 0"
+        }
+      ],
+      "searchId": "search-9a242710-8038-4bc5-b895-e37aeaee04e2"
+    },
+    "scalar": null,
+    "summary": null
+  },
+  "pagination": {
+    "originalChars": 2912,
+    "returnedCount": null,
+    "totalCount": null,
+    "total": null,
+    "offset": null,
+    "limit": null,
+    "truncated": false,
+    "cursors": {}
+  },
+  "completeness": "complete",
+  "truncated": false,
+  "identifiers": [
+    "fieldId=unlockThresholdCamouflage",
+    "fieldId=bowDistRate",
+    "fieldId=antiDarkSightRadius",
+    "fieldId=hearingSearchRate",
+    "fieldId=mapVisibilityOverrideDark",
+    "fieldId=mapVisibilityOverrideGood",
+    "fieldId=mapVisibilityOverridePitchDark",
+    "fieldId=sightSearchRate",
+    "searchId=search-9a242710-8038-4bc5-b895-e37aeaee04e2"
+  ],
+  "evidence": {
+    "sourceUris": [],
+    "sourceHashes": [
+      "1d3c66aea588cdb859884bd33141cc48d7c04649a7e0b7baa1def840e050989d"
+    ],
+    "sourceRevisions": [
+      1788456409864.9424
+    ],
+    "status": "candidate",
+    "kind": "discovery",
+    "nextActions": [
+      "已命中相同或语义相近的定位词；停止重复同义词搜索，停止继续扩大同一路径，改用另一类资源或已有结果的稳定 ID/sourceUri。"
+    ],
+    "repeatedQuery": true
+  }
+}
+```
+
+> **🛠️ 工具返回** (ToolCall ID: `call_01a07cff62b5751085e98023ce78c41b`)
+```json
+{
+  "ok": true,
+  "state": "completed",
+  "data": {
+    "items": [],
+    "record": {
+      "ok": true,
+      "containerPath": "C:\\Users\\ASUS\\AppData\\Local\\Temp\\soulforge-real-agent-2026-09-07T17-48-44-698Z-Rllz1M\\overlay\\param\\gameparam\\gameparam.parambnd.dcx",
+      "table": "BehaviorParam",
+      "entryName": "N:\\NTC\\data\\Target\\INTERROOT_win64\\param\\GameParam\\BehaviorParam.param",
+      "entryIndex": 7,
+      "rowIds": [
+        254000404
+      ],
+      "sourceHash": "b74b265ebf1bf0a71b46718aefd4cfbbbeb0e5bbba7c58d5a8cbe028fd0c42e4",
+      "sourceRevision": 1788456409864.9424,
+      "fields": [],
+      "diagnostics": [
+        {
+          "severity": "info",
+          "code": "PARAM_DOCUMENT_ROUNDTRIP_SEMANTIC_VERIFIED",
+          "message": "PARAM 无修改往返字节级一致。"
+        },
+        {
+          "severity": "info",
+          "code": "PARAM_DOCUMENT_SESSION",
+          "message": "session 9afc2a317853630782c699d0dde00b45 gen 0 parse 1"
+        }
+      ],
+      "searchId": "search-72c3801f-54b4-4f9d-84d3-e25e0f3c3811"
+    },
+    "scalar": null,
+    "summary": null
+  },
+  "pagination": {
+    "originalChars": 1171,
+    "returnedCount": null,
+    "totalCount": null,
+    "total": null,
+    "offset": null,
+    "limit": null,
+    "truncated": false,
+    "cursors": {}
+  },
+  "completeness": "complete",
+  "truncated": false,
+  "identifiers": [
+    "searchId=search-72c3801f-54b4-4f9d-84d3-e25e0f3c3811"
+  ],
+  "evidence": {
+    "sourceUris": [],
+    "sourceHashes": [
+      "b74b265ebf1bf0a71b46718aefd4cfbbbeb0e5bbba7c58d5a8cbe028fd0c42e4"
+    ],
+    "sourceRevisions": [
+      1788456409864.9424
+    ],
+    "status": "insufficient_evidence",
+    "kind": "discovery",
+    "nextActions": [
+      "当前字段语义查询没有命中；不能调用 read_param_fields，因为没有真实 fieldId。改用 health/hp、elite/boss、hostile/team/target、lightning/effect 或 drop/reward/item 等字段语义词重新检索。"
+    ],
+    "repeatedQuery": true
+  }
+}
+```
+
+### 🤖 助手响应 (Step 10)
+
+绣丸终结追踪80码——我顺着锈丸和刀光切换的线索来找那一刀的落点。
+
+#### 🛠️ 发起工具调用:
+- **工具名称**: `search_param_rows` (ID: `call_01a07cffee4a7172a5126aa2db014e37`)
+  ```json
+  {
+    "limit": 30,
+    "query": "4410"
+  }
+  ```
+- **工具名称**: `search_param_rows` (ID: `call_01a07cfff08472e2a91fbc444ecda459`)
+  ```json
+  {
+    "limit": 30,
+    "query": "锈丸刀光"
+  }
+  ```
+- **工具名称**: `search_param_fields` (ID: `call_01a07cfff2a57310b4344b51c0370d06`)
+  ```json
+  {
+    "limit": 30,
+    "query": "distance track homing range",
+    "rowIds": [
+      5000152
+    ],
+    "table": "ATK_PARAM_ST"
+  }
+  ```
+
+> **🛠️ 工具返回** (ToolCall ID: `call_01a07cffee4a7172a5126aa2db014e37`)
+```json
+{
+  "ok": true,
+  "state": "completed",
+  "data": {
+    "items": [],
+    "record": {
+      "results": [
+        {
+          "item": {
+            "uri": "param://SP_EFFECT_PARAM_ST/4401",
+            "sourceUri": "file://param/gameparam/gameparam.parambnd.dcx",
+            "paramName": "SP_EFFECT_PARAM_ST",
+            "entryName": "SpEffectParam.param",
+            "entryIndex": 118,
+            "rowId": 4401,
+            "sourceHash": "1d3c66aea588cdb859884bd33141cc48d7c04649a7e0b7baa1def840e050989d",
+            "rowName": "刀光切换特效 4401-4410",
+            "fields": [],
+            "raw": {
+              "parser": "sekiro-param-native-v1",
+              "entryIndex": 118,
+              "entryName": "SpEffectParam.param",
+              "rowIndex": 1364,
+              "nativeNameOffset": 8698555,
+              "nativeDataOffset": 1671056,
+              "dataLength": 1088,
+              "dataHash": "965b29d4bb513d4ba7e02fbf3ba1f964f914186ac422dc5e9493a1ae6aed79a5",
+              "confidence": "high"
+            }
+          },
+          "score": 12,
+          "highlights": [
+            "4410"
+          ]
+        },
+        {
+          "item": {
+            "uri": "param://NPC_PARAM_ST/15504410",
+            "sourceUri": "file://param/gameparam/gameparam.parambnd.dcx",
+            "paramName": "NPC_PARAM_ST",
+            "entryName": "NpcParam.param",
+            "entryIndex": 100,
+            "rowId": 15504410,
+            "sourceHash": "6fdd0ac4c90e4a4a0ba6cc5138007588a8b353de9231b2bd27c792e6f8ed32ab",
+            "fields": [],
+            "raw": {
+              "parser": "sekiro-param-native-v1",
+              "entryIndex": 100,
+              "entryName": "NpcParam.param",
+              "rowIndex": 1207,
+              "nativeNameOffset": 0,
+              "nativeDataOffset": 1123776,
+              "dataLength": 896,
+              "dataHash": "4ab7ceb1d7e9ade264bd67c5f76a286241c81ea5254915e9a77899252db83f39",
+              "confidence": "high"
+            }
+          },
+          "score": 12,
+          "highlights": [
+            "4410"
+          ]
+        },
+        {
+          "item": {
+            "uri": "param://OBJECT_PARAM_ST/104410",
+            "sourceUri": "file://param/gameparam/gameparam.parambnd.dcx",
+            "paramName": "OBJECT_PARAM_ST",
+            "entryName": "ObjectParam.param",
+            "entryIndex": 104,
+            "rowId": 104410,
+            "sourceHash": "647a7094145883b77ce2133ec70d41558bd4da00c11645d10515b02396aa0fd8",
+            "fields": [],
+            "raw": {
+              "parser": "sekiro-param-native-v1",
+              "entryIndex": 104,
+              "entryName": "ObjectParam.param",
+              "rowIndex": 257,
+              "nativeNameOffset": 0,
+              "nativeDataOffset": 98376,
+              "dataLength": 280,
+              "dataHash": "f7b6aba1ebde52976a80b5c2b5c27f5f53b943760730ebfaaaf06c9c63a8c9c6",
+              "confidence": "high"
+            }
+          },
+          "score": 12,
+          "highlights": [
+            "4410"
+          ]
+        },
+        {
+          "item": {
+            "uri": "param://OBJECT_PARAM_ST/114410",
+            "sourceUri": "file://param/gameparam/gameparam.parambnd.dcx",
+            "paramName": "OBJECT_PARAM_ST",
+            "entryName": "ObjectParam.param",
+            "entryIndex": 104,
+            "rowId": 114410,
+            "sourceHash": "647a7094145883b77ce2133ec70d41558bd4da00c11645d10515b02396aa0fd8",
+            "fields": [],
+            "raw": {
+              "parser": "sekiro-param-native-v1",
+              "entryIndex": 104,
+              "entryName": "ObjectParam.param",
+              "rowIndex": 513,
+              "nativeNameOffset": 0,
+              "nativeDataOffset": 170056,
+              "dataLength": 280,
+              "dataHash": "da3330bea2a34f606173bff43412e0f62b3417cb66f81ddbb96f2a8fdf171b60",
+              "confidence": "high"
+            }
+          },
+          "score": 12,
+          "highlights": [
+            "4410"
+          ]
+        },
+        {
+          "item": {
+            "uri": "param://OBJECT_PARAM_ST/114410~514",
+            "sourceUri": "file://param/gameparam/gameparam.parambnd.dcx",
+            "paramName": "OBJECT_PARAM_ST",
+            "entryName": "ObjectParam.param",
+            "entryIndex": 104,
+            "rowId": 114410,
+            "sourceHash": "647a7094145883b77ce2133ec70d41558bd4da00c11645d10515b02396aa0fd8",
+            "fields": [],
+            "raw": {
+              "parser": "sekiro-param-native-v1",
+              "entryIndex": 104,
+              "entryName": "ObjectParam.param",
+              "rowIndex": 514,
+              "nativeNameOffset": 0,
+              "nativeDataOffset": 170336,
+              "dataLength": 280,
+              "dataHash": "da3330bea2a34f606173bff43412e0f62b3417cb66f81ddbb96f2a8fdf171b60",
+              "confidence": "high"
+            }
+          },
+          "score": 12,
+          "highlights": [
+            "4410"
+          ]
+        },
+        {
+          "item": {
+            "uri": "param://OBJECT_PARAM_ST/174410",
+            "sourceUri": "file://param/gameparam/gameparam.parambnd.dcx",
+            "paramName": "OBJECT_PARAM_ST",
+            "entryName": "ObjectParam.param",
+            "entryIndex": 104,
+            "rowId": 174410,
+            "sourceHash": "647a7094145883b77ce2133ec70d41558bd4da00c11645d10515b02396aa0fd8",
+            "fields": [],
+            "raw": {
+              "parser": "sekiro-param-native-v1",
+              "entryIndex": 104,
+              "entryName": "ObjectParam.param",
+              "rowIndex": 799,
+              "nativeNameOffset": 0,
+              "nativeDataOffset": 250136,
+              "dataLength": 280,
+              "dataHash": "ebf5f5571f057bb199f0fdfca636b872f6fa42a6d4bcb8784c11e367913fc541",
+              "confidence": "high"
+            }
+          },
+          "score": 12,
+          "highlights": [
+            "4410"
+          ]
+        },
+        {
+          "item": {
+            "uri": "param://SP_EFFECT_PARAM_ST/4410",
+            "sourceUri": "file://param/gameparam/gameparam.parambnd.dcx",
+            "paramName": "SP_EFFECT_PARAM_ST",
+            "entryName": "SpEffectParam.param",
+            "entryIndex": 118,
+            "rowId": 4410,
+            "sourceHash": "1d3c66aea588cdb859884bd33141cc48d7c04649a7e0b7baa1def840e050989d",
+            "rowName": "刀光切换特效",
+            "fields": [],
+            "raw": {
+              "parser": "sekiro-param-native-v1",
+              "entryIndex": 118,
+              "entryName": "SpEffectParam.param",
+              "rowIndex": 1373,
+              "nativeNameOffset": 8698701,
+              "nativeDataOffset": 1680848,
+              "dataLength": 1088,
+              "dataHash": "c9ed128561b915381abda84e08d179ca9a272a51d3f5701b07b2d4ed801fa83d",
+              "confidence": "high"
+            }
+          },
+          "score": 12,
+          "highlights": [
+            "4410"
+          ]
+        }
+      ],
+      "searchId": "search-ebad117d-6e4b-4d0a-b40f-3a0dbb98c2cd"
+    },
+    "scalar": null,
+    "summary": null
+  },
+  "pagination": {
+    "originalChars": 4823,
+    "returnedCount": null,
+    "totalCount": null,
+    "total": null,
+    "offset": null,
+    "limit": null,
+    "truncated": false,
+    "cursors": {}
+  },
+  "completeness": "complete",
+  "truncated": false,
+  "identifiers": [
+    "uri=param://SP_EFFECT_PARAM_ST/4401",
+    "sourceUri=file://param/gameparam/gameparam.parambnd.dcx",
+    "rowId=4401",
+    "uri=param://NPC_PARAM_ST/15504410",
+    "rowId=15504410",
+    "uri=param://OBJECT_PARAM_ST/104410",
+    "rowId=104410",
+    "uri=param://OBJECT_PARAM_ST/114410",
+    "rowId=114410",
+    "uri=param://OBJECT_PARAM_ST/114410~514",
+    "uri=param://OBJECT_PARAM_ST/174410",
+    "rowId=174410",
+    "uri=param://SP_EFFECT_PARAM_ST/4410",
+    "rowId=4410",
+    "searchId=search-ebad117d-6e4b-4d0a-b40f-3a0dbb98c2cd"
+  ],
+  "evidence": {
+    "sourceUris": [
+      "file://param/gameparam/gameparam.parambnd.dcx"
+    ],
+    "sourceHashes": [
+      "1d3c66aea588cdb859884bd33141cc48d7c04649a7e0b7baa1def840e050989d",
+      "6fdd0ac4c90e4a4a0ba6cc5138007588a8b353de9231b2bd27c792e6f8ed32ab",
+      "647a7094145883b77ce2133ec70d41558bd4da00c11645d10515b02396aa0fd8"
+    ],
+    "sourceRevisions": [],
+    "status": "candidate",
+    "kind": "discovery",
+    "nextActions": [
+      "已命中相同或语义相近的定位词；停止重复同义词搜索，停止继续扩大同一路径，改用另一类资源或已有结果的稳定 ID/sourceUri。"
+    ],
+    "repeatedQuery": true
+  }
+}
+```
+
+> **🛠️ 工具返回** (ToolCall ID: `call_01a07cfff08472e2a91fbc444ecda459`)
+```json
+{
+  "ok": true,
+  "state": "completed",
+  "data": {
+    "items": [],
+    "record": {
+      "results": [
+        {
+          "item": {
+            "uri": "param://EQUIP_PARAM_GOODS_ST/3352",
+            "sourceUri": "file://param/gameparam/gameparam.parambnd.dcx",
+            "paramName": "EQUIP_PARAM_GOODS_ST",
+            "entryName": "EquipParamGoods.param",
+            "entryIndex": 39,
+            "rowId": 3352,
+            "sourceHash": "5d1b914f13ea54bd5cec56cc28af21ec1394622f3077445751006e79759d158a",
+            "rowName": "“锈丸刀光”检测物品"
+          },
+          "score": 12,
+          "highlights": [
+            "锈丸刀光"
+          ]
+        },
+        {
+          "item": {
+            "uri": "param://SP_EFFECT_PARAM_ST/3352",
+            "sourceUri": "file://param/gameparam/gameparam.parambnd.dcx",
+            "paramName": "SP_EFFECT_PARAM_ST",
+            "entryName": "SpEffectParam.param",
+            "entryIndex": 118,
+            "rowId": 3352,
+            "sourceHash": "1d3c66aea588cdb859884bd33141cc48d7c04649a7e0b7baa1def840e050989d",
+            "rowName": "“锈丸刀光”状态机3352"
+          },
+          "score": 12,
+          "highlights": [
+            "锈丸刀光"
+          ]
+        },
+        {
+          "item": {
+            "uri": "param://BEHAVIOR_PARAM_ST/254000404",
+            "sourceUri": "file://param/gameparam/gameparam.parambnd.dcx",
+            "paramName": "BEHAVIOR_PARAM_ST",
+            "entryName": "BehaviorParam.param",
+            "entryIndex": 7,
+            "rowId": 254000404,
+            "sourceHash": "b74b265ebf1bf0a71b46718aefd4cfbbbeb0e5bbba7c58d5a8cbe028fd0c42e4",
+            "rowName": "劍聖SFX 次元斬 刀光"
+          },
+          "score": 6,
+          "highlights": [
+            "刀",
+            "光"
+          ]
+        },
+        {
+          "item": {
+            "uri": "param://BULLET_PARAM_ST/12500650",
+            "sourceUri": "file://param/gameparam/gameparam.parambnd.dcx",
+            "paramName": "BULLET_PARAM_ST",
+            "entryName": "Bullet.param",
+            "entryIndex": 11,
+            "rowId": 12500650,
+            "sourceHash": "7b4327ff4a78fddb7b13576cb7e3d88e7ed0f167cf6a21694db92a826a84564d",
+            "rowName": "612501契丸版飞刀"
+          },
+          "score": 6,
+          "highlights": [
+            "丸",
+            "刀"
+          ]
+        },
+        {
+          "item": {
+            "uri": "param://EQUIP_MTRL_SET_PARAM_ST/100050",
+            "sourceUri": "file://param/gameparam/gameparam.parambnd.dcx",
+            "paramName": "EQUIP_MTRL_SET_PARAM_ST",
+            "entryName": "EquipMtrlSetParam.param",
+            "entryIndex": 37,
+            "rowId": 100050,
+            "sourceHash": "d8d772ae17896faad74672b9682e3c733295bcbca3113f6697c573767ae464a2",
+            "rowName": "锈丸"
+          },
+          "score": 6,
+          "highlights": [
+            "锈",
+            "丸"
+          ]
+        },
+        {
+          "item": {
+            "uri": "param://EQUIP_PARAM_GOODS_ST/3353",
+            "sourceUri": "file://param/gameparam/gameparam.parambnd.dcx",
+            "paramName": "EQUIP_PARAM_GOODS_ST",
+            "entryName": "EquipParamGoods.param",
+            "entryIndex": 39,
+            "rowId": 3353,
+            "sourceHash": "5d1b914f13ea54bd5cec56cc28af21ec1394622f3077445751006e79759d158a",
+            "rowName": "“火斧刀光”检测物品"
+          },
+          "score": 6,
+          "highlights": [
+            "刀",
+            "光"
+          ]
+        }
+      ],
+      "resultsReturnedCount": 6,
+      "resultsTotalCount": 30,
+      "resultsTruncated": true,
+      "searchId": "search-75075ef5-53b0-4dcf-80dd-fbdda9658e79"
+    },
+    "scalar": null,
+    "summary": "工具 search_param_rows 输出过大，已返回摘要；请使用返回的 ID 或游标继续分页查询。"
+  },
+  "pagination": {
+    "originalChars": 19950,
+    "returnedCount": null,
+    "totalCount": null,
+    "total": null,
+    "offset": null,
+    "limit": null,
+    "truncated": false,
+    "cursors": {}
+  },
+  "completeness": "summary_only",
+  "truncated": true,
+  "identifiers": [
+    "uri=param://EQUIP_PARAM_GOODS_ST/3352",
+    "sourceUri=file://param/gameparam/gameparam.parambnd.dcx",
+    "rowId=3352",
+    "uri=param://SP_EFFECT_PARAM_ST/3352",
+    "uri=param://BEHAVIOR_PARAM_ST/254000404",
+    "rowId=254000404",
+    "uri=param://BULLET_PARAM_ST/12500650",
+    "rowId=12500650",
+    "uri=param://EQUIP_MTRL_SET_PARAM_ST/100050",
+    "rowId=100050",
+    "uri=param://EQUIP_PARAM_GOODS_ST/3353",
+    "rowId=3353"
+  ],
+  "evidence": {
+    "sourceUris": [
+      "file://param/gameparam/gameparam.parambnd.dcx"
+    ],
+    "sourceHashes": [
+      "5d1b914f13ea54bd5cec56cc28af21ec1394622f3077445751006e79759d158a",
+      "1d3c66aea588cdb859884bd33141cc48d7c04649a7e0b7baa1def840e050989d",
+      "b74b265ebf1bf0a71b46718aefd4cfbbbeb0e5bbba7c58d5a8cbe028fd0c42e4",
+      "7b4327ff4a78fddb7b13576cb7e3d88e7ed0f167cf6a21694db92a826a84564d",
+      "d8d772ae17896faad74672b9682e3c733295bcbca3113f6697c573767ae464a2",
+      "56fb4bb3baf94efcb49656e16f648ba43389825b0df5896aec51ab2cfd1d5405",
+      "bdafbc6ba8cc3d8c85017932d750b34fced294ce6ae557be7753ec8ec3fc5fd5",
+      "c9c4dd2a942162ae40f9b9f99f939a8cfbd1e1c25d0816ba963d5c0bbe8e84d6"
+    ],
+    "sourceRevisions": [],
+    "status": "candidate",
+    "kind": "discovery",
+    "nextActions": [
+      "已命中相同或语义相近的定位词；停止重复同义词搜索，停止继续扩大同一路径，改用另一类资源或已有结果的稳定 ID/sourceUri。"
+    ],
+    "repeatedQuery": true
+  }
+}
+```
+
+> **🛠️ 工具返回** (ToolCall ID: `call_01a07cfff2a57310b4344b51c0370d06`)
+```json
+{
+  "ok": false,
+  "state": "failed",
+  "error": {
+    "code": "PARAM_TABLE_NOT_FOUND",
+    "message": "容器内没有表 ATK_PARAM_ST。",
+    "details": {
+      "available": [
+        "ActionButtonParam.param",
+        "ActionGuideParam.param",
+        "ActionUnlockParam.param",
+        "AiSoundParam.param",
+        "AtkParam_Npc.param",
+        "AtkParam_Pc.param",
+        "AttackElementCorrectParam.param",
+        "BehaviorParam.param",
+        "BehaviorParam_PC.param",
+        "BonfireWarpParam.param",
+        "BudgetParam.param",
+        "Bullet.param",
+        "BulletCreateLimitParam.param",
+        "CalcCorrectGraph.param",
+        "CameraParam.param",
+        "CameraSetParam.param",
+        "Ceremony.param",
+        "CharaInitParam.param",
+        "CharMakeMenuListItemParam.param",
+        "CharMakeMenuTopParam.param",
+        "ChrPhysicsHomingParam.param",
+        "ChrPhysicsVelocityChangeParam.param",
+        "ClearCountCorrectParam.param",
+        "CoolTimeParam.param",
+        "CultSettingParam.param",
+        "CutsceneParam.param",
+        "DecalParam.param",
+        "DefaultKeyAssignParam00.param",
+        "DefaultKeyAssignParam01.param",
+        "DefaultKeyAssignParam02.param",
+        "DefaultKeyAssignParam03.param",
+        "DefaultKeyAssignParam04.param",
+        "default_AIStandardInfoBank.param",
+        "default_EnemyBehaviorBank.param",
+        "DirectionCameraParam.param",
+        "DyingEffectParam.param",
+        "EnemyCommonParam.param",
+        "EquipMtrlSetParam.param",
+        "EquipParamAccessory.param",
+        "EquipParamGoods.param",
+        "EquipParamProtector.param",
+        "EquipParamWeapon.param",
+        "FaceGenParam.param",
+        "FaceParam.param",
+        "FaceRangeParam.param",
+        "FootSfxParam.param",
+        "GameAreaParam.param",
+        "GameProgressParam.param",
+        "GameSystemParam.param",
+        "GemCategoryParam.param",
+        "GemDropDopingParam.param",
+        "GemDropModifyParam.param",
+        "GemeffectParam.param",
+        "GemGenParam.param",
+        "GraphicsParam.param",
+        "GrassLodRangeParam.param",
+        "GrassTypeParam.param",
+        "HitEffectSeHitWallParam.param",
+        "HitEffectSeJustGuardParam.param",
+        "HitEffectSeParam.param",
+        "HitEffectSfxAngleParam.param",
+        "HitEffectSfxConceptJustGuardParam.param",
+        "HitEffectSfxConceptParam.param",
+        "HitEffectSfxParam.param",
+        "HitMaterialSpecialSettingParam.param",
+        "HitMtrlParam.param",
+        "HPEstusFlaskRecoveryParam.param",
+        "ItemLotParam.param",
+        "KnockBackParam.param",
+        "KnowledgeLoadScreenItemParam.param",
+        "LoadBalancerDrawDistScaleParam.param",
+        "LoadBalancerParam.param",
+        "LockCamParam.param",
+        "LodParam.param",
+        "LodParam_ps4.param",
+        "LodParam_xb1.param",
+        "LodPlatform.param",
+        "Magic.param",
+        "MapMimicryEstablishmentParam.param",
+        "MapPartsParam.param",
+        "MaterialExParam.param",
+        "MenuColorTableParam.param",
+        "MenuOffscrRendParam.param",
+        "MenuParam.param",
+        "MenuPropertyLayoutParam.param",
+        "MenuPropertySpecParam.param",
+        "MenuTutorialParam.param",
+        "MenuValueTableParam.param",
+        "ModelSfxParam.param",
+        "MoveParam.param",
+        "MPEstusFlaskRecoveryParam.param",
+        "MultiHPEstusFlaskBonusParam.param",
+        "MultiMPEstusFlaskBonusParam.param",
+        "MultiPlayCorrectionParam.param",
+        "MultiSoulBonusRateParam.param",
+        "NetworkAreaParam.param",
+        "NetworkMsgParam.param",
+        "NetworkParam.param",
+        "NewMenuColorTableParam.param",
+        "NpcAiActionParam.param",
+        "NpcParam.param",
+        "NpcThinkParam.param",
+        "ObjActParam.param",
+        "ObjectMaterialSfxParam.param",
+        "ObjectParam.param",
+        "PhantomParam.param",
+        "PlayRegionParam.param",
+        "ProtectorGenParam.param",
+        "RagdollParam.param",
+        "ReinforceParamProtector.param",
+        "ReinforceParamWeapon.param",
+        "RematchWarpParam.param",
+        "ResourceItemLotParam.param",
+        "ResourceItemParam.param",
+        "RoleParam.param",
+        "ShopLineupParam.param",
+        "SkeletonParam.param",
+        "SkillParam.param",
+        "SpEffectParam.param",
+        "SpEffectVfxParam.param",
+        "StaminaControlParam.param",
+        "SwordArtsParam.param",
+        "TalkParam.param",
+        "TentativePlayerParam.param",
+        "ThrowDirectionDecalParam.param",
+        "ThrowDirectionSeParam.param",
+        "ThrowDirectionSfxParam.param",
+        "ThrowKindParam.param",
+        "ThrowParam.param",
+        "ToughnessParam.param",
+        "UpperArmParam.param",
+        "WeaponGenParam.param",
+        "WepAbsorpPosParam.param",
+        "WetAspectParam.param",
+        "WhiteSignCoolTimeParam.param",
+        "WirePointSearchParam.param",
+        "WireSetParam.param",
+        "WireVariationParam.param"
+      ]
+    }
+  }
+}
+```
+
+### 🤖 助手响应 (Step 11)
+
+绣丸终结那刀我来加追踪——正顺着锈丸和刀光切换两条线索找80距离该落在哪。
+
+#### 🛠️ 发起工具调用:
+- **工具名称**: `search_param_fields` (ID: `call_01a07d00dbaf74b1bd0d64f4d8e0e621`)
+  ```json
+  {
+    "limit": 30,
+    "query": "track homing distance",
+    "rowIds": [
+      5000152
+    ],
+    "table": "ATK_PARAM_PC_ST"
+  }
+  ```
+- **工具名称**: `search_param_fields` (ID: `call_01a07d00df6d7801b1fb224c8f212ce7`)
+  ```json
+  {
+    "limit": 30,
+    "query": "track homing distance chase",
+    "rowIds": [
+      301000
+    ],
+    "table": "SWORD_ARTS_PARAM_ST"
+  }
+  ```
+- **工具名称**: `search_param_rows` (ID: `call_01a07d00e3017951931959a3b1d81445`)
+  ```json
+  {
+    "limit": 30,
+    "query": "追斩 切换"
+  }
+  ```
+
+> **🛠️ 工具返回** (ToolCall ID: `call_01a07d00dbaf74b1bd0d64f4d8e0e621`)
+```json
+{
+  "ok": true,
+  "state": "completed",
+  "data": {
+    "items": [],
+    "record": {
+      "ok": true,
+      "containerPath": "C:\\Users\\ASUS\\AppData\\Local\\Temp\\soulforge-real-agent-2026-09-07T17-48-44-698Z-Rllz1M\\overlay\\param\\gameparam\\gameparam.parambnd.dcx",
+      "table": "AtkParam_Pc",
+      "entryName": "N:\\NTC\\data\\Target\\INTERROOT_win64\\param\\GameParam\\AtkParam_Pc.param",
+      "entryIndex": 5,
+      "rowIds": [
+        5000152
+      ],
+      "sourceHash": "15d797817bbff32e6cdcf42158e7c88673f77991df4097fdfc7c8282679c1a90",
+      "sourceRevision": 1788456409864.9424,
+      "fields": [
+        {
+          "fieldId": "trackType",
+          "name": "軌道",
+          "type": "u8",
+          "description": "Defines the Invincibility frame category"
+        }
+      ],
+      "diagnostics": [
+        {
+          "severity": "info",
+          "code": "PARAM_DOCUMENT_ROUNDTRIP_SEMANTIC_VERIFIED",
+          "message": "PARAM 无修改往返字节级一致。"
+        },
+        {
+          "severity": "info",
+          "code": "PARAM_DOCUMENT_SESSION",
+          "message": "session eff79835185f7fb2fc74fbbba49d0f6a gen 0 parse 1"
+        }
+      ],
+      "searchId": "search-ded6eecc-c825-46c3-b76d-d08433f943ef"
+    },
+    "scalar": null,
+    "summary": null
+  },
+  "pagination": {
+    "originalChars": 1329,
+    "returnedCount": null,
+    "totalCount": null,
+    "total": null,
+    "offset": null,
+    "limit": null,
+    "truncated": false,
+    "cursors": {}
+  },
+  "completeness": "complete",
+  "truncated": false,
+  "identifiers": [
+    "fieldId=trackType",
+    "searchId=search-ded6eecc-c825-46c3-b76d-d08433f943ef"
+  ],
+  "evidence": {
+    "sourceUris": [],
+    "sourceHashes": [
+      "15d797817bbff32e6cdcf42158e7c88673f77991df4097fdfc7c8282679c1a90"
+    ],
+    "sourceRevisions": [
+      1788456409864.9424
+    ],
+    "status": "candidate",
+    "kind": "discovery",
+    "nextActions": [
+      "这是授信 PARAM 字段元数据候选；使用返回的真实 fieldId 继续 read_param_fields。",
+      "如果 fields 为空，不能调用 read_param_fields；改用 health/hp、elite/boss、hostile/team/target、lightning/effect 或 drop/reward/item 等字段语义词重新检索。",
+      "本工具不读取或写入字段值，不能替代原生字段读取。"
+    ],
+    "repeatedQuery": false
+  }
+}
+```
+
+> **🛠️ 工具返回** (ToolCall ID: `call_01a07d00df6d7801b1fb224c8f212ce7`)
+```json
+{
+  "ok": false,
+  "state": "failed",
+  "error": {
+    "code": "PARAM_ROW_NOT_FOUND",
+    "message": "SwordArtsParam.param 缺少行：301000"
+  }
+}
+```
+
+> **🛠️ 工具返回** (ToolCall ID: `call_01a07d00e3017951931959a3b1d81445`)
+```json
+{
+  "ok": true,
+  "state": "completed",
+  "data": {
+    "items": [],
+    "record": {
+      "results": [
+        {
+          "item": {
+            "uri": "param://EQUIP_MTRL_SET_PARAM_ST/301000",
+            "sourceUri": "file://param/gameparam/gameparam.parambnd.dcx",
+            "paramName": "EQUIP_MTRL_SET_PARAM_ST",
+            "entryName": "EquipMtrlSetParam.param",
+            "entryIndex": 37,
+            "rowId": 301000,
+            "sourceHash": "d8d772ae17896faad74672b9682e3c733295bcbca3113f6697c573767ae464a2",
+            "rowName": "派生攻击·追斩"
+          },
+          "score": 12,
+          "highlights": [
+            "追斩"
+          ]
+        },
+        {
+          "item": {
+            "uri": "param://SKILL_PARAM_ST/100",
+            "sourceUri": "file://param/gameparam/gameparam.parambnd.dcx",
+            "paramName": "SKILL_PARAM_ST",
+            "entryName": "SkillParam.param",
+            "entryIndex": 117,
+            "rowId": 100,
+            "sourceHash": "e23082e65a15ac6755cb30654a0f9c40088a3fa7d2ab3fb73c6fefc352bf5d48",
+            "rowName": "派生攻击：追斩"
+          },
+          "score": 12,
+          "highlights": [
+            "追斩"
+          ]
+        },
+        {
+          "item": {
+            "uri": "param://SP_EFFECT_PARAM_ST/3709",
+            "sourceUri": "file://param/gameparam/gameparam.parambnd.dcx",
+            "paramName": "SP_EFFECT_PARAM_ST",
+            "entryName": "SpEffectParam.param",
+            "entryIndex": 118,
+            "rowId": 3709,
+            "sourceHash": "1d3c66aea588cdb859884bd33141cc48d7c04649a7e0b7baa1def840e050989d",
+            "rowName": "三冲追斩白血刀附魔"
+          },
+          "score": 12,
+          "highlights": [
+            "追斩"
+          ]
+        },
+        {
+          "item": {
+            "uri": "param://SP_EFFECT_VFX_PARAM_ST/32403",
+            "sourceUri": "file://param/gameparam/gameparam.parambnd.dcx",
+            "paramName": "SP_EFFECT_VFX_PARAM_ST",
+            "entryName": "SpEffectVfxParam.param",
+            "entryIndex": 119,
+            "rowId": 32403,
+            "sourceHash": "c9c4dd2a942162ae40f9b9f99f939a8cfbd1e1c25d0816ba963d5c0bbe8e84d6",
+            "rowName": "火锈丸切换特效"
+          },
+          "score": 12,
+          "highlights": [
+            "切换"
+          ]
+        },
+        {
+          "item": {
+            "uri": "param://SP_EFFECT_PARAM_ST/4401",
+            "sourceUri": "file://param/gameparam/gameparam.parambnd.dcx",
+            "paramName": "SP_EFFECT_PARAM_ST",
+            "entryName": "SpEffectParam.param",
+            "entryIndex": 118,
+            "rowId": 4401,
+            "sourceHash": "1d3c66aea588cdb859884bd33141cc48d7c04649a7e0b7baa1def840e050989d",
+            "rowName": "刀光切换特效 4401-4410"
+          },
+          "score": 12,
+          "highlights": [
+            "切换"
+          ]
+        },
+        {
+          "item": {
+            "uri": "param://SP_EFFECT_PARAM_ST/4402",
+            "sourceUri": "file://param/gameparam/gameparam.parambnd.dcx",
+            "paramName": "SP_EFFECT_PARAM_ST",
+            "entryName": "SpEffectParam.param",
+            "entryIndex": 118,
+            "rowId": 4402,
+            "sourceHash": "1d3c66aea588cdb859884bd33141cc48d7c04649a7e0b7baa1def840e050989d",
+            "rowName": "刀光切换特效"
+          },
+          "score": 12,
+          "highlights": [
+            "切换"
+          ]
+        }
+      ],
+      "resultsReturnedCount": 6,
+      "resultsTotalCount": 27,
+      "resultsTruncated": true,
+      "searchId": "search-b7a476a9-7254-4cc5-8300-76dda60bfb99"
+    },
+    "scalar": null,
+    "summary": "工具 search_param_rows 输出过大，已返回摘要；请使用返回的 ID 或游标继续分页查询。"
+  },
+  "pagination": {
+    "originalChars": 17820,
+    "returnedCount": null,
+    "totalCount": null,
+    "total": null,
+    "offset": null,
+    "limit": null,
+    "truncated": false,
+    "cursors": {}
+  },
+  "completeness": "summary_only",
+  "truncated": true,
+  "identifiers": [
+    "uri=param://EQUIP_MTRL_SET_PARAM_ST/301000",
+    "sourceUri=file://param/gameparam/gameparam.parambnd.dcx",
+    "rowId=301000",
+    "uri=param://SKILL_PARAM_ST/100",
+    "rowId=100",
+    "uri=param://SP_EFFECT_PARAM_ST/3709",
+    "rowId=3709",
+    "uri=param://SP_EFFECT_VFX_PARAM_ST/32403",
+    "rowId=32403",
+    "uri=param://SP_EFFECT_PARAM_ST/4401",
+    "rowId=4401",
+    "uri=param://SP_EFFECT_PARAM_ST/4402"
+  ],
+  "evidence": {
+    "sourceUris": [
+      "file://param/gameparam/gameparam.parambnd.dcx"
+    ],
+    "sourceHashes": [
+      "d8d772ae17896faad74672b9682e3c733295bcbca3113f6697c573767ae464a2",
+      "e23082e65a15ac6755cb30654a0f9c40088a3fa7d2ab3fb73c6fefc352bf5d48",
+      "1d3c66aea588cdb859884bd33141cc48d7c04649a7e0b7baa1def840e050989d",
+      "c9c4dd2a942162ae40f9b9f99f939a8cfbd1e1c25d0816ba963d5c0bbe8e84d6",
+      "b74b265ebf1bf0a71b46718aefd4cfbbbeb0e5bbba7c58d5a8cbe028fd0c42e4",
+      "7b4327ff4a78fddb7b13576cb7e3d88e7ed0f167cf6a21694db92a826a84564d"
+    ],
+    "sourceRevisions": [],
+    "status": "candidate",
+    "kind": "discovery",
+    "nextActions": [
+      "已命中相同或语义相近的定位词；停止重复同义词搜索，停止继续扩大同一路径，改用另一类资源或已有结果的稳定 ID/sourceUri。"
+    ],
+    "repeatedQuery": true
+  }
+}
+```
+
+### 🤖 助手响应 (Step 12)
+
+绣丸终结那刀我来加追踪 — 正顺着锈丸和刀光切换两条线索找 80 距离该落在哪。
+
+#### 🛠️ 发起工具调用:
+- **工具名称**: `search_param_fields` (ID: `call_01a07d01b2c672f1a9883d80f7a0baf2`)
+  ```json
+  {
+    "limit": 30,
+    "query": "forward distance move",
+    "rowIds": [
+      5000152
+    ],
+    "table": "ATK_PARAM_PC_ST"
+  }
+  ```
+- **工具名称**: `search_param_fields` (ID: `call_01a07d01b6867f90b72f22c2321cf95d`)
+  ```json
+  {
+    "limit": 30,
+    "query": "homing",
+    "rowIds": [
+      500052
+    ],
+    "table": "BULLET_PARAM_ST"
+  }
+  ```
+- **工具名称**: `search_param_rows` (ID: `call_01a07d01ba9c77c0bdda614dabef1b9f`)
+  ```json
+  {
+    "limit": 30,
+    "query": "錆丸"
+  }
+  ```
+
+> **🛠️ 工具返回** (ToolCall ID: `call_01a07d01b2c672f1a9883d80f7a0baf2`)
+```json
+{
+  "ok": true,
+  "state": "completed",
+  "data": {
+    "items": [],
+    "record": {
+      "ok": true,
+      "containerPath": "C:\\Users\\ASUS\\AppData\\Local\\Temp\\soulforge-real-agent-2026-09-07T17-48-44-698Z-Rllz1M\\overlay\\param\\gameparam\\gameparam.parambnd.dcx",
+      "table": "AtkParam_Pc",
+      "entryName": "N:\\NTC\\data\\Target\\INTERROOT_win64\\param\\GameParam\\AtkParam_Pc.param",
+      "entryIndex": 5,
+      "rowIds": [
+        5000152
+      ],
+      "sourceHash": "15d797817bbff32e6cdcf42158e7c88673f77991df4097fdfc7c8282679c1a90",
+      "sourceRevision": 1788456409864.9424,
+      "fields": [],
+      "diagnostics": [
+        {
+          "severity": "info",
+          "code": "PARAM_DOCUMENT_ROUNDTRIP_SEMANTIC_VERIFIED",
+          "message": "PARAM 无修改往返字节级一致。"
+        },
+        {
+          "severity": "info",
+          "code": "PARAM_DOCUMENT_SESSION",
+          "message": "session eff79835185f7fb2fc74fbbba49d0f6a gen 0 parse 0"
+        }
+      ],
+      "searchId": "search-d74af1f7-1e17-4d3e-8f3a-8e3d4f01a09a"
+    },
+    "scalar": null,
+    "summary": null
+  },
+  "pagination": {
+    "originalChars": 1166,
+    "returnedCount": null,
+    "totalCount": null,
+    "total": null,
+    "offset": null,
+    "limit": null,
+    "truncated": false,
+    "cursors": {}
+  },
+  "completeness": "complete",
+  "truncated": false,
+  "identifiers": [
+    "searchId=search-d74af1f7-1e17-4d3e-8f3a-8e3d4f01a09a"
+  ],
+  "evidence": {
+    "sourceUris": [],
+    "sourceHashes": [
+      "15d797817bbff32e6cdcf42158e7c88673f77991df4097fdfc7c8282679c1a90"
+    ],
+    "sourceRevisions": [
+      1788456409864.9424
+    ],
+    "status": "insufficient_evidence",
+    "kind": "discovery",
+    "nextActions": [
+      "当前字段语义查询没有命中；不能调用 read_param_fields，因为没有真实 fieldId。改用 health/hp、elite/boss、hostile/team/target、lightning/effect 或 drop/reward/item 等字段语义词重新检索。"
+    ],
+    "repeatedQuery": false
+  }
+}
+```
+
+> **🛠️ 工具返回** (ToolCall ID: `call_01a07d01b6867f90b72f22c2321cf95d`)
+```json
+{
+  "ok": true,
+  "state": "completed",
+  "data": {
+    "items": [],
+    "record": {
+      "ok": true,
+      "containerPath": "C:\\Users\\ASUS\\AppData\\Local\\Temp\\soulforge-real-agent-2026-09-07T17-48-44-698Z-Rllz1M\\overlay\\param\\gameparam\\gameparam.parambnd.dcx",
+      "table": "Bullet",
+      "entryName": "N:\\NTC\\data\\Target\\INTERROOT_win64\\param\\GameParam\\Bullet.param",
+      "entryIndex": 11,
+      "rowIds": [
+        500052
+      ],
+      "sourceHash": "7b4327ff4a78fddb7b13576cb7e3d88e7ed0f167cf6a21694db92a826a84564d",
+      "sourceRevision": 1788456409864.9424,
+      "fields": [
+        {
+          "fieldId": "homingAngle",
+          "name": "誘導性能[deg/s]",
+          "type": "s16",
+          "description": "The amount of corrections applied to the bullet trajectory every second"
+        },
+        {
+          "fieldId": "homingAngleX",
+          "name": "誘導性能（X軸個別）[deg/s]",
+          "type": "s16",
+          "description": "誘導性能のX軸成分だけを変えます。-1で変えません"
+        },
+        {
+          "fieldId": "homingBeginDist",
+          "name": "誘導開始距離[m]",
+          "type": "f32",
+          "description": "How many meters ahead do you want to start homing?"
+        },
+        {
+          "fieldId": "isEnableAutoHoming",
+          "name": "弾丸自動捕捉許可",
+          "type": "u8",
+          "description": "Whether to automatically follow when unlocked"
+        },
+        {
+          "fieldId": "hormingStopRange",
+          "name": "誘導停止距離[m]",
+          "type": "f32",
+          "description": "The distance to the target at which to stop homing"
+        },
+        {
+          "fieldId": "targetYOffsetRange",
+          "name": "目標上下オフセット[m]",
+          "type": "f32",
+          "description": "Vertical offset of the impact position. Shifts the target position up and down when firing and homing"
+        }
+      ],
+      "diagnostics": [
+        {
+          "severity": "info",
+          "code": "PARAM_DOCUMENT_ROUNDTRIP_SEMANTIC_VERIFIED",
+          "message": "PARAM 无修改往返字节级一致。"
+        },
+        {
+          "severity": "info",
+          "code": "PARAM_DOCUMENT_SESSION",
+          "message": "session 9a09e55692b45f6daec6fe0fda90c2ca gen 0 parse 0"
+        }
+      ],
+      "searchId": "search-8f89ee01-4297-4f4d-8e64-81e58bdbcd39"
+    },
+    "scalar": null,
+    "summary": null
+  },
+  "pagination": {
+    "originalChars": 1892,
+    "returnedCount": null,
+    "totalCount": null,
+    "total": null,
+    "offset": null,
+    "limit": null,
+    "truncated": false,
+    "cursors": {}
+  },
+  "completeness": "complete",
+  "truncated": false,
+  "identifiers": [
+    "fieldId=homingAngle",
+    "fieldId=homingAngleX",
+    "fieldId=homingBeginDist",
+    "fieldId=isEnableAutoHoming",
+    "fieldId=hormingStopRange",
+    "fieldId=targetYOffsetRange",
+    "searchId=search-8f89ee01-4297-4f4d-8e64-81e58bdbcd39"
+  ],
+  "evidence": {
+    "sourceUris": [],
+    "sourceHashes": [
+      "7b4327ff4a78fddb7b13576cb7e3d88e7ed0f167cf6a21694db92a826a84564d"
+    ],
+    "sourceRevisions": [
+      1788456409864.9424
+    ],
+    "status": "candidate",
+    "kind": "discovery",
+    "nextActions": [
+      "已命中相同或语义相近的定位词；停止重复同义词搜索，停止继续扩大同一路径，改用另一类资源或已有结果的稳定 ID/sourceUri。"
+    ],
+    "repeatedQuery": true
+  }
+}
+```
+
+> **🛠️ 工具返回** (ToolCall ID: `call_01a07d01ba9c77c0bdda614dabef1b9f`)
+```json
+{
+  "ok": false,
+  "state": "failed",
+  "error": {
+    "code": "RAG_UNAVAILABLE",
+    "message": "RAG 语义语料为空；仅有文件目录不能用于对象定位。",
+    "details": {
+      "ragAvailability": "unavailable",
+      "ragStats": {
+        "total": 136,
+        "byFamily": {
+          "file": 136,
+          "event": 0,
+          "map_entity": 0,
+          "map_region": 0,
+          "param_row": 0,
+          "text_entry": 0,
+          "tae_event": 0
+        }
+      },
+      "diagnostics": [
+        {
+          "severity": "warning",
+          "code": "RAG_SEMANTIC_CORPUS_EMPTY",
+          "message": "RAG 语义语料为空；仅有文件目录不能用于对象定位。"
+        },
+        {
+          "severity": "warning",
+          "code": "RAG_SEMANTIC_CORPUS_EMPTY",
+          "message": "RAG 语义语料为空；仅有文件目录不能用于对象定位。"
+        }
+      ]
+    }
+  }
+}
+```
+
+### 🤖 助手响应 (Step 13)
+
+绣丸终结那刀我来加追踪 — 正顺着锈丸和刀光切换两条线索找 80 距离该落在哪。
+
+#### 🛠️ 发起工具调用:
+- **工具名称**: `search_param_rows` (ID: `call_01a07d02a0d573b0b2e7d79e2594c966`)
+  ```json
+  {
+    "limit": 30,
+    "query": "绣丸"
+  }
+  ```
+- **工具名称**: `search_param_rows` (ID: `call_01a07d02a2af74a39d0ed62d8c42a6c2`)
+  ```json
+  {
+    "limit": 30,
+    "query": "切换"
+  }
+  ```
+- **工具名称**: `search_param_rows` (ID: `call_01a07d02a45377c1acec1051630b328e`)
+  ```json
+  {
+    "limit": 30,
+    "query": "3352"
+  }
+  ```
+- **工具名称**: `search_param_fields` (ID: `call_01a07d02a5b07c608a5ec4f3e0fa0789`)
+  ```json
+  {
+    "limit": 30,
+    "query": "distance range homing",
+    "rowIds": [
+      500052
+    ],
+    "table": "BULLET_PARAM_ST"
+  }
+  ```
+
+> **🛠️ 工具返回** (ToolCall ID: `call_01a07d02a0d573b0b2e7d79e2594c966`)
+```json
+{
+  "ok": true,
+  "state": "completed",
+  "data": {
+    "items": [],
+    "record": {
+      "results": [
+        {
+          "item": {
+            "uri": "param://ATK_PARAM_ST/5000150",
+            "sourceUri": "file://param/gameparam/gameparam.parambnd.dcx",
+            "paramName": "ATK_PARAM_ST",
+            "entryName": "AtkParam_Pc.param",
+            "entryIndex": 5,
+            "rowId": 5000150,
+            "sourceHash": "15d797817bbff32e6cdcf42158e7c88673f77991df4097fdfc7c8282679c1a90",
+            "rowName": "绣丸表里追斬"
+          },
+          "score": 12,
+          "highlights": [
+            "绣丸"
+          ]
+        },
+        {
+          "item": {
+            "uri": "param://BULLET_PARAM_ST/750300",
+            "sourceUri": "file://param/gameparam/gameparam.parambnd.dcx",
+            "paramName": "BULLET_PARAM_ST",
+            "entryName": "Bullet.param",
+            "entryIndex": 11,
+            "rowId": 750300,
+            "sourceHash": "7b4327ff4a78fddb7b13576cb7e3d88e7ed0f167cf6a21694db92a826a84564d",
+            "rowName": "琉璃绣丸1 -正手第一击，第六击，派生后第一击，第二击（分为正手六击，派生一击，派生后六击）  毒雾9009"
+          },
+          "score": 12,
+          "highlights": [
+            "绣丸"
+          ]
+        },
+        {
+          "item": {
+            "uri": "param://EQUIP_PARAM_WEAPON_ST/75000",
+            "sourceUri": "file://param/gameparam/gameparam.parambnd.dcx",
+            "paramName": "EQUIP_PARAM_WEAPON_ST",
+            "entryName": "EquipParamWeapon.param",
+            "entryIndex": 41,
+            "rowId": 75000,
+            "sourceHash": "9966012e64e3817b861043f0074703186fa0f901396355f961e6fe1d0d74fa93",
+            "rowName": "绣丸"
+          },
+          "score": 12,
+          "highlights": [
+            "绣丸"
+          ]
+        },
+        {
+          "item": {
+            "uri": "param://SKILL_PARAM_ST/751",
+            "sourceUri": "file://param/gameparam/gameparam.parambnd.dcx",
+            "paramName": "SKILL_PARAM_ST",
+            "entryName": "SkillParam.param",
+            "entryIndex": 117,
+            "rowId": 751,
+            "sourceHash": "e23082e65a15ac6755cb30654a0f9c40088a3fa7d2ab3fb73c6fefc352bf5d48",
+            "rowName": "绣丸：表里"
+          },
+          "score": 12,
+          "highlights": [
+            "绣丸"
+          ]
+        },
+        {
+          "item": {
+            "uri": "param://SP_EFFECT_PARAM_ST/9003",
+            "sourceUri": "file://param/gameparam/gameparam.parambnd.dcx",
+            "paramName": "SP_EFFECT_PARAM_ST",
+            "entryName": "SpEffectParam.param",
+            "entryIndex": 118,
+            "rowId": 9003,
+            "sourceHash": "1d3c66aea588cdb859884bd33141cc48d7c04649a7e0b7baa1def840e050989d",
+            "rowName": "绣丸中毒"
+          },
+          "score": 12,
+          "highlights": [
+            "绣丸"
+          ]
+        },
+        {
+          "item": {
+            "uri": "param://ATK_PARAM_ST/5000151",
+            "sourceUri": "file://param/gameparam/gameparam.parambnd.dcx",
+            "paramName": "ATK_PARAM_ST",
+            "entryName": "AtkParam_Pc.param",
+            "entryIndex": 5,
+            "rowId": 5000151,
+            "sourceHash": "15d797817bbff32e6cdcf42158e7c88673f77991df4097fdfc7c8282679c1a90",
+            "rowName": "绣丸表里追斬"
+          },
+          "score": 12,
+          "highlights": [
+            "绣丸"
+          ]
+        }
+      ],
+      "resultsReturnedCount": 6,
+      "resultsTotalCount": 30,
+      "resultsTruncated": true,
+      "searchId": "search-590ab7b8-e92b-4529-868f-03d6ac621f84"
+    },
+    "scalar": null,
+    "summary": "工具 search_param_rows 输出过大，已返回摘要；请使用返回的 ID 或游标继续分页查询。"
+  },
+  "pagination": {
+    "originalChars": 19375,
+    "returnedCount": null,
+    "totalCount": null,
+    "total": null,
+    "offset": null,
+    "limit": null,
+    "truncated": false,
+    "cursors": {}
+  },
+  "completeness": "summary_only",
+  "truncated": true,
+  "identifiers": [
+    "uri=param://ATK_PARAM_ST/5000150",
+    "sourceUri=file://param/gameparam/gameparam.parambnd.dcx",
+    "rowId=5000150",
+    "uri=param://BULLET_PARAM_ST/750300",
+    "rowId=750300",
+    "uri=param://EQUIP_PARAM_WEAPON_ST/75000",
+    "rowId=75000",
+    "uri=param://SKILL_PARAM_ST/751",
+    "rowId=751",
+    "uri=param://SP_EFFECT_PARAM_ST/9003",
+    "rowId=9003",
+    "uri=param://ATK_PARAM_ST/5000151"
+  ],
+  "evidence": {
+    "sourceUris": [
+      "file://param/gameparam/gameparam.parambnd.dcx"
+    ],
+    "sourceHashes": [
+      "15d797817bbff32e6cdcf42158e7c88673f77991df4097fdfc7c8282679c1a90",
+      "7b4327ff4a78fddb7b13576cb7e3d88e7ed0f167cf6a21694db92a826a84564d",
+      "9966012e64e3817b861043f0074703186fa0f901396355f961e6fe1d0d74fa93",
+      "e23082e65a15ac6755cb30654a0f9c40088a3fa7d2ab3fb73c6fefc352bf5d48",
+      "1d3c66aea588cdb859884bd33141cc48d7c04649a7e0b7baa1def840e050989d"
+    ],
+    "sourceRevisions": [],
+    "status": "candidate",
+    "kind": "discovery",
+    "nextActions": [
+      "已命中相同或语义相近的定位词；停止重复同义词搜索，停止继续扩大同一路径，改用另一类资源或已有结果的稳定 ID/sourceUri。"
+    ],
+    "repeatedQuery": true
+  }
+}
+```
+
+> **🛠️ 工具返回** (ToolCall ID: `call_01a07d02a2af74a39d0ed62d8c42a6c2`)
+```json
+{
+  "ok": true,
+  "state": "completed",
+  "data": {
+    "items": [],
+    "record": {
+      "results": [
+        {
+          "item": {
+            "uri": "param://SP_EFFECT_PARAM_ST/4401",
+            "sourceUri": "file://param/gameparam/gameparam.parambnd.dcx",
+            "paramName": "SP_EFFECT_PARAM_ST",
+            "entryName": "SpEffectParam.param",
+            "entryIndex": 118,
+            "rowId": 4401,
+            "sourceHash": "1d3c66aea588cdb859884bd33141cc48d7c04649a7e0b7baa1def840e050989d",
+            "rowName": "刀光切换特效 4401-4410"
+          },
+          "score": 12,
+          "highlights": [
+            "切换"
+          ]
+        },
+        {
+          "item": {
+            "uri": "param://SP_EFFECT_VFX_PARAM_ST/32403",
+            "sourceUri": "file://param/gameparam/gameparam.parambnd.dcx",
+            "paramName": "SP_EFFECT_VFX_PARAM_ST",
+            "entryName": "SpEffectVfxParam.param",
+            "entryIndex": 119,
+            "rowId": 32403,
+            "sourceHash": "c9c4dd2a942162ae40f9b9f99f939a8cfbd1e1c25d0816ba963d5c0bbe8e84d6",
+            "rowName": "火锈丸切换特效"
+          },
+          "score": 12,
+          "highlights": [
+            "切换"
+          ]
+        },
+        {
+          "item": {
+            "uri": "param://SP_EFFECT_PARAM_ST/4402",
+            "sourceUri": "file://param/gameparam/gameparam.parambnd.dcx",
+            "paramName": "SP_EFFECT_PARAM_ST",
+            "entryName": "SpEffectParam.param",
+            "entryIndex": 118,
+            "rowId": 4402,
+            "sourceHash": "1d3c66aea588cdb859884bd33141cc48d7c04649a7e0b7baa1def840e050989d",
+            "rowName": "刀光切换特效"
+          },
+          "score": 12,
+          "highlights": [
+            "切换"
+          ]
+        },
+        {
+          "item": {
+            "uri": "param://SP_EFFECT_PARAM_ST/4403",
+            "sourceUri": "file://param/gameparam/gameparam.parambnd.dcx",
+            "paramName": "SP_EFFECT_PARAM_ST",
+            "entryName": "SpEffectParam.param",
+            "entryIndex": 118,
+            "rowId": 4403,
+            "sourceHash": "1d3c66aea588cdb859884bd33141cc48d7c04649a7e0b7baa1def840e050989d",
+            "rowName": "刀光切换特效"
+          },
+          "score": 12,
+          "highlights": [
+            "切换"
+          ]
+        },
+        {
+          "item": {
+            "uri": "param://SP_EFFECT_PARAM_ST/4404",
+            "sourceUri": "file://param/gameparam/gameparam.parambnd.dcx",
+            "paramName": "SP_EFFECT_PARAM_ST",
+            "entryName": "SpEffectParam.param",
+            "entryIndex": 118,
+            "rowId": 4404,
+            "sourceHash": "1d3c66aea588cdb859884bd33141cc48d7c04649a7e0b7baa1def840e050989d",
+            "rowName": "刀光切换特效"
+          },
+          "score": 12,
+          "highlights": [
+            "切换"
+          ]
+        },
+        {
+          "item": {
+            "uri": "param://SP_EFFECT_PARAM_ST/4405",
+            "sourceUri": "file://param/gameparam/gameparam.parambnd.dcx",
+            "paramName": "SP_EFFECT_PARAM_ST",
+            "entryName": "SpEffectParam.param",
+            "entryIndex": 118,
+            "rowId": 4405,
+            "sourceHash": "1d3c66aea588cdb859884bd33141cc48d7c04649a7e0b7baa1def840e050989d",
+            "rowName": "刀光切换特效"
+          },
+          "score": 12,
+          "highlights": [
+            "切换"
+          ]
+        }
+      ],
+      "resultsReturnedCount": 6,
+      "resultsTotalCount": 20,
+      "resultsTruncated": true,
+      "searchId": "search-49371bb2-6c7b-4ced-b700-e0554cf0f67d"
+    },
+    "scalar": null,
+    "summary": "工具 search_param_rows 输出过大，已返回摘要；请使用返回的 ID 或游标继续分页查询。"
+  },
+  "pagination": {
+    "originalChars": 13172,
+    "returnedCount": null,
+    "totalCount": null,
+    "total": null,
+    "offset": null,
+    "limit": null,
+    "truncated": false,
+    "cursors": {}
+  },
+  "completeness": "summary_only",
+  "truncated": true,
+  "identifiers": [
+    "uri=param://SP_EFFECT_PARAM_ST/4401",
+    "sourceUri=file://param/gameparam/gameparam.parambnd.dcx",
+    "rowId=4401",
+    "uri=param://SP_EFFECT_VFX_PARAM_ST/32403",
+    "rowId=32403",
+    "uri=param://SP_EFFECT_PARAM_ST/4402",
+    "rowId=4402",
+    "uri=param://SP_EFFECT_PARAM_ST/4403",
+    "rowId=4403",
+    "uri=param://SP_EFFECT_PARAM_ST/4404",
+    "rowId=4404",
+    "uri=param://SP_EFFECT_PARAM_ST/4405"
+  ],
+  "evidence": {
+    "sourceUris": [
+      "file://param/gameparam/gameparam.parambnd.dcx"
+    ],
+    "sourceHashes": [
+      "1d3c66aea588cdb859884bd33141cc48d7c04649a7e0b7baa1def840e050989d",
+      "c9c4dd2a942162ae40f9b9f99f939a8cfbd1e1c25d0816ba963d5c0bbe8e84d6"
+    ],
+    "sourceRevisions": [],
+    "status": "candidate",
+    "kind": "discovery",
+    "nextActions": [
+      "已命中相同或语义相近的定位词；停止重复同义词搜索，停止继续扩大同一路径，改用另一类资源或已有结果的稳定 ID/sourceUri。"
+    ],
+    "repeatedQuery": true
+  }
+}
+```
+
+> **🛠️ 工具返回** (ToolCall ID: `call_01a07d02a45377c1acec1051630b328e`)
+```json
+{
+  "ok": true,
+  "state": "completed",
+  "data": {
+    "items": [],
+    "record": {
+      "results": [
+        {
+          "item": {
+            "uri": "param://SP_EFFECT_PARAM_ST/3352",
+            "sourceUri": "file://param/gameparam/gameparam.parambnd.dcx",
+            "paramName": "SP_EFFECT_PARAM_ST",
+            "entryName": "SpEffectParam.param",
+            "entryIndex": 118,
+            "rowId": 3352,
+            "sourceHash": "1d3c66aea588cdb859884bd33141cc48d7c04649a7e0b7baa1def840e050989d",
+            "rowName": "“锈丸刀光”状态机3352",
+            "fields": [],
+            "raw": {
+              "parser": "sekiro-param-native-v1",
+              "entryIndex": 118,
+              "entryName": "SpEffectParam.param",
+              "rowIndex": 975,
+              "nativeNameOffset": 8688169,
+              "nativeDataOffset": 1247824,
+              "dataLength": 1088,
+              "dataHash": "7b336314c26a7955fbf122465ac765a409c069c2dbb96a27f3355242a27ab1ef",
+              "confidence": "high"
+            }
+          },
+          "score": 12,
+          "highlights": [
+            "3352"
+          ]
+        },
+        {
+          "item": {
+            "uri": "param://EQUIP_PARAM_GOODS_ST/3352",
+            "sourceUri": "file://param/gameparam/gameparam.parambnd.dcx",
+            "paramName": "EQUIP_PARAM_GOODS_ST",
+            "entryName": "EquipParamGoods.param",
+            "entryIndex": 39,
+            "rowId": 3352,
+            "sourceHash": "5d1b914f13ea54bd5cec56cc28af21ec1394622f3077445751006e79759d158a",
+            "rowName": "“锈丸刀光”检测物品",
+            "fields": [],
+            "raw": {
+              "parser": "sekiro-param-native-v1",
+              "entryIndex": 39,
+              "entryName": "EquipParamGoods.param",
+              "rowIndex": 113,
+              "nativeNameOffset": 115635,
+              "nativeDataOffset": 32856,
+              "dataLength": 160,
+              "dataHash": "a41736b85b130825e4159197a4cfe0f848b754306707f52b66e8c2ba8b6eed96",
+              "confidence": "high"
+            }
+          },
+          "score": 12,
+          "highlights": [
+            "3352"
+          ]
+        },
+        {
+          "item": {
+            "uri": "param://SP_EFFECT_PARAM_ST/23352",
+            "sourceUri": "file://param/gameparam/gameparam.parambnd.dcx",
+            "paramName": "SP_EFFECT_PARAM_ST",
+            "entryName": "SpEffectParam.param",
+            "entryIndex": 118,
+            "rowId": 23352,
+            "sourceHash": "1d3c66aea588cdb859884bd33141cc48d7c04649a7e0b7baa1def840e050989d",
+            "rowName": "火焰習武修士 噴火SFX",
+            "fields": [],
+            "raw": {
+              "parser": "sekiro-param-native-v1",
+              "entryIndex": 118,
+              "entryName": "SpEffectParam.param",
+              "rowIndex": 4240,
+              "nativeNameOffset": 8775967,
+              "nativeDataOffset": 4800144,
+              "dataLength": 1088,
+              "dataHash": "6e176a4693a3a0848761af67fb5e1ac3b03397d2812b6b7a93f5ff7ce29ea749",
+              "confidence": "high"
+            }
+          },
+          "score": 12,
+          "highlights": [
+            "3352"
+          ]
+        },
+        {
+          "item": {
+            "uri": "param://SP_EFFECT_VFX_PARAM_ST/23352",
+            "sourceUri": "file://param/gameparam/gameparam.parambnd.dcx",
+            "paramName": "SP_EFFECT_VFX_PARAM_ST",
+            "entryName": "SpEffectVfxParam.param",
+            "entryIndex": 119,
+            "rowId": 23352,
+            "sourceHash": "c9c4dd2a942162ae40f9b9f99f939a8cfbd1e1c25d0816ba963d5c0bbe8e84d6",
+            "rowName": "火焰習武修士 噴火SFX",
+            "fields": [],
+            "raw": {
+              "parser": "sekiro-param-native-v1",
+              "entryIndex": 119,
+              "entryName": "SpEffectVfxParam.param",
+              "rowIndex": 983,
+              "nativeNameOffset": 531545,
+              "nativeDataOffset": 240624,
+              "dataLength": 184,
+              "dataHash": "531c2c14b3dffeed3f370106c1fd07a16745129caab11133f1343322f264bb49",
+              "confidence": "high"
+            }
+          },
+          "score": 12,
+          "highlights": [
+            "3352"
+          ]
+        }
+      ],
+      "searchId": "search-3ccfa2f6-ee1d-41bc-ba31-c20fde25f769"
+    },
+    "scalar": null,
+    "summary": null
+  },
+  "pagination": {
+    "originalChars": 3130,
+    "returnedCount": null,
+    "totalCount": null,
+    "total": null,
+    "offset": null,
+    "limit": null,
+    "truncated": false,
+    "cursors": {}
+  },
+  "completeness": "complete",
+  "truncated": false,
+  "identifiers": [
+    "uri=param://SP_EFFECT_PARAM_ST/3352",
+    "sourceUri=file://param/gameparam/gameparam.parambnd.dcx",
+    "rowId=3352",
+    "uri=param://EQUIP_PARAM_GOODS_ST/3352",
+    "uri=param://SP_EFFECT_PARAM_ST/23352",
+    "rowId=23352",
+    "uri=param://SP_EFFECT_VFX_PARAM_ST/23352",
+    "searchId=search-3ccfa2f6-ee1d-41bc-ba31-c20fde25f769"
+  ],
+  "evidence": {
+    "sourceUris": [
+      "file://param/gameparam/gameparam.parambnd.dcx"
+    ],
+    "sourceHashes": [
+      "1d3c66aea588cdb859884bd33141cc48d7c04649a7e0b7baa1def840e050989d",
+      "5d1b914f13ea54bd5cec56cc28af21ec1394622f3077445751006e79759d158a",
+      "c9c4dd2a942162ae40f9b9f99f939a8cfbd1e1c25d0816ba963d5c0bbe8e84d6"
+    ],
+    "sourceRevisions": [],
+    "status": "candidate",
+    "kind": "discovery",
+    "nextActions": [
+      "已命中相同或语义相近的定位词；停止重复同义词搜索，停止继续扩大同一路径，改用另一类资源或已有结果的稳定 ID/sourceUri。"
+    ],
+    "repeatedQuery": true
+  }
+}
+```
+
+> **🛠️ 工具返回** (ToolCall ID: `call_01a07d02a5b07c608a5ec4f3e0fa0789`)
+```json
+{
+  "ok": true,
+  "state": "completed",
+  "data": {
+    "items": [],
+    "record": {
+      "ok": true,
+      "containerPath": "C:\\Users\\ASUS\\AppData\\Local\\Temp\\soulforge-real-agent-2026-09-07T17-48-44-698Z-Rllz1M\\overlay\\param\\gameparam\\gameparam.parambnd.dcx",
+      "table": "Bullet",
+      "entryName": "N:\\NTC\\data\\Target\\INTERROOT_win64\\param\\GameParam\\Bullet.param",
+      "entryIndex": 11,
+      "rowIds": [
+        500052
+      ],
+      "sourceHash": "7b4327ff4a78fddb7b13576cb7e3d88e7ed0f167cf6a21694db92a826a84564d",
+      "sourceRevision": 1788456409864.9424,
+      "fields": [
+        {
+          "fieldId": "hormingStopRange",
+          "name": "誘導停止距離[m]",
+          "type": "f32",
+          "description": "The distance to the target at which to stop homing"
+        },
+        {
+          "fieldId": "gravityInRange",
+          "name": "射程距離内重力[m/s^2]",
+          "type": "f32",
+          "description": "Gravity applied before the attenuation distance"
+        },
+        {
+          "fieldId": "gravityOutRange",
+          "name": "射程距離外重力[m/s^2]",
+          "type": "f32",
+          "description": "Gravity applied before the atenuantion distance"
+        },
+        {
+          "fieldId": "targetYOffsetRange",
+          "name": "目標上下オフセット[m]",
+          "type": "f32",
+          "description": "Vertical offset of the impact position. Shifts the target position up and down when firing and homing"
+        },
+        {
+          "fieldId": "accelInRange",
+          "name": "射程距離内加速度[m/s^2]",
+          "type": "f32",
+          "description": "Acceleration within range of SFX"
+        },
+        {
+          "fieldId": "accelOutRange",
+          "name": "射程距離外加速度[m/s^2]",
+          "type": "f32",
+          "description": "Acceleration when SFX goes out of range"
+        },
+        {
+          "fieldId": "disappearDistanceToTarget",
+          "name": "接近消滅距離[m]",
+          "type": "f32",
+          "description": "When the bullet approaches the specified value (m) from the guidance target, the bullet disappears"
+        },
+        {
+          "fieldId": "guardRangeType",
+          "name": "ガード判定位置",
+          "type": "u8",
+          "description": "When guarding a bullet, where to take the guard success judgment position"
+        },
+        {
+          "fieldId": "homingAngle",
+          "name": "誘導性能[deg/s]",
+          "type": "s16",
+          "description": "The amount of corrections applied to the bullet trajectory every second"
+        },
+        {
+          "fieldId": "homingAngleX",
+          "name": "誘導性能（X軸個別）[deg/s]",
+          "type": "s16",
+          "description": "誘導性能のX軸成分だけを変えます。-1で変えません"
+        },
+        {
+          "fieldId": "homingBeginDist",
+          "name": "誘導開始距離[m]",
+          "type": "f32",
+          "description": "How many meters ahead do you want to start homing?"
+        },
+        {
+          "fieldId": "hormingOffsetRange",
+          "name": "誘導ずらし量[m]",
+          "type": "f32",
+          "description": "0 is correct. Shift each component of XYZ by this amount when aiming."
+        },
+        {
+          "fieldId": "isEnableAutoHoming",
+          "name": "弾丸自動捕捉許可",
+          "type": "u8",
+          "description": "Whether to automatically follow when unlocked"
+        },
+        {
+          "fieldId": "lifeRandomRange",
+          "name": "寿命乱数[s]",
+          "type": "f32",
+          "description": "Add a random number of seconds with the set time amplitude to the lifetime"
+        },
+        {
+          "fieldId": "shootYOffsetRange",
+          "name": "発射位置上下オフセット[m]",
+          "type": "f32",
+          "description": "発射時の高さをオフセットします。発生源タイプが「ダミポリから上下オフセット」の時にしか効きません"
+        },
+        {
+          "fieldId": "damageDamp",
+          "name": "物理攻撃力減衰率[%/s]",
+          "type": "s8",
+          "description": "Reduces physical damage of the bullet when the bullet travels past the attenuation distance"
+        },
+        {
+          "fieldId": "darkDamageDamp",
+          "name": "闇攻撃力減衰率[%/s]",
+          "type": "s8",
+          "description": "Reduces dark damage of the bullet when the bullet travels past the attenuation distance"
+        },
+        {
+          "fieldId": "dist",
+          "name": "射程距離[m]",
+          "type": "f32",
+          "description": "Attenuation Distance, distance the bullet can travel before gravity and damage dampaning take effect"
+        },
+        {
+          "fieldId": "fireDamageDamp",
+          "name": "炎攻撃力減衰率[%/s]",
+          "type": "s8",
+          "description": "Reduces fire damage of the bullet when the bullet travels past the attenuation distance"
+        },
+        {
+          "fieldId": "generationMaxDistWhenOwner",
+          "name": "発生限界距離[m]",
+          "type": "f32",
+          "description": "If the bullet's spawn point is more than this distance away from the owner's position, it will not be fired"
+        },
+        {
+          "fieldId": "knockbackDamp",
+          "name": "ノックバック減衰率[%/s]",
+          "type": "s8",
+          "description": "Reduces knockback damage of the bullet when the bullet travels past the attenuation distance"
+        },
+        {
+          "fieldId": "spelDamageDamp",
+          "name": "魔法攻撃力減衰率[%/s]",
+          "type": "s8",
+          "description": "Reduces magic damage of the bullet when the bullet travels past the attenuation distance"
+        },
+        {
+          "fieldId": "staminaDamp",
+          "name": "スタミナダメージ減衰率[%/s]",
+          "type": "s8",
+          "description": "Reduces stamina damage of the bullet when the bullet travels past the attenuation distance"
+        },
+        {
+          "fieldId": "thunderDamageDamp",
+          "name": "電撃攻撃力減衰率[%/s]",
+          "type": "s8",
+          "description": "Reduces lightning damage of the bullet when the bullet travels past the attenuation distance"
+        }
+      ],
+      "diagnostics": [
+        {
+          "severity": "info",
+          "code": "PARAM_DOCUMENT_ROUNDTRIP_SEMANTIC_VERIFIED",
+          "message": "PARAM 无修改往返字节级一致。"
+        },
+        {
+          "severity": "info",
+          "code": "PARAM_DOCUMENT_SESSION",
+          "message": "session 9a09e55692b45f6daec6fe0fda90c2ca gen 0 parse 0"
+        }
+      ],
+      "searchId": "search-32113fc3-6e32-4c95-9099-b769dbcef973"
+    },
+    "scalar": null,
+    "summary": null
+  },
+  "pagination": {
+    "originalChars": 4714,
+    "returnedCount": null,
+    "totalCount": null,
+    "total": null,
+    "offset": null,
+    "limit": null,
+    "truncated": false,
+    "cursors": {}
+  },
+  "completeness": "complete",
+  "truncated": false,
+  "identifiers": [
+    "fieldId=hormingStopRange",
+    "fieldId=gravityInRange",
+    "fieldId=gravityOutRange",
+    "fieldId=targetYOffsetRange",
+    "fieldId=accelInRange",
+    "fieldId=accelOutRange",
+    "fieldId=disappearDistanceToTarget",
+    "fieldId=guardRangeType",
+    "fieldId=homingAngle",
+    "fieldId=homingAngleX",
+    "fieldId=homingBeginDist",
+    "fieldId=hormingOffsetRange",
+    "fieldId=isEnableAutoHoming",
+    "fieldId=lifeRandomRange",
+    "fieldId=shootYOffsetRange",
+    "fieldId=damageDamp",
+    "fieldId=darkDamageDamp",
+    "fieldId=dist",
+    "fieldId=fireDamageDamp",
+    "fieldId=generationMaxDistWhenOwner",
+    "fieldId=knockbackDamp",
+    "fieldId=spelDamageDamp",
+    "fieldId=staminaDamp",
+    "fieldId=thunderDamageDamp",
+    "searchId=search-32113fc3-6e32-4c95-9099-b769dbcef973"
+  ],
+  "evidence": {
+    "sourceUris": [],
+    "sourceHashes": [
+      "7b4327ff4a78fddb7b13576cb7e3d88e7ed0f167cf6a21694db92a826a84564d"
+    ],
+    "sourceRevisions": [
+      1788456409864.9424
+    ],
+    "status": "candidate",
+    "kind": "discovery",
+    "nextActions": [
+      "已命中相同或语义相近的定位词；停止重复同义词搜索，停止继续扩大同一路径，改用另一类资源或已有结果的稳定 ID/sourceUri。"
+    ],
+    "repeatedQuery": true
+  }
+}
+```
+
+### 🤖 助手响应 (Step 14)
+
+找到绣丸追斩本体了，正在确认最后一刀切换斩的追踪字段。
+
+#### 🛠️ 发起工具调用:
+- **工具名称**: `search_param_rows` (ID: `call_01a07d030ae87600940bea73ce0e487c`)
+  ```json
+  {
+    "limit": 30,
+    "query": "5000150"
+  }
+  ```
+- **工具名称**: `search_param_rows` (ID: `call_01a07d030cbd70508f934b1188891557`)
+  ```json
+  {
+    "limit": 30,
+    "query": "绣丸表里追斬"
+  }
+  ```
+- **工具名称**: `search_param_fields` (ID: `call_01a07d030e9c7800a1f3699c351312d7`)
+  ```json
+  {
+    "limit": 30,
+    "query": "distance",
+    "rowIds": [
+      5000150,
+      5000151
+    ],
+    "table": "ATK_PARAM_PC_ST"
+  }
+  ```
+
+> **🛠️ 工具返回** (ToolCall ID: `call_01a07d030ae87600940bea73ce0e487c`)
+```json
+{
+  "ok": true,
+  "state": "completed",
+  "data": {
+    "items": [],
+    "record": {
+      "results": [
+        {
+          "item": {
+            "uri": "param://ATK_PARAM_ST/50001500",
+            "sourceUri": "file://param/gameparam/gameparam.parambnd.dcx",
+            "paramName": "ATK_PARAM_ST",
+            "entryName": "AtkParam_Npc.param",
+            "entryIndex": 4,
+            "rowId": 50001500,
+            "sourceHash": "c7e4013c981aa118b9e8a11cfbc3a9002d6c32a4d7c4e0f2d22373ef9b768863",
+            "fields": [],
+            "raw": {
+              "parser": "sekiro-param-native-v1",
+              "entryIndex": 4,
+              "entryName": "AtkParam_Npc.param",
+              "rowIndex": 2398,
+              "nativeNameOffset": 0,
+              "nativeDataOffset": 1210896,
+              "dataLength": 464,
+              "dataHash": "dc9a7b8fd93c76a252eccc6f82b896cd081710c4aa8f76c5aed7374f91348b9c",
+              "confidence": "high"
+            }
+          },
+          "score": 12,
+          "highlights": [
+            "5000150"
+          ]
+        },
+        {
+          "item": {
+            "uri": "param://ATK_PARAM_ST/5000150",
+            "sourceUri": "file://param/gameparam/gameparam.parambnd.dcx",
+            "paramName": "ATK_PARAM_ST",
+            "entryName": "AtkParam_Pc.param",
+            "entryIndex": 5,
+            "rowId": 5000150,
+            "sourceHash": "15d797817bbff32e6cdcf42158e7c88673f77991df4097fdfc7c8282679c1a90",
+            "rowName": "绣丸表里追斬",
+            "fields": [],
+            "raw": {
+              "parser": "sekiro-param-native-v1",
+              "entryIndex": 5,
+              "entryName": "AtkParam_Pc.param",
+              "rowIndex": 144,
+              "nativeNameOffset": 264761,
+              "nativeDataOffset": 79888,
+              "dataLength": 464,
+              "dataHash": "dd409a879174bb0798c0c71f372bf16edf8ce4d6d3a3d2f660da34b71faefc61",
+              "confidence": "high"
+            }
+          },
+          "score": 12,
+          "highlights": [
+            "5000150"
+          ]
+        },
+        {
+          "item": {
+            "uri": "param://BEHAVIOR_PARAM_ST/250001500",
+            "sourceUri": "file://param/gameparam/gameparam.parambnd.dcx",
+            "paramName": "BEHAVIOR_PARAM_ST",
+            "entryName": "BehaviorParam.param",
+            "entryIndex": 7,
+            "rowId": 250001500,
+            "sourceHash": "b74b265ebf1bf0a71b46718aefd4cfbbbeb0e5bbba7c58d5a8cbe028fd0c42e4",
+            "fields": [],
+            "raw": {
+              "parser": "sekiro-param-native-v1",
+              "entryIndex": 7,
+              "entryName": "BehaviorParam.param",
+              "rowIndex": 3183,
+              "nativeNameOffset": 0,
+              "nativeDataOffset": 231688,
+              "dataLength": 32,
+              "dataHash": "73b7ecd8adcb45b262238d83619a420b6dc8a380af8f684e365b7adc0d65b76e",
+              "confidence": "high"
+            }
+          },
+          "score": 12,
+          "highlights": [
+            "5000150"
+          ]
+        },
+        {
+          "item": {
+            "uri": "param://BEHAVIOR_PARAM_ST/105000150",
+            "sourceUri": "file://param/gameparam/gameparam.parambnd.dcx",
+            "paramName": "BEHAVIOR_PARAM_ST",
+            "entryName": "BehaviorParam_PC.param",
+            "entryIndex": 8,
+            "rowId": 105000150,
+            "sourceHash": "f01ba002902f4f504ca488454b989d5816c96467c1fd9379becb237a8271a424",
+            "fields": [],
+            "raw": {
+              "parser": "sekiro-param-native-v1",
+              "entryIndex": 8,
+              "entryName": "BehaviorParam_PC.param",
+              "rowIndex": 106,
+              "nativeNameOffset": 41060,
+              "nativeDataOffset": 20904,
+              "dataLength": 32,
+              "dataHash": "5f02d2d9aa1aab1c0fa1891309d1801f2d8a97140c245be871da0a91dfebad44",
+              "confidence": "high"
+            }
+          },
+          "score": 12,
+          "highlights": [
+            "5000150"
+          ]
+        },
+        {
+          "item": {
+            "uri": "param://THROW_INFO_BANK/15000150",
+            "sourceUri": "file://param/gameparam/gameparam.parambnd.dcx",
+            "paramName": "THROW_INFO_BANK",
+            "entryName": "ThrowParam.param",
+            "entryIndex": 128,
+            "rowId": 15000150,
+            "sourceHash": "3f4448ef2def4003f4dfcba0b878355d1877f32ae3d8d934c36758e50bf7f7df",
+            "fields": [],
+            "raw": {
+              "parser": "sekiro-param-native-v1",
+              "entryIndex": 128,
+              "entryName": "ThrowParam.param",
+              "rowIndex": 1554,
+              "nativeNameOffset": 0,
+              "nativeDataOffset": 269560,
+              "dataLength": 136,
+              "dataHash": "ec17b9cd1f4dfbb8426016b2272a3d731d6b6e307ca77d78878c2d7675e0b8d2",
+              "confidence": "high"
+            }
+          },
+          "score": 12,
+          "highlights": [
+            "5000150"
+          ]
+        }
+      ],
+      "searchId": "search-12186cc7-34f8-4d9b-881f-b22f381694f0"
+    },
+    "scalar": null,
+    "summary": null
+  },
+  "pagination": {
+    "originalChars": 3747,
+    "returnedCount": null,
+    "totalCount": null,
+    "total": null,
+    "offset": null,
+    "limit": null,
+    "truncated": false,
+    "cursors": {}
+  },
+  "completeness": "complete",
+  "truncated": false,
+  "identifiers": [
+    "uri=param://ATK_PARAM_ST/50001500",
+    "sourceUri=file://param/gameparam/gameparam.parambnd.dcx",
+    "rowId=50001500",
+    "uri=param://ATK_PARAM_ST/5000150",
+    "rowId=5000150",
+    "uri=param://BEHAVIOR_PARAM_ST/250001500",
+    "rowId=250001500",
+    "uri=param://BEHAVIOR_PARAM_ST/105000150",
+    "rowId=105000150",
+    "uri=param://THROW_INFO_BANK/15000150",
+    "rowId=15000150",
+    "searchId=search-12186cc7-34f8-4d9b-881f-b22f381694f0"
+  ],
+  "evidence": {
+    "sourceUris": [
+      "file://param/gameparam/gameparam.parambnd.dcx"
+    ],
+    "sourceHashes": [
+      "c7e4013c981aa118b9e8a11cfbc3a9002d6c32a4d7c4e0f2d22373ef9b768863",
+      "15d797817bbff32e6cdcf42158e7c88673f77991df4097fdfc7c8282679c1a90",
+      "b74b265ebf1bf0a71b46718aefd4cfbbbeb0e5bbba7c58d5a8cbe028fd0c42e4",
+      "f01ba002902f4f504ca488454b989d5816c96467c1fd9379becb237a8271a424",
+      "3f4448ef2def4003f4dfcba0b878355d1877f32ae3d8d934c36758e50bf7f7df"
+    ],
+    "sourceRevisions": [],
+    "status": "candidate",
+    "kind": "discovery",
+    "nextActions": [
+      "已命中相同或语义相近的定位词；停止重复同义词搜索，停止继续扩大同一路径，改用另一类资源或已有结果的稳定 ID/sourceUri。"
+    ],
+    "repeatedQuery": true
+  }
+}
+```
+
+> **🛠️ 工具返回** (ToolCall ID: `call_01a07d030cbd70508f934b1188891557`)
+```json
+{
+  "ok": true,
+  "state": "completed",
+  "data": {
+    "items": [],
+    "record": {
+      "results": [
+        {
+          "item": {
+            "uri": "param://ATK_PARAM_ST/5000150",
+            "sourceUri": "file://param/gameparam/gameparam.parambnd.dcx",
+            "paramName": "ATK_PARAM_ST",
+            "entryName": "AtkParam_Pc.param",
+            "entryIndex": 5,
+            "rowId": 5000150,
+            "sourceHash": "15d797817bbff32e6cdcf42158e7c88673f77991df4097fdfc7c8282679c1a90",
+            "rowName": "绣丸表里追斬"
+          },
+          "score": 12,
+          "highlights": [
+            "绣丸表里追斬"
+          ]
+        },
+        {
+          "item": {
+            "uri": "param://ATK_PARAM_ST/5000151",
+            "sourceUri": "file://param/gameparam/gameparam.parambnd.dcx",
+            "paramName": "ATK_PARAM_ST",
+            "entryName": "AtkParam_Pc.param",
+            "entryIndex": 5,
+            "rowId": 5000151,
+            "sourceHash": "15d797817bbff32e6cdcf42158e7c88673f77991df4097fdfc7c8282679c1a90",
+            "rowName": "绣丸表里追斬"
+          },
+          "score": 12,
+          "highlights": [
+            "绣丸表里追斬"
+          ]
+        },
+        {
+          "item": {
+            "uri": "param://ATK_PARAM_ST/7500110",
+            "sourceUri": "file://param/gameparam/gameparam.parambnd.dcx",
+            "paramName": "ATK_PARAM_ST",
+            "entryName": "AtkParam_Pc.param",
+            "entryIndex": 5,
+            "rowId": 7500110,
+            "sourceHash": "15d797817bbff32e6cdcf42158e7c88673f77991df4097fdfc7c8282679c1a90",
+            "rowName": "绣丸：表里"
+          },
+          "score": 12,
+          "highlights": [
+            "绣",
+            "丸",
+            "表",
+            "里"
+          ]
+        },
+        {
+          "item": {
+            "uri": "param://ATK_PARAM_ST/7500111",
+            "sourceUri": "file://param/gameparam/gameparam.parambnd.dcx",
+            "paramName": "ATK_PARAM_ST",
+            "entryName": "AtkParam_Pc.param",
+            "entryIndex": 5,
+            "rowId": 7500111,
+            "sourceHash": "15d797817bbff32e6cdcf42158e7c88673f77991df4097fdfc7c8282679c1a90",
+            "rowName": "绣丸：表里"
+          },
+          "score": 12,
+          "highlights": [
+            "绣",
+            "丸",
+            "表",
+            "里"
+          ]
+        },
+        {
+          "item": {
+            "uri": "param://ATK_PARAM_ST/7500112",
+            "sourceUri": "file://param/gameparam/gameparam.parambnd.dcx",
+            "paramName": "ATK_PARAM_ST",
+            "entryName": "AtkParam_Pc.param",
+            "entryIndex": 5,
+            "rowId": 7500112,
+            "sourceHash": "15d797817bbff32e6cdcf42158e7c88673f77991df4097fdfc7c8282679c1a90",
+            "rowName": "绣丸：表里"
+          },
+          "score": 12,
+          "highlights": [
+            "绣",
+            "丸",
+            "表",
+            "里"
+          ]
+        },
+        {
+          "item": {
+            "uri": "param://ATK_PARAM_ST/7500113",
+            "sourceUri": "file://param/gameparam/gameparam.parambnd.dcx",
+            "paramName": "ATK_PARAM_ST",
+            "entryName": "AtkParam_Pc.param",
+            "entryIndex": 5,
+            "rowId": 7500113,
+            "sourceHash": "15d797817bbff32e6cdcf42158e7c88673f77991df4097fdfc7c8282679c1a90",
+            "rowName": "绣丸：表里"
+          },
+          "score": 12,
+          "highlights": [
+            "绣",
+            "丸",
+            "表",
+            "里"
+          ]
+        }
+      ],
+      "resultsReturnedCount": 6,
+      "resultsTotalCount": 30,
+      "resultsTruncated": true,
+      "searchId": "search-1a2a2521-416c-4cb0-b5d8-b56560374884"
+    },
+    "scalar": null,
+    "summary": "工具 search_param_rows 输出过大，已返回摘要；请使用返回的 ID 或游标继续分页查询。"
+  },
+  "pagination": {
+    "originalChars": 19766,
+    "returnedCount": null,
+    "totalCount": null,
+    "total": null,
+    "offset": null,
+    "limit": null,
+    "truncated": false,
+    "cursors": {}
+  },
+  "completeness": "summary_only",
+  "truncated": true,
+  "identifiers": [
+    "uri=param://ATK_PARAM_ST/5000150",
+    "sourceUri=file://param/gameparam/gameparam.parambnd.dcx",
+    "rowId=5000150",
+    "uri=param://ATK_PARAM_ST/5000151",
+    "rowId=5000151",
+    "uri=param://ATK_PARAM_ST/7500110",
+    "rowId=7500110",
+    "uri=param://ATK_PARAM_ST/7500111",
+    "rowId=7500111",
+    "uri=param://ATK_PARAM_ST/7500112",
+    "rowId=7500112",
+    "uri=param://ATK_PARAM_ST/7500113"
+  ],
+  "evidence": {
+    "sourceUris": [
+      "file://param/gameparam/gameparam.parambnd.dcx"
+    ],
+    "sourceHashes": [
+      "15d797817bbff32e6cdcf42158e7c88673f77991df4097fdfc7c8282679c1a90",
+      "9966012e64e3817b861043f0074703186fa0f901396355f961e6fe1d0d74fa93",
+      "e23082e65a15ac6755cb30654a0f9c40088a3fa7d2ab3fb73c6fefc352bf5d48",
+      "1d3c66aea588cdb859884bd33141cc48d7c04649a7e0b7baa1def840e050989d",
+      "d8d772ae17896faad74672b9682e3c733295bcbca3113f6697c573767ae464a2",
+      "c7e4013c981aa118b9e8a11cfbc3a9002d6c32a4d7c4e0f2d22373ef9b768863",
+      "b74b265ebf1bf0a71b46718aefd4cfbbbeb0e5bbba7c58d5a8cbe028fd0c42e4",
+      "7b4327ff4a78fddb7b13576cb7e3d88e7ed0f167cf6a21694db92a826a84564d",
+      "c9c4dd2a942162ae40f9b9f99f939a8cfbd1e1c25d0816ba963d5c0bbe8e84d6"
+    ],
+    "sourceRevisions": [],
+    "status": "candidate",
+    "kind": "discovery",
+    "nextActions": [
+      "已命中相同或语义相近的定位词；停止重复同义词搜索，停止继续扩大同一路径，改用另一类资源或已有结果的稳定 ID/sourceUri。"
+    ],
+    "repeatedQuery": true
+  }
+}
+```
+
+> **🛠️ 工具返回** (ToolCall ID: `call_01a07d030e9c7800a1f3699c351312d7`)
+```json
+{
+  "ok": true,
+  "state": "completed",
+  "data": {
+    "items": [],
+    "record": {
+      "ok": true,
+      "containerPath": "C:\\Users\\ASUS\\AppData\\Local\\Temp\\soulforge-real-agent-2026-09-07T17-48-44-698Z-Rllz1M\\overlay\\param\\gameparam\\gameparam.parambnd.dcx",
+      "table": "AtkParam_Pc",
+      "entryName": "N:\\NTC\\data\\Target\\INTERROOT_win64\\param\\GameParam\\AtkParam_Pc.param",
+      "entryIndex": 5,
+      "rowIds": [
+        5000150,
+        5000151
+      ],
+      "sourceHash": "15d797817bbff32e6cdcf42158e7c88673f77991df4097fdfc7c8282679c1a90",
+      "sourceRevision": 1788456409864.9424,
+      "fields": [],
+      "diagnostics": [
+        {
+          "severity": "info",
+          "code": "PARAM_DOCUMENT_ROUNDTRIP_SEMANTIC_VERIFIED",
+          "message": "PARAM 无修改往返字节级一致。"
+        },
+        {
+          "severity": "info",
+          "code": "PARAM_DOCUMENT_SESSION",
+          "message": "session eff79835185f7fb2fc74fbbba49d0f6a gen 0 parse 0"
+        }
+      ],
+      "searchId": "search-d2bad256-27be-41c9-a3f2-156b38200f44"
+    },
+    "scalar": null,
+    "summary": null
+  },
+  "pagination": {
+    "originalChars": 1173,
+    "returnedCount": null,
+    "totalCount": null,
+    "total": null,
+    "offset": null,
+    "limit": null,
+    "truncated": false,
+    "cursors": {}
+  },
+  "completeness": "complete",
+  "truncated": false,
+  "identifiers": [
+    "searchId=search-d2bad256-27be-41c9-a3f2-156b38200f44"
+  ],
+  "evidence": {
+    "sourceUris": [],
+    "sourceHashes": [
+      "15d797817bbff32e6cdcf42158e7c88673f77991df4097fdfc7c8282679c1a90"
+    ],
+    "sourceRevisions": [
+      1788456409864.9424
+    ],
+    "status": "insufficient_evidence",
+    "kind": "discovery",
+    "nextActions": [
+      "当前字段语义查询没有命中；不能调用 read_param_fields，因为没有真实 fieldId。改用 health/hp、elite/boss、hostile/team/target、lightning/effect 或 drop/reward/item 等字段语义词重新检索。"
+    ],
+    "repeatedQuery": true
+  }
+}
+```
+
+### 🤖 助手响应 (Step 15)
+
+找到绣丸追斩本体了，正在确认最后一刀切换斩的追踪字段。
+
+#### 🛠️ 发起工具调用:
+- **工具名称**: `search_param_rows` (ID: `call_01a07d0399a577739e5a7c1cdcaf2514`)
+  ```json
+  {
+    "limit": 30,
+    "query": "绣丸表里"
+  }
+  ```
+- **工具名称**: `search_param_rows` (ID: `call_01a07d039c687f209f7adce61de7e33f`)
+  ```json
+  {
+    "limit": 50,
+    "query": "7500110"
+  }
+  ```
+- **工具名称**: `search_param_rows` (ID: `call_01a07d039f637670b545a68f6e6d147e`)
+  ```json
+  {
+    "limit": 50,
+    "query": "SwordArts 绣丸"
+  }
+  ```
+
+> **🛠️ 工具返回** (ToolCall ID: `call_01a07d0399a577739e5a7c1cdcaf2514`)
+```json
+{
+  "ok": true,
+  "state": "completed",
+  "data": {
+    "items": [],
+    "record": {
+      "results": [
+        {
+          "item": {
+            "uri": "param://ATK_PARAM_ST/5000150",
+            "sourceUri": "file://param/gameparam/gameparam.parambnd.dcx",
+            "paramName": "ATK_PARAM_ST",
+            "entryName": "AtkParam_Pc.param",
+            "entryIndex": 5,
+            "rowId": 5000150,
+            "sourceHash": "15d797817bbff32e6cdcf42158e7c88673f77991df4097fdfc7c8282679c1a90",
+            "rowName": "绣丸表里追斬"
+          },
+          "score": 12,
+          "highlights": [
+            "绣丸表里"
+          ]
+        },
+        {
+          "item": {
+            "uri": "param://ATK_PARAM_ST/5000151",
+            "sourceUri": "file://param/gameparam/gameparam.parambnd.dcx",
+            "paramName": "ATK_PARAM_ST",
+            "entryName": "AtkParam_Pc.param",
+            "entryIndex": 5,
+            "rowId": 5000151,
+            "sourceHash": "15d797817bbff32e6cdcf42158e7c88673f77991df4097fdfc7c8282679c1a90",
+            "rowName": "绣丸表里追斬"
+          },
+          "score": 12,
+          "highlights": [
+            "绣丸表里"
+          ]
+        },
+        {
+          "item": {
+            "uri": "param://ATK_PARAM_ST/7500110",
+            "sourceUri": "file://param/gameparam/gameparam.parambnd.dcx",
+            "paramName": "ATK_PARAM_ST",
+            "entryName": "AtkParam_Pc.param",
+            "entryIndex": 5,
+            "rowId": 7500110,
+            "sourceHash": "15d797817bbff32e6cdcf42158e7c88673f77991df4097fdfc7c8282679c1a90",
+            "rowName": "绣丸：表里"
+          },
+          "score": 12,
+          "highlights": [
+            "绣",
+            "丸",
+            "表",
+            "里"
+          ]
+        },
+        {
+          "item": {
+            "uri": "param://ATK_PARAM_ST/7500111",
+            "sourceUri": "file://param/gameparam/gameparam.parambnd.dcx",
+            "paramName": "ATK_PARAM_ST",
+            "entryName": "AtkParam_Pc.param",
+            "entryIndex": 5,
+            "rowId": 7500111,
+            "sourceHash": "15d797817bbff32e6cdcf42158e7c88673f77991df4097fdfc7c8282679c1a90",
+            "rowName": "绣丸：表里"
+          },
+          "score": 12,
+          "highlights": [
+            "绣",
+            "丸",
+            "表",
+            "里"
+          ]
+        },
+        {
+          "item": {
+            "uri": "param://ATK_PARAM_ST/7500112",
+            "sourceUri": "file://param/gameparam/gameparam.parambnd.dcx",
+            "paramName": "ATK_PARAM_ST",
+            "entryName": "AtkParam_Pc.param",
+            "entryIndex": 5,
+            "rowId": 7500112,
+            "sourceHash": "15d797817bbff32e6cdcf42158e7c88673f77991df4097fdfc7c8282679c1a90",
+            "rowName": "绣丸：表里"
+          },
+          "score": 12,
+          "highlights": [
+            "绣",
+            "丸",
+            "表",
+            "里"
+          ]
+        },
+        {
+          "item": {
+            "uri": "param://ATK_PARAM_ST/7500113",
+            "sourceUri": "file://param/gameparam/gameparam.parambnd.dcx",
+            "paramName": "ATK_PARAM_ST",
+            "entryName": "AtkParam_Pc.param",
+            "entryIndex": 5,
+            "rowId": 7500113,
+            "sourceHash": "15d797817bbff32e6cdcf42158e7c88673f77991df4097fdfc7c8282679c1a90",
+            "rowName": "绣丸：表里"
+          },
+          "score": 12,
+          "highlights": [
+            "绣",
+            "丸",
+            "表",
+            "里"
+          ]
+        }
+      ],
+      "resultsReturnedCount": 6,
+      "resultsTotalCount": 30,
+      "resultsTruncated": true,
+      "searchId": "search-a54f9e72-171e-41e7-a51c-4d3e5baeeebb"
+    },
+    "scalar": null,
+    "summary": "工具 search_param_rows 输出过大，已返回摘要；请使用返回的 ID 或游标继续分页查询。"
+  },
+  "pagination": {
+    "originalChars": 19537,
+    "returnedCount": null,
+    "totalCount": null,
+    "total": null,
+    "offset": null,
+    "limit": null,
+    "truncated": false,
+    "cursors": {}
+  },
+  "completeness": "summary_only",
+  "truncated": true,
+  "identifiers": [
+    "uri=param://ATK_PARAM_ST/5000150",
+    "sourceUri=file://param/gameparam/gameparam.parambnd.dcx",
+    "rowId=5000150",
+    "uri=param://ATK_PARAM_ST/5000151",
+    "rowId=5000151",
+    "uri=param://ATK_PARAM_ST/7500110",
+    "rowId=7500110",
+    "uri=param://ATK_PARAM_ST/7500111",
+    "rowId=7500111",
+    "uri=param://ATK_PARAM_ST/7500112",
+    "rowId=7500112",
+    "uri=param://ATK_PARAM_ST/7500113"
+  ],
+  "evidence": {
+    "sourceUris": [
+      "file://param/gameparam/gameparam.parambnd.dcx"
+    ],
+    "sourceHashes": [
+      "15d797817bbff32e6cdcf42158e7c88673f77991df4097fdfc7c8282679c1a90",
+      "9966012e64e3817b861043f0074703186fa0f901396355f961e6fe1d0d74fa93",
+      "e23082e65a15ac6755cb30654a0f9c40088a3fa7d2ab3fb73c6fefc352bf5d48",
+      "1d3c66aea588cdb859884bd33141cc48d7c04649a7e0b7baa1def840e050989d",
+      "d8d772ae17896faad74672b9682e3c733295bcbca3113f6697c573767ae464a2",
+      "7b4327ff4a78fddb7b13576cb7e3d88e7ed0f167cf6a21694db92a826a84564d"
+    ],
+    "sourceRevisions": [],
+    "status": "candidate",
+    "kind": "discovery",
+    "nextActions": [
+      "已命中相同或语义相近的定位词；停止重复同义词搜索，停止继续扩大同一路径，改用另一类资源或已有结果的稳定 ID/sourceUri。"
+    ],
+    "repeatedQuery": true
+  }
+}
+```
+
+> **🛠️ 工具返回** (ToolCall ID: `call_01a07d039c687f209f7adce61de7e33f`)
+```json
+{
+  "ok": true,
+  "state": "completed",
+  "data": {
+    "items": [],
+    "record": {
+      "results": [
+        {
+          "item": {
+            "uri": "param://ATK_PARAM_ST/7500110",
+            "sourceUri": "file://param/gameparam/gameparam.parambnd.dcx",
+            "paramName": "ATK_PARAM_ST",
+            "entryName": "AtkParam_Pc.param",
+            "entryIndex": 5,
+            "rowId": 7500110,
+            "sourceHash": "15d797817bbff32e6cdcf42158e7c88673f77991df4097fdfc7c8282679c1a90",
+            "rowName": "绣丸：表里",
+            "fields": [],
+            "raw": {
+              "parser": "sekiro-param-native-v1",
+              "entryIndex": 5,
+              "entryName": "AtkParam_Pc.param",
+              "rowIndex": 404,
+              "nativeNameOffset": 268333,
+              "nativeDataOffset": 200528,
+              "dataLength": 464,
+              "dataHash": "8c6e15623a4e77c7ffe17006724f39afab2e97ad53f78cdc41b0b83f0b556def",
+              "confidence": "high"
+            }
+          },
+          "score": 12,
+          "highlights": [
+            "7500110"
+          ]
+        },
+        {
+          "item": {
+            "uri": "param://BEHAVIOR_PARAM_ST/107500110",
+            "sourceUri": "file://param/gameparam/gameparam.parambnd.dcx",
+            "paramName": "BEHAVIOR_PARAM_ST",
+            "entryName": "BehaviorParam_PC.param",
+            "entryIndex": 8,
+            "rowId": 107500110,
+            "sourceHash": "f01ba002902f4f504ca488454b989d5816c96467c1fd9379becb237a8271a424",
+            "fields": [],
+            "raw": {
+              "parser": "sekiro-param-native-v1",
+              "entryIndex": 8,
+              "entryName": "BehaviorParam_PC.param",
+              "rowIndex": 498,
+              "nativeNameOffset": 42524,
+              "nativeDataOffset": 33448,
+              "dataLength": 32,
+              "dataHash": "948d14c52c85bab50877b2278c585b8411826db6e17bff2d7ac55f5002d3a926",
+              "confidence": "high"
+            }
+          },
+          "score": 12,
+          "highlights": [
+            "7500110"
+          ]
+        },
+        {
+          "item": {
+            "uri": "param://THROW_INFO_BANK/17500110",
+            "sourceUri": "file://param/gameparam/gameparam.parambnd.dcx",
+            "paramName": "THROW_INFO_BANK",
+            "entryName": "ThrowParam.param",
+            "entryIndex": 128,
+            "rowId": 17500110,
+            "sourceHash": "3f4448ef2def4003f4dfcba0b878355d1877f32ae3d8d934c36758e50bf7f7df",
+            "fields": [],
+            "raw": {
+              "parser": "sekiro-param-native-v1",
+              "entryIndex": 128,
+              "entryName": "ThrowParam.param",
+              "rowIndex": 2104,
+              "nativeNameOffset": 0,
+              "nativeDataOffset": 344360,
+              "dataLength": 136,
+              "dataHash": "d279f518f7512d04102b4d968f93f0ffafe9686e95c697992503eda5c456f070",
+              "confidence": "high"
+            }
+          },
+          "score": 12,
+          "highlights": [
+            "7500110"
+          ]
+        }
+      ],
+      "searchId": "search-2ceb5629-49bf-4115-b0dd-9324f5ba5f8e"
+    },
+    "scalar": null,
+    "summary": null
+  },
+  "pagination": {
+    "originalChars": 2405,
+    "returnedCount": null,
+    "totalCount": null,
+    "total": null,
+    "offset": null,
+    "limit": null,
+    "truncated": false,
+    "cursors": {}
+  },
+  "completeness": "complete",
+  "truncated": false,
+  "identifiers": [
+    "uri=param://ATK_PARAM_ST/7500110",
+    "sourceUri=file://param/gameparam/gameparam.parambnd.dcx",
+    "rowId=7500110",
+    "uri=param://BEHAVIOR_PARAM_ST/107500110",
+    "rowId=107500110",
+    "uri=param://THROW_INFO_BANK/17500110",
+    "rowId=17500110",
+    "searchId=search-2ceb5629-49bf-4115-b0dd-9324f5ba5f8e"
+  ],
+  "evidence": {
+    "sourceUris": [
+      "file://param/gameparam/gameparam.parambnd.dcx"
+    ],
+    "sourceHashes": [
+      "15d797817bbff32e6cdcf42158e7c88673f77991df4097fdfc7c8282679c1a90",
+      "f01ba002902f4f504ca488454b989d5816c96467c1fd9379becb237a8271a424",
+      "3f4448ef2def4003f4dfcba0b878355d1877f32ae3d8d934c36758e50bf7f7df"
+    ],
+    "sourceRevisions": [],
+    "status": "candidate",
+    "kind": "discovery",
+    "nextActions": [
+      "已命中相同或语义相近的定位词；停止重复同义词搜索，停止继续扩大同一路径，改用另一类资源或已有结果的稳定 ID/sourceUri。"
+    ],
+    "repeatedQuery": true
+  }
+}
+```
+
+> **🛠️ 工具返回** (ToolCall ID: `call_01a07d039f637670b545a68f6e6d147e`)
+```json
+{
+  "ok": true,
+  "state": "completed",
+  "data": {
+    "items": [],
+    "record": {
+      "results": [
+        {
+          "item": {
+            "uri": "param://ATK_PARAM_ST/5000150",
+            "sourceUri": "file://param/gameparam/gameparam.parambnd.dcx",
+            "paramName": "ATK_PARAM_ST",
+            "entryName": "AtkParam_Pc.param",
+            "entryIndex": 5,
+            "rowId": 5000150,
+            "sourceHash": "15d797817bbff32e6cdcf42158e7c88673f77991df4097fdfc7c8282679c1a90",
+            "rowName": "绣丸表里追斬"
+          },
+          "score": 12,
+          "highlights": [
+            "绣丸"
+          ]
+        },
+        {
+          "item": {
+            "uri": "param://BULLET_PARAM_ST/750300",
+            "sourceUri": "file://param/gameparam/gameparam.parambnd.dcx",
+            "paramName": "BULLET_PARAM_ST",
+            "entryName": "Bullet.param",
+            "entryIndex": 11,
+            "rowId": 750300,
+            "sourceHash": "7b4327ff4a78fddb7b13576cb7e3d88e7ed0f167cf6a21694db92a826a84564d",
+            "rowName": "琉璃绣丸1 -正手第一击，第六击，派生后第一击，第二击（分为正手六击，派生一击，派生后六击）  毒雾9009"
+          },
+          "score": 12,
+          "highlights": [
+            "绣丸"
+          ]
+        },
+        {
+          "item": {
+            "uri": "param://EQUIP_PARAM_WEAPON_ST/75000",
+            "sourceUri": "file://param/gameparam/gameparam.parambnd.dcx",
+            "paramName": "EQUIP_PARAM_WEAPON_ST",
+            "entryName": "EquipParamWeapon.param",
+            "entryIndex": 41,
+            "rowId": 75000,
+            "sourceHash": "9966012e64e3817b861043f0074703186fa0f901396355f961e6fe1d0d74fa93",
+            "rowName": "绣丸"
+          },
+          "score": 12,
+          "highlights": [
+            "绣丸"
+          ]
+        },
+        {
+          "item": {
+            "uri": "param://SKILL_PARAM_ST/751",
+            "sourceUri": "file://param/gameparam/gameparam.parambnd.dcx",
+            "paramName": "SKILL_PARAM_ST",
+            "entryName": "SkillParam.param",
+            "entryIndex": 117,
+            "rowId": 751,
+            "sourceHash": "e23082e65a15ac6755cb30654a0f9c40088a3fa7d2ab3fb73c6fefc352bf5d48",
+            "rowName": "绣丸：表里"
+          },
+          "score": 12,
+          "highlights": [
+            "绣丸"
+          ]
+        },
+        {
+          "item": {
+            "uri": "param://SP_EFFECT_PARAM_ST/9003",
+            "sourceUri": "file://param/gameparam/gameparam.parambnd.dcx",
+            "paramName": "SP_EFFECT_PARAM_ST",
+            "entryName": "SpEffectParam.param",
+            "entryIndex": 118,
+            "rowId": 9003,
+            "sourceHash": "1d3c66aea588cdb859884bd33141cc48d7c04649a7e0b7baa1def840e050989d",
+            "rowName": "绣丸中毒"
+          },
+          "score": 12,
+          "highlights": [
+            "绣丸"
+          ]
+        },
+        {
+          "item": {
+            "uri": "param://ATK_PARAM_ST/5000151",
+            "sourceUri": "file://param/gameparam/gameparam.parambnd.dcx",
+            "paramName": "ATK_PARAM_ST",
+            "entryName": "AtkParam_Pc.param",
+            "entryIndex": 5,
+            "rowId": 5000151,
+            "sourceHash": "15d797817bbff32e6cdcf42158e7c88673f77991df4097fdfc7c8282679c1a90",
+            "rowName": "绣丸表里追斬"
+          },
+          "score": 12,
+          "highlights": [
+            "绣丸"
+          ]
+        }
+      ],
+      "resultsReturnedCount": 6,
+      "resultsTotalCount": 50,
+      "resultsTruncated": true,
+      "searchId": "search-191d3d27-c7ff-4fe8-b669-470010e788ff"
+    },
+    "scalar": null,
+    "summary": "工具 search_param_rows 输出过大，已返回摘要；请使用返回的 ID 或游标继续分页查询。"
+  },
+  "pagination": {
+    "originalChars": 31772,
+    "returnedCount": null,
+    "totalCount": null,
+    "total": null,
+    "offset": null,
+    "limit": null,
+    "truncated": false,
+    "cursors": {}
+  },
+  "completeness": "summary_only",
+  "truncated": true,
+  "identifiers": [
+    "uri=param://ATK_PARAM_ST/5000150",
+    "sourceUri=file://param/gameparam/gameparam.parambnd.dcx",
+    "rowId=5000150",
+    "uri=param://BULLET_PARAM_ST/750300",
+    "rowId=750300",
+    "uri=param://EQUIP_PARAM_WEAPON_ST/75000",
+    "rowId=75000",
+    "uri=param://SKILL_PARAM_ST/751",
+    "rowId=751",
+    "uri=param://SP_EFFECT_PARAM_ST/9003",
+    "rowId=9003",
+    "uri=param://ATK_PARAM_ST/5000151"
+  ],
+  "evidence": {
+    "sourceUris": [
+      "file://param/gameparam/gameparam.parambnd.dcx"
+    ],
+    "sourceHashes": [
+      "15d797817bbff32e6cdcf42158e7c88673f77991df4097fdfc7c8282679c1a90",
+      "7b4327ff4a78fddb7b13576cb7e3d88e7ed0f167cf6a21694db92a826a84564d",
+      "9966012e64e3817b861043f0074703186fa0f901396355f961e6fe1d0d74fa93",
+      "e23082e65a15ac6755cb30654a0f9c40088a3fa7d2ab3fb73c6fefc352bf5d48",
+      "1d3c66aea588cdb859884bd33141cc48d7c04649a7e0b7baa1def840e050989d"
+    ],
+    "sourceRevisions": [],
+    "status": "candidate",
+    "kind": "discovery",
+    "nextActions": [
+      "已命中相同或语义相近的定位词；停止重复同义词搜索，停止继续扩大同一路径，改用另一类资源或已有结果的稳定 ID/sourceUri。"
+    ],
+    "repeatedQuery": true
+  }
+}
+```
+
+### 🤖 助手响应 (Step 16)
+
+找到绣丸追斩本体了，正在确认最后一刀切换斩的追踪字段。
+
+#### 🛠️ 发起工具调用:
+- **工具名称**: `search_param_rows` (ID: `call_01a07d043b0171a083ca133aafff1ecc`)
+  ```json
+  {
+    "limit": 50,
+    "query": "750011"
+  }
+  ```
+- **工具名称**: `search_param_rows` (ID: `call_01a07d043d517231ac86852687ef7e6f`)
+  ```json
+  {
+    "limit": 50,
+    "query": "75030"
+  }
+  ```
+- **工具名称**: `search_param_rows` (ID: `call_01a07d043f197bc3850406f6cf97c60d`)
+  ```json
+  {
+    "limit": 50,
+    "query": "5000151"
+  }
+  ```
+
+> **🛠️ 工具返回** (ToolCall ID: `call_01a07d043b0171a083ca133aafff1ecc`)
+```json
+{
+  "ok": true,
+  "state": "completed",
+  "data": {
+    "items": [],
+    "record": {
+      "results": [
+        {
+          "item": {
+            "uri": "param://ATK_PARAM_ST/7500110",
+            "sourceUri": "file://param/gameparam/gameparam.parambnd.dcx",
+            "paramName": "ATK_PARAM_ST",
+            "entryName": "AtkParam_Pc.param",
+            "entryIndex": 5,
+            "rowId": 7500110,
+            "sourceHash": "15d797817bbff32e6cdcf42158e7c88673f77991df4097fdfc7c8282679c1a90",
+            "rowName": "绣丸：表里"
+          },
+          "score": 12,
+          "highlights": [
+            "750011"
+          ]
+        },
+        {
+          "item": {
+            "uri": "param://BEHAVIOR_PARAM_ST/107500110",
+            "sourceUri": "file://param/gameparam/gameparam.parambnd.dcx",
+            "paramName": "BEHAVIOR_PARAM_ST",
+            "entryName": "BehaviorParam_PC.param",
+            "entryIndex": 8,
+            "rowId": 107500110,
+            "sourceHash": "f01ba002902f4f504ca488454b989d5816c96467c1fd9379becb237a8271a424"
+          },
+          "score": 12,
+          "highlights": [
+            "750011"
+          ]
+        },
+        {
+          "item": {
+            "uri": "param://THROW_INFO_BANK/17500110",
+            "sourceUri": "file://param/gameparam/gameparam.parambnd.dcx",
+            "paramName": "THROW_INFO_BANK",
+            "entryName": "ThrowParam.param",
+            "entryIndex": 128,
+            "rowId": 17500110,
+            "sourceHash": "3f4448ef2def4003f4dfcba0b878355d1877f32ae3d8d934c36758e50bf7f7df"
+          },
+          "score": 12,
+          "highlights": [
+            "750011"
+          ]
+        },
+        {
+          "item": {
+            "uri": "param://ATK_PARAM_ST/7500111",
+            "sourceUri": "file://param/gameparam/gameparam.parambnd.dcx",
+            "paramName": "ATK_PARAM_ST",
+            "entryName": "AtkParam_Pc.param",
+            "entryIndex": 5,
+            "rowId": 7500111,
+            "sourceHash": "15d797817bbff32e6cdcf42158e7c88673f77991df4097fdfc7c8282679c1a90",
+            "rowName": "绣丸：表里"
+          },
+          "score": 12,
+          "highlights": [
+            "750011"
+          ]
+        },
+        {
+          "item": {
+            "uri": "param://BEHAVIOR_PARAM_ST/107500111",
+            "sourceUri": "file://param/gameparam/gameparam.parambnd.dcx",
+            "paramName": "BEHAVIOR_PARAM_ST",
+            "entryName": "BehaviorParam_PC.param",
+            "entryIndex": 8,
+            "rowId": 107500111,
+            "sourceHash": "f01ba002902f4f504ca488454b989d5816c96467c1fd9379becb237a8271a424"
+          },
+          "score": 12,
+          "highlights": [
+            "750011"
+          ]
+        },
+        {
+          "item": {
+            "uri": "param://THROW_INFO_BANK/17500111",
+            "sourceUri": "file://param/gameparam/gameparam.parambnd.dcx",
+            "paramName": "THROW_INFO_BANK",
+            "entryName": "ThrowParam.param",
+            "entryIndex": 128,
+            "rowId": 17500111,
+            "sourceHash": "3f4448ef2def4003f4dfcba0b878355d1877f32ae3d8d934c36758e50bf7f7df"
+          },
+          "score": 12,
+          "highlights": [
+            "750011"
+          ]
+        }
+      ],
+      "resultsReturnedCount": 6,
+      "resultsTotalCount": 17,
+      "resultsTruncated": true,
+      "searchId": "search-7b66b535-7c5f-4b5c-b784-324d038e7d31"
+    },
+    "scalar": null,
+    "summary": "工具 search_param_rows 输出过大，已返回摘要；请使用返回的 ID 或游标继续分页查询。"
+  },
+  "pagination": {
+    "originalChars": 10965,
+    "returnedCount": null,
+    "totalCount": null,
+    "total": null,
+    "offset": null,
+    "limit": null,
+    "truncated": false,
+    "cursors": {}
+  },
+  "completeness": "summary_only",
+  "truncated": true,
+  "identifiers": [
+    "uri=param://ATK_PARAM_ST/7500110",
+    "sourceUri=file://param/gameparam/gameparam.parambnd.dcx",
+    "rowId=7500110",
+    "uri=param://BEHAVIOR_PARAM_ST/107500110",
+    "rowId=107500110",
+    "uri=param://THROW_INFO_BANK/17500110",
+    "rowId=17500110",
+    "uri=param://ATK_PARAM_ST/7500111",
+    "rowId=7500111",
+    "uri=param://BEHAVIOR_PARAM_ST/107500111",
+    "rowId=107500111",
+    "uri=param://THROW_INFO_BANK/17500111"
+  ],
+  "evidence": {
+    "sourceUris": [
+      "file://param/gameparam/gameparam.parambnd.dcx"
+    ],
+    "sourceHashes": [
+      "15d797817bbff32e6cdcf42158e7c88673f77991df4097fdfc7c8282679c1a90",
+      "f01ba002902f4f504ca488454b989d5816c96467c1fd9379becb237a8271a424",
+      "3f4448ef2def4003f4dfcba0b878355d1877f32ae3d8d934c36758e50bf7f7df"
+    ],
+    "sourceRevisions": [],
+    "status": "candidate",
+    "kind": "discovery",
+    "nextActions": [
+      "已命中相同或语义相近的定位词；停止重复同义词搜索，停止继续扩大同一路径，改用另一类资源或已有结果的稳定 ID/sourceUri。"
+    ],
+    "repeatedQuery": true
+  }
+}
+```
+
+> **🛠️ 工具返回** (ToolCall ID: `call_01a07d043d517231ac86852687ef7e6f`)
+```json
+{
+  "ok": true,
+  "state": "completed",
+  "data": {
+    "items": [],
+    "record": {
+      "results": [
+        {
+          "item": {
+            "uri": "param://BULLET_PARAM_ST/750300",
+            "sourceUri": "file://param/gameparam/gameparam.parambnd.dcx",
+            "paramName": "BULLET_PARAM_ST",
+            "entryName": "Bullet.param",
+            "entryIndex": 11,
+            "rowId": 750300,
+            "sourceHash": "7b4327ff4a78fddb7b13576cb7e3d88e7ed0f167cf6a21694db92a826a84564d",
+            "rowName": "琉璃绣丸1 -正手第一击，第六击，派生后第一击，第二击（分为正手六击，派生一击，派生后六击）  毒雾9009",
+            "fields": [],
+            "raw": {
+              "parser": "sekiro-param-native-v1",
+              "entryIndex": 11,
+              "entryName": "Bullet.param",
+              "rowIndex": 478,
+              "nativeNameOffset": 884382,
+              "nativeDataOffset": 197768,
+              "dataLength": 256,
+              "dataHash": "db884892fd4b63f8403cfb766f5d576076251269ca796531647494fecaaaeae3",
+              "confidence": "high"
+            }
+          },
+          "score": 12,
+          "highlights": [
+            "75030"
+          ]
+        },
+        {
+          "item": {
+            "uri": "param://BULLET_PARAM_ST/750301",
+            "sourceUri": "file://param/gameparam/gameparam.parambnd.dcx",
+            "paramName": "BULLET_PARAM_ST",
+            "entryName": "Bullet.param",
+            "entryIndex": 11,
+            "rowId": 750301,
+            "sourceHash": "7b4327ff4a78fddb7b13576cb7e3d88e7ed0f167cf6a21694db92a826a84564d",
+            "rowName": "琉璃绣丸2 -正手第三击，派生后第四击（分为正手六击，派生一击，派生后六击） 范围原生1.6",
+            "fields": [],
+            "raw": {
+              "parser": "sekiro-param-native-v1",
+              "entryIndex": 11,
+              "entryName": "Bullet.param",
+              "rowIndex": 479,
+              "nativeNameOffset": 884492,
+              "nativeDataOffset": 198024,
+              "dataLength": 256,
+              "dataHash": "db884892fd4b63f8403cfb766f5d576076251269ca796531647494fecaaaeae3",
+              "confidence": "high"
+            }
+          },
+          "score": 12,
+          "highlights": [
+            "75030"
+          ]
+        },
+        {
+          "item": {
+            "uri": "param://BULLET_PARAM_ST/750302",
+            "sourceUri": "file://param/gameparam/gameparam.parambnd.dcx",
+            "paramName": "BULLET_PARAM_ST",
+            "entryName": "Bullet.param",
+            "entryIndex": 11,
+            "rowId": 750302,
+            "sourceHash": "7b4327ff4a78fddb7b13576cb7e3d88e7ed0f167cf6a21694db92a826a84564d",
+            "rowName": "琉璃绣丸3 -正手第五击，派生后第三击和第六击（分为正手六击，派生一击，派生后六击）",
+            "fields": [],
+            "raw": {
+              "parser": "sekiro-param-native-v1",
+              "entryIndex": 11,
+              "entryName": "Bullet.param",
+              "rowIndex": 480,
+              "nativeNameOffset": 884586,
+              "nativeDataOffset": 198280,
+              "dataLength": 256,
+              "dataHash": "db884892fd4b63f8403cfb766f5d576076251269ca796531647494fecaaaeae3",
+              "confidence": "high"
+            }
+          },
+          "score": 12,
+          "highlights": [
+            "75030"
+          ]
+        }
+      ],
+      "searchId": "search-0475675f-158d-4b0d-8f07-6fbef4589cb7"
+    },
+    "scalar": null,
+    "summary": null
+  },
+  "pagination": {
+    "originalChars": 2389,
+    "returnedCount": null,
+    "totalCount": null,
+    "total": null,
+    "offset": null,
+    "limit": null,
+    "truncated": false,
+    "cursors": {}
+  },
+  "completeness": "complete",
+  "truncated": false,
+  "identifiers": [
+    "uri=param://BULLET_PARAM_ST/750300",
+    "sourceUri=file://param/gameparam/gameparam.parambnd.dcx",
+    "rowId=750300",
+    "uri=param://BULLET_PARAM_ST/750301",
+    "rowId=750301",
+    "uri=param://BULLET_PARAM_ST/750302",
+    "rowId=750302",
+    "searchId=search-0475675f-158d-4b0d-8f07-6fbef4589cb7"
+  ],
+  "evidence": {
+    "sourceUris": [
+      "file://param/gameparam/gameparam.parambnd.dcx"
+    ],
+    "sourceHashes": [
+      "7b4327ff4a78fddb7b13576cb7e3d88e7ed0f167cf6a21694db92a826a84564d"
+    ],
+    "sourceRevisions": [],
+    "status": "candidate",
+    "kind": "discovery",
+    "nextActions": [
+      "已命中相同或语义相近的定位词；停止重复同义词搜索，停止继续扩大同一路径，改用另一类资源或已有结果的稳定 ID/sourceUri。"
+    ],
+    "repeatedQuery": true
+  }
+}
+```
+
+> **🛠️ 工具返回** (ToolCall ID: `call_01a07d043f197bc3850406f6cf97c60d`)
+```json
+{
+  "ok": true,
+  "state": "completed",
+  "data": {
+    "items": [],
+    "record": {
+      "results": [
+        {
+          "item": {
+            "uri": "param://ATK_PARAM_ST/50001510",
+            "sourceUri": "file://param/gameparam/gameparam.parambnd.dcx",
+            "paramName": "ATK_PARAM_ST",
+            "entryName": "AtkParam_Npc.param",
+            "entryIndex": 4,
+            "rowId": 50001510,
+            "sourceHash": "c7e4013c981aa118b9e8a11cfbc3a9002d6c32a4d7c4e0f2d22373ef9b768863",
+            "fields": [],
+            "raw": {
+              "parser": "sekiro-param-native-v1",
+              "entryIndex": 4,
+              "entryName": "AtkParam_Npc.param",
+              "rowIndex": 2399,
+              "nativeNameOffset": 0,
+              "nativeDataOffset": 1211360,
+              "dataLength": 464,
+              "dataHash": "ac4e71d236e88d184821eb82a4fa740191885d017f965cbeac0e70a4d821e4b1",
+              "confidence": "high"
+            }
+          },
+          "score": 12,
+          "highlights": [
+            "5000151"
+          ]
+        },
+        {
+          "item": {
+            "uri": "param://ATK_PARAM_ST/5000151",
+            "sourceUri": "file://param/gameparam/gameparam.parambnd.dcx",
+            "paramName": "ATK_PARAM_ST",
+            "entryName": "AtkParam_Pc.param",
+            "entryIndex": 5,
+            "rowId": 5000151,
+            "sourceHash": "15d797817bbff32e6cdcf42158e7c88673f77991df4097fdfc7c8282679c1a90",
+            "rowName": "绣丸表里追斬",
+            "fields": [],
+            "raw": {
+              "parser": "sekiro-param-native-v1",
+              "entryIndex": 5,
+              "entryName": "AtkParam_Pc.param",
+              "rowIndex": 145,
+              "nativeNameOffset": 264775,
+              "nativeDataOffset": 80352,
+              "dataLength": 464,
+              "dataHash": "266eee32a16878e14dab0766cee6f30e079ae00362b7f66878fb9e64d6f17f16",
+              "confidence": "high"
+            }
+          },
+          "score": 12,
+          "highlights": [
+            "5000151"
+          ]
+        },
+        {
+          "item": {
+            "uri": "param://BEHAVIOR_PARAM_ST/250001510",
+            "sourceUri": "file://param/gameparam/gameparam.parambnd.dcx",
+            "paramName": "BEHAVIOR_PARAM_ST",
+            "entryName": "BehaviorParam.param",
+            "entryIndex": 7,
+            "rowId": 250001510,
+            "sourceHash": "b74b265ebf1bf0a71b46718aefd4cfbbbeb0e5bbba7c58d5a8cbe028fd0c42e4",
+            "fields": [],
+            "raw": {
+              "parser": "sekiro-param-native-v1",
+              "entryIndex": 7,
+              "entryName": "BehaviorParam.param",
+              "rowIndex": 3184,
+              "nativeNameOffset": 0,
+              "nativeDataOffset": 231720,
+              "dataLength": 32,
+              "dataHash": "aa49d7dda91b2252ac73c2abc844c25b7b5a66eb5b3fa4a8027bf2c38eb8ced9",
+              "confidence": "high"
+            }
+          },
+          "score": 12,
+          "highlights": [
+            "5000151"
+          ]
+        },
+        {
+          "item": {
+            "uri": "param://BEHAVIOR_PARAM_ST/105000151",
+            "sourceUri": "file://param/gameparam/gameparam.parambnd.dcx",
+            "paramName": "BEHAVIOR_PARAM_ST",
+            "entryName": "BehaviorParam_PC.param",
+            "entryIndex": 8,
+            "rowId": 105000151,
+            "sourceHash": "f01ba002902f4f504ca488454b989d5816c96467c1fd9379becb237a8271a424",
+            "fields": [],
+            "raw": {
+              "parser": "sekiro-param-native-v1",
+              "entryIndex": 8,
+              "entryName": "BehaviorParam_PC.param",
+              "rowIndex": 107,
+              "nativeNameOffset": 41062,
+              "nativeDataOffset": 20936,
+              "dataLength": 32,
+              "dataHash": "08051119411b4a0238c0793f8c7073b1cb2cdef18cfc36c2e814bddeaeefa511",
+              "confidence": "high"
+            }
+          },
+          "score": 12,
+          "highlights": [
+            "5000151"
+          ]
+        },
+        {
+          "item": {
+            "uri": "param://THROW_INFO_BANK/15000151",
+            "sourceUri": "file://param/gameparam/gameparam.parambnd.dcx",
+            "paramName": "THROW_INFO_BANK",
+            "entryName": "ThrowParam.param",
+            "entryIndex": 128,
+            "rowId": 15000151,
+            "sourceHash": "3f4448ef2def4003f4dfcba0b878355d1877f32ae3d8d934c36758e50bf7f7df",
+            "fields": [],
+            "raw": {
+              "parser": "sekiro-param-native-v1",
+              "entryIndex": 128,
+              "entryName": "ThrowParam.param",
+              "rowIndex": 1555,
+              "nativeNameOffset": 0,
+              "nativeDataOffset": 269696,
+              "dataLength": 136,
+              "dataHash": "f351dab98752d177c967c4625779db1972cfa6c101cda63e0be85d6b3c63a3a8",
+              "confidence": "high"
+            }
+          },
+          "score": 12,
+          "highlights": [
+            "5000151"
+          ]
+        }
+      ],
+      "searchId": "search-662e9d46-792b-4f06-a40b-c6895b648582"
+    },
+    "scalar": null,
+    "summary": null
+  },
+  "pagination": {
+    "originalChars": 3747,
+    "returnedCount": null,
+    "totalCount": null,
+    "total": null,
+    "offset": null,
+    "limit": null,
+    "truncated": false,
+    "cursors": {}
+  },
+  "completeness": "complete",
+  "truncated": false,
+  "identifiers": [
+    "uri=param://ATK_PARAM_ST/50001510",
+    "sourceUri=file://param/gameparam/gameparam.parambnd.dcx",
+    "rowId=50001510",
+    "uri=param://ATK_PARAM_ST/5000151",
+    "rowId=5000151",
+    "uri=param://BEHAVIOR_PARAM_ST/250001510",
+    "rowId=250001510",
+    "uri=param://BEHAVIOR_PARAM_ST/105000151",
+    "rowId=105000151",
+    "uri=param://THROW_INFO_BANK/15000151",
+    "rowId=15000151",
+    "searchId=search-662e9d46-792b-4f06-a40b-c6895b648582"
+  ],
+  "evidence": {
+    "sourceUris": [
+      "file://param/gameparam/gameparam.parambnd.dcx"
+    ],
+    "sourceHashes": [
+      "c7e4013c981aa118b9e8a11cfbc3a9002d6c32a4d7c4e0f2d22373ef9b768863",
+      "15d797817bbff32e6cdcf42158e7c88673f77991df4097fdfc7c8282679c1a90",
+      "b74b265ebf1bf0a71b46718aefd4cfbbbeb0e5bbba7c58d5a8cbe028fd0c42e4",
+      "f01ba002902f4f504ca488454b989d5816c96467c1fd9379becb237a8271a424",
+      "3f4448ef2def4003f4dfcba0b878355d1877f32ae3d8d934c36758e50bf7f7df"
+    ],
+    "sourceRevisions": [],
+    "status": "candidate",
+    "kind": "discovery",
+    "nextActions": [
+      "已命中相同或语义相近的定位词；停止重复同义词搜索，停止继续扩大同一路径，改用另一类资源或已有结果的稳定 ID/sourceUri。"
+    ],
+    "repeatedQuery": true
+  }
+}
+```
+
+### 🤖 助手响应 (Step 17)
+
+绣丸追斩本体已锁定，我来查最后一刀切换斩的追踪距离落点并直写80。
+
+#### 🛠️ 发起工具调用:
+- **工具名称**: `search_param_fields` (ID: `call_01a07d05058576d0895b110029f96fe5`)
+  ```json
+  {
+    "limit": 30,
+    "query": "attack damage hit",
+    "rowIds": [
+      7500110
+    ],
+    "table": "ATK_PARAM_PC_ST"
+  }
+  ```
+- **工具名称**: `search_param_fields` (ID: `call_01a07d0507d37e529922089de3645297`)
+  ```json
+  {
+    "limit": 30,
+    "query": "range hit knockback",
+    "rowIds": [
+      5000150
+    ],
+    "table": "ATK_PARAM_PC_ST"
+  }
+  ```
+- **工具名称**: `search_param_rows` (ID: `call_01a07d050b9277718657c005506cf659`)
+  ```json
+  {
+    "limit": 50,
+    "query": "绣丸：表里"
+  }
+  ```
+
+> **🛠️ 工具返回** (ToolCall ID: `call_01a07d05058576d0895b110029f96fe5`)
+```json
+{
+  "ok": true,
+  "state": "completed",
+  "data": {
+    "items": [],
+    "record": {
+      "ok": true,
+      "containerPath": "C:\\Users\\ASUS\\AppData\\Local\\Temp\\soulforge-real-agent-2026-09-07T17-48-44-698Z-Rllz1M\\overlay\\param\\gameparam\\gameparam.parambnd.dcx",
+      "table": "AtkParam_Pc",
+      "entryName": "N:\\NTC\\data\\Target\\INTERROOT_win64\\param\\GameParam\\AtkParam_Pc.param",
+      "entryIndex": 5,
+      "rowIds": [
+        7500110
+      ],
+      "sourceHash": "15d797817bbff32e6cdcf42158e7c88673f77991df4097fdfc7c8282679c1a90",
+      "sourceRevision": 1788456409864.9424,
+      "fields": [
+        {
+          "fieldId": "staminaDamageAttackHitParry",
+          "name": "攻撃接触パリィ時被スタミナダメージ",
+          "type": "s16",
+          "description": "Flat posture damage dealt to attacker if this attack is countered with Mikiri Counter"
+        },
+        {
+          "fieldId": "directAtkStamDamage_Attacker",
+          "name": "被スタミナダメージ_直撃時",
+          "type": "s16",
+          "description": "Posture damage dealt to the attacker when this attack hits directly"
+        },
+        {
+          "fieldId": "isDamageDropAttack",
+          "name": "ダメージドロップ攻撃か？",
+          "type": "u8",
+          "description": "○のダメージがヒットしたとき、ダメージを受けたキャラがソウルやアイテムをドロップする"
+        },
+        {
+          "fieldId": "repelLostStamDamage_Attacker",
+          "name": "被スタミナダメージ_攻撃側_弾き負け",
+          "type": "s16",
+          "description": "Posture damage dealt to the attacker when this attack is deflected"
+        },
+        {
+          "fieldId": "repelVictoryStamDamage_Attacker",
+          "name": "被スタミナダメージ_攻撃側_弾き勝ち",
+          "type": "s16",
+          "description": "Posture damage dealt to the attacker when this attack is blocked"
+        },
+        {
+          "fieldId": "opposeTarget",
+          "name": "対象：●敵対",
+          "type": "u8",
+          "description": "Will this hitbox hit enemies?"
+        },
+        {
+          "fieldId": "directAtkStamDamage",
+          "name": "スタミナ攻撃力_直撃時",
+          "type": "s16",
+          "description": "Posture damage multiplier for direct hits"
+        },
+        {
+          "fieldId": "friendlyTarget",
+          "name": "対象：○味方",
+          "type": "u8",
+          "description": "Will this hitbox hit your allies?"
+        },
+        {
+          "fieldId": "isDisableNoDamage",
+          "name": "無敵無効か",
+          "type": "u8",
+          "description": "Attack will connect even during Invincibility frames"
+        },
+        {
+          "fieldId": "knockbackDist_DirectHit",
+          "name": "ノックバック距離_直撃した時[m]",
+          "type": "f32",
+          "description": "Amount of knockback applied if target is hit hit without blocking"
+        },
+        {
+          "fieldId": "repelLostStamDamage",
+          "name": "スタミナ攻撃力_攻撃側_弾き勝ち",
+          "type": "s16",
+          "description": "Posture damage multiplier for blocked hits"
+        },
+        {
+          "fieldId": "selfTarget",
+          "name": "対象：自分",
+          "type": "u8",
+          "description": "Will this hitbox hit you?"
+        },
+        {
+          "fieldId": "attackDirectionPoint",
+          "name": "攻撃方向判定基準点",
+          "type": "u8",
+          "description": "攻撃方向を求める際に使用する攻撃者の原点"
+        },
+        {
+          "fieldId": "disableHitSpEffect",
+          "name": "ヒット時特殊効果無効",
+          "type": "u8",
+          "description": "攻撃ヒットしたときの特殊効果を無効にします。SCEバグ対策"
+        },
+        {
+          "fieldId": "disableStaminaAttack",
+          "name": "スタミナ減らない",
+          "type": "u8",
+          "description": "スタミナ攻撃力による「崩され判定」は行うが、実際にスタミナは減らさない"
+        },
+        {
+          "fieldId": "doesBreakRepelStamDamage",
+          "name": "被スタミナダメージで崩れるか",
+          "type": "u8",
+          "description": "攻撃が弾かれることで体幹が0になった場合に、弾いた側を「弾き崩し」に、弾かれた側を「弾かれ崩れ」に遷移させるかを決定するパラ。弾かれても弾かれ崩れに遷移させたくない攻撃にだけ\"×\"を設定してください。"
+        },
+        {
+          "fieldId": "hit0_DmyPoly1",
+          "name": "あたり0 ダミポリ1",
+          "type": "s16",
+          "description": "Location of the hitbox, defined by DummyPoly"
+        },
+        {
+          "fieldId": "hit0_DmyPoly2",
+          "name": "あたり0 ダミポリ2",
+          "type": "s16",
+          "description": "Location of the hitbox, defined by DummyPoly"
+        },
+        {
+          "fieldId": "hit0_hitType",
+          "name": "あたり0 部位",
+          "type": "u8",
+          "description": "あたり部位"
+        },
+        {
+          "fieldId": "hit0_Radius",
+          "name": "あたり0 半径",
+          "type": "f32",
+          "description": "Radius of the hitbox"
+        },
+        {
+          "fieldId": "hit1_DmyPoly1",
+          "name": "あたり1 ダミポリ1",
+          "type": "s16",
+          "description": "Location of the hitbox, defined by DummyPoly"
+        },
+        {
+          "fieldId": "hit1_DmyPoly2",
+          "name": "あたり1 ダミポリ2",
+          "type": "s16",
+          "description": "Location of the hitbox, defined by DummyPoly"
+        },
+        {
+          "fieldId": "hit1_hitType",
+          "name": "あたり1 部位",
+          "type": "u8",
+          "description": "あたり部位"
+        },
+        {
+          "fieldId": "hit1_Radius",
+          "name": "あたり1 半径",
+          "type": "f32",
+          "description": "Radius of the hitbox"
+        },
+        {
+          "fieldId": "hit10_DmyPoly1",
+          "name": "あたり10 ダミポリ1",
+          "type": "s16",
+          "description": "Location of the hitbox, defined by DummyPoly"
+        },
+        {
+          "fieldId": "hit10_DmyPoly2",
+          "name": "あたり10 ダミポリ2",
+          "type": "s16",
+          "description": "Location of the hitbox, defined by DummyPoly"
+        },
+        {
+          "fieldId": "hit10_hitType",
+          "name": "あたり10 部位",
+          "type": "u8",
+          "description": "あたり部位"
+        },
+        {
+          "fieldId": "hit10_Radius",
+          "name": "あたり10 半径",
+          "type": "f32",
+          "description": "Radius of the hitbox"
+        },
+        {
+          "fieldId": "hit11_DmyPoly1",
+          "name": "あたり11 ダミポリ1",
+          "type": "s16",
+          "description": "Location of the hitbox, defined by DummyPoly"
+        },
+        {
+          "fieldId": "hit11_DmyPoly2",
+          "name": "あたり11 ダミポリ2",
+          "type": "s16",
+          "description": "Location of the hitbox, defined by DummyPoly"
+        }
+      ],
+      "diagnostics": [
+        {
+          "severity": "info",
+          "code": "PARAM_DOCUMENT_ROUNDTRIP_SEMANTIC_VERIFIED",
+          "message": "PARAM 无修改往返字节级一致。"
+        },
+        {
+          "severity": "info",
+          "code": "PARAM_DOCUMENT_SESSION",
+          "message": "session eff79835185f7fb2fc74fbbba49d0f6a gen 0 parse 0"
+        }
+      ],
+      "searchId": "search-bc7528cb-617d-4f02-9bfe-a66b15a6f425"
+    },
+    "scalar": null,
+    "summary": null
+  },
+  "pagination": {
+    "originalChars": 4757,
+    "returnedCount": null,
+    "totalCount": null,
+    "total": null,
+    "offset": null,
+    "limit": null,
+    "truncated": false,
+    "cursors": {}
+  },
+  "completeness": "complete",
+  "truncated": false,
+  "identifiers": [
+    "fieldId=staminaDamageAttackHitParry",
+    "fieldId=directAtkStamDamage_Attacker",
+    "fieldId=isDamageDropAttack",
+    "fieldId=repelLostStamDamage_Attacker",
+    "fieldId=repelVictoryStamDamage_Attacker",
+    "fieldId=opposeTarget",
+    "fieldId=directAtkStamDamage",
+    "fieldId=friendlyTarget",
+    "fieldId=isDisableNoDamage",
+    "fieldId=knockbackDist_DirectHit",
+    "fieldId=repelLostStamDamage",
+    "fieldId=selfTarget",
+    "fieldId=attackDirectionPoint",
+    "fieldId=disableHitSpEffect",
+    "fieldId=disableStaminaAttack",
+    "fieldId=doesBreakRepelStamDamage",
+    "fieldId=hit0_DmyPoly1",
+    "fieldId=hit0_DmyPoly2",
+    "fieldId=hit0_hitType",
+    "fieldId=hit0_Radius",
+    "fieldId=hit1_DmyPoly1",
+    "fieldId=hit1_DmyPoly2",
+    "fieldId=hit1_hitType",
+    "fieldId=hit1_Radius",
+    "fieldId=hit10_DmyPoly1",
+    "fieldId=hit10_DmyPoly2",
+    "fieldId=hit10_hitType",
+    "fieldId=hit10_Radius",
+    "fieldId=hit11_DmyPoly1",
+    "fieldId=hit11_DmyPoly2",
+    "searchId=search-bc7528cb-617d-4f02-9bfe-a66b15a6f425"
+  ],
+  "evidence": {
+    "sourceUris": [],
+    "sourceHashes": [
+      "15d797817bbff32e6cdcf42158e7c88673f77991df4097fdfc7c8282679c1a90"
+    ],
+    "sourceRevisions": [
+      1788456409864.9424
+    ],
+    "status": "candidate",
+    "kind": "discovery",
+    "nextActions": [
+      "已命中相同或语义相近的定位词；停止重复同义词搜索，停止继续扩大同一路径，改用另一类资源或已有结果的稳定 ID/sourceUri。"
+    ],
+    "repeatedQuery": true
+  }
+}
+```
+
+> **🛠️ 工具返回** (ToolCall ID: `call_01a07d0507d37e529922089de3645297`)
+```json
+{
+  "ok": true,
+  "state": "completed",
+  "data": {
+    "items": [],
+    "record": {
+      "ok": true,
+      "containerPath": "C:\\Users\\ASUS\\AppData\\Local\\Temp\\soulforge-real-agent-2026-09-07T17-48-44-698Z-Rllz1M\\overlay\\param\\gameparam\\gameparam.parambnd.dcx",
+      "table": "AtkParam_Pc",
+      "entryName": "N:\\NTC\\data\\Target\\INTERROOT_win64\\param\\GameParam\\AtkParam_Pc.param",
+      "entryIndex": 5,
+      "rowIds": [
+        5000150
+      ],
+      "sourceHash": "15d797817bbff32e6cdcf42158e7c88673f77991df4097fdfc7c8282679c1a90",
+      "sourceRevision": 1788456409864.9424,
+      "fields": [
+        {
+          "fieldId": "knockbackDist_DirectHit",
+          "name": "ノックバック距離_直撃した時[m]",
+          "type": "f32",
+          "description": "Amount of knockback applied if target is hit hit without blocking"
+        },
+        {
+          "fieldId": "knockbackDist_Guard",
+          "name": "ノックバック距離_ガードされた時[m]",
+          "type": "f32",
+          "description": "Amount of knockback applied if target is hit while blocking"
+        },
+        {
+          "fieldId": "knockbackDist_JustGuard",
+          "name": "ノックバック距離_ジャスガされた時[m]",
+          "type": "f32",
+          "description": "Amount of knockback applied if target is hit while deflecting"
+        },
+        {
+          "fieldId": "disableHitSpEffect",
+          "name": "ヒット時特殊効果無効",
+          "type": "u8",
+          "description": "攻撃ヒットしたときの特殊効果を無効にします。SCEバグ対策"
+        },
+        {
+          "fieldId": "hit0_DmyPoly1",
+          "name": "あたり0 ダミポリ1",
+          "type": "s16",
+          "description": "Location of the hitbox, defined by DummyPoly"
+        },
+        {
+          "fieldId": "hit0_DmyPoly2",
+          "name": "あたり0 ダミポリ2",
+          "type": "s16",
+          "description": "Location of the hitbox, defined by DummyPoly"
+        },
+        {
+          "fieldId": "hit0_hitType",
+          "name": "あたり0 部位",
+          "type": "u8",
+          "description": "あたり部位"
+        },
+        {
+          "fieldId": "hit0_Radius",
+          "name": "あたり0 半径",
+          "type": "f32",
+          "description": "Radius of the hitbox"
+        },
+        {
+          "fieldId": "hit1_DmyPoly1",
+          "name": "あたり1 ダミポリ1",
+          "type": "s16",
+          "description": "Location of the hitbox, defined by DummyPoly"
+        },
+        {
+          "fieldId": "hit1_DmyPoly2",
+          "name": "あたり1 ダミポリ2",
+          "type": "s16",
+          "description": "Location of the hitbox, defined by DummyPoly"
+        },
+        {
+          "fieldId": "hit1_hitType",
+          "name": "あたり1 部位",
+          "type": "u8",
+          "description": "あたり部位"
+        },
+        {
+          "fieldId": "hit1_Radius",
+          "name": "あたり1 半径",
+          "type": "f32",
+          "description": "Radius of the hitbox"
+        },
+        {
+          "fieldId": "hit10_DmyPoly1",
+          "name": "あたり10 ダミポリ1",
+          "type": "s16",
+          "description": "Location of the hitbox, defined by DummyPoly"
+        },
+        {
+          "fieldId": "hit10_DmyPoly2",
+          "name": "あたり10 ダミポリ2",
+          "type": "s16",
+          "description": "Location of the hitbox, defined by DummyPoly"
+        },
+        {
+          "fieldId": "hit10_hitType",
+          "name": "あたり10 部位",
+          "type": "u8",
+          "description": "あたり部位"
+        },
+        {
+          "fieldId": "hit10_Radius",
+          "name": "あたり10 半径",
+          "type": "f32",
+          "description": "Radius of the hitbox"
+        },
+        {
+          "fieldId": "hit11_DmyPoly1",
+          "name": "あたり11 ダミポリ1",
+          "type": "s16",
+          "description": "Location of the hitbox, defined by DummyPoly"
+        },
+        {
+          "fieldId": "hit11_DmyPoly2",
+          "name": "あたり11 ダミポリ2",
+          "type": "s16",
+          "description": "Location of the hitbox, defined by DummyPoly"
+        },
+        {
+          "fieldId": "hit11_hitType",
+          "name": "あたり11 部位",
+          "type": "u8",
+          "description": "あたり部位"
+        },
+        {
+          "fieldId": "hit11_Radius",
+          "name": "あたり11 半径",
+          "type": "f32",
+          "description": "Radius of the hitbox"
+        },
+        {
+          "fieldId": "hit12_DmyPoly1",
+          "name": "あたり12 ダミポリ1",
+          "type": "s16",
+          "description": "Location of the hitbox, defined by DummyPoly"
+        },
+        {
+          "fieldId": "hit12_DmyPoly2",
+          "name": "あたり12 ダミポリ2",
+          "type": "s16",
+          "description": "Location of the hitbox, defined by DummyPoly"
+        },
+        {
+          "fieldId": "hit12_hitType",
+          "name": "あたり12 部位",
+          "type": "u8",
+          "description": "あたり部位"
+        },
+        {
+          "fieldId": "hit12_Radius",
+          "name": "あたり12 半径",
+          "type": "f32",
+          "description": "Radius of the hitbox"
+        },
+        {
+          "fieldId": "hit13_DmyPoly1",
+          "name": "あたり13ダミポリ1",
+          "type": "s16",
+          "description": "Location of the hitbox, defined by DummyPoly"
+        },
+        {
+          "fieldId": "hit13_DmyPoly2",
+          "name": "あたり13 ダミポリ2",
+          "type": "s16",
+          "description": "Location of the hitbox, defined by DummyPoly"
+        },
+        {
+          "fieldId": "hit13_hitType",
+          "name": "あたり13 部位",
+          "type": "u8",
+          "description": "あたり部位"
+        },
+        {
+          "fieldId": "hit13_Radius",
+          "name": "あたり13 半径",
+          "type": "f32",
+          "description": "Radius of the hitbox"
+        },
+        {
+          "fieldId": "hit14_DmyPoly1",
+          "name": "あたり14 ダミポリ1",
+          "type": "s16",
+          "description": "Location of the hitbox, defined by DummyPoly"
+        },
+        {
+          "fieldId": "hit14_DmyPoly2",
+          "name": "あたり14 ダミポリ2",
+          "type": "s16",
+          "description": "Location of the hitbox, defined by DummyPoly"
+        }
+      ],
+      "diagnostics": [
+        {
+          "severity": "info",
+          "code": "PARAM_DOCUMENT_ROUNDTRIP_SEMANTIC_VERIFIED",
+          "message": "PARAM 无修改往返字节级一致。"
+        },
+        {
+          "severity": "info",
+          "code": "PARAM_DOCUMENT_SESSION",
+          "message": "session eff79835185f7fb2fc74fbbba49d0f6a gen 0 parse 0"
+        }
+      ],
+      "searchId": "search-89ec89af-facf-4f9e-9a1e-52e490117ef9"
+    },
+    "scalar": null,
+    "summary": null
+  },
+  "pagination": {
+    "originalChars": 4426,
+    "returnedCount": null,
+    "totalCount": null,
+    "total": null,
+    "offset": null,
+    "limit": null,
+    "truncated": false,
+    "cursors": {}
+  },
+  "completeness": "complete",
+  "truncated": false,
+  "identifiers": [
+    "fieldId=knockbackDist_DirectHit",
+    "fieldId=knockbackDist_Guard",
+    "fieldId=knockbackDist_JustGuard",
+    "fieldId=disableHitSpEffect",
+    "fieldId=hit0_DmyPoly1",
+    "fieldId=hit0_DmyPoly2",
+    "fieldId=hit0_hitType",
+    "fieldId=hit0_Radius",
+    "fieldId=hit1_DmyPoly1",
+    "fieldId=hit1_DmyPoly2",
+    "fieldId=hit1_hitType",
+    "fieldId=hit1_Radius",
+    "fieldId=hit10_DmyPoly1",
+    "fieldId=hit10_DmyPoly2",
+    "fieldId=hit10_hitType",
+    "fieldId=hit10_Radius",
+    "fieldId=hit11_DmyPoly1",
+    "fieldId=hit11_DmyPoly2",
+    "fieldId=hit11_hitType",
+    "fieldId=hit11_Radius",
+    "fieldId=hit12_DmyPoly1",
+    "fieldId=hit12_DmyPoly2",
+    "fieldId=hit12_hitType",
+    "fieldId=hit12_Radius",
+    "fieldId=hit13_DmyPoly1",
+    "fieldId=hit13_DmyPoly2",
+    "fieldId=hit13_hitType",
+    "fieldId=hit13_Radius",
+    "fieldId=hit14_DmyPoly1",
+    "fieldId=hit14_DmyPoly2",
+    "searchId=search-89ec89af-facf-4f9e-9a1e-52e490117ef9"
+  ],
+  "evidence": {
+    "sourceUris": [],
+    "sourceHashes": [
+      "15d797817bbff32e6cdcf42158e7c88673f77991df4097fdfc7c8282679c1a90"
+    ],
+    "sourceRevisions": [
+      1788456409864.9424
+    ],
+    "status": "candidate",
+    "kind": "discovery",
+    "nextActions": [
+      "已命中相同或语义相近的定位词；停止重复同义词搜索，停止继续扩大同一路径，改用另一类资源或已有结果的稳定 ID/sourceUri。"
+    ],
+    "repeatedQuery": true
+  }
+}
+```
+
+> **🛠️ 工具返回** (ToolCall ID: `call_01a07d050b9277718657c005506cf659`)
+```json
+{
+  "ok": true,
+  "state": "completed",
+  "data": {
+    "items": [],
+    "record": {
+      "results": [
+        {
+          "item": {
+            "uri": "param://ATK_PARAM_ST/7500110",
+            "sourceUri": "file://param/gameparam/gameparam.parambnd.dcx",
+            "paramName": "ATK_PARAM_ST",
+            "entryName": "AtkParam_Pc.param",
+            "entryIndex": 5,
+            "rowId": 7500110,
+            "sourceHash": "15d797817bbff32e6cdcf42158e7c88673f77991df4097fdfc7c8282679c1a90",
+            "rowName": "绣丸：表里"
+          },
+          "score": 12,
+          "highlights": [
+            "绣丸：表里"
+          ]
+        },
+        {
+          "item": {
+            "uri": "param://ATK_PARAM_ST/7500111",
+            "sourceUri": "file://param/gameparam/gameparam.parambnd.dcx",
+            "paramName": "ATK_PARAM_ST",
+            "entryName": "AtkParam_Pc.param",
+            "entryIndex": 5,
+            "rowId": 7500111,
+            "sourceHash": "15d797817bbff32e6cdcf42158e7c88673f77991df4097fdfc7c8282679c1a90",
+            "rowName": "绣丸：表里"
+          },
+          "score": 12,
+          "highlights": [
+            "绣丸：表里"
+          ]
+        },
+        {
+          "item": {
+            "uri": "param://ATK_PARAM_ST/7500112",
+            "sourceUri": "file://param/gameparam/gameparam.parambnd.dcx",
+            "paramName": "ATK_PARAM_ST",
+            "entryName": "AtkParam_Pc.param",
+            "entryIndex": 5,
+            "rowId": 7500112,
+            "sourceHash": "15d797817bbff32e6cdcf42158e7c88673f77991df4097fdfc7c8282679c1a90",
+            "rowName": "绣丸：表里"
+          },
+          "score": 12,
+          "highlights": [
+            "绣丸：表里"
+          ]
+        },
+        {
+          "item": {
+            "uri": "param://ATK_PARAM_ST/7500113",
+            "sourceUri": "file://param/gameparam/gameparam.parambnd.dcx",
+            "paramName": "ATK_PARAM_ST",
+            "entryName": "AtkParam_Pc.param",
+            "entryIndex": 5,
+            "rowId": 7500113,
+            "sourceHash": "15d797817bbff32e6cdcf42158e7c88673f77991df4097fdfc7c8282679c1a90",
+            "rowName": "绣丸：表里"
+          },
+          "score": 12,
+          "highlights": [
+            "绣丸：表里"
+          ]
+        },
+        {
+          "item": {
+            "uri": "param://ATK_PARAM_ST/7500114",
+            "sourceUri": "file://param/gameparam/gameparam.parambnd.dcx",
+            "paramName": "ATK_PARAM_ST",
+            "entryName": "AtkParam_Pc.param",
+            "entryIndex": 5,
+            "rowId": 7500114,
+            "sourceHash": "15d797817bbff32e6cdcf42158e7c88673f77991df4097fdfc7c8282679c1a90",
+            "rowName": "绣丸：表里"
+          },
+          "score": 12,
+          "highlights": [
+            "绣丸：表里"
+          ]
+        },
+        {
+          "item": {
+            "uri": "param://ATK_PARAM_ST/7500115",
+            "sourceUri": "file://param/gameparam/gameparam.parambnd.dcx",
+            "paramName": "ATK_PARAM_ST",
+            "entryName": "AtkParam_Pc.param",
+            "entryIndex": 5,
+            "rowId": 7500115,
+            "sourceHash": "15d797817bbff32e6cdcf42158e7c88673f77991df4097fdfc7c8282679c1a90",
+            "rowName": "绣丸：表里"
+          },
+          "score": 12,
+          "highlights": [
+            "绣丸：表里"
+          ]
+        }
+      ],
+      "resultsReturnedCount": 6,
+      "resultsTotalCount": 50,
+      "resultsTruncated": true,
+      "searchId": "search-e3bf6628-7a46-497c-b90e-f03622e7bf7d"
+    },
+    "scalar": null,
+    "summary": "工具 search_param_rows 输出过大，已返回摘要；请使用返回的 ID 或游标继续分页查询。"
+  },
+  "pagination": {
+    "originalChars": 31985,
+    "returnedCount": null,
+    "totalCount": null,
+    "total": null,
+    "offset": null,
+    "limit": null,
+    "truncated": false,
+    "cursors": {}
+  },
+  "completeness": "summary_only",
+  "truncated": true,
+  "identifiers": [
+    "uri=param://ATK_PARAM_ST/7500110",
+    "sourceUri=file://param/gameparam/gameparam.parambnd.dcx",
+    "rowId=7500110",
+    "uri=param://ATK_PARAM_ST/7500111",
+    "rowId=7500111",
+    "uri=param://ATK_PARAM_ST/7500112",
+    "rowId=7500112",
+    "uri=param://ATK_PARAM_ST/7500113",
+    "rowId=7500113",
+    "uri=param://ATK_PARAM_ST/7500114",
+    "rowId=7500114",
+    "uri=param://ATK_PARAM_ST/7500115"
+  ],
+  "evidence": {
+    "sourceUris": [
+      "file://param/gameparam/gameparam.parambnd.dcx"
+    ],
+    "sourceHashes": [
+      "15d797817bbff32e6cdcf42158e7c88673f77991df4097fdfc7c8282679c1a90",
+      "9966012e64e3817b861043f0074703186fa0f901396355f961e6fe1d0d74fa93",
+      "e23082e65a15ac6755cb30654a0f9c40088a3fa7d2ab3fb73c6fefc352bf5d48",
+      "1d3c66aea588cdb859884bd33141cc48d7c04649a7e0b7baa1def840e050989d",
+      "d8d772ae17896faad74672b9682e3c733295bcbca3113f6697c573767ae464a2",
+      "7b4327ff4a78fddb7b13576cb7e3d88e7ed0f167cf6a21694db92a826a84564d"
+    ],
+    "sourceRevisions": [],
+    "status": "candidate",
+    "kind": "discovery",
+    "nextActions": [
+      "已命中相同或语义相近的定位词；停止重复同义词搜索，停止继续扩大同一路径，改用另一类资源或已有结果的稳定 ID/sourceUri。"
+    ],
+    "repeatedQuery": true
+  }
+}
+```
+
+### 🤖 助手响应 (Step 18)
+
+绣丸终结那刀我来加追踪 — 正顺着锈丸和刀光切换两条线索找 80 距离该落在哪。
+
+#### 🛠️ 发起工具调用:
+- **工具名称**: `search_param_rows` (ID: `call_01a07d0622987c808c9565233f18abf6`)
+  ```json
+  {
+    "limit": 20,
+    "query": "7500115"
+  }
+  ```
+- **工具名称**: `search_param_rows` (ID: `call_01a07d06252a7c70b5d6e806c3060108`)
+  ```json
+  {
+    "limit": 20,
+    "query": "7500116"
+  }
+  ```
+- **工具名称**: `search_param_rows` (ID: `call_01a07d0627a47f42ada84b193c5d9913`)
+  ```json
+  {
+    "limit": 20,
+    "query": "7500117"
+  }
+  ```
+- **工具名称**: `search_param_rows` (ID: `call_01a07d0629887e83b401402c9a81809f`)
+  ```json
+  {
+    "limit": 20,
+    "query": "7500118"
+  }
+  ```
+
+> **🛠️ 工具返回** (ToolCall ID: `call_01a07d0622987c808c9565233f18abf6`)
+```json
+{
+  "ok": true,
+  "state": "completed",
+  "data": {
+    "items": [],
+    "record": {
+      "results": [
+        {
+          "item": {
+            "uri": "param://ATK_PARAM_ST/7500115",
+            "sourceUri": "file://param/gameparam/gameparam.parambnd.dcx",
+            "paramName": "ATK_PARAM_ST",
+            "entryName": "AtkParam_Pc.param",
+            "entryIndex": 5,
+            "rowId": 7500115,
+            "sourceHash": "15d797817bbff32e6cdcf42158e7c88673f77991df4097fdfc7c8282679c1a90",
+            "rowName": "绣丸：表里",
+            "fields": [],
+            "raw": {
+              "parser": "sekiro-param-native-v1",
+              "entryIndex": 5,
+              "entryName": "AtkParam_Pc.param",
+              "rowIndex": 409,
+              "nativeNameOffset": 268393,
+              "nativeDataOffset": 202848,
+              "dataLength": 464,
+              "dataHash": "4b28863457daacc096a33c1084421aa5600725f251665c0dc80dcdcff5bf8bca",
+              "confidence": "high"
+            }
+          },
+          "score": 12,
+          "highlights": [
+            "7500115"
+          ]
+        },
+        {
+          "item": {
+            "uri": "param://BEHAVIOR_PARAM_ST/107500115",
+            "sourceUri": "file://param/gameparam/gameparam.parambnd.dcx",
+            "paramName": "BEHAVIOR_PARAM_ST",
+            "entryName": "BehaviorParam_PC.param",
+            "entryIndex": 8,
+            "rowId": 107500115,
+            "sourceHash": "f01ba002902f4f504ca488454b989d5816c96467c1fd9379becb237a8271a424",
+            "fields": [],
+            "raw": {
+              "parser": "sekiro-param-native-v1",
+              "entryIndex": 8,
+              "entryName": "BehaviorParam_PC.param",
+              "rowIndex": 503,
+              "nativeNameOffset": 42534,
+              "nativeDataOffset": 33608,
+              "dataLength": 32,
+              "dataHash": "739f6d47d3fa98274069c7226c25ea2dbd1eaef163cb22f79669283abbc324e6",
+              "confidence": "high"
+            }
+          },
+          "score": 12,
+          "highlights": [
+            "7500115"
+          ]
+        }
+      ],
+      "searchId": "search-e519bf53-c590-4d2b-991a-c8703cd16049"
+    },
+    "scalar": null,
+    "summary": null
+  },
+  "pagination": {
+    "originalChars": 1735,
+    "returnedCount": null,
+    "totalCount": null,
+    "total": null,
+    "offset": null,
+    "limit": null,
+    "truncated": false,
+    "cursors": {}
+  },
+  "completeness": "complete",
+  "truncated": false,
+  "identifiers": [
+    "uri=param://ATK_PARAM_ST/7500115",
+    "sourceUri=file://param/gameparam/gameparam.parambnd.dcx",
+    "rowId=7500115",
+    "uri=param://BEHAVIOR_PARAM_ST/107500115",
+    "rowId=107500115",
+    "searchId=search-e519bf53-c590-4d2b-991a-c8703cd16049"
+  ],
+  "evidence": {
+    "sourceUris": [
+      "file://param/gameparam/gameparam.parambnd.dcx"
+    ],
+    "sourceHashes": [
+      "15d797817bbff32e6cdcf42158e7c88673f77991df4097fdfc7c8282679c1a90",
+      "f01ba002902f4f504ca488454b989d5816c96467c1fd9379becb237a8271a424"
+    ],
+    "sourceRevisions": [],
+    "status": "candidate",
+    "kind": "discovery",
+    "nextActions": [
+      "已命中相同或语义相近的定位词；停止重复同义词搜索，停止继续扩大同一路径，改用另一类资源或已有结果的稳定 ID/sourceUri。"
+    ],
+    "repeatedQuery": true
+  }
+}
+```
+
+> **🛠️ 工具返回** (ToolCall ID: `call_01a07d06252a7c70b5d6e806c3060108`)
+```json
+{
+  "ok": true,
+  "state": "completed",
+  "data": {
+    "items": [],
+    "record": {
+      "source": "rag-fallback",
+      "tool": "search_param_rows",
+      "query": "7500116",
+      "availability": "available",
+      "totalHits": 0,
+      "hits": [],
+      "diagnostics": [
+        {
+          "severity": "info",
+          "code": "PARAM_NATIVE_SEMANTIC_EXPORT",
+          "message": "已由原生 PARAM 文档解析器展开 BND4 子项、行 ID、行名和原始行身份；字段值等待 Paramdef 投影。",
+          "sourceUri": "file://param/gameparam/gameparam.parambnd.dcx",
+          "details": {
+            "parser": "sekiro-param-native-v1",
+            "paramsCount": 131,
+            "rows": 50295
+          }
+        },
+        {
+          "severity": "warning",
+          "code": "PARAM_NATIVE_CHILD_SKIPPED",
+          "message": "BND4 中的 PARAM 子项无法由原生解析器读取，已保留结构化诊断并继续其它子项。",
+          "sourceUri": "file://param/gameparam/gameparam.parambnd.dcx",
+          "details": {
+            "entryIndex": 35,
+            "entryName": "DyingEffectParam.param",
+            "error": "PARAM 单行数据边界不唯一：ParamType 字符串被重定位但旧副本仍存在；需要 PARAMDEF 行宽。"
+          }
+        },
+        {
+          "severity": "warning",
+          "code": "PARAM_NATIVE_CHILD_SKIPPED",
+          "message": "BND4 中的 PARAM 子项无法由原生解析器读取，已保留结构化诊断并继续其它子项。",
+          "sourceUri": "file://param/gameparam/gameparam.parambnd.dcx",
+          "details": {
+            "entryIndex": 36,
+            "entryName": "EnemyCommonParam.param",
+            "error": "PARAM 单行数据边界不唯一：ParamType 字符串被重定位但旧副本仍存在；需要 PARAMDEF 行宽。"
+          }
+        },
+        {
+          "severity": "warning",
+          "code": "PARAM_NATIVE_CHILD_SKIPPED",
+          "message": "BND4 中的 PARAM 子项无法由原生解析器读取，已保留结构化诊断并继续其它子项。",
+          "sourceUri": "file://param/gameparam/gameparam.parambnd.dcx",
+          "details": {
+            "entryIndex": 38,
+            "entryName": "EquipParamAccessory.param",
+            "error": "PARAM 单行数据边界不唯一：ParamType 字符串被重定位但旧副本仍存在；需要 PARAMDEF 行宽。"
+          }
+        },
+        {
+          "severity": "warning",
+          "code": "PARAM_NATIVE_CHILD_SKIPPED",
+          "message": "BND4 中的 PARAM 子项无法由原生解析器读取，已保留结构化诊断并继续其它子项。",
+          "sourceUri": "file://param/gameparam/gameparam.parambnd.dcx",
+          "details": {
+            "entryIndex": 48,
+            "entryName": "GameSystemParam.param",
+            "error": "PARAM 单行数据边界不唯一：ParamType 字符串被重定位但旧副本仍存在；需要 PARAMDEF 行宽。"
+          }
+        },
+        {
+          "severity": "warning",
+          "code": "PARAM_NATIVE_CHILD_SKIPPED",
+          "message": "BND4 中的 PARAM 子项无法由原生解析器读取，已保留结构化诊断并继续其它子项。",
+          "sourceUri": "file://param/gameparam/gameparam.parambnd.dcx",
+          "details": {
+            "entryIndex": 54,
+            "entryName": "GraphicsParam.param",
+            "error": "PARAM 单行数据边界不唯一：ParamType 字符串被重定位但旧副本仍存在；需要 PARAMDEF 行宽。"
+          }
+        },
+        {
+          "severity": "warning",
+          "code": "PARAM_NATIVE_CHILD_SKIPPED",
+          "message": "BND4 中的 PARAM 子项无法由原生解析器读取，已保留结构化诊断并继续其它子项。",
+          "sourceUri": "file://param/gameparam/gameparam.parambnd.dcx",
+          "details": {
+            "entryIndex": 83,
+            "entryName": "MenuParam.param",
+            "error": "PARAM 单行数据边界不唯一：ParamType 字符串被重定位但旧副本仍存在；需要 PARAMDEF 行宽。"
+          }
+        },
+        {
+          "severity": "warning",
+          "code": "PARAM_NATIVE_CHILD_SKIPPED",
+          "message": "BND4 中的 PARAM 子项无法由原生解析器读取，已保留结构化诊断并继续其它子项。",
+          "sourceUri": "file://param/gameparam/gameparam.parambnd.dcx",
+          "details": {
+            "entryIndex": 123,
+            "entryName": "TentativePlayerParam.param",
+            "error": "PARAM 单行数据边界不唯一：ParamType 字符串被重定位但旧副本仍存在；需要 PARAMDEF 行宽。"
+          }
+        },
+        {
+          "severity": "info",
+          "code": "BRIDGE_RESULT_FILE_BACKED",
+          "message": "Bridge result exceeded one negotiated frame and was moved to a daemon-owned artifact.",
+          "sourceUri": "file://param/gameparam/gameparam.parambnd.dcx",
+          "details": {
+            "command": "export-param",
+            "serializedBytes": 31644142,
+            "maxFrameBytes": 16777216,
+            "artifactToken": "a9fafff76af446e5b0f899739a7bcda7",
+            "artifactByteLength": 31643804,
+            "artifactChunkSize": 32768
+          }
+        },
+        {
+          "severity": "info",
+          "code": "BRIDGE_FILE_BACKED_RESULT_MATERIALIZED",
+          "message": "Bridge 大结果已通过 daemon-owned file-backed artifact 分块还原。",
+          "sourceUri": "file://param/gameparam/gameparam.parambnd.dcx",
+          "details": {
+            "artifactToken": "a9fafff76af446e5b0f899739a7bcda7",
+            "byteLength": 31643804,
+            "chunkSize": 32768,
+            "payloadFormat": "bridge-result-json",
+            "payloadVersion": 1
+          }
+        }
+      ],
+      "note": "查询「7500116」没有命中已索引的事件、地图、参数、文本或文件。",
+      "searchId": "search-be674ac8-28d7-47ff-bf58-3fe904f3e73b"
+    },
+    "scalar": null,
+    "summary": null
+  },
+  "pagination": {
+    "originalChars": 3697,
+    "returnedCount": null,
+    "totalCount": 0,
+    "total": 0,
+    "offset": null,
+    "limit": null,
+    "truncated": false,
+    "cursors": {}
+  },
+  "completeness": "complete",
+  "truncated": false,
+  "identifiers": [
+    "sourceUri=file://param/gameparam/gameparam.parambnd.dcx",
+    "searchId=search-be674ac8-28d7-47ff-bf58-3fe904f3e73b"
+  ],
+  "evidence": {
+    "sourceUris": [
+      "file://param/gameparam/gameparam.parambnd.dcx"
+    ],
+    "sourceHashes": [],
+    "sourceRevisions": [],
+    "status": "insufficient_evidence",
+    "kind": "discovery",
+    "nextActions": [
+      "已执行相同或语义相近的查询；不要原样重试，改用另一条对象解析路径或原生读取。"
+    ],
+    "repeatedQuery": true
+  }
+}
+```
+
+> **🛠️ 工具返回** (ToolCall ID: `call_01a07d0627a47f42ada84b193c5d9913`)
+```json
+{
+  "ok": true,
+  "state": "completed",
+  "data": {
+    "items": [],
+    "record": {
+      "source": "rag-fallback",
+      "tool": "search_param_rows",
+      "query": "7500117",
+      "availability": "available",
+      "totalHits": 0,
+      "hits": [],
+      "diagnostics": [
+        {
+          "severity": "info",
+          "code": "PARAM_NATIVE_SEMANTIC_EXPORT",
+          "message": "已由原生 PARAM 文档解析器展开 BND4 子项、行 ID、行名和原始行身份；字段值等待 Paramdef 投影。",
+          "sourceUri": "file://param/gameparam/gameparam.parambnd.dcx",
+          "details": {
+            "parser": "sekiro-param-native-v1",
+            "paramsCount": 131,
+            "rows": 50295
+          }
+        },
+        {
+          "severity": "warning",
+          "code": "PARAM_NATIVE_CHILD_SKIPPED",
+          "message": "BND4 中的 PARAM 子项无法由原生解析器读取，已保留结构化诊断并继续其它子项。",
+          "sourceUri": "file://param/gameparam/gameparam.parambnd.dcx",
+          "details": {
+            "entryIndex": 35,
+            "entryName": "DyingEffectParam.param",
+            "error": "PARAM 单行数据边界不唯一：ParamType 字符串被重定位但旧副本仍存在；需要 PARAMDEF 行宽。"
+          }
+        },
+        {
+          "severity": "warning",
+          "code": "PARAM_NATIVE_CHILD_SKIPPED",
+          "message": "BND4 中的 PARAM 子项无法由原生解析器读取，已保留结构化诊断并继续其它子项。",
+          "sourceUri": "file://param/gameparam/gameparam.parambnd.dcx",
+          "details": {
+            "entryIndex": 36,
+            "entryName": "EnemyCommonParam.param",
+            "error": "PARAM 单行数据边界不唯一：ParamType 字符串被重定位但旧副本仍存在；需要 PARAMDEF 行宽。"
+          }
+        },
+        {
+          "severity": "warning",
+          "code": "PARAM_NATIVE_CHILD_SKIPPED",
+          "message": "BND4 中的 PARAM 子项无法由原生解析器读取，已保留结构化诊断并继续其它子项。",
+          "sourceUri": "file://param/gameparam/gameparam.parambnd.dcx",
+          "details": {
+            "entryIndex": 38,
+            "entryName": "EquipParamAccessory.param",
+            "error": "PARAM 单行数据边界不唯一：ParamType 字符串被重定位但旧副本仍存在；需要 PARAMDEF 行宽。"
+          }
+        },
+        {
+          "severity": "warning",
+          "code": "PARAM_NATIVE_CHILD_SKIPPED",
+          "message": "BND4 中的 PARAM 子项无法由原生解析器读取，已保留结构化诊断并继续其它子项。",
+          "sourceUri": "file://param/gameparam/gameparam.parambnd.dcx",
+          "details": {
+            "entryIndex": 48,
+            "entryName": "GameSystemParam.param",
+            "error": "PARAM 单行数据边界不唯一：ParamType 字符串被重定位但旧副本仍存在；需要 PARAMDEF 行宽。"
+          }
+        },
+        {
+          "severity": "warning",
+          "code": "PARAM_NATIVE_CHILD_SKIPPED",
+          "message": "BND4 中的 PARAM 子项无法由原生解析器读取，已保留结构化诊断并继续其它子项。",
+          "sourceUri": "file://param/gameparam/gameparam.parambnd.dcx",
+          "details": {
+            "entryIndex": 54,
+            "entryName": "GraphicsParam.param",
+            "error": "PARAM 单行数据边界不唯一：ParamType 字符串被重定位但旧副本仍存在；需要 PARAMDEF 行宽。"
+          }
+        },
+        {
+          "severity": "warning",
+          "code": "PARAM_NATIVE_CHILD_SKIPPED",
+          "message": "BND4 中的 PARAM 子项无法由原生解析器读取，已保留结构化诊断并继续其它子项。",
+          "sourceUri": "file://param/gameparam/gameparam.parambnd.dcx",
+          "details": {
+            "entryIndex": 83,
+            "entryName": "MenuParam.param",
+            "error": "PARAM 单行数据边界不唯一：ParamType 字符串被重定位但旧副本仍存在；需要 PARAMDEF 行宽。"
+          }
+        },
+        {
+          "severity": "warning",
+          "code": "PARAM_NATIVE_CHILD_SKIPPED",
+          "message": "BND4 中的 PARAM 子项无法由原生解析器读取，已保留结构化诊断并继续其它子项。",
+          "sourceUri": "file://param/gameparam/gameparam.parambnd.dcx",
+          "details": {
+            "entryIndex": 123,
+            "entryName": "TentativePlayerParam.param",
+            "error": "PARAM 单行数据边界不唯一：ParamType 字符串被重定位但旧副本仍存在；需要 PARAMDEF 行宽。"
+          }
+        },
+        {
+          "severity": "info",
+          "code": "BRIDGE_RESULT_FILE_BACKED",
+          "message": "Bridge result exceeded one negotiated frame and was moved to a daemon-owned artifact.",
+          "sourceUri": "file://param/gameparam/gameparam.parambnd.dcx",
+          "details": {
+            "command": "export-param",
+            "serializedBytes": 31644142,
+            "maxFrameBytes": 16777216,
+            "artifactToken": "a9fafff76af446e5b0f899739a7bcda7",
+            "artifactByteLength": 31643804,
+            "artifactChunkSize": 32768
+          }
+        },
+        {
+          "severity": "info",
+          "code": "BRIDGE_FILE_BACKED_RESULT_MATERIALIZED",
+          "message": "Bridge 大结果已通过 daemon-owned file-backed artifact 分块还原。",
+          "sourceUri": "file://param/gameparam/gameparam.parambnd.dcx",
+          "details": {
+            "artifactToken": "a9fafff76af446e5b0f899739a7bcda7",
+            "byteLength": 31643804,
+            "chunkSize": 32768,
+            "payloadFormat": "bridge-result-json",
+            "payloadVersion": 1
+          }
+        }
+      ],
+      "note": "查询「7500117」没有命中已索引的事件、地图、参数、文本或文件。",
+      "searchId": "search-db25987d-a2e2-4fcc-a7ed-68a78a7d993e"
+    },
+    "scalar": null,
+    "summary": null
+  },
+  "pagination": {
+    "originalChars": 3697,
+    "returnedCount": null,
+    "totalCount": 0,
+    "total": 0,
+    "offset": null,
+    "limit": null,
+    "truncated": false,
+    "cursors": {}
+  },
+  "completeness": "complete",
+  "truncated": false,
+  "identifiers": [
+    "sourceUri=file://param/gameparam/gameparam.parambnd.dcx",
+    "searchId=search-db25987d-a2e2-4fcc-a7ed-68a78a7d993e"
+  ],
+  "evidence": {
+    "sourceUris": [
+      "file://param/gameparam/gameparam.parambnd.dcx"
+    ],
+    "sourceHashes": [],
+    "sourceRevisions": [],
+    "status": "insufficient_evidence",
+    "kind": "discovery",
+    "nextActions": [
+      "已执行相同或语义相近的查询；不要原样重试，改用另一条对象解析路径或原生读取。"
+    ],
+    "repeatedQuery": true
+  }
+}
+```
+
+> **🛠️ 工具返回** (ToolCall ID: `call_01a07d0629887e83b401402c9a81809f`)
+```json
+{
+  "ok": true,
+  "state": "completed",
+  "data": {
+    "items": [],
+    "record": {
+      "source": "rag-fallback",
+      "tool": "search_param_rows",
+      "query": "7500118",
+      "availability": "available",
+      "totalHits": 0,
+      "hits": [],
+      "diagnostics": [
+        {
+          "severity": "info",
+          "code": "PARAM_NATIVE_SEMANTIC_EXPORT",
+          "message": "已由原生 PARAM 文档解析器展开 BND4 子项、行 ID、行名和原始行身份；字段值等待 Paramdef 投影。",
+          "sourceUri": "file://param/gameparam/gameparam.parambnd.dcx",
+          "details": {
+            "parser": "sekiro-param-native-v1",
+            "paramsCount": 131,
+            "rows": 50295
+          }
+        },
+        {
+          "severity": "warning",
+          "code": "PARAM_NATIVE_CHILD_SKIPPED",
+          "message": "BND4 中的 PARAM 子项无法由原生解析器读取，已保留结构化诊断并继续其它子项。",
+          "sourceUri": "file://param/gameparam/gameparam.parambnd.dcx",
+          "details": {
+            "entryIndex": 35,
+            "entryName": "DyingEffectParam.param",
+            "error": "PARAM 单行数据边界不唯一：ParamType 字符串被重定位但旧副本仍存在；需要 PARAMDEF 行宽。"
+          }
+        },
+        {
+          "severity": "warning",
+          "code": "PARAM_NATIVE_CHILD_SKIPPED",
+          "message": "BND4 中的 PARAM 子项无法由原生解析器读取，已保留结构化诊断并继续其它子项。",
+          "sourceUri": "file://param/gameparam/gameparam.parambnd.dcx",
+          "details": {
+            "entryIndex": 36,
+            "entryName": "EnemyCommonParam.param",
+            "error": "PARAM 单行数据边界不唯一：ParamType 字符串被重定位但旧副本仍存在；需要 PARAMDEF 行宽。"
+          }
+        },
+        {
+          "severity": "warning",
+          "code": "PARAM_NATIVE_CHILD_SKIPPED",
+          "message": "BND4 中的 PARAM 子项无法由原生解析器读取，已保留结构化诊断并继续其它子项。",
+          "sourceUri": "file://param/gameparam/gameparam.parambnd.dcx",
+          "details": {
+            "entryIndex": 38,
+            "entryName": "EquipParamAccessory.param",
+            "error": "PARAM 单行数据边界不唯一：ParamType 字符串被重定位但旧副本仍存在；需要 PARAMDEF 行宽。"
+          }
+        },
+        {
+          "severity": "warning",
+          "code": "PARAM_NATIVE_CHILD_SKIPPED",
+          "message": "BND4 中的 PARAM 子项无法由原生解析器读取，已保留结构化诊断并继续其它子项。",
+          "sourceUri": "file://param/gameparam/gameparam.parambnd.dcx",
+          "details": {
+            "entryIndex": 48,
+            "entryName": "GameSystemParam.param",
+            "error": "PARAM 单行数据边界不唯一：ParamType 字符串被重定位但旧副本仍存在；需要 PARAMDEF 行宽。"
+          }
+        },
+        {
+          "severity": "warning",
+          "code": "PARAM_NATIVE_CHILD_SKIPPED",
+          "message": "BND4 中的 PARAM 子项无法由原生解析器读取，已保留结构化诊断并继续其它子项。",
+          "sourceUri": "file://param/gameparam/gameparam.parambnd.dcx",
+          "details": {
+            "entryIndex": 54,
+            "entryName": "GraphicsParam.param",
+            "error": "PARAM 单行数据边界不唯一：ParamType 字符串被重定位但旧副本仍存在；需要 PARAMDEF 行宽。"
+          }
+        },
+        {
+          "severity": "warning",
+          "code": "PARAM_NATIVE_CHILD_SKIPPED",
+          "message": "BND4 中的 PARAM 子项无法由原生解析器读取，已保留结构化诊断并继续其它子项。",
+          "sourceUri": "file://param/gameparam/gameparam.parambnd.dcx",
+          "details": {
+            "entryIndex": 83,
+            "entryName": "MenuParam.param",
+            "error": "PARAM 单行数据边界不唯一：ParamType 字符串被重定位但旧副本仍存在；需要 PARAMDEF 行宽。"
+          }
+        },
+        {
+          "severity": "warning",
+          "code": "PARAM_NATIVE_CHILD_SKIPPED",
+          "message": "BND4 中的 PARAM 子项无法由原生解析器读取，已保留结构化诊断并继续其它子项。",
+          "sourceUri": "file://param/gameparam/gameparam.parambnd.dcx",
+          "details": {
+            "entryIndex": 123,
+            "entryName": "TentativePlayerParam.param",
+            "error": "PARAM 单行数据边界不唯一：ParamType 字符串被重定位但旧副本仍存在；需要 PARAMDEF 行宽。"
+          }
+        },
+        {
+          "severity": "info",
+          "code": "BRIDGE_RESULT_FILE_BACKED",
+          "message": "Bridge result exceeded one negotiated frame and was moved to a daemon-owned artifact.",
+          "sourceUri": "file://param/gameparam/gameparam.parambnd.dcx",
+          "details": {
+            "command": "export-param",
+            "serializedBytes": 31644142,
+            "maxFrameBytes": 16777216,
+            "artifactToken": "a9fafff76af446e5b0f899739a7bcda7",
+            "artifactByteLength": 31643804,
+            "artifactChunkSize": 32768
+          }
+        },
+        {
+          "severity": "info",
+          "code": "BRIDGE_FILE_BACKED_RESULT_MATERIALIZED",
+          "message": "Bridge 大结果已通过 daemon-owned file-backed artifact 分块还原。",
+          "sourceUri": "file://param/gameparam/gameparam.parambnd.dcx",
+          "details": {
+            "artifactToken": "a9fafff76af446e5b0f899739a7bcda7",
+            "byteLength": 31643804,
+            "chunkSize": 32768,
+            "payloadFormat": "bridge-result-json",
+            "payloadVersion": 1
+          }
+        }
+      ],
+      "note": "查询「7500118」没有命中已索引的事件、地图、参数、文本或文件。",
+      "searchId": "search-226a262e-45f1-475c-957f-b332f3daeb90"
+    },
+    "scalar": null,
+    "summary": null
+  },
+  "pagination": {
+    "originalChars": 3697,
+    "returnedCount": null,
+    "totalCount": 0,
+    "total": 0,
+    "offset": null,
+    "limit": null,
+    "truncated": false,
+    "cursors": {}
+  },
+  "completeness": "complete",
+  "truncated": false,
+  "identifiers": [
+    "sourceUri=file://param/gameparam/gameparam.parambnd.dcx",
+    "searchId=search-226a262e-45f1-475c-957f-b332f3daeb90"
+  ],
+  "evidence": {
+    "sourceUris": [
+      "file://param/gameparam/gameparam.parambnd.dcx"
+    ],
+    "sourceHashes": [],
+    "sourceRevisions": [],
+    "status": "insufficient_evidence",
+    "kind": "discovery",
+    "nextActions": [
+      "已执行相同或语义相近的查询；不要原样重试，改用另一条对象解析路径或原生读取。"
+    ],
+    "repeatedQuery": true
+  }
+}
+```
+
+### 🤖 助手响应 (Step 19)
+
+### 🤖 助手响应 (Step 20)
+
+已确认项：
+- 目标已登记：`绣丸 最后一刀切换斩 -> 80追斩追踪距离`。
+- 命中绣丸本体簇：`AtkParam_Pc 5000150/5000151 绣丸表里追斬`，`AtkParam_Pc 7500110~7500115 绣丸：表里`，`Bullet 750300/750301/750302 琉璃绣丸`，`EquipWeapon 75000 绣丸`，`Skill 751 绣丸：表里`。
+- 切换斩相关：`SpEffect 4401-4410 刀光切换特效`，`SpEffectVfx 32403 火锈丸切换特效`。
+- 追踪距离候选字段已定位：`Bullet.homingBeginDist 誘導開始距離[m]`，`Bullet.hormingStopRange`，`Bullet.dist 射程距離[m]`，`Bullet.homingAngle`，`Bullet.isEnableAutoHoming`。`AtkParam_Pc`侧仅见`trackType/knockbackDist/hit*_Radius`，无追踪距离语义。
+
+未确认项：
+- “最后一刀切换斩”具体是哪一行未验证。`7500115`存在、`7500116/117/118`无命中，推测`7500110-7500115`为表里连段，末刀可能是`7500115`，但未经原生`read_param_fields`核对行名/顺序。
+- 80应落`homingBeginDist`还是`dist/hormingStopRange`未确认，需读当前值判断。
+- 对应`BehaviorParam_PC 107500110/107500111/107500115`与`Bullet 75030x`映射关系未验证。
+
+缺口与下一步：
+1. 对`AtkParam_Pc 7500110-7500115`、`5000150/5000151`做`read_param_fields`核对哪行为终结切换斩。
+2. 对`Bullet 750300-750302`读`homingBeginDist/dist/hormingStopRange/isEnableAutoHoming`当前值。
+3. 确认后用`mutate_param_fields`将目标行追踪距离写80并回读验证。未写入。
+
+
+> **耐久终态**: 步数 20, taskStatus=`partial`, finishReason=`partial`

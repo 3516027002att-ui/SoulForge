@@ -1,0 +1,2 @@
+{"type":"session-meta","meta":{"sessionId":"f9eeb186-a622-4db1-962c-de52d6e3aed1","startedAt":"2026-09-01T14:16:50.030Z","configId":"test-service","protocol":"openai-responses","permissionMode":"full","model":"muse-spark-1.2-contributor"}}
+{"type":"message","step":0,"message":{"role":"user","content":"把鬼刑部设置成精英怪，血条设置为2，出场时地上随机落雷5秒，不攻击到狼，击杀后掉落义父的铃铛"}}

@@ -1,0 +1,5 @@
+{"type":"session-meta","meta":{"sessionId":"2c894fbb-a495-4d7b-85d7-6f4ffedc2beb","startedAt":"2026-09-07T04:50:32.232Z","configId":"test-service","protocol":"openai-responses","permissionMode":"plan","model":"muse-spark-1.3-contributor"}}
+{"type":"message","step":0,"message":{"role":"user","content":"把鬼刑部改为精英怪，血条改为2，死亡后掉落靛蓝星陨"}}
+{"type":"provider-usage","callIndex":1,"currentContextTokens":217,"contextSource":"estimated","providerReported":false,"recordedAt":"2026-09-07T04:50:33.700Z"}
+{"type":"message","step":1,"message":{"role":"assistant","content":"【系统收口摘要-error】Agent 在 1 步后停止，未形成模型最终汇报。已记录 0 次工具调用；未发现写入类工具调用。当前结果不可视为完成，请从 rollout 的最后一条工具结果继续处理未确认项。"}}
+{"type":"turn-complete","at":"2026-09-07T04:50:46.880Z","finishReason":"error","taskStatus":"error","steps":1,"diagnostics":[{"severity":"error","code":"MODEL_SERVICE_HTTP_ERROR","message":"OpenAI Responses 请求失败：HTTP 400 Error from provider (Console Go): Request is missing x-opencode-session and cannot be routed efficiently. Please see https://opencode.ai/docs/go/#where-can-i-use-it"},{"severity":"warning","code":"AGENT_TERMINAL_REPORT_EMITTED","message":"终态没有模型正文，已生成明确标注为未完成的系统收口摘要。"}]}

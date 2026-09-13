@@ -9,7 +9,8 @@
  * 1. %APPDATA%/@soulforge/desktop/agent/sessions
  * 2. %APPDATA%/Electron/agent/sessions
  * 3. %APPDATA%/SoulForge/agent/sessions
- * 4. 自定义参数目录
+ * 4. output/agent-real/*.rollout.jsonl（自动模拟，不含 supervisor 日志）
+ * 5. 自定义参数目录
  */
 
 import { existsSync, readdirSync, readFileSync, writeFileSync, mkdirSync, copyFileSync, statSync } from 'node:fs';
@@ -27,7 +28,8 @@ const appData = process.env.APPDATA || '';
 const DEFAULT_SOURCE_DIRS = [
   join(appData, '@soulforge', 'desktop', 'agent', 'sessions'),
   join(appData, 'Electron', 'agent', 'sessions'),
-  join(appData, 'SoulForge', 'agent', 'sessions')
+  join(appData, 'SoulForge', 'agent', 'sessions'),
+  join(REPO_ROOT, 'output', 'agent-real')
 ];
 
 function findJsonlFiles(dir) {
@@ -39,7 +41,7 @@ function findJsonlFiles(dir) {
       const fullPath = join(curr, entry.name);
       if (entry.isDirectory()) {
         scan(fullPath);
-      } else if (entry.isFile() && entry.name.endsWith('.jsonl')) {
+      } else if (entry.isFile() && entry.name.endsWith('.jsonl') && !entry.name.endsWith('.log.jsonl')) {
         results.push(fullPath);
       }
     }
@@ -126,6 +128,7 @@ export function parseSessionFile(filePath) {
   return {
     filePath,
     fileName,
+    sourceKind: fileName.endsWith('.rollout.jsonl') ? 'simulation' : 'desktop',
     sessionId,
     startedAt,
     meta,
@@ -159,6 +162,7 @@ export function generateMarkdown(session) {
   mdLines.push('');
   mdLines.push(`> 📅 **记录时间**: ${dateStr} (${session.startedAt})  `);
   mdLines.push(`> 🆔 **会话 ID**: \`${session.sessionId}\`  `);
+  mdLines.push(`> **来源**: ${session.sourceKind === 'simulation' ? '自动模拟（临时 overlay）' : '桌面会话'}  `);
   mdLines.push(`> 📊 **总步数**: ${session.totalSteps} 步 | **文件大小**: ${(session.sizeBytes / 1024).toFixed(1)} KB  `);
   mdLines.push(`> 🏁 **终态**: \`${session.taskStatus}\`${session.finishReason ? ` / finishReason=\`${session.finishReason}\`` : ''}  `);
   if (session.terminalMissing) {
@@ -216,7 +220,7 @@ export function generateMarkdown(session) {
           const parsed = JSON.parse(msg.content);
           mdLines.push(JSON.stringify(parsed, null, 2));
         } catch {
-          mdLines.push(String(msg.content).slice(0, 2000) + (String(msg.content).length > 2000 ? '\n... (truncated)' : ''));
+          mdLines.push(String(msg.content));
         }
         mdLines.push('```');
         mdLines.push('');
@@ -236,11 +240,12 @@ export function generateMarkdown(session) {
   return mdLines.join('\n');
 }
 
-export function renderArchiveIndex(indexRows, sessionCount, updatedAt = new Date()) {
+export function renderArchiveIndex(indexRows, sessionCount, updatedAt = new Date(), counts = null) {
   return [
     '# SoulForge 本地 AI 助手会话归档 (AI Conversation Logs)',
     '',
     '本索引仅描述本目录已归档的会话快照，不是客户端实时会话列表、本机历史总数或 Agent 成功率统计。桌面会话与 `output/agent-real/*.rollout.jsonl` 自动化模拟记录分开统计。',
+    ...(counts ? ['', `本次归档：**${sessionCount} 份 rollout**，其中桌面会话 **${counts.desktop}** 份、自动模拟 **${counts.simulation}** 份。每份都有 JSONL 快照和 Markdown 阅读版；supervisor 运行日志不计入会话。`] : []),
     '',
     '## 同步方式与隐私边界',
     '',
@@ -250,14 +255,16 @@ export function renderArchiveIndex(indexRows, sessionCount, updatedAt = new Date
     'npm run ai-logs:sync -- --index-only',
     '```',
     '',
-    '完整同步命令 `npm run ai-logs:sync` 会扫描本机 Electron、SoulForge 和历史 @soulforge/desktop 的 Agent 会话目录，复制原始 JSONL 并生成 Markdown；它不会自动脱敏。只有明确需要导出时才运行，提交或分享前必须审查对话、工具返回中的私人路径、凭据及 Mod 内容。',
+    '完整同步命令 `npm run ai-logs:sync` 会扫描本机 Electron、SoulForge、历史 @soulforge/desktop 的 Agent 会话目录，以及仓库 `output/agent-real/*.rollout.jsonl`，复制 JSONL 快照并生成 Markdown。同步前会阻止常见明文凭据，但不会自动脱敏，也不能替代人工审查；提交或分享前必须审查对话、工具返回中的私人路径、凭据及 Mod 内容。',
+    '',
+    '完整同步后只提交 `docs/ai-logs/` 归档和相关脚本/说明，不必提交整个 `output/`。原始运行目录仍供本机使用，公开追踪的是这里的 JSONL 快照。重复同步保留旧归档，索引覆盖全部已归档文件；新增记录需再次同步、审查、提交和推送，不会自动上传。',
     '',
     '索引由 [生成脚本](../../scripts/sync-ai-logs.mjs) 维护。缺失终态不能解释为完成；`completed` 等终态也是记录中的状态，不替代任务结果或原生写回验收。',
     '',
     '## 会话历史索引（按开始时间倒序，北京时间）',
     '',
-    '| 记录时间 | 会话摘要 | 记录终态 | 步数 | Markdown 详情 | 原始记录 |',
-    '| :--- | :--- | :--- | :--- | :--- | :--- |',
+    '| 记录时间 | 来源 | 会话摘要 | 记录终态 | 步数 | Markdown 详情 | 原始记录 |',
+    '| :--- | :--- | :--- | :--- | :--- | :--- | :--- |',
     ...indexRows,
     '',
     '---',
@@ -277,16 +284,32 @@ export function refreshArchiveIndex(targetBase = TARGET_BASE, updatedAt = new Da
     const date = new Date(session.startedAt);
     const dateText = Number.isNaN(date.getTime()) ? session.startedAt : date.toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai' });
     const title = session.shortTitle.replace(/\|/g, '\\|');
-    return `| ${dateText} | ${title} | ${session.taskStatus}${session.terminalMissing ? ' (terminal missing)' : ''} | ${session.totalSteps} | ${mdLink} | [原始 JSONL](${relJsonlPath}) |`;
+    return `| ${dateText} | ${session.sourceKind === 'simulation' ? '自动模拟' : '桌面会话'} | ${title} | ${session.taskStatus}${session.terminalMissing ? ' (terminal missing)' : ''} | ${session.totalSteps} | ${mdLink} | [原始 JSONL](${relJsonlPath}) |`;
   });
   mkdirSync(targetBase, { recursive: true });
-  writeFileSync(join(targetBase, 'README.md'), renderArchiveIndex(rows, archived.length, updatedAt), 'utf8');
+  const counts = { desktop: 0, simulation: 0 };
+  for (const session of archived) counts[session.sourceKind] += 1;
+  writeFileSync(join(targetBase, 'README.md'), renderArchiveIndex(rows, archived.length, updatedAt, counts), 'utf8');
   return { mode: 'index-only', archiveFiles: archived.length, sourceScanned: false, sessionFilesWritten: 0 };
 }
 
-export function sync(inputDirs = process.argv.slice(2).filter((arg) => !arg.startsWith('-'))) {
-  const sourceDirs = [...inputDirs, ...DEFAULT_SOURCE_DIRS].filter((d) => existsSync(d));
-  console.log('🔍 正在扫描本地 AI 侧边栏会话记录...');
+export function assertPublishableSession(session) {
+  if (!session.meta || session.parseErrors) throw new Error(`Invalid rollout: ${session.fileName}`);
+  const content = readFileSync(session.filePath, 'utf8');
+  const rules = [
+    /\bsk-[A-Za-z0-9_-]{20,}/,
+    /\b(?:gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{30,})/,
+    /-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----/,
+    /Bearer\s+[A-Za-z0-9._~+\/-]{16,}/i,
+    /(?:api[_-]?key|access[_-]?token|password|secret)\\?"\s*:\s*\\?"[^"\\]{8,}/i
+  ];
+  if (rules.some((rule) => rule.test(content))) throw new Error(`Possible credential; review before publishing: ${session.fileName}`);
+}
+
+export function sync(inputDirs = process.argv.slice(2).filter((arg) => !arg.startsWith('-')), options = {}) {
+  const targetBase = options.targetBase ?? TARGET_BASE;
+  const sourceDirs = [...new Set([...inputDirs, ...(options.defaultSourceDirs ?? DEFAULT_SOURCE_DIRS)].map((d) => resolve(d)))].filter((d) => existsSync(d));
+  console.log('🔍 正在扫描桌面与自动模拟会话记录...');
   const allJsonlFiles = [];
   for (const dir of sourceDirs) {
     console.log(`  - 扫描目录: ${dir}`);
@@ -304,9 +327,11 @@ export function sync(inputDirs = process.argv.slice(2).filter((arg) => !arg.star
   const sessionsMap = new Map();
   for (const f of allJsonlFiles) {
     const session = parseSessionFile(f);
-    const existing = sessionsMap.get(session.sessionId);
+    assertPublishableSession(session);
+    const key = `${session.sourceKind}:${session.sessionId}`;
+    const existing = sessionsMap.get(key);
     if (!existing || session.sizeBytes > existing.sizeBytes) {
-      sessionsMap.set(session.sessionId, session);
+      sessionsMap.set(key, session);
     }
   }
 
@@ -316,16 +341,14 @@ export function sync(inputDirs = process.argv.slice(2).filter((arg) => !arg.star
 
   console.log(`📦 正在同步 ${uniqueSessions.length} 个独立会话记录到 docs/ai-logs/...`);
 
-  mkdirSync(SESSIONS_TARGET, { recursive: true });
-  mkdirSync(MARKDOWN_TARGET, { recursive: true });
-
-  const indexRows = [];
+  mkdirSync(join(targetBase, 'sessions'), { recursive: true });
+  mkdirSync(join(targetBase, 'markdown'), { recursive: true });
 
   for (const session of uniqueSessions) {
     // 确定子目录日期: YYYY/MM/DD
-    let year = '2026';
-    let month = '08';
-    let day = '24';
+    let year = 'unknown';
+    let month = 'unknown';
+    let day = 'unknown';
     try {
       const d = new Date(session.startedAt);
       if (!isNaN(d.getTime())) {
@@ -335,9 +358,9 @@ export function sync(inputDirs = process.argv.slice(2).filter((arg) => !arg.star
       }
     } catch {}
 
-    const sessionRelDir = join(year, month, day);
-    const targetSessionDir = join(SESSIONS_TARGET, sessionRelDir);
-    const targetMdDir = join(MARKDOWN_TARGET, sessionRelDir);
+    const sessionRelDir = session.sourceKind === 'simulation' ? join('simulations', year, month, day) : join(year, month, day);
+    const targetSessionDir = join(targetBase, 'sessions', sessionRelDir);
+    const targetMdDir = join(targetBase, 'markdown', sessionRelDir);
 
     mkdirSync(targetSessionDir, { recursive: true });
     mkdirSync(targetMdDir, { recursive: true });
@@ -353,21 +376,12 @@ export function sync(inputDirs = process.argv.slice(2).filter((arg) => !arg.star
     const mdContent = generateMarkdown(session);
     writeFileSync(targetMdPath, mdContent, 'utf8');
 
-    // 记录索引条目
-    const relMdPath = relative(TARGET_BASE, targetMdPath).replace(/\\/g, '/');
-    const relJsonlPath = relative(TARGET_BASE, targetJsonlPath).replace(/\\/g, '/');
-    const safePrompt = session.shortTitle.replace(/\|/g, '\\|');
-    const d = new Date(session.startedAt);
-    const localTimeStr = isNaN(d.getTime()) ? session.startedAt : d.toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai' });
-
-    indexRows.push(
-      `| ${localTimeStr} | ${safePrompt} | ${session.taskStatus}${session.terminalMissing ? ' (terminal missing)' : ''} | ${session.totalSteps} | [📖 查看对话 Markdown](${relMdPath}) | [📦 原始 JSONL](${relJsonlPath}) |`
-    );
   }
 
   // 生成 docs/ai-logs/README.md
-  writeFileSync(join(TARGET_BASE, 'README.md'), renderArchiveIndex(indexRows, uniqueSessions.length), 'utf8');
+  const result = refreshArchiveIndex(targetBase);
   console.log(`✅ 同步完成！已生成 ${uniqueSessions.length} 篇 Markdown 对话记录及 README 索引。`);
+  return { ...result, mode: 'sync', sourceScanned: true, sessionFilesWritten: uniqueSessions.length };
 }
 
 const invokedPath = process.argv[1] ? pathToFileURL(resolve(process.argv[1])).href : '';

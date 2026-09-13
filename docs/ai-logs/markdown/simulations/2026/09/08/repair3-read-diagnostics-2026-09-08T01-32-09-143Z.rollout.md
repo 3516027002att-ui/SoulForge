@@ -1,0 +1,1990 @@
+# AI 会话记录: 只做只读回归诊断，不修改任何游戏资源。先搜索鬼刑部并使用当前搜索证据定位 NpcParam，然后一次...
+
+> 📅 **记录时间**: 2026/9/8 09:33:12 (2026-09-08T01:33:12.369Z)  
+> 🆔 **会话 ID**: `5a449ea5-aae6-42b2-aeec-38e8d5d481b4`  
+> **来源**: 自动模拟（临时 overlay）  
+> 📊 **总步数**: 11 步 | **文件大小**: 55.8 KB  
+> 🏁 **终态**: `completed` / finishReason=`stop`  
+
+---
+
+## 👤 用户输入 (User)
+
+```text
+只做只读回归诊断，不修改任何游戏资源。先搜索鬼刑部并使用当前搜索证据定位 NpcParam，然后一次 read_param_fields 请求读取 npcType、ninsatuNum、itemLotId_1、itemLotId_2、itemLotId_3、hp、isSoulGetByBoss、getSoul 这八个字段。再搜索工作区 m11_00_00_00.emevd.dcx，调用 read_emevd_outline 读取第一页8个事件和第二页8个事件，核对 offset、total、returned 和源哈希。最后读取 workspace_stats 并汇报这三项工具调用是否成功、有无输出超限和当前 PARAM/MSG/RAG 数量。无需执行整道Mod任务，也不要反复扩大检索。
+```
+
+### 🤖 助手响应 (Step 1)
+
+只读回归检查开始：先定位鬼刑部 NpcParam，再核对事件与统计。
+
+#### 🛠️ 发起工具调用:
+- **工具名称**: `search_param_rows` (ID: `call_01a07ea5fad47523894c065c39c2af69`)
+  ```json
+  {
+    "limit": 10,
+    "paramNames": [
+      "NpcParam"
+    ],
+    "query": "鬼刑部"
+  }
+  ```
+
+> **🛠️ 工具返回** (ToolCall ID: `call_01a07ea5fad47523894c065c39c2af69`)
+```json
+{
+  "ok": false,
+  "state": "failed",
+  "error": {
+    "code": "TASK_RECORD_TARGET_REQUIRED",
+    "message": "搜索前必须先从当前用户指令逐字登记至少一个 target；模型不能用任意搜索替换宿主冻结的请求范围。"
+  }
+}
+```
+
+### 🤖 助手响应 (Step 2)
+
+诊断需先登记目标，我来补齐台账再继续只读核验。
+
+#### 🛠️ 发起工具调用:
+- **工具名称**: `read_agent_task_record` (ID: `call_01a07ea612157f50b7bb26c0b9e429a3`)
+  ```json
+  {}
+  ```
+
+> **🛠️ 工具返回** (ToolCall ID: `call_01a07ea612157f50b7bb26c0b9e429a3`)
+```json
+{
+  "ok": true,
+  "state": "completed",
+  "data": {
+    "items": [],
+    "record": {
+      "path": "C:\\Users\\ASUS\\AppData\\Local\\Temp\\soulforge-real-agent-2026-09-08T01-32-09-143Z-YZBl9H\\task-records\\5a449ea5-aae6-42b2-aeec-38e8d5d481b4.md",
+      "totalEntries": 0,
+      "entries": [],
+      "updatedAt": null
+    },
+    "scalar": null,
+    "summary": null
+  },
+  "pagination": {
+    "originalChars": 391,
+    "returnedCount": null,
+    "totalCount": null,
+    "total": null,
+    "offset": null,
+    "limit": null,
+    "truncated": false,
+    "cursors": {}
+  },
+  "completeness": "complete",
+  "truncated": false,
+  "identifiers": [],
+  "evidence": {
+    "sourceUris": [],
+    "sourceHashes": [],
+    "sourceRevisions": [],
+    "status": "not_applicable",
+    "kind": "other",
+    "nextActions": [],
+    "repeatedQuery": false
+  }
+}
+```
+
+### 🤖 助手响应 (Step 3)
+
+只读诊断已确认台账为空，先补登记再做三次核验。
+
+#### 🛠️ 发起工具调用:
+- **工具名称**: `update_agent_task_record` (ID: `call_01a07ea6605277c1b15390560a178e9d`)
+  ```json
+  {
+    "kind": "target",
+    "objectName": "鬼刑部",
+    "propertyKey": "target",
+    "status": "candidate",
+    "value": "只做只读回归诊断，不修改任何游戏资源，先搜索鬼刑部并定位NpcParam"
+  }
+  ```
+
+> **🛠️ 工具返回** (ToolCall ID: `call_01a07ea6605277c1b15390560a178e9d`)
+```json
+{
+  "ok": true,
+  "state": "completed",
+  "data": {
+    "items": [],
+    "record": {
+      "message": "台账词条已登记：鬼刑部 -> target",
+      "entry": {
+        "entryId": "entry-b2732dc2-e6e4-4b81-b527-9d7a513bc167",
+        "objectName": "鬼刑部",
+        "propertyKey": "target",
+        "kind": "target",
+        "status": "candidate",
+        "mutationBudget": 0,
+        "mutationUsed": 0
+      },
+      "totalEntries": 1
+    },
+    "scalar": null,
+    "summary": null
+  },
+  "pagination": {
+    "originalChars": 419,
+    "returnedCount": null,
+    "totalCount": null,
+    "total": null,
+    "offset": null,
+    "limit": null,
+    "truncated": false,
+    "cursors": {}
+  },
+  "completeness": "complete",
+  "truncated": false,
+  "identifiers": [
+    "entryId=entry-b2732dc2-e6e4-4b81-b527-9d7a513bc167"
+  ],
+  "evidence": {
+    "sourceUris": [],
+    "sourceHashes": [],
+    "sourceRevisions": [],
+    "status": "not_applicable",
+    "kind": "other",
+    "nextActions": [],
+    "repeatedQuery": false
+  }
+}
+```
+
+### 🤖 助手响应 (Step 4)
+
+只读诊断台账已补齐，继续三项核验。
+
+#### 🛠️ 发起工具调用:
+- **工具名称**: `update_agent_task_record` (ID: `call_01a07ea692ab7e62aaac8ac89c1548ff`)
+  ```json
+  {
+    "kind": "target",
+    "objectName": "m11_00_00_00.emevd.dcx",
+    "propertyKey": "target",
+    "status": "candidate",
+    "value": "搜索工作区 m11_00_00_00.emevd.dcx，读取第一页和第二页事件做只读回归诊断"
+  }
+  ```
+
+> **🛠️ 工具返回** (ToolCall ID: `call_01a07ea692ab7e62aaac8ac89c1548ff`)
+```json
+{
+  "ok": true,
+  "state": "completed",
+  "data": {
+    "items": [],
+    "record": {
+      "message": "台账词条已登记：m11_00_00_00.emevd.dcx -> target",
+      "entry": {
+        "entryId": "entry-dc61c3d1-f4c6-40c1-a75f-79fef4699678",
+        "objectName": "m11_00_00_00.emevd.dcx",
+        "propertyKey": "target",
+        "kind": "target",
+        "status": "candidate",
+        "mutationBudget": 0,
+        "mutationUsed": 0
+      },
+      "totalEntries": 2
+    },
+    "scalar": null,
+    "summary": null
+  },
+  "pagination": {
+    "originalChars": 457,
+    "returnedCount": null,
+    "totalCount": null,
+    "total": null,
+    "offset": null,
+    "limit": null,
+    "truncated": false,
+    "cursors": {}
+  },
+  "completeness": "complete",
+  "truncated": false,
+  "identifiers": [
+    "entryId=entry-dc61c3d1-f4c6-40c1-a75f-79fef4699678"
+  ],
+  "evidence": {
+    "sourceUris": [],
+    "sourceHashes": [],
+    "sourceRevisions": [],
+    "status": "not_applicable",
+    "kind": "other",
+    "nextActions": [],
+    "repeatedQuery": false
+  }
+}
+```
+
+### 🤖 助手响应 (Step 5)
+
+两项只读目标已登记，现在按序跑三组核验。
+
+#### 🛠️ 发起工具调用:
+- **工具名称**: `search_param_rows` (ID: `call_01a07ea6bc337a21a54426d910acf355`)
+  ```json
+  {
+    "limit": 10,
+    "paramNames": [
+      "NpcParam"
+    ],
+    "query": "鬼刑部"
+  }
+  ```
+
+> **🛠️ 工具返回** (ToolCall ID: `call_01a07ea6bc337a21a54426d910acf355`)
+```json
+{
+  "ok": true,
+  "state": "completed",
+  "data": {
+    "items": [],
+    "record": {
+      "results": [
+        {
+          "item": {
+            "uri": "param://NPC_PARAM_ST/50800000",
+            "sourceUri": "file://param/gameparam/gameparam.parambnd.dcx",
+            "paramName": "NPC_PARAM_ST",
+            "entryName": "NpcParam.param",
+            "entryIndex": 100,
+            "rowId": 50800000,
+            "sourceHash": "6fdd0ac4c90e4a4a0ba6cc5138007588a8b353de9231b2bd27c792e6f8ed32ab",
+            "rowName": "【鬼形部",
+            "fields": [],
+            "raw": {
+              "parser": "sekiro-param-native-v1",
+              "entryIndex": 100,
+              "entryName": "NpcParam.param",
+              "rowIndex": 1463,
+              "nativeNameOffset": 1645085,
+              "nativeDataOffset": 1353152,
+              "dataLength": 896,
+              "dataHash": "0167dcfe3f4660ebc4b380d21224b1a432ceb9fa7eed5769907dfb1b3dbc4cf4",
+              "confidence": "high"
+            }
+          },
+          "score": 27,
+          "highlights": [
+            "鬼",
+            "部",
+            "鬼形部",
+            "形"
+          ]
+        },
+        {
+          "item": {
+            "uri": "param://NPC_PARAM_ST/98500019",
+            "sourceUri": "file://param/gameparam/gameparam.parambnd.dcx",
+            "paramName": "NPC_PARAM_ST",
+            "entryName": "NpcParam.param",
+            "entryIndex": 100,
+            "rowId": 98500019,
+            "sourceHash": "6fdd0ac4c90e4a4a0ba6cc5138007588a8b353de9231b2bd27c792e6f8ed32ab",
+            "rowName": "诅咒附魔二队怨恨鬼刑部",
+            "fields": [],
+            "raw": {
+              "parser": "sekiro-param-native-v1",
+              "entryIndex": 100,
+              "entryName": "NpcParam.param",
+              "rowIndex": 1744,
+              "nativeNameOffset": 1650245,
+              "nativeDataOffset": 1604928,
+              "dataLength": 896,
+              "dataHash": "447d0ef7ed5481da5e31fca57f3eefc4c95cab115af3059095004ec2d49431a3",
+              "confidence": "high"
+            }
+          },
+          "score": 24,
+          "highlights": [
+            "鬼刑部",
+            "鬼",
+            "部"
+          ]
+        },
+        {
+          "item": {
+            "uri": "param://NPC_PARAM_ST/17006050",
+            "sourceUri": "file://param/gameparam/gameparam.parambnd.dcx",
+            "paramName": "NPC_PARAM_ST",
+            "entryName": "NpcParam.param",
+            "entryIndex": 100,
+            "rowId": 17006050,
+            "sourceHash": "6fdd0ac4c90e4a4a0ba6cc5138007588a8b353de9231b2bd27c792e6f8ed32ab",
+            "rowName": "自訂BOSS 鬼咬眾 瀧川兵部少丞虎盛(炎) EID : 2000430",
+            "fields": [],
+            "raw": {
+              "parser": "sekiro-param-native-v1",
+              "entryIndex": 100,
+              "entryName": "NpcParam.param",
+              "rowIndex": 1350,
+              "nativeNameOffset": 1641819,
+              "nativeDataOffset": 1251904,
+              "dataLength": 896,
+              "dataHash": "88cbffaf1fd69f57c7375be85b8f4ec796289eb206d4115058470910bb8a388b",
+              "confidence": "high"
+            }
+          },
+          "score": 18,
+          "highlights": [
+            "鬼",
+            "部"
+          ]
+        },
+        {
+          "item": {
+            "uri": "param://NPC_PARAM_ST/17006060",
+            "sourceUri": "file://param/gameparam/gameparam.parambnd.dcx",
+            "paramName": "NPC_PARAM_ST",
+            "entryName": "NpcParam.param",
+            "entryIndex": 100,
+            "rowId": 17006060,
+            "sourceHash": "6fdd0ac4c90e4a4a0ba6cc5138007588a8b353de9231b2bd27c792e6f8ed32ab",
+            "rowName": "自訂BOSS 鬼咬眾 天童治部少丞重長(咒) EID : 2000433",
+            "fields": [],
+            "raw": {
+              "parser": "sekiro-param-native-v1",
+              "entryIndex": 100,
+              "entryName": "NpcParam.param",
+              "rowIndex": 1351,
+              "nativeNameOffset": 1641893,
+              "nativeDataOffset": 1252800,
+              "dataLength": 896,
+              "dataHash": "e0f438cde200682e4e037597d1eba41a027e118bf4ffbda4c04daa5ffb20ee4a",
+              "confidence": "high"
+            }
+          },
+          "score": 18,
+          "highlights": [
+            "鬼",
+            "部"
+          ]
+        },
+        {
+          "item": {
+            "uri": "param://NPC_PARAM_ST/17009541",
+            "sourceUri": "file://param/gameparam/gameparam.parambnd.dcx",
+            "paramName": "NPC_PARAM_ST",
+            "entryName": "NpcParam.param",
+            "entryIndex": 100,
+            "rowId": 17009541,
+            "sourceHash": "6fdd0ac4c90e4a4a0ba6cc5138007588a8b353de9231b2bd27c792e6f8ed32ab",
+            "rowName": "自訂BOSS 餘燼 鬼咬眾 瀧川兵部少丞虎盛(炎) EID : 1300881",
+            "fields": [],
+            "raw": {
+              "parser": "sekiro-param-native-v1",
+              "entryIndex": 100,
+              "entryName": "NpcParam.param",
+              "rowIndex": 1380,
+              "nativeNameOffset": 1642875,
+              "nativeDataOffset": 1278784,
+              "dataLength": 896,
+              "dataHash": "1278995638de0932ade006806a165f6c535a8cbefc40f09c34a1e28b2f3ea4ff",
+              "confidence": "high"
+            }
+          },
+          "score": 18,
+          "highlights": [
+            "鬼",
+            "部"
+          ]
+        },
+        {
+          "item": {
+            "uri": "param://NPC_PARAM_ST/17009542",
+            "sourceUri": "file://param/gameparam/gameparam.parambnd.dcx",
+            "paramName": "NPC_PARAM_ST",
+            "entryName": "NpcParam.param",
+            "entryIndex": 100,
+            "rowId": 17009542,
+            "sourceHash": "6fdd0ac4c90e4a4a0ba6cc5138007588a8b353de9231b2bd27c792e6f8ed32ab",
+            "rowName": "自訂BOSS 餘燼 鬼咬眾 天童治部少丞重長(咒) EID : 1300882",
+            "fields": [],
+            "raw": {
+              "parser": "sekiro-param-native-v1",
+              "entryIndex": 100,
+              "entryName": "NpcParam.param",
+              "rowIndex": 1381,
+              "nativeNameOffset": 1642955,
+              "nativeDataOffset": 1279680,
+              "dataLength": 896,
+              "dataHash": "a9e5ffde5d67225c13863968aabf025ba4af105256b326312e992f99c04e8e7a",
+              "confidence": "high"
+            }
+          },
+          "score": 18,
+          "highlights": [
+            "鬼",
+            "部"
+          ]
+        },
+        {
+          "item": {
+            "uri": "param://NPC_PARAM_ST/14505700",
+            "sourceUri": "file://param/gameparam/gameparam.parambnd.dcx",
+            "paramName": "NPC_PARAM_ST",
+            "entryName": "NpcParam.param",
+            "entryIndex": 100,
+            "rowId": 14505700,
+            "sourceHash": "6fdd0ac4c90e4a4a0ba6cc5138007588a8b353de9231b2bd27c792e6f8ed32ab",
+            "rowName": "自訂BOSS 四鬼 隱形鬼 EID: 1500814",
+            "fields": [],
+            "raw": {
+              "parser": "sekiro-param-native-v1",
+              "entryIndex": 100,
+              "entryName": "NpcParam.param",
+              "rowIndex": 900,
+              "nativeNameOffset": 1636143,
+              "nativeDataOffset": 848704,
+              "dataLength": 896,
+              "dataHash": "db92b48f27a2d31b750430675c333360f40d1707fad635566342b1788ee24a77",
+              "confidence": "high"
+            }
+          },
+          "score": 12,
+          "highlights": [
+            "鬼",
+            "形"
+          ]
+        },
+        {
+          "item": {
+            "uri": "param://NPC_PARAM_ST/10205000",
+            "sourceUri": "file://param/gameparam/gameparam.parambnd.dcx",
+            "paramName": "NPC_PARAM_ST",
+            "entryName": "NpcParam.param",
+            "entryIndex": 100,
+            "rowId": 10205000,
+            "sourceHash": "6fdd0ac4c90e4a4a0ba6cc5138007588a8b353de9231b2bd27c792e6f8ed32ab",
+            "rowName": "【武士大将  精英  同苇名七本枪 鬼庭主马雅次一同出现那里",
+            "fields": [],
+            "raw": {
+              "parser": "sekiro-param-native-v1",
+              "entryIndex": 100,
+              "entryName": "NpcParam.param",
+              "rowIndex": 165,
+              "nativeNameOffset": 1620497,
+              "nativeDataOffset": 190144,
+              "dataLength": 896,
+              "dataHash": "47d3e2b2153cd4d02e8be3519f35310609a0f4703dc78a812a20e94185809b0a",
+              "confidence": "high"
+            }
+          },
+          "score": 9,
+          "highlights": [
+            "鬼",
+            "庭",
+            "雅"
+          ]
+        },
+        {
+          "item": {
+            "uri": "param://NPC_PARAM_ST/10211000",
+            "sourceUri": "file://param/gameparam/gameparam.parambnd.dcx",
+            "paramName": "NPC_PARAM_ST",
+            "entryName": "NpcParam.param",
+            "entryIndex": 100,
+            "rowId": 10211000,
+            "sourceHash": "6fdd0ac4c90e4a4a0ba6cc5138007588a8b353de9231b2bd27c792e6f8ed32ab",
+            "rowName": "BOSS 鬼庭主马雅次",
+            "fields": [],
+            "raw": {
+              "parser": "sekiro-param-native-v1",
+              "entryIndex": 100,
+              "entryName": "NpcParam.param",
+              "rowIndex": 188,
+              "nativeNameOffset": 1621145,
+              "nativeDataOffset": 210752,
+              "dataLength": 896,
+              "dataHash": "399ff2c02a0d4da7b02fd1ffc0977d8a2ea08190fa1d7733117a6cc004bb63e7",
+              "confidence": "high"
+            }
+          },
+          "score": 9,
+          "highlights": [
+            "鬼",
+            "庭",
+            "雅"
+          ]
+        },
+        {
+          "item": {
+            "uri": "param://NPC_PARAM_ST/10211005",
+            "sourceUri": "file://param/gameparam/gameparam.parambnd.dcx",
+            "paramName": "NPC_PARAM_ST",
+            "entryName": "NpcParam.param",
+            "entryIndex": 100,
+            "rowId": 10211005,
+            "sourceHash": "6fdd0ac4c90e4a4a0ba6cc5138007588a8b353de9231b2bd27c792e6f8ed32ab",
+            "rowName": "自訂BOSS 嗟怨武者 山城刑部大輔重國  EID : 1120886",
+            "fields": [],
+            "raw": {
+              "parser": "sekiro-param-native-v1",
+              "entryIndex": 100,
+              "entryName": "NpcParam.param",
+              "rowIndex": 189,
+              "nativeNameOffset": 1621169,
+              "nativeDataOffset": 211648,
+              "dataLength": 896,
+              "dataHash": "105296bddc08104f7a76e6c85142c131159fbb0de80ca39a2b81cd9c51b39ae7",
+              "confidence": "high"
+            }
+          },
+          "score": 6,
+          "highlights": [
+            "刑",
+            "部"
+          ]
+        }
+      ],
+      "searchId": "search-e683aa81-2fd1-4383-bdbd-e60b35db4e95"
+    },
+    "scalar": null,
+    "summary": null
+  },
+  "pagination": {
+    "originalChars": 7013,
+    "returnedCount": null,
+    "totalCount": null,
+    "total": null,
+    "offset": null,
+    "limit": null,
+    "truncated": false,
+    "cursors": {}
+  },
+  "completeness": "complete",
+  "truncated": false,
+  "identifiers": [
+    "uri=param://NPC_PARAM_ST/50800000",
+    "sourceUri=file://param/gameparam/gameparam.parambnd.dcx",
+    "rowId=50800000",
+    "uri=param://NPC_PARAM_ST/98500019",
+    "rowId=98500019",
+    "uri=param://NPC_PARAM_ST/17006050",
+    "rowId=17006050",
+    "uri=param://NPC_PARAM_ST/17006060",
+    "rowId=17006060",
+    "uri=param://NPC_PARAM_ST/17009541",
+    "rowId=17009541",
+    "uri=param://NPC_PARAM_ST/17009542",
+    "rowId=17009542",
+    "uri=param://NPC_PARAM_ST/14505700",
+    "rowId=14505700",
+    "uri=param://NPC_PARAM_ST/10205000",
+    "rowId=10205000",
+    "uri=param://NPC_PARAM_ST/10211000",
+    "rowId=10211000",
+    "uri=param://NPC_PARAM_ST/10211005",
+    "rowId=10211005",
+    "searchId=search-e683aa81-2fd1-4383-bdbd-e60b35db4e95"
+  ],
+  "evidence": {
+    "sourceUris": [
+      "file://param/gameparam/gameparam.parambnd.dcx"
+    ],
+    "sourceHashes": [
+      "6fdd0ac4c90e4a4a0ba6cc5138007588a8b353de9231b2bd27c792e6f8ed32ab"
+    ],
+    "sourceRevisions": [],
+    "status": "candidate",
+    "kind": "discovery",
+    "nextActions": [
+      "这是 PARAM 候选；优先使用返回的 paramName、rowName、fieldId、字段显示名/备注和 sourceUri。",
+      "如果结果没有 fieldId，下一步先用同一 table/rowIds 调用 search_param_fields，并使用 health/hp、elite/boss、hostile/team/target、lightning/effect 或 drop/reward/item 等字段语义词；拿到真实 fieldId 后再调用 read_param_fields。"
+    ],
+    "repeatedQuery": false
+  }
+}
+```
+
+### 🤖 助手响应 (Step 6)
+
+已定位鬼形部候选行，现在补齐字段定义并定位事件文件。
+
+#### 🛠️ 发起工具调用:
+- **工具名称**: `search_param_fields` (ID: `call_01a07ea7047a70e0ae642456edfba812`)
+  ```json
+  {
+    "limit": 20,
+    "query": "npcType ninsatuNum itemLot hp soul boss",
+    "rowIds": [
+      50800000
+    ],
+    "table": "NPC_PARAM_ST"
+  }
+  ```
+- **工具名称**: `search_resources` (ID: `call_01a07ea708b27720ab21423e9a2efc7e`)
+  ```json
+  {
+    "limit": 10,
+    "query": "m11_00_00_00.emevd.dcx"
+  }
+  ```
+
+> **🛠️ 工具返回** (ToolCall ID: `call_01a07ea7047a70e0ae642456edfba812`)
+```json
+{
+  "ok": true,
+  "state": "completed",
+  "data": {
+    "items": [],
+    "record": {
+      "ok": true,
+      "containerPath": "C:\\Users\\ASUS\\AppData\\Local\\Temp\\soulforge-real-agent-2026-09-08T01-32-09-143Z-YZBl9H\\overlay\\param\\gameparam\\gameparam.parambnd.dcx",
+      "table": "NpcParam",
+      "entryName": "N:\\NTC\\data\\Target\\INTERROOT_win64\\param\\GameParam\\NpcParam.param",
+      "entryIndex": 100,
+      "rowIds": [
+        50800000
+      ],
+      "sourceHash": "6fdd0ac4c90e4a4a0ba6cc5138007588a8b353de9231b2bd27c792e6f8ed32ab",
+      "sourceRevision": 1788456409864.9424,
+      "fields": [
+        {
+          "fieldId": "ninsatsuResourceItemLotId_1",
+          "name": "忍殺時リソースアイテム抽選パラメータID_1",
+          "type": "s32",
+          "description": "Resource Item dropped when the Npc recieves ninsatsu damage (deathblows)",
+          "refs": "ResourceItemLotParam"
+        },
+        {
+          "fieldId": "ninsatsuResourceItemLotId_2",
+          "name": "忍殺時リソースアイテム抽選パラメータID_2",
+          "type": "s32",
+          "description": "Resource Item dropped when the Npc recieves ninsatsu damage (deathblows)",
+          "refs": "ResourceItemLotParam"
+        },
+        {
+          "fieldId": "damageDropItemLotId_1",
+          "name": "ダメージドロップアイテム抽選ID_1",
+          "type": "s32",
+          "description": "ItemLot rolled when hit with Golden Vortex",
+          "refs": "ItemLotParam"
+        },
+        {
+          "fieldId": "damageDropItemLotId_2",
+          "name": "ダメージドロップアイテム抽選ID_2",
+          "type": "s32",
+          "description": "ItemLot rolled when hit with Golden Vortex",
+          "refs": "ItemLotParam"
+        },
+        {
+          "fieldId": "itemLotId_1",
+          "name": "アイテム抽選ID_1",
+          "type": "s32",
+          "description": "Item Lottery that is rolled whenever this Npc is killed",
+          "refs": "ItemLotParam"
+        },
+        {
+          "fieldId": "itemLotId_2",
+          "name": "アイテム抽選ID_2",
+          "type": "s32",
+          "description": "Item Lottery that is rolled whenever this Npc is killed",
+          "refs": "ItemLotParam"
+        },
+        {
+          "fieldId": "itemLotId_3",
+          "name": "アイテム抽選ID_3",
+          "type": "s32",
+          "description": "Item Lottery that is rolled whenever this Npc is killed",
+          "refs": "ItemLotParam"
+        },
+        {
+          "fieldId": "itemLotId_4",
+          "name": "アイテム抽選ID_4",
+          "type": "s32",
+          "description": "Item Lottery that is rolled whenever this Npc is killed",
+          "refs": "ItemLotParam"
+        },
+        {
+          "fieldId": "itemLotId_5",
+          "name": "アイテム抽選ID_5",
+          "type": "s32",
+          "description": "Item Lottery that is rolled whenever this Npc is killed",
+          "refs": "ItemLotParam"
+        },
+        {
+          "fieldId": "itemLotId_6",
+          "name": "アイテム抽選ID_6",
+          "type": "s32",
+          "description": "Item Lottery that is rolled whenever this Npc is killed",
+          "refs": "ItemLotParam"
+        },
+        {
+          "fieldId": "lifeCountItemLotId",
+          "name": "残機用アイテム抽選ID",
+          "type": "s32",
+          "description": "Specify the lottery ID of the remaining life item to be obtained upon death"
+        },
+        {
+          "fieldId": "resourceItemLotParamId",
+          "name": "リソースアイテム抽選パラメータID_1",
+          "type": "s32",
+          "description": "Item Lottery that is rolled when the Npc is killed (for Resource Items)",
+          "refs": "ResourceItemLotParam"
+        },
+        {
+          "fieldId": "resourceItemLotParamId2",
+          "name": "リソースアイテム抽選パラメータID_2",
+          "type": "s32",
+          "description": "Item Lottery that is rolled when the Npc is killed (for Resource Items)",
+          "refs": "ResourceItemLotParam"
+        },
+        {
+          "fieldId": "ninsatuNum",
+          "name": "必要忍殺回数",
+          "type": "s8",
+          "description": "Amount of healthbars"
+        },
+        {
+          "fieldId": "hpEstusFlaskLotPoint",
+          "name": "HPエスト瓶回復 抽選確率",
+          "type": "u16",
+          "description": "Chance for Hp Flasks to drop"
+        },
+        {
+          "fieldId": "hpEstusFlaskRecovery_failedLotPointAdd",
+          "name": "HPエスト瓶回復 落選時 加算抽選確率",
+          "type": "u16",
+          "description": "If the Flask Lot isn't successful add this amount to hpEstusFlaskLotPoint"
+        },
+        {
+          "fieldId": "estusFlaskLotPoint",
+          "name": "HP&MPエスト瓶回復 抽選確率",
+          "type": "u16",
+          "description": "Chance for both Hp and Fp Flasks to drop"
+        },
+        {
+          "fieldId": "damageDropSoul",
+          "name": "ダメージドロップソウル",
+          "type": "u32",
+          "description": "Amount of Sen dropped when hit with Golden Vortex"
+        },
+        {
+          "fieldId": "estusFlaskRecovery_failedLotPointAdd",
+          "name": "HP&MPエスト瓶回復 落選時 加算抽選確率",
+          "type": "u16",
+          "description": "If the Flask Lot isn't successful add this amount to estusFlaskLotPoint"
+        },
+        {
+          "fieldId": "isSoulGetByBoss",
+          "name": "ソウルはボス入手か",
+          "type": "u8",
+          "description": "ソウルはボス入手か"
+        }
+      ],
+      "diagnostics": [
+        {
+          "severity": "info",
+          "code": "PARAM_DOCUMENT_ROUNDTRIP_SEMANTIC_VERIFIED",
+          "message": "PARAM 无修改往返字节级一致。"
+        },
+        {
+          "severity": "info",
+          "code": "PARAM_DOCUMENT_SESSION",
+          "message": "session 2da5f4760818e58586cbfbf1eb8cac73 gen 0 parse 1"
+        }
+      ],
+      "searchId": "search-65bb9aaa-1070-4949-85eb-9e48e2ced093"
+    },
+    "scalar": null,
+    "summary": null
+  },
+  "pagination": {
+    "originalChars": 4341,
+    "returnedCount": null,
+    "totalCount": null,
+    "total": null,
+    "offset": null,
+    "limit": null,
+    "truncated": false,
+    "cursors": {}
+  },
+  "completeness": "complete",
+  "truncated": false,
+  "identifiers": [
+    "fieldId=ninsatsuResourceItemLotId_1",
+    "fieldId=ninsatsuResourceItemLotId_2",
+    "fieldId=damageDropItemLotId_1",
+    "fieldId=damageDropItemLotId_2",
+    "fieldId=itemLotId_1",
+    "fieldId=itemLotId_2",
+    "fieldId=itemLotId_3",
+    "fieldId=itemLotId_4",
+    "fieldId=itemLotId_5",
+    "fieldId=itemLotId_6",
+    "fieldId=lifeCountItemLotId",
+    "fieldId=resourceItemLotParamId",
+    "fieldId=resourceItemLotParamId2",
+    "fieldId=ninsatuNum",
+    "fieldId=hpEstusFlaskLotPoint",
+    "fieldId=hpEstusFlaskRecovery_failedLotPointAdd",
+    "fieldId=estusFlaskLotPoint",
+    "fieldId=damageDropSoul",
+    "fieldId=estusFlaskRecovery_failedLotPointAdd",
+    "fieldId=isSoulGetByBoss",
+    "searchId=search-65bb9aaa-1070-4949-85eb-9e48e2ced093"
+  ],
+  "evidence": {
+    "sourceUris": [],
+    "sourceHashes": [
+      "6fdd0ac4c90e4a4a0ba6cc5138007588a8b353de9231b2bd27c792e6f8ed32ab"
+    ],
+    "sourceRevisions": [
+      1788456409864.9424
+    ],
+    "status": "candidate",
+    "kind": "discovery",
+    "nextActions": [
+      "这是授信 PARAM 字段元数据候选；使用返回的真实 fieldId 继续 read_param_fields。",
+      "如果 fields 为空，不能调用 read_param_fields；改用 health/hp、elite/boss、hostile/team/target、lightning/effect 或 drop/reward/item 等字段语义词重新检索。",
+      "本工具不读取或写入字段值，不能替代原生字段读取。"
+    ],
+    "repeatedQuery": false
+  }
+}
+```
+
+> **🛠️ 工具返回** (ToolCall ID: `call_01a07ea708b27720ab21423e9a2efc7e`)
+```json
+{
+  "ok": true,
+  "state": "completed",
+  "data": {
+    "items": [],
+    "record": {
+      "results": [
+        {
+          "item": {
+            "id": "file:///C:/Users/ASUS/AppData/Local/Temp/soulforge-real-agent-2026-09-08T01-32-09-143Z-YZBl9H/overlay:event/m11_00_00_00.emevd.dcx",
+            "sourceUri": "file://event/m11_00_00_00.emevd.dcx",
+            "sourcePath": "C:\\Users\\ASUS\\AppData\\Local\\Temp\\soulforge-real-agent-2026-09-08T01-32-09-143Z-YZBl9H\\overlay\\event\\m11_00_00_00.emevd.dcx",
+            "relativePath": "event/m11_00_00_00.emevd.dcx",
+            "resourceKind": "event",
+            "diagnostics": []
+          },
+          "score": 9072,
+          "highlights": [
+            "m11",
+            "00",
+            "emevd",
+            "dcx"
+          ]
+        },
+        {
+          "item": {
+            "id": "file:///C:/Users/ASUS/AppData/Local/Temp/soulforge-real-agent-2026-09-08T01-32-09-143Z-YZBl9H/overlay:event/m11_01_00_00.emevd.dcx",
+            "sourceUri": "file://event/m11_01_00_00.emevd.dcx",
+            "sourcePath": "C:\\Users\\ASUS\\AppData\\Local\\Temp\\soulforge-real-agent-2026-09-08T01-32-09-143Z-YZBl9H\\overlay\\event\\m11_01_00_00.emevd.dcx",
+            "relativePath": "event/m11_01_00_00.emevd.dcx",
+            "resourceKind": "event",
+            "diagnostics": []
+          },
+          "score": 72,
+          "highlights": [
+            "m11",
+            "00",
+            "emevd",
+            "dcx"
+          ]
+        },
+        {
+          "item": {
+            "id": "file:///C:/Users/ASUS/AppData/Local/Temp/soulforge-real-agent-2026-09-08T01-32-09-143Z-YZBl9H/overlay:event/m11_02_00_00.emevd.dcx",
+            "sourceUri": "file://event/m11_02_00_00.emevd.dcx",
+            "sourcePath": "C:\\Users\\ASUS\\AppData\\Local\\Temp\\soulforge-real-agent-2026-09-08T01-32-09-143Z-YZBl9H\\overlay\\event\\m11_02_00_00.emevd.dcx",
+            "relativePath": "event/m11_02_00_00.emevd.dcx",
+            "resourceKind": "event",
+            "diagnostics": []
+          },
+          "score": 72,
+          "highlights": [
+            "m11",
+            "00",
+            "emevd",
+            "dcx"
+          ]
+        },
+        {
+          "item": {
+            "id": "file:///C:/Users/ASUS/AppData/Local/Temp/soulforge-real-agent-2026-09-08T01-32-09-143Z-YZBl9H/overlay:event/m11_02_54_00.emevd.dcx",
+            "sourceUri": "file://event/m11_02_54_00.emevd.dcx",
+            "sourcePath": "C:\\Users\\ASUS\\AppData\\Local\\Temp\\soulforge-real-agent-2026-09-08T01-32-09-143Z-YZBl9H\\overlay\\event\\m11_02_54_00.emevd.dcx",
+            "relativePath": "event/m11_02_54_00.emevd.dcx",
+            "resourceKind": "event",
+            "diagnostics": []
+          },
+          "score": 72,
+          "highlights": [
+            "m11",
+            "00",
+            "emevd",
+            "dcx"
+          ]
+        },
+        {
+          "item": {
+            "id": "file:///C:/Users/ASUS/AppData/Local/Temp/soulforge-real-agent-2026-09-08T01-32-09-143Z-YZBl9H/overlay:event/m10_00_00_00.emevd.dcx",
+            "sourceUri": "file://event/m10_00_00_00.emevd.dcx",
+            "sourcePath": "C:\\Users\\ASUS\\AppData\\Local\\Temp\\soulforge-real-agent-2026-09-08T01-32-09-143Z-YZBl9H\\overlay\\event\\m10_00_00_00.emevd.dcx",
+            "relativePath": "event/m10_00_00_00.emevd.dcx",
+            "resourceKind": "event",
+            "diagnostics": []
+          },
+          "score": 60,
+          "highlights": [
+            "00",
+            "emevd",
+            "dcx"
+          ]
+        },
+        {
+          "item": {
+            "id": "file:///C:/Users/ASUS/AppData/Local/Temp/soulforge-real-agent-2026-09-08T01-32-09-143Z-YZBl9H/overlay:event/m10_00_50_60.emevd.dcx",
+            "sourceUri": "file://event/m10_00_50_60.emevd.dcx",
+            "sourcePath": "C:\\Users\\ASUS\\AppData\\Local\\Temp\\soulforge-real-agent-2026-09-08T01-32-09-143Z-YZBl9H\\overlay\\event\\m10_00_50_60.emevd.dcx",
+            "relativePath": "event/m10_00_50_60.emevd.dcx",
+            "resourceKind": "event",
+            "diagnostics": []
+          },
+          "score": 60,
+          "highlights": [
+            "00",
+            "emevd",
+            "dcx"
+          ]
+        }
+      ],
+      "resultsReturnedCount": 6,
+      "resultsTotalCount": 10,
+      "resultsTruncated": true,
+      "searchId": "search-92ea518c-1b38-4a27-af2e-cbb9e7cb10f8"
+    },
+    "scalar": null,
+    "summary": "工具 search_resources 输出过大，已返回摘要；请使用返回的 ID 或游标继续分页查询。"
+  },
+  "pagination": {
+    "originalChars": 10685,
+    "returnedCount": null,
+    "totalCount": null,
+    "total": null,
+    "offset": null,
+    "limit": null,
+    "truncated": false,
+    "cursors": {}
+  },
+  "completeness": "summary_only",
+  "truncated": true,
+  "identifiers": [
+    "id=file:///C:/Users/ASUS/AppData/Local/Temp/soulforge-real-agent-2026-09-08T01-32-09-143Z-YZBl9H/overlay:event/m11_00_00_00.emevd.dcx",
+    "workspaceId=file:///C:/Users/ASUS/AppData/Local/Temp/soulforge-real-agent-2026-09-08T01-32-09-143Z-YZBl9H/overlay",
+    "sourceUri=file://event/m11_00_00_00.emevd.dcx",
+    "id=file:///C:/Users/ASUS/AppData/Local/Temp/soulforge-real-agent-2026-09-08T01-32-09-143Z-YZBl9H/overlay:event/m11_01_00_00.emevd.dcx",
+    "sourceUri=file://event/m11_01_00_00.emevd.dcx",
+    "id=file:///C:/Users/ASUS/AppData/Local/Temp/soulforge-real-agent-2026-09-08T01-32-09-143Z-YZBl9H/overlay:event/m11_02_00_00.emevd.dcx",
+    "sourceUri=file://event/m11_02_00_00.emevd.dcx",
+    "id=file:///C:/Users/ASUS/AppData/Local/Temp/soulforge-real-agent-2026-09-08T01-32-09-143Z-YZBl9H/overlay:event/m11_02_54_00.emevd.dcx",
+    "sourceUri=file://event/m11_02_54_00.emevd.dcx",
+    "id=file:///C:/Users/ASUS/AppData/Local/Temp/soulforge-real-agent-2026-09-08T01-32-09-143Z-YZBl9H/overlay:event/m10_00_00_00.emevd.dcx",
+    "sourceUri=file://event/m10_00_00_00.emevd.dcx",
+    "id=file:///C:/Users/ASUS/AppData/Local/Temp/soulforge-real-agent-2026-09-08T01-32-09-143Z-YZBl9H/overlay:event/m10_00_50_60.emevd.dcx"
+  ],
+  "evidence": {
+    "sourceUris": [
+      "file://event/m11_00_00_00.emevd.dcx",
+      "file://event/m11_01_00_00.emevd.dcx",
+      "file://event/m11_02_00_00.emevd.dcx",
+      "file://event/m11_02_54_00.emevd.dcx",
+      "file://event/m10_00_00_00.emevd.dcx",
+      "file://event/m10_00_50_60.emevd.dcx",
+      "file://event/m10_00_50_61.emevd.dcx",
+      "file://event/m10_00_50_90.emevd.dcx",
+      "file://event/m13_00_00_00.emevd.dcx",
+      "file://event/m15_00_00_00.emevd.dcx"
+    ],
+    "sourceHashes": [],
+    "sourceRevisions": [],
+    "status": "candidate",
+    "kind": "discovery",
+    "nextActions": [
+      "候选结果不是写入依据；使用返回的稳定 ID/sourceUri 转入结构化查询或原生读取。"
+    ],
+    "repeatedQuery": false
+  }
+}
+```
+
+### 🤖 助手响应 (Step 7)
+
+只读回归三项核验排队：先一次读齐八个 PARAM 字段，再核对事件分页与统计。
+
+#### 🛠️ 发起工具调用:
+- **工具名称**: `read_param_fields` (ID: `call_01a07ea7682977618b13e29f8d1812ab`)
+  ```json
+  {
+    "fieldIds": [
+      "npcType",
+      "ninsatuNum",
+      "itemLotId_1",
+      "itemLotId_2",
+      "itemLotId_3",
+      "hp",
+      "isSoulGetByBoss",
+      "getSoul"
+    ],
+    "rowIds": [
+      50800000
+    ],
+    "table": "NpcParam"
+  }
+  ```
+
+> **🛠️ 工具返回** (ToolCall ID: `call_01a07ea7682977618b13e29f8d1812ab`)
+```json
+{
+  "ok": true,
+  "state": "completed",
+  "data": {
+    "items": [],
+    "record": {
+      "fields": [
+        {
+          "rowId": 50800000,
+          "entryName": "N:\\NTC\\data\\Target\\INTERROOT_win64\\param\\GameParam\\NpcParam.param",
+          "entryIndex": 100,
+          "rowName": "【鬼形部",
+          "fieldId": "npcType",
+          "description": "NPCの種類.ザコ敵/ボス敵が区別されていればOK",
+          "sourceHash": "6fdd0ac4c90e4a4a0ba6cc5138007588a8b353de9231b2bd27c792e6f8ed32ab",
+          "sourceRevision": 1788456409864.9424,
+          "value": 0
+        },
+        {
+          "rowId": 50800000,
+          "entryName": "N:\\NTC\\data\\Target\\INTERROOT_win64\\param\\GameParam\\NpcParam.param",
+          "entryIndex": 100,
+          "rowName": "【鬼形部",
+          "fieldId": "ninsatuNum",
+          "description": "Amount of healthbars",
+          "sourceHash": "6fdd0ac4c90e4a4a0ba6cc5138007588a8b353de9231b2bd27c792e6f8ed32ab",
+          "sourceRevision": 1788456409864.9424,
+          "value": 3
+        },
+        {
+          "rowId": 50800000,
+          "entryName": "N:\\NTC\\data\\Target\\INTERROOT_win64\\param\\GameParam\\NpcParam.param",
+          "entryIndex": 100,
+          "rowName": "【鬼形部",
+          "fieldId": "itemLotId_1",
+          "description": "Item Lottery that is rolled whenever this Npc is killed",
+          "sourceHash": "6fdd0ac4c90e4a4a0ba6cc5138007588a8b353de9231b2bd27c792e6f8ed32ab",
+          "sourceRevision": 1788456409864.9424,
+          "value": -1
+        },
+        {
+          "rowId": 50800000,
+          "entryName": "N:\\NTC\\data\\Target\\INTERROOT_win64\\param\\GameParam\\NpcParam.param",
+          "entryIndex": 100,
+          "rowName": "【鬼形部",
+          "fieldId": "itemLotId_2",
+          "description": "Item Lottery that is rolled whenever this Npc is killed",
+          "sourceHash": "6fdd0ac4c90e4a4a0ba6cc5138007588a8b353de9231b2bd27c792e6f8ed32ab",
+          "sourceRevision": 1788456409864.9424,
+          "value": -1
+        },
+        {
+          "rowId": 50800000,
+          "entryName": "N:\\NTC\\data\\Target\\INTERROOT_win64\\param\\GameParam\\NpcParam.param",
+          "entryIndex": 100,
+          "rowName": "【鬼形部",
+          "fieldId": "itemLotId_3",
+          "description": "Item Lottery that is rolled whenever this Npc is killed",
+          "sourceHash": "6fdd0ac4c90e4a4a0ba6cc5138007588a8b353de9231b2bd27c792e6f8ed32ab",
+          "sourceRevision": 1788456409864.9424,
+          "value": -1
+        },
+        {
+          "rowId": 50800000,
+          "entryName": "N:\\NTC\\data\\Target\\INTERROOT_win64\\param\\GameParam\\NpcParam.param",
+          "entryIndex": 100,
+          "rowName": "【鬼形部",
+          "fieldId": "hp",
+          "description": "Base Hp",
+          "sourceHash": "6fdd0ac4c90e4a4a0ba6cc5138007588a8b353de9231b2bd27c792e6f8ed32ab",
+          "sourceRevision": 1788456409864.9424,
+          "value": 3000
+        }
+      ],
+      "fieldsReturnedCount": 6,
+      "fieldsTotalCount": 8,
+      "fieldsTruncated": true,
+      "diagnostics": [
+        {
+          "severity": "info",
+          "code": "PARAM_DOCUMENT_ROUNDTRIP_SEMANTIC_VERIFIED",
+          "message": "PARAM 无修改往返字节级一致。"
+        },
+        {
+          "severity": "info",
+          "code": "PARAM_DOCUMENT_SESSION",
+          "message": "session 2da5f4760818e58586cbfbf1eb8cac73 gen 0 parse 0"
+        }
+      ]
+    },
+    "scalar": null,
+    "summary": "工具 read_param_fields 输出过大，已返回摘要；请使用返回的 ID 或游标继续分页查询。"
+  },
+  "pagination": {
+    "originalChars": 13890,
+    "returnedCount": null,
+    "totalCount": null,
+    "total": null,
+    "offset": null,
+    "limit": null,
+    "truncated": false,
+    "cursors": {}
+  },
+  "completeness": "summary_only",
+  "truncated": true,
+  "identifiers": [
+    "rowId=50800000",
+    "fieldId=npcType",
+    "fieldId=ninsatuNum",
+    "fieldId=itemLotId_1",
+    "fieldId=itemLotId_2",
+    "fieldId=itemLotId_3",
+    "fieldId=hp",
+    "fieldId=isSoulGetByBoss",
+    "fieldId=getSoul",
+    "characterId=c5080",
+    "npcParamId=50800000",
+    "mapId=m11_00_00_00"
+  ],
+  "evidence": {
+    "sourceUris": [
+      "param://NpcParam/50800000",
+      "C:\\Users\\ASUS\\AppData\\Local\\Temp\\soulforge-real-agent-2026-09-08T01-32-09-143Z-YZBl9H\\overlay\\map\\mapstudio\\m11_00_00_00.msb.dcx",
+      "C:\\Users\\ASUS\\AppData\\Local\\Temp\\soulforge-real-agent-2026-09-08T01-32-09-143Z-YZBl9H\\overlay\\map\\mapstudio\\m13_00_00_00.msb.dcx",
+      "C:\\Users\\ASUS\\AppData\\Local\\Temp\\soulforge-real-agent-2026-09-08T01-32-09-143Z-YZBl9H\\overlay\\event\\m11_00_00_00.emevd.dcx"
+    ],
+    "sourceHashes": [
+      "6fdd0ac4c90e4a4a0ba6cc5138007588a8b353de9231b2bd27c792e6f8ed32ab"
+    ],
+    "sourceRevisions": [
+      1788456409864.9424,
+      1735948980000,
+      1741688738000,
+      1788456410220.5247
+    ],
+    "status": "native-verified",
+    "kind": "native-read",
+    "nextActions": [
+      "已取得带 sourceHash 的原生快照；写入前仍须使用该哈希和 sourceRevision 做前置条件校验。"
+    ],
+    "repeatedQuery": false,
+    "claims": [
+      {
+        "identity": {
+          "claimKind": "npcType"
+        },
+        "text": "0",
+        "observationSequence": 1788831299173,
+        "sequence": 1788831299173
+      },
+      {
+        "identity": {
+          "claimKind": "ninsatuNum"
+        },
+        "text": "3",
+        "observationSequence": 1788831299174,
+        "sequence": 1788831299174
+      },
+      {
+        "identity": {
+          "claimKind": "itemLotId_1"
+        },
+        "text": "-1",
+        "observationSequence": 1788831299175,
+        "sequence": 1788831299175
+      },
+      {
+        "identity": {
+          "claimKind": "itemLotId_2"
+        },
+        "text": "-1",
+        "observationSequence": 1788831299176,
+        "sequence": 1788831299176
+      },
+      {
+        "identity": {
+          "claimKind": "itemLotId_3"
+        },
+        "text": "-1",
+        "observationSequence": 1788831299177,
+        "sequence": 1788831299177
+      },
+      {
+        "identity": {
+          "claimKind": "hp"
+        },
+        "text": "3000",
+        "observationSequence": 1788831299178,
+        "sequence": 1788831299178
+      },
+      {
+        "identity": {
+          "claimKind": "isSoulGetByBoss"
+        },
+        "text": "0",
+        "observationSequence": 1788831299179,
+        "sequence": 1788831299179
+      },
+      {
+        "identity": {
+          "claimKind": "getSoul"
+        },
+        "text": "0",
+        "observationSequence": 1788831299180,
+        "sequence": 1788831299180
+      }
+    ],
+    "claimDefaults": {
+      "version": {
+        "outerHash": "6fdd0ac4c90e4a4a0ba6cc5138007588a8b353de9231b2bd27c792e6f8ed32ab",
+        "revision": 1788456409864.9424
+      },
+      "versionState": "current",
+      "authorityClass": "native",
+      "authority": 3,
+      "relevance": 0,
+      "required": false,
+      "identity": {
+        "workspaceId": "file:///C:/Users/ASUS/AppData/Local/Temp/soulforge-real-agent-2026-09-08T01-32-09-143Z-YZBl9H/overlay",
+        "canonicalOuterId": "C:\\Users\\ASUS\\AppData\\Local\\Temp\\soulforge-real-agent-2026-09-08T01-32-09-143Z-YZBl9H\\overlay\\param\\gameparam\\gameparam.parambnd.dcx",
+        "childChain": [
+          "N:\\NTC\\data\\Target\\INTERROOT_win64\\param\\GameParam\\NpcParam.param"
+        ],
+        "domain": "param",
+        "namespace": "NpcParam",
+        "objectHandle": "50800000"
+      }
+    }
+  }
+}
+```
+
+### 🤖 助手响应 (Step 8)
+
+PARAM 八字段已一次读齐且有截断提示；现在继续核对事件分页与统计。
+
+#### 🛠️ 发起工具调用:
+- **工具名称**: `read_emevd_outline` (ID: `call_01a07ea793c17681b2e4784a852295ab`)
+  ```json
+  {
+    "file": "file://event/m11_00_00_00.emevd.dcx",
+    "limit": 8,
+    "offset": 0
+  }
+  ```
+
+> **🛠️ 工具返回** (ToolCall ID: `call_01a07ea793c17681b2e4784a852295ab`)
+```json
+{
+  "ok": true,
+  "state": "completed",
+  "data": {
+    "items": [],
+    "record": {
+      "ok": true,
+      "filePath": "C:\\Users\\ASUS\\AppData\\Local\\Temp\\soulforge-real-agent-2026-09-08T01-32-09-143Z-YZBl9H\\overlay\\event\\m11_00_00_00.emevd.dcx",
+      "sourceHash": "d9b69b51d1823e363adb95bbdcbb4dd0126ab868233b4075d0d48562a50303b1",
+      "events": [
+        {
+          "eventId": 0,
+          "restBehavior": 0,
+          "instructionCount": 1338
+        },
+        {
+          "eventId": 50,
+          "restBehavior": 0,
+          "instructionCount": 59
+        },
+        {
+          "eventId": 11000691,
+          "restBehavior": 1,
+          "instructionCount": 4
+        },
+        {
+          "eventId": 11000692,
+          "restBehavior": 0,
+          "instructionCount": 3
+        },
+        {
+          "eventId": 11000693,
+          "restBehavior": 1,
+          "instructionCount": 4
+        },
+        {
+          "eventId": 11000694,
+          "restBehavior": 1,
+          "instructionCount": 5
+        },
+        {
+          "eventId": 11000695,
+          "restBehavior": 1,
+          "instructionCount": 5
+        },
+        {
+          "eventId": 11000696,
+          "restBehavior": 1,
+          "instructionCount": 3
+        }
+      ],
+      "diagnostics": [
+        {
+          "severity": "info",
+          "code": "EMEVD_FULL_DOCUMENT_ASSEMBLED",
+          "message": "完整 EMEVD 文档组装完成：279 事件 / 5361 指令 / 1 页。"
+        }
+      ],
+      "total": 279,
+      "totalCount": 279,
+      "offset": 0,
+      "limit": 8,
+      "returned": 8,
+      "returnedCount": 8,
+      "truncated": true,
+      "darkScriptComplete": false,
+      "nextOffset": 8,
+      "continuationParams": {
+        "file": "file://event/m11_00_00_00.emevd.dcx",
+        "offset": 8,
+        "limit": 8
+      }
+    },
+    "scalar": null,
+    "summary": "底层工具结果已分页（total=279, offset=0, limit=8, returned=8），剩余数据需要继续请求后续窗口。"
+  },
+  "pagination": {
+    "originalChars": 3351,
+    "returnedCount": 8,
+    "totalCount": 279,
+    "total": 279,
+    "offset": 0,
+    "limit": 8,
+    "truncated": true,
+    "cursors": {},
+    "continuationParams": {
+      "instructionOffset": 8,
+      "instructionLimit": 8,
+      "offset": 8,
+      "limit": 8
+    }
+  },
+  "completeness": "windowed",
+  "truncated": true,
+  "identifiers": [
+    "eventId=0",
+    "eventId=50",
+    "eventId=11000691",
+    "eventId=11000692",
+    "eventId=11000693",
+    "eventId=11000694",
+    "eventId=11000695",
+    "eventId=11000696"
+  ],
+  "evidence": {
+    "sourceUris": [],
+    "sourceHashes": [
+      "d9b69b51d1823e363adb95bbdcbb4dd0126ab868233b4075d0d48562a50303b1"
+    ],
+    "sourceRevisions": [],
+    "status": "native-verified",
+    "kind": "native-read",
+    "nextActions": [
+      "已取得带 sourceHash 的原生快照；写入前仍须使用该哈希和 sourceRevision 做前置条件校验。"
+    ],
+    "repeatedQuery": false,
+    "claims": [
+      {
+        "identity": {
+          "objectHandle": "0"
+        },
+        "text": "{\"eventId\":0,\"restBehavior\":0,\"instructionCount\":1338}",
+        "observationSequence": 1788831311305,
+        "sequence": 1788831311305
+      },
+      {
+        "identity": {
+          "objectHandle": "50"
+        },
+        "text": "{\"eventId\":50,\"restBehavior\":0,\"instructionCount\":59}",
+        "observationSequence": 1788831311306,
+        "sequence": 1788831311306
+      },
+      {
+        "identity": {
+          "objectHandle": "11000691"
+        },
+        "text": "{\"eventId\":11000691,\"restBehavior\":1,\"instructionCount\":4}",
+        "observationSequence": 1788831311307,
+        "sequence": 1788831311307
+      },
+      {
+        "identity": {
+          "objectHandle": "11000692"
+        },
+        "text": "{\"eventId\":11000692,\"restBehavior\":0,\"instructionCount\":3}",
+        "observationSequence": 1788831311308,
+        "sequence": 1788831311308
+      },
+      {
+        "identity": {
+          "objectHandle": "11000693"
+        },
+        "text": "{\"eventId\":11000693,\"restBehavior\":1,\"instructionCount\":4}",
+        "observationSequence": 1788831311309,
+        "sequence": 1788831311309
+      },
+      {
+        "identity": {
+          "objectHandle": "11000694"
+        },
+        "text": "{\"eventId\":11000694,\"restBehavior\":1,\"instructionCount\":5}",
+        "observationSequence": 1788831311310,
+        "sequence": 1788831311310
+      },
+      {
+        "identity": {
+          "objectHandle": "11000695"
+        },
+        "text": "{\"eventId\":11000695,\"restBehavior\":1,\"instructionCount\":5}",
+        "observationSequence": 1788831311311,
+        "sequence": 1788831311311
+      },
+      {
+        "identity": {
+          "objectHandle": "11000696"
+        },
+        "text": "{\"eventId\":11000696,\"restBehavior\":1,\"instructionCount\":3}",
+        "observationSequence": 1788831311312,
+        "sequence": 1788831311312
+      }
+    ],
+    "claimDefaults": {
+      "version": {
+        "outerHash": "d9b69b51d1823e363adb95bbdcbb4dd0126ab868233b4075d0d48562a50303b1"
+      },
+      "versionState": "current",
+      "authorityClass": "native",
+      "authority": 3,
+      "relevance": 0,
+      "required": false,
+      "identity": {
+        "workspaceId": "file:///C:/Users/ASUS/AppData/Local/Temp/soulforge-real-agent-2026-09-08T01-32-09-143Z-YZBl9H/overlay",
+        "canonicalOuterId": "C:\\Users\\ASUS\\AppData\\Local\\Temp\\soulforge-real-agent-2026-09-08T01-32-09-143Z-YZBl9H\\overlay\\event\\m11_00_00_00.emevd.dcx",
+        "childChain": [
+          "root"
+        ],
+        "domain": "emevd",
+        "namespace": "emevd",
+        "claimKind": "object"
+      }
+    }
+  }
+}
+```
+
+### 🤖 助手响应 (Step 9)
+
+第一页事件已核对，继续读取第二页与工作区统计。
+
+#### 🛠️ 发起工具调用:
+- **工具名称**: `read_emevd_outline` (ID: `call_01a07ea7b97e7981a363cb16fc7cba6d`)
+  ```json
+  {
+    "file": "file://event/m11_00_00_00.emevd.dcx",
+    "limit": 8,
+    "offset": 8
+  }
+  ```
+
+> **🛠️ 工具返回** (ToolCall ID: `call_01a07ea7b97e7981a363cb16fc7cba6d`)
+```json
+{
+  "ok": true,
+  "state": "completed",
+  "data": {
+    "items": [],
+    "record": {
+      "ok": true,
+      "filePath": "C:\\Users\\ASUS\\AppData\\Local\\Temp\\soulforge-real-agent-2026-09-08T01-32-09-143Z-YZBl9H\\overlay\\event\\m11_00_00_00.emevd.dcx",
+      "sourceHash": "d9b69b51d1823e363adb95bbdcbb4dd0126ab868233b4075d0d48562a50303b1",
+      "events": [
+        {
+          "eventId": 11000697,
+          "restBehavior": 1,
+          "instructionCount": 4
+        },
+        {
+          "eventId": 11000705,
+          "restBehavior": 1,
+          "instructionCount": 6
+        },
+        {
+          "eventId": 11000706,
+          "restBehavior": 1,
+          "instructionCount": 6
+        },
+        {
+          "eventId": 11000707,
+          "restBehavior": 1,
+          "instructionCount": 6
+        },
+        {
+          "eventId": 11000708,
+          "restBehavior": 1,
+          "instructionCount": 4
+        },
+        {
+          "eventId": 11000709,
+          "restBehavior": 1,
+          "instructionCount": 3
+        },
+        {
+          "eventId": 11000710,
+          "restBehavior": 1,
+          "instructionCount": 6
+        },
+        {
+          "eventId": 11000711,
+          "restBehavior": 1,
+          "instructionCount": 4
+        }
+      ],
+      "diagnostics": [
+        {
+          "severity": "info",
+          "code": "EMEVD_FULL_DOCUMENT_ASSEMBLED",
+          "message": "完整 EMEVD 文档组装完成：279 事件 / 5361 指令 / 1 页。"
+        }
+      ],
+      "total": 279,
+      "totalCount": 279,
+      "offset": 8,
+      "limit": 8,
+      "returned": 8,
+      "returnedCount": 8,
+      "truncated": true,
+      "darkScriptComplete": false,
+      "nextOffset": 16,
+      "continuationParams": {
+        "file": "file://event/m11_00_00_00.emevd.dcx",
+        "offset": 16,
+        "limit": 8
+      }
+    },
+    "scalar": null,
+    "summary": "底层工具结果已分页（total=279, offset=8, limit=8, returned=8），剩余数据需要继续请求后续窗口。"
+  },
+  "pagination": {
+    "originalChars": 3384,
+    "returnedCount": 8,
+    "totalCount": 279,
+    "total": 279,
+    "offset": 8,
+    "limit": 8,
+    "truncated": true,
+    "cursors": {},
+    "continuationParams": {
+      "instructionOffset": 16,
+      "instructionLimit": 8,
+      "offset": 16,
+      "limit": 8
+    }
+  },
+  "completeness": "windowed",
+  "truncated": true,
+  "identifiers": [
+    "eventId=11000697",
+    "eventId=11000705",
+    "eventId=11000706",
+    "eventId=11000707",
+    "eventId=11000708",
+    "eventId=11000709",
+    "eventId=11000710",
+    "eventId=11000711"
+  ],
+  "evidence": {
+    "sourceUris": [],
+    "sourceHashes": [
+      "d9b69b51d1823e363adb95bbdcbb4dd0126ab868233b4075d0d48562a50303b1"
+    ],
+    "sourceRevisions": [],
+    "status": "native-verified",
+    "kind": "native-read",
+    "nextActions": [
+      "已取得带 sourceHash 的原生快照；写入前仍须使用该哈希和 sourceRevision 做前置条件校验。"
+    ],
+    "repeatedQuery": false,
+    "claims": [
+      {
+        "identity": {
+          "objectHandle": "11000697"
+        },
+        "text": "{\"eventId\":11000697,\"restBehavior\":1,\"instructionCount\":4}",
+        "observationSequence": 1788831320778,
+        "sequence": 1788831320778
+      },
+      {
+        "identity": {
+          "objectHandle": "11000705"
+        },
+        "text": "{\"eventId\":11000705,\"restBehavior\":1,\"instructionCount\":6}",
+        "observationSequence": 1788831320779,
+        "sequence": 1788831320779
+      },
+      {
+        "identity": {
+          "objectHandle": "11000706"
+        },
+        "text": "{\"eventId\":11000706,\"restBehavior\":1,\"instructionCount\":6}",
+        "observationSequence": 1788831320780,
+        "sequence": 1788831320780
+      },
+      {
+        "identity": {
+          "objectHandle": "11000707"
+        },
+        "text": "{\"eventId\":11000707,\"restBehavior\":1,\"instructionCount\":6}",
+        "observationSequence": 1788831320781,
+        "sequence": 1788831320781
+      },
+      {
+        "identity": {
+          "objectHandle": "11000708"
+        },
+        "text": "{\"eventId\":11000708,\"restBehavior\":1,\"instructionCount\":4}",
+        "observationSequence": 1788831320782,
+        "sequence": 1788831320782
+      },
+      {
+        "identity": {
+          "objectHandle": "11000709"
+        },
+        "text": "{\"eventId\":11000709,\"restBehavior\":1,\"instructionCount\":3}",
+        "observationSequence": 1788831320783,
+        "sequence": 1788831320783
+      },
+      {
+        "identity": {
+          "objectHandle": "11000710"
+        },
+        "text": "{\"eventId\":11000710,\"restBehavior\":1,\"instructionCount\":6}",
+        "observationSequence": 1788831320784,
+        "sequence": 1788831320784
+      },
+      {
+        "identity": {
+          "objectHandle": "11000711"
+        },
+        "text": "{\"eventId\":11000711,\"restBehavior\":1,\"instructionCount\":4}",
+        "observationSequence": 1788831320785,
+        "sequence": 1788831320785
+      }
+    ],
+    "claimDefaults": {
+      "version": {
+        "outerHash": "d9b69b51d1823e363adb95bbdcbb4dd0126ab868233b4075d0d48562a50303b1"
+      },
+      "versionState": "current",
+      "authorityClass": "native",
+      "authority": 3,
+      "relevance": 0,
+      "required": false,
+      "identity": {
+        "workspaceId": "file:///C:/Users/ASUS/AppData/Local/Temp/soulforge-real-agent-2026-09-08T01-32-09-143Z-YZBl9H/overlay",
+        "canonicalOuterId": "C:\\Users\\ASUS\\AppData\\Local\\Temp\\soulforge-real-agent-2026-09-08T01-32-09-143Z-YZBl9H\\overlay\\event\\m11_00_00_00.emevd.dcx",
+        "childChain": [
+          "root"
+        ],
+        "domain": "emevd",
+        "namespace": "emevd",
+        "claimKind": "object"
+      }
+    }
+  }
+}
+```
+
+### 🤖 助手响应 (Step 10)
+
+两页事件已对齐，正在拉取工作区统计收尾。
+
+#### 🛠️ 发起工具调用:
+- **工具名称**: `workspace_stats` (ID: `call_01a07ea7e33a73918b0c5e214b1ddece`)
+  ```json
+  {}
+  ```
+
+> **🛠️ 工具返回** (ToolCall ID: `call_01a07ea7e33a73918b0c5e214b1ddece`)
+```json
+{
+  "ok": true,
+  "state": "completed",
+  "data": {
+    "items": [],
+    "record": {
+      "files": 210,
+      "filesByKind": {
+        "event": 47,
+        "map": 12,
+        "param": 59,
+        "msg": 4,
+        "menu": 0,
+        "script": 14,
+        "action": 13,
+        "ai": 0,
+        "sfx": 0,
+        "chr": 61,
+        "obj": 0,
+        "other": 0,
+        "unknown": 0
+      },
+      "events": 279,
+      "mapEntities": 0,
+      "mapRegions": 0,
+      "paramRows": 50296,
+      "textEntries": 0,
+      "textEntriesByConfidence": {
+        "high": 0,
+        "medium": 0,
+        "low": 0,
+        "unknown": 0
+      },
+      "references": 0,
+      "coverage": [
+        {
+          "scope": "workspace",
+          "domain": "event",
+          "status": "partial",
+          "coveredResources": 1,
+          "expectedResources": 47,
+          "staleSourceCount": 0,
+          "sourceVersionCount": 47,
+          "diagnosticCount": 0,
+          "predicateCompleteness": {
+            "kind": "unknown",
+            "status": "partial",
+            "exhaustive": false
+          },
+          "detail": "summary-only"
+        },
+        {
+          "scope": "workspace",
+          "domain": "map",
+          "status": "not_indexed",
+          "coveredResources": 0,
+          "expectedResources": 12,
+          "staleSourceCount": 0,
+          "sourceVersionCount": 12,
+          "diagnosticCount": 0,
+          "predicateCompleteness": {
+            "kind": "unknown",
+            "status": "partial",
+            "exhaustive": false
+          },
+          "detail": "summary-only"
+        },
+        {
+          "scope": "workspace",
+          "domain": "param",
+          "status": "partial",
+          "coveredResources": 2,
+          "expectedResources": 59,
+          "staleSourceCount": 0,
+          "sourceVersionCount": 59,
+          "diagnosticCount": 0,
+          "predicateCompleteness": {
+            "kind": "unknown",
+            "status": "partial",
+            "exhaustive": false
+          },
+          "detail": "summary-only"
+        },
+        {
+          "scope": "workspace",
+          "domain": "msg",
+          "status": "not_indexed",
+          "coveredResources": 0,
+          "expectedResources": 4,
+          "staleSourceCount": 0,
+          "sourceVersionCount": 4,
+          "diagnosticCount": 0,
+          "predicateCompleteness": {
+            "kind": "unknown",
+            "status": "partial",
+            "exhaustive": false
+          },
+          "detail": "summary-only"
+        },
+        {
+          "scope": "workspace",
+          "domain": "action",
+          "status": "not_indexed",
+          "coveredResources": 0,
+          "expectedResources": 13,
+          "staleSourceCount": 0,
+          "sourceVersionCount": 13,
+          "diagnosticCount": 0,
+          "predicateCompleteness": {
+            "kind": "unknown",
+            "status": "partial",
+            "exhaustive": false
+          },
+          "detail": "summary-only"
+        },
+        {
+          "scope": "workspace",
+          "status": "partial",
+          "coveredResources": 3,
+          "expectedResources": 210,
+          "staleSourceCount": 0,
+          "sourceVersionCount": 210,
+          "diagnosticCount": 0,
+          "predicateCompleteness": {
+            "kind": "unknown",
+            "status": "partial",
+            "exhaustive": false
+          },
+          "detail": "summary-only"
+        }
+      ],
+      "semanticIndex": {
+        "source": "workspace-index",
+        "inMemory": {
+          "events": 279,
+          "mapEntities": 0,
+          "mapRegions": 0,
+          "paramRows": 50296,
+          "textEntries": 0,
+          "references": 0
+        },
+        "rag": {
+          "total": 210,
+          "byFamily": {
+            "file": 210,
+            "event": 0,
+            "map_entity": 0,
+            "map_region": 0,
+            "param_row": 0,
+            "text_entry": 0,
+            "tae_event": 0
+          },
+          "availability": "unavailable",
+          "diagnostics": [
+            {
+              "severity": "warning",
+              "code": "RAG_SEMANTIC_CORPUS_EMPTY",
+              "message": "RAG 语义语料为空；仅有文件目录不能用于对象定位。"
+            },
+            {
+              "severity": "warning",
+              "code": "RAG_SEMANTIC_CORPUS_EMPTY",
+              "message": "RAG 语义语料为空；仅有文件目录不能用于对象定位。"
+            }
+          ]
+        }
+      }
+    },
+    "scalar": null,
+    "summary": null
+  },
+  "pagination": {
+    "originalChars": 2657,
+    "returnedCount": null,
+    "totalCount": null,
+    "total": null,
+    "offset": null,
+    "limit": null,
+    "truncated": false,
+    "cursors": {}
+  },
+  "completeness": "complete",
+  "truncated": false,
+  "identifiers": [],
+  "evidence": {
+    "sourceUris": [],
+    "sourceHashes": [],
+    "sourceRevisions": [],
+    "status": "not_applicable",
+    "kind": "other",
+    "nextActions": [],
+    "repeatedQuery": false
+  }
+}
+```
+
+### 🤖 助手响应 (Step 11)
+
+只读回归诊断完成，未修改任何游戏资源。
+
+### 1. 鬼刑部 NpcParam 定位 + 八字段一次读取
+
+* `search_param_rows[NpcParam/鬼刑部]`：**成功**，`searchId=search-e683aa81-2fd1-4383-bdbd-e60b35db4e95`
+  * 首候选：`param://NPC_PARAM_ST/50800000`，`rowId=50800000`，`rowName=【鬼形部`（注意：原生为“形”非“刑”）
+  * `sourceHash=6fdd0ac4c90e4a4a0ba6cc5138007588a8b353de9231b2bd27c792e6f8ed32ab`
+* `search_param_fields[NPC_PARAM_ST/50800000]`：**成功**，用于确认真实 `fieldId`
+* `read_param_fields[NpcParam/50800000 × 8字段]`：**成功，但输出超限**
+  * 请求：`npcType,ninsatuNum,itemLotId_1,itemLotId_2,itemLotId_3,hp,isSoulGetByBoss,getSoul`
+  * 返回：`fieldsReturnedCount=6, fieldsTotalCount=8, fieldsTruncated=true, completeness=summary_only, truncated=true`
+  * 完整八值仍可由 `evidence.claims` 重建，原生已验证 `native-verified`：
+    * `npcType=0`
+    * `ninsatuNum=3`
+    * `itemLotId_1=-1`
+    * `itemLotId_2=-1`
+    * `itemLotId_3=-1`
+    * `hp=3000`
+    * `isSoulGetByBoss=0`
+    * `getSoul=0`
+  * `sourceHash` 与搜索一致，`sourceRevision=1788456409864.9424`
+
+### 2. m11_00_00_00.emevd.dcx 分页核对
+
+* `search_resources[m11_00_00_00.emevd.dcx]`：**成功，但输出超限**
+  * `resultsReturnedCount=6, resultsTotalCount=10, resultsTruncated=true, completeness=summary_only`
+  * 首命中：`file://event/m11_00_00_00.emevd.dcx`
+* `read_emevd_outline offset=0 limit=8`：**成功，有分页截断（预期内）**
+  * `total=279, offset=0, limit=8, returned=8, returnedCount=8, truncated=true, nextOffset=8`
+  * `sourceHash=d9b69b51d1823e363adb95bbdcbb4dd0126ab868233b4075d0d48562a50303b1`
+  * 事件：`0(1338),50(59),11000691(4),11000692(3),11000693(4),11000694(5),11000695(5),11000696(3)`
+* `read_emevd_outline offset=8 limit=8`：**成功，有分页截断（预期内）**
+  * `total=279, offset=8, limit=8, returned=8, returnedCount=8, truncated=true, nextOffset=16`
+  * `sourceHash` 与第一页一致
+  * 事件：`11000697(4),11000705(6),11000706(6),11000707(6),11000708(4),11000709(3),11000710(6),11000711(4)`
+
+两页 `offset/total/returned` 自洽，源哈希一致。
+
+### 3. workspace_stats
+
+* `workspace_stats`：**成功，无超限，`completeness=complete, truncated=false`**
+* 当前数量：
+  * `files=210`：`event 47, map 12, param 59, msg 4, script 14, action 13, chr 61`
+  * `PARAM：paramRows=50296`
+  * `MSG：textEntries=0`
+  * `RAG：total=210, byFamily{file:210}, availability=unavailable`，伴随 `RAG_SEMANTIC_CORPUS_EMPTY` 警告，仅有文件目录不能用于对象定位
+  * `events=279, mapEntities=0, mapRegions=0, references=0`
+
+三项工具调用均成功；超限仅为 `read_param_fields` 摘要截断、`search_resources` 摘要截断、`read_emevd_outline` 预期分页截断。未执行 Mod 写入，未扩大检索。
+
+
+> **耐久终态**: 步数 11, taskStatus=`completed`, finishReason=`stop`
