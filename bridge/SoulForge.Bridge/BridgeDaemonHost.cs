@@ -22,6 +22,21 @@ internal static class BridgeDaemonHost
         DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull,
         WriteIndented = false
     };
+    private const int ArtifactFrameHeadroomBytes = 4 * 1024;
+    private const int ArtifactRequestIdProbeLength = 256;
+    private static readonly int MaxArtifactBase64CharBytes = MeasureMaxArtifactBase64CharBytes();
+
+    private static int MeasureMaxArtifactBase64CharBytes()
+    {
+        const string alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/=";
+        var max = 1;
+        foreach (var character in alphabet)
+        {
+            var encoded = JsonSerializer.Serialize(character.ToString(), JsonOptions);
+            max = Math.Max(max, Encoding.UTF8.GetByteCount(encoded) - 2);
+        }
+        return max;
+    }
 
     // This is intentionally a source-visible declaration. The advertisement
     // gate reads this exact set and reconciles it with service dispatch and
@@ -553,6 +568,10 @@ internal static class BridgeDaemonHost
             payload.Command,
             payload.Options ?? default,
             work.EnqueuedTimestamp);
+        var characterTiming = CharacterTimingCollector.TryCreate(
+            payload.Command,
+            payload.Options ?? default,
+            work.EnqueuedTimestamp);
         try
         {
             if (frame.DeadlineUtc is { } deadline && deadline <= DateTimeOffset.UtcNow)
@@ -590,7 +609,8 @@ internal static class BridgeDaemonHost
                     work.OutputPath,
                     state.AllowedRoots,
                     frame.WorkspaceSessionId,
-                    mapTiming);
+                    mapTiming,
+                    characterTiming);
             }
             work.CancellationSource.Token.ThrowIfCancellationRequested();
             if (string.Equals(payload.Command, "read-map-static-geometry", StringComparison.OrdinalIgnoreCase))
@@ -611,6 +631,20 @@ internal static class BridgeDaemonHost
                         result.SourceUri,
                         mapTiming.Snapshot()));
                 }
+                result = result with
+                {
+                    Diagnostics = diagnostics.ToArray()
+                };
+            }
+            else if (string.Equals(payload.Command, "read-chrbnd-flver-preview", StringComparison.OrdinalIgnoreCase)
+                && characterTiming is not null)
+            {
+                var diagnostics = result.Diagnostics.Append(new Diagnostic(
+                    "info",
+                    "CHARACTER_NATIVE_TIMINGS",
+                    "角色 FLVER native 读链路的 opt-in 计时快照。",
+                    result.SourceUri,
+                    characterTiming.Snapshot()));
                 result = result with
                 {
                     Diagnostics = diagnostics.ToArray()
@@ -900,7 +934,13 @@ internal static class BridgeDaemonHost
             }
 
             var resultJson = JsonSerializer.SerializeToUtf8Bytes(result, JsonOptions);
-            var artifact = _artifacts.Store(resultJson);
+            var artifact = _artifacts.Store(
+                resultJson,
+                artifactToken => CalculateArtifactChunkSize(
+                    request,
+                    result,
+                    artifactToken,
+                    resultJson.Length));
             var resultNode = JsonNode.Parse(Encoding.UTF8.GetString(resultJson))?.AsObject()
                 ?? throw new InvalidDataException("Bridge result could not be converted to a JSON object.");
             var diagnosticArray = resultNode["diagnostics"] as JsonArray ?? new JsonArray();
@@ -948,6 +988,66 @@ internal static class BridgeDaemonHost
             });
         }
 
+        private int CalculateArtifactChunkSize(
+            BridgeInboundFrame request,
+            BridgeResult<object> result,
+            string artifactToken,
+            int artifactByteLength)
+        {
+            // The artifact descriptor is emitted before any chunk request exists,
+            // so the chunk budget has to be derived from the result frame shape
+            // that the next read-bridge-artifact request will use. Keep the real
+            // JsonOptions/encoder and a deliberately worst-case numeric envelope.
+            var probe = BridgeResult<object>.Partial(
+                result.SourcePath,
+                "unknown",
+                new[]
+                {
+                    new Diagnostic(
+                        "info",
+                        "BRIDGE_ARTIFACT_CHUNK_READ",
+                        "Bridge file-backed artifact chunk 已读取。",
+                        BridgeResult<object>.MakeSourceUri(result.SourcePath))
+                },
+                new
+                {
+                    artifactToken,
+                    offset = (long)BridgeArtifactStore.MaxArtifactBytes,
+                    length = int.MaxValue,
+                    totalLength = artifactByteLength,
+                    complete = false,
+                    dataBase64 = string.Empty
+                });
+            var frame = CreateFrame(
+                "result",
+                new string('0', ArtifactRequestIdProbeLength),
+                request.WorkspaceSessionId,
+                request.ResourceUri,
+                new
+                {
+                    // read-bridge-artifact is handled by the daemon and never
+                    // carries a synthetic authority marker.
+                    authority = "candidate",
+                    nativeFormatAuthority = false,
+                    result = probe
+                });
+            var envelopeBytes = Encoding.UTF8.GetByteCount(JsonSerializer.Serialize(frame, JsonOptions));
+            var availableBase64EncodedBytes = (long)MaxFrameBytes - envelopeBytes - ArtifactFrameHeadroomBytes;
+            if (availableBase64EncodedBytes <= 0) return 1;
+
+            // System.Text.Json's default encoder is deliberately retained.  A
+            // base64 alphabet character may be emitted as one byte or as an
+            // escaped sequence, so use the measured worst character cost rather
+            // than assuming a 4/3 ASCII expansion.  The alphabet is closed and
+            // Convert.ToBase64String cannot emit any other character.
+            var maxBase64Chars = availableBase64EncodedBytes / MaxArtifactBase64CharBytes;
+            var chunkBytes = Math.Min(
+                (long)BridgeArtifactStore.MaxArtifactBytes,
+                (maxBase64Chars / 4L) * 3L);
+            chunkBytes -= chunkBytes % 3L;
+            return (int)Math.Max(1L, chunkBytes);
+        }
+
         public async Task<BridgeResult<object>> ReadArtifactAsync(
             JsonElement? options,
             string sourcePath,
@@ -967,7 +1067,11 @@ internal static class BridgeDaemonHost
 
             try
             {
-                var chunk = _artifacts.Read(tokenElement.GetString()!, offset, length, cancellationToken);
+                var chunk = await _artifacts.ReadAsync(
+                    tokenElement.GetString()!,
+                    offset,
+                    length,
+                    cancellationToken).ConfigureAwait(false);
                 return BridgeResult<object>.Partial(sourcePath, "unknown", new[]
                 {
                     new Diagnostic("info", "BRIDGE_ARTIFACT_CHUNK_READ", "Bridge file-backed artifact chunk 已读取。", BridgeResult<object>.MakeSourceUri(sourcePath))
@@ -1520,14 +1624,9 @@ internal sealed class BridgeOutboundFrameTooLargeException : Exception
 
 internal sealed class BridgeArtifactStore : IDisposable
 {
-    private const int MaxArtifactBytes = 512 * 1024 * 1024;
-    // Must fit inside the protocol's minimum negotiated 64 KiB frame after
-    // base64 expansion and the result envelope. Keeping one conservative size
-    // makes the artifact command safe even when a caller deliberately uses the
-    // minimum frame budget for a transport regression test.
-    public const int ChunkSize = 32 * 1024;
+    internal const int MaxArtifactBytes = 512 * 1024 * 1024;
     private readonly string root;
-    private readonly ConcurrentDictionary<string, string> files = new(StringComparer.Ordinal);
+    private readonly ConcurrentDictionary<string, StoredArtifact> files = new(StringComparer.Ordinal);
 
     public BridgeArtifactStore()
     {
@@ -1535,37 +1634,62 @@ internal sealed class BridgeArtifactStore : IDisposable
         Directory.CreateDirectory(root);
     }
 
-    public ArtifactRecord Store(byte[] bytes)
+    public ArtifactRecord Store(byte[] bytes, Func<string, int> chunkSizeFactory)
     {
         if (bytes.Length <= 0 || bytes.Length > MaxArtifactBytes)
             throw new InvalidDataException($"Bridge artifact size {bytes.Length} is outside the allowed range.");
         var token = Guid.NewGuid().ToString("N");
+        var chunkSize = chunkSizeFactory(token);
+        if (chunkSize <= 0)
+            throw new InvalidDataException("Bridge artifact chunk size must be positive.");
+        chunkSize = Math.Min(chunkSize, bytes.Length);
         var path = Path.Combine(root, token + ".json");
         File.WriteAllBytes(path, bytes);
-        if (!files.TryAdd(token, path))
+        if (!files.TryAdd(token, new StoredArtifact(path, bytes.Length, chunkSize)))
         {
             File.Delete(path);
             throw new IOException("Bridge artifact token collision.");
         }
-        return new ArtifactRecord(token, bytes.Length, ChunkSize);
+        return new ArtifactRecord(token, bytes.Length, chunkSize);
     }
 
-    public ArtifactChunk Read(string token, long offset, int length, CancellationToken cancellationToken)
+    public async Task<ArtifactChunk> ReadAsync(
+        string token,
+        long offset,
+        int length,
+        CancellationToken cancellationToken)
     {
-        if (string.IsNullOrWhiteSpace(token) || !files.TryGetValue(token, out var path))
+        if (string.IsNullOrWhiteSpace(token) || !files.TryGetValue(token, out var artifact))
             throw new InvalidDataException("Bridge artifact token is unknown or expired.");
-        if (offset < 0 || length <= 0 || length > ChunkSize)
+        if (offset < 0 || length <= 0 || length > artifact.ChunkSize)
             throw new ArgumentOutOfRangeException(nameof(length), "Bridge artifact chunk range is invalid.");
 
-        var totalLength = checked((int)new FileInfo(path).Length);
-        if (offset >= totalLength || offset + length > totalLength)
+        var totalLength = checked((int)new FileInfo(artifact.Path).Length);
+        if (totalLength != artifact.ByteLength)
+            throw new InvalidDataException("Bridge artifact changed after it was stored.");
+        if (offset >= totalLength || (long)length > totalLength - offset)
             throw new InvalidDataException("Bridge artifact chunk range exceeds the artifact.");
 
-        var bytes = new byte[length];
-        using var stream = File.OpenRead(path);
-        stream.Position = offset;
         cancellationToken.ThrowIfCancellationRequested();
-        stream.ReadExactly(bytes, 0, bytes.Length);
+        var bytes = new byte[length];
+        await using var stream = new FileStream(
+            artifact.Path,
+            FileMode.Open,
+            FileAccess.Read,
+            FileShare.Read,
+            bufferSize: 64 * 1024,
+            useAsync: true);
+        stream.Position = offset;
+        var read = 0;
+        while (read < bytes.Length)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            var count = await stream.ReadAsync(bytes.AsMemory(read), cancellationToken).ConfigureAwait(false);
+            if (count <= 0)
+                throw new EndOfStreamException("Bridge artifact ended before the requested chunk was read.");
+            read += count;
+        }
+        cancellationToken.ThrowIfCancellationRequested();
         return new ArtifactChunk(bytes, totalLength);
     }
 
@@ -1579,6 +1703,8 @@ internal sealed class BridgeArtifactStore : IDisposable
         catch (IOException) { }
         catch (UnauthorizedAccessException) { }
     }
+
+    private sealed record StoredArtifact(string Path, int ByteLength, int ChunkSize);
 
     public sealed record ArtifactRecord(string Token, int ByteLength, int ChunkSize);
     public sealed record ArtifactChunk(byte[] Bytes, int TotalLength);

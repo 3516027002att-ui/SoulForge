@@ -23,6 +23,49 @@ export interface PersistedDiagnostic extends Diagnostic {
 
 const MAX_RAG_DELTA_BATCH = 512;
 
+/**
+ * Bounded, identity-free diagnostics for one successful RAG delta transaction.
+ * These counts deliberately contain no chunk IDs, text, or paths so the
+ * desktop refresh receipt can distinguish provenance churn from searchable
+ * content work without copying the corpus across the utility boundary.
+ */
+export interface RagChunkDeltaStats {
+  finalUpserts: number;
+  newUpserts: number;
+  bodyChangedUpserts: number;
+  metadataOnlyUpserts: number;
+  ftsRebuilds: number;
+  embeddingDeletes: number;
+}
+
+const RAG_CHUNK_DELTA_STAT_KEYS: readonly (keyof RagChunkDeltaStats)[] = [
+  'finalUpserts',
+  'newUpserts',
+  'bodyChangedUpserts',
+  'metadataOnlyUpserts',
+  'ftsRebuilds',
+  'embeddingDeletes'
+];
+
+/** Validate the bounded result crossing the desktop utility boundary. */
+export function isRagChunkDeltaStats(value: unknown): value is RagChunkDeltaStats {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  const candidate = value as Record<string, unknown>;
+  const keys = Object.keys(candidate);
+  if (keys.length !== RAG_CHUNK_DELTA_STAT_KEYS.length
+    || !RAG_CHUNK_DELTA_STAT_KEYS.every((key) => Object.prototype.hasOwnProperty.call(candidate, key))) {
+    return false;
+  }
+  for (const key of RAG_CHUNK_DELTA_STAT_KEYS) {
+    const stat = candidate[key];
+    if (typeof stat !== 'number' || !Number.isSafeInteger(stat) || stat < 0 || stat > MAX_RAG_DELTA_BATCH) return false;
+  }
+  const stats = candidate as unknown as RagChunkDeltaStats;
+  return stats.metadataOnlyUpserts + stats.ftsRebuilds === stats.finalUpserts
+    && stats.newUpserts + stats.embeddingDeletes === stats.finalUpserts
+    && stats.bodyChangedUpserts <= stats.ftsRebuilds - stats.newUpserts;
+}
+
 export type BackgroundJobStatus = 'queued' | 'running' | 'completed' | 'failed' | 'cancelled';
 export interface BackgroundJobRecord {
   jobId: string;
@@ -279,7 +322,7 @@ ON CONFLICT(chunk_id) DO UPDATE SET workspace_id=excluded.workspace_id,
     sourceUri: string;
     upserts: readonly RagChunk[];
     deletedChunkIds: readonly string[];
-  }): void {
+  }): RagChunkDeltaStats {
     const sourceUri = input.sourceUri.trim();
     if (!sourceUri) throw new Error('RAG source delta 缺少 sourceUri。');
     if (input.upserts.length > MAX_RAG_DELTA_BATCH || input.deletedChunkIds.length > MAX_RAG_DELTA_BATCH) {
@@ -349,6 +392,23 @@ FROM rag_chunks WHERE workspace_id = ? AND chunk_id IN (${placeholders})`
     const ftsRebuildExistingIds = finalUpserts
       .filter((chunk) => existingRows.has(chunk.chunkId) && ftsRebuildIdSet.has(chunk.chunkId))
       .map((chunk) => chunk.chunkId);
+    const stats: RagChunkDeltaStats = {
+      finalUpserts: finalUpserts.length,
+      newUpserts: finalUpserts.filter((chunk) => !existingRows.has(chunk.chunkId)).length,
+      bodyChangedUpserts: finalUpserts.filter((chunk) => {
+        const row = existingRows.get(chunk.chunkId);
+        return row !== undefined && row.body !== chunk.body;
+      }).length,
+      // Every final upsert is either an FTS rebuild or an existing row whose
+      // searchable title/body/contentHash stayed stable.  This complement is
+      // also the invariant that keeps metadata-only + FTS rebuilds equal to
+      // the deduplicated final upsert count.
+      metadataOnlyUpserts: finalUpserts.length - ftsRebuildIds.length,
+      ftsRebuilds: ftsRebuildIds.length,
+      // This is the number of DELETE statements attempted by the existing
+      // embedding invalidation loop, not the number of vectors that existed.
+      embeddingDeletes: existingUpsertIds.length
+    };
     const standaloneDeletedIds = sourceDeletedChunkIds
       .filter((chunkId) => !finalUpsertsById.has(chunkId));
     const deleteChunk = this.database.prepare(
@@ -408,6 +468,7 @@ ON CONFLICT(chunk_id) DO UPDATE SET workspace_id=excluded.workspace_id,
         }
       }
     }).immediate();
+    return stats;
   }
 
   loadRagChunks(): RagChunk[] {

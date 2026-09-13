@@ -5,7 +5,15 @@ import { writeFile } from 'node:fs/promises';
 import { runBridge, disposeBridgeDaemonPool } from '../bridge/runBridge.js';
 import { resolveNativeFixture } from './nativeFixtureRegistry.js';
 import { createSmokeWorkspace } from './harness/smokeWorkspace.js';
-import { buildSyntheticStripFlver, type SyntheticFlverFixture } from './audit/sf-14/flverFixture.js';
+import {
+  buildSyntheticStripFlver,
+  buildSyntheticReferencePoseFlver,
+  buildSyntheticTriangleListFlver,
+  type SyntheticReferencePoseCase,
+  type SyntheticFlverFixture
+} from './audit/sf-14/flverFixture.js';
+
+const SF14_MAX_CONCURRENCY = 2;
 
 interface StaticChunk {
   positionsBase64?: string;
@@ -23,6 +31,10 @@ interface StaticChunk {
   emittedIndexCount?: number;
   triangleCount?: number;
   boundsStatus?: string;
+  emittedBounds?: {
+    min?: number[];
+    max?: number[];
+  };
   telemetry?: {
     flverParse?: number;
     flverBase64Encode?: number;
@@ -67,7 +79,64 @@ function decodeSourceIndices(base64: string): number[] {
   for (let offset = 0; offset < bytes.length; offset += 4) output.push(bytes.readUInt32LE(offset));
   return output;
 }
-function assertChunkShape(chunk: StaticChunk): {
+function decodeFloats(base64: string): number[] {
+  const bytes = Buffer.from(base64, 'base64');
+  assert.equal(bytes.length % 4, 0);
+  const output: number[] = [];
+  for (let offset = 0; offset < bytes.length; offset += 4) output.push(bytes.readFloatLE(offset));
+  return output;
+}
+function assertClose(actual: number, expected: number, label: string): void {
+  assert.ok(
+    Math.abs(actual - expected) <= 1e-6,
+    `${label}: ${actual} != ${expected}`
+  );
+}
+function assertTupleClose(actual: readonly number[], expected: readonly number[], label: string): void {
+  assert.equal(actual.length, expected.length, `${label} length`);
+  for (let index = 0; index < expected.length; index++) {
+    assertClose(actual[index]!, expected[index]!, `${label}[${index}]`);
+  }
+}
+function assertSyntheticVertexPayload(
+  chunk: StaticChunk,
+  sourceVertexIndices: readonly number[],
+  vertexCount: number
+): void {
+  assert.ok(typeof chunk.positionsBase64 === 'string');
+  assert.ok(typeof chunk.normalsBase64 === 'string');
+  assert.ok(typeof chunk.uvsBase64 === 'string');
+  const positions = decodeFloats(chunk.positionsBase64!);
+  const normals = decodeFloats(chunk.normalsBase64!);
+  const uvs = decodeFloats(chunk.uvsBase64!);
+  assert.equal(positions.length, sourceVertexIndices.length * 3);
+  assert.equal(normals.length, sourceVertexIndices.length * 3);
+  assert.equal(uvs.length, sourceVertexIndices.length * 2);
+
+  const emittedMin = [Number.POSITIVE_INFINITY, Number.POSITIVE_INFINITY, Number.POSITIVE_INFINITY];
+  const emittedMax = [Number.NEGATIVE_INFINITY, Number.NEGATIVE_INFINITY, Number.NEGATIVE_INFINITY];
+  sourceVertexIndices.forEach((source, dense) => {
+    const position = [source, source % 7, (source % 11) / 10];
+    const normal = [
+      (source % 5 + 1) / 6,
+      (source % 7 + 2) / 9,
+      (source % 11 + 3) / 14
+    ];
+    const uv = [source / Math.max(1, vertexCount - 1), (source % 13 + 1) / 14];
+    assertTupleClose(positions.slice(dense * 3, dense * 3 + 3), position, `position source ${source}`);
+    assertTupleClose(normals.slice(dense * 3, dense * 3 + 3), normal, `normal source ${source}`);
+    assertTupleClose(uvs.slice(dense * 2, dense * 2 + 2), uv, `uv source ${source}`);
+    for (let axis = 0; axis < 3; axis++) {
+      emittedMin[axis] = Math.min(emittedMin[axis]!, position[axis]!);
+      emittedMax[axis] = Math.max(emittedMax[axis]!, position[axis]!);
+    }
+  });
+  assert.ok(chunk.emittedBounds?.min, 'synthetic chunk must expose emitted bounds min');
+  assert.ok(chunk.emittedBounds?.max, 'synthetic chunk must expose emitted bounds max');
+  assertTupleClose(chunk.emittedBounds!.min!, emittedMin, 'emitted bounds min');
+  assertTupleClose(chunk.emittedBounds!.max!, emittedMax, 'emitted bounds max');
+}
+function assertChunkShape(chunk: StaticChunk, expected?: SyntheticFlverFixture): {
   sourceTriangles: Array<[number, number, number]>;
 } {
   assert.equal(typeof chunk.positionsBase64, 'string');
@@ -86,6 +155,7 @@ function assertChunkShape(chunk: StaticChunk): {
   assert.ok(chunk.sourceIndexCount! >= chunk.sourceIndexStart!);
   if (chunk.normalsBase64) assert.equal(Buffer.from(chunk.normalsBase64, 'base64').length, sources.length * 12);
   if (chunk.uvsBase64) assert.equal(Buffer.from(chunk.uvsBase64, 'base64').length, sources.length * 8);
+  if (expected) assertSyntheticVertexPayload(chunk, sources, expected.vertexCount);
   const triangles: Array<[number, number, number]> = [];
   for (let i = 0; i < indices.length; i += 3) {
     const a = indices[i]!;
@@ -105,6 +175,7 @@ async function requestStaticPage(
     sessionToken?: string;
     cursor?: string;
     oodleRuntimeRoot?: string;
+    bridgeExecutablePath?: string;
   }
 ): Promise<PageResult> {
   const result = await runBridge<StaticPage>({
@@ -112,7 +183,9 @@ async function requestStaticPage(
     filePath,
     allowedRoots: [dirname(filePath)],
     ...(options.oodleRuntimeRoot ? { oodleRuntimeRoot: options.oodleRuntimeRoot } : {}),
+    ...(options.bridgeExecutablePath ? { bridgeExecutablePath: options.bridgeExecutablePath } : {}),
     workspaceSessionId: options.workspaceSessionId,
+    maxConcurrency: SF14_MAX_CONCURRENCY,
     timeoutMs: 120_000,
     commandOptions: {
       modelName,
@@ -128,17 +201,52 @@ async function requestStaticPage(
     parseStatus: result.parseStatus
   };
 }
+
+async function readMapTypedIndexCount(
+  filePath: string,
+  workspaceSessionId: string
+): Promise<number> {
+  const result = await runBridge<{
+    telemetry?: { mapTypedIndexRead?: number };
+  }>({
+    command: 'read-flver-document',
+    filePath,
+    allowedRoots: [dirname(filePath)],
+    workspaceSessionId,
+    maxConcurrency: SF14_MAX_CONCURRENCY,
+    timeoutMs: 120_000
+  });
+  assert.notEqual(result.parseStatus, 'failed', JSON.stringify(result.diagnostics));
+  const count = result.data?.telemetry?.mapTypedIndexRead;
+  assert.equal(typeof count, 'number', 'read-flver-document must expose mapTypedIndexRead');
+  return count!;
+}
 async function collectPages(
   filePath: string,
   modelName: string,
   workspaceSessionId: string,
   ownerLeaseId: string,
   expected?: SyntheticFlverFixture,
-  oodleRuntimeRoot?: string
-): Promise<{ pages: StaticPage[]; triangles: Array<[number, number, number]> }> {
+  oodleRuntimeRoot?: string,
+  measureIndexReads = false
+): Promise<{
+  pages: StaticPage[];
+  triangles: Array<[number, number, number]>;
+  mapTypedIndexReadDeltas: number[];
+  mapTypedIndexReadTotal?: number;
+}> {
   const pages: StaticPage[] = [];
   const triangles: Array<[number, number, number]> = [];
   const trianglesByMesh = new Map<number, number>();
+  const mapTypedIndexReadDeltas: number[] = [];
+  let mapTypedIndexReadBefore: number | undefined;
+  if (measureIndexReads) {
+    mapTypedIndexReadBefore = await readMapTypedIndexCount(filePath, workspaceSessionId);
+    // The probe itself must be inert; otherwise the per-page deltas could be
+    // falsely green by mixing parser work into the map index counter.
+    const stableProbe = await readMapTypedIndexCount(filePath, workspaceSessionId);
+    assert.equal(stableProbe, mapTypedIndexReadBefore, 'read-flver-document must not increment mapTypedIndexRead');
+  }
   let sessionToken: string | undefined;
   let cursor: string | undefined;
   for (let pageNumber = 0; pageNumber < 256; pageNumber++) {
@@ -149,6 +257,11 @@ async function collectPages(
       ...(cursor ? { cursor } : {}),
       ...(oodleRuntimeRoot ? { oodleRuntimeRoot } : {})
     });
+    if (measureIndexReads) {
+      const mapTypedIndexReadAfter = await readMapTypedIndexCount(filePath, workspaceSessionId);
+      mapTypedIndexReadDeltas.push(mapTypedIndexReadAfter - mapTypedIndexReadBefore!);
+      mapTypedIndexReadBefore = mapTypedIndexReadAfter;
+    }
     assert.notEqual(result.parseStatus, 'failed', JSON.stringify(result.diagnostics));
     assert.equal(result.data.complete === true || typeof result.data.nextCursor === 'string', true);
     const chunk = result.data.chunks?.[0];
@@ -158,7 +271,7 @@ async function collectPages(
       pages.push(result.data);
       break;
     }
-    const shape = assertChunkShape(chunk);
+    const shape = assertChunkShape(chunk, expected);
     triangles.push(...shape.sourceTriangles);
     assert.ok(Buffer.byteLength(JSON.stringify(result.data), 'utf8') < 8 * 1024 * 1024);
     if (expected) {
@@ -188,8 +301,79 @@ async function collectPages(
   }
   assert.equal(pages.some((page) => page.complete === true), true, 'pagination did not terminate');
   if (expected) assert.deepEqual(triangles, expected.expectedTriangles);
-  return { pages, triangles };
+  return {
+    pages,
+    triangles,
+    mapTypedIndexReadDeltas,
+    ...(measureIndexReads
+      ? { mapTypedIndexReadTotal: mapTypedIndexReadDeltas.reduce((sum, value) => sum + value, 0) }
+      : {})
+  };
 }
+
+function assertReferencePayload(
+  chunk: StaticChunk,
+  expectedPositions: readonly number[],
+  expectedNormals: readonly number[]
+): void {
+  assert.ok(chunk.positionsBase64);
+  assert.ok(chunk.normalsBase64);
+  assert.ok(chunk.sourceVertexIndicesBase64);
+  assert.deepEqual(decodeSourceIndices(chunk.sourceVertexIndicesBase64!), [0, 1, 2]);
+  assertTupleClose(decodeFloats(chunk.positionsBase64!), expectedPositions, 'reference positions');
+  assertTupleClose(decodeFloats(chunk.normalsBase64!), expectedNormals, 'reference normals');
+}
+
+async function runReferencePoseRegression(workspaceRoot: string): Promise<string[]> {
+  const checks: string[] = [];
+  const cases: Array<{ name: string; testCase: SyntheticReferencePoseCase; expectFailure?: string }> = [
+    { name: 'absolute', testCase: 'absolute' },
+    { name: 'dynamic', testCase: 'dynamic' },
+    { name: 'dynamic-cycle', testCase: 'dynamic-cycle' },
+    { name: 'unused-singular', testCase: 'unused-singular' },
+    { name: 'weighted', testCase: 'weighted', expectFailure: 'MAP_STATIC_SKINNING_WEIGHTED_UNSUPPORTED' },
+    { name: 'invalid-binding', testCase: 'invalid-binding', expectFailure: 'MAP_STATIC_SKINNING_INVALID' },
+    { name: 'used-singular', testCase: 'used-singular', expectFailure: 'FLVER_REFERENCE_FK_SINGULAR' }
+  ];
+  // Native smoke runners may override the bridge artifact while validating a
+  // local Debug build.  Normal suite execution leaves this unset and uses the
+  // same automatic resolver as every other runBridge call.
+  const bridgeExecutableOverride = process.env.SOULFORGE_BRIDGE_EXECUTABLE;
+  for (const item of cases) {
+    const fixture = buildSyntheticReferencePoseFlver(item.testCase);
+    const filePath = join(workspaceRoot, `sf14-reference-${item.name}.flver`);
+    await writeFile(filePath, fixture.bytes);
+    const result = await requestStaticPage(filePath, `sf14-reference-${item.name}.flver`, {
+      workspaceSessionId: `sf14-reference-${item.name}`,
+      ownerLeaseId: `sf14-reference-owner-${item.name}`,
+      ...(bridgeExecutableOverride ? { bridgeExecutablePath: bridgeExecutableOverride } : {})
+    });
+    if (item.expectFailure) {
+      assert.equal(result.parseStatus, 'failed', `${item.name} must fail closed`);
+      assert.ok(
+        result.diagnostics.some((diagnostic) =>
+          `${diagnostic.code ?? ''} ${diagnostic.message ?? ''}`.includes(item.expectFailure!)
+        ),
+        `${item.name} diagnostics: ${JSON.stringify(result.diagnostics)}`
+      );
+      checks.push(`${item.name} failed closed`);
+      continue;
+    }
+    assert.notEqual(result.parseStatus, 'failed', `${item.name}: ${JSON.stringify(result.diagnostics)}`);
+    const chunk = result.data.chunks?.[0];
+    assert.ok(chunk, `${item.name} must emit one chunk`);
+    if (item.testCase === 'dynamic' || item.testCase === 'dynamic-cycle') {
+      assertReferencePayload(chunk!, fixture.rawPositions, fixture.rawNormals);
+    } else {
+      assertReferencePayload(chunk!, fixture.expectedAbsolutePositions, fixture.expectedAbsoluteNormals);
+    }
+    assert.equal(chunk!.sourceVertexCount, 3);
+    assert.equal(chunk!.sourceIndexCount, 3);
+    checks.push(`${item.name} reference payload`);
+  }
+  return checks;
+}
+
 async function runUnit(): Promise<Record<string, unknown>> {
   const fixture = buildSyntheticStripFlver();
   const workspace = await createSmokeWorkspace('audit-sf14-unit');
@@ -205,6 +389,7 @@ async function runUnit(): Promise<Record<string, unknown>> {
       filePath,
       allowedRoots: [workspace.root],
       workspaceSessionId,
+      maxConcurrency: SF14_MAX_CONCURRENCY,
       timeoutMs: 120_000
     });
     assert.notEqual(parserBefore.parseStatus, 'failed', JSON.stringify(parserBefore.diagnostics));
@@ -228,6 +413,7 @@ async function runUnit(): Promise<Record<string, unknown>> {
       filePath,
       allowedRoots: [workspace.root],
       workspaceSessionId,
+      maxConcurrency: SF14_MAX_CONCURRENCY,
       timeoutMs: 120_000
     });
     assert.notEqual(parserAfter.parseStatus, 'failed', JSON.stringify(parserAfter.diagnostics));
@@ -281,6 +467,7 @@ async function runUnit(): Promise<Record<string, unknown>> {
       filePath,
       allowedRoots: [workspace.root],
       workspaceSessionId,
+      maxConcurrency: SF14_MAX_CONCURRENCY,
       timeoutMs: 120_000,
       commandOptions: {}
     });
@@ -304,14 +491,63 @@ async function runUnit(): Promise<Record<string, unknown>> {
       chunks[0]?.chunks?.[0]?.telemetry?.flverBase64Encode,
       chunks[1]?.chunks?.[0]?.telemetry?.flverBase64Encode
     );
+
+    const wideTarget = 32_005;
+    const wideStripFixture = buildSyntheticStripFlver(wideTarget);
+    const wideStripPath = join(workspace.root, 'sf14-strip-wide.flver');
+    await writeFile(wideStripPath, wideStripFixture.bytes);
+    const wideStrip = await collectPages(
+      wideStripPath,
+      'sf14-strip-wide.flver',
+      workspaceSessionId,
+      'sf14-owner-wide-strip',
+      wideStripFixture,
+      undefined,
+      true
+    );
+    const wideStripChunks = wideStrip.pages.filter((page) => (page.chunks?.length ?? 0) > 0);
+    assert.ok(wideStripChunks.length >= 4, 'strip fixture must exercise at least four geometry pages');
+    assert.ok(
+      wideStrip.mapTypedIndexReadTotal! <= wideStripFixture.indices.length + wideStrip.pages.length * 64,
+      `strip map index reads must stay linear: ${wideStrip.mapTypedIndexReadTotal} > ${wideStripFixture.indices.length + wideStrip.pages.length * 64}`
+    );
+
+    const wideListFixture = buildSyntheticTriangleListFlver(wideTarget);
+    const wideListPath = join(workspace.root, 'sf14-list-wide.flver');
+    await writeFile(wideListPath, wideListFixture.bytes);
+    const wideList = await collectPages(
+      wideListPath,
+      'sf14-list-wide.flver',
+      workspaceSessionId,
+      'sf14-owner-wide-list',
+      wideListFixture,
+      undefined,
+      true
+    );
+    const wideListChunks = wideList.pages.filter((page) => (page.chunks?.length ?? 0) > 0);
+    assert.ok(wideListChunks.length >= 4, 'list fixture must exercise at least four geometry pages');
+    assert.ok(
+      wideList.mapTypedIndexReadTotal! <= wideListFixture.indices.length + wideList.pages.length * 64,
+      `list map index reads must stay linear: ${wideList.mapTypedIndexReadTotal} > ${wideListFixture.indices.length + wideList.pages.length * 64}`
+    );
+    const referencePoseChecks = await runReferencePoseRegression(workspace.root);
     return {
       ok: true, status: 'passed', layer: 'unit', pages: chunks.length,
       triangles: collected.triangles.length,
+      wideStripPages: wideStripChunks.length,
+      wideStripMapTypedIndexRead: wideStrip.mapTypedIndexReadTotal,
+      wideListPages: wideListChunks.length,
+      wideListMapTypedIndexRead: wideList.mapTypedIndexReadTotal,
+      referencePoseChecks,
       checks: [
         'typed lazy projection', 'strip parity across page boundary',
         'degenerate and primitive restart semantics', 'wire frame budget',
+        'multi-page list/strip linear index-read budget',
         'opaque old cursor rejection', 'cross-owner cursor rejection',
-        'source hash/session expiry rejection', 'missing model rejection'
+        'source hash/session expiry rejection', 'missing model rejection',
+        'reference FK rigid bake and inverse-transpose normals',
+        'dynamic/cyclic hierarchy bypass', 'weighted and invalid binding fail-closed',
+        'unused singular bone tolerance'
       ]
     };
   } finally {

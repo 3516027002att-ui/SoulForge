@@ -23,6 +23,13 @@ export interface SemanticRefreshStageDetails {
   changedSourceCountInDiff?: number;
   upsertChunks?: number;
   deletedChunks?: number;
+  finalUpserts?: number;
+  newUpserts?: number;
+  bodyChangedUpserts?: number;
+  metadataOnlyUpserts?: number;
+  ftsRebuilds?: number;
+  embeddingDeletes?: number;
+  ragStatsUnavailable?: boolean;
   batchCount?: number;
   dbEnqueueMs?: number;
   dbDurationMs?: number;
@@ -68,6 +75,12 @@ type NumericDetailKey =
   | 'changedSourceCountInDiff'
   | 'upsertChunks'
   | 'deletedChunks'
+  | 'finalUpserts'
+  | 'newUpserts'
+  | 'bodyChangedUpserts'
+  | 'metadataOnlyUpserts'
+  | 'ftsRebuilds'
+  | 'embeddingDeletes'
   | 'batchCount'
   | 'dbEnqueueMs'
   | 'dbDurationMs';
@@ -85,6 +98,12 @@ const NUMERIC_DETAIL_KEYS: readonly NumericDetailKey[] = [
   'changedSourceCountInDiff',
   'upsertChunks',
   'deletedChunks',
+  'finalUpserts',
+  'newUpserts',
+  'bodyChangedUpserts',
+  'metadataOnlyUpserts',
+  'ftsRebuilds',
+  'embeddingDeletes',
   'batchCount',
   'dbEnqueueMs',
   'dbDurationMs'
@@ -132,6 +151,7 @@ export function createSemanticRefreshTelemetry(
         current.firstEnqueuedAt = details.firstEnqueuedAt;
       }
       if (details.lastEndedAt !== undefined) current.lastEndedAt = details.lastEndedAt;
+      if (details.ragStatsUnavailable === true) current.ragStatsUnavailable = true;
       stages.set(stage, current);
     },
     finish(status, error): void {

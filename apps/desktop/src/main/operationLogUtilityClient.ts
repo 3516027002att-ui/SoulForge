@@ -221,8 +221,8 @@ export class OperationLogUtilityClient implements OperationLogStore {
     sourceUri: string;
     upserts: RagChunk[];
     deletedChunkIds: string[];
-  }): Promise<void> {
-    return this.request('mergeRagChunkDelta', input).then(() => undefined);
+  }): Promise<OperationLogUtilityResultMap['mergeRagChunkDelta']> {
+    return this.request('mergeRagChunkDelta', input);
   }
 
   loadRagChunks(): Promise<RagChunk[]> {

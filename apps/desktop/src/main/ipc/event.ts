@@ -30,6 +30,11 @@ import { EmevdSourceTokens } from '../emevdSourceTokens.js';
 import { sanitizeDiagnostics, sanitizeRendererValue, type RendererSaveResult } from '../rendererDto.js';
 import type { OperationLogUtilityClient } from '../operationLogUtilityClient.js';
 import type { TrustedIpcHandle } from './registration.js';
+import {
+  appendPostCommitFailureDiagnostic,
+  runCallerOwnedPostCommit,
+  type KnowledgeRefreshOwner
+} from '../knowledgeRefreshOwnership.js';
 
 /**
  * Authoritative full EMEVD editor documents keyed by sourceUri. Assembled in
@@ -247,7 +252,8 @@ export interface EventIpcDeps {
   sessionCommitPort(
     session: WorkspaceSession,
     operationLog: OperationLogUtilityClient,
-    storage: { backupBaseDir: string; recoveryDir: string }
+    storage: { backupBaseDir: string; recoveryDir: string },
+    options?: { knowledgeRefreshOwner?: KnowledgeRefreshOwner }
   ): RawReplaceCommitPort;
   electronConfirmationPort(event: IpcMainInvokeEvent): WriteConfirmationPort;
   toSaveResultFromOutcome(outcome: NativeMutationOutcome, files: readonly IndexedFile[]): RendererSaveResult;
@@ -403,18 +409,38 @@ export function registerEventIpcHandlers(deps: EventIpcDeps): void {
         confirmActionLabel: '提交 EMEVD 变更'
       }, {
         confirm: deps.electronConfirmationPort(event),
-        commit: deps.sessionCommitPort(deps.activeSession, operationLog, storage)
+        commit: deps.sessionCommitPort(deps.activeSession, operationLog, storage, { knowledgeRefreshOwner: 'caller' })
       });
       if (outcome.status === 'committed' && outcome.result.ok) {
-        const refreshed = await openResourcePreview({
-          file,
-          inspectNative: true,
-          parseStructured: true,
-          ...(deps.activeSession.layers.baseRoot ? { oodleRuntimeRoot: deps.activeSession.layers.baseRoot } : {})
+        // The native replacement is already committed. Preview refresh is a
+        // best-effort projection; the shared caller-owned sequence guarantees
+        // that one knowledge refresh still runs if preview throws.
+        await runCallerOwnedPostCommit(outcome.result, {
+          prepare: async () => {
+            const refreshed = await openResourcePreview({
+              file,
+              inspectNative: true,
+              parseStructured: true,
+              ...(deps.activeSession!.layers.baseRoot ? { oodleRuntimeRoot: deps.activeSession!.layers.baseRoot } : {})
+            });
+            const index = deps.indexedFiles.findIndex((item) => item.sourceUri === sourceUri);
+            if (index >= 0) deps.indexedFiles[index] = refreshed.file;
+          },
+          refresh: (result) => deps.refreshActiveIndexAfterNativeWrite([sourceUri], result),
+          onPrepareError: (result, error) => appendPostCommitFailureDiagnostic(
+            result,
+            'POSTCOMMIT_PREVIEW_FAILED',
+            sourceUri,
+            error,
+            '写入已提交，但提交后的 EMEVD 预览刷新失败；已保留已提交结果。'
+          ),
+          onRefreshError: (result, error) => appendPostCommitFailureDiagnostic(
+            result,
+            'POSTCOMMIT_REFRESH_FAILED',
+            sourceUri,
+            error
+          )
         });
-        const index = deps.indexedFiles.findIndex((item) => item.sourceUri === sourceUri);
-        if (index >= 0) deps.indexedFiles[index] = refreshed.file;
-        await deps.refreshActiveIndexAfterNativeWrite([sourceUri], outcome.result);
       }
       return deps.toSaveResultFromOutcome(outcome, deps.indexedFiles);
     }

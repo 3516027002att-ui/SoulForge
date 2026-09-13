@@ -2,9 +2,12 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import {
   evaluateGoalCoverage,
+  evaluateRollbackVerification,
   evaluateSupervisorNormalCompletion,
+  decideScratchCleanup,
   isCancelledAgentLifecycle,
   isRunStopRequested,
+  rollbackCommittedOperations,
   isSuccessfulAgentTerminal,
   makeSupervisorGeneration,
   planSemanticCorpus,
@@ -163,4 +166,133 @@ test('generation-bearing labels are not truncated and a run-specific stop reques
   assert.equal(safeHarnessFileLabel(label, 128), label);
   assert.equal(isRunStopRequested({ stopping: false, globalStop: false, runStop: true }), true);
   assert.equal(isRunStopRequested({ stopping: false, globalStop: false, runStop: false }), false);
+});
+
+test('rollback preserves production newest-first order and strict hash guards restore chained writes', async () => {
+  const initial = new Map([
+    ['event.emevd', 'base-event'],
+    ['param.param', 'base-param']
+  ]);
+  const current = new Map([
+    ['event.emevd', 'event-C'],
+    ['param.param', 'param-P']
+  ]);
+  const hash = (value) => `hash:${value}`;
+  const productionOrder = [
+    { opId: 'param-P', file: 'param.param', before: 'base-param', after: 'param-P' },
+    { opId: 'event-C', file: 'event.emevd', before: 'event-B', after: 'event-C' },
+    { opId: 'event-B', file: 'event.emevd', before: 'event-A', after: 'event-B' },
+    { opId: 'event-A', file: 'event.emevd', before: 'base-event', after: 'event-A' }
+  ];
+  const originalIds = productionOrder.map((operation) => operation.opId);
+  const rollback = async (opId) => {
+    const operation = productionOrder.find((candidate) => candidate.opId === opId);
+    assert.ok(operation, `unknown operation ${opId}`);
+    const actualHash = hash(current.get(operation.file));
+    if (actualHash !== hash(operation.after)) {
+      return { ok: false, diagnostics: [{ code: 'ROLLBACK_TARGET_CHANGED', actualHash }] };
+    }
+    current.set(operation.file, operation.before);
+    return { ok: true, beforeHash: hash(operation.before), afterHash: hash(operation.after) };
+  };
+
+  const wrongOrderCurrent = new Map([
+    ['event.emevd', 'event-C'],
+    ['param.param', 'param-P']
+  ]);
+  const wrongOrderResults = await rollbackCommittedOperations(
+    [...productionOrder].reverse(),
+    async (opId) => {
+      const operation = productionOrder.find((candidate) => candidate.opId === opId);
+      const actualHash = hash(wrongOrderCurrent.get(operation.file));
+      if (actualHash !== hash(operation.after)) {
+        return { ok: false, diagnostics: [{ code: 'ROLLBACK_TARGET_CHANGED', actualHash }] };
+      }
+      wrongOrderCurrent.set(operation.file, operation.before);
+      return { ok: true };
+    }
+  );
+  assert.equal(wrongOrderResults.find((entry) => entry.opId === 'event-A').result.ok, false);
+  assert.equal(wrongOrderResults.find((entry) => entry.opId === 'event-A').result.diagnostics[0].code, 'ROLLBACK_TARGET_CHANGED');
+  assert.equal(wrongOrderCurrent.get('event.emevd'), 'event-B');
+
+  const results = await rollbackCommittedOperations(productionOrder, rollback);
+  assert.deepEqual(productionOrder.map((operation) => operation.opId), originalIds);
+  assert.deepEqual(results.map((entry) => entry.opId), ['param-P', 'event-C', 'event-B', 'event-A']);
+  assert.deepEqual(results.slice(1).map((entry) => entry.result.ok), [true, true, true]);
+  assert.ok(results.every((entry) => entry.result.ok === true));
+  assert.deepEqual([...current.entries()], [...initial.entries()]);
+});
+
+test('rollback records a first-operation throw and never reaches later operations', async () => {
+  const calls = [];
+  const results = await rollbackCommittedOperations(
+    [{ opId: 'first' }, { opId: 'second' }],
+    async (opId) => {
+      calls.push(opId);
+      throw Object.assign(new Error('database request timed out'), { code: 'DB_TIMEOUT' });
+    }
+  );
+  assert.deepEqual(calls, ['first']);
+  assert.equal(results.length, 1);
+  assert.equal(results[0].opId, 'first');
+  assert.equal(results[0].attempted, true);
+  assert.equal(results[0].result.ok, false);
+  assert.equal(results[0].error.code, 'DB_TIMEOUT');
+  assert.equal(results[0].result.diagnostics[0].message, 'database request timed out');
+});
+
+test('rollback keeps the successful prefix and records the middle throw without retrying', async () => {
+  const calls = [];
+  const results = await rollbackCommittedOperations(
+    [{ opId: 'newest' }, { opId: 'middle' }, { opId: 'oldest' }],
+    async (opId) => {
+      calls.push(opId);
+      if (opId === 'middle') throw Object.assign(new Error('indeterminate inverse'), { code: 'ROLLBACK_UNKNOWN' });
+      return { ok: true, opId };
+    }
+  );
+  assert.deepEqual(calls, ['newest', 'middle']);
+  assert.deepEqual(results.map((entry) => entry.opId), ['newest', 'middle']);
+  assert.equal(results[0].attempted, true);
+  assert.deepEqual(results[0].result, { ok: true, opId: 'newest' });
+  assert.equal(results[1].attempted, true);
+  assert.equal(results[1].result.ok, false);
+  assert.equal(results[1].error.code, 'ROLLBACK_UNKNOWN');
+});
+
+test('scratch cleanup is allowed only for verified rollback and an exited electron tree', () => {
+  assert.deepEqual(decideScratchCleanup({ electronStatus: 'not-started', rollbackStatus: 'unverified' }), {
+    remove: false, status: 'preserved', reason: 'ROLLBACK_NOT_VERIFIED'
+  });
+  assert.deepEqual(decideScratchCleanup({ electronStatus: 'succeeded', rollbackStatus: 'not_applicable' }), {
+    remove: true, status: 'remove', reason: null
+  });
+  assert.deepEqual(decideScratchCleanup({ electronStatus: 'succeeded', rollbackStatus: 'verified' }), {
+    remove: true, status: 'remove', reason: null
+  });
+  assert.deepEqual(decideScratchCleanup({ electronStatus: 'not-started', rollbackStatus: 'verified' }), {
+    remove: true, status: 'remove', reason: null
+  });
+  assert.deepEqual(decideScratchCleanup({ electronStatus: 'skipped', rollbackStatus: 'verified' }), {
+    remove: false, status: 'preserved', reason: 'ELECTRON_TREE_NOT_CONFIRMED_EXITED'
+  });
+  assert.deepEqual(decideScratchCleanup({ electronStatus: 'skipped', rollbackStatus: 'not_applicable' }), {
+    remove: false, status: 'preserved', reason: 'ELECTRON_TREE_NOT_CONFIRMED_EXITED'
+  });
+});
+
+test('rollback receipt and status cannot verify cleanup when the tree still differs', () => {
+  const verification = evaluateRollbackVerification({
+    operations: [{ opId: 'write-1' }],
+    results: [{ opId: 'write-1', result: { ok: true } }],
+    statuses: new Map([['write-1', 'rolled_back']]),
+    treeRestoredExactly: false
+  });
+  assert.equal(verification.receiptOk, true);
+  assert.equal(verification.operationStatusOk, true);
+  assert.equal(verification.verified, false);
+  assert.deepEqual(decideScratchCleanup({ electronStatus: 'succeeded', rollbackStatus: 'unverified' }), {
+    remove: false, status: 'preserved', reason: 'ROLLBACK_NOT_VERIFIED'
+  });
 });

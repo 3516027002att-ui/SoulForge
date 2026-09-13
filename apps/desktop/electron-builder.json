@@ -9,14 +9,38 @@
   "files": [
     "out/**/*",
     "!out/release-compliance.json",
+    "!out/agent-production-build.json",
     "package.json",
     "!**/*.map",
     "!src/**/*",
     "!**/src/**/*",
+    "!**/test/**/*",
+    "!**/tests/**/*",
+    "!**/testing/**/*",
+    "!**/__tests__/**/*",
+    "!**/test-utils*",
+    "!**/*test-utils*",
+    "!**/*.test.*",
+    "!**/*.spec.*",
+    "!**/*playwright*",
+    "!**/*vitest*",
+    "!**/*jest*",
+    "!**/*cypress*",
     "!**/dist/testing/**/*",
     "!**/dist/_tmp/**/*",
+    "!**/probe_tmp.*",
+    "!**/_tmp/**/*",
     "!**/*.tsbuildinfo",
     "!**/tsconfig*.json",
+    "!**/package-lock.json",
+    "!**/*.log",
+    "!**/*.jsonl",
+    "!**/docs/**/*",
+    "!**/锐评/**/*",
+    "!**/*handoff*.md",
+    "!**/*交接*.md",
+    "!**/AGENTS.md",
+    "!**/SKILL.md",
     "!.native/**/*",
     "!mods/**/*",
     "!**/oo2core*.dll",
@@ -33,12 +57,49 @@
       ]
     },
     {
-      "from": "../prompt",
-      "to": "prompt"
+      "from": "../../prompt",
+      "to": "prompt",
+      "filter": [
+        "system.md",
+        "rag-embedding.md",
+        "event-reference.md",
+        "agent-task-record.md"
+      ]
     },
     {
       "from": "../../mutter.md",
-      "to": "mutter.md"
+      "to": "mutter.md",
+      "filter": [
+        "mutter.md"
+      ]
+    },
+    {
+      "from": "../../bridge/SoulForge.Bridge/bin/Release/net10.0/win-x64/publish/SoulForge.Bridge.exe",
+      "to": "bridge/SoulForge.Bridge.exe",
+      "filter": [
+        "SoulForge.Bridge.exe"
+      ]
+    },
+    {
+      "from": "../../LICENSE",
+      "to": "LICENSE",
+      "filter": [
+        "LICENSE"
+      ]
+    },
+    {
+      "from": "../../NOTICE",
+      "to": "NOTICE",
+      "filter": [
+        "NOTICE"
+      ]
+    },
+    {
+      "from": "../../licenses",
+      "to": "licenses",
+      "filter": [
+        "**/*"
+      ]
     }
   ],
   "win": {

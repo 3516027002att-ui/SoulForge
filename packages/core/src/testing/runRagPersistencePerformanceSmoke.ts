@@ -15,7 +15,11 @@ import { createRagCorpus } from '../rag/chunkBuilder.js';
 import { collectIndexedCandidates, ensureLookupIndex } from '../rag/lookupIndex.js';
 import { diffRagCorpusBySource, loadRagCorpus, persistRagCorpus } from '../rag/persist.js';
 import { openWorkspaceDatabase } from '../storage/sqliteDatabase.js';
-import { WorkspaceDataRepository } from '../storage/workspaceDataRepository.js';
+import {
+  isRagChunkDeltaStats,
+  WorkspaceDataRepository,
+  type RagChunkDeltaStats
+} from '../storage/workspaceDataRepository.js';
 import { withSmokeWorkspace } from './harness/smokeWorkspace.js';
 
 const BATCH_SIZE = 512;
@@ -44,14 +48,17 @@ function main(): Promise<void> {
         references: []
       });
       const batchDurationsMs: number[] = [];
+      let initialStats: RagChunkDeltaStats | null = null;
       const persistStarted = performance.now();
       for (let offset = 0; offset < chunks.length; offset += BATCH_SIZE) {
         const started = performance.now();
-        repository.mergeRagChunkDelta({
+        const stats = repository.mergeRagChunkDelta({
           sourceUri: SOURCE_URI,
           upserts: chunks.slice(offset, offset + BATCH_SIZE),
           deletedChunkIds: []
         });
+        assertRagChunkDeltaStats(stats);
+        if (initialStats === null) initialStats = stats;
         batchDurationsMs.push(performance.now() - started);
         if (VERBOSE && (batchDurationsMs.length === 1 || batchDurationsMs.length % 10 === 0)) {
           process.stderr.write(JSON.stringify({
@@ -67,6 +74,23 @@ function main(): Promise<void> {
       const persistedCount = countChunks(database);
       if (persistedCount !== rows) {
         throw new Error(`初次持久化行数错误：${persistedCount} != ${rows}。`);
+      }
+      assertRagChunkDeltaStats(initialStats, {
+        finalUpserts: Math.min(BATCH_SIZE, rows),
+        newUpserts: Math.min(BATCH_SIZE, rows),
+        bodyChangedUpserts: 0,
+        metadataOnlyUpserts: 0,
+        ftsRebuilds: Math.min(BATCH_SIZE, rows),
+        embeddingDeletes: 0
+      });
+      const invalidStats: readonly unknown[] = [
+        null,
+        { ...initialStats, ftsRebuilds: undefined },
+        { ...initialStats, ftsRebuilds: Number.NaN },
+        { ...initialStats, privateDiagnostic: 1 }
+      ];
+      if (invalidStats.some((value) => isRagChunkDeltaStats(value))) {
+        throw new Error('RAG delta stats validator accepted null/missing/nonfinite/extra diagnostic data。');
       }
 
       // The SQLite loader has its own ORDER BY and reconstructs optional
@@ -130,15 +154,18 @@ function main(): Promise<void> {
         outerFileHash: 'synthetic-outer-hash-v2'
       }));
       const metadataChurnBatchDurationsMs: number[] = [];
+      let metadataStats: RagChunkDeltaStats | null = null;
       const metadataChangesBefore = readTotalChanges(database);
       const metadataChurnStarted = performance.now();
       for (let offset = 0; offset < metadataChunks.length; offset += BATCH_SIZE) {
         const started = performance.now();
-        repository.mergeRagChunkDelta({
+        const stats = repository.mergeRagChunkDelta({
           sourceUri: SOURCE_URI,
           upserts: metadataChunks.slice(offset, offset + BATCH_SIZE),
           deletedChunkIds: []
         });
+        assertRagChunkDeltaStats(stats);
+        if (metadataStats === null) metadataStats = stats;
         metadataChurnBatchDurationsMs.push(performance.now() - started);
       }
       const metadataChurnElapsedMs = performance.now() - metadataChurnStarted;
@@ -176,6 +203,14 @@ function main(): Promise<void> {
           expectedMetadataChangeDelta
         })}。`);
       }
+      assertRagChunkDeltaStats(metadataStats, {
+        finalUpserts: Math.min(BATCH_SIZE, rows),
+        newUpserts: 0,
+        bodyChangedUpserts: 0,
+        metadataOnlyUpserts: Math.min(BATCH_SIZE, rows),
+        ftsRebuilds: 0,
+        embeddingDeletes: Math.min(BATCH_SIZE, rows)
+      });
 
       // A delete+reinsert may carry byte-for-byte identical searchable text
       // while refreshing only provenance.  The delete must still clear the
@@ -202,10 +237,18 @@ function main(): Promise<void> {
         sourceHash: 'synthetic-source-hash-v3',
         outerFileHash: 'synthetic-outer-hash-v3'
       };
-      repository.mergeRagChunkDelta({
+      const reinsertStats = repository.mergeRagChunkDelta({
         sourceUri: SOURCE_URI,
         upserts: [reinsertMetadataChunk],
         deletedChunkIds: [reinsertPreparedChunk.chunkId]
+      });
+      assertRagChunkDeltaStats(reinsertStats, {
+        finalUpserts: 1,
+        newUpserts: 0,
+        bodyChangedUpserts: 0,
+        metadataOnlyUpserts: 0,
+        ftsRebuilds: 1,
+        embeddingDeletes: 1
       });
       const reinsertAfter = readFtsProbe(database, reinsertPreparedChunk.chunkId);
       const reinsertRow = repository.loadRagChunks().find((chunk) => chunk.chunkId === reinsertPreparedChunk.chunkId);
@@ -344,10 +387,18 @@ SELECT
         body: `${duplicateChunk.body} ragduplicatenewtoken`,
         contentHash: 'content-duplicate-new'
       };
-      repository.mergeRagChunkDelta({
+      const duplicateStats = repository.mergeRagChunkDelta({
         sourceUri: SOURCE_URI,
         upserts: [duplicateOld, duplicateNew],
         deletedChunkIds: []
+      });
+      assertRagChunkDeltaStats(duplicateStats, {
+        finalUpserts: 1,
+        newUpserts: 0,
+        bodyChangedUpserts: 1,
+        metadataOnlyUpserts: 0,
+        ftsRebuilds: 1,
+        embeddingDeletes: 1
       });
       const duplicateFtsCounts = database.prepare(`
 SELECT
@@ -377,10 +428,18 @@ SELECT
         ...chunk,
         body: `${chunk.body} changed`
       }));
-      repository.mergeRagChunkDelta({
+      const changedStats = repository.mergeRagChunkDelta({
         sourceUri: SOURCE_URI,
         upserts: changed,
         deletedChunkIds: []
+      });
+      assertRagChunkDeltaStats(changedStats, {
+        finalUpserts: changed.length,
+        newUpserts: 0,
+        bodyChangedUpserts: changed.length,
+        metadataOnlyUpserts: 0,
+        ftsRebuilds: changed.length,
+        embeddingDeletes: changed.length
       });
       const afterDeltaCount = countChunks(database);
       if (afterDeltaCount !== rows) {
@@ -451,6 +510,45 @@ function makeChunk(index: number): RagChunk {
     relativePath: 'param/gameparam.parambnd.dcx',
     resourceKind: 'param'
   };
+}
+
+const RAG_DELTA_STAT_KEYS: readonly (keyof RagChunkDeltaStats)[] = [
+  'finalUpserts',
+  'newUpserts',
+  'bodyChangedUpserts',
+  'metadataOnlyUpserts',
+  'ftsRebuilds',
+  'embeddingDeletes'
+];
+
+function assertRagChunkDeltaStats(
+  stats: RagChunkDeltaStats | null,
+  expected?: Partial<RagChunkDeltaStats>
+): asserts stats is RagChunkDeltaStats {
+  if (stats === null || typeof stats !== 'object') {
+    throw new Error('RAG delta stats 缺失，不能把缺失结果归零。');
+  }
+  const actualKeys = Object.keys(stats).sort();
+  const expectedKeys = [...RAG_DELTA_STAT_KEYS].sort();
+  if (actualKeys.join(',') !== expectedKeys.join(',')) {
+    throw new Error(`RAG delta stats keys 不完整或包含额外字段：${actualKeys.join(',')}`);
+  }
+  for (const key of RAG_DELTA_STAT_KEYS) {
+    const value = stats[key];
+    if (!Number.isSafeInteger(value) || value < 0 || value > BATCH_SIZE) {
+      throw new Error(`RAG delta stats ${key} 不是有限非负整数：${String(value)}`);
+    }
+  }
+  if (stats.metadataOnlyUpserts + stats.ftsRebuilds !== stats.finalUpserts
+    || stats.newUpserts + stats.embeddingDeletes !== stats.finalUpserts
+    || stats.bodyChangedUpserts > stats.ftsRebuilds - stats.newUpserts) {
+    throw new Error(`RAG delta stats 分类不守恒：${JSON.stringify(stats)}`);
+  }
+  for (const [key, value] of Object.entries(expected ?? {})) {
+    if (stats[key as keyof RagChunkDeltaStats] !== value) {
+      throw new Error(`RAG delta stats ${key} 不符合预期：${String(stats[key as keyof RagChunkDeltaStats])} != ${String(value)}`);
+    }
+  }
 }
 
 function readFtsProbe(

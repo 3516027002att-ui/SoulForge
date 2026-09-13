@@ -553,7 +553,7 @@ function parseTaeExport(value: unknown, sourceUri: string, sourcePath: string | 
   for (let animIndex = 0; animIndex < animationsRaw.length; animIndex += 1) {
     const anim = asRecord(animationsRaw[animIndex]);
     const animId = asNumber(anim.animId);
-    if (animId === null) {
+    if (animId === null || !Number.isSafeInteger(animId) || animId < 0) {
       return { diagnostics: [invalidField(sourceUri, `animations[${animIndex}].animId`)] };
     }
     const identity = parseTaeAnimationIdentity(anim, sourceUri, animIndex, diagnostics);

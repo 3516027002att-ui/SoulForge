@@ -3,6 +3,12 @@ import { normalizeModelResourceKey } from './modelResourcePool.js';
 
 export type MapMeshGeometry = NonNullable<SceneDrawItem['mesh']>;
 
+/** Minimal geometry seam shared by the serialized mesh and worker-prepared mesh. */
+export interface MapModelLoadGeometry {
+  positionsBase64: string;
+  vertexCount: number;
+}
+
 // --- 24.12 ResourceCacheKeyV1 (renderer view) ---
 export interface ResourceCacheKeyV1 {
   schema: 'map-resource-cache-key-v1';
@@ -18,20 +24,25 @@ export interface ResourceCacheKeyV1 {
   mapCoordinateContractPayloadSha256: string;
 }
 
-export function canonicalResourceCacheKeySha256(key: ResourceCacheKeyV1): string {
-  const canonical = JSON.stringify(key, Object.keys(key).sort());
-  try {
-    // eslint-disable-next-line @typescript-eslint/no-require-imports
-    const crypto = require('node:crypto') as typeof import('node:crypto');
-    return crypto.createHash('sha256').update(Buffer.from(canonical, 'utf8')).digest('hex');
-  } catch {
-    let h = 0x811c9dc5;
-    for (let i = 0; i < canonical.length; i++) {
-      h ^= canonical.charCodeAt(i);
-      h = Math.imul(h, 0x01000193);
-    }
-    return h.toString(16).padStart(64, '0').slice(-64);
-  }
+const HEX = '0123456789abcdef';
+
+function canonicalResourceCacheKeyJson(key: ResourceCacheKeyV1): string {
+  return JSON.stringify(key, Object.keys(key).sort());
+}
+
+/** Browser-safe SHA-256 over UTF-8 text; never substitutes a weaker digest. */
+export async function sha256Utf8Hex(value: string): Promise<string> {
+  const subtle = globalThis.crypto?.subtle;
+  if (!subtle) throw new Error('MAP_CACHE_SHA256_UNAVAILABLE: crypto.subtle is unavailable');
+  const digest = await subtle.digest('SHA-256', new TextEncoder().encode(value));
+  const bytes = new Uint8Array(digest);
+  let hex = '';
+  for (const byte of bytes) hex += HEX.charAt(byte >> 4) + HEX.charAt(byte & 0x0f);
+  return hex;
+}
+
+export async function canonicalResourceCacheKeySha256(key: ResourceCacheKeyV1): Promise<string> {
+  return sha256Utf8Hex(canonicalResourceCacheKeyJson(key));
 }
 
 export function normalizeMapModelKey(modelName: string): string {
@@ -59,26 +70,43 @@ export interface ReadyResourceManifestV1 {
   lastUsedFrame: number;
 }
 
+export interface MapModelLoadRetentionStats {
+  preparedEnvelopeCount: number;
+  inFlightCount: number;
+  legacyInFlightCount: number;
+  uploadedCount: number;
+}
+
 interface InFlightEntry<TGeometry extends MapMeshGeometry> {
   controller: AbortController;
   promise: Promise<TGeometry | null>;
-  resourceCacheKeySha256: string;
+  operationKey: string;
 }
 
 /**
  * MapModelLoadCache per 24.12:
- * - keys by ResourceCacheKeyV1 canonical SHA (full typed key, not short modelName)
+ * - loadByKey keys by ResourceCacheKeyV1 canonical SHA (full typed key, not short modelName)
+ * - production panel currently uses load()'s collision-free legacy delivery seam
  * - resolved cache holds small ReadyResourceManifest only: no base64 wire payload / ArrayBuffer retained
- * - inFlight coalesces by operationKeySha256 (resourceCacheKeySha256 + context)
+ * - inFlight coalesces by operation key
  * - dispose aborts via AbortController and clears inFlight
  */
-export class MapModelLoadCache<TGeometry extends MapMeshGeometry = MapMeshGeometry> {
+export class MapModelLoadCache<TGeometry extends MapModelLoadGeometry = MapMeshGeometry> {
   // For production keys: small manifest only, no wire retained.
-  private readonly resolvedManifests = new Map<string, ReadyResourceManifestV1 | null>();
-  // Legacy synthetic keys (tests): retain small mesh for backward compat.
+  private readonly resolvedManifests = new Map<string, ReadyResourceManifestV1>();
+  // Legacy `load()` path: transient prepared envelope, released after upload;
+  // retained for the shared-load/test compatibility seam while loadByKey is
+  // still the manifest-only production contract.
   private readonly legacyResolved = new Map<string, TGeometry | null>();
   private readonly inFlight = new Map<string, InFlightEntry<TGeometry>>();
   private readonly inFlightLegacy = new Map<string, Promise<TGeometry | null>>();
+  /**
+   * A successful upload keeps its Three resource alive, but no longer needs
+   * the prepared CPU envelope in this scheduler.  This set is deliberately
+   * only a small state marker so a selected-part retry cannot re-read and
+   * re-upload a model that is already visible.
+   */
+  private readonly uploaded = new Set<string>();
   private disposed = false;
 
   public constructor(
@@ -89,41 +117,33 @@ export class MapModelLoadCache<TGeometry extends MapMeshGeometry = MapMeshGeomet
     if (this.disposed) {
       return Promise.reject(new Error(`MAP_MESH_LOAD_CACHE_DISPOSED: cannot load ${modelName}`));
     }
-    const legacySha = normalizeMapModelKey(modelName);
-    // legacyResolved path (test compat) — still keyed via normalized short key but also via canonical SHA for spec
-    const syntheticKey: ResourceCacheKeyV1 = {
-      schema: 'map-resource-cache-key-v1',
-      workspacePersistentIdentityHash: 'legacy',
-      overlayResolutionGeneration: 0,
-      resourceEdgeId: legacySha,
-      resolvedLogicalUri: legacySha,
-      sourceIdentityHash: 'legacy',
-      pathSourceGeneration: 0,
-      containerEntryIdentitySha256: legacySha,
-      modelLocalTransformSha256: 'legacy',
-      faceSetRuleRegistrySha256: 'legacy',
-      mapCoordinateContractPayloadSha256: 'legacy',
-    };
-    const sha = canonicalResourceCacheKeySha256(syntheticKey);
-    // coalesce legacy inFlight by sha
-    if (this.legacyResolved.has(sha)) return Promise.resolve(this.legacyResolved.get(sha) ?? null);
-    const pending = this.inFlightLegacy.get(sha);
+    // The production panel still uses this legacy delivery path. Keep its
+    // identity collision-free without migrating it to the manifest-only path.
+    const key = this.legacyCacheKey(modelName);
+    if (this.uploaded.has(key)) return Promise.resolve(null);
+    if (this.legacyResolved.has(key)) return Promise.resolve(this.legacyResolved.get(key) ?? null);
+    const pending = this.inFlightLegacy.get(key);
     if (pending) return pending;
     const controller = new AbortController();
-    const request = this.loader(modelName, controller.signal)
+    let request: Promise<TGeometry | null>;
+    request = this.loader(modelName, controller.signal)
       .then((geometry) => {
         if (this.disposed || controller.signal.aborted) {
           throw new Error(`MAP_MESH_LOAD_CANCELLED: ${modelName}`);
         }
-        this.legacyResolved.set(sha, geometry);
+        // Missing/diagnostic-only models must remain retryable.  Only a real
+        // prepared geometry is eligible for the success/upload lifecycle.
+        if (geometry) this.legacyResolved.set(key, geometry);
         return geometry;
       })
       .finally(() => {
-        this.inFlightLegacy.delete(sha);
+        if (this.inFlightLegacy.get(key) === request) this.inFlightLegacy.delete(key);
+        const current = this.inFlight.get(key);
+        if (current?.promise === request) this.inFlight.delete(key);
       });
     // store controller for abort
-    this.inFlight.set(sha, { controller, promise: request, resourceCacheKeySha256: sha });
-    this.inFlightLegacy.set(sha, request);
+    this.inFlight.set(key, { controller, promise: request, operationKey: key });
+    this.inFlightLegacy.set(key, request);
     return request;
   }
 
@@ -131,53 +151,103 @@ export class MapModelLoadCache<TGeometry extends MapMeshGeometry = MapMeshGeomet
     if (this.disposed) {
       return Promise.reject(new Error(`MAP_MESH_LOAD_CACHE_DISPOSED: cannot load ${modelName}`));
     }
-    const sha = canonicalResourceCacheKeySha256(key);
-    if (this.resolvedManifests.has(sha)) {
-      // ready hit: manifest exists, wire payload not retained — caller acquires from GPU pool.
-      return Promise.resolve(null);
-    }
-    const pending = this.inFlight.get(sha);
+    // All fields are scalar; snapshot before the async digest so a caller
+    // mutation cannot split the digest identity from the retained manifest.
+    const keySnapshot = { ...key };
+    const canonical = canonicalResourceCacheKeyJson(keySnapshot);
+    // Reserve the exact typed operation before awaiting WebCrypto. Otherwise
+    // two same-key calls whose digest promises settle in different turns can
+    // both start a fast (including null) loader before either hashes.
+    const operationKey = `typed:${canonical}`;
+    const pending = this.inFlight.get(operationKey);
     if (pending) return pending.promise;
     const controller = new AbortController();
-    const promise = this.loader(modelName, controller.signal)
-      .then((geometry) => {
-        if (this.disposed || controller.signal.aborted) {
-          throw new Error(`MAP_MESH_LOAD_CANCELLED: ${modelName}`);
-        }
-        if (!geometry) {
-          this.resolvedManifests.set(sha, null);
-          return null;
-        }
-        const manifest: ReadyResourceManifestV1 = {
-          schema: 'map-ready-resource-manifest-v1',
-          cacheKey: key,
-          resourceCacheKeySha256: sha,
-          chunks: [{
-            chunkId: sha.slice(0, 16),
-            meshOrdinal: 0,
-            materialIndex: 0,
-            sourceTriangleStart: 0,
-            triangleCount: Math.floor(geometry.vertexCount / 3),
-            modelLocalTransformSha256: key.modelLocalTransformSha256,
-            faceSetSpansAndCullSha256: key.faceSetRuleRegistrySha256,
-            geometryKey: `${sha}:g0`,
-            materialKeys: [`${sha}:m0`],
-            rawContentSha256: sha,
-          }],
-          complete: true,
-          createdAtFrame: 0,
-          lastUsedFrame: 0,
-        };
-        // do not retain wire payload: drop base64 refs immediately
-        void geometry.positionsBase64;
-        this.resolvedManifests.set(sha, manifest);
+    let promise: Promise<TGeometry | null>;
+    promise = (async () => {
+      const sha = await sha256Utf8Hex(canonical);
+      if (this.disposed || controller.signal.aborted) {
+        throw new Error(`MAP_MESH_LOAD_CANCELLED: ${modelName}`);
+      }
+      if (this.resolvedManifests.has(sha)) {
+        // ready hit: manifest exists, wire payload not retained — caller acquires from GPU pool.
         return null;
-      })
+      }
+      const geometry = await this.loader(modelName, controller.signal);
+      if (this.disposed || controller.signal.aborted) {
+        throw new Error(`MAP_MESH_LOAD_CANCELLED: ${modelName}`);
+      }
+      if (!geometry) {
+        // Missing/diagnostic-only results remain retryable; do not create
+        // a permanent negative manifest entry.
+        return null;
+      }
+      const manifest: ReadyResourceManifestV1 = {
+        schema: 'map-ready-resource-manifest-v1',
+        cacheKey: keySnapshot,
+        resourceCacheKeySha256: sha,
+        chunks: [{
+          chunkId: sha.slice(0, 16),
+          meshOrdinal: 0,
+          materialIndex: 0,
+          sourceTriangleStart: 0,
+          triangleCount: Math.floor(geometry.vertexCount / 3),
+          modelLocalTransformSha256: keySnapshot.modelLocalTransformSha256,
+          faceSetSpansAndCullSha256: keySnapshot.faceSetRuleRegistrySha256,
+          geometryKey: `${sha}:g0`,
+          materialKeys: [`${sha}:m0`],
+          rawContentSha256: sha,
+        }],
+        complete: true,
+        createdAtFrame: 0,
+        lastUsedFrame: 0,
+      };
+      // do not retain wire payload: drop base64 refs immediately
+      void geometry.positionsBase64;
+      this.resolvedManifests.set(sha, manifest);
+      return null;
+    })()
       .finally(() => {
-        this.inFlight.delete(sha);
+        const current = this.inFlight.get(operationKey);
+        if (current?.promise === promise) this.inFlight.delete(operationKey);
       });
-    this.inFlight.set(sha, { controller, promise, resourceCacheKeySha256: sha });
+    this.inFlight.set(operationKey, { controller, promise, operationKey });
     return promise;
+  }
+
+  /** True when the model has committed successfully to the visible scene. */
+  public isUploaded(modelName: string): boolean {
+    return this.uploaded.has(this.legacyCacheKey(modelName));
+  }
+
+  /**
+   * Drop a prepared envelope after the corresponding upload succeeds.  The
+   * identity check prevents an old generation from deleting a newer load that
+   * has already replaced the cache entry.
+   */
+  public markUploaded(modelName: string, geometry: TGeometry): boolean {
+    const key = this.legacyCacheKey(modelName);
+    if (this.legacyResolved.get(key) !== geometry) return false;
+    this.legacyResolved.delete(key);
+    this.uploaded.add(key);
+    return true;
+  }
+
+  /** Release a failed/cancelled prepared envelope while keeping retry enabled. */
+  public release(modelName: string, geometry?: TGeometry): void {
+    const key = this.legacyCacheKey(modelName);
+    if (geometry === undefined || this.legacyResolved.get(key) === geometry) {
+      this.legacyResolved.delete(key);
+    }
+  }
+
+  /** Read-only lifecycle counts; payloads and model names never leave the cache. */
+  public getRetentionStats(): MapModelLoadRetentionStats {
+    return {
+      preparedEnvelopeCount: this.legacyResolved.size,
+      inFlightCount: this.inFlight.size,
+      legacyInFlightCount: this.inFlightLegacy.size,
+      uploadedCount: this.uploaded.size
+    };
   }
 
   public dispose(): void {
@@ -189,6 +259,11 @@ export class MapModelLoadCache<TGeometry extends MapMeshGeometry = MapMeshGeomet
     this.inFlightLegacy.clear();
     this.legacyResolved.clear();
     this.resolvedManifests.clear();
+    this.uploaded.clear();
+  }
+
+  private legacyCacheKey(modelName: string): string {
+    return `legacy:${normalizeMapModelKey(modelName)}`;
   }
 }
 
@@ -204,7 +279,8 @@ interface QueuedFrameTask {
 
 /**
  * Drains synchronous GPU upload work inside a small per-frame budget.
- * Each task uploads exactly one bounded decoded chunk.
+ * Each task uploads one prepared model geometry; the budget is a soft
+ * inter-task yield and cannot preempt a running upload.
  */
 export class FrameTaskQueue {
   private readonly tasks: QueuedFrameTask[] = [];

@@ -39,6 +39,7 @@ import {
   type CoverageSourceVersion,
   type CoverageState
 } from './coverageState.js';
+import { cloneParamExports } from './cloneParamExport.js';
 
 export const MSB_READER_SCHEMA_REVISION = 2;
 export const MSB_READER_SCHEMA_HASH = 'msb-schema-rev-2-entityid-verified';
@@ -187,7 +188,7 @@ export class WorkspaceIndex {
     }
     clone.eventExports = structuredClone(this.eventExports);
     clone.mapExports = structuredClone(this.mapExports);
-    clone.paramExports = structuredClone(this.paramExports);
+    clone.paramExports = cloneParamExports(this.paramExports);
     clone.msgExports = structuredClone(this.msgExports);
     clone.taeExports = structuredClone(this.taeExports);
     clone.references = structuredClone(this.references);

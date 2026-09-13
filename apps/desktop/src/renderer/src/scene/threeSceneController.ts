@@ -21,6 +21,7 @@ import { flverEulerXzyToQuaternion } from './flverSkeletonMapping.js';
 import {
   ModelResourcePool,
   normalizeModelResourceKey,
+  type PreparedGeometryHints,
   type MeshGeometryWire
 } from './modelResourcePool.js';
 import type {
@@ -77,7 +78,11 @@ export interface ProxySceneHandle extends ThreeSceneHandle {
   /** 用真实 FLVER 网格替换某个 proxy 盒子；找不到 id 则忽略。 */
   replaceItemMesh: (id: string, mesh: FlverSceneMesh) => void;
   /** 按 modelName 批量更新场景内所有引用该模型的 Mesh 几何体（对齐 Smithbox 几何共享池）。返回实际替换数。 */
-  updateModelGeometry?: (modelName: string, geometryData: MeshGeometryWire) => number;
+  updateModelGeometry?: (
+    modelName: string,
+    geometryData: MeshGeometryWire,
+    preparedHints?: PreparedGeometryHints
+  ) => number;
 }
 
 export interface FlverSceneHandle extends ThreeSceneHandle {
@@ -702,14 +707,15 @@ export async function mountThreeProxyScene(
       core.addMesh(id, createFlverMesh(core.three, core.track, mesh));
       emitRenderAudit('mesh-ready');
     },
-    updateModelGeometry: (modelName, geometryData) => {
+    updateModelGeometry: (modelName, geometryData, preparedHints) => {
       if ((!geometryData.positionsBase64 && !geometryData.positionsBytes) || geometryData.vertexCount <= 0) return 0;
       // 1. 使用共享资源池获取或创建 BufferGeometry 和 Material
       const { geometry, material } = resourcePool.updateModelGeometry(
         core.three,
         core.track,
         modelName,
-        geometryData
+        geometryData,
+        preparedHints
       );
 
       const replaced = core.replaceModelGeometry(modelName, geometry, material);

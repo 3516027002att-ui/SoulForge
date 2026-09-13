@@ -3,6 +3,7 @@ import {
   importLegacySemanticSnapshot,
   DurableWorkspaceRepository,
   WorkspaceDataRepository,
+  isRagChunkDeltaStats,
   openAppDatabase,
   openSqliteOperationLogStore,
   type SqliteDatabase,
@@ -211,9 +212,13 @@ async function dispatch(request: OperationLogUtilityRequest): Promise<unknown> {
     case 'mergeRagChunks':
       requireWorkspaceDataRepository().mergeRagChunks(request.payload.chunks);
       return null;
-    case 'mergeRagChunkDelta':
-      requireWorkspaceDataRepository().mergeRagChunkDelta(request.payload);
-      return null;
+    case 'mergeRagChunkDelta': {
+      const stats = requireWorkspaceDataRepository().mergeRagChunkDelta(request.payload);
+      // The transaction has already committed when this result is produced.
+      // An invalid diagnostic must therefore become explicit unavailable
+      // rather than a fabricated zero-filled receipt.
+      return isRagChunkDeltaStats(stats) ? stats : null;
+    }
     case 'loadRagChunks':
       return requireWorkspaceDataRepository().loadRagChunks();
     case 'searchRagChunks':

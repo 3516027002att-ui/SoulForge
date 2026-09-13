@@ -198,3 +198,99 @@ export function safeHarnessFileLabel(value, maxLength = 128) {
 export function isRunStopRequested({ stopping = false, globalStop = false, runStop = false } = {}) {
   return stopping === true || globalStop === true || runStop === true;
 }
+
+/**
+ * Roll back committed operations in the order returned by production
+ * `listOperations()` (newest first). The caller supplies that production
+ * order; do not reverse or otherwise mutate it because consecutive writes to
+ * one file require the newest inverse to run before older inverses.
+ */
+export async function rollbackCommittedOperations(operations, rollbackOperation) {
+  if (!Array.isArray(operations)) throw new TypeError('operations must be an array');
+  if (typeof rollbackOperation !== 'function') throw new TypeError('rollbackOperation must be a function');
+  const results = [];
+  for (const operation of operations) {
+    const opId = operation?.opId ?? null;
+    try {
+      const result = await rollbackOperation(opId, operation);
+      results.push({ opId, attempted: true, result });
+    } catch (error) {
+      const code = typeof error?.code === 'string' && error.code.trim() !== ''
+        ? error.code
+        : 'ROLLBACK_OPERATION_FAILED';
+      const message = error instanceof Error ? error.message : String(error);
+      results.push({
+        opId,
+        attempted: true,
+        result: {
+          ok: false,
+          diagnostics: [{ severity: 'error', code, message }]
+        },
+        error: { code, message }
+      });
+      // A thrown rollback is indeterminate. Do not issue another inverse after
+      // it, because the production side may have accepted the request before
+      // the caller observed the error.
+      break;
+    }
+  }
+  return results;
+}
+
+/**
+ * Keep the destructive cleanup gate strict: receipts and operation statuses
+ * are insufficient when the isolated tree still differs from its baseline.
+ * This helper only evaluates the already-collected evidence; it does not
+ * grant any additional native/write authority.
+ */
+export function evaluateRollbackVerification({
+  operations = [],
+  results = [],
+  statuses,
+  treeRestoredExactly = false
+} = {}) {
+  const committedOperations = Array.isArray(operations) ? operations : [];
+  const rollbackResults = Array.isArray(results) ? results : [];
+  const readStatus = (opId) => statuses instanceof Map
+    ? statuses.get(opId)
+    : statuses && typeof statuses === 'object'
+      ? statuses[opId]
+      : undefined;
+  const receiptOk = committedOperations.length > 0
+    && rollbackResults.length === committedOperations.length
+    && rollbackResults.every((entry) => entry?.result?.ok === true);
+  const operationStatusOk = committedOperations.length > 0
+    && committedOperations.every((operation) => readStatus(operation?.opId) === 'rolled_back');
+  const treeOk = treeRestoredExactly === true;
+  return {
+    receiptOk,
+    operationStatusOk,
+    treeRestoredExactly: treeOk,
+    verified: receiptOk && operationStatusOk && treeOk
+  };
+}
+
+/**
+ * Scratch removal is permitted only after rollback is verified or a
+ * no-committed-operation/no-change result is proven not applicable. A
+ * preserved scratch directory is evidence, not a cleanup success, so callers
+ * can keep the run report honest when rollback is unverified.
+ */
+export function decideScratchCleanup({ electronStatus, rollbackStatus } = {}) {
+  const electronExited = electronStatus === 'succeeded' || electronStatus === 'not-started';
+  if (!electronExited) {
+    return {
+      remove: false,
+      status: 'preserved',
+      reason: 'ELECTRON_TREE_NOT_CONFIRMED_EXITED'
+    };
+  }
+  if ((rollbackStatus === 'verified' || rollbackStatus === 'not_applicable') && electronExited) {
+    return { remove: true, status: 'remove', reason: null };
+  }
+  return {
+    remove: false,
+    status: 'preserved',
+    reason: 'ROLLBACK_NOT_VERIFIED'
+  };
+}

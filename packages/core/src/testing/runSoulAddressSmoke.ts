@@ -25,6 +25,16 @@ function assert(condition: boolean, message: string): void {
   if (!condition) throw new Error(`soulAddress smoke failed: ${message}`);
 }
 
+function assertThrows(action: () => unknown, message: string): void {
+  let threw = false;
+  try {
+    action();
+  } catch {
+    threw = true;
+  }
+  assert(threw, message);
+}
+
 function main(): void {
   try {
     run();
@@ -40,6 +50,14 @@ function run(): void {
   assert(formatAnimCode(7) === 'A0007', `formatAnimCode(7) === 'A0007', got ${formatAnimCode(7)}`);
   assert(parseAnimCode('A200') === 200, `parseAnimCode('A200') === 200, got ${String(parseAnimCode('A200'))}`);
   assert(parseAnimCode('A0200') === 200, `parseAnimCode('A0200') === 200`);
+  for (const animId of [99999, 100000, 405403, Number.MAX_SAFE_INTEGER]) {
+    const code = formatAnimCode(animId);
+    assert(parseAnimCode(code) === animId, `format/parse animId ${animId} must round-trip via ${code}`);
+  }
+  assert(parseAnimCode(`A${Number.MAX_SAFE_INTEGER + 1}`) === null, 'parseAnimCode must reject >MAX_SAFE_INTEGER');
+  assert(parseAnimCode('A-1') === null, 'parseAnimCode must reject negative ids');
+  assert(parseAnimCode('A1.5') === null, 'parseAnimCode must reject fractional ids');
+  assert(parseAnimCode('AInfinity') === null, 'parseAnimCode must reject Infinity');
   assert(parseAnimCode('not-an-anim') === null, 'parseAnimCode must fail closed on garbage');
 
   // ── formatChrId ──
@@ -167,6 +185,31 @@ function run(): void {
     parseActionAddress(formatActionAddress({ chr: 'c1050', animId: 200, eventIndex: 3 }))?.eventIndex === 3,
     'formatActionAddress → parseActionAddress round trip'
   );
+  for (const animId of [99999, 100000, 405403, Number.MAX_SAFE_INTEGER]) {
+    const formatted = formatActionAddress({ chr: 'c0000', taeEntryIndex: 1, animId, eventIndex: 0 });
+    const parsed = parseActionAddress(formatted);
+    assert(
+      parsed?.animId === animId && parsed.taeEntryIndex === 1 && parsed.eventIndex === 0,
+      `sectioned action large animId ${animId} must round-trip: ${formatted} -> ${JSON.stringify(parsed)}`
+    );
+  }
+  const idSection100000 = formatActionAddress({ chr: 'c0000', taeEntryId: 5000000, animId: 100000, eventIndex: 0 });
+  const nameSection100000 = formatActionAddress({ chr: 'c0000', taeEntryName: 'a00.tae', animId: 100000, eventIndex: 0 });
+  assert(idSection100000 !== nameSection100000, 'different TAE section selectors must remain distinct for large animIds');
+  assert(parseActionAddress(idSection100000)?.taeEntryId === 5000000, 'TAE id selector must survive large animId formatting');
+  assert(parseActionAddress(nameSection100000)?.taeEntryName === 'a00.tae', 'TAE name selector must survive large animId formatting');
+  for (const animId of [-1, 1.5, Infinity, Number.MAX_SAFE_INTEGER + 1]) {
+    assertThrows(
+      () => formatActionAddress({ chr: 'c0000', taeEntryIndex: 1, animId, eventIndex: 0 }),
+      `formatActionAddress must reject invalid animId ${String(animId)}`
+    );
+    assert(parseActionAddress(`action://c0000/tae/1/A${String(animId)}/e0`) === null,
+      `parseActionAddress must reject invalid animId ${String(animId)}`);
+  }
+  assertThrows(
+    () => formatActionAddress({ chr: 'c0000', taeEntryIndex: 1, animId: 100000, eventIndex: -1 }),
+    'formatActionAddress must reject negative event index'
+  );
 
   // ── extractAtomicAddressTokens ──
   const tokens = extractAtomicAddressTokens('查 m11_01_00_00 的 c1050_0000');
@@ -188,6 +231,24 @@ function run(): void {
   assert(
     sectionedTokens.includes('action://c0000/tae/3/a0200/e0.startframe'),
     `extractAtomicAddressTokens must keep sectioned action URI atomic, got ${JSON.stringify(sectionedTokens)}`
+  );
+  const largeAddressTokens = extractAtomicAddressTokens(
+    'c0000#A100000.e0 action://c0000/tae/1/A405403/e0 action://c0000/tae/1/A9007199254740991/e0'
+  );
+  assert(
+    largeAddressTokens.includes('c0000#a100000.e0')
+      && largeAddressTokens.includes('action://c0000/tae/1/a405403/e0')
+      && largeAddressTokens.includes('action://c0000/tae/1/a9007199254740991/e0'),
+    `extractAtomicAddressTokens must preserve complete large action ids: ${JSON.stringify(largeAddressTokens)}`
+  );
+  const unsafeAddressTokens = extractAtomicAddressTokens(
+    'c0000#A9007199254740992.e0 action://c0000/tae/1/A9007199254740992/e0'
+  );
+  assert(
+    !unsafeAddressTokens.includes('c0000#a9007199254740992.e0')
+      && !unsafeAddressTokens.includes('action://c0000/tae/1/a9007199254740992/e0')
+      && !unsafeAddressTokens.includes('a9007199254740992'),
+    `extractAtomicAddressTokens must reject unsafe numeric ids without truncation: ${JSON.stringify(unsafeAddressTokens)}`
   );
 
   // ── parseRagQuery 原子地址（问题 6-A：queryParse 不再拆地址）──

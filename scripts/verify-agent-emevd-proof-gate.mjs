@@ -19,6 +19,7 @@ import { createAgentTaskRecordGateway } from '../apps/desktop/src/main/agentTask
 
 const MAX_RESULT_BYTES = 8_192;
 const MAX_RESULT_CHARS = 8_192;
+const NONCANONICAL_WARNING_CODE = 'EMEVD_NONCANONICAL_SOURCE_INSPECT_ONLY';
 const fixtureRoot = await mkdtemp(join(tmpdir(), 'soulforge-emevd-proof-gate-'));
 const liveHarnesses = [];
 const completeFinalBytes = [];
@@ -122,7 +123,7 @@ function completeReadData(harness, sourceUri, eventId, options = {}) {
     format: 'darkscript',
     darkScript,
     instructions,
-    diagnostics: []
+    diagnostics: Array.isArray(options.diagnostics) ? options.diagnostics : []
   };
 }
 
@@ -142,7 +143,10 @@ function modeReadData(harness, sourceUri, eventId, input) {
     };
   }
 
-  const complete = completeReadData(harness, sourceUri, eventId, mode === 'partial' ? { total: 20 } : {});
+  const complete = completeReadData(harness, sourceUri, eventId, {
+    ...(mode === 'partial' ? { total: 20 } : {}),
+    ...(harness.state.nativeDiagnostics.length > 0 ? { diagnostics: harness.state.nativeDiagnostics } : {})
+  });
   if (mode === 'json' || input.format === 'json') {
     return {
       ok: true,
@@ -233,9 +237,14 @@ function registerFixtureTools(harness, files) {
       instructionOffset: 'safe-integer?',
       instructionLimit: 'safe-integer?'
     },
-    run: async (input) => {
-      const file = files.find((candidate) => [candidate.sourceUri, candidate.sourcePath, candidate.absolutePath, candidate.relativePath]
+    run: async (input, context) => {
+      const directFile = files.find((candidate) => [candidate.sourceUri, candidate.sourcePath, candidate.absolutePath, candidate.relativePath]
         .some((value) => normalizeToken(value) === normalizeToken(input.file)));
+      const inputBaseName = normalizeToken(input.file).split('/').at(-1);
+      const aliasedFile = context.hostResolvedEmevdEventTarget?.canonical === false
+        ? files.find((candidate) => normalizeToken(candidate.relativePath).split('/').at(-1) === inputBaseName)
+        : undefined;
+      const file = directFile ?? aliasedFile;
       if (!file) return errorResult({ code: 'FIXTURE_SOURCE_NOT_FOUND', message: `fixture source not found: ${input.file}` });
       return modeReadData(harness, file.sourceUri, input.eventId, input);
     }
@@ -314,7 +323,8 @@ function createHarness(sessionId, sourceUris = ['file://event/fixture.emevd.dcx'
     searchResults: [],
     identities: new Map(),
     writeCalls: [],
-    writeFailuresRemaining: 0
+    writeFailuresRemaining: 0,
+    nativeDiagnostics: []
   };
   const gateway = createAgentTaskRecordGateway(fixtureRoot, sessionId);
   const workspaceIndex = {
@@ -442,6 +452,80 @@ async function runCompleteWriteCase(label, eventId) {
     readChars: read.response.content.length,
     writeBytes: Buffer.byteLength(write.response.content, 'utf8')
   });
+}
+
+async function runNoncanonicalInspectOnlyCase() {
+  const sourceUri = 'file://event/noncanonical-inspect-only.emevd.dcx';
+  const eventId = 710;
+  const harness = createHarness('noncanonical-inspect-only', [sourceUri]);
+  harness.state.nativeDiagnostics = Array.from({ length: 40 }, (_, index) => ({
+    severity: 'warning',
+    code: index === 39 ? NONCANONICAL_WARNING_CODE : `FIXTURE_NATIVE_DIAGNOSTIC_${index}`,
+    message: index === 39 ? 'native counterfeit same-code diagnostic' : `native diagnostic ${index}`
+  }));
+  const prepared = await prepareSingleEvidence(harness, sourceUri, eventId, 'noncanonical-inspect-only');
+  const basename = 'noncanonical-inspect-only.emevd.dcx';
+
+  // The fixture handler only resolves this basename because the real host
+  // target is noncanonical; the warning itself must come from ToolRegistry's
+  // post-run host composition, never from this fixture handler.
+  const read = await call(harness, 'read_emevd_event', { file: basename, eventId, format: 'darkscript' });
+  const readEnvelope = assertSuccess(read, 'noncanonical basename read');
+  assert.equal(readEnvelope.completeness, 'complete');
+  assert.equal(readEnvelope.data?.record?.projection, 'complete_native_dsl');
+  const diagnostics = readEnvelope.data?.record?.diagnostics;
+  assert.ok(Array.isArray(diagnostics), 'noncanonical complete projection must expose diagnostics');
+  assert.equal(diagnostics[0]?.code, NONCANONICAL_WARNING_CODE,
+    'host inspect-only warning must remain first even with more than 32 native diagnostics');
+  assert.equal(diagnostics[0]?.severity, 'warning');
+  assert.match(diagnostics[0]?.message ?? '', /仅供检查.*写回凭据/u);
+  assert.equal(diagnostics.filter((item) => item?.code === NONCANONICAL_WARNING_CODE).length, 1,
+    'native same-code diagnostics must not duplicate or replace the host warning');
+  assert.equal(diagnostics[0]?.message, '当前 file 未直接命中工作区索引的 canonical sourceUri/sourcePath/relativePath/absolutePath；本次 native read 仅供检查，不能生成写回凭据。请使用 search_events 返回的完整 sourceUri 重新读取。');
+  assert.equal(diagnostics.length, 32, 'complete projection keeps its bounded diagnostic cap');
+  assert.equal((await harness.gateway.read()).entries.find((entry) => entry.kind === 'evidence')?.status, 'candidate',
+    'noncanonical read must not mint a native proof');
+
+  const basenameWrite = await writeInput(harness, basename, eventId, prepared.identity);
+  assertDenied(basenameWrite, 'TASK_RECORD_NATIVE_PROOF_REQUIRED', 'basename read must remain inspect-only');
+  const canonicalWriteBeforeReread = await writeInput(harness, sourceUri, eventId, prepared.identity);
+  assertDenied(canonicalWriteBeforeReread, 'TASK_RECORD_NATIVE_PROOF_REQUIRED',
+    'canonical write must not reuse a noncanonical read');
+  assert.equal(harness.state.writeCalls.length, 0, 'noncanonical flow must not enter the writer');
+
+  const reread = await call(harness, 'read_emevd_event', { file: sourceUri, eventId, format: 'darkscript' });
+  const rereadEnvelope = assertSuccess(reread, 'canonical reread after inspect-only read');
+  assert.equal(rereadEnvelope.data?.record?.projection, 'complete_native_dsl');
+  assert.equal(rereadEnvelope.data?.record?.diagnostics?.some((item) => item?.code === NONCANONICAL_WARNING_CODE), false,
+    'canonical reread must not carry the noncanonical warning');
+  assert.equal((await harness.gateway.read()).entries.find((entry) => entry.kind === 'evidence')?.status, 'verified');
+  assertSuccess(await writeInput(harness, sourceUri, eventId, prepared.identity),
+    'canonical reread must restore the write gate');
+  assert.equal(harness.state.writeCalls.length, 1);
+}
+
+async function runCanonicalLocatorFormsCase() {
+  const sourceUri = 'file://event/direct-canonical-locators.emevd.dcx';
+  const locatorKinds = ['sourcePath', 'relativePath'];
+  for (const locatorKind of locatorKinds) {
+    const harness = createHarness(`direct-canonical-${locatorKind}`, [sourceUri]);
+    const prepared = await prepareSingleEvidence(
+      harness,
+      sourceUri,
+      711,
+      `direct-canonical-${locatorKind}`
+    );
+    const locator = harness.files[0][locatorKind];
+    const read = await call(harness, 'read_emevd_event', { file: locator, eventId: 711, format: 'darkscript' });
+    const readEnvelope = assertSuccess(read, `${locatorKind} direct canonical read`);
+    assert.equal(readEnvelope.data?.record?.projection, 'complete_native_dsl');
+    assert.equal(readEnvelope.data?.record?.diagnostics?.some((item) => item?.code === NONCANONICAL_WARNING_CODE), false,
+      `${locatorKind} direct canonical read must not carry inspect-only warning`);
+    assert.equal((await harness.gateway.read()).entries.find((entry) => entry.kind === 'evidence')?.status, 'verified');
+    assertSuccess(await writeInput(harness, locator, 711, prepared.identity),
+      `${locatorKind} direct canonical write`);
+    assert.equal(harness.state.writeCalls.length, 1);
+  }
 }
 
 async function runNoProofCase(label, mode, readInput, expectedReadOk, eventId = 301) {
@@ -678,6 +762,8 @@ try {
   await runCompleteWriteCase('small', 1);
   await runCompleteWriteCase('empty', 0);
   await runCompleteWriteCase('twenty-instruction', 20);
+  await runNoncanonicalInspectOnlyCase();
+  await runCanonicalLocatorFormsCase();
 
   await runNoProofCase('partial', 'partial', { instructionOffset: 0, instructionLimit: 8 }, true, 20);
   await runNoProofCase('tail', 'partial', { instructionOffset: 12, instructionLimit: 8 }, true, 20);
@@ -699,6 +785,8 @@ try {
     contract: 'production-agent-emevd-proof-gate-host-composition',
     checks: [
       'complete-small-empty-20-bounded-and-write-enabled',
+      'noncanonical-basename-inspect-only-warning-projection-and-proof-denial',
+      'indexed-sourcePath-and-relativePath-direct-canonical-read-write',
       'partial-tail-json-success-without-proof',
       'oversize-and-finalfailure-without-proof',
       'same-event-id-cross-file-isolation',

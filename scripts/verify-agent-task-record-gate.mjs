@@ -7,7 +7,7 @@
  */
 
 import assert from 'node:assert/strict';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -127,6 +127,19 @@ try {
   });
   assert.equal(candidateWrite.ok, false, 'candidate Evidence 不得直接授权写入');
   assert.equal(candidateWrite.code, 'TASK_RECORD_NATIVE_PROOF_REQUIRED');
+  assert.deepEqual(candidateWrite.details.target, {
+    resourceKind: 'param',
+    table: 'EquipParamGoods',
+    rowId: 3080,
+    fieldId: 'nameId'
+  });
+  assert.deepEqual(candidateWrite.details.requiredRead, {
+    table: 'EquipParamGoods',
+    rowIds: [3080],
+    fieldIds: ['nameId']
+  });
+  assert.equal(candidateWrite.details.nativeProofState, 'candidate');
+  assert.match(candidateWrite.message, /EquipParamGoods#3080\.nameId/u);
   await gateway.recordNativeParamRead(
     { table: 'EquipParamGoods', rowIds: [3080], fieldIds: ['nameId'] },
     { fields: [{ table: 'EquipParamGoods', rowId: 3080, fieldId: 'nameId', value: 3504, sourceHash: 'native-hash', sourceRevision: 1 }] }
@@ -285,6 +298,192 @@ try {
   assert.equal(forgedDerivedTarget.error.code, 'TASK_RECORD_TARGET_OUTSIDE_FROZEN_REQUEST');
   await derivedGateway.read();
 
+  // A search_events ticket carries a structured sourceUri+eventId receipt in
+  // parallel with the bounded resultText projection.  Keep the event target
+  // after the 4,000-character projection boundary so this exercises the
+  // actual registry -> gateway path rather than a direct helper call.
+  const eventSourceUri = 'file://event/m11_00_00_00.emevd.dcx';
+  const emevdGateway = createAgentTaskRecordGateway(root, 'derived-emevd-registry-smoke', {
+    frozenRequest: '把鬼刑部改为精英怪并设置靛蓝星陨掉落'
+  });
+  const emevdIndex = {
+    searchEvents: () => [
+      {
+        eventId: 11105800,
+        sourceUri: eventSourceUri,
+        padding: 'x'.repeat(3_900)
+      },
+      { eventId: 11105810, sourceUri: eventSourceUri },
+      { eventId: 11105811, sourceUri: eventSourceUri }
+    ]
+  };
+  const emevdContext = {
+    workspaceIndex: emevdIndex,
+    mode: 'fullPermission',
+    taskRecord: emevdGateway,
+    requireTaskRecord: true
+  };
+  const emevdUserTarget = await registry.run('update_agent_task_record', {
+    objectName: '鬼刑部', propertyKey: 'target', value: '用户指定对象', kind: 'target'
+  }, emevdContext);
+  assert.equal(emevdUserTarget.ok, true);
+  const emevdSearch = await registry.run('search_events', { query: '111058' }, emevdContext);
+  assert.equal(emevdSearch.ok, true);
+  assert.ok(emevdSearch.data.searchId);
+  await emevdGateway.read();
+  const emevdLedger = await readFile(join(root, 'derived-emevd-registry-smoke.md'), 'utf8');
+  const emevdTicketLine = emevdLedger.split(/\r?\n/u).find((line) => line.startsWith('<!-- soulforge-search-ticket '));
+  assert.ok(emevdTicketLine, 'actual gateway 应持久化 search_events ticket');
+  const emevdTicket = JSON.parse(emevdTicketLine.slice('<!-- soulforge-search-ticket '.length, -4));
+  assert.equal(emevdTicket.resultText.length, 4_000, '截断复现必须保留 4,000 字符上限');
+  assert.equal(emevdTicket.resultText.includes('11105810'), false, '11105810 必须位于 resultText 截断边界之后');
+  assert.ok(
+    emevdTicket.emevdTargets.some((target) => (
+      target.sourceUri === eventSourceUri && target.eventId === 11105810
+    )),
+    '结构化 emevdTargets 必须保留截断文本之外的精确 event 身份'
+  );
+  const structuredEmevdTarget = await registry.run('update_agent_task_record', {
+    objectName: '11105810',
+    propertyKey: 'target',
+    value: 'search_events 返回的精确 eventId 候选',
+    kind: 'target',
+    searchId: emevdSearch.data.searchId
+  }, emevdContext);
+  assert.equal(
+    structuredEmevdTarget.ok,
+    true,
+    'resultText 截断后，search_events 的结构化 sourceUri+eventId 仍应允许精确候选登记'
+  );
+  const conflictingEventHint = await registry.run('update_agent_task_record', {
+    objectName: '11105811',
+    propertyKey: 'target',
+    value: 'eventId=11105810 与 objectName 冲突',
+    kind: 'target',
+    searchId: emevdSearch.data.searchId
+  }, emevdContext);
+  assert.equal(conflictingEventHint.ok, false);
+  assert.equal(conflictingEventHint.error.code, 'TASK_RECORD_TARGET_OUTSIDE_FROZEN_REQUEST');
+  const conflictingSourceHint = await registry.run('update_agent_task_record', {
+    objectName: '11105811',
+    propertyKey: 'target',
+    value: `sourceUri=${eventSourceUri} sourceUri=file://event/other.emevd.dcx`,
+    kind: 'target',
+    searchId: emevdSearch.data.searchId
+  }, emevdContext);
+  assert.equal(conflictingSourceHint.ok, false);
+  assert.equal(conflictingSourceHint.error.code, 'TASK_RECORD_TARGET_OUTSIDE_FROZEN_REQUEST');
+  const nonExistingEmevdTarget = await registry.run('update_agent_task_record', {
+    objectName: '11105812',
+    propertyKey: 'target',
+    value: '不存在于结构化搜索结果的 eventId',
+    kind: 'target',
+    searchId: emevdSearch.data.searchId
+  }, emevdContext);
+  assert.equal(nonExistingEmevdTarget.ok, false);
+  assert.equal(nonExistingEmevdTarget.error.code, 'TASK_RECORD_TARGET_OUTSIDE_FROZEN_REQUEST');
+  const multiIdObjectName = await registry.run('update_agent_task_record', {
+    objectName: '11105810,11105811',
+    propertyKey: 'target',
+    value: '不得把多个 eventId 合并成一个候选对象',
+    kind: 'target',
+    searchId: emevdSearch.data.searchId
+  }, emevdContext);
+  assert.equal(multiIdObjectName.ok, false);
+  assert.equal(multiIdObjectName.error.code, 'TASK_RECORD_TARGET_OUTSIDE_FROZEN_REQUEST');
+
+  const ambiguousEmevdGateway = createAgentTaskRecordGateway(root, 'ambiguous-emevd-registry-smoke', {
+    frozenRequest: '把鬼刑部改为精英怪并设置靛蓝星陨掉落'
+  });
+  const ambiguousEmevdContext = {
+    workspaceIndex: {
+      searchEvents: () => [
+        { eventId: 11105820, sourceUri: 'file://event/m11_00_00_00.emevd.dcx' },
+        { eventId: 11105820, sourceUri: 'file://event/m12_00_00_00.emevd.dcx' }
+      ]
+    },
+    mode: 'fullPermission',
+    taskRecord: ambiguousEmevdGateway,
+    requireTaskRecord: true
+  };
+  const ambiguousUserTarget = await registry.run('update_agent_task_record', {
+    objectName: '鬼刑部', propertyKey: 'target', value: '用户指定对象', kind: 'target'
+  }, ambiguousEmevdContext);
+  assert.equal(ambiguousUserTarget.ok, true);
+  const ambiguousSearch = await registry.run('search_events', { query: '11105820' }, ambiguousEmevdContext);
+  assert.equal(ambiguousSearch.ok, true);
+  const ambiguousTarget = await registry.run('update_agent_task_record', {
+    objectName: '11105820',
+    propertyKey: 'target',
+    value: '同 eventId 多 sourceUri 时不得猜文件',
+    kind: 'target',
+    searchId: ambiguousSearch.data.searchId
+  }, ambiguousEmevdContext);
+  assert.equal(ambiguousTarget.ok, false);
+  assert.equal(ambiguousTarget.error.code, 'TASK_RECORD_TARGET_OUTSIDE_FROZEN_REQUEST');
+  const explicitSourceTarget = await registry.run('update_agent_task_record', {
+    objectName: '11105820',
+    propertyKey: 'target',
+    value: 'sourceUri=file://event/m12_00_00_00.emevd.dcx',
+    kind: 'target',
+    searchId: ambiguousSearch.data.searchId
+  }, ambiguousEmevdContext);
+  assert.equal(
+    explicitSourceTarget.ok,
+    true,
+    '同 eventId 多 sourceUri 时，明确 sourceUri 才能登记精确候选'
+  );
+
+  const emevdEvidence = await registry.run('update_agent_task_record', {
+    objectName: '11105810',
+    propertyKey: 'emevd',
+    value: `eventId=11105810 sourceUri=${eventSourceUri}`,
+    kind: 'evidence',
+    status: 'candidate',
+    evidence: [`eventId=11105810 sourceUri=${eventSourceUri}`],
+    searchId: emevdSearch.data.searchId,
+    mutationBudget: 1
+  }, emevdContext);
+  assert.equal(emevdEvidence.ok, true, '结构化 event 候选登记后应允许登记 candidate Evidence');
+  const emevdWriteWithoutProof = await emevdGateway.assertMutationTarget(
+    'apply_emevd_dsl',
+    { file: 'm11_00_00_00.emevd.dcx', scope: 'event' },
+    {
+      sourceUri: eventSourceUri,
+      sourcePath: 'D:/fixture/m11_00_00_00.emevd.dcx',
+      eventId: 11105810
+    }
+  );
+  assert.equal(emevdWriteWithoutProof.ok, false);
+  assert.equal(emevdWriteWithoutProof.code, 'TASK_RECORD_NATIVE_PROOF_REQUIRED');
+
+  const freeTextEmevdGateway = createAgentTaskRecordGateway(root, 'free-text-emevd-registry-smoke', {
+    frozenRequest: '把鬼刑部改为精英怪并设置靛蓝星陨掉落'
+  });
+  const freeTextEmevdContext = {
+    workspaceIndex: {
+      searchEvents: () => [{ description: '文本提到了 eventId=11105830，但没有结构化 eventId/sourceUri' }]
+    },
+    mode: 'fullPermission',
+    taskRecord: freeTextEmevdGateway,
+    requireTaskRecord: true
+  };
+  const freeTextUserTarget = await registry.run('update_agent_task_record', {
+    objectName: '鬼刑部', propertyKey: 'target', value: '用户指定对象', kind: 'target'
+  }, freeTextEmevdContext);
+  assert.equal(freeTextUserTarget.ok, true);
+  const freeTextSearch = await registry.run('search_events', { query: '11105830' }, freeTextEmevdContext);
+  assert.equal(freeTextSearch.ok, true);
+  const freeTextTarget = await registry.run('update_agent_task_record', {
+    objectName: '11105830',
+    propertyKey: 'target',
+    value: '自由文本不能授权 eventId 候选',
+    kind: 'target',
+    searchId: freeTextSearch.data.searchId
+  }, freeTextEmevdContext);
+  assert.equal(freeTextTarget.ok, false);
+  assert.equal(freeTextTarget.error.code, 'TASK_RECORD_TARGET_OUTSIDE_FROZEN_REQUEST');
+
   const omittedFieldIds = await registry.run('read_param_fields', {
     table: 'EquipParamGoods',
     rowIds: [9011]
@@ -422,6 +621,7 @@ try {
     const decision = await checkProofWrite(targetGateway, fieldId);
     assert.equal(decision.ok, false, message);
     assert.equal(decision.code, 'TASK_RECORD_NATIVE_PROOF_REQUIRED', message);
+    return decision;
   };
   await registerProofEvidence(['hp', 'itemLotId_1']);
   const noRevisionResult = proofResult(['hp']);
@@ -471,11 +671,130 @@ try {
   const committedProofWrite = await checkProofWrite(proofGateway, 'hp');
   assert.equal(committedProofWrite.ok, true);
   await proofGateway.finalizeMutation(committedProofWrite.reservationId);
-  await assertProofWriteDenied(proofGateway, 'itemLotId_1', '一次写入完成后，其他未耗尽 entry 的旧原生证明也必须重读');
+  const finalizedLedger = await proofGateway.read();
+  assert.equal(
+    finalizedLedger.entries.find((entry) => entry.propertyKey === 'NpcParam')?.status,
+    'verified',
+    'finalize 清掉 host proof 时不能把持久化 ledger 的 verified 标签降回 candidate'
+  );
+  const missingAfterFinalize = await assertProofWriteDenied(
+    proofGateway,
+    'itemLotId_1',
+    '一次写入完成后，其他未耗尽 entry 的旧原生证明也必须重读'
+  );
+  assert.deepEqual(missingAfterFinalize.details.target, {
+    resourceKind: 'param',
+    table: 'NpcParam',
+    rowId: 50800000,
+    fieldId: 'itemLotId_1'
+  });
+  assert.deepEqual(missingAfterFinalize.details.requiredRead, {
+    table: 'NpcParam',
+    rowIds: [50800000],
+    fieldIds: ['itemLotId_1']
+  });
+  assert.equal(missingAfterFinalize.details.nativeProofState, 'verified_missing_native_proof');
+  assert.match(missingAfterFinalize.message, /NpcParam#50800000\.itemLotId_1/u);
   await proofGateway.recordNativeParamRead(proofQuery(['itemLotId_1']), proofResult(['itemLotId_1'], 'proof-hash-c', 3));
   await assertProofWriteAllowed(proofGateway, 'itemLotId_1', '提交后使用新来源重读可以恢复未耗尽 entry 的精确字段权限');
   await proofGateway.read();
   await frozenGateway.read();
+
+  // A persisted verified label does not preserve a host proof after a commit.
+  // Reproduce the three-row Bullet case: all rows are first read at the old
+  // identity, the commit clears receipts, only 750300/750302 are reread, and
+  // a batch must identify 750301 without consuming any mutation budget.
+  const bulletGateway = createAgentTaskRecordGateway(root, 'bullet-proof-diagnostic-smoke');
+  await bulletGateway.update({
+    objectName: '绣丸', propertyKey: 'target', value: '绣丸连招子弹', kind: 'target'
+  });
+  const bulletSearch = await bulletGateway.recordSearch({
+    toolName: 'search_param_rows',
+    query: '绣丸 Bullet',
+    result: {
+      items: [
+        { item: { table: 'Bullet', rowId: 750300, rowName: '绣丸1' } },
+        { item: { table: 'Bullet', rowId: 750301, rowName: '绣丸2' } },
+        { item: { table: 'Bullet', rowId: 750302, rowName: '绣丸3' } },
+        { item: { table: 'SpEffectParam', rowId: 9027, rowName: '超猛毒' } }
+      ]
+    }
+  });
+  const registerBulletEvidence = async (propertyKey, value, evidence) => bulletGateway.update({
+    objectName: '绣丸', propertyKey, value, kind: 'evidence', evidence,
+    searchId: bulletSearch.searchId, mutationBudget: 1
+  });
+  await registerBulletEvidence('Bullet_750300', 'Bullet#750300', ['Bullet#750300 fieldId=spEffectId0']);
+  await registerBulletEvidence('Bullet_750301', 'Bullet#750301', ['Bullet#750301 fieldId=spEffectId0']);
+  await registerBulletEvidence('Bullet_750302', 'Bullet#750302', ['Bullet#750302 fieldId=spEffectId0']);
+  await registerBulletEvidence('SpEffectParam', 'SpEffectParam#9027', ['SpEffectParam#9027 fieldId=poizonAttackPower']);
+  const bulletQuery = { table: 'Bullet', rowIds: [750300, 750301, 750302], fieldIds: ['spEffectId0'] };
+  const bulletFields = (rowIds, sourceRevision) => ({
+    fields: rowIds.map((rowId) => ({
+      table: 'Bullet', rowId, fieldId: 'spEffectId0', value: 9039,
+      sourceHash: 'bullet-source-hash', sourceRevision
+    }))
+  });
+  await bulletGateway.recordNativeParamRead(bulletQuery, bulletFields([750300, 750301, 750302], 1));
+  await bulletGateway.recordNativeParamRead(
+    { table: 'SpEffectParam', rowIds: [9027], fieldIds: ['poizonAttackPower'] },
+    { fields: [{ table: 'SpEffectParam', rowId: 9027, fieldId: 'poizonAttackPower', value: 162, sourceHash: 'effect-source-hash', sourceRevision: 1 }] }
+  );
+  const controlReservation = await bulletGateway.assertMutationTarget('mutate_param_fields', {
+    edits: [{ table: 'SpEffectParam', rowId: 9027, fieldId: 'poizonAttackPower', value: 200 }]
+  });
+  assert.equal(controlReservation.ok, true);
+  await bulletGateway.finalizeMutation(controlReservation.reservationId);
+  await bulletGateway.recordNativeParamRead(
+    { table: 'Bullet', rowIds: [750300, 750302], fieldIds: ['spEffectId0'] },
+    bulletFields([750300, 750302], 2)
+  );
+  await registerBulletEvidence('Bullet_750301', 'Bullet#750301 refreshed candidate', ['Bullet#750301 fieldId=spEffectId0 refreshed candidate']);
+  const mixedBulletEntries = (await bulletGateway.read()).entries
+    .filter((entry) => entry.propertyKey === 'Bullet_750301');
+  assert.deepEqual(
+    mixedBulletEntries.map((entry) => entry.status),
+    ['verified', 'candidate'],
+    '同一目标应同时保留旧 verified entry 与新 candidate entry'
+  );
+  const bulletBatchInput = {
+    edits: [
+      { table: 'Bullet', rowId: 750300, fieldId: 'spEffectId0', value: 9027 },
+      { table: 'Bullet', rowId: 750301, fieldId: 'spEffectId0', value: 9027 },
+      { table: 'Bullet', rowId: 750302, fieldId: 'spEffectId0', value: 9027 }
+    ]
+  };
+  const bulletBatchDenied = await bulletGateway.assertMutationTarget('mutate_param_fields', bulletBatchInput);
+  assert.equal(bulletBatchDenied.ok, false);
+  assert.equal(bulletBatchDenied.code, 'TASK_RECORD_NATIVE_PROOF_REQUIRED');
+  assert.deepEqual(bulletBatchDenied.details.target, {
+    resourceKind: 'param',
+    table: 'Bullet',
+    rowId: 750301,
+    fieldId: 'spEffectId0'
+  });
+  assert.deepEqual(bulletBatchDenied.details.requiredRead, {
+    table: 'Bullet',
+    rowIds: [750301],
+    fieldIds: ['spEffectId0']
+  });
+  assert.equal(bulletBatchDenied.details.nativeProofState, 'verified_missing_native_proof');
+  assert.match(bulletBatchDenied.message, /Bullet#750301\.spEffectId0/u);
+  const bulletAfterDenied = await bulletGateway.read();
+  assert.deepEqual(
+    bulletAfterDenied.entries
+      .filter((entry) => /^Bullet_75030[012]$/u.test(entry.propertyKey))
+      .map((entry) => entry.mutationUsed),
+    [0, 0, 0, 0],
+    '批量拒绝时不得消耗已通过行的 mutationBudget'
+  );
+  await bulletGateway.recordNativeParamRead(
+    { table: 'Bullet', rowIds: [750301], fieldIds: ['spEffectId0'] },
+    bulletFields([750301], 2)
+  );
+  const bulletBatchAllowed = await bulletGateway.assertMutationTarget('mutate_param_fields', bulletBatchInput);
+  assert.equal(bulletBatchAllowed.ok, true, '补读精确 750301 后三行批量门禁应通过');
+  await bulletGateway.releaseMutationReservation(bulletBatchAllowed.reservationId);
 
   console.log('agent task-record gate smoke passed');
 } finally {

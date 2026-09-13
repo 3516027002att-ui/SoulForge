@@ -10,10 +10,22 @@ import type {
 } from '@soulforge/shared';
 import {
   BridgeDaemonClient,
-  BridgeDaemonError
+  BridgeDaemonError,
+  type BridgeCancellationTerminalReceipt
 } from './bridgeDaemonClient.js';
+import {
+  BRIDGE_TRANSPORT_TIMING_CODE,
+  createBridgeTransportTimingCollector,
+  type BridgeTransportTimingCollector
+} from './bridgeTransportTiming.js';
 
 export type BridgeCommand = 'inspect' | 'read-dcx-document' | 'write-bnd4' | 'snapshot-bnd4-child' | 'extract-bnd4-child' | 'list-bnd4-entries' | 'inventory-asset-resources' | 'read-fmg-document' | 'write-fmg' | 'read-param-document' | 'write-param' | 'read-gparam-document' | 'write-gparam' | 'read-text-catalog' | 'read-emevd-document' | 'write-emevd' | 'read-msb-document' | 'write-msb' | 'read-tae-document' | 'read-tae-event-params' | 'read-tae-animation-clip' | 'sample-tae-animation-pose' | 'read-bridge-artifact' | 'read-chrbnd-flver-preview' | 'read-map-part-flver-preview' | 'read-map-static-geometry' | 'read-tpf-document' | 'export-tpf-texture' | 'read-tpf-texture-preview' | 'write-tpf-texture-replace' | 'read-flver-document' | 'write-flver' | 'read-flver-mesh' | 'read-flver-skeleton' | 'read-flver-texture-slots' | 'read-flver-dummies' | 'read-esd-document' | 'write-esd-document' | 'write-tae-document' | 'write-fxr-document' | 'read-mtd-document' | 'write-mtd-document' | 'read-fxr-document' | 'list-ffxbnd-entries' | 'read-luabnd-document' | 'inspect-luabnd' | 'read-luabnd-script' | 'write-luabnd-script' | 'export-luabnd' | 'export-event' | 'export-map' | 'export-param' | 'export-msg' | 'validate' | 'probe-oodle' | 'probe-document-locator';
+
+export type BridgeRequestPhase = 'command' | 'artifact';
+
+export type RunBridgeCancellationTerminalReceipt = BridgeCancellationTerminalReceipt & {
+  requestPhase: BridgeRequestPhase;
+};
 
 export interface RunBridgeOptions {
   bridgeProjectPath?: string;
@@ -31,6 +43,9 @@ export interface RunBridgeOptions {
   cwd?: string;
   signal?: AbortSignal;
   onProgress?: (payload: unknown) => void;
+  onCancellationTerminal?: (
+    receipt: RunBridgeCancellationTerminalReceipt
+  ) => void | Promise<void>;
   /**
    * 守护进程单帧上限（字节）。缺省 16 MiB；PARAM 全量载荷（includeAllPayloads）
    * 可到数 MB~29 MB base64，调用方按需提高（守护进程绝对上限 32 MiB）。
@@ -49,6 +64,14 @@ type BridgeClientPool = Map<string, Promise<BridgeDaemonClient>>;
 
 const clients: BridgeClientPool = new Map();
 
+function withCancellationTerminalPhase(
+  observer: RunBridgeOptions['onCancellationTerminal'],
+  requestPhase: BridgeRequestPhase
+): ((receipt: BridgeCancellationTerminalReceipt) => void | Promise<void>) | undefined {
+  if (!observer) return undefined;
+  return (receipt) => observer({ ...receipt, requestPhase });
+}
+
 export type BridgeRunner = <T = unknown>(options: RunBridgeOptions) => Promise<BridgeResult<T>>;
 
 export interface BridgeDaemonScope {
@@ -58,6 +81,13 @@ export interface BridgeDaemonScope {
 
 interface DisposableBridgeClient {
   dispose: () => Promise<void>;
+}
+
+interface BridgeLaunch {
+  executable: string;
+  args: string[];
+  cwd?: string;
+  packaged?: boolean;
 }
 
 /**
@@ -145,6 +175,9 @@ async function runBridgeWithPool<T = unknown>(
   options: RunBridgeOptions,
   clientPool: BridgeClientPool
 ): Promise<BridgeResult<T>> {
+  const transportTiming = options.commandOptions?.diagnosticTimings === true
+    ? createBridgeTransportTimingCollector()
+    : null;
   const bridgeProjectPath = resolveBridgeProjectPath(options.bridgeProjectPath, options.cwd);
   const allowedRoots = uniqueResolvedRoots([
     ...(options.allowedRoots?.length ? options.allowedRoots : [dirname(options.filePath)]),
@@ -155,6 +188,15 @@ async function runBridgeWithPool<T = unknown>(
   const workspaceSessionId = options.workspaceSessionId
     ?? stableSessionId(allowedRoots);
   const launch = resolveBridgeLaunch(options, bridgeProjectPath);
+  if (launch.packaged && !existsSync(launch.executable)) {
+    const missing = failedBridgeResult<T>(
+      options,
+      'BRIDGE_PACKAGED_EXECUTABLE_MISSING',
+      '打包运行时缺少 resources/bridge/SoulForge.Bridge.exe，拒绝回退到源码项目或 dotnet run。',
+      { executable: launch.executable }
+    );
+    return withTransportTiming(missing, transportTiming, 'failed');
+  }
   const writableRoots = uniqueResolvedRoots(options.writableRoots ?? []);
   const maxConcurrency = normalizeMaxConcurrency(options.maxConcurrency);
   const poolKey = JSON.stringify({
@@ -167,10 +209,11 @@ async function runBridgeWithPool<T = unknown>(
   });
 
   try {
+    const poolScope = transportTiming?.begin('poolAcquireMs') ?? null;
     const client = await getOrCreateClient(poolKey, {
       executable: launch.executable,
       args: launch.args,
-      cwd: options.cwd ?? dirname(bridgeProjectPath),
+      cwd: options.cwd ?? launch.cwd ?? dirname(bridgeProjectPath),
       workspaceSessionId,
       allowedRoots,
       ...(writableRoots.length ? { writableRoots } : {}),
@@ -181,6 +224,12 @@ async function runBridgeWithPool<T = unknown>(
       maxConcurrency,
       startupTimeoutMs: options.timeoutMs ?? DEFAULT_TIMEOUT_MS
     }, launch, clientPool);
+    transportTiming?.end(poolScope);
+    const daemonScope = transportTiming?.begin('daemonRequestMs') ?? null;
+    const commandCancellationTerminal = withCancellationTerminalPhase(
+      options.onCancellationTerminal,
+      options.command === 'read-bridge-artifact' ? 'artifact' : 'command'
+    );
     const payload = await client.request<BridgeResult<T>>({
       payload: {
         command: options.command,
@@ -190,10 +239,22 @@ async function runBridgeWithPool<T = unknown>(
       resourceUri: options.resourceUri ?? pathToFileURL(resolve(options.filePath)).toString(),
       timeoutMs: options.timeoutMs ?? DEFAULT_TIMEOUT_MS,
       ...(options.signal ? { signal: options.signal } : {}),
-      ...(options.onProgress ? { onProgress: options.onProgress } : {})
+      ...(options.onProgress ? { onProgress: options.onProgress } : {}),
+      ...(commandCancellationTerminal ? { onCancellationTerminal: commandCancellationTerminal } : {})
     });
-    if (options.command === 'read-bridge-artifact') return payload.result;
-    return materializeFileBackedResult(client, payload.result, options);
+    transportTiming?.end(daemonScope);
+    if (options.command === 'read-bridge-artifact') {
+      return withTransportTiming(
+        payload.result,
+        transportTiming,
+        payload.result.parseStatus === 'failed' ? 'failed' : 'ok'
+      );
+    }
+    // Keep this as a promise return (rather than `await`) so a rejected or
+    // cancelled file-backed child request preserves the established caller
+    // semantics. Materialization itself attaches the diagnostic on all
+    // structured success/failure results.
+    return materializeFileBackedResult(client, payload.result, options, transportTiming);
   } catch (error) {
     const client = await clientPool.get(poolKey)?.catch(() => undefined);
     if (!client || client.isClosed) clientPool.delete(poolKey);
@@ -204,52 +265,92 @@ async function runBridgeWithPool<T = unknown>(
           error instanceof Error ? error.message : String(error),
           true
         );
-    return failedBridgeResult<T>(options, bridgeError.code, bridgeError.message, {
+    const failed = failedBridgeResult<T>(options, bridgeError.code, bridgeError.message, {
       retryable: bridgeError.retryable,
       bridgeProjectPath,
       executable: launch.executable
     });
+    return withTransportTiming(
+      failed,
+      transportTiming,
+      bridgeError.code === 'BRIDGE_REQUEST_CANCELLED' ? 'cancelled' : 'failed'
+    );
   }
 }
 
 async function materializeFileBackedResult<T>(
   client: BridgeDaemonClient,
   result: BridgeResult<T>,
-  options: RunBridgeOptions
+  options: RunBridgeOptions,
+  transportTiming: BridgeTransportTimingCollector | null
 ): Promise<BridgeResult<T>> {
   const descriptor = readFileBackedDescriptor(result.data);
-  if (!descriptor) return result;
+  if (!descriptor) {
+    return withTransportTiming(
+      result,
+      transportTiming,
+      result.parseStatus === 'failed' ? 'failed' : 'ok'
+    );
+  }
+
+  transportTiming?.markArtifactExpected();
+  const materializeScope = transportTiming?.begin('materializeTotalMs') ?? null;
 
   const chunks: Buffer[] = [];
   let offset = 0;
   while (offset < descriptor.byteLength) {
     const length = Math.min(descriptor.chunkSize, descriptor.byteLength - offset);
-    const payload = await client.request<BridgeResult<{
-      artifactToken: string;
-      offset: number;
-      length: number;
-      totalLength: number;
-      complete: boolean;
-      dataBase64: string;
-    }>>({
-      payload: {
-        command: 'read-bridge-artifact',
-        filePath: resolve(options.filePath),
-        options: {
-          artifactToken: descriptor.artifactToken,
-          offset,
-          length
-        }
-      },
-      resourceUri: options.resourceUri ?? pathToFileURL(resolve(options.filePath)).toString(),
-      timeoutMs: options.timeoutMs ?? DEFAULT_TIMEOUT_MS,
-      ...(options.signal ? { signal: options.signal } : {}),
-      ...(options.onProgress ? { onProgress: options.onProgress } : {})
-    });
+    const artifactScope = transportTiming?.begin('artifactRequestMs') ?? null;
+    let payload: {
+      result: BridgeResult<{
+        artifactToken: string;
+        offset: number;
+        length: number;
+        totalLength: number;
+        complete: boolean;
+        dataBase64: string;
+      }>;
+    };
+    const artifactCancellationTerminal = withCancellationTerminalPhase(
+      options.onCancellationTerminal,
+      'artifact'
+    );
+    try {
+      payload = await client.request<BridgeResult<{
+        artifactToken: string;
+        offset: number;
+        length: number;
+        totalLength: number;
+        complete: boolean;
+        dataBase64: string;
+      }>>({
+        payload: {
+          command: 'read-bridge-artifact',
+          filePath: resolve(options.filePath),
+          options: {
+            artifactToken: descriptor.artifactToken,
+            offset,
+            length
+          }
+        },
+        resourceUri: options.resourceUri ?? pathToFileURL(resolve(options.filePath)).toString(),
+        timeoutMs: options.timeoutMs ?? DEFAULT_TIMEOUT_MS,
+        ...(options.signal ? { signal: options.signal } : {}),
+        ...(options.onProgress ? { onProgress: options.onProgress } : {}),
+        ...(artifactCancellationTerminal ? { onCancellationTerminal: artifactCancellationTerminal } : {})
+      });
+    } catch (error) {
+      // Do not catch/convert this rejection: callers rely on the existing
+      // BridgeDaemonError cancellation/timeout behavior.
+      void error;
+      throw error;
+    }
+    transportTiming?.end(artifactScope);
+    transportTiming?.recordArtifactRequest();
     const chunkResult = payload.result;
     const chunk = asArtifactChunk(chunkResult.data);
     if (chunkResult.parseStatus === 'failed' || !chunk) {
-      return {
+      return withTransportTiming({
         ...chunkResult,
         diagnostics: [
           ...chunkResult.diagnostics,
@@ -260,38 +361,43 @@ async function materializeFileBackedResult<T>(
             sourceUri: options.resourceUri
           }
         ]
-      } as BridgeResult<T>;
+      } as BridgeResult<T>, transportTiming, 'failed');
     }
     if (chunk.artifactToken !== descriptor.artifactToken
       || chunk.offset !== offset
       || chunk.totalLength !== descriptor.byteLength) {
-      return failedBridgeResult<T>(options, 'BRIDGE_FILE_BACKED_RESULT_SCHEMA_INVALID', 'Bridge file-backed result chunk identity 不匹配。', {
+      return withTransportTiming(failedBridgeResult<T>(options, 'BRIDGE_FILE_BACKED_RESULT_SCHEMA_INVALID', 'Bridge file-backed result chunk identity 不匹配。', {
         artifactToken: descriptor.artifactToken,
         expectedOffset: offset,
         actualOffset: chunk.offset,
         expectedLength: descriptor.byteLength,
         actualLength: chunk.totalLength
-      });
+      }), transportTiming, 'failed');
     }
+    const decodeScope = transportTiming?.begin('base64DecodeMs') ?? null;
     const bytes = Buffer.from(chunk.dataBase64, 'base64');
+    transportTiming?.end(decodeScope);
     if (bytes.length !== chunk.length || bytes.length === 0) {
-      return failedBridgeResult<T>(options, 'BRIDGE_FILE_BACKED_RESULT_CHUNK_INVALID', 'Bridge file-backed result chunk 长度无效。', {
+      return withTransportTiming(failedBridgeResult<T>(options, 'BRIDGE_FILE_BACKED_RESULT_CHUNK_INVALID', 'Bridge file-backed result chunk 长度无效。', {
         artifactToken: descriptor.artifactToken,
         offset,
         expectedLength: chunk.length,
         actualLength: bytes.length
-      });
+      }), transportTiming, 'failed');
     }
     chunks.push(bytes);
     offset += bytes.length;
   }
 
+  const concatJsonParseScope = transportTiming?.begin('concatJsonParseMs') ?? null;
   try {
     const restored = JSON.parse(Buffer.concat(chunks).toString('utf8')) as BridgeResult<T>;
     if (!restored || typeof restored !== 'object' || !Array.isArray(restored.diagnostics)) {
       throw new Error('restored BridgeResult envelope is invalid');
     }
-    return {
+    transportTiming?.end(concatJsonParseScope);
+    transportTiming?.end(materializeScope);
+    return withTransportTiming({
       ...restored,
       diagnostics: [
         ...restored.diagnostics,
@@ -314,14 +420,34 @@ async function materializeFileBackedResult<T>(
           }
         }
       ]
-    };
+    }, transportTiming, 'ok');
   } catch (error) {
-    return failedBridgeResult<T>(options, 'BRIDGE_FILE_BACKED_RESULT_JSON_INVALID', 'Bridge file-backed result 不是有效的 BridgeResult JSON。', {
+    return withTransportTiming(failedBridgeResult<T>(options, 'BRIDGE_FILE_BACKED_RESULT_JSON_INVALID', 'Bridge file-backed result 不是有效的 BridgeResult JSON。', {
       artifactToken: descriptor.artifactToken,
       byteLength: descriptor.byteLength,
       error: error instanceof Error ? error.message : String(error)
-    });
+    }), transportTiming, 'failed');
   }
+}
+
+function withTransportTiming<T>(
+  result: BridgeResult<T>,
+  collector: BridgeTransportTimingCollector | null,
+  outcome: 'ok' | 'failed' | 'cancelled'
+): BridgeResult<T> {
+  if (!collector) return result;
+  return {
+    ...result,
+    diagnostics: [
+      ...result.diagnostics,
+      {
+        severity: 'info',
+        code: BRIDGE_TRANSPORT_TIMING_CODE,
+        message: 'Bridge client transport and file-backed materialization timing.',
+        details: collector.finish(outcome)
+      }
+    ]
+  };
 }
 
 function readFileBackedDescriptor(value: unknown): BridgeFileBackedResultDescriptor | undefined {
@@ -465,9 +591,28 @@ async function getOrCreateClient(
 function resolveBridgeLaunch(
   options: RunBridgeOptions,
   bridgeProjectPath: string
-): { executable: string; args: string[] } {
+): BridgeLaunch {
   if (options.bridgeExecutablePath) {
     return { executable: resolve(options.bridgeExecutablePath), args: [] };
+  }
+
+  // A packaged Electron build has no repository checkout or dotnet project.
+  // electron-builder places the self-contained Bridge under resources/bridge;
+  // prefer that executable before falling back to the normal source/build
+  // discovery used by development and native smoke scripts.
+  const electronProcess = process as NodeJS.Process & {
+    defaultApp?: boolean;
+    resourcesPath?: string;
+  };
+  const packagedResourceRoot = electronProcess.resourcesPath;
+  if (packagedResourceRoot && electronProcess.defaultApp !== true) {
+    const packaged = resolve(packagedResourceRoot, 'bridge', 'SoulForge.Bridge.exe');
+    return {
+      executable: packaged,
+      args: [],
+      cwd: dirname(packaged),
+      packaged: true
+    };
   }
 
   const projectDirectory = dirname(bridgeProjectPath);

@@ -1,4 +1,5 @@
 using System.Buffers.Binary;
+using System.Numerics;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
@@ -47,6 +48,10 @@ internal static class MapStaticGeometryService
         public required string PathSourceGeneration;
         public required long ResourceGeneration;
         public required ResourceLeaseCache<GeometryResource>.Lease ResourceLease;
+        public required Matrix4x4[] ReferenceFkMatrices;
+        public required Matrix4x4[] ReferenceNormalMatrices;
+        public required bool[] ReferenceNormalMatrixReady;
+        public object ReferenceNormalMatrixGate { get; } = new();
         public readonly Dictionary<string, CursorState> Cursors = new(StringComparer.Ordinal);
     }
 
@@ -89,6 +94,7 @@ internal static class MapStaticGeometryService
         public required string[] RuleIds;
         public required int[] SourceIndexBits;
         public required bool[] FaceSetCullBackfaces;
+        public required byte Dynamic;
     }
 
     internal sealed class GeometryResource
@@ -97,6 +103,7 @@ internal static class MapStaticGeometryService
         public required IReadOnlyList<MeshInfo> Meshes;
         public required int TotalTriangles;
         public required long ResidentBytes;
+        public required Matrix4x4[] ReferenceFkMatrices;
     }
 
     private sealed record RequestContext(CancellationToken CancellationToken, string WorkspaceEpoch);
@@ -229,6 +236,27 @@ internal static class MapStaticGeometryService
         }
     }
 
+    private static Matrix4x4 GetReferenceNormalMatrix(SessionEntry session, int boneIndex)
+    {
+        if (boneIndex < 0 || boneIndex >= session.ReferenceFkMatrices.Length)
+            throw new InvalidDataException(
+                $"MAP_STATIC_SKINNING_BONE_INDEX_INVALID:{boneIndex}");
+
+        lock (session.ReferenceNormalMatrixGate)
+        {
+            if (session.ReferenceNormalMatrixReady[boneIndex])
+                return session.ReferenceNormalMatrices[boneIndex];
+            // Normal matrices are deliberately built on demand. A FLVER can
+            // contain unused singular bones; only a bone actually referenced
+            // by a baked absolute vertex is allowed to fail closed here.
+            var matrix = FlverMatureSkinning.BuildReferenceNormalMatrix(
+                session.ReferenceFkMatrices[boneIndex]);
+            session.ReferenceNormalMatrices[boneIndex] = matrix;
+            session.ReferenceNormalMatrixReady[boneIndex] = true;
+            return matrix;
+        }
+    }
+
     internal static SessionEntry GetOrCreate(
         string filePath,
         string modelName,
@@ -287,6 +315,10 @@ internal static class MapStaticGeometryService
                 {
                     token.ThrowIfCancellationRequested();
                     var meshes = BuildMeshInfos(flver);
+                    var referenceFkMatrices = flver.Bones.Count == 0
+                        || meshes.All(mesh => mesh.Dynamic != 0)
+                        ? Array.Empty<Matrix4x4>()
+                        : FlverMatureSkinning.BuildReferenceFkMatrices(flver.Bones);
                     var totalTris = checked(meshes.Sum(item => item.Descriptor.TriangleStrip
                         ? Math.Max(0, item.SourceIndexCount - 2)
                         : item.SourceIndexCount / 3));
@@ -297,7 +329,8 @@ internal static class MapStaticGeometryService
                             Flver = flver,
                             Meshes = meshes,
                             TotalTriangles = totalTris,
-                            ResidentBytes = residentBytes
+                            ResidentBytes = residentBytes,
+                            ReferenceFkMatrices = referenceFkMatrices
                         },
                         residentBytes));
                 },
@@ -329,7 +362,10 @@ internal static class MapStaticGeometryService
                     ? CurrentRequestContext.Value?.WorkspaceEpoch ?? ""
                     : pathSourceGeneration,
                 ResourceGeneration = acquiredLease.Generation,
-                ResourceLease = acquiredLease
+                ResourceLease = acquiredLease,
+                ReferenceFkMatrices = resource.ReferenceFkMatrices,
+                ReferenceNormalMatrices = new Matrix4x4[resource.ReferenceFkMatrices.Length],
+                ReferenceNormalMatrixReady = new bool[resource.ReferenceFkMatrices.Length]
             };
 
             if (entry.Meshes.Count > 0)
@@ -466,7 +502,8 @@ internal static class MapStaticGeometryService
         // therefore participates in the byte budget even though it is not
         // duplicated by MeshInfo.
         var estimate = Math.Max(1, flver.SourceBytes.LongLength)
-            + Math.Max(1, flver.MeshCount) * 16L * 1024L;
+            + Math.Max(1, flver.MeshCount) * 16L * 1024L
+            + flver.Bones.Count * 64L;
         return Math.Min(InFlightGeometryByteBudget - 1, Math.Max(1, estimate));
     }
 
@@ -475,6 +512,7 @@ internal static class MapStaticGeometryService
         IReadOnlyList<MeshInfo> meshes)
     {
         long bytes = Math.Max(1, flver.SourceBytes.LongLength);
+        bytes = AddBytes(bytes, flver.Bones.Count * 64L);
         foreach (var mesh in meshes)
         {
             bytes = AddBytes(bytes, 4096);
@@ -535,7 +573,8 @@ internal static class MapStaticGeometryService
                 SelectedFaceSetOrdinals = new[] { descriptor.DisplayFaceSetOrdinal },
                 RuleIds = new[] { RuleId },
                 SourceIndexBits = new[] { descriptor.IndexElementBytes * 8 },
-                FaceSetCullBackfaces = new[] { descriptor.CullBackfaces }
+                FaceSetCullBackfaces = new[] { descriptor.CullBackfaces },
+                Dynamic = nativeMesh.Dynamic
             });
         }
 
@@ -878,6 +917,14 @@ internal static class MapStaticGeometryService
         var candidateTopology = initialTopology;
         var accepted = new List<PendingTriangle>(Math.Min(MaxTrianglesPerChunk, 1024));
         var acceptedSources = new HashSet<uint>();
+        var wireFloatComponentsPerVertex = 3
+            + (descriptor.DataPlan.Normal is null ? 0 : 3)
+            + (descriptor.UvSetCount > 0 ? 2 : 0);
+        var wireMetadataBytes = EstimateWireMetadataBytes(
+            session,
+            mesh,
+            texturePreviewToken,
+            textureColorSpace);
 
         // Discover topology boundaries before decoding any vertex payload. A
         // candidate that exceeds the binary budget never mutates the accepted
@@ -888,30 +935,35 @@ internal static class MapStaticGeometryService
                 ref candidateTopology,
                 out var triangle))
         {
-            var candidateSources = new[] { triangle.A, triangle.B, triangle.C };
-            var newSources = candidateSources
-                .Where(source => !acceptedSources.Contains(source))
-                .Distinct()
-                .ToArray();
-            foreach (var source in newSources)
-            {
-                if (source >= (uint)descriptor.SourceVertexCount)
-                    throw new InvalidDataException(
-                        "MAP_STATIC_SOURCE_VERTEX_OUT_OF_BOUNDS: source vertex index exceeds descriptor");
-            }
+            // Keep the native A/B/C first-seen order without allocating a
+            // three-item array or a LINQ result for every candidate. OOB
+            // validation intentionally remains before either budget check.
+            var addA = !acceptedSources.Contains(triangle.A);
+            var addB = triangle.B != triangle.A && !acceptedSources.Contains(triangle.B);
+            var addC = triangle.C != triangle.A
+                && triangle.C != triangle.B
+                && !acceptedSources.Contains(triangle.C);
+            if (addA && triangle.A >= (uint)descriptor.SourceVertexCount)
+                throw new InvalidDataException(
+                    "MAP_STATIC_SOURCE_VERTEX_OUT_OF_BOUNDS: source vertex index exceeds descriptor");
+            if (addB && triangle.B >= (uint)descriptor.SourceVertexCount)
+                throw new InvalidDataException(
+                    "MAP_STATIC_SOURCE_VERTEX_OUT_OF_BOUNDS: source vertex index exceeds descriptor");
+            if (addC && triangle.C >= (uint)descriptor.SourceVertexCount)
+                throw new InvalidDataException(
+                    "MAP_STATIC_SOURCE_VERTEX_OUT_OF_BOUNDS: source vertex index exceeds descriptor");
+            var newSourceCount = (addA ? 1 : 0) + (addB ? 1 : 0) + (addC ? 1 : 0);
 
             var estimatedBytes = EstimateBinaryPayloadBytes(
                 descriptor,
-                acceptedSources.Count + newSources.Length,
+                acceptedSources.Count + newSourceCount,
                 accepted.Count + 1);
             var estimatedWireBytes = EstimateWirePayloadBytes(
-                session,
-                mesh,
                 descriptor,
-                acceptedSources.Count + newSources.Length,
+                acceptedSources.Count + newSourceCount,
                 accepted.Count + 1,
-                texturePreviewToken,
-                textureColorSpace);
+                wireFloatComponentsPerVertex,
+                wireMetadataBytes);
             if (estimatedBytes > ChunkPayloadBudgetBytes
                 || estimatedWireBytes >= SafeChunkFrameBytes)
             {
@@ -922,7 +974,9 @@ internal static class MapStaticGeometryService
             }
 
             accepted.Add(new PendingTriangle(triangle, candidateTopology));
-            foreach (var source in newSources) acceptedSources.Add(source);
+            if (addA) acceptedSources.Add(triangle.A);
+            if (addB) acceptedSources.Add(triangle.B);
+            if (addC) acceptedSources.Add(triangle.C);
         }
 
         if (accepted.Count == 0)
@@ -943,8 +997,7 @@ internal static class MapStaticGeometryService
         var acceptedCount = accepted.Count;
         while (true)
         {
-            var prefix = accepted.Take(acceptedCount).ToArray();
-            buffers = DecodeChunkBuffers(session, mesh, prefix);
+            buffers = DecodeChunkBuffers(session, mesh, accepted, acceptedCount);
             var indexElementBytes = buffers.SourceVertexIndices.Count <= ushort.MaxValue ? 2 : 4;
             chunk = BuildChunkObject(
                 session,
@@ -977,7 +1030,13 @@ internal static class MapStaticGeometryService
 
         var finalTopology = accepted[acceptedCount - 1].CursorAfter;
         var nextSourcePosition = finalTopology.SourceIndexPosition;
-        if (HasDisplayTriangle(session, meshListIndex, descriptor, nextSourcePosition))
+        // finalTopology already contains the native strip/list state at the
+        // page boundary. Probe a copy directly; calling HasDisplayTriangle
+        // here would recreate a cursor at source position zero after the
+        // resume hint was consumed above, replaying the whole FaceSet prefix
+        // once per page.
+        var lookahead = finalTopology;
+        if (session.Flver.TryReadDisplayTriangle(descriptor, ref lookahead, out _))
         {
             nextCursor = GenerateOpaqueCursor(
                 session,
@@ -1021,17 +1080,12 @@ internal static class MapStaticGeometryService
     }
 
     private static long EstimateWirePayloadBytes(
-        SessionEntry session,
-        MeshInfo mesh,
         FlverNativeDocument.FlverMeshGeometryDescriptor descriptor,
         int sourceVertexCount,
         int triangleCount,
-        string? texturePreviewToken,
-        string? textureColorSpace)
+        int floatComponentsPerVertex,
+        long metadataBytes)
     {
-        var floatComponentsPerVertex = 3
-            + (descriptor.DataPlan.Normal is null ? 0 : 3)
-            + (descriptor.UvSetCount > 0 ? 2 : 0);
         var denseIndexBytes = sourceVertexCount <= ushort.MaxValue ? 2 : 4;
         var positionsBytes = checked((long)sourceVertexCount * 3 * sizeof(float));
         var normalsBytes = descriptor.DataPlan.Normal is null
@@ -1047,19 +1101,26 @@ internal static class MapStaticGeometryService
             + Base64EncodedBytes(sourceIndicesBytes)
             + Base64EncodedBytes(normalsBytes)
             + Base64EncodedBytes(uvsBytes);
+        return checked(wireBytes + metadataBytes + floatComponentsPerVertex);
+    }
 
+    private static long EstimateWireMetadataBytes(
+        SessionEntry session,
+        MeshInfo mesh,
+        string? texturePreviewToken,
+        string? textureColorSpace)
+    {
         // Numeric fields, bounds, material identity and rule arrays are small
         // but real JSON bytes. Keep a conservative fixed envelope and include
         // all variable strings so the candidate budget never assumes that
-        // metadata is free.
-        var metadataBytes = 16L * 1024L
+        // metadata is free. This is invariant for one BuildChunk call.
+        return 16L * 1024L
             + StringBytes(session.ModelName)
             + StringBytes(mesh.MaterialName)
             + StringBytes(mesh.MaterialMtdPath)
             + mesh.RuleIds.Sum(StringBytes)
             + StringBytes(texturePreviewToken ?? string.Empty)
             + StringBytes(textureColorSpace ?? string.Empty);
-        return checked(wireBytes + metadataBytes + floatComponentsPerVertex);
     }
 
     private static long Base64EncodedBytes(long byteCount)
@@ -1071,7 +1132,8 @@ internal static class MapStaticGeometryService
     private static ChunkBuffers DecodeChunkBuffers(
         SessionEntry session,
         MeshInfo mesh,
-        IReadOnlyList<PendingTriangle> triangles)
+        IReadOnlyList<PendingTriangle> triangles,
+        int triangleCount)
     {
         var descriptor = mesh.Descriptor;
         var sourceToDense = new Dictionary<uint, int>();
@@ -1079,7 +1141,7 @@ internal static class MapStaticGeometryService
         var positions = new List<float>();
         var normals = descriptor.DataPlan.Normal is not null ? new List<float>() : null;
         var uvs = descriptor.UvSetCount > 0 ? new List<float>() : null;
-        var denseIndices = new List<uint>(checked(triangles.Count * 3));
+        var denseIndices = new List<uint>(checked(triangleCount * 3));
         var buffers = new ChunkBuffers
         {
             SourceVertexIndices = sourceVertexIndices,
@@ -1088,63 +1150,51 @@ internal static class MapStaticGeometryService
             Uvs = uvs,
             DenseIndices = denseIndices
         };
+        Span<float> positionScratch = stackalloc float[3];
+        Span<float> normalScratch = stackalloc float[3];
+        Span<float> uvScratch = stackalloc float[2];
+        Span<float> skinWeights = stackalloc float[4];
+        Span<ushort> skinIndices = stackalloc ushort[4];
 
-        foreach (var pending in triangles)
+        for (var triangleIndex = 0; triangleIndex < triangleCount; triangleIndex++)
         {
-            var triangle = pending.Triangle;
-            foreach (var source in new[] { triangle.A, triangle.B, triangle.C })
-            {
-                if (sourceToDense.ContainsKey(source)) continue;
-                if (source >= (uint)descriptor.SourceVertexCount)
-                    throw new InvalidDataException(
-                        "MAP_STATIC_SOURCE_VERTEX_OUT_OF_BOUNDS: source vertex index exceeds descriptor");
-
-                var dense = sourceVertexIndices.Count;
-                sourceToDense.Add(source, dense);
-                sourceVertexIndices.Add(source);
-                var position = new float[3];
-                if (!session.Flver.DecodePositionInto(
-                        descriptor,
-                        checked((int)source),
-                        position))
-                    throw new InvalidDataException(
-                        "MAP_STATIC_POSITION_DECODE_FAILED: typed position decoder rejected source vertex");
-                if (!position.All(value => float.IsFinite(value)))
-                    throw new InvalidDataException(
-                        "MAP_STATIC_POSITION_NONFINITE: typed position is not finite");
-                positions.AddRange(position);
-                buffers.MinX = Math.Min(buffers.MinX, position[0]);
-                buffers.MinY = Math.Min(buffers.MinY, position[1]);
-                buffers.MinZ = Math.Min(buffers.MinZ, position[2]);
-                buffers.MaxX = Math.Max(buffers.MaxX, position[0]);
-                buffers.MaxY = Math.Max(buffers.MaxY, position[1]);
-                buffers.MaxZ = Math.Max(buffers.MaxZ, position[2]);
-
-                if (normals is not null)
-                {
-                    var normal = new float[3];
-                    if (!session.Flver.DecodeNormalInto(
-                            descriptor,
-                            checked((int)source),
-                            normal))
-                        throw new InvalidDataException(
-                            "MAP_STATIC_NORMAL_DECODE_FAILED: typed normal decoder rejected source vertex");
-                    normals.AddRange(normal);
-                }
-
-                if (uvs is not null)
-                {
-                    var uv = new float[2];
-                    if (!session.Flver.DecodeUvInto(
-                            descriptor,
-                            0,
-                            checked((int)source),
-                            uv))
-                        throw new InvalidDataException(
-                            "MAP_STATIC_UV_DECODE_FAILED: typed UV decoder rejected source vertex");
-                    uvs.AddRange(uv);
-                }
-            }
+            var triangle = triangles[triangleIndex].Triangle;
+            DecodeChunkVertex(
+                session,
+                mesh,
+                descriptor,
+                triangle.A,
+                sourceToDense,
+                buffers,
+                positionScratch,
+                normalScratch,
+                uvScratch,
+                skinWeights,
+                skinIndices);
+            DecodeChunkVertex(
+                session,
+                mesh,
+                descriptor,
+                triangle.B,
+                sourceToDense,
+                buffers,
+                positionScratch,
+                normalScratch,
+                uvScratch,
+                skinWeights,
+                skinIndices);
+            DecodeChunkVertex(
+                session,
+                mesh,
+                descriptor,
+                triangle.C,
+                sourceToDense,
+                buffers,
+                positionScratch,
+                normalScratch,
+                uvScratch,
+                skinWeights,
+                skinIndices);
 
             if (!sourceToDense.TryGetValue(triangle.A, out var denseA)
                 || !sourceToDense.TryGetValue(triangle.B, out var denseB)
@@ -1157,6 +1207,134 @@ internal static class MapStaticGeometryService
         }
 
         return buffers;
+    }
+
+    private static void DecodeChunkVertex(
+        SessionEntry session,
+        MeshInfo mesh,
+        FlverNativeDocument.FlverMeshGeometryDescriptor descriptor,
+        uint source,
+        Dictionary<uint, int> sourceToDense,
+        ChunkBuffers buffers,
+        Span<float> positionScratch,
+        Span<float> normalScratch,
+        Span<float> uvScratch,
+        Span<float> skinWeights,
+        Span<ushort> skinIndices)
+    {
+        if (sourceToDense.ContainsKey(source)) return;
+        if (source >= (uint)descriptor.SourceVertexCount)
+            throw new InvalidDataException(
+                "MAP_STATIC_SOURCE_VERTEX_OUT_OF_BOUNDS: source vertex index exceeds descriptor");
+
+        var dense = buffers.SourceVertexIndices.Count;
+        sourceToDense.Add(source, dense);
+        buffers.SourceVertexIndices.Add(source);
+        if (!session.Flver.DecodePositionInto(
+                descriptor,
+                checked((int)source),
+                positionScratch))
+            throw new InvalidDataException(
+                "MAP_STATIC_POSITION_DECODE_FAILED: typed position decoder rejected source vertex");
+        if (!float.IsFinite(positionScratch[0])
+            || !float.IsFinite(positionScratch[1])
+            || !float.IsFinite(positionScratch[2]))
+            throw new InvalidDataException(
+                "MAP_STATIC_POSITION_NONFINITE: typed position is not finite");
+
+        var bakeReferencePose = mesh.Dynamic == 0 && session.Flver.Bones.Count > 0;
+        if (bakeReferencePose)
+        {
+            var mode = session.Flver.DecodeMapVertexSkinning(
+                descriptor,
+                checked((int)source),
+                skinWeights,
+                skinIndices,
+                out var skinFailure);
+            if (mode == FlverMatureSkinning.VertexMode.Invalid)
+                throw new InvalidDataException(
+                    $"MAP_STATIC_SKINNING_INVALID:{skinFailure ?? "unknown"}");
+            if (mode == FlverMatureSkinning.VertexMode.Weighted)
+                throw new InvalidDataException(
+                    "MAP_STATIC_SKINNING_WEIGHTED_UNSUPPORTED: absolute reference bake is only verified for rigid vertices");
+
+            var boneIndex = skinIndices[0];
+            if (boneIndex >= session.ReferenceFkMatrices.Length)
+                throw new InvalidDataException(
+                    $"MAP_STATIC_SKINNING_BONE_INDEX_INVALID:{boneIndex}");
+            var transformedPosition = Vector3.Transform(
+                new Vector3(positionScratch[0], positionScratch[1], positionScratch[2]),
+                session.ReferenceFkMatrices[boneIndex]);
+            if (!float.IsFinite(transformedPosition.X)
+                || !float.IsFinite(transformedPosition.Y)
+                || !float.IsFinite(transformedPosition.Z))
+                throw new InvalidDataException(
+                    "MAP_STATIC_POSITION_NONFINITE: reference FK produced a non-finite position");
+            positionScratch[0] = transformedPosition.X;
+            positionScratch[1] = transformedPosition.Y;
+            positionScratch[2] = transformedPosition.Z;
+        }
+        buffers.Positions.Add(positionScratch[0]);
+        buffers.Positions.Add(positionScratch[1]);
+        buffers.Positions.Add(positionScratch[2]);
+        buffers.MinX = Math.Min(buffers.MinX, positionScratch[0]);
+        buffers.MinY = Math.Min(buffers.MinY, positionScratch[1]);
+        buffers.MinZ = Math.Min(buffers.MinZ, positionScratch[2]);
+        buffers.MaxX = Math.Max(buffers.MaxX, positionScratch[0]);
+        buffers.MaxY = Math.Max(buffers.MaxY, positionScratch[1]);
+        buffers.MaxZ = Math.Max(buffers.MaxZ, positionScratch[2]);
+
+        if (buffers.Normals is not null)
+        {
+            if (!session.Flver.DecodeNormalInto(
+                    descriptor,
+                    checked((int)source),
+                    normalScratch))
+                throw new InvalidDataException(
+                    "MAP_STATIC_NORMAL_DECODE_FAILED: typed normal decoder rejected source vertex");
+
+            if (!float.IsFinite(normalScratch[0])
+                || !float.IsFinite(normalScratch[1])
+                || !float.IsFinite(normalScratch[2]))
+                throw new InvalidDataException(
+                    "MAP_STATIC_NORMAL_NONFINITE: typed normal is not finite");
+            if (bakeReferencePose)
+            {
+                var normalMatrix = GetReferenceNormalMatrix(session, skinIndices[0]);
+                var transformedNormal = Vector3.TransformNormal(
+                    new Vector3(normalScratch[0], normalScratch[1], normalScratch[2]),
+                    normalMatrix);
+                if (!float.IsFinite(transformedNormal.X)
+                    || !float.IsFinite(transformedNormal.Y)
+                    || !float.IsFinite(transformedNormal.Z))
+                    throw new InvalidDataException(
+                        "MAP_STATIC_NORMAL_NONFINITE: reference FK produced a non-finite normal");
+                var lengthSquared = transformedNormal.LengthSquared();
+                if (lengthSquared > 1e-20f)
+                    transformedNormal /= MathF.Sqrt(lengthSquared);
+                else
+                    transformedNormal = Vector3.Zero;
+                normalScratch[0] = transformedNormal.X;
+                normalScratch[1] = transformedNormal.Y;
+                normalScratch[2] = transformedNormal.Z;
+            }
+            buffers.Normals.Add(normalScratch[0]);
+            buffers.Normals.Add(normalScratch[1]);
+            buffers.Normals.Add(normalScratch[2]);
+        }
+
+        if (buffers.Uvs is not null)
+        {
+            if (!session.Flver.DecodeUvInto(
+                    descriptor,
+                    0,
+                    checked((int)source),
+                    uvScratch))
+                throw new InvalidDataException(
+                    "MAP_STATIC_UV_DECODE_FAILED: typed UV decoder rejected source vertex");
+            buffers.Uvs.Add(uvScratch[0]);
+            buffers.Uvs.Add(uvScratch[1]);
+        }
     }
 
     private static object BuildChunkObject(

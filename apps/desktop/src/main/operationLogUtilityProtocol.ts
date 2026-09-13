@@ -15,10 +15,11 @@ import type {
   PersistedDiagnostic,
   TransactionJournalPhase,
   TransactionJournalRecord,
-  OperationLogStore
+  OperationLogStore,
+  RagChunkDeltaStats
 } from '@soulforge/core';
 
-export const OPERATION_LOG_UTILITY_PROTOCOL = '1.4.0' as const;
+export const OPERATION_LOG_UTILITY_PROTOCOL = '1.4.1' as const;
 
 export interface ProviderUsageEventPayload {
   eventId: string;
@@ -208,7 +209,7 @@ export interface OperationLogUtilityResultMap {
   searchFiles: IndexedFile[];
   replaceRagChunks: null;
   mergeRagChunks: null;
-  mergeRagChunkDelta: null;
+  mergeRagChunkDelta: RagChunkDeltaStats | null;
   loadRagChunks: RagChunk[];
   searchRagChunks: RagChunk[];
   replaceRagEmbeddings: null;

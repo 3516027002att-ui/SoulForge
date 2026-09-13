@@ -84,6 +84,7 @@ export const TIER_BY_SCRIPT = Object.freeze({
   'test:ai-log-sync': 'unit',
   'test:agent-production-build': 'unit',
   'test:agent-production-scenario': 'unit',
+  'test:tae-anim-id-guards': 'unit',
   'test:agent-param-dependency-batch': 'unit',
   // Agent/RAG/CPU 回归门禁：离线确定性 adapter + 生产 task-record gateway，
   // 不宣称 provider/native authority，代码改动时必须随 unit 层执行。
@@ -102,7 +103,12 @@ export const TIER_BY_SCRIPT = Object.freeze({
   'test:map-transaction-atomic': 'unit',
   'test:action-motion-identity': 'unit',
   'test:map-static-pagination-contract': 'unit',
+  'test:map-timing-contract': 'unit',
+  'test:map-request-cancellation': 'unit',
+  'test:map-streaming-contract': 'unit',
   'test:param-slim-ipc': 'unit',
+  'test:param-canonical-projection': 'unit',
+  'test:param-export-clone': 'unit',
   'test:darkscript-languageservice-scale': 'unit',
   'test:animation-playback-clock': 'unit',
   'test:map-document-scale': 'unit',
@@ -205,6 +211,7 @@ export const TIER_BY_SCRIPT = Object.freeze({
   'test:vault-ipc-contract': 'unit',
   'test:workbench-projections': 'unit',
   'test:database-utility': 'unit',
+  'test:update:unit': 'unit',
   // 变更集提交后的失败回滚专门 smoke。由独立入口直接调度，不能只因为
   // 文件被 task evidence 引用就认为它已执行。
   'test:audit-change-set-commit': 'unit',
@@ -241,6 +248,7 @@ export const TIER_BY_SCRIPT = Object.freeze({
   // fixture 仍真实经过 C# FxrNativeWriter 验证写回（双路径，authority 恒 partial）。
   'bridge:verify:fxr-writer': 'synthetic',
   'test:bridge-recovery-harness': 'synthetic',
+  'test:bridge-cancellation-terminal-phase': 'synthetic',
   'test:bridge-staging': 'synthetic',
   // Bridge allowed-root 生命周期（front-end.md §13.2）：read 不得附加不存在的
   // staging、stage 必须 mkdir→realpath→boundary check 后注册、链接越界拒绝。
@@ -560,6 +568,7 @@ export const TIER_BY_SCRIPT = Object.freeze({
   // ACTION/TAE 真实 ANIBND + HKX spline 采样、C#/TS differential 与 payload
   // budget；缺 Sekiro 语料时由 smoke 结构化失败/跳过，不归 synthetic。
   'test:action-real-corpus': 'native',
+  'test:agent-tae-indexed-uri': 'native',
   'test:action-mature-oracle': 'native',
   'test:native-knowledge-refresh': 'native',
   'test:emevd-corpus-matrix': 'native',
@@ -624,6 +633,8 @@ export const TIER_BY_SCRIPT = Object.freeze({
   'test:release-content': 'release',
   'test:release-compliance-fixtures': 'release',
   'test:release-reproducible': 'release',
+  // 解析已打包的 Release Bridge 运行时路径；需要真实 EXE，缺产物时由 smoke 结构化跳过。
+  'test:packaged-bridge-runtime': 'release',
   // 跨机指纹重建机制：缺第二台机器时本机 audit + 协议输出（partial），
   // --compare 两份导出记录一致才算跨机复现证据。慢且偏发布链，归 release。
   'test:release-cross-machine': 'release',
@@ -698,5 +709,8 @@ export const EXCLUDED = Object.freeze({
   // 投影写入命令。跑它会改交接书，不能作为验证调度；对应的只读校验是
   // test:handoff-projection（内含 --check），已登记进 governance 层。
   'handoff:project': '交接书投影写入命令，不是验证；只读校验由 test:handoff-projection 承担',
-  'test:mission1-acceptance': 'mission1 聚合验收入口，通过 scripts/verify-mission1-acceptance.mjs 直接运行，不经 verify.mjs tier 调度'
+  'test:mission1-acceptance': 'mission1 聚合验收入口，通过 scripts/verify-mission1-acceptance.mjs 直接运行，不经 verify.mjs tier 调度',
+  'test:update:integration': 'U01 报告入口会诚实输出 not_run，待 U02-U24 实现后再登记为 process-integration',
+  'test:update:installed': 'U01 报告入口会诚实输出 not_run，待 U08-U11 Windows 安装证据后再登记为 release',
+  'test:update:all': 'U01 聚合入口包含尚未执行的 integration/installed suite，不能作为当前 tier 的绿色验证'
 });

@@ -16,9 +16,9 @@ import { importPinnedSmithboxSdtParamMetadata } from '../param/smithboxParamMeta
 import { buildRagCorpus } from '../rag/chunkBuilder.js';
 import { retrieveEvidence } from '../rag/retrieve.js';
 import { WorkspaceIndex } from '../indexing/workspaceIndex.js';
-import { ingestBridgeResult } from '../indexing/ingestBridgeResult.js';
 import { refreshKnowledgeAfterCommit } from '../indexing/knowledgeRefresh.js';
 import { refreshNativeSemanticSources } from '../indexing/nativeSemanticRefresh.js';
+import { analyzeWorkspace } from '../pipeline/workspacePipeline.js';
 import { scanWorkspace } from '../workspace/scanWorkspace.js';
 import { createConfirmationReceipt } from '../patch/writerContract.js';
 import { MemoryOperationLogStore } from '../patch/operationLog.js';
@@ -173,6 +173,55 @@ interface ParamAnalyzeReceipt {
   seededExportCount: number;
   seededRowCount: number;
   seededIdentities: string[];
+  seededRag: ParamRagSnapshot;
+}
+
+interface ParamRagSnapshot {
+  chunkCount: number;
+  rowCount: number;
+  uniquePhysicalRowKeyCount: number;
+  duplicatePhysicalRowKeyCount: number;
+  duplicateRowIdGroupCount: number;
+  duplicateRowIdExtraCount: number;
+  missingRowIndexCount: number;
+  uniqueChunkIdCount: number;
+  chunkIds: Set<string>;
+  chunkIdsByPhysicalRowKey: Map<string, string[]>;
+}
+
+interface ParamRagComparison {
+  beforeChunkCount: number;
+  afterChunkCount: number;
+  beforeRowCount: number;
+  afterRowCount: number;
+  beforeUniquePhysicalRowKeyCount: number;
+  afterUniquePhysicalRowKeyCount: number;
+  physicalKeyIntersectionCount: number;
+  physicalKeyOnlyBeforeCount: number;
+  physicalKeyOnlyAfterCount: number;
+  mismatchCount: number;
+  beforeUniqueChunkIdCount: number;
+  afterUniqueChunkIdCount: number;
+  chunkIdIntersectionCount: number;
+  chunkIdOnlyBeforeCount: number;
+  chunkIdOnlyAfterCount: number;
+  beforeDuplicatePhysicalRowKeyCount: number;
+  afterDuplicatePhysicalRowKeyCount: number;
+  beforeDuplicateRowIdGroupCount: number;
+  afterDuplicateRowIdGroupCount: number;
+  beforeDuplicateRowIdExtraCount: number;
+  afterDuplicateRowIdExtraCount: number;
+  beforeMissingRowIndexCount: number;
+  afterMissingRowIndexCount: number;
+  onlyBeforeSample: string[];
+  onlyAfterSample: string[];
+  chunkIdOnlyBeforeSample: string[];
+  chunkIdOnlyAfterSample: string[];
+  mismatchSample: Array<{
+    physicalRowKey: string;
+    before: string[];
+    after: string[];
+  }>;
 }
 
 interface ParamRefreshReceipt {
@@ -189,6 +238,7 @@ interface ParamRefreshReceipt {
     physicalIdentityCount: number;
   };
   physicalIdentitiesMatch: true;
+  ragComparison: ParamRagComparison;
 }
 
 async function seedParamProjectionFromProductionExport(
@@ -210,54 +260,42 @@ async function seedParamProjectionFromProductionExport(
   ));
   if (physicalEntries.length === 0) throw new Error('真实 PARAM BND4 没有可验证的 .param 物理子项。');
 
-  const exported = await runNativeBridge<Record<string, unknown>>({
-    command: 'export-param',
-    filePath: file.absolutePath,
-    resourceUri: file.sourceUri,
-    allowedRoots: [state.overlay],
-    ...(state.gameRoot ? { oodleRuntimeRoot: state.gameRoot } : {}),
-    timeoutMs: 180_000,
-    maxFrameBytes: 32 * 1024 * 1024
+  // Use the same production analyze path as ordinary workspace analysis.  It
+  // canonicalizes the Bridge envelope recursively, including nested row
+  // sourceUri values, before ingesting the first PARAM projection.
+  const analyzed = await analyzeWorkspace({
+    workspaceRoot: state.overlay,
+    files: [file],
+    inspectNativeResources: false,
+    parseTextResources: false,
+    parseJsonFixtures: false,
+    bridgeTimeoutMs: 180_000,
+    oodleRuntimeRoot: state.gameRoot,
+    ...(BRIDGE_EXECUTABLE_OVERRIDE ? { bridgeExecutablePath: BRIDGE_EXECUTABLE_OVERRIDE } : {})
   });
-  if (exported.parseStatus === 'failed' || !exported.data) {
-    throw new Error(`production PARAM export failed: ${JSON.stringify(exported.diagnostics)}`);
+  const analyzedProjections = paramExportsFor(analyzed.index, file.sourceUri);
+  if (analyzed.parsedFiles !== 1 || analyzedProjections.length === 0) {
+    throw new Error(`production PARAM analyze was not accepted: ${JSON.stringify({
+      parsedFiles: analyzed.parsedFiles,
+      projections: analyzedProjections.length,
+      diagnostics: analyzed.diagnostics
+    })}`);
   }
-  // Bridge derives sourceUri from the temporary absolute path, while the
-  // workspace index owns the relative sourceUri assigned by scanWorkspace.
-  // Production analyze canonicalizes this envelope before ingest; mirror that
-  // boundary here so the before/after comparison exercises the same key.
-  const ingested = ingestBridgeResult(state.index, {
-    ...exported,
-    sourceUri: file.sourceUri,
-    sourcePath: file.absolutePath
-  });
-  if (!ingested.accepted) {
-    throw new Error(`production PARAM export was not accepted: ${JSON.stringify(ingested.diagnostics)}`);
+  for (const projection of analyzedProjections) {
+    if (!state.index.upsertParamExport(projection)) {
+      throw new Error(`production PARAM projection was rejected by the test index: ${projection.entryName ?? projection.paramName}`);
+    }
   }
 
   const projections = paramExportsFor(state.index, file.sourceUri);
   const seededIdentities = projectionIdentities(projections);
   assertPhysicalParamIdentities(projections, physicalEntries, 'production export');
   if (seededIdentities.length === 0 || seededIdentities.length !== new Set(seededIdentities).size) {
-    const dataRecord = exported.data && typeof exported.data === 'object'
-      ? exported.data as Record<string, unknown>
-      : undefined;
     const indexedParams = state.index.toSymbolBundle().params ?? [];
     throw new Error(`production PARAM export has missing/duplicate physical identities: ${JSON.stringify({
-      result: {
-        parseStatus: exported.parseStatus,
-        resourceKind: exported.resourceKind,
-        sourceUri: exported.sourceUri,
-        sourcePath: exported.sourcePath,
-        expectedSourceUri: file.sourceUri,
-        dataKeys: dataRecord ? Object.keys(dataRecord).slice(0, 16) : [],
-        dataParamsCount: Array.isArray(dataRecord?.params) ? dataRecord.params.length : undefined,
-        dataParamName: typeof dataRecord?.paramName === 'string' ? dataRecord.paramName : undefined
-      },
-      ingest: {
-        accepted: ingested.accepted,
-        parseStatus: ingested.parseStatus,
-        diagnosticCodes: ingested.diagnostics.map((diagnostic) => diagnostic.code).slice(0, 16)
+      analysis: {
+        parsedFiles: analyzed.parsedFiles,
+        diagnostics: analyzed.diagnostics.map((diagnostic) => diagnostic.code).slice(0, 16)
       },
       indexed: {
         sourceCount: indexedParams.length,
@@ -271,7 +309,8 @@ async function seedParamProjectionFromProductionExport(
     physicalEntries,
     seededExportCount: projections.length,
     seededRowCount: projections.reduce((count, item) => count + item.rows.length, 0),
-    seededIdentities
+    seededIdentities,
+    seededRag: captureParamRagSnapshot(state.index, file.sourceUri)
   };
 }
 
@@ -289,6 +328,27 @@ function assertParamRefreshIdentity(index: WorkspaceIndex, receipt: ParamAnalyze
     throw new Error(`PARAM physical identities changed during native refresh: ${JSON.stringify({ before: receipt.seededIdentities, after: identities })}`);
   }
   assertPhysicalParamIdentities(projections, receipt.physicalEntries, 'native refresh');
+
+  const refreshedRag = captureParamRagSnapshot(index, receipt.sourceUri);
+  const ragComparison = compareParamRagSnapshots(receipt.seededRag, refreshedRag);
+  if (
+    ragComparison.beforeChunkCount !== ragComparison.afterChunkCount
+    || ragComparison.beforeUniqueChunkIdCount !== ragComparison.beforeRowCount
+    || ragComparison.afterUniqueChunkIdCount !== ragComparison.afterRowCount
+    || ragComparison.beforeUniquePhysicalRowKeyCount !== ragComparison.beforeRowCount
+    || ragComparison.afterUniquePhysicalRowKeyCount !== ragComparison.afterRowCount
+    || ragComparison.beforeMissingRowIndexCount !== 0
+    || ragComparison.afterMissingRowIndexCount !== 0
+    || ragComparison.beforeDuplicatePhysicalRowKeyCount !== 0
+    || ragComparison.afterDuplicatePhysicalRowKeyCount !== 0
+    || ragComparison.physicalKeyOnlyBeforeCount !== 0
+    || ragComparison.physicalKeyOnlyAfterCount !== 0
+    || ragComparison.chunkIdOnlyBeforeCount !== 0
+    || ragComparison.chunkIdOnlyAfterCount !== 0
+    || ragComparison.mismatchCount !== 0
+  ) {
+    throw new Error(`PARAM RAG physical row chunk identity did not converge: ${JSON.stringify(ragComparison)}`);
+  }
 
   // Native refresh must enrich the production projection with typed fields;
   // an identity-only replacement with empty field arrays is not convergence.
@@ -311,7 +371,8 @@ function assertParamRefreshIdentity(index: WorkspaceIndex, receipt: ParamAnalyze
       rowCount,
       physicalIdentityCount: identities.length
     },
-    physicalIdentitiesMatch: true
+    physicalIdentitiesMatch: true,
+    ragComparison
   };
 }
 
@@ -321,6 +382,143 @@ function paramExportsFor(index: WorkspaceIndex, sourceUri: string) {
 
 function projectionIdentities(projections: ReturnType<typeof paramExportsFor>): string[] {
   return projections.map((item) => `${item.entryIndex ?? ''}\u0000${item.entryName ?? ''}`);
+}
+
+function captureParamRagSnapshot(index: WorkspaceIndex, sourceUri: string): ParamRagSnapshot {
+  const corpus = buildRagCorpus(index);
+  const chunks = corpus.chunks.filter((chunk) => (
+    chunk.family === 'param_row' && chunk.sourceUri === sourceUri
+  ));
+  const rows = (index.toSymbolBundle().params ?? [])
+    .filter((item) => item.sourceUri === sourceUri)
+    .flatMap((item) => item.rows);
+  if (chunks.length !== rows.length) {
+    throw new Error(`PARAM RAG chunk/row count mismatch: ${chunks.length}/${rows.length}`);
+  }
+
+  const chunkIdsByPhysicalRowKey = new Map<string, string[]>();
+  const rowIdGroups = new Map<string, number>();
+  rows.forEach((row, rowIndex) => {
+    if (row.sourceUri !== sourceUri) {
+      throw new Error(`PARAM RAG row sourceUri was not canonicalized: ${JSON.stringify({
+        expected: sourceUri,
+        actual: row.sourceUri,
+        rowIndex
+      })}`);
+    }
+    const chunk = chunks[rowIndex];
+    if (!chunk || chunk.symbolUri !== row.uri) {
+      throw new Error(`PARAM RAG chunk/row order mismatch at row ${rowIndex}: ${JSON.stringify({
+        rowUri: row.uri,
+        chunkId: chunk?.chunkId,
+        chunkUri: chunk?.symbolUri
+      })}`);
+    }
+    const physicalRowKey = paramPhysicalRowKey(row, sourceUri);
+    const chunkIds = chunkIdsByPhysicalRowKey.get(physicalRowKey) ?? [];
+    chunkIds.push(chunk.chunkId);
+    chunkIdsByPhysicalRowKey.set(physicalRowKey, chunkIds);
+
+    const rowIdGroup = JSON.stringify([
+      sourceUri,
+      row.entryName ?? null,
+      row.entryIndex ?? null,
+      row.rowId
+    ]);
+    rowIdGroups.set(rowIdGroup, (rowIdGroups.get(rowIdGroup) ?? 0) + 1);
+  });
+
+  const duplicateRowIdGroups = [...rowIdGroups.values()].filter((count) => count > 1);
+  const chunkIds = new Set(chunks.map((chunk) => chunk.chunkId));
+  return {
+    chunkCount: chunks.length,
+    rowCount: rows.length,
+    uniquePhysicalRowKeyCount: chunkIdsByPhysicalRowKey.size,
+    duplicatePhysicalRowKeyCount: [...chunkIdsByPhysicalRowKey.values()]
+      .filter((chunkIds) => chunkIds.length > 1).length,
+    duplicateRowIdGroupCount: duplicateRowIdGroups.length,
+    duplicateRowIdExtraCount: duplicateRowIdGroups.reduce((count, size) => count + size - 1, 0),
+    missingRowIndexCount: rows.filter((row) => paramRowIndex(row) === null).length,
+    uniqueChunkIdCount: chunkIds.size,
+    chunkIds,
+    chunkIdsByPhysicalRowKey
+  };
+}
+
+function compareParamRagSnapshots(
+  before: ParamRagSnapshot,
+  after: ParamRagSnapshot
+): ParamRagComparison {
+  const beforeKeys = new Set(before.chunkIdsByPhysicalRowKey.keys());
+  const afterKeys = new Set(after.chunkIdsByPhysicalRowKey.keys());
+  const intersection = [...beforeKeys].filter((key) => afterKeys.has(key));
+  const onlyBefore = [...beforeKeys].filter((key) => !afterKeys.has(key));
+  const onlyAfter = [...afterKeys].filter((key) => !beforeKeys.has(key));
+  const mismatches = intersection.filter((key) => (
+    JSON.stringify(before.chunkIdsByPhysicalRowKey.get(key))
+      !== JSON.stringify(after.chunkIdsByPhysicalRowKey.get(key))
+  ));
+  const beforeChunkIds = before.chunkIds;
+  const afterChunkIds = after.chunkIds;
+  const chunkIdIntersection = [...beforeChunkIds].filter((chunkId) => afterChunkIds.has(chunkId));
+  const chunkIdOnlyBefore = [...beforeChunkIds].filter((chunkId) => !afterChunkIds.has(chunkId));
+  const chunkIdOnlyAfter = [...afterChunkIds].filter((chunkId) => !beforeChunkIds.has(chunkId));
+  return {
+    beforeChunkCount: before.chunkCount,
+    afterChunkCount: after.chunkCount,
+    beforeRowCount: before.rowCount,
+    afterRowCount: after.rowCount,
+    beforeUniquePhysicalRowKeyCount: before.uniquePhysicalRowKeyCount,
+    afterUniquePhysicalRowKeyCount: after.uniquePhysicalRowKeyCount,
+    physicalKeyIntersectionCount: intersection.length,
+    physicalKeyOnlyBeforeCount: onlyBefore.length,
+    physicalKeyOnlyAfterCount: onlyAfter.length,
+    mismatchCount: mismatches.length,
+    beforeUniqueChunkIdCount: before.uniqueChunkIdCount,
+    afterUniqueChunkIdCount: after.uniqueChunkIdCount,
+    chunkIdIntersectionCount: chunkIdIntersection.length,
+    chunkIdOnlyBeforeCount: chunkIdOnlyBefore.length,
+    chunkIdOnlyAfterCount: chunkIdOnlyAfter.length,
+    beforeDuplicatePhysicalRowKeyCount: before.duplicatePhysicalRowKeyCount,
+    afterDuplicatePhysicalRowKeyCount: after.duplicatePhysicalRowKeyCount,
+    beforeDuplicateRowIdGroupCount: before.duplicateRowIdGroupCount,
+    afterDuplicateRowIdGroupCount: after.duplicateRowIdGroupCount,
+    beforeDuplicateRowIdExtraCount: before.duplicateRowIdExtraCount,
+    afterDuplicateRowIdExtraCount: after.duplicateRowIdExtraCount,
+    beforeMissingRowIndexCount: before.missingRowIndexCount,
+    afterMissingRowIndexCount: after.missingRowIndexCount,
+    onlyBeforeSample: onlyBefore.slice(0, 8),
+    onlyAfterSample: onlyAfter.slice(0, 8),
+    chunkIdOnlyBeforeSample: chunkIdOnlyBefore.slice(0, 8),
+    chunkIdOnlyAfterSample: chunkIdOnlyAfter.slice(0, 8),
+    mismatchSample: mismatches.slice(0, 8).map((physicalRowKey) => ({
+      physicalRowKey,
+      before: before.chunkIdsByPhysicalRowKey.get(physicalRowKey) ?? [],
+      after: after.chunkIdsByPhysicalRowKey.get(physicalRowKey) ?? []
+    }))
+  };
+}
+
+function paramPhysicalRowKey(row: ParamRowSymbol, sourceUri: string): string {
+  return JSON.stringify([
+    sourceUri,
+    row.entryName ?? null,
+    row.entryIndex ?? null,
+    paramRowIndex(row),
+    row.rowId
+  ]);
+}
+
+function paramRowIndex(row: ParamRowSymbol): number | null {
+  const raw = row.raw && typeof row.raw === 'object' && !Array.isArray(row.raw)
+    ? row.raw as Record<string, unknown>
+    : undefined;
+  const rowIndex = raw?.rowIndex;
+  return typeof rowIndex === 'number'
+    && Number.isSafeInteger(rowIndex)
+    && rowIndex >= 0
+    ? rowIndex
+    : null;
 }
 
 function assertPhysicalParamIdentities(

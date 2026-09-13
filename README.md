@@ -6,11 +6,11 @@ SoulForge 是给魂游（FromSoftware 的《只狼》《黑暗之魂》《艾尔
 
 像写代码时用 Cursor 一样，你用自然语言告诉它想怎么改游戏，它在独立的工作区里帮你改好、验证、提交，还能随时一键回滚
 
-> 当前状态：工作区内所有文件均可读取、索引和诊断；文件能否编辑、写入方式和安全等级以当前治理登记、原生 authority、验证结果和工作区诊断为准。安装包未做代码签名，暂不适合作为稳定工具分发。
+> 当前状态：正在进行 V1 功能收尾，尚未宣称 V1 验收或发布完成。工作区文件发现、原生解析、界面预览与安全写入是不同层级；未知格式可显示为候选或诊断，不等于已经解析。具体能力以当前源码、原生读取结果、治理登记和对应验证为准。未签名产物不应当作稳定发行版。
 
 ## 当前可用能力
 
-项目支持对工作区内所有文件进行读取、索引和诊断，编辑器按格式对应的原生写入能力开放：
+下表列出当前源码已接入的工作台与操作入口，不是各格式、布局或全部游戏语料的验收通过清单。编辑和保存仍受原生读取、字段校验、工作区权限与 Patch Engine 约束：
 
 | 编辑器 | 通俗说法 | 你能拿它做什么 |
 | --- | --- | --- |
@@ -19,12 +19,19 @@ SoulForge 是给魂游（FromSoftware 的《只狼》《黑暗之魂》《艾尔
 | EMEVD | 改事件 / 剧情 | 改事件脚本：剧情流程、Boss 战阶段、机关触发 |
 | BND4 | 打包 / 解包资源 | 增删改游戏资源包里的条目 |
 | script | 改 AI / 行为（有限） | 查看 AI 与出招脚本；明文条目可改源码，字节码条目只能整文件替换 |
+| MSB / MAP | 地图与场景 | 查看实体、模型与空间关系，渐进加载场景；已接入受控场景修改和取消链路，加载完成不等于响应性验收通过 |
+| ACTION / TAE | 动作预览与事件时间轴 | 按动作容器定位动画、预览角色与骨骼；编辑已支持的事件时间和模板事件，不等于任意 HKX 动画重编码 |
+| ESD | 对话 / 行为状态机 | 查看状态、条件和转移；受控修改转移目标，不等于任意表达式或指令体可编辑 |
+| FLVER | 3D 模型 | 模型与骨骼预览，提供已支持的模型字段编辑；不是通用建模软件 |
+| TPF | 贴图库 | 浏览贴图，以工作区中的 DDS 替换符合格式、尺寸等校验条件的条目 |
+| MTD / GPARAM / FXR | 材质、画面参数与特效 | 各有格式化读取与受控字段写入入口；未知字段、布局和未实现操作保留诊断或失败关闭 |
 
 几点说明：
 
 - PARAM 的具体表族、字段和写入状态以当前能力登记、原生读取结果及面板诊断为准。
-- 工作区内所有文件均可读取；尚未具备原生写入能力的格式仍以只读、诊断或受限编辑方式呈现。
-- 地图/场景（MSB）、动画/动作事件（TAE）、状态机（ESD）、3D 模型（FLVER）、贴图（TPF）、材质（MTD）、碰撞和导航按各自的原生读写能力独立推进；未验证的路径必须显示为只读、partial 或失败关闭。
+- 文件出现在资源树、搜索结果或编辑器中，不代表已原生解析或可安全写入；具体状态以面板诊断为准。
+- Agent 已接入工作区索引、RAG 检索、原生读取、受控修改、结果重读与回滚；一次模拟通过不代表任意自然语言任务都能完成。中断、超时、partial 和缺失终态必须保留。
+- MAP 的功能加载、测量完整性、前台响应性与原生取消分别判定；`test:map-streaming-native` 的退出码 0 仅表示功能加载成功，仍需查看报告的 `status`。碰撞、导航及其他未验证路径不能外推为已完成。
 
 ## 卓越的安全
 
@@ -34,21 +41,34 @@ SoulForge 是给魂游（FromSoftware 的《只狼》《黑暗之魂》《艾尔
 
 ## 开发文档
 
-开发与架构设计规范请参阅[实施交接书](docs/V0_5_IMPLEMENTATION_HANDOFF.md)。文档内容以当前治理登记与验证结果为准。
+先读[实施交接书 §0](docs/V0_5_IMPLEMENTATION_HANDOFF.md)，再运行 `node scripts/gov.mjs next`、`help` 和 `status`。交接书文件名及开头的历史基线不代表当前发布版本；机器可读治理数据是范围、状态与封存证据的权威。
+
+| 想找什么 | 当前入口 |
+| --- | --- |
+| 范围、切片、Gate 与证据 | [治理说明](docs/governance/README.md)、[切片与实现入口](docs/governance/slices.json)、[验证登记](docs/governance/validation.json) |
+| 开发方法与安全边界 | [执行手册](docs/AGENT_EXECUTION_PLAYBOOK.md)（仓库公开说明与当前工作区治理数据共同约束实施边界） |
+| 文件识别与编辑器分派 | [工作区编辑器目录](packages/core/src/workspace/editorCatalog.ts)、[编辑器选择](apps/desktop/src/renderer/src/workbench/selectEditor.ts) |
+| 原生格式读写与 Bridge 协议 | [Bridge 说明](bridge/SoulForge.Bridge/README.md)、[原生命令分派](bridge/SoulForge.Bridge/BridgeCommandService.cs) |
+| Agent 工具与真实链路模拟 | [工具登记](packages/core/src/ai/toolRegistry.ts)、[模拟入口](scripts/run-real-agent-gyoubu.mjs) |
+| 验证命令与分层调度 | [package.json](package.json)、[验证调度表](scripts/verify/tiers.mjs) |
+| 产品愿景与专题规格 | [长期愿景](docs/PRODUCT_VISION.md)、[格式研究](docs/PARSER_RESEARCH.md)、[EMEVD 编译链](docs/EMEVD_DSL_COMPILER_SLICE_AB.md) |
+| 已归档的会话示例 | [会话归档索引](docs/ai-logs/README.md)（不是本机全部会话或成功率统计） |
+
+本地验证产物位于 `output/validation/`、`output/playwright/`、`output/agent-real/`，不保证随源码分发。核对时检查报告的源码/产物身份、实际退出码、具体断言和未验证项；旧 PASS 不自动覆盖后续改动，`GATE_EVIDENCE_STALE` 也不能用文档改成通过。
 
 ## 快速开始
 
-### 方式一：直接双击智能启动器（推荐，零配置）
+### 方式一：使用已构建的启动器
 
-如果你拿到的是编译好的发行包或本地仓库：
+如果你拿到的目录已经包含完整构建产物（仅下载源码 ZIP 不保证包含）：
 
 1. **直接双击根目录下的 `SoulForge.Launcher.exe`**；
 2. 启动器会自动扫描并检测：
    - 🎮 **《只狼》安装路径**（自动扫描 Steam 库、注册表与常见盘符）
-   - 🧩 **Oodle 解密库 (`oo2core_6_win64.dll`)**（自动从只狼目录安全提取与校验）
+   - 🧩 **Oodle 解压运行库 (`oo2core_6_win64.dll`)**（检查本机合法游戏目录中的运行库与兼容性，不随源码提供）
    - ⚙️ **Mod 工作区**（自动初始化标准 `mods/` 文件夹与 `project.json`）
    - 💻 **系统运行库**（VC++ 2015-2022 x64）
-3. 检测并自动补全完毕后，**将直接拉起 SoulForge 编辑器并自动载入工作区**，无需任何前置配置！
+3. 体检通过后启动编辑器；缺少游戏、运行库、依赖或应用产物时，按启动器诊断处理，不保证所有环境都能自动修复。
 
 > 提示：如果你只想进行环境体检，可在终端中执行 `.\SoulForge.Launcher.exe --check`。
 
@@ -91,7 +111,7 @@ npm -v
 
 .NET SDK 是编译桌面端底层 Native Bridge 与启动器必需的工具。
 
-1. 打开 https://dotnet.microsoft.com/download/dotnet → 下载 **.NET SDK**（.NET 6 / 8 / 10 均可），一路“下一步”安装。
+1. Bridge 当前目标为 **`net10.0`，需要 .NET 10 SDK**；只有 .NET 6 或 8 SDK 不足以构建 Bridge。可从 https://dotnet.microsoft.com/download/dotnet 安装，或在下载源码后运行 `./scripts/install-dotnet-sdk.ps1` 安装到用户本地目录。
 2. 装完同样**重新打开** PowerShell，验证：
 
 ~~~powershell
@@ -99,6 +119,7 @@ dotnet --version
 ~~~
 
 > 注意：.NET Runtime（运行时）和 SDK 是两回事，必须装 **SDK**，否则 `dotnet build` 会失败。
+> Doctor/Launcher 当前目标为 `net6.0`；`launcher:build` 使用 PATH 中的 `dotnet`。Bridge 脚本还会依次检查 `SOULFORGE_DOTNET`、`%LOCALAPPDATA%\SoulForge\dotnet\dotnet.exe`，见 [SDK 选择脚本](scripts/run-dotnet.mjs)。本地 SDK 安装不等于已经配置全局 PATH。
 
 #### 第 4 步：下载 SoulForge 源码
 
@@ -126,18 +147,19 @@ npm install
 # 2. 检查类型（确保代码没写错，没报错即通过）
 npm run typecheck
 
-# 3. 跑一遍测试（可选，新手可跳过）
+# 3. 跑公开测试与 Bridge 合成验证（不能以此宣称真实游戏语料验收）
 npm test
+npm run bridge:verify:synthetic
 
 # 4. 编译出桌面应用
 npm run build
 
-# 5. 编译根目录智能启动器（生成 SoulForge.Launcher.exe）
-npm run launcher:build
+# 5. 更新 Bridge、Doctor、Launcher 和根目录 SoulForge.exe 四个可执行产物
+npm run exe:build
 ~~~
 
 > 常见报错：
-> - `npm : 无法加载文件 ... 因为在此系统上禁止运行脚本` → 以管理员身份打开 PowerShell 执行 `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned` 后重试。
+> - `npm : 无法加载文件 ... 因为在此系统上禁止运行脚本` → 将命令中的 `npm` 换为 `npm.cmd` 后重试，无需为运行 npm 修改系统策略。
 > - 网络超时/ `ECONNRESET` → 多试几次 `npm install`，或切换网络/开代理。
 > - `dotnet: command not found` → 没装好 .NET SDK，回到第 3 步。
 
@@ -145,14 +167,14 @@ npm run launcher:build
 
 编译成功后：
 
-- **直接双击根目录的 `SoulForge.Launcher.exe` 即可全自动检测、自愈环境并启动！**
+- **双击根目录的 `SoulForge.Launcher.exe`，根据环境体检结果启动或处理诊断。**
 - 或想边看前端控制台日志边跑（开发者常用）：
 
 ~~~powershell
 npm run dev
 ~~~
 
-首次启动若被 Windows Defender 拦截，点“更多信息”→“仍要运行”（因尚未做代码签名，属正常现象）。
+未签名产物可能触发 Windows 安全提示；先核对来源与构建产物，不要把所有拦截都当作误报，也不要为此关闭防护。
 
 ### 还跑不起来？
 
@@ -203,7 +225,7 @@ I also plan to build an LLM Wiki, where Agents deployed across different compute
 This is not just wishful thinking. In fact, you can already see from the source code that the feature is beginning to take shape, though I still need to improve and test it further before it can go live.
 To help improve the project, I will provide generous usage credits to active users. If you are willing to share your experience with me, please star the repository and then get in touch — you know how to reach me.
 
-会话记录：[全部会话](docs/ai-logs/README.md)
+会话记录：[已归档会话](docs/ai-logs/README.md)（静态归档，不是本机现存会话总数）。只刷新已有归档索引可运行 `npm run ai-logs:sync -- --index-only`；完整同步会复制本机对话与工具返回，提交或分享前必须审查敏感内容。
 
 - [鬼型部修改 Markdown](docs/ai-logs/markdown/2026/08/23/rollout-2026-08-23T12-40-06-359Z-fdc9e1e0-62ee-4ac8-9168-e5966252fdde.md) · [原始 JSONL](docs/ai-logs/sessions/2026/08/23/rollout-2026-08-23T12-40-06-359Z-fdc9e1e0-62ee-4ac8-9168-e5966252fdde.jsonl)
 - [道具/商店崩溃只读排查 Markdown](docs/ai-logs/markdown/2026/08/21/rollout-2026-08-21T02-37-13-611Z-27acb304-a895-4fe7-8701-07a2552340d7.md) · [原始 JSONL](docs/ai-logs/sessions/2026/08/21/rollout-2026-08-21T02-37-13-611Z-27acb304-a895-4fe7-8701-07a2552340d7.jsonl)

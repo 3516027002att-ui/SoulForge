@@ -57,12 +57,12 @@ export interface MapAddress {
 }
 
 const CHR_RE = /\bc(\d{4})(?![\w])/gi;
-const ANIM_CODE_RE = /\bA(\d{1,5})(?![\w])/gi;
+const ANIM_CODE_RE = /\bA(\d+)(?![\w])/gi;
 const HKX_STEM_RE = /\ba(\d{3})_(\d+)(?![\w])/gi;
 const MAP_AREA_RE = /\b[Mm](\d{2})(?![\w])/g;
 const MAP_BLOCK_RE = /\bm(\d{2})_(\d{2})_(\d{2})_(\d{2})(?![\w])/g;
-const ACTION_ADDR_RE = /\bc\d{4}#(?:A\d{1,5}|a\d{3}_\d+)(?:\.e\d+)?(?:\.\w+)?/gi;
-const ACTION_URI_ADDR_RE = /\baction:\/\/c\d{4}\/(?:A\d{1,5}(?:\/e\d+(?:\.[A-Za-z0-9_]+)?)?|tae\/(?:(?:0|[1-9]\d*)|index\/(?:0|[1-9]\d*)|id\/-?\d+|(?:name|group)\/[^\s/?#]+)\/A\d{1,5}(?:\/e\d+(?:\.[A-Za-z0-9_]+)?)?)/gi;
+const ACTION_ADDR_RE = /\bc\d{4}#(?:A\d+|a\d{3}_\d+)(?![\w])(?:\.e\d+)?(?:\.\w+)?/gi;
+const ACTION_URI_ADDR_RE = /\baction:\/\/c\d{4}\/(?:A\d+(?![\w])(?:\/e\d+(?:\.[A-Za-z0-9_]+)?)?|tae\/(?:(?:0|[1-9]\d*)|index\/(?:0|[1-9]\d*)|id\/-?\d+|(?:name|group)\/[^\s/?#]+)\/A\d+(?![\w])(?:\/e\d+(?:\.[A-Za-z0-9_]+)?)?)/gi;
 const MAP_ADDR_RE = /\bm\d{2}_\d{2}_\d{2}_\d{2}#[^\s.]*(?:\.[\w]+)?/gi;
 
 type ActionSectionSelector =
@@ -116,7 +116,7 @@ function parseActionSectionSelector(kind: string, value: string | undefined): Ac
 
 function parseActionTail(parts: string[], codeIndex: number, section?: ActionSectionSelector): ActionAddress | null {
   const code = parts[codeIndex];
-  if (code === undefined || !/^A\d{1,5}$/i.test(code)) return null;
+  if (code === undefined || !/^A\d+$/i.test(code)) return null;
   const animId = parseAnimCode(code);
   if (animId === null) return null;
   if (parts.length > codeIndex + 2) return null;
@@ -191,16 +191,18 @@ function formatActionSectionSelector(address: ActionAddress): string | null {
   return `tae/${selector.key}/${encodeURIComponent(selector.value)}`;
 }
 
-/** animId → `A0200`。 */
+/** animId → `A0200` (无任意五位上限，但必须是非负 safe integer)。 */
 export function formatAnimCode(animId: number): string {
-  if (!Number.isFinite(animId) || animId < 0) return `A${String(animId)}`;
-  return `A${String(Math.trunc(animId)).padStart(4, '0')}`;
+  if (!Number.isSafeInteger(animId) || animId < 0) {
+    throw new TypeError('animId 必须是非负 safe integer。');
+  }
+  return `A${String(animId).padStart(4, '0')}`;
 }
 
-/** `A0200` / `A200` → 200；解析不出返回 null。 */
+/** `A0200` / `A200` / `A100000` → animId；解析不出或超出 safe integer 返回 null。 */
 export function parseAnimCode(value: string): number | null {
-  const match = /^A(\d{1,5})$/i.exec(value.trim());
-  return match ? Number(match[1]) : null;
+  const match = /^A(\d+)$/i.exec(value.trim());
+  return match ? parseSafeIntegerSegment(match[1]!, false, false) : null;
 }
 
 /** 从路径 / 茎提取角色 id：`chr/c1050.anibnd.dcx` / `c1050.chrbnd.dcx` → `c1050`。 */
@@ -231,20 +233,17 @@ export function formatMapArea(block: string): string {
 export function formatActionAddress(address: ActionAddress): string {
   let result = address.chr.toLowerCase();
   if (address.animId !== undefined) {
-    const section = formatActionSectionSelector(address);
-    if (section !== null) {
-      if (!Number.isSafeInteger(address.animId) || address.animId < 0) {
-        throw new TypeError('canonical ActionAddress.animId 必须是非负 safe integer。');
-      }
-      if (address.animId > 99999) throw new TypeError('canonical ActionAddress.animId 必须不超过 5 位。');
-      if (address.eventIndex !== undefined
-        && (!Number.isSafeInteger(address.eventIndex) || address.eventIndex < 0)) {
-        throw new TypeError('canonical ActionAddress.eventIndex 必须是非负 safe integer。');
-      }
-      if (address.field && address.field.length > 0 && !/^[A-Za-z0-9_]+$/.test(address.field)) {
-        throw new TypeError('canonical ActionAddress.field 只能包含字母、数字和下划线。');
-      }
+    if (!Number.isSafeInteger(address.animId) || address.animId < 0) {
+      throw new TypeError('ActionAddress.animId 必须是非负 safe integer。');
     }
+    if (address.eventIndex !== undefined
+      && (!Number.isSafeInteger(address.eventIndex) || address.eventIndex < 0)) {
+      throw new TypeError('ActionAddress.eventIndex 必须是非负 safe integer。');
+    }
+    if (address.field && address.field.length > 0 && !/^[A-Za-z0-9_]+$/.test(address.field)) {
+      throw new TypeError('ActionAddress.field 只能包含字母、数字和下划线。');
+    }
+    const section = formatActionSectionSelector(address);
     result = section === null
       ? `${result}#${formatAnimCode(address.animId)}`
       : `action://${result}/${section}/${formatAnimCode(address.animId)}`;
@@ -276,11 +275,13 @@ export function parseActionAddress(value: string): ActionAddress | null {
   const text = value.trim();
   const uriResult = parseActionUri(text);
   if (uriResult !== null) return uriResult;
-  const match = /^c(\d{4})(?:#A(\d{1,5})(?:\.e(\d+))?(?:\.([A-Za-z0-9_]+))?)?$/i.exec(text);
+  const match = /^c(\d{4})(?:#A(\d+)(?:\.e(\d+))?(?:\.([A-Za-z0-9_]+))?)?$/i.exec(text);
   if (!match) return null;
   const result: ActionAddress = { chr: `c${match[1]}`.toLowerCase() };
   if (match[2] === undefined) return result;
-  result.animId = Number(match[2]);
+  const animId = parseSafeIntegerSegment(match[2], false, false);
+  if (animId === null) return null;
+  result.animId = animId;
   if (match[3] !== undefined) {
     const eventIndex = parseSafeIntegerSegment(match[3], false, false);
     if (eventIndex === null) return null;
@@ -316,7 +317,7 @@ export function parseMapAddress(value: string): MapAddress | null {
 
 /**
  * 从文本里抽出原子地址 token（大小写不敏感，一律小写；下划线是 ID 一部分，
- * 保留不拆）。至少覆盖：`c\d{4}`、`A\d{1,5}`、`a\d{3}_\d+`（hkx 茎）、`M\d{2}`、
+ * 保留不拆）。至少覆盖：`c\d{4}`、`A\d+`、`a\d{3}_\d+`（hkx 茎）、`M\d{2}`、
  * `m\d{2}_\d{2}_\d{2}_\d{2}`、以及带 `#` 的完整地址（含 .eN / .field）。
  * 供 queryParse tokenize 与 lookupIndex 在切词前先抽地址，避免被 replaceAll 拆碎。
  */
@@ -327,15 +328,26 @@ export function extractAtomicAddressTokens(text: string): string[] {
     const normalized = value.toLowerCase();
     if (!tokens.includes(normalized)) tokens.push(normalized);
   };
+  const keepActionToken = (value: string): void => {
+    // Numeric action identities must be parser-valid before entering the
+    // query token set.  Preserve HKX stems separately as lookup aliases:
+    // they intentionally do not parse back to an animId.
+    if (parseActionAddress(value) !== null
+      || /^c\d{4}#a\d{3}_\d+(?![\w])(?:\.e\d+)?(?:\.\w+)?$/i.test(value)) {
+      add(value);
+    }
+  };
 
   // 完整地址优先整体提取，保证带 # 的旧地址及 action:// section URI 不被拆。
-  for (const match of text.matchAll(ACTION_ADDR_RE)) add(match[0]);
-  for (const match of text.matchAll(ACTION_URI_ADDR_RE)) add(match[0]);
+  for (const match of text.matchAll(ACTION_ADDR_RE)) keepActionToken(match[0]!);
+  for (const match of text.matchAll(ACTION_URI_ADDR_RE)) keepActionToken(match[0]!);
   for (const match of text.matchAll(MAP_ADDR_RE)) add(match[0]);
 
   // 再抽独立分量（c1050 / a0200 / m11 / m11_01_00_00 等）。
   for (const match of text.matchAll(CHR_RE)) add(`c${match[1]}`);
-  for (const match of text.matchAll(ANIM_CODE_RE)) add(`a${match[1]}`);
+  for (const match of text.matchAll(ANIM_CODE_RE)) {
+    if (parseAnimCode(`A${match[1]}`) !== null) add(`a${match[1]}`);
+  }
   for (const match of text.matchAll(HKX_STEM_RE)) add(`a${match[1]}_${match[2]}`);
   for (const match of text.matchAll(MAP_AREA_RE)) add(`m${match[1]}`);
   for (const match of text.matchAll(MAP_BLOCK_RE)) add(`m${match[1]}_${match[2]}_${match[3]}_${match[4]}`);

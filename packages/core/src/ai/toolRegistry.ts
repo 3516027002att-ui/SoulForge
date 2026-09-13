@@ -556,6 +556,40 @@ export class ToolRegistry {
           configurable: true
         });
       }
+      if (name === 'read_emevd_event'
+        && result.ok
+        && resolvedEmevdTarget?.canonical !== true
+        && result.data
+        && typeof result.data === 'object'
+        && !Array.isArray(result.data)) {
+        const resultData = result.data as Record<string, unknown>;
+        const diagnostics = Array.isArray(resultData.diagnostics)
+          ? resultData.diagnostics
+          : [];
+        const warningCode = 'EMEVD_NONCANONICAL_SOURCE_INSPECT_ONLY';
+        const nativeDiagnostics = diagnostics.filter((diagnostic) => (
+          diagnostic
+          && typeof diagnostic === 'object'
+          && !Array.isArray(diagnostic)
+          && (diagnostic as Record<string, unknown>).code !== warningCode
+        ));
+        // Keep this diagnostic in the native result data, rather than only
+        // in host provenance: projectCompleteNativeEmevdDsl intentionally
+        // preserves source diagnostics in the complete model-facing view.
+        // Always replace a native same-code item and put the host wording
+        // first, so a verbose native list cannot hide or spoof this boundary.
+        result.data = {
+          ...resultData,
+          diagnostics: [
+            {
+              severity: 'warning',
+              code: warningCode,
+              message: '当前 file 未直接命中工作区索引的 canonical sourceUri/sourcePath/relativePath/absolutePath；本次 native read 仅供检查，不能生成写回凭据。请使用 search_events 返回的完整 sourceUri 重新读取。'
+            },
+            ...nativeDiagnostics
+          ]
+        };
+      }
       if (mutationReservationId && context.taskRecord) {
         if (result.ok) {
           await context.taskRecord.finalizeMutation(mutationReservationId);
@@ -1980,6 +2014,7 @@ export function createDefaultToolRegistry(): ToolRegistry {
       + 'A complete format=darkscript read from instructionOffset=0 through the native total returns data.record.projection=complete_native_dsl: '
       + 'the full DarkScript, native evidence/provenance and native identity are retained while auxiliary machine DTO is omitted; this is the only event read view that can mint a write receipt. '
       + 'Use format=json or instructionOffset/instructionLimit paging when machine instructions are needed, but JSON, tail, partial, or incomplete windows remain inspect-only and cannot authorize event writes. '
+      + 'If file does not directly match an indexed sourceUri/sourcePath/relativePath/absolutePath, the native read may still succeed as inspect-only and cannot mint a write receipt; use search_events to obtain the complete sourceUri and reread. '
       + 'It never uses RAG or an index projection as a native-read substitute. format defaults to darkscript.',
     permission: 'read',
     permissionLevel: 'read',
@@ -2282,14 +2317,27 @@ export function createDefaultToolRegistry(): ToolRegistry {
       const file = asString(value.file);
       if (!file) return fail('INVALID_INPUT', 'read_tae_events 需要 file。');
       const addresses = value.addresses === undefined ? [] : asStringList(value.addresses);
+      // search_resources returns the indexed source URI for ACTION containers
+      // (for example file://chr/c7100.anibnd.dcx), while the TAE facade needs
+      // the current workspace's physical overlay path.  Resolve only this
+      // read path through the existing catalog boundary; mutation remains on
+      // its legacy resolver and base/read permissions stay unchanged.
+      const resolvedFile = resolveIndexedResourceFile(context, file, 'chr');
+      if (!resolvedFile.ok) return fail(resolvedFile.code, resolvedFile.message, resolvedFile.details);
       const result = await readTaeEvents({
         edit: edit.session,
-        file,
+        file: nativePathFromFileToken(resolvedFile.path),
         ...(addresses.length > 0 ? { addresses } : {})
       });
       if (!result.ok) return fail(result.error.code, result.error.message, result.diagnostics);
       if (context.workspaceIndex) {
-        const sourceUri = pathToFileURL(result.filePath).href;
+        // Keep the catalog identity returned by search_resources when the
+        // resolver selected a canonical indexed file.  For legacy relative /
+        // absolute / bare tokens that remain unindexed, preserve the previous
+        // physical-path identity derived from the successful native read.
+        const sourceUri = resolvedFile.canonical === true
+          ? resolvedFile.sourceUri
+          : pathToFileURL(result.filePath).href;
         const sourceFile = context.workspaceIndex.getFile(sourceUri);
         const sourceHash = result.sourceHash;
         const sourceRevision = sourceFile?.mtimeMs;

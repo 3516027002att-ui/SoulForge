@@ -667,7 +667,24 @@ export const SOURCE_MANIFEST_RELATIVE_PATH = RELEASE_MANIFEST_RELATIVE_PATH;
 const PACKAGE_TREE_STRICT_REQUIRED = [
   'resources/app.asar',
   'resources/native/better_sqlite3.node',
-  'resources/native/better_sqlite3.json'
+  'resources/native/better_sqlite3.json',
+  'resources/bridge/SoulForge.Bridge.exe',
+  'resources/prompt/system.md',
+  'resources/prompt/rag-embedding.md',
+  'resources/prompt/event-reference.md',
+  'resources/prompt/agent-task-record.md',
+  'resources/mutter.md',
+  'resources/LICENSE',
+  'resources/NOTICE',
+  'resources/licenses/@electron-internal+extract-zip.txt',
+  'resources/licenses/@esbuild+win32-x64.txt',
+  'resources/licenses/@rollup+rollup-win32-x64-gnu.txt',
+  'resources/licenses/@rollup+rollup-win32-x64-msvc.txt',
+  'resources/licenses/guid-typescript.txt',
+  'resources/licenses/onnxruntime-common.txt',
+  'resources/licenses/onnxruntime-node.txt',
+  'resources/licenses/onnxruntime-web.txt',
+  'resources/licenses/saxes.txt'
 ];
 
 /** Electron runtime files that must always be present in the unpacked tree. */

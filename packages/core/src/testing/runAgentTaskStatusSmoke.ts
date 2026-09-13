@@ -5,9 +5,31 @@ import { createAgentToolBridge } from '../ai/agentToolBridge.js';
 import { ToolRegistry } from '../ai/toolRegistry.js';
 import { WorkspaceIndex } from '../indexing/workspaceIndex.js';
 import { runAgentToolLoop } from '../model-services/agentLoop.js';
+import { parseRolloutLines } from '../model-services/rolloutRecorder.js';
 import type {
-  AgentEvent, AgentPermissionMode, ModelServiceAdapter, RolloutItem, ToolCall
+  AgentEvent, AgentPermissionMode, ChatMessage, ModelServiceAdapter, RolloutItem, ToolCall
 } from '../model-services/types.js';
+
+const hostNoticeMarker = '【系统执行核验｜host=';
+
+function agentDeltaText(events: readonly AgentEvent[]): string {
+  return events
+    .filter((event): event is Extract<AgentEvent, { type: 'agent-message-delta' }> => (
+      event.type === 'agent-message-delta'
+    ))
+    .map((event) => event.text)
+    .join('');
+}
+
+function countTextMarker(text: string, marker: string): number {
+  return text.split(marker).length - 1;
+}
+
+function assistantContents(messages: readonly ChatMessage[]): string[] {
+  return messages
+    .filter((message) => message.role === 'assistant')
+    .map((message) => message.content);
+}
 
 interface StatusCase {
   name: string;
@@ -192,12 +214,270 @@ export async function runAgentTaskStatusSmoke(): Promise<void> {
     assert.equal(providerCalls, 3, `sticky refresh, streaming=${streaming}: provider calls`);
     assert.equal(result.finishReason, 'partial', `sticky refresh, streaming=${streaming}`);
     assert.ok(result.diagnostics.some((item) => item.code === 'AGENT_KNOWLEDGE_REFRESH_DEGRADED_STICKY'));
+    assert.equal(
+      countTextMarker(agentDeltaText(events), `${hostNoticeMarker}partial】`),
+      1,
+      `sticky refresh, streaming=${streaming}: UI host notice`
+    );
+    const stickyUiText = agentDeltaText(events);
+    assert.equal(
+      countTextMarker(stickyUiText, '本次修改完成并回读验证。'),
+      1,
+      `sticky refresh, streaming=${streaming}: UI model text`
+    );
+    assert.ok(
+      stickyUiText.indexOf('本次修改完成并回读验证。') < stickyUiText.indexOf(`${hostNoticeMarker}partial】`),
+      `sticky refresh, streaming=${streaming}: host notice follows model text`
+    );
+    const resultAssistants = assistantContents(result.messages);
+    assert.equal(
+      resultAssistants.filter((text) => text.includes(`${hostNoticeMarker}partial】`)).length,
+      1,
+      `sticky refresh, streaming=${streaming}: result host notice`
+    );
+    assert.equal(
+      resultAssistants.filter((text) => text === '本次修改完成并回读验证。').length,
+      1,
+      `sticky refresh, streaming=${streaming}: model text preserved`
+    );
+    assert.match(
+      resultAssistants.find((text) => text.includes(`${hostNoticeMarker}partial】`)) ?? '',
+      /知识刷新状态为 failed/,
+      `sticky refresh, streaming=${streaming}: refresh detail`
+    );
+    const reloaded = parseRolloutLines(rollout.map((item) => JSON.stringify(item)));
+    assert.equal(
+      reloaded.messages.filter((message) => message.content.includes(`${hostNoticeMarker}partial】`)).length,
+      1,
+      `sticky refresh, streaming=${streaming}: rollout reload host notice`
+    );
+    assert.equal(
+      reloaded.messages.filter((message) => message.content === '本次修改完成并回读验证。').length,
+      1,
+      `sticky refresh, streaming=${streaming}: rollout reload model text`
+    );
+    assert.equal(reloaded.terminal?.finishReason, 'partial');
+    assert.equal(reloaded.terminal?.taskStatus, 'partial');
     const durableEnd = rollout.find((item) => item.type === 'turn-complete');
     assert.ok(durableEnd?.type === 'turn-complete');
     assert.equal(durableEnd.taskStatus, 'partial');
     const sessionEnd = events.find((event) => event.type === 'turn-complete');
     assert.ok(sessionEnd?.type === 'turn-complete');
     assert.equal(sessionEnd.finishReason, 'partial');
+  }
+
+  // A sticky refresh failure must annotate every non-stop terminal without
+  // rewriting the loop's actual finishReason.  These cases deliberately do
+  // not ask the provider for a terminal resample.
+  for (const terminalCase of ['cancelled', 'error', 'length'] as const) {
+    for (const streaming of [false, true]) {
+      const controller = new AbortController();
+      const events: AgentEvent[] = [];
+      const rollout: RolloutItem[] = [];
+      const calls: ToolCall[] = [
+        { id: `${terminalCase}-write-call`, name: 'write_fixture', argumentsJson: '{}' },
+        { id: `${terminalCase}-read-call`, name: 'read_fixture', argumentsJson: '{}' }
+      ];
+      let providerCalls = 0;
+      const adapter: ModelServiceAdapter = {
+        protocol: 'openai-compatible',
+        async complete() {
+          providerCalls += 1;
+          if (providerCalls === 1) {
+            return {
+              message: { role: 'assistant', content: '', toolCalls: [calls[0]!] },
+              finishReason: 'tool_use' as const,
+              diagnostics: [],
+              ...(terminalCase === 'length' ? { usage: { outputTokens: 1 } } : {})
+            };
+          }
+          if (providerCalls === 2) {
+            return {
+              message: { role: 'assistant', content: '', toolCalls: [calls[1]!] },
+              finishReason: 'tool_use' as const,
+              diagnostics: []
+            };
+          }
+          return {
+            message: { role: 'assistant', content: '' },
+            finishReason: 'error' as const,
+            diagnostics: [{ severity: 'error' as const, code: 'MODEL_SERVICE_HTTP_ERROR', message: 'fixture terminal error' }]
+          };
+        },
+        async *stream() {
+          providerCalls += 1;
+          if (providerCalls === 1) {
+            if (terminalCase === 'length') yield { type: 'usage', outputTokens: 1 };
+            yield { type: 'tool-call', toolCall: calls[0]! };
+            yield { type: 'message-stop', finishReason: 'tool_use' };
+            return;
+          }
+          if (providerCalls === 2) {
+            yield { type: 'tool-call', toolCall: calls[1]! };
+            yield { type: 'message-stop', finishReason: 'tool_use' };
+            return;
+          }
+          yield { type: 'error', code: 'MODEL_SERVICE_HTTP_ERROR', message: 'fixture terminal error' };
+        },
+        async listModels() { return { ok: true, models: [] }; }
+      };
+      const result = await runAgentToolLoop(adapter, {
+        config: {
+          id: `sticky-terminal-${terminalCase}`, displayName: 'sticky terminal fixture',
+          protocol: 'openai-compatible', baseUrl: 'http://127.0.0.1:9',
+          model: 'fixture', hasCredential: false,
+          createdAt: '2026-09-08T00:00:00Z', updatedAt: '2026-09-08T00:00:00Z'
+        },
+        apiKey: `fixture-sticky-${terminalCase}-credential`,
+        messages: [{ role: 'user', content: '修改并验证这个资源' }],
+        taskQuery: '修改并验证这个资源',
+        permissionMode: 'normal',
+        tools: [
+          { name: 'write_fixture', description: 'fixture write', parametersJsonSchema: {}, permissionLevel: 'read' },
+          { name: 'read_fixture', description: 'fixture read', parametersJsonSchema: {}, permissionLevel: 'read' }
+        ],
+        executeTool: async (call) => {
+          if (call.name === 'write_fixture') {
+            return {
+              ok: true,
+              content: JSON.stringify({
+                ok: true,
+                state: 'committed',
+                data: { record: { lifecycle: { transaction: 'committed', knowledgeRefresh: 'failed' } } }
+              })
+            };
+          }
+          if (terminalCase === 'cancelled') controller.abort();
+          return {
+            ok: true,
+            content: JSON.stringify({
+              ok: true,
+              state: 'completed',
+              data: { sourceUri: 'file:///fixture/resource.param' },
+              evidence: { status: 'native-verified' }
+            })
+          };
+        },
+        maxSteps: 5,
+        ...(terminalCase === 'length' ? { maxTotalOutputTokens: 1 } : {}),
+        ...(terminalCase === 'cancelled' ? { signal: controller.signal } : {}),
+        streaming,
+        onEvent: (event) => { events.push(event); },
+        rollout: {
+          enqueue(item) { rollout.push(item); },
+          async flush() {}
+        }
+      });
+      const label = `sticky ${terminalCase}, streaming=${streaming}`;
+      const expectedTaskStatus = terminalCase === 'cancelled'
+        ? 'cancelled'
+        : terminalCase === 'error'
+          ? 'error'
+          : 'partial';
+      const expectedProviderCalls = terminalCase === 'cancelled'
+        ? 2
+        : terminalCase === 'error'
+          ? 3
+          : 1;
+      assert.equal(providerCalls, expectedProviderCalls, `${label}: provider calls`);
+      assert.equal(result.finishReason, terminalCase, `${label}: actual finishReason`);
+      assert.equal(
+        countTextMarker(agentDeltaText(events), `${hostNoticeMarker}${terminalCase}】`),
+        1,
+        `${label}: UI host notice`
+      );
+      const resultAssistants = assistantContents(result.messages);
+      assert.equal(
+        resultAssistants.filter((text) => text.includes(`${hostNoticeMarker}${terminalCase}】`)).length,
+        1,
+        `${label}: result host notice`
+      );
+      assert.match(
+        resultAssistants.find((text) => text.includes(`${hostNoticeMarker}${terminalCase}】`)) ?? '',
+        /后续读取成功不改变本次刷新失败/,
+        `${label}: refresh detail`
+      );
+      const reloaded = parseRolloutLines(rollout.map((item) => JSON.stringify(item)));
+      assert.equal(
+        reloaded.messages.filter((message) => message.content.includes(`${hostNoticeMarker}${terminalCase}】`)).length,
+        1,
+        `${label}: rollout reload host notice`
+      );
+      assert.equal(reloaded.terminal?.finishReason, terminalCase, `${label}: rollout finishReason`);
+      assert.equal(reloaded.terminal?.taskStatus, expectedTaskStatus, `${label}: rollout taskStatus`);
+      const sessionEnd = events.find((event) => event.type === 'turn-complete');
+      assert.ok(sessionEnd?.type === 'turn-complete', label);
+      assert.equal(sessionEnd.finishReason, terminalCase, `${label}: session finishReason`);
+    }
+  }
+
+  // A previous turn's assistant answer must not suppress the current turn's
+  // no-model-text terminal summary.  This also proves the synthetic summary
+  // reaches the live UI exactly once, not only durable rollout storage.
+  for (const streaming of [false, true]) {
+    const controller = new AbortController();
+    controller.abort();
+    const events: AgentEvent[] = [];
+    const rollout: RolloutItem[] = [];
+    let providerCalls = 0;
+    const adapter: ModelServiceAdapter = {
+      protocol: 'openai-compatible',
+      async complete() {
+        providerCalls += 1;
+        return { message: { role: 'assistant', content: 'must not be called' }, finishReason: 'stop', diagnostics: [] };
+      },
+      async *stream() {
+        providerCalls += 1;
+        yield { type: 'text-delta', text: 'must not be called' };
+        yield { type: 'message-stop', finishReason: 'stop' };
+      },
+      async listModels() { return { ok: true, models: [] }; }
+    };
+    const result = await runAgentToolLoop(adapter, {
+      config: {
+        id: 'stale-assistant-terminal-fixture', displayName: 'stale assistant terminal fixture',
+        protocol: 'openai-compatible', baseUrl: 'http://127.0.0.1:9',
+        model: 'fixture', hasCredential: false,
+        createdAt: '2026-09-08T00:00:00Z', updatedAt: '2026-09-08T00:00:00Z'
+      },
+      apiKey: 'fixture-stale-assistant-credential',
+      messages: [
+        { role: 'assistant', content: '旧轮已完成。' },
+        { role: 'user', content: '当前任务' }
+      ],
+      taskQuery: '当前任务',
+      permissionMode: 'normal',
+      tools: [],
+      executeTool: async () => { throw new Error('Unexpected tool execution'); },
+      signal: controller.signal,
+      streaming,
+      onEvent: (event) => { events.push(event); },
+      rollout: {
+        enqueue(item) { rollout.push(item); },
+        async flush() {}
+      }
+    });
+    const label = `stale assistant terminal, streaming=${streaming}`;
+    assert.equal(providerCalls, 0, `${label}: provider calls`);
+    assert.equal(result.finishReason, 'cancelled', label);
+    assert.equal(
+      countTextMarker(agentDeltaText(events), '【系统收口摘要-cancelled】'),
+      1,
+      `${label}: UI summary`
+    );
+    assert.equal(
+      result.messages.filter((message) => message.content.includes('【系统收口摘要-cancelled】')).length,
+      1,
+      `${label}: result summary`
+    );
+    const reloaded = parseRolloutLines(rollout.map((item) => JSON.stringify(item)));
+    assert.equal(
+      reloaded.messages.filter((message) => message.content.includes('【系统收口摘要-cancelled】')).length,
+      1,
+      `${label}: rollout reload summary`
+    );
+    assert.equal(reloaded.terminal?.finishReason, 'cancelled', `${label}: rollout finishReason`);
+    assert.equal(reloaded.terminal?.taskStatus, 'cancelled', `${label}: rollout taskStatus`);
   }
 
   // Exercise the production registry -> bounded bridge -> loop path. The
@@ -252,6 +532,7 @@ export async function runAgentTaskStatusSmoke(): Promise<void> {
         context: { workspaceIndex: new WorkspaceIndex('bridge-loop-sticky-fixture'), mode: 'plan' }
       });
       const events: AgentEvent[] = [];
+      const rollout: RolloutItem[] = [];
       const calls: ToolCall[] = [
         { id: 'oversized-write-call', name: 'write_oversized_fixture', argumentsJson: '{}' },
         { id: 'ordinary-read-call', name: 'read_oversized_fixture', argumentsJson: '{}' }
@@ -297,7 +578,10 @@ export async function runAgentTaskStatusSmoke(): Promise<void> {
         maxSteps: 5,
         streaming,
         onEvent: (event) => { events.push(event); },
-        rollout: { enqueue() {}, async flush() {} }
+        rollout: {
+          enqueue(item) { rollout.push(item); },
+          async flush() {}
+        }
       });
       const label = `bridge-loop ${refreshCase.name}, streaming=${streaming}`;
       assert.equal(providerCalls, 3, `${label}: provider calls`);
@@ -310,6 +594,23 @@ export async function runAgentTaskStatusSmoke(): Promise<void> {
       const sessionEnd = events.find((event) => event.type === 'turn-complete');
       assert.ok(sessionEnd?.type === 'turn-complete', label);
       assert.equal(sessionEnd.finishReason, result.finishReason, label);
+      const expectedHostNoticeCount = refreshCase.partial ? 1 : 0;
+      assert.equal(
+        countTextMarker(agentDeltaText(events), hostNoticeMarker),
+        expectedHostNoticeCount,
+        `${label}: UI host notice count`
+      );
+      assert.equal(
+        assistantContents(result.messages).filter((text) => text.includes(hostNoticeMarker)).length,
+        expectedHostNoticeCount,
+        `${label}: result host notice count`
+      );
+      const reloaded = parseRolloutLines(rollout.map((item) => JSON.stringify(item)));
+      assert.equal(
+        reloaded.messages.filter((message) => message.content.includes(hostNoticeMarker)).length,
+        expectedHostNoticeCount,
+        `${label}: rollout reload host notice count`
+      );
     }
   }
 }

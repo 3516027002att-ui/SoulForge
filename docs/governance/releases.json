@@ -1,6 +1,6 @@
 {
   "schemaVersion": "1.0.0",
-  "currentRelease": null,
+  "currentRelease": "V0.9",
   "releases": [
     {
       "release": "V0.5",
@@ -49,6 +49,16 @@
       "frozenEvidenceRef": null,
       "frozenFields": [],
       "frozenFieldsNote": "V0.6 范围尚未裁定。承接条目见 scope.json 中 deferredToRelease=V0.6 的条目及其 resumeRequires。",
+      "unfreezeRuling": null
+    },
+    {
+      "release": "V0.9",
+      "state": "active",
+      "frozen": false,
+      "frozenScopeRulingRef": null,
+      "frozenEvidenceRef": null,
+      "frozenFields": [],
+      "frozenFieldsNote": "V0.9 公开预发行边界已由 scope.json 的独立 scopeItem 登记，用户裁定引用为 user-ruling-2026-09-09-v09-public-prerelease-and-clean-source；本轮交付为 clean 源码 ZIP、启动 EXE/native 必需组件与 GitHub 自动源码归档，NSIS 安装包不在本轮交付；源码归档、启动路径、内部文件排除、哈希与许可证 notices 验证尚未冻结，不提升既有 V0.5/V0.6 Gate 或 authority。",
       "unfreezeRuling": null
     }
   ],

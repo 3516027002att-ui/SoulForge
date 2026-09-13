@@ -851,6 +851,11 @@ export async function runAgentToolLoop(
   let forcedConclusion = false;
   let lengthConclusionAttempted = false;
   let stickyKnowledgeRefreshDegraded: { status: string; toolName: string } | null = null;
+  // Track assistant messages produced during this invocation only.  Looking
+  // through the whole `messages` array would let a resumed turn's old final
+  // answer suppress the terminal report for the current turn.
+  let latestRunAssistant: ChatMessage | null = null;
+  let terminalHostNoticeEmitted = false;
   // A successful field-metadata lookup is the last discovery step before the
   // mandatory bounded native read.  Give the provider one extra turn at the
   // research boundary to consume that metadata; the generic discovery guard
@@ -902,6 +907,18 @@ export async function runAgentToolLoop(
   };
   const recordInterrupted = (): void => {
     request.rollout?.enqueue({ type: 'interrupted', at: new Date().toISOString() });
+  };
+  const appendTerminalHostMessage = (content: string, appendToExisting: boolean): void => {
+    if (terminalHostNoticeEmitted) return;
+    terminalHostNoticeEmitted = true;
+    const message: ChatMessage = { role: 'assistant', content };
+    messages.push(message);
+    recordMessage(steps, message);
+    emit({
+      type: 'agent-message-delta',
+      step: steps,
+      text: `${appendToExisting ? '\n\n' : ''}${content}`
+    });
   };
 
   /**
@@ -1280,6 +1297,7 @@ export async function runAgentToolLoop(
         : {})
     };
     messages.push(safeMessage);
+    if (safeMessage.role === 'assistant') latestRunAssistant = safeMessage;
     recordMessage(steps, safeMessage);
     // 非流式路径没有 delta：把整段正文一次推给界面，否则用户只能看见工具行。
     if (!request.streaming && safeMessage.content.length > 0) {
@@ -1981,26 +1999,33 @@ export async function runAgentToolLoop(
 
   // A caller timeout/cancellation can land while the provider is producing a
   // tool-producing turn.  In that case there is no model-authored final text,
-  // but the UI and rollout still need an honest terminal report.  Synthesize a
-  // bounded system summary only for non-stop terminals with an empty final
-  // assistant message; never turn it into a completion claim.
+  // but the UI and rollout still need an honest terminal report.  A committed
+  // write whose knowledge refresh degraded needs one additional host-owned
+  // execution check even when the model did produce a final-looking sentence:
+  // preserve that sentence, then append a bounded notice with the actual
+  // terminal finishReason.  Never turn it into a completion claim.
   if (finishReason !== 'stop' && finishReason !== 'tool_use') {
-    const lastAssistant = [...messages].reverse().find((message) => message.role === 'assistant');
-    if (!lastAssistant || lastAssistant.content.trim().length === 0) {
+    const hasCurrentAssistantText = (latestRunAssistant?.content.trim().length ?? 0) > 0;
+    const refreshNotice = stickyKnowledgeRefreshDegraded === null
+      ? null
+      : `【系统执行核验｜host=${finishReason}】写入后的知识刷新状态为 ${stickyKnowledgeRefreshDegraded.status}`
+        + `（工具 ${stickyKnowledgeRefreshDegraded.toolName}）。`
+        + '后续读取成功不改变本次刷新失败；上方模型原文保持不变。'
+        + '本提示不证明已回滚或已在游戏内生效。';
+    if (refreshNotice !== null && hasCurrentAssistantText) {
+      appendTerminalHostMessage(refreshNotice, true);
+    } else if (!hasCurrentAssistantText) {
       const mutationCalls = toolAudit
         .filter((call) => /^(?:propose_|mutate_|apply_|stage_|validate_|commit_|rollback_|write_)/.test(call.name))
         .map((call) => call.name);
       const mutationStatus = mutationCalls.length > 0
         ? `检测到写入类工具调用（${[...new Set(mutationCalls)].join('、')}），实际资源状态必须以 Patch Engine 审计与回读为准。`
         : '未发现写入类工具调用。';
-      const terminalReport: ChatMessage = {
-        role: 'assistant',
-        content: `【系统收口摘要-${finishReason}】Agent 在 ${steps} 步后停止，未形成模型最终汇报。`
-          + `已记录 ${toolAudit.length} 次工具调用；${mutationStatus}`
-          + '当前结果不可视为完成，请从 rollout 的最后一条工具结果继续处理未确认项。'
-      };
-      messages.push(terminalReport);
-      recordMessage(steps, terminalReport);
+      const terminalReport = `【系统收口摘要-${finishReason}】Agent 在 ${steps} 步后停止，未形成模型最终汇报。`
+        + `已记录 ${toolAudit.length} 次工具调用；${mutationStatus}`
+        + '当前结果不可视为完成，请从 rollout 的最后一条工具结果继续处理未确认项。'
+        + (refreshNotice === null ? '' : `\n\n${refreshNotice}`);
+      appendTerminalHostMessage(terminalReport, false);
       diagnostics.push({
         severity: 'warning',
         code: 'AGENT_TERMINAL_REPORT_EMITTED',

@@ -11,7 +11,9 @@ import {
   nativeEditSessionFromContext,
   readMsbDocumentViaBridge,
   runBridge,
+  BRIDGE_TRANSPORT_TIMING_CODE,
   type MsbBridgeMutation,
+  type RunBridgeCancellationTerminalReceipt,
   type WorkspaceIndex,
   type WorkspaceSession,
   type WriteConfirmationPort
@@ -36,6 +38,18 @@ import {
   timingKeyForNativeSession,
   clearMapNativeTimingSession
 } from '../mapTimingTelemetry.js';
+import {
+  CHARACTER_NATIVE_TIMING_CODE,
+  summarizeCharacterNativeTiming
+} from '../characterTimingTelemetry.js';
+import {
+  createCharacterMainTimingCollector,
+  type CharacterMainTimingCollector
+} from '../characterMainTimingTelemetry.js';
+import {
+  decideMapStaticReadFailure,
+  isMapStaticGeometryData
+} from './mapStaticReadDecision.js';
 // Forensics counters (V1, pure diagnostic — no business logic change).
 const _forensicsMapCounters = new Map<string, number>();
 function _forensicsMapInc(key: string, delta = 1): void { _forensicsMapCounters.set(key, (_forensicsMapCounters.get(key) ?? 0) + delta); }
@@ -46,11 +60,208 @@ export function getMapForensicsCounters(): Record<string, number> { return Objec
 // bounded summary on a model's final page; renderer responses never receive
 // the per-page timing payload.
 const MAP_NATIVE_TIMING_ENABLED = process.env.SF_MAP_NATIVE_TIMING === '1';
+const CHARACTER_NATIVE_TIMING_ENABLED = process.env.SF_MAP_NATIVE_TIMING === '1';
 import type { TrustedIpcHandle } from './registration.js';
 import {
   assembleC0000CompatibilityPreview,
   characterTexturePackagePaths
 } from './action.js';
+import {
+  executeMapRequest,
+  isMapRequestCancellationError,
+  MapRequestCancellationRegistry,
+  normalizeMapRequestId
+} from './mapRequestCancellation.js';
+
+const mapReadRequests = new MapRequestCancellationRegistry();
+const MAP_REQUEST_CANCELLED_CODE = 'MAP_REQUEST_CANCELLED';
+const MAP_CANCELLATION_TERMINAL_MARKER = '[SF_MAP_CANCELLATION_TERMINAL]';
+const MAP_CANCELLATION_REQUESTED_MARKER = '[SF_MAP_CANCELLATION_REQUESTED]';
+
+type MapCancellationTerminalReceipt = RunBridgeCancellationTerminalReceipt & {
+  ownerId: number;
+  /** Renderer-facing opaque request handle, not the Bridge request UUID. */
+  mapRequestId: string;
+};
+
+function emitMapCancellationTerminal(receipt: MapCancellationTerminalReceipt): void {
+  // Keep this diagnostic-only and opt-in.  The production MAP probe enables
+  // the same main telemetry switch and consumes this as a structured line;
+  // ordinary desktop sessions must not receive transport noise on stdout.
+  if (process.env.SF_MAP_MAIN_TELEMETRY !== '1') return;
+  try {
+    // eslint-disable-next-line no-console
+    console.log(`${MAP_CANCELLATION_TERMINAL_MARKER} ${JSON.stringify({
+      schemaVersion: 1,
+      source: 'soulforge.main.map.runBridge',
+      ownerId: receipt.ownerId,
+      requestId: receipt.mapRequestId,
+      bridgeRequestId: receipt.requestId,
+      outcome: receipt.outcome,
+      requestPhase: receipt.requestPhase,
+      cancelRequested: receipt.cancelRequested,
+      receivedAt: receipt.receivedAt
+    })}`);
+  } catch {
+    // Cancellation evidence must never affect the read/cancel path.
+  }
+}
+
+function emitMapCancellationRequested(
+  ownerId: number,
+  requestId: string,
+  status: 'cancelled' | 'already-cancelled' | 'not-found'
+): void {
+  if (process.env.SF_MAP_MAIN_TELEMETRY !== '1') return;
+  try {
+    // eslint-disable-next-line no-console
+    console.log(`${MAP_CANCELLATION_REQUESTED_MARKER} ${JSON.stringify({
+      schemaVersion: 1,
+      source: 'soulforge.main.map.cancelMapStaticGeometry',
+      ownerId,
+      requestId,
+      status,
+      atUTC: new Date().toISOString()
+    })}`);
+  } catch {
+    // Cancellation evidence must never affect the read/cancel path.
+  }
+}
+
+type MapRequestCancellationResult = {
+  ok: false;
+  diagnostics: Diagnostic[];
+};
+
+function mapRequestCancelledResponse(
+  requestId: string,
+  sourceUri: string | undefined,
+  terminalReceipts: readonly MapCancellationTerminalReceipt[] = []
+): MapRequestCancellationResult {
+  const commandCancelled = terminalReceipts.some((receipt) =>
+    receipt.requestPhase === 'command'
+    && receipt.outcome === 'cancelled'
+    && receipt.cancelRequested === true
+  );
+  const artifactCancelled = terminalReceipts.some((receipt) =>
+    receipt.requestPhase === 'artifact'
+    && receipt.outcome === 'cancelled'
+    && receipt.cancelRequested === true
+  );
+  return {
+    ok: false,
+    diagnostics: [{
+      severity: 'info',
+      code: MAP_REQUEST_CANCELLED_CODE,
+      message: '地图模型读取已取消。',
+      ...(sourceUri ? { sourceUri } : {}),
+      details: {
+        requestId,
+        cancellation: {
+          cancelRequested: true,
+          callerSettled: true,
+          // A local AbortSignal proves the caller asked for cancellation, but
+          // not that a Bridge frame was dispatched or that the daemon emitted
+          // its terminal frame.  Keep those claims explicitly unverified
+          // until the scoped receipt arrives.
+          // A terminal receipt proves that the daemon reached a terminal
+          // state, but its cancelRequested bit is not proof that main sent a
+          // cancel frame: a terminal frame can race the local abort path.
+          // Keep the request claim explicitly unverified and expose the
+          // receipt observation separately.
+          daemonCancelRequested: 'unverified',
+          daemonTerminalObserved: terminalReceipts.length > 0,
+          nativeActiveWorkStopped: 'unverified',
+          nativeAbortObserved: commandCancelled ? true : 'unverified',
+          artifactCancellationObserved: artifactCancelled,
+          terminalReceipts: terminalReceipts.map((receipt) => ({
+            schemaVersion: 1,
+            source: 'soulforge.main.map.runBridge',
+            ownerId: receipt.ownerId,
+            requestId: receipt.mapRequestId,
+            bridgeRequestId: receipt.requestId,
+            outcome: receipt.outcome,
+            requestPhase: receipt.requestPhase,
+            cancelRequested: receipt.cancelRequested,
+            receivedAt: receipt.receivedAt
+          }))
+        }
+      }
+    }]
+  };
+}
+
+function mapRequestDuplicateResponse(requestId: string): MapRequestCancellationResult {
+  return {
+    ok: false,
+    diagnostics: [{
+      severity: 'error',
+      code: 'MAP_REQUEST_DUPLICATE',
+      message: '同一窗口已有相同 requestId 的地图读取在途。',
+      details: { requestId }
+    }]
+  };
+}
+
+function mapRequestInvalidIdResponse(): MapRequestCancellationResult {
+  return {
+    ok: false,
+    diagnostics: [{
+      severity: 'error',
+      code: 'MAP_REQUEST_ID_INVALID',
+      message: '地图读取 requestId 无效，已拒绝。'
+    }]
+  };
+}
+
+async function withMapRequestCancellation<T>(
+  event: IpcMainInvokeEvent,
+  requestIdValue: unknown,
+  work: (
+    signal: AbortSignal | undefined,
+    onCancellationTerminal?: (receipt: RunBridgeCancellationTerminalReceipt) => void
+  ) => Promise<T>,
+  sourceUri?: string
+): Promise<T | MapRequestCancellationResult> {
+  // Undefined is the legacy four-argument call. Preserve it as a no-signal
+  // request for already shipped preload clients.
+  if (requestIdValue === undefined || requestIdValue === null) return work(undefined);
+  const requestId = normalizeMapRequestId(requestIdValue);
+  if (!requestId) return mapRequestInvalidIdResponse();
+  const ownerId = event.sender.id;
+  const begun = mapReadRequests.begin(ownerId, requestId);
+  if (begun.status === 'duplicate') return mapRequestDuplicateResponse(requestId);
+  mapReadRequests.bindOwner(ownerId, event.sender);
+  const { controller } = begun.lease;
+  const terminalReceipts: MapCancellationTerminalReceipt[] = [];
+  const onCancellationTerminal = (receipt: RunBridgeCancellationTerminalReceipt): void => {
+    const enriched: MapCancellationTerminalReceipt = {
+      ...receipt,
+      ownerId,
+      mapRequestId: requestId
+    };
+    terminalReceipts.push(enriched);
+    emitMapCancellationTerminal(enriched);
+  };
+  try {
+    const execution = await executeMapRequest(controller, (signal) => work(signal, onCancellationTerminal));
+    // executeMapRequest performs the shared late-settlement guard: a value
+    // resolved after cancellation is never published as a successful page.
+    if (execution.outcome === 'cancelled') {
+      return mapRequestCancelledResponse(requestId, sourceUri, terminalReceipts);
+    }
+    return execution.value;
+  } catch (error) {
+    // Keep the local code constant visible for diagnostics while the shared
+    // helper owns normal abort/error classification.
+    if (controller.signal.aborted || isMapRequestCancellationError(error)) {
+      return mapRequestCancelledResponse(requestId, sourceUri, terminalReceipts);
+    }
+    throw error;
+  } finally {
+    mapReadRequests.finish(ownerId, requestId, controller);
+  }
+}
 
 /**
  * 地图里的 c* / o* 对象不是 mapbnd 静态几何，而是 chrbnd/objbnd。将其
@@ -876,13 +1087,17 @@ export function registerMapIpcHandlers(deps: MapIpcDeps): void {
   deps.handle(
     'resource.readMapStaticGeometry',
     async (
-      _event,
+      event,
       msbSourceUri: string,
       modelName: string,
       cursor?: string | null,
-      sessionToken?: string | null
-    ) => {
+      sessionToken?: string | null,
+      requestId?: string
+    ) => withMapRequestCancellation(event, requestId, async (requestSignal, onCancellationTerminal) => {
       _forensicsMapInc('map:main:readMapStaticGeometry:count');
+      const throwIfMapRequestCancelled = (): void => {
+        if (requestSignal?.aborted) throw new Error(MAP_REQUEST_CANCELLED_CODE);
+      };
       const file = deps.indexedFiles.find((item) => item.sourceUri === msbSourceUri);
       if (!file || !deps.activeSession) return { ok: false, diagnostics: [{ severity: 'error', code: 'MAP_PART_MSB_NOT_INDEXED', message: 'MSB not indexed', sourceUri: msbSourceUri }] };
       const baseName = basename(file.relativePath);
@@ -892,7 +1107,9 @@ export function registerMapIpcHandlers(deps: MapIpcDeps): void {
       const overlayDir = join(deps.activeSession.layers.overlayRoot, 'map', mapId);
       const baseDir = effectiveBase ? join(effectiveBase, 'map', mapId) : null;
       const candidateDirs = [...(deps.safeExists(overlayDir) ? [{ dir: overlayDir, fromBase: false }] : []), ...(baseDir && deps.safeExists(baseDir) ? [{ dir: baseDir, fromBase: true }] : [])];
+      throwIfMapRequestCancelled();
       const roots = await deps.verifiedReadRoots(deps.activeSession, dirname(file.absolutePath));
+      throwIfMapRequestCancelled();
       if (roots.diagnostics.length > 0) return { ok: false, diagnostics: roots.diagnostics };
       if (effectiveBase && !roots.allowedRoots.includes(effectiveBase)) roots.allowedRoots.push(effectiveBase);
 
@@ -901,6 +1118,7 @@ export function registerMapIpcHandlers(deps: MapIpcDeps): void {
         requestedCursor: string | null = cursor ?? null,
         requestedSessionToken: string | null = sessionToken ?? null
       ) => {
+        throwIfMapRequestCancelled();
         evictMapCharacterPageSessions();
         if (requestedSessionToken) {
           const session = mapCharacterPageSessions.get(requestedSessionToken);
@@ -913,6 +1131,7 @@ export function registerMapIpcHandlers(deps: MapIpcDeps): void {
               '角色模型分页会话已过期、来源已变化或不属于当前地图。请刷新模型/纹理后重试。'
             );
           }
+          throwIfMapRequestCancelled();
           return serveMapCharacterPage(session, requestedCursor);
         }
         if (requestedCursor) {
@@ -923,54 +1142,160 @@ export function registerMapIpcHandlers(deps: MapIpcDeps): void {
           );
         }
 
-        const result = await runBridge<unknown>({
-          command: 'read-chrbnd-flver-preview',
-          filePath: modelPath,
-          allowedRoots: roots.allowedRoots,
-          timeoutMs: 120_000,
-          ...(effectiveBase ? { oodleRuntimeRoot: effectiveBase } : {}),
-          commandOptions: {
+        // Character timing is deliberately request-local.  A session/cursor
+        // replay is a page-cache read and must not create another timing
+        // sample or attach a duplicate summary.
+        const mainTiming: CharacterMainTimingCollector | null = CHARACTER_NATIVE_TIMING_ENABLED
+          ? createCharacterMainTimingCollector()
+          : null;
+        let bridgeTransportTiming: Record<string, unknown> | null = null;
+        const withMainTiming = <T extends { diagnostics?: Diagnostic[] }>(
+          response: T,
+          outcome: 'ok' | 'failed' | 'empty'
+        ): T => {
+          if (!mainTiming) return response;
+          const summary = mainTiming.finish(outcome, bridgeTransportTiming) as unknown as Diagnostic;
+          return {
+            ...response,
+            diagnostics: [...(response.diagnostics ?? []), summary]
+          };
+        };
+        const failureDiagnostic = (error: unknown): Diagnostic => ({
+          severity: 'error',
+          code: 'MAP_CHARACTER_READ_FAILED',
+          message: error instanceof Error ? error.message : String(error),
+          sourceUri: msbSourceUri
+        });
+
+        const optionsScope = mainTiming?.begin('optionsPrepareMs') ?? null;
+        let commandOptions: Record<string, unknown>;
+        try {
+          commandOptions = {
             maxVertices: 1_000_000,
             maxIndices: 3_000_000,
             texturePackagePaths: characterTexturePackagePaths(modelPath, [
               join(deps.activeSession!.layers.overlayRoot, 'parts'),
               ...(effectiveBase ? [join(effectiveBase, 'parts')] : [])
-            ])
-          }
-        });
-        if (result.parseStatus === 'failed' || !isCharacterPreviewBundle(result.data)) {
-          return {
+            ]),
+            ...(CHARACTER_NATIVE_TIMING_ENABLED ? { diagnosticTimings: true } : {})
+          };
+        } catch (error) {
+          return withMainTiming({
             ok: false,
             sourceUri: msbSourceUri,
-            diagnostics: result.diagnostics
-          };
+            diagnostics: [failureDiagnostic(error)]
+          }, 'failed');
+        } finally {
+          mainTiming?.end(optionsScope);
         }
 
-        let bundle = result.data;
+        const bridgeScope = mainTiming?.begin('bridgeAwaitMs') ?? null;
+        let result;
+        try {
+          result = await runBridge<unknown>({
+            command: 'read-chrbnd-flver-preview',
+            filePath: modelPath,
+            allowedRoots: roots.allowedRoots,
+            timeoutMs: 120_000,
+            ...(effectiveBase ? { oodleRuntimeRoot: effectiveBase } : {}),
+            commandOptions,
+            ...(requestSignal ? { signal: requestSignal } : {}),
+            ...(onCancellationTerminal ? { onCancellationTerminal } : {})
+          });
+          throwIfMapRequestCancelled();
+        } catch (error) {
+          return withMainTiming({
+            ok: false,
+            sourceUri: msbSourceUri,
+            diagnostics: [failureDiagnostic(error)]
+          }, 'failed');
+        } finally {
+          mainTiming?.end(bridgeScope);
+        }
+        const transportDiagnostic = result.diagnostics.find(
+          (item) => item.code === BRIDGE_TRANSPORT_TIMING_CODE
+        );
+        if (transportDiagnostic?.details
+          && typeof transportDiagnostic.details === 'object'
+          && !Array.isArray(transportDiagnostic.details)) {
+          bridgeTransportTiming = transportDiagnostic.details as Record<string, unknown>;
+        }
+        const characterTimingSummary: Diagnostic | null = CHARACTER_NATIVE_TIMING_ENABLED
+          ? summarizeCharacterNativeTiming(result.diagnostics) as unknown as Diagnostic | null
+          : null;
+        const responseDiagnostics = result.diagnostics.filter(
+          (item) => item.code !== CHARACTER_NATIVE_TIMING_CODE
+            && item.code !== BRIDGE_TRANSPORT_TIMING_CODE
+        );
+        const bundleValidateScope = mainTiming?.begin('bundleValidateMs') ?? null;
+        let bundle = result.parseStatus !== 'failed' && isCharacterPreviewBundle(result.data)
+          ? result.data
+          : null;
+        mainTiming?.end(bundleValidateScope);
+        if (!bundle) {
+          return withMainTiming({
+            ok: false,
+            sourceUri: msbSourceUri,
+            diagnostics: characterTimingSummary
+              ? [...responseDiagnostics, characterTimingSummary]
+              : responseDiagnostics
+          }, 'failed');
+        }
+
         const modelStem = basename(modelPath).replace(/\.chrbnd(?:\.dcx)?$/i, '').toLowerCase();
         let compatibilityDiagnostics: Diagnostic[] = [];
-        if (modelStem === 'c0000' && bundle.meshCount === 0 && bundle.boneCount > 0) {
-          const compatibility = await assembleC0000CompatibilityPreview({
-            leaderBundle: bundle,
-            overlayPartsDirectory: join(deps.activeSession!.layers.overlayRoot, 'parts'),
-            basePartsDirectory: effectiveBase ? join(effectiveBase, 'parts') : null,
-            allowedRoots: roots.allowedRoots,
-            oodleRuntimeRoot: effectiveBase
-          });
-          compatibilityDiagnostics = compatibility.diagnostics;
-          if (compatibility.bundle) bundle = compatibility.bundle;
+        if (modelStem !== 'c0000') {
+          // Compatibility is a c0000-only path.  Preserve that fact in the
+          // summary instead of treating the known non-c0000 path as missing.
+          mainTiming?.skip('compatibilityMs');
+        } else if (bundle.meshCount === 0 && bundle.boneCount > 0) {
+          const compatibilityScope = mainTiming?.begin('compatibilityMs') ?? null;
+          try {
+            const compatibility = await assembleC0000CompatibilityPreview({
+              leaderBundle: bundle,
+              overlayPartsDirectory: join(deps.activeSession!.layers.overlayRoot, 'parts'),
+              basePartsDirectory: effectiveBase ? join(effectiveBase, 'parts') : null,
+              allowedRoots: roots.allowedRoots,
+              oodleRuntimeRoot: effectiveBase,
+              ...(requestSignal ? { signal: requestSignal } : {}),
+              ...(onCancellationTerminal ? { onCancellationTerminal } : {})
+            });
+            throwIfMapRequestCancelled();
+            compatibilityDiagnostics = compatibility.diagnostics;
+            if (compatibility.bundle) bundle = compatibility.bundle;
+          } catch (error) {
+            return withMainTiming({
+              ok: false,
+              sourceUri: msbSourceUri,
+              diagnostics: [
+                ...responseDiagnostics,
+                ...(characterTimingSummary ? [characterTimingSummary] : []),
+                failureDiagnostic(error)
+              ]
+            }, 'failed');
+          } finally {
+            mainTiming?.end(compatibilityScope);
+          }
+        } else {
+          // A c0000 bundle that already contains renderable geometry does not
+          // need the compatibility assembly; this is a known skip, not a
+          // missing observation.
+          mainTiming?.skip('compatibilityMs');
         }
 
         let chunks: Array<Record<string, unknown>>;
+        const chunkBuildScope = mainTiming?.begin('chunkBuildMs') ?? null;
         try {
           chunks = splitCharacterMapChunks(characterBundleToMapChunks(bundle));
         } catch (error) {
-          return {
+          mainTiming?.end(chunkBuildScope);
+          return withMainTiming({
             ok: false,
             sourceUri: msbSourceUri,
             diagnostics: [
-              ...result.diagnostics,
+              ...responseDiagnostics,
               ...compatibilityDiagnostics,
+              ...(characterTimingSummary ? [characterTimingSummary] : []),
               {
                 severity: 'error' as const,
                 code: 'MAP_CHARACTER_GEOMETRY_INVALID',
@@ -978,15 +1303,18 @@ export function registerMapIpcHandlers(deps: MapIpcDeps): void {
                 sourceUri: msbSourceUri
               }
             ]
-          };
+          }, 'failed');
         }
+        mainTiming?.end(chunkBuildScope);
+        throwIfMapRequestCancelled();
         if (chunks.length === 0) {
-          return {
+          return withMainTiming({
             ok: false,
             sourceUri: msbSourceUri,
             diagnostics: [
-              ...result.diagnostics,
+              ...responseDiagnostics,
               ...compatibilityDiagnostics,
+              ...(characterTimingSummary ? [characterTimingSummary] : []),
               {
                 severity: 'warning' as const,
                 code: 'MAP_CHARACTER_GEOMETRY_UNAVAILABLE',
@@ -994,7 +1322,7 @@ export function registerMapIpcHandlers(deps: MapIpcDeps): void {
                 sourceUri: msbSourceUri
               }
             ]
-          };
+          }, 'empty');
         }
         const pageSession: MapCharacterPageSession = {
           token: randomUUID(),
@@ -1002,17 +1330,43 @@ export function registerMapIpcHandlers(deps: MapIpcDeps): void {
           modelPath,
           modelStem,
           chunks,
-          diagnostics: [...result.diagnostics, ...compatibilityDiagnostics],
+          diagnostics: [...responseDiagnostics, ...compatibilityDiagnostics],
           cursors: new Map<string, number>(),
           lastAccessMs: Date.now()
         };
+        throwIfMapRequestCancelled();
         mapCharacterPageSessions.set(pageSession.token, pageSession);
         evictMapCharacterPageSessions();
-        return serveMapCharacterPage(pageSession, null);
+        const pageFirstScope = mainTiming?.begin('pageFirstMs') ?? null;
+        let firstPage;
+        try {
+          firstPage = serveMapCharacterPage(pageSession, null);
+        } catch (error) {
+          mapCharacterPageSessions.delete(pageSession.token);
+          return withMainTiming({
+            ok: false,
+            sourceUri: msbSourceUri,
+            diagnostics: [
+              ...responseDiagnostics,
+              ...compatibilityDiagnostics,
+              ...(characterTimingSummary ? [characterTimingSummary] : []),
+              failureDiagnostic(error)
+            ]
+          }, 'failed');
+        } finally {
+          mainTiming?.end(pageFirstScope);
+        }
+        if (!firstPage.ok) mapCharacterPageSessions.delete(pageSession.token);
+        throwIfMapRequestCancelled();
+        const firstPageWithNativeTiming = characterTimingSummary
+          ? { ...firstPage, diagnostics: [...firstPage.diagnostics, characterTimingSummary] }
+          : firstPage;
+        return withMainTiming(firstPageWithNativeTiming, firstPage.ok ? 'ok' : 'failed');
       };
 
       const readStaticPath = async (modelPath: string, modelKind: 'flver' | 'chrbnd' = 'flver') => {
         if (modelKind === 'chrbnd') return readCharacterPath(modelPath);
+        throwIfMapRequestCancelled();
         const timingKey = MAP_NATIVE_TIMING_ENABLED
           ? sessionToken
             ? (timingKeyForNativeSession(sessionToken) ?? `native:${sessionToken}`)
@@ -1039,8 +1393,11 @@ export function registerMapIpcHandlers(deps: MapIpcDeps): void {
             ownerLeaseId: deps.activeWorkspaceSessionId ?? '',
             resourceCacheKey: JSON.stringify({ modelName, mapId }),
             ...(MAP_NATIVE_TIMING_ENABLED ? { diagnosticTimings: true } : {})
-          }
+          },
+          ...(requestSignal ? { signal: requestSignal } : {}),
+          ...(onCancellationTerminal ? { onCancellationTerminal } : {})
         });
+        throwIfMapRequestCancelled();
         const nativeTimingSummary = MAP_NATIVE_TIMING_ENABLED
           ? recordMapNativeTiming(timingKey, result.diagnostics)
           : null;
@@ -1048,7 +1405,16 @@ export function registerMapIpcHandlers(deps: MapIpcDeps): void {
         if (MAP_NATIVE_TIMING_ENABLED && typeof nativeSessionToken === 'string') {
           bindNativeTimingSession(nativeSessionToken, timingKey);
         }
-        if (result.parseStatus === 'failed' || !result.data) return null;
+        if (result.parseStatus === 'failed' || !isMapStaticGeometryData(result.data)) {
+          const failure = decideMapStaticReadFailure({
+            sourceUri: msbSourceUri,
+            parseStatus: result.parseStatus,
+            data: result.data,
+            diagnostics: result.diagnostics
+          });
+          if (failure.action === 'fallback') return null;
+          return failure.result;
+        }
         const responseDiagnostics = result.diagnostics.filter((item) => item.code !== MAP_NATIVE_TIMING_CODE);
         const complete = Boolean((result.data as { complete?: unknown } | null)?.complete);
         if (nativeTimingSummary && complete) {
@@ -1079,7 +1445,9 @@ export function registerMapIpcHandlers(deps: MapIpcDeps): void {
         modelName
       );
       if (directModel) {
+        throwIfMapRequestCancelled();
         const directResult = await readStaticPath(directModel.absolutePath, directModel.kind);
+        throwIfMapRequestCancelled();
         if (directResult) return directResult;
       }
 
@@ -1088,14 +1456,37 @@ export function registerMapIpcHandlers(deps: MapIpcDeps): void {
         let mapbnds: string[] = [];
         try { mapbnds = readdirSync(dir).filter((name) => /\.mapbnd\.dcx$/i.test(name)).map((name) => join(dir, name)); } catch {}
         for (const mapbndPath of mapbnds) {
+          throwIfMapRequestCancelled();
           const key = mapbndPath.toLowerCase();
           if (triedPaths.has(key)) continue;
           triedPaths.add(key);
           const result = await readStaticPath(mapbndPath);
+          throwIfMapRequestCancelled();
           if (result) return result;
         }
       }
       return { ok: false, diagnostics: [{ severity: 'error', code: 'MAP_PART_MODEL_NOT_FOUND', message: 'not found ' + modelName, sourceUri: msbSourceUri }] };
+    }, msbSourceUri)
+  );
+
+  deps.handle(
+    'resource.cancelMapStaticGeometry',
+    async (event, requestIdValue: unknown): Promise<{
+      ok: true;
+      cancelled: boolean;
+      status: 'cancelled' | 'already-cancelled' | 'not-found';
+      requestId?: string;
+    } | MapRequestCancellationResult> => {
+      const requestId = normalizeMapRequestId(requestIdValue);
+      if (!requestId) return mapRequestInvalidIdResponse();
+      const result = mapReadRequests.cancel(event.sender.id, requestId);
+      emitMapCancellationRequested(event.sender.id, requestId, result.status);
+      return {
+        ok: true,
+        cancelled: result.status === 'cancelled',
+        status: result.status,
+        requestId
+      };
     }
   );
 

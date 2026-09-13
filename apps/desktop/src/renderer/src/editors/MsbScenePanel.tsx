@@ -22,9 +22,14 @@ import {
   normalizeMapModelKey,
   type MapMeshGeometry
 } from '../scene/mapModelLoadScheduler.js';
-import type { MeshGeometryWire } from '../scene/modelResourcePool.js';
+import {
+  type MapStaticGeometryChunk,
+  type MapMaterialGroup,
+  type PreparedMapGeometry,
+  type RendererGeometryBytes
+} from '../scene/mapGeometryPrepare.js';
+import { MapGeometryPrepareClient, type MapGeometryPrepareTelemetryEvent } from '../scene/mapGeometryPrepareClient.js';
 import { getRendererBridge } from '../runtime/rendererRuntime.js';
-import { decodeBase64ToUint8Array, uint8ArrayToBase64 } from '../utils/binary.js';
 import { WorkbenchLayout } from '../workbench/WorkbenchLayout.js';
 import type { MapEditTransaction } from '@soulforge/shared';
 
@@ -136,7 +141,7 @@ export function filterCollisionDrawItems(
 
 interface MapMeshReadResult {
   ok?: boolean;
-  diagnostics?: Array<{ severity?: string; code?: string; message?: string }>;
+  diagnostics?: Array<{ severity?: string; code?: string; message?: string; details?: unknown }>;
   data?: {
     positionsBase64?: string;
     indicesBase64?: string;
@@ -146,28 +151,65 @@ interface MapMeshReadResult {
     vertexCount?: number;
     texturePreviewToken?: string | null;
     textureColorSpace?: string | null;
-    materialGroups?: Array<{ start: number; count: number; materialIndex: number }>;
+    cullBackfaces?: boolean;
+    materialGroups?: MapMaterialGroup[];
     texturePreviews?: Array<{ materialIndex: number; texturePreviewToken: string; colorSpace?: string }>;
   };
 }
 
-export function isMapMeshUnavailableResponse(raw: MapMeshReadResult): boolean {
+export function isMapMeshUnavailableResponse(raw: {
+  ok?: boolean;
+  data?: unknown;
+  diagnostics?: Array<{ severity?: string; code?: string; message?: string; details?: unknown }>;
+}): boolean {
   return raw.diagnostics?.some((diagnostic) => (
     diagnostic.code === 'MAP_STATIC_GEOMETRY_COMPLETE'
     || diagnostic.code === 'MAP_CHARACTER_GEOMETRY_UNAVAILABLE'
   )) ?? false;
 }
 
-interface MapStaticGeometryChunk {
-  positionsBase64?: string | null;
-  indicesBase64?: string | null;
-  indexElementBytes?: 2 | 4 | null;
-  uvsBase64?: string | null;
-  normalsBase64?: string | null;
-  materialIndex?: number | null;
-  materialName?: string | null;
-  texturePreviewToken?: string | null;
-  textureColorSpace?: string | null;
+export function isMapReadCancellationResponse(raw: {
+  diagnostics?: Array<{ code?: string }>;
+} | null | undefined): boolean {
+  return raw?.diagnostics?.some((diagnostic) => diagnostic.code === 'MAP_REQUEST_CANCELLED') ?? false;
+}
+
+/**
+ * The normal MAP probe needs a small, renderer-local explanation for models
+ * that ended without renderable geometry.  Keep this projection deliberately
+ * narrow: model name plus stable diagnostic codes only.  In particular, do
+ * not log native paths, diagnostic messages, or the full Bridge response.
+ */
+export const MAP_MODEL_UNAVAILABLE_TELEMETRY_MARKER = '[SF_MAP_MODEL_UNAVAILABLE]';
+export const MAP_MODEL_UNAVAILABLE_TELEMETRY_LIMIT = 256;
+export const MAP_LOAD_RETENTION_MARKER = '[SF_MAP_LOAD_RETENTION]';
+
+export type MapModelUnavailableTelemetryRecord = {
+  modelName: string;
+  diagnosticCodes: string[];
+  geometryClassification: 'empty-geometry' | 'skeleton-only' | 'unclassified';
+};
+
+const STABLE_MAP_DIAGNOSTIC_CODE = /^[A-Z][A-Z0-9_]{2,}$/;
+
+export function stableMapDiagnosticCodes(detail: unknown): string[] {
+  const diagnostics = detail && typeof detail === 'object' && !Array.isArray(detail)
+    ? (detail as { diagnostics?: unknown }).diagnostics
+    : undefined;
+  if (!Array.isArray(diagnostics)) return [];
+  return [...new Set(diagnostics
+    .map((item) => item && typeof item === 'object' ? (item as { code?: unknown }).code : undefined)
+    .filter((code): code is string => typeof code === 'string' && STABLE_MAP_DIAGNOSTIC_CODE.test(code)))]
+    .sort();
+}
+
+export function classifyMapUnavailableGeometry(
+  detail: unknown
+): MapModelUnavailableTelemetryRecord['geometryClassification'] {
+  const codes = stableMapDiagnosticCodes(detail);
+  if (codes.includes('MAP_CHARACTER_GEOMETRY_UNAVAILABLE')) return 'skeleton-only';
+  if (codes.includes('MAP_STATIC_GEOMETRY_COMPLETE')) return 'empty-geometry';
+  return 'unclassified';
 }
 
 interface MapStaticGeometryPage {
@@ -181,154 +223,33 @@ interface MapStaticGeometryPage {
 
 interface MapStaticGeometryReadResult {
   ok?: boolean;
-  diagnostics?: Array<{ severity?: string; code?: string; message?: string }>;
+  diagnostics?: Array<{ severity?: string; code?: string; message?: string; details?: unknown }>;
   data?: MapStaticGeometryPage;
 }
 
-type RendererGeometryBytes = Pick<
-  MeshGeometryWire,
-  'positionsBytes' | 'indicesBytes' | 'uvsBytes' | 'normalsBytes'
->;
-type MapMeshGeometryData = NonNullable<MapMeshReadResult['data']> & RendererGeometryBytes;
+let mapRequestSequence = 0;
+
+/** A renderer-only opaque handle; the main process owns the AbortController. */
+function createMapRequestId(): string {
+  const cryptoApi = globalThis.crypto as Crypto & { randomUUID?: () => string } | undefined;
+  const uuid = cryptoApi?.randomUUID?.();
+  if (uuid) return `map-${uuid}`;
+  mapRequestSequence += 1;
+  return `map-${Date.now().toString(36)}-${mapRequestSequence.toString(36)}`;
+}
+
 type LoadedMapMeshGeometry = MapMeshGeometry & RendererGeometryBytes;
+type MapMeshReadResultDataWithBytes = NonNullable<MapMeshReadResult['data']> & {
+  positionsBytes?: Uint8Array | undefined;
+  indicesBytes?: Uint8Array | undefined;
+  uvsBytes?: Uint8Array | undefined;
+  normalsBytes?: Uint8Array | undefined;
+};
 type MapMeshReadResultWithBytes = Omit<MapMeshReadResult, 'data'> & {
-  data?: MapMeshGeometryData;
+  data?: MapMeshReadResultDataWithBytes | undefined;
 };
 
-function concatUint8Arrays(parts: readonly Uint8Array[]): Uint8Array {
-  const totalLength = parts.reduce((sum, part) => sum + part.byteLength, 0);
-  const merged = new Uint8Array(totalLength);
-  let offset = 0;
-  for (const part of parts) {
-    merged.set(part, offset);
-    offset += part.byteLength;
-  }
-  return merged;
-}
-
-export function mergeMapStaticGeometryChunks(
-  chunks: readonly MapStaticGeometryChunk[],
-  options: { encodeBase64?: boolean } = {}
-): MapMeshGeometryData {
-  const encodeBase64 = options.encodeBase64 ?? true;
-  const geometryChunks = chunks.filter((chunk) => Boolean(chunk.positionsBase64));
-  if (geometryChunks.length === 0) return {};
-
-  const positions: Uint8Array[] = [];
-  const uvs: Uint8Array[] = [];
-  const normals: Uint8Array[] = [];
-  const indices: number[] = [];
-  const allHaveIndices = geometryChunks.every((chunk) => Boolean(chunk.indicesBase64));
-  // 一个 FLVER 往往把无 UV 的辅助 mesh 与有 UV 的表面 mesh 放在同一
-  // model 中。若要求所有 chunk 都有 UV，整个模型会静默退回中性材质，
-  // 这正是地图大面积“有模型没贴图”的来源。只要至少一个 chunk 有 UV，
-  // 就为无 UV chunk 补零 UV，保持属性长度与顶点数对齐，让有 UV 的表面
-  // 仍能使用自己的纹理。
-  const anyHaveUvs = geometryChunks.some((chunk) => Boolean(chunk.uvsBase64));
-  const allHaveNormals = geometryChunks.every((chunk) => Boolean(chunk.normalsBase64));
-  const materialGroups: Array<{ start: number; count: number; materialIndex: number }> = [];
-  const texturePreviews = new Map<number, { materialIndex: number; texturePreviewToken: string; colorSpace?: string }>();
-  let vertexCount = 0;
-  let indexSize: 16 | 32 = 16;
-
-  for (const chunk of geometryChunks) {
-    const positionBytes = decodeBase64ToUint8Array(chunk.positionsBase64!);
-    if (positionBytes.byteLength % (3 * Float32Array.BYTES_PER_ELEMENT) !== 0) {
-      throw new Error('MAP_STATIC_GEOMETRY_INVALID: positions are not Float32 xyz aligned');
-    }
-    const chunkVertexCount = positionBytes.byteLength / (3 * Float32Array.BYTES_PER_ELEMENT);
-    positions.push(positionBytes);
-
-    if (anyHaveUvs) {
-      if (chunk.uvsBase64) {
-        const uvBytes = decodeBase64ToUint8Array(chunk.uvsBase64);
-        const expectedUvBytes = chunkVertexCount * 2 * Float32Array.BYTES_PER_ELEMENT;
-        if (uvBytes.byteLength !== expectedUvBytes) {
-          throw new Error('MAP_STATIC_GEOMETRY_INVALID: UV count does not match positions');
-        }
-        uvs.push(uvBytes);
-      } else {
-        uvs.push(new Uint8Array(chunkVertexCount * 2 * Float32Array.BYTES_PER_ELEMENT));
-      }
-    }
-    if (allHaveNormals) normals.push(decodeBase64ToUint8Array(chunk.normalsBase64!));
-
-    const materialIndex = Number.isInteger(chunk.materialIndex) && (chunk.materialIndex ?? -1) >= 0
-      ? chunk.materialIndex!
-      : 0;
-    let groupStart = vertexCount;
-    let groupCount = chunkVertexCount;
-    if (allHaveIndices) {
-      const indexElementBytes = chunk.indexElementBytes;
-      if (indexElementBytes !== 2 && indexElementBytes !== 4) {
-        throw new Error('MAP_STATIC_GEOMETRY_INVALID: indexElementBytes must be 2 or 4');
-      }
-      const indexBytes = decodeBase64ToUint8Array(chunk.indicesBase64!);
-      if (indexBytes.byteLength % indexElementBytes !== 0) {
-        throw new Error('MAP_STATIC_GEOMETRY_INVALID: indices are not aligned');
-      }
-      const indexView = new DataView(indexBytes.buffer, indexBytes.byteOffset, indexBytes.byteLength);
-      groupStart = indices.length;
-      groupCount = indexBytes.byteLength / indexElementBytes;
-      for (let offset = 0; offset < indexBytes.byteLength; offset += indexElementBytes) {
-        const localIndex = indexElementBytes === 4
-          ? indexView.getUint32(offset, true)
-          : indexView.getUint16(offset, true);
-        const mergedIndex = localIndex + vertexCount;
-        if (mergedIndex > 0xffff_ffff) {
-          throw new Error('MAP_STATIC_GEOMETRY_INVALID: merged index exceeds uint32');
-        }
-        indices.push(mergedIndex);
-        if (indexElementBytes === 4 || mergedIndex > 0xffff) indexSize = 32;
-      }
-    }
-
-    if (groupCount > 0) materialGroups.push({ start: groupStart, count: groupCount, materialIndex });
-    if (chunk.texturePreviewToken) {
-      texturePreviews.set(materialIndex, {
-        materialIndex,
-        texturePreviewToken: chunk.texturePreviewToken,
-        ...(chunk.textureColorSpace ? { colorSpace: chunk.textureColorSpace } : {})
-      });
-    }
-
-    vertexCount += chunkVertexCount;
-  }
-
-  const positionsBytes = concatUint8Arrays(positions);
-  const merged: MapMeshGeometryData = {
-    ...(encodeBase64 ? { positionsBase64: uint8ArrayToBase64(positionsBytes) } : {}),
-    positionsBytes,
-    vertexCount
-  };
-
-  if (allHaveIndices) {
-    const indexBytes = new Uint8Array(indices.length * (indexSize / 8));
-    const indexView = new DataView(indexBytes.buffer);
-    for (let i = 0; i < indices.length; i += 1) {
-      const offset = i * (indexSize / 8);
-      if (indexSize === 32) indexView.setUint32(offset, indices[i]!, true);
-      else indexView.setUint16(offset, indices[i]!, true);
-    }
-    merged.indicesBytes = indexBytes;
-    if (encodeBase64) merged.indicesBase64 = uint8ArrayToBase64(indexBytes);
-    merged.indexSize = indexSize;
-  }
-  if (anyHaveUvs) {
-    const uvsBytes = concatUint8Arrays(uvs);
-    merged.uvsBytes = uvsBytes;
-    if (encodeBase64) merged.uvsBase64 = uint8ArrayToBase64(uvsBytes);
-  }
-  if (allHaveNormals) {
-    const normalsBytes = concatUint8Arrays(normals);
-    merged.normalsBytes = normalsBytes;
-    if (encodeBase64) merged.normalsBase64 = uint8ArrayToBase64(normalsBytes);
-  }
-  if (materialGroups.length > 0) merged.materialGroups = materialGroups;
-  if (texturePreviews.size > 0) merged.texturePreviews = [...texturePreviews.values()];
-
-  return merged;
-}
+export { mergeMapStaticGeometryChunks } from '../scene/mapGeometryPrepare.js';
 
 export function toMapMeshGeometry(raw: MapMeshReadResultWithBytes): LoadedMapMeshGeometry | null {
   if (!raw.ok) return null;
@@ -359,6 +280,7 @@ export function toMapMeshGeometry(raw: MapMeshReadResultWithBytes): LoadedMapMes
     ...(raw.data.normalsBytes ? { normalsBytes: raw.data.normalsBytes } : {}),
     ...(raw.data.texturePreviewToken ? { texturePreviewToken: raw.data.texturePreviewToken } : {}),
     ...(raw.data.textureColorSpace ? { textureColorSpace: raw.data.textureColorSpace } : {}),
+    ...(typeof raw.data.cullBackfaces === 'boolean' ? { cullBackfaces: raw.data.cullBackfaces } : {}),
     ...(raw.data.materialGroups ? { materialGroups: raw.data.materialGroups } : {}),
     ...(raw.data.texturePreviews ? { texturePreviews: raw.data.texturePreviews } : {}),
     vertexCount: raw.data.vertexCount ?? 0
@@ -575,9 +497,9 @@ export function MsbScenePanel(props: MsbScenePanelProps): ReactElement {
   /** S23：最近一次 drawList（mesh 渐进加载后重建用）。 */
   const drawListRef = useRef<ReturnType<typeof buildSceneDrawList> | null>(null);
   const drawItemByIdRef = useRef<Map<string, SceneDrawItem>>(new Map());
-  const modelLoadCacheRef = useRef<MapModelLoadCache<LoadedMapMeshGeometry> | null>(null);
+  const modelLoadCacheRef = useRef<MapModelLoadCache<PreparedMapGeometry> | null>(null);
   const modelUploadQueueRef = useRef<FrameTaskQueue | null>(null);
-  const modelUploadRef = useRef<((modelName: string, mesh: LoadedMapMeshGeometry) => Promise<boolean>) | null>(null);
+  const modelUploadRef = useRef<((modelName: string, mesh: PreparedMapGeometry) => Promise<boolean>) | null>(null);
   const meshPartTotalRef = useRef(0);
   const [isSaving, setIsSaving] = useState(false);
   const [saveStatus, setSaveStatus] = useState<string | null>(null);
@@ -656,6 +578,16 @@ export function MsbScenePanel(props: MsbScenePanelProps): ReactElement {
 
   useEffect(() => {
     let cancelled = false;
+    const activeMapRequestIds = new Set<string>();
+    let cancelMapRequest: ((requestId: string) => Promise<unknown>) | null = null;
+    let prepareClient: MapGeometryPrepareClient | null = null;
+    const cancelActiveMapRequests = (): void => {
+      const requestIds = [...activeMapRequestIds];
+      activeMapRequestIds.clear();
+      for (const requestId of requestIds) {
+        void cancelMapRequest?.(requestId).catch(() => undefined);
+      }
+    };
     const host = hostRef.current;
     if (!host) return;
 
@@ -664,6 +596,20 @@ export function MsbScenePanel(props: MsbScenePanelProps): ReactElement {
     let loaderCompleted = 0;
     let uploadedPartCount = 0;
     const unavailableModelKeys = new Set<string>();
+    const recordUnavailableModelTelemetry = (modelName: string, detail: unknown): void => {
+      const modelKey = normalizeMapModelKey(modelName);
+      if (!modelKey || unavailableModelKeys.has(modelKey)) return;
+      unavailableModelKeys.add(modelKey);
+      const record: MapModelUnavailableTelemetryRecord = {
+        modelName,
+        diagnosticCodes: stableMapDiagnosticCodes(detail),
+        geometryClassification: classifyMapUnavailableGeometry(detail)
+      };
+      // One compact JSON line keeps the production harness parser independent
+      // of Chromium's console argument formatting and avoids leaking native
+      // paths/messages into ordinary renderer telemetry.
+      console.debug(`${MAP_MODEL_UNAVAILABLE_TELEMETRY_MARKER} ${JSON.stringify(record)}`);
+    };
     const diagnosticFromDetail = (detail: unknown): { severity: 'info' | 'warning' | 'error'; code: string; message: string } => {
       const candidate = detail && typeof detail === 'object'
         ? (detail as { diagnostics?: unknown }).diagnostics
@@ -888,8 +834,12 @@ export function MsbScenePanel(props: MsbScenePanelProps): ReactElement {
             msbSourceUri: string,
             modelName: string,
             cursor?: string | null,
-            sessionToken?: string | null
-          ) => bridge.readMapStaticGeometry(msbSourceUri, modelName, cursor, sessionToken)
+            sessionToken?: string | null,
+            requestId?: string
+          ) => bridge.readMapStaticGeometry(msbSourceUri, modelName, cursor, sessionToken, requestId)
+        : null;
+      cancelMapRequest = bridge && typeof bridge.cancelMapStaticGeometry === 'function'
+        ? (requestId: string) => bridge.cancelMapStaticGeometry(requestId)
         : null;
       console.debug('[MsbScenePanel] MAP mesh loader init', {
         bridgePresent: Boolean(bridge),
@@ -908,7 +858,19 @@ export function MsbScenePanel(props: MsbScenePanelProps): ReactElement {
       // 24.10 streaming: read-map-static-geometry (chunked, cursor opaque with daemon/owner/sourceHash/resourceCacheKey, wire bytes budget)
       // Deprecated: readMapPartMesh -> readMapStaticGeometry
       if (props.mapResourceUri) {
-        const loadCache = new MapModelLoadCache<LoadedMapMeshGeometry>(async (modelName) => {
+        const prepareClientForLoad = new MapGeometryPrepareClient(undefined, {
+          concurrency: 2,
+          maxQueued: 8,
+          onTelemetry: (event: MapGeometryPrepareTelemetryEvent) => {
+            // Renderer-local metrics only: model names, native paths and wire
+            // payloads never enter telemetry.  The event also makes worker
+            // saturation/cancellation visible without turning it into a UI
+            // claim that GPU upload is frame-bounded.
+            console.debug('[SF_MAP_PREPARE_TELEMETRY]', event);
+          }
+        });
+        prepareClient = prepareClientForLoad;
+        const loadCache = new MapModelLoadCache<PreparedMapGeometry>(async (modelName, loadSignal) => {
           const modelKey = normalizeMapModelKey(modelName);
           if (!modelName.trim() || !modelKey) {
             const invalidModel = `MAP_MESH_LOADER_START_INVALID: modelName=${JSON.stringify(modelName)}`;
@@ -916,10 +878,19 @@ export function MsbScenePanel(props: MsbScenePanelProps): ReactElement {
             throw new Error(invalidModel);
           }
           loaderStarted += 1;
+          const loadId = createMapRequestId();
+          const activePageRequestIds = new Set<string>();
+          const cancelRequestOnLoadAbort = (): void => {
+            for (const requestId of activePageRequestIds) {
+              void cancelMapRequest?.(requestId).catch(() => undefined);
+            }
+          };
+          loadSignal.addEventListener('abort', cancelRequestOnLoadAbort, { once: true });
           console.debug('[MsbScenePanel] MAP mesh loader start', {
             modelName,
             modelKey,
-            batchKey: `model:${modelKey}`
+            batchKey: `model:${modelKey}`,
+            loadId
           });
           let raw: MapMeshReadResultWithBytes = { ok: false };
           // Chunked streaming: follow opaque cursors until complete, wire bytes budget <8MiB per chunk
@@ -931,7 +902,36 @@ export function MsbScenePanel(props: MsbScenePanelProps): ReactElement {
           let textureColorSpace: string | undefined;
           try {
             do {
-              const chunkResult = await readMapStaticGeometry(props.mapResourceUri, modelName, cursor, sessionToken) as MapStaticGeometryReadResult | null | undefined;
+              if (cancelled || loadSignal.aborted) return null;
+              // Every page gets a fresh opaque handle.  A cursor/session page
+              // may outlive a previous response, so reusing one model-level
+              // id would let a late cancel/terminal receipt be attributed to
+              // the wrong native request generation.
+              const requestId = createMapRequestId();
+              activePageRequestIds.add(requestId);
+              activeMapRequestIds.add(requestId);
+              console.debug('[MsbScenePanel] MAP mesh page start', {
+                modelName,
+                modelKey,
+                loadId,
+                requestId,
+                cursorPresent: Boolean(cursor),
+                sessionPresent: Boolean(sessionToken)
+              });
+              let chunkResult: MapStaticGeometryReadResult | null | undefined;
+              try {
+                chunkResult = await readMapStaticGeometry(
+                  props.mapResourceUri,
+                  modelName,
+                  cursor,
+                  sessionToken,
+                  requestId
+                ) as MapStaticGeometryReadResult | null | undefined;
+              } finally {
+                activePageRequestIds.delete(requestId);
+                activeMapRequestIds.delete(requestId);
+              }
+              if (cancelled || loadSignal.aborted) return null;
               if (!chunkResult) {
                 const nullResponse = 'MAP_STATIC_GEOMETRY_NULL_RESPONSE: readMapStaticGeometry returned null/undefined';
                 reportMeshDiagnostic(modelName, 'ipc', nullResponse);
@@ -939,6 +939,7 @@ export function MsbScenePanel(props: MsbScenePanelProps): ReactElement {
               }
               if (!chunkResult.ok) {
                 raw = chunkResult as MapMeshReadResult;
+                if (isMapReadCancellationResponse(chunkResult)) return null;
                 if (!isMapMeshUnavailableResponse(raw)) reportMeshDiagnostic(modelName, 'ipc', chunkResult);
                 break;
               }
@@ -957,11 +958,6 @@ export function MsbScenePanel(props: MsbScenePanelProps): ReactElement {
                 raw = {
                   ok: true,
                   data: {
-                    // Keep the decoded typed buffers local to the renderer.
-                    // Re-encoding every merged model and decoding it again in
-                    // ModelResourcePool made MAP loading spend most CPU in
-                    // base64 conversion and amplified GC pressure.
-                    ...mergeMapStaticGeometryChunks(chunks, { encodeBase64: false }),
                     ...(texturePreviewToken ? { texturePreviewToken } : {}),
                     ...(textureColorSpace ? { textureColorSpace } : {})
                   },
@@ -970,31 +966,90 @@ export function MsbScenePanel(props: MsbScenePanelProps): ReactElement {
                 break;
               }
             } while (cursor);
-            const geometry = toMapMeshGeometry(raw);
+            if (cancelled || loadSignal.aborted) return null;
+            if (!raw.ok) {
+              const geometry = toMapMeshGeometry(raw);
+              if (!geometry && isMapMeshUnavailableResponse(raw)) {
+                recordUnavailableModelTelemetry(modelName, raw);
+              }
+              if (!geometry && !isMapMeshUnavailableResponse(raw)) reportMeshDiagnostic(modelName, 'geometry', raw);
+              loaderCompleted += 1;
+              return geometry as PreparedMapGeometry | null;
+            }
+            // An empty/diagnostic-only page has no CPU payload to prepare. Keep
+            // the existing unavailable projection and its structured reason.
+            if (!chunks.some((chunk) => Boolean(chunk.positionsBase64))) {
+              const geometry = toMapMeshGeometry(raw);
+              if (!geometry && isMapMeshUnavailableResponse(raw)) {
+                recordUnavailableModelTelemetry(modelName, raw);
+              }
+              if (!geometry && !isMapMeshUnavailableResponse(raw)) reportMeshDiagnostic(modelName, 'geometry', raw);
+              if (cancelled || loadSignal.aborted) return null;
+              loaderCompleted += 1;
+              return geometry as PreparedMapGeometry | null;
+            }
+            // All base64 decode, chunk merge, index relocation, UV/normal
+            // assembly, material-group projection and texture identity hashing
+            // happen in the bounded worker pool. The returned bytes are fresh
+            // transferables and are never shared with the old visible proxy.
+            const prepared = await prepareClientForLoad.prepare(chunks, loadSignal, {
+              ...(texturePreviewToken ? { texturePreviewToken } : {}),
+              ...(textureColorSpace ? { textureColorSpace } : {})
+            });
+            if (cancelled || loadSignal.aborted) return null;
+            if (prepared.diagnostics && prepared.diagnostics.length > 0) {
+              // Preparation warnings are renderer-local provenance, not a
+              // failed model load. Forward stable code/details for diagnosis
+              // while leaving the visible map and its first-error status
+              // unchanged; ambiguous cull metadata intentionally stays
+              // DoubleSide in the resource pool.
+              for (const diagnostic of prepared.diagnostics) {
+                const log = diagnostic.severity === 'warning' ? console.warn : console.debug;
+                log('[MsbScenePanel] MAP geometry prepare diagnostic', {
+                  modelName,
+                  severity: diagnostic.severity,
+                  code: diagnostic.code,
+                  details: diagnostic.details
+                });
+              }
+            }
+            const geometry = prepared;
             if (!geometry && isMapMeshUnavailableResponse(raw)) {
-              unavailableModelKeys.add(modelKey);
+              recordUnavailableModelTelemetry(modelName, raw);
             }
             if (!geometry && !isMapMeshUnavailableResponse(raw)) reportMeshDiagnostic(modelName, 'geometry', raw);
+            if (cancelled || loadSignal.aborted) return null;
             loaderCompleted += 1;
             return geometry;
           } catch (error) {
+            if (cancelled || loadSignal.aborted || isMapReadCancellationResponse(error as MapStaticGeometryReadResult)) return null;
             reportMeshDiagnostic(modelName, 'merge/decode', error);
             throw error;
+          } finally {
+            loadSignal.removeEventListener('abort', cancelRequestOnLoadAbort);
           }
         });
         const uploadQueue = new FrameTaskQueue();
         const uploads = new Map<string, Promise<boolean>>();
-        const uploadModel = (modelName: string, geometry: LoadedMapMeshGeometry): Promise<boolean> => {
+        const uploadModel = (modelName: string, geometry: PreparedMapGeometry): Promise<boolean> => {
           const key = normalizeMapModelKey(modelName);
           const pending = uploads.get(key);
           if (pending) return pending;
+          // Another caller may have uploaded the same prepared geometry while
+          // this caller was awaiting the shared load promise. The CPU envelope
+          // is intentionally gone at that point; reuse the visible batch.
+          if (loadCache.isUploaded(modelName)) return Promise.resolve(true);
           const upload = uploadQueue
             .enqueue(() => {
               try {
                 if (typeof handle.updateModelGeometry !== 'function') {
                   throw new Error('MAP_RENDERER_UPDATE_METHOD_MISSING: proxy scene handle cannot replace model geometry');
                 }
-                const replaced = handle.updateModelGeometry(modelName, geometry);
+                const replaced = handle.updateModelGeometry(modelName, geometry, {
+                  textureIdentities: geometry.textureIdentities,
+                  ...(geometry.bounds ? { bounds: geometry.bounds } : {}),
+                  ...(geometry.cacheKey ? { cacheKey: geometry.cacheKey } : {})
+                });
                 if (replaced <= 0) {
                   throw new Error(`MAP_RENDERER_MODEL_BATCH_NOT_FOUND: ${modelName} (expected batch key model:${normalizeMapModelKey(modelName)})`);
                 }
@@ -1004,6 +1059,14 @@ export function MsbScenePanel(props: MsbScenePanelProps): ReactElement {
                 reportMeshDiagnostic(modelName, 'renderer-upload', error);
                 throw error;
               }
+            })
+            .then((uploaded) => {
+              if (uploaded) loadCache.markUploaded(modelName, geometry);
+              else loadCache.release(modelName, geometry);
+              return uploaded;
+            }, (error) => {
+              loadCache.release(modelName, geometry);
+              throw error;
             })
             .finally(() => uploads.delete(key));
           uploads.set(key, upload);
@@ -1088,6 +1151,13 @@ export function MsbScenePanel(props: MsbScenePanelProps): ReactElement {
                       missing += items.length;
                       modelsFailed += 1;
                     }
+                  } else if (loadCache.isUploaded(modelName)) {
+                    // A selected-part caller can commit the shared geometry
+                    // before this bulk worker observes the load result. It is
+                    // already visible; do not miscount the null cache hit as
+                    // a missing model.
+                    loaded += items.length;
+                    modelsLoaded += 1;
                   } else {
                     missing += items.length;
                     if (unavailableModelKeys.has(normalizeMapModelKey(modelName))) modelsUnavailable += 1;
@@ -1126,23 +1196,35 @@ export function MsbScenePanel(props: MsbScenePanelProps): ReactElement {
               modelsLoaded,
               modelsFailed,
               modelsUnavailable,
-              cancelled
+              cancelled,
+              prepareStats: prepareClientForLoad.getStats(),
+              loadRetentionStats: loadCache.getRetentionStats()
             });
+            // Keep the existing completion object unchanged: cancellation
+            // evidence matches its `cancelled: true` text.  This separate
+            // compact JSON marker exposes only cache lifecycle counts so the
+            // production harness does not depend on Chromium's object preview
+            // truncating fields after the first few properties.
+            console.debug(`${MAP_LOAD_RETENTION_MARKER} ${JSON.stringify(loadCache.getRetentionStats())}`);
           })();
         }
       }
     }).catch((error: unknown) => {
       if (!cancelled) reportMeshDiagnostic('__scene__', 'scene-mount', error);
       else console.debug('[MsbScenePanel] MAP mesh effect cleanup during scene mount', { loaderStarted, error: diagnosticFromDetail(error) });
-      setStatus(error instanceof Error ? error.message : '3D 场景初始化失败');
+      if (!cancelled) setStatus(error instanceof Error ? error.message : '3D 场景初始化失败');
     });
 
     return () => {
       cancelled = true;
+      const activeRequestIdsAtCleanup = [...activeMapRequestIds];
+      cancelActiveMapRequests();
       console.debug('[MsbScenePanel] MAP mesh effect cleanup', {
         loaderStarted,
         loaderCompleted,
         uploadedPartCount,
+        activeRequestCount: activeRequestIdsAtCleanup.length,
+        activeRequestIds: activeRequestIdsAtCleanup,
         cacheCreated: modelLoadCacheRef.current !== null,
         queueCreated: modelUploadQueueRef.current !== null
       });
@@ -1152,6 +1234,10 @@ export function MsbScenePanel(props: MsbScenePanelProps): ReactElement {
       drawItemByIdRef.current.clear();
       modelLoadCacheRef.current?.dispose();
       modelLoadCacheRef.current = null;
+      // This terminates active/queued CPU prepare jobs before a remount can
+      // receive a worker result. No late prepare may reach model upload.
+      prepareClient?.dispose();
+      prepareClient = null;
       modelUploadQueueRef.current?.dispose();
       modelUploadQueueRef.current = null;
       modelUploadRef.current = null;
@@ -1185,6 +1271,7 @@ export function MsbScenePanel(props: MsbScenePanelProps): ReactElement {
     let cancelled = false;
     void (async () => {
       try {
+        if (loadCache.isUploaded(modelName)) return;
         const meshData = await loadCache.load(modelName);
         if (cancelled || !meshData) return;
         await uploadModel(modelName, meshData);
