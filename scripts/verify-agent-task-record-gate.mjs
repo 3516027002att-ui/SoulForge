@@ -796,6 +796,137 @@ try {
   assert.equal(bulletBatchAllowed.ok, true, '补读精确 750301 后三行批量门禁应通过');
   await bulletGateway.releaseMutationReservation(bulletBatchAllowed.reservationId);
 
+  // 事件（emevd）与脚本（script/luabnd）为无限修改：verified 后同条 Evidence 可反复预留。
+  const unlimitedGateway = createAgentTaskRecordGateway(root, 'unlimited-emevd-script', {
+    frozenRequest: '修改目标敌人事件并更新 AI 脚本'
+  });
+  await unlimitedGateway.update({
+    objectName: '目标敌人',
+    propertyKey: 'target',
+    value: '用户要求修改事件与脚本',
+    kind: 'target'
+  });
+  const unlimitedTicket = await unlimitedGateway.recordSearch({
+    toolName: 'search_events',
+    query: '目标敌人',
+    result: {
+      items: [{
+        item: {
+          eventId: 11105810,
+          sourceUri: 'file://event/m11_00_00_00.emevd.dcx',
+          name: '目标敌人'
+        }
+      }]
+    }
+  });
+  await unlimitedGateway.update({
+    objectName: '目标敌人',
+    propertyKey: 'emevd',
+    value: 'sourceUri=file://event/m11_00_00_00.emevd.dcx eventId=11105810',
+    kind: 'evidence',
+    evidence: ['sourceUri=file://event/m11_00_00_00.emevd.dcx eventId=11105810'],
+    searchId: unlimitedTicket.searchId,
+    mutationBudget: 1
+  });
+  const scriptTicket = await unlimitedGateway.recordSearch({
+    toolName: 'list_luabnd_scripts',
+    query: '目标敌人',
+    result: { items: [{ item: { name: '目标敌人', script: 'script' } }] }
+  });
+  await unlimitedGateway.update({
+    objectName: '目标敌人',
+    propertyKey: 'script',
+    value: 'luabnd script target',
+    kind: 'evidence',
+    evidence: ['script container entry for 目标敌人'],
+    searchId: scriptTicket.searchId,
+    mutationBudget: 1
+  });
+  await unlimitedGateway.update({
+    objectName: '目标敌人',
+    propertyKey: 'luabnd',
+    value: 'luabnd container target',
+    kind: 'evidence',
+    evidence: ['luabnd container for 目标敌人'],
+    searchId: scriptTicket.searchId,
+    mutationBudget: 1
+  });
+  const unlimitedEntries = (await unlimitedGateway.read()).entries.filter((entry) => entry.kind === 'evidence');
+  assert.ok(unlimitedEntries.length >= 3);
+  for (const entry of unlimitedEntries) {
+    assert.equal(
+      entry.mutationBudget,
+      -1,
+      `${entry.propertyKey} 应记为无限预算 (unlimited=-1)`
+    );
+  }
+  // 脚本 Evidence 登记后可反复预留，不因次数耗尽被拒。
+  const scriptFirst = await unlimitedGateway.assertMutationTarget('mutate_luabnd_script', {
+    file: 'script.luabnd.dcx',
+    script: 'print("hi")'
+  });
+  assert.equal(scriptFirst.ok, true, '脚本 Evidence 首次预留应通过');
+  await unlimitedGateway.finalizeMutation(scriptFirst.reservationId);
+  const scriptSecond = await unlimitedGateway.assertMutationTarget('mutate_luabnd_script', {
+    file: 'script.luabnd.dcx',
+    script: 'print("hi again")'
+  });
+  assert.equal(scriptSecond.ok, true, '脚本 Evidence 第二次预留仍应通过（无限修改）');
+  await unlimitedGateway.finalizeMutation(scriptSecond.reservationId);
+  const scriptThird = await unlimitedGateway.assertMutationTarget('mutate_luabnd_script', {
+    file: 'script.luabnd.dcx',
+    script: 'print("hi thrice")'
+  });
+  assert.equal(scriptThird.ok, true, '脚本 Evidence 第三次预留仍应通过（无限修改）');
+  await unlimitedGateway.finalizeMutation(scriptThird.reservationId);
+
+  // PARAM 对照：仍为恰好 1 次，用尽后拒绝。
+  const paramGateway = createAgentTaskRecordGateway(root, 'param-still-once', {
+    frozenRequest: '修改义父的铃铛'
+  });
+  await paramGateway.update({
+    objectName: '义父的铃铛',
+    propertyKey: 'target',
+    value: '待定位',
+    kind: 'target'
+  });
+  const paramTicket = await paramGateway.recordSearch({
+    toolName: 'search_param_rows',
+    query: '义父的铃铛',
+    result: { items: [{ item: { paramName: 'EquipParamGoods', rowId: 3080 } }] }
+  });
+  await paramGateway.update({
+    objectName: '义父的铃铛',
+    propertyKey: 'EquipParamGoods',
+    value: 'rowId=3080',
+    kind: 'evidence',
+    evidence: ['EquipParamGoods#3080 fieldId=nameId'],
+    searchId: paramTicket.searchId,
+    mutationBudget: 1
+  });
+  await paramGateway.recordNativeParamRead(
+    { table: 'EquipParamGoods', rowIds: [3080], fieldIds: ['nameId'] },
+    { fields: [{ table: 'EquipParamGoods', rowId: 3080, fieldId: 'nameId', value: 3504, sourceHash: 'h', sourceRevision: 1 }] }
+  );
+  const paramFirst = await paramGateway.assertMutationTarget('mutate_param_fields', {
+    edits: [{ table: 'EquipParamGoods', rowId: 3080, fieldId: 'nameId', value: 1 }]
+  });
+  assert.equal(paramFirst.ok, true);
+  await paramGateway.finalizeMutation(paramFirst.reservationId);
+  const paramEntryAfterWrite = (await paramGateway.read()).entries
+    .find((entry) => entry.propertyKey === 'EquipParamGoods' && entry.kind === 'evidence');
+  assert.equal(paramEntryAfterWrite.mutationBudget, 1, 'PARAM 预算仍为 1');
+  assert.equal(paramEntryAfterWrite.mutationUsed, 1, 'PARAM 成功写入后消耗 1 次');
+  const paramSecond = await paramGateway.assertMutationTarget('mutate_param_fields', {
+    edits: [{ table: 'EquipParamGoods', rowId: 3080, fieldId: 'nameId', value: 2 }]
+  });
+  assert.equal(paramSecond.ok, false, 'PARAM Evidence 用尽后不得继续写入');
+  assert.ok(
+    ['TASK_RECORD_MUTATION_BUDGET_EXHAUSTED', 'TASK_RECORD_NATIVE_PROOF_REQUIRED', 'TASK_RECORD_PARAM_ROW_UNRESOLVED']
+      .includes(paramSecond.code),
+    `PARAM 二次写入应被预算/证明门禁拒绝，实际 ${paramSecond.code}`
+  );
+
   console.log('agent task-record gate smoke passed');
 } finally {
   await rm(root, { recursive: true, force: true });

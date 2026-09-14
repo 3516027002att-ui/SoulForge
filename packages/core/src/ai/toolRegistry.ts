@@ -851,7 +851,7 @@ export function createDefaultToolRegistry(): ToolRegistry {
 
   registry.register({
     name: 'update_agent_task_record',
-    description: '写入本次任务的 Evidence 台账。kind=target 时 propertyKey 必须精确为 target，value 写原始意图：首次 objectName 逐字取自用户请求并省略 searchId/evidence/mutationBudget；搜索后新增规范目标必须传入该次真实 searchId。搜索前先完成所有用户目标登记。kind=evidence 时 objectName 必须复用已登记的真实修改目标，propertyKey 使用真实表名（如 NpcParam 或 SpEffectParam），只能含字母数字下划线；同一 PARAM 行准备一次 mutate_param_fields 时合并全部待写字段。evidence 必须是非空字符串数组，例如 ["NpcParam#50800000 fieldId=ninsatuNum"] 或 ["SpEffectParam#9003 fieldId=poizonAttackPower"]，不能传对象数组；searchId 必须来自包含该目标的当前搜索、mutationBudget 必须精确为 1。只读对照对象及 _ref/_elite 近义属性不进台账。模型只能写 candidate/blocked；verified 由宿主在成功原生读取后自动晋升。',
+    description: '写入本次任务的 Evidence 台账。kind=target 时 propertyKey 必须精确为 target，value 写原始意图：首次 objectName 逐字取自用户请求并省略 searchId/evidence/mutationBudget；搜索后新增规范目标必须传入该次真实 searchId。搜索前先完成所有用户目标登记。kind=evidence 时 objectName 必须复用已登记的真实修改目标，propertyKey 使用真实表名（如 NpcParam 或 SpEffectParam），只能含字母数字下划线；同一 PARAM 行准备一次 mutate_param_fields 时合并全部待写字段。evidence 必须是非空字符串数组，例如 ["NpcParam#50800000 fieldId=ninsatuNum"] 或 ["SpEffectParam#9003 fieldId=poizonAttackPower"]，不能传对象数组；searchId 必须来自包含该目标的当前搜索。mutationBudget：普通 Evidence 必须精确为 1；事件（emevd）与脚本（script/luabnd）为无限修改，登记时省略或传 1 即可。只读对照对象及 _ref/_elite 近义属性不进台账。模型只能写 candidate/blocked；verified 由宿主在成功原生读取后自动晋升。',
     permission: 'analyze',
     permissionLevel: 'analyze',
     inputSchema: {
@@ -877,12 +877,28 @@ export function createDefaultToolRegistry(): ToolRegistry {
       const evidence = asStringList(value.evidence).map((item) => item.trim());
       const searchId = asOptionalString(value.searchId)?.trim();
       const mutationBudget = value.mutationBudget;
+      const unlimitedMutationKeys = new Set(['emevd', 'script', 'luabnd']);
+      const isUnlimitedMutationKey = unlimitedMutationKeys.has(propertyKey.trim().toLocaleLowerCase());
       if (kind === 'evidence') {
-        if (evidence.length === 0 || !searchId
-          || mutationBudget !== 1) {
+        if (evidence.length === 0 || !searchId) {
           return fail(
             'TASK_RECORD_EVIDENCE_REQUIRED',
-            'Evidence 台账词条必须同时传入非空 evidence 数组、当前搜索返回的 searchId，并固定 mutationBudget=1；缺少或扩大预算都会被拒绝。',
+            'Evidence 台账词条必须同时传入非空 evidence 数组和当前搜索返回的 searchId。',
+            { required: ['evidence', 'searchId'] }
+          );
+        }
+        if (isUnlimitedMutationKey) {
+          if (mutationBudget !== undefined && mutationBudget !== 1) {
+            return fail(
+              'TASK_RECORD_MUTATION_BUDGET_INVALID',
+              '事件（emevd）与脚本（script/luabnd）为无限修改；登记时 mutationBudget 必须省略或为 1。',
+              { propertyKey }
+            );
+          }
+        } else if (mutationBudget !== 1) {
+          return fail(
+            'TASK_RECORD_EVIDENCE_REQUIRED',
+            'Evidence 台账词条必须同时传入非空 evidence 数组、当前搜索返回的 searchId，并固定 mutationBudget=1；缺少或扩大预算都会被拒绝。事件（emevd）与脚本（script/luabnd）除外。',
             { required: ['evidence', 'searchId', 'mutationBudget=1'] }
           );
         }
@@ -896,7 +912,7 @@ export function createDefaultToolRegistry(): ToolRegistry {
         kind,
         evidence,
         ...(searchId ? { searchId } : {}),
-        ...(kind === 'evidence'
+        ...(kind === 'evidence' && mutationBudget !== undefined
           ? { mutationBudget: mutationBudget as number }
           : {})
       };

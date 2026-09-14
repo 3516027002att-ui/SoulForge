@@ -20,7 +20,8 @@ const HEADER = `# SoulForge Agent Evidence 台账
 - evidence 词条：由搜索工具返回的 searchId 支持，propertyKey 是大小写不敏感的规范标识符；
 - 只读对照：用于比较取值但不会被修改的参考行/对象不登记为 target 或 evidence，直接使用搜索结果；
 - mutationBudget：该 Evidence 词条允许通过写入工具的次数；每次成功写入调用消耗一次；
-- mutationUsed：已预留或已消耗的次数。次数用尽后必须重新搜索并写入新的 Evidence，或在实际资源回退后释放次数。
+- mutationUsed：已预留或已消耗的次数。次数用尽后必须重新搜索并写入新的 Evidence，或在实际资源回退后释放次数；
+- 事件（emevd）与脚本（script/luabnd）为无限修改：登记后同条 Evidence 可反复写入，无需重新登记。
 
 `;
 const MAX_ENTRIES = 256;
@@ -28,6 +29,9 @@ const MAX_SEARCH_TICKETS = 512;
 const SEARCH_TICKET_PREFIX = '<!-- soulforge-search-ticket ';
 /** Coalesce the burst of ledger updates produced by one agent turn. */
 const WRITE_DEBOUNCE_MS = 40;
+/** Host-only sentinel: emevd/script/luabnd evidence never exhausts. */
+const UNLIMITED_MUTATION_BUDGET = -1;
+const UNLIMITED_MUTATION_KEYS = new Set(['emevd', 'script', 'luabnd']);
 
 interface SearchTicket {
   searchId: string;
@@ -103,23 +107,32 @@ export function createAgentTaskRecordGateway(
     JSON.stringify([sourceUri, eventId])
   );
 
-  const hasNativeProof = (entry: AgentTaskRecordEntry, target: MutationTarget): boolean => (
-    target.resourceKind === 'event'
-      ? target.sourceUri !== undefined && target.eventId !== undefined
-        && target.sourceHash !== undefined
-        && target.outerFileHash !== undefined
-        && target.sourceRevision !== undefined
-        && (() => {
-          const proof = nativeEmevdProofs.get(entry.entryId)?.get(emevdProofKey(target.sourceUri!, target.eventId!));
-          return proof !== undefined
-            && proof.sourceHash === target.sourceHash
-            && proof.outerFileHash === target.outerFileHash
-            && proof.sourceRevision === target.sourceRevision;
-        })()
-      : target.table === undefined || target.rowId === undefined || target.fieldId === undefined
-        ? false
-        : nativeParamProofs.get(entry.entryId)?.has(proofKey(target.table, target.rowId, target.fieldId)) === true
-  );
+  const hasNativeProof = (entry: AgentTaskRecordEntry, target: MutationTarget): boolean => {
+    if (target.resourceKind === 'event') {
+      if (target.sourceUri === undefined || target.eventId === undefined
+        || target.sourceHash === undefined
+        || target.outerFileHash === undefined
+        || target.sourceRevision === undefined) {
+        return false;
+      }
+      const proof = nativeEmevdProofs.get(entry.entryId)?.get(emevdProofKey(target.sourceUri, target.eventId));
+      return proof !== undefined
+        && proof.sourceHash === target.sourceHash
+        && proof.outerFileHash === target.outerFileHash
+        && proof.sourceRevision === target.sourceRevision;
+    }
+    // 事件/脚本的整文件写入没有 PARAM 行字段身份；无限键在此不要求 native param proof。
+    if (isUnlimitedMutationKey(target.key)
+      && target.table === undefined
+      && target.rowId === undefined
+      && target.fieldId === undefined) {
+      return true;
+    }
+    if (target.table === undefined || target.rowId === undefined || target.fieldId === undefined) {
+      return false;
+    }
+    return nativeParamProofs.get(entry.entryId)?.has(proofKey(target.table, target.rowId, target.fieldId)) === true;
+  };
   let operationTail = Promise.resolve();
   let cachedDocument: ParsedDocument | undefined;
   let dirty = false;
@@ -202,7 +215,7 @@ export function createAgentTaskRecordGateway(
       `  - kind: ${entry.kind}`,
       `  - status: ${entry.status}`,
       `  - evidence: ${entry.evidence.length > 0 ? entry.evidence.map(clean).join('；') : '未提供'}`,
-      `  - mutationBudget: ${entry.mutationBudget}`,
+      `  - mutationBudget: ${formatMutationBudget(entry.mutationBudget)}`,
       `  - mutationUsed: ${entry.mutationUsed}`,
       ...(entry.searchId ? [`  - searchId: ${clean(entry.searchId)}`] : []),
       `  - updatedAt: ${clean(entry.updatedAt)}`,
@@ -371,10 +384,8 @@ export function createAgentTaskRecordGateway(
             { searchId, objectName }
           );
         }
-        if (input.mutationBudget !== 1) {
-          throw new TaskRecordError('TASK_RECORD_MUTATION_BUDGET_INVALID', '当前宿主策略为每条 Evidence 只授权一次写入调用，mutationBudget 必须为 1。');
-        }
-        evidenceMutationBudget = input.mutationBudget!;
+        // 事件（emevd）与脚本（script/luabnd）固定为无限写入；其余 Evidence 仍必须恰好为 1。
+        evidenceMutationBudget = resolveEvidenceMutationBudget(propertyKey, input.mutationBudget);
         const target = parsed.entries.find((entry) => (
           entry.kind === 'target'
           && entry.status !== 'blocked'
@@ -594,8 +605,8 @@ export function createAgentTaskRecordGateway(
       for (const target of targets) {
         const match = [...parsed.entries].reverse().find((entry) => (
           entry.kind === 'evidence'
-          && entry.status === 'verified'
-          && entry.mutationUsed < entry.mutationBudget
+          && writeEligibleStatus(entry)
+          && hasRemainingMutationBudget(entry)
           && mutationEvidenceMatches(entry, target, searchTickets)
           && hasNativeProof(entry, target)
         ));
@@ -654,7 +665,7 @@ export function createAgentTaskRecordGateway(
               : hasKey && !hasTable
               ? `任务记录已有 ${target.key} 属性，但没有找到 ${target.table}#${target.rowId}${target.fieldId ? `.${target.fieldId}` : ''} 的证据；已拒绝写入，请继续寻找并更新任务记录。`
               : hasKey
-              ? `Evidence 词条 ${target.key} 的 mutationBudget 已用尽；请实际回退后释放次数，或重新搜索并写入新的 Evidence。`
+              ? `Evidence 词条 ${target.key} 的 mutationBudget 已用尽；请实际回退后释放次数，或重新搜索并写入新的 Evidence。事件（emevd）与脚本（script/luabnd）为无限修改，不会耗尽。`
               : `Evidence 台账中没有词条 ${target.key}${target.fieldId ? `（字段 ${target.fieldId}）` : ''}；已拒绝 ${toolName} 写入，请使用已有字段证据的 propertyKey，或继续搜索并更新任务记录。`,
             details: {
               toolName,
@@ -844,8 +855,11 @@ function parseDocument(content: string): ParsedDocument {
     if (status) pending.status = status[1] as AgentTaskRecordEntry['status'];
     const evidence = /^\s+-\s+evidence:\s+(.+)$/u.exec(rawLine);
     if (evidence && evidence[1] !== '未提供') pending.evidence = evidence[1]!.split('；').filter(Boolean);
-    const mutationBudget = /^\s+-\s+mutationBudget:\s+(\d+)$/u.exec(rawLine);
-    if (mutationBudget) pending.mutationBudget = Number(mutationBudget[1]);
+    const mutationBudget = /^\s+-\s+mutationBudget:\s+(.+)$/u.exec(rawLine);
+    if (mutationBudget) {
+      const parsedBudget = parseMutationBudget(mutationBudget[1]!);
+      if (parsedBudget !== undefined) pending.mutationBudget = parsedBudget;
+    }
     const mutationUsed = /^\s+-\s+mutationUsed:\s+(\d+)$/u.exec(rawLine);
     if (mutationUsed) pending.mutationUsed = Number(mutationUsed[1]);
     const searchId = /^\s+-\s+searchId:\s+(.+)$/u.exec(rawLine);
@@ -861,19 +875,30 @@ function finalizeEntry(entry: Partial<AgentTaskRecordEntry>): AgentTaskRecordEnt
   // Records written before the target/evidence protocol are treated as
   // non-authorizing legacy Evidence, never as a target declaration.
   const kind = entry.kind ?? 'evidence';
-  const mutationBudget = kind === 'evidence' && Number.isInteger(entry.mutationBudget) && entry.mutationBudget! > 0
-    ? 1
-    : 0;
+  const propertyKey = entry.propertyKey ?? '';
+  const rawBudget = Number.isInteger(entry.mutationBudget) ? entry.mutationBudget! : 0;
+  let mutationBudget = 0;
+  if (kind === 'evidence' && rawBudget > 0) {
+    mutationBudget = isUnlimitedMutationKey(propertyKey)
+      ? UNLIMITED_MUTATION_BUDGET
+      : 1;
+  } else if (kind === 'evidence' && rawBudget === UNLIMITED_MUTATION_BUDGET) {
+    mutationBudget = UNLIMITED_MUTATION_BUDGET;
+  }
   return {
     entryId: entry.entryId && entry.entryId.trim() !== '' ? entry.entryId : `entry-${randomUUID()}`,
     objectName: entry.objectName ?? '未命名对象',
-    propertyKey: entry.propertyKey ?? '',
+    propertyKey,
     value: entry.value ?? '',
     kind,
     status: entry.status ?? 'candidate',
     evidence: entry.evidence ?? [],
     mutationBudget,
-    mutationUsed: Math.max(0, Math.min(mutationBudget, Number.isInteger(entry.mutationUsed) ? entry.mutationUsed! : 0)),
+    mutationUsed: clampMutationUsed({
+      propertyKey,
+      mutationBudget,
+      ...(entry.mutationUsed !== undefined ? { mutationUsed: entry.mutationUsed } : {})
+    }),
     ...(entry.searchId ? { searchId: entry.searchId } : {}),
     updatedAt: entry.updatedAt ?? new Date(0).toISOString()
   };
@@ -1426,6 +1451,72 @@ function normalizeKey(value: string): string {
   return value.trim().toLocaleLowerCase();
 }
 
+function isUnlimitedMutationKey(propertyKey: string): boolean {
+  return UNLIMITED_MUTATION_KEYS.has(normalizeKey(propertyKey));
+}
+
+function formatMutationBudget(budget: number): string {
+  return budget === UNLIMITED_MUTATION_BUDGET ? 'unlimited' : String(budget);
+}
+
+function parseMutationBudget(raw: string): number | undefined {
+  const text = raw.trim().toLocaleLowerCase();
+  if (text === 'unlimited' || text === 'inf' || text === 'infinite') {
+    return UNLIMITED_MUTATION_BUDGET;
+  }
+  if (/^-?\d+$/u.test(text)) return Number(text);
+  return undefined;
+}
+
+function resolveEvidenceMutationBudget(propertyKey: string, requested: unknown): number {
+  // 事件与脚本：宿主策略固定为无限写入；模型侧仍须传 1（或省略）以保持协议一致。
+  if (isUnlimitedMutationKey(propertyKey)) {
+    if (requested !== undefined && requested !== 1) {
+      throw new TaskRecordError(
+        'TASK_RECORD_MUTATION_BUDGET_INVALID',
+        '事件（emevd）与脚本（script/luabnd）为无限修改；登记时 mutationBudget 必须省略或为 1，不能自行声明其它数值。',
+      );
+    }
+    return UNLIMITED_MUTATION_BUDGET;
+  }
+  if (requested !== 1) {
+    throw new TaskRecordError(
+      'TASK_RECORD_MUTATION_BUDGET_INVALID',
+      '当前宿主策略为每条 Evidence 只授权一次写入调用，mutationBudget 必须为 1；事件（emevd）与脚本（script/luabnd）为无限修改。',
+    );
+  }
+  return 1;
+}
+
+function hasRemainingMutationBudget(entry: AgentTaskRecordEntry): boolean {
+  if (entry.kind !== 'evidence' || entry.status === 'blocked') return false;
+  if (entry.mutationBudget === UNLIMITED_MUTATION_BUDGET) return true;
+  if (entry.mutationBudget <= 0) return false;
+  return entry.mutationUsed < entry.mutationBudget;
+}
+
+/** script/luabnd 没有 native param/emevd proof 通路；搜索证据登记后即可写入。 */
+function writeEligibleStatus(entry: AgentTaskRecordEntry): boolean {
+  if (entry.status === 'verified') return true;
+  if (entry.status !== 'candidate') return false;
+  const key = normalizeKey(entry.propertyKey);
+  return key === 'script' || key === 'luabnd';
+}
+
+function clampMutationUsed(entry: {
+  propertyKey: string;
+  mutationBudget: number;
+  mutationUsed?: number;
+}): number {
+  const used = Number.isInteger(entry.mutationUsed) ? Math.max(0, entry.mutationUsed!) : 0;
+  if (isUnlimitedMutationKey(entry.propertyKey)
+    || entry.mutationBudget === UNLIMITED_MUTATION_BUDGET) {
+    return used;
+  }
+  const budget = Math.max(0, entry.mutationBudget);
+  return Math.min(budget, used);
+}
+
 function mutationPropertyKeyMatches(propertyKey: string, targetKey: string): boolean {
   const normalizedPropertyKey = normalizeParamTable(propertyKey);
   const normalizedTargetKey = normalizeParamTable(targetKey);
@@ -1447,7 +1538,7 @@ function mutationEvidenceMatches(
   target: MutationTarget,
   tickets?: Map<string, SearchTicket>
 ): boolean {
-  if (entry.kind !== 'evidence' || entry.status === 'blocked' || entry.mutationUsed >= entry.mutationBudget) return false;
+  if (entry.kind !== 'evidence' || entry.status === 'blocked' || !hasRemainingMutationBudget(entry)) return false;
   if (target.resourceKind === 'event') {
     if (target.sourceUri === undefined || target.eventId === undefined || !tickets) return false;
     const ticket = entry.searchId ? tickets.get(entry.searchId) : undefined;

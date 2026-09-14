@@ -60,6 +60,8 @@ target 声明待修改对象，不授权直接写入；target 可以直接来自
 
 `value` 和 `evidence` 是 Agent 根据工具结果编写的格式化文本，可以包含任意说明；真正作为写入门槛的是 `propertyKey`、`searchId` 和次数字段。Evidence 对象必须先以完全相同的 `objectName` 出现在 target 清单中，且对应的搜索结果中必须出现该对象或已建立关系的稳定 ID。涉及 PARAM 字段时，说明中必须保留工具返回的真实表、rowId、fieldId、当前值和来源指纹；不得用空值、范围、邻近值或“属性1”等占位内容。
 
+**事件与脚本为无限修改**：`propertyKey` 为 `emevd`、`script` 或 `luabnd` 时，宿主将该 Evidence 记为无限写入（台账中显示 `mutationBudget: unlimited`）。登记时模型仍须传入非空 `evidence`、真实 `searchId`，`mutationBudget` 省略或为 1；通过原生读取晋升 `verified` 后，同一条 Evidence 可反复写入，无需每次重新搜索登记。PARAM/FMG 等其它 Evidence 仍为每条恰好 1 次。
+
 ## propertyKey 规范
 
 - `propertyKey` 必须是字母开头的字母、数字或下划线标识符，例如 `atkparam_npc`、`npcparam`、`itemlotparam`、`emevd`；
@@ -78,7 +80,7 @@ target 声明待修改对象，不授权直接写入；target 可以直接来自
 4. 只有 Evidence 文件中出现与写入目标匹配的 key，写入工具才会通过门禁；
 5. 写入工具对本次调用涉及的每个不同 key 预留一次 `mutation-budget`，成功后保留消耗，失败后释放预留；
 6. candidate Evidence 不授权写入；对应原生读取成功后，由宿主把匹配的表、行、字段 Evidence 自动晋升为 verified；
-7. 次数用尽后，继续写入必须重新调用搜索工具、引用新的 `searchId`、写入新的 Evidence 并重新原生读取。只有宿主在已验证真实逆事务后才能释放计数；模型侧不提供台账计数回退工具。
+7. PARAM 次数用尽后，继续写入必须重新调用搜索工具、引用新的 `searchId`、写入新的 Evidence 并重新原生读取。事件与脚本 Evidence 不因次数耗尽被拒。只有宿主在已验证真实逆事务后才能释放计数；模型侧不提供台账计数回退工具。
 
 同一次写入调用内对同一 key 的多条 edit 只消耗一次该 key 的次数。写入工具检测到 Evidence 中有对应词条才会通过写入，并不解析 `value` 中的 rowId、fieldId 或其它自由文本；这些身份仍由原生读取和具体 writer 负责校验。
 
@@ -86,10 +88,10 @@ target 声明待修改对象，不授权直接写入；target 可以直接来自
 
 - 首次搜索前必须先登记当前用户请求中逐字出现的 target；后续新对象只能来自该 target 的有效搜索结果，并携带对应 `searchId` 登记；
 - 不得手写或猜测 `searchId`、rowId、fieldId、eventId、掉落 ID、特效 ID 或文件身份；所有身份必须逐字采用当前工具返回值；
-- `update_agent_task_record(kind=evidence)` 必须引用当前运行中搜索工具返回的有效 `searchId`，并固定声明 `mutationBudget=1`；模型不能扩大预算，只能登记 candidate/blocked，不能自报 verified；
+- `update_agent_task_record(kind=evidence)` 必须引用当前运行中搜索工具返回的有效 `searchId`。PARAM 等普通 Evidence 固定声明 `mutationBudget=1`；事件（`emevd`）与脚本（`script`/`luabnd`）为无限修改，`mutationBudget` 省略或为 1。模型不能扩大预算，只能登记 candidate/blocked，不能自报 verified；
 - `read_param_fields` 每次都必须传入工具返回的非空 `fieldIds`；没有字段 ID 就继续查元数据，不能省略或猜测；
 - 已由搜索定位的只读参考行可以直接原生读取，无需登记写入 Evidence。返回 `taskRecordProof.status=not-recorded` 代表读取成功但没有晋升写入权限；需要修改该行时，仍须登记匹配 Evidence 并重新原生读取。
-- 搜索结果为空、对象不在搜索结果中、Evidence key 缺失或次数耗尽时，必须改走其它搜索路径或按门禁要求重新搜索，不得凭模型记忆创建 Evidence；
+- 搜索结果为空、对象不在搜索结果中、Evidence key 缺失或 PARAM 次数耗尽时，必须改走其它搜索路径或按门禁要求重新搜索，不得凭模型记忆创建 Evidence；事件与脚本 Evidence 在 `verified` 后可无限次写入，不因次数耗尽被拒；
 - `blocked` 词条永远不能授权写入；
 - 只有 Evidence 文件中的规范 key 才能授权对应写入，Evidence 后面的自然语言说明不构成额外授权；
 - 资源写入前后仍须执行原生读取、Patch Engine 事务、备份、审批、native 回读、操作日志和回滚验证；Evidence 台账不提升资源 authority。
