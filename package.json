@@ -9,6 +9,7 @@
   ],
   "scripts": {
     "ai-logs:sync": "node scripts/sync-ai-logs.mjs",
+    "sfcli": "node tools/soulforge-cli/sfcli.mjs",
     "dev": "npm run dev -w @soulforge/desktop",
     "build": "npm run build -w @soulforge/shared && npm run build -w @soulforge/core && npm run build -w @soulforge/desktop && node scripts/generate-agent-production-build-manifest.mjs && npm run release:manifest",
     "typecheck": "tsc -b packages/shared packages/core apps/desktop --pretty false",
