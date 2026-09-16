@@ -262,6 +262,3 @@ To help improve the project, I will provide generous usage credits to active use
 
 运行 `npm run ai-logs:sync` 会同步本机桌面会话及 `output/agent-real/*.rollout.jsonl`，保留旧归档并重建分类索引；仅更新已有索引用 `npm run ai-logs:sync -- --index-only`。公开追踪的是 `docs/ai-logs/` 中的快照，不是整个本机输出目录。同步会检查常见明文凭据，但不会自动脱敏；新增记录仍需审查后提交、推送，不会自动上传。
 
-- [鬼型部修改 Markdown](docs/ai-logs/markdown/2026/08/23/rollout-2026-08-23T12-40-06-359Z-fdc9e1e0-62ee-4ac8-9168-e5966252fdde.md) · [原始 JSONL](docs/ai-logs/sessions/2026/08/23/rollout-2026-08-23T12-40-06-359Z-fdc9e1e0-62ee-4ac8-9168-e5966252fdde.jsonl)
-- [道具/商店崩溃只读排查 Markdown](docs/ai-logs/markdown/2026/08/21/rollout-2026-08-21T02-37-13-611Z-27acb304-a895-4fe7-8701-07a2552340d7.md) · [原始 JSONL](docs/ai-logs/sessions/2026/08/21/rollout-2026-08-21T02-37-13-611Z-27acb304-a895-4fe7-8701-07a2552340d7.jsonl)
-
