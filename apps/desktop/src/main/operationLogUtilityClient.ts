@@ -54,6 +54,14 @@ interface LateRequest {
   expiresAt: number;
 }
 
+interface QueuedRequest {
+  requestId: string;
+  method: OperationLogUtilityMethod;
+  request: OperationLogUtilityRequest;
+  child: UtilityProcess;
+  priority: number;
+}
+
 type UtilityTraceEvent = 'enqueue' | 'dispatch' | 'finish' | 'timeout' | 'late-completion' | 'workerfail' | 'close';
 
 interface UtilityTrace {
@@ -77,6 +85,11 @@ export class OperationLogUtilityClient implements OperationLogStore {
   private process: UtilityProcess | null = null;
   private readonly pending = new Map<string, PendingRequest>();
   private readonly lateRequests = new Map<string, LateRequest>();
+  /** The utility process is serial by design; keep a host-side queue so a
+   * long background RAG transaction cannot sit in front of every foreground
+   * Agent read that arrived later. */
+  private dispatchQueue: QueuedRequest[] = [];
+  private dispatchingRequestId: string | null = null;
   private activeWorkspace: OpenWorkspaceDatabasePayload | null = null;
   private activeAppDatabasePath: string | null = null;
   private opening: Promise<void> | null = null;
@@ -465,7 +478,7 @@ export class OperationLogUtilityClient implements OperationLogStore {
     return new Promise((resolve, reject) => {
       const timeout = this.timeoutForMethod(method);
       const depth = this.pending.size + 1;
-      const dispatchedAt = performance.now();
+      let dispatchedAt = enqueuedAt;
       const timer = setTimeout(() => {
         this.pending.delete(requestId);
         this.rememberLateRequest({
@@ -491,6 +504,7 @@ export class OperationLogUtilityClient implements OperationLogStore {
           outcome: 'timeout'
         });
         reject(new Error(`数据库后台请求超时：${method}`));
+        this.drainDispatchQueue();
       }, timeout);
       this.pending.set(requestId, {
         requestId,
@@ -516,44 +530,89 @@ export class OperationLogUtilityClient implements OperationLogStore {
         timeout: false,
         timeoutMs: timeout
       });
+      this.dispatchQueue.push({
+        requestId,
+        method,
+        request,
+        child,
+        priority: utilityRequestPriority(method)
+      });
+      // Dispatch is deliberately host-owned instead of posting every request
+      // immediately. The worker itself remains one serial SQLite queue, but a
+      // later foreground read can now run before queued background RAG merges.
+      void dispatchedAt;
+      this.drainDispatchQueue((value) => { dispatchedAt = value; });
+    });
+  }
+
+  private drainDispatchQueue(setDispatchedAt?: (value: number) => void): void {
+    if (this.dispatchingRequestId !== null) return;
+    for (;;) {
+      const index = this.nextDispatchIndex();
+      if (index < 0) return;
+      const queued = this.dispatchQueue.splice(index, 1)[0]!;
+      const pending = this.pending.get(queued.requestId);
+      if (!pending) continue;
+      if (this.process !== queued.child || queued.child !== this.process) {
+        clearTimeout(pending.timer);
+        this.pending.delete(queued.requestId);
+        pending.reject(new Error('数据库后台进程已重启，请重试本次请求。'));
+        continue;
+      }
+      const dispatchedAt = performance.now();
+      pending.dispatchedAt = dispatchedAt;
+      setDispatchedAt?.(dispatchedAt);
+      this.dispatchingRequestId = queued.requestId;
+      writeUtilityTrace({
+        side: 'client',
+        event: 'dispatch',
+        requestId: queued.requestId,
+        method: queued.method,
+        enqueue: pending.enqueuedAt,
+        start: null,
+        finish: null,
+        depth: this.pending.size,
+        queueWaitMs: boundedDuration(dispatchedAt - pending.enqueuedAt),
+        dbDurationMs: null,
+        timeout: false,
+        timeoutMs: this.timeoutForMethod(queued.method)
+      });
       try {
-        child.postMessage(request);
-        writeUtilityTrace({
-          side: 'client',
-          event: 'dispatch',
-          requestId,
-          method,
-          enqueue: enqueuedAt,
-          start: null,
-          finish: null,
-          depth,
-          queueWaitMs: null,
-          dbDurationMs: null,
-          timeout: false,
-          timeoutMs: timeout
-        });
+        queued.child.postMessage(queued.request);
       } catch (error) {
-        clearTimeout(timer);
-        this.pending.delete(requestId);
+        this.dispatchingRequestId = null;
+        clearTimeout(pending.timer);
+        this.pending.delete(queued.requestId);
         writeUtilityTrace({
           side: 'client',
           event: 'finish',
-          requestId,
-          method,
-          enqueue: enqueuedAt,
-          start: null,
+          requestId: queued.requestId,
+          method: queued.method,
+          enqueue: pending.enqueuedAt,
+          start: dispatchedAt,
           finish: performance.now(),
           depth: this.pending.size,
-          queueWaitMs: null,
+          queueWaitMs: boundedDuration(dispatchedAt - pending.enqueuedAt),
           dbDurationMs: null,
           timeout: false,
-          timeoutMs: timeout,
+          timeoutMs: this.timeoutForMethod(queued.method),
           outcome: 'post-error',
           errorCode: 'UTILITY_POST_MESSAGE_FAILED'
         });
-        reject(error instanceof Error ? error : new Error(String(error)));
+        pending.reject(error instanceof Error ? error : new Error(String(error)));
+        continue;
       }
-    });
+      return;
+    }
+  }
+
+  private nextDispatchIndex(): number {
+    if (this.dispatchQueue.length === 0) return -1;
+    let bestIndex = 0;
+    for (let index = 1; index < this.dispatchQueue.length; index += 1) {
+      if (this.dispatchQueue[index]!.priority > this.dispatchQueue[bestIndex]!.priority) bestIndex = index;
+    }
+    return bestIndex;
   }
 
   private timeoutForMethod(method: OperationLogUtilityMethod): number {
@@ -573,6 +632,17 @@ export class OperationLogUtilityClient implements OperationLogStore {
       case 'transitionTransaction':
       case 'finalizeCommit':
         return Math.max(this.requestTimeoutMs, 120_000);
+      case 'get':
+      case 'list':
+      case 'history':
+      case 'listIncompleteTransactions':
+      case 'listRecoveryPoints':
+      case 'listAuditEvents':
+      case 'providerUsageSummary':
+        // Foreground Agent/operation reads must be able to wait behind one
+        // already-running RAG transaction. They remain bounded and are still
+        // rejected on process failure or explicit close.
+        return Math.max(this.requestTimeoutMs, 120_000);
       default:
         return this.requestTimeoutMs;
     }
@@ -581,10 +651,15 @@ export class OperationLogUtilityClient implements OperationLogStore {
   private onMessage(message: unknown): void {
     if (!isOperationLogUtilityResponse(message)) return;
     this.pruneLateRequests();
+    const isDispatchedRequest = this.dispatchingRequestId === message.requestId;
+    if (isDispatchedRequest) this.dispatchingRequestId = null;
     const pending = this.pending.get(message.requestId);
     if (!pending) {
       const late = this.lateRequests.get(message.requestId);
-      if (!late) return;
+      if (!late) {
+        if (isDispatchedRequest) this.drainDispatchQueue();
+        return;
+      }
       this.lateRequests.delete(message.requestId);
       writeUtilityTrace({
         side: 'client',
@@ -601,6 +676,7 @@ export class OperationLogUtilityClient implements OperationLogStore {
         outcome: 'late-completion',
         ...(message.ok ? {} : { errorCode: message.error?.code ?? 'DATABASE_UTILITY_FAILED' })
       });
+      this.drainDispatchQueue();
       return;
     }
     clearTimeout(pending.timer);
@@ -622,6 +698,7 @@ export class OperationLogUtilityClient implements OperationLogStore {
     });
     if (message.ok) {
       pending.resolve(message.result);
+      this.drainDispatchQueue();
       return;
     }
     const error = Object.assign(
@@ -629,9 +706,12 @@ export class OperationLogUtilityClient implements OperationLogStore {
       { code: message.error?.code ?? 'DATABASE_UTILITY_FAILED' }
     );
     pending.reject(error);
+    this.drainDispatchQueue();
   }
 
   private rejectAll(error: Error, outcome: 'workerfail' | 'close' = 'workerfail'): void {
+    this.dispatchQueue = [];
+    this.dispatchingRequestId = null;
     for (const pending of this.pending.values()) {
       clearTimeout(pending.timer);
       writeUtilityTrace({
@@ -697,8 +777,28 @@ function boundedTraceNumber(value: number): number {
   return Math.min(Math.max(Math.round(value * 100) / 100, 0), 86_400_000);
 }
 
+function boundedDuration(value: number): number {
+  return boundedTraceNumber(value);
+}
+
 function boundedTraceString(value: string, maxLength: number): string {
   return value.length <= maxLength ? value : value.slice(0, maxLength);
+}
+
+function utilityRequestPriority(method: OperationLogUtilityMethod): number {
+  // RAG/index persistence is deliberately background work. Keep it ordered
+  // relative to itself, but let foreground reads, approvals, and ordinary
+  // operation-log writes jump ahead once the current SQLite transaction ends.
+  if (method === 'mergeRagChunkDelta'
+    || method === 'replaceRagChunks'
+    || method === 'mergeRagChunks'
+    || method === 'replaceRagEmbeddings'
+    || method === 'mergeRagEmbeddings'
+    || method === 'replaceReferences'
+    || method === 'replaceDiagnostics'
+    || method === 'upsertJob'
+    || method === 'upsertSemanticFileCache') return 0;
+  return 1;
 }
 
 function sameWorkspace(

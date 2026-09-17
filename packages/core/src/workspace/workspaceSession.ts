@@ -3,36 +3,13 @@ import { join, resolve } from 'node:path';
 import type { Diagnostic, OverlayLayer, WorkspaceLayers, WorkspaceSessionMeta } from '@soulforge/shared';
 import { makeWorkspaceId } from './resourceUri.js';
 import { isPathInside, pathsEqual, verifyPathInsideRoot } from './pathBoundary.js';
-import { searchRealEmedf } from '../testing/realEmedfLocator.js';
-
-export interface EmedfLocatorContext {
-  overlayRoot: string;
-  baseRoot?: string;
-  game: string;
-}
-
-/**
- * EMEDF 依赖只负责定位用户本机文件，不负责读取、解析或解释其内容。
- * 生产默认实现是 `realEmedfLocator.ts`；smoke/调用方可注入确定性定位器。
- */
-export type EmedfLocator = (
-  context: EmedfLocatorContext
-) => string | undefined | Promise<string | undefined>;
-
-export const defaultEmedfLocator: EmedfLocator = (context) =>
-  context.baseRoot
-    ? searchRealEmedf({ gameRoot: context.baseRoot })
-    : searchRealEmedf();
+import { EMEVD_EXTERNAL_SCHEMA_FORBIDDEN_CODE } from '../emevd/emedfRegistryResolver.js';
 
 export interface OpenWorkspaceSessionOptions {
   overlayRoot: string;
   baseRoot?: string;
   stagingRoot?: string;
   game?: string;
-  /** Explicit user-provided EMEDF path; it wins over the locator. */
-  emedfPath?: string;
-  /** Path-only locator; defaults to the real local EMEDF locator. */
-  emedfLocator?: EmedfLocator;
 }
 
 export interface ResolveWritablePathResult {
@@ -45,8 +22,6 @@ export interface ResolveWritablePathResult {
 export interface WorkspaceSession {
   meta: WorkspaceSessionMeta;
   layers: WorkspaceLayers;
-  /** Resolved user-local EMEDF path, if the path-only locator found one. */
-  emedfPath?: string;
   /** Returns true when absolutePath is inside the writable overlay root. */
   isOverlayPath(absolutePath: string): boolean;
   /** Returns true when absolutePath is inside the optional base root. */
@@ -82,6 +57,7 @@ export interface WorkspaceSession {
  * identity, alias detection and the authoritative reparse-point write gate.
  */
 export async function openWorkspaceSession(options: OpenWorkspaceSessionOptions): Promise<WorkspaceSession> {
+  assertNoExternalEmedfOptions(options);
   const overlayRoot = resolve(options.overlayRoot);
   await assertDirectory(overlayRoot, 'overlayRoot');
   const physicalOverlayRoot = await realpath(overlayRoot);
@@ -99,14 +75,6 @@ export async function openWorkspaceSession(options: OpenWorkspaceSessionOptions)
 
   // Staging roots are optional and may be created later by Patch Engine.
   const stagingRoot = options.stagingRoot ? resolve(options.stagingRoot) : undefined;
-  const game = options.game ?? 'unknown';
-  const emedfPath = await resolveEmedfPath({
-    overlayRoot,
-    ...(baseRoot ? { baseRoot } : {}),
-    game,
-    ...(options.emedfPath !== undefined ? { emedfPath: options.emedfPath } : {}),
-    ...(options.emedfLocator ? { emedfLocator: options.emedfLocator } : {})
-  });
 
   const layers: WorkspaceLayers = {
     overlayRoot,
@@ -126,7 +94,6 @@ export async function openWorkspaceSession(options: OpenWorkspaceSessionOptions)
   const session: WorkspaceSession = {
     meta,
     layers,
-    ...(emedfPath ? { emedfPath } : {}),
     isOverlayPath(absolutePath: string): boolean {
       return isInsideSelectedOrPhysicalRoot(overlayRoot, physicalOverlayRoot, absolutePath);
     },
@@ -226,21 +193,27 @@ export async function openWorkspaceSession(options: OpenWorkspaceSessionOptions)
   return session;
 }
 
-async function resolveEmedfPath(input: EmedfLocatorContext & {
-  emedfPath?: string;
-  emedfLocator?: EmedfLocator;
-}): Promise<string | undefined> {
-  const { emedfPath, emedfLocator, ...context } = input;
-  const explicit = normalizeOptionalPath(emedfPath);
-  if (explicit) return explicit;
-
-  const located = await (emedfLocator ?? defaultEmedfLocator)(context);
-  return normalizeOptionalPath(located);
-}
-
-function normalizeOptionalPath(path: string | undefined): string | undefined {
-  const trimmed = path?.trim();
-  return trimmed ? resolve(trimmed) : undefined;
+/**
+ * Reject the removed path/locator contract at the runtime boundary too, so
+ * stale JavaScript callers receive a useful diagnostic instead of silently
+ * reintroducing a third-party schema dependency.
+ */
+export function assertNoExternalEmedfOptions(input: unknown): void {
+  if (input === null || typeof input !== 'object' || Array.isArray(input)) return;
+  const record = input as Record<string, unknown>;
+  if (!Object.prototype.hasOwnProperty.call(record, 'emedfPath')
+    && !Object.prototype.hasOwnProperty.call(record, 'emedfLocator')) return;
+  const error = new Error('生产会话不接受外部 EMEDF schema；请使用 SoulForge 内置 schema。') as Error & {
+    code?: string;
+    diagnostics?: Diagnostic[];
+  };
+  error.code = EMEVD_EXTERNAL_SCHEMA_FORBIDDEN_CODE;
+  error.diagnostics = [{
+    severity: 'error',
+    code: EMEVD_EXTERNAL_SCHEMA_FORBIDDEN_CODE,
+    message: '生产会话不接受外部 EMEDF schema；请使用 SoulForge 内置 schema。'
+  }];
+  throw error;
 }
 
 export function assertWritableThroughSession(

@@ -231,6 +231,143 @@ internal sealed class BridgeCommandService
         }
 
         cancellationToken.ThrowIfCancellationRequested();
+
+        if (command == "read-hks-source")
+        {
+            try
+            {
+                byte[] bytes;
+                if (optionsIsObject
+                    && options.TryGetProperty("contentBase64", out var contentElement)
+                    && contentElement.ValueKind == JsonValueKind.String
+                    && !string.IsNullOrWhiteSpace(contentElement.GetString()))
+                {
+                    try
+                    {
+                        bytes = Convert.FromBase64String(contentElement.GetString()!);
+                    }
+                    catch (FormatException ex)
+                    {
+                        return BridgeResult<object>.Failed(file, "script", "HKS_CONTENT_BASE64_INVALID", ex.Message);
+                    }
+                }
+                else
+                {
+                    bytes = await File.ReadAllBytesAsync(file, cancellationToken);
+                }
+                var read = HksSemanticService.Read(bytes);
+                if (!read.Ok)
+                {
+                    var (code, message) = SplitHksDiagnostic(read.Message, "HKS_DOCUMENT_READ_FAILED");
+                    return BridgeResult<object>.Failed(file, "script", code, message, read.Coverage);
+                }
+
+                return BridgeResult<object>.Ok(file, "script", new
+                {
+                    format = read.Dialect == HksSemanticService.Lua50Dialect ? "LuaP" : "HKS",
+                    kind = "decompiled",
+                    sourceText = read.SourceText,
+                    encoding = "utf8",
+                    decompiled = true,
+                    writeSupported = HksNativeCompiler.IsAvailable,
+                    dialect = read.Dialect,
+                    package = HksSemanticService.Package,
+                    revision = HksSemanticService.SchemaRevision,
+                    sourceHash = read.SourceHash,
+                    compiler = new
+                    {
+                        provenance = "first-party",
+                        package = HksSemanticService.Package,
+                        revision = HksSemanticService.CompilerRevision
+                    },
+                    decompiler = new
+                    {
+                        provenance = "first-party",
+                        package = HksSemanticService.Package,
+                        revision = HksSemanticService.DecompilerRevision
+                    },
+                    functionCount = read.FunctionCount,
+                    coverage = read.Coverage
+                });
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                return BridgeResult<object>.Failed(file, "script", "HKS_DOCUMENT_READ_FAILED", ex.Message);
+            }
+        }
+
+        if (command == "compile-hks-source")
+        {
+            try
+            {
+                if (!optionsIsObject || !options.TryGetProperty("sourceText", out var sourceElement)
+                    || sourceElement.ValueKind != JsonValueKind.String)
+                {
+                    return BridgeResult<object>.Failed(file, "script", "HKS_SOURCE_TEXT_REQUIRED", "compile-hks-source 需要 options.sourceText。");
+                }
+                var expectedSourceHash = OptionString("expectedSourceHash", string.Empty);
+                if (!string.IsNullOrWhiteSpace(expectedSourceHash))
+                {
+                    byte[] sourceBytes;
+                    if (optionsIsObject
+                        && options.TryGetProperty("sourceContentBase64", out var sourceContentElement)
+                        && sourceContentElement.ValueKind == JsonValueKind.String
+                        && !string.IsNullOrWhiteSpace(sourceContentElement.GetString()))
+                    {
+                        try
+                        {
+                            sourceBytes = Convert.FromBase64String(sourceContentElement.GetString()!);
+                        }
+                        catch (FormatException ex)
+                        {
+                            return BridgeResult<object>.Failed(file, "script", "HKS_SOURCE_CONTENT_BASE64_INVALID", ex.Message);
+                        }
+                    }
+                    else
+                    {
+                        sourceBytes = await File.ReadAllBytesAsync(file, cancellationToken);
+                    }
+                    var currentHash = HashHex(sourceBytes);
+                    if (!currentHash.Equals(expectedSourceHash, StringComparison.OrdinalIgnoreCase))
+                    {
+                        return BridgeResult<object>.Failed(file, "script", "HKS_SOURCE_HASH_MISMATCH", "HKS 编译输入文件在读取证明后发生变化。");
+                    }
+                }
+
+                var compiled = HksSemanticService.Compile(
+                    sourceElement.GetString() ?? string.Empty,
+                    OptionString("expectedDialect", HksSemanticService.Dialect));
+                if (!compiled.Ok)
+                {
+                    var (code, message) = SplitHksDiagnostic(compiled.Message, "HKS_COMPILER_FAILED");
+                    return BridgeResult<object>.Failed(file, "script", code, message, compiled.Coverage);
+                }
+
+                return BridgeResult<object>.Ok(file, "script", new
+                {
+                    format = compiled.Dialect == HksSemanticService.Lua50Dialect ? "LuaP" : "HKS",
+                    contentBase64 = Convert.ToBase64String(compiled.Bytes),
+                    byteLength = compiled.Bytes.Length,
+                    outputHash = compiled.OutputHash,
+                    dialect = compiled.Dialect,
+                    package = HksSemanticService.Package,
+                    revision = HksSemanticService.SchemaRevision,
+                    compiler = new
+                    {
+                        provenance = "first-party",
+                        package = HksSemanticService.Package,
+                        revision = HksSemanticService.CompilerRevision
+                    },
+                    functionCount = compiled.FunctionCount,
+                    coverage = compiled.Coverage
+                });
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                return BridgeResult<object>.Failed(file, "script", "HKS_COMPILER_FAILED", ex.Message);
+            }
+        }
+
         if (command is "inspect" or "validate")
         {
             var includeDcxDecompressionPreview = OptionBool("includeDcxDecompressionPreview", true);
@@ -1230,34 +1367,10 @@ internal sealed class BridgeCommandService
                         && altParsedSize > 0)
                         animationPageSize = altParsedSize;
                 }
-                IReadOnlyDictionary<int, TaeFieldLayout[]>? templateLayouts = null;
-                if (optionsIsObject
-                    && options.TryGetProperty("templateLayouts", out var layoutsEl)
-                    && layoutsEl.ValueKind == JsonValueKind.Object)
-                {
-                    var dict = new Dictionary<int, TaeFieldLayout[]>();
-                    foreach (var prop in layoutsEl.EnumerateObject())
-                    {
-                        if (!int.TryParse(prop.Name, out var typeId)) continue;
-                        if (prop.Value.ValueKind != JsonValueKind.Array) continue;
-                        var list = new List<TaeFieldLayout>();
-                        foreach (var fieldEl in prop.Value.EnumerateArray())
-                        {
-                            if (fieldEl.ValueKind != JsonValueKind.Object) continue;
-                            if (!fieldEl.TryGetProperty("name", out var nameEl) || nameEl.ValueKind != JsonValueKind.String) continue;
-                            if (!fieldEl.TryGetProperty("kind", out var kindEl) || kindEl.ValueKind != JsonValueKind.String) continue;
-                            if (!fieldEl.TryGetProperty("slotSize", out var slotEl) || slotEl.ValueKind != JsonValueKind.Number) continue;
-                            var name = nameEl.GetString();
-                            var kind = kindEl.GetString();
-                            if (string.IsNullOrWhiteSpace(name) || string.IsNullOrWhiteSpace(kind)) continue;
-                            if (!slotEl.TryGetInt32(out var slotSize)) continue;
-                            list.Add(new TaeFieldLayout(name, kind, slotSize));
-                        }
-                        if (list.Count > 0) dict[typeId] = list.ToArray();
-                    }
-                    if (dict.Count > 0) templateLayouts = dict;
-                }
-                return BridgeResult<object>.Partial(file, "action", diagnostics, document.ToEnvelope(roundTrip, extractionDiagnostics, templateLayouts, animationPage, animationPageSize));
+                // Production TAE decoding is always backed by the bundled
+                // first-party registry. Do not accept caller-supplied XML
+                // layouts or turn an external template into a runtime input.
+                return BridgeResult<object>.Partial(file, "action", diagnostics, document.ToEnvelope(roundTrip, extractionDiagnostics, null, animationPage, animationPageSize));
             }
             catch (TaeEntryMissingException)
             {
@@ -1273,21 +1386,39 @@ internal sealed class BridgeCommandService
         {
             try
             {
-                // S17：按需读取单个事件参数体。paramSize 由 main 从本机
-                // TAE.Template.SDT.xml 的布局算出（无模板的事件传 0 → 只给前 16 字节
-                // hex 作「未解码」证据）；Bridge 按长度截取并越界失败关闭。
+                // 按 native 事件边界读取参数体，并由 bundled first-party
+                // schema 选择精确布局。调用方不能注入外部模板或任意长度。
                 var (document, _) = OpenTaeDocument(file, oodleRuntimeRoot);
                 var animId = OptionInt64("animId", -1);
                 var eventIndex = OptionInt("eventIndex", -1);
-                var paramSize = OptionInt("paramSize", 0);
                 var taeEntryIndex = OptionNullableInt("taeEntryIndex");
                 var taeEntryId = OptionNullableInt64("taeEntryId");
                 var taeEntryName = OptionNullableString("taeEntryName");
                 var taeGroup = OptionNullableString("taeGroup");
                 var located = document.ResolveEvent(animId, eventIndex, taeEntryIndex, taeEntryId, taeEntryName, taeGroup);
                 var ev = located.Event;
-                var length = paramSize > 0 ? paramSize : Math.Min(16, (int)Math.Max(0, ev.ParameterDataOffset));
+                var length = located.Entry.Document.GetParameterLength(located.Animation, eventIndex);
                 var raw = located.Entry.Document.ReadParameterBody(ev, length);
+                var schemaBankId = located.Entry.Document.SchemaBankId;
+                var decoded = TaeFirstPartySchema.Decode(ev.EventTypeId, raw, schemaBankId);
+                if (!decoded.Complete || decoded.Resolution.Event is null)
+                {
+                    var code = decoded.Resolution.Candidates.Count == 0
+                        ? "TAE_SCHEMA_EVENT_UNKNOWN"
+                        : "TAE_SCHEMA_LENGTH_MISMATCH";
+                    return BridgeResult<object>.Failed(
+                        file,
+                        "action",
+                        code,
+                        $"SoulForge 内置 TAE schema 无法完整覆盖 eventTypeId={ev.EventTypeId} length={length}。",
+                        new
+                        {
+                            eventTypeId = ev.EventTypeId,
+                            parameterLength = length,
+                            schema = TaeFirstPartySchema.Metadata(),
+                            variants = decoded.Resolution.Candidates.Select(item => new { item.BankId, item.BankName, item.ParamSize }).ToArray()
+                        });
+                }
                 return BridgeResult<object>.Partial(file, "action", new[]
                 {
                     new Diagnostic(
@@ -1306,7 +1437,19 @@ internal sealed class BridgeCommandService
                     eventTypeId = ev.EventTypeId,
                     paramDataOffset = ev.ParameterDataOffset,
                     paramHex = Convert.ToHexString(raw).ToLowerInvariant(),
-                    paramSize = raw.Length
+                    paramSize = raw.Length,
+                    parameterLength = raw.Length,
+                    parameterDecodedSize = decoded.Resolution.Event.ParamSize,
+                    parameterTailHex = raw.Length > decoded.Resolution.Event.ParamSize
+                        ? Convert.ToHexString(raw.AsSpan(decoded.Resolution.Event.ParamSize)).ToLowerInvariant()
+                        : string.Empty,
+                    templateName = decoded.Resolution.Event.Name,
+                    fields = decoded.Fields,
+                    schema = TaeFirstPartySchema.Metadata(),
+                    schemaBankId = schemaBankId ?? decoded.Resolution.Event.BankId,
+                    schemaBankName = decoded.Resolution.Event.BankName,
+                    schemaVariantCount = decoded.Resolution.Candidates.Count,
+                    schemaVariant = decoded.Resolution.Event.VariantKind
                 });
             }
             catch (TaeEntryMissingException)
@@ -4035,6 +4178,14 @@ internal sealed class BridgeCommandService
 
     private static string HashHex(byte[] bytes) =>
         Convert.ToHexString(SHA256.HashData(bytes)).ToLowerInvariant();
+
+    private static (string Code, string Message) SplitHksDiagnostic(string value, string fallbackCode)
+    {
+        var separator = value.IndexOf(':');
+        if (separator <= 0) return (fallbackCode, value);
+        var code = value[..separator].Trim();
+        return (string.IsNullOrWhiteSpace(code) ? fallbackCode : code, value[(separator + 1)..].Trim());
+    }
 
     private static string ActionFailureCode(Exception error, string fallback)
     {

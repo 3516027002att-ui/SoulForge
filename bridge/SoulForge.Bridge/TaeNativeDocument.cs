@@ -3,29 +3,9 @@ using System.Security.Cryptography;
 using System.Text;
 
 /// <summary>
-/// Sekiro TAE (Time Act Editor) read-only native document.
-/// Layout verified against a00.tae (938 animations, 2,890,432 bytes).
-/// All offsets are absolute int64 except event-group event arrays which use int32.
-/// Times are float32 stored at absolute offsets within a per-animation times array.
-/// Strings are UTF-16LE null-terminated.
-///
-/// <para><b>解析到哪一层：只到 timing，事件参数体未解码。</b>
-/// 本解析器对每个事件读出 startTime / endTime / eventTypeId 与两个偏移
-/// （eventDataOffset、paramDataOffset），<b>paramDataOffset 指向的参数体
-/// 一字节未读</b>；envelope 只导出 timing 与计数，外加 bounded 的逐动画
-/// 事件时间表（startTime / endTime / eventTypeId，见 ToEnvelope）。
-///
-/// 原类文档在这一行写的是「TAE defines per-animation event timing (hitboxes,
-/// SFX, VFX, camera shakes)」，与上一行的「Layout verified」并排——读起来像那四项
-/// 都已解析，而它们全在未读的 paramData 区。TAE 的事件参数按 eventTypeId 分派、
-/// 每类布局不同，缺一类就不能开 writer，所以「读出 hitbox 数据」与「读出事件在
-/// 时间轴上的位置」是两件相差很远的事。措辞已按 EsdNativeDocument 的先例改为
-/// 明确标注未解码（那里写的是 "Expression bytecode is reported as opaque
-/// (offset, length) pairs — not decoded"）。
-///
-/// 这不是待办标记：TAE 当前属于只读预览族，不解参数体是当前范围内的正确状态。
-/// 要解它必须先按 eventTypeId 逐类登记布局并有真实样本验证，否则无法无损保留
-/// 未知字段、也就不得开放 writer。</para>
+/// Sekiro 1.6.x TAE native document. The Bridge decodes the binary layout and
+/// projects event parameters through the embedded first-party schema. Source
+/// bytes and native parameter tails remain available to typed writeback.
 /// </summary>
 internal sealed class TaeNativeDocument
 {
@@ -47,7 +27,7 @@ internal sealed class TaeNativeDocument
         long flags,
         long section1Offset,
         long section2Offset,
-        long unknownCount,
+        long eventBank,
         IReadOnlyList<TaeAnimation> animations,
         int totalEventCount,
         int totalGroupCount,
@@ -58,7 +38,10 @@ internal sealed class TaeNativeDocument
         Flags = flags;
         Section1Offset = section1Offset;
         Section2Offset = section2Offset;
-        UnknownCount = unknownCount;
+        EventBank = eventBank;
+        // Compatibility alias for older diagnostics. TAE header offset 0x30
+        // is the event bank, not an arbitrary counter.
+        UnknownCount = eventBank;
         Animations = animations;
         TotalEventCount = totalEventCount;
         TotalGroupCount = totalGroupCount;
@@ -70,6 +53,11 @@ internal sealed class TaeNativeDocument
     public long Flags { get; }
     public long Section1Offset { get; }
     public long Section2Offset { get; }
+    public long EventBank { get; }
+    public int? SchemaBankId => EventBank is >= int.MinValue and <= int.MaxValue
+        && (EventBank == 13 || EventBank == 14)
+        ? (int)EventBank
+        : null;
     public long UnknownCount { get; }
     public IReadOnlyList<TaeAnimation> Animations { get; }
     public int TotalEventCount { get; }
@@ -106,7 +94,7 @@ internal sealed class TaeNativeDocument
         // 0x18: int64 unknown (1) — read but not validated
         var section1Offset = ReadInt64(source, 0x20);
         var section2Offset = ReadInt64(source, 0x28);
-        var unknownCount = ReadInt64(source, 0x30);
+        var eventBank = ReadInt64(source, 0x30);
         // 0x38: int64 reserved (0)
 
         // Extended header at 0x40: byte[8] per-flag bytes + int64 unknown at 0x48
@@ -305,14 +293,14 @@ internal sealed class TaeNativeDocument
             totalGroups += eventGroupCount;
             animations.Add(new TaeAnimation(
                 animId, eventCount, eventGroupCount, timesCount,
-                times, events, groups, animFileInfoOffset, hkxName));
+                times, events, groups, eventGroupTableOffset, animFileInfoOffset, hkxName));
         }
 
         if (totalEvents > MaxEvents)
             throw new InvalidDataException($"TAE 事件总数 {totalEvents} 超出安全上限 {MaxEvents}。");
 
         return new TaeNativeDocument(
-            source, version, flags, section1Offset, section2Offset, unknownCount,
+            source, version, flags, section1Offset, section2Offset, eventBank,
             animations, checked((int)totalEvents), checked((int)totalGroups),
             eventTypeSet.ToArray());
     }
@@ -335,9 +323,99 @@ internal sealed class TaeNativeDocument
     }
 
     /// <summary>
+    /// Returns the exact native parameter span for one event. The span is
+    /// bounded by the next event-data header (or this animation's event-group
+    /// table for the last event), matching the public SoulsFormats TAE reader.
+    /// A schema may decode a prefix of this span; the remaining bytes are
+    /// preserved as a native tail rather than silently discarded.
+    /// </summary>
+    public int GetParameterLength(long animId, int eventIndex)
+    {
+        var animation = Animations.FirstOrDefault(a => a.AnimId == animId)
+            ?? throw new InvalidDataException($"TAE 动画 animId={animId} 不存在。");
+        return GetParameterLength(animation, eventIndex);
+    }
+
+    public int GetParameterLength(TaeAnimation animation, int eventIndex)
+    {
+        if (eventIndex < 0 || eventIndex >= animation.Events.Count)
+            throw new InvalidDataException($"TAE 事件索引 {eventIndex} 越界。");
+        var ev = animation.Events[eventIndex];
+        if (ev.ParameterDataOffset == 0) return 0;
+        if (ev.ParameterDataOffset < ev.EventDataOffset + EventDataHeaderSize)
+            throw new InvalidDataException("TAE 参数体偏移早于事件头结束，布局无效。");
+        var end = eventIndex + 1 < animation.Events.Count
+            ? animation.Events[eventIndex + 1].EventDataOffset
+            : animation.EventGroupTableOffset > 0
+                ? animation.EventGroupTableOffset
+                : SourceBytes.Length;
+        var length = end - ev.ParameterDataOffset;
+        if (length < 0 || length > MaxSourceBytes || length > int.MaxValue)
+            throw new InvalidDataException($"TAE 参数体长度 {length} 越界。");
+        return checked((int)length);
+    }
+
+    public TaeSchemaCoverage GetSchemaCoverage()
+    {
+        var covered = 0;
+        var unknownEvents = 0;
+        var lengthMismatches = 0;
+        var ambiguous = 0;
+        var assertFailures = 0;
+        var unknownIds = new SortedSet<int>();
+        var assertFailureDetails = new List<TaeSchemaAssertFailure>();
+        foreach (var animation in Animations)
+        {
+            for (var index = 0; index < animation.Events.Count; index++)
+            {
+                var ev = animation.Events[index];
+                var length = GetParameterLength(animation, index);
+                var resolution = TaeFirstPartySchema.Resolve(ev.EventTypeId, length, SchemaBankId);
+                if (resolution.Event is null)
+                {
+                    if (resolution.Candidates.Count == 0)
+                    {
+                        unknownEvents++;
+                        unknownIds.Add(ev.EventTypeId);
+                    }
+                    else
+                    {
+                        lengthMismatches++;
+                    }
+                    continue;
+                }
+                covered++;
+                if (resolution.Ambiguous) ambiguous++;
+                var decoded = TaeFirstPartySchema.Decode(
+                    ev.EventTypeId,
+                    ReadParameterBody(ev, length),
+                    SchemaBankId);
+                assertFailures += decoded.AssertFailures.Count;
+                if (decoded.AssertFailures.Count > 0)
+                {
+                    assertFailureDetails.Add(new TaeSchemaAssertFailure(
+                        animation.AnimId,
+                        index,
+                        ev.EventTypeId,
+                        length,
+                        decoded.AssertFailures));
+                }
+            }
+        }
+        return new TaeSchemaCoverage(
+            covered,
+            unknownEvents,
+            lengthMismatches,
+            ambiguous,
+            assertFailures,
+            unknownIds.ToArray(),
+            assertFailureDetails);
+    }
+
+    /// <summary>
     /// 事件参数体原始字节：paramDataOffset 起截 length 字节，越界失败关闭。
-    /// length 由 main 按本机 TAE 模板布局给出；无模板类型传 0 → 只读前 16 字节
-    /// hex 作「未解码」证据。
+    /// length 由 TAE 原生事件边界确定；first-party schema 只消费对应前缀，
+    /// 任何剩余尾部由调用方作为原始 bytes 保留。
     /// </summary>
     public byte[] ReadParameterBody(TaeEvent ev, int length)
     {
@@ -349,8 +427,8 @@ internal sealed class TaeNativeDocument
     }
 
     /// <summary>
-    /// TAE is read-only: verify source integrity by re-parsing the same bytes
-    /// and confirming deterministic structural equality.
+    /// Verify source integrity by re-parsing the same bytes and confirming
+    /// deterministic structural equality before any typed mutation is staged.
     /// </summary>
     public TaeRoundTripReport VerifyRoundTrip()
     {
@@ -436,6 +514,19 @@ internal sealed class TaeNativeDocument
         }
         // 合并上游诊断（如 anibnd 提取 TAE 的 TAE_FROM_ANIBND_EXTRACTED），
         // 使预览面板能显示提取来源而不是只见文档自身诊断。
+        var schemaCoverage = GetSchemaCoverage();
+        var schemaDiagnostics = schemaCoverage.Complete
+            ? Array.Empty<Diagnostic>()
+            : new[]
+            {
+                new Diagnostic(
+                    "error",
+                    "TAE_SCHEMA_COVERAGE_GAP",
+                    $"SoulForge 内置 TAE schema 覆盖缺口：未知事件 {schemaCoverage.UnknownEventCount}，"
+                    + $"长度不匹配 {schemaCoverage.LengthMismatchCount}，断言失败 {schemaCoverage.AssertFailureCount}。当前范围不会伪造字段或源码。",
+                    null,
+                    schemaCoverage)
+            };
         var diagnostics = (extraDiagnostics ?? Array.Empty<Diagnostic>())
             .Concat(invalidTimeRangeCount > 0
                 ? new[]
@@ -447,6 +538,7 @@ internal sealed class TaeNativeDocument
                 }
                 : Array.Empty<Diagnostic>())
             .Concat(motionDiagnostics)
+            .Concat(schemaDiagnostics)
             .ToArray();
         return new
         {
@@ -454,6 +546,8 @@ internal sealed class TaeNativeDocument
             version = $"0x{Version:X8}",
             sourceSize = SourceBytes.Length,
             sourceHash = SourceHash,
+            eventBank = EventBank,
+            schemaBankId = SchemaBankId,
             animationCount = Animations.Count,
             totalEventCount = TotalEventCount,
             totalGroupCount = TotalGroupCount,
@@ -471,9 +565,11 @@ internal sealed class TaeNativeDocument
                 ? Animations.Count > (animationPage.Value + 1) * animationPageSize.Value
                 : false,
             eventTypes = EventTypes,
+            schema = TaeFirstPartySchema.Metadata(),
+            schemaCoverage,
             roundTrip = report,
             diagnostics = diagnostics,
-            authority = invalidTimeRangeCount > 0 || motionDiagnostics.Count > 0 ? "partial" : "candidate"
+            authority = invalidTimeRangeCount > 0 || motionDiagnostics.Count > 0 || !schemaCoverage.Complete ? "partial" : "candidate"
         };
     }
 
@@ -493,23 +589,31 @@ internal sealed class TaeNativeDocument
         string? taeEntryName = null,
         string? taeGroup = null)
     {
-        var events = animation.Events.Take(timelineEventLimit).Select(e =>
+        var events = animation.Events.Take(timelineEventLimit).Select((e, eventIndex) =>
         {
-            // S17：参数体按模板布局解码（4 字节槽对齐）；无模板时给有界 hex。
-            var decodedFields = templateLayouts != null
-                && templateLayouts.TryGetValue(e.EventTypeId, out var layout)
-                && layout.Length > 0
-                && DecodeParamFields(e, layout, out var decoded)
-                ? decoded
-                : null;
+            var parameterLength = GetParameterLength(animation, eventIndex);
+            var resolution = TaeFirstPartySchema.Resolve(e.EventTypeId, parameterLength, SchemaBankId);
+            var decodedResult = resolution.Event is null
+                ? null
+                : TaeFirstPartySchema.Decode(e.EventTypeId, ReadParameterBody(e, parameterLength), SchemaBankId);
+            var decoded = decodedResult?.Fields;
+            var decodedComplete = decodedResult?.Complete == true;
             return new
             {
                 startTime = e.StartTime,
                 endTime = e.EndTime,
                 eventTypeId = e.EventTypeId,
-                parameterDecoded = decodedFields != null,
-                templateFields = decodedFields,
-                parameterBytesHex = ParameterBytesHex(e, paramHexLimit)
+                parameterLength,
+                parameterDecoded = decodedComplete,
+                templateFields = decodedComplete ? decoded : null,
+                schemaBankId = resolution.Event?.BankId,
+                schemaBankName = resolution.Event?.BankName,
+                schemaVariantCount = resolution.Candidates.Count,
+                schemaVariant = resolution.Event?.VariantKind,
+                parameterBytesHex = ParameterBytesHex(e, parameterLength, paramHexLimit),
+                parameterTailLength = resolution.Event is null
+                    ? parameterLength
+                    : Math.Max(0, parameterLength - resolution.Event.ParamSize)
             };
         }).ToArray();
 
@@ -596,11 +700,11 @@ internal sealed class TaeNativeDocument
     }
 
     /// <summary>参数体有界 hex 预览（无模板布局时的兜底，S17）。</summary>
-    private string ParameterBytesHex(TaeEvent e, int limit)
+    private string ParameterBytesHex(TaeEvent e, int parameterLength, int limit)
     {
         if (e.ParameterDataOffset <= 0 || e.ParameterDataOffset >= SourceBytes.Length) return "";
         var offset = checked((int)e.ParameterDataOffset);
-        var length = Math.Min(limit, SourceBytes.Length - offset);
+        var length = Math.Min(Math.Min(limit, parameterLength), SourceBytes.Length - offset);
         if (length <= 0) return "";
         return Convert.ToHexString(SourceBytes.AsSpan(offset, length)).ToLowerInvariant();
     }
@@ -665,8 +769,8 @@ internal sealed class TaeNativeDocument
 
 // ── Records ──
 
-/// <summary>S17：TAE 事件参数体的模板字段布局（来自本机 DSAS TAE.Template.SDT.xml，
-/// 由 main 解析后传入；SlotSize 为 4 字节槽）。</summary>
+/// <summary>Legacy layout shape retained for compatibility with older callers;
+/// production decoding uses the embedded TaeFirstPartySchema directly.</summary>
 internal sealed record TaeFieldLayout(string Name, string Kind, int SlotSize);
 
 internal sealed record TaeAnimation(
@@ -677,6 +781,7 @@ internal sealed record TaeAnimation(
     float[] Times,
     IReadOnlyList<TaeEvent> Events,
     IReadOnlyList<TaeEventGroup> EventGroups,
+    long EventGroupTableOffset,
     long AnimFileInfoOffset,
     string? HkxName);
 
@@ -707,3 +812,25 @@ internal sealed record TaeRoundTripReport(
     int AnimationCount,
     int TotalEventCount,
     int TotalGroupCount);
+
+internal sealed record TaeSchemaCoverage(
+    int CoveredEventCount,
+    int UnknownEventCount,
+    int LengthMismatchCount,
+    int AmbiguousEventCount,
+    int AssertFailureCount,
+    IReadOnlyList<int> UnknownEventTypeIds,
+    IReadOnlyList<TaeSchemaAssertFailure> AssertFailureDetails)
+{
+    public bool Complete => UnknownEventCount == 0
+        && LengthMismatchCount == 0
+        && AmbiguousEventCount == 0
+        && AssertFailureCount == 0;
+}
+
+internal sealed record TaeSchemaAssertFailure(
+    long AnimId,
+    int EventIndex,
+    int EventTypeId,
+    int ParameterLength,
+    IReadOnlyList<string> Fields);

@@ -1,3 +1,5 @@
+import type { ParamFieldRefTarget } from './param-field-reference.js';
+
 export interface EventExport {
   mapId?: string;
   /** Revision actually used to decode this export; never infer from the file catalog. */
@@ -26,6 +28,12 @@ export interface EventInstruction {
   index: number;
   name?: string;
   category?: string;
+  /** Native instruction bank; together with id addresses the real op code. */
+  bank?: number;
+  /** Native instruction id as decoded by the EMEDF registry. */
+  id?: number;
+  /** Native byte range of this instruction inside the unpacked payload. */
+  byteRange?: [number, number];
   args: EventArg[];
   raw?: unknown;
 }
@@ -33,7 +41,11 @@ export interface EventInstruction {
 export interface EventArg {
   name?: string;
   value: string | number | boolean;
+  /** Zero-based position in the native argument list. */
+  argIndex?: number;
   role?: 'flag' | 'eventId' | 'entityId' | 'regionId' | 'paramId' | 'textId' | 'unknown';
+  /** Where the role came from: trusted registry metadata vs. name inference. */
+  roleSource?: 'registry' | 'inferred';
   paramName?: string;
   confidence?: 'high' | 'medium' | 'low';
 }
@@ -108,6 +120,10 @@ export interface ParamRowSymbol {
   entryName?: string;
   entryIndex?: number;
   rowId: number;
+  /** Zero-based physical row position; rowId alone cannot address duplicate rows. */
+  rowIndex?: number;
+  /** SHA-256 of the physical row bytes; write precondition, never replaces outer version. */
+  dataHash?: string;
   rowName?: string;
   sourceHash?: string;
   outerFileHash?: string;
@@ -124,6 +140,12 @@ export interface ParamFieldSymbol {
   /** Human-readable field note from the trusted PARAM metadata package. */
   description?: string;
   value: string | number | boolean | null;
+  /** Parsed Smithbox `Refs=` targets; only published from trusted metadata. */
+  refs?: ParamFieldRefTarget[];
+  /** Unrecognized raw fragments dropped by the parser (diagnostics, never silence). */
+  refsRejected?: string[];
+  /** Where the refs data came from; display-name construction is never trusted. */
+  refsProvenance?: 'trusted-metadata' | 'unknown';
 }
 
 export interface MsgExport {
@@ -138,6 +160,10 @@ export interface TextEntrySymbol {
   uri: string;
   sourceUri: string;
   category?: string;
+  /** Physical entry ordinal in the native FMG/container projection. */
+  entryIndex?: number;
+  /** Language identity when the native reader exposes it. */
+  language?: string;
   textId: number;
   text: string;
   confidence?: 'high' | 'medium' | 'low';
@@ -217,10 +243,64 @@ export interface TaeEventSymbol {
   parameterBytesHex?: string;
 }
 
+/**
+ * Script projection (执行指令 T02 step 5). Distinguishes what the container
+ * actually holds: real source text, a decompiled view, only a directory entry,
+ * or opaque bytecode. Never collapse these — a bytecode child has no original
+ * text and must not be decoded as UTF-8 mojibake to fake one.
+ */
+export type ScriptContentKind = 'source' | 'decompiled-view' | 'catalog-only' | 'bytecode';
+
+export interface ScriptCallOccurrence {
+  /** Zero-based index into the parsed statement list (bounded static subset). */
+  statementIndex: number;
+  callee: string;
+  /** Literal argument values that resolved statically; dynamic slots stay absent. */
+  literalArgs?: Array<string | number | boolean>;
+  /** True when an argument could not be resolved to a literal (no code evaluation). */
+  hasDynamicArg?: boolean;
+  /** Source span of the call expression within the script text. */
+  span?: { startLine: number; startColumn: number; endLine: number; endColumn: number };
+  /** Whether the callee resolves to a known API or is shadowed/unknown. */
+  resolution?: 'api' | 'local' | 'unknown';
+}
+
+export interface ScriptSymbol {
+  uri: string;
+  sourceUri: string;
+  /** Full child chain inside the container; catalog name alone is not identity. */
+  childChain: string[];
+  entryIndex?: number;
+  entryName?: string;
+  contentKind: ScriptContentKind;
+  /** Decoded source text; absent for bytecode/catalog-only children. */
+  sourceText?: string;
+  /** Encoding/bytecode diagnostics when sourceText is unavailable. */
+  encodingDiagnostics?: string[];
+  calls?: ScriptCallOccurrence[];
+  sourceHash?: string;
+  outerFileHash?: string;
+  sourceRevision?: number;
+}
+
+export interface ScriptExport {
+  sourceUri: string;
+  /** Container format that produced this export (LUABND, BND4, plaintext file). */
+  containerKind: 'luabnd' | 'bnd4' | 'plaintext';
+  childChain?: string[];
+  sourceHash?: string;
+  outerFileHash?: string;
+  sourceRevision?: number;
+  /** Whether all directory pages were read; a partial listing is not complete coverage. */
+  catalogComplete?: boolean;
+  scripts: ScriptSymbol[];
+}
+
 export interface SymbolBundle {
   events?: EventExport[];
   maps?: MapExport[];
   params?: ParamExport[];
   msgs?: MsgExport[];
   tae?: TaeExport[];
+  scripts?: ScriptExport[];
 }

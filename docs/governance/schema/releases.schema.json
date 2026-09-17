@@ -51,6 +51,12 @@
                 "items": { "type": "string", "minLength": 1 },
                 "description": "本次解冻放开哪些 scopeItem 的裁定字段。**必填且非空**：解冻是按条目的，未列出的条目继续受 git 基线比对保护。若允许省略，一条裁定就会把该版全部裁定字段的保护一起关掉，而保护面变小不会有任何信号。"
               },
+              "fieldPaths": {
+                "type": "array",
+                "uniqueItems": true,
+                "items": { "type": "string", "minLength": 1 },
+                "description": "可选的顶层冻结字段解冻清单。每一项必须精确匹配 frozenFields 中的顶层字段；未列出的顶层字段继续受 git 基线保护。"
+              },
               "reason": { "type": "string", "minLength": 1 }
             }
           }

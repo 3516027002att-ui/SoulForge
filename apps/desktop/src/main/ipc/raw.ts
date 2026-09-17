@@ -1,6 +1,4 @@
-import { randomUUID } from 'node:crypto';
-import { spawn } from 'node:child_process';
-import { readFile, stat, unlink, writeFile } from 'node:fs/promises';
+import { readFile, stat } from 'node:fs/promises';
 import { basename, dirname, join } from 'node:path';
 import {
   analyzePlaintextLineEndings,
@@ -10,7 +8,6 @@ import {
   decodePlaintext,
   inspectContainerTree,
   listContainerChildren,
-  locateDsLuaDecompilerSync,
   magicLabel,
   normalizePageWindow,
   probeContainerCapabilityOptions,
@@ -328,12 +325,14 @@ async function readScriptContainerChildByIndex(input: {
   containerUri: string;
   entryIndex: number;
   allowedRoots: string[];
+  oodleRuntimeRoot?: string;
 }): Promise<ReadScriptContainerChildResult | { ok: false; diagnostics: StructuredDiagnostic[] }> {
   const dcx = await runBridge<ScriptDcxDocumentLike>({
     command: 'read-dcx-document',
     filePath: input.containerPath,
     resourceUri: input.containerUri,
     allowedRoots: input.allowedRoots,
+    ...(input.oodleRuntimeRoot ? { oodleRuntimeRoot: input.oodleRuntimeRoot } : {}),
     timeoutMs: 60_000
   });
   if (dcx.parseStatus === 'failed') {
@@ -357,6 +356,7 @@ async function readScriptContainerChildByIndex(input: {
     filePath: input.containerPath,
     resourceUri: input.containerUri,
     allowedRoots: input.allowedRoots,
+    ...(input.oodleRuntimeRoot ? { oodleRuntimeRoot: input.oodleRuntimeRoot } : {}),
     timeoutMs: 120_000,
     commandOptions: { entryIndex: input.entryIndex }
   });
@@ -389,121 +389,6 @@ async function readScriptContainerChildByIndex(input: {
 export function clearRawIpcCaches(): void {
   containerChildrenCache.clear();
   scriptContainerEntriesCache.clear();
-}
-
-/** 反编译器命中来源的人类可读标识（renderer 展示用，不含路径）。 */
-function decompilerLabel(origin: 'explicit' | 'v1.1.5' | 'tools-scan' | 'legacy' | 'none'): string {
-  switch (origin) {
-    case 'explicit':
-      return 'DSLuaDecompiler（显式路径）';
-    case 'v1.1.5':
-      return 'DSLuaDecompiler v1.1.5';
-    case 'tools-scan':
-      return 'DSLuaDecompiler（tools 扫描）';
-    case 'legacy':
-      return 'DSLuaDecompiler（hks解码目录）';
-    default:
-      return 'DSLuaDecompiler';
-  }
-}
-
-/**
- * S16 脚本 IDE：HKS 字节码反编译（main 进程 spawn 本机 DSLuaDecompiler.exe）。
- *
- * `DSLuaDecompiler <file> --console` 把 Lua 字节码反编译到 stdout；发行目标
- * net7，本机可能只有 .NET 6/8，故注入 DOTNET_ROLL_FORWARD=LatestMajor。
- * stdout 有界（8 MiB）、超时 kill；一切失败结构化返回，不抛给 renderer。
- */
-export interface DsLuaDecompileRunResult {
-  ok: boolean;
-  stdout: string;
-  stderr: string;
-  timedOut: boolean;
-  exitCode: number | null;
-  spawnFailure: string | null;
-  truncated: boolean;
-}
-
-export async function runDsLuaDecompilerCapture(
-  exePath: string,
-  hksPath: string,
-  timeoutMs: number
-): Promise<DsLuaDecompileRunResult> {
-  return await new Promise((resolveResult) => {
-    let settled = false;
-    let stdout = Buffer.alloc(0);
-    let stderr = Buffer.alloc(0);
-    let truncated = false;
-    let child: ReturnType<typeof spawn> | undefined;
-    let timer: NodeJS.Timeout | undefined;
-    const stdoutLimit = 8 * 1024 * 1024;
-    const settle = (result: DsLuaDecompileRunResult): void => {
-      if (settled) return;
-      settled = true;
-      if (timer) clearTimeout(timer);
-      resolveResult(result);
-    };
-    const current = (exitCode: number | null, extra: Partial<DsLuaDecompileRunResult>): DsLuaDecompileRunResult => ({
-      ok: exitCode === 0 && !truncated,
-      stdout: stdout.toString('utf8'),
-      stderr: stderr.toString('utf8'),
-      timedOut: false,
-      exitCode,
-      spawnFailure: null,
-      truncated,
-      ...extra
-    });
-    timer = setTimeout(() => {
-      try { child?.kill(); } catch { /* 超时终止，尽力而为 */ }
-      settle(current(null, { timedOut: true }));
-    }, timeoutMs);
-    try {
-      child = spawn(exePath, [hksPath, '--console'], {
-        cwd: dirname(exePath),
-        shell: false,
-        windowsHide: true,
-        stdio: ['ignore', 'pipe', 'pipe'],
-        env: { ...process.env, DOTNET_ROLL_FORWARD: 'LatestMajor' }
-      });
-    } catch (error) {
-      settle({
-        ok: false,
-        stdout: '',
-        stderr: String(error),
-        timedOut: false,
-        exitCode: null,
-        spawnFailure: error instanceof Error ? error.message : String(error),
-        truncated: false
-      });
-      return;
-    }
-    child.stdout?.on('data', (chunk: Buffer | string) => {
-      const bytes = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
-      const remaining = stdoutLimit - stdout.length;
-      if (bytes.length > remaining) truncated = true;
-      if (remaining > 0) stdout = Buffer.concat([stdout, bytes.subarray(0, remaining)]);
-    });
-    child.stderr?.on('data', (chunk: Buffer | string) => {
-      const bytes = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
-      const remaining = stdoutLimit - stderr.length;
-      if (bytes.length > remaining) truncated = true;
-      if (remaining > 0) stderr = Buffer.concat([stderr, bytes.subarray(0, remaining)]);
-    });
-    child.once('error', (error) => {
-      settle({
-        ok: false,
-        stdout: '',
-        stderr: '',
-        timedOut: false,
-        exitCode: null,
-        spawnFailure: error.message,
-        truncated: false
-      });
-    });
-    child.once('close', (code) => {
-      settle(current(code, {}));
-    });
-  });
 }
 
 export interface RawIpcDeps {
@@ -1032,10 +917,10 @@ export function registerRawIpcHandlers(deps: RawIpcDeps): void {
   /**
    * S16 脚本 IDE：源码视图（容器条目或独立脚本文件）。
    *
-   * 明文条目按真实 encoding 返回文本；`\x1bLua` 字节码条目调本机
-   * DSLuaDecompiler 反编译为 Lua 文本（main spawn，renderer 只收文本）；
-   * 反编译不可用/失败/其他字节码 → kind='failure' 结构化原因，绝不把字节码
-   * 呈现为可编辑源码。容器条目同时回传 child/container hash 供保存时做
+   * 明文条目按真实 encoding 返回文本；`\x1bLua` 字节码条目经 Bridge 内置
+   * SoulForge HKS dialect 反编译为完整 Lua 文本（renderer 只收文本）；
+   * 当前 dialect 的覆盖缺口/失败 → 结构化原因，不能把当前范围的未知语义
+   * 伪装为完成。容器条目同时回传 child/container hash 供保存时做
    * 乐观并发校验。
    *
    * 容器子项以 **entryIndex** 为主键（renderer 手里只有打码后的名字，
@@ -1076,7 +961,10 @@ export function registerRawIpcHandlers(deps: RawIpcDeps): void {
           containerPath: file.absolutePath,
           containerUri: sourceUri,
           entryIndex,
-          allowedRoots: roots.allowedRoots
+          allowedRoots: roots.allowedRoots,
+          ...(deps.activeSession.layers.baseRoot
+            ? { oodleRuntimeRoot: deps.activeSession.layers.baseRoot }
+            : {})
         });
         if (!child.ok) {
           return failure('SCRIPT_SOURCE_READ_FAILED', '读取脚本容器条目失败。', child.diagnostics);
@@ -1140,56 +1028,72 @@ export function registerRawIpcHandlers(deps: RawIpcDeps): void {
             sourceUri
           }]);
       }
-      // Lua 字节码：本机 DSLuaDecompiler 反编译（只读定位，找不到给结构化失败）。
-      const probe = locateDsLuaDecompilerSync({
-        baseRoot: deps.activeSession.layers.baseRoot ?? null,
-        overlayRoot: deps.activeSession.layers.overlayRoot ?? null,
-        gameRootEnv: process.env.SOULFORGE_SEKIRO_GAME_ROOT?.trim() ?? null
-      });
-      if (!probe.exePath) {
-        return failure('SCRIPT_DECOMPILER_NOT_FOUND',
-          '本机找不到 DSLuaDecompiler：该脚本是 Lua 字节码，需要反编译器才能编辑。请把 DSLuaDecompiler.exe 放到 Sekiro 兄弟 tools 目录，或设置 SOULFORGE_DSLUADECOMPILER_PATH。');
-      }
-      const storage = deps.durableStoragePaths(deps.activeSession.meta.workspaceId);
-      const stage = await deps.verifiedStageRoots(deps.activeSession, storage, 'SCRIPT_DECOMPILE_STAGING_FAILED');
-      if (stage.diagnostics.length > 0) {
-        return failure('SCRIPT_DECOMPILE_STAGING_FAILED', '无法准备反编译暂存目录。', stage.diagnostics);
-      }
-      const stageRoot = stage.writableRoots[0];
-      if (!stageRoot) {
-        return failure('SCRIPT_DECOMPILE_STAGING_FAILED', '反编译暂存目录未就绪。', stage.diagnostics);
-      }
-      const tmpPath = join(stageRoot, `s16-decompile-${randomUUID()}.hks`);
-      await writeFile(tmpPath, Buffer.from(bytes));
-      const decompiled = await runDsLuaDecompilerCapture(probe.exePath, tmpPath, 120_000);
-      await unlink(tmpPath).catch(() => { /* 暂存清理尽力而为 */ });
-      if (!decompiled.ok) {
-        if (decompiled.timedOut) {
-          return failure('SCRIPT_DECOMPILE_TIMED_OUT', '反编译超时（120 秒），请稍后重试。');
-        }
-        if (decompiled.spawnFailure) {
-          return failure('SCRIPT_DECOMPILE_SPAWN_FAILED', `反编译器无法启动：${decompiled.spawnFailure}`);
-        }
-        if (decompiled.truncated) {
-          return failure('SCRIPT_DECOMPILE_OUTPUT_TRUNCATED', '反编译输出超过 8 MiB 有界上限，未返回文本。');
-        }
-        const tail = decompiled.stderr.trim().split(/\r?\n/).slice(-5).join('\n');
-        return failure('SCRIPT_DECOMPILE_FAILED',
-          `反编译失败（退出码 ${decompiled.exitCode ?? '未知'}）${tail ? `：${tail}` : ''}`);
-      }
+       // Lua 字节码：Bridge 内置 first-party HKS parser/IR，禁止外部 locator。
+       const roots = await deps.verifiedReadRoots(deps.activeSession, dirname(file.absolutePath));
+       if (roots.diagnostics.length > 0) {
+         return failure('SCRIPT_HKS_READ_FAILED', '读取 HKS 源码前的路径证明失败。', roots.diagnostics);
+       }
+       const native = await runBridge<{
+         sourceText?: string;
+         encoding?: string;
+         dialect?: string;
+         package?: string;
+         revision?: string;
+         sourceHash?: string;
+         compiler?: { provenance?: string; package?: string; revision?: string };
+         decompiler?: { provenance?: string; package?: string; revision?: string };
+         functionCount?: number;
+         coverage?: unknown;
+       }>({
+         command: 'read-hks-source',
+         filePath: file.absolutePath,
+         resourceUri: sourceUri,
+         allowedRoots: roots.allowedRoots,
+         workspaceSessionId: deps.activeSession.meta.workspaceId,
+         commandOptions: resolvedEntryIndex !== undefined
+           ? { contentBase64: Buffer.from(bytes).toString('base64') }
+           : {},
+         timeoutMs: 120_000,
+         maxFrameBytes: 32 * 1024 * 1024
+       });
+       if (native.parseStatus === 'failed' || !native.data?.sourceText) {
+         return failure('SCRIPT_HKS_READ_FAILED', 'SoulForge 内置 HKS dialect 未能生成完整源码。', [
+           ...native.diagnostics.map((item) => ({
+             severity: item.severity,
+             code: item.code,
+             message: item.message,
+             sourceUri
+           })),
+           {
+             severity: 'error' as const,
+             code: 'SCRIPT_HKS_READ_FAILED',
+             message: '当前 Sekiro 1.6.x HKS coverage gate 未通过，未返回伪造源码。',
+             sourceUri
+           }
+         ]);
+       }
+       const semantic = native.data;
       return {
         ok: true,
         logicalName,
         kind: 'decompiled',
-        sourceText: decompiled.stdout,
-        // S34：反编译文本的 encoding 标记为 'decompiled'；写回时按 UTF-8 明文落盘
-        // （saveScriptSource 的 writeEncoding 映射把非 utf8-bom/shift_jis 归一到 utf8）。
-        encoding: 'decompiled',
+         sourceText: semantic.sourceText!,
+        encoding: 'utf8',
         decompiled: true,
-        decompiler: decompilerLabel(probe.origin),
+        decompiler: 'SoulForge HKS IR（内置）',
+        ...(semantic.compiler ? { compiler: { origin: 'first-party' as const, package: semantic.compiler.package ?? 'soulforge-sekiro-hks-schema', revision: semantic.compiler.revision ?? 'unknown' } } : {}),
+        ...(semantic.decompiler ? { decompilerProvenance: { origin: 'first-party' as const, package: semantic.decompiler.package ?? 'soulforge-sekiro-hks-schema', revision: semantic.decompiler.revision ?? 'unknown' } } : {}),
+        ...(semantic.dialect ? { dialect: semantic.dialect } : {}),
+        ...(semantic.revision ? { revision: semantic.revision } : {}),
+        ...(semantic.sourceHash ? { sourceHash: semantic.sourceHash } : {}),
         ...containerFields,
         writeSupported: true,
-        diagnostics: []
+        diagnostics: native.diagnostics.map((item) => ({
+          severity: item.severity,
+          code: item.code,
+          message: item.message,
+          sourceUri
+        }))
       };
     }
   );

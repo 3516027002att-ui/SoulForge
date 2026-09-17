@@ -7,7 +7,7 @@ import {
   createSekiroFixtureEmedf,
   type EmedfRegistry,
 } from '../emevd/emedfSchema.js';
-import { parseDs3EmedfJson } from '../emevd/emedfExternalAdapter.js';
+import { parseDs3EmedfJson } from './emedfExternalAdapter.js';
 import { listEmedfCompletionItems } from '../emevd/emedfCompletionCatalog.js';
 
 function assert(condition: unknown, message: string): asserts condition {

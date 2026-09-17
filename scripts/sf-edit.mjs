@@ -6,6 +6,7 @@
  *   node scripts/sf-edit.mjs fmg   read|set ...
  *   node scripts/sf-edit.mjs emevd read|apply-dsl ...
  *   node scripts/sf-edit.mjs tae   read|set --file chr/c1050.anibnd.dcx --set c1050#A0200.e0.startFrame=438
+ *   node scripts/sf-edit.mjs tae   set --file chr/c1050.anibnd.dcx --set c1050#A0200.e0.#2=1.25
  *   node scripts/sf-edit.mjs msb   read|set --file map/m11_01_00_00/m11_01_00_00.msb.dcx --set m11_01_00_00#c1050_0000@0x123456.posX=12.5
  */
 import { readFile } from 'node:fs/promises';
@@ -15,14 +16,14 @@ import { applyEmevdDsl, readEmevdOutline } from '../packages/core/dist/editing/e
 import { openNativeEditSession } from '../packages/core/dist/editing/nativeEditSession.js';
 import { readFmgEntries, setFmgEntries } from '../packages/core/dist/editing/fmgEdit.js';
 import { readParamFields, setParamFields } from '../packages/core/dist/param/containerParamEdit.js';
-import { readTaeEvents, setTaeEventTimes } from '../packages/core/dist/editing/taeEdit.js';
+import { readTaeEvents, setTaeEventFields, setTaeEventTimes } from '../packages/core/dist/editing/taeEdit.js';
 import { readMsbParts, setMsbPartTransform } from '../packages/core/dist/editing/msbEdit.js';
 
 const PARAM_SET_RE = /^([^#]+)#(\d+)\.([A-Za-z0-9_]+)=(.*)$/u;
 const FMG_SET_RE = /^([^#]+)#(\d+)=(.*)$/u;
 const TAE_SET_RE = /^(c\d{4}#A\d+\.e\d+)\.([A-Za-z0-9_]+)=(.*)$/u;
+const TAE_FIELD_INDEX_SET_RE = /^(c\d{4}#A\d+\.e\d+)\.#(\d+)=(.*)$/u;
 const MSB_SET_RE = /^(m\d{2}_\d{2}_\d{2}_\d{2}#[^@.\s]+)@((?:0x)?[0-9a-f]+)\.([A-Za-z0-9_]+)=(.*)$/iu;
-const TAE_SETTABLE_FIELDS = ['startFrame', 'endFrame'];
 const MSB_TRANSFORM_FIELDS = ['posX', 'posY', 'posZ', 'rotX', 'rotY', 'rotZ', 'scaleX', 'scaleY', 'scaleZ'];
 
 function fail(code, message, extra) {
@@ -107,21 +108,31 @@ function parseFmgSets(flags) {
 }
 
 function parseTaeSets(flags) {
-  const edits = [];
+  const timeEdits = [];
+  const fieldEdits = [];
   for (const raw of flagStrings(flags, 'set')) {
+    const indexMatch = TAE_FIELD_INDEX_SET_RE.exec(raw);
+    if (indexMatch) {
+      fieldEdits.push({
+        address: indexMatch[1],
+        fieldIndex: Number(indexMatch[2]),
+        value: parseValue(indexMatch[3])
+      });
+      continue;
+    }
     const match = TAE_SET_RE.exec(raw);
     if (!match) {
-      fail('TAE_SET_SYNTAX', `无法解析 --set ${raw}，格式为 cXXXX#AXXXX.eN.startFrame=帧`);
+      fail('TAE_SET_SYNTAX', `无法解析 --set ${raw}，格式为 cXXXX#AXXXX.eN.startFrame=帧 或 cXXXX#AXXXX.eN.#字段序号=值`);
       return null;
     }
     const field = match[2];
-    if (!TAE_SETTABLE_FIELDS.includes(field)) {
-      fail('TAE_SET_FIELD_READONLY', `TAE 门面只开放 ${TAE_SETTABLE_FIELDS.join(' / ')}（未解码参数不开放 set）：${field}`);
-      return null;
+    if (field !== 'startFrame' && field !== 'endFrame') {
+      fieldEdits.push({ address: match[1], fieldName: field, value: parseValue(match[3]) });
+      continue;
     }
-    edits.push({ address: match[1], [field]: Number(match[3]) });
+    timeEdits.push({ address: match[1], [field]: Number(match[3]) });
   }
-  return edits;
+  return { timeEdits, fieldEdits };
 }
 
 function parseMsbSets(flags) {
@@ -164,6 +175,10 @@ async function main() {
     : (action === 'read' || action === 'set');
   if (!kindOk || !actionOk) {
     fail('SF_EDIT_USAGE', usage);
+    return;
+  }
+  if (flags.has('emedf')) {
+    fail('EMEVD_EXTERNAL_SCHEMA_FORBIDDEN', '生产 EMEVD 链不接受 --emedf 外部 schema；请使用 SoulForge 内置 schema。');
     return;
   }
   const workspace = flags.get('workspace');
@@ -246,13 +261,19 @@ async function main() {
       printResult(await readTaeEvents({ edit, file, ...(addresses.length > 0 ? { addresses } : {}) }));
       return;
     }
-    const edits = parseTaeSets(flags);
-    if (!edits) return;
-    if (edits.length === 0) {
-      fail('TAE_EDIT_EMPTY', 'tae set 需要 --set cXXXX#AXXXX.eN.startFrame=帧');
+    const parsed = parseTaeSets(flags);
+    if (!parsed) return;
+    if (parsed.timeEdits.length > 0 && parsed.fieldEdits.length > 0) {
+      fail('TAE_EDIT_MIXED_MUTATIONS', '一次 tae set 不能混合时间字段与参数字段，请分两次提交。');
       return;
     }
-    printResult(await setTaeEventTimes({ edit, file, edits }));
+    if (parsed.timeEdits.length === 0 && parsed.fieldEdits.length === 0) {
+      fail('TAE_EDIT_EMPTY', 'tae set 需要 --set cXXXX#AXXXX.eN.startFrame=帧 或 .#字段序号=值');
+      return;
+    }
+    printResult(parsed.timeEdits.length > 0
+      ? await setTaeEventTimes({ edit, file, edits: parsed.timeEdits })
+      : await setTaeEventFields({ edit, file, edits: parsed.fieldEdits }));
     return;
   }
   if (kind === 'msb') {
@@ -292,8 +313,7 @@ async function main() {
     edit,
     file,
     dsl,
-    mode: flags.get('mode') === 'dark-script' ? 'dark-script' : 'patch',
-    ...(typeof flags.get('emedf') === 'string' ? { emedfPath: resolve(String(flags.get('emedf'))) } : {})
+    mode: flags.get('mode') === 'dark-script' ? 'dark-script' : 'patch'
   }));
 }
 

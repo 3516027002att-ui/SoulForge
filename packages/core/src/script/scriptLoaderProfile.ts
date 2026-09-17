@@ -1,9 +1,9 @@
 /**
  * Script loader profiles for SoulForge script editing.
  *
- * Enforces resource category, representation, encoding, and syntax/decompiler
- * tool bindings. Only resources explicitly verified to support plaintext source
- * editing are allowed to be modified as source.
+ * Enforces resource category, representation, encoding, and first-party
+ * compiler/decompiler provenance. Current Sekiro HKS bytecode is source-editable;
+ * future dialects must not be silently treated as the current dialect.
  */
 
 import type { PlaintextEncoding } from './plaintextScriptEntry.js';
@@ -54,15 +54,11 @@ export const REGISTERED_SCRIPT_LOADER_PROFILES: readonly ScriptLoaderProfile[] =
     entryPattern: /\.lua$/i,
     allowedRepresentations: ['plaintext', 'bytecode'],
     defaultEncoding: 'shift_jis',
-    supportsPlaintextSourceEdit: true, // Only for verified plaintext entries
-    bytecodeToSourceAllowed: false, // Prohibit bytecode -> source writeback for production AI scripts
-    matchingSyntaxValidator: {
-      toolName: 'luac51-syntax',
-      targetLuaVersion: 'Lua 5.1 / Havok Script'
-    },
+     supportsPlaintextSourceEdit: true,
+    bytecodeToSourceAllowed: true,
     decompilerTool: {
-      toolName: 'DSLuaDecompiler',
-      version: 'v1.1.5'
+       toolName: 'SoulForge HKS IR',
+       version: 'soulforge-hks-ir-1'
     },
     verifiedSamples: [
       'goal_list.lua',
@@ -98,10 +94,10 @@ export const REGISTERED_SCRIPT_LOADER_PROFILES: readonly ScriptLoaderProfile[] =
     allowedRepresentations: ['bytecode'],
     defaultEncoding: 'ascii',
     supportsPlaintextSourceEdit: false,
-    bytecodeToSourceAllowed: false,
+    bytecodeToSourceAllowed: true,
     decompilerTool: {
-      toolName: 'DSLuaDecompiler',
-      version: 'v1.1.5'
+       toolName: 'SoulForge HKS IR',
+       version: 'soulforge-hks-ir-1'
     },
     verifiedSamples: [
       'c0000_transition.hks'
@@ -153,7 +149,7 @@ export function canEditScriptAsSource(
       return {
         allowed: false,
         code: 'SCRIPT_BYTECODE_SOURCE_EDIT_PROHIBITED',
-        message: `Profile '${profile.id}' 未开放字节码反编译源码编辑写回；仅支持只读或整文件字节替换。`
+        message: `Profile '${profile.id}' 未开放当前 dialect 的源码编辑写回。`
       };
     }
   } else {

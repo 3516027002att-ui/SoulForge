@@ -35,6 +35,9 @@ export interface RollbackOperationIpcResult {
 
 /** Prevent duplicate rollback dialogs/transactions while one request is in flight. */
 const activeRollbackRequests = new Set<string>();
+export function hasActiveRollbackRequests(): boolean {
+  return activeRollbackRequests.size > 0;
+}
 
 export interface OperationIpcDeps {
   handle: TrustedIpcHandle;

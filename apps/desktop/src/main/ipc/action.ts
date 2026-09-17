@@ -5,13 +5,11 @@ import {
   ingestBridgeResult,
   ActionMotionIdentityCache,
   isLeaderRemappedBundle,
-  readTaeEventTemplateFile,
   remapCharacterBundleToLeader,
   runBridge,
   type BinderMembershipMatch,
   type BinderMembershipCandidate,
   type RunBridgeCancellationTerminalReceipt,
-  type TaeEventTemplateInfo,
   type WorkspaceIndex,
   type WorkspaceSession
 } from '@soulforge/core';
@@ -23,10 +21,7 @@ import {
   type IndexedFile
 } from '@soulforge/shared';
 import { sanitizeRendererValue } from '../rendererDto.js';
-import {
-  decodeTaeParamFields,
-  getTaeTemplateCatalog
-} from '../taeTemplateCatalog.js';
+import { getTaeTemplateCatalog } from '../taeTemplateCatalog.js';
 import {
   C0000_COMPATIBILITY_PART_SLOTS,
   canonicalCharacterStemForActionPath,
@@ -39,111 +34,6 @@ const _forensicsActionCounters = new Map<string, number>();
 function _forensicsActionInc(key: string, delta = 1): void { _forensicsActionCounters.set(key, (_forensicsActionCounters.get(key) ?? 0) + delta); }
 export function getActionForensicsCounters(): Record<string, number> { return Object.fromEntries(_forensicsActionCounters); }
 
-/* ------------------------------------------------------------------ */
-/*  本机 DSAnimStudio TAE 词条只读导入（S17 动作域）                    */
-/*                                                                    */
-/*  DSAnimStudio 的 Res\TAE.Template.SDT.xml 是 Sekiro 事件类型词条表： */
-/*  `0 JumpTable` 这类事件行「类型名」的来源，也带每类事件参数体的      */
-/*  字段布局（name/kind/slotSize），随 read-tae-document 的             */
-/*  templateLayouts 选项传给 Bridge 解码参数体。                        */
-/*                                                                    */
-/*  同 Yapped：本机第三方工具安装目录，只读、不入库、失败降级 ——        */
-/*  拿不到就事件行显示裸 `{typeId}`、参数体不解码，绝不把「词条不可用」 */
-/*  升级成「TAE 不可用」。                                              */
-/* ------------------------------------------------------------------ */
-
-/** S17 固定候选：本机 DSAnimStudio 发布包真实落地（grok 已求证存在）。 */
-const TAE_TEMPLATE_FIXED_CANDIDATES = [
-  'D:\\mystream\\Sekiro Shadows Die Twice\\tools\\DSAnimStudio-4.9.9[Build 4999]'
-    + '\\Res\\TAE.Template.SDT.xml'
-];
-
-/** TAE 模板在 tools/<一层子目录> 下的相对候选（DSAS 装在 Res/ 下）。 */
-const TAE_TEMPLATE_RELATIVE_CANDIDATES = [
-  'Res\\TAE.Template.SDT.xml',
-  'TAE.Template.SDT.xml',
-  'Res\\TAE.Template.xml'
-];
-
-let taeTemplateCache: {
-  loaded: true;
-  /** eventTypeId → 词条；null 表示本机无模板或读不到。 */
-  byEventTypeId: ReadonlyMap<number, TaeEventTemplateInfo> | null;
-} | null = null;
-
-/**
- * 定位本机 DSAnimStudio 的 `TAE.Template.SDT.xml`。
- *
- * 候选顺序：SOULFORGE_TAE_TEMPLATE_PATH 显式环境变量 → 固定候选 → 已挂载
- * 会话兄弟 tools/<一层子目录>/Res/。找不到返回 null，由调用方降级到裸
- * typeId —— 这是可选增强，绝不能把「词条不可用」升级成「TAE 不可用」。
- */
-function makeLocateTaeTemplatePathSync(deps: ActionIpcDeps): () => string | null {
-  return (): string | null => {
-    const probe = (candidate: string): boolean => {
-      try {
-        return existsSync(candidate);
-      } catch {
-        return false;
-      }
-    };
-    const explicit = process.env.SOULFORGE_TAE_TEMPLATE_PATH?.trim();
-    if (explicit) {
-      const candidate = resolve(explicit);
-      if (probe(candidate)) return candidate;
-    }
-    for (const candidate of TAE_TEMPLATE_FIXED_CANDIDATES) {
-      if (probe(candidate)) return candidate;
-    }
-    const roots: string[] = [];
-    deps.pushToolsSubdirs(roots, deps.activeSession?.layers.baseRoot);
-    const overlay = deps.activeSession?.layers.overlayRoot?.trim();
-    if (overlay) deps.pushToolsSubdirs(roots, dirname(dirname(overlay)));
-    const gameRootEnv = process.env.SOULFORGE_SEKIRO_GAME_ROOT?.trim();
-    if (gameRootEnv) deps.pushToolsSubdirs(roots, gameRootEnv);
-    for (const root of roots) {
-      for (const relative of TAE_TEMPLATE_RELATIVE_CANDIDATES) {
-        const candidate = join(root, relative);
-        if (probe(candidate)) return candidate;
-      }
-    }
-    return null;
-  };
-}
-
-/**
- * 惰性读本机 TAE 模板索引并缓存。只读一次（73KB 单文件），每次读 TAE
- * 都重跑会让打开卡顿。空/缺失回 null，不抛 —— 失败降级到裸 typeId。
- */
-function makeLoadTaeEventTemplate(
-  locateTaeTemplatePathSync: () => string | null
-): () => Promise<ReadonlyMap<number, TaeEventTemplateInfo> | null> {
-  return async (): Promise<ReadonlyMap<number, TaeEventTemplateInfo> | null> => {
-    if (taeTemplateCache) return taeTemplateCache.byEventTypeId;
-    const templatePath = locateTaeTemplatePathSync();
-    const result = templatePath ? await readTaeEventTemplateFile(templatePath) : null;
-    taeTemplateCache = {
-      loaded: true,
-      byEventTypeId: result?.ok ? result.byEventTypeId : null
-    };
-    return taeTemplateCache.byEventTypeId;
-  };
-}
-
-/** read-tae-document 的 bridge options：templateLayouts（无模板时省略）。 */
-function taeTemplateLayoutsOption(byEventTypeId: ReadonlyMap<number, TaeEventTemplateInfo> | null) {
-  return byEventTypeId
-    ? {
-        templateLayouts: Object.fromEntries(
-          [...byEventTypeId.entries()].map(([id, info]) => [
-            String(id),
-            info.fields.map((field) => ({ name: field.name, kind: field.kind, slotSize: field.slotSize }))
-          ])
-        )
-      }
-    : {};
-}
-
 export interface ActionIpcDeps {
   handle: TrustedIpcHandle;
   readonly indexedFiles: readonly IndexedFile[];
@@ -151,7 +41,6 @@ export interface ActionIpcDeps {
   readonly activeIndex: WorkspaceIndex | null;
   readonly activeWorkspaceSessionId: string | null;
   safeExists(path: string): boolean;
-  pushToolsSubdirs(roots: string[], gameRoot: string | undefined): void;
   asBasicDiagnostics(
     items: Array<{ severity: string; code: string; message: string; sourceUri?: string }>
   ): Array<{ severity: 'error' | 'warning' | 'info'; code: string; message: string; sourceUri?: string }>;
@@ -1058,8 +947,6 @@ export async function assembleC0000CompatibilityPreview(input: {
 }
 
 export function registerActionIpcHandlers(deps: ActionIpcDeps): void {
-  const locateTaeTemplatePathSync = makeLocateTaeTemplatePathSync(deps);
-  const loadTaeEventTemplate = makeLoadTaeEventTemplate(locateTaeTemplatePathSync);
 
   // ACTION 的播放时缓存只缓存「已由 Bridge 读取过的 TAE motion identity」。
   // Binder membership 属于 WorkspaceIndex 的建立期投影；播放 handler 不得
@@ -1486,8 +1373,8 @@ export function registerActionIpcHandlers(deps: ActionIpcDeps): void {
     }
     const roots = await deps.verifiedReadRoots(deps.activeSession, dirname(file.absolutePath));
     if (roots.diagnostics.length > 0) return { ok: false, diagnostics: roots.diagnostics };
-    // S17：DSAS 模板（本机只读，可选增强）→ templateLayouts 给 Bridge 解码参数体。
-    const byEventTypeId = await loadTaeEventTemplate();
+    // TAE 字段、事件名称和长度变体均由 Bridge 内置 first-party schema 处理。
+    // 这里只传分页参数；生产链不读取编辑器安装目录或外部模板。
     const paginationOptions: Record<string, unknown> = {};
     if (typeof options?.animationPage === 'number' && Number.isFinite(options.animationPage) && options.animationPage >= 0) {
       paginationOptions.animationPage = Math.floor(options.animationPage);
@@ -1495,11 +1382,7 @@ export function registerActionIpcHandlers(deps: ActionIpcDeps): void {
     if (typeof options?.animationPageSize === 'number' && Number.isFinite(options.animationPageSize) && options.animationPageSize > 0) {
       paginationOptions.animationPageSize = Math.floor(options.animationPageSize);
     }
-    const templateLayoutsCommandOptions = taeTemplateLayoutsOption(byEventTypeId) as Record<string, unknown> | null;
-    const mergedCommandOptions = {
-      ...(templateLayoutsCommandOptions ? { templateLayouts: (templateLayoutsCommandOptions as { templateLayouts: unknown }).templateLayouts } : {}),
-      ...paginationOptions
-    } as Record<string, unknown>;
+    const mergedCommandOptions = paginationOptions;
     const result = await runBridge<Record<string, unknown>>({
       command: 'read-tae-document',
       filePath: file.absolutePath,
@@ -1525,17 +1408,17 @@ export function registerActionIpcHandlers(deps: ActionIpcDeps): void {
         data: result.data
       });
     }
-    // 事件类型名表（`0 JumpTable` 的「类型名」）：只投影文档实际出现过的
-    // eventTypeId，模板缺的 id 不出现，渲染器回退裸 `{typeId}`。
+    // 事件类型名表来自 SoulForge first-party registry；只投影文档实际出现过的
+    // eventTypeId，schema 缺口由 Bridge 的结构化 coverage 诊断显式报告。
     let eventTypeNames: Record<string, string> | undefined;
-    if (result.parseStatus !== 'failed' && result.data && byEventTypeId) {
+    if (result.parseStatus !== 'failed' && result.data) {
       const data = result.data as { eventTypes?: number[] };
       const present = (data.eventTypes ?? []).filter(
-        (id): id is number => byEventTypeId.has(id)
+        (id): id is number => Number.isInteger(id)
       );
       if (present.length > 0) {
         eventTypeNames = Object.fromEntries(
-          present.map((id) => [String(id), byEventTypeId.get(id)!.name])
+          present.map((id) => [String(id), getTaeTemplateCatalog().events.get(id)?.name ?? `事件类型 ${id}`])
         );
       }
     }
@@ -1550,28 +1433,33 @@ export function registerActionIpcHandlers(deps: ActionIpcDeps): void {
   });
 
   /**
-   * S17：词条名目录。main 从本机 TAE.Template.SDT.xml 解析 eventTypeId → 名称；
+   * SoulForge first-party TAE 事件目录。生产环境不依赖 DSAnimStudio XML。
    */
   deps.handle('resource.readTaeTemplateCatalog', async (): Promise<{
     ok: boolean;
-    origin: 'imported' | 'unavailable';
+    origin: 'first-party';
+    package: string;
+    version: string;
+    contentDigest: string;
     events: Array<{ eventTypeId: number; name: string }>;
     diagnostics?: Array<{ severity: string; code: string; message: string }>;
   }> => {
     const catalog = getTaeTemplateCatalog();
     // handle() 包装器统一 sanitize；这里只组装结构化结果。
     return {
-      ok: catalog.origin === 'imported',
+      ok: true,
       origin: catalog.origin,
+      package: catalog.package,
+      version: catalog.version,
+      contentDigest: catalog.contentDigest,
       events: [...catalog.events.entries()].map(([eventTypeId, def]) => ({ eventTypeId, name: def.name })),
       diagnostics: [...catalog.diagnostics]
     };
   });
 
   /**
-   * S17：单个词条事件的参数体。main 按本机模板布局给 Bridge 参数长度，Bridge
-   * 原生截取参数体字节（越界失败关闭），main 再按布局解码字段（little-endian）。
-   * 无模板类型：返回未解码 + 原始 hex，不编造字段含义。
+   * S17：单个词条事件的参数体。Bridge 依据原生事件边界和 first-party
+   * schema 精确截取、校验并解码字段；main 只投影 renderer-safe 结果。
    */
   deps.handle(
     'resource.readTaeEventParams',
@@ -1591,7 +1479,24 @@ export function registerActionIpcHandlers(deps: ActionIpcDeps): void {
       data?: {
         eventTypeId: number;
         templateName: string | null;
-        fields: Array<{ name: string; type: string; value: string }>;
+        parameterLength: number;
+        parameterDecodedSize: number;
+        schemaBankId?: number;
+        schemaVariant?: string;
+        fields: Array<{
+          index: number;
+          name: string;
+          type: string;
+          offset: number;
+          size: number;
+          value: string | number | boolean;
+          displayValue?: string;
+          rawValue?: number;
+          assert?: number;
+          assertValid?: boolean;
+          isPadding?: boolean;
+          enumEntries?: Array<{ value: number; name: string }>;
+        }>;
         tailHex: string | null;
         undecodedHex: string | null;
       };
@@ -1611,12 +1516,33 @@ export function registerActionIpcHandlers(deps: ActionIpcDeps): void {
         : undefined;
       const roots = await deps.verifiedReadRoots(deps.activeSession, dirname(file.absolutePath));
       if (roots.diagnostics.length > 0) return { ok: false, diagnostics: roots.diagnostics };
-      const catalog = getTaeTemplateCatalog();
-      // 第一读：paramSize 缺省 → Bridge 给前 16 字节，拿到 eventTypeId。
       const result = await runBridge<{
         eventTypeId?: number;
         paramHex?: string;
         paramSize?: number;
+        parameterLength?: number;
+        parameterDecodedSize?: number;
+        parameterTailHex?: string;
+        schemaBankId?: number;
+        schemaVariant?: string;
+        templateName?: string | null;
+        fields?: Array<{
+          index?: number;
+          name?: string;
+          type?: string;
+          offset?: number;
+          size?: number;
+          value?: string | number | boolean;
+          displayValue?: string;
+          rawValue?: number;
+          assert?: number;
+          assertValid?: boolean;
+          isPadding?: boolean;
+          enumEntries?: Array<{ value: number; name: string }>;
+        }>;
+        tailHex?: string | null;
+        undecodedHex?: string | null;
+        schema?: Record<string, unknown>;
       }>({
         command: 'read-tae-event-params',
         filePath: file.absolutePath,
@@ -1638,35 +1564,20 @@ export function registerActionIpcHandlers(deps: ActionIpcDeps): void {
         return { ok: false, diagnostics: result.diagnostics };
       }
       const eventTypeId = result.data.eventTypeId ?? -1;
-      const def = catalog.events.get(eventTypeId);
-      // 有模板且模板大小 ≠ 16：按模板长度重读参数体（16 字节时第一读已够）。
-      const paramSize = def?.paramSize ?? 0;
-      const needsExactRead = paramSize > 0 && paramSize !== 16;
-      const exact = needsExactRead
-        ? await runBridge<{ paramHex?: string }>({
-            command: 'read-tae-event-params',
-            filePath: file.absolutePath,
-            allowedRoots: roots.allowedRoots,
-            timeoutMs: 120_000,
-            ...(deps.activeSession?.layers.baseRoot
-              ? { oodleRuntimeRoot: deps.activeSession.layers.baseRoot }
-              : {}),
-            commandOptions: {
-              animId,
-              eventIndex,
-              paramSize,
-              ...(typeof selector?.taeEntryIndex === 'number' ? { taeEntryIndex: selector.taeEntryIndex } : {}),
-              ...(typeof selector?.taeEntryId === 'number' ? { taeEntryId: selector.taeEntryId } : {}),
-              ...(typeof selector?.taeEntryName === 'string' ? { taeEntryName: selector.taeEntryName } : {}),
-              ...(typeof selector?.taeGroup === 'string' ? { taeGroup: selector.taeGroup } : {})
-            }
-          })
-        : null;
-      if (exact && (exact.parseStatus === 'failed' || !exact.data?.paramHex)) {
-        return { ok: false, diagnostics: exact.diagnostics };
-      }
-      const paramHex = exact?.data?.paramHex ?? result.data.paramHex ?? '';
-      const decoded = decodeTaeParamFields(def, paramHex);
+      const fields = (result.data.fields ?? []).map((field, index) => ({
+        index: field.index ?? index,
+        name: field.name ?? `field_${index}`,
+        type: field.type ?? 'unknown',
+        offset: field.offset ?? 0,
+        size: field.size ?? 0,
+        value: field.value ?? '',
+        ...(field.displayValue !== undefined ? { displayValue: field.displayValue } : {}),
+        ...(field.rawValue !== undefined ? { rawValue: field.rawValue } : {}),
+        ...(field.assert !== undefined ? { assert: field.assert } : {}),
+        ...(field.assertValid !== undefined ? { assertValid: field.assertValid } : {}),
+        ...(field.isPadding !== undefined ? { isPadding: field.isPadding } : {}),
+        ...(field.enumEntries ? { enumEntries: field.enumEntries } : {})
+      }));
       // handle() 包装器统一 sanitize；这里只组装结构化结果。
       return {
         ok: true,
@@ -1674,13 +1585,17 @@ export function registerActionIpcHandlers(deps: ActionIpcDeps): void {
         relativePath: file.relativePath,
         data: {
           eventTypeId,
-          templateName: def?.name ?? null,
-          fields: decoded ?? [],
-          // 模板字段之外的尾部字节（模板大小与实测参数体不一致时可见，不丢弃）。
-          tailHex: decoded ? (paramHex.slice(decoded.length * 2) || null) : null,
-          undecodedHex: def && def.paramSize > 0 ? null : (paramHex || null)
+          templateName: result.data.templateName ?? null,
+          parameterLength: result.data.parameterLength ?? result.data.paramSize ?? 0,
+          parameterDecodedSize: result.data.parameterDecodedSize ?? 0,
+          ...(result.data.schemaBankId !== undefined ? { schemaBankId: result.data.schemaBankId } : {}),
+          ...(result.data.schemaVariant !== undefined ? { schemaVariant: result.data.schemaVariant } : {}),
+          fields,
+          tailHex: result.data.parameterTailHex ?? result.data.tailHex ?? null,
+          undecodedHex: result.data.undecodedHex
+            ?? ((fields.length === 0 && result.data.paramHex) ? result.data.paramHex : null)
         },
-        diagnostics: [...result.diagnostics, ...(exact?.diagnostics ?? [])]
+        diagnostics: result.diagnostics
       };
     }
   );

@@ -16,6 +16,7 @@ import {
   semanticReadiness,
   waitForSemanticReadiness
 } from './real-agent-harness-lib.mjs';
+import { matchesAssertion, parseGoalContract } from './real-agent-goal-contract.mjs';
 
 test('selected corpus includes action/chr and reports all exclusions without claiming full corpus', () => {
   const plan = planSemanticCorpus(['param', 'msg', 'event', 'map', 'script', 'action', 'chr', 'sfx', '.soulforge']);
@@ -52,6 +53,36 @@ test('matching a required PARAM proxy is a field result, not proof of the whole 
   assert.equal(verdict.taskCoverageOk, false);
   assert.equal(verdict.taskCompletionVerified, false);
   assert.equal(evaluateGoalCoverage([{ required: true, verified: false }], false).fieldChecksOk, false);
+});
+
+test('semantic goals require their own native evidence and can use only data assertions', () => {
+  const parsed = parseGoalContract(JSON.stringify([{
+    goalId: 'tae-time',
+    kind: 'native-tool',
+    tool: 'read_tae_events',
+    input: { file: 'chr/c5080.anibnd.dcx', addresses: ['c5080#A0200.e3'] },
+    assertion: { path: 'data.events', some: { path: 'fields', some: { path: 'name', equals: 'duration' } } }
+  }]));
+  assert.equal(parsed[0].kind, 'native-tool');
+  assert.equal(matchesAssertion({ data: { events: [{ fields: [{ name: 'duration', value: 80 }] }] } }, parsed[0].assertion), true);
+  const verified = evaluateGoalCoverage([{
+    ...parsed[0], verified: true, verificationEvidence: [{ tool: 'read_tae_events', sourceHashes: ['sha'] }]
+  }], false);
+  assert.equal(verified.mode, 'native-semantic');
+  assert.equal(verified.taskCoverageOk, true);
+  assert.equal(verified.taskCompletionVerified, true);
+});
+
+test('semantic goal without proof or assertion cannot pass the task gate', () => {
+  assert.throws(() => parseGoalContract(JSON.stringify([{
+    kind: 'native-tool', tool: 'read_emevd_event', input: { file: 'event/x.emevd.dcx', eventId: 1 }
+  }])), /assertion/u);
+  const verdict = evaluateGoalCoverage([{
+    kind: 'native-tool', required: true, verified: true, verificationEvidence: []
+  }], false);
+  assert.equal(verdict.goalsOk, true);
+  assert.equal(verdict.taskCoverageOk, false);
+  assert.ok(verdict.diagnostics.some((item) => item.code === 'TASK_SEMANTIC_GOAL_FAILED'));
 });
 
 test('observation mode never passes even with all supplied native goals verified', () => {

@@ -17,7 +17,7 @@ import { MemoryOperationLogStore, type OperationLogStore } from '../patch/operat
 import { createConfirmationReceipt } from '../patch/writerContract.js';
 import {
   openWorkspaceSession,
-  type EmedfLocator,
+  assertNoExternalEmedfOptions,
   type WorkspaceSession
 } from '../workspace/workspaceSession.js';
 import { saveRawReplace } from './saveRawResource.js';
@@ -36,8 +36,6 @@ export interface HostNativeHandleEntry {
 
 export interface NativeEditSession {
   session: WorkspaceSession;
-  /** Resolved user-local EMEDF path inherited from the workspace session. */
-  emedfPath?: string;
   operationLog: OperationLogStore;
   stagingRoot: string;
   backupBaseDir: string;
@@ -58,10 +56,6 @@ export interface OpenNativeEditSessionOptions {
   baseRoot?: string;
   game?: string;
   operationLog?: OperationLogStore;
-  /** Explicit user-provided EMEDF path; it wins over the locator. */
-  emedfPath?: string;
-  /** Path-only locator forwarded to openWorkspaceSession. */
-  emedfLocator?: EmedfLocator;
 }
 
 export function nativeEditSessionFromContext(input: {
@@ -100,7 +94,6 @@ export function nativeEditSessionFromContext(input: {
 
   return {
     session: input.session,
-    ...(input.session.emedfPath ? { emedfPath: input.session.emedfPath } : {}),
     operationLog: input.operationLog,
     stagingRoot,
     backupBaseDir: input.backupBaseDir,
@@ -145,13 +138,12 @@ export function nativeEditSessionFromContext(input: {
 export async function openNativeEditSession(
   options: OpenNativeEditSessionOptions
 ): Promise<NativeEditSession> {
+  assertNoExternalEmedfOptions(options);
   const overlayRoot = resolve(options.overlayRoot);
   const session = await openWorkspaceSession({
     overlayRoot,
     ...(options.baseRoot ? { baseRoot: resolve(options.baseRoot) } : {}),
-    game: options.game ?? 'sekiro',
-    ...(options.emedfPath !== undefined ? { emedfPath: options.emedfPath } : {}),
-    ...(options.emedfLocator ? { emedfLocator: options.emedfLocator } : {})
+    game: options.game ?? 'sekiro'
   });
   const storage = cliStoragePaths(session.meta.workspaceId);
   await mkdir(storage.stagingRoot, { recursive: true });
@@ -181,7 +173,6 @@ export async function openNativeEditSession(
 
   return {
     session,
-    ...(session.emedfPath ? { emedfPath: session.emedfPath } : {}),
     operationLog,
     stagingRoot: storage.stagingRoot,
     backupBaseDir: storage.backupBaseDir,

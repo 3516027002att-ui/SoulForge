@@ -41,14 +41,19 @@
   },
   "paramMetadataSourcePolicy": {
     "status": "user-approved",
-    "sourceProject": "vawser/Smithbox",
-    "sourceRelease": "2.2.4",
-    "sourceCommit": "1b46d2c9f82d1c3635ff7c12c526e05a8ba4208f",
-    "sourceArtifactSha256": "14a7fd735a9577249fa93655f63d1e9ac025a3b00d7c5bed8badc8a3a7fd489d",
-    "sourcePath": "Smithbox.Release/Output/Assets/PARAM/SDT",
-    "acquisition": "user-local-pinned-release-import",
-    "redistribution": "forbidden",
-    "mismatchPolicy": "fail-closed"
+    "sourceProject": "SoulForge",
+    "sourceRelease": "sekiro-1.6.x",
+    "sourceCommit": "first-party-schema-package-v1.0.0",
+    "sourceArtifactSha256": "e42fde9b453fad62490e0f6ee2bb9c34d37293313caf52b5df0f2747163d3daf",
+    "sourcePath": "packages/core/src/schema/sekiro/firstPartySchemaData.ts",
+    "acquisition": "first-party-reviewed-semantic-projection",
+    "redistribution": "permitted",
+    "mismatchPolicy": "fail-closed",
+    "packageId": "soulforge-sekiro-param",
+    "packageVersion": "1.0.0",
+    "contentDigest": "sha256:e42fde9b453fad62490e0f6ee2bb9c34d37293313caf52b5df0f2747163d3daf",
+    "thirdPartyRuntimeDependency": "forbidden",
+    "nativeFormatAuthority": false
   },
   "providerCredentialPolicy": {
     "status": "user-approved",
@@ -383,7 +388,7 @@
         "REL-C"
       ],
       "subjectKind": "resource",
-      "scope": "固定 Smithbox 2.2.4 本机 metadata 严格匹配下的 Sekiro gameparam 全部 ParamType、布局、字段与行完整读写；drawparam / gparam 延期至 V0.6",
+      "scope": "SoulForge first-party Sekiro 1.6.x PARAM schema 严格匹配下的 gameparam 全部 ParamType、布局、字段与行完整读写；drawparam / gparam 延期至 V0.6",
       "decisionStatus": "user-approved",
       "proposedSupport": "supported",
       "paramContainerScope": {
@@ -397,8 +402,9 @@
       },
       "operations": [
         "read-all-gameparam-param-types",
-        "import-user-local-pinned-smithbox-metadata",
+        "load-first-party-param-schema",
         "verify-source-release-and-content-digest",
+        "verify-first-party-package-provenance",
         "record-source-license-and-provenance",
         "no-op-roundtrip",
         "typed-field-mutation",
@@ -410,7 +416,8 @@
         "game-load"
       ],
       "unsupportedOperations": [
-        "redistribute-imported-smithbox-param-metadata",
+        "ship-third-party-schema-or-adapter",
+        "accept-external-param-schema-at-runtime",
         "accept-unpinned-or-mismatched-metadata-source",
         "metadata-mismatch-write",
         "unknown-field-rewrite",
@@ -434,7 +441,7 @@
       ],
       "openRulings": [],
       "nonClaims": [
-        "V0.5 收窄为 gameparam 容器内全部 ParamType 的完整读写；drawparam 与 gparam 延期至 V0.6，不属于 V0.5 支持范围也不属于 V0.5 完成条件。裁定时 authorityAtRuling 为 partial；固定 Smithbox 本机来源裁定不证明导入 adapter、全部布局、上游再分发权利或真实游戏验证完成。"
+        "V0.5 收窄为 gameparam 容器内全部 ParamType 的完整读写；drawparam 与 gparam 延期至 V0.6，不属于 V0.5 支持范围也不属于 V0.5 完成条件。SoulForge first-party 包当前登记 160 个 PARAM definition；裁定时 authorityAtRuling 为 partial，不证明全部 native corpus、Bridge writer、真实游戏验证或未覆盖布局已完成。第三方 adapter 与历史 Smithbox Evidence 仅保留为开发/验证记录，不构成生产依赖或再分发依据。"
       ],
       "targetRelease": "V0.5",
       "deferredToRelease": null,
@@ -448,11 +455,13 @@
         "REL-C"
       ],
       "subjectKind": "resource",
-      "scope": "Sekiro 全部 EMEVD 事件、指令、控制流、参数与 layer 变体的完整无损读写",
+      "scope": "Sekiro 1.6.x 在 SoulForge first-party schema 覆盖内的 EMEVD 事件、指令、控制流与参数无损读写；未覆盖及长度不匹配变体只读",
       "decisionStatus": "user-approved",
       "proposedSupport": "supported",
       "operations": [
-        "read-all-events-instructions-layers",
+        "read-first-party-covered-events-instructions",
+        "use-first-party-emedf-schema",
+        "schema-coverage-diagnostics",
         "no-op-roundtrip",
         "typed-mutation",
         "event-instruction-crud",
@@ -466,7 +475,10 @@
       "unsupportedOperations": [
         "direct-dsl-binary-write",
         "bypass-emedf-typecheck",
-        "unknown-instruction-reencode"
+        "unknown-instruction-reencode",
+        "length-mismatch-reencode",
+        "accept-external-emedf-runtime",
+        "claim-uncovered-instructions-as-typed"
       ],
       "authorityAtRuling": "partial",
       "evidenceRefs": [
@@ -483,7 +495,7 @@
       ],
       "openRulings": [],
       "nonClaims": [
-        "全部 EMEVD 已纳入目标范围，但裁定时 authorityAtRuling 为 partial；完整 EMEDF、layer/KRAK 变体、生产 DSL 接线、release corpus 与游戏加载尚未完成。"
+        "当前 first-party EMEVD 包登记 405 条指令与 27 个 bank，并以 coverage gap 诊断保护未知指令和长度不匹配内容；裁定时 authorityAtRuling 为 partial。该包不等于全部 layer/KRAK 变体、真实 release corpus、完整游戏加载或 native 格式 authority；第三方 EMEDF 文件与 adapter 不进入生产运行链。"
       ],
       "targetRelease": "V0.5",
       "deferredToRelease": null,
@@ -1337,6 +1349,54 @@
         "本轮交付含 clean 源码 ZIP、启动 EXE/native 必需组件、NSIS x64 安装包、GitHub 自动源码归档与必要许可证 notices；代码签名、证书信任链和 SmartScreen 信誉不在验收范围，未签名包不得声明发布者身份或信誉通过。",
         "V0.9.1 仍须以实际源码归档完整性、安装包内容与哈希、安装/升级/卸载/已安装启动路径、内部文件排除、许可证 notice inventory 与自动源码归档扫描结果为准；当前用户机器上的 typecheck、workspace 回归与构建成功不替代跨机或真实 Sekiro 会话验收。",
         "已知限制须在发布说明中保留：部分 backend analysis 退出问题、large-map 前台响应性尚未验证、跨机/真实游戏接受不完整；不得把这些限制写成已通过。"
+      ],
+      "targetRelease": "V0.9",
+      "deferredToRelease": null,
+      "deferredTrack": null,
+      "resumeRequires": []
+    },
+    {
+      "scopeItemId": "SCOPE-V09-GITHUB-UPDATE",
+      "capabilityId": "H-RUNTIME",
+      "gateIds": [
+        "REL-H",
+        "REL-COMPLIANCE"
+      ],
+      "subjectKind": "release",
+      "scope": "V0.9.2 Windows x64 GitHub Release 更新链：从固定 SoulForge Release 选择非降级预发布，要求 x64 NSIS 安装包、latest.yml、blockmap 与 SHA256SUMS 一致，下载完成后由用户确认并启动安装；v0.9.1 保持手动安装 bootstrap 边界",
+      "decisionStatus": "user-approved",
+      "proposedSupport": "supported",
+      "operations": [
+        "check-github-release",
+        "select-nondecreasing-prerelease",
+        "exclude-draft-release",
+        "require-x64-nsis",
+        "require-latest-yml-and-blockmap",
+        "verify-latest-yml-sha512",
+        "verify-sha256sums",
+        "confirm-and-install",
+        "open-fixed-release-page"
+      ],
+      "unsupportedOperations": [
+        "publish-github-release-in-this-change",
+        "accept-draft-release",
+        "accept-version-downgrade",
+        "accept-non-github-asset",
+        "require-authenticode-signature",
+        "auto-update-source-build",
+        "claim-cross-machine-a-to-b-acceptance",
+        "claim-smartscreen-acceptance",
+        "claim-stable-channel-before-release"
+      ],
+      "authorityAtRuling": "unverified",
+      "evidenceRefs": [],
+      "registryRefs": [],
+      "openRulings": [],
+      "nonClaims": [
+        "本次只实现更新器、发布资产生成/校验与 CI 配置，不执行 v0.9.2 tag、GitHub Release 创建或资产上传；实际 Release 未发布前不能宣称端到端更新已验收。",
+        "v0.9.1 的历史范围不被改写；已安装 v0.9.1 的用户仍需手动安装一次带更新按钮的 v0.9.2 bootstrap。",
+        "未签名 NSIS 不因缺少 Authenticode 而被更新门禁拒绝，但 SmartScreen/UAC、跨机器 A→B、真实远程网络与稳定频道仍未验收。",
+        "源码运行与非 NSIS 构建继续手动更新；更新下载、token、临时路径和网络请求仅由主进程持有，渲染器只接收脱敏状态。"
       ],
       "targetRelease": "V0.9",
       "deferredToRelease": null,

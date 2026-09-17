@@ -3,6 +3,8 @@ import { readFile } from 'node:fs/promises';
 const files = {
   main: await readFile(new URL('../apps/desktop/src/main/index.ts', import.meta.url), 'utf8'),
   ipc: await readFile(new URL('../apps/desktop/src/main/ipc.ts', import.meta.url), 'utf8'),
+  agent: await readFile(new URL('../apps/desktop/src/main/ipc/agent.ts', import.meta.url), 'utf8'),
+  rendererApp: await readFile(new URL('../apps/desktop/src/renderer/src/App.tsx', import.meta.url), 'utf8'),
   preload: await readFile(new URL('../apps/desktop/src/preload/index.ts', import.meta.url), 'utf8'),
   rendererDto: await readFile(new URL('../apps/desktop/src/main/rendererDto.ts', import.meta.url), 'utf8'),
   databaseUtility: await readFile(new URL('../apps/desktop/src/main/databaseUtility.ts', import.meta.url), 'utf8'),
@@ -36,7 +38,17 @@ const checks = [
   ['渲染进程不能传入确认凭据', !files.preload.includes('ConfirmationReceipt')],
   ['渲染进程不能传入工作区绝对路径', !files.preload.includes('workspaceRoot')],
   ['渲染进程不能决定 AI 权限模式', !files.preload.includes("ToolContext['mode']")
-    && files.ipc.includes("const activeAiMode: ToolContext['mode'] = 'plan'")],
+    && files.ipc.includes("const activeAiMode: ToolContext['mode'] = 'plan'")
+    && files.agent.includes('consumePermissionGrant')
+    && files.agent.includes("ai.agent.permission.request")],
+  ['Agent 审批列表不接受 renderer 覆盖', !files.agent.includes('request.approvalRequiredLevels')
+    && files.agent.includes("mode === 'fullPermission' ? { approvalRequiredLevels: [] }" )],
+  ['renderer 只请求 main-issued Agent grant', files.rendererApp.includes('requestAiAgentPermission')
+    && !files.rendererApp.includes('approvalRequiredLevels: []')],
+  ['Agent 会话控制校验 owner', files.agent.includes('sessionOwnerMatches(request.sessionId, _event.sender.id)')
+    && files.agent.includes('sessionOwnerMatches(decoded.sessionId, _event.sender.id)')],
+  ['Agent 事件按窗口 owner 路由', files.agent.includes('agentEventTargets')
+    && files.agent.includes('agentEventTargets.get(ownerId)')],
   ['渲染 DTO 删除绝对路径', files.rendererDto.includes("'absolutePath'")],
   ['渲染 DTO 删除源路径', files.rendererDto.includes("'sourcePath'")],
   ['渲染 DTO 脱敏字符串中的绝对路径', files.rendererDto.includes('sanitizeRendererString(item.message)')

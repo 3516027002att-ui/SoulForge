@@ -63,8 +63,8 @@ export interface ParamDefDocument {
   rowDataSize: number;
   fields: ParamFieldDef[];
   enums?: ParamEnumDef[];
-  /** provenance: never claim official game package authority. */
-  origin: 'user-derived' | 'fixture' | 'imported';
+  /** provenance: native format authority remains the C# Bridge. */
+  origin: 'user-derived' | 'fixture' | 'imported' | 'first-party';
   notes?: string;
 }
 
@@ -90,12 +90,12 @@ export interface ParamMetadataDefinitionKey {
 
 export interface ParamMetadataSource {
   /** Describes compatibility only; it does not grant authority or redistribution rights. */
-  kind: 'paramdex-compatible' | 'user-supplied' | 'synthetic-fixture';
+  kind: 'paramdex-compatible' | 'user-supplied' | 'synthetic-fixture' | 'first-party';
   /** Stable repository URL or user-controlled source identifier. */
   identity: string;
   /** Immutable `git:<commit>` or `sha256:<digest>` revision. */
   revision: string;
-  /** Digest of the exact external source payload used to build this package. */
+  /** Digest of the exact source/projection payload used to build this package. */
   contentDigest: ParamMetadataDigest;
 }
 

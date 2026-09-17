@@ -3,7 +3,8 @@ using System.Security.Cryptography;
 using System.Text;
 
 /// <summary>
-/// A read-only set of independent TAE documents.
+/// A set of independent TAE documents with typed first-party field writeback
+/// delegated to the native Bridge writer.
 ///
 /// An ANIBND is not a TAE file with concatenated sections: each BND4 TAE child
 /// has its own header, absolute offsets and source bytes.  This type keeps that
@@ -221,6 +222,15 @@ internal sealed class TaeDocumentSet
         const int paramHexLimit = 64;
         var allAnimations = EnumerateAnimations().ToArray();
         var invalidTimeRangeCount = Entries.Sum(entry => entry.Document.InvalidTimeRangeCount);
+        var childCoverage = Entries.Select(entry => entry.Document.GetSchemaCoverage()).ToArray();
+        var schemaCoverage = new TaeSchemaCoverage(
+            childCoverage.Sum(item => item.CoveredEventCount),
+            childCoverage.Sum(item => item.UnknownEventCount),
+            childCoverage.Sum(item => item.LengthMismatchCount),
+            childCoverage.Sum(item => item.AmbiguousEventCount),
+            childCoverage.Sum(item => item.AssertFailureCount),
+            childCoverage.SelectMany(item => item.UnknownEventTypeIds).Distinct().OrderBy(item => item).ToArray(),
+            childCoverage.SelectMany(item => item.AssertFailureDetails).ToArray());
         var motionIds = new Dictionary<(int EntryOrdinal, long AnimId), long>();
         var motionDiagnostics = new List<Diagnostic>();
 
@@ -280,6 +290,19 @@ internal sealed class TaeDocumentSet
                         $"检测到 {invalidTimeRangeCount} 个事件时间范围非法（startTime > endTime 或非有限值），timeline 投影降级为 partial。")
                 }
                 : Array.Empty<Diagnostic>())
+            .Concat(schemaCoverage.Complete
+                ? Array.Empty<Diagnostic>()
+                : new[]
+                {
+                    new Diagnostic(
+                        "error",
+                        "TAE_SCHEMA_COVERAGE_GAP",
+                        $"SoulForge 内置 TAE schema 覆盖缺口：未知事件 {schemaCoverage.UnknownEventCount}，"
+                            + $"长度不匹配 {schemaCoverage.LengthMismatchCount}，歧义变体 {schemaCoverage.AmbiguousEventCount}，"
+                            + $"断言失败 {schemaCoverage.AssertFailureCount}。",
+                        null,
+                        schemaCoverage)
+                })
             .Concat(motionDiagnostics)
             .ToArray();
 
@@ -314,6 +337,8 @@ internal sealed class TaeDocumentSet
                 entryId = entry.TaeEntryId!.Value,
                 entryName = entry.TaeEntryName!,
                 taeGroup = entry.TaeGroup!,
+                eventBank = entry.Document.EventBank,
+                schemaBankId = entry.Document.SchemaBankId,
                 animationCount = entry.Document.Animations.Count,
                 sourceSize = entry.Document.SourceBytes.Length,
                 sourceHash = entry.Document.SourceHash
@@ -340,10 +365,12 @@ internal sealed class TaeDocumentSet
             animationsTruncated = animationPage.HasValue && animationPageSize.HasValue
                 && animationStart + animationPageSize.Value < allAnimations.Length,
             eventTypes = EventTypes,
+            schema = TaeFirstPartySchema.Metadata(),
+            schemaCoverage,
             roundTrip = report,
             diagnostics,
             authority = !report.ByteIdentical || !report.SemanticIdentical
-                || invalidTimeRangeCount > 0 || motionDiagnostics.Count > 0
+                || invalidTimeRangeCount > 0 || motionDiagnostics.Count > 0 || !schemaCoverage.Complete
                 ? "partial"
                 : "candidate"
         };

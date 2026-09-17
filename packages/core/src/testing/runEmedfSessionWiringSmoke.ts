@@ -1,108 +1,89 @@
 import assert from 'node:assert/strict';
-import { mkdir, writeFile } from 'node:fs/promises';
-import { dirname, join, resolve } from 'node:path';
+import { mkdir } from 'node:fs/promises';
+import { join } from 'node:path';
 import { MemoryOperationLogStore } from '../patch/operationLog.js';
 import {
   openWorkspaceSession,
-  type EmedfLocator
+  type OpenWorkspaceSessionOptions
 } from '../workspace/workspaceSession.js';
 import {
   nativeEditSessionFromContext,
-  openNativeEditSession
+  openNativeEditSession,
+  type OpenNativeEditSessionOptions
 } from '../editing/nativeEditSession.js';
+import { resolveEmevdRegistry } from '../emevd/emedfRegistryResolver.js';
 import { withSmokeWorkspace } from './harness/smokeWorkspace.js';
 
+const ENVIRONMENT_KEYS = ['SOULFORGE_EMEDF_PATH', 'SOULFORGE_SEKIRO_GAME_ROOT', 'LOCALAPPDATA'] as const;
+
+async function assertExternalSchemaRejected(run: () => Promise<unknown>): Promise<void> {
+  await assert.rejects(run, (error: unknown) => {
+    const candidate = error as { code?: string; diagnostics?: Array<{ code?: string }> };
+    return candidate.code === 'EMEVD_EXTERNAL_SCHEMA_FORBIDDEN'
+      && candidate.diagnostics?.some((item) => item.code === 'EMEVD_EXTERNAL_SCHEMA_FORBIDDEN') === true;
+  });
+}
+
 async function run(): Promise<void> {
-  const previousEmedfPath = process.env.SOULFORGE_EMEDF_PATH;
-  const previousGameRoot = process.env.SOULFORGE_SEKIRO_GAME_ROOT;
-  const previousLocalAppData = process.env.LOCALAPPDATA;
+  const previous = new Map<string, string | undefined>();
+  for (const key of ENVIRONMENT_KEYS) {
+    previous.set(key, process.env[key]);
+    process.env[key] = 'C:\\does-not-exist\\external-schema';
+  }
 
   try {
     await withSmokeWorkspace('emedf-session-wiring', async (workspace) => {
       const overlayRoot = join(workspace.root, 'overlay');
       const gameRoot = join(workspace.root, 'Sekiro');
-      const defaultPath = join(
-        workspace.root,
-        'tools',
-        'DarkScript3',
-        'Resources',
-        'sekiro-common.emedf.json'
-      );
       await mkdir(overlayRoot, { recursive: true });
       await mkdir(gameRoot, { recursive: true });
-      await mkdir(dirname(defaultPath), { recursive: true });
-      await writeFile(defaultPath, '{}', 'utf8');
 
-      delete process.env.SOULFORGE_EMEDF_PATH;
-      delete process.env.SOULFORGE_SEKIRO_GAME_ROOT;
       const defaultSession = await openWorkspaceSession({
         overlayRoot,
         baseRoot: gameRoot,
         game: 'sekiro'
       });
-      assert.equal(defaultSession.emedfPath, resolve(defaultPath));
-
-      const injectedPath = join(workspace.root, 'injected.emedf.json');
-      await writeFile(injectedPath, '{}', 'utf8');
-      const contexts: Array<{ overlayRoot: string; baseRoot?: string; game: string }> = [];
-      const locator: EmedfLocator = (context) => {
-        contexts.push({ ...context });
-        return injectedPath;
-      };
-
-      const injectedSession = await openWorkspaceSession({
-        overlayRoot,
-        baseRoot: gameRoot,
-        game: 'sekiro',
-        emedfLocator: locator
-      });
-      assert.equal(injectedSession.emedfPath, resolve(injectedPath));
-      assert.deepEqual(contexts[0], {
-        overlayRoot: resolve(overlayRoot),
-        baseRoot: resolve(gameRoot),
-        game: 'sekiro'
-      });
+      assert.equal(Object.prototype.hasOwnProperty.call(defaultSession, 'emedfPath'), false);
+      assert.equal(resolveEmevdRegistry().origin, 'first-party');
 
       const fromContext = nativeEditSessionFromContext({
-        session: injectedSession,
+        session: defaultSession,
         operationLog: new MemoryOperationLogStore(),
         backupBaseDir: join(workspace.root, 'storage', 'backups'),
         recoveryDir: join(workspace.root, 'storage', 'recovery')
       });
-      assert.equal(fromContext.emedfPath, resolve(injectedPath));
+      assert.equal(Object.prototype.hasOwnProperty.call(fromContext, 'emedfPath'), false);
+      assert.equal(Object.prototype.hasOwnProperty.call(fromContext.session, 'emedfPath'), false);
 
-      process.env.LOCALAPPDATA = join(workspace.root, 'local-app-data');
       const nativeSession = await openNativeEditSession({
         overlayRoot,
         baseRoot: gameRoot,
-        game: 'sekiro',
-        emedfLocator: locator
+        game: 'sekiro'
       });
-      assert.equal(nativeSession.emedfPath, resolve(injectedPath));
-      assert.equal(nativeSession.session.emedfPath, resolve(injectedPath));
-      assert.equal(contexts.length, 2);
+      assert.equal(Object.prototype.hasOwnProperty.call(nativeSession, 'emedfPath'), false);
 
-      const explicitPath = join(workspace.root, 'explicit.emedf.json');
-      const beforeExplicit = contexts.length;
-      const explicitSession = await openWorkspaceSession({
+      const legacyWorkspace = {
         overlayRoot,
         baseRoot: gameRoot,
         game: 'sekiro',
-        emedfPath: explicitPath,
-        emedfLocator: () => {
-          throw new Error('explicit emedfPath must bypass the locator');
-        }
-      });
-      assert.equal(explicitSession.emedfPath, resolve(explicitPath));
-      assert.equal(contexts.length, beforeExplicit);
+        emedfPath: join(workspace.root, 'external.emedf.json')
+      } as unknown as OpenWorkspaceSessionOptions;
+      await assertExternalSchemaRejected(() => openWorkspaceSession(legacyWorkspace));
+
+      const legacyNative = {
+        overlayRoot,
+        baseRoot: gameRoot,
+        game: 'sekiro',
+        emedfLocator: () => join(workspace.root, 'external.emedf.json')
+      } as unknown as OpenNativeEditSessionOptions;
+      await assertExternalSchemaRejected(() => openNativeEditSession(legacyNative));
     });
   } finally {
-    if (previousEmedfPath === undefined) delete process.env.SOULFORGE_EMEDF_PATH;
-    else process.env.SOULFORGE_EMEDF_PATH = previousEmedfPath;
-    if (previousGameRoot === undefined) delete process.env.SOULFORGE_SEKIRO_GAME_ROOT;
-    else process.env.SOULFORGE_SEKIRO_GAME_ROOT = previousGameRoot;
-    if (previousLocalAppData === undefined) delete process.env.LOCALAPPDATA;
-    else process.env.LOCALAPPDATA = previousLocalAppData;
+    for (const key of ENVIRONMENT_KEYS) {
+      const value = previous.get(key);
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
   }
 }
 

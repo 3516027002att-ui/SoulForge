@@ -40,6 +40,9 @@ import {
   SEMANTIC_CORPUS_KINDS,
   waitForSemanticReadiness
 } from './real-agent-harness-lib.mjs';
+import { loadTestAgentProvider } from './testing/test-agent-provider.mjs';
+import { parseGoalContract, matchesAssertion, readAssertionPath } from './real-agent-goal-contract.mjs';
+import { getFourTask } from './testing/real-agent-four-task-manifest.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = resolve(here, '..');
@@ -77,7 +80,14 @@ const DEFAULT_GOALS = Object.freeze([
 ]);
 
 const CLI_OPTIONS = parseCliOptions(process.argv.slice(2));
-const TASK_QUERY = CLI_OPTIONS.query ?? DEFAULT_TASK_QUERY;
+const AGENT_PROVIDER = CLI_OPTIONS.provider ?? process.env.SOULFORGE_AGENT_PROVIDER?.trim() ?? null;
+const AGENT_CONFIG_ID = CLI_OPTIONS.configId ?? process.env.SOULFORGE_AGENT_CONFIG_ID?.trim() ?? null;
+const AGENT_TEST_CONFIG_PATH = CLI_OPTIONS.testConfig ?? process.env.SOULFORGE_AGENT_TEST_CONFIG_PATH?.trim() ?? null;
+const AGENT_RUNTIME = CLI_OPTIONS.runtime ?? process.env.SOULFORGE_AGENT_RUNTIME?.trim() ?? 'unpacked';
+const AGENT_EXE_PATH = CLI_OPTIONS.exe ?? process.env.SOULFORGE_AGENT_EXE?.trim() ?? null;
+const WRITE_MODE = CLI_OPTIONS.write === true || CLI_OPTIONS.observationOnly !== true;
+const SELECTED_TEST_TASK = CLI_OPTIONS.testset ? getFourTask(CLI_OPTIONS.testset) : null;
+const TASK_QUERY = CLI_OPTIONS.query ?? SELECTED_TEST_TASK?.query ?? DEFAULT_TASK_QUERY;
 const SAFE_TIMESTAMP = new Date().toISOString().replace(/[:.]/gu, '-');
 const REPORT_LABEL = safeFileLabel(CLI_OPTIONS.label ?? 'real-agent');
 const MAX_STEPS = positiveInteger(
@@ -102,7 +112,7 @@ const WORKSPACE_PREP_TIMEOUT_MS = positiveInteger(
   CLI_OPTIONS.workspaceTimeoutMs ?? process.env.SOULFORGE_REAL_AGENT_WORKSPACE_TIMEOUT_MS,
   5 * 60_000
 );
-const SEMANTIC_PREFLIGHT_TIMEOUT_MS = positiveInteger(CLI_OPTIONS.semanticTimeoutMs, 60_000);
+const SEMANTIC_PREFLIGHT_TIMEOUT_MS = positiveInteger(CLI_OPTIONS.semanticTimeoutMs, 5 * 60_000);
 const EXEC_FILE = promisify(execFileCallback);
 const RUNNER_POLICY_PATH = fileURLToPath(import.meta.url);
 const RUNNER_POLICY_SHA256 = await sha256FileOrNull(RUNNER_POLICY_PATH);
@@ -144,6 +154,10 @@ function parseCliOptions(args) {
       options.observationOnly = true;
       continue;
     }
+    if (arg === '--write' || arg === '--apply-overlay') {
+      options.write = true;
+      continue;
+    }
     const next = args[index + 1];
     if (arg === '--query' && typeof next === 'string' && next.trim() !== '') {
       options.query = next.trim();
@@ -155,8 +169,38 @@ function parseCliOptions(args) {
       index += 1;
       continue;
     }
+    if (arg === '--testset' && typeof next === 'string' && next.trim() !== '') {
+      options.testset = next.trim();
+      index += 1;
+      continue;
+    }
     if (arg === '--label' && typeof next === 'string' && next.trim() !== '') {
       options.label = next.trim();
+      index += 1;
+      continue;
+    }
+    if (arg === '--provider' && typeof next === 'string' && next.trim() !== '') {
+      options.provider = next.trim();
+      index += 1;
+      continue;
+    }
+    if (arg === '--config-id' && typeof next === 'string' && next.trim() !== '') {
+      options.configId = next.trim();
+      index += 1;
+      continue;
+    }
+    if (arg === '--test-config' && typeof next === 'string' && next.trim() !== '') {
+      options.testConfig = next.trim();
+      index += 1;
+      continue;
+    }
+    if (arg === '--runtime' && typeof next === 'string' && next.trim() !== '') {
+      options.runtime = next.trim();
+      index += 1;
+      continue;
+    }
+    if (arg === '--exe' && typeof next === 'string' && next.trim() !== '') {
+      options.exe = next.trim();
       index += 1;
       continue;
     }
@@ -209,15 +253,17 @@ function printHelp() {
   console.log([
     'SoulForge 真实生产 Agent 链路模拟',
     '',
-    '默认任务检查内置的两个 PARAM 字段；这些字段不证明原文任务完整达成。',
+    '默认任务检查内置的两个 PARAM 字段；四题 --testset 会额外执行独立的 native 语义目标验收。',
     '其它任务传 --goals JSON 检查指定字段，或 --observe 仅观察原文任务执行。',
-    '当前验证器不提供整题语义验收，顶层 ok 不会据 PARAM 锚点提升为任务 PASS。',
+    '四题只有在写回、Bridge 重读、语义证据和回滚均通过时才会报告 verified；字段命中本身不等于整题完成。',
     '',
     '用法：',
     '  npm run agent:simulate',
     '  npm run agent:simulate -- "你的原始修改指令" --goals "[...]"',
     '  npm run agent:simulate -- --query "你的修改任务" --goals "[...]" --label "任务名"',
     '  npm run agent:simulate -- "你的原始修改指令" --observe --label "观察任务"',
+    '  npm run agent:simulate -- --provider test --test-config "D:/.../test"',
+    '  npm run agent:simulate -- --provider vault --config-id "<vault-config-id>"',
     '',
     'PARAM goal 格式：',
     '  [{"goalId":"g1","kind":"param-field","table":"NpcParam","rowId":50800000,"fieldId":"ninsatuNum","expectedValue":2,"required":true}]',
@@ -226,11 +272,19 @@ function printHelp() {
     '  --query <文本>                 覆盖默认任务',
     '  --goals <JSON>                冻结的机器可验证终态目标',
     '  --observe                     观察模式，可省略 goals；不作任务通过声明',
+    '  --write                       显式启用隔离 overlay 写回闭环',
+    '  --apply-overlay               --write 的兼容别名',
+    '  --testset <名称>              使用机器可验证测试清单（four-1 到 four-4；four 由批处理入口展开）',
     '  --label <名称>                报告文件名前缀',
+    '  --provider test|vault          显式选择测试 provider 或隔离 vault provider',
+    '  --config-id <id>              vault provider 的模型服务 ID',
+    '  --test-config <路径>          加密 test provider 配置路径',
+    '  --runtime unpacked|installed  默认 unpacked；installed 需要 --exe',
+    '  --exe <路径>                  已安装 SoulForge.exe 路径',
     '  --max-steps <整数>            默认 200',
     '  --timeout-ms <整数>           单次模型请求超时，默认 180000',
     '  --workspace-timeout-ms <整数> 工作区打开/轻量扫描超时，默认 300000',
-    '  --semantic-timeout-ms <整数>  首批 PARAM/MSG 语义预热等待，默认 60000',
+    '  --semantic-timeout-ms <整数>  首批 PARAM/MSG 语义预热等待，默认 300000',
     '  --session-timeout-ms <整数>   整个会话超时，默认 2700000',
     '  --max-output-tokens <整数>    总输出预算，默认 60000'
   ].join('\n'));
@@ -244,49 +298,23 @@ function harnessError(code, message, details) {
 }
 
 function parseGoals(raw) {
-  if (raw === undefined) {
-    if (CLI_OPTIONS.observationOnly) return [];
-    if (TASK_QUERY === DEFAULT_TASK_QUERY) return DEFAULT_GOALS.map((goal) => ({ ...goal }));
+  try {
+    const selectedGoals = raw === undefined && SELECTED_TEST_TASK
+      ? JSON.stringify(SELECTED_TEST_TASK.goals)
+      : raw;
+    return parseGoalContract(selectedGoals, {
+      observationOnly: CLI_OPTIONS.observationOnly === true,
+      taskQuery: TASK_QUERY,
+      defaultTaskQuery: DEFAULT_TASK_QUERY,
+      defaultGoals: SELECTED_TEST_TASK?.goals ?? DEFAULT_GOALS
+    });
+  } catch (error) {
     throw harnessError(
-      'GOAL_CONTRACT_REQUIRED',
-      '非默认任务须用 --goals 提供字段检查目标，或 --observe 观察原文执行。'
+      error?.code ?? 'GOAL_CONTRACT_INVALID',
+      error instanceof Error ? error.message : String(error),
+      error?.details
     );
   }
-  let parsed;
-  try {
-    parsed = JSON.parse(raw);
-  } catch (error) {
-    throw harnessError('GOAL_CONTRACT_INVALID', `--goals 不是有效 JSON：${error instanceof Error ? error.message : String(error)}`);
-  }
-  const goals = Array.isArray(parsed) ? parsed : parsed?.goals;
-  if (!Array.isArray(goals) || goals.length === 0) {
-    throw harnessError('GOAL_CONTRACT_INVALID', '--goals 必须是非空数组，或包含非空 goals 数组的对象。');
-  }
-  const ids = new Set();
-  return goals.map((goal, index) => {
-    if (!goal || typeof goal !== 'object' || Array.isArray(goal)
-      || goal.kind !== 'param-field'
-      || typeof goal.table !== 'string' || goal.table.trim() === ''
-      || !Number.isSafeInteger(goal.rowId)
-      || typeof goal.fieldId !== 'string' || goal.fieldId.trim() === ''
-      || !['string', 'number', 'boolean'].includes(typeof goal.expectedValue)) {
-      throw harnessError('GOAL_CONTRACT_INVALID', `goal[${index}] 不是有效的 param-field 目标。`);
-    }
-    const goalId = typeof goal.goalId === 'string' && goal.goalId.trim() !== ''
-      ? goal.goalId.trim()
-      : `param-${goal.table}-${goal.rowId}-${goal.fieldId}`;
-    if (ids.has(goalId)) throw harnessError('GOAL_CONTRACT_INVALID', `goalId 重复：${goalId}`);
-    ids.add(goalId);
-    return {
-      goalId,
-      kind: 'param-field',
-      table: goal.table.trim(),
-      rowId: goal.rowId,
-      fieldId: goal.fieldId.trim(),
-      expectedValue: goal.expectedValue,
-      required: goal.required !== false
-    };
-  });
 }
 
 function log(message) {
@@ -297,7 +325,13 @@ function redactString(value) {
   return value
     .replace(/\bBearer\s+[A-Za-z0-9._~+\/-]+/giu, 'Bearer [REDACTED]')
     .replace(/\bsk-[A-Za-z0-9_-]{8,}\b/gu, '[REDACTED]')
-    .replace(/(["']?(?:api[_-]?key|password|secret|authorization|token)["']?\s*[:=]\s*["']?)[^\s,"'}]+/giu, '$1[REDACTED]');
+    .replace(/(["']?(?:api[_-]?key|password|secret|authorization|token)["']?\s*[:=]\s*["']?)[^\s,"'}]+/giu, '$1[REDACTED]')
+    // Reports and durable test evidence are portable artifacts.  Keep logical
+    // file://param/... identities, but never persist the host's drive path or
+    // the temporary user-data/scratch path.
+    .replace(/file:\/\/\/(?:[A-Za-z]:[\\/]|\/)[^"'\s}]+/gu, 'file://[LOCAL_PATH]')
+    .replace(/\b[A-Za-z]:[\\/][^"'{}\r\n]+/gu, '[LOCAL_PATH]')
+    .replace(/\\\\[^"'{}\r\n\s]+/gu, '[LOCAL_PATH]');
 }
 
 function sanitizeForReport(value, key = '') {
@@ -590,15 +624,166 @@ function eventSummary(events) {
 
 function sameValue(observed, expected) {
   if (typeof expected === 'number' && typeof observed === 'string' && observed.trim() !== '') {
-    return Number(observed) === expected;
+    return /^-?(?:0|[1-9]\d*)$/u.test(observed.trim())
+      && Number.isSafeInteger(Number(observed))
+      && Number(observed) === expected;
   }
   if (typeof expected === 'boolean' && typeof observed === 'number') return Boolean(observed) === expected;
   return Object.is(observed, expected);
 }
 
-async function verifyGoalsThroughNativeTool(window, goals) {
+function collectNativeSourceFacts(value, facts = { hashes: [], revisions: [], uris: [] }, depth = 0) {
+  if (depth > 6 || value === null || value === undefined) return facts;
+  if (Array.isArray(value)) {
+    for (const item of value.slice(0, 64)) collectNativeSourceFacts(item, facts, depth + 1);
+    return facts;
+  }
+  if (typeof value !== 'object') return facts;
+  for (const [key, child] of Object.entries(value)) {
+    const lower = key.toLocaleLowerCase();
+    if (typeof child === 'string' && lower === 'sourcehash' && child.length > 0) facts.hashes.push(child);
+    if ((lower === 'sourcerevision' || lower === 'revision')
+      && (typeof child === 'number' || typeof child === 'string')) facts.revisions.push(child);
+    if (typeof child === 'string' && lower === 'sourceuri' && child.length > 0) facts.uris.push(child);
+    collectNativeSourceFacts(child, facts, depth + 1);
+  }
+  return facts;
+}
+
+function compactNativeToolResult(value, depth = 0) {
+  if (depth > 4) return '[depth-limited]';
+  if (typeof value === 'string') return value.length > 512 ? `${value.slice(0, 512)}…` : value;
+  if (value === null || typeof value === 'number' || typeof value === 'boolean') return value;
+  if (Array.isArray(value)) return value.slice(0, 16).map((item) => compactNativeToolResult(item, depth + 1));
+  if (typeof value !== 'object') return undefined;
+  const output = {};
+  for (const [key, child] of Object.entries(value)) {
+    // Complete Lua source and DarkScript are used for the in-process
+    // assertion, but must not be copied into a rollout/report.
+    if (key === 'sourceText' || key === 'darkScript' || key === 'argsBase64' || key === 'contentBase64') continue;
+    output[key] = compactNativeToolResult(child, depth + 1);
+  }
+  return output;
+}
+
+async function runReadOnlyGoalTool(window, goal) {
+  const result = await window.evaluate(
+    async ({ tool, input }) => globalThis.soulforge.runAiTool(tool, input),
+    { tool: goal.tool, input: goal.input }
+  );
+  return {
+    tool: goal.tool,
+    input: goal.input,
+    result,
+    compactResult: compactNativeToolResult(result)
+  };
+}
+
+function evaluateParamGoal(goal, result) {
+  const fields = result?.ok && Array.isArray(result?.data?.fields)
+    ? result.data.fields
+    : [];
+  const field = fields.find((candidate) => (
+    Number(candidate?.rowId) === goal.rowId
+    && String(candidate?.fieldId ?? '').toLocaleLowerCase() === goal.fieldId.toLocaleLowerCase()
+  ));
+  const sourceHashPresent = typeof field?.sourceHash === 'string' && field.sourceHash.length > 0;
+  return {
+    ...goal,
+    nativeReadOk: result?.ok === true,
+    observedValue: field?.value ?? null,
+    sourceHashPresent,
+    sourceRevisionPresent: field?.sourceRevision !== undefined && field?.sourceRevision !== null,
+    verified: Boolean(result?.ok === true && field && sourceHashPresent && sameValue(field.value, goal.expectedValue)),
+    verificationEvidence: result?.ok === true && sourceHashPresent
+      ? [{ tool: 'read_param_fields', sourceHashes: [field.sourceHash], sourceRevisions: field.sourceRevision === undefined ? [] : [field.sourceRevision], sourceUris: field.sourceUri ? [field.sourceUri] : [] }]
+      : [],
+    diagnostics: result?.ok === false ? result?.error ?? null : null,
+    read: compactNativeToolResult(result ?? null)
+  };
+}
+
+function goalChangedInOverlay(goal, treeEvidence) {
+  if (!goal.changedPath || !treeEvidence?.before || !treeEvidence?.after) return true;
+  const before = treeEvidence.before.entries.find((entry) => entry.path === goal.changedPath);
+  const after = treeEvidence.after.entries.find((entry) => entry.path === goal.changedPath);
+  return JSON.stringify(before ?? null) !== JSON.stringify(after ?? null);
+}
+
+async function verifyGoalThroughNativeTool(window, goal, paramReads = new Map(), treeEvidence = undefined) {
+  if (goal.kind === 'param-field') {
+    const key = `${goal.table}\0${goal.rowId}`;
+    let result = paramReads.get(key);
+    if (!result) {
+      result = await window.evaluate(
+        async (input) => globalThis.soulforge.runAiTool('read_param_fields', input),
+        { table: goal.table, rowIds: [goal.rowId], fieldIds: [goal.fieldId] }
+      );
+      paramReads.set(key, result);
+    }
+    const evaluation = evaluateParamGoal(goal, result);
+    if (evaluation.verified && !goalChangedInOverlay(goal, treeEvidence)) {
+      evaluation.verified = false;
+      evaluation.diagnostics = [{ code: 'GOAL_RESOURCE_UNCHANGED', message: `目标 ${goal.goalId} 指定资源在 Agent 写回后没有变化。` }];
+      evaluation.verificationEvidence = [];
+    }
+    return evaluation;
+  }
+  if (goal.kind === 'composite' || goal.kind === 'semantic') {
+    const children = [];
+    for (const child of goal.checks) {
+      children.push(await verifyGoalThroughNativeTool(window, child, paramReads, treeEvidence));
+    }
+    const requiredChildren = children.filter((child) => child?.required !== false);
+    const verified = requiredChildren.length > 0 && requiredChildren.every((child) => child.verified === true);
+    const changed = goalChangedInOverlay(goal, treeEvidence);
+    return {
+      ...goal,
+      verified: verified && changed,
+      nativeReadOk: requiredChildren.every((child) => child.nativeReadOk === true),
+      observedValue: verified,
+      verificationEvidence: verified && changed ? children.flatMap((child) => child?.verificationEvidence ?? []) : [],
+      checks: children,
+      diagnostics: verified && changed
+        ? []
+        : [{ code: changed ? 'SEMANTIC_ASSERTION_FAILED' : 'GOAL_RESOURCE_UNCHANGED', message: changed ? `复合目标 ${goal.goalId} 的至少一个检查未通过。` : `目标 ${goal.goalId} 指定资源在 Agent 写回后没有变化。` }]
+    };
+  }
+  const execution = await runReadOnlyGoalTool(window, goal);
+  const result = execution.result;
+  const facts = collectNativeSourceFacts(result);
+  const nativeReadOk = result?.ok === true;
+  const sourceHashPresent = facts.hashes.length > 0;
+  const assertionOk = nativeReadOk && matchesAssertion(result, goal.assertion);
+  const proofOk = !goal.requireSourceHash || sourceHashPresent;
+  const observed = goal.assertion?.path === undefined
+    ? null
+    : readAssertionPath(result, goal.assertion.path).value ?? null;
+  const changed = goalChangedInOverlay(goal, treeEvidence);
+  const diagnostics = [];
+  if (!nativeReadOk) diagnostics.push(result?.error ?? { code: 'NATIVE_READ_FAILED', message: `${goal.tool} 读取失败。` });
+  if (nativeReadOk && !assertionOk) diagnostics.push({ code: 'SEMANTIC_ASSERTION_FAILED', message: `目标 ${goal.goalId} 的原生结果未满足断言。` });
+  if (nativeReadOk && !proofOk) diagnostics.push({ code: 'NATIVE_SOURCE_HASH_MISSING', message: `目标 ${goal.goalId} 缺少 sourceHash，不能作为原生验证证据。` });
+  if (nativeReadOk && !changed) diagnostics.push({ code: 'GOAL_RESOURCE_UNCHANGED', message: `目标 ${goal.goalId} 指定资源在 Agent 写回后没有变化。` });
+  return {
+    ...goal,
+    nativeReadOk,
+    observedValue: compactNativeToolResult(observed),
+    sourceHashPresent,
+    sourceRevisionPresent: facts.revisions.length > 0,
+    verified: nativeReadOk && assertionOk && proofOk && changed,
+    verificationEvidence: nativeReadOk && assertionOk && proofOk && changed
+      ? [{ tool: goal.tool, sourceHashes: [...new Set(facts.hashes)].slice(0, 4), sourceRevisions: [...new Set(facts.revisions)].slice(0, 4), sourceUris: [...new Set(facts.uris)].slice(0, 4) }]
+      : [],
+    diagnostics,
+    read: execution.compactResult
+  };
+}
+
+async function verifyGoalsThroughNativeTool(window, goals, treeEvidence = undefined) {
   const grouped = new Map();
   for (const goal of goals) {
+    if (goal.kind !== 'param-field') continue;
     const key = `${goal.table}\0${goal.rowId}`;
     const current = grouped.get(key) ?? { table: goal.table, rowId: goal.rowId, fieldIds: [] };
     if (!current.fieldIds.includes(goal.fieldId)) current.fieldIds.push(goal.fieldId);
@@ -612,32 +797,17 @@ async function verifyGoalsThroughNativeTool(window, goals) {
     );
     reads.push({ query, result });
   }
+  const paramReads = new Map(reads.map((entry) => [`${entry.query.table}\0${entry.query.rowId}`, entry.result]));
   const evaluations = goals.map((goal) => {
     const read = reads.find((item) => item.query.table === goal.table && item.query.rowId === goal.rowId);
-    const fields = read?.result?.ok && Array.isArray(read.result?.data?.fields)
-      ? read.result.data.fields
-      : [];
-    const field = fields.find((candidate) => (
-      Number(candidate?.rowId) === goal.rowId
-      && String(candidate?.fieldId ?? '').toLocaleLowerCase() === goal.fieldId.toLocaleLowerCase()
-    ));
-    return {
-      ...goal,
-      nativeReadOk: read?.result?.ok === true,
-      observedValue: field?.value ?? null,
-      sourceHashPresent: typeof field?.sourceHash === 'string' && field.sourceHash.length > 0,
-      sourceRevisionPresent: field?.sourceRevision !== undefined && field?.sourceRevision !== null,
-      verified: Boolean(
-        read?.result?.ok === true
-        && field
-        && typeof field.sourceHash === 'string'
-        && field.sourceHash.length > 0
-        && sameValue(field.value, goal.expectedValue)
-      ),
-      diagnostics: read?.result?.ok === false ? read.result?.error ?? null : null
-    };
+    return evaluateParamGoal(goal, read?.result ?? null);
   });
-  return { reads, evaluations };
+  const semanticEvaluations = [];
+  for (const goal of goals) {
+    if (goal.kind === 'param-field') continue;
+    semanticEvaluations.push(await verifyGoalThroughNativeTool(window, goal, paramReads, treeEvidence));
+  }
+  return { reads: reads.map((entry) => ({ ...entry, result: compactNativeToolResult(entry.result) })), evaluations: [...evaluations, ...semanticEvaluations] };
 }
 
 function parseDurableTerminal(raw) {
@@ -1030,23 +1200,62 @@ async function run() {
     printHelp();
     return { ok: true, help: true };
   }
+  if (CLI_OPTIONS.observationOnly === true && CLI_OPTIONS.write === true) {
+    throw harnessError('REAL_AGENT_MODE_INVALID', '--observe 与 --write/--apply-overlay 不能同时使用。');
+  }
+  if (CLI_OPTIONS.testset && !SELECTED_TEST_TASK) {
+    throw harnessError('REAL_AGENT_TESTSET_INVALID', `未知四题测试清单：${CLI_OPTIONS.testset}`);
+  }
+  if (AGENT_RUNTIME !== 'unpacked' && AGENT_RUNTIME !== 'installed') {
+    throw harnessError('REAL_AGENT_RUNTIME_INVALID', '--runtime 只能是 unpacked 或 installed。');
+  }
+  if (AGENT_RUNTIME === 'installed') {
+    const exeInfo = AGENT_EXE_PATH ? await stat(AGENT_EXE_PATH).catch(() => null) : null;
+    if (!AGENT_EXE_PATH || !exeInfo?.isFile()) {
+      const reportDir = resolve(REPO_ROOT, 'output/agent-real');
+      const reportStem = `${REPORT_LABEL}-${SAFE_TIMESTAMP}`;
+      const reportPath = join(reportDir, `${reportStem}.json`);
+      await mkdir(reportDir, { recursive: true });
+      const notAttempted = {
+        ok: false,
+        status: 'not-attempted',
+        verificationMode: 'installed-exe',
+        runtime: 'installed',
+        task: TASK_QUERY,
+        diagnostic: {
+          code: 'REAL_AGENT_INSTALLED_RUNTIME_NOT_ATTEMPTED',
+          message: '没有提供可执行的安装版 EXE；本次不把 unpacked 结果冒充 installed smoke。'
+        },
+        reportPath: `output/agent-real/${reportStem}.json`
+      };
+      await writeFile(reportPath, `${JSON.stringify(notAttempted, null, 2)}\n`, 'utf8');
+      console.log(JSON.stringify(notAttempted, null, 2));
+      process.exitCode = 1;
+      return notAttempted;
+    }
+  }
   const goals = parseGoals(CLI_OPTIONS.goals);
   // A supplied immutable artifact is the complete production receipt for this
   // run.  Validate every snapshot byte, but do not compare it with the live
   // checkout: a later source/build update must not silently mix into a pinned
   // Electron/Bridge run.
   const configuredSnapshotRoot = CONFIGURED_SNAPSHOT_ROOT;
-  const build = configuredSnapshotRoot
-    ? await assertAgentProductionArtifactSnapshotFresh(configuredSnapshotRoot)
-    : await assertAgentProductionBuildFresh(REPO_ROOT);
-  const productionMainSha256 = await sha256FileOrNull(PRODUCTION_MAIN);
+  const build = AGENT_RUNTIME === 'installed'
+    ? null
+    : configuredSnapshotRoot
+      ? await assertAgentProductionArtifactSnapshotFresh(configuredSnapshotRoot)
+      : await assertAgentProductionBuildFresh(REPO_ROOT);
+  const productionMainSha256 = await sha256FileOrNull(AGENT_RUNTIME === 'installed' ? AGENT_EXE_PATH : PRODUCTION_MAIN);
   if (!productionMainSha256) {
-    throw harnessError('PRODUCTION_MAIN_MISSING', `生产 main 入口不存在或不可读：${PRODUCTION_MAIN}`);
+    throw harnessError(
+      AGENT_RUNTIME === 'installed' ? 'REAL_AGENT_INSTALLED_EXE_UNREADABLE' : 'PRODUCTION_MAIN_MISSING',
+      AGENT_RUNTIME === 'installed' ? '安装版 EXE 不可读，未启动测试。' : `生产 main 入口不存在或不可读：${PRODUCTION_MAIN}`
+    );
   }
-  const productionMainManifestEntry = configuredSnapshotRoot
+  const productionMainManifestEntry = AGENT_RUNTIME !== 'installed' && configuredSnapshotRoot
     ? build.manifest.files?.entries?.find((entry) => entry.path === 'apps/desktop/e2e/playwright/production-main.mjs') ?? null
     : null;
-  if (configuredSnapshotRoot && (!productionMainManifestEntry
+  if (AGENT_RUNTIME !== 'installed' && configuredSnapshotRoot && (!productionMainManifestEntry
     || productionMainManifestEntry.sha256 !== productionMainSha256)) {
     throw harnessError(
       'PRODUCTION_MAIN_SNAPSHOT_MISMATCH',
@@ -1059,45 +1268,63 @@ async function run() {
       }
     );
   }
-  const buildSummary = configuredSnapshotRoot
+  const buildSummary = AGENT_RUNTIME === 'installed'
     ? {
-        manifestPath: relative(REPO_ROOT, build.manifestPath),
-        sourceHash: build.manifest.liveBuild.sourceSha256,
-        outputHash: build.manifest.liveBuild.outputSha256,
+        manifestPath: null,
+        sourceHash: null,
+        outputHash: productionMainSha256,
         sourceFiles: null,
-        outputFiles: build.manifest.files.fileCount,
-        artifactId: build.manifest.artifactId,
+        outputFiles: null,
+        runtime: 'installed-exe',
         productionMain: {
-          path: portablePath(PRODUCTION_MAIN),
-          sha256: productionMainSha256,
-          manifestSha256: productionMainManifestEntry?.sha256 ?? null
-        }
-      }
-    : {
-        manifestPath: relative(REPO_ROOT, build.manifestPath),
-        sourceHash: build.manifest.source.sha256,
-        outputHash: build.manifest.output.sha256,
-        sourceFiles: build.manifest.source.fileCount,
-        outputFiles: build.manifest.output.fileCount,
-        productionMain: {
-          path: portablePath(PRODUCTION_MAIN),
+          path: portablePath(AGENT_EXE_PATH),
           sha256: productionMainSha256,
           manifestSha256: null
         }
-       };
+      }
+    : configuredSnapshotRoot
+      ? {
+          manifestPath: relative(REPO_ROOT, build.manifestPath),
+          sourceHash: build.manifest.liveBuild.sourceSha256,
+          outputHash: build.manifest.liveBuild.outputSha256,
+          sourceFiles: null,
+          outputFiles: build.manifest.files.fileCount,
+          artifactId: build.manifest.artifactId,
+          productionMain: {
+            path: portablePath(PRODUCTION_MAIN),
+            sha256: productionMainSha256,
+            manifestSha256: productionMainManifestEntry?.sha256 ?? null
+          }
+        }
+      : {
+          manifestPath: relative(REPO_ROOT, build.manifestPath),
+          sourceHash: build.manifest.source.sha256,
+          outputHash: build.manifest.output.sha256,
+          sourceFiles: build.manifest.source.fileCount,
+          outputFiles: build.manifest.output.fileCount,
+          productionMain: {
+            path: portablePath(PRODUCTION_MAIN),
+            sha256: productionMainSha256,
+            manifestSha256: null
+          }
+        };
   const productionReceipt = {
-    mode: configuredSnapshotRoot ? 'immutable-snapshot' : 'live-build',
-    snapshotRoot: configuredSnapshotRoot ? portablePath(build.snapshotRoot) : null,
-    manifestPath: portablePath(build.manifestPath),
-    artifactId: build.manifest.artifactId ?? null,
-    sourceHash: configuredSnapshotRoot
-      ? build.manifest.liveBuild.sourceSha256
-      : build.manifest.source.sha256,
-    outputHash: configuredSnapshotRoot
-      ? build.manifest.liveBuild.outputSha256
-      : build.manifest.output.sha256,
+    mode: AGENT_RUNTIME === 'installed' ? 'installed-exe' : configuredSnapshotRoot ? 'immutable-snapshot' : 'live-build',
+    snapshotRoot: AGENT_RUNTIME !== 'installed' && configuredSnapshotRoot ? portablePath(build.snapshotRoot) : null,
+    manifestPath: AGENT_RUNTIME === 'installed' ? null : portablePath(build.manifestPath),
+    artifactId: build?.manifest.artifactId ?? null,
+    sourceHash: AGENT_RUNTIME === 'installed'
+      ? null
+      : configuredSnapshotRoot
+        ? build.manifest.liveBuild.sourceSha256
+        : build.manifest.source.sha256,
+    outputHash: AGENT_RUNTIME === 'installed'
+      ? productionMainSha256
+      : configuredSnapshotRoot
+        ? build.manifest.liveBuild.outputSha256
+        : build.manifest.output.sha256,
     productionMain: {
-      path: portablePath(PRODUCTION_MAIN),
+      path: portablePath(AGENT_RUNTIME === 'installed' ? AGENT_EXE_PATH : PRODUCTION_MAIN),
       sha256: productionMainSha256,
       manifestSha256: productionMainManifestEntry?.sha256 ?? null
     }
@@ -1119,6 +1346,7 @@ async function run() {
   let terminalEvidence = null;
   let interruptedDurableRollout = null;
   let interruptedEvidenceHasEntries = false;
+  let taskRecordStatus = 'not-emitted';
   let corpusManifest = null;
   let semanticPreflight = null;
   let phase = 'prepare';
@@ -1130,6 +1358,7 @@ async function run() {
   let operationsAfterRollback = null;
   let newCommittedOperations = [];
   let rollbackResults = [];
+  let providerEvidence = null;
   let treeBefore = null;
   let treeAfterRun = null;
   let treeAfterRollback = null;
@@ -1144,10 +1373,10 @@ async function run() {
     events: [],
     ownedProcessTree: null,
     productionMain: {
-      path: portablePath(PRODUCTION_MAIN),
+      path: portablePath(AGENT_RUNTIME === 'installed' ? AGENT_EXE_PATH : PRODUCTION_MAIN),
       sha256: productionMainSha256,
-      snapshotRoot: configuredSnapshotRoot ? portablePath(configuredSnapshotRoot) : null,
-      artifactId: build.manifest.artifactId ?? null
+      snapshotRoot: AGENT_RUNTIME !== 'installed' && configuredSnapshotRoot ? portablePath(configuredSnapshotRoot) : null,
+      artifactId: build?.manifest.artifactId ?? null
     }
   };
   const startedAt = new Date().toISOString();
@@ -1161,14 +1390,26 @@ async function run() {
 
     phase = 'launch-electron';
     app = await electron.launch({
-      cwd: configuredSnapshotRoot ? resolve(configuredSnapshotRoot) : REPO_ROOT,
-      args: [PRODUCTION_MAIN, `--user-data-dir=${userDataDir}`],
+      ...(AGENT_RUNTIME === 'installed'
+        ? { executablePath: AGENT_EXE_PATH }
+        : { cwd: configuredSnapshotRoot ? resolve(configuredSnapshotRoot) : REPO_ROOT }),
+      args: [
+        ...(AGENT_RUNTIME === 'unpacked' ? [PRODUCTION_MAIN] : []),
+        `--user-data-dir=${userDataDir}`
+      ],
       env: {
         ...process.env,
         NODE_ENV: 'production',
         SF_E2E_OVERLAY_ROOT: overlayRoot,
         SF_E2E_BASE_ROOT: GAME_ROOT,
-        SOULFORGE_AGENT_TASK_RECORD_DIR: taskRecordDir
+        // Keep the Agent's durable workspace/knowledge/operation databases
+        // outside the overlay.  The overlay must contain only user Mod
+        // resources so the final rollback comparison cannot be confused by
+        // SoulForge's own SQLite sidecars (and an installed run cannot lock a
+        // real workspace database).
+        SF_E2E_WORKSPACE_STORAGE_ROOT: join(scratchRoot, 'workspace-storage'),
+        SOULFORGE_AGENT_TASK_RECORD_DIR: taskRecordDir,
+        ...(AGENT_RUNTIME === 'installed' ? { SF_E2E_INSTALLED_HARNESS: '1' } : {})
       }
     });
     const child = app.process();
@@ -1274,10 +1515,40 @@ async function run() {
     for (const diagnostic of semanticPreflight.diagnostics) log(`${diagnostic.code}: ${diagnostic.message}`);
 
     phase = 'provider';
-    const providers = await window.evaluate(() => globalThis.soulforge.listModelServices());
-    const provider = providers.find((candidate) => candidate.id === 'test-service');
-    if (!provider || provider.hasCredential !== true) {
-      throw harnessError('REAL_AGENT_TEST_CONFIG_MISSING', '生产主进程未发现带凭据的 test-service；未发起模型请求。');
+    if (AGENT_PROVIDER !== 'test' && AGENT_PROVIDER !== 'vault') {
+      throw harnessError('REAL_AGENT_PROVIDER_REQUIRED', '模拟 Agent 必须显式指定 --provider test 或 --provider vault；未发起模型请求。');
+    }
+    let providerId = AGENT_CONFIG_ID;
+    if (AGENT_PROVIDER === 'test') {
+      const loaded = loadTestAgentProvider({ repoRoot: REPO_ROOT, explicitPath: AGENT_TEST_CONFIG_PATH });
+      if (!loaded) {
+        throw harnessError('REAL_AGENT_TEST_CONFIG_MISSING', '未找到有效的加密 test provider 配置；未发起模型请求。');
+      }
+      const saved = await window.evaluate(async (config) => {
+        return globalThis.soulforge.upsertModelService(config);
+      }, {
+        id: 'test-service',
+        displayName: 'test',
+        protocol: loaded.config.protocol,
+        baseUrl: loaded.config.baseUrl,
+        model: loaded.config.model,
+        apiKey: loaded.config.apiKey
+      });
+      if (!saved?.hasCredential) {
+        throw harnessError('REAL_AGENT_TEST_CONFIG_REJECTED', 'test provider 未能写入隔离模型 vault；未发起模型请求。');
+      }
+      providerId = 'test-service';
+      providerEvidence = { mode: 'test', id: providerId, source: 'simulation-test-config' };
+    } else {
+      if (!providerId || providerId === 'test-service') {
+        throw harnessError('REAL_AGENT_PROVIDER_CONFIG_REQUIRED', 'vault provider 必须指定非 test-service 的 --config-id；未发起模型请求。');
+      }
+      const providers = await window.evaluate(() => globalThis.soulforge.listModelServices());
+      const provider = providers.find((candidate) => candidate.id === providerId);
+      if (!provider || provider.hasCredential !== true) {
+        throw harnessError('REAL_AGENT_PROVIDER_CONFIG_REQUIRED', `隔离 vault 中没有带凭据的 provider：${providerId}；未发起模型请求。`);
+      }
+      providerEvidence = { mode: 'vault', id: providerId, source: 'isolated-user-data' };
     }
 
     phase = 'baseline-operations';
@@ -1287,16 +1558,34 @@ async function run() {
       globalThis.__sfAgentHarnessUnsubscribe?.();
       globalThis.__sfAgentHarnessUnsubscribe = globalThis.soulforge.onAiAgentEvent((envelope) => {
         globalThis.__sfAgentHarnessEvents.push(envelope);
+        if (envelope?.event?.type === 'approval-requested') {
+          const allowed = new Set(['stage', 'commit', 'rollback', 'write']);
+          const decision = allowed.has(envelope.event.permissionLevel) ? 'once' : 'reject';
+          void globalThis.soulforge.respondAiAgentApproval({
+            sessionId: envelope.sessionId,
+            callId: envelope.event.callId,
+            decision
+          });
+        }
       });
     });
 
     phase = 'run-agent';
+    const requestedAgentMode = CLI_OPTIONS.observationOnly === true ? 'plan' : 'normal';
+    const permission = await window.evaluate(
+      (mode) => globalThis.soulforge.requestAiAgentPermission(mode),
+      requestedAgentMode
+    );
+    if (!permission?.ok || typeof permission.grantId !== 'string') {
+      throw harnessError(permission?.error?.code ?? 'AGENT_PERMISSION_REQUIRED', permission?.error?.message ?? '模拟 Agent 未获得正常审批权限。');
+    }
     const accepted = await window.evaluate(
       async (request) => globalThis.soulforge.runAiAgent(request),
       {
-        configId: 'test-service',
+        configId: providerId,
         prompt: TASK_QUERY,
-        mode: 'fullPermission',
+        mode: requestedAgentMode,
+        permissionGrantId: permission.grantId,
         streaming: true,
         maxSteps: MAX_STEPS,
         timeoutMs: REQUEST_TIMEOUT_MS,
@@ -1306,8 +1595,7 @@ async function run() {
         useContextBroker: true,
         contextMaxBytes: 16_000,
         useRagSearch: true,
-        ragSearchMaxHits: 8,
-        approvalRequiredLevels: []
+        ragSearchMaxHits: 8
       }
     );
     if (!accepted?.ok || typeof accepted.sessionId !== 'string') {
@@ -1337,13 +1625,16 @@ async function run() {
     }
 
     phase = 'verify-native-goals';
-    const nativeGoals = await verifyGoalsThroughNativeTool(window, goals);
     operationsAfterRun = await window.evaluate(() => globalThis.soulforge.listOperations());
     const priorOperationIds = new Set(operationsBefore.map((operation) => operation.opId));
     newCommittedOperations = operationsAfterRun.filter((operation) => (
       operation.status === 'committed' && !priorOperationIds.has(operation.opId)
     ));
     treeAfterRun = await snapshotTree(overlayRoot);
+    const nativeGoals = await verifyGoalsThroughNativeTool(window, goals, {
+      before: treeBefore,
+      after: treeAfterRun
+    });
 
     phase = 'copy-durable-evidence';
     const rolloutSource = resolveWithin(join(userDataDir, 'agent'), terminal.rolloutFileName, 'ROLLOUT_PATH_FORBIDDEN');
@@ -1351,11 +1642,18 @@ async function run() {
     if (!isWithin(taskRecordDir, taskRecordSource)) throw harnessError('TASK_RECORD_PATH_FORBIDDEN', 'Evidence 路径越过隔离目录。');
     await sleep(100);
     await copyFile(rolloutSource, rolloutCopyPath);
-    await copyFile(taskRecordSource, taskRecordCopyPath);
-    const [rolloutRaw, taskRecordRaw] = await Promise.all([
-      readFile(rolloutCopyPath, 'utf8'),
-      readFile(taskRecordCopyPath, 'utf8')
-    ]);
+    let taskRecordRaw = '';
+    const taskRecordSnapshot = await readFile(taskRecordSource, 'utf8').catch(() => null);
+    if (taskRecordSnapshot !== null) {
+      await writeFile(taskRecordCopyPath, taskRecordSnapshot, 'utf8');
+      taskRecordRaw = taskRecordSnapshot;
+      taskRecordStatus = 'present';
+    }
+    // The production Agent now uses automatic read proofs and the durable
+    // rollout as its authoritative evidence.  The old markdown task ledger is
+    // optional historical evidence; its absence must be reported, not turn a
+    // completed observation into an ENOENT harness failure.
+    const rolloutRaw = await readFile(rolloutCopyPath, 'utf8');
     const durableRollout = parseDurableTerminal(rolloutRaw);
     const evidenceHasEntries = /^##\s+\S+/mu.test(taskRecordRaw);
 
@@ -1413,7 +1711,14 @@ async function run() {
     // that can mask the failed operation; the catch report already contains
     // the committed IDs, attempted IDs and completed/failed results.
     if (!rollbackThrown) {
-      operationsAfterRollback = await window.evaluate(() => globalThis.soulforge.listOperations());
+      // Observation-only runs cannot have committed operations. Re-querying
+      // operation.list here only competes with the still-running background
+      // semantic/RAG persistence queue and can turn an otherwise complete
+      // observation into a history timeout. A write run still performs the
+      // authoritative post-rollback reread below.
+      operationsAfterRollback = newCommittedOperations.length === 0
+        ? operationsAfterRun
+        : await window.evaluate(() => globalThis.soulforge.listOperations());
       treeAfterRollback = await snapshotTree(overlayRoot);
       rollbackStatuses = new Map(operationsAfterRollback.map((operation) => [operation.opId, operation.status]));
       workspaceAnalysis = await window.evaluate(() => globalThis.__sfAgentHarnessAnalysis ?? null);
@@ -1487,12 +1792,12 @@ async function run() {
           };
     }
     const durableEvidenceOk = durableRollout.parseErrors === 0
-      && durableRollout.terminal !== null
-      && evidenceHasEntries;
+      && durableRollout.terminal !== null;
     const runtimeOk = eventsReport.seqGaps.length === 0
       && pageErrors.length === 0
       && waited.cancelledForTimeout === false;
     const taskSucceeded = lifecycleOk
+      && WRITE_MODE
       && goalsOk
       && goalCoverage.taskCoverageOk
       && committedOperationOk
@@ -1517,6 +1822,7 @@ async function run() {
         stopFileRequested: waited.stopFileRequested
       }),
       verdict: {
+        writeMode: WRITE_MODE,
         lifecycleOk,
         goalsOk,
         taskCoverageOk: goalCoverage.taskCoverageOk,
@@ -1531,13 +1837,7 @@ async function run() {
       },
       build: buildSummary,
       productionReceipt,
-      provider: {
-        id: provider.id,
-        protocol: provider.protocol,
-        model: provider.model,
-        baseUrl: provider.baseUrl,
-        hasCredential: provider.hasCredential
-      },
+      provider: providerEvidence,
       workspace: { ...workspace, semanticPreflight, analysis: workspaceAnalysis ?? workspace.analysis },
       isolatedWorkspace: {
         sourceModRoot: portablePath(relative(REPO_ROOT, MOD_ROOT)),
@@ -1558,7 +1858,11 @@ async function run() {
         ...(AGENT_STOP_FILE ? { stopFile: portablePath(AGENT_STOP_FILE) } : {}),
         events: eventsReport,
         rolloutPath: rolloutCopyPath,
-        taskRecordPath: taskRecordCopyPath,
+        taskRecordPath: taskRecordStatus === 'present' ? taskRecordCopyPath : null,
+        taskRecordStatus,
+        taskRecordDiagnostic: taskRecordStatus === 'present'
+          ? null
+          : { code: 'TASK_RECORD_NOT_EMITTED', message: '生产链使用自动读取证明；旧 markdown task ledger 未生成。' },
         durableRollout,
         evidenceHasEntries
       },
@@ -1586,7 +1890,7 @@ async function run() {
       rollbackRestoredExactly: treeRestoredExactly,
       seqGaps: eventsReport.seqGaps,
       reportPath,
-      evidencePath: taskRecordCopyPath,
+      evidencePath: taskRecordStatus === 'present' ? taskRecordCopyPath : null,
       rolloutPath: rolloutCopyPath
     };
     process.exitCode = report.ok ? 0 : 1;
@@ -1632,6 +1936,7 @@ async function run() {
       policy: livePolicyIdentity(),
       goals,
       verificationMode: CLI_OPTIONS.observationOnly ? 'observation-only' : 'param-fields-only',
+      writeMode: WRITE_MODE,
       taskCompletionVerified: false,
       rollback: rollbackResult,
       cleanup: cleanupResult,
@@ -1639,6 +1944,7 @@ async function run() {
       semanticPreflight,
       build: buildSummary,
       productionReceipt,
+      provider: providerEvidence,
       sessionId,
       session: terminalEvidence
         ? {

@@ -164,6 +164,8 @@ export type BridgeCommandName =
   | 'read-luabnd-document'
   | 'inspect-luabnd'
   | 'read-luabnd-script'
+  | 'read-hks-source'
+  | 'compile-hks-source'
   | 'write-luabnd-script'
   | 'export-luabnd'
   | 'capabilities'

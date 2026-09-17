@@ -1,19 +1,22 @@
 /**
- * PARAM discovery/read dependency scheduling smoke.
+ * PARAM discovery/read scheduling + proof-boundary write smoke (T12 migration).
  *
- * The fixture deliberately drives the production agent loop, bridge, and
- * ToolRegistry together.  It does not assert that a candidate is native
- * authority; the in-memory task record only models the existing search-ticket
- * and native-read gate so the ordering contract is observable.
+ * The fixture drives the production agent loop, bridge, and ToolRegistry
+ * together. The manual ledger gate is gone: reads never require a search
+ * ticket, while writes must satisfy the automatic native-read proof boundary
+ * (T09) built from the ACTUAL delivered read result. The loop's PARAM
+ * dependency barrier (a row-search must settle before dependent PARAM
+ * consumers start) is a scheduler contract and stays observable here.
  */
 import assert from 'node:assert/strict';
+import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { createAgentToolBridge } from '../ai/agentToolBridge.js';
 import {
   ToolRegistry,
-  type AgentTaskRecordGateway,
   type ToolContext
 } from '../ai/toolRegistry.js';
+import { CoreToolSession } from '../runtime/coreToolSession.js';
 import { runAgentToolLoop } from '../model-services/agentLoop.js';
 import type {
   ModelServiceAdapter,
@@ -35,21 +38,18 @@ type FixtureState = {
   events: string[];
   searchStarted: number;
   searchCompleted: number;
-  recordSearchCompleted: number;
-  readGateChecks: number;
   readStarted: number;
   searchFieldStarted: number;
   activeReads: number;
   maxConcurrentReads: number;
-  authorizedTables: Set<string>;
+  writerCalls: number;
 };
 
 type FixtureOptions = {
   searchResult?: ParamRow[];
   searchWait?: Promise<void>;
   readWait?: Promise<void>;
-  initialAuthorizedTables?: string[];
-  onSearchRecorded?: () => void;
+  onSearchCompleted?: () => void;
 };
 
 const config = {
@@ -62,6 +62,7 @@ const config = {
   createdAt: '2026-09-08T00:00:00.000Z',
   updatedAt: '2026-09-08T00:00:00.000Z'
 };
+const fixtureContainerPath = join(process.cwd(), 'package.json');
 
 const row: ParamRow = {
   paramName: 'NpcParam',
@@ -72,17 +73,6 @@ const row: ParamRow = {
   sourceHash: 'fixture-native-hash',
   sourceRevision: 1
 };
-
-function normalizeTable(value: string): string {
-  const compact = value
-    .replace(/\\/gu, '/')
-    .split('/')
-    .pop()!
-    .replace(/\.param$/iu, '')
-    .replace(/[^a-z0-9]/giu, '')
-    .toLocaleLowerCase();
-  return compact.endsWith('st') && compact.length > 2 ? compact.slice(0, -2) : compact;
-}
 
 function recordOf(value: unknown): Record<string, unknown> {
   return value && typeof value === 'object' && !Array.isArray(value)
@@ -116,52 +106,6 @@ function waitFor(predicate: () => boolean, timeoutMs = 2_000): Promise<void> {
   });
 }
 
-function createTaskRecord(state: FixtureState, options: FixtureOptions): AgentTaskRecordGateway {
-  let searchSequence = 0;
-  const snapshot = () => ({ path: 'fixture://task-record', entries: [], updatedAt: null });
-  return {
-    read: async () => snapshot(),
-    beforeSearch: async () => ({ ok: true as const }),
-    recordSearch: async ({ toolName, query, result }) => {
-      state.events.push('record-search');
-      state.recordSearchCompleted += 1;
-      const rows = Array.isArray(result) ? result : [];
-      for (const value of rows) {
-        const item = recordOf(value);
-        // A native type (for example ATK_PARAM_ST) is not a physical entry.
-        // Prefer the exact entryName when the Bridge returned it, and only use
-        // paramName for legacy rows that have no finer-grained identity.
-        const exactTable = typeof item.entryName === 'string' && item.entryName.trim() !== ''
-          ? item.entryName
-          : item.paramName;
-        if (typeof exactTable === 'string') state.authorizedTables.add(normalizeTable(exactTable));
-      }
-      options.onSearchRecorded?.();
-      searchSequence += 1;
-      return { searchId: `fixture-search-${searchSequence}`, toolName, query };
-    },
-    update: async () => snapshot(),
-    recordNativeParamRead: async () => snapshot(),
-    assertMutationTarget: async () => ({ ok: true as const, reservationId: 'fixture-reservation' }),
-    finalizeMutation: async () => undefined,
-    releaseMutationReservation: async () => undefined,
-    releaseMutationCount: async () => ({ ok: true as const, released: 0, snapshot: snapshot() }),
-    assertParamReadTarget: async (input) => {
-      state.events.push('read-gate');
-      state.readGateChecks += 1;
-      const table = recordOf(input).table;
-      if (typeof table === 'string' && state.authorizedTables.has(normalizeTable(table))) {
-        return { ok: true as const };
-      }
-      return {
-        ok: false as const,
-        code: 'TASK_RECORD_PARAM_TARGET_UNVERIFIED',
-        message: 'fixture gate: PARAM table has no matching search row receipt.'
-      };
-    }
-  };
-}
-
 function createFixture(options: FixtureOptions = {}): {
   registry: ToolRegistry;
   context: ToolContext;
@@ -171,15 +115,25 @@ function createFixture(options: FixtureOptions = {}): {
     events: [],
     searchStarted: 0,
     searchCompleted: 0,
-    recordSearchCompleted: 0,
-    readGateChecks: 0,
     readStarted: 0,
     searchFieldStarted: 0,
     activeReads: 0,
     maxConcurrentReads: 0,
-    authorizedTables: new Set((options.initialAuthorizedTables ?? []).map(normalizeTable))
+    writerCalls: 0
   };
   const registry = new ToolRegistry();
+  // Keep the fixture host-shaped: the automatic proof promotion needs a
+  // stable workspace identity in addition to the proof store.  Production
+  // hosts obtain both from CoreToolSession; a null workspace index alone is
+  // intentionally insufficient for minting a write receipt.
+  const coreSession = new CoreToolSession({
+    principal: 'fixture-run',
+    workspaceId: 'workspace://param-dependency-batch'
+  });
+  const session = {
+    meta: { workspaceId: coreSession.workspaceId, game: 'sekiro' },
+    layers: { overlayRoot: process.cwd() }
+  } as unknown as NonNullable<ToolContext['session']>;
   registry.register({
     name: 'search_param_rows',
     description: 'fixture PARAM row search',
@@ -192,6 +146,7 @@ function createFixture(options: FixtureOptions = {}): {
       await (options.searchWait ?? resolved());
       state.events.push('search-end');
       state.searchCompleted += 1;
+      options.onSearchCompleted?.();
       return { ok: true, data: options.searchResult ?? [row] };
     }
   });
@@ -219,7 +174,7 @@ function createFixture(options: FixtureOptions = {}): {
     description: 'fixture native PARAM read',
     permission: 'read',
     permissionLevel: 'read',
-    inputSchema: { table: 'string', rowIds: 'array', fieldIds: 'array' },
+    inputSchema: { table: 'string', rowIds: 'array', fieldIds: 'array', containerPath: 'string?' },
     run: async (input) => {
       state.events.push('read-start');
       state.readStarted += 1;
@@ -227,27 +182,45 @@ function createFixture(options: FixtureOptions = {}): {
       state.maxConcurrentReads = Math.max(state.maxConcurrentReads, state.activeReads);
       try {
         await (options.readWait ?? resolved());
-        return {
-          ok: true,
-          data: {
-            table: recordOf(input).table,
-            rows: [row]
-          }
-        };
+        const value = recordOf(input);
+        const table = typeof value.table === 'string' ? value.table : '';
+        const rowIds = Array.isArray(value.rowIds) ? value.rowIds.filter((id): id is number => typeof id === 'number') : [];
+        const fieldIds = Array.isArray(value.fieldIds) ? value.fieldIds.filter((id): id is string => typeof id === 'string') : [];
+        // Production-shaped field payload: the bridge mints delivered-read
+        // proofs from exactly this `fields` array shape.
+        const fields = rowIds.flatMap((rowId) => fieldIds.map((fieldId) => ({
+          table,
+          rowId,
+          fieldId,
+          value: 100,
+          outerFileHash: 'fixture-outer-hash'
+        })));
+        return { ok: true, data: { table, containerPath: fixtureContainerPath, fields } };
       } finally {
         state.activeReads -= 1;
         state.events.push('read-end');
       }
     }
   });
-  const taskRecord = createTaskRecord(state, options);
+  registry.register({
+    name: 'mutate_param_fields',
+    description: 'fixture PARAM write (counts writer invocations)',
+    permission: 'commit',
+    permissionLevel: 'commit',
+    inputSchema: { edits: 'array', containerPath: 'string?' },
+    run: async () => {
+      state.writerCalls += 1;
+      return { ok: true, state: 'committed' as const, data: { opId: 'fixture-op' } };
+    }
+  });
   return {
     registry,
     context: {
       workspaceIndex: null,
-      taskRecord,
-      requireTaskRecord: true,
-      mode: 'normal'
+      coreSession,
+      mode: 'normal',
+      session,
+      proofPrincipal: 'fixture-run'
     },
     state
   };
@@ -316,7 +289,7 @@ async function testDeferredSearchBarrier(): Promise<void> {
     const result = await running;
     assert.equal(result.finishReason, 'stop');
     assert.deepEqual(result.audit.toolCalls.map((item) => item.name), ['search_param_rows', 'read_param_fields']);
-    assert.ok(fixture.state.events.indexOf('record-search') < fixture.state.events.indexOf('read-gate'));
+    assert.ok(fixture.state.events.indexOf('search-end') < fixture.state.events.indexOf('read-start'));
     assert.equal(fixture.state.readStarted, 1);
   } finally {
     releaseSearch();
@@ -324,7 +297,9 @@ async function testDeferredSearchBarrier(): Promise<void> {
   }
 }
 
-async function testEmptyAndWrongSearchCannotAuthorize(): Promise<void> {
+async function testLedgerlessReadNeedsNoTicket(): Promise<void> {
+  // T12: a plain native read no longer requires any search ticket or ledger
+  // entry, even when the preceding search returned nothing usable.
   const cases: Array<[string, ParamRow[]]> = [
     ['empty search', [] as ParamRow[]],
     ['wrong table search', [{ ...row, paramName: 'OtherParam' }]]
@@ -335,16 +310,42 @@ async function testEmptyAndWrongSearchCannotAuthorize(): Promise<void> {
       call(`search-${label}`, 'search_param_rows', { query: 'boss', paramNames: ['NpcParam'] }),
       call(`read-${label}`, 'read_param_fields', { table: 'NpcParam', rowIds: [50800000], fieldIds: ['hp'] })
     ]);
-    assert.equal(result.finishReason, 'stop', `${label}: gate refusal should return to model`);
-    assert.equal(fixture.state.searchCompleted, 1);
-    assert.equal(fixture.state.recordSearchCompleted, 1);
-    assert.equal(fixture.state.readStarted, 0, `${label}: failed read gate must not enter native handler`);
-    assert.equal(fixture.state.readGateChecks, 1);
-    assert.ok(fixture.state.events.indexOf('record-search') < fixture.state.events.indexOf('read-gate'));
+    assert.equal(result.finishReason, 'stop', `${label}: read must not be gated by the removed ledger`);
+    assert.equal(fixture.state.readStarted, 1, `${label}: read must reach the native handler without a ticket`);
     const readAudit = result.audit.toolCalls.find((item) => item.name === 'read_param_fields');
-    assert.equal(readAudit?.ok, false, `${label}: read must be rejected by the task record`);
-    assert.equal(readAudit?.code, 'TASK_RECORD_PARAM_TARGET_UNVERIFIED');
+    assert.equal(readAudit?.ok, true, `${label}: ledgerless read must succeed`);
+    assert.ok(!result.audit.toolCalls.some((item) => item.name === 'update_agent_task_record'
+      || item.name === 'read_agent_task_record'), '轨迹中不得出现台账工具');
   }
+}
+
+async function testWriteRequiresDeliveredReadProof(): Promise<void> {
+  // Without a prior native read there is no proof: the writer must not run.
+  const cold = createFixture();
+  const coldResult = await runFixture(cold, [
+    call('write-cold', 'mutate_param_fields', {
+      edits: [{ table: 'NpcParam', rowId: 50800000, fieldId: 'hp', value: 120 }],
+      containerPath: fixtureContainerPath
+    })
+  ]);
+  assert.equal(cold.state.writerCalls, 0, '未读取就写入不得进入 writer');
+  const coldAudit = coldResult.audit.toolCalls.find((item) => item.name === 'mutate_param_fields');
+  assert.equal(coldAudit?.ok, false);
+  assert.equal(coldAudit?.code, 'NATIVE_READ_REQUIRED');
+
+  // A delivered read of the same field mints the proof; the write then passes.
+  const warm = createFixture();
+  const warmResult = await runFixture(warm, [
+    call('read', 'read_param_fields', { table: 'NpcParam', rowIds: [50800000], fieldIds: ['hp'] }),
+    call('write', 'mutate_param_fields', {
+      edits: [{ table: 'NpcParam', rowId: 50800000, fieldId: 'hp', value: 120 }],
+      containerPath: fixtureContainerPath
+    })
+  ]);
+  assert.equal(warmResult.finishReason, 'stop');
+  assert.equal(warm.state.writerCalls, 1, '已读取字段的写入应通过证明边界');
+  const writeAudit = warmResult.audit.toolCalls.find((item) => item.name === 'mutate_param_fields');
+  assert.equal(writeAudit?.ok, true);
 }
 
 async function testSearchFieldsAlsoWaitsForRows(): Promise<void> {
@@ -365,7 +366,7 @@ async function testSearchFieldsAlsoWaitsForRows(): Promise<void> {
     assert.equal(result.finishReason, 'stop');
     assert.equal(fixture.state.searchFieldStarted, 1);
     assert.equal(fixture.state.readStarted, 1);
-    assert.ok(fixture.state.events.indexOf('record-search') < fixture.state.events.indexOf('read-gate'));
+    assert.ok(fixture.state.events.indexOf('search-end') < fixture.state.events.indexOf('search-fields-start'));
     assert.deepEqual(result.audit.toolCalls.map((item) => item.name), [
       'search_param_rows', 'search_param_fields', 'read_param_fields'
     ]);
@@ -375,39 +376,30 @@ async function testSearchFieldsAlsoWaitsForRows(): Promise<void> {
   }
 }
 
-async function testPreciseEntryTicketDoesNotWidenType(): Promise<void> {
-  const attackRow: ParamRow = {
-    ...row,
-    paramName: 'ATK_PARAM_ST',
-    entryName: 'AtkParam_Npc.param',
-    rowId: 71000100
-  };
-  const fixture = createFixture({ searchResult: [attackRow] });
-  const npcRead = await runFixture(fixture, [
-    call('search-atk', 'search_param_rows', { query: 'attack', paramNames: ['ATK_PARAM_ST'] }),
-    call('read-atk-npc', 'read_param_fields', {
+async function testProofDoesNotWidenPhysicalEntry(): Promise<void> {
+  // A read of the physical entry AtkParam_Npc must not authorize a write to
+  // the sibling AtkParam_Pc that shares the logical native type.
+  const fixture = createFixture();
+  const result = await runFixture(fixture, [
+    call('read-npc', 'read_param_fields', {
       table: 'AtkParam_Npc', rowIds: [71000100], fieldIds: ['attackPower']
+    }),
+    call('write-pc', 'mutate_param_fields', {
+      edits: [{ table: 'AtkParam_Pc', rowId: 71000100, fieldId: 'attackPower', value: 5 }],
+      containerPath: fixtureContainerPath
     })
   ]);
-  assert.equal(npcRead.finishReason, 'stop');
-  assert.equal(fixture.state.readStarted, 1, 'exact AtkParam_Npc entry should be readable');
-
-  const pcRead = await runFixture(fixture, [
-    call('read-atk-pc', 'read_param_fields', {
-      table: 'AtkParam_Pc', rowIds: [71000100], fieldIds: ['attackPower']
-    })
-  ]);
-  assert.equal(pcRead.finishReason, 'stop');
-  assert.equal(fixture.state.readStarted, 1, 'shared ATK_PARAM_ST type must not authorize AtkParam_Pc');
-  const pcAudit = pcRead.audit.toolCalls.find((item) => item.name === 'read_param_fields');
+  assert.equal(result.finishReason, 'stop');
+  assert.equal(fixture.state.writerCalls, 0, 'shared ATK_PARAM_ST type must not authorize AtkParam_Pc');
+  const pcAudit = result.audit.toolCalls.find((item) => item.name === 'mutate_param_fields');
   assert.equal(pcAudit?.ok, false);
-  assert.equal(pcAudit?.code, 'TASK_RECORD_PARAM_TARGET_UNVERIFIED');
+  assert.equal(pcAudit?.code, 'NATIVE_READ_REQUIRED');
 }
 
 async function testIndependentReadsOverlap(): Promise<void> {
   let releaseReads!: () => void;
   const readWait = new Promise<void>((resolve) => { releaseReads = resolve; });
-  const fixture = createFixture({ readWait, initialAuthorizedTables: ['NpcParam'] });
+  const fixture = createFixture({ readWait });
   const running = runFixture(fixture, [
     call('read-a', 'read_param_fields', { table: 'NpcParam', rowIds: [50800000], fieldIds: ['hp'] }),
     call('read-b', 'read_param_fields', { table: 'NpcParam', rowIds: [50800000], fieldIds: ['hpBarType'] })
@@ -427,28 +419,29 @@ async function testIndependentReadsOverlap(): Promise<void> {
 
 async function testAbortStopsDependentBatch(): Promise<void> {
   const controller = new AbortController();
-  const fixture = createFixture({ onSearchRecorded: () => controller.abort('fixture-cancel') });
+  const fixture = createFixture({ onSearchCompleted: () => controller.abort('fixture-cancel') });
   const result = await runFixture(fixture, [
     call('search', 'search_param_rows', { query: 'boss', paramNames: ['NpcParam'] }),
     call('read', 'read_param_fields', { table: 'NpcParam', rowIds: [50800000], fieldIds: ['hp'] })
   ], controller.signal);
   assert.equal(result.finishReason, 'cancelled');
-  assert.equal(fixture.state.recordSearchCompleted, 1);
+  assert.equal(fixture.state.searchCompleted, 1);
   assert.equal(fixture.state.readStarted, 0, 'cancellation must not launch the dependent read batch');
   assert.deepEqual(result.audit.toolCalls.map((item) => item.name), ['search_param_rows']);
 }
 
 export async function runAgentParamDependencyBatchSmoke(): Promise<void> {
   await testDeferredSearchBarrier();
-  await testEmptyAndWrongSearchCannotAuthorize();
+  await testLedgerlessReadNeedsNoTicket();
+  await testWriteRequiresDeliveredReadProof();
   await testSearchFieldsAlsoWaitsForRows();
-  await testPreciseEntryTicketDoesNotWidenType();
+  await testProofDoesNotWidenPhysicalEntry();
   await testIndependentReadsOverlap();
   await testAbortStopsDependentBatch();
   console.log(JSON.stringify({
     ok: true,
-    checks: 6,
-    message: 'PARAM discovery/read dependency batch smoke passed'
+    checks: 7,
+    message: 'PARAM discovery/read scheduling + proof-boundary write smoke passed'
   }, null, 2));
 }
 

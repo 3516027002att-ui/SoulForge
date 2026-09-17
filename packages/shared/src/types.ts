@@ -151,6 +151,9 @@ export interface ReferenceEdge {
     | 'references_region'
     | 'references_param_row'
     | 'references_text'
+    | 'invokes_script'
+    | 'contains'
+    | 'member_of'
     | 'numeric_match'
     | 'unknown';
   confidence: ReferenceConfidence;

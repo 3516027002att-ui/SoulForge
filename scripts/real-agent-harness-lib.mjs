@@ -1,6 +1,19 @@
 /** Pure harness policy and injectable polling; never imports production internals. */
 export const SEMANTIC_CORPUS_KINDS = Object.freeze(['param', 'msg', 'event', 'map', 'script', 'action', 'chr']);
 
+// A PARAM field is useful as a narrow native anchor, but it is not the same
+// thing as proving a natural-language task.  Keep the distinction explicit in
+// the harness so a task can only be accepted after its semantic assertions
+// have produced their own evidence.
+const SEMANTIC_GOAL_KINDS = new Set([
+  'semantic', 'composite', 'native-tool', 'event', 'tae-field', 'script',
+  'map-entity', 'map-region', 'text-entry', 'param-row', 'resource'
+]);
+
+function isSemanticGoal(goal) {
+  return Boolean(goal && SEMANTIC_GOAL_KINDS.has(goal.kind));
+}
+
 export function planSemanticCorpus(directories) {
   const present = new Set(directories);
   const missing = SEMANTIC_CORPUS_KINDS.filter((kind) => !present.has(kind));
@@ -20,26 +33,50 @@ export function planSemanticCorpus(directories) {
 
 export function evaluateGoalCoverage(goals, observationOnly) {
   const required = goals.filter((goal) => goal.required);
-  const fieldChecksOk = required.length > 0 && required.every((goal) => goal.verified === true);
+  const fieldGoals = required.filter((goal) => goal.kind === 'param-field' || goal.kind === undefined);
+  const semanticGoals = required.filter(isSemanticGoal);
+  const allRequiredVerified = required.length > 0 && required.every((goal) => goal.verified === true);
+  const fieldChecksOk = fieldGoals.length > 0 && fieldGoals.every((goal) => goal.verified === true);
+  const semanticChecksOk = semanticGoals.length > 0 && semanticGoals.every((goal) => (
+    goal.verified === true
+      && Array.isArray(goal.verificationEvidence)
+      && goal.verificationEvidence.length > 0
+  ));
+  const taskCoverageOk = !observationOnly
+    && semanticGoals.length > 0
+    && allRequiredVerified
+    && semanticChecksOk;
   return {
-    mode: observationOnly ? 'observation-only' : 'param-fields-only',
+    mode: observationOnly
+      ? 'observation-only'
+      : semanticGoals.length > 0
+        ? 'native-semantic'
+        : 'param-fields-only',
     requiredGoalCount: required.length,
     observedGoalCount: goals.length,
     fieldChecksOk,
-    goalsOk: !observationOnly && fieldChecksOk,
-    // PARAM values do not establish full natural-language task semantics (AI,
-    // timed effects, drop execution or combat outcomes). No such verifier exists here.
-    taskCoverageOk: false,
-    taskCompletionVerified: false,
-    diagnostics: [{
-      severity: 'warning', code: observationOnly ? 'TASK_OBSERVATION_ONLY' : 'TASK_COVERAGE_UNVERIFIED',
-      message: observationOnly
-        ? '本次只观察原文任务执行和可选原生字段，不作任务通过声明。'
-        : '当前验证器仅检查指定 PARAM 字段；原文任务的完整语义尚未验证。'
-    }, ...(required.length === 0 ? [{
+    semanticChecksOk,
+    // goalsOk remains the required-goal contract used by older PARAM-only
+    // runs. Semantic task acceptance additionally requires taskCoverageOk.
+    goalsOk: !observationOnly && allRequiredVerified,
+    taskCoverageOk,
+    taskCompletionVerified: taskCoverageOk,
+    diagnostics: [
+      ...(observationOnly ? [{
+        severity: 'warning', code: 'TASK_OBSERVATION_ONLY',
+        message: '本次只观察原文任务执行和可选原生字段，不作任务通过声明。'
+      }] : semanticGoals.length === 0 ? [{
+        severity: 'warning', code: 'TASK_COVERAGE_UNVERIFIED',
+        message: '当前验证器仅检查指定 PARAM 字段；原文任务的完整语义尚未验证。'
+      }] : !taskCoverageOk ? [{
+        severity: 'error', code: 'TASK_SEMANTIC_GOAL_FAILED',
+        message: '至少一个语义目标未产生完整的原生验证证据，不能宣称整题通过。'
+      }] : []),
+      ...(required.length === 0 ? [{
       severity: 'warning', code: 'REQUIRED_GOALS_EMPTY',
       message: '没有必需终态目标，不能将空集合判为 goalsOk。'
-    }] : [])]
+      }] : [])
+    ]
   };
 }
 

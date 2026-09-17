@@ -13,8 +13,8 @@ export interface ParamDefPanelProps {
   /** True when the source is a live Bridge PARAM document. */
   live?: boolean;
   /**
-   * 字段级结构定义。为 null 表示当前没有可用的 paramdef 定义（官方适配包
-   * 只读；用户派生定义尚未接入），此时字段视图保持只读/不可用。
+   * 字段级结构定义。为 null 表示内置 schema 未覆盖或行宽校验未通过，
+   * 此时字段视图保持只读/不可用。
    */
   definition: ParamDefDocument | null;
   /** 真实 PARAM 行索引；rowIndex + id + dataHash 是唯一身份。 */
@@ -114,7 +114,9 @@ export function ParamDefPanel(props: ParamDefPanelProps): ReactElement {
   }, [selectedRowBytes, props.definition]);
 
   const definitionCanCommit = props.definition !== null
-    && (props.definition.origin === 'user-derived' || props.definition.origin === 'imported')
+    && (props.definition.origin === 'first-party'
+      || props.definition.origin === 'user-derived'
+      || props.definition.origin === 'imported')
     && props.definition.rowDataSize === props.rowDataSize
     && props.onApplyFieldMutation !== undefined;
 
@@ -169,7 +171,7 @@ export function ParamDefPanel(props: ParamDefPanelProps): ReactElement {
 
       {props.definition === null && (
         <p className="muted">
-          当前没有可用的 paramdef 定义：官方适配包只读，用户派生定义尚未接入。字段视图不可用，仅展示行的原始字节预览。
+          当前没有可用的内置 PARAM schema 定义（未覆盖或行宽不匹配）。字段视图不可用，仅展示行的原始字节预览。
         </p>
       )}
       {props.definition !== null && props.definition.origin === 'fixture' && (
@@ -265,7 +267,7 @@ export function ParamDefPanel(props: ParamDefPanelProps): ReactElement {
                     <button
                       type="button"
                       disabled={!definitionCanCommit || committing}
-                      title={definitionCanCommit ? undefined : '需要用户派生 paramdef 定义才能提交字段'}
+                      title={definitionCanCommit ? undefined : '需要通过校验的 PARAM schema 定义才能提交字段'}
                       onClick={() => {
                         const parsed = parseFieldValue(field, draft ?? field.display);
                         if (parsed === undefined) {
@@ -317,10 +319,10 @@ export function ParamDefPanel(props: ParamDefPanelProps): ReactElement {
 
       {!definitionCanCommit && props.definition !== null && (
         <p className="muted">
-          字段提交须经 Patch Engine 提交（whole-row upsert）；当前定义不是用户派生/导入来源，或行大小不匹配，提交已关闭。
+          字段提交须经 Patch Engine 提交（whole-row upsert）；当前内置 schema 未覆盖或行大小不匹配，提交已关闭。
         </p>
       )}
-      <p className="muted">结构定义编辑写入用户派生游戏适配包，不修改官方包；未知/不支持类型的字段保持只读展示。</p>
+      <p className="muted">结构定义来自 SoulForge 内置 schema；未知/不支持类型的字段保持只读展示。</p>
     </section>
   );
 }
@@ -453,5 +455,6 @@ function originLabel(origin: string): string {
   if (origin === 'user-derived') return '用户派生';
   if (origin === 'fixture') return '测试夹具';
   if (origin === 'imported') return '导入';
+  if (origin === 'first-party') return 'SoulForge 内置';
   return origin;
 }

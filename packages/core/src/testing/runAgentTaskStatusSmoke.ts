@@ -613,6 +613,43 @@ export async function runAgentTaskStatusSmoke(): Promise<void> {
       );
     }
   }
+
+  // A non-cooperative provider must not keep the host session pending after
+  // ai.agent.cancel aborts the run. The underlying promise is intentionally
+  // never resolved; the loop-owned cancellation race must still emit a
+  // cancelled terminal result.
+  {
+    const controller = new AbortController();
+    const never = new Promise<never>(() => {});
+    const adapter: ModelServiceAdapter = {
+      protocol: 'openai-compatible',
+      complete: async () => await never,
+      async *stream() {},
+      async listModels() { return { ok: true, models: [] }; }
+    };
+    const runPromise = runAgentToolLoop(adapter, {
+      config: {
+        id: 'non-cooperative-cancellation-fixture', displayName: 'cancellation fixture',
+        protocol: 'openai-compatible', baseUrl: 'http://127.0.0.1:9',
+        model: 'fixture', hasCredential: false,
+        createdAt: '2026-09-08T00:00:00Z', updatedAt: '2026-09-08T00:00:00Z'
+      },
+      apiKey: 'fixture-cancellation-credential',
+      messages: [{ role: 'user', content: 'cancel this run' }],
+      taskQuery: 'cancel this run',
+      permissionMode: 'normal',
+      tools: [],
+      executeTool: async () => ({ ok: true, content: '{}' }),
+      signal: controller.signal
+    });
+    const timer = setTimeout(() => controller.abort(), 10);
+    const result = await Promise.race([
+      runPromise,
+      new Promise<never>((_, reject) => setTimeout(() => reject(new Error('cancellation race hung')), 1_000))
+    ]);
+    clearTimeout(timer);
+    assert.equal(result.finishReason, 'cancelled');
+  }
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {

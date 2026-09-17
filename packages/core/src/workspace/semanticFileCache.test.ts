@@ -4,7 +4,8 @@ import { WorkspaceIndex } from '../indexing/workspaceIndex.js';
 import {
   extractFileSymbolBundle,
   isNativeSemanticBundleCurrent,
-  loadSymbolBundleIntoIndex
+  loadSymbolBundleIntoIndex,
+  rebaseSymbolBundleToFileRevision
 } from './semanticFileCache.js';
 import type { EventExport, ParamExport } from '@soulforge/shared';
 
@@ -120,6 +121,10 @@ describe('semanticFileCache', () => {
       }]
     };
     assert.equal(isNativeSemanticBundleCurrent(file, currentBundle), true);
+    assert.equal(isNativeSemanticBundleCurrent({ ...file, mtimeMs: 456 }, currentBundle), true);
+    const rebased = rebaseSymbolBundleToFileRevision({ mtimeMs: 456 }, currentBundle);
+    assert.equal(rebased.params?.[0]?.sourceRevision, 456);
+    assert.equal(rebased.params?.[0]?.rows[0]?.sourceRevision, 456);
     assert.equal(isNativeSemanticBundleCurrent({
       ...file,
       relativePath: 'param/mockparam.json',

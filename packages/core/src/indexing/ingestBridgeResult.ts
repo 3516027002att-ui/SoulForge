@@ -1035,11 +1035,14 @@ function parseTextEntry(
   const textId = asNumber(record.textId);
   const raw = asRecord(record.raw);
   const confidence = isConfidence(record.confidence) ? record.confidence : isConfidence(raw.confidence) ? raw.confidence : undefined;
+  const language = asString(record.language) || asString(raw.language);
   if (textId === null) return [];
   return [{
     uri: asString(record.uri) || `msg://${asString(record.category, 'default')}/${textId}`,
     sourceUri: asString(record.sourceUri) || sourceUri,
     ...(asString(record.category) ? { category: asString(record.category) } : {}),
+    entryIndex: index,
+    ...(language ? { language } : {}),
     textId,
     text: asString(record.text, ''),
     ...provenance,

@@ -1,0 +1,94 @@
+/* -*- Mode: C -*- */
+/*
+** $Id: ltoken.def $
+** Define all reserved tokens here
+** Before including this file, define the macro DEFTOK
+** See Copyright Notice in lua.h
+*/
+
+/*
+** #define DEFTOK(name, text)
+** #define DEFTOKFIRST(name, text)
+** <name> is the name of the token, e.g. TK_AND
+** <text> is the string which is printed in messages, e.g. "and" for TK_AND
+*/
+
+#ifndef DEFTOKFIRST
+# define NO_DEFTOKFIRST /* so this file knows to undef it at the end */
+# define DEFTOKFIRST DEFTOK
+#endif /* !DEFTOKFIRST */
+
+
+/* terminal symbols denoted by reserved words */
+/* NOTE: the first reserved token uses DEFTOKFIRST, all others use DEFTOK */
+DEFTOKFIRST(TK_AND,       "and")
+DEFTOK(TK_BREAK,          "break")
+DEFTOK(TK_DO,             "do")
+DEFTOK(TK_ELSE,           "else")
+DEFTOK(TK_ELSEIF,         "elseif")
+DEFTOK(TK_END,            "end")
+DEFTOK(TK_FALSE,          "false")
+DEFTOK(TK_FOR,            "for")
+DEFTOK(TK_FUNCTION,       "function")
+DEFTOK(TK_IF,             "if")
+DEFTOK(TK_IN,             "in")
+DEFTOK(TK_LOCAL,          "local")
+DEFTOK(TK_NIL,            "nil")
+DEFTOK(TK_NOT,            "not")
+DEFTOK(TK_OR,             "or")
+DEFTOK(TK_REPEAT,         "repeat")
+DEFTOK(TK_RETURN,         "return")
+DEFTOK(TK_THEN,           "then")
+DEFTOK(TK_TRUE,           "true")
+DEFTOK(TK_UNTIL,          "until")
+DEFTOK(TK_WHILE,          "while")
+DEFTOK(TK_STRUCT,         "hstructure")
+DEFTOK(TK_MAKE,           "hmake")
+#ifdef LUA_CODIW6 /* IW6 extension */
+DEFTOK(TK_DELETE,         "hdelete")
+#endif /* LUA_CODIW6 */
+
+/* end of reserved words */
+DEFTOK(TK_RESERVED_LAST,  "INVALID")
+
+/* other terminal symbols */
+#ifdef LUA_CODT7 /* T7 extensions */
+DEFTOK(TK_LEFT_SHIFT,     "<<")
+DEFTOK(TK_RIGHT_SHIFT,    ">>")
+#endif /* LUA_CODT7 */
+DEFTOK(TK_CONCAT,         "..")
+DEFTOK(TK_DOTS,           "...")
+DEFTOK(TK_EQ,             "==")
+DEFTOK(TK_GE,             ">=")
+DEFTOK(TK_LE,             "<=")
+DEFTOK(TK_NE,             "~=")
+
+/* the remaining tokens are of variable format and are not to be quoted as
+   literal strings in error messages */
+#ifndef LAST_FIXED_FORMAT_TOKEN
+# define LAST_FIXED_FORMAT_TOKEN TK_NE
+#endif /* LAST_FIXED_FORMAT_TOKEN */
+
+DEFTOK(TK_NUMBER,         "<number>")
+DEFTOK(TK_LITERALLUD,     "<short literal>")
+DEFTOK(TK_LITERALUI64,    "<long literal>")
+DEFTOK(TK_NAME,           "<name>")
+DEFTOK(TK_STRING,         "<string>")
+DEFTOK(TK_EOS,            "<eof>")
+
+/* byte order marks */
+DEFTOK(TK_BOM_INVALID,    "<Invalid BOM>")
+DEFTOK(TK_BOM_UTF8,       "<UTF8 BOM>")
+DEFTOK(TK_BOM_UTF16LE,    "<UTF16LE BOM>")
+DEFTOK(TK_BOM_UTF16BE,    "<UTF16BE BOM>")
+DEFTOK(TK_BOM_UTF32LE,    "<UTF32LE BOM>")
+DEFTOK(TK_BOM_UTF32BE,    "<UTF32BE BOM>")
+
+/* end of reserved tokens */
+
+#ifdef NO_DEFTOKFIRST
+# undef DEFTOKFIRST
+# undef NO_DEFTOKFIRST
+#endif /* NO_DEFTOKFIRST */
+
+

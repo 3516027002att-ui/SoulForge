@@ -86,11 +86,8 @@ export function runScriptSourceWritebackSmoke(): { ok: boolean; message: string;
   {
     const bytecode = Uint8Array.from([0x1b, 0x4c, 0x75, 0x61, 0x51, 0x00, 0x01]);
     const encoded = encodeScriptSourceForWriteback(bytecode, 'print("ok")\n');
-    assert(encoded.ok, '反编译文本写回应成功，不要因缺编译器拒写');
-    if (encoded.ok) {
-      assert(encoded.writeKind === 'decompiled-as-utf8', `writeKind 应为 decompiled-as-utf8，实际 ${encoded.writeKind}`);
-      assert(Buffer.from(encoded.bytes).toString('utf8') === 'print("ok")\n', '字节码槽写回必须是 UTF-8 明文');
-    }
+    assert(!encoded.ok, '通用写回器不得把源码伪装成 HKS 字节码');
+    if (!encoded.ok) assert(encoded.code === 'SCRIPT_HKS_BRIDGE_REQUIRED', `码应为 SCRIPT_HKS_BRIDGE_REQUIRED，实际 ${encoded.code}`);
     passed += 1;
   }
 

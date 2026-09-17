@@ -20,6 +20,11 @@ const SUITE_CASES = Object.freeze({
     evidenceLevel: 'unit-production',
     entrypoint: 'scripts/update/inspect-baseline.mjs',
     command: [process.execPath, '--test', 'scripts/update/inspect-baseline.test.mjs']
+  }, {
+    id: 'github-release-update-core',
+    evidenceLevel: 'unit-production',
+    entrypoint: 'apps/desktop/src/main/update/update.test.ts',
+    command: [process.execPath, 'scripts/update/run-core-tests.mjs']
   }],
   integration: [{
     id: 'runtime-switch',

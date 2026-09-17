@@ -12,7 +12,7 @@
  * renderer smoke); never a dump of any real EMEDF file.
  */
 import { createEmevdEditorDocument } from '../editing/emevdFourViewController.js';
-import { parseDs3EmedfJson } from '../emevd/emedfExternalAdapter.js';
+import { parseDs3EmedfJson } from './emedfExternalAdapter.js';
 import type { EmedfRegistry } from '../emevd/emedfSchema.js';
 import { renderEmevdDarkScript } from '../emevd/darkScriptRenderer.js';
 import { compileEmevdDarkScript } from '../emevd/darkScriptCompiler.js';

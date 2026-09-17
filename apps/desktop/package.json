@@ -1,6 +1,6 @@
 {
   "name": "@soulforge/desktop",
-  "version": "0.9.1",
+  "version": "0.9.2",
   "private": true,
   "description": "SoulForge — Sekiro Mod Editor",
   "author": "SoulForge contributors",
@@ -32,6 +32,7 @@
     "@soulforge/core": "0.0.0",
     "@soulforge/shared": "0.0.0",
     "@tanstack/react-virtual": "3.14.9",
+    "electron-updater": "^6.8.9",
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
     "three": "^0.172.0"

@@ -2,7 +2,10 @@ import assert from 'node:assert/strict';
 import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import type { IndexedFile, SymbolBundle } from '@soulforge/shared';
 import { analyzeWorkspace } from '../pipeline/workspacePipeline.js';
+import { scanWorkspace } from '../workspace/scanWorkspace.js';
+import type { SemanticCacheProvider } from '../workspace/semanticFileCache.js';
 
 /**
  * Verifies the staged semantic publish contract without a native fixture:
@@ -58,6 +61,43 @@ try {
   assert.equal(result.index.getStats().events, 1, 'final index must retain the EVENT export');
   assert.equal(result.index.getStats().mapEntities, 1, 'final index must retain the MAP export');
   assert.equal(result.index.getStats().paramRows, 1, 'final index must retain the PARAM export');
+
+  // Reopening a stable workspace must hydrate the persisted semantic payload
+  // after the catalog hash check instead of parsing the same JSON resources
+  // again.  The second pass intentionally presents new mtimes with the same
+  // bytes; cache reuse is content-hash based, not timestamp based.
+  const cache = new Map<string, { fileSha256: string; payload: SymbolBundle }>();
+  let cacheHits = 0;
+  let cacheSaves = 0;
+  const semanticCache: SemanticCacheProvider = {
+    load: (file: IndexedFile) => {
+      const entry = cache.get(file.relativePath);
+      if (!entry || entry.fileSha256 !== file.sha256) return null;
+      cacheHits += 1;
+      return entry.payload;
+    },
+    save: (file: IndexedFile, payload: SymbolBundle) => {
+      if (!file.sha256) return;
+      cacheSaves += 1;
+      cache.set(file.relativePath, { fileSha256: file.sha256, payload });
+    }
+  };
+  await analyzeWorkspace({ workspaceRoot: root, inspectNativeResources: false, semanticCache });
+  const savedAfterFirstPass = cacheSaves;
+  assert.equal(savedAfterFirstPass, 3, 'first pass must persist all semantic resources');
+  const hashedCatalog = await scanWorkspace({ workspaceRoot: root, includeContentHashes: true });
+  const restoredCatalog = hashedCatalog.files.map((file) => ({ ...file, mtimeMs: file.mtimeMs + 10_000 }));
+  const reopened = await analyzeWorkspace({
+    workspaceRoot: root,
+    files: restoredCatalog,
+    inspectNativeResources: false,
+    semanticCache
+  });
+  assert.equal(cacheHits, 3, 'reopen must load each unchanged semantic payload from cache');
+  assert.equal(cacheSaves, savedAfterFirstPass, 'cache hits must not rewrite semantic payloads');
+  assert.equal(reopened.index.getStats().paramRows, 1);
+  assert.equal(reopened.index.getStats().events, 1);
+  assert.equal(reopened.index.getStats().mapEntities, 1);
   console.log('[workspace-pipeline-stage-smoke] staged PARAM publish and final semantic convergence passed');
 } finally {
   await rm(root, { recursive: true, force: true });

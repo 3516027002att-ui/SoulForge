@@ -37,6 +37,11 @@ export interface LuabndScriptSnapshot {
   decompilerVersion?: string | undefined;
   warnings?: string[] | undefined;
   loaderProfileId?: string | undefined;
+  /** Complete first-party decompiled source for current Sekiro HKS bytecode. */
+  sourceText?: string | undefined;
+  dialect?: string | undefined;
+  compilerProvenance?: { origin: 'first-party'; package: string; revision: string } | undefined;
+  decompilerProvenance?: { origin: 'first-party'; package: string; revision: string } | undefined;
 }
 
 export interface LuabndEditFailure {
@@ -274,6 +279,58 @@ export async function readLuabndScript(input: {
     ? (profile?.bytecodeToSourceAllowed ?? false)
     : (profile?.supportsPlaintextSourceEdit ?? true);
 
+  let sourceText: string | undefined;
+  let dialect: string | undefined;
+  let compilerProvenance: LuabndScriptSnapshot['compilerProvenance'];
+  let decompilerProvenance: LuabndScriptSnapshot['decompilerProvenance'];
+  const semanticDiagnostics: Diagnostic[] = [];
+  if (isBytecode && typeof data.contentBase64 === 'string' && data.contentBase64.length > 0) {
+    const semantic = await runBridge<{
+      sourceText?: string;
+      dialect?: string;
+      compiler?: { provenance?: string; package?: string; revision?: string };
+      decompiler?: { provenance?: string; package?: string; revision?: string };
+    }>({
+      command: 'read-hks-source',
+      filePath: containerPath,
+      resourceUri: pathToFileURL(containerPath).href,
+      ...(input.edit.oodleRuntimeRoot ? { oodleRuntimeRoot: input.edit.oodleRuntimeRoot } : {}),
+      commandOptions: { contentBase64: data.contentBase64 },
+      allowedRoots: input.edit.allowedRoots(),
+      timeoutMs: 120_000,
+      maxFrameBytes: 32 * 1024 * 1024
+    });
+    if (semantic.parseStatus === 'failed' || !semantic.data?.sourceText) {
+      return {
+        ok: false,
+        error: {
+          code: semantic.diagnostics.find((item) => item.severity === 'error')?.code ?? 'HKS_DOCUMENT_READ_FAILED',
+          message: semantic.diagnostics.find((item) => item.severity === 'error')?.message
+            ?? 'SoulForge 内置 HKS dialect 未能生成完整源码。',
+          details: semantic.diagnostics
+        },
+        diagnostics: [...diagnostics, ...semantic.diagnostics]
+      };
+    }
+    sourceText = semantic.data.sourceText;
+    dialect = semantic.data.dialect;
+    if (semantic.data.compiler?.provenance === 'first-party') {
+      compilerProvenance = {
+        origin: 'first-party',
+        package: semantic.data.compiler.package ?? 'soulforge-sekiro-hks-schema',
+        revision: semantic.data.compiler.revision ?? 'unknown'
+      };
+    }
+    if (semantic.data.decompiler?.provenance === 'first-party') {
+      decompilerProvenance = {
+        origin: 'first-party',
+        package: semantic.data.decompiler.package ?? 'soulforge-sekiro-hks-schema',
+        revision: semantic.data.decompiler.revision ?? 'unknown'
+      };
+    }
+    semanticDiagnostics.push(...semantic.diagnostics);
+  }
+
   const scriptSnapshot: LuabndScriptSnapshot = {
     sanitizedName: data.sanitizedName ?? input.childPath,
     size: data.size ?? 0,
@@ -284,7 +341,7 @@ export async function readLuabndScript(input: {
     variant: data.variant ?? '',
     isPlainText: Boolean(data.isPlainText),
     embeddedSymbols: Array.isArray(data.embeddedSymbols) ? data.embeddedSymbols : [],
-    textPreview: typeof data.textPreview === 'string' ? data.textPreview : undefined,
+    textPreview: sourceText ?? (typeof data.textPreview === 'string' ? data.textPreview : undefined),
     sourceHash: data.sourceHash || data.contentHash || '',
     representation,
     detectedEncoding: isBytecode ? undefined : (data.detectedEncoding ?? 'shift_jis'),
@@ -292,14 +349,18 @@ export async function readLuabndScript(input: {
     derivedSource: typeof data.derivedSource === 'string' ? data.derivedSource : undefined,
     decompilerVersion: typeof data.decompilerVersion === 'string' ? data.decompilerVersion : undefined,
     warnings: Array.isArray(data.warnings) ? data.warnings : undefined,
-    loaderProfileId: profile?.id
+    loaderProfileId: profile?.id,
+    ...(sourceText !== undefined ? { sourceText } : {}),
+    ...(dialect !== undefined ? { dialect } : {}),
+    ...(compilerProvenance ? { compilerProvenance } : {}),
+    ...(decompilerProvenance ? { decompilerProvenance } : {})
   };
 
   return {
     ok: true,
     containerPath,
     script: scriptSnapshot,
-    diagnostics
+    diagnostics: [...diagnostics, ...semanticDiagnostics]
   };
 }
 
@@ -336,14 +397,20 @@ export async function setLuabndScript(input: {
     };
   }
 
+  let compiledContentBase64 = input.contentBase64;
+  let existingScript: LuabndScriptSnapshot | undefined;
   if (input.text !== undefined) {
     const existing = await readLuabndScript({
       edit: input.edit,
       file: containerPath,
-      childPath: input.childPath
+      childPath: input.childPath,
+      ...(input.expectedContainerHash ? { expectedContainerHash: input.expectedContainerHash } : {}),
+      ...(input.expectedChildHash ? { expectedChildHash: input.expectedChildHash } : {})
     });
-    if (existing.ok) {
-      const isBytecode = existing.script.isBytecode;
+    if (!existing.ok) return existing;
+    existingScript = existing.script;
+    if (existing.script.isBytecode) {
+      const isBytecode = true;
       const profile = resolveScriptLoaderProfile({
         game: 'sekiro',
         containerPath,
@@ -354,21 +421,70 @@ export async function setLuabndScript(input: {
       if (!check.allowed) {
         return {
           ok: false,
-          error: {
-            code: check.code ?? 'SCRIPT_SOURCE_EDIT_PROHIBITED',
-            message: check.message ?? '该条目不允许作为源码文本写回。'
-          },
-          diagnostics: [
-            {
-              severity: 'error',
-              code: check.code ?? 'SCRIPT_SOURCE_EDIT_PROHIBITED',
-              message: check.message ?? '该条目不允许作为源码文本写回。',
-              sourceUri: pathToFileURL(resolve(containerPath)).href
-            }
-          ]
+          error: { code: check.code ?? 'SCRIPT_SOURCE_EDIT_PROHIBITED', message: check.message ?? '该条目不允许作为源码文本写回。' },
+          diagnostics: [{ severity: 'error', code: check.code ?? 'SCRIPT_SOURCE_EDIT_PROHIBITED', message: check.message ?? '该条目不允许作为源码文本写回。', sourceUri: pathToFileURL(resolve(containerPath)).href }]
         };
       }
+      const raw = await runBridge<{
+        contentBase64?: string;
+        contentHash?: string;
+      }>({
+        command: 'read-luabnd-script',
+        filePath: containerPath,
+        ...(input.edit.oodleRuntimeRoot ? { oodleRuntimeRoot: input.edit.oodleRuntimeRoot } : {}),
+        commandOptions: {
+          childPath: input.childPath,
+          ...(input.expectedContainerHash ? { expectedContainerHash: input.expectedContainerHash } : {}),
+          ...(input.expectedChildHash ? { expectedChildHash: input.expectedChildHash } : {})
+        },
+        allowedRoots: input.edit.allowedRoots(),
+        timeoutMs: 120_000,
+        maxFrameBytes: 32 * 1024 * 1024
+      });
+      if (raw.parseStatus === 'failed' || !raw.data?.contentBase64) {
+        return {
+          ok: false,
+          error: { code: 'HKS_SOURCE_READ_FAILED', message: '编译 HKS 源码前无法取得带哈希的原始字节。' },
+          diagnostics: raw.diagnostics
+        };
+      }
+      const sourceHash = raw.data.contentHash ?? existing.script.contentHash;
+      const compiled = await runBridge<{
+        contentBase64?: string;
+      }>({
+        command: 'compile-hks-source',
+        filePath: containerPath,
+        resourceUri: pathToFileURL(containerPath).href,
+        ...(input.edit.oodleRuntimeRoot ? { oodleRuntimeRoot: input.edit.oodleRuntimeRoot } : {}),
+        commandOptions: {
+          sourceText: input.text,
+          expectedDialect: existing.script.dialect ?? 'sekiro-hks-1.6.x',
+          expectedSourceHash: sourceHash,
+          sourceContentBase64: raw.data.contentBase64
+        },
+        allowedRoots: input.edit.allowedRoots(),
+        timeoutMs: 120_000,
+        maxFrameBytes: 32 * 1024 * 1024
+      });
+      if (compiled.parseStatus === 'failed' || !compiled.data?.contentBase64) {
+        return {
+          ok: false,
+          error: { code: compiled.diagnostics[0]?.code ?? 'HKS_COMPILER_FAILED', message: compiled.diagnostics[0]?.message ?? 'SoulForge 内置 HKS 编译器未返回字节码。' },
+          diagnostics: compiled.diagnostics
+        };
+      }
+      compiledContentBase64 = compiled.data.contentBase64;
     }
+  }
+
+  if (input.text !== undefined && !existingScript) {
+    // This branch is unreachable because text always reads the current child
+    // above; keep the invariant explicit for future callers.
+    return {
+      ok: false,
+      error: { code: 'HKS_SOURCE_READ_FAILED', message: '源码写回缺少当前条目读取证明。' },
+      diagnostics: []
+    };
   }
 
   const diskBytes = await readFile(containerPath);
@@ -407,8 +523,8 @@ export async function setLuabndScript(input: {
             outputPath: context.outputPath,
             childPath: input.childPath,
             expectedContainerHash: currentContainerHash,
-            ...(input.text !== undefined ? { text: input.text } : {}),
-            ...(input.contentBase64 !== undefined ? { contentBase64: input.contentBase64 } : {}),
+            ...(input.text !== undefined && compiledContentBase64 === undefined ? { text: input.text } : {}),
+            ...(compiledContentBase64 !== undefined ? { contentBase64: compiledContentBase64 } : {}),
             ...(input.expectedChildHash ? { expectedChildHash: input.expectedChildHash } : {})
           },
           allowedRoots: context.allowedRoots,

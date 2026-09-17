@@ -1394,7 +1394,7 @@ function mutationTargets(
       : {};
     return [{ key: 'emevd', ...scope }];
   }
-  if (toolName === 'mutate_tae_event_times') {
+  if (toolName === 'mutate_tae_event_times' || toolName === 'mutate_tae_event_fields') {
     return file ? [{ key: 'tae' }] : [];
   }
   if (toolName === 'mutate_msb_part_transform'

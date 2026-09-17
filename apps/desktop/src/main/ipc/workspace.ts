@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { existsSync, readFileSync } from 'node:fs';
 import { app, dialog, type IpcMainInvokeEvent } from 'electron';
-import { basename, dirname, join, resolve } from 'node:path';
+import { basename, dirname, isAbsolute, join, resolve } from 'node:path';
 import {
   analyzeWorkspace,
   canReusePersistedHash,
@@ -17,6 +17,7 @@ import {
   normalizeCtimeNs,
   normalizeMtimeNs,
   openWorkspaceSession,
+  rebaseSymbolBundleToFileRevision,
   saveFingerprintStore,
   scanWorkspace,
   workspacePhysicalRootHash,
@@ -530,7 +531,25 @@ export function registerWorkspaceIpcHandlers(deps: WorkspaceIpcDeps): void {
     return { overlay: overlayPath ? createDirectorySelection(event, overlayPath, 'overlay') : null, base: basePath ? createDirectorySelection(event, basePath, 'base') : null };
   });
 
+  /**
+   * Installed-EXE harness hook. It is opt-in, requires absolute existing
+   * directories supplied by the harness, and is never used by normal builds.
+   * Keeping the selection in main preserves the same sender-bound credential
+   * path as the real directory picker while allowing an installed smoke to
+   * exercise preload/IPC/Bridge/SQLite without a human modal dialog.
+   */
+  function installedHarnessDirectory(kind: 'overlay' | 'base'): string | null {
+    if (process.env.SF_E2E_INSTALLED_HARNESS !== '1') return null;
+    const raw = (kind === 'overlay' ? process.env.SF_E2E_OVERLAY_ROOT : process.env.SF_E2E_BASE_ROOT)?.trim();
+    if (!raw || !isAbsolute(raw) || !existsSync(raw)) {
+      throw new Error(`INSTALLED_HARNESS_${kind.toUpperCase()}_PATH_INVALID`);
+    }
+    return resolve(raw);
+  }
+
   handle('workspace.openDialog', async (event): Promise<DirectorySelection | null> => {
+    const harnessPath = installedHarnessDirectory('overlay');
+    if (harnessPath) return createDirectorySelection(event, harnessPath, 'overlay');
     const remembered = readRecentPath(recentPathsFile, 'overlay');
     const result = await dialog.showOpenDialog({ title: '打开 Mod 工作区', properties: ['openDirectory'], ...(remembered ? { defaultPath: remembered } : {}) });
     const selectedPath = result.canceled ? undefined : result.filePaths[0];
@@ -539,6 +558,8 @@ export function registerWorkspaceIpcHandlers(deps: WorkspaceIpcDeps): void {
   });
 
   handle('workspace.openBaseDialog', async (event): Promise<DirectorySelection | null> => {
+    const harnessPath = installedHarnessDirectory('base');
+    if (harnessPath) return createDirectorySelection(event, harnessPath, 'base');
     const remembered = readRecentPath(recentPathsFile, 'base');
     const result = await dialog.showOpenDialog({ title: '打开原版游戏目录（可选）', properties: ['openDirectory'], ...(remembered ? { defaultPath: remembered } : {}) });
     const selectedPath = result.canceled ? undefined : result.filePaths[0];
@@ -696,7 +717,7 @@ export function registerWorkspaceIpcHandlers(deps: WorkspaceIpcDeps): void {
               const cached = await database.getSemanticFileCache(file.relativePath);
               if (cached && cached.fileSha256 === file.sha256
                 && isNativeSemanticBundleCurrent(file, cached.payload)) {
-                loadSymbolBundleIntoIndex(indexForSession, cached.payload);
+                loadSymbolBundleIntoIndex(indexForSession, rebaseSymbolBundleToFileRevision(file, cached.payload));
               }
             } catch {
               // 忽略单点缓存读取失败

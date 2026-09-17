@@ -3,7 +3,8 @@
  *
  * 明文：ascii / utf8 / utf8-bom / shift_jis（CP932）走 encodePlaintext。
  * 混合编码：只允许改纯 ASCII 行，非 ASCII 字节原样复制（O(B+E) 纯字节 line span 算法）。
- * Lua 字节码：受 ScriptLoaderProfile 守卫，未开放反编译写回的条目一律拒绝。
+ * Lua 字节码：受 ScriptLoaderProfile 守卫；当前 Sekiro HKS 的源码编译由
+ * Bridge 完成，本通用字节级编码器不把文本冒充成 HKS 字节码。
  */
 import { createDiagnostic, type StructuredDiagnostic } from '@soulforge/shared';
 import {
@@ -218,35 +219,14 @@ export function encodeScriptSourceForWriteback(
   const content = originalBytes.subarray(0, originalBytes.length - padding);
 
   if (verdict.luaBytecodeMagic) {
-    if (options?.requireProfile || options?.profile !== undefined) {
-      const profile = options.profile;
-      const check = canEditScriptAsSource(profile, true);
-      if (!check.allowed) {
-        return fail(
-          check.code ?? 'SCRIPT_BYTECODE_SOURCE_EDIT_PROHIBITED',
-          check.message ?? '该条目是 Lua 字节码，当前 Profile 未开放源码编辑写回。'
-        );
-      }
-      if (profile?.matchingSyntaxValidator) {
-        const validator = profile.matchingSyntaxValidator;
-        if (validator.validate) {
-          const valRes = validator.validate(newText);
-          if (!valRes.ok) {
-            return fail(
-              'SCRIPT_SYNTAX_VALIDATION_FAILED',
-              valRes.error ?? `Lua 语法校验失败（${validator.toolName}）。`
-            );
-          }
-        } else if (!validator.validatorPath) {
-          return fail(
-            'SCRIPT_SYNTAX_VALIDATOR_UNAVAILABLE',
-            `未找到匹配的 Lua 语法校验工具（${validator.toolName}，目标版本 ${validator.targetLuaVersion}）。`
-          );
-        }
-      }
-    }
-    const body = new TextEncoder().encode(newText);
-    return { ok: true, bytes: appendPadding(body, padding), encoding: 'utf8', writeKind: 'decompiled-as-utf8' };
+    // A text encoder cannot produce valid Havok Script bytecode.  The
+    // first-party Bridge is the only HKS compiler authority; callers that
+    // have source text must compile there before invoking a native writer.
+    return fail(
+      'SCRIPT_HKS_BRIDGE_REQUIRED',
+      '当前条目是 Sekiro HKS 字节码，必须通过 SoulForge 内置 Bridge 编译器写回；'
+        + '通用文本编码器不会把源码冒充为字节码。'
+    );
   }
 
   if (!verdict.isPlaintext) {

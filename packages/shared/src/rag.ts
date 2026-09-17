@@ -61,6 +61,35 @@ export interface RagCorpus {
   diagnostics: Diagnostic[];
 }
 
+/**
+ * RAG embedding is an optional local accelerator. The application must remain
+ * fully usable when the model is absent and must never turn a missing model
+ * into a download request.
+ */
+export type RagLocalModelState =
+  | 'local-ready'
+  | 'unavailable'
+  | 'model-id-mismatch'
+  | 'revision-mismatch'
+  | 'local-files-missing';
+
+export type RagLocalModelSource =
+  | 'explicit'
+  | 'managed'
+  | 'embedding-cache'
+  | 'huggingface-cache';
+
+export interface RagLocalModelStatus {
+  state: RagLocalModelState;
+  modelId: string;
+  revision: string;
+  dimension: number;
+  source?: RagLocalModelSource;
+  diagnosticCode?: string;
+  /** Renderer-safe explanation; never contains an absolute path or token. */
+  diagnostic?: string;
+}
+
 export interface RagHit {
   chunk: RagChunk;
   score: number;

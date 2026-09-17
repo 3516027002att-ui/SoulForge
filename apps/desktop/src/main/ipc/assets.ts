@@ -9,6 +9,7 @@ import {
   commitMtdPropertySetViaBridge,
   commitEsdTransitionViaBridge,
   commitTaeEventViaBridge,
+  commitTaeEventContainerViaBridge,
   commitVfxFieldSetViaBridge,
   isParamBackupPath,
   runBridge,
@@ -805,6 +806,82 @@ deps.handle('resource.readFlverDocument', async (_event, sourceUri: string) => {
         };
       }
       const storage = deps.durableStoragePaths(deps.activeSession.meta.workspaceId);
+      const isAnibnd = /\.anibnd(?:\.dcx)?$/iu.test(file.absolutePath);
+      const taeEntryIndexes = [...new Set(mutations
+        .map((mutation) => mutation.taeEntryIndex)
+        .filter((index): index is number => Number.isInteger(index)))];
+      let commitExpectedHash = expectedDocumentHash;
+      let containerEntryIndex: number | undefined;
+      if (isAnibnd) {
+        if (taeEntryIndexes.length === 0
+          || mutations.some((mutation) => (
+            !Number.isInteger(mutation.taeEntryIndex)
+            || !taeEntryIndexes.includes(mutation.taeEntryIndex as number)
+          ))) {
+          return {
+            ok: false,
+            changedFiles: [],
+            diagnostics: [{
+              severity: 'error' as const,
+              code: 'TAE_CONTAINER_ENTRY_REQUIRED',
+              message: 'ANIBND TAE 写回必须为每条 mutation 提供有效的 taeEntryIndex。',
+              sourceUri
+            }]
+          };
+        }
+        containerEntryIndex = taeEntryIndexes.length === 1 ? taeEntryIndexes[0] : undefined;
+        const current = await runBridge<{
+          sourceHash?: string;
+          containerSourceHash?: string;
+        }>({
+          command: 'read-tae-document',
+          filePath: file.absolutePath,
+          allowedRoots: [dirname(file.absolutePath)],
+          ...(deps.activeSession.layers.baseRoot
+            ? { oodleRuntimeRoot: deps.activeSession.layers.baseRoot }
+            : {}),
+          timeoutMs: 120_000
+        });
+        if (current.parseStatus === 'failed' || !current.data?.containerSourceHash) {
+          return {
+            ok: false,
+            changedFiles: [],
+            diagnostics: current.diagnostics.length > 0
+              ? current.diagnostics
+              : [{
+                severity: 'error' as const,
+                code: 'TAE_CONTAINER_HASH_UNAVAILABLE',
+                message: '无法取得 ANIBND 外层 source hash，已拒绝 TAE 写回。',
+                sourceUri
+              }]
+          };
+        }
+        if (current.data.sourceHash !== expectedDocumentHash) {
+          return {
+            ok: false,
+            changedFiles: [],
+            diagnostics: [{
+              severity: 'error' as const,
+              code: 'TAE_SOURCE_VERSION_STALE',
+              message: 'TAE 聚合文档在读取后已变化，请重新读取后再写回。',
+              sourceUri,
+              details: { expectedDocumentHash, currentDocumentHash: current.data.sourceHash }
+            }]
+          };
+        }
+        commitExpectedHash = current.data.containerSourceHash;
+      } else if (taeEntryIndexes.length > 0) {
+        return {
+          ok: false,
+          changedFiles: [],
+          diagnostics: [{
+            severity: 'error' as const,
+            code: 'TAE_LOOSE_ENTRY_SELECTOR_INVALID',
+            message: '裸 TAE 不接受 taeEntryIndex；请使用 ANIBND 文档的 child identity。',
+            sourceUri
+          }]
+        };
+      }
       const stage = await deps.verifiedStageRoots(deps.activeSession, storage, 'TAE_STAGING_PREPARE_FAILED');
       if (stage.diagnostics.length > 0) {
         return {
@@ -815,21 +892,34 @@ deps.handle('resource.readFlverDocument', async (_event, sourceUri: string) => {
       }
       const operationLog = await deps.ensureActiveOperationLog(deps.activeSession);
       const outcome = await applyNativeMutation({
-        file,
+        file: commitExpectedHash === expectedDocumentHash ? file : { ...file, sha256: commitExpectedHash },
         sourceUri,
-        expectedHash: expectedDocumentHash,
+        expectedHash: commitExpectedHash,
         stagingRoot: storage.stagingRoot,
         allowedRoots: () => [...stage.allowedRoots],
         stagingPrefix: 'tae',
         stagingFileName: `${basename(file.relativePath)}.mut`,
-        stageWrite: (context) => commitTaeEventViaBridge({
-          sourcePath: file.absolutePath,
-          outputPath: context.outputPath,
-          expectedDocumentHash,
-          allowedRoots: context.allowedRoots,
-          writableRoots: context.writableRoots,
-          mutations
-        }),
+        stageWrite: (context) => isAnibnd
+          ? commitTaeEventContainerViaBridge({
+            sourcePath: file.absolutePath,
+            outputPath: context.outputPath,
+            expectedDocumentHash: commitExpectedHash,
+            allowedRoots: context.allowedRoots,
+            writableRoots: context.writableRoots,
+            mutations,
+            ...(containerEntryIndex === undefined ? {} : { taeEntryIndex: containerEntryIndex }),
+            ...(deps.activeSession?.layers.baseRoot
+              ? { oodleRuntimeRoot: deps.activeSession.layers.baseRoot }
+              : {})
+          })
+          : commitTaeEventViaBridge({
+            sourcePath: file.absolutePath,
+            outputPath: context.outputPath,
+            expectedDocumentHash: commitExpectedHash,
+            allowedRoots: context.allowedRoots,
+            writableRoots: context.writableRoots,
+            mutations
+          }),
         title: `TAE event upsert × ${mutations.length}`,
         confirmActionLabel: '提交 TAE 事件变更'
       }, {

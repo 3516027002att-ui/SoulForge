@@ -8,7 +8,7 @@ import {
   readYappedSdtDefsIndex,
   readYappedSdtRowNamesIndex,
   resolveYappedRowName
-} from '../param/yappedParamMetadataSource.js';
+} from './yappedParamMetadataSource.js';
 import type { ParamDefDocument } from '@soulforge/shared';
 
 const scratch = await mkdtemp(join(tmpdir(), 'soulforge-yapped-source-'));

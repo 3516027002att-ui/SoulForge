@@ -1,15 +1,13 @@
 /**
- * Sekiro TAE（.tae，Time Act Editor）只读文档 wire 类型与三页投影。
+ * Sekiro TAE（.tae，Time Act Editor）文档 wire 类型与三页投影。
  *
  * 与 Bridge 的 read-tae-document 一一对应（ANIMATION-56A）。
  * 布局权威在 C# 侧 TaeNativeDocument.cs；这里的类型只描述 wire 形状，
  * 不维护第二套 native parser。
  *
  * 语义：
- *  - 事件参数体未解码是刻意边界（见 TaeNativeDocument.cs 类注释）：每个事件只
- *    导出 startTime / endTime / eventTypeId 与计数，paramDataOffset 指向的参数体
- *    一字节未读。上层不得把「读出了事件在时间轴上的位置」伪装成「读出了
- *    hitbox/SFX/VFX 参数」——缺 eventTypeId 逐类布局就不能开放 writer。
+ *  - 事件参数体由 Bridge 按 first-party schema 解码；schema 覆盖到的字段可通过
+ *    typed mutation 写回，超出 schema 的原始尾部仍随文档保留。
  *  - authority 只在全部事件时间范围合法时为 candidate；存在 startTime > endTime
  *    或非有限时间时降为 partial，并在 diagnostics 里给 TAE_INVALID_TIME_RANGE。
  *  - animations 行只采样前 sampleLimit 条（envelope 内嵌 animationsTruncated），
@@ -44,12 +42,22 @@ export interface TaeRoundTripReport {
   totalGroupCount: number;
 }
 
-/** 模板解码出的单个参数字段（S17：来自本机 DSAS TAE.Template.SDT.xml 布局）。 */
+/** first-party schema 解码出的单个参数字段。 */
 export interface TaeTemplateFieldValue {
   name: string;
-  kind: string;
-  /** 按 kind 解码的数值/布尔；解不出的字段为字符串「未解码」。 */
+  kind?: string;
+  type?: string;
+  index?: number;
+  offset?: number;
+  size?: number;
+  assert?: number;
+  assertValid?: boolean;
+  isPadding?: boolean;
+  enumEntries?: Array<{ value: number; name: string }>;
+  /** 按 kind 解码的数值/布尔。 */
   value: number | boolean | string;
+  rawValue?: number;
+  displayValue?: string;
 }
 
 /** read-tae-document envelope 里的事件时间表行（timeline page 的最小单元）。 */
@@ -57,6 +65,13 @@ export interface TaeTimelineEventWire {
   startTime: number;
   endTime: number;
   eventTypeId: number;
+  parameterLength?: number;
+  parameterDecodedSize?: number;
+  schemaBankId?: number;
+  schemaBankName?: string;
+  schemaVariantCount?: number;
+  schemaVariant?: string;
+  parameterTailLength?: number;
   /** 所属 ANIBND TAE 子项；同一 animId 在不同 section 可重复。 */
   taeEntryIndex?: number;
   taeEntryId?: number;
@@ -68,7 +83,7 @@ export interface TaeTimelineEventWire {
    * 消费方回落 parameterBytesHex（有界 hex 预览），禁止编造字段含义。
    */
   parameterDecoded?: boolean;
-  /** 模板解码出的字段数组（name/kind/value）；未解码时缺省。 */
+  /** first-party schema 解码出的字段数组（name/type/value）；未解码时缺省。 */
   templateFields?: TaeTemplateFieldValue[];
   /** 参数体有界 hex 预览（无模板布局时的兜底，最多 64 字节）。 */
   parameterBytesHex?: string;
@@ -89,6 +104,8 @@ export interface TaeEntryWire {
   animationCount: number;
   sourceSize: number;
   sourceHash: string;
+  eventBank?: number;
+  schemaBankId?: number;
 }
 
 /** read-tae-document envelope 里的 animation 行：摘要 + bounded 事件时间表。 */
@@ -159,6 +176,9 @@ export interface TaeDocument {
   version: string;
   sourceSize: number;
   sourceHash: string;
+  containerSourceHash?: string;
+  eventBank?: number;
+  schemaBankId?: number;
   animationCount: number;
   totalEventCount: number;
   totalGroupCount: number;
@@ -170,6 +190,34 @@ export interface TaeDocument {
   animationsTruncated: boolean;
   /** distinct 事件类型列表（C# 侧 SortedSet，已去重排序）。 */
   eventTypes: number[];
+  schema?: {
+    origin: 'first-party';
+    package: string;
+    version: string;
+    contentDigest: string;
+    game: string;
+    format: string;
+    nativeFormatAuthority: boolean;
+    bankCount: number;
+    eventCount: number;
+    fieldCount: number;
+  };
+  schemaCoverage?: {
+    coveredEventCount: number;
+    unknownEventCount: number;
+    lengthMismatchCount: number;
+    ambiguousEventCount: number;
+    assertFailureCount?: number;
+    assertFailureDetails?: Array<{
+      animId: number;
+      eventIndex: number;
+      eventTypeId: number;
+      parameterLength: number;
+      fields: string[];
+    }>;
+    unknownEventTypeIds: number[];
+    complete: boolean;
+  };
   roundTrip: TaeRoundTripReport;
   diagnostics: TaeDiagnostic[];
   authority: 'native-verified' | 'candidate' | 'fixture-confirmed' | 'unsupported' | 'partial';

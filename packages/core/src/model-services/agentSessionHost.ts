@@ -51,7 +51,10 @@ export interface AgentSessionRunParams {
   systemPrompt?: string;
   permissionMode: AgentPermissionMode;
   tools: ToolDefinition[];
-  executeTool: (call: ToolCall) => Promise<{ ok: boolean; content: string; code?: string }>;
+  executeTool: (
+    call: ToolCall,
+    contextOverride?: Record<string, unknown>
+  ) => Promise<{ ok: boolean; content: string; code?: string }>;
   signal?: AbortSignal;
   streaming?: boolean;
   /**
@@ -214,46 +217,57 @@ export async function runAgentSession(params: AgentSessionRunParams): Promise<Ag
     );
   };
 
-  const run = await runAgentToolLoop(trackedAdapter, {
-    config: params.config,
-    apiKey: params.apiKey,
-    messages,
-    sessionId,
-    taskQuery: params.prompt,
-    tools: params.tools,
-    permissionMode: params.permissionMode,
-    executeTool: params.executeTool,
-    ...(params.maxSteps != null ? { maxSteps: params.maxSteps } : {}),
-    ...(params.signal ? { signal: params.signal } : {}),
-    ...(params.timeoutMs != null ? { timeoutMs: params.timeoutMs } : {}),
-    ...(params.maxTotalOutputTokens != null ? { maxTotalOutputTokens: params.maxTotalOutputTokens } : {}),
-    ...(params.retryPolicy ? { retryPolicy: params.retryPolicy } : {}),
-    ...(params.streamMaxRetries != null ? { streamMaxRetries: params.streamMaxRetries } : {}),
-    ...(params.streaming != null ? { streaming: params.streaming } : {}),
-    ...(params.compaction ? { compaction: params.compaction } : {}),
-    ...(params.sampling ? { sampling: params.sampling } : {}),
-    ...(params.ragSearch ? { ragSearch: params.ragSearch } : {}),
-    ...(params.requestApproval ? { requestApproval: params.requestApproval } : {}),
-    ...(params.resolveApprovalDiff ? { resolveApprovalDiff: params.resolveApprovalDiff } : {}),
-    ...(params.approvalRequiredLevels
-      ? { approvalRequiredLevels: params.approvalRequiredLevels }
-      : {}),
-    ...(params.contextBroker ? { contextBroker: params.contextBroker } : {}),
-    ...(params.contextBrokerOptions
-      ? { contextBrokerOptions: params.contextBrokerOptions }
-      : {}),
-    onEvent: emit,
-    rollout: recorder
-  });
-
-  if (usagePersistenceErrors.length > 0) {
-    run.diagnostics.push({
-      severity: 'warning',
-      code: 'PROVIDER_USAGE_INDEX_PERSIST_FAILED',
-      message: `provider usage 已写入会话 rollout，但 app.db 索引失败 ${usagePersistenceErrors.length} 次。`
+  let primaryError: unknown = null;
+  try {
+    const run = await runAgentToolLoop(trackedAdapter, {
+      config: params.config,
+      apiKey: params.apiKey,
+      messages,
+      sessionId,
+      taskQuery: params.prompt,
+      tools: params.tools,
+      permissionMode: params.permissionMode,
+      executeTool: params.executeTool,
+      ...(params.maxSteps != null ? { maxSteps: params.maxSteps } : {}),
+      ...(params.signal ? { signal: params.signal } : {}),
+      ...(params.timeoutMs != null ? { timeoutMs: params.timeoutMs } : {}),
+      ...(params.maxTotalOutputTokens != null ? { maxTotalOutputTokens: params.maxTotalOutputTokens } : {}),
+      ...(params.retryPolicy ? { retryPolicy: params.retryPolicy } : {}),
+      ...(params.streamMaxRetries != null ? { streamMaxRetries: params.streamMaxRetries } : {}),
+      ...(params.streaming != null ? { streaming: params.streaming } : {}),
+      ...(params.compaction ? { compaction: params.compaction } : {}),
+      ...(params.sampling ? { sampling: params.sampling } : {}),
+      ...(params.ragSearch ? { ragSearch: params.ragSearch } : {}),
+      ...(params.requestApproval ? { requestApproval: params.requestApproval } : {}),
+      ...(params.resolveApprovalDiff ? { resolveApprovalDiff: params.resolveApprovalDiff } : {}),
+      ...(params.approvalRequiredLevels
+        ? { approvalRequiredLevels: params.approvalRequiredLevels }
+        : {}),
+      ...(params.contextBroker ? { contextBroker: params.contextBroker } : {}),
+      ...(params.contextBrokerOptions
+        ? { contextBrokerOptions: params.contextBrokerOptions }
+        : {}),
+      onEvent: emit,
+      rollout: recorder
     });
-  }
 
-  await recorder.close();
-  return { sessionId, rolloutPath, run };
+    if (usagePersistenceErrors.length > 0) {
+      run.diagnostics.push({
+        severity: 'warning',
+        code: 'PROVIDER_USAGE_INDEX_PERSIST_FAILED',
+        message: `provider usage 已写入会话 rollout，但 app.db 索引失败 ${usagePersistenceErrors.length} 次。`
+      });
+    }
+    return { sessionId, rolloutPath, run };
+  } catch (error) {
+    primaryError = error;
+    recorder.enqueue({ type: 'interrupted', at: new Date().toISOString() });
+    throw error;
+  } finally {
+    try {
+      await recorder.close();
+    } catch (closeError) {
+      if (primaryError === null) throw closeError;
+    }
+  }
 }

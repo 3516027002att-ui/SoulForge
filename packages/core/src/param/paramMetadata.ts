@@ -12,6 +12,14 @@ import type {
 } from '@soulforge/shared';
 import { validateParamDef } from './paramdefLayout.js';
 
+/** Stable identity of the bundled SoulForge PARAM package. */
+export const SOULFORGE_FIRST_PARTY_PARAM_PACKAGE_ID = 'soulforge-sekiro-param';
+export const SOULFORGE_FIRST_PARTY_PARAM_PACKAGE_VERSION = '1.0.0';
+export const SOULFORGE_FIRST_PARTY_PARAM_SOURCE_IDENTITY = 'soulforge://schema/sekiro/1.6.x/param';
+/** Updated by the schema generator when the checked-in package changes. */
+export const SOULFORGE_FIRST_PARTY_PARAM_PACKAGE_DIGEST =
+  'sha256:e42fde9b453fad62490e0f6ee2bb9c34d37293313caf52b5df0f2747163d3daf' as const;
+
 export interface ParamMetadataDiagnostic {
   severity: 'error';
   code: string;
@@ -83,7 +91,8 @@ const SPDX_RESERVED_IDENTIFIERS = new Set(['AND', 'OR', 'WITH', 'NOT', 'NONE', '
 const SOURCE_KINDS = [
   'paramdex-compatible',
   'user-supplied',
-  'synthetic-fixture'
+  'synthetic-fixture',
+  'first-party'
 ] as const;
 const PACKAGE_KEYS = new Set([
   'schemaVersion',
@@ -238,7 +247,7 @@ export function validateParamMetadataPackage(input: unknown): ParamMetadataPacka
 export function resolveParamMetadataRowWidth(
   metadata: ParamMetadataPackage,
   descriptor: Omit<ParamMetadataDefinitionKey, 'rowDataSize'>,
-  trustPolicy: ParamMetadataTrustPolicy
+  trustPolicy?: ParamMetadataTrustPolicy
 ): number | undefined {
   const candidates = metadata.definitions.filter(({ key }) => key.game === descriptor.game
     && key.gameBuild === descriptor.gameBuild && key.typeName === descriptor.typeName
@@ -272,25 +281,29 @@ function matchValidatedParamMetadataPackage(
     '$descriptor',
     'Definition key'
   );
-  const trustPolicySnapshot: ParamMetadataSnapshotResult = trustPolicyInput === undefined
+  const firstPartyPackage = packageValidation.ok
+    && isRecognizedFirstPartyPackage(packageValidation.package);
+  const trustPolicySnapshot: ParamMetadataSnapshotResult = firstPartyPackage
     ? { ok: true, value: undefined }
-    : snapshotUntrustedInput(
-        trustPolicyInput,
-        'PARAM_METADATA_TRUST_POLICY_SNAPSHOT_FAILED',
-        '$policy',
-        'Trust policy'
-      );
+    : trustPolicyInput === undefined
+      ? { ok: true, value: undefined }
+      : snapshotUntrustedInput(
+          trustPolicyInput,
+          'PARAM_METADATA_TRUST_POLICY_SNAPSHOT_FAILED',
+          '$policy',
+          'Trust policy'
+        );
   if (!descriptorSnapshot.ok) appendDiagnostic(diagnostics, descriptorSnapshot.diagnostic);
   if (!trustPolicySnapshot.ok) appendDiagnostic(diagnostics, trustPolicySnapshot.diagnostic);
 
-  const trustDiagnostics = trustPolicySnapshot.ok
+  const trustDiagnostics = !firstPartyPackage && trustPolicySnapshot.ok
     ? validateTrustPolicy(trustPolicySnapshot.value)
     : [];
   appendDiagnostics(diagnostics, trustDiagnostics);
 
   if (!packageValidation.ok) return rejectedMatch(diagnostics);
   const metadataPackage = packageValidation.package;
-  if (trustPolicySnapshot.ok && trustDiagnostics.length === 0) {
+  if (!firstPartyPackage && trustPolicySnapshot.ok && trustDiagnostics.length === 0) {
     validatePackageTrust(
       metadataPackage,
       trustPolicySnapshot.value as ParamMetadataTrustPolicy,
@@ -429,6 +442,14 @@ function validateSource(input: unknown, diagnostics: ParamMetadataDiagnostic[]):
     'PARAM_METADATA_SOURCE_DIGEST_INVALID',
     diagnostics
   );
+}
+
+function isRecognizedFirstPartyPackage(metadataPackage: ParamMetadataPackage): boolean {
+  return metadataPackage.source.kind === 'first-party'
+    && metadataPackage.packageId === SOULFORGE_FIRST_PARTY_PARAM_PACKAGE_ID
+    && metadataPackage.packageVersion === SOULFORGE_FIRST_PARTY_PARAM_PACKAGE_VERSION
+    && metadataPackage.source.identity === SOULFORGE_FIRST_PARTY_PARAM_SOURCE_IDENTITY
+    && metadataPackage.packageDigest === SOULFORGE_FIRST_PARTY_PARAM_PACKAGE_DIGEST;
 }
 
 function validateLicense(input: unknown, diagnostics: ParamMetadataDiagnostic[]): void {

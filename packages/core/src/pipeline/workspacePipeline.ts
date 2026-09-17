@@ -12,6 +12,7 @@ import {
   extractFileSymbolBundle,
   isNativeSemanticBundleCurrent,
   loadSymbolBundleIntoIndex,
+  rebaseSymbolBundleToFileRevision,
   type SemanticCacheProvider
 } from '../workspace/semanticFileCache.js';
 
@@ -166,7 +167,7 @@ export async function analyzeWorkspace(options: AnalyzeWorkspaceOptions): Promis
     }
 
     if (cachedBundle) {
-      loadSymbolBundleIntoIndex(index, cachedBundle);
+      loadSymbolBundleIntoIndex(index, rebaseSymbolBundleToFileRevision(file, cachedBundle));
       accepted = true;
     } else {
       const parsed = await parseKnownResource(file, index, options);

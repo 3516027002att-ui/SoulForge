@@ -64,6 +64,7 @@ const CONTROLLED_ENTRIES = Object.freeze([
   // setMsbPartTransform（包 write-msb），落盘均经 applyNativeMutation → Patch
   // Engine，定义在 editing/ 下，不直接写盘。
   'setTaeEventTimes',
+  'setTaeEventFields',
   'setMsbPartTransform',
   // Canonical MSB map operations: these lower into MapEditTransaction and
   // then through the Patch Engine/native reread boundary.

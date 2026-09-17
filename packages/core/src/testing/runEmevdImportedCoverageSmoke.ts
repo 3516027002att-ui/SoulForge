@@ -14,8 +14,9 @@
  *    SOULFORGE_EMEDF_PATH / arg 2 is provided. Real EMEDF absence is a
  *    fail-closed skip, recorded in the output.
  *
- * DarkScript3 EMEDF data is All Rights Reserved and never bundled; the
- * synthetic DS3 JSON is our own tiny sample.
+ * DarkScript3 EMEDF remains an external-only validation input. The synthetic
+ * DS3 JSON is our own tiny sample; the production first-party registry is a
+ * separately maintained semantic package and never reads this adapter.
  *
  * Authority cap: partial — aggregate distribution only, no payload semantics.
  */
@@ -30,7 +31,7 @@ import {
   type EmevdCoverageAnalysis,
   type EmevdInstructionDistributionEntry
 } from '../emevd/emedfCoverage.js';
-import { importDs3EmedfFile } from '../emevd/emedfExternalAdapter.js';
+import { importDs3EmedfFile } from './emedfExternalAdapter.js';
 import { decodeInstructionArgs, type EmedfRegistry } from '../emevd/emedfSchema.js';
 import {
   createSyntheticImportedEmedf

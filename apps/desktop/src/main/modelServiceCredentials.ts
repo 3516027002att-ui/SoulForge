@@ -117,13 +117,6 @@ function isMissingFile(error: unknown): boolean {
   return isRecord(error) && error.code === 'ENOENT';
 }
 
-import {
-  isTestConfigPresent,
-  getTestServiceConfig,
-  getTestApiKey,
-  TEST_CONFIG_ID
-} from './testLoader.js';
-
 export class ModelServiceCredentialVault {
   private readonly vaultPath: string;
   private cache: VaultFile | null = null;
@@ -133,7 +126,6 @@ export class ModelServiceCredentialVault {
   }
 
   isEncryptionAvailable(): boolean {
-    if (isTestConfigPresent()) return true;
     return safeStorage.isEncryptionAvailable();
   }
 
@@ -148,10 +140,6 @@ export class ModelServiceCredentialVault {
         : config
     ));
 
-    const testService = getTestServiceConfig();
-    if (testService) {
-      return [testService, ...mapped.filter((c) => c.id !== TEST_CONFIG_ID)];
-    }
     return mapped;
   }
 
@@ -220,10 +208,6 @@ export class ModelServiceCredentialVault {
    * Resolve plaintext key for main/core agent loop only. Never send to renderer.
    */
   async resolveApiKey(configId: string): Promise<string | null> {
-    if (configId === TEST_CONFIG_ID) {
-      const testKey = getTestApiKey(configId);
-      if (testKey) return testKey;
-    }
     if (!this.isEncryptionAvailable()) return null;
     const vault = await this.load();
     const encoded = vault.secrets[configId];

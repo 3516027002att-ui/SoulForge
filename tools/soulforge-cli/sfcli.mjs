@@ -224,15 +224,8 @@ async function main() {
 
   const core = await loadCore();
   const {
-    openWorkspaceSession,
-    scanWorkspace,
-    WorkspaceIndex,
-    createDefaultToolRegistry,
-    createAgentToolBridge,
-    MemoryOperationLogStore,
-    disposeBridgeDaemonPool,
-    analyzeWorkspace,
-    loadSymbolBundleIntoIndex
+    mapCliArgumentsToToolInput,
+    openLocalCliSession
   } = core;
 
   if (!options.workspace) fail('必须通过 --workspace 指定 Mod 工作区路径');
@@ -242,87 +235,22 @@ async function main() {
   if (baseRoot && !existsSync(baseRoot)) fail(`--base 路径不存在: ${baseRoot}`);
 
   log(`打开工作区: ${workspaceRoot}`);
-  const session = await openWorkspaceSession({
+  const cliSession = await openLocalCliSession({
     overlayRoot: workspaceRoot,
     ...(baseRoot ? { baseRoot } : {}),
-    game: options.game
-  });
-
-  const scan = await scanWorkspace({
-    workspaceRoot: session.layers.overlayRoot,
-    game: session.meta.game,
-    includeContentHashes: false
-  });
-  const index = new WorkspaceIndex(session.meta.workspaceId);
-  index.setFiles(scan.files);
-  if (scan.files.some((f) => f.resourceKind === 'param' || String(f.relativePath).toLowerCase().includes('.param'))) {
-    index.setParamSemanticState('warming_up');
-  }
-  log(`扫描到文件 ${scan.files.length} 个`);
-
-  if (options.useCache) {
-    const cached = await hydrateSemanticCache(index, workspaceRoot, log, loadSymbolBundleIntoIndex);
-    log(`语义缓存水合载荷 ${cached} 条`);
-  }
-  if (index.getStats().paramRows > 0) {
-    index.setParamSemanticState('ready');
-  }
-  // Hydration only upserts symbols; the evidence graph is built separately.
-  // Without this, find_references / resolve_entity edges stay empty.
-  try {
-    const refStats = index.rebuildReferences();
-    log(
-      `引用图: high=${refStats.stats.high} medium=${refStats.stats.medium} ` +
-      `low=${refStats.stats.low} edges=${refStats.edges.length}`
-    );
-  } catch (error) {
-    log(`引用图构建失败: ${error instanceof Error ? error.message : String(error)}`);
-  }
-
-  let activeIndex = index;
-  if (options.analyze) {
-    log('执行完整原生分析（analyzeWorkspace）…');
-    const analyzed = await analyzeWorkspace({
-      workspaceRoot: session.layers.overlayRoot,
-      files: scan.files,
-      inspectNativeResources: true,
-      parseTextResources: true,
-      onProgress: (p) => log(`  [${p.phase}] ${p.current}/${p.total ?? '?'} ${p.message ?? ''}`)
-    });
-    activeIndex = analyzed.index;
-    if (activeIndex.getStats().paramRows > 0) activeIndex.setParamSemanticState('ready');
-    log(`分析完成: files=${analyzed.parsedFiles}, paramRows=${activeIndex.getStats().paramRows}`);
-  }
-
-  const storageRoot = join(workspaceRoot, '.soulforge-staging');
-  const backupBaseDir = join(storageRoot, 'backups');
-  const recoveryDir = join(storageRoot, 'recovery');
-  const stagingRoot = join(storageRoot, 'staging');
-  await mkdir(backupBaseDir, { recursive: true });
-  await mkdir(recoveryDir, { recursive: true });
-  await mkdir(stagingRoot, { recursive: true });
-
-  const operationLogStore = new MemoryOperationLogStore();
-  const registry = createDefaultToolRegistry();
-  const context = {
-    workspaceIndex: activeIndex,
+    game: options.game,
     mode: options.mode === 'plan' || options.mode === 'fullPermission' ? options.mode : 'normal',
-    modeCeiling: options.mode === 'plan' || options.mode === 'fullPermission' ? options.mode : 'normal',
-    allowMemoryWrite: false,
-    session,
-    operationLogStore,
-    backupBaseDir,
-    recoveryDir
-  };
-
-  const bridge = createAgentToolBridge({
-    registry,
-    context,
-    contextProvider: () => context
+    principal: 'local-cli',
+    analyze: options.analyze,
+    requireDurableLog: false,
+    onFallbackWarning: (message) => log(message),
+    onProgress: (progress) => log(`  [${progress.phase}] ${progress.current}/${progress.total ?? '?'} ${progress.message ?? ''}`)
   });
+  const { bridge, registry } = cliSession;
+  log(`扫描/索引完成: files=${cliSession.workspaceIndex.getFiles().length}`);
 
   const finish = async (code = 0) => {
-    try { await disposeBridgeDaemonPool(); } catch { /* ignore */ }
+    try { await cliSession.dispose(); } catch { /* ignore */ }
     process.exit(code);
   };
 
@@ -391,10 +319,14 @@ async function main() {
     }
 
     log(`调用 ${toolName}`);
+    const mapped = mapCliArgumentsToToolInput(toolName, args);
+    if (!mapped.ok) {
+      fail(`${mapped.code}: ${mapped.message}`, 2);
+    }
     const result = await bridge.executeTool({
       id: `cli-${Date.now()}`,
       name: toolName,
-      argumentsJson: JSON.stringify(args)
+      argumentsJson: JSON.stringify(mapped.input)
     });
 
     if (options.json || options.quiet) {

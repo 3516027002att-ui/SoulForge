@@ -36,8 +36,11 @@ import type {
   ParamNativeTelemetry,
   ParamPhysicalRowIdentity,
   ParamSessionMaterializationSnapshot,
-  ResourceKind
+  ResourceKind,
+  RagLocalModelStatus,
+  UpdatePublicState
 } from '@soulforge/shared';
+import type { UpdateCommandResult, UpdateChannel } from '@soulforge/shared';
 import type {
   AiAgentEventEnvelope,
   AnalyzeWorkspaceSummary,
@@ -243,6 +246,48 @@ const EMPTY_EMEVD_DOCUMENT: EmevdEditorDocument = {
 const EMPTY_FMG_ENTRIES: Array<{ id: number; text: string }> = [];
 
 const EMPTY_PARAM_ROWS: ParamRowView[] = [];
+
+const INITIAL_UPDATE_STATE: UpdatePublicState = {
+  status: 'idle',
+  currentVersion: '读取中',
+  channel: 'prerelease'
+};
+
+function updateStateLabel(state: UpdatePublicState): string {
+  switch (state.status) {
+    case 'idle': return '尚未检查';
+    case 'checking': return '检查中…';
+    case 'up-to-date': return '已是最新版本';
+    case 'available': return `发现 ${state.info.version}`;
+    case 'downloading': return `下载中 ${state.progress.percent}%`;
+    case 'pending-install': return '已下载，等待安装';
+    case 'installing': return '正在启动安装器…';
+    case 'installed': return '已启动安装器';
+    case 'cancelled': return '已取消';
+    case 'blocked': return '暂缓安装';
+    case 'error': return '更新失败';
+  }
+}
+
+function ragLocalModelStateLabel(state: RagLocalModelStatus['state']): string {
+  switch (state) {
+    case 'local-ready': return '本地模型已就绪';
+    case 'model-id-mismatch': return '模型 ID 不匹配';
+    case 'revision-mismatch': return '版本不匹配';
+    case 'local-files-missing': return '本地文件缺失或损坏';
+    case 'unavailable': return '未安装本地模型';
+  }
+}
+
+function ragLocalModelSourceLabel(source: RagLocalModelStatus['source']): string {
+  switch (source) {
+    case 'explicit': return '显式本地目录';
+    case 'managed': return 'SoulForge 受管目录';
+    case 'embedding-cache': return '已有 embedding 缓存';
+    case 'huggingface-cache': return 'Hugging Face 本地缓存';
+    default: return '未发现本地来源';
+  }
+}
 
 function paramRowViewFromIndex(row: ParamIndexRow): ParamRowView {
   return {
@@ -462,16 +507,11 @@ export function App(): ReactElement {
   const [paramIndexLoading, setParamIndexLoading] = useState(false);
   const [paramIndexDiagnostic, setParamIndexDiagnostic] = useState<string | null>(null);
   /**
-   * 主进程给出的字段定义（Smithbox SDT 2.2.4）与缺失原因。
+   * 主进程给出的 SoulForge 内置字段定义与缺失原因。
    *
-   * ⚠️ 当前经**直连**取得：main 侧按 typeName 从元数据包里找定义，
-   * 未走 matchParamMetadataPackage 的包校验 + 描述符匹配 + 用户信任策略三层检查
-   * ——生产侧目前没有信任策略的构造代码（只有测试里有）。
-   *
-   * 因此字段表按**只读**呈现：读得到、改不了。写入需要先建立用户信任策略，
-   * 那是范围变更，已记录待裁定。definitionCanCommit 靠 origin 拦住写入是既有的
-   * 保护性设计，这里不绕过它——把 origin 标成 'imported' 会让写入放行，
-   * 那等于用一个字段名换掉一道授权检查。
+   * main 侧只接受版本化、内容寻址的 first-party schema，并在返回前完成
+   * 包来源、行宽和描述符匹配。字段定义不再依赖用户安装的第三方编辑器；
+   * 未覆盖或行宽不匹配时保留结构化诊断并维持只读。
    */
   const [paramFieldDefs, setParamFieldDefs] = useState<ParamFieldDef[] | null>(null);
   /**
@@ -485,19 +525,23 @@ export function App(): ReactElement {
     Array<{ id: string; name: string; values: Array<{ value: number; label: string }> }> | null
   >(null);
   /**
-   * 字段定义的授信来源。'imported'/'user-derived' 放行字段写入，'fixture' 只读。
-   *
-   * 值来自主进程（包校验 + 行宽核对 + 用户信任策略三层都通过才给 'imported'），
-   * 渲染器只做白名单收窄，不自行判定 —— 自行拼这个值等于用一个字段名换掉
-   * 一道授权检查，而那道检查守的是「元数据字段偏移与真实 PARAM 是否对得上」。
+   * 字段定义的来源。first-party 只有在内置包校验、行宽核对和描述符匹配通过后
+   * 才能放行写入；fixture 及覆盖缺口保持只读。渲染器只消费主进程裁定的值。
    */
   const [paramFieldDefsOrigin, setParamFieldDefsOrigin] = useState<
-    'fixture' | 'imported' | 'user-derived'
+    'first-party' | 'fixture' | 'imported' | 'user-derived'
   >('fixture');
   const [paramFieldDefsDiagnostic, setParamFieldDefsDiagnostic] = useState<
     { code: string; message: string } | null
   >(null);
   const [paramRowDataSize, setParamRowDataSize] = useState<number>(16);
+
+  /** GitHub Release 更新状态只来自 main/preload，renderer 不保存路径或句柄。 */
+  const [updateState, setUpdateState] = useState<UpdatePublicState>(INITIAL_UPDATE_STATE);
+  const [updateActionBusy, setUpdateActionBusy] = useState(false);
+  const updateActionInFlightRef = useRef(false);
+  /** RAG 只报告本地模型状态；renderer 不接触路径、网络或下载入口。 */
+  const [ragModelStatus, setRagModelStatus] = useState<RagLocalModelStatus | null>(null);
 
   const [aiProvider, setAiProvider] = useState<AiProvider>('mock');
   // 2-A：思考档用官方 effort 值（默认 medium；旧档 normal 已迁移，写路径只写官方值）。
@@ -608,8 +652,8 @@ export function App(): ReactElement {
       setParamFieldDefs(null);
       setParamFieldEnums(null);
       setParamFieldDefsDiagnostic(null);
-      // 授信来源回落到只读：上一个 param 的 'imported' 若残留，新 param 的字段
-      // 会被错误地显示为可写。授权判定必须由新文档的 fieldDefsOrigin 重新给出。
+      // 来源回落到只读：上一个 param 的 first-party 定义若残留，新 param 的字段
+      // 会被错误地显示为可写。写入判定必须由新文档的 fieldDefsOrigin 重新给出。
       setParamFieldDefsOrigin('fixture');
       // S31：一次性 PARAM reveal 请求随 param 族清空，避免残留到别的表误滚动。
       setParamRevealRowId(null);
@@ -820,16 +864,12 @@ export function App(): ReactElement {
    * 交给 ParamDefPanel 的字段定义。
    *
    * origin 来自主进程的 fieldDefsOrigin（见 paramFieldDefsOrigin 的注释）：
-   * 它在 matchParamMetadataPackage 的包校验、行宽核对与用户信任策略三层都通过后
-   * 才给出 'imported'，否则是 'fixture'（只读）。
+   * 它在 matchParamMetadataPackage 的包校验和行宽核对通过后给出 first-party，
+   * 否则是 fixture（只读）。
    *
-   * 此前这里硬写 'fixture'，因为生产侧缺少信任策略的构造代码，于是字段编辑
-   * 恒为只读。现在那一环已接线（param.metadata.trustState / setTrust），
-   * 用户确认一次后本机后续都放行；包内容变化会因摘要不符而重新询问。
-   *
-   * 仍然不在渲染器里自行判定 origin —— 那等于用一个字段名换掉一道授权检查，
-   * 而那道检查守的是「元数据字段偏移与真实 PARAM 是否对得上」：偏移错了
-   * 就是往错误字节位置写数值，存出来的 param 静默损坏。
+   * 渲染器不自行判定 origin，也不提供外部 schema 信任入口；那道检查守的是
+   * 「内置元数据字段偏移与真实 PARAM 是否对得上」：偏移错了就是往错误
+   * 字节位置写数值，存出来的 param 静默损坏。
    */
   const paramFieldDefinition = useMemo<ParamDefDocument | null>(() => {
     if (!paramFieldDefs || paramFieldDefs.length === 0) return null;
@@ -1087,17 +1127,106 @@ export function App(): ReactElement {
           protocol: service.protocol
         })));
         setAgentTools(toolList);
-        // 优先选中 test-service 免配置服务；未配置凭据的服务会被主进程拒绝。
-        const testService = services.find((service) => service.id === 'test-service' || service.displayName === 'test');
-        setAgentServiceId((current) => (testService ? testService.id : (current
+        // 只选择用户已配置的服务；生产启动不扫描仓库 test 文件，也不注入测试服务。
+        setAgentServiceId((current) => current
           ?? services.find((service) => service.hasCredential)?.id
           ?? services[0]?.id
-          ?? null)));
+          ?? null);
       } catch (error) {
         setAgentSessionsError(error instanceof Error ? error.message : '读取模型服务或工具清单失败');
       }
     })();
   }, [bridge]);
+  useEffect(() => {
+    if (!bridge || typeof bridge.getUpdateState !== 'function' || typeof bridge.onUpdateState !== 'function') return;
+    let cancelled = false;
+    const unsubscribe = bridge.onUpdateState((state) => {
+      if (!cancelled) setUpdateState(state);
+    });
+    void bridge.getUpdateState().then((state) => {
+      if (!cancelled) setUpdateState(state);
+    }).catch((error: unknown) => {
+      if (cancelled) return;
+      setStatus(error instanceof Error ? error.message : '读取更新状态失败');
+    });
+    return () => {
+      cancelled = true;
+      unsubscribe();
+    };
+  }, [bridge]);
+
+  useEffect(() => {
+    if (!bridge || typeof bridge.getRagLocalModelStatus !== 'function') {
+      setRagModelStatus(null);
+      return;
+    }
+    let cancelled = false;
+    void bridge.getRagLocalModelStatus().then((status) => {
+      if (!cancelled) setRagModelStatus(status);
+    }).catch(() => {
+      if (!cancelled) setRagModelStatus(null);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [bridge]);
+
+  async function runUpdateCommand(
+    action: () => Promise<UpdateCommandResult>,
+    successMessage?: string
+  ): Promise<void> {
+    if (!bridge) {
+      announceDesktopOnly('检查 SoulForge 更新');
+      return;
+    }
+    if (updateActionInFlightRef.current) return;
+    updateActionInFlightRef.current = true;
+    setUpdateActionBusy(true);
+    try {
+      const result = await action();
+      setUpdateState(result.state);
+      if (!result.ok && result.error) {
+        setStatus(`更新未执行：${result.error.message}`);
+        pushToast(result.error.message, 'warn');
+      } else if (successMessage) {
+        setStatus(successMessage);
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : '更新操作失败';
+      setStatus(message);
+      pushToast(message, 'warn');
+    } finally {
+      updateActionInFlightRef.current = false;
+      setUpdateActionBusy(false);
+    }
+  }
+
+  function updateAction(): { label: string; run: (() => Promise<UpdateCommandResult>) | null } {
+    switch (updateState.status) {
+      case 'available':
+        return { label: '下载更新', run: bridge ? bridge.downloadUpdate : null };
+      case 'downloading':
+        return { label: '取消下载', run: bridge ? bridge.cancelUpdate : null };
+      case 'pending-install':
+      case 'blocked':
+        return { label: '安装并重启', run: bridge ? bridge.installUpdate : null };
+      case 'installing':
+        return { label: '安装器启动中…', run: null };
+      default:
+        return { label: '检查更新', run: bridge ? bridge.checkForUpdate : null };
+    }
+  }
+
+  function changeUpdateChannel(channel: UpdateChannel): void {
+    if (!bridge) {
+      announceDesktopOnly('切换更新频道');
+      return;
+    }
+    void runUpdateCommand(
+      () => bridge.setUpdateChannel({ channel }),
+      channel === 'prerelease' ? '已切换到预发布频道' : '已切换到稳定频道'
+    );
+  }
   /**
    * 领域栏数据源（SHELL-09 §4.1）：DomainSummary 由「固定领域集合 × read
    * contract 注册状态」构造，不根据任何文件数据分类。read contract 的
@@ -1207,8 +1336,8 @@ export function App(): ReactElement {
           setParamFieldDefs(null);
           setParamFieldEnums(null);
           setParamFieldDefsDiagnostic(null);
-          // 读取失败同样要清授信来源：否则上一个 param 的 'imported' 残留，
-          // 会让这个读不出来的资源看起来仍可写入字段。
+          // 读取失败同样要清来源：否则上一个 param 的 first-party 残留，会让
+          // 这个读不出来的资源看起来仍可写入字段。
           setParamFieldDefsOrigin('fixture');
           setStatus(result.diagnostics?.[0]?.message ?? '这个 PARAM 读不出来。');
           return;
@@ -1223,7 +1352,9 @@ export function App(): ReactElement {
         setParamFieldDefs(result.metadata.fieldDefs);
         setParamFieldEnums(result.metadata.fieldEnums);
         setParamFieldDefsOrigin(
-          result.metadata.fieldDefsOrigin === 'imported' || result.metadata.fieldDefsOrigin === 'user-derived'
+          result.metadata.fieldDefsOrigin === 'first-party'
+            || result.metadata.fieldDefsOrigin === 'imported'
+            || result.metadata.fieldDefsOrigin === 'user-derived'
             ? result.metadata.fieldDefsOrigin
             : 'fixture'
         );
@@ -1761,7 +1892,9 @@ export function App(): ReactElement {
     setParamFieldDefs(reload.metadata.fieldDefs);
     setParamFieldEnums(reload.metadata.fieldEnums);
     setParamFieldDefsOrigin(
-      reload.metadata.fieldDefsOrigin === 'imported' || reload.metadata.fieldDefsOrigin === 'user-derived'
+      reload.metadata.fieldDefsOrigin === 'first-party'
+        || reload.metadata.fieldDefsOrigin === 'imported'
+        || reload.metadata.fieldDefsOrigin === 'user-derived'
         ? reload.metadata.fieldDefsOrigin
         : 'fixture'
     );
@@ -2861,9 +2994,9 @@ export function App(): ReactElement {
   }
 
   /* ── AI agent 任务：运行 / 取消 / 会话历史 ───────────────────────────────
-     六个通道的 renderer 侧唯一调用点。权限模式**不由这里传**：ai.agent.run 的
-     request.mode 省略时主进程落到 'plan'（ipc.ts:2967 的三元），传 'fullPermission'
-     会真的抬高工具上限。renderer 抬高授权是红线，故这里刻意不带 mode 字段。 */
+     权限模式只是 UI 意图。真正的 mode 必须先由 main 签发一次性 grant，
+     runAiAgent 只提交这个 opaque grantId；approvalRequiredLevels 永远不从
+     renderer 传入。 */
 
   async function refreshAgentSessions(): Promise<void> {
     if (!bridge) {
@@ -2926,6 +3059,35 @@ export function App(): ReactElement {
     setAgentTask(startAgentTask(optimisticSessionId, Date.now(), previousTask, previousGoal));
     setStatus('正在发起 AI 任务...');
 
+    const requestedAgentMode = agentInteractionMode === 'bypass'
+      ? 'fullPermission'
+      : agentInteractionMode === 'edit'
+        ? 'normal'
+        : 'plan';
+    let permissionGrantId: string | undefined;
+    if (requestedAgentMode !== 'plan') {
+      try {
+        const permission = await bridge.requestAiAgentPermission(requestedAgentMode);
+        if (!permission.ok) {
+          const error = { code: permission.error.code, message: permission.error.message };
+          setAgentTask((current) => ({ ...current, phase: 'error', error }));
+          setStatus(`Agent 权限未授予：${permission.error.code}`);
+          pushToast(`Agent 权限未授予：${permission.error.message}`, 'warn');
+          return;
+        }
+        permissionGrantId = permission.grantId;
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        setAgentTask((current) => ({
+          ...current,
+          phase: 'error',
+          error: { code: 'AGENT_PERMISSION_REQUEST_FAILED', message }
+        }));
+        setStatus('Agent 权限请求失败');
+        return;
+      }
+    }
+
     let result: Awaited<ReturnType<NonNullable<typeof bridge>['runAiAgent']>>;
     try {
       result = await bridge.runAiAgent({
@@ -2951,13 +3113,8 @@ export function App(): ReactElement {
         useRagSearch: true,
         // S32：输入条的思考强度随任务提交（优先于服务级默认）。
         thinkingLevel: aiThinking,
-        // Ask/Plan = 只读计划；Edit = 可经 Patch Engine 提交（需审批卡）；Bypass = 全自动提交（免审批）。
-        mode: agentInteractionMode === 'bypass'
-          ? 'fullPermission'
-          : agentInteractionMode === 'edit'
-            ? 'normal'
-            : 'plan',
-        ...(agentInteractionMode === 'bypass' ? { approvalRequiredLevels: [] } : {})
+        mode: requestedAgentMode,
+        ...(permissionGrantId !== undefined ? { permissionGrantId } : {})
       });
     } catch (error) {
       setAgentTask((current) => ({
@@ -3184,6 +3341,7 @@ export function App(): ReactElement {
   // 8-A：Composer 思考强度按当前选中服务的协议换表；没有服务时当 openai-compatible。
   const activeAgentProtocol = agentServices
     .find((service) => service.id === agentServiceId)?.protocol ?? 'openai-compatible';
+  const currentUpdateAction = updateAction();
   const sidebarStyle = { '--sidebar-w': `${sidebarWidth}px` } as CSSProperties;
   const agentStyle = { '--agent-w': `${agentWidth}px` } as CSSProperties;
   // 原版目录展示只从这一份派生状态生成，避免把「已选择路径」误显示成
@@ -3623,6 +3781,97 @@ export function App(): ReactElement {
                   <div className="setting-desc">流光溢彩白（默认）</div>
                 </div>
                 <span className="pill pill--accent">流光溢彩白</span>
+              </div>
+
+              <div className="setting-row setting-row--update" data-testid="update-settings">
+                <div className="setting-row__content">
+                  <div className="setting-name">软件更新</div>
+                  <div className="setting-desc">
+                    当前版本 {updateState.currentVersion} · {updateStateLabel(updateState)}
+                  </div>
+                  {('info' in updateState) && (
+                    <div className="setting-desc setting-desc--update">
+                      {updateState.info.releaseName} · {updateState.info.installerName}
+                    </div>
+                  )}
+                  {('diagnostic' in updateState) && (
+                    <div className="setting-desc setting-desc--error" role="status">
+                      {updateState.diagnostic.message}
+                    </div>
+                  )}
+                  {updateState.status === 'available' && updateState.info.releaseNotes.trim() !== '' && (
+                    <details className="update-notes">
+                      <summary>查看更新说明</summary>
+                      <p>{updateState.info.releaseNotes}</p>
+                    </details>
+                  )}
+                </div>
+                <div className="setting-row__controls">
+                  <label className="update-channel-label">
+                    <span>频道</span>
+                    <select
+                      value={updateState.channel}
+                      disabled={isBrowserPreview || updateActionBusy}
+                      onChange={(event) => {
+                        const channel = event.currentTarget.value;
+                        if (channel === 'stable' || channel === 'prerelease') changeUpdateChannel(channel);
+                      }}
+                      aria-label="更新频道"
+                    >
+                      <option value="prerelease">预发布</option>
+                      <option value="stable">稳定版</option>
+                    </select>
+                  </label>
+                  <button
+                    type="button"
+                    className="btn btn--ghost btn--sm"
+                    disabled={isBrowserPreview || updateActionBusy || currentUpdateAction.run === null}
+                    onClick={() => {
+                      if (currentUpdateAction.run) void runUpdateCommand(currentUpdateAction.run);
+                    }}
+                  >
+                    {updateActionBusy ? '处理中…' : currentUpdateAction.label}
+                  </button>
+                  {bridge && typeof bridge.openUpdateRelease === 'function' && (
+                    <button
+                      type="button"
+                      className="btn btn--ghost btn--sm"
+                      disabled={updateActionBusy}
+                      onClick={() => void runUpdateCommand(
+                        bridge.openUpdateRelease,
+                        '已打开 GitHub Release 下载页面'
+                      )}
+                    >
+                      手动下载
+                    </button>
+                  )}
+                </div>
+              </div>
+
+              <div className="setting-row setting-row--rag" data-testid="rag-local-model-settings">
+                <div className="setting-row__content">
+                  <div className="setting-name">RAG 语义模型</div>
+                  <div className="setting-desc">
+                    只使用本机已有的完全匹配模型；缺失时保留词法与结构化检索，不会下载模型。
+                  </div>
+                  {ragModelStatus && (
+                    <div className="setting-desc setting-desc--update">
+                      {ragModelStatus.modelId} · revision {ragModelStatus.revision.slice(0, 8)} · {ragLocalModelSourceLabel(ragModelStatus.source)}
+                    </div>
+                  )}
+                  {ragModelStatus?.diagnostic && (
+                    <div className="setting-desc setting-desc--error" role="status">
+                      {ragModelStatus.diagnostic}
+                    </div>
+                  )}
+                </div>
+                <span className={ragModelStatus?.state === 'local-ready' ? 'pill pill--ok' : 'pill pill--warn'}>
+                  {isBrowserPreview
+                    ? '桌面版运行时可用'
+                    : ragModelStatus
+                      ? ragLocalModelStateLabel(ragModelStatus.state)
+                      : '读取中…'}
+                </span>
               </div>
 
               {/*

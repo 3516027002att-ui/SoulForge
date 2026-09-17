@@ -29,6 +29,7 @@ import {
   utf8CodepointPrefix,
   defaultReadSessionManager,
   createOpaqueCursor,
+  maskPathFragments,
   parseOpaqueCursor,
   type NativeReadCompleteness,
   type NativeEditDomain
@@ -40,6 +41,15 @@ import {
   type ToolRegistry,
   type ToolResult
 } from './toolRegistry.js';
+import type { NativeReadProofStore } from '../editing/nativeReadProofStore.js';
+import {
+  emevdDeliveredRead,
+  fmgDeliveredReads,
+  msbDeliveredReads,
+  outerFileKey,
+  paramDeliveredReads,
+  taeDeliveredReads
+} from '../editing/proofIdentities.js';
 import {
   projectEvidenceClaims,
   type EvidenceClaim
@@ -86,7 +96,8 @@ const DISCOVERY_TOOLS = new Set([
   'search_event_reference',
   'retrieve_evidence',
   'list_luabnd_scripts',
-  'lookup_text_id'
+  'lookup_text_id',
+  'resolve_entity'
 ]);
 const NATIVE_READ_TOOLS = new Set([
   'read_param_fields',
@@ -119,6 +130,7 @@ const MUTATION_TOOLS = new Set([
   'mutate_fmg_entries',
   'apply_emevd_dsl',
   'mutate_tae_event_times',
+  'mutate_tae_event_fields',
   'mutate_msb_part_transform',
   'mutate_luabnd_script',
   'batch_transform_map_objects',
@@ -142,6 +154,7 @@ const BOUNDED_DISCOVERY_TOOLS = new Set([
   'search_text_entries',
   'search_event_reference',
   'query_map_objects',
+  'resolve_entity',
   'read_param_fields',
   'read_fmg_entries',
   'read_emevd_outline',
@@ -244,7 +257,10 @@ function summarizeToolValue(value: unknown, depth = 0): unknown {
  */
 const DISCOVERY_ARRAY_KEYS = new Set([
   'items', 'hits', 'matches', 'rows', 'entries', 'events', 'parts', 'entities',
-  'results', 'fields', 'instructions', 'topics', 'models'
+  'results', 'fields', 'instructions', 'topics', 'models',
+  'candidates', 'candidateSet', 'identityChains', 'verifiedEdges', 'pendingEdges',
+  'edges', 'hypotheses', 'coverageByDomain', 'nextReadPlan', 'progress',
+  'blockedReasons', 'attemptedRoutes', 'mutationTargets', 'diagnostics'
 ]);
 const DISCOVERY_DETAIL_KEYS = new Set([
   'id', 'uri', 'sourceUri', 'sourcePath', 'relativePath', 'symbolUri', 'chunkId',
@@ -258,6 +274,10 @@ const DISCOVERY_DETAIL_KEYS = new Set([
   'instructionOffset', 'instructionLimit', 'totalHits', 'totalCount', 'returnedCount',
   'availability', 'source', 'tool',
   'query', 'note', 'status', 'confidence', 'sourceHash', 'outerFileHash', 'sourceRevision', 'numericIds',
+  'candidateId', 'namespace', 'domain', 'nativeHandle', 'label', 'route', 'nativeVerified',
+  'sourceSnapshot', 'evidence', 'evidenceTruncated', 'rejectionReason', 'ruleId', 'fromUri', 'toUri',
+  'sourceProperty', 'targetNamespace', 'targetConfirmed', 'hypothesis', 'reason', 'coverage',
+  'priority', 'requiredForMutation', 'stepId', 'target', 'progressed', 'progressKind', 'detail',
   'item', 'chunk', 'row', 'event', 'format', 'darkScript', 'darkScriptComplete', 'machineInstructions',
   'instructionDto', 'index', 'bank', 'argsBase64', 'unknown', 'emedfName', 'typedArgs',
   'pagination', 'provenance', 'evidence', 'resourceKind', 'diagnostics',
@@ -271,6 +291,135 @@ const DISCOVERY_DETAIL_KEYS = new Set([
 const DISCOVERY_ITEM_LIMIT = 6;
 const DISCOVERY_NESTED_ARRAY_LIMIT = 8;
 const DISCOVERY_STRING_LIMIT = 420;
+
+function modelFacingLogicalUri(value: unknown, context?: ToolContext): string | undefined {
+  if (typeof value !== 'string' || value.trim() === '') return undefined;
+  const relative = modelFacingRelativePath(value, context);
+  if (relative) return relative;
+  return modelFacingSourceUri(value) ?? compactDiscoveryScalar(value) as string;
+}
+
+function projectEntitySnapshot(value: unknown, context?: ToolContext): Record<string, unknown> | undefined {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined;
+  const source = value as Record<string, unknown>;
+  const output: Record<string, unknown> = {};
+  const sourceUri = modelFacingLogicalUri(source.sourceUri, context);
+  if (sourceUri) output.sourceUri = sourceUri;
+  for (const key of ['sourceHash', 'readerSchemaVersion', 'metadataSchemaVersion']) {
+    if (typeof source[key] === 'string' && source[key].trim() !== '') output[key] = compactDiscoveryScalar(source[key]);
+    else if (typeof source[key] === 'number' && Number.isFinite(source[key])) output[key] = source[key];
+  }
+  if (typeof source.sourceRevision === 'string' || (typeof source.sourceRevision === 'number' && Number.isFinite(source.sourceRevision))) {
+    output.sourceRevision = source.sourceRevision;
+  }
+  return Object.keys(output).length > 0 ? output : undefined;
+}
+
+function projectEntityCandidate(value: unknown, context?: ToolContext): Record<string, unknown> {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return {};
+  const source = value as Record<string, unknown>;
+  const output: Record<string, unknown> = {};
+  for (const key of ['candidateId', 'namespace', 'domain', 'nativeHandle', 'label', 'route', 'status']) {
+    const child = source[key];
+    if (typeof child === 'string' && child.trim() !== '') output[key] = compactDiscoveryScalar(child);
+  }
+  for (const key of ['score', 'nativeVerified']) {
+    if (typeof source[key] === 'number' || typeof source[key] === 'boolean') output[key] = source[key];
+  }
+  const sourceUri = modelFacingLogicalUri(source.sourceUri, context);
+  if (sourceUri) output.sourceUri = sourceUri;
+  const snapshot = projectEntitySnapshot(source.sourceSnapshot, context);
+  if (snapshot) output.sourceSnapshot = snapshot;
+  if (Array.isArray(source.evidence)) {
+    output.evidence = source.evidence.slice(0, 3).map((item) => {
+      if (!item || typeof item !== 'object' || Array.isArray(item)) return {};
+      const evidence = item as Record<string, unknown>;
+      const projected: Record<string, unknown> = {};
+      for (const key of ['kind', 'sourceProperty']) {
+        if (typeof evidence[key] === 'string' && evidence[key].trim() !== '') projected[key] = evidence[key];
+      }
+      if (typeof evidence.value === 'string' || typeof evidence.value === 'number' || typeof evidence.value === 'boolean') projected.value = compactDiscoveryScalar(evidence.value);
+      const evidenceUri = modelFacingLogicalUri(evidence.sourceUri, context);
+      if (evidenceUri) projected.sourceUri = evidenceUri;
+      if (typeof evidence.detail === 'string') projected.detail = compactDiscoveryScalar(evidence.detail);
+      return projected;
+    });
+    if (source.evidence.length > 3) output.evidenceTruncated = true;
+  }
+  if (typeof source.rejectionReason === 'string') output.rejectionReason = compactDiscoveryScalar(source.rejectionReason);
+  return output;
+}
+
+function projectEntityEdge(value: unknown, context?: ToolContext): Record<string, unknown> {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return {};
+  const source = value as Record<string, unknown>;
+  const output: Record<string, unknown> = {};
+  for (const key of ['ruleId', 'sourceProperty', 'targetNamespace', 'confidence', 'reason', 'hypothesis', 'targetConfirmed']) {
+    const child = source[key];
+    if (typeof child === 'string' || typeof child === 'boolean') output[key] = compactDiscoveryScalar(child);
+  }
+  for (const key of ['fromUri', 'toUri']) {
+    const uri = modelFacingLogicalUri(source[key], context);
+    if (uri) output[key] = uri;
+  }
+  const sourceSnapshot = projectEntitySnapshot(source.sourceSnapshot, context);
+  if (sourceSnapshot) output.sourceSnapshot = sourceSnapshot;
+  const targetSnapshot = projectEntitySnapshot(source.targetSnapshot, context);
+  if (targetSnapshot) output.targetSnapshot = targetSnapshot;
+  return output;
+}
+
+function projectEntityResolutionForAgent(value: unknown, context?: ToolContext): unknown {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return value;
+  const source = value as Record<string, unknown>;
+  const output: Record<string, unknown> = {};
+  for (const key of ['status', 'query', 'domain']) {
+    if (typeof source[key] === 'string') output[key] = compactDiscoveryScalar(source[key]);
+  }
+  for (const key of ['candidates', 'candidateSet']) {
+    if (!Array.isArray(source[key])) continue;
+    const values = source[key] as unknown[];
+    output[key] = values.slice(0, 8).map((item) => projectEntityCandidate(item, context));
+    output[`${key}ReturnedCount`] = Math.min(values.length, 8);
+    output[`${key}TotalCount`] = values.length;
+    if (values.length > 8) output[`${key}Truncated`] = true;
+  }
+  if (Array.isArray(source.identityChains)) {
+    const values = source.identityChains as unknown[];
+    output.identityChains = values.slice(0, 8).map((item) => {
+      if (!item || typeof item !== 'object' || Array.isArray(item)) return {};
+      const chain = item as Record<string, unknown>;
+      const projected: Record<string, unknown> = {};
+      if (typeof chain.candidateId === 'string') projected.candidateId = compactDiscoveryScalar(chain.candidateId);
+      if (typeof chain.verified === 'boolean') projected.verified = chain.verified;
+      if (Array.isArray(chain.nodes)) projected.nodes = chain.nodes.slice(0, 8).map((node) => modelFacingLogicalUri(node, context) ?? compactDiscoveryScalar(node));
+      if (Array.isArray(chain.links)) projected.links = chain.links.slice(0, 8).map((link) => projectEntityEdge(link, context));
+      return projected;
+    });
+    output.identityChainsTotalCount = values.length;
+    if (values.length > 8) output.identityChainsTruncated = true;
+  }
+  for (const key of ['verifiedEdges', 'edges', 'pendingEdges', 'hypotheses']) {
+    if (!Array.isArray(source[key])) continue;
+    const values = source[key] as unknown[];
+    output[key] = values.slice(0, 8).map((item) => projectEntityEdge(item, context));
+    output[`${key}TotalCount`] = values.length;
+    if (values.length > 8) output[`${key}Truncated`] = true;
+  }
+  if (source.coverage && typeof source.coverage === 'object' && !Array.isArray(source.coverage)) {
+    output.coverage = summarizeDiscoveryValue(source.coverage, 8, 1);
+  }
+  if (Array.isArray(source.coverageByDomain)) output.coverageByDomain = source.coverageByDomain.slice(0, 8).map((item) => summarizeDiscoveryValue(item, 8, 1));
+  for (const key of ['blockedReasons', 'attemptedRoutes', 'mutationTargets', 'diagnostics']) {
+    if (!Array.isArray(source[key])) continue;
+    const values = source[key] as unknown[];
+    output[key] = values.slice(0, 16).map((item) => compactDiscoveryScalar(item));
+    if (values.length > 16) output[`${key}Truncated`] = true;
+  }
+  if (Array.isArray(source.nextReadPlan)) output.nextReadPlan = source.nextReadPlan.slice(0, 12).map((item) => summarizeDiscoveryValue(item, 8, 1));
+  if (Array.isArray(source.progress)) output.progress = source.progress.slice(-12).map((item) => summarizeDiscoveryValue(item, 8, 1));
+  return output;
+}
 
 function summarizeDiscoveryValue(value: unknown, itemLimit = DISCOVERY_ITEM_LIMIT, depth = 0): unknown {
   if (depth > 4) return summarizeToolValue(value, depth);
@@ -324,11 +473,194 @@ function summarizeDiscoveryChild(value: unknown, depth: number): unknown {
 
 function compactDiscoveryScalar(value: unknown): unknown {
   if (typeof value === 'string') {
-    return value.length > DISCOVERY_STRING_LIMIT
-      ? `${utf8CodepointPrefix(value, DISCOVERY_STRING_LIMIT)}…`
-      : value;
+    const masked = maskPathFragments(value);
+    return masked.length > DISCOVERY_STRING_LIMIT
+      ? `${utf8CodepointPrefix(masked, DISCOVERY_STRING_LIMIT)}…`
+      : masked;
   }
   return value;
+}
+
+function modelFacingRelativePath(value: unknown, context?: ToolContext): string | undefined {
+  if (typeof value !== 'string' || value.trim() === '') return undefined;
+  const files = context?.workspaceIndex?.getFiles() ?? [];
+  const match = files.find((file) => [
+    file.sourceUri,
+    file.sourcePath,
+    file.relativePath,
+    file.absolutePath
+  ].includes(value));
+  if (match) return match.relativePath.replaceAll('\\', '/');
+  let candidate = value.trim().replaceAll('\\', '/');
+  if (candidate.startsWith('file://')) candidate = candidate.slice('file://'.length).replace(/^\/+/, '');
+  if (/^[A-Za-z]:(?:\/|$)/u.test(candidate)
+    || candidate.startsWith('/')
+    || candidate.startsWith('//')
+    || candidate.split('/').some((part) => part === '..')) return undefined;
+  return candidate || undefined;
+}
+
+function modelFacingSourceUri(value: unknown): string | undefined {
+  if (typeof value !== 'string' || value.trim() === '') return undefined;
+  const normalized = value.trim().replaceAll('\\', '/');
+  if (/^[A-Za-z]:(?:\/|$)/u.test(normalized)
+    || normalized.startsWith('file:///')
+    || normalized.startsWith('/')
+    || normalized.startsWith('//')
+    || normalized.split('/').some((part) => part === '..')) return undefined;
+  return normalized;
+}
+
+function modelFacingSymbol(value: unknown, context?: ToolContext): Record<string, unknown> {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return {};
+  const source = value as Record<string, unknown>;
+  const output: Record<string, unknown> = {};
+  const sourceUri = modelFacingSourceUri(source.sourceUri);
+  if (sourceUri) output.sourceUri = sourceUri;
+  const relativePath = modelFacingRelativePath(source.relativePath ?? source.sourceUri ?? source.sourcePath, context);
+  if (relativePath) {
+    output.file = relativePath;
+    output.relativePath = relativePath;
+  }
+  for (const key of [
+    'resourceKind', 'extension', 'compoundExtension', 'formatKind', 'formatLabel',
+    'paramName', 'entryName', 'entryIndex', 'rowId', 'rowIndex', 'rowName', 'dataHash',
+    'eventId', 'name', 'mapId', 'entityId', 'internalEntryId', 'kind', 'model', 'modelIndex',
+    'textId', 'category', 'language', 'animId', 'eventIndex', 'taeEntryIndex', 'taeEntryName',
+    'taeGroup', 'code', 'eventTypeId', 'typeName', 'contentKind', 'score', 'highlights',
+    'sourceHash', 'outerFileHash', 'sourceRevision', 'confidence',
+    // PARAM definition search returns the stable id separately from the
+    // localized display name.  Dropping fieldId here forced the model to
+    // guess Japanese labels when calling read_param_fields, producing the
+    // real PARAM_FIELD_NOT_FOUND loop seen in the four-task run.
+    'fieldId', 'type', 'refs', 'description'
+  ]) {
+    if (key in source && source[key] !== undefined && source[key] !== null) {
+      const child = source[key];
+      output[key] = typeof child === 'string' ? compactDiscoveryScalar(child) : child;
+    }
+  }
+  if (Array.isArray(source.instructions)) output.instructionCount = source.instructions.length;
+  if (Array.isArray(source.events)) output.eventCount = source.events.length;
+  if (Array.isArray(source.fields)) output.fieldCount = source.fields.length;
+  if (Array.isArray(source.calls)) output.callCount = source.calls.length;
+  return output;
+}
+
+function projectDiscoveryForAgent(name: string, value: unknown, context?: ToolContext): unknown {
+  if (!DISCOVERY_TOOLS.has(name)) return value;
+  if (name === 'resolve_entity') return projectEntityResolutionForAgent(value, context);
+  if (Array.isArray(value)) {
+    return value.map((item) => {
+      if (!item || typeof item !== 'object' || Array.isArray(item)) return item;
+      const record = item as Record<string, unknown>;
+      const symbol = record.item ?? record.row ?? record.event ?? record.entity ?? record.entry ?? record.chunk;
+      if (symbol !== undefined) {
+        return {
+          ...(typeof record.score === 'number' ? { score: record.score } : {}),
+          ...(record.highlights !== undefined ? { highlights: record.highlights } : {}),
+          item: modelFacingSymbol(symbol, context)
+        };
+      }
+      return modelFacingSymbol(record, context);
+    });
+  }
+  if (!value || typeof value !== 'object') return value;
+  const record = value as Record<string, unknown>;
+  const output: Record<string, unknown> = {};
+  for (const [key, child] of Object.entries(record)) {
+    if (DISCOVERY_ARRAY_KEYS.has(key) && Array.isArray(child)) {
+      output[key] = child.slice(0, DISCOVERY_ITEM_LIMIT).map((item) => modelFacingSymbol(item, context));
+      output[`${key}ReturnedCount`] = Math.min(child.length, DISCOVERY_ITEM_LIMIT);
+      output[`${key}TotalCount`] = child.length;
+      if (child.length > DISCOVERY_ITEM_LIMIT) output[`${key}Truncated`] = true;
+      continue;
+    }
+    if (key === 'sourcePath' || key === 'filePath' || key === 'absolutePath' || key === 'path') {
+      const relative = modelFacingRelativePath(child, context);
+      if (relative) output.file = relative;
+      continue;
+    }
+    if (DISCOVERY_DETAIL_KEYS.has(key) && key !== 'id' && key !== 'uri') {
+      output[key] = summarizeDiscoveryChild(child, 1);
+    } else if (key === 'sourceUri') {
+      const safe = modelFacingSourceUri(child);
+      if (safe) output.sourceUri = safe;
+      else {
+        const relative = modelFacingRelativePath(child, context);
+        if (relative) output.file = relative;
+      }
+    }
+  }
+  return Object.keys(output).length > 0 ? output : summarizeDiscoveryValue(value);
+}
+
+const NATIVE_PATH_KEYS = new Set([
+  'sourcePath', 'filePath', 'absolutePath', 'containerPath', 'workspaceRoot',
+  'backupBaseDir', 'recoveryDir', 'stagingRoot', 'rootPath'
+]);
+
+/** Native reads can take the small-result fast path, so sanitize them before
+ * the generic envelope is serialized. Keep a workspace-relative locator when
+ * the host can resolve it; never expose the physical path as a fallback. */
+function projectNativeReadForAgent(name: string, value: unknown, context?: ToolContext): unknown {
+  if (!NATIVE_READ_TOOLS.has(name)) return value;
+  const visit = (node: unknown, key = '', depth = 0): unknown => {
+    if (depth > 8) return compactDiscoveryScalar(node);
+    if (typeof node === 'string') {
+      if (NATIVE_PATH_KEYS.has(key)) return modelFacingLogicalUri(node, context);
+      if (key === 'workspaceId') return 'workspace://active';
+      if (key === 'entryName' && /^[A-Za-z]:[\\/]/u.test(node)) return undefined;
+      return compactDiscoveryScalar(node);
+    }
+    if (Array.isArray(node)) return node.map((item) => visit(item, key, depth + 1));
+    if (!node || typeof node !== 'object') return node;
+    const output: Record<string, unknown> = {};
+    for (const [childKey, child] of Object.entries(node as Record<string, unknown>)) {
+      const projected = visit(child, childKey, depth + 1);
+      if (projected !== undefined) output[childKey] = projected;
+    }
+    return output;
+  };
+  return visit(value);
+}
+
+function canonicalNumericString(value: unknown, expectedType: string): number | undefined {
+  if (typeof value !== 'string') return undefined;
+  const text = value.trim();
+  const pattern = expectedType === 'safe-integer'
+    ? /^-?(?:0|[1-9]\d*)(?:\.0+)?$/u
+    : /^-?(?:0|[1-9]\d*)(?:\.\d+)?$/u;
+  if (!pattern.test(text)) return undefined;
+  const parsed = Number(text);
+  if (!Number.isFinite(parsed)) return undefined;
+  if (expectedType === 'safe-integer' && !Number.isSafeInteger(parsed)) return undefined;
+  return parsed;
+}
+
+/**
+ * Models occasionally encode a JSON numeric field as the canonical string
+ * `11785080.0`.  Normalize only fields whose registered schema already says
+ * number/safe-integer; arbitrary strings and nested free-form values remain
+ * untouched.  This keeps the strict validator while removing a harmless
+ * provider-format failure from the production path.
+ */
+function normalizeToolInputNumbers(
+  input: unknown,
+  shape: Record<string, string> | undefined
+): unknown {
+  if (!shape || !input || typeof input !== 'object' || Array.isArray(input)) return input;
+  const output = { ...(input as Record<string, unknown>) };
+  let changed = false;
+  for (const [key, declared] of Object.entries(shape)) {
+    const expectedType = declared.endsWith('?') ? declared.slice(0, -1) : declared;
+    if (expectedType !== 'number' && expectedType !== 'safe-integer') continue;
+    const converted = canonicalNumericString(output[key], expectedType);
+    if (converted === undefined) continue;
+    output[key] = converted;
+    changed = true;
+  }
+  return changed ? output : input;
 }
 
 /**
@@ -385,6 +717,8 @@ function summarizeEmevdEventValue(value: unknown, includeRawArgs: boolean): unkn
 function collectStableIdentifiers(value: unknown): { ids: string[]; cursors: Record<string, string> } {
   const ids: string[] = [];
   const cursors: Record<string, string> = {};
+  let identifierBytes = 0;
+  const maxIdentifierBytes = 4_096;
   const walk = (node: unknown, depth: number): void => {
     if (depth > 5 || node === null || typeof node !== 'object') return;
     if (Array.isArray(node)) {
@@ -394,15 +728,25 @@ function collectStableIdentifiers(value: unknown): { ids: string[]; cursors: Rec
     for (const [key, child] of Object.entries(node as Record<string, unknown>)) {
       if (typeof child === 'string') {
         if (/cursor|nextPage|pageToken/i.test(key)) cursors[key] = child;
-        if (/^(?:id|.*Id|uri|sourceUri|opId|eventId|rowId|textId|tableId)$/i.test(key) && ids.length < 128) {
-          ids.push(`${key}=${child}`);
+        if (/^(?:id|.*Id|uri|sourceUri|opId|eventId|rowId|textId|tableId)$/i.test(key) && ids.length < 64) {
+          const candidate = `${key}=${child}`;
+          const bytes = Buffer.byteLength(candidate, 'utf8');
+          if (identifierBytes + bytes <= maxIdentifierBytes) {
+            ids.push(candidate);
+            identifierBytes += bytes;
+          }
         }
       } else if (typeof child === 'number' && Number.isFinite(child)) {
         // Native addresses commonly expose eventId/rowId/textId as numbers.
         // Stable summary IDs must preserve them just like their string form;
         // otherwise the final truncation branch loses the only follow-up key.
-        if (/^(?:id|.*Id|uri|sourceUri|opId|eventId|rowId|textId|tableId)$/i.test(key) && ids.length < 128) {
-          ids.push(`${key}=${child}`);
+        if (/^(?:id|.*Id|uri|sourceUri|opId|eventId|rowId|textId|tableId)$/i.test(key) && ids.length < 64) {
+          const candidate = `${key}=${child}`;
+          const bytes = Buffer.byteLength(candidate, 'utf8');
+          if (identifierBytes + bytes <= maxIdentifierBytes) {
+            ids.push(candidate);
+            identifierBytes += bytes;
+          }
         }
       } else {
         walk(child, depth + 1);
@@ -568,9 +912,12 @@ function buildEvidenceClaims(
   const root = data && typeof data === 'object' && !Array.isArray(data)
     ? data as Record<string, unknown>
     : { items: Array.isArray(data) ? data : [data] };
-  const workspaceId = context?.session?.meta.workspaceId
-    ?? context?.workspaceIndex?.workspaceId
-    ?? (typeof root.workspaceId === 'string' ? root.workspaceId : undefined);
+  // Evidence claims are model-facing transport, not the host's proof store.
+  // Use a stable alias for the active host scope; never serialize the
+  // workspace root embedded in a file:// workspace id.
+  const workspaceId = context
+    ? 'workspace://active'
+    : (typeof root.workspaceId === 'string' ? modelFacingSourceUri(root.workspaceId) : undefined);
   if (!workspaceId) return [];
   const native = NATIVE_READ_TOOLS.has(name);
   const nativeVerified = collectEvidenceFacts(data).sourceHashes.length > 0;
@@ -596,7 +943,11 @@ function buildEvidenceClaims(
     versionState: nativeVerified ? 'current' : 'candidate',
     observationSequence: Date.now()
   });
-  return claims.map((claim) => ({
+  // Claims are evidence hints carried in the model envelope, not the
+  // authoritative proof store. Keep the transport bounded just like source
+  // facts; a 300-entry FMG read must remain a successful paged read rather
+  // than fail with RESULT_IDENTITY_TOO_LARGE before the data projection runs.
+  return claims.slice(0, 16).map((claim) => ({
     ...claim,
     key: evidenceKey(claim.identity),
     ...(authorityClass ? { authorityClass } : {}),
@@ -1636,7 +1987,7 @@ function boundedFailureContent(
   fallbackCode = 'TOOL_FAILED'
 ): string {
   const normalizedState = normalizeFailureState(state);
-  const originalError = error ?? { code: fallbackCode, message: '工具执行失败。' };
+  const originalError = maskAgentErrorPaths(error ?? { code: fallbackCode, message: '工具执行失败。' });
   // Preserve the exact error schema whenever it already fits. This keeps
   // tool-specific fields (including fields not known to this bridge) intact;
   // projection is only a response to the actual byte/character overflow.
@@ -1809,9 +2160,22 @@ function boundedToolContent(
   state: AgentToolSuccessState = 'completed',
   input?: Record<string, unknown>
 ): string {
+  // Discovery symbols may contain the complete native row/event/document.  A
+  // model-facing envelope must never serialize that raw projection first: it
+  // can exceed V8's string limit before the byte budget has a chance to run.
+  data = projectDiscoveryForAgent(name, data, context);
+  data = projectNativeReadForAgent(name, data, context);
   const evidence = buildEvidenceMetadata(name, data, repeatedQuery, context);
-  const raw = JSON.stringify({ ok: true, state, data: data ?? null, evidence });
-  const rawBytes = Buffer.byteLength(raw, 'utf8');
+  let raw: string | null = null;
+  try {
+    raw = JSON.stringify({ ok: true, state, data: data ?? null, evidence });
+  } catch {
+    // Circular/custom values are not actionable model data; the bounded
+    // projection below still returns identifiers/evidence and a retry hint.
+    raw = null;
+  }
+  const rawLength = raw?.length ?? 0;
+  const rawBytes = raw === null ? Number.MAX_SAFE_INTEGER : Buffer.byteLength(raw, 'utf8');
   const identifiers = collectStableIdentifiers(data);
   const compactIdentity = compactIdentifiers(identifiers);
   const window = resultWindowMetadata(data);
@@ -1832,7 +2196,7 @@ function boundedToolContent(
       return committedOversizeEnvelope(
         name,
         data,
-        raw.length,
+        rawLength,
         identityBytes,
         identifiers,
         evidence,
@@ -1856,7 +2220,7 @@ function boundedToolContent(
     if (completeDsl !== null) {
       const completeEnvelope = createResultEnvelope(
         completeDsl,
-        raw.length,
+        rawLength,
         false,
         '完整 native DarkScript 视图；辅助 machine instruction DTO 已省略。',
         compactIdentity,
@@ -1881,7 +2245,7 @@ function boundedToolContent(
     const sourceSummary = truncationSummary(name, window, false);
     const encoded = JSON.stringify(createResultEnvelope(
       data,
-      raw.length,
+      rawLength,
       window.truncated,
       sourceSummary,
       identifiers,
@@ -1914,7 +2278,7 @@ function boundedToolContent(
         return compact;
       });
       const encoded = JSON.stringify(createResultEnvelope(
-        summary, raw.length, true,
+        summary, rawLength, true,
         '已压缩辅助元数据；保留本次请求的全部字段、完整字段值及原生身份。',
         compactIdentity, evidence, window, state
       ));
@@ -1931,7 +2295,7 @@ function boundedToolContent(
     if (completeDsl !== null) {
       const completeEnvelope = createResultEnvelope(
         completeDsl,
-        raw.length,
+        rawLength,
         false,
         '完整 native DarkScript 视图；辅助 machine instruction DTO 已省略。',
         compactIdentity,
@@ -1953,7 +2317,7 @@ function boundedToolContent(
       if (summary === null) break;
       const summarizedEnvelope = createResultEnvelope(
         summary,
-        raw.length,
+        rawLength,
         window.truncated,
         window.truncated
           ? summaryText
@@ -1982,7 +2346,7 @@ function boundedToolContent(
     const summary = summarizeDiscoveryValue(data, itemLimit);
     const summarizedEnvelope = createResultEnvelope(
       summary,
-      raw.length,
+      rawLength,
       true,
       summaryText,
       compactIdentity,
@@ -1998,7 +2362,7 @@ function boundedToolContent(
   const compact = compactIdentifiers(identifiers);
   const compactEnvelope = createResultEnvelope(
     null,
-    raw.length,
+    rawLength,
     true,
     `工具 ${name} 输出已截断；请使用 identifiers 或 pagination.cursors 继续查询。`,
     compact,
@@ -2011,7 +2375,7 @@ function boundedToolContent(
 
   return JSON.stringify(createResultEnvelope(
     null,
-    raw.length,
+    rawLength,
     true,
     `工具 ${name} 输出已截断；请继续分页查询。`,
     { ids: [], cursors: {} },
@@ -2023,6 +2387,7 @@ function boundedToolContent(
 
 export function createAgentToolBridge(options: AgentToolBridgeOptions): AgentToolBridge {
   const { registry, context } = options;
+  const inputSchemas = new Map(registry.list().map((descriptor) => [descriptor.name, descriptor.inputSchema]));
   const attemptedDiscoveryQueries: DiscoveryQueryRecord[] = [];
   const tools: AgentToolDefinition[] = registry.list().map((descriptor) => ({
     name: descriptor.name,
@@ -2055,8 +2420,9 @@ export function createAgentToolBridge(options: AgentToolBridgeOptions): AgentToo
       };
     }
 
-    const inputRec = input && typeof input === 'object' && !Array.isArray(input)
-      ? (input as Record<string, unknown>)
+    const normalizedInput = normalizeToolInputNumbers(input, inputSchemas.get(call.name));
+    const inputRec = normalizedInput && typeof normalizedInput === 'object' && !Array.isArray(normalizedInput)
+      ? (normalizedInput as Record<string, unknown>)
       : {};
 
     // Guard against model free-form crafted nativeOffset on pagination tools
@@ -2114,14 +2480,14 @@ export function createAgentToolBridge(options: AgentToolBridgeOptions): AgentToo
       if (dynamicContext.backupBaseDir === undefined) delete effectiveContext.backupBaseDir;
       if (dynamicContext.recoveryDir === undefined) delete effectiveContext.recoveryDir;
     }
-    const result = await registry.run(call.name, input, effectiveContext);
+    const result = await registry.run(call.name, normalizedInput, effectiveContext);
     if (effectiveContext.mode && effectiveContext.mode !== context.mode) {
       context.mode = effectiveContext.mode;
     }
     if (result.ok && result.state !== 'failed') {
       let repeatedQuery = false;
       if (DISCOVERY_QUERY_TOOLS.has(call.name)) {
-        const current = makeDiscoveryQueryRecord(call.name, input, result.data);
+        const current = makeDiscoveryQueryRecord(call.name, normalizedInput, result.data);
         if (current) {
           repeatedQuery = attemptedDiscoveryQueries.some((previous) => (
             previous.scope === current.scope
@@ -2159,42 +2525,48 @@ export function createAgentToolBridge(options: AgentToolBridgeOptions): AgentToo
         && !Array.isArray(envelopeData.record)
         ? envelopeData.record as Record<string, unknown>
         : undefined;
-      // Only the named complete native DSL view can mint an EMEVD proof. A
-      // JSON read, a tail/partial window, or a generic summary is still a
-      // useful successful read, but it must leave the mutation gate closed.
+      // Native read proofs are minted by the host after the bounded projection
+      // succeeds. A JSON read, a tail/partial window, or a generic summary is
+      // still useful, but it must leave the mutation gate closed. This is the
+      // production replacement for the old task-ledger callback: the model
+      // never supplies proof data and the bridge never records a proof before
+      // the exact model-facing result has been delivered.
       const completeNativeDslEnvelope = call.name === 'read_emevd_event'
         && result.__hostResolvedEmevdEventTarget?.canonical === true
         && envelopeRecord?.projection === 'complete_native_dsl'
         && envelope.completeness === 'complete'
         && envelope.truncated === false;
-      if (completeNativeDslEnvelope
-        && effectiveContext.taskRecord?.recordNativeEmevdRead
-        && result.__hostResolvedEmevdEventTarget) {
+      const proofStore = effectiveContext.nativeReadProofs ?? effectiveContext.coreSession?.proofStore;
+      if (proofStore && (completeNativeDslEnvelope || isCompleteNativeEnvelope(envelope, call.name))) {
         try {
-          await effectiveContext.taskRecord.recordNativeEmevdRead({
+          recordAutomaticNativeReadProof({
+            store: proofStore,
+            context: effectiveContext,
+            callName: call.name,
             input: inputRec,
             rawResult: result.data,
             envelope,
-            target: result.__hostResolvedEmevdEventTarget
+            ...(result.__hostResolvedEmevdEventTarget
+              ? { target: result.__hostResolvedEmevdEventTarget }
+              : {}),
+            completeNativeDslEnvelope
           });
         } catch (error) {
           const structured = error && typeof error === 'object'
             ? error as { code?: unknown; message?: unknown; details?: unknown }
             : undefined;
-          if (structured?.code !== 'TASK_RECORD_NATIVE_PROOF_TARGET_MISSING') {
-            const message = typeof structured?.message === 'string'
-              ? structured.message
-              : error instanceof Error ? error.message : String(error);
-            return {
-              ok: false,
-              code: 'TASK_RECORD_NATIVE_PROOF_FAILED',
-              content: boundedFailureContent({
-                code: 'TASK_RECORD_NATIVE_PROOF_FAILED',
-                message: `原生 EMEVD 已读取但 Evidence proof 未能由宿主记录：${message}`,
-                ...(structured?.details === undefined ? {} : { details: structured.details })
-              })
-            };
-          }
+          const message = typeof structured?.message === 'string'
+            ? structured.message
+            : error instanceof Error ? error.message : String(error);
+          return {
+            ok: false,
+            code: typeof structured?.code === 'string' ? structured.code : 'NATIVE_READ_PROOF_FAILED',
+            content: boundedFailureContent({
+              code: typeof structured?.code === 'string' ? structured.code : 'NATIVE_READ_PROOF_FAILED',
+              message: `原生读取已成功但宿主无法记录 NativeReadProof：${message}`,
+              ...(structured?.details === undefined ? {} : { details: structured.details })
+            })
+          };
         }
       }
       return { ok: true, content };
@@ -2212,6 +2584,284 @@ export function createAgentToolBridge(options: AgentToolBridgeOptions): AgentToo
   };
 
   return { tools, executeTool };
+}
+
+function maskAgentErrorPaths(value: unknown, depth = 0): unknown {
+  if (depth > 8 || value === null || typeof value !== 'object') {
+    return typeof value === 'string' ? maskPathFragments(value) : value;
+  }
+  if (Array.isArray(value)) return value.map((item) => maskAgentErrorPaths(item, depth + 1));
+  return Object.fromEntries(Object.entries(value as Record<string, unknown>)
+    .map(([key, child]) => [key, maskAgentErrorPaths(child, depth + 1)]));
+}
+
+/**
+ * 将最终已送达的原生读取投影转换为内部证明。
+ *
+ * 这里故意只接受 native tool 的返回值和 bridge 的最终 envelope：
+ * `searchId`、`verified`、`proof`、task ledger 等模型输入都不在参数中，
+ * 因而不能伪造或扩大证明范围。无法导出稳定身份时不创建证明，后续
+ * writer 会按 NativeReadProofStore 的失败关闭策略拒绝写入。
+ */
+function recordAutomaticNativeReadProof(input: {
+  store: NativeReadProofStore;
+  context: ToolContext;
+  callName: string;
+  input: Record<string, unknown>;
+  rawResult: unknown;
+  envelope: { data?: unknown; completeness?: NativeReadCompleteness; truncated?: boolean };
+  target?: HostResolvedEmevdEventTarget;
+  completeNativeDslEnvelope: boolean;
+}): void {
+  const principal = input.context.proofPrincipal
+    ?? input.context.coreSession?.principal
+    ?? 'session';
+  const workspaceId = input.context.coreSession?.workspaceId
+    ?? input.context.session?.meta.workspaceId
+    ?? input.context.workspaceIndex?.workspaceId;
+  if (!workspaceId) return;
+
+  const envelopeRecord = input.envelope.data && typeof input.envelope.data === 'object'
+    && !Array.isArray(input.envelope.data)
+    ? ((input.envelope.data as { record?: unknown }).record ?? undefined)
+    : undefined;
+  const projected = envelopeRecord && typeof envelopeRecord === 'object' && !Array.isArray(envelopeRecord)
+    ? envelopeRecord as Record<string, unknown>
+    : undefined;
+  const raw = input.rawResult && typeof input.rawResult === 'object' && !Array.isArray(input.rawResult)
+    ? input.rawResult as Record<string, unknown>
+    : undefined;
+
+  if (input.callName === 'read_emevd_event'
+    && input.completeNativeDslEnvelope
+    && input.target?.canonical === true
+    && projected) {
+    const darkScript = typeof projected.darkScript === 'string' ? projected.darkScript : undefined;
+    if (!darkScript || darkScript.trim() === '') return;
+    const sourceHash = typeof projected.sourceHash === 'string'
+      ? projected.sourceHash
+      : typeof raw?.sourceHash === 'string' ? raw.sourceHash : undefined;
+    const outerFileHash = typeof projected.outerFileHash === 'string'
+      ? projected.outerFileHash
+      : typeof raw?.outerFileHash === 'string' ? raw.outerFileHash : undefined;
+    const sourceRevision = typeof projected.sourceRevision === 'number'
+      ? projected.sourceRevision
+      : typeof raw?.sourceRevision === 'number' ? raw.sourceRevision : undefined;
+    input.store.acceptDeliveredRead(emevdDeliveredRead({
+      principal,
+      workspaceId,
+      canonicalSourceUri: input.target.sourceUri,
+      eventId: input.target.eventId,
+      version: {
+        ...(sourceHash ? { childHash: sourceHash } : {}),
+        ...(outerFileHash ? { outerFileHash } : {}),
+        ...(sourceRevision !== undefined ? { sourceRevision } : {})
+      },
+      dslText: darkScript,
+      ...(typeof projected.registryFingerprint === 'string'
+        ? { capability: projected.registryFingerprint }
+        : {})
+    }));
+    registerNativeProofWatch(input.context, input.target.sourcePath);
+    return;
+  }
+
+  if (!projected || !raw || !isCompleteNativeEnvelope(input.envelope, input.callName)) return;
+
+  if (input.callName === 'read_param_fields') {
+    const containerPath = typeof raw.containerPath === 'string' && raw.containerPath.trim() !== ''
+      ? raw.containerPath
+      : undefined;
+    const fields = Array.isArray(projected.fields) ? projected.fields : [];
+    if (!containerPath || fields.length === 0) return;
+    const readFields = fields.flatMap((field): Array<{
+      table: string;
+      rowId: number;
+      rowIndex?: number;
+      fieldId: string;
+      sourceHash?: string;
+      sourceRevision?: number;
+    }> => {
+      if (!field || typeof field !== 'object' || Array.isArray(field)) return [];
+      const record = field as Record<string, unknown>;
+      if (typeof record.table !== 'string'
+        || typeof record.fieldId !== 'string'
+        || typeof record.rowId !== 'number'
+        || !Number.isSafeInteger(record.rowId)) return [];
+      return [{
+        table: record.table,
+        rowId: record.rowId,
+        ...(typeof record.rowIndex === 'number' && Number.isSafeInteger(record.rowIndex)
+          ? { rowIndex: record.rowIndex } : {}),
+        fieldId: record.fieldId,
+        ...(typeof record.sourceHash === 'string' ? { sourceHash: record.sourceHash } : {}),
+        ...(typeof record.sourceRevision === 'number' ? { sourceRevision: record.sourceRevision } : {})
+      }];
+    });
+    const reads = paramDeliveredReads({
+      principal,
+      workspaceId,
+      containerPath,
+      fields: readFields
+    });
+    registerNativeProofWatch(input.context, containerPath);
+    for (const read of reads) input.store.acceptDeliveredRead(read);
+    // A unique logical row may be written without rowIndex (the writer still
+    // rechecks ambiguity at commit time).  Store a second alias only when the
+    // delivered read proves that table+rowId maps to one physical row.  Never
+    // create this alias for duplicate row IDs; those remain fail-closed until
+    // the model copies rowIndex from the native read.
+    const rowSlots = new Map<string, Set<number | 'missing'>>();
+    for (const field of readFields) {
+      const key = `${field.table}\u0000${field.rowId}`;
+      const slots = rowSlots.get(key) ?? new Set<number | 'missing'>();
+      slots.add(field.rowIndex === undefined ? 'missing' : field.rowIndex);
+      rowSlots.set(key, slots);
+    }
+    const logicalAliases = readFields.filter((field) => {
+      if (field.rowIndex === undefined) return false;
+      const slots = rowSlots.get(`${field.table}\u0000${field.rowId}`);
+      return slots?.size === 1;
+    }).map(({ rowIndex: _rowIndex, ...field }) => field);
+    for (const read of paramDeliveredReads({
+      principal,
+      workspaceId,
+      containerPath,
+      fields: logicalAliases
+    })) input.store.acceptDeliveredRead(read);
+    return;
+  }
+
+  if (input.callName === 'read_fmg_entries') {
+    const containerPath = typeof raw.containerPath === 'string' && raw.containerPath.trim() !== ''
+      ? raw.containerPath
+      : undefined;
+    const table = typeof raw.table === 'string' ? raw.table : undefined;
+    const entries = Array.isArray(projected.entries) ? projected.entries : [];
+    if (!containerPath || !table || entries.length === 0) return;
+    const outerKey = outerFileKey(input.context.session?.layers.overlayRoot, containerPath);
+    registerNativeProofWatch(input.context, containerPath);
+    for (const read of fmgDeliveredReads({
+      principal,
+      workspaceId,
+      outerKey,
+      table,
+      entries: entries.flatMap((entry) => {
+        if (!entry || typeof entry !== 'object' || Array.isArray(entry)) return [];
+        const record = entry as Record<string, unknown>;
+        return typeof record.id === 'number' && Number.isSafeInteger(record.id)
+          ? [{
+              id: record.id,
+              ...(typeof record.table === 'string' ? { table: record.table } : {}),
+              ...(typeof record.sourceHash === 'string' ? { sourceHash: record.sourceHash } : {}),
+              ...(typeof record.sourceRevision === 'number' ? { sourceRevision: record.sourceRevision } : {})
+            }]
+          : [];
+      })
+    })) input.store.acceptDeliveredRead(read);
+    return;
+  }
+
+  if (input.callName === 'read_tae_events') {
+    const filePath = typeof raw.filePath === 'string' && raw.filePath.trim() !== ''
+      ? raw.filePath
+      : undefined;
+    const chrId = typeof raw.chrId === 'string' && raw.chrId.trim() !== '' ? raw.chrId : undefined;
+    const events = Array.isArray(projected.events) ? projected.events : [];
+    if (!filePath || !chrId || events.length === 0) return;
+    const outerKey = outerFileKey(input.context.session?.layers.overlayRoot, filePath);
+    registerNativeProofWatch(input.context, filePath);
+    for (const read of taeDeliveredReads({
+      principal,
+      workspaceId,
+      outerKey,
+      chrId,
+      events: events.flatMap((event) => {
+        if (!event || typeof event !== 'object' || Array.isArray(event)) return [];
+        const record = event as Record<string, unknown>;
+        if (typeof record.animId !== 'number' || !Number.isSafeInteger(record.animId)
+          || typeof record.eventIndex !== 'number' || !Number.isSafeInteger(record.eventIndex)) return [];
+        return [{
+          ...(typeof record.chrId === 'string' ? { chrId: record.chrId } : {}),
+          animId: record.animId,
+          eventIndex: record.eventIndex,
+          ...(typeof record.taeEntryIndex === 'number' && Number.isSafeInteger(record.taeEntryIndex)
+            ? { taeEntryIndex: record.taeEntryIndex } : {}),
+          ...(typeof record.taeEntryId === 'number' && Number.isSafeInteger(record.taeEntryId)
+            ? { taeEntryId: record.taeEntryId } : {}),
+          ...(typeof record.taeEntryName === 'string' ? { taeEntryName: record.taeEntryName } : {}),
+          ...(typeof record.taeGroup === 'string' ? { taeGroup: record.taeGroup } : {}),
+          ...(typeof record.startFrame === 'number' ? { startFrame: record.startFrame } : {}),
+          ...(typeof record.endFrame === 'number' ? { endFrame: record.endFrame } : {}),
+          ...(Array.isArray(record.fields)
+            ? {
+              fieldNames: record.fields
+                .flatMap((field) => typeof field === 'object' && field !== null && !Array.isArray(field)
+                  && typeof (field as Record<string, unknown>).name === 'string'
+                  ? [(field as Record<string, unknown>).name as string]
+                  : []),
+              fieldIndices: record.fields
+                .flatMap((field) => typeof field === 'object' && field !== null && !Array.isArray(field)
+                  && typeof (field as Record<string, unknown>).index === 'number'
+                  && Number.isSafeInteger((field as Record<string, unknown>).index)
+                  ? [(field as Record<string, unknown>).index as number]
+                  : [])
+            }
+            : {})
+        }];
+      })
+    })) input.store.acceptDeliveredRead(read);
+    return;
+  }
+
+  if (input.callName === 'read_msb_parts') {
+    const filePath = typeof raw.filePath === 'string' && raw.filePath.trim() !== ''
+      ? raw.filePath
+      : undefined;
+    const parts = Array.isArray(projected.parts) ? projected.parts : [];
+    if (!filePath || parts.length === 0) return;
+    const outerKey = outerFileKey(input.context.session?.layers.overlayRoot, filePath);
+    registerNativeProofWatch(input.context, filePath);
+    for (const read of msbDeliveredReads({
+      principal,
+      workspaceId,
+      outerKey,
+      parts: parts.flatMap((part) => {
+        if (!part || typeof part !== 'object' || Array.isArray(part)) return [];
+        const record = part as Record<string, unknown>;
+        return [{
+          ...(typeof record.address === 'string' ? { address: record.address } : {}),
+          ...(typeof record.nativeOffset === 'number' ? { nativeOffset: record.nativeOffset } : {}),
+          ...(typeof record.posX === 'number' ? { posX: record.posX } : {}),
+          ...(typeof record.posY === 'number' ? { posY: record.posY } : {}),
+          ...(typeof record.posZ === 'number' ? { posZ: record.posZ } : {}),
+          ...(typeof record.rotX === 'number' ? { rotX: record.rotX } : {}),
+          ...(typeof record.rotY === 'number' ? { rotY: record.rotY } : {}),
+          ...(typeof record.rotZ === 'number' ? { rotZ: record.rotZ } : {}),
+          ...(typeof record.scaleX === 'number' ? { scaleX: record.scaleX } : {}),
+          ...(typeof record.scaleY === 'number' ? { scaleY: record.scaleY } : {}),
+          ...(typeof record.scaleZ === 'number' ? { scaleZ: record.scaleZ } : {})
+        }];
+      })
+    })) input.store.acceptDeliveredRead(read);
+  }
+}
+
+function isCompleteNativeEnvelope(
+  envelope: { completeness?: NativeReadCompleteness; truncated?: boolean },
+  callName: string
+): boolean {
+  // The EMEVD complete DSL case has its own stricter predicate above. Other
+  // native reads can be promoted only when their final model envelope did not
+  // get paged or summarized; a partial page must never authorize a write.
+  return callName !== 'read_emevd_event'
+    && envelope.truncated === false
+    && envelope.completeness === 'complete';
+}
+
+function registerNativeProofWatch(context: ToolContext, sourcePath: string): void {
+  if (!context.coreSession) return;
+  context.coreSession.watchOuterFile(sourcePath);
 }
 
 interface DiscoveryQueryRecord {

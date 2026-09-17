@@ -79,6 +79,8 @@ export async function runAgentToolEnvelopeSmoke(): Promise<void> {
   assert.equal(verboseEnvelope.data.record.sourceRevision, 123);
   assert.equal(typeof verboseEnvelope.data.record.sourcePath, 'string');
   assert.ok(verboseEnvelope.data.record.sourcePath.length <= 421);
+  assert.equal(verboseEnvelope.evidence.claimDefaults?.identity?.workspaceId, 'workspace://active');
+  assert.doesNotMatch(verboseResult.content, /[A-Za-z]:[\\/][^/]/u);
   assert.deepEqual(verboseEnvelope.data.record.fields.map((field: { fieldId: string; value: number }) => [field.fieldId, field.value]),
     nativeFields.map(field => [field.fieldId, field.value]));
 
@@ -119,10 +121,81 @@ export async function runAgentToolEnvelopeSmoke(): Promise<void> {
       }]
     }
   });
-  assert.equal(oversized.envelope.error.code, 'RESULT_IDENTITY_TOO_LARGE');
-  assert.equal(oversized.outer.ok, false);
-  assert.equal(oversized.outer.code, oversized.envelope.error.code);
-  assert.equal(oversized.envelope.state, 'failed');
+  assert.equal(oversized.outer.ok, true, oversized.outer.content);
+  assert.equal(oversized.envelope.state, 'completed');
+  assert.equal(oversized.envelope.truncated, true);
+  assert.equal(oversized.envelope.data.record.coverage[0].sourceVersions.totalCount, 128);
+  assert.equal(oversized.envelope.data.record.coverage[0].sourceVersions.truncated, true);
+
+  // Entity resolution is a discovery result, not a native proof.  A real
+  // resolver can return many candidates and relationship edges; the model
+  // must receive a bounded, useful candidate window rather than losing the
+  // entire result to the stable-identity budget.
+  const resolutionRegistry = new ToolRegistry();
+  resolutionRegistry.register({
+    name: 'resolve_entity',
+    description: 'Resolve a model entity through the production resolver.',
+    permission: 'read',
+    run: () => ({ ok: true, data: {
+      status: 'candidate',
+      query: 'Gyoubu',
+      domain: 'param',
+      candidates: Array.from({ length: 64 }, (_, index) => ({
+        candidateId: `candidate:${index}`,
+        namespace: 'param-row',
+        domain: 'param',
+        nativeHandle: `row:${50800000 + index}`,
+        label: `Gyoubu candidate ${index}`,
+        sourceUri: `workspace://mods/gameparam/NpcParam/${50800000 + index}`,
+        nativeVerified: index === 0,
+        evidence: [{ kind: 'structured-index', sourceProperty: 'rowName', value: 'Gyoubu' }]
+      })),
+      verifiedEdges: Array.from({ length: 64 }, (_, index) => ({
+        ruleId: 'param-row-to-source',
+        fromUri: `workspace://mods/gameparam/NpcParam/${50800000 + index}`,
+        toUri: `workspace://mods/gameparam/NpcParam/${50800000 + index}/fields`,
+        targetNamespace: 'param-field',
+        targetConfirmed: index === 0,
+        reason: 'structured candidate edge'
+      })),
+      diagnostics: Array.from({ length: 64 }, (_, index) => `diagnostic-${index}`)
+    } })
+  });
+  resolutionRegistry.register({
+    name: 'search_param_fields',
+    description: 'Return trusted PARAM field definitions.',
+    permission: 'read',
+    run: () => ({ ok: true, data: {
+      table: 'NpcParam',
+      rowIds: [50800000],
+      sourceHash: 'a'.repeat(64),
+      fields: [{ fieldId: 'ninsatuNum', name: '必要忍殺回数', type: 'int32' }]
+    } })
+  });
+  const resolutionBridge = createAgentToolBridge({
+    registry: resolutionRegistry,
+    context: { workspaceIndex: new WorkspaceIndex('entity-resolution-fixture'), mode: 'plan' }
+  });
+  const resolutionResult = await resolutionBridge.executeTool({
+    id: 'large-entity-resolution', name: 'resolve_entity', argumentsJson: '{"query":"Gyoubu"}'
+  });
+  assert.equal(resolutionResult.ok, true, resolutionResult.content);
+  assert.ok(Buffer.byteLength(resolutionResult.content, 'utf8') <= 8_192);
+  const resolutionEnvelope = JSON.parse(resolutionResult.content);
+  assert.equal(resolutionEnvelope.data.record.candidatesReturnedCount, 8);
+  assert.equal(resolutionEnvelope.data.record.candidatesTotalCount, 64);
+  assert.equal(resolutionEnvelope.data.record.candidatesTruncated, true);
+  assert.equal(resolutionEnvelope.data.record.verifiedEdgesTotalCount, 64);
+  assert.equal(resolutionEnvelope.data.record.verifiedEdgesTruncated, true);
+  assert.equal(resolutionEnvelope.data.record.candidates[0].sourceUri, 'workspace://mods/gameparam/NpcParam/50800000');
+  assert.equal(resolutionEnvelope.error, undefined);
+  const fieldResult = await resolutionBridge.executeTool({
+    id: 'param-definition-projection', name: 'search_param_fields', argumentsJson: '{}'
+  });
+  assert.equal(fieldResult.ok, true, fieldResult.content);
+  const fieldEnvelope = JSON.parse(fieldResult.content);
+  assert.equal(fieldEnvelope.data.record.fields[0].fieldId, 'ninsatuNum');
+  assert.equal(fieldEnvelope.data.record.fields[0].name, '必要忍殺回数');
 
   // A committed write must not be converted into a retryable ordinary
   // failure merely because its stable identity list is too large. Keep the
@@ -154,8 +227,8 @@ export async function runAgentToolEnvelopeSmoke(): Promise<void> {
   assert.equal(committedOversized.envelope.data.record.lifecycle.nativeVerification.status, 'verified');
   assert.equal(committedOversized.envelope.data.record.lifecycle.knowledgeRefresh, 'failed');
   assert.equal(committedOversized.envelope.data.record.sourceVersions, undefined);
-  assert.equal(committedOversized.envelope.data.record.outputBudget.code, 'RESULT_IDENTITY_TOO_LARGE');
-  assert.equal(committedOversized.envelope.data.record.outputBudget.identityBytes > 8192, true);
+  assert.equal(committedOversized.envelope.truncated, true);
+  assert.equal(committedOversized.envelope.data.record.outputBudget, undefined);
   assert.ok(
     Buffer.byteLength(committedOversized.outer.content, 'utf8') <= 8192,
     `committed oversized envelope exceeded byte budget: ${Buffer.byteLength(committedOversized.outer.content, 'utf8')}`
@@ -175,13 +248,16 @@ export async function runAgentToolEnvelopeSmoke(): Promise<void> {
       }))
     }
   });
-  assert.equal(partialOversized.outer.ok, false);
+  assert.equal(partialOversized.outer.ok, true, partialOversized.outer.content);
   assert.equal(partialOversized.envelope.state, 'partial');
-  assert.equal(partialOversized.envelope.error.code, 'RESULT_IDENTITY_TOO_LARGE');
+  assert.equal(partialOversized.envelope.truncated, true);
+  assert.equal(partialOversized.envelope.completeness, 'summary_only');
+  assert.deepEqual(partialOversized.envelope.data.record, {});
 
   // Force the strictest committed fallback: long opaque locators and nested
   // diagnostics make the projected lifecycle itself too large.  The fallback
-  // must omit incomplete handles while retaining the failed refresh state.
+  // must retain the committed lifecycle and expose why auxiliary data was
+  // omitted, without inviting a duplicate write.
   const committedMinimal = await execute({
     ok: true,
     state: 'committed',
@@ -202,8 +278,9 @@ export async function runAgentToolEnvelopeSmoke(): Promise<void> {
   assert.equal(committedMinimal.outer.ok, true, committedMinimal.outer.content);
   assert.equal(committedMinimal.envelope.state, 'committed');
   assert.equal(committedMinimal.envelope.data.record.lifecycle.knowledgeRefresh.status, 'failed');
-  assert.equal(committedMinimal.envelope.data.record.operationId, undefined);
-  assert.equal(committedMinimal.envelope.data.record.outputBudget.locatorOmitted, true);
+  assert.equal(typeof committedMinimal.envelope.data.record.operationId, 'string');
+  assert.equal(committedMinimal.envelope.data.record.outputBudget.code, 'RESULT_IDENTITY_TOO_LARGE');
+  assert.equal(committedMinimal.envelope.data.record.outputBudget.projection, 'committed_lifecycle');
   assert.ok(Buffer.byteLength(committedMinimal.outer.content, 'utf8') <= 8192);
   assert.ok(committedMinimal.outer.content.length <= 8192);
 

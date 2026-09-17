@@ -720,6 +720,16 @@ input::placeholder, textarea::placeholder { color: var(--ink-3); }
 .setting-name { font-size: 12.5px; font-weight: 550; }
 .setting-desc { font-size: 11px; color: var(--ink-3); margin-top: 2px; }
 .setting-actions { padding: 4px; }
+.setting-row--update { align-items: flex-start; }
+.setting-row__content { min-width: 0; flex: 1; }
+.setting-row__controls { display: flex; align-items: flex-end; gap: 8px; flex: none; }
+.update-channel-label { display: flex; flex-direction: column; gap: 3px; font-size: 10px; color: var(--ink-3); }
+.update-channel-label select { min-width: 88px; }
+.setting-desc--update { color: var(--ink-2); font-family: var(--font-mono); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.setting-desc--error { color: var(--danger-text); max-width: 420px; }
+.update-notes { margin-top: 6px; font-size: 11px; color: var(--ink-2); }
+.update-notes summary { cursor: pointer; color: var(--ember); }
+.update-notes p { white-space: pre-wrap; max-height: 160px; overflow: auto; margin: 6px 0 0; }
 
 /* ═══════════ 编辑器区 ═══════════ */
 .editor-area { flex: 1; display: flex; flex-direction: column; min-width: 0; background: var(--forge-1); position: relative; }

@@ -14,9 +14,9 @@ import { basename, dirname, join } from 'node:path';
 import { runBridge, disposeBridgeDaemonPool } from '../bridge/runBridge.js';
 import { commitEmevdBatchViaBridge } from '../editing/emevdBridgeCommit.js';
 import { encodeInstructionArgs } from '../emevd/emedfSchema.js';
-import { resolveEmevdRegistry } from '../emevd/emedfRegistryResolver.js';
+import { importDs3EmedfFile } from './emedfExternalAdapter.js';
 import { applyParamFieldMutation } from '../param/paramFieldMutation.js';
-import { locateDsLuaDecompilerSync } from '../script/dsLuaDecompilerLocator.js';
+import { locateDsLuaDecompilerSync } from './dsLuaDecompilerLocator.js';
 import { searchRealEmedf } from './realEmedfLocator.js';
 import type { ParamDefDocument } from '@soulforge/shared';
 
@@ -322,7 +322,10 @@ async function main(): Promise<void> {
     const targetEvent = (emevdRead.data.events ?? []).find((event) => (event.instructionCount ?? 0) >= 1 && event.id);
     if (!targetEvent?.id) throw new Error('common 没有可插入指令的事件');
     const emedfPath = await searchRealEmedf();
-    const resolved = resolveEmevdRegistry(emedfPath);
+    if (!emedfPath) throw new Error('S40 验证需要显式可用的本机 EMEDF 参考文件。');
+    const imported = importDs3EmedfFile(emedfPath);
+    if (!imported.ok) throw new Error(`EMEDF 外部验证导入失败：${imported.message}`);
+    const resolved = imported;
     const waitDef = resolved.registry.instructions.find((item) =>
       item.bank === 2000 && item.id === 11
     ) ?? resolved.registry.instructions.find((item) =>
@@ -332,7 +335,7 @@ async function main(): Promise<void> {
     );
     if (!waitDef) {
       throw new Error(
-        `EMEDF 没有 WaitFixedTimeFrames / 2000:11（origin=${resolved.origin} path=${emedfPath ?? 'none'} names=${
+        `EMEDF 没有 WaitFixedTimeFrames / 2000:11（origin=${resolved.registry.origin} path=${emedfPath} names=${
           resolved.registry.instructions.filter((item) => /wait/i.test(item.name)).map((item) => `${item.bank}:${item.id}:${item.name}`).slice(0, 12).join(',')
         })`
       );
@@ -408,7 +411,7 @@ async function main(): Promise<void> {
       eventId: targetEvent.id,
       instructionCount: targetEvent.instructionCount,
       wait: `${waitDef.bank}:${waitDef.id}`,
-      emedfOrigin: resolved.origin
+      emedfOrigin: resolved.registry.origin
     });
 
     // ---- S40-2 PARAM EquipParamGoods 改一个数 ----

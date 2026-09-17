@@ -187,6 +187,7 @@ function recommendTools(prompt: string, tools: ToolDescriptor[], mode: AiPermiss
     names.add('search_tae_events');
     names.add('read_tae_events');
     names.add('mutate_tae_event_times');
+    names.add('mutate_tae_event_fields');
   }
 
   if (lower.includes('param') || lower.includes('参数') || lower.includes('speffect') || lower.includes('goods')
@@ -248,6 +249,7 @@ function reasonForTool(name: string): string {
     search_tae_events: '按动作地址（cXXXX#AXXXX.eN）或 SoundID 查找 TAE 词条。',
     read_tae_events: '按地址（c1050#A0200.e0）读 TAE 词条的帧/时间与已解码字段。',
     mutate_tae_event_times: '按地址改 TAE 词条起始/结束帧，经 Patch Engine 提交。',
+    mutate_tae_event_fields: '按 first-party schema 字段改 TAE 参数，经 Patch Engine 提交。',
     read_msb_parts: '按地址（m11_01_00_00#c1050_0000）读 MSB part 的位置/旋转/缩放。',
     mutate_msb_part_transform: '按地址改 MSB part 变换，经 Patch Engine 提交。',
     search_param_rows: '查找参数行候选或已确认行。',

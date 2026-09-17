@@ -1,5 +1,4 @@
-import { basename, dirname, join, resolve } from 'node:path';
-import { existsSync } from 'node:fs';
+import { basename, dirname } from 'node:path';
 import type { IpcMainInvokeEvent } from 'electron';
 import {
   applyNativeMutation,
@@ -135,80 +134,10 @@ function cacheEmevdDisassembly(
   }
 }
 
-/* ------------------------------------------------------------------ */
-/*  EMEDF 自动定位（同步、只读、有界）。                                 */
-/*                                                                    */
-/*  R3/P4 裁定：事件源码必须是 DarkScript3 式（EMEDF 函数名），没 EMEDF 失败关闭。 */
-/*  T4 查找顺序（grok 2026-08-15 拍死）：                              */
-/*  1. SOULFORGE_EMEDF_PATH（显式覆盖）；                              */
-/*  2. 固定候选：本机 DarkScript3 事件编辑器发布包的真实落地            */
-/*     `<tools>/事件编辑器3.4.1/Resources/sekiro-common.emedf.json`；  */
-/*  3. 已挂载 baseRoot 兄弟 `tools/<一层子目录>/Resources/`（DarkScript3 发布包  */
-/*     常规落地形态）；                                                */
-/*  4. 已挂载 overlay 根向上两级（workspace 层）的兄弟 `tools/<一层>/Resources/`； */
-/*  5. SOULFORGE_SEKIRO_GAME_ROOT 同样扫兄弟 tools；                   */
-/*  6. 有界用户目录（Desktop/Documents/Downloads）。                   */
-/*  绝不递归整盘；找不到返回 null，由 resolveEmevdRegistry 失败关闭到 fixture。 */
-/* ------------------------------------------------------------------ */
-
-const EMEDF_RELATIVE_CANDIDATES = [
-  'sekiro-common.emedf.json',
-  'Sekiro/sekiro-common.emedf.json',
-  'sekiro.emedf.json',
-  'Resources/sekiro-common.emedf.json'
-];
-
-/** T4 固定候选：本机 DarkScript3 事件编辑器发布包真实落地（grok 已求证存在）。 */
-const EMEDF_FIXED_CANDIDATES = [
-  'D:\\mystream\\Sekiro Shadows Die Twice\\tools\\事件编辑器3.4.1\\Resources\\sekiro-common.emedf.json'
-];
-
-function locateUserEmedfSync(deps: EventIpcDeps): string | null {
-  const roots: string[] = [];
-  // 1) 显式环境变量优先。
-  const explicit = process.env.SOULFORGE_EMEDF_PATH?.trim();
-  if (explicit) roots.push(resolve(explicit));
-  // 2) 固定候选：DarkScript3 事件编辑器发布包的本机真实落地（整路径直接判存在）。
-  for (const candidate of EMEDF_FIXED_CANDIDATES) {
-    try {
-      if (existsSync(candidate)) return candidate;
-    } catch {
-      // 继续下一个候选。
-    }
-  }
-  // 3) 已挂载 baseRoot 的兄弟 tools/<一层子目录>。
-  deps.pushToolsSubdirs(roots, deps.activeSession?.layers.baseRoot);
-  // 4) 已挂载 overlay 根向上两级（workspace 层）的兄弟 tools/<一层>/Resources/。
-  const overlay = deps.activeSession?.layers.overlayRoot?.trim();
-  if (overlay) deps.pushToolsSubdirs(roots, dirname(dirname(overlay)));
-  // 5) SOULFORGE_SEKIRO_GAME_ROOT 同样扫兄弟 tools。
-  const gameRootEnv = process.env.SOULFORGE_SEKIRO_GAME_ROOT?.trim();
-  if (gameRootEnv) deps.pushToolsSubdirs(roots, gameRootEnv);
-  // 6) 有界用户目录。
-  const home = process.env.USERPROFILE ?? process.env.HOME ?? '';
-  if (home) {
-    roots.push(join(home, 'Desktop'), join(home, 'Documents'), join(home, 'Downloads'));
-  }
-  for (const root of roots) {
-    for (const relative of EMEDF_RELATIVE_CANDIDATES) {
-      try {
-        const candidate = join(root, relative);
-        if (existsSync(candidate)) return candidate;
-      } catch {
-        // 继续下一个候选。
-      }
-    }
-  }
-  return null;
-}
-
 let cachedEmevdRegistry: ReturnType<typeof resolveEmevdRegistry> | null = null;
-function getEmevdRegistry(deps: EventIpcDeps): ReturnType<typeof resolveEmevdRegistry> {
-  // 12-B：只有「imported」才算成功缓存。origin 为 fixture（首次查找时文件还不在 /
-  // 路径暂时不可读 / 解析失败）不得缓存 —— 用户把文件放回或修好后再开同一份事件
-  // 文档要立即生效，不能把失败钉死到进程退出。
-  if (!cachedEmevdRegistry || cachedEmevdRegistry.origin !== 'imported') {
-    cachedEmevdRegistry = resolveEmevdRegistry(locateUserEmedfSync(deps));
+function getEmevdRegistry(): ReturnType<typeof resolveEmevdRegistry> {
+  if (!cachedEmevdRegistry) {
+    cachedEmevdRegistry = resolveEmevdRegistry();
   }
   return cachedEmevdRegistry;
 }
@@ -246,7 +175,6 @@ export interface EventIpcDeps {
     code: string,
     result: Extract<PrepareBridgeRootsResult, { ok: false }>
   ): Diagnostic;
-  pushToolsSubdirs(roots: string[], gameRoot: string | undefined): void;
   rejectNonSekiroNativeWrite(sourceUri: string, file?: IndexedFile): RendererSaveResult | null;
   ensureActiveOperationLog(session: WorkspaceSession): Promise<OperationLogUtilityClient>;
   sessionCommitPort(
@@ -536,7 +464,7 @@ export function registerEventIpcHandlers(deps: EventIpcDeps): void {
         filePath: file.absolutePath,
         allowedRoots: [...roots.allowedRoots],
         resourceUri: sourceUri,
-        registry: getEmevdRegistry(deps).registry,
+        registry: getEmevdRegistry().registry,
         signal: openController.signal,
         ...(documentInstanceId ? { documentInstanceId } : {}),
         // pageSize 不再显式指定：走 DEFAULT_PAGE_SIZE（8192，避免单页 33k 指令 JSON 长帧）。
@@ -560,10 +488,9 @@ export function registerEventIpcHandlers(deps: EventIpcDeps): void {
       // 权威缓存必须在反汇编成功（或确认无需反汇编）之后才写入。
       // 渲染期间被取消时，被放弃的文档不得提前成为 submitEmevdDslPlan 的权威。
       if (openController.signal.aborted) return emevdOpenCancelled(sourceUri);
-      const registryResolution = getEmevdRegistry(deps);
-      // R3/P4 裁定：反汇编必须是 DarkScript3 式（EMEDF 函数名）；没 EMEDF 失败
-      // 关闭——不再下发 hash 伪源码（旧 renderEmevdPatchDslBounded 输出已从
-      // production 入口移除，底层 dslCompiler/typed 写链保留）。
+      const registryResolution = getEmevdRegistry();
+      // 反汇编使用 SoulForge 自有 first-party EMEVD schema；未知指令或长度
+      // 变体由 readEventInstruction 标为 coverage gap，并保持原始字节只读。
       // 3.1：首包只回 outline + 前 400 行 + opaque source token，全文不进
       // 第一次 IPC。3.3：反汇编在 worker_threads（renderEmevdDarkScriptAsync）。
       // loadFullDslTemplate 参数保留以兼容既有 IPC 契约与 core smoke，不再
@@ -574,13 +501,21 @@ export function registerEventIpcHandlers(deps: EventIpcDeps): void {
       let dslTemplateTruncated = false;
       let dslTemplateTotalLines = 0;
       let sourceStyle: 'dark-script' | 'patch-dsl' | 'none' = 'none';
-      const responseDiagnostics = full.diagnostics.map((d) => ({
+      const responseDiagnostics = [
+        ...registryResolution.diagnostics.map((d) => ({
+          severity: d.severity as Diagnostic['severity'],
+          code: d.code,
+          message: d.message,
+          sourceUri
+        })),
+        ...full.diagnostics.map((d) => ({
         severity: d.severity as Diagnostic['severity'],
         code: d.code,
         message: d.message,
         sourceUri
-      }));
-      if (registryResolution.origin === 'imported') {
+        }))
+      ];
+      if (registryResolution.origin === 'first-party') {
         const disassemblyCacheKey = full.sourceHash
           ? `${full.sourceHash}::${fingerprintEmedfRegistry(registryResolution.registry)}`
           : null;
@@ -618,14 +553,11 @@ export function registerEventIpcHandlers(deps: EventIpcDeps): void {
           sourcePrefix = stored.prefix;
           dslTemplateTotalLines = stored.totalLines;
         }
-      } else {
+      } else if (responseDiagnostics.length === 0) {
         responseDiagnostics.push({
           severity: 'error' as const,
-          code: 'EMEDF_MISSING',
-          message: '未找到用户本机 EMEDF（DarkScript3 的 sekiro-common.emedf.json）：'
-            + '事件源码反汇编已失败关闭，不再提供伪解码。'
-            + '请设置环境变量 SOULFORGE_EMEDF_PATH 指向该文件，'
-            + '或在游戏根旁 tools/<工具目录>/Resources/ 放置该文件后重新打开。',
+          code: 'EMEDF_FIRST_PARTY_SCHEMA_UNAVAILABLE',
+          message: 'SoulForge 内置 EMEVD schema 不可用，事件源码反汇编已失败关闭，未生成伪源码。',
           sourceUri
         });
       }
@@ -661,6 +593,10 @@ export function registerEventIpcHandlers(deps: EventIpcDeps): void {
         sourceHash: full.sourceHash ?? null,
         sourceFormat: full.sourceFormat ?? null,
         outerFileHash: full.outerFileHash ?? null,
+        registryOrigin: registryResolution.origin,
+        registryPackageId: registryResolution.packageId ?? null,
+        registryPackageVersion: registryResolution.packageVersion ?? null,
+        registryContentDigest: registryResolution.contentDigest ?? null,
         // renderer 的状态行要 authority；以前它是另发一次 readEmevdDocument 才拿到的，
         // 那次读除了这一个字符串没有别的用处（见 App.loadEmevd）。
         authority: full.authority ?? null,
@@ -671,21 +607,21 @@ export function registerEventIpcHandlers(deps: EventIpcDeps): void {
   );
 
   /**
-   * T4-3：暴露本机 EMEDF 指令名补全目录给 renderer（autocomplete/hover）。
-   * 只读 EMEDF 公开字段（name/bank/id/args），EMEDF 数据本身留在本机不进仓库。
-   * 无论 registry 来源（imported 或 fixture）都返回目录，由 renderer 决定何时展示。
+   * 暴露 SoulForge 内置 EMEVD 指令名补全目录给 renderer（autocomplete/hover）。
+   * 仅返回语义 schema 的 name/bank/id/args；未知覆盖继续通过结构化诊断显示。
    */
   deps.handle('resource.readEmedfCompletionCatalog', async (): Promise<{
     ok: boolean;
-    origin: 'imported' | 'fixture';
+    origin: 'first-party' | 'imported' | 'fixture';
     items: EmedfCompletionItem[];
     diagnostics?: Array<{ severity: string; code: string; message: string }>;
   }> => {
-    const resolution = getEmevdRegistry(deps);
+    const resolution = getEmevdRegistry();
     return {
-      ok: true,
+      ok: resolution.origin === 'first-party',
       origin: resolution.origin,
-      items: listEmedfCompletionItems(resolution.registry)
+      items: listEmedfCompletionItems(resolution.registry),
+      diagnostics: resolution.diagnostics
     };
   });
 
@@ -742,7 +678,7 @@ export function registerEventIpcHandlers(deps: EventIpcDeps): void {
         };
       }
       const operationLog = await deps.ensureActiveOperationLog(deps.activeSession);
-      const registry = getEmevdRegistry(deps).registry;
+      const registry = getEmevdRegistry().registry;
       const full = await readFullEmevdDocument({
         filePath: file.absolutePath,
         allowedRoots: [...roots.allowedRoots],

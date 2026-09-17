@@ -27,6 +27,7 @@ type BridgeMock = (input: BridgeMockInput) => Promise<Record<string, unknown>>;
 function makeEditSession(overlayRoot: string): NativeEditSession {
   const session = {
     layers: { overlayRoot },
+    meta: { workspaceId: 'tae-anim-id-validation-workspace' },
     resolveWritablePath: (absolutePath: string) => ({
       ok: true as const,
       absolutePath,

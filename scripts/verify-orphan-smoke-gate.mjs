@@ -72,7 +72,10 @@ const SCRIPTS_DIR = join(repoRoot, 'scripts');
  */
 const EXCLUDED_SCRIPTS = Object.freeze({
   'verify-mission1-a1.mjs': '受 A0 trust root 与显式 --resume 约束的 Mission1 后续 runner，按需手工运行。',
-  'verify-mission1-corpus-v2.mjs': '依赖本机 Mission1 语料与 manifest 的独立复核，按需手工运行。'
+  'verify-mission1-corpus-v2.mjs': '依赖本机 Mission1 语料与 manifest 的独立复核，按需手工运行。',
+  'verify-agent-task-record-gate.mjs': '历史 task-record 交叉验证脚本；生产链路已迁移到 CoreToolSession/NativeReadProofStore，不将手工台账重新接回验证调度。',
+  'verify-release-tag.mjs': 'GitHub Windows Release 工作流中的 tag/package 预发布校验，必须由工作流传入明确 RELEASE_TAG，不作为无 tag 的普通回归套件。',
+  'verify-release-update-assets.mjs': 'GitHub Windows Release 工作流中的生成资产完整性校验，依赖同批 NSIS/latest.yml/SHA256SUMS 产物，仅在发布前资产目录就绪时运行。'
 });
 
 function collectScriptText() {

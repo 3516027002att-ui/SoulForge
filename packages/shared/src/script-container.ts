@@ -6,11 +6,10 @@
  * path-bearing fields before this DTO crosses the context bridge, so the
  * entries are identified by logical inner names only.
  *
- * SoulForge does NOT decompile, recompile, or execute scripts. Inner `.lua` /
- * `.hks` files are Havok Script compiled bytecode (`\x1bLuaQ` magic), not
- * editable source text. The script panel is read-only evidence plus a
- * user-supplied whole inner-file replacement; it never presents bytecode as
- * editable source.
+ * SoulForge does not execute scripts. Inner `.lua` / `.hks` files that use the
+ * current Sekiro HKS dialect are decompiled and recompiled by the first-party
+ * Bridge; future or out-of-scope dialects remain structured failures rather
+ * than being presented as fake source.
  */
 
 import type { Diagnostic } from './types.js';
@@ -109,12 +108,12 @@ export interface ScriptEntryNewlines {
 }
 
 /**
- * 单条脚本内层条目的源码级只读视图（SCRIPT-41）。
+ * 单条脚本内层条目的源码级视图（SCRIPT-41）。
  *
  * 主进程用真实字节判定：不看文件名、不用证据采样的分类，逐个条目调用
  * `classifyPlaintextBytes`（阈值 0.99）。明文条目返回按真实 encoding 解码的
- * 文本；字节码条目只返回判定证据，渲染器只展示明确的只读字节视图，
- * 绝不把字节码呈现为可编辑源码。
+ * 文本；当前 Sekiro HKS 字节码由 Bridge 内置 first-party dialect 生成完整
+ * 可写 Lua 源码，未来/范围外 dialect 才返回结构化失败诊断。
  */
 export interface ScriptEntryPlaintextView {
   ok: boolean;
@@ -151,11 +150,18 @@ export interface ScriptEntryPlaintextView {
  * 脚本源码视图（S16 脚本 IDE）。
  *
  * `resource.readScriptSource` 的结果：明文条目按真实 encoding 返回文本；
- * `Lua` 字节码条目由主进程调本机 DSLuaDecompiler（只读定位，见 core
- * dsLuaDecompilerLocator）反编译为 Lua 文本；反编译不可用/失败时
- * `kind='failure'`，只给结构化原因，绝不把字节码呈现为可编辑源码。
+ * `Lua` 字节码由 Bridge 内置的 SoulForge HKS dialect 生成 Lua 文本。
+ * 只有未来版本或不属于当前治理范围的 dialect 才会返回结构化
+ * `not-attempted/failed` 诊断；当前范围的覆盖缺口不能被伪装成只读完成态。
  * renderer 只收文本，不接触任何绝对路径。
  */
+export interface ScriptSemanticProvenance {
+  origin: 'first-party';
+  package: string;
+  revision: string;
+  contentDigest?: string;
+}
+
 export interface ScriptSourceView {
   ok: boolean;
   /** 显示用逻辑名：容器内为条目名，独立文件为 basename。 */
@@ -170,8 +176,18 @@ export interface ScriptSourceView {
   encoding?: ScriptEntryEncoding | 'utf8' | 'decompiled';
   /** sourceText 是否为反编译器输出（非原文件文本）。 */
   decompiled?: boolean;
-  /** 反编译器人类可读标识，如 "DSLuaDecompiler v1.1.5"。 */
+  /** 反编译器人类可读标识；生产实现固定为 SoulForge first-party。 */
   decompiler?: string;
+  /** first-party 编译器来源与 revision。 */
+  compiler?: ScriptSemanticProvenance;
+  /** first-party 反编译器来源与 revision。 */
+  decompilerProvenance?: ScriptSemanticProvenance;
+  /** 当前脚本字节码 dialect。 */
+  dialect?: string;
+  /** schema/语义实现 revision。 */
+  revision?: string;
+  /** 打开时的原始字节 source hash，用于 CAS 与重读证明。 */
+  sourceHash?: string;
   /** 容器内条目时为其容器 uri。 */
   containerUri?: string;
   /** 容器内条目名。 */

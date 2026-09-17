@@ -221,13 +221,14 @@ export function mergeCatalogAndPersisted(catalog: RagCorpus, persisted: RagCorpu
       if (chunk.family === 'file' || !liveSources.has(chunk.sourceUri)) return false;
       const current = liveSourceRevisions.get(chunk.sourceUri);
       // Persisted semantic data is usable only when the current file catalog
-      // proves both content and revision.  Missing provenance is stale, never
+      // proves both content and revision. Missing provenance is stale, never
       // an invitation to merge an old row/event under a new export hash.
       if (!current) return false;
       // Older durable semantic chunks only carried the leaf/source hash and
       // cannot be proven current against a packed catalog file. Rebuild them
       // instead of treating the outer catalog hash as their missing leaf hash.
-      if (current.outerFileHash === undefined || current.sourceRevision === undefined) return false;
+      if (current.outerFileHash === undefined || current.sourceRevision === undefined
+        || chunk.sourceRevision === undefined) return false;
       return chunk.outerFileHash === current.outerFileHash
         && chunk.sourceRevision === current.sourceRevision;
     }

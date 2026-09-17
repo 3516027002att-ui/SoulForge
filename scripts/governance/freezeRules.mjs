@@ -93,7 +93,16 @@ function canonical(value) {
  * 比较冻结字段在基线与当前数据之间是否发生变化。
  * 只报告归属于该冻结版本（targetRelease 匹配）的条目。
  */
-function diffFrozenField(release, spec, baseline, current, findings, where, unfrozenItemIds = null) {
+function diffFrozenField(
+  release,
+  spec,
+  baseline,
+  current,
+  findings,
+  where,
+  unfrozenItemIds = null,
+  unfrozenFieldPaths = null
+) {
   const parsed = parseFrozenField(spec);
   if (parsed === null) {
     findings.push(makeFinding(
@@ -105,6 +114,10 @@ function diffFrozenField(release, spec, baseline, current, findings, where, unfr
   }
 
   if (!parsed.isArray) {
+    // 顶层冻结字段没有 scopeItemId 可供按条目解冻，因此必须由同一份
+    // user-approved ruling 显式列出精确 field path。缺少该清单时继续比较
+    // git 基线，避免「解冻了一个条目」意外放开整份顶层政策。
+    if (unfrozenFieldPaths !== null && unfrozenFieldPaths.has(spec)) return;
     if (canonical(baseline[parsed.container]) !== canonical(current[parsed.container])) {
       findings.push(makeFinding(
         'FREEZE_VIOLATION',
@@ -246,6 +259,7 @@ export function validateCrossVersionFreeze(data, findings, options = {}) {
     //
     // 现在要求裁定显式列出 scopeItemIds，未列出的条目继续比对基线。
     let unfrozenItemIds = null;
+    let unfrozenFieldPaths = null;
     if (entry.unfreezeRuling !== null && entry.unfreezeRuling !== undefined) {
       const ruling = entry.unfreezeRuling;
       const ids = Array.isArray(ruling?.scopeItemIds) ? ruling.scopeItemIds : null;
@@ -262,12 +276,39 @@ export function validateCrossVersionFreeze(data, findings, options = {}) {
         continue;
       }
       unfrozenItemIds = new Set(ids);
+      const fieldPaths = ruling?.fieldPaths;
+      if (fieldPaths !== undefined) {
+        if (!Array.isArray(fieldPaths)
+          || fieldPaths.length === 0
+          || fieldPaths.some((fieldPath) => typeof fieldPath !== 'string' || fieldPath.trim() === '')) {
+          findings.push(makeFinding(
+            'FREEZE_UNFREEZE_FIELD_PATHS_INVALID',
+            'docs/governance/releases.json',
+            `${entry.release} 的 unfreezeRuling.fieldPaths 必须是非空字符串数组；`
+              + '若不解冻顶层字段应省略该项，不能用空数组伪造放开范围。'
+          ));
+        } else {
+          unfrozenFieldPaths = new Set(fieldPaths);
+          const frozenFields = new Set(entry.frozenFields ?? []);
+          for (const fieldPath of unfrozenFieldPaths) {
+            if (frozenFields.has(fieldPath) && !fieldPath.includes('[]')) continue;
+            findings.push(makeFinding(
+              'FREEZE_UNFREEZE_FIELD_PATH_INVALID',
+              'docs/governance/releases.json',
+              `${entry.release} 的 unfreezeRuling.fieldPaths=${fieldPath} 必须精确匹配一个顶层 frozenFields 字段。`
+            ));
+          }
+        }
+      }
       findings.push({
         severity: 'info',
         code: 'FREEZE_UNFROZEN_BY_RULING',
         where: 'docs/governance/releases.json',
         message: `${entry.release} 声明了 unfreezeRuling，已按条目放开冻结拦截：`
-          + `${[...unfrozenItemIds].join(', ')}。其余条目继续比对 git 基线；`
+          + `${[...unfrozenItemIds].join(', ')}。`
+          + (unfrozenFieldPaths === null
+            ? '其余条目与顶层字段继续比对 git 基线；'
+            : `顶层字段解冻清单：${[...unfrozenFieldPaths].join(', ')}；其余条目与字段继续比对 git 基线；`)
           + '该裁定的真实性由工程复核负责。'
       });
     }
@@ -316,7 +357,8 @@ export function validateCrossVersionFreeze(data, findings, options = {}) {
         data.scope,
         findings,
         'docs/governance/scope.json',
-        unfrozenItemIds
+        unfrozenItemIds,
+        unfrozenFieldPaths
       );
     }
   }

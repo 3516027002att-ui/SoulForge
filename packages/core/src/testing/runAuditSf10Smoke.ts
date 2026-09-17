@@ -312,7 +312,7 @@ async function runUnitLayer(): Promise<void> {
     const pAi = resolveScriptLoaderProfile({ game: 'sekiro', containerPath: 'mods/script/aicommon.luabnd.dcx', entryName: 'goal_list.lua' });
     if (!pAi || pAi.id !== 'sekiro-ai-luabnd') fail('未能正确匹配 sekiro-ai-luabnd profile');
     if (!pAi.supportsPlaintextSourceEdit) fail('sekiro-ai-luabnd 必须支持明文条目源码编辑');
-    if (pAi.bytecodeToSourceAllowed) fail('sekiro-ai-luabnd 不得开放字节码转源码写回');
+    if (!pAi.bytecodeToSourceAllowed) fail('sekiro-ai-luabnd 必须开放当前 HKS 字节码转源码写回');
 
     const pNameId = resolveScriptLoaderProfile({ game: 'sekiro', containerPath: 'mods/action/eventnameid.txt' });
     if (!pNameId || pNameId.id !== 'sekiro-action-nameid') fail('未能正确匹配 sekiro-action-nameid profile');
@@ -333,47 +333,32 @@ async function runUnitLayer(): Promise<void> {
       fail('未登记 profile 必须拒绝字节码源码写回');
     }
 
-    // 登记 Profile 但未开放 bytecodeToSourceAllowed (例如 sekiro-ai-luabnd)
+    // 登记 Profile 但未开放 bytecodeToSourceAllowed
     const pAi = resolveScriptLoaderProfile({ game: 'sekiro', containerPath: 'aicommon.luabnd.dcx' })!;
-    const rDisallowed = encodeScriptSourceForWriteback(bytecode, 'print("test")\n', { profile: pAi });
+    const disallowedProfile: ScriptLoaderProfile = { ...pAi, bytecodeToSourceAllowed: false };
+    const rDisallowed = encodeScriptSourceForWriteback(bytecode, 'print("test")\n', { profile: disallowedProfile });
     if (rDisallowed.ok || rDisallowed.code !== 'SCRIPT_BYTECODE_SOURCE_EDIT_PROHIBITED') {
       fail('未开放 bytecodeToSourceAllowed 必须拒绝写回');
     }
 
-    // 开放 bytecodeToSourceAllowed 但语法校验失败
-    const customProfileWithValidator: ScriptLoaderProfile = {
-      ...pAi,
-      id: 'custom-tested-profile',
-      bytecodeToSourceAllowed: true,
-      matchingSyntaxValidator: {
-        toolName: 'mock-luac',
-        targetLuaVersion: '5.1',
-        validate: (src) => {
-          if (src.includes('syntax_error')) {
-            return { ok: false, error: 'syntax error near unexpected token' };
-          }
-          return { ok: true };
-        }
-      }
-    };
-
+    // 通用字节编码器不得伪造 HKS；真实源码写回走 first-party Bridge。
     const rSyntaxFail = encodeScriptSourceForWriteback(
       bytecode,
       'syntax_error local x =',
-      { profile: customProfileWithValidator }
+      { profile: pAi }
     );
-    if (rSyntaxFail.ok || rSyntaxFail.code !== 'SCRIPT_SYNTAX_VALIDATION_FAILED') {
-      fail('语法校验失败必须拒绝写回并返回 SCRIPT_SYNTAX_VALIDATION_FAILED');
+    if (rSyntaxFail.ok || rSyntaxFail.code !== 'SCRIPT_HKS_BRIDGE_REQUIRED') {
+      fail('通用编码器必须拒绝 HKS，并返回 SCRIPT_HKS_BRIDGE_REQUIRED');
     }
 
-    // 开放 bytecodeToSourceAllowed 且语法校验通过
+    // 即使 Profile 已开放，通用层也不能把 UTF-8 文本当作 HKS 字节码。
     const rSyntaxOk = encodeScriptSourceForWriteback(
       bytecode,
       'local x = 1\nprint(x)\n',
-      { profile: customProfileWithValidator }
+      { profile: pAi }
     );
-    if (!rSyntaxOk.ok || rSyntaxOk.writeKind !== 'decompiled-as-utf8') {
-      fail('合规字节码源码写回应该成功');
+    if (rSyntaxOk.ok || rSyntaxOk.code !== 'SCRIPT_HKS_BRIDGE_REQUIRED') {
+      fail('HKS 源码必须交由 first-party Bridge 编译');
     }
   }
 
@@ -381,10 +366,7 @@ async function runUnitLayer(): Promise<void> {
   {
     const pAi = resolveScriptLoaderProfile({ game: 'sekiro', containerPath: 'aicommon.luabnd.dcx' })!;
     const checkBytecode = canEditScriptAsSource(pAi, true);
-    if (checkBytecode.allowed) fail('AI 字节码条目不得允许源码编辑');
-    if (checkBytecode.code !== 'SCRIPT_BYTECODE_SOURCE_EDIT_PROHIBITED') {
-      fail('错误码应为 SCRIPT_BYTECODE_SOURCE_EDIT_PROHIBITED');
-    }
+    if (!checkBytecode.allowed) fail('当前 Sekiro AI HKS 字节码必须允许源码编辑');
 
     const checkPlaintext = canEditScriptAsSource(pAi, false);
     if (!checkPlaintext.allowed) fail('AI 明文条目应该允许源码编辑');

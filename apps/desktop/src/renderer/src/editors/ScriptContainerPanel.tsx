@@ -35,15 +35,16 @@ import { isRowTabEntry, selectableRowAttributes } from '../a11y/selectableRow.js
  *
  * 两形态：
  * - 容器（luabnd 等）：Files | Source 两栏。左栏分页条目表，右栏点开的条目
- *   源码；`\x1bLua` 字节码条目由主进程调本机 DSLuaDecompiler 反编译为 Lua
- *   文本（main spawn，renderer 只收文本，不接触路径）。
+ *   源码；`\x1bLua` 字节码条目由 Bridge 内置 SoulForge HKS dialect 反编译为
+ *   完整 Lua 文本（renderer 只收文本，不接触路径）。
  * - 独立脚本文件（.hks/.lua）：单 Source 栏，打开即按字节判定/反编译。
  *
  * 写回：Ctrl+S 应用（同 S14 话术「正在应用…」「已应用，可回滚。」），容器条目
  * 走 Patch Engine replaceContainerChild（回传 child/container hash 乐观校验），
  * 独立文件走 saveRawReplace。打开时哪套编码（ascii / utf8 / utf8-bom /
  * shift_jis / mixed-unknown / 反编译 utf8），保存必须用回那套；混合编码只改
- * 纯 ASCII 行。反编译失败/非 Lua 字节码给结构化原因，绝不把字节码呈现为可编辑源码。
+ * 纯 ASCII 行。当前 HKS dialect 反编译失败或非 Lua 字节码才给结构化原因；
+ * 未来/范围外内容不会被伪装成当前源码。
  */
 
 export interface ScriptContainerPanelProps {
@@ -289,8 +290,9 @@ export function ScriptContainerPanel(props: ScriptContainerPanelProps): ReactEle
         source.childHash,
         source.containerHash,
         draftRef.current,
-        // S34：按打开编码写回 —— main 侧用这个编码重新编码文本落盘。
-        source.encoding
+        // 明文按打开编码写回；HKS 则由 main/Bridge 编译为原生字节码。
+        source.encoding,
+        source.entryIndex
       );
       if (result.ok) {
         setDirty(false);
@@ -429,7 +431,7 @@ export function ScriptContainerPanel(props: ScriptContainerPanelProps): ReactEle
                 </div>
               )}
               <p className="muted">
-                只读：SoulForge 不把字节码呈现为可编辑源码，也不伪造反编译结果。
+                当前 dialect 未通过 SoulForge schema coverage，未返回可写源码；请查看上方结构化诊断。
               </p>
             </div>
           )}

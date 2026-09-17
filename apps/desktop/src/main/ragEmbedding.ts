@@ -6,6 +6,10 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { RagChunk, RagCorpus } from '@soulforge/shared';
 import type { OperationLogUtilityClient } from './operationLogUtilityClient.js';
+import {
+  resolveRagLocalModel,
+  type RagLocalModelResolution
+} from './ragLocalModel.js';
 
 export const INTERNAL_RAG_EMBEDDING = {
   id: 'soulforge-local-bge-small-zh-v1.5@75c43b069aac4d136ba6bc1122f995fedcfd2781',
@@ -94,6 +98,8 @@ function chunkText(chunk: RagChunk): string {
 }
 
 export class InternalRagEmbeddingService {
+  private readonly cacheDir: string;
+  private readonly resolveLocalModel: () => RagLocalModelResolution;
   private worker: Worker | null = null;
   private nextRequestId = 1;
   private readonly pending = new Map<number, PendingRequest>();
@@ -105,10 +111,40 @@ export class InternalRagEmbeddingService {
   private unavailableUntil = 0;
   private completed: { workspaceId: string; fingerprint: string; vectors: Map<string, Float32Array> } | null = null;
 
-  constructor(private readonly cacheDir: string) {}
+  private localModel: RagLocalModelResolution | null = null;
+
+  constructor(
+    cacheDir: string,
+    resolveLocalModel: () => RagLocalModelResolution = () => resolveRagLocalModel({
+      cacheDir,
+      userDataDir: dirname(dirname(cacheDir))
+    })
+  ) {
+    this.cacheDir = cacheDir;
+    this.resolveLocalModel = resolveLocalModel;
+  }
+
+  getLocalModelStatus(): RagLocalModelResolution {
+    if (!this.localModel) this.localModel = this.resolveLocalModel();
+    return this.localModel;
+  }
+
+  refreshLocalModelStatus(): RagLocalModelResolution {
+    this.localModel = this.resolveLocalModel();
+    if (this.localModel.state === 'local-ready') this.unavailableUntil = 0;
+    return this.localModel;
+  }
 
   schedule(corpus: RagCorpus, store: EmbeddingStore): void {
     if (corpus.availability !== 'available' || corpus.chunks.length === 0) return;
+    const model = this.getLocalModelStatus();
+    if (model.state !== 'local-ready') {
+      // Do not even create a timer or worker when the local model is absent.
+      // Lexical/structured retrieval remains available through the caller.
+      this.scheduled = null;
+      this.unavailableUntil = Date.now() + EMBEDDING_RETRY_COOLDOWN_MS;
+      return;
+    }
     if (Date.now() < this.unavailableUntil) return;
     const fingerprint = internalRagCorpusFingerprint(corpus);
     if (this.activeFingerprint === fingerprint && this.activeJob) return;
@@ -127,6 +163,15 @@ export class InternalRagEmbeddingService {
   async ensure(corpus: RagCorpus, store: EmbeddingStore, signal?: AbortSignal): Promise<InternalEmbeddingResult> {
     if (corpus.availability !== 'available' || corpus.chunks.length === 0) {
       return { ok: false, code: 'RAG_UNAVAILABLE', message: 'RAG 语义语料为空。', fingerprint: internalRagCorpusFingerprint(corpus) };
+    }
+    const model = this.getLocalModelStatus();
+    if (model.state !== 'local-ready') {
+      return {
+        ok: false,
+        code: 'RAG_LOCAL_MODEL_UNAVAILABLE',
+        message: model.diagnostic ?? '未发现匹配的本地 RAG 模型；已保留词法与结构化检索。',
+        fingerprint: internalRagCorpusFingerprint(corpus)
+      };
     }
     const fingerprint = internalRagCorpusFingerprint(corpus);
     if (this.activeFingerprint === fingerprint && this.activeJob) return this.activeJob;
@@ -158,6 +203,8 @@ export class InternalRagEmbeddingService {
 
   async embedQuery(query: string, signal?: AbortSignal): Promise<Float32Array | null> {
     if (!query.trim()) return null;
+    const model = this.getLocalModelStatus();
+    if (model.state !== 'local-ready') return null;
     if (Date.now() < this.unavailableUntil) return null;
     try {
       const result = await this.request([query], signal);
@@ -372,7 +419,11 @@ export class InternalRagEmbeddingService {
     if (this.worker) return this.worker;
     const script = workerFilePath();
     if (!existsSync(script)) throw new Error('RAG_EMBEDDING_WORKER_UNAVAILABLE');
-    const worker = new Worker(script, { workerData: { cacheDir: this.cacheDir } });
+    const model = this.getLocalModelStatus();
+    if (model.state !== 'local-ready' || !model.modelPath) {
+      throw new Error('RAG_LOCAL_MODEL_UNAVAILABLE');
+    }
+    const worker = new Worker(script, { workerData: { cacheDir: this.cacheDir, modelPath: model.modelPath } });
     worker.on('message', (message: WorkerResponse) => {
       const pending = this.pending.get(message.id);
       if (!pending) return;

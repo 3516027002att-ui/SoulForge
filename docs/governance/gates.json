@@ -181,7 +181,8 @@
         "SCOPE-RENDERING",
         "SCOPE-COMPLIANCE",
         "SCOPE-MATBIN-53DE-DEFERRAL",
-        "SCOPE-V09-PUBLIC-PREVIEW"
+        "SCOPE-V09-PUBLIC-PREVIEW",
+        "SCOPE-V09-GITHUB-UPDATE"
       ],
       "openRulings": [
         "用户逐项裁定已冻结；scope target 不提升实时 authority，技术缺口由后继 Gate 与 blocker 继续失败关闭。"
@@ -253,7 +254,8 @@
       "gateState": "open",
       "applicability": "in-scope",
       "sliceRefs": [
-        "W-REL-D-GAMELOAD-01"
+        "W-REL-D-GAMELOAD-01",
+        "W-FIRSTPARTY-SCHEMA-01"
       ],
       "evidenceRefs": [
         "EV-EMEVD-FMG-PARAM-03-20260803",
@@ -523,7 +525,8 @@
         "SCOPE-SEKIRO-BUILD",
         "SCOPE-RUNTIME",
         "SCOPE-RELEASE",
-        "SCOPE-V09-PUBLIC-PREVIEW"
+        "SCOPE-V09-PUBLIC-PREVIEW",
+        "SCOPE-V09-GITHUB-UPDATE"
       ],
       "openRulings": [
         "需完成 me3 能力探测运行闭环及 Windows 10/11 x64 NSIS 的 manifest/hash、安装、升级、卸载和干净机验证；代码签名不属于验收范围。"
@@ -617,7 +620,8 @@
       "blockerRefs": [],
       "scopeItemIds": [
         "SCOPE-COMPLIANCE",
-        "SCOPE-V09-PUBLIC-PREVIEW"
+        "SCOPE-V09-PUBLIC-PREVIEW",
+        "SCOPE-V09-GITHUB-UPDATE"
       ],
       "openRulings": [
         "仅允许项目所有者内部测试；外部分发仍由 notices、再分发权利与完整发行合规失败关闭。"

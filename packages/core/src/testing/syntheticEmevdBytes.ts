@@ -12,7 +12,7 @@
  */
 
 import { createHash } from 'node:crypto';
-import { parseDs3EmedfJson } from '../emevd/emedfExternalAdapter.js';
+import { parseDs3EmedfJson } from './emedfExternalAdapter.js';
 import type { EmedfRegistry } from '../emevd/emedfSchema.js';
 
 export interface SyntheticEmevdInstructionSpec {

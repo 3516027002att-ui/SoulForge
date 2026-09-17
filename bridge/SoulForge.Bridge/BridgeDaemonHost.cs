@@ -19,6 +19,7 @@ internal static class BridgeDaemonHost
     {
         PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
         PropertyNameCaseInsensitive = true,
+        NumberHandling = JsonNumberHandling.AllowNamedFloatingPointLiterals,
         DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull,
         WriteIndented = false
     };
@@ -95,6 +96,8 @@ internal static class BridgeDaemonHost
         "read-luabnd-document",
         "inspect-luabnd",
         "read-luabnd-script",
+        "read-hks-source",
+        "compile-hks-source",
         "write-luabnd-script",
         "export-luabnd",
         "export-event",

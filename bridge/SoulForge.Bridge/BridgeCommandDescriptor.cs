@@ -89,6 +89,8 @@ internal static class BridgeCommandDescriptorCatalog
             Read("read-luabnd-document", "foreground"),
             Read("inspect-luabnd", "interactive"),
             Read("read-luabnd-script", "foreground"),
+            Read("read-hks-source", "foreground"),
+            Read("compile-hks-source", "foreground"),
             Write("write-luabnd-script", "foreground"),
             Export("export-luabnd", "background", requiresOutputPath: true),
             Export("export-event", "background"),

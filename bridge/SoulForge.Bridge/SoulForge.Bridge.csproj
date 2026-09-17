@@ -13,5 +13,14 @@
   </PropertyGroup>
   <ItemGroup>
     <EmbeddedResource Include="FormatRules\sekiro-face-set-rules.v1.json" />
+    <EmbeddedResource Include="FormatRules\sekiro-tae-schema.v1.json.gz.base64" />
   </ItemGroup>
+
+  <Target Name="BuildFirstPartyHksNative" BeforeTargets="Build" Condition="'$(OS)' == 'Windows_NT'">
+    <Exec Command="node &quot;$(MSBuildProjectDirectory)\..\..\scripts\build-first-party-hksc-native.mjs&quot; --output &quot;$(OutputPath)&quot;" />
+  </Target>
+
+  <Target Name="PublishFirstPartyHksNative" AfterTargets="Publish" Condition="'$(OS)' == 'Windows_NT'">
+    <Exec Command="node &quot;$(MSBuildProjectDirectory)\..\..\scripts\build-first-party-hksc-native.mjs&quot; --output &quot;$(PublishDir)&quot;" />
+  </Target>
 </Project>

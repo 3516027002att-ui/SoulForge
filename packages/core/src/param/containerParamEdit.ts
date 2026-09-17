@@ -10,7 +10,7 @@ import { createHash } from 'node:crypto';
 import { mkdir, mkdtemp, readdir, readFile, rm, stat } from 'node:fs/promises';
 import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import type { Diagnostic, ParamDefDocument, ParamMetadataTrustPolicy } from '@soulforge/shared';
+import type { Diagnostic, ParamDefDocument } from '@soulforge/shared';
 import { createBridgeDaemonScope, runBridge } from '../bridge/runBridge.js';
 import { applyNativeMutation } from '../editing/editorMutationService.js';
 import {
@@ -21,8 +21,8 @@ import { stageBridgeOutput } from '../editing/bridgeStaging.js';
 import type { NativeEditSession } from '../editing/nativeEditSession.js';
 import { applyParamFieldMutation } from './paramFieldMutation.js';
 import { decodeRowFields } from './paramdefLayout.js';
-import { importPinnedSmithboxSdtParamMetadata } from './smithboxParamMetadataSource.js';
 import { matchParamMetadataPackage, resolveParamMetadataRowWidth } from './paramMetadata.js';
+import { loadFirstPartyParamMetadata, type FirstPartyParamMetadataLoadResult } from '../schema/sekiro/firstPartySchema.js';
 
 export interface ParamRowSlot {
   rowIndex: number;
@@ -126,7 +126,7 @@ interface ContainerEntry {
   contentHash: string;
 }
 
-let metadataCache: Awaited<ReturnType<typeof importPinnedSmithboxSdtParamMetadata>> | null = null;
+let metadataCache: FirstPartyParamMetadataLoadResult | null = null;
 
 /**
  * Remove one PARAM read handoff directory without ever accepting an arbitrary
@@ -299,66 +299,108 @@ export async function readParamFields(input: {
   }
   const entries = await listParamEntries(input.edit, container.path);
   if (!entries.ok) return { ok: false, error: entries.error, diagnostics: entries.diagnostics };
+  // Resolve aliases before loading anything, then merge requests that point
+  // at the same physical child.  A single canonical entry read is enough for
+  // multiple Agent/CLI queries and avoids repeated BND extraction and Bridge
+  // parsing while preserving each query's own rowIndex/field projection.
+  const groupedQueries = new Map<string, {
+    table: string;
+    rowIds: Set<number>;
+    queries: ParamFieldReadQuery[];
+  }>();
   for (const query of input.queries) {
-    const loaded = await loadTableRows(input.edit, container.path, entries.entries, query.table, query.rowIds, true);
+    const entry = findTableEntry(entries.entries, query.table);
+    if (!entry) {
+      return {
+        ok: false,
+        error: {
+          code: 'PARAM_TABLE_NOT_FOUND',
+          message: `容器内没有表 ${query.table}。`,
+          details: { available: entries.entries.map((item) => basename(item.name.replace(/\\/g, '/'))) }
+        },
+        diagnostics
+      };
+    }
+    const canonicalKey = `${entry.index}:${normalizeTableToken(entry.name)}`;
+    const group = groupedQueries.get(canonicalKey) ?? {
+      table: entry.name,
+      rowIds: new Set<number>(),
+      queries: []
+    };
+    for (const rowId of query.rowIds) group.rowIds.add(rowId);
+    group.queries.push(query);
+    groupedQueries.set(canonicalKey, group);
+  }
+
+  for (const group of groupedQueries.values()) {
+    const loaded = await loadTableRows(
+      input.edit,
+      container.path,
+      entries.entries,
+      group.table,
+      [...group.rowIds],
+      true
+    );
     if (!loaded.ok) return { ok: false, error: loaded.error, diagnostics: [...diagnostics, ...loaded.diagnostics] };
     diagnostics.push(...loaded.diagnostics);
-    for (const rowId of query.rowIds) {
-      const candidateSlots = loaded.slotsById.get(rowId);
-      if (!candidateSlots || candidateSlots.length === 0) {
-        missingRows.push({ table: loaded.tableName, rowId });
-        continue;
-      }
-      const targetSlots = query.rowIndex !== undefined
-        ? candidateSlots.filter((s) => s.rowIndex === query.rowIndex)
-        : candidateSlots;
-      if (targetSlots.length === 0) {
-        missingRows.push({ table: loaded.tableName, rowId });
-        continue;
-      }
-      for (const row of targetSlots) {
-        let foundAnyField = false;
-        // An empty fieldIds list is an explicit request for the complete
-        // trusted row projection. This lets the agent inspect a richly named
-        // PARAM row before it has to guess a field id, while the writer still
-        // requires explicit field ids for mutations.
-        const requestedFieldIds = query.fieldIds.length > 0
-          ? query.fieldIds
-          : loaded.definition.fields.map((field) => field.id);
-        for (const fieldId of requestedFieldIds) {
-          const field = loaded.definition.fields.find((item) => item.id === fieldId);
-          if (!field) {
-            diagnostics.push({
-              severity: 'warning',
-              code: 'PARAM_FIELD_NOT_FOUND',
-              message: `${query.table}.${fieldId} 不在授信定义里。`
-            });
-            continue;
-          }
-          foundAnyField = true;
-          fields.push({
-            table: loaded.tableName,
-            rowId,
-            rowIndex: row.rowIndex,
-            dataHash: row.dataHash,
-            entryName: loaded.entry.name,
-            entryIndex: loaded.entry.index,
-            ...(row.name ? { rowName: row.name } : {}),
-            fieldId,
-            ...(field.name && field.name !== fieldId ? { displayName: field.name } : {}),
-            ...(field.description ? { description: field.description } : {}),
-            ...(field.refs ? { refs: field.refs } : {}),
-            sourceHash: loaded.sourceHash,
-            ...(sourceRevision !== undefined ? { sourceRevision } : {}),
-            value: readFieldValue(row.dataBase64, loaded.definition, fieldId)
-          });
+    for (const query of group.queries) {
+      for (const rowId of query.rowIds) {
+        const candidateSlots = loaded.slotsById.get(rowId);
+        if (!candidateSlots || candidateSlots.length === 0) {
+          missingRows.push({ table: loaded.tableName, rowId });
+          continue;
         }
-        if (!foundAnyField && requestedFieldIds.length > 0) {
-          return {
-            ok: false,
-            error: { code: 'PARAM_FIELD_NOT_FOUND', message: `${query.table} 请求的字段均不在授信定义里（${requestedFieldIds.join(', ')}）。` },
-            diagnostics
-          };
+        const targetSlots = query.rowIndex !== undefined
+          ? candidateSlots.filter((s) => s.rowIndex === query.rowIndex)
+          : candidateSlots;
+        if (targetSlots.length === 0) {
+          missingRows.push({ table: loaded.tableName, rowId });
+          continue;
+        }
+        for (const row of targetSlots) {
+          let foundAnyField = false;
+          // An empty fieldIds list is an explicit request for the complete
+          // trusted row projection. This lets the agent inspect a richly named
+          // PARAM row before it has to guess a field id, while the writer still
+          // requires explicit field ids for mutations.
+          const requestedFieldIds = query.fieldIds.length > 0
+            ? query.fieldIds
+            : loaded.definition.fields.map((field) => field.id);
+          for (const fieldId of requestedFieldIds) {
+            const field = loaded.definition.fields.find((item) => item.id === fieldId);
+            if (!field) {
+              diagnostics.push({
+                severity: 'warning',
+                code: 'PARAM_FIELD_NOT_FOUND',
+                message: `${query.table}.${fieldId} 不在授信定义里。`
+              });
+              continue;
+            }
+            foundAnyField = true;
+            fields.push({
+              table: loaded.tableName,
+              rowId,
+              rowIndex: row.rowIndex,
+              dataHash: row.dataHash,
+              entryName: loaded.entry.name,
+              entryIndex: loaded.entry.index,
+              ...(row.name ? { rowName: row.name } : {}),
+              fieldId,
+              ...(field.name && field.name !== fieldId ? { displayName: field.name } : {}),
+              ...(field.description ? { description: field.description } : {}),
+              ...(field.refs ? { refs: field.refs } : {}),
+              sourceHash: loaded.sourceHash,
+              ...(sourceRevision !== undefined ? { sourceRevision } : {}),
+              value: readFieldValue(row.dataBase64, loaded.definition, fieldId)
+            });
+          }
+          if (!foundAnyField && requestedFieldIds.length > 0) {
+            return {
+              ok: false,
+              error: { code: 'PARAM_FIELD_NOT_FOUND', message: `${query.table} 请求的字段均不在授信定义里（${requestedFieldIds.join(', ')}）。` },
+              diagnostics
+            };
+          }
         }
       }
     }
@@ -1113,48 +1155,27 @@ async function loadTrustedDefinition(
   dataVersion: number | undefined,
   game: string
 ): Promise<{ ok: true; document: ParamDefDocument } | { ok: false; error: ParamEditFailure }> {
-  if (!metadataCache) {
-    const local = process.env.LOCALAPPDATA;
-    if (!local) {
-      return {
-        ok: false,
-        error: { code: 'PARAM_METADATA_NO_LOCALAPPDATA', message: '无法定位 LOCALAPPDATA，未加载 PARAM 字段定义。' }
-      };
-    }
-    metadataCache = await importPinnedSmithboxSdtParamMetadata({
-      cacheRoot: join(local, 'SoulForge', 'tools', 'smithbox', '2.2.4')
-    });
-  }
+  if (!metadataCache) metadataCache = loadFirstPartyParamMetadata();
   if (!metadataCache.ok) {
     const first = metadataCache.diagnostics[0];
     return {
       ok: false,
       error: {
-        code: first?.code ?? 'PARAM_METADATA_IMPORT_REJECTED',
-        message: first?.message ?? 'PARAM 字段定义导入被拒绝。'
+        code: first?.code ?? 'PARAM_FIRST_PARTY_SCHEMA_UNAVAILABLE',
+        message: first?.message ?? 'SoulForge 内置 PARAM schema 不可用。'
       }
     };
   }
   const metadata = metadataCache.package;
-  // Import already pins archive, source tree, license and immutable revision.
-  const trustPolicy: ParamMetadataTrustPolicy = {
-    schemaVersion: 1, policyId: 'smithbox-sdt-2.2.4.container-param',
-    trustedPackages: [{
-      packageId: metadata.packageId, packageVersion: metadata.packageVersion,
-      packageDigest: metadata.packageDigest, sourceIdentity: metadata.source.identity,
-      sourceRevision: metadata.source.revision, sourceContentDigest: metadata.source.contentDigest,
-      licenseSpdxExpression: metadata.license.spdxExpression, licenseTextDigest: metadata.license.textDigest
-    }]
-  };
   const descriptor = { game, gameBuild: '1.6', typeName, dataVersion: dataVersion ?? -1 };
-  const width = rowDataSize ?? resolveParamMetadataRowWidth(metadata, descriptor, trustPolicy);
+  const width = rowDataSize ?? resolveParamMetadataRowWidth(metadata, descriptor);
   if (width === undefined) {
     return {
       ok: false,
       error: { code: 'PARAM_METADATA_TYPE_NOT_FOUND', message: `元数据包里没有唯一匹配类型 ${typeName} 和版本 ${dataVersion} 的定义。` }
     };
   }
-  const matched = matchParamMetadataPackage(metadata, { ...descriptor, rowDataSize: width }, trustPolicy);
+  const matched = matchParamMetadataPackage(metadata, { ...descriptor, rowDataSize: width }, undefined);
   if (!matched.ok) {
     return {
       ok: false,
@@ -1164,7 +1185,7 @@ async function loadTrustedDefinition(
       }
     };
   }
-  return { ok: true, document: { ...matched.definition.document, origin: 'imported' } };
+  return { ok: true, document: { ...matched.definition.document, origin: 'first-party' } };
 }
 
 async function findParamBnd(root: string): Promise<string[]> {

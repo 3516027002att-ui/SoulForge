@@ -20,7 +20,6 @@ import type {
   MsgExport,
   ParamDefDocument,
   ParamMetadataPackage,
-  ParamMetadataTrustPolicy,
   ParamExport,
   ParamFieldSymbol,
   ParamRowSymbol,
@@ -30,7 +29,7 @@ import { runBridge } from '../bridge/runBridge.js';
 import { readParamDocumentViaBridge } from '../editing/paramBridgeCommit.js';
 import { decodeRowFields } from '../param/paramdefLayout.js';
 import { matchParamMetadataPackage, resolveParamMetadataRowWidth } from '../param/paramMetadata.js';
-import { importPinnedSmithboxSdtParamMetadata } from '../param/smithboxParamMetadataSource.js';
+import { loadFirstPartyParamMetadata } from '../schema/sekiro/firstPartySchema.js';
 import { mapExportFromMsbDocument } from './ingestBridgeResult.js';
 import { WorkspaceIndex } from './workspaceIndex.js';
 
@@ -655,6 +654,7 @@ async function readMsgExports(
           uri: `${file.sourceUri}#${category}/${textId}`,
           sourceUri: file.sourceUri,
           category,
+          entryIndex: index,
           textId,
           text: stringValue(record.text),
           confidence: 'high' as const,
@@ -757,22 +757,12 @@ async function materializeNativeEntry(
 
 async function loadParamMetadata(): Promise<ParamMetadataCache> {
   if (paramMetadataCache) return paramMetadataCache;
-  const local = process.env.LOCALAPPDATA;
-  if (!local) {
-    paramMetadataCache = {
-      ok: false,
-      diagnostics: [{ severity: 'error', code: 'PARAM_METADATA_NO_LOCALAPPDATA', message: '无法定位 LOCALAPPDATA。' }]
-    };
-    return paramMetadataCache;
-  }
-  const imported = await importPinnedSmithboxSdtParamMetadata({
-    cacheRoot: join(local, 'SoulForge', 'tools', 'smithbox', '2.2.4')
-  });
-  paramMetadataCache = imported.ok
-    ? { ok: true, package: imported.package, diagnostics: [] }
+  const loaded = loadFirstPartyParamMetadata();
+  paramMetadataCache = loaded.ok
+    ? { ok: true, package: loaded.package, diagnostics: [] }
     : {
         ok: false,
-        diagnostics: imported.diagnostics.map((diagnostic) => ({
+        diagnostics: loaded.diagnostics.map((diagnostic) => ({
           severity: diagnostic.severity,
           code: diagnostic.code,
           message: diagnostic.message
@@ -781,31 +771,13 @@ async function loadParamMetadata(): Promise<ParamMetadataCache> {
   return paramMetadataCache;
 }
 
-function paramMetadataTrustPolicy(metadata: ParamMetadataPackage): ParamMetadataTrustPolicy {
-  return {
-    schemaVersion: 1,
-    policyId: 'smithbox-sdt-2.2.4.native-semantic-refresh',
-    trustedPackages: [{
-      packageId: metadata.packageId,
-      packageVersion: metadata.packageVersion,
-      packageDigest: metadata.packageDigest,
-      sourceIdentity: metadata.source.identity,
-      sourceRevision: metadata.source.revision,
-      sourceContentDigest: metadata.source.contentDigest,
-      licenseSpdxExpression: metadata.license.spdxExpression,
-      licenseTextDigest: metadata.license.textDigest
-    }]
-  };
-}
-
 function resolveTrustedParamRowWidth(
   metadata: ParamMetadataPackage,
   header: { typeName: string; dataVersion: number }
 ): number | undefined {
   return resolveParamMetadataRowWidth(
     metadata,
-    { game: 'sekiro', gameBuild: '1.6', typeName: header.typeName, dataVersion: header.dataVersion },
-    paramMetadataTrustPolicy(metadata)
+    { game: 'sekiro', gameBuild: '1.6', typeName: header.typeName, dataVersion: header.dataVersion }
   );
 }
 
@@ -822,7 +794,7 @@ function resolveTrustedParamDefinition(
       dataVersion: input.dataVersion,
       rowDataSize: input.rowDataSize
     },
-    paramMetadataTrustPolicy(metadata)
+    undefined
   );
   return matched.ok ? matched.definition.document : undefined;
 }

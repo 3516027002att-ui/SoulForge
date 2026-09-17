@@ -23,6 +23,7 @@ function main(): void {
   const ipc = readFileSync(resolve(root, 'apps/desktop/src/main/ipc/event.ts'), 'utf8');
   const preload = readFileSync(resolve(root, 'apps/desktop/src/preload/index.ts'), 'utf8');
   const commit = readFileSync(resolve(root, 'packages/core/src/editing/emevdBridgeCommit.ts'), 'utf8');
+  const emevdEdit = readFileSync(resolve(root, 'packages/core/src/editing/emevdEdit.ts'), 'utf8');
 
   // 硬约束 18：完整 EMEVD 文档必须只存在于 main 的私有缓存里。
   if (!ipc.includes('emevdFullDocuments')) {
@@ -39,8 +40,8 @@ function main(): void {
   // 硬约束 17：DSL 模板必须有界渲染，并把截断状态上报给 renderer。
   // R3/P4 裁定（2026-08-14）：production 反汇编入口改为 DarkScript3 式；旧 hash DSL
   // 渲染（renderEmevdPatchDslBounded）已从 ipc.ts 移除，底层 dslCompiler/typed 写链
-  // 保留。没 EMEDF 必须失败关闭（EMEDF_MISSING + dslTemplate null），不能再发 hash
-  // 伪源码。
+  // 保留。当前生产入口使用 SoulForge 内置 first-party EMEDF；只有 schema 覆盖缺口
+  // 才能失败关闭，不能发伪源码或安装第三方编辑器的提示。
   //
   // 反汇编入口另外钉住「分片异步」：同步入口那 75 ms 会让主进程事件循环整段停摆，
   // 取消信号只能排队，于是快速切换时旧请求取消不掉。两条断言分开写是必要的 ——
@@ -58,8 +59,14 @@ function main(): void {
   if (ipc.includes('renderEmevdDarkScriptBounded')) {
     throw new Error('production 入口不得残留同步有界反汇编调用（会重新引入 75 ms 停摆）。');
   }
-  if (!ipc.includes('EMEDF_MISSING')) {
-    throw new Error('main 在未找到用户本机 EMEDF 时必须失败关闭（EMEDF_MISSING 诊断）。');
+  if (!ipc.includes("origin === 'first-party'")) {
+    throw new Error('main 必须显式校验并使用 SoulForge 内置 first-party EMEVD schema。');
+  }
+  if (!emevdEdit.includes('EMEDF_SCHEMA_COVERAGE_GAP')) {
+    throw new Error('main 必须为未知指令或长度变体返回 schema coverage gap 诊断。');
+  }
+  if (ipc.includes('SOULFORGE_EMEDF_PATH') || ipc.includes('DarkScript3 安装') || ipc.includes('设置环境变量')) {
+    throw new Error('production EMEVD IPC 不得要求用户安装或配置第三方 EMEDF。');
   }
   if (!ipc.includes('sourceStyle')) {
     throw new Error('main 必须上报源码形态 sourceStyle（dark-script/patch-dsl/none）。');
@@ -77,7 +84,7 @@ function main(): void {
 
   console.log(JSON.stringify({
     ok: true,
-    message: 'EMEVD 实现级契约验证通过（main 文档权威 + 有界模板上报 + Bridge 命令名）',
+    message: 'EMEVD 实现级契约验证通过（first-party schema + main 文档权威 + 有界模板上报 + Bridge 命令名）',
     mainDocumentAuthority: 'emevdFullDocuments（renderer 不可达）',
     boundedTemplate: ['dslTemplateTruncated', 'dslTemplateTotalLines', 'loadFullDslTemplate'],
     bridgeCommands: ['write-emevd'],

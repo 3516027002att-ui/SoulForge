@@ -1,61 +1,106 @@
 /**
- * EMEDF registry resolution: try external DarkScript3 EMEDF JSON first,
- * fall back to the built-in fixture.
+ * Resolve the production EMEVD semantic registry.
  *
- * SoulForge does NOT bundle EMEDF data. The external file is read from
- * a user-provided path (e.g. their DarkScript3 installation).
+ * Production deliberately has one source of schema truth: the versioned,
+ * content-addressed SoulForge first-party package. The optional argument is
+ * retained only as a compatibility boundary for old callers; it is rejected
+ * with a structured diagnostic and is never read from disk.
+ *
+ * The C# Bridge remains the authority for native EMEVD bytes. This registry
+ * only supplies the semantic instruction/argument vocabulary used by the
+ * TypeScript projection and typed mutation layers.
  */
 
-import { readFileSync } from 'node:fs';
 import { createSekiroFixtureEmedf, type EmedfRegistry } from './emedfSchema.js';
-import { parseDs3EmedfJson } from './emedfExternalAdapter.js';
+import {
+  loadFirstPartyEmedfRegistry,
+  type FirstPartySchemaDiagnostic
+} from '../schema/sekiro/firstPartySchema.js';
+
+export interface EmedfResolutionDiagnostic {
+  severity: 'error' | 'warning' | 'info';
+  code: string;
+  message: string;
+  details?: unknown;
+}
+
+export const EMEVD_EXTERNAL_SCHEMA_FORBIDDEN_CODE = 'EMEVD_EXTERNAL_SCHEMA_FORBIDDEN';
+
+export type ProductionEmedfOrigin = 'first-party' | 'fixture';
 
 export interface EmedfResolutionResult {
   registry: EmedfRegistry;
-  origin: 'fixture' | 'imported';
-  /** Present when origin is 'imported'. */
-  instructionCount?: number;
-  bankCount?: number;
-  /** Present when an external path was attempted but failed. */
+  origin: ProductionEmedfOrigin;
+  instructionCount: number;
+  bankCount: number;
+  packageId?: string;
+  packageVersion?: string;
+  contentDigest?: `sha256:${string}`;
+  diagnostics: EmedfResolutionDiagnostic[];
+  /** True when a legacy external schema argument was explicitly rejected. */
+  externalSchemaRejected?: boolean;
+  /** Compatibility alias for older diagnostics consumers. */
   fallbackReason?: string;
 }
 
+function diagnosticFromFirstParty(item: FirstPartySchemaDiagnostic): EmedfResolutionDiagnostic {
+  return {
+    severity: item.severity,
+    code: item.code,
+    message: item.message
+  };
+}
+
+function describeRegistry(
+  registry: EmedfRegistry,
+  diagnostics: EmedfResolutionDiagnostic[] = [],
+  options: Pick<EmedfResolutionResult, 'externalSchemaRejected' | 'fallbackReason'> = {}
+): EmedfResolutionResult {
+  const bankCount = registry.banks?.length
+    ?? new Set(registry.instructions.map((instruction) => instruction.bank)).size;
+  return {
+    registry,
+    origin: registry.origin as ProductionEmedfOrigin,
+    instructionCount: registry.instructions.length,
+    bankCount,
+    ...(registry.packageId !== undefined ? { packageId: registry.packageId } : {}),
+    ...(registry.packageVersion !== undefined ? { packageVersion: registry.packageVersion } : {}),
+    ...(registry.contentDigest !== undefined ? { contentDigest: registry.contentDigest } : {}),
+    diagnostics,
+    ...(options.externalSchemaRejected !== undefined
+      ? { externalSchemaRejected: options.externalSchemaRejected }
+      : {}),
+    ...(options.fallbackReason !== undefined ? { fallbackReason: options.fallbackReason } : {})
+  };
+}
+
 /**
- * Resolve the EMEDF registry for EMEVD editing.
- *
- * @param externalPath Optional absolute path to a DarkScript3-format
- *   `sekiro-common.emedf.json`. When provided and readable, the imported
- *   registry is used. Otherwise the built-in fixture is returned.
+ * Return the built-in SoulForge registry. `externalPath` is intentionally a
+ * rejection-only compatibility input; production never scans or reads it.
  */
 export function resolveEmevdRegistry(externalPath?: string | null): EmedfResolutionResult {
-  if (externalPath) {
-    try {
-      const text = readFileSync(externalPath, 'utf-8');
-      const result = parseDs3EmedfJson(text);
-      if (result.ok) {
-        return {
-          registry: result.registry,
-          origin: 'imported',
-          instructionCount: result.instructionCount,
-          bankCount: result.bankCount,
-        };
-      }
-      return {
-        registry: createSekiroFixtureEmedf(),
-        origin: 'fixture',
-        fallbackReason: `EMEDF 导入失败：${result.message}`,
-      };
-    } catch {
-      return {
-        registry: createSekiroFixtureEmedf(),
-        origin: 'fixture',
-        fallbackReason: `无法读取 EMEDF 文件：${externalPath}`,
-      };
-    }
+  const loaded = loadFirstPartyEmedfRegistry();
+  if (!loaded.ok || loaded.registry === null) {
+    const diagnostics = loaded.diagnostics.map(diagnosticFromFirstParty);
+    const fixture = createSekiroFixtureEmedf();
+    return describeRegistry(fixture, diagnostics, {
+      fallbackReason: diagnostics[0]?.message ?? '内置 EMEVD schema 不可用。'
+    });
   }
 
-  return {
-    registry: createSekiroFixtureEmedf(),
-    origin: 'fixture',
-  };
+  // Presence of the legacy argument itself is enough to reject the old
+  // contract, including an empty string. Only an omitted/null argument means
+  // "use the production default".
+  const externalRequested = externalPath !== undefined && externalPath !== null;
+  const diagnostics: EmedfResolutionDiagnostic[] = externalRequested
+    ? [{
+        severity: 'error',
+        code: EMEVD_EXTERNAL_SCHEMA_FORBIDDEN_CODE,
+        message: '生产 EMEVD 链仅使用 SoulForge 内置 first-party schema，不接受外部 EMEDF 文件。',
+        details: { suppliedPath: '[redacted]' }
+      }]
+    : [];
+  return describeRegistry(loaded.registry, diagnostics, externalRequested
+    ? { externalSchemaRejected: true }
+    : {});
 }

@@ -6,7 +6,7 @@ import {
   importPinnedSmithboxSdtParamMetadata,
   importSmithboxSdtParamMetadata,
   type SmithboxSdtSourcePolicy
-} from '../param/smithboxParamMetadataSource.js';
+} from './smithboxParamMetadataSource.js';
 
 const scratch = await mkdtemp(join(tmpdir(), 'soulforge-smithbox-source-'));
 try {

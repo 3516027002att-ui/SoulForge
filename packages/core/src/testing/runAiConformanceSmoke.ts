@@ -4441,28 +4441,11 @@ async function main(): Promise<void> {
         )
       })
     });
-    let finalized = 0;
-    let released = 0;
-    const taskRecord = {
-      read: async () => ({ path: '', entries: [], updatedAt: null }),
-      beforeSearch: async () => ({ ok: true as const }),
-      recordSearch: async ({ toolName, query }: { toolName: string; query: string }) => ({ searchId: 'unused', toolName, query }),
-      update: async () => ({ path: '', entries: [], updatedAt: null }),
-      recordNativeParamRead: async () => ({ path: '', entries: [], updatedAt: null }),
-      assertMutationTarget: async () => ({ ok: true as const, reservationId: `reservation-${finalized + released}` }),
-      finalizeMutation: async () => { finalized += 1; },
-      releaseMutationReservation: async () => { released += 1; },
-      releaseMutationCount: async () => ({
-        ok: true as const,
-        released: 0,
-        snapshot: { path: '', entries: [], updatedAt: null }
-      })
-    };
+    // T12: the manual ledger reservation is gone; the committed lifecycle
+    // must survive refresh/native verification failures on its own.
     const context: ToolContext = {
       workspaceIndex: null,
       mode: 'fullPermission',
-      taskRecord,
-      requireTaskRecord: true,
       onNativeWriteCommitted: async () => { throw new Error('fixture refresh failed'); }
     };
     const committed = await registry.run('mutate_param_fields', {}, context);
@@ -4471,10 +4454,8 @@ async function main(): Promise<void> {
     }
     const committedData = committed.data as { lifecycle?: { transaction?: string; knowledgeRefresh?: string } };
     if (committedData.lifecycle?.transaction !== 'committed'
-      || committedData.lifecycle.knowledgeRefresh !== 'failed'
-      || finalized !== 1
-      || released !== 0) {
-      throw new Error(`Case 65: committed reservation/lifecycle mismatch ${JSON.stringify({ committedData, finalized, released })}`);
+      || committedData.lifecycle.knowledgeRefresh !== 'failed') {
+      throw new Error(`Case 65: committed lifecycle mismatch ${JSON.stringify({ committedData })}`);
     }
 
     const bridge = createAgentToolBridge({ registry, context });
@@ -4491,10 +4472,8 @@ async function main(): Promise<void> {
     if (!verificationFailed.ok
       || envelope.state !== 'verification_failed'
       || envelope.data?.record?.lifecycle?.transaction !== 'committed'
-      || envelope.data.record.lifecycle.nativeVerification?.status !== 'failed'
-      || Number(finalized) !== 2
-      || released !== 0) {
-      throw new Error(`Case 65: bridge lost post-commit failure state ${JSON.stringify({ verificationFailed, envelope, finalized, released })}`);
+      || envelope.data.record.lifecycle.nativeVerification?.status !== 'failed') {
+      throw new Error(`Case 65: bridge lost post-commit failure state ${JSON.stringify({ verificationFailed, envelope })}`);
     }
     passed++;
   }

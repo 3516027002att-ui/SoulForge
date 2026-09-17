@@ -8,13 +8,13 @@
  *
  * 1. SSR 结构：未识别形态时是单 Source 骨架（无 Container/Metadata 栏、
  *    不造四栏 Tools 空栏）。未选中条目时 Source 栏是显式 muted 空态而不是错误；
- * 2. Negative source：解码/判定/反编译/childUri 构造全在 main 侧（renderer
- *    文本面不自解编码、不拼内层地址、不调反编译器）；反编译失败只给结构化
- *    原因，绝不显示 fake hex、不把字节码呈现为可编辑源码；写回统一走
+ * 2. Negative source：解码/判定/反编译/childUri 构造全在 main/Bridge 侧（renderer
+ *    文本面不自解编码、不拼内层地址、不调外部反编译器）；coverage 失败只给结构化
+ *    原因，绝不显示 fake hex、不把字节码伪装成源码；当前 HKS 文本写回统一走
  *    readScriptSource/saveScriptSource（renderer 不直接碰 replaceContainerChild）。
  *
  * 真实 live 链路（Bridge → ipc → readScriptSource → classifyPlaintextBytes /
- * 本机 DSLuaDecompiler）由 e2e 与 core 验证覆盖，本文件只钉 renderer 展示与
+ * SoulForge HKS Bridge）由 e2e 与 core 验证覆盖，本文件只钉 renderer 展示与
  * 接线约束。
  */
 import assert from 'node:assert/strict';
@@ -70,14 +70,13 @@ describe('Negative source tests（S16 契约）', () => {
   );
 
   it('解码/判定/反编译全在 main 侧：renderer 不自解编码、不扫字节、不调反编译器', () => {
-    // 明文解码、字节判定、DSLuaDecompiler spawn 都在 main（core plaintextScriptEntry
-    // / dsLuaDecompilerLocator + ipc.runDsLuaDecompilerCapture）。renderer 出现解码/
+    // 明文解码、字节判定、SoulForge HKS Bridge 都在 main。renderer 出现解码/
     // 判定/反编译**调用**（带左括号）就是回到了「渲染器二次解析」；注释里提及
     // 函数名只是职责说明，不构成调用，不在负向断言范围。
     assert.doesNotMatch(panelSource, /TextDecoder\(/);
     assert.doesNotMatch(panelSource, /decodePlaintext\(/);
     assert.doesNotMatch(panelSource, /classifyPlaintextBytes\(/);
-    assert.doesNotMatch(panelSource, /locateDsLuaDecompilerSync\(/);
+    assert.doesNotMatch(panelSource, /DSLuaDecompiler|locateDsLuaDecompilerSync/);
     // 但必须消费 main 给出的真实来源与结果（否则「反编译在 main」在 UI 上无出口）。
     assert.match(panelSource, /readScriptSource\(/);
     assert.match(panelSource, /\.kind === 'decompiled'/);
@@ -101,12 +100,13 @@ describe('Negative source tests（S16 契约）', () => {
     assert.match(panelSource, /source\.kind === 'failure'/);
   });
 
-  it('反编译失败只给结构化原因，绝不显示 fake hex / 不把字节码伪装成可编辑源码', () => {
-    // S16 删掉了 HexEditorPanel 与「编译产物，非明文源码」假视图。
+  it('coverage 失败只给结构化原因，绝不显示 fake hex / 不把字节码伪装成源码', () => {
+    // S16 删掉了 HexEditorPanel 与「编译产物，非明文源码」假视图；当前
+    // Sekiro HKS 成功反编译后由同一编辑器提供源码写回。
     assert.doesNotMatch(panelSource, /HexEditorPanel/);
     assert.doesNotMatch(panelSource, /编译产物，非明文源码/);
-    assert.match(panelSource, /不把字节码呈现为可编辑源码/);
-    assert.match(panelSource, /不伪造反编译结果/);
+    assert.match(panelSource, /coverage/);
+    assert.match(panelSource, /结构化诊断/);
   });
 
   it('写回统一走 saveScriptSource（renderer 不直接调 replaceContainerChild）', () => {

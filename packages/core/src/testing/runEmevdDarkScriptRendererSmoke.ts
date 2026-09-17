@@ -11,7 +11,7 @@
  * instruction names → PascalCase, arg names → camelCase) are exercised.
  */
 import { createEmevdEditorDocument } from '../editing/emevdFourViewController.js';
-import { parseDs3EmedfJson } from '../emevd/emedfExternalAdapter.js';
+import { parseDs3EmedfJson } from './emedfExternalAdapter.js';
 import type { EmedfRegistry } from '../emevd/emedfSchema.js';
 import {
   renderEmevdDarkScript,

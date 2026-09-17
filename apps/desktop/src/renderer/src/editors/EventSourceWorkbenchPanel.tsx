@@ -156,9 +156,9 @@ export interface EventSourceTabData {
   dslTemplateTotalLines: number;
   /**
    * 源码形态（R3/P4 裁定）：
-   * - 'dark-script'：EMEDF 反汇编的 DarkScript3 式源码，可编辑（S14）；
+   * - 'dark-script'：SoulForge 内置 EMEVD schema 反汇编的源码，可编辑（S14）；
    * - 'patch-dsl'：旧 hash DSL（历史路径）；
-   * - 'none'：EMEDF 缺失失败关闭（不提供伪解码）。
+   * - 'none'：内置 schema 不可用时失败关闭（不提供伪解码）。
    */
   sourceStyle?: 'dark-script' | 'patch-dsl' | 'none' | undefined;
   /**
@@ -240,17 +240,13 @@ function renderSource(document: EmevdEditorDocument): string {
   return lines.join('\n').trimEnd();
 }
 
-/**
- * R3/P4 裁定：没 EMEDF 必须失败关闭，不能再用 hash 伪源码冒充已解码。
- * 事件工作台在拿不到用户本机 EMEDF 时只显示这一句可行动说明，不渲染任何
- * `instruction @i:hash` / `event @e:` 伪源码。
- */
-const EMEDF_MISSING_SOURCE = [
-  '// 事件源码反汇编已失败关闭：未找到用户本机 EMEDF。',
-  '// 需要 DarkScript3 安装里的 sekiro-common.emedf.json：',
-  '//   1) 设置环境变量 SOULFORGE_EMEDF_PATH 指向该文件；或',
-  '//   2) 把文件放到游戏根旁 tools/<工具目录>/Resources/sekiro-common.emedf.json。',
-  '// 反汇编只消费 EMEDF 公开语法，数据留在本机，不会打进仓库。'
+/** Unknown instructions and length variants remain opaque instead of being
+ * rendered as guessed source. The exact bank/id/length is available in the
+ * structured Problems diagnostics. */
+const EMEDF_SCHEMA_COVERAGE_GAP_SOURCE = [
+  '// SoulForge 内置 EMEVD schema 对当前指令存在覆盖缺口。',
+  '// 未知指令或长度变体保持原始字节只读；未生成伪源码。',
+  '// 请查看事件诊断中的 bank/id 与参数长度信息。'
 ].join('\n');
 
 /**
@@ -287,8 +283,8 @@ export function baselineText(tab: EventSourceTabData): string {
   if (tab.sourceToken && tab.sourcePrefix !== undefined && tab.sourcePrefix !== null) {
     return tab.sourcePrefix;
   }
-  // live 但 dslTemplate 缺失 = EMEDF 缺失（主进程失败关闭，不给伪源码）。
-  if (tab.live && tab.dslTemplate === null) return EMEDF_MISSING_SOURCE;
+  // live 但 dslTemplate 缺失 = 内置 schema coverage gap 或 schema failure。
+  if (tab.live && tab.dslTemplate === null) return EMEDF_SCHEMA_COVERAGE_GAP_SOURCE;
   // S15：读取失败（非 live 且无模板）→ 可行动失败句，禁止假 resource 源码。
   if (!tab.live && tab.dslTemplate === null) {
     return readFailureSource(tab.document) ?? renderSource(tab.document);

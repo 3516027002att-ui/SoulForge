@@ -12,9 +12,9 @@ import {
   parseDs3EmedfJson,
   importDs3EmedfFile,
   type EmedfImportResult,
-} from '../emevd/emedfExternalAdapter.js';
-import { resolveEmevdRegistry } from '../emevd/emedfRegistryResolver.js';
+} from './emedfExternalAdapter.js';
 import {
+  createSekiroFixtureEmedf,
   validateEmedfRegistry,
   encodedEmedfArgsLength,
   hasVararg,
@@ -202,16 +202,13 @@ function syntheticChecks(): void {
   const badVarargResult = parseDs3EmedfJson(badVararg);
   assert(!badVarargResult.ok, 'vararg not last must fail');
 
-  // Registry resolver: no path → fixture
-  const fixtureResolution = resolveEmevdRegistry(null);
-  assert(fixtureResolution.origin === 'fixture', 'null path must resolve to fixture');
-  assert(fixtureResolution.registry.origin === 'fixture', 'fixture registry origin');
-  assert(fixtureResolution.fallbackReason === undefined, 'no fallback reason for null path');
-
-  // Registry resolver: nonexistent path → fixture with reason
-  const badPathResolution = resolveEmevdRegistry('/nonexistent/path/emedf.json');
-  assert(badPathResolution.origin === 'fixture', 'bad path must fall back to fixture');
-  assert(badPathResolution.fallbackReason !== undefined, 'bad path must have fallback reason');
+  // The production resolver is intentionally not exercised here: this file is
+  // the development/validation boundary for the external adapter. Production
+  // clean-machine behavior is covered by runFirstPartySchemaCleanMachineSmoke.
+  const fixture = createSekiroFixtureEmedf();
+  assert(fixture.origin === 'fixture', 'fixture helper remains explicit and local');
+  const badPathImport = importDs3EmedfFile('/nonexistent/path/emedf.json');
+  assert(!badPathImport.ok && badPathImport.code === 'EMEDF_IMPORT_READ_FAILED', 'external read failure must stay explicit');
 
   console.log(JSON.stringify({ ok: true, message: 'EMEDF external adapter synthetic smoke: ok', cases: 32 }));
 }

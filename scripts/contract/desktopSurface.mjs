@@ -73,6 +73,9 @@ function ensureElectronStubHooks() {
         const lines = ELECTRON_EXPORT_NAMES.map(
           (name) => `export const ${name} = globalThis.__soulforgeElectronStub[${JSON.stringify(name)}];`
         );
+        // electron 在 main bundle 中同时以默认导入和具名导入出现；默认导出
+        // 必须指向同一个受控桩对象，否则 ESM 链接期会在任何契约断言之前失败。
+        lines.push('export default globalThis.__soulforgeElectronStub;');
         return { format: 'module', shortCircuit: true, source: lines.join('\n') };
       }
       return next(url, context);
@@ -140,6 +143,7 @@ function createMainStub(record) {
   return {
     app: {
       isPackaged: false,
+      getVersion: () => '0.9.2',
       getPath: () => userData,
       getAppPath: () => join(repoRoot, 'apps', 'desktop'),
       whenReady: () => Promise.resolve(),

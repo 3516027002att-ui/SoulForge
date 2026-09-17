@@ -11,8 +11,10 @@ import type { Diagnostic, IndexedFile } from '@soulforge/shared';
 import { fingerprintEmedfRegistry } from '../emevd/dslCompiler.js';
 import { decodeInstructionArgs, findInstructionDef, type DecodedArg, type EmedfRegistry } from '../emevd/emedfSchema.js';
 import { renderEmevdDarkScript } from '../emevd/darkScriptRenderer.js';
-import { resolveEmevdRegistry } from '../emevd/emedfRegistryResolver.js';
-import { searchRealEmedf } from '../testing/realEmedfLocator.js';
+import {
+  EMEVD_EXTERNAL_SCHEMA_FORBIDDEN_CODE,
+  resolveEmevdRegistry
+} from '../emevd/emedfRegistryResolver.js';
 import { readFullEmevdDocumentViaBridge, sanitizeResourceUri } from './emevdFullDocument.js';
 import { submitEmevdDslPlanViaFourView } from './emevdFourViewController.js';
 import type { NativeEditSession } from './nativeEditSession.js';
@@ -85,7 +87,16 @@ export interface EmevdEventReadDto {
   resourceKind: 'event';
   registryOrigin: EmedfRegistry['origin'];
   registryFingerprint: string;
-  registry: { origin: EmedfRegistry['origin']; fingerprint: string };
+  registry: {
+    origin: EmedfRegistry['origin'];
+    fingerprint: string;
+    packageId?: string;
+    packageVersion?: string;
+    contentDigest?: `sha256:${string}`;
+  };
+  registryPackageId?: string;
+  registryPackageVersion?: string;
+  registryContentDigest?: `sha256:${string}`;
   format: EmevdEventReadFormat;
   darkScript?: string;
   instructions: EmevdEventInstructionReadDto[];
@@ -171,9 +182,9 @@ export async function searchEmevdInstructionMatches(input: {
     };
   }
   const limit = Math.max(1, Math.min(200, Math.trunc(input.limit ?? 50)));
-  const registry = await loadImportedRegistry(input.edit, undefined);
+  const registry = loadProductionRegistry(input.edit);
   if (!registry.ok) {
-    return { ok: false, query, error: registry.error, diagnostics: [] };
+    return { ok: false, query, error: registry.error, diagnostics: registry.diagnostics };
   }
   const files = [...new Map(
     input.files
@@ -317,9 +328,15 @@ export async function readEmevdEvent(input: {
 
   const resolved = await resolveEmevdFile(input.edit, input.file);
   if (!resolved.ok) return { ok: false, eventId: input.eventId, error: resolved.error, diagnostics: [] };
-  const registry = await loadImportedRegistry(input.edit, undefined);
+  const registry = loadProductionRegistry(input.edit);
   if (!registry.ok) {
-    return { ok: false, filePath: resolved.path, eventId: input.eventId, error: registry.error, diagnostics: [] };
+    return {
+      ok: false,
+      filePath: resolved.path,
+      eventId: input.eventId,
+      error: registry.error,
+      diagnostics: registry.diagnostics
+    };
   }
 
   // Full-document assembly deliberately sanitizes absolute file URIs. Use the
@@ -343,7 +360,7 @@ export async function readEmevdEvent(input: {
       filePath: resolved.path,
       eventId: input.eventId,
       error: { code: 'EMEVD_READ_FAILED', message: '无法读取 EMEVD，拒绝返回事件 DTO。' },
-      diagnostics: asDiagnostics(full.diagnostics)
+      diagnostics: [...registry.diagnostics, ...asDiagnostics(full.diagnostics)]
     };
   }
 
@@ -355,7 +372,7 @@ export async function readEmevdEvent(input: {
       filePath: resolved.path,
       eventId: input.eventId,
       error: { code: 'EMEVD_EVENT_NOT_FOUND', message: `EMEVD 中不存在事件 ${input.eventId}。` },
-      diagnostics: asDiagnostics(full.diagnostics)
+      diagnostics: [...registry.diagnostics, ...asDiagnostics(full.diagnostics)]
     };
   }
 
@@ -429,13 +446,23 @@ export async function readEmevdEvent(input: {
     resourceKind: 'event',
     registryOrigin: registry.registry.origin,
     registryFingerprint: fingerprint,
-    registry: { origin: registry.registry.origin, fingerprint },
+    registry: {
+      origin: registry.registry.origin,
+      fingerprint,
+      ...(registry.registry.packageId ? { packageId: registry.registry.packageId } : {}),
+      ...(registry.registry.packageVersion ? { packageVersion: registry.registry.packageVersion } : {}),
+      ...(registry.registry.contentDigest ? { contentDigest: registry.registry.contentDigest } : {})
+    },
+    ...(registry.registry.packageId ? { registryPackageId: registry.registry.packageId } : {}),
+    ...(registry.registry.packageVersion ? { registryPackageVersion: registry.registry.packageVersion } : {}),
+    ...(registry.registry.contentDigest ? { registryContentDigest: registry.registry.contentDigest } : {}),
     format,
     ...(format === 'darkscript'
       ? { darkScript: renderEmevdDarkScript({ ...full.document, events: [eventForRead] }, registry.registry) }
       : {}),
     instructions,
     diagnostics: [
+      ...registry.diagnostics,
       ...asDiagnostics(full.diagnostics),
       ...(truncated ? [{
         severity: 'warning' as const,
@@ -454,9 +481,9 @@ export async function readEmevdOutline(input: {
 }): Promise<EmevdReadResult> {
   const resolved = await resolveEmevdFile(input.edit, input.file);
   if (!resolved.ok) return { ok: false, error: resolved.error, diagnostics: [] };
-  const registry = await loadImportedRegistry(input.edit, undefined);
+  const registry = loadProductionRegistry(input.edit);
   if (!registry.ok) {
-    return { ok: false, error: registry.error, diagnostics: [] };
+    return { ok: false, error: registry.error, diagnostics: registry.diagnostics };
   }
   const full = await readFullEmevdDocumentViaBridge({
     filePath: resolved.path,
@@ -472,7 +499,7 @@ export async function readEmevdOutline(input: {
     return {
       ok: false,
       error: { code: 'EMEVD_READ_FAILED', message: '无法读取 EMEVD。' },
-      diagnostics: asDiagnostics(full.diagnostics)
+      diagnostics: [...registry.diagnostics, ...asDiagnostics(full.diagnostics)]
     };
   }
   return {
@@ -484,7 +511,7 @@ export async function readEmevdOutline(input: {
       restBehavior: event.restBehavior,
       instructionCount: event.instructions.length
     })),
-    diagnostics: asDiagnostics(full.diagnostics)
+    diagnostics: [...registry.diagnostics, ...asDiagnostics(full.diagnostics)]
   };
 }
 
@@ -493,7 +520,6 @@ export async function applyEmevdDsl(input: {
   file: string;
   dsl: string;
   mode?: 'patch' | 'dark-script';
-  emedfPath?: string;
   /** Canonical event-scoped DarkScript target. */
   scopeEventId?: number;
   /** Short alias accepted by Agent callers. */
@@ -507,6 +533,14 @@ export async function applyEmevdDsl(input: {
   /** False means the supplied DarkScript was only an instruction page. */
   darkScriptComplete?: boolean;
 }): Promise<EmevdApplyResult> {
+  if (hasLegacyExternalSchemaOption(input)) {
+    const message = '生产 EMEVD 链不接受外部 EMEDF schema；请使用 SoulForge 内置 schema。';
+    return {
+      ok: false,
+      error: { code: EMEVD_EXTERNAL_SCHEMA_FORBIDDEN_CODE, message },
+      diagnostics: [{ severity: 'error', code: EMEVD_EXTERNAL_SCHEMA_FORBIDDEN_CODE, message }]
+    };
+  }
   if (input.dsl.trim().length === 0) {
     return { ok: false, error: { code: 'EMEVD_DSL_EMPTY', message: 'DSL 为空。' }, diagnostics: [] };
   }
@@ -552,8 +586,8 @@ export async function applyEmevdDsl(input: {
       diagnostics: []
     };
   }
-  const registry = await loadImportedRegistry(input.edit, input.emedfPath);
-  if (!registry.ok) return { ok: false, error: registry.error, diagnostics: [] };
+  const registry = loadProductionRegistry(input.edit, input);
+  if (!registry.ok) return { ok: false, error: registry.error, diagnostics: registry.diagnostics };
 
   // Full-document assembly deliberately sanitizes absolute file URIs. Use the
   // exact same resource identity for compile/plan matching; sourcePath remains
@@ -573,7 +607,7 @@ export async function applyEmevdDsl(input: {
     return {
       ok: false,
       error: { code: 'EMEVD_READ_FAILED', message: '无法读取 EMEVD，拒绝提交 DSL。' },
-      diagnostics: asDiagnostics(full.diagnostics)
+      diagnostics: [...registry.diagnostics, ...asDiagnostics(full.diagnostics)]
     };
   }
   const currentRevision = await stat(resolved.path).then((value) => value.mtimeMs).catch(() => undefined);
@@ -628,7 +662,7 @@ export async function applyEmevdDsl(input: {
     timeoutMs: 120_000
   });
   if (!result.ok) {
-    const diagnostics = asDiagnostics(result.diagnostics);
+    const diagnostics = [...registry.diagnostics, ...asDiagnostics(result.diagnostics)];
     const resourceMismatch = diagnostics.find((diagnostic) => diagnostic.code === 'EMEVD_DSL_RESOURCE_MISMATCH');
     return {
       ok: false,
@@ -645,7 +679,7 @@ export async function applyEmevdDsl(input: {
     ok: true,
     filePath: resolved.path,
     mutationCount: result.commit?.mutationCount ?? 0,
-    diagnostics: asDiagnostics(result.diagnostics)
+    diagnostics: [...registry.diagnostics, ...asDiagnostics(result.diagnostics)]
   };
 }
 
@@ -666,6 +700,7 @@ function readEventInstruction(
   }
   if (!definition) {
     diagnostics.push({ severity: 'warning', code: 'EMEDF_UNKNOWN_INSTRUCTION', message: `EMEDF 中没有 bank=${instruction.bank} id=${instruction.id}。` });
+    diagnostics.push({ severity: 'warning', code: 'EMEDF_SCHEMA_COVERAGE_GAP', message: `SoulForge 内置 EMEVD schema 未覆盖 bank=${instruction.bank} id=${instruction.id}，保留原始字节并保持只读。` });
     return { index, bank: instruction.bank, id: instruction.id, argsBase64: instruction.argsBase64, unknown: true, diagnostics };
   }
   try {
@@ -673,6 +708,9 @@ function readEventInstruction(
     const decoded = decodeInstructionArgs(registry, instruction.bank, instruction.id, rawArgs);
     if (!decoded.ok) {
       diagnostics.push({ severity: 'warning', code: decoded.code, message: decoded.message });
+      if (decoded.code === 'EMEDF_ARGS_LENGTH_MISMATCH') {
+        diagnostics.push({ severity: 'warning', code: 'EMEDF_SCHEMA_COVERAGE_GAP', message: `SoulForge 内置 EMEVD schema 与 bank=${instruction.bank} id=${instruction.id} 的原生参数长度不匹配，保留原始字节并保持只读。` });
+      }
       return {
         index, bank: instruction.bank, id: instruction.id, argsBase64: instruction.argsBase64,
         unknown: true, emedfName: definition.name, diagnostics
@@ -760,33 +798,43 @@ async function resolveEmevdFile(
   };
 }
 
-async function loadImportedRegistry(
+function hasLegacyExternalSchemaOption(input: unknown): boolean {
+  if (input === null || typeof input !== 'object' || Array.isArray(input)) return false;
+  const record = input as Record<string, unknown>;
+  return Object.prototype.hasOwnProperty.call(record, 'emedfPath')
+    || Object.prototype.hasOwnProperty.call(record, 'emedfLocator');
+}
+
+function loadProductionRegistry(
   edit: NativeEditSession,
-  explicit: string | undefined
-): Promise<
-  | { ok: true; registry: ReturnType<typeof resolveEmevdRegistry>['registry'] }
-  | { ok: false; error: { code: string; message: string } }
-> {
-  const path = explicit
-    ?? edit.emedfPath
-    ?? process.env.SOULFORGE_EMEDF_PATH
-    ?? await searchRealEmedfFromGame(edit.session.layers.baseRoot);
-  const resolved = resolveEmevdRegistry(path);
-  if (resolved.origin !== 'imported') {
+  legacyInput?: unknown
+):
+  | { ok: true; registry: ReturnType<typeof resolveEmevdRegistry>['registry']; diagnostics: Diagnostic[] }
+  | { ok: false; error: { code: string; message: string }; diagnostics: Diagnostic[] } {
+  if (hasLegacyExternalSchemaOption(legacyInput)
+    || hasLegacyExternalSchemaOption(edit)
+    || hasLegacyExternalSchemaOption(edit.session)) {
+    const message = '生产 EMEVD 链不接受外部 EMEDF schema；请使用 SoulForge 内置 schema。';
+    return {
+      ok: false,
+      error: { code: EMEVD_EXTERNAL_SCHEMA_FORBIDDEN_CODE, message },
+      diagnostics: [{ severity: 'error', code: EMEVD_EXTERNAL_SCHEMA_FORBIDDEN_CODE, message }]
+    };
+  }
+  const resolved = resolveEmevdRegistry();
+  const diagnostics = asDiagnostics(resolved.diagnostics);
+  if (resolved.origin !== 'first-party') {
+    const first = diagnostics[0];
     return {
       ok: false,
       error: {
-        code: 'EMEVD_EMEDF_NOT_IMPORTED',
-        message: resolved.fallbackReason
-          ?? '未找到本机 DarkScript3 EMEDF（sekiro-common.emedf.json）。请传 --emedf 或设 SOULFORGE_EMEDF_PATH。'
-      }
+        code: first?.code ?? 'EMEVD_FIRST_PARTY_SCHEMA_UNAVAILABLE',
+        message: first?.message ?? 'SoulForge 内置 EMEVD schema 不可用。'
+      },
+      diagnostics
     };
   }
-  return { ok: true, registry: resolved.registry };
-}
-
-async function searchRealEmedfFromGame(baseRoot: string | undefined): Promise<string | undefined> {
-  return baseRoot ? searchRealEmedf({ gameRoot: baseRoot }) : searchRealEmedf();
+  return { ok: true, registry: resolved.registry, diagnostics };
 }
 
 function asDiagnostics(

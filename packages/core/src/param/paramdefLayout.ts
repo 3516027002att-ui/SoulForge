@@ -111,7 +111,7 @@ export function validateParamDef(doc: ParamDefDocument): ParamDefValidationResul
       message: `Param rowDataSize ${doc.rowDataSize} is invalid.`
     });
   }
-  if (!['user-derived', 'fixture', 'imported'].includes(String(doc.origin))) {
+  if (!['user-derived', 'fixture', 'imported', 'first-party'].includes(String(doc.origin))) {
     diagnostics.push({
       severity: 'error',
       code: 'PARAMDEF_ORIGIN_INVALID',

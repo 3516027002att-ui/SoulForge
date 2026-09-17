@@ -11,6 +11,7 @@ var jsonOptions = new JsonSerializerOptions
     PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
     PropertyNameCaseInsensitive = true,
     WriteIndented = true,
+    NumberHandling = JsonNumberHandling.AllowNamedFloatingPointLiterals,
     DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull
 };
 

@@ -6,7 +6,7 @@ SoulForge 是给魂游（FromSoftware 的《只狼》《黑暗之魂》《艾尔
 
 像写代码时用 Cursor 一样，你用自然语言告诉它想怎么改游戏，它在独立的工作区里帮你改好、验证、提交，还能随时一键回滚
 
-> 当前状态：工作区内所有文件均可读取、索引和诊断；文件能否编辑、写入方式和安全等级以当前治理登记、原生 authority、验证结果和工作区诊断为准。安装包未做代码签名，暂不适合作为稳定工具分发。
+> 当前状态：工作区内所有文件均可读取、索引和诊断；文件能否编辑、写入方式和安全等级以当前治理登记、原生 authority、验证结果和工作区诊断为准。安装包未做 Authenticode 签名；Windows 可能显示 SmartScreen/UAC 提示，签名不是更新安装门禁。本版本仍是预发行，不等同于稳定工具验收。
 
 ## 当前可用能力
 
@@ -54,19 +54,21 @@ Windows CI 对文档和治理数据变更只跑治理检查；代码变更共用
 
 ## 快速开始
 
-### 方式一：V0.9.1 Windows x64 安装包（推荐）
+### 方式一：V0.9.2 Windows x64 安装包（推荐）
 
 请从 [GitHub Releases 页面](https://github.com/3516027002att-ui/SoulForge/releases) 下载
-`SoulForge-0.9.1-x64.exe`，双击安装包并按向导完成安装，然后从桌面或开始菜单启动
+`SoulForge-0.9.2-x64.exe`，双击安装包并按向导完成安装，然后从桌面或开始菜单启动
 `SoulForge`。
 
 安装包已经内置 Electron 运行时、编译后的桌面端、SQLite native binding 和自包含
 Bridge。安装包用户不需要安装 Node.js 24、npm、Electron 或 .NET SDK，也不需要打开
 PowerShell 或运行任何 `npm` 命令；首次启动不需要 .NET SDK。
 
-> 当前仓库 `main` 是 `V0.9.1` 代码线；如果 Releases 页面尚未出现上述安装包，说明该
-> 安装包还没有上传，不要把 GitHub 自动生成的 Source code ZIP 当作安装包。
-> 安装包尚未做代码签名，暂不适合作为稳定工具分发。
+> 当前仓库 `main` 是 `V0.9.2` 代码线；如果 Releases 页面尚未出现上述安装包，说明该
+> 安装包还没有上传，不要把 GitHub 自动生成的 Source code ZIP 当作安装包。v0.9.1
+> 没有更新按钮，已安装的 v0.9.1 需要手动安装 v0.9.2 一次；之后可在设置中检查更新。
+> 安装包未做 Authenticode 签名；Windows 可能显示 SmartScreen/UAC 提示，签名不是更新
+> 安装门禁。本版本仍是预发行，不等同于稳定工具验收。
 
 ### 方式二：完整 Release 源码包（开发/诊断用）
 

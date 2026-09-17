@@ -22,6 +22,11 @@
       "sliceId": "W-REL-V09-PUBLIC-PREVIEW-01",
       "targetRelease": "V0.9",
       "reason": "V0.9 发布线 V0.9.1 clean 源码 ZIP、启动 EXE/native 必需组件与 NSIS 安装包的归档/内容完整性、安装包哈希、安装/覆盖升级/卸载/已安装启动路径、内部文件排除、许可证 notices 及 GitHub 自动源码归档排除验证尚未冻结；旧跨机与真实游戏验收仍不声称完成"
+    },
+    {
+      "sliceId": "W-FIRSTPARTY-SCHEMA-01",
+      "targetRelease": "V0.5",
+      "reason": "SoulForge first-party PARAM/EMEVD schema 的清洁环境、生产边界、Bridge synthetic 与真实 native corpus 验证尚未冻结；未覆盖或长度不匹配部分保持 partial/只读"
     }
   ],
   "frozen": [

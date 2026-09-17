@@ -33,8 +33,9 @@
  * The generic sampling / fail-closed / verification helpers live in
  * emevdCorpusMatrix.ts and are shared with runEmevdMultiCorpusMatrixSmoke.
  *
- * DarkScript3 EMEDF data is All Rights Reserved and never bundled; the
- * synthetic DS3 JSON is our own tiny sample (syntheticEmevdBytes).
+ * DarkScript3 EMEDF remains an external-only validation input. The synthetic
+ * DS3 JSON is our own tiny sample (syntheticEmevdBytes); production uses the
+ * separately maintained SoulForge first-party registry.
  *
  * Authority cap: partial — proves the imported-registry -> production write
  * matrix on the registered native sample; no full EMEDF/layer/game-load claims.
@@ -70,7 +71,7 @@ import {
   type MatrixSample,
   type MultiLengthKindInfo
 } from '../emevd/emevdCorpusMatrix.js';
-import { importDs3EmedfFile } from '../emevd/emedfExternalAdapter.js';
+import { importDs3EmedfFile } from './emedfExternalAdapter.js';
 // searchRealEmedf 与候选路径清单共享自 realEmedfLocator，与另三条 emevd smoke
 // 同源。此前本文件**只读 env 与 argv、不调定位器**，于是同一台机器上另三条能
 // 跑到真实 EMEDF leg、唯独这条恒跳过——两道判据之间的盲区，各自都有理由不管。

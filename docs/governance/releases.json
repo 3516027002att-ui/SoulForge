@@ -28,17 +28,22 @@
       "unfreezeRuling": {
         "status": "user-approved",
         "approvedBy": "user",
-        "approvedAt": "2026-08-30",
-        "decisionRef": "user-ruling-2026-08-30-resume-action-tae",
+        "approvedAt": "2026-09-16",
+        "decisionRef": "user-ruling-2026-09-16-firstparty-schema",
         "scopeItemIds": [
           "SCOPE-BEHAVIOR-ANIMATION",
           "SCOPE-BEHAVIOR-TAE",
           "SCOPE-BEHAVIOR-ESD",
           "SCOPE-BEHAVIOR-SCRIPT",
           "SCOPE-RUNTIME",
-          "SCOPE-EDITORS"
+          "SCOPE-EDITORS",
+          "SCOPE-PARAM",
+          "SCOPE-EMEVD"
         ],
-        "reason": "用户裁定把 SCOPE-BEHAVIOR-ESD 从 V0.6 延期改回 supported，并实现状态转移边的只读解析（跟随 condition 的 targetStateOffset、读出 command call 的 commandID、检出悬空目标与指向哨兵槽的边）。第一阶段裁定当时只放开解析，写能力仍待后续裁定；同日第二阶段裁定已明确取代该阶段性限制，解除 SCOPE-BEHAVIOR-ANIMATION、SCOPE-BEHAVIOR-TAE、SCOPE-BEHAVIOR-ESD 与 SCOPE-EDITORS 在 V0.5/V0.6 过渡期的 writer、unknown-structure reencode、release-editor 和其他开发范围限制。追加（同日第二次裁定）：SCOPE-BEHAVIOR-SCRIPT 放开**明文条目的源码级编辑**，新增 operation source-level-edit-plaintext-script-entries。实测明文条目共 6 个（luabnd 内 3 个 .lua + action 下 3 张符号表 txt），其余 306 个条目为 HKS 字节码（luabnd 侧 LuaP/0x50、action 侧 LuaQ/0x51 两种版本）；字节码反编译、重编译与 typed mutation 尚未实现，但 V0.5/V0.6 过渡期不以版本禁令阻止其研发，完成度仍由独立实现与证据决定。scopeItemIds 仍限定只放开列出的两条，V0.5 其余 scopeItem 继续受 git 基线比对保护。追加（2026-08-18 第三次裁定）：用户裁定撤销「不自实现 Mod loader 取代 me3」禁令（AGENTS.md 对应条目同日删除，交接书 §16 同步移除）。放开 SCOPE-RUNTIME.unsupportedOperations 中的 implement-mod-loader 与顶层 runtimeToolPolicy 的修订：允许自行实现 Mod loader，但须经独立切片、requiredValidation、Patch Engine 与审计边界，不得写入原版游戏目录；已完成的 me3 集成切片（W-ME3-ADAPTER-01 / W-ME3-MAIN-DETECT-02 / W-ME3-PROFILE-03）结论与 authority 不变，GameRuntimeAdapter 保持可替换接口。scopeItemIds 仍限定只放开列出的三条，V0.5 其余 scopeItem 继续受 git 基线比对保护，条目删除保护不随解冻放开。追加（2026-08-30）：同日阶段性裁定中的限制均以第二阶段裁定为准；ACTION/TAE motion identity、Binder membership、clip/pose 预览和 TAE projection 继续推进，相关 writer、unknown-structure reencode、release editor 与其他开发均可继续，authority 仍须单独验证。追加（2026-08-30 第二次裁定）：用户进一步裁定解除 V0.5/V0.6 过渡期对 SCOPE-BEHAVIOR-ANIMATION、SCOPE-BEHAVIOR-TAE、SCOPE-BEHAVIOR-ESD 与 SCOPE-EDITORS 的 writer、unknown-structure reencode、release-editor 和其他开发范围限制；这些能力的 authority 仍必须由真实语料、native writer、Patch Engine、重读/恢复与功能验证分别建立，不能由范围放开自动推导。"
+        "fieldPaths": [
+          "paramMetadataSourcePolicy"
+        ],
+        "reason": "用户裁定把 SCOPE-BEHAVIOR-ESD 从 V0.6 延期改回 supported，并实现状态转移边的只读解析（跟随 condition 的 targetStateOffset、读出 command call 的 commandID、检出悬空目标与指向哨兵槽的边）。第一阶段裁定当时只放开解析，写能力仍待后续裁定；同日第二阶段裁定已明确取代该阶段性限制，解除 SCOPE-BEHAVIOR-ANIMATION、SCOPE-BEHAVIOR-TAE、SCOPE-BEHAVIOR-ESD 与 SCOPE-EDITORS 在 V0.5/V0.6 过渡期的 writer、unknown-structure reencode、release-editor 和其他开发范围限制。追加（同日第二次裁定）：SCOPE-BEHAVIOR-SCRIPT 放开**明文条目的源码级编辑**，新增 operation source-level-edit-plaintext-script-entries。实测明文条目共 6 个（luabnd 内 3 个 .lua + action 下 3 张符号表 txt），其余 306 个条目为 HKS 字节码（luabnd 侧 LuaP/0x50、action 侧 LuaQ/0x51 两种版本）；字节码反编译、重编译与 typed mutation 尚未实现，但 V0.5/V0.6 过渡期不以版本禁令阻止其研发，完成度仍由独立实现与证据决定。scopeItemIds 仍限定只放开列出的两条，V0.5 其余 scopeItem 继续受 git 基线比对保护。追加（2026-08-18 第三次裁定）：用户裁定撤销「不自实现 Mod loader 取代 me3」禁令（AGENTS.md 对应条目同日删除，交接书 §16 同步移除）。放开 SCOPE-RUNTIME.unsupportedOperations 中的 implement-mod-loader 与顶层 runtimeToolPolicy 的修订：允许自行实现 Mod loader，但须经独立切片、requiredValidation、Patch Engine 与审计边界，不得写入原版游戏目录；已完成的 me3 集成切片（W-ME3-ADAPTER-01 / W-ME3-MAIN-DETECT-02 / W-ME3-PROFILE-03）结论与 authority 不变，GameRuntimeAdapter 保持可替换接口。scopeItemIds 仍限定只放开列出的三条，V0.5 其余 scopeItem 继续受 git 基线比对保护，条目删除保护不随解冻放开。追加（2026-08-30）：同日阶段性裁定中的限制均以第二阶段裁定为准；ACTION/TAE motion identity、Binder membership、clip/pose 预览和 TAE projection 继续推进，相关 writer、unknown-structure reencode、release editor 与其他开发均可继续，authority 仍须单独验证。追加（2026-08-30 第二次裁定）：用户进一步裁定解除 V0.5/V0.6 过渡期对 SCOPE-BEHAVIOR-ANIMATION、SCOPE-BEHAVIOR-TAE、SCOPE-BEHAVIOR-ESD 与 SCOPE-EDITORS 的 writer、unknown-structure reencode、release-editor 和其他开发范围限制；这些能力的 authority 仍必须由真实语料、native writer、Patch Engine、重读/恢复与功能验证分别建立，不能由范围放开自动推导。追加（2026-09-16）：用户裁定解除 SCOPE-PARAM 与 SCOPE-EMEVD 的旧第三方 schema 绑定限制，允许使用 SoulForge first-party Sekiro 1.6.x PARAM/EMEVD schema；第三方 adapter 仅保留开发/验证边界，未知/长度不匹配内容继续只读，C# Bridge native authority 不变。"
       }
     },
     {
@@ -58,7 +63,7 @@
       "frozenScopeRulingRef": null,
       "frozenEvidenceRef": null,
       "frozenFields": [],
-      "frozenFieldsNote": "V0.9 发布线的 V0.9.1 公开预发行边界已由 scope.json 的独立 scopeItem 登记，用户裁定引用为 user-ruling-2026-09-13-v091-nsis-installer-public-release；本轮交付为 clean 源码 ZIP、启动 EXE/native 必需组件、NSIS x64 安装包与 GitHub 自动源码归档；源码归档、安装包内容与哈希、安装/升级/卸载/已安装启动路径、内部文件排除与许可证 notices 验证尚未冻结，不提升既有 V0.5/V0.6 Gate 或 authority。",
+      "frozenFieldsNote": "V0.9 发布线的 V0.9.1 公开预发行边界已由 scope.json 的独立 scopeItem 登记，用户裁定引用为 user-ruling-2026-09-13-v091-nsis-installer-public-release；本轮交付为 clean 源码 ZIP、启动 EXE/native 必需组件、NSIS x64 安装包与 GitHub 自动源码归档。另登记 SCOPE-V09-GITHUB-UPDATE：v0.9.2 作为带更新按钮的 bootstrap，固定 GitHub Release 资产需通过 latest.yml、blockmap 与 SHA256SUMS 校验，但实际 tag/Release/上传及跨机 A→B 验收不在本次执行；源码归档、安装包内容与哈希、安装/升级/卸载/已安装启动路径、内部文件排除与许可证 notices 验证尚未冻结，不提升既有 V0.5/V0.6 Gate 或 authority。",
       "unfreezeRuling": null
     }
   ],

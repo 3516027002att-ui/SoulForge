@@ -47,6 +47,15 @@ const EXPECTED_FILE_PATTERNS = [
   '!**/*jest*',
   '!**/*cypress*',
   '!**/dist/testing/**/*',
+  '!**/dist/param/smithboxParamMetadataSource.*',
+  '!**/dist/param/yappedParamMetadataSource.*',
+  '!**/dist/emevd/emedfExternalAdapter.*',
+  '!**/dist/script/dsLuaDecompilerLocator.*',
+  '!**/dist/tae/taeEventTemplate.*',
+  '!out/**/*Smoke.*',
+  '!out/**/*smoke.*',
+  '!out/**/*test.*',
+  '!out/**/*spec.*',
   '!**/dist/_tmp/**/*',
   '!**/probe_tmp.*',
   '!**/_tmp/**/*',
@@ -81,13 +90,18 @@ const EXPECTED_EXTRA_RESOURCES = [
   {
     from: '../../prompt',
     to: 'prompt',
-    filter: ['system.md', 'rag-embedding.md', 'event-reference.md', 'agent-task-record.md']
+    filter: ['system.md', 'rag-embedding.md', 'event-reference.md', 'native-read-safety.md']
   },
   { from: '../../mutter.md', to: 'mutter.md', filter: ['mutter.md'] },
   {
     from: '../../bridge/SoulForge.Bridge/bin/Release/net10.0/win-x64/publish/SoulForge.Bridge.exe',
     to: 'bridge/SoulForge.Bridge.exe',
     filter: ['SoulForge.Bridge.exe']
+  },
+  {
+    from: '../../bridge/SoulForge.Bridge/bin/Release/net10.0/win-x64/publish/SoulForge.Hksc.Native.dll',
+    to: 'bridge/SoulForge.Hksc.Native.dll',
+    filter: ['SoulForge.Hksc.Native.dll']
   },
   { from: '../../LICENSE', to: 'LICENSE', filter: ['LICENSE'] },
   { from: '../../NOTICE', to: 'NOTICE', filter: ['NOTICE'] },

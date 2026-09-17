@@ -6,7 +6,8 @@ import { applyEmevdDsl, readEmevdEvent } from '../editing/emevdEdit.js';
 import { compileEmevdDarkScript } from '../emevd/darkScriptCompiler.js';
 import { fingerprintEmedfRegistry } from '../emevd/dslCompiler.js';
 import { renderEmevdDarkScript } from '../emevd/darkScriptRenderer.js';
-import { createSyntheticImportedEmedf, createSyntheticDs3EmedfJson, importedRegistrySyntheticEmevd } from './syntheticEmevdBytes.js';
+import { getFirstPartyEmedfRegistry } from '../schema/sekiro/firstPartySchema.js';
+import { createSyntheticImportedEmedf, importedRegistrySyntheticEmevd } from './syntheticEmevdBytes.js';
 import { disposeBridgeDaemonPool } from '../bridge/runBridge.js';
 import { openNativeEditSession } from '../editing/nativeEditSession.js';
 import { withSmokeWorkspace } from './harness/smokeWorkspace.js';
@@ -26,10 +27,9 @@ async function run(): Promise<void> {
       const eventDir = join(workspace.root, 'event');
       await mkdir(eventDir, { recursive: true });
       const file = join(eventDir, 'common.emevd');
-      const emedfPath = join(workspace.root, 'synthetic.emedf.json');
       await writeFile(file, importedRegistrySyntheticEmevd());
-      await writeFile(emedfPath, createSyntheticDs3EmedfJson(), 'utf8');
-      process.env.SOULFORGE_EMEDF_PATH = emedfPath;
+      // A stale external locator must not change the production registry.
+      process.env.SOULFORGE_EMEDF_PATH = join(workspace.root, 'missing-third-party.emedf.json');
 
       const edit = await openNativeEditSession({ overlayRoot: workspace.root, game: 'sekiro' });
       const read = await readEmevdEvent({ edit, file, eventId: 50 });
@@ -40,12 +40,15 @@ async function run(): Promise<void> {
       assert.equal(read.game, 'sekiro');
       assert.equal(read.resourceKind, 'event');
       assert.equal(read.instructionCount, 3);
-      assert.equal(read.registryOrigin, 'imported');
-      assert.equal(read.registryFingerprint, fingerprintEmedfRegistry(createSyntheticImportedEmedf()));
+      assert.equal(read.registryOrigin, 'first-party');
+      assert.equal(read.registryFingerprint, fingerprintEmedfRegistry(getFirstPartyEmedfRegistry()));
       assert.equal(read.instructions[0]?.index, 0);
       assert.equal(read.instructions[0]?.emedfName, 'IFConditionGroup');
       assert.equal(read.instructions[0]?.unknown, false);
       assert.equal(read.instructions[0]?.typedArgs?.[0]?.value, 1);
+      assert.equal(read.instructions[1]?.emedfName, 'InitializeEvent');
+      assert.equal(read.instructions[1]?.typedArgs?.[1]?.value, 100);
+      assert.equal(read.instructions[1]?.typedArgs?.[2]?.value, 7);
       assert.equal(read.instructions[2]?.unknown, true);
       assert.ok(
         read.instructions[2]!.diagnostics.some((diagnostic) =>
@@ -95,8 +98,11 @@ async function run(): Promise<void> {
       // Exercise the production Agent facade end-to-end on the temporary
       // overlay: read DarkScript, scope it to one event, commit through the
       // existing four-view/Patch Engine path, and verify the changed arg.
-      const sourceForWrite = read.darkScript?.replace('IfConditionGroup(1, 0, 2)', 'IfConditionGroup(1, 1, 2)');
+      const sourceForWrite = read.darkScript
+        ?.replace('IfConditionGroup(1, 0, 2)', 'IfConditionGroup(1, 1, 2)')
+        .replace('InitializeEvent(10, 100, 7)', 'InitializeEvent(10, 200, 7)');
       assert.ok(sourceForWrite);
+      assert.ok(sourceForWrite.includes('InitializeEvent(10, 200, 7)'));
       const applied = await applyEmevdDsl({
         edit,
         file,
@@ -114,6 +120,12 @@ async function run(): Promise<void> {
       assert.equal(reread.ok, true, JSON.stringify(reread));
       if (!reread.ok) return;
       assert.equal(reread.instructions[0]?.typedArgs?.[1]?.value, 1);
+      assert.equal(reread.instructions[1]?.typedArgs?.[1]?.value, 200);
+      assert.equal(
+        reread.instructions[1]?.argsBase64,
+        Buffer.from([0x0a, 0x00, 0x00, 0x00, 0xc8, 0x00, 0x00, 0x00, 0x07, 0x00, 0x00, 0x00]).toString('base64'),
+        'first-party vararg tail must remain byte-exact'
+      );
 
       // The first read receipt must no longer authorize a second write after
       // the native document changed; this is the event-scope CAS boundary.

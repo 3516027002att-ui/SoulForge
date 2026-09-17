@@ -32,9 +32,10 @@
  * read-dcx-document exposes only a 128-byte payload prefix, so a full
  * distribution/mutation matrix for KRAK payloads is not runnable here.
  *
- * DarkScript3 EMEDF data is All Rights Reserved and never bundled; the real
- * file is read only from a user-provided path, and the synthetic DS3 JSON is
- * our own tiny sample.
+ * DarkScript3 EMEDF remains an external-only validation input; the real file
+ * is read only from a user-provided path, and the synthetic DS3 JSON is our
+ * own tiny sample. Production uses the separately maintained SoulForge
+ * first-party registry.
  *
  * Authority cap: partial — real DarkScript3 EMEDF length signatures are shown
  * to be consistent with every observed corpus args length, but typed-mutation
@@ -74,7 +75,7 @@ import {
   type EventMutationSpec,
   type FlatInstruction
 } from '../emevd/emevdCorpusMatrix.js';
-import { importDs3EmedfFile } from '../emevd/emedfExternalAdapter.js';
+import { importDs3EmedfFile } from './emedfExternalAdapter.js';
 import {
   analyzeEmedfCoverage,
   summarizeCorpusFamilyDifferences,

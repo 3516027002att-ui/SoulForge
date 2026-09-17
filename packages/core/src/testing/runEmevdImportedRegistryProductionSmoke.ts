@@ -20,9 +20,9 @@
  * - Real EMEDF file (SOULFORGE_EMEDF_PATH / arg 3): same real-corpus chain with
  *   the real file's imported registry; absent → structured skip recorded.
  *
- * DarkScript3 EMEDF data is All Rights Reserved. The synthetic DS3 JSON is our
- * own tiny sample (syntheticEmevdBytes.createSyntheticDs3EmedfJson); no real
- * DarkScript3 data is bundled or committed.
+ * DarkScript3 EMEDF remains an external-only validation input. The synthetic
+ * DS3 JSON is our own tiny sample (syntheticEmevdBytes.createSyntheticDs3EmedfJson);
+ * production uses the separately maintained SoulForge first-party registry.
  *
  * Authority cap: partial. Proves the imported-registry → production write chain
  * on synthetic + registered native samples; no full EMEDF/layer/game-load claims.
@@ -51,7 +51,7 @@ import {
 import { readFullEmevdDocumentViaBridge } from '../editing/emevdFullDocument.js';
 import { compileEmevdPatchDsl, fingerprintEmedfRegistry } from '../emevd/dslCompiler.js';
 import { decodeInstructionArgs, type EmedfRegistry } from '../emevd/emedfSchema.js';
-import { importDs3EmedfFile } from '../emevd/emedfExternalAdapter.js';
+import { importDs3EmedfFile } from './emedfExternalAdapter.js';
 import { decodeStrictBase64 } from '../util/base64.js';
 import { formatEmevdAnchor } from '../emevd/stableIdentity.js';
 import { runBridge, disposeBridgeDaemonPool } from '../bridge/runBridge.js';

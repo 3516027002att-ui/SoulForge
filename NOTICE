@@ -33,3 +33,26 @@ SoulForge ships no game assets, no proprietary compression libraries, and
 no FromSoftware code. External FromSoftware community tools are consulted
 for behavior, format-family and workflow comparison only; incompatibly
 licensed source is not copied.
+
+The checked-in first-party Sekiro PARAM schema includes a normalized semantic
+projection of Paramdex-compatible metadata. The projection is distributed
+under the MIT terms applicable to the reviewed Smithbox/Paramdex metadata
+source; the required notice is retained here and no Smithbox executable or
+runtime is shipped:
+
+  Copyright (c) 2025 Vawser
+  Copyright (c) 2018 Katalash, Meowmaritus
+
+The complete MIT permission notice for this metadata projection is included
+at licenses/Smithbox-Paramdex-Metadata-MIT.txt.
+
+The first-party HKS decompiler contains source-derived portions from
+DSLuaDecompiler, licensed under MIT; the complete notice is included at
+licenses/DSLuaDecompiler-MIT.txt. The first-party HKS compiler contains the
+reviewed hksc source under its original copyright/permission terms; see
+licenses/hksc-COPYRIGHT.txt.
+
+The EMEVD schema is maintained as SoulForge semantic data. DarkScript3,
+Smithbox and Yapped remain development/validation references only; their
+installations, runtime adapters and restricted data are not production
+dependencies or release inputs.

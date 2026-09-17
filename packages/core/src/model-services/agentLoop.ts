@@ -790,6 +790,56 @@ async function collectStreamCompletion(
   };
 }
 
+/**
+ * Provider adapters are expected to honor request.signal, but a third-party
+ * or test adapter can still leave a promise pending forever.  The host owns
+ * the Agent lifecycle, so cancellation must settle the loop even when the
+ * underlying transport is non-cooperative.  The late promise remains
+ * observed through then/catch and cannot become an unhandled rejection.
+ */
+async function awaitModelCompletion(
+  operation: Promise<ModelCompleteResult>,
+  signal?: AbortSignal
+): Promise<ModelCompleteResult> {
+  if (!signal) return operation;
+  if (signal.aborted) {
+    return {
+      message: { role: 'assistant', content: '' },
+      finishReason: 'cancelled',
+      diagnostics: [{ severity: 'warning', code: 'AGENT_CANCELLED', message: 'Agent 循环在模型调用期间取消。' }]
+    };
+  }
+  let abortListener!: () => void;
+  const cancellation = new Promise<ModelCompleteResult>((resolve) => {
+    abortListener = () => resolve({
+      message: { role: 'assistant', content: '' },
+      finishReason: 'cancelled',
+      diagnostics: [{ severity: 'warning', code: 'AGENT_CANCELLED', message: 'Agent 循环在模型调用期间取消。' }]
+    });
+    signal.addEventListener('abort', abortListener, { once: true });
+    if (signal.aborted) abortListener();
+  });
+  try {
+    // `then`/`catch` is attached before racing so a late provider rejection is
+    // consumed even after the cancellation branch wins.
+    const observed = operation.then(
+      (value) => ({ kind: 'result' as const, value }),
+      (error) => ({
+        kind: 'error' as const,
+        error: error instanceof Error ? error : new Error(String(error))
+      })
+    );
+    const winner = await Promise.race([observed, cancellation]);
+    if (winner && typeof winner === 'object' && 'kind' in winner) {
+      if (winner.kind === 'error') throw winner.error;
+      return winner.value;
+    }
+    return winner;
+  } finally {
+    signal.removeEventListener('abort', abortListener);
+  }
+}
+
 export async function runAgentToolLoop(
   adapter: ModelServiceAdapter,
   request: AgentRunRequest
@@ -1174,28 +1224,23 @@ export async function runAgentToolLoop(
       // Rebuild the request snapshot for every attempt so the retry actually
       // uses that replacement instead of resending the over-limit payload.
       const callMessages = [...messages, ...ephemeralMessages];
-      completion = request.streaming
-        ? await collectStreamCompletion(
+      const modelRequest = {
+        messages: callMessages,
+        tools: forcedConclusion ? [] : request.tools,
+        ...samplingFields,
+        ...(request.signal ? { signal: request.signal } : {}),
+        ...(request.timeoutMs != null ? { timeoutMs: request.timeoutMs } : {}),
+        ...(request.sessionId ? { sessionId: request.sessionId } : {})
+      };
+      const providerOperation = request.streaming
+        ? collectStreamCompletion(
             adapter,
-            {
-              messages: callMessages,
-              tools: forcedConclusion ? [] : request.tools,
-              ...samplingFields,
-              ...(request.signal ? { signal: request.signal } : {}),
-              ...(request.timeoutMs != null ? { timeoutMs: request.timeoutMs } : {}),
-              ...(request.sessionId ? { sessionId: request.sessionId } : {})
-            },
+            modelRequest,
             (text) => emit({ type: 'agent-message-delta', step: steps, text }),
             (text) => emit({ type: 'agent-thinking-delta', step: steps, text })
           )
-        : await adapter.complete({
-            messages: callMessages,
-            tools: forcedConclusion ? [] : request.tools,
-            ...samplingFields,
-            ...(request.signal ? { signal: request.signal } : {}),
-            ...(request.timeoutMs != null ? { timeoutMs: request.timeoutMs } : {}),
-            ...(request.sessionId ? { sessionId: request.sessionId } : {})
-          });
+        : adapter.complete(modelRequest);
+      completion = await awaitModelCompletion(providerOperation, request.signal);
       if (completion.finishReason !== 'error' || request.signal?.aborted) break;
       // Context-overflow 错误不走退避重试（OpenCode retry.ts：overflow 不参与
       // retry）：压缩历史后用新上下文重试一次；压缩后仍溢出则失败关闭，避免
@@ -1692,7 +1737,10 @@ export async function runAgentToolLoop(
             throw new Error('AGENT_LOOP_INTERNAL: 批次包含非执行条目。');
           }
           const modeOverride = currentMode === 'full' ? 'fullPermission' : currentMode;
-          return request.executeTool(batchEntry.call, { mode: modeOverride });
+          return request.executeTool(batchEntry.call, {
+            mode: modeOverride,
+            ...(request.signal ? { signal: request.signal } : {})
+          });
         })
       );
       settled.forEach((settlement, position) => {
@@ -1732,12 +1780,7 @@ export async function runAgentToolLoop(
         evidenceAdditions.push(makeToolEvidenceSource(
           batchEntry.call.name,
           redactedContent,
-          {
-            ...(batchEntry.call.name === 'read_agent_task_record'
-              || batchEntry.call.name === 'update_agent_task_record'
-              ? { evidenceKey: 'agent-task-record' }
-              : {})
-          },
+          undefined,
           Boolean(brokerOptions?.currentVersionByResource ?? brokerOptions?.currentRevisionByResource)
         ));
         if (batchEntry.call.name === 'switch_mode' && result.ok) {

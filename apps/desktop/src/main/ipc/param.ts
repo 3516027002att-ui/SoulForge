@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
-import { existsSync, readFileSync, writeFileSync, readdirSync } from 'node:fs';
+import { existsSync } from 'node:fs';
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
-import { app, dialog } from 'electron';
+import { dialog } from 'electron';
 import { basename, dirname, join, resolve, sep } from 'node:path';
 import type { IpcMainInvokeEvent } from 'electron';
 import {
@@ -18,27 +18,15 @@ import {
   isParamBackupPath,
   sanitizeEntryName,
   normalizePageWindow,
-  importPinnedSmithboxSdtParamMetadata,
-  applyYappedFieldOverlay,
-  readYappedSdtDefsIndex,
-  readYappedSdtRowNamesIndex,
-  buildTrustPolicyFromPackage,
-  clearTrustDecision,
-  readTrustDecision,
-  trustCoversPackage,
-  writeTrustDecision,
-  type AppSettingsStore,
+  loadFirstPartyParamMetadata,
+  matchParamMetadataPackage,
   type WorkspaceSession,
   type NativeMutationOutcome,
   type RawReplaceCommitPort,
   classifyScriptEntry,
   magicLabel,
-  readTaeEventTemplateFile,
   type ScriptContainerEntryEvidence,
   type ScriptEntryClassification,
-  type TaeEventTemplateInfo,
-  type YappedParamOverlay,
-  type YappedSourceDiagnostic
 } from '@soulforge/core';
 import {
   PARAM_PAGE_SIZE,
@@ -162,11 +150,6 @@ const putContainerParamAll = (key: string, value: CachedParamDocument): void => 
   }
 };
 const MAX_PAGED_PARAM_ROWS = 100_000;
-function pushToolsSubdirs(roots: string[], gameRoot: string | undefined): void {
-  if (!gameRoot) return;
-  const toolsDir = join(dirname(gameRoot), 'tools');
-  try { roots.push(toolsDir); for (const entry of readdirSync(toolsDir, { withFileTypes: true })) if (entry.isDirectory()) roots.push(join(toolsDir, entry.name)); } catch {}
-}
 export interface ParamIpcDeps {
   handle: TrustedIpcHandle;
   readonly indexedFiles: readonly IndexedFile[];
@@ -274,7 +257,7 @@ export function registerParamIpcHandlers(deps: ParamIpcDeps): void {
     const typeName = result.data.typeName ?? 'UNKNOWN_PARAM';
     const rowDataSize = result.data.rowDataSize ?? 0;
     const resolved = typeName
-      ? await resolveTrustedParamDefinition(typeName, rowDataSize, { waitForYappedOverlay: false })
+      ? await resolveTrustedParamDefinition(typeName, rowDataSize)
       : { document: null, trusted: false, diagnostic: null };
     _forensicsInc('param:main:open:indexRows', rows.length);
     return sanitizeRendererValue({
@@ -820,41 +803,28 @@ let paramMetadataCache: {
 
   const loadParamMetadataOnce = async (): Promise<ParamMetadataLoadResult> => {
     if (paramMetadataCache) return paramMetadataCache;
-    const localAppData = process.env.LOCALAPPDATA;
-    if (!localAppData) {
-      paramMetadataCache = {
-        loaded: true,
-        package: null,
-        diagnostic: {
-          code: 'PARAM_METADATA_NO_LOCALAPPDATA',
-          message: '无法定位 LOCALAPPDATA，未加载 PARAM 字段定义。'
-        }
-      };
-      return paramMetadataCache;
-    }
-    const cacheRoot = join(localAppData, 'SoulForge', 'tools', 'smithbox', '2.2.4');
     try {
-      const imported = await importPinnedSmithboxSdtParamMetadata({ cacheRoot });
-      if (!imported.ok) {
-        const first = imported.diagnostics[0];
+      const loaded = loadFirstPartyParamMetadata();
+      if (!loaded.ok) {
+        const first = loaded.diagnostics[0];
         paramMetadataCache = {
           loaded: true,
           package: null,
           diagnostic: {
-            code: first?.code ?? 'PARAM_METADATA_IMPORT_REJECTED',
-            message: first?.message ?? 'PARAM 字段定义导入被拒绝。'
+            code: first?.code ?? 'PARAM_FIRST_PARTY_SCHEMA_UNAVAILABLE',
+            message: first?.message ?? 'SoulForge 内置 PARAM schema 不可用。'
           }
         };
         return paramMetadataCache;
       }
-      paramMetadataCache = { loaded: true, package: imported.package, diagnostic: null };
+      paramMetadataCache = { loaded: true, package: loaded.package, diagnostic: null };
       return paramMetadataCache;
     } catch (error) {
       paramMetadataCache = {
         loaded: true,
         package: null,
         diagnostic: {
-          code: 'PARAM_METADATA_IMPORT_FAILED',
+          code: 'PARAM_FIRST_PARTY_SCHEMA_LOAD_FAILED',
           message: error instanceof Error ? error.message : String(error)
         }
       };
@@ -875,281 +845,20 @@ let paramMetadataCache: {
     return paramMetadataLoad;
   };
 
-  /* ------------------------------------------------------------------ */
-  /*  本机 Yapped 只读覆盖（T5-1）                                       */
-  /*                                                                    */
-  /*  Smithbox 元数据给的是英文字段名。用户装的中文汉化版 Yapped 在      */
-  /*  Paramdex\\SDT\\Defs\\*.xml 里带中文 DisplayName/Description，       */
-  /*  本模块只从本机 Yapped 安装只读抽这两样，覆盖到 Smithbox 文档上。    */
-  /*  这是**显示层覆盖**：origin 与偏移不动，写链只消费字段 id/type/      */
-  /*  offset，不受显示名影响。                                          */
-  /*                                                                    */
-  /*  刻意不做成 Smithbox 那样的钉死发布包：Yapped 是本机第三方工具     */
-  /*  安装目录，不是可再分发来源，没有归档摘要可钉。这里只读、不入库、   */
-  /*  失败降级（拿不到就回落到 Smithbox 英文）。                          */
-  /* ------------------------------------------------------------------ */
-
-  /** T5 固定候选：本机 Yapped Rune Bear 发布包真实落地（grok 已求证存在）。 */
-  const YAPPED_SDT_FIXED_CANDIDATES = [
-    'D:\\mystream\\Sekiro Shadows Die Twice\\tools\\Yapped Rune Bear v2.14.1'
-      + '\\Yapped Rune Bear v2.14.1\\Paramdex\\SDT'
-  ];
-
   /**
-   * 定位本机 Yapped 的 `Paramdex\SDT` 根（含 Defs/ 与 Names/）。
-   *
-   * 候选顺序：SOULFORGE_YAPPED_SDT_ROOT 显式环境变量 → 固定候选 → 已挂载
-   * 会话兄弟 tools/<一层子目录>/Paramdex/SDT。找不到返回 null，由调用方
-   * 降级到 Smithbox 英文 —— 这是可选增强，绝不能把「中文名不可用」升级成
-   * 「PARAM 不可用」。
-   */
-  const locateYappedSdtRootSync = (): string | null => {
-    const probe = (candidate: string): boolean => {
-      try {
-        return existsSync(join(candidate, 'Defs')) && existsSync(join(candidate, 'Names'));
-      } catch {
-        return false;
-      }
-    };
-    const explicit = process.env.SOULFORGE_YAPPED_SDT_ROOT?.trim();
-    if (explicit) {
-      const candidate = resolve(explicit);
-      if (probe(candidate)) return candidate;
-    }
-    for (const candidate of YAPPED_SDT_FIXED_CANDIDATES) {
-      if (probe(candidate)) return candidate;
-    }
-    const roots: string[] = [];
-    pushToolsSubdirs(roots, getSession()?.layers.baseRoot);
-    const overlay = getSession()?.layers.overlayRoot?.trim();
-    if (overlay) pushToolsSubdirs(roots, dirname(dirname(overlay)));
-    const gameRootEnv = process.env.SOULFORGE_SEKIRO_GAME_ROOT?.trim();
-    if (gameRootEnv) pushToolsSubdirs(roots, gameRootEnv);
-    for (const root of roots) {
-      const candidate = join(root, 'Paramdex', 'SDT');
-      if (probe(candidate)) return candidate;
-    }
-    return null;
-  };
-
-  /* ------------------------------------------------------------------ */
-  /*  本机 DSAnimStudio TAE 词条只读导入（S17 动作域）                    */
-  /*                                                                    */
-  /*  DSAnimStudio 的 Res\\TAE.Template.SDT.xml 是 Sekiro 事件类型词条表：  */
-  /*  `0 JumpTable` 这类事件行「类型名」的来源，也带每类事件参数体的      */
-  /*  字段布局（name/kind/slotSize），随 read-tae-document 的             */
-  /*  templateLayouts 选项传给 Bridge 解码参数体。                        */
-  /*                                                                    */
-  /*  同 Yapped：本机第三方工具安装目录，只读、不入库、失败降级 ——        */
-  /*  拿不到就事件行显示裸 `{typeId}`、参数体不解码，绝不把「词条不可用」 */
-  /*  升级成「TAE 不可用」。                                              */
-  /* ------------------------------------------------------------------ */
-
-  /** S17 固定候选：本机 DSAnimStudio 发布包真实落地（grok 已求证存在）。 */
-  const TAE_TEMPLATE_FIXED_CANDIDATES = [
-    'D:\\mystream\\Sekiro Shadows Die Twice\\tools\\DSAnimStudio-4.9.9[Build 4999]'
-      + '\\Res\\TAE.Template.SDT.xml'
-  ];
-
-  /** TAE 模板在 tools/<一层子目录> 下的相对候选（DSAS 装在 Res/ 下）。 */
-  const TAE_TEMPLATE_RELATIVE_CANDIDATES = [
-    'Res\\TAE.Template.SDT.xml',
-    'TAE.Template.SDT.xml',
-    'Res\\TAE.Template.xml'
-  ];
-
-  /**
-   * 定位本机 DSAnimStudio 的 `TAE.Template.SDT.xml`。
-   *
-   * 候选顺序：SOULFORGE_TAE_TEMPLATE_PATH 显式环境变量 → 固定候选 → 已挂载
-   * 会话兄弟 tools/<一层子目录>/Res/。找不到返回 null，由调用方降级到裸
-   * typeId —— 这是可选增强，绝不能把「词条不可用」升级成「TAE 不可用」。
-   */
-  const locateTaeTemplatePathSync = (): string | null => {
-    const probe = (candidate: string): boolean => {
-      try {
-        return existsSync(candidate);
-      } catch {
-        return false;
-      }
-    };
-    const explicit = process.env.SOULFORGE_TAE_TEMPLATE_PATH?.trim();
-    if (explicit) {
-      const candidate = resolve(explicit);
-      if (probe(candidate)) return candidate;
-    }
-    for (const candidate of TAE_TEMPLATE_FIXED_CANDIDATES) {
-      if (probe(candidate)) return candidate;
-    }
-    const roots: string[] = [];
-    pushToolsSubdirs(roots, getSession()?.layers.baseRoot);
-    const overlay = getSession()?.layers.overlayRoot?.trim();
-    if (overlay) pushToolsSubdirs(roots, dirname(dirname(overlay)));
-    const gameRootEnv = process.env.SOULFORGE_SEKIRO_GAME_ROOT?.trim();
-    if (gameRootEnv) pushToolsSubdirs(roots, gameRootEnv);
-    for (const root of roots) {
-      for (const relative of TAE_TEMPLATE_RELATIVE_CANDIDATES) {
-        const candidate = join(root, relative);
-        if (probe(candidate)) return candidate;
-      }
-    }
-    return null;
-  };
-
-  let taeTemplateCache: {
-    loaded: true;
-    /** eventTypeId → 词条；null 表示本机无模板或读不到。 */
-    byEventTypeId: ReadonlyMap<number, TaeEventTemplateInfo> | null;
-  } | null = null;
-
-  /**
-   * 惰性读本机 TAE 模板索引并缓存。只读一次（73KB 单文件），每次读 TAE
-   * 都重跑会让打开卡顿。空/缺失回 null，不抛 —— 失败降级到裸 typeId。
-   */
-  const loadTaeEventTemplate = async (): Promise<ReadonlyMap<number, TaeEventTemplateInfo> | null> => {
-    if (taeTemplateCache) return taeTemplateCache.byEventTypeId;
-    const templatePath = locateTaeTemplatePathSync();
-    const result = templatePath ? await readTaeEventTemplateFile(templatePath) : null;
-    taeTemplateCache = {
-      loaded: true,
-      byEventTypeId: result?.ok ? result.byEventTypeId : null
-    };
-    return taeTemplateCache.byEventTypeId;
-  };
-
-  /** read-tae-document 的 bridge options：templateLayouts（无模板时省略）。 */
-  const taeTemplateLayoutsOption = (byEventTypeId: ReadonlyMap<number, TaeEventTemplateInfo> | null) =>
-    byEventTypeId
-      ? {
-          templateLayouts: Object.fromEntries(
-            [...byEventTypeId.entries()].map(([id, info]) => [
-              String(id),
-              info.fields.map((field) => ({ name: field.name, kind: field.kind, slotSize: field.slotSize }))
-            ])
-          )
-        }
-      : {};
-
-  let yappedOverlayCache: {
-    loaded: true;
-    /** ParamType → 字段覆盖；null 表示本机无 Yapped 或读不到可用 Defs。 */
-    defs: ReadonlyMap<string, YappedParamOverlay> | null;
-    /** 容器条目名 → 行 id → 行名；null 表示本机无 Yapped 或读不到可用 Names。 */
-    rowNames: ReadonlyMap<string, ReadonlyMap<number, string>> | null;
-    diagnostics: YappedSourceDiagnostic[];
-  } | null = null;
-
-  /**
-   * 惰性读本机 Yapped Defs/Names 索引并缓存。只读一次：160 个 xml + 160 个
-   * txt 实测数秒级，每读一个 param 都跑一遍会让界面卡住。空/缺失回 null，
-   * 不抛 —— 失败降级到 Smithbox 英文。
-   */
-  const loadYappedOverlayOnce = async (): Promise<{
-    defs: ReadonlyMap<string, YappedParamOverlay> | null;
-    rowNames: ReadonlyMap<string, ReadonlyMap<number, string>> | null;
-    diagnostics: YappedSourceDiagnostic[];
-  }> => {
-    if (yappedOverlayCache) return yappedOverlayCache;
-    const sdtRoot = locateYappedSdtRootSync();
-    if (!sdtRoot) {
-      yappedOverlayCache = {
-        loaded: true,
-        defs: null,
-        rowNames: null,
-        diagnostics: [{
-          severity: 'info',
-          code: 'YAPPED_SDT_NOT_FOUND',
-          message: '未找到本机 Yapped Paramdex/SDT，字段名回落 Smithbox 英文标注。'
-        }]
-      };
-      return yappedOverlayCache;
-    }
-    const [defs, names] = await Promise.all([
-      readYappedSdtDefsIndex(join(sdtRoot, 'Defs')),
-      readYappedSdtRowNamesIndex(join(sdtRoot, 'Names'))
-    ]);
-    yappedOverlayCache = {
-      loaded: true,
-      defs: defs.ok ? defs.byTypeName : null,
-      rowNames: names.ok ? names.byEntryName : null,
-      diagnostics: [...defs.diagnostics, ...names.diagnostics]
-    };
-    return yappedOverlayCache;
-  };
-
-  // 列表、字段解析和全量兼容路径可能同时触发行名覆盖读取；共享 promise，
-  // 避免每个入口各扫一遍本机 Defs/Names。
-  let yappedOverlayInFlight: ReturnType<typeof loadYappedOverlayOnce> | null = null;
-  const loadYappedOverlay = (): ReturnType<typeof loadYappedOverlayOnce> => {
-    if (yappedOverlayCache) return Promise.resolve(yappedOverlayCache);
-    if (yappedOverlayInFlight) return yappedOverlayInFlight;
-    yappedOverlayInFlight = loadYappedOverlayOnce().finally(() => {
-      yappedOverlayInFlight = null;
-    });
-    return yappedOverlayInFlight;
-  };
-
-  /**
-   * PARAM 元数据信任决定的持久化：userData 下的独立 JSON。
-   *
-   * 为什么不进 app.db：信任决定是一条单值用户设置，不需要事务；而 app.db 走
-   * OperationLogUtilityClient 子进程，把它当宿主会让「能不能打开 PARAM 字段
-   * 视图」耦合到那个子进程的可用性上。核心逻辑（摘要比对、策略构造）在
-   * core 的 paramMetadataTrustStore 里，与存储介质无关。
-   *
-   * 读失败一律当「未确认」而不抛：一条坏掉的设置不该让 PARAM 打不开，
-   * 而重新问一次用户比猜测一个残缺策略的含义安全。
-   */
-  const trustSettingsPath = join(app.getPath('userData'), 'param-metadata-trust.json');
-  const trustSettingsStore: AppSettingsStore = {
-    get(key) {
-      try {
-        const raw = readFileSync(trustSettingsPath, 'utf8');
-        const parsed = JSON.parse(raw) as Record<string, unknown>;
-        const value = parsed[key];
-        return typeof value === 'string' ? value : undefined;
-      } catch {
-        return undefined;
-      }
-    },
-    set(key, valueJson) {
-      let existing: Record<string, unknown> = {};
-      try {
-        existing = JSON.parse(readFileSync(trustSettingsPath, 'utf8')) as Record<string, unknown>;
-      } catch {
-        existing = {};
-      }
-      existing[key] = valueJson;
-      writeFileSync(trustSettingsPath, JSON.stringify(existing, null, 2), 'utf8');
-    },
-    delete(key) {
-      try {
-        const existing = JSON.parse(readFileSync(trustSettingsPath, 'utf8')) as Record<string, unknown>;
-        delete existing[key];
-        writeFileSync(trustSettingsPath, JSON.stringify(existing, null, 2), 'utf8');
-      } catch {
-        // 文件不存在或已损坏：删除是幂等的，无事可做。
-      }
-    }
-  };
-
-  /**
-   * 走**正规**路径取字段定义：包校验 → 描述符匹配 →（T5-2 起）行宽自动授信。
+   * 走**正规**路径取字段定义：内置包校验 → 描述符匹配 → 原生行宽核对。
    *
    * 此前生产侧是 `definitions.find((e) => e.document.typeName === typeName)`，
-   * 绕过了 matchParamMetadataPackage 的五键严格匹配、包摘要与信任策略三层检查。
-   * 那三层守的是「两台机器拿到同名但内容不同的元数据包」—— 偏移对不上就是
+   * 绕过了 matchParamMetadataPackage 的五键严格匹配、包摘要与行宽检查。
+   * 这些检查守的是「同名定义内容或版本不一致」——偏移对不上就是
    * 往错误字节位置写数值，存出来的 param 静默损坏。
    *
-   * 返回的 origin 决定渲染器是否放行字段写入：
-   *   · 行宽与定义一致 → 'imported'，写入放行（T5-2 自动授信，不再要求先点信任）；
-   *   · 未确认信任 → 不再挡编辑（grok T5：「可留开发者撤销，但不挡编辑」），
-   *     仅保留 param.metadata.setTrust 作为开发者侧的可选撤销入口。
+   * 返回的 origin 决定渲染器是否放行字段写入：只有 first-party 定义在包摘要、
+   * 五键匹配和原生行宽核对均通过时，才放行字段写入；外部 schema 不再进入生产链。
    */
   const resolveTrustedParamDefinition = async (
     typeName: string,
-    rowDataSize: number,
-    options: { waitForYappedOverlay?: boolean } = {}
+    rowDataSize: number
   ): Promise<{
     document: ParamDefDocument | null;
     trusted: boolean;
@@ -1159,9 +868,10 @@ let paramMetadataCache: {
     if (!metadata.package) {
       return { document: null, trusted: false, diagnostic: metadata.diagnostic };
     }
-    const entry = metadata.package.definitions
-      .find((candidate) => candidate.document.typeName === typeName);
-    if (!entry) {
+    const candidates = metadata.package.definitions.filter((candidate) =>
+      candidate.document.typeName === typeName && candidate.document.rowDataSize === rowDataSize
+    );
+    if (candidates.length === 0) {
       return {
         document: null,
         trusted: false,
@@ -1171,35 +881,79 @@ let paramMetadataCache: {
         }
       };
     }
-    if (entry.document.rowDataSize !== rowDataSize) {
+    if (candidates.length !== 1) {
       return {
         document: null,
         trusted: false,
         diagnostic: {
-          code: 'PARAM_METADATA_ROW_WIDTH_MISMATCH',
-          message: `字段定义行宽（${entry.document.rowDataSize}）与真实 PARAM（${rowDataSize}）不一致，`
-            + '不做解码 —— 用错位的布局解释字节会产出看似合理但完全错误的数值。'
+          code: 'PARAM_METADATA_AMBIGUOUS_MATCH',
+          message: `内置 PARAM schema 对 ${typeName} 与行宽 ${rowDataSize} 存在多个定义，拒绝猜测。`
         }
       };
     }
-    // 显示层覆盖：本机 Yapped 有该类型的中文 DisplayName/Description 就套上，
-    // 没有（或本机没装 Yapped）就原样回落 Smithbox。覆盖不改变 origin。
-    const waitForYappedOverlay = options.waitForYappedOverlay !== false;
-    const yapped = waitForYappedOverlay
-      ? await loadYappedOverlay()
-      : (yappedOverlayCache ?? { defs: null, rowNames: null, diagnostics: [] });
-    if (!waitForYappedOverlay) {
-      void loadYappedOverlay().catch(() => undefined);
+    const entry = candidates[0]!;
+    const matched = matchParamMetadataPackage(metadata.package, entry.key, undefined);
+    if (!matched.ok) {
+      return {
+        document: null,
+        trusted: false,
+        diagnostic: {
+          code: matched.diagnostics[0]?.code ?? 'PARAM_METADATA_MATCH_REJECTED',
+          message: matched.diagnostics[0]?.message ?? '内置 PARAM schema 匹配被拒绝。'
+        }
+      };
     }
-    const applyOverlay = (document: ParamDefDocument): ParamDefDocument =>
-      yapped.defs ? applyYappedFieldOverlay(document, yapped.defs) : document;
-    // T5-2：行宽匹配即授信。包在导入时已核对归档/源树/许可证三个摘要（钉死），
-    // 行宽匹配保证本表字段偏移对齐 —— 两把锁都过，不再把「用户点过确认」当第三道门。
     return {
-      document: applyOverlay({ ...entry.document, origin: 'imported' }),
+      document: { ...matched.definition.document, origin: 'first-party' },
       trusted: true,
       diagnostic: null
     };
+  };
+
+  /**
+   * Re-resolve a renderer-supplied field definition against the immutable
+   * first-party package before any bytes are mutated. Origin is a projection,
+   * not an authority: a caller must not be able to forge `origin: first-party`
+   * together with an arbitrary offset/layout and reach the writer.
+   */
+  const resolveCanonicalParamFieldDefinition = async (
+    input: unknown
+  ): Promise<
+    | { ok: true; definition: ParamDefDocument }
+    | { ok: false; diagnostic: { code: string; message: string } }
+  > => {
+    if (input === null || typeof input !== 'object' || Array.isArray(input)) {
+      return {
+        ok: false,
+        diagnostic: {
+          code: 'PARAM_FIELD_DEFINITION_INVALID',
+          message: '字段定义不是有效对象，拒绝写入。'
+        }
+      };
+    }
+    const candidate = input as Record<string, unknown>;
+    const typeName = typeof candidate.typeName === 'string' ? candidate.typeName.trim() : '';
+    const rowDataSize = typeof candidate.rowDataSize === 'number' ? candidate.rowDataSize : NaN;
+    if (!typeName || !Number.isSafeInteger(rowDataSize) || rowDataSize <= 0) {
+      return {
+        ok: false,
+        diagnostic: {
+          code: 'PARAM_FIELD_DEFINITION_INVALID',
+          message: '字段定义缺少有效的 typeName 或 rowDataSize，拒绝写入。'
+        }
+      };
+    }
+    const resolved = await resolveTrustedParamDefinition(typeName, rowDataSize);
+    if (!resolved.document || !resolved.trusted) {
+      return {
+        ok: false,
+        diagnostic: resolved.diagnostic ?? {
+          code: 'PARAM_FIELD_DEFINITION_NOT_TRUSTED',
+          message: '字段定义未通过 SoulForge 内置 schema 校验，拒绝写入。'
+        }
+      };
+    }
+    return { ok: true, definition: resolved.document };
   };
 
   function projectParamSessionMetadata(
@@ -1240,63 +994,29 @@ let paramMetadataCache: {
           : []
       };
     }
-    const decision = readTrustDecision(trustSettingsStore);
     return {
       ok: true,
-      trusted: trustCoversPackage(decision, metadata.package),
+      trusted: true,
       packageId: metadata.package.packageId,
       packageVersion: metadata.package.packageVersion,
       sourceIdentity: metadata.package.source?.identity ?? null,
       sourceRevision: metadata.package.source?.revision ?? null,
       licenseSpdxExpression: metadata.package.license?.spdxExpression ?? null,
-      ...(decision ? { confirmedAt: decision.confirmedAt } : {}),
       diagnostics: []
     };
   });
 
-  /**
-   * 记录用户对当前元数据包的信任决定。
-   *
-   * 「这个文件是不是那个发布」由钉死策略校验（导入器已核对归档摘要、源树摘要与
-   * 许可证摘要）；「你愿不愿意用它」只能由用户回答，应用不预置。
-   * 信任绑定到三个摘要而不是包名：包升级或被替换后摘要变化，旧决定不再覆盖，
-   * 会重新询问。
-   */
   handle('param.metadata.setTrust', async (_event, trusted: boolean) => {
-    const metadata = await loadParamMetadata();
-    if (!metadata.package) {
-      return {
-        ok: false,
-        diagnostics: [{
-          severity: 'error' as const,
-          code: metadata.diagnostic?.code ?? 'PARAM_METADATA_UNAVAILABLE',
-          message: metadata.diagnostic?.message ?? '元数据包不可用，无法记录信任决定。'
-        }]
-      };
-    }
-    if (!trusted) {
-      clearTrustDecision(trustSettingsStore);
-      return { ok: true, trusted: false, diagnostics: [] };
-    }
-    const built = buildTrustPolicyFromPackage(
-      metadata.package,
-      `USER_CONFIRMED_${metadata.package.packageId}_${metadata.package.packageVersion}`
-    );
-    if (!built.ok) {
-      return {
-        ok: false,
-        diagnostics: [{
-          severity: 'error' as const,
-          code: built.code,
-          message: built.message
-        }]
-      };
-    }
-    writeTrustDecision(trustSettingsStore, {
-      policy: built.policy,
-      confirmedAt: new Date().toISOString()
-    });
-    return { ok: true, trusted: true, diagnostics: [] };
+    void trusted;
+    return {
+      ok: false,
+      trusted: true,
+      diagnostics: [{
+        severity: 'error' as const,
+        code: 'PARAM_METADATA_EXTERNAL_SCHEMA_FORBIDDEN',
+        message: '生产 PARAM 仅使用 SoulForge 内置 first-party schema，不接受外部 schema 或信任覆盖。'
+      }]
+    };
   });
 
   handle('resource.readParamDocument', async (_event, sourceUri: string) => {
@@ -1395,8 +1115,8 @@ let paramMetadataCache: {
             ...(field.refs ? { refs: field.refs } : {}),
             ...(field.min !== undefined ? { min: field.min } : {}),
             ...(field.max !== undefined ? { max: field.max } : {}),
-            // Yapped 覆盖的中文名/Description 悬停：裸 param 读链与容器
-            // readContainerParamPage/readContainerParamRowIndex 映射保持一致。
+             // 字段描述来自 SoulForge 内置 PARAM schema，与裸 param 读链和容器
+             // readContainerParamPage/readContainerParamRowIndex 使用同一份定义。
             ...(field.description ? { description: field.description } : {})
           }))
         : null,
@@ -1412,16 +1132,14 @@ let paramMetadataCache: {
             values: enumDef.values.map((value) => ({ value: value.value, label: value.label }))
           }))
         : null,
-      // 诊断统一来自 resolveTrustedParamDefinition：它区分「包不可用」
-      // 「类型不存在」「行宽不符」「尚未授信」四种情形，各自给出可行动的码。
-      // 尤其「尚未授信」不是故障 —— 字段可读、只是写入未放行，文案必须说清
-      // 下一步动作（确认一次），否则用户会以为功能坏了。
+      // 诊断统一来自 resolveTrustedParamDefinition：它区分内置包不可用、
+      // 类型不存在、行宽不符和歧义匹配，各自给出可行动的码。
       fieldDefsDiagnostic: resolved.diagnostic,
       /**
        * 字段定义的授信状态。渲染器据此决定是否放行字段写入。
        *
-       * origin 是 'imported' 才放行 —— 这个值不是渲染器自己拼的，而是主进程
-       * 在包校验、行宽核对与用户信任策略都通过后才给出的。
+       * first-party 与严格行宽匹配通过后放行；这个值不是渲染器自己拼的，
+       * 而是主进程从内置包校验结果投影出来的。
        */
       fieldDefsOrigin: paramDef?.origin ?? null,
       fieldDefsTrusted: resolved.trusted,
@@ -1612,8 +1330,8 @@ let paramMetadataCache: {
                 ...(field.refs ? { refs: field.refs } : {}),
                 ...(field.min !== undefined ? { min: field.min } : {}),
                 ...(field.max !== undefined ? { max: field.max } : {}),
-                // 与 readParamDocument / readContainerParamPage 一致：透传 Yapped
-                // 覆盖的中文名/Description 悬停（见 readParamDocument 同款注释）。
+                // 与 readParamDocument / readContainerParamPage 一致：透传内置
+                // schema 提供的 Description 悬停。
                 ...(field.description ? { description: field.description } : {})
               }))
             : null,
@@ -1897,10 +1615,27 @@ let paramMetadataCache: {
       const gameBlocked = deps.rejectNonSekiroNativeWrite(sourceUri, file);
       if (gameBlocked) return gameBlocked;
 
+      // Origin is not trusted merely because it arrived from the renderer.
+      // Resolve the submitted shape back to the immutable first-party layout
+      // before calculating any byte offset.
+      const definitionResult = await resolveCanonicalParamFieldDefinition(mutation.definition);
+      if (!definitionResult.ok) {
+        return {
+          ok: false,
+          changedFiles: [],
+          diagnostics: [{
+            severity: 'error',
+            code: definitionResult.diagnostic.code,
+            message: definitionResult.diagnostic.message,
+            sourceUri
+          }]
+        };
+      }
+
       // Apply field-level mutation to get the modified row bytes
       const fieldResult = applyParamFieldMutation({
         rowDataBase64: mutation.rowDataBase64,
-        definition: mutation.definition as ParamDefDocument,
+        definition: definitionResult.definition,
         fieldId: mutation.fieldId,
         value: mutation.value
       });
@@ -2039,23 +1774,22 @@ let paramMetadataCache: {
       const gameBlocked = deps.rejectNonSekiroNativeWrite(containerUri, file);
       if (gameBlocked) return gameBlocked;
 
-      // ① 字段值编码进行字节。定义未授信时 applyParamFieldMutation 之前就该被
-      //    渲染器挡住，但这里不依赖前端守卫 —— 它只校验行宽与 base64 合法性，
-      //    真正的授权判定在 resolveTrustedParamDefinition 给出的 origin 上。
-      const definition = mutation.definition as ParamDefDocument;
-      if (definition?.origin !== 'imported' && definition?.origin !== 'user-derived') {
+      // ① 先将 renderer 提交的定义重新绑定到 immutable first-party layout。
+      //    不以 origin 字段作为权限证明，避免伪造来源后改变字段偏移。
+      const definitionResult = await resolveCanonicalParamFieldDefinition(mutation.definition);
+      if (!definitionResult.ok) {
         return {
           ok: false,
           changedFiles: [],
           diagnostics: [{
             severity: 'error',
-            code: 'PARAM_FIELD_DEFINITION_NOT_TRUSTED',
-            message: '字段定义来源未授信，拒绝写入。元数据字段偏移若与真实 PARAM 不符，'
-              + '按它写入就是往错误字节位置塞数值。请先确认信任该元数据包。',
+            code: definitionResult.diagnostic.code,
+            message: definitionResult.diagnostic.message,
             sourceUri: containerUri
           }]
         };
       }
+      const definition = definitionResult.definition;
       const fieldResult = applyParamFieldMutation({
         rowDataBase64: mutation.rowDataBase64,
         definition,
@@ -2484,7 +2218,7 @@ let paramMetadataCache: {
    *   ③ 真正落盘由 applyNativeMutation 的 commit port（Patch Engine）完成，
    *      含备份与回滚元数据。
    *
-   * rowId 由渲染器按「当前表最大 id + 1」给出（不跳过空洞，对照 Yapped）；
+   * rowId 由渲染器按「当前表最大 id + 1」给出（不跳过空洞，保持编辑器约定）；
    * add/copy 必须携带整行字节（copy = 当前行原样；add = 长度=行宽的 0 行），
    * 长度由 C# 侧对 RowDataSize 校验。旧布局（无行头）PARAM 不支持行数变更，
    * C# add/delete 会返回结构化失败，不会破坏无损性。
@@ -3085,7 +2819,7 @@ let paramMetadataCache: {
   );
 
   /**
-   * T5-4：导出备注（行名，CSV：id,name）—— 对照 Yapped Export/Import Names。
+   * T5-4：导出备注（行名，CSV：id,name）。
    */
   handle(
     'param.exportNamesCsv',
@@ -3163,7 +2897,7 @@ let paramMetadataCache: {
   );
 
   /**
-   * T5-4：导入备注（行名 CSV：id,name）—— 对照 Yapped Import Names。
+   * T5-4：导入备注（行名 CSV：id,name）。
    *
    * 主进程打开对话框选文件；逐 id 把「当前行字节原样回传 + 新 name」拼成
    * write-param upsert，整批经 commitContainerParamBulk 走 Patch Engine。
@@ -3557,8 +3291,7 @@ let paramMetadataCache: {
     // 让用户点进大型表时，native 行索引与字段定义可以并行准备，而不是
     // 把几秒级的首次包导入全部压到“选中首行”之后。
     void loadParamMetadata();
-    // 行名覆盖同样只读且只应有一个 loader；后台预热不阻塞左侧条目列表。
-    void loadYappedOverlay().catch(() => undefined);
+    // 内置 schema 校验在后台预热，不阻塞左侧条目列表。
     // ROOT-07：只读枚举只传已存在并 verified 的 roots，不附加 staging。
     const roots = await deps.verifiedReadRoots(getSession()!, dirname(file.absolutePath));
     if (roots.diagnostics.length > 0) {
@@ -3834,11 +3567,11 @@ let paramMetadataCache: {
       // P1 裁定：容器工作台走 readContainerParamPage，渲染器的 FIELDS 栏只从
       // fieldDefs 拿定义，而这条通道此前根本没返回。这里复用与
       // resource.readParamDocument 完全相同的 resolveTrustedParamDefinition 与
-      // 逐字段映射（包校验 + 行宽核对 + 用户信任策略三层都不绕过）。
+      // 逐字段映射（内置包校验 + 行宽核对不绕过）。
       // UNKNOWN_PARAM 按空串走「无定义」分支（等价于原来的 full.data.typeName ?? ''）。
       const containerTypeName = doc.typeName === 'UNKNOWN_PARAM' ? '' : doc.typeName;
       const resolvedContainerDef = containerTypeName
-        ? await resolveTrustedParamDefinition(containerTypeName, doc.rowDataSize, { waitForYappedOverlay: false })
+        ? await resolveTrustedParamDefinition(containerTypeName, doc.rowDataSize)
         : { document: null, trusted: false, diagnostic: null };
       const containerParamDef = resolvedContainerDef.document;
       // 行宽已在 resolveTrustedParamDefinition 内核对：拿到 document 即行宽一致。
@@ -3855,12 +3588,6 @@ let paramMetadataCache: {
       // ── 全量路径（用户裁定）：一次返回全部行（含字节）；渲染器本地过滤与
       //    虚拟化，不再分批续取；字段定义照常随页下发（P1 裁定，与分页路径一致）。
       if (loadAll) {
-        // T5-3 行名回落：Bridge 没解码出名字的行，查本机 Yapped Names（条目名键）。
-        // 键是容器条目名（SpEffectParam，不带 .param），与 Defs 的 ParamType 键不同。
-        const yappedRowNames = (await loadYappedOverlay()).rowNames;
-        const yappedEntryName = unpacked.child.name.replace(/\.param$/i, '');
-        const yappedNameFor = (rowId: number): string | undefined =>
-          yappedRowNames?.get(yappedEntryName)?.get(rowId);
         return {
           ok: true,
           containerUri,
@@ -3902,7 +3629,6 @@ let paramMetadataCache: {
           pageCount: 1,
           rows: filtered.map((row) => {
             const dataBase64 = typeof row.dataBase64 === 'string' ? row.dataBase64 : undefined;
-            const yappedName = row.name ? undefined : yappedNameFor(row.id);
             return {
               rowIndex: row.rowIndex,
               id: row.id,
@@ -3915,9 +3641,7 @@ let paramMetadataCache: {
                       .toString('hex')
                   }
                 : {}),
-              ...(row.name
-                ? { name: row.name }
-                : (yappedName ? { name: yappedName, nameOrigin: 'yapped' as const } : {}))
+              ...(row.name ? { name: row.name } : {})
             };
           }),
           rowsTruncated: (doc.rowCount ?? allRows.length) > allRows.length,
@@ -4286,7 +4010,6 @@ let paramMetadataCache: {
   // 在主进程注册完成后后台预热一次本机只读元数据。这样用户打开工作区、扫描
   // 资源时就能并行完成包校验；首次点表不再承担整包导入的全部等待。
   void loadParamMetadata().catch(() => undefined);
-  void loadYappedOverlay().catch(() => undefined);
 
   // Renderer cutover must preserve value-search semantics without reintroducing loadAll; implement native/session-side value search before removing the legacy path.
 }

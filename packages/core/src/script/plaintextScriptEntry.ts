@@ -199,8 +199,8 @@ export function classifyPlaintextBytes(bytes: Uint8Array): PlaintextVerdict {
         severity: 'error',
         code: 'PLAINTEXT_REJECTED_LUA_BYTECODE_MAGIC',
         message: '条目以 \\x1bLua 字节码签名开头,是编译产物。'
-          + ' 字节码条目只允许整文件替换,不允许源码级编辑'
-          + '(当前没有 HKS 重编译器)。'
+          + ' 当前 Sekiro HKS 字节码应由上层 first-party Bridge 编译器处理，'
+          + '本明文编码器不直接改写字节码。'
       })]
     };
   }

@@ -48,7 +48,7 @@ export function registerModelServiceIpcHandlers(deps: ModelServiceIpcDeps): void
       input: {
         id?: string;
         displayName: string;
-        protocol: 'openai-compatible' | 'anthropic-compatible';
+        protocol: 'openai-compatible' | 'openai-responses' | 'anthropic-compatible';
         baseUrl: string;
         model: string;
         apiKey?: string;

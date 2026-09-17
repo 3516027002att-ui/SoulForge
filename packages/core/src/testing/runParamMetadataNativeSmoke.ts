@@ -16,7 +16,7 @@ import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { runBridge, disposeBridgeDaemonPool } from '../bridge/runBridge.js';
-import { importPinnedSmithboxSdtParamMetadata } from '../param/smithboxParamMetadataSource.js';
+import { importPinnedSmithboxSdtParamMetadata } from './smithboxParamMetadataSource.js';
 import { matchParamMetadataPackage, resolveParamMetadataRowWidth } from '../param/paramMetadata.js';
 import { readParamDocumentViaBridge } from '../editing/paramBridgeCommit.js';
 import { decodeRowFields, validateParamDef } from '../param/paramdefLayout.js';

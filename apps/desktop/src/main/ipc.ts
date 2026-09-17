@@ -1,6 +1,5 @@
-import { spawn } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
-import { existsSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
+import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { mkdir, readFile, stat, unlink, writeFile } from 'node:fs/promises';
 import { app, BrowserWindow, dialog, ipcMain, type IpcMainInvokeEvent, type WebContents } from 'electron';
 import { basename, dirname, join, relative, resolve, sep } from 'node:path';
@@ -17,12 +16,6 @@ import { resolveWorkspaceStoragePaths, type WorkspaceStoragePaths } from './work
 import {
   analyzeWorkspace,
   buildAiSidebarDraft,
-  buildTrustPolicyFromPackage,
-  clearTrustDecision,
-  readTrustDecision,
-  trustCoversPackage,
-  writeTrustDecision,
-  type AppSettingsStore,
   createAgentToolBridge,
   createConfiguredModelServiceAdapter,
   isAllowedEndpoint,
@@ -32,14 +25,6 @@ import {
   createConfirmationReceipt,
   createContextBroker,
   createUnifiedDiff,
-  importPinnedSmithboxSdtParamMetadata,
-  applyYappedFieldOverlay,
-  readYappedSdtDefsIndex,
-  readYappedSdtRowNamesIndex,
-  readTaeEventTemplateFile,
-  type TaeEventTemplateInfo,
-  type YappedParamOverlay,
-  type YappedSourceDiagnostic,
   listRolloutSessions,
   loadRolloutSession,
   runAgentSession,
@@ -52,7 +37,6 @@ import {
   encodeScriptSourceForWriteback,
   classifyScriptEntry,
   magicLabel,
-  locateDsLuaDecompilerSync,
   normalizePageWindow,
   sanitizeEntryName,
   applyParamFieldMutation,
@@ -138,6 +122,11 @@ import {
   mapExportFromMsbDocument
 } from '@soulforge/core';
 import {
+  KnowledgeStore,
+  SqliteKnowledgeStorePersistence,
+  openWorkspaceDatabase
+} from '@soulforge/core';
+import {
   CONTAINER_PAGE_SIZE,
   FMG_PAGE_SIZE,
   PARAM_PAGE_SIZE,
@@ -181,10 +170,8 @@ import type {
   EditorContentQuery,
   EditorMutation,
   OpenEditorDocumentValue,
-  ParamMetadataPackage,
   EmevdEditorDocument,
   IndexedFile,
-  ParamDefDocument,
   GparamDocument,
   ReadOperationId,
   RagChunkFamily,
@@ -247,7 +234,7 @@ import {
 } from './ipc/workspace.js';
 import { clearParamIpcCaches, registerParamIpcHandlers } from './ipc/param.js';
 import { registerDocumentIpcHandlers, resetEditorDocumentStore } from './ipc/documents.js';
-import { registerOperationIpcHandlers } from './ipc/operations.js';
+import { hasActiveRollbackRequests, registerOperationIpcHandlers } from './ipc/operations.js';
 import { registerModelServiceIpcHandlers } from './ipc/modelServices.js';
 import { registerRawIpcHandlers, clearRawIpcCaches } from './ipc/raw.js';
 import { registerTextIpcHandlers, clearTextIpcCaches } from './ipc/text.js';
@@ -256,6 +243,7 @@ import { registerActionIpcHandlers } from './ipc/action.js';
 import { registerAssetIpcHandlers } from './ipc/assets.js';
 import { registerEventIpcHandlers, clearEmevdIpcCaches, disposeEmevdWindow } from './ipc/event.js';
 import { clearAgentIpcState } from './ipc/agent.js';
+import { registerUpdateIpcHandlers } from './update/updateIpc.js';
 
 /** 只读存在性检查（chrbnd 伴生查找用；不抛异常）。 */
 function safeExists(path: string): boolean {
@@ -268,6 +256,10 @@ function safeExists(path: string): boolean {
 
 let activeOperationLog: OperationLogUtilityClient | null = null;
 let activeOperationLogWorkspaceId: string | null = null;
+let activeKnowledgeStore: KnowledgeStore | null = null;
+let activeKnowledgeDatabase: ReturnType<typeof openWorkspaceDatabase> | null = null;
+let activeKnowledgeWorkspaceId: string | null = null;
+let activeKnowledgeStoreError: string | null = null;
 let recoveryCleanupWorkspaceId: string | null = null;
 let recoveryCleanupInFlight: Promise<void> | null = null;
 let semanticRefreshInFlight: Promise<void> | null = null;
@@ -320,90 +312,6 @@ function clearEditorPageCaches(): void {
   clearWorkspaceIpcCaches();
   clearAgentIpcState();
   resetEditorDocumentStore();
-}
-
-/**
- * EMEDF 自动定位（同步、只读、有界）。
- *
- * R3/P4 裁定：事件源码必须是 DarkScript3 式（EMEDF 函数名），没 EMEDF 失败关闭。
- * T4 查找顺序（grok 2026-08-15 拍死）：
- * 1. SOULFORGE_EMEDF_PATH（显式覆盖）；
- * 2. 固定候选：本机 DarkScript3 事件编辑器发布包的真实落地
- *    `<tools>/事件编辑器3.4.1/Resources/sekiro-common.emedf.json`；
- * 3. 已挂载 baseRoot 兄弟 `tools/<一层子目录>/Resources/`（DarkScript3 发布包
- *    常规落地形态）；
- * 4. 已挂载 overlay 根向上两级（workspace 层）的兄弟 `tools/<一层>/Resources/`；
- * 5. SOULFORGE_SEKIRO_GAME_ROOT 同样扫兄弟 tools；
- * 6. 有界用户目录（Desktop/Documents/Downloads）。
- * 绝不递归整盘；找不到返回 null，由 resolveEmevdRegistry 失败关闭到 fixture。
- */
-const EMEDF_RELATIVE_CANDIDATES = [
-  'sekiro-common.emedf.json',
-  'Sekiro/sekiro-common.emedf.json',
-  'sekiro.emedf.json',
-  'Resources/sekiro-common.emedf.json'
-];
-
-/** T4 固定候选：本机 DarkScript3 事件编辑器发布包真实落地（grok 已求证存在）。 */
-const EMEDF_FIXED_CANDIDATES = [
-  'D:\\mystream\\Sekiro Shadows Die Twice\\tools\\事件编辑器3.4.1\\Resources\\sekiro-common.emedf.json'
-];
-
-/**
- * 往 roots 追加某 gameRoot 兄弟 `tools/` 目录及其中一层子目录，供后续逐候选探测。
- * 找不到 tools/ 或不可读时静默跳过，不阻断其他候选。
- */
-function pushToolsSubdirs(roots: string[], gameRoot: string | undefined): void {
-  if (!gameRoot) return;
-  const toolsDir = join(dirname(gameRoot), 'tools');
-  try {
-    roots.push(toolsDir);
-    for (const entry of readdirSync(toolsDir, { withFileTypes: true })) {
-      if (entry.isDirectory()) roots.push(join(toolsDir, entry.name));
-    }
-  } catch {
-    // tools 目录不存在/不可读：跳过，继续其他候选。
-  }
-}
-
-function locateUserEmedfSync(): string | null {
-  const roots: string[] = [];
-  // 1) 显式环境变量优先。
-  const explicit = process.env.SOULFORGE_EMEDF_PATH?.trim();
-  if (explicit) roots.push(resolve(explicit));
-  // 2) 固定候选：DarkScript3 事件编辑器发布包的本机真实落地（整路径直接判存在）。
-  for (const candidate of EMEDF_FIXED_CANDIDATES) {
-    try {
-      if (existsSync(candidate)) return candidate;
-    } catch {
-      // 继续下一个候选。
-    }
-  }
-  // 3) 已挂载 baseRoot 的兄弟 tools/<一层子目录>。
-  const emedfSession = getWorkspaceSession();
-  pushToolsSubdirs(roots, emedfSession?.layers.baseRoot);
-  // 4) 已挂载 overlay 根向上两级（workspace 层）的兄弟 tools/<一层>/Resources/。
-  const overlay = emedfSession?.layers.overlayRoot?.trim();
-  if (overlay) pushToolsSubdirs(roots, dirname(dirname(overlay)));
-  // 5) SOULFORGE_SEKIRO_GAME_ROOT 同样扫兄弟 tools。
-  const gameRootEnv = process.env.SOULFORGE_SEKIRO_GAME_ROOT?.trim();
-  if (gameRootEnv) pushToolsSubdirs(roots, gameRootEnv);
-  // 6) 有界用户目录。
-  const home = process.env.USERPROFILE ?? process.env.HOME ?? '';
-  if (home) {
-    roots.push(join(home, 'Desktop'), join(home, 'Documents'), join(home, 'Downloads'));
-  }
-  for (const root of roots) {
-    for (const relative of EMEDF_RELATIVE_CANDIDATES) {
-      try {
-        const candidate = join(root, relative);
-        if (existsSync(candidate)) return candidate;
-      } catch {
-        // 继续下一个候选。
-      }
-    }
-  }
-  return null;
 }
 
 /**
@@ -691,14 +599,6 @@ function readSystemPrompt(): string | null {
   return null;
 }
 
-function agentTaskRecordDirectory(): string {
-  const explicit = process.env.SOULFORGE_AGENT_TASK_RECORD_DIR;
-  if (explicit && explicit.trim() !== '') return resolve(explicit);
-  return app.isPackaged
-    ? join(app.getPath('userData'), 'prompt', '.agent-task-records')
-    : resolve(app.getAppPath(), '..', '..', 'prompt', '.agent-task-records');
-}
-
 /* ------------------------------------------------------------------ */
 /*  AI agent session IPC contract (Codex-derived kernel).             */
 /*  Keys never cross the bridge; events are redacted by the host.     */
@@ -708,6 +608,7 @@ export interface AiAgentRunRequest {
   configId: string;
   prompt: string;
   mode?: 'plan' | 'normal' | 'fullPermission';
+  permissionGrantId?: string;
   streaming?: boolean;
   /** Session-relative rollout path as returned by ai.agent.sessions. */
   resumeSessionPath?: string;
@@ -748,9 +649,8 @@ export interface AiAgentRunRequest {
   /** Cap on injected rag-evidence hits per turn (1..8). */
   ragSearchMaxHits?: number;
   /**
-   * Permission levels that require user approval. Omit for the loop's default
-   * (stage/commit/rollback/write). An explicit empty array disables approval,
-   * which main refuses outside plan mode — see the handler.
+   * Legacy compatibility field. Main ignores renderer-supplied values; the
+   * effective approval policy comes from the main-issued permission grant.
    */
   approvalRequiredLevels?: string[];
   /**
@@ -801,6 +701,12 @@ export interface AiAgentApprovalResponseRequest {
 
 export type AiAgentRunIpcResult =
   | { ok: true; sessionId: string }
+  | { ok: false; error: { code: string; message: string } };
+export type AiAgentPermissionRequestResult =
+  | { ok: true; grantId: string; mode: 'plan' | 'normal' | 'fullPermission'; expiresAt: string }
+  | { ok: false; error: { code: string; message: string } };
+export type AiAgentCancelIpcResult =
+  | { ok: true }
   | { ok: false; error: { code: string; message: string } };
 
 export interface AiAgentSessionSummaryIpc {
@@ -970,6 +876,7 @@ function currentToolContext(): ToolContext {
   const rag = getWorkspaceRag();
   const storage = session ? durableStoragePaths(session.meta.workspaceId) : undefined;
   const memoryStore = memoryManager.getStore(index?.workspaceId);
+  const knowledgeStore = session ? ensureActiveKnowledgeStore(session) : null;
   return {
     workspaceIndex: index,
     mode: activeAiMode,
@@ -978,9 +885,61 @@ function currentToolContext(): ToolContext {
     ...(session ? { session } : {}),
     ...(activeOperationLog ? { operationLogStore: activeOperationLog } : {}),
     ...(storage ? { backupBaseDir: storage.backupBaseDir, recoveryDir: storage.recoveryDir } : {}),
+    ...(knowledgeStore ? { knowledgeStore } : {}),
+    ...(activeKnowledgeStoreError ? { knowledgeStoreDiagnostic: activeKnowledgeStoreError } : {}),
     onSemanticEvidenceUpdated: refreshActiveIndexAfterSemanticEvidence,
     onNativeWriteCommitted: refreshActiveIndexAfterNativeWrite
   };
+}
+
+/**
+ * Knowledge is a curator/evidence store, not a Mod writer. Keep one SQLite
+ * connection per active workspace and reopen it when the workspace identity
+ * changes. A failed open is observable through the tool context and never
+ * becomes an empty in-memory result.
+ */
+function ensureActiveKnowledgeStore(session: WorkspaceSession): KnowledgeStore | null {
+  const workspaceId = session.meta.workspaceId;
+  if (activeKnowledgeWorkspaceId === workspaceId && activeKnowledgeStore) return activeKnowledgeStore;
+  disposeActiveKnowledgeStore();
+  try {
+    const storage = durableStoragePaths(workspaceId, session.layers.overlayRoot);
+    // The main process is Electron, not the repository's Node ABI.  Use the
+    // same prepared native binding as the database utility; otherwise the
+    // KnowledgeStore fails only in real desktop/Agent runs while its isolated
+    // Node smoke passes, and query_knowledge is downgraded to a misleading
+    // KNOWLEDGE_STORE_UNAVAILABLE result.
+    const database = openWorkspaceDatabase(join(storage.root, 'workspace.db'), {
+      nativeBinding: sqliteNativeBindingPath
+    });
+    const persistence = new SqliteKnowledgeStorePersistence(database, {
+      workspaceId,
+      rootPath: session.layers.overlayRoot,
+      game: session.meta.game
+    });
+    const store = new KnowledgeStore({ persistence, schemaVersion: 'knowledge-v1' });
+    activeKnowledgeDatabase = database;
+    activeKnowledgeWorkspaceId = workspaceId;
+    activeKnowledgeStore = store;
+    activeKnowledgeStoreError = null;
+    return store;
+  } catch (error) {
+    activeKnowledgeWorkspaceId = workspaceId;
+    activeKnowledgeStore = null;
+    activeKnowledgeStoreError = error instanceof Error ? error.message : String(error);
+    console.warn(`[SoulForge knowledge] SQLite store unavailable: ${activeKnowledgeStoreError}`);
+    return null;
+  }
+}
+
+function disposeActiveKnowledgeStore(): void {
+  activeKnowledgeStore = null;
+  activeKnowledgeWorkspaceId = null;
+  activeKnowledgeStoreError = null;
+  if (activeKnowledgeDatabase) {
+    try { activeKnowledgeDatabase.close(); } catch {}
+    activeKnowledgeDatabase = null;
+  }
 }
 
 async function persistActiveRag(
@@ -1586,121 +1545,6 @@ async function verifiedStageRoots(
   return { allowedRoots: [...roots.allowedRoots], writableRoots: [...roots.writableRoots], diagnostics: [] };
 }
 
-/**
- * S16 脚本 IDE：HKS 字节码反编译（main 进程 spawn 本机 DSLuaDecompiler.exe）。
- *
- * `DSLuaDecompiler <file> --console` 把 Lua 字节码反编译到 stdout；发行目标
- * net7，本机可能只有 .NET 6/8，故注入 DOTNET_ROLL_FORWARD=LatestMajor。
- * stdout 有界（8 MiB）、超时 kill；一切失败结构化返回，不抛给 renderer。
- */
-export interface DsLuaDecompileRunResult {
-  ok: boolean;
-  stdout: string;
-  stderr: string;
-  timedOut: boolean;
-  exitCode: number | null;
-  spawnFailure: string | null;
-  truncated: boolean;
-}
-
-export async function runDsLuaDecompilerCapture(
-  exePath: string,
-  hksPath: string,
-  timeoutMs: number
-): Promise<DsLuaDecompileRunResult> {
-  return await new Promise((resolveResult) => {
-    let settled = false;
-    let stdout = Buffer.alloc(0);
-    let stderr = Buffer.alloc(0);
-    let truncated = false;
-    let child: ReturnType<typeof spawn> | undefined;
-    let timer: NodeJS.Timeout | undefined;
-    const stdoutLimit = 8 * 1024 * 1024;
-    const settle = (result: DsLuaDecompileRunResult): void => {
-      if (settled) return;
-      settled = true;
-      if (timer) clearTimeout(timer);
-      resolveResult(result);
-    };
-    const current = (exitCode: number | null, extra: Partial<DsLuaDecompileRunResult>): DsLuaDecompileRunResult => ({
-      ok: exitCode === 0 && !truncated,
-      stdout: stdout.toString('utf8'),
-      stderr: stderr.toString('utf8'),
-      timedOut: false,
-      exitCode,
-      spawnFailure: null,
-      truncated,
-      ...extra
-    });
-    timer = setTimeout(() => {
-      try { child?.kill(); } catch { /* 超时终止，尽力而为 */ }
-      settle(current(null, { timedOut: true }));
-    }, timeoutMs);
-    try {
-      child = spawn(exePath, [hksPath, '--console'], {
-        cwd: dirname(exePath),
-        shell: false,
-        windowsHide: true,
-        stdio: ['ignore', 'pipe', 'pipe'],
-        env: { ...process.env, DOTNET_ROLL_FORWARD: 'LatestMajor' }
-      });
-    } catch (error) {
-      settle({
-        ok: false,
-        stdout: '',
-        stderr: String(error),
-        timedOut: false,
-        exitCode: null,
-        spawnFailure: error instanceof Error ? error.message : String(error),
-        truncated: false
-      });
-      return;
-    }
-    child.stdout?.on('data', (chunk: Buffer | string) => {
-      const bytes = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
-      const remaining = stdoutLimit - stdout.length;
-      if (bytes.length > remaining) truncated = true;
-      if (remaining > 0) stdout = Buffer.concat([stdout, bytes.subarray(0, remaining)]);
-    });
-    child.stderr?.on('data', (chunk: Buffer | string) => {
-      const bytes = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
-      const remaining = stdoutLimit - stderr.length;
-      if (bytes.length > remaining) truncated = true;
-      if (remaining > 0) stderr = Buffer.concat([stderr, bytes.subarray(0, remaining)]);
-    });
-    child.once('error', (error) => {
-      settle({
-        ok: false,
-        stdout: '',
-        stderr: '',
-        timedOut: false,
-        exitCode: null,
-        spawnFailure: error.message,
-        truncated: false
-      });
-    });
-    child.once('close', (code) => {
-      settle(current(code, {}));
-    });
-  });
-}
-
-/** 反编译器命中来源的人类可读标识（renderer 展示用，不含路径）。 */
-function decompilerLabel(origin: 'explicit' | 'v1.1.5' | 'tools-scan' | 'legacy' | 'none'): string {
-  switch (origin) {
-    case 'explicit':
-      return 'DSLuaDecompiler（显式路径）';
-    case 'v1.1.5':
-      return 'DSLuaDecompiler v1.1.5';
-    case 'tools-scan':
-      return 'DSLuaDecompiler（tools 扫描）';
-    case 'legacy':
-      return 'DSLuaDecompiler（hks解码目录）';
-    default:
-      return 'DSLuaDecompiler';
-  }
-}
-
 function normalizeGameIdentity(value: unknown): string {
   return String(value ?? '')
     .trim()
@@ -1744,6 +1588,7 @@ export async function disposeOperationLogUtility(): Promise<void> {
   activeOperationLogWorkspaceId = null;
   recoveryCleanupWorkspaceId = null;
   recoveryCleanupInFlight = null;
+  await disposeActiveKnowledgeStore();
   await operationLogUtility.dispose();
 }
 
@@ -1964,9 +1809,26 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
     // 审批按拒绝结算（无人回答 ≠ 同意执行写入）。其他窗口的运行不受影响。
     // agent runs teardown handled in ipc/agent.ts via bound webContents
   });
+  const trustedHandle: TrustedIpcHandle = handle;
+  // Update handlers are also called when a later window is created: the
+  // service remains singleton, while its event target follows the foreground
+  // trusted renderer.
+  registerUpdateIpcHandlers({
+    handle: trustedHandle,
+    webContents,
+    userDataPath: app.getPath('userData'),
+    currentVersion: app.getVersion(),
+    isPackaged: app.isPackaged,
+    hasActiveAgentRuns,
+    hasActiveRollbacks: hasActiveRollbackRequests,
+    hasActiveTransactions: async () => {
+      if (!activeOperationLog) return false;
+      const incomplete = await activeOperationLog.listIncompleteTransactions();
+      return incomplete.length > 0;
+    }
+  });
   if (handlersRegistered) return;
   handlersRegistered = true;
-  const trustedHandle: TrustedIpcHandle = handle;
   // Spec A2-A13 registration order: documents -> operations -> modelServices -> raw -> text -> map -> action -> assets -> event -> param -> workspace -> agent
   registerDocumentIpcHandlers({
     handle: trustedHandle,
@@ -2046,7 +1908,6 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
     get activeIndex() { return getWorkspaceActiveIndex(); },
     get activeWorkspaceSessionId() { return getActiveWorkspaceSessionIdState(); },
     safeExists,
-    pushToolsSubdirs,
     asBasicDiagnostics: (items) => items.map((item) => ({ severity: item.severity === 'warning' || item.severity === 'info' ? item.severity : 'error', code: item.code, message: item.message, ...(item.sourceUri ? { sourceUri: item.sourceUri } : {}) })),
     verifiedReadRoots,
     ensureActionBinderMembershipForFamily: (characterFamily) => ensureActionBinderMembershipForFamily({ verifiedReadRoots }, characterFamily),
@@ -2075,7 +1936,6 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
     durableStoragePaths,
     bridgeRootSession,
     bridgeRootsDiagnostic,
-    pushToolsSubdirs,
     rejectNonSekiroNativeWrite,
     ensureActiveOperationLog,
     sessionCommitPort,
@@ -2130,7 +1990,6 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
     durableStoragePaths,
     currentToolContext,
     requestWriteConfirmation,
-    taskRecordDirectory: agentTaskRecordDirectory,
     readSystemPrompt
   });
 
@@ -2142,6 +2001,10 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
     getActiveWorkspaceSessionId: getActiveWorkspaceSessionIdState,
     durableStoragePaths,
     ensureActiveOperationLog,
+    verifiedReadRoots,
+    verifiedStageRoots,
+    sessionCommitPort,
+    toSaveResultFromOutcome,
     rejectNonSekiroNativeWrite,
     requestWriteConfirmation,
     refreshActiveIndexAfterNativeWrite,

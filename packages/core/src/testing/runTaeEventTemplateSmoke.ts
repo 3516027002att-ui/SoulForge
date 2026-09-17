@@ -4,7 +4,7 @@ import { join } from 'node:path';
 import {
   parseTaeEventTemplateXml,
   readTaeEventTemplateFile
-} from '../tae/taeEventTemplate.js';
+} from './taeEventTemplate.js';
 
 /**
  * S17 动作域：DSAS TAE.Template.SDT.xml 词条解析器 smoke。

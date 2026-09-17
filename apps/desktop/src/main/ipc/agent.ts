@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { existsSync, readdirSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
-import { app } from 'electron';
+import { app, dialog } from 'electron';
 import type { WebContents, IpcMainInvokeEvent } from 'electron';
 import { basename, join, relative, resolve, sep } from 'node:path';
 import {
@@ -12,8 +12,12 @@ import {
   createContextBroker,
   createUnifiedDiff,
   getRagStaleChunkMaskCached,
+  CoreToolSession,
+  nativeEditSessionFromContext,
   retrieveEvidence,
   retrieveEvidenceHybrid,
+  buildRagCorpus,
+  mergeCatalogAndPersisted,
   createRagCorpus,
   listRolloutSessions,
   loadRolloutSession,
@@ -35,7 +39,7 @@ import type {
   AiSidebarDraft,
   AiSidebarDraftRequest
 } from '@soulforge/core';
-import type { ConfirmationReceipt, RagChunkFamily, RagRetrieveResult, ResourceKind } from '@soulforge/shared';
+import type { ConfirmationReceipt, RagChunkFamily, RagLocalModelStatus, RagRetrieveResult, ResourceKind } from '@soulforge/shared';
 import {
   agentReferenceExpiresAt,
   agentSelectionSummary,
@@ -52,18 +56,20 @@ import {
   mergeCiteHits,
   type Citation
 } from '@soulforge/shared';
+import { maskPathFragments } from '@soulforge/shared';
 import { sanitizeRendererValue } from '../rendererDto.js';
 import type { TrustedIpcHandle } from './registration.js';
 import type { MemoryManager } from '../memoryManager.js';
 import type { ModelServiceCredentialVault } from '../modelServiceCredentials.js';
 import type { OperationLogUtilityClient } from '../operationLogUtilityClient.js';
-import { createAgentTaskRecordGateway } from '../agentTaskRecord.js';
-import { InternalRagEmbeddingService } from '../ragEmbedding.js';
+import { INTERNAL_RAG_EMBEDDING, InternalRagEmbeddingService } from '../ragEmbedding.js';
 
 export interface AiAgentRunRequest {
   configId: string;
   prompt: string;
   mode?: 'plan' | 'normal' | 'fullPermission';
+  /** main 签发的一次性权限授权；renderer 不能自行伪造权限。 */
+  permissionGrantId?: string;
   streaming?: boolean;
   resumeSessionPath?: string;
   /** Optional per-run ceiling; omitted uses the core's safe default. */
@@ -77,6 +83,7 @@ export interface AiAgentRunRequest {
   thinkingLevel?: 'off' | 'none' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max';
   useRagSearch?: boolean;
   ragSearchMaxHits?: number;
+  /** Legacy renderer field; main ignores it and derives approvals from grant mode. */
   approvalRequiredLevels?: string[];
   resources?: readonly AgentResourceReference[];
   selection?: { label: string; resourceKind: ResourceKind; };
@@ -84,6 +91,12 @@ export interface AiAgentRunRequest {
 }
 export interface AiAgentApprovalResponseRequest { sessionId: string; callId: string; decision: ApprovalDecision; note?: string; }
 export type AiAgentRunIpcResult = { ok: true; sessionId: string } | { ok: false; error: { code: string; message: string } };
+export type AiAgentPermissionRequestResult =
+  | { ok: true; grantId: string; mode: 'plan' | 'normal' | 'fullPermission'; expiresAt: string }
+  | { ok: false; error: { code: string; message: string } };
+export type AiAgentCancelIpcResult =
+  | { ok: true }
+  | { ok: false; error: { code: string; message: string } };
 export type AiAgentEventReplayIpcResult = { ok: true; events: AiAgentEventEnvelope[] } | { ok: false; error: { code: string; message: string } };
 export interface AiAgentSessionSummaryIpc { sessionPath: string; fileName: string; sessionId: string | null; startedAt: string | null; messageCount: number; parseErrors: number; interrupted: boolean; compactedWindows: number; sizeBytes: number; modifiedAt: string; }
 export type AiAgentSessionListIpcResult = { ok: true; sessions: AiAgentSessionSummaryIpc[] } | { ok: false; error: { code: string; message: string } };
@@ -99,6 +112,7 @@ const APPROVAL_TIMEOUT_MS = 600_000;
 const DEFAULT_REQUEST_TIMEOUT_MS = 180_000;
 const AGENT_EVENT_HISTORY_LIMIT = 4_096;
 const AGENT_EVENT_HISTORY_TTL_MS = 5 * 60_000;
+const AGENT_PERMISSION_GRANT_TTL_MS = 5 * 60_000;
 
 const agentSessionsBaseDir = join(app.getPath('userData'), 'agent');
 const activeAgentRuns = new Map<string, { controller: AbortController; ownerId: number; serviceId: string; model: string; }>();
@@ -107,9 +121,52 @@ const agentReferenceRegistry = new Map<string, { ownerId: string; tokenId: strin
 const pendingApprovals = new Map<string, { resolve: (response: { decision: ApprovalDecision; note?: string }) => void; timer: NodeJS.Timeout }>();
 const agentSessionSeqs = new Map<string, number>();
 const agentSessionOwners = new Map<string, number>();
+const agentEventTargets = new Map<number, WebContents>();
+const agentPermissionGrants = new Map<string, {
+  ownerId: number;
+  mode: 'plan' | 'normal' | 'fullPermission';
+  expiresAt: number;
+}>();
 const agentEventHistory = new Map<string, AiAgentEventEnvelope[]>();
 const agentEventHistoryCleanup = new Map<string, NodeJS.Timeout>();
 let boundWebContents: WebContents | null = null;
+
+function forbiddenAgentSession(): { ok: false; error: { code: string; message: string } } {
+  return {
+    ok: false,
+    error: { code: 'AGENT_SESSION_FORBIDDEN', message: '无权操作该 Agent 会话。' }
+  };
+}
+
+function sessionOwnerMatches(sessionId: string, senderId: number): boolean {
+  return agentSessionOwners.get(sessionId) === senderId;
+}
+
+function consumePermissionGrant(
+  event: IpcMainInvokeEvent,
+  request: AiAgentRunRequest
+): { ok: true; mode: 'plan' | 'normal' | 'fullPermission' } | { ok: false; error: { code: string; message: string } } {
+  const requestedMode = request.mode ?? 'plan';
+  const hasGrantId = typeof request.permissionGrantId === 'string' && request.permissionGrantId.trim() !== '';
+  if (!hasGrantId && requestedMode === 'plan') return { ok: true, mode: 'plan' };
+  if (!hasGrantId) {
+    return {
+      ok: false,
+      error: { code: 'AGENT_PERMISSION_REQUIRED', message: '该 Agent 权限模式必须由主进程先签发一次性授权。' }
+    };
+  }
+  const grantId = request.permissionGrantId?.trim() ?? '';
+  const grant = agentPermissionGrants.get(grantId);
+  agentPermissionGrants.delete(grantId);
+  if (!grant || grant.ownerId !== event.sender.id || grant.expiresAt < Date.now()
+    || (requestedMode !== 'plan' && grant.mode !== requestedMode)) {
+    return {
+      ok: false,
+      error: { code: 'AGENT_PERMISSION_INVALID', message: 'Agent 权限授权无效、已过期或不属于当前窗口。' }
+    };
+  }
+  return { ok: true, mode: grant.mode };
+}
 
 const settleApproval = (key: string, response: { decision: ApprovalDecision; note?: string }): boolean => {
   const pending = pendingApprovals.get(key);
@@ -146,9 +203,12 @@ const sendAgentEvent = (sessionId: string, event: AgentEvent | AiAgentSessionLif
     cleanup.unref?.();
     agentEventHistoryCleanup.set(sessionId, cleanup);
   }
-  if (!boundWebContents || boundWebContents.isDestroyed()) return;
-  boundWebContents.send('ai:agent:event', envelope);
+  const ownerId = agentSessionOwners.get(sessionId);
+  const target = ownerId === undefined ? boundWebContents : agentEventTargets.get(ownerId);
+  if (!target || target.isDestroyed()) return;
+  target.send('ai:agent:event', envelope);
 };
+
 function findRolloutInSessions(base: string, targetFileName: string): string | null {
   const root = join(base, 'sessions');
   if (!existsSync(root)) return null;
@@ -210,11 +270,29 @@ export function clearAgentIpcState(): void {
   agentEventHistoryCleanup.clear();
   agentEventHistory.clear();
   agentSessionOwners.clear();
+  agentEventTargets.clear();
   agentSessionSeqs.clear();
+  agentPermissionGrants.clear();
 }
 
 export function scheduleInternalRagEmbedding(corpus: RagCorpus, database: OperationLogUtilityClient): void {
   internalRagEmbedding.schedule(corpus, database);
+}
+
+function publicRagLocalModelStatus(): RagLocalModelStatus {
+  const status = internalRagEmbedding.getLocalModelStatus();
+  const diagnostic = status.diagnostic === undefined
+    ? undefined
+    : maskPathFragments(status.diagnostic);
+  return {
+    state: status.state,
+    modelId: status.modelId,
+    revision: status.revision,
+    dimension: status.dimension,
+    ...(status.source ? { source: status.source } : {}),
+    ...(status.diagnosticCode ? { diagnosticCode: status.diagnosticCode } : {}),
+    ...(diagnostic ? { diagnostic } : {})
+  };
 }
 export interface AgentIpcDeps {
   handle: TrustedIpcHandle;
@@ -234,7 +312,6 @@ export interface AgentIpcDeps {
   durableStoragePaths: (workspaceId: string) => { root: string; backupBaseDir: string; recoveryDir: string; stagingRoot: string };
   currentToolContext: () => ToolContext;
   requestWriteConfirmation: (input: { event?: IpcMainInvokeEvent; resourceLabel: string; sourceUri: string; actionLabel: string; payloadHash: string; extraSubjects?: string[] }) => Promise<ConfirmationReceipt | null>;
-  taskRecordDirectory: () => string;
   readSystemPrompt: () => string | null;
 }
 
@@ -245,10 +322,39 @@ export function registerAgentIpcHandlers(deps: AgentIpcDeps): void {
       if (entry.ownerId !== deps.webContents.id) continue;
       entry.controller.abort();
       rejectSessionApprovals(sessionId, '渲染进程已关闭，未回答的审批按拒绝处理。');
+      agentEventTargets.delete(deps.webContents.id);
     }
     if (boundWebContents === deps.webContents) boundWebContents = null;
   });
   const activeAiMode: ToolContext['mode'] = 'plan';
+  deps.handle(
+    'ai.agent.permission.request',
+    async (event, requestedMode: unknown): Promise<AiAgentPermissionRequestResult> => {
+      if (requestedMode !== 'plan' && requestedMode !== 'normal' && requestedMode !== 'fullPermission') {
+        return { ok: false, error: { code: 'INVALID_INPUT', message: 'Agent 权限模式无效。' } };
+      }
+      let mode: 'plan' | 'normal' | 'fullPermission' = requestedMode;
+      if (mode === 'fullPermission') {
+        const confirmation = await dialog.showMessageBox({
+          type: 'warning',
+          title: '确认 Agent 完全权限',
+          message: '允许本次 Agent 会话免审批提交工作区修改吗？',
+          detail: '这只对下一次会话有效；工作区写入仍必须经过 Patch Engine、备份和回滚边界。',
+          buttons: ['允许本次', '取消'],
+          defaultId: 1,
+          cancelId: 1,
+          noLink: true
+        });
+        if (confirmation.response !== 0) {
+          return { ok: false, error: { code: 'AGENT_PERMISSION_DENIED', message: '用户未授予 Agent 完全权限。' } };
+        }
+      }
+      const grantId = randomUUID();
+      const expiresAt = Date.now() + AGENT_PERMISSION_GRANT_TTL_MS;
+      agentPermissionGrants.set(grantId, { ownerId: event.sender.id, mode, expiresAt });
+      return { ok: true, grantId, mode, expiresAt: new Date(expiresAt).toISOString() };
+    }
+  );
   deps.handle('ai.tools', async () => deps.toolRegistry.list());
   
   deps.handle('ai.memory.list', async () => {
@@ -369,12 +475,16 @@ export function registerAgentIpcHandlers(deps: AgentIpcDeps): void {
     if (!database) return null;
     try {
       const model = await database.ragEmbeddingModel();
-      if (!model) return null;
+      if (model !== INTERNAL_RAG_EMBEDDING.id) return null;
       const records = await database.loadRagEmbeddingRecords();
       if (records.length === 0) return null;
+      const currentContentHashes = new Map(corpus.chunks.map((chunk) => [chunk.chunkId, chunk.contentHash] as const));
       const vectorMap = new Map<string, Float32Array>();
       for (const record of records) {
-        if (record.vector && record.vector.length > 0) {
+        if (record.model === INTERNAL_RAG_EMBEDDING.id
+          && record.contentHash !== null
+          && currentContentHashes.get(record.chunkId) === record.contentHash
+          && record.vector?.length === INTERNAL_RAG_EMBEDDING.dim) {
           vectorMap.set(record.chunkId, record.vector);
         }
       }
@@ -410,30 +520,39 @@ export function registerAgentIpcHandlers(deps: AgentIpcDeps): void {
         message: '内存 RAG 语料尚未就绪；查询不会启动数据库 recovery。'
       };
     }
-    const corpus = activeRag ?? createRagCorpus({
+    const liveCorpus = buildRagCorpus(initialIndex);
+    const persisted = createRagCorpus({
       workspaceId: initialIndex.workspaceId,
-      builtAt: new Date().toISOString(),
-      chunks: await database!.loadRagChunks(),
-      references: await database!.loadReferences()
+      builtAt: liveCorpus.builtAt,
+      chunks: database ? await database.loadRagChunks() : [],
+      references: database ? await database.loadReferences() : []
     });
+    // A freshly published in-memory semantic index is the current authority;
+    // persisted chunks only fill verified source/revision gaps. This keeps a
+    // clean workspace usable before the background RAG writer has finished.
+    const corpus = activeRag
+      ?? (liveCorpus.chunks.some((chunk) => chunk.family !== 'file')
+        ? mergeCatalogAndPersisted(liveCorpus, persisted)
+        : persisted);
 
-    // 没有配置 embedding 就不启用 RAG 相关功能（静默不启用，不产生额外提示）
+    const staleChunkMask = getRagStaleChunkMaskCached(initialIndex, corpus);
+    const lexicalOptions = {
+      ...(options.limit != null && options.limit > 0 ? { limit: Math.trunc(options.limit) } : {}),
+      ...(options.expandReferences === undefined ? {} : { expandReferences: options.expandReferences === true }),
+      ...(options.families && options.families.length > 0 ? { families: options.families } : {}),
+      ...(staleChunkMask ? { excludeChunkIds: staleChunkMask.ids } : {})
+    };
+
+    // Embeddings are an optional local accelerator. Never make lexical RAG
+    // depend on a model or on a vector cache left by a different revision.
     const vectorMap = await loadWorkspaceVectorMap(corpus, database);
-    if (!vectorMap || vectorMap.size === 0) {
-      return {
-        ok: false,
-        code: 'RAG_UNAVAILABLE',
-        message: 'RAG 检索未启用。'
-      };
+    if (!vectorMap || vectorMap.size === 0 || internalRagEmbedding.getLocalModelStatus().state !== 'local-ready') {
+      return retrieveEvidence(corpus, query, lexicalOptions);
     }
 
     const queryVector = await internalRagEmbedding.embedQuery(query, options.signal);
     if (!queryVector) {
-      return {
-        ok: false,
-        code: 'RAG_UNAVAILABLE',
-        message: 'RAG 检索未启用。'
-      };
+      return retrieveEvidence(corpus, query, lexicalOptions);
     }
 
     // All inputs above may await database/vector/embedding work.  A remount,
@@ -453,18 +572,24 @@ export function registerAgentIpcHandlers(deps: AgentIpcDeps): void {
       };
     }
 
-    const staleChunkMask = getRagStaleChunkMaskCached(currentIndex, corpus);
+    const currentStaleChunkMask = getRagStaleChunkMaskCached(currentIndex, corpus);
     return retrieveEvidenceHybrid(corpus, query, {
       ...(options.limit != null && options.limit > 0 ? { limit: Math.trunc(options.limit) } : {}),
       ...(options.expandReferences === undefined ? {} : { expandReferences: options.expandReferences === true }),
       ...(options.families && options.families.length > 0 ? { families: options.families } : {}),
-      ...(staleChunkMask ? { excludeChunkMask: staleChunkMask } : {}),
+      ...(currentStaleChunkMask ? { excludeChunkMask: currentStaleChunkMask } : {}),
       vectors: {
         vectors: vectorMap,
         queryVector
       }
     });
   };
+
+  deps.handle('rag.localModelStatus', async (): Promise<RagLocalModelStatus> => {
+    // Read-only refresh: it never downloads or starts an embedding worker.
+    internalRagEmbedding.refreshLocalModelStatus();
+    return publicRagLocalModelStatus();
+  });
 
   deps.handle('rag.searchEvidence', async (_event, input: {
       query: string;
@@ -582,7 +707,6 @@ export function registerAgentIpcHandlers(deps: AgentIpcDeps): void {
         );
 
       let resumeFrom: ResumedRollout | undefined;
-      let inheritTaskRecordSessionId: string | undefined;
       if (request.resumeSessionPath !== undefined) {
         const resolved = resolveSessionPath(request.resumeSessionPath);
         if (resolved.ok) {
@@ -590,15 +714,6 @@ export function registerAgentIpcHandlers(deps: AgentIpcDeps): void {
           if (loaded.ok) {
             const { ok: _ok, path: _path, ...resumed } = loaded;
             resumeFrom = resumed;
-            const metaSessionId = resumed.meta?.sessionId;
-            if (typeof metaSessionId === 'string' && metaSessionId.trim() !== '') {
-              inheritTaskRecordSessionId = metaSessionId.trim();
-            } else {
-              const fileNameMatch = /([0-9a-fA-F-]{36})\.jsonl$/i.exec(basename(resolved.absolute));
-              if (fileNameMatch) {
-                inheritTaskRecordSessionId = fileNameMatch[1];
-              }
-            }
           } else {
             console.warn(`[SoulForge Agent] 尝试承接会话未找到或读取失败（${loaded.code}：${loaded.message}），平滑降级为新会话启动。`);
           }
@@ -624,32 +739,56 @@ export function registerAgentIpcHandlers(deps: AgentIpcDeps): void {
           }
         };
       }
-      const mode: ToolContext['mode'] = request.mode === 'normal' || request.mode === 'fullPermission'
-        ? request.mode
-        : 'plan';
-      const taskRecord = createAgentTaskRecordGateway(
-        deps.taskRecordDirectory(),
-        sessionId,
-        {
-          ...(inheritTaskRecordSessionId ? { inheritFromSessionId: inheritTaskRecordSessionId } : {}),
-          frozenRequest: request.prompt
-        }
-      );
-      await taskRecord.read();
+      const permission = consumePermissionGrant(_event, request);
+      if (!permission.ok) return permission;
+      const mode: ToolContext['mode'] = permission.mode;
+      // One CoreToolSession owns the native edit handles, snapshot cache,
+      // source watcher and automatic NativeReadProof store for this Agent
+      // subject. It is intentionally per-run, so proofs cannot cross Agent
+      // identities or a later workspace session.
+      const activeWorkspaceSession = deps.getActiveSession();
+      let coreSession: CoreToolSession | undefined;
+      if (activeWorkspaceSession) {
+        const storage = deps.durableStoragePaths(activeWorkspaceSession.meta.workspaceId);
+        const operationLog = await deps.ensureActiveOperationLog(activeWorkspaceSession);
+        const editSession = nativeEditSessionFromContext({
+          session: activeWorkspaceSession,
+          operationLog,
+          backupBaseDir: storage.backupBaseDir,
+          recoveryDir: storage.recoveryDir,
+          stagingRoot: storage.stagingRoot
+        });
+        coreSession = new CoreToolSession({
+          principal: `agent:${sessionId}`,
+          workspaceId: activeWorkspaceSession.meta.workspaceId,
+          workspaceSession: activeWorkspaceSession,
+          ...(deps.getActiveIndex() ? { workspaceIndex: deps.getActiveIndex()! } : {}),
+          editSession,
+          operationLog,
+          modeCeiling: mode
+        });
+      }
+      const currentAgentContext = (): ToolContext => ({
+        ...deps.currentToolContext(),
+        ...(coreSession ? {
+          coreSession,
+          nativeReadProofs: coreSession.proofStore,
+          proofPrincipal: coreSession.principal,
+          ...(coreSession.editSession ? { editSession: coreSession.editSession } : {})
+        } : {})
+      });
       // 无工作区时 deps.getActiveIndex() 为 null：工具层按工具守卫（WORKSPACE_REQUIRED），
       // 需要工作区的工具干净失败，不整次拒绝（T6）。
       const bridge = createAgentToolBridge({
         registry: deps.toolRegistry,
-        contextProvider: deps.currentToolContext,
+        contextProvider: currentAgentContext,
         // Agent 可以读取记忆来恢复项目上下文，但不能把未经用户明确整理的
         // 运行时对话或测试内容写入长期记忆；记忆写入只保留给显式宿主流程。
         context: {
-          ...deps.currentToolContext(),
+          ...currentAgentContext(),
           mode,
           modeCeiling: mode,
-          allowMemoryWrite: false,
-          taskRecord,
-          requireTaskRecord: true
+          allowMemoryWrite: false
         },
         // Discovery is non-blocking: the bridge returns candidate/evidence
         // metadata, while native readers and writers enforce real authority.
@@ -667,13 +806,11 @@ export function registerAgentIpcHandlers(deps: AgentIpcDeps): void {
         const rawExecuteTool = bridge.executeTool;
         const executeLiveTool = (call: Parameters<typeof rawExecuteTool>[0], extra: Partial<ToolContext> = {}) => {
           return rawExecuteTool(call, {
-            // The run's mode and task ledger are stable for its lifetime; all
-            // workspace/RAG/session state must be refreshed per tool call.
+            // The run's mode is stable for its lifetime; all workspace/RAG/
+            // session state is refreshed per tool call by currentAgentContext.
             mode: currentRunMode,
             modeCeiling: mode,
             allowMemoryWrite: false,
-            taskRecord,
-            requireTaskRecord: true,
             ...(agentSignal ? { signal: agentSignal } : {}),
             ...extra
           });
@@ -853,6 +990,7 @@ export function registerAgentIpcHandlers(deps: AgentIpcDeps): void {
         model: stored!.model
       });
       agentSessionOwners.set(sessionId, _event.sender.id);
+      agentEventTargets.set(_event.sender.id, deps.webContents);
       sendAgentEvent(sessionId, { type: 'session-accepted', mode });
   
       const permissionMode = mode === 'fullPermission' ? 'full' : mode;
@@ -887,7 +1025,8 @@ export function registerAgentIpcHandlers(deps: AgentIpcDeps): void {
           // unref so a parked approval never keeps the process alive on quit.
           timer.unref?.();
           pendingApprovals.set(key, { resolve: resolveApproval, timer });
-          if (!boundWebContents || boundWebContents.isDestroyed()) {
+          const approvalTarget = agentEventTargets.get(_event.sender.id);
+          if (!approvalTarget || approvalTarget.isDestroyed()) {
             // No renderer to ask. Reject rather than execute — a closed window is
             // not consent.
             settleApproval(key, { decision: 'reject', note: '渲染进程已关闭，无法请求审批。' });
@@ -987,30 +1126,28 @@ export function registerAgentIpcHandlers(deps: AgentIpcDeps): void {
         };
       };
   
-      const hasRagEmbedding = async (): Promise<boolean> => {
+      const hasRagSearchCorpus = async (): Promise<boolean> => {
         if (!deps.getActiveIndex() || !deps.getActiveSession()) return false;
+        const liveStats = deps.getActiveIndex()!.getStats();
+        if (liveStats.events > 0 || liveStats.mapEntities > 0 || liveStats.paramRows > 0 || liveStats.textEntries > 0) {
+          return true;
+        }
         const activeRag = deps.getActiveRag();
         if (activeRag) {
-          const cached = internalRagEmbedding.getCachedVectors(activeRag);
-          if (cached && cached.size > 0) return true;
+          return activeRag.availability === 'available' && activeRag.chunks.length > 0;
         }
         try {
           // 只做轻量只读检查，不执行耗时的 recovery cleanup 全盘扫描
-          const model = await Promise.race([
-            deps.operationLogUtility.ragEmbeddingModel(),
-            new Promise<null>((resolve) => setTimeout(() => resolve(null), 100))
-          ]);
-          if (!model) return false;
-          const records = await Promise.race([
-            deps.operationLogUtility.loadRagEmbeddingRecords(),
+          const chunks = await Promise.race([
+            deps.operationLogUtility.loadRagChunks(),
             new Promise<unknown[]>((resolve) => setTimeout(() => resolve([]), 100))
           ]);
-          return records.length > 0;
+          return chunks.length > 0;
         } catch {
           return false;
         }
       };
-      const ragEmbeddingAvailable = request.useRagSearch === true ? await hasRagEmbedding() : false;
+      const ragSearchAvailable = request.useRagSearch === true ? await hasRagSearchCorpus() : false;
 
       void runAgentSession({
         sessionsDir: agentSessionsBaseDir,
@@ -1036,9 +1173,10 @@ export function registerAgentIpcHandlers(deps: AgentIpcDeps): void {
         signal: controller.signal,
         requestApproval,
         resolveApprovalDiff,
-        ...(Array.isArray(request.approvalRequiredLevels)
-          ? { approvalRequiredLevels: request.approvalRequiredLevels }
-          : { approvalRequiredLevels: [] }),
+        // Renderer-supplied approvalRequiredLevels are never an authority.
+        // Only an explicitly main-granted fullPermission session may disable
+        // the core loop's default approval levels.
+        ...(mode === 'fullPermission' ? { approvalRequiredLevels: [] } : {}),
         ...(request.streaming === true ? { streaming: true } : {}),
         timeoutMs: request.timeoutMs != null && request.timeoutMs > 0
           ? Math.trunc(request.timeoutMs)
@@ -1058,7 +1196,7 @@ export function registerAgentIpcHandlers(deps: AgentIpcDeps): void {
             : effectiveAutoCompactTokenLimit
         },
         ...(Object.keys(sampling).length > 0 ? { sampling } : {}),
-        ...(ragEmbeddingAvailable
+        ...(ragSearchAvailable
           ? {
               ragSearch: {
                 ...(request.ragSearchMaxHits != null && request.ragSearchMaxHits > 0
@@ -1142,6 +1280,8 @@ export function registerAgentIpcHandlers(deps: AgentIpcDeps): void {
           code: 'AGENT_SESSION_FAILED',
           message: error instanceof Error ? error.message : String(error)
         });
+      }).finally(() => {
+        coreSession?.close();
       });
   
       return { ok: true, sessionId };
@@ -1173,7 +1313,10 @@ export function registerAgentIpcHandlers(deps: AgentIpcDeps): void {
     }
   );
   
-  deps.handle('ai.agent.cancel', async (_event, sessionId: string): Promise<{ ok: boolean }> => {
+  deps.handle('ai.agent.cancel', async (_event, sessionId: string): Promise<AiAgentCancelIpcResult> => {
+      if (typeof sessionId !== 'string' || sessionId.trim() === '' || !sessionOwnerMatches(sessionId, _event.sender.id)) {
+        return forbiddenAgentSession();
+      }
       const entry = activeAgentRuns.get(sessionId);
       if (entry) entry.controller.abort();
       // Cancel must also settle parked approvals. An abort signal does not reach
@@ -1195,6 +1338,7 @@ export function registerAgentIpcHandlers(deps: AgentIpcDeps): void {
         ) {
           return { ok: false, error: { code: 'INVALID_INPUT', message: 'sessionId 与 callId 必填。' } };
         }
+        if (!sessionOwnerMatches(request.sessionId, _event.sender.id)) return forbiddenAgentSession();
         // 用户可发起的四档。`timed_out` 刻意**不在**其中：它只能由主进程的超时
         // 定时器产生。允许 renderer 自称超时会让「没人回答」这个事实可以被伪造，
         // 而审计正是靠它区分「用户拒绝」与「无人在场」。
@@ -1234,6 +1378,7 @@ export function registerAgentIpcHandlers(deps: AgentIpcDeps): void {
           };
         }
         const decision = decoded.decision === 'approve-and-commit' ? 'once' : 'reject';
+        if (!sessionOwnerMatches(decoded.sessionId, _event.sender.id)) return forbiddenAgentSession();
         const matched = settleApproval(`${decoded.sessionId}:${decoded.reviewId}`, { decision });
         return { ok: true, matched };
       }

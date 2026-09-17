@@ -77,7 +77,12 @@ export const TIER_BY_SCRIPT = Object.freeze({
   // 判据用构造的导出记录驱动 compare，逐字段单独差异各测一次（只测「全都不同」会让
   // 「只比一个字段」的实现全绿）。纯静态、临时目录、秒级，归 governance。
   'test:cross-machine-fixtures': 'governance',
-  'test:agent-task-record-gate': 'governance',
+  // 历史 task-record 门禁仍可显式用于迁移/交叉验证，但不再属于生产验证调度。
+  'test:agent-native-proof-gate': 'unit',
+  // First-party schema 发布边界：生产入口只能依赖内置包，第三方 adapter 只允许
+  // 出现在开发/验证路径；同时检查内置包已进入 core 构建产物。
+  'test:first-party-schema-boundary': 'governance',
+  'test:first-party-schema-package': 'governance',
 
   // ---- unit：编译、单元与契约；按改动范围选取 ----
   typecheck: 'unit',
@@ -95,8 +100,8 @@ export const TIER_BY_SCRIPT = Object.freeze({
   'test:agent-production-scenario': 'unit',
   'test:tae-anim-id-guards': 'unit',
   'test:agent-param-dependency-batch': 'unit',
-  // Agent/RAG/CPU 回归门禁：离线确定性 adapter + 生产 task-record gateway，
-  // 不宣称 provider/native authority，代码改动时必须随 unit 层执行。
+  // Agent/RAG/CPU 回归门禁：离线确定性 adapter；历史 task-record gateway
+  // 仅留在显式迁移/交叉验证入口，不作为生产门禁。
   'test:agent-performance-fixes': 'unit',
   'test:emevd-cross-file-index': 'unit',
   'test:emevd-agent-event-read': 'unit',
@@ -166,6 +171,24 @@ export const TIER_BY_SCRIPT = Object.freeze({
   'test:emevd-external-adapter': 'unit',
   'test:emevd-four-view': 'unit',
   'test:emevd-ipc-contract': 'unit',
+  'test:first-party-schema-clean': 'unit',
+  // First-party Lua/HKS 与 TAE 回归必须真实经过 Bridge；它们消费本机 Sekiro
+  // 语料，不能被归入只验证源码存在性的 unit 层。
+  'test:first-party-lua-hks-corpus': 'native',
+  'test:first-party-lua-hks-roundtrip': 'native',
+  'test:first-party-luap-roundtrip': 'native',
+  // 四题真实 Agent overlay 闭环：使用本机 Mod 语料和 Bridge，写入只落在
+  // 隔离 overlay；安装版/真实语料不可用时由 harness 明确报告 not-attempted。
+  'agent:simulate:four': 'native',
+  'test:first-party-tae-field-write': 'native',
+  'test:first-party-emevd-roundtrip': 'native',
+  // RAG 本地模型门禁以 fetch trap 和本地状态机验证，不需要真实游戏语料。
+  'test:rag-local-only': 'unit',
+  'test:first-party-schema-native-coverage': 'native',
+  'test:reference-query': 'unit',
+  'test:reference-cli-session': 'unit',
+  'test:reference-optimization-native': 'native',
+  'test:reference-optimization-performance': 'unit',
   'test:emevd-plan-commit': 'unit',
   'test:fmg-msb-ipc-contract': 'unit',
   'test:hex-scene': 'unit',
@@ -228,6 +251,7 @@ export const TIER_BY_SCRIPT = Object.freeze({
   'test:workspace-analysis-lifecycle': 'unit',
   'test:rag-persistence-performance': 'unit',
   'test:param-metadata-read-bridge': 'unit',
+  'test:knowledge-store-sqlite': 'unit',
 
   // ---- synthetic：合成 native 契约与恢复矩阵。需 dotnet，不需真实资源 ----
   'bridge:build': 'synthetic',
@@ -680,6 +704,7 @@ export const EXCLUDED = Object.freeze({
   verify: '统一验证入口本身，自调度会无限递归',
   'verify:all': '同上（全层级别名）',
   'verify:list': '同上（只列计划，不是验证）',
+  sfcli: 'SoulForge CLI 交互入口，不是验证套件；其行为由各自的命令级 smoke 覆盖',
   dev: '交互式开发服务器，不是验证',
   'benchmark:rag-fts-delta': '50,000 行 RAG/FTS 性能诊断，按需运行；不作为常规回归或已免验的发布性能门槛',
   'agent:simulate': '真实 Agent 链路模拟入口，依赖真实模型与本地 Mod 交互，按需手工运行',
@@ -689,6 +714,7 @@ export const EXCLUDED = Object.freeze({
   'launcher:build': '启动器二进制发布构建，不是验证',
   'exe:build': 'Bridge、启动器和开发 launcher 的显式构建命令；由交付流程直接调用，不是独立验证套件',
   'dev-launcher:build': '开发 launcher 产物构建；由 exe:build 调用，不是独立验证套件',
+  pretest: 'npm test 的 Node 原生 binding 自愈前置，不是独立验证套件',
   'corpus:build-local-release': '生成本机 corpus registry，写 testdata，不是验证',
   'corpus:build-local-release:configured': '同上（被 wrapper 调用的内层）',
   // gov CLI 是治理数据的写入口，不是验证：跑它会改执行面板状态。

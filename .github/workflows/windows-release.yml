@@ -1,0 +1,101 @@
+name: windows-release
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing vX.Y.Z tag to package and publish
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+concurrency:
+  group: windows-release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build-release:
+    runs-on: windows-latest
+    timeout-minutes: 120
+    env:
+      RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Verify release tag and package versions
+        run: node scripts/verify-release-tag.mjs $env:RELEASE_TAG
+
+      - name: Read release version
+        shell: pwsh
+        run: |
+          $version = node -p "JSON.parse(require('fs').readFileSync('apps/desktop/package.json','utf8')).version"
+          "RELEASE_VERSION=$version" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Build native bridge and production bundles
+        run: |
+          npm run bridge:publish
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          npm run build
+
+      - name: Build unsigned x64 NSIS installer
+        working-directory: apps/desktop
+        env:
+          CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+        run: npx --yes electron-builder@26.16.1 --win nsis --publish never
+
+      - name: Record installer compliance
+        run: npm run release:installer:manifest
+
+      - name: Create clean source archive
+        shell: pwsh
+        run: |
+          $sourceZip = "apps/desktop/release/SoulForge-v$env:RELEASE_VERSION-win-x64-source.zip"
+          git archive --format=zip --prefix="SoulForge-v$env:RELEASE_VERSION-win-x64/" -o $sourceZip HEAD
+
+      - name: Generate electron-updater metadata
+        run: node scripts/generate-release-update-metadata.mjs --version=$env:RELEASE_VERSION
+
+      - name: Generate Release checksums
+        run: node scripts/generate-release-sha256-sums.mjs --version=$env:RELEASE_VERSION
+
+      - name: Verify Release assets before upload
+        run: node scripts/verify-release-update-assets.mjs --tag=$env:RELEASE_TAG --version=$env:RELEASE_VERSION
+
+      - name: Verify packaged content
+        run: npm run test:release-content
+
+      - name: Publish fixed-repository GitHub Release
+        shell: pwsh
+        run: |
+          $flags = @('--verify-tag', '--generate-notes')
+          if ($env:RELEASE_TAG.Contains('-')) { $flags += '--prerelease' }
+          $assets = @(
+            "apps/desktop/release/SoulForge-$env:RELEASE_VERSION-x64.exe",
+            "apps/desktop/release/SoulForge-$env:RELEASE_VERSION-x64.exe.blockmap",
+            'apps/desktop/release/latest.yml',
+            'apps/desktop/release/SHA256SUMS.txt',
+            'apps/desktop/release/release-installer-compliance.json',
+            "apps/desktop/release/SoulForge-v$env:RELEASE_VERSION-win-x64-source.zip"
+          )
+          gh release create $env:RELEASE_TAG --repo 3516027002att-ui/SoulForge --title "SoulForge $env:RELEASE_VERSION" @flags @assets
+

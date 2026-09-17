@@ -1,8 +1,10 @@
 import { contextBridge, ipcRenderer } from 'electron';
 import type {
   AiAgentApprovalResponseRequest,
+  AiAgentCancelIpcResult,
   AiAgentEventEnvelope,
   AiAgentEventReplayIpcResult,
+  AiAgentPermissionRequestResult,
   AiAgentRunIpcResult,
   AiAgentRunRequest,
   AiAgentSessionListIpcResult,
@@ -65,9 +67,13 @@ import type {
   SessionFeedbackIpcResult,
   SubmitAllHistoryIpcResult,
   CiteHit,
-  MapEditTransaction
+  MapEditTransaction,
+  UpdateCommandResult,
+  UpdateSetChannelRequest,
+  UpdateStateEvent,
+  UpdatePublicState
 } from '@soulforge/shared';
-import { AUXILIARY_IPC_CHANNELS, EDITOR_DOCUMENT_IPC_CHANNELS, maskPathFragments, PARAM_SESSION_IPC_CHANNELS } from '@soulforge/shared';
+import { AUXILIARY_IPC_CHANNELS, EDITOR_DOCUMENT_IPC_CHANNELS, maskPathFragments, PARAM_SESSION_IPC_CHANNELS, UPDATE_IPC_CHANNELS } from '@soulforge/shared';
 import type {
   OpenParamSessionRequest,
   OpenParamSessionResult,
@@ -236,7 +242,8 @@ const api = {
     expectedChildHash: string | undefined,
     expectedContainerHash: string | undefined,
     sourceText: string,
-    encoding?: string
+    encoding?: string,
+    entryIndex?: number
   ): Promise<RendererSaveResult> =>
     ipcRenderer.invoke(
       'resource.saveScriptSource',
@@ -245,7 +252,8 @@ const api = {
       expectedChildHash,
       expectedContainerHash,
       sourceText,
-      encoding
+      encoding,
+      entryIndex
     ),
   listOperations: (): Promise<RendererPatchHistoryEntry[]> => ipcRenderer.invoke('operation.list'),
   rollbackOperation: (opId: string): Promise<RollbackOperationIpcResult> =>
@@ -294,6 +302,10 @@ const api = {
     sourceHash?: string | null;
     sourceFormat?: string | null;
     outerFileHash?: string | null;
+    registryOrigin?: 'first-party' | 'imported' | 'fixture';
+    registryPackageId?: string | null;
+    registryPackageVersion?: string | null;
+    registryContentDigest?: string | null;
     /** Bridge 往返判定：'native-verified'（语义+字节一致）/ 'candidate'（仅语义）。 */
     authority?: string | null;
     outline?: {
@@ -351,7 +363,7 @@ const api = {
     ipcRenderer.invoke('resource.submitEmevdDslPlan', sourceUri, sourceText, mode),
   readEmedfCompletionCatalog: (): Promise<{
     ok: boolean;
-    origin: 'imported' | 'fixture';
+    origin: 'first-party' | 'imported' | 'fixture';
     items: EmedfCompletionItem[];
     enums?: Record<string, import('@soulforge/core').EmedfEnumDef>;
   }> =>
@@ -387,18 +399,18 @@ const api = {
     ipcRenderer.invoke('resource.readMapPartFlverPreview', mapSourceUri, modelName, sibPath),
   readTaeDocument: (sourceUri: string, options?: { animationPage?: number; animationPageSize?: number }): Promise<unknown> =>
     ipcRenderer.invoke('resource.readTaeDocument', sourceUri, options),
-  /** S17：词条名目录（main 解析本机 TAE.Template.SDT.xml；renderer 只拿逻辑名）。 */
+  /** 词条名与字段目录（main 使用内置 SoulForge first-party TAE registry）。 */
   readTaeTemplateCatalog: (): Promise<unknown> =>
     ipcRenderer.invoke('resource.readTaeTemplateCatalog'),
-  /** S17：单个词条事件参数体（按本机模板解码字段；无模板返回未解码 + hex）。 */
+  /** 单个 TAE 事件参数体（按内置 first-party schema 解码，保留原始尾部）。 */
   readTaeEventParams: (
     sourceUri: string,
     animId: number,
-    eventIndex: number,
+      eventIndex: number,
     taeEntryIndex?: number,
     taeEntryId?: number,
     taeEntryName?: string,
-    taeGroup?: string
+      taeGroup?: string
   ): Promise<unknown> =>
     ipcRenderer.invoke('resource.readTaeEventParams', sourceUri, animId, eventIndex, taeEntryIndex, taeEntryId, taeEntryName, taeGroup),
   /** S17：伴生 chrbnd 的 FLVER 预览（overlay → 原版；KRAK 缺 Oodle 给可行动码）。一次读取完整角色 bundle，不再逐 mesh 循环。 */
@@ -597,6 +609,11 @@ const api = {
       eventTypeId?: number;
       startTime?: number;
       endTime?: number;
+      fieldIndex?: number;
+      fieldName?: string;
+      value?: string | number | boolean;
+      schemaBankId?: number;
+      taeEntryIndex?: number;
     }>
   ): Promise<RendererSaveResult> =>
     ipcRenderer.invoke('resource.commitTaeEvent', sourceUri, expectedDocumentHash, mutations),
@@ -699,7 +716,7 @@ const api = {
     childHash?: string;
     /**
      * P1：随页下发的字段定义/枚举/授信来源。主进程在 resolveTrustedParamDefinition
-     * 里完成包校验 + 行宽核对 + 用户信任策略；origin 只给白名单值，渲染器不自行判定。
+     * 里完成 first-party 包校验 + 行宽核对；origin 只给白名单值，渲染器不自行判定。
      */
     fieldDefs?: ParamFieldDef[] | null;
     fieldEnums?: Array<{
@@ -708,7 +725,7 @@ const api = {
       values: Array<{ value: number; label: string }>;
     }> | null;
     fieldDefsDiagnostic?: { code: string; message: string } | null;
-    fieldDefsOrigin?: 'fixture' | 'imported' | 'user-derived' | null;
+    fieldDefsOrigin?: 'first-party' | 'fixture' | 'imported' | 'user-derived' | null;
     fieldDefsTrusted?: boolean;
   }> => ipcRenderer.invoke(
     'resource.readContainerParamPage',
@@ -1014,6 +1031,8 @@ const api = {
     | { ok: true; embedded: number; reused: number; failed: number; model: string; dim: number }
     | { ok: false; error: { code: string; message: string } }
   > => ipcRenderer.invoke('rag.embed'),
+  getRagLocalModelStatus: (): Promise<import('@soulforge/shared').RagLocalModelStatus> =>
+    ipcRenderer.invoke('rag.localModelStatus'),
   /**
    * 工作区混合检索：lexical + SoulForge 内置向量 RRF 融合；内置向量暂不可用时
    * 自动退化为 lexical + structured，并返回可诊断结果。
@@ -1043,9 +1062,13 @@ const api = {
    */
   runAiAgent: (request: AiAgentRunRequest): Promise<AiAgentRunIpcResult> =>
     ipcRenderer.invoke('ai.agent.run', request),
+  requestAiAgentPermission: (
+    mode: 'plan' | 'normal' | 'fullPermission'
+  ): Promise<AiAgentPermissionRequestResult> =>
+    ipcRenderer.invoke('ai.agent.permission.request', mode),
   getAiAgentEvents: (sessionId: string, afterSeq = 0): Promise<AiAgentEventReplayIpcResult> =>
     ipcRenderer.invoke('ai.agent.events', sessionId, afterSeq),
-  cancelAiAgent: (sessionId: string): Promise<{ ok: boolean }> =>
+  cancelAiAgent: (sessionId: string): Promise<AiAgentCancelIpcResult> =>
     ipcRenderer.invoke('ai.agent.cancel', sessionId),
   /**
    * Answer one approval request. The request itself arrives as an
@@ -1090,6 +1113,28 @@ const api = {
     ipcRenderer.invoke('ai.memory.save', entry),
   deleteAiMemory: (idOrTopic: string): Promise<{ ok: true; deleted: boolean } | { ok: false; error: { code: string; message: string } }> =>
     ipcRenderer.invoke('ai.memory.delete', idOrTopic),
+  /** GitHub Release 更新：renderer 只接收脱敏状态，不接触 token、路径或网络。 */
+  getUpdateState: (): Promise<UpdatePublicState> =>
+    ipcRenderer.invoke(UPDATE_IPC_CHANNELS.getState),
+  setUpdateChannel: (request: UpdateSetChannelRequest): Promise<UpdateCommandResult> =>
+    ipcRenderer.invoke(UPDATE_IPC_CHANNELS.setChannel, request),
+  checkForUpdate: (): Promise<UpdateCommandResult> =>
+    ipcRenderer.invoke(UPDATE_IPC_CHANNELS.check),
+  downloadUpdate: (): Promise<UpdateCommandResult> =>
+    ipcRenderer.invoke(UPDATE_IPC_CHANNELS.download),
+  cancelUpdate: (): Promise<UpdateCommandResult> =>
+    ipcRenderer.invoke(UPDATE_IPC_CHANNELS.cancel),
+  installUpdate: (): Promise<UpdateCommandResult> =>
+    ipcRenderer.invoke(UPDATE_IPC_CHANNELS.install),
+  openUpdateRelease: (): Promise<UpdateCommandResult> =>
+    ipcRenderer.invoke(UPDATE_IPC_CHANNELS.openRelease),
+  onUpdateState: (callback: (state: UpdatePublicState) => void): (() => void) => {
+    const listener = (_event: Electron.IpcRendererEvent, envelope: UpdateStateEvent): void => {
+      callback(envelope.state);
+    };
+    ipcRenderer.on(UPDATE_IPC_CHANNELS.event, listener);
+    return () => ipcRenderer.removeListener(UPDATE_IPC_CHANNELS.event, listener);
+  },
   onAiAgentEvent: (callback: (envelope: AiAgentEventEnvelope) => void): (() => void) => {
     const listener = (_event: Electron.IpcRendererEvent, envelope: AiAgentEventEnvelope): void => {
       callback(envelope);

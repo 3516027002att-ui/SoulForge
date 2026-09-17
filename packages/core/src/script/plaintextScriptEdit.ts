@@ -1,9 +1,9 @@
 /**
  * 明文脚本条目的源码级编辑编排。
  *
- * 用户裁定(2026-08-08)给 SCOPE-BEHAVIOR-SCRIPT 开了
- * `source-level-edit-plaintext-script-entries`,范围严格限于**实测确认为明文**
- * 的条目；306 个字节码条目仍只许整文件替换（当前没有 HKS 重编译器）。
+ * 当前 Sekiro 1.6.x 范围同时允许已通过 first-party HKS coverage gate 的
+ * 字节码条目进入源码编辑；不属于当前 dialect 的字节码必须由上层返回结构化
+ * `not-attempted/blocked` 诊断，不能走这里的明文编码回退。
  *
  * ── 为什么不新建 writer ──
  *

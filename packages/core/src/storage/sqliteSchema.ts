@@ -634,6 +634,76 @@ CREATE INDEX IF NOT EXISTS idx_semantic_file_cache_workspace_kind
 CREATE INDEX IF NOT EXISTS idx_rag_chunks_workspace_outer_hash
   ON rag_chunks(workspace_id, source_uri, outer_file_hash);
 `
+  },
+  {
+    id: 14,
+    name: 'v0_9_knowledge_store',
+    sql: `
+PRAGMA foreign_keys = ON;
+
+-- Curated knowledge is workspace-scoped evidence, not a game-resource writer.
+-- Generations are append-only; knowledge_current is the single CAS head.
+CREATE TABLE IF NOT EXISTS knowledge_generations (
+  workspace_id TEXT NOT NULL,
+  generation_id TEXT NOT NULL,
+  parent_generation TEXT,
+  schema_version TEXT NOT NULL,
+  source_revisions_json TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  PRIMARY KEY (workspace_id, generation_id),
+  FOREIGN KEY (workspace_id) REFERENCES workspaces(workspace_id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS knowledge_current (
+  workspace_id TEXT PRIMARY KEY,
+  generation_id TEXT NOT NULL,
+  FOREIGN KEY (workspace_id, generation_id)
+    REFERENCES knowledge_generations(workspace_id, generation_id)
+    ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS knowledge_blobs (
+  workspace_id TEXT NOT NULL,
+  content_hash TEXT NOT NULL,
+  body TEXT NOT NULL,
+  PRIMARY KEY (workspace_id, content_hash),
+  FOREIGN KEY (workspace_id) REFERENCES workspaces(workspace_id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS knowledge_pages (
+  workspace_id TEXT NOT NULL,
+  generation_id TEXT NOT NULL,
+  page_id TEXT NOT NULL,
+  path TEXT NOT NULL,
+  body TEXT NOT NULL,
+  content_hash TEXT NOT NULL,
+  revision INTEGER NOT NULL,
+  scope_json TEXT NOT NULL,
+  claims_json TEXT NOT NULL,
+  PRIMARY KEY (workspace_id, generation_id, page_id),
+  FOREIGN KEY (workspace_id, generation_id)
+    REFERENCES knowledge_generations(workspace_id, generation_id)
+    ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS knowledge_claims (
+  workspace_id TEXT NOT NULL,
+  generation_id TEXT NOT NULL,
+  claim_id TEXT NOT NULL,
+  claim_json TEXT NOT NULL,
+  PRIMARY KEY (workspace_id, generation_id, claim_id),
+  FOREIGN KEY (workspace_id, generation_id)
+    REFERENCES knowledge_generations(workspace_id, generation_id)
+    ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_knowledge_generations_workspace_created
+  ON knowledge_generations(workspace_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_knowledge_pages_workspace_page
+  ON knowledge_pages(workspace_id, page_id, generation_id);
+CREATE INDEX IF NOT EXISTS idx_knowledge_claims_workspace_claim
+  ON knowledge_claims(workspace_id, claim_id, generation_id);
+`
   }
 ];
 

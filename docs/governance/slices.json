@@ -148,6 +148,69 @@
       "declaresUnfrozenValidation": false
     },
     {
+      "sliceId": "W-FIRSTPARTY-SCHEMA-01",
+      "targetRelease": "V0.5",
+      "lifecycle": "active",
+      "authority": "candidate",
+      "authorityCap": "partial",
+      "authorityCapNote": "cap=partial；仅覆盖已内置并通过当前验证的 Sekiro 1.6.x schema；未覆盖或长度不匹配保持只读，Bridge 仍是 native authority",
+      "capabilityIds": [
+        "C-PARAM",
+        "C-EMEVD"
+      ],
+      "blockerRefs": [],
+      "goal": "解除生产运行时对 Smithbox/DarkScript3/Yapped 的依赖，随 SoulForge 发布自有版本化、内容寻址的 Sekiro 1.6.x PARAM/EMEVD schema；覆盖 160 个 PARAM definition、405 条 EMEVD 指令与 27 个 bank，覆盖缺口失败关闭",
+      "hardPrerequisites": "第三方 adapter 仅可用于开发与交叉验证，不得进入生产入口或发布包；C# Bridge 继续是 native 格式 authority；drawparam/gparam 仍延期至 V0.6",
+      "entryPoints": [
+        "packages/core/src/schema/sekiro/firstPartySchema.ts",
+        "packages/core/src/param/paramMetadata.ts",
+        "packages/core/src/emevd/emedfRegistryResolver.ts",
+        "apps/desktop/src/main/ipc/param.ts",
+        "apps/desktop/src/main/ipc/event.ts",
+        "scripts/verify-first-party-schema-boundary.mjs"
+      ],
+      "requiredValidation": {
+        "steps": [
+          {
+            "suiteId": "test:first-party-schema-clean",
+            "args": [],
+            "env": {}
+          },
+          {
+            "suiteId": "test:first-party-schema-boundary",
+            "args": [],
+            "env": {}
+          },
+          {
+            "suiteId": "test:first-party-schema-package",
+            "args": [],
+            "env": {}
+          },
+          {
+            "suiteId": "typecheck",
+            "args": [],
+            "env": {}
+          },
+          {
+            "suiteId": "bridge:verify:synthetic",
+            "args": [],
+            "env": {}
+          },
+          {
+            "suiteId": "test:first-party-schema-native-coverage",
+            "args": [],
+            "env": {}
+          }
+        ],
+        "manualChecks": [
+          "清空 LOCALAPPDATA、SOULFORGE_EMEDF_PATH、SOULFORGE_YAPPED_SDT_ROOT 后仍可读取内置 PARAM 字段和 EMEVD 源码",
+          "真实 native corpus 可用时执行对应 PARAM/EMEVD smoke；未运行项保持 unverified/partial"
+        ],
+        "notes": "内置 schema loader 自动校验 origin、package/version、contentDigest 与覆盖计数；旧外部参数只返回 EMEVD_EXTERNAL_SCHEMA_FORBIDDEN，不扫描或读取外部路径。"
+      },
+      "declaresUnfrozenValidation": true
+    },
+    {
       "sliceId": "W-EMEVD-DSL-01",
       "targetRelease": "V0.5",
       "lifecycle": "completed",
@@ -1178,7 +1241,16 @@
       "declaresUnfrozenValidation": true
     }
   ],
-  "activeClaims": [],
+  "activeClaims": [
+    {
+      "sliceId": "W-FIRSTPARTY-SCHEMA-01",
+      "claimId": "claim-w-firstparty-schema-01-20260916",
+      "owner": "codex",
+      "claimedAt": "2026-09-16T10:42:53.783Z",
+      "heartbeatAt": "2026-09-16T10:42:53.783Z",
+      "recoveryTrigger": "若本会话中断，核对 codex/firstparty-schema 工作树与未完成验证后再释放或继续"
+    }
+  ],
   "invariants": [
     "authority 不得高于 authorityCap；unverified 表示尚无所需证据，不是绕过 cap 的高等级。",
     "completed 只表示该切片完成，不表示整条路线或 Gate 完成。",

@@ -1,8 +1,10 @@
 /**
- * Minimal EMEDF-style instruction argument schema.
- * Not a full Sekiro EMEDF dump — fixture/user schemas bind bank+id → arg layout.
- * Unknown instructions stay opaque (argsBase64 only).
+ * SoulForge EMEVD semantic schema.  The C# Bridge remains the native binary
+ * authority; this module only describes instruction arguments and performs
+ * bounded typed projections/mutations.
  */
+
+import { createHash } from 'node:crypto';
 
 export type EmedfArgType =
   | 'u8'
@@ -51,7 +53,13 @@ export interface EmedfInstructionDef {
 export interface EmedfRegistry {
   schemaVersion: 1;
   game: 'sekiro';
-  origin: 'fixture' | 'user-derived' | 'imported';
+  origin: 'fixture' | 'user-derived' | 'imported' | 'first-party';
+  /** Content-addressed provenance for a bundled first-party registry. */
+  packageId?: string;
+  packageVersion?: string;
+  contentDigest?: `sha256:${string}`;
+  /** All declared banks, including a bank that currently has no instructions. */
+  banks?: number[];
   instructions: EmedfInstructionDef[];
   enums?: Record<string, EmedfEnumDef>;
 }
@@ -78,6 +86,87 @@ export type EmedfArgsValidationResult =
   | { ok: false; code: string; message: string };
 
 export type EmedfRegistryValidationResult = EmedfArgsValidationResult;
+
+function stableJson(value: unknown): string {
+  if (value === null || typeof value !== 'object') return JSON.stringify(value);
+  if (Array.isArray(value)) return `[${value.map((item) => stableJson(item)).join(',')}]`;
+  const record = value as Record<string, unknown>;
+  return `{${Object.keys(record)
+    .filter((key) => record[key] !== undefined)
+    .sort()
+    .map((key) => `${JSON.stringify(key)}:${stableJson(record[key])}`)
+    .join(',')}}`;
+}
+
+/** Digest of instruction and enum semantics, excluding provenance fields. */
+export function computeEmedfRegistryContentDigest(registry: EmedfRegistry): `sha256:${string}` {
+  const payload = {
+    schemaVersion: registry.schemaVersion,
+    game: registry.game,
+    banks: registry.banks ? [...registry.banks].sort((a, b) => a - b) : undefined,
+    instructions: [...registry.instructions]
+      .sort((a, b) => a.bank - b.bank || a.id - b.id || a.name.localeCompare(b.name))
+      .map((instruction) => ({
+        bank: instruction.bank,
+        id: instruction.id,
+        name: instruction.name,
+        args: instruction.args.map((arg) => ({ ...arg }))
+      })),
+    enums: registry.enums
+      ? Object.fromEntries(Object.entries(registry.enums)
+          .sort(([left], [right]) => left.localeCompare(right))
+          .map(([name, definition]) => [name, {
+            name: definition.name,
+            members: definition.members.map((member) => ({ ...member }))
+          }]))
+      : undefined
+  };
+  return `sha256:${createHash('sha256').update(stableJson(payload), 'utf8').digest('hex')}`;
+}
+
+/** Strict validation used by the bundled registry loader. */
+export function validateFirstPartyEmedfRegistry(
+  registry: EmedfRegistry
+): EmedfRegistryValidationResult {
+  const base = validateEmedfRegistry(registry);
+  if (!base.ok) return base;
+  if (registry.origin !== 'first-party') {
+    return {
+      ok: false,
+      code: 'EMEDF_FIRST_PARTY_ORIGIN_REQUIRED',
+      message: '内置 EMEVD schema 必须标记为 first-party。'
+    };
+  }
+  if (!registry.packageId || !registry.packageVersion || !registry.contentDigest) {
+    return {
+      ok: false,
+      code: 'EMEDF_FIRST_PARTY_PROVENANCE_MISSING',
+      message: '内置 EMEVD schema 缺少 packageId、packageVersion 或 contentDigest。'
+    };
+  }
+  if (registry.banks === undefined || registry.banks.length === 0) {
+    return {
+      ok: false,
+      code: 'EMEDF_FIRST_PARTY_BANKS_MISSING',
+      message: '内置 EMEVD schema 缺少完整 bank 目录。'
+    };
+  }
+  if (!/^sha256:[a-f0-9]{64}$/u.test(registry.contentDigest)) {
+    return {
+      ok: false,
+      code: 'EMEDF_FIRST_PARTY_DIGEST_INVALID',
+      message: '内置 EMEVD schema contentDigest 不是有效 SHA-256。'
+    };
+  }
+  const calculated = computeEmedfRegistryContentDigest(registry);
+  return calculated === registry.contentDigest
+    ? { ok: true }
+    : {
+        ok: false,
+        code: 'EMEDF_FIRST_PARTY_DIGEST_MISMATCH',
+        message: '内置 EMEVD schema contentDigest 与内容不一致。'
+      };
+}
 
 /** Small built-in fixture covering common bank 2000 / 1000 patterns for smoke. */
 export function createSekiroFixtureEmedf(): EmedfRegistry {
@@ -581,12 +670,22 @@ function validateEmedfRegistryUncached(
   registry: EmedfRegistry
 ): EmedfRegistryValidationResult {
   if (!registry || registry.schemaVersion !== 1 || registry.game !== 'sekiro'
-    || !['fixture', 'user-derived', 'imported'].includes(registry.origin)
+    || !['fixture', 'user-derived', 'imported', 'first-party'].includes(registry.origin)
     || !Array.isArray(registry.instructions)) {
     return {
       ok: false,
       code: 'EMEDF_REGISTRY_INVALID',
       message: 'EMEDF registry schemaVersion/game/instructions 无效。'
+    };
+  }
+  if (registry.banks !== undefined
+    && (!Array.isArray(registry.banks)
+      || registry.banks.some((bank) => !Number.isSafeInteger(bank) || bank < 0)
+      || new Set(registry.banks).size !== registry.banks.length)) {
+    return {
+      ok: false,
+      code: 'EMEDF_BANK_DIRECTORY_INVALID',
+      message: 'EMEDF bank 目录无效。'
     };
   }
   const instructionKeys = new Set<string>();

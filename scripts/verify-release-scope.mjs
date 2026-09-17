@@ -764,13 +764,13 @@ if (proposal !== null) {
 
     if (proposal.proposalStatus === 'user-approved') {
       requireFrozenValue(proposal, 'paramMetadataSourcePolicy.status', 'user-approved');
-      requireFrozenValue(proposal, 'paramMetadataSourcePolicy.sourceProject', 'vawser/Smithbox');
-      requireFrozenValue(proposal, 'paramMetadataSourcePolicy.sourceRelease', '2.2.4');
-      requireFrozenValue(proposal, 'paramMetadataSourcePolicy.sourceCommit', '1b46d2c9f82d1c3635ff7c12c526e05a8ba4208f');
-      requireFrozenValue(proposal, 'paramMetadataSourcePolicy.sourceArtifactSha256', '14a7fd735a9577249fa93655f63d1e9ac025a3b00d7c5bed8badc8a3a7fd489d');
-      requireFrozenValue(proposal, 'paramMetadataSourcePolicy.sourcePath', 'Smithbox.Release/Output/Assets/PARAM/SDT');
-      requireFrozenValue(proposal, 'paramMetadataSourcePolicy.acquisition', 'user-local-pinned-release-import');
-      requireFrozenValue(proposal, 'paramMetadataSourcePolicy.redistribution', 'forbidden');
+      requireFrozenValue(proposal, 'paramMetadataSourcePolicy.sourceProject', 'SoulForge');
+      requireFrozenValue(proposal, 'paramMetadataSourcePolicy.sourceRelease', 'sekiro-1.6.x');
+      requireFrozenValue(proposal, 'paramMetadataSourcePolicy.sourceCommit', 'first-party-schema-package-v1.0.0');
+      requireFrozenValue(proposal, 'paramMetadataSourcePolicy.sourceArtifactSha256', 'e42fde9b453fad62490e0f6ee2bb9c34d37293313caf52b5df0f2747163d3daf');
+      requireFrozenValue(proposal, 'paramMetadataSourcePolicy.sourcePath', 'packages/core/src/schema/sekiro/firstPartySchemaData.ts');
+      requireFrozenValue(proposal, 'paramMetadataSourcePolicy.acquisition', 'first-party-reviewed-semantic-projection');
+      requireFrozenValue(proposal, 'paramMetadataSourcePolicy.redistribution', 'permitted');
       requireFrozenValue(proposal, 'paramMetadataSourcePolicy.mismatchPolicy', 'fail-closed');
       requireFrozenValue(proposal, 'providerCredentialPolicy.status', 'user-approved');
       requireFrozenValue(proposal, 'providerCredentialPolicy.defaultConfiguration', 'empty');
@@ -825,10 +825,12 @@ if (proposal !== null) {
       requireFrozenEditorMatrix(itemById);
       requireFrozenOperation(itemById, 'SCOPE-KRAK', 'recompress');
       requireFrozenOperation(itemById, 'SCOPE-KRAK', 'write');
-      requireFrozenOperation(itemById, 'SCOPE-PARAM', 'import-user-local-pinned-smithbox-metadata');
+      requireFrozenOperation(itemById, 'SCOPE-PARAM', 'load-first-party-param-schema');
       requireFrozenOperation(itemById, 'SCOPE-PARAM', 'verify-source-release-and-content-digest');
+      requireFrozenOperation(itemById, 'SCOPE-PARAM', 'verify-first-party-package-provenance');
       requireFrozenOperation(itemById, 'SCOPE-PARAM', 'record-source-license-and-provenance');
-      requireFrozenUnsupported(itemById, 'SCOPE-PARAM', 'redistribute-imported-smithbox-param-metadata');
+      requireFrozenUnsupported(itemById, 'SCOPE-PARAM', 'ship-third-party-schema-or-adapter');
+      requireFrozenUnsupported(itemById, 'SCOPE-PARAM', 'accept-external-param-schema-at-runtime');
       requireFrozenUnsupported(itemById, 'SCOPE-PARAM', 'accept-unpinned-or-mismatched-metadata-source');
       requireFrozenOperation(itemById, 'SCOPE-AI', 'offline-protocol-conformance');
       requireFrozenOperation(itemById, 'SCOPE-AI', 'diagnose-empty-provider-configuration-without-network-call');

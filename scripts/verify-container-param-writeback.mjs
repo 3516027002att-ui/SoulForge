@@ -141,7 +141,12 @@ if (typeof writeHandler === 'function') {
  * 二者缺一，写入就是「无授权」或「无并发保护」。
  */
 const { readFileSync } = await import('node:fs');
-const ipcSource = readFileSync('apps/desktop/src/main/ipc.ts', 'utf8');
+// PARAM IPC 已按职责拆到 ipc/param.ts；同时读取注册入口和实际写回实现，
+// 避免契约脚本因模块拆分而把真实的授权/并发/容器重打包门禁误报为缺失。
+const ipcSource = [
+  'apps/desktop/src/main/ipc.ts',
+  'apps/desktop/src/main/ipc/param.ts'
+].map((path) => readFileSync(path, 'utf8')).join('\n');
 
 assertions.check(
   ipcSource.includes('PARAM_FIELD_DEFINITION_NOT_TRUSTED'),

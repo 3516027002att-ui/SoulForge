@@ -94,6 +94,7 @@ internal static class TaeNativeWriter
 
         var insertCount = mutations.Count(m => m.Kind == "insert-event");
         var updateCount = mutations.Count(m => m.Kind == "update-event-times");
+        var fieldUpdateCount = mutations.Count(m => m.Kind == "set-event-field");
         var expectedTotalEvents = document.TotalEventCount + insertCount;
         if (reread.TotalEventCount != expectedTotalEvents)
             throw new InvalidDataException($"重读后事件总数 {reread.TotalEventCount} ≠ 写前 {document.TotalEventCount} + {insertCount}。");
@@ -109,11 +110,12 @@ internal static class TaeNativeWriter
             mutationCount = mutations.Count,
             updateCount,
             insertCount,
+            fieldUpdateCount,
             outputHash = reread.SourceHash,
             outputSize = reread.SourceBytes.Length,
             rereadVerified = true,
             structurePreserved = true,
-            byteSurgical = insertCount == 0 && mutations.All(m => m.Kind == "update-event-times"),
+            byteSurgical = insertCount == 0,
             mutations = appliedSummaries
         };
     }
@@ -155,12 +157,12 @@ internal static class TaeNativeWriter
     {
         foreach (var mutation in mutations)
         {
-            ValidateTimes(mutation.StartTime, mutation.EndTime);
             var anim = layout.FindAnim(mutation.AnimId)
                 ?? throw new InvalidDataException($"TAE 动画 animId={mutation.AnimId} 不存在。");
 
             if (mutation.Kind == "update-event-times")
             {
+                ValidateTimes(mutation.StartTime!.Value, mutation.EndTime!.Value);
                 var ev = ResolveEvent(anim, mutation.EventIndex!.Value);
 
                 // 全文时间槽使用者检查：不能被本动画其它事件或其它动画的事件共享 (SF-11 §2.6.2)
@@ -193,7 +195,7 @@ internal static class TaeNativeWriter
                 }
 
                 // 零时长点事件（start/end 指向同一时间槽）：只能写入同一个值 (SF-11 §2.6.2)
-                if (ev.StartTimeAbs == ev.EndTimeAbs && mutation.StartTime != mutation.EndTime)
+                if (ev.StartTimeAbs == ev.EndTimeAbs && mutation.StartTime!.Value != mutation.EndTime!.Value)
                 {
                     throw new TaeWriteBlockedException(
                         $"TAE 动画 {mutation.AnimId} 事件 {ev.Index} 的 start/end 指向同一时间槽（点事件），"
@@ -204,6 +206,7 @@ internal static class TaeNativeWriter
             }
             else if (mutation.Kind == "insert-event")
             {
+                ValidateTimes(mutation.StartTime!.Value, mutation.EndTime!.Value);
                 var template = ResolveEvent(anim, mutation.TemplateEventIndex!.Value);
 
                 // 事件参数体连续性检查
@@ -250,6 +253,10 @@ internal static class TaeNativeWriter
                         + "（参数体按模板逐字节拷贝，类型必须一致才有意义）。");
                 }
             }
+            else if (mutation.Kind == "set-event-field")
+            {
+                _ = ResolveFieldWrite(mutation, layout, anim, source);
+            }
         }
     }
 
@@ -260,6 +267,155 @@ internal static class TaeNativeWriter
             ? anim.Events[template.Index + 1].EventDataAbs - template.ParamDataAbs
             : anim.EventGroupTableAbs - template.ParamDataAbs;
     }
+
+    private static int GetParameterSpan(TaeLayout.AnimInfo anim, TaeLayout.EventInfo ev, int sourceLength)
+    {
+        if (ev.ParamDataAbs == 0) return 0;
+        if (ev.ParamDataAbs < ev.EventDataAbs + EventDataHeaderSize)
+            throw new TaeWriteBlockedException(
+                $"TAE 动画 {anim.AnimId} 事件 {ev.Index} 参数体偏移早于事件头结束。",
+                "TAE_WRITE_BLOCKED_UNKNOWN_STRUCTURE",
+                new { mutation = "set-event-field", reason = "parameter-offset-before-header" });
+        var end = ev.Index < anim.Events.Count - 1
+            ? anim.Events[ev.Index + 1].EventDataAbs
+            : anim.EventGroupTableAbs > 0 ? anim.EventGroupTableAbs : sourceLength;
+        var length = end - ev.ParamDataAbs;
+        if (length < 0 || ev.ParamDataAbs + length > sourceLength)
+            throw new TaeWriteBlockedException(
+                $"TAE 动画 {anim.AnimId} 事件 {ev.Index} 参数体边界无效。",
+                "TAE_WRITE_BLOCKED_UNKNOWN_STRUCTURE",
+                new { mutation = "set-event-field", reason = "parameter-span-invalid", parameterOffset = ev.ParamDataAbs, length });
+        return length;
+    }
+
+    private static FieldWriteSpec ResolveFieldWrite(
+        TaeMutation mutation,
+        TaeLayout layout,
+        TaeLayout.AnimInfo anim,
+        byte[] source)
+    {
+        var ev = ResolveEvent(anim, mutation.EventIndex
+            ?? throw new InvalidDataException("set-event-field 需要 eventIndex。"));
+        var parameterLength = GetParameterSpan(anim, ev, source.Length);
+        if (parameterLength == 0 || ev.ParamDataAbs == 0)
+        {
+            throw new TaeWriteBlockedException(
+                $"TAE 动画 {anim.AnimId} 事件 {ev.Index} 没有可写参数体。",
+                "TAE_SCHEMA_EVENT_NO_PARAMETERS",
+                new { mutation = mutation.Kind, eventTypeId = ev.EventTypeId, parameterLength });
+        }
+
+        var schemaBankId = mutation.SchemaBankId ?? layout.SchemaBankId;
+        if (mutation.SchemaBankId.HasValue
+            && layout.SchemaBankId.HasValue
+            && mutation.SchemaBankId.Value != layout.SchemaBankId.Value)
+        {
+            throw new TaeWriteBlockedException(
+                $"set-event-field 的 schemaBankId={mutation.SchemaBankId.Value} 与 TAE EventBank={layout.SchemaBankId.Value} 不一致。",
+                "TAE_SCHEMA_BANK_MISMATCH",
+                new { mutation = mutation.Kind, eventTypeId = ev.EventTypeId, requestedBankId = mutation.SchemaBankId, documentBankId = layout.SchemaBankId });
+        }
+        var resolution = TaeFirstPartySchema.Resolve(ev.EventTypeId, parameterLength, schemaBankId);
+        if (resolution.Event is null)
+        {
+            var code = resolution.Candidates.Count == 0
+                ? "TAE_SCHEMA_EVENT_UNKNOWN"
+                : "TAE_SCHEMA_LENGTH_MISMATCH";
+            throw new TaeWriteBlockedException(
+                $"SoulForge 内置 TAE schema 无法覆盖 eventTypeId={ev.EventTypeId} length={parameterLength}。",
+                code,
+                new
+                {
+                    mutation = mutation.Kind,
+                    eventTypeId = ev.EventTypeId,
+                    parameterLength,
+                    schema = TaeFirstPartySchema.Metadata(),
+                    variants = resolution.Candidates.Select(item => new { item.BankId, item.BankName, item.ParamSize }).ToArray()
+                });
+        }
+        if (resolution.Ambiguous)
+        {
+            throw new TaeWriteBlockedException(
+                $"eventTypeId={ev.EventTypeId} 在当前参数长度下对应多个 first-party TAE bank，写入必须带 schemaBankId。",
+                "TAE_SCHEMA_VARIANT_AMBIGUOUS",
+                new
+                {
+                    mutation = mutation.Kind,
+                    eventTypeId = ev.EventTypeId,
+                    parameterLength,
+                    documentBankId = layout.SchemaBankId,
+                    variants = resolution.Candidates.Select(item => new { item.BankId, item.BankName, item.ParamSize }).ToArray()
+                });
+        }
+
+        var decoded = TaeFirstPartySchema.Decode(
+            ev.EventTypeId,
+            source.AsSpan(ev.ParamDataAbs, parameterLength),
+            schemaBankId);
+        if (!decoded.Complete)
+        {
+            var code = decoded.AssertFailures.Count > 0
+                ? "TAE_SCHEMA_ASSERT_FAILED"
+                : "TAE_SCHEMA_COVERAGE_GAP";
+            throw new TaeWriteBlockedException(
+                $"TAE 事件 {ev.Index} 的 first-party schema 现有字节未通过完整校验。",
+                code,
+                new
+                {
+                    mutation = mutation.Kind,
+                    eventTypeId = ev.EventTypeId,
+                    parameterLength,
+                    assertFailures = decoded.AssertFailures,
+                    schema = TaeFirstPartySchema.Metadata()
+                });
+        }
+
+        var schemaEvent = resolution.Event;
+        var byIndex = mutation.FieldIndex is { } requestedIndex
+            ? schemaEvent.Fields.FirstOrDefault(field => field.Index == requestedIndex)
+            : null;
+        var byName = !string.IsNullOrWhiteSpace(mutation.FieldName)
+            ? schemaEvent.Fields.FirstOrDefault(field => string.Equals(field.Name, mutation.FieldName, StringComparison.Ordinal))
+            : null;
+        var field = byIndex ?? byName;
+        if (field is null)
+        {
+            throw new TaeWriteBlockedException(
+                $"TAE 事件 {ev.Index} 的字段选择器未命中 first-party schema。",
+                "TAE_SCHEMA_FIELD_UNKNOWN",
+                new { mutation = mutation.Kind, eventTypeId = ev.EventTypeId, fieldIndex = mutation.FieldIndex, fieldName = mutation.FieldName });
+        }
+        if (byIndex is not null && byName is not null && !ReferenceEquals(byIndex, byName))
+        {
+            throw new TaeWriteBlockedException(
+                $"TAE 事件 {ev.Index} 的 fieldIndex 与 fieldName 指向不同字段。",
+                "TAE_SCHEMA_FIELD_SELECTOR_CONFLICT",
+                new { mutation = mutation.Kind, fieldIndex = mutation.FieldIndex, fieldName = mutation.FieldName });
+        }
+        if (TaeFirstPartySchema.IsPaddingField(field))
+        {
+            throw new TaeWriteBlockedException(
+                $"TAE 事件 {ev.Index} 的字段 {field.Name} 是 assert/padding 字段，不允许作为语义字段写入。",
+                "TAE_SCHEMA_PADDING_READONLY",
+                new { mutation = mutation.Kind, eventTypeId = ev.EventTypeId, fieldIndex = field.Index, fieldName = field.Name, assert = field.Assert });
+        }
+
+        var bytes = TaeFirstPartySchema.EncodeValue(
+            field,
+            mutation.FieldValue ?? throw new InvalidDataException("set-event-field 需要 value。"));
+        if (field.Offset < 0 || field.Offset + bytes.Length > parameterLength)
+            throw new TaeWriteBlockedException(
+                $"TAE 事件 {ev.Index} 的字段 {field.Name} 越过参数体边界。",
+                "TAE_SCHEMA_FIELD_OUT_OF_RANGE",
+                new { mutation = mutation.Kind, fieldIndex = field.Index, fieldName = field.Name, parameterLength });
+        return new FieldWriteSpec(mutation, ev, schemaEvent, field, bytes, parameterLength);
+    }
+
+    private static string DescribeJsonValue(JsonElement? value) => value is null
+        ? string.Empty
+        : value.Value.ValueKind == JsonValueKind.String
+            ? value.Value.GetString() ?? string.Empty
+            : value.Value.ToString();
 
     // ── 分组构建写入计划 (SF-11 §2.6.3) ──
 
@@ -272,6 +428,14 @@ internal static class TaeNativeWriter
         int EndTimeAbs,
         int ParamDataAbs,
         int EventDataAbs);
+
+    private sealed record FieldWriteSpec(
+        TaeMutation Mutation,
+        TaeLayout.EventInfo Event,
+        TaeSchemaEvent SchemaEvent,
+        TaeSchemaField Field,
+        byte[] Bytes,
+        int ParameterLength);
 
     private static List<object> BuildAndApplyPlan(
         List<TaeMutation> mutations,
@@ -287,12 +451,12 @@ internal static class TaeNativeWriter
             var anim = layout.FindAnim(m.AnimId)!;
             var ev = ResolveEvent(anim, m.EventIndex!.Value);
 
-            var startBytes = BitConverter.GetBytes(m.StartTime);
+            var startBytes = BitConverter.GetBytes(m.StartTime!.Value);
             plan.AddOrUpdateInterval(ev.StartTimeAbs, startBytes, $"anim:{m.AnimId}:event:{ev.Index}:start", $"set-start:{m.StartTime}");
 
             if (ev.EndTimeAbs != ev.StartTimeAbs)
             {
-                var endBytes = BitConverter.GetBytes(m.EndTime);
+                var endBytes = BitConverter.GetBytes(m.EndTime!.Value);
                 plan.AddOrUpdateInterval(ev.EndTimeAbs, endBytes, $"anim:{m.AnimId}:event:{ev.Index}:end", $"set-end:{m.EndTime}");
             }
 
@@ -307,7 +471,33 @@ internal static class TaeNativeWriter
             });
         }
 
-        // 2. 按动画分组处理所有 insert-event (避免逐事件复制表产生 O(mB) 重建成本)
+        // 2. 处理已由 first-party schema 精确解析的字段写入。
+        foreach (var m in mutations.Where(m => m.Kind == "set-event-field"))
+        {
+            var anim = layout.FindAnim(m.AnimId)!;
+            var spec = ResolveFieldWrite(m, layout, anim, source);
+            plan.AddOrUpdateInterval(
+                checked(spec.Event.ParamDataAbs + spec.Field.Offset),
+                spec.Bytes,
+                $"anim:{m.AnimId}:event:{spec.Event.Index}:field:{spec.Field.Index}",
+                $"set-field:{spec.Field.Name}");
+            summaries.Add(new
+            {
+                mutation = m.Kind,
+                animId = m.AnimId,
+                eventIndex = m.EventIndex,
+                fieldIndex = spec.Field.Index,
+                fieldName = spec.Field.Name,
+                fieldType = spec.Field.Type,
+                value = DescribeJsonValue(m.FieldValue),
+                parameterLength = spec.ParameterLength,
+                byteOffset = spec.Event.ParamDataAbs + spec.Field.Offset,
+                byteLength = spec.Bytes.Length,
+                byteSurgical = true
+            });
+        }
+
+        // 3. 按动画分组处理所有 insert-event (避免逐事件复制表产生 O(mB) 重建成本)
         var insertsByAnim = mutations
             .Where(m => m.Kind == "insert-event")
             .GroupBy(m => m.AnimId)
@@ -327,8 +517,8 @@ internal static class TaeNativeWriter
                 var eventTypeId = insertMutation.EventTypeId ?? template.EventTypeId;
 
                 // 2.1 新时间槽
-                var startTimeAbs = plan.Append(BitConverter.GetBytes(insertMutation.StartTime), $"anim:{animId}:new_event_{currentEventCount}:start");
-                var endTimeAbs = plan.Append(BitConverter.GetBytes(insertMutation.EndTime), $"anim:{animId}:new_event_{currentEventCount}:end");
+                var startTimeAbs = plan.Append(BitConverter.GetBytes(insertMutation.StartTime!.Value), $"anim:{animId}:new_event_{currentEventCount}:start");
+                var endTimeAbs = plan.Append(BitConverter.GetBytes(insertMutation.EndTime!.Value), $"anim:{animId}:new_event_{currentEventCount}:end");
 
                 // 2.2 新参数体 (逐字节拷贝模板参数体)
                 var paramDataAbs = 0;
@@ -400,7 +590,7 @@ internal static class TaeNativeWriter
             }
         }
 
-        // 3. 若发生插入追加，同步文件头声明大小 (0x0C int32)
+        // 4. 若发生插入追加，同步文件头声明大小 (0x0C int32)
         if (insertsByAnim.Count > 0)
         {
             var finalSize = plan.CurrentAppendOffset;
@@ -433,7 +623,7 @@ internal static class TaeNativeWriter
             var animReread = rereadAnims[m.AnimId];
             var evReread = animReread.Events[m.EventIndex!.Value];
 
-            if (Math.Abs(evReread.StartTime - m.StartTime) > 0.0001f || Math.Abs(evReread.EndTime - m.EndTime) > 0.0001f)
+            if (Math.Abs(evReread.StartTime - m.StartTime!.Value) > 0.0001f || Math.Abs(evReread.EndTime - m.EndTime!.Value) > 0.0001f)
             {
                 throw new InvalidDataException($"重读后事件 {m.EventIndex} 时间 {evReread.StartTime}/{evReread.EndTime} ≠ 写入 {m.StartTime}/{m.EndTime}。");
             }
@@ -468,8 +658,8 @@ internal static class TaeNativeWriter
             var templateSpan = GetTemplateSpan(animOrig, template);
 
             var newEv = animReread.Events.FirstOrDefault(e =>
-                Math.Abs(e.StartTime - m.StartTime) < 0.0001f
-                && Math.Abs(e.EndTime - m.EndTime) < 0.0001f
+                Math.Abs(e.StartTime - m.StartTime!.Value) < 0.0001f
+                && Math.Abs(e.EndTime - m.EndTime!.Value) < 0.0001f
                 && e.EventTypeId == (m.EventTypeId ?? template.EventTypeId));
 
             if (newEv == null)
@@ -487,6 +677,24 @@ internal static class TaeNativeWriter
                 }
             }
         }
+
+        // 3. 验证 first-party schema 字段写入命中正确的原生参数区间。
+        if (mutations.Any(m => m.Kind == "set-event-field"))
+        {
+            var rereadLayout = TaeLayout.Read(reread.SourceBytes);
+            foreach (var m in mutations.Where(m => m.Kind == "set-event-field"))
+            {
+                var anim = rereadLayout.FindAnim(m.AnimId)
+                    ?? throw new InvalidDataException($"重读后找不到 TAE 动画 {m.AnimId}。" );
+                var spec = ResolveFieldWrite(m, rereadLayout, anim, reread.SourceBytes);
+                var offset = checked(spec.Event.ParamDataAbs + spec.Field.Offset);
+                if (!reread.SourceBytes.AsSpan(offset, spec.Bytes.Length).SequenceEqual(spec.Bytes))
+                {
+                    throw new InvalidDataException(
+                        $"重读后 TAE 字段 {spec.Field.Name} 未保持写入值（animId={m.AnimId}, eventIndex={spec.Event.Index}）。");
+                }
+            }
+        }
     }
 
     private static TaeMutation ParseMutation(JsonElement item)
@@ -500,7 +708,7 @@ internal static class TaeNativeWriter
                 var eventIndex = RequiredInt32(item, "eventIndex");
                 var startTime = RequiredFloat(item, "startTime");
                 var endTime = RequiredFloat(item, "endTime");
-                return new TaeMutation(kind, animId, eventIndex, null, null, startTime, endTime);
+                return new TaeMutation(kind, animId, eventIndex, null, null, startTime, endTime, null, null, null, null);
             }
             case "insert-event":
             {
@@ -509,7 +717,21 @@ internal static class TaeNativeWriter
                 var eventTypeId = OptionalInt32(item, "eventTypeId");
                 var startTime = RequiredFloat(item, "startTime");
                 var endTime = RequiredFloat(item, "endTime");
-                return new TaeMutation(kind, animId, null, templateEventIndex, eventTypeId, startTime, endTime);
+                return new TaeMutation(kind, animId, null, templateEventIndex, eventTypeId, startTime, endTime, null, null, null, null);
+            }
+            case "set-event-field":
+            {
+                var animId = RequiredInt64(item, "animId");
+                var eventIndex = RequiredInt32(item, "eventIndex");
+                var fieldIndex = OptionalInt32(item, "fieldIndex");
+                var fieldName = OptionalString(item, "fieldName");
+                if (!fieldIndex.HasValue && string.IsNullOrWhiteSpace(fieldName))
+                    throw new InvalidDataException("set-event-field 需要 fieldIndex 或 fieldName。" );
+                if (!item.TryGetProperty("value", out var fieldValue)
+                    || fieldValue.ValueKind is JsonValueKind.Undefined or JsonValueKind.Null)
+                    throw new InvalidDataException("set-event-field 需要 value。" );
+                var schemaBankId = OptionalInt32(item, "schemaBankId");
+                return new TaeMutation(kind, animId, eventIndex, null, null, null, null, fieldIndex, fieldName, fieldValue.Clone(), schemaBankId);
             }
             default:
                 throw new InvalidDataException($"未知 TAE mutation 类型：{kind}");
@@ -541,6 +763,11 @@ internal static class TaeNativeWriter
         => options.TryGetProperty(field, out var value) && value.ValueKind == JsonValueKind.Number && value.TryGetInt32(out var parsed)
             ? parsed : null;
 
+    private static string? OptionalString(JsonElement options, string field)
+        => options.TryGetProperty(field, out var value) && value.ValueKind == JsonValueKind.String
+            ? value.GetString()
+            : null;
+
     private static float RequiredFloat(JsonElement options, string field)
         => options.TryGetProperty(field, out var value) && value.ValueKind == JsonValueKind.Number && value.TryGetSingle(out var parsed)
             ? parsed : throw new InvalidDataException($"options.{field} 是必填浮点数。");
@@ -564,16 +791,22 @@ internal static class TaeNativeWriter
         int? EventIndex,
         int? TemplateEventIndex,
         int? EventTypeId,
-        float StartTime,
-        float EndTime);
+        float? StartTime,
+        float? EndTime,
+        int? FieldIndex,
+        string? FieldName,
+        JsonElement? FieldValue,
+        int? SchemaBankId);
 
     private sealed class TaeLayout
     {
-        public Dictionary<long, AnimInfo> Animations { get; }
+            public Dictionary<long, AnimInfo> Animations { get; }
+            public int? SchemaBankId { get; }
 
-        private TaeLayout(Dictionary<long, AnimInfo> animations)
+        private TaeLayout(Dictionary<long, AnimInfo> animations, int? schemaBankId)
         {
             Animations = animations;
+            SchemaBankId = schemaBankId;
         }
 
         public AnimInfo? FindAnim(long animId) => Animations.TryGetValue(animId, out var anim) ? anim : null;
@@ -606,6 +839,8 @@ internal static class TaeNativeWriter
                 throw new InvalidDataException("输入不是 TAE（缺少 \"TAE \" 魔数）。");
 
             var section1Offset = ReadInt64(source, 0x20);
+            var eventBank = ReadInt64(source, 0x30);
+            var schemaBankId = eventBank is 13 or 14 ? (int)eventBank : (int?)null;
             if (section1Offset < FileHeaderSize || section1Offset + Section1HeaderSize > source.Length)
                 throw new InvalidDataException("TAE Section 1 头偏移越界。");
             var s1 = checked((int)section1Offset);
@@ -680,7 +915,7 @@ internal static class TaeNativeWriter
                     Events = events
                 };
             }
-            return new TaeLayout(animations);
+            return new TaeLayout(animations, schemaBankId);
         }
 
         private static int ReadInt32(byte[] source, int offset) =>

@@ -28,7 +28,7 @@
  * ── 写入 ──
  *
  * 字段值编辑经 onApplyFieldMutation 出口交给宿主，由宿主走 Patch Engine。
- * 本组件不直接写盘，也不在 origin 未授信时放行提交 —— 那道授权门守的是
+ * 本组件不直接写盘，也不在未通过 schema/行宽校验时放行提交 —— 那道门守的是
  * 「元数据包与真实 PARAM 的字段偏移是否对得上」，绕过它等于往错误偏移写数值。
  */
 
@@ -207,7 +207,7 @@ export interface ParamWorkbenchProps {
   /**
    * 字段定义查询：给定 typeName 返回该 param 的字段定义。
    *
-   * 由宿主提供而不是本组件自己取：定义要经元数据包匹配与信任策略，那是
+   * 由宿主提供而不是本组件自己取：定义要经内置 schema 包匹配与行宽校验，那是
    * main 侧的权威路径，渲染器不该自行拼装。
    */
   resolveDefinition?: (typeName: string, rowDataSize: number) => ParamDefDocument | null;
@@ -541,15 +541,15 @@ export function ParamWorkbench(props: ParamWorkbenchProps): ReactElement {
    * 此前字段定义只经 App 的 resolveDefinition prop 下发，而那条链的数据源是
    * readParamDocument(容器 URI)——容器喂进去必失败，于是容器工作台的 Fields
    * 栏永远是「没有可用的字段定义」。现在主进程在 readContainerParamPage 里用
-   * 与 readParamDocument 相同的 resolveTrustedParamDefinition（包校验 + 行宽
-   * 核对 + 用户信任策略）解析并随页返回；origin 仍由主进程裁定，渲染器只消费。
+   * 与 readParamDocument 相同的 resolveTrustedParamDefinition（内置包校验 + 行宽
+   * 核对）解析并随页返回；origin 仍由主进程裁定，渲染器只消费。
    */
   const [pageFieldDefs, setPageFieldDefs] = useState<ParamFieldDef[] | null>(null);
   const [pageFieldEnums, setPageFieldEnums] = useState<
     Array<{ id: string; name: string; values: Array<{ value: number; label: string }> }> | null
   >(null);
   const [pageFieldDefsOrigin, setPageFieldDefsOrigin] = useState<
-    'fixture' | 'imported' | 'user-derived'
+    'first-party' | 'fixture' | 'imported' | 'user-derived'
   >('fixture');
   const [pageFieldDefsDiagnostic, setPageFieldDefsDiagnostic] = useState<
     { code: string; message: string } | null
@@ -986,7 +986,9 @@ export function ParamWorkbench(props: ParamWorkbenchProps): ReactElement {
             : null
         );
         setPageFieldDefsOrigin(
-          result.fieldDefsOrigin === 'imported' || result.fieldDefsOrigin === 'user-derived'
+          result.fieldDefsOrigin === 'first-party'
+            || result.fieldDefsOrigin === 'imported'
+            || result.fieldDefsOrigin === 'user-derived'
             ? result.fieldDefsOrigin
             : 'fixture'
         );
@@ -1085,13 +1087,16 @@ export function ParamWorkbench(props: ParamWorkbenchProps): ReactElement {
   /**
    * 字段写入是否放行。
    *
-   * T5-2：行宽匹配即授信。definition 非空已经意味着 resolveTrustedParamDefinition
-   * 在包校验 + 行宽核对两层都通过（行宽不符根本不返回 document），所以这里不再
-   * 检查 origin —— 把「必须先点信任」的路径去掉，行宽对上就放行字段写入。
+   * T5-2：first-party definition 且行宽匹配才放行。definition 非空已经意味着
+   * resolveTrustedParamDefinition 在内置包校验 + 行宽核对两层都通过（行宽不符
+   * 根本不返回 document）；这里仍复核来源，避免 fixture 或未知来源误入写链。
    * 仍要求 onApplyFieldMutation 出口存在与选中行带行字节（那是写入的必要条件，
    * 不是授权门）。
    */
   const canCommitFields = definition !== null
+    && (definition.origin === 'first-party'
+      || definition.origin === 'user-derived'
+      || definition.origin === 'imported')
     && definition.rowDataSize === rowDataSize
     && props.onApplyFieldMutation !== undefined
     && selectedRow?.dataBase64 !== undefined;
@@ -1662,12 +1667,12 @@ export function ParamWorkbench(props: ParamWorkbenchProps): ReactElement {
   const footerMessages = [
     ...pageDiagnostics,
     // 页面级字段诊断（P1）：readContainerParamPage 随页下发，主进程在
-    // resolveTrustedParamDefinition 里区分「包不可用/类型不存在/行宽不符/尚未授信」。
+    // resolveTrustedParamDefinition 里区分「内置包不可用/类型不存在/行宽不符/歧义匹配」。
     ...(selectedRowIndex !== null && definition === null && pageFieldDefsDiagnostic
       ? [`字段定义不可用：${pageFieldDefsDiagnostic.code}——${pageFieldDefsDiagnostic.message}`]
       : []),
-    // 只读原因必须说清下一步动作。T5-2 起行宽匹配即授信，字段写入不再被信任
-    // 门挡着 —— 只剩行字节缺失这一种真实的只读原因。
+    // 只读原因必须说清。通过 first-party schema 和行宽校验后才可进入写链，
+    // 其余情况保留诊断；行字节缺失也不能被猜测或伪造。
     ...(selectedRowIndex !== null && definition !== null && !canCommitFields
       ? [
           selectedRow?.dataBase64 === undefined

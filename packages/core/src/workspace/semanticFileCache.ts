@@ -25,11 +25,13 @@ export interface SemanticCacheProvider {
 
 /**
  * Native semantic caches are only reusable when the cached projection carries
- * the same verified packed-file identity and scan revision as the current
- * catalog.  Older cache rows predate outerFileHash/sourceRevision; treating
- * those rows as a hit would silently skip the Bridge export and leave RAG
- * without a freshness proof.  Text/JSON fixture caches intentionally retain
- * the historical cache behavior because they are not native byte projections.
+ * the same verified packed-file identity as the current catalog.  The source
+ * revision must still exist as provenance, but it is rebound to the current
+ * verified catalog revision on load. Older cache rows predate
+ * outerFileHash/sourceRevision; treating those rows as a hit would silently
+ * skip the Bridge export and leave RAG without a freshness proof. Text/JSON
+ * fixture caches intentionally retain the historical cache behavior because
+ * they are not native byte projections.
  */
 export function isNativeSemanticBundleCurrent(file: IndexedFile, bundle: SymbolBundle): boolean {
   if (!isNativeSemanticCacheCandidate(file)) return true;
@@ -44,9 +46,75 @@ export function isNativeSemanticBundleCurrent(file: IndexedFile, bundle: SymbolB
   ] as Array<{ sourceRevision?: number; outerFileHash?: string }>;
   if (proven.length === 0) return false;
   return proven.every((value) => (
-    value.sourceRevision === file.mtimeMs
+    // Content identity is the reuse authority.  A copied/restored workspace
+    // may legitimately have a different mtime while containing the exact
+    // same native bytes; forcing a Bridge export in that case defeats the
+    // persistent-cache contract.  Callers rebase sourceRevision to the
+    // current verified catalog revision before publishing the bundle.
+    typeof value.sourceRevision === 'number'
       && value.outerFileHash === file.sha256
   ));
+}
+
+/**
+ * Rebind a verified cache payload to the current catalog revision.  The
+ * payload is accepted only after isNativeSemanticBundleCurrent compared its
+ * outer hash, so this changes freshness metadata, never decoded content or
+ * native byte identity.
+ */
+export function rebaseSymbolBundleToFileRevision(
+  file: Pick<IndexedFile, 'mtimeMs'>,
+  bundle: SymbolBundle
+): SymbolBundle {
+  const sourceRevision = file.mtimeMs;
+  return {
+    ...(bundle.events ? {
+      events: bundle.events.map((item) => ({
+        ...item,
+        sourceRevision,
+        events: item.events.map((event) => ({ ...event, sourceRevision }))
+      }))
+    } : {}),
+    ...(bundle.maps ? {
+      maps: bundle.maps.map((item) => ({
+        ...item,
+        sourceRevision,
+        entities: item.entities.map((entity) => ({ ...entity, sourceRevision })),
+        regions: item.regions.map((region) => ({ ...region, sourceRevision }))
+      }))
+    } : {}),
+    ...(bundle.params ? {
+      params: bundle.params.map((item) => ({
+        ...item,
+        sourceRevision,
+        rows: item.rows.map((row) => ({ ...row, sourceRevision }))
+      }))
+    } : {}),
+    ...(bundle.msgs ? {
+      msgs: bundle.msgs.map((item) => ({
+        ...item,
+        sourceRevision,
+        entries: item.entries.map((entry) => ({ ...entry, sourceRevision }))
+      }))
+    } : {}),
+    ...(bundle.tae ? {
+      tae: bundle.tae.map((item) => ({
+        ...item,
+        sourceRevision,
+        animations: item.animations.map((animation) => ({
+          ...animation,
+          events: animation.events.map((event) => ({ ...event, sourceRevision }))
+        }))
+      }))
+    } : {}),
+    ...(bundle.scripts ? {
+      scripts: bundle.scripts.map((item) => ({
+        ...item,
+        sourceRevision,
+        scripts: item.scripts.map((script) => ({ ...script, sourceRevision }))
+      }))
+    } : {})
+  };
 }
 
 function isNativeSemanticCacheCandidate(file: IndexedFile): boolean {

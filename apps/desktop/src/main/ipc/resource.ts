@@ -1,18 +1,23 @@
 import { createHash } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
+import { dirname } from 'node:path';
 import type { IpcMainInvokeEvent } from 'electron';
 import {
+  applyNativeMutation,
   encodeScriptSourceForWriteback,
   inspectContainerTree,
   openResourcePreview,
   readContainerChild,
   replaceContainerChild,
+  runBridge,
   saveRawReplace,
   saveTextResource,
+  type NativeMutationOutcome,
+  type RawReplaceCommitPort,
   type WorkspaceIndex,
   type WorkspaceSession
 } from '@soulforge/core';
-import type { IndexedFile } from '@soulforge/shared';
+import type { Diagnostic, IndexedFile, SaveTextResourceResult } from '@soulforge/shared';
 import {
   sanitizeRendererValue,
   toRendererIndexedFile,
@@ -37,6 +42,24 @@ export interface ResourceIpcDeps {
     stagingRoot: string;
   };
   ensureActiveOperationLog(session: WorkspaceSession): Promise<OperationLogUtilityClient>;
+  verifiedReadRoots(
+    session: WorkspaceSession | null,
+    fallback: string
+  ): Promise<{ allowedRoots: string[]; diagnostics: Diagnostic[] }>;
+  verifiedStageRoots(
+    session: WorkspaceSession,
+    storage: { root: string },
+    code: string
+  ): Promise<{ allowedRoots: string[]; writableRoots: string[]; diagnostics: Diagnostic[] }>;
+  sessionCommitPort(
+    session: WorkspaceSession,
+    operationLog: OperationLogUtilityClient,
+    storage: { backupBaseDir: string; recoveryDir: string }
+  ): RawReplaceCommitPort;
+  toSaveResultFromOutcome(
+    outcome: NativeMutationOutcome,
+    files: readonly IndexedFile[]
+  ): RendererSaveResult;
   rejectNonSekiroNativeWrite(sourceUri: string, file?: IndexedFile): RendererSaveResult | null;
   requestWriteConfirmation(input: {
     event?: IpcMainInvokeEvent;
@@ -54,6 +77,112 @@ export interface ResourceIpcDeps {
   bumpPathSourceGenerationForUris(uris: readonly string[]): void;
   clearResourceRelatedCaches(): void;
   getActiveSessionLayers?(): { overlayRoot?: string; baseRoot?: string | null };
+}
+
+function isHksBytecode(bytes: Uint8Array): boolean {
+  return bytes.length >= 5
+    && bytes[0] === 0x1b
+    && bytes[1] === 0x4c
+    && bytes[2] === 0x75
+    && bytes[3] === 0x61
+    && bytes[4] === 0x51;
+}
+
+type HksBridgeData = {
+  contentBase64?: string;
+  outputHash?: string;
+  dialect?: string;
+  package?: string;
+  revision?: string;
+};
+
+async function compileHksSource(input: {
+  file: IndexedFile;
+  sourceUri: string;
+  session: WorkspaceSession;
+  sourceText: string;
+  originalBytes: Uint8Array;
+  expectedSourceHash: string;
+  readRoots: string[];
+}): Promise<{ ok: true; bytes: Buffer; data: HksBridgeData } | { ok: false; diagnostics: Diagnostic[] }> {
+  const result = await runBridge<HksBridgeData>({
+    command: 'compile-hks-source',
+    filePath: input.file.absolutePath,
+    resourceUri: input.sourceUri,
+    allowedRoots: input.readRoots,
+    workspaceSessionId: input.session.meta.workspaceId,
+    commandOptions: {
+      sourceText: input.sourceText,
+      expectedSourceHash: input.expectedSourceHash,
+      expectedDialect: 'sekiro-hks-1.6.x',
+      // A container child is not the file passed as filePath. The Bridge uses
+      // this bounded byte snapshot for the compile-time CAS check, so the
+      // editor never silently compiles against a stale child.
+      ...(isHksBytecode(input.originalBytes)
+        ? { sourceContentBase64: Buffer.from(input.originalBytes).toString('base64') }
+        : {})
+    },
+    timeoutMs: 120_000,
+    maxFrameBytes: 32 * 1024 * 1024
+  });
+  if (result.parseStatus === 'failed' || !result.data?.contentBase64) {
+    return {
+      ok: false,
+      diagnostics: result.diagnostics.length > 0
+        ? result.diagnostics.map((item) => ({
+            severity: item.severity,
+            code: item.code,
+            message: item.message,
+            sourceUri: input.sourceUri
+          }))
+        : [{
+            severity: 'error',
+            code: 'HKS_COMPILER_OUTPUT_MISSING',
+            message: 'SoulForge 内置 HKS 编译器未返回字节码。',
+            sourceUri: input.sourceUri
+          }]
+    };
+  }
+  let bytes: Buffer;
+  try {
+    bytes = Buffer.from(result.data.contentBase64, 'base64');
+  } catch (error) {
+    return {
+      ok: false,
+      diagnostics: [{
+        severity: 'error',
+        code: 'HKS_COMPILER_OUTPUT_INVALID',
+        message: error instanceof Error ? error.message : 'HKS 编译器输出不是有效 base64。',
+        sourceUri: input.sourceUri
+      }]
+    };
+  }
+  if (!isHksBytecode(bytes)) {
+    return {
+      ok: false,
+      diagnostics: [{
+        severity: 'error',
+        code: 'HKS_COMPILER_OUTPUT_INVALID',
+        message: 'SoulForge 内置 HKS 编译器返回的文件头不是 Sekiro 1.6.x dialect。',
+        sourceUri: input.sourceUri
+      }]
+    };
+  }
+  return { ok: true, bytes, data: result.data };
+}
+
+function confirmationRequiredResult(sourceUri: string): SaveTextResourceResult {
+  return {
+    ok: false,
+    changedFiles: [],
+    requiresConfirmation: true,
+    diagnostics: [{
+      severity: 'warning',
+      code: 'EDIT_CONFIRMATION_REQUIRED',
+      message: '该脚本写回需要显式确认。',
+      sourceUri
+    }]
+  };
 }
 
 function cancelledWrite(sourceUri: string): RendererSaveResult {
@@ -161,7 +290,8 @@ export function registerResourceIpcHandlers(deps: ResourceIpcDeps): void {
       expectedChildHash: string | undefined,
       expectedContainerHash: string | undefined,
       sourceText: string,
-      encoding?: string
+      encoding?: string,
+      entryIndex?: number
     ): Promise<RendererSaveResult> => {
       const file = deps.getIndexedFiles().find((item) => item.sourceUri === sourceUri);
       if (!file) {
@@ -202,6 +332,175 @@ export function registerResourceIpcHandlers(deps: ResourceIpcDeps): void {
         const gameBlocked = deps.rejectNonSekiroNativeWrite(sourceUri, file);
         if (gameBlocked) return gameBlocked;
         const childUri = `${sourceUri}#bnd/child/${encodeURIComponent(entryName)}`;
+
+        // Real Sekiro luabnd files are native BND4/DCX documents. The old
+        // generic container helper intentionally only understands SFBN test
+        // binders, so using it here would make a real script look writable and
+        // then fail (or, worse, write the source text as raw bytes). Use the
+        // Bridge's entry-indexed native read/write path whenever the read view
+        // supplied the identity proof.
+        if (entryIndex !== undefined) {
+          const readRoots = await deps.verifiedReadRoots(activeSession, dirname(file.absolutePath));
+          if (readRoots.diagnostics.length > 0) {
+            return { ok: false, changedFiles: [], diagnostics: readRoots.diagnostics };
+          }
+          const nativeRead = await runBridge<{
+            containerHash?: string;
+            contentHash?: string;
+            contentBase64?: string;
+            sanitizedName?: string;
+            isBytecode?: boolean;
+          }>({
+            command: 'read-luabnd-script',
+            filePath: file.absolutePath,
+            resourceUri: sourceUri,
+            allowedRoots: readRoots.allowedRoots,
+            workspaceSessionId: activeSession.meta.workspaceId,
+            commandOptions: {
+              entryIndex,
+              ...(expectedContainerHash ? { expectedContainerHash } : {}),
+              ...(expectedChildHash ? { expectedChildHash } : {})
+            },
+            ...(activeSession.layers.baseRoot
+              ? { oodleRuntimeRoot: activeSession.layers.baseRoot }
+              : {}),
+            timeoutMs: 120_000,
+            maxFrameBytes: 32 * 1024 * 1024
+          });
+          const nativeData = nativeRead.data;
+          if (nativeRead.parseStatus === 'failed'
+            || !nativeData?.contentBase64
+            || nativeData.contentHash === undefined
+            || nativeData.containerHash === undefined) {
+            return {
+              ok: false,
+              changedFiles: [],
+              diagnostics: nativeRead.diagnostics.length > 0
+                ? nativeRead.diagnostics.map((item) => ({
+                    severity: item.severity,
+                    code: item.code,
+                    message: item.message,
+                    sourceUri
+                  }))
+                : [{
+                    severity: 'error',
+                    code: 'LUABND_SCRIPT_READ_FAILED',
+                    message: 'Bridge 未返回带完整身份哈希的 luabnd 条目。',
+                    sourceUri
+                  }]
+            };
+          }
+          const originalChild = Buffer.from(nativeData.contentBase64, 'base64');
+          if (originalChild.length === 0) {
+            return {
+              ok: false,
+              changedFiles: [],
+              diagnostics: [{
+                severity: 'error',
+                code: 'LUABND_CHILD_BYTES_EMPTY',
+                message: 'Bridge 返回的 luabnd 条目字节为空。',
+                sourceUri
+              }]
+            };
+          }
+          const actualContainerHash = nativeData.containerHash;
+          const actualChildHash = nativeData.contentHash;
+          const compiled = isHksBytecode(originalChild)
+            ? await compileHksSource({
+                file,
+                sourceUri,
+                session: activeSession,
+                sourceText,
+                originalBytes: originalChild,
+                expectedSourceHash: actualChildHash,
+                readRoots: readRoots.allowedRoots
+              })
+            : (() => {
+                const encoded = encodeScriptSourceForWriteback(originalChild, sourceText);
+                return encoded.ok
+                  ? { ok: true as const, bytes: Buffer.from(encoded.bytes), data: {} }
+                  : {
+                      ok: false as const,
+                      diagnostics: encoded.diagnostics.map((item) => ({
+                        severity: item.severity,
+                        code: item.code,
+                        message: item.message,
+                        sourceUri
+                      }))
+                    };
+              })();
+          if (!compiled.ok) return { ok: false, changedFiles: [], diagnostics: compiled.diagnostics };
+
+          const stage = await deps.verifiedStageRoots(activeSession, storage, 'LUABND_STAGING_PREPARE_FAILED');
+          if (stage.diagnostics.length > 0) {
+            return { ok: false, changedFiles: [], diagnostics: stage.diagnostics };
+          }
+          const commitPort = deps.sessionCommitPort(activeSession, operationLog, storage);
+          const confirmingCommit: RawReplaceCommitPort = {
+            commit: async (input) => input.confirmation
+              ? commitPort.commit(input)
+              : confirmationRequiredResult(sourceUri)
+          };
+          const outcome = await applyNativeMutation(
+            {
+              file,
+              sourceUri,
+              expectedHash: actualContainerHash,
+              stagingRoot: storage.stagingRoot,
+              allowedRoots: () => [...stage.allowedRoots],
+              stagingPrefix: 'luabnd',
+              stagingFileName: `${entryIndex}.mut.dcx`,
+              stageWrite: async (context) => {
+                const nativeWrite = await runBridge<{ outputHash?: string }>({
+                  command: 'write-luabnd-script',
+                  filePath: file.absolutePath,
+                  resourceUri: sourceUri,
+                  allowedRoots: context.allowedRoots,
+                  writableRoots: context.writableRoots,
+                  workspaceSessionId: activeSession.meta.workspaceId,
+                  ...(activeSession.layers.baseRoot
+                    ? { oodleRuntimeRoot: activeSession.layers.baseRoot }
+                    : {}),
+                  commandOptions: {
+                    outputPath: context.outputPath,
+                    entryIndex,
+                    expectedContainerHash: actualContainerHash,
+                    expectedChildHash: actualChildHash,
+                    contentBase64: compiled.bytes.toString('base64')
+                  },
+                  timeoutMs: 120_000,
+                  maxFrameBytes: 32 * 1024 * 1024
+                });
+                return {
+                  ok: nativeWrite.parseStatus !== 'failed' && nativeWrite.data !== null,
+                  diagnostics: nativeWrite.diagnostics
+                };
+              },
+              title: `保存 HKS 脚本源码 ${nativeData.sanitizedName ?? entryName}`,
+              confirmActionLabel: '保存 HKS 脚本源码'
+            },
+            {
+              confirm: {
+                requestConfirmation: (input) => deps.requestWriteConfirmation({
+                  event,
+                  resourceLabel: `${file.relativePath} / ${nativeData.sanitizedName ?? entryName}`,
+                  sourceUri,
+                  actionLabel: input.actionLabel,
+                  payloadHash: input.payloadHash,
+                  ...(input.extraSubjects ? { extraSubjects: input.extraSubjects } : {})
+                })
+              },
+              commit: confirmingCommit
+            }
+          );
+          const result = deps.toSaveResultFromOutcome(outcome, [...deps.getIndexedFiles()]);
+          if (result.ok) {
+            deps.clearResourceRelatedCaches();
+            await deps.refreshActiveIndexAfterNativeWrite([sourceUri], result);
+          }
+          return result;
+        }
+
         const read = await readContainerChild(file.absolutePath, childUri, {
           relativePath: file.relativePath
         });
@@ -229,6 +528,18 @@ export function registerResourceIpcHandlers(deps: ResourceIpcDeps): void {
             relativePath: file.relativePath
           });
           containerHash = tree.ok && tree.tree?.rootHash ? tree.tree.rootHash : '';
+        }
+        if (isHksBytecode(read.bytes)) {
+          return {
+            ok: false,
+            changedFiles: [],
+            diagnostics: [{
+              severity: 'error',
+              code: 'HKS_ENTRY_INDEX_REQUIRED',
+              message: 'HKS 容器条目必须带 native entryIndex，才能通过内置编译器写回。请重新读取条目后重试。',
+              sourceUri
+            }]
+          };
         }
         const encoded = encodeScriptSourceForWriteback(read.bytes, sourceText);
         if (!encoded.ok) {
@@ -288,31 +599,52 @@ export function registerResourceIpcHandlers(deps: ResourceIpcDeps): void {
           ]
         };
       }
-      const encoded = encodeScriptSourceForWriteback(originalBytes, sourceText);
-      if (!encoded.ok) {
-        return {
-          ok: false,
-          changedFiles: [],
-          diagnostics: encoded.diagnostics.map((item) => ({
-            severity: item.severity,
-            code: item.code,
-            message: item.message,
-            sourceUri
-          }))
-        };
+      const originalHash = createHash('sha256').update(originalBytes).digest('hex');
+      let replacementBytes: Buffer;
+      if (isHksBytecode(originalBytes)) {
+        const readRoots = await deps.verifiedReadRoots(activeSession, dirname(file.absolutePath));
+        if (readRoots.diagnostics.length > 0) {
+          return { ok: false, changedFiles: [], diagnostics: readRoots.diagnostics };
+        }
+        const compiled = await compileHksSource({
+          file,
+          sourceUri,
+          session: activeSession,
+          sourceText,
+          originalBytes,
+          expectedSourceHash: originalHash,
+          readRoots: readRoots.allowedRoots
+        });
+        if (!compiled.ok) return { ok: false, changedFiles: [], diagnostics: compiled.diagnostics };
+        replacementBytes = compiled.bytes;
+      } else {
+        const encoded = encodeScriptSourceForWriteback(originalBytes, sourceText);
+        if (!encoded.ok) {
+          return {
+            ok: false,
+            changedFiles: [],
+            diagnostics: encoded.diagnostics.map((item) => ({
+              severity: item.severity,
+              code: item.code,
+              message: item.message,
+              sourceUri
+            }))
+          };
+        }
+        replacementBytes = Buffer.from(encoded.bytes);
       }
       const confirmation = await deps.requestWriteConfirmation({
         event,
         resourceLabel: file.relativePath,
         sourceUri,
         actionLabel: '保存脚本源码',
-        payloadHash: createHash('sha256').update(encoded.bytes).digest('hex')
+        payloadHash: createHash('sha256').update(replacementBytes).digest('hex')
       });
       if (!confirmation) return cancelledWrite(sourceUri);
       const result = await saveRawReplace({
         file,
-        expectedHash: createHash('sha256').update(originalBytes).digest('hex'),
-        newContentBase64: Buffer.from(encoded.bytes).toString('base64'),
+        expectedHash: originalHash,
+        newContentBase64: replacementBytes.toString('base64'),
         confirmation,
         session: activeSession,
         operationLog,

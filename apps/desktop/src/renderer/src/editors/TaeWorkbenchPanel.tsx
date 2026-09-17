@@ -6,10 +6,9 @@
  * ── T3 重构（行为 + 动画合并为「动作」）+ 底部 IDE 终端式详情 ──
  *
  * 左栏列动画 id（hkxName 去扩展，如 a000_003013；无 hkxName 用 a000_ + 6位 id）。
- * 次栏列当前动画的词条事件列表——envelope 只有 eventTypeId 与起止时间，词条文本名
- * （PlaySound_ByStateInfo 等）当前未解码，诚实显示「事件类型 N」；选中后详情在
- * 底部独立面板展示（起止帧 / 事件类型 / 下标与能解出的全部字段；解不出的字段写
- * 「未解码」+ 原始数值，禁止编造 SoundType 含义），支持拖拽调高、独立滚动。
+ * 次栏列当前动画的词条事件列表——事件名称与参数字段来自内置 first-party
+ * registry；选中后详情在底部独立面板展示起止帧、枚举和全部已覆盖字段，参数尾部
+ * 原始字节仍单独保留，支持拖拽调高、独立滚动。
  * 右栏是只读动作视图（S17）：
  * `read-chrbnd-flver-preview`（已登记进 AdvertisedCommands）从 overlay 或原版
  * chr/<id>.chrbnd.dcx 取伴生 FLVER，renderer 按 meshIndex=0..meshCount-1 循环读齐
@@ -17,12 +16,11 @@
  * TAE Clip 驱动连续骨骼采样和播放控制。动作目录、事件图和预览分别由 action/ 下的
  * 独立模块承载；两边都没有 chrbnd 时给可行动空态（去「开始」页挂原版）。
  *
- * ── 事件参数体未解码是刻意边界 ──
+ * ── 事件参数体与写回 ──
  *
- * 每个事件只导出 startTime / endTime / eventTypeId 与计数，paramDataOffset 指向的
- * 参数体一字节未读（C# 侧刻意边界）。UI 不得把「读出了事件在时间轴上的位置」
- * 伪装成「读出了 hitbox/SFX/VFX 参数」——缺 eventTypeId 逐类布局就不能开放参数
- * 编辑。ANIMATION-56C 写回只开放已解码字段（事件时间 / 按模板新增事件）。
+ * Bridge 按 eventTypeId、EventBank 和 native 长度选择 first-party schema 变体；
+ * 已覆盖字段可以 typed 写回，短变体缺失的尾部继续原样保留。未知未来版本仍由
+ * Bridge 给出结构化 coverage 诊断，不伪造字段。
  *
  * ── 写回（ANIMATION-56C 保留，收进详情栏）──
  *
@@ -33,7 +31,7 @@
  * events，下标直接可回推）；templateEventIndex 同理用于新增事件。expectedDocumentHash
  * 取读信封的 sourceHash。提交成功后经 readTaeDocument 重读并覆盖本地文档
  * （refreshedDocument）；失败展示 diagnostics + 回滚提示。提交期间禁用重复提交。
- * 写回不经过通用文本保存/字节直写，只有 commitTaeEvent 一个 typed 出口。右栏始终只读。
+ * 写回不经过通用文本保存/字节直写，只有 commitTaeEvent 一个 typed 出口。右栏仍只负责动作预览。
  *
  * ── 词条详情（底部 IDE 终端式面板，对照 DSAS）──
  *
@@ -384,7 +382,7 @@ export function buildUpdateEventTimesMutation(
   row: TaeTimelineEventRow,
   eventIndex: number,
   draft: TaeTimeDraft
-): { mutation: 'update-event-times'; animId: number; eventIndex: number; startTime: number; endTime: number } | null {
+): { mutation: 'update-event-times'; animId: number; eventIndex: number; startTime: number; endTime: number; taeEntryIndex?: number } | null {
   const startFrame = Number(draft.startText);
   const endFrame = Number(draft.endText);
   if (!Number.isFinite(startFrame) || !Number.isFinite(endFrame)) return null;
@@ -393,7 +391,8 @@ export function buildUpdateEventTimesMutation(
     animId: row.animId,
     eventIndex,
     startTime: startFrame / FRAME_RATE,
-    endTime: endFrame / FRAME_RATE
+    endTime: endFrame / FRAME_RATE,
+    ...(row.taeEntryIndex === undefined ? {} : { taeEntryIndex: row.taeEntryIndex })
   };
 }
 
@@ -421,8 +420,7 @@ export function formatWriteDiagnostics(diagnostics: readonly Diagnostic[] | unde
 }
 
 /**
- * 详情栏里的写回区：时间编辑（update-event-times）+ 新增事件
- * （insert-event，以当前事件为模板）。参数体未解码，这里不出现任何参数编辑控件。
+ * 详情栏里的写回区：时间编辑（update-event-times）+ first-party 字段写回。
  * 详情栏独立滚动，不与词条列表共享滚动容器。
  */
 
@@ -442,7 +440,9 @@ export interface TaeEventDetailProps {
     loading: boolean;
     error: string | null;
     templateName: string | null;
-    fields: Array<{ name: string; type: string; value: string }>;
+    schemaBankId?: number;
+    schemaVariant?: string;
+    fields: TaeEventParamField[];
     tailHex: string | null;
     undecodedHex: string | null;
   } | null;
@@ -451,7 +451,23 @@ export interface TaeEventDetailProps {
   writeNotice: TaeWriteNotice | null;
   onTimeDraftChange: (draft: TaeTimeDraft) => void;
   onSubmitTime: () => void;
+  onSubmitField: (field: TaeEventParamField, value: string | number | boolean) => void;
   onClose: () => void;
+}
+
+export interface TaeEventParamField {
+  index: number;
+  name: string;
+  type: string;
+  offset: number;
+  size: number;
+  value: string | number | boolean;
+  displayValue?: string;
+  rawValue?: number;
+  assert?: number;
+  assertValid?: boolean;
+  isPadding?: boolean;
+  enumEntries?: Array<{ value: number; name: string }>;
 }
 
 export function TaeEventDetail(props: TaeEventDetailProps): ReactElement {
@@ -462,6 +478,34 @@ export function TaeEventDetail(props: TaeEventDetailProps): ReactElement {
   // 旁边小字 ≈ 秒：主单位是帧，秒只是换算（帧 / 30）。
   const startSeconds = Number(startText) / FRAME_RATE;
   const endSeconds = Number(endText) / FRAME_RATE;
+  const [fieldDrafts, setFieldDrafts] = useState<Record<number, string>>({});
+
+  useEffect(() => {
+    if (!params || params.loading) return;
+    setFieldDrafts(Object.fromEntries(params.fields.map((field) => [
+      field.index,
+      String(field.value)
+    ])));
+  }, [event.eventTypeId, eventIndex, params]);
+
+  const fieldValue = (field: TaeEventParamField): string => (
+    fieldDrafts[field.index] ?? String(field.value)
+  );
+
+  const isFieldReadonly = (field: TaeEventParamField): boolean => (
+    field.isPadding === true || field.assert !== undefined
+  );
+
+  const parseFieldValue = (field: TaeEventParamField): string | number | boolean | null => {
+    const draft = fieldValue(field);
+    if (field.type === 'b') {
+      if (draft === 'true') return true;
+      if (draft === 'false') return false;
+      return null;
+    }
+    const numeric = Number(draft);
+    return Number.isFinite(numeric) ? numeric : null;
+  };
 
   return (
     <div className="tae-event-detail" data-testid="tae-details">
@@ -533,9 +577,56 @@ export function TaeEventDetail(props: TaeEventDetailProps): ReactElement {
       ) : params.fields.length > 0 ? (
         <div className="wb-props" data-testid="tae-params-fields">
           {params.fields.map((field) => (
-            <div key={`${field.name}-${field.type}`} className="wb-prop">
+            <div key={`${field.index}-${field.name}-${field.type}`} className="wb-prop">
               <span className="wb-prop__name">{field.name}</span>
-              <span className="wb-prop__value wb-prop__value--readonly">{field.value}</span>
+              <span className="wb-prop__value">
+                {field.enumEntries && field.enumEntries.length > 0 ? (
+                  <select
+                    aria-label={`字段 ${field.name}`}
+                    value={fieldValue(field)}
+                    disabled={saving || isFieldReadonly(field)}
+                    onChange={(area) => setFieldDrafts((current) => ({ ...current, [field.index]: area.target.value }))}
+                  >
+                    {field.enumEntries.map((entry) => (
+                      <option key={entry.value} value={String(entry.value)}>{entry.name}</option>
+                    ))}
+                  </select>
+                ) : field.type === 'b' ? (
+                  <select
+                    aria-label={`字段 ${field.name}`}
+                    value={fieldValue(field)}
+                    disabled={saving || isFieldReadonly(field)}
+                    onChange={(area) => setFieldDrafts((current) => ({ ...current, [field.index]: area.target.value }))}
+                  >
+                    <option value="false">false</option>
+                    <option value="true">true</option>
+                  </select>
+                ) : (
+                  <input
+                    type="number"
+                    step={field.type === 'f32' ? 'any' : '1'}
+                    aria-label={`字段 ${field.name}`}
+                    value={fieldValue(field)}
+                    disabled={saving || isFieldReadonly(field)}
+                    onChange={(area) => setFieldDrafts((current) => ({ ...current, [field.index]: area.target.value }))}
+                  />
+                )}
+                {!isFieldReadonly(field) && (
+                  <button
+                    type="button"
+                    disabled={saving || fieldValue(field) === String(field.value)}
+                    onClick={() => {
+                      const value = parseFieldValue(field);
+                      if (value !== null) props.onSubmitField(field, value);
+                    }}
+                  >
+                    写入
+                  </button>
+                )}
+                {field.displayValue && field.displayValue !== String(field.value) && (
+                  <span className="muted"> · {field.displayValue}</span>
+                )}
+              </span>
             </div>
           ))}
         </div>
@@ -598,12 +689,14 @@ export function TaeWorkbenchPanel(props: TaeWorkbenchPanelProps): ReactElement {
   const [playbackTime, setPlaybackTime] = useState(0);
   const [playbackSpeed, setPlaybackSpeed] = useState<number>(1.0);
   const [isLooping, setIsLooping] = useState(true);
-  /** S17：选中词条事件的参数体（按需拉取；无模板时 undecodedHex 非空）。 */
+  /** 选中词条事件的参数体（按需拉取；字段可通过 typed mutation 写回）。 */
   const [eventParams, setEventParams] = useState<{
     loading: boolean;
     error: string | null;
     templateName: string | null;
-    fields: Array<{ name: string; type: string; value: string }>;
+    schemaBankId?: number;
+    schemaVariant?: string;
+    fields: TaeEventParamField[];
     tailHex: string | null;
     undecodedHex: string | null;
   } | null>(null);
@@ -681,7 +774,7 @@ export function TaeWorkbenchPanel(props: TaeWorkbenchPanelProps): ReactElement {
     };
   }, [props.resourceUri]);
 
-  /** S17：选中词条时按需拉取参数体（footer 展示；无模板类型给未解码 + hex）。 */
+  /** 选中词条时按需拉取参数体（字段来自 first-party schema）。 */
   useEffect(() => {
     if (selected?.kind !== 'event' || selected.eventIndex === undefined) {
       setEventParams(null);
@@ -706,7 +799,9 @@ export function TaeWorkbenchPanel(props: TaeWorkbenchPanelProps): ReactElement {
         data?: {
           eventTypeId?: number;
           templateName?: string | null;
-          fields?: Array<{ name: string; type: string; value: string }>;
+          schemaBankId?: number;
+          schemaVariant?: string;
+          fields?: TaeEventParamField[];
           tailHex?: string | null;
           undecodedHex?: string | null;
         };
@@ -717,6 +812,8 @@ export function TaeWorkbenchPanel(props: TaeWorkbenchPanelProps): ReactElement {
           loading: false,
           error: null,
           templateName: result.data.templateName ?? null,
+          ...(result.data.schemaBankId !== undefined ? { schemaBankId: result.data.schemaBankId } : {}),
+          ...(result.data.schemaVariant !== undefined ? { schemaVariant: result.data.schemaVariant } : {}),
           fields: result.data.fields ?? [],
           tailHex: result.data.tailHex ?? null,
           undecodedHex: result.data.undecodedHex ?? null
@@ -739,6 +836,7 @@ export function TaeWorkbenchPanel(props: TaeWorkbenchPanelProps): ReactElement {
     };
   }, [
     props.resourceUri,
+    documentKey,
     selected?.kind,
     selected?.eventIndex,
     selected?.animationId,
@@ -1005,6 +1103,11 @@ export function TaeWorkbenchPanel(props: TaeWorkbenchPanelProps): ReactElement {
       eventTypeId?: number;
       startTime?: number;
       endTime?: number;
+      fieldIndex?: number;
+      fieldName?: string;
+      value?: string | number | boolean;
+      schemaBankId?: number;
+      taeEntryIndex?: number;
     }>,
     successMessage: string
   ): Promise<void> {
@@ -1053,6 +1156,20 @@ export function TaeWorkbenchPanel(props: TaeWorkbenchPanelProps): ReactElement {
       return;
     }
     await commitMutations([mutation], '事件时间已更新并重读验证。');
+  }
+
+  async function submitFieldEdit(field: TaeEventParamField, value: string | number | boolean): Promise<void> {
+    if (selected?.kind !== 'event' || selectedEventIndex === undefined) return;
+    await commitMutations([{
+      mutation: 'set-event-field',
+      animId: selected.animationId,
+      eventIndex: selectedEventIndex,
+      fieldIndex: field.index,
+      fieldName: field.name,
+      value,
+      ...(eventParams?.schemaBankId === undefined ? {} : { schemaBankId: eventParams.schemaBankId }),
+      ...(selected.taeEntryIndex === undefined ? {} : { taeEntryIndex: selected.taeEntryIndex })
+    }], `TAE 字段 ${field.name} 已更新并重读验证。`);
   }
 
   // 权威动画 Clip 数据与连续采样器
@@ -1435,6 +1552,7 @@ export function TaeWorkbenchPanel(props: TaeWorkbenchPanelProps): ReactElement {
                   writeNotice={writeNotice}
                   onTimeDraftChange={(draft) => setTimeDraft(draft)}
                   onSubmitTime={() => void submitTimeEdit()}
+                  onSubmitField={(field, value) => void submitFieldEdit(field, value)}
                   onClose={closeEventDetail}
                 />
               ) : (

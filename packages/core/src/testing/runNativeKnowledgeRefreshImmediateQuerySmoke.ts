@@ -12,7 +12,7 @@ import type { IndexedFile, ParamDefDocument, ParamRowSymbol, RagChunkFamily } fr
 import { pathToFileURL } from 'node:url';
 import { runBridge, disposeBridgeDaemonPool } from '../bridge/runBridge.js';
 import { decodeRowFields, encodeFieldMutation } from '../param/paramdefLayout.js';
-import { importPinnedSmithboxSdtParamMetadata } from '../param/smithboxParamMetadataSource.js';
+import { importPinnedSmithboxSdtParamMetadata } from './smithboxParamMetadataSource.js';
 import { buildRagCorpus } from '../rag/chunkBuilder.js';
 import { retrieveEvidence } from '../rag/retrieve.js';
 import { WorkspaceIndex } from '../indexing/workspaceIndex.js';

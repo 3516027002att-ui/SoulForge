@@ -8,11 +8,11 @@
 import { parentPort, workerData } from 'node:worker_threads';
 import { env, pipeline } from '@huggingface/transformers';
 
-const MODEL_ID = 'Xenova/bge-small-zh-v1.5';
 const MODEL_REVISION = '75c43b069aac4d136ba6bc1122f995fedcfd2781';
 
 interface WorkerInput {
   cacheDir: string;
+  modelPath: string;
 }
 
 interface EmbedRequest {
@@ -35,11 +35,13 @@ type FeatureExtractor = (texts: string | string[], options?: { pooling?: 'mean';
 
 const input = workerData as WorkerInput;
 env.cacheDir = input.cacheDir;
-env.allowRemoteModels = true;
+env.localModelPath = input.modelPath;
+env.allowRemoteModels = false;
 env.allowLocalModels = true;
 
-const session = pipeline('feature-extraction', MODEL_ID, {
+const session = pipeline('feature-extraction', input.modelPath, {
   revision: MODEL_REVISION,
+  local_files_only: true,
   dtype: 'q8',
   device: 'cpu',
   session_options: {
