@@ -6,19 +6,30 @@ import type {
   PatchMode,
   PatchProposal,
   ReferenceEdge,
+  ReferencePageRecord,
+  ReferenceRelatedMode,
   ResourceKind,
   TaeAnimSymbol,
   TaeEventSymbol,
   NativeEditDomain,
+  NativeSourceIdentity,
   FieldValueKind
 } from '@soulforge/shared';
 import {
   assertEditDomain,
   assertWritableField,
+  decodeReferenceQueryInput,
   defaultReadSessionManager,
   createOpaqueCursor,
   parseOpaqueCursor
 } from '@soulforge/shared';
+import {
+  buildWriteRequirement,
+  type NativeReadProofStore
+} from '../editing/nativeReadProofStore.js';
+import type { CoreToolSession } from '../runtime/coreToolSession.js';
+import type { ReferenceQueryService } from '../references/referenceQueryService.js';
+import type { ResourceVersion } from '../runtime/resourceVersion.js';
 import { basename, isAbsolute, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { commitPatchProposal, createPatchProposal, dryRunPatchProposal } from '../patch/patchEngine.js';
@@ -209,8 +220,32 @@ export type KnowledgeSourceChange = readonly string[];
 
 export interface ToolContext {
   workspaceIndex: WorkspaceIndex | null;
+  /**
+   * Optional transition ledger. Production is migrating to NativeReadProofStore
+   * + ReferenceQueryService; this is no longer required for tool execution.
+   */
   taskRecord?: AgentTaskRecordGateway;
+  /**
+   * @deprecated No longer a production gate. Kept so older hosts compile;
+   * missing taskRecord no longer blocks search/param/write tools.
+   */
   requireTaskRecord?: boolean;
+  /** Automatic host native-read proofs. Preferred over taskRecord. */
+  nativeReadProofs?: NativeReadProofStore;
+  /** Long-lived core session: owns proofs, reference service, version clock. */
+  coreSession?: CoreToolSession;
+  /** Direct reference-query injection when coreSession is not constructed. */
+  referenceService?: ReferenceQueryService;
+  /**
+   * Fail-closed write boundary. Defaults to true when nativeReadProofs or
+   * coreSession is present; defaults to false when neither is present so
+   * legacy hosts without a proof store can still run until full migration.
+   */
+  requireProofBoundary?: boolean;
+  /** Host principal for proof attribution when coreSession is absent. */
+  proofPrincipal?: string;
+  /** Optional agent run id used as proof principal fallback. */
+  agentRunId?: string;
   mode: 'plan' | 'normal' | 'fullPermission';
   /**
    * Immutable host grant for this run. `switch_mode` may lower/equal the
@@ -243,7 +278,7 @@ export interface ToolContext {
   /** Abort the current Agent tool call when the host cancels the run. */
   signal?: AbortSignal;
   /** Curator-only knowledge staging store; never a game resource writer. */
-  knowledgeStore?: import('../knowledge/knowledgeStore.js').KnowledgeStore;
+  knowledgeStore?: import('../knowledge/knowledgeStore.js').KnowledgeStoreLike;
   /** Private host target attached by ToolRegistry for the current event call. */
   hostResolvedEmevdEventTarget?: HostResolvedEmevdEventTarget;
 }
@@ -480,9 +515,8 @@ export class ToolRegistry {
     }
 
     const searchQuery = getEvidenceSearchQuery(name, input);
-    if (context.requireTaskRecord && EVIDENCE_SEARCH_TOOLS.has(name) && !context.taskRecord) {
-      return fail('TASK_RECORD_UNAVAILABLE', `调用 ${name} 前必须提供本次运行的任务记录；任务记录不可用，已拒绝搜索。`);
-    }
+    // taskRecord is optional transition infrastructure. Missing ledger must not
+    // block search/param/write tools — NativeReadProofStore is the production gate.
     if (searchQuery !== null && context.taskRecord) {
       try {
         const searchGate = await context.taskRecord.beforeSearch({ toolName: name, query: searchQuery });
@@ -492,25 +526,15 @@ export class ToolRegistry {
       }
     }
 
-    if (name === 'read_param_fields' || name === 'search_param_fields') {
-      if (context.requireTaskRecord && !context.taskRecord) {
-        return fail('TASK_RECORD_UNAVAILABLE', '生产 Agent 原生 PARAM 读取前必须提供本次运行的任务记录。');
-      }
-      if (context.taskRecord?.assertParamReadTarget) {
-        try {
-          const targetCheck = await context.taskRecord.assertParamReadTarget(input);
-          if (!targetCheck.ok) return fail(targetCheck.code, targetCheck.message, targetCheck.details);
-        } catch (error) {
-          return fail('TASK_RECORD_GATE_FAILED', `PARAM 读取任务记录门禁失败：${error instanceof Error ? error.message : String(error)}`);
-        }
-      } else if (context.requireTaskRecord) {
-        return fail('TASK_RECORD_PARAM_READ_GATE_UNAVAILABLE', '生产 Agent 缺少 PARAM 原生读取门禁，已拒绝继续。');
+    if ((name === 'read_param_fields' || name === 'search_param_fields') && context.taskRecord?.assertParamReadTarget) {
+      try {
+        const targetCheck = await context.taskRecord.assertParamReadTarget(input);
+        if (!targetCheck.ok) return fail(targetCheck.code, targetCheck.message, targetCheck.details);
+      } catch (error) {
+        return fail('TASK_RECORD_GATE_FAILED', `PARAM 读取任务记录门禁失败：${error instanceof Error ? error.message : String(error)}`);
       }
     }
 
-    if (MUTATING_AGENT_TOOLS.has(name) && context.requireTaskRecord && !context.taskRecord) {
-      return fail('TASK_RECORD_UNAVAILABLE', '生产 Agent 写入前必须读取本次任务记录；任务记录不可用，已拒绝写入。');
-    }
     const rawEventInput = asRecord(input);
     const hasEventIdentity = typeof rawEventInput.file === 'string'
       && rawEventInput.file.trim() !== ''
@@ -823,126 +847,9 @@ function attachEvidenceSearchId(data: unknown, searchId: string): unknown {
 export function createDefaultToolRegistry(): ToolRegistry {
   const registry = new ToolRegistry();
 
-  registry.register({
-    name: 'read_agent_task_record',
-    description: '读取本次任务的格式化 Evidence 台账，包含 target 对象、Evidence propertyKey、searchId、mutationBudget 和 mutationUsed；它不是生产资源本身。',
-    permission: 'read',
-    permissionLevel: 'read',
-    run: async (_input, context) => {
-      if (!context.taskRecord) return fail('TASK_RECORD_UNAVAILABLE', '本次运行没有可用的任务记录。');
-      const snapshot = await context.taskRecord.read();
-      return ok({
-        path: snapshot.path,
-        totalEntries: snapshot.entries.length,
-        entries: snapshot.entries.map((e) => ({
-          entryId: e.entryId,
-          objectName: e.objectName,
-          propertyKey: e.propertyKey,
-          kind: e.kind,
-          status: e.status,
-          mutationBudget: e.mutationBudget,
-          mutationUsed: e.mutationUsed,
-          ...(e.searchId ? { searchId: e.searchId } : {})
-        })),
-        updatedAt: snapshot.updatedAt
-      });
-    }
-  });
-
-  registry.register({
-    name: 'update_agent_task_record',
-    description: '写入本次任务的 Evidence 台账。kind=target 时 propertyKey 必须精确为 target，value 写原始意图：首次 objectName 逐字取自用户请求并省略 searchId/evidence/mutationBudget；搜索后新增规范目标必须传入该次真实 searchId。搜索前先完成所有用户目标登记。kind=evidence 时 objectName 必须复用已登记的真实修改目标，propertyKey 使用真实表名（如 NpcParam 或 SpEffectParam），只能含字母数字下划线；同一 PARAM 行准备一次 mutate_param_fields 时合并全部待写字段。evidence 必须是非空字符串数组，例如 ["NpcParam#50800000 fieldId=ninsatuNum"] 或 ["SpEffectParam#9003 fieldId=poizonAttackPower"]，不能传对象数组；searchId 必须来自包含该目标的当前搜索。mutationBudget：普通 Evidence 必须精确为 1；事件（emevd）与脚本（script/luabnd）为无限修改，登记时省略或传 1 即可。只读对照对象及 _ref/_elite 近义属性不进台账。模型只能写 candidate/blocked；verified 由宿主在成功原生读取后自动晋升。',
-    permission: 'analyze',
-    permissionLevel: 'analyze',
-    inputSchema: {
-      objectName: 'string',
-      propertyKey: 'string',
-      value: 'string',
-      kind: 'enum:target|evidence?',
-      status: 'enum:candidate|blocked?',
-      evidence: 'string[]?',
-      mutationBudget: 'number?',
-      searchId: 'string?'
-    },
-    run: async (input, context) => {
-      if (!context.taskRecord) return fail('TASK_RECORD_UNAVAILABLE', '本次运行没有可用的任务记录。');
-      const value = asRecord(input);
-      const objectName = asString(value.objectName).trim();
-      const propertyKey = asString(value.propertyKey).trim();
-      const propertyValue = asString(value.value).trim();
-      if (!objectName || !propertyKey || !propertyValue) {
-        return fail('INVALID_INPUT', '任务记录需要非空 objectName、propertyKey 和 value；不能用空值占位。');
-      }
-      const kind = value.kind === 'target' ? 'target' : 'evidence';
-      const evidence = asStringList(value.evidence).map((item) => item.trim());
-      const searchId = asOptionalString(value.searchId)?.trim();
-      const mutationBudget = value.mutationBudget;
-      const unlimitedMutationKeys = new Set(['emevd', 'script', 'luabnd']);
-      const isUnlimitedMutationKey = unlimitedMutationKeys.has(propertyKey.trim().toLocaleLowerCase());
-      if (kind === 'evidence') {
-        if (evidence.length === 0 || !searchId) {
-          return fail(
-            'TASK_RECORD_EVIDENCE_REQUIRED',
-            'Evidence 台账词条必须同时传入非空 evidence 数组和当前搜索返回的 searchId。',
-            { required: ['evidence', 'searchId'] }
-          );
-        }
-        if (isUnlimitedMutationKey) {
-          if (mutationBudget !== undefined && mutationBudget !== 1) {
-            return fail(
-              'TASK_RECORD_MUTATION_BUDGET_INVALID',
-              '事件（emevd）与脚本（script/luabnd）为无限修改；登记时 mutationBudget 必须省略或为 1。',
-              { propertyKey }
-            );
-          }
-        } else if (mutationBudget !== 1) {
-          return fail(
-            'TASK_RECORD_EVIDENCE_REQUIRED',
-            'Evidence 台账词条必须同时传入非空 evidence 数组、当前搜索返回的 searchId，并固定 mutationBudget=1；缺少或扩大预算都会被拒绝。事件（emevd）与脚本（script/luabnd）除外。',
-            { required: ['evidence', 'searchId', 'mutationBudget=1'] }
-          );
-        }
-      } else if (mutationBudget !== undefined && mutationBudget !== 0) {
-        return fail('TASK_RECORD_TARGET_BUDGET_INVALID', 'target 对象只用于声明候选对象，mutationBudget 必须省略或为 0。');
-      }
-      const update: AgentTaskRecordUpdate = {
-        objectName,
-        propertyKey,
-        value: propertyValue,
-        kind,
-        evidence,
-        ...(searchId ? { searchId } : {}),
-        ...(kind === 'evidence' && mutationBudget !== undefined
-          ? { mutationBudget: mutationBudget as number }
-          : {})
-      };
-      if (value.status === 'candidate' || value.status === 'verified' || value.status === 'blocked') {
-        update.status = value.status;
-      }
-      try {
-        const snapshot = await context.taskRecord.update(update);
-        const latestEntry = snapshot.entries.find((e) => e.objectName === objectName && e.propertyKey === propertyKey) ?? snapshot.entries.at(-1);
-        return ok({
-          message: `台账词条已登记：${objectName} -> ${propertyKey}`,
-          entry: latestEntry ? {
-            entryId: latestEntry.entryId,
-            objectName: latestEntry.objectName,
-            propertyKey: latestEntry.propertyKey,
-            kind: latestEntry.kind,
-            status: latestEntry.status,
-            mutationBudget: latestEntry.mutationBudget,
-            mutationUsed: latestEntry.mutationUsed
-          } : null,
-          totalEntries: snapshot.entries.length
-        });
-      } catch (error) {
-        const structured = asTaskRecordFailure(error);
-        return structured
-          ? fail(structured.code, structured.message, structured.details)
-          : fail('TASK_RECORD_UPDATE_FAILED', error instanceof Error ? error.message : String(error));
-      }
-    }
-  });
+  // read_agent_task_record / update_agent_task_record production registrations
+  // removed: automatic NativeReadProofStore + ReferenceQueryService replace the
+  // manual agent task-record ledger. Do not re-register stubs that return success.
 
   registry.register({
     name: 'workspace_stats',
@@ -1216,8 +1123,12 @@ export function createDefaultToolRegistry(): ToolRegistry {
       const query = asString(value.query, '');
       const limit = asNumber(value.limit, 50);
       const nativeResults = ws.searchMapEntities(query, limit);
-      return nativeResults.length > 0
-        ? ok(nativeResults)
+      const projectedResults = nativeResults.map((result) => ({
+        ...result,
+        item: projectMapSearchItem(result.item)
+      }));
+      return projectedResults.length > 0
+        ? ok(projectedResults)
         : ragSearchFallback(context, query, ['map_entity', 'map_region'], limit, 'search_map_entities');
     }
   });
@@ -1237,6 +1148,20 @@ export function createDefaultToolRegistry(): ToolRegistry {
       const query = asString(value.query, '');
       const limit = asNumber(value.limit, 50);
       const nativeResults = ws.searchTaeEvents(query, limit);
+      const actionCoverage = ws.getCoverage('action');
+      if (nativeResults.length === 0 && actionCoverage.status !== 'complete') {
+        return ok({
+          status: 'not_indexed',
+          totalHits: 0,
+          hits: [],
+          coverage: actionCoverage,
+          diagnostics: [{
+            code: 'TAE_NOT_INDEXED',
+            message: '当前动作/TAE 文件尚未建立可验证的语义索引；零命中不是“没有事件”。',
+            severity: 'warning'
+          }]
+        });
+      }
       return nativeResults.length > 0
         ? ok(nativeResults)
         : ragSearchFallback(context, query, ['tae_event'], limit, 'search_tae_events');
@@ -1248,11 +1173,12 @@ export function createDefaultToolRegistry(): ToolRegistry {
     description: 'Search parsed PARAM rows by native row name, row id, field id, display name, '
       + 'field description, or value. Use paramNames to search specific tables such as '
       + 'NpcParam, EquipParamGoods, or ItemLotParam. Results are candidates; use '
-      + 'read_param_fields for live native values. Example: { query: "鬼庭形部", '
-      + 'paramNames: ["NpcParam"] }.',
+      + 'read_param_fields for live native values. related defaults to none (no chrLinkage/'
+      + 'map/event/script deep scan); pass summary or context only when relation expansion is needed. '
+      + 'Example: { query: "鬼庭形部", paramNames: ["NpcParam"] }.',
     permission: 'read',
     permissionLevel: 'read',
-    inputSchema: { query: 'string', limit: 'number?', paramNames: 'array?' },
+    inputSchema: { query: 'string', limit: 'number?', paramNames: 'array?', related: 'enum:none|summary|context?' },
     run: (input, context) => {
       const ws = context.workspaceIndex;
       if (ws === null) return fail('WORKSPACE_REQUIRED', '这次工具需要先打开 Mod 工作区。');
@@ -1287,7 +1213,8 @@ export function createDefaultToolRegistry(): ToolRegistry {
     description: 'Search the trusted native PARAM definition for field IDs on an already located table/row. '
       + 'Pass table, non-empty rowIds, and a semantic query such as health/hp, elite/boss, hostile/team/target, '
       + 'lightning/effect, or drop/reward/item. This returns metadata candidates only; use the returned real fieldId '
-      + 'in read_param_fields, which requires a non-empty explicit fieldIds array. Do not parse Smithbox XML yourself.',
+      + 'in read_param_fields, which requires a non-empty explicit fieldIds array. related defaults to none '
+      + '(no chrLinkage deep scan). Do not parse Smithbox XML yourself.',
     permission: 'read',
     permissionLevel: 'read',
     inputSchema: {
@@ -1295,7 +1222,8 @@ export function createDefaultToolRegistry(): ToolRegistry {
       rowIds: 'array',
       query: 'string',
       limit: 'number?',
-      containerPath: 'string?'
+      containerPath: 'string?',
+      related: 'enum:none|summary|context?'
     },
     run: async (input, context) => {
       const edit = requireEditSession(context, 'read');
@@ -1417,18 +1345,56 @@ export function createDefaultToolRegistry(): ToolRegistry {
 
   registry.register({
     name: 'find_references',
-    description: 'Find evidence graph references connected to a URI.',
+    description: 'Find evidence-graph references for a workspace target. Prefer structured target/query input: '
+      + 'target is a physical selector ({domain, sourceUri, rowId/eventId/...} or {objectHandle}), '
+      + 'query is a fuzzy/discovery entry, cursor continues a prior page, detail is edges|context, '
+      + 'and fieldIds requests PARAM native fields on the resolved root. Legacy uri+direction remains '
+      + 'supported when ReferenceQueryService is unavailable (uri-only shape only). '
+      + 'uri / target / query are mutually exclusive.',
     permission: 'analyze',
     permissionLevel: 'analyze',
-    inputSchema: { uri: 'string', direction: 'enum:from|to|both?' },
-    run: (input, context) => {
+    inputSchema: {
+      uri: 'string?',
+      direction: 'enum:from|to|both?',
+      target: 'object?',
+      query: 'string?',
+      domain: 'string?',
+      detail: 'enum:edges|context?',
+      fieldIds: 'array?',
+      cursor: 'string?',
+      includeHypotheses: 'boolean?',
+      depth: 'number?',
+      limit: 'number?'
+    },
+    run: async (input, context) => {
+      const decoded = decodeReferenceQueryInput(input);
+      if (!decoded.ok) {
+        return fail(decoded.code, decoded.message, decoded.details);
+      }
+      const referenceService = resolveReferenceQueryService(context);
+      if (referenceService) {
+        const pageRecord = await referenceService.query(decoded.value);
+        return ok(pageRecord);
+      }
+      // Legacy fallback: only the uri-only shape can use the index edge list.
+      // Structured target/query/cursor shapes have no legacy authority.
+      const value = asRecord(input);
+      const uri = asOptionalString(value.uri)?.trim();
+      const hasStructuredTarget = value.target !== undefined && value.target !== null
+        || typeof value.query === 'string' && value.query.trim() !== ''
+        || typeof value.cursor === 'string' && value.cursor.trim() !== '';
+      if (hasStructuredTarget || !uri) {
+        return fail(
+          'REFERENCE_SERVICE_UNAVAILABLE',
+          'ReferenceQueryService 未注入，且当前输入不是 uri-only 遗留形状；请注入 coreSession/referenceService，或改用 uri。',
+          { supportedLegacyInput: { uri: 'string', direction: 'from|to|both' } }
+        );
+      }
       const ws = context.workspaceIndex;
       if (ws === null) return fail('WORKSPACE_REQUIRED', '这次工具需要先打开 Mod 工作区。');
-      const value = asRecord(input);
-      const uri = asString(value.uri);
-      if (!uri) return fail('INVALID_INPUT', 'find_references requires uri.');
-      const direction = asReferenceDirection(value.direction);
-      return ok(ws.findReferences(uri, direction));
+      const direction = decoded.value.direction;
+      const edges = ws.findReferences(uri, direction);
+      return ok(wrapLegacyReferenceEdges(uri, direction, edges));
     }
   });
 
@@ -1742,6 +1708,8 @@ export function createDefaultToolRegistry(): ToolRegistry {
     description: 'Read live PARAM field values from the opened gameparam container. '
       + 'Pass table, row ids, and a non-empty explicit fieldIds array on every call; '
       + 'omitting fieldIds or passing an empty array is rejected to prevent unbounded row payloads. '
+      + 'related defaults to none (no chrLinkage/map/event/script expansion); pass summary or context '
+      + 'only when deep relation context is required. '
       + 'Do not parse Smithbox XML or unpack BND yourself. Use the same explicit field ids for writes.',
     permission: 'read',
     permissionLevel: 'read',
@@ -1750,7 +1718,8 @@ export function createDefaultToolRegistry(): ToolRegistry {
       rowIds: 'array',
       fieldIds: 'array',
       containerPath: 'string?',
-      cursor: 'string?'
+      cursor: 'string?',
+      related: 'enum:none|summary|context?'
     },
     run: async (input, context) => {
       const value = asRecord(input);
@@ -1760,6 +1729,7 @@ export function createDefaultToolRegistry(): ToolRegistry {
       if (!table || rowIds.length === 0 || fieldIds.length === 0) {
         return fail('PARAM_FIELD_IDS_REQUIRED', 'read_param_fields 必须提供 table、非空 rowIds 和非空 fieldIds；请先从候选或元数据中确认真实字段 ID。');
       }
+      const related = asReferenceRelatedMode(value.related);
       const edit = requireEditSession(context, 'read');
       if (!('session' in edit)) return edit;
       const containerPath = asOptionalString(value.containerPath);
@@ -1769,30 +1739,31 @@ export function createDefaultToolRegistry(): ToolRegistry {
         ...(containerPath ? { containerPath } : {})
       });
       if (!result.ok) return fail(result.error.code, result.error.message, result.error.details);
-      let taskRecordProof: { status: 'not-recorded'; code: string; message: string } | undefined;
-      if (context.taskRecord) {
+      // Production proof path: host records delivered native fields automatically.
+      // taskRecord.recordNativeParamRead is no longer a production blocker.
+      let nativeReadProof: { status: 'accepted' } | { status: 'skipped'; reason: string } | undefined;
+      const proofStore = resolveNativeReadProofStore(context);
+      if (proofStore) {
+        try {
+          acceptParamDeliveredReadProofs(context, {
+            containerPath: result.containerPath,
+            fields: result.fields
+          });
+          nativeReadProof = { status: 'accepted' };
+        } catch (error) {
+          nativeReadProof = {
+            status: 'skipped',
+            reason: error instanceof Error ? error.message : String(error)
+          };
+        }
+      } else if (context.taskRecord) {
+        // Optional transition: keep ledger recording when a host still injects it,
+        // but never fail the native read because the ledger is missing/mismatched.
         try {
           await context.taskRecord.recordNativeParamRead(input, result);
-        } catch (error) {
-          const structured = asTaskRecordFailure(error);
-          if (structured?.code === 'TASK_RECORD_NATIVE_PROOF_TARGET_MISSING') {
-            // Reference reads need no write ledger entry. Preserve native
-            // values without granting any mutation authority.
-            taskRecordProof = {
-              status: 'not-recorded',
-              code: structured.code,
-              message: '原生读取成功；没有匹配的待晋升 Evidence，未授予写入权限。需要写入时先登记精确表、行、字段的 Evidence，再重新原生读取。'
-            };
-          } else {
-            return fail(
-              'TASK_RECORD_NATIVE_PROOF_FAILED',
-              `原生 PARAM 已读取，但 Evidence 台账未能记录该证明：${error instanceof Error ? error.message : String(error)}`,
-              { nativeRead: result, ...(structured ? { taskRecordError: structured } : {}) }
-            );
-          }
+        } catch {
+          nativeReadProof = { status: 'skipped', reason: 'task_record_transition_mismatch' };
         }
-      } else if (context.requireTaskRecord) {
-        return fail('TASK_RECORD_NATIVE_PROOF_GATE_UNAVAILABLE', '生产 Agent 缺少原生读取证明写入门禁，已拒绝继续。');
       }
       if (context.workspaceIndex && result.fields.length > 0) {
         const sourceUri = pathToFileURL(result.containerPath).href;
@@ -1832,10 +1803,12 @@ export function createDefaultToolRegistry(): ToolRegistry {
         context.workspaceIndex.rebuildReferences();
         await context.onSemanticEvidenceUpdated?.([sourceUri]);
       }
+      // Production default (related=none): no chrLinkage, no map/event/script readers.
       let crossReferences: ChrLinkageResult[] | undefined;
+      let relatedSummary: { mode: ReferenceRelatedMode; npcParamRows: number; linkageHits: number } | undefined;
       const isNpcParam = /npcparam|npc_param_st/i.test(table);
       const wsRoot = edit.session.session.layers.overlayRoot;
-      if (isNpcParam && wsRoot) {
+      if (related !== 'none' && isNpcParam && wsRoot) {
         const linkages: ChrLinkageResult[] = [];
         for (const rId of rowIds) {
           try {
@@ -1851,12 +1824,23 @@ export function createDefaultToolRegistry(): ToolRegistry {
           }
         }
         if (linkages.length > 0) {
-          crossReferences = linkages;
+          if (related === 'summary') {
+            relatedSummary = {
+              mode: 'summary',
+              npcParamRows: rowIds.length,
+              linkageHits: linkages.length
+            };
+          } else {
+            crossReferences = linkages;
+          }
+        } else {
+          relatedSummary = { mode: related, npcParamRows: rowIds.length, linkageHits: 0 };
         }
       }
       return ok({
         ...result,
-        ...(taskRecordProof ? { taskRecordProof } : {}),
+        ...(nativeReadProof ? { nativeReadProof } : {}),
+        ...(relatedSummary ? { relatedSummary } : {}),
         ...(crossReferences ? { crossReferences } : {})
       });
     }
@@ -1895,6 +1879,24 @@ export function createDefaultToolRegistry(): ToolRegistry {
       const edit = requireEditSession(context, 'write');
       if (!('session' in edit)) return edit;
       const containerPath = asOptionalString(value.containerPath);
+      const proofGate = enforceNativeReadWriteBoundary('mutate_param_fields', input, context, (payload) => {
+        // buildWriteRequirement walks each edit and calls identityFor(edit).
+        const record = asRecord(payload);
+        const table = asOptionalString(record.table);
+        const rowId = typeof record.rowId === 'number' && Number.isSafeInteger(record.rowId)
+          ? record.rowId
+          : undefined;
+        if (!table || rowId === undefined) return null;
+        return paramNativeSourceIdentity({
+          workspaceId: resolveProofWorkspaceId(context),
+          table,
+          rowId,
+          containerPath: asOptionalString(record.containerPath) ?? asOptionalString(value.containerPath),
+          entryName: asOptionalString(record.entryName),
+          entryIndex: typeof record.entryIndex === 'number' ? record.entryIndex : undefined
+        });
+      });
+      if (proofGate) return proofGate;
       const result = await setParamFields({
         edit: edit.session,
         edits: edits.edits,
@@ -2038,6 +2040,7 @@ export function createDefaultToolRegistry(): ToolRegistry {
       file: 'string',
       eventId: 'safe-integer',
       format: 'enum:darkscript|json?',
+      view: 'enum:default|full-source?',
       instructionOffset: 'safe-integer?',
       instructionLimit: 'safe-integer?',
       cursor: 'string?'
@@ -2073,6 +2076,7 @@ export function createDefaultToolRegistry(): ToolRegistry {
           { authority: 'core.readEmevdEvent', file, eventId }
         );
       }
+      const view = value.view === 'full-source' ? 'full-source' as const : 'default' as const;
       const format = value.format === undefined ? undefined : value.format as EmevdEventReadFormat;
       const instructionOffset = value.instructionOffset === undefined
         ? undefined
@@ -2107,7 +2111,7 @@ export function createDefaultToolRegistry(): ToolRegistry {
           result.diagnostics
         );
       }
-      const resultRecord = result as Record<string, unknown>;
+      const resultRecord = { ...(result as Record<string, unknown>) };
       // Bind the model-facing/native receipt to the workspace-indexed URI.
       // The facade's URI is derived from its physical path and may otherwise
       // contain a sanitized-but-user-specific path rather than the canonical
@@ -2126,6 +2130,34 @@ export function createDefaultToolRegistry(): ToolRegistry {
           ? { registryFingerprint: resultRecord.registryFingerprint }
           : {})
       };
+      // view=full-source annotates a complete native DSL projection only when
+      // the host-observed document is complete and not truncated. Outlines,
+      // partial/tail windows and JSON machine views never mint this projection
+      // and therefore never grant a write proof.
+      if (view === 'full-source' && result.ok) {
+        const darkScript = typeof resultRecord.darkScript === 'string' ? resultRecord.darkScript : undefined;
+        const truncated = resultRecord.truncated === true;
+        const darkScriptComplete = resultRecord.darkScriptComplete === true;
+        const isDarkscript = resultRecord.format === 'darkscript' || resultRecord.format === undefined;
+        const offsetOk = resultRecord.offset === 0 || resultRecord.offset === undefined;
+        const complete = darkScriptComplete
+          && !truncated
+          && isDarkscript
+          && offsetOk
+          && typeof darkScript === 'string';
+        if (complete && darkScript !== undefined) {
+          const totalUtf8Bytes = Buffer.byteLength(darkScript, 'utf8');
+          resultRecord.projection = 'complete_native_dsl';
+          resultRecord.fullSourceText = darkScript;
+          resultRecord.totalUtf8Bytes = totalUtf8Bytes;
+          try {
+            const { createHash } = await import('node:crypto');
+            resultRecord.fullTextHash = createHash('sha256').update(darkScript, 'utf8').digest('hex');
+          } catch {
+            // Hash is optional provenance; completeness gate already applied.
+          }
+        }
+      }
       return ok({ ...resultRecord, sourceUri: canonicalSourceUri, provenance });
     }
   });
@@ -2286,6 +2318,27 @@ export function createDefaultToolRegistry(): ToolRegistry {
       }
       const edit = requireEditSession(context, 'write');
       if (!('session' in edit)) return edit;
+      const proofGate = enforceNativeReadWriteBoundary('apply_emevd_dsl', input, context, (payload) => {
+        const record = asRecord(payload);
+        const fileToken = asOptionalString(record.file);
+        const resolved = fileToken
+          ? resolveIndexedResourceFile(context, fileToken, 'event')
+          : undefined;
+        const sourceUri = resolved?.ok
+          ? resolved.sourceUri
+          : context.hostResolvedEmevdEventTarget?.sourceUri
+            ?? fileToken;
+        if (!sourceUri) return null;
+        const eventId = typeof record.eventId === 'number' && Number.isSafeInteger(record.eventId)
+          ? record.eventId
+          : context.hostResolvedEmevdEventTarget?.eventId;
+        return emevdNativeSourceIdentity({
+          workspaceId: resolveProofWorkspaceId(context),
+          sourceUri,
+          eventId
+        });
+      });
+      if (proofGate) return proofGate;
       const resolvedFile = context.hostResolvedEmevdEventTarget
         ? {
             ok: true as const,
@@ -2450,7 +2503,8 @@ export function createDefaultToolRegistry(): ToolRegistry {
     permission: 'read',
     permissionLevel: 'read',
     inputSchema: {
-      file: 'string'
+      file: 'string',
+      cursor: 'string?'
     },
     run: async (input, context) => {
       const edit = requireEditSession(context, 'read');
@@ -2458,7 +2512,10 @@ export function createDefaultToolRegistry(): ToolRegistry {
       const value = asRecord(input);
       const file = asString(value.file);
       if (!file) return fail('INVALID_INPUT', 'list_luabnd_scripts ��Ҫ file��');
-      const result = await listLuabndScripts({ edit: edit.session, file });
+      const resolvedFile = resolveIndexedResourceFile(context, file, 'script');
+      if (!resolvedFile.ok) return fail(resolvedFile.code, resolvedFile.message, resolvedFile.details);
+      const cursor = asOptionalString(value.cursor);
+      const result = await listLuabndScripts({ edit: edit.session, file: resolvedFile.path, ...(cursor ? { cursor } : {}) });
       if (!result.ok) return fail(result.error.code, result.error.message, result.diagnostics);
       return ok(result);
     }
@@ -2475,7 +2532,8 @@ export function createDefaultToolRegistry(): ToolRegistry {
       file: 'string',
       childPath: 'string?',
       expectedContainerHash: 'string?',
-      expectedChildHash: 'string?'
+      expectedChildHash: 'string?',
+      cursor: 'string?'
     },
     run: async (input, context) => {
       const edit = requireEditSession(context, 'read');
@@ -2484,14 +2542,18 @@ export function createDefaultToolRegistry(): ToolRegistry {
       const file = asString(value.file);
       const childPath = asOptionalString(value.childPath);
       if (!file) return fail('INVALID_INPUT', 'read_luabnd_script ��Ҫ file��');
+      const resolvedFile = resolveIndexedResourceFile(context, file, 'script');
+      if (!resolvedFile.ok) return fail(resolvedFile.code, resolvedFile.message, resolvedFile.details);
       const expectedContainerHash = asOptionalString(value.expectedContainerHash);
       const expectedChildHash = asOptionalString(value.expectedChildHash);
+      const cursor = asOptionalString(value.cursor);
       const result = await readLuabndScript({
         edit: edit.session,
-        file,
+        file: resolvedFile.path,
         ...(childPath ? { childPath } : {}),
         ...(expectedContainerHash ? { expectedContainerHash } : {}),
-        ...(expectedChildHash ? { expectedChildHash } : {})
+        ...(expectedChildHash ? { expectedChildHash } : {}),
+        ...(cursor ? { cursor } : {})
       });
       if (!result.ok) return fail(result.error.code, result.error.message, result.diagnostics);
       return ok(result);
@@ -2520,17 +2582,33 @@ export function createDefaultToolRegistry(): ToolRegistry {
       const value = asRecord(input);
       const file = asString(value.file);
       const childPath = asString(value.childPath);
-      if (!file || !childPath) return fail('INVALID_INPUT', 'mutate_luabnd_script ��Ҫ file �� childPath��');
+      if (!file || !childPath) {
+        return fail('INVALID_INPUT', 'mutate_luabnd_script requires file and childPath.');
+      }
+      const resolvedFile = resolveIndexedResourceFile(context, file, 'script');
+      if (!resolvedFile.ok) return fail(resolvedFile.code, resolvedFile.message, resolvedFile.details);
+      const proofGate = enforceNativeReadWriteBoundary('mutate_luabnd_script', input, context, (payload) => {
+        const record = asRecord(payload);
+        const fileToken = asOptionalString(record.file);
+        const child = asOptionalString(record.childPath);
+        if (!fileToken || !child) return null;
+        return scriptNativeSourceIdentity({
+          workspaceId: resolveProofWorkspaceId(context),
+          file: fileToken,
+          childPath: child
+        });
+      });
+      if (proofGate) return proofGate;
       const text = asOptionalString(value.text);
       const contentBase64 = asOptionalString(value.contentBase64);
       if (text === undefined && contentBase64 === undefined) {
-        return fail('INVALID_INPUT', 'mutate_luabnd_script ��Ҫ text �� contentBase64��');
+        return fail('INVALID_INPUT', 'mutate_luabnd_script requires text or contentBase64.');
       }
       const expectedContainerHash = asOptionalString(value.expectedContainerHash);
       const expectedChildHash = asOptionalString(value.expectedChildHash);
       const result = await setLuabndScript({
         edit: edit.session,
-        file,
+        file: resolvedFile.path,
         childPath,
         ...(text !== undefined ? { text } : {}),
         ...(contentBase64 !== undefined ? { contentBase64 } : {}),
@@ -2698,10 +2776,18 @@ export function createDefaultToolRegistry(): ToolRegistry {
       if (!file) return fail('INVALID_INPUT', 'query_map_objects 需要 file。');
       const resolvedFile = resolveIndexedResourceFile(context, file, 'map');
       if (!resolvedFile.ok) return fail(resolvedFile.code, resolvedFile.message, resolvedFile.details);
+      let normalizedKind: 'model' | 'part' | 'region' | 'event' | 'route' | undefined;
+      if (value.kind) {
+        try {
+          normalizedKind = normalizeMapNativeKind(asString(value.kind));
+        } catch {
+          return fail('MAP_KIND_INVALID', `不支持的地图查询 kind：${asString(value.kind)}。可用 character/object/part/model/region/event/route。`);
+        }
+      }
       const result = await queryMapEntities(edit.session, resolvedFile.path, {
         ...(value.modelName ? { modelName: asString(value.modelName) } : {}),
         ...(typeof value.entityId === 'number' ? { entityId: Number(value.entityId) } : {}),
-        ...(value.kind ? { kind: asString(value.kind) as any } : {}),
+        ...(normalizedKind ? { kind: normalizedKind } : {}),
         ...(value.nameContains ? { nameContains: asString(value.nameContains) } : {}),
         ...(value.regionName ? { regionName: asString(value.regionName) } : {})
       });
@@ -3167,6 +3253,300 @@ function fail(code: string, message: string, details?: unknown): ToolResult<neve
   };
 }
 
+function resolveNativeReadProofStore(context: ToolContext): NativeReadProofStore | undefined {
+  return context.coreSession?.nativeReadProofs ?? context.nativeReadProofs;
+}
+
+function resolveReferenceQueryService(context: ToolContext): ReferenceQueryService | undefined {
+  return context.coreSession?.referenceService ?? context.referenceService;
+}
+
+function resolveProofWorkspaceId(context: ToolContext): string {
+  return context.coreSession?.workspaceId
+    ?? context.workspaceIndex?.workspaceId
+    ?? '';
+}
+
+function resolveProofPrincipal(context: ToolContext): string {
+  return context.coreSession?.principal
+    ?? context.proofPrincipal
+    ?? context.agentRunId
+    ?? 'agent-run';
+}
+
+function asReferenceRelatedMode(value: unknown): ReferenceRelatedMode {
+  return value === 'summary' || value === 'context' ? value : 'none';
+}
+
+function paramNativeSourceIdentity(input: {
+  workspaceId: string;
+  table: string;
+  rowId: number;
+  containerPath?: string | undefined;
+  entryName?: string | undefined;
+  entryIndex?: number | undefined;
+  sourceUri?: string | undefined;
+}): NativeSourceIdentity {
+  // Stable PARAM identity for proof matching: table + rowId are present on both
+  // delivered reads and write payloads. containerPath/entryName are diagnostics
+  // only — they must not break proof key equality between read and write.
+  return {
+    workspaceId: input.workspaceId,
+    domain: 'param',
+    outerId: input.sourceUri ?? input.table,
+    childChain: [String(input.rowId)],
+    namespace: input.table,
+    objectKey: `${input.table}#${input.rowId}`
+  };
+}
+
+function emevdNativeSourceIdentity(input: {
+  workspaceId: string;
+  sourceUri: string;
+  eventId?: number | undefined;
+}): NativeSourceIdentity {
+  return {
+    workspaceId: input.workspaceId,
+    domain: 'emevd',
+    outerId: input.sourceUri,
+    childChain: input.eventId !== undefined ? ['event', String(input.eventId)] : ['file'],
+    namespace: input.eventId !== undefined ? 'event' : 'file',
+    objectKey: input.eventId !== undefined ? `event#${input.eventId}` : input.sourceUri
+  };
+}
+
+function scriptNativeSourceIdentity(input: {
+  workspaceId: string;
+  file: string;
+  childPath?: string | undefined;
+}): NativeSourceIdentity {
+  return {
+    workspaceId: input.workspaceId,
+    domain: 'script',
+    outerId: input.file,
+    childChain: input.childPath ? [input.childPath] : [],
+    namespace: 'script',
+    objectKey: input.childPath ? `${input.file}#${input.childPath}` : input.file
+  };
+}
+
+function resourceVersionFromObservation(input: {
+  outerFileHash?: string;
+  dataHash?: string;
+  sourceRevision?: number;
+  generation: number;
+}): ResourceVersion {
+  return {
+    outerFileHash: input.outerFileHash ?? '',
+    ...(input.dataHash ? { dataHash: input.dataHash } : {}),
+    ...(input.sourceRevision !== undefined ? { sourceRevision: input.sourceRevision } : {}),
+    generation: input.generation
+  };
+}
+
+/**
+ * Host-side automatic proof acceptance for delivered PARAM native reads.
+ * Never uses model-supplied verified flags; identity/version come from the
+ * native result payload.
+ */
+function acceptParamDeliveredReadProofs(
+  context: ToolContext,
+  input: {
+    containerPath: string;
+    fields: Array<{
+      table: string;
+      rowId: number;
+      fieldId: string;
+      value: unknown;
+      entryName?: string;
+      entryIndex?: number;
+      sourceHash?: string;
+      sourceRevision?: number;
+      dataHash?: string;
+    }>;
+  }
+): void {
+  const proofStore = resolveNativeReadProofStore(context);
+  if (!proofStore || input.fields.length === 0) return;
+  const workspaceId = resolveProofWorkspaceId(context);
+  const principal = resolveProofPrincipal(context);
+  if (!workspaceId) {
+    throw new Error('NATIVE_READ_PROOF_WORKSPACE_REQUIRED');
+  }
+  const generation = context.coreSession?.versionClock.current() ?? proofStore.currentGeneration();
+  const groups = new Map<string, typeof input.fields>();
+  for (const field of input.fields) {
+    const key = `${field.table}::${field.rowId}`;
+    const list = groups.get(key) ?? [];
+    list.push(field);
+    groups.set(key, list);
+  }
+  for (const [, fields] of groups) {
+    const first = fields[0]!;
+    const identity = paramNativeSourceIdentity({
+      workspaceId,
+      table: first.table,
+      rowId: first.rowId,
+      containerPath: input.containerPath,
+      entryName: first.entryName,
+      entryIndex: first.entryIndex
+    });
+    const sourceHash = fields
+      .map((field) => field.sourceHash)
+      .find((hash): hash is string => typeof hash === 'string' && hash.length > 0);
+    const sourceRevision = fields
+      .map((field) => field.sourceRevision)
+      .find((revision): revision is number => revision !== undefined);
+    const dataHash = fields
+      .map((field) => field.dataHash)
+      .find((hash): hash is string => typeof hash === 'string' && hash.length > 0);
+    proofStore.acceptDeliveredRead({
+      principal,
+      workspaceId,
+      identity,
+      version: resourceVersionFromObservation({
+        ...(sourceHash ? { outerFileHash: sourceHash } : {}),
+        ...(dataHash ? { dataHash } : {}),
+        ...(sourceRevision !== undefined ? { sourceRevision } : {}),
+        generation
+      }),
+      domain: 'param',
+      observation: {
+        kind: 'param-fields',
+        fields: fields.map((field) => ({
+          fieldId: field.fieldId,
+          value: field.value,
+          delivered: true
+        })),
+        completeness: 'complete',
+        truncated: false
+      },
+      finalVisible: {
+        hasTargetRead: true,
+        deliveredFieldIds: fields.map((field) => field.fieldId),
+        projection: 'param-fields'
+      }
+    });
+  }
+}
+
+/**
+ * Failure-closed native-read write boundary for mutating tools.
+ * Returns undefined when the write may proceed, or a ToolResult failure.
+ *
+ * - proof store present → requireCoverage must pass before any writer runs.
+ * - requireProofBoundary true and no proof store → NATIVE_READ_PROOF_UNAVAILABLE.
+ * - neither proof store nor coreSession → requireProofBoundary defaults false
+ *   so legacy hosts without a proof store can still run until full migration.
+ */
+function enforceNativeReadWriteBoundary(
+  toolName: string,
+  input: unknown,
+  context: ToolContext,
+  identityFor: (payload: unknown) => NativeSourceIdentity | null
+): ToolResult<never> | undefined {
+  const proofStore = resolveNativeReadProofStore(context);
+  const requireBoundary = context.requireProofBoundary ?? Boolean(proofStore || context.coreSession);
+  if (!proofStore) {
+    if (requireBoundary) {
+      return fail(
+        'NATIVE_READ_PROOF_UNAVAILABLE',
+        `工具 ${toolName} 需要 NativeReadProofStore 写入边界，当前上下文未提供证明存储，已失败关闭。`,
+        { toolName }
+      );
+    }
+    return undefined;
+  }
+  const workspaceId = resolveProofWorkspaceId(context);
+  const principal = resolveProofPrincipal(context);
+  if (!workspaceId) {
+    return fail(
+      'NATIVE_READ_PROOF_UNAVAILABLE',
+      `工具 ${toolName} 无法解析 workspaceId，写入证明门禁失败关闭。`,
+      { toolName }
+    );
+  }
+  const requirement = buildWriteRequirement(toolName, input, {
+    principal,
+    workspaceId,
+    identityFor
+  });
+  if (!('targets' in requirement)) {
+    return fail(requirement.code, requirement.message, { toolName });
+  }
+  const coverage = proofStore.requireCoverage(requirement);
+  if (!coverage.ok) {
+    return fail(coverage.code, coverage.message, coverage.details);
+  }
+  return undefined;
+}
+
+function wrapLegacyReferenceEdges(
+  uri: string,
+  direction: 'from' | 'to' | 'both',
+  edges: ReferenceEdge[]
+): ReferencePageRecord {
+  const resolved = edges.length > 0;
+  return {
+    resolution: resolved ? 'resolved' : 'insufficient_evidence',
+    candidates: [],
+    relations: edges.map((edge, index) => ({
+      relationId: `legacy_${index}`.slice(0, 80),
+      from: {
+        workspaceId: '',
+        domain: 'other' as const,
+        sourceUri: edge.fromUri,
+        outerId: edge.fromUri,
+        childChain: [],
+        namespace: 'legacy-index',
+        objectKey: edge.fromUri
+      },
+      to: {
+        workspaceId: '',
+        domain: 'other' as const,
+        sourceUri: edge.toUri,
+        outerId: edge.toUri,
+        childChain: [],
+        namespace: 'legacy-index',
+        objectKey: edge.toUri
+      },
+      relationKind: edge.kind,
+      certainty: 'hypothesis' as const,
+      evidence: {
+        version: {},
+        location: {
+          sourceUri: edge.fromUri,
+          domain: 'other' as const,
+          locator: edge.toUri
+        },
+        ...(edge.reason ? { diagnostics: [edge.reason] } : {})
+      },
+      path: []
+    })),
+    coverage: {
+      scopeDescription: `legacy-ws-findReferences uri=${uri} direction=${direction}`,
+      predicateComplete: false,
+      domains: [],
+      unresolvedSources: [],
+      failedSources: [],
+      unscannedSources: [],
+      allowsNegativeClaim: false
+    },
+    page: {
+      returnedCount: edges.length,
+      hasMore: false,
+      dependencyDigest: '',
+      sortVersion: 'legacy-ws-v1'
+    },
+    diagnostics: [{
+      code: 'REFERENCE_LEGACY_INDEX_FALLBACK',
+      message: 'ReferenceQueryService 未注入；已降级为工作区索引 findReferences，仅表示索引边，不是原生关联页。',
+      severity: 'warning' as const
+    }],
+    nextActions: []
+  };
+}
+
 function asTaskRecordFailure(error: unknown): { code: string; message: string; details?: unknown } | null {
   if (!(error instanceof Error)) return null;
   const candidate = error as Error & { code?: unknown; details?: unknown };
@@ -3181,6 +3561,40 @@ function asTaskRecordFailure(error: unknown): { code: string; message: string; d
 
 function asRecord(value: unknown): Record<string, unknown> {
   return value && typeof value === 'object' ? value as Record<string, unknown> : {};
+}
+
+/** Stable cross-tool map contract: native queries operate on Part/Region/Model,
+ * while the index uses the more descriptive character/object/mapPiece labels. */
+function projectMapSearchItem(item: any): any {
+  if (item && typeof item === 'object' && typeof item.kind === 'string') {
+    const nativeKind = ['character', 'object', 'asset', 'collision', 'mapPiece'].includes(item.kind)
+      ? 'part'
+      : item.kind;
+    return {
+      ...item,
+      kind: nativeKind,
+      subkind: item.kind,
+      canonicalKind: nativeKind
+    };
+  }
+  return item;
+}
+
+function normalizeMapNativeKind(value: string): 'model' | 'part' | 'region' | 'event' | 'route' {
+  switch (value.trim().toLowerCase()) {
+    case 'character':
+    case 'object':
+    case 'asset':
+    case 'collision':
+    case 'mappiece':
+    case 'part':
+      return 'part';
+    case 'model': return 'model';
+    case 'region': return 'region';
+    case 'event': return 'event';
+    case 'route': return 'route';
+    default: throw new Error(`MAP_KIND_INVALID:${value}`);
+  }
 }
 
 function asString(value: unknown, fallback?: string): string {
@@ -3339,7 +3753,21 @@ function ambiguousIndexedFiles(
 }
 
 function normalizeFileToken(value: string): string {
-  return value.trim().replace(/\\/g, '/').toLocaleLowerCase();
+  let token = value.trim();
+  if (/^file:\/\//iu.test(token)) {
+    try {
+      // Resource URI uses file://<workspace-relative-path>, while absolute
+      // file URLs use file:///C:/... . Treat both as the same catalog token.
+      if (/^file:\/\/\/[a-z]:[\\/]/iu.test(token) || /^file:\/\/\/\\\\/iu.test(token)) {
+        token = fileURLToPath(token);
+      } else {
+        token = decodeURIComponent(token.slice('file://'.length));
+      }
+    } catch {
+      token = token.slice('file://'.length);
+    }
+  }
+  return token.replace(/\\/g, '/').replace(/^\.\//, '').toLocaleLowerCase();
 }
 
 function isLogicalMapToken(value: string): boolean {
@@ -3712,9 +4140,11 @@ function asPatchMode(value: unknown, fallback: ToolContext['mode']): PatchMode {
  * that check from becoming a second copy that drifts.
  */
 export const ENUM_FIELD_NORMALIZERS: Record<string, (value: string) => string> = {
-  'update_agent_task_record.kind': (value) => value,
-  'update_agent_task_record.status': (value) => value,
   'find_references.direction': (value) => asReferenceDirection(value),
+  'find_references.detail': (value) => (value === 'edges' || value === 'context' ? value : 'context'),
+  'read_param_fields.related': (value) => asReferenceRelatedMode(value),
+  'search_param_fields.related': (value) => asReferenceRelatedMode(value),
+  'search_param_rows.related': (value) => asReferenceRelatedMode(value),
   'read_emevd_event.format': (value) => (value === 'darkscript' || value === 'json' ? value : '__unaccepted__'),
   // asPatchMode falls back to the session mode. Probing with a sentinel
   // fallback keeps every declared value testable — using a real mode as the

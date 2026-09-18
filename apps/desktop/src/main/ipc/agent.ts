@@ -10,8 +10,11 @@ import {
   createConfiguredModelServiceAdapter,
   createConfirmationReceipt,
   createContextBroker,
+  createCoreToolSession,
+  createWorkspaceReferenceRuntime,
   createUnifiedDiff,
   getRagStaleChunkMaskCached,
+  nativeEditSessionFromContext,
   retrieveEvidence,
   retrieveEvidenceHybrid,
   createRagCorpus,
@@ -22,6 +25,7 @@ import {
   type ApprovalDecision,
   type ApprovalDiff,
   type ChatMessage,
+  type CoreToolSession,
   type RolloutSessionMeta,
   type ResumedRollout
 } from '@soulforge/core';
@@ -636,23 +640,71 @@ export function registerAgentIpcHandlers(deps: AgentIpcDeps): void {
         }
       );
       await taskRecord.read();
-      // 无工作区时 deps.getActiveIndex() 为 null：工具层按工具守卫（WORKSPACE_REQUIRED），
-      // 需要工作区的工具干净失败，不整次拒绝（T6）。
+      // Per-run CoreToolSession: proofs are principal-scoped and must not
+      // inherit across Agent runs. Workspace immutable snapshots may be shared
+      // later; write proofs stay isolated via principal.
+      let coreSession: CoreToolSession | null = null;
+      try {
+        const wsSession = deps.getActiveSession();
+        const operationLog = wsSession ? await deps.ensureActiveOperationLog(wsSession) : null;
+        if (wsSession && operationLog) {
+          const storage = deps.durableStoragePaths(wsSession.meta.workspaceId);
+          const editSession = nativeEditSessionFromContext({
+            session: wsSession,
+            operationLog,
+            backupBaseDir: storage.backupBaseDir,
+            recoveryDir: storage.recoveryDir,
+            stagingRoot: storage.stagingRoot
+          });
+          const activeIndex = deps.getActiveIndex() ?? undefined;
+          const hostContext = deps.currentToolContext();
+          coreSession = createCoreToolSession({
+            principal: `agent-run:${sessionId}`,
+            workspaceId: wsSession.meta.workspaceId,
+            session: wsSession,
+            editSession,
+            workspaceIndex: activeIndex,
+            operationLog,
+            modeCeiling: mode,
+            ...(hostContext.knowledgeStore ? { knowledgeStore: hostContext.knowledgeStore } : {}),
+            ...(activeIndex
+              ? {
+                  referenceRuntime: createWorkspaceReferenceRuntime({
+                    workspaceIndex: activeIndex,
+                    workspaceId: wsSession.meta.workspaceId,
+                    editSession
+                  })
+                }
+              : {})
+          });
+        }
+      } catch {
+        coreSession = null;
+      }
+      const proofContextExtras = coreSession
+        ? {
+            coreSession,
+            nativeReadProofs: coreSession.nativeReadProofs,
+            referenceService: coreSession.referenceService,
+            requireProofBoundary: true,
+            proofPrincipal: coreSession.principal
+          }
+        : {
+            requireProofBoundary: false,
+            proofPrincipal: `agent-run:${sessionId}`
+          };
       const bridge = createAgentToolBridge({
         registry: deps.toolRegistry,
         contextProvider: deps.currentToolContext,
-        // Agent 可以读取记忆来恢复项目上下文，但不能把未经用户明确整理的
-        // 运行时对话或测试内容写入长期记忆；记忆写入只保留给显式宿主流程。
         context: {
           ...deps.currentToolContext(),
           mode,
           modeCeiling: mode,
           allowMemoryWrite: false,
           taskRecord,
-          requireTaskRecord: true
+          requireTaskRecord: false,
+          ...proofContextExtras
         },
-        // Discovery is non-blocking: the bridge returns candidate/evidence
-        // metadata, while native readers and writers enforce real authority.
       });
   
       // AI 回滚接通：rollback_operation 走与 UI 操作级回滚完全相同的通道 ——
@@ -667,13 +719,15 @@ export function registerAgentIpcHandlers(deps: AgentIpcDeps): void {
         const rawExecuteTool = bridge.executeTool;
         const executeLiveTool = (call: Parameters<typeof rawExecuteTool>[0], extra: Partial<ToolContext> = {}) => {
           return rawExecuteTool(call, {
-            // The run's mode and task ledger are stable for its lifetime; all
-            // workspace/RAG/session state must be refreshed per tool call.
+            // The run's mode is stable for its lifetime; workspace/RAG/session
+            // state is refreshed per tool call. taskRecord is optional transition
+            // infrastructure — production proofs use NativeReadProofStore.
             mode: currentRunMode,
             modeCeiling: mode,
             allowMemoryWrite: false,
             taskRecord,
-            requireTaskRecord: true,
+            requireTaskRecord: false,
+            ...proofContextExtras,
             ...(agentSignal ? { signal: agentSignal } : {}),
             ...extra
           });
@@ -1125,6 +1179,8 @@ export function registerAgentIpcHandlers(deps: AgentIpcDeps): void {
         onEvent: (event) => sendAgentEvent(sessionId, event)
       }).then((result) => {
         activeAgentRuns.delete(sessionId);
+        coreSession?.close();
+        coreSession = null;
         rejectSessionApprovals(sessionId, '会话已结束，未回答的审批按拒绝处理。');
         const relativeRolloutPath = relative(agentSessionsBaseDir, result.rolloutPath).replace(/\\/g, '/');
         sendAgentEvent(sessionId, {
@@ -1135,6 +1191,8 @@ export function registerAgentIpcHandlers(deps: AgentIpcDeps): void {
         });
       }).catch((error: unknown) => {
         activeAgentRuns.delete(sessionId);
+        coreSession?.close();
+        coreSession = null;
         // Also on the failure path: a crashed run must not leave resolvers parked.
         rejectSessionApprovals(sessionId, '会话异常结束，未回答的审批按拒绝处理。');
         sendAgentEvent(sessionId, {

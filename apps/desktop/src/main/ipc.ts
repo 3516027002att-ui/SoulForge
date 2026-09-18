@@ -133,6 +133,8 @@ import {
   type ScriptEntryClassification,
   ingestBridgeResult,
   loadSymbolBundleIntoIndex,
+  openSqliteKnowledgeStore,
+  type SqliteKnowledgeStore,
   saveFingerprintStore,
   bumpPathSourceGeneration,
   mapExportFromMsbDocument
@@ -268,6 +270,7 @@ function safeExists(path: string): boolean {
 
 let activeOperationLog: OperationLogUtilityClient | null = null;
 let activeOperationLogWorkspaceId: string | null = null;
+const knowledgeStores = new Map<string, SqliteKnowledgeStore>();
 let recoveryCleanupWorkspaceId: string | null = null;
 let recoveryCleanupInFlight: Promise<void> | null = null;
 let semanticRefreshInFlight: Promise<void> | null = null;
@@ -667,28 +670,46 @@ export interface RollbackOperationIpcResult {
 }
 
 /**
- * 读装配进 Agent loop 的系统提示（prompt/system.md，仓库内自己的提示词）。
+ * 读装配进 Agent loop 的系统提示（prompt/system.md + prompt/native-read-safety.md）。
  *
- * T6 要求 main/core 读入装配、renderer 不拼。候选顺序：
- *  1. SOULFORGE_SYSTEM_PROMPT_PATH（显式覆盖）
- *  2. 打包 extraResources：process.resourcesPath/prompt/system.md
- *  3. dev 仓库根：app.getAppPath()（dev = apps/desktop）上两级 → repo/prompt/system.md
- * 读不到返回 null：loop 照常运行，只是没有系统提示（不硬失败）。
+ * T6/T12：main/core 读入装配、renderer 不拼。候选顺序：
+ *  1. SOULFORGE_SYSTEM_PROMPT_PATH（显式覆盖，仅 system.md）
+ *  2. 打包 extraResources：process.resourcesPath/prompt/*
+ *  3. dev 仓库根：app.getAppPath()（dev = apps/desktop）上两级 → repo/prompt/*
+ * 生产不再加载 agent-task-record.md；历史台账文件仅供用户查看，不授予权限。
+ * 读不到 system.md 返回 null：loop 照常运行，只是没有系统提示（不硬失败）。
  */
 function readSystemPrompt(): string | null {
-  const candidates = [
+  const systemCandidates = [
     process.env.SOULFORGE_SYSTEM_PROMPT_PATH,
     join(process.resourcesPath, 'prompt', 'system.md'),
     resolve(app.getAppPath(), '..', '..', 'prompt', 'system.md')
   ].filter((candidate): candidate is string => typeof candidate === 'string' && candidate.length > 0);
-  for (const candidate of candidates) {
+  let system: string | null = null;
+  for (const candidate of systemCandidates) {
     try {
-      return readFileSync(candidate, 'utf8');
+      system = readFileSync(candidate, 'utf8');
+      break;
     } catch {
       // try next candidate
     }
   }
-  return null;
+  const safetyCandidates = [
+    join(process.resourcesPath, 'prompt', 'native-read-safety.md'),
+    resolve(app.getAppPath(), '..', '..', 'prompt', 'native-read-safety.md')
+  ];
+  let safety: string | null = null;
+  for (const candidate of safetyCandidates) {
+    try {
+      safety = readFileSync(candidate, 'utf8');
+      break;
+    } catch {
+      // optional companion prompt
+    }
+  }
+  if (system === null) return safety;
+  if (safety === null || safety.trim() === '') return system;
+  return `${system}\n\n---\n\n${safety}`;
 }
 
 function agentTaskRecordDirectory(): string {
@@ -970,6 +991,7 @@ function currentToolContext(): ToolContext {
   const rag = getWorkspaceRag();
   const storage = session ? durableStoragePaths(session.meta.workspaceId) : undefined;
   const memoryStore = memoryManager.getStore(index?.workspaceId);
+  const knowledgeStore = session ? getKnowledgeStore(session) : undefined;
   return {
     workspaceIndex: index,
     mode: activeAiMode,
@@ -978,9 +1000,38 @@ function currentToolContext(): ToolContext {
     ...(session ? { session } : {}),
     ...(activeOperationLog ? { operationLogStore: activeOperationLog } : {}),
     ...(storage ? { backupBaseDir: storage.backupBaseDir, recoveryDir: storage.recoveryDir } : {}),
+    ...(knowledgeStore ? { knowledgeStore } : {}),
+    // Workspace-scoped proof boundary for non-run tool paths (UI/CLI adapters).
+    // Agent runs override with principal-isolated CoreToolSession.
+    ...(index?.workspaceId
+      ? {
+          proofPrincipal: `desktop-ws:${index.workspaceId}`,
+          requireProofBoundary: false
+        }
+      : {}),
     onSemanticEvidenceUpdated: refreshActiveIndexAfterSemanticEvidence,
     onNativeWriteCommitted: refreshActiveIndexAfterNativeWrite
   };
+}
+
+function getKnowledgeStore(session: WorkspaceSession): SqliteKnowledgeStore | undefined {
+  const workspaceId = session.meta.workspaceId;
+  const existing = knowledgeStores.get(workspaceId);
+  if (existing) return existing;
+  try {
+    const storage = durableStoragePaths(workspaceId, session.layers.overlayRoot);
+    const store = openSqliteKnowledgeStore({
+      databasePath: join(storage.root, 'workspace.db'),
+      workspaceId,
+      rootPath: session.layers.overlayRoot,
+      game: session.meta.game
+    });
+    knowledgeStores.set(workspaceId, store);
+    return store;
+  } catch (error) {
+    console.warn(`[SoulForge KnowledgeStore] 打开失败：${error instanceof Error ? error.message : String(error)}`);
+    return undefined;
+  }
 }
 
 async function persistActiveRag(

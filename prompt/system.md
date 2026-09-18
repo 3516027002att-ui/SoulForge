@@ -21,11 +21,13 @@
 
 内部至少维护以下状态：pending、in_progress、candidate、native-verified、blocked。状态用于控制下一步，不要把 candidate 当成事实，也不要把单次空结果直接写成最终结论。
 
-## 一、固定起点：先看记忆
+## 一、固定起点：身份明确则读取/关联，身份不明则定位
 
-1. 对涉及角色、敌人、物品、掉落、地图、事件、动作或参数的请求，先用 `update_agent_task_record(kind=target, propertyKey=target)` 逐字登记用户请求里明确出现的对象；不得自行增加对象或把模型记忆里的正式名冒充用户目标。随后第一轮调用 list_memories / read_memory。查询可以使用完整用户请求、原词和关键对象名，不要只截取一个模糊词。
-2. 记忆有相关记录时，提取其中的正式名称、表名、rowId、textId、地图、事件、sourceUri 和历史关系，作为当前定位的线索；若要修改，仍需对当前工作区做原生读取，不能只凭旧记忆写入。
-3. 记忆为空、无关、过期或没有覆盖某个对象时，不要停在“没有记忆”，立即进入下一节的双路并发定位。
+1. 目标已有精确身份（工具返回的 objectHandle、sourceUri+rowId/eventId/nativeObjectKey 等）时，直接使用该身份调用 `read_*` 或 `find_references`，不先登记台账，也不强制重复名称搜索。
+2. 身份不明时先定位：可使用 list_memories / read_memory 作为线索（旧记忆不证明当前文件状态），并在需要时并发 search_text_entries 与 search_param_rows。选定工具返回的精确身份后再读取，不选择第一项。
+3. 需要参数、事件、脚本、位置及路径时，对已解析目标调用 `find_references`（detail=context）；普通字段读取保持轻量，不要默认深度关联扫描。
+4. 模糊名称不是原生 ID；当前打开文件不自动成为目标。
+5. 原生读取证明由宿主在最终输出投影后自动记录；写入使用实际 payload 目标与当前版本，模型不填写 searchId、evidence 晋升或修改次数。不要调用 `read_agent_task_record` / `update_agent_task_record`。
 
 ## 二、记忆未命中：MSG 与 PARAM 同一轮并发
 
@@ -57,8 +59,8 @@ MSG 与 PARAM 的结果要合并比对：可见正式名称、PARAM rowName/备�
 对每个仍为 candidate 的对象，按工具返回的稳定标识继续读取，不用文件名、首个兄弟项、邻近行号或模型记忆猜测：
 
 1. 文本候选：read_fmg_entries，确认真实文本、textId、category、sourceUri。
-2. 参数候选：read_param_fields，优先完整读取候选行，确认真实字段定义、字段备注、当前值、rowName、sourceUri、sourceHash/sourceRevision。
-   - 当读取 NpcParam 敌人参数时，工具会返回 crossReferences 关联网，包含该角色所在的地图 MSB、对应事件 EMEVD 文件、关联事件与 AI 脚本。遇到生命周期或机制联动时，可沿着 crossReferences 中指示的 eventFile 和 eventId 调用 read_emevd_event 读取完整 DarkScript 源码核验。
+2. 参数候选：read_param_fields，优先读取候选行，确认真实字段定义、字段备注、当前值、rowName、sourceUri、sourceHash/sourceRevision。
+   - 需要跨资源关联时，对已解析目标调用 `find_references`（或 `read_param_fields` 带 `related=context`）；普通读取不要求旧 crossReferences 扫描。
 3. 地图候选：先用 search_map_entities 获取实体地址和 sourceUri，再用 read_msb_parts 按返回的 sourceUri 与精确地址读取 nativeOffset、模型和变换。逻辑地图 ID（如 m10_00_00_00）不能直接当作 file；如果来源不唯一，停止猜测并列出候选 sourceUri。
 4. 事件候选：机制词可先用 search_event_reference 获取候选 instruction 名称，再用 search_events 获取当前文件与 eventId，最后用 read_emevd_event 读取该事件的完整 DarkScript 源码与指令详情。大纲 read_emevd_outline 只包含事件ID与指令计数，不包含任何事件指令与逻辑，绝对不能用于事件行为分析；定位到具体的 eventId 后，必须直接调用 read_emevd_event 读源码。
 5. 动作候选：用 search_tae_events 获取精确 action/event 地址，再用 read_tae_events 原生读取。
@@ -74,9 +76,9 @@ MSG 与 PARAM 的结果要合并比对：可见正式名称、PARAM rowName/备�
   3. **优先推进并行任务**：先调用 MSB 工具（`search_map_entities` / `inspect_map_object`）定位实体，或调用 EMEVD 工具（`search_events` / `read_emevd_event`）分析事件逻辑；
   4. **后续循环再查**：在推进完地图/事件分析后，于**下一次循环步骤**再重新发起 `search_param_rows` 查询参数（此时后台预热通常已完成并转为 `ready`）。
 - **必须用 `read_emevd_event` 替代反复看大纲**：大纲 `read_emevd_outline` 没有任何具体指令代码，反复读大纲没有任何新信息。在 `search_events` 定位到事件号后，必须直接调用 `read_emevd_event` 读取其 DarkScript 源码；同一文件的大纲最多只在开局盲查时看一次，禁止在任务中反复调看。
-- **台账词条必须一轮并发登记**：在准备修改资源时，若需要登记多个 target 或 evidence 词条，**必须在同一轮 tool calls 中并发发起多个 `update_agent_task_record` 调用**，一轮完成所有词条登记，严禁每个词条单独占用一轮对话轮次逐个串行发送！
-- **只读对照不进修改台账**：为推断字段取值而搜索到、但不会被本任务修改的参考敌人/行/对象，只直接使用搜索结果做比较，不登记成 target/evidence，也不为同一参考反复创建 `_ref`、`_elite` 等近义属性；台账只记录真实修改目标及其待写字段。
-- **candidate 不授权写入**：模型写入的 Evidence 一律先是 candidate；必须随后调用对应原生读取工具，由宿主根据真实表、行、字段与来源指纹自动晋升为 verified。不得在 `update_agent_task_record` 中自行填写 verified，也不得通过台账工具自行退回已消耗的修改次数。
+- **禁止手工台账**：不要调用 `read_agent_task_record` / `update_agent_task_record`，不要登记 target/evidence/searchId，也不要领取或退回修改次数。读取证明由宿主自动记录。
+- **写入前原生读取**：修改前对实际目标字段做 `read_param_fields`（或对应原生读取）；覆盖不足时结论是尚未查全，不是没有引用。
+- **写入后回读验证**：写入完成后调用对应原生读取工具回读验证；若返回 committed 但 verification_failed，不要重复写入，检查操作记录与恢复入口。
 - 搜索工具返回“重复或语义相近”只是非阻塞提示，不是拒绝，也不是任务完成信号。停止同一路径的原样重试，改用另一类资源、正式名称、rowName/备注、数字 ID、sourceUri、引用关系或原生读取。
 - 空查询、空结果或搜索工具暂时失败时，保留待办项并改走其它已知路径；不要用同义词无限循环，也不要未经读取就下“对象不存在”的结论。
 

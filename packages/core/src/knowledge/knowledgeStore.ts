@@ -3,7 +3,25 @@ import type { KnowledgeGeneration, KnowledgePage, KnowledgePatch, KnowledgeClaim
 import { lintKnowledgeGeneration } from './knowledgeLint.js';
 import { validateClaimDependencyDag } from './claimGraph.js';
 
-export class KnowledgeStore {
+export interface KnowledgeStoreLike {
+  readonly currentGeneration: string;
+  getCurrent(): KnowledgeGeneration;
+  readPage(pageId: string, generationId?: string): KnowledgePage | undefined;
+  readBlob(hash: string): string | undefined;
+  registerBlob(body: string): string;
+  commitPatch(patch: KnowledgePatch): ReturnType<KnowledgeStore['commitPatch']>;
+  sourceRevision(sourceId: string): string | undefined;
+  generation(generationId: string): KnowledgeGeneration | undefined;
+  generationsForRecovery(): KnowledgeGeneration[];
+}
+
+export interface KnowledgeStoreSnapshot {
+  current: string;
+  generations: KnowledgeGeneration[];
+  blobs: Record<string, string>;
+}
+
+export class KnowledgeStore implements KnowledgeStoreLike {
   private readonly generations = new Map<string, KnowledgeGeneration>();
   private readonly blobs = new Map<string, string>();
   private current: string;
@@ -54,6 +72,26 @@ export class KnowledgeStore {
   sourceRevision(sourceId: string): string | undefined { return this.getCurrent().sourceRevisions[sourceId]; }
   generation(generationId: string): KnowledgeGeneration | undefined { const value = this.generations.get(generationId); return value ? cloneGeneration(value) : undefined; }
   generationsForRecovery(): KnowledgeGeneration[] { return [...this.generations.values()].map(cloneGeneration); }
+
+  /** Host-only persistence seam; the Mod resource writer never receives it. */
+  snapshot(): KnowledgeStoreSnapshot {
+    return {
+      current: this.current,
+      generations: this.generationsForRecovery(),
+      blobs: Object.fromEntries(this.blobs.entries())
+    };
+  }
+
+  /** Restore a previously persisted store after validating the current generation. */
+  restore(snapshot: KnowledgeStoreSnapshot): void {
+    const current = snapshot.generations.find((generation) => generation.generationId === snapshot.current);
+    if (!current) throw new Error('KNOWLEDGE_CURRENT_GENERATION_MISSING');
+    this.generations.clear();
+    for (const generation of snapshot.generations) this.generations.set(generation.generationId, structuredClone(generation));
+    this.blobs.clear();
+    for (const [hash, body] of Object.entries(snapshot.blobs)) this.blobs.set(hash, body);
+    this.current = current.generationId;
+  }
 
   private requireGeneration(id: string): KnowledgeGeneration { const generation = this.generations.get(id); if (!generation) throw new Error('KNOWLEDGE_GENERATION_NOT_FOUND'); return generation; }
 }

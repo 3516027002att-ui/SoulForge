@@ -165,7 +165,7 @@ function abs(path) {
   return isAbsolute(path) ? path : resolve(process.cwd(), path);
 }
 
-async function hydrateSemanticCache(index, workspaceRoot, log) {
+async function hydrateSemanticCache(index, workspaceRoot, log, loadSymbolBundleIntoIndex) {
   const dbPath = join(workspaceRoot, '.soulforge', 'workspace.db');
   if (!existsSync(dbPath)) {
     log(`语义缓存不存在，跳过: ${dbPath}`);
@@ -182,33 +182,49 @@ async function hydrateSemanticCache(index, workspaceRoot, log) {
   try {
     const rows = db
       .prepare(
-        `SELECT relative_path, file_sha256, payload_json
+        `SELECT relative_path, file_sha256, mtime_ms, resource_kind, payload_json
            FROM semantic_file_cache
           WHERE resource_kind IN ('param','msg','event','map')`
       )
       .all();
     let loaded = 0;
+    let stale = 0;
     for (const row of rows) {
       try {
+        const file = index.getFiles().find((candidate) => candidate.relativePath === String(row.relative_path));
+        if (!file || !file.sha256 || String(row.file_sha256).toLowerCase() !== file.sha256.toLowerCase()
+          || Number(row.mtime_ms) !== Number(file.mtimeMs)) {
+          stale += 1;
+          log(`缓存身份过期，等待重新分析: ${row.relative_path}`);
+          continue;
+        }
         const payload = JSON.parse(String(row.payload_json));
-        const { loadSymbolBundleIntoIndex, isNativeSemanticBundleCurrent } = await import(
-          pathToFileURL(CORE_DIST).href
-        );
-        // Prefer param/msg payloads; full bundle currentness is best-effort for CLI.
         if (payload && typeof payload === 'object') {
-          loadSymbolBundleIntoIndex(index, payload);
+          const proven = stampCacheProvenance(payload, file.sha256, file.mtimeMs);
+          loadSymbolBundleIntoIndex(index, proven);
           loaded += 1;
-          void row.file_sha256;
-          void isNativeSemanticBundleCurrent;
         }
       } catch (error) {
         log(`水合失败 ${row.relative_path}: ${error instanceof Error ? error.message : String(error)}`);
       }
     }
-    return loaded;
+    return { loaded, stale };
   } finally {
     try { db.close(); } catch { /* ignore */ }
   }
+}
+
+function stampCacheProvenance(payload, outerFileHash, sourceRevision) {
+  const stamp = (value) => value && typeof value === 'object'
+    ? { ...value, outerFileHash: value.outerFileHash ?? outerFileHash, sourceRevision: value.sourceRevision ?? sourceRevision }
+    : value;
+  return {
+    ...(payload.events ? { events: payload.events.map((item) => ({ ...stamp(item), events: (item.events ?? []).map(stamp) })) } : {}),
+    ...(payload.maps ? { maps: payload.maps.map((item) => ({ ...stamp(item), entities: (item.entities ?? []).map(stamp), regions: (item.regions ?? []).map(stamp) })) } : {}),
+    ...(payload.params ? { params: payload.params.map((item) => ({ ...stamp(item), rows: (item.rows ?? []).map((row) => ({ ...stamp(row), fields: row.fields })) })) } : {}),
+    ...(payload.msgs ? { msgs: payload.msgs.map((item) => ({ ...stamp(item), entries: (item.entries ?? []).map(stamp) })) } : {}),
+    ...(payload.tae ? { tae: payload.tae.map((item) => ({ ...stamp(item), animations: (item.animations ?? []).map((animation) => ({ ...stamp(animation), events: (animation.events ?? []).map(stamp) })) })) } : {})
+  };
 }
 
 async function main() {
@@ -230,6 +246,11 @@ async function main() {
     createDefaultToolRegistry,
     createAgentToolBridge,
     MemoryOperationLogStore,
+    openSqliteOperationLogStore,
+    openSqliteKnowledgeStore,
+    nativeEditSessionFromContext,
+    createCoreToolSession,
+    createWorkspaceReferenceRuntime,
     disposeBridgeDaemonPool,
     analyzeWorkspace,
     loadSymbolBundleIntoIndex
@@ -251,7 +272,7 @@ async function main() {
   const scan = await scanWorkspace({
     workspaceRoot: session.layers.overlayRoot,
     game: session.meta.game,
-    includeContentHashes: false
+    includeContentHashes: true
   });
   const index = new WorkspaceIndex(session.meta.workspaceId);
   index.setFiles(scan.files);
@@ -262,7 +283,7 @@ async function main() {
 
   if (options.useCache) {
     const cached = await hydrateSemanticCache(index, workspaceRoot, log, loadSymbolBundleIntoIndex);
-    log(`语义缓存水合载荷 ${cached} 条`);
+    log(`语义缓存水合载荷 ${cached.loaded} 条，过期 ${cached.stale} 条`);
   }
   if (index.getStats().paramRows > 0) {
     index.setParamSemanticState('ready');
@@ -294,6 +315,22 @@ async function main() {
     log(`分析完成: files=${analyzed.parsedFiles}, paramRows=${activeIndex.getStats().paramRows}`);
   }
 
+  const databasePath = join(workspaceRoot, '.soulforge', 'workspace.db');
+  let operationLogStore;
+  try {
+    operationLogStore = openSqliteOperationLogStore({
+      databasePath,
+      workspaceId: session.meta.workspaceId,
+      rootPath: workspaceRoot,
+      game: session.meta.game
+    });
+  } catch (error) {
+    // A read-only CLI session is still useful, but never silently uses an
+    // in-memory journal for a write-capable workspace.
+    log(`持久化 operation log 不可用，当前会话降级为只读：${error instanceof Error ? error.message : String(error)}`);
+    operationLogStore = new MemoryOperationLogStore();
+    options.mode = 'plan';
+  }
   const storageRoot = join(workspaceRoot, '.soulforge-staging');
   const backupBaseDir = join(storageRoot, 'backups');
   const recoveryDir = join(storageRoot, 'recovery');
@@ -301,8 +338,40 @@ async function main() {
   await mkdir(backupBaseDir, { recursive: true });
   await mkdir(recoveryDir, { recursive: true });
   await mkdir(stagingRoot, { recursive: true });
-
-  const operationLogStore = new MemoryOperationLogStore();
+  const editSession = nativeEditSessionFromContext({
+    session,
+    operationLog: operationLogStore,
+    backupBaseDir,
+    recoveryDir,
+    stagingRoot
+  });
+  const referenceRuntime = createWorkspaceReferenceRuntime({
+    workspaceIndex: activeIndex,
+    workspaceId: session.meta.workspaceId,
+    editSession
+  });
+  let knowledgeStore;
+  try {
+    knowledgeStore = openSqliteKnowledgeStore({
+      databasePath,
+      workspaceId: session.meta.workspaceId,
+      rootPath: workspaceRoot,
+      game: session.meta.game
+    });
+  } catch (error) {
+    log(`KnowledgeStore 不可用，知识查询将明确失败：${error instanceof Error ? error.message : String(error)}`);
+  }
+  const coreSession = createCoreToolSession({
+    principal: 'sfcli',
+    workspaceId: session.meta.workspaceId,
+    session,
+    editSession,
+    workspaceIndex: activeIndex,
+    operationLog: operationLogStore,
+    modeCeiling: options.mode === 'plan' || options.mode === 'fullPermission' ? options.mode : 'normal',
+    referenceRuntime,
+    ...(knowledgeStore ? { knowledgeStore } : {})
+  });
   const registry = createDefaultToolRegistry();
   const context = {
     workspaceIndex: activeIndex,
@@ -312,7 +381,13 @@ async function main() {
     session,
     operationLogStore,
     backupBaseDir,
-    recoveryDir
+    recoveryDir,
+    editSession,
+    coreSession,
+    referenceService: coreSession.referenceService,
+    requireProofBoundary: false,
+    proofPrincipal: 'sfcli',
+    ...(knowledgeStore ? { knowledgeStore } : {})
   };
 
   const bridge = createAgentToolBridge({
@@ -322,6 +397,9 @@ async function main() {
   });
 
   const finish = async (code = 0) => {
+    try { coreSession.close(); } catch { /* ignore */ }
+    try { knowledgeStore?.close?.(); } catch { /* ignore */ }
+    try { operationLogStore.close?.(); } catch { /* ignore */ }
     try { await disposeBridgeDaemonPool(); } catch { /* ignore */ }
     process.exit(code);
   };

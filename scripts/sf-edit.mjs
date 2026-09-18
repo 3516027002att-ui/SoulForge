@@ -1,304 +1,344 @@
 #!/usr/bin/env node
 /**
- * Thin CLI for Agent native edits. Logic lives in @soulforge/core.
+ * CLI thin client entry (single-shot + session/batch aware).
+ * Logic lives in @soulforge/core; this process maps argv → production tools.
  *
- *   node scripts/sf-edit.mjs param read|set ...
- *   node scripts/sf-edit.mjs fmg   read|set ...
- *   node scripts/sf-edit.mjs emevd read|apply-dsl ...
- *   node scripts/sf-edit.mjs tae   read|set --file chr/c1050.anibnd.dcx --set c1050#A0200.e0.startFrame=438
- *   node scripts/sf-edit.mjs msb   read|set --file map/m11_01_00_00/m11_01_00_00.msb.dcx --set m11_01_00_00#c1050_0000@0x123456.posX=12.5
+ *   node scripts/sf-edit.mjs param read --table T --row-id 1 --field hp --workspace <overlay>
+ *   node scripts/sf-edit.mjs tool <toolName> --json '{...}'
+ *   node scripts/sf-edit.mjs batch --file <path>
+ *   node scripts/sf-edit.mjs session status|close
+ *   node scripts/sf-edit.mjs session --stdio
  */
+import { createInterface } from 'node:readline';
 import { readFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
-import { disposeBridgeDaemonPool } from '../packages/core/dist/bridge/runBridge.js';
-import { applyEmevdDsl, readEmevdOutline } from '../packages/core/dist/editing/emevdEdit.js';
-import { openNativeEditSession } from '../packages/core/dist/editing/nativeEditSession.js';
-import { readFmgEntries, setFmgEntries } from '../packages/core/dist/editing/fmgEdit.js';
-import { readParamFields, setParamFields } from '../packages/core/dist/param/containerParamEdit.js';
-import { readTaeEvents, setTaeEventTimes } from '../packages/core/dist/editing/taeEdit.js';
-import { readMsbParts, setMsbPartTransform } from '../packages/core/dist/editing/msbEdit.js';
+import { randomBytes } from 'node:crypto';
+import { parseNativeCommand } from '../packages/core/dist/cli/nativeCommandAdapter.js';
+import { validateBatchFile, dispatchBatch, formatBatchSummary } from '../packages/core/dist/cli/batchDispatcher.js';
+import { createLocalSessionHost } from '../packages/core/dist/cli/localSessionHost.js';
 
-const PARAM_SET_RE = /^([^#]+)#(\d+)\.([A-Za-z0-9_]+)=(.*)$/u;
-const FMG_SET_RE = /^([^#]+)#(\d+)=(.*)$/u;
-const TAE_SET_RE = /^(c\d{4}#A\d+\.e\d+)\.([A-Za-z0-9_]+)=(.*)$/u;
-const MSB_SET_RE = /^(m\d{2}_\d{2}_\d{2}_\d{2}#[^@.\s]+)@((?:0x)?[0-9a-f]+)\.([A-Za-z0-9_]+)=(.*)$/iu;
-const TAE_SETTABLE_FIELDS = ['startFrame', 'endFrame'];
-const MSB_TRANSFORM_FIELDS = ['posX', 'posY', 'posZ', 'rotX', 'rotY', 'rotZ', 'scaleX', 'scaleY', 'scaleZ'];
+const STDIO_MAX_FRAME_BYTES = 4 * 1024 * 1024;
+const STDIO_QUEUE_LIMIT = 64;
 
-function fail(code, message, extra) {
-  console.log(JSON.stringify({ ok: false, error: { code, message }, ...extra }, null, 2));
-  process.exitCode = 1;
+function emit(payload) {
+  process.stdout.write(`${JSON.stringify(payload, null, 2)}\n`);
 }
 
-function argMap(argv) {
-  const flags = new Map();
-  const rest = [];
-  for (let i = 0; i < argv.length; i += 1) {
-    const token = argv[i];
-    if (token === '--') {
-      rest.push(...argv.slice(i + 1));
-      break;
-    }
-    if (token.startsWith('--')) {
-      const key = token.slice(2);
-      const next = argv[i + 1];
-      if (next === undefined || next.startsWith('--')) {
-        flags.set(key, true);
-      } else {
-        const existing = flags.get(key);
-        flags.set(key, existing === undefined ? next : [].concat(existing, next));
-        i += 1;
-      }
-      continue;
-    }
-    rest.push(token);
+/** Never print session tokens / credentials to stdout. */
+function sanitizeForStdout(value) {
+  if (value === null || value === undefined) return value;
+  if (typeof value === 'string') return value;
+  try {
+    return JSON.parse(JSON.stringify(value, (key, val) => {
+      if (/token|authorization|password|secret|apiKey|api_key/i.test(key)) return undefined;
+      return val;
+    }));
+  } catch {
+    return value;
   }
-  return { flags, rest };
 }
 
-function asList(value) {
-  if (value === undefined || value === true) return [];
-  const raw = Array.isArray(value) ? value.join(',') : String(value);
-  return raw.split(',').map((item) => item.trim()).filter(Boolean);
-}
-
-function parseValue(raw) {
-  if (raw === 'true') return true;
-  if (raw === 'false') return false;
-  if (raw !== '' && Number.isFinite(Number(raw))) return Number(raw);
-  return raw;
-}
-
-function flagStrings(flags, key) {
-  const raw = flags.get(key);
-  if (raw === undefined || raw === true) return [];
-  return Array.isArray(raw) ? raw.map(String) : [String(raw)];
-}
-
-function parseParamSets(flags) {
-  const edits = [];
-  for (const raw of flagStrings(flags, 'set')) {
-    const match = PARAM_SET_RE.exec(raw);
-    if (!match) {
-      fail('PARAM_SET_SYNTAX', `无法解析 --set ${raw}，格式为 Table#rowId.field=value`);
-      return null;
+async function createRegistryExecutor(mode) {
+  try {
+    const core = await import('../packages/core/dist/index.js');
+    const registry = typeof core.createDefaultToolRegistry === 'function'
+      ? core.createDefaultToolRegistry()
+      : null;
+    if (!registry || typeof registry.run !== 'function') {
+      return async (tool) => ({
+        ok: false,
+        error: {
+          code: 'CLI_REGISTRY_UNAVAILABLE',
+          message: `无法加载 createDefaultToolRegistry；工具 ${tool} 无法在 CLI 会话中执行。`
+        }
+      });
     }
-    edits.push({
-      table: match[1],
-      rowId: Number(match[2]),
-      fieldId: match[3],
-      value: parseValue(match[4])
+    const context = {
+      mode: mode ?? 'normal',
+      requireProofBoundary: true
+    };
+    if (typeof core.NativeReadProofStore === 'function') {
+      context.nativeReadProofs = new core.NativeReadProofStore({ generation: 0 });
+    }
+    return async (tool, args) => {
+      if (typeof tool !== 'string' || tool.startsWith('session_')) {
+        return {
+          ok: false,
+          error: {
+            code: 'CLI_SESSION_CONTROL',
+            message: `会话控制工具 ${tool} 由 stdio host 处理，不进入 ToolRegistry。`
+          }
+        };
+      }
+      try {
+        return await registry.run(tool, args ?? {}, context);
+      } catch (error) {
+        return {
+          ok: false,
+          error: {
+            code: 'CLI_TOOL_EXCEPTION',
+            message: error instanceof Error ? error.message : String(error)
+          }
+        };
+      }
+    };
+  } catch (error) {
+    return async (tool) => ({
+      ok: false,
+      error: {
+        code: 'CLI_REGISTRY_UNAVAILABLE',
+        message: `加载 @soulforge/core 失败，工具 ${tool} 无法执行：${error instanceof Error ? error.message : String(error)}`
+      }
     });
   }
-  return edits;
 }
 
-function parseFmgSets(flags) {
-  const edits = [];
-  for (const raw of flagStrings(flags, 'set')) {
-    const match = FMG_SET_RE.exec(raw);
-    if (!match) {
-      fail('FMG_SET_SYNTAX', `无法解析 --set ${raw}，格式为 Table#id=文本`);
-      return null;
+function createNdjsonStdinReader({ maxFrameBytes, queueLimit, onFrame, onError }) {
+  const queue = [];
+  let paused = false;
+  let closed = false;
+  let pending = '';
+
+  const rl = createInterface({ input: process.stdin, crlfDelay: Infinity });
+
+  const pump = async () => {
+    while (queue.length > 0 && !closed) {
+      const line = queue.shift();
+      try {
+        await onFrame(line);
+      } catch (error) {
+        onError?.(error);
+      }
     }
-    edits.push({ table: match[1], id: Number(match[2]), text: match[3] });
+    if (paused && queue.length < queueLimit) {
+      paused = false;
+      rl.resume();
+    }
+  };
+
+  rl.on('line', (line) => {
+    if (Buffer.byteLength(line, 'utf8') > maxFrameBytes) {
+      onError?.(new Error(`CLI_STDIO_FRAME_TOO_LARGE: frame exceeds ${maxFrameBytes} bytes`));
+      return;
+    }
+    pending = '';
+    queue.push(line);
+    if (queue.length >= queueLimit && !paused) {
+      paused = true;
+      rl.pause();
+    }
+    void pump();
+  });
+
+  rl.on('close', () => {
+    closed = true;
+    void pump();
+  });
+
+  return {
+    waitForClose: () => new Promise((resolveClose) => {
+      if (closed && queue.length === 0) resolveClose();
+      else rl.once('close', () => { void pump().then(resolveClose); });
+    }),
+    close: () => { closed = true; rl.close(); }
+  };
+}
+
+async function runSessionStdio(parsed) {
+  // Token stays host-side; never printed to stdout.
+  const sessionToken = randomBytes(32).toString('base64url');
+  const sessionKey = process.env.SOULFORGE_CLI_SESSION_KEY
+    ?? `cli-stdio-${randomBytes(8).toString('hex')}`;
+  const executor = await createRegistryExecutor(parsed?.mode);
+  const hostOptions = {
+    sessionKey,
+    modeCeiling: parsed?.mode ?? 'normal',
+    execute: executor
+  };
+  if (process.env.SOULFORGE_CLI_OPERATION_LOG_DB) {
+    hostOptions.databasePath = process.env.SOULFORGE_CLI_OPERATION_LOG_DB;
+    hostOptions.workspaceId = process.env.SOULFORGE_CLI_WORKSPACE_ID ?? sessionKey;
+    hostOptions.rootPath = process.env.SOULFORGE_CLI_WORKSPACE_ROOT ?? process.cwd();
+    hostOptions.openSqlite = true;
   }
-  return edits;
-}
-
-function parseTaeSets(flags) {
-  const edits = [];
-  for (const raw of flagStrings(flags, 'set')) {
-    const match = TAE_SET_RE.exec(raw);
-    if (!match) {
-      fail('TAE_SET_SYNTAX', `无法解析 --set ${raw}，格式为 cXXXX#AXXXX.eN.startFrame=帧`);
-      return null;
-    }
-    const field = match[2];
-    if (!TAE_SETTABLE_FIELDS.includes(field)) {
-      fail('TAE_SET_FIELD_READONLY', `TAE 门面只开放 ${TAE_SETTABLE_FIELDS.join(' / ')}（未解码参数不开放 set）：${field}`);
-      return null;
-    }
-    edits.push({ address: match[1], [field]: Number(match[3]) });
+  let host;
+  try {
+    host = createLocalSessionHost(hostOptions);
+  } catch (error) {
+    const code = typeof error?.code === 'string' ? error.code : 'CLI_SESSION_HOST_FAILED';
+    emit({
+      ok: false,
+      error: {
+        code,
+        message: error instanceof Error ? error.message : String(error)
+      }
+    });
+    process.exitCode = 1;
+    return;
   }
-  return edits;
-}
+  host.setExecutor(executor);
 
-function parseMsbSets(flags) {
-  const edits = [];
-  for (const raw of flagStrings(flags, 'set')) {
-    const match = MSB_SET_RE.exec(raw);
-    if (!match) {
-      fail('MSB_SET_SYNTAX', `无法解析 --set ${raw}，格式为 mAA_BB_CC_DD#part@nativeOffset.posX=值（nativeOffset 支持十进制或 0x 十六进制）`);
-      return null;
-    }
-    const nativeOffset = Number(match[2]);
-    if (!Number.isSafeInteger(nativeOffset) || nativeOffset < 0) {
-      fail('MSB_NATIVE_OFFSET_INVALID', `--set 的 nativeOffset 必须是非负安全整数：${match[2]}`);
-      return null;
-    }
-    const field = match[3];
-    if (!MSB_TRANSFORM_FIELDS.includes(field)) {
-      fail('MSB_SET_FIELD_UNKNOWN', `MSB 门面只接受变换字段 ${MSB_TRANSFORM_FIELDS.join(' / ')}：${field}`);
-      return null;
-    }
-    edits.push({ address: match[1], nativeOffset, [field]: Number(match[4]) });
-  }
-  return edits;
-}
+  let finishing = false;
+  const finish = () => {
+    if (finishing) return;
+    finishing = true;
+    try { host.close(); } catch { /* ignore */ }
+    // Ensure the process exits after stdin closes.
+    setTimeout(() => process.exit(process.exitCode ?? 0), 10).unref?.();
+  };
 
-function printResult(result) {
-  console.log(JSON.stringify(result, null, 2));
-  if (!result.ok) process.exitCode = 1;
+  const writeLine = (payload) => {
+    process.stdout.write(`${JSON.stringify(sanitizeForStdout(payload))}\n`);
+  };
+
+  const reader = createNdjsonStdinReader({
+    maxFrameBytes: STDIO_MAX_FRAME_BYTES,
+    queueLimit: STDIO_QUEUE_LIMIT,
+    onFrame: async (line) => {
+      const trimmed = line.trim();
+      if (!trimmed) return;
+      let frame;
+      try {
+        frame = JSON.parse(trimmed);
+      } catch {
+        writeLine({
+          ok: false,
+          error: { code: 'CLI_STDIO_FRAME_INVALID', message: 'stdin NDJSON 帧不是合法 JSON。' }
+        });
+        return;
+      }
+      const id = typeof frame?.id === 'string' ? frame.id : `req-${Date.now()}`;
+      const tool = typeof frame?.tool === 'string' ? frame.tool : '';
+      const args = frame?.args && typeof frame.args === 'object' && !Array.isArray(frame.args)
+        ? frame.args
+        : {};
+      if (tool === 'session_close' || tool === 'session_exit') {
+        writeLine({ id, ok: true, data: { command: tool, status: 'closed' } });
+        finish();
+        return;
+      }
+      if (tool === 'session_status') {
+        writeLine({
+          id,
+          ok: true,
+          data: {
+            command: tool,
+            sessionKey,
+            instanceId: host.instanceId,
+            modeCeiling: host.modeCeiling,
+            closed: host.isClosed()
+          }
+        });
+        return;
+      }
+      if (!tool) {
+        writeLine({ id, ok: false, error: { code: 'CLI_TOOL_NAME_REQUIRED', message: 'NDJSON 帧缺少 tool。' } });
+        return;
+      }
+      const result = await host.handleRequest({ id, tool, args });
+      writeLine({ id, result: sanitizeForStdout(result) });
+    },
+    onError: (error) => {
+      writeLine({
+        ok: false,
+        error: {
+          code: typeof error?.code === 'string' ? error.code : 'CLI_STDIO_ERROR',
+          message: error instanceof Error ? error.message : String(error)
+        }
+      });
+    }
+  });
+
+  await reader.waitForClose();
+  finish();
 }
 
 async function main() {
   const argv = process.argv.slice(2);
-  const kind = argv[0];
-  const action = argv[1];
-  const { flags } = argMap(argv.slice(2));
-  const usage = '用法: node scripts/sf-edit.mjs param|fmg|emevd|tae|msb <read|set|apply-dsl> --workspace <mods> ...';
-  const kindOk = ['param', 'fmg', 'emevd', 'tae', 'msb'].includes(kind);
-  const actionOk = kind === 'emevd'
-    ? (action === 'read' || action === 'apply-dsl')
-    : (action === 'read' || action === 'set');
-  if (!kindOk || !actionOk) {
-    fail('SF_EDIT_USAGE', usage);
+  const parsed = parseNativeCommand(argv);
+  if (!parsed.ok) {
+    emit({ ok: false, error: { code: parsed.code, message: parsed.message } });
+    process.exitCode = 1;
     return;
   }
-  const workspace = flags.get('workspace');
-  if (typeof workspace !== 'string' || workspace.length === 0) {
-    fail('SF_EDIT_WORKSPACE_REQUIRED', '必须提供 --workspace。');
-    return;
-  }
-  const edit = await openNativeEditSession({
-    overlayRoot: resolve(workspace),
-    ...(typeof flags.get('game') === 'string' ? { baseRoot: resolve(String(flags.get('game'))) } : {}),
-    game: 'sekiro'
-  });
-  const containerPath = typeof flags.get('container') === 'string' ? resolve(String(flags.get('container'))) : undefined;
-  const lang = typeof flags.get('lang') === 'string' ? String(flags.get('lang')) : undefined;
 
-  if (kind === 'param' && action === 'read') {
-    const table = flags.get('table');
-    const rows = asList(flags.get('rows')).map(Number).filter((id) => Number.isInteger(id));
-    const fields = asList(flags.get('fields'));
-    if (typeof table !== 'string' || rows.length === 0 || fields.length === 0) {
-      fail('SF_EDIT_READ_ARGS', 'param read 需要 --table --rows --fields。');
-      return;
-    }
-    printResult(await readParamFields({
-      edit,
-      queries: [{ table, rowIds: rows, fieldIds: fields }],
-      ...(containerPath ? { containerPath } : {})
-    }));
+  const sessionEnv = process.env.SOULFORGE_CLI_SESSION === '1';
+
+  if (parsed.tool === 'session_stdio'
+    || (sessionEnv && parsed.tool.startsWith('session_') && parsed.tool !== 'session_status')) {
+    await runSessionStdio(parsed);
     return;
   }
-  if (kind === 'param' && action === 'set') {
-    const edits = parseParamSets(flags);
-    if (!edits) return;
-    if (edits.length === 0) {
-      fail('PARAM_EDIT_EMPTY', 'param set 需要 --set Table#row.field=value');
+
+  if (parsed.tool === 'batch_dispatch') {
+    const raw = JSON.parse(await readFile(resolve(String(parsed.args.file)), 'utf8'));
+    const validated = validateBatchFile(raw);
+    if (!validated.ok) {
+      emit({ ok: false, error: { code: validated.code, message: validated.message } });
+      process.exitCode = 1;
       return;
     }
-    printResult(await setParamFields({ edit, edits, ...(containerPath ? { containerPath } : {}) }));
+    // Endpoint env is a conceptual remote host marker. Even when present this
+    // thin client still runs local validate + dispatch with a registry+proof
+    // executor; it never bypasses the proof boundary.
+    const endpoint = process.env.SOULFORGE_CLI_SESSION_ENDPOINT;
+    const executor = await createRegistryExecutor(parsed.mode);
+    const result = await dispatchBatch({
+      items: validated.items,
+      continueOnError: Boolean(parsed.args.continueOnError),
+      port: {
+        execute: async (tool, args) => executor(tool, args)
+      }
+    });
+    emit({
+      ...result,
+      endpoint: endpoint ? { configured: true } : { configured: false },
+      summaryText: formatBatchSummary(result)
+    });
+    process.stdout.write(`${formatBatchSummary(result)}\n`);
+    if (!result.ok) process.exitCode = 1;
     return;
   }
-  if (kind === 'fmg' && action === 'read') {
-    const table = flags.get('table');
-    const ids = asList(flags.get('ids')).map(Number).filter((id) => Number.isInteger(id));
-    if (typeof table !== 'string' || ids.length === 0) {
-      fail('SF_EDIT_READ_ARGS', 'fmg read 需要 --table --ids。');
-      return;
-    }
-    printResult(await readFmgEntries({
-      edit,
-      table,
-      ids,
-      ...(containerPath ? { containerPath } : {}),
-      ...(lang ? { lang } : {})
-    }));
+
+  if (parsed.tool.startsWith('session_')) {
+    emit({
+      ok: true,
+      data: {
+        command: parsed.tool,
+        sessionName: parsed.sessionName ?? 'default',
+        mode: parsed.mode ?? 'normal',
+        note: '会话控制请使用 `session --stdio` 建立本地 host；本入口不打印 token，也不旁路证明边界。'
+      }
+    });
     return;
   }
-  if (kind === 'fmg' && action === 'set') {
-    const edits = parseFmgSets(flags);
-    if (!edits) return;
-    if (edits.length === 0) {
-      fail('FMG_EDIT_EMPTY', 'fmg set 需要 --set Table#id=文本');
-      return;
-    }
-    printResult(await setFmgEntries({
-      edit,
-      edits,
-      ...(containerPath ? { containerPath } : {}),
-      ...(lang ? { lang } : {})
-    }));
+
+  // Single-shot tool mapping: registry executor when SOULFORGE_CLI_SESSION=1,
+  // otherwise emit the mapped production contract without side effects.
+  if (sessionEnv) {
+    const executor = await createRegistryExecutor(parsed.mode);
+    const result = await executor(parsed.tool, parsed.args);
+    emit(sanitizeForStdout(result));
+    if (result?.ok === false) process.exitCode = 1;
     return;
   }
-  if (kind === 'tae') {
-    const file = flags.get('file');
-    if (typeof file !== 'string' || file.length === 0) {
-      fail('SF_EDIT_FILE_REQUIRED', 'tae 需要 --file（anibnd，如 chr/c1050.anibnd.dcx）。');
-      return;
+
+  emit({
+    ok: true,
+    data: {
+      mappedTool: parsed.tool,
+      args: parsed.args,
+      mode: parsed.mode ?? 'normal',
+      yes: Boolean(parsed.yes),
+      sessionName: parsed.sessionName ?? 'default',
+      note: '已映射到生产工具契约。实际原生读取/写入须经 ToolRegistry + 读取证明门禁；请使用 `session --stdio` 或 SOULFORGE_CLI_SESSION=1。'
     }
-    if (action === 'read') {
-      const addresses = asList(flags.get('addr'));
-      printResult(await readTaeEvents({ edit, file, ...(addresses.length > 0 ? { addresses } : {}) }));
-      return;
-    }
-    const edits = parseTaeSets(flags);
-    if (!edits) return;
-    if (edits.length === 0) {
-      fail('TAE_EDIT_EMPTY', 'tae set 需要 --set cXXXX#AXXXX.eN.startFrame=帧');
-      return;
-    }
-    printResult(await setTaeEventTimes({ edit, file, edits }));
-    return;
-  }
-  if (kind === 'msb') {
-    const file = flags.get('file');
-    if (typeof file !== 'string' || file.length === 0) {
-      fail('SF_EDIT_FILE_REQUIRED', 'msb 需要 --file（msb，如 map/m11_01_00_00/m11_01_00_00.msb.dcx）。');
-      return;
-    }
-    if (action === 'read') {
-      const addresses = asList(flags.get('addr'));
-      printResult(await readMsbParts({ edit, file, ...(addresses.length > 0 ? { addresses } : {}) }));
-      return;
-    }
-    const edits = parseMsbSets(flags);
-    if (!edits) return;
-    if (edits.length === 0) {
-      fail('MSB_EDIT_EMPTY', 'msb set 需要 --set mAA_BB_CC_DD#part@nativeOffset.posX=值');
-      return;
-    }
-    printResult(await setMsbPartTransform({ edit, file, edits }));
-    return;
-  }
-  const file = flags.get('file');
-  if (typeof file !== 'string' || file.length === 0) {
-    fail('SF_EDIT_FILE_REQUIRED', 'emevd 需要 --file。');
-    return;
-  }
-  if (action === 'read') {
-    printResult(await readEmevdOutline({ edit, file }));
-    return;
-  }
-  let dsl = typeof flags.get('dsl') === 'string' ? String(flags.get('dsl')) : '';
-  if (!dsl && typeof flags.get('dsl-file') === 'string') {
-    dsl = await readFile(resolve(String(flags.get('dsl-file'))), 'utf8');
-  }
-  printResult(await applyEmevdDsl({
-    edit,
-    file,
-    dsl,
-    mode: flags.get('mode') === 'dark-script' ? 'dark-script' : 'patch',
-    ...(typeof flags.get('emedf') === 'string' ? { emedfPath: resolve(String(flags.get('emedf'))) } : {})
-  }));
+  });
 }
 
-main()
-  .catch((error) => {
-    fail('SF_EDIT_CRASH', error instanceof Error ? error.stack ?? error.message : String(error));
-  })
-  .finally(() => disposeBridgeDaemonPool());
+void createLocalSessionHost;
+
+main().catch((error) => {
+  emit({ ok: false, error: { code: 'CLI_UNEXPECTED', message: error instanceof Error ? error.message : String(error) } });
+  process.exitCode = 1;
+});

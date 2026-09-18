@@ -228,6 +228,22 @@ export const TIER_BY_SCRIPT = Object.freeze({
   'test:workspace-analysis-lifecycle': 'unit',
   'test:rag-persistence-performance': 'unit',
   'test:param-metadata-read-bridge': 'unit',
+  // T01 reference-optimization / native-read-proof 回归门禁。
+  // decode + ReferenceQueryService + projection 的行为契约；缺生产符号时
+  // 失败关闭（behavior_not_implemented），不静默跳过。纯逻辑 + fixture ports，归 unit。
+  'test:reference-query': 'unit',
+  // NativeReadProofStore + buildWriteRequirement：读取证明 → 写入授权契约。
+  // 证明是宿主事实，不得由模型 verified/台账提供。纯逻辑，归 unit。
+  'test:native-read-proof': 'unit',
+  // CLI 会话适配：param read/set → read_param_fields/mutate_param_fields 形状、
+  // batch 依赖失败跳过、stdout 协议结果不含凭据。packages/core/src/cli/* 生产模块，归 unit。
+  'test:reference-cli-session': 'unit',
+  // 参考优化性能：cold parse once / hot 0 增量 parse / concurrent coalesce=1 /
+  // bypass 仍计 freshVerificationReadCount。计数器挂在 port/cache 对象上，归 unit。
+  'test:reference-optimization-performance': 'unit',
+  // 参考优化 native 层：Bridge/语料缺失时必须结构化 NATIVE_ENV_BLOCKED（exit 2），
+  // 不得假装通过；synthetic 路径在 proof/writer API 缺失时失败关闭。归 native。
+  'test:reference-optimization-native': 'native',
 
   // ---- synthetic：合成 native 契约与恢复矩阵。需 dotnet，不需真实资源 ----
   'bridge:build': 'synthetic',
@@ -707,5 +723,7 @@ export const EXCLUDED = Object.freeze({
   'test:mission1-acceptance': 'mission1 聚合验收入口，通过 scripts/verify-mission1-acceptance.mjs 直接运行，不经 verify.mjs tier 调度',
   'test:update:integration': 'U01 报告入口会诚实输出 not_run，待 U02-U24 实现后再登记为 process-integration',
   'test:update:installed': 'U01 报告入口会诚实输出 not_run，待 U08-U11 Windows 安装证据后再登记为 release',
-  'test:update:all': 'U01 聚合入口包含尚未执行的 integration/installed suite，不能作为当前 tier 的绿色验证'
+  'test:update:all': 'U01 聚合入口包含尚未执行的 integration/installed suite，不能作为当前 tier 的绿色验证',
+  // 运行工具入口，不是验证；CLI 一致性由 test:reference-cli-session 门禁
+  sfcli: '运行工具入口，不是验证；CLI 一致性由 test:reference-cli-session 门禁'
 });

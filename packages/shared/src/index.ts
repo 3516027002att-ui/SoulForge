@@ -49,5 +49,49 @@ export * from './sanitizeRendererPath.js';
 export * from './audit-execution-contracts.js';
 export * from './msb-shape-profile.js';
 export * from './native-evidence-contract.js';
+export type {
+  ReferenceDirection,
+  ReferenceDetail,
+  ReferenceRelatedMode,
+  ReferenceResolution,
+  RelationCertainty,
+  RelationStatementKind,
+  ParamTargetStatus,
+  ReferenceDomain,
+  ReferenceErrorCode,
+  ReferenceTargetSelector,
+  ReferenceStatement,
+  ReferenceLocation,
+  ReferenceIdentity,
+  ReferenceVersionSnapshot,
+  ReferenceRelationItem,
+  ReferenceCandidate,
+  ReferenceTargetRead,
+  ReferenceDomainCoverage,
+  ReferenceCoverage,
+  ReferencePageInfo,
+  ReferenceNextAction,
+  ReferenceDiagnostic,
+  ReferencePageRecord,
+  ReferenceQueryInput,
+  ReferenceQueryDecodeOk,
+  ReferenceQueryDecodeFail,
+  ReferenceQueryDecodeResult,
+  ReferenceSelectorDecodeResult
+  // ReferenceEvidence is owned by ./types.js; reference-query's same-named
+  // interface is core-local DTO detail and is not re-exported here.
+} from './reference-query.js';
+export {
+  REFERENCE_DEFAULT_DEPTH,
+  REFERENCE_DEFAULT_LIMIT,
+  REFERENCE_MIN_DEPTH,
+  REFERENCE_MAX_DEPTH,
+  REFERENCE_MIN_LIMIT,
+  REFERENCE_MAX_LIMIT,
+  decodeReferenceQueryInput,
+  referenceIdentityKey,
+  buildReferenceDependencyDigest,
+  domainFromNativeEditDomain
+} from './reference-query.js';
 export * from './scene-edit-protocol.js';
 export * from './blender-job-protocol.js';

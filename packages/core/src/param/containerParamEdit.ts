@@ -24,6 +24,11 @@ import { decodeRowFields } from './paramdefLayout.js';
 import { importPinnedSmithboxSdtParamMetadata } from './smithboxParamMetadataSource.js';
 import { matchParamMetadataPackage, resolveParamMetadataRowWidth } from './paramMetadata.js';
 
+/** Full-value hash compare; rejects prefix/substring matches by construction. */
+function normalizeDataHash(value: string): string {
+  return value.trim().toLowerCase();
+}
+
 export interface ParamRowSlot {
   rowIndex: number;
   id: number;
@@ -188,6 +193,37 @@ export function groupParamEdits(edits: ParamFieldEdit[]): Map<string, ParamField
     groups.set(key, list);
   }
   return groups;
+}
+
+type ChildCommitJob = {
+  tableName: string;
+  entry: { index: number; name: string; contentHash?: string };
+  unpackedPath: string;
+  unpackedHash: string;
+  expectedRowDataSize: number;
+  mutations: Array<{ kind: 'upsert'; id: number; dataBase64: string; rowIndex?: number; expectedDataHash?: string }>;
+  cleanup: () => Promise<Diagnostic | undefined>;
+};
+
+async function cleanupLoaded(loaded: { cleanup: () => Promise<Diagnostic | undefined> }): Promise<void> {
+  try {
+    await loaded.cleanup();
+  } catch {
+    // best-effort temp cleanup
+  }
+}
+
+async function cleanupChildJobs(jobs: ChildCommitJob[], collect = false): Promise<Diagnostic[]> {
+  const out: Diagnostic[] = [];
+  for (const job of jobs) {
+    try {
+      const d = await job.cleanup();
+      if (collect && d) out.push(d);
+    } catch {
+      // best-effort
+    }
+  }
+  return out;
 }
 
 export function applyEditsToRowBytes(input: {
@@ -505,56 +541,119 @@ export async function setParamFields(input: {
   const after: ParamFieldSnapshot[] = [];
   const changedTables: string[] = [];
   const diagnostics: Diagnostic[] = [];
-  let containerHash = file.sha256 ?? await sha256Of(container.path);
+  const originalContainerHash = file.sha256 ?? await sha256Of(container.path);
 
+  type ChildCommitJobLocal = ChildCommitJob;
+  const childJobs: ChildCommitJob[] = [];
+
+  // Phase 1 — validate and materialize every table mutation; do not touch the outer file.
   for (const [, tableEdits] of grouped) {
     const table = tableEdits[0]!.table;
     const rowIds = [...new Set(tableEdits.map((item) => item.rowId))];
     const loaded = await loadTableRows(input.edit, container.path, entries.entries, table, rowIds, false, true);
     if (!loaded.ok) {
+      await cleanupChildJobs(childJobs);
       return { ok: false, error: loaded.error, diagnostics: [...diagnostics, ...loaded.diagnostics], before };
     }
-    try {
     diagnostics.push(...loaded.diagnostics);
-    const mutations: Array<{ kind: 'upsert'; id: number; dataBase64: string; rowIndex?: number; expectedDataHash?: string }> = [];
-    const bySlot = new Map<number, { slot: ParamRowSlot; edits: ParamFieldEdit[] }>();
-    for (const edit of tableEdits) {
-      let slot: ParamRowSlot | undefined;
-      if (edit.rowIndex !== undefined) {
-        slot = loaded.slots.find((s) => s.rowIndex === edit.rowIndex);
+    try {
+      const mutations: Array<{ kind: 'upsert'; id: number; dataBase64: string; rowIndex?: number; expectedDataHash?: string }> = [];
+      const bySlot = new Map<number, { slot: ParamRowSlot; edits: ParamFieldEdit[] }>();
+      for (const edit of tableEdits) {
+        let slot: ParamRowSlot | undefined;
+        if (edit.rowIndex !== undefined) {
+          slot = loaded.slots.find((s) => s.rowIndex === edit.rowIndex);
+          if (!slot) {
+            await cleanupLoaded(loaded);
+            await cleanupChildJobs(childJobs);
+            return {
+              ok: false,
+              error: { code: 'PARAM_ROW_NOT_FOUND', message: `${table} 物理行索引 ${edit.rowIndex} 不存在。` },
+              diagnostics,
+              before
+            };
+          }
+          if (slot.id !== edit.rowId) {
+            await cleanupLoaded(loaded);
+            await cleanupChildJobs(childJobs);
+            return {
+              ok: false,
+              error: {
+                code: 'PARAM_ROW_ID_MISMATCH',
+                message: `${table} 物理行索引 ${edit.rowIndex} 的 ID (${slot.id}) 与请求 ID (${edit.rowId}) 不匹配。`
+              },
+              diagnostics,
+              before
+            };
+          }
+          if (edit.expectedDataHash && normalizeDataHash(edit.expectedDataHash) !== normalizeDataHash(slot.dataHash)) {
+            await cleanupLoaded(loaded);
+            await cleanupChildJobs(childJobs);
+            return {
+              ok: false,
+              error: {
+                code: 'PARAM_ROW_HASH_MISMATCH',
+                message: `${table} 物理行索引 ${edit.rowIndex} 的数据哈希已过期（完整哈希相等比较，拒绝子串匹配）。`
+              },
+              diagnostics,
+              before
+            };
+          }
+        } else {
+          const candidates = loaded.slotsById.get(edit.rowId) ?? [];
+          if (candidates.length === 0) {
+            await cleanupLoaded(loaded);
+            await cleanupChildJobs(childJobs);
+            return {
+              ok: false,
+              error: { code: 'PARAM_ROW_NOT_FOUND', message: `${table}#${edit.rowId} 不存在。` },
+              diagnostics,
+              before
+            };
+          }
+          if (candidates.length > 1) {
+            await cleanupLoaded(loaded);
+            await cleanupChildJobs(childJobs);
+            return {
+              ok: false,
+              error: {
+                code: 'PARAM_ROW_AMBIGUOUS',
+                message: `${table}#${edit.rowId} 存在重复行 (${candidates.length} 个物理槽)；修改必须指定 rowIndex 和 expectedDataHash。`
+              },
+              diagnostics,
+              before
+            };
+          }
+          const candidate = candidates[0];
+          if (!candidate) {
+            await cleanupLoaded(loaded);
+            await cleanupChildJobs(childJobs);
+            return {
+              ok: false,
+              error: { code: 'PARAM_ROW_NOT_FOUND', message: `${table}#${edit.rowId} 不存在。` },
+              diagnostics,
+              before
+            };
+          }
+          slot = candidate;
+          if (edit.expectedDataHash && normalizeDataHash(edit.expectedDataHash) !== normalizeDataHash(slot.dataHash)) {
+            await cleanupLoaded(loaded);
+            await cleanupChildJobs(childJobs);
+            return {
+              ok: false,
+              error: {
+                code: 'PARAM_ROW_HASH_MISMATCH',
+                message: `${table}#${edit.rowId} 的数据哈希已过期（完整哈希相等比较，拒绝子串匹配）。`
+              },
+              diagnostics,
+              before
+            };
+          }
+        }
+
         if (!slot) {
-          return {
-            ok: false,
-            error: { code: 'PARAM_ROW_NOT_FOUND', message: `${table} 物理行索引 ${edit.rowIndex} 不存在。` },
-            diagnostics,
-            before
-          };
-        }
-        if (slot.id !== edit.rowId) {
-          return {
-            ok: false,
-            error: {
-              code: 'PARAM_ROW_ID_MISMATCH',
-              message: `${table} 物理行索引 ${edit.rowIndex} 的 ID (${slot.id}) 与请求 ID (${edit.rowId}) 不匹配。`
-            },
-            diagnostics,
-            before
-          };
-        }
-        if (edit.expectedDataHash && !slot.dataHash.toLowerCase().includes(edit.expectedDataHash.toLowerCase())) {
-          return {
-            ok: false,
-            error: {
-              code: 'PARAM_ROW_HASH_MISMATCH',
-              message: `${table} 物理行索引 ${edit.rowIndex} 的数据哈希已过期。`
-            },
-            diagnostics,
-            before
-          };
-        }
-      } else {
-        const candidates = loaded.slotsById.get(edit.rowId) ?? [];
-        if (candidates.length === 0) {
+          await cleanupLoaded(loaded);
+          await cleanupChildJobs(childJobs);
           return {
             ok: false,
             error: { code: 'PARAM_ROW_NOT_FOUND', message: `${table}#${edit.rowId} 不存在。` },
@@ -562,130 +661,129 @@ export async function setParamFields(input: {
             before
           };
         }
-        if (candidates.length > 1) {
+
+        const entry = bySlot.get(slot.rowIndex) ?? { slot, edits: [] as ParamFieldEdit[] };
+        entry.edits.push(edit);
+        bySlot.set(slot.rowIndex, entry);
+      }
+
+      for (const [, { slot, edits: rowEdits }] of bySlot) {
+        const applied = applyEditsToRowBytes({
+          rowDataBase64: slot.dataBase64,
+          definition: loaded.definition,
+          edits: rowEdits.map((item) => ({ fieldId: item.fieldId, value: item.value }))
+        });
+        if (!applied.ok) {
+          await cleanupLoaded(loaded);
+          await cleanupChildJobs(childJobs);
           return {
             ok: false,
-            error: {
-              code: 'PARAM_ROW_AMBIGUOUS',
-              message: `${table}#${edit.rowId} 存在重复行 (${candidates.length} 个物理槽)；修改必须指定 rowIndex 和 expectedDataHash。`
-            },
+            error: { code: applied.code, message: `${table}#${slot.id} (row ${slot.rowIndex}): ${applied.message}` },
             diagnostics,
             before
           };
         }
-        const candidate = candidates[0];
-        if (!candidate) {
-          return {
-            ok: false,
-            error: { code: 'PARAM_ROW_NOT_FOUND', message: `${table}#${edit.rowId} 不存在。` },
-            diagnostics,
-            before
-          };
+        for (const edit of rowEdits) {
+          const field = loaded.definition.fields.find((item) => item.id === edit.fieldId);
+          before.push({
+            table: loaded.tableName,
+            rowId: slot.id,
+            rowIndex: slot.rowIndex,
+            dataHash: slot.dataHash,
+            ...(slot.name ? { rowName: slot.name } : {}),
+            fieldId: edit.fieldId,
+            ...(field?.name && field.name !== edit.fieldId ? { displayName: field.name } : {}),
+            ...(field?.description ? { description: field.description } : {}),
+            value: applied.before[edit.fieldId] ?? null
+          });
+          after.push({
+            table: loaded.tableName,
+            rowId: slot.id,
+            rowIndex: slot.rowIndex,
+            dataHash: createHash('sha256').update(Buffer.from(applied.nextDataBase64, 'base64')).digest('hex').toLowerCase(),
+            ...(slot.name ? { rowName: slot.name } : {}),
+            fieldId: edit.fieldId,
+            ...(field?.name && field.name !== edit.fieldId ? { displayName: field.name } : {}),
+            ...(field?.description ? { description: field.description } : {}),
+            value: applied.after[edit.fieldId] ?? null
+          });
         }
-        slot = candidate;
-        if (edit.expectedDataHash && !slot.dataHash.toLowerCase().includes(edit.expectedDataHash.toLowerCase())) {
-          return {
-            ok: false,
-            error: {
-              code: 'PARAM_ROW_HASH_MISMATCH',
-              message: `${table}#${edit.rowId} 的数据哈希已过期。`
-            },
-            diagnostics,
-            before
-          };
+        if (applied.nextDataBase64 !== slot.dataBase64) {
+          mutations.push({
+            kind: 'upsert',
+            id: slot.id,
+            dataBase64: applied.nextDataBase64,
+            rowIndex: slot.rowIndex,
+            expectedDataHash: slot.dataHash
+          });
         }
       }
 
-      if (!slot) {
-        return {
-          ok: false,
-          error: { code: 'PARAM_ROW_NOT_FOUND', message: `${table}#${edit.rowId} 不存在。` },
-          diagnostics,
-          before
-        };
+      if (mutations.length === 0) {
+        const cleanupOnly = await loaded.cleanup();
+        if (cleanupOnly) diagnostics.push(cleanupOnly);
+        continue;
       }
 
-      const entry = bySlot.get(slot.rowIndex) ?? { slot, edits: [] as ParamFieldEdit[] };
-      entry.edits.push(edit);
-      bySlot.set(slot.rowIndex, entry);
-    }
-
-    for (const [, { slot, edits: rowEdits }] of bySlot) {
-      const applied = applyEditsToRowBytes({
-        rowDataBase64: slot.dataBase64,
-        definition: loaded.definition,
-        edits: rowEdits.map((item) => ({ fieldId: item.fieldId, value: item.value }))
+      childJobs.push({
+        tableName: loaded.tableName,
+        entry: loaded.entry,
+        unpackedPath: loaded.unpackedPath,
+        unpackedHash: loaded.sourceHash,
+        expectedRowDataSize: loaded.definition.rowDataSize,
+        mutations,
+        cleanup: loaded.cleanup
       });
-      if (!applied.ok) {
-        return {
-          ok: false,
-          error: { code: applied.code, message: `${table}#${slot.id} (row ${slot.rowIndex}): ${applied.message}` },
-          diagnostics,
-          before
-        };
-      }
-      for (const edit of rowEdits) {
-        const field = loaded.definition.fields.find((item) => item.id === edit.fieldId);
-        before.push({
-          table: loaded.tableName,
-          rowId: slot.id,
-          rowIndex: slot.rowIndex,
-          dataHash: slot.dataHash,
-          ...(slot.name ? { rowName: slot.name } : {}),
-          fieldId: edit.fieldId,
-          ...(field?.name && field.name !== edit.fieldId ? { displayName: field.name } : {}),
-          ...(field?.description ? { description: field.description } : {}),
-          value: applied.before[edit.fieldId] ?? null
-        });
-        after.push({
-          table: loaded.tableName,
-          rowId: slot.id,
-          rowIndex: slot.rowIndex,
-          dataHash: createHash('sha256').update(Buffer.from(applied.nextDataBase64, 'base64')).digest('hex').toLowerCase(),
-          ...(slot.name ? { rowName: slot.name } : {}),
-          fieldId: edit.fieldId,
-          ...(field?.name && field.name !== edit.fieldId ? { displayName: field.name } : {}),
-          ...(field?.description ? { description: field.description } : {}),
-          value: applied.after[edit.fieldId] ?? null
-        });
-      }
-      if (applied.nextDataBase64 !== slot.dataBase64) {
-        mutations.push({
-          kind: 'upsert',
-          id: slot.id,
-          dataBase64: applied.nextDataBase64,
-          rowIndex: slot.rowIndex,
-          expectedDataHash: slot.dataHash
-        });
-      }
+    } catch (error) {
+      await cleanupLoaded(loaded);
+      await cleanupChildJobs(childJobs);
+      return {
+        ok: false,
+        error: {
+          code: 'PARAM_EDIT_STAGE_PREPARE_FAILED',
+          message: error instanceof Error ? error.message : String(error)
+        },
+        diagnostics,
+        before
+      };
     }
-    if (mutations.length === 0) continue;
+  }
 
-    const committed = await commitTableMutations({
-      edit: input.edit,
-      file: { ...file, sha256: containerHash },
+  if (childJobs.length === 0) {
+    return {
+      ok: true,
       containerPath: container.path,
-      containerHash,
-      entry: loaded.entry,
-      unpackedPath: loaded.unpackedPath,
-      unpackedHash: loaded.sourceHash,
-      expectedRowDataSize: loaded.definition.rowDataSize,
-      mutations,
-      title: `PARAM set ${mutations.length} row(s) in ${loaded.tableName}`
-    });
-    if (!committed.ok) {
-      return { ok: false, error: committed.error, diagnostics: [...diagnostics, ...committed.diagnostics], before };
-    }
-    diagnostics.push(...committed.diagnostics);
-    changedTables.push(loaded.tableName);
-    containerHash = committed.nextContainerHash;
-    file.sha256 = containerHash;
-    const refreshed = entries.entries.find((item) => item.index === loaded.entry.index);
+      before,
+      after,
+      changedTables,
+      diagnostics
+    };
+  }
+
+  // Phase 2 — stage every child, then ONE outer container transaction.
+  const committed = await commitContainerChildJobs({
+    edit: input.edit,
+    file: { ...file, sha256: originalContainerHash },
+    containerPath: container.path,
+    originalContainerHash,
+    childJobs,
+    title: childJobs.length === 1
+      ? `PARAM set ${childJobs[0]!.mutations.length} row(s) in ${childJobs[0]!.tableName}`
+      : `PARAM set across ${childJobs.length} tables in one container commit`
+  });
+
+  const cleanupDiags = await cleanupChildJobs(childJobs, true);
+  diagnostics.push(...cleanupDiags);
+
+  if (!committed.ok) {
+    return { ok: false, error: committed.error, diagnostics: [...diagnostics, ...committed.diagnostics], before };
+  }
+  diagnostics.push(...committed.diagnostics);
+  changedTables.push(...childJobs.map((job) => job.tableName));
+  file.sha256 = committed.nextContainerHash;
+  for (const job of childJobs) {
+    const refreshed = entries.entries.find((item) => item.index === job.entry.index);
     if (refreshed) refreshed.contentHash = '';
-    } finally {
-      const cleanupDiagnostic = await loaded.cleanup();
-      if (cleanupDiagnostic) diagnostics.push(cleanupDiagnostic);
-    }
   }
 
   return {
@@ -698,7 +796,174 @@ export async function setParamFields(input: {
   };
 }
 
-async function commitTableMutations(input: {
+/**
+ * Stage all modified PARAM children, then commit the outer container once.
+ * Multi-child uses a controlled staging container chain (single-child write-bnd4
+ * per step). Any staging failure leaves the original outer file untouched.
+ */
+async function commitContainerChildJobs(input: {
+  edit: NativeEditSession;
+  file: Awaited<ReturnType<NativeEditSession['indexFile']>>;
+  containerPath: string;
+  originalContainerHash: string;
+  childJobs: ChildCommitJob[];
+  title: string;
+}): Promise<
+  | { ok: true; nextContainerHash: string; diagnostics: Diagnostic[] }
+  | { ok: false; error: ParamEditFailure; diagnostics: Diagnostic[] }
+> {
+  const { edit } = input;
+  const diagnostics: Diagnostic[] = [];
+  const stagedChildren: Array<{
+    job: ChildCommitJob;
+    childBase64: string;
+    expectedChildHash: string;
+  }> = [];
+
+  for (const job of input.childJobs) {
+    const allowedRoots = () => [...edit.allowedRoots(), dirname(job.unpackedPath)];
+    const paramStage = await stageBridgeOutput({
+      stagingRoot: edit.stagingRoot,
+      prefix: 'param-field',
+      fileName: `${safeSegment(job.entry.name)}.mutated`,
+      allowedRoots,
+      write: async (context) => commitParamMutationsViaBridge({
+        sourcePath: job.unpackedPath,
+        outputPath: context.outputPath,
+        expectedDocumentHash: job.unpackedHash,
+        expectedRowDataSize: job.expectedRowDataSize,
+        allowedRoots: context.allowedRoots,
+        writableRoots: context.writableRoots,
+        mutations: job.mutations,
+        timeoutMs: 120_000
+      })
+    });
+    if (!paramStage.ok || !paramStage.bytes) {
+      const stageDiags: Diagnostic[] = [
+        ...paramStage.diagnostics.map((item) => ({
+          severity: item.severity as Diagnostic['severity'],
+          code: item.code,
+          message: item.message,
+          sourceUri: input.file.sourceUri
+        })),
+        ...(paramStage.result?.diagnostics ?? []).map((item) => ({
+          severity: item.severity as Diagnostic['severity'],
+          code: item.code,
+          message: item.message,
+          sourceUri: input.file.sourceUri
+        }))
+      ];
+      return {
+        ok: false,
+        error: {
+          code: 'PARAM_CONTAINER_STAGING_FAILED',
+          message: `子项 ${job.tableName} 暂存失败，原外层容器未修改。`
+        },
+        diagnostics: [...diagnostics, ...stageDiags]
+      };
+    }
+    const childBase64 = paramStage.bytes.toString('base64');
+    const expectedChildHash = job.entry.contentHash || await sha256Of(job.unpackedPath);
+    stagedChildren.push({ job, childBase64, expectedChildHash });
+  }
+
+  const outcome = await applyNativeMutation({
+    file: input.file,
+    sourceUri: input.file.sourceUri,
+    expectedHash: input.originalContainerHash,
+    stagingRoot: edit.stagingRoot,
+    allowedRoots: () => [...edit.allowedRoots()],
+    stagingPrefix: 'parambnd',
+    stagingFileName: `${basename(input.containerPath)}.repacked`,
+    stageWrite: async (context) => {
+      const allowed = context.allowedRoots;
+      const writable = context.writableRoots;
+      let sourcePath = input.containerPath;
+      let sourceHash = input.originalContainerHash;
+      const chainDiagnostics: Diagnostic[] = [];
+      for (let i = 0; i < stagedChildren.length; i += 1) {
+        const item = stagedChildren[i]!;
+        const isLast = i === stagedChildren.length - 1;
+        const chainPath = join(edit.stagingRoot, `parambnd-chain-${Date.now()}-${i}.bnd`);
+        const outputPath = isLast ? context.outputPath : chainPath;
+        const written = await runBridge<Record<string, unknown>>({
+          command: 'write-bnd4',
+          filePath: sourcePath,
+          resourceUri: input.file.sourceUri,
+          allowedRoots: allowed,
+          writableRoots: writable,
+          timeoutMs: 180_000,
+          maxFrameBytes: 32 * 1024 * 1024,
+          ...(edit.oodleRuntimeRoot ? { oodleRuntimeRoot: edit.oodleRuntimeRoot } : {}),
+          commandOptions: {
+            outputPath,
+            mutation: 'replace',
+            expectedContainerHash: sourceHash,
+            entryIndex: item.job.entry.index,
+            expectedChildHash: item.expectedChildHash,
+            contentBase64: item.childBase64
+          }
+        });
+        const verified = written.parseStatus !== 'failed'
+          && written.diagnostics.some((d) => d.code === 'BND4_STAGING_WRITE_VERIFIED');
+        chainDiagnostics.push(...written.diagnostics.map((d) => ({
+          severity: d.severity as Diagnostic['severity'],
+          code: d.code,
+          message: d.message,
+          sourceUri: input.file.sourceUri
+        })));
+        if (!verified) {
+          return {
+            ok: false,
+            diagnostics: [
+              ...chainDiagnostics,
+              {
+                severity: 'error' as const,
+                code: 'PARAM_CONTAINER_STAGING_FAILED',
+                message: `同容器子项链式暂存失败于 ${item.job.tableName}；原外层容器未提交。`,
+                sourceUri: input.file.sourceUri
+              }
+            ]
+          };
+        }
+        sourcePath = outputPath;
+        sourceHash = await sha256Of(outputPath);
+      }
+      return { ok: true, diagnostics: chainDiagnostics };
+    },
+    title: input.title,
+    confirmActionLabel: '提交容器内 PARAM 字段变更（单次外层事务）'
+  }, { commit: edit.commitPort });
+
+  if (outcome.status !== 'committed' || !outcome.result.ok) {
+    const failDiags = outcome.status === 'failed'
+      ? outcome.diagnostics
+      : outcome.status === 'committed'
+        ? outcome.result.diagnostics
+        : [{
+            severity: 'error' as const,
+            code: 'PARAM_WRITE_CANCELLED',
+            message: '写入被取消。',
+            sourceUri: input.file.sourceUri
+          }];
+    return {
+      ok: false,
+      error: {
+        code: failDiags[0]?.code ?? 'PARAM_WRITE_FAILED',
+        message: failDiags[0]?.message ?? '容器写入失败。'
+      },
+      diagnostics: [...diagnostics, ...failDiags]
+    };
+  }
+
+  return {
+    ok: true,
+    nextContainerHash: await sha256Of(input.containerPath),
+    diagnostics: [...diagnostics, ...outcome.result.diagnostics]
+  };
+}
+
+async function unusedCommitTableMutations(input: {
   edit: NativeEditSession;
   file: Awaited<ReturnType<NativeEditSession['indexFile']>>;
   containerPath: string;

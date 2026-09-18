@@ -672,7 +672,7 @@ const PACKAGE_TREE_STRICT_REQUIRED = [
   'resources/prompt/system.md',
   'resources/prompt/rag-embedding.md',
   'resources/prompt/event-reference.md',
-  'resources/prompt/agent-task-record.md',
+  'resources/prompt/native-read-safety.md',
   'resources/mutter.md',
   'resources/LICENSE',
   'resources/NOTICE',

@@ -346,7 +346,12 @@
     "test:param-rag-identity-convergence": "npm run test:param-rag-identity-convergence -w @soulforge/core",
     "test:agent-emevd-proof-gate": "node --experimental-strip-types scripts/verify-agent-emevd-proof-gate.mjs",
     "test:bridge-artifact-chunking": "npm run bridge:build && node scripts/verify-bridge-artifact-chunking.mjs",
-    "benchmark:rag-fts-delta": "npm run build -w @soulforge/core && node scripts/verify-rag-fts-delta-performance.mjs"
+    "benchmark:rag-fts-delta": "npm run build -w @soulforge/core && node scripts/verify-rag-fts-delta-performance.mjs",
+    "test:reference-query": "npm run test:reference-query -w @soulforge/core",
+    "test:native-read-proof": "npm run test:native-read-proof -w @soulforge/core",
+    "test:reference-cli-session": "npm run test:reference-cli-session -w @soulforge/core",
+    "test:reference-optimization-performance": "npm run test:reference-optimization-performance -w @soulforge/core",
+    "test:reference-optimization-native": "npm run test:reference-optimization-native -w @soulforge/core"
   },
   "devDependencies": {
     "@types/node": "^22.13.1",

@@ -31,7 +31,8 @@ import {
   createOpaqueCursor,
   parseOpaqueCursor,
   type NativeReadCompleteness,
-  type NativeEditDomain
+  type NativeEditDomain,
+  type NativeSourceIdentity
 } from '@soulforge/shared';
 import {
   toolInputShapeToJsonSchema,
@@ -40,12 +41,15 @@ import {
   type ToolRegistry,
   type ToolResult
 } from './toolRegistry.js';
+import type { NativeReadProofStore } from '../editing/nativeReadProofStore.js';
+import type { ResourceVersion } from '../runtime/resourceVersion.js';
 import {
   projectEvidenceClaims,
   type EvidenceClaim
 } from '../model-services/evidenceIdentity.js';
 import { evidenceKey } from '../model-services/evidenceSelection.js';
 import { encodeEvidenceClaims, type EvidenceClaimsTransport } from '../model-services/evidenceTransport.js';
+import { createHash } from 'node:crypto';
 
 export interface AgentToolBridgeOptions {
   registry: ToolRegistry;
@@ -179,10 +183,11 @@ export interface AgentToolResultEnvelope {
   ok: true;
   state: AgentToolSuccessState;
   data: {
-    items: unknown[];
-    record: Record<string, unknown> | null;
-    scalar: string | number | boolean | null;
-    summary: string | null;
+    /** Present only when the underlying result is a collection. */
+    items?: unknown[];
+    record?: Record<string, unknown>;
+    scalar?: string | number | boolean;
+    summary?: string;
   };
   pagination: {
     originalChars: number;
@@ -418,15 +423,15 @@ function normalizeEnvelopeData(
   summary: string | null
 ): AgentToolResultEnvelope['data'] {
   if (Array.isArray(value)) {
-    return { items: value, record: null, scalar: null, summary };
+    return { items: value, ...(summary ? { summary } : {}) };
   }
   if (value !== null && typeof value === 'object') {
-    return { items: [], record: value as Record<string, unknown>, scalar: null, summary };
+    return { record: value as Record<string, unknown>, ...(summary ? { summary } : {}) };
   }
   if (typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean') {
-    return { items: [], record: null, scalar: value, summary };
+    return { scalar: value, ...(summary ? { summary } : {}) };
   }
-  return { items: [], record: null, scalar: null, summary };
+  return summary ? { summary } : {};
 }
 
 function collectionCounts(value: unknown): { returnedCount: number | null; totalCount: number | null } {
@@ -760,10 +765,13 @@ function createResultEnvelope(
       limit: window.limit ?? window.returned
     };
   }
+  const discoveryLike = evidence.kind === 'discovery' || evidence.kind === 'rag' || evidence.status === 'candidate';
   const completeness: NativeReadCompleteness = completenessOverride
-    ?? (window.truncated
-      ? (window.offset !== null ? 'windowed' : 'partial')
-      : (summary ? 'summary_only' : 'complete'));
+    ?? (discoveryLike
+      ? 'summary_only'
+      : window.truncated
+        ? (window.offset !== null ? 'windowed' : 'partial')
+        : (summary ? 'summary_only' : 'complete'));
 
   return {
     ok: true,
@@ -1107,6 +1115,18 @@ function projectCompleteNativeEmevdDsl(value: unknown): Record<string, unknown> 
       ? { unknownInstructionIndices: diagnosticProjection.unknownInstructionIndices }
       : {})
   };
+  // view=full-source host annotations: keep totalUtf8Bytes/fullTextHash always
+  // when present; only echo fullSourceText when the native document supplied it.
+  const fullSourceText = typeof source.fullSourceText === 'string' ? source.fullSourceText : undefined;
+  const totalUtf8Bytes = typeof source.totalUtf8Bytes === 'number' && Number.isSafeInteger(source.totalUtf8Bytes)
+    ? source.totalUtf8Bytes
+    : Buffer.byteLength(String(source.darkScript ?? ''), 'utf8');
+  const fullTextHash = typeof source.fullTextHash === 'string' && source.fullTextHash.trim() !== ''
+    ? source.fullTextHash
+    : createHash('sha256').update(String(source.darkScript ?? ''), 'utf8').digest('hex');
+  output.totalUtf8Bytes = totalUtf8Bytes;
+  output.fullTextHash = fullTextHash;
+  if (fullSourceText !== undefined) output.fullSourceText = fullSourceText;
   if (relativePath) {
     // Keep the field names stable for callers that previously consumed the
     // event DTO, but never expose the native absolute sourcePath/filePath.
@@ -1285,7 +1305,6 @@ function committedOversizeEnvelope(
     ok: true,
     state,
     data: {
-      items: [],
       record: {
         ...(strictOperationId !== undefined ? { operationId: strictOperationId } : {}),
         ...(strictKnowledgeRefresh !== undefined ? { knowledgeRefresh: strictKnowledgeRefresh } : {}),
@@ -1296,7 +1315,6 @@ function committedOversizeEnvelope(
           ...(locatorOmitted ? { locatorOmitted: true } : {})
         }
       },
-      scalar: null,
       summary: '提交已完成；完整身份超出输出预算。'
     },
     pagination: {
@@ -1871,6 +1889,28 @@ function boundedToolContent(
     }
   }
 
+  // Reference page results keep their full page (including relations[].evidence
+  // statement/path and targetRead.fields) whenever that page fits the budget.
+  // Do not strip a fitting page down to the generic discovery summary.
+  if (name === 'find_references' || name === 'read_param_fields') {
+    const pageRecord = extractReferencePageRecord(data);
+    if (pageRecord) {
+      const pageEnvelope = createResultEnvelope(
+        pageRecord,
+        raw.length,
+        false,
+        null,
+        compactIdentity,
+        evidence,
+        window,
+        state
+      );
+      const encoded = JSON.stringify(pageEnvelope);
+      if (Buffer.byteLength(encoded, 'utf8') <= MAX_BOUNDED_TOOL_RESULT_BYTES
+        && encoded.length <= MAX_BOUNDED_TOOL_RESULT_CHARS) return encoded;
+    }
+  }
+
   const byteBoundedByRaw = (BOUNDED_DISCOVERY_TOOLS.has(name) || rawBytes > MAX_BOUNDED_TOOL_RESULT_BYTES * 4)
     && rawBytes > MAX_BOUNDED_TOOL_RESULT_BYTES;
   // Event reads always use the event-specific projection below when the
@@ -2162,12 +2202,37 @@ export function createAgentToolBridge(options: AgentToolBridgeOptions): AgentToo
       // Only the named complete native DSL view can mint an EMEVD proof. A
       // JSON read, a tail/partial window, or a generic summary is still a
       // useful successful read, but it must leave the mutation gate closed.
+      // Outline reads never satisfy this contract.
       const completeNativeDslEnvelope = call.name === 'read_emevd_event'
         && result.__hostResolvedEmevdEventTarget?.canonical === true
         && envelopeRecord?.projection === 'complete_native_dsl'
         && envelope.completeness === 'complete'
         && envelope.truncated === false;
+      const nativeReadProofs = effectiveContext.coreSession?.nativeReadProofs
+        ?? effectiveContext.nativeReadProofs;
+      if (completeNativeDslEnvelope && result.__hostResolvedEmevdEventTarget && nativeReadProofs) {
+        acceptEmevdFullDslProof({
+          proofStore: nativeReadProofs,
+          context: effectiveContext,
+          target: result.__hostResolvedEmevdEventTarget,
+          envelopeRecord,
+          rawData: result.data
+        });
+      } else if (
+        (call.name === 'find_references' || call.name === 'read_param_fields')
+        && nativeReadProofs
+      ) {
+        acceptTargetReadFieldProofs({
+          proofStore: nativeReadProofs,
+          context: effectiveContext,
+          callName: call.name,
+          envelopeRecord,
+          rawData: result.data
+        });
+      }
+      // Legacy optional path only when no NativeReadProofStore is present.
       if (completeNativeDslEnvelope
+        && !nativeReadProofs
         && effectiveContext.taskRecord?.recordNativeEmevdRead
         && result.__hostResolvedEmevdEventTarget) {
         try {
@@ -2294,3 +2359,263 @@ function areSimilarEvidenceTerms(left: string, right: string): boolean {
 function normalizeEvidenceTerm(value: string): string {
   return value.toLocaleLowerCase().replace(/[\s_#:/\\.-]+/gu, '');
 }
+
+function isRecordValue(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === 'object' && !Array.isArray(value);
+}
+
+/** ReferencePageRecord structural check: resolution + relations + coverage + page. */
+function extractReferencePageRecord(data: unknown): Record<string, unknown> | null {
+  if (!isRecordValue(data)) return null;
+  if (isReferencePageShape(data)) return data;
+  const nestedKeys = ['record', 'page', 'result', 'related', 'relatedContext'];
+  for (const key of nestedKeys) {
+    const nested = data[key];
+    if (isRecordValue(nested) && isReferencePageShape(nested)) return nested;
+  }
+  return null;
+}
+
+function isReferencePageShape(value: Record<string, unknown>): boolean {
+  return typeof value.resolution === 'string'
+    && Array.isArray(value.relations)
+    && isRecordValue(value.coverage)
+    && isRecordValue(value.page);
+}
+
+function resolveBridgeProofWorkspaceId(context: ToolContext): string {
+  return context.coreSession?.workspaceId
+    ?? (context.workspaceIndex as { workspaceId?: string } | null)?.workspaceId
+    ?? '';
+}
+
+function resolveBridgeProofPrincipal(context: ToolContext): string {
+  return context.coreSession?.principal
+    ?? context.proofPrincipal
+    ?? context.agentRunId
+    ?? 'desktop-agent';
+}
+
+function isAllowedSyntheticProofHashEnvironment(): boolean {
+  return process.env.NODE_ENV === 'test'
+    || process.env.SOULFORGE_ALLOW_SYNTHETIC_PROOF_HASH === '1'
+    || process.env.VITEST !== undefined
+    || process.argv.some((arg) => /verify-|smoke|test[:/\\]/i.test(arg));
+}
+
+function resolveEmevdProofVersion(input: {
+  outerFileHash?: unknown;
+  sourceHash?: unknown;
+  sourceRevision?: unknown;
+  generation: number;
+  fullText?: string;
+}): ResourceVersion | null {
+  const outer = typeof input.outerFileHash === 'string' && input.outerFileHash.trim() !== ''
+    ? input.outerFileHash.trim()
+    : typeof input.sourceHash === 'string' && input.sourceHash.trim() !== ''
+      ? input.sourceHash.trim()
+      : undefined;
+  if (outer) {
+    return {
+      outerFileHash: outer,
+      ...(input.sourceRevision !== undefined
+        && (typeof input.sourceRevision === 'number' || typeof input.sourceRevision === 'string')
+        ? { sourceRevision: input.sourceRevision }
+        : {}),
+      generation: input.generation
+    };
+  }
+  // Synthetic full sha256 placeholder is tests-only. Production must use real
+  // hashes from the native result; without them we refuse to mint a proof.
+  if (isAllowedSyntheticProofHashEnvironment() && typeof input.fullText === 'string' && input.fullText.length > 0) {
+    return {
+      outerFileHash: createHash('sha256').update(input.fullText, 'utf8').digest('hex'),
+      generation: input.generation
+    };
+  }
+  return null;
+}
+
+function emevdIdentityFromHostTarget(
+  target: HostResolvedEmevdEventTarget,
+  workspaceId: string
+): NativeSourceIdentity {
+  const outerId = target.sourceUri && target.sourceUri.trim() !== ''
+    ? target.sourceUri
+    : target.sourcePath;
+  return {
+    workspaceId,
+    outerId,
+    childChain: ['event', String(target.eventId)],
+    domain: 'emevd',
+    namespace: 'event',
+    objectKey: `event#${target.eventId}`,
+    ...(target.sourceUri ? { sourceUri: target.sourceUri } : {})
+  };
+}
+
+function acceptEmevdFullDslProof(input: {
+  proofStore: NativeReadProofStore;
+  context: ToolContext;
+  target: HostResolvedEmevdEventTarget;
+  envelopeRecord: Record<string, unknown> | undefined;
+  rawData: unknown;
+}): void {
+  const workspaceId = resolveBridgeProofWorkspaceId(input.context);
+  if (!workspaceId) return;
+  const principal = resolveBridgeProofPrincipal(input.context);
+  const envelopeRecord = input.envelopeRecord ?? {};
+  const rawData = isRecordValue(input.rawData) ? input.rawData : {};
+  const fullText = typeof envelopeRecord.dsl === 'string' && envelopeRecord.dsl !== ''
+    ? envelopeRecord.dsl
+    : typeof envelopeRecord.source === 'string' && envelopeRecord.source !== ''
+      ? envelopeRecord.source
+      : typeof envelopeRecord.darkScript === 'string'
+        ? envelopeRecord.darkScript
+        : typeof rawData.darkScript === 'string'
+          ? rawData.darkScript
+          : typeof envelopeRecord.fullSourceText === 'string'
+            ? envelopeRecord.fullSourceText
+            : '';
+  const projection = typeof envelopeRecord.projection === 'string'
+    ? envelopeRecord.projection
+    : undefined;
+  const generation = input.context.coreSession?.versionClock.current()
+    ?? input.proofStore.currentGeneration();
+  const version = resolveEmevdProofVersion({
+    outerFileHash: envelopeRecord.outerFileHash ?? rawData.outerFileHash,
+    sourceHash: envelopeRecord.sourceHash ?? rawData.sourceHash,
+    sourceRevision: envelopeRecord.sourceRevision ?? rawData.sourceRevision,
+    generation,
+    fullText
+  });
+  if (!version) return;
+  const identity = emevdIdentityFromHostTarget(input.target, workspaceId);
+  const bytes = typeof envelopeRecord.totalUtf8Bytes === 'number' && Number.isSafeInteger(envelopeRecord.totalUtf8Bytes)
+    ? envelopeRecord.totalUtf8Bytes
+    : Buffer.byteLength(fullText, 'utf8');
+  input.proofStore.acceptDeliveredRead({
+    principal,
+    workspaceId,
+    identity,
+    version,
+    domain: 'emevd',
+    observation: {
+      kind: 'emevd-full-dsl',
+      fullText,
+      deliveredRanges: bytes > 0 ? [[0, bytes]] : [],
+      completeness: 'complete',
+      truncated: false
+    },
+    finalVisible: {
+      hasTargetRead: true,
+      deliveredFieldIds: [],
+      ...(projection !== undefined ? { projection } : {})
+    }
+  });
+}
+
+function acceptTargetReadFieldProofs(input: {
+  proofStore: NativeReadProofStore;
+  context: ToolContext;
+  callName: string;
+  envelopeRecord: Record<string, unknown> | undefined;
+  rawData: unknown;
+}): void {
+  const workspaceId = resolveBridgeProofWorkspaceId(input.context);
+  if (!workspaceId) return;
+  const principal = resolveBridgeProofPrincipal(input.context);
+  const candidates: Array<Record<string, unknown>> = [];
+  const pushCandidate = (value: unknown): void => {
+    if (isRecordValue(value)) candidates.push(value);
+  };
+  pushCandidate(input.envelopeRecord?.targetRead);
+  pushCandidate(input.envelopeRecord?.record && isRecordValue(input.envelopeRecord.record)
+    ? (input.envelopeRecord.record as Record<string, unknown>).targetRead
+    : undefined);
+  pushCandidate(isRecordValue(input.rawData) ? (input.rawData as Record<string, unknown>).targetRead : undefined);
+  const nested = isRecordValue(input.rawData) && isRecordValue((input.rawData as Record<string, unknown>).record)
+    ? ((input.rawData as Record<string, unknown>).record as Record<string, unknown>).targetRead
+    : undefined;
+  pushCandidate(nested);
+
+  const generation = input.context.coreSession?.versionClock.current()
+    ?? input.proofStore.currentGeneration();
+
+  for (const targetRead of candidates) {
+    const fields = Array.isArray(targetRead.fields) ? targetRead.fields : [];
+    if (fields.length === 0) continue;
+    const identityRaw = isRecordValue(targetRead.identity) ? targetRead.identity : undefined;
+    if (!identityRaw) continue;
+    const identity: NativeSourceIdentity = {
+      workspaceId,
+      outerId: typeof identityRaw.outerId === 'string' && identityRaw.outerId !== ''
+        ? identityRaw.outerId
+        : typeof identityRaw.sourceUri === 'string' ? identityRaw.sourceUri : '',
+      childChain: Array.isArray(identityRaw.childChain)
+        ? identityRaw.childChain.map((item) => String(item))
+        : [],
+      domain: (typeof identityRaw.domain === 'string' ? identityRaw.domain : 'param') as NativeSourceIdentity['domain'],
+      namespace: typeof identityRaw.namespace === 'string' ? identityRaw.namespace : '',
+      objectKey: typeof identityRaw.objectKey === 'string' ? identityRaw.objectKey : '',
+      ...(typeof identityRaw.sourceUri === 'string' ? { sourceUri: identityRaw.sourceUri } : {})
+    };
+    if (!identity.outerId || !identity.objectKey) continue;
+    const versionRaw = isRecordValue(targetRead.version) ? targetRead.version : {};
+    const outerFileHash = typeof versionRaw.outerFileHash === 'string' ? versionRaw.outerFileHash : undefined;
+    const version: ResourceVersion = {
+      outerFileHash: outerFileHash ?? '',
+      ...(typeof versionRaw.dataHash === 'string' ? { dataHash: versionRaw.dataHash } : {}),
+      ...(versionRaw.sourceRevision !== undefined
+        && (typeof versionRaw.sourceRevision === 'number' || typeof versionRaw.sourceRevision === 'string')
+        ? { sourceRevision: versionRaw.sourceRevision }
+        : {}),
+      generation: typeof versionRaw.generation === 'number' ? versionRaw.generation : generation
+    };
+    // Only fields that appear in the final envelope data are delivered.
+    const deliveredFieldIds: string[] = [];
+    const observationFields: Array<{ fieldId: string; value: unknown; delivered: boolean }> = [];
+    const envelopeRecord = input.envelopeRecord ?? {};
+    const envelopeFieldsSource = isRecordValue(envelopeRecord.fields)
+      ? undefined
+      : Array.isArray(envelopeRecord.fields)
+        ? envelopeRecord.fields
+        : Array.isArray((envelopeRecord as { targetRead?: { fields?: unknown } }).targetRead?.fields)
+          ? (envelopeRecord as { targetRead: { fields: unknown[] } }).targetRead.fields
+          : Array.isArray((isRecordValue(input.rawData) ? (input.rawData as Record<string, unknown>).fields : undefined))
+            ? (input.rawData as Record<string, unknown>).fields as unknown[]
+            : fields;
+    for (const field of fields) {
+      if (!isRecordValue(field) || typeof field.fieldId !== 'string') continue;
+      const fieldId = field.fieldId;
+      const presentInEnvelope = Array.isArray(envelopeFieldsSource)
+        ? envelopeFieldsSource.some((item) => isRecordValue(item) && item.fieldId === fieldId)
+        : true;
+      if (!presentInEnvelope) continue;
+      deliveredFieldIds.push(fieldId);
+      observationFields.push({ fieldId, value: field.value, delivered: true });
+    }
+    if (observationFields.length === 0) continue;
+    input.proofStore.acceptDeliveredRead({
+      principal,
+      workspaceId,
+      identity,
+      version,
+      domain: identity.domain,
+      observation: {
+        kind: 'param-fields',
+        fields: observationFields,
+        completeness: typeof targetRead.completeness === 'string'
+          ? targetRead.completeness as NativeReadCompleteness
+          : 'complete',
+        truncated: false
+      },
+      finalVisible: {
+        hasTargetRead: true,
+        deliveredFieldIds,
+        projection: 'param-fields'
+      }
+    });
+  }
+}
+

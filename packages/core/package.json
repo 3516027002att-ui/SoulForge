@@ -220,7 +220,12 @@
     "test:audit-sf-28-unit": "tsc -b ../shared . && node dist/testing/runAuditSf28Smoke.js --layer unit",
     "test:audit-sf-29-unit": "tsc -b ../shared . && node dist/testing/runAuditSf29Smoke.js --layer unit",
     "test:audit-sf-29-native": "tsc -b ../shared . && node dist/testing/runAuditSf29Smoke.js --layer native",
-    "test:param-rag-identity-convergence": "tsc -b ../shared . && node dist/testing/runParamRagIdentityConvergenceSmoke.js"
+    "test:param-rag-identity-convergence": "tsc -b ../shared . && node dist/testing/runParamRagIdentityConvergenceSmoke.js",
+    "test:reference-query": "tsc -b ../shared . && node dist/testing/runReferenceQuerySmoke.js",
+    "test:native-read-proof": "tsc -b ../shared . && node dist/testing/runNativeReadProofSmoke.js",
+    "test:reference-cli-session": "tsc -b ../shared . && node dist/testing/runReferenceCliSessionSmoke.js",
+    "test:reference-optimization-performance": "tsc -b ../shared . && node dist/testing/runReferenceOptimizationPerformanceSmoke.js",
+    "test:reference-optimization-native": "tsc -b ../shared . && node dist/testing/runReferenceOptimizationNativeSmoke.js"
   },
   "dependencies": {
     "@soulforge/shared": "0.0.0",

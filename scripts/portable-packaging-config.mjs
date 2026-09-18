@@ -81,7 +81,7 @@ const EXPECTED_EXTRA_RESOURCES = [
   {
     from: '../../prompt',
     to: 'prompt',
-    filter: ['system.md', 'rag-embedding.md', 'event-reference.md', 'agent-task-record.md']
+    filter: ['system.md', 'rag-embedding.md', 'event-reference.md', 'native-read-safety.md']
   },
   { from: '../../mutter.md', to: 'mutter.md', filter: ['mutter.md'] },
   {

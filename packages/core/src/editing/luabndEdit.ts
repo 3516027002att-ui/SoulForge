@@ -53,8 +53,11 @@ export type LuabndListResult =
   | {
       ok: true;
       containerPath: string;
+      containerHash: string;
       entryCount: number;
       scriptCount: number;
+      offset: number;
+      nextCursor?: string;
       scripts: Array<{
         name: string;
         sanitizedName: string;
@@ -112,6 +115,7 @@ async function resolveLuabndPath(edit: NativeEditSession, file: string): Promise
 export async function listLuabndScripts(input: {
   edit: NativeEditSession;
   file: string;
+  cursor?: string;
 }): Promise<LuabndListResult> {
   const containerPath = await resolveLuabndPath(input.edit, input.file);
   if (!containerPath) {
@@ -151,7 +155,7 @@ export async function listLuabndScripts(input: {
   }
 
   const data = bridgeResult.data as any;
-  const scripts = Array.isArray(data.scripts)
+  const allScripts = Array.isArray(data.scripts)
     ? data.scripts.map((s: any) => ({
         name: s.name,
         sanitizedName: s.sanitizedName,
@@ -160,12 +164,23 @@ export async function listLuabndScripts(input: {
         embeddedSymbolsSample: s.embeddedSymbolsSample ?? []
       }))
     : [];
+  const pageSize = 64;
+  const offset = decodeListCursor(input.cursor);
+  const scripts = allScripts.slice(offset, offset + pageSize);
+  const nextCursor = offset + scripts.length < allScripts.length
+    ? encodeListCursor(offset + scripts.length)
+    : undefined;
+  const bytes = await readFile(containerPath);
+  const containerHash = String(data.sourceHash ?? data.containerHash ?? createHash('sha256').update(bytes).digest('hex'));
 
   return {
     ok: true,
     containerPath,
-    entryCount: data.entryCount ?? scripts.length,
-    scriptCount: data.scriptCount ?? scripts.length,
+    containerHash,
+    entryCount: data.entryCount ?? allScripts.length,
+    scriptCount: data.scriptCount ?? allScripts.length,
+    offset,
+    ...(nextCursor ? { nextCursor } : {}),
     scripts,
     diagnostics
   };
@@ -177,6 +192,7 @@ export async function readLuabndScript(input: {
   childPath?: string;
   expectedContainerHash?: string;
   expectedChildHash?: string;
+  cursor?: string;
 }): Promise<LuabndReadResult> {
   const containerPath = await resolveLuabndPath(input.edit, input.file);
   if (!containerPath) {
@@ -205,14 +221,14 @@ export async function readLuabndScript(input: {
         sanitizedName: 'SCRIPTS_IN_CONTAINER',
         size: 0,
         uncompressedSize: 0,
-        contentHash: '',
+        contentHash: listRes.containerHash,
         isBytecode: false,
         magic: '',
         variant: '',
         isPlainText: true,
         embeddedSymbols: names,
         textPreview: `Available scripts in ${basename(containerPath)} (${names.length}):\n` + names.join('\n'),
-        sourceHash: ''
+        sourceHash: listRes.containerHash
       },
       diagnostics: listRes.diagnostics
     };
@@ -301,6 +317,21 @@ export async function readLuabndScript(input: {
     script: scriptSnapshot,
     diagnostics
   };
+}
+
+function encodeListCursor(offset: number): string {
+  return `luabnd_${Buffer.from(JSON.stringify({ v: 1, offset }), 'utf8').toString('base64url')}`;
+}
+
+function decodeListCursor(cursor?: string): number {
+  if (!cursor) return 0;
+  try {
+    const raw = JSON.parse(Buffer.from(cursor.replace(/^luabnd_/iu, ''), 'base64url').toString('utf8')) as { v?: number; offset?: number };
+    const offset = raw.offset;
+    return raw.v === 1 && typeof offset === 'number' && Number.isSafeInteger(offset) && offset >= 0 ? offset : 0;
+  } catch {
+    return 0;
+  }
 }
 
 export async function setLuabndScript(input: {

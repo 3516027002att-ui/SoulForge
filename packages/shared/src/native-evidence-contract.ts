@@ -47,6 +47,8 @@ export interface NativeSourceIdentity {
   namespace: string;
   objectKey: string;
   claimKey?: string;
+  /** Optional host-resolved source URI; not a primary key. */
+  sourceUri?: string;
 }
 
 export interface NativeSourceVersion {
