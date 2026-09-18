@@ -232,6 +232,12 @@ export const TIER_BY_SCRIPT = Object.freeze({
   // decode + ReferenceQueryService + projection 的行为契约；缺生产符号时
   // 失败关闭（behavior_not_implemented），不静默跳过。纯逻辑 + fixture ports，归 unit。
   'test:reference-query': 'unit',
+  // CLI/desktop 共享 resolver、RAG freshness 与持久 KnowledgeStore 的离线
+  // association smoke；fixture 不提升 native authority。
+  'test:reference-association': 'unit',
+  // 真实工作区 CLI 链路；未设置 SOULFORGE_REFERENCE_TEST_* 时明确
+  // not-attempted，具备环境时才进入真实资源验证。
+  'test:reference-real-cli': 'native',
   // NativeReadProofStore + buildWriteRequirement：读取证明 → 写入授权契约。
   // 证明是宿主事实，不得由模型 verified/台账提供。纯逻辑，归 unit。
   'test:native-read-proof': 'unit',
