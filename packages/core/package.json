@@ -64,6 +64,7 @@
     "test:reference-query": "tsc -b ../shared . && node dist/testing/runReferenceQuerySmoke.js && node dist/testing/runParamTextReferenceCacheSmoke.js",
     "test:knowledge-store-sqlite": "tsc -b ../shared . && node dist/testing/runKnowledgeStoreSqliteSmoke.js",
     "test:reference-cli-session": "tsc -b ../shared . && node dist/testing/runReferenceCliSessionSmoke.js",
+    "test:cli-semantic-bootstrap": "tsc -b ../shared . && node dist/testing/runCliSemanticBootstrapSmoke.js",
     "test:reference-optimization-native": "tsc -b ../shared . && node dist/testing/runReferenceOptimizationNativeSmoke.js",
     "test:reference-optimization-performance": "tsc -b ../shared . && node dist/testing/runReferenceOptimizationPerformanceSmoke.js",
     "test:emedf-completion-catalog": "tsc -b ../shared . && node dist/testing/runEmedfCompletionCatalogSmoke.js",

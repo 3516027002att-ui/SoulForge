@@ -13,6 +13,7 @@ import type {
   RagChunk,
   ReferenceEdge,
   ResourceKind,
+  ScriptExport,
   SymbolBundle,
   TaeAnimSymbol,
   TaeEventSymbol,
@@ -151,6 +152,8 @@ export class WorkspaceIndex {
   private paramExports: ParamExport[] = [];
   private msgExports: MsgExport[] = [];
   private taeExports: TaeExport[] = [];
+  /** On-demand/native LUABND projections used by script reference edges. */
+  private scriptExports: ScriptExport[] = [];
   private references: ReferenceEdge[] = [];
   private actionBinderMembershipCandidates: BinderMembershipCandidate[] = [];
   private actionBinderMembershipReady = false;
@@ -193,6 +196,7 @@ export class WorkspaceIndex {
     clone.paramExports = cloneParamExports(this.paramExports);
     clone.msgExports = structuredClone(this.msgExports);
     clone.taeExports = structuredClone(this.taeExports);
+    clone.scriptExports = structuredClone(this.scriptExports);
     clone.references = structuredClone(this.references);
     clone.actionBinderMembershipCandidates = structuredClone(this.actionBinderMembershipCandidates);
     clone.actionBinderMembershipReady = this.actionBinderMembershipReady;
@@ -607,6 +611,7 @@ export class WorkspaceIndex {
       if (!keep) removed.taeExports += 1;
       return keep;
     });
+    this.scriptExports = this.scriptExports.filter((item) => !isChangedSource(item.sourceUri));
 
     const referencesRebuilt = uniqueSources.length > 0 ? this.rebuildReferences().edges.length : this.references.length;
     this.recomputeCoverageStates();
@@ -801,6 +806,28 @@ export class WorkspaceIndex {
   }
 
   /**
+   * Publish a bounded LUABND catalog or a native child read into the shared
+   * semantic snapshot. A list operation may only provide catalog-only or
+   * bytecode children; those remain visible for containment, while the source
+   * is marked partial until decodable source/IR coverage is available.
+   */
+  upsertScriptExport(value: ScriptExport): boolean {
+    if (!this.acceptNativeProjection(value.sourceUri, projectionVersion(value), `script:${value.sourceUri}`).accepted) {
+      return false;
+    }
+    this.scriptExports = replaceByKey(this.scriptExports, value.sourceUri, (item) => item.sourceUri, value);
+    const incomplete = value.catalogComplete !== true
+      || value.scripts.some((script) => (
+        script.contentKind === 'catalog-only'
+        || (script.contentKind === 'bytecode' && !script.sourceText)
+      ));
+    if (incomplete) this.partialSources.add(value.sourceUri);
+    else this.partialSources.delete(value.sourceUri);
+    this.recomputeCoverageStates();
+    return true;
+  }
+
+  /**
    * 按精确 sourceUri + TAE entry selector + animId 读取一个 TAE animation identity。
    *
    * sourceUri 不做 alias/fuzzy 匹配，animId 也不跨来源合并；同一来源出现
@@ -845,7 +872,8 @@ export class WorkspaceIndex {
       ...(this.mapExports.length > 0 ? { maps: this.mapExports } : {}),
       ...(this.paramExports.length > 0 ? { params: this.paramExports } : {}),
       ...(this.msgExports.length > 0 ? { msgs: this.msgExports } : {}),
-      ...(this.taeExports.length > 0 ? { tae: this.taeExports } : {})
+      ...(this.taeExports.length > 0 ? { tae: this.taeExports } : {}),
+      ...(this.scriptExports.length > 0 ? { scripts: this.scriptExports } : {})
     };
   }
 
@@ -897,7 +925,34 @@ export class WorkspaceIndex {
   }
 
   searchEvents(query: string, limit = 100): Array<SearchResult<EventSymbol>> {
-    return searchSymbols(this.eventExports.flatMap((item) => item.events), query, limit, eventSearchText);
+    return this.searchEventsPage(query, 0, limit).items;
+  }
+
+  /**
+   * Return a deterministic event-search window over the complete indexed
+   * candidate set. The old searchEvents method applied the limit before the
+   * host could mint a continuation cursor, so a truncated Agent result had no
+   * safe way to request the next candidates.
+   */
+  searchEventsPage(query: string, offset = 0, limit = 100): {
+    items: Array<SearchResult<EventSymbol>>;
+    total: number;
+    offset: number;
+    returned: number;
+    hasMore: boolean;
+  } {
+    const events = this.eventExports.flatMap((item) => item.events);
+    const ranked = searchSymbols(events, query, events.length, eventSearchText);
+    const safeOffset = Math.max(0, Math.trunc(offset));
+    const safeLimit = Math.max(1, Math.trunc(limit));
+    const items = ranked.slice(safeOffset, safeOffset + safeLimit);
+    return {
+      items,
+      total: ranked.length,
+      offset: safeOffset,
+      returned: items.length,
+      hasMore: safeOffset + items.length < ranked.length
+    };
   }
 
   /** Exact event lookup used after the caller has resolved a source file. */
@@ -1022,7 +1077,7 @@ export class WorkspaceIndex {
 
   private recomputeCoverageStates(): void {
     this.coverageStore.clear();
-    const domains: ResourceKind[] = ['event', 'map', 'param', 'msg', 'action'];
+    const domains: ResourceKind[] = ['event', 'map', 'param', 'msg', 'action', 'script'];
     for (const domain of domains) {
       const files = [...this.filesByUri.values()].filter((file) => file.resourceKind === domain);
       const coverageFiles = files.map((file) => this.partialSources.has(file.sourceUri)
@@ -1080,7 +1135,8 @@ export class WorkspaceIndex {
       ...semanticSourceUris(this, 'map'),
       ...semanticSourceUris(this, 'param'),
       ...semanticSourceUris(this, 'msg'),
-      ...semanticSourceUris(this, 'action')
+      ...semanticSourceUris(this, 'action'),
+      ...semanticSourceUris(this, 'script')
     ]);
     const allExpected = files.map((file) => file.sourceUri);
     const allCovered = allProjectedSourceUris.length > 0
@@ -1132,6 +1188,9 @@ function semanticSourceUris(index: WorkspaceIndex, domain: ResourceKind): string
   }
   if (domain === 'action') {
     return uniqueStrings((bundle.tae ?? []).map((item) => item.sourceUri));
+  }
+  if (domain === 'script') {
+    return uniqueStrings((bundle.scripts ?? []).map((item) => item.sourceUri));
   }
   return [];
 }

@@ -95,6 +95,7 @@
     "test:knowledge-store-sqlite": "npm run test:knowledge-store-sqlite -w @soulforge/core",
     "test:reference-query": "npm run test:reference-query -w @soulforge/core",
     "test:reference-cli-session": "npm run test:reference-cli-session -w @soulforge/core",
+    "test:cli-semantic-bootstrap": "npm run test:cli-semantic-bootstrap -w @soulforge/core",
     "test:reference-optimization-native": "npm run test:reference-optimization-native -w @soulforge/core",
     "test:reference-optimization-performance": "npm run test:reference-optimization-performance -w @soulforge/core",
     "test:model-service-configuration": "npm run test:model-service-configuration -w @soulforge/core",

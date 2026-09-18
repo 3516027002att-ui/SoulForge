@@ -17,6 +17,11 @@ import { disposeBridgeDaemonPool } from '../bridge/runBridge.js';
 import { KnowledgeStore } from '../knowledge/knowledgeStore.js';
 import { SqliteKnowledgeStorePersistence } from '../knowledge/sqliteKnowledgeStore.js';
 import { openWorkspaceDatabase } from '../storage/sqliteDatabase.js';
+import { WorkspaceDataRepository } from '../storage/workspaceDataRepository.js';
+import {
+  isNativeSemanticBundleCurrent,
+  type SemanticCacheProvider
+} from '../workspace/semanticFileCache.js';
 
 export interface LocalCliSessionOptions {
   overlayRoot: string;
@@ -26,6 +31,8 @@ export interface LocalCliSessionOptions {
   principal?: string;
   /** 执行一次完整语义分析；未开启时仍完成外层扫描与引用图构建。 */
   analyze?: boolean;
+  /** 复用并更新受管 workspace.db 中经过 source identity 校验的语义缓存。 */
+  useCache?: boolean;
   onProgress?: (progress: AnalyzeWorkspaceProgress) => void;
   /**
    * 为 true 时 SQLite 打不开则整个会话失败（写入失败关闭）；
@@ -59,10 +66,55 @@ export async function openLocalCliSession(options: LocalCliSessionOptions): Prom
     game: options.game ?? 'sekiro'
   });
   const workspaceId = session.meta.workspaceId;
+  const shouldAnalyze = options.analyze !== false;
+  const useCache = options.useCache !== false && shouldAnalyze;
+  const root = cliWorkspaceRoot(workspaceId);
+  await mkdir(join(root, 'staging'), { recursive: true });
+  await mkdir(join(root, 'backups'), { recursive: true });
+  await mkdir(join(root, 'recovery'), { recursive: true });
+
+  let semanticDatabase: ReturnType<typeof openWorkspaceDatabase> | null = null;
+  let semanticCache: SemanticCacheProvider | undefined;
+  if (useCache) {
+    try {
+      semanticDatabase = openWorkspaceDatabase(join(root, 'workspace.db'));
+      const repository = new WorkspaceDataRepository(semanticDatabase, workspaceId);
+      semanticCache = {
+        load: (file) => {
+          if (!file.sha256) return null;
+          const row = repository.getSemanticFileCacheRow(file.relativePath);
+          if (!row || row.resourceKind !== file.resourceKind || row.fileSha256 !== file.sha256) return null;
+          try {
+            const payload = JSON.parse(row.payloadJson) as import('@soulforge/shared').SymbolBundle;
+            return isNativeSemanticBundleCurrent(file, payload) ? payload : null;
+          } catch {
+            return null;
+          }
+        },
+        save: (file, payload) => {
+          if (!file.sha256) return;
+          repository.upsertSemanticFileCache({
+            relativePath: file.relativePath,
+            fileSha256: file.sha256,
+            resourceKind: file.resourceKind,
+            payload,
+            mtimeMs: file.mtimeMs
+          });
+        }
+      };
+    } catch (error) {
+      options.onFallbackWarning?.(
+        `CLI_SEMANTIC_CACHE_UNAVAILABLE: 语义缓存数据库不可用，将执行当前会话的原生分析：${error instanceof Error ? error.message : String(error)}`
+      );
+      try { semanticDatabase?.close(); } catch { /* ignore */ }
+      semanticDatabase = null;
+    }
+  }
+
   const scan = await scanWorkspace({
     workspaceRoot: session.layers.overlayRoot,
     game: session.meta.game,
-    includeContentHashes: false,
+    includeContentHashes: shouldAnalyze || Boolean(semanticCache),
     onProgress: (progress) => options.onProgress?.({
       phase: 'scan',
       current: progress.scannedFiles,
@@ -74,12 +126,14 @@ export async function openLocalCliSession(options: LocalCliSessionOptions): Prom
   if (scan.files.some((file) => file.resourceKind === 'param' || file.relativePath.toLowerCase().includes('.param'))) {
     workspaceIndex.setParamSemanticState('warming_up');
   }
-  if (options.analyze === true) {
+  if (shouldAnalyze) {
     const analyzed = await analyzeWorkspace({
       workspaceRoot: session.layers.overlayRoot,
       files: scan.files,
+      ...(semanticCache ? { semanticCache } : {}),
       inspectNativeResources: true,
       parseTextResources: true,
+      ...(session.layers.baseRoot ? { oodleRuntimeRoot: session.layers.baseRoot } : {}),
       ...(options.onProgress ? { onProgress: options.onProgress } : {})
     });
     workspaceIndex = analyzed.index;
@@ -87,15 +141,10 @@ export async function openLocalCliSession(options: LocalCliSessionOptions): Prom
     workspaceIndex.rebuildReferences();
     if (workspaceIndex.getStats().paramRows > 0) workspaceIndex.setParamSemanticState('ready');
   }
-  const root = cliWorkspaceRoot(workspaceId);
-  await mkdir(join(root, 'staging'), { recursive: true });
-  await mkdir(join(root, 'backups'), { recursive: true });
-  await mkdir(join(root, 'recovery'), { recursive: true });
-
   let operationLog: OperationLogStore;
   let durableLog = true;
   let knowledgeStore: KnowledgeStore | null = null;
-  let knowledgeDatabase: ReturnType<typeof openWorkspaceDatabase> | null = null;
+  let knowledgeDatabase: ReturnType<typeof openWorkspaceDatabase> | null = semanticDatabase;
   try {
     operationLog = openSqliteOperationLogStore({
       databasePath: join(root, 'workspace.db'),
@@ -116,7 +165,7 @@ export async function openLocalCliSession(options: LocalCliSessionOptions): Prom
 
   if (durableLog) {
     try {
-      knowledgeDatabase = openWorkspaceDatabase(join(root, 'workspace.db'));
+      if (!knowledgeDatabase) knowledgeDatabase = openWorkspaceDatabase(join(root, 'workspace.db'));
       knowledgeStore = new KnowledgeStore({
         persistence: new SqliteKnowledgeStorePersistence(knowledgeDatabase, {
           workspaceId,

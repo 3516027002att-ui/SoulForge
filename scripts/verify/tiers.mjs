@@ -191,6 +191,7 @@ export const TIER_BY_SCRIPT = Object.freeze({
   'test:first-party-schema-native-coverage': 'native',
   'test:reference-query': 'unit',
   'test:reference-cli-session': 'unit',
+  'test:cli-semantic-bootstrap': 'unit',
   'test:reference-optimization-native': 'native',
   'test:reference-optimization-performance': 'unit',
   'test:emevd-plan-commit': 'unit',

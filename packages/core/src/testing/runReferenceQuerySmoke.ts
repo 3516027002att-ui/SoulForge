@@ -12,6 +12,8 @@ import { existsSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import {
   decodeReferenceQueryInput,
+  defaultReadSessionManager,
+  parseOpaqueCursor,
   REFERENCE_DEPTH_MAX,
   REFERENCE_LIMIT_MAX
 } from '@soulforge/shared';
@@ -58,6 +60,7 @@ import {
 } from '../references/eventReferenceProvider.js';
 import type { EmedfRegistry } from '../emevd/emedfSchema.js';
 import { createDefaultToolRegistry, type ToolContext } from '../ai/toolRegistry.js';
+import { createAgentToolBridge } from '../ai/agentToolBridge.js';
 import { WorkspaceIndex } from '../indexing/workspaceIndex.js';
 
 const failures: string[] = [];
@@ -461,6 +464,92 @@ const eExports = [
 const eGraph = buildReferenceGraph({ events: eExports as never }, { registry: smokeRegistry });
 const eEdges = eGraph.edges;
 
+// Regression: find_text_references must rebuild the current graph before
+// answering. A native/event projection may arrive after the text projection;
+// returning only the stale container edge hides the event->text relation.
+const textReferenceIndex = new WorkspaceIndex('text-reference-fixture');
+const textReferenceUri = `${E_FILE_A}#text/777`;
+textReferenceIndex.upsertMsgExport({
+  category: 'fixture',
+  sourceHash: fixtureHash('text-reference'),
+  entries: [{
+    uri: textReferenceUri,
+    sourceUri: E_FILE_A,
+    category: 'fixture',
+    textId: 777,
+    text: 'fixture text'
+  }]
+});
+textReferenceIndex.upsertEventExport(emevdExport(E_FILE_A, 'text-reference', [{
+  eventId: 701,
+  instructions: [{
+    index: 0,
+    name: 'ShowDialogText',
+    args: [{ name: 'messageId', value: 777, argIndex: 0, role: 'textId', roleSource: 'registry' }]
+  }]
+}]));
+const textReferenceResult = await createDefaultToolRegistry().run(
+  'find_text_references',
+  { textId: 777, category: 'fixture' },
+  { workspaceIndex: textReferenceIndex, mode: 'plan' }
+);
+const textReferenceRecord = textReferenceResult.ok
+  ? (textReferenceResult.data as { matches?: Array<{ references?: Array<{ kind?: string; fromUri?: string }> }> })
+  : undefined;
+check('text-reference/rebuilds-current-event-edges', textReferenceResult.ok
+  && textReferenceRecord?.matches?.[0]?.references?.some((edge) =>
+    edge.kind === 'references_text' && edge.fromUri?.endsWith('#event/701')) === true,
+  `文本反向引用未包含当前事件边：${JSON.stringify(textReferenceResult.error ?? textReferenceRecord)}`);
+
+// Regression: indexed event search must return a host-issued continuation
+// cursor instead of silently truncating the candidate set.
+const cursorIndex = new WorkspaceIndex('event-search-cursor-fixture');
+cursorIndex.upsertEventExport({
+  sourceHash: fixtureHash('cursor-events'),
+  events: Array.from({ length: 5 }, (_, index) => ({
+    uri: `${E_FILE_A}#event/${800 + index}`,
+    sourceUri: E_FILE_A,
+    eventId: 800 + index,
+    name: 'CursorEvent',
+    instructions: []
+  }))
+});
+const cursorBridge = createAgentToolBridge({
+  registry: createDefaultToolRegistry(),
+  context: { workspaceIndex: cursorIndex, mode: 'plan' }
+});
+const cursorPage1 = await cursorBridge.executeTool({
+  id: 'event-search-page-1',
+  name: 'search_events',
+  argumentsJson: JSON.stringify({ query: 'CursorEvent', limit: 2 })
+});
+const cursorEnvelope1 = JSON.parse(cursorPage1.content) as {
+  data?: { record?: { nextCursor?: string; matches?: Array<{ item?: { eventId?: number } }> } };
+};
+check('event-search/cursor-issued', cursorPage1.ok === true
+  && typeof cursorEnvelope1.data?.record?.nextCursor === 'string',
+  `事件搜索截断后没有 opaque cursor：${cursorPage1.content}`);
+if (typeof cursorEnvelope1.data?.record?.nextCursor === 'string') {
+  // Simulate the one-shot CLI process ending between calls. The continuation
+  // must still work from source hash + scope, not only from in-memory state.
+  const cursorPayload = parseOpaqueCursor(cursorEnvelope1.data.record.nextCursor);
+  defaultReadSessionManager.invalidate(cursorPayload.sessionId);
+  const cursorPage2 = await cursorBridge.executeTool({
+    id: 'event-search-page-2',
+    name: 'search_events',
+    argumentsJson: JSON.stringify({ cursor: cursorEnvelope1.data.record.nextCursor, limit: 2 })
+  });
+  const cursorEnvelope2 = JSON.parse(cursorPage2.content) as {
+    data?: { record?: { matches?: Array<{ item?: { eventId?: number } }>; offset?: number } };
+  };
+  const ids1 = (cursorEnvelope1.data?.record?.matches ?? []).map((match) => match.item?.eventId);
+  const ids2 = (cursorEnvelope2.data?.record?.matches ?? []).map((match) => match.item?.eventId);
+  check('event-search/cursor-continues', cursorPage2.ok === true
+    && ids2.length === 2
+    && ids1.every((id) => !ids2.includes(id)),
+  `事件搜索 cursor 续页失败：${cursorPage2.content}`);
+}
+
 // Trusted metadata flag role → confirmed high.
 check('E01/trusted-role-confirmed', eEdges.some((edge) =>
   edge.fromUri === `${E_FILE_A}#event/100` && edge.toUri === 'flag://5000'
@@ -681,6 +770,26 @@ check('C02/partial-catalog-diagnostic', partialGraph.diagnostics.some((d) =>
 check('C03/partial-require-unverified', partialGraph.diagnostics.some((d) =>
   d.code === 'SCRIPT_REQUIRE_TARGET_UNVERIFIED'),
   '行为未实现：目录不全时 require 目标存在性未降为 unverified（T06 步骤 2）');
+
+// Production WorkspaceIndex must retain script exports instead of leaving the
+// script domain absent from toSymbolBundle/coverage after a native child read.
+const scriptIndex = new WorkspaceIndex('script-index-fixture');
+const indexedScriptExport = buildScriptBundle().scripts?.[0];
+if (indexedScriptExport) {
+  scriptIndex.upsertScriptExport(indexedScriptExport);
+  const indexedBundle = scriptIndex.toSymbolBundle();
+  check('script-index/export-preserved', indexedBundle.scripts?.length === 1
+    && indexedBundle.scripts[0]?.scripts.length === indexedScriptExport.scripts.length,
+  'WorkspaceIndex 丢弃了脚本容器投影，后续关联查询只能返回 not_indexed');
+  const scriptCoverage = scriptIndex.getCoverageSnapshot().find((item) => item.domain === 'script');
+  check('script-index/coverage-visible', scriptCoverage !== undefined
+    && ['partial', 'complete', 'source_unavailable'].includes(scriptCoverage.status),
+  `脚本 coverage 未登记：${JSON.stringify(scriptIndex.getCoverageSnapshot())}`);
+  const indexedScriptGraph = scriptIndex.rebuildReferences();
+  check('script-index/references-built', indexedScriptGraph.edges.some((edge) =>
+    edge.kind === 'contains' || edge.kind === 'invokes_script'),
+  '脚本容器进入 WorkspaceIndex 后没有重建脚本关系边');
+}
 
 // 8d. Source span equals the real statement slice (T06 step 9).
 const spanCall = luaParse.calls.find((call) => call.callee === 'RequestAsset');

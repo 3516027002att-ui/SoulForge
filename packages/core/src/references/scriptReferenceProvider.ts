@@ -166,7 +166,9 @@ export function buildScriptReferenceEdges(
         });
       }
 
-      if (child.contentKind !== 'source') {
+      const parseableView = child.contentKind === 'source'
+        || (child.contentKind === 'decompiled-view' && child.sourceText !== undefined);
+      if (!parseableView) {
         stats.nonSourceChildren += 1;
         if (child.contentKind === 'decompiled-view') {
           pushDiagnostic({
@@ -195,6 +197,15 @@ export function buildScriptReferenceEdges(
           sourceUri: child.sourceUri
         });
         continue;
+      }
+
+      if (child.contentKind === 'decompiled-view') {
+        pushDiagnostic({
+          severity: 'info',
+          code: 'SCRIPT_DECOMPILED_VIEW_PARSED',
+          message: `${child.uri} 使用 SoulForge first-party 反编译视图参与静态关联；该关系不是原始源码写回证明。`,
+          sourceUri: child.sourceUri
+        });
       }
 
       const parsed: LuaParseResult = parseLuaStaticSubset(child.sourceText);
@@ -356,13 +367,14 @@ function emitCallEdges(context: CallContext, call: LuaCall, statementIndex: numb
     });
   } else {
     const target = candidates[0]!;
-    stats.confirmed += 1;
+    const decompiledView = child.contentKind === 'decompiled-view';
+    if (!decompiledView) stats.confirmed += 1;
     edges.push({
       fromUri: child.uri,
       toUri: target.uri,
       kind: 'invokes_script',
-      confidence: 'high',
-      reason: `规则 ${rule.ruleId}：${call.callee}(${moduleName}) 在同容器完整目录中唯一命中 ${target.entryName ?? target.childChain.join('/')}`,
+      confidence: decompiledView ? 'medium' : 'high',
+      reason: `规则 ${rule.ruleId}：${call.callee}(${moduleName}) 在同容器完整目录中唯一命中 ${target.entryName ?? target.childChain.join('/')}${decompiledView ? '（first-party 反编译视图）' : ''}`,
       evidence: [evidence()]
     });
   }

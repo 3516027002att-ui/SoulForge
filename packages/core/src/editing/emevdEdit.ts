@@ -131,6 +131,9 @@ export interface EmevdInstructionSearchResult {
   ok: true;
   query: string;
   matches: EmevdInstructionSearchMatch[];
+  offset: number;
+  limit: number;
+  returned: number;
   scannedFiles: number;
   scannedEvents: number;
   complete: boolean;
@@ -167,6 +170,7 @@ export async function searchEmevdInstructionMatches(input: {
   files: readonly IndexedFile[];
   query: string;
   limit?: number;
+  offset?: number;
   signal?: AbortSignal;
 }): Promise<EmevdInstructionSearchResponse> {
   const query = input.query.trim();
@@ -182,6 +186,7 @@ export async function searchEmevdInstructionMatches(input: {
     };
   }
   const limit = Math.max(1, Math.min(200, Math.trunc(input.limit ?? 50)));
+  const offset = Math.max(0, Math.trunc(input.offset ?? 0));
   const registry = loadProductionRegistry(input.edit);
   if (!registry.ok) {
     return { ok: false, query, error: registry.error, diagnostics: registry.diagnostics };
@@ -198,6 +203,7 @@ export async function searchEmevdInstructionMatches(input: {
   let scannedEvents = 0;
   let complete = true;
   let truncated = false;
+  let matchedCount = 0;
 
   for (const file of files) {
     if (input.signal?.aborted) {
@@ -233,6 +239,15 @@ export async function searchEmevdInstructionMatches(input: {
         for (let index = 0; index < event.instructions.length; index += 1) {
           const instruction = readEventInstruction(event.instructions[index]!, index, registry.registry);
           if (!instructionSearchMatches(instruction, needle)) continue;
+          if (matchedCount < offset) {
+            matchedCount += 1;
+            continue;
+          }
+          if (matches.length >= limit) {
+            truncated = true;
+            complete = false;
+            break;
+          }
           matches.push({
             sourceUri: file.sourceUri,
             eventId: event.eventId,
@@ -242,11 +257,7 @@ export async function searchEmevdInstructionMatches(input: {
             ...(full.outerFileHash ? { outerFileHash: full.outerFileHash } : {}),
             authority: full.authority === 'native-verified' ? 'native-verified-event' : 'native-read-event'
           });
-          if (matches.length >= limit) {
-            truncated = true;
-            complete = false;
-            break;
-          }
+          matchedCount += 1;
         }
         if (truncated) break;
       }
@@ -261,7 +272,19 @@ export async function searchEmevdInstructionMatches(input: {
       });
     }
   }
-  return { ok: true, query, matches, scannedFiles, scannedEvents, complete, truncated, diagnostics };
+  return {
+    ok: true,
+    query,
+    matches,
+    offset,
+    limit,
+    returned: matches.length,
+    scannedFiles,
+    scannedEvents,
+    complete,
+    truncated,
+    diagnostics
+  };
 }
 
 /**

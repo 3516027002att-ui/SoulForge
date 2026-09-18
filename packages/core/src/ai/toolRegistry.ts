@@ -1,3 +1,4 @@
+import { createHash, randomUUID } from 'node:crypto';
 import type {
   AiToolPermissionLevel,
   ConfirmationReceipt,
@@ -7,6 +8,8 @@ import type {
   PatchProposal,
   ReferenceEdge,
   ResourceKind,
+  ScriptExport,
+  ScriptSymbol,
   TaeAnimSymbol,
   TaeEventSymbol,
   NativeEditDomain,
@@ -946,7 +949,7 @@ export function createDefaultToolRegistry(): ToolRegistry {
       + 'candidate instruction against this workspace event and EMEDF.',
     permission: 'read',
     permissionLevel: 'read',
-    inputSchema: { query: 'string?', file: 'string?', eventId: 'number?', limit: 'number?' },
+    inputSchema: { query: 'string?', file: 'string?', eventId: 'number?', limit: 'number?', cursor: 'string?' },
     run: async (input, context) => {
       const ws = context.workspaceIndex;
       if (ws === null) return fail('WORKSPACE_REQUIRED', '这次工具需要先打开 Mod 工作区。');
@@ -954,6 +957,128 @@ export function createDefaultToolRegistry(): ToolRegistry {
       const file = asOptionalString(value.file);
       const eventId = value.eventId === undefined ? undefined : asNumber(value.eventId, Number.NaN);
       const limit = Math.max(1, Math.min(200, Math.trunc(asNumber(value.limit, 50))));
+      const cursor = asOptionalString(value.cursor)?.trim();
+      if (cursor && (file !== undefined || eventId !== undefined || value.query !== undefined)) {
+        return fail('EVENT_SEARCH_CURSOR_SCOPE_MISMATCH', 'search_events 续页只能携带 host-issued cursor，不能同时更换 query 或 file/eventId。');
+      }
+      if (cursor) {
+        let payload;
+        try {
+          payload = parseOpaqueCursor(cursor);
+        } catch (error) {
+          return fail(
+            typeof (error as { code?: unknown }).code === 'string'
+              ? (error as { code: string }).code
+              : 'INVALID_READ_CURSOR',
+            error instanceof Error ? error.message : 'search_events cursor 无效。'
+          );
+        }
+        if (payload.domain !== 'emevd'
+          || (!payload.scope.startsWith('search-events:') && !payload.scope.startsWith('native-events:'))) {
+          return fail('EVENT_SEARCH_CURSOR_SCOPE_MISMATCH', 'search_events cursor 不属于当前事件搜索范围。');
+        }
+        if (payload.scope.startsWith('native-events:')) {
+          let nativeQuery: string;
+          try {
+            const scope = JSON.parse(payload.scope.slice('native-events:'.length)) as { query?: unknown };
+            nativeQuery = typeof scope.query === 'string' ? scope.query : '';
+          } catch {
+            return fail('INVALID_READ_CURSOR', 'native search_events cursor 的查询范围无法解析。');
+          }
+          if (!nativeQuery) return fail('INVALID_READ_CURSOR', 'native search_events cursor 缺少原始查询范围。');
+          const currentHash = nativeEventSearchSnapshotHash(nativeQuery, ws.getFiles());
+          if (payload.sourceHash !== currentHash) {
+            return fail('STALE_READ_CURSOR', 'EMEVD native 搜索来源已变化，请重新执行 search_events。');
+          }
+          if (!context.session) return fail('WORKSPACE_REQUIRED', 'native search_events 续页需要工作区会话。');
+          const edit = requireEditSession(context, 'read');
+          if (!('session' in edit)) return edit;
+          const nativeSearch = await emevdEdit.searchEmevdInstructionMatches({
+            edit: edit.session,
+            files: ws.getFiles(),
+            query: nativeQuery,
+            offset: payload.offset,
+            limit,
+            ...(context.signal ? { signal: context.signal } : {})
+          });
+          if (!nativeSearch.ok) return fail(nativeSearch.error.code, nativeSearch.error.message, nativeSearch.diagnostics);
+          const nextCursor = nativeSearch.truncated
+            ? createOpaqueCursor({
+                sessionId: payload.sessionId,
+                offset: nativeSearch.offset + nativeSearch.returned,
+                sourceHash: currentHash,
+                domain: 'emevd',
+                scope: payload.scope
+              })
+            : undefined;
+          return ok({
+            authority: 'native-read-event-search',
+            query: nativeQuery,
+            complete: nativeSearch.complete,
+            truncated: nativeSearch.truncated,
+            offset: nativeSearch.offset,
+            limit: nativeSearch.limit,
+            returned: nativeSearch.returned,
+            matches: nativeSearch.matches,
+            scannedFiles: nativeSearch.scannedFiles,
+            scannedEvents: nativeSearch.scannedEvents,
+            diagnostics: nativeSearch.diagnostics,
+            ...(nextCursor ? { nextCursor } : {})
+          });
+        }
+        let query: string;
+        try {
+          const scope = JSON.parse(payload.scope.slice('search-events:'.length)) as { query?: unknown };
+          query = typeof scope.query === 'string' ? scope.query : '';
+        } catch {
+          return fail('INVALID_READ_CURSOR', 'search_events cursor 的查询范围无法解析。');
+        }
+        if (!query) return fail('INVALID_READ_CURSOR', 'search_events cursor 缺少原始查询范围。');
+        const all = ws.searchEventsPage(query, 0, Number.MAX_SAFE_INTEGER);
+        const sourceHash = eventSearchSnapshotHash(query, all.items);
+        try {
+          const page = defaultReadSessionManager.resolvePage(cursor, sourceHash, limit);
+          return ok({
+            query,
+            matches: page.items,
+            total: page.total,
+            totalCount: page.total,
+            offset: page.offset,
+            limit,
+            returned: page.items.length,
+            returnedCount: page.items.length,
+            truncated: page.hasMore,
+            hasMore: page.hasMore,
+            ...(page.nextCursor ? { nextCursor: page.nextCursor } : {})
+          });
+        } catch (error) {
+          if (typeof (error as { code?: unknown }).code === 'string'
+            && (error as { code: string }).code === 'STALE_READ_CURSOR') {
+            try {
+              const page = resolveStatelessCursorPage(payload, sourceHash, all.items, limit, 'emevd', payload.scope);
+              return ok({
+                query,
+                matches: page.items,
+                total: page.total,
+                totalCount: page.total,
+                offset: page.offset,
+                limit,
+                returned: page.items.length,
+                returnedCount: page.items.length,
+                truncated: page.hasMore,
+                hasMore: page.hasMore,
+                ...(page.nextCursor ? { nextCursor: page.nextCursor } : {})
+              });
+            } catch (fallbackError) {
+              error = fallbackError;
+            }
+          }
+          const code = typeof (error as { code?: unknown }).code === 'string'
+            ? (error as { code: string }).code
+            : 'INVALID_READ_CURSOR';
+          return fail(code, error instanceof Error ? error.message : 'search_events cursor 无法续页。');
+        }
+      }
       if (file !== undefined || eventId !== undefined) {
         if (!file || eventId === undefined || !Number.isSafeInteger(eventId)) {
           return fail('INVALID_INPUT', 'search_events exact lookup 需要 file 与安全整数 eventId。');
@@ -968,8 +1093,33 @@ export function createDefaultToolRegistry(): ToolRegistry {
       }
       const query = asOptionalString(value.query)?.trim();
       if (!query) return fail('INVALID_INPUT', 'search_events 需要 query，或 file + eventId。');
-      const nativeResults = ws.searchEvents(query, limit);
-      if (nativeResults.length > 0) return ok(nativeResults);
+      const indexedPage = ws.searchEventsPage(query, 0, Number.MAX_SAFE_INTEGER);
+      if (indexedPage.items.length > 0) {
+        const sourceHash = eventSearchSnapshotHash(query, indexedPage.items);
+        const scope = `search-events:${JSON.stringify({ query })}`;
+        const session = defaultReadSessionManager.createSession({
+          workspaceId: ws.workspaceId,
+          sourceVersion: { sourceUri: `search://events/${encodeURIComponent(query)}`, sourceHash },
+          domain: 'emevd',
+          queryScope: scope,
+          items: indexedPage.items
+        });
+        const firstCursor = createOpaqueCursor({ sessionId: session.sessionId, offset: 0, sourceHash, domain: 'emevd', scope });
+        const page = defaultReadSessionManager.resolvePage(firstCursor, sourceHash, limit);
+        return ok({
+          query,
+          matches: page.items,
+          total: page.total,
+          totalCount: page.total,
+          offset: page.offset,
+          limit,
+          returned: page.items.length,
+          returnedCount: page.items.length,
+          truncated: page.hasMore,
+          hasMore: page.hasMore,
+          ...(page.nextCursor ? { nextCursor: page.nextCursor } : {})
+        });
+      }
 
       // The index is a bounded semantic projection and may legitimately lack
       // instruction rows after a fresh mount. For a precise instruction name
@@ -989,15 +1139,30 @@ export function createDefaultToolRegistry(): ToolRegistry {
             return fail(nativeSearch.error.code, nativeSearch.error.message, nativeSearch.diagnostics);
           }
           if (nativeSearch.matches.length > 0 || !nativeSearch.complete) {
+            const sourceHash = nativeEventSearchSnapshotHash(query, ws.getFiles());
+            const scope = `native-events:${JSON.stringify({ query })}`;
+            const nextCursor = nativeSearch.truncated
+              ? createOpaqueCursor({
+                  sessionId: randomUUID(),
+                  offset: nativeSearch.offset + nativeSearch.returned,
+                  sourceHash,
+                  domain: 'emevd',
+                  scope
+                })
+              : undefined;
             return ok({
               authority: 'native-read-event-search',
               query,
               complete: nativeSearch.complete,
               truncated: nativeSearch.truncated,
+              offset: nativeSearch.offset,
+              limit: nativeSearch.limit,
+              returned: nativeSearch.returned,
               scannedFiles: nativeSearch.scannedFiles,
               scannedEvents: nativeSearch.scannedEvents,
               matches: nativeSearch.matches,
-              diagnostics: nativeSearch.diagnostics
+              diagnostics: nativeSearch.diagnostics,
+              ...(nextCursor ? { nextCursor } : {})
             });
           }
         }
@@ -1204,11 +1369,44 @@ export function createDefaultToolRegistry(): ToolRegistry {
       const category = asOptionalString(value.category);
       const matches = ws.lookupTextEntries(textId, category);
       if (matches.length === 0) return fail('TEXT_ENTRY_NOT_FOUND', `No text entry exists for textId ${textId}.`, { category });
+      // Native/event projections can be published after MSG entries. Rebuild
+      // the shared graph here so this reverse query cannot return only the
+      // stale container-member edge from the previous index generation.
+      ws.rebuildReferences();
+      const coverage = ws.getCoverageSnapshot().map((item) => ({
+        ...(item.domain ? { domain: item.domain } : {}),
+        status: item.status,
+        coveredResources: item.coveredResources,
+        expectedResources: item.expectedResources,
+        staleSourceCount: item.staleSources.length,
+        diagnosticCount: item.diagnostics.length
+      }));
+      const coverageComplete = coverage.every((item) => item.status === 'complete');
       const items = matches.map((entry) => {
         const references = ws.findReferences(entry.uri, 'to');
-        return { entry, references, referenceStats: summarizeReferences(references) };
+        const semanticReferences = references.filter((reference) => (
+          reference.kind !== 'contains' && reference.kind !== 'member_of'
+        ));
+        return {
+          entry,
+          references,
+          semanticReferences,
+          referenceStats: summarizeReferences(references),
+          semanticReferenceStats: summarizeReferences(semanticReferences)
+        };
       });
-      return ok({ textId, category, matches: items, totalReferences: items.reduce((sum, item) => sum + item.references.length, 0) });
+      const totalReferences = items.reduce((sum, item) => sum + item.references.length, 0);
+      const totalSemanticReferences = items.reduce((sum, item) => sum + item.semanticReferences.length, 0);
+      return ok({
+        textId,
+        category,
+        matches: items,
+        totalReferences,
+        totalSemanticReferences,
+        status: totalSemanticReferences > 0 ? 'found' : coverageComplete ? 'not_found' : 'insufficient_evidence',
+        coverage,
+        negativeConclusionAllowed: coverageComplete
+      });
     }
   });
 
@@ -2360,7 +2558,9 @@ export function createDefaultToolRegistry(): ToolRegistry {
     permission: 'read',
     permissionLevel: 'read',
     inputSchema: {
-      file: 'string'
+      file: 'string',
+      cursor: 'string?',
+      pageSize: 'number?'
     },
     run: async (input, context) => {
       const edit = requireEditSession(context, 'read');
@@ -2368,9 +2568,109 @@ export function createDefaultToolRegistry(): ToolRegistry {
       const value = asRecord(input);
       const file = asString(value.file);
       if (!file) return fail('INVALID_INPUT', 'list_luabnd_scripts ��Ҫ file��');
+      const cursor = asOptionalString(value.cursor)?.trim();
+      const pageSize = Math.max(1, Math.min(100, Math.trunc(asNumber(value.pageSize, 32))));
       const result = await listLuabndScripts({ edit: edit.session, file });
       if (!result.ok) return fail(result.error.code, result.error.message, result.diagnostics);
-      return ok(result);
+      const sourceUriForPaging = context.workspaceIndex
+        ? canonicalScriptSourceUri(context, result.containerPath, result.sourceUri)
+        : result.sourceUri;
+      const catalogHash = scriptCatalogSnapshotHash(sourceUriForPaging, result.outerFileHash, result.scripts);
+      const catalogScope = `luabnd-scripts:${sourceUriForPaging}`;
+      let page;
+      if (cursor) {
+        let payload;
+        try {
+          payload = parseOpaqueCursor(cursor);
+        } catch (error) {
+          return fail(
+            typeof (error as { code?: unknown }).code === 'string'
+              ? (error as { code: string }).code
+              : 'INVALID_READ_CURSOR',
+            error instanceof Error ? error.message : 'LuaBND 目录 cursor 无效。'
+          );
+        }
+        if (payload.domain !== 'script' || payload.scope !== catalogScope) {
+          return fail('LUABND_CURSOR_SCOPE_MISMATCH', 'LuaBND 目录 cursor 与当前容器不匹配，请重新列出脚本。');
+        }
+        try {
+          page = defaultReadSessionManager.resolvePage(cursor, catalogHash, pageSize);
+        } catch (error) {
+          if (typeof (error as { code?: unknown }).code === 'string'
+            && (error as { code: string }).code === 'STALE_READ_CURSOR') {
+            try {
+              page = resolveStatelessCursorPage(payload, catalogHash, result.scripts, pageSize, 'script', catalogScope);
+            } catch (fallbackError) {
+              error = fallbackError;
+            }
+          }
+          if (page) {
+            // The stateless fallback above recovered a valid page after a CLI
+            // process restart; continue through the same bounded projection.
+          } else {
+            const code = typeof (error as { code?: unknown }).code === 'string'
+              ? (error as { code: string }).code
+              : 'INVALID_READ_CURSOR';
+            return fail(code, error instanceof Error ? error.message : 'LuaBND 目录 cursor 无法续页。');
+          }
+        }
+      } else {
+        const session = defaultReadSessionManager.createSession({
+          workspaceId: context.workspaceIndex?.workspaceId ?? edit.session.session.meta.workspaceId,
+          sourceVersion: { sourceUri: sourceUriForPaging, sourceHash: catalogHash },
+          domain: 'script',
+          queryScope: catalogScope,
+          items: result.scripts
+        });
+        const firstCursor = createOpaqueCursor({
+          sessionId: session.sessionId,
+          offset: 0,
+          sourceHash: catalogHash,
+          domain: 'script',
+          scope: catalogScope
+        });
+        page = defaultReadSessionManager.resolvePage(firstCursor, catalogHash, pageSize);
+      }
+      let publicResult: Record<string, unknown> = {
+        ...result,
+        sourceUri: sourceUriForPaging,
+        scripts: page.items as typeof result.scripts,
+        total: page.total,
+        totalCount: page.total,
+        offset: page.offset,
+        limit: pageSize,
+        returned: page.items.length,
+        returnedCount: page.items.length,
+        truncated: page.hasMore,
+        hasMore: page.hasMore,
+        ...(page.nextCursor ? { nextCursor: page.nextCursor } : {})
+      };
+      if (context.workspaceIndex) {
+        const sourceUri = sourceUriForPaging;
+        const scripts: ScriptSymbol[] = result.scripts.map((script, index) => ({
+          uri: `${sourceUri}!/${script.sanitizedName}`,
+          sourceUri,
+          childChain: [script.sanitizedName],
+          entryIndex: index,
+          entryName: script.sanitizedName,
+          contentKind: script.contentKind,
+          ...(script.contentHash ? { sourceHash: script.contentHash } : {}),
+          ...(result.outerFileHash ? { outerFileHash: result.outerFileHash } : {}),
+          sourceRevision: result.sourceRevision
+        }));
+        context.workspaceIndex.upsertScriptExport({
+          sourceUri,
+          containerKind: 'luabnd',
+          outerFileHash: result.outerFileHash,
+          sourceRevision: result.sourceRevision,
+          catalogComplete: result.catalogComplete,
+          scripts
+        });
+        context.workspaceIndex.rebuildReferences();
+        await context.onSemanticEvidenceUpdated?.([sourceUri]);
+        publicResult = { ...publicResult, sourceUri };
+      }
+      return ok(publicResult);
     }
   });
 
@@ -2404,6 +2704,37 @@ export function createDefaultToolRegistry(): ToolRegistry {
         ...(expectedChildHash ? { expectedChildHash } : {})
       });
       if (!result.ok) return fail(result.error.code, result.error.message, result.diagnostics);
+      if (context.workspaceIndex && childPath) {
+        const sourceUri = canonicalScriptSourceUri(context, result.containerPath);
+        const script = result.script;
+        const child: ScriptSymbol = {
+          uri: `${sourceUri}!/${childPath}`,
+          sourceUri,
+          childChain: [childPath],
+          entryName: childPath,
+          contentKind: script.sourceText !== undefined
+            ? (script.isBytecode ? 'decompiled-view' : 'source')
+            : script.isBytecode ? 'bytecode' : 'catalog-only',
+          ...(script.sourceText !== undefined ? { sourceText: script.sourceText } : {}),
+          ...(script.sourceHash ? { sourceHash: script.sourceHash } : {}),
+          ...(script.outerFileHash ? { outerFileHash: script.outerFileHash } : {}),
+          ...(context.workspaceIndex.getFile(sourceUri)?.mtimeMs !== undefined
+            ? { sourceRevision: context.workspaceIndex.getFile(sourceUri)!.mtimeMs }
+            : {})
+        };
+        const existing = context.workspaceIndex.toSymbolBundle().scripts?.find((item) => item.sourceUri === sourceUri);
+        const scripts = [...(existing?.scripts ?? []).filter((item) => item.uri !== child.uri), child];
+        context.workspaceIndex.upsertScriptExport({
+          sourceUri,
+          containerKind: 'luabnd',
+          ...(existing?.outerFileHash ? { outerFileHash: existing.outerFileHash } : {}),
+          ...(existing?.sourceRevision !== undefined ? { sourceRevision: existing.sourceRevision } : {}),
+          catalogComplete: existing?.catalogComplete ?? false,
+          scripts
+        });
+        context.workspaceIndex.rebuildReferences();
+        await context.onSemanticEvidenceUpdated?.([sourceUri]);
+      }
       return ok(result);
     }
   });
@@ -3272,6 +3603,21 @@ function resolveIndexedResourceFile(
   return { ok: true, path: token, sourceUri: token, canonical: false };
 }
 
+function canonicalScriptSourceUri(context: ToolContext, containerPath: string, fallback?: string): string {
+  const index = context.workspaceIndex;
+  if (index) {
+    const normalized = normalizeFileToken(containerPath);
+    const match = index.getFiles().find((file) => file.resourceKind === 'script' && [
+      file.absolutePath,
+      file.sourcePath,
+      file.relativePath,
+      file.sourceUri
+    ].some((candidate) => normalizeFileToken(candidate) === normalized));
+    if (match) return match.sourceUri;
+  }
+  return fallback && !/^[A-Za-z]:[\\/]/u.test(fallback) ? fallback : pathToFileURL(containerPath).href;
+}
+
 function ambiguousIndexedFiles(
   resourceKind: ResourceKind,
   token: string,
@@ -3539,6 +3885,107 @@ function asNumber(value: unknown, fallback: number): number {
   return fallback;
 }
 
+/**
+ * Cursor freshness identity for indexed event search. Hash only stable
+ * candidate identity/provenance, not full instruction bodies, so minting or
+ * validating a cursor does not recreate the historical Invalid string length
+ * failure on large EMEVD bundles.
+ */
+function eventSearchSnapshotHash(
+  query: string,
+  matches: ReadonlyArray<{
+    item: { uri: string; sourceHash?: string; sourceRevision?: number };
+    score: number;
+  }>
+): string {
+  const hash = createHash('sha256');
+  hash.update(`search-events:${query}\u0000${matches.length}\u0000`);
+  for (const match of matches) {
+    hash.update(match.item.uri);
+    hash.update('\u0000');
+    hash.update(String(match.score));
+    hash.update('\u0000');
+    hash.update(match.item.sourceHash ?? '');
+    hash.update('\u0000');
+    hash.update(match.item.sourceRevision === undefined ? '' : String(match.item.sourceRevision));
+    hash.update('\u0001');
+  }
+  return `sha256:${hash.digest('hex')}`;
+}
+
+function nativeEventSearchSnapshotHash(query: string, files: readonly IndexedFile[]): string {
+  const hash = createHash('sha256');
+  hash.update(`native-search-events:${query}\u0000`);
+  for (const file of files
+    .filter((item) => item.resourceKind === 'event')
+    .sort((a, b) => a.sourceUri.localeCompare(b.sourceUri))) {
+    hash.update(file.sourceUri);
+    hash.update('\u0000');
+    hash.update(file.sha256 ?? '');
+    hash.update('\u0000');
+    hash.update(String(file.mtimeMs));
+    hash.update('\u0001');
+  }
+  return `sha256:${hash.digest('hex')}`;
+}
+
+function scriptCatalogSnapshotHash(
+  sourceUri: string,
+  outerFileHash: string,
+  scripts: ReadonlyArray<{ sanitizedName: string; contentHash?: string; contentKind: string }>
+): string {
+  const hash = createHash('sha256');
+  hash.update(`luabnd-scripts:${sourceUri}\u0000${outerFileHash}\u0000${scripts.length}\u0000`);
+  for (const script of scripts) {
+    hash.update(script.sanitizedName);
+    hash.update('\u0000');
+    hash.update(script.contentKind);
+    hash.update('\u0000');
+    hash.update(script.contentHash ?? '');
+    hash.update('\u0001');
+  }
+  return `sha256:${hash.digest('hex')}`;
+}
+
+/**
+ * CLI invocations are one-shot Node processes, so the in-memory read-session
+ * table may not exist when a model feeds a cursor into the next invocation.
+ * Recompute the bounded candidate list and accept the opaque offset only when
+ * the source snapshot hash and scope still match. Desktop calls continue to
+ * use NativeReadSessionManager; this is the restart-safe read-only fallback.
+ */
+function resolveStatelessCursorPage<T>(
+  payload: { sessionId: string; offset: number; sourceHash: string; domain: string; scope: string },
+  currentSourceHash: string,
+  items: readonly T[],
+  limit: number,
+  domain: 'emevd' | 'script',
+  scope: string
+): { items: T[]; offset: number; total: number; hasMore: boolean; nextCursor: string | null } {
+  if (payload.domain !== domain || payload.scope !== scope || payload.sourceHash !== currentSourceHash) {
+    throw Object.assign(new Error('Source document changed since cursor was minted (STALE_READ_CURSOR). Please re-read from start.'), {
+      code: 'STALE_READ_CURSOR'
+    });
+  }
+  if (!Number.isSafeInteger(payload.offset) || payload.offset < 0) {
+    throw Object.assign(new Error('Cursor offset is invalid (INVALID_READ_CURSOR).'), { code: 'INVALID_READ_CURSOR' });
+  }
+  const safeLimit = Math.max(1, Math.min(200, Math.trunc(limit)));
+  const pageItems = items.slice(payload.offset, payload.offset + safeLimit);
+  const nextOffset = payload.offset + pageItems.length;
+  const hasMore = nextOffset < items.length;
+  const nextCursor = hasMore
+    ? createOpaqueCursor({
+        sessionId: payload.sessionId,
+        offset: nextOffset,
+        sourceHash: currentSourceHash,
+        domain,
+        scope
+      })
+    : null;
+  return { items: pageItems, offset: payload.offset, total: items.length, hasMore, nextCursor };
+}
+
 function asResourceKinds(value: unknown): ResourceKind[] | undefined {
   if (!Array.isArray(value)) return undefined;
   const allowed = new Set<ResourceKind>(ALL_RESOURCE_KINDS);
@@ -3612,7 +4059,7 @@ export function resolveRagCorpus(context: ToolContext): RagCorpus | null {
       undefined,
       {
         lookupIndex: 'deferred',
-        families: ['file', 'event', 'map_entity', 'map_region', 'text_entry', 'tae_event']
+        families: ['file', 'event', 'map_entity', 'map_region', 'param_row', 'text_entry', 'tae_event']
       }
     );
     if (context.rag && context.rag.chunks.length > 0) {

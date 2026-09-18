@@ -21,7 +21,6 @@
 import { dirname, isAbsolute, join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { existsSync } from 'node:fs';
-import { mkdir, readFile } from 'node:fs/promises';
 import process from 'node:process';
 
 // Portable/local SDK hosts may omit ProgramFiles; NuGet restore (dotnet run
@@ -165,52 +164,6 @@ function abs(path) {
   return isAbsolute(path) ? path : resolve(process.cwd(), path);
 }
 
-async function hydrateSemanticCache(index, workspaceRoot, log) {
-  const dbPath = join(workspaceRoot, '.soulforge', 'workspace.db');
-  if (!existsSync(dbPath)) {
-    log(`语义缓存不存在，跳过: ${dbPath}`);
-    return 0;
-  }
-  let DatabaseSync;
-  try {
-    ({ DatabaseSync } = await import('node:sqlite'));
-  } catch {
-    log('当前 Node 不支持 node:sqlite，跳过语义缓存水合。可用 --analyze 做完整解析。');
-    return 0;
-  }
-  const db = new DatabaseSync(dbPath, { readOnly: true });
-  try {
-    const rows = db
-      .prepare(
-        `SELECT relative_path, file_sha256, payload_json
-           FROM semantic_file_cache
-          WHERE resource_kind IN ('param','msg','event','map')`
-      )
-      .all();
-    let loaded = 0;
-    for (const row of rows) {
-      try {
-        const payload = JSON.parse(String(row.payload_json));
-        const { loadSymbolBundleIntoIndex, isNativeSemanticBundleCurrent } = await import(
-          pathToFileURL(CORE_DIST).href
-        );
-        // Prefer param/msg payloads; full bundle currentness is best-effort for CLI.
-        if (payload && typeof payload === 'object') {
-          loadSymbolBundleIntoIndex(index, payload);
-          loaded += 1;
-          void row.file_sha256;
-          void isNativeSemanticBundleCurrent;
-        }
-      } catch (error) {
-        log(`水合失败 ${row.relative_path}: ${error instanceof Error ? error.message : String(error)}`);
-      }
-    }
-    return loaded;
-  } finally {
-    try { db.close(); } catch { /* ignore */ }
-  }
-}
-
 async function main() {
   const options = parseArgs(process.argv.slice(2));
   if (options.command === 'help') {
@@ -234,6 +187,8 @@ async function main() {
   if (!existsSync(workspaceRoot)) fail(`工作区不存在: ${workspaceRoot}`);
   if (baseRoot && !existsSync(baseRoot)) fail(`--base 路径不存在: ${baseRoot}`);
 
+  const metadataOnly = options.command === 'list' || options.command === 'ls'
+    || options.command === 'describe' || options.command === 'desc';
   log(`打开工作区: ${workspaceRoot}`);
   const cliSession = await openLocalCliSession({
     overlayRoot: workspaceRoot,
@@ -241,7 +196,8 @@ async function main() {
     game: options.game,
     mode: options.mode === 'plan' || options.mode === 'fullPermission' ? options.mode : 'normal',
     principal: 'local-cli',
-    analyze: options.analyze,
+    analyze: options.analyze || !metadataOnly,
+    useCache: options.useCache,
     requireDurableLog: false,
     onFallbackWarning: (message) => log(message),
     onProgress: (progress) => log(`  [${progress.phase}] ${progress.current}/${progress.total ?? '?'} ${progress.message ?? ''}`)

@@ -6,7 +6,7 @@
  * д��write-luabnd-script �� applyNativeMutation -> Patch Engine �ύ����ֱ��д�̡�
  */
 import { createHash } from 'node:crypto';
-import { access, readFile } from 'node:fs/promises';
+import { access, readFile, stat } from 'node:fs/promises';
 import { basename, isAbsolute, join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import type { Diagnostic } from '@soulforge/shared';
@@ -23,6 +23,7 @@ export interface LuabndScriptSnapshot {
   size: number;
   uncompressedSize: number;
   contentHash: string;
+  outerFileHash?: string;
   isBytecode: boolean;
   magic: string;
   variant: string;
@@ -42,6 +43,8 @@ export interface LuabndScriptSnapshot {
   dialect?: string | undefined;
   compilerProvenance?: { origin: 'first-party'; package: string; revision: string } | undefined;
   decompilerProvenance?: { origin: 'first-party'; package: string; revision: string } | undefined;
+  /** A child-less read is a directory/catalog view, never script content. */
+  status?: 'catalog-only' | 'native-read';
 }
 
 export interface LuabndEditFailure {
@@ -58,6 +61,10 @@ export type LuabndListResult =
   | {
       ok: true;
       containerPath: string;
+      sourceUri: string;
+      outerFileHash: string;
+      sourceRevision: number;
+      catalogComplete: boolean;
       entryCount: number;
       scriptCount: number;
       scripts: Array<{
@@ -65,6 +72,8 @@ export type LuabndListResult =
         sanitizedName: string;
         size: number;
         isBytecode: boolean;
+        contentKind: 'source' | 'bytecode' | 'catalog-only';
+        contentHash?: string;
         embeddedSymbolsSample?: string[];
       }>;
       diagnostics: Diagnostic[];
@@ -156,12 +165,23 @@ export async function listLuabndScripts(input: {
   }
 
   const data = bridgeResult.data as any;
+  const fileStat = await stat(containerPath);
+  const outerFileHash = typeof data.outerFileHash === 'string' && data.outerFileHash.length > 0
+    ? data.outerFileHash
+    : typeof data.sourceHash === 'string' && data.sourceHash.length > 0
+      ? data.sourceHash
+      : await sha256File(containerPath);
+  const sourceRevision = typeof data.sourceRevision === 'number' && Number.isFinite(data.sourceRevision)
+    ? data.sourceRevision
+    : fileStat.mtimeMs;
   const scripts = Array.isArray(data.scripts)
     ? data.scripts.map((s: any) => ({
-        name: s.name,
-        sanitizedName: s.sanitizedName,
-        size: s.size,
+        name: logicalScriptName(s.name ?? s.sanitizedName),
+        sanitizedName: logicalScriptName(s.sanitizedName ?? s.name),
+        size: typeof s.size === 'number' ? s.size : 0,
         isBytecode: Boolean(s.isBytecode),
+        contentKind: s.isBytecode ? 'bytecode' : typeof s.sourceText === 'string' ? 'source' : 'catalog-only',
+        ...(typeof s.contentHash === 'string' && s.contentHash.length > 0 ? { contentHash: s.contentHash } : {}),
         embeddedSymbolsSample: s.embeddedSymbolsSample ?? []
       }))
     : [];
@@ -169,6 +189,10 @@ export async function listLuabndScripts(input: {
   return {
     ok: true,
     containerPath,
+    sourceUri: pathToFileURL(containerPath).href,
+    outerFileHash,
+    sourceRevision,
+    catalogComplete: data.catalogComplete !== false,
     entryCount: data.entryCount ?? scripts.length,
     scriptCount: data.scriptCount ?? scripts.length,
     scripts,
@@ -217,7 +241,12 @@ export async function readLuabndScript(input: {
         isPlainText: true,
         embeddedSymbols: names,
         textPreview: `Available scripts in ${basename(containerPath)} (${names.length}):\n` + names.join('\n'),
-        sourceHash: ''
+        sourceHash: '',
+        outerFileHash: listRes.outerFileHash,
+        representation: 'unknown',
+        canWriteBack: false,
+        status: 'catalog-only',
+        warnings: ['仅返回容器目录；必须提供 childPath 才能读取实际脚本内容、sourceHash 和写回能力。']
       },
       diagnostics: listRes.diagnostics
     };
@@ -343,6 +372,9 @@ export async function readLuabndScript(input: {
     embeddedSymbols: Array.isArray(data.embeddedSymbols) ? data.embeddedSymbols : [],
     textPreview: sourceText ?? (typeof data.textPreview === 'string' ? data.textPreview : undefined),
     sourceHash: data.sourceHash || data.contentHash || '',
+    ...(typeof data.outerFileHash === 'string' && data.outerFileHash.length > 0
+      ? { outerFileHash: data.outerFileHash }
+      : {}),
     representation,
     detectedEncoding: isBytecode ? undefined : (data.detectedEncoding ?? 'shift_jis'),
     canWriteBack,
@@ -350,6 +382,7 @@ export async function readLuabndScript(input: {
     decompilerVersion: typeof data.decompilerVersion === 'string' ? data.decompilerVersion : undefined,
     warnings: Array.isArray(data.warnings) ? data.warnings : undefined,
     loaderProfileId: profile?.id,
+    status: 'native-read',
     ...(sourceText !== undefined ? { sourceText } : {}),
     ...(dialect !== undefined ? { dialect } : {}),
     ...(compilerProvenance ? { compilerProvenance } : {}),
@@ -362,6 +395,17 @@ export async function readLuabndScript(input: {
     script: scriptSnapshot,
     diagnostics: [...diagnostics, ...semanticDiagnostics]
   };
+}
+
+async function sha256File(filePath: string): Promise<string> {
+  const bytes = await readFile(filePath);
+  return createHash('sha256').update(bytes).digest('hex');
+}
+
+function logicalScriptName(value: unknown): string {
+  if (typeof value !== 'string') return '';
+  const normalized = value.replaceAll('\\', '/');
+  return normalized.slice(normalized.lastIndexOf('/') + 1);
 }
 
 export async function setLuabndScript(input: {

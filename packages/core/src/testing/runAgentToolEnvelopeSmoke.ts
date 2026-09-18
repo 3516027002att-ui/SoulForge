@@ -127,6 +127,25 @@ export async function runAgentToolEnvelopeSmoke(): Promise<void> {
   assert.equal(oversized.envelope.data.record.coverage[0].sourceVersions.totalCount, 128);
   assert.equal(oversized.envelope.data.record.coverage[0].sourceVersions.truncated, true);
 
+  // A reference query can carry its coverage certificate below data.record.
+  // The outer Agent envelope must not call that result complete merely because
+  // the top-level tool returned successfully.
+  const nestedPartial = await execute({
+    ok: true,
+    data: {
+      resolution: 'resolved',
+      relations: [],
+      coverage: {
+        status: 'partial',
+        domains: [{ domain: 'script', status: 'not_indexed' }],
+        predicateComplete: false,
+        negativeConclusionAllowed: false
+      },
+      page: { returnedCount: 0, hasMore: false }
+    }
+  });
+  assert.equal(nestedPartial.envelope.completeness, 'partial');
+
   // Entity resolution is a discovery result, not a native proof.  A real
   // resolver can return many candidates and relationship edges; the model
   // must receive a bounded, useful candidate window rather than losing the

@@ -257,7 +257,7 @@ function summarizeToolValue(value: unknown, depth = 0): unknown {
  */
 const DISCOVERY_ARRAY_KEYS = new Set([
   'items', 'hits', 'matches', 'rows', 'entries', 'events', 'parts', 'entities',
-  'results', 'fields', 'instructions', 'topics', 'models',
+  'results', 'fields', 'instructions', 'topics', 'models', 'scripts',
   'candidates', 'candidateSet', 'identityChains', 'verifiedEdges', 'pendingEdges',
   'edges', 'hypotheses', 'coverageByDomain', 'nextReadPlan', 'progress',
   'blockedReasons', 'attemptedRoutes', 'mutationTargets', 'diagnostics'
@@ -281,6 +281,7 @@ const DISCOVERY_DETAIL_KEYS = new Set([
   'item', 'chunk', 'row', 'event', 'format', 'darkScript', 'darkScriptComplete', 'machineInstructions',
   'instructionDto', 'index', 'bank', 'argsBase64', 'unknown', 'emedfName', 'typedArgs',
   'pagination', 'provenance', 'evidence', 'resourceKind', 'diagnostics',
+  'contentKind', 'contentHash', 'catalogComplete', 'entryCount', 'scriptCount',
   'severity', 'code', 'message',
   // Committed mutation lifecycle is deliberately small but must survive the
   // bounded projection: the loop uses it to keep a failed post-commit refresh
@@ -527,7 +528,7 @@ function modelFacingSymbol(value: unknown, context?: ToolContext): Record<string
     'paramName', 'entryName', 'entryIndex', 'rowId', 'rowIndex', 'rowName', 'dataHash',
     'eventId', 'name', 'mapId', 'entityId', 'internalEntryId', 'kind', 'model', 'modelIndex',
     'textId', 'category', 'language', 'animId', 'eventIndex', 'taeEntryIndex', 'taeEntryName',
-    'taeGroup', 'code', 'eventTypeId', 'typeName', 'contentKind', 'score', 'highlights',
+    'taeGroup', 'code', 'eventTypeId', 'typeName', 'contentKind', 'contentHash', 'score', 'highlights',
     'sourceHash', 'outerFileHash', 'sourceRevision', 'confidence',
     // PARAM definition search returns the stable id separately from the
     // localized display name.  Dropping fieldId here forced the model to
@@ -570,7 +571,26 @@ function projectDiscoveryForAgent(name: string, value: unknown, context?: ToolCo
   const output: Record<string, unknown> = {};
   for (const [key, child] of Object.entries(record)) {
     if (DISCOVERY_ARRAY_KEYS.has(key) && Array.isArray(child)) {
-      output[key] = child.slice(0, DISCOVERY_ITEM_LIMIT).map((item) => modelFacingSymbol(item, context));
+      output[key] = child.slice(0, DISCOVERY_ITEM_LIMIT).map((item) => {
+        if (!item || typeof item !== 'object' || Array.isArray(item)) {
+          return item;
+        }
+        const itemRecord = item as Record<string, unknown>;
+        const symbol = itemRecord.item
+          ?? itemRecord.row
+          ?? itemRecord.event
+          ?? itemRecord.entity
+          ?? itemRecord.entry
+          ?? itemRecord.chunk;
+        if (symbol !== undefined) {
+          return {
+            ...(typeof itemRecord.score === 'number' ? { score: itemRecord.score } : {}),
+            ...(itemRecord.highlights !== undefined ? { highlights: itemRecord.highlights } : {}),
+            item: modelFacingSymbol(symbol, context)
+          };
+        }
+        return modelFacingSymbol(item, context);
+      });
       output[`${key}ReturnedCount`] = Math.min(child.length, DISCOVERY_ITEM_LIMIT);
       output[`${key}TotalCount`] = child.length;
       if (child.length > DISCOVERY_ITEM_LIMIT) output[`${key}Truncated`] = true;
@@ -1111,7 +1131,9 @@ function createResultEnvelope(
       limit: window.limit ?? window.returned
     };
   }
+  const inferredCompleteness = inferResultCompleteness(data);
   const completeness: NativeReadCompleteness = completenessOverride
+    ?? inferredCompleteness
     ?? (window.truncated
       ? (window.offset !== null ? 'windowed' : 'partial')
       : (summary ? 'summary_only' : 'complete'));
@@ -1137,6 +1159,54 @@ function createResultEnvelope(
     identifiers: identifiers.ids,
     evidence
   };
+}
+
+function inferResultCompleteness(data: unknown): NativeReadCompleteness | undefined {
+  if (!data || typeof data !== 'object') return undefined;
+  const incompleteStatuses = new Set(['warming_up', 'partial', 'not_indexed', 'stale', 'unavailable', 'failed', 'catalog-only']);
+  const seen = new Set<object>();
+  let incomplete = false;
+  const walk = (value: unknown, depth: number): void => {
+    if (incomplete || depth > 8 || value === null || typeof value !== 'object') return;
+    if (seen.has(value)) return;
+    seen.add(value);
+    if (Array.isArray(value)) {
+      for (const item of value.slice(0, 256)) walk(item, depth + 1);
+      return;
+    }
+    const record = value as Record<string, unknown>;
+    if (typeof record.status === 'string' && incompleteStatuses.has(record.status)) {
+      incomplete = true;
+      return;
+    }
+    if (record.catalogComplete === false || record.contentKind === 'catalog-only') {
+      incomplete = true;
+      return;
+    }
+    const coverage = record.coverage;
+    if (coverage && typeof coverage === 'object') {
+      const coverageRecord = coverage as Record<string, unknown>;
+      if (typeof coverageRecord.status === 'string' && coverageRecord.status !== 'complete') {
+        incomplete = true;
+        return;
+      }
+      if (coverageRecord.negativeConclusionAllowed === false) {
+        incomplete = true;
+        return;
+      }
+    }
+    if (record.negativeConclusionAllowed === false) {
+      incomplete = true;
+      return;
+    }
+    if (record.availability === 'unavailable') {
+      incomplete = true;
+      return;
+    }
+    for (const child of Object.values(record)) walk(child, depth + 1);
+  };
+  walk(data, 0);
+  return incomplete ? 'partial' : undefined;
 }
 
 function compactIdentifiers(
@@ -2163,6 +2233,7 @@ function boundedToolContent(
   // Discovery symbols may contain the complete native row/event/document.  A
   // model-facing envelope must never serialize that raw projection first: it
   // can exceed V8's string limit before the byte budget has a chance to run.
+  const originalData = data;
   data = projectDiscoveryForAgent(name, data, context);
   data = projectNativeReadForAgent(name, data, context);
   const evidence = buildEvidenceMetadata(name, data, repeatedQuery, context);
@@ -2307,6 +2378,24 @@ function boundedToolContent(
       const encoded = JSON.stringify(completeEnvelope);
       if (Buffer.byteLength(encoded, 'utf8') <= MAX_BOUNDED_TOOL_RESULT_BYTES
         && encoded.length <= MAX_BOUNDED_TOOL_RESULT_CHARS) return encoded;
+    }
+    // If the complete requested native window contains a DarkScript body that
+    // alone exceeds the Agent budget, a compact summary would necessarily
+    // replace the source text with an ellipsis. That is not a valid complete
+    // event read and must fail closed instead of returning ok=true with a
+    // truncated write candidate.
+    const originalRecord = originalData && typeof originalData === 'object' && !Array.isArray(originalData)
+      ? originalData as Record<string, unknown>
+      : undefined;
+    if (!window.truncated
+      && originalRecord
+      && typeof originalRecord.darkScript === 'string'
+      && Buffer.byteLength(originalRecord.darkScript, 'utf8') > MAX_BOUNDED_TOOL_RESULT_BYTES) {
+      return boundedFailureContent({
+        code: 'RESULT_EVENT_WINDOW_TOO_LARGE',
+        message: '完整 EMEVD DarkScript 窗口超过 Agent 输出预算；请使用 instructionOffset/instructionLimit 分页读取。',
+        details: buildEmevdWindowTooLargeDetails(originalData, input)
+      }, state === 'completed' ? 'failed' : state);
     }
     // Preserve the complete requested instruction window even when verbose
     // typed arguments make the ordinary 8 KiB discovery projection overflow.

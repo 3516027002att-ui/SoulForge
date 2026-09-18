@@ -5,6 +5,7 @@ import type {
   MsgExport,
   ParamExport,
   ResourceKind,
+  ScriptExport,
   SymbolBundle,
   TaeExport
 } from '@soulforge/shared';
@@ -42,7 +43,8 @@ export function isNativeSemanticBundleCurrent(file: IndexedFile, bundle: SymbolB
     ...(bundle.maps ?? []).flatMap((item) => [item, ...item.entities, ...item.regions]),
     ...(bundle.params ?? []).flatMap((item) => [item, ...item.rows]),
     ...(bundle.msgs ?? []).flatMap((item) => [item, ...item.entries]),
-    ...(bundle.tae ?? []).flatMap((item) => [item, ...item.animations.flatMap((anim) => [item, ...anim.events])])
+    ...(bundle.tae ?? []).flatMap((item) => [item, ...item.animations.flatMap((anim) => [item, ...anim.events])]),
+    ...(bundle.scripts ?? []).flatMap((item) => [item, ...item.scripts])
   ] as Array<{ sourceRevision?: number; outerFileHash?: string }>;
   if (proven.length === 0) return false;
   return proven.every((value) => (
@@ -128,6 +130,9 @@ function isNativeSemanticCacheCandidate(file: IndexedFile): boolean {
       || path.includes('msgbnd')
       || path.includes('.msgbnd');
   }
+  if (file.resourceKind === 'script') {
+    return path.includes('.luabnd') || path.endsWith('.lua') || path.endsWith('.hks');
+  }
   return false;
 }
 
@@ -192,6 +197,11 @@ export function extractFileSymbolBundle(index: WorkspaceIndex, sourceUri: string
     if (tae.length > 0) bundle.tae = tae;
   }
 
+  if (full.scripts && full.scripts.length > 0) {
+    const scripts: ScriptExport[] = full.scripts.filter((item) => item.sourceUri === sourceUri);
+    if (scripts.length > 0) bundle.scripts = scripts;
+  }
+
   return bundle;
 }
 
@@ -213,5 +223,8 @@ export function loadSymbolBundleIntoIndex(index: WorkspaceIndex, bundle: SymbolB
   }
   if (bundle.tae) {
     for (const item of bundle.tae) index.upsertTaeExport(item);
+  }
+  if (bundle.scripts) {
+    for (const item of bundle.scripts) index.upsertScriptExport(item);
   }
 }
