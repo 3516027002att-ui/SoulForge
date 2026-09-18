@@ -57,6 +57,8 @@ export type LuabndListResult =
       entryCount: number;
       scriptCount: number;
       offset: number;
+      returnedCount: number;
+      totalCount: number;
       nextCursor?: string;
       scripts: Array<{
         name: string;
@@ -166,6 +168,13 @@ export async function listLuabndScripts(input: {
     : [];
   const pageSize = 64;
   const offset = decodeListCursor(input.cursor);
+  if (offset === null) {
+    return {
+      ok: false,
+      error: { code: 'CURSOR_INVALID', message: 'LuaBND 列表游标无效或已过期。' },
+      diagnostics: [{ severity: 'error', code: 'CURSOR_INVALID', message: 'LuaBND 列表游标无效。' }]
+    };
+  }
   const scripts = allScripts.slice(offset, offset + pageSize);
   const nextCursor = offset + scripts.length < allScripts.length
     ? encodeListCursor(offset + scripts.length)
@@ -180,6 +189,8 @@ export async function listLuabndScripts(input: {
     entryCount: data.entryCount ?? allScripts.length,
     scriptCount: data.scriptCount ?? allScripts.length,
     offset,
+    returnedCount: scripts.length,
+    totalCount: allScripts.length,
     ...(nextCursor ? { nextCursor } : {}),
     scripts,
     diagnostics
@@ -323,14 +334,14 @@ function encodeListCursor(offset: number): string {
   return `luabnd_${Buffer.from(JSON.stringify({ v: 1, offset }), 'utf8').toString('base64url')}`;
 }
 
-function decodeListCursor(cursor?: string): number {
+function decodeListCursor(cursor?: string): number | null {
   if (!cursor) return 0;
   try {
     const raw = JSON.parse(Buffer.from(cursor.replace(/^luabnd_/iu, ''), 'base64url').toString('utf8')) as { v?: number; offset?: number };
     const offset = raw.offset;
-    return raw.v === 1 && typeof offset === 'number' && Number.isSafeInteger(offset) && offset >= 0 ? offset : 0;
+    return raw.v === 1 && typeof offset === 'number' && Number.isSafeInteger(offset) && offset >= 0 ? offset : null;
   } catch {
-    return 0;
+    return null;
   }
 }
 

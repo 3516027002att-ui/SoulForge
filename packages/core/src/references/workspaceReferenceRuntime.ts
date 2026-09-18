@@ -212,7 +212,10 @@ function resolveSelector(
   if (selector.domain === 'map') {
     return (bundle.maps ?? []).flatMap((item) => [...item.entities, ...item.regions])
       .filter((entity) => entity.sourceUri === selector.sourceUri
-        && (entity.uri === selector.nativeObjectKey || entity.name === selector.nativeObjectKey || ('model' in entity && entity.model === selector.nativeObjectKey)))
+        && (entity.uri === selector.nativeObjectKey
+          || entity.name === selector.nativeObjectKey
+          || ('model' in entity && entity.model === selector.nativeObjectKey)
+          || (entity.entityId !== undefined && String(entity.entityId) === selector.nativeObjectKey)))
       .map((entity) => ({ identity: mapIdentity(entity, workspaceId), version: versionForIndexed(entity, index, generation), payload: { entity } }));
   }
   if (selector.domain === 'tae') {
