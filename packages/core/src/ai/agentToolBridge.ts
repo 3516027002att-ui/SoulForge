@@ -249,19 +249,20 @@ function summarizeToolValue(value: unknown, depth = 0): unknown {
  */
 const DISCOVERY_ARRAY_KEYS = new Set([
   'items', 'hits', 'matches', 'rows', 'entries', 'events', 'parts', 'entities',
-  'results', 'fields', 'instructions', 'topics', 'models'
+  'results', 'fields', 'instructions', 'topics', 'models', 'scripts', 'matchedEntities'
 ]);
 const DISCOVERY_DETAIL_KEYS = new Set([
   'id', 'uri', 'sourceUri', 'sourcePath', 'relativePath', 'symbolUri', 'chunkId',
   'searchId',
   'family', 'title', 'body', 'excerpt', 'text', 'name', 'rowId', 'rowName',
-  'paramName', 'textId', 'category', 'eventId', 'mapId', 'entityId', 'nativeOffset',
+  'paramName', 'textId', 'category', 'eventId', 'mapId', 'entityId', 'nativeOffset', 'kind', 'subkind', 'canonicalKind',
   'entryName', 'entryIndex',
   'file', 'model', 'score', 'vectorScore', 'reasons', 'highlights', 'fieldId',
   'fieldIds', 'value', 'valueType', 'description', 'nextCursor', 'cursor',
   'total', 'offset', 'limit', 'returned', 'truncated', 'instructionCount',
   'instructionOffset', 'instructionLimit', 'totalHits', 'totalCount', 'returnedCount',
   'availability', 'source', 'tool',
+  'containerHash', 'entryCount', 'scriptCount', 'representation', 'canWriteBack', 'sanitizedName', 'isBytecode', 'size', 'embeddedSymbolsSample',
   'query', 'note', 'status', 'confidence', 'sourceHash', 'outerFileHash', 'sourceRevision', 'numericIds',
   'item', 'chunk', 'row', 'event', 'format', 'darkScript', 'darkScriptComplete', 'machineInstructions',
   'instructionDto', 'index', 'bank', 'argsBase64', 'unknown', 'emedfName', 'typedArgs',
@@ -766,8 +767,14 @@ function createResultEnvelope(
     };
   }
   const discoveryLike = evidence.kind === 'discovery' || evidence.kind === 'rag' || evidence.status === 'candidate';
+  const incompleteCoverage = data && typeof data === 'object' && !Array.isArray(data)
+    && (data as Record<string, unknown>).coverage
+    && typeof (data as Record<string, unknown>).coverage === 'object'
+    && (data as Record<string, any>).coverage.predicateComplete === false;
   const completeness: NativeReadCompleteness = completenessOverride
-    ?? (discoveryLike
+    ?? (incompleteCoverage
+      ? 'partial'
+      : discoveryLike
       ? 'summary_only'
       : window.truncated
         ? (window.offset !== null ? 'windowed' : 'partial')
