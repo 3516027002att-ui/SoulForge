@@ -880,6 +880,7 @@ export function createDefaultToolRegistry(): ToolRegistry {
         detail: 'summary-only'
       }));
       if (!corpus) return ok({ ...stats, coverage });
+      const staleRagChunkCount = getRagStaleChunkMaskCached(ws, corpus)?.ids.length ?? 0;
       // 轻量索引可能尚未把所有符号投影到内存，但宿主注入的 RAG 快照
       // 仍是带来源的语义语料；不能把内存计数为 0 误报成数据不存在。
       return ok({
@@ -906,7 +907,13 @@ export function createDefaultToolRegistry(): ToolRegistry {
           rag: {
             ...corpus.stats,
             availability: corpus.availability,
-            diagnostics: corpus.diagnostics
+            diagnostics: corpus.diagnostics,
+            freshness: {
+              state: staleRagChunkCount > 0 ? 'partial' : corpus.availability === 'available' ? 'current' : 'unavailable',
+              staleChunkCount: staleRagChunkCount,
+              totalChunkCount: corpus.chunks.length,
+              source: 'host-validated-index-epoch'
+            }
           }
         }
       });

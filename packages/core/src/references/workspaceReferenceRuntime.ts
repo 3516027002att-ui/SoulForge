@@ -96,7 +96,11 @@ export function createWorkspaceReferenceRuntime(
 
     if (candidates.length === 1) {
       const candidate = candidates[0]!;
-      return { resolution: 'resolved', target: candidate.identity, version: candidate.version };
+      return {
+        resolution: 'resolved',
+        target: candidate.payload ? ({ ...candidate.identity, ...candidate.payload } as ReferenceIdentity) : candidate.identity,
+        version: candidate.version
+      };
     }
     if (candidates.length > 1) {
       return {
@@ -193,7 +197,7 @@ function resolveSelector(
         && row.rowId === selector.rowId
         && (selector.entryName === undefined || row.entryName === selector.entryName)
         && (selector.entryIndex === undefined || row.entryIndex === undefined || row.entryIndex === selector.entryIndex))
-      .map((row) => ({ identity: paramIdentity(row, workspaceId), version: versionForIndexed(row, index, generation), payload: { row } }));
+      .map((row) => ({ identity: paramIdentity(row, workspaceId), version: versionForIndexed(row, index, generation), payload: paramSemanticPayload(row, index) }));
   }
   if (selector.domain === 'emevd') {
     return index.lookupEvents(selector.eventId, selector.sourceUri)
@@ -238,7 +242,12 @@ function resolveUriTarget(
   const exact = resolveUriIdentity(uri);
   if (exact) {
     const file = index.getFile(exact.sourceUri);
-    return [{ identity: exact, version: versionForFile(file, generation) }];
+    const row = (index.toSymbolBundle().params ?? []).flatMap((item) => item.rows).find((item) => item.uri === uri);
+    return [{
+      identity: exact,
+      version: versionForFile(file, generation),
+      ...(row ? { payload: paramSemanticPayload(row, index) } : {})
+    }];
   }
   const file = index.getFile(uri);
   return file
@@ -257,7 +266,7 @@ function resolveQuery(
   const domains = domain ? [domain] : ['param', 'emevd', 'fmg', 'map', 'tae', 'resource'] as const;
   for (const item of domains) {
     if (item === 'param') {
-      for (const result of index.searchParamRows(query, 8)) out.push({ identity: paramIdentity(result.item, workspaceId), version: versionForIndexed(result.item, index, generation), payload: { row: result.item } });
+      for (const result of index.searchParamRows(query, 8)) out.push({ identity: paramIdentity(result.item, workspaceId), version: versionForIndexed(result.item, index, generation), payload: paramSemanticPayload(result.item, index) });
     } else if (item === 'emevd') {
       for (const result of index.searchEvents(query, 8)) out.push({ identity: eventIdentity(result.item, workspaceId), version: versionForIndexed(result.item, index, generation), payload: { event: result.item } });
     } else if (item === 'fmg') {
@@ -298,6 +307,29 @@ function paramIdentity(row: ParamRowSymbol, workspaceId: string): ReferenceIdent
     rowId: row.rowId,
     ...(row.entryIndex !== undefined ? { entryIndex: row.entryIndex } : {}),
     ...(row.entryName ? { entryName: row.entryName } : {})
+  };
+}
+
+function paramSemanticPayload(row: ParamRowSymbol, index: WorkspaceIndex): Record<string, unknown> {
+  const fieldValues: Record<string, unknown> = {};
+  const metadataByField: Record<string, { refs?: string; provenance?: string }> = {};
+  for (const field of row.fields ?? []) {
+    const fieldId = field.fieldId ?? field.name;
+    fieldValues[fieldId] = field.value;
+    const refs = (field as unknown as { refs?: unknown }).refs;
+    metadataByField[fieldId] = {
+      ...(field.description ? { provenance: field.description } : {}),
+      ...(typeof refs === 'string' ? { refs } : {})
+    };
+  }
+  const entries = (index.toSymbolBundle().params ?? [])
+    .flatMap((item) => item.rows)
+    .filter((candidate) => candidate.sourceUri === row.sourceUri)
+    .map((candidate) => candidate.entryName ?? candidate.paramName);
+  return {
+    ...(Object.keys(fieldValues).length > 0 ? { fieldValues } : {}),
+    ...(Object.keys(metadataByField).length > 0 ? { metadataByField } : {}),
+    ...(entries.length > 0 ? { containerEntries: [...new Set(entries)] } : {})
   };
 }
 

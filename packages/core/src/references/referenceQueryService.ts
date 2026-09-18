@@ -144,9 +144,16 @@ export class ReferenceQueryService {
       };
     }
 
-    const target = resolved.target;
+    const providerTarget = resolved.target;
+    const target = publicReferenceIdentity(providerTarget);
     if (cursor && cursor.targetKey !== referenceIdentityKey(target)) {
       return cursorScopeFailure('游标绑定的目标已变化，必须从新的精确目标重新查询。');
+    }
+    const resolvedDigest = buildReferenceDependencyDigest([
+      { sourceKey: referenceIdentityKey(target), version: toVersionSnapshot(resolved.version) }
+    ]);
+    if (cursor && cursor.digest !== resolvedDigest) {
+      return cursorScopeFailure('游标绑定的 source version 已变化，必须重新读取目标后分页。');
     }
     let targetRead: ReferenceTargetRead | undefined;
     if (input.fieldIds && input.fieldIds.length > 0) {
@@ -157,7 +164,7 @@ export class ReferenceQueryService {
     }
 
     const collected = await this.collectRelations({
-      target,
+      target: providerTarget,
       direction: input.direction,
       detail: input.detail,
       depth: input.depth,
@@ -182,7 +189,7 @@ export class ReferenceQueryService {
     const record: ReferencePageRecord = {
       resolution: 'resolved',
       target,
-      targetVersion: resolved.version,
+      targetVersion: toVersionSnapshot(resolved.version),
       ...(targetRead ? { targetRead } : {}),
       candidates: [],
       relations: pageRelations,
@@ -394,6 +401,22 @@ function draftToItem(
     path: (draft.path as ReferenceIdentity[] | undefined) ?? [from, to],
     ...(draft.limitNote ? { limitNote: draft.limitNote } : {})
   };
+}
+
+function publicReferenceIdentity(identity: ReferenceIdentity): ReferenceIdentity {
+  const value = identity as ReferenceIdentity & Record<string, unknown>;
+  const {
+    fieldValues: _fieldValues,
+    metadataByField: _metadataByField,
+    containerEntries: _containerEntries,
+    instructions: _instructions,
+    typedArgs: _typedArgs,
+    callArgs: _callArgs,
+    parameters: _parameters,
+    document: _document,
+    ...publicValue
+  } = value;
+  return publicValue as ReferenceIdentity;
 }
 
 function defaultRegistry(): ReferenceProviderRegistry {
@@ -709,11 +732,14 @@ function mergeCoverage(
   return {
     ...base,
     scopeDescription: `target=${target.objectKey}`,
-    domains,
+    domains: domains.map((domain) => ({
+      ...domain,
+      ...(domain.notes ? { notes: domain.notes.slice(0, 8) } : {})
+    })),
     predicateComplete: complete,
     allowsNegativeClaim: complete,
-    failedSources: [...new Set([...base.failedSources, ...domains.filter((domain) => domain.status === 'failed').map((domain) => domain.domain)])],
-    unscannedSources: [...new Set([...base.unscannedSources, ...domains.filter((domain) => ['unscanned', 'not_indexed', 'skipped'].includes(domain.status)).map((domain) => domain.domain)])]
+    failedSources: [...new Set([...base.failedSources, ...domains.filter((domain) => domain.status === 'failed').map((domain) => domain.domain)])].slice(0, 8),
+    unscannedSources: [...new Set([...base.unscannedSources, ...domains.filter((domain) => ['unscanned', 'not_indexed', 'skipped'].includes(domain.status)).map((domain) => domain.domain)])].slice(0, 8)
   };
 }
 

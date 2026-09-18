@@ -222,6 +222,7 @@
     "test:audit-sf-29-native": "tsc -b ../shared . && node dist/testing/runAuditSf29Smoke.js --layer native",
     "test:param-rag-identity-convergence": "tsc -b ../shared . && node dist/testing/runParamRagIdentityConvergenceSmoke.js",
     "test:reference-query": "tsc -b ../shared . && node dist/testing/runReferenceQuerySmoke.js",
+    "test:reference-association": "tsc -b ../shared . && node dist/testing/runReferenceAssociationSmoke.js",
     "test:native-read-proof": "tsc -b ../shared . && node dist/testing/runNativeReadProofSmoke.js",
     "test:reference-cli-session": "tsc -b ../shared . && node dist/testing/runReferenceCliSessionSmoke.js",
     "test:reference-optimization-performance": "tsc -b ../shared . && node dist/testing/runReferenceOptimizationPerformanceSmoke.js",

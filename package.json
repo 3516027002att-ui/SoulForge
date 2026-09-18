@@ -348,6 +348,8 @@
     "test:bridge-artifact-chunking": "npm run bridge:build && node scripts/verify-bridge-artifact-chunking.mjs",
     "benchmark:rag-fts-delta": "npm run build -w @soulforge/core && node scripts/verify-rag-fts-delta-performance.mjs",
     "test:reference-query": "npm run test:reference-query -w @soulforge/core",
+    "test:reference-association": "npm run test:reference-association -w @soulforge/core",
+    "test:reference-real-cli": "node scripts/run-reference-real-cli-smoke.mjs",
     "test:native-read-proof": "npm run test:native-read-proof -w @soulforge/core",
     "test:reference-cli-session": "npm run test:reference-cli-session -w @soulforge/core",
     "test:reference-optimization-performance": "npm run test:reference-optimization-performance -w @soulforge/core",
