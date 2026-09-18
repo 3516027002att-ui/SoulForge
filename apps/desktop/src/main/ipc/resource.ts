@@ -32,6 +32,7 @@ import type { ConfirmationReceipt } from '@soulforge/shared';
 export interface ResourceIpcDeps {
   handle: TrustedIpcHandle;
   getIndexedFiles(): readonly IndexedFile[];
+  replaceIndexedFile(sourceUri: string, file: IndexedFile): boolean;
   getActiveIndex(): WorkspaceIndex | null;
   getActiveSession(): WorkspaceSession | null;
   getActiveWorkspaceSessionId(): string | null;
@@ -658,9 +659,7 @@ export function registerResourceIpcHandlers(deps: ResourceIpcDeps): void {
           parseStructured: true,
           ...(activeSession.layers.baseRoot ? { oodleRuntimeRoot: activeSession.layers.baseRoot } : {})
         });
-        const files = deps.getIndexedFiles() as unknown as IndexedFile[];
-        const index = files.findIndex((item) => item.sourceUri === sourceUri);
-        if (index >= 0) (files as IndexedFile[])[index] = refreshed.file;
+        deps.replaceIndexedFile(sourceUri, refreshed.file);
         await deps.refreshActiveIndexAfterNativeWrite([sourceUri], result);
       }
       return toRendererSaveResult(result, [...deps.getIndexedFiles()] as IndexedFile[]);
@@ -756,9 +755,7 @@ export function registerResourceIpcHandlers(deps: ResourceIpcDeps): void {
           parseStructured: true,
           ...(activeSession?.layers.baseRoot ? { oodleRuntimeRoot: activeSession.layers.baseRoot } : {})
         });
-        const files = deps.getIndexedFiles() as unknown as IndexedFile[];
-        const idx2 = files.findIndex((item) => item.sourceUri === sourceUri);
-        if (idx2 >= 0) (files as IndexedFile[])[idx2] = refreshed.file;
+        deps.replaceIndexedFile(sourceUri, refreshed.file);
         await deps.refreshActiveIndexAfterNativeWrite([sourceUri], result);
       }
       return toRendererSaveResult(result, [...deps.getIndexedFiles()] as IndexedFile[]);

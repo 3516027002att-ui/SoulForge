@@ -15,11 +15,12 @@ import type {
   Side,
 } from 'three';
 import { decodeBase64ToUint8Array } from '../utils/binary.js';
-import type {
-  MapGeometryPrepareDiagnostic,
-  MapMaterialGroup,
-  PreparedGeometryBounds,
-  PreparedTextureIdentity
+import {
+  prepareTextureKey,
+  type MapGeometryPrepareDiagnostic,
+  type MapMaterialGroup,
+  type PreparedGeometryBounds,
+  type PreparedTextureIdentity
 } from './mapGeometryPrepare.js';
 
 type ThreeModule = typeof import('three');
@@ -512,9 +513,7 @@ export class ModelResourcePool {
     if (preparedTextureKey === undefined) {
       tokenKey = this.textureTokenKeys.get(texturePreviewToken);
       if (tokenKey === undefined && !this.textureTokenKeys.has(texturePreviewToken)) {
-        tokenKey = /^data:image\/png;base64,[A-Za-z0-9+/=]+$/.test(texturePreviewToken)
-          ? hashTextureToken(texturePreviewToken)
-          : null;
+        tokenKey = prepareTextureKey(texturePreviewToken);
         if (texturePreviewToken.length <= ModelResourcePool.maxTextureTokenHashChars) {
           while (
             this.textureTokenKeys.size >= ModelResourcePool.maxTextureTokenHashes

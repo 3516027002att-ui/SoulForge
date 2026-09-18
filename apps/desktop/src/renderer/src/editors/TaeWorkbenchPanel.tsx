@@ -632,7 +632,7 @@ export function TaeEventDetail(props: TaeEventDetailProps): ReactElement {
         </div>
       ) : params.undecodedHex ? (
         <p className="muted" style={{ fontSize: 11 }} data-testid="tae-params-undecoded">
-          {params.undecodedHex}
+          <span>未解码参数体：</span> <code>{params.undecodedHex}</code>
         </p>
       ) : (
         <p className="muted" style={{ fontSize: 11 }}>该事件类型没有参数。</p>

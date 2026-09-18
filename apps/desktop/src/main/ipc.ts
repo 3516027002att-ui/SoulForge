@@ -224,6 +224,10 @@ import {
   getActiveWorkspaceSessionIdState,
   getActiveWorkspaceSessionGenerationState,
   getWorkspaceRag,
+  getWorkspaceRagSnapshotState,
+  getWorkspaceIndexedFilesRevisionState,
+  getWorkspaceRuntimeIdentityState,
+  replaceWorkspaceIndexedFileState,
   getWorkspaceFingerprintStore,
   applyWorkspaceIndexSnapshot,
   applyWorkspaceRag,
@@ -873,7 +877,10 @@ async function ensureActiveOperationLog(session: WorkspaceSession): Promise<Oper
 function currentToolContext(): ToolContext {
   const session = getWorkspaceSession();
   const index = getWorkspaceActiveIndex();
-  const rag = getWorkspaceRag();
+  const ragSnapshot = getWorkspaceRagSnapshotState();
+  const workspaceSessionId = getActiveWorkspaceSessionIdState();
+  const workspaceSessionGeneration = getActiveWorkspaceSessionGenerationState();
+  const indexedFilesRevision = getWorkspaceIndexedFilesRevisionState();
   const storage = session ? durableStoragePaths(session.meta.workspaceId) : undefined;
   const memoryStore = memoryManager.getStore(index?.workspaceId);
   const knowledgeStore = session ? ensureActiveKnowledgeStore(session) : null;
@@ -881,7 +888,19 @@ function currentToolContext(): ToolContext {
     workspaceIndex: index,
     mode: activeAiMode,
     memoryStore,
-    ...(rag ? { rag } : {}),
+    ...(workspaceSessionId ? {
+      workspaceSessionId,
+      workspaceSessionGeneration,
+      indexedFilesRevision
+    } : {}),
+    ...(ragSnapshot.corpus ? {
+      rag: ragSnapshot.corpus,
+      ragEpoch: ragSnapshot.epoch,
+      ...(ragSnapshot.scope ? { ragScope: ragSnapshot.scope } : {}),
+      ...(ragSnapshot.sessionId ? { ragSessionId: ragSnapshot.sessionId } : {}),
+      ragGeneration: ragSnapshot.generation,
+      ragIndexedFilesRevision: ragSnapshot.indexedFilesRevision
+    } : {}),
     ...(session ? { session } : {}),
     ...(activeOperationLog ? { operationLogStore: activeOperationLog } : {}),
     ...(storage ? { backupBaseDir: storage.backupBaseDir, recoveryDir: storage.recoveryDir } : {}),
@@ -1888,9 +1907,13 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
   registerMapIpcHandlers({
     handle: trustedHandle,
     get indexedFiles() { return getWorkspaceIndexedFiles(); },
+    get indexedFilesRevision() { return getWorkspaceIndexedFilesRevisionState(); },
+    get indexedFilesIdentityDigest() { return getWorkspaceRuntimeIdentityState().indexedFilesIdentityDigest; },
     get activeSession() { return getWorkspaceSession(); },
     get activeIndex() { return getWorkspaceActiveIndex(); },
     get activeWorkspaceSessionId() { return getActiveWorkspaceSessionIdState(); },
+    get activeWorkspaceSessionGeneration() { return getActiveWorkspaceSessionGenerationState(); },
+    replaceIndexedFile: replaceWorkspaceIndexedFileState,
     safeExists,
     asBasicDiagnostics: (items) => items.map((item) => ({ severity: item.severity === 'warning' || item.severity === 'info' ? item.severity : 'error', code: item.code, message: item.message, ...(item.sourceUri ? { sourceUri: item.sourceUri } : {}) })),
     durableStoragePaths,
@@ -1932,6 +1955,7 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
   registerEventIpcHandlers({
     handle: trustedHandle,
     get indexedFiles() { return getWorkspaceIndexedFiles(); },
+    replaceIndexedFile: replaceWorkspaceIndexedFileState,
     get activeSession() { return getWorkspaceSession(); },
     durableStoragePaths,
     bridgeRootSession,
@@ -1984,7 +2008,6 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
     getActiveSession: getWorkspaceSession,
     getActiveWorkspaceSessionId: getActiveWorkspaceSessionIdState,
     getActiveWorkspaceSessionGeneration: getActiveWorkspaceSessionGenerationState,
-    getActiveRag: getWorkspaceRag,
     waitForWorkspaceIndexing,
     ensureActiveOperationLog,
     durableStoragePaths,
@@ -1996,6 +2019,7 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
   registerResourceIpcHandlers({
     handle: trustedHandle,
     getIndexedFiles: getWorkspaceIndexedFiles,
+    replaceIndexedFile: replaceWorkspaceIndexedFileState,
     getActiveIndex: getWorkspaceActiveIndex,
     getActiveSession: getWorkspaceSession,
     getActiveWorkspaceSessionId: getActiveWorkspaceSessionIdState,

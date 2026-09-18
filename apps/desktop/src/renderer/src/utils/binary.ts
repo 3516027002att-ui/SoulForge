@@ -11,19 +11,85 @@
  * 到一个出口：输入不合法时抛**可行动**的结构化错误（错误边界能显示原因），
  * 而不是让浏览器抛一条看不懂的 DOMException。所有 atob 调用点必须经本函数。
  */
-const BASE64_RE = /^[A-Za-z0-9+/]*={0,2}$/;
+const BASE64_INVALID_MSG =
+  'BASE64_INVALID_INPUT：传入 atob 的内容不是合法 base64（含非 Latin1 字符或非法字符）。'
+  + ' 数据来源可能被误标为 base64；已拒绝解码以避免渲染崩溃。';
+
+const B64_LOOKUP = new Uint8Array(256);
+B64_LOOKUP.fill(255);
+const B64_CHARS = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
+for (let i = 0; i < B64_CHARS.length; i += 1) {
+  B64_LOOKUP[B64_CHARS.charCodeAt(i)] = i;
+}
 
 export function decodeBase64ToUint8Array(base64: string): Uint8Array {
-  const trimmed = base64.trim();
-  if (!BASE64_RE.test(trimmed)) {
-    throw new Error(
-      'BASE64_INVALID_INPUT：传入 atob 的内容不是合法 base64（含非 Latin1 字符或非法字符）。'
-      + ' 数据来源可能被误标为 base64；已拒绝解码以避免渲染崩溃。'
-    );
+  let start = 0;
+  let end = base64.length;
+  while (start < end && base64.charCodeAt(start) <= 32) start += 1;
+  while (end > start && base64.charCodeAt(end - 1) <= 32) end -= 1;
+  if (start === end) return new Uint8Array(0);
+
+  const rawLen = end - start;
+  let pad = 0;
+  if (base64.charCodeAt(end - 1) === 61) { // '='
+    pad += 1;
+    if (end - 2 >= start && base64.charCodeAt(end - 2) === 61) {
+      pad += 1;
+      if (end - 3 >= start && base64.charCodeAt(end - 3) === 61) {
+        throw new Error(BASE64_INVALID_MSG);
+      }
+    }
   }
-  const binary = atob(trimmed);
-  const out = new Uint8Array(binary.length);
-  for (let i = 0; i < binary.length; i += 1) out[i] = binary.charCodeAt(i);
+
+  const unpaddedLen = rawLen - pad;
+  if (pad > 0 && rawLen % 4 !== 0) throw new Error(BASE64_INVALID_MSG);
+  if (pad === 0 && rawLen % 4 === 1) throw new Error(BASE64_INVALID_MSG);
+
+  const effectivePad = pad > 0 ? pad : (4 - (rawLen % 4)) % 4;
+  const totalSlots = rawLen + (pad === 0 && effectivePad > 0 ? effectivePad : 0);
+  const outLen = ((totalSlots * 3) >>> 2) - effectivePad;
+  const out = new Uint8Array(outLen);
+  let outIdx = 0;
+
+  const fullLimit = start + (unpaddedLen & ~3);
+  for (let i = start; i < fullLimit; i += 4) {
+    const c0 = base64.charCodeAt(i);
+    const c1 = base64.charCodeAt(i + 1);
+    const c2 = base64.charCodeAt(i + 2);
+    const c3 = base64.charCodeAt(i + 3);
+    if ((c0 | c1 | c2 | c3) >= 256) throw new Error(BASE64_INVALID_MSG);
+    const a = B64_LOOKUP[c0]!;
+    const b = B64_LOOKUP[c1]!;
+    const c = B64_LOOKUP[c2]!;
+    const d = B64_LOOKUP[c3]!;
+    if ((a | b | c | d) === 255) throw new Error(BASE64_INVALID_MSG);
+    out[outIdx++] = (a << 2) | (b >> 4);
+    out[outIdx++] = ((b & 15) << 4) | (c >> 2);
+    out[outIdx++] = ((c & 3) << 6) | d;
+  }
+
+  const rem = unpaddedLen % 4;
+  if (rem === 2) {
+    const c0 = base64.charCodeAt(fullLimit);
+    const c1 = base64.charCodeAt(fullLimit + 1);
+    if ((c0 | c1) >= 256) throw new Error(BASE64_INVALID_MSG);
+    const a = B64_LOOKUP[c0]!;
+    const b = B64_LOOKUP[c1]!;
+    if ((a | b) === 255) throw new Error(BASE64_INVALID_MSG);
+    out[outIdx++] = (a << 2) | (b >> 4);
+  } else if (rem === 3) {
+    const c0 = base64.charCodeAt(fullLimit);
+    const c1 = base64.charCodeAt(fullLimit + 1);
+    const c2 = base64.charCodeAt(fullLimit + 2);
+    if ((c0 | c1 | c2) >= 256) throw new Error(BASE64_INVALID_MSG);
+    const a = B64_LOOKUP[c0]!;
+    const b = B64_LOOKUP[c1]!;
+    const c = B64_LOOKUP[c2]!;
+    if ((a | b | c) === 255) throw new Error(BASE64_INVALID_MSG);
+    out[outIdx++] = (a << 2) | (b >> 4);
+    out[outIdx++] = ((b & 15) << 4) | (c >> 2);
+  }
+
   return out;
 }
 

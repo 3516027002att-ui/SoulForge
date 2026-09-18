@@ -1078,7 +1078,7 @@ export function registerRawIpcHandlers(deps: RawIpcDeps): void {
         logicalName,
         kind: 'decompiled',
          sourceText: semantic.sourceText!,
-        encoding: 'utf8',
+        encoding: 'decompiled',
         decompiled: true,
         decompiler: 'SoulForge HKS IR（内置）',
         ...(semantic.compiler ? { compiler: { origin: 'first-party' as const, package: semantic.compiler.package ?? 'soulforge-sekiro-hks-schema', revision: semantic.compiler.revision ?? 'unknown' } } : {}),

@@ -160,6 +160,8 @@ export class WorkspaceIndex {
   private readonly coverageStore = new CoverageStateStore();
   /** Changed sources remain stale until a current-version projection is published. */
   private readonly staleSources = new Set<string>();
+  /** Sources with useful decoded leaves but incomplete native coverage. */
+  private readonly partialSources = new Set<string>();
   /** Highest accepted semantic version per physical source/child identity. */
   private readonly latestProjectionVersions = new Map<string, CoverageSourceVersion>();
   /** Monotonic identity epoch used by host-side RAG freshness masks. */
@@ -198,6 +200,8 @@ export class WorkspaceIndex {
     clone.paramSemanticState = this.paramSemanticState;
     clone.staleSources.clear();
     for (const sourceUri of this.staleSources) clone.staleSources.add(sourceUri);
+    clone.partialSources.clear();
+    for (const sourceUri of this.partialSources) clone.partialSources.add(sourceUri);
     clone.latestProjectionVersions.clear();
     for (const [sourceUri, version] of this.latestProjectionVersions) {
       clone.latestProjectionVersions.set(sourceUri, structuredClone(version));
@@ -244,6 +248,7 @@ export class WorkspaceIndex {
     this.actionBinderMembershipReady = false;
     for (const sourceUri of removedSourceUris) {
       this.staleSources.add(sourceUri);
+      this.partialSources.delete(this.canonicalSourceUri(sourceUri));
       this.deleteProjectionVersionsForSource(sourceUri);
     }
     if (removedSourceUris.length > 0) {
@@ -427,6 +432,14 @@ export class WorkspaceIndex {
     return marked;
   }
 
+  markCoveragePartial(sourceUris: readonly string[]): CoverageState[] {
+    const normalized = uniqueStrings(sourceUris.map((sourceUri) => this.canonicalSourceUri(sourceUri)));
+    for (const sourceUri of normalized) this.partialSources.add(sourceUri);
+    if (normalized.length > 0) this.nativeVersionEpoch += 1;
+    this.recomputeCoverageStates();
+    return this.coverageStore.list();
+  }
+
   /**
    * Gate semantic projection publication.  An async native read may finish
    * after a newer read or a commit; an older projection must never replace the
@@ -532,6 +545,7 @@ export class WorkspaceIndex {
     const uniqueSources = [...new Set(sourceUris.filter((sourceUri) => sourceUri.trim().length > 0))];
     for (const sourceUri of uniqueSources) {
       this.staleSources.add(sourceUri);
+      this.partialSources.delete(this.canonicalSourceUri(sourceUri));
       this.deleteProjectionVersionsForSource(sourceUri);
     }
     if (uniqueSources.length > 0) this.nativeVersionEpoch += 1;
@@ -1011,6 +1025,9 @@ export class WorkspaceIndex {
     const domains: ResourceKind[] = ['event', 'map', 'param', 'msg', 'action'];
     for (const domain of domains) {
       const files = [...this.filesByUri.values()].filter((file) => file.resourceKind === domain);
+      const coverageFiles = files.map((file) => this.partialSources.has(file.sourceUri)
+        ? { ...file, parseStatus: 'partial' as const }
+        : file);
       const projectedSourceUris = semanticSourceUris(this, domain);
       const expectedResourceIds = files.map((file) => file.sourceUri);
       const coveredResourceIds = projectedSourceUris.length > 0
@@ -1042,7 +1059,7 @@ export class WorkspaceIndex {
       this.coverageStore.set(deriveCoverageState({
         scope: 'workspace',
         domain,
-        files,
+        files: coverageFiles,
         coveredResourceIds,
         expectedResourceIds,
         sourceVersions,
@@ -1055,6 +1072,9 @@ export class WorkspaceIndex {
     }
 
     const files = [...this.filesByUri.values()];
+    const coverageFiles = files.map((file) => this.partialSources.has(file.sourceUri)
+      ? { ...file, parseStatus: 'partial' as const }
+      : file);
     const allProjectedSourceUris = uniqueStrings([
       ...semanticSourceUris(this, 'event'),
       ...semanticSourceUris(this, 'map'),
@@ -1068,7 +1088,7 @@ export class WorkspaceIndex {
       : files.filter((file) => file.parseStatus === 'parsed').map((file) => file.sourceUri);
     this.coverageStore.set(deriveCoverageState({
       scope: 'workspace',
-      files,
+      files: coverageFiles,
       coveredResourceIds: allCovered,
       expectedResourceIds: allExpected,
       staleSources: [...this.staleSources],
@@ -1094,13 +1114,21 @@ function semanticSourceUris(index: WorkspaceIndex, domain: ResourceKind): string
     ]));
   }
   if (domain === 'param') {
-    return uniqueStrings((bundle.params ?? []).flatMap((item) => [
-      ...(item.sourceUri ? [item.sourceUri] : []),
-      ...item.rows.map((row) => row.sourceUri)
-    ]));
+    const uris = new Set<string>();
+    for (const item of bundle.params ?? []) {
+      if (item.sourceUri) uris.add(item.sourceUri);
+      else if (item.rows[0]?.sourceUri) uris.add(item.rows[0].sourceUri);
+    }
+    return [...uris];
   }
   if (domain === 'msg') {
-    return uniqueStrings((bundle.msgs ?? []).flatMap((item) => item.entries.map((entry) => entry.sourceUri)));
+    const uris = new Set<string>();
+    for (const item of bundle.msgs ?? []) {
+      for (const entry of item.entries) {
+        if (entry.sourceUri) uris.add(entry.sourceUri);
+      }
+    }
+    return [...uris];
   }
   if (domain === 'action') {
     return uniqueStrings((bundle.tae ?? []).map((item) => item.sourceUri));

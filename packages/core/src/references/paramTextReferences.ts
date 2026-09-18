@@ -67,12 +67,51 @@ export function parseParamTextReference(value: ParamFieldSymbol['value']): numbe
   return numeric !== null && Number.isSafeInteger(numeric) && numeric >= 0 ? numeric : null;
 }
 
+const PARAM_TEXT_FIELD_CACHE_CAPACITY = 4096;
+const paramTextFieldCache = new Map<string, boolean>();
+
+function paramTextFieldCacheKey(field: ParamFieldSymbol): string {
+  return [
+    field.fieldId ?? '',
+    field.name,
+    field.type ?? '',
+    field.description ?? '',
+    field.refsProvenance ?? 'unknown'
+  ].map((value) => `${value.length}:${value}`).join('|');
+}
+
+function cacheParamTextFieldResult(key: string, value: boolean): void {
+  // Keep this a bounded LRU: native metadata from many workspaces may reuse
+  // field ids while changing descriptions/types, so an unbounded global map
+  // would retain every workspace's schema vocabulary forever.
+  paramTextFieldCache.delete(key);
+  paramTextFieldCache.set(key, value);
+  while (paramTextFieldCache.size > PARAM_TEXT_FIELD_CACHE_CAPACITY) {
+    const oldest = paramTextFieldCache.keys().next().value as string | undefined;
+    if (oldest === undefined) break;
+    paramTextFieldCache.delete(oldest);
+  }
+}
+
 /**
  * PARAM metadata 没有携带完整的 FmgRef XML 属性时，仍只能按字段语义识别
  * 文本引用。字段名/说明不满足明确模式就不查 FMG，避免把 itemId、iconId
  * 等普通整数误解释成 textId。
  */
 export function isParamTextReferenceField(field: ParamFieldSymbol): boolean {
+  const cacheKey = paramTextFieldCacheKey(field);
+  const cached = paramTextFieldCache.get(cacheKey);
+  if (cached !== undefined) {
+    paramTextFieldCache.delete(cacheKey);
+    paramTextFieldCache.set(cacheKey, cached);
+    return cached;
+  }
+  const result = evaluateParamTextReferenceField(field);
+  cacheParamTextFieldResult(cacheKey, result);
+  return result;
+}
+
+function evaluateParamTextReferenceField(field: ParamFieldSymbol): boolean {
   const fieldId = compactToken(field.fieldId ?? '');
   if (fieldId.length > 0 && isTextIdToken(fieldId)) return true;
 
@@ -187,23 +226,35 @@ export function buildParamTextReferenceEdges(
   return edges;
 }
 
+const rowFmgAssociationCache = new Map<string, readonly string[]>();
+
 function rowFmgAssociation(paramName: string): readonly string[] {
+  const cached = rowFmgAssociationCache.get(paramName);
+  if (cached !== undefined) return cached;
   // Native ParamDef exports use the physical *_ST names (for example
   // EQUIP_PARAM_GOODS_ST), while the mature-tool annotations use the logical
   // domain name (EquipParamGoods). Normalize only that documented suffix; do
   // not strip arbitrary digits or names because those can identify a
   // different table.
   const normalized = compactToken(paramName).replace(/st$/u, '');
-  return ROW_FMG_ASSOCIATIONS[normalized] ?? [];
+  const result = ROW_FMG_ASSOCIATIONS[normalized] ?? [];
+  rowFmgAssociationCache.set(paramName, result);
+  return result;
 }
 
+const entryHaystackCache = new WeakMap<TextEntrySymbol, string>();
+
 function matchesTextDomain(entry: TextEntrySymbol, domains: readonly string[]): boolean {
-  const haystack = compactToken([
-    entry.category,
-    entry.sourceUri,
-    entry.uri
-  ].filter(Boolean).join(' '));
-  return domains.some((domain) => haystack.includes(compactToken(domain)));
+  let haystack = entryHaystackCache.get(entry);
+  if (haystack === undefined) {
+    haystack = compactToken([
+      entry.category,
+      entry.sourceUri,
+      entry.uri
+    ].filter(Boolean).join(' '));
+    entryHaystackCache.set(entry, haystack);
+  }
+  return domains.some((domain) => haystack!.includes(compactToken(domain)));
 }
 
 function isTextIdToken(value: string): boolean {
@@ -211,8 +262,14 @@ function isTextIdToken(value: string): boolean {
     || /(?:name|description|desc|title|caption|role|text|msg|message|fmg)(?:id|index|idx)/.test(value);
 }
 
+const compactTokenCache = new Map<string, string>();
+
 function compactToken(value: string): string {
-  return value.toLowerCase().replace(/[^a-z0-9\u3400-\u9fff]+/giu, '');
+  const cached = compactTokenCache.get(value);
+  if (cached !== undefined) return cached;
+  const result = value.toLowerCase().replace(/[^a-z0-9\u3400-\u9fff]+/giu, '');
+  if (compactTokenCache.size < 50_000) compactTokenCache.set(value, result);
+  return result;
 }
 
 function linkRank(kind: ParamTextLinkKind): number {

@@ -23,7 +23,8 @@ import type {
   ParamExport,
   ParamFieldSymbol,
   ParamRowSymbol,
-  BridgeResult
+  BridgeResult,
+  SymbolBundle
 } from '@soulforge/shared';
 import { runBridge } from '../bridge/runBridge.js';
 import { readParamDocumentViaBridge } from '../editing/paramBridgeCommit.js';
@@ -32,6 +33,10 @@ import { matchParamMetadataPackage, resolveParamMetadataRowWidth } from '../para
 import { loadFirstPartyParamMetadata } from '../schema/sekiro/firstPartySchema.js';
 import { mapExportFromMsbDocument } from './ingestBridgeResult.js';
 import { WorkspaceIndex } from './workspaceIndex.js';
+import { loadSymbolBundleIntoIndex } from '../workspace/semanticFileCache.js';
+
+/** Internal test seam; production callers use the imported Bridge runner. */
+type NativeSemanticBridgeRunner = typeof runBridge;
 
 export interface NativeSemanticRefreshOptions {
   index: WorkspaceIndex;
@@ -41,6 +46,10 @@ export interface NativeSemanticRefreshOptions {
   oodleRuntimeRoot?: string;
   timeoutMs?: number;
   signal?: AbortSignal;
+  /** @internal Test-only seam; never supplied by production IPC. */
+  bridgeRunner?: NativeSemanticBridgeRunner;
+  /** @internal Test-only seam for the PARAM document reader. */
+  paramDocumentReader?: typeof readParamDocumentViaBridge;
 }
 
 export interface NativeSemanticRefreshResult {
@@ -128,6 +137,16 @@ export async function refreshNativeSemanticSources(
   await mkdir(input.stagingRoot, { recursive: true });
   const scratchRoot = await mkdtemp(join(resolve(input.stagingRoot), 'native-semantic-refresh-'));
   const diagnostics: Diagnostic[] = [];
+  // Native reads and entry fan-out happen on an isolated projection.  The
+  // live index is changed only after every requested source has reached a
+  // terminal non-cancelled state.
+  const refreshIndex = input.index.cloneForRefresh();
+  // The clone must start with every requested source invalidated.  Otherwise
+  // a failed/partial container read can leave an old export in the clone and
+  // commitRefreshProjection will faithfully copy that stale export back into
+  // the live index together with the newly decoded leaves.
+  refreshIndex.invalidateChangedSources(sourceFiles.map((file) => file.sourceUri));
+  const refreshInput: NativeSemanticRefreshOptions = { ...input, index: refreshIndex };
   const refreshedSources: string[] = [];
   const partialSources: string[] = [];
   const failedSources: string[] = [];
@@ -135,7 +154,7 @@ export async function refreshNativeSemanticSources(
   try {
     for (const file of sourceFiles) {
       try {
-        throwIfAborted(input.signal);
+        throwIfAborted(refreshInput.signal);
         // Freeze one complete source receipt before asking Bridge to enumerate
         // or extract anything.  Every subsequent native read uses this copy,
         // so a mutable mod workspace cannot mix catalog-v1 and readback-v2
@@ -151,7 +170,7 @@ export async function refreshNativeSemanticSources(
           });
           continue;
         }
-        if (!input.index.isNativeProjectionCurrent(file.sourceUri, {
+        if (!refreshInput.index.isNativeProjectionCurrent(file.sourceUri, {
           // IndexedFile.sha256 is the packed/outer catalog identity.  A
           // semantic child hash must never be compared to it as if it were
           // the same byte domain.
@@ -177,8 +196,9 @@ export async function refreshNativeSemanticSources(
         };
         const roots = refreshAllowedRoots(input, snapshotFile, scratchRoot);
         if (file.resourceKind === 'event') {
-          const eventExport = await readEventExport(snapshotFile, roots, input, snapshot.outerFileHash);
-          if (!input.index.upsertEventExport(eventExport)) {
+          const eventExport = await readEventExport(snapshotFile, roots, refreshInput, snapshot.outerFileHash);
+          throwIfAborted(refreshInput.signal);
+          if (!refreshInput.index.upsertEventExport(eventExport)) {
             staleSources.push(file.sourceUri);
             diagnostics.push({
               severity: 'warning',
@@ -189,8 +209,9 @@ export async function refreshNativeSemanticSources(
             continue;
           }
         } else if (file.resourceKind === 'map') {
-          const mapExport = await readMapExport(snapshotFile, roots, input, snapshot.outerFileHash);
-          if (!input.index.upsertMapExport(mapExport)) {
+          const mapExport = await readMapExport(snapshotFile, roots, refreshInput, snapshot.outerFileHash);
+          throwIfAborted(refreshInput.signal);
+          if (!refreshInput.index.upsertMapExport(mapExport)) {
             staleSources.push(file.sourceUri);
             diagnostics.push({
               severity: 'warning',
@@ -201,7 +222,7 @@ export async function refreshNativeSemanticSources(
             continue;
           }
         } else if (file.resourceKind === 'param') {
-          const result = await readParamExports(snapshotFile, roots, scratchRoot, input, snapshot.outerFileHash);
+          const result = await readParamExports(snapshotFile, roots, scratchRoot, refreshInput, snapshot.outerFileHash);
           diagnostics.push(...result.diagnostics);
           if (result.stale) {
             staleSources.push(file.sourceUri);
@@ -212,7 +233,7 @@ export async function refreshNativeSemanticSources(
           }
           if (!result.complete) partialSources.push(file.sourceUri);
         } else if (file.resourceKind === 'msg') {
-          const result = await readMsgExports(snapshotFile, roots, scratchRoot, input, snapshot.outerFileHash);
+          const result = await readMsgExports(snapshotFile, roots, scratchRoot, refreshInput, snapshot.outerFileHash);
           diagnostics.push(...result.diagnostics);
           if (result.stale) {
             staleSources.push(file.sourceUri);
@@ -225,6 +246,7 @@ export async function refreshNativeSemanticSources(
         }
         refreshedSources.push(file.sourceUri);
       } catch (error) {
+        if (refreshInput.signal?.aborted || isAbortLike(error)) throw error;
         failedSources.push(file.sourceUri);
         diagnostics.push({
           severity: 'error',
@@ -234,11 +256,64 @@ export async function refreshNativeSemanticSources(
         });
       }
     }
-    input.index.rebuildReferences();
+    throwIfAborted(refreshInput.signal);
+    refreshIndex.rebuildReferences();
+    commitRefreshProjection(
+      input.index,
+      refreshIndex,
+      sourceFiles.map((file) => file.sourceUri),
+      partialSources
+    );
     return { refreshedSources, partialSources, failedSources, staleSources, diagnostics };
   } finally {
     await rm(scratchRoot, { recursive: true, force: true });
   }
+}
+
+function commitRefreshProjection(
+  target: WorkspaceIndex,
+  refreshed: WorkspaceIndex,
+  sourceUris: readonly string[],
+  partialSources: readonly string[]
+): void {
+  const sourceSet = new Set(sourceUris);
+  // Remove every requested source from the live projection first, including a
+  // source whose native read failed.  That keeps failed sources stale and
+  // partial sources explicitly incomplete instead of leaving an old row set
+  // that looks current.
+  target.invalidateChangedSources(sourceUris);
+  const bundle = refreshed.toSymbolBundle();
+  const sourceBundle: SymbolBundle = {
+    ...(bundle.events ? {
+      events: bundle.events
+        .map((item) => ({ ...item, events: item.events.filter((event) => sourceSet.has(event.sourceUri)) }))
+        .filter((item) => item.events.length > 0)
+    } : {}),
+    ...(bundle.maps ? {
+      maps: bundle.maps
+        .map((item) => ({
+          ...item,
+          entities: item.entities.filter((entity) => sourceSet.has(entity.sourceUri)),
+          regions: item.regions.filter((region) => sourceSet.has(region.sourceUri))
+        }))
+        .filter((item) => item.entities.length > 0 || item.regions.length > 0)
+    } : {}),
+    ...(bundle.params ? {
+      params: bundle.params.filter((item) => sourceSet.has(item.sourceUri ?? '')
+        || item.rows.some((row) => sourceSet.has(row.sourceUri)))
+    } : {}),
+    ...(bundle.msgs ? {
+      msgs: bundle.msgs
+        .map((item) => ({ ...item, entries: item.entries.filter((entry) => sourceSet.has(entry.sourceUri)) }))
+        .filter((item) => item.entries.length > 0)
+    } : {}),
+    ...(bundle.tae ? { tae: bundle.tae.filter((item) => sourceSet.has(item.sourceUri)) } : {})
+  };
+  loadSymbolBundleIntoIndex(target, sourceBundle);
+  if (partialSources.length > 0) {
+    target.markCoveragePartial(partialSources);
+  }
+  target.rebuildReferences();
 }
 
 async function readEventExport(
@@ -247,7 +322,8 @@ async function readEventExport(
   input: NativeSemanticRefreshOptions,
   expectedOuterFileHash: string
 ): Promise<EventExport> {
-  const result = await runBridge<Record<string, unknown>>({
+  const bridgeRunner = input.bridgeRunner ?? runBridge;
+  const result = await bridgeRunner<Record<string, unknown>>({
     // The outline document is deliberately bounded and has no per-event
     // instruction body.  Refreshing the semantic index through it recreates
     // the old empty `instructions: []` projection.  `export-event` is the
@@ -369,7 +445,8 @@ async function readMapExport(
   input: NativeSemanticRefreshOptions,
   expectedOuterFileHash: string
 ): Promise<MapExport> {
-  const result = await runBridge<Record<string, unknown>>({
+  const bridgeRunner = input.bridgeRunner ?? runBridge;
+  const result = await bridgeRunner<Record<string, unknown>>({
     command: 'read-msb-document',
     filePath: file.absolutePath,
     resourceUri: file.sourceUri,
@@ -520,6 +597,23 @@ export async function decodeNativeParamRows(input: {
   return rows;
 }
 
+async function runWithConcurrencyPool<T>(
+  items: readonly T[],
+  limit: number,
+  fn: (item: T, index: number) => Promise<void>
+): Promise<void> {
+  if (items.length === 0) return;
+  const poolSize = Math.max(1, Math.min(limit, items.length));
+  let nextIndex = 0;
+  const workers = Array.from({ length: poolSize }, async () => {
+    while (nextIndex < items.length) {
+      const currentIndex = nextIndex++;
+      await fn(items[currentIndex]!, currentIndex);
+    }
+  });
+  await Promise.all(workers);
+}
+
 async function readParamExports(
   file: IndexedFile,
   allowedRoots: string[],
@@ -533,14 +627,23 @@ async function readParamExports(
   if (!metadata.ok || !metadata.package) {
     throw new Error(metadata.diagnostics[0]?.message ?? 'PARAM 元数据不可用，拒绝生成无字段语义的 RAG。');
   }
+  const paramPackage = metadata.package;
   const diagnostics: Diagnostic[] = [];
   let semanticCount = 0;
   let stale = false;
-  for (const entry of entries) {
+
+  const entryResults: Array<{
+    entry: NativeContainerEntry;
+    exported?: ParamExport;
+    errorDiagnostic?: Diagnostic;
+  }> = new Array(entries.length);
+
+  await runWithConcurrencyPool(entries, 8, async (entry, idx) => {
     throwIfAborted(input.signal);
     try {
       const childPath = await materializeNativeEntry(file, entry, allowedRoots, scratchRoot, input);
-      const result = await readParamDocumentViaBridge({
+      const readParamDocument = input.paramDocumentReader ?? readParamDocumentViaBridge;
+      const result = await readParamDocument({
         sourcePath: childPath,
         allowedRoots: [...allowedRoots, scratchRoot],
         ...(input.timeoutMs ? { timeoutMs: input.timeoutMs } : {}),
@@ -548,7 +651,8 @@ async function readParamExports(
         maxRows: 100_000,
         includeAllPayloads: true,
         maxFrameBytes: 32 * 1024 * 1024,
-        resolveRowDataSize: async (header) => resolveTrustedParamRowWidth(metadata.package!, header)
+        maxConcurrency: 8,
+        resolveRowDataSize: async (header) => resolveTrustedParamRowWidth(paramPackage, header)
       });
       if (!result.ok || !result.data) {
         const first = result.diagnostics[0];
@@ -562,7 +666,7 @@ async function readParamExports(
       const rowDataSize = numberValue(data.rowDataSize);
       const dataVersion = numberValue(data.dataVersion);
       const definition = dataVersion !== undefined && Number.isSafeInteger(dataVersion) && rowDataSize !== undefined
-        ? resolveTrustedParamDefinition(metadata.package, {
+        ? resolveTrustedParamDefinition(paramPackage, {
             typeName,
             dataVersion,
             rowDataSize
@@ -594,26 +698,43 @@ async function readParamExports(
         ...(file.mtimeMs !== undefined ? { sourceRevision: file.mtimeMs } : {}),
         rows
       };
-      if (input.index.upsertParamExport(exported)) {
-        semanticCount += rows.length;
+      entryResults[idx] = { entry, exported };
+    } catch (error) {
+      if (input.signal?.aborted || isAbortLike(error)) throw error;
+      entryResults[idx] = {
+        entry,
+        errorDiagnostic: {
+          severity: 'warning',
+          code: 'NATIVE_PARAM_TABLE_SKIPPED',
+          message: error instanceof Error ? error.message : String(error),
+          sourceUri: file.sourceUri
+        }
+      };
+    }
+  });
+
+  throwIfAborted(input.signal);
+  for (const item of entryResults) {
+    if (!item) continue;
+    if (item.errorDiagnostic) {
+      diagnostics.push(item.errorDiagnostic);
+      continue;
+    }
+    if (item.exported) {
+      if (input.index.upsertParamExport(item.exported)) {
+        semanticCount += item.exported.rows.length;
       } else {
         stale = true;
         diagnostics.push({
           severity: 'warning',
           code: 'NATIVE_PARAM_TABLE_STALE',
-          message: `PARAM ${entry.name} semantic projection was rejected because its source revision is stale.`,
+          message: `PARAM ${item.entry.name} semantic projection was rejected because its source revision is stale.`,
           sourceUri: file.sourceUri
         });
       }
-    } catch (error) {
-      diagnostics.push({
-        severity: 'warning',
-        code: 'NATIVE_PARAM_TABLE_SKIPPED',
-        message: error instanceof Error ? error.message : String(error),
-        sourceUri: file.sourceUri
-      });
     }
   }
+
   return { complete: diagnostics.length === 0, semanticCount, stale, diagnostics };
 }
 
@@ -629,14 +750,23 @@ async function readMsgExports(
   const diagnostics: Diagnostic[] = [];
   let semanticCount = 0;
   let stale = false;
-  for (const entry of entries) {
+
+  const msgResults: Array<{
+    entry: NativeContainerEntry;
+    exported?: MsgExport;
+    errorDiagnostic?: Diagnostic;
+  }> = new Array(entries.length);
+
+  await runWithConcurrencyPool(entries, 8, async (entry, idx) => {
     throwIfAborted(input.signal);
     try {
       const childPath = await materializeNativeEntry(file, entry, allowedRoots, scratchRoot, input);
-      const result = await runBridge<Record<string, unknown>>({
+      const bridgeRunner = input.bridgeRunner ?? runBridge;
+      const result = await bridgeRunner<Record<string, unknown>>({
         command: 'read-fmg-document',
         filePath: childPath,
         allowedRoots: [...allowedRoots, scratchRoot],
+        maxConcurrency: 8,
         ...(input.timeoutMs ? { timeoutMs: input.timeoutMs } : {}),
         ...(input.signal ? { signal: input.signal } : {}),
         maxFrameBytes: 32 * 1024 * 1024
@@ -644,7 +774,7 @@ async function readMsgExports(
       const data = requireBridgeData(result, file.sourceUri, `FMG ${entry.name}`);
       const category = stripLeafExtension(entry.name, '.fmg');
       const entriesRaw = arrayValue(data.entries);
-      const entries = entriesRaw.map((value, index) => {
+      const msgEntries = entriesRaw.map((value, index) => {
         const record = recordValue(value);
         const textId = numberValue(record.id);
         if (textId === undefined || !Number.isSafeInteger(textId)) {
@@ -669,28 +799,45 @@ async function readMsgExports(
         ...(stringValue(data.sourceHash) ? { sourceHash: stringValue(data.sourceHash) } : {}),
         outerFileHash: expectedOuterFileHash,
         ...(file.mtimeMs !== undefined ? { sourceRevision: file.mtimeMs } : {}),
-        entries
+        entries: msgEntries
       };
-      if (input.index.upsertMsgExport(exported)) {
-        semanticCount += entries.length;
+      msgResults[idx] = { entry, exported };
+    } catch (error) {
+      if (input.signal?.aborted || isAbortLike(error)) throw error;
+      msgResults[idx] = {
+        entry,
+        errorDiagnostic: {
+          severity: 'warning',
+          code: 'NATIVE_FMG_TABLE_SKIPPED',
+          message: error instanceof Error ? error.message : String(error),
+          sourceUri: file.sourceUri
+        }
+      };
+    }
+  });
+
+  throwIfAborted(input.signal);
+  for (const item of msgResults) {
+    if (!item) continue;
+    if (item.errorDiagnostic) {
+      diagnostics.push(item.errorDiagnostic);
+      continue;
+    }
+    if (item.exported) {
+      if (input.index.upsertMsgExport(item.exported)) {
+        semanticCount += item.exported.entries.length;
       } else {
         stale = true;
         diagnostics.push({
           severity: 'warning',
           code: 'NATIVE_FMG_TABLE_STALE',
-          message: `FMG ${entry.name} semantic projection was rejected because its source revision is stale.`,
+          message: `FMG ${item.entry.name} semantic projection was rejected because its source revision is stale.`,
           sourceUri: file.sourceUri
         });
       }
-    } catch (error) {
-      diagnostics.push({
-        severity: 'warning',
-        code: 'NATIVE_FMG_TABLE_SKIPPED',
-        message: error instanceof Error ? error.message : String(error),
-        sourceUri: file.sourceUri
-      });
     }
   }
+
   return { complete: diagnostics.length === 0, semanticCount, stale, diagnostics };
 }
 
@@ -705,7 +852,8 @@ async function listNativeEntries(
   if (lower.endsWith(extension)) {
     return [{ index: -1, name: basename(file.absolutePath) }];
   }
-  const result = await runBridge<Record<string, unknown>>({
+  const bridgeRunner = input.bridgeRunner ?? runBridge;
+  const result = await bridgeRunner<Record<string, unknown>>({
     command: 'read-dcx-document',
     filePath: file.absolutePath,
     resourceUri: file.sourceUri,
@@ -740,12 +888,14 @@ async function materializeNativeEntry(
 ): Promise<string> {
   if (entry.index < 0) return file.absolutePath;
   const outputPath = join(scratchRoot, `${entry.index}-${safeSegment(stripLeafExtension(entry.name, ''))}${extensionOf(entry.name)}`);
-  const result = await runBridge<Record<string, unknown>>({
+  const bridgeRunner = input.bridgeRunner ?? runBridge;
+  const result = await bridgeRunner<Record<string, unknown>>({
     command: 'extract-bnd4-child',
     filePath: file.absolutePath,
     resourceUri: file.sourceUri,
     allowedRoots: [...allowedRoots, scratchRoot],
     writableRoots: [scratchRoot],
+    maxConcurrency: 8,
     ...(input.oodleRuntimeRoot ? { oodleRuntimeRoot: input.oodleRuntimeRoot } : {}),
     ...(input.timeoutMs ? { timeoutMs: input.timeoutMs } : {}),
     ...(input.signal ? { signal: input.signal } : {}),
@@ -922,7 +1072,15 @@ function escapeRegExp(value: string): string {
 }
 
 function throwIfAborted(signal?: AbortSignal): void {
-  if (signal?.aborted) throw new Error('native semantic refresh aborted');
+  if (!signal?.aborted) return;
+  const error = new Error('native semantic refresh aborted');
+  error.name = 'AbortError';
+  throw error;
+}
+
+function isAbortLike(error: unknown): boolean {
+  if (!(error instanceof Error)) return false;
+  return error.name === 'AbortError' || /\b(abort|cancel)ed?\b/i.test(error.message);
 }
 
 function yieldNativeSemanticRefresh(): Promise<void> {

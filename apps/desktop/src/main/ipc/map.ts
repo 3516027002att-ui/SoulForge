@@ -1,6 +1,6 @@
 import { Buffer } from 'node:buffer';
 import { randomUUID } from 'node:crypto';
-import { existsSync, readdirSync } from 'node:fs';
+import { existsSync, readdirSync, statSync } from 'node:fs';
 import { basename, dirname, join } from 'node:path';
 import type { IpcMainInvokeEvent } from 'electron';
 import {
@@ -50,6 +50,7 @@ import {
   decideMapStaticReadFailure,
   isMapStaticGeometryData
 } from './mapStaticReadDecision.js';
+import { makeMapCacheIdentity } from './mapCacheIdentity.js';
 // Forensics counters (V1, pure diagnostic — no business logic change).
 const _forensicsMapCounters = new Map<string, number>();
 function _forensicsMapInc(key: string, delta = 1): void { _forensicsMapCounters.set(key, (_forensicsMapCounters.get(key) ?? 0) + delta); }
@@ -130,6 +131,7 @@ function emitMapCancellationRequested(
 
 type MapRequestCancellationResult = {
   ok: false;
+  status?: 'partial';
   diagnostics: Diagnostic[];
 };
 
@@ -150,6 +152,7 @@ function mapRequestCancelledResponse(
   );
   return {
     ok: false,
+    status: 'partial',
     diagnostics: [{
       severity: 'info',
       code: MAP_REQUEST_CANCELLED_CODE,
@@ -347,6 +350,62 @@ function characterBundleToMapChunks(bundle: CharacterPreviewBundle): Array<Recor
     }
   }
   return chunks;
+}
+
+function estimateMapStaticWireBytes(data: unknown): number {
+  if (data === null || data === undefined) return 4;
+  if (typeof data === 'string') return Buffer.byteLength(data, 'utf8') + 2;
+  if (typeof data === 'number' || typeof data === 'boolean') return 16;
+  if (typeof data !== 'object') return 32;
+
+  const record = data as Record<string, unknown>;
+  let total = 64;
+
+  if (typeof record.sessionToken === 'string') total += record.sessionToken.length + 20;
+  if (typeof record.nextCursor === 'string') total += record.nextCursor.length + 16;
+  if (typeof record.texturePreviewToken === 'string') total += record.texturePreviewToken.length + 24;
+  if (typeof record.textureColorSpace === 'string') total += record.textureColorSpace.length + 22;
+
+  const chunks = record.chunks;
+  if (Array.isArray(chunks)) {
+    total += 16;
+    for (const chunk of chunks) {
+      if (!chunk || typeof chunk !== 'object') {
+        total += 64;
+        continue;
+      }
+      const c = chunk as Record<string, unknown>;
+      total += 256;
+      for (const key in c) {
+        const val = c[key];
+        if (typeof val === 'string') {
+          total += key.length + val.length + 6;
+        } else if (Array.isArray(val)) {
+          total += key.length + val.length * 24 + 6;
+        } else if (typeof val === 'number' || typeof val === 'boolean') {
+          total += key.length + 20;
+        } else if (val) {
+          total += key.length + 64;
+        }
+      }
+    }
+    return total;
+  }
+
+  total += 256;
+  for (const key in record) {
+    const val = record[key];
+    if (typeof val === 'string') {
+      total += key.length + val.length + 6;
+    } else if (Array.isArray(val)) {
+      total += key.length + val.length * 24 + 6;
+    } else if (typeof val === 'number' || typeof val === 'boolean') {
+      total += key.length + 20;
+    } else if (val) {
+      total += key.length + 64;
+    }
+  }
+  return total;
 }
 
 const MAP_CHARACTER_WIRE_BUDGET_BYTES = 8 * 1024 * 1024;
@@ -550,15 +609,23 @@ function serveMapCharacterPage(session: MapCharacterPageSession, cursor: string 
   }
 
   let end = start;
+  let accumulatedEstimated = 128;
+  if (session.token) accumulatedEstimated += session.token.length + 20;
+  accumulatedEstimated += 52;
+
   while (end < session.chunks.length) {
-    const hasMore = end + 1 < session.chunks.length;
-    const data = {
-      sessionToken: session.token,
-      nextCursor: hasMore ? 'x'.repeat(36) : null,
-      complete: !hasMore,
-      chunks: session.chunks.slice(start, end + 1)
-    };
-    if (Buffer.byteLength(JSON.stringify(data), 'utf8') >= MAP_CHARACTER_WIRE_BUDGET_BYTES) break;
+    const chunkEstimated = estimateMapStaticWireBytes(session.chunks[end]);
+    if (accumulatedEstimated + chunkEstimated >= 7.5 * 1024 * 1024) {
+      const hasMore = end + 1 < session.chunks.length;
+      const data = {
+        sessionToken: session.token,
+        nextCursor: hasMore ? 'x'.repeat(36) : null,
+        complete: !hasMore,
+        chunks: session.chunks.slice(start, end + 1)
+      };
+      if (Buffer.byteLength(JSON.stringify(data), 'utf8') >= MAP_CHARACTER_WIRE_BUDGET_BYTES) break;
+    }
+    accumulatedEstimated += chunkEstimated;
     end += 1;
   }
   if (end === start) {
@@ -601,14 +668,103 @@ function logicalMapModelName(raw: string): string {
     .replace(/\.dcx$/i, '');
 }
 
+interface IndexedFileIndex {
+  byRel: Map<string, IndexedFile>;
+  byBasename: Map<string, IndexedFile[]>;
+  bySourceUri: Map<string, IndexedFile>;
+}
+
+const indexedFileIndexCache = new WeakMap<readonly IndexedFile[], { revision: number; index: IndexedFileIndex }>();
+
+function getIndexedFileIndex(files: readonly IndexedFile[], revision: number): IndexedFileIndex {
+  const cached = indexedFileIndexCache.get(files);
+  if (cached?.revision === revision) return cached.index;
+  {
+    const byRel = new Map<string, IndexedFile>();
+    const byBasename = new Map<string, IndexedFile[]>();
+    const bySourceUri = new Map<string, IndexedFile>();
+    for (const file of files) {
+      const normalized = file.relativePath.replace(/\\/g, '/').toLowerCase();
+      byRel.set(normalized, file);
+      if (file.sourceUri) bySourceUri.set(file.sourceUri, file);
+      const base = basename(normalized);
+      let list = byBasename.get(base);
+      if (!list) {
+        list = [];
+        byBasename.set(base, list);
+      }
+      list.push(file);
+    }
+    const index = { byRel, byBasename, bySourceUri };
+    indexedFileIndexCache.set(files, { revision, index });
+    return index;
+  }
+}
+
+interface MapbndDirectoryScan {
+  mapbnds: string[];
+  complete: boolean;
+}
+
+const dirMapbndsCache = new Map<string, { mtimeMs: number; mapbnds: string[] }>();
+
+function getDirMapbnds(dir: string, cacheIdentity = ''): MapbndDirectoryScan {
+  try {
+    const stat = statSync(dir);
+    const cacheKey = `${cacheIdentity}|${dir}`;
+    const cached = dirMapbndsCache.get(cacheKey);
+    if (cached && cached.mtimeMs === stat.mtimeMs) {
+      return { mapbnds: cached.mapbnds, complete: true };
+    }
+    const entries = readdirSync(dir);
+    const mapbnds = entries
+      .filter((name) => /\.mapbnd\.dcx$/i.test(name))
+      .map((name) => join(dir, name));
+    if (dirMapbndsCache.size >= 100) {
+      dirMapbndsCache.clear();
+    }
+    dirMapbndsCache.set(cacheKey, { mtimeMs: stat.mtimeMs, mapbnds });
+    return { mapbnds, complete: true };
+  } catch (error) {
+    // A directory that does not exist is a complete negative observation;
+    // permission/I/O failures are not.  Do not cache or translate the latter
+    // into MAP_PART_MODEL_NOT_FOUND.
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+      return { mapbnds: [], complete: true };
+    }
+    return { mapbnds: [], complete: false };
+  }
+}
+
+const resolvedModelFileCache = new Map<string, { absolutePath: string; relativePath: string; kind: 'flver' | 'chrbnd' } | null>();
+
 function resolveMapModelFile(
   indexedFiles: readonly IndexedFile[],
+  indexedFilesRevision: number,
+  indexedFilesIdentityDigest: string,
   activeSession: WorkspaceSession | null,
+  activeWorkspaceSessionId: string | null,
+  activeWorkspaceSessionGeneration: number,
   safeExists: (path: string) => boolean,
   mapRelativePath: string,
   modelName: string,
   sibPath?: string
 ): { absolutePath: string; relativePath: string; kind: 'flver' | 'chrbnd' } | null {
+  const cacheKey = [
+    activeWorkspaceSessionId ?? '',
+    activeWorkspaceSessionGeneration,
+    activeSession?.meta.workspaceId ?? '',
+    indexedFilesRevision,
+    indexedFilesIdentityDigest,
+    activeSession?.layers.overlayRoot ?? '',
+    activeSession?.layers.baseRoot ?? '',
+    mapRelativePath,
+    modelName,
+    sibPath ?? ''
+  ].join(':');
+  const cached = resolvedModelFileCache.get(cacheKey);
+  if (cached !== undefined) return cached;
+
   const names = [...new Set(
     [modelName, sibPath ?? '']
       .map((value) => logicalMapModelName(value))
@@ -620,34 +776,66 @@ function resolveMapModelFile(
   for (const name of names) {
     if (mapId) {
       // m000010 → m10_00_00_00_000010：MSB 侧短名需展开为 mapbnd 侧长名
-      const mShort = /^m(\d{6})$/i.exec(name)?.[1];
-      if (mShort) {
-        const longName = `${mapId}_${mShort}`;
+      const mDigits = /^m?(\d+)$/i.exec(name)?.[1];
+      if (mDigits) {
+        const padded = mDigits.padStart(6, '0');
+        const longName = `${mapId}_${padded}`;
         candidates.push({ rel: `map/${mapId}/${longName}.mapbnd.dcx`, kind: 'flver' });
         // mapbnd 容器内的 FLVER 名就是长名本身（条目名为 .../long.flver），
         // 但单文件 flver 路径也试一下（部分 map 可能有散文件）
         candidates.push({ rel: `map/${mapId}/${longName}.flver.dcx`, kind: 'flver' });
         candidates.push({ rel: `map/${mapId}/${longName}.flver`, kind: 'flver' });
       }
+      const mapPrefixMatch = /^(m\d{2}_\d{2}_\d{2}_\d{2})_/i.exec(name);
+      if (mapPrefixMatch) {
+        const specificMapId = mapPrefixMatch[1]!;
+        candidates.push({ rel: `map/${specificMapId}/${name}.mapbnd.dcx`, kind: 'flver' });
+        candidates.push({ rel: `map/${specificMapId}/${name}.flver.dcx`, kind: 'flver' });
+        candidates.push({ rel: `map/${specificMapId}/${name}.flver`, kind: 'flver' });
+      }
+      candidates.push({ rel: `map/${mapId}/${name}.mapbnd.dcx`, kind: 'flver' });
       candidates.push({ rel: `map/${mapId}/${name}.flver.dcx`, kind: 'flver' });
       candidates.push({ rel: `map/${mapId}/${name}.flver`, kind: 'flver' });
     }
+    candidates.push({ rel: `map/${name}.mapbnd.dcx`, kind: 'flver' });
     candidates.push({ rel: `map/${name}.flver.dcx`, kind: 'flver' });
-    if (/^c\d/i.test(name)) candidates.push({ rel: `chr/${name}.chrbnd.dcx`, kind: 'chrbnd' });
+    candidates.push({ rel: `map/${name}.flver`, kind: 'flver' });
+    if (/^c\d/i.test(name)) {
+      candidates.push({ rel: `chr/${name}.chrbnd.dcx`, kind: 'chrbnd' });
+      candidates.push({ rel: `chr/${name}.chrbnd`, kind: 'chrbnd' });
+    }
     // objbnd 是静态 FLVER 容器，不是角色 chrbnd。误标成 chrbnd 会把
     // 原生对象送进骨骼预览分支，最终只能留下 MSB 的方块代理。
-    if (/^o\d/i.test(name)) candidates.push({ rel: `obj/${name}.objbnd.dcx`, kind: 'flver' });
-  }
-  const normalize = (value: string): string => value.replace(/\\/g, '/').toLowerCase();
-  for (const candidate of candidates) {
-    const indexed = indexedFiles.find((item) => {
-      const rel = normalize(item.relativePath);
-      return rel === normalize(candidate.rel) || rel.endsWith(`/${normalize(candidate.rel)}`);
-    });
-    if (indexed) {
-      return { absolutePath: indexed.absolutePath, relativePath: indexed.relativePath, kind: candidate.kind };
+    if (/^o\d/i.test(name)) {
+      candidates.push({ rel: `obj/${name}.objbnd.dcx`, kind: 'flver' });
+      candidates.push({ rel: `obj/${name}.objbnd`, kind: 'flver' });
     }
   }
+
+  const index = getIndexedFileIndex(indexedFiles, indexedFilesRevision);
+  for (const candidate of candidates) {
+    const rel = candidate.rel.replace(/\\/g, '/').toLowerCase();
+    const directHit = index.byRel.get(rel);
+    if (directHit) {
+      const res = { absolutePath: directHit.absolutePath, relativePath: directHit.relativePath, kind: candidate.kind };
+      resolvedModelFileCache.set(cacheKey, res);
+      return res;
+    }
+    const base = basename(rel);
+    const sameBase = index.byBasename.get(base);
+    if (sameBase) {
+      const matched = sameBase.find((item) => {
+        const itemRel = item.relativePath.replace(/\\/g, '/').toLowerCase();
+        return itemRel === rel || itemRel.endsWith(`/${rel}`);
+      });
+      if (matched) {
+        const res = { absolutePath: matched.absolutePath, relativePath: matched.relativePath, kind: candidate.kind };
+        resolvedModelFileCache.set(cacheKey, res);
+        return res;
+      }
+    }
+  }
+
   const overlay = activeSession?.layers.overlayRoot?.trim();
   const base = activeSession?.layers.baseRoot?.trim();
   for (const root of [overlay, base]) {
@@ -655,9 +843,15 @@ function resolveMapModelFile(
     for (const candidate of candidates) {
       const absolutePath = join(root, candidate.rel);
       if (safeExists(absolutePath)) {
-        return { absolutePath, relativePath: candidate.rel, kind: candidate.kind };
+        const res = { absolutePath, relativePath: candidate.rel, kind: candidate.kind };
+        resolvedModelFileCache.set(cacheKey, res);
+        return res;
       }
     }
+  }
+
+  if (resolvedModelFileCache.size < 20_000) {
+    resolvedModelFileCache.set(cacheKey, null);
   }
   return null;
 }
@@ -666,9 +860,13 @@ export interface MapIpcDeps {
   handle: TrustedIpcHandle;
   /** 活动索引文件表：事务成功后按条目原地替换（与拆分前语义一致）。 */
   readonly indexedFiles: IndexedFile[];
+  readonly indexedFilesRevision: number;
+  readonly indexedFilesIdentityDigest: string;
   readonly activeSession: WorkspaceSession | null;
   readonly activeIndex: WorkspaceIndex | null;
   readonly activeWorkspaceSessionId: string | null;
+  readonly activeWorkspaceSessionGeneration: number;
+  replaceIndexedFile(sourceUri: string, file: IndexedFile): boolean;
   safeExists(path: string): boolean;
   asBasicDiagnostics(
     items: Array<{ severity: string; code: string; message: string; sourceUri?: string }>
@@ -692,9 +890,56 @@ export interface MapIpcDeps {
   ): Promise<unknown>;
 }
 
+function mapCacheIdentity(deps: Pick<MapIpcDeps, 'activeWorkspaceSessionId' | 'activeWorkspaceSessionGeneration' | 'indexedFilesRevision' | 'indexedFilesIdentityDigest' | 'activeSession'>): string {
+  return makeMapCacheIdentity({
+    workspaceSessionId: deps.activeWorkspaceSessionId,
+    workspaceSessionGeneration: deps.activeWorkspaceSessionGeneration,
+    workspaceId: deps.activeSession?.meta.workspaceId ?? null,
+    indexedFilesRevision: deps.indexedFilesRevision,
+    indexedFilesIdentityDigest: deps.indexedFilesIdentityDigest,
+    overlayRoot: deps.activeSession?.layers.overlayRoot ?? null,
+    baseRoot: deps.activeSession?.layers.baseRoot ?? null
+  });
+}
+
+const verifiedReadRootsCache = new Map<string, { allowedRoots: string[]; diagnostics: Diagnostic[] }>();
+
+async function getVerifiedReadRoots(
+  deps: Pick<MapIpcDeps, 'verifiedReadRoots' | 'activeSession' | 'activeWorkspaceSessionId' | 'activeWorkspaceSessionGeneration' | 'indexedFilesRevision' | 'indexedFilesIdentityDigest'>,
+  filePath: string
+): Promise<{ allowedRoots: string[]; diagnostics: Diagnostic[] }> {
+  const dir = dirname(filePath);
+  const cacheKey = [
+    deps.activeWorkspaceSessionId ?? '',
+    deps.activeWorkspaceSessionGeneration,
+    deps.activeSession?.meta.workspaceId ?? '',
+    deps.indexedFilesRevision,
+    deps.indexedFilesIdentityDigest,
+    deps.activeSession?.layers.overlayRoot ?? '',
+    deps.activeSession?.layers.baseRoot ?? '',
+    dir
+  ].join(':');
+  const cached = verifiedReadRootsCache.get(cacheKey);
+  if (cached) {
+    return { allowedRoots: [...cached.allowedRoots], diagnostics: [...cached.diagnostics] };
+  }
+  const result = await deps.verifiedReadRoots(deps.activeSession, dir);
+  if (result.diagnostics.length === 0) {
+    if (verifiedReadRootsCache.size >= 500) {
+      verifiedReadRootsCache.clear();
+    }
+    verifiedReadRootsCache.set(cacheKey, {
+      allowedRoots: [...result.allowedRoots],
+      diagnostics: [...result.diagnostics]
+    });
+  }
+  return { allowedRoots: [...result.allowedRoots], diagnostics: [...result.diagnostics] };
+}
+
 export function registerMapIpcHandlers(deps: MapIpcDeps): void {
   deps.handle('resource.readMsbDocument', async (_event, sourceUri: string) => {
-    const file = deps.indexedFiles.find((item) => item.sourceUri === sourceUri);
+    const file = getIndexedFileIndex(deps.indexedFiles, deps.indexedFilesRevision).bySourceUri.get(sourceUri)
+      ?? deps.indexedFiles.find((item) => item.sourceUri === sourceUri);
     if (!file) {
       return {
         ok: false,
@@ -706,7 +951,7 @@ export function registerMapIpcHandlers(deps: MapIpcDeps): void {
         }]
       };
     }
-    const roots = await deps.verifiedReadRoots(deps.activeSession, dirname(file.absolutePath));
+    const roots = await getVerifiedReadRoots(deps, file.absolutePath);
     if (roots.diagnostics.length > 0) return { ok: false, diagnostics: roots.diagnostics };
     const result = await readMsbDocumentViaBridge({
       sourcePath: file.absolutePath,
@@ -767,8 +1012,8 @@ export function registerMapIpcHandlers(deps: MapIpcDeps): void {
     });
   });
 
-  deps.handle(
-    'resource.readMapPartFlverPreview',
+    deps.handle(
+    'resource.readMapModelSource',
     async (
       _event,
       mapSourceUri: string,
@@ -779,7 +1024,8 @@ export function registerMapIpcHandlers(deps: MapIpcDeps): void {
       data?: Record<string, unknown>;
       diagnostics: Array<{ severity: string; code: string; message: string; sourceUri?: string }>;
     }> => {
-      const file = deps.indexedFiles.find((item) => item.sourceUri === mapSourceUri);
+      const file = getIndexedFileIndex(deps.indexedFiles, deps.indexedFilesRevision).bySourceUri.get(mapSourceUri)
+        ?? deps.indexedFiles.find((item) => item.sourceUri === mapSourceUri);
       if (!file) {
         return {
           ok: false,
@@ -791,7 +1037,18 @@ export function registerMapIpcHandlers(deps: MapIpcDeps): void {
           }]
         };
       }
-      const resolved = resolveMapModelFile(deps.indexedFiles, deps.activeSession, deps.safeExists, file.relativePath, modelName, sibPath);
+      const resolved = resolveMapModelFile(
+        deps.indexedFiles,
+        deps.indexedFilesRevision,
+        deps.indexedFilesIdentityDigest,
+        deps.activeSession,
+        deps.activeWorkspaceSessionId,
+        deps.activeWorkspaceSessionGeneration,
+        deps.safeExists,
+        file.relativePath,
+        modelName,
+        sibPath
+      );
       const baseRoot = deps.activeSession?.layers.baseRoot?.trim();
       if (!resolved) {
         return {
@@ -805,7 +1062,7 @@ export function registerMapIpcHandlers(deps: MapIpcDeps): void {
           }]
         };
       }
-      const roots = await deps.verifiedReadRoots(deps.activeSession, dirname(resolved.absolutePath));
+      const roots = await getVerifiedReadRoots(deps, resolved.absolutePath);
       if (roots.diagnostics.length > 0) return { ok: false, diagnostics: roots.diagnostics };
       const command = resolved.kind === 'chrbnd' ? 'read-chrbnd-flver-preview' : 'read-flver-mesh';
       const result = await runBridge<Record<string, unknown>>({
@@ -840,10 +1097,12 @@ export function registerMapIpcHandlers(deps: MapIpcDeps): void {
       ok: boolean;
       sourceUri?: string;
       data?: Record<string, unknown>;
+      status?: 'partial';
       diagnostics: Array<{ severity: string; code: string; message: string; sourceUri?: string }>;
     }> => {
       _forensicsMapInc('map:main:readMapPartMesh:count');
-      const file = deps.indexedFiles.find((item) => item.sourceUri === msbSourceUri);
+      const file = getIndexedFileIndex(deps.indexedFiles, deps.indexedFilesRevision).bySourceUri.get(msbSourceUri)
+        ?? deps.indexedFiles.find((item) => item.sourceUri === msbSourceUri);
       if (!file || !deps.activeSession) {
         return {
           ok: false,
@@ -867,6 +1126,8 @@ export function registerMapIpcHandlers(deps: MapIpcDeps): void {
         ...(deps.safeExists(overlayDir) ? [{ dir: overlayDir, fromBase: false }] : []),
         ...(baseDir && deps.safeExists(baseDir) ? [{ dir: baseDir, fromBase: true }] : [])
       ];
+      const cacheIdentity = mapCacheIdentity(deps);
+      let directoryScanPartial = false;
       if (candidateDirs.length === 0) {
         const baseHint = effectiveBase
           ? `map/${mapId}/ 目录下没有模型文件。`
@@ -876,7 +1137,7 @@ export function registerMapIpcHandlers(deps: MapIpcDeps): void {
           diagnostics: [{ severity: 'error' as const, code: 'MAP_PART_NO_MODEL_DIR', message: `没有找到 ${modelName} 的模型（mapbnd）：${baseHint}`, sourceUri: msbSourceUri }]
         };
       }
-      const roots = await deps.verifiedReadRoots(deps.activeSession, dirname(file.absolutePath));
+      const roots = await getVerifiedReadRoots(deps, file.absolutePath);
       if (roots.diagnostics.length > 0) return { ok: false, diagnostics: roots.diagnostics };
       if (effectiveBase && !roots.allowedRoots.includes(effectiveBase)) roots.allowedRoots.push(effectiveBase);
 
@@ -1008,10 +1269,11 @@ export function registerMapIpcHandlers(deps: MapIpcDeps): void {
         for (const { dir, fromBase } of candidateDirs) {
           let mapbnds: string[];
           try {
-            mapbnds = readdirSync(dir)
-              .filter((name) => /\.mapbnd\.dcx$/i.test(name) && name.startsWith(prefix))
-              .sort()
-              .map((name) => join(dir, name));
+            const scan = getDirMapbnds(dir, cacheIdentity);
+            directoryScanPartial ||= !scan.complete;
+            mapbnds = scan.mapbnds
+              .filter((path) => basename(path).startsWith(prefix))
+              .sort();
           } catch { mapbnds = []; }
           if (mapbnds.length === 0) continue;
           const fallbackPath = mapbnds[0]!;
@@ -1031,12 +1293,9 @@ export function registerMapIpcHandlers(deps: MapIpcDeps): void {
       for (const { dir, fromBase } of candidateDirs) {
         let mapbnds: string[];
         try {
-          mapbnds = readdirSync(dir)
-            // mapbnd 命名 `<mapId>_<6位编号>.mapbnd.dcx`，mapId 本身含下划线，
-            // 只按后缀过滤。
-            .filter((name) => /\.mapbnd\.dcx$/i.test(name))
-            .sort()
-            .map((name) => join(dir, name));
+          const scan = getDirMapbnds(dir, cacheIdentity);
+          directoryScanPartial ||= !scan.complete;
+          mapbnds = scan.mapbnds.slice().sort();
         } catch {
           mapbnds = [];
         }
@@ -1070,6 +1329,18 @@ export function registerMapIpcHandlers(deps: MapIpcDeps): void {
         const fallbackData = await tryPrefixFallbackForTerrain();
         if (fallbackData) return { ok: true, sourceUri: msbSourceUri, data: fallbackData, diagnostics: [] };
       }
+      if (directoryScanPartial) {
+        return {
+          ok: false,
+          status: 'partial',
+          diagnostics: [{
+            severity: 'warning' as const,
+            code: 'MAP_PART_MODEL_SCAN_PARTIAL',
+            message: `模型目录扫描未完成，暂不判定 ${modelName} 不存在。`,
+            sourceUri: msbSourceUri
+          }]
+        };
+      }
       return {
         ok: false,
         diagnostics: [{
@@ -1098,7 +1369,8 @@ export function registerMapIpcHandlers(deps: MapIpcDeps): void {
       const throwIfMapRequestCancelled = (): void => {
         if (requestSignal?.aborted) throw new Error(MAP_REQUEST_CANCELLED_CODE);
       };
-      const file = deps.indexedFiles.find((item) => item.sourceUri === msbSourceUri);
+      const file = getIndexedFileIndex(deps.indexedFiles, deps.indexedFilesRevision).bySourceUri.get(msbSourceUri)
+        ?? deps.indexedFiles.find((item) => item.sourceUri === msbSourceUri);
       if (!file || !deps.activeSession) return { ok: false, diagnostics: [{ severity: 'error', code: 'MAP_PART_MSB_NOT_INDEXED', message: 'MSB not indexed', sourceUri: msbSourceUri }] };
       const baseName = basename(file.relativePath);
       const mapId = baseName.replace(/\.msb(\.dcx)?$/i, '');
@@ -1107,8 +1379,10 @@ export function registerMapIpcHandlers(deps: MapIpcDeps): void {
       const overlayDir = join(deps.activeSession.layers.overlayRoot, 'map', mapId);
       const baseDir = effectiveBase ? join(effectiveBase, 'map', mapId) : null;
       const candidateDirs = [...(deps.safeExists(overlayDir) ? [{ dir: overlayDir, fromBase: false }] : []), ...(baseDir && deps.safeExists(baseDir) ? [{ dir: baseDir, fromBase: true }] : [])];
+      const cacheIdentity = mapCacheIdentity(deps);
+      let directoryScanPartial = false;
       throwIfMapRequestCancelled();
-      const roots = await deps.verifiedReadRoots(deps.activeSession, dirname(file.absolutePath));
+      const roots = await getVerifiedReadRoots(deps, file.absolutePath);
       throwIfMapRequestCancelled();
       if (roots.diagnostics.length > 0) return { ok: false, diagnostics: roots.diagnostics };
       if (effectiveBase && !roots.allowedRoots.includes(effectiveBase)) roots.allowedRoots.push(effectiveBase);
@@ -1427,7 +1701,10 @@ export function registerMapIpcHandlers(deps: MapIpcDeps): void {
           });
           clearMapNativeTimingSession(timingKey);
         }
-        const wireBytes = Buffer.byteLength(JSON.stringify(result.data), 'utf8');
+        const estimatedWire = estimateMapStaticWireBytes(result.data);
+        const wireBytes = estimatedWire >= 7.5 * 1024 * 1024
+          ? Buffer.byteLength(JSON.stringify(result.data), 'utf8')
+          : estimatedWire;
         if (wireBytes >= 8 * 1024 * 1024) {
           return { ok: false, diagnostics: [{ severity: 'error', code: 'MAP_STATIC_WIRE_BUDGET_EXCEEDED', message: 'wire bytes exceed 8 MiB', sourceUri: msbSourceUri }] };
         }
@@ -1439,7 +1716,11 @@ export function registerMapIpcHandlers(deps: MapIpcDeps): void {
       // container instead of probing every mapbnd again (O(models * files * pages)).
       const directModel = resolveMapModelFile(
         deps.indexedFiles,
+        deps.indexedFilesRevision,
+        deps.indexedFilesIdentityDigest,
         deps.activeSession,
+        deps.activeWorkspaceSessionId,
+        deps.activeWorkspaceSessionGeneration,
         deps.safeExists,
         file.relativePath,
         modelName
@@ -1453,9 +1734,30 @@ export function registerMapIpcHandlers(deps: MapIpcDeps): void {
 
       const triedPaths = new Set(directModel ? [directModel.absolutePath.toLowerCase()] : []);
       for (const { dir } of candidateDirs) {
-        let mapbnds: string[] = [];
-        try { mapbnds = readdirSync(dir).filter((name) => /\.mapbnd\.dcx$/i.test(name)).map((name) => join(dir, name)); } catch {}
-        for (const mapbndPath of mapbnds) {
+        const scan = getDirMapbnds(dir, cacheIdentity);
+        directoryScanPartial ||= !scan.complete;
+        const mapbnds = scan.mapbnds;
+        const modelDigits = modelName.replace(/\D/g, '');
+        const prioritizedMapbnds: string[] = [];
+        const otherMapbnds: string[] = [];
+        const lowerModel = modelName.toLowerCase();
+        for (const mapbnd of mapbnds) {
+          const lowerBase = basename(mapbnd).toLowerCase();
+          if (
+            lowerBase.includes(lowerModel) ||
+            (modelDigits.length >= 2 && lowerBase.includes(modelDigits)) ||
+            (modelDigits.length > 0 && lowerBase.includes(modelDigits.padStart(6, '0')))
+          ) {
+            prioritizedMapbnds.push(mapbnd);
+          } else {
+            otherMapbnds.push(mapbnd);
+          }
+        }
+      const candidateMapbnds = [
+        ...prioritizedMapbnds,
+        ...otherMapbnds
+      ];
+        for (const mapbndPath of candidateMapbnds) {
           throwIfMapRequestCancelled();
           const key = mapbndPath.toLowerCase();
           if (triedPaths.has(key)) continue;
@@ -1464,6 +1766,13 @@ export function registerMapIpcHandlers(deps: MapIpcDeps): void {
           throwIfMapRequestCancelled();
           if (result) return result;
         }
+      }
+      if (directoryScanPartial) {
+        return {
+          ok: false,
+          status: 'partial',
+          diagnostics: [{ severity: 'warning', code: 'MAP_PART_MODEL_SCAN_PARTIAL', message: `模型目录扫描未完成，暂不判定 ${modelName} 不存在。`, sourceUri: msbSourceUri }]
+        };
       }
       return { ok: false, diagnostics: [{ severity: 'error', code: 'MAP_PART_MODEL_NOT_FOUND', message: 'not found ' + modelName, sourceUri: msbSourceUri }] };
     }, msbSourceUri)
@@ -1498,7 +1807,8 @@ export function registerMapIpcHandlers(deps: MapIpcDeps): void {
       expectedHash: string,
       mutation: MsbBridgeMutation
     ): Promise<RendererSaveResult> => {
-      const file = deps.indexedFiles.find((item) => item.sourceUri === sourceUri);
+      const file = getIndexedFileIndex(deps.indexedFiles, deps.indexedFilesRevision).bySourceUri.get(sourceUri)
+        ?? deps.indexedFiles.find((item) => item.sourceUri === sourceUri);
       if (!file || !deps.activeSession) {
         return {
           ok: false,
@@ -1614,7 +1924,8 @@ export function registerMapIpcHandlers(deps: MapIpcDeps): void {
       expectedHash: string,
       transaction: MapEditTransaction
     ): Promise<RendererSaveResult> => {
-      const file = deps.indexedFiles.find((item) => item.sourceUri === sourceUri);
+      const file = getIndexedFileIndex(deps.indexedFiles, deps.indexedFilesRevision).bySourceUri.get(sourceUri)
+        ?? deps.indexedFiles.find((item) => item.sourceUri === sourceUri);
       if (!file || !deps.activeSession) {
         return {
           ok: false,
@@ -1656,8 +1967,7 @@ export function registerMapIpcHandlers(deps: MapIpcDeps): void {
         };
       }
       const refreshed = await nativeEdit.indexFile(file.absolutePath, 'map');
-      const index = deps.indexedFiles.findIndex((item) => item.sourceUri === sourceUri);
-      if (index >= 0) deps.indexedFiles[index] = refreshed;
+      deps.replaceIndexedFile(sourceUri, refreshed);
       const response: RendererSaveResult = {
         ok: true,
         changedFiles: result.committed ? [sourceUri] : [],

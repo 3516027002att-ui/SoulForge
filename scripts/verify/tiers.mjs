@@ -110,6 +110,10 @@ export const TIER_BY_SCRIPT = Object.freeze({
   'test:rag': 'unit',
   'test:agent-knowledge-refresh': 'unit',
   'test:native-projection-acceptance': 'unit',
+  // Native semantic refresh cancellation uses an injected Bridge reader and
+  // synthetic files only; it proves the clone/commit boundary without real
+  // Sekiro assets, so it belongs to the unit tier.
+  'test:native-semantic-refresh-cancellation': 'unit',
   'test:emevd-stable-identity': 'unit',
   'test:emevd-dark-script-compiler': 'unit',
   'test:emevd-dark-script-compiler-s14': 'unit',

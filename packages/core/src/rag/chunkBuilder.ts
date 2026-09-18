@@ -47,6 +47,12 @@ export type RagCorpusLookupIndexMode = 'eager' | 'deferred';
 
 export interface RagCorpusBuildOptions {
   lookupIndex?: RagCorpusLookupIndexMode;
+  /**
+   * Optional host-controlled projection.  File chunks remain included unless
+   * the caller explicitly omits them; they carry the source identity needed
+   * to prove persisted semantic chunks are still current.
+   */
+  families?: readonly RagChunkFamily[];
 }
 
 export function buildRagCorpus(
@@ -59,22 +65,28 @@ export function buildRagCorpus(
 ): RagCorpus {
   const sourceFilter = sourceUris && sourceUris.length > 0 ? new Set(sourceUris) : null;
   const symbolFilter = symbolUris && symbolUris.length > 0 ? new Set(symbolUris) : null;
+  const familyFilter = options.families ? new Set(options.families) : null;
+  const includeFamily = (family: RagChunkFamily): boolean => (
+    familyFilter === null || familyFilter.has(family) || family === 'file'
+  );
   const includeSource = (sourceUri: string): boolean => sourceFilter === null || sourceFilter.has(sourceUri);
   const includeSymbol = (sourceUri: string, symbolUri: string): boolean => (
     includeSource(sourceUri) && (symbolFilter === null || symbolFilter.has(symbolUri))
   );
   const chunks: RagChunk[] = [];
+  const fileIdentity = new Map(index.getFiles().map((file) => [file.sourceUri, file] as const));
   for (const file of index.getFiles()) {
     // A symbol-scoped refresh replaces only native rows/events. The existing
     // file catalog chunk must remain in the previous corpus; rebuilding it
     // here would make the caller drop unrelated symbols from the same source.
-    if (symbolFilter === null && includeSource(file.sourceUri)) {
+    if (includeFamily('file') && symbolFilter === null && includeSource(file.sourceUri)) {
       chunks.push(fileChunk(index.workspaceId, file));
     }
   }
   const symbols = index.toSymbolBundle();
   const textEntryLookup = buildTextEntryLookup(symbols.msgs ?? []);
   for (const eventExport of symbols.events ?? []) {
+    if (!includeFamily('event')) continue;
     for (const event of eventExport.events) {
       if (!includeSymbol(event.sourceUri, event.uri)) continue;
       chunks.push(eventChunk(
@@ -87,7 +99,9 @@ export function buildRagCorpus(
     }
   }
   for (const mapExport of symbols.maps ?? []) {
+    if (!includeFamily('map_entity') && !includeFamily('map_region')) continue;
     for (const entity of mapExport.entities) {
+      if (!includeFamily('map_entity')) continue;
       if (!includeSymbol(entity.sourceUri, entity.uri)) continue;
       chunks.push(mapEntityChunk(
         index.workspaceId,
@@ -98,6 +112,7 @@ export function buildRagCorpus(
       ));
     }
     for (const region of mapExport.regions) {
+      if (!includeFamily('map_region')) continue;
       if (!includeSymbol(region.sourceUri, region.uri)) continue;
       chunks.push(mapRegionChunk(
         index.workspaceId,
@@ -109,6 +124,7 @@ export function buildRagCorpus(
     }
   }
   for (const taeExport of symbols.tae ?? []) {
+    if (!includeFamily('tae_event')) continue;
     if (!includeSource(taeExport.sourceUri)) continue;
     for (const anim of taeExport.animations) {
       for (const event of anim.events) {
@@ -126,6 +142,7 @@ export function buildRagCorpus(
     }
   }
   for (const paramExport of symbols.params ?? []) {
+    if (!includeFamily('param_row')) continue;
     for (const row of paramExport.rows) {
       if (!includeSymbol(row.sourceUri, row.uri)) continue;
       chunks.push(paramRowChunk(
@@ -139,6 +156,7 @@ export function buildRagCorpus(
     }
   }
   for (const msgExport of symbols.msgs ?? []) {
+    if (!includeFamily('text_entry')) continue;
     for (const entry of msgExport.entries) {
       if (!includeSymbol(entry.sourceUri, entry.uri)) continue;
       chunks.push(textEntryChunk(
@@ -151,16 +169,36 @@ export function buildRagCorpus(
     }
   }
 
+  // Native symbol envelopes from older/fixture readers may omit the packed
+  // outer hash and physical revision even though the current catalog proves
+  // both.  Fill only from the exact same sourceUri; never borrow identity
+  // across files.  This lets stale-snapshot merging validate legacy rows
+  // without treating an unbound symbol as current.
+  const normalizedChunks = chunks.map((chunk) => {
+    if (chunk.family === 'file') return chunk;
+    const file = fileIdentity.get(chunk.sourceUri);
+    if (!file) return chunk;
+    return {
+      ...chunk,
+      ...(chunk.outerFileHash || !file.sha256 ? {} : { outerFileHash: file.sha256 }),
+      ...(chunk.sourceRevision !== undefined || file.mtimeMs === undefined
+        ? {}
+        : { sourceRevision: file.mtimeMs })
+    };
+  });
+
   return createRagCorpus({
     workspaceId: index.workspaceId,
     builtAt: now,
-    chunks,
+    chunks: normalizedChunks,
     // Keep the current graph, but derive PARAM↔FMG edges from the same source
     // mapping in this snapshot as well. This makes a freshly assembled corpus
     // correct even when the caller has not yet published a reference rebuild.
     references: mergeReferenceEdges(
       index.listReferences(),
-      buildParamTextReferenceEdges(symbols.params ?? [], symbols.msgs ?? [])
+      includeFamily('param_row') && includeFamily('text_entry')
+        ? buildParamTextReferenceEdges(symbols.params ?? [], symbols.msgs ?? [])
+        : []
     ),
     diagnostics,
     ...(options.lookupIndex ? { lookupIndex: options.lookupIndex } : {})
@@ -206,7 +244,11 @@ export function createRagCorpus(input: {
   return corpus;
 }
 
-export function mergeCatalogAndPersisted(catalog: RagCorpus, persisted: RagCorpus): RagCorpus {
+export function mergeCatalogAndPersisted(
+  catalog: RagCorpus,
+  persisted: RagCorpus,
+  options: { lookupIndex?: RagCorpusLookupIndexMode } = {}
+): RagCorpus {
   const liveSources = new Set(catalog.chunks.map((chunk) => chunk.sourceUri));
   const liveSourceRevisions = new Map(
     catalog.chunks
@@ -270,7 +312,8 @@ export function mergeCatalogAndPersisted(catalog: RagCorpus, persisted: RagCorpu
     builtAt: catalog.builtAt,
     chunks: [...catalog.chunks.filter((chunk) => chunk.family === 'file'), ...symbols],
     references,
-    diagnostics: catalog.diagnostics
+    diagnostics: catalog.diagnostics,
+    ...(options.lookupIndex ? { lookupIndex: options.lookupIndex } : {})
   });
 }
 

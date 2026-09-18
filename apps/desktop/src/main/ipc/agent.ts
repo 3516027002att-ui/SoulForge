@@ -16,6 +16,7 @@ import {
   nativeEditSessionFromContext,
   retrieveEvidence,
   retrieveEvidenceHybrid,
+  resolveRagCorpus,
   buildRagCorpus,
   mergeCatalogAndPersisted,
   createRagCorpus,
@@ -63,6 +64,7 @@ import type { MemoryManager } from '../memoryManager.js';
 import type { ModelServiceCredentialVault } from '../modelServiceCredentials.js';
 import type { OperationLogUtilityClient } from '../operationLogUtilityClient.js';
 import { INTERNAL_RAG_EMBEDDING, InternalRagEmbeddingService } from '../ragEmbedding.js';
+import { isAgentRagSearchIdentityCurrent } from './agentRagIdentity.js';
 
 export interface AiAgentRunRequest {
   configId: string;
@@ -305,7 +307,6 @@ export interface AgentIpcDeps {
   getActiveSession: () => WorkspaceSession | null;
   getActiveWorkspaceSessionId: () => string | null;
   getActiveWorkspaceSessionGeneration: () => number;
-  getActiveRag: () => RagCorpus | null;
   /** 等待当前一次性工作区分析；不会为每次 RAG 查询重新扫描。 */
   waitForWorkspaceIndexing: (signal?: AbortSignal) => Promise<void>;
   ensureActiveOperationLog: (session: WorkspaceSession) => Promise<OperationLogUtilityClient>;
@@ -441,7 +442,7 @@ export function registerAgentIpcHandlers(deps: AgentIpcDeps): void {
         };
       }
       const database = await deps.ensureActiveOperationLog(deps.getActiveSession()!);
-      const corpus = deps.getActiveRag() ?? createRagCorpus({
+      const corpus = resolveRagCorpus(deps.currentToolContext()) ?? createRagCorpus({
         workspaceId: deps.getActiveIndex()!.workspaceId,
         builtAt: new Date().toISOString(),
         chunks: await database.loadRagChunks(),
@@ -508,11 +509,48 @@ export function registerAgentIpcHandlers(deps: AgentIpcDeps): void {
     const initialSession = deps.getActiveSession();
     const initialSessionId = deps.getActiveWorkspaceSessionId();
     const initialGeneration = deps.getActiveWorkspaceSessionGeneration();
-    const initialRag = deps.getActiveRag();
+    const initialContext = deps.currentToolContext();
+    const initialRagEpoch = initialContext.ragEpoch;
+    const initialRagScope = initialContext.ragScope;
+    const initialRagSessionId = initialContext.ragSessionId;
+    const initialRagGeneration = initialContext.ragGeneration;
+    const initialRagIndexedFilesRevision = initialContext.ragIndexedFilesRevision;
+    const initialRag = resolveRagCorpus(initialContext);
     if (!initialIndex) {
       return { ok: false as const, code: 'WORKSPACE_REQUIRED' as const, message: '先打开 Mod 工作区。' };
     }
     const activeRag = initialRag;
+    const expectedSearchIdentity = {
+      activeIndex: initialIndex,
+      activeSession: initialSession,
+      workspaceSessionId: initialSessionId,
+      workspaceSessionGeneration: initialGeneration,
+      ragEpoch: initialRagEpoch,
+      ragScope: initialRagScope,
+      ragSessionId: initialRagSessionId,
+      ragGeneration: initialRagGeneration,
+      ragIndexedFilesRevision: initialRagIndexedFilesRevision
+    };
+    const workspaceStillCurrent = (): boolean => {
+      const currentContext = deps.currentToolContext();
+      const currentIndex = deps.getActiveIndex();
+      return isAgentRagSearchIdentityCurrent(expectedSearchIdentity, {
+        activeIndex: currentIndex,
+        activeSession: deps.getActiveSession(),
+        workspaceSessionId: deps.getActiveWorkspaceSessionId(),
+        workspaceSessionGeneration: deps.getActiveWorkspaceSessionGeneration(),
+        ragEpoch: currentContext.ragEpoch,
+        ragScope: currentContext.ragScope,
+        ragSessionId: currentContext.ragSessionId,
+        ragGeneration: currentContext.ragGeneration,
+        ragIndexedFilesRevision: currentContext.ragIndexedFilesRevision
+      });
+    };
+    const staleSearchResult = (): RagRetrieveResult => ({
+      ok: false,
+      code: 'RAG_UNAVAILABLE',
+      message: '工作区会话或 RAG 语料已切换，已丢弃旧检索结果；请重试。'
+    });
     if (!activeRag && !database) {
       return {
         ok: false,
@@ -520,7 +558,7 @@ export function registerAgentIpcHandlers(deps: AgentIpcDeps): void {
         message: '内存 RAG 语料尚未就绪；查询不会启动数据库 recovery。'
       };
     }
-    const liveCorpus = buildRagCorpus(initialIndex);
+    const liveCorpus = activeRag ?? buildRagCorpus(initialIndex);
     const persisted = createRagCorpus({
       workspaceId: initialIndex.workspaceId,
       builtAt: liveCorpus.builtAt,
@@ -531,9 +569,14 @@ export function registerAgentIpcHandlers(deps: AgentIpcDeps): void {
     // persisted chunks only fill verified source/revision gaps. This keeps a
     // clean workspace usable before the background RAG writer has finished.
     const corpus = activeRag
-      ?? (liveCorpus.chunks.some((chunk) => chunk.family !== 'file')
-        ? mergeCatalogAndPersisted(liveCorpus, persisted)
-        : persisted);
+      ? mergeCatalogAndPersisted(liveCorpus, persisted)
+      : persisted;
+
+    // Database loading and local-vector checks may await long enough for a
+    // remount or semantic publication.  Recheck before any retrieval branch,
+    // including lexical-only fallback; otherwise the old corpus can escape
+    // through the fast path while hybrid happens to be protected below.
+    if (!workspaceStillCurrent()) return staleSearchResult();
 
     const staleChunkMask = getRagStaleChunkMaskCached(initialIndex, corpus);
     const lexicalOptions = {
@@ -547,11 +590,13 @@ export function registerAgentIpcHandlers(deps: AgentIpcDeps): void {
     // depend on a model or on a vector cache left by a different revision.
     const vectorMap = await loadWorkspaceVectorMap(corpus, database);
     if (!vectorMap || vectorMap.size === 0 || internalRagEmbedding.getLocalModelStatus().state !== 'local-ready') {
+      if (!workspaceStillCurrent()) return staleSearchResult();
       return retrieveEvidence(corpus, query, lexicalOptions);
     }
 
     const queryVector = await internalRagEmbedding.embedQuery(query, options.signal);
     if (!queryVector) {
+      if (!workspaceStillCurrent()) return staleSearchResult();
       return retrieveEvidence(corpus, query, lexicalOptions);
     }
 
@@ -559,18 +604,7 @@ export function registerAgentIpcHandlers(deps: AgentIpcDeps): void {
     // scan replacement, or semantic RAG publication during that window must
     // not let an old workspace snapshot reach the Agent evidence preflight.
     const currentIndex = deps.getActiveIndex();
-    const workspaceStillCurrent = currentIndex === initialIndex
-      && deps.getActiveSession() === initialSession
-      && deps.getActiveWorkspaceSessionId() === initialSessionId
-      && deps.getActiveWorkspaceSessionGeneration() === initialGeneration
-      && deps.getActiveRag() === initialRag;
-    if (!workspaceStillCurrent || !currentIndex) {
-      return {
-        ok: false,
-        code: 'RAG_UNAVAILABLE',
-        message: '工作区会话或 RAG 语料已切换，已丢弃旧检索结果；请重试。'
-      };
-    }
+    if (!workspaceStillCurrent() || !currentIndex) return staleSearchResult();
 
     const currentStaleChunkMask = getRagStaleChunkMaskCached(currentIndex, corpus);
     return retrieveEvidenceHybrid(corpus, query, {
@@ -603,7 +637,7 @@ export function registerAgentIpcHandlers(deps: AgentIpcDeps): void {
       if (!deps.getActiveIndex() || !deps.getActiveSession()) {
         return { ok: false as const, code: 'WORKSPACE_REQUIRED' as const, message: '先打开 Mod 工作区。' };
       }
-      const database = deps.getActiveRag()
+      const database = resolveRagCorpus(deps.currentToolContext())
         ? deps.operationLogUtility
         : await deps.ensureActiveOperationLog(deps.getActiveSession()!);
       return searchWorkspaceEvidence(database, input.query, {
@@ -1132,7 +1166,7 @@ export function registerAgentIpcHandlers(deps: AgentIpcDeps): void {
         if (liveStats.events > 0 || liveStats.mapEntities > 0 || liveStats.paramRows > 0 || liveStats.textEntries > 0) {
           return true;
         }
-        const activeRag = deps.getActiveRag();
+        const activeRag = resolveRagCorpus(deps.currentToolContext());
         if (activeRag) {
           return activeRag.availability === 'available' && activeRag.chunks.length > 0;
         }

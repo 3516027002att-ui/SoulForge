@@ -105,8 +105,16 @@ export interface RendererWorkspaceScanResult {
 
 // Module-owned mutable state – moved from composition root per A12.
 let indexedFiles: IndexedFile[] = [];
+let indexedFilesRevision = 0;
+let indexedFilesIdentityDigest = 'empty';
 let activeIndex: WorkspaceIndex | null = null;
 let activeRag: RagCorpus | null = null;
+export type WorkspaceRagScope = 'canonical-param' | 'full';
+let activeRagEpoch = 0;
+let activeRagScope: WorkspaceRagScope | null = null;
+let activeRagSessionId: string | null = null;
+let activeRagGeneration = 0;
+let activeRagIndexedFilesRevision = 0;
 let scheduleRagEmbedding: ((corpus: RagCorpus, database: OperationLogUtilityClient) => void) | null = null;
 let activeSession: WorkspaceSession | null = null;
 let activeWorkspaceSessionId: string | null = null;
@@ -117,6 +125,7 @@ let activeFingerprintStore: FingerprintStoreState | null = null;
 let foregroundActive = false;
 let workspaceIndexingAbort: AbortController | null = null;
 let workspaceIndexingTask: Promise<void> | null = null;
+let workspacePrimaryIndexingTask: Promise<void> | null = null;
 interface WorkspaceSemanticIndexingTask {
   sessionId: string;
   generation: number;
@@ -143,6 +152,52 @@ const directorySelections = new Map<string, DirectorySelectionRecord>();
 const recentPathsFile = join(app.getPath('userData'), 'recent-paths.json');
 const toolRegistry = createDefaultToolRegistry();
 
+function replaceWorkspaceIndexedFiles(next: readonly IndexedFile[]): void {
+  indexedFiles = [...next];
+  indexedFilesRevision += 1;
+  const digest = createHash('sha256');
+  for (const file of indexedFiles.slice().sort((left, right) => left.sourceUri.localeCompare(right.sourceUri))) {
+    digest.update(file.sourceUri);
+    digest.update('\u0000');
+    digest.update(file.sha256 ?? '');
+    digest.update('\u0000');
+    digest.update(file.mtimeMs === undefined ? '' : String(file.mtimeMs));
+    digest.update('\u0000');
+  }
+  indexedFilesIdentityDigest = digest.digest('hex');
+}
+
+function replaceWorkspaceIndexedFile(sourceUri: string, file: IndexedFile): boolean {
+  const index = indexedFiles.findIndex((item) => item.sourceUri === sourceUri);
+  if (index < 0) return false;
+  const next = indexedFiles.slice();
+  next[index] = file;
+  replaceWorkspaceIndexedFiles(next);
+  return true;
+}
+
+function clearWorkspaceRagSnapshot(): void {
+  activeRag = null;
+  activeRagEpoch = 0;
+  activeRagScope = null;
+  activeRagSessionId = null;
+  activeRagGeneration = 0;
+  activeRagIndexedFilesRevision = 0;
+}
+
+function publishWorkspaceRagSnapshot(
+  corpus: RagCorpus,
+  scope: WorkspaceRagScope,
+  index: WorkspaceIndex | null = activeIndex
+): void {
+  activeRag = corpus;
+  activeRagEpoch = index?.getNativeVersionEpoch() ?? 0;
+  activeRagScope = scope;
+  activeRagSessionId = activeWorkspaceSessionId;
+  activeRagGeneration = activeWorkspaceSessionGeneration;
+  activeRagIndexedFilesRevision = indexedFilesRevision;
+}
+
 function workspaceStoragePaths(workspaceId: string, workspaceRoot?: string): WorkspaceStoragePaths {
   const session = activeSession;
   const resolvedRoot = workspaceRoot
@@ -163,20 +218,33 @@ async function persistActiveRag(
   corpus: RagCorpus,
   previous: RagCorpus | null = null,
   signal?: AbortSignal,
-  scheduleEmbedding = true
+  scheduleEmbedding = true,
+  scope: WorkspaceRagScope = scheduleEmbedding ? 'full' : 'canonical-param'
 ): Promise<void> {
   const publishingSessionId = activeWorkspaceSessionId;
   const publishingGeneration = activeWorkspaceSessionGeneration;
+  const publishingIndexedFilesRevision = typeof indexedFilesRevision !== 'undefined'
+    ? indexedFilesRevision
+    : null;
   await persistRagCorpusBySourceDelta(database, corpus, previous, signal);
   // Publish only after the source delta is durable.  Publishing first would
   // make a cancelled bounded refresh look committed and could cause the next
   // retry to skip SQLite batches that were not written yet.
   throwIfRagRefreshAborted(signal);
   if (publishingSessionId !== activeWorkspaceSessionId || publishingGeneration !== activeWorkspaceSessionGeneration
+    || (publishingIndexedFilesRevision !== null
+      && typeof indexedFilesRevision !== 'undefined'
+      && publishingIndexedFilesRevision !== indexedFilesRevision)
     || activeIndex?.workspaceId !== corpus.workspaceId) {
     throw new Error('工作区已切换，旧语义语料不会发布到新会话。');
   }
-  activeRag = corpus;
+  if (typeof publishWorkspaceRagSnapshot === 'function') {
+    publishWorkspaceRagSnapshot(corpus, scope);
+  } else {
+    // Minimal lifecycle contract harnesses inject only the legacy corpus
+    // variable; keep their isolated evaluation independent of module helpers.
+    activeRag = corpus;
+  }
   if (scheduleEmbedding) scheduleRagEmbedding?.(corpus, database);
 }
 
@@ -222,7 +290,14 @@ async function refreshRagAfterAnalyze(
       throwIfRagRefreshAborted(signal);
       return { chunks, references };
     },
-    persist: (corpus, previous) => persistActiveRag(database, corpus, previous, signal, scheduleEmbedding)
+    persist: (corpus, previous) => persistActiveRag(
+      database,
+      corpus,
+      previous,
+      signal,
+      scheduleEmbedding,
+      scheduleEmbedding ? 'full' : 'canonical-param'
+    )
   });
 }
 
@@ -443,7 +518,17 @@ export async function waitForWorkspaceIndexing(signal?: AbortSignal): Promise<vo
       error.name = 'AbortError';
       throw error;
     }
-    const scanTask = workspaceIndexingTask;
+    // The light catalog is already returned to the renderer.  Agent reads
+    // only need the primary native hashes and the first semantic projection;
+    // waiting for the long tail of unrelated files makes the first query
+    // appear hung and defeats staged indexing.
+    // Some contract tests evaluate this function in a minimal VM containing
+    // only the legacy scan task.  Keep that isolated harness valid while the
+    // real module uses the primary-hash promise when it exists.
+    const primaryTask = typeof workspacePrimaryIndexingTask !== 'undefined'
+      ? workspacePrimaryIndexingTask
+      : null;
+    const scanTask = primaryTask ?? workspaceIndexingTask;
     const semanticTask = workspaceSemanticIndexingTask;
     if (scanTask) {
       try {
@@ -464,7 +549,10 @@ export async function waitForWorkspaceIndexing(signal?: AbortSignal): Promise<vo
       error.name = 'AbortError';
       throw error;
     }
-    if (workspaceIndexingTask !== scanTask
+    const currentPrimaryTask = typeof workspacePrimaryIndexingTask !== 'undefined'
+      ? workspacePrimaryIndexingTask
+      : null;
+    if ((currentPrimaryTask ?? workspaceIndexingTask) !== scanTask
       || workspaceSemanticIndexingTask?.promise !== semanticTask?.promise) continue;
     return;
   }
@@ -477,7 +565,8 @@ export function clearWorkspaceIpcCaches(): void {
   directorySelections.clear();
   actionMembershipForegroundTasks.clear();
   resolveWorkspaceSemanticIndexingTask();
-  activeRag = null;
+  if (typeof clearWorkspaceRagSnapshot === 'function') clearWorkspaceRagSnapshot();
+  else activeRag = null;
   scheduleRagEmbedding = null;
   workspaceAnalysisStarter = null;
 }
@@ -594,9 +683,9 @@ export function registerWorkspaceIpcHandlers(deps: WorkspaceIpcDeps): void {
     // A corpus is valid only for its active WorkspaceIndex/session.  Clear it
     // before exposing the new session so an agent cannot query the previous
     // workspace during the open-to-analyze window.
-    activeRag = null;
+    clearWorkspaceRagSnapshot();
     activeIndex = null;
-    indexedFiles = [];
+    replaceWorkspaceIndexedFiles([]);
     workspaceSessionGenerationCounter += 1;
     const thisSessionGeneration = workspaceSessionGenerationCounter;
     activeWorkspaceSessionGeneration = thisSessionGeneration;
@@ -615,7 +704,7 @@ export function registerWorkspaceIpcHandlers(deps: WorkspaceIpcDeps): void {
     const shellVisibleAt = Date.now();
     const lightResult = await scanWorkspace({ workspaceRoot: activeSession.layers.overlayRoot, game: activeSession.meta.game, includeContentHashes: false });
     const filesVisibleAt = Date.now();
-    indexedFiles = lightResult.files;
+    replaceWorkspaceIndexedFiles(lightResult.files);
     activeOverlayLabel = overlaySelection.label;
     activeIndex = new WorkspaceIndex(activeSession.meta.workspaceId);
     activeIndex.setFiles(lightResult.files);
@@ -631,10 +720,39 @@ export function registerWorkspaceIpcHandlers(deps: WorkspaceIpcDeps): void {
     const currentSession = activeSession;
     const currentGeneration = thisSessionGeneration;
     const currentStoreGen = fingerprintStore.fingerprintStoreGeneration;
-    const lightFiles = lightResult.files;
+    const isPrimaryHashCandidate = (f: IndexedFile) => (
+      f.resourceKind === 'param'
+      || f.resourceKind === 'msg'
+      || f.resourceKind === 'event'
+      || f.resourceKind === 'map'
+      || f.relativePath.toLowerCase().includes('.param')
+      || f.relativePath.toLowerCase().includes('.msgbnd')
+      || f.relativePath.toLowerCase().includes('.emevd')
+      || f.relativePath.toLowerCase().includes('.msb')
+      || f.relativePath.toLowerCase().endsWith('.fmg')
+    );
+    const lightFiles = [...lightResult.files].sort((a, b) => {
+      const aPri = isPrimaryHashCandidate(a) ? 0 : 1;
+      const bPri = isPrimaryHashCandidate(b) ? 0 : 1;
+      return aPri - bPri;
+    });
+    let resolvePrimaryHash!: () => void;
+    const primaryHashPromise = new Promise<void>((resolve) => { resolvePrimaryHash = resolve; });
+    workspacePrimaryIndexingTask = primaryHashPromise;
     const controller = new AbortController();
     workspaceIndexingAbort = controller;
     const backgroundTask = (async () => {
+      const enriched: IndexedFile[] = [];
+      let primaryHashResolved = false;
+      const checkResolvePrimary = () => {
+        if (!primaryHashResolved) {
+          primaryHashResolved = true;
+          const enrichedMap = new Map(enriched.map((e) => [e.relativePath, e]));
+          replaceWorkspaceIndexedFiles(lightResult.files.map((lf) => enrichedMap.get(lf.relativePath) ?? lf));
+          indexForSession.setFiles(indexedFiles);
+          resolvePrimaryHash();
+        }
+      };
       const openHandles: import('node:fs/promises').FileHandle[] = [];
       let activeDiskReaders = 0;
       const releaseAll = async () => { for (const h of openHandles) { try { await h.close(); } catch {} } openHandles.length = 0; };
@@ -664,8 +782,11 @@ export function registerWorkspaceIpcHandlers(deps: WorkspaceIpcDeps): void {
       try {
         const { createHash: _createHash } = await import('node:crypto');
         const { open: _open } = await import('node:fs/promises');
-        let hashedCount = 0; let reuseCount = 0; const enriched = [];
+        let hashedCount = 0; let reuseCount = 0;
         for (const file of lightFiles) {
+          if (!primaryHashResolved && !isPrimaryHashCandidate(file)) {
+            checkResolvePrimary();
+          }
           if (controller.signal.aborted) throw new Error('aborted');
           if (currentGeneration !== activeWorkspaceSessionGeneration || currentSession !== activeSession || currentSessionId !== activeWorkspaceSessionId) throw new Error('aborted');
           let liveStat = null;
@@ -705,9 +826,14 @@ export function registerWorkspaceIpcHandlers(deps: WorkspaceIpcDeps): void {
           }
           await new Promise((r) => setTimeout(r, 0));
         }
+        checkResolvePrimary();
         if (controller.signal.aborted) { await cancelCurrentJob('工作区扫描被新任务取消。'); await releaseAll(); return; }
         if (currentGeneration !== activeWorkspaceSessionGeneration || currentSession !== activeSession || currentSessionId !== activeWorkspaceSessionId) { await cancelCurrentJob('工作区会话已切换，旧扫描结果已丢弃。'); await releaseAll(); return; }
-        indexedFiles = enriched as unknown as IndexedFile[]; indexForSession.setFiles(enriched as unknown as IndexedFile[]); await database.replaceFiles(enriched as unknown as IndexedFile[]);
+        replaceWorkspaceIndexedFiles(enriched as unknown as IndexedFile[]); indexForSession.setFiles(enriched as unknown as IndexedFile[]);
+        if (activeIndex && activeIndex !== indexForSession) {
+          activeIndex.setFiles(enriched as unknown as IndexedFile[]);
+        }
+        await database.replaceFiles(enriched as unknown as IndexedFile[]);
         const quickHydrateFiles = (enriched as unknown as IndexedFile[]).filter(
           (f) => f.resourceKind === 'param' || f.resourceKind === 'msg' || f.relativePath.toLowerCase().includes('gameparam.parambnd')
         );
@@ -750,6 +876,7 @@ export function registerWorkspaceIpcHandlers(deps: WorkspaceIpcDeps): void {
         await database.upsertJob({ jobId: scanJobId, title: '扫描工作区', jobKind: 'workspace_scan', status: 'completed', progress: { current: enriched.length, total: enriched.length }, payload: { workspaceSessionId: currentSessionId, workspaceSessionGeneration: currentGeneration, fingerprintStoreGeneration: currentStoreGen }, result: { fileCount: enriched.length, hashedCount, reuseCount, shellVisibleAt, filesVisibleAt, backgroundCompleteAt, shellVisibleMs: filesVisibleAt - shellVisibleAt, indexingMs: backgroundCompleteAt - shellVisibleAt, openHandles: 0, activeDiskReaders: 0, actionBinderIndex }, createdAt: scanStartedAt, startedAt: scanStartedAt, completedAt, updatedAt: completedAt });
         if (activeIndex === indexForSession) await refreshRagAfterScan(database, indexForSession, controller.signal);
       } catch (error) {
+        checkResolvePrimary();
         await releaseAll(); if (controller.signal.aborted) { await cancelCurrentJob('工作区扫描被新任务取消。'); return; } if (currentGeneration !== activeWorkspaceSessionGeneration) { await cancelCurrentJob('工作区会话已切换，旧扫描结果已丢弃。'); return; }
         const failedAt = new Date().toISOString(); try { await database.upsertJob({ jobId: scanJobId, title: '扫描工作区', jobKind: 'workspace_scan', status: 'failed', progress: { current: 0 }, payload: { workspaceSessionId: currentSessionId, workspaceSessionGeneration: currentGeneration }, error: { message: error instanceof Error ? error.message : String(error) }, createdAt: scanStartedAt, startedAt: scanStartedAt, completedAt: failedAt, updatedAt: failedAt }); } catch {}
       }
@@ -764,12 +891,13 @@ export function registerWorkspaceIpcHandlers(deps: WorkspaceIpcDeps): void {
     workspaceAnalyzeAbort?.abort();
     if (workspaceIndexingAbort) { try { workspaceIndexingAbort.abort(); } catch {} }
     if (workspaceIndexingTask) { try { await workspaceIndexingTask; } catch {} }
+    workspacePrimaryIndexingTask = null;
     resolveWorkspaceSemanticIndexingTask();
     await disposeBridgeDaemonPool();
-    activeRag = null;
+    clearWorkspaceRagSnapshot();
     activeIndex?.clearActionBinderMembership();
     activeIndex = null;
-    indexedFiles = [];
+    replaceWorkspaceIndexedFiles([]);
     workspaceSessionGenerationCounter += 1; activeWorkspaceSessionGeneration = workspaceSessionGenerationCounter; activeWorkspaceSessionId = randomUUID();
     activeSession = await openWorkspaceSession({ overlayRoot: activeSession.layers.overlayRoot, ...(baseSelection ? { baseRoot: baseSelection.absolutePath } : {}), game: activeSession.meta.game });
     const workspaceLabel = activeOverlayLabel || activeSession.meta.game;
@@ -808,7 +936,9 @@ export function registerWorkspaceIpcHandlers(deps: WorkspaceIpcDeps): void {
     // file, builds ACTION membership, and publishes the file-only RAG corpus.
     // Do not start the full native analysis beside that work: the map export is
     // CPU/memory intensive and the overlap can make Electron appear hung.
-    const scanTask = workspaceIndexingTask;
+    // Analysis only requires candidate parse resources to have valid SHA-256 hashes,
+    // so wait for the prioritized primary hash stage rather than the full directory.
+    const scanTask = workspacePrimaryIndexingTask ?? workspaceIndexingTask;
     let resolveSemanticStage!: () => void;
     const semanticStagePromise = new Promise<void>((resolve) => {
       resolveSemanticStage = resolve;
@@ -913,6 +1043,7 @@ export function registerWorkspaceIpcHandlers(deps: WorkspaceIpcDeps): void {
         workspaceRoot: session.layers.overlayRoot,
         signal: analyzeController.signal,
         files: indexedFiles,
+        inspectNativeResources: false,
         ...(semanticCache ? { semanticCache } : {}),
         ...(session.layers.baseRoot ? { oodleRuntimeRoot: session.layers.baseRoot } : {}),
         onSemanticIndexReady: async (stage) => {
@@ -939,6 +1070,17 @@ export function registerWorkspaceIpcHandlers(deps: WorkspaceIpcDeps): void {
               stage.index.setParamSemanticState('ready');
             }
             assertAnalyzeGenerationCurrent('工作区已切换，阶段语义索引已丢弃。');
+            activeIndex = stage.index;
+            replaceWorkspaceIndexedFiles(stage.index.getFiles());
+            const stageCorpus = buildRagCorpus(
+              canonicalProjection.canonicalIndex,
+              undefined,
+              [...stage.diagnostics, ...canonicalProjection.diagnostics],
+              undefined,
+              undefined,
+              { lookupIndex: 'deferred' }
+            );
+            publishWorkspaceRagSnapshot(stageCorpus, 'canonical-param', stage.index);
             // The full analysis will publish again at the end.  Do not start
             // embedding during this transitional slice: it would compete with
             // the remaining native EVENT/MAP pass and is not needed for the
@@ -952,8 +1094,6 @@ export function registerWorkspaceIpcHandlers(deps: WorkspaceIpcDeps): void {
               canonicalProjection.attemptedSourceUris
             );
             assertAnalyzeGenerationCurrent('工作区已切换，阶段语义索引已丢弃。');
-            activeIndex = stage.index;
-            indexedFiles = stage.index.getFiles();
           } finally {
             resolveWorkspaceSemanticIndexingTask(semanticStage);
           }
@@ -992,6 +1132,14 @@ export function registerWorkspaceIpcHandlers(deps: WorkspaceIpcDeps): void {
         })),
         ...canonicalProjection.diagnostics
       ];
+      // The complete native index is ready before its RAG snapshot is
+      // published.  Set it first so the snapshot epoch is taken from the
+      // index that Agent reads will actually use, not the earlier PARAM-stage
+      // projection.
+      activeIndex = result.index;
+      // Publish the catalog revision before RAG so the snapshot provenance
+      // points at the exact file identity set consumed by Agent queries.
+      replaceWorkspaceIndexedFiles(result.index.getFiles());
       await refreshRagAfterAnalyze(
         database,
         canonicalProjection.canonicalIndex,
@@ -1001,8 +1149,6 @@ export function registerWorkspaceIpcHandlers(deps: WorkspaceIpcDeps): void {
         canonicalProjection.attemptedSourceUris
       );
       assertAnalyzeGenerationCurrent('工作区已切换，最终 RAG 语料已丢弃。');
-      activeIndex = result.index;
-      indexedFiles = result.index.getFiles();
       const summary: AnalyzeWorkspaceSummary = {
         parsedFiles: result.parsedFiles,
         inspectedFiles: result.inspectedFiles,
@@ -1052,6 +1198,30 @@ export function getWorkspaceSession(): WorkspaceSession | null {
 export function getWorkspaceIndexedFiles(): IndexedFile[] {
   return indexedFiles;
 }
+export function getWorkspaceIndexedFilesRevisionState(): number {
+  return indexedFilesRevision;
+}
+export interface WorkspaceRuntimeIdentity {
+  workspaceSessionId: string | null;
+  generation: number;
+  indexedFilesRevision: number;
+  indexedFilesIdentityDigest: string;
+  overlayRoot: string | null;
+  baseRoot: string | null;
+}
+export function getWorkspaceRuntimeIdentityState(): WorkspaceRuntimeIdentity {
+  return {
+    workspaceSessionId: activeWorkspaceSessionId,
+    generation: activeWorkspaceSessionGeneration,
+    indexedFilesRevision,
+    indexedFilesIdentityDigest,
+    overlayRoot: activeSession?.layers.overlayRoot ?? null,
+    baseRoot: activeSession?.layers.baseRoot ?? null
+  };
+}
+export function replaceWorkspaceIndexedFileState(sourceUri: string, file: IndexedFile): boolean {
+  return replaceWorkspaceIndexedFile(sourceUri, file);
+}
 export function getWorkspaceActiveIndex(): WorkspaceIndex | null {
   return activeIndex;
 }
@@ -1064,15 +1234,33 @@ export function getActiveWorkspaceSessionGenerationState(): number {
 export function getWorkspaceRag(): RagCorpus | null {
   return activeRag;
 }
+export interface WorkspaceRagSnapshotState {
+  corpus: RagCorpus | null;
+  epoch: number;
+  scope: WorkspaceRagScope | null;
+  sessionId: string | null;
+  generation: number;
+  indexedFilesRevision: number;
+}
+export function getWorkspaceRagSnapshotState(): WorkspaceRagSnapshotState {
+  return {
+    corpus: activeRag,
+    epoch: activeRagEpoch,
+    scope: activeRagScope,
+    sessionId: activeRagSessionId,
+    generation: activeRagGeneration,
+    indexedFilesRevision: activeRagIndexedFilesRevision
+  };
+}
 export function getWorkspaceFingerprintStore(): FingerprintStoreState | null {
   return activeFingerprintStore;
 }
 export function applyWorkspaceIndexSnapshot(index: WorkspaceIndex): void {
   activeIndex = index;
-  indexedFiles = index.getFiles();
+  replaceWorkspaceIndexedFiles(index.getFiles());
 }
 export function applyWorkspaceRag(corpus: RagCorpus): void {
-  activeRag = corpus;
+  publishWorkspaceRagSnapshot(corpus, 'full');
 }
 export function setWorkspaceForegroundActive(value: boolean): void {
   foregroundActive = value;

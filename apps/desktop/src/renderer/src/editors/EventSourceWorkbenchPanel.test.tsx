@@ -307,7 +307,8 @@ describe('S15 事件失败面：读取失败时源码区给可行动句，禁止
       live: true
     };
     const text = baselineText(tab);
-    assert.match(text, /未找到用户本机 EMEDF/);
+    assert.match(text, /first-party|覆盖缺口|内置.*覆盖/i);
+    assert.doesNotMatch(text, /DarkScript3|SOULFORGE_EMEDF_PATH|安装.*EMEDF/i);
   });
 });
 

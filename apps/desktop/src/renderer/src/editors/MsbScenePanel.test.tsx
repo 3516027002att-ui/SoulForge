@@ -21,6 +21,7 @@ import { Buffer } from 'node:buffer';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, it } from 'node:test';
+import React from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import {
   MsbScenePanel,

@@ -21,15 +21,15 @@ describe('first-party TAE catalog', () => {
   it('projects field layout and enum names from the built-in schema', () => {
     const catalog = getTaeTemplateCatalog();
     const jumpTable = catalog.events.get(0)!;
-    assert.equal(jumpTable.name, 'JumpTable');
-    assert.equal(jumpTable.paramSize, 16);
+    assert.equal(jumpTable.name, 'Jump Table');
+    assert.equal(jumpTable.paramSize, 24);
     assert.ok(jumpTable.fields.length > 0);
     assert.ok(jumpTable.fields.some((field) => field.entries && field.entries.length > 0));
 
     const hex = '09000000' + '00' + '000000' + '00000000' + '00000000';
     const fields = decodeTaeParamFields(jumpTable, hex)!;
     assert.ok(fields.length > 0);
-    assert.equal(fields[0]!.value, '9: InvokeAnimCancelStart_Guard');
+    assert.equal(fields[0]!.value, 'Left Hand Attack Key Input');
   });
 
   it('renders a deterministic first-party fallback for an unknown event id', () => {

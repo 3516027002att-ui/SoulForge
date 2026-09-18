@@ -114,9 +114,14 @@ export interface HostResolvedEmevdEventTarget {
 }
 
 export type KnowledgeSourceChange = readonly string[];
+export type RagSnapshotScope = 'canonical-param' | 'full';
 
 export interface ToolContext {
   workspaceIndex: WorkspaceIndex | null;
+  /** Host-owned identity of the currently active workspace session. */
+  workspaceSessionId?: string;
+  workspaceSessionGeneration?: number;
+  indexedFilesRevision?: number;
   /** Same long-lived host session used by desktop and CLI; no per-call ledger. */
   coreSession?: import('../runtime/coreToolSession.js').CoreToolSession;
   mode: 'plan' | 'normal' | 'fullPermission';
@@ -130,6 +135,14 @@ export interface ToolContext {
   allowMemoryWrite?: boolean;
   /** Optional durable/in-memory RAG corpus. Absent falls back to building from the index. */
   rag?: RagCorpus;
+  /** Host-owned native epoch that proves which WorkspaceIndex built the RAG snapshot. */
+  ragEpoch?: number;
+  /** Host-owned scope of the injected RAG snapshot. Missing provenance is stale. */
+  ragScope?: RagSnapshotScope;
+  /** Host-owned identity of the session/catalog that produced the RAG snapshot. */
+  ragSessionId?: string;
+  ragGeneration?: number;
+  ragIndexedFilesRevision?: number;
   /** Optional long-term memory store (Codex MEMORY.md persistent layer). */
   memoryStore?: MemoryStore;
   /**
@@ -837,6 +850,22 @@ export function createDefaultToolRegistry(): ToolRegistry {
       });
       if (!result.ok) {
         if (result.code === 'insufficient_evidence') return ok({ query, hits: [], totalHits: 0, note: result.message });
+        // A stale injected snapshot may be the only semantic body available
+        // while the current catalog has already invalidated its source.  The
+        // freshness mask intentionally removes those chunks; report an
+        // honest empty/partial result instead of turning a known stale source
+        // into a retry loop around RAG_UNAVAILABLE.
+        if (result.code === 'RAG_UNAVAILABLE'
+          && context.rag?.chunks.some((chunk) => chunk.family !== 'file')) {
+          return ok({
+            query,
+            hits: [],
+            totalHits: 0,
+            status: 'partial',
+            diagnostics: corpus?.diagnostics ?? [],
+            note: '当前语义快照已因 source revision/hash 失效，未将旧内容作为证据返回。'
+          });
+        }
         return fail(result.code, result.message);
       }
       return ok(result);
@@ -3524,17 +3553,70 @@ function asRagFamilies(value: unknown): RagChunkFamily[] | undefined {
   return families.length > 0 ? families : undefined;
 }
 
-function resolveRagCorpus(context: ToolContext): RagCorpus | null {
+export function resolveRagCorpus(context: ToolContext): RagCorpus | null {
   if (context.workspaceIndex) {
+    const currentEpoch = context.workspaceIndex.getNativeVersionEpoch();
+    const hasMatchingHostIdentity = typeof context.workspaceSessionId === 'string'
+      && typeof context.ragSessionId === 'string'
+      && context.ragSessionId === context.workspaceSessionId
+      && typeof context.workspaceSessionGeneration === 'number'
+      && typeof context.ragGeneration === 'number'
+      && context.ragGeneration === context.workspaceSessionGeneration
+      && typeof context.indexedFilesRevision === 'number'
+      && typeof context.ragIndexedFilesRevision === 'number'
+      && context.ragIndexedFilesRevision === context.indexedFilesRevision;
     // 主进程在一次分析/原生回读后注入带来源快照。优先复用同一 workspace
     // 的快照；如果每次 retrieve_evidence 都从 WorkspaceIndex 重建 18 万个
     // chunk，会把检索变成全局 CPU 放大器，尤其在并发 Agent 下会互相叠加。
-    if (context.rag && context.rag.workspaceId === context.workspaceIndex.workspaceId) {
-      return context.rag;
+    if (context.rag
+      && context.rag.workspaceId === context.workspaceIndex.workspaceId
+      && hasMatchingHostIdentity
+      && context.ragEpoch === currentEpoch
+      && context.ragScope === 'full') {
+      const stats = context.workspaceIndex.getStats();
+      const ragStats = context.rag.stats.byFamily;
+      const taeEventCount = context.workspaceIndex.toSymbolBundle().tae?.reduce(
+        (total, exportItem) => total + exportItem.animations.reduce(
+          (animationTotal, animation) => animationTotal + animation.events.length,
+          0
+        ),
+        0
+      ) ?? 0;
+      const ragMissingSymbols = (stats.files > 0 && ragStats.file === 0)
+        || (stats.events > 0 && ragStats.event === 0)
+        || (stats.mapEntities > 0 && ragStats.map_entity === 0)
+        || (stats.mapRegions > 0 && ragStats.map_region === 0)
+        || (stats.paramRows > 0 && ragStats.param_row === 0)
+        || (stats.textEntries > 0 && ragStats.text_entry === 0)
+        || (taeEventCount > 0 && ragStats.tae_event === 0);
+      const incompleteSemanticCoverage = context.workspaceIndex.getCoverageSnapshot().some((item) => (
+        item.domain !== undefined
+        && item.expectedResources !== null
+        && item.expectedResources > 0
+        && item.status !== 'complete'
+      ));
+      if (!ragMissingSymbols && !incompleteSemanticCoverage) {
+        return context.rag;
+      }
     }
-    const live = buildRagCorpus(context.workspaceIndex);
+    // A canonical PARAM snapshot is intentionally retained, while the live
+    // index supplies native families that may finish after the first PARAM
+    // stage.  This is also the safe fallback for snapshots without provenance:
+    // stale persisted chunks are admitted only when mergeCatalogAndPersisted
+    // can prove their source revision/hash against the current file catalog.
+    const live = buildRagCorpus(
+      context.workspaceIndex,
+      undefined,
+      [],
+      undefined,
+      undefined,
+      {
+        lookupIndex: 'deferred',
+        families: ['file', 'event', 'map_entity', 'map_region', 'text_entry', 'tae_event']
+      }
+    );
     if (context.rag && context.rag.chunks.length > 0) {
-      return mergeCatalogAndPersisted(live, context.rag);
+      return mergeCatalogAndPersisted(live, context.rag, { lookupIndex: 'deferred' });
     }
     return live;
   }

@@ -123,8 +123,8 @@ export class MapGeometryPrepareClient {
       onTelemetry?: (event: MapGeometryPrepareTelemetryEvent) => void;
     } = {}
   ) {
-    this.concurrency = Math.max(1, Math.floor(options.concurrency ?? 2));
-    this.maxQueued = Math.max(this.concurrency, Math.floor(options.maxQueued ?? 8));
+    this.concurrency = Math.max(1, Math.floor(options.concurrency ?? 4));
+    this.maxQueued = Math.max(this.concurrency, Math.floor(options.maxQueued ?? 32));
     this.timeoutMs = Math.max(1, Math.floor(options.timeoutMs ?? 120_000));
     this.onTelemetry = options.onTelemetry;
   }

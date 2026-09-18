@@ -161,8 +161,9 @@ export function disposeEmevdWindow(windowId: number): void {
 
 export interface EventIpcDeps {
   handle: TrustedIpcHandle;
-  /** 活动索引文件表：写回成功后按条目原地替换（与拆分前语义一致）。 */
+  /** 活动索引文件表；写回通过 workspace catalog helper 发布新 revision。 */
   readonly indexedFiles: IndexedFile[];
+  replaceIndexedFile(sourceUri: string, file: IndexedFile): boolean;
   readonly activeSession: WorkspaceSession | null;
   durableStoragePaths(workspaceId: string): {
     root: string;
@@ -351,8 +352,7 @@ export function registerEventIpcHandlers(deps: EventIpcDeps): void {
               parseStructured: true,
               ...(deps.activeSession!.layers.baseRoot ? { oodleRuntimeRoot: deps.activeSession!.layers.baseRoot } : {})
             });
-            const index = deps.indexedFiles.findIndex((item) => item.sourceUri === sourceUri);
-            if (index >= 0) deps.indexedFiles[index] = refreshed.file;
+            deps.replaceIndexedFile(sourceUri, refreshed.file);
           },
           refresh: (result) => deps.refreshActiveIndexAfterNativeWrite([sourceUri], result),
           onPrepareError: (result, error) => appendPostCommitFailureDiagnostic(
@@ -772,8 +772,7 @@ export function registerEventIpcHandlers(deps: EventIpcDeps): void {
         parseStructured: true,
         ...(deps.activeSession.layers.baseRoot ? { oodleRuntimeRoot: deps.activeSession.layers.baseRoot } : {})
       });
-      const index = deps.indexedFiles.findIndex((item) => item.sourceUri === sourceUri);
-      if (index >= 0) deps.indexedFiles[index] = preview.file;
+      deps.replaceIndexedFile(sourceUri, preview.file);
       const response: RendererSaveResult = {
         ok: true,
         changedFiles: [sourceUri],

@@ -157,6 +157,7 @@ export async function readParamDocumentViaBridge(input: {
   rowIds?: number[];
   includeAllPayloads?: boolean;
   maxFrameBytes?: number;
+  maxConcurrency?: number;
   /** Resolve only from verified metadata; never infer ambiguous single-row boundaries. */
   resolveRowDataSize?: (header: {
     sourceHash: string; typeName: string; dataVersion: number;
@@ -191,6 +192,7 @@ export async function readParamDocumentViaBridge(input: {
     timeoutMs: input.timeoutMs ?? 60_000,
     ...(input.signal ? { signal: input.signal } : {}),
     ...(input.maxFrameBytes !== undefined ? { maxFrameBytes: input.maxFrameBytes } : {}),
+    ...(input.maxConcurrency !== undefined ? { maxConcurrency: input.maxConcurrency } : {}),
     commandOptions
   });
   const options = {

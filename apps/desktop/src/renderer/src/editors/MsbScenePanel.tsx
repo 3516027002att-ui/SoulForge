@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type ReactElement } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState, type ReactElement } from 'react';
 import { useVirtualizer } from '@tanstack/react-virtual';
 import { selectableRowAttributes } from '../a11y/selectableRow.js';
 import {
@@ -84,14 +84,18 @@ export function orderMapModelLoadGroups<
   }
 
   const ordered: T[] = [];
+  const pointers = [0, 0, 0];
   const schedule = [0, 1, 2, 2, 2] as const;
-  while (lanes.some((lane) => lane.length > 0)) {
+  while (pointers[0]! < lanes[0]!.length || pointers[1]! < lanes[1]!.length || pointers[2]! < lanes[2]!.length) {
     let emitted = false;
     for (const priority of schedule) {
-      const group = lanes[priority]!.shift();
-      if (!group) continue;
-      ordered.push(group);
-      emitted = true;
+      const lane = lanes[priority]!;
+      const ptr = pointers[priority]!;
+      if (ptr < lane.length) {
+        ordered.push(lane[ptr]!);
+        pointers[priority] = ptr + 1;
+        emitted = true;
+      }
     }
     // schedule 覆盖了全部车道；这个保护只防止未来扩展优先级时出现死循环。
     if (!emitted) break;
@@ -119,10 +123,17 @@ export function filterCollisionDrawItems(
   drawList: SceneDrawList,
   models?: readonly MsbModelLike[]
 ): { drawList: SceneDrawList; hiddenCollisionCount: number } {
+  const modelTypeMap = models ? new Map(models.map((m) => [normalizeMapModelKey(m.name), m.typeId])) : null;
+  const isCollision = (modelName: string): boolean => {
+    const modelKey = normalizeMapModelKey(modelName);
+    if (modelTypeMap?.get(modelKey) === 5) return true;
+    const base = modelKey.replace(/\\/g, '/').split('/').pop() ?? modelKey;
+    return /^h\d+$/i.test(base);
+  };
   const visibleItems = drawList.items.filter((item) => (
     item.entityKind !== 'msb-part'
     || !item.modelName
-    || !isCollisionMapModel(item.modelName, models)
+    || !isCollision(item.modelName)
   ));
   const hiddenCollisionCount = drawList.items.length - visibleItems.length;
   if (hiddenCollisionCount === 0) return { drawList, hiddenCollisionCount };
@@ -858,9 +869,12 @@ export function MsbScenePanel(props: MsbScenePanelProps): ReactElement {
       // 24.10 streaming: read-map-static-geometry (chunked, cursor opaque with daemon/owner/sourceHash/resourceCacheKey, wire bytes budget)
       // Deprecated: readMapPartMesh -> readMapStaticGeometry
       if (props.mapResourceUri) {
+        const hardwareConcurrency = typeof navigator !== 'undefined' && navigator.hardwareConcurrency
+          ? navigator.hardwareConcurrency
+          : 4;
         const prepareClientForLoad = new MapGeometryPrepareClient(undefined, {
-          concurrency: 2,
-          maxQueued: 8,
+          concurrency: Math.min(8, Math.max(4, hardwareConcurrency)),
+          maxQueued: 64,
           onTelemetry: (event: MapGeometryPrepareTelemetryEvent) => {
             // Renderer-local metrics only: model names, native paths and wire
             // payloads never enter telemetry.  The event also makes worker

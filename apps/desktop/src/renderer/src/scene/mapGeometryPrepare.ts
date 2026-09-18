@@ -87,6 +87,8 @@ export interface PreparedMapGeometry extends MeshGeometryWire {
 }
 
 function concatUint8Arrays(parts: readonly Uint8Array[]): Uint8Array {
+  if (parts.length === 1) return parts[0]!;
+  if (parts.length === 0) return new Uint8Array(0);
   const totalLength = parts.reduce((sum, part) => sum + part.byteLength, 0);
   const merged = new Uint8Array(totalLength);
   let offset = 0;
@@ -233,12 +235,30 @@ function computeVertexNormalsBytes(
   return new Uint8Array(normals.buffer);
 }
 
+const PNG_PREFIX = 'data:image/png;base64,';
+
 /** Same bounded identity algorithm used by the legacy renderer pool. */
 export function prepareTextureKey(value: string): string | null {
-  if (!/^data:image\/png;base64,[A-Za-z0-9+/=]+$/.test(value)) return null;
+  if (!value.startsWith(PNG_PREFIX)) return null;
+  const prefixLen = PNG_PREFIX.length;
+  if (value.length <= prefixLen) return null;
+
   let hash = 0x811c9dc5;
-  for (let index = 0; index < value.length; index += 1) {
+  for (let index = 0; index < prefixLen; index += 1) {
     hash ^= value.charCodeAt(index);
+    hash = Math.imul(hash, 0x01000193);
+  }
+
+  for (let index = prefixLen; index < value.length; index += 1) {
+    const code = value.charCodeAt(index);
+    const isB64 = (code >= 65 && code <= 90)
+      || (code >= 97 && code <= 122)
+      || (code >= 48 && code <= 57)
+      || code === 43
+      || code === 47
+      || code === 61;
+    if (!isB64) return null;
+    hash ^= code;
     hash = Math.imul(hash, 0x01000193);
   }
   return (hash >>> 0).toString(16).padStart(8, '0');
@@ -257,6 +277,109 @@ export function mergeMapStaticGeometryChunks(
   const geometryChunks = chunks.filter((chunk) => Boolean(chunk.positionsBase64));
   if (geometryChunks.length === 0) return {};
 
+  const diagnostics: MapGeometryPrepareDiagnostic[] = [];
+
+  // Fast path for single-part models (the common case): bypass multi-chunk concatenation,
+  // redundant index passes, and intermediate buffer allocations.
+  if (geometryChunks.length === 1) {
+    const chunk = geometryChunks[0]!;
+    const positionBytes = decodeBase64ToUint8Array(chunk.positionsBase64!);
+    if (positionBytes.byteLength % (3 * Float32Array.BYTES_PER_ELEMENT) !== 0) {
+      throw new Error('MAP_STATIC_GEOMETRY_INVALID: positions are not Float32 xyz aligned');
+    }
+    const vertexCount = positionBytes.byteLength / (3 * Float32Array.BYTES_PER_ELEMENT);
+
+    let uvBytes: Uint8Array | undefined;
+    if (chunk.uvsBase64) {
+      uvBytes = decodeBase64ToUint8Array(chunk.uvsBase64);
+      if (uvBytes.byteLength !== vertexCount * 2 * Float32Array.BYTES_PER_ELEMENT) {
+        throw new Error('MAP_STATIC_GEOMETRY_INVALID: UV count does not match positions');
+      }
+    }
+
+    let indexBytes: Uint8Array | undefined;
+    let indexSize: 16 | 32 = 16;
+    let indexCount = 0;
+    if (chunk.indicesBase64) {
+      const indexElementBytes = chunk.indexElementBytes;
+      if (indexElementBytes !== 2 && indexElementBytes !== 4) {
+        throw new Error('MAP_STATIC_GEOMETRY_INVALID: indexElementBytes must be 2 or 4');
+      }
+      indexBytes = decodeBase64ToUint8Array(chunk.indicesBase64);
+      if (indexBytes.byteLength % indexElementBytes !== 0) {
+        throw new Error('MAP_STATIC_GEOMETRY_INVALID: indices are not aligned');
+      }
+      indexSize = indexElementBytes === 4 ? 32 : 16;
+      indexCount = indexBytes.byteLength / indexElementBytes;
+    }
+
+    const materialIndex = Number.isInteger(chunk.materialIndex) && (chunk.materialIndex ?? -1) >= 0
+      ? chunk.materialIndex!
+      : 0;
+
+    const materialGroups: MapMaterialGroup[] = [];
+    const groupCount = indexBytes ? indexCount : vertexCount;
+    if (groupCount > 0) {
+      const faceSetMetadata = resolveChunkFaceSetMetadata(
+        chunk,
+        groupCount,
+        vertexCount,
+        Boolean(indexBytes),
+        diagnostics
+      );
+      materialGroups.push({
+        start: 0,
+        count: groupCount,
+        materialIndex,
+        ...faceSetMetadata,
+        ...(typeof chunk.chunkId === 'string' && chunk.chunkId.length > 0 ? { sourceChunkId: chunk.chunkId } : {}),
+        ...(typeof chunk.sourceTriangleStart === 'number' && Number.isFinite(chunk.sourceTriangleStart) ? { sourceTriangleStart: chunk.sourceTriangleStart } : {}),
+        ...(typeof chunk.triangleCount === 'number' && Number.isFinite(chunk.triangleCount) ? { sourceTriangleCount: chunk.triangleCount } : {})
+      });
+    }
+
+    const texturePreviews = new Map<number, { materialIndex: number; texturePreviewToken: string; colorSpace?: string }>();
+    if (chunk.texturePreviewToken) {
+      texturePreviews.set(materialIndex, {
+        materialIndex,
+        texturePreviewToken: chunk.texturePreviewToken,
+        ...(chunk.textureColorSpace ? { colorSpace: chunk.textureColorSpace } : {})
+      });
+    }
+
+    let normalBytes: Uint8Array;
+    if (chunk.normalsBase64) {
+      normalBytes = decodeBase64ToUint8Array(chunk.normalsBase64);
+    } else {
+      const indexArray = indexBytes
+        ? (indexSize === 32
+            ? new Uint32Array(indexBytes.buffer, indexBytes.byteOffset, indexCount)
+            : new Uint16Array(indexBytes.buffer, indexBytes.byteOffset, indexCount))
+        : null;
+      normalBytes = computeVertexNormalsBytes(positionBytes, vertexCount, indexArray);
+    }
+
+    return {
+      positionsBase64: encodeBase64 ? (chunk.positionsBase64 ?? '') : '',
+      positionsBytes: positionBytes,
+      ...(indexBytes ? {
+        indicesBase64: encodeBase64 ? (chunk.indicesBase64 ?? '') : undefined,
+        indicesBytes: indexBytes,
+        indexSize
+      } : {}),
+      ...(uvBytes ? {
+        uvsBase64: encodeBase64 ? (chunk.uvsBase64 ?? '') : undefined,
+        uvsBytes: uvBytes
+      } : {}),
+      normalsBase64: encodeBase64 ? (chunk.normalsBase64 ?? uint8ArrayToBase64(normalBytes)) : undefined,
+      normalsBytes: normalBytes,
+      vertexCount,
+      materialGroups,
+      ...(diagnostics.length > 0 ? { diagnostics } : {}),
+      ...(texturePreviews.size > 0 ? { texturePreviews: [...texturePreviews.values()] } : {})
+    };
+  }
+
   const positions: Uint8Array[] = [];
   const chunkVertexCounts: number[] = [];
   const uvs: Uint8Array[] = [];
@@ -268,15 +391,11 @@ export function mergeMapStaticGeometryChunks(
   const allHaveNormals = geometryChunks.every((chunk) => Boolean(chunk.normalsBase64));
   const materialGroups: MapMaterialGroup[] = [];
   const texturePreviews = new Map<number, { materialIndex: number; texturePreviewToken: string; colorSpace?: string }>();
-  const diagnostics: MapGeometryPrepareDiagnostic[] = [];
   let vertexCount = 0;
   let indexSize: 16 | 32 = 16;
   let indexCount = 0;
 
-  // First pass decodes each index stream only long enough to validate it,
-  // count its elements, and choose the smallest exact output width.  Keeping
-  // no JS number[] here avoids a boxed/indexed-array copy proportional to the
-  // entire model; the second pass writes directly into the final typed array.
+  const decodedIndices: Uint8Array[] = [];
   for (const chunk of geometryChunks) {
     const positionBytes = decodeBase64ToUint8Array(chunk.positionsBase64!);
     if (positionBytes.byteLength % (3 * Float32Array.BYTES_PER_ELEMENT) !== 0) {
@@ -314,18 +433,11 @@ export function mergeMapStaticGeometryChunks(
       if (indexBytes.byteLength % indexElementBytes !== 0) {
         throw new Error('MAP_STATIC_GEOMETRY_INVALID: indices are not aligned');
       }
-      const indexView = new DataView(indexBytes.buffer, indexBytes.byteOffset, indexBytes.byteLength);
+      decodedIndices.push(indexBytes);
       groupStart = indexCount;
       groupCount = indexBytes.byteLength / indexElementBytes;
-      for (let offset = 0; offset < indexBytes.byteLength; offset += indexElementBytes) {
-        const localIndex = indexElementBytes === 4
-          ? indexView.getUint32(offset, true)
-          : indexView.getUint16(offset, true);
-        const mergedIndex = localIndex + vertexCount;
-        if (mergedIndex > 0xffff_ffff) {
-          throw new Error('MAP_STATIC_GEOMETRY_INVALID: merged index exceeds uint32');
-        }
-        if (indexElementBytes === 4 || mergedIndex > 0xffff) indexSize = 32;
+      if (indexElementBytes === 4 || vertexCount + chunkVertexCount > 0xffff) {
+        indexSize = 32;
       }
       indexCount += groupCount;
     }
@@ -372,46 +484,49 @@ export function mergeMapStaticGeometryChunks(
   };
   if (allHaveIndices) {
     const indexBytes = new Uint8Array(indexCount * (indexSize / 8));
-    const indexView = new DataView(indexBytes.buffer);
+    const target32 = indexSize === 32 ? new Uint32Array(indexBytes.buffer, indexBytes.byteOffset, indexCount) : null;
+    const target16 = indexSize === 16 ? new Uint16Array(indexBytes.buffer, indexBytes.byteOffset, indexCount) : null;
     let outputIndex = 0;
     let vertexOffset = 0;
     for (let chunkIndex = 0; chunkIndex < geometryChunks.length; chunkIndex += 1) {
       const chunk = geometryChunks[chunkIndex]!;
       const chunkVertexCount = chunkVertexCounts[chunkIndex]!;
-      const indexElementBytes = chunk.indexElementBytes;
-      const sourceBytes = decodeBase64ToUint8Array(chunk.indicesBase64!);
-      if (indexElementBytes !== 2 && indexElementBytes !== 4) {
-        throw new Error('MAP_STATIC_GEOMETRY_INVALID: indexElementBytes must be 2 or 4');
-      }
-      if (sourceBytes.byteLength % indexElementBytes !== 0) {
-        throw new Error('MAP_STATIC_GEOMETRY_INVALID: indices are not aligned');
-      }
-      const sourceView = new DataView(sourceBytes.buffer, sourceBytes.byteOffset, sourceBytes.byteLength);
-      for (let offset = 0; offset < sourceBytes.byteLength; offset += indexElementBytes) {
-        const localIndex = indexElementBytes === 4
-          ? sourceView.getUint32(offset, true)
-          : sourceView.getUint16(offset, true);
-        const mergedIndex = localIndex + vertexOffset;
-        if (mergedIndex > 0xffff_ffff) {
-          throw new Error('MAP_STATIC_GEOMETRY_INVALID: merged index exceeds uint32');
-        }
-        if (indexSize === 32) indexView.setUint32(outputIndex * 4, mergedIndex, true);
-        else {
-          if (mergedIndex > 0xffff) {
-            throw new Error('MAP_STATIC_GEOMETRY_INVALID: merged index exceeds uint16');
+      const indexElementBytes = chunk.indexElementBytes!;
+      const sourceBytes = decodedIndices[chunkIndex]!;
+      const count = sourceBytes.byteLength / indexElementBytes;
+      if (indexElementBytes === 4) {
+        const src32 = new Uint32Array(sourceBytes.buffer, sourceBytes.byteOffset, count);
+        if (target32) {
+          for (let i = 0; i < count; i += 1) {
+            const mergedIndex = src32[i]! + vertexOffset;
+            if (mergedIndex > 0xffff_ffff) {
+              throw new Error('MAP_STATIC_GEOMETRY_INVALID: merged index exceeds uint32');
+            }
+            target32[outputIndex++] = mergedIndex;
           }
-          indexView.setUint16(outputIndex * 2, mergedIndex, true);
         }
-        outputIndex += 1;
+      } else {
+        const src16 = new Uint16Array(sourceBytes.buffer, sourceBytes.byteOffset, count);
+        if (target32) {
+          for (let i = 0; i < count; i += 1) {
+            target32[outputIndex++] = src16[i]! + vertexOffset;
+          }
+        } else if (target16) {
+          for (let i = 0; i < count; i += 1) {
+            const mergedIndex = src16[i]! + vertexOffset;
+            if (mergedIndex > 0xffff) {
+              throw new Error('MAP_STATIC_GEOMETRY_INVALID: merged index exceeds uint16');
+            }
+            target16[outputIndex++] = mergedIndex;
+          }
+        }
       }
       vertexOffset += chunkVertexCount;
     }
     merged.indicesBytes = indexBytes;
     if (encodeBase64) merged.indicesBase64 = uint8ArrayToBase64(indexBytes);
     merged.indexSize = indexSize;
-    const indexArray = indexSize === 32
-      ? new Uint32Array(indexBytes.buffer, indexBytes.byteOffset, indexCount)
-      : new Uint16Array(indexBytes.buffer, indexBytes.byteOffset, indexCount);
+    const indexArray = (target32 ?? target16)!;
     merged.normalsBytes = allHaveNormals
       ? concatUint8Arrays(normals)
       : computeVertexNormalsBytes(positionsBytes, vertexCount, indexArray);
@@ -491,12 +606,12 @@ export function prepareMapStaticGeometryChunks(
     if (!Number.isFinite(x) || !Number.isFinite(y) || !Number.isFinite(z)) {
       throw new Error('MAP_STATIC_GEOMETRY_INVALID: positions contain non-finite values');
     }
-    minX = Math.min(minX, x);
-    minY = Math.min(minY, y);
-    minZ = Math.min(minZ, z);
-    maxX = Math.max(maxX, x);
-    maxY = Math.max(maxY, y);
-    maxZ = Math.max(maxZ, z);
+    if (x < minX) minX = x;
+    if (y < minY) minY = y;
+    if (z < minZ) minZ = z;
+    if (x > maxX) maxX = x;
+    if (y > maxY) maxY = y;
+    if (z > maxZ) maxZ = z;
   }
   const centerX = (minX + maxX) / 2;
   const centerY = (minY + maxY) / 2;
@@ -506,7 +621,8 @@ export function prepareMapStaticGeometryChunks(
     const dx = positions[index]! - centerX;
     const dy = positions[index + 1]! - centerY;
     const dz = positions[index + 2]! - centerZ;
-    radiusSquared = Math.max(radiusSquared, dx * dx + dy * dy + dz * dz);
+    const d2 = dx * dx + dy * dy + dz * dz;
+    if (d2 > radiusSquared) radiusSquared = d2;
   }
   return {
     ...{

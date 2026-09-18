@@ -143,10 +143,9 @@ export async function analyzeWorkspace(options: AnalyzeWorkspaceOptions): Promis
     });
   };
 
-  for (let i = 0; i < parseLimited.length; i += 1) {
+  const parseFile = async (file: IndexedFile, fileProgress: number): Promise<void> => {
     throwIfAborted(options.signal);
-    const file = parseLimited[i]!;
-    options.onProgress?.({ phase: 'parse', current: i + 1, total: parseLimited.length, message: file.relativePath });
+    options.onProgress?.({ phase: 'parse', current: fileProgress, total: parseLimited.length, message: file.relativePath });
 
     let accepted = false;
     let cachedBundle: SymbolBundle | null = null;
@@ -186,16 +185,29 @@ export async function analyzeWorkspace(options: AnalyzeWorkspaceOptions): Promis
     }
 
     if (accepted) parsedFiles += 1;
-    // PARAM/MSG are ordered first, so on a real game workspace this normally
-    // publishes immediately after the first native PARAM/MSG export instead
-    // of waiting for every map/event Bridge read.  If those families are
-    // absent, the first accepted semantic family still unblocks the same
-    // contract.
     if (index.getStats().paramRows > 0) {
       index.setParamSemanticState('ready');
     }
-    await notifySemanticIndexReady(false);
+  };
+
+  // Split parse files: high-priority PARAM/MSG first to unlock early readiness,
+  // then fan-out EVENT/MAP files with controlled concurrency.
+  const primaryParseFiles = parseLimited.filter((file) => parsePriority(file) <= 1);
+  const secondaryParseFiles = parseLimited.filter((file) => parsePriority(file) > 1);
+
+  for (let i = 0; i < primaryParseFiles.length; i += 1) {
+    await parseFile(primaryParseFiles[i]!, i + 1);
   }
+
+  // Early stage readiness: PARAM/MSG candidates are fully parsed, unlock stage readiness
+  // immediately so Agent and RAG are available while EVENT/MAP parse concurrently.
+  await notifySemanticIndexReady(false);
+
+  let secondaryProgress = primaryParseFiles.length;
+  await runWithConcurrencyPool(secondaryParseFiles, 6, async (file) => {
+    secondaryProgress += 1;
+    await parseFile(file, secondaryProgress);
+  });
 
   if (index.getStats().paramRows === 0) {
     index.setParamSemanticState(hasParamCandidates ? 'failed' : 'empty');
@@ -214,21 +226,39 @@ export async function analyzeWorkspace(options: AnalyzeWorkspaceOptions): Promis
     : [];
   const inspectLimited = inspectCandidates.slice(0, options.maxFilesToInspect ?? 200);
   let inspectedFiles = 0;
+  let inspectProgress = 0;
 
-  for (let i = 0; i < inspectLimited.length; i += 1) {
+  await runWithConcurrencyPool(inspectLimited, 6, async (file) => {
     throwIfAborted(options.signal);
-    const file = inspectLimited[i]!;
-    options.onProgress?.({ phase: 'inspect', current: i + 1, total: inspectLimited.length, message: file.relativePath });
+    inspectProgress += 1;
+    options.onProgress?.({ phase: 'inspect', current: inspectProgress, total: inspectLimited.length, message: file.relativePath });
     const inspected = await inspectNativeResource(file, options);
     diagnostics.push(...inspected.diagnostics);
     if (inspected.accepted) inspectedFiles += 1;
-  }
+  });
 
   options.onProgress?.({ phase: 'references', current: 0, message: 'Building reference graph' });
   const referenceStats = index.rebuildReferences({ enableNumericFallback: true }).stats;
   options.onProgress?.({ phase: 'done', current: parsedFiles, total: parseLimited.length, message: 'Workspace analysis complete' });
 
   return { index, diagnostics, parsedFiles, inspectedFiles, referenceStats };
+}
+
+async function runWithConcurrencyPool<T>(
+  items: readonly T[],
+  limit: number,
+  fn: (item: T, index: number) => Promise<void>
+): Promise<void> {
+  if (items.length === 0) return;
+  const poolSize = Math.max(1, Math.min(limit, items.length));
+  let nextIndex = 0;
+  const workers = Array.from({ length: poolSize }, async () => {
+    while (nextIndex < items.length) {
+      const currentIndex = nextIndex++;
+      await fn(items[currentIndex]!, currentIndex);
+    }
+  });
+  await Promise.all(workers);
 }
 
 function shouldParse(file: IndexedFile, options: AnalyzeWorkspaceOptions): boolean {
@@ -558,7 +588,10 @@ function isNativeCandidateResource(file: IndexedFile): boolean {
   const path = file.relativePath.toLowerCase();
   if (file.resourceKind === 'event') return path.includes('.emevd');
   if (file.resourceKind === 'map') return path.includes('.msb');
-  if (file.resourceKind === 'param') return path.includes('.param');
+  if (file.resourceKind === 'param') {
+    if (path.includes('gparam')) return false;
+    return path.includes('.param') || path.includes('parambnd');
+  }
   return false;
 }
 

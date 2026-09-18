@@ -166,6 +166,9 @@ export interface ResetCoverageReport {
 
 /** 非文档态 setter：不参与复位登记，附排除理由。 */
 export const NON_DOCUMENT_SETTERS: Readonly<Record<string, string>> = Object.freeze({
+  setUpdateState: 'GitHub Release 更新状态，不属于资源文档态',
+  setUpdateActionBusy: '更新操作进行态，由更新按钮 promise 清理',
+  setRagModelStatus: '本地 RAG 模型状态，属于应用能力状态而非资源文档态',
   setWorkspace: '工作区扫描结果，由 openWorkspace 自己赋值',
   setWorkspaceIndexing: '工作区级后台索引进度，由会话 token 和轮询生命周期管理，不属于资源文档态',
   setSessionMeta: '会话元数据，同上',
