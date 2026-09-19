@@ -8,7 +8,8 @@
  * 3. 歧义在本步结束：只返回候选 + 覆盖 + 选定后的调用入口，不深读候选。
  * 4. 根目标锁定当前版本；fieldIds 读取原生值形成 targetRead 快照。
  * 5. 通过 provider registry 取 source-scoped 分片（同 source/version 合并）。
- * 6. 有界事件调用链遍历补充 indirect 路径；稳定排序。
+ * 6. 按 direction/depth/node/edge/source 上限做真正多跳遍历；contains/member_of
+ *    仅作为根的终止关系，避免容器边把无关子图全部展开；保留完整 path。
  * 7. 语句/位置来自 provider 证据；解析失败保留诊断。
  * 8. coverage + 依赖摘要 + envelope 预算分页；targetRead 建立字段观察登记。
  */
@@ -21,6 +22,7 @@ import type {
   ReferenceDetail,
   ReferenceQueryInput,
   ReferenceRelationItem,
+  ReferencePathHop,
   ReferenceTargetReadDto,
   SymbolBundle
 } from '@soulforge/shared';
@@ -35,16 +37,23 @@ import {
   buildDependencySummary,
   collectSourceVersions,
   assembleRelations,
+  certaintyForEdge,
   edgeIdentityKey,
   identityForUri,
-  decodeCursor,
-  encodeCursor,
+  REFERENCE_CURSOR_TOKEN_PLACEHOLDER,
   type BuiltPage
 } from './referencePageProjection.js';
+import type { ReferenceEdge } from '@soulforge/shared';
 import { REFERENCE_PROVIDERS, type ProviderBuildOptions } from './referenceProviderRegistry.js';
 import { buildEventCallChain } from './eventReferenceProvider.js';
 import type { EmedfRegistry } from '../emevd/emedfSchema.js';
-import { dependencySummariesMatch, type DependencySummary } from '../runtime/resourceVersion.js';
+import { dependencySummariesMatch } from '../runtime/resourceVersion.js';
+import {
+  defaultReferenceCursorStore,
+  type ReferenceCursorScope,
+  type ReferenceCursorStore,
+  type StoredReferenceCursor
+} from './referenceCursorStore.js';
 
 export interface ReferenceQueryServiceOptions {
   /** Snapshot bundle of current symbols (workspace index or fixture). */
@@ -69,6 +78,15 @@ export interface ReferenceQueryServiceOptions {
   }>;
   /** Scan caps for cold-shard completion (步骤：并发 ≤2、来源 ≤64). */
   maxSources?: number;
+  /** Hard graph traversal caps; they bound multi-hop work independently of page size. */
+  maxTraversalNodes?: number;
+  maxTraversalEdges?: number;
+  /** Host-owned cursor state. Default is a bounded store shared by service instances. */
+  cursorStore?: ReferenceCursorStore;
+  /** Optional enrichment scan state to include while budgeting the public page. */
+  scan?: ReferencePageRecord['scan'];
+  /** Enrichment diagnostics are folded into the page before cursor budgeting. */
+  sourceDiagnostics?: ReferencePageRecord['diagnostics'];
   buildOptions?: ProviderBuildOptions;
   /** Host-owned coverage certificate; bundle symbols alone never prove completeness. */
   coverageStates?: readonly {
@@ -85,16 +103,6 @@ export interface ReferenceQueryServiceOptions {
   providerRegistryDigest?: string;
 }
 
-interface CursorRegistration {
-  workspaceId: string;
-  scopeKey: string;
-  /** Root resolved at issue time; continuation re-reads the same object. */
-  rootUri: string;
-  offset: number;
-  sourceOffset: number;
-  dependencySummary: DependencySummary;
-}
-
 export interface ReferenceQueryService {
   query(input: ReferenceQueryInput): Promise<ReferencePageRecord>;
   /** Field observations actually delivered to the caller (T09 proof input). */
@@ -104,24 +112,27 @@ export interface ReferenceQueryService {
 export function createReferenceQueryService(options: ReferenceQueryServiceOptions): ReferenceQueryService {
   const workspaceId = options.workspaceId ?? 'workspace';
   const maxSources = options.maxSources ?? 64;
-  const cursors = new Map<string, CursorRegistration>();
+  const maxTraversalNodes = options.maxTraversalNodes ?? 256;
+  const maxTraversalEdges = options.maxTraversalEdges ?? 512;
+  const cursorStore = options.cursorStore ?? defaultReferenceCursorStore;
   const fieldProofs: Array<{ sourceUri: string; rowId: number; rowIndex?: number; fieldId: string; dataHash?: string }> = [];
   let shardCache: { key: string; edges: import('@soulforge/shared').ReferenceEdge[]; diagnostics: import('@soulforge/shared').Diagnostic[] } | undefined;
 
-  function collectShards(): { edges: import('@soulforge/shared').ReferenceEdge[]; diagnostics: import('@soulforge/shared').Diagnostic[] } {
+  function collectShards(includeHypotheses = false): { edges: import('@soulforge/shared').ReferenceEdge[]; diagnostics: import('@soulforge/shared').Diagnostic[] } {
     const bundle = options.bundle;
-    const versions = `${bundleVersionKey(bundle)}|providers:${options.providerRegistryDigest ?? 'default'}`;
+    const versions = `${bundleVersionKey(bundle)}|providers:${options.providerRegistryDigest ?? 'default'}|hypotheses:${includeHypotheses ? 'on' : 'off'}`;
     if (shardCache && shardCache.key === versions) return shardCache;
     const edges: import('@soulforge/shared').ReferenceEdge[] = [];
     const diagnostics: import('@soulforge/shared').Diagnostic[] = [];
     const buildOptions: ProviderBuildOptions = {
       ...(options.registry ? { registry: options.registry } : {}),
-      ...(options.buildOptions ?? {})
+      ...(options.buildOptions ?? {}),
+      includeHypotheses
     };
     for (const provider of REFERENCE_PROVIDERS) {
       const shard = provider.build(bundle, buildOptions);
-      edges.push(...shard.edges);
-      diagnostics.push(...shard.diagnostics);
+      for (const edge of shard.edges) edges.push(edge);
+      for (const diagnostic of shard.diagnostics) diagnostics.push(diagnostic);
     }
     shardCache = { key: versions, edges, diagnostics };
     return shardCache;
@@ -189,15 +200,33 @@ export function createReferenceQueryService(options: ReferenceQueryServiceOption
     return `sha256:${hash.digest('hex')}`;
   }
 
-  function scopeKeyFor(input: NormalizedReferenceQuery): string {
-    // Only the root-resolving fields matter for continuation re-resolution;
-    // cursor/limit/offset are page state, not scope.
-    return JSON.stringify({
+  function cursorScopeFor(input: NormalizedReferenceQuery): ReferenceCursorScope {
+    return {
       ...(input.uri !== undefined ? { uri: input.uri } : {}),
       ...(input.target !== undefined ? { target: input.target } : {}),
       ...(input.query !== undefined ? { query: input.query } : {}),
-      ...(input.domain !== undefined ? { domain: input.domain } : {})
-    });
+      ...(input.domain !== undefined ? { domain: input.domain } : {}),
+      direction: input.direction,
+      detail: input.detail,
+      ...(input.fieldIds !== undefined ? { fieldIds: [...input.fieldIds] } : {}),
+      depth: input.depth,
+      limit: input.limit,
+      includeHypotheses: input.includeHypotheses
+    };
+  }
+
+  function explicitCursorScopeMatches(raw: ReferenceQueryInput, decoded: NormalizedReferenceQuery, stored: ReferenceCursorScope): boolean {
+    const rawRecord = raw as unknown as Record<string, unknown>;
+    const fields: Array<keyof ReferenceCursorScope> = [
+      'uri', 'target', 'query', 'domain', 'direction', 'detail', 'fieldIds', 'depth', 'limit', 'includeHypotheses'
+    ];
+    for (const field of fields) {
+      if (!(field in rawRecord)) continue;
+      const current = (cursorScopeFor(decoded) as Record<string, unknown>)[field];
+      const expected = (stored as Record<string, unknown>)[field];
+      if (JSON.stringify(current) !== JSON.stringify(expected)) return false;
+    }
+    return true;
   }
 
   interface ResolvedCandidate {
@@ -346,6 +375,24 @@ export function createReferenceQueryService(options: ReferenceQueryServiceOption
     for (const scriptExport of bundle.scripts ?? []) {
       for (const child of scriptExport.scripts) if (child.uri === uri) candidates.push({ uri: child.uri, label: child.entryName ?? '', discriminators: {}, identity: identity() });
     }
+    // A host may resolve a table/file/container before asking for content
+    // references. Preserve a source-only root instead of treating the file as
+    // absent merely because it has no child symbol in this snapshot.
+    if (candidates.length === 0) {
+      const sourceUris = new Set<string>();
+      for (const item of bundle.params ?? []) if (item.sourceUri) sourceUris.add(item.sourceUri);
+      for (const item of bundle.events ?? []) for (const event of item.events) sourceUris.add(event.sourceUri);
+      for (const item of bundle.maps ?? []) {
+        for (const entity of item.entities) sourceUris.add(entity.sourceUri);
+        for (const region of item.regions) sourceUris.add(region.sourceUri);
+      }
+      for (const item of bundle.msgs ?? []) for (const entry of item.entries) sourceUris.add(entry.sourceUri);
+      for (const item of bundle.scripts ?? []) sourceUris.add(item.sourceUri);
+      for (const item of bundle.tae ?? []) sourceUris.add(item.sourceUri);
+      if (sourceUris.has(uri)) {
+        candidates.push({ uri, label: uri, discriminators: { sourceUri: uri }, identity: identity() });
+      }
+    }
     return candidates.length === 1 ? { uri: candidates[0]!.uri, candidates } : { candidates };
   }
 
@@ -486,13 +533,163 @@ export function createReferenceQueryService(options: ReferenceQueryServiceOption
     };
   }
 
+  interface TraversalResult {
+    edges: ReferenceEdge[];
+    paths: Map<string, ReferencePathHop[]>;
+    indirectEdgeKeys: Set<string>;
+    scannedSources: Set<string>;
+    truncated: boolean;
+    truncationReason?: string;
+  }
+
+  const CONTAINER_BOUNDARY_KINDS = new Set<ReferenceEdge['kind']>(['contains', 'member_of']);
+
+  function sourceOf(uri: string): string {
+    return uri.split('#')[0] ?? uri;
+  }
+
+  function edgeStableSort(a: ReferenceEdge, b: ReferenceEdge): number {
+    return a.fromUri.localeCompare(b.fromUri)
+      || a.toUri.localeCompare(b.toUri)
+      || a.kind.localeCompare(b.kind)
+      || a.reason.localeCompare(b.reason)
+      || (a.evidence[0]?.sourceUri ?? '').localeCompare(b.evidence[0]?.sourceUri ?? '');
+  }
+
+  /**
+   * Traverse only the requested direction and depth. Container membership is
+   * a terminal fact: a root may show its own contains/member_of relation, but
+   * the traversal never walks through the container to enumerate unrelated
+   * siblings. Node, edge and source caps remain independent of page size.
+   */
+  function traverseBounded(
+    rootUri: string,
+    edges: readonly ReferenceEdge[],
+    direction: NormalizedReferenceQuery['direction'],
+    depth: number
+  ): TraversalResult {
+    const outgoing = new Map<string, ReferenceEdge[]>();
+    const incoming = new Map<string, ReferenceEdge[]>();
+    for (const edge of edges) {
+      const from = outgoing.get(edge.fromUri) ?? [];
+      from.push(edge);
+      outgoing.set(edge.fromUri, from);
+      const to = incoming.get(edge.toUri) ?? [];
+      to.push(edge);
+      incoming.set(edge.toUri, to);
+    }
+    for (const list of outgoing.values()) list.sort(edgeStableSort);
+    for (const list of incoming.values()) list.sort(edgeStableSort);
+
+    const queue: Array<{ uri: string; depth: number; path: ReferencePathHop[] }> = [{ uri: rootUri, depth: 0, path: [] }];
+    const visited = new Set<string>([rootUri]);
+    const selected = new Map<string, ReferenceEdge>();
+    const paths = new Map<string, ReferencePathHop[]>();
+    const indirectEdgeKeys = new Set<string>();
+    const scannedSources = new Set<string>([sourceOf(rootUri)]);
+    let truncated = false;
+    let truncationReason: string | undefined;
+    let expansionEdges = 0;
+
+    const candidatesFor = (uri: string): ReferenceEdge[] => {
+      if (direction === 'from') return outgoing.get(uri) ?? [];
+      if (direction === 'to') return incoming.get(uri) ?? [];
+      const combined = new Map<string, ReferenceEdge>();
+      for (const edge of [...(outgoing.get(uri) ?? []), ...(incoming.get(uri) ?? [])]) {
+        const key = `${edge.fromUri}\u0000${edge.toUri}\u0000${edge.kind}\u0000${edge.evidence[0]?.sourceUri ?? ''}`;
+        if (!combined.has(key)) combined.set(key, edge);
+      }
+      return [...combined.values()].sort(edgeStableSort);
+    };
+    const nextFor = (uri: string, edge: ReferenceEdge): string | undefined => {
+      if (direction === 'from') return edge.fromUri === uri ? edge.toUri : undefined;
+      if (direction === 'to') return edge.toUri === uri ? edge.fromUri : undefined;
+      if (edge.fromUri === uri) return edge.toUri;
+      if (edge.toUri === uri) return edge.fromUri;
+      return undefined;
+    };
+
+    while (queue.length > 0) {
+      const current = queue.shift()!;
+      if (current.depth >= depth) {
+        const hasUnvisitedBeyondDepth = candidatesFor(current.uri).some((edge) => {
+          if (CONTAINER_BOUNDARY_KINDS.has(edge.kind)) return false;
+          const nextUri = nextFor(current.uri, edge);
+          return nextUri !== undefined && !visited.has(nextUri);
+        });
+        if (hasUnvisitedBeyondDepth) {
+          truncated = true;
+          truncationReason = `达到查询深度上限 ${depth}；已停止继续遍历。`;
+        }
+        continue;
+      }
+      for (const edge of candidatesFor(current.uri)) {
+        if (expansionEdges >= maxTraversalEdges) {
+          truncated = true;
+          truncationReason = `达到关联边上限 ${maxTraversalEdges}；已停止继续遍历。`;
+          break;
+        }
+        expansionEdges += 1;
+        const nextUri = nextFor(current.uri, edge);
+        if (!nextUri) continue;
+        const nextSource = sourceOf(nextUri);
+        if (!scannedSources.has(nextSource) && scannedSources.size >= maxSources) {
+          truncated = true;
+          truncationReason = `达到来源上限 ${maxSources}；已停止继续遍历。`;
+          continue;
+        }
+        if (!visited.has(nextUri) && visited.size >= maxTraversalNodes) {
+          truncated = true;
+          truncationReason = `达到关联节点上限 ${maxTraversalNodes}；已停止继续遍历。`;
+          continue;
+        }
+        const key = `${edge.fromUri}\u0000${edge.toUri}\u0000${edge.kind}\u0000${edge.evidence[0]?.sourceUri ?? ''}`;
+        const hopCertainty = certaintyForEdge(edge, current.path.length > 0);
+        const hop: ReferencePathHop = {
+          from: identityForUri(current.uri, options.bundle, workspaceId),
+          to: identityForUri(nextUri, options.bundle, workspaceId),
+          relationKind: edge.kind,
+          certainty: hopCertainty
+        };
+        const path = [...current.path, hop];
+        if (!selected.has(key)) {
+          selected.set(key, edge);
+          paths.set(key, path);
+          if (path.length > 1 || hopCertainty === 'indirect') indirectEdgeKeys.add(key);
+        }
+        scannedSources.add(sourceOf(edge.fromUri));
+        scannedSources.add(sourceOf(edge.toUri));
+
+        // Membership edges are intentionally terminal. A container relation
+        // can be displayed when directly attached to the root but never fans
+        // out into all children/siblings.
+        if (CONTAINER_BOUNDARY_KINDS.has(edge.kind)) continue;
+        if (current.depth + 1 > depth || visited.has(nextUri)) continue;
+        visited.add(nextUri);
+        scannedSources.add(nextSource);
+        queue.push({ uri: nextUri, depth: current.depth + 1, path });
+      }
+      if (truncated && expansionEdges >= maxTraversalEdges) break;
+    }
+
+    return {
+      edges: [...selected.values()],
+      paths,
+      indirectEdgeKeys,
+      scannedSources,
+      truncated,
+      ...(truncationReason ? { truncationReason } : {})
+    };
+  }
+
   function insufficientRecord(message: string): ReferencePageRecord {
     return {
       resolution: 'insufficient_evidence',
       relations: [],
       coverage: buildCoverage({ bundle: options.bundle, scannedDomains: [], truncated: false, coverageStates: options.coverageStates }),
       page: { returnedCount: 0, hasMore: false },
-      diagnostics: [{ severity: 'warning', code: 'REFERENCE_INSUFFICIENT_EVIDENCE', message }],
+      ...(options.scan ? { scan: options.scan } : {}),
+      diagnostics: [...(options.sourceDiagnostics ?? []), { severity: 'warning', code: 'REFERENCE_INSUFFICIENT_EVIDENCE', message }],
       nextActions: []
     };
   }
@@ -502,31 +699,42 @@ export function createReferenceQueryService(options: ReferenceQueryServiceOption
     if (!decoded.ok) {
       throw Object.assign(new Error(decoded.message), { code: decoded.code, field: decoded.field });
     }
-    const normalized = decoded.input;
-    const limit = normalized.limit ?? REFERENCE_LIMIT_DEFAULT;
-    const depth = normalized.depth ?? REFERENCE_DEPTH_DEFAULT;
-
-    // --- Cursor continuation (投影 8): validate against host registration. ---
+    let normalized = decoded.input;
     let offset = 0;
-    let cursorRegistration: CursorRegistration | undefined;
+    let cursorRegistration: StoredReferenceCursor | undefined;
+    const currentSourceVersionKey = bundleVersionKey(options.bundle);
+    const currentDependencySummary = buildDependencySummary(options.bundle);
     if (normalized.cursor) {
-      const parsed = decodeCursor(normalized.cursor);
-      if (!parsed) throw Object.assign(new Error('关联游标格式无效。'), { code: 'REFERENCE_INVALID_INPUT' });
-      const registration = cursors.get(normalized.cursor);
-      if (!registration) throw Object.assign(new Error('游标未由本会话签发或已过期；请重新发起查询。'), { code: 'REFERENCE_CURSOR_SCOPE_MISMATCH' });
+      const registration = cursorStore.get(normalized.cursor);
+      if (!registration) {
+        throw Object.assign(new Error('游标未由当前宿主签发或已过期；请重新发起查询。'), { code: 'REFERENCE_CURSOR_SCOPE_MISMATCH' });
+      }
+      if (registration.sourceScanState !== undefined) {
+        throw Object.assign(new Error('该游标属于来源 enrichment 扫描，不能作为关联结果分页游标使用；请通过 sourceCursor 续扫。'), { code: 'REFERENCE_CURSOR_KIND_MISMATCH' });
+      }
       if (registration.workspaceId !== workspaceId) {
         throw Object.assign(new Error('游标属于其他 workspace。'), { code: 'REFERENCE_CURSOR_SCOPE_MISMATCH' });
       }
-      // The query scope lives in the host registration (the decoder forbids
-      // re-declaring uri/target/query on continuation); the cursor token itself
-      // is the scope binding. Version drift invalidates the old page snapshot.
-      const summary = buildDependencySummary(options.bundle);
-      if (!dependencySummariesMatch(registration.dependencySummary, summary)) {
+      if (!explicitCursorScopeMatches(input, normalized, registration.scope)) {
+        throw Object.assign(new Error('游标查询条件与首次查询不一致；请沿用原 scope 续页。'), { code: 'REFERENCE_CURSOR_SCOPE_MISMATCH' });
+      }
+      if (registration.sourceVersionKey !== currentSourceVersionKey
+        || registration.providerRegistryDigest !== options.providerRegistryDigest
+        || !dependencySummariesMatch(registration.dependencySummary, currentDependencySummary)) {
         throw Object.assign(new Error('来源版本在分页期间变化；旧游标失效，请重新查询。'), { code: 'REFERENCE_CURSOR_SCOPE_MISMATCH' });
       }
-      offset = parsed.offset;
       cursorRegistration = registration;
+      offset = registration.relationOffset;
+      // Omitted continuation fields inherit the exact original scope,
+      // including direction/detail/depth/limit/includeHypotheses.
+      normalized = {
+        ...registration.scope,
+        cursor: normalized.cursor,
+        cursorScopeCheckRequired: true
+      };
     }
+    const limit = normalized.limit ?? REFERENCE_LIMIT_DEFAULT;
+    const depth = normalized.depth ?? REFERENCE_DEPTH_DEFAULT;
 
     // --- Steps 2-3: resolve the root. ---
     let rootUri: string | undefined;
@@ -611,51 +819,37 @@ export function createReferenceQueryService(options: ReferenceQueryServiceOption
     // --- Step 4: lock root version; read requested fields. ---
     const targetRead = targetReadFor(rootUri, normalized.fieldIds);
 
-    // --- Step 5: shards (merged per source/version via cache). ---
-    const shards = collectShards();
-    const scanned = new Set<string>();
-    const rootSourceUri = rootUri.split('#')[0] ?? rootUri;
-    scanned.add(rootSourceUri);
-    const direction = normalized.direction ?? 'both';
+    // --- Step 5-6: source shards + bounded multi-hop traversal. ---
     const includeHypotheses = normalized.includeHypotheses === true;
-    const allConnected = shards.edges.filter((edge) => {
-      if (!includeHypotheses && edge.confidence === 'low' && edge.reason.includes('hypothesis(')) return false;
-      if (direction === 'from') return edge.fromUri === rootUri;
-      if (direction === 'to') return edge.toUri === rootUri;
-      return edge.fromUri === rootUri || edge.toUri === rootUri;
-    });
-    const allSourceUris = [...new Set([
-      ...scanned,
-      ...allConnected.flatMap((edge) => [edge.fromUri.split('#')[0] ?? edge.fromUri, edge.toUri.split('#')[0] ?? edge.toUri])
-    ])].sort();
-    const sourceOffset = cursorRegistration
-      ? (decodeCursor(normalized.cursor!)?.sourceOffset ?? cursorRegistration.sourceOffset)
-      : 0;
-    const selectedSourceUris = new Set(allSourceUris.slice(sourceOffset, sourceOffset + maxSources));
-    const connected = allConnected.filter((edge) => {
-      const fromSource = edge.fromUri.split('#')[0] ?? edge.fromUri;
-      const toSource = edge.toUri.split('#')[0] ?? edge.toUri;
-      return selectedSourceUris.has(fromSource) || selectedSourceUris.has(toSource);
-    });
-    for (const edge of connected) {
-      scanned.add(edge.fromUri.split('#')[0] ?? edge.fromUri);
-      scanned.add(edge.toUri.split('#')[0] ?? edge.toUri);
+    const shards = collectShards(includeHypotheses);
+    const direction = normalized.direction ?? 'both';
+    const traversableEdges = shards.edges.filter((edge) =>
+      includeHypotheses || !(edge.confidence === 'low' && edge.reason.includes('hypothesis(')));
+    const traversal = traverseBounded(rootUri, traversableEdges, direction, depth);
+    const connected = traversal.edges;
+    const scanned = traversal.scannedSources;
+    const indirectKeys = new Set(traversal.indirectEdgeKeys);
+    if (rootUri.includes('#event/')) {
+      for (const key of indirectEdgeKeys(rootUri, depth)) indirectKeys.add(key);
     }
-    const truncated = sourceOffset + maxSources < allSourceUris.length;
-
-    // --- Step 6: bounded call-chain for indirect paths + stable order. ---
-    const indirectKeys = rootUri.includes('#event/') ? indirectEdgeKeys(rootUri, depth) : new Set<string>();
     const versions = collectSourceVersions(options.bundle);
     const relations = assembleRelations({
       edges: connected,
       bundle: options.bundle,
       workspaceId,
       versions,
-      indirectEdgeKeys: indirectKeys
+      indirectEdgeKeys: indirectKeys,
+      paths: traversal.paths
     });
 
-    // --- Steps 7-8: coverage, dependency summary, envelope page. ---
-    const dependencySummary = buildDependencySummary(options.bundle);
+    // --- Step 7-8: coverage + page projection. Context is built only from
+    // the relations retained on this page, never from the full result set. ---
+    const dependencySummary = currentDependencySummary;
+    const truncated = traversal.truncated;
+    const reserveContinuation = relations.length > offset + 1;
+    const continuationReservation = reserveContinuation
+      ? [{ tool: 'find_references', args: { cursor: REFERENCE_CURSOR_TOKEN_PLACEHOLDER }, reason: '使用该游标继续读取当前已锁定关联结果页。' }]
+      : [];
     const baseRecord: Omit<ReferencePageRecord, 'page'> = {
       resolution,
       ...(rootUri ? {
@@ -667,75 +861,77 @@ export function createReferenceQueryService(options: ReferenceQueryServiceOption
       } : {}),
       detail: normalized.detail as ReferenceDetail,
       ...(normalized.fieldIds ? { targetRead } : {}),
-      ...(normalized.detail === 'context' && rootUri
-        ? { context: contextFor(rootUri, relations, targetRead) }
-        : {}),
+      ...(options.scan ? { scan: options.scan } : {}),
       relations,
       coverage: buildCoverage({ bundle: options.bundle, scannedDomains: [...scanned], truncated, coverageStates: options.coverageStates }),
-      diagnostics: shards.diagnostics
-        .filter((diagnostic) => diagnostic.sourceUri === undefined || relatedTo(diagnostic.sourceUri, connected, rootUri))
-        .slice(0, 16)
-        .map((diagnostic) => ({
-          severity: diagnostic.severity === 'error' ? 'error' as const : 'warning' as const,
-          code: diagnostic.code,
-          message: diagnostic.message,
-          ...(diagnostic.sourceUri ? { sourceUri: diagnostic.sourceUri } : {})
-        })),
+      diagnostics: [
+        ...(options.sourceDiagnostics ?? []),
+        ...shards.diagnostics
+          .filter((diagnostic) => diagnostic.sourceUri === undefined || relatedTo(diagnostic.sourceUri, connected, rootUri))
+          .map((diagnostic) => ({
+            severity: diagnostic.severity === 'error' ? 'error' as const : diagnostic.severity === 'info' ? 'info' as const : 'warning' as const,
+            code: diagnostic.code,
+            message: diagnostic.message,
+            ...(diagnostic.sourceUri ? { sourceUri: diagnostic.sourceUri } : {})
+          }))
+      ].slice(0, 16),
       nextActions: truncated
-        ? [{ tool: 'find_references', args: {}, reason: '扫描来源超过上限，用返回的 nextCursor 续页获取剩余关系' }]
-        : []
+        ? [{ tool: 'find_references', args: {}, reason: traversal.truncationReason ?? '关联遍历达到上限；请缩小查询范围后重试。' }, ...continuationReservation]
+        : continuationReservation
     };
 
-    const built: BuiltPage = buildBoundedPage({ record: baseRecord, limit, offset });
-    if (rootUri) {
-      const relationCursor = built.record.page.nextCursor
-        ? decodeCursor(built.record.page.nextCursor)
-        : undefined;
-      const nextSourceOffset = sourceOffset + maxSources;
-      const continuationSourceOffset = relationCursor
-        ? sourceOffset
-        : truncated
-          ? nextSourceOffset
-          : sourceOffset;
-      const nextCursor = relationCursor
-        ? encodeCursor(relationCursor.offset, continuationSourceOffset)
-        : truncated
-          ? encodeCursor(0, continuationSourceOffset)
-          : undefined;
-      if (nextCursor) {
-        built.record.page = {
-          ...built.record.page,
-          hasMore: true,
-          nextCursor
-        };
-      }
-      if (nextCursor) {
-        cursors.set(nextCursor, {
-        workspaceId,
-        scopeKey: scopeKeyFor(normalized),
-        rootUri,
-        offset: relationCursor?.offset ?? 0,
-        sourceOffset: continuationSourceOffset,
-        dependencySummary
-      });
-      if (truncated || relationCursor) {
-        built.record.nextActions = built.record.nextActions.map((action) =>
-          action.tool === 'find_references'
-            ? { ...action, args: { cursor: nextCursor } }
-            : action);
-      }
-      }
+    const built: BuiltPage = buildBoundedPage({
+      record: baseRecord,
+      limit,
+      offset,
+      ...(normalized.detail === 'context' && rootUri
+        ? { contextForPage: (pageRelations) => contextFor(rootUri!, pageRelations, targetRead) }
+        : {}),
+      ...(reserveContinuation ? { nextCursorPlaceholder: REFERENCE_CURSOR_TOKEN_PLACEHOLDER } : {}),
+      ...(traversal.truncationReason ? { truncationReason: traversal.truncationReason } : {})
+    });
+    const relationPageHasMore = offset + built.record.relations.length < relations.length;
+    const nextCursor = relationPageHasMore
+      ? cursorStore.issue({
+          workspaceId,
+          scope: cursorScopeFor(normalized),
+          rootUri,
+          relationOffset: offset + built.record.relations.length,
+          sourceVersionKey: currentSourceVersionKey,
+          dependencySummary,
+          ...(options.providerRegistryDigest ? { providerRegistryDigest: options.providerRegistryDigest } : {})
+        })
+      : undefined;
+    if (nextCursor) {
+      built.record.page = {
+        ...built.record.page,
+        returnedCount: built.record.relations.length,
+        hasMore: true,
+        nextCursor,
+        ...(traversal.truncationReason ? { truncationReason: traversal.truncationReason } : {})
+      };
+      built.record.nextActions = [
+        ...built.record.nextActions.filter((action) => action.tool !== 'find_references'),
+        { tool: 'find_references', args: { cursor: nextCursor }, reason: '使用该游标继续读取当前已锁定关联结果页。' }
+      ];
+    } else if (traversal.truncationReason) {
+      built.record.page = {
+        ...built.record.page,
+        ...(built.record.page.truncationReason ? {} : { truncationReason: traversal.truncationReason })
+      };
     }
+    built.record.nextActions = built.record.nextActions.filter((action) =>
+      action.args.cursor !== REFERENCE_CURSOR_TOKEN_PLACEHOLDER);
     return built.record;
   }
 
   function domainOfUri(uri: string, bundle: SymbolBundle): string {
-    if ((bundle.params ?? []).some((item) => item.rows.some((row) => row.uri === uri))) return 'param';
-    if ((bundle.events ?? []).some((item) => item.events.some((event) => event.uri === uri))) return 'emevd';
-    if ((bundle.maps ?? []).some((item) => item.entities.some((entity) => entity.uri === uri) || item.regions.some((region) => region.uri === uri))) return 'map';
-    if ((bundle.msgs ?? []).some((item) => item.entries.some((entry) => entry.uri === uri))) return 'fmg';
-    if ((bundle.scripts ?? []).some((item) => item.scripts.some((child) => child.uri === uri))) return 'script';
-    if ((bundle.tae ?? []).some((item) => item.animations.some((animation) => (
+    if ((bundle.params ?? []).some((item) => item.sourceUri === uri || item.rows.some((row) => row.uri === uri))) return 'param';
+    if ((bundle.events ?? []).some((item) => item.events.some((event) => event.sourceUri === uri || event.uri === uri))) return 'emevd';
+    if ((bundle.maps ?? []).some((item) => item.entities.some((entity) => entity.sourceUri === uri || entity.uri === uri) || item.regions.some((region) => region.sourceUri === uri || region.uri === uri))) return 'map';
+    if ((bundle.msgs ?? []).some((item) => item.entries.some((entry) => entry.sourceUri === uri || entry.uri === uri))) return 'fmg';
+    if ((bundle.scripts ?? []).some((item) => item.sourceUri === uri || item.scripts.some((child) => child.uri === uri))) return 'script';
+    if ((bundle.tae ?? []).some((item) => item.sourceUri === uri || item.animations.some((animation) => (
       animation.events.some((event) => event.uri === uri)
         || `${item.sourceUri}#anim/${animation.animId}@${animation.taeEntryIndex ?? 'x'}` === uri
     )))) return 'tae';

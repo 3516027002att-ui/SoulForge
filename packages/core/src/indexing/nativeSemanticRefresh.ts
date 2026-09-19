@@ -26,6 +26,7 @@ import type {
   BridgeResult,
   SymbolBundle
 } from '@soulforge/shared';
+import { parseParamFieldRefs } from '@soulforge/shared';
 import { runBridge } from '../bridge/runBridge.js';
 import { readParamDocumentViaBridge } from '../editing/paramBridgeCommit.js';
 import { decodeRowFields } from '../param/paramdefLayout.js';
@@ -50,6 +51,11 @@ export interface NativeSemanticRefreshOptions {
   bridgeRunner?: NativeSemanticBridgeRunner;
   /** @internal Test-only seam for the PARAM document reader. */
   paramDocumentReader?: typeof readParamDocumentViaBridge;
+  /**
+   * Reference-only projection used by on-demand find_references enrichment.
+   * Normal post-write refreshes keep their historical complete field rows.
+   */
+  referenceFieldsOnly?: boolean;
 }
 
 export interface NativeSemanticRefreshResult {
@@ -408,6 +414,11 @@ function nativeSemanticInstructions(
     const args = Array.isArray(record.args)
       ? record.args.flatMap((arg) => nativeSemanticArg(arg))
       : [];
+    const wireRaw: Record<string, unknown> = {};
+    if (numberValue(record.bank) !== undefined) wireRaw.bank = numberValue(record.bank);
+    if (numberValue(record.id) !== undefined) wireRaw.id = numberValue(record.id);
+    if (stringValue(record.argsBase64)) wireRaw.argsBase64 = stringValue(record.argsBase64);
+    if (numberValue(record.layerOffset) !== undefined) wireRaw.layerOffset = numberValue(record.layerOffset);
     return [{
       uri: stringValue(record.uri) || `${eventUri}/instruction/${instructionIndex ?? index}`,
       index: instructionIndex !== undefined && Number.isSafeInteger(instructionIndex) && instructionIndex >= 0
@@ -416,8 +427,8 @@ function nativeSemanticInstructions(
       ...(stringValue(record.name) ? { name: stringValue(record.name) } : {}),
       ...(stringValue(record.category) ? { category: stringValue(record.category) } : {}),
       args,
-      ...(record.raw === undefined && (record.bank !== undefined || record.id !== undefined)
-        ? { raw: { bank: record.bank, id: record.id } }
+      ...(record.raw === undefined && Object.keys(wireRaw).length > 0
+        ? { raw: wireRaw }
         : record.raw === undefined ? {} : { raw: record.raw })
     }];
   });
@@ -530,8 +541,25 @@ export async function decodeNativeParamRows(input: {
   definition: ParamDefDocument;
   rows: readonly unknown[];
   signal?: AbortSignal;
+  referenceFieldsOnly?: boolean;
 }): Promise<ParamRowSymbol[]> {
   const fieldsById = new Map(input.definition.fields.map((field) => [field.id, field]));
+  // PARAM reference enrichment only needs fields carrying trusted Refs= rules
+  // plus their condition siblings.  Keeping the projection narrow matters on
+  // real gameparam tables with tens of thousands of rows: unrelated fields
+  // remain available to the explicit read_param_fields path instead of being
+  // copied into every reference snapshot.
+  const referenceFieldIds = new Set<string>();
+  if (input.referenceFieldsOnly) {
+    for (const definitionField of input.definition.fields) {
+      if (!definitionField.refs) continue;
+      referenceFieldIds.add(definitionField.id);
+      const parsed = parseParamFieldRefs(definitionField.refs);
+      for (const target of parsed.targets) {
+        if (target.condition) referenceFieldIds.add(target.condition.fieldId);
+      }
+    }
+  }
   // Keep backwards-compatible fixture callers (which only supplied
   // file.sha256) while making the packed/native path explicit.  Once either
   // identity is supplied, do not copy one hash into the other domain.
@@ -560,14 +588,21 @@ export async function decodeNativeParamRows(input: {
       && nativeRowIndex >= 0
       ? nativeRowIndex
       : undefined;
-    const fields: ParamFieldSymbol[] = decodeRowFields(bytes, input.definition).map((field) => {
+    const fields: ParamFieldSymbol[] = decodeRowFields(bytes, input.definition)
+      .filter((field) => !input.referenceFieldsOnly || referenceFieldIds.has(field.fieldId))
+      .map((field) => {
       const definitionField = fieldsById.get(field.fieldId);
+      const refs = input.referenceFieldsOnly && definitionField?.refs
+        ? parseParamFieldRefs(definitionField.refs)
+        : undefined;
       return {
         fieldId: field.fieldId,
         name: field.name,
         type: field.type,
         ...(definitionField?.description ? { description: definitionField.description } : {}),
-        value: field.value
+        value: field.value,
+        ...(refs && refs.targets.length > 0 ? { refs: refs.targets, refsProvenance: 'trusted-metadata' as const } : {}),
+        ...(refs && refs.rejected.length > 0 ? { refsRejected: refs.rejected, refsProvenance: 'trusted-metadata' as const } : {})
       };
     });
     rows.push({
@@ -686,6 +721,7 @@ async function readParamExports(
         typeName,
         definition,
         rows: arrayValue(data.rows),
+        ...(input.referenceFieldsOnly ? { referenceFieldsOnly: true } : {}),
         ...(input.signal ? { signal: input.signal } : {})
       });
       const exported: ParamExport = {

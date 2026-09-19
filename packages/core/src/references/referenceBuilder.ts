@@ -59,8 +59,8 @@ export function buildReferenceGraph(bundle: SymbolBundle, options: ReferenceBuil
       ...options,
       maxAmbiguousNumericMatches: options.maxAmbiguousNumericMatches ?? DEFAULT_MAX_AMBIGUOUS_NUMERIC_MATCHES
     });
-    edges.push(...shard.edges);
-    diagnostics.push(...shard.diagnostics);
+    for (const edge of shard.edges) edges.push(edge);
+    for (const diagnostic of shard.diagnostics) diagnostics.push(diagnostic);
     suppressedAmbiguousNumbers += shard.suppressedAmbiguousNumbers ?? 0;
   }
 

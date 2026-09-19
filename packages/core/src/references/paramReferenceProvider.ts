@@ -328,7 +328,7 @@ function buildTableIndex(params: readonly ParamExport[]): Map<string, TableEntry
 /** 容器 entry 名是权威表名；paramName（typeName）在不同导出路径下会漂移。 */
 function entryTableName(paramExport: ParamExport): string {
   const raw = paramExport.entryName ?? paramExport.paramName;
-  return raw.replace(/\.param$/iu, '');
+  return raw.split(/[\\/]/u).at(-1)!.replace(/\.param$/iu, '');
 }
 
 function indexRows(paramExport: ParamExport, cache: Map<ParamExport, RowIndex>): RowIndex {

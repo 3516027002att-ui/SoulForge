@@ -43,6 +43,24 @@ export interface ScriptReferenceBuildOptions {
   includeHypotheses?: boolean;
   /** Cap for bounded statement excerpts carried into evidence. */
   maxExcerptChars?: number;
+  /**
+   * Already located workspace objects that may be compared with literal
+   * arguments in otherwise unknown calls.  These are observation edges only:
+   * they never turn an unknown game API into a confirmed foreign key.
+   */
+  literalTargets?: ScriptLiteralTargetIndexes;
+  /** Maximum literal matches emitted for one call site. */
+  maxLiteralMatchesPerCall?: number;
+}
+
+export interface ScriptLiteralTarget {
+  uri: string;
+  label?: string;
+}
+
+export interface ScriptLiteralTargetIndexes {
+  numeric: Map<number, ScriptLiteralTarget[]>;
+  strings: Map<string, ScriptLiteralTarget[]>;
 }
 
 export interface ScriptReferenceBuildResult {
@@ -292,7 +310,7 @@ function emitCallEdges(context: CallContext, call: LuaCall, statementIndex: numb
   const evidence = (): ReferenceEvidence => ({
     sourceUri: child.uri,
     fieldName: call.callee,
-    excerpt,
+    excerpt: withLocation(excerpt, call),
     ...(literalArgs.length > 0 ? { value: literalArgs[0] } : {})
   });
   const span = {
@@ -317,6 +335,7 @@ function emitCallEdges(context: CallContext, call: LuaCall, statementIndex: numb
   const rule = SCRIPT_API_RULES.find((item) => item.callee === call.callee);
   if (!rule) {
     // 没有受信任语义规则：调用只是观察事实，不冒充 API 引用（resolution=unknown）。
+    emitLiteralMatchEdges(context, call, resolvedArgs, excerpt);
     emitNameHypothesis(context, call, resolvedArgs, excerpt);
     return {
       statementIndex,
@@ -386,6 +405,72 @@ function emitCallEdges(context: CallContext, call: LuaCall, statementIndex: numb
   };
 }
 
+/**
+ * Unknown game APIs still expose useful, bounded observations when a literal
+ * argument exactly equals an object already located by another provider.  The
+ * edge is deliberately `numeric_match` + low confidence and says the rule is
+ * unknown; it is never promoted to a typed API relationship.
+ */
+function emitLiteralMatchEdges(
+  context: CallContext,
+  call: LuaCall,
+  resolvedArgs: ResolvedArg[],
+  excerpt: string
+): void {
+  const targets = context.options.literalTargets;
+  if (!targets) return;
+  const maxMatches = Math.max(1, context.options.maxLiteralMatchesPerCall ?? 16);
+  let emitted = 0;
+  for (const [argIndex, arg] of resolvedArgs.entries()) {
+    if (emitted >= maxMatches || arg.dynamic || arg.literal === undefined || arg.literal === null) continue;
+    const candidates = typeof arg.literal === 'number'
+      && Number.isSafeInteger(arg.literal)
+      ? targets.numeric.get(arg.literal) ?? []
+      : typeof arg.literal === 'string'
+        ? targets.strings.get(normalizeLiteral(arg.literal)) ?? []
+        : [];
+    for (const target of dedupeLiteralTargets(candidates)) {
+      if (emitted >= maxMatches) break;
+      emitted += 1;
+      const value = arg.literal as string | number | boolean;
+      const valueText = typeof value === 'string' ? JSON.stringify(value) : String(value);
+      context.edges.push({
+        fromUri: context.child.uri,
+        toUri: target.uri,
+        kind: typeof value === 'string' ? 'name_match' : 'numeric_match',
+        confidence: 'low',
+        reason: `unknown-api literal-match: ${call.callee}(${valueText}) 的第 ${argIndex + 1} 个字面量与已定位对象 ${target.label ?? target.uri} 相同；未登记游戏 API 规则。`,
+        evidence: [{
+          sourceUri: context.child.uri,
+          fieldName: `${call.callee}[${argIndex}]`,
+          value,
+          excerpt: withLocation(excerpt, call)
+        }]
+      });
+    }
+  }
+}
+
+function dedupeLiteralTargets(targets: readonly ScriptLiteralTarget[]): ScriptLiteralTarget[] {
+  const seen = new Set<string>();
+  return targets.filter((target) => {
+    if (seen.has(target.uri)) return false;
+    seen.add(target.uri);
+    return true;
+  });
+}
+
+function normalizeLiteral(value: string): string {
+  return value.trim().toLocaleLowerCase();
+}
+
+function withLocation(excerpt: string, call: LuaCall): string {
+  // `luaStaticSubset` is zero based; reference-query locations are displayed
+  // as one based line/column values.  The marker is parsed by the existing
+  // page projection, so no shared evidence type change is required.
+  return `${excerpt} @L${call.span.startLine + 1}:C${call.span.startColumn + 1}`;
+}
+
 type ResolvedArg =
   | { dynamic: false; literal?: string | number | boolean | null }
   | { dynamic: true };
@@ -439,7 +524,7 @@ function emitNameHypothesis(
     kind: 'invokes_script',
     confidence: 'low',
     reason: `hypothesis(script-name-match): ${call.callee} 的第 1 参字符串与同容器子项 ${target.entryName ?? ''} 同名；该匹配只说明命名一致，不能证明运行时加载关系。`,
-    evidence: [{ sourceUri: context.child.uri, fieldName: call.callee, excerpt }]
+    evidence: [{ sourceUri: context.child.uri, fieldName: call.callee, excerpt: withLocation(excerpt, call) }]
   });
 }
 

@@ -6,17 +6,21 @@
  *   ReferenceRelationItem（certainty 词表 confirmed/indirect/hypothesis），
  *   补齐真实语句、位置与完整身份；不能解析的位置保留诊断，不编造摘要句。
  * - 稳定排序：确定关系优先，来源类型与完整身份作为次级键（步骤 6）。
- * - envelope 预算：序列化对象是**完整 ReferencePageRecord**，不是裸 relations
- *   数组；缩页只整条移除 relation，绝不截断语句/哈希/child identity；移出项
- *   进入下一页。单条装不下时 REFERENCE_PAGE_ITEM_TOO_LARGE（投影 6）。
+ * - envelope 预算：对外序列化走 content-first projection，不把 evidence、版本或
+ *   hash 带进页面；缩页只整条移除 relation，长 source snippet 显式 truncated 并
+ *   提供 readAction，identity/path 保持完整。单条装不下时保留诊断（投影 6）。
  */
 import type {
   ReferenceCoverageDto,
   ReferenceDomainCoverageDto,
   ReferenceEvidenceDto,
+  ReferenceContextDto,
   ReferenceObjectIdentity,
   ReferencePageRecord,
   ReferenceRelationItem,
+  ReferenceSearchPage,
+  ReferenceSearchRelationDto,
+  ReferenceNextActionDto,
   ReferenceSourceVersionDto,
   ReferenceStatementDto,
   ReferenceStatementKind,
@@ -31,16 +35,20 @@ import {
 
 export const REFERENCE_ENVELOPE_MAX_BYTES = 8192;
 export const REFERENCE_ENVELOPE_MAX_CHARS = 8192;
+export const REFERENCE_CONTENT_STATEMENT_MAX_CHARS = 512;
+/** Fixed-length reservation so replacing it with a host cursor cannot evict a relation. */
+export const REFERENCE_CURSOR_TOKEN_PLACEHOLDER = `rf2_${'x'.repeat(32)}_${'x'.repeat(24)}`;
 
-/** Serialize the FULL page record — the single budget callback (投影 2/5). */
+/** Serialize the public content page — the single Agent envelope budget callback. */
 export function serializeReferenceEnvelope(record: ReferencePageRecord): string {
-  return JSON.stringify(record);
+  return JSON.stringify(projectReferenceSearchPage(record));
 }
 
 function withinEnvelope(record: ReferencePageRecord): boolean {
   const text = serializeReferenceEnvelope(record);
-  return Buffer.byteLength(text, 'utf8') <= REFERENCE_ENVELOPE_MAX_BYTES
-    && text.length <= REFERENCE_ENVELOPE_MAX_CHARS;
+  // The bridge adds pagination and a small status envelope after projection.
+  return Buffer.byteLength(text, 'utf8') <= REFERENCE_ENVELOPE_MAX_BYTES - 1536
+    && text.length <= REFERENCE_ENVELOPE_MAX_CHARS - 1536;
 }
 
 /**
@@ -65,7 +73,7 @@ export function ruleNameFromReason(reason: string): string | undefined {
 }
 
 export function statementFromEdge(edge: ReferenceEdge): ReferenceStatementDto | undefined {
-  const first = edge.evidence[0];
+  const first = edge.evidence.find((item) => item.excerpt !== undefined);
   if (!first || first.excerpt === undefined) return undefined;
   let kind: ReferenceStatementKind;
   if (edge.reason.includes('rule(event-call') || edge.reason.includes('registry-confirmed')) kind = 'native-rendered';
@@ -78,8 +86,22 @@ export function statementFromEdge(edge: ReferenceEdge): ReferenceStatementDto | 
   return statement;
 }
 
+function cloneStatement(statement: ReferenceStatementDto, maxChars = REFERENCE_CONTENT_STATEMENT_MAX_CHARS): ReferenceStatementDto {
+  const characters = Array.from(statement.text);
+  if (characters.length <= maxChars) return { ...statement, ...(statement.location ? { location: { ...statement.location } } : {}) };
+  const suffix = '…';
+  const take = Math.max(0, maxChars - suffix.length);
+  return {
+    ...statement,
+    text: `${characters.slice(0, take).join('')}${suffix}`,
+    truncated: true,
+    ...(statement.location ? { location: { ...statement.location } } : {})
+  };
+}
+
 function locationFromEdge(edge: ReferenceEdge): ReferenceStatementDto['location'] | undefined {
-  const first = edge.evidence[0];
+  const first = edge.evidence.find((item) => item.excerpt !== undefined || item.fieldName !== undefined || item.instructionUri !== undefined)
+    ?? edge.evidence[0];
   if (!first) return undefined;
   const location: NonNullable<ReferenceStatementDto['location']> = {};
   if (first.fieldName) location.fieldId = first.fieldName;
@@ -96,6 +118,7 @@ function locationFromEdge(edge: ReferenceEdge): ReferenceStatementDto['location'
 export function evidenceDtoFromEdge(edge: ReferenceEdge, versions: Map<string, ReferenceSourceVersionDto>): ReferenceEvidenceDto[] {
   return edge.evidence.map((item) => {
     const dto: ReferenceEvidenceDto = { sourceUri: item.sourceUri };
+    if (item.excerpt !== undefined) dto.excerpt = item.excerpt;
     const version = versions.get(item.sourceUri);
     if (version) dto.sourceVersion = version;
     const statement = statementFromEdge(edge);
@@ -273,6 +296,8 @@ export interface AssembleRelationsInput {
   versions: Map<string, ReferenceSourceVersionDto>;
   /** uris reached through a bounded call-chain hop (T05) → indirect certainty. */
   indirectEdgeKeys?: Set<string>;
+  /** Complete root-to-edge traversal paths keyed by the edge identity. */
+  paths?: ReadonlyMap<string, import('@soulforge/shared').ReferencePathHop[]>;
 }
 
 export function edgeIdentityKey(
@@ -305,6 +330,11 @@ export function assembleRelations(input: AssembleRelationsInput): ReferenceRelat
     const from = identityForUri(edge.fromUri, input.bundle, input.workspaceId);
     const to = identityForUri(edge.toUri, input.bundle, input.workspaceId);
     const ruleName = ruleNameFromReason(edge.reason);
+    const path = input.paths?.get(edgeKey(edge))?.map((hop) => ({
+      ...hop,
+      from: { ...hop.from },
+      ...(hop.to ? { to: { ...hop.to } } : {})
+    })) ?? [{ from, to, relationKind: edge.kind, certainty }];
     counter += 1;
     items.push({
       relationId: `rel-${counter}`,
@@ -313,7 +343,8 @@ export function assembleRelations(input: AssembleRelationsInput): ReferenceRelat
       relationKind: edge.kind,
       certainty,
       evidence: evidenceDtoFromEdge(edge, input.versions),
-      path: [{ from, relationKind: edge.kind, certainty }],
+      path,
+      reason: edge.reason,
       ...(ruleName ? { ruleName } : {})
     });
   }
@@ -462,6 +493,11 @@ export interface BuildPageInput {
   record: Omit<ReferencePageRecord, 'page'>;
   limit: number;
   offset: number;
+  /** Build context from the relations actually retained on this page. */
+  contextForPage?: (relations: ReferenceRelationItem[]) => ReferenceContextDto | undefined;
+  /** Reserve the final opaque cursor's byte length while budgeting this page. */
+  nextCursorPlaceholder?: string;
+  truncationReason?: string;
 }
 
 export interface BuiltPage {
@@ -484,11 +520,18 @@ export function buildBoundedPage(input: BuildPageInput): BuiltPage {
 
   const assemble = (relations: typeof pageRelations, hasMore: boolean): ReferencePageRecord => ({
     ...input.record,
+    ...(input.contextForPage
+      ? (() => {
+          const context = input.contextForPage(relations);
+          return context ? { context } : {};
+        })()
+      : {}),
     relations,
     page: {
       returnedCount: relations.length,
       hasMore,
-      ...(hasMore ? { nextCursor: encodeCursor(offset + relations.length) } : {})
+      ...(hasMore ? { nextCursor: input.nextCursorPlaceholder ?? encodeCursor(offset + relations.length) } : {}),
+      ...(input.truncationReason ? { truncationReason: input.truncationReason } : {})
     }
   });
 
@@ -526,6 +569,174 @@ export function buildBoundedPage(input: BuildPageInput): BuiltPage {
     };
   }
   return { record, droppedRelationIds };
+}
+
+function eventIdentity(relation: ReferenceRelationItem): ReferenceObjectIdentity | undefined {
+  if (relation.from.domain === 'emevd' && relation.from.eventId !== undefined) return relation.from;
+  if (relation.to.domain === 'emevd' && relation.to.eventId !== undefined) return relation.to;
+  return undefined;
+}
+
+function scriptIdentity(relation: ReferenceRelationItem): ReferenceObjectIdentity | undefined {
+  if (relation.from.domain === 'script' && relation.from.childChain?.length) return relation.from;
+  if (relation.to.domain === 'script' && relation.to.childChain?.length) return relation.to;
+  return undefined;
+}
+
+function readActionForRelation(relation: ReferenceRelationItem): ReferenceNextActionDto | undefined {
+  const statement = relation.evidence.find((item) => item.statement)?.statement;
+  const location = statement?.location;
+  const event = eventIdentity(relation);
+  if (event) {
+    return {
+      tool: 'read_emevd_event',
+      args: {
+        file: event.sourceUri,
+        eventId: event.eventId,
+        ...(location?.instructionIndex === undefined ? {} : { instructionOffset: location.instructionIndex }),
+        instructionLimit: 1,
+        format: 'json'
+      },
+      reason: '读取产生该关联的原生事件指令窗口；完整事件仍需按 native read 结果续读。'
+    };
+  }
+  const script = scriptIdentity(relation);
+  if (script) {
+    const sourceOffset = location?.byteRange?.[0];
+    return {
+      tool: 'read_luabnd_script',
+      args: {
+        file: script.sourceUri,
+        childPath: script.childChain!.join('/'),
+        ...(sourceOffset === undefined ? {} : { sourceOffset, sourceLimit: 256 })
+      },
+      reason: sourceOffset === undefined
+        ? '读取该脚本的正文入口；返回 source cursor 后继续读取全文，当前页未猜测调用字符偏移。'
+        : '读取脚本调用所在的有界源码窗口；窗口返回 nextCursor 时继续读取全文。'
+    };
+  }
+  const param = relation.from.domain === 'param' ? relation.from : relation.to.domain === 'param' ? relation.to : undefined;
+  if (param?.rowId !== undefined && param.label) {
+    const table = param.label.split('#')[0]?.trim();
+    const fieldId = location?.fieldId;
+    if (table && fieldId && fieldId !== 'rowId' && relation.relationKind !== 'references_text' && relation.relationKind !== 'name_match') {
+      return {
+        tool: 'read_param_fields',
+        args: { table, rowIds: [param.rowId], fieldIds: [fieldId], containerPath: param.sourceUri },
+        reason: '按具体 PARAM 行与字段读取当前原生值。'
+      };
+    }
+  }
+  const text = relation.from.domain === 'fmg' ? relation.from : relation.to.domain === 'fmg' ? relation.to : undefined;
+  if (text?.textId !== undefined && text.label) {
+    const table = text.childChain?.at(-1)?.split(/[\\/]/u).at(-1)?.trim()
+      || text.label.split('/').at(-2)?.trim();
+    if (table) {
+      return {
+        tool: 'read_fmg_entries',
+        args: { table, ids: [text.textId], containerPath: text.sourceUri, sourceOffset: 0, sourceLimit: 256 },
+        reason: '读取该文本条目的有界正文窗口；窗口返回 nextCursor 时继续读取全文。'
+      };
+    }
+  }
+  return undefined;
+}
+
+function projectedCoverage(coverage: ReferenceCoverageDto): ReferenceSearchPage['coverage'] {
+  return {
+    scope: coverage.scope,
+    status: coverage.status,
+    predicateComplete: coverage.predicateComplete,
+    negativeConclusionAllowed: coverage.negativeConclusionAllowed,
+    domains: coverage.domains.map((domain) => ({
+      domain: domain.domain,
+      status: domain.status,
+      discoveredSources: domain.discoveredSources,
+      readSuccessSources: domain.readSuccessSources,
+      unscannedCount: domain.unscannedSources.length,
+      failedCount: domain.failedSources.length
+    }))
+  };
+}
+
+function projectedCandidates(record: ReferencePageRecord): ReferenceSearchPage['candidates'] {
+  if (!record.candidates) return undefined;
+  return record.candidates.map((candidate) => ({
+    identity: publicIdentity(candidate.identity),
+    discriminators: Object.fromEntries(Object.entries(candidate.discriminators).filter(([key]) =>
+      !/(?:hash|version|revision|generation)/iu.test(key)))
+  }));
+}
+
+function publicIdentity(identity: ReferenceObjectIdentity): ReferenceObjectIdentity {
+  return {
+    ...identity,
+    workspaceId: 'workspace://active',
+    ...(identity.entryName ? { entryName: identity.entryName.split(/[\\/]/u).at(-1)! } : {})
+  };
+}
+
+function projectRelation(relation: ReferenceRelationItem): ReferenceSearchRelationDto {
+  const statement = relation.evidence.find((item) => item.statement)?.statement
+    ?? (() => {
+      const excerpt = relation.evidence.find((item) => item.excerpt !== undefined)?.excerpt;
+      return excerpt === undefined ? undefined : { kind: 'source-text' as const, text: excerpt };
+    })();
+  const content = statement ? cloneStatement(statement) : undefined;
+  const readAction = readActionForRelation(relation);
+  return {
+    relationId: relation.relationId,
+    from: publicIdentity(relation.from),
+    to: publicIdentity(relation.to),
+    relationKind: relation.relationKind,
+    certainty: relation.certainty,
+    ...(content ? { content } : {}),
+    ...(content?.location ? { location: content.location } : {}),
+    ...(relation.reason ?? relation.ruleName
+      ? { reason: relation.reason ?? relation.ruleName } : {}),
+    path: relation.path.map((hop) => ({ ...hop, from: publicIdentity(hop.from), ...(hop.to ? { to: publicIdentity(hop.to) } : {}) })),
+    ...(readAction ? { readAction } : {})
+  };
+}
+
+export interface ReferenceSearchPageProjectionOptions {
+  maxBytes?: number;
+  maxChars?: number;
+}
+
+/**
+ * Project a host-side record to the content-first page consumed by Agent and
+ * renderer envelopes.  Evidence, source versions and hashes never cross this
+ * boundary.  Long statements are explicitly marked and carry a read action;
+ * identity fields and paths are kept intact.
+ */
+export function projectReferenceSearchPage(
+  record: ReferencePageRecord,
+  options: ReferenceSearchPageProjectionOptions = {}
+): ReferenceSearchPage {
+  const relations = record.relations.map(projectRelation);
+  const page: ReferenceSearchPage['page'] = {
+    returnedCount: relations.length,
+    hasMore: record.page.hasMore,
+    ...(record.page.nextCursor ? { nextCursor: record.page.nextCursor } : {}),
+    ...(record.page.truncationReason ? { truncationReason: record.page.truncationReason } : {})
+  };
+  const candidates = projectedCandidates(record);
+  const base = (): ReferenceSearchPage => ({
+    resolution: record.resolution,
+    ...(record.target ? { target: publicIdentity(record.target) } : {}),
+    ...(candidates ? { candidates } : {}),
+    relations,
+    coverage: projectedCoverage(record.coverage),
+    page,
+    ...(record.scan ? { scan: record.scan } : {}),
+    ...(record.nextActions.length > 0 ? { nextActions: record.nextActions.slice(0, 4) } : {}),
+    ...(record.diagnostics && record.diagnostics.length > 0
+      ? { diagnostics: record.diagnostics.slice(0, 4) } : {})
+  });
+  // Never remove relations here: the service has already signed the next
+  // offset. Page budgeting must operate on this exact, lossless projection.
+  return base();
 }
 
 const CURSOR_PREFIX = 'rf1:';

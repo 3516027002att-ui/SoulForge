@@ -47,6 +47,7 @@ export interface ResolutionEvidence {
 export interface EntitySourceSnapshot {
   sourceUri: string;
   sourceHash?: string;
+  outerFileHash?: string;
   sourceRevision?: number | string;
   readerSchemaVersion?: number | string;
   metadataSchemaVersion?: string;
@@ -673,7 +674,7 @@ function candidateFromParam(row: ParamRowSymbol, score: number, route: EntityCan
     status: 'candidate',
     nativeVerified: false,
     evidence: [{ kind: route === 'param' ? 'index' : route === 'memory' ? 'memory' : 'index', sourceUri: row.sourceUri, detail: highlights.join(', ') || 'parameter row candidate' }],
-    ...(snapshotFromFields(row.sourceUri, row.sourceHash, row.sourceRevision) ? { sourceSnapshot: snapshotFromFields(row.sourceUri, row.sourceHash, row.sourceRevision) } : {})
+    ...(snapshotFromFields(row.sourceUri, row.sourceHash, row.sourceRevision, row.outerFileHash) ? { sourceSnapshot: snapshotFromFields(row.sourceUri, row.sourceHash, row.sourceRevision, row.outerFileHash) } : {})
   };
 }
 
@@ -690,7 +691,7 @@ function candidateFromText(entry: TextEntrySymbol, score: number, route: EntityC
     status: 'candidate',
     nativeVerified: false,
     evidence: [{ kind: route === 'fmg' ? 'index' : 'index', sourceUri: entry.sourceUri, detail: highlights.join(', ') || entry.text.slice(0, 120) }],
-    ...(snapshotFromFields(entry.sourceUri, entry.sourceHash, entry.sourceRevision) ? { sourceSnapshot: snapshotFromFields(entry.sourceUri, entry.sourceHash, entry.sourceRevision) } : {})
+    ...(snapshotFromFields(entry.sourceUri, entry.sourceHash, entry.sourceRevision, entry.outerFileHash) ? { sourceSnapshot: snapshotFromFields(entry.sourceUri, entry.sourceHash, entry.sourceRevision, entry.outerFileHash) } : {})
   };
 }
 
@@ -707,7 +708,7 @@ function candidateFromMap(symbol: MapEntitySymbol | MapRegionSymbol, score: numb
     status: 'candidate',
     nativeVerified: false,
     evidence: [{ kind: 'index', sourceUri: symbol.sourceUri, detail: highlights.join(', ') || 'map entity candidate' }],
-    ...(snapshotFromFields(symbol.sourceUri, symbol.sourceHash, symbol.sourceRevision) ? { sourceSnapshot: snapshotFromFields(symbol.sourceUri, symbol.sourceHash, symbol.sourceRevision) } : {})
+    ...(snapshotFromFields(symbol.sourceUri, symbol.sourceHash, symbol.sourceRevision, symbol.outerFileHash) ? { sourceSnapshot: snapshotFromFields(symbol.sourceUri, symbol.sourceHash, symbol.sourceRevision, symbol.outerFileHash) } : {})
   };
 }
 
@@ -724,7 +725,7 @@ function candidateFromEvent(event: EventSymbol, score: number, route: EntityCand
     status: 'candidate',
     nativeVerified: false,
     evidence: [{ kind: 'index', sourceUri: event.sourceUri, detail: highlights.join(', ') || 'event candidate' }],
-    ...(snapshotFromFields(event.sourceUri, event.sourceHash, event.sourceRevision) ? { sourceSnapshot: snapshotFromFields(event.sourceUri, event.sourceHash, event.sourceRevision) } : {})
+    ...(snapshotFromFields(event.sourceUri, event.sourceHash, event.sourceRevision, event.outerFileHash) ? { sourceSnapshot: snapshotFromFields(event.sourceUri, event.sourceHash, event.sourceRevision, event.outerFileHash) } : {})
   };
 }
 
@@ -777,17 +778,18 @@ function snapshotForSymbol(
 ): EntitySourceSnapshot | undefined {
   if (!symbol) return undefined;
   const sourceUri = symbol.sourceUri;
-  const source = snapshotFromFields(sourceUri, symbol.sourceHash, symbol.sourceRevision);
+  const source = snapshotFromFields(sourceUri, symbol.sourceHash, symbol.sourceRevision, symbol.outerFileHash);
   if (source) return source;
   const file = index.getFile(sourceUri);
   return file ? snapshotFromFile(file) : undefined;
 }
 
-function snapshotFromFields(sourceUri: string, sourceHash?: string, sourceRevision?: number): EntitySourceSnapshot | undefined {
-  if (!sourceHash && sourceRevision === undefined) return undefined;
+function snapshotFromFields(sourceUri: string, sourceHash?: string, sourceRevision?: number, outerFileHash?: string): EntitySourceSnapshot | undefined {
+  if (!sourceHash && !outerFileHash && sourceRevision === undefined) return undefined;
   return {
     sourceUri,
     ...(sourceHash ? { sourceHash } : {}),
+    ...(outerFileHash ? { outerFileHash } : {}),
     ...(sourceRevision !== undefined ? { sourceRevision } : {})
   };
 }
@@ -804,7 +806,8 @@ function isSnapshotCurrent(snapshot: EntitySourceSnapshot | undefined, index: Wo
   if (!snapshot) return false;
   const file = index.getFile(snapshot.sourceUri);
   if (!file) return false;
-  if (snapshot.sourceHash && file.sha256 && snapshot.sourceHash !== file.sha256) return false;
+  const outerHash = snapshot.outerFileHash ?? snapshot.sourceHash;
+  if (outerHash && file.sha256 && outerHash !== file.sha256) return false;
   if (snapshot.sourceRevision !== undefined && typeof snapshot.sourceRevision === 'number' && snapshot.sourceRevision !== file.mtimeMs) return false;
   return true;
 }

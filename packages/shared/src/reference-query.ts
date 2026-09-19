@@ -32,6 +32,7 @@ export type ReferenceRelationKind =
   | 'contains'
   | 'member_of'
   | 'numeric_match'
+  | 'name_match'
   | 'unknown';
 
 /** Discriminated selector; no catch-all object with arbitrary properties. */
@@ -78,12 +79,15 @@ export interface ReferenceQueryInput {
   limit?: number;
   includeHypotheses?: boolean;
   cursor?: string;
+  /** Host enrichment scan continuation; distinct from result-page cursor. */
+  sourceCursor?: string;
 }
 
 export type ReferenceQueryErrorCode =
   | 'REFERENCE_TARGET_REQUIRED'
   | 'REFERENCE_TARGET_CONFLICT'
   | 'REFERENCE_CURSOR_SCOPE_MISMATCH'
+  | 'REFERENCE_CURSOR_KIND_MISMATCH'
   | 'REFERENCE_INVALID_INPUT';
 
 export interface ReferenceQueryDecodeFailure {
@@ -105,6 +109,7 @@ export interface NormalizedReferenceQuery {
   limit: number;
   includeHypotheses: boolean;
   cursor?: string;
+  sourceCursor?: string;
   /** Cursor continuation requests must match the host-stored scope exactly. */
   cursorScopeCheckRequired: boolean;
 }
@@ -122,7 +127,7 @@ export const REFERENCE_LIMIT_MAX = 32;
 
 const QUERY_TOP_LEVEL_KEYS = new Set([
   'uri', 'target', 'query', 'domain', 'direction', 'detail',
-  'fieldIds', 'depth', 'limit', 'includeHypotheses', 'cursor'
+  'fieldIds', 'depth', 'limit', 'includeHypotheses', 'cursor', 'sourceCursor'
 ]);
 
 const SELECTOR_KEYS: Record<string, ReadonlySet<string>> = {
@@ -340,11 +345,16 @@ export function decodeReferenceQueryInput(raw: unknown): ReferenceQueryDecodeRes
   const hasTarget = raw.target !== undefined;
   const hasQuery = raw.query !== undefined;
   const hasCursor = nonEmptyString(raw.cursor);
+  const hasSourceCursor = nonEmptyString(raw.sourceCursor);
+
+  if (raw.cursor !== undefined && !hasCursor) {
+    return failure('REFERENCE_INVALID_INPUT', 'cursor must be a non-empty string.', 'cursor');
+  }
 
   if (hasCursor) {
-    if (hasUri || hasTarget || hasQuery) {
+    if (hasUri || hasTarget || hasQuery || hasSourceCursor) {
       return failure('REFERENCE_CURSOR_SCOPE_MISMATCH',
-        'A cursor continuation must not re-declare uri/target/query; omit them or start a fresh query.');
+        'A result cursor continuation must not re-declare uri/target/query/sourceCursor; omit them or start a fresh query.');
     }
   } else {
     const entries = [hasUri, hasTarget, hasQuery].filter(Boolean).length;
@@ -374,6 +384,13 @@ export function decodeReferenceQueryInput(raw: unknown): ReferenceQueryDecodeRes
   if (hasQuery) {
     if (!nonEmptyString(raw.query)) return failure('REFERENCE_INVALID_INPUT', 'query must be a non-empty string.', 'query');
     normalized.query = raw.query.trim();
+  }
+  if (raw.sourceCursor !== undefined) {
+    if (!hasSourceCursor) return failure('REFERENCE_INVALID_INPUT', 'sourceCursor must be a non-empty string.', 'sourceCursor');
+    if (!hasUri && !hasTarget && !hasQuery) {
+      return failure('REFERENCE_TARGET_REQUIRED', 'sourceCursor 只能附着在带 uri、target 或 query 的新查询上。', 'sourceCursor');
+    }
+    normalized.sourceCursor = (raw.sourceCursor as string).trim();
   }
   if (hasTarget) {
     const decoded = decodeTargetSelector(raw.target);
@@ -496,6 +513,8 @@ export interface ReferenceFieldFactDto {
 
 export interface ReferenceEvidenceDto {
   sourceUri: string;
+  /** Bounded source snippet retained for content projection; never a proof by itself. */
+  excerpt?: string;
   sourceVersion?: ReferenceSourceVersionDto;
   statement?: ReferenceStatementDto;
   fieldFact?: ReferenceFieldFactDto;
@@ -505,6 +524,8 @@ export interface ReferenceEvidenceDto {
 
 export interface ReferencePathHop {
   from: ReferenceObjectIdentity;
+  /** Traversal destination for this hop; optional for compatibility with old pages. */
+  to?: ReferenceObjectIdentity;
   relationKind: ReferenceRelationKind;
   certainty: ReferenceCertainty;
 }
@@ -517,6 +538,8 @@ export interface ReferenceRelationItem {
   certainty: ReferenceCertainty;
   evidence: ReferenceEvidenceDto[];
   path: ReferencePathHop[];
+  /** Provider rule/explanation; evidence remains host-side and is not exported by the content projection. */
+  reason?: string;
   /** Explicit heuristic rule name; required when certainty is hypothesis. */
   ruleName?: string;
   /** Whether the referenced native target currently exists. */
@@ -604,6 +627,68 @@ export interface ReferenceNextActionDto {
   reason: string;
 }
 
+/**
+ * Renderer/Agent-safe relation projection.  It deliberately carries the
+ * useful content and location while omitting provider evidence, source
+ * versions, hashes and native proof fields.
+ */
+export interface ReferenceSearchRelationDto {
+  relationId: string;
+  from: ReferenceObjectIdentity;
+  to: ReferenceObjectIdentity;
+  relationKind: ReferenceRelationKind;
+  certainty: ReferenceCertainty;
+  content?: ReferenceStatementDto;
+  location?: ReferenceStatementLocation;
+  reason?: string;
+  path: ReferencePathHop[];
+  readAction?: ReferenceNextActionDto;
+}
+
+/** Compact coverage suitable for an Agent envelope. */
+export interface ReferenceSearchCoverageDomainDto {
+  domain: string;
+  status: ReferenceDomainCoverageDto['status'];
+  discoveredSources: number;
+  readSuccessSources: number;
+  unscannedCount: number;
+  failedCount: number;
+}
+
+export interface ReferenceSearchCoverageDto {
+  scope: string;
+  status: ReferenceCoverageDto['status'];
+  domains: ReferenceSearchCoverageDomainDto[];
+  predicateComplete: boolean;
+  negativeConclusionAllowed: boolean;
+}
+
+export interface ReferenceSearchPageDto {
+  returnedCount: number;
+  hasMore: boolean;
+  nextCursor?: string;
+  truncationReason?: string;
+}
+
+/** Public content-first projection of a ReferencePageRecord. */
+export interface ReferenceSearchPage {
+  resolution: ReferenceResolution;
+  target?: ReferenceObjectIdentity;
+  candidates?: ReferenceCandidateDto[];
+  relations: ReferenceSearchRelationDto[];
+  coverage: ReferenceSearchCoverageDto;
+  page: ReferenceSearchPageDto;
+  scan?: {
+    remaining: boolean;
+    complete?: boolean;
+    failedCount?: number;
+    sourceCursor?: string;
+    nextAction?: ReferenceNextActionDto;
+  };
+  nextActions?: ReferenceNextActionDto[];
+  diagnostics?: ReferenceDiagnosticDto[];
+}
+
 /** The `data.record` payload of a find_references envelope. */
 export interface ReferencePageRecord {
   resolution: ReferenceResolution;
@@ -615,6 +700,13 @@ export interface ReferencePageRecord {
   relations: ReferenceRelationItem[];
   coverage: ReferenceCoverageDto;
   page: ReferencePageDto;
+  scan?: {
+    remaining: boolean;
+    complete?: boolean;
+    failedCount?: number;
+    sourceCursor?: string;
+    nextAction?: ReferenceNextActionDto;
+  };
   diagnostics: ReferenceDiagnosticDto[];
   nextActions: ReferenceNextActionDto[];
 }

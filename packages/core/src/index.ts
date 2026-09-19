@@ -88,6 +88,7 @@ export * from './references/referenceProviderRegistry.js';
 export * from './references/referenceQueryService.js';
 export * from './references/resourceReferenceProvider.js';
 export * from './references/scriptReferenceProvider.js';
+export * from './references/nativeReferenceContent.js';
 export * from './references/containerMemberProvider.js';
 export * from './references/emevdRoleRules.js';
 export * from './references/luaStaticSubset.js';

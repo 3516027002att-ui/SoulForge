@@ -11,7 +11,6 @@ import { WorkbenchLayout, type WorkbenchColumnSpec } from '../workbench/Workbenc
  * renderer 只消费 typed ID，绝不自行从物理路径解析语言/容器）。
  */
 type TextCatalogResponse = Awaited<ReturnType<NonNullable<SoulForgeApi['readTextCatalog']>>>;
-type TextContainerNode = TextCatalogResponse['languages'][number]['containers'][number];
 
 export interface FmgEntryRow {
   id: number;
@@ -105,10 +104,12 @@ export interface FmgWorkbenchPanelProps {
  */
 export function findTableInCatalog(
   catalog: TextCatalogResponse,
-  tableId: string
+  tableId: string,
+  resourceUri?: string
 ): { languageId: string; containerId: string; tableId: string } | null {
   for (const language of catalog.languages) {
     for (const container of language.containers) {
+      if (resourceUri !== undefined && container.sourceUri !== resourceUri) continue;
       const table = container.tables.find((candidate) => candidate.tableId === tableId);
       if (table) {
         return {
@@ -140,7 +141,7 @@ const REVEAL_SCAN_PAGE_SIZE = 100_000;
  *
  *   Text Categories | Text Entries | Text（三列，各自独立滚动）
  *
- * Categories 是「语言筛选在顶上 + 表名平铺」：表名是 main 投影的逻辑名
+ * Categories 只列当前文件的文本表，标题旁显示该文件的语言：表名是 main 投影的逻辑名
  * （basename 去 .fmg，同名加序号），绝不用路径打码占位当表名；没有缩进树、
  * 没有左栏底下空 Tools。
  *
@@ -177,10 +178,14 @@ export function FmgWorkbenchPanel(props: FmgWorkbenchPanelProps): ReactElement {
   const [catalogLoading, setCatalogLoading] = useState(false);
   const [catalogError, setCatalogError] = useState<string | null>(null);
 
-  // ── 选择链：三级 typed ID ──
-  const [selectedLanguageId, setSelectedLanguageId] = useState<string | null>(null);
-  const [selectedContainerId, setSelectedContainerId] = useState<string | null>(null);
+  // 语言和容器由当前文件决定，只有容器内的文本表可以独立选择。
   const [selectedTableId, setSelectedTableId] = useState<string | null>(null);
+  const selectedLanguage = catalog?.languages.find((language) => (
+    language.containers.some((container) => container.sourceUri === props.resourceUri)
+  )) ?? null;
+  const selectedContainer = selectedLanguage?.containers.find((container) => (
+    container.sourceUri === props.resourceUri
+  )) ?? null;
 
   // ── 左树搜索（§9.3 每区搜索）：只过滤目录行显示，不动选择链 ──
   const [treeQuery, setTreeQuery] = useState('');
@@ -209,6 +214,8 @@ export function FmgWorkbenchPanel(props: FmgWorkbenchPanelProps): ReactElement {
     let cancelled = false;
     setCatalogLoading(true);
     setCatalogError(null);
+    setCatalog(null);
+    setSelectedTableId(null);
     bridge.readTextCatalog()
       .then((result: TextCatalogResponse) => {
         if (cancelled) return;
@@ -221,21 +228,13 @@ export function FmgWorkbenchPanel(props: FmgWorkbenchPanelProps): ReactElement {
             for (const language of result.languages) {
               for (const container of language.containers) {
                 if (container.sourceUri === props.resourceUri) {
-                  setSelectedLanguageId(language.languageId);
-                  setSelectedContainerId(container.containerId);
-                  if (container.tables.length > 0) {
-                    setSelectedTableId(container.tables[0]!.tableId);
-                  }
+                  setSelectedTableId(container.tables[0]?.tableId ?? null);
                   return;
                 }
               }
             }
           }
-          // 3-B：没点具体 msgbnd（resourceUri 空）时不回落「默认 item 组」——只
-          // 默认选语言，Categories 走空态，等用户在左侧资源浏览器点 item / menu。
-          if (result.languages.length > 0 && selectedLanguageId === null) {
-            setSelectedLanguageId(result.languages[0]!.languageId);
-          }
+          // 没有匹配文件时保持空态，等用户在左侧资源浏览器点 item / menu。
         } else {
           setCatalogError(result.diagnostics?.[0]?.message ?? '文本目录读取失败。');
         }
@@ -248,34 +247,7 @@ export function FmgWorkbenchPanel(props: FmgWorkbenchPanelProps): ReactElement {
     return () => { cancelled = true; };
   }, [liveMode, bridge, props.resourceUri]);
 
-  // ── 父级切换清理：逐级清空下游选择与状态，杜绝跨表残留 ──
-  function handleSelectLanguage(languageId: string): void {
-    if (languageId === selectedLanguageId) return;
-    commitDraftRef.current();
-    setSelectedLanguageId(languageId);
-    setSelectedContainerId(null);
-    setSelectedTableId(null);
-    setSelectedId(null);
-    setPage(0);
-    setLoadedPage(null);
-    setQuery('');
-    setPageEntries([]);
-    setPageError(null);
-  }
-
-  function handleSelectContainer(containerId: string): void {
-    if (containerId === selectedContainerId) return;
-    commitDraftRef.current();
-    setSelectedContainerId(containerId);
-    setSelectedTableId(null);
-    setSelectedId(null);
-    setPage(0);
-    setLoadedPage(null);
-    setQuery('');
-    setPageEntries([]);
-    setPageError(null);
-  }
-
+  // ── 换表前提交草稿，再清理下游条目状态 ──
   function handleSelectTable(tableId: string): void {
     if (tableId === selectedTableId) return;
     commitDraftRef.current();
@@ -370,15 +342,13 @@ export function FmgWorkbenchPanel(props: FmgWorkbenchPanelProps): ReactElement {
       return;
     }
     commitDraftRef.current();
-    const found = findTableInCatalog(catalog, request.tableId);
+    const found = findTableInCatalog(catalog, request.tableId, props.resourceUri);
     if (!found) {
-      setRevealError(`文本目录里没有目标表，条目 ${request.entryId} 无法定位。`);
+      setRevealError(`当前文本文件里没有目标表，条目 ${request.entryId} 无法定位。`);
       props.onRevealHandled?.();
       return;
     }
     setRevealError(null);
-    setSelectedLanguageId(found.languageId);
-    setSelectedContainerId(found.containerId);
     setSelectedTableId(found.tableId);
     setSelectedId(null);
     setPage(0);
@@ -413,7 +383,7 @@ export function FmgWorkbenchPanel(props: FmgWorkbenchPanelProps): ReactElement {
       cancelled = true;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [props.revealRequest, catalog, catalogError, liveMode, bridge]);
+  }, [props.revealRequest, props.resourceUri, catalog, catalogError, liveMode, bridge]);
 
   /**
    * S31：外部 reveal 第二步 —— 目标表 + 精确 id 过滤 + 全量窗口就绪后选中目标
@@ -449,11 +419,6 @@ export function FmgWorkbenchPanel(props: FmgWorkbenchPanelProps): ReactElement {
   }, [props.revealRequest, selectedTableId, query, page, revealTargetPage, loadedPage, loading, pageEntries]);
 
   const selected = pageEntries.find((row) => row.id === selectedId) ?? null;
-  const selectedContainer = useMemo(() => {
-    if (!catalog || selectedLanguageId === null || selectedContainerId === null) return null;
-    const language = catalog.languages.find((l) => l.languageId === selectedLanguageId);
-    return language?.containers.find((c) => c.containerId === selectedContainerId) ?? null;
-  }, [catalog, selectedLanguageId, selectedContainerId]);
   const containerFailed = selectedContainer?.parseStatus === 'failed';
   // 3-A：目录元数据里的 filledCount / entryCount（Bridge 仍上报，RAG/Agent 用）
   // 不再画成「槽 / 有字」；表名一行只留表名。
@@ -504,15 +469,9 @@ export function FmgWorkbenchPanel(props: FmgWorkbenchPanelProps): ReactElement {
     });
   }
 
-  // ── 左栏 Categories（3-B）：语言筛选在顶上。资源浏览器点开哪个容器，就只列
-  // 那一个容器里的表（container.sourceUri === props.resourceUri）；没有具体
-  // msgbnd（resourceUri 空）时不列任何容器，走空态。不再有 ITEM/MENU 组头，
-  // 也不再平铺两个容器 33 张表。
+  // ── 左栏 Categories：资源浏览器点开哪个文件，就只列该容器里的表。
   // 表名是 main 投影的逻辑名（shared logicalFmgTableName），renderer 不做二次解析。
-  const selectedLanguage = catalog?.languages.find((l) => l.languageId === selectedLanguageId) ?? null;
-  const categoryContainer = selectedLanguage?.containers.find(
-    (container) => container.sourceUri === props.resourceUri
-  ) ?? null;
+  const categoryContainer = selectedContainer;
   const categoryTables = useMemo(() => {
     if (!catalog || selectedLanguage === null || categoryContainer === null) return [];
     if (categoryContainer.parseStatus !== 'confirmed') return [];
@@ -525,32 +484,15 @@ export function FmgWorkbenchPanel(props: FmgWorkbenchPanelProps): ReactElement {
         title: `${categoryContainer.containerKind} / ${table.entryName}`,
         selected: table.tableId === selectedTableId,
         onSelect: () => {
-          // 选表即选其容器：容器读取失败/诊断跟随表所属容器。
-          setSelectedContainerId(categoryContainer.containerId);
           handleSelectTable(table.tableId);
         }
       }));
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [catalog, selectedLanguage, categoryContainer, selectedContainerId, selectedTableId, treeQuery]);
+  }, [catalog, selectedLanguage, categoryContainer, selectedTableId, treeQuery]);
 
   const categoriesColumn = (
     <>
       <div className="fmg-categories__search">
-        <label className="stack gap">
-          <span className="muted">语言</span>
-          <select
-            value={selectedLanguageId ?? ''}
-            onChange={(event) => handleSelectLanguage(event.target.value)}
-            aria-label="文本语言"
-          >
-            {catalog?.languages.length === 0 && <option value="">无语言</option>}
-            {catalog?.languages.map((language) => (
-              <option key={language.languageId} value={language.languageId}>
-                {language.languageId}
-              </option>
-            ))}
-          </select>
-        </label>
         <input
           value={treeQuery}
           onChange={(e) => setTreeQuery(e.target.value)}
@@ -564,8 +506,8 @@ export function FmgWorkbenchPanel(props: FmgWorkbenchPanelProps): ReactElement {
         {!catalogLoading && !catalogError && catalog === null && (
           <p className="wb-empty">文本目录需要桌面版才能读取。</p>
         )}
-        {catalog && selectedLanguage === null && (
-          <p className="wb-empty">先选择语言。</p>
+        {catalog && !catalogLoading && props.resourceUri && categoryContainer === null && (
+          <p className="wb-empty">当前文件不在文本目录中。</p>
         )}
         {catalog && !catalogLoading && !props.resourceUri && (
            <p className="wb-empty">请在左侧资源浏览器中选择文本容器。</p>
@@ -586,8 +528,8 @@ export function FmgWorkbenchPanel(props: FmgWorkbenchPanelProps): ReactElement {
             <span className="wb-row__name" title={row.title}>{row.label}</span>
           </div>
         ))}
-        {catalog && !catalogLoading && props.resourceUri && categoryTables.length === 0 && (
-          <p className="wb-empty">当前语言没有匹配的表。</p>
+        {categoryContainer?.parseStatus === 'confirmed' && !catalogLoading && categoryTables.length === 0 && (
+          <p className="wb-empty">当前文件没有匹配的文本表。</p>
         )}
       </div>
     </>
@@ -663,7 +605,7 @@ export function FmgWorkbenchPanel(props: FmgWorkbenchPanelProps): ReactElement {
             ? query.trim().length > 0
               ? <p className="muted">没有匹配的条目。</p>
               : <p className="muted">当前页无条目。</p>
-            : <p className="muted">先选择语言与文本表。</p>
+            : <p className="muted">先选择文本文件与文本表。</p>
         )}
       </div>
     </>
@@ -699,7 +641,7 @@ export function FmgWorkbenchPanel(props: FmgWorkbenchPanelProps): ReactElement {
     {
       id: 'categories',
        title: '文本分类',
-       hint: catalog ? `${catalog.languages.length} 个语言` : '',
+       hint: selectedLanguage?.languageId ?? '',
       initialWidth: 300,
       minWidth: 200,
       children: <div className="fmg-categories">{categoriesColumn}</div>

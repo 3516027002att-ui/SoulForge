@@ -12,7 +12,7 @@ import type { Diagnostic, ReferenceEdge, SymbolBundle } from '@soulforge/shared'
 import { buildParamReferenceEdges } from './paramReferenceProvider.js';
 import { buildParamTextReferenceEdges } from './paramTextReferences.js';
 import { buildEventReferenceEdges } from './eventReferenceProvider.js';
-import { buildScriptReferenceEdges } from './scriptReferenceProvider.js';
+import { buildScriptReferenceEdges, type ScriptLiteralTargetIndexes } from './scriptReferenceProvider.js';
 import { buildMapReferenceEdges } from './mapReferenceProvider.js';
 import { buildContainerMemberEdges } from './containerMemberProvider.js';
 import type { EmedfRegistry } from '../emevd/emedfSchema.js';
@@ -88,7 +88,100 @@ function eventTargetIndexes(bundle: SymbolBundle) {
   return { mapEntitiesByEntityId, paramRowsById, paramRowsByScopedId, textsById };
 }
 
+/**
+ * Literal lookup index for the bounded script observation channel.  It is
+ * intentionally built from symbols that already have a stable URI; this
+ * helper does not invent an API namespace or infer a foreign key from names.
+ */
+function scriptLiteralTargetIndexes(bundle: SymbolBundle): ScriptLiteralTargetIndexes {
+  const numeric = new Map<number, Array<{ uri: string; label?: string }>>();
+  const strings = new Map<string, Array<{ uri: string; label?: string }>>();
+  const addNumeric = (value: number | undefined, target: { uri: string; label?: string }): void => {
+    if (value === undefined || !Number.isSafeInteger(value)) return;
+    const list = numeric.get(value) ?? [];
+    list.push(target);
+    numeric.set(value, list);
+  };
+  const addString = (value: string | undefined, target: { uri: string; label?: string }): void => {
+    if (!value || value.trim().length === 0) return;
+    const key = value.trim().toLocaleLowerCase();
+    const list = strings.get(key) ?? [];
+    list.push(target);
+    strings.set(key, list);
+  };
+  for (const eventExport of bundle.events ?? []) {
+    for (const event of eventExport.events) {
+      const target = { uri: event.uri, label: `event ${event.eventId}` };
+      addNumeric(event.eventId, target);
+      addString(event.name, target);
+    }
+  }
+  for (const mapExport of bundle.maps ?? []) {
+    for (const entity of [...mapExport.entities, ...mapExport.regions]) {
+      const target = { uri: entity.uri, label: entity.name };
+      addNumeric(entity.entityId, target);
+      addString(entity.name, target);
+    }
+  }
+  for (const paramExport of bundle.params ?? []) {
+    for (const row of paramExport.rows) {
+      const target = { uri: row.uri, label: `${row.paramName}#${row.rowId}` };
+      addNumeric(row.rowId, target);
+      addString(row.rowName, target);
+    }
+  }
+  for (const msgExport of bundle.msgs ?? []) {
+    for (const entry of msgExport.entries) {
+      const target = { uri: entry.uri, label: `${entry.category ?? 'text'}#${entry.textId}` };
+      addNumeric(entry.textId, target);
+      addString(entry.text, target);
+    }
+  }
+  for (const scriptExport of bundle.scripts ?? []) {
+    for (const child of scriptExport.scripts) {
+      const target = { uri: child.uri, label: child.entryName ?? child.childChain.join('/') };
+      addString(child.entryName, target);
+      addString(child.childChain[child.childChain.length - 1], target);
+    }
+  }
+  return { numeric, strings };
+}
+
+export function buildNameMatchEdges(bundle: SymbolBundle): ProviderShard {
+  const texts = new Map<string, Array<{ uri: string; text: string }>>();
+  const normalize = (value: string) => value.trim().normalize('NFC').toLocaleLowerCase();
+  for (const item of bundle.msgs ?? []) {
+    for (const entry of item.entries) {
+      const name = normalize(entry.text);
+      if (!name) continue;
+      const values = texts.get(name) ?? [];
+      values.push({ uri: entry.uri, text: entry.text });
+      texts.set(name, values);
+    }
+  }
+  const edges: ReferenceEdge[] = [];
+  const diagnostics: Diagnostic[] = [];
+  for (const table of bundle.params ?? []) {
+    for (const row of table.rows) {
+      const name = normalize(row.rowName ?? '');
+      if (!name) continue;
+      const matches = texts.get(name) ?? [];
+      for (const entry of matches.slice(0, 16)) {
+        edges.push({
+          fromUri: row.uri, toUri: entry.uri, kind: 'name_match', confidence: 'low',
+          reason: `同名：参数行名与文本内容“${row.rowName}”一致；仅名称匹配，不代表文本 ID 等于参数行 ID，也不表示存在外键。`,
+          evidence: [{ sourceUri: entry.uri, excerpt: entry.text }]
+        });
+      }
+      if (matches.length > 16) diagnostics.push({ severity: 'info', code: 'NAME_MATCH_LIMIT',
+        message: `“${row.rowName}”命中 ${matches.length} 条同名文本，本次显示前 16 条；可用 search_text_entries 搜索该名称继续读取。`, sourceUri: row.sourceUri });
+    }
+  }
+  return { edges, diagnostics };
+}
+
 export const REFERENCE_PROVIDERS: readonly ReferenceProviderDescriptor[] = Object.freeze([
+  { id: 'content-name-match', domains: ['param', 'msg'], build: buildNameMatchEdges },
   {
     id: 'param-refs',
     domains: ['param'],
@@ -127,7 +220,8 @@ export const REFERENCE_PROVIDERS: readonly ReferenceProviderDescriptor[] = Objec
     id: 'script-refs',
     domains: ['script', 'ai'],
     build: (bundle, options) => buildScriptReferenceEdges(bundle.scripts ?? [], {
-      ...(options.includeHypotheses !== undefined ? { includeHypotheses: options.includeHypotheses } : {})
+      ...(options.includeHypotheses !== undefined ? { includeHypotheses: options.includeHypotheses } : {}),
+      literalTargets: scriptLiteralTargetIndexes(bundle)
     })
   },
   {

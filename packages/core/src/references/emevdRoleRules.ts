@@ -53,7 +53,10 @@ function eventCallRules(): EmevdRoleRule[] {
   return EVENT_CALL_INSTRUCTION_NAMES.map((instructionName) => ({
     ruleId: `event-call:${instructionName}`,
     game: 'sekiro',
-    registryOrigins: ['imported', 'user-derived', 'fixture'],
+    // The bundled production registry is the current source of truth; keep
+    // imported/user-derived/fixture origins for the existing synthetic and
+    // external-schema compatibility tests.
+    registryOrigins: ['first-party', 'imported', 'user-derived', 'fixture'],
     instructionName,
     argPosition: 1,
     // The registry arg definition name for the target id. Imported Sekiro

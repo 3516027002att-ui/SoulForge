@@ -7,7 +7,7 @@
 import { basename, join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { access, stat } from 'node:fs/promises';
-import type { Diagnostic, IndexedFile } from '@soulforge/shared';
+import type { Diagnostic, EmevdEventIr, IndexedFile } from '@soulforge/shared';
 import { fingerprintEmedfRegistry } from '../emevd/dslCompiler.js';
 import { decodeInstructionArgs, findInstructionDef, type DecodedArg, type EmedfRegistry } from '../emevd/emedfSchema.js';
 import { renderEmevdDarkScript } from '../emevd/darkScriptRenderer.js';
@@ -237,7 +237,7 @@ export async function searchEmevdInstructionMatches(input: {
       for (const event of full.document.events) {
         scannedEvents += 1;
         for (let index = 0; index < event.instructions.length; index += 1) {
-          const instruction = readEventInstruction(event.instructions[index]!, index, registry.registry);
+          const instruction = readEventInstruction(event.instructions[index]!, index, registry.registry, event.parameters);
           if (!instructionSearchMatches(instruction, needle)) continue;
           if (matchedCount < offset) {
             matchedCount += 1;
@@ -408,7 +408,7 @@ export async function readEmevdEvent(input: {
   );
   const end = Math.min(total, offset + limit);
   const instructions = event.instructions.slice(offset, end).map((instruction, index) =>
-    readEventInstruction(instruction, offset + index, registry.registry)
+    readEventInstruction(instruction, offset + index, registry.registry, event.parameters)
   );
   const truncated = end < total;
   // A DarkScript write receipt is complete only for the entire event: it must
@@ -713,7 +713,8 @@ function looksLikeDarkScriptSource(source: string): boolean {
 function readEventInstruction(
   instruction: Pick<EmevdEventInstructionReadDto, 'bank' | 'id' | 'argsBase64' | 'unknown'>,
   index: number,
-  registry: EmedfRegistry
+  registry: EmedfRegistry,
+  parameters?: EmevdEventIr['parameters']
 ): EmevdEventInstructionReadDto {
   const diagnostics: EmevdEventInstructionReadDto['diagnostics'] = [];
   const definition = instruction.unknown ? undefined : findInstructionDef(registry, instruction.bank, instruction.id);
@@ -746,7 +747,10 @@ function readEventInstruction(
       argsBase64: instruction.argsBase64,
       unknown: false,
       emedfName: decoded.def.name,
-      typedArgs: decoded.args,
+      typedArgs: decoded.args.map((arg) => {
+        const parameter = parameters?.find((item) => item.instructionIndex === index && item.targetStartByte === arg.startByte);
+        return parameter ? { ...arg, parameterSymbol: `X${parameter.sourceStartByte}_${parameter.byteCount}` } : arg;
+      }),
       diagnostics
     };
   } catch (error) {
@@ -779,7 +783,7 @@ function instructionSearchMatches(
     instruction.emedfName,
     String(instruction.bank),
     String(instruction.id),
-    ...(instruction.typedArgs ?? []).flatMap((arg) => [arg.name, String(arg.value), arg.parameterSymbol])
+    ...(instruction.typedArgs ?? []).flatMap((arg) => [arg.name, arg.parameterSymbol ?? String(arg.value)])
   ]
     .filter((value): value is string => typeof value === 'string' && value.length > 0)
     .map(normalizeInstructionSearchText);

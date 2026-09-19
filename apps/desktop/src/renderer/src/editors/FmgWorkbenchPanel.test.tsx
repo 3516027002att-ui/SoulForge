@@ -9,7 +9,7 @@
  *
  * 1. SSR 结构：工作台骨架（区域名、左 Categories + 右上下两区、工具条面包屑）
  *    挂载即存在，未选表时
- *    是显式「先选择语言、容器与文本表」空态而不是错误；
+ *    是显式「先选择文本文件与文本表」空态而不是错误；
  * 2. 纯渲染语义（source contract）：真空表 / 无匹配 / 失败三个空态分离
  *    （muted 空态 vs danger 诊断）、重复 FMG ID 槽位保留（行 map 不去重）、
  *    language→container→table 选择链全部消费 Bridge metadata 的 typed ID；
@@ -26,7 +26,8 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, it } from 'node:test';
 import { renderToStaticMarkup } from 'react-dom/server';
-import { FmgWorkbenchPanel, projectFmgDisplayText } from './FmgWorkbenchPanel.js';
+import { FmgWorkbenchPanel, findTableInCatalog, projectFmgDisplayText } from './FmgWorkbenchPanel.js';
+import { DomainLibraryList } from '../navigation/DomainLibraryList.js';
 
 // node 环境没有 window；getRendererRuntime 会读 window.soulforge。设为空对象 →
 // browser-preview 表面 → bridge 为 null → live 路径短路，SSR 输出纯初始结构
@@ -59,9 +60,9 @@ describe('FmgWorkbenchPanel 初始结构（挂载即有的 §9.1 S13 骨架：Ca
     assert.doesNotMatch(html, /暂无已接通的工具/);
   });
 
-  it('语言是 Categories 顶上筛选：combobox 挂载即有', () => {
+  it('语言跟随当前文件，Categories 不再提供语言切换', () => {
     const html = render();
-    assert.match(html, /aria-label="文本语言"/);
+    assert.doesNotMatch(html, /aria-label="文本语言"|<select/);
   });
 
   it('11-C：工具条面包屑已删除（不再有「文本」crumb）', () => {
@@ -69,10 +70,54 @@ describe('FmgWorkbenchPanel 初始结构（挂载即有的 §9.1 S13 骨架：Ca
     assert.doesNotMatch(render(), /Text · \d+ languages/);
   });
 
-  it('未选表时不伪装错误：显式「先选择语言与文本表」muted 空态', () => {
+  it('未选表时提示选择文本文件与文本表', () => {
     const html = render();
-    assert.match(html, /先选择语言与文本表/);
+    assert.match(html, /先选择文本文件与文本表/);
     assert.doesNotMatch(html, /danger/);
+  });
+
+  it('同名文本资源只显示文件名和语言，不重复格式与完整路径', () => {
+    const html = renderToStaticMarkup(
+      <DomainLibraryList
+        files={['engus', 'zhocn'].flatMap((language) => ['item', 'menu'].map((name) => ({
+          sourceUri: `fixture://msg/${language}/${name}.msgbnd.dcx`,
+          relativePath: `msg/${language}/${name}.msgbnd.dcx`,
+          resourceKind: 'msg',
+          formatLabel: 'MSG BND DCX'
+        })))}
+        selectedUri="fixture://msg/zhocn/item.msgbnd.dcx"
+        emptyHint=""
+        onSelect={() => {}}
+      />
+    );
+    assert.equal((html.match(/class="library-item__meta">engus</g) ?? []).length, 2);
+    assert.equal((html.match(/class="library-item__meta">zhocn</g) ?? []).length, 2);
+    assert.doesNotMatch(html, /msg\/|MSG BND DCX/);
+  });
+
+  it('条目跳转限定到当前文件，不能借 tableId 切到另一语言或容器', () => {
+    const catalog: Parameters<typeof findTableInCatalog>[0] = {
+      ok: true, libraryId: 'game-text', title: '文本', diagnostics: [],
+      languages: ['engus', 'zhocn'].map((languageId) => ({
+        languageId,
+        containers: ['item', 'menu'].map((kind) => ({
+          containerId: `${languageId}:${kind}`, containerKind: kind,
+          sourceUri: `fixture://msg/${languageId}/${kind}.msgbnd.dcx`,
+          relativePath: `msg/${languageId}/${kind}.msgbnd.dcx`,
+          parseStatus: 'confirmed', tableCount: 1, diagnostics: [],
+          tables: [{
+            tableId: `${languageId}:${kind}:title`, entryName: 'title', entryCount: 1,
+            sourceUri: `fixture://msg/${languageId}/${kind}.msgbnd.dcx`, entryIndex: 0
+          }]
+        }))
+      }))
+    };
+    const current = 'fixture://msg/zhocn/item.msgbnd.dcx';
+    assert.deepEqual(findTableInCatalog(catalog, 'zhocn:item:title', current), {
+      languageId: 'zhocn', containerId: 'zhocn:item', tableId: 'zhocn:item:title'
+    });
+    assert.equal(findTableInCatalog(catalog, 'engus:item:title', current), null);
+    assert.equal(findTableInCatalog(catalog, 'zhocn:menu:title', current), null);
   });
 });
 
@@ -160,14 +205,14 @@ describe('Negative source tests（TEXT-20B 五类失败覆盖）', () => {
     assert.match(panelSource, /parseStatus !== 'confirmed'/);
   });
 
-  it('3-A：界面不再画「N 槽 · M 有字」，语言下拉不强调容器数，筛选只按表名', () => {
+  it('3-A：界面不再画「N 槽 · M 有字」，筛选只按表名', () => {
     // HTML 不得含 槽 / 有字（SSR 骨架层面即可拦截，live 目录面由 e2e 覆盖）。
     const html = render();
     assert.doesNotMatch(html, /槽|有字/);
     // 源码不再有 formatSlotCount 与行尾 meta 槽/有字。
     assert.doesNotMatch(panelSource, /formatSlotCount/);
     assert.doesNotMatch(panelSource, /wb-row__meta/);
-    // 语言下拉不再强调容器数；筛选 placeholder 只按表名。
+    // 筛选 placeholder 只按表名。
     assert.doesNotMatch(panelSource, /containers\.length\} 容器/);
     assert.match(panelSource, /placeholder="筛选表名"/);
   });

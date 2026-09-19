@@ -16,9 +16,11 @@ import { CoreToolSession } from '../runtime/coreToolSession.js';
 import { disposeBridgeDaemonPool } from '../bridge/runBridge.js';
 import { KnowledgeStore } from '../knowledge/knowledgeStore.js';
 import { SqliteKnowledgeStorePersistence } from '../knowledge/sqliteKnowledgeStore.js';
+import { createManagedReferenceCursorStore } from '../references/referenceCursorStore.js';
 import { openWorkspaceDatabase } from '../storage/sqliteDatabase.js';
 import { WorkspaceDataRepository } from '../storage/workspaceDataRepository.js';
 import {
+  extractFileSymbolBundle,
   isNativeSemanticBundleCurrent,
   type SemanticCacheProvider
 } from '../workspace/semanticFileCache.js';
@@ -213,6 +215,21 @@ export async function openLocalCliSession(options: LocalCliSessionOptions): Prom
       backupBaseDir: join(root, 'backups'),
       recoveryDir: join(root, 'recovery'),
       coreSession,
+      referenceCursorStore: createManagedReferenceCursorStore(root),
+      onSemanticEvidenceUpdated: async (sourceUris) => {
+        if (!semanticCache || !sourceUris?.length) return;
+        const files = workspaceIndex.getFiles();
+        const sources = new Set(sourceUris.map((sourceUri) => (
+          workspaceIndex.getFile(sourceUri)?.sourceUri
+            ?? files.find((file) => file.absolutePath === sourceUri)?.sourceUri
+            ?? sourceUri
+        )));
+        for (const file of files) {
+          if (!sources.has(file.sourceUri)) continue;
+          const bundle = extractFileSymbolBundle(workspaceIndex, file.sourceUri);
+          if (isNativeSemanticBundleCurrent(file, bundle)) await semanticCache.save(file, bundle);
+        }
+      },
       ...(knowledgeStore ? { knowledgeStore } : {}),
       ...(!knowledgeStore ? { knowledgeStoreDiagnostic: 'CLI 持久知识数据库不可用。' } : {})
     }

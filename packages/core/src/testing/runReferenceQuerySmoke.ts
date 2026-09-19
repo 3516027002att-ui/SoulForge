@@ -136,6 +136,9 @@ check('decode/cursor-plus-target-conflict', decodeCode({
   target: { domain: 'emevd', sourceUri: 'workspace://ws/x.emevd.dcx', eventId: 1 }
 }) === 'REFERENCE_CURSOR_SCOPE_MISMATCH');
 check('decode/cursor-continuation-ok', decodeCode({ cursor: 'host-cursor-1' }) === 'ok');
+check('decode/source-cursor-on-new-query', decodeCode({ query: 'NpcParam 50800000', domain: 'param', sourceCursor: 'scan-1' }) === 'ok');
+check('decode/source-cursor-empty-rejected', decodeCode({ query: 'NpcParam 50800000', domain: 'param', sourceCursor: '' }) === 'REFERENCE_INVALID_INPUT');
+check('decode/source-cursor-result-cursor-conflict', decodeCode({ cursor: 'page-1', sourceCursor: 'scan-1' }) === 'REFERENCE_CURSOR_SCOPE_MISMATCH');
 check('decode/objectHandle-selector-only-key', decodeCode({
   target: { objectHandle: 'handle-1', extra: 'x' }
 }) === 'REFERENCE_INVALID_INPUT');

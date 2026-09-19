@@ -6,6 +6,7 @@ import { createDefaultToolRegistry, ToolRegistry, type ToolResult } from '../ai/
 import { WorkspaceIndex } from '../indexing/workspaceIndex.js';
 import { projectEvidenceClaims } from '../model-services/evidenceIdentity.js';
 import { encodeEvidenceClaims, expandEvidenceClaims } from '../model-services/evidenceTransport.js';
+import { createOpaqueCursor } from '@soulforge/shared';
 
 async function execute(result: ToolResult) {
   const registry = new ToolRegistry();
@@ -83,6 +84,195 @@ export async function runAgentToolEnvelopeSmoke(): Promise<void> {
   assert.doesNotMatch(verboseResult.content, /[A-Za-z]:[\\/][^/]/u);
   assert.deepEqual(verboseEnvelope.data.record.fields.map((field: { fieldId: string; value: number }) => [field.fieldId, field.value]),
     nativeFields.map(field => [field.fieldId, field.value]));
+
+  // Search projections must retain the content that made a candidate useful:
+  // text/URI, native row fields, and the exact event instruction plus typed
+  // arguments.  These are model-facing candidates, not proof receipts.
+  const contentRegistry = new ToolRegistry();
+  const textSourceUri = 'workspace://mods/msg/item.msgbnd#engus';
+  const paramSourceUri = 'file://param/gameparam.parambnd.dcx';
+  const eventSourceUri = 'workspace://mods/event/m11_00_00_00.emevd.dcx';
+  contentRegistry.register({
+    name: 'search_text_entries', description: 'text search fixture', permission: 'read',
+    run: () => ({ ok: true, data: [{
+      item: {
+        uri: `${textSourceUri}#text/1001`, sourceUri: textSourceUri, category: 'item',
+        textId: 1001, entryIndex: 4, language: 'engus', text: '葫芦种子',
+        confidence: 'high'
+      },
+      score: 0.98, highlights: ['葫芦种子']
+    }] })
+  });
+  contentRegistry.register({
+    name: 'search_param_rows', description: 'param search fixture', permission: 'read',
+    run: () => ({ ok: true, data: [{
+      item: {
+        uri: `${paramSourceUri}#NpcParam/4400`, sourceUri: paramSourceUri,
+        paramName: 'NpcParam', entryName: 'NpcParam.param', entryIndex: 0,
+        rowId: 4400, rowIndex: 12, rowName: '葫芦种子',
+        fields: [{ fieldId: 'hp', name: 'HP', type: 'int32', description: '生命值', value: 100 }]
+      },
+      score: 0.91, highlights: ['rowName:葫芦种子']
+    }] })
+  });
+  contentRegistry.register({
+    name: 'search_events', description: 'event search fixture', permission: 'read',
+    run: () => ({ ok: true, data: {
+      query: 'DisplayBossHealthBar', authority: 'native-read-event-search',
+      matches: [{
+        sourceUri: eventSourceUri, eventId: 1000, instructionIndex: 7,
+        instruction: {
+          index: 7, bank: 2003, id: 5, unknown: false,
+          emedfName: 'DisplayBossHealthBar', argsBase64: 'AQ==',
+          typedArgs: [{ name: 'display', type: 'bool', value: true, parameterSymbol: 'BossHealth' }],
+          diagnostics: []
+        }, authority: 'native-read-event'
+      }], total: 1, offset: 0, limit: 20, returned: 1, truncated: false
+    } })
+  });
+  const referenceCursor = 'rf1:{"offset":1}';
+  contentRegistry.register({
+    name: 'find_references', description: 'reference page fixture', permission: 'analyze',
+    inputSchema: { uri: 'string?', cursor: 'string?' },
+    run: (input) => ({ ok: true, data: {
+      resolution: 'resolved',
+      relations: [{
+        relationId: 'rel-1', relationKind: 'calls_event', certainty: 'confirmed', path: [],
+        from: { workspaceId: 'fixture', domain: 'emevd', sourceUri: eventSourceUri, eventId: 1000 },
+        to: { workspaceId: 'fixture', domain: 'fmg', sourceUri: textSourceUri, textId: 1001 },
+        evidence: [{ sourceUri: eventSourceUri, statement: {
+          kind: 'native-rendered', text: 'DisplayBossHealthBar(1001)',
+          location: { instructionIndex: 7 }
+        } }]
+      }],
+      coverage: { scope: 'workspace-bundle', status: 'complete', domains: [], predicateComplete: true, negativeConclusionAllowed: true },
+      nextActions: [], diagnostics: [],
+      page: { returnedCount: 1, hasMore: typeof (input as Record<string, unknown>).cursor === 'string', ...(typeof (input as Record<string, unknown>).cursor === 'string' ? { nextCursor: referenceCursor } : {}) }
+    } })
+  });
+  const luaSourceUri = 'workspace://mods/script/test.luabnd.dcx';
+  const luaSourceHash = 'l'.repeat(64);
+  const luaCursor = createOpaqueCursor({
+    sessionId: 'source-text-v1', offset: 120, sourceHash: 'lua-page-fingerprint',
+    domain: 'script', scope: JSON.stringify({ sourceKey: `${luaSourceUri}!/test.lua`, limit: 120 })
+  });
+  const luaFirstText = 'function test()\n' + '  print("😀")\n'.repeat(55);
+  const luaSecondText = 'return true\n';
+  const luaRegistry = contentRegistry;
+  luaRegistry.register({
+    name: 'read_luabnd_script', description: 'lua read fixture', permission: 'read',
+    inputSchema: { file: 'string', childPath: 'string?', sourceOffset: 'safe-integer?', sourceLimit: 'safe-integer?', cursor: 'string?' },
+    run: (input) => {
+      const hasCursor = typeof (input as Record<string, unknown>).cursor === 'string';
+      const sourceText = hasCursor ? luaSecondText : luaFirstText;
+      const offset = hasCursor ? 120 : 0;
+      const total = luaFirstText.length + luaSecondText.length;
+      return { ok: true, data: {
+        containerPath: luaSourceUri, childPath: 'test.lua', sourceUri: luaSourceUri,
+        offset, limit: 120, total, totalCount: total, returned: sourceText.length,
+        returnedCount: sourceText.length, truncated: !hasCursor, hasMore: !hasCursor,
+        sourceTextComplete: false,
+        ...(hasCursor ? {} : { nextCursor: luaCursor }),
+        script: {
+          sanitizedName: 'test.lua', sourceText, textPreview: hasCursor ? undefined : 'function test()',
+          sourceHash: luaSourceHash, outerFileHash: 'o'.repeat(64), contentKind: 'source',
+          isBytecode: false, size: sourceText.length, uncompressedSize: total,
+          embeddedSymbols: [], magic: 'TEXT', variant: 'source', isPlainText: true
+        }
+      } };
+    }
+  });
+  const contentBridge = createAgentToolBridge({
+    registry: contentRegistry,
+    context: { workspaceIndex: null, mode: 'plan' }
+  });
+  const textSearch = await contentBridge.executeTool({ id: 'text-search', name: 'search_text_entries', argumentsJson: '{"query":"葫芦种子"}' });
+  assert.equal(textSearch.ok, true, textSearch.content);
+  const textSearchEnvelope = JSON.parse(textSearch.content);
+  assert.equal(textSearchEnvelope.data.items[0].item.text, '葫芦种子');
+  assert.equal(textSearchEnvelope.data.items[0].item.sourceUri, textSourceUri);
+  assert.equal(textSearchEnvelope.data.items[0].item.entryIndex, 4);
+  assert.deepEqual(textSearchEnvelope.data.items[0].highlights, ['葫芦种子']);
+  const paramSearch = await contentBridge.executeTool({ id: 'param-search', name: 'search_param_rows', argumentsJson: '{"query":"葫芦种子"}' });
+  assert.equal(paramSearch.ok, true, paramSearch.content);
+  const paramSearchEnvelope = JSON.parse(paramSearch.content);
+  assert.equal(paramSearchEnvelope.data.items[0].item.rowId, 4400);
+  assert.equal(paramSearchEnvelope.data.items[0].item.uri, `${paramSourceUri}#NpcParam/4400`);
+  assert.equal(paramSearchEnvelope.data.items[0].item.fields[0].fieldId, 'hp');
+  assert.equal(paramSearchEnvelope.data.items[0].item.fields[0].value, 100);
+  const eventSearch = await contentBridge.executeTool({ id: 'event-search', name: 'search_events', argumentsJson: '{"query":"DisplayBossHealthBar"}' });
+  assert.equal(eventSearch.ok, true, eventSearch.content);
+  const eventSearchEnvelope = JSON.parse(eventSearch.content);
+  assert.equal(eventSearchEnvelope.data.record.matches[0].instructionIndex, 7);
+  assert.equal(eventSearchEnvelope.data.record.matches[0].instruction.typedArgs[0].parameterSymbol, 'BossHealth');
+  assert.equal(eventSearchEnvelope.data.record.matches[0].instruction.emedfName, 'DisplayBossHealthBar');
+  const referenceSearch = await contentBridge.executeTool({ id: 'reference-search', name: 'find_references', argumentsJson: JSON.stringify({ cursor: referenceCursor }) });
+  assert.equal(referenceSearch.ok, true, referenceSearch.content);
+  const referenceSearchEnvelope = JSON.parse(referenceSearch.content);
+  assert.equal(referenceSearchEnvelope.data.record.relations[0].content.text, 'DisplayBossHealthBar(1001)');
+  assert.equal(referenceSearchEnvelope.data.record.relations[0].evidence, undefined);
+  assert.equal(referenceSearchEnvelope.data.record.page.nextCursor, referenceCursor);
+  assert.equal(referenceSearchEnvelope.truncated, true);
+  assert.deepEqual(referenceSearchEnvelope.evidence.sourceHashes, []);
+  assert.deepEqual(referenceSearchEnvelope.evidence.sourceRevisions, []);
+  const pagingRegistry = new ToolRegistry();
+  const longCursor = createOpaqueCursor({ sessionId: 'content-search-v1', offset: 1, sourceHash: 'search-hash', domain: 'fmg', scope: 'scope:'.repeat(80) });
+  pagingRegistry.register({ name: 'search_text_entries', description: 'paged content', permission: 'read', run: () => ({ ok: true, data: {
+    matches: [{ item: { textId: 1, text: '命中内容' } }], total: 9, offset: 0, limit: 1, returned: 1, truncated: true,
+    nextCursor: longCursor, nextActions: [{ tool: 'search_text_entries', args: { cursor: longCursor }, reason: '下一页' }]
+  } }) });
+  const pagingBridge = createAgentToolBridge({ registry: pagingRegistry, context: { workspaceIndex: null, mode: 'plan' } });
+  const paged = await pagingBridge.executeTool({ id: 'paging-contract', name: 'search_text_entries', argumentsJson: '{}' });
+  assert.equal(paged.ok, true, paged.content);
+  const pagedEnvelope = JSON.parse(paged.content);
+  assert.equal(pagedEnvelope.data.record.nextCursor, longCursor);
+  assert.equal(pagedEnvelope.data.record.nextActions[0].args.cursor, longCursor);
+  assert.equal(pagedEnvelope.pagination.cursors.nextCursor, longCursor);
+  assert.deepEqual(pagedEnvelope.pagination.continuationParams, { cursor: longCursor });
+  const luaFirst = await contentBridge.executeTool({
+    id: 'lua-first', name: 'read_luabnd_script',
+    argumentsJson: JSON.stringify({ file: luaSourceUri, childPath: 'test.lua' })
+  });
+  assert.equal(luaFirst.ok, true, luaFirst.content);
+  const luaFirstEnvelope = JSON.parse(luaFirst.content);
+  assert.ok(['windowed', 'partial'].includes(luaFirstEnvelope.completeness));
+  assert.equal(luaFirstEnvelope.truncated, true);
+  assert.equal(luaFirstEnvelope.data.record.script.sourceText, luaFirstText);
+  assert.doesNotMatch(luaFirstEnvelope.data.record.script.sourceText, /…$/u);
+  assert.equal(luaFirstEnvelope.data.record.sourceTextComplete, false);
+  assert.equal(luaFirstEnvelope.pagination.cursors.nextCursor, luaCursor);
+  const luaSecond = await contentBridge.executeTool({
+    id: 'lua-second', name: 'read_luabnd_script',
+    argumentsJson: JSON.stringify({ file: luaSourceUri, childPath: 'test.lua', cursor: luaCursor })
+  });
+  assert.equal(luaSecond.ok, true, luaSecond.content);
+  const luaSecondEnvelope = JSON.parse(luaSecond.content);
+  assert.equal(luaSecondEnvelope.data.record.script.sourceText, luaSecondText);
+  assert.equal(luaSecondEnvelope.data.record.script.sourceText.endsWith('…'), false);
+
+  // A complete native EMEVD body that is too large for one model envelope
+  // must not be returned as a 421-character "complete" DSL receipt.
+  contentRegistry.register({
+    name: 'read_emevd_event', description: 'event read fixture', permission: 'read',
+    inputSchema: { file: 'string', eventId: 'safe-integer', format: 'string?' },
+    run: () => ({ ok: true, data: {
+      sourceUri: eventSourceUri, sourcePath: eventSourceUri, filePath: eventSourceUri,
+      eventId: 1000, resourceKind: 'event', game: 'sekiro', format: 'darkscript',
+      sourceHash: 'e'.repeat(64), outerFileHash: 'f'.repeat(64), sourceRevision: 9,
+      registryFingerprint: 'registry-fixture', instructionCount: 2, total: 2,
+      offset: 0, limit: 256, returned: 2, truncated: false, darkScriptComplete: true,
+      readRange: { start: 0, end: 2 },
+      darkScript: '$Event(1000, {\n' + '  DisplayBossHealthBar(1001),\n'.repeat(500) + '})',
+      instructions: [{ index: 0, bank: 2003, id: 5, unknown: false, emedfName: 'DisplayBossHealthBar', typedArgs: [], diagnostics: [] },
+        { index: 1, bank: 2003, id: 6, unknown: false, emedfName: 'End', typedArgs: [], diagnostics: [] }], diagnostics: []
+    } })
+  });
+  const longEvent = await contentBridge.executeTool({ id: 'long-event', name: 'read_emevd_event', argumentsJson: JSON.stringify({ file: eventSourceUri, eventId: 1000 }) });
+  assert.equal(longEvent.ok, false, longEvent.content);
+  assert.equal(longEvent.code, 'RESULT_EVENT_WINDOW_TOO_LARGE');
+  assert.equal(JSON.parse(longEvent.content).error.details.completeness, 'windowed');
+  assert.equal(JSON.parse(longEvent.content).error.details.truncated, true);
+  assert.doesNotMatch(longEvent.content, /complete_native_dsl/u);
 
   const index = new WorkspaceIndex('stats-summary-fixture');
   const sourceVersions = Array.from({ length: 128 }, (_, i) => ({

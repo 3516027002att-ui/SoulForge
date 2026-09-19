@@ -10,7 +10,8 @@ import {
   libraryDisplayName,
   paramLibraryGroups,
   pickPreferredAnimation,
-  pickPreferredParamContainer
+  pickPreferredParamContainer,
+  textLibraryLanguage
 } from './domainLibraries.js';
 
 describe('domainLibraries', () => {
@@ -62,6 +63,15 @@ describe('domainLibraries', () => {
     assert.equal(libraryDisplayName('event/common.emevd'), 'common');
     assert.equal(libraryDisplayName('chr/c5030/c5030.anibnd.dcx'), 'c5030');
     assert.equal(libraryDisplayName('action/c5030.tae'), 'c5030');
+  });
+
+  it('文本库用 msg 后的语言目录区分同名 item/menu，兼容两种路径分隔符', () => {
+    assert.equal(textLibraryLanguage('msg/engus/item.msgbnd.dcx'), 'engus');
+    assert.equal(textLibraryLanguage('msg/zhocn/menu.msgbnd.dcx'), 'zhocn');
+    assert.equal(textLibraryLanguage('msg\\jpnjp\\item.msgbnd.dcx'), 'jpnjp');
+    assert.equal(textLibraryLanguage('msg/engus/menu/title.fmg'), 'engus');
+    assert.equal(textLibraryLanguage('msg/item.msgbnd.dcx'), null);
+    assert.equal(textLibraryLanguage('event/common.emevd.dcx'), null);
   });
 
   it('T3+S39：动作域侧栏列 anibnd|tae 与 action/ 下的 hks，esd/behbnd/chrbnd 不进动作', () => {

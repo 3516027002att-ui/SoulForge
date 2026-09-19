@@ -41,6 +41,7 @@ import {
   type ToolRegistry,
   type ToolResult
 } from './toolRegistry.js';
+import { projectReferenceSearchPage } from '../references/referencePageProjection.js';
 import type { NativeReadProofStore } from '../editing/nativeReadProofStore.js';
 import {
   emevdDeliveredRead,
@@ -122,6 +123,11 @@ const DISCOVERY_QUERY_TOOLS = new Set([
   'retrieve_evidence',
   'list_luabnd_scripts'
 ]);
+// Reference-query cursors are owned by referenceQueryService (for example
+// `rf1:...`).  They are deliberately outside the generic native cursor
+// grammar used by the other read tools; the bridge must pass them through so
+// the service can decode and validate its own continuation state.
+const REFERENCE_QUERY_TOOLS = new Set(['find_references']);
 const PROPOSAL_TOOLS = new Set(['propose_text_patch', 'propose_plaintext_script_edit', 'build_patch_graph']);
 const VALIDATION_TOOLS = new Set(['validate_patch', 'assess_edit_risk']);
 const MUTATION_TOOLS = new Set([
@@ -260,7 +266,7 @@ const DISCOVERY_ARRAY_KEYS = new Set([
   'results', 'fields', 'instructions', 'topics', 'models', 'scripts',
   'candidates', 'candidateSet', 'identityChains', 'verifiedEdges', 'pendingEdges',
   'edges', 'hypotheses', 'coverageByDomain', 'nextReadPlan', 'progress',
-  'blockedReasons', 'attemptedRoutes', 'mutationTargets', 'diagnostics'
+  'blockedReasons', 'attemptedRoutes', 'mutationTargets', 'diagnostics', 'nextActions'
 ]);
 const DISCOVERY_DETAIL_KEYS = new Set([
   'id', 'uri', 'sourceUri', 'sourcePath', 'relativePath', 'symbolUri', 'chunkId',
@@ -292,12 +298,186 @@ const DISCOVERY_DETAIL_KEYS = new Set([
 const DISCOVERY_ITEM_LIMIT = 6;
 const DISCOVERY_NESTED_ARRAY_LIMIT = 8;
 const DISCOVERY_STRING_LIMIT = 420;
+const DISCOVERY_CONTENT_LIMIT = 2_048;
+const DISCOVERY_INSTRUCTION_LIMIT = 32;
+
+const DISCOVERY_CONTENT_KEYS = new Set([
+  'text', 'body', 'content', 'excerpt', 'snippet', 'fragment', 'statement',
+  'instructionText', 'sourceText', 'darkScript', 'matchText', 'context', 'reason',
+  'matchReason', 'associationReason', 'why'
+]);
+
+function projectDiscoveryContent(value: unknown, key: string): unknown {
+  if (typeof value !== 'string') return summarizeDiscoveryChild(value, 1);
+  const masked = maskPathFragments(value);
+  if (!DISCOVERY_CONTENT_KEYS.has(key)) return compactDiscoveryScalar(masked);
+  return masked.length > DISCOVERY_CONTENT_LIMIT
+    ? `${utf8CodepointPrefix(masked, DISCOVERY_CONTENT_LIMIT)}…`
+    : masked;
+}
+
+function projectDiscoveryTypedArgs(value: unknown): unknown {
+  if (!Array.isArray(value)) return undefined;
+  return value.slice(0, DISCOVERY_INSTRUCTION_LIMIT).map((item) => {
+    if (!item || typeof item !== 'object' || Array.isArray(item)) return item;
+    const source = item as Record<string, unknown>;
+    const output: Record<string, unknown> = {};
+    for (const key of ['name', 'type', 'value', 'parameterSymbol', 'role', 'roleSource', 'argIndex', 'confidence']) {
+      if (!(key in source)) continue;
+      output[key] = DISCOVERY_CONTENT_KEYS.has(key)
+        ? projectDiscoveryContent(source[key], key)
+        : summarizeDiscoveryChild(source[key], 1);
+    }
+    return output;
+  });
+}
+
+function projectDiscoveryInstruction(value: unknown): Record<string, unknown> | unknown {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return value;
+  const source = value as Record<string, unknown>;
+  const output: Record<string, unknown> = {};
+  for (const key of [
+    'index', 'instructionIndex', 'bank', 'id', 'unknown', 'name', 'category',
+    'emedfName', 'argsBase64', 'authority', 'byteRange', 'location', 'span'
+  ]) {
+    if (!(key in source)) continue;
+    output[key] = key === 'location' || key === 'span'
+      ? summarizeDiscoveryValue(source[key], 4, 1)
+      : summarizeDiscoveryChild(source[key], 1);
+  }
+  const typedArgs = projectDiscoveryTypedArgs(source.typedArgs ?? source.args);
+  if (typedArgs !== undefined) output.typedArgs = typedArgs;
+  for (const key of ['text', 'statement', 'fragment', 'sourceText', 'darkScript']) {
+    if (key in source) output[key] = projectDiscoveryContent(source[key], key);
+  }
+  if (Array.isArray(source.diagnostics)) {
+    output.diagnostics = source.diagnostics.slice(0, DISCOVERY_NESTED_ARRAY_LIMIT)
+      .map((item) => summarizeDiscoveryItem(item));
+    if (source.diagnostics.length > DISCOVERY_NESTED_ARRAY_LIMIT) output.diagnosticsTruncated = true;
+  }
+  return output;
+}
+
+function projectDiscoveryFields(value: unknown): unknown {
+  if (!Array.isArray(value)) return undefined;
+  return value.slice(0, DISCOVERY_INSTRUCTION_LIMIT).map((item) => {
+    if (!item || typeof item !== 'object' || Array.isArray(item)) return item;
+    const source = item as Record<string, unknown>;
+    const output: Record<string, unknown> = {};
+    for (const key of ['fieldId', 'name', 'type', 'description', 'value', 'refs', 'refsRejected', 'refsProvenance']) {
+      if (!(key in source)) continue;
+      output[key] = key === 'description'
+        ? projectDiscoveryContent(source[key], key)
+        : summarizeDiscoveryChild(source[key], 1);
+    }
+    return output;
+  });
+}
+
+function projectDiscoveryCalls(value: unknown): unknown {
+  if (!Array.isArray(value)) return undefined;
+  return value.slice(0, DISCOVERY_INSTRUCTION_LIMIT).map((item) => {
+    if (!item || typeof item !== 'object' || Array.isArray(item)) return item;
+    const source = item as Record<string, unknown>;
+    const output: Record<string, unknown> = {};
+    for (const key of ['statementIndex', 'callee', 'literalArgs', 'hasDynamicArg', 'resolution', 'span']) {
+      if (!(key in source)) continue;
+      output[key] = key === 'span'
+        ? summarizeDiscoveryValue(source[key], 4, 1)
+        : summarizeDiscoveryChild(source[key], 1);
+    }
+    return output;
+  });
+}
+
+function projectDiscoveryAction(value: unknown): unknown {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return value;
+  const source = value as Record<string, unknown>;
+  return {
+    ...(typeof source.tool === 'string' ? { tool: source.tool } : {}),
+    ...(source.args && typeof source.args === 'object' && !Array.isArray(source.args)
+      ? { args: source.args }
+      : {}),
+    ...(typeof source.reason === 'string' ? { reason: projectDiscoveryContent(source.reason, 'reason') } : {})
+  };
+}
+
+function projectDiscoveryMatch(value: unknown, context?: ToolContext): unknown {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return value;
+  const source = value as Record<string, unknown>;
+  const symbolKey = source.item !== undefined ? 'item'
+    : source.row !== undefined ? 'row'
+      : source.event !== undefined ? 'event'
+        : source.entity !== undefined ? 'entity'
+          : source.entry !== undefined ? 'entry'
+            : source.chunk !== undefined ? 'chunk'
+              : source.symbol !== undefined ? 'symbol' : undefined;
+  const symbol = symbolKey === undefined ? undefined : source[symbolKey];
+  const output: Record<string, unknown> = {};
+  for (const key of [
+    'score', 'highlights', 'reason', 'reasons', 'matchReason', 'associationReason',
+    'context', 'statement', 'location', 'position', 'span', 'sourceUri', 'uri', 'instructionIndex',
+    'line', 'column', 'startLine', 'endLine', 'startColumn', 'endColumn',
+    'authority', 'confidence'
+  ]) {
+    if (!(key in source)) continue;
+    if (key === 'sourceUri' || key === 'uri') {
+      const uri = modelFacingLogicalUri(source[key], context);
+      if (uri) output[key] = uri;
+    } else if (key === 'context' || key === 'statement' || key === 'reason' || key === 'matchReason' || key === 'associationReason') {
+      output[key] = projectDiscoveryContent(source[key], key);
+    } else if (key === 'location' || key === 'position' || key === 'span') {
+      output[key] = summarizeDiscoveryValue(source[key], 4, 1);
+    } else {
+      output[key] = summarizeDiscoveryChild(source[key], 1);
+    }
+  }
+  if (symbol !== undefined && symbolKey !== undefined) output[symbolKey] = modelFacingSymbol(symbol, context);
+  if (source.instruction !== undefined) output.instruction = projectDiscoveryInstruction(source.instruction);
+  if (source.typedArgs !== undefined) output.typedArgs = projectDiscoveryTypedArgs(source.typedArgs);
+  return Object.keys(output).length > 0 ? output : modelFacingSymbol(source, context);
+}
+
+/**
+ * The reference service still returns its host-side ReferencePageRecord to
+ * ToolRegistry.  Project it exactly once at the Agent boundary.  A page that
+ * already contains public `content` relations is left untouched so a later
+ * service/toolRegistry adapter cannot lose paths or issue a second budget
+ * projection.
+ */
+function projectReferenceForAgent(value: unknown): unknown {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return value;
+  const record = value as Record<string, unknown>;
+  const relations = Array.isArray(record.relations) ? record.relations : [];
+  const internalRelation = relations.some((relation) => (
+    relation && typeof relation === 'object' && !Array.isArray(relation)
+    && (Array.isArray((relation as Record<string, unknown>).evidence)
+      || Object.prototype.hasOwnProperty.call(relation, 'ruleName'))
+  ));
+  const coverage = record.coverage && typeof record.coverage === 'object' && !Array.isArray(record.coverage)
+    ? record.coverage as Record<string, unknown>
+    : undefined;
+  const internalCoverage = Array.isArray(coverage?.domains)
+    && coverage.domains.some((domain) => (
+      domain && typeof domain === 'object' && !Array.isArray(domain)
+      && (Array.isArray((domain as Record<string, unknown>).unscannedSources)
+        || Array.isArray((domain as Record<string, unknown>).failedSources))
+    ));
+  const isInternal = internalRelation
+    || internalCoverage
+    || Object.prototype.hasOwnProperty.call(record, 'targetRead')
+    || Object.prototype.hasOwnProperty.call(record, 'detail');
+  if (!isInternal) return value;
+  return projectReferenceSearchPage(value as Parameters<typeof projectReferenceSearchPage>[0]);
+}
 
 function modelFacingLogicalUri(value: unknown, context?: ToolContext): string | undefined {
   if (typeof value !== 'string' || value.trim() === '') return undefined;
+  const logical = modelFacingSourceUri(value);
+  if (logical && /^[A-Za-z][A-Za-z0-9+.-]*:\/\//u.test(logical)) return logical;
   const relative = modelFacingRelativePath(value, context);
   if (relative) return relative;
-  return modelFacingSourceUri(value) ?? compactDiscoveryScalar(value) as string;
+  return logical ?? compactDiscoveryScalar(value) as string;
 }
 
 function projectEntitySnapshot(value: unknown, context?: ToolContext): Record<string, unknown> | undefined {
@@ -437,7 +617,7 @@ function summarizeDiscoveryValue(value: unknown, itemLimit = DISCOVERY_ITEM_LIMI
   const output: Record<string, unknown> = {};
   for (const [key, child] of Object.entries(record)) {
     if (DISCOVERY_ARRAY_KEYS.has(key) && Array.isArray(child)) {
-      output[key] = child.slice(0, itemLimit).map((item) => summarizeDiscoveryItem(item, depth + 1));
+      output[key] = child.slice(0, itemLimit).map((item) => key === 'nextActions' ? projectDiscoveryAction(item) : summarizeDiscoveryItem(item, depth + 1));
       output[`${key}ReturnedCount`] = Math.min(child.length, itemLimit);
       output[`${key}TotalCount`] = child.length;
       if (child.length > itemLimit) output[`${key}Truncated`] = true;
@@ -474,6 +654,7 @@ function summarizeDiscoveryChild(value: unknown, depth: number): unknown {
 
 function compactDiscoveryScalar(value: unknown): unknown {
   if (typeof value === 'string') {
+    if (value.startsWith('sf_cur_') || value.startsWith('rf2_')) return value;
     const masked = maskPathFragments(value);
     return masked.length > DISCOVERY_STRING_LIMIT
       ? `${utf8CodepointPrefix(masked, DISCOVERY_STRING_LIMIT)}…`
@@ -516,6 +697,15 @@ function modelFacingSymbol(value: unknown, context?: ToolContext): Record<string
   if (!value || typeof value !== 'object' || Array.isArray(value)) return {};
   const source = value as Record<string, unknown>;
   const output: Record<string, unknown> = {};
+  for (const key of ['id', 'uri']) {
+    if (typeof source[key] !== 'string' && typeof source[key] !== 'number') continue;
+    if (key === 'uri') {
+      const uri = modelFacingLogicalUri(source[key], context);
+      if (uri) output.uri = uri;
+    } else {
+      output[key] = source[key];
+    }
+  }
   const sourceUri = modelFacingSourceUri(source.sourceUri);
   if (sourceUri) output.sourceUri = sourceUri;
   const relativePath = modelFacingRelativePath(source.relativePath ?? source.sourceUri ?? source.sourcePath, context);
@@ -541,7 +731,51 @@ function modelFacingSymbol(value: unknown, context?: ToolContext): Record<string
       output[key] = typeof child === 'string' ? compactDiscoveryScalar(child) : child;
     }
   }
-  if (Array.isArray(source.instructions)) output.instructionCount = source.instructions.length;
+  for (const key of [
+    'text', 'body', 'content', 'excerpt', 'snippet', 'fragment', 'instructionText',
+    'sourceText', 'darkScript', 'matchText', 'statement', 'context', 'reason', 'matchReason',
+    'associationReason', 'why'
+  ]) {
+    if (key in source && source[key] !== undefined && source[key] !== null) {
+      output[key] = projectDiscoveryContent(source[key], key);
+      if (typeof source[key] === 'string'
+        && DISCOVERY_CONTENT_KEYS.has(key)
+        && source[key].length > DISCOVERY_CONTENT_LIMIT) {
+        output[`${key}Truncated`] = true;
+      }
+    }
+  }
+  for (const key of [
+    'instructionIndex', 'line', 'column', 'startLine', 'endLine', 'startColumn',
+    'endColumn', 'offset', 'length', 'entryIndex', 'rowIndex', 'index', 'position',
+    'location', 'span', 'reason', 'reasons', 'relationKind', 'certainty', 'ruleId'
+  ]) {
+    if (!(key in source)) continue;
+    if (key === 'reason' && output.reason !== undefined) continue;
+    if (key === 'location' || key === 'span' || key === 'position') {
+      output[key] = summarizeDiscoveryValue(source[key], 4, 1);
+    } else {
+      output[key] = summarizeDiscoveryChild(source[key], 1);
+    }
+  }
+  const fields = projectDiscoveryFields(source.fields);
+  if (fields !== undefined) {
+    output.fields = fields;
+    if (Array.isArray(source.fields) && source.fields.length > DISCOVERY_INSTRUCTION_LIMIT) {
+      output.fieldsTruncated = true;
+      output.fieldsTotalCount = source.fields.length;
+    }
+  }
+  if (source.instruction !== undefined) output.instruction = projectDiscoveryInstruction(source.instruction);
+  if (source.typedArgs !== undefined) output.typedArgs = projectDiscoveryTypedArgs(source.typedArgs);
+  const calls = projectDiscoveryCalls(source.calls);
+  if (calls !== undefined) output.calls = calls;
+  if (Array.isArray(source.instructions)) {
+    output.instructions = source.instructions.slice(0, DISCOVERY_INSTRUCTION_LIMIT)
+      .map((instruction) => projectDiscoveryInstruction(instruction));
+    output.instructionCount = source.instructions.length;
+    if (source.instructions.length > DISCOVERY_INSTRUCTION_LIMIT) output.instructionsTruncated = true;
+  }
   if (Array.isArray(source.events)) output.eventCount = source.events.length;
   if (Array.isArray(source.fields)) output.fieldCount = source.fields.length;
   if (Array.isArray(source.calls)) output.callCount = source.calls.length;
@@ -552,45 +786,16 @@ function projectDiscoveryForAgent(name: string, value: unknown, context?: ToolCo
   if (!DISCOVERY_TOOLS.has(name)) return value;
   if (name === 'resolve_entity') return projectEntityResolutionForAgent(value, context);
   if (Array.isArray(value)) {
-    return value.map((item) => {
-      if (!item || typeof item !== 'object' || Array.isArray(item)) return item;
-      const record = item as Record<string, unknown>;
-      const symbol = record.item ?? record.row ?? record.event ?? record.entity ?? record.entry ?? record.chunk;
-      if (symbol !== undefined) {
-        return {
-          ...(typeof record.score === 'number' ? { score: record.score } : {}),
-          ...(record.highlights !== undefined ? { highlights: record.highlights } : {}),
-          item: modelFacingSymbol(symbol, context)
-        };
-      }
-      return modelFacingSymbol(record, context);
-    });
+    return value.map((item) => projectDiscoveryMatch(item, context));
   }
   if (!value || typeof value !== 'object') return value;
   const record = value as Record<string, unknown>;
   const output: Record<string, unknown> = {};
   for (const [key, child] of Object.entries(record)) {
     if (DISCOVERY_ARRAY_KEYS.has(key) && Array.isArray(child)) {
-      output[key] = child.slice(0, DISCOVERY_ITEM_LIMIT).map((item) => {
-        if (!item || typeof item !== 'object' || Array.isArray(item)) {
-          return item;
-        }
-        const itemRecord = item as Record<string, unknown>;
-        const symbol = itemRecord.item
-          ?? itemRecord.row
-          ?? itemRecord.event
-          ?? itemRecord.entity
-          ?? itemRecord.entry
-          ?? itemRecord.chunk;
-        if (symbol !== undefined) {
-          return {
-            ...(typeof itemRecord.score === 'number' ? { score: itemRecord.score } : {}),
-            ...(itemRecord.highlights !== undefined ? { highlights: itemRecord.highlights } : {}),
-            item: modelFacingSymbol(symbol, context)
-          };
-        }
-        return modelFacingSymbol(item, context);
-      });
+      output[key] = child.slice(0, DISCOVERY_ITEM_LIMIT).map((item) => key === 'nextActions'
+        ? projectDiscoveryAction(item)
+        : projectDiscoveryMatch(item, context));
       output[`${key}ReturnedCount`] = Math.min(child.length, DISCOVERY_ITEM_LIMIT);
       output[`${key}TotalCount`] = child.length;
       if (child.length > DISCOVERY_ITEM_LIMIT) output[`${key}Truncated`] = true;
@@ -631,6 +836,14 @@ function projectNativeReadForAgent(name: string, value: unknown, context?: ToolC
       if (NATIVE_PATH_KEYS.has(key)) return modelFacingLogicalUri(node, context);
       if (key === 'workspaceId') return 'workspace://active';
       if (key === 'entryName' && /^[A-Za-z]:[\\/]/u.test(node)) return undefined;
+      // Native source bodies are already bounded by their reader (Lua/FMG
+      // sourceText windows or EMEVD instruction windows).  Applying the
+      // discovery scalar cap here turns a real body into an ellipsis and can
+      // make the outer receipt falsely appear complete.  Preserve the exact
+      // reader window; boundedToolContent handles the envelope budget with an
+      // explicit incomplete result when a host returns an unpaged body.
+      if (key === 'sourceText' || key === 'darkScript'
+        || (name === 'read_fmg_entries' && key === 'text')) return node;
       return compactDiscoveryScalar(node);
     }
     if (Array.isArray(node)) return node.map((item) => visit(item, key, depth + 1));
@@ -845,10 +1058,17 @@ function resultWindowMetadata(value: unknown): ResultWindowMetadata {
     return { total: null, offset: null, limit: null, returned: null, truncated: false };
   }
   const record = value as Record<string, unknown>;
-  const total = firstMetadataNumber(record, ['total', 'instructionCount', 'totalCount', 'totalHits']);
-  const offset = firstMetadataNumber(record, ['offset', 'instructionOffset']);
-  const limit = firstMetadataNumber(record, ['limit', 'instructionLimit']);
+  const page = record.page && typeof record.page === 'object' && !Array.isArray(record.page)
+    ? record.page as Record<string, unknown>
+    : undefined;
+  const total = firstMetadataNumber(record, ['total', 'instructionCount', 'totalCount', 'totalHits'])
+    ?? (page ? firstMetadataNumber(page, ['total', 'totalCount', 'totalHits']) : null);
+  const offset = firstMetadataNumber(record, ['offset', 'instructionOffset', 'sourceOffset'])
+    ?? (page ? firstMetadataNumber(page, ['offset', 'sourceOffset']) : null);
+  const limit = firstMetadataNumber(record, ['limit', 'instructionLimit', 'sourceLimit'])
+    ?? (page ? firstMetadataNumber(page, ['limit', 'sourceLimit']) : null);
   const returned = firstMetadataNumber(record, ['returned', 'returnedCount'])
+    ?? (page ? firstMetadataNumber(page, ['returned', 'returnedCount']) : null)
     ?? (Array.isArray(record.instructions)
       ? record.instructions.length
       : Array.isArray(record.items) ? record.items.length : null);
@@ -860,7 +1080,13 @@ function resultWindowMetadata(value: unknown): ResultWindowMetadata {
     offset,
     limit,
     returned,
-    truncated: typeof record.truncated === 'boolean' ? record.truncated : inferredTruncated
+    truncated: typeof record.truncated === 'boolean'
+      ? record.truncated
+      : record.hasMore === true
+        ? true
+        : typeof page?.truncated === 'boolean'
+          ? page.truncated
+          : page?.hasMore === true || inferredTruncated
   };
 }
 
@@ -1068,6 +1294,22 @@ function buildEvidenceMetadata(
   });
 }
 
+function buildReferenceEnvelopeEvidence(): AgentEvidenceMetadata {
+  // find_references already returns the public content-first projection from
+  // referencePageProjection.  Re-running generic evidence-claim expansion on
+  // that page would duplicate source identities/hashes and can push an
+  // otherwise valid relation page over the Agent budget.
+  return {
+    status: 'not_applicable',
+    kind: 'other',
+    sourceUris: [],
+    sourceHashes: [],
+    sourceRevisions: [],
+    nextActions: [],
+    repeatedQuery: false
+  };
+}
+
 function discoveryNextActions(name: string, repeatedQuery: boolean): string[] {
   if (repeatedQuery) {
     return [
@@ -1124,15 +1366,34 @@ function createResultEnvelope(
   const counts = collectionCounts(data);
   let continuationParams: Record<string, unknown> | undefined;
   if (window.truncated && window.offset !== null && window.returned !== null) {
-    continuationParams = {
-      instructionOffset: window.offset + window.returned,
-      instructionLimit: window.limit ?? window.returned,
-      offset: window.offset + window.returned,
-      limit: window.limit ?? window.returned
-    };
+    const nextOffset = window.offset + window.returned;
+    const nextLimit = window.limit ?? window.returned;
+    const sourceWindow = data && typeof data === 'object' && !Array.isArray(data)
+      ? data as Record<string, unknown>
+      : undefined;
+    const hasSourceWindow = sourceWindow !== undefined
+      && ('sourceTextComplete' in sourceWindow
+        || 'sourceOffset' in sourceWindow
+        || 'sourceLimit' in sourceWindow);
+    continuationParams = typeof sourceWindow?.nextCursor === 'string'
+      ? { cursor: sourceWindow.nextCursor }
+      : hasSourceWindow
+      ? {
+          sourceOffset: nextOffset,
+          sourceLimit: nextLimit,
+          offset: nextOffset,
+          limit: nextLimit,
+        }
+      : {
+          instructionOffset: nextOffset,
+          instructionLimit: nextLimit,
+          offset: nextOffset,
+          limit: nextLimit
+        };
   }
   const inferredCompleteness = inferResultCompleteness(data);
   const completeness: NativeReadCompleteness = completenessOverride
+    ?? (window.truncated && window.offset !== null ? 'windowed' : undefined)
     ?? inferredCompleteness
     ?? (window.truncated
       ? (window.offset !== null ? 'windowed' : 'partial')
@@ -1175,6 +1436,10 @@ function inferResultCompleteness(data: unknown): NativeReadCompleteness | undefi
       return;
     }
     const record = value as Record<string, unknown>;
+    if (record.sourceTextComplete === false || record.darkScriptComplete === false) {
+      incomplete = true;
+      return;
+    }
     if (typeof record.status === 'string' && incompleteStatuses.has(record.status)) {
       incomplete = true;
       return;
@@ -1214,8 +1479,7 @@ function compactIdentifiers(
 ): { ids: string[]; cursors: Record<string, string> } {
   return {
     ids: identifiers.ids.slice(0, 12).map((id) => id.slice(0, 160)),
-    cursors: Object.fromEntries(Object.entries(identifiers.cursors).slice(0, 8)
-      .map(([key, value]) => [key, value.slice(0, 160)]))
+    cursors: Object.fromEntries(Object.entries(identifiers.cursors).slice(0, 8))
   };
 }
 
@@ -2179,6 +2443,8 @@ function buildEmevdWindowTooLargeDetails(
   const canReduce = requestedLimit > 1;
   const suggestedLimit = canReduce ? Math.max(1, Math.floor(requestedLimit / 2)) : 1;
   const details: Record<string, unknown> = {
+    completeness: 'windowed',
+    truncated: true,
     sourceUri: firstRecordString([result, input], ['sourceUri']),
     sourcePath: firstRecordString([result, input], ['sourcePath', 'filePath']),
     file: firstRecordString([input, result], ['file']),
@@ -2222,6 +2488,52 @@ function buildEmevdWindowTooLargeDetails(
   return Object.fromEntries(Object.entries(details).filter(([, value]) => value !== undefined));
 }
 
+function nativeBodyExceedsBudget(name: string, value: unknown): boolean {
+  const bodyKeys = name === 'read_emevd_event'
+    ? new Set(['darkScript'])
+    : name === 'read_luabnd_script'
+      ? new Set(['sourceText'])
+      : name === 'read_fmg_entries'
+        ? new Set(['text'])
+        : new Set<string>();
+  if (bodyKeys.size === 0) return false;
+  const seen = new Set<object>();
+  const walk = (node: unknown, key = '', depth = 0): boolean => {
+    if (depth > 8 || node === null || typeof node !== 'object') {
+      return typeof node === 'string'
+        && bodyKeys.has(key)
+        && Buffer.byteLength(node, 'utf8') > MAX_BOUNDED_TOOL_RESULT_BYTES;
+    }
+    if (seen.has(node)) return false;
+    seen.add(node);
+    if (Array.isArray(node)) return node.some((item) => walk(item, key, depth + 1));
+    return Object.entries(node as Record<string, unknown>)
+      .some(([childKey, child]) => walk(child, childKey, depth + 1));
+  };
+  return walk(value);
+}
+
+function buildNativeBodyWindowDetails(name: string, data: unknown, input?: Record<string, unknown>): Record<string, unknown> {
+  const result = data && typeof data === 'object' && !Array.isArray(data)
+    ? data as Record<string, unknown>
+    : {};
+  const request = input ?? {};
+  const sourceOffset = firstRecordNumber([request, result], ['sourceOffset', 'offset', 'instructionOffset']) ?? 0;
+  const sourceLimit = firstRecordNumber([request, result], ['sourceLimit', 'limit', 'instructionLimit']) ?? 1;
+  const nextLimit = Math.max(1, Math.min(sourceLimit, Math.floor(sourceLimit / 2) || 1));
+  return {
+    completeness: 'windowed',
+    truncated: true,
+    sourceOffset,
+    sourceLimit,
+    suggestedSourceLimit: nextLimit,
+    retry: name === 'read_emevd_event'
+      ? { instructionOffset: sourceOffset, instructionLimit: nextLimit }
+      : { sourceOffset, sourceLimit: nextLimit },
+    ...(typeof result.nextCursor === 'string' ? { nextCursor: result.nextCursor } : {})
+  };
+}
+
 function boundedToolContent(
   name: string,
   data: unknown,
@@ -2234,9 +2546,12 @@ function boundedToolContent(
   // model-facing envelope must never serialize that raw projection first: it
   // can exceed V8's string limit before the byte budget has a chance to run.
   const originalData = data;
+  if (REFERENCE_QUERY_TOOLS.has(name)) data = projectReferenceForAgent(data);
   data = projectDiscoveryForAgent(name, data, context);
   data = projectNativeReadForAgent(name, data, context);
-  const evidence = buildEvidenceMetadata(name, data, repeatedQuery, context);
+  const evidence = REFERENCE_QUERY_TOOLS.has(name)
+    ? buildReferenceEnvelopeEvidence()
+    : buildEvidenceMetadata(name, data, repeatedQuery, context);
   let raw: string | null = null;
   try {
     raw = JSON.stringify({ ok: true, state, data: data ?? null, evidence });
@@ -2250,6 +2565,7 @@ function boundedToolContent(
   const identifiers = collectStableIdentifiers(data);
   const compactIdentity = compactIdentifiers(identifiers);
   const window = resultWindowMetadata(data);
+  const bodyExceedsBudget = nativeBodyExceedsBudget(name, originalData);
 
   // If identity itself exceeds the byte budget, fail fast without truncating hash or handle
   const identityJson = JSON.stringify({
@@ -2286,7 +2602,7 @@ function boundedToolContent(
   // one response.  Keep this before the raw fastpath: otherwise small/empty
   // events would be returned without `projection=complete_native_dsl` and
   // could never produce the host-side native proof that the write gate needs.
-  if (name === 'read_emevd_event' && !window.truncated) {
+  if (name === 'read_emevd_event' && !window.truncated && !bodyExceedsBudget) {
     const completeDsl = projectCompleteNativeEmevdDsl(data);
     if (completeDsl !== null) {
       const completeEnvelope = createResultEnvelope(
@@ -2304,6 +2620,13 @@ function boundedToolContent(
       if (Buffer.byteLength(encoded, 'utf8') <= MAX_BOUNDED_TOOL_RESULT_BYTES
         && encoded.length <= MAX_BOUNDED_TOOL_RESULT_CHARS) return encoded;
     }
+  }
+  if (bodyExceedsBudget && (name === 'read_luabnd_script' || name === 'read_fmg_entries')) {
+    return boundedFailureContent({
+      code: name === 'read_luabnd_script' ? 'RESULT_SCRIPT_WINDOW_TOO_LARGE' : 'RESULT_TEXT_WINDOW_TOO_LARGE',
+      message: '原生正文窗口超过 Agent 输出预算；请使用 sourceOffset/sourceLimit 或 cursor 继续读取，不能把截断正文当作完整读取。',
+      details: buildNativeBodyWindowDetails(name, originalData, input)
+    }, state === 'completed' ? 'failed' : state);
   }
 
   const byteBoundedByRaw = (BOUNDED_DISCOVERY_TOOLS.has(name) || rawBytes > MAX_BOUNDED_TOOL_RESULT_BYTES * 4)
@@ -2331,6 +2654,17 @@ function boundedToolContent(
     // limits; otherwise continue through the bounded projection below.
     if (Buffer.byteLength(encoded, 'utf8') <= MAX_BOUNDED_TOOL_RESULT_BYTES
       && encoded.length <= MAX_BOUNDED_TOOL_RESULT_CHARS) return encoded;
+  }
+  if (name === 'read_luabnd_script' || name === 'read_fmg_entries') {
+    // Do not fall through to summarizeDiscoveryValue: that projection would
+    // replace a native source/text body with a 421-character discovery
+    // excerpt.  Ask the reader for a smaller source window instead, keeping
+    // the incomplete boundary explicit and the write proof closed.
+    return boundedFailureContent({
+      code: name === 'read_luabnd_script' ? 'RESULT_SCRIPT_WINDOW_TOO_LARGE' : 'RESULT_TEXT_WINDOW_TOO_LARGE',
+      message: '原生正文窗口无法在 Agent 输出预算内完整交付；请使用 sourceOffset/sourceLimit 或 cursor 继续读取。',
+      details: buildNativeBodyWindowDetails(name, originalData, input)
+    }, state === 'completed' ? 'failed' : state);
   }
   const summaryText = truncationSummary(name, window, true) ?? '工具输出已截断；请继续分页查询。';
   if (name === 'read_param_fields' && data && typeof data === 'object' && !Array.isArray(data)) {
@@ -2360,6 +2694,35 @@ function boundedToolContent(
         message: '本次字段窗口在保留全部原生身份和字段值后仍超出输出预算；请减少 fieldIds 或 rowIds 分批读取。'
       }, state === 'completed' ? 'failed' : state);
     }
+  }
+  if (REFERENCE_QUERY_TOOLS.has(name)) {
+    // referenceQueryService owns its relation page projection and cursor
+    // grammar.  Preserve the projected relations verbatim; if the service
+    // ever hands us an over-budget page, fail closed instead of passing the
+    // generic discovery summarizer, which would silently drop relations.
+    const encoded = JSON.stringify(createResultEnvelope(
+      data,
+      rawLength,
+      window.truncated,
+      summaryText,
+      identifiers,
+      evidence,
+      window,
+      state
+    ));
+    if (Buffer.byteLength(encoded, 'utf8') <= MAX_BOUNDED_TOOL_RESULT_BYTES
+      && encoded.length <= MAX_BOUNDED_TOOL_RESULT_CHARS) return encoded;
+    return boundedFailureContent({
+      code: 'RESULT_REFERENCE_PAGE_TOO_LARGE',
+      message: '关联查询页超过 Agent 输出预算；已保留 reference service 的关系页边界，请使用其 cursor 或更小 limit 续读。',
+      details: {
+        completeness: window.truncated ? 'windowed' : 'partial',
+        truncated: true,
+        ...(typeof (data as Record<string, unknown> | null)?.nextCursor === 'string'
+          ? { nextCursor: (data as Record<string, unknown>).nextCursor }
+          : {})
+      }
+    }, state === 'completed' ? 'failed' : state);
   }
   if (name === 'read_emevd_event') {
     const completeDsl = window.truncated ? null : projectCompleteNativeEmevdDsl(data);
@@ -2534,7 +2897,7 @@ export function createAgentToolBridge(options: AgentToolBridgeOptions): AgentToo
     }
 
     // Validate cursor token if passed
-    if (typeof inputRec.cursor === 'string') {
+    if (typeof inputRec.cursor === 'string' && !REFERENCE_QUERY_TOOLS.has(call.name)) {
       try {
         parseOpaqueCursor(inputRec.cursor);
       } catch (err: any) {
@@ -2624,7 +2987,8 @@ export function createAgentToolBridge(options: AgentToolBridgeOptions): AgentToo
         && result.__hostResolvedEmevdEventTarget?.canonical === true
         && envelopeRecord?.projection === 'complete_native_dsl'
         && envelope.completeness === 'complete'
-        && envelope.truncated === false;
+        && envelope.truncated === false
+        && !hasExplicitIncompleteNativeBody(envelope.data);
       const proofStore = effectiveContext.nativeReadProofs ?? effectiveContext.coreSession?.proofStore;
       if (proofStore && (completeNativeDslEnvelope || isCompleteNativeEnvelope(envelope, call.name))) {
         try {
@@ -2937,15 +3301,26 @@ function recordAutomaticNativeReadProof(input: {
 }
 
 function isCompleteNativeEnvelope(
-  envelope: { completeness?: NativeReadCompleteness; truncated?: boolean },
+  envelope: { data?: unknown; completeness?: NativeReadCompleteness; truncated?: boolean },
   callName: string
 ): boolean {
   // The EMEVD complete DSL case has its own stricter predicate above. Other
   // native reads can be promoted only when their final model envelope did not
   // get paged or summarized; a partial page must never authorize a write.
+  if (hasExplicitIncompleteNativeBody(envelope.data)) return false;
   return callName !== 'read_emevd_event'
     && envelope.truncated === false
     && envelope.completeness === 'complete';
+}
+
+function hasExplicitIncompleteNativeBody(value: unknown, depth = 0, seen = new Set<object>()): boolean {
+  if (depth > 8 || value === null || typeof value !== 'object') return false;
+  if (seen.has(value)) return false;
+  seen.add(value);
+  if (Array.isArray(value)) return value.some((item) => hasExplicitIncompleteNativeBody(item, depth + 1, seen));
+  const record = value as Record<string, unknown>;
+  if (record.sourceTextComplete === false || record.darkScriptComplete === false) return true;
+  return Object.values(record).some((child) => hasExplicitIncompleteNativeBody(child, depth + 1, seen));
 }
 
 function registerNativeProofWatch(context: ToolContext, sourcePath: string): void {

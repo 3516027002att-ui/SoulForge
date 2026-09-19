@@ -1,5 +1,5 @@
 import { useState, type ReactElement } from 'react';
-import { libraryDisplayName, type DomainLibraryGroup } from './domainLibraries.js';
+import { isTextLibraryPath, libraryDisplayName, textLibraryLanguage, type DomainLibraryGroup } from './domainLibraries.js';
 
 export interface DomainLibraryItem {
   sourceUri: string;
@@ -31,17 +31,21 @@ function LibraryRow({
   selected: boolean;
   onSelect: (file: DomainLibraryItem) => void;
 }): ReactElement {
+  const name = libraryDisplayName(file.relativePath);
+  const isText = isTextLibraryPath(file.relativePath);
+  const language = textLibraryLanguage(file.relativePath);
+  const description = isText ? language : `${file.formatLabel} · ${file.relativePath}`;
   return (
     <button
       key={file.sourceUri}
       type="button"
       role="listitem"
       className={selected ? 'library-item is-selected' : 'library-item'}
-      title={file.relativePath}
+      title={isText ? [name, language].filter(Boolean).join(' · ') : file.relativePath}
       onClick={() => onSelect(file)}
     >
-      <span className="library-item__name">{libraryDisplayName(file.relativePath)}</span>
-      <small className="library-item__meta">{file.formatLabel} · {file.relativePath}</small>
+      <span className="library-item__name">{name}</span>
+      {description && <small className="library-item__meta">{description}</small>}
     </button>
   );
 }

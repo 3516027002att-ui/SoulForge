@@ -155,6 +155,7 @@ export interface ReferenceEdge {
     | 'contains'
     | 'member_of'
     | 'numeric_match'
+    | 'name_match'
     | 'unknown';
   confidence: ReferenceConfidence;
   reason: string;

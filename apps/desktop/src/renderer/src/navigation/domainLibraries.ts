@@ -153,6 +153,12 @@ export function libraryDisplayName(relativePath: string): string {
     .replace(/\.(parambnd|gameparambnd|drawparambnd|msgbnd|gparam|emevd|msb|flver|tpf|mtd|fxr|luabnd|anibnd|hkxbnd|behbnd|tae|esd|fmg|hks|lua)$/i, '');
 }
 
+/** 文本库的显示标签取 msg 后的目录名；只用于展示，不参与文件或表的寻址。 */
+export function textLibraryLanguage(relativePath: string): string | null {
+  if (!isTextLibraryPath(relativePath)) return null;
+  return /(?:^|[\\/])msg[\\/]([^\\/]+)[\\/]/i.exec(relativePath)?.[1] ?? null;
+}
+
 /**
  * 侧栏逻辑库分组（R1 裁定后的参数域两级形态）。
  *

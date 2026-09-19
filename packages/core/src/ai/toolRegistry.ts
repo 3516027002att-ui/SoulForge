@@ -73,11 +73,16 @@ import { getRagStaleChunkMaskCached } from '../rag/freshness.js';
 import { type MemoryStore } from '../memory/memoryStore.js';
 import { EVENT_REFERENCE_SOURCE_URI, searchEventReference } from './eventReference.js';
 import { resolveChrLinkage } from '../references/chrLinkageResolver.js';
-import { createReferenceQueryService } from '../references/referenceQueryService.js';
+import { createReferenceQueryService, type ReferenceQueryServiceOptions } from '../references/referenceQueryService.js';
+import { defaultReferenceCursorStore, type ReferenceCursorStore } from '../references/referenceCursorStore.js';
+import { prepareReferenceContentSearch } from '../references/referenceContentSearch.js';
 import { ProofError, type NativeReadProofStore } from '../editing/nativeReadProofStore.js';
 import { buildSessionWriteRequirements, LegacyFallbackError } from '../editing/writeRequirements.js';
 import { resolveEntity, type EntityRelationRequest } from './entityResolution.js';
 import { queryKnowledgeClaims, readKnowledgePage } from '../knowledge/knowledgeQuery.js';
+import { sourceTextPage } from './sourceTextPage.js';
+import { contentSearchPage } from './contentSearchPage.js';
+import { loadFirstPartyEmedfRegistry } from '../schema/sekiro/firstPartySchema.js';
 /** @deprecated Prefer AiToolPermissionLevel. Kept for older UI labels. */
 export type ToolPermission = 'read' | 'plan' | 'write' | AiToolPermissionLevel;
 
@@ -168,6 +173,8 @@ export interface ToolContext {
   confirmation?: ConfirmationReceipt;
   /** Persist/rebuild RAG after a live native read enriches WorkspaceIndex. */
   onSemanticEvidenceUpdated?: (sourceUris?: KnowledgeSourceChange) => Promise<void>;
+  /** Host-owned read-only query continuations; CLI may persist these across commands. */
+  referenceCursorStore?: ReferenceCursorStore;
   /** Invalidate and converge knowledge after a committed native write/rollback. */
   onNativeWriteCommitted?: (changedSources: KnowledgeSourceChange) => Promise<KnowledgeRefreshResult | void>;
   /** Abort the current Agent tool call when the host cancels the run. */
@@ -1245,7 +1252,7 @@ export function createDefaultToolRegistry(): ToolRegistry {
       + 'paramNames: ["NpcParam"] }.',
     permission: 'read',
     permissionLevel: 'read',
-    inputSchema: { query: 'string', limit: 'number?', paramNames: 'array?' },
+    inputSchema: { query: 'string?', limit: 'safe-integer?', paramNames: 'array?', offset: 'safe-integer?', cursor: 'string?' },
     run: (input, context) => {
       const ws = context.workspaceIndex;
       if (ws === null) return fail('WORKSPACE_REQUIRED', '这次工具需要先打开 Mod 工作区。');
@@ -1261,17 +1268,18 @@ export function createDefaultToolRegistry(): ToolRegistry {
         });
       }
       const value = asRecord(input);
-      const paramNames = asStringList(value.paramNames);
-      const query = asString(value.query, '');
-      const limit = asNumber(value.limit, 50);
-      const nativeResults = ws.searchParamRows(
-        query,
-        limit,
-        paramNames.length > 0 ? paramNames : undefined
-      );
-      return nativeResults.length > 0
-        ? ok(nativeResults)
-        : ragSearchFallback(context, query, ['param_row'], limit, 'search_param_rows', paramNames);
+      try {
+        const page = contentSearchPage({
+          tool: 'search_param_rows', workspaceId: ws.workspaceId, input: value,
+          search: (query, paramNames) => ws.searchParamRows(query, Number.MAX_SAFE_INTEGER, paramNames.length > 0 ? paramNames : undefined),
+          fingerprint: ({ item, score }) => [item.uri, score, item.rowName, item.sourceHash, item.outerFileHash, item.sourceRevision, item.dataHash]
+        });
+        return page.total > 0 || value.cursor !== undefined
+          ? ok(page)
+          : ragSearchFallback(context, page.query, ['param_row'], page.limit, 'search_param_rows', asStringList(value.paramNames));
+      } catch (error) {
+        return fail((error as { code?: string }).code ?? 'CONTENT_SEARCH_FAILED', error instanceof Error ? error.message : '参数搜索失败。');
+      }
     }
   });
 
@@ -1321,17 +1329,23 @@ export function createDefaultToolRegistry(): ToolRegistry {
       + 'textId is not automatically a PARAM rowId.',
     permission: 'read',
     permissionLevel: 'read',
-    inputSchema: { query: 'string', limit: 'number?' },
+    inputSchema: { query: 'string?', limit: 'safe-integer?', offset: 'safe-integer?', cursor: 'string?' },
     run: (input, context) => {
       const ws = context.workspaceIndex;
       if (ws === null) return fail('WORKSPACE_REQUIRED', '这次工具需要先打开 Mod 工作区。');
       const value = asRecord(input);
-      const query = asString(value.query, '');
-      const limit = asNumber(value.limit, 50);
-      const nativeResults = ws.searchTextEntries(query, limit);
-      return nativeResults.length > 0
-        ? ok(nativeResults)
-        : ragSearchFallback(context, query, ['text_entry'], limit, 'search_text_entries');
+      try {
+        const page = contentSearchPage({
+          tool: 'search_text_entries', workspaceId: ws.workspaceId, input: value,
+          search: (query) => ws.searchTextEntries(query, Number.MAX_SAFE_INTEGER),
+          fingerprint: ({ item, score }) => [item.uri, score, item.text, item.sourceHash, item.outerFileHash, item.sourceRevision]
+        });
+        return page.total > 0 || value.cursor !== undefined
+          ? ok(page)
+          : ragSearchFallback(context, page.query, ['text_entry'], page.limit, 'search_text_entries');
+      } catch (error) {
+        return fail((error as { code?: string }).code ?? 'CONTENT_SEARCH_FAILED', error instanceof Error ? error.message : '文本搜索失败。');
+      }
     }
   });
 
@@ -1443,12 +1457,13 @@ export function createDefaultToolRegistry(): ToolRegistry {
 
   registry.register({
     name: 'find_references',
-    description: 'Find evidence-graph references connected to a target. Provide exactly one of '
+    description: 'Find related content and actual usages: parameter fields, text, event instructions, and script calls, '
+      + 'with file/table/event/function locations, snippets, relationship reasons, and continuation actions. Provide exactly one of '
       + 'uri (logical symbol uri), target (precise native selector, e.g. '
       + '{domain:"param",sourceUri,entryIndex,rowId} / {domain:"emevd",sourceUri,eventId}) or '
       + 'query (delegated to resolveEntity). Optional: direction (from|to|both), detail '
       + '(edges|context), fieldIds (param root only), depth (1-4), limit (1-32), '
-      + 'includeHypotheses, cursor (host-issued continuation only).',
+      + 'includeHypotheses, cursor (next result page) or sourceCursor (continue scanning unread sources with the original query).',
     permission: 'analyze',
     permissionLevel: 'analyze',
     inputSchema: {
@@ -1462,30 +1477,27 @@ export function createDefaultToolRegistry(): ToolRegistry {
       depth: 'number?',
       limit: 'number?',
       includeHypotheses: 'boolean?',
-      cursor: 'string?'
+      cursor: 'string?',
+      sourceCursor: 'string?'
     },
     run: async (input, context) => {
       const ws = context.workspaceIndex;
       if (ws === null) return fail('WORKSPACE_REQUIRED', '这次工具需要先打开 Mod 工作区。');
       const decoded = decodeReferenceQueryInput(input);
       if (!decoded.ok) return fail(decoded.code, decoded.message);
-      const service = createReferenceQueryService({
-        bundle: ws.toSymbolBundle(),
-        workspaceId: ws.workspaceId,
-        coverageStates: ws.getCoverageSnapshot(),
-        providerRegistryDigest: 'soulforge-reference-providers-v1',
-        resolveQuery: async (query, domain) => {
+      const emedf = loadFirstPartyEmedfRegistry();
+      const resolveQuery: NonNullable<ReferenceQueryServiceOptions['resolveQuery']> = async (query, domain) => {
           const resolved = await resolveEntity({
             index: ws,
             query,
-            ...(domain ? { domain: domain as never } : {}),
+            ...(domain ? { domain: domain === 'fmg' ? 'msg' : domain === 'emevd' ? 'event' : domain } : {}),
             maxCandidates: 8
           });
           if (resolved.status === 'ambiguous' || resolved.candidates.length > 1) {
             return {
               resolution: 'ambiguous' as const,
               candidates: resolved.candidates.slice(0, 8).map((candidate) => ({
-                uri: candidate.sourceUri ?? candidate.nativeHandle,
+                uri: candidate.candidateId,
                 label: candidate.label ?? candidate.nativeHandle,
                 discriminators: { nativeHandle: candidate.nativeHandle, route: candidate.route }
               }))
@@ -1493,15 +1505,42 @@ export function createDefaultToolRegistry(): ToolRegistry {
           }
           if (resolved.status === 'resolved' && resolved.candidates.length === 1) {
             const candidate = resolved.candidates[0]!;
-            return { resolution: 'resolved' as const, uri: candidate.sourceUri ?? candidate.nativeHandle };
+            return { resolution: 'resolved' as const, uri: candidate.candidateId };
           }
           return {
             resolution: resolved.status === 'not_found' || resolved.status === 'not_found_complete_coverage'
               ? 'not_found' as const : 'insufficient_evidence' as const
           };
-        }
-      });
+        };
       try {
+        const normalized = decoded.input;
+        const resolved = normalized.query ? await resolveQuery(normalized.query, normalized.domain) : undefined;
+        const cursorStore = context.referenceCursorStore ?? defaultReferenceCursorStore;
+        let preparation: Awaited<ReturnType<typeof prepareReferenceContentSearch>> | undefined;
+        if (!normalized.cursor && context.session && (!resolved || resolved.resolution === 'resolved')) {
+          const edit = requireEditSession(context, 'read');
+          if (!('session' in edit)) return edit;
+          const targetSource = normalized.target && 'sourceUri' in normalized.target ? normalized.target.sourceUri : undefined;
+          const targetUri = resolved?.uri ?? normalized.uri;
+          preparation = await prepareReferenceContentSearch({
+            index: ws, edit: edit.session, input: normalized, store: cursorStore,
+            ...(emedf.ok ? { registry: emedf.registry } : {}),
+            ...(context.signal ? { signal: context.signal } : {}),
+            ...(targetUri ? { targetUri } : {}),
+            ...(targetSource ? { prioritySourceUris: [targetSource] } : {}),
+            ...(context.onSemanticEvidenceUpdated ? { persist: context.onSemanticEvidenceUpdated } : {})
+          });
+        }
+        const service = createReferenceQueryService({
+          bundle: ws.toSymbolBundle(), workspaceId: ws.workspaceId,
+          coverageStates: ws.getCoverageSnapshot(),
+          providerRegistryDigest: 'soulforge-reference-providers-content-v2',
+          ...(emedf.ok ? { registry: emedf.registry } : {}),
+          cursorStore,
+          ...(preparation?.scan ? { scan: preparation.scan } : {}),
+          ...(preparation ? { sourceDiagnostics: preparation.diagnostics } : {}),
+          resolveQuery: async (query, domain) => resolved ?? resolveQuery(query, domain)
+        });
         const page = await service.query(input as Parameters<typeof service.query>[0]);
         return ok(page);
       } catch (error) {
@@ -1990,7 +2029,7 @@ export function createDefaultToolRegistry(): ToolRegistry {
   registry.register({
     name: 'read_fmg_entries',
     description: 'Read live FMG text entries from a confirmed msgbnd table. '
-      + 'Pass table name (logical, e.g. Title) and entry ids. Do not treat FMG as UTF-8.',
+      + 'Pass table name (logical, e.g. Title) and entry ids. For a long entry read one id with sourceOffset/sourceLimit or nextCursor to continue its actual text. Do not treat FMG as UTF-8.',
     permission: 'read',
     permissionLevel: 'read',
     inputSchema: {
@@ -1998,7 +2037,9 @@ export function createDefaultToolRegistry(): ToolRegistry {
       ids: 'array',
       containerPath: 'string?',
       lang: 'string?',
-      cursor: 'string?'
+      cursor: 'string?',
+      sourceOffset: 'safe-integer?',
+      sourceLimit: 'safe-integer?'
     },
     run: async (input, context) => {
       const edit = requireEditSession(context, 'read');
@@ -2008,6 +2049,9 @@ export function createDefaultToolRegistry(): ToolRegistry {
       const ids = asIdList(value.ids);
       if (!table || ids.length === 0) {
         return fail('INVALID_INPUT', 'read_fmg_entries 需要 table、ids。');
+      }
+      if ((value.cursor !== undefined || value.sourceOffset !== undefined || value.sourceLimit !== undefined) && ids.length !== 1) {
+        return fail('FMG_SOURCE_WINDOW_SINGLE_ENTRY', '展开正文时 ids 必须只有一个文本条目。');
       }
       const containerPath = asOptionalString(value.containerPath);
       const lang = asOptionalString(value.lang);
@@ -2020,28 +2064,58 @@ export function createDefaultToolRegistry(): ToolRegistry {
       });
       if (!result.ok) return fail(result.error.code, result.error.message, result.error.details);
       if (context.workspaceIndex && result.entries.length > 0) {
-        const sourceUri = pathToFileURL(result.containerPath).href;
+        const resolved = resolveIndexedResourceFile(context, result.containerPath, 'msg');
+        const sourceUri = resolved.ok ? resolved.sourceUri : pathToFileURL(result.containerPath).href;
         const hashes = new Set(result.entries.map((entry) => entry.sourceHash).filter((hash): hash is string => Boolean(hash)));
         const revisions = new Set(result.entries.map((entry) => entry.sourceRevision).filter((revision): revision is number => revision !== undefined));
         const sourceHash = hashes.size === 1 ? [...hashes][0] : undefined;
         const sourceRevision = revisions.size === 1 ? [...revisions][0] : undefined;
+        const indexedTable = context.workspaceIndex.toSymbolBundle().msgs?.find((item) => (
+          item.entries.some((entry) => entry.sourceUri === sourceUri)
+          && (item.category === result.table || item.category?.endsWith(`/${result.table}`))
+        ));
+        const category = indexedTable?.category ?? result.table;
         context.workspaceIndex.mergeMsgEntries({
-          category: result.table,
+          category,
           ...(sourceHash ? { sourceHash } : {}),
+          ...(sourceHash ? { outerFileHash: sourceHash } : {}),
           ...(sourceRevision !== undefined ? { sourceRevision } : {}),
           entries: result.entries.map((entry) => ({
-            uri: `${sourceUri}#${result.table}/${entry.id}`,
+            ...indexedTable?.entries.find((old) => old.textId === entry.id && old.sourceUri === sourceUri),
+            uri: indexedTable?.entries.find((old) => old.textId === entry.id && old.sourceUri === sourceUri)?.uri ?? `${sourceUri}#${result.table}/${entry.id}`,
             sourceUri,
-            category: result.table,
+            category,
             textId: entry.id,
             text: entry.text ?? '',
             confidence: 'high',
             ...(entry.sourceHash ? { sourceHash: entry.sourceHash } : {}),
+            ...(entry.sourceHash ? { outerFileHash: entry.sourceHash } : {}),
             ...(entry.sourceRevision !== undefined ? { sourceRevision: entry.sourceRevision } : {})
           }))
         });
         context.workspaceIndex.rebuildReferences();
         await context.onSemanticEvidenceUpdated?.([sourceUri]);
+      }
+      if (result.entries.length === 1 && typeof result.entries[0]!.text === 'string') {
+        const entry = result.entries[0]!;
+        try {
+          const resolved = resolveIndexedResourceFile(context, result.containerPath, 'msg');
+          const sourceUri = resolved.ok ? resolved.sourceUri : result.containerPath;
+          const { sourceText, ...page } = sourceTextPage({
+            text: entry.text!,
+            sourceKey: `${context.workspaceIndex?.workspaceId ?? edit.session.session.meta.workspaceId}|${sourceUri}|${result.table}|${entry.id}`,
+            sourceHash: entry.sourceHash ?? '', domain: 'fmg',
+            ...(value.sourceOffset !== undefined ? { sourceOffset: value.sourceOffset as number } : {}),
+            ...(value.sourceLimit !== undefined ? { sourceLimit: value.sourceLimit as number } : {}),
+            ...(value.cursor !== undefined ? { cursor: value.cursor as string } : {})
+          });
+          return ok({ ...result, sourceUri, entries: [{ ...entry, text: sourceText }], ...page,
+            nextActions: page.nextCursor ? [{ tool: 'read_fmg_entries',
+              args: { table: result.table, ids: [entry.id], containerPath: result.containerPath, cursor: page.nextCursor },
+              reason: '继续读取该条目的后续文本' }] : [] });
+        } catch (error) {
+          return fail((error as { code?: string }).code ?? 'SOURCE_WINDOW_FAILED', error instanceof Error ? error.message : '文本窗口读取失败。');
+        }
       }
       return ok(result);
     }
@@ -2678,14 +2752,18 @@ export function createDefaultToolRegistry(): ToolRegistry {
     name: 'read_luabnd_script',
     description: 'Read a native Lua AI script inside a *.luabnd.dcx container (such as script/m11_01_00_00.luabnd.dcx or aicommon.luabnd.dcx). '
       + 'file: relative or absolute path (e.g. script/m11_01_00_00.luabnd.dcx); childPath: script name (e.g. 540000_battle.lua; omit to list scripts). '
-      + 'Returns script bytecode/text status, embedded symbols/action list (Act01, Interupt_Use_Item, etc.), and script preview.',
+      + 'Returns the actual source/decompiled text with sourceOffset/sourceLimit character windows and line locations. '
+      + 'Use nextCursor with the same file/childPath to read the remaining source; sourceTextComplete states whether the delivered view is the whole script.',
     permission: 'read',
     permissionLevel: 'read',
     inputSchema: {
       file: 'string',
       childPath: 'string?',
       expectedContainerHash: 'string?',
-      expectedChildHash: 'string?'
+      expectedChildHash: 'string?',
+      sourceOffset: 'safe-integer?',
+      sourceLimit: 'safe-integer?',
+      cursor: 'string?'
     },
     run: async (input, context) => {
       const edit = requireEditSession(context, 'read');
@@ -2693,12 +2771,18 @@ export function createDefaultToolRegistry(): ToolRegistry {
       const value = asRecord(input);
       const file = asString(value.file);
       const childPath = asOptionalString(value.childPath);
+      if ((value.cursor !== undefined || value.sourceOffset !== undefined || value.sourceLimit !== undefined) && !childPath) {
+        return fail('SCRIPT_CHILD_REQUIRED', '展开源码需要指定 childPath。');
+      }
       if (!file) return fail('INVALID_INPUT', 'read_luabnd_script ��Ҫ file��');
       const expectedContainerHash = asOptionalString(value.expectedContainerHash);
       const expectedChildHash = asOptionalString(value.expectedChildHash);
+      const resolvedFile = resolveIndexedResourceFile(context, file, 'script');
+      if (!resolvedFile.ok) return fail(resolvedFile.code, resolvedFile.message, resolvedFile.details);
       const result = await readLuabndScript({
         edit: edit.session,
-        file,
+        file: nativePathFromFileToken(resolvedFile.path),
+        ...(context.signal ? { signal: context.signal } : {}),
         ...(childPath ? { childPath } : {}),
         ...(expectedContainerHash ? { expectedContainerHash } : {}),
         ...(expectedChildHash ? { expectedChildHash } : {})
@@ -2727,13 +2811,42 @@ export function createDefaultToolRegistry(): ToolRegistry {
         context.workspaceIndex.upsertScriptExport({
           sourceUri,
           containerKind: 'luabnd',
-          ...(existing?.outerFileHash ? { outerFileHash: existing.outerFileHash } : {}),
-          ...(existing?.sourceRevision !== undefined ? { sourceRevision: existing.sourceRevision } : {}),
+          ...(script.outerFileHash ? { outerFileHash: script.outerFileHash } : {}),
+          ...(child.sourceRevision !== undefined ? { sourceRevision: child.sourceRevision } : {}),
           catalogComplete: existing?.catalogComplete ?? false,
           scripts
         });
         context.workspaceIndex.rebuildReferences();
         await context.onSemanticEvidenceUpdated?.([sourceUri]);
+      }
+      if (childPath && typeof result.script.sourceText === 'string') {
+        try {
+          const sourceUri = canonicalScriptSourceUri(context, result.containerPath);
+          const { sourceText, ...page } = sourceTextPage({
+            text: result.script.sourceText,
+            sourceKey: `${context.workspaceIndex?.workspaceId ?? edit.session.session.meta.workspaceId}|${sourceUri}!/${childPath}`,
+            sourceHash: result.script.sourceHash,
+            domain: 'script',
+            ...(value.sourceOffset !== undefined ? { sourceOffset: value.sourceOffset as number } : {}),
+            ...(value.sourceLimit !== undefined ? { sourceLimit: value.sourceLimit as number } : {}),
+            ...(value.cursor !== undefined ? { cursor: value.cursor as string } : {})
+          });
+          const { textPreview: _preview, derivedSource: _derived, embeddedSymbols: _symbols, ...snapshot } = result.script;
+          return ok({
+            ...result,
+            sourceUri,
+            childPath,
+            script: { ...snapshot, sourceText, sourceTextComplete: page.sourceTextComplete },
+            ...page,
+            nextActions: page.nextCursor ? [{
+              tool: 'read_luabnd_script',
+              args: { file: sourceUri, childPath, cursor: page.nextCursor },
+              reason: '继续读取后续源码'
+            }] : []
+          });
+        } catch (error) {
+          return fail((error as { code?: string }).code ?? 'SOURCE_WINDOW_FAILED', error instanceof Error ? error.message : '源码窗口读取失败。');
+        }
       }
       return ok(result);
     }

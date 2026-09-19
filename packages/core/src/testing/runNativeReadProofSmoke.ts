@@ -616,13 +616,40 @@ export async function runNativeReadProofSmoke(): Promise<void> {
     context: { workspaceIndex: null, mode: 'plan', coreSession: bigBridgeSession }
   });
   const bigRead = await bigBridge.executeTool({ id: 'big-1', name: 'read_fmg_entries', argumentsJson: '{}' });
-  assert.equal(bigRead.ok, true);
+  assert.equal(bigRead.ok, false);
+  assert.equal(bigRead.code, 'RESULT_TEXT_WINDOW_TOO_LARGE');
   assert.throws(() => bigBridgeSession.proofStore.requireCoverage({
     principal: 'big-agent', workspaceId: 'big-workspace',
     objectKey: fmgObjectKey(paramOuterKey(containerPath), 'Big', 0),
     outerSourceKey: paramOuterKey(containerPath), version: {}, requiredFields: ['text']
   }), /no delivered read|NATIVE_READ_REQUIRED/);
   bigBridgeSession.close();
+  // A page can fit the Agent envelope while still carrying an explicitly
+  // incomplete native text window.  The nested completeness flag must keep
+  // the FMG write proof closed; envelope size alone is not a full read.
+  const partialFmgRegistry = new ToolRegistry();
+  partialFmgRegistry.register({
+    name: 'read_fmg_entries', description: 'partial FMG fixture', permission: 'read',
+    run: () => ({ ok: true, data: {
+      containerPath, table: 'Partial', sourceHash: 'p'.repeat(64), sourceRevision: 2,
+      offset: 0, limit: 120, total: 500, returned: 120, truncated: true,
+      sourceTextComplete: false,
+      entries: [{ id: 7, text: 'partial native text window', sourceTextComplete: false }]
+    } })
+  });
+  const partialFmgSession = new CoreToolSession({ principal: 'partial-fmg-agent', workspaceId: 'partial-fmg-workspace' });
+  const partialFmgBridge = createAgentToolBridge({
+    registry: partialFmgRegistry,
+    context: { workspaceIndex: null, mode: 'plan', coreSession: partialFmgSession }
+  });
+  const partialFmgRead = await partialFmgBridge.executeTool({ id: 'partial-fmg', name: 'read_fmg_entries', argumentsJson: '{}' });
+  assert.equal(partialFmgRead.ok, true, partialFmgRead.content);
+  assert.throws(() => partialFmgSession.proofStore.requireCoverage({
+    principal: 'partial-fmg-agent', workspaceId: 'partial-fmg-workspace',
+    objectKey: fmgObjectKey(paramOuterKey(containerPath), 'Partial', 7),
+    outerSourceKey: paramOuterKey(containerPath), version: {}, requiredFields: ['text']
+  }), /no delivered read|NATIVE_READ_REQUIRED/);
+  partialFmgSession.close();
   resBridgeSession.close();
   // 提交成功即失效：changedSources 覆盖的证明不可复用，无关证明保留；
   // 复核失败仍已提交，失效同样发布。

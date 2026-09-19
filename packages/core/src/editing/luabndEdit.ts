@@ -126,6 +126,8 @@ async function resolveLuabndPath(edit: NativeEditSession, file: string): Promise
 export async function listLuabndScripts(input: {
   edit: NativeEditSession;
   file: string;
+  signal?: AbortSignal;
+  timeoutMs?: number;
 }): Promise<LuabndListResult> {
   const containerPath = await resolveLuabndPath(input.edit, input.file);
   if (!containerPath) {
@@ -146,6 +148,8 @@ export async function listLuabndScripts(input: {
   const bridgeResult = await runBridge({
     command: 'read-luabnd-document',
     filePath: containerPath,
+    ...(input.signal ? { signal: input.signal } : {}),
+    ...(input.timeoutMs ? { timeoutMs: input.timeoutMs } : {}),
     ...(input.edit.oodleRuntimeRoot ? { oodleRuntimeRoot: input.edit.oodleRuntimeRoot } : {}),
     allowedRoots: input.edit.allowedRoots()
   });
@@ -206,6 +210,8 @@ export async function readLuabndScript(input: {
   childPath?: string;
   expectedContainerHash?: string;
   expectedChildHash?: string;
+  signal?: AbortSignal;
+  timeoutMs?: number;
 }): Promise<LuabndReadResult> {
   const containerPath = await resolveLuabndPath(input.edit, input.file);
   if (!containerPath) {
@@ -255,6 +261,8 @@ export async function readLuabndScript(input: {
   const bridgeResult = await runBridge({
     command: 'read-luabnd-script',
     filePath: containerPath,
+    ...(input.signal ? { signal: input.signal } : {}),
+    ...(input.timeoutMs ? { timeoutMs: input.timeoutMs } : {}),
     ...(input.edit.oodleRuntimeRoot ? { oodleRuntimeRoot: input.edit.oodleRuntimeRoot } : {}),
     commandOptions: {
       childPath: input.childPath,
@@ -308,7 +316,8 @@ export async function readLuabndScript(input: {
     ? (profile?.bytecodeToSourceAllowed ?? false)
     : (profile?.supportsPlaintextSourceEdit ?? true);
 
-  let sourceText: string | undefined;
+  let sourceText: string | undefined = !isBytecode && typeof data.textContent === 'string'
+    ? data.textContent : undefined;
   let dialect: string | undefined;
   let compilerProvenance: LuabndScriptSnapshot['compilerProvenance'];
   let decompilerProvenance: LuabndScriptSnapshot['decompilerProvenance'];
@@ -326,7 +335,8 @@ export async function readLuabndScript(input: {
       ...(input.edit.oodleRuntimeRoot ? { oodleRuntimeRoot: input.edit.oodleRuntimeRoot } : {}),
       commandOptions: { contentBase64: data.contentBase64 },
       allowedRoots: input.edit.allowedRoots(),
-      timeoutMs: 120_000,
+      timeoutMs: input.timeoutMs ?? 120_000,
+      ...(input.signal ? { signal: input.signal } : {}),
       maxFrameBytes: 32 * 1024 * 1024
     });
     if (semantic.parseStatus === 'failed' || !semantic.data?.sourceText) {
@@ -372,8 +382,8 @@ export async function readLuabndScript(input: {
     embeddedSymbols: Array.isArray(data.embeddedSymbols) ? data.embeddedSymbols : [],
     textPreview: sourceText ?? (typeof data.textPreview === 'string' ? data.textPreview : undefined),
     sourceHash: data.sourceHash || data.contentHash || '',
-    ...(typeof data.outerFileHash === 'string' && data.outerFileHash.length > 0
-      ? { outerFileHash: data.outerFileHash }
+    ...(typeof (data.outerFileHash ?? data.containerHash) === 'string' && (data.outerFileHash ?? data.containerHash).length > 0
+      ? { outerFileHash: data.outerFileHash ?? data.containerHash }
       : {}),
     representation,
     detectedEncoding: isBytecode ? undefined : (data.detectedEncoding ?? 'shift_jis'),

@@ -149,11 +149,15 @@ export function buildEventReferenceEdges(
               : inferArgRole(arg, instruction);
           if (role === 'unknown') {
             if (!enableNumericFallback) continue;
-            const fallbackTargets = collectFallbackTargets(numeric, indexes, eventIndexes);
-            if (fallbackTargets.length > maxAmbiguousNumericMatches) {
+            const targetCount = (eventIndexes.eventsById.get(numeric)?.length ?? 0)
+              + (indexes.mapEntitiesByEntityId.get(numeric)?.length ?? 0)
+              + (indexes.paramRowsById.get(numeric)?.length ?? 0)
+              + (indexes.textsById.get(numeric)?.length ?? 0);
+            if (targetCount > maxAmbiguousNumericMatches) {
               stats.suppressedAmbiguousNumbers += 1;
               continue;
             }
+            const fallbackTargets = collectFallbackTargets(numeric, indexes, eventIndexes);
             const evidence = makeInstructionEvidence(instruction, arg, statement);
             for (const target of fallbackTargets) {
               edges.push({
@@ -166,6 +170,38 @@ export function buildEventReferenceEdges(
               });
             }
             continue;
+          }
+
+          // Do not materialize name-inferred fan-out merely to discard it
+          // later. Native boolean/sentinel zero arguments can otherwise join
+          // thousands of unrelated map objects and exhaust the process heap.
+          if (!explicit && !options.includeHypotheses) {
+            stats.hypothesisSuppressed += 1;
+            continue;
+          }
+          if (!explicit) {
+            const inferredCount = role === 'entityId' || role === 'regionId'
+              ? indexes.mapEntitiesByEntityId.get(numeric)?.length ?? 0
+              : role === 'paramId' ? indexes.paramRowsById.get(numeric)?.length ?? 0
+              : role === 'textId' ? indexes.textsById.get(numeric)?.length ?? 0
+              : role === 'eventId' ? eventIndexes.eventsById.get(numeric)?.length ?? 0 : 1;
+            if (inferredCount > maxAmbiguousNumericMatches) {
+              stats.suppressedAmbiguousNumbers += 1;
+              continue;
+            }
+          }
+          if (explicit) {
+            const explicitCount = role === 'entityId' || role === 'regionId'
+              ? indexes.mapEntitiesByEntityId.get(numeric)?.length ?? 0
+              : role === 'paramId' ? (arg.paramName ? indexes.paramRowsByScopedId.get(paramKey(arg.paramName, numeric)) : indexes.paramRowsById.get(numeric))?.length ?? 0
+              : role === 'textId' ? indexes.textsById.get(numeric)?.length ?? 0
+              : role === 'eventId' ? eventIndexes.eventsById.get(numeric)?.length ?? 0 : 1;
+            if (explicitCount > 256) {
+              stats.suppressedAmbiguousNumbers += 1;
+              pushDiagnostic({ severity: 'warning', code: 'EMEVD_REFERENCE_TARGET_LIMIT', sourceUri: event.sourceUri,
+                message: `指令 ${instruction.index} 的 ${arg.name ?? role}=${numeric} 命中 ${explicitCount} 个目标，超过单参数 256 目标上限；该位置的关联列表不完整。` });
+              continue;
+            }
           }
 
           const confidence: ReferenceConfidence = explicit ? 'high' : 'low';
