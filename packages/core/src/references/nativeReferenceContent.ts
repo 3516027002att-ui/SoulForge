@@ -202,65 +202,44 @@ export async function enrichReferenceContent(
     paramRows: 0
   };
 
-  const eventProgress = await enrichEvents({
-    ...input,
-    index: input.index,
-    registry,
-    files: eventFiles,
-    cursorOffset: cursor.eventOffset,
-    maxSources,
-    completed,
-    failed,
-    diagnostics,
-    sourceVersions,
-    signal,
-    deadline
-  });
-  added += eventProgress.added;
-  updated += eventProgress.updated;
-  skipped += eventProgress.skipped;
+  const shared = { ...input, index: input.index, maxSources, completed, failed,
+    diagnostics, sourceVersions, signal, deadline };
+  let eventProgress: Awaited<ReturnType<typeof enrichEvents>> = {
+    added: 0, updated: 0, skipped: 0, processed: 0, nextOffset: cursor.eventOffset
+  };
+  let paramProgress: Awaited<ReturnType<typeof enrichParams>> = {
+    added: 0, updated: 0, skipped: 0, processedSources: 0, processedRows: 0, nextOffset: cursor.paramOffset
+  };
+  let scriptProgress: Awaited<ReturnType<typeof enrichScripts>> = {
+    added: 0, updated: 0, skipped: 0, processedSources: 0, processedChildren: 0, nextOffset: cursor.scriptOffset
+  };
+  const phases = [
+    { files: eventFiles, run: async () => {
+      eventProgress = await enrichEvents({ ...shared, registry, files: eventFiles, cursorOffset: cursor.eventOffset });
+    } },
+    { files: paramFiles, run: async () => {
+      paramProgress = await enrichParams({ ...shared, files: paramFiles, cursorOffset: cursor.paramOffset });
+    } },
+    { files: scriptFiles, run: async () => {
+      scriptProgress = await enrichScripts({ ...shared, files: scriptFiles, cursorOffset: cursor.scriptOffset,
+        maxScripts, maxBytes, scriptChildOffsets });
+    } }
+  ];
+  // Prioritizing files only within a domain still lets unrelated EMEVD reads
+  // exhaust a script query's entire budget. Run the target domain first too.
+  const priority = prioritySourceSet(input);
+  phases.sort((a, b) => Number(b.files.some(file => priority.has(file.sourceUri)))
+    - Number(a.files.some(file => priority.has(file.sourceUri))));
+  for (const phase of phases) {
+    throwIfAborted(signal);
+    await phase.run();
+  }
+  added += eventProgress.added + paramProgress.added + scriptProgress.added;
+  updated += eventProgress.updated + paramProgress.updated + scriptProgress.updated;
+  skipped += eventProgress.skipped + paramProgress.skipped + scriptProgress.skipped;
   processed.eventSources += eventProgress.processed;
-  throwIfAborted(signal);
-
-  const paramProgress = await enrichParams({
-    ...input,
-    index: input.index,
-    files: paramFiles,
-    cursorOffset: cursor.paramOffset,
-    maxSources,
-    completed,
-    failed,
-    diagnostics,
-    sourceVersions,
-    signal,
-    deadline
-  });
-  added += paramProgress.added;
-  updated += paramProgress.updated;
-  skipped += paramProgress.skipped;
   processed.paramSources += paramProgress.processedSources;
   processed.paramRows += paramProgress.processedRows;
-  throwIfAborted(signal);
-
-  const scriptProgress = await enrichScripts({
-    ...input,
-    index: input.index,
-    files: scriptFiles,
-    cursorOffset: cursor.scriptOffset,
-    maxSources,
-    maxScripts,
-    maxBytes,
-    completed,
-    failed,
-    scriptChildOffsets,
-    diagnostics,
-    sourceVersions,
-    signal,
-    deadline
-  });
-  added += scriptProgress.added;
-  updated += scriptProgress.updated;
-  skipped += scriptProgress.skipped;
   processed.scriptSources += scriptProgress.processedSources;
   processed.scriptChildren += scriptProgress.processedChildren;
 
@@ -359,11 +338,15 @@ async function enrichEvents(input: {
     const key = sourceKey('event', file);
     if (input.completed.has(key) || input.failed.has(key)) continue;
     inspected += 1;
-    const existing = eventExportsForSource(input.index, file.sourceUri);
+    const existing = eventExportsForSource(input.index, file.sourceUri).filter(item =>
+      file.sha256 !== undefined && item.outerFileHash === file.sha256
+      && item.events.every(event => event.outerFileHash === file.sha256 && event.sourceRevision === file.mtimeMs));
     const indexed = enrichIndexedEventExports(existing, file, input.registry, input.sourceVersions);
     if (indexed.exported.length > 0) {
-      for (const exportItem of indexed.exported) {
-        if (input.index.upsertEventExport(exportItem)) updated += indexed.enrichedCount;
+      if (indexed.enrichedCount > 0) {
+        for (const exportItem of indexed.exported) {
+          if (input.index.upsertEventExport(exportItem)) updated += indexed.enrichedCount;
+        }
       }
       if (indexed.complete) {
         input.completed.add(key);
@@ -469,6 +452,7 @@ async function enrichScripts(input: {
   scriptChildOffsets: Map<string, number>;
   diagnostics: Diagnostic[];
   sourceVersions: NativeReferenceSourceVersion[];
+  targetUri?: string;
   deadline: number | undefined;
 }): Promise<{ added: number; updated: number; skipped: number; processedSources: number; processedChildren: number; nextOffset: number }> {
   let added = 0;
@@ -516,7 +500,12 @@ async function enrichScripts(input: {
       }
       const childOffset = Math.max(0, input.scriptChildOffsets.get(key) ?? 0);
       const existing = findScriptExport(input.index, file.sourceUri);
-      const children = new Map((existing?.scripts ?? []).map((child) => [child.uri, child]));
+      const children = new Map((existing?.outerFileHash === listed.outerFileHash ? existing.scripts : [])
+        .map((child) => [child.uri, child]));
+      const targetChild = input.targetUri?.startsWith(`${file.sourceUri}!/`)
+        ? input.targetUri.slice(file.sourceUri.length + 2) : undefined;
+      const catalogScripts = [...listed.scripts].sort((a, b) =>
+        Number((b.sanitizedName || b.name) === targetChild) - Number((a.sanitizedName || a.name) === targetChild));
       for (const [catalogIndex, catalog] of listed.scripts.entries()) {
         const childUri = scriptChildUri(file.sourceUri, catalog.sanitizedName || catalog.name);
         if (!children.has(childUri)) {
@@ -525,13 +514,20 @@ async function enrichScripts(input: {
       }
       let childIndex = childOffset;
       let hitBudget = false;
-      for (; childIndex < listed.scripts.length; childIndex += 1) {
-        if (remainingScriptBudget <= 0) { hitBudget = true; break; }
+      for (; childIndex < catalogScripts.length; childIndex += 1) {
         throwIfAborted(input.signal);
-        const catalog = listed.scripts[childIndex]!;
+        const catalog = catalogScripts[childIndex]!;
         const childPath = catalog.sanitizedName || catalog.name;
         const childUri = scriptChildUri(file.sourceUri, childPath);
         const expectedChildHash = catalog.contentHash;
+        const cached = children.get(childUri);
+        if (cached?.sourceText !== undefined && cached.outerFileHash === listed.outerFileHash
+          && expectedChildHash && cached.sourceHash === expectedChildHash
+          && Buffer.byteLength(cached.sourceText, 'utf8') <= input.maxBytes) {
+          skipped += 1;
+          continue;
+        }
+        if (remainingScriptBudget <= 0 || budgetExhausted(input.deadline)) { hitBudget = true; break; }
         if (!input.edit && !input.scriptReader) break;
         const reader = input.scriptReader ?? defaultScriptReader;
         const read = await reader({
@@ -588,10 +584,22 @@ async function enrichScripts(input: {
         catalogComplete: listed.catalogComplete,
         scripts: [...children.values()]
       };
-      if (!input.index.upsertScriptExport(exportItem)) {
+      const unchanged = existing !== undefined && existing.outerFileHash === exportItem.outerFileHash
+        && existing.sourceRevision === exportItem.sourceRevision
+        && existing.catalogComplete === exportItem.catalogComplete
+        && existing.scripts.length === exportItem.scripts.length
+        && existing.scripts.every((child, position) => child === exportItem.scripts[position]);
+      if (!unchanged && !input.index.upsertScriptExport(exportItem)) {
         input.failed.add(key);
         input.diagnostics.push({ severity: 'warning', code: 'NATIVE_REFERENCE_SCRIPT_STALE', message: '脚本原生内容因 source revision/hash 过旧被索引拒绝。', sourceUri: file.sourceUri });
         continue;
+      }
+      if (!unchanged) {
+        // Catalog-only additions also participate in the relation snapshot.
+        // Persist them even if the child budget was spent on another source;
+        // otherwise a fresh CLI process loses this part of a locked page.
+        input.sourceVersions.push({ domain: 'script', sourceUri: file.sourceUri,
+          outerFileHash: listed.outerFileHash, sourceRevision: listed.sourceRevision });
       }
       if (partial) {
         input.scriptChildOffsets.set(key, childIndex);
@@ -830,7 +838,7 @@ function enrichIndexedEventExports(
         const bank = safeInt(wire.bank) ?? instruction.bank;
         const id = safeInt(wire.id) ?? instruction.id;
         const argsBase64 = typeof wire.argsBase64 === 'string' ? wire.argsBase64 : undefined;
-        if (bank === undefined || id === undefined || !argsBase64) {
+        if (bank === undefined || id === undefined || argsBase64 === undefined) {
           if (instruction.args.length === 0) eventComplete = false;
           return instruction;
         }
@@ -841,8 +849,9 @@ function enrichIndexedEventExports(
           argsBase64,
           unknown: false
         }, index, `${file.sourceUri}#event/${event.eventId}`, parameters, registry);
-        if (decoded.args.length === 0 && instruction.args.length === 0) eventComplete = false;
-        if (decoded.args.length > 0) enrichedCount += 1;
+        // Unknown instructions remain opaque, but rereading the same native
+        // bytes cannot supply a missing schema. Empty bytes are valid too.
+        if (JSON.stringify(decoded) !== JSON.stringify(instruction)) enrichedCount += 1;
         return decoded;
       });
       const expected = safeInt(record(event.raw).instructionCount);
@@ -856,7 +865,7 @@ function enrichIndexedEventExports(
       };
     })
   }));
-  if (exported.length > 0) {
+  if (exported.length > 0 && enrichedCount > 0) {
     sourceVersions.push({
       domain: 'event',
       sourceUri: file.sourceUri,

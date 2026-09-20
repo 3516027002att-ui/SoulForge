@@ -583,10 +583,47 @@ function scriptIdentity(relation: ReferenceRelationItem): ReferenceObjectIdentit
   return undefined;
 }
 
+function sourceRootUri(uri: string): string {
+  const hash = uri.indexOf('#');
+  const child = uri.indexOf('!/');
+  const cut = [hash, child].filter((value) => value >= 0).sort((a, b) => a - b)[0];
+  return cut === undefined ? uri : uri.slice(0, cut);
+}
+
+function statementSourceIdentity(relation: ReferenceRelationItem): ReferenceObjectIdentity | undefined {
+  const statementEvidence = relation.evidence.find((item) => item.statement !== undefined)
+    ?? relation.evidence.find((item) => item.excerpt !== undefined)
+    ?? relation.evidence[0];
+  if (!statementEvidence) return undefined;
+  const sourceRoot = sourceRootUri(statementEvidence.sourceUri);
+  for (const identity of [relation.from, relation.to]) {
+    if (sourceRootUri(identity.sourceUri) === sourceRoot) return identity;
+  }
+  return undefined;
+}
+
+function completeSourceIdentity(
+  identity: ReferenceObjectIdentity | undefined,
+  domain: string
+): ReferenceObjectIdentity | undefined {
+  if (!identity || identity.domain !== domain) return undefined;
+  if (domain === 'emevd' && identity.eventId === undefined) return undefined;
+  if (domain === 'script' && (!identity.childChain || identity.childChain.length === 0)) return undefined;
+  if (domain === 'param' && (identity.rowId === undefined || !identity.label)) return undefined;
+  if (domain === 'fmg' && (identity.textId === undefined || !identity.label)) return undefined;
+  return identity;
+}
+
 function readActionForRelation(relation: ReferenceRelationItem): ReferenceNextActionDto | undefined {
   const statement = relation.evidence.find((item) => item.statement)?.statement;
   const location = statement?.location;
-  const event = eventIdentity(relation);
+  // Evidence carries the source that produced the statement. Prefer that
+  // identity over endpoint order: a script -> event numeric match is proved by
+  // the script line, so the continuation must reopen the script window.
+  const sourceIdentity = statementSourceIdentity(relation);
+  const event = sourceIdentity
+    ? completeSourceIdentity(sourceIdentity, 'emevd')
+    : eventIdentity(relation);
   if (event) {
     return {
       tool: 'read_emevd_event',
@@ -600,7 +637,9 @@ function readActionForRelation(relation: ReferenceRelationItem): ReferenceNextAc
       reason: '读取产生该关联的原生事件指令窗口；完整事件仍需按 native read 结果续读。'
     };
   }
-  const script = scriptIdentity(relation);
+  const script = sourceIdentity
+    ? completeSourceIdentity(sourceIdentity, 'script')
+    : scriptIdentity(relation);
   if (script) {
     const sourceOffset = location?.byteRange?.[0];
     return {
@@ -615,7 +654,11 @@ function readActionForRelation(relation: ReferenceRelationItem): ReferenceNextAc
         : '读取脚本调用所在的有界源码窗口；窗口返回 nextCursor 时继续读取全文。'
     };
   }
-  const param = relation.from.domain === 'param' ? relation.from : relation.to.domain === 'param' ? relation.to : undefined;
+  const param = sourceIdentity?.domain === 'param'
+    ? completeSourceIdentity(sourceIdentity, 'param')
+    : sourceIdentity
+      ? undefined
+      : relation.from.domain === 'param' ? relation.from : relation.to.domain === 'param' ? relation.to : undefined;
   if (param?.rowId !== undefined && param.label) {
     const table = param.label.split('#')[0]?.trim();
     const fieldId = location?.fieldId;
@@ -627,7 +670,11 @@ function readActionForRelation(relation: ReferenceRelationItem): ReferenceNextAc
       };
     }
   }
-  const text = relation.from.domain === 'fmg' ? relation.from : relation.to.domain === 'fmg' ? relation.to : undefined;
+  const text = sourceIdentity?.domain === 'fmg'
+    ? completeSourceIdentity(sourceIdentity, 'fmg')
+    : sourceIdentity
+      ? undefined
+      : relation.from.domain === 'fmg' ? relation.from : relation.to.domain === 'fmg' ? relation.to : undefined;
   if (text?.textId !== undefined && text.label) {
     const table = text.childChain?.at(-1)?.split(/[\\/]/u).at(-1)?.trim()
       || text.label.split('/').at(-2)?.trim();

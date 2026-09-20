@@ -199,7 +199,9 @@ async function main() {
     analyze: options.analyze || !metadataOnly,
     useCache: options.useCache,
     requireDurableLog: false,
-    onFallbackWarning: (message) => log(message),
+    // Quiet suppresses progress, not degraded cache/audit guarantees. These
+    // warnings explain why restart-safe cursors or writes may be unavailable.
+    onFallbackWarning: (message) => process.stderr.write(`${message}\n`),
     onProgress: (progress) => log(`  [${progress.phase}] ${progress.current}/${progress.total ?? '?'} ${progress.message ?? ''}`)
   });
   const { bridge, registry } = cliSession;

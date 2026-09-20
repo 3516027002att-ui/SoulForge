@@ -100,7 +100,7 @@ export function buildParamReferenceEdges(
             code: 'PARAM_REF_SYNTAX_REJECTED',
             message: `${paramExport.paramName}#${row.rowId}.${field.fieldId ?? field.name} 的 Refs 含未识别片段「${fragment}」，该规则的覆盖不完整。`,
             sourceUri: row.sourceUri,
-            details: { fieldId: field.fieldId ?? field.name, rejected: fragment }
+            details: { rowUri: row.uri, rowId: row.rowId, fieldId: field.fieldId ?? field.name, rejected: fragment }
           });
         }
 
@@ -113,7 +113,7 @@ export function buildParamReferenceEdges(
               code: 'PARAM_REF_CONDITION_UNRESOLVED',
               message: `${paramExport.paramName}#${row.rowId} 缺少条件字段 ${target.condition!.fieldId}（或无法解码为整数），引用规则 ${ruleText(target.param, target.condition)} 不适用也无法排除。`,
               sourceUri: row.sourceUri,
-              details: { rowId: row.rowId, fieldId: field.fieldId ?? field.name, condition: target.condition }
+              details: { rowUri: row.uri, rowId: row.rowId, fieldId: field.fieldId ?? field.name, condition: target.condition }
             });
             continue;
           }
@@ -130,7 +130,7 @@ export function buildParamReferenceEdges(
               code: 'PARAM_REF_VALUE_UNRESOLVED',
               message: `${paramExport.paramName}#${row.rowId}.${field.fieldId ?? field.name} 的值无法解释为目标行 id（${String(field.value)}），规则 ${ruleText(target.param, target.condition)} 未解析。`,
               sourceUri: row.sourceUri,
-              details: { fieldId: field.fieldId ?? field.name, value: field.value }
+              details: { rowUri: row.uri, rowId: row.rowId, fieldId: field.fieldId ?? field.name, value: field.value }
             });
             continue;
           }
@@ -143,7 +143,7 @@ export function buildParamReferenceEdges(
               code: 'PARAM_REF_TARGET_TABLE_MISSING',
               message: `规则 ${ruleText(target.param, target.condition)} 指向的表 ${target.param} 不在当前索引中；引用保留为语义事实，但不生成边。`,
               sourceUri: row.sourceUri,
-              details: { targetParam: target.param, targetRowId }
+              details: { rowUri: row.uri, rowId: row.rowId, targetParam: target.param, targetRowId }
             });
             continue;
           }
@@ -155,6 +155,8 @@ export function buildParamReferenceEdges(
               message: `目标表名 ${target.param} 命中 ${table.exports.length} 个物理 entry（${table.exports.map((item) => `${item.entryIndex ?? '?'}:${item.entryName ?? item.paramName}`).join(', ')}），返回候选而非任选其一。`,
               sourceUri: row.sourceUri,
               details: {
+                rowUri: row.uri,
+                rowId: row.rowId,
                 targetParam: target.param,
                 targetRowId,
                 candidates: table.exports.map((item) => ({
@@ -177,6 +179,8 @@ export function buildParamReferenceEdges(
               message: `悬空引用：${paramExport.paramName}#${row.rowId}.${field.fieldId ?? field.name} 指向 ${table.nativeName}#${targetRowId}，该目标行不存在，不能授权修改不存在的目标。`,
               sourceUri: row.sourceUri,
               details: {
+                rowUri: row.uri,
+                rowId: row.rowId,
                 targetParam: table.nativeName,
                 targetRowId,
                 rule: ruleText(target.param, target.condition)
@@ -192,6 +196,8 @@ export function buildParamReferenceEdges(
               message: `目标 ${table.nativeName}#${targetRowId} 有 ${rows.length} 个物理行（rowIndex ${rows.map((item) => item.rowIndex ?? '?').join('/')}），引用不落到单一目标。`,
               sourceUri: row.sourceUri,
               details: {
+                rowUri: row.uri,
+                rowId: row.rowId,
                 targetParam: table.nativeName,
                 targetRowId,
                 candidates: rows.map((item) => ({

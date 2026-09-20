@@ -74,6 +74,7 @@ import { type MemoryStore } from '../memory/memoryStore.js';
 import { EVENT_REFERENCE_SOURCE_URI, searchEventReference } from './eventReference.js';
 import { resolveChrLinkage } from '../references/chrLinkageResolver.js';
 import { createReferenceQueryService, type ReferenceQueryServiceOptions } from '../references/referenceQueryService.js';
+import { projectScriptReadExport } from '../references/scriptReadProjection.js';
 import { defaultReferenceCursorStore, type ReferenceCursorStore } from '../references/referenceCursorStore.js';
 import { prepareReferenceContentSearch } from '../references/referenceContentSearch.js';
 import { ProofError, type NativeReadProofStore } from '../editing/nativeReadProofStore.js';
@@ -1534,7 +1535,7 @@ export function createDefaultToolRegistry(): ToolRegistry {
         const service = createReferenceQueryService({
           bundle: ws.toSymbolBundle(), workspaceId: ws.workspaceId,
           coverageStates: ws.getCoverageSnapshot(),
-          providerRegistryDigest: 'soulforge-reference-providers-content-v2',
+          providerRegistryDigest: 'soulforge-reference-providers-content-v3',
           ...(emedf.ok ? { registry: emedf.registry } : {}),
           cursorStore,
           ...(preparation?.scan ? { scan: preparation.scan } : {}),
@@ -2791,31 +2792,15 @@ export function createDefaultToolRegistry(): ToolRegistry {
       if (context.workspaceIndex && childPath) {
         const sourceUri = canonicalScriptSourceUri(context, result.containerPath);
         const script = result.script;
-        const child: ScriptSymbol = {
-          uri: `${sourceUri}!/${childPath}`,
-          sourceUri,
-          childChain: [childPath],
-          entryName: childPath,
-          contentKind: script.sourceText !== undefined
-            ? (script.isBytecode ? 'decompiled-view' : 'source')
-            : script.isBytecode ? 'bytecode' : 'catalog-only',
-          ...(script.sourceText !== undefined ? { sourceText: script.sourceText } : {}),
-          ...(script.sourceHash ? { sourceHash: script.sourceHash } : {}),
-          ...(script.outerFileHash ? { outerFileHash: script.outerFileHash } : {}),
-          ...(context.workspaceIndex.getFile(sourceUri)?.mtimeMs !== undefined
-            ? { sourceRevision: context.workspaceIndex.getFile(sourceUri)!.mtimeMs }
-            : {})
-        };
         const existing = context.workspaceIndex.toSymbolBundle().scripts?.find((item) => item.sourceUri === sourceUri);
-        const scripts = [...(existing?.scripts ?? []).filter((item) => item.uri !== child.uri), child];
-        context.workspaceIndex.upsertScriptExport({
+        const sourceRevision = context.workspaceIndex.getFile(sourceUri)?.mtimeMs;
+        context.workspaceIndex.upsertScriptExport(projectScriptReadExport({
           sourceUri,
-          containerKind: 'luabnd',
-          ...(script.outerFileHash ? { outerFileHash: script.outerFileHash } : {}),
-          ...(child.sourceRevision !== undefined ? { sourceRevision: child.sourceRevision } : {}),
-          catalogComplete: existing?.catalogComplete ?? false,
-          scripts
-        });
+          childPath,
+          script,
+          ...(sourceRevision !== undefined ? { sourceRevision } : {}),
+          ...(existing ? { existing } : {})
+        }));
         context.workspaceIndex.rebuildReferences();
         await context.onSemanticEvidenceUpdated?.([sourceUri]);
       }

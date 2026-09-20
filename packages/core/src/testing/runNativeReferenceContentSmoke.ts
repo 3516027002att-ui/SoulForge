@@ -242,7 +242,7 @@ async function main(): Promise<void> {
   });
   assert.equal(secondScript.complete, true);
   assert.equal(secondScript.remaining.scriptChildren, 0);
-  const failedScript = await enrichReferenceContent({ index: workspace, sourceFiles: [scriptSource], maxScripts: 8,
+  const failedScript = await enrichReferenceContent({ index: new index('failed-script'), sourceFiles: [scriptSource], maxScripts: 8,
     edit: { stagingRoot: 'D:/fixture/staging', allowedRoots: () => [] }, scriptListReader: listReader,
     scriptReader: async () => ({ ok: false, error: { code: 'READ_FAIL', message: 'read failed' }, diagnostics: [{ severity: 'warning', code: 'READ_FAIL', message: 'read failed' }] })
   });

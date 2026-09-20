@@ -110,6 +110,7 @@ export interface ReferenceQueryService {
 }
 
 export function createReferenceQueryService(options: ReferenceQueryServiceOptions): ReferenceQueryService {
+  let queryBundle = options.bundle;
   const workspaceId = options.workspaceId ?? 'workspace';
   const maxSources = options.maxSources ?? 64;
   const maxTraversalNodes = options.maxTraversalNodes ?? 256;
@@ -118,9 +119,9 @@ export function createReferenceQueryService(options: ReferenceQueryServiceOption
   const fieldProofs: Array<{ sourceUri: string; rowId: number; rowIndex?: number; fieldId: string; dataHash?: string }> = [];
   let shardCache: { key: string; edges: import('@soulforge/shared').ReferenceEdge[]; diagnostics: import('@soulforge/shared').Diagnostic[] } | undefined;
 
-  function collectShards(includeHypotheses = false): { edges: import('@soulforge/shared').ReferenceEdge[]; diagnostics: import('@soulforge/shared').Diagnostic[] } {
-    const bundle = options.bundle;
-    const versions = `${bundleVersionKey(bundle)}|providers:${options.providerRegistryDigest ?? 'default'}|hypotheses:${includeHypotheses ? 'on' : 'off'}`;
+  function collectShards(includeHypotheses: boolean, sourceVersionKey: string): { edges: import('@soulforge/shared').ReferenceEdge[]; diagnostics: import('@soulforge/shared').Diagnostic[] } {
+    const bundle = queryBundle;
+    const versions = `${sourceVersionKey}|providers:${options.providerRegistryDigest ?? 'default'}|hypotheses:${includeHypotheses ? 'on' : 'off'}`;
     if (shardCache && shardCache.key === versions) return shardCache;
     const edges: import('@soulforge/shared').ReferenceEdge[] = [];
     const diagnostics: import('@soulforge/shared').Diagnostic[] = [];
@@ -138,7 +139,25 @@ export function createReferenceQueryService(options: ReferenceQueryServiceOption
     return shardCache;
   }
 
-  function bundleVersionKey(bundle: SymbolBundle): string {
+  function canonicalBundleSnapshot(bundle: SymbolBundle): { bundle: SymbolBundle; key: string } {
+    const ordered: Record<string, unknown> = {};
+    const fingerprints: Record<string, unknown> = {};
+    for (const [domain, values] of Object.entries(bundle)) {
+      if (values === undefined) continue;
+      if (Array.isArray(values)) {
+        const exports = values.map(value => ({ value, key: valueVersionKey(value) }))
+          .sort((a, b) => a.key.localeCompare(b.key));
+        ordered[domain] = exports.map(item => item.value);
+        fingerprints[domain] = exports.map(item => item.key);
+      } else {
+        ordered[domain] = values;
+        fingerprints[domain] = valueVersionKey(values);
+      }
+    }
+    return { bundle: ordered as SymbolBundle, key: valueVersionKey(fingerprints) };
+  }
+
+  function valueVersionKey(value: unknown): string {
     // Do not build one giant JSON/string key.  Real EMEVD and PARAM exports
     // contain millions of characters and the old `parts.join()` path could
     // throw V8 `Invalid string length` before the bounded page projection ran.
@@ -146,57 +165,75 @@ export function createReferenceQueryService(options: ReferenceQueryServiceOption
     // and instruction content in the invalidation identity without retaining
     // the whole bundle in another string.
     const hash = createHash('sha256');
+    // A native hash.update per primitive dominated real CLI profiles. Buffer
+    // the exact token stream, not the whole bundle, before crossing into crypto.
+    let fragments: string[] = [];
+    let bufferedChars = 0;
+    const flush = (): void => {
+      if (bufferedChars > 0) hash.update(fragments.join(''));
+      fragments = [];
+      bufferedChars = 0;
+    };
+    const append = (text: string): void => {
+      if (text.length >= 65536) { flush(); hash.update(text); return; }
+      fragments.push(text);
+      bufferedChars += text.length;
+      if (bufferedChars >= 65536) flush();
+    };
     const write = (value: unknown, seen: Set<object> = new Set()): void => {
       if (value === null) {
-        hash.update('null;');
+        append('null;');
         return;
       }
       switch (typeof value) {
         case 'undefined':
-          hash.update('undefined;');
+          append('undefined;');
           return;
         case 'string':
-          hash.update(`string:${value.length}:`);
-          hash.update(value);
-          hash.update(';');
+          append(`string:${value.length}:`);
+          append(value);
+          append(';');
           return;
         case 'number':
-          hash.update(`number:${Number.isNaN(value) ? 'NaN' : String(value)};`);
+          append(`number:${Number.isNaN(value) ? 'NaN' : String(value)};`);
           return;
         case 'boolean':
-          hash.update(value ? 'true;' : 'false;');
+          append(value ? 'true;' : 'false;');
           return;
         case 'bigint':
-          hash.update(`bigint:${value.toString()};`);
+          append(`bigint:${value.toString()};`);
           return;
         case 'function':
-          hash.update('function;');
+          append('function;');
           return;
       }
       if (seen.has(value)) {
-        hash.update('cycle;');
+        append('cycle;');
         return;
       }
       seen.add(value);
       if (Array.isArray(value)) {
-        hash.update(`array:${value.length}[`);
+        append(`array:${value.length}[`);
         for (const item of value) write(item, seen);
-        hash.update('];');
+        append('];');
       } else {
         const record = value as Record<string, unknown>;
-        const keys = Object.keys(record).sort();
-        hash.update(`object:${keys.length}{`);
+        // JSON-backed semantic caches omit absent optional properties. Their
+        // reappearance as explicit undefined is not a native content change.
+        const keys = Object.keys(record).filter(key => record[key] !== undefined).sort();
+        append(`object:${keys.length}{`);
         for (const key of keys) {
-          hash.update(`key:${key.length}:`);
-          hash.update(key);
-          hash.update('=');
+          append(`key:${key.length}:`);
+          append(key);
+          append('=');
           write(record[key], seen);
         }
-        hash.update('};');
+        append('};');
       }
       seen.delete(value);
     };
-    write(bundle);
+    write(value);
+    flush();
     return `sha256:${hash.digest('hex')}`;
   }
 
@@ -229,6 +266,21 @@ export function createReferenceQueryService(options: ReferenceQueryServiceOption
     return true;
   }
 
+  function freshQueryArgs(input: NormalizedReferenceQuery): Record<string, unknown> {
+    return {
+      ...(input.uri !== undefined ? { uri: input.uri } : {}),
+      ...(input.target !== undefined ? { target: input.target } : {}),
+      ...(input.query !== undefined ? { query: input.query } : {}),
+      ...(input.domain !== undefined ? { domain: input.domain } : {}),
+      direction: input.direction,
+      detail: input.detail,
+      ...(input.fieldIds !== undefined ? { fieldIds: [...input.fieldIds] } : {}),
+      depth: input.depth,
+      limit: input.limit,
+      includeHypotheses: input.includeHypotheses
+    };
+  }
+
   interface ResolvedCandidate {
     uri: string;
     label: string;
@@ -241,7 +293,7 @@ export function createReferenceQueryService(options: ReferenceQueryServiceOption
   }
 
   function resolveExactTarget(target: Exclude<ReferenceQueryInput['target'], undefined>): { uri?: string; candidates: ResolvedCandidate[] } {
-    const bundle = options.bundle;
+    const bundle = queryBundle;
     const candidates: ResolvedCandidate[] = [];
     if (!('domain' in target)) return { candidates };
     if (target.domain === 'param') {
@@ -356,7 +408,7 @@ export function createReferenceQueryService(options: ReferenceQueryServiceOption
   }
 
   function resolveUri(uri: string): { uri?: string; candidates: ResolvedCandidate[] } {
-    const bundle = options.bundle;
+    const bundle = queryBundle;
     const candidates: ResolvedCandidate[] = [];
     const identity = () => identityForUri(uri, bundle, workspaceId);
     for (const paramExport of bundle.params ?? []) {
@@ -407,7 +459,7 @@ export function createReferenceQueryService(options: ReferenceQueryServiceOption
     uri?: string;
     candidates?: ResolvedCandidate[];
   } {
-    const bundle = options.bundle;
+    const bundle = queryBundle;
     const match = /^([A-Za-z0-9_.]+)\s+(\d+)$/u.exec(query.trim());
     if (domain === 'param' && match) {
       const table = match[1]!.replace(/\.param$/iu, '').toLowerCase();
@@ -443,7 +495,7 @@ export function createReferenceQueryService(options: ReferenceQueryServiceOption
 
   function targetReadFor(uri: string | undefined, fieldIds: string[] | undefined): ReferenceTargetReadDto {
     if (!uri || !fieldIds) return { fields: [], completeness: 'summary_only' };
-    const bundle = options.bundle;
+    const bundle = queryBundle;
     const fields: ReferenceTargetReadDto['fields'] = [];
     for (const paramExport of bundle.params ?? []) {
       for (const row of paramExport.rows) {
@@ -478,7 +530,7 @@ export function createReferenceQueryService(options: ReferenceQueryServiceOption
   function indirectEdgeKeys(rootUri: string, depth: number): Set<string> {
     const keys = new Set<string>();
     if (!options.registry && !rootUri.includes('#event/')) return keys;
-    const chain = buildEventCallChain(options.bundle.events ?? [], rootUri, {
+    const chain = buildEventCallChain(queryBundle.events ?? [], rootUri, {
       maxDepth: Math.min(depth, 4),
       ...(options.registry ? { registry: options.registry } : {})
     });
@@ -527,7 +579,7 @@ export function createReferenceQueryService(options: ReferenceQueryServiceOption
       if (statements.length < 32) statements.push(statement);
     }
     return {
-      target: identityForUri(rootUri, options.bundle, workspaceId),
+      target: identityForUri(rootUri, queryBundle, workspaceId),
       statements,
       evidence
     };
@@ -646,8 +698,8 @@ export function createReferenceQueryService(options: ReferenceQueryServiceOption
         const key = `${edge.fromUri}\u0000${edge.toUri}\u0000${edge.kind}\u0000${edge.evidence[0]?.sourceUri ?? ''}`;
         const hopCertainty = certaintyForEdge(edge, current.path.length > 0);
         const hop: ReferencePathHop = {
-          from: identityForUri(current.uri, options.bundle, workspaceId),
-          to: identityForUri(nextUri, options.bundle, workspaceId),
+          from: identityForUri(current.uri, queryBundle, workspaceId),
+          to: identityForUri(nextUri, queryBundle, workspaceId),
           relationKind: edge.kind,
           certainty: hopCertainty
         };
@@ -686,7 +738,7 @@ export function createReferenceQueryService(options: ReferenceQueryServiceOption
     return {
       resolution: 'insufficient_evidence',
       relations: [],
-      coverage: buildCoverage({ bundle: options.bundle, scannedDomains: [], truncated: false, coverageStates: options.coverageStates }),
+      coverage: buildCoverage({ bundle: queryBundle, scannedDomains: [], truncated: false, coverageStates: options.coverageStates }),
       page: { returnedCount: 0, hasMore: false },
       ...(options.scan ? { scan: options.scan } : {}),
       diagnostics: [...(options.sourceDiagnostics ?? []), { severity: 'warning', code: 'REFERENCE_INSUFFICIENT_EVIDENCE', message }],
@@ -702,8 +754,13 @@ export function createReferenceQueryService(options: ReferenceQueryServiceOption
     let normalized = decoded.input;
     let offset = 0;
     let cursorRegistration: StoredReferenceCursor | undefined;
-    const currentSourceVersionKey = bundleVersionKey(options.bundle);
-    const currentDependencySummary = buildDependencySummary(options.bundle);
+    // Native sources may finish in different orders during cold analysis.
+    // Canonicalize only export groups; physical row/instruction/field order is
+    // retained. Providers and the cursor fingerprint see the same snapshot.
+    const snapshot = canonicalBundleSnapshot(options.bundle);
+    queryBundle = snapshot.bundle;
+    const currentSourceVersionKey = snapshot.key;
+    const currentDependencySummary = buildDependencySummary(queryBundle);
     if (normalized.cursor) {
       const registration = cursorStore.get(normalized.cursor);
       if (!registration) {
@@ -755,7 +812,7 @@ export function createReferenceQueryService(options: ReferenceQueryServiceOption
               discriminators: item.discriminators
             })),
             relations: [],
-            coverage: buildCoverage({ bundle: options.bundle, scannedDomains: [], truncated: false, coverageStates: options.coverageStates }),
+            coverage: buildCoverage({ bundle: queryBundle, scannedDomains: [], truncated: false, coverageStates: options.coverageStates }),
             page: { returnedCount: 0, hasMore: false },
             diagnostics: [{ severity: 'info', code: 'REFERENCE_TARGET_AMBIGUOUS', message: '同名/同 id 多候选；选定精确 target 后重新查询。第一步不对候选深读。' }],
             nextActions: exact.candidates.slice(0, 8).map((item) => ({
@@ -779,7 +836,7 @@ export function createReferenceQueryService(options: ReferenceQueryServiceOption
               discriminators: item.discriminators
             })),
             relations: [],
-            coverage: buildCoverage({ bundle: options.bundle, scannedDomains: [], truncated: false, coverageStates: options.coverageStates }),
+            coverage: buildCoverage({ bundle: queryBundle, scannedDomains: [], truncated: false, coverageStates: options.coverageStates }),
             page: { returnedCount: 0, hasMore: false },
             diagnostics: [{ severity: 'info', code: 'REFERENCE_TARGET_AMBIGUOUS', message: '逻辑 URI 不能唯一解析，返回候选。' }],
             nextActions: []
@@ -796,11 +853,11 @@ export function createReferenceQueryService(options: ReferenceQueryServiceOption
         return {
           resolution: 'ambiguous',
           candidates: (resolved.candidates ?? []).map((item) => ({
-            identity: item.identity ?? identityForUri(item.uri, options.bundle, workspaceId),
+            identity: item.identity ?? identityForUri(item.uri, queryBundle, workspaceId),
             discriminators: item.discriminators
           })),
           relations: [],
-          coverage: buildCoverage({ bundle: options.bundle, scannedDomains: [], truncated: false, coverageStates: options.coverageStates }),
+          coverage: buildCoverage({ bundle: queryBundle, scannedDomains: [], truncated: false, coverageStates: options.coverageStates }),
           page: { returnedCount: 0, hasMore: false },
           diagnostics: [{ severity: 'info', code: 'REFERENCE_QUERY_AMBIGUOUS', message: 'query 命中多个候选；第一步不深读，选定后重新查询。' }],
           nextActions: (resolved.candidates ?? []).slice(0, 8).map((item) => ({
@@ -821,10 +878,14 @@ export function createReferenceQueryService(options: ReferenceQueryServiceOption
 
     // --- Step 5-6: source shards + bounded multi-hop traversal. ---
     const includeHypotheses = normalized.includeHypotheses === true;
-    const shards = collectShards(includeHypotheses);
+    const shards = collectShards(includeHypotheses, currentSourceVersionKey);
     const direction = normalized.direction ?? 'both';
+    // `low` is the graph confidence contract for candidate observations. Some
+    // providers use a descriptive reason such as `unknown-api literal-match`
+    // instead of the legacy `hypothesis(...)` prefix, so filtering by reason
+    // alone leaks numeric/name candidates when hypotheses are disabled.
     const traversableEdges = shards.edges.filter((edge) =>
-      includeHypotheses || !(edge.confidence === 'low' && edge.reason.includes('hypothesis(')));
+      includeHypotheses || edge.confidence !== 'low');
     const traversal = traverseBounded(rootUri, traversableEdges, direction, depth);
     const connected = traversal.edges;
     const scanned = traversal.scannedSources;
@@ -832,10 +893,10 @@ export function createReferenceQueryService(options: ReferenceQueryServiceOption
     if (rootUri.includes('#event/')) {
       for (const key of indirectEdgeKeys(rootUri, depth)) indirectKeys.add(key);
     }
-    const versions = collectSourceVersions(options.bundle);
+    const versions = collectSourceVersions(queryBundle);
     const relations = assembleRelations({
       edges: connected,
-      bundle: options.bundle,
+      bundle: queryBundle,
       workspaceId,
       versions,
       indirectEdgeKeys: indirectKeys,
@@ -855,7 +916,7 @@ export function createReferenceQueryService(options: ReferenceQueryServiceOption
       ...(rootUri ? {
         target: {
           workspaceId,
-          domain: domainOfUri(rootUri, options.bundle),
+          domain: domainOfUri(rootUri, queryBundle),
           sourceUri: rootUri
         }
       } : {}),
@@ -863,11 +924,11 @@ export function createReferenceQueryService(options: ReferenceQueryServiceOption
       ...(normalized.fieldIds ? { targetRead } : {}),
       ...(options.scan ? { scan: options.scan } : {}),
       relations,
-      coverage: buildCoverage({ bundle: options.bundle, scannedDomains: [...scanned], truncated, coverageStates: options.coverageStates }),
+      coverage: buildCoverage({ bundle: queryBundle, scannedDomains: [...scanned], truncated, coverageStates: options.coverageStates }),
       diagnostics: [
         ...(options.sourceDiagnostics ?? []),
         ...shards.diagnostics
-          .filter((diagnostic) => diagnostic.sourceUri === undefined || relatedTo(diagnostic.sourceUri, connected, rootUri))
+          .filter((diagnostic) => relatedToDiagnostic(diagnostic, connected, rootUri))
           .map((diagnostic) => ({
             severity: diagnostic.severity === 'error' ? 'error' as const : diagnostic.severity === 'info' ? 'info' as const : 'warning' as const,
             code: diagnostic.code,
@@ -876,7 +937,11 @@ export function createReferenceQueryService(options: ReferenceQueryServiceOption
           }))
       ].slice(0, 16),
       nextActions: truncated
-        ? [{ tool: 'find_references', args: {}, reason: traversal.truncationReason ?? '关联遍历达到上限；请缩小查询范围后重试。' }, ...continuationReservation]
+        ? [{
+            tool: 'find_references',
+            args: freshQueryArgs(normalized),
+            reason: `${traversal.truncationReason ?? '关联遍历达到上限'}；该动作会重新执行当前有界查询，不是现有结果页续读，请缩小查询目标或由宿主提高受控遍历上限。`
+          }, ...continuationReservation]
         : continuationReservation
     };
 
@@ -911,7 +976,8 @@ export function createReferenceQueryService(options: ReferenceQueryServiceOption
         ...(traversal.truncationReason ? { truncationReason: traversal.truncationReason } : {})
       };
       built.record.nextActions = [
-        ...built.record.nextActions.filter((action) => action.tool !== 'find_references'),
+        ...built.record.nextActions.filter((action) =>
+          !(action.tool === 'find_references' && action.args.cursor === REFERENCE_CURSOR_TOKEN_PLACEHOLDER)),
         { tool: 'find_references', args: { cursor: nextCursor }, reason: '使用该游标继续读取当前已锁定关联结果页。' }
       ];
     } else if (traversal.truncationReason) {
@@ -938,9 +1004,36 @@ export function createReferenceQueryService(options: ReferenceQueryServiceOption
     return 'resource';
   }
 
-  function relatedTo(sourceUri: string, edges: import('@soulforge/shared').ReferenceEdge[], rootUri: string | undefined): boolean {
-    if (rootUri && sourceUri === rootUri) return true;
-    return edges.some((edge) => edge.evidence.some((item) => item.sourceUri === sourceUri));
+  function relatedToDiagnostic(
+    diagnostic: import('@soulforge/shared').Diagnostic,
+    edges: import('@soulforge/shared').ReferenceEdge[],
+    rootUri: string | undefined
+  ): boolean {
+    const details = diagnostic.details;
+    const detailRecord = typeof details === 'object' && details !== null
+      ? details as Record<string, unknown>
+      : undefined;
+    const relatedUris = new Set<string>([
+      ...(rootUri ? [rootUri] : []),
+      ...edges.flatMap((edge) => [edge.fromUri, edge.toUri])
+    ]);
+    // Providers that know the physical row/event/script identity should attach
+    // it here. This keeps unrelated diagnostics from the same source container
+    // out of a focused reference query.
+    for (const key of ['rowUri', 'eventUri', 'scriptUri', 'objectUri', 'uri']) {
+      const value = detailRecord?.[key];
+      if (typeof value === 'string') return relatedUris.has(value);
+    }
+    const rowId = detailRecord?.rowId;
+    if (typeof rowId === 'number' && Number.isSafeInteger(rowId)) {
+      return [...relatedUris].some((uri) => {
+        const identity = identityForUri(uri, queryBundle, workspaceId);
+        return identity.domain === 'param' && identity.rowId === rowId;
+      });
+    }
+    if (diagnostic.sourceUri === undefined) return true;
+    if (rootUri && diagnostic.sourceUri === rootUri) return true;
+    return edges.some((edge) => edge.evidence.some((item) => item.sourceUri === diagnostic.sourceUri));
   }
 
   return {

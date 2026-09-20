@@ -130,7 +130,7 @@ function isNativeSemanticCacheCandidate(file: IndexedFile): boolean {
       || path.includes('msgbnd')
       || path.includes('.msgbnd');
   }
-  if (file.resourceKind === 'script') {
+  if (file.resourceKind === 'script' || file.resourceKind === 'ai') {
     return path.includes('.luabnd') || path.endsWith('.lua') || path.endsWith('.hks');
   }
   return false;

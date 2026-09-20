@@ -29,6 +29,9 @@ export async function prepareReferenceContentSearch(options: {
 }): Promise<{ scan: ReferencePageRecord['scan']; diagnostics: ReferencePageRecord['diagnostics'] }> {
   const scope = scanScope(options.input);
   const hash = createHash('sha256');
+  // Child ordering and enrichment reuse are part of the continuation contract.
+  // Never replay an older scan offset under the new target-first order.
+  hash.update('reference-content-scan-v2\0');
   for (const file of options.index.getFiles().sort((a, b) => a.sourceUri.localeCompare(b.sourceUri))) {
     hash.update(JSON.stringify([file.sourceUri, file.sha256, file.mtimeMs, file.size])).update('\0');
   }
@@ -50,7 +53,9 @@ export async function prepareReferenceContentSearch(options: {
     ...(cursor ? { cursor } : {}),
     ...(options.registry ? { registry: options.registry } : {}),
     ...(options.signal ? { signal: options.signal } : {}),
-    ...(options.targetUri ? { targetUri: options.targetUri } : {}),
+    ...(options.input.target && 'domain' in options.input.target && options.input.target.domain === 'script' ? {
+      targetUri: `${options.input.target.sourceUri}!/${options.input.target.childChain.join('/')}`
+    } : options.targetUri ? { targetUri: options.targetUri } : {}),
     ...(options.prioritySourceUris ? { prioritySourceUris: options.prioritySourceUris } : {}),
     maxSources: 2, maxScripts: 2, maxBytes: 512 * 1024, timeoutMs: 20000
   });

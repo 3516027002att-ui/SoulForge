@@ -168,6 +168,12 @@ export async function analyzeWorkspace(options: AnalyzeWorkspaceOptions): Promis
     if (cachedBundle) {
       loadSymbolBundleIntoIndex(index, rebaseSymbolBundleToFileRevision(file, cachedBundle));
       accepted = true;
+    } else if (isNativeScriptResource(file)) {
+      // Native Lua/HKS sources are cache-hydration candidates only.  A cache
+      // miss or stale payload stays unavailable until the bounded enrichment
+      // reader runs; never fall through to readFile(..., 'utf8') or invent a
+      // text parser for bytecode.
+      accepted = false;
     } else {
       const parsed = await parseKnownResource(file, index, options);
       diagnostics.push(...parsed.diagnostics);
@@ -269,10 +275,20 @@ function shouldParse(file: IndexedFile, options: AnalyzeWorkspaceOptions): boole
   if (parseJsonFixtures && file.extension === '.json') return true;
   if (exportNativeMsgResources && isNativeMsgResource(file)) return true;
   if (exportNativeCandidateResources && isNativeCandidateResource(file)) return true;
+  // Native script/AI exports are loaded here only when a host supplied a
+  // verified semantic cache. Cache misses remain not_indexed and are filled
+  // by the bounded native enrichment path instead of parsing binary bytes.
+  if (options.semanticCache && isNativeScriptResource(file)) return true;
   if (!parseTextResources) return false;
   if (file.resourceKind === 'event' && (file.relativePath.endsWith('.txt') || file.relativePath.endsWith('.emevd.txt'))) return true;
   if (file.resourceKind === 'msg' && (file.relativePath.endsWith('.tsv') || file.relativePath.endsWith('.csv') || file.relativePath.endsWith('.txt') || file.relativePath.endsWith('.xml') || file.relativePath.endsWith('.json'))) return true;
   return false;
+}
+
+function isNativeScriptResource(file: IndexedFile): boolean {
+  if (file.resourceKind !== 'script' && file.resourceKind !== 'ai') return false;
+  const path = file.relativePath.toLowerCase();
+  return path.includes('.luabnd') || path.endsWith('.lua') || path.endsWith('.hks');
 }
 
 // The real Sekiro gameparam container takes longer than the generic 15-second
