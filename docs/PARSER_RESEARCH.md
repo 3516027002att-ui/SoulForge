@@ -1,7 +1,5 @@
 # Parser research boundary
 
-SoulForge must not copy Smithbox, DSMapStudio, DarkScript3, or SoulsFormats implementation code.
-
 The bridge parser policy is:
 
 - use public projects only to identify format families and workflow boundaries;

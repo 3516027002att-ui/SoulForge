@@ -105,14 +105,6 @@ lastReviewedAt
 5. 若两个切片相互独立，可以并行；若共享 native writer、Patch Engine、migration 或协议变更，必须串行审查。
 6. 完成切片后先记录证据，再更新路线状态和当前前沿；没有证据记录，不更新 authority。
 
-### 0.4 工程执行与辅助生成边界
-
-- 主 Agent 负责复杂推理、架构、安全、native authority、数据库迁移、Patch Engine、回滚、恢复和复杂 bug；这些职责不得以辅助代码生成替代。
-- 简单、机械、低风险且边界清晰的 DTO、测试样板、序列化、机械重命名和胶水代码可以交给辅助代码生成工具。
-- 前端视觉、交互和布局优先交给专门的前端 Agent。没有可用前端 Agent 时，主 Agent 可以在既定数据契约、安全边界和可运行验收标准内实施，但必须补齐真实视觉、交互和响应式验证。
-- 任何辅助输出都必须由主 Agent 审查、集成并运行真实验证；辅助工具的成功输出不构成 SoulForge authority 或完成证据。
-- 上述分工只影响实施方式，不放宽工作区写入闸门、路径隔离、Patch Engine、native authority、结构化诊断、凭据和私有资产边界。
-
 ---
 
 ## 1. 产品目标与长期边界
@@ -466,8 +458,6 @@ REL-B 的稳定格式规格（不构成产品范围或进度口径）：
 
 证据：`EV-C-PARAM-7BD`（historical-record，本轮未重跑私有 corpus）、`EV-PUBLIC-CONTRACTS-20260725`、`EV-REL-SCOPE-20260731-TEXT-FIRST`（容器范围收窄裁定）。
 
-V0.5 容器范围已收窄为 `gameparam`；`drawparam` 与 `gparam` 延期至 V0.6，本版不得写入，也不得作为发布能力对外声明。
-
 已有：
 
 - 紧凑布局 PARAM 读取、raw row CRUD、写入、提交和回滚；
@@ -486,8 +476,6 @@ V0.5 容器范围已收窄为 `gameparam`；`drawparam` 与 `gparam` 延期至 V
 - definition 与 ParamType、版本、row size 的严格匹配；
 - 游戏适配包内 metadata 版本；
 - 用户 overlay 与冲突诊断。
-
-V0.5 的批准来源冻结为 Smithbox `2.2.4` 中随官方发行包提供的 Sekiro `SDT` PARAM 资产：Git tag/commit `1b46d2c9f82d1c3635ff7c12c526e05a8ba4208f`，发行包 SHA-256 `14a7fd735a9577249fa93655f63d1e9ac025a3b00d7c5bed8badc8a3a7fd489d`，路径 `Smithbox.Release/Output/Assets/PARAM/SDT`。SoulForge 只从用户本机取得的该固定发行包导入并内容寻址，不把导入数据提交或打进 SoulForge 安装包。Smithbox 仓库与发行包带有 MIT 正文，但其提交历史显示部分数据来自未单独声明 LICENSE 的 Paramdex；因此本裁定不把 Smithbox 根许可证外推成对全部上游数据的再分发保证。源不存在、版本或 digest 不匹配时 PARAM 语义 metadata 失败关闭。
 
 仍缺：
 
@@ -527,8 +515,6 @@ V0.5 的批准来源冻结为 Smithbox `2.2.4` 中随官方发行包提供的 Se
 - 全 corpus mutation matrix；
 - KRAK 包装样本；
 - 真实游戏加载验证。
-
-EMEDF 类型源的定位、版本固定、许可证审计和适配实现属于工程工作，不是 `user-ruling`。工程方已完成 DarkScript3 公开项目调查与许可证审计：DarkScript3 及其 EMEDF 数据为 **All Rights Reserved**（见 `DarkScript3/Resources/LICENSES.txt`），不可复制、捆绑或再分发。因此 SoulForge 采用 external-only adapter 方案：adapter 代码（`emedfExternalAdapter.ts`）为原创，从用户本机 DarkScript3 安装中读取 `sekiro-common.emedf.json`，不提交或打包任何 EMEDF 数据。Smithbox 2.2.4 发行包中无 EMEDF 指令定义（已核验，仅 PARAM 数据）。若用户未提供 EMEDF 文件，未知指令继续保持只读 opaque，相关能力维持 `partial/unsupported`。只有改变已冻结的 EMEVD 产品范围才需要新的用户裁定。
 
 #### EMEVD DSL 终局
 
@@ -717,7 +703,7 @@ msb、tae、esd、flver 的版本性 deferred-preview 门禁已移除；当前 `
 - renderer agent 任务面板（数据契约已备，视觉/交互归前端 Agent）；
 - provider-specific 边界扩展与模型服务迁移。
 
-AI 无充分证据时必须返回 `insufficient_evidence`。任何模型服务都不能绕过 Patch Engine、native validator、备份、审计和回滚。真实 provider endpoint/key 可由所有者日后选择配置，但不是 V0.5 验收输入；仓库、安装包和默认配置均保持空值且不得内置凭据。
+任何模型服务都不能绕过 Patch Engine、native validator、备份、审计和回滚。真实 provider endpoint/key 可由所有者日后选择配置，但不是 V0.5 验收输入；仓库、安装包和默认配置均保持空值且不得内置凭据。
 
 ---
 
@@ -1660,7 +1646,7 @@ npm run test:release-reproducible
 | 变量/输入 | 使用者 | 规则 |
 |---|---|---|
 | `SOULFORGE_DOTNET` | Bridge build/run | 可选的受控 dotnet 路径；不得提交本机值 |
-| `SOULFORGE_SEKIRO_GAME_ROOT` | Oodle、private native、section-28、`test:workspace-completeness` | 必须由用户合法拥有并显式提供；始终只读；未设置只能产生 `unverified`/`skipped`；完成度矩阵扫 `$SOULFORGE_SEKIRO_GAME_ROOT/mods` |
+| `SOULFORGE_SEKIRO_GAME_ROOT` | Oodle、private native、section-28、`test:workspace-completeness` | 未设置只能产生 `unverified`/`skipped`；完成度矩阵扫 `$SOULFORGE_SEKIRO_GAME_ROOT/mods` |
 | `SOULFORGE_NATIVE_FIXTURE_ROOT` | private native gate | 指向私有 fixture 根；不得位于 Git 提交范围，不得记录真实绝对路径 |
 | `SOULFORGE_SCRATCH` | private/packaging/section-28 gate | 可选临时输出根；必须在 Mod 与原版目录之外，可安全清理 |
 | `SOULFORGE_UNPACKED_PACK=1` | legacy-named unpacked package inspection gate | 仅允许生成供内容扫描的 unsigned `--dir` 中间产物；不是 V0.5 distributable portable，也不等于安装或发布通过 |

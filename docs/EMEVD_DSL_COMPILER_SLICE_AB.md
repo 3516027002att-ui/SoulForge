@@ -58,20 +58,6 @@ event @e:0123456789abcdef01234567 {
 }
 ```
 
-当前只解析：
-
-- `set id`；
-- `set rest`；
-- `set arg <name>`。
-
-不支持 insert、delete、layer、parameter bank、macro、include、表达式执行、裸 bytes 或 argsBase64 写入。
-
-同一 event 字段或同一 instruction argument 在整个 source 中只能写一次：
-
-- event 字段冲突返回 `EMEVD_DSL_DUPLICATE_WRITE`；
-- instruction argument 冲突返回 `EMEVD_DSL_DUPLICATE_ARGUMENT`；
-- 任何重复写都会阻止 plan 生成，不依赖未来 apply 阶段决定先后覆盖。
-
 ## Patch template roundtrip
 
 `renderEmevdPatchDsl()` 会渲染当前 event ID、rest behavior 和已绑定 EMEDF 的 typed args。未知 instruction 仅作为带 anchor 的只读注释出现。
@@ -86,15 +72,9 @@ render -> parse -> bind -> deterministic empty plan
 
 ## 安全边界
 
-- source 最大 256 KiB；
-- token 最大 20,000；
-- nesting 最大 16；
-- tokenizer 无文件系统访问、无动态执行；
 - 所有 diagnostics 带 source span；
 - schema 缺失或 fingerprint 变化时不产出 plan；
 - unknown instruction 保持只读；
-- 重复 target write 失败关闭；
-- integer 严格执行 u8/s8/u16/s16/u32/s32 范围；
 - bool 不与 number 自动转换；
 - f32 必须 finite；
 - event ID 冲突失败；
