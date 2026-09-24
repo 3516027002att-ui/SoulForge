@@ -120,7 +120,7 @@
       "goal": "已接入固定 Smithbox 2.2.4 本机发行包中的 SDT PARAM metadata，校验 commit/release/archive/tree/license digest、隔离导入、provenance、升级与撤回；不随 SoulForge 再分发导入数据",
       "hardPrerequisites": "W-PARAM-META-01 已完成；固定来源与非再分发政策已裁定；真实导入保持仓库外",
       "entryPoints": [
-        "packages/core/src/param/smithboxParamMetadataSource.ts",
+        "packages/core/src/testing/smithboxParamMetadataSource.ts",
         "packages/core/src/param/paramMetadata.ts"
       ],
       "requiredValidation": "npm run test:smithbox-param-metadata-source",
@@ -141,7 +141,7 @@
       "hardPrerequisites": "metadata contract 与固定 Smithbox adapter 已完成；仓库外 PARAM fixture registry 已可用；剩余布局不得绕过",
       "entryPoints": [
         "bridge/SoulForge.Bridge/ParamNativeDocument.cs",
-        "packages/core/src/param/smithboxParamMetadataSource.ts",
+        "packages/core/src/testing/smithboxParamMetadataSource.ts",
         "native fixture registry"
       ],
       "requiredValidation": "npm run bridge:verify:param、npm run test:smithbox-param-metadata-source、npm run test:param-metadata-native",
@@ -273,7 +273,7 @@
       "hardPrerequisites": "W-EMEVD-PATCHIR-02 已完成 production 接线；未知指令、opaque 尾部和 layer 变体不得被重编码；真实文档既有重复事件 id 容忍但不修改；同 bank:id 多长度变体必须按长度签名区分，不得编造参数类型；无合法类型源时保持 opaque/partial 并继续其他工程切片，不能转成用户介入项；DarkScript3 EMEDF 数据为 All Rights Reserved，不得提交或打包",
       "entryPoints": [
         "packages/core/src/emevd/emedfSchema.ts",
-        "packages/core/src/emevd/emedfExternalAdapter.ts",
+        "packages/core/src/testing/emedfExternalAdapter.ts",
         "packages/core/src/emevd/emedfCoverage.ts",
         "packages/core/src/emevd/dslCompiler.ts",
         "packages/core/src/editing/emevdFourViewController.ts",

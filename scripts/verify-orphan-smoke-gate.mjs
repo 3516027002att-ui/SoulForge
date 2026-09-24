@@ -75,7 +75,9 @@ const EXCLUDED_SCRIPTS = Object.freeze({
   'verify-mission1-corpus-v2.mjs': '依赖本机 Mission1 语料与 manifest 的独立复核，按需手工运行。',
   'verify-agent-task-record-gate.mjs': '历史 task-record 交叉验证脚本；生产链路已迁移到 CoreToolSession/NativeReadProofStore，不将手工台账重新接回验证调度。',
   'verify-release-tag.mjs': 'GitHub Windows Release 工作流中的 tag/package 预发布校验，必须由工作流传入明确 RELEASE_TAG，不作为无 tag 的普通回归套件。',
-  'verify-release-update-assets.mjs': 'GitHub Windows Release 工作流中的生成资产完整性校验，依赖同批 NSIS/latest.yml/SHA256SUMS 产物，仅在发布前资产目录就绪时运行。'
+  'verify-release-update-assets.mjs': 'GitHub Windows Release 工作流中的生成资产完整性校验，依赖同批 NSIS/latest.yml/SHA256SUMS 产物，仅在发布前资产目录就绪时运行。',
+  'verify-first-party-lua-hks.mjs': 'first-party 工作流（W-FIRSTPARTY-SCHEMA-01，claim 自 2026-09-16 heartbeatStale）的 Lua/HKS 校验脚本；npm 入口与层级登记归该工作流接续，本次治理修复只恢复可判定性，不代为接线其验证入口。',
+  'verify-first-party-tae-corpus.mjs': 'first-party 工作流的 TAE corpus 门禁，依赖本机真实语料；npm 入口与层级登记归 W-FIRSTPARTY-SCHEMA-01 接续，理由同上。'
 });
 
 function collectScriptText() {
