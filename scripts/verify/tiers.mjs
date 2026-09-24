@@ -171,6 +171,18 @@ export const TIER_BY_SCRIPT = Object.freeze({
   'test:editor-mutation-service': 'unit',
   'test:emedf-schema': 'unit',
   'test:emevd-dsl-compiler': 'unit',
+  // first-party agent / content-search 工作流新增的 8 条 suite 补登记（2026-09-24
+  // 治理修复）：内容引用检索、EMEVD 参数求值、Lua 结构、EMEVD 确定性引用、
+  // CLI session、工作区快扫、RAG 刷新队列、PARAM 读取回退。均为纯逻辑或
+  // 注入式 smoke，无 native 语料硬依赖，本机实测全部通过，归 unit。
+  'test:content-search': 'unit',
+  'test:emevd-parameter-evaluator': 'unit',
+  'test:lua-structure': 'unit',
+  'test:emevd-deterministic-reference': 'unit',
+  'test:sfcli-session': 'unit',
+  'test:workspace-scan-fast-path': 'unit',
+  'test:rag-refresh-queue': 'unit',
+  'test:param-read-fallback': 'unit',
   'test:emevd-envelope-map': 'unit',
   'test:emevd-external-adapter': 'unit',
   'test:emevd-four-view': 'unit',
