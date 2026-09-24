@@ -37,11 +37,12 @@ export function contentSearchPage<T>(options: {
   };
   let offset = input.offset ?? 0;
   let expectedHash: string | undefined;
+  let legacyScope: SearchScope | undefined;
   const domain = options.tool === 'search_param_rows' ? 'param' : 'fmg';
   if (input.cursor !== undefined) {
     if (typeof input.cursor !== 'string' || input.offset !== undefined) invalid('续页只传 cursor，不同时传 offset。');
     const payload = parseOpaqueCursor(input.cursor);
-    if (payload.sessionId !== 'content-search-v1' || payload.domain !== domain) invalid('游标不属于当前内容搜索。');
+    if (!['content-search-v1', 'content-search-v2'].includes(payload.sessionId) || payload.domain !== domain) invalid('游标不属于当前内容搜索。');
     let parsed: SearchScope;
     try { parsed = JSON.parse(payload.scope) as SearchScope; }
     catch { invalid('搜索游标范围无效。'); }
@@ -50,23 +51,33 @@ export function contentSearchPage<T>(options: {
       || parsed.paramNames.some((name) => typeof name !== 'string')
       || !Number.isSafeInteger(parsed.limit) || parsed.limit < 1 || parsed.limit > 6) invalid('游标与当前工作区或搜索工具不匹配。');
     if ((input.query !== undefined && input.query !== parsed.query)
-      || (input.paramNames !== undefined && JSON.stringify(paramNames) !== JSON.stringify(parsed.paramNames))
-      || (input.limit !== undefined && scope.limit !== parsed.limit)) invalid('续页时不能改变搜索条件。');
-    scope = parsed;
+      || (input.paramNames !== undefined && JSON.stringify(paramNames) !== JSON.stringify(parsed.paramNames))) invalid('续页时不能改变搜索条件。');
+    if (input.limit !== undefined && scope.limit > parsed.limit) invalid('恢复当前页只能缩小窗口，不能扩大 limit。');
+    if (payload.sessionId === 'content-search-v1') legacyScope = parsed;
+    scope = { ...parsed, limit: input.limit === undefined ? parsed.limit : scope.limit };
     offset = payload.offset;
     expectedHash = payload.sourceHash;
   }
   if (typeof offset !== 'number' || !Number.isSafeInteger(offset) || offset < 0) invalid('offset 必须是非负整数。', 'INVALID_SEARCH_WINDOW');
   const all = options.search(scope.query, scope.paramNames);
-  const hash = createHash('sha256').update(JSON.stringify(scope));
-  for (const match of all) hash.update('\0').update(JSON.stringify(options.fingerprint(match)));
+  // Window size is a delivery choice, not query/snapshot identity. A failed
+  // transport can retry the current cursor with fewer rows without skipping it.
+  const { limit: _windowSize, ...snapshotScope } = scope;
+  const hash = createHash('sha256').update(JSON.stringify(snapshotScope));
+  const legacyHash = legacyScope ? createHash('sha256').update(JSON.stringify(legacyScope)) : undefined;
+  for (const match of all) {
+    const fingerprint = JSON.stringify(options.fingerprint(match));
+    hash.update('\0').update(fingerprint);
+    legacyHash?.update('\0').update(fingerprint);
+  }
   const sourceHash = hash.digest('hex');
-  if (expectedHash !== undefined && expectedHash !== sourceHash) invalid('搜索结果已变化，请重新搜索。', 'STALE_READ_CURSOR');
+  const expectedSnapshotHash = legacyHash?.digest('hex') ?? sourceHash;
+  if (expectedHash !== undefined && expectedHash !== expectedSnapshotHash) invalid('搜索结果已变化，请重新搜索。', 'STALE_READ_CURSOR');
   const matches = all.slice(offset, offset + scope.limit);
   const end = offset + matches.length;
   const truncated = end < all.length;
   const nextCursor = truncated ? createOpaqueCursor({
-    sessionId: 'content-search-v1', domain, scope: JSON.stringify(scope), sourceHash, offset: end
+    sessionId: 'content-search-v2', domain, scope: JSON.stringify(scope), sourceHash, offset: end
   }) : undefined;
   return {
     query: scope.query, matches, total: all.length, totalCount: all.length,

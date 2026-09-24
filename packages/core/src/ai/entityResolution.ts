@@ -17,6 +17,7 @@ import {
 } from '../indexing/coverageState.js';
 import type { ChrLinkageResult } from '../references/chrLinkageResolver.js';
 import { WorkspaceIndex } from '../indexing/workspaceIndex.js';
+import { isActiveSemanticSource } from '../workspace/resourceKinds.js';
 
 export type EntityResolutionDomain = 'event' | 'map' | 'param' | 'msg' | 'action' | 'resource' | 'chr' | string;
 
@@ -179,6 +180,8 @@ export interface EntityResolutionResult {
   hypotheses: PendingRelationEdge[];
   /** Only current, native-verified candidates may enter this list. */
   mutationTargets: string[];
+  /** False when the fuzzy candidate budget truncated distinct target identities. */
+  candidateSetComplete: boolean;
   diagnostics: string[];
 }
 
@@ -265,6 +268,7 @@ export async function resolveEntity(input: EntityResolutionInput): Promise<Entit
       progress: [],
       hypotheses: [],
       mutationTargets: [],
+      candidateSetComplete: true,
       diagnostics: ['resolver requires a current workspace index']
     });
   }
@@ -282,6 +286,7 @@ export async function resolveEntity(input: EntityResolutionInput): Promise<Entit
   });
 
   let candidates: EntityCandidate[] = [];
+  let candidateSetComplete = true;
   if (exact) {
     attemptedRoutes.push('exact_handle');
     candidates = exactCandidates(index, handleText, domain, maxCandidates);
@@ -312,20 +317,31 @@ export async function resolveEntity(input: EntityResolutionInput): Promise<Entit
       // The two high-value name routes intentionally run together.  Neither
       // route is allowed to claim absence on its own.
       attemptedRoutes.push('memory', 'fmg', 'param');
+      // Fetch one item past the caller's bounded candidate budget on every
+      // fuzzy route. Without this sentinel, a high-scoring wrong-domain or
+      // wrong-row candidate can make a truncated result look exhaustive.
+      const fuzzyFetchLimit = Math.min(MAX_CANDIDATES + 1, maxCandidates + 1);
       const [memoryCandidates, fmgCandidates, paramCandidates, domainCandidates] = await Promise.all([
         Promise.resolve(memoryHintCandidates(index, input.memoryHints ?? [], query, domain)),
         Promise.resolve(domain === 'param' || domain === 'unknown' || domain === 'msg'
-          ? index.searchTextEntries(query, maxCandidates)
+          ? index.searchTextEntries(query, fuzzyFetchLimit)
           : []),
-        Promise.resolve(domain === 'msg' ? [] : index.searchParamRows(query, maxCandidates)),
-        Promise.resolve(searchDomain(index, query, domain, maxCandidates))
+        Promise.resolve(domain === 'msg' ? [] : index.searchParamRows(query, fuzzyFetchLimit)),
+        Promise.resolve(searchDomain(index, query, domain, fuzzyFetchLimit))
       ]);
-      candidates = mergeCandidates([
+      const mergedCandidates = mergeCandidatesForRequestedDomain([
         ...memoryCandidates,
         ...fmgCandidates.map((result) => candidateFromText(result.item, result.score, 'fmg', result.highlights)),
         ...paramCandidates.map((result) => candidateFromParam(result.item, result.score, 'param', result.highlights)),
         ...domainCandidates
-      ], maxCandidates);
+      ], Number.MAX_SAFE_INTEGER, domain);
+      const targetCandidateCount = mergedCandidates.filter((candidate) => isRequestedDomainCandidate(candidate, domain)).length;
+      candidateSetComplete = targetCandidateCount <= maxCandidates;
+      candidates = mergedCandidates.slice(0, maxCandidates);
+      if (!candidateSetComplete) {
+        blockedReasons.push('CANDIDATE_SET_INCOMPLETE');
+        diagnostics.push(`CANDIDATE_SET_INCOMPLETE: fuzzy retrieval found ${targetCandidateCount} distinct ${domain} candidates but maxCandidates=${maxCandidates}`);
+      }
       nextReadPlan.push({
         stepId: 'native-fuzzy-candidates',
         route: 'read_native',
@@ -337,13 +353,17 @@ export async function resolveEntity(input: EntityResolutionInput): Promise<Entit
     }
   }
 
-  candidates = candidates.map((candidate) => verifyIndexedCandidate(index, candidate));
+  candidates = candidates.map((candidate) => {
+    if (!isRequestedDomainCandidate(candidate, domain)) return excludeDomainMismatchedCandidate(candidate, domain);
+    return verifyIndexedCandidate(index, candidate);
+  });
   const verifiedEdges: VerifiedRelationEdge[] = [];
   const pendingEdges: PendingRelationEdge[] = [];
   const hypotheses: PendingRelationEdge[] = [];
   const identityChains: IdentityChain[] = [];
 
   for (const candidate of candidates.slice(0, maxCandidates)) {
+    if (candidate.status === 'excluded') continue;
     const chain: IdentityChain = {
       candidateId: candidate.candidateId,
       nodes: [candidate.candidateId],
@@ -477,8 +497,10 @@ export async function resolveEntity(input: EntityResolutionInput): Promise<Entit
     }
   }
 
-  const hasVerifiedCandidate = candidates.some((candidate) => candidate.status === 'verified' && candidate.nativeVerified);
-  const mutationTargets = candidates
+  const targetCandidates = candidates.filter((candidate) => isRequestedDomainCandidate(candidate, domain));
+  const hasVerifiedCandidate = targetCandidates.some((candidate) => candidate.status === 'verified' && candidate.nativeVerified);
+  const mutationTargets = (candidateSetComplete ? candidates : [])
+    .filter((candidate) => isRequestedDomainCandidate(candidate, domain))
     .filter((candidate) => candidate.status === 'verified' && candidate.nativeVerified)
     .filter((candidate) => !requestedRelations.some((relation) => (
       !relationRuleForRequest(relation)
@@ -490,16 +512,21 @@ export async function resolveEntity(input: EntityResolutionInput): Promise<Entit
     const code = notFoundCode(coverage, coverage.predicateCompleteness);
     blockedReasons.push(code);
   }
-  if (candidates.some((candidate) => candidate.status === 'stale')) blockedReasons.push('STALE_NATIVE_EVIDENCE');
-  if (candidates.some((candidate) => candidate.status === 'candidate')) blockedReasons.push('NATIVE_READ_REQUIRED_BEFORE_MUTATION');
+  if (targetCandidates.some((candidate) => candidate.status === 'stale')) blockedReasons.push('STALE_NATIVE_EVIDENCE');
+  if (targetCandidates.some((candidate) => candidate.status === 'candidate')) blockedReasons.push('NATIVE_READ_REQUIRED_BEFORE_MUTATION');
+  if (candidates.some((candidate) => candidate.status === 'excluded')) {
+    diagnostics.push('DOMAIN_MISMATCH_CANDIDATES_RETAINED_AS_CLUES');
+  }
   if (blockedReasons.length > 0 && !hasVerifiedCandidate) {
     diagnostics.push(...blockedReasons.filter((reason) => reason.startsWith('NOT_FOUND')));
   }
 
   const status = candidates.length === 0
     ? canConcludeNotFound(coverage, coverage.predicateCompleteness) ? 'not_found_complete_coverage' : query ? 'not_found' : 'blocked'
+    : !candidateSetComplete
+      ? hasVerifiedCandidate ? 'partial' : 'blocked'
     : mutationTargets.length > 0 && blockedReasons.every((reason) => !reason.startsWith('RELATION_'))
-      ? candidates.filter((candidate) => candidate.nativeVerified).length > 1 ? 'ambiguous' : 'resolved'
+      ? targetCandidates.filter((candidate) => candidate.nativeVerified).length > 1 ? 'ambiguous' : 'resolved'
       : hasVerifiedCandidate ? 'partial' : 'blocked';
 
   return makeResult({
@@ -518,6 +545,7 @@ export async function resolveEntity(input: EntityResolutionInput): Promise<Entit
     progress,
     hypotheses: hypotheses.slice(0, maxEdges),
     mutationTargets,
+    candidateSetComplete,
     diagnostics
   });
 }
@@ -588,7 +616,7 @@ function exactCandidates(
       found.push(candidateFromEvent(event, 100, 'exact_handle', ['exact native handle']));
     }
   }
-  for (const file of index.getFiles()) {
+  for (const file of index.getFiles().filter(isActiveSemanticSource)) {
     if (domain !== 'unknown' && domain !== 'resource') continue;
     const handles = [file.sourceUri, file.sourcePath, file.relativePath, file.absolutePath].map(normalizeHandle);
     if (handles.includes(normalized)) {
@@ -729,6 +757,28 @@ function candidateFromEvent(event: EventSymbol, score: number, route: EntityCand
   };
 }
 
+function isRequestedDomainCandidate(candidate: Pick<EntityCandidate, 'domain'>, requestedDomain: EntityResolutionDomain): boolean {
+  if (requestedDomain === 'unknown') return true;
+  // CHR searches are intentionally backed by the map entity projection; the
+  // candidate domain remains map-entity so its native handle stays truthful.
+  const targetDomain = requestedDomain === 'chr' ? 'map' : requestedDomain;
+  return candidate.domain === targetDomain;
+}
+
+function excludeDomainMismatchedCandidate(candidate: EntityCandidate, requestedDomain: EntityResolutionDomain): EntityCandidate {
+  return {
+    ...candidate,
+    status: 'excluded',
+    nativeVerified: false,
+    rejectionReason: `candidate domain ${candidate.domain} does not match requested domain ${requestedDomain}`,
+    evidence: [...candidate.evidence, {
+      kind: 'index',
+      sourceUri: candidate.sourceUri,
+      detail: `retained as a ${candidate.domain} clue; excluded from ${requestedDomain} identity and mutation targets`
+    }]
+  };
+}
+
 function verifyIndexedCandidate(index: WorkspaceIndex, candidate: EntityCandidate): EntityCandidate {
   if (!candidate.sourceUri || !candidate.sourceSnapshot) {
     return { ...candidate, status: 'candidate', nativeVerified: false };
@@ -862,6 +912,7 @@ async function addChrLinkageEdges(input: {
       input.blockedReasons.push('EDGE_BUDGET_EXHAUSTED');
       return;
     }
+    if (candidate.status === 'excluded') continue;
     if (!candidate.namespace.toLowerCase().startsWith('param:npcparam')) continue;
     const rowId = parseNativeRowId(candidate.nativeHandle);
     if (rowId === undefined) continue;
@@ -890,32 +941,60 @@ async function addChrLinkageEdges(input: {
     for (const map of linkage.maps) {
       if (input.verifiedEdges.length >= input.maxEdges) break;
       const mapUri = `map://${map.mapId}/part/${map.partName}`;
-      input.verifiedEdges.push({
-        ruleId: 'character-model.map-part-name',
-        fromUri: chrUri,
-        toUri: mapUri,
-        sourceProperty: 'part.name',
-        targetNamespace: 'map-entity',
-        sourceSnapshot,
-        targetConfirmed: true,
-        confidence: 'high',
-        evidence: [{ kind: 'linkage', sourceUri: map.mapFile, sourceProperty: 'part.name', detail: 'native MSB character part matched character model' }]
-      });
+      const evidenceDetail = map.identityStatus === 'native-foreign-key'
+        ? `native MSB npcParamRowId=${rowId} matched entityId=${map.entityId ?? '?'}; instance identity preserved`
+        : `model/name match only for ${map.partName}; native MSB foreign key was not available, so this is not a confirmed instance`
+      if (map.identityStatus === 'native-foreign-key') {
+        input.verifiedEdges.push({
+          ruleId: 'character-model.map-part-foreign-key',
+          fromUri: chrUri,
+          toUri: mapUri,
+          sourceProperty: 'npcParamRowId',
+          targetNamespace: 'map-entity',
+          sourceSnapshot,
+          targetConfirmed: true,
+          confidence: 'high',
+          evidence: [{ kind: 'linkage', sourceUri: map.mapFile, sourceProperty: 'npcParamRowId', value: rowId, detail: evidenceDetail }]
+        });
+      } else {
+        input.pendingEdges.push({
+          fromUri: chrUri,
+          toUri: mapUri,
+          targetNamespace: 'map-entity',
+          reason: 'MAP_INSTANCE_FOREIGN_KEY_UNVERIFIED',
+          hypothesis: false,
+          sourceProperty: 'part.name',
+          ruleId: 'character-model.map-part-foreign-key',
+          evidence: [{ kind: 'linkage', sourceUri: map.mapFile, sourceProperty: 'part.name', detail: evidenceDetail }]
+        });
+      }
       chain?.nodes.push(mapUri);
     }
     for (const event of linkage.associatedBossEvents) {
       if (input.verifiedEdges.length >= input.maxEdges) break;
       const eventUri = `event://${event.eventFile}#${event.eventId}`;
-      input.verifiedEdges.push({
+      const eventTargetConfirmed = event.causality === 'defeat-handler-observed';
+      const eventEdge: VerifiedRelationEdge = {
         ruleId: 'map-part.event-scope',
         fromUri: chrUri,
         toUri: eventUri,
         sourceProperty: 'eventId',
         targetNamespace: 'event',
         sourceSnapshot,
-        targetConfirmed: true,
+        targetConfirmed: eventTargetConfirmed,
         confidence: 'medium',
-        evidence: [{ kind: 'linkage', sourceUri: event.eventFile, sourceProperty: 'eventId', value: event.eventId, detail: event.description }]
+        evidence: [{ kind: 'linkage' as const, sourceUri: event.eventFile, sourceProperty: 'eventId', value: event.eventId, detail: `${event.description}; causality=${event.causality}; this does not prove reward/drop ownership` }]
+      };
+      if (eventTargetConfirmed) input.verifiedEdges.push(eventEdge);
+      else input.pendingEdges.push({
+        fromUri: eventUri,
+        toUri: chrUri,
+        targetNamespace: 'event',
+        reason: 'EVENT_SCOPE_ONLY_NOT_CAUSAL',
+        hypothesis: false,
+        sourceProperty: 'eventId',
+        ruleId: 'map-part.event-scope',
+        evidence: eventEdge.evidence
       });
       chain?.nodes.push(eventUri);
     }
@@ -1025,8 +1104,19 @@ async function runNativeReadForExact(
 function parseNativeHandle(handle: string, domain: EntityResolutionDomain): { namespace: string; objectKey: string; sourceUri?: string } | undefined {
   const trimmed = handle.trim();
   if (!trimmed) return undefined;
+  const fragment = trimmed.indexOf('#');
+  if (domain === 'msg' && fragment > 0) {
+    const prefix = trimmed.slice(0, fragment);
+    const looksLikeUri = /^[a-z][a-z\d+.-]*:\/\//iu.test(prefix) || prefix.startsWith('file:');
+    const looksLikeMsgResource = /\.(?:fmg|msgbnd)(?:\.dcx)?$/iu.test(prefix);
+    // FMG categories may themselves contain path separators (for example
+    // zhocn/item/npc名#902012). They are logical table/entry handles, not a
+    // filesystem source URI; keep the whole handle for the native reader.
+    if (prefix.includes('/') && !looksLikeUri && !looksLikeMsgResource) {
+      return { namespace: namespaceForDomain(domain), objectKey: trimmed };
+    }
+  }
   if (trimmed.startsWith('file:') || trimmed.includes('/') || trimmed.includes('\\')) {
-    const fragment = trimmed.indexOf('#');
     if (fragment > 0) {
       return { namespace: namespaceForDomain(domain), objectKey: trimmed.slice(fragment + 1), sourceUri: trimmed.slice(0, fragment) };
     }
@@ -1115,6 +1205,26 @@ function mergeCandidates(candidates: readonly EntityCandidate[], limit: number):
     }
   }
   return [...byId.values()].sort((left, right) => right.score - left.score).slice(0, limit);
+}
+
+/**
+ * Explicit domain requests must spend the bounded candidate budget on the
+ * requested native domain before retaining cross-domain lexical clues.  FMG
+ * text is useful for locating a PARAM row name, but it can never displace a
+ * matching PARAM candidate when maxCandidates is small.
+ */
+function mergeCandidatesForRequestedDomain(
+  candidates: readonly EntityCandidate[],
+  limit: number,
+  requestedDomain: EntityResolutionDomain
+): EntityCandidate[] {
+  const merged = mergeCandidates(candidates, Number.MAX_SAFE_INTEGER);
+  if (requestedDomain === 'unknown') return merged.slice(0, limit);
+  const target = merged.filter((candidate) => isRequestedDomainCandidate(candidate, requestedDomain));
+  const clues = merged.filter((candidate) => !isRequestedDomainCandidate(candidate, requestedDomain));
+  const selected = target.slice(0, limit);
+  if (selected.length >= limit) return selected;
+  return [...selected, ...clues.slice(0, limit - selected.length)];
 }
 
 function uniqueStrings(values: readonly string[]): string[] {

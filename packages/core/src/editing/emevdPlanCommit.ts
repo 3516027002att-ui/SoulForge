@@ -11,6 +11,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import { pathToFileURL } from 'node:url';
 import type {
+  BridgeResult,
   EmevdEditorDocument,
   EmevdMutationPlan,
   PatchIR,
@@ -68,6 +69,10 @@ export interface EmevdPlanPatchEngineCommitRequest extends EmevdPlanCommitReques
 export interface EmevdReReadReport {
   ok: boolean;
   outputHash: string;
+  /** Payload/source hash from the native re-read, when available. */
+  sourceHash?: string;
+  /** Outer container hash from the native re-read, when available. */
+  outerFileHash?: string;
   eventCount: number;
   instructionCount: number;
   semanticIdentical: boolean;
@@ -75,9 +80,25 @@ export interface EmevdReReadReport {
   byteConsistent: boolean;
 }
 
+export type EmevdTransactionStatus = 'not_committed' | 'committed';
+
+/** Verification performed after the durable transaction changed the target. */
+export interface EmevdNativeVerification {
+  status: 'verified' | 'failed';
+  code?: string;
+  message?: string;
+  details?: unknown;
+}
+
 export interface EmevdPlanCommitResult {
   ok: boolean;
+  /** Explicitly distinguishes a rolled-back/failed transaction from a committed one. */
+  transactionStatus?: EmevdTransactionStatus;
+  /** Result of the independent post-commit Bridge re-read, when a file changed. */
+  nativeVerification?: EmevdNativeVerification;
   outputHash?: string;
+  /** Payload/source hash from Bridge staging, when DCX output exposes it. */
+  payloadHash?: string;
   /** "emevd" for raw payload output; "dcx" when the staged artifact is a rebuilt outer DCX. */
   sourceFormat?: 'emevd' | 'dcx';
   /** Outer container hash of the staged artifact (dcx only). */
@@ -89,6 +110,27 @@ export interface EmevdPlanCommitResult {
   committedPath?: string;
   reRead?: EmevdReReadReport;
   diagnostics: Array<{ severity: string; code: string; message: string }>;
+}
+
+export interface EmevdPostCommitReadInput {
+  sourcePath: string;
+  allowedRoots: string[];
+  timeoutMs?: number;
+  oodleRuntimeRoot?: string;
+  sourceFormat: 'emevd' | 'dcx';
+  expectedOutputHash: string;
+  expectedPayloadHash?: string;
+  opId: string;
+  committedPath?: string;
+  outputHash?: string;
+  payloadHash?: string;
+  outerFileHash?: string;
+  eventCount?: number;
+  instructionCount?: number;
+  mutationCount: number;
+  commitDiagnostics: Array<{ severity: string; code: string; message: string }>;
+  /** Narrow seam for deterministic post-commit failure tests. */
+  read?: () => Promise<BridgeResult<EmevdReadEnvelope>>;
 }
 
 interface BridgeMutationWithOrder {
@@ -669,37 +711,113 @@ export async function commitEmevdPlanViaPatchEngine(
   if (committed.changedFiles.length === 0) {
     return {
       ok: false,
+      transactionStatus: 'not_committed',
+      ...(staged.result.outputHash ? { outputHash: staged.result.outputHash } : {}),
+      ...(staged.result.payloadHash ? { payloadHash: staged.result.payloadHash } : {}),
+      ...(staged.result.sourceFormat === 'dcx' ? { sourceFormat: staged.result.sourceFormat } : {}),
+      ...(staged.result.outerFileHash ? { outerFileHash: staged.result.outerFileHash } : {}),
       mutationCount: staged.mutationCount,
       opId: committed.opId,
       diagnostics: commitDiagnostics
     };
   }
 
-  // Re-read the committed file via Bridge (production re-read boundary).
-  // DCX 场景下 Bridge 重开报告的是 payload sourceHash + outerFileHash；字节一致
-  // 必须按 outer 容器哈希比对（与 C# writer 的 outputHash 口径一致）。
-  const reRead = await runBridge<EmevdReadEnvelope>({
-    command: 'read-emevd-document',
-    filePath: request.sourcePath,
+  return finalizeEmevdPostCommitRead({
+    sourcePath: request.sourcePath,
     allowedRoots: request.allowedRoots,
-    timeoutMs: request.timeoutMs ?? 120_000,
-    ...(request.oodleRuntimeRoot !== undefined ? { oodleRuntimeRoot: request.oodleRuntimeRoot } : {})
+    ...(request.timeoutMs !== undefined ? { timeoutMs: request.timeoutMs } : {}),
+    ...(request.oodleRuntimeRoot !== undefined ? { oodleRuntimeRoot: request.oodleRuntimeRoot } : {}),
+    sourceFormat: staged.result.sourceFormat ?? 'emevd',
+    expectedOutputHash: staged.result.outputHash ?? '',
+    ...(staged.result.payloadHash ? { expectedPayloadHash: staged.result.payloadHash } : {}),
+    opId: committed.opId,
+    ...(committed.changedFiles[0] !== undefined ? { committedPath: committed.changedFiles[0] } : {}),
+    ...(staged.result.outputHash ? { outputHash: staged.result.outputHash } : {}),
+    ...(staged.result.payloadHash ? { payloadHash: staged.result.payloadHash } : {}),
+    ...(staged.result.outerFileHash ? { outerFileHash: staged.result.outerFileHash } : {}),
+    ...(staged.result.eventCount !== undefined ? { eventCount: staged.result.eventCount } : {}),
+    ...(staged.result.instructionCount !== undefined
+      ? { instructionCount: staged.result.instructionCount }
+      : {}),
+    mutationCount: staged.mutationCount,
+    commitDiagnostics,
+    read: () => runBridge<EmevdReadEnvelope>({
+      command: 'read-emevd-document',
+      filePath: request.sourcePath,
+      allowedRoots: request.allowedRoots,
+      timeoutMs: request.timeoutMs ?? 120_000,
+      ...(request.oodleRuntimeRoot !== undefined ? { oodleRuntimeRoot: request.oodleRuntimeRoot } : {})
+    })
   });
-  const sourceFormat = staged.result.sourceFormat ?? 'emevd';
+}
+
+/**
+ * Perform the independent post-commit native read and preserve the durable
+ * receipt even when that read throws. The reader seam is production-bound to
+ * runBridge by the caller and is injectable only for deterministic tests.
+ */
+export async function finalizeEmevdPostCommitRead(
+  input: EmevdPostCommitReadInput
+): Promise<EmevdPlanCommitResult> {
+  const read = input.read ?? (() => runBridge<EmevdReadEnvelope>({
+    command: 'read-emevd-document',
+    filePath: input.sourcePath,
+    allowedRoots: input.allowedRoots,
+    timeoutMs: input.timeoutMs ?? 120_000,
+    ...(input.oodleRuntimeRoot !== undefined ? { oodleRuntimeRoot: input.oodleRuntimeRoot } : {})
+  }));
+  let reRead: BridgeResult<EmevdReadEnvelope>;
+  try {
+    reRead = await read();
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    const diagnostic = {
+      severity: 'error' as const,
+      code: 'EMEVD_REREAD_EXCEPTION',
+      message: `提交后重读异常：${message}`
+    };
+    return {
+      ok: false,
+      transactionStatus: 'committed',
+      nativeVerification: {
+        status: 'failed',
+        code: diagnostic.code,
+        message: diagnostic.message
+      },
+      ...(input.outputHash ? { outputHash: input.outputHash } : {}),
+      ...(input.payloadHash ? { payloadHash: input.payloadHash } : {}),
+      ...(input.sourceFormat === 'dcx' && input.outerFileHash ? { outerFileHash: input.outerFileHash } : {}),
+      ...(input.eventCount !== undefined ? { eventCount: input.eventCount } : {}),
+      ...(input.instructionCount !== undefined ? { instructionCount: input.instructionCount } : {}),
+      mutationCount: input.mutationCount,
+      opId: input.opId,
+      ...(input.committedPath ? { committedPath: input.committedPath } : {}),
+      diagnostics: [...input.commitDiagnostics, diagnostic]
+    };
+  }
+
   const reReadSourceHash = reRead.data?.sourceHash ?? '';
   const reReadOuterHash = reRead.data?.outerFileHash ?? '';
-  const expectedOutputHash = (staged.result.outputHash ?? '').toLowerCase();
-  const actualOutputHash = (sourceFormat === 'dcx' ? reReadOuterHash : reReadSourceHash).toLowerCase();
+  const actualOutputHash = (input.sourceFormat === 'dcx' ? reReadOuterHash : reReadSourceHash).toLowerCase();
   const byteConsistent = reRead.parseStatus !== 'failed'
-    && actualOutputHash === expectedOutputHash
-    && (sourceFormat !== 'dcx'
+    && actualOutputHash === input.expectedOutputHash.toLowerCase()
+    && (input.sourceFormat !== 'dcx'
       || !reReadSourceHash
-      || reReadSourceHash.toLowerCase() === (staged.result.payloadHash ?? '').toLowerCase());
+      || reReadSourceHash.toLowerCase() === (input.expectedPayloadHash ?? '').toLowerCase());
   const semanticIdentical = reRead.data?.roundTrip?.semanticIdentical === true;
   const reReadOk = byteConsistent && semanticIdentical;
-
+  const reReadReport: EmevdReReadReport = {
+    ok: reReadOk,
+    outputHash: input.sourceFormat === 'dcx' ? reReadOuterHash : reReadSourceHash,
+    ...(reReadSourceHash ? { sourceHash: reReadSourceHash } : {}),
+    ...(reReadOuterHash ? { outerFileHash: reReadOuterHash } : {}),
+    eventCount: reRead.data?.eventCount ?? 0,
+    instructionCount: reRead.data?.instructionCount ?? 0,
+    semanticIdentical,
+    byteConsistent
+  };
   const diagnostics: EmevdPlanCommitResult['diagnostics'] = [
-    ...commitDiagnostics,
+    ...input.commitDiagnostics,
     ...(reReadOk
       ? [{
           severity: 'info' as const,
@@ -711,30 +829,50 @@ export async function commitEmevdPlanViaPatchEngine(
           code: 'EMEVD_REREAD_FAILED',
           message: reRead.parseStatus === 'failed'
             ? '提交后重读失败：Bridge 无法解析已提交文件。'
-            : `提交后重读不一致：字节或语义往返未通过（期望 ${staged.result.outputHash}，实际 ${reReadOuterHash || reReadSourceHash}）。`
+            : `提交后重读不一致：字节或语义往返未通过（期望 ${input.expectedOutputHash}，实际 ${reReadOuterHash || reReadSourceHash}）。`
         }])
   ];
-
+  const nativeVerification: EmevdNativeVerification = reReadOk
+    ? {
+        status: 'verified',
+        details: {
+          outputHash: reReadReport.outputHash,
+          sourceHash: reReadSourceHash || undefined,
+          outerFileHash: reReadOuterHash || undefined,
+          eventCount: reReadReport.eventCount,
+          instructionCount: reReadReport.instructionCount,
+          semanticIdentical,
+          byteConsistent
+        }
+      }
+    : {
+        status: 'failed',
+        code: 'EMEVD_REREAD_FAILED',
+        message: diagnostics.find((item) => item.code === 'EMEVD_REREAD_FAILED')?.message
+          ?? '提交后重读未通过。',
+        details: {
+          outputHash: reReadReport.outputHash,
+          sourceHash: reReadSourceHash || undefined,
+          outerFileHash: reReadOuterHash || undefined,
+          eventCount: reReadReport.eventCount,
+          instructionCount: reReadReport.instructionCount,
+          semanticIdentical,
+          byteConsistent
+        }
+      };
   return {
     ok: reReadOk,
-    ...(staged.result.outputHash ? { outputHash: staged.result.outputHash } : {}),
-    ...(staged.result.sourceFormat === 'dcx' ? { sourceFormat: staged.result.sourceFormat } : {}),
-    ...(staged.result.outerFileHash ? { outerFileHash: staged.result.outerFileHash } : {}),
-    ...(staged.result.eventCount !== undefined ? { eventCount: staged.result.eventCount } : {}),
-    ...(staged.result.instructionCount !== undefined
-      ? { instructionCount: staged.result.instructionCount }
-      : {}),
-    mutationCount: staged.mutationCount,
-    opId: committed.opId,
-    ...(committed.changedFiles[0] !== undefined ? { committedPath: committed.changedFiles[0] } : {}),
-    reRead: {
-      ok: reReadOk,
-      outputHash: sourceFormat === 'dcx' ? reReadOuterHash : reReadSourceHash,
-      eventCount: reRead.data?.eventCount ?? 0,
-      instructionCount: reRead.data?.instructionCount ?? 0,
-      semanticIdentical,
-      byteConsistent
-    },
+    transactionStatus: 'committed',
+    nativeVerification,
+    ...(input.outputHash ? { outputHash: input.outputHash } : {}),
+    ...(input.payloadHash ? { payloadHash: input.payloadHash } : {}),
+    ...(input.sourceFormat === 'dcx' && input.outerFileHash ? { outerFileHash: input.outerFileHash } : {}),
+    ...(input.eventCount !== undefined ? { eventCount: input.eventCount } : {}),
+    ...(input.instructionCount !== undefined ? { instructionCount: input.instructionCount } : {}),
+    mutationCount: input.mutationCount,
+    opId: input.opId,
+    ...(input.committedPath ? { committedPath: input.committedPath } : {}),
+    reRead: reReadReport,
     diagnostics
   };
 }

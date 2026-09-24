@@ -1,7 +1,7 @@
 /** Regression for historical workspace_stats projection failures and audit parity. */
 import assert from 'node:assert/strict';
 import { pathToFileURL } from 'node:url';
-import { createAgentToolBridge } from '../ai/agentToolBridge.js';
+import { createAgentToolBridge, MAX_BOUNDED_TOOL_RESULT_BYTES, MAX_BOUNDED_TOOL_RESULT_CHARS } from '../ai/agentToolBridge.js';
 import { createDefaultToolRegistry, ToolRegistry, type ToolResult } from '../ai/toolRegistry.js';
 import { WorkspaceIndex } from '../indexing/workspaceIndex.js';
 import { projectEvidenceClaims } from '../model-services/evidenceIdentity.js';
@@ -198,8 +198,14 @@ export async function runAgentToolEnvelopeSmoke(): Promise<void> {
   const paramSearchEnvelope = JSON.parse(paramSearch.content);
   assert.equal(paramSearchEnvelope.data.items[0].item.rowId, 4400);
   assert.equal(paramSearchEnvelope.data.items[0].item.uri, `${paramSourceUri}#NpcParam/4400`);
-  assert.equal(paramSearchEnvelope.data.items[0].item.fields[0].fieldId, 'hp');
-  assert.equal(paramSearchEnvelope.data.items[0].item.fields[0].value, 100);
+  const paramCandidate = paramSearchEnvelope.data.items[0].item;
+  assert.equal(paramCandidate.fields, undefined);
+  assert.equal(paramCandidate.fieldsComplete, false);
+  assert.equal(paramCandidate.fieldPreview[0].fieldId, 'hp');
+  assert.equal(paramCandidate.fieldPreview[0].value, 100);
+  assert.equal(paramCandidate.readAction.tool, 'read_param_fields');
+  assert.deepEqual(paramCandidate.readAction.args.fieldIds, ['hp']);
+  assert.deepEqual(paramCandidate.readAction.args.rowIds, [4400]);
   const eventSearch = await contentBridge.executeTool({ id: 'event-search', name: 'search_events', argumentsJson: '{"query":"DisplayBossHealthBar"}' });
   assert.equal(eventSearch.ok, true, eventSearch.content);
   const eventSearchEnvelope = JSON.parse(eventSearch.content);
@@ -262,7 +268,7 @@ export async function runAgentToolEnvelopeSmoke(): Promise<void> {
       registryFingerprint: 'registry-fixture', instructionCount: 2, total: 2,
       offset: 0, limit: 256, returned: 2, truncated: false, darkScriptComplete: true,
       readRange: { start: 0, end: 2 },
-      darkScript: '$Event(1000, {\n' + '  DisplayBossHealthBar(1001),\n'.repeat(500) + '})',
+      darkScript: '$Event(1000, {\n' + '  DisplayBossHealthBar(1001),\n'.repeat(1200) + '})',
       instructions: [{ index: 0, bank: 2003, id: 5, unknown: false, emedfName: 'DisplayBossHealthBar', typedArgs: [], diagnostics: [] },
         { index: 1, bank: 2003, id: 6, unknown: false, emedfName: 'End', typedArgs: [], diagnostics: [] }], diagnostics: []
     } })
@@ -389,11 +395,13 @@ export async function runAgentToolEnvelopeSmoke(): Promise<void> {
     id: 'large-entity-resolution', name: 'resolve_entity', argumentsJson: '{"query":"Gyoubu"}'
   });
   assert.equal(resolutionResult.ok, true, resolutionResult.content);
-  assert.ok(Buffer.byteLength(resolutionResult.content, 'utf8') <= 8_192);
+  assert.ok(Buffer.byteLength(resolutionResult.content, 'utf8') <= MAX_BOUNDED_TOOL_RESULT_BYTES);
   const resolutionEnvelope = JSON.parse(resolutionResult.content);
-  assert.equal(resolutionEnvelope.data.record.candidatesReturnedCount, 8);
+  // 预算内候选全量交付（自适应预算取代旧的固定 8 条截断）：64 条小候选
+  // 约 10KB，24KB 候选预算内容得下，不截断。
+  assert.equal(resolutionEnvelope.data.record.candidatesReturnedCount, 64);
   assert.equal(resolutionEnvelope.data.record.candidatesTotalCount, 64);
-  assert.equal(resolutionEnvelope.data.record.candidatesTruncated, true);
+  assert.equal(resolutionEnvelope.data.record.candidatesTruncated, false);
   assert.equal(resolutionEnvelope.data.record.verifiedEdgesTotalCount, 64);
   assert.equal(resolutionEnvelope.data.record.verifiedEdgesTruncated, true);
   assert.equal(resolutionEnvelope.data.record.candidates[0].sourceUri, 'workspace://mods/gameparam/NpcParam/50800000');
@@ -439,11 +447,11 @@ export async function runAgentToolEnvelopeSmoke(): Promise<void> {
   assert.equal(committedOversized.envelope.truncated, true);
   assert.equal(committedOversized.envelope.data.record.outputBudget, undefined);
   assert.ok(
-    Buffer.byteLength(committedOversized.outer.content, 'utf8') <= 8192,
+    Buffer.byteLength(committedOversized.outer.content, 'utf8') <= MAX_BOUNDED_TOOL_RESULT_BYTES,
     `committed oversized envelope exceeded byte budget: ${Buffer.byteLength(committedOversized.outer.content, 'utf8')}`
   );
   assert.ok(
-    committedOversized.outer.content.length <= 8192,
+    committedOversized.outer.content.length <= MAX_BOUNDED_TOOL_RESULT_CHARS,
     `committed oversized envelope exceeded character budget: ${committedOversized.outer.content.length}`
   );
 
@@ -463,10 +471,14 @@ export async function runAgentToolEnvelopeSmoke(): Promise<void> {
   assert.equal(partialOversized.envelope.completeness, 'summary_only');
   assert.deepEqual(partialOversized.envelope.data.record, {});
 
-  // Force the strictest committed fallback: long opaque locators and nested
-  // diagnostics make the projected lifecycle itself too large.  The fallback
-  // must retain the committed lifecycle and expose why auxiliary data was
-  // omitted, without inviting a duplicate write.
+  // Force the strictest committed fallback.  Note on how it is forced: the
+  // lifecycle projection caps strings at 1024 chars and arrays at 8 items,
+  // so long locators/nested diagnostics alone can never overflow the minimal
+  // projection under the 32 KiB budget.  The only channel that reaches strict
+  // is an oversized outputBudget echoed verbatim by the minimal projection;
+  // strict then re-synthesizes it.  The fallback must retain the committed
+  // lifecycle and expose why auxiliary data was omitted, without inviting a
+  // duplicate write.
   const committedMinimal = await execute({
     ok: true,
     state: 'committed',
@@ -477,6 +489,11 @@ export async function runAgentToolEnvelopeSmoke(): Promise<void> {
         nativeVerification: { status: 'verified', sourceUri: '地图'.repeat(400) },
         knowledgeRefresh: { status: 'failed', semanticState: 'empty' },
         diagnostics: Array.from({ length: 8 }, () => ({ message: '诊断'.repeat(600) }))
+      },
+      outputBudget: {
+        code: 'RESULT_IDENTITY_TOO_LARGE',
+        projection: 'committed_lifecycle',
+        detail: 'x'.repeat(40_000)
       },
       sourceVersions: Array.from({ length: 128 }, (_, index) => ({
         sourceUri: `workspace://mods/event/${String(index).padStart(8, '0')}/${'长路径/'.repeat(12)}.emevd.dcx`,
@@ -490,8 +507,8 @@ export async function runAgentToolEnvelopeSmoke(): Promise<void> {
   assert.equal(typeof committedMinimal.envelope.data.record.operationId, 'string');
   assert.equal(committedMinimal.envelope.data.record.outputBudget.code, 'RESULT_IDENTITY_TOO_LARGE');
   assert.equal(committedMinimal.envelope.data.record.outputBudget.projection, 'committed_lifecycle');
-  assert.ok(Buffer.byteLength(committedMinimal.outer.content, 'utf8') <= 8192);
-  assert.ok(committedMinimal.outer.content.length <= 8192);
+  assert.ok(Buffer.byteLength(committedMinimal.outer.content, 'utf8') );
+  assert.ok(committedMinimal.outer.content.length <= MAX_BOUNDED_TOOL_RESULT_CHARS);
 
   // An explicitly failed lifecycle must not be silently promoted to completed,
   // even if a registry handler returned an inconsistent ok flag.
@@ -582,8 +599,8 @@ export async function runAgentToolEnvelopeSmoke(): Promise<void> {
     assert.equal(error.details?.diagnostics?.total, 1_000);
     assert.ok((error.details?.diagnostics?.returned ?? 0) <= 8);
     assert.equal(error.details?.diagnostics?.truncated, true);
-    assert.ok(Buffer.byteLength(failed.outer.content, 'utf8') <= 8_192);
-    assert.ok(failed.outer.content.length <= 8_192);
+    assert.ok(Buffer.byteLength(failed.outer.content, 'utf8') <= MAX_BOUNDED_TOOL_RESULT_BYTES);
+    assert.ok(failed.outer.content.length <= MAX_BOUNDED_TOOL_RESULT_CHARS);
   }
 
   // Some callers put stable identity and diagnostics on the error object
@@ -610,8 +627,8 @@ export async function runAgentToolEnvelopeSmoke(): Promise<void> {
   assert.equal(topLevelFailure.envelope.error.diagnostics.total, 1000);
   assert.ok(topLevelFailure.envelope.error.diagnostics.returned <= 8);
   assert.equal(topLevelFailure.envelope.error.diagnostics.truncated, true);
-  assert.ok(Buffer.byteLength(topLevelFailure.outer.content, 'utf8') <= 8_192);
-  assert.ok(topLevelFailure.outer.content.length <= 8_192);
+  assert.ok(Buffer.byteLength(topLevelFailure.outer.content, 'utf8') <= MAX_BOUNDED_TOOL_RESULT_BYTES);
+  assert.ok(topLevelFailure.outer.content.length <= MAX_BOUNDED_TOOL_RESULT_CHARS);
 
   // A post-commit failure state is not an ordinary retryable failure. The
   // bridge must preserve the lifecycle state even when the error is non-ok;

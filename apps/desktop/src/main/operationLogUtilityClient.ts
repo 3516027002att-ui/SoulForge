@@ -20,7 +20,8 @@ import type {
   RecoveryCleanupPlan,
   ResourceEntryChangeRecord,
   TransactionJournalPhase,
-  TransactionJournalRecord
+  TransactionJournalRecord,
+  KnowledgeStoreSnapshot
 } from '@soulforge/core';
 import {
   OPERATION_LOG_UTILITY_PROTOCOL,
@@ -80,6 +81,47 @@ interface UtilityTrace {
   outcome?: 'ok' | 'timeout' | 'request-failed' | 'workerfail' | 'close' | 'post-error' | 'late-completion';
   errorCode?: string;
 }
+
+export interface WorkspaceBoundUtilityStore {
+  readonly workspaceId: string;
+  replaceRagChunks(chunks: RagChunk[]): Promise<void>;
+  mergeRagChunks(chunks: RagChunk[]): Promise<void>;
+  mergeRagChunkDelta(input: {
+    sourceUri: string;
+    upserts: RagChunk[];
+    deletedChunkIds: string[];
+  }): Promise<OperationLogUtilityResultMap['mergeRagChunkDelta']>;
+  loadRagChunks(): Promise<RagChunk[]>;
+  searchRagChunks(query: string, limit?: number): Promise<RagChunk[]>;
+  replaceRagEmbeddings(entries: Array<{ chunkId: string; model: string; vector: Float32Array }>): Promise<void>;
+  mergeRagEmbeddings(input: {
+    model: string;
+    entries: Array<{ chunkId: string; contentHash: string; vector: Float32Array }>;
+    deletedChunkIds: string[];
+  }): Promise<void>;
+  loadRagEmbeddings(): Promise<Map<string, Float32Array>>;
+  loadRagEmbeddingRecords(): Promise<Array<{ chunkId: string; model: string; contentHash: string | null; vector: Float32Array }>>;
+  ragEmbeddingModel(): Promise<string | null>;
+  replaceReferences(references: ReferenceEdge[]): Promise<void>;
+  loadReferences(): Promise<ReferenceEdge[]>;
+  upsertJob(job: Omit<BackgroundJobRecord, 'workspaceId'>): Promise<void>;
+}
+
+type WorkspaceScopedMethod =
+  | 'replaceRagChunks'
+  | 'mergeRagChunks'
+  | 'mergeRagChunkDelta'
+  | 'loadRagChunks'
+  | 'searchRagChunks'
+  | 'replaceRagEmbeddings'
+  | 'mergeRagEmbeddings'
+  | 'loadRagEmbeddings'
+  | 'loadRagEmbeddingRecords'
+  | 'ragEmbeddingModel'
+  | 'replaceReferences'
+  | 'loadReferences'
+  | 'upsertJob'
+  | 'loadKnowledgeSnapshot';
 
 export class OperationLogUtilityClient implements OperationLogStore {
   private process: UtilityProcess | null = null;
@@ -223,11 +265,11 @@ export class OperationLogUtilityClient implements OperationLogStore {
   }
 
   replaceRagChunks(chunks: RagChunk[]): Promise<void> {
-    return this.request('replaceRagChunks', { chunks }).then(() => undefined);
+    return this.requestWorkspace('replaceRagChunks', this.requireActiveWorkspaceId(), { chunks }).then(() => undefined);
   }
 
   mergeRagChunks(chunks: RagChunk[]): Promise<void> {
-    return this.request('mergeRagChunks', { chunks }).then(() => undefined);
+    return this.requestWorkspace('mergeRagChunks', this.requireActiveWorkspaceId(), { chunks }).then(() => undefined);
   }
 
   mergeRagChunkDelta(input: {
@@ -235,15 +277,15 @@ export class OperationLogUtilityClient implements OperationLogStore {
     upserts: RagChunk[];
     deletedChunkIds: string[];
   }): Promise<OperationLogUtilityResultMap['mergeRagChunkDelta']> {
-    return this.request('mergeRagChunkDelta', input);
+    return this.requestWorkspace('mergeRagChunkDelta', this.requireActiveWorkspaceId(), input);
   }
 
   loadRagChunks(): Promise<RagChunk[]> {
-    return this.request('loadRagChunks', {});
+    return this.requestWorkspace('loadRagChunks', this.requireActiveWorkspaceId(), {});
   }
 
   async replaceRagEmbeddings(entries: Array<{ chunkId: string; model: string; vector: Float32Array }>): Promise<void> {
-    await this.request('replaceRagEmbeddings', { entries }).then(() => undefined);
+    await this.requestWorkspace('replaceRagEmbeddings', this.requireActiveWorkspaceId(), { entries }).then(() => undefined);
   }
 
   async mergeRagEmbeddings(input: {
@@ -251,11 +293,11 @@ export class OperationLogUtilityClient implements OperationLogStore {
     entries: Array<{ chunkId: string; contentHash: string; vector: Float32Array }>;
     deletedChunkIds: string[];
   }): Promise<void> {
-    await this.request('mergeRagEmbeddings', input).then(() => undefined);
+    await this.requestWorkspace('mergeRagEmbeddings', this.requireActiveWorkspaceId(), input).then(() => undefined);
   }
 
   async loadRagEmbeddings(): Promise<Map<string, Float32Array>> {
-    const plain = await this.request('loadRagEmbeddings', {});
+    const plain = await this.requestWorkspace('loadRagEmbeddings', this.requireActiveWorkspaceId(), {});
     const map = new Map<string, Float32Array>();
     for (const [chunkId, values] of Object.entries(plain)) {
       map.set(chunkId, Float32Array.from(values));
@@ -264,7 +306,7 @@ export class OperationLogUtilityClient implements OperationLogStore {
   }
 
   async loadRagEmbeddingRecords(): Promise<Array<{ chunkId: string; model: string; contentHash: string | null; vector: Float32Array }>> {
-    const records = await this.request('loadRagEmbeddingRecords', {});
+    const records = await this.requestWorkspace('loadRagEmbeddingRecords', this.requireActiveWorkspaceId(), {});
     return records.map((record) => ({
       chunkId: record.chunkId,
       model: record.model,
@@ -274,19 +316,19 @@ export class OperationLogUtilityClient implements OperationLogStore {
   }
 
   ragEmbeddingModel(): Promise<string | null> {
-    return this.request('ragEmbeddingModel', {});
+    return this.requestWorkspace('ragEmbeddingModel', this.requireActiveWorkspaceId(), {});
   }
 
   searchRagChunks(query: string, limit?: number): Promise<RagChunk[]> {
-    return this.request('searchRagChunks', { query, ...(limit === undefined ? {} : { limit }) });
+    return this.requestWorkspace('searchRagChunks', this.requireActiveWorkspaceId(), { query, ...(limit === undefined ? {} : { limit }) });
   }
 
   replaceReferences(references: ReferenceEdge[]): Promise<void> {
-    return this.request('replaceReferences', { references }).then(() => undefined);
+    return this.requestWorkspace('replaceReferences', this.requireActiveWorkspaceId(), { references }).then(() => undefined);
   }
 
   loadReferences(): Promise<ReferenceEdge[]> {
-    return this.request('loadReferences', {});
+    return this.requestWorkspace('loadReferences', this.requireActiveWorkspaceId(), {});
   }
 
   replaceDiagnostics(diagnostics: Array<Omit<PersistedDiagnostic, 'workspaceId'>>): Promise<void> {
@@ -298,7 +340,7 @@ export class OperationLogUtilityClient implements OperationLogStore {
   }
 
   upsertJob(job: Omit<BackgroundJobRecord, 'workspaceId'>): Promise<void> {
-    return this.request('upsertJob', { job }).then(() => undefined);
+    return this.requestWorkspace('upsertJob', this.requireActiveWorkspaceId(), { job }).then(() => undefined);
   }
 
   listJobs(): Promise<BackgroundJobRecord[]> {
@@ -350,6 +392,39 @@ export class OperationLogUtilityClient implements OperationLogStore {
     });
   }
 
+  /** Read the curator snapshot through the already-open utility connection. */
+  loadKnowledgeSnapshot(input: { workspaceId: string; rootPath: string; game: string }): Promise<KnowledgeStoreSnapshot | null> {
+    return this.requestWorkspace('loadKnowledgeSnapshot', input.workspaceId, {
+      rootPath: input.rootPath,
+      game: input.game
+    });
+  }
+
+  forWorkspace(workspaceId: string): WorkspaceBoundUtilityStore {
+    return {
+      workspaceId,
+      replaceRagChunks: (chunks) => this.requestWorkspace('replaceRagChunks', workspaceId, { chunks }).then(() => undefined),
+      mergeRagChunks: (chunks) => this.requestWorkspace('mergeRagChunks', workspaceId, { chunks }).then(() => undefined),
+      mergeRagChunkDelta: (input) => this.requestWorkspace('mergeRagChunkDelta', workspaceId, input),
+      loadRagChunks: () => this.requestWorkspace('loadRagChunks', workspaceId, {}),
+      searchRagChunks: (query, limit) => this.requestWorkspace('searchRagChunks', workspaceId, { query, ...(limit === undefined ? {} : { limit }) }),
+      replaceRagEmbeddings: (entries) => this.requestWorkspace('replaceRagEmbeddings', workspaceId, { entries }).then(() => undefined),
+      mergeRagEmbeddings: (input) => this.requestWorkspace('mergeRagEmbeddings', workspaceId, input).then(() => undefined),
+      loadRagEmbeddings: async () => {
+        const plain = await this.requestWorkspace('loadRagEmbeddings', workspaceId, {});
+        return new Map(Object.entries(plain).map(([chunkId, values]) => [chunkId, Float32Array.from(values)] as const));
+      },
+      loadRagEmbeddingRecords: async () => {
+        const records = await this.requestWorkspace('loadRagEmbeddingRecords', workspaceId, {});
+        return records.map((record) => ({ ...record, vector: Float32Array.from(record.vector) }));
+      },
+      ragEmbeddingModel: () => this.requestWorkspace('ragEmbeddingModel', workspaceId, {}),
+      replaceReferences: (references) => this.requestWorkspace('replaceReferences', workspaceId, { references }).then(() => undefined),
+      loadReferences: () => this.requestWorkspace('loadReferences', workspaceId, {}),
+      upsertJob: (job) => this.requestWorkspace('upsertJob', workspaceId, { job }).then(() => undefined)
+    };
+  }
+
   async health(): Promise<{ ready: boolean; appReady: boolean; workspaceId?: string }> {
     return this.request('health', {});
   }
@@ -372,6 +447,8 @@ export class OperationLogUtilityClient implements OperationLogStore {
   }
 
   async dispose(): Promise<void> {
+    const opening = this.opening;
+    if (opening) await opening.catch(() => undefined);
     const child = this.process;
     this.activeWorkspace = null;
     this.activeAppDatabasePath = null;
@@ -460,6 +537,26 @@ export class OperationLogUtilityClient implements OperationLogStore {
     const child = this.process;
     if (!child) return Promise.reject(new Error('数据库后台进程不可用。'));
     return this.requestOn(child, method, payload);
+  }
+
+  private requestWorkspace<Method extends WorkspaceScopedMethod>(
+    method: Method,
+    workspaceId: string,
+    payload: Omit<OperationLogUtilityPayloadMap[Method], 'workspaceId'>
+  ): Promise<OperationLogUtilityResultMap[Method]> {
+    if (this.activeWorkspace?.workspaceId !== workspaceId) {
+      return Promise.reject(Object.assign(
+        new Error(`数据库后台工作区不匹配：期望 ${workspaceId}。`),
+        { code: 'DATABASE_UTILITY_WORKSPACE_MISMATCH' }
+      ));
+    }
+    return this.request(method, { ...payload, workspaceId } as OperationLogUtilityPayloadMap[Method]);
+  }
+
+  private requireActiveWorkspaceId(): string {
+    const workspaceId = this.activeWorkspace?.workspaceId;
+    if (!workspaceId) throw Object.assign(new Error('数据库后台工作区尚未打开。'), { code: 'DATABASE_UTILITY_WORKSPACE_MISMATCH' });
+    return workspaceId;
   }
 
   private requestOn<Method extends OperationLogUtilityMethod>(

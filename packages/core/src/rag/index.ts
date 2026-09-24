@@ -5,7 +5,7 @@ export {
   createRagChunkExclusionMask,
   type RagChunkExclusionMask
 } from './retrieve.js';
-export { ensureLookupIndex } from './lookupIndex.js';
+export { ensureLookupIndex, attachLookupIndexAsync, type RagLookupBuildOptions } from './lookupIndex.js';
 export { retrieveEvidenceHybrid, type HybridVectorSource } from './hybridRetrieve.js';
 export {
   getRagStaleChunkIdsCached,

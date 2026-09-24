@@ -13,6 +13,8 @@ export const READ_ONLY_NATIVE_GOAL_TOOLS = Object.freeze(new Set([
   'read_tae_events',
   'read_msb_parts',
   'read_luabnd_script',
+  'analyze_luabnd_script',
+  'analyze_tae_structure',
   'search_events',
   'search_tae_events',
   'search_map_entities',
@@ -20,8 +22,26 @@ export const READ_ONLY_NATIVE_GOAL_TOOLS = Object.freeze(new Set([
   'search_text_entries'
 ]));
 
+// Discovery and source-structure tools deliberately stay usable as optional
+// observations, but their candidates/static projections are not an executable
+// task outcome. A required goal using one of these tools is rejected at the
+// contract boundary instead of being allowed to mint semantic completion.
+export const OBSERVATION_GOAL_TOOLS = Object.freeze(new Set([
+  'analyze_luabnd_script',
+  'analyze_tae_structure',
+  'search_events',
+  'search_tae_events',
+  'search_map_entities',
+  'search_param_rows',
+  'search_text_entries'
+]));
+
+export function isObservationGoalTool(tool) {
+  return typeof tool === 'string' && OBSERVATION_GOAL_TOOLS.has(tool);
+}
+
 const GOAL_KINDS = new Set([
-  'param-field', 'native-tool', 'event', 'tae-field', 'script', 'composite', 'semantic'
+  'param-field', 'native-tool', 'event', 'tae-field', 'script', 'composite', 'semantic', 'unsupported'
 ]);
 
 function contractError(message, details) {
@@ -88,6 +108,28 @@ function normalizeGoal(goal, index, prefix = '') {
     ? undefined
     : assertBoundedString(goal.changedPath, `${prefix}goal[${index}].changedPath`, 512)
         .replaceAll('\\', '/').replace(/^\/+/, '');
+
+  if (goal.kind === 'unsupported') {
+    const status = goal.verificationStatus ?? goal.status ?? 'unsupported';
+    if (status !== 'unsupported' && status !== 'unverified') {
+      throw contractError(`${prefix}goal[${index}] unsupported 目标的 verificationStatus 必须是 unsupported 或 unverified。`);
+    }
+    const reasonValue = goal.unsupportedReason ?? goal.reason;
+    const unsupportedReason = assertBoundedString(
+      reasonValue,
+      `${prefix}goal[${index}].unsupportedReason`,
+      2048
+    );
+    return {
+      goalId,
+      kind: 'unsupported',
+      required,
+      status,
+      verificationStatus: status,
+      unsupportedReason,
+      ...(changedPath ? { changedPath } : {})
+    };
+  }
 
   if (goal.kind === 'param-field') {
     if (typeof goal.table !== 'string' || goal.table.trim() === ''
@@ -176,6 +218,14 @@ function normalizeGoal(goal, index, prefix = '') {
   if (typeof tool !== 'string' || !READ_ONLY_NATIVE_GOAL_TOOLS.has(tool)) {
     throw contractError(`${prefix}goal[${index}] tool 不是允许的只读 native 工具。`);
   }
+  const verificationClass = isObservationGoalTool(tool) ? 'observation' : 'native';
+  if (required && verificationClass === 'observation') {
+    throw contractError(`${prefix}goal[${index}] 使用发现/静态工具 ${tool}，只能作为 optional 观察，不能作为 required semantic goal。`);
+  }
+  const requireSourceHash = goal.requireSourceHash !== false;
+  if (required && verificationClass === 'native' && !requireSourceHash) {
+    throw contractError(`${prefix}goal[${index}] required native goal 必须保留 sourceHash 证明，不能设置 requireSourceHash=false。`);
+  }
   if (!isPlainRecord(input)) throw contractError(`${prefix}goal[${index}] input 必须是对象。`);
   assertSafeInput(input, `${goalId}.input`);
   if (assertion === undefined) throw contractError(`${prefix}goal[${index}] 缺少 assertion。`);
@@ -186,8 +236,9 @@ function normalizeGoal(goal, index, prefix = '') {
     input,
     assertion: normalizeAssertion(assertion, `${goalId}.assertion`),
     required,
+    verificationClass,
     ...(changedPath ? { changedPath } : {}),
-    requireSourceHash: goal.requireSourceHash !== false
+    requireSourceHash
   };
 }
 
@@ -195,11 +246,28 @@ export function parseGoalContract(raw, {
   observationOnly = false,
   taskQuery,
   defaultTaskQuery,
-  defaultGoals = []
+  defaultGoals = [],
+  requiredGoalIds = []
 } = {}) {
+  const ensureRequiredGoalIds = (normalizedGoals) => {
+    const ids = new Set(normalizedGoals.map((goal) => goal.goalId));
+    const missingRequiredGoalIds = requiredGoalIds
+      .filter((goalId) => typeof goalId === 'string' && goalId.trim() !== '')
+      .filter((goalId) => !ids.has(goalId));
+    if (missingRequiredGoalIds.length > 0) {
+      throw contractError(
+        `--goals 缺少当前任务的必需目标：${missingRequiredGoalIds.join(', ')}。不能用局部断言替代完整任务契约。`,
+        { missingGoalIds: missingRequiredGoalIds }
+      );
+    }
+    return normalizedGoals;
+  };
   if (raw === undefined) {
     if (observationOnly) return [];
-    if (taskQuery === defaultTaskQuery) return defaultGoals.map((goal) => ({ ...goal }));
+    if (taskQuery === defaultTaskQuery) {
+      const normalizedDefaults = defaultGoals.map((goal, index) => normalizeGoal(goal, index));
+      return ensureRequiredGoalIds(normalizedDefaults);
+    }
     throw contractError('非默认任务须用 --goals 提供机器可验证目标，或 --observe 观察原文执行。');
   }
   let parsed;
@@ -213,12 +281,28 @@ export function parseGoalContract(raw, {
     throw contractError('--goals 必须是 1 到 64 项的数组，或包含该数组的对象。');
   }
   const ids = new Set();
-  return goals.map((goal, index) => {
+  const normalizedGoals = goals.map((goal, index) => {
     const normalized = normalizeGoal(goal, index);
     if (ids.has(normalized.goalId)) throw contractError(`goalId 重复：${normalized.goalId}`);
     ids.add(normalized.goalId);
     return normalized;
   });
+  return ensureRequiredGoalIds(normalizedGoals);
+}
+
+export function validateTaskContractGoals(goals, taskContract) {
+  const goalById = new Map((Array.isArray(goals) ? goals : [])
+    .filter((goal) => typeof goal?.goalId === 'string')
+    .map((goal) => [goal.goalId, goal]));
+  const missingGoalIds = (Array.isArray(taskContract?.postconditions) ? taskContract.postconditions : [])
+    .filter((goalId) => {
+      const goal = goalById.get(goalId);
+      return !goal || goal.required !== true;
+    });
+  return {
+    ok: missingGoalIds.length === 0,
+    missingGoalIds
+  };
 }
 
 function valuesEqual(actual, expected) {
@@ -254,6 +338,23 @@ export function matchesAssertion(root, assertion) {
   if (!isPlainRecord(assertion)) return false;
   if (Array.isArray(assertion.allOf)) return assertion.allOf.every((child) => matchesAssertion(root, child));
   if (Array.isArray(assertion.anyOf)) return assertion.anyOf.some((child) => matchesAssertion(root, child));
+  if (Array.isArray(assertion.sequence)) {
+    const resolved = readAssertionPath(root, assertion.path);
+    if (!resolved.found || !Array.isArray(resolved.value) || assertion.sequence.length === 0) return false;
+    let cursor = 0;
+    for (const expected of assertion.sequence) {
+      let matched = false;
+      for (; cursor < resolved.value.length; cursor += 1) {
+        if (matchesAssertion(resolved.value[cursor], expected)) {
+          matched = true;
+          cursor += 1;
+          break;
+        }
+      }
+      if (!matched) return false;
+    }
+    return true;
+  }
   if (assertion.some !== undefined) {
     const target = assertion.path === undefined ? root : readAssertionPath(root, assertion.path).value;
     return Array.isArray(target) && target.some((item) => matchesAssertion(item, assertion.some));

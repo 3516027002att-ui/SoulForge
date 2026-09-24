@@ -10,6 +10,10 @@ import {
   createRagCorpus,
   createPatchIr,
   executePatchIrThroughTransaction,
+  ingestKnowledgeSource,
+  KnowledgeStore,
+  openWorkspaceDatabase,
+  SqliteKnowledgeStorePersistence,
   openWorkspaceSession,
   type RagChunkDeltaStats
 } from '@soulforge/core';
@@ -41,6 +45,41 @@ app.whenReady().then(async () => {
   );
   try {
     const appDatabasePath = join(root, 'app.db');
+    const workspaceDatabasePath = join(root, 'workspace.db');
+    // Seed a durable curator generation before the utility owns the same
+    // database. The production path must then read it through the utility
+    // connection, not open a second main-process SQLite handle.
+    const seedDatabase = openWorkspaceDatabase(workspaceDatabasePath, {
+      nativeBinding: resolve(here, '../../.native/better_sqlite3.node')
+    });
+    try {
+      const seedStore = new KnowledgeStore({
+        persistence: new SqliteKnowledgeStorePersistence(seedDatabase, {
+          workspaceId, rootPath: overlayRoot, game: 'sekiro'
+        })
+      });
+      const seeded = ingestKnowledgeSource(seedStore, {
+        sourceId: 'knowledge:utility-smoke',
+        body: 'utility knowledge source',
+        observedVersion: 'rev-1',
+        readerSchemaHash: 'schema-1',
+        page: {
+          pageId: 'utility-page',
+          path: 'wiki/utility.md',
+          body: '# utility knowledge',
+          scope: {
+            gameProfile: 'sekiro',
+            version: '1.6.x',
+            visibility: 'project',
+            workspaceId,
+            namespace: 'utility-smoke'
+          }
+        }
+      });
+      if (!seeded.ok) throw new Error(`Knowledge seed failed: ${seeded.message}`);
+    } finally {
+      seedDatabase.close();
+    }
     await client.openAppDatabase(appDatabasePath);
     const appOnlyHealth = await client.health();
     if (appOnlyHealth.ready || !appOnlyHealth.appReady) {
@@ -62,7 +101,7 @@ app.whenReady().then(async () => {
     });
     await client.openWorkspace({
       appDatabasePath,
-      databasePath: join(root, 'workspace.db'),
+      databasePath: workspaceDatabasePath,
       workspaceId,
       rootPath: overlayRoot,
       game: 'sekiro',
@@ -72,6 +111,37 @@ app.whenReady().then(async () => {
       legacySemanticBackupDirectory: join(root, 'semantic-backups')
     });
     const health = await client.health();
+    const knowledgeSnapshot = await client.loadKnowledgeSnapshot({ workspaceId, rootPath: overlayRoot, game: 'sekiro' });
+    if (!knowledgeSnapshot
+      || knowledgeSnapshot.current === 'gen-0'
+      || knowledgeSnapshot.generations.find((generation) => generation.generationId === knowledgeSnapshot.current)
+        ?.pages['utility-page']?.body !== '# utility knowledge') {
+      throw new Error('Database utility knowledge snapshot round trip failed.');
+    }
+    const boundRag = client.forWorkspace(workspaceId);
+    await boundRag.loadReferences();
+    let staleWorkspaceRejected = false;
+    try {
+      await client.forWorkspace('stale-workspace').loadReferences();
+    } catch (error) {
+      staleWorkspaceRejected = /workspace/i.test(error instanceof Error ? error.message : String(error));
+    }
+    if (!staleWorkspaceRejected) throw new Error('Database utility accepted a stale workspace-bound request.');
+    const metadataDatabase = openWorkspaceDatabase(workspaceDatabasePath, {
+      readonly: true,
+      fileMustExist: true,
+      nativeBinding: resolve(here, '../../.native/better_sqlite3.node')
+    });
+    try {
+      const metadata = metadataDatabase.prepare(
+        'SELECT root_path AS rootPath, game FROM workspaces WHERE workspace_id = ?'
+      ).get(workspaceId) as { rootPath?: string; game?: string } | undefined;
+      if (metadata?.rootPath !== overlayRoot || metadata.game !== 'sekiro') {
+        throw new Error(`Database utility changed workspace metadata: ${JSON.stringify(metadata)}`);
+      }
+    } finally {
+      metadataDatabase.close();
+    }
     await access(appDatabasePath);
     await client.recordProviderUsage({
       eventId: 'usage-session-1:2',
@@ -216,6 +286,12 @@ app.whenReady().then(async () => {
     await client.upsertJob({
       jobId: 'utility-job', title: '索引工作区', jobKind: 'workspace_index', status: 'completed',
       progress: { current: 1, total: 1 }, payload: {}, result: { indexed: 1 },
+      createdAt: now, startedAt: now, completedAt: now, updatedAt: now
+    });
+    await client.upsertJob({
+      jobId: 'utility-job', title: '索引工作区', jobKind: 'workspace_index', status: 'cancelled',
+      progress: { current: 1, total: 1 }, payload: {},
+      error: { message: 'late cancellation must not reopen a terminal job' },
       createdAt: now, startedAt: now, completedAt: now, updatedAt: now
     });
     const utilityChunk: RagChunk = {

@@ -35,7 +35,7 @@ import type {
   ScriptExport,
   ScriptSymbol
 } from '@soulforge/shared';
-import { parseLuaStaticSubset } from './luaStaticSubset.js';
+import { buildLuaStructureIndex, parseLuaStaticSubset } from './luaStaticSubset.js';
 import type { LuaCall, LuaLocalBinding, LuaParseResult } from './luaStaticSubset.js';
 
 export interface ScriptReferenceBuildOptions {
@@ -247,6 +247,8 @@ export function buildScriptReferenceEdges(
 
       const occurrences: ScriptCallOccurrence[] = [];
       callsByScriptUri.set(child.uri, occurrences);
+      const structure = buildLuaStructureIndex(child.sourceText, parsed);
+      child.structure = structure;
       const context: CallContext = {
         child,
         containerUri: exportItem.sourceUri,
@@ -263,6 +265,7 @@ export function buildScriptReferenceEdges(
       for (const [statementIndex, call] of parsed.calls.entries()) {
         occurrences.push(emitCallEdges(context, call, statementIndex));
       }
+      child.calls = occurrences;
     }
   }
 

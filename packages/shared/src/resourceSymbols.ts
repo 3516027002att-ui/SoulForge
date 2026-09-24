@@ -241,6 +241,9 @@ export interface TaeEventSymbol {
   fields?: Array<{ name: string; value: string | number | boolean }>;
   /** 未解码参数体的有界 hex 预览（正文写 `undecoded hex=…`，不编造字段）。 */
   parameterBytesHex?: string;
+  /** Unknown/partial native event remains visible; absence of a template is not deletion. */
+  decodeStatus?: 'decoded' | 'partial' | 'unknown';
+  raw?: { eventTypeId: number; startTime: number; endTime: number; parameterBytesHex?: string };
 }
 
 /**
@@ -265,6 +268,35 @@ export interface ScriptCallOccurrence {
   resolution?: 'api' | 'local' | 'unknown';
 }
 
+export interface ScriptStructureFunction {
+  name: string;
+  kind: 'function' | 'goal';
+  span: { startLine: number; startColumn: number; endLine: number; endColumn: number; startOffset: number; endOffset: number };
+}
+
+export interface ScriptStructureBranch {
+  kind: 'if' | 'elseif' | 'else' | 'while' | 'for' | 'repeat';
+  span: { startLine: number; startColumn: number; endLine: number; endColumn: number; startOffset: number; endOffset: number };
+  conditionText?: string;
+}
+
+export interface ScriptStructureConstant {
+  name: string;
+  value: string | number | boolean | null;
+  span: { startLine: number; startColumn: number; endLine: number; endColumn: number; startOffset: number; endOffset: number };
+}
+
+export interface ScriptStructureIndex {
+  status: 'complete' | 'partial' | 'unsupported';
+  functions: ScriptStructureFunction[];
+  goals: ScriptStructureFunction[];
+  branches: ScriptStructureBranch[];
+  constants: ScriptStructureConstant[];
+  unsupportedApis: Array<{ callee: string; span: ScriptStructureFunction['span'] }>;
+  sourceHash?: string;
+  diagnostics?: string[];
+}
+
 export interface ScriptSymbol {
   uri: string;
   sourceUri: string;
@@ -278,6 +310,8 @@ export interface ScriptSymbol {
   /** Encoding/bytecode diagnostics when sourceText is unavailable. */
   encodingDiagnostics?: string[];
   calls?: ScriptCallOccurrence[];
+  /** Bounded source structure; not a game-behavior/runtime proof. */
+  structure?: ScriptStructureIndex;
   sourceHash?: string;
   outerFileHash?: string;
   sourceRevision?: number;

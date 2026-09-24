@@ -37,7 +37,9 @@ import type { NativeEditSession } from '../editing/nativeEditSession.js';
 import { refreshNativeSemanticSources } from '../indexing/nativeSemanticRefresh.js';
 import { WorkspaceIndex } from '../indexing/workspaceIndex.js';
 import { getFirstPartyEmedfRegistry } from '../schema/sekiro/firstPartySchema.js';
+import type { DiagnosticEvent } from '../diagnostics/diagnosticEvent.js';
 import { matchEmevdRoleRule } from './emevdRoleRules.js';
+import { isActiveSemanticSource } from '../workspace/resourceKinds.js';
 
 export type { ScriptLiteralTargetIndexes } from './scriptReferenceProvider.js';
 
@@ -127,6 +129,7 @@ export interface NativeReferenceContentOptions {
   scriptListReader?: NativeScriptListReader;
   scriptReader?: NativeScriptReader;
   paramRefresher?: typeof refreshNativeSemanticSources;
+  onDiagnostic?: (event: DiagnosticEvent) => void;
 }
 
 export interface NativeReferenceContentResult {
@@ -180,7 +183,7 @@ export async function enrichReferenceContent(
   const maxScripts = clampPositive(input.maxScripts ?? DEFAULT_MAX_SCRIPTS, DEFAULT_MAX_SCRIPTS);
   const maxBytes = clampPositive(input.maxBytes ?? DEFAULT_MAX_BYTES, DEFAULT_MAX_BYTES);
   const deadline = input.timeoutMs !== undefined ? Date.now() + Math.max(1, input.timeoutMs) : undefined;
-  const sourceFiles = sortFiles(input.sourceFiles ?? input.index.getFiles(), prioritySourceSet(input));
+  const sourceFiles = sortFiles((input.sourceFiles ?? input.index.getFiles()).filter(isActiveSemanticSource), prioritySourceSet(input));
   const matchesSource = (file: IndexedFile, pattern: RegExp) => pattern.test(file.relativePath) || pattern.test(file.sourceUri);
   const eventFiles = sourceFiles.filter((file) => file.resourceKind === 'event' && matchesSource(file, /\.emevd(?:\.dcx)?$/iu));
   const scriptFiles = sourceFiles.filter((file) => (file.resourceKind === 'script' || file.resourceKind === 'ai') && matchesSource(file, /\.(?:luabnd(?:\.dcx)?|lua|hks)$/iu));
@@ -214,13 +217,13 @@ export async function enrichReferenceContent(
     added: 0, updated: 0, skipped: 0, processedSources: 0, processedChildren: 0, nextOffset: cursor.scriptOffset
   };
   const phases = [
-    { files: eventFiles, run: async () => {
+    { name: 'event', files: eventFiles, run: async () => {
       eventProgress = await enrichEvents({ ...shared, registry, files: eventFiles, cursorOffset: cursor.eventOffset });
     } },
-    { files: paramFiles, run: async () => {
+    { name: 'param', files: paramFiles, run: async () => {
       paramProgress = await enrichParams({ ...shared, files: paramFiles, cursorOffset: cursor.paramOffset });
     } },
-    { files: scriptFiles, run: async () => {
+    { name: 'script', files: scriptFiles, run: async () => {
       scriptProgress = await enrichScripts({ ...shared, files: scriptFiles, cursorOffset: cursor.scriptOffset,
         maxScripts, maxBytes, scriptChildOffsets });
     } }
@@ -232,7 +235,35 @@ export async function enrichReferenceContent(
     - Number(a.files.some(file => priority.has(file.sourceUri))));
   for (const phase of phases) {
     throwIfAborted(signal);
-    await phase.run();
+    const startedAt = Date.now();
+    input.onDiagnostic?.({
+      phase: `reference.native-read.${phase.name}`,
+      status: 'start',
+      details: { candidateSources: phase.files.length }
+    });
+    try {
+      await phase.run();
+      input.onDiagnostic?.({
+        phase: `reference.native-read.${phase.name}`,
+        status: 'complete',
+        elapsedMs: Date.now() - startedAt,
+        details: {
+          remaining: {
+            eventSources: countRemaining(eventFiles, completed, failed),
+            scriptSources: countRemaining(scriptFiles, completed, failed),
+            paramSources: countRemaining(paramFiles, completed, failed)
+          }
+        }
+      });
+    } catch (error) {
+      input.onDiagnostic?.({
+        phase: `reference.native-read.${phase.name}`,
+        status: 'failed',
+        elapsedMs: Date.now() - startedAt,
+        details: { message: error instanceof Error ? error.message : String(error) }
+      });
+      throw error;
+    }
   }
   added += eventProgress.added + paramProgress.added + scriptProgress.added;
   updated += eventProgress.updated + paramProgress.updated + scriptProgress.updated;
@@ -787,7 +818,8 @@ function instructionToSymbol(
           name: arg.name,
           value: arg.parameterSymbol ?? arg.value,
           argIndex,
-          ...(role ? { role, roleSource: 'registry' as const } : {})
+          ...(role ? { role, roleSource: 'registry' as const } : {}),
+          ...(roleRule?.targetParamName ? { paramName: roleRule.targetParamName } : {})
         };
       })
     : [];

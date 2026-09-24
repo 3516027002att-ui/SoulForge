@@ -46,6 +46,8 @@ export interface SqliteKnowledgeStoreOptions {
   /** Used only to establish the internal workspace row required by the FK. */
   rootPath?: string;
   game?: string;
+  /** Utility snapshot reads must not rewrite workspace metadata from RPC input. */
+  ensureWorkspaceRow?: boolean;
 }
 
 /**
@@ -62,7 +64,7 @@ export class SqliteKnowledgeStorePersistence implements KnowledgeStorePersistenc
   constructor(database: SqliteDatabase, options: SqliteKnowledgeStoreOptions) {
     this.database = database;
     this.workspaceId = options.workspaceId;
-    this.database.prepare(`
+    if (options.ensureWorkspaceRow !== false) this.database.prepare(`
 INSERT INTO workspaces (workspace_id, root_path, game, created_at, updated_at)
 VALUES (@workspaceId, @rootPath, @game, @now, @now)
 ON CONFLICT(workspace_id) DO UPDATE SET

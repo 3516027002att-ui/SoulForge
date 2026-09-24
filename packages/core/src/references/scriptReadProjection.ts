@@ -51,11 +51,13 @@ export function projectScriptReadExport(input: ScriptReadProjectionInput): Scrip
   if (sameChild && input.script.sourceText === undefined) {
     delete child.sourceText;
     delete child.calls;
+    delete child.structure;
   } else if (sameChild && existingChild?.sourceText !== input.script.sourceText) {
     // Calls are derived from the exact source representation. A same child
     // hash can still be reread through a different decompiler/representation;
     // do not carry a derived call graph across that boundary.
     delete child.calls;
+    delete child.structure;
   }
 
   // The child replacement keeps its original array slot. A changed outer

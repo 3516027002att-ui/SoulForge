@@ -36,6 +36,14 @@ SoulForge 是给魂游（FromSoftware 的《只狼》《黑暗之魂》《艾尔
 
 开发与架构设计规范请参阅[实施交接书](docs/V0_5_IMPLEMENTATION_HANDOFF.md)。文档内容以当前治理登记与验证结果为准。
 
+### CLI 与真实 Agent 验证
+
+工具开发、问题复现和后续 Agent 请先看[执行手册：CLI 与真实 Agent 验证](docs/AGENT_EXECUTION_PLAYBOOK.md#agent-tool-validation)：包括生产工具直接调用、搜索与跨进程分页、unpacked Agent 模拟、已安装 EXE 验证，以及配置、报告和缓存排障。
+
+按目标选入口：**测工具用 CLI，测模型任务链路用 Agent 模拟，测安装版用 installed 模式**。仓库根 `SoulForge.exe` 是开发启动器，不是 installed smoke 的安装版应用。只查用法时直接运行 `node tools/soulforge-cli/sfcli.mjs --help` 或 `node scripts/run-real-agent-gyoubu.mjs --help`，不要无参数启动真实模型任务。
+
+本文和执行手册由 Git 跟踪，可随克隆/工作树获取；仅存在于本机的代理规则文件被 Git 忽略，不作为这些操作说明的唯一来源。
+
 ### 按改动选择验证
 
 优先使用统一入口组合本次所需验证；层级是选择工具，不表示每次修改都需要全跑。先用 `--list` 查看具体操作和环境需求：

@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import type { RagChunk, RagChunkFamily, RagCorpus } from '@soulforge/shared';
 import { RAG_CHUNK_FAMILIES } from '@soulforge/shared';
+import { compareCodePointText } from './topK.js';
 
 export type RetrievalVersion = string | number;
 
@@ -210,7 +211,7 @@ export function corpusRevision(corpus: RagCorpus): string {
   hash.update(corpus.workspaceId);
   hash.update('\u0000');
   hash.update(corpus.builtAt);
-  for (const chunk of [...corpus.chunks].sort((left, right) => compareText(left.chunkId, right.chunkId))) {
+  for (const chunk of [...corpus.chunks].sort((left, right) => compareCodePointText(left.chunkId, right.chunkId))) {
     hash.update(JSON.stringify([
       chunk.chunkId,
       chunk.workspaceId,
@@ -224,11 +225,63 @@ export function corpusRevision(corpus: RagCorpus): string {
     ]));
     hash.update('\n');
   }
-  for (const edge of [...corpus.references].sort((left, right) => compareText(edgeKey(left), edgeKey(right)))) {
-    hash.update(edgeKey(edge));
+  const orderedReferences = corpus.references
+    .map((edge, index) => ({ index, key: edgeKey(edge) }))
+    .sort((left, right) => compareCodePointText(left.key, right.key) || left.index - right.index);
+  for (const reference of orderedReferences) {
+    hash.update(reference.key);
     hash.update('\n');
   }
   return hash.digest('hex');
+}
+
+interface ValidatedLookupIdentity {
+  readonly chunkSignature: string;
+  readonly referenceSignature: string;
+}
+
+interface CorpusRevisionCacheEntry {
+  readonly lookup: ValidatedLookupIdentity;
+  readonly chunkSignature: string;
+  readonly referenceSignature: string;
+  readonly workspaceId: string;
+  readonly builtAt: string;
+  readonly revision: string;
+}
+
+// This cache is deliberately guarded by the lookup object and both mutable
+// signatures.  A corpus object may be edited in place, so a corpus-only
+// WeakMap hit would turn a stale revision into a valid cache key.
+const corpusRevisionCache = new WeakMap<RagCorpus, CorpusRevisionCacheEntry>();
+
+/**
+ * Return a canonical revision after the caller has completed ensureLookupIndex
+ * validation.  The same helper also warms the revision cache during async index
+ * publication, so the first retrieval does not pay the canonical sort cost.
+ */
+export function corpusRevisionForValidatedLookup(
+  corpus: RagCorpus,
+  lookup: ValidatedLookupIdentity
+): string {
+  const cached = corpusRevisionCache.get(corpus);
+  if (cached
+    && cached.lookup === lookup
+    && cached.chunkSignature === lookup.chunkSignature
+    && cached.referenceSignature === lookup.referenceSignature
+    && cached.workspaceId === corpus.workspaceId
+    && cached.builtAt === corpus.builtAt) {
+    return cached.revision;
+  }
+  const revision = corpusRevision(corpus);
+  corpusRevisionCache.set(corpus, {
+    lookup,
+    chunkSignature: lookup.chunkSignature,
+    referenceSignature: lookup.referenceSignature,
+    workspaceId: corpus.workspaceId,
+    builtAt: corpus.builtAt,
+    revision
+  });
+  return revision;
 }
 
 export interface RetrievalCacheKeyInput {
@@ -362,7 +415,7 @@ function normalizeOptionalStrings(
       }
     }
   }
-  return normalized.sort(compareText);
+  return normalized.sort(compareCodePointText);
 }
 
 function normalizeScopedString(
@@ -428,10 +481,10 @@ function mergeAliases(first: readonly string[] | undefined, second: readonly str
 function scopeKey(scope: Omit<NormalizedRetrievalScope, 'key'>): string {
   return JSON.stringify({
     workspaceId: scope.workspaceId,
-    families: [...scope.families].sort(compareText),
-    resourceUris: scope.resourceUris ? [...scope.resourceUris].sort(compareText) : null,
-    resourceKinds: scope.resourceKinds ? [...scope.resourceKinds].sort(compareText) : null,
-    relativePaths: scope.relativePaths ? [...scope.relativePaths].sort(compareText) : null,
+    families: [...scope.families].sort(compareCodePointText),
+    resourceUris: scope.resourceUris ? [...scope.resourceUris].sort(compareCodePointText) : null,
+    resourceKinds: scope.resourceKinds ? [...scope.resourceKinds].sort(compareCodePointText) : null,
+    relativePaths: scope.relativePaths ? [...scope.relativePaths].sort(compareCodePointText) : null,
     sourceUriPrefixes: scope.sourceUriPrefixes ?? null,
     game: scope.game ?? null,
     profile: scope.profile ?? null,
@@ -466,19 +519,7 @@ function nonEmptyString(value: unknown, code: string): string {
   return value.trim();
 }
 
-function compareText(left: string, right: string): number {
-  const a = [...left];
-  const b = [...right];
-  const length = Math.min(a.length, b.length);
-  for (let index = 0; index < length; index += 1) {
-    const leftCodePoint = a[index]!.codePointAt(0)!;
-    const rightCodePoint = b[index]!.codePointAt(0)!;
-    if (leftCodePoint !== rightCodePoint) return leftCodePoint < rightCodePoint ? -1 : 1;
-  }
-  return a.length - b.length;
-}
-
 function compareVersion(left: RetrievalVersion, right: RetrievalVersion): number {
   if (typeof left === 'number' && typeof right === 'number') return left - right;
-  return compareText(String(left), String(right));
+  return compareCodePointText(String(left), String(right));
 }

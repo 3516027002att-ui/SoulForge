@@ -13,6 +13,7 @@ import { fileURLToPath } from 'node:url';
 import { resolve, dirname } from 'node:path';
 import { tmpdir } from 'node:os';
 import { decodeReferenceQueryInput } from '@soulforge/shared';
+import { normalizeCliToolDiagnostic } from '../cli/cliDiagnostic.js';
 
 const failures: string[] = [];
 let checks = 0;
@@ -87,7 +88,9 @@ if (existsSync(batchPath)) {
 if (existsSync(hostPath)) {
   const hostModule = await import(new URL('../cli/localSessionHost.js', import.meta.url).href) as {
     LocalSessionHost?: new (sessionName: string, workspaceId: string, principal: string) => {
-      dispatch: (request: { id: string; tool: string; args: Record<string, unknown> }, call: (tool: string, args: Record<string, unknown>) => Promise<unknown>) => Promise<unknown>;
+      dispatch: (request: { id: string; tool: string; args: Record<string, unknown> }, call: (tool: string, args: Record<string, unknown>, signal?: AbortSignal) => Promise<unknown>) => Promise<unknown>;
+      requestCancel?: (requestId: string) => { ok: boolean; status?: { state: string } };
+      requestStatus?: (requestId: string) => { state: string; lateResultDiscarded?: boolean } | undefined;
       close: () => void;
     };
   };
@@ -120,6 +123,46 @@ if (existsSync(hostPath)) {
     }
     check('T11/host-rejects-request-id-conflict', conflict);
     host.close();
+
+    // Cancellation is a two-phase lifecycle: requestCancel must first expose
+    // cancel_requested, and only the settled executor may publish cancelled.
+    const cancellable = new hostModule.LocalSessionHost('cancel-smoke', 'workspace', 'cli-smoke');
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const pending = cancellable.dispatch({ id: 'late', tool: 'slow-read', args: {} }, async (_tool, _args, signal) => {
+      await gate;
+      // Deliberately ignore AbortSignal to prove the host discards a late result.
+      void signal;
+      return { late: true };
+    });
+    await new Promise((resolve) => setImmediate(resolve));
+    const cancelRequest = cancellable.requestCancel?.('late');
+    check('T11/cancel-requested-first', cancelRequest?.ok === true && cancelRequest.status?.state === 'cancel_requested');
+    check('T11/status-visible-during-cancel', cancellable.requestStatus?.('late')?.state === 'cancel_requested');
+    release();
+    const cancelled = await pending;
+    const terminalStatus = cancellable.requestStatus?.('late');
+    check('T11/late-result-discarded', (cancelled as { ok?: boolean; error?: { code?: string } }).ok === false
+      && (cancelled as { error?: { code?: string } }).error?.code === 'CLI_REQUEST_CANCELLED'
+      && terminalStatus?.state === 'cancelled'
+      && terminalStatus.lateResultDiscarded === true);
+    cancellable.close();
+
+    const abortedController = new AbortController();
+    abortedController.abort();
+    const cancelledDiagnostic = normalizeCliToolDiagnostic(
+      { ok: false, code: 'REFERENCE_QUERY_FAILED' },
+      abortedController.signal
+    );
+    check('T11/cancel-diagnostic-uses-session-code', cancelledDiagnostic.ok === false
+      && cancelledDiagnostic.code === 'CLI_REQUEST_CANCELLED'
+      && cancelledDiagnostic.cancelled === true
+      && cancelledDiagnostic.underlyingCode === 'REFERENCE_QUERY_FAILED',
+    `取消诊断必须使用 CLI_REQUEST_CANCELLED 并保留底层错误，实际 ${JSON.stringify(cancelledDiagnostic)}`);
+    const completedDiagnostic = normalizeCliToolDiagnostic({ ok: true }, new AbortController().signal);
+    check('T11/non-cancel-diagnostic-preserves-tool-result', completedDiagnostic.ok === true
+      && completedDiagnostic.code === undefined
+      && completedDiagnostic.cancelled !== true);
   }
 }
 

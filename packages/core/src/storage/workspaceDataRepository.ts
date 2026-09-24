@@ -170,6 +170,8 @@ ON CONFLICT(job_id) DO UPDATE SET title=excluded.title, job_kind=excluded.job_ki
  progress_total=excluded.progress_total, progress_message=excluded.progress_message,
  payload_json=excluded.payload_json, result_json=excluded.result_json, error_json=excluded.error_json,
  started_at=excluded.started_at, completed_at=excluded.completed_at, updated_at=excluded.updated_at
+WHERE background_jobs.status IN ('queued', 'running')
+   OR background_jobs.status = excluded.status
 `).run(job.jobId, this.workspaceId, job.title, job.jobKind, job.status, job.progress.current,
       job.progress.total ?? null, job.progress.message ?? null, JSON.stringify(job.payload),
       job.result === undefined ? null : JSON.stringify(job.result),
@@ -201,27 +203,27 @@ INSERT INTO rag_chunks (
  source_revision, source_hash, outer_file_hash, created_at
 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`);
     const insertFts = this.database.prepare(`
-INSERT INTO rag_chunks_fts (chunk_id, title, body) VALUES (?, ?, ?)`);
+INSERT INTO rag_chunks_fts (rowid, chunk_id, title, body) VALUES (?, ?, ?, ?)`);
     const insertTrigram = this.database.prepare(`
-INSERT INTO rag_chunks_fts_trigram (chunk_id, title, body) VALUES (?, ?, ?)`);
+INSERT INTO rag_chunks_fts_trigram (rowid, chunk_id, title, body) VALUES (?, ?, ?, ?)`);
     const createdAt = new Date().toISOString();
     this.database.transaction(() => {
-      const deleteFts = this.database.prepare(
-        'DELETE FROM rag_chunks_fts WHERE chunk_id IN (SELECT chunk_id FROM rag_chunks WHERE workspace_id = ?)');
-      const deleteTrigram = this.database.prepare(
-        'DELETE FROM rag_chunks_fts_trigram WHERE chunk_id IN (SELECT chunk_id FROM rag_chunks WHERE workspace_id = ?)');
-      deleteFts.run(this.workspaceId);
-      deleteTrigram.run(this.workspaceId);
+      const oldRowIds = this.database.prepare<[string], { mainRowId: number }>(
+        'SELECT rowid AS mainRowId FROM rag_chunks WHERE workspace_id = ?'
+      ).all(this.workspaceId).map((row) => row.mainRowId);
+      deleteFtsByMainRowId(this.database, 'rag_chunks_fts', oldRowIds);
+      deleteFtsByMainRowId(this.database, 'rag_chunks_fts_trigram', oldRowIds);
       this.database.prepare('DELETE FROM rag_chunks WHERE workspace_id = ?').run(this.workspaceId);
       for (const chunk of chunks) {
-        insert.run(
+        const result = insert.run(
           chunk.chunkId, this.workspaceId, chunk.sourceUri, chunk.symbolUri, chunk.family,
           chunk.title, chunk.body, JSON.stringify(chunk.numericIds),
           chunk.relativePath ?? null, chunk.resourceKind ?? null, chunk.confidence ?? null,
           chunk.contentHash, chunk.sourceRevision ?? null, chunk.sourceHash ?? null, chunk.outerFileHash ?? null, createdAt
         );
-        insertFts.run(chunk.chunkId, chunk.title, chunk.body);
-        insertTrigram.run(chunk.chunkId, chunk.title, chunk.body);
+        const mainRowId = Number(result.lastInsertRowid);
+        insertFts.run(mainRowId, chunk.chunkId, chunk.title, chunk.body);
+        insertTrigram.run(mainRowId, chunk.chunkId, chunk.title, chunk.body);
       }
     }).immediate();
   }
@@ -236,21 +238,39 @@ INSERT INTO rag_chunks_fts_trigram (chunk_id, title, body) VALUES (?, ?, ?)`);
    */
   mergeRagChunks(chunks: readonly RagChunk[]): void {
     for (const chunk of chunks) this.assertWorkspace(chunk.workspaceId);
+    const sourceByChunkId = new Map<string, string>();
+    for (const chunk of chunks) {
+      const previousSource = sourceByChunkId.get(chunk.chunkId);
+      if (previousSource !== undefined && previousSource !== chunk.sourceUri) {
+        throw new Error(`RAG chunk ${chunk.chunkId} has conflicting source URIs in one merge.`);
+      }
+      sourceByChunkId.set(chunk.chunkId, chunk.sourceUri);
+    }
+    // chunk_id is globally unique in SQLite.  Check foreign owners before the
+    // upsert so an ON CONFLICT update can never move another workspace's row.
+    assertNoForeignRagChunks(this.database, this.workspaceId, chunks.map((chunk) => chunk.chunkId));
     const existing = new Map(this.database.prepare<[string], RagChunkRow>(`
-SELECT chunk_id AS chunkId, workspace_id AS workspaceId, source_uri AS sourceUri,
+SELECT rowid AS mainRowId, chunk_id AS chunkId, workspace_id AS workspaceId, source_uri AS sourceUri,
  symbol_uri AS symbolUri, family, title, body, numeric_ids_json AS numericIdsJson,
  relative_path AS relativePath, resource_kind AS resourceKind, confidence,
  content_hash AS contentHash, source_revision AS sourceRevision, source_hash AS sourceHash,
  outer_file_hash AS outerFileHash
 FROM rag_chunks WHERE workspace_id = ?`).all(this.workspaceId)
       .map((row) => [row.chunkId, row] as const));
+    for (const chunk of chunks) {
+      const row = existing.get(chunk.chunkId);
+      if (row && row.sourceUri !== chunk.sourceUri) {
+        throw new Error(
+          `RAG chunk ${chunk.chunkId} source changed from ${row.sourceUri} to ${chunk.sourceUri}; full merge refused.`
+        );
+      }
+    }
     const desired = new Map(chunks.map((chunk) => [chunk.chunkId, chunk] as const));
     const deleted = [...existing.keys()].filter((chunkId) => !desired.has(chunkId));
-    const changed = chunks.filter((chunk) => {
+    const changed = [...desired.values()].filter((chunk) => {
       const row = existing.get(chunk.chunkId);
       if (!row) return true;
-      return row.sourceUri !== chunk.sourceUri
-        || row.symbolUri !== chunk.symbolUri
+      return row.symbolUri !== chunk.symbolUri
         || row.family !== chunk.family
         || row.title !== chunk.title
         || row.body !== chunk.body
@@ -264,10 +284,22 @@ FROM rag_chunks WHERE workspace_id = ?`).all(this.workspaceId)
         || (row.outerFileHash ?? null) !== (chunk.outerFileHash ?? null);
     });
     if (deleted.length === 0 && changed.length === 0) return;
+    const ftsRebuild = changed.filter((chunk) => {
+      const row = existing.get(chunk.chunkId);
+      return !row
+        || row.title !== chunk.title
+        || row.body !== chunk.body
+        || row.contentHash !== chunk.contentHash;
+    });
+    const ftsRebuildIds = new Set(ftsRebuild.map((chunk) => chunk.chunkId));
+    const deletedRowIds = deleted
+      .map((chunkId) => existing.get(chunkId)?.mainRowId)
+      .filter((rowId): rowId is number => rowId !== undefined);
+    const ftsRebuildExistingRowIds = ftsRebuild
+      .map((chunk) => existing.get(chunk.chunkId)?.mainRowId)
+      .filter((rowId): rowId is number => rowId !== undefined);
 
     const deleteChunk = this.database.prepare('DELETE FROM rag_chunks WHERE workspace_id = ? AND chunk_id = ?');
-    const deleteFts = this.database.prepare('DELETE FROM rag_chunks_fts WHERE chunk_id = ?');
-    const deleteTrigram = this.database.prepare('DELETE FROM rag_chunks_fts_trigram WHERE chunk_id = ?');
     const deleteEmbedding = this.database.prepare('DELETE FROM rag_embeddings WHERE chunk_id = ?');
     const insert = this.database.prepare(`
 INSERT INTO rag_chunks (
@@ -284,30 +316,30 @@ ON CONFLICT(chunk_id) DO UPDATE SET workspace_id=excluded.workspace_id,
  outer_file_hash=excluded.outer_file_hash,
  created_at=excluded.created_at`);
     const insertFts = this.database.prepare(
-      'INSERT INTO rag_chunks_fts (chunk_id, title, body) VALUES (?, ?, ?)');
+      'INSERT INTO rag_chunks_fts (rowid, chunk_id, title, body) VALUES (?, ?, ?, ?)');
     const insertTrigram = this.database.prepare(
-      'INSERT INTO rag_chunks_fts_trigram (chunk_id, title, body) VALUES (?, ?, ?)');
+      'INSERT INTO rag_chunks_fts_trigram (rowid, chunk_id, title, body) VALUES (?, ?, ?, ?)');
     const createdAt = new Date().toISOString();
     this.database.transaction(() => {
-      for (const chunkId of deleted) {
-        deleteFts.run(chunkId);
-        deleteTrigram.run(chunkId);
-        deleteChunk.run(this.workspaceId, chunkId);
-      }
+      deleteFtsByMainRowId(this.database, 'rag_chunks_fts', deletedRowIds);
+      deleteFtsByMainRowId(this.database, 'rag_chunks_fts_trigram', deletedRowIds);
+      deleteFtsByMainRowId(this.database, 'rag_chunks_fts', ftsRebuildExistingRowIds);
+      deleteFtsByMainRowId(this.database, 'rag_chunks_fts_trigram', ftsRebuildExistingRowIds);
+      for (const chunkId of deleted) deleteChunk.run(this.workspaceId, chunkId);
       for (const chunk of changed) {
-        // FTS tables are contentless from SQLite's perspective, so an update
-        // must remove the old index row before inserting the new one.
-        deleteFts.run(chunk.chunkId);
-        deleteTrigram.run(chunk.chunkId);
+        const existingRow = existing.get(chunk.chunkId);
         deleteEmbedding.run(chunk.chunkId);
-        insert.run(
+        const result = insert.run(
           chunk.chunkId, this.workspaceId, chunk.sourceUri, chunk.symbolUri, chunk.family,
           chunk.title, chunk.body, JSON.stringify(chunk.numericIds),
           chunk.relativePath ?? null, chunk.resourceKind ?? null, chunk.confidence ?? null,
           chunk.contentHash, chunk.sourceRevision ?? null, chunk.sourceHash ?? null, chunk.outerFileHash ?? null, createdAt
         );
-        insertFts.run(chunk.chunkId, chunk.title, chunk.body);
-        insertTrigram.run(chunk.chunkId, chunk.title, chunk.body);
+        if (ftsRebuildIds.has(chunk.chunkId)) {
+          const mainRowId = existingRow?.mainRowId ?? Number(result.lastInsertRowid);
+          insertFts.run(mainRowId, chunk.chunkId, chunk.title, chunk.body);
+          insertTrigram.run(mainRowId, chunk.chunkId, chunk.title, chunk.body);
+        }
       }
     }).immediate();
   }
@@ -343,12 +375,15 @@ ON CONFLICT(chunk_id) DO UPDATE SET workspace_id=excluded.workspace_id,
     const finalUpserts = [...finalUpsertsById.values()];
     const upsertIds = [...finalUpsertsById.keys()];
     const deletedChunkIds = [...new Set(input.deletedChunkIds)];
+    // Do not allow ON CONFLICT(chunk_id) to move a row owned by another
+    // workspace.  The check is read-only and bounded before any transaction.
+    assertNoForeignRagChunks(this.database, this.workspaceId, upsertIds);
     const existingRows = new Map<string, RagChunkRow>();
     const loadExistingRows = (chunkIds: readonly string[]): void => {
       if (chunkIds.length === 0) return;
       const placeholders = chunkIds.map(() => '?').join(', ');
       const rows = this.database.prepare(
-        `SELECT chunk_id AS chunkId, workspace_id AS workspaceId, source_uri AS sourceUri,
+        `SELECT rowid AS mainRowId, chunk_id AS chunkId, workspace_id AS workspaceId, source_uri AS sourceUri,
  symbol_uri AS symbolUri, family, title, body, numeric_ids_json AS numericIdsJson,
  relative_path AS relativePath, resource_kind AS resourceKind, confidence,
  content_hash AS contentHash, source_revision AS sourceRevision, source_hash AS sourceHash,
@@ -362,6 +397,16 @@ FROM rag_chunks WHERE workspace_id = ? AND chunk_id IN (${placeholders})`
     // decisions based on the row's current source URI.
     loadExistingRows(upsertIds);
     loadExistingRows(deletedChunkIds);
+    const sourceMismatch = finalUpserts.find((chunk) => {
+      const row = existingRows.get(chunk.chunkId);
+      return row !== undefined && row.sourceUri !== sourceUri;
+    });
+    if (sourceMismatch) {
+      const existingRow = existingRows.get(sourceMismatch.chunkId)!;
+      throw new Error(
+        `RAG chunk ${sourceMismatch.chunkId} source changed from ${existingRow.sourceUri} to ${sourceUri}; delta refused.`
+      );
+    }
     const existingUpsertIds = finalUpserts
       .filter((chunk) => existingRows.has(chunk.chunkId))
       .map((chunk) => chunk.chunkId);
@@ -391,7 +436,7 @@ FROM rag_chunks WHERE workspace_id = ? AND chunk_id IN (${placeholders})`
     // FTS rows below.
     const ftsRebuildExistingIds = finalUpserts
       .filter((chunk) => existingRows.has(chunk.chunkId) && ftsRebuildIdSet.has(chunk.chunkId))
-      .map((chunk) => chunk.chunkId);
+      .map((chunk) => existingRows.get(chunk.chunkId)!.mainRowId);
     const stats: RagChunkDeltaStats = {
       finalUpserts: finalUpserts.length,
       newUpserts: finalUpserts.filter((chunk) => !existingRows.has(chunk.chunkId)).length,
@@ -410,18 +455,10 @@ FROM rag_chunks WHERE workspace_id = ? AND chunk_id IN (${placeholders})`
       embeddingDeletes: existingUpsertIds.length
     };
     const standaloneDeletedIds = sourceDeletedChunkIds
-      .filter((chunkId) => !finalUpsertsById.has(chunkId));
+      .filter((chunkId) => !finalUpsertsById.has(chunkId))
+      .map((chunkId) => existingRows.get(chunkId)!.mainRowId);
     const deleteChunk = this.database.prepare(
       'DELETE FROM rag_chunks WHERE workspace_id = ? AND source_uri = ? AND chunk_id = ?');
-    // FTS5's chunk_id is UNINDEXED, so one DELETE per changed row scans the
-    // whole virtual table repeatedly.  Keep per-row statements for repeated
-    // upserts below, but collapse the normal batch invalidation into one scan
-    // per table.  The batch limit keeps SQLite bind parameters bounded.
-    const deleteFtsBatch = (table: 'rag_chunks_fts' | 'rag_chunks_fts_trigram', chunkIds: readonly string[]): void => {
-      if (chunkIds.length === 0) return;
-      const placeholders = chunkIds.map(() => '?').join(', ');
-      this.database.prepare(`DELETE FROM ${table} WHERE chunk_id IN (${placeholders})`).run(...chunkIds);
-    };
     const deleteEmbedding = this.database.prepare('DELETE FROM rag_embeddings WHERE chunk_id = ?');
     const insert = this.database.prepare(`
 INSERT INTO rag_chunks (
@@ -438,15 +475,15 @@ ON CONFLICT(chunk_id) DO UPDATE SET workspace_id=excluded.workspace_id,
  outer_file_hash=excluded.outer_file_hash,
  created_at=excluded.created_at`);
     const insertFts = this.database.prepare(
-      'INSERT INTO rag_chunks_fts (chunk_id, title, body) VALUES (?, ?, ?)');
+      'INSERT INTO rag_chunks_fts (rowid, chunk_id, title, body) VALUES (?, ?, ?, ?)');
     const insertTrigram = this.database.prepare(
-      'INSERT INTO rag_chunks_fts_trigram (chunk_id, title, body) VALUES (?, ?, ?)');
+      'INSERT INTO rag_chunks_fts_trigram (rowid, chunk_id, title, body) VALUES (?, ?, ?, ?)');
     const createdAt = new Date().toISOString();
     this.database.transaction(() => {
-      deleteFtsBatch('rag_chunks_fts', standaloneDeletedIds);
-      deleteFtsBatch('rag_chunks_fts_trigram', standaloneDeletedIds);
-      deleteFtsBatch('rag_chunks_fts', ftsRebuildExistingIds);
-      deleteFtsBatch('rag_chunks_fts_trigram', ftsRebuildExistingIds);
+      deleteFtsByMainRowId(this.database, 'rag_chunks_fts', standaloneDeletedIds);
+      deleteFtsByMainRowId(this.database, 'rag_chunks_fts_trigram', standaloneDeletedIds);
+      deleteFtsByMainRowId(this.database, 'rag_chunks_fts', ftsRebuildExistingIds);
+      deleteFtsByMainRowId(this.database, 'rag_chunks_fts_trigram', ftsRebuildExistingIds);
       for (const chunkId of deletedChunkIds) {
         deleteChunk.run(this.workspaceId, sourceUri, chunkId);
       }
@@ -456,15 +493,19 @@ ON CONFLICT(chunk_id) DO UPDATE SET workspace_id=excluded.workspace_id,
         // only provenance changed.  The embedding scheduler decides whether
         // and when to regenerate the vector; this delta only avoids needless
         // FTS rebuilds for metadata-only changes.
-        insert.run(
+        const result = insert.run(
           chunk.chunkId, this.workspaceId, chunk.sourceUri, chunk.symbolUri, chunk.family,
           chunk.title, chunk.body, JSON.stringify(chunk.numericIds),
           chunk.relativePath ?? null, chunk.resourceKind ?? null, chunk.confidence ?? null,
           chunk.contentHash, chunk.sourceRevision ?? null, chunk.sourceHash ?? null, chunk.outerFileHash ?? null, createdAt
         );
         if (ftsRebuildIdSet.has(chunk.chunkId)) {
-          insertFts.run(chunk.chunkId, chunk.title, chunk.body);
-          insertTrigram.run(chunk.chunkId, chunk.title, chunk.body);
+          const existingRow = existingRows.get(chunk.chunkId);
+          const mainRowId = existingRow && !sourceDeletedSet.has(chunk.chunkId)
+            ? existingRow.mainRowId
+            : Number(result.lastInsertRowid);
+          insertFts.run(mainRowId, chunk.chunkId, chunk.title, chunk.body);
+          insertTrigram.run(mainRowId, chunk.chunkId, chunk.title, chunk.body);
         }
       }
     }).immediate();
@@ -473,7 +514,7 @@ ON CONFLICT(chunk_id) DO UPDATE SET workspace_id=excluded.workspace_id,
 
   loadRagChunks(): RagChunk[] {
     const rows = this.database.prepare<[string], RagChunkRow>(`
-SELECT chunk_id AS chunkId, workspace_id AS workspaceId, source_uri AS sourceUri,
+SELECT rowid AS mainRowId, chunk_id AS chunkId, workspace_id AS workspaceId, source_uri AS sourceUri,
  symbol_uri AS symbolUri, family, title, body, numeric_ids_json AS numericIdsJson,
  relative_path AS relativePath, resource_kind AS resourceKind, confidence,
  content_hash AS contentHash, source_revision AS sourceRevision, source_hash AS sourceHash,
@@ -490,13 +531,13 @@ FROM rag_chunks WHERE workspace_id = ? ORDER BY family, title, chunk_id`)
     if (tokens.length === 0) return this.loadRagChunks().slice(0, boundedLimit);
 
     const selectChunks = `
-SELECT c.chunk_id AS chunkId, c.workspace_id AS workspaceId, c.source_uri AS sourceUri,
+SELECT c.rowid AS mainRowId, c.chunk_id AS chunkId, c.workspace_id AS workspaceId, c.source_uri AS sourceUri,
  c.symbol_uri AS symbolUri, c.family, c.title, c.body, c.numeric_ids_json AS numericIdsJson,
  c.relative_path AS relativePath, c.resource_kind AS resourceKind, c.confidence,
  c.content_hash AS contentHash, c.source_revision AS sourceRevision, c.source_hash AS sourceHash,
  c.outer_file_hash AS outerFileHash
 FROM rag_chunks c
-JOIN rag_chunks_fts x ON x.chunk_id = c.chunk_id
+JOIN rag_chunks_fts x ON x.rowid = c.rowid
 WHERE c.workspace_id = ? AND rag_chunks_fts MATCH ? ORDER BY rank LIMIT ?`;
     const rows = this.database.prepare<[string, string, number], RagChunkRow>(selectChunks)
       .all(this.workspaceId, tokens.join(' AND '), boundedLimit);
@@ -509,13 +550,13 @@ WHERE c.workspace_id = ? AND rag_chunks_fts MATCH ? ORDER BY rank LIMIT ?`;
     if (cjkChars >= 3) {
       const phrase = `"${trimmed.replaceAll('"', '""')}"`;
       const trigramRows = this.database.prepare<[string, string, number], RagChunkRow>(`
-SELECT c.chunk_id AS chunkId, c.workspace_id AS workspaceId, c.source_uri AS sourceUri,
+SELECT c.rowid AS mainRowId, c.chunk_id AS chunkId, c.workspace_id AS workspaceId, c.source_uri AS sourceUri,
  c.symbol_uri AS symbolUri, c.family, c.title, c.body, c.numeric_ids_json AS numericIdsJson,
  c.relative_path AS relativePath, c.resource_kind AS resourceKind, c.confidence,
  c.content_hash AS contentHash, c.source_revision AS sourceRevision, c.source_hash AS sourceHash,
  c.outer_file_hash AS outerFileHash
 FROM rag_chunks c
-JOIN rag_chunks_fts_trigram x ON x.chunk_id = c.chunk_id
+JOIN rag_chunks_fts_trigram x ON x.rowid = c.rowid
 WHERE c.workspace_id = ? AND rag_chunks_fts_trigram MATCH ? ORDER BY rank LIMIT ?`)
         .all(this.workspaceId, phrase, boundedLimit);
       if (trigramRows.length > 0) return trigramRows.map(hydrateRagChunk);
@@ -523,7 +564,7 @@ WHERE c.workspace_id = ? AND rag_chunks_fts_trigram MATCH ? ORDER BY rank LIMIT 
 
     const needle = `%${trimmed.replaceAll('%', '').replaceAll('_', '')}%`;
     const fallback = this.database.prepare<[string, string, string, number], RagChunkRow>(`
-SELECT chunk_id AS chunkId, workspace_id AS workspaceId, source_uri AS sourceUri,
+SELECT rowid AS mainRowId, chunk_id AS chunkId, workspace_id AS workspaceId, source_uri AS sourceUri,
  symbol_uri AS symbolUri, family, title, body, numeric_ids_json AS numericIdsJson,
  relative_path AS relativePath, resource_kind AS resourceKind, confidence,
  content_hash AS contentHash, source_revision AS sourceRevision, source_hash AS sourceHash,
@@ -792,6 +833,7 @@ DELETE FROM semantic_file_cache WHERE workspace_id = ? AND relative_path = ?`);
 }
 
 interface RagChunkRow {
+  mainRowId: number;
   chunkId: string;
   workspaceId: string;
   sourceUri: string;
@@ -807,6 +849,46 @@ interface RagChunkRow {
   sourceRevision: number | null;
   sourceHash: string | null;
   outerFileHash: string | null;
+}
+
+function deleteFtsByMainRowId(
+  database: SqliteDatabase,
+  table: 'rag_chunks_fts' | 'rag_chunks_fts_trigram',
+  mainRowIds: readonly number[]
+): void {
+  if (mainRowIds.length === 0) return;
+  // Keep every IN-list below SQLite's variable limit.  replaceRagChunks can
+  // legitimately pass the complete workspace corpus here, unlike the bounded
+  // delta writer, so one unbounded DELETE would fail above 32k rows before the
+  // transaction had a chance to roll back cleanly.
+  for (let offset = 0; offset < mainRowIds.length; offset += MAX_RAG_DELTA_BATCH) {
+    const batch = mainRowIds.slice(offset, offset + MAX_RAG_DELTA_BATCH);
+    const placeholders = batch.map(() => '?').join(', ');
+    database.prepare(`DELETE FROM ${table} WHERE rowid IN (${placeholders})`).run(...batch);
+  }
+}
+
+function assertNoForeignRagChunks(
+  database: SqliteDatabase,
+  workspaceId: string,
+  chunkIds: readonly string[]
+): void {
+  const uniqueChunkIds = [...new Set(chunkIds)];
+  for (let offset = 0; offset < uniqueChunkIds.length; offset += MAX_RAG_DELTA_BATCH) {
+    const batch = uniqueChunkIds.slice(offset, offset + MAX_RAG_DELTA_BATCH);
+    if (batch.length === 0) continue;
+    const placeholders = batch.map(() => '?').join(', ');
+    const rows = database.prepare(
+      `SELECT chunk_id AS chunkId, workspace_id AS workspaceId
+FROM rag_chunks WHERE chunk_id IN (${placeholders})`
+    ).all(...batch) as Array<{ chunkId: string; workspaceId: string }>;
+    const foreign = rows.find((row) => row.workspaceId !== workspaceId);
+    if (foreign) {
+      throw new Error(
+        `RAG chunk ${foreign.chunkId} belongs to workspace ${foreign.workspaceId}; cross-workspace upsert refused.`
+      );
+    }
+  }
 }
 
 function hydrateRagChunk(row: RagChunkRow): RagChunk {

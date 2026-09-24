@@ -19,7 +19,7 @@ import type {
 // @ts-ignore The focused runner reads the built core module directly.
 import { ensureLookupIndex, getLookupIndex } from '@soulforge/core/dist/rag/lookupIndex.js';
 // @ts-ignore The focused runner executes this source file with Node's experimental TypeScript stripping.
-import { createParamCanonicalProjectionCache, mergeCanonicalParamExports, persistCanonicalRagProjection, prepareParamCanonicalProjection } from './workspaceParamCanonical.ts';
+import { createParamCanonicalProjectionCache, mergeCanonicalParamExports, persistCanonicalRagProjection, prepareCanonicalProjectionWithCatalogRetry, prepareParamCanonicalProjection } from './workspaceParamCanonical.ts';
 
 const PARAM_SOURCE = 'file://synthetic/param/gameparam.parambnd.dcx';
 const SECOND_PARAM_SOURCE = 'file://synthetic/param/drawparam.parambnd.dcx';
@@ -236,10 +236,11 @@ function summarizeLookupResult(result: ReturnType<typeof retrieveEvidence>): unk
 function makeRefresh(
   calls: { value: number },
   status: 'refreshed' | 'partial' | 'failed' | 'stale',
-  options: { abort?: AbortController; emit?: 'good' | 'none' } = {}
+  options: { abort?: AbortController; emit?: 'good' | 'none'; observedReferenceOnly?: boolean[] } = {}
 ) {
   return async (input: Parameters<NonNullable<Parameters<typeof prepareParamCanonicalProjection>[0]['refresh']>>[0]) => {
     calls.value += 1;
+    options.observedReferenceOnly?.push(input.referenceFieldsOnly === true);
     const file = input.sourceFiles[0]!;
     if (options.emit === 'good') {
       input.index.upsertParamExport(makeParamExport(
@@ -270,6 +271,7 @@ async function run(): Promise<void> {
   // A partial native read keeps only the successful native leaf.  The generic
   // failed leaf is removed from the canonical clone, while MSG remains.
   const partialCalls = { value: 0 };
+  const observedReferenceOnly: boolean[] = [];
   const partialIndex = makeBaseIndex();
   const partial = await prepareParamCanonicalProjection({
     index: partialIndex,
@@ -277,10 +279,11 @@ async function run(): Promise<void> {
     stagingRoot: 'C:/synthetic/staging',
     allowedRoots: [],
     cache: createParamCanonicalProjectionCache(),
-    refresh: makeRefresh(partialCalls, 'partial', { emit: 'good' })
+    refresh: makeRefresh(partialCalls, 'partial', { emit: 'good', observedReferenceOnly })
   });
   assert.equal(partial.publishable, true);
   assert.equal(partialCalls.value, 1);
+  assert.deepEqual(observedReferenceOnly, [true], 'canonical PARAM refresh must use reference-only fields');
   assert.deepEqual(partial.partialSources, [PARAM_SOURCE]);
   assert.deepEqual(partial.canonicalExports.map((item) => item.entryName), ['NpcParam.param']);
   assert.equal(partial.canonicalIndex.toSymbolBundle().params?.some((item) => item.entryName === 'ItemLotParam.param'), false);
@@ -380,6 +383,9 @@ async function run(): Promise<void> {
   }), false, 'desktop hook must not structuredClone a whole ParamExport or ParamExport[]');
   const sourceRichRow = richExports[0]!.rows[0]!;
   const candidateRichRow = rich.canonicalExports[0]!.rows[0]!;
+  const cachedReceipt = richCache.sources.get(richSource);
+  let reuseYielded = false;
+  setImmediate(() => { reuseYielded = true; });
   const reusedRich = await prepareParamCanonicalProjection({
     index: richIndex,
     sourceFiles: [richFile],
@@ -388,6 +394,8 @@ async function run(): Promise<void> {
     cache: richCache,
     refresh: async () => { throw new Error('cached rich source should not refresh'); }
   });
+  assert.equal(reuseYielded, true, 'a cache hit must still yield while preparing a full projection');
+  assert.equal(richCache.sources.get(richSource), cachedReceipt, 'unchanged receipts must not be deep-copied again');
   assert.equal(reusedRich.reusedSourceUris.includes(richSource), true);
   const reusedRichRow = reusedRich.canonicalExports[0]!.rows[0]!;
   assert.notStrictEqual(reusedRich.canonicalExports[0]!.rows, richExports[0]!.rows, 'cached rows must not share the source array');
@@ -411,7 +419,17 @@ async function run(): Promise<void> {
   assert.deepEqual((reusedRich.canonicalExports[0]!.rows[0]!.raw as { nested: { values: number[] } }).nested.values, [0, 1]);
 
   const liveRichIndex = new WorkspaceIndex('workspace://synthetic-rich');
-  mergeCanonicalParamExports(liveRichIndex, reusedRich.canonicalExports);
+  let mergeYielded = false;
+  setImmediate(() => { mergeYielded = true; });
+  await mergeCanonicalParamExports(liveRichIndex, reusedRich.canonicalExports);
+  assert.equal(mergeYielded, true, 'merge cloning must yield before changing the live index');
+  const cancelledMergeIndex = new WorkspaceIndex('workspace://synthetic-rich');
+  const mergeAbort = new AbortController();
+  setImmediate(() => mergeAbort.abort());
+  await assert.rejects(mergeCanonicalParamExports(cancelledMergeIndex, reusedRich.canonicalExports, mergeAbort.signal),
+    { name: 'AbortError' });
+  assert.equal(cancelledMergeIndex.toSymbolBundle().params?.length ?? 0, 0,
+    'cancellation during cooperative cloning must not partially mutate the live index');
   const liveRichRow = liveRichIndex.toSymbolBundle().params?.[0]?.rows[0];
   assert.ok(liveRichRow);
   reusedRich.canonicalExports[0]!.rows[0]!.fields![0]!.value = 'mutated-after-merge';
@@ -677,6 +695,48 @@ async function run(): Promise<void> {
   releaseNative();
   const nativeAwaitResult = await nativeAwaitTask;
   assert.equal(nativeAwaitResult.publishable, false, 'native await cancellation must not publish');
+
+  const emptyProjection = (index: WorkspaceIndex) => ({
+    canonicalIndex: index,
+    canonicalExports: [],
+    attemptedSourceUris: [],
+    reusedSourceUris: [],
+    refreshedSources: [],
+    partialSources: [],
+    failedSources: [],
+    staleSources: [],
+    diagnostics: [],
+    publishable: true
+  });
+  let stableRevision = 0;
+  let stablePrepareCalls = 0;
+  const stableProjection = await prepareCanonicalProjectionWithCatalogRetry({
+    baseIndex: makeBaseIndex(),
+    getFiles: () => [],
+    getRevision: () => stableRevision,
+    prepare: async (index) => {
+      stablePrepareCalls += 1;
+      if (stablePrepareCalls === 1) stableRevision = 1;
+      return emptyProjection(index);
+    }
+  });
+  assert.equal(stablePrepareCalls, 2, 'catalog change must retry on an isolated candidate');
+  assert.equal(stableProjection.catalogRevision, 1);
+
+  let unstableRevision = 0;
+  await assert.rejects(
+    prepareCanonicalProjectionWithCatalogRetry({
+      baseIndex: makeBaseIndex(),
+      getFiles: () => [],
+      getRevision: () => unstableRevision,
+      maxAttempts: 3,
+      prepare: async (index) => {
+        unstableRevision += 1;
+        return emptyProjection(index);
+      }
+    }),
+    error => error instanceof Error && (error as { code?: string }).code === 'RAG_CATALOG_CHANGED'
+  );
 
   console.log('[workspace-param-canonical] PASS: partial/fail-closed/non-PARAM/cancel/cache/identity + deferred/eager lookup matrix');
 }

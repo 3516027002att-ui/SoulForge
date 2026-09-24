@@ -15,6 +15,13 @@ export interface ChrMapLink {
   mapId: string;
   partName: string;
   eventFile: string;
+  /** Physical MSB instance identity; never collapse same-model instances. */
+  entityId?: number;
+  internalEntryId?: number;
+  model?: string;
+  modelIndex?: number;
+  entityGroupId?: number;
+  identityStatus: 'native-foreign-key' | 'model-name-match' | 'unverified';
 }
 
 export interface ChrBossEventLink {
@@ -25,6 +32,9 @@ export interface ChrBossEventLink {
   instructionName: string;
   keyInstructions?: string[];
   description: string;
+  /** Event naming/instruction evidence does not prove reward causality. */
+  causality: 'scope-only' | 'defeat-handler-observed' | 'unverified';
+  entityIds?: number[];
 }
 
 export interface ChrLinkageEdge {
@@ -64,7 +74,15 @@ export interface ChrLinkageResult {
 
 interface MsbCacheEntry {
   mtimeMs: number;
-  parts: Array<{ name: string; entityId?: number }>;
+  parts: Array<{
+    name: string;
+    entityId?: number;
+    internalEntryId?: number;
+    model?: string;
+    modelIndex?: number;
+    entityGroupId?: number;
+    npcParamRowId?: number;
+  }>;
 }
 
 interface EmevdParsedEvent {
@@ -172,17 +190,32 @@ export async function resolveChrLinkage(
         const stats = statSync(fullPath);
         entry = msbCache.get(fullPath);
         if (!entry || entry.mtimeMs !== stats.mtimeMs) {
-          const res = await runBridge<{ parts?: Array<{ name: string; entityId?: number }> }>({
+          const res = await runBridge<{ parts?: Array<Record<string, unknown>> }>({
             command: 'read-msb-document',
             filePath: fullPath,
             ...(oodleRuntimeRoot ? { oodleRuntimeRoot } : {}),
             ...(bridgeExecutablePath ? { bridgeExecutablePath } : {})
           });
           const rawParts = res.data?.parts || [];
-          const parts: Array<{ name: string; entityId?: number }> = [];
+          const parts: MsbCacheEntry['parts'] = [];
           for (const p of rawParts) {
-            if (p.name) {
-              parts.push(p.entityId !== undefined ? { name: p.name, entityId: p.entityId } : { name: p.name });
+            const name = typeof p.name === 'string' ? p.name : '';
+            if (name) {
+              const safeNumber = (value: unknown): number | undefined => typeof value === 'number' && Number.isSafeInteger(value) ? value : undefined;
+              const entityId = safeNumber(p.entityId);
+              const internalEntryId = safeNumber(p.internalEntryId);
+              const modelIndex = safeNumber(p.modelIndex);
+              const entityGroupId = safeNumber(p.entityGroupId);
+              const npcParamRowId = safeNumber(p.npcParamRowId);
+              parts.push({
+                name,
+                ...(entityId === undefined ? {} : { entityId }),
+                ...(internalEntryId === undefined ? {} : { internalEntryId }),
+                ...(typeof p.model === 'string' ? { model: p.model } : {}),
+                ...(modelIndex === undefined ? {} : { modelIndex }),
+                ...(entityGroupId === undefined ? {} : { entityGroupId }),
+                ...(npcParamRowId === undefined ? {} : { npcParamRowId })
+              });
             }
           }
           entry = { mtimeMs: stats.mtimeMs, parts };
@@ -199,16 +232,27 @@ export async function resolveChrLinkage(
       }
       mapCoveredResources += 1;
 
-      const matchedPart = entry.parts.find((p) => p.name.startsWith(chrId));
-      if (matchedPart) {
+      // A character can occur multiple times in one map. Keep every native
+      // instance and use the native foreign key when the Bridge exposes it;
+      // the name prefix is only a bounded fallback identity hint.
+      const matchedParts = entry.parts.filter((p) => p.npcParamRowId === rowId || p.name.startsWith(chrId));
+      if (matchedParts.length > 0) {
         const mapId = f.replace('.msb.dcx', '');
         const eventFile = `event/${mapId}.emevd.dcx`;
-        result.maps.push({
-          mapFile: `map/mapstudio/${f}`,
-          mapId,
-          partName: matchedPart.name,
-          eventFile
-        });
+        for (const matchedPart of matchedParts) {
+          result.maps.push({
+            mapFile: `map/mapstudio/${f}`,
+            mapId,
+            partName: matchedPart.name,
+            eventFile,
+            ...(matchedPart.entityId !== undefined ? { entityId: matchedPart.entityId } : {}),
+            ...(matchedPart.internalEntryId !== undefined ? { internalEntryId: matchedPart.internalEntryId } : {}),
+            ...(matchedPart.model ? { model: matchedPart.model } : {}),
+            ...(matchedPart.modelIndex !== undefined ? { modelIndex: matchedPart.modelIndex } : {}),
+            ...(matchedPart.entityGroupId !== undefined ? { entityGroupId: matchedPart.entityGroupId } : {}),
+            identityStatus: matchedPart.npcParamRowId === rowId ? 'native-foreign-key' : 'model-name-match'
+          });
+        }
 
         // 2. Scan associated EMEVD for Boss events
         const eventFullPath = join(workspaceRoot, eventFile);
@@ -282,7 +326,11 @@ export async function resolveChrLinkage(
                     hasMinibossDefeat ? 'HandleMinibossDefeat (2003[15])' : 'HandleBossDefeat (2003[12])',
                     hasMinibossBar ? 'DisplayMinibossHealthBar (2003[87])' : 'DisplayBossHealthBar (2003[11])'
                   ],
-                  description: '首领/精英怪击败与死亡结算：负责关闭血条与击败处理。'
+                  description: '首领/精英怪击败与死亡结算：负责关闭血条与击败处理。',
+                  causality: 'defeat-handler-observed',
+                  ...(matchedParts.map((part) => part.entityId).filter((id): id is number => id !== undefined).length > 0
+                    ? { entityIds: matchedParts.map((part) => part.entityId).filter((id): id is number => id !== undefined) }
+                    : {})
                 });
               } else if (hasBossBar || hasMinibossBar || evStr.endsWith('10')) {
                 result.associatedBossEvents.push({
@@ -295,7 +343,8 @@ export async function resolveChrLinkage(
                     hasMinibossBar ? 'DisplayMinibossHealthBar (2003[87])' : 'DisplayBossHealthBar (2003[11])',
                     ...(hasImmortality ? ['SetCharacterImmortality (2004[12])'] : [])
                   ],
-                  description: '开战与血条初始化：负责全屏血条显示与开战状态设置。'
+                  description: '开战与血条初始化：负责全屏血条显示与开战状态设置。',
+                  causality: 'scope-only'
                 });
               } else if (hasImmortality || evStr.endsWith('20')) {
                 result.associatedBossEvents.push({
@@ -305,7 +354,8 @@ export async function resolveChrLinkage(
                   role: 'immortality_control',
                   instructionName: 'SetCharacterImmortality (2004[12])',
                   keyInstructions: ['SetCharacterImmortality (2004[12])'],
-                  description: '不死锁状态维护：控制角色的不死身状态。'
+                  description: '不死锁状态维护：控制角色的不死身状态。',
+                  causality: 'scope-only'
                 });
               }
             }
@@ -405,9 +455,11 @@ export async function resolveChrLinkage(
         sourceUri: mapPath,
         ...safeRevision(mapPath)
       },
-      targetConfirmed: true,
-      confidence: 'high',
-      evidence: 'native MSB part name was read and matched the character model'
+      targetConfirmed: map.identityStatus === 'native-foreign-key',
+      confidence: map.identityStatus === 'native-foreign-key' ? 'high' : 'medium',
+      evidence: map.identityStatus === 'native-foreign-key'
+        ? `native MSB npcParamRowId=${rowId} matched entityId=${map.entityId ?? '?'}; instance preserved`
+        : `MSB part name ${map.partName} matches ${chrId}; entity identity is a candidate until a native FK is available`
     });
   }
   for (const event of result.associatedBossEvents) {
@@ -422,9 +474,9 @@ export async function resolveChrLinkage(
         sourceUri: eventPath,
         ...safeRevision(eventPath)
       },
-      targetConfirmed: true,
+      targetConfirmed: event.causality === 'defeat-handler-observed',
       confidence: 'medium',
-      evidence: event.description
+      evidence: `${event.description}; causality=${event.causality}; reward/drop causality is not proven`
     });
   }
   for (const script of result.scripts) {

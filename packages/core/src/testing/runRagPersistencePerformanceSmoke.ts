@@ -14,7 +14,8 @@ import type { RagChunk } from '@soulforge/shared';
 import { createRagCorpus } from '../rag/chunkBuilder.js';
 import { collectIndexedCandidates, ensureLookupIndex } from '../rag/lookupIndex.js';
 import { diffRagCorpusBySource, loadRagCorpus, persistRagCorpus } from '../rag/persist.js';
-import { openWorkspaceDatabase } from '../storage/sqliteDatabase.js';
+import { openMigratedDatabase, openWorkspaceDatabase } from '../storage/sqliteDatabase.js';
+import { SQLITE_MIGRATIONS } from '../storage/sqliteSchema.js';
 import {
   isRagChunkDeltaStats,
   WorkspaceDataRepository,
@@ -31,6 +32,7 @@ const VERBOSE = process.env.SF_RAG_PERF_VERBOSE === '1';
 function main(): Promise<void> {
   const rows = parseRows(process.env.SF_RAG_PERF_ROWS);
   return withSmokeWorkspace('rag-persistence-performance', async (workspace) => {
+    assertFtsRowidMigration(workspace.root);
     const database = openWorkspaceDatabase(join(workspace.root, 'workspace.db'));
     try {
       const now = new Date().toISOString();
@@ -75,6 +77,84 @@ function main(): Promise<void> {
       if (persistedCount !== rows) {
         throw new Error(`初次持久化行数错误：${persistedCount} != ${rows}。`);
       }
+      const otherWorkspaceId = `${WORKSPACE_ID}-other`;
+      const otherSourceUri = `${SOURCE_URI}#other-workspace`;
+      database.prepare(`
+        INSERT INTO workspaces (workspace_id, root_path, game, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?)
+      `).run(otherWorkspaceId, workspace.root, 'sekiro', now, now);
+      const otherRepository = new WorkspaceDataRepository(database, otherWorkspaceId);
+      const otherChunk: RagChunk = {
+        ...makeChunk(rows + 1),
+        chunkId: 'rag:param:other-workspace',
+        workspaceId: otherWorkspaceId,
+        sourceUri: otherSourceUri,
+        symbolUri: 'param://OtherWorkspace/1',
+        body: 'crossworkspace rowid isolation token',
+        contentHash: 'crossworkspace-content'
+      };
+      otherRepository.mergeRagChunkDelta({ sourceUri: otherSourceUri, upserts: [otherChunk], deletedChunkIds: [] });
+      const otherFtsBefore = readFtsProbe(database, otherChunk.chunkId);
+      const foreignAsPrimary = { ...otherChunk, workspaceId: WORKSPACE_ID, sourceUri: SOURCE_URI };
+      let mergeForeignGuardFailed = false;
+      try {
+        repository.mergeRagChunks([foreignAsPrimary]);
+      } catch {
+        mergeForeignGuardFailed = true;
+      }
+      let deltaForeignGuardFailed = false;
+      try {
+        repository.mergeRagChunkDelta({ sourceUri: SOURCE_URI, upserts: [foreignAsPrimary], deletedChunkIds: [] });
+      } catch {
+        deltaForeignGuardFailed = true;
+      }
+      const otherFtsAfterForeignGuards = readFtsProbe(database, otherChunk.chunkId);
+      if (!mergeForeignGuardFailed
+        || !deltaForeignGuardFailed
+        || !otherRepository.loadRagChunks().some((chunk) => chunk.chunkId === otherChunk.chunkId)
+        || otherFtsBefore.unicodeRowId !== otherFtsAfterForeignGuards.unicodeRowId
+        || otherFtsBefore.trigramRowId !== otherFtsAfterForeignGuards.trigramRowId) {
+        throw new Error('跨 workspace 同 chunk_id upsert 未失败关闭或污染 foreign row。');
+      }
+      repository.mergeRagChunkDelta({ sourceUri: SOURCE_URI, upserts: [], deletedChunkIds: [otherChunk.chunkId] });
+      const otherFtsAfter = readFtsProbe(database, otherChunk.chunkId);
+      if (!otherRepository.loadRagChunks().some((chunk) => chunk.chunkId === otherChunk.chunkId)
+        || otherFtsBefore.unicodeRowId === null
+        || otherFtsBefore.trigramRowId === null
+        || otherFtsBefore.unicodeRowId !== otherFtsAfter.unicodeRowId
+        || otherFtsBefore.trigramRowId !== otherFtsAfter.trigramRowId
+        || otherRepository.searchRagChunks('crossworkspace').length !== 1) {
+        throw new Error(`跨 workspace rowid 映射被 source 删除污染：${JSON.stringify({ before: otherFtsBefore, after: otherFtsAfter })}`);
+      }
+      otherRepository.mergeRagChunkDelta({ sourceUri: otherSourceUri, upserts: [], deletedChunkIds: [otherChunk.chunkId] });
+      database.prepare('DELETE FROM workspaces WHERE workspace_id = ?').run(otherWorkspaceId);
+
+      // replaceRagChunks must also delete FTS rows in bounded IN-lists when a
+      // complete workspace has more than one delta batch of rows.
+      const replaceWorkspaceId = `${WORKSPACE_ID}-replace-batch`;
+      database.prepare(`
+        INSERT INTO workspaces (workspace_id, root_path, game, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?)
+      `).run(replaceWorkspaceId, workspace.root, 'sekiro', now, now);
+      const replaceRepository = new WorkspaceDataRepository(database, replaceWorkspaceId);
+      const replaceChunks = Array.from({ length: BATCH_SIZE + 1 }, (_, index) => {
+        const base = makeChunk(10_000 + index);
+        return {
+          ...base,
+          chunkId: `rag:replace-batch:${index}`,
+          workspaceId: replaceWorkspaceId,
+          ...(index === 1 ? { body: `${base.body} replacestabletoken` } : {})
+        };
+      });
+      replaceRepository.replaceRagChunks(replaceChunks);
+      replaceRepository.replaceRagChunks(replaceChunks);
+      if (replaceRepository.loadRagChunks().length !== replaceChunks.length
+        || replaceRepository.searchRagChunks('replacestabletoken').length !== 1) {
+        throw new Error('replaceRagChunks 分批删除 FTS 后没有保持完整 workspace 结果。');
+      }
+      replaceRepository.replaceRagChunks([]);
+      database.prepare('DELETE FROM workspaces WHERE workspace_id = ?').run(replaceWorkspaceId);
+
       assertRagChunkDeltaStats(initialStats, {
         finalUpserts: Math.min(BATCH_SIZE, rows),
         newUpserts: Math.min(BATCH_SIZE, rows),
@@ -110,6 +190,41 @@ function main(): Promise<void> {
       // rows untouched; this exercises the production core persistence path.
       persistRagCorpus(repository, desiredCorpus);
 
+      const metadataChunkIndex = Math.min(1, chunks.length - 1);
+      const metadataChunk = chunks[metadataChunkIndex]!;
+      const metadataSearchToken = metadataChunk.body.includes('metadataonlystabletoken')
+        ? 'metadataonlystabletoken'
+        : `NpcParam ${metadataChunkIndex}`;
+      const mergeMetadataFtsBefore = readFtsProbe(database, metadataChunk.chunkId);
+      repository.mergeRagChunks(chunks.map((chunk, index) => index === metadataChunkIndex
+        ? { ...chunk, sourceRevision: 2, sourceHash: 'merge-source-hash-v2', outerFileHash: 'merge-outer-hash-v2' }
+        : chunk));
+      const mergeMetadataFtsAfter = readFtsProbe(database, metadataChunk.chunkId);
+      if (mergeMetadataFtsBefore.unicodeRowId === null
+        || mergeMetadataFtsBefore.trigramRowId === null
+        || mergeMetadataFtsBefore.unicodeRowId !== mergeMetadataFtsAfter.unicodeRowId
+        || mergeMetadataFtsBefore.trigramRowId !== mergeMetadataFtsAfter.trigramRowId
+        || repository.searchRagChunks(metadataSearchToken).length !== 1) {
+        throw new Error('mergeRagChunks metadata-only 更新意外重建或丢失 FTS。');
+      }
+      const mergeCountBeforeSourceGuard = countChunks(database);
+      let mergeSourceGuardFailed = false;
+      try {
+        repository.mergeRagChunks([{
+          ...metadataChunk,
+          sourceUri: `${SOURCE_URI}#moved-by-merge`
+        }]);
+      } catch {
+        mergeSourceGuardFailed = true;
+      }
+      const mergeSourceGuardRow = repository.loadRagChunks()
+        .find((chunk) => chunk.chunkId === metadataChunk.chunkId);
+      if (!mergeSourceGuardFailed
+        || countChunks(database) !== mergeCountBeforeSourceGuard
+        || mergeSourceGuardRow?.sourceUri !== SOURCE_URI) {
+        throw new Error('mergeRagChunks 未拒绝同 workspace 的 source 迁移。');
+      }
+
       // A reorder is not equivalent for a positional inverted index.  Mutate
       // one corpus in place and require ensureLookupIndex to rebuild it; a
       // signature that sorted chunk identities would incorrectly reuse stale
@@ -124,7 +239,7 @@ function main(): Promise<void> {
         phrases: [],
         uris: ['param://NpcParam/0']
       }, null);
-      if (beforeReorderIndex === afterReorderIndex
+      if ((desiredCorpus.chunks.length > 1 && beforeReorderIndex === afterReorderIndex)
         || reorderedPositions.some((position) => desiredCorpus.chunks[position]?.symbolUri !== 'param://NpcParam/0')
         || reorderedHits.length !== 1
         || reorderedHits[0]?.symbolUri !== 'param://NpcParam/0') {
@@ -136,7 +251,6 @@ function main(): Promise<void> {
       // both contentless FTS rowids as a direct proof that this path updates
       // only the main-table provenance.  Embedding invalidation intentionally
       // retains the existing contract and is checked separately.
-      const metadataChunk = chunks[1]!;
       const metadataFtsBefore = readFtsProbe(database, metadataChunk.chunkId);
       repository.mergeRagEmbeddings({
         model: 'synthetic-rag-model',
@@ -153,6 +267,7 @@ function main(): Promise<void> {
         sourceHash: 'synthetic-source-hash-v2',
         outerFileHash: 'synthetic-outer-hash-v2'
       }));
+      const atomicInvalidChunkIndex = (metadataChunkIndex + 1) % chunks.length;
       const metadataChurnBatchDurationsMs: number[] = [];
       let metadataStats: RagChunkDeltaStats | null = null;
       const metadataChangesBefore = readTotalChanges(database);
@@ -185,7 +300,7 @@ function main(): Promise<void> {
         || metadataRow.outerFileHash !== 'synthetic-outer-hash-v2') {
         throw new Error('metadata-only 更新没有把最新 source identity 写入主表。');
       }
-      if (repository.searchRagChunks('metadataonlystabletoken').length !== 1) {
+      if (repository.searchRagChunks(metadataSearchToken).length !== 1) {
         throw new Error('metadata-only 更新后原有 FTS 词不可检索。');
       }
       if (repository.loadRagEmbeddings().has(metadataChunk.chunkId)) {
@@ -217,9 +332,10 @@ function main(): Promise<void> {
       // old contentless FTS rows before the replacement is inserted; otherwise
       // the stable token disappears from search (or a stale duplicate row is
       // left behind).
+      const reinsertChunk = chunks[Math.min(4, chunks.length - 1)]!;
       const reinsertPreparedChunk = {
-        ...chunks[4]!,
-        body: `${chunks[4]!.body} deletereinsertstabletoken`,
+        ...reinsertChunk,
+        body: `${reinsertChunk.body} deletereinsertstabletoken`,
         contentHash: 'content-delete-reinsert'
       };
       repository.mergeRagChunkDelta({
@@ -292,10 +408,10 @@ SELECT
         repository.mergeRagChunkDelta({
           sourceUri: SOURCE_URI,
           upserts: [
-            { ...metadataChunks[1]!, sourceRevision: 3, sourceHash: 'atomic-source-hash' },
+            { ...metadataChunks[metadataChunkIndex]!, sourceRevision: 3, sourceHash: 'atomic-source-hash' },
             {
-              ...metadataChunks[2]!,
-              body: `${metadataChunks[2]!.body} atomic-new-token`,
+              ...metadataChunks[atomicInvalidChunkIndex]!,
+              body: `${metadataChunks[atomicInvalidChunkIndex]!.body} atomic-new-token`,
               contentHash: null as unknown as string
             }
           ],
@@ -332,6 +448,25 @@ SELECT
         deletedChunkIds: []
       });
       const foreignFtsBefore = readFtsProbe(database, foreignChunk.chunkId);
+      let deltaSourceGuardFailed = false;
+      try {
+        repository.mergeRagChunkDelta({
+          sourceUri: SOURCE_URI,
+          upserts: [{ ...foreignChunk, sourceUri: SOURCE_URI, body: `${foreignChunk.body} moved` }],
+          deletedChunkIds: []
+        });
+      } catch {
+        deltaSourceGuardFailed = true;
+      }
+      const foreignAfterSourceGuard = readFtsProbe(database, foreignChunk.chunkId);
+      const foreignSourceGuardRow = repository.loadRagChunks()
+        .find((chunk) => chunk.chunkId === foreignChunk.chunkId);
+      if (!deltaSourceGuardFailed
+        || foreignSourceGuardRow?.sourceUri !== foreignSourceUri
+        || foreignFtsBefore.unicodeRowId !== foreignAfterSourceGuard.unicodeRowId
+        || foreignFtsBefore.trigramRowId !== foreignAfterSourceGuard.trigramRowId) {
+        throw new Error('RAG delta 未拒绝同 workspace 的 source 迁移。');
+      }
       repository.mergeRagChunkDelta({
         sourceUri: SOURCE_URI,
         upserts: [],
@@ -355,7 +490,7 @@ SELECT
       try {
         repository.mergeRagChunkDelta({
           sourceUri: SOURCE_URI,
-          upserts: [{ ...chunks[3]!, chunkId: 'rag:param:workspace-guard', workspaceId: 'other-workspace' }],
+          upserts: [{ ...chunks[Math.min(3, chunks.length - 1)]!, chunkId: 'rag:param:workspace-guard', workspaceId: 'other-workspace' }],
           deletedChunkIds: []
         });
       } catch {
@@ -424,7 +559,10 @@ SELECT
       }
 
       // 更新一批时只替换该批的主表/FTS 行；同一 source 的其余行必须保留。
-      const changed = chunks.slice(0, Math.min(BATCH_SIZE, chunks.length)).map((chunk) => ({
+      const changedCount = chunks.length > 1
+        ? Math.min(BATCH_SIZE, chunks.length - 1)
+        : 1;
+      const changed = chunks.slice(0, changedCount).map((chunk) => ({
         ...chunk,
         body: `${chunk.body} changed`
       }));
@@ -445,9 +583,11 @@ SELECT
       if (afterDeltaCount !== rows) {
         throw new Error(`增量更新错误删除同源 chunk：${afterDeltaCount} != ${rows}。`);
       }
-      const unchanged = repository.loadRagChunks().find((chunk) => chunk.chunkId === chunks.at(-1)?.chunkId);
-      if (!unchanged || unchanged.body.endsWith(' changed')) {
-        throw new Error('增量更新覆盖了未变化 chunk。');
+      if (chunks.length > 1) {
+        const unchanged = repository.loadRagChunks().find((chunk) => chunk.chunkId === chunks.at(-1)?.chunkId);
+        if (!unchanged || unchanged.body.endsWith(' changed')) {
+          throw new Error('增量更新覆盖了未变化 chunk。');
+        }
       }
       const changedRead = repository.searchRagChunks('changed', BATCH_SIZE);
       if (changedRead.length === 0) {
@@ -491,6 +631,165 @@ SELECT
       database.close();
     }
   });
+}
+
+function assertFtsRowidMigration(workspaceRoot: string): void {
+  const databasePath = join(workspaceRoot, 'legacy-fts-rowid-migration.db');
+  const workspaceId = 'rag-persistence-legacy-rowid';
+  const chunk = makeChunk(1);
+  let legacyMainRowId = 0;
+  const legacy = openMigratedDatabase(databasePath, SQLITE_MIGRATIONS.slice(0, -1));
+  try {
+    const now = new Date().toISOString();
+    legacy.prepare(`
+      INSERT INTO workspaces (workspace_id, root_path, game, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?)
+    `).run(workspaceId, workspaceRoot, 'sekiro', now, now);
+    legacy.prepare(`
+      INSERT INTO rag_chunks (
+        chunk_id, workspace_id, source_uri, symbol_uri, family, title, body,
+        numeric_ids_json, relative_path, resource_kind, confidence, content_hash,
+        source_revision, source_hash, outer_file_hash, created_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      chunk.chunkId, workspaceId, chunk.sourceUri, chunk.symbolUri, chunk.family,
+      chunk.title, chunk.body, JSON.stringify(chunk.numericIds), chunk.relativePath ?? null,
+      chunk.resourceKind ?? null, chunk.confidence ?? null, chunk.contentHash,
+      chunk.sourceRevision ?? null, chunk.sourceHash ?? null, chunk.outerFileHash ?? null, now
+    );
+    const mainRow = legacy.prepare('SELECT rowid AS rowId FROM rag_chunks WHERE chunk_id = ?')
+      .get(chunk.chunkId) as { rowId: number };
+    legacyMainRowId = Number(mainRow.rowId);
+    // Deliberately make historical FTS rowids unrelated to the authoritative
+    // rag_chunks rowid.  Migration must rebuild from the main table rather
+    // than assuming an old virtual-table rowid relationship.
+    legacy.prepare(
+      'INSERT INTO rag_chunks_fts (rowid, chunk_id, title, body) VALUES (?, ?, ?, ?)'
+    ).run(legacyMainRowId + 100_000, chunk.chunkId, chunk.title, chunk.body);
+    legacy.prepare(
+      'INSERT INTO rag_chunks_fts_trigram (rowid, chunk_id, title, body) VALUES (?, ?, ?, ?)'
+    ).run(legacyMainRowId + 200_000, chunk.chunkId, chunk.title, chunk.body);
+  } finally {
+    legacy.close();
+  }
+
+  // A failed migration must not leave the old FTS tables half-dropped.  A
+  // pre-existing temporary table makes migration 15 fail before it can drop
+  // either authoritative virtual table; the next legacy open proves the
+  // migration ledger and historical rowids are still intact.
+  const rollbackSetup = openMigratedDatabase(databasePath, SQLITE_MIGRATIONS.slice(0, -1));
+  rollbackSetup.exec(`
+    CREATE TABLE rag_chunks_fts_rowid_v15 (rowid INTEGER, chunk_id TEXT);
+  `);
+  rollbackSetup.close();
+  let migrationFailed = false;
+  try {
+    const shouldFail = openWorkspaceDatabase(databasePath);
+    shouldFail.close();
+  } catch {
+    migrationFailed = true;
+  }
+  if (!migrationFailed) throw new Error('FTS rowid migration did not fail closed on a conflicting temp table.');
+  const rolledBack = openMigratedDatabase(databasePath, SQLITE_MIGRATIONS.slice(0, -1));
+  try {
+    const rolledBackIndexes = rolledBack.prepare("PRAGMA index_list('rag_chunks')").all() as Array<{ name?: unknown }>;
+    if (rolledBackIndexes.some((index) => index.name === 'idx_rag_chunks_workspace_chunk')) {
+      throw new Error('Failed FTS rowid migration left the workspace/chunk lookup index behind.');
+    }
+    const oldUnicode = rolledBack.prepare('SELECT rowid AS rowId FROM rag_chunks_fts WHERE chunk_id = ?')
+      .get(chunk.chunkId) as { rowId?: number } | undefined;
+    const oldTrigram = rolledBack.prepare('SELECT rowid AS rowId FROM rag_chunks_fts_trigram WHERE chunk_id = ?')
+      .get(chunk.chunkId) as { rowId?: number } | undefined;
+    if (Number(oldUnicode?.rowId) !== legacyMainRowId + 100_000
+      || Number(oldTrigram?.rowId) !== legacyMainRowId + 200_000) {
+      throw new Error('Failed FTS rowid migration changed the old tables instead of rolling back.');
+    }
+    rolledBack.exec('DROP TABLE rag_chunks_fts_rowid_v15;');
+  } finally {
+    rolledBack.close();
+  }
+
+  // Also fail after the first virtual table has been rebuilt.  This proves
+  // that a later trigram-stage error rolls back the earlier Unicode rename,
+  // the lookup index, and the migration ledger as one transaction.
+  const secondStageSetup = openMigratedDatabase(databasePath, SQLITE_MIGRATIONS.slice(0, -1));
+  secondStageSetup.exec(`
+    CREATE TABLE rag_chunks_fts_trigram_rowid_v15 (rowid INTEGER, chunk_id TEXT);
+  `);
+  secondStageSetup.close();
+  let secondStageMigrationFailed = false;
+  try {
+    const shouldFail = openWorkspaceDatabase(databasePath);
+    shouldFail.close();
+  } catch {
+    secondStageMigrationFailed = true;
+  }
+  if (!secondStageMigrationFailed) {
+    throw new Error('FTS rowid migration did not fail closed at the trigram stage.');
+  }
+  const secondStageRolledBack = openMigratedDatabase(databasePath, SQLITE_MIGRATIONS.slice(0, -1));
+  try {
+    const secondStageIndexes = secondStageRolledBack.prepare("PRAGMA index_list('rag_chunks')")
+      .all() as Array<{ name?: unknown }>;
+    const oldUnicode = secondStageRolledBack.prepare('SELECT rowid AS rowId FROM rag_chunks_fts WHERE chunk_id = ?')
+      .get(chunk.chunkId) as { rowId?: number } | undefined;
+    const oldTrigram = secondStageRolledBack.prepare('SELECT rowid AS rowId FROM rag_chunks_fts_trigram WHERE chunk_id = ?')
+      .get(chunk.chunkId) as { rowId?: number } | undefined;
+    const conflictTable = secondStageRolledBack.prepare(`
+      SELECT COUNT(*) AS count FROM sqlite_master
+      WHERE type = 'table' AND name = 'rag_chunks_fts_trigram_rowid_v15'
+    `).get() as { count: number };
+    if (secondStageIndexes.some((index) => index.name === 'idx_rag_chunks_workspace_chunk')
+      || Number(oldUnicode?.rowId) !== legacyMainRowId + 100_000
+      || Number(oldTrigram?.rowId) !== legacyMainRowId + 200_000
+      || Number(conflictTable.count) !== 1) {
+      throw new Error('Trigram-stage migration failure did not roll back all prior schema work.');
+    }
+    secondStageRolledBack.exec('DROP TABLE rag_chunks_fts_trigram_rowid_v15;');
+  } finally {
+    secondStageRolledBack.close();
+  }
+
+  const migrated = openWorkspaceDatabase(databasePath);
+  try {
+    const ragIndexes = migrated.prepare("PRAGMA index_list('rag_chunks')").all() as Array<{ name?: unknown }>;
+    if (!ragIndexes.some((index) => index.name === 'idx_rag_chunks_workspace_chunk')) {
+      throw new Error('FTS rowid migration did not install the workspace/chunk lookup index.');
+    }
+    const mainRow = migrated.prepare('SELECT rowid AS rowId FROM rag_chunks WHERE chunk_id = ?')
+      .get(chunk.chunkId) as { rowId: number };
+    const unicode = migrated.prepare('SELECT rowid AS rowId FROM rag_chunks_fts WHERE chunk_id = ?')
+      .get(chunk.chunkId) as { rowId?: number } | undefined;
+    const trigram = migrated.prepare('SELECT rowid AS rowId FROM rag_chunks_fts_trigram WHERE chunk_id = ?')
+      .get(chunk.chunkId) as { rowId?: number } | undefined;
+    if (Number(unicode?.rowId) !== Number(mainRow.rowId)
+      || Number(trigram?.rowId) !== Number(mainRow.rowId)) {
+      throw new Error(`FTS rowid migration did not follow rag_chunks rowid: ${JSON.stringify({ mainRow, unicode, trigram })}`);
+    }
+    const repository = new WorkspaceDataRepository(migrated, workspaceId);
+    const hits = repository.searchRagChunks('metadataonlystabletoken');
+    if (hits.length !== 1 || hits[0]?.chunkId !== chunk.chunkId) {
+      throw new Error(`FTS rowid migration lost searchable content: ${JSON.stringify(hits.map((hit) => hit.chunkId))}`);
+    }
+  } finally {
+    migrated.close();
+  }
+
+  const reopened = openWorkspaceDatabase(databasePath);
+  try {
+    const mainRow = reopened.prepare('SELECT rowid AS rowId FROM rag_chunks WHERE chunk_id = ?')
+      .get(chunk.chunkId) as { rowId: number };
+    const unicode = reopened.prepare('SELECT rowid AS rowId FROM rag_chunks_fts WHERE chunk_id = ?')
+      .get(chunk.chunkId) as { rowId?: number } | undefined;
+    const trigram = reopened.prepare('SELECT rowid AS rowId FROM rag_chunks_fts_trigram WHERE chunk_id = ?')
+      .get(chunk.chunkId) as { rowId?: number } | undefined;
+    if (Number(unicode?.rowId) !== Number(mainRow.rowId)
+      || Number(trigram?.rowId) !== Number(mainRow.rowId)) {
+      throw new Error('FTS rowid migration was not stable across reopen.');
+    }
+  } finally {
+    reopened.close();
+  }
 }
 
 function makeChunk(index: number): RagChunk {
@@ -555,12 +854,16 @@ function readFtsProbe(
   database: ReturnType<typeof openWorkspaceDatabase>,
   chunkId: string
 ): { unicodeRowId: number | null; trigramRowId: number | null } {
+  const main = database.prepare(
+    'SELECT rowid AS rowId FROM rag_chunks WHERE chunk_id = ?'
+  ).get(chunkId) as { rowId?: number } | undefined;
+  if (main?.rowId === undefined) return { unicodeRowId: null, trigramRowId: null };
   const unicode = database.prepare(
-    'SELECT rowid AS rowId FROM rag_chunks_fts WHERE chunk_id = ?'
-  ).get(chunkId) as { rowId?: number } | undefined;
+    'SELECT rowid AS rowId FROM rag_chunks_fts WHERE rowid = ?'
+  ).get(main.rowId) as { rowId?: number } | undefined;
   const trigram = database.prepare(
-    'SELECT rowid AS rowId FROM rag_chunks_fts_trigram WHERE chunk_id = ?'
-  ).get(chunkId) as { rowId?: number } | undefined;
+    'SELECT rowid AS rowId FROM rag_chunks_fts_trigram WHERE rowid = ?'
+  ).get(main.rowId) as { rowId?: number } | undefined;
   return {
     unicodeRowId: unicode?.rowId === undefined ? null : Number(unicode.rowId),
     trigramRowId: trigram?.rowId === undefined ? null : Number(trigram.rowId)

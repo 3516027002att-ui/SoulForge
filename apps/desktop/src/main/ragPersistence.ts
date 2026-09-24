@@ -32,8 +32,10 @@ export async function persistRagCorpusBySourceDelta(
   corpus: RagCorpus,
   previous: RagCorpus | null = null,
   signal?: AbortSignal,
-  telemetry?: SemanticRefreshTelemetry
+  telemetry?: SemanticRefreshTelemetry,
+  assertCurrent?: () => void
 ): Promise<void> {
+  assertCurrent?.();
   const deltas = telemetry
     ? measureSemanticRefreshStageSync(telemetry, 'diff', () => diffRagCorpusBySource(previous, corpus), (value) => ({
         changedSourceCountInDiff: value.length,
@@ -42,8 +44,10 @@ export async function persistRagCorpusBySourceDelta(
       }))
     : diffRagCorpusBySource(previous, corpus);
   for (const delta of deltas) {
+    assertCurrent?.();
     throwIfAborted(signal);
     for (let dStart = 0; dStart < delta.deletedChunkIds.length; dStart += RAG_PERSIST_BATCH_SIZE) {
+      assertCurrent?.();
       throwIfAborted(signal);
       const deletedChunkIds = delta.deletedChunkIds.slice(dStart, dStart + RAG_PERSIST_BATCH_SIZE);
       const persist = () => store.mergeRagChunkDelta({
@@ -60,8 +64,10 @@ export async function persistRagCorpusBySourceDelta(
       } else {
         await persist();
       }
+      assertCurrent?.();
     }
     for (let start = 0; start < delta.upserts.length; start += RAG_PERSIST_BATCH_SIZE) {
+      assertCurrent?.();
       throwIfAborted(signal);
       const upserts = delta.upserts.slice(start, start + RAG_PERSIST_BATCH_SIZE);
       const persist = () => store.mergeRagChunkDelta({
@@ -78,10 +84,13 @@ export async function persistRagCorpusBySourceDelta(
       } else {
         await persist();
       }
+      assertCurrent?.();
     }
   }
+  assertCurrent?.();
   throwIfAborted(signal);
   if (previous === null || !sameRagReferences(previous.references, corpus.references)) {
+    assertCurrent?.();
     const persistReferences = () => store.replaceReferences(corpus.references);
     if (telemetry) {
       await measureSemanticRefreshStage(telemetry, 'persistBatch', persistReferences, () => ({
@@ -91,6 +100,7 @@ export async function persistRagCorpusBySourceDelta(
     } else {
       await persistReferences();
     }
+    assertCurrent?.();
   }
 }
 

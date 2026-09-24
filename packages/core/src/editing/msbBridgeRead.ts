@@ -24,6 +24,9 @@ export interface MsbBridgePart {
   scaleZ?: number;
   internalEntryId?: number;
   entityId?: number;
+  entityGroupId?: number;
+  npcParamRowId?: number;
+  model?: string;
 }
 
 export interface MsbBridgeRegion {
@@ -155,7 +158,10 @@ export async function readMsbDocumentViaBridge(input: {
     ...(p.scaleY !== undefined ? { scaleY: Number(p.scaleY) } : {}),
     ...(p.scaleZ !== undefined ? { scaleZ: Number(p.scaleZ) } : {}),
     ...(p.internalEntryId !== undefined ? { internalEntryId: Number(p.internalEntryId) } : {}),
-    ...(p.entityId !== undefined ? { entityId: Number(p.entityId) } : {})
+    ...(p.entityId !== undefined ? { entityId: Number(p.entityId) } : {}),
+    ...(p.entityGroupId !== undefined ? { entityGroupId: Number(p.entityGroupId) } : {}),
+    ...(p.npcParamRowId !== undefined ? { npcParamRowId: Number(p.npcParamRowId) } : {}),
+    ...(typeof p.model === 'string' ? { model: p.model } : {})
   }));
   const regions = (result.data.regions ?? []).slice(0, maxRegions).map((r) => ({
     name: String(r.name ?? ''),

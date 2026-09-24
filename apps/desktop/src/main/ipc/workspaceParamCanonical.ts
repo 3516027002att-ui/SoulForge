@@ -6,10 +6,11 @@ import type {
   RagCorpus,
   ReferenceEdge
 } from '@soulforge/shared';
+import { setImmediate as yieldEventLoop } from 'node:timers/promises';
 import {
+  attachLookupIndexAsync,
   buildRagCorpus,
   cloneParamExport,
-  cloneParamExports,
   createRagCorpus,
   mergeCatalogAndPersisted,
   refreshNativeSemanticSources,
@@ -81,6 +82,8 @@ export interface PersistCanonicalRagProjectionInput {
   }>;
   /** Injected so the IPC layer keeps its session-safe durable publication gate. */
   persist: (corpus: RagCorpus, previous: RagCorpus) => Promise<void>;
+  /** Optional host job/progress adapter; the default still eagerly prepares, asynchronously. */
+  prepareLookup?: (corpus: RagCorpus, signal?: AbortSignal) => Promise<void>;
 }
 
 export interface PersistCanonicalRagProjectionResult {
@@ -121,7 +124,9 @@ export async function persistCanonicalRagProjection(
     lookupIndex: 'deferred'
   });
   const mergeView = filterPersistedParamRowsForSources(persisted, input.attemptedParamSourceUris);
-  const corpus = mergeCatalogAndPersisted(catalog, mergeView);
+  const corpus = mergeCatalogAndPersisted(catalog, mergeView, { lookupIndex: 'deferred' });
+  if (input.prepareLookup) await input.prepareLookup(corpus, input.signal);
+  else await attachLookupIndexAsync(corpus, { ...(input.signal ? { signal: input.signal } : {}) });
   throwIfCanonicalAborted(input.signal);
   await input.persist(corpus, persisted);
   throwIfCanonicalAborted(input.signal);
@@ -146,12 +151,19 @@ export async function prepareParamCanonicalProjection(
 ): Promise<PrepareParamCanonicalProjectionResult> {
   const sourceFiles = uniqueParamFiles(input.sourceFiles);
   const attemptedSourceUris = sourceFiles.map((file) => file.sourceUri);
+  await yieldEventLoop();
   const canonicalIndex = input.index.cloneForRefresh();
+  await yieldEventLoop();
   canonicalIndex.invalidateChangedSources(attemptedSourceUris);
 
   const diagnostics: Diagnostic[] = [];
   const reusedSourceUris: string[] = [];
   const toRefresh: IndexedFile[] = [];
+  const cancelled = (): PrepareParamCanonicalProjectionResult => {
+    for (const file of toRefresh) input.cache.sources.delete(file.sourceUri);
+    return makeAbortedProjectionResult(canonicalIndex, attemptedSourceUris, diagnostics);
+  };
+  await yieldEventLoop();
 
   if (input.signal?.aborted) {
     return makeAbortedProjectionResult(
@@ -173,6 +185,8 @@ export async function prepareParamCanonicalProjection(
     let reused = true;
     for (const value of receipt.exports) {
       if (!canonicalIndex.upsertParamExport(cloneParamExport(value))) reused = false;
+      await yieldEventLoop();
+      if (input.signal?.aborted) return cancelled();
     }
     if (!reused) {
       input.cache.sources.delete(file.sourceUri);
@@ -199,6 +213,11 @@ export async function prepareParamCanonicalProjection(
         sourceFiles: toRefresh,
         stagingRoot: input.stagingRoot,
         allowedRoots: input.allowedRoots,
+        // Canonical RAG only needs trusted reference fields. Scalar PARAM
+        // values are read on demand through read_param_fields / the editor;
+        // materializing every field of all gameparam rows here can allocate
+        // gigabytes and make Electron appear hung during workspace open.
+        referenceFieldsOnly: true,
         ...(input.oodleRuntimeRoot ? { oodleRuntimeRoot: input.oodleRuntimeRoot } : {}),
         ...(input.signal ? { signal: input.signal } : {})
       });
@@ -256,11 +275,17 @@ export async function prepareParamCanonicalProjection(
       candidateExportsBySource.delete(sourceUri);
       input.cache.sources.delete(sourceUri);
     }
+    // This receipt already owns an isolated snapshot for the exact same
+    // source identity. Re-cloning all 138 tables here only creates another
+    // temporary copy; candidate/live exports are separately isolated below.
+    if (reusedSourceUris.includes(sourceUri)) continue;
+    const receiptExports = await cloneCanonicalExports(candidateExportsBySource.get(sourceUri) ?? [], input.signal);
+    if (!receiptExports) return cancelled();
     const receipt: ParamCanonicalProjectionReceipt = {
       sourceUri,
       identity: paramSourceIdentity(file),
       status,
-      exports: cloneParamExports(candidateExportsBySource.get(sourceUri) ?? []),
+      exports: receiptExports,
       diagnostics: diagnostics.filter((diagnostic) => diagnostic.sourceUri === sourceUri)
     };
     if (status === 'refreshed' || status === 'partial') {
@@ -313,7 +338,11 @@ export async function prepareParamCanonicalProjection(
   const canonicalExports = attemptedSourceUris.flatMap((sourceUri) => (
     candidateExportsBySource.get(sourceUri) ?? []
   ));
+  await yieldEventLoop();
+  if (input.signal?.aborted) return cancelled();
   canonicalIndex.rebuildReferences();
+  await yieldEventLoop();
+  if (input.signal?.aborted) return cancelled();
   return {
     canonicalIndex,
     canonicalExports,
@@ -329,9 +358,76 @@ export async function prepareParamCanonicalProjection(
 }
 
 /** Merge only accepted canonical PARAM exports into a structured live index. */
-export function mergeCanonicalParamExports(index: WorkspaceIndex, exports: readonly ParamExport[]): void {
-  for (const value of cloneParamExports(exports)) index.upsertParamExport(value);
+export async function mergeCanonicalParamExports(index: WorkspaceIndex, exports: readonly ParamExport[], signal?: AbortSignal): Promise<void> {
+  // Clone cooperatively before touching the live index. Cancellation cannot
+  // leave a half-applied merge, while row/field/raw isolation stays intact.
+  const cloned = await cloneCanonicalExports(exports, signal);
+  throwIfCanonicalAborted(signal);
+  for (const value of cloned ?? []) index.upsertParamExport(value);
   index.rebuildReferences();
+  await yieldEventLoop();
+  throwIfCanonicalAborted(signal);
+}
+
+export interface StableCanonicalProjectionInput {
+  baseIndex: WorkspaceIndex;
+  getFiles: () => readonly IndexedFile[];
+  getRevision: () => number;
+  prepare: (index: WorkspaceIndex) => Promise<PrepareParamCanonicalProjectionResult>;
+  signal?: AbortSignal;
+  maxAttempts?: number;
+}
+
+export interface StableCanonicalProjectionResult {
+  index: WorkspaceIndex;
+  projection: PrepareParamCanonicalProjectionResult;
+  catalogRevision: number;
+}
+
+/**
+ * Build and merge the final canonical projection on an isolated candidate.
+ * Catalog hashing can finish while native PARAM work yields; never mutate the
+ * analyzed live index until both sides of the revision fence are stable.
+ */
+export async function prepareCanonicalProjectionWithCatalogRetry(
+  input: StableCanonicalProjectionInput
+): Promise<StableCanonicalProjectionResult> {
+  const maxAttempts = input.maxAttempts ?? 3;
+  if (!Number.isSafeInteger(maxAttempts) || maxAttempts < 1) {
+    throw new RangeError('Invalid canonical projection retry budget.');
+  }
+  const baseIndex = input.baseIndex.cloneForRefresh();
+  for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+    throwIfCanonicalAborted(input.signal);
+    const catalogRevision = input.getRevision();
+    const candidate = baseIndex.cloneForRefresh();
+    candidate.setFiles(input.getFiles());
+    const projection = await input.prepare(candidate);
+    throwIfCanonicalAborted(input.signal);
+    if (catalogRevision !== input.getRevision()) {
+      if (attempt + 1 >= maxAttempts) throw catalogChangedError();
+      continue;
+    }
+    if (!projection.publishable) throw new Error('PARAM canonical projection 未发布。');
+    await mergeCanonicalParamExports(candidate, projection.canonicalExports, input.signal);
+    throwIfCanonicalAborted(input.signal);
+    if (catalogRevision !== input.getRevision()) {
+      if (attempt + 1 >= maxAttempts) throw catalogChangedError();
+      continue;
+    }
+    return { index: candidate, projection, catalogRevision };
+  }
+  throw catalogChangedError();
+}
+
+async function cloneCanonicalExports(exports: readonly ParamExport[], signal?: AbortSignal): Promise<ParamExport[] | null> {
+  const cloned: ParamExport[] = [];
+  for (const value of exports) {
+    if (signal?.aborted) return null;
+    cloned.push(cloneParamExport(value));
+    await yieldEventLoop();
+  }
+  return signal?.aborted ? null : cloned;
 }
 
 function filterPersistedParamRowsForSources(
@@ -441,4 +537,10 @@ function throwIfCanonicalAborted(signal?: AbortSignal): void {
   const error = new Error('PARAM canonical RAG publication 已取消。');
   error.name = 'AbortError';
   throw error;
+}
+
+function catalogChangedError(): Error {
+  return Object.assign(new Error('文件目录在最终 PARAM 投影期间持续变化，请重试分析。'), {
+    code: 'RAG_CATALOG_CHANGED'
+  });
 }

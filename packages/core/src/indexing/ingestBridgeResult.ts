@@ -830,6 +830,9 @@ export function mapExportFromMsbDocument(input: {
     scaleZ?: number;
     internalEntryId?: number;
     entityId?: number;
+    entityGroupId?: number;
+    npcParamRowId?: number;
+    model?: string;
   }>;
   regions?: Array<{
     name?: string | number;
@@ -859,6 +862,13 @@ export function mapExportFromMsbDocument(input: {
       ...(part.internalEntryId !== undefined ? { internalEntryId: part.internalEntryId } : {}),
       ...(part.entityId !== undefined ? { entityId: part.entityId } : {}),
       ...(part.modelIndex === undefined ? {} : { modelIndex: part.modelIndex }),
+      ...(part.model === undefined ? {} : { model: part.model }),
+      ...((part.entityGroupId === undefined && part.npcParamRowId === undefined)
+        ? {}
+        : { raw: {
+          ...(part.entityGroupId === undefined ? {} : { entityGroupId: part.entityGroupId }),
+          ...(part.npcParamRowId === undefined ? {} : { npcParamRowId: part.npcParamRowId })
+        } }),
       ...(position ? { position } : {}),
       ...(rotation ? { rotation } : {}),
       ...(scale ? { scale } : {}),

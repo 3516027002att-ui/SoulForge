@@ -3,6 +3,7 @@ import type { NormalizedReferenceQuery, ReferencePageRecord } from '@soulforge/s
 import type { WorkspaceIndex } from '../indexing/workspaceIndex.js';
 import type { NativeEditSession } from '../editing/nativeEditSession.js';
 import type { EmedfRegistry } from '../emevd/emedfSchema.js';
+import type { DiagnosticEvent } from '../diagnostics/diagnosticEvent.js';
 import { enrichReferenceContent, type NativeReferenceContentCursor } from './nativeReferenceContent.js';
 import type { ReferenceCursorScope, ReferenceCursorStore } from './referenceCursorStore.js';
 
@@ -26,6 +27,7 @@ export async function prepareReferenceContentSearch(options: {
   targetUri?: string;
   prioritySourceUris?: string[];
   persist?: (sourceUris: string[]) => Promise<void>;
+  onDiagnostic?: (event: DiagnosticEvent) => void;
 }): Promise<{ scan: ReferencePageRecord['scan']; diagnostics: ReferencePageRecord['diagnostics'] }> {
   const scope = scanScope(options.input);
   const hash = createHash('sha256');
@@ -57,7 +59,8 @@ export async function prepareReferenceContentSearch(options: {
       targetUri: `${options.input.target.sourceUri}!/${options.input.target.childChain.join('/')}`
     } : options.targetUri ? { targetUri: options.targetUri } : {}),
     ...(options.prioritySourceUris ? { prioritySourceUris: options.prioritySourceUris } : {}),
-    maxSources: 2, maxScripts: 2, maxBytes: 512 * 1024, timeoutMs: 20000
+    maxSources: 2, maxScripts: 2, maxBytes: 512 * 1024, timeoutMs: 20000,
+    ...(options.onDiagnostic ? { onDiagnostic: options.onDiagnostic } : {})
   });
   if (enriched.updatedSourceUris.length > 0) await options.persist?.(enriched.updatedSourceUris);
   const sourceCursor = enriched.nextCursor ? options.store.issue({

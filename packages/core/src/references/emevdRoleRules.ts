@@ -4,12 +4,9 @@
  * 规则项包含：游戏、registry 来源、指令定义（名称＋参数位置＋参数名）、
  * 引用命名空间。这里的每一条都必须能追溯到仓库受支持定义或测试夹具：
  *
- * - `InitializeEvent` 的 eventId 位于第 2 参（位置 1）：
- *   `emevd/language-service/eventSymbolIndexer.ts` 的受支持调用集
- *   `InitializeEvent|InitializeCommonEvent|GotoEvent|RunEvent` 都以第二参为
- *   目标事件 id；`testing/runDarkScriptCompilerSmoke.ts` 夹具签名为
- *   `(slotNumber, eventId, arg)`；`darkScriptRenderer.ts` 头注释
- *   `InitializeEvent(0, 77770001, 0)` 与之一致。
+ * - `InitializeEvent` 的 eventId 位于第 2 参（位置 1），而一手 Sekiro
+ *   Schema 中的 `InitializeCommonEvent` 的 eventId 位于第 1 参（位置 0），
+ *   后续参数是 vararg。不能把两者按同一个调用签名处理。
  * - 命名空间：同文件事件优先；`common.emevd` / `commonfunc.emevd` 是
  *   Sekiro 的全局事件命名空间（真实语料入口，见 `emevd/stableIdentity.ts`
  *   与 full-document 注释中的 common.emevd 规模说明）。
@@ -38,16 +35,25 @@ export interface EmevdRoleRule {
   /** Exact EMEDF arg definition name at that position. */
   readonly argName: string;
   readonly namespace: EmevdReferenceNamespace;
+  /** Optional target PARAM table when the namespace is `param`. */
+  readonly targetParamName?: string;
   /** Where the rule came from — repo-supported definition citation. */
   readonly source: string;
 }
 
 /**
- * Supported initialization/call instructions whose actual signatures carry an
- * event id at argument position 1 (slotNumber first). Mirrors the supported
- * set in `eventSymbolIndexer.ts`.
+ * Supported initialization/call instructions and their exact eventId
+ * positions. `InitializeCommonEvent` is intentionally different from
+ * `InitializeEvent`: its first argument is eventId and the rest is vararg.
  */
 const EVENT_CALL_INSTRUCTION_NAMES = ['InitializeEvent', 'InitializeCommonEvent', 'GotoEvent', 'RunEvent'] as const;
+
+const EVENT_CALL_ARG_POSITIONS: Record<typeof EVENT_CALL_INSTRUCTION_NAMES[number], number> = {
+  InitializeEvent: 1,
+  InitializeCommonEvent: 0,
+  GotoEvent: 1,
+  RunEvent: 1
+};
 
 function eventCallRules(): EmevdRoleRule[] {
   return EVENT_CALL_INSTRUCTION_NAMES.map((instructionName) => ({
@@ -58,7 +64,7 @@ function eventCallRules(): EmevdRoleRule[] {
     // external-schema compatibility tests.
     registryOrigins: ['first-party', 'imported', 'user-derived', 'fixture'],
     instructionName,
-    argPosition: 1,
+    argPosition: EVENT_CALL_ARG_POSITIONS[instructionName],
     // The registry arg definition name for the target id. Imported Sekiro
     // EMEDF names this "eventId" (DarkScript3 convention, see emedfSchema
     // extractEventIdReferences); the rule only fires when the def matches.
@@ -69,7 +75,18 @@ function eventCallRules(): EmevdRoleRule[] {
 }
 
 export const EMEVD_ROLE_RULES: readonly EmevdRoleRule[] = Object.freeze([
-  ...eventCallRules()
+  ...eventCallRules(),
+  {
+    ruleId: 'param-ref:AwardItemLot.itemLotId',
+    game: 'sekiro',
+    registryOrigins: ['first-party', 'imported', 'user-derived', 'fixture'],
+    instructionName: 'AwardItemLot',
+    argPosition: 0,
+    argName: 'itemLotId',
+    namespace: 'param',
+    targetParamName: 'ItemLotParam',
+    source: 'first-party Sekiro EMEDF: AwardItemLot(itemLotId)'
+  }
 ]);
 
 /**

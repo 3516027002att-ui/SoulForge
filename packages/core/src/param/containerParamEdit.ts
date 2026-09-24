@@ -7,10 +7,12 @@
  * Do not parse Smithbox XML here and do not scan BND by brute-force index.
  */
 import { createHash } from 'node:crypto';
+import { metadataPage } from '../ai/metadataPage.js';
 import { mkdir, mkdtemp, readdir, readFile, rm, stat } from 'node:fs/promises';
 import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import type { Diagnostic, ParamDefDocument } from '@soulforge/shared';
+import { paramReadSourceHash, paramReadWindow } from './paramReadWindow.js';
 import { createBridgeDaemonScope, runBridge } from '../bridge/runBridge.js';
 import { applyNativeMutation } from '../editing/editorMutationService.js';
 import {
@@ -48,6 +50,16 @@ export interface ParamFieldReadQuery {
   rowIndex?: number;
 }
 
+interface ParamReadCell {
+  table: string;
+  row: ParamRowSlot;
+  entry: ContainerEntry;
+  definition: ParamDefDocument;
+  fieldId: string;
+  sourceHash: string;
+  sourceRevision?: number;
+}
+
 export interface ParamFieldSnapshot {
   table: string;
   rowId: number;
@@ -80,8 +92,23 @@ export type ParamReadResult =
       ok: true;
       containerPath: string;
       fields: ParamFieldSnapshot[];
+      /** Definitions are returned once per page, never repeated per cell. */
+      fieldDefinitions?: ParamFieldDefinitionSnapshot[];
       missingRows: Array<{ table: string; rowId: number }>;
       diagnostics: Diagnostic[];
+      pagination?: {
+        offset: number;
+        returnedCount: number;
+        totalCount: number;
+        hasMore: boolean;
+        nextCursor: string | null;
+        pageSize: number;
+        queryScope: string;
+      };
+      execution?: { status: 'completed' | 'partial' | 'failed'; native: 'completed' | 'partial' | 'failed' };
+      scan?: { status: 'complete' | 'partial'; requestedRows: number; matchedRows: number; missingRows: number };
+      page?: { status: 'complete' | 'partial'; source: 'native'; offset: number; remaining: number };
+      evidence?: { status: 'complete' | 'partial' | 'stale'; sourceHash: string; sourceRevision?: number; complete: boolean };
     }
   | { ok: false; error: ParamEditFailure; diagnostics: Diagnostic[] };
 
@@ -105,6 +132,14 @@ export type ParamFieldDefinitionResult =
       sourceHash: string;
       sourceRevision?: number;
       fields: ParamFieldDefinitionSnapshot[];
+      total: number;
+      totalCount: number;
+      offset: number;
+      limit: number;
+      returned: number;
+      returnedCount: number;
+      truncated: boolean;
+      nextCursor?: string;
       diagnostics: Diagnostic[];
     }
   | { ok: false; error: ParamEditFailure; diagnostics: Diagnostic[] };
@@ -280,11 +315,17 @@ export async function readParamFields(input: {
   edit: NativeEditSession;
   queries: ParamFieldReadQuery[];
   containerPath?: string;
+  cursor?: string;
+  pageSize?: number;
 }): Promise<ParamReadResult> {
   const container = await resolveGameparamContainer(input.edit.session.layers.overlayRoot, input.containerPath);
   if (!container.ok) return { ok: false, error: container.error, diagnostics: [] };
   const diagnostics: Diagnostic[] = [];
   const fields: ParamFieldSnapshot[] = [];
+  const cells: ParamReadCell[] = [];
+  const cellKeys = new Set<string>();
+  const matchedRowKeys = new Set<string>();
+  const fieldDefinitions = new Map<string, ParamFieldDefinitionSnapshot>();
   const missingRows: Array<{ table: string; rowId: number }> = [];
   let sourceRevision: number | undefined;
   try {
@@ -328,10 +369,16 @@ export async function readParamFields(input: {
       queries: []
     };
     for (const rowId of query.rowIds) group.rowIds.add(rowId);
-    group.queries.push(query);
+    group.queries.push({
+      ...query,
+      rowIds: [...new Set(query.rowIds)],
+      fieldIds: [...new Set(query.fieldIds)]
+    });
     groupedQueries.set(canonicalKey, group);
   }
 
+  const requestedRowCount = [...groupedQueries.values()].reduce((total, group) => total + group.rowIds.size, 0);
+  let matchedRowCount = 0;
   for (const group of groupedQueries.values()) {
     const loaded = await loadTableRows(
       input.edit,
@@ -358,6 +405,11 @@ export async function readParamFields(input: {
           continue;
         }
         for (const row of targetSlots) {
+          const matchedRowKey = `${loaded.entry.index}\u0000${loaded.tableName}\u0000${row.rowIndex}`;
+          if (!matchedRowKeys.has(matchedRowKey)) {
+            matchedRowKeys.add(matchedRowKey);
+            matchedRowCount += 1;
+          }
           let foundAnyField = false;
           // An empty fieldIds list is an explicit request for the complete
           // trusted row projection. This lets the agent inspect a richly named
@@ -377,21 +429,27 @@ export async function readParamFields(input: {
               continue;
             }
             foundAnyField = true;
-            fields.push({
+            const definitionKey = `${loaded.tableName}\u0000${fieldId}`;
+            if (!fieldDefinitions.has(definitionKey)) {
+              fieldDefinitions.set(definitionKey, {
+                fieldId,
+                name: field.name,
+                type: field.type,
+                ...(field.description ? { description: field.description } : {}),
+                ...(field.refs ? { refs: field.refs } : {})
+              });
+            }
+            const cellKey = `${matchedRowKey}\u0000${fieldId}`;
+            if (cellKeys.has(cellKey)) continue;
+            cellKeys.add(cellKey);
+            cells.push({
               table: loaded.tableName,
-              rowId,
-              rowIndex: row.rowIndex,
-              dataHash: row.dataHash,
-              entryName: loaded.entry.name,
-              entryIndex: loaded.entry.index,
-              ...(row.name ? { rowName: row.name } : {}),
+              row,
+              entry: loaded.entry,
+              definition: loaded.definition,
               fieldId,
-              ...(field.name && field.name !== fieldId ? { displayName: field.name } : {}),
-              ...(field.description ? { description: field.description } : {}),
-              ...(field.refs ? { refs: field.refs } : {}),
               sourceHash: loaded.sourceHash,
-              ...(sourceRevision !== undefined ? { sourceRevision } : {}),
-              value: readFieldValue(row.dataBase64, loaded.definition, fieldId)
+              ...(sourceRevision !== undefined ? { sourceRevision } : {})
             });
           }
           if (!foundAnyField && requestedFieldIds.length > 0) {
@@ -415,7 +473,76 @@ export async function readParamFields(input: {
       diagnostics
     };
   }
-  return { ok: true, containerPath: container.path, fields, missingRows, diagnostics };
+  let sourceHash: string;
+  const legacyScope = `param-fields:${pathToFileURL(container.path).href}:${input.edit.session.meta.workspaceId}:${JSON.stringify([...groupedQueries.values()].map((group) => ({
+    table: group.table,
+    rowIds: [...group.rowIds].sort((a, b) => a - b),
+    queries: group.queries.map((query) => ({ rowIndex: query.rowIndex, fieldIds: [...query.fieldIds].sort() }))
+  })))}`;
+  const pageSize = normalizeParamPageSize(input.pageSize);
+  let window: ReturnType<typeof paramReadWindow<ParamReadCell, ParamFieldDefinitionSnapshot>>;
+  try {
+    sourceHash = paramReadSourceHash(cells.map((cell) => ({
+      table: cell.table, entryIndex: cell.entry.index, sourceHash: cell.sourceHash
+    })));
+    window = paramReadWindow({ cells, definitions: fieldDefinitions, legacyScope, sourceHash, pageSize,
+      cellIdentity: (cell) => [cell.entry.index, cell.table, cell.row.rowIndex, cell.row.id, cell.fieldId],
+      ...(input.cursor ? { cursor: input.cursor } : {}) });
+  } catch (error) {
+    const code = error instanceof Error && 'code' in error && typeof error.code === 'string'
+      ? error.code : 'PARAM_CURSOR_INVALID';
+    return { ok: false, error: { code, message: error instanceof Error ? error.message : String(error) }, diagnostics };
+  }
+  const { offset, nextCursor, queryScope } = window;
+  for (const cell of window.items) fields.push(snapshotParamReadCell(cell));
+  const complete = missingRows.length === 0 && !nextCursor;
+  return {
+    ok: true,
+    containerPath: container.path,
+    fields,
+    fieldDefinitions: window.fieldDefinitions,
+    missingRows,
+    diagnostics,
+    pagination: {
+      offset,
+      returnedCount: fields.length,
+      totalCount: cells.length,
+      hasMore: nextCursor !== null,
+      nextCursor,
+      pageSize,
+      queryScope
+    },
+    execution: { status: missingRows.length > 0 ? 'partial' : 'completed', native: 'completed' },
+    scan: { status: missingRows.length > 0 ? 'partial' : 'complete', requestedRows: requestedRowCount, matchedRows: matchedRowCount, missingRows: missingRows.length },
+    page: { status: nextCursor ? 'partial' : 'complete', source: 'native', offset, remaining: Math.max(0, cells.length - offset - fields.length) },
+    evidence: { status: missingRows.length > 0 ? 'partial' : 'complete', sourceHash, ...(sourceRevision !== undefined ? { sourceRevision } : {}), complete }
+  };
+}
+
+function normalizeParamPageSize(value: number | undefined): number {
+  if (value === undefined) return 32;
+  if (!Number.isSafeInteger(value) || value < 1 || value > 128) return 32;
+  return value;
+}
+
+function snapshotParamReadCell(cell: ParamReadCell): ParamFieldSnapshot {
+  const field = cell.definition.fields.find((item) => item.id === cell.fieldId);
+  return {
+    table: cell.table,
+    rowId: cell.row.id,
+    rowIndex: cell.row.rowIndex,
+    dataHash: cell.row.dataHash,
+    entryName: cell.entry.name,
+    entryIndex: cell.entry.index,
+    ...(cell.row.name ? { rowName: cell.row.name } : {}),
+    fieldId: cell.fieldId,
+    ...(field?.name && field.name !== cell.fieldId ? { displayName: field.name } : {}),
+    ...(field?.description ? { description: field.description } : {}),
+    ...(field?.refs ? { refs: field.refs } : {}),
+    sourceHash: cell.sourceHash,
+    ...(cell.sourceRevision !== undefined ? { sourceRevision: cell.sourceRevision } : {}),
+    value: readFieldValue(cell.row.dataBase64, cell.definition, cell.fieldId)
+  };
 }
 
 /**
@@ -430,6 +557,7 @@ export async function searchParamFieldDefinitions(input: {
   rowIds: number[];
   query: string;
   limit?: number;
+  cursor?: string;
   containerPath?: string;
 }): Promise<ParamFieldDefinitionResult> {
   const query = input.query.trim();
@@ -457,7 +585,6 @@ export async function searchParamFieldDefinitions(input: {
   }))
     .filter((item) => item.score > 0)
     .sort((left, right) => right.score - left.score || left.field.id.localeCompare(right.field.id))
-    .slice(0, Math.max(1, Math.min(32, Math.trunc(input.limit ?? 12))))
     .map(({ field }) => ({
       fieldId: field.id,
       name: field.name,
@@ -473,6 +600,15 @@ export async function searchParamFieldDefinitions(input: {
     // source revision is useful provenance, but failure to stat must not turn
     // a metadata lookup into an unstructured exception.
   }
+  let page;
+  try {
+    page = metadataPage({ items: scored, domain: 'param', sourceHash: loaded.sourceHash,
+      scope: { workspace: input.edit.session.layers.overlayRoot, container: container.path, table: loaded.tableName, rowIds: [...input.rowIds].sort((a, b) => a - b), query },
+      ...(input.limit !== undefined ? { limit: input.limit } : {}), ...(input.cursor ? { cursor: input.cursor } : {}) });
+  } catch (error) {
+    return { ok: false, error: { code: (error as { code?: string }).code ?? 'PARAM_METADATA_PAGE_FAILED', message: String(error), details: (error as { details?: unknown }).details }, diagnostics: loaded.diagnostics };
+  }
+  const { items: fields, ...pagination } = page;
   return {
     ok: true,
     containerPath: container.path,
@@ -482,7 +618,8 @@ export async function searchParamFieldDefinitions(input: {
     rowIds: [...input.rowIds],
     sourceHash: loaded.sourceHash,
     ...(sourceRevision !== undefined ? { sourceRevision } : {}),
-    fields: scored,
+    fields,
+    ...pagination,
     diagnostics: loaded.diagnostics
   };
 }

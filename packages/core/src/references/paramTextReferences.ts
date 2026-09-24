@@ -45,6 +45,28 @@ const ROW_FMG_ASSOCIATIONS: Readonly<Record<string, readonly string[]>> = {
 
 const MAX_PARAM_TEXT_LINKS = 16;
 
+// Keep a weak identity index for the common immutable-snapshot path, but pair
+// it with a primitive semantic snapshot.  The public API accepts readonly
+// arrays only as a TypeScript constraint; callers can still mutate rows,
+// fields, MSG entries, or export arrays in place.  The token snapshot makes
+// those mutations invalidate the cache without rebuilding a large string key.
+type ParamTextSemanticToken = string | number | boolean | null | undefined;
+
+interface ParamTextReferenceEdgesCacheEntry {
+  paramTokens: ParamTextSemanticToken[];
+  msgTokens: ParamTextSemanticToken[];
+  edges: ReferenceEdge[];
+}
+
+const paramTextReferenceEdgesCache = new WeakMap<
+  readonly { rows: readonly ParamRowSymbol[] }[],
+  WeakMap<readonly MsgExport[], ParamTextReferenceEdgesCacheEntry>
+>();
+
+export interface ParamTextFieldClassifier {
+  isTextReferenceField(field: ParamFieldSymbol): boolean;
+}
+
 export function buildTextEntryLookup(msgExports: readonly MsgExport[]): Map<number, TextEntrySymbol[]> {
   const lookup = new Map<number, TextEntrySymbol[]>();
   for (const msgExport of msgExports) {
@@ -68,29 +90,87 @@ export function parseParamTextReference(value: ParamFieldSymbol['value']): numbe
 }
 
 const PARAM_TEXT_FIELD_CACHE_CAPACITY = 4096;
-const paramTextFieldCache = new Map<string, boolean>();
 
-function paramTextFieldCacheKey(field: ParamFieldSymbol): string {
-  return [
-    field.fieldId ?? '',
-    field.name,
-    field.type ?? '',
-    field.description ?? '',
-    field.refsProvenance ?? 'unknown'
-  ].map((value) => `${value.length}:${value}`).join('|');
+interface ParamTextFieldShape {
+  name: string;
+  type?: string;
+  description?: string;
+  refsProvenance?: ParamFieldSymbol['refsProvenance'];
 }
 
-function cacheParamTextFieldResult(key: string, value: boolean): void {
-  // Keep this a bounded LRU: native metadata from many workspaces may reuse
-  // field ids while changing descriptions/types, so an unbounded global map
-  // would retain every workspace's schema vocabulary forever.
-  paramTextFieldCache.delete(key);
-  paramTextFieldCache.set(key, value);
-  while (paramTextFieldCache.size > PARAM_TEXT_FIELD_CACHE_CAPACITY) {
-    const oldest = paramTextFieldCache.keys().next().value as string | undefined;
+interface ParamTextFieldCacheEntry extends ParamTextFieldShape {
+  result: boolean;
+}
+
+// Field ids are stable within a trusted schema.  Keep the shape alongside the
+// result so a changed metadata package cannot reuse an old classification.
+// Unlike the previous per-call string-keyed LRU, cache hits only compare the
+// already-present metadata properties and never construct/delete/reinsert a key.
+const paramTextFieldCacheById = new Map<string, ParamTextFieldCacheEntry>();
+const paramTextFieldCacheByName = new Map<string, ParamTextFieldCacheEntry>();
+
+function cacheEntry(field: ParamFieldSymbol, result: boolean): ParamTextFieldCacheEntry {
+  return {
+    name: field.name,
+    ...(field.type !== undefined ? { type: field.type } : {}),
+    ...(field.description !== undefined ? { description: field.description } : {}),
+    refsProvenance: field.refsProvenance,
+    result
+  };
+}
+
+function sameFieldShape(left: ParamTextFieldShape, right: ParamFieldSymbol): boolean {
+  return left.name === right.name
+    && left.type === right.type
+    && left.description === right.description
+    && left.refsProvenance === right.refsProvenance;
+}
+
+function cacheParamTextFieldResult(
+  cache: Map<string, ParamTextFieldCacheEntry>,
+  key: string,
+  field: ParamFieldSymbol,
+  result: boolean
+): void {
+  cache.set(key, cacheEntry(field, result));
+  while (cache.size > PARAM_TEXT_FIELD_CACHE_CAPACITY) {
+    const oldest = cache.keys().next().value as string | undefined;
     if (oldest === undefined) break;
-    paramTextFieldCache.delete(oldest);
+    cache.delete(oldest);
   }
+}
+
+function classifyParamTextField(field: ParamFieldSymbol): boolean {
+  const cache = field.fieldId ? paramTextFieldCacheById : paramTextFieldCacheByName;
+  const key = field.fieldId ?? field.name;
+  const cached = cache.get(key);
+  if (cached !== undefined && sameFieldShape(cached, field)) return cached.result;
+  const result = evaluateParamTextReferenceField(field);
+  cacheParamTextFieldResult(cache, key, field, result);
+  return result;
+}
+
+export function createParamTextFieldClassifier(
+  fields: readonly ParamFieldSymbol[]
+): ParamTextFieldClassifier {
+  const byId = new Map<string, ParamTextFieldCacheEntry>();
+  const byName = new Map<string, ParamTextFieldCacheEntry>();
+  for (const field of fields) {
+    const cache = field.fieldId ? byId : byName;
+    const key = field.fieldId ?? field.name;
+    cache.set(key, cacheEntry(field, evaluateParamTextReferenceField(field)));
+  }
+  return {
+    isTextReferenceField(field): boolean {
+      const cache = field.fieldId ? byId : byName;
+      const key = field.fieldId ?? field.name;
+      const cached = cache.get(key);
+      if (cached !== undefined && sameFieldShape(cached, field)) return cached.result;
+      const result = classifyParamTextField(field);
+      cache.set(key, cacheEntry(field, result));
+      return result;
+    }
+  };
 }
 
 /**
@@ -99,16 +179,7 @@ function cacheParamTextFieldResult(key: string, value: boolean): void {
  * 等普通整数误解释成 textId。
  */
 export function isParamTextReferenceField(field: ParamFieldSymbol): boolean {
-  const cacheKey = paramTextFieldCacheKey(field);
-  const cached = paramTextFieldCache.get(cacheKey);
-  if (cached !== undefined) {
-    paramTextFieldCache.delete(cacheKey);
-    paramTextFieldCache.set(cacheKey, cached);
-    return cached;
-  }
-  const result = evaluateParamTextReferenceField(field);
-  cacheParamTextFieldResult(cacheKey, result);
-  return result;
+  return classifyParamTextField(field);
 }
 
 function evaluateParamTextReferenceField(field: ParamFieldSymbol): boolean {
@@ -133,13 +204,14 @@ function evaluateParamTextReferenceField(field: ParamFieldSymbol): boolean {
 export function collectParamTextLinks(
   row: ParamRowSymbol,
   textEntriesById: TextEntryLookup,
-  maxLinks = MAX_PARAM_TEXT_LINKS
+  maxLinks = MAX_PARAM_TEXT_LINKS,
+  classifier?: ParamTextFieldClassifier
 ): ParamTextLink[] {
   if (maxLinks <= 0) return [];
   const byUri = new Map<string, ParamTextLink>();
 
   for (const field of row.fields ?? []) {
-    if (!isParamTextReferenceField(field)) continue;
+    if (!(classifier?.isTextReferenceField(field) ?? isParamTextReferenceField(field))) continue;
     const referenceValue = parseParamTextReference(field.value);
     if (referenceValue === null) continue;
     for (const entry of textEntriesById.get(referenceValue) ?? []) {
@@ -190,17 +262,97 @@ export function paramTextLinkSearchText(links: readonly ParamTextLink[]): string
   ].filter(Boolean).join(' ')).join(' ');
 }
 
+const TOKEN_PARAM_EXPORT = 1;
+const TOKEN_PARAM_ROWS = 2;
+const TOKEN_ROW = 3;
+const TOKEN_ROW_FIELDS = 4;
+const TOKEN_FIELD = 5;
+const TOKEN_MSG_EXPORT = 6;
+const TOKEN_MSG_ENTRIES = 7;
+const TOKEN_MSG_ENTRY = 8;
+const TOKEN_VALUE = 9;
+
+function pushSemanticToken(
+  tokens: ParamTextSemanticToken[],
+  tag: number,
+  value: ParamTextSemanticToken = undefined
+): void {
+  tokens.push(tag, value);
+}
+
+function paramTextSemanticTokens(
+  params: readonly { rows: readonly ParamRowSymbol[] }[],
+  msgExports: readonly MsgExport[]
+): { paramTokens: ParamTextSemanticToken[]; msgTokens: ParamTextSemanticToken[] } {
+  const paramTokens: ParamTextSemanticToken[] = [];
+  for (const paramExport of params) {
+    pushSemanticToken(paramTokens, TOKEN_PARAM_EXPORT);
+    pushSemanticToken(paramTokens, TOKEN_PARAM_ROWS, paramExport.rows.length);
+    for (const row of paramExport.rows) {
+      pushSemanticToken(paramTokens, TOKEN_ROW);
+      pushSemanticToken(paramTokens, TOKEN_VALUE, row.uri);
+      pushSemanticToken(paramTokens, TOKEN_VALUE, row.sourceUri);
+      pushSemanticToken(paramTokens, TOKEN_VALUE, row.paramName);
+      pushSemanticToken(paramTokens, TOKEN_VALUE, row.rowId);
+      pushSemanticToken(paramTokens, TOKEN_ROW_FIELDS, row.fields?.length ?? 0);
+      for (const field of row.fields ?? []) {
+        pushSemanticToken(paramTokens, TOKEN_FIELD);
+        pushSemanticToken(paramTokens, TOKEN_VALUE, field.fieldId);
+        pushSemanticToken(paramTokens, TOKEN_VALUE, field.name);
+        pushSemanticToken(paramTokens, TOKEN_VALUE, field.type);
+        pushSemanticToken(paramTokens, TOKEN_VALUE, field.description);
+        pushSemanticToken(paramTokens, TOKEN_VALUE, field.refsProvenance);
+        pushSemanticToken(paramTokens, TOKEN_VALUE, field.value);
+      }
+    }
+  }
+
+  const msgTokens: ParamTextSemanticToken[] = [];
+  for (const msgExport of msgExports) {
+    pushSemanticToken(msgTokens, TOKEN_MSG_EXPORT);
+    pushSemanticToken(msgTokens, TOKEN_VALUE, msgExport.category);
+    pushSemanticToken(msgTokens, TOKEN_MSG_ENTRIES, msgExport.entries.length);
+    for (const entry of msgExport.entries) {
+      pushSemanticToken(msgTokens, TOKEN_MSG_ENTRY);
+      pushSemanticToken(msgTokens, TOKEN_VALUE, entry.uri);
+      pushSemanticToken(msgTokens, TOKEN_VALUE, entry.sourceUri);
+      pushSemanticToken(msgTokens, TOKEN_VALUE, entry.category);
+      pushSemanticToken(msgTokens, TOKEN_VALUE, entry.textId);
+      pushSemanticToken(msgTokens, TOKEN_VALUE, entry.text);
+    }
+  }
+  return { paramTokens, msgTokens };
+}
+
+function sameSemanticTokens(left: readonly ParamTextSemanticToken[], right: readonly ParamTextSemanticToken[]): boolean {
+  if (left.length !== right.length) return false;
+  for (let index = 0; index < left.length; index += 1) {
+    if (!Object.is(left[index], right[index])) return false;
+  }
+  return true;
+}
+
 /** Build graph edges for PARAM↔FMG links without numeric-fallback noise. */
 export function buildParamTextReferenceEdges(
   params: readonly { rows: readonly ParamRowSymbol[] }[],
   msgExports: readonly MsgExport[]
 ): ReferenceEdge[] {
+  const byMsgSnapshot = paramTextReferenceEdgesCache.get(params);
+  const cached = byMsgSnapshot?.get(msgExports);
+  const { paramTokens, msgTokens } = paramTextSemanticTokens(params, msgExports);
+  if (cached !== undefined
+    && sameSemanticTokens(cached.paramTokens, paramTokens)
+    && sameSemanticTokens(cached.msgTokens, msgTokens)) {
+    return cached.edges;
+  }
+
   const lookup = buildTextEntryLookup(msgExports);
   const edges: ReferenceEdge[] = [];
   const seen = new Set<string>();
   for (const paramExport of params) {
+    const classifier = createParamTextFieldClassifier(paramExport.rows[0]?.fields ?? []);
     for (const row of paramExport.rows) {
-      for (const link of collectParamTextLinks(row, lookup)) {
+      for (const link of collectParamTextLinks(row, lookup, MAX_PARAM_TEXT_LINKS, classifier)) {
         const key = `${row.uri}\u0000${link.entry.uri}`;
         if (seen.has(key)) continue;
         seen.add(key);
@@ -223,6 +375,10 @@ export function buildParamTextReferenceEdges(
       }
     }
   }
+  const cacheForParams = byMsgSnapshot
+    ?? new WeakMap<readonly MsgExport[], ParamTextReferenceEdgesCacheEntry>();
+  cacheForParams.set(msgExports, { paramTokens, msgTokens, edges });
+  if (byMsgSnapshot === undefined) paramTextReferenceEdgesCache.set(params, cacheForParams);
   return edges;
 }
 

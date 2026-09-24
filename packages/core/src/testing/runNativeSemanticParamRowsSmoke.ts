@@ -7,9 +7,10 @@
  * or synthetic binary parser authority.
  */
 import assert from 'node:assert/strict';
-import type { ParamDefDocument, ParamRowSymbol } from '@soulforge/shared';
+import type { MsgExport, ParamDefDocument, ParamRowSymbol } from '@soulforge/shared';
 import { decodeRowFields } from '../param/paramdefLayout.js';
 import { decodeNativeParamRows } from '../indexing/nativeSemanticRefresh.js';
+import { buildParamTextReferenceEdges } from '../references/paramTextReferences.js';
 
 const definition: ParamDefDocument = {
   schemaVersion: 1,
@@ -108,6 +109,110 @@ async function main(): Promise<void> {
     assert.equal(row.outerFileHash, 'packed-outer-hash');
     assert.notEqual(row.sourceHash, row.outerFileHash);
   }
+
+  let unrelatedDecodeCount = 0;
+  const unrelatedField = {
+    id: 'unrelated',
+    name: 'unrelated',
+    type: 'u32' as const,
+    offset: 0,
+    size: 4
+  };
+  Object.defineProperty(unrelatedField, 'type', {
+    enumerable: true,
+    get() {
+      return 'u32';
+    }
+  });
+  Object.defineProperty(unrelatedField, 'offset', {
+    enumerable: true,
+    get() {
+      unrelatedDecodeCount += 1;
+      return 0;
+    }
+  });
+  const referenceDefinition: ParamDefDocument = {
+    schemaVersion: 1,
+    typeName: 'REFERENCE_ONLY_PARAM_ST',
+    version: 1,
+    rowDataSize: 16,
+    origin: 'fixture',
+    fields: [
+      unrelatedField as ParamDefDocument['fields'][number],
+      { id: 'refId', name: 'refId', type: 'u32', offset: 4, size: 4, refs: 'TargetParam(refType=1)' },
+      { id: 'refType', name: 'refType', type: 'u8', offset: 8, size: 1 },
+      { id: 'textId', name: 'textId', type: 'u16', offset: 9, size: 2 },
+      {
+        id: 'bitRefId',
+        name: 'bitRefId',
+        type: 'u8',
+        offset: 11,
+        size: 1,
+        bitfield: { bitOffset: 1, bitWidth: 3 },
+        refs: 'TargetParam(refType=1)'
+      },
+      { id: 'padding', name: 'padding', type: 'bytes', offset: 12, size: 4 }
+    ]
+  };
+  const referenceBytes = Buffer.alloc(referenceDefinition.rowDataSize);
+  referenceBytes.writeUInt32LE(42, 4);
+  referenceBytes.writeUInt8(1, 8);
+  referenceBytes.writeUInt16LE(77, 9);
+  referenceBytes.writeUInt8(0b00001010, 11);
+  const referenceRows = [{ id: 7, dataBase64: referenceBytes.toString('base64') }];
+  unrelatedDecodeCount = 0;
+  const referenceOnly = await decodeNativeParamRows({
+    file,
+    sourceHash: 'native-child-hash',
+    outerFileHash: 'packed-outer-hash',
+    tableName: 'ReferenceOnlyParam',
+    entryName: 'ReferenceOnlyParam.param',
+    entryIndex: 4,
+    typeName: referenceDefinition.typeName,
+    definition: referenceDefinition,
+    rows: referenceRows,
+    referenceFieldsOnly: true
+  });
+  assert.deepEqual(
+    referenceOnly[0]?.fields?.map((field) => field.fieldId),
+    ['refId', 'refType', 'textId', 'bitRefId'],
+    'reference-only projection must include refs, condition siblings, text-id fields, and bitfields, but no unrelated fields'
+  );
+  assert.equal(referenceOnly[0]?.fields?.find((field) => field.fieldId === 'refId')?.value, 42);
+  assert.equal(referenceOnly[0]?.fields?.find((field) => field.fieldId === 'refType')?.value, 1);
+  assert.equal(
+    referenceOnly[0]?.fields?.find((field) => field.fieldId === 'textId')?.value,
+    77,
+    'reference-only projection must preserve a no-refs textId field'
+  );
+  assert.equal(
+    referenceOnly[0]?.fields?.find((field) => field.fieldId === 'bitRefId')?.value,
+    5,
+    'reference-only projection must preserve native bitfield decoding'
+  );
+  assert.equal(
+    unrelatedDecodeCount,
+    0,
+    'reference-only projection must not decode unrelated wide-row fields'
+  );
+  assert.equal(referenceOnly[0]?.sourceHash, 'native-child-hash');
+  assert.equal(referenceOnly[0]?.outerFileHash, 'packed-outer-hash');
+  assert.equal(referenceOnly[0]?.sourceRevision, file.mtimeMs);
+
+  const syntheticMsg: MsgExport = {
+    category: 'SyntheticText',
+    entries: [{
+      uri: 'file:///fixture/msg/SyntheticText.fmg#77',
+      sourceUri: 'file:///fixture/msg/SyntheticText.fmg',
+      textId: 77,
+      text: 'Synthetic localized text',
+      confidence: 'high'
+    }]
+  };
+  const textEdges = buildParamTextReferenceEdges([{ rows: referenceOnly }], [syntheticMsg]);
+  assert.equal(textEdges.length, 1, 'no-refs textId must produce a PARAM↔FMG edge');
+  assert.equal(textEdges[0]?.kind, 'references_text');
+  assert.equal(textEdges[0]?.toUri, syntheticMsg.entries[0]?.uri);
 
   const controller = new AbortController();
   let abortScheduled = false;

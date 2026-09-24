@@ -1,3 +1,5 @@
+import { createHash } from 'node:crypto';
+import { createOpaqueCursor, parseOpaqueCursor } from '@soulforge/shared';
 import type {
   EventArg,
   EventExport,
@@ -41,6 +43,7 @@ import {
   type CoverageState
 } from './coverageState.js';
 import { cloneParamExports } from './cloneParamExport.js';
+import { isActiveSemanticSource } from '../workspace/resourceKinds.js';
 
 export const MSB_READER_SCHEMA_REVISION = 2;
 export const MSB_READER_SCHEMA_HASH = 'msb-schema-rev-2-entityid-verified';
@@ -57,9 +60,31 @@ export function computeMapDerivedKey(input: {
 }
 
 export interface SearchResourcesOptions {
-  query: string;
+  query?: string;
   kinds?: readonly ResourceKind[];
   limit?: number;
+  /** Continuation token returned by searchResourcesPage. */
+  cursor?: string;
+  /** Recovery artifacts stay out of the normal resource search by default. */
+  sourceFilter?: ResourceSearchSourceFilter;
+}
+
+export type ResourceSearchSourceFilter = 'active' | 'all' | 'artifacts';
+
+export interface SearchResourcesPage {
+  items: Array<SearchResult<IndexedFile>>;
+  /** Agent-facing alias retained alongside the WorkspaceIndex item name. */
+  matches: Array<SearchResult<IndexedFile>>;
+  total: number;
+  totalCount: number;
+  offset: number;
+  limit: number;
+  returned: number;
+  returnedCount: number;
+  hasMore: boolean;
+  truncated: boolean;
+  nextCursor?: string;
+  nextActions: Array<{ tool: 'search_resources'; args: { query: string; cursor: string }; reason: string }>;
 }
 
 export interface SearchResult<T> {
@@ -169,6 +194,8 @@ export class WorkspaceIndex {
   private readonly latestProjectionVersions = new Map<string, CoverageSourceVersion>();
   /** Monotonic identity epoch used by host-side RAG freshness masks. */
   private nativeVersionEpoch = 0;
+  /** Cached source URI projections; semantic arrays replace on mutation. */
+  private readonly semanticSourceUriCache = new Map<ResourceKind, readonly string[]>();
 
   constructor(workspaceId: string) {
     this.workspaceId = workspaceId;
@@ -197,6 +224,10 @@ export class WorkspaceIndex {
     clone.msgExports = structuredClone(this.msgExports);
     clone.taeExports = structuredClone(this.taeExports);
     clone.scriptExports = structuredClone(this.scriptExports);
+    // The constructor has already populated URI caches for the empty clone.
+    // Projection arrays are assigned directly below it, so those entries must
+    // be discarded before the first coverage recomputation on the clone.
+    clone.invalidateSemanticSourceUriCache();
     clone.references = structuredClone(this.references);
     clone.actionBinderMembershipCandidates = structuredClone(this.actionBinderMembershipCandidates);
     clone.actionBinderMembershipReady = this.actionBinderMembershipReady;
@@ -241,6 +272,7 @@ export class WorkspaceIndex {
       .flatMap((file) => [file.sourceUri, file.sourcePath, file.relativePath, file.absolutePath]);
     this.filesByUri.clear();
     for (const file of nextFiles) this.filesByUri.set(file.sourceUri, file);
+    this.invalidateSemanticSourceUriCache();
     this.actionBinderMembershipCandidates = previousMembership.map((candidate) => ({
       characterFamily: candidate.characterFamily,
       source: this.refreshActionBinderSourceRevision(candidate.source, nextFiles),
@@ -547,6 +579,7 @@ export class WorkspaceIndex {
    */
   invalidateChangedSources(sourceUris: readonly string[]): SourceInvalidationResult {
     const uniqueSources = [...new Set(sourceUris.filter((sourceUri) => sourceUri.trim().length > 0))];
+    this.invalidateSemanticSourceUriCache();
     for (const sourceUri of uniqueSources) {
       this.staleSources.add(sourceUri);
       this.partialSources.delete(this.canonicalSourceUri(sourceUri));
@@ -637,8 +670,10 @@ export class WorkspaceIndex {
     // cannot erase an already indexed rich event body.
     if (value.events.length === 0) return false;
     const sourceUri = value.events[0]?.sourceUri;
-    if (sourceUri && !this.acceptNativeProjection(sourceUri, projectionVersion(value)).accepted) return false;
-    const key = eventExportKey(value);
+    const projectionKey = eventExportKey(value);
+    if (sourceUri && !this.acceptNativeProjection(sourceUri, projectionVersion(value), projectionKey ?? sourceUri).accepted) return false;
+    this.invalidateSemanticSourceUriCache('event');
+    const key = projectionKey;
     // An export without one unambiguous source identity cannot safely replace
     // another export. Keep it as a separate candidate instead of collapsing it
     // under a shared "unknown" key.
@@ -680,6 +715,7 @@ export class WorkspaceIndex {
       readerSchemaVersion: value.readerSchemaRevision ?? MSB_READER_SCHEMA_REVISION,
       metadataSchemaVersion: METADATA_SCHEMA_HASH
     }).accepted) return false;
+    this.invalidateSemanticSourceUriCache('map');
     const derivedKey = value.derivedKey
       ?? ((value.outerFileHash ?? value.sourceHash)
         ? computeMapDerivedKey({ outerHash: value.outerFileHash ?? value.sourceHash! })
@@ -708,6 +744,7 @@ export class WorkspaceIndex {
     staleMapExportsRemoved: number;
     referencesRebuilt: number;
   } {
+    this.invalidateSemanticSourceUriCache('map');
     const staleMapSources: string[] = [];
     this.mapExports = this.mapExports.filter((mapExport) => {
       const rev = mapExport.readerSchemaRevision ?? 1;
@@ -731,6 +768,7 @@ export class WorkspaceIndex {
   upsertParamExport(value: ParamExport): boolean {
     const sourceUri = paramExportSourceUri(value);
     if (sourceUri && !this.acceptNativeProjection(sourceUri, projectionVersion(value), paramExportKey(value)).accepted) return false;
+    this.invalidateSemanticSourceUriCache('param');
     this.paramExports = replaceByKey(this.paramExports, paramExportKey(value), paramExportKey, value);
     if (this.paramExports.length > 0) {
       this.paramSemanticState = 'ready';
@@ -750,7 +788,24 @@ export class WorkspaceIndex {
     // packed source URI.  Two BND4 tables commonly contain the same numeric
     // row ID; keep their identities separate while merging a slim live read.
     const rows = new Map((existing?.rows ?? []).map((row) => [paramRowKey(row), row]));
-    for (const row of value.rows) rows.set(paramRowKey(row), row);
+    for (const row of value.rows) {
+      const key = paramRowKey(row);
+      const previous = rows.get(key);
+      if (!previous) {
+        rows.set(key, row);
+        continue;
+      }
+      // read_param_fields pages field cells.  Merge field projections by
+      // physical identity instead of replacing page 1 with page 2; otherwise
+      // a second cursor call would silently erase the first page from the
+      // shared semantic index.
+      const fields = new Map((previous.fields ?? []).map((field) => [field.fieldId ?? field.name, field]));
+      for (const field of row.fields ?? []) fields.set(field.fieldId ?? field.name, field);
+      const { fields: _incomingFields, ...rowWithoutFields } = row;
+      const mergedRow: ParamRowSymbol = { ...previous, ...rowWithoutFields };
+      if (fields.size > 0) mergedRow.fields = [...fields.values()];
+      rows.set(key, mergedRow);
+    }
     const mergedRows = [...rows.values()];
     const sourceHashes = new Set(mergedRows.map((row) => row.sourceHash).filter((item): item is string => Boolean(item)));
     const outerFileHashes = new Set(mergedRows.map((row) => row.outerFileHash).filter((item): item is string => Boolean(item)));
@@ -770,6 +825,7 @@ export class WorkspaceIndex {
   upsertMsgExport(value: MsgExport): boolean {
     const sourceUri = msgExportSourceUri(value);
     if (sourceUri && !this.acceptNativeProjection(sourceUri, projectionVersion(value), msgProjectionKey(value)).accepted) return false;
+    this.invalidateSemanticSourceUriCache('msg');
     const key = value.category ?? 'default';
     this.msgExports = replaceByKey(this.msgExports, key, (item) => item.category ?? 'default', value);
     this.recomputeCoverageStates();
@@ -800,6 +856,7 @@ export class WorkspaceIndex {
   /** 照 upsertMapExport 抄：TAE 一份 anibnd 一个 TaeExport，按 sourceUri 替换。 */
   upsertTaeExport(value: TaeExport): boolean {
     if (!this.acceptNativeProjection(value.sourceUri, projectionVersion(value)).accepted) return false;
+    this.invalidateSemanticSourceUriCache('action');
     this.taeExports = replaceByKey(this.taeExports, value.sourceUri, (item) => item.sourceUri, value);
     this.recomputeCoverageStates();
     return true;
@@ -815,6 +872,7 @@ export class WorkspaceIndex {
     if (!this.acceptNativeProjection(value.sourceUri, projectionVersion(value), `script:${value.sourceUri}`).accepted) {
       return false;
     }
+    this.invalidateSemanticSourceUriCache('script');
     this.scriptExports = replaceByKey(this.scriptExports, value.sourceUri, (item) => item.sourceUri, value);
     const incomplete = value.catalogComplete !== true
       || value.scripts.some((script) => (
@@ -901,13 +959,155 @@ export class WorkspaceIndex {
     };
   }
 
+  /**
+   * Backwards-compatible bounded resource search.  Callers that need to
+   * inspect every match must use searchResourcesPage and follow its opaque
+   * cursor; this method deliberately retains the historical array shape.
+   */
   searchResources(options: SearchResourcesOptions): Array<SearchResult<IndexedFile>> {
-    const query = normalizeSearch(options.query);
-    const limit = options.limit ?? 100;
-    const kinds = options.kinds ? new Set<ResourceKind>(options.kinds) : null;
-    const results: Array<SearchResult<IndexedFile>> = [];
+    if (options.cursor) return this.searchResourcesPage(options).items;
+    const sourceFilter = options.sourceFilter ?? 'active';
+    if (sourceFilter !== 'active' && sourceFilter !== 'all' && sourceFilter !== 'artifacts') {
+      throw Object.assign(new Error('sourceFilter 必须是 active、all 或 artifacts。'), {
+        code: 'INVALID_RESOURCE_SEARCH_FILTER'
+      });
+    }
+    const scope: ResourceSearchCursorScope = {
+      workspaceId: this.workspaceId,
+      query: normalizeSearch(options.query ?? ''),
+      kinds: normalizeResourceSearchKinds(options.kinds),
+      // The legacy API was not page-envelope limited. Keep its requested
+      // limit semantics while the new page API remains bounded for Agents.
+      limit: normalizeResourceSearchLimit(options.limit, false),
+      sourceFilter
+    };
+    return this.searchResourceResults(scope).slice(0, scope.limit);
+  }
 
+  /**
+   * Search the catalog with a stable, query-bound continuation cursor.
+   * Recovery artifacts remain in the catalog for restore/history consumers,
+   * but are excluded from the default active source view.  `sourceFilter`
+   * makes that boundary explicit without deleting or hiding the files from
+   * the workspace index itself.
+   */
+  searchResourcesPage(options: SearchResourcesOptions): SearchResourcesPage {
+    const sourceFilter = options.sourceFilter ?? 'active';
+    if (sourceFilter !== 'active' && sourceFilter !== 'all' && sourceFilter !== 'artifacts') {
+      throw Object.assign(new Error('sourceFilter 必须是 active、all 或 artifacts。'), {
+        code: 'INVALID_RESOURCE_SEARCH_FILTER'
+      });
+    }
+    const hasQuery = options.query !== undefined;
+    const requestedQuery = normalizeSearch(options.query ?? '');
+    const requestedKinds = normalizeResourceSearchKinds(options.kinds);
+    const requestedLimit = normalizeResourceSearchLimit(options.limit, true);
+    let scope: ResourceSearchCursorScope = {
+      workspaceId: this.workspaceId,
+      query: requestedQuery,
+      kinds: requestedKinds,
+      limit: requestedLimit,
+      sourceFilter
+    };
+    let offset = 0;
+    let expectedHash: string | undefined;
+    const cursor = options.cursor?.trim();
+    if (cursor) {
+      let payload;
+      try {
+        payload = parseOpaqueCursor(cursor);
+      } catch (error) {
+        throw Object.assign(
+          new Error(error instanceof Error ? error.message : '资源搜索 cursor 无效。'),
+          { code: (error as { code?: string }).code ?? 'INVALID_READ_CURSOR' }
+        );
+      }
+      if (payload.sessionId !== RESOURCE_SEARCH_CURSOR_SESSION
+        || payload.domain !== RESOURCE_SEARCH_CURSOR_DOMAIN) {
+        throw Object.assign(new Error('资源搜索 cursor 不属于当前搜索范围。'), {
+          code: 'RESOURCE_SEARCH_CURSOR_SCOPE_MISMATCH'
+        });
+      }
+      let parsed: ResourceSearchCursorScope;
+      try {
+        parsed = JSON.parse(payload.scope) as ResourceSearchCursorScope;
+      } catch {
+        throw Object.assign(new Error('资源搜索 cursor 范围无效。'), {
+          code: 'RESOURCE_SEARCH_CURSOR_SCOPE_MISMATCH'
+        });
+      }
+      if (!isResourceSearchCursorScope(parsed) || parsed.workspaceId !== this.workspaceId) {
+        throw Object.assign(new Error('资源搜索 cursor 范围无效。'), {
+          code: 'RESOURCE_SEARCH_CURSOR_SCOPE_MISMATCH'
+        });
+      }
+      if ((hasQuery && requestedQuery !== parsed.query)
+        || (options.limit !== undefined && requestedLimit !== parsed.limit)
+        || (options.sourceFilter !== undefined && sourceFilter !== parsed.sourceFilter)
+        || (options.kinds !== undefined && !sameStringArray(requestedKinds, parsed.kinds))) {
+        throw Object.assign(new Error('续页时不能改变资源搜索条件。'), {
+          code: 'RESOURCE_SEARCH_CURSOR_SCOPE_MISMATCH'
+        });
+      }
+      scope = parsed;
+      offset = payload.offset;
+      expectedHash = payload.sourceHash;
+    }
+    if (!Number.isSafeInteger(offset) || offset < 0) {
+      throw Object.assign(new Error('资源搜索 cursor offset 无效。'), {
+        code: 'INVALID_READ_CURSOR'
+      });
+    }
+
+    const ranked = this.searchResourceResults(scope);
+    const sourceHash = resourceSearchFingerprint(scope, ranked);
+    if (expectedHash !== undefined && expectedHash !== sourceHash) {
+      throw Object.assign(new Error('资源目录已变化，请从头搜索。'), {
+        code: 'STALE_READ_CURSOR'
+      });
+    }
+    const items = ranked.slice(offset, offset + scope.limit);
+    const nextOffset = offset + items.length;
+    const hasMore = nextOffset < ranked.length;
+    const nextCursor = hasMore ? createOpaqueCursor({
+      sessionId: RESOURCE_SEARCH_CURSOR_SESSION,
+      // CursorPayload is shared with native edit sessions. The scope and
+      // session id are the authority for this catalog-only cursor; `script`
+      // is used as the existing opaque token domain without broadening the
+      // native edit-domain contract.
+      domain: RESOURCE_SEARCH_CURSOR_DOMAIN,
+      scope: JSON.stringify(scope),
+      sourceHash,
+      offset: nextOffset
+    }) : undefined;
+    const nextActions = nextCursor ? [{
+      tool: 'search_resources' as const,
+      args: { query: scope.query, cursor: nextCursor },
+      reason: '继续读取后续资源搜索结果'
+    }] : [];
+    return {
+      items,
+      matches: items,
+      total: ranked.length,
+      totalCount: ranked.length,
+      offset,
+      returned: items.length,
+      returnedCount: items.length,
+      limit: scope.limit,
+      hasMore,
+      truncated: hasMore,
+      ...(nextCursor ? { nextCursor } : {}),
+      nextActions
+    };
+  }
+
+  private searchResourceResults(scope: ResourceSearchCursorScope): Array<SearchResult<IndexedFile>> {
+    const kinds = scope.kinds.length > 0 ? new Set<ResourceKind>(scope.kinds) : null;
+    const results: Array<SearchResult<IndexedFile>> = [];
     for (const file of this.filesByUri.values()) {
+      const active = isActiveSemanticSource(file);
+      if (scope.sourceFilter === 'active' && !active) continue;
+      if (scope.sourceFilter === 'artifacts' && active) continue;
       if (kinds && !kinds.has(file.resourceKind)) continue;
       const text = [
         file.relativePath,
@@ -917,11 +1117,10 @@ export class WorkspaceIndex {
         file.formatKind,
         file.formatLabel
       ].join(' ');
-      const score = scoreResource(file, text, query);
-      if (score > 0) results.push({ item: file, score, highlights: makeHighlights(text, query) });
+      const score = scoreResource(file, text, scope.query);
+      if (score > 0) results.push({ item: file, score, highlights: makeHighlights(text, buildSearchQueryProfile(scope.query)) });
     }
-
-    return sortAndLimit(results, limit);
+    return sortAndLimit(results, results.length);
   }
 
   searchEvents(query: string, limit = 100): Array<SearchResult<EventSymbol>> {
@@ -941,7 +1140,7 @@ export class WorkspaceIndex {
     returned: number;
     hasMore: boolean;
   } {
-    const events = this.eventExports.flatMap((item) => item.events);
+    const events = dedupeEventSearchSymbols(this.activeEventExportsForSearch());
     const ranked = searchSymbols(events, query, events.length, eventSearchText);
     const safeOffset = Math.max(0, Math.trunc(offset));
     const safeLimit = Math.max(1, Math.trunc(limit));
@@ -957,14 +1156,15 @@ export class WorkspaceIndex {
 
   /** Exact event lookup used after the caller has resolved a source file. */
   lookupEvents(eventId: number, sourceUri?: string): EventSymbol[] {
-    return this.eventExports
-      .flatMap((item) => item.events)
+    return dedupeEventSearchSymbols(this.activeEventExportsForSearch())
       .filter((event) => event.eventId === eventId
         && (sourceUri === undefined || event.sourceUri === sourceUri));
   }
 
   searchMapEntities(query: string, limit = 100): Array<SearchResult<MapEntitySymbol | MapRegionSymbol>> {
-    return searchSymbols(this.mapExports.flatMap((item) => [...item.entities, ...item.regions]), query, limit, mapSymbolSearchText);
+    return searchSymbols(this.mapExports.flatMap((item) => [...item.entities, ...item.regions])
+      .filter((symbol) => this.isActiveSemanticSourceUri(symbol.sourceUri)), query, limit, mapSymbolSearchText,
+      (symbol, _text, profile) => scoreMapSymbol(symbol, profile));
   }
 
   searchParamRows(query: string, limit = 100, paramNames?: readonly string[]): Array<SearchResult<ParamRowSymbol>> {
@@ -974,17 +1174,18 @@ export class WorkspaceIndex {
     // Native semantic rows often have no rowName. Resolve only the bounded,
     // source-backed PARAM↔FMG links once per query so an item-name search can
     // find the physical row without scanning/rebuilding RAG per tool call.
-    const textEntryLookup = buildTextEntryLookup(this.msgExports);
+    const textEntryLookup = buildTextEntryLookup(this.activeMsgExportsForSearch());
     // Rank each physical table independently before interleaving. Ranking the
     // flattened 50k-row corpus first can exhaust the limit on one dense table
     // and hide the NpcParam/ItemLotParam representative entirely.
     const ranked = this.paramExports
       .filter((item) => allowed === null || paramExportMatches(item, allowed))
       .flatMap((item) => searchSymbols(
-        item.rows,
+        item.rows.filter((row) => this.isActiveSemanticSourceUri(row.sourceUri)),
         query,
         limit,
-        (row) => paramRowSearchText(row, textEntryLookup)
+        (row) => paramRowSearchText(row, textEntryLookup),
+        (row, text, profile) => scoreParamRow(row, text, profile)
       ));
     return diversifyParamSearchResults(
       ranked,
@@ -994,12 +1195,16 @@ export class WorkspaceIndex {
   }
 
   searchTextEntries(query: string, limit = 100): Array<SearchResult<TextEntrySymbol>> {
-    return searchSymbols(this.msgExports.flatMap((item) => item.entries), query, limit, textEntrySearchText);
+    return searchSymbols(this.msgExports.flatMap((item) => item.entries)
+      .filter((entry) => this.isActiveSemanticSourceUri(entry.sourceUri)), query, limit, textEntrySearchText,
+      (entry, text, profile) => scoreTextEntry(entry, text, profile));
   }
 
   /** 问题 6-C/D：按地址（action://c1050/A0200/e0 / c1050#A0200.e0）、类型名与字段值搜 TAE 词条。 */
   searchTaeEvents(query: string, limit = 100): Array<SearchResult<TaeEventSymbol>> {
-    const events = this.taeExports.flatMap((item) => item.animations.flatMap((anim) => anim.events));
+    const events = this.taeExports
+      .filter((item) => this.isActiveSemanticSourceUri(item.sourceUri))
+      .flatMap((item) => item.animations.flatMap((anim) => anim.events));
     return searchSymbols(events, query, limit, taeEventSearchText);
   }
 
@@ -1015,6 +1220,28 @@ export class WorkspaceIndex {
 
   lookupTextEntry(textId: number, category?: string): TextEntrySymbol | undefined {
     return this.lookupTextEntries(textId, category)[0];
+  }
+
+  private isActiveSemanticSourceUri(sourceUri: string): boolean {
+    const file = findUniqueSourceFile(this.filesByUri, sourceUri);
+    // Synthetic semantic fixtures may not have a catalog row. In that case
+    // there is no evidence that the source is a recovery artifact, so retain
+    // it; a catalog row marked backup/previous is a hard exclusion.
+    return !file || isActiveSemanticSource(file);
+  }
+
+  private activeEventExportsForSearch(): EventExport[] {
+    return this.eventExports.flatMap((item) => {
+      const events = item.events.filter((event) => this.isActiveSemanticSourceUri(event.sourceUri));
+      return events.length > 0 ? [{ ...item, events }] : [];
+    });
+  }
+
+  private activeMsgExportsForSearch(): MsgExport[] {
+    return this.msgExports.flatMap((item) => {
+      const entries = item.entries.filter((entry) => this.isActiveSemanticSourceUri(entry.sourceUri));
+      return entries.length > 0 ? [{ ...item, entries }] : [];
+    });
   }
 
   getFiles(): IndexedFile[] {
@@ -1083,7 +1310,7 @@ export class WorkspaceIndex {
       const coverageFiles = files.map((file) => this.partialSources.has(file.sourceUri)
         ? { ...file, parseStatus: 'partial' as const }
         : file);
-      const projectedSourceUris = semanticSourceUris(this, domain);
+      const projectedSourceUris = this.semanticSourceUris(domain);
       const expectedResourceIds = files.map((file) => file.sourceUri);
       const coveredResourceIds = projectedSourceUris.length > 0
         ? projectedSourceUris
@@ -1131,12 +1358,12 @@ export class WorkspaceIndex {
       ? { ...file, parseStatus: 'partial' as const }
       : file);
     const allProjectedSourceUris = uniqueStrings([
-      ...semanticSourceUris(this, 'event'),
-      ...semanticSourceUris(this, 'map'),
-      ...semanticSourceUris(this, 'param'),
-      ...semanticSourceUris(this, 'msg'),
-      ...semanticSourceUris(this, 'action'),
-      ...semanticSourceUris(this, 'script')
+      ...this.semanticSourceUris('event'),
+      ...this.semanticSourceUris('map'),
+      ...this.semanticSourceUris('param'),
+      ...this.semanticSourceUris('msg'),
+      ...this.semanticSourceUris('action'),
+      ...this.semanticSourceUris('script')
     ]);
     const allExpected = files.map((file) => file.sourceUri);
     const allCovered = allProjectedSourceUris.length > 0
@@ -1156,43 +1383,175 @@ export class WorkspaceIndex {
       }))
     }));
   }
+
+  private invalidateSemanticSourceUriCache(...domains: ResourceKind[]): void {
+    if (domains.length === 0) {
+      this.semanticSourceUriCache.clear();
+      return;
+    }
+    for (const domain of domains) this.semanticSourceUriCache.delete(domain);
+  }
+
+  private semanticSourceUris(domain: ResourceKind): readonly string[] {
+    const cached = this.semanticSourceUriCache.get(domain);
+    if (cached !== undefined) return cached;
+
+    let result: string[];
+    if (domain === 'event') {
+      result = uniqueStrings(this.eventExports.flatMap((item) => item.events.map((event) => event.sourceUri)));
+    } else if (domain === 'map') {
+      result = uniqueStrings(this.mapExports.flatMap((item) => [
+        ...item.entities.map((entity) => entity.sourceUri),
+        ...item.regions.map((region) => region.sourceUri)
+      ]));
+    } else if (domain === 'param') {
+      const uris = new Set<string>();
+      for (const item of this.paramExports) {
+        if (item.sourceUri) uris.add(item.sourceUri);
+        else if (item.rows[0]?.sourceUri) uris.add(item.rows[0].sourceUri);
+      }
+      result = [...uris];
+    } else if (domain === 'msg') {
+      const uris = new Set<string>();
+      for (const item of this.msgExports) {
+        for (const entry of item.entries) {
+          if (entry.sourceUri) uris.add(entry.sourceUri);
+        }
+      }
+      result = [...uris];
+    } else if (domain === 'action') {
+      result = uniqueStrings(this.taeExports.map((item) => item.sourceUri));
+    } else if (domain === 'script') {
+      result = uniqueStrings(this.scriptExports.map((item) => item.sourceUri));
+    } else {
+      result = [];
+    }
+    this.semanticSourceUriCache.set(domain, result);
+    return result;
+  }
 }
 
-function semanticSourceUris(index: WorkspaceIndex, domain: ResourceKind): string[] {
-  const bundle = index.toSymbolBundle();
-  if (domain === 'event') {
-    return uniqueStrings((bundle.events ?? []).flatMap((item) => item.events.map((event) => event.sourceUri)));
+const RESOURCE_SEARCH_CURSOR_SESSION = 'workspace-resource-search-v1';
+// Native cursor payloads use the existing edit-domain union. The session id
+// and scope below make this a separate catalog-only cursor contract.
+const RESOURCE_SEARCH_CURSOR_DOMAIN = 'script' as const;
+const RESOURCE_SEARCH_PAGE_LIMIT = 6;
+
+interface ResourceSearchCursorScope {
+  workspaceId: string;
+  query: string;
+  kinds: ResourceKind[];
+  limit: number;
+  sourceFilter: ResourceSearchSourceFilter;
+}
+
+function normalizeResourceSearchKinds(kinds: readonly ResourceKind[] | undefined): ResourceKind[] {
+  if (!kinds || kinds.length === 0) return [];
+  return [...new Set(kinds.filter((kind): kind is ResourceKind => (ALL_RESOURCE_KINDS as readonly string[]).includes(kind)))]
+    .sort((left, right) => left.localeCompare(right));
+}
+
+function normalizeResourceSearchLimit(value: number | undefined, pageBounded: boolean): number {
+  const limit = value ?? 100;
+  if (!Number.isSafeInteger(limit) || limit < 1) {
+    throw Object.assign(new Error('limit 必须是正整数。'), { code: 'INVALID_RESOURCE_SEARCH_WINDOW' });
   }
-  if (domain === 'map') {
-    return uniqueStrings((bundle.maps ?? []).flatMap((item) => [
-      ...item.entities.map((entity) => entity.sourceUri),
-      ...item.regions.map((region) => region.sourceUri)
-    ]));
+  return pageBounded ? Math.min(RESOURCE_SEARCH_PAGE_LIMIT, limit) : limit;
+}
+
+function sameStringArray(left: readonly string[], right: readonly string[]): boolean {
+  return left.length === right.length && left.every((value, index) => value === right[index]);
+}
+
+function isResourceSearchCursorScope(value: unknown): value is ResourceSearchCursorScope {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  const candidate = value as Partial<ResourceSearchCursorScope>;
+  const limit = candidate.limit;
+  return typeof candidate.workspaceId === 'string'
+    && candidate.workspaceId.length > 0
+    && typeof candidate.query === 'string'
+    && Array.isArray(candidate.kinds)
+    && candidate.kinds.every((kind) => typeof kind === 'string' && (ALL_RESOURCE_KINDS as readonly string[]).includes(kind))
+    && typeof limit === 'number'
+    && Number.isSafeInteger(limit)
+    && limit >= 1
+    && limit <= RESOURCE_SEARCH_PAGE_LIMIT
+    && (candidate.sourceFilter === 'active' || candidate.sourceFilter === 'all' || candidate.sourceFilter === 'artifacts');
+}
+
+function resourceSearchFingerprint(
+  scope: ResourceSearchCursorScope,
+  results: readonly SearchResult<IndexedFile>[]
+): string {
+  const hash = createHash('sha256').update(JSON.stringify(scope));
+  for (const result of results) {
+    hash.update('\0').update(JSON.stringify({
+      sourceUri: result.item.sourceUri,
+      relativePath: result.item.relativePath,
+      resourceKind: result.item.resourceKind,
+      score: result.score,
+      sha256: result.item.sha256,
+      mtimeMs: result.item.mtimeMs,
+      artifactRole: result.item.artifactMarkers?.artifactRole
+    }));
   }
-  if (domain === 'param') {
-    const uris = new Set<string>();
-    for (const item of bundle.params ?? []) {
-      if (item.sourceUri) uris.add(item.sourceUri);
-      else if (item.rows[0]?.sourceUri) uris.add(item.rows[0].sourceUri);
-    }
-    return [...uris];
-  }
-  if (domain === 'msg') {
-    const uris = new Set<string>();
-    for (const item of bundle.msgs ?? []) {
-      for (const entry of item.entries) {
-        if (entry.sourceUri) uris.add(entry.sourceUri);
+  return hash.digest('hex');
+}
+
+/**
+ * Search receives projections from both the legacy parser (event://...) and
+ * the native reader (sourceUri#event/...).  URI spelling is not a second
+ * event identity: source URI + event id + source version is.  Keep distinct
+ * source hashes as separate candidates so a stale/current conflict cannot be
+ * silently collapsed.
+ */
+function dedupeEventSearchSymbols(exports: readonly EventExport[]): EventSymbol[] {
+  const byBaseIdentity = new Map<string, { known: Map<string, EventSymbol>; unknown?: EventSymbol }>();
+  for (const exportItem of exports) {
+    for (const event of exportItem.events) {
+      const projected = event.sourceHash === undefined && exportItem.sourceHash !== undefined
+        || event.outerFileHash === undefined && exportItem.outerFileHash !== undefined
+        || event.sourceRevision === undefined && exportItem.sourceRevision !== undefined
+        ? {
+            ...event,
+            ...(event.sourceHash === undefined && exportItem.sourceHash !== undefined ? { sourceHash: exportItem.sourceHash } : {}),
+            ...(event.outerFileHash === undefined && exportItem.outerFileHash !== undefined ? { outerFileHash: exportItem.outerFileHash } : {}),
+            ...(event.sourceRevision === undefined && exportItem.sourceRevision !== undefined ? { sourceRevision: exportItem.sourceRevision } : {})
+          }
+        : event;
+      const baseIdentity = JSON.stringify([projected.sourceUri, projected.eventId]);
+      const group = byBaseIdentity.get(baseIdentity) ?? { known: new Map<string, EventSymbol>() };
+      const version = eventSearchVersion(projected);
+      if (version === undefined) {
+        if (!group.unknown || preferEventSearchSymbol(projected, group.unknown)) group.unknown = projected;
+      } else {
+        const previous = group.known.get(version);
+        if (!previous || preferEventSearchSymbol(projected, previous)) group.known.set(version, projected);
       }
+      byBaseIdentity.set(baseIdentity, group);
     }
-    return [...uris];
   }
-  if (domain === 'action') {
-    return uniqueStrings((bundle.tae ?? []).map((item) => item.sourceUri));
+  return [...byBaseIdentity.values()].flatMap((group) => group.known.size > 0
+    ? [...group.known.values()]
+    : group.unknown ? [group.unknown] : []);
+}
+
+function eventSearchVersion(event: Pick<EventSymbol, 'sourceHash' | 'outerFileHash' | 'sourceRevision'>): string | undefined {
+  if (event.sourceHash !== undefined) return `source:${event.sourceHash}`;
+  if (event.outerFileHash !== undefined) return `outer:${event.outerFileHash}`;
+  if (event.sourceRevision !== undefined) return `revision:${String(event.sourceRevision)}`;
+  return undefined;
+}
+
+function preferEventSearchSymbol(candidate: EventSymbol, previous: EventSymbol): boolean {
+  const canonicalUri = `${candidate.sourceUri}#event/${candidate.eventId}`;
+  const candidateCanonical = candidate.uri === canonicalUri;
+  const previousCanonical = previous.uri === `${previous.sourceUri}#event/${previous.eventId}`;
+  if (candidateCanonical !== previousCanonical) return candidateCanonical;
+  if (candidate.instructions.length !== previous.instructions.length) {
+    return candidate.instructions.length > previous.instructions.length;
   }
-  if (domain === 'script') {
-    return uniqueStrings((bundle.scripts ?? []).map((item) => item.sourceUri));
-  }
-  return [];
+  return candidate.uri.localeCompare(previous.uri) < 0;
 }
 
 function eventExportSourceUri(value: EventExport): string | undefined {
@@ -1528,11 +1887,11 @@ const SEKIRO_SEARCH_SYNONYMS: ReadonlyArray<[RegExp, string]> = [
   [/蝴蝶夫人|阿蝶/, '幻影之蝶 Butterfly'],
   [/弦一郎|屑一郎/, '苇名弦一郎 Genichiro c5400 540000 540000_battle.lua'],
   [/狮子猿/, '狮子猿 Ape Guardian'],
-  [/巨型忍者|义父|枭/, '巨型忍者 枭 Father Owl'],
+  [/巨型忍者|义父(?!的?(?:铃铛|守护铃))|崇枭|祟枭|枭/iu, '巨型忍者 枭 崇枭 祟枭 Father Owl'],
   // 当前 Sekiro 中文语料把用户说的“义父的铃铛”写成
   // EquipParamGoods 行名“义父的守护铃”；这是受限的词法别名，不是
   // 数字 ID 映射。它让精确 Goods 行先进入候选，后续仍必须原生读取。
-  [/义父(?:的(?:铃铛|守护铃))?|铃铛|守护铃|守り鈴/iu, '义父的守护铃 守护铃 铃铛 Bell'],
+  [/铃铛|守护铃|守り鈴/iu, '义父的守护铃 守护铃 铃铛 Bell'],
   [/一心|剑圣/, '苇名一心 剑圣 Isshin'],
   [/破戒僧/, '破戒僧 Monk'],
   [/赤鬼/, '赤鬼 Ogre'],
@@ -1540,50 +1899,113 @@ const SEKIRO_SEARCH_SYNONYMS: ReadonlyArray<[RegExp, string]> = [
   [/佐濑甚助|居合哥/, '佐濑甚助 Jinsuke']
 ];
 
-function expandSearchQuery(query: string): string {
-  let expanded = query;
-  for (const [pattern, replacement] of SEKIRO_SEARCH_SYNONYMS) {
-    if (pattern.test(query)) {
-      expanded += ` ${replacement}`;
-    }
-  }
-  return expanded;
+interface SearchQueryProfile {
+  original: string;
+  aliases: string[];
+  hasCjk: boolean;
 }
 
-function searchSymbols<T>(items: T[], query: string, limit: number, toText: (item: T) => string): Array<SearchResult<T>> {
-  const expandedQuery = expandSearchQuery(query);
-  const normalized = normalizeSearch(expandedQuery);
+const SEARCH_CHAR_FOLDS: Readonly<Record<string, string>> = {
+  義: '义', 鈴: '铃', 鐺: '铛', 護: '护', 梟: '枭',
+  戰: '战', 鬥: '斗', 記: '记', 憶: '忆', 強: '强', 敵: '敌',
+  現: '现', 發: '发', 聲: '声', 會: '会', 話: '话', 說: '说',
+  為: '为', 與: '与', 從: '从', 後: '后', 獲: '获', 得: '得',
+  這: '这', 個: '个', 無: '无', 關: '关', 係: '系', 親: '亲',
+  愛: '爱', 遠: '远', 對: '对', 應: '应', 選: '选', 擇: '择',
+  聽: '听', 見: '见', 開: '开', 門: '门', 離: '离', 讓: '让',
+  帶: '带', 來: '来', 兩: '两', 進: '进', 場: '场', 殺: '杀',
+  擊: '击', 傷: '伤', 體: '体', 氣: '气', 運: '运', 動: '动',
+  變: '变', 換: '换', 將: '将', 號: '号', 類: '类', 別: '别',
+  點: '点', 時: '时', 間: '间', 長: '长', 實: '实', 驗: '验',
+  頁: '页', 總: '总', 數: '数', 簡: '简', 繁: '繁'
+};
+
+function foldSearchCharacters(value: string): string {
+  return [...value].map((character) => SEARCH_CHAR_FOLDS[character] ?? character).join('');
+}
+
+function buildSearchQueryProfile(query: string): SearchQueryProfile {
+  const original = normalizeSearch(query);
+  const foldedQuery = foldSearchCharacters(query);
+  const aliases: string[] = [];
+  for (const [pattern, replacement] of SEKIRO_SEARCH_SYNONYMS) {
+    if (!pattern.test(query) && !pattern.test(foldedQuery)) continue;
+    const normalizedReplacement = normalizeSearch(replacement);
+    if (!normalizedReplacement) continue;
+    aliases.push(normalizedReplacement, ...normalizedReplacement.split(' '));
+  }
+  return {
+    original,
+    aliases: [...new Set(aliases.filter((alias) => alias !== original))],
+    hasCjk: /[\u3400-\u9fff]/u.test(original)
+  };
+}
+
+function expandSearchQuery(query: string): string {
+  const profile = buildSearchQueryProfile(query);
+  return [profile.original, ...profile.aliases].filter(Boolean).join(' ');
+}
+
+function searchSymbols<T>(
+  items: T[],
+  query: string,
+  limit: number,
+  toText: (item: T) => string,
+  scoreItem?: (item: T, text: string, profile: SearchQueryProfile) => number
+): Array<SearchResult<T>> {
+  const profile = buildSearchQueryProfile(query);
   const results: Array<SearchResult<T>> = [];
   for (const item of items) {
     const text = toText(item);
-    const score = scoreText(text, normalized);
-    if (score > 0) results.push({ item, score, highlights: makeHighlights(text, normalized) });
+    const score = scoreItem ? scoreItem(item, text, profile) : scoreSearchProfile(text, profile);
+    if (score > 0) results.push({ item, score, highlights: makeHighlights(text, profile) });
   }
   return sortAndLimit(results, limit);
 }
 
 function scoreText(text: string, query: string): number {
-  if (query.length === 0) return 1;
+  return scoreSearchProfile(text, buildSearchQueryProfile(query));
+}
+
+function scoreSearchProfile(text: string, profile: SearchQueryProfile): number {
+  if (profile.original.length === 0 && profile.aliases.length === 0) return 1;
   const normalized = normalizeSearch(text);
-  const terms = query.split(' ').filter(Boolean);
-  let score = 0;
-  for (const term of terms) {
-    if (normalized === term) score += 100;
-    else if (normalized.startsWith(term)) score += 40;
-    else if (normalized.includes(term)) score += 12;
-    else if (term.length >= 2) {
-      let cjkMatchCount = 0;
-      for (const ch of term) {
-        if (/[\u4e00-\u9fa5]/.test(ch) && normalized.includes(ch)) {
-          cjkMatchCount++;
-        }
+  let score = scorePrimaryTerm(normalized, profile.original);
+  for (const alias of profile.aliases) score += scoreAliasTerm(normalized, alias, profile);
+  return score;
+}
+
+function scorePrimaryTerm(normalizedText: string, term: string): number {
+  if (!term) return 0;
+  if (normalizedText === term) return 220;
+  if (normalizedText.startsWith(term)) return 190;
+  if (normalizedText.includes(term)) return 170;
+  if (term.length >= 2) {
+    const cjkMatchCount = [...term].filter((character) => /[\u4e00-\u9fff]/u.test(character)
+      && normalizedText.includes(character)).length;
+    if (cjkMatchCount >= 2) {
+      // Keep weak CJK partial matches discoverable for recall, but make them
+      // materially weaker than an exact phrase or a declared alias.
+      if (term.length <= 4) {
+        const required = term.length >= 3 ? Math.ceil(term.length * 0.67) : term.length;
+        if (cjkMatchCount >= required) return cjkMatchCount * 4;
       }
-      if (cjkMatchCount >= 2) {
-        score += cjkMatchCount * 3;
-      }
+      return cjkMatchCount;
     }
   }
-  return score;
+  return 0;
+}
+
+function scoreAliasTerm(normalizedText: string, term: string, profile: SearchQueryProfile): number {
+  if (!term) return 0;
+  // A Chinese query may have an English synonym, but an English-only label
+  // should not outrank a same-script entity name merely because both contain
+  // a generic translated word such as "Bell".
+  const crossScriptWeight = profile.hasCjk && /^[a-z0-9 _-]+$/iu.test(term) ? 0.2 : 1;
+  if (normalizedText === term) return Math.round(120 * crossScriptWeight);
+  if (normalizedText.startsWith(term)) return Math.round(70 * crossScriptWeight);
+  if (normalizedText.includes(term)) return Math.round(48 * crossScriptWeight);
+  return 0;
 }
 
 function scoreResource(file: IndexedFile, text: string, query: string): number {
@@ -1604,17 +2026,17 @@ function scoreResource(file: IndexedFile, text: string, query: string): number {
   return score;
 }
 
-function makeHighlights(text: string, query: string): string[] {
-  if (query.length === 0) return [];
+function makeHighlights(text: string, profile: SearchQueryProfile): string[] {
+  if (profile.original.length === 0 && profile.aliases.length === 0) return [];
   const normalized = normalizeSearch(text);
-  const terms = query.split(' ').filter(Boolean);
+  const terms = [profile.original, ...profile.aliases].filter(Boolean);
   const highlights: string[] = [];
   for (const term of terms) {
     if (term.length > 0 && normalized.includes(term)) {
       highlights.push(term);
     } else {
       for (const ch of term) {
-        if (/[\u4e00-\u9fa5]/.test(ch) && normalized.includes(ch)) {
+        if (/[\u4e00-\u9fff]/u.test(ch) && normalized.includes(ch)) {
           highlights.push(ch);
         }
       }
@@ -1743,7 +2165,16 @@ function diversifyParamSearchResults(
 }
 
 function normalizeSearch(value: string): string {
-  return value.toLowerCase().replaceAll('_', ' ').replaceAll(':', ' ').replaceAll('/', ' ').replaceAll('\\', ' ').replaceAll('.', ' ').replaceAll('-', ' ').split(' ').filter(Boolean).join(' ');
+  return foldSearchCharacters(value.toLowerCase())
+    .replaceAll('_', ' ')
+    .replaceAll(':', ' ')
+    .replaceAll('/', ' ')
+    .replaceAll('\\', ' ')
+    .replaceAll('.', ' ')
+    .replaceAll('-', ' ')
+    .split(' ')
+    .filter(Boolean)
+    .join(' ');
 }
 
 /**
@@ -1893,6 +2324,13 @@ function mapSymbolSearchText(symbol: MapEntitySymbol | MapRegionSymbol): string 
   return [symbol.uri, symbol.entityId, symbol.name, symbol.mapId, 'kind' in symbol ? symbol.kind : undefined, 'model' in symbol ? symbol.model : undefined].filter(Boolean).join(' ');
 }
 
+function scoreMapSymbol(symbol: MapEntitySymbol | MapRegionSymbol, profile: SearchQueryProfile): number {
+  const text = mapSymbolSearchText(symbol);
+  const base = scoreSearchProfile(text, profile);
+  const nameScore = scoreSearchProfile(symbol.name, profile);
+  return base + nameScore * 1.5;
+}
+
 function paramRowSearchText(row: ParamRowSymbol, textEntryLookup?: ReturnType<typeof buildTextEntryLookup>): string {
   const linkedText = textEntryLookup
     ? paramTextLinkSearchText(collectParamTextLinks(row, textEntryLookup))
@@ -1912,6 +2350,13 @@ function paramRowSearchText(row: ParamRowSymbol, textEntryLookup?: ReturnType<ty
     ].filter(Boolean).join(':')).join(' '),
     linkedText
   ].filter(Boolean).join(' ');
+}
+
+function scoreParamRow(row: ParamRowSymbol, text: string, profile: SearchQueryProfile): number {
+  const base = scoreSearchProfile(text, profile);
+  const rowNameScore = scoreSearchProfile(row.rowName ?? '', profile);
+  const paramNameScore = scoreSearchProfile(row.paramName, profile);
+  return base + rowNameScore * 1.75 + paramNameScore * 0.25;
 }
 
 function normalizeParamName(value: string): string {
@@ -1951,6 +2396,20 @@ function paramExportMatches(value: ParamExport, allowed: ReadonlySet<string>): b
 
 function textEntrySearchText(entry: TextEntrySymbol): string {
   return [entry.uri, entry.category, entry.textId, entry.confidence, entry.text].filter(Boolean).join(' ');
+}
+
+function scoreTextEntry(entry: TextEntrySymbol, text: string, profile: SearchQueryProfile): number {
+  const base = scoreSearchProfile(text, profile);
+  const textScore = scoreSearchProfile(entry.text, profile);
+  const category = entry.category ?? '';
+  const normalizedCategory = normalizeSearch(category);
+  const isItemName = /(?:item\s*name|itemname|アイテム名|アイテム\s*名)/iu.test(normalizedCategory);
+  const isConversation = /(?:conversation|talk|会話)/iu.test(normalizedCategory);
+  const isDescription = /(?:description|説明)/iu.test(normalizedCategory);
+  if (isItemName) return base + textScore * 1.5 + (textScore > 0 ? 40 : 0);
+  if (isDescription) return base + textScore * 0.25;
+  if (isConversation && textScore === 0) return Math.max(0, base - 8);
+  return base + textScore * 0.5;
 }
 
 function taeEventSearchText(event: TaeEventSymbol): string {

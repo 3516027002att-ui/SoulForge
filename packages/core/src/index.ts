@@ -81,6 +81,7 @@ export * from './assets/assetImport.js';
 
 export * from './references/referenceBuilder.js';
 export * from './references/eventReferenceProvider.js';
+export * from './references/emevdParameterEvaluator.js';
 export * from './references/mapReferenceProvider.js';
 export * from './references/paramReferenceProvider.js';
 export * from './references/referencePageProjection.js';
@@ -101,6 +102,7 @@ export * from './editing/nativeReadProofStore.js';
 export * from './editing/proofIdentities.js';
 export * from './editing/writeRequirements.js';
 export * from './cli/batchDispatcher.js';
+export * from './cli/cliDiagnostic.js';
 export * from './cli/localCliSession.js';
 export * from './cli/localSessionClient.js';
 export * from './cli/localSessionHost.js';

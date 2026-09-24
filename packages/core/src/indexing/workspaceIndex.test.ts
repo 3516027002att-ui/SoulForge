@@ -147,7 +147,10 @@ describe('WorkspaceIndex TAE section identity', () => {
     );
 
     assert.equal(result.ok, true);
-    assert.equal(Array.isArray(result.data), true);
-    assert.equal((result.data as any[])[0]?.item?.rowId, 5090000);
+    const page = result.data as { matches: Array<{ item: { rowId: number } }>; total: number; returned: number; truncated: boolean };
+    assert.equal(page.matches[0]?.item.rowId, 5090000);
+    assert.equal(page.total, 1);
+    assert.equal(page.returned, 1);
+    assert.equal(page.truncated, false);
   });
 });

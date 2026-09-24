@@ -15,7 +15,7 @@ import {
   type RagLookupIndex
 } from './lookupIndex.js';
 import {
-  corpusRevision,
+  corpusRevisionForValidatedLookup,
   getRetrievalCache,
   isChunkEligible,
   normalizeRetrievalScope,
@@ -225,7 +225,7 @@ export function retrieveEvidence(
   const cacheKey = retrievalCacheKey({
     query: value.query,
     scope: value.scope,
-    corpusRevision: corpusRevision(value.corpus),
+    corpusRevision: corpusRevisionForValidatedLookup(value.corpus, value.lookup),
     ...(options.readerSchema !== undefined ? { readerSchema: options.readerSchema } : {}),
     ...(options.metadataSchema !== undefined ? { metadataSchema: options.metadataSchema } : {}),
     ...(options.embeddingModel !== undefined ? { embeddingModel: options.embeddingModel } : {}),

@@ -25,6 +25,7 @@ import {
   type RawReplaceCommitPort,
   classifyScriptEntry,
   magicLabel,
+  resolveParamMetadataRowWidth,
   type ScriptContainerEntryEvidence,
   type ScriptEntryClassification,
 } from '@soulforge/core';
@@ -44,6 +45,7 @@ import { prepareBridgeRoots, type BridgeRootSession, type PrepareBridgeRootsResu
 import type { NativeBnd4EntryLike, NativeDcxEnvelopeLike } from './bridgeEnvelopes.js';
 import { sanitizeDiagnostics, sanitizeRendererValue, type RendererSaveResult } from '../rendererDto.js';
 import type { TrustedIpcHandle } from './registration.js';
+import { readParamDocumentWithMetadataFallback } from './paramReadFallback.js';
 import {
   appendPostCommitFailureDiagnostic,
   runCallerOwnedPostCommit,
@@ -911,6 +913,26 @@ let paramMetadataCache: {
   };
 
   /**
+   * 单行 PARAM 的边界提示只来自已校验的 first-party metadata；绝不从
+   * 重定位后的字符串区间猜测。Bridge 会在拿到这个提示后再次做 native
+   * 结构校验，并把最终 source/type/version/row width 回传。
+   */
+  const resolveTrustedParamRowWidth = async (header: {
+    sourceHash: string;
+    typeName: string;
+    dataVersion: number;
+  }): Promise<number | undefined> => {
+    const metadata = await loadParamMetadata();
+    if (!metadata.package) return undefined;
+    return resolveParamMetadataRowWidth(metadata.package, {
+      game: 'sekiro',
+      gameBuild: '1.6',
+      typeName: header.typeName,
+      dataVersion: header.dataVersion
+    });
+  };
+
+  /**
    * Re-resolve a renderer-supplied field definition against the immutable
    * first-party package before any bytes are mutated. Origin is a projection,
    * not an authority: a caller must not be able to forge `origin: first-party`
@@ -1073,7 +1095,8 @@ let paramMetadataCache: {
     const result = await readParamDocumentViaBridge({
       sourcePath: file.absolutePath,
       allowedRoots: roots.allowedRoots,
-      maxRows: 500
+      maxRows: 500,
+      resolveRowDataSize: resolveTrustedParamRowWidth
     });
     // 字段定义：走 resolveTrustedParamDefinition（包校验 + 行宽核对 + 用户信任
     // 策略），不再直接 definitions.find(...) 绕过那三层检查。
@@ -1252,7 +1275,7 @@ let paramMetadataCache: {
             diagnostics: roots.diagnostics
           };
         }
-        const result = await runBridge<{
+        const result = await readParamDocumentWithMetadataFallback<{
           sourceHash?: string;
           typeName?: string;
           dataVersion?: number;
@@ -1261,13 +1284,12 @@ let paramMetadataCache: {
           rows?: Array<{ rowIndex: number; id: number; dataBase64?: string | null; dataHash: string; name?: string }>;
           authority?: string;
         }>({
-          command: 'read-param-document',
           filePath: file.absolutePath,
           allowedRoots: roots.allowedRoots,
           timeoutMs: 120_000,
           commandOptions: loadAll ? { includeAllPayloads: true } : {},
           ...(loadAll ? { maxFrameBytes: 32 * 1024 * 1024 } : {})
-        });
+        }, resolveTrustedParamRowWidth);
         if (result.parseStatus === 'failed' || !result.data?.sourceHash) {
           return {
             ok: false,
@@ -3497,7 +3519,7 @@ let paramMetadataCache: {
       }
       const docReused = doc !== undefined;
       if (!doc) {
-        const full = await runBridge<{
+        const full = await readParamDocumentWithMetadataFallback<{
           sourceHash?: string;
           typeName?: string;
           rowCount?: number;
@@ -3506,7 +3528,6 @@ let paramMetadataCache: {
           authority?: string;
           sessionToken?: string;
         }>({
-          command: 'read-param-document',
           filePath: paramPath,
           allowedRoots,
           timeoutMs: 120_000,
@@ -3522,7 +3543,7 @@ let paramMetadataCache: {
           ...(loadAll ? { maxFrameBytes: 32 * 1024 * 1024 } : {}),
           ...bridgeSession,
           ...bridgeRuntime
-        });
+        }, resolveTrustedParamRowWidth);
         if (full.parseStatus === 'failed' || !full.data?.sourceHash) {
           return failure(
             'PARAM_DOCUMENT_READ_FAILED',
@@ -3888,7 +3909,7 @@ let paramMetadataCache: {
       const bridgeRuntime = getSession()?.layers.baseRoot
         ? { oodleRuntimeRoot: getSession()!.layers.baseRoot as string }
         : {};
-      const full = await runBridge<{
+      const full = await readParamDocumentWithMetadataFallback<{
         sourceHash?: string;
         typeName?: string;
         rowCount?: number;
@@ -3897,14 +3918,13 @@ let paramMetadataCache: {
         authority?: string;
         sessionToken?: string;
       }>({
-        command: 'read-param-document',
         filePath: unpacked.child.absolutePath,
         allowedRoots: stageRoots ? [...stageRoots.allowedRoots] : [dirname(unpacked.child.absolutePath)],
         timeoutMs: 60_000,
         commandOptions: { includeRowPayloads: false, includeRowHashes: true, rowPage: 0, rowPageSize: 0 },
         ...bridgeSession,
         ...bridgeRuntime
-      });
+      }, resolveTrustedParamRowWidth);
       if (full.parseStatus === 'failed' || !full.data?.sourceHash) {
         return failure(
           'PARAM_DOCUMENT_READ_FAILED',

@@ -12,16 +12,19 @@
  *   --base <path>        游戏根目录（可选，用于 Oodle/EMEDF）
  *   --game <name>        默认 sekiro
  *   --mode <mode>        plan | normal | fullPermission（默认 normal）
+ *   --confirm-rollback <opId>  显式授予当前 workspace 对单个 opId 的一次性回滚确认
  *   --analyze            打开后执行完整原生分析（慢，但无语义缓存时需要）
  *   --no-cache           跳过 workspace.db 语义缓存水合
  *   --json               以紧凑 JSON 输出结果
  *   --quiet              仅输出工具结果
+ *   --diagnostics        将阶段耗时与游标诊断以 JSON Lines 写入 stderr
  */
 
 import { dirname, isAbsolute, join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { existsSync } from 'node:fs';
 import process from 'node:process';
+import { createInterface } from 'node:readline';
 
 // Portable/local SDK hosts may omit ProgramFiles; NuGet restore (dotnet run
 // fallback) and some path combinators require them.
@@ -41,16 +44,33 @@ function fail(message, code = 1) {
   process.exit(code);
 }
 
+// PowerShell 管道默认带 BOM（U+FEFF）；直接 JSON.parse 会报
+// "Unexpected token 'U+FEFF'"。stdin 入口统一剥离后再解析。
+function stripJsonBom(text) {
+  return typeof text === 'string' ? text.replace(/^\uFEFF+/u, '') : text;
+}
+
+// stdout 消费者提前关闭管道（例如 `| head`）时 Node 默认抛出
+// 未捕获的 EPIPE，直接崩溃并打印堆栈。只对 EPIPE 静默退出（类
+// Unix 惯例），其他写入错误仍按原样报告。
+process.stdout.on('error', (error) => {
+  if (error && error.code === 'EPIPE') process.exit(0);
+  process.stderr.write(`stdout 写入失败: ${error?.stack || error}\n`);
+  process.exit(1);
+});
+
 function parseArgs(argv) {
   const options = {
     workspace: process.env.SOULFORGE_WORKSPACE || process.env.SOULFORGE_SEKIRO_MOD_ROOT || null,
     base: process.env.SOULFORGE_SEKIRO_ROOT || null,
     game: process.env.SOULFORGE_GAME || 'sekiro',
     mode: process.env.SOULFORGE_MODE || 'normal',
+    confirmRollback: null,
     analyze: false,
     useCache: true,
     json: false,
     quiet: false,
+    diagnostics: false,
     command: null,
     tool: null,
     argsJson: null,
@@ -79,6 +99,9 @@ function parseArgs(argv) {
       case '--mode':
         options.mode = next();
         break;
+      case '--confirm-rollback':
+        options.confirmRollback = next();
+        break;
       case '--analyze':
         options.analyze = true;
         break;
@@ -91,6 +114,9 @@ function parseArgs(argv) {
       case '--quiet':
       case '-q':
         options.quiet = true;
+        break;
+      case '--diagnostics':
+        options.diagnostics = true;
         break;
       case '--help':
       case '-h':
@@ -132,8 +158,19 @@ function printUsage() {
   describe <tool>              查看工具说明与输入 schema
   call <tool> ['{"k":v}']      调用任意工具
   call --stdin <tool>          从 stdin 读取 JSON 参数并调用
+  session                      打开一次工作区并从 stdin 按行调用工具
   search-param <query> [表...]  快捷：search_param_rows
   read-param <table> <rowId> <f1,f2>  快捷：read_param_fields
+
+选项:
+  --workspace <path>           Mod 工作区（必填）
+  --base <path>                游戏根目录（可选）
+  --mode <mode>                plan | normal | fullPermission
+  --confirm-rollback <opId>    当前 workspace 对单个 opId 的一次性 rollback 授权
+  --no-cache                   跳过 workspace.db 语义缓存水合
+  --json                       一次性调用输出 JSON
+  --quiet                      隐藏普通进度
+  --diagnostics                stderr 输出阶段诊断 JSON Lines
 
 示例:
   node tools/soulforge-cli/sfcli.mjs \\
@@ -174,11 +211,20 @@ async function main() {
   const log = (message) => {
     if (!options.quiet) process.stderr.write(`${message}\n`);
   };
+  const emitDiagnostic = (event) => {
+    if (!options.diagnostics) return;
+    process.stderr.write(`${JSON.stringify({
+      type: 'soulforge-cli-diagnostic',
+      timestamp: new Date().toISOString(),
+      ...event
+    })}\n`);
+  };
 
   const core = await loadCore();
   const {
     mapCliArgumentsToToolInput,
-    openLocalCliSession
+    openLocalCliSession,
+    LocalSessionHost
   } = core;
 
   if (!options.workspace) fail('必须通过 --workspace 指定 Mod 工作区路径');
@@ -195,22 +241,222 @@ async function main() {
     ...(baseRoot ? { baseRoot } : {}),
     game: options.game,
     mode: options.mode === 'plan' || options.mode === 'fullPermission' ? options.mode : 'normal',
+    ...(options.confirmRollback ? { confirmRollbackOpId: options.confirmRollback } : {}),
     principal: 'local-cli',
     analyze: options.analyze || !metadataOnly,
     useCache: options.useCache,
     requireDurableLog: false,
     // Quiet suppresses progress, not degraded cache/audit guarantees. These
     // warnings explain why restart-safe cursors or writes may be unavailable.
-    onFallbackWarning: (message) => process.stderr.write(`${message}\n`),
-    onProgress: (progress) => log(`  [${progress.phase}] ${progress.current}/${progress.total ?? '?'} ${progress.message ?? ''}`)
+    onFallbackWarning: (message) => {
+      if (options.diagnostics) {
+        emitDiagnostic({ phase: 'host.fallback', status: 'failed', details: { message } });
+      } else {
+        process.stderr.write(`${message}\n`);
+      }
+    },
+    onDiagnostic: (event) => emitDiagnostic(event),
+    onProgress: (progress) => {
+      emitDiagnostic({
+        phase: `workspace.${progress.phase}`,
+        status: 'progress',
+        details: {
+          current: progress.current,
+          ...(progress.total === undefined ? {} : { total: progress.total }),
+          ...(progress.message ? { message: progress.message } : {})
+        }
+      });
+      log(`  [${progress.phase}] ${progress.current}/${progress.total ?? '?'} ${progress.message ?? ''}`);
+    }
   });
-  const { bridge, registry } = cliSession;
+  const { registry } = cliSession;
   log(`扫描/索引完成: files=${cliSession.workspaceIndex.getFiles().length}`);
+  emitDiagnostic({
+    phase: 'session.ready',
+    status: 'complete',
+    details: {
+      workspaceId: cliSession.coreSession.workspaceId,
+      files: cliSession.workspaceIndex.getFiles().length
+    }
+  });
 
   const finish = async (code = 0) => {
     try { await cliSession.dispose(); } catch { /* ignore */ }
     process.exit(code);
   };
+
+  const parseToolContent = (content) => {
+    if (typeof content !== 'string') return content;
+    try { return JSON.parse(content); } catch { return content; }
+  };
+
+  const executeToolCall = async (requestId, toolName, rawArgs, signal) => {
+    const mapped = mapCliArgumentsToToolInput(toolName, rawArgs);
+    if (!mapped.ok) {
+      return {
+        ok: false,
+        code: mapped.code,
+        content: JSON.stringify({
+          ok: false,
+          error: { code: mapped.code, message: mapped.message }
+        })
+      };
+    }
+    const startedAt = Date.now();
+    emitDiagnostic({
+      phase: 'tool',
+      status: 'start',
+      details: { requestId, tool: toolName }
+    });
+    try {
+      const result = await cliSession.executeTool({
+        id: requestId,
+        name: toolName,
+        argumentsJson: JSON.stringify(mapped.input)
+      }, signal ? { signal } : {});
+      const diagnostic = core.normalizeCliToolDiagnostic(result, signal);
+      emitDiagnostic({
+        phase: 'tool',
+        status: 'complete',
+        elapsedMs: Date.now() - startedAt,
+        details: { requestId, tool: toolName, ...diagnostic }
+      });
+      return result;
+    } catch (error) {
+      const diagnostic = core.normalizeCliToolDiagnostic(
+        {
+          ok: false,
+          ...(error && typeof error === 'object' && typeof error.code === 'string'
+            ? { code: error.code }
+            : {})
+        },
+        signal
+      );
+      emitDiagnostic({
+        phase: 'tool',
+        status: 'failed',
+        elapsedMs: Date.now() - startedAt,
+        details: {
+          requestId,
+          tool: toolName,
+          ...diagnostic,
+          message: error instanceof Error ? error.message : String(error)
+        }
+      });
+      throw error;
+    }
+  };
+
+  if (options.command === 'session') {
+    if (typeof LocalSessionHost !== 'function') {
+      throw new Error('CLI_SESSION_HOST_UNAVAILABLE');
+    }
+    const sessionHost = new LocalSessionHost(
+      'stdin',
+      cliSession.coreSession.workspaceId,
+      'local-cli',
+      cliSession.coreSession
+    );
+    const input = createInterface({ input: process.stdin, crlfDelay: Infinity });
+    let shouldClose = false;
+    const pending = new Set();
+    const writeFrame = (frame) => process.stdout.write(`${JSON.stringify(frame)}\n`);
+    const handleFrame = async (line) => {
+      let frame;
+      try {
+        frame = JSON.parse(stripJsonBom(line));
+      } catch {
+        writeFrame({
+          id: '',
+          ok: false,
+          error: { code: 'CLI_REQUEST_INVALID', message: 'session 输入行不是有效 JSON。' }
+        });
+        return;
+      }
+      const requestId = typeof frame?.id === 'string' ? frame.id : '';
+      const tool = typeof frame?.tool === 'string' ? frame.tool : '';
+      const args = frame?.args && typeof frame.args === 'object' && !Array.isArray(frame.args)
+        ? frame.args
+        : {};
+      if (!requestId || !tool) {
+        writeFrame({
+          id: requestId,
+          ok: false,
+          error: { code: 'CLI_REQUEST_INVALID', message: 'session 请求必须包含非空 id 和 tool。' }
+        });
+        return;
+      }
+      if (tool === '__host_status') {
+        writeFrame({
+          id: requestId,
+          ok: true,
+          result: {
+            session: 'stdin',
+            workspace: workspaceRoot,
+            workspaceId: cliSession.coreSession.workspaceId,
+            inFlight: sessionHost.listRequestStatuses().filter((item) => ['queued', 'running', 'cancel_requested'].includes(item.state)).length,
+            requests: sessionHost.listRequestStatuses()
+          }
+        });
+        return;
+      }
+      if (tool === '__host_cancel') {
+        const targetId = typeof args.requestId === 'string' ? args.requestId : requestId;
+        writeFrame({ id: requestId, ok: true, result: sessionHost.requestCancel(targetId) });
+        return;
+      }
+      if (tool === '__host_request_status') {
+        const targetId = typeof args.requestId === 'string' ? args.requestId : requestId;
+        const status = sessionHost.requestStatus(targetId);
+        writeFrame(status
+          ? { id: requestId, ok: true, result: status }
+          : { id: requestId, ok: false, error: { code: 'CLI_REQUEST_NOT_FOUND', message: `没有找到请求 ${targetId}。` } });
+        return;
+      }
+      if (tool === '__host_close') {
+        writeFrame({ id: requestId, ok: true, result: { closed: true } });
+        shouldClose = true;
+        input.close();
+        return;
+      }
+      try {
+        const outcome = await sessionHost.dispatch(
+          { id: requestId, tool, args },
+          (dispatchTool, dispatchArgs, signal) => executeToolCall(requestId, dispatchTool, dispatchArgs, signal)
+        );
+        if (!outcome.ok) {
+          writeFrame({ id: requestId, ok: false, error: outcome.error });
+        } else {
+          const result = outcome.result;
+          writeFrame({
+            id: requestId,
+            ok: Boolean(result?.ok),
+            ...(result?.code ? { code: result.code } : {}),
+            result: parseToolContent(result?.content)
+          });
+        }
+      } catch (error) {
+        writeFrame({
+          id: requestId,
+          ok: false,
+          error: { code: 'CLI_REQUEST_FAILED', message: error instanceof Error ? error.message : String(error) }
+        });
+      }
+    };
+    try {
+      for await (const line of input) {
+        if (shouldClose || line.trim() === '') continue;
+        const work = handleFrame(line);
+        pending.add(work);
+        void work.finally(() => pending.delete(work));
+      }
+      await Promise.allSettled([...pending]);
+    } finally {
+      sessionHost.close();
+      await finish(0);
+    }
+    return;
+  }
 
   try {
     if (options.command === 'list' || options.command === 'ls') {
@@ -246,7 +492,7 @@ async function main() {
         const chunks = [];
         for await (const chunk of process.stdin) chunks.push(chunk);
         const raw = Buffer.concat(chunks).toString('utf8');
-        args = raw.trim() ? JSON.parse(raw) : {};
+        args = raw.trim() ? JSON.parse(stripJsonBom(raw)) : {};
       } else if (options.argsJson && options.argsJson.trim()) {
         args = JSON.parse(options.argsJson);
       }
@@ -277,15 +523,7 @@ async function main() {
     }
 
     log(`调用 ${toolName}`);
-    const mapped = mapCliArgumentsToToolInput(toolName, args);
-    if (!mapped.ok) {
-      fail(`${mapped.code}: ${mapped.message}`, 2);
-    }
-    const result = await bridge.executeTool({
-      id: `cli-${Date.now()}`,
-      name: toolName,
-      argumentsJson: JSON.stringify(mapped.input)
-    });
+    const result = await executeToolCall(`cli-${Date.now()}`, toolName, args);
 
     if (options.json || options.quiet) {
       // bridge returns { ok, content, code? } where content is envelope JSON string

@@ -150,14 +150,19 @@ async function main(): Promise<void> {
 
   const index = (await import('../indexing/workspaceIndex.js')).WorkspaceIndex;
   const workspace = new index('native-reference-content-smoke');
+  const diagnostics: Array<{ phase: string; status: string }> = [];
   const result = await enrichReferenceContent({
     index: workspace,
     sourceFiles: [],
     maxSources: 1,
-    cursor: { version: 1, eventOffset: 0, scriptOffset: 0, paramOffset: 0 }
+    cursor: { version: 1, eventOffset: 0, scriptOffset: 0, paramOffset: 0 },
+    onDiagnostic: (event) => diagnostics.push({ phase: event.phase, status: event.status })
   });
   assert.equal(result.ok, true);
   assert.equal(result.nextCursor, undefined);
+  assert.ok(diagnostics.some((event) => event.phase === 'reference.native-read.event' && event.status === 'complete'));
+  assert.ok(diagnostics.some((event) => event.phase === 'reference.native-read.param' && event.status === 'complete'));
+  assert.ok(diagnostics.some((event) => event.phase === 'reference.native-read.script' && event.status === 'complete'));
 
   const eventSource = indexedFile('file://event/native.emevd.dcx', 'event', 'outer-event');
   workspace.setFiles([eventSource]);

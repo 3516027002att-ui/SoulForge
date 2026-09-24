@@ -17,6 +17,7 @@ import { defaultReadSessionManager, createOpaqueCursor, parseOpaqueCursor } from
 import type { ActionAddress, Diagnostic, TaeEntryWire } from '@soulforge/shared';
 import { formatActionAddress, formatAnimCode, parseActionAddress } from '@soulforge/shared';
 import { runBridge } from '../bridge/runBridge.js';
+import { makeFileResourceUri, makeWorkspaceRelativePath } from '../workspace/resourceUri.js';
 import { applyNativeMutation } from './editorMutationService.js';
 import {
   commitTaeEventContainerViaBridge,
@@ -64,6 +65,8 @@ export interface TaeEventSnapshot {
     displayValue?: string;
   }>;
   parameterBytesHex?: string;
+  decodeStatus?: 'decoded' | 'partial' | 'unknown';
+  raw?: { eventTypeId: number; startTime: number; endTime: number; parameterBytesHex?: string };
 }
 
 export interface TaeEventTimeEdit {
@@ -213,7 +216,10 @@ export async function readTaeEvents(input: {
   }
   const pageSize = normalizeTaePageSize(input.pageSize);
   const sourceHash = envelope.containerSourceHash ?? envelope.sourceHash ?? await sha256Of(resolved.path);
-  const queryScope = `tae-events:${pathToFileURL(resolved.path).href}`;
+  // queryScope 只做续页时的相等性校验；用工作区相对逻辑 URI，避免把本机
+  // 绝对路径编进发往模型的 opaque cursor（base64 可解码，不是脱敏）。
+  const overlayRoot = input.edit.session.layers.overlayRoot;
+  const queryScope = `tae-events:${makeFileResourceUri(makeWorkspaceRelativePath(overlayRoot, resolved.path))}`;
   let pagination = {
     returnedCount: selected.length,
     totalCount: selected.length,
@@ -236,7 +242,7 @@ export async function readTaeEvents(input: {
       } else {
         const session = defaultReadSessionManager.createSession({
           workspaceId: input.edit.session.meta.workspaceId,
-          sourceVersion: { sourceUri: pathToFileURL(resolved.path).href, sourceHash },
+          sourceVersion: { sourceUri: makeFileResourceUri(makeWorkspaceRelativePath(overlayRoot, resolved.path)), sourceHash },
           domain: 'tae',
           queryScope,
           items: selected
@@ -663,6 +669,19 @@ function projectEvents(chrId: string, animations: EnvelopeAnim[]): TaeEventSnaps
         endTime,
         startFrame: frameFromSeconds(startTime),
         endFrame: frameFromSeconds(endTime),
+        decodeStatus: event.parameterDecoded === true && Array.isArray(event.templateFields)
+          ? 'decoded'
+          : typeof event.parameterBytesHex === 'string' && event.parameterBytesHex.length > 0
+            ? 'unknown'
+            : 'partial',
+        raw: {
+          eventTypeId: typeof event.eventTypeId === 'number' ? event.eventTypeId : 0,
+          startTime,
+          endTime,
+          ...(typeof event.parameterBytesHex === 'string' && event.parameterBytesHex.length > 0
+            ? { parameterBytesHex: event.parameterBytesHex }
+            : {})
+        },
         ...(Array.isArray(event.templateFields)
           ? {
             fields: event.templateFields

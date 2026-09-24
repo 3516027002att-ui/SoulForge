@@ -17,6 +17,7 @@
  * - 块作用域内的 `local` 同名声明遮蔽全局 API：被遮蔽的调用标 `isLocal`，
  *   永不生成“已确认游戏 API 引用”。
  */
+import type { ScriptStructureIndex } from '@soulforge/shared';
 
 export type LuaTokenType = 'name' | 'number' | 'string' | 'keyword' | 'punct';
 
@@ -95,6 +96,104 @@ export interface LuaParseResult {
   diagnostics: LuaParseDiagnostic[];
   /** True when the file could not be lexed to completion. */
   lexTruncated: boolean;
+}
+
+/** Build the source-only structural layer used by the Agent. */
+export function buildLuaStructureIndex(text: string, parsed: LuaParseResult = parseLuaStaticSubset(text)): ScriptStructureIndex {
+  const { tokens } = tokenizeLua(text);
+  const offsets = lineOffsets(text);
+  const functions: ScriptStructureIndex['functions'] = [];
+  const goals: ScriptStructureIndex['goals'] = [];
+  const branches: ScriptStructureIndex['branches'] = [];
+  const structureDiagnostics: string[] = [];
+  const constants: ScriptStructureIndex['constants'] = parsed.bindings
+    .filter((binding) => !binding.isFunction && !binding.modified && binding.literal !== undefined)
+    .map((binding) => ({ name: binding.name, value: binding.literal!, span: binding.span }));
+
+  for (let index = 0; index < tokens.length; index += 1) {
+    const token = tokens[index]!;
+    if (token.type === 'keyword' && token.value === 'function') {
+      const nameTokens: LuaToken[] = [];
+      let cursor = index + 1;
+      if (tokens[cursor]?.type === 'name') {
+        nameTokens.push(tokens[cursor]!);
+        cursor += 1;
+        while ((tokens[cursor]?.value === '.' || tokens[cursor]?.value === ':') && tokens[cursor + 1]?.type === 'name') {
+          nameTokens.push(tokens[cursor + 1]!);
+          cursor += 2;
+        }
+      }
+      // Native decompiled AI uses `Goal.ActXX = function (...)`, not only
+      // declaration syntax. Recover a simple static assignment name; table
+      // indexing and expressions deliberately remain anonymous.
+      if (nameTokens.length === 0 && tokens[index - 1]?.value === '=' && tokens[index - 2]?.type === 'name') {
+        let lhs = index - 2;
+        nameTokens.unshift(tokens[lhs]!);
+        while (tokens[lhs - 1]?.value === '.' && tokens[lhs - 2]?.type === 'name') {
+          lhs -= 2;
+          nameTokens.unshift(tokens[lhs]!);
+        }
+      }
+      const name = nameTokens.length > 0 ? nameTokens.map((item) => item.value).join('.') : '<anonymous>';
+      const endToken = findBlockEnd(tokens, index);
+      if (!endToken) structureDiagnostics.push(`LUA_UNCLOSED_FUNCTION: ${name} at ${token.start}`);
+      const span = spanFromOffsets(text, token.start, endToken?.end ?? token.end, offsets);
+      const record = { name, kind: /^(?:goal|Goal)(?:_|\.|$)/u.test(name) ? 'goal' as const : 'function' as const, span };
+      functions.push(record);
+      if (record.kind === 'goal') goals.push(record);
+    }
+    if (token.type === 'keyword' && ['if', 'elseif', 'else', 'while', 'for', 'repeat'].includes(token.value)) {
+      const end = branchEnd(tokens, index, token.value as 'if' | 'elseif' | 'else' | 'while' | 'for' | 'repeat');
+      const conditionTokens = tokens.slice(index + 1, end.conditionEndIndex);
+      branches.push({
+        kind: token.value as 'if' | 'elseif' | 'else' | 'while' | 'for' | 'repeat',
+        span: spanFromOffsets(text, token.start, end.endOffset, offsets),
+        ...(conditionTokens.length > 0 ? { conditionText: text.slice(conditionTokens[0]!.start, conditionTokens.at(-1)!.end) } : {})
+      });
+    }
+  }
+  const unsupportedApis = parsed.calls
+    .filter((call) => !call.isLocal && !call.isRequire)
+    .map((call) => ({ callee: call.callee, span: call.span }));
+  return {
+    status: parsed.lexTruncated || structureDiagnostics.length > 0 || parsed.diagnostics.some((item) => item.severity === 'error') ? 'partial' : 'complete',
+    functions,
+    goals,
+    branches,
+    constants,
+    unsupportedApis,
+    ...(parsed.diagnostics.length > 0 || structureDiagnostics.length > 0
+      ? { diagnostics: [...parsed.diagnostics.map((item) => `${item.code}: ${item.message}`), ...structureDiagnostics] } : {})
+  };
+}
+
+function findBlockEnd(tokens: LuaToken[], start: number): LuaToken | undefined {
+  let depth = 0;
+  let pendingLoopDo = 0;
+  for (let index = start; index < tokens.length; index += 1) {
+    const token = tokens[index]!;
+    if (token.type === 'keyword' && (token.value === 'for' || token.value === 'while')) {
+      depth += 1;
+      pendingLoopDo += 1;
+    } else if (token.type === 'keyword' && token.value === 'do' && pendingLoopDo > 0) pendingLoopDo -= 1;
+    else if (token.type === 'keyword' && ['function', 'if', 'do', 'repeat'].includes(token.value)) depth += 1;
+    else if (token.type === 'keyword' && (token.value === 'end' || token.value === 'until')) {
+      depth -= 1;
+      if (depth === 0) return token;
+    }
+  }
+  return undefined;
+}
+
+function branchEnd(tokens: LuaToken[], start: number, kind: 'if' | 'elseif' | 'else' | 'while' | 'for' | 'repeat'): { endOffset: number; conditionEndIndex: number } {
+  if (kind === 'else' || kind === 'repeat') return { endOffset: tokens[start]!.end, conditionEndIndex: start };
+  for (let index = start + 1; index < tokens.length; index += 1) {
+    if (tokens[index]?.value === 'then' || tokens[index]?.value === 'do') {
+      return { endOffset: tokens[index]!.end, conditionEndIndex: index };
+    }
+    if (tokens[index]?.type === 'keyword' && ['if', 'for', 'while', 'function', 'end'].includes(tokens[index]!.value)) break;
+  }
+  return { endOffset: tokens[start]!.end, conditionEndIndex: start + 1 };
 }
 
 const LUA_KEYWORDS: ReadonlySet<string> = new Set([

@@ -35,6 +35,7 @@ import { loadFirstPartyParamMetadata } from '../schema/sekiro/firstPartySchema.j
 import { mapExportFromMsbDocument } from './ingestBridgeResult.js';
 import { WorkspaceIndex } from './workspaceIndex.js';
 import { loadSymbolBundleIntoIndex } from '../workspace/semanticFileCache.js';
+import { isParamTextReferenceField } from '../references/paramTextReferences.js';
 
 /** Internal test seam; production callers use the imported Bridge runner. */
 type NativeSemanticBridgeRunner = typeof runBridge;
@@ -102,6 +103,11 @@ interface NativeMapPartInput {
   scaleX?: number;
   scaleY?: number;
   scaleZ?: number;
+  internalEntryId?: number;
+  entityId?: number;
+  entityGroupId?: number;
+  npcParamRowId?: number;
+  model?: string;
 }
 
 interface NativeMapRegionInput {
@@ -491,6 +497,9 @@ async function readMapExport(
     assignNumber(part, 'scaleZ', record.scaleZ);
     assignNumber(part, 'internalEntryId', record.internalEntryId);
     assignNumber(part, 'entityId', record.entityId);
+    assignNumber(part, 'entityGroupId', record.entityGroupId);
+    assignNumber(part, 'npcParamRowId', record.npcParamRowId);
+    if (typeof record.model === 'string') part.model = record.model;
     return part;
   });
   const regions: NativeMapRegionInput[] = arrayValue(data.regions).map((value) => {
@@ -544,22 +553,45 @@ export async function decodeNativeParamRows(input: {
   referenceFieldsOnly?: boolean;
 }): Promise<ParamRowSymbol[]> {
   const fieldsById = new Map(input.definition.fields.map((field) => [field.id, field]));
-  // PARAM reference enrichment only needs fields carrying trusted Refs= rules
-  // plus their condition siblings.  Keeping the projection narrow matters on
-  // real gameparam tables with tens of thousands of rows: unrelated fields
-  // remain available to the explicit read_param_fields path instead of being
-  // copied into every reference snapshot.
+  // PARAM reference enrichment only needs fields carrying trusted Refs= rules,
+  // their condition siblings, or the existing text-id predicate.  Keeping the
+  // projection narrow matters on real gameparam tables with tens of thousands
+  // of rows: unrelated fields remain available to the explicit
+  // read_param_fields path instead of being copied into every reference snapshot.
   const referenceFieldIds = new Set<string>();
+  const parsedReferenceFields = new Map<string, ReturnType<typeof parseParamFieldRefs>>();
   if (input.referenceFieldsOnly) {
     for (const definitionField of input.definition.fields) {
-      if (!definitionField.refs) continue;
-      referenceFieldIds.add(definitionField.id);
-      const parsed = parseParamFieldRefs(definitionField.refs);
-      for (const target of parsed.targets) {
-        if (target.condition) referenceFieldIds.add(target.condition.fieldId);
+      // Keep both native Refs= relations and the existing PARAM↔FMG text-id
+      // predicate.  Several real tables (ACTION_GUIDE.textId,
+      // NPC_PARAM.nameId, TALK.textId/_female) carry no Refs= metadata but
+      // are still source-backed text links.  Reuse the single trusted
+      // classifier instead of copying its naming rules here.
+      const metadataField: ParamFieldSymbol = {
+        fieldId: definitionField.id,
+        name: definitionField.name,
+        type: definitionField.type,
+        ...(definitionField.description !== undefined ? { description: definitionField.description } : {}),
+        value: null
+      };
+      if (isParamTextReferenceField(metadataField)) referenceFieldIds.add(definitionField.id);
+      if (definitionField.refs) {
+        referenceFieldIds.add(definitionField.id);
+        const parsed = parseParamFieldRefs(definitionField.refs);
+        parsedReferenceFields.set(definitionField.id, parsed);
+        for (const target of parsed.targets) {
+          if (target.condition) referenceFieldIds.add(target.condition.fieldId);
+        }
       }
     }
   }
+  // Select by the trusted metadata's physical byte layout before decoding any
+  // row.  This is deliberately not a post-decode filter: wide PARAM rows can
+  // contain hundreds of unrelated fields, while reference enrichment only
+  // needs Refs= fields, their condition siblings, and source-backed text IDs.
+  const decodeDefinition = input.referenceFieldsOnly
+    ? { ...input.definition, fields: input.definition.fields.filter((field) => referenceFieldIds.has(field.id)) }
+    : input.definition;
   // Keep backwards-compatible fixture callers (which only supplied
   // file.sha256) while making the packed/native path explicit.  Once either
   // identity is supplied, do not copy one hash into the other domain.
@@ -588,12 +620,11 @@ export async function decodeNativeParamRows(input: {
       && nativeRowIndex >= 0
       ? nativeRowIndex
       : undefined;
-    const fields: ParamFieldSymbol[] = decodeRowFields(bytes, input.definition)
-      .filter((field) => !input.referenceFieldsOnly || referenceFieldIds.has(field.fieldId))
+    const fields: ParamFieldSymbol[] = decodeRowFields(bytes, decodeDefinition)
       .map((field) => {
       const definitionField = fieldsById.get(field.fieldId);
-      const refs = input.referenceFieldsOnly && definitionField?.refs
-        ? parseParamFieldRefs(definitionField.refs)
+      const refs = input.referenceFieldsOnly
+        ? parsedReferenceFields.get(field.fieldId)
         : undefined;
       return {
         fieldId: field.fieldId,

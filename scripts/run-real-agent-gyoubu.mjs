@@ -36,12 +36,13 @@ import {
   evaluateRollbackVerification,
   planSemanticCorpus,
   rollbackCommittedOperations,
+  resolveNativeSourceUri,
   safeHarnessFileLabel,
   SEMANTIC_CORPUS_KINDS,
   waitForSemanticReadiness
 } from './real-agent-harness-lib.mjs';
 import { loadTestAgentProvider } from './testing/test-agent-provider.mjs';
-import { parseGoalContract, matchesAssertion, readAssertionPath } from './real-agent-goal-contract.mjs';
+import { isObservationGoalTool, parseGoalContract, matchesAssertion, readAssertionPath, validateTaskContractGoals } from './real-agent-goal-contract.mjs';
 import { getFourTask } from './testing/real-agent-four-task-manifest.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -253,7 +254,7 @@ function printHelp() {
   console.log([
     'SoulForge 真实生产 Agent 链路模拟',
     '',
-    '默认任务检查内置的两个 PARAM 字段；四题 --testset 会额外执行独立的 native 语义目标验收。',
+    '默认任务检查内置的两个 PARAM 字段；四题 --testset 使用清单中的可执行目标，并对无验证器的行为目标显式报告 unsupported。',
     '其它任务传 --goals JSON 检查指定字段，或 --observe 仅观察原文任务执行。',
     '四题只有在写回、Bridge 重读、语义证据和回滚均通过时才会报告 verified；字段命中本身不等于整题完成。',
     '',
@@ -299,15 +300,31 @@ function harnessError(code, message, details) {
 
 function parseGoals(raw) {
   try {
+    if (raw !== undefined && SELECTED_TEST_TASK && CLI_OPTIONS.observationOnly !== true) {
+      throw harnessError(
+        'GOAL_CONTRACT_OVERRIDE_FORBIDDEN',
+        `--testset ${SELECTED_TEST_TASK.id} 必须使用清单中的完整可执行 goals；不能用 --goals 绕过必需的行为/unsupported 终态。`
+      );
+    }
     const selectedGoals = raw === undefined && SELECTED_TEST_TASK
       ? JSON.stringify(SELECTED_TEST_TASK.goals)
       : raw;
-    return parseGoalContract(selectedGoals, {
+    const parsed = parseGoalContract(selectedGoals, {
       observationOnly: CLI_OPTIONS.observationOnly === true,
       taskQuery: TASK_QUERY,
       defaultTaskQuery: DEFAULT_TASK_QUERY,
       defaultGoals: SELECTED_TEST_TASK?.goals ?? DEFAULT_GOALS
     });
+    if (SELECTED_TEST_TASK && CLI_OPTIONS.observationOnly !== true) {
+      const contractCheck = validateTaskContractGoals(parsed, SELECTED_TEST_TASK.contract);
+      if (!contractCheck.ok) {
+        throw harnessError(
+          'CONTRACT_GOAL_MISSING',
+          `任务 ${SELECTED_TEST_TASK.id} 缺少 required postcondition goal：${contractCheck.missingGoalIds.join(', ')}。`
+        );
+      }
+    }
+    return parsed;
   } catch (error) {
     throw harnessError(
       error?.code ?? 'GOAL_CONTRACT_INVALID',
@@ -679,26 +696,55 @@ async function runReadOnlyGoalTool(window, goal) {
   };
 }
 
-function evaluateParamGoal(goal, result) {
-  const fields = result?.ok && Array.isArray(result?.data?.fields)
-    ? result.data.fields
-    : [];
+function evaluateParamGoal(goal, result, treeEvidence = undefined) {
+  const resultData = result?.data && typeof result.data === 'object' && !Array.isArray(result.data)
+    ? result.data
+    : null;
+  const fields = result?.ok && Array.isArray(resultData?.fields)
+    ? resultData.fields
+    : result?.ok && Array.isArray(resultData?.record?.fields)
+      ? resultData.record.fields
+      : [];
   const field = fields.find((candidate) => (
     Number(candidate?.rowId) === goal.rowId
     && String(candidate?.fieldId ?? '').toLocaleLowerCase() === goal.fieldId.toLocaleLowerCase()
   ));
   const sourceHashPresent = typeof field?.sourceHash === 'string' && field.sourceHash.length > 0;
+  const sourceIdentity = resolveNativeSourceUri(result, {
+    workspaceRoot: treeEvidence?.root,
+    entries: [
+      ...(treeEvidence?.before?.entries ?? []),
+      ...(treeEvidence?.after?.entries ?? [])
+    ]
+  });
+  const sourceUriPresent = sourceIdentity !== null;
+  const valueMatches = Boolean(result?.ok === true && field && sourceHashPresent && sameValue(field.value, goal.expectedValue));
   return {
     ...goal,
     nativeReadOk: result?.ok === true,
     observedValue: field?.value ?? null,
     sourceHashPresent,
     sourceRevisionPresent: field?.sourceRevision !== undefined && field?.sourceRevision !== null,
-    verified: Boolean(result?.ok === true && field && sourceHashPresent && sameValue(field.value, goal.expectedValue)),
+    sourceUriPresent,
+    verified: Boolean(valueMatches && sourceUriPresent),
+    status: valueMatches && sourceUriPresent
+      ? 'verified'
+      : 'unverified',
     verificationEvidence: result?.ok === true && sourceHashPresent
-      ? [{ tool: 'read_param_fields', sourceHashes: [field.sourceHash], sourceRevisions: field.sourceRevision === undefined ? [] : [field.sourceRevision], sourceUris: field.sourceUri ? [field.sourceUri] : [] }]
+      ? [{
+          tool: 'read_param_fields',
+          sourceHashes: [field.sourceHash],
+          sourceRevisions: field.sourceRevision === undefined ? [] : [field.sourceRevision],
+          sourceUris: sourceIdentity ? [sourceIdentity.sourceUri] : []
+        }]
       : [],
-    diagnostics: result?.ok === false ? result?.error ?? null : null,
+    diagnostics: result?.ok === false
+      ? result?.error ?? null
+      : sourceUriPresent ? null : [{
+          severity: 'error',
+          code: 'NATIVE_SOURCE_URI_UNBOUND',
+          message: `目标 ${goal.goalId} 的 native containerPath 未能绑定到当前 overlay 工作区，不能作为 corpus 证据。`
+        }],
     read: compactNativeToolResult(result ?? null)
   };
 }
@@ -711,6 +757,41 @@ function goalChangedInOverlay(goal, treeEvidence) {
 }
 
 async function verifyGoalThroughNativeTool(window, goal, paramReads = new Map(), treeEvidence = undefined) {
+  if (goal.verificationClass === 'observation' || isObservationGoalTool(goal.tool)) {
+    const execution = await runReadOnlyGoalTool(window, goal);
+    return {
+      ...goal,
+      nativeReadOk: execution.result?.ok === true,
+      verified: false,
+      status: 'observed',
+      verificationClass: 'observation',
+      verificationEvidence: [],
+      diagnostics: [{
+        severity: 'info',
+        code: 'GOAL_OBSERVATION_ONLY',
+        message: `目标 ${goal.goalId ?? 'unknown'} 只产生发现/静态观察，不参与 semantic completion。`
+      }],
+      read: execution.compactResult
+    };
+  }
+  if (goal.kind === 'unsupported'
+    || goal.verificationStatus === 'unsupported'
+    || goal.status === 'unsupported') {
+    return {
+      ...goal,
+      nativeReadOk: false,
+      verified: false,
+      status: 'unsupported',
+      verificationStatus: 'unsupported',
+      verificationEvidence: [],
+      diagnostics: [{
+        severity: 'error',
+        code: 'GOAL_VERIFICATION_UNSUPPORTED',
+        message: goal.unsupportedReason ?? `目标 ${goal.goalId ?? 'unknown'} 没有可执行验证器。`
+      }],
+      read: null
+    };
+  }
   if (goal.kind === 'param-field') {
     const key = `${goal.table}\0${goal.rowId}`;
     let result = paramReads.get(key);
@@ -721,9 +802,10 @@ async function verifyGoalThroughNativeTool(window, goal, paramReads = new Map(),
       );
       paramReads.set(key, result);
     }
-    const evaluation = evaluateParamGoal(goal, result);
+    const evaluation = evaluateParamGoal(goal, result, treeEvidence);
     if (evaluation.verified && !goalChangedInOverlay(goal, treeEvidence)) {
       evaluation.verified = false;
+      evaluation.status = 'unverified';
       evaluation.diagnostics = [{ code: 'GOAL_RESOURCE_UNCHANGED', message: `目标 ${goal.goalId} 指定资源在 Agent 写回后没有变化。` }];
       evaluation.verificationEvidence = [];
     }
@@ -736,10 +818,13 @@ async function verifyGoalThroughNativeTool(window, goal, paramReads = new Map(),
     }
     const requiredChildren = children.filter((child) => child?.required !== false);
     const verified = requiredChildren.length > 0 && requiredChildren.every((child) => child.verified === true);
+    const unsupported = requiredChildren.some((child) => child.status === 'unsupported');
     const changed = goalChangedInOverlay(goal, treeEvidence);
     return {
       ...goal,
       verified: verified && changed,
+      status: unsupported ? 'unsupported' : verified && changed ? 'verified' : 'unverified',
+      ...(unsupported ? { verificationStatus: 'unsupported' } : {}),
       nativeReadOk: requiredChildren.every((child) => child.nativeReadOk === true),
       observedValue: verified,
       verificationEvidence: verified && changed ? children.flatMap((child) => child?.verificationEvidence ?? []) : [],
@@ -772,6 +857,7 @@ async function verifyGoalThroughNativeTool(window, goal, paramReads = new Map(),
     sourceHashPresent,
     sourceRevisionPresent: facts.revisions.length > 0,
     verified: nativeReadOk && assertionOk && proofOk && changed,
+    status: nativeReadOk && assertionOk && proofOk && changed ? 'verified' : 'unverified',
     verificationEvidence: nativeReadOk && assertionOk && proofOk && changed
       ? [{ tool: goal.tool, sourceHashes: [...new Set(facts.hashes)].slice(0, 4), sourceRevisions: [...new Set(facts.revisions)].slice(0, 4), sourceUris: [...new Set(facts.uris)].slice(0, 4) }]
       : [],
@@ -798,10 +884,12 @@ async function verifyGoalsThroughNativeTool(window, goals, treeEvidence = undefi
     reads.push({ query, result });
   }
   const paramReads = new Map(reads.map((entry) => [`${entry.query.table}\0${entry.query.rowId}`, entry.result]));
-  const evaluations = goals.map((goal) => {
-    const read = reads.find((item) => item.query.table === goal.table && item.query.rowId === goal.rowId);
-    return evaluateParamGoal(goal, read?.result ?? null);
-  });
+  const evaluations = goals
+    .filter((goal) => goal.kind === 'param-field')
+    .map((goal) => {
+      const read = reads.find((item) => item.query.table === goal.table && item.query.rowId === goal.rowId);
+      return evaluateParamGoal(goal, read?.result ?? null, treeEvidence);
+    });
   const semanticEvaluations = [];
   for (const goal of goals) {
     if (goal.kind === 'param-field') continue;
@@ -1632,6 +1720,7 @@ async function run() {
     ));
     treeAfterRun = await snapshotTree(overlayRoot);
     const nativeGoals = await verifyGoalsThroughNativeTool(window, goals, {
+      root: overlayRoot,
       before: treeBefore,
       after: treeAfterRun
     });
@@ -1735,7 +1824,11 @@ async function run() {
       && terminal.finishReason === 'stop'
       && durableRollout.terminal?.finishReason === 'stop'
       && eventsReport.lifecycle.some((entry) => entry.event.type === 'turn-complete' && entry.event.finishReason === 'stop');
-    const goalCoverage = evaluateGoalCoverage(nativeGoals.evaluations, CLI_OPTIONS.observationOnly === true);
+    const goalCoverage = evaluateGoalCoverage(
+      nativeGoals.evaluations,
+      CLI_OPTIONS.observationOnly === true,
+      SELECTED_TEST_TASK?.contract
+    );
     const goalsOk = goalCoverage.goalsOk;
     const committedOperationOk = newCommittedOperations.length > 0;
     const writeObserved = treeAfterRun.sha256 !== treeBefore.sha256;
@@ -1815,6 +1908,7 @@ async function run() {
       policy: livePolicyIdentity(),
       goals: nativeGoals.evaluations,
       goalCoverage,
+      taskContract: SELECTED_TEST_TASK?.contract ?? null,
       rollback: rollbackResult,
       cleanup: cleanupResult,
       stop: classifyStopTelemetry({
@@ -1825,6 +1919,9 @@ async function run() {
         writeMode: WRITE_MODE,
         lifecycleOk,
         goalsOk,
+        goalCoverageStatus: goalCoverage.status,
+        unsupportedGoalIds: goalCoverage.unsupportedGoalIds,
+        unverifiedGoalIds: goalCoverage.unverifiedGoalIds,
         taskCoverageOk: goalCoverage.taskCoverageOk,
         taskCompletionVerified: goalCoverage.taskCompletionVerified,
         committedOperationOk,
@@ -1881,6 +1978,9 @@ async function run() {
     completionSummary = {
       ok: report.ok,
       verificationMode: goalCoverage.mode,
+      goalCoverageStatus: goalCoverage.status,
+      unsupportedGoalIds: goalCoverage.unsupportedGoalIds,
+      unverifiedGoalIds: goalCoverage.unverifiedGoalIds,
       fieldChecksOk: goalCoverage.fieldChecksOk,
       taskCompletionVerified: goalCoverage.taskCompletionVerified,
       finishReason: terminal.finishReason,
@@ -1935,6 +2035,7 @@ async function run() {
       task: TASK_QUERY,
       policy: livePolicyIdentity(),
       goals,
+      taskContract: SELECTED_TEST_TASK?.contract ?? null,
       verificationMode: CLI_OPTIONS.observationOnly ? 'observation-only' : 'param-fields-only',
       writeMode: WRITE_MODE,
       taskCompletionVerified: false,

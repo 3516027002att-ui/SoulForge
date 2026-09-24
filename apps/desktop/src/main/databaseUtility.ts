@@ -4,8 +4,10 @@ import {
   DurableWorkspaceRepository,
   WorkspaceDataRepository,
   isRagChunkDeltaStats,
+  KnowledgeStore,
   openAppDatabase,
   openSqliteOperationLogStore,
+  SqliteKnowledgeStorePersistence,
   type SqliteDatabase,
   type SqliteOperationLogStore
 } from '@soulforge/core';
@@ -29,6 +31,8 @@ let durableRepository: DurableWorkspaceRepository | null = null;
 let workspaceDataRepository: WorkspaceDataRepository | null = null;
 let queue: Promise<void> = Promise.resolve();
 let queueDepth = 0;
+let workspaceRootPath: string | null = null;
+let workspaceGame: string | null = null;
 
 const writeUtilityTrace = createQueueObservationWriter({ side: 'worker' });
 
@@ -207,12 +211,15 @@ async function dispatch(request: OperationLogUtilityRequest): Promise<unknown> {
     case 'searchFiles':
       return requireWorkspaceDataRepository().searchFiles(request.payload.query, request.payload.limit);
     case 'replaceRagChunks':
+      assertWorkspaceRequest(request.payload.workspaceId);
       requireWorkspaceDataRepository().replaceRagChunks(request.payload.chunks);
       return null;
     case 'mergeRagChunks':
+      assertWorkspaceRequest(request.payload.workspaceId);
       requireWorkspaceDataRepository().mergeRagChunks(request.payload.chunks);
       return null;
     case 'mergeRagChunkDelta': {
+      assertWorkspaceRequest(request.payload.workspaceId);
       const stats = requireWorkspaceDataRepository().mergeRagChunkDelta(request.payload);
       // The transaction has already committed when this result is produced.
       // An invalid diagnostic must therefore become explicit unavailable
@@ -220,22 +227,28 @@ async function dispatch(request: OperationLogUtilityRequest): Promise<unknown> {
       return isRagChunkDeltaStats(stats) ? stats : null;
     }
     case 'loadRagChunks':
+      assertWorkspaceRequest(request.payload.workspaceId);
       return requireWorkspaceDataRepository().loadRagChunks();
     case 'searchRagChunks':
+      assertWorkspaceRequest(request.payload.workspaceId);
       return requireWorkspaceDataRepository().searchRagChunks(request.payload.query, request.payload.limit);
     case 'replaceRagEmbeddings':
+      assertWorkspaceRequest(request.payload.workspaceId);
       requireWorkspaceDataRepository().replaceRagEmbeddings(request.payload.entries);
       return null;
     case 'mergeRagEmbeddings':
+      assertWorkspaceRequest(request.payload.workspaceId);
       requireWorkspaceDataRepository().mergeRagEmbeddings(request.payload);
       return null;
     case 'loadRagEmbeddings': {
+      assertWorkspaceRequest(request.payload.workspaceId);
       const vectors = requireWorkspaceDataRepository().loadRagEmbeddings();
       const plain: Record<string, number[]> = {};
       for (const [chunkId, vector] of vectors) plain[chunkId] = Array.from(vector);
       return plain;
     }
     case 'loadRagEmbeddingRecords':
+      assertWorkspaceRequest(request.payload.workspaceId);
       return requireWorkspaceDataRepository().loadRagEmbeddingRecords().map((record) => ({
         chunkId: record.chunkId,
         model: record.model,
@@ -243,11 +256,14 @@ async function dispatch(request: OperationLogUtilityRequest): Promise<unknown> {
         vector: Array.from(record.vector)
       }));
     case 'ragEmbeddingModel':
+      assertWorkspaceRequest(request.payload.workspaceId);
       return requireWorkspaceDataRepository().ragEmbeddingModel();
     case 'replaceReferences':
+      assertWorkspaceRequest(request.payload.workspaceId);
       requireWorkspaceDataRepository().replaceReferences(request.payload.references);
       return null;
     case 'loadReferences':
+      assertWorkspaceRequest(request.payload.workspaceId);
       return requireWorkspaceDataRepository().loadReferences();
     case 'replaceDiagnostics':
       requireWorkspaceDataRepository().replaceDiagnostics(request.payload.diagnostics);
@@ -255,6 +271,7 @@ async function dispatch(request: OperationLogUtilityRequest): Promise<unknown> {
     case 'listDiagnostics':
       return requireWorkspaceDataRepository().listDiagnostics();
     case 'upsertJob':
+      assertWorkspaceRequest(request.payload.workspaceId);
       requireWorkspaceDataRepository().upsertJob(request.payload.job);
       return null;
     case 'listJobs':
@@ -268,6 +285,27 @@ async function dispatch(request: OperationLogUtilityRequest): Promise<unknown> {
     case 'upsertSemanticFileCache':
       requireWorkspaceDataRepository().upsertSemanticFileCacheRow(request.payload.entry);
       return null;
+    case 'loadKnowledgeSnapshot': {
+      assertWorkspaceRequest(request.payload.workspaceId);
+      if (request.payload.rootPath !== workspaceRootPath || request.payload.game !== workspaceGame) {
+        throw codedError('DATABASE_UTILITY_WORKSPACE_METADATA_MISMATCH', 'Knowledge snapshot 请求的 rootPath/game 与活动工作区不匹配。');
+      }
+      const activeStore = requireStore();
+      const persistence = new SqliteKnowledgeStorePersistence(activeStore.database, {
+        workspaceId: activeStore.workspaceId,
+        rootPath: workspaceRootPath ?? undefined,
+        game: workspaceGame ?? undefined,
+        ensureWorkspaceRow: false
+      });
+      let snapshot = persistence.load();
+      if (!snapshot) {
+        // Preserve the old first-open behavior: gen-0 is durably initialized
+        // on the utility connection, never through a main-process handle.
+        new KnowledgeStore({ persistence, schemaVersion: 'knowledge-v1' });
+        snapshot = persistence.load();
+      }
+      return snapshot;
+    }
   }
 }
 
@@ -307,6 +345,8 @@ async function openWorkspace(payload: OpenWorkspaceDatabasePayload) {
     appDatabase = nextAppDatabase;
     appDatabasePath = payload.appDatabasePath;
     workspaceId = payload.workspaceId;
+    workspaceRootPath = payload.rootPath;
+    workspaceGame = payload.game;
     return {
       workspaceId,
       legacyImport: {
@@ -501,6 +541,14 @@ function closeStore(): void {
   appDatabase = null;
   appDatabasePath = null;
   workspaceId = null;
+  workspaceRootPath = null;
+  workspaceGame = null;
+}
+
+function assertWorkspaceRequest(requestedWorkspaceId: string): void {
+  if (!workspaceId || workspaceId !== requestedWorkspaceId) {
+    throw codedError('DATABASE_UTILITY_WORKSPACE_MISMATCH', '数据库后台请求不属于当前工作区。');
+  }
 }
 
 function post(response: OperationLogUtilityResponse): void {

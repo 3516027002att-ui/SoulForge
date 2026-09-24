@@ -94,11 +94,14 @@ const DISCOVERY_TOOLS = new Set([
   'search_events',
   'search_tae_events',
   'search_text_entries',
+  'search_hks_script',
   'search_event_reference',
   'retrieve_evidence',
   'list_luabnd_scripts',
   'lookup_text_id',
-  'resolve_entity'
+  'resolve_entity',
+  'analyze_luabnd_script',
+  'analyze_tae_structure'
 ]);
 const NATIVE_READ_TOOLS = new Set([
   'read_param_fields',
@@ -108,9 +111,11 @@ const NATIVE_READ_TOOLS = new Set([
   'read_tae_events',
   'read_msb_parts',
   'read_luabnd_script',
+  'read_hks_script',
   'query_map_objects',
   'inspect_map_object'
 ]);
+const PAGED_METADATA_TOOLS = new Set(['analyze_luabnd_script', 'analyze_tae_structure', 'search_param_fields']);
 const DISCOVERY_QUERY_TOOLS = new Set([
   'search_resources',
   'search_param_rows',
@@ -119,6 +124,7 @@ const DISCOVERY_QUERY_TOOLS = new Set([
   'search_events',
   'search_tae_events',
   'search_text_entries',
+  'search_hks_script',
   'search_event_reference',
   'retrieve_evidence',
   'list_luabnd_scripts'
@@ -148,13 +154,14 @@ const MUTATION_TOOLS = new Set([
  * native document. Keep the model-facing payload small and leave it enough
  * stable identifiers/cursors to request the next page explicitly.
  */
-export const MAX_BOUNDED_TOOL_RESULT_CHARS = 8_192;
-export const MAX_BOUNDED_TOOL_RESULT_BYTES = 8_192;
+export const MAX_BOUNDED_TOOL_RESULT_CHARS = 32_768;
+export const MAX_BOUNDED_TOOL_RESULT_BYTES = 32_768;
 const BOUNDED_DISCOVERY_TOOLS = new Set([
   'search_resources',
   'search_events',
   'search_map_entities',
   'search_tae_events',
+  'search_hks_script',
   'search_param_rows',
   'search_param_fields',
   'search_text_entries',
@@ -171,7 +178,7 @@ const BOUNDED_DISCOVERY_TOOLS = new Set([
 const SUMMARY_ARRAY_LIMIT = 16;
 const SUMMARY_STRING_LIMIT = 320;
 const RESULT_ENVELOPE_DESCRIPTION =
-  '返回固定结果 envelope：state、data、pagination、truncated、identifiers、evidence；state=committed 表示事务已落盘，verification_failed 表示已落盘但原生复读失败，不能按普通失败重试；大型结果只在 data.summary 中摘要，不能按原始 typed response 解读。evidence 只表示确定性来源状态，不是模型置信度分数。evidence.claimDefaults 是各条 claims 共用的完整字段（identity 按属性合并），单条字段覆盖默认值；省略的 key/resourceKey 可由完整 identity 无损重建。';
+  '返回固定结果 envelope：state、data、pagination、truncated、identifiers、evidence；pagination.truncated 仅表示逻辑结果有后页，pagination.deliveryTruncated 表示传输摘要省略了细节而非存在游标；按 nextActions/nextReadPlan 恢复细节。state=committed 表示事务已落盘，verification_failed 表示已落盘但原生复读失败，不能按普通失败重试；大型结果只在 data.summary 中摘要，不能按原始 typed response 解读。evidence 只表示确定性来源状态，不是模型置信度分数。evidence.claimDefaults 是各条 claims 共用的完整字段（identity 按属性合并），单条字段覆盖默认值；省略的 key/resourceKey 可由完整 identity 无损重建。';
 
 export type AgentEvidenceStatus = 'not_applicable' | 'candidate' | 'native-verified' | 'insufficient_evidence';
 export type AgentEvidenceKind = 'discovery' | 'rag' | 'native-read' | 'proposal' | 'validation' | 'mutation' | 'memory' | 'other';
@@ -216,6 +223,8 @@ export interface AgentToolResultEnvelope {
     limit: number | null;
     /** Whether the underlying tool result has more data beyond this window. */
     truncated: boolean;
+    /** Transport projection lost detail; not a claim that a logical next page exists. */
+    deliveryTruncated: boolean;
     cursors: Record<string, string>;
     continuationParams?: Record<string, unknown>;
   };
@@ -268,25 +277,37 @@ const DISCOVERY_ARRAY_KEYS = new Set([
   'edges', 'hypotheses', 'coverageByDomain', 'nextReadPlan', 'progress',
   'blockedReasons', 'attemptedRoutes', 'mutationTargets', 'diagnostics', 'nextActions'
 ]);
+// These arrays are the producer's logical page. They are not an auxiliary
+// detail list: slicing them here while preserving the producer cursor makes
+// the bridge claim page N was delivered when only a prefix was returned.
+const DISCOVERY_PRIMARY_ARRAY_KEYS = new Set([
+  'items', 'hits', 'matches', 'rows', 'entries', 'events', 'parts', 'entities',
+  'results', 'topics', 'scripts'
+]);
 const DISCOVERY_DETAIL_KEYS = new Set([
   'id', 'uri', 'sourceUri', 'sourcePath', 'relativePath', 'symbolUri', 'chunkId',
   'searchId',
   'family', 'title', 'body', 'excerpt', 'text', 'name', 'rowId', 'rowName',
   'paramName', 'textId', 'category', 'eventId', 'mapId', 'entityId', 'nativeOffset',
   'entryName', 'entryIndex',
+  'sourceOffset', 'matchOffset', 'snippet', 'readAction',
   'file', 'model', 'score', 'vectorScore', 'reasons', 'highlights', 'fieldId',
   'fieldIds', 'value', 'valueType', 'description', 'nextCursor', 'cursor',
   'total', 'offset', 'limit', 'returned', 'truncated', 'instructionCount',
   'instructionOffset', 'instructionLimit', 'totalHits', 'totalCount', 'returnedCount',
+  'searchComplete', 'hasMore', 'scan', 'nextOffset',
   'availability', 'source', 'tool',
   'query', 'note', 'status', 'confidence', 'sourceHash', 'outerFileHash', 'sourceRevision', 'numericIds',
   'candidateId', 'namespace', 'domain', 'nativeHandle', 'label', 'route', 'nativeVerified',
+  'candidateSetComplete',
   'sourceSnapshot', 'evidence', 'evidenceTruncated', 'rejectionReason', 'ruleId', 'fromUri', 'toUri',
   'sourceProperty', 'targetNamespace', 'targetConfirmed', 'hypothesis', 'reason', 'coverage',
+  'scope', 'negativeConclusionAllowed', 'predicateComplete', 'complete', 'scannedFiles',
+  'readSources', 'unscannedSources', 'failedSources',
   'priority', 'requiredForMutation', 'stepId', 'target', 'progressed', 'progressKind', 'detail',
   'item', 'chunk', 'row', 'event', 'format', 'darkScript', 'darkScriptComplete', 'machineInstructions',
   'instructionDto', 'index', 'bank', 'argsBase64', 'unknown', 'emedfName', 'typedArgs',
-  'pagination', 'provenance', 'evidence', 'resourceKind', 'diagnostics',
+  'pagination', 'provenance', 'evidence', 'resourceKind', 'diagnostics', 'raw', 'decodeStatus', 'evidenceLayers', 'actionChain',
   'contentKind', 'contentHash', 'catalogComplete', 'entryCount', 'scriptCount',
   'severity', 'code', 'message',
   // Committed mutation lifecycle is deliberately small but must survive the
@@ -300,6 +321,7 @@ const DISCOVERY_NESTED_ARRAY_LIMIT = 8;
 const DISCOVERY_STRING_LIMIT = 420;
 const DISCOVERY_CONTENT_LIMIT = 2_048;
 const DISCOVERY_INSTRUCTION_LIMIT = 32;
+const DISCOVERY_NESTED_INSTRUCTION_LIMIT = 1;
 
 const DISCOVERY_CONTENT_KEYS = new Set([
   'text', 'body', 'content', 'excerpt', 'snippet', 'fragment', 'statement',
@@ -358,6 +380,16 @@ function projectDiscoveryInstruction(value: unknown): Record<string, unknown> | 
   return output;
 }
 
+function projectNestedDiscoveryInstruction(value: unknown): Record<string, unknown> | unknown {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return value;
+  const source = value as Record<string, unknown>;
+  const output: Record<string, unknown> = {};
+  for (const key of ['index', 'instructionIndex', 'name', 'emedfName']) {
+    if (source[key] !== undefined) output[key] = summarizeDiscoveryChild(source[key], 1);
+  }
+  return output;
+}
+
 function projectDiscoveryFields(value: unknown): unknown {
   if (!Array.isArray(value)) return undefined;
   return value.slice(0, DISCOVERY_INSTRUCTION_LIMIT).map((item) => {
@@ -398,11 +430,87 @@ function projectDiscoveryAction(value: unknown): unknown {
     ...(source.args && typeof source.args === 'object' && !Array.isArray(source.args)
       ? { args: source.args }
       : {}),
-    ...(typeof source.reason === 'string' ? { reason: projectDiscoveryContent(source.reason, 'reason') } : {})
+    ...(typeof source.reason === 'string' ? { reason: projectDiscoveryContent(source.reason, 'reason') } : {}),
+    ...(typeof source.scope === 'string' ? { scope: source.scope } : {}),
+    ...(typeof source.completeness === 'string' ? { completeness: source.completeness } : {}),
+    ...(typeof source.recovery === 'string' ? { recovery: projectDiscoveryContent(source.recovery, 'reason') } : {})
   };
 }
 
-function projectDiscoveryMatch(value: unknown, context?: ToolContext): unknown {
+const PARAM_DISCOVERY_PREVIEW_LIMIT = 2;
+const PARAM_DISCOVERY_FULL_ACTION_FIELD_LIMIT = 4;
+
+function compactParamPreviewValue(value: unknown): unknown {
+  if (typeof value === 'string') {
+    const compact = compactDiscoveryScalar(value);
+    return typeof compact === 'string' && compact.length > 120
+      ? `${utf8CodepointPrefix(compact, 120)}…`
+      : compact;
+  }
+  if (typeof value === 'number' || typeof value === 'boolean' || value === null) return value;
+  return summarizeDiscoveryChild(value, 1);
+}
+
+function projectParamDiscoveryField(value: unknown): Record<string, unknown> {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return {};
+  const source = value as Record<string, unknown>;
+  return {
+    ...(typeof source.fieldId === 'string' ? { fieldId: source.fieldId } : {}),
+    ...(typeof source.name === 'string' ? { name: compactDiscoveryScalar(source.name) } : {}),
+    ...(typeof source.type === 'string' ? { type: source.type } : {}),
+    ...(source.value !== undefined ? { value: compactParamPreviewValue(source.value) } : {})
+  };
+}
+
+function projectParamDiscoverySymbol(value: unknown, context?: ToolContext): Record<string, unknown> {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return {};
+  const source = value as Record<string, unknown>;
+  const output = modelFacingSymbol(source, context);
+  const fields = Array.isArray(source.fields) ? source.fields : [];
+  delete output.fields;
+  delete output.fieldsTruncated;
+  delete output.fieldsTotalCount;
+  output.fieldCount = typeof source.fieldCount === 'number' ? source.fieldCount : fields.length;
+  output.fieldsComplete = false;
+  output.fieldPreview = fields.slice(0, PARAM_DISCOVERY_PREVIEW_LIMIT).map(projectParamDiscoveryField);
+  if (fields.length > PARAM_DISCOVERY_PREVIEW_LIMIT) output.fieldPreviewTruncated = true;
+
+  const table = typeof source.paramName === 'string' ? source.paramName : undefined;
+  const rowId = typeof source.rowId === 'number' && Number.isSafeInteger(source.rowId) ? source.rowId : undefined;
+  const sourceUri = modelFacingLogicalUri(source.sourceUri, context);
+  const fieldIds = [...new Set(fields
+    .map((field) => field && typeof field === 'object' && !Array.isArray(field)
+      ? (field as Record<string, unknown>).fieldId
+      : undefined)
+    .filter((fieldId): fieldId is string => typeof fieldId === 'string' && fieldId.trim().length > 0))];
+  if (table && rowId !== undefined && fieldIds.length > 0) {
+    const allFieldsFit = fieldIds.length <= PARAM_DISCOVERY_FULL_ACTION_FIELD_LIMIT;
+    const actionFieldIds = allFieldsFit ? fieldIds : fieldIds.slice(0, PARAM_DISCOVERY_PREVIEW_LIMIT);
+    output.readAction = {
+      tool: 'read_param_fields',
+      args: {
+        table,
+        rowIds: [rowId],
+        fieldIds: actionFieldIds,
+        ...(sourceUri ? { containerPath: sourceUri } : {}),
+        pageSize: 4
+      },
+      scope: allFieldsFit ? 'all-known-fields' : 'preview-fields',
+      completeness: allFieldsFit ? 'all-known-field-ids' : 'preview-only',
+      reason: allFieldsFit
+        ? '使用该候选的全部已知真实 fieldId 读取原生值；若返回 nextCursor，沿 cursor 继续读取。'
+        : '这里只读取两个 preview fieldId；当前候选字段元数据不完整，不能冒充整行读取。'
+    };
+    if (!allFieldsFit) {
+      output.recovery = '要读取完整字段：使用同一 table、rowIds 和 containerPath 调用 search_param_fields，填写具体语义 query 获取真实 fieldId，沿其 cursor 分页后再调用 read_param_fields；read_param_fields 不接受省略 fieldIds。';
+    }
+  } else {
+    output.recovery = '当前候选没有足够的真实字段身份；先使用返回的 table、rowId、sourceUri 调用 search_param_fields 获取真实 fieldId，再调用 read_param_fields。';
+  }
+  return output;
+}
+
+function projectDiscoveryMatch(value: unknown, context?: ToolContext, discoveryToolName?: string): unknown {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return value;
   const source = value as Record<string, unknown>;
   const symbolKey = source.item !== undefined ? 'item'
@@ -418,21 +526,34 @@ function projectDiscoveryMatch(value: unknown, context?: ToolContext): unknown {
     'score', 'highlights', 'reason', 'reasons', 'matchReason', 'associationReason',
     'context', 'statement', 'location', 'position', 'span', 'sourceUri', 'uri', 'instructionIndex',
     'line', 'column', 'startLine', 'endLine', 'startColumn', 'endColumn',
-    'authority', 'confidence'
+    'authority', 'confidence', 'eventId', 'rowId', 'textId', 'entryIndex', 'entryName',
+    'sourceHash', 'outerFileHash', 'sourceRevision', 'resourceKind', 'file', 'relativePath',
+    'sourceOffset', 'matchOffset', 'snippet', 'readAction'
   ]) {
     if (!(key in source)) continue;
     if (key === 'sourceUri' || key === 'uri') {
       const uri = modelFacingLogicalUri(source[key], context);
       if (uri) output[key] = uri;
-    } else if (key === 'context' || key === 'statement' || key === 'reason' || key === 'matchReason' || key === 'associationReason') {
+    } else if (key === 'context' || key === 'statement' || key === 'reason' || key === 'matchReason' || key === 'associationReason' || key === 'snippet') {
       output[key] = projectDiscoveryContent(source[key], key);
+    } else if (key === 'readAction') {
+      output[key] = projectDiscoveryAction(source[key]);
     } else if (key === 'location' || key === 'position' || key === 'span') {
       output[key] = summarizeDiscoveryValue(source[key], 4, 1);
     } else {
       output[key] = summarizeDiscoveryChild(source[key], 1);
     }
   }
-  if (symbol !== undefined && symbolKey !== undefined) output[symbolKey] = modelFacingSymbol(symbol, context);
+  if (symbol !== undefined && symbolKey !== undefined) {
+    output[symbolKey] = discoveryToolName === 'search_param_rows'
+      && symbolKey === 'item'
+      && symbol && typeof symbol === 'object'
+      && !Array.isArray(symbol)
+      && typeof (symbol as Record<string, unknown>).paramName === 'string'
+      && typeof (symbol as Record<string, unknown>).rowId === 'number'
+      ? projectParamDiscoverySymbol(symbol, context)
+      : modelFacingSymbol(symbol, context);
+  }
   if (source.instruction !== undefined) output.instruction = projectDiscoveryInstruction(source.instruction);
   if (source.typedArgs !== undefined) output.typedArgs = projectDiscoveryTypedArgs(source.typedArgs);
   return Object.keys(output).length > 0 ? output : modelFacingSymbol(source, context);
@@ -550,6 +671,9 @@ function projectEntityEdge(value: unknown, context?: ToolContext): Record<string
   return output;
 }
 
+/** 候选投影的字节预算：剩余空间留给 envelope 的分页、标识与证据。 */
+const ENTITY_CANDIDATE_BUDGET_BYTES = 24576;
+
 function projectEntityResolutionForAgent(value: unknown, context?: ToolContext): unknown {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return value;
   const source = value as Record<string, unknown>;
@@ -557,13 +681,32 @@ function projectEntityResolutionForAgent(value: unknown, context?: ToolContext):
   for (const key of ['status', 'query', 'domain']) {
     if (typeof source[key] === 'string') output[key] = compactDiscoveryScalar(source[key]);
   }
+  let candidatesTruncated = false;
   for (const key of ['candidates', 'candidateSet']) {
     if (!Array.isArray(source[key])) continue;
     const values = source[key] as unknown[];
-    output[key] = values.slice(0, 8).map((item) => projectEntityCandidate(item, context));
-    output[`${key}ReturnedCount`] = Math.min(values.length, 8);
+    const projected = values.map((item) => projectEntityCandidate(item, context));
+    const fitsBudget = (items: unknown[]) =>
+      Buffer.byteLength(JSON.stringify(items), 'utf8') <= ENTITY_CANDIDATE_BUDGET_BYTES;
+    let fitting: unknown[] = projected.slice(0, 1);
+    if (fitsBudget(projected)) {
+      fitting = projected;
+    } else {
+      for (const count of [32, 16, 8, 4, 2, 1]) {
+        const prefix = projected.slice(0, Math.min(count, projected.length));
+        if (fitsBudget(prefix)) {
+          fitting = prefix;
+          break;
+        }
+      }
+    }
+    output[key] = fitting;
+    output[`${key}ReturnedCount`] = fitting.length;
     output[`${key}TotalCount`] = values.length;
-    if (values.length > 8) output[`${key}Truncated`] = true;
+    output[`${key}Truncated`] = values.length > fitting.length;
+    if (values.length > fitting.length) {
+      candidatesTruncated = true;
+    }
   }
   if (Array.isArray(source.identityChains)) {
     const values = source.identityChains as unknown[];
@@ -599,6 +742,24 @@ function projectEntityResolutionForAgent(value: unknown, context?: ToolContext):
   }
   if (Array.isArray(source.nextReadPlan)) output.nextReadPlan = source.nextReadPlan.slice(0, 12).map((item) => summarizeDiscoveryValue(item, 8, 1));
   if (Array.isArray(source.progress)) output.progress = source.progress.slice(-12).map((item) => summarizeDiscoveryValue(item, 8, 1));
+  if (typeof source.candidateSetComplete === 'boolean') {
+    output.candidateSetComplete = source.candidateSetComplete && !candidatesTruncated;
+  }
+  if (typeof source.relationshipsTruncated === 'boolean') {
+    output.relationshipsTruncated = source.relationshipsTruncated;
+  }
+  if (candidatesTruncated && typeof source.query === 'string' && source.query.trim() !== '') {
+    // 被预算截断的候选之后可能藏着目标行（如 64 选 8 时的正确参数行），
+    // 而候选本身没有续页游标。search_param_rows 按表独立排序并做异体/
+    // 简繁折叠，是指定的到达路径；显式指引，避免模型误认零候选。
+    const plan = Array.isArray(output.nextReadPlan) ? [...(output.nextReadPlan as unknown[])] : [];
+    plan.push({
+      tool: 'search_param_rows',
+      args: { query: source.query, limit: 8 },
+      reason: '候选集被截断，目标可能在未交付部分；按参数表独立排序并支持异体/简繁折叠的参数搜索继续定位。'
+    });
+    output.nextReadPlan = plan.slice(-12);
+  }
   return output;
 }
 
@@ -702,8 +863,16 @@ function modelFacingSymbol(value: unknown, context?: ToolContext): Record<string
     if (key === 'uri') {
       const uri = modelFacingLogicalUri(source[key], context);
       if (uri) output.uri = uri;
-    } else {
+    } else if (typeof source[key] === 'number') {
       output[key] = source[key];
+    } else {
+      // IndexedFile.id 形如 `<workspace file URL>:<relpath>`，内嵌本机绝对
+      // 路径（如 file:///D:/...），而 uri/sourceUri/file 已足以定位同一资
+      // 源。含绝对路径形态的 id 不向模型透出；逻辑 id 原样保留。
+      const idText = String(source[key]).replaceAll('\\', '/');
+      const looksAbsolute = idText.startsWith('file:///') || idText.startsWith('/')
+        || /^[A-Za-z]:\//.test(idText);
+      if (!looksAbsolute) output[key] = source[key];
     }
   }
   const sourceUri = modelFacingSourceUri(source.sourceUri);
@@ -771,10 +940,10 @@ function modelFacingSymbol(value: unknown, context?: ToolContext): Record<string
   const calls = projectDiscoveryCalls(source.calls);
   if (calls !== undefined) output.calls = calls;
   if (Array.isArray(source.instructions)) {
-    output.instructions = source.instructions.slice(0, DISCOVERY_INSTRUCTION_LIMIT)
-      .map((instruction) => projectDiscoveryInstruction(instruction));
+    output.instructions = source.instructions.slice(0, DISCOVERY_NESTED_INSTRUCTION_LIMIT)
+      .map((instruction) => projectNestedDiscoveryInstruction(instruction));
     output.instructionCount = source.instructions.length;
-    if (source.instructions.length > DISCOVERY_INSTRUCTION_LIMIT) output.instructionsTruncated = true;
+    if (source.instructions.length > DISCOVERY_NESTED_INSTRUCTION_LIMIT) output.instructionsTruncated = true;
   }
   if (Array.isArray(source.events)) output.eventCount = source.events.length;
   if (Array.isArray(source.fields)) output.fieldCount = source.fields.length;
@@ -784,23 +953,28 @@ function modelFacingSymbol(value: unknown, context?: ToolContext): Record<string
 
 function projectDiscoveryForAgent(name: string, value: unknown, context?: ToolContext): unknown {
   if (!DISCOVERY_TOOLS.has(name)) return value;
+  if (PAGED_METADATA_TOOLS.has(name)) return value;
   if (name === 'resolve_entity') return projectEntityResolutionForAgent(value, context);
   if (Array.isArray(value)) {
-    return value.map((item) => projectDiscoveryMatch(item, context));
+    return value.map((item) => projectDiscoveryMatch(item, context, name));
   }
   if (!value || typeof value !== 'object') return value;
   const record = value as Record<string, unknown>;
-  const output: Record<string, unknown> = {};
-  for (const [key, child] of Object.entries(record)) {
-    if (DISCOVERY_ARRAY_KEYS.has(key) && Array.isArray(child)) {
-      output[key] = child.slice(0, DISCOVERY_ITEM_LIMIT).map((item) => key === 'nextActions'
-        ? projectDiscoveryAction(item)
-        : projectDiscoveryMatch(item, context));
-      output[`${key}ReturnedCount`] = Math.min(child.length, DISCOVERY_ITEM_LIMIT);
-      output[`${key}TotalCount`] = child.length;
-      if (child.length > DISCOVERY_ITEM_LIMIT) output[`${key}Truncated`] = true;
-      continue;
-    }
+    const output: Record<string, unknown> = {};
+    for (const [key, child] of Object.entries(record)) {
+      if (DISCOVERY_ARRAY_KEYS.has(key) && Array.isArray(child)) {
+        const primaryPage = DISCOVERY_QUERY_TOOLS.has(name) && DISCOVERY_PRIMARY_ARRAY_KEYS.has(key);
+        const projected = primaryPage
+          ? child.map((item) => projectDiscoveryMatch(item, context, name))
+          : child.slice(0, DISCOVERY_ITEM_LIMIT).map((item) => key === 'nextActions'
+            ? projectDiscoveryAction(item)
+            : projectDiscoveryMatch(item, context, name));
+        output[key] = projected;
+        output[`${key}ReturnedCount`] = primaryPage ? child.length : Math.min(child.length, DISCOVERY_ITEM_LIMIT);
+        output[`${key}TotalCount`] = child.length;
+        if (!primaryPage && child.length > DISCOVERY_ITEM_LIMIT) output[`${key}Truncated`] = true;
+        continue;
+      }
     if (key === 'sourcePath' || key === 'filePath' || key === 'absolutePath' || key === 'path') {
       const relative = modelFacingRelativePath(child, context);
       if (relative) output.file = relative;
@@ -829,11 +1003,11 @@ const NATIVE_PATH_KEYS = new Set([
  * the generic envelope is serialized. Keep a workspace-relative locator when
  * the host can resolve it; never expose the physical path as a fallback. */
 function projectNativeReadForAgent(name: string, value: unknown, context?: ToolContext): unknown {
-  if (!NATIVE_READ_TOOLS.has(name)) return value;
+  if (!NATIVE_READ_TOOLS.has(name) && !PAGED_METADATA_TOOLS.has(name)) return value;
   const visit = (node: unknown, key = '', depth = 0): unknown => {
     if (depth > 8) return compactDiscoveryScalar(node);
     if (typeof node === 'string') {
-      if (NATIVE_PATH_KEYS.has(key)) return modelFacingLogicalUri(node, context);
+      if (NATIVE_PATH_KEYS.has(key) || key === 'file') return modelFacingLogicalUri(node, context);
       if (key === 'workspaceId') return 'workspace://active';
       if (key === 'entryName' && /^[A-Za-z]:[\\/]/u.test(node)) return undefined;
       // Native source bodies are already bounded by their reader (Lua/FMG
@@ -844,6 +1018,9 @@ function projectNativeReadForAgent(name: string, value: unknown, context?: ToolC
       // explicit incomplete result when a host returns an unpaged body.
       if (key === 'sourceText' || key === 'darkScript'
         || (name === 'read_fmg_entries' && key === 'text')) return node;
+      // The producer already byte-pages structure rows. A second scalar cap
+      // would silently truncate conditions/constants without a continuation.
+      if (PAGED_METADATA_TOOLS.has(name)) return node;
       return compactDiscoveryScalar(node);
     }
     if (Array.isArray(node)) return node.map((item) => visit(item, key, depth + 1));
@@ -1058,15 +1235,16 @@ function resultWindowMetadata(value: unknown): ResultWindowMetadata {
     return { total: null, offset: null, limit: null, returned: null, truncated: false };
   }
   const record = value as Record<string, unknown>;
-  const page = record.page && typeof record.page === 'object' && !Array.isArray(record.page)
-    ? record.page as Record<string, unknown>
-    : undefined;
+  const page = {
+    ...(record.page && typeof record.page === 'object' && !Array.isArray(record.page) ? record.page as Record<string, unknown> : {}),
+    ...(record.pagination && typeof record.pagination === 'object' && !Array.isArray(record.pagination) ? record.pagination as Record<string, unknown> : {})
+  };
   const total = firstMetadataNumber(record, ['total', 'instructionCount', 'totalCount', 'totalHits'])
     ?? (page ? firstMetadataNumber(page, ['total', 'totalCount', 'totalHits']) : null);
   const offset = firstMetadataNumber(record, ['offset', 'instructionOffset', 'sourceOffset'])
     ?? (page ? firstMetadataNumber(page, ['offset', 'sourceOffset']) : null);
   const limit = firstMetadataNumber(record, ['limit', 'instructionLimit', 'sourceLimit'])
-    ?? (page ? firstMetadataNumber(page, ['limit', 'sourceLimit']) : null);
+    ?? (page ? firstMetadataNumber(page, ['limit', 'sourceLimit', 'pageSize']) : null);
   const returned = firstMetadataNumber(record, ['returned', 'returnedCount'])
     ?? (page ? firstMetadataNumber(page, ['returned', 'returnedCount']) : null)
     ?? (Array.isArray(record.instructions)
@@ -1141,7 +1319,7 @@ function hasMeaningfulResult(value: unknown): boolean {
     'matchedEntities',
     'results',
     'topics',
-    'fields'
+    'fields', 'candidates', 'candidateSet', 'scripts'
   ]) {
     if (Array.isArray(record[key]) && record[key]!.length > 0) return true;
   }
@@ -1239,13 +1417,18 @@ function buildEvidenceMetadata(
   }
   if (NATIVE_READ_TOOLS.has(name)) {
     const nativeVerified = facts.sourceHashes.length > 0;
+    const readOnlySource = name === 'read_hks_script';
     return withClaims({
       ...facts,
       status: nativeVerified ? 'native-verified' : 'insufficient_evidence',
       kind: 'native-read',
       nextActions: nativeVerified
-        ? ['已取得带 sourceHash 的原生快照；写入前仍须使用该哈希和 sourceRevision 做前置条件校验。']
-        : ['原生读取没有返回 sourceHash，不能把本次结果作为写入前置依据。'],
+        ? [readOnlySource
+          ? '已取得带 sourceHash 的 HKS/Lua 源码证据；仅可用于本次只读核对，不提供写入授权或 NativeReadProof。'
+          : '已取得带 sourceHash 的原生快照；写入前仍须使用该哈希和 sourceRevision 做前置条件校验。']
+        : [readOnlySource
+          ? 'HKS/Lua 源码读取没有返回 sourceHash，不能把本次结果作为稳定只读源码证据。'
+          : '原生读取没有返回 sourceHash，不能把本次结果作为写入前置依据。'],
       repeatedQuery: false
     });
   }
@@ -1375,8 +1558,15 @@ function createResultEnvelope(
       && ('sourceTextComplete' in sourceWindow
         || 'sourceOffset' in sourceWindow
         || 'sourceLimit' in sourceWindow);
+    const nestedCursor = sourceWindow?.pagination && typeof sourceWindow.pagination === 'object'
+      && !Array.isArray(sourceWindow.pagination)
+      && typeof (sourceWindow.pagination as Record<string, unknown>).nextCursor === 'string'
+      ? (sourceWindow.pagination as Record<string, unknown>).nextCursor as string
+      : undefined;
     continuationParams = typeof sourceWindow?.nextCursor === 'string'
       ? { cursor: sourceWindow.nextCursor }
+      : nestedCursor
+      ? { cursor: nestedCursor }
       : hasSourceWindow
       ? {
           sourceOffset: nextOffset,
@@ -1412,6 +1602,7 @@ function createResultEnvelope(
       offset: window.offset,
       limit: window.limit,
       truncated: window.truncated,
+      deliveryTruncated: truncated && !window.truncated,
       cursors: identifiers.cursors,
       ...(continuationParams ? { continuationParams } : {})
     },
@@ -1436,6 +1627,10 @@ function inferResultCompleteness(data: unknown): NativeReadCompleteness | undefi
       return;
     }
     const record = value as Record<string, unknown>;
+    if (Object.entries(record).some(([key, child]) => (key === 'truncated' || key.endsWith('Truncated')) && child === true)) {
+      incomplete = true;
+      return;
+    }
     if (record.sourceTextComplete === false || record.darkScriptComplete === false) {
       incomplete = true;
       return;
@@ -2493,9 +2688,11 @@ function nativeBodyExceedsBudget(name: string, value: unknown): boolean {
     ? new Set(['darkScript'])
     : name === 'read_luabnd_script'
       ? new Set(['sourceText'])
-      : name === 'read_fmg_entries'
-        ? new Set(['text'])
-        : new Set<string>();
+      : name === 'read_hks_script'
+        ? new Set(['sourceText'])
+        : name === 'read_fmg_entries'
+          ? new Set(['text'])
+          : new Set<string>();
   if (bodyKeys.size === 0) return false;
   const seen = new Set<object>();
   const walk = (node: unknown, key = '', depth = 0): boolean => {
@@ -2532,6 +2729,109 @@ function buildNativeBodyWindowDetails(name: string, data: unknown, input?: Recor
       : { sourceOffset, sourceLimit: nextLimit },
     ...(typeof result.nextCursor === 'string' ? { nextCursor: result.nextCursor } : {})
   };
+}
+
+function discoveryPrimaryArrayKey(value: unknown): string | undefined {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined;
+  return Object.entries(value as Record<string, unknown>)
+    .find(([key, child]) => DISCOVERY_PRIMARY_ARRAY_KEYS.has(key) && Array.isArray(child))?.[0];
+}
+
+function buildDiscoveryWindowTooLargeDetails(
+  name: string,
+  data: unknown,
+  input?: Record<string, unknown>
+): Record<string, unknown> {
+  const record = data && typeof data === 'object' && !Array.isArray(data)
+    ? data as Record<string, unknown>
+    : {};
+  const page = record.page && typeof record.page === 'object' && !Array.isArray(record.page)
+    ? record.page as Record<string, unknown>
+    : {};
+  const scan = record.scan && typeof record.scan === 'object' && !Array.isArray(record.scan)
+    ? record.scan as Record<string, unknown>
+    : {};
+  const currentCursor = typeof input?.cursor === 'string' ? input.cursor : undefined;
+  const currentLimit = safeMetadataNumber(record.limit ?? page.limit ?? input?.limit);
+  const retryLimit = currentLimit !== null && currentLimit > 1
+    ? Math.max(1, Math.floor(currentLimit / 2))
+    : currentLimit;
+  const retry = {
+    ...(input ?? {}),
+    ...(currentCursor === undefined ? {} : { cursor: currentCursor }),
+    ...(retryLimit === null ? {} : { limit: retryLimit })
+  };
+  return {
+    query: typeof input?.query === 'string' ? input.query : record.query ?? null,
+    tool: name,
+    retry,
+    currentPage: {
+      offset: record.offset ?? page.offset ?? null,
+      limit: record.limit ?? page.limit ?? null,
+      returned: record.returned ?? record.returnedCount ?? page.returned ?? page.returnedCount ?? null,
+      total: record.total ?? record.totalCount ?? page.total ?? page.totalCount ?? null,
+      cursor: currentCursor ?? null
+    },
+    // These cursors are not retry cursors: they may only be followed after
+    // the current page is successfully delivered.
+    ...(typeof record.nextCursor === 'string' ? { nextPageCursor: record.nextCursor } : {}),
+    ...(typeof page.nextCursor === 'string' ? { pageNextCursor: page.nextCursor } : {}),
+    ...(typeof scan.sourceCursor === 'string' ? { scanSourceCursor: scan.sourceCursor } : {}),
+    ...(scan.nextAction && typeof scan.nextAction === 'object' ? { scanNextAction: scan.nextAction } : {})
+  };
+}
+
+function buildReferencePageTooLargeDetails(data: unknown, input?: Record<string, unknown>): Record<string, unknown> {
+  const record = data && typeof data === 'object' && !Array.isArray(data)
+    ? data as Record<string, unknown>
+    : {};
+  const page = record.page && typeof record.page === 'object' && !Array.isArray(record.page)
+    ? record.page as Record<string, unknown>
+    : {};
+  const scan = record.scan && typeof record.scan === 'object' && !Array.isArray(record.scan)
+    ? record.scan as Record<string, unknown>
+    : {};
+  const retry = { ...(input ?? {}) };
+  return {
+    retry,
+    currentPage: {
+      returnedCount: page.returnedCount ?? record.returnedCount ?? null,
+      hasMore: page.hasMore ?? record.hasMore ?? null,
+      cursor: typeof input?.cursor === 'string' ? input.cursor : null
+    },
+    ...(typeof page.nextCursor === 'string' ? { pageNextCursor: page.nextCursor } : {}),
+    ...(typeof scan.sourceCursor === 'string' ? { scanSourceCursor: scan.sourceCursor } : {}),
+    ...(scan.nextAction && typeof scan.nextAction === 'object' ? { scanNextAction: scan.nextAction } : {})
+  };
+}
+
+/** coverage 身份列表逐项透传的上限；超过时只保留计数与截断标记。 */
+const COVERAGE_SOURCE_VERSION_PREVIEW = 8;
+
+/**
+ * coverage 携带的 sourceVersions 是全量来源身份（可达数百项），逐项透传
+ * 既浪费预算又无助于定位。超过上限时替换为计数摘要；短列表原样保留。
+ */
+function summarizeCoverageIdentities(data: unknown): { data: unknown; dropped: boolean } {
+  if (!data || typeof data !== 'object' || Array.isArray(data)) return { data, dropped: false };
+  const record = data as Record<string, unknown>;
+  if (!Array.isArray(record.coverage)) return { data, dropped: false };
+  let dropped = false;
+  const coverage = record.coverage.map((item) => {
+    if (!item || typeof item !== 'object' || Array.isArray(item)) return item;
+    const entry = item as Record<string, unknown>;
+    if (!Array.isArray(entry.sourceVersions)
+      || entry.sourceVersions.length <= COVERAGE_SOURCE_VERSION_PREVIEW) return item;
+    dropped = true;
+    return {
+      ...entry,
+      sourceVersions: {
+        totalCount: entry.sourceVersions.length,
+        truncated: true
+      }
+    };
+  });
+  return dropped ? { data: { ...record, coverage }, dropped } : { data, dropped };
 }
 
 function boundedToolContent(
@@ -2621,9 +2921,9 @@ function boundedToolContent(
         && encoded.length <= MAX_BOUNDED_TOOL_RESULT_CHARS) return encoded;
     }
   }
-  if (bodyExceedsBudget && (name === 'read_luabnd_script' || name === 'read_fmg_entries')) {
+  if (bodyExceedsBudget && (name === 'read_luabnd_script' || name === 'read_hks_script' || name === 'read_fmg_entries')) {
     return boundedFailureContent({
-      code: name === 'read_luabnd_script' ? 'RESULT_SCRIPT_WINDOW_TOO_LARGE' : 'RESULT_TEXT_WINDOW_TOO_LARGE',
+      code: name === 'read_fmg_entries' ? 'RESULT_TEXT_WINDOW_TOO_LARGE' : 'RESULT_SCRIPT_WINDOW_TOO_LARGE',
       message: '原生正文窗口超过 Agent 输出预算；请使用 sourceOffset/sourceLimit 或 cursor 继续读取，不能把截断正文当作完整读取。',
       details: buildNativeBodyWindowDetails(name, originalData, input)
     }, state === 'completed' ? 'failed' : state);
@@ -2636,11 +2936,41 @@ function boundedToolContent(
   // would echo its physical absolute sourcePath/filePath and bypass the
   // locator/unknown-diagnostic redaction.
   if (!byteBoundedByRaw && name !== 'read_emevd_event') {
-    const sourceSummary = truncationSummary(name, window, false);
+    let envelopeData = data;
+    if (name === 'read_param_fields' && data && typeof data === 'object' && !Array.isArray(data)) {
+      const record = data as Record<string, unknown>;
+      const pagination = record.pagination as Record<string, unknown> | undefined;
+      // 溢出分支经 summarize 合成 fieldsReturnedCount；fast path 原样透传会
+      // 丢掉该计数造成两条路径形状不一致。计数可由在手 fields 直接得出，
+      // 仅在生产者未分页（无后页）且缺失时补齐，不改任何原生值。
+      if (Array.isArray(record.fields)
+        && record.fieldsReturnedCount === undefined
+        && (pagination === undefined || pagination.nextCursor == null)) {
+        envelopeData = { ...record, fieldsReturnedCount: record.fields.length };
+      }
+    }
+    const coverageSummary = summarizeCoverageIdentities(envelopeData);
+    envelopeData = coverageSummary.data;
+    let fastTruncated = window.truncated || coverageSummary.dropped;
+    let fastSummary: string | null = null;
+    if (envelopeData && typeof envelopeData === 'object' && !Array.isArray(envelopeData)) {
+      const record = envelopeData as Record<string, unknown>;
+      // 顶层 sourceVersions 是全量来源身份（可达数百项）：超限直接省略
+      //（已提交回执的 lifecycle 与回读定位保留），省略即截断并配摘要，
+      // 使 completeness 与 truncated 诚实。
+      if (Array.isArray(record.sourceVersions)
+        && record.sourceVersions.length > COVERAGE_SOURCE_VERSION_PREVIEW) {
+        const { sourceVersions: _omitted, ...rest } = record;
+        envelopeData = rest;
+        fastTruncated = true;
+        fastSummary = '来源身份列表过长已省略；完整版本请用 ID 或游标继续分页查询。';
+      }
+    }
+    const sourceSummary = fastSummary ?? truncationSummary(name, window, false);
     const encoded = JSON.stringify(createResultEnvelope(
-      data,
+      envelopeData,
       rawLength,
-      window.truncated,
+      fastTruncated,
       sourceSummary,
       identifiers,
       evidence,
@@ -2655,18 +2985,73 @@ function boundedToolContent(
     if (Buffer.byteLength(encoded, 'utf8') <= MAX_BOUNDED_TOOL_RESULT_BYTES
       && encoded.length <= MAX_BOUNDED_TOOL_RESULT_CHARS) return encoded;
   }
-  if (name === 'read_luabnd_script' || name === 'read_fmg_entries') {
+  if (COMMITTED_STATES.has(state)) {
+    // 已提交结果绝不能进通用 discovery 摘要（会丢 lifecycle/写证明）。
+    // fast path 装不下时走 lifecycle 投影：minimal 装得下即返回，否则
+    // strict 只保留定位与合成 outputBudget，绝不把已提交写成可重试失败。
+    return committedOversizeEnvelope(name, data, rawLength, identityBytes, identifiers, evidence, window, state);
+  }
+  if (name === 'read_luabnd_script' || name === 'read_hks_script' || name === 'read_fmg_entries') {
     // Do not fall through to summarizeDiscoveryValue: that projection would
     // replace a native source/text body with a 421-character discovery
     // excerpt.  Ask the reader for a smaller source window instead, keeping
     // the incomplete boundary explicit and the write proof closed.
     return boundedFailureContent({
-      code: name === 'read_luabnd_script' ? 'RESULT_SCRIPT_WINDOW_TOO_LARGE' : 'RESULT_TEXT_WINDOW_TOO_LARGE',
+      code: name === 'read_fmg_entries' ? 'RESULT_TEXT_WINDOW_TOO_LARGE' : 'RESULT_SCRIPT_WINDOW_TOO_LARGE',
       message: '原生正文窗口无法在 Agent 输出预算内完整交付；请使用 sourceOffset/sourceLimit 或 cursor 继续读取。',
       details: buildNativeBodyWindowDetails(name, originalData, input)
     }, state === 'completed' ? 'failed' : state);
   }
   const summaryText = truncationSummary(name, window, true) ?? '工具输出已截断；请继续分页查询。';
+  if (PAGED_METADATA_TOOLS.has(name)) {
+    // These tools page at the producer. Never lose a metadata row or a branch
+    // inside the bridge while keeping the producer's next cursor unchanged.
+    return boundedFailureContent({
+      code: 'RESULT_METADATA_WINDOW_TOO_LARGE',
+      message: '元数据窗口超过输出预算；用相同查询、相同 cursor 和更小 limit 重读当前页。',
+      details: { retry: { ...(input ?? {}), [name === 'analyze_tae_structure' ? 'pageSize' : 'limit']:
+        Math.max(1, Math.floor(Number(name === 'analyze_tae_structure' ? input?.pageSize ?? 32 : input?.limit ?? 6) / 2)) } }
+    });
+  }
+  if (name === 'resolve_entity' && data && typeof data === 'object' && !Array.isArray(data)) {
+    const record = data as Record<string, unknown>;
+    const candidates = Array.isArray(record.candidates) ? record.candidates : [];
+    const candidatesTotal = Number(record.candidatesTotalCount ?? candidates.length);
+    // 预算允许时优先交付完整候选集：旧逻辑固定从 8 条开始尝试，
+    // maxCandidates 再大也只能看到前 8 条，剩余候选既无续页游标又无
+    // 到达路径（如 64 条候选中排第 9 位之后的正确行）。改为从全量向
+    // 下逐级收缩，只在确实装不下时才截断。
+    const candidateCounts = Array.from(new Set([candidates.length, 32, 16, 8, 4, 2, 1]))
+      .filter((count) => count >= 1)
+      .sort((left, right) => right - left);
+    for (const count of candidateCounts) {
+      const selected = candidates.slice(0, count).map((item) => {
+        const candidate = item as Record<string, unknown>;
+        return Object.fromEntries(['candidateId', 'domain', 'nativeHandle', 'label', 'sourceUri', 'sourceSnapshot', 'nativeVerified', 'status']
+          .filter((key) => candidate[key] !== undefined).map((key) => [key, candidate[key]]));
+      });
+      const truncated = selected.length < candidatesTotal;
+      const compactRecord = {
+        status: record.status, query: record.query, domain: record.domain,
+        candidateSetComplete: Boolean(record.candidateSetComplete) && !truncated,
+        candidates: selected, candidatesReturnedCount: selected.length,
+        candidatesTotalCount: record.candidatesTotalCount ?? candidates.length,
+        candidatesTruncated: truncated,
+        relationshipsTruncated: record.relationshipsTruncated ?? true, coverage: record.coverage,
+        nextReadPlan: [...selected.map((candidate) => ({ tool: 'resolve_entity', args: { handle: candidate.nativeHandle, domain: candidate.domain }, reason: '按精确候选句柄展开身份；当前摘要不授权修改。' })),
+          // 候选被预算截断时，目标行可能排在未交付部分之后（如 64 选 8）。
+          // search_param_rows 按表独立排序并做异体字折叠，是定位被埋没
+          // 参数行的指定到达路径；此处显式指引，避免模型误认零候选。
+          ...(truncated && typeof record.query === 'string' && record.query.trim() !== ''
+            ? [{ tool: 'search_param_rows', args: { query: record.query, limit: 8 }, reason: '候选集被截断，目标可能在未交付部分；按参数表独立排序并支持异体/简繁折叠的参数搜索继续定位。' }]
+            : [])]
+      };
+      const encoded = JSON.stringify(createResultEnvelope(compactRecord, rawLength, true,
+        '候选与来源已保留；关系细节未完整交付，按候选句柄精确展开。', compactIdentity, evidence, window, state, 'partial'));
+      if (Buffer.byteLength(encoded, 'utf8') <= MAX_BOUNDED_TOOL_RESULT_BYTES) return encoded;
+    }
+    return boundedFailureContent({ code: 'RESULT_ENTITY_WINDOW_TOO_LARGE', message: '单个候选身份超过输出预算；请缩小查询或使用精确句柄。' });
+  }
   if (name === 'read_param_fields' && data && typeof data === 'object' && !Array.isArray(data)) {
     const fields = (data as Record<string, unknown>).fields;
     if (Array.isArray(fields)) {
@@ -2682,6 +3067,13 @@ function boundedToolContent(
         }
         return compact;
       });
+      // PARAM pagination is a native read boundary, not an envelope-only
+      // truncation. Preserve the cursor and independent execution/scan/page/
+      // evidence states even when auxiliary field descriptions are compacted.
+      for (const key of ['fieldDefinitions', 'pagination', 'execution', 'scan', 'page', 'evidence', 'missingRows']) {
+        const original = (data as Record<string, unknown>)[key];
+        if (original !== undefined) summary[key] = original;
+      }
       const encoded = JSON.stringify(createResultEnvelope(
         summary, rawLength, true,
         '已压缩辅助元数据；保留本次请求的全部字段、完整字段值及原生身份。',
@@ -2691,7 +3083,12 @@ function boundedToolContent(
         && encoded.length <= MAX_BOUNDED_TOOL_RESULT_CHARS) return encoded;
       return boundedFailureContent({
         code: 'RESULT_FIELD_WINDOW_TOO_LARGE',
-        message: '本次字段窗口在保留全部原生身份和字段值后仍超出输出预算；请减少 fieldIds 或 rowIds 分批读取。'
+        message: '本次字段窗口在保留全部原生身份和字段值后仍超出输出预算；请减少 fieldIds 或 rowIds 分批读取。',
+        details: {
+          ...(typeof (data as Record<string, unknown>).pagination === 'object'
+            ? { pagination: (data as Record<string, unknown>).pagination }
+            : {})
+        }
       }, state === 'completed' ? 'failed' : state);
     }
   }
@@ -2714,13 +3111,11 @@ function boundedToolContent(
       && encoded.length <= MAX_BOUNDED_TOOL_RESULT_CHARS) return encoded;
     return boundedFailureContent({
       code: 'RESULT_REFERENCE_PAGE_TOO_LARGE',
-      message: '关联查询页超过 Agent 输出预算；已保留 reference service 的关系页边界，请使用其 cursor 或更小 limit 续读。',
+      message: '关联查询当前页超过 Agent 输出预算；请按 retry 原查询/当前 cursor 重读当前页，交付完整后再分别使用 pageNextCursor 或 scanSourceCursor，不能直接跳过当前页。',
       details: {
         completeness: window.truncated ? 'windowed' : 'partial',
         truncated: true,
-        ...(typeof (data as Record<string, unknown> | null)?.nextCursor === 'string'
-          ? { nextCursor: (data as Record<string, unknown>).nextCursor }
-          : {})
+        ...buildReferencePageTooLargeDetails(data, input)
       }
     }, state === 'completed' ? 'failed' : state);
   }
@@ -2789,6 +3184,30 @@ function boundedToolContent(
       code: 'RESULT_EVENT_WINDOW_TOO_LARGE',
       message: '完整 EMEVD 指令窗口超过 Agent 输出预算；请使用 instructionOffset/instructionLimit 分页读取。',
       details: buildEmevdWindowTooLargeDetails(data, input)
+    }, state === 'completed' ? 'failed' : state);
+  }
+  if (DISCOVERY_QUERY_TOOLS.has(name) && discoveryPrimaryArrayKey(data) !== undefined) {
+    // The primary logical page has already been projected with all candidate
+    // identities retained. It may either fit as a successful page or fail
+    // closed; never fall through to summarizeDiscoveryValue, whose generic
+    // six-item cap would pair a shortened array with the producer's cursor.
+    const pageEnvelope = createResultEnvelope(
+      data,
+      rawLength,
+      false,
+      null,
+      compactIdentity,
+      evidence,
+      window,
+      state
+    );
+    const encoded = JSON.stringify(pageEnvelope);
+    if (Buffer.byteLength(encoded, 'utf8') <= MAX_BOUNDED_TOOL_RESULT_BYTES
+      && encoded.length <= MAX_BOUNDED_TOOL_RESULT_CHARS) return encoded;
+    return boundedFailureContent({
+      code: 'RESULT_DISCOVERY_WINDOW_TOO_LARGE',
+      message: '发现结果当前逻辑页在保留全部候选稳定身份后仍超过输出预算；请用原查询和当前 cursor 重读当前页，不能直接使用下一页 cursor 跳过未交付候选。',
+      details: buildDiscoveryWindowTooLargeDetails(name, originalData, input)
     }, state === 'completed' ? 'failed' : state);
   }
   // Try progressively smaller candidate sets. A single native row/chunk can
@@ -3118,6 +3537,12 @@ function recordAutomaticNativeReadProof(input: {
     registerNativeProofWatch(input.context, input.target.sourcePath);
     return;
   }
+
+  // Standalone HKS/Lua source hashes are read-only source evidence.  They are
+  // deliberately not converted into NativeReadProof receipts: HKS writeback
+  // has its own first-party compiler/readback gate and must never be unlocked
+  // by merely exposing a source hash through this bridge.
+  if (input.callName === 'read_hks_script') return;
 
   if (!projected || !raw || !isCompleteNativeEnvelope(input.envelope, input.callName)) return;
 

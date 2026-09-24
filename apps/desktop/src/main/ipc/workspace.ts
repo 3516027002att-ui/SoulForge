@@ -37,13 +37,16 @@ import type { Diagnostic, IndexedFile, ResourceKind, SymbolBundle } from '@soulf
 import { sanitizeDiagnostics, sanitizeRendererValue, toRendererIndexedFile } from '../rendererDto.js';
 import type { RendererIndexedFile } from '../rendererDto.js';
 import { prepareBridgeRoots, type BridgeRootSession, type PrepareBridgeRootsResult } from '../bridgeRoots.js';
-import type { OperationLogUtilityClient } from '../operationLogUtilityClient.js';
+import type { OperationLogUtilityClient, WorkspaceBoundUtilityStore } from '../operationLogUtilityClient.js';
 import type { TrustedIpcHandle } from './registration.js';
 import { persistRagCorpusBySourceDelta } from '../ragPersistence.js';
+import { RagRefreshQueue } from '../ragRefreshQueue.js';
+import { prepareWorkspaceRagLookup } from '../ragLookupBuild.js';
 import { buildRagCorpus, createRagCorpus, mergeCatalogAndPersisted } from '@soulforge/core';
 import {
   createParamCanonicalProjectionCache,
   mergeCanonicalParamExports,
+  prepareCanonicalProjectionWithCatalogRetry,
   persistCanonicalRagProjection,
   prepareParamCanonicalProjection
 } from './workspaceParamCanonical.js';
@@ -115,7 +118,7 @@ let activeRagScope: WorkspaceRagScope | null = null;
 let activeRagSessionId: string | null = null;
 let activeRagGeneration = 0;
 let activeRagIndexedFilesRevision = 0;
-let scheduleRagEmbedding: ((corpus: RagCorpus, database: OperationLogUtilityClient) => void) | null = null;
+let scheduleRagEmbedding: ((corpus: RagCorpus, database: WorkspaceBoundUtilityStore) => void) | null = null;
 let activeSession: WorkspaceSession | null = null;
 let activeWorkspaceSessionId: string | null = null;
 let activeWorkspaceSessionGeneration = 0;
@@ -151,6 +154,7 @@ let activeOverlayLabel = '';
 const directorySelections = new Map<string, DirectorySelectionRecord>();
 const recentPathsFile = join(app.getPath('userData'), 'recent-paths.json');
 const toolRegistry = createDefaultToolRegistry();
+const ragRefreshQueue = new RagRefreshQueue();
 
 function replaceWorkspaceIndexedFiles(next: readonly IndexedFile[]): void {
   indexedFiles = [...next];
@@ -214,27 +218,41 @@ function bridgeRootsDiagnostic(code: string, result: Extract<PrepareBridgeRootsR
   return { severity: 'error', code, message: `${result.message}。操作：重试 / 打开诊断 / 检查工作区存储权限。`, ...(result.details !== undefined ? { details: result.details } : {}) };
 }
 async function persistActiveRag(
-  database: OperationLogUtilityClient,
+  database: WorkspaceBoundUtilityStore,
   corpus: RagCorpus,
   previous: RagCorpus | null = null,
   signal?: AbortSignal,
   scheduleEmbedding = true,
-  scope: WorkspaceRagScope = scheduleEmbedding ? 'full' : 'canonical-param'
+  scope: WorkspaceRagScope = scheduleEmbedding ? 'full' : 'canonical-param',
+  expectedIndexedFilesRevision?: number
 ): Promise<void> {
   const publishingSessionId = activeWorkspaceSessionId;
   const publishingGeneration = activeWorkspaceSessionGeneration;
-  const publishingIndexedFilesRevision = typeof indexedFilesRevision !== 'undefined'
+  const publishingIndexedFilesRevision = expectedIndexedFilesRevision ?? (typeof indexedFilesRevision !== 'undefined'
     ? indexedFilesRevision
-    : null;
-  await persistRagCorpusBySourceDelta(database, corpus, previous, signal);
+    : null);
+  const assertCatalogCurrent = (): void => {
+    if (publishingIndexedFilesRevision !== null && typeof indexedFilesRevision !== 'undefined'
+      && publishingIndexedFilesRevision !== indexedFilesRevision) {
+      throw Object.assign(new Error('文件目录已更新，旧 RAG 候选不会持久化或发布。'), { code: 'RAG_CATALOG_CHANGED' });
+    }
+  };
+  const assertRefreshCurrent = (): void => {
+    throwIfRagRefreshAborted(signal);
+    assertCatalogCurrent();
+    if (publishingSessionId !== activeWorkspaceSessionId || publishingGeneration !== activeWorkspaceSessionGeneration
+      || activeIndex?.workspaceId !== corpus.workspaceId) {
+      throw new Error('工作区已切换，旧语义语料不会持久化。');
+    }
+  };
+  assertRefreshCurrent();
+  await persistRagCorpusBySourceDelta(database, corpus, previous, signal, undefined, assertRefreshCurrent);
   // Publish only after the source delta is durable.  Publishing first would
   // make a cancelled bounded refresh look committed and could cause the next
   // retry to skip SQLite batches that were not written yet.
   throwIfRagRefreshAborted(signal);
+  assertCatalogCurrent();
   if (publishingSessionId !== activeWorkspaceSessionId || publishingGeneration !== activeWorkspaceSessionGeneration
-    || (publishingIndexedFilesRevision !== null
-      && typeof indexedFilesRevision !== 'undefined'
-      && publishingIndexedFilesRevision !== indexedFilesRevision)
     || activeIndex?.workspaceId !== corpus.workspaceId) {
     throw new Error('工作区已切换，旧语义语料不会发布到新会话。');
   }
@@ -260,14 +278,24 @@ async function refreshRagAfterScan(
   index: WorkspaceIndex,
   signal?: AbortSignal
 ): Promise<void> {
-  throwIfRagRefreshAborted(signal);
-  const catalog = buildRagCorpus(index);
-  const chunks = await database.loadRagChunks();
-  throwIfRagRefreshAborted(signal);
-  const references = await database.loadReferences();
-  throwIfRagRefreshAborted(signal);
-  const persisted = createRagCorpus({ workspaceId: index.workspaceId, builtAt: catalog.builtAt, chunks, references });
-  await persistActiveRag(database, mergeCatalogAndPersisted(catalog, persisted), persisted, signal);
+  const sessionId = activeWorkspaceSessionId, generation = activeWorkspaceSessionGeneration;
+  const scopedDatabase = database.forWorkspace(index.workspaceId);
+  await ragRefreshQueue.run(ragRefreshQueueKey(index.workspaceId, sessionId, generation), async () => {
+    throwIfRagRefreshAborted(signal);
+    if (sessionId !== activeWorkspaceSessionId || generation !== activeWorkspaceSessionGeneration) {
+      throw Object.assign(new Error('工作区已切换，旧 RAG 刷新已取消。'), { name: 'AbortError' });
+    }
+    const catalogRevision = indexedFilesRevision;
+    const catalog = buildRagCorpus(index, undefined, [], undefined, undefined, { lookupIndex: 'deferred' });
+    const chunks = await scopedDatabase.loadRagChunks();
+    throwIfRagRefreshAborted(signal);
+    const references = await scopedDatabase.loadReferences();
+    throwIfRagRefreshAborted(signal);
+    const persisted = createRagCorpus({ workspaceId: index.workspaceId, builtAt: catalog.builtAt, chunks, references, lookupIndex: 'deferred' });
+    const corpus = mergeCatalogAndPersisted(catalog, persisted, { lookupIndex: 'deferred' });
+    await prepareWorkspaceRagLookup(scopedDatabase, corpus, signal);
+    await persistActiveRag(scopedDatabase, corpus, persisted, signal, true, 'full', catalogRevision);
+  }, signal);
 }
 async function refreshRagAfterAnalyze(
   database: OperationLogUtilityClient,
@@ -277,28 +305,45 @@ async function refreshRagAfterAnalyze(
   scheduleEmbedding = true,
   attemptedParamSourceUris: readonly string[] = []
 ): Promise<void> {
-  await persistCanonicalRagProjection({
-    index,
-    diagnostics,
-    attemptedParamSourceUris,
-    ...(signal ? { signal } : {}),
-    loadPersisted: async () => {
-      throwIfRagRefreshAborted(signal);
-      const chunks = await database.loadRagChunks();
-      throwIfRagRefreshAborted(signal);
-      const references = await database.loadReferences();
-      throwIfRagRefreshAborted(signal);
-      return { chunks, references };
-    },
-    persist: (corpus, previous) => persistActiveRag(
-      database,
-      corpus,
-      previous,
-      signal,
-      scheduleEmbedding,
-      scheduleEmbedding ? 'full' : 'canonical-param'
-    )
-  });
+  const sessionId = activeWorkspaceSessionId, generation = activeWorkspaceSessionGeneration;
+  const catalogRevision = indexedFilesRevision;
+  const scopedDatabase = database.forWorkspace(index.workspaceId);
+  await ragRefreshQueue.run(ragRefreshQueueKey(index.workspaceId, sessionId, generation), async () => {
+    if (sessionId !== activeWorkspaceSessionId || generation !== activeWorkspaceSessionGeneration) {
+      throw Object.assign(new Error('工作区已切换，旧 RAG 刷新已取消。'), { name: 'AbortError' });
+    }
+    if (catalogRevision !== indexedFilesRevision) {
+      throw Object.assign(new Error('文件目录已更新，旧 RAG 候选已丢弃。'), { code: 'RAG_CATALOG_CHANGED' });
+    }
+    await persistCanonicalRagProjection({
+      index,
+      diagnostics,
+      attemptedParamSourceUris,
+      prepareLookup: (corpus, lookupSignal) => prepareWorkspaceRagLookup(scopedDatabase, corpus, lookupSignal),
+      ...(signal ? { signal } : {}),
+      loadPersisted: async () => {
+        throwIfRagRefreshAborted(signal);
+        const chunks = await scopedDatabase.loadRagChunks();
+        throwIfRagRefreshAborted(signal);
+        const references = await scopedDatabase.loadReferences();
+        throwIfRagRefreshAborted(signal);
+        return { chunks, references };
+      },
+      persist: (corpus, previous) => persistActiveRag(
+        scopedDatabase,
+        corpus,
+        previous,
+        signal,
+        scheduleEmbedding,
+        scheduleEmbedding ? 'full' : 'canonical-param',
+        catalogRevision
+      )
+    });
+  }, signal);
+}
+
+function ragRefreshQueueKey(workspaceId: string, sessionId: string | null, generation: number): string {
+  return `${workspaceId}\u0000${sessionId ?? 'no-session'}\u0000${generation}`;
 }
 
 function parsedParamSourceFiles(index: WorkspaceIndex): IndexedFile[] {
@@ -369,11 +414,12 @@ function resolveProjectJsonGameRoot(overlayAbsolutePath: string): string | null 
 export interface WorkspaceIpcDeps {
   handle: TrustedIpcHandle;
   ensureActiveOperationLog(session: WorkspaceSession): Promise<OperationLogUtilityClient>;
+  clearActiveOperationLog(): Promise<void>;
   verifiedReadRoots(
     session: WorkspaceSession | null,
     fallback: string
   ): Promise<{ allowedRoots: string[]; diagnostics: Diagnostic[] }>;
-  scheduleRagEmbedding?: (corpus: RagCorpus, database: OperationLogUtilityClient) => void;
+  scheduleRagEmbedding?: (corpus: RagCorpus, database: WorkspaceBoundUtilityStore) => void;
 }
 
 export async function rebuildActionBinderMembershipIndex(input: {
@@ -679,7 +725,10 @@ export function registerWorkspaceIpcHandlers(deps: WorkspaceIpcDeps): void {
     if (workspaceIndexingAbort) { try { workspaceIndexingAbort.abort(); } catch {} }
     if (workspaceIndexingTask) { try { await workspaceIndexingTask; } catch {} }
     resolveWorkspaceSemanticIndexingTask();
-    if (activeSession) await disposeBridgeDaemonPool();
+    const previousSession = activeSession;
+    activeSession = null;
+    await deps.clearActiveOperationLog();
+    if (previousSession) await disposeBridgeDaemonPool();
     // A corpus is valid only for its active WorkspaceIndex/session.  Clear it
     // before exposing the new session so an agent cannot query the previous
     // workspace during the open-to-analyze window.
@@ -691,8 +740,6 @@ export function registerWorkspaceIpcHandlers(deps: WorkspaceIpcDeps): void {
     activeWorkspaceSessionGeneration = thisSessionGeneration;
     activeSession = await openWorkspaceSession({ overlayRoot: overlaySelection.absolutePath, ...(effectiveBaseRecord ? { baseRoot: effectiveBaseRecord.absolutePath } : {}), game: 'sekiro' });
     activeWorkspaceSessionId = randomUUID();
-    const database = await deps.ensureActiveOperationLog(activeSession);
-    await cancelAbandonedWorkspaceJobs(database);
     const physicalOverlayRoot = await (async () => { try { const { realpath } = await import('node:fs/promises'); return await realpath(activeSession.layers.overlayRoot); } catch { return activeSession.layers.overlayRoot; } })();
     const physicalOverlayHash = workspacePhysicalRootHash(physicalOverlayRoot);
     const physicalBaseHash = activeSession.layers.baseRoot ? workspacePhysicalRootHash(await (async () => { try { const { realpath } = await import('node:fs/promises'); return await realpath(activeSession.layers.baseRoot!); } catch { return activeSession.layers.baseRoot!; } })()) : undefined;
@@ -714,8 +761,6 @@ export function registerWorkspaceIpcHandlers(deps: WorkspaceIpcDeps): void {
     const indexForSession = activeIndex;
     const scanJobId = randomUUID();
     const scanStartedAt = new Date().toISOString();
-    await database.upsertJob({ jobId: scanJobId, title: '扫描工作区', jobKind: 'workspace_scan', status: 'running', progress: { current: 0, total: lightResult.files.length, message: '基础资源已可用，正在后台校验内容索引' }, payload: { workspaceSessionId: activeWorkspaceSessionId, workspaceSessionGeneration: thisSessionGeneration, fingerprintStoreGeneration: fingerprintStore.fingerprintStoreGeneration, workspacePersistentIdentityHash }, createdAt: scanStartedAt, startedAt: scanStartedAt, updatedAt: scanStartedAt });
-    await database.replaceFiles(lightResult.files);
     const currentSessionId = activeWorkspaceSessionId;
     const currentSession = activeSession;
     const currentGeneration = thisSessionGeneration;
@@ -741,6 +786,7 @@ export function registerWorkspaceIpcHandlers(deps: WorkspaceIpcDeps): void {
     workspacePrimaryIndexingTask = primaryHashPromise;
     const controller = new AbortController();
     workspaceIndexingAbort = controller;
+    let database: OperationLogUtilityClient | undefined;
     const backgroundTask = (async () => {
       const enriched: IndexedFile[] = [];
       let primaryHashResolved = false;
@@ -764,7 +810,7 @@ export function registerWorkspaceIpcHandlers(deps: WorkspaceIpcDeps): void {
         if (currentSession !== activeSession || currentSessionId !== activeWorkspaceSessionId) return;
         const cancelledAt = new Date().toISOString();
         try {
-          await database.upsertJob({
+          if (database) await database.upsertJob({
             jobId: scanJobId,
             title: '扫描工作区',
             jobKind: 'workspace_scan',
@@ -780,6 +826,11 @@ export function registerWorkspaceIpcHandlers(deps: WorkspaceIpcDeps): void {
         } catch { /* 会话切换时数据库可能已关闭；不能阻止句柄清理。 */ }
       };
       try {
+        const activeDatabase = await deps.ensureActiveOperationLog(currentSession);
+        database = activeDatabase;
+        await cancelAbandonedWorkspaceJobs(activeDatabase);
+        await activeDatabase.upsertJob({ jobId: scanJobId, title: '扫描工作区', jobKind: 'workspace_scan', status: 'running', progress: { current: 0, total: lightResult.files.length, message: '基础资源已可用，正在后台校验内容索引' }, payload: { workspaceSessionId: activeWorkspaceSessionId, workspaceSessionGeneration: thisSessionGeneration, fingerprintStoreGeneration: fingerprintStore.fingerprintStoreGeneration, workspacePersistentIdentityHash }, createdAt: scanStartedAt, startedAt: scanStartedAt, updatedAt: scanStartedAt });
+        await activeDatabase.replaceFiles(lightResult.files);
         const { createHash: _createHash } = await import('node:crypto');
         const { open: _open } = await import('node:fs/promises');
         let hashedCount = 0; let reuseCount = 0;
@@ -833,14 +884,14 @@ export function registerWorkspaceIpcHandlers(deps: WorkspaceIpcDeps): void {
         if (activeIndex && activeIndex !== indexForSession) {
           activeIndex.setFiles(enriched as unknown as IndexedFile[]);
         }
-        await database.replaceFiles(enriched as unknown as IndexedFile[]);
+        await activeDatabase.replaceFiles(enriched as unknown as IndexedFile[]);
         const quickHydrateFiles = (enriched as unknown as IndexedFile[]).filter(
           (f) => f.resourceKind === 'param' || f.resourceKind === 'msg' || f.relativePath.toLowerCase().includes('gameparam.parambnd')
         );
         for (const file of quickHydrateFiles) {
           if (file.sha256) {
             try {
-              const cached = await database.getSemanticFileCache(file.relativePath);
+              const cached = await activeDatabase.getSemanticFileCache(file.relativePath);
               if (cached && cached.fileSha256 === file.sha256
                 && isNativeSemanticBundleCurrent(file, cached.payload)) {
                 loadSymbolBundleIntoIndex(indexForSession, rebaseSymbolBundleToFileRevision(file, cached.payload));
@@ -873,12 +924,17 @@ export function registerWorkspaceIpcHandlers(deps: WorkspaceIpcDeps): void {
         if (continuity.continuity === 'UNKNOWN' && hashedCount + reuseCount === enriched.length) fingerprintStore.continuity = { ...continuity, continuity: 'PROVEN', unknownReason: null, cleanShutdown: true };
         fingerprintStore.continuity.cleanShutdown = true; try { await saveFingerprintStore({ storageRoot, state: fingerprintStore }); } catch {}
         const completedAt = new Date().toISOString(); const backgroundCompleteAt = Date.now();
-        await database.upsertJob({ jobId: scanJobId, title: '扫描工作区', jobKind: 'workspace_scan', status: 'completed', progress: { current: enriched.length, total: enriched.length }, payload: { workspaceSessionId: currentSessionId, workspaceSessionGeneration: currentGeneration, fingerprintStoreGeneration: currentStoreGen }, result: { fileCount: enriched.length, hashedCount, reuseCount, shellVisibleAt, filesVisibleAt, backgroundCompleteAt, shellVisibleMs: filesVisibleAt - shellVisibleAt, indexingMs: backgroundCompleteAt - shellVisibleAt, openHandles: 0, activeDiskReaders: 0, actionBinderIndex }, createdAt: scanStartedAt, startedAt: scanStartedAt, completedAt, updatedAt: completedAt });
-        if (activeIndex === indexForSession) await refreshRagAfterScan(database, indexForSession, controller.signal);
+        await activeDatabase.upsertJob({ jobId: scanJobId, title: '扫描工作区', jobKind: 'workspace_scan', status: 'completed', progress: { current: enriched.length, total: enriched.length }, payload: { workspaceSessionId: currentSessionId, workspaceSessionGeneration: currentGeneration, fingerprintStoreGeneration: currentStoreGen }, result: { fileCount: enriched.length, hashedCount, reuseCount, shellVisibleAt, filesVisibleAt, backgroundCompleteAt, shellVisibleMs: filesVisibleAt - shellVisibleAt, indexingMs: backgroundCompleteAt - shellVisibleAt, openHandles: 0, activeDiskReaders: 0, actionBinderIndex }, createdAt: scanStartedAt, startedAt: scanStartedAt, completedAt, updatedAt: completedAt });
+        // An explicitly requested analysis owns both staged and full RAG
+        // publication. Do not start a redundant scan-side semantic writer
+        // beside it with an older database baseline.
+        if (activeIndex === indexForSession && workspaceAnalysisRequestedGeneration !== currentGeneration) {
+          await refreshRagAfterScan(activeDatabase, indexForSession, controller.signal);
+        }
       } catch (error) {
         checkResolvePrimary();
         await releaseAll(); if (controller.signal.aborted) { await cancelCurrentJob('工作区扫描被新任务取消。'); return; } if (currentGeneration !== activeWorkspaceSessionGeneration) { await cancelCurrentJob('工作区会话已切换，旧扫描结果已丢弃。'); return; }
-        const failedAt = new Date().toISOString(); try { await database.upsertJob({ jobId: scanJobId, title: '扫描工作区', jobKind: 'workspace_scan', status: 'failed', progress: { current: 0 }, payload: { workspaceSessionId: currentSessionId, workspaceSessionGeneration: currentGeneration }, error: { message: error instanceof Error ? error.message : String(error) }, createdAt: scanStartedAt, startedAt: scanStartedAt, completedAt: failedAt, updatedAt: failedAt }); } catch {}
+        const failedAt = new Date().toISOString(); try { if (database) await database.upsertJob({ jobId: scanJobId, title: '扫描工作区', jobKind: 'workspace_scan', status: 'failed', progress: { current: 0 }, payload: { workspaceSessionId: currentSessionId, workspaceSessionGeneration: currentGeneration }, error: { message: error instanceof Error ? error.message : String(error) }, createdAt: scanStartedAt, startedAt: scanStartedAt, completedAt: failedAt, updatedAt: failedAt }); } catch {}
       }
     })();
     workspaceIndexingTask = backgroundTask;
@@ -893,13 +949,16 @@ export function registerWorkspaceIpcHandlers(deps: WorkspaceIpcDeps): void {
     if (workspaceIndexingTask) { try { await workspaceIndexingTask; } catch {} }
     workspacePrimaryIndexingTask = null;
     resolveWorkspaceSemanticIndexingTask();
-    await disposeBridgeDaemonPool();
+    const previousSession = activeSession;
+    activeSession = null;
+    await deps.clearActiveOperationLog();
+    if (previousSession) await disposeBridgeDaemonPool();
     clearWorkspaceRagSnapshot();
     activeIndex?.clearActionBinderMembership();
     activeIndex = null;
     replaceWorkspaceIndexedFiles([]);
     workspaceSessionGenerationCounter += 1; activeWorkspaceSessionGeneration = workspaceSessionGenerationCounter; activeWorkspaceSessionId = randomUUID();
-    activeSession = await openWorkspaceSession({ overlayRoot: activeSession.layers.overlayRoot, ...(baseSelection ? { baseRoot: baseSelection.absolutePath } : {}), game: activeSession.meta.game });
+    activeSession = await openWorkspaceSession({ overlayRoot: previousSession!.layers.overlayRoot, ...(baseSelection ? { baseRoot: baseSelection.absolutePath } : {}), game: previousSession!.meta.game });
     const workspaceLabel = activeOverlayLabel || activeSession.meta.game;
     return { workspaceSessionId: activeWorkspaceSessionId, session: { workspaceSessionId: activeWorkspaceSessionId, workspaceLabel, game: activeSession.meta.game, openedAt: activeSession.meta.openedAt, baseMounted: !activeSession.meta.baseMissing, ...(baseSelection ? { baseLabel: baseSelection.label } : {}) } };
   });
@@ -1065,34 +1124,38 @@ export function registerWorkspaceIpcHandlers(deps: WorkspaceIpcDeps): void {
             // use the isolated PARAM-only projection for the first RAG body.
             // Failed PARAM leaves therefore remain visible as candidates while
             // never being promoted to generic RAG evidence.
-            mergeCanonicalParamExports(stage.index, canonicalProjection.canonicalExports);
+            // Background hashing may finish while native PARAM preparation
+            // yields. Keep its newer catalog; never overwrite it with the
+            // stage's earlier light-file snapshot.
+            await mergeCanonicalParamExports(stage.index, canonicalProjection.canonicalExports, analyzeController.signal);
+            stage.index.setFiles(indexedFiles);
+            canonicalProjection.canonicalIndex.setFiles(indexedFiles);
             if (stage.index.getStats().paramRows > 0) {
               stage.index.setParamSemanticState('ready');
             }
             assertAnalyzeGenerationCurrent('工作区已切换，阶段语义索引已丢弃。');
             activeIndex = stage.index;
-            replaceWorkspaceIndexedFiles(stage.index.getFiles());
-            const stageCorpus = buildRagCorpus(
-              canonicalProjection.canonicalIndex,
-              undefined,
-              [...stage.diagnostics, ...canonicalProjection.diagnostics],
-              undefined,
-              undefined,
-              { lookupIndex: 'deferred' }
-            );
-            publishWorkspaceRagSnapshot(stageCorpus, 'canonical-param', stage.index);
+            // Only publish a fully prepared lookup snapshot. Exposing a
+            // deferred intermediate here moves the stall to the first query
+            // and also assembles the same PARAM corpus twice.
             // The full analysis will publish again at the end.  Do not start
             // embedding during this transitional slice: it would compete with
             // the remaining native EVENT/MAP pass and is not needed for the
             // default lexical/structured Agent path.
-            await refreshRagAfterAnalyze(
-              database,
-              canonicalProjection.canonicalIndex,
-              [...stage.diagnostics, ...canonicalProjection.diagnostics],
-              analyzeController.signal,
-              false,
-              canonicalProjection.attemptedSourceUris
-            );
+            try {
+              await refreshRagAfterAnalyze(
+                database,
+                canonicalProjection.canonicalIndex,
+                [...stage.diagnostics, ...canonicalProjection.diagnostics],
+                analyzeController.signal,
+                false,
+                canonicalProjection.attemptedSourceUris
+              );
+            } catch (error) {
+              // A changed catalog invalidates only this optional early RAG
+              // candidate; the final pass below uses the finished scan.
+              if ((error as { code?: string }).code !== 'RAG_CATALOG_CHANGED') throw error;
+            }
             assertAnalyzeGenerationCurrent('工作区已切换，阶段语义索引已丢弃。');
           } finally {
             resolveWorkspaceSemanticIndexingTask(semanticStage);
@@ -1115,10 +1178,20 @@ export function registerWorkspaceIpcHandlers(deps: WorkspaceIpcDeps): void {
       if (result.index.getStats().paramRows > 0) {
         result.index.setParamSemanticState('ready');
       }
-      const canonicalProjection = await prepareCanonicalParamProjection(result.index);
+      if (workspaceIndexingTask) await workspaceIndexingTask;
+      assertAnalyzeGenerationCurrent('工作区已切换，最终文件目录已丢弃。');
+      const stableCanonicalProjection = await prepareCanonicalProjectionWithCatalogRetry({
+        baseIndex: result.index,
+        getFiles: () => indexedFiles,
+        getRevision: () => indexedFilesRevision,
+        prepare: prepareCanonicalParamProjection,
+        signal: analyzeController.signal,
+        maxAttempts: 3
+      });
+      const finalCatalogRevision = stableCanonicalProjection.catalogRevision;
+      const canonicalProjection = stableCanonicalProjection.projection;
+      result.index = stableCanonicalProjection.index;
       assertAnalyzeGenerationCurrent('工作区已切换，最终 PARAM canonical projection 已丢弃。');
-      if (!canonicalProjection.publishable) throw new Error('PARAM canonical projection 未发布。');
-      mergeCanonicalParamExports(result.index, canonicalProjection.canonicalExports);
       if (result.index.getStats().paramRows > 0) {
         result.index.setParamSemanticState('ready');
       }
@@ -1137,9 +1210,8 @@ export function registerWorkspaceIpcHandlers(deps: WorkspaceIpcDeps): void {
       // index that Agent reads will actually use, not the earlier PARAM-stage
       // projection.
       activeIndex = result.index;
-      // Publish the catalog revision before RAG so the snapshot provenance
-      // points at the exact file identity set consumed by Agent queries.
-      replaceWorkspaceIndexedFiles(result.index.getFiles());
+      // The candidate was built from this exact finished catalog revision;
+      // refreshRagAfterAnalyze fences it across queueing/lookup/persistence.
       await refreshRagAfterAnalyze(
         database,
         canonicalProjection.canonicalIndex,

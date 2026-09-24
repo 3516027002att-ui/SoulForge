@@ -62,7 +62,7 @@ import { sanitizeRendererValue } from '../rendererDto.js';
 import type { TrustedIpcHandle } from './registration.js';
 import type { MemoryManager } from '../memoryManager.js';
 import type { ModelServiceCredentialVault } from '../modelServiceCredentials.js';
-import type { OperationLogUtilityClient } from '../operationLogUtilityClient.js';
+import type { OperationLogUtilityClient, WorkspaceBoundUtilityStore } from '../operationLogUtilityClient.js';
 import { INTERNAL_RAG_EMBEDDING, InternalRagEmbeddingService } from '../ragEmbedding.js';
 import { isAgentRagSearchIdentityCurrent } from './agentRagIdentity.js';
 
@@ -277,7 +277,7 @@ export function clearAgentIpcState(): void {
   agentPermissionGrants.clear();
 }
 
-export function scheduleInternalRagEmbedding(corpus: RagCorpus, database: OperationLogUtilityClient): void {
+export function scheduleInternalRagEmbedding(corpus: RagCorpus, database: WorkspaceBoundUtilityStore): void {
   internalRagEmbedding.schedule(corpus, database);
 }
 
@@ -421,6 +421,8 @@ export function registerAgentIpcHandlers(deps: AgentIpcDeps): void {
     'ai.runTool',
     async (_event, name: string, input: unknown): Promise<ToolResult> => {
       // T6：无工作区时由工具层按工具守卫（WORKSPACE_REQUIRED），不整次拒绝。
+      const session = deps.getActiveSession();
+      if (session) await deps.ensureActiveOperationLog(session);
       return deps.toolRegistry.run(name, input, deps.currentToolContext());
     }
   );
@@ -442,11 +444,12 @@ export function registerAgentIpcHandlers(deps: AgentIpcDeps): void {
         };
       }
       const database = await deps.ensureActiveOperationLog(deps.getActiveSession()!);
+      const scopedDatabase = database.forWorkspace(deps.getActiveIndex()!.workspaceId);
       const corpus = resolveRagCorpus(deps.currentToolContext()) ?? createRagCorpus({
         workspaceId: deps.getActiveIndex()!.workspaceId,
         builtAt: new Date().toISOString(),
-        chunks: await database.loadRagChunks(),
-        references: await database.loadReferences()
+        chunks: await scopedDatabase.loadRagChunks(),
+        references: await scopedDatabase.loadReferences()
       });
       if (corpus.availability !== 'available') {
         return {
@@ -462,14 +465,14 @@ export function registerAgentIpcHandlers(deps: AgentIpcDeps): void {
         return { ok: false, error: { code: 'INSUFFICIENT_CORPUS', message: '语料为空：先扫描并分析工作区。' } };
       }
   
-      const result = await internalRagEmbedding.ensure(corpus, database);
+      const result = await internalRagEmbedding.ensure(corpus, scopedDatabase);
       if (!result.ok) return { ok: false, error: { code: result.code, message: result.message } };
       return { ok: true, embedded: result.embedded, reused: result.reused, failed: result.failed, model: result.model, dim: result.dim };
     });
   
   const loadWorkspaceVectorMap = async (
     corpus: RagCorpus,
-    database: OperationLogUtilityClient | null
+    database: WorkspaceBoundUtilityStore | null
   ): Promise<Map<string, Float32Array> | null> => {
     const cached = internalRagEmbedding.getCachedVectors(corpus);
     if (cached && cached.size > 0) return cached;
@@ -496,7 +499,7 @@ export function registerAgentIpcHandlers(deps: AgentIpcDeps): void {
   };
 
   const searchWorkspaceEvidence = async (
-    database: OperationLogUtilityClient | null,
+    database: WorkspaceBoundUtilityStore | null,
     query: string,
     options: {
       limit?: number;
@@ -637,9 +640,10 @@ export function registerAgentIpcHandlers(deps: AgentIpcDeps): void {
       if (!deps.getActiveIndex() || !deps.getActiveSession()) {
         return { ok: false as const, code: 'WORKSPACE_REQUIRED' as const, message: '先打开 Mod 工作区。' };
       }
-      const database = resolveRagCorpus(deps.currentToolContext())
+      const databaseClient = resolveRagCorpus(deps.currentToolContext())
         ? deps.operationLogUtility
         : await deps.ensureActiveOperationLog(deps.getActiveSession()!);
+      const database = databaseClient.forWorkspace(deps.getActiveIndex()!.workspaceId);
       return searchWorkspaceEvidence(database, input.query, {
         ...(input.limit !== undefined ? { limit: input.limit } : {}),
         ...(input.families !== undefined ? { families: input.families } : {}),
@@ -1173,7 +1177,7 @@ export function registerAgentIpcHandlers(deps: AgentIpcDeps): void {
         try {
           // 只做轻量只读检查，不执行耗时的 recovery cleanup 全盘扫描
           const chunks = await Promise.race([
-            deps.operationLogUtility.loadRagChunks(),
+            deps.operationLogUtility.forWorkspace(deps.getActiveIndex()!.workspaceId).loadRagChunks(),
             new Promise<unknown[]>((resolve) => setTimeout(() => resolve([]), 100))
           ]);
           return chunks.length > 0;
@@ -1272,7 +1276,11 @@ export function registerAgentIpcHandlers(deps: AgentIpcDeps): void {
                     clearTimeout(indexingTimer);
                     controller.signal.removeEventListener('abort', onParentAbort);
                   }
-                  return searchWorkspaceEvidence(deps.operationLogUtility, query, { signal: controller.signal });
+                  return searchWorkspaceEvidence(
+                    deps.operationLogUtility.forWorkspace(deps.getActiveIndex()!.workspaceId),
+                    query,
+                    { signal: controller.signal }
+                  );
                 }
               }
             }

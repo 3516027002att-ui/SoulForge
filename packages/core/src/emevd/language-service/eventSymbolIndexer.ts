@@ -94,18 +94,26 @@ export function indexDocumentSymbols(text: string): DocumentSymbolIndex {
           }
         }
 
-        // Collect event references (e.g. InitializeEvent(0, 10000, ...))
-        const refMatch = /\b(InitializeEvent|InitializeCommonEvent|GotoEvent|RunEvent)\s*\(\s*[^,]+,\s*(-?\d+)/.exec(line);
+        // Collect event references. InitializeEvent keeps its slotNumber
+        // first, while InitializeCommonEvent starts directly with eventId and
+        // then accepts a vararg parameter tail.
+        const commonRefMatch = /\bInitializeCommonEvent\s*\(\s*(-?\d+)/.exec(line);
+        const regularRefMatch = /\b(InitializeEvent|GotoEvent|RunEvent)\s*\(\s*[^,]+,\s*(-?\d+)/.exec(line);
+        const refMatch = commonRefMatch
+          ? { instructionName: 'InitializeCommonEvent', targetId: commonRefMatch[1]! }
+          : regularRefMatch
+            ? { instructionName: regularRefMatch[1]!, targetId: regularRefMatch[2]! }
+            : undefined;
         if (refMatch) {
-          const targetId = Number(refMatch[2]);
-          const refFrom = lineStart + line.indexOf(refMatch[2]!);
+          const targetId = Number(refMatch.targetId);
+          const refFrom = lineStart + line.indexOf(refMatch.targetId);
           references.push({
             targetEventId: targetId,
             callingEventId: currentSymbol.eventId,
             callerLine: lineNumber,
             from: refFrom,
-            to: refFrom + refMatch[2]!.length,
-            instructionName: refMatch[1]!
+            to: refFrom + refMatch.targetId.length,
+            instructionName: refMatch.instructionName
           });
         }
       }

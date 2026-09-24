@@ -14,9 +14,212 @@ import {
   safeHarnessFileLabel,
   sameOwnedProcessIdentity,
   semanticReadiness,
-  waitForSemanticReadiness
+  waitForSemanticReadiness,
+  resolveNativeSourceUri
 } from './real-agent-harness-lib.mjs';
-import { matchesAssertion, parseGoalContract } from './real-agent-goal-contract.mjs';
+import { matchesAssertion, parseGoalContract, validateTaskContractGoals } from './real-agent-goal-contract.mjs';
+import { FOUR_TASKS } from './testing/real-agent-four-task-manifest.mjs';
+
+test('required unsupported behavior goals are terminal and cannot be masked by PARAM anchors', () => {
+  const goals = [
+    { goalId: 'bars', kind: 'param-field', required: true, verified: true },
+    {
+      goalId: 'runtime-behavior',
+      kind: 'unsupported',
+      required: true,
+      verificationStatus: 'unsupported',
+      unsupportedReason: '没有游戏运行时行为验证器。',
+      verified: false,
+      verificationEvidence: []
+    }
+  ];
+  const verdict = evaluateGoalCoverage(goals, false);
+  assert.equal(verdict.goalsOk, false);
+  assert.equal(verdict.taskCoverageOk, false);
+  assert.equal(verdict.status, 'unsupported');
+  assert.ok(verdict.diagnostics.some((item) => item.code === 'REQUIRED_GOAL_UNSUPPORTED'));
+  const forged = evaluateGoalCoverage([{
+    goalId: 'forged-runtime', kind: 'unsupported', required: true,
+    verificationStatus: 'unsupported', unsupportedReason: '仍然没有运行时验证器。',
+    verified: true, verificationEvidence: [{ tool: 'fake', sourceHashes: ['fake'] }]
+  }], false);
+  assert.equal(forged.goalsOk, false);
+  assert.equal(forged.taskCompletionVerified, false);
+});
+
+test('a selected task cannot claim completion from only one executable subset', () => {
+  const verdict = evaluateGoalCoverage([
+    {
+      goalId: 'partial-native',
+      kind: 'native-tool',
+      required: true,
+      verified: true,
+      verificationEvidence: [{ sourceUris: ['file://param/gameparam/gameparam.parambnd.dcx'], sourceHashes: ['h'] }]
+    },
+    {
+      goalId: 'unverified-runtime',
+      kind: 'unsupported',
+      required: true,
+      verificationStatus: 'unsupported',
+      unsupportedReason: '需要运行时。',
+      verified: false,
+      verificationEvidence: []
+    }
+  ], false, { corpusFingerprint: { requiredSources: ['param/gameparam/gameparam.parambnd.dcx'] } });
+  assert.equal(verdict.taskCompletionVerified, false);
+  assert.equal(verdict.status, 'unsupported');
+});
+
+test('missing source evidence is a corpus mismatch rather than an implicit pass', () => {
+  const verdict = evaluateGoalCoverage([{
+    goalId: 'native', kind: 'native-tool', required: true, verified: true,
+    verificationEvidence: [{ tool: 'read_emevd_event', sourceHashes: ['h'], sourceUris: [] }]
+  }], false, { corpusFingerprint: { requiredSources: ['event/common.emevd.dcx'] } });
+  assert.equal(verdict.corpusMismatch, true);
+  assert.equal(verdict.status, 'corpus_mismatch');
+  assert.equal(verdict.taskCompletionVerified, false);
+});
+
+test('a required failed native goal has an explicit unverified terminal status', () => {
+  const verdict = evaluateGoalCoverage([{
+    goalId: 'native-failed', kind: 'native-tool', required: true,
+    verified: false, verificationEvidence: [], diagnostics: [{ code: 'NATIVE_READ_FAILED' }]
+  }], false);
+  assert.equal(verdict.status, 'unverified');
+  assert.equal(verdict.taskCompletionVerified, false);
+  assert.ok(verdict.unverifiedGoalIds.includes('native-failed'));
+  assert.ok(verdict.diagnostics.some((item) => item.code === 'REQUIRED_GOAL_UNVERIFIED'));
+});
+
+test('discovery and static-analysis tools are observation-only and cannot be required semantic goals', () => {
+  for (const tool of ['search_events', 'search_param_rows', 'analyze_luabnd_script', 'analyze_tae_structure']) {
+    assert.throws(() => parseGoalContract(JSON.stringify([{
+      goalId: `required-${tool}`, kind: 'native-tool', tool,
+      input: { file: 'event/common.emevd.dcx', ...(tool.startsWith('search_') ? { query: 'x' } : { childPath: 'x.lua' }) },
+      assertion: { path: 'data.record', exists: true }, required: true
+    }])), /观察|optional/u);
+    const optional = parseGoalContract(JSON.stringify([{
+      goalId: `optional-${tool}`, kind: 'native-tool', tool,
+      input: { file: 'event/common.emevd.dcx', ...(tool.startsWith('search_') ? { query: 'x' } : { childPath: 'x.lua' }) },
+      assertion: { path: 'data.record', exists: true }, required: false
+    }]))[0];
+    assert.equal(optional.verificationClass, 'observation');
+  }
+  const verdict = evaluateGoalCoverage([{
+    goalId: 'candidate', kind: 'native-tool', tool: 'search_events', verificationClass: 'observation',
+    required: true, verified: true, verificationEvidence: [{ sourceHashes: ['fake'] }]
+  }], false);
+  assert.equal(verdict.taskCompletionVerified, false);
+  assert.equal(verdict.status, 'observation_only');
+  assert.ok(verdict.diagnostics.some((item) => item.code === 'REQUIRED_GOAL_OBSERVATION_ONLY'));
+});
+
+test('native PARAM containerPath becomes a workspace-bound logical source URI without guessing', () => {
+  const bound = resolveNativeSourceUri({
+    ok: true,
+    data: { containerPath: 'param/gameparam/gameparam.parambnd.dcx' }
+  }, {
+    workspaceRoot: 'D:/overlay',
+    entries: [{ type: 'file', path: 'param/gameparam/gameparam.parambnd.dcx' }]
+  });
+  assert.deepEqual(bound, {
+    sourceUri: 'file://param/gameparam/gameparam.parambnd.dcx',
+    relativePath: 'param/gameparam/gameparam.parambnd.dcx'
+  });
+  assert.equal(resolveNativeSourceUri({ ok: true, data: { containerPath: 'param/not-indexed.parambnd.dcx' } }, {
+    workspaceRoot: 'D:/overlay', entries: [{ type: 'file', path: 'param/gameparam/gameparam.parambnd.dcx' }]
+  }), null);
+  assert.equal(resolveNativeSourceUri({ ok: true, data: { containerPath: 'D:/outside/gameparam.parambnd.dcx' } }, {
+    workspaceRoot: 'D:/overlay', entries: [{ type: 'file', path: 'param/gameparam/gameparam.parambnd.dcx' }]
+  }), null);
+});
+
+test('contract postconditions must map to required executable goals', () => {
+  const task = FOUR_TASKS.find((item) => item.id === 'four-1-gyoubu-elite-indigo');
+  assert.ok(task);
+  const missing = validateTaskContractGoals(task.goals.filter((goal) => goal.goalId !== 'gyoubu-health-bars'), task.contract);
+  assert.deepEqual(missing, { ok: false, missingGoalIds: ['gyoubu-health-bars'] });
+  const optional = validateTaskContractGoals(task.goals.map((goal) => goal.goalId === 'gyoubu-health-bars'
+    ? { ...goal, required: false } : goal), task.contract);
+  assert.deepEqual(optional, { ok: false, missingGoalIds: ['gyoubu-health-bars'] });
+});
+
+test('task contracts requiring runtime evidence cannot be completed by native reads alone', () => {
+  const verdict = evaluateGoalCoverage([{
+    goalId: 'native-read', kind: 'native-tool', verificationClass: 'native', required: true,
+    verified: true, verificationEvidence: [{ sourceUris: ['file://event/common.emevd.dcx'], sourceHashes: ['h'] }]
+  }], false, {
+    requiresRuntimeEvidence: true,
+    corpusFingerprint: { requiredSources: ['event/common.emevd.dcx'] },
+    postconditions: ['native-read']
+  });
+  assert.equal(verdict.taskCompletionVerified, false);
+  assert.equal(verdict.status, 'unverified');
+  assert.ok(verdict.diagnostics.some((item) => item.code === 'RUNTIME_EVIDENCE_REQUIRED'));
+});
+
+test('ordered instruction assertions prove a native event chain, not a substring coincidence', () => {
+  const assertion = {
+    path: 'data.record.instructions',
+    sequence: [
+      { allOf: [
+        { path: 'name', equals: 'AwardItemLot' },
+        { path: 'typedArgs', some: { allOf: [
+          { path: 'name', equals: 'itemLotId' }, { path: 'value', equals: 90017000 }
+        ] } }
+      ] },
+      { allOf: [
+        { path: 'name', equals: 'GrantSkill' },
+        { path: 'typedArgs', some: { allOf: [
+          { path: 'name', equals: 'skillParamId' }, { path: 'value', equals: 786 }
+        ] } }
+      ] },
+      { allOf: [
+        { path: 'name', equals: 'RemoveItemFromPlayer' },
+        { path: 'typedArgs', some: { allOf: [
+          { path: 'name', equals: 'itemId' }, { path: 'value', equals: 9457 }
+        ] } }
+      ] }
+    ]
+  };
+  const root = { data: { record: { instructions: [
+    { name: 'AwardItemLot', typedArgs: [{ name: 'itemLotId', value: 90017000 }] },
+    { name: 'GrantSkill', typedArgs: [{ name: 'skillParamId', value: 786 }] },
+    { name: 'RemoveItemFromPlayer', typedArgs: [{ name: 'itemId', value: 9457 }] }
+  ] } } };
+  assert.equal(matchesAssertion(root, assertion), true);
+  const wrongOrder = structuredClone(root);
+  wrongOrder.data.record.instructions.reverse();
+  assert.equal(matchesAssertion(wrongOrder, assertion), false);
+});
+
+test('four-task manifest keeps unsupported runtime obligations required and does not treat lot token 9457 as unlock proof', () => {
+  for (const task of FOUR_TASKS) {
+    const requiredUnsupported = task.goals.filter((goal) => goal.required && goal.kind === 'unsupported');
+    assert.ok(requiredUnsupported.length > 0, `${task.id} must block when runtime behavior is unavailable`);
+    assert.ok(requiredUnsupported.every((goal) => goal.verificationStatus === 'unsupported'));
+    const goalIds = new Set(task.goals.map((goal) => goal.goalId));
+    assert.ok(task.contract.postconditions.every((goalId) => goalIds.has(goalId)), `${task.id} contract metadata must refer to executable goals or explicit unsupported goals`);
+    assert.ok(task.contract.postconditions.every((goalId) => task.goals.find((goal) => goal.goalId === goalId)?.required === true), `${task.id} postconditions must not promote optional probes to required outcomes`);
+  }
+  const four1 = FOUR_TASKS.find((task) => task.id === 'four-1-gyoubu-elite-indigo');
+  assert.ok(four1);
+  assert.ok(!four1.goals.some((goal) => goal.required && goal.expectedValue === 9457));
+  const lotLink = four1.goals.find((goal) => goal.goalId === 'gyoubu-indigo-lot-link');
+  const unlockBaseline = four1.goals.find((goal) => goal.goalId === 'indigo-unlock-event');
+  assert.equal(lotLink?.required, false);
+  assert.equal(lotLink?.changedPath, undefined);
+  assert.equal(unlockBaseline?.required, false);
+  assert.equal(unlockBaseline?.changedPath, undefined);
+  const four2 = FOUR_TASKS.find((task) => task.id === 'four-2-gyoubu-lightning-genichiro');
+  assert.ok(four2);
+  for (const probe of four2.goals.filter((goal) => goal.goalId.endsWith('-script-structure'))) {
+    assert.equal(probe.required, false);
+    assert.equal(probe.changedPath, undefined);
+    assert.ok(['calls', 'branches'].includes(probe.input.section));
+    assert.ok(probe.input.limit <= 6);
+  }
+});
 
 test('selected corpus includes action/chr and reports all exclusions without claiming full corpus', () => {
   const plan = planSemanticCorpus(['param', 'msg', 'event', 'map', 'script', 'action', 'chr', 'sfx', '.soulforge']);

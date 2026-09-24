@@ -21,6 +21,19 @@ export interface SessionResult {
   error?: SessionError;
 }
 
+export type SessionRequestState = 'queued' | 'running' | 'cancel_requested' | 'cancelled' | 'completed' | 'failed';
+
+export interface SessionRequestStatus {
+  id: string;
+  state: SessionRequestState;
+  queuedAt: number;
+  startedAt?: number;
+  finishedAt?: number;
+  cancelRequestedAt?: number;
+  lateResultDiscarded?: boolean;
+  outcome?: SessionResult;
+}
+
 export function sessionError(code: string, message: string, retryable = false): SessionError {
   return { code, message, retryable };
 }
@@ -31,6 +44,12 @@ export const MAX_QUEUE = 64;
 interface TrackedRequest {
   payloadHash: string;
   outcome: SessionResult;
+}
+
+interface RequestRecord extends SessionRequestStatus {
+  payloadHash: string;
+  controller: AbortController;
+  promise?: Promise<SessionResult>;
 }
 
 function payloadHash(request: SessionRequest): string {
@@ -44,6 +63,7 @@ export class LocalSessionHost {
   readonly coreSession: CoreToolSession;
   private tracked = new Map<string, TrackedRequest>();
   private inFlight = new Map<string, { payloadHash: string; promise: Promise<SessionResult>; controller: AbortController }>();
+  private requests = new Map<string, RequestRecord>();
   private tail: Promise<void> = Promise.resolve();
   private pendingCount = 0;
   private closed = false;
@@ -79,50 +99,94 @@ export class LocalSessionHost {
 
     this.pendingCount += 1;
     const controller = new AbortController();
-    const abortFromCaller = () => controller.abort();
+    const requestRecord: RequestRecord = {
+      id: request.id,
+      payloadHash: hash,
+      state: 'queued',
+      queuedAt: Date.now(),
+      controller
+    };
+    this.requests.set(request.id, requestRecord);
+    const abortFromCaller = () => {
+      if (requestRecord.state === 'queued' || requestRecord.state === 'running') {
+        requestRecord.state = 'cancel_requested';
+        requestRecord.cancelRequestedAt = Date.now();
+      }
+      controller.abort();
+    };
     if (signal) {
-      if (signal.aborted) controller.abort();
+      if (signal.aborted) abortFromCaller();
       else signal.addEventListener('abort', abortFromCaller, { once: true });
     }
     const task = this.tail.then(async () => {
       if (this.closed) {
+        const cancelled = controller.signal.aborted || requestRecord.state === 'cancel_requested';
+        requestRecord.state = cancelled ? 'cancelled' : 'failed';
+        requestRecord.finishedAt = Date.now();
         return {
           id: request.id,
           ok: false,
-          error: sessionError('CLI_SESSION_CLOSED', '本地会话已关闭。', false)
+          error: sessionError(cancelled ? 'CLI_REQUEST_CANCELLED' : 'CLI_SESSION_CLOSED', cancelled ? '请求已取消；本地会话随后关闭。' : '本地会话已关闭。', cancelled)
         } satisfies SessionResult;
       }
       try {
         if (controller.signal.aborted) {
+          requestRecord.state = 'cancelled';
+          requestRecord.finishedAt = Date.now();
           return {
             id: request.id,
             ok: false,
             error: sessionError('CLI_REQUEST_CANCELLED', '本地会话请求已取消。', true)
           } satisfies SessionResult;
         }
+        requestRecord.state = requestRecord.state === 'cancel_requested' ? 'cancel_requested' : 'running';
+        requestRecord.startedAt = Date.now();
         const result = await call(request.tool, request.args, controller.signal);
+        // An executor may not observe AbortSignal. A result that arrives after
+        // cancellation is never allowed to become a successful result for a
+        // later request with the same id.
+        if (controller.signal.aborted || requestRecord.state === 'cancel_requested') {
+          requestRecord.state = 'cancelled';
+          requestRecord.finishedAt = Date.now();
+          requestRecord.lateResultDiscarded = true;
+          return {
+            id: request.id,
+            ok: false,
+            error: sessionError('CLI_REQUEST_CANCELLED', '请求已取消；迟到的工具结果已丢弃。', true)
+          } satisfies SessionResult;
+        }
+        requestRecord.state = 'completed';
+        requestRecord.finishedAt = Date.now();
         if (request.tool.startsWith('mutate_') || request.tool.startsWith('apply_') || request.tool.startsWith('commit_')) {
           this.writerCalls += 1;
         }
         return { id: request.id, ok: true, result } satisfies SessionResult;
       } catch (error) {
+        const cancelled = controller.signal.aborted || requestRecord.state === 'cancel_requested';
+        requestRecord.state = cancelled ? 'cancelled' : 'failed';
+        requestRecord.finishedAt = Date.now();
+        if (cancelled) requestRecord.lateResultDiscarded = true;
         return {
           id: request.id,
           ok: false,
           error: sessionError(
-            error instanceof Error && /^CLI_[A-Z0-9_]+/u.test(error.message)
+            cancelled
+              ? 'CLI_REQUEST_CANCELLED'
+              : error instanceof Error && /^CLI_[A-Z0-9_]+/u.test(error.message)
               ? error.message.split(':', 1)[0]!
               : 'CLI_TOOL_FAILED',
-            error instanceof Error ? error.message : String(error),
-            false
+            cancelled ? '请求已取消；执行方已返回终态。' : error instanceof Error ? error.message : String(error),
+            cancelled
           )
         } satisfies SessionResult;
       }
     });
+    requestRecord.promise = task;
     this.tail = task.then(() => undefined, () => undefined);
     this.inFlight.set(request.id, { payloadHash: hash, promise: task, controller });
     try {
       const outcome = await task;
+      requestRecord.outcome = outcome;
       this.tracked.set(request.id, { payloadHash: hash, outcome });
       return outcome;
     } finally {
@@ -130,6 +194,32 @@ export class LocalSessionHost {
       this.inFlight.delete(request.id);
       this.pendingCount -= 1;
     }
+  }
+
+  /** Request cancellation is separate from the terminal cancelled state. */
+  requestCancel(requestId: string): { ok: true; status: SessionRequestStatus } | { ok: false; code: string; message: string } {
+    const record = this.requests.get(requestId);
+    if (!record) return { ok: false, code: 'CLI_REQUEST_NOT_FOUND', message: `没有找到请求 ${requestId}。` };
+    if (record.state === 'completed' || record.state === 'failed' || record.state === 'cancelled') {
+      return { ok: true, status: this.requestStatus(requestId)! };
+    }
+    if (record.state !== 'cancel_requested') {
+      record.state = 'cancel_requested';
+      record.cancelRequestedAt = Date.now();
+      record.controller.abort();
+    }
+    return { ok: true, status: this.requestStatus(requestId)! };
+  }
+
+  requestStatus(requestId: string): SessionRequestStatus | undefined {
+    const record = this.requests.get(requestId);
+    if (!record) return undefined;
+    const { payloadHash: _payloadHash, controller: _controller, promise: _promise, ...status } = record;
+    return status;
+  }
+
+  listRequestStatuses(): SessionRequestStatus[] {
+    return [...this.requests.keys()].map((id) => this.requestStatus(id)).filter((item): item is SessionRequestStatus => item !== undefined);
   }
 
   get writerCallCount(): number {
@@ -140,12 +230,20 @@ export class LocalSessionHost {
   restart(): void {
     this.coreSession.proofStore.invalidateAll('host-restart');
     this.tracked.clear();
+    this.requests.clear();
   }
 
   close(): void {
     if (this.closed) return;
     this.closed = true;
     for (const entry of this.inFlight.values()) entry.controller.abort();
+    for (const record of this.requests.values()) {
+      if (record.state === 'queued' || record.state === 'running' || record.state === 'cancel_requested') {
+        record.state = 'cancel_requested';
+        record.cancelRequestedAt ??= Date.now();
+        record.controller.abort();
+      }
+    }
     this.coreSession.close();
   }
 }

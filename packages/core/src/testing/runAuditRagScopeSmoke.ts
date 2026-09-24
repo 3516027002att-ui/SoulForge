@@ -1,9 +1,16 @@
 import { strict as assert } from 'node:assert';
 import type { RagChunk, RagCorpus, RagRetrieveResult } from '@soulforge/shared';
 import { retrieveEvidenceHybrid, fuseRrf } from '../rag/hybridRetrieve.js';
-import { normalizeRetrievalScope, RetrievalScopeError, retrievalCandidateLimit } from '../rag/retrievalScope.js';
+import { compareCodePointText, compareRanked, topK } from '../rag/topK.js';
+import {
+  corpusRevision,
+  corpusRevisionForValidatedLookup,
+  normalizeRetrievalScope,
+  RetrievalScopeError,
+  retrievalCandidateLimit
+} from '../rag/retrievalScope.js';
+import { ensureLookupIndex } from '../rag/lookupIndex.js';
 import { retrieveEvidence } from '../rag/retrieve.js';
-import { compareRanked, topK } from '../rag/topK.js';
 
 interface SmokeSummary {
   readonly ok: true;
@@ -54,6 +61,107 @@ export function runAuditRagScopeSmoke(): SmokeSummary {
   assert.deepEqual(tied.map((item) => item.id), ['a', 'b', 'z']);
   assert.deepEqual(tied, [...tied].sort(compareRanked));
   cases += 1;
+
+  const codePointSamples = [
+    '', 'a', 'aa', 'a\u{1f600}', 'a\ud800', 'a\udc00',
+    '\ud800', '\udc00', '\ud800\udc00', '\u{10000}', '\u{10ffff}', '😀a', '😀b'
+  ];
+  const codePointOracle = (left: string, right: string): number => {
+    const leftChars = [...left];
+    const rightChars = [...right];
+    const length = Math.min(leftChars.length, rightChars.length);
+    for (let index = 0; index < length; index += 1) {
+      const leftCodePoint = leftChars[index]!.codePointAt(0)!;
+      const rightCodePoint = rightChars[index]!.codePointAt(0)!;
+      if (leftCodePoint !== rightCodePoint) return leftCodePoint < rightCodePoint ? -1 : 1;
+    }
+    return leftChars.length - rightChars.length;
+  };
+  for (const left of codePointSamples) {
+    for (const right of codePointSamples) {
+      assert.equal(
+        Math.sign(compareCodePointText(left, right)),
+        Math.sign(codePointOracle(left, right)),
+        `code-point ordering mismatch for ${JSON.stringify(left)} vs ${JSON.stringify(right)}`
+      );
+    }
+  }
+  assert.deepEqual(
+    [...codePointSamples].sort(compareCodePointText),
+    [...codePointSamples].sort(codePointOracle)
+  );
+  cases += 1;
+
+  const baseCorpusRevision = corpusRevision(corpus);
+  const reorderedCorpus = {
+    ...corpus,
+    chunks: [...corpus.chunks].reverse(),
+    references: [...corpus.references].reverse()
+  };
+  assert.equal(corpusRevision(reorderedCorpus), baseCorpusRevision);
+  const contentChangedCorpus = {
+    ...corpus,
+    chunks: corpus.chunks.map((chunk) => chunk.chunkId === 'param-1'
+      ? { ...chunk, contentHash: `${chunk.contentHash}:changed` }
+      : chunk)
+  };
+  assert.notEqual(corpusRevision(contentChangedCorpus), baseCorpusRevision);
+  const sourceChangedCorpus = {
+    ...corpus,
+    chunks: corpus.chunks.map((chunk) => chunk.chunkId === 'param-1'
+      ? { ...chunk, sourceUri: `${chunk.sourceUri}:changed` }
+      : chunk)
+  };
+  assert.notEqual(corpusRevision(sourceChangedCorpus), baseCorpusRevision);
+  cases += 3;
+
+  // The revision cache is only valid after ensureLookupIndex has validated the
+  // mutable corpus identity.  A corpus-object-only WeakMap would return the
+  // old value for all of these in-place mutations.
+  const mutableRevisionCorpus = makeCorpus();
+  const initialLookup = ensureLookupIndex(mutableRevisionCorpus);
+  const initialRevision = corpusRevision(mutableRevisionCorpus);
+  assert.equal(corpusRevisionForValidatedLookup(mutableRevisionCorpus, initialLookup), initialRevision);
+  assert.equal(corpusRevisionForValidatedLookup(mutableRevisionCorpus, initialLookup), initialRevision);
+
+  const mutableSourceChunk = mutableRevisionCorpus.chunks.find((chunk) => chunk.chunkId === 'param-1')!;
+  mutableSourceChunk.sourceRevision = 9;
+  const sourceMutationLookup = ensureLookupIndex(mutableRevisionCorpus);
+  assert.notEqual(corpusRevisionForValidatedLookup(mutableRevisionCorpus, sourceMutationLookup), initialRevision);
+  mutableSourceChunk.sourceRevision = 1;
+  const restoredSourceLookup = ensureLookupIndex(mutableRevisionCorpus);
+  assert.equal(corpusRevisionForValidatedLookup(mutableRevisionCorpus, restoredSourceLookup), initialRevision);
+
+  mutableSourceChunk.contentHash = `${mutableSourceChunk.contentHash}:changed`;
+  const contentMutationLookup = ensureLookupIndex(mutableRevisionCorpus);
+  assert.notEqual(corpusRevisionForValidatedLookup(mutableRevisionCorpus, contentMutationLookup), initialRevision);
+
+  const mutableReference = mutableRevisionCorpus.references[0]!;
+  const beforeReferenceMutation = corpusRevisionForValidatedLookup(mutableRevisionCorpus, contentMutationLookup);
+  mutableReference.reason = `${mutableReference.reason}:changed`;
+  const referenceMutationLookup = ensureLookupIndex(mutableRevisionCorpus);
+  assert.notEqual(corpusRevisionForValidatedLookup(mutableRevisionCorpus, referenceMutationLookup), beforeReferenceMutation);
+
+  const reorderedRevisionCorpus = makeCorpus();
+  const reorderedInitialLookup = ensureLookupIndex(reorderedRevisionCorpus);
+  const reorderedInitialRevision = corpusRevisionForValidatedLookup(reorderedRevisionCorpus, reorderedInitialLookup);
+  reorderedRevisionCorpus.references.reverse();
+  const reorderedReferencesLookup = ensureLookupIndex(reorderedRevisionCorpus);
+  assert.equal(reorderedReferencesLookup, reorderedInitialLookup);
+  assert.equal(corpusRevisionForValidatedLookup(reorderedRevisionCorpus, reorderedReferencesLookup), reorderedInitialRevision);
+  reorderedRevisionCorpus.chunks.reverse();
+  const reorderedChunksLookup = ensureLookupIndex(reorderedRevisionCorpus);
+  assert.notEqual(reorderedChunksLookup, reorderedInitialLookup);
+  assert.equal(corpusRevisionForValidatedLookup(reorderedRevisionCorpus, reorderedChunksLookup), reorderedInitialRevision);
+
+  const identityRevisionCorpus = makeCorpus();
+  const identityLookup = ensureLookupIndex(identityRevisionCorpus);
+  const identityRevision = corpusRevisionForValidatedLookup(identityRevisionCorpus, identityLookup);
+  identityRevisionCorpus.builtAt = `${identityRevisionCorpus.builtAt}:changed`;
+  assert.notEqual(corpusRevisionForValidatedLookup(identityRevisionCorpus, identityLookup), identityRevision);
+  identityRevisionCorpus.workspaceId = 'ws-a-changed';
+  assert.notEqual(corpusRevisionForValidatedLookup(identityRevisionCorpus, identityLookup), identityRevision);
+  cases += 12;
 
   const scopedLexical = retrieveEvidence(corpus, '50800000', {
     families: ['param_row'],
@@ -154,6 +262,8 @@ export function runAuditRagScopeSmoke(): SmokeSummary {
       'retrievalCandidateLimit',
       'topK',
       'compareRanked',
+      'compareCodePointText',
+      'corpusRevision',
       'retrieveEvidence',
       'retrieveEvidenceHybrid',
       'fuseRrf'

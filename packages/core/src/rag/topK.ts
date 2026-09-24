@@ -119,13 +119,51 @@ export function cosine(a: ArrayLike<number>, b: ArrayLike<number>): number {
 export const cosineSimilarity = cosine;
 
 export function compareCodePointText(left: string, right: string): number {
-  const leftChars = [...left];
-  const rightChars = [...right];
-  const length = Math.min(leftChars.length, rightChars.length);
-  for (let index = 0; index < length; index += 1) {
-    const leftCodePoint = leftChars[index]!.codePointAt(0)!;
-    const rightCodePoint = rightChars[index]!.codePointAt(0)!;
+  let leftIndex = 0;
+  let rightIndex = 0;
+  let leftCodePointCount = 0;
+  let rightCodePointCount = 0;
+  while (leftIndex < left.length && rightIndex < right.length) {
+    const leftFirst = left.charCodeAt(leftIndex);
+    const rightFirst = right.charCodeAt(rightIndex);
+    const leftSecond = leftIndex + 1 < left.length ? left.charCodeAt(leftIndex + 1) : 0;
+    const rightSecond = rightIndex + 1 < right.length ? right.charCodeAt(rightIndex + 1) : 0;
+    const leftIsPair = leftFirst >= 0xd800 && leftFirst <= 0xdbff
+      && leftSecond >= 0xdc00 && leftSecond <= 0xdfff;
+    const rightIsPair = rightFirst >= 0xd800 && rightFirst <= 0xdbff
+      && rightSecond >= 0xdc00 && rightSecond <= 0xdfff;
+    const leftCodePoint = leftIsPair
+      ? 0x10000 + ((leftFirst - 0xd800) << 10) + (leftSecond - 0xdc00)
+      : leftFirst;
+    const rightCodePoint = rightIsPair
+      ? 0x10000 + ((rightFirst - 0xd800) << 10) + (rightSecond - 0xdc00)
+      : rightFirst;
     if (leftCodePoint !== rightCodePoint) return leftCodePoint < rightCodePoint ? -1 : 1;
+    leftIndex += leftIsPair ? 2 : 1;
+    rightIndex += rightIsPair ? 2 : 1;
+    leftCodePointCount += 1;
+    rightCodePointCount += 1;
   }
-  return leftChars.length - rightChars.length;
+  if (leftIndex === left.length && rightIndex === right.length) return 0;
+  if (leftIndex === left.length) {
+    while (rightIndex < right.length) {
+      rightIndex += codePointWidth(right, rightIndex);
+      rightCodePointCount += 1;
+    }
+  } else {
+    while (leftIndex < left.length) {
+      leftIndex += codePointWidth(left, leftIndex);
+      leftCodePointCount += 1;
+    }
+  }
+  return leftCodePointCount - rightCodePointCount;
+}
+
+function codePointWidth(text: string, index: number): 1 | 2 {
+  const first = text.charCodeAt(index);
+  if (first >= 0xd800 && first <= 0xdbff && index + 1 < text.length) {
+    const second = text.charCodeAt(index + 1);
+    if (second >= 0xdc00 && second <= 0xdfff) return 2;
+  }
+  return 1;
 }

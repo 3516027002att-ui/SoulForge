@@ -69,6 +69,22 @@ export class SessionPipeClient {
     return await this.roundTrip(request);
   }
 
+  async cancel(requestId: string): Promise<PipeSessionResult> {
+    return await this.call({
+      id: `cancel-${requestId}-${Date.now()}`,
+      tool: '__host_cancel',
+      args: { requestId }
+    });
+  }
+
+  async requestStatus(requestId: string): Promise<PipeSessionResult> {
+    return await this.call({
+      id: `status-${requestId}-${Date.now()}`,
+      tool: '__host_request_status',
+      args: { requestId }
+    });
+  }
+
   close(): void {
     this.failPending(new Error('CLI_SESSION_CLOSED'));
     this.socket?.end();

@@ -165,7 +165,6 @@ function handleDaemonSocket(
   let buffer = '';
   let authed = false;
   let closed = false;
-  let processing = Promise.resolve();
   const connectionAbort = new AbortController();
   const handshakeTimer = setTimeout(() => {
     if (authed || closed) return;
@@ -216,12 +215,13 @@ function handleDaemonSocket(
         closed = true;
         return;
       }
-      processing = processing
-        .then(() => handleDaemonLine(write, socket, line, config, authToken, requestHost, dispatch, connectionAbort.signal, () => {
-          authed = true;
-          clearTimeout(handshakeTimer);
-        }, () => authed))
-        .catch(() => undefined);
+      // The request host already serializes tool execution.  Do not serialize
+      // the socket reader as well: a cancellation/status frame must be able to
+      // reach the host while a native request is still running.
+      void handleDaemonLine(write, socket, line, config, authToken, requestHost, dispatch, connectionAbort.signal, () => {
+        authed = true;
+        clearTimeout(handshakeTimer);
+      }, () => authed).catch(() => undefined);
     }
   });
 }
@@ -264,6 +264,33 @@ async function handleDaemonLine(
   const args = typeof frame.args === 'object' && frame.args !== null ? frame.args as Record<string, unknown> : {};
   if (!id || !tool) {
     write({ id, ok: false, error: sessionError('CLI_REQUEST_INVALID', '本地会话请求格式无效。', false) });
+    return;
+  }
+  if (tool === '__host_status') {
+    const statuses = requestHost.listRequestStatuses();
+    write({
+      id,
+      ok: true,
+      result: {
+        session: config.sessionName,
+        workspaceId: config.workspaceId,
+        inFlight: statuses.filter((item) => ['queued', 'running', 'cancel_requested'].includes(item.state)).length,
+        requests: statuses
+      }
+    });
+    return;
+  }
+  if (tool === '__host_cancel') {
+    const targetId = typeof args.requestId === 'string' ? args.requestId : id;
+    write({ id, ok: true, result: requestHost.requestCancel(targetId) });
+    return;
+  }
+  if (tool === '__host_request_status') {
+    const targetId = typeof args.requestId === 'string' ? args.requestId : id;
+    const status = requestHost.requestStatus(targetId);
+    write(status
+      ? { id, ok: true, result: status }
+      : { id, ok: false, error: sessionError('CLI_REQUEST_NOT_FOUND', `没有找到请求 ${targetId}。`, false) });
     return;
   }
   try {

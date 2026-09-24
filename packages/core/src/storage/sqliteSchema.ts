@@ -704,6 +704,41 @@ CREATE INDEX IF NOT EXISTS idx_knowledge_pages_workspace_page
 CREATE INDEX IF NOT EXISTS idx_knowledge_claims_workspace_claim
   ON knowledge_claims(workspace_id, claim_id, generation_id);
 `
+  },
+  {
+    id: 15,
+    name: 'v0_9_rag_fts_rowid_mapping',
+    sql: `
+PRAGMA foreign_keys = ON;
+
+-- FTS5's UNINDEXED chunk_id cannot support bounded deletes: a DELETE by
+-- chunk_id scans the virtual table. Rebuild both tables from rag_chunks so
+-- historical FTS rowids are never trusted.
+CREATE INDEX IF NOT EXISTS idx_rag_chunks_workspace_chunk
+  ON rag_chunks(workspace_id, chunk_id);
+
+CREATE VIRTUAL TABLE rag_chunks_fts_rowid_v15 USING fts5(
+  chunk_id UNINDEXED,
+  title,
+  body,
+  tokenize = 'unicode61 remove_diacritics 2'
+);
+INSERT INTO rag_chunks_fts_rowid_v15 (rowid, chunk_id, title, body)
+SELECT rowid, chunk_id, title, body FROM rag_chunks;
+DROP TABLE rag_chunks_fts;
+ALTER TABLE rag_chunks_fts_rowid_v15 RENAME TO rag_chunks_fts;
+
+CREATE VIRTUAL TABLE rag_chunks_fts_trigram_rowid_v15 USING fts5(
+  chunk_id UNINDEXED,
+  title,
+  body,
+  tokenize = 'trigram'
+);
+INSERT INTO rag_chunks_fts_trigram_rowid_v15 (rowid, chunk_id, title, body)
+SELECT rowid, chunk_id, title, body FROM rag_chunks;
+DROP TABLE rag_chunks_fts_trigram;
+ALTER TABLE rag_chunks_fts_trigram_rowid_v15 RENAME TO rag_chunks_fts_trigram;
+`
   }
 ];
 

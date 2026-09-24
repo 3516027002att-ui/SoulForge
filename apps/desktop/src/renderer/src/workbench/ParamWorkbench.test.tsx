@@ -489,6 +489,11 @@ describe('S29 能打开就能写（grok §1-9/§1-10）', () => {
     assert.ok(paramIpcSource.includes('|| await deps.sha256FileNow(unpacked.child.absolutePath)'), '条目哈希现算兜底');
   });
 
+  it('单行 PARAM 的重定位类型名必须先走可信行宽回退，不能把可读表标红', () => {
+    assert.ok(paramIpcSource.includes('readParamDocumentWithMetadataFallback'), 'PARAM 读取必须复用 metadata 行宽回退');
+    assert.ok(paramIpcSource.includes('resolveParamMetadataRowWidth'), 'PARAM 读取必须用 first-party schema 解析行宽');
+  });
+
   it('main 不再弹「确认高风险写入」（确认端口从 PARAM 链拆除）', () => {
     // 容器 PARAM 三条通道（字段/行名/批量导入）不再把 electronConfirmationPort
     // 接进 applyNativeMutation —— 那是「高风险写入」弹窗的唯一入口。

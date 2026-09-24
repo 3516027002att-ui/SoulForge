@@ -81,6 +81,20 @@ async function main(): Promise<void> {
     assert.equal(reopened.getCurrent().claims['claim-a']?.claimId, 'claim-a');
     assert.equal(reopened.readBlob(reopened.getCurrent().pages['page-a']!.contentHash), '# native');
 
+    // A utility-side snapshot read must not rewrite workspace metadata from
+    // request arguments.  The workspace row is already established by the
+    // operation-log opener, so this adapter is intentionally read-only with
+    // respect to that row.
+    new SqliteKnowledgeStorePersistence(reopenedDatabase, {
+      workspaceId: 'ws-a', rootPath: join(root, 'stale-request-root'), game: 'wrong-game',
+      ensureWorkspaceRow: false
+    }).load();
+    const metadata = reopenedDatabase.prepare(
+      'SELECT root_path AS rootPath, game FROM workspaces WHERE workspace_id = ?'
+    ).get('ws-a') as { rootPath?: string; game?: string } | undefined;
+    assert.equal(metadata?.rootPath, root);
+    assert.equal(metadata?.game, 'sekiro');
+
     const other = new KnowledgeStore({
       persistence: new SqliteKnowledgeStorePersistence(reopenedDatabase, {
         workspaceId: 'ws-b', rootPath: root, game: 'sekiro'

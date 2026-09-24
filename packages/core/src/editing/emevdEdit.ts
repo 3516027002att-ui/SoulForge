@@ -16,7 +16,16 @@ import {
   resolveEmevdRegistry
 } from '../emevd/emedfRegistryResolver.js';
 import { readFullEmevdDocumentViaBridge, sanitizeResourceUri } from './emevdFullDocument.js';
-import { submitEmevdDslPlanViaFourView } from './emevdFourViewController.js';
+import {
+  submitEmevdDslPlanViaFourView,
+  type EmevdDslPlanSubmitResult
+} from './emevdFourViewController.js';
+import type {
+  EmevdNativeVerification,
+  EmevdPlanCommitResult,
+  EmevdReReadReport,
+  EmevdTransactionStatus
+} from './emevdPlanCommit.js';
 import type { NativeEditSession } from './nativeEditSession.js';
 import { decodeStrictBase64, StrictBase64Error } from '../util/base64.js';
 
@@ -24,6 +33,16 @@ export interface EmevdApplyResult {
   ok: boolean;
   filePath?: string;
   mutationCount?: number;
+  /** `noop` is a completed compile with no transaction; it is not a commit. */
+  transactionStatus?: EmevdTransactionStatus | 'noop';
+  /** Durable operation identity, when the Patch Engine created one. */
+  opId?: string;
+  outputHash?: string;
+  payloadHash?: string;
+  outerFileHash?: string;
+  committedPath?: string;
+  reRead?: EmevdReReadReport;
+  nativeVerification?: EmevdNativeVerification;
   error?: { code: string; message: string };
   diagnostics: Diagnostic[];
 }
@@ -39,6 +58,80 @@ export interface EmevdReadResult {
 }
 
 export type EmevdEventReadFormat = 'darkscript' | 'json';
+
+/**
+ * Preserve the Patch Engine receipt across the facade boundary. In
+ * particular, a post-commit native re-read failure is not the same as a
+ * transaction that never changed the file: both retain opId, but only the
+ * former has transactionStatus=committed and a committedPath.
+ */
+export function projectEmevdSubmitResult(
+  filePath: string,
+  registryDiagnostics: readonly Diagnostic[],
+  result: EmevdDslPlanSubmitResult
+): EmevdApplyResult {
+  const commit = result.commit;
+  const diagnostics = mergeEmevdDiagnostics(
+    [...registryDiagnostics],
+    result.diagnostics,
+    commit?.diagnostics ?? []
+  );
+  const noOp = result.ok
+    && commit?.mutationCount === 0
+    && commit.diagnostics.some((item) => item.code === 'EMEVD_PLAN_EMPTY');
+  const receipt = commitReceiptFields(commit);
+  if (result.ok) {
+    return {
+      ok: true,
+      filePath,
+      mutationCount: commit?.mutationCount ?? 0,
+      ...(noOp ? { transactionStatus: 'noop' as const } : {}),
+      ...(!noOp && commit?.transactionStatus ? { transactionStatus: commit.transactionStatus } : {}),
+      ...receipt,
+      diagnostics
+    };
+  }
+  const first = diagnostics.find((item) => item.severity === 'error') ?? diagnostics[0];
+  return {
+    ok: false,
+    filePath,
+    ...(commit?.mutationCount === undefined ? {} : { mutationCount: commit.mutationCount }),
+    ...(commit?.transactionStatus ? { transactionStatus: commit.transactionStatus } : {}),
+    ...receipt,
+    error: {
+      code: first?.code ?? 'EMEVD_DSL_REJECTED',
+      message: first?.message ?? 'DSL 编译或提交失败。'
+    },
+    diagnostics
+  };
+}
+
+function commitReceiptFields(commit: EmevdPlanCommitResult | undefined): Partial<EmevdApplyResult> {
+  if (!commit) return {};
+  return {
+    ...(commit.opId ? { opId: commit.opId } : {}),
+    ...(commit.outputHash ? { outputHash: commit.outputHash } : {}),
+    ...(commit.payloadHash ? { payloadHash: commit.payloadHash } : {}),
+    ...(commit.outerFileHash ? { outerFileHash: commit.outerFileHash } : {}),
+    ...(commit.committedPath ? { committedPath: commit.committedPath } : {}),
+    ...(commit.reRead ? { reRead: commit.reRead } : {}),
+    ...(commit.nativeVerification ? { nativeVerification: commit.nativeVerification } : {})
+  };
+}
+
+function mergeEmevdDiagnostics(
+  ...groups: Array<readonly { severity: string; code: string; message: string }[]>
+): Diagnostic[] {
+  const seen = new Set<string>();
+  const merged: Diagnostic[] = [];
+  for (const item of groups.flat()) {
+    const key = `${item.severity}\u0000${item.code}\u0000${item.message}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    merged.push(...asDiagnostics([item]));
+  }
+  return merged;
+}
 
 export interface EmevdEventInstructionReadDto {
   index: number;
@@ -684,26 +777,17 @@ export async function applyEmevdDsl(input: {
     recoveryDir: input.edit.recoveryDir,
     timeoutMs: 120_000
   });
-  if (!result.ok) {
-    const diagnostics = [...registry.diagnostics, ...asDiagnostics(result.diagnostics)];
-    const resourceMismatch = diagnostics.find((diagnostic) => diagnostic.code === 'EMEVD_DSL_RESOURCE_MISMATCH');
-    return {
-      ok: false,
-      error: {
-        code: diagnostics[0]?.code ?? 'EMEVD_DSL_REJECTED',
-        message: resourceMismatch
-          ? `${resourceMismatch.message} request=${sourceUri} document=${full.document.resourceUri}`
-          : diagnostics[0]?.message ?? 'DSL 编译或提交失败。'
-      },
-      diagnostics
-    };
+  const projected = projectEmevdSubmitResult(resolved.path, registry.diagnostics, result);
+  if (!projected.ok) {
+    const resourceMismatch = projected.diagnostics.find((diagnostic) => diagnostic.code === 'EMEVD_DSL_RESOURCE_MISMATCH');
+    if (resourceMismatch) {
+      projected.error = {
+        code: resourceMismatch.code,
+        message: `${resourceMismatch.message} request=${sourceUri} document=${full.document.resourceUri}`
+      };
+    }
   }
-  return {
-    ok: true,
-    filePath: resolved.path,
-    mutationCount: result.commit?.mutationCount ?? 0,
-    diagnostics: [...registry.diagnostics, ...asDiagnostics(result.diagnostics)]
-  };
+  return projected;
 }
 
 function looksLikeDarkScriptSource(source: string): boolean {

@@ -1,4 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto';
+import { createReadStream } from 'node:fs';
 import type {
   AiToolPermissionLevel,
   ConfirmationReceipt,
@@ -37,6 +38,7 @@ import { RAG_CHUNK_FAMILIES } from '@soulforge/shared';
 import type { WorkspaceIndex } from '../indexing/workspaceIndex.js';
 import type { KnowledgeRefreshResult } from '../indexing/knowledgeRefresh.js';
 import { ALL_RESOURCE_KINDS } from '../workspace/resourceKinds.js';
+import { isActiveSemanticSource } from '../workspace/resourceKinds.js';
 import { buildTextAiContext, renderTextAiPrompt } from './aiContextBuilder.js';
 import { buildPlaintextScriptEdit } from '../script/plaintextScriptEdit.js';
 import { nativeEditSessionFromContext, type NativeEditSession } from '../editing/nativeEditSession.js';
@@ -69,21 +71,29 @@ import { parseMapAddress } from '@soulforge/shared';
 import { decideAiToolPermission, legacyPermissionToLevel } from './toolPermissions.js';
 import { buildRagCorpus, mergeCatalogAndPersisted } from '../rag/chunkBuilder.js';
 import { retrieveEvidence, type RagChunkExclusionMask } from '../rag/retrieve.js';
+import { attachLookupIndexAsync, getLookupIndex } from '../rag/lookupIndex.js';
 import { getRagStaleChunkMaskCached } from '../rag/freshness.js';
 import { type MemoryStore } from '../memory/memoryStore.js';
 import { EVENT_REFERENCE_SOURCE_URI, searchEventReference } from './eventReference.js';
 import { resolveChrLinkage } from '../references/chrLinkageResolver.js';
 import { createReferenceQueryService, type ReferenceQueryServiceOptions } from '../references/referenceQueryService.js';
 import { projectScriptReadExport } from '../references/scriptReadProjection.js';
+import { buildLuaStructureIndex, parseLuaStaticSubset } from '../references/luaStaticSubset.js';
 import { defaultReferenceCursorStore, type ReferenceCursorStore } from '../references/referenceCursorStore.js';
 import { prepareReferenceContentSearch } from '../references/referenceContentSearch.js';
+import { evaluateEmevdParameters } from '../references/emevdParameterEvaluator.js';
 import { ProofError, type NativeReadProofStore } from '../editing/nativeReadProofStore.js';
 import { buildSessionWriteRequirements, LegacyFallbackError } from '../editing/writeRequirements.js';
 import { resolveEntity, type EntityRelationRequest } from './entityResolution.js';
 import { queryKnowledgeClaims, readKnowledgePage } from '../knowledge/knowledgeQuery.js';
 import { sourceTextPage } from './sourceTextPage.js';
 import { contentSearchPage } from './contentSearchPage.js';
+import { metadataPage } from './metadataPage.js';
+import { literalSourceSearchPage } from './literalSourceSearchPage.js';
+import { readHksSource } from '../editing/hksRead.js';
+import { createScopedEventSearchCursor, readScopedEventSearchCursor } from './scopedEventSearchCursor.js';
 import { loadFirstPartyEmedfRegistry } from '../schema/sekiro/firstPartySchema.js';
+import type { DiagnosticEvent } from '../diagnostics/diagnosticEvent.js';
 /** @deprecated Prefer AiToolPermissionLevel. Kept for older UI labels. */
 export type ToolPermission = 'read' | 'plan' | 'write' | AiToolPermissionLevel;
 
@@ -180,6 +190,8 @@ export interface ToolContext {
   onNativeWriteCommitted?: (changedSources: KnowledgeSourceChange) => Promise<KnowledgeRefreshResult | void>;
   /** Abort the current Agent tool call when the host cancels the run. */
   signal?: AbortSignal;
+  /** Optional host-only timing/progress sink; never enters tool result data. */
+  onDiagnostic?: (event: DiagnosticEvent) => void;
   /** Curator-only knowledge staging store; never a game resource writer. */
   knowledgeStore?: import('../knowledge/knowledgeStore.js').KnowledgeStore;
   /** Host diagnostic when the durable curator store could not be opened. */
@@ -668,6 +680,56 @@ export async function finalizeCommittedToolResult<T extends object>(input: {
   };
 }
 
+/**
+ * Map the EMEVD facade result into the registry lifecycle contract. This is
+ * kept separate from the native handler so the no-op and post-commit-failure
+ * boundaries can be tested without starting a Bridge process.
+ */
+export async function finalizeEmevdDslApplyResult(
+  result: emevdEdit.EmevdApplyResult,
+  file: string,
+  context: ToolContext
+): Promise<ToolResult> {
+  // A post-commit Bridge re-read can fail after the durable Patch Engine
+  // transaction has already committed. Do not turn that state into an
+  // ordinary failed tool call: preserve the operation receipt and let the
+  // finalizer expose state=verification_failed with transaction=committed.
+  if (!result.ok && result.transactionStatus !== 'committed') {
+    return fail(
+      result.error?.code ?? 'EMEVD_DSL_FAILED',
+      result.error?.message ?? 'EMEVD DSL 提交失败。',
+      {
+        transactionStatus: result.transactionStatus ?? 'not_committed',
+        ...(result.opId ? { opId: result.opId } : {}),
+        ...(result.outputHash ? { outputHash: result.outputHash } : {}),
+        ...(result.payloadHash ? { payloadHash: result.payloadHash } : {}),
+        ...(result.outerFileHash ? { outerFileHash: result.outerFileHash } : {}),
+        diagnostics: result.diagnostics
+      }
+    );
+  }
+  // A compile-only empty plan never opened a transaction and must not claim
+  // committed merely because the mutation handler uses the common finalizer.
+  if (result.transactionStatus === 'noop') return ok(result);
+  return finalizeCommittedToolResult({
+    data: result,
+    changedSources: [result.filePath ?? file],
+    context,
+    verifyNative: async () => {
+      const verification = result.nativeVerification;
+      if (verification?.status === 'verified') {
+        return { ok: true as const, details: verification.details };
+      }
+      return {
+        ok: false as const,
+        code: verification?.code ?? 'EMEVD_POST_COMMIT_VERIFICATION_MISSING',
+        message: verification?.message ?? '提交后的 EMEVD 原生重读验证未形成结构化回执。',
+        ...(verification?.details === undefined ? {} : { details: verification.details })
+      };
+    }
+  });
+}
+
 async function verifyCommittedParamFields(input: {
   edit: ReturnType<typeof nativeEditSessionFromContext>;
   edits: readonly ParamFieldEdit[];
@@ -853,6 +915,7 @@ export function createDefaultToolRegistry(): ToolRegistry {
       const query = asString(value.query);
       if (!query.trim()) return fail('INVALID_INPUT', 'retrieve_evidence 需要非空 query。');
       const families = asRagFamilies(value.families);
+      await prepareRagQueryLookup(corpus, context.signal);
       const result = retrieveEvidence(corpus, query, {
         limit: asNumber(value.limit, 8),
         ...(value.expandReferences === undefined ? {} : { expandReferences: value.expandReferences === true }),
@@ -934,24 +997,33 @@ export function createDefaultToolRegistry(): ToolRegistry {
 
   registry.register({
     name: 'search_resources',
-    description: 'Search indexed workspace files by path, extension, or resource kind.',
+    description: 'Search indexed workspace files by path, extension, or resource kind. Returns total and an opaque nextCursor; follow nextActions. Recovery/backup artifacts are excluded unless sourceFilter=all or artifacts is explicit.',
     permission: 'read',
     permissionLevel: 'read',
-    inputSchema: { query: 'string', limit: 'number?', kinds: 'array?' },
+    inputSchema: { query: 'string?', limit: 'safe-integer?', kinds: 'array?', cursor: 'string?', sourceFilter: 'enum:active|all|artifacts?' },
     run: (input, context) => {
       const ws = context.workspaceIndex;
       if (ws === null) return fail('WORKSPACE_REQUIRED', '这次工具需要先打开 Mod 工作区。');
       const value = asRecord(input);
-      const query = asString(value.query, '');
-      const limit = asNumber(value.limit, 50);
       const kinds = asResourceKinds(value.kinds);
-      return ok(ws.searchResources({ query, limit, ...(kinds ? { kinds } : {}) }));
+      try {
+        const { items: _items, ...page } = ws.searchResourcesPage({
+          ...(typeof value.query === 'string' ? { query: value.query } : {}),
+          ...(typeof value.limit === 'number' ? { limit: value.limit } : {}),
+          ...(typeof value.cursor === 'string' ? { cursor: value.cursor } : {}),
+          ...(typeof value.sourceFilter === 'string' ? { sourceFilter: value.sourceFilter as 'active' | 'all' | 'artifacts' } : {}),
+          ...(kinds ? { kinds } : {})
+        });
+        return ok(page);
+      } catch (error) {
+        return fail((error as { code?: string }).code ?? 'RESOURCE_SEARCH_FAILED', String(error));
+      }
     }
   });
 
   registry.register({
     name: 'search_events',
-    description: 'Search parsed native event symbols and instruction names. For exact lookup pass file + eventId; '
+    description: 'Search parsed native event symbols and instruction names. For exact lookup pass file + eventId; for current native instructions inside a located file pass file + query (instruction name or numeric ID). Global indexed results are candidates with explicit coverage, not exhaustive native search; '
       + 'fuzzy queries return candidates and are not a substitute for native reads. For Chinese behavior terms '
       + 'such as 血条、落雷、掉落 or 不攻击, use search_event_reference in parallel, then verify the '
       + 'candidate instruction against this workspace event and EMEDF.',
@@ -964,10 +1036,20 @@ export function createDefaultToolRegistry(): ToolRegistry {
       const value = asRecord(input);
       const file = asOptionalString(value.file);
       const eventId = value.eventId === undefined ? undefined : asNumber(value.eventId, Number.NaN);
-      const limit = Math.max(1, Math.min(200, Math.trunc(asNumber(value.limit, 50))));
+      const limit = Math.max(1, Math.min(6, Math.trunc(asNumber(value.limit, 6))));
       const cursor = asOptionalString(value.cursor)?.trim();
       if (cursor && (file !== undefined || eventId !== undefined || value.query !== undefined)) {
         return fail('EVENT_SEARCH_CURSOR_SCOPE_MISMATCH', 'search_events 续页只能携带 host-issued cursor，不能同时更换 query 或 file/eventId。');
+      }
+      if (cursor) {
+        try {
+          const scoped = readScopedEventSearchCursor(cursor, ws.workspaceId);
+          if (scoped) return searchScopedNativeEvents(context, scoped.scope.file, scoped.scope.query, limit, scoped);
+        } catch (error) {
+          return fail((error as { code?: string }).code ?? 'INVALID_READ_CURSOR', String(error));
+        }
+      } else if (file && typeof value.query === 'string' && eventId === undefined) {
+        return searchScopedNativeEvents(context, file, value.query.trim(), limit);
       }
       if (cursor) {
         let payload;
@@ -994,7 +1076,7 @@ export function createDefaultToolRegistry(): ToolRegistry {
             return fail('INVALID_READ_CURSOR', 'native search_events cursor 的查询范围无法解析。');
           }
           if (!nativeQuery) return fail('INVALID_READ_CURSOR', 'native search_events cursor 缺少原始查询范围。');
-          const currentHash = nativeEventSearchSnapshotHash(nativeQuery, ws.getFiles());
+          const currentHash = nativeEventSearchSnapshotHash(nativeQuery, ws.getFiles().filter(isActiveSemanticSource));
           if (payload.sourceHash !== currentHash) {
             return fail('STALE_READ_CURSOR', 'EMEVD native 搜索来源已变化，请重新执行 search_events。');
           }
@@ -1003,7 +1085,7 @@ export function createDefaultToolRegistry(): ToolRegistry {
           if (!('session' in edit)) return edit;
           const nativeSearch = await emevdEdit.searchEmevdInstructionMatches({
             edit: edit.session,
-            files: ws.getFiles(),
+            files: ws.getFiles().filter(isActiveSemanticSource),
             query: nativeQuery,
             offset: payload.offset,
             limit,
@@ -1021,6 +1103,7 @@ export function createDefaultToolRegistry(): ToolRegistry {
             : undefined;
           return ok({
             authority: 'native-read-event-search',
+            coverage: { scope: 'active-workspace-native-scan', status: nativeSearch.complete ? 'complete' : 'partial', negativeConclusionAllowed: nativeSearch.complete },
             query: nativeQuery,
             complete: nativeSearch.complete,
             truncated: nativeSearch.truncated,
@@ -1031,6 +1114,8 @@ export function createDefaultToolRegistry(): ToolRegistry {
             scannedFiles: nativeSearch.scannedFiles,
             scannedEvents: nativeSearch.scannedEvents,
             diagnostics: nativeSearch.diagnostics,
+            nextActions: !nativeSearch.complete && !nextCursor
+              ? [{ tool: 'search_events', args: { query: nativeQuery, limit }, reason: '原生来源扫描未完整完成；处理 diagnostics 后重试，不能作无匹配结论。' }] : [],
             ...(nextCursor ? { nextCursor } : {})
           });
         }
@@ -1048,6 +1133,7 @@ export function createDefaultToolRegistry(): ToolRegistry {
           const page = defaultReadSessionManager.resolvePage(cursor, sourceHash, limit);
           return ok({
             query,
+            ...indexedEventSearchCoverage(context, query),
             matches: page.items,
             total: page.total,
             totalCount: page.total,
@@ -1066,6 +1152,7 @@ export function createDefaultToolRegistry(): ToolRegistry {
               const page = resolveStatelessCursorPage(payload, sourceHash, all.items, limit, 'emevd', payload.scope);
               return ok({
                 query,
+                ...indexedEventSearchCoverage(context, query),
                 matches: page.items,
                 total: page.total,
                 totalCount: page.total,
@@ -1116,6 +1203,7 @@ export function createDefaultToolRegistry(): ToolRegistry {
         const page = defaultReadSessionManager.resolvePage(firstCursor, sourceHash, limit);
         return ok({
           query,
+          ...indexedEventSearchCoverage(context, query),
           matches: page.items,
           total: page.total,
           totalCount: page.total,
@@ -1138,7 +1226,7 @@ export function createDefaultToolRegistry(): ToolRegistry {
         if ('session' in edit) {
           const nativeSearch = await emevdEdit.searchEmevdInstructionMatches({
             edit: edit.session,
-            files: ws.getFiles(),
+            files: ws.getFiles().filter(isActiveSemanticSource),
             query,
             limit,
             ...(context.signal ? { signal: context.signal } : {})
@@ -1146,8 +1234,8 @@ export function createDefaultToolRegistry(): ToolRegistry {
           if (!nativeSearch.ok) {
             return fail(nativeSearch.error.code, nativeSearch.error.message, nativeSearch.diagnostics);
           }
-          if (nativeSearch.matches.length > 0 || !nativeSearch.complete) {
-            const sourceHash = nativeEventSearchSnapshotHash(query, ws.getFiles());
+          {
+            const sourceHash = nativeEventSearchSnapshotHash(query, ws.getFiles().filter(isActiveSemanticSource));
             const scope = `native-events:${JSON.stringify({ query })}`;
             const nextCursor = nativeSearch.truncated
               ? createOpaqueCursor({
@@ -1160,6 +1248,7 @@ export function createDefaultToolRegistry(): ToolRegistry {
               : undefined;
             return ok({
               authority: 'native-read-event-search',
+            coverage: { scope: 'active-workspace-native-scan', status: nativeSearch.complete ? 'complete' : 'partial', negativeConclusionAllowed: nativeSearch.complete },
               query,
               complete: nativeSearch.complete,
               truncated: nativeSearch.truncated,
@@ -1170,6 +1259,8 @@ export function createDefaultToolRegistry(): ToolRegistry {
               scannedEvents: nativeSearch.scannedEvents,
               matches: nativeSearch.matches,
               diagnostics: nativeSearch.diagnostics,
+              nextActions: !nativeSearch.complete && !nextCursor
+                ? [{ tool: 'search_events', args: { query, limit }, reason: '原生来源扫描未完整完成；处理 diagnostics 后重试，不能作无匹配结论。' }] : [],
               ...(nextCursor ? { nextCursor } : {})
             });
           }
@@ -1289,7 +1380,7 @@ export function createDefaultToolRegistry(): ToolRegistry {
     description: 'Search the trusted native PARAM definition for field IDs on an already located table/row. '
       + 'Pass table, non-empty rowIds, and a semantic query such as health/hp, elite/boss, hostile/team/target, '
       + 'lightning/effect, or drop/reward/item. This returns metadata candidates only; use the returned real fieldId '
-      + 'in read_param_fields, which requires a non-empty explicit fieldIds array. Do not parse Smithbox XML yourself.',
+      + 'in read_param_fields, which requires a non-empty explicit fieldIds array. Follow nextActions with the original query and opaque cursor to read all fields; limit is a maximum, not a total. Do not parse Smithbox XML yourself.',
     permission: 'read',
     permissionLevel: 'read',
     inputSchema: {
@@ -1297,6 +1388,7 @@ export function createDefaultToolRegistry(): ToolRegistry {
       rowIds: 'array',
       query: 'string',
       limit: 'number?',
+      cursor: 'string?',
       containerPath: 'string?'
     },
     run: async (input, context) => {
@@ -1316,10 +1408,11 @@ export function createDefaultToolRegistry(): ToolRegistry {
         rowIds,
         query,
         ...(typeof value.limit === 'number' ? { limit: value.limit } : {}),
+        ...(typeof value.cursor === 'string' ? { cursor: value.cursor } : {}),
         ...(containerPath ? { containerPath } : {})
       });
       if (!result.ok) return fail(result.error.code, result.error.message, result.error.details);
-      return ok(result);
+      return ok({ ...result, nextActions: result.nextCursor ? [{ tool: 'search_param_fields', args: { ...value, cursor: result.nextCursor }, reason: '继续读取字段定义。' }] : [] });
     }
   });
 
@@ -1457,6 +1550,54 @@ export function createDefaultToolRegistry(): ToolRegistry {
   });
 
   registry.register({
+    name: 'evaluate_emevd_parameters',
+    description: 'Evaluate bounded EMEVD InitializeEvent/InitializeCommonEvent parameter bindings from native event bytes. '
+      + 'Returns caller/callee instance traces and explicit unbound/ambiguous/unsupported/stale states; it never guesses dynamic IDs '
+      + 'and does not claim death/reward causality merely because AwardItemLot is reachable.',
+    permission: 'analyze',
+    permissionLevel: 'analyze',
+    inputSchema: {
+      rootUri: 'string',
+      maxDepth: 'number?',
+      maxNodes: 'number?',
+      maxExpansionEdges: 'number?',
+      expectedSourceHashes: 'object?'
+    },
+    run: (input, context) => {
+      const ws = context.workspaceIndex;
+      if (ws === null) return fail('WORKSPACE_REQUIRED', '这次工具需要先打开 Mod 工作区。');
+      const value = asRecord(input);
+      const rootUri = asOptionalString(value.rootUri)?.trim() ?? asOptionalString(value.uri)?.trim();
+      if (!rootUri) return fail('INVALID_INPUT', 'evaluate_emevd_parameters 需要 rootUri。');
+      const emedf = loadFirstPartyEmedfRegistry();
+      if (!emedf.ok) return fail('EMEDF_REGISTRY_UNAVAILABLE', '当前没有可验证的 first-party EMEDF registry。');
+      const parameterBytesByEventUri: Record<string, string> = {};
+      for (const eventExport of ws.toSymbolBundle().events ?? []) {
+        for (const event of eventExport.events) {
+          const raw = event.raw && typeof event.raw === 'object' && !Array.isArray(event.raw)
+            ? event.raw as Record<string, unknown> : {};
+          if (typeof raw.parameterBytesBase64 === 'string') parameterBytesByEventUri[event.uri] = raw.parameterBytesBase64;
+        }
+      }
+      const expectedSourceHashes = value.expectedSourceHashes && typeof value.expectedSourceHashes === 'object'
+        && !Array.isArray(value.expectedSourceHashes)
+        ? Object.fromEntries(Object.entries(value.expectedSourceHashes as Record<string, unknown>)
+          .filter((entry): entry is [string, string] => typeof entry[0] === 'string' && typeof entry[1] === 'string'))
+        : undefined;
+      return ok(evaluateEmevdParameters({
+        eventExports: ws.toSymbolBundle().events ?? [],
+        rootUri,
+        registry: emedf.registry,
+        ...(Object.keys(parameterBytesByEventUri).length > 0 ? { parameterBytesByEventUri } : {}),
+        ...(expectedSourceHashes && Object.keys(expectedSourceHashes).length > 0 ? { expectedSourceHashes } : {}),
+        ...(typeof value.maxDepth === 'number' ? { maxDepth: Math.trunc(value.maxDepth) } : {}),
+        ...(typeof value.maxNodes === 'number' ? { maxNodes: Math.trunc(value.maxNodes) } : {}),
+        ...(typeof value.maxExpansionEdges === 'number' ? { maxExpansionEdges: Math.trunc(value.maxExpansionEdges) } : {})
+      }));
+    }
+  });
+
+  registry.register({
     name: 'find_references',
     description: 'Find related content and actual usages: parameter fields, text, event instructions, and script calls, '
       + 'with file/table/event/function locations, snippets, relationship reasons, and continuation actions. Provide exactly one of '
@@ -1523,14 +1664,37 @@ export function createDefaultToolRegistry(): ToolRegistry {
           if (!('session' in edit)) return edit;
           const targetSource = normalized.target && 'sourceUri' in normalized.target ? normalized.target.sourceUri : undefined;
           const targetUri = resolved?.uri ?? normalized.uri;
-          preparation = await prepareReferenceContentSearch({
-            index: ws, edit: edit.session, input: normalized, store: cursorStore,
-            ...(emedf.ok ? { registry: emedf.registry } : {}),
-            ...(context.signal ? { signal: context.signal } : {}),
-            ...(targetUri ? { targetUri } : {}),
-            ...(targetSource ? { prioritySourceUris: [targetSource] } : {}),
-            ...(context.onSemanticEvidenceUpdated ? { persist: context.onSemanticEvidenceUpdated } : {})
+          const contentStartedAt = Date.now();
+          context.onDiagnostic?.({
+            phase: 'reference.content-scan',
+            status: 'start',
+            details: { sourceCursor: normalized.sourceCursor ?? null }
           });
+          try {
+            preparation = await prepareReferenceContentSearch({
+              index: ws, edit: edit.session, input: normalized, store: cursorStore,
+              ...(emedf.ok ? { registry: emedf.registry } : {}),
+              ...(context.signal ? { signal: context.signal } : {}),
+              ...(targetUri ? { targetUri } : {}),
+              ...(targetSource ? { prioritySourceUris: [targetSource] } : {}),
+              ...(context.onSemanticEvidenceUpdated ? { persist: context.onSemanticEvidenceUpdated } : {}),
+              ...(context.onDiagnostic ? { onDiagnostic: context.onDiagnostic } : {})
+            });
+            context.onDiagnostic?.({
+              phase: 'reference.content-scan',
+              status: 'complete',
+              elapsedMs: Date.now() - contentStartedAt,
+              details: { scan: preparation.scan }
+            });
+          } catch (error) {
+            context.onDiagnostic?.({
+              phase: 'reference.content-scan',
+              status: 'failed',
+              elapsedMs: Date.now() - contentStartedAt,
+              details: { message: error instanceof Error ? error.message : String(error) }
+            });
+            throw error;
+          }
         }
         const service = createReferenceQueryService({
           bundle: ws.toSymbolBundle(), workspaceId: ws.workspaceId,
@@ -1542,7 +1706,35 @@ export function createDefaultToolRegistry(): ToolRegistry {
           ...(preparation ? { sourceDiagnostics: preparation.diagnostics } : {}),
           resolveQuery: async (query, domain) => resolved ?? resolveQuery(query, domain)
         });
-        const page = await service.query(input as Parameters<typeof service.query>[0]);
+        const relationStartedAt = Date.now();
+        context.onDiagnostic?.({
+          phase: 'reference.relation-page',
+          status: 'start',
+          details: { cursor: normalized.cursor ?? null, limit: normalized.limit }
+        });
+        let page;
+        try {
+          page = await service.query(input as Parameters<typeof service.query>[0]);
+          context.onDiagnostic?.({
+            phase: 'reference.relation-page',
+            status: 'complete',
+            elapsedMs: Date.now() - relationStartedAt,
+            details: {
+              resolution: page.resolution,
+              returnedCount: page.page.returnedCount,
+              hasMore: page.page.hasMore,
+              scan: page.scan
+            }
+          });
+        } catch (error) {
+          context.onDiagnostic?.({
+            phase: 'reference.relation-page',
+            status: 'failed',
+            elapsedMs: Date.now() - relationStartedAt,
+            details: { message: error instanceof Error ? error.message : String(error) }
+          });
+          throw error;
+        }
         return ok(page);
       } catch (error) {
         const code = typeof (error as { code?: unknown }).code === 'string'
@@ -1862,6 +2054,7 @@ export function createDefaultToolRegistry(): ToolRegistry {
     description: 'Read live PARAM field values from the opened gameparam container. '
       + 'Pass table, row ids, and a non-empty explicit fieldIds array on every call; '
       + 'omitting fieldIds or passing an empty array is rejected to prevent unbounded row payloads. '
+      + 'Use pageSize and the returned opaque cursor to read a large field window without loading the whole result envelope. '
       + 'Copy each returned fieldId, rowIndex, and dataHash into the matching write edit; '
       + 'the physical rowIndex is required when the read returned it. '
       + 'Do not parse Smithbox XML or unpack BND yourself. Use the same explicit field ids for writes.',
@@ -1872,13 +2065,16 @@ export function createDefaultToolRegistry(): ToolRegistry {
       rowIds: 'array',
       fieldIds: 'array',
       containerPath: 'string?',
-      cursor: 'string?'
+      cursor: 'string?',
+      pageSize: 'number?'
     },
     run: async (input, context) => {
       const value = asRecord(input);
       const table = asString(value.table);
       const rowIds = asIdList(value.rowIds);
       const fieldIds = asStringList(value.fieldIds);
+      const cursor = asOptionalString(value.cursor)?.trim();
+      const pageSize = value.pageSize === undefined ? undefined : Math.max(1, Math.min(128, Math.trunc(asNumber(value.pageSize, 32))));
       if (!table || rowIds.length === 0 || fieldIds.length === 0) {
         return fail('PARAM_FIELD_IDS_REQUIRED', 'read_param_fields 必须提供 table、非空 rowIds 和非空 fieldIds；请先从候选或元数据中确认真实字段 ID。');
       }
@@ -1888,7 +2084,9 @@ export function createDefaultToolRegistry(): ToolRegistry {
       const result = await readParamFields({
         edit: edit.session,
         queries: [{ table, rowIds, fieldIds }],
-        ...(containerPath ? { containerPath } : {})
+        ...(containerPath ? { containerPath } : {}),
+        ...(cursor ? { cursor } : {}),
+        ...(pageSize !== undefined ? { pageSize } : {})
       });
       if (!result.ok) return fail(result.error.code, result.error.message, result.error.details);
       // T09 step 3: the automatic proof is confirmed by the bridge AFTER the
@@ -2009,8 +2207,15 @@ export function createDefaultToolRegistry(): ToolRegistry {
       });
       if (!result.ok) return fail(result.error.code, result.error.message, result.error.details);
       if (result.changedTables.length === 0) return ok(result);
+      // 编辑层返回的是物理绝对路径；面向模型的回执必须用逻辑 sourceUri，
+      // 否则本机路径透出，且调用方无法把该 containerPath 直接用于下一次
+      // read/mutate（工具描述要求传回可复用的 containerPath）。
+      const resolvedContainer = resolveIndexedResourceFile(context, result.containerPath, 'param');
+      const modelContainerPath = resolvedContainer.ok
+        ? resolvedContainer.sourceUri
+        : (containerPath ?? result.containerPath);
       return finalizeCommittedToolResult({
-        data: result,
+        data: { ...result, containerPath: modelContainerPath },
         changedSources: [result.containerPath],
         // Read proofs are keyed on the logical table name (the same value the
         // write requirement carries); the container path alone would leave the
@@ -2463,8 +2668,18 @@ export function createDefaultToolRegistry(): ToolRegistry {
         ...(darkScriptComplete !== undefined ? { darkScriptComplete } : {})
       };
       const result = await emevdEdit.applyEmevdDsl(applyInput);
-      if (!result.ok) return fail(result.error?.code ?? 'EMEVD_DSL_FAILED', result.error?.message ?? 'EMEVD DSL 提交失败。', result.diagnostics);
-      return finalizeCommittedToolResult({ data: result, changedSources: [result.filePath ?? file], context });
+      // 编辑层回吐物理绝对路径；回执面向模型，只给逻辑 sourceUri
+      //（mutate_param_fields 同类问题已同法治）。
+      const modelResult = (result.ok || result.transactionStatus === 'committed') && resolvedFile.ok
+        ? {
+            ...result,
+            ...(typeof (result as { filePath?: unknown }).filePath === 'string'
+              ? { filePath: resolvedFile.sourceUri } : {}),
+            ...((result as { committedPath?: unknown }).committedPath !== undefined
+              ? { committedPath: resolvedFile.sourceUri } : {})
+          }
+        : result;
+      return finalizeEmevdDslApplyResult(modelResult, file, context);
     }
   });
 
@@ -2509,7 +2724,12 @@ export function createDefaultToolRegistry(): ToolRegistry {
           ? resolvedFile.sourceUri
           : pathToFileURL(result.filePath).href;
         const sourceFile = context.workspaceIndex.getFile(sourceUri);
-        const sourceHash = result.sourceHash;
+        // 原生读取的内容哈希与扫描期的文件字节哈希是两种体系，直接用前者
+        // 挂版本会被 freshness 门禁恒拒（read-hash ≠ scan-hash），导致
+        // search_tae_events 永远 RAG-fallback。导出版本只挂扫描一致的文件
+        // 身份（无扫描哈希时退为纯 mtime 版本）；事件明细仍保留读取哈希。
+        const exportSourceHash = sourceFile?.sha256;
+        const readSourceHash = result.sourceHash;
         const sourceRevision = sourceFile?.mtimeMs;
         // 同一 TAE source 内不同 section 可以复用 animId；不能按裸数字合并，
         // 否则 AI 看到的事件会跨 a00/a50 串线。
@@ -2538,17 +2758,19 @@ export function createDefaultToolRegistry(): ToolRegistry {
             endTime: event.endTime,
             startFrame: event.startFrame,
             endFrame: event.endFrame,
-            ...(sourceHash ? { sourceHash } : {}),
+            ...(readSourceHash ? { sourceHash: readSourceHash } : {}),
             ...(sourceRevision !== undefined ? { sourceRevision } : {}),
             ...(event.fields ? { fields: event.fields } : {}),
-            ...(event.parameterBytesHex ? { parameterBytesHex: event.parameterBytesHex } : {})
+            ...(event.parameterBytesHex ? { parameterBytesHex: event.parameterBytesHex } : {}),
+            ...(event.decodeStatus ? { decodeStatus: event.decodeStatus } : {}),
+            ...(event.raw ? { raw: event.raw } : {})
           });
           animations.set(animationKey, animation);
         }
         context.workspaceIndex.upsertTaeExport({
           chrId: result.chrId,
           sourceUri,
-          ...(sourceHash ? { sourceHash } : {}),
+          ...(exportSourceHash ? { sourceHash: exportSourceHash } : {}),
           ...(sourceRevision !== undefined ? { sourceRevision } : {}),
           ...(result.taeEntryCount !== undefined ? { taeEntryCount: result.taeEntryCount } : {}),
           ...(result.taeEntries ? { taeEntries: result.taeEntries } : {}),
@@ -2558,6 +2780,50 @@ export function createDefaultToolRegistry(): ToolRegistry {
         await context.onSemanticEvidenceUpdated?.([sourceUri]);
       }
       return ok(result);
+    }
+  });
+
+  registry.register({
+    name: 'analyze_tae_structure',
+    description: 'Read native TAE structure with section/animation/event identity, raw unknown-event preservation and layered '
+      + 'evidence. It does not infer an action-to-AtkParam/Bullet chain or runtime behavior from timing/name similarity.',
+    permission: 'analyze',
+    permissionLevel: 'analyze',
+    inputSchema: { file: 'string', cursor: 'string?', pageSize: 'number?' },
+    run: async (input, context) => {
+      const edit = requireEditSession(context, 'read');
+      if (!('session' in edit)) return edit;
+      const value = asRecord(input);
+      const file = asString(value.file);
+      if (!file) return fail('INVALID_INPUT', 'analyze_tae_structure 需要 file。');
+      const resolvedFile = resolveIndexedResourceFile(context, file, 'chr');
+      if (!resolvedFile.ok) return fail(resolvedFile.code, resolvedFile.message, resolvedFile.details);
+      const result = await readTaeEvents({
+        edit: edit.session,
+        file: nativePathFromFileToken(resolvedFile.path),
+        ...(typeof value.cursor === 'string' ? { cursor: value.cursor.trim() } : {}),
+        ...(typeof value.pageSize === 'number' ? { pageSize: Math.trunc(value.pageSize) } : {})
+      });
+      if (!result.ok) return fail(result.error.code, result.error.message, result.diagnostics);
+      const unknownEvents = result.events.filter((event) => event.decodeStatus !== 'decoded');
+      return ok({
+        ...result,
+        evidenceLayers: {
+          resource: 'native-read',
+          relation: 'section-animation-event-index',
+          logic: unknownEvents.length > 0 ? 'partial-unknown-events' : 'decoded-fields-only',
+          runtime: 'not-run'
+        },
+        actionChain: {
+          status: 'insufficient_evidence',
+          reason: '当前没有足够证据把招式分支闭合到 Behavior/AtkParam/Bullet；禁止用最大行号、最后时间轴事件或名称相似度代替身份。'
+        },
+        unknownEvents: unknownEvents.map((event) => ({
+          address: event.address,
+          eventTypeId: event.eventTypeId,
+          raw: event.raw ?? { eventTypeId: event.eventTypeId, startTime: event.startTime, endTime: event.endTime, ...(event.parameterBytesHex ? { parameterBytesHex: event.parameterBytesHex } : {}) }
+        }))
+      });
     }
   });
 
@@ -2625,6 +2891,55 @@ export function createDefaultToolRegistry(): ToolRegistry {
       return finalizeCommittedToolResult({ data: result, changedSources: [result.filePath], context });
     }
   });
+
+  for (const name of ['read_hks_script', 'search_hks_script'] as const) {
+    registry.register({
+      name,
+      description: name === 'read_hks_script'
+        ? 'Read a standalone .hks/.lua from the opened workspace through validated plaintext or first-party Bridge decoding. Returns lossless sourceOffset/sourceLimit/cursor windows and sourceHash. This is read-only source evidence, not runtime verification or write authorization.'
+        : 'Find exact, case-sensitive source text in a standalone .hks/.lua. Pass file and query; follow nextActions for remaining matches, then readAction for source context. Text matches do not prove action semantics. A cursor is bound to file, query and sourceHash.',
+      permission: 'read', permissionLevel: 'read',
+      inputSchema: name === 'read_hks_script'
+        ? { file: 'string', sourceOffset: 'safe-integer?', sourceLimit: 'safe-integer?', cursor: 'string?', expectedSourceHash: 'string?' }
+        : { file: 'string', query: 'string', cursor: 'string?', limit: 'safe-integer?' },
+      run: async (input, context) => {
+        const value = asRecord(input);
+        const file = asString(value.file);
+        if (!file || !/\.(hks|lua)$/iu.test(file)) return fail('SCRIPT_SOURCE_REQUIRED', '需要工作区内独立 .hks/.lua 文件，不接受容器或其它二进制格式。');
+        const resolved = resolveIndexedResourceFile(context, file, /\.hks$/iu.test(file) ? 'action' : 'script');
+        if (!resolved.ok) return fail(resolved.code, resolved.message, resolved.details);
+        if (!resolved.canonical) return fail('SCRIPT_SOURCE_NOT_INDEXED', '请先用 search_resources 定位当前工作区中的脚本。');
+        const edit = requireEditSession(context, 'read');
+        if (!('session' in edit)) return edit;
+        const source = await readHksSource({ edit: edit.session, file: resolved.path, ...(context.signal ? { signal: context.signal } : {}) });
+        if (!source.ok) return fail(source.code, source.message, source.diagnostics);
+        if (value.expectedSourceHash !== undefined && value.expectedSourceHash !== source.sourceHash) return fail('STALE_READ_CURSOR', '源码已改变，请重新搜索或读取。');
+        const identity = { sourceUri: resolved.sourceUri, sourceHash: source.sourceHash, outerFileHash: source.sourceHash,
+          representation: source.representation, encoding: source.encoding, game: context.session?.meta.game,
+          resourceKind: /\.hks$/iu.test(file) ? 'action' : 'script', diagnostics: source.diagnostics,
+          evidenceLayers: { resource: 'source-read', logic: 'source-only', runtime: 'not-run' } };
+        const sourceKey = `${context.workspaceIndex!.workspaceId}|${resolved.sourceUri}`;
+        try {
+          if (name === 'read_hks_script') {
+            const page = sourceTextPage({ text: source.sourceText, sourceKey, sourceHash: source.sourceHash, domain: 'script',
+              ...(typeof value.sourceOffset === 'number' ? { sourceOffset: value.sourceOffset } : {}),
+              ...(typeof value.sourceLimit === 'number' ? { sourceLimit: value.sourceLimit } : {}),
+              ...(typeof value.cursor === 'string' ? { cursor: value.cursor } : {}) });
+            return ok({ ...identity, ...page, nextActions: page.nextCursor ? [{ tool: name,
+              args: { file: resolved.sourceUri, cursor: page.nextCursor }, reason: '继续读取同一版本的脚本原文。' }] : [] });
+          }
+          const page = literalSourceSearchPage({ text: source.sourceText, sourceKey, sourceHash: source.sourceHash, query: asString(value.query),
+            ...(typeof value.cursor === 'string' ? { cursor: value.cursor } : {}), ...(typeof value.limit === 'number' ? { limit: value.limit } : {}) });
+          return ok({ ...identity, ...page, matches: page.matches.map((match) => ({ ...match,
+            sourceUri: resolved.sourceUri, readAction: { tool: 'read_hks_script', args: { file: resolved.sourceUri,
+              sourceOffset: match.sourceOffset, sourceLimit: 2400, expectedSourceHash: source.sourceHash } } })),
+            nextActions: page.nextCursor ? [{ tool: name, args: { file: resolved.sourceUri, query: page.query, cursor: page.nextCursor, limit: page.limit }, reason: '继续查找后续精确文本命中。' }] : [] });
+        } catch (error) {
+          return fail((error as { code?: string }).code ?? 'SCRIPT_SOURCE_WINDOW_FAILED', String(error));
+        }
+      }
+    });
+  }
 
   registry.register({
     name: 'list_luabnd_scripts',
@@ -2834,6 +3149,95 @@ export function createDefaultToolRegistry(): ToolRegistry {
         }
       }
       return ok(result);
+    }
+  });
+
+  registry.register({
+    name: 'analyze_luabnd_script',
+    description: 'Read one native LuaBND child and return a bounded structural index: functions, Goal functions, branches, '
+      + 'constants, call sites and explicitly unsupported game APIs. This is source/static evidence only; it never executes Lua '
+      + 'and never upgrades a test stub or decompiled view to runtime behavior. Select section=functions (default), goals, branches, constants, calls, unsupportedApis or diagnostics. Each section returns items, sectionCounts and a version-bound nextCursor; follow nextActions to finish that section. One completed section does not mean the entire script has been analyzed for runtime behavior.',
+    permission: 'analyze',
+    permissionLevel: 'analyze',
+    inputSchema: { file: 'string', childPath: 'string', section: 'string?', cursor: 'string?', limit: 'safe-integer?' },
+    run: async (input, context) => {
+      const edit = requireEditSession(context, 'read');
+      if (!('session' in edit)) return edit;
+      const value = asRecord(input);
+      const file = asString(value.file);
+      const childPath = asString(value.childPath);
+      if (!file || !childPath) return fail('INVALID_INPUT', 'analyze_luabnd_script 需要 file 和 childPath。');
+      const resolvedFile = resolveIndexedResourceFile(context, file, 'script');
+      if (!resolvedFile.ok) return fail(resolvedFile.code, resolvedFile.message, resolvedFile.details);
+      const native = await readLuabndScript({
+        edit: edit.session,
+        file: nativePathFromFileToken(resolvedFile.path),
+        childPath,
+        ...(context.signal ? { signal: context.signal } : {})
+      });
+      if (!native.ok) return fail(native.error.code, native.error.message, native.diagnostics);
+      if (native.script.sourceText === undefined) {
+        return ok({
+          file: canonicalScriptSourceUri(context, native.containerPath),
+          childPath,
+          sourceHash: native.script.sourceHash,
+          structure: { status: 'unsupported', functions: [], goals: [], branches: [], constants: [], unsupportedApis: [], diagnostics: native.script.warnings ?? ['没有可分析的原文源码。'] },
+          evidenceLayers: { resource: 'native-read', relation: 'not-indexed', logic: 'unsupported', runtime: 'not-run' },
+          diagnostics: native.diagnostics
+        });
+      }
+      const parsed = parseLuaStaticSubset(native.script.sourceText);
+      const structure = buildLuaStructureIndex(native.script.sourceText, parsed);
+      if (context.workspaceIndex) {
+        const sourceUri = canonicalScriptSourceUri(context, native.containerPath);
+        const existing = context.workspaceIndex.toSymbolBundle().scripts?.find((item) => item.sourceUri === sourceUri);
+        const sourceRevision = context.workspaceIndex.getFile(sourceUri)?.mtimeMs;
+        const projection = projectScriptReadExport({
+          sourceUri,
+          childPath,
+          script: native.script,
+          ...(sourceRevision === undefined ? {} : { sourceRevision }),
+          ...(existing ? { existing } : {})
+        });
+        const child = projection.scripts.find((item) => item.uri === `${sourceUri}!/${childPath}`);
+        if (child) child.structure = structure;
+        context.workspaceIndex.upsertScriptExport(projection);
+        context.workspaceIndex.rebuildReferences();
+        await context.onSemanticEvidenceUpdated?.([sourceUri]);
+      }
+      const sections: Record<string, readonly unknown[]> = {
+        functions: structure.functions, goals: structure.goals, branches: structure.branches,
+        constants: structure.constants, unsupportedApis: structure.unsupportedApis, diagnostics: structure.diagnostics ?? [],
+        calls: parsed.calls.map((call) => ({ callee: call.callee, span: call.span, isLocal: call.isLocal, isRequire: call.isRequire }))
+      };
+      const section = asString(value.section, 'functions');
+      const items = sections[section];
+      if (!items) return fail('INVALID_STRUCTURE_SECTION', 'section 必须为 functions/goals/branches/constants/unsupportedApis/diagnostics/calls。');
+      let page;
+      try {
+        page = metadataPage({ items, domain: 'script', sourceHash: native.script.sourceHash,
+          scope: { workspace: context.workspaceIndex?.workspaceId, file: resolvedFile.path, childPath, section },
+          ...(typeof value.cursor === 'string' ? { cursor: value.cursor } : {}),
+          ...(typeof value.limit === 'number' ? { limit: value.limit } : {}) });
+      } catch (error) {
+        return fail((error as { code?: string }).code ?? 'STRUCTURE_PAGE_FAILED', String(error), (error as { details?: unknown }).details);
+      }
+      return ok({
+        file: canonicalScriptSourceUri(context, native.containerPath), childPath,
+        sourceUri: canonicalScriptSourceUri(context, native.containerPath),
+        sourceHash: native.script.sourceHash, outerFileHash: native.script.outerFileHash,
+        section, sectionCounts: Object.fromEntries(Object.entries(sections).map(([key, rows]) => [key, rows.length])),
+        structureStatus: structure.status,
+        ...page,
+        nextActions: page.nextCursor ? [{ tool: 'analyze_luabnd_script', args: { file, childPath, section, cursor: page.nextCursor, ...(typeof value.limit === 'number' ? { limit: value.limit } : {}) }, reason: '继续读取同一结构分区。' }] : [],
+        evidenceLayers: {
+          resource: 'native-read',
+          relation: 'static-source-index',
+          logic: structure.unsupportedApis.length > 0 ? 'partial-unsupported-api' : 'structural-only',
+          runtime: 'not-run'
+        },
+        diagnostics: native.diagnostics
+      });
     }
   });
 
@@ -3258,7 +3662,7 @@ export function createDefaultToolRegistry(): ToolRegistry {
 
   registry.register({
     name: 'rollback_operation',
-    description: 'Rollback a committed operation from its backup. Requires full-permission mode.',
+    description: 'Rollback a committed operation from its backup. Requires full-permission mode and a host-issued confirmation bound to the operation. For CLI, the user must start the host with --confirm-rollback <opId>; tool input cannot grant its own confirmation.',
     permission: 'rollback',
     permissionLevel: 'rollback',
     inputSchema: { opId: 'string' },
@@ -3665,7 +4069,7 @@ function resolveIndexedResourceFile(
     return { ok: true, path: token, sourceUri: token, canonical: false };
   }
 
-  const files = index.getFiles().filter((file) => file.resourceKind === resourceKind);
+  const files = index.getFiles().filter((file) => file.resourceKind === resourceKind && isActiveSemanticSource(file));
   const normalized = normalizeFileToken(token);
   const direct = files.filter((file) => [file.sourceUri, file.sourcePath, file.relativePath, file.absolutePath]
     .some((candidate) => normalizeFileToken(candidate) === normalized));
@@ -4011,6 +4415,52 @@ function eventSearchSnapshotHash(
   return `sha256:${hash.digest('hex')}`;
 }
 
+function indexedEventSearchCoverage(context: ToolContext, query: string) {
+  return {
+    coverage: {
+      scope: 'indexed-event-candidates', status: 'partial', negativeConclusionAllowed: false,
+      domains: context.workspaceIndex?.getCoverageSnapshot().filter((item) => item.domain === 'event') ?? [],
+      detail: '页数仅覆盖当前索引命中，不能证明所有来源的原生指令已经检索。'
+    },
+    nextActions: [{ tool: 'search_resources', args: { query: '.emevd', kinds: ['event'], limit: 6 },
+      reason: `定位目标事件文件后，用 search_events 的 file + query=${query} 检索当前原生指令。` }]
+  };
+}
+
+async function searchScopedNativeEvents(
+  context: ToolContext, file: string, query: string, limit: number,
+  continuation?: { sourceHash: string; offset: number }
+): Promise<ToolResult> {
+  if (!emevdEdit.isPreciseEmevdInstructionQuery(query)) return fail('EMEVD_NATIVE_SEARCH_QUERY_NOT_PRECISE', '指定文件的原生搜索需要英文指令名或数字 ID。');
+  const resolved = resolveIndexedResourceFile(context, file, 'event');
+  if (!resolved.ok) return fail(resolved.code, resolved.message, resolved.details);
+  const source = context.workspaceIndex?.getFiles().find((candidate) => candidate.sourceUri === resolved.sourceUri && isActiveSemanticSource(candidate));
+  if (!source) return fail('EVENT_SOURCE_NOT_INDEXED', '请先用 search_resources 定位当前工作区中的活动 EMEVD 来源。');
+  const edit = requireEditSession(context, 'read');
+  if (!('session' in edit)) return edit;
+  const beforeHash = await hashEventSource(source.absolutePath, context.signal);
+  if (continuation && continuation.sourceHash !== beforeHash) return fail('STALE_READ_CURSOR', '事件文件已改变，不能在新版本上继续旧窗口。');
+  const result = await emevdEdit.searchEmevdInstructionMatches({ edit: edit.session, files: [source], query, limit,
+    offset: continuation?.offset ?? 0, ...(context.signal ? { signal: context.signal } : {}) });
+  if (!result.ok) return fail(result.error.code, result.error.message, result.diagnostics);
+  if (await hashEventSource(source.absolutePath, context.signal) !== beforeHash) return fail('STALE_READ_CURSOR', '搜索期间事件文件发生变化，请重读。');
+  const nextCursor = result.truncated ? createScopedEventSearchCursor({ workspaceId: context.workspaceIndex!.workspaceId,
+    file: source.sourceUri, query }, beforeHash, result.offset + result.returned) : undefined;
+  return ok({ ...result, authority: 'native-read-event-search', sourceUri: source.sourceUri, outerFileHash: beforeHash,
+    ...(result.complete ? { total: result.offset + result.returned, totalCount: result.offset + result.returned } : {}),
+    coverage: { scope: 'selected-source', status: result.complete ? 'complete' : 'partial', negativeConclusionAllowed: result.complete },
+    ...(nextCursor ? { nextCursor } : {}),
+    nextActions: nextCursor
+      ? [{ tool: 'search_events', args: { cursor: nextCursor, limit }, reason: '继续读取此文件的原生指令命中；不是全工作区搜索。' }]
+      : !result.complete ? [{ tool: 'search_events', args: { file: source.sourceUri, query, limit }, reason: '来源未完整读取；处理 diagnostics 后重试此文件，不得将本次空页当无匹配。' }] : [] });
+}
+
+async function hashEventSource(file: string, signal?: AbortSignal): Promise<string> {
+  const hash = createHash('sha256');
+  for await (const chunk of createReadStream(file, signal ? { signal } : {})) hash.update(chunk);
+  return hash.digest('hex');
+}
+
 function nativeEventSearchSnapshotHash(query: string, files: readonly IndexedFile[]): string {
   const hash = createHash('sha256');
   hash.update(`native-search-events:${query}\u0000`);
@@ -4134,13 +4584,14 @@ export function resolveRagCorpus(context: ToolContext): RagCorpus | null {
         || (stats.paramRows > 0 && ragStats.param_row === 0)
         || (stats.textEntries > 0 && ragStats.text_entry === 0)
         || (taeEventCount > 0 && ragStats.tae_event === 0);
-      const incompleteSemanticCoverage = context.workspaceIndex.getCoverageSnapshot().some((item) => (
-        item.domain !== undefined
-        && item.expectedResources !== null
-        && item.expectedResources > 0
-        && item.status !== 'complete'
-      ));
-      if (!ragMissingSymbols && !incompleteSemanticCoverage) {
+      // Coverage status describes native authority/completeness, not whether
+      // this already-prepared snapshot contains the families currently
+      // available from the live index.  A partial native source can still
+      // have a complete usable RAG projection for its available rows; reject
+      // only when the live index exposes a family that the snapshot cannot
+      // represent.  Rebuilding here would discard the host's prepared lookup
+      // index on every first search after a partial native read.
+      if (!ragMissingSymbols) {
         return context.rag;
       }
     }
@@ -4169,14 +4620,21 @@ export function resolveRagCorpus(context: ToolContext): RagCorpus | null {
   return null;
 }
 
-function ragSearchFallback(
+/** Normal desktop snapshots are prebuilt; legacy/live-merge fallbacks must not block main. */
+async function prepareRagQueryLookup(corpus: RagCorpus | null, signal?: AbortSignal): Promise<void> {
+  if (corpus?.availability === 'available' && !getLookupIndex(corpus)) {
+    await attachLookupIndexAsync(corpus, { ...(signal ? { signal } : {}) });
+  }
+}
+
+async function ragSearchFallback(
   context: ToolContext,
   query: string,
   families: readonly RagChunkFamily[],
   limit: number,
   toolName: string,
   paramNames?: readonly string[]
-): ToolResult<unknown> {
+): Promise<ToolResult<unknown>> {
   const isParamWarmingUp = families.includes('param_row')
     && context.workspaceIndex?.getParamSemanticState?.() === 'warming_up';
 
@@ -4217,6 +4675,7 @@ function ragSearchFallback(
     });
   }
 
+  await prepareRagQueryLookup(corpus, context.signal);
   const result = retrieveEvidence(corpus, query, {
     limit: Math.max(1, Math.min(100, Math.trunc(limit))),
     families,

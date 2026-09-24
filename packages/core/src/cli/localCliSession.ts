@@ -19,23 +19,28 @@ import { SqliteKnowledgeStorePersistence } from '../knowledge/sqliteKnowledgeSto
 import { createManagedReferenceCursorStore } from '../references/referenceCursorStore.js';
 import { openWorkspaceDatabase } from '../storage/sqliteDatabase.js';
 import { WorkspaceDataRepository } from '../storage/workspaceDataRepository.js';
+import { createConfirmationReceipt } from '../patch/writerContract.js';
 import {
   extractFileSymbolBundle,
   isNativeSemanticBundleCurrent,
   type SemanticCacheProvider
 } from '../workspace/semanticFileCache.js';
+import type { DiagnosticEvent } from '../diagnostics/diagnosticEvent.js';
 
 export interface LocalCliSessionOptions {
   overlayRoot: string;
   baseRoot?: string;
   game?: string;
   mode?: 'plan' | 'normal' | 'fullPermission';
+  /** Explicit, one-shot rollback authorization bound to this operation ID. */
+  confirmRollbackOpId?: string;
   principal?: string;
   /** 执行一次完整语义分析；未开启时仍完成外层扫描与引用图构建。 */
   analyze?: boolean;
   /** 复用并更新受管 workspace.db 中经过 source identity 校验的语义缓存。 */
   useCache?: boolean;
   onProgress?: (progress: AnalyzeWorkspaceProgress) => void;
+  onDiagnostic?: (event: DiagnosticEvent) => void;
   /**
    * 为 true 时 SQLite 打不开则整个会话失败（写入失败关闭）；
    * 为 false（只读命令）则退回内存日志并由调用方显式警告，不得静默。
@@ -49,10 +54,81 @@ export interface LocalCliSession {
   editSession: NativeEditSession;
   registry: ToolRegistry;
   bridge: AgentToolBridge;
+  executeTool: AgentToolBridge['executeTool'];
   workspaceIndex: WorkspaceIndex;
   durableLog: boolean;
   knowledgeStore: KnowledgeStore | null;
   dispose(): Promise<void>;
+}
+
+export interface CliRollbackAuthorization {
+  readonly operationId: string;
+  readonly workspaceId: string;
+  readonly receipt: import('@soulforge/shared').ConfirmationReceipt;
+}
+
+type CliRollbackAuthorizationResult =
+  | { ok: true; confirmation: import('@soulforge/shared').ConfirmationReceipt }
+  | { ok: false; code: string; message: string };
+
+const consumedRollbackAuthorizations = new WeakSet<object>();
+
+export function createCliRollbackAuthorization(input: {
+  operationId: string;
+  workspaceId: string;
+}): CliRollbackAuthorization {
+  const operationId = input.operationId.trim();
+  const workspaceId = input.workspaceId.trim();
+  if (!operationId || !workspaceId) throw new Error('CLI_ROLLBACK_CONFIRMATION_INPUT_INVALID');
+  return Object.freeze({
+    operationId,
+    workspaceId,
+    receipt: createConfirmationReceipt({
+      subjects: [`ROLLBACK_OPERATION:${operationId}`, `ROLLBACK_WORKSPACE:${workspaceId}`],
+      riskLevel: 'high',
+      sourceUri: workspaceId,
+      note: 'CLI --confirm-rollback 显式授权；绑定当前 workspace 与单个 operationId。',
+      policyTags: ['CLI_EXPLICIT_ROLLBACK_CONFIRMATION', 'ONE_SHOT']
+    })
+  });
+}
+
+export function consumeCliRollbackAuthorization(
+  authorization: CliRollbackAuthorization | undefined,
+  operationId: string,
+  workspaceId: string
+): CliRollbackAuthorizationResult {
+  if (!authorization) {
+    return {
+      ok: false,
+      code: 'EDIT_CONFIRMATION_REQUIRED',
+      message: 'CLI rollback 需要启动时显式提供 --confirm-rollback <opId>。'
+    };
+  }
+  if (authorization.operationId !== operationId.trim() || authorization.workspaceId !== workspaceId.trim()) {
+    return {
+      ok: false,
+      code: 'CLI_ROLLBACK_CONFIRMATION_MISMATCH',
+      message: 'CLI rollback 确认凭据未绑定当前 workspace 或 operationId。'
+    };
+  }
+  if (consumedRollbackAuthorizations.has(authorization)) {
+    return {
+      ok: false,
+      code: 'CLI_ROLLBACK_CONFIRMATION_REPLAYED',
+      message: 'CLI rollback 确认凭据已经使用，不能重放。'
+    };
+  }
+  consumedRollbackAuthorizations.add(authorization);
+  return { ok: true, confirmation: authorization.receipt };
+}
+
+function cliToolFailure(code: string, message: string): { ok: false; code: string; content: string } {
+  return {
+    ok: false,
+    code,
+    content: JSON.stringify({ ok: false, error: { code, message } })
+  };
 }
 
 function cliWorkspaceRoot(workspaceId: string): string {
@@ -62,12 +138,33 @@ function cliWorkspaceRoot(workspaceId: string): string {
 }
 
 export async function openLocalCliSession(options: LocalCliSessionOptions): Promise<LocalCliSession> {
-  const session = await openWorkspaceSession({
+  const emit = (event: DiagnosticEvent): void => options.onDiagnostic?.(event);
+  const measured = async <T>(phase: string, operation: () => Promise<T>): Promise<T> => {
+    const startedAt = Date.now();
+    emit({ phase, status: 'start' });
+    try {
+      const result = await operation();
+      emit({ phase, status: 'complete', elapsedMs: Date.now() - startedAt });
+      return result;
+    } catch (error) {
+      emit({
+        phase,
+        status: 'failed',
+        elapsedMs: Date.now() - startedAt,
+        details: { message: error instanceof Error ? error.message : String(error) }
+      });
+      throw error;
+    }
+  };
+  const session = await measured('workspace.open', () => openWorkspaceSession({
     overlayRoot: options.overlayRoot,
     ...(options.baseRoot ? { baseRoot: options.baseRoot } : {}),
     game: options.game ?? 'sekiro'
-  });
+  }));
   const workspaceId = session.meta.workspaceId;
+  const rollbackAuthorization = options.confirmRollbackOpId?.trim()
+    ? createCliRollbackAuthorization({ operationId: options.confirmRollbackOpId, workspaceId })
+    : undefined;
   const shouldAnalyze = options.analyze !== false;
   const useCache = options.useCache !== false && shouldAnalyze;
   const root = cliWorkspaceRoot(workspaceId);
@@ -77,19 +174,34 @@ export async function openLocalCliSession(options: LocalCliSessionOptions): Prom
 
   let semanticDatabase: ReturnType<typeof openWorkspaceDatabase> | null = null;
   let semanticCache: SemanticCacheProvider | undefined;
+  let semanticCacheHits = 0;
+  let semanticCacheMisses = 0;
+  let semanticCacheSaves = 0;
   if (useCache) {
     try {
       semanticDatabase = openWorkspaceDatabase(join(root, 'workspace.db'));
       const repository = new WorkspaceDataRepository(semanticDatabase, workspaceId);
       semanticCache = {
         load: (file) => {
-          if (!file.sha256) return null;
+          if (!file.sha256) {
+            semanticCacheMisses += 1;
+            return null;
+          }
           const row = repository.getSemanticFileCacheRow(file.relativePath);
-          if (!row || row.resourceKind !== file.resourceKind || row.fileSha256 !== file.sha256) return null;
+          if (!row || row.resourceKind !== file.resourceKind || row.fileSha256 !== file.sha256) {
+            semanticCacheMisses += 1;
+            return null;
+          }
           try {
             const payload = JSON.parse(row.payloadJson) as import('@soulforge/shared').SymbolBundle;
-            return isNativeSemanticBundleCurrent(file, payload) ? payload : null;
+            if (!isNativeSemanticBundleCurrent(file, payload)) {
+              semanticCacheMisses += 1;
+              return null;
+            }
+            semanticCacheHits += 1;
+            return payload;
           } catch {
+            semanticCacheMisses += 1;
             return null;
           }
         },
@@ -102,6 +214,7 @@ export async function openLocalCliSession(options: LocalCliSessionOptions): Prom
             payload,
             mtimeMs: file.mtimeMs
           });
+          semanticCacheSaves += 1;
         }
       };
     } catch (error) {
@@ -113,7 +226,7 @@ export async function openLocalCliSession(options: LocalCliSessionOptions): Prom
     }
   }
 
-  const scan = await scanWorkspace({
+  const scan = await measured('workspace.scan', () => scanWorkspace({
     workspaceRoot: session.layers.overlayRoot,
     game: session.meta.game,
     includeContentHashes: shouldAnalyze || Boolean(semanticCache),
@@ -122,14 +235,14 @@ export async function openLocalCliSession(options: LocalCliSessionOptions): Prom
       current: progress.scannedFiles,
       ...(progress.currentPath ? { message: progress.currentPath } : {})
     })
-  });
+  }));
   let workspaceIndex = new WorkspaceIndex(workspaceId);
   workspaceIndex.setFiles(scan.files);
   if (scan.files.some((file) => file.resourceKind === 'param' || file.relativePath.toLowerCase().includes('.param'))) {
     workspaceIndex.setParamSemanticState('warming_up');
   }
   if (shouldAnalyze) {
-    const analyzed = await analyzeWorkspace({
+    const analyzed = await measured('workspace.analyze', () => analyzeWorkspace({
       workspaceRoot: session.layers.overlayRoot,
       files: scan.files,
       ...(semanticCache ? { semanticCache } : {}),
@@ -137,12 +250,23 @@ export async function openLocalCliSession(options: LocalCliSessionOptions): Prom
       parseTextResources: true,
       ...(session.layers.baseRoot ? { oodleRuntimeRoot: session.layers.baseRoot } : {}),
       ...(options.onProgress ? { onProgress: options.onProgress } : {})
-    });
+    }));
     workspaceIndex = analyzed.index;
   } else {
     workspaceIndex.rebuildReferences();
     if (workspaceIndex.getStats().paramRows > 0) workspaceIndex.setParamSemanticState('ready');
+    emit({ phase: 'workspace.index', status: 'complete', details: { analyzed: false } });
   }
+  emit({
+    phase: 'semantic.cache',
+    status: 'complete',
+    details: {
+      enabled: Boolean(semanticCache),
+      hits: semanticCacheHits,
+      misses: semanticCacheMisses,
+      saves: semanticCacheSaves
+    }
+  });
   let operationLog: OperationLogStore;
   let durableLog = true;
   let knowledgeStore: KnowledgeStore | null = null;
@@ -216,6 +340,7 @@ export async function openLocalCliSession(options: LocalCliSessionOptions): Prom
       recoveryDir: join(root, 'recovery'),
       coreSession,
       referenceCursorStore: createManagedReferenceCursorStore(root),
+      ...(options.onDiagnostic ? { onDiagnostic: options.onDiagnostic } : {}),
       onSemanticEvidenceUpdated: async (sourceUris) => {
         if (!semanticCache || !sourceUris?.length) return;
         const files = workspaceIndex.getFiles();
@@ -247,27 +372,50 @@ export async function openLocalCliSession(options: LocalCliSessionOptions): Prom
     'import_map_from_blender',
     'rollback_operation'
   ]);
-  const bridge: AgentToolBridge = {
-    tools: rawBridge.tools,
-    executeTool: async (call, contextOverride = {}) => {
-      if (!durableLog && mutatingTools.has(call.name)) {
-        return {
-          ok: false,
-          code: 'CLI_SQLITE_UNAVAILABLE',
-          content: JSON.stringify({
-            ok: false,
-            error: { code: 'CLI_SQLITE_UNAVAILABLE', message: '本地审计数据库不可用，写入已失败关闭。' }
-          })
-        };
-      }
+  const executeTool: AgentToolBridge['executeTool'] = async (call, contextOverride = {}) => {
+    if (!durableLog && mutatingTools.has(call.name)) {
+      return cliToolFailure('CLI_SQLITE_UNAVAILABLE', '本地审计数据库不可用，写入已失败关闭。');
+    }
+    if (call.name !== 'rollback_operation') return rawBridge.executeTool(call, contextOverride);
+
+    let input: unknown;
+    try {
+      input = call.argumentsJson.trim() === '' ? {} : JSON.parse(call.argumentsJson);
+    } catch {
       return rawBridge.executeTool(call, contextOverride);
     }
+    const operationId = input && typeof input === 'object' && !Array.isArray(input)
+      && typeof (input as Record<string, unknown>).opId === 'string'
+      ? ((input as Record<string, unknown>).opId as string).trim()
+      : '';
+    if (!operationId) return rawBridge.executeTool(call, contextOverride);
+
+    const authorization = consumeCliRollbackAuthorization(rollbackAuthorization, operationId, workspaceId);
+    if (!authorization.ok) return cliToolFailure(authorization.code, authorization.message);
+    let record;
+    try {
+      record = await operationLog.get(operationId);
+    } catch (error) {
+      return cliToolFailure(
+        'CLI_ROLLBACK_CONFIRMATION_UNAVAILABLE',
+        `无法核对 rollback operation 所属 workspace：${error instanceof Error ? error.message : String(error)}`
+      );
+    }
+    if (!record || record.workspaceId !== workspaceId) {
+      return cliToolFailure(
+        'CLI_ROLLBACK_CONFIRMATION_MISMATCH',
+        'rollback operation 不存在于当前 workspace，已拒绝使用 CLI 确认凭据。'
+      );
+    }
+    return rawBridge.executeTool(call, { ...contextOverride, confirmation: authorization.confirmation });
   };
+  const bridge: AgentToolBridge = { tools: rawBridge.tools, executeTool };
   return {
     coreSession,
     editSession,
     registry,
     bridge,
+    executeTool,
     workspaceIndex,
     durableLog,
     knowledgeStore,

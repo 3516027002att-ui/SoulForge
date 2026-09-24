@@ -147,6 +147,15 @@ export function buildEventReferenceEdges(
             : ruleRole
               ? namespaceToRole(ruleRole.namespace)
               : inferArgRole(arg, instruction);
+          // A direct registry rule can carry a PARAM table even when the
+          // Bridge export did not repeat that table on the argument record.
+          // Keep the raw argument for evidence, but use the rule-scoped view
+          // for target lookup so AwardItemLot cannot fan out by shared row id.
+          const scopedArg = role === 'paramId'
+            && ruleRole?.targetParamName
+            && !arg.paramName
+            ? { ...arg, paramName: ruleRole.targetParamName }
+            : arg;
           if (role === 'unknown') {
             if (!enableNumericFallback) continue;
             const targetCount = (eventIndexes.eventsById.get(numeric)?.length ?? 0)
@@ -193,7 +202,7 @@ export function buildEventReferenceEdges(
           if (explicit) {
             const explicitCount = role === 'entityId' || role === 'regionId'
               ? indexes.mapEntitiesByEntityId.get(numeric)?.length ?? 0
-              : role === 'paramId' ? (arg.paramName ? indexes.paramRowsByScopedId.get(paramKey(arg.paramName, numeric)) : indexes.paramRowsById.get(numeric))?.length ?? 0
+              : role === 'paramId' ? (scopedArg.paramName ? indexes.paramRowsByScopedId.get(paramKey(scopedArg.paramName, numeric)) : indexes.paramRowsById.get(numeric))?.length ?? 0
               : role === 'textId' ? indexes.textsById.get(numeric)?.length ?? 0
               : role === 'eventId' ? eventIndexes.eventsById.get(numeric)?.length ?? 0 : 1;
             if (explicitCount > 256) {
@@ -209,7 +218,7 @@ export function buildEventReferenceEdges(
             ? (trustedArgRole ? undefined : ruleRole?.ruleId)
             : NAME_INFERENCE_RULE;
           const evidence = makeInstructionEvidence(instruction, arg, statement);
-          const outcome = emitRoleEdges(edges, event, role, numeric, arg, instruction, indexes, eventIndexes, confidence, ruleName, evidence, stats);
+          const outcome = emitRoleEdges(edges, event, role, numeric, scopedArg, instruction, indexes, eventIndexes, confidence, ruleName, evidence, stats);
           if (outcome === 'cross-file') {
             stats.crossFileEventIdCandidates += 1;
             pushDiagnostic({

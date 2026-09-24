@@ -28,6 +28,7 @@ async function main(): Promise<void> {
     ...(argValue(argv, 'base') ? { baseRoot: argValue(argv, 'base')! } : {}),
     ...(argValue(argv, 'game') ? { game: argValue(argv, 'game')! } : {}),
     mode,
+    ...(argValue(argv, 'confirm-rollback') ? { confirmRollbackOpId: argValue(argv, 'confirm-rollback')! } : {}),
     principal: argValue(argv, 'principal') ?? 'local-cli-host',
     requireDurableLog: false,
     onFallbackWarning: (message) => console.error(message)
@@ -71,12 +72,14 @@ async function main(): Promise<void> {
         };
       }
       if (!cliSession.durableLog
-        && (MUTATING_PREFIXES.some((prefix) => tool.startsWith(prefix)) || tool === 'commit_patch')) {
+        && (MUTATING_PREFIXES.some((prefix) => tool.startsWith(prefix))
+          || tool === 'commit_patch'
+          || tool === 'rollback_operation')) {
         throw new Error('CLI_SQLITE_UNAVAILABLE: 本地审计数据库不可用，写入已失败关闭。');
       }
       inFlight += 1;
       try {
-        const result = await cliSession.bridge.executeTool({
+        const result = await cliSession.executeTool({
           id: `host-${Date.now()}-${tool}`,
           name: tool,
           argumentsJson: JSON.stringify(args)

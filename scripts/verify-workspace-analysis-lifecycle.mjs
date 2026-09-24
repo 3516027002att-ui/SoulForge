@@ -22,7 +22,7 @@ function productionFunctions(path, names) {
     { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.None } }).outputText;
 }
 const source = productionFunctions('../apps/desktop/src/main/ipc/workspace.ts',
-  ['awaitWorkspaceReadiness', 'waitForWorkspaceIndexing', 'persistActiveRag', 'clearWorkspaceIpcCaches']);
+  ['awaitWorkspaceReadiness', 'waitForWorkspaceIndexing', 'persistActiveRag', 'refreshRagAfterAnalyze', 'clearWorkspaceIpcCaches', 'ragRefreshQueueKey']);
 const ragPersistenceSource = `const RAG_PERSIST_BATCH_SIZE = 512;\n${productionFunctions('../apps/desktop/src/main/ragPersistence.ts', [
   'persistRagCorpusBySourceDelta',
   'throwIfAborted'
@@ -82,6 +82,42 @@ assert.equal(state.activeRag, null, 'speculative corpus must not publish');
 durable.resolve();
 await publishing;
 assert.equal(state.activeRag, corpus, 'durable corpus publishes');
+
+// Lookup preparation may yield while the background scan replaces the file
+// catalog. The writer must fence against the revision captured BEFORE lookup,
+// not silently stamp an older corpus with the current revision.
+state.indexedFilesRevision = 10;
+state.activeRag = null;
+let staleWrites = 0;
+state.persistRagCorpusBySourceDelta = async () => { staleWrites++; };
+await assert.rejects(state.persistActiveRag({}, corpus, null, undefined, true, 'full', 9),
+  error => error.code === 'RAG_CATALOG_CHANGED');
+assert.equal(staleWrites, 0, 'catalog change during lookup must reject before durable writes');
+assert.equal(state.activeRag, null);
+const catalogDurable = deferred();
+state.persistRagCorpusBySourceDelta = async () => catalogDurable.promise;
+const catalogPublishing = state.persistActiveRag({}, corpus, null, undefined, true, 'full', 10);
+state.indexedFilesRevision++;
+const catalogRejected = assert.rejects(catalogPublishing, error => error.code === 'RAG_CATALOG_CHANGED');
+catalogDurable.resolve();
+await catalogRejected;
+assert.equal(state.activeRag, null, 'catalog change during persistence must reject publication');
+const preparingLookup = deferred();
+state.ragRefreshQueue = { run: async (_owner, operation) => operation() };
+state.prepareWorkspaceRagLookup = async () => preparingLookup.promise;
+state.persistCanonicalRagProjection = async input => {
+  await input.prepareLookup(corpus);
+  await input.persist(corpus, null);
+};
+state.persistRagCorpusBySourceDelta = async () => { staleWrites++; };
+const workspaceDatabase = { forWorkspace() { return this; } };
+const refreshing = state.refreshRagAfterAnalyze(workspaceDatabase, state.activeIndex);
+state.indexedFilesRevision++;
+const refreshRejected = assert.rejects(refreshing, error => error.code === 'RAG_CATALOG_CHANGED');
+preparingLookup.resolve();
+await refreshRejected;
+assert.equal(staleWrites, 0, 'analyze wrapper must pass its pre-lookup catalog revision to persistence');
+assert.equal(state.activeRag, null);
 
 // The production RAG writer sends one source in bounded 512-row calls.  A
 // rejection after batch 1 is a partial durable write, not a publication: the
@@ -176,6 +212,30 @@ state.persistRagCorpusBySourceDelta = (_database, next, previous) => {
 await state.persistActiveRag({}, nextBoundary, previousBoundary);
 assert.equal(state.activeRag, nextBoundary, 'only the fully durable retry may publish activeRag');
 assert.deepEqual(retryBatches.map(batch => batch.upserts.length), [512, 1]);
+
+// A workspace/catalog fence is checked before every bounded request.  Once it
+// fails, no later chunk batch or reference replacement may be submitted.
+const fencedBatches = [];
+let fenceChecks = 0;
+const fencedStore = {
+  mergeRagChunkDelta(delta) {
+    fencedBatches.push(delta);
+    return Promise.resolve();
+  },
+  replaceReferences() { throw new Error('reference replacement must not be reached'); }
+};
+await assert.rejects(
+  productionPersistRagCorpusBySourceDelta(
+    fencedStore,
+    nextBoundary,
+    previousBoundary,
+    undefined,
+    undefined,
+    () => { fenceChecks++; if (fenceChecks === 4) throw Object.assign(new Error('catalog changed'), { code: 'RAG_CATALOG_CHANGED' }); }
+  ),
+  error => error.code === 'RAG_CATALOG_CHANGED'
+);
+assert.deepEqual(fencedBatches.map(batch => batch.upserts.length), [512]);
 
 // Simulate restart loading a durable old projection beside a current scan:
 // mergeCatalogAndPersisted must not reintroduce the old source hash.

@@ -121,11 +121,8 @@ import {
   bumpPathSourceGeneration,
   mapExportFromMsbDocument
 } from '@soulforge/core';
-import {
-  KnowledgeStore,
-  SqliteKnowledgeStorePersistence,
-  openWorkspaceDatabase
-} from '@soulforge/core';
+import type { KnowledgeStore } from '@soulforge/core';
+import { createReadOnlyKnowledgeStore } from './knowledgeStoreSnapshot.js';
 import {
   CONTAINER_PAGE_SIZE,
   FMG_PAGE_SIZE,
@@ -202,7 +199,7 @@ import {
   type RendererResourcePreview,
   type RendererSaveResult
 } from './rendererDto.js';
-import { OperationLogUtilityClient } from './operationLogUtilityClient.js';
+import { OperationLogUtilityClient, type WorkspaceBoundUtilityStore } from './operationLogUtilityClient.js';
 import { clearRecentPath, readRecentPath, writeRecentPath } from './recentPaths.js';
 import { executeRecoveryCleanup } from './recoveryCleanup.js';
 import { ModelServiceCredentialVault } from './modelServiceCredentials.js';
@@ -261,9 +258,14 @@ function safeExists(path: string): boolean {
 let activeOperationLog: OperationLogUtilityClient | null = null;
 let activeOperationLogWorkspaceId: string | null = null;
 let activeKnowledgeStore: KnowledgeStore | null = null;
-let activeKnowledgeDatabase: ReturnType<typeof openWorkspaceDatabase> | null = null;
 let activeKnowledgeWorkspaceId: string | null = null;
 let activeKnowledgeStoreError: string | null = null;
+let activeKnowledgeLoad: Promise<void> | null = null;
+let activeKnowledgeLoadWorkspaceId: string | null = null;
+let activeKnowledgeLoadToken: symbol | null = null;
+let activeKnowledgeFailureWorkspaceId: string | null = null;
+let activeKnowledgeRetryAt = 0;
+const KNOWLEDGE_RETRY_COOLDOWN_MS = 1_000;
 let recoveryCleanupWorkspaceId: string | null = null;
 let recoveryCleanupInFlight: Promise<void> | null = null;
 let semanticRefreshInFlight: Promise<void> | null = null;
@@ -824,6 +826,11 @@ function legacyOperationLogPathForWorkspace(workspaceId: string): string {
 }
 
 async function ensureActiveOperationLog(session: WorkspaceSession): Promise<OperationLogUtilityClient> {
+  if (getWorkspaceSession() !== session) {
+    throw Object.assign(new Error('工作区会话已切换，拒绝重新打开旧数据库。'), {
+      code: 'DATABASE_UTILITY_SESSION_STALE'
+    });
+  }
   const storage = workspaceStoragePaths(session.meta.workspaceId, session.layers.overlayRoot);
   await operationLogUtility.openWorkspace({
     appDatabasePath: join(app.getPath('userData'), 'app.db'),
@@ -842,10 +849,12 @@ async function ensureActiveOperationLog(session: WorkspaceSession): Promise<Oper
   // once per opened workspace and let concurrent callers share that promise.
   if (activeOperationLog === operationLogUtility
     && activeOperationLogWorkspaceId === session.meta.workspaceId) {
+    await ensureActiveKnowledgeStore(session);
     return operationLogUtility;
   }
   if (recoveryCleanupInFlight && recoveryCleanupWorkspaceId === session.meta.workspaceId) {
     await recoveryCleanupInFlight;
+    await ensureActiveKnowledgeStore(session);
     return operationLogUtility;
   }
   const cleanupTask = (async () => {
@@ -865,6 +874,7 @@ async function ensureActiveOperationLog(session: WorkspaceSession): Promise<Oper
     await cleanupTask;
     activeOperationLog = operationLogUtility;
     activeOperationLogWorkspaceId = session.meta.workspaceId;
+    await ensureActiveKnowledgeStore(session);
   } finally {
     if (recoveryCleanupInFlight === cleanupTask) {
       recoveryCleanupInFlight = null;
@@ -883,7 +893,9 @@ function currentToolContext(): ToolContext {
   const indexedFilesRevision = getWorkspaceIndexedFilesRevisionState();
   const storage = session ? durableStoragePaths(session.meta.workspaceId) : undefined;
   const memoryStore = memoryManager.getStore(index?.workspaceId);
-  const knowledgeStore = session ? ensureActiveKnowledgeStore(session) : null;
+  const knowledgeStore = session && activeKnowledgeWorkspaceId === session.meta.workspaceId
+    ? activeKnowledgeStore
+    : null;
   return {
     workspaceIndex: index,
     mode: activeAiMode,
@@ -912,57 +924,83 @@ function currentToolContext(): ToolContext {
 }
 
 /**
- * Knowledge is a curator/evidence store, not a Mod writer. Keep one SQLite
- * connection per active workspace and reopen it when the workspace identity
- * changes. A failed open is observable through the tool context and never
- * becomes an empty in-memory result.
+ * Knowledge is a curator/evidence store, not a Mod writer. The workspace
+ * database is already open and integrity-checked in the utility process;
+ * mirror its snapshot into a read-only in-memory KnowledgeStore instead of
+ * opening the same SQLite file synchronously on Electron's main thread.
  */
-function ensureActiveKnowledgeStore(session: WorkspaceSession): KnowledgeStore | null {
+async function ensureActiveKnowledgeStore(session: WorkspaceSession): Promise<void> {
   const workspaceId = session.meta.workspaceId;
-  if (activeKnowledgeWorkspaceId === workspaceId && activeKnowledgeStore) return activeKnowledgeStore;
-  disposeActiveKnowledgeStore();
+  if (activeKnowledgeWorkspaceId === workspaceId && activeKnowledgeStore !== null) return;
+  if (activeKnowledgeLoad && activeKnowledgeLoadWorkspaceId === workspaceId) {
+    await activeKnowledgeLoad;
+    return;
+  }
+  if (activeKnowledgeFailureWorkspaceId === workspaceId && Date.now() < activeKnowledgeRetryAt) return;
+  await disposeActiveKnowledgeStore();
+  const token = Symbol('knowledge-load');
+  activeKnowledgeLoadToken = token;
+  activeKnowledgeLoadWorkspaceId = workspaceId;
+  const load = (async () => {
+    let lastError: unknown;
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      if (activeKnowledgeLoadToken !== token) return;
+      if (attempt > 0) await new Promise<void>((resolve) => setTimeout(resolve, 50));
+      try {
+        const snapshot = await operationLogUtility.loadKnowledgeSnapshot({
+          workspaceId,
+          rootPath: session.layers.overlayRoot,
+          game: session.meta.game
+        });
+        if (activeKnowledgeLoadToken !== token) return;
+        activeKnowledgeStore = createReadOnlyKnowledgeStore(snapshot);
+        activeKnowledgeWorkspaceId = workspaceId;
+        activeKnowledgeStoreError = null;
+        activeKnowledgeFailureWorkspaceId = null;
+        activeKnowledgeRetryAt = 0;
+        return;
+      } catch (error) {
+        lastError = error;
+      }
+    }
+    try {
+      if (activeKnowledgeLoadToken !== token) return;
+      activeKnowledgeWorkspaceId = workspaceId;
+      activeKnowledgeStore = null;
+      activeKnowledgeStoreError = lastError instanceof Error ? lastError.message : String(lastError);
+      activeKnowledgeFailureWorkspaceId = workspaceId;
+      activeKnowledgeRetryAt = Date.now() + KNOWLEDGE_RETRY_COOLDOWN_MS;
+      console.warn(`[SoulForge knowledge] utility snapshot unavailable: ${activeKnowledgeStoreError}`);
+    } catch {
+      // A stale load token must never turn cleanup into a new failure.
+    }
+  })();
+  activeKnowledgeLoad = load;
   try {
-    const storage = durableStoragePaths(workspaceId, session.layers.overlayRoot);
-    // The main process is Electron, not the repository's Node ABI.  Use the
-    // same prepared native binding as the database utility; otherwise the
-    // KnowledgeStore fails only in real desktop/Agent runs while its isolated
-    // Node smoke passes, and query_knowledge is downgraded to a misleading
-    // KNOWLEDGE_STORE_UNAVAILABLE result.
-    const database = openWorkspaceDatabase(join(storage.root, 'workspace.db'), {
-      nativeBinding: sqliteNativeBindingPath
-    });
-    const persistence = new SqliteKnowledgeStorePersistence(database, {
-      workspaceId,
-      rootPath: session.layers.overlayRoot,
-      game: session.meta.game
-    });
-    const store = new KnowledgeStore({ persistence, schemaVersion: 'knowledge-v1' });
-    activeKnowledgeDatabase = database;
-    activeKnowledgeWorkspaceId = workspaceId;
-    activeKnowledgeStore = store;
-    activeKnowledgeStoreError = null;
-    return store;
-  } catch (error) {
-    activeKnowledgeWorkspaceId = workspaceId;
-    activeKnowledgeStore = null;
-    activeKnowledgeStoreError = error instanceof Error ? error.message : String(error);
-    console.warn(`[SoulForge knowledge] SQLite store unavailable: ${activeKnowledgeStoreError}`);
-    return null;
+    await load;
+  } finally {
+    if (activeKnowledgeLoadToken === token) {
+      activeKnowledgeLoad = null;
+      activeKnowledgeLoadWorkspaceId = null;
+    }
   }
 }
 
-function disposeActiveKnowledgeStore(): void {
+async function disposeActiveKnowledgeStore(): Promise<void> {
+  const pending = activeKnowledgeLoad;
+  activeKnowledgeLoadToken = null;
+  activeKnowledgeLoad = null;
+  activeKnowledgeLoadWorkspaceId = null;
   activeKnowledgeStore = null;
   activeKnowledgeWorkspaceId = null;
   activeKnowledgeStoreError = null;
-  if (activeKnowledgeDatabase) {
-    try { activeKnowledgeDatabase.close(); } catch {}
-    activeKnowledgeDatabase = null;
-  }
+  activeKnowledgeFailureWorkspaceId = null;
+  activeKnowledgeRetryAt = 0;
+  await pending?.catch(() => undefined);
 }
 
 async function persistActiveRag(
-  database: OperationLogUtilityClient,
+  database: WorkspaceBoundUtilityStore,
   corpus: RagCorpus,
   previous: RagCorpus | null = null,
   signal?: AbortSignal,
@@ -971,7 +1009,16 @@ async function persistActiveRag(
   throwIfRagRefreshAborted(signal);
   const publishingSessionId = getActiveWorkspaceSessionIdState();
   const publishingGeneration = getActiveWorkspaceSessionGenerationState();
-  await persistRagCorpusBySourceDelta(database, corpus, previous, signal, telemetry);
+  const assertRefreshCurrent = (): void => {
+    throwIfRagRefreshAborted(signal);
+    if (publishingSessionId !== getActiveWorkspaceSessionIdState()
+      || publishingGeneration !== getActiveWorkspaceSessionGenerationState()
+      || getWorkspaceActiveIndex()?.workspaceId !== corpus.workspaceId) {
+      throw new Error('工作区已切换，旧语义语料不会持久化。');
+    }
+  };
+  assertRefreshCurrent();
+  await persistRagCorpusBySourceDelta(database, corpus, previous, signal, telemetry, assertRefreshCurrent);
   // Do not publish an in-memory corpus before its delta is durable.  A
   // cancelled refresh may already have written one bounded SQLite batch; if
   // the speculative corpus became the next `previous` snapshot, the retry
@@ -1000,14 +1047,15 @@ async function refreshRagAfterScan(
   signal?: AbortSignal,
   telemetry?: SemanticRefreshTelemetry
 ): Promise<void> {
+  const scopedDatabase = database.forWorkspace(index.workspaceId);
   const catalog = buildRagCorpusForRefresh(index, undefined, undefined, undefined, undefined, telemetry);
   const persisted = createRagCorpus({
     workspaceId: index.workspaceId,
     builtAt: catalog.builtAt,
-    chunks: await database.loadRagChunks(),
-    references: await database.loadReferences()
+    chunks: await scopedDatabase.loadRagChunks(),
+    references: await scopedDatabase.loadReferences()
   });
-  await persistActiveRag(database, mergeCatalogAndPersisted(catalog, persisted), persisted, signal, telemetry);
+  await persistActiveRag(scopedDatabase, mergeCatalogAndPersisted(catalog, persisted), persisted, signal, telemetry);
 }
 
 async function refreshRagAfterAnalyze(
@@ -1018,6 +1066,7 @@ async function refreshRagAfterAnalyze(
   changedSymbols: readonly string[] = [],
   telemetry?: SemanticRefreshTelemetry
 ): Promise<void> {
+  const scopedDatabase = database.forWorkspace(index.workspaceId);
   const builtAt = new Date().toISOString();
   const sourceFilter = new Set(changedSources.filter((sourceUri) => sourceUri.trim().length > 0));
   const symbolFilter = new Set(changedSymbols.filter((symbolUri) => symbolUri.trim().length > 0));
@@ -1062,15 +1111,15 @@ async function refreshRagAfterAnalyze(
       references: index.listReferences(),
       diagnostics: changedCatalog.diagnostics
     });
-    await persistActiveRag(database, next, current, signal, telemetry);
+    await persistActiveRag(scopedDatabase, next, current, signal, telemetry);
     return;
   }
 
   const persisted = createRagCorpus({
     workspaceId: index.workspaceId,
     builtAt,
-    chunks: await database.loadRagChunks(),
-    references: await database.loadReferences()
+    chunks: await scopedDatabase.loadRagChunks(),
+    references: await scopedDatabase.loadReferences()
   });
   let catalog: RagCorpus;
   if (sourceFilter.size === 0 && symbolFilter.size === 0) {
@@ -1094,7 +1143,7 @@ async function refreshRagAfterAnalyze(
       diagnostics: changedCatalog.diagnostics
     });
   }
-  await persistActiveRag(database, mergeCatalogAndPersisted(catalog, persisted), persisted, signal, telemetry);
+  await persistActiveRag(scopedDatabase, mergeCatalogAndPersisted(catalog, persisted), persisted, signal, telemetry);
 }
 
 function buildRagCorpusForRefresh(
@@ -1993,6 +2042,12 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
   registerWorkspaceIpcHandlers({
     handle: trustedHandle,
     ensureActiveOperationLog,
+    clearActiveOperationLog: async () => {
+      activeOperationLog = null;
+      activeOperationLogWorkspaceId = null;
+      await disposeActiveKnowledgeStore();
+      await operationLogUtility.dispose();
+    },
     verifiedReadRoots,
     scheduleRagEmbedding: scheduleInternalRagEmbedding
   });

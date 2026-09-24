@@ -16,10 +16,11 @@ import type {
   TransactionJournalPhase,
   TransactionJournalRecord,
   OperationLogStore,
-  RagChunkDeltaStats
+  RagChunkDeltaStats,
+  KnowledgeStoreSnapshot
 } from '@soulforge/core';
 
-export const OPERATION_LOG_UTILITY_PROTOCOL = '1.4.1' as const;
+export const OPERATION_LOG_UTILITY_PROTOCOL = '1.4.3' as const;
 
 export interface ProviderUsageEventPayload {
   eventId: string;
@@ -112,29 +113,31 @@ export interface OperationLogUtilityPayloadMap {
   finalizeCommit: { bundle: Parameters<NonNullable<OperationLogStore['finalizeCommit']>>[0] };
   replaceFiles: { files: IndexedFile[] };
   searchFiles: { query: string; limit?: number };
-  replaceRagChunks: { chunks: RagChunk[] };
-  mergeRagChunks: { chunks: RagChunk[] };
+  replaceRagChunks: { workspaceId: string; chunks: RagChunk[] };
+  mergeRagChunks: { workspaceId: string; chunks: RagChunk[] };
   mergeRagChunkDelta: {
+    workspaceId: string;
     sourceUri: string;
     upserts: RagChunk[];
     deletedChunkIds: string[];
   };
-  loadRagChunks: Record<string, never>;
-  searchRagChunks: { query: string; limit?: number };
-  replaceRagEmbeddings: { entries: Array<{ chunkId: string; model: string; vector: Float32Array }> };
+  loadRagChunks: { workspaceId: string };
+  searchRagChunks: { workspaceId: string; query: string; limit?: number };
+  replaceRagEmbeddings: { workspaceId: string; entries: Array<{ chunkId: string; model: string; vector: Float32Array }> };
   mergeRagEmbeddings: {
+    workspaceId: string;
     model: string;
     entries: Array<{ chunkId: string; contentHash: string; vector: Float32Array }>;
     deletedChunkIds: string[];
   };
-  loadRagEmbeddings: Record<string, never>;
-  loadRagEmbeddingRecords: Record<string, never>;
-  ragEmbeddingModel: Record<string, never>;
-  replaceReferences: { references: ReferenceEdge[] };
-  loadReferences: Record<string, never>;
+  loadRagEmbeddings: { workspaceId: string };
+  loadRagEmbeddingRecords: { workspaceId: string };
+  ragEmbeddingModel: { workspaceId: string };
+  replaceReferences: { workspaceId: string; references: ReferenceEdge[] };
+  loadReferences: { workspaceId: string };
   replaceDiagnostics: { diagnostics: Array<Omit<PersistedDiagnostic, 'workspaceId'>> };
   listDiagnostics: Record<string, never>;
-  upsertJob: { job: Omit<BackgroundJobRecord, 'workspaceId'> };
+  upsertJob: { workspaceId: string; job: Omit<BackgroundJobRecord, 'workspaceId'> };
   listJobs: Record<string, never>;
   getSemanticFileCache: { relativePath: string };
   getAllSemanticFileCache: Record<string, never>;
@@ -147,6 +150,7 @@ export interface OperationLogUtilityPayloadMap {
       mtimeMs: number;
     };
   };
+  loadKnowledgeSnapshot: { workspaceId: string; rootPath: string; game: string };
   health: Record<string, never>;
   close: Record<string, never>;
 }
@@ -242,6 +246,7 @@ export interface OperationLogUtilityResultMap {
     }>;
   };
   upsertSemanticFileCache: null;
+  loadKnowledgeSnapshot: KnowledgeStoreSnapshot | null;
   health: { ready: boolean; appReady: boolean; workspaceId?: string };
   close: null;
 }

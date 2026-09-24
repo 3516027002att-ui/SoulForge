@@ -4,6 +4,7 @@ import {
   type ArtifactMarkers,
   type ResourceKind
 } from '@soulforge/shared';
+import type { IndexedFile } from '@soulforge/shared';
 
 // 权威列表已下沉到 @soulforge/shared（renderer 可安全引用）；core 仅做 re-export + 分类逻辑。
 export { ALL_RESOURCE_KINDS, KNOWN_RESOURCE_DIRS };
@@ -59,6 +60,19 @@ export function classifyResourceKind(relativePath: string): ResourceKind {
 
 export function isKnownResourceKind(value: string): value is ResourceKind {
   return (ALL_RESOURCE_KINDS as readonly string[]).includes(value);
+}
+
+/**
+ * Semantic/native readers must not treat recovery artifacts as live game
+ * resources.  Keep the files in the catalog for History/restore UI, but make
+ * the default analysis domain a hard primary/base-only filter.
+ */
+export function isActiveSemanticSource(file: Pick<IndexedFile, 'relativePath' | 'artifactMarkers'>): boolean {
+  const role = file.artifactMarkers?.artifactRole;
+  if (role === 'backup' || role === 'previous' || role === 'recovery'
+    || role === 'cache' || role === 'audit' || role === 'temporary' || role === 'projection') return false;
+  const lower = file.relativePath.replaceAll('\\', '/').toLowerCase();
+  return !lower.endsWith('.bak') && !lower.endsWith('.prev') && !lower.includes('/.soulforge/');
 }
 
 function classifyResourceKindByPath(normalizedPath: string): ResourceKind {

@@ -1,4 +1,7 @@
 /** Pure harness policy and injectable polling; never imports production internals. */
+import { isAbsolute, relative, resolve, sep } from 'node:path';
+import { isObservationGoalTool, validateTaskContractGoals } from './real-agent-goal-contract.mjs';
+
 export const SEMANTIC_CORPUS_KINDS = Object.freeze(['param', 'msg', 'event', 'map', 'script', 'action', 'chr']);
 
 // A PARAM field is useful as a narrow native anchor, but it is not the same
@@ -7,11 +10,59 @@ export const SEMANTIC_CORPUS_KINDS = Object.freeze(['param', 'msg', 'event', 'ma
 // have produced their own evidence.
 const SEMANTIC_GOAL_KINDS = new Set([
   'semantic', 'composite', 'native-tool', 'event', 'tae-field', 'script',
-  'map-entity', 'map-region', 'text-entry', 'param-row', 'resource'
+  'map-entity', 'map-region', 'text-entry', 'param-row', 'resource', 'unsupported'
 ]);
 
 function isSemanticGoal(goal) {
   return Boolean(goal && SEMANTIC_GOAL_KINDS.has(goal.kind));
+}
+
+function nativeResultRecords(result) {
+  const data = result?.data && typeof result.data === 'object' && !Array.isArray(result.data)
+    ? result.data
+    : result;
+  const record = data?.record && typeof data.record === 'object' && !Array.isArray(data.record)
+    ? data.record
+    : undefined;
+  return [data, record, result].filter((value) => value && typeof value === 'object');
+}
+
+/**
+ * Resolve native container provenance to a logical URI only when the native
+ * result's container is present in the current overlay snapshot. Absolute
+ * physical paths outside the supplied workspace root and unindexed relative
+ * guesses are rejected rather than converted by suffix guessing.
+ */
+export function resolveNativeSourceUri(result, { workspaceRoot, entries = [] } = {}) {
+  if (typeof workspaceRoot !== 'string' || workspaceRoot.trim() === '' || !Array.isArray(entries)) return null;
+  const candidates = [];
+  for (const record of nativeResultRecords(result)) {
+    for (const key of ['containerPath', 'sourceUri', 'sourcePath']) {
+      if (typeof record[key] === 'string' && record[key].trim() !== '') candidates.push(record[key].trim());
+    }
+  }
+  const root = resolve(workspaceRoot);
+  const indexedPaths = new Set(entries
+    .filter((entry) => entry?.type === 'file' && typeof entry.path === 'string')
+    .map((entry) => entry.path.replaceAll('\\', '/').replace(/^\.\//u, '').toLocaleLowerCase()));
+  for (const candidate of candidates) {
+    let value = candidate.replaceAll('\\', '/');
+    if (/^file:\/\//iu.test(value)) value = value.slice('file://'.length);
+    let relativePath;
+    const driveAbsolute = /^\/?[A-Za-z]:\//u.test(value);
+    if (driveAbsolute || isAbsolute(value)) {
+      const absolute = resolve(value);
+      if (absolute !== root && !absolute.startsWith(root + sep)) continue;
+      relativePath = relative(root, absolute).replaceAll('\\', '/');
+    } else {
+      relativePath = value.replace(/^\.\//u, '').replace(/^\/+/, '');
+    }
+    relativePath = relativePath.replace(/^\/+/, '');
+    if (!relativePath || relativePath.includes('\0') || relativePath.includes(':') || relativePath === '..' || relativePath.startsWith('../')) continue;
+    if (!indexedPaths.has(relativePath.toLocaleLowerCase())) continue;
+    return { sourceUri: `file://${relativePath}`, relativePath };
+  }
+  return null;
 }
 
 export function planSemanticCorpus(directories) {
@@ -31,21 +82,93 @@ export function planSemanticCorpus(directories) {
   };
 }
 
-export function evaluateGoalCoverage(goals, observationOnly) {
-  const required = goals.filter((goal) => goal.required);
+export function evaluateGoalCoverage(goals, observationOnly, taskContract = undefined) {
+  const normalizedGoals = Array.isArray(goals) ? goals : [];
+  const required = normalizedGoals.filter((goal) => goal?.required);
   const fieldGoals = required.filter((goal) => goal.kind === 'param-field' || goal.kind === undefined);
   const semanticGoals = required.filter(isSemanticGoal);
-  const allRequiredVerified = required.length > 0 && required.every((goal) => goal.verified === true);
+  const observationGoals = required.filter((goal) => (
+    goal.verificationClass === 'observation' || isObservationGoalTool(goal.tool)
+  ));
+  const unsupportedGoals = required.filter((goal) => (
+    goal.kind === 'unsupported'
+      || goal.verificationStatus === 'unsupported'
+      || goal.status === 'unsupported'
+  ));
+  const unverifiedGoals = required.filter((goal) => (
+    !unsupportedGoals.includes(goal)
+      && !observationGoals.includes(goal)
+      && goal.verified !== true
+  ));
+  const allRequiredVerified = required.length > 0 && required.every((goal) => (
+    goal.verified === true && !unsupportedGoals.includes(goal) && !observationGoals.includes(goal)
+  ));
   const fieldChecksOk = fieldGoals.length > 0 && fieldGoals.every((goal) => goal.verified === true);
   const semanticChecksOk = semanticGoals.length > 0 && semanticGoals.every((goal) => (
-    goal.verified === true
+    !unsupportedGoals.includes(goal)
+      && !observationGoals.includes(goal)
+      && goal.verified === true
       && Array.isArray(goal.verificationEvidence)
       && goal.verificationEvidence.length > 0
   ));
+  const collectSourceUris = (value, output = []) => {
+    if (value === null || value === undefined || typeof value !== 'object') return output;
+    if (Array.isArray(value)) {
+      value.slice(0, 128).forEach((item) => collectSourceUris(item, output));
+      return output;
+    }
+    for (const [key, child] of Object.entries(value)) {
+      if (key === 'sourceUri' && typeof child === 'string') output.push(child);
+      else if (key === 'sourceUris' && Array.isArray(child)) output.push(...child.filter((item) => typeof item === 'string'));
+      else collectSourceUris(child, output);
+    }
+    return output;
+  };
+  // Corpus provenance may come from optional read-only probes as well as
+  // required outcome goals. Optional evidence cannot satisfy the outcome gate,
+  // but it can prove that the selected native source was actually inspected.
+  const sourceUris = normalizedGoals.flatMap((goal) => collectSourceUris({
+    verificationEvidence: goal.verificationEvidence,
+    read: goal.read
+  }));
+  const requiredSources = taskContract?.corpusFingerprint?.requiredSources ?? [];
+  const corpusMismatches = requiredSources.filter((source) => {
+    const token = String(source).replaceAll('\\', '/').toLocaleLowerCase();
+    return !sourceUris.some((uri) => String(uri).replaceAll('\\', '/').toLocaleLowerCase().includes(token));
+  });
+  const corpusMismatch = corpusMismatches.length > 0;
+  const contractCheck = validateTaskContractGoals(normalizedGoals, taskContract);
+  const runtimeRequired = taskContract?.requiresRuntimeEvidence === true;
+  const runtimeGoals = required.filter((goal) => (
+    goal.verificationClass === 'runtime' || goal.runtimeVerified === true
+  ));
+  const runtimeEvidenceMissing = runtimeRequired && !runtimeGoals.some((goal) => goal.verified === true);
   const taskCoverageOk = !observationOnly
+    && contractCheck.ok
+    && !observationGoals.length
+    && !corpusMismatch
+    && unsupportedGoals.length === 0
+    && !runtimeEvidenceMissing
     && semanticGoals.length > 0
     && allRequiredVerified
     && semanticChecksOk;
+  const status = observationOnly
+    ? 'observation_only'
+    : !contractCheck.ok
+      ? 'contract_invalid'
+    : unsupportedGoals.length > 0
+      ? 'unsupported'
+      : observationGoals.length > 0
+        ? 'observation_only'
+      : unverifiedGoals.length > 0
+        ? 'unverified'
+        : runtimeEvidenceMissing
+          ? 'unverified'
+      : corpusMismatch
+          ? 'corpus_mismatch'
+          : taskCoverageOk
+            ? 'verified'
+            : 'implementation_failed';
   return {
     mode: observationOnly
       ? 'observation-only'
@@ -53,24 +176,59 @@ export function evaluateGoalCoverage(goals, observationOnly) {
         ? 'native-semantic'
         : 'param-fields-only',
     requiredGoalCount: required.length,
-    observedGoalCount: goals.length,
+    observedGoalCount: normalizedGoals.length,
     fieldChecksOk,
     semanticChecksOk,
     // goalsOk remains the required-goal contract used by older PARAM-only
     // runs. Semantic task acceptance additionally requires taskCoverageOk.
-    goalsOk: !observationOnly && allRequiredVerified,
+    goalsOk: !observationOnly && contractCheck.ok && observationGoals.length === 0
+      && unsupportedGoals.length === 0 && !runtimeEvidenceMissing && allRequiredVerified,
     taskCoverageOk,
     taskCompletionVerified: taskCoverageOk,
+    status,
+    contractGoalMissing: contractCheck.missingGoalIds,
+    observationGoalIds: observationGoals.map((goal) => goal.goalId ?? null),
+    unsupportedGoalIds: unsupportedGoals.map((goal) => goal.goalId ?? null),
+    unverifiedGoalIds: unverifiedGoals.map((goal) => goal.goalId ?? null),
+    runtimeEvidenceMissing,
+    corpusMismatch,
+    corpusMismatches,
     diagnostics: [
       ...(observationOnly ? [{
         severity: 'warning', code: 'TASK_OBSERVATION_ONLY',
         message: '本次只观察原文任务执行和可选原生字段，不作任务通过声明。'
-      }] : semanticGoals.length === 0 ? [{
+      }] : []),
+      ...(!observationOnly && !contractCheck.ok ? [{
+        severity: 'error', code: 'CONTRACT_GOAL_MISSING',
+        message: `任务契约 postconditions 缺少 required goal：${contractCheck.missingGoalIds.join(', ')}。`
+      }] : []),
+      ...(!observationOnly && corpusMismatch ? [{
+        severity: 'error', code: 'CORPUS_MISMATCH',
+        message: `清单来源与本次 native 证据不一致：${corpusMismatches.join(', ')}；这不是实现失败，必须先更新/选择正确语料。`
+      }] : []),
+      ...(!observationOnly && unsupportedGoals.length > 0 ? [{
+        severity: 'error', code: 'REQUIRED_GOAL_UNSUPPORTED',
+        message: `必需行为目标没有可执行验证器：${unsupportedGoals.map((goal) => `${goal.goalId ?? 'unknown'}（${goal.unsupportedReason ?? '未说明原因'}）`).join('；')}。不能以局部字段或静态字符串代替。`
+      }] : []),
+      ...(!observationOnly && observationGoals.length > 0 ? [{
+        severity: 'error', code: 'REQUIRED_GOAL_OBSERVATION_ONLY',
+        message: `必需目标只能提供发现/静态观察，不能作为 semantic completion：${observationGoals.map((goal) => goal.goalId ?? 'unknown').join(', ')}。`
+      }] : []),
+      ...(!observationOnly && runtimeEvidenceMissing ? [{
+        severity: 'error', code: 'RUNTIME_EVIDENCE_REQUIRED',
+        message: '当前任务契约要求运行时证据；native read/static evidence 不能自动代表游戏行为。'
+      }] : []),
+      ...(!observationOnly && !corpusMismatch && unsupportedGoals.length === 0 && semanticGoals.length === 0 ? [{
         severity: 'warning', code: 'TASK_COVERAGE_UNVERIFIED',
         message: '当前验证器仅检查指定 PARAM 字段；原文任务的完整语义尚未验证。'
-      }] : !taskCoverageOk ? [{
+      }] : []),
+      ...(!observationOnly && !corpusMismatch && unsupportedGoals.length === 0 && semanticGoals.length > 0 && !taskCoverageOk ? [{
         severity: 'error', code: 'TASK_SEMANTIC_GOAL_FAILED',
         message: '至少一个语义目标未产生完整的原生验证证据，不能宣称整题通过。'
+      }] : []),
+      ...(!observationOnly && unsupportedGoals.length === 0 && unverifiedGoals.length > 0 ? [{
+        severity: 'error', code: 'REQUIRED_GOAL_UNVERIFIED',
+        message: `必需目标未验证：${unverifiedGoals.map((goal) => goal.goalId ?? 'unknown').join(', ')}。`
       }] : []),
       ...(required.length === 0 ? [{
       severity: 'warning', code: 'REQUIRED_GOALS_EMPTY',
