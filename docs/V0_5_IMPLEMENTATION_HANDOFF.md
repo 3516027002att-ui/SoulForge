@@ -1233,7 +1233,7 @@ npm run build
 
 <!-- SOULFORGE_PROJECTION_BEGIN:command-index -->
 
-全部 319 条已登记验证命令按层级列出。层级顺序即执行顺序（先快后慢，早失败早停）。
+全部 337 条已登记验证命令按层级列出。层级顺序即执行顺序（先快后慢，早失败早停）。
 
 一次跑完某一层：`node scripts/verify.mjs --tier <层级>`；跑全部：`npm run verify:all`。
 
@@ -1269,7 +1269,7 @@ npm run test:verify-scheduling
 npm run verify:audit
 ~~~
 
-**unit**（135 条）
+**unit**（147 条）
 
 ~~~powershell
 npm run test
@@ -1330,6 +1330,8 @@ npm run test:bridge-optional-args
 npm run test:bridge-production-build
 npm run test:bridge-roots
 npm run test:citations
+npm run test:cli-semantic-bootstrap
+npm run test:content-search
 npm run test:core-journal-wiring
 npm run test:csv
 npm run test:darkscript-languageservice-scale
@@ -1348,18 +1350,22 @@ npm run test:emevd-agent-tools
 npm run test:emevd-cross-file-index
 npm run test:emevd-dark-script-compiler
 npm run test:emevd-dark-script-compiler-s14
+npm run test:emevd-deterministic-reference
 npm run test:emevd-dsl-compiler
 npm run test:emevd-envelope-map
 npm run test:emevd-external-adapter
 npm run test:emevd-four-view
 npm run test:emevd-instruction-structural
 npm run test:emevd-ipc-contract
+npm run test:emevd-parameter-evaluator
 npm run test:emevd-plan-commit
 npm run test:emevd-stable-identity
 npm run test:first-party-schema-clean
 npm run test:flver-pages
 npm run test:fmg-msb-ipc-contract
 npm run test:hex-scene
+npm run test:knowledge-store-sqlite
+npm run test:lua-structure
 npm run test:map-document-scale
 npm run test:map-request-cancellation
 npm run test:map-static-pagination-contract
@@ -1371,18 +1377,22 @@ npm run test:me3-runtime-gateway
 npm run test:model-service-configuration
 npm run test:model-service-vault-contract
 npm run test:native-projection-acceptance
+npm run test:native-semantic-refresh-cancellation
 npm run test:openai-responses
 npm run test:param-canonical-projection
 npm run test:param-export-clone
 npm run test:param-metadata-read-bridge
 npm run test:param-msb-write-ipc-contract
 npm run test:param-rag-identity-convergence
+npm run test:param-read-fallback
 npm run test:param-slim-ipc
 npm run test:path-sanitizer
 npm run test:performance-baseline
 npm run test:preload-surface-ruling
 npm run test:rag
+npm run test:rag-local-only
 npm run test:rag-persistence-performance
+npm run test:rag-refresh-queue
 npm run test:real-agent-harness
 npm run test:recent-paths
 npm run test:reference-cli-session
@@ -1393,6 +1403,7 @@ npm run test:renderer-unit
 npm run test:resource-index-diagnostics
 npm run test:scene-asset-inventory
 npm run test:scene-draw-list
+npm run test:sfcli-session
 npm run test:subprocess-control
 npm run test:tae-anim-id-guards
 npm run test:three-scene-functional
@@ -1404,6 +1415,7 @@ npm run test:vault-encrypt-contract
 npm run test:vault-ipc-contract
 npm run test:workbench-projections
 npm run test:workspace-analysis-lifecycle
+npm run test:workspace-scan-fast-path
 npm run test:workspace-startup
 npm run test:yapped-param-metadata-source
 npm run typecheck
@@ -1470,9 +1482,10 @@ npm run test:upgrade-recovery
 npm run test:writer-failure-matrix
 ~~~
 
-**native**（90 条）
+**native**（96 条）
 
 ~~~powershell
+npm run agent:simulate:four
 npm run bridge:verify:bnd4-transaction
 npm run bridge:verify:bnd4-writer
 npm run bridge:verify:character-preview
@@ -1534,7 +1547,12 @@ npm run test:emevd-corpus-matrix
 npm run test:emevd-imported-coverage
 npm run test:emevd-imported-production
 npm run test:emevd-multi-corpus-matrix
+npm run test:first-party-emevd-roundtrip
+npm run test:first-party-lua-hks-corpus
+npm run test:first-party-lua-hks-roundtrip
+npm run test:first-party-luap-roundtrip
 npm run test:first-party-schema-native-coverage
+npm run test:first-party-tae-field-write
 npm run test:fmg-reference-integrity
 npm run test:krak-combination-mutation
 npm run test:map-streaming-native
@@ -1581,7 +1599,7 @@ npm run test:release-cross-machine
 npm run test:release-reproducible
 ~~~
 
-另有 28 条 script 显式排除在验证调度之外（写入命令、外部工具或入口自身）：
+另有 29 条 script 显式排除在验证调度之外（写入命令、外部工具或入口自身）：
 
 - `verify`：统一验证入口本身，自调度会无限递归
 - `verify:all`：同上（全层级别名）
@@ -1596,6 +1614,7 @@ npm run test:release-reproducible
 - `launcher:build`：启动器二进制发布构建，不是验证
 - `exe:build`：Bridge、启动器和开发 launcher 的显式构建命令；由交付流程直接调用，不是独立验证套件
 - `dev-launcher:build`：开发 launcher 产物构建；由 exe:build 调用，不是独立验证套件
+- `pretest`：npm test 的 Node 原生 binding 自愈前置，不是独立验证套件
 - `corpus:build-local-release`：生成本机 corpus registry，写 testdata，不是验证
 - `corpus:build-local-release:configured`：同上（被 wrapper 调用的内层）
 - `gov`：治理写入 CLI，不是验证；正确性由 test:gov-cli 门禁
