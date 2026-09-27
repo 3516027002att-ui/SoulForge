@@ -9,6 +9,23 @@ import { FOUR_TASKS } from './testing/real-agent-four-task-manifest.mjs';
 const execFile = promisify(execFileCallback);
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const outputRoot = join(repoRoot, 'output', 'agent-real');
+const HELP_TEXT = `运行四题本地测试集（每题使用独立隔离会话）
+
+用法：
+  node scripts/run-real-agent-four-tasks.mjs [选项]
+  npm run agent:simulate:four -- [选项]
+
+选项：
+  --only four-1|four-2|four-3|four-4  只运行指定测试项；默认顺序运行四项
+  --provider test|vault               选择模型 provider
+  --test-config <路径>                加密 test provider 配置
+  --config-id <id>                    隔离 vault 中的模型服务 ID
+  --runtime unpacked|installed        运行时类型
+  --max-steps <整数>                  单题最大 Agent 步数
+  --timeout-ms <整数>                 单次模型请求超时
+  --session-timeout-ms <整数>         单题会话总超时
+  --max-output-tokens <整数>          单题总输出预算
+  -h, --help                          显示帮助（不启动子任务）`;
 
 function parseArgs(args) {
   const passthrough = [];
@@ -18,10 +35,6 @@ function parseArgs(args) {
     if (arg === '--only') {
       only = args[index + 1] ?? null;
       index += 1;
-      continue;
-    }
-    if (arg === '--write' || arg === '--apply-overlay') {
-      // The batch runner owns this safety switch and always adds --write.
       continue;
     }
     passthrough.push(arg);
@@ -62,7 +75,13 @@ async function findChildReport(label) {
   catch { return { path, report: null }; }
 }
 
-const { tasks, passthrough } = parseArgs(process.argv.slice(2));
+const inputArgs = process.argv.slice(2);
+if (inputArgs.some((arg) => arg === '-h' || arg === '--help')) {
+  console.log(HELP_TEXT);
+  process.exit(0);
+}
+
+const { tasks, passthrough } = parseArgs(inputArgs);
 const startedAt = new Date().toISOString();
 const batchToken = startedAt.replace(/[^0-9TZ-]/gu, '');
 const runtimeArgIndex = passthrough.findIndex((arg) => arg === '--runtime');
@@ -79,7 +98,6 @@ for (const task of tasks) {
   const args = [
     join(repoRoot, 'scripts', 'run-real-agent-gyoubu.mjs'),
     '--testset', task.id,
-    '--write',
     '--label', label,
     ...passthrough
   ];
@@ -88,7 +106,10 @@ for (const task of tasks) {
       cwd: repoRoot,
       env: { ...process.env },
       windowsHide: true,
-      maxBuffer: 8 * 1024 * 1024
+      // Real runs may emit hundreds of thousands of model/tool tokens plus
+      // native progress diagnostics. Keep the batch wrapper from terminating
+      // a healthy child at the former 8 MiB stdout/stderr ceiling.
+      maxBuffer: 64 * 1024 * 1024
     });
     void child.stdout;
     const childResult = await findChildReport(label);

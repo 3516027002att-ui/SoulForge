@@ -17,5 +17,5 @@ const envelope = JSON.parse(result.content);
 assert.deepEqual(envelope.data.record.fields, fields);
 assert.ok(Buffer.byteLength(result.content, 'utf8') > 8192, 'exercise the previous rejected range');
 assert.ok(Buffer.byteLength(result.content, 'utf8') <= MAX_BOUNDED_TOOL_RESULT_BYTES);
-assert.equal(MAX_BOUNDED_TOOL_RESULT_BYTES, 32768);
-console.log('32 KiB native tool result budget smoke passed.');
+assert.equal(MAX_BOUNDED_TOOL_RESULT_BYTES, 65_536);
+console.log('64 KiB native tool result budget smoke passed.');

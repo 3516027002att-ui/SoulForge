@@ -4595,7 +4595,9 @@ async function runMapTelemetrySingleFlightFixture() {
   );
   const invalid = await sampler.run(
     () => track(() => ({ telemetry: 'invalid-timing', timing: invalidTiming })),
-    { timeoutMs: 100, slowMs: 1 }
+    // This case asserts invalid timing is omitted, not scheduler speed. A
+    // 1 ms slow threshold made the fixture flaky when the full suite was busy.
+    { timeoutMs: 100, slowMs: 100 }
   );
   const failed = await sampler.run(
     () => track(() => Promise.reject(new Error('fixture failure'))),

@@ -154,8 +154,8 @@ const MUTATION_TOOLS = new Set([
  * native document. Keep the model-facing payload small and leave it enough
  * stable identifiers/cursors to request the next page explicitly.
  */
-export const MAX_BOUNDED_TOOL_RESULT_CHARS = 32_768;
-export const MAX_BOUNDED_TOOL_RESULT_BYTES = 32_768;
+export const MAX_BOUNDED_TOOL_RESULT_CHARS = 65_536;
+export const MAX_BOUNDED_TOOL_RESULT_BYTES = 65_536;
 const BOUNDED_DISCOVERY_TOOLS = new Set([
   'search_resources',
   'search_events',

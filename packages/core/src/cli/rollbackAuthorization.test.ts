@@ -1,7 +1,10 @@
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
+import { join, resolve } from 'node:path';
 import {
   consumeCliRollbackAuthorization,
-  createCliRollbackAuthorization
+  createCliRollbackAuthorization,
+  cliWorkspaceRoot
 } from './localCliSession.js';
 
 const workspaceId = 'file:///workspace/rollback-test';
@@ -34,4 +37,19 @@ const replay = consumeCliRollbackAuthorization(authorization, operationId, works
 assert.equal(replay.ok, false);
 assert.equal(replay.code, 'CLI_ROLLBACK_CONFIRMATION_REPLAYED');
 
-console.log(JSON.stringify({ ok: true, checks: 13 }));
+const previousIsolatedRoot = process.env.SF_E2E_WORKSPACE_STORAGE_ROOT;
+try {
+  const isolatedRoot = join(process.cwd(), 'output', 'cli-workspace-root-fixture');
+  process.env.SF_E2E_WORKSPACE_STORAGE_ROOT = isolatedRoot;
+  const workspaceKey = createHash('sha256').update(workspaceId).digest('hex').slice(0, 24);
+  assert.equal(
+    cliWorkspaceRoot(workspaceId),
+    join(resolve(isolatedRoot), workspaceKey),
+    'CLI must reopen the same isolated workspace database root used by production E2E runs'
+  );
+} finally {
+  if (previousIsolatedRoot === undefined) delete process.env.SF_E2E_WORKSPACE_STORAGE_ROOT;
+  else process.env.SF_E2E_WORKSPACE_STORAGE_ROOT = previousIsolatedRoot;
+}
+
+console.log(JSON.stringify({ ok: true, checks: 14 }));

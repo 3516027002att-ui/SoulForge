@@ -84,11 +84,13 @@ const edgeMsgs = [{
 const firstEdges = buildParamTextReferenceEdges(edgeParams, edgeMsgs);
 const secondEdges = buildParamTextReferenceEdges(edgeParams, edgeMsgs);
 assert.equal(firstEdges.length, 1);
-assert.equal(
+assert.notStrictEqual(
   secondEdges,
   firstEdges,
-  'unchanged PARAM/MSG snapshots must reuse the prepared text-reference edge array'
+  'edge arrays must not be shared because the public results are mutable'
 );
+assert.deepEqual(secondEdges, firstEdges,
+  'unchanged PARAM/MSG snapshots must produce the same semantic edges without retaining per-field token snapshots');
 edgeParams[0]!.rows[0]!.fields![0]!.value = 78;
 const changedFieldEdges = buildParamTextReferenceEdges(edgeParams, edgeMsgs);
 assert.equal(changedFieldEdges[0]?.toUri, 'file:///synthetic/SyntheticText.fmg#78');

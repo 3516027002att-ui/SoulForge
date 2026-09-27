@@ -2,7 +2,7 @@
 import { createHash } from 'node:crypto';
 import { mkdir } from 'node:fs/promises';
 import { homedir } from 'node:os';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import { openWorkspaceSession } from '../workspace/workspaceSession.js';
 import { scanWorkspace } from '../workspace/scanWorkspace.js';
 import { WorkspaceIndex } from '../indexing/workspaceIndex.js';
@@ -131,8 +131,13 @@ function cliToolFailure(code: string, message: string): { ok: false; code: strin
   };
 }
 
-function cliWorkspaceRoot(workspaceId: string): string {
+export function cliWorkspaceRoot(workspaceId: string): string {
   const key = createHash('sha256').update(workspaceId).digest('hex').slice(0, 24);
+  // Match the production E2E host's isolated workspace database root so the
+  // local CLI can inspect/recover a preserved overlay after the Electron main
+  // process exits unexpectedly.
+  const isolatedRoot = process.env.SF_E2E_WORKSPACE_STORAGE_ROOT?.trim();
+  if (isolatedRoot) return join(resolve(isolatedRoot), key);
   const local = process.env.LOCALAPPDATA ?? join(homedir(), 'AppData', 'Local');
   return join(local, 'SoulForge', 'cli-workspaces', key);
 }

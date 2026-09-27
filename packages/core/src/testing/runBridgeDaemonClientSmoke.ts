@@ -3,10 +3,12 @@ import { mkdir, writeFile } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { promisify } from 'node:util';
 import { withSmokeWorkspace } from './harness/smokeWorkspace.js';
+import { BridgeDaemonClient } from '../bridge/bridgeDaemonClient.js';
 import {
   createBridgeDaemonScope,
   disposeBridgeClientPromises,
   disposeBridgeDaemonPool,
+  disposeIdleBridgeDaemonPool,
   runBridge
 } from '../bridge/runBridge.js';
 
@@ -234,6 +236,133 @@ async function mainInWorkspace(root: string): Promise<void> {
     if (processLifecycle.status === 'verified') {
       const afterGlobalReuse = await waitForOwnedBridgeProcessCount(executable, processesBeforeScopes.length);
       assertBaselineProcesses(afterGlobalReuse, processesBeforeScopes, 'global pool reuse');
+    }
+
+    let releaseIdlePruneProgress: (() => void) | undefined;
+    let idlePruneProgressStarted: (() => void) | undefined;
+    const idlePruneProgressGate = new Promise<void>((resolveGate) => { releaseIdlePruneProgress = resolveGate; });
+    const idlePruneProgressEntered = new Promise<void>((resolveEntered) => { idlePruneProgressStarted = resolveEntered; });
+    const activeGlobalRequest = runBridge({
+      bridgeExecutablePath: executable,
+      command: 'inspect',
+      filePath,
+      resourceUri: 'file://event/client-smoke.emevd',
+      allowedRoots: [root],
+      workspaceSessionId: 'bridge-client-idle-prune',
+      timeoutMs: 10_000,
+      onProgress: async () => {
+        idlePruneProgressStarted?.();
+        await idlePruneProgressGate;
+      }
+    });
+    await Promise.race([
+      idlePruneProgressEntered,
+      delay(10_000).then(() => { throw new Error('Global idle-prune test did not receive progress.'); })
+    ]);
+    const whileActive = await disposeIdleBridgeDaemonPool();
+    if (whileActive.activeClientCount < 1) {
+      releaseIdlePruneProgress?.();
+      await Promise.allSettled([activeGlobalRequest]);
+      throw new Error(`Idle pool prune did not preserve an in-flight global request: ${JSON.stringify(whileActive)}`);
+    }
+    releaseIdlePruneProgress?.();
+    const [activeGlobalResult] = await Promise.all([activeGlobalRequest]);
+    if (activeGlobalResult.parseStatus !== 'partial') {
+      throw new Error(`Global request failed after in-flight idle prune: ${JSON.stringify(activeGlobalResult.diagnostics)}`);
+    }
+    const afterIdle = await disposeIdleBridgeDaemonPool();
+    if (afterIdle.disposedClientCount < 1 || afterIdle.activeClientCount !== 0) {
+      throw new Error(`Idle global Bridge client was not reclaimed: ${JSON.stringify(afterIdle)}`);
+    }
+    const recreatedGlobal = await runBridge({
+      bridgeExecutablePath: executable,
+      command: 'validate',
+      filePath,
+      resourceUri: 'file://event/client-smoke.emevd',
+      allowedRoots: [root],
+      workspaceSessionId: 'bridge-client-idle-prune',
+      timeoutMs: 10_000
+    });
+    if (!recreatedGlobal.diagnostics.some((item) => item.code === 'VALIDATION_READABLE')) {
+      throw new Error(`Global Bridge pool could not recreate a reclaimed client: ${JSON.stringify(recreatedGlobal.diagnostics)}`);
+    }
+
+    await disposeBridgeDaemonPool();
+    const coveringPruneOptions = {
+      bridgeExecutablePath: executable,
+      command: 'validate' as const,
+      filePath,
+      resourceUri: 'file://event/covering-idle-prune.emevd',
+      allowedRoots: [root],
+      workspaceSessionId: 'bridge-client-covering-idle-prune',
+      timeoutMs: 10_000
+    };
+    const coveringSeed = await runBridge(coveringPruneOptions);
+    if (!coveringSeed.diagnostics.some((item) => item.code === 'VALIDATION_READABLE')) {
+      throw new Error(`Could not seed a covering client for concurrent idle pruning: ${JSON.stringify(coveringSeed.diagnostics)}`);
+    }
+    let releaseCoveringRequest!: () => void;
+    let markCoveringRequestEntered!: () => void;
+    const coveringRequestBarrier = new Promise<void>((resolveBarrier) => { releaseCoveringRequest = resolveBarrier; });
+    const coveringRequestEntered = new Promise<void>((resolveEntered) => { markCoveringRequestEntered = resolveEntered; });
+    const originalClientRequest = BridgeDaemonClient.prototype.request;
+    const requestPrototype = BridgeDaemonClient.prototype as unknown as {
+      request: (options: Parameters<typeof originalClientRequest>[0]) => ReturnType<typeof originalClientRequest>;
+    };
+    requestPrototype.request = async function (this: BridgeDaemonClient, requestOptions) {
+      if (this.options.workspaceSessionId === coveringPruneOptions.workspaceSessionId) {
+        markCoveringRequestEntered();
+        await coveringRequestBarrier;
+      }
+      return originalClientRequest.call(this, requestOptions);
+    };
+    let coveringReuseResult: Awaited<ReturnType<typeof runBridge>>;
+    let coveringAcquirePrune: Awaited<ReturnType<typeof disposeIdleBridgeDaemonPool>>;
+    const coveringReuse = runBridge(coveringPruneOptions);
+    try {
+      await Promise.race([
+        coveringRequestEntered,
+        delay(10_000).then(() => { throw new Error('Covering-client reuse never reached the request boundary.'); })
+      ]);
+      coveringAcquirePrune = await disposeIdleBridgeDaemonPool();
+    } finally {
+      releaseCoveringRequest();
+      requestPrototype.request = originalClientRequest;
+    }
+    coveringReuseResult = await coveringReuse;
+    if (!coveringReuseResult.diagnostics.some((item) => item.code === 'VALIDATION_READABLE')) {
+      throw new Error(`Idle pruning closed a covering client before its reused request started: ${JSON.stringify(coveringReuseResult.diagnostics)}`);
+    }
+    if (coveringAcquirePrune.activeClientCount < 1) {
+      throw new Error(`Covering-client reuse did not hold an active lease during concurrent pruning: ${JSON.stringify(coveringAcquirePrune)}`);
+    }
+    const pruneAfterCoveringReuse = await disposeIdleBridgeDaemonPool();
+    if (pruneAfterCoveringReuse.disposedClientCount < 1 || pruneAfterCoveringReuse.activeClientCount !== 0) {
+      throw new Error(`Covering client was not reclaimable after its reused request completed: ${JSON.stringify(pruneAfterCoveringReuse)}`);
+    }
+
+    await disposeBridgeDaemonPool();
+    const frameBudgetOptions = {
+      bridgeExecutablePath: executable,
+      command: 'validate' as const,
+      filePath,
+      resourceUri: 'file://event/frame-budget-pool-key.emevd',
+      allowedRoots: [root],
+      workspaceSessionId: 'bridge-client-frame-budget-pool-key',
+      timeoutMs: 10_000
+    };
+    const smallFrameBudget = await runBridge({ ...frameBudgetOptions, maxFrameBytes: 1024 * 1024 });
+    const largeFrameBudget = await runBridge({ ...frameBudgetOptions, maxFrameBytes: 2 * 1024 * 1024 });
+    if (!smallFrameBudget.diagnostics.some((item) => item.code === 'VALIDATION_READABLE')
+      || !largeFrameBudget.diagnostics.some((item) => item.code === 'VALIDATION_READABLE')) {
+      throw new Error(`Bridge frame-budget clients could not complete both requests: ${JSON.stringify({
+        small: smallFrameBudget.diagnostics,
+        large: largeFrameBudget.diagnostics
+      })}`);
+    }
+    const frameBudgetPrune = await disposeIdleBridgeDaemonPool();
+    if (frameBudgetPrune.activeClientCount !== 0 || frameBudgetPrune.disposedClientCount < 2) {
+      throw new Error(`A reused Bridge client retained a leaked lease across frame-budget scopes: ${JSON.stringify(frameBudgetPrune)}`);
     }
 
     console.log(JSON.stringify({

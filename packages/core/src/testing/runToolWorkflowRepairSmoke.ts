@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { createAgentToolBridge } from '../ai/agentToolBridge.js';
+import { createAgentToolBridge, MAX_BOUNDED_TOOL_RESULT_BYTES } from '../ai/agentToolBridge.js';
 import { ToolRegistry } from '../ai/toolRegistry.js';
 import { metadataPage } from '../ai/metadataPage.js';
 
@@ -28,7 +28,10 @@ assert.ok(envelope.data.record?.candidates?.length > 0, result.content);
 assert.ok(!envelope.evidence.nextActions.some((x: string) => x.includes('没有命中')));
 assert.equal(envelope.pagination.deliveryTruncated, envelope.truncated);
 assert.notEqual(envelope.completeness, 'complete');
-assert.ok(Buffer.byteLength(result.content) <= 8192);
+assert.equal(envelope.truncated, false);
+assert.equal(envelope.pagination.deliveryTruncated, false);
+assert.equal(envelope.data.record.candidates.length, 6);
+assert.ok(Buffer.byteLength(result.content, 'utf8') <= MAX_BOUNDED_TOOL_RESULT_BYTES);
 for (const tool of ['analyze_luabnd_script', 'search_param_fields']) {
   const text = '保留完整条件或字段描述'.repeat(50);
   const rows = tool === 'analyze_luabnd_script'
@@ -48,7 +51,7 @@ for (const tool of ['analyze_luabnd_script', 'search_param_fields']) {
 let hugeTae = false;
 registry.register({ name: 'analyze_tae_structure', description: 'TAE metadata transport', permission: 'read', run: () => ({ ok: true, data: {
   filePath: 'C:\\private-mod\\chr\\c0000.anibnd.dcx', sourceHash: 'a'.repeat(64),
-  events: [{ address: 'c0000#A0001.e0', animId: 1, parameterBytesHex: hugeTae ? 'ab'.repeat(20000) : 'ab'.repeat(300) }],
+  events: [{ address: 'c0000#A0001.e0', animId: 1, parameterBytesHex: hugeTae ? 'ab'.repeat(40000) : 'ab'.repeat(300) }],
   pagination: { offset: 0, returnedCount: 1, totalCount: 1, hasMore: false, pageSize: 1 }
 } }) });
 const taeBridge = createAgentToolBridge({ registry, context: { workspaceIndex: null, mode: 'plan' } });
@@ -60,4 +63,3 @@ const oversizedTae = await taeBridge.executeTool({ id: 'tae-large', name: 'analy
 assert.equal(oversizedTae.ok, false);
 assert.equal(JSON.parse(oversizedTae.content).error.code, 'RESULT_METADATA_WINDOW_TOO_LARGE');
 console.log('Tool workflow repair smoke passed.');
-

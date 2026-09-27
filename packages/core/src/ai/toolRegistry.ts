@@ -71,7 +71,7 @@ import { parseMapAddress } from '@soulforge/shared';
 import { decideAiToolPermission, legacyPermissionToLevel } from './toolPermissions.js';
 import { buildRagCorpus, mergeCatalogAndPersisted } from '../rag/chunkBuilder.js';
 import { retrieveEvidence, type RagChunkExclusionMask } from '../rag/retrieve.js';
-import { attachLookupIndexAsync, getLookupIndex } from '../rag/lookupIndex.js';
+import { attachLookupIndexAsync } from '../rag/lookupIndex.js';
 import { getRagStaleChunkMaskCached } from '../rag/freshness.js';
 import { type MemoryStore } from '../memory/memoryStore.js';
 import { EVENT_REFERENCE_SOURCE_URI, searchEventReference } from './eventReference.js';
@@ -162,6 +162,8 @@ export interface ToolContext {
   ragSessionId?: string;
   ragGeneration?: number;
   ragIndexedFilesRevision?: number;
+  /** Host-owned live check used to discard RAG results after a workspace switch. */
+  isWorkspaceContextCurrent?: () => boolean;
   /** Optional long-term memory store (Codex MEMORY.md persistent layer). */
   memoryStore?: MemoryStore;
   /**
@@ -916,6 +918,9 @@ export function createDefaultToolRegistry(): ToolRegistry {
       if (!query.trim()) return fail('INVALID_INPUT', 'retrieve_evidence 需要非空 query。');
       const families = asRagFamilies(value.families);
       await prepareRagQueryLookup(corpus, context.signal);
+      if (!isWorkspaceContextCurrent(context)) {
+        return fail('RAG_CONTEXT_STALE', '工作区会话或 RAG 语料已切换，已丢弃旧检索结果；请重试。');
+      }
       const result = retrieveEvidence(corpus, query, {
         limit: asNumber(value.limit, 8),
         ...(value.expandReferences === undefined ? {} : { expandReferences: value.expandReferences === true }),
@@ -2089,11 +2094,16 @@ export function createDefaultToolRegistry(): ToolRegistry {
         ...(pageSize !== undefined ? { pageSize } : {})
       });
       if (!result.ok) return fail(result.error.code, result.error.message, result.error.details);
+      const resolvedContainer = context.workspaceIndex
+        ? resolveIndexedResourceFile(context, result.containerPath, 'param')
+        : undefined;
+      const sourceUri = resolvedContainer?.ok
+        ? resolvedContainer.sourceUri
+        : pathToFileURL(result.containerPath).href;
       // T09 step 3: the automatic proof is confirmed by the bridge AFTER the
       // bounded projection is delivered (createAgentToolBridge), not promoted
       // here from the raw tool result.
       if (context.workspaceIndex && result.fields.length > 0) {
-        const sourceUri = pathToFileURL(result.containerPath).href;
         // Physical identity: entry + rowIndex + rowId. A PARAM table can hold
         // duplicate logical row ids; bucketing by rowId alone merged distinct
         // physical rows into one projection.
@@ -2125,7 +2135,7 @@ export function createDefaultToolRegistry(): ToolRegistry {
           };
         };
         const exportProvenance = provenanceFor(result.fields);
-        context.workspaceIndex.mergeParamRows({
+        const changed = context.workspaceIndex.mergeParamRows({
           paramName: table,
           ...exportProvenance,
           rows: [...rowsByPhysicalKey.values()].map((bucket) => ({
@@ -2156,13 +2166,22 @@ export function createDefaultToolRegistry(): ToolRegistry {
             })
           }))
         });
-        context.workspaceIndex.rebuildReferences();
-        await context.onSemanticEvidenceUpdated?.([sourceUri]);
+        if (changed) {
+          context.workspaceIndex.rebuildReferences();
+          await context.onSemanticEvidenceUpdated?.([sourceUri]);
+        }
       }
       // T12 step 8: reading NpcParam no longer auto-attaches a crossReferences
       // web. Related context is obtained explicitly via find_references
       // (detail=context) or resolve_entity, so a plain field read stays light.
-      return ok(result);
+      const indexedFile = resolvedContainer?.ok
+        ? context.workspaceIndex?.getFile(resolvedContainer.sourceUri)
+        : undefined;
+      return ok({
+        ...result,
+        sourceUri,
+        ...(indexedFile?.relativePath ? { sourcePath: indexedFile.relativePath } : {})
+      });
     }
   });
 
@@ -4622,8 +4641,19 @@ export function resolveRagCorpus(context: ToolContext): RagCorpus | null {
 
 /** Normal desktop snapshots are prebuilt; legacy/live-merge fallbacks must not block main. */
 async function prepareRagQueryLookup(corpus: RagCorpus | null, signal?: AbortSignal): Promise<void> {
-  if (corpus?.availability === 'available' && !getLookupIndex(corpus)) {
+  if (corpus?.availability === 'available') {
+    // attachLookupIndexAsync validates the existing chunk/reference signatures;
+    // a truthy cached index may still be stale after a mutable legacy corpus
+    // changes. Never let retrieveEvidence perform the resulting rebuild inline.
     await attachLookupIndexAsync(corpus, { ...(signal ? { signal } : {}) });
+  }
+}
+
+function isWorkspaceContextCurrent(context: ToolContext): boolean {
+  try {
+    return context.isWorkspaceContextCurrent?.() !== false;
+  } catch {
+    return false;
   }
 }
 
@@ -4676,6 +4706,9 @@ async function ragSearchFallback(
   }
 
   await prepareRagQueryLookup(corpus, context.signal);
+  if (!isWorkspaceContextCurrent(context)) {
+    return fail('RAG_CONTEXT_STALE', '工作区会话或 RAG 语料已切换，已丢弃旧检索结果；请重试。');
+  }
   const result = retrieveEvidence(corpus, query, {
     limit: Math.max(1, Math.min(100, Math.trunc(limit))),
     families,

@@ -11,6 +11,7 @@ import type {
   MapRegionSymbol,
   MsgExport,
   ParamExport,
+  ParamFieldSymbol,
   ParamRowSymbol,
   RagChunk,
   ReferenceEdge,
@@ -180,6 +181,8 @@ export class WorkspaceIndex {
   /** On-demand/native LUABND projections used by script reference edges. */
   private scriptExports: ScriptExport[] = [];
   private references: ReferenceEdge[] = [];
+  private referencesDirty = true;
+  private lastReferenceBuildResult: ReferenceBuildResult | null = null;
   private actionBinderMembershipCandidates: BinderMembershipCandidate[] = [];
   private actionBinderMembershipReady = false;
   /** Families whose foreground membership projection is complete. */
@@ -229,6 +232,10 @@ export class WorkspaceIndex {
     // be discarded before the first coverage recomputation on the clone.
     clone.invalidateSemanticSourceUriCache();
     clone.references = structuredClone(this.references);
+    clone.referencesDirty = this.referencesDirty;
+    clone.lastReferenceBuildResult = this.lastReferenceBuildResult
+      ? { ...this.lastReferenceBuildResult, edges: clone.references }
+      : null;
     clone.actionBinderMembershipCandidates = structuredClone(this.actionBinderMembershipCandidates);
     clone.actionBinderMembershipReady = this.actionBinderMembershipReady;
     clone.actionBinderMembershipReadyFamilies = new Set(this.actionBinderMembershipReadyFamilies);
@@ -244,6 +251,53 @@ export class WorkspaceIndex {
     clone.nativeVersionEpoch = this.nativeVersionEpoch;
     clone.coverageStore.clear();
     for (const state of this.coverageStore.list()) clone.coverageStore.set(state);
+    return clone;
+  }
+
+  /**
+   * Fork the mutable containers for a source refresh while structurally
+   * sharing unchanged native projection trees. WorkspaceIndex updates use
+   * copy-on-write top-level exports; callers must not mutate nested objects
+   * returned by `toSymbolBundle()` directly.
+   *
+   * The regular `cloneForRefresh()` remains deeply isolated for native readers
+   * that may mutate imported input. This variant is for a validated refresh
+   * candidate whose unchanged projections have already passed provenance
+   * checks and are immutable for the lifetime of the fork.
+   */
+  cloneForRefreshShared(): WorkspaceIndex {
+    const clone = new WorkspaceIndex(this.workspaceId);
+    clone.filesByUri = new Map(this.filesByUri);
+    clone.eventExports = [...this.eventExports];
+    clone.mapExports = [...this.mapExports];
+    clone.paramExports = [...this.paramExports];
+    clone.msgExports = [...this.msgExports];
+    clone.taeExports = [...this.taeExports];
+    clone.scriptExports = [...this.scriptExports];
+    // The constructor warmed every source-URI cache while the projection
+    // arrays were empty. Discard those entries before a later source-family
+    // upsert recomputes coverage against the shared snapshot.
+    clone.invalidateSemanticSourceUriCache();
+    clone.references = [...this.references];
+    clone.referencesDirty = this.referencesDirty;
+    clone.lastReferenceBuildResult = this.lastReferenceBuildResult
+      ? { ...this.lastReferenceBuildResult, edges: clone.references }
+      : null;
+    clone.actionBinderMembershipCandidates = structuredClone(this.actionBinderMembershipCandidates);
+    clone.actionBinderMembershipReady = this.actionBinderMembershipReady;
+    clone.actionBinderMembershipReadyFamilies = new Set(this.actionBinderMembershipReadyFamilies);
+    clone.paramSemanticState = this.paramSemanticState;
+    clone.staleSources.clear();
+    for (const sourceUri of this.staleSources) clone.staleSources.add(sourceUri);
+    clone.partialSources.clear();
+    for (const sourceUri of this.partialSources) clone.partialSources.add(sourceUri);
+    clone.latestProjectionVersions.clear();
+    for (const [sourceUri, version] of this.latestProjectionVersions) {
+      clone.latestProjectionVersions.set(sourceUri, structuredClone(version));
+    }
+    clone.nativeVersionEpoch = this.nativeVersionEpoch;
+    clone.coverageStore.clear();
+    for (const state of this.coverageStore.list()) clone.coverageStore.set(structuredClone(state));
     return clone;
   }
 
@@ -580,6 +634,7 @@ export class WorkspaceIndex {
   invalidateChangedSources(sourceUris: readonly string[]): SourceInvalidationResult {
     const uniqueSources = [...new Set(sourceUris.filter((sourceUri) => sourceUri.trim().length > 0))];
     this.invalidateSemanticSourceUriCache();
+    if (uniqueSources.length > 0) this.markReferencesDirty();
     for (const sourceUri of uniqueSources) {
       this.staleSources.add(sourceUri);
       this.partialSources.delete(this.canonicalSourceUri(sourceUri));
@@ -777,10 +832,17 @@ export class WorkspaceIndex {
     return true;
   }
 
-  /** Merge a partial live PARAM read without erasing rows indexed earlier. */
-  mergeParamRows(value: ParamExport): void {
+  /** Merge a partial live PARAM read without erasing rows indexed earlier. Returns false for a no-op or rejected stale projection. */
+  mergeParamRows(value: ParamExport): boolean {
     const key = paramExportKey(value);
     const existing = this.paramExports.find((item) => paramExportKey(item) === key);
+    if (existing && sameProvidedParamExportMetadata(existing, value)
+      && value.rows.every((incoming) => {
+        const previous = existing.rows.find((row) => paramRowKey(row) === paramRowKey(incoming));
+        return previous !== undefined && sameParamRowAfterMerge(previous, incoming);
+      })) {
+      return false;
+    }
     // Row IDs are only unique inside one native source.  Keying by rowId alone
     // used to let a live read from source B overwrite source A, and could then
     // carry source A's old semantic body under source B's hash.
@@ -810,7 +872,7 @@ export class WorkspaceIndex {
     const sourceHashes = new Set(mergedRows.map((row) => row.sourceHash).filter((item): item is string => Boolean(item)));
     const outerFileHashes = new Set(mergedRows.map((row) => row.outerFileHash).filter((item): item is string => Boolean(item)));
     const sourceRevisions = new Set(mergedRows.map((row) => row.sourceRevision).filter((item): item is number => item !== undefined));
-    this.upsertParamExport({
+    return this.upsertParamExport({
       ...(value.sourceUri !== undefined ? { sourceUri: value.sourceUri } : existing?.sourceUri !== undefined ? { sourceUri: existing.sourceUri } : {}),
       ...(value.entryIndex !== undefined ? { entryIndex: value.entryIndex } : existing?.entryIndex !== undefined ? { entryIndex: existing.entryIndex } : {}),
       ...(value.entryName !== undefined ? { entryName: value.entryName } : existing?.entryName !== undefined ? { entryName: existing.entryName } : {}),
@@ -919,8 +981,27 @@ export class WorkspaceIndex {
   }
 
   rebuildReferences(options: ReferenceBuildOptions = {}): ReferenceBuildResult {
+    const cacheableDefaultBuild = Object.keys(options).length === 0;
+    if (cacheableDefaultBuild && !this.referencesDirty && this.lastReferenceBuildResult) {
+      return this.lastReferenceBuildResult;
+    }
+    // Drop stale or differently configured edges before allocating the next
+    // full graph. If the build throws, keeping the old graph would make stale
+    // relations appear current and also doubles the peak edge memory.
+    this.references = [];
+    this.referencesDirty = true;
+    this.lastReferenceBuildResult = null;
     const result = buildReferenceGraph(this.toSymbolBundle(), options);
     this.references = result.edges;
+    if (cacheableDefaultBuild) {
+      this.referencesDirty = false;
+      this.lastReferenceBuildResult = result;
+    } else {
+      // Non-default options change the graph semantics; a later default call
+      // must not reuse this result as the canonical production graph.
+      this.referencesDirty = true;
+      this.lastReferenceBuildResult = null;
+    }
     return result;
   }
 
@@ -1389,7 +1470,16 @@ export class WorkspaceIndex {
       this.semanticSourceUriCache.clear();
       return;
     }
+    if (domains.some((domain) => ['event', 'map', 'param', 'msg', 'action', 'script'].includes(domain))) {
+      this.markReferencesDirty();
+    }
     for (const domain of domains) this.semanticSourceUriCache.delete(domain);
+  }
+
+  private markReferencesDirty(): void {
+    this.referencesDirty = true;
+    this.references = [];
+    this.lastReferenceBuildResult = null;
   }
 
   private semanticSourceUris(domain: ResourceKind): readonly string[] {
@@ -1697,6 +1787,61 @@ function matchesTaeEntryIdentity(
   return true;
 }
 
+function sameProvidedParamExportMetadata(existing: ParamExport, incoming: ParamExport): boolean {
+  return existing.paramName === incoming.paramName
+    && (incoming.sourceUri === undefined || existing.sourceUri === incoming.sourceUri)
+    && (incoming.entryIndex === undefined || existing.entryIndex === incoming.entryIndex)
+    && (incoming.entryName === undefined || existing.entryName === incoming.entryName)
+    && (incoming.sourceHash === undefined || existing.sourceHash === incoming.sourceHash)
+    && (incoming.outerFileHash === undefined || existing.outerFileHash === incoming.outerFileHash)
+    && (incoming.sourceRevision === undefined || existing.sourceRevision === incoming.sourceRevision);
+}
+
+function sameParamRowAfterMerge(previous: ParamRowSymbol, incoming: ParamRowSymbol): boolean {
+  const { fields: incomingFields, ...incomingMetadata } = incoming;
+  for (const [key, value] of Object.entries(incomingMetadata)) {
+    if (!Object.is(previous[key as keyof ParamRowSymbol], value)) return false;
+  }
+  for (const field of incomingFields ?? []) {
+    const fieldKey = field.fieldId ?? field.name;
+    const previousField = previous.fields?.find((candidate) => (candidate.fieldId ?? candidate.name) === fieldKey);
+    if (!previousField || !sameParamField(previousField, field)) return false;
+  }
+  return true;
+}
+
+function sameParamField(left: ParamFieldSymbol, right: ParamFieldSymbol): boolean {
+  return left.fieldId === right.fieldId
+    && left.name === right.name
+    && left.type === right.type
+    && left.description === right.description
+    && Object.is(left.value, right.value)
+    && left.refsProvenance === right.refsProvenance
+    && sameParamFieldRefs(left.refs, right.refs)
+    && sameStringSequence(left.refsRejected, right.refsRejected);
+}
+
+function sameParamFieldRefs(
+  left: ParamFieldSymbol['refs'],
+  right: ParamFieldSymbol['refs']
+): boolean {
+  if (left === right) return true;
+  if (!left || !right || left.length !== right.length) return false;
+  return left.every((target, index) => {
+    const other = right[index];
+    return other !== undefined
+      && target.param === other.param
+      && target.condition?.fieldId === other.condition?.fieldId
+      && target.condition?.value === other.condition?.value;
+  });
+}
+
+function sameStringSequence(left: readonly string[] | undefined, right: readonly string[] | undefined): boolean {
+  if (left === right) return true;
+  if (!left || !right || left.length !== right.length) return false;
+  return left.every((value, index) => value === right[index]);
+}
+
 function paramExportKey(value: ParamExport): string {
   const sourceUri = value.sourceUri ?? value.rows[0]?.sourceUri ?? '';
   const entryIdentity = value.entryName
@@ -1902,6 +2047,7 @@ const SEKIRO_SEARCH_SYNONYMS: ReadonlyArray<[RegExp, string]> = [
 interface SearchQueryProfile {
   original: string;
   aliases: string[];
+  preferredAliases: string[];
   hasCjk: boolean;
 }
 
@@ -1928,15 +2074,19 @@ function buildSearchQueryProfile(query: string): SearchQueryProfile {
   const original = normalizeSearch(query);
   const foldedQuery = foldSearchCharacters(query);
   const aliases: string[] = [];
+  const preferredAliases: string[] = [];
   for (const [pattern, replacement] of SEKIRO_SEARCH_SYNONYMS) {
     if (!pattern.test(query) && !pattern.test(foldedQuery)) continue;
     const normalizedReplacement = normalizeSearch(replacement);
     if (!normalizedReplacement) continue;
+    const canonicalAlias = normalizedReplacement.split(' ')[0];
+    if (canonicalAlias) preferredAliases.push(canonicalAlias);
     aliases.push(normalizedReplacement, ...normalizedReplacement.split(' '));
   }
   return {
     original,
     aliases: [...new Set(aliases.filter((alias) => alias !== original))],
+    preferredAliases: [...new Set(preferredAliases.filter((alias) => alias !== original))],
     hasCjk: /[\u3400-\u9fff]/u.test(original)
   };
 }
@@ -2356,7 +2506,15 @@ function scoreParamRow(row: ParamRowSymbol, text: string, profile: SearchQueryPr
   const base = scoreSearchProfile(text, profile);
   const rowNameScore = scoreSearchProfile(row.rowName ?? '', profile);
   const paramNameScore = scoreSearchProfile(row.paramName, profile);
-  return base + rowNameScore * 1.75 + paramNameScore * 0.25;
+  // A declared game-name synonym is stronger evidence of the intended
+  // identity than an unrelated row that merely contains the user's misspelling
+  // (for example, `怨恨鬼刑部` must not outrank canonical `鬼形部` for query
+  // `鬼刑部`). Keep the literal competitor in the result set, but rank the
+  // explicit canonical alias first so the model can verify both candidates.
+  const preferredAliasScore = Math.max(0, ...profile.preferredAliases.map((alias) => (
+    scoreAliasTerm(normalizeSearch(row.rowName ?? ''), alias, profile)
+  )));
+  return base + rowNameScore * 1.75 + paramNameScore * 0.25 + preferredAliasScore * 8;
 }
 
 function normalizeParamName(value: string): string {

@@ -147,6 +147,12 @@ export async function commitParamMutationsViaBridge(
   };
 }
 
+/**
+ * Legacy materializing PARAM reader used by bounded editor reads/writes.
+ * `maxRows` limits the returned projection after Bridge completes its request;
+ * it is not a native payload or heap bound. Whole-table semantic refreshes
+ * must use `readParamDocumentRowsPagedViaBridge` instead.
+ */
 export async function readParamDocumentViaBridge(input: {
   sourcePath: string;
   allowedRoots: string[];

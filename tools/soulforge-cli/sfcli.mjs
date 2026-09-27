@@ -14,6 +14,7 @@
  *   --mode <mode>        plan | normal | fullPermission（默认 normal）
  *   --confirm-rollback <opId>  显式授予当前 workspace 对单个 opId 的一次性回滚确认
  *   --analyze            打开后执行完整原生分析（慢，但无语义缓存时需要）
+ *   --no-analyze          显式跳过语义分析（适用于操作历史/回滚等维护工具）
  *   --no-cache           跳过 workspace.db 语义缓存水合
  *   --json               以紧凑 JSON 输出结果
  *   --quiet              仅输出工具结果
@@ -67,6 +68,7 @@ function parseArgs(argv) {
     mode: process.env.SOULFORGE_MODE || 'normal',
     confirmRollback: null,
     analyze: false,
+    noAnalyze: false,
     useCache: true,
     json: false,
     quiet: false,
@@ -105,6 +107,9 @@ function parseArgs(argv) {
       case '--analyze':
         options.analyze = true;
         break;
+      case '--no-analyze':
+        options.noAnalyze = true;
+        break;
       case '--no-cache':
         options.useCache = false;
         break;
@@ -129,6 +134,7 @@ function parseArgs(argv) {
   if (!options.command) {
     options.command = rest.shift() ?? 'help';
   }
+  if (options.analyze && options.noAnalyze) fail('--analyze 与 --no-analyze 不能同时使用');
   if (options.command === 'call') {
     if (rest[0] === '--stdin') {
       options.stdin = true;
@@ -167,6 +173,8 @@ function printUsage() {
   --base <path>                游戏根目录（可选）
   --mode <mode>                plan | normal | fullPermission
   --confirm-rollback <opId>    当前 workspace 对单个 opId 的一次性 rollback 授权
+  --analyze                    显式请求完整原生语义分析
+  --no-analyze                 显式跳过语义分析；适用于操作历史/回滚等维护工具
   --no-cache                   跳过 workspace.db 语义缓存水合
   --json                       一次性调用输出 JSON
   --quiet                      隐藏普通进度
@@ -243,7 +251,7 @@ async function main() {
     mode: options.mode === 'plan' || options.mode === 'fullPermission' ? options.mode : 'normal',
     ...(options.confirmRollback ? { confirmRollbackOpId: options.confirmRollback } : {}),
     principal: 'local-cli',
-    analyze: options.analyze || !metadataOnly,
+    analyze: options.noAnalyze ? false : options.analyze || !metadataOnly,
     useCache: options.useCache,
     requireDurableLog: false,
     // Quiet suppresses progress, not degraded cache/audit guarantees. These

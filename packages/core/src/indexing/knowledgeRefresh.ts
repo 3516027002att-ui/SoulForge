@@ -29,6 +29,11 @@ export interface RefreshKnowledgeAfterCommitInput {
   /** Publish a validated candidate into the live index after freshness checks. */
   publish?: (index: WorkspaceIndex, changedSources: readonly string[], signal?: AbortSignal) => Promise<WorkspaceIndex> | WorkspaceIndex;
   persist?: (index: WorkspaceIndex, changedSources: readonly string[], signal?: AbortSignal) => Promise<void>;
+  /** Observe large in-memory publication boundaries without changing refresh authority. */
+  onRefreshBoundary?: (
+    stage: 'publish' | 'referenceBuild',
+    phase: 'started' | 'completed' | 'failed'
+  ) => void;
   /** Abort a bounded post-commit refresh without undoing the committed write. */
   signal?: AbortSignal;
 }
@@ -36,6 +41,39 @@ export interface RefreshKnowledgeAfterCommitInput {
 export interface RefreshKnowledgeAfterCommitOutput {
   index: WorkspaceIndex;
   result: KnowledgeRefreshResult;
+}
+
+export interface PostCommitRefreshBaseline {
+  /**
+   * The supplied index after the requested source semantics are invalidated.
+   * This index is safe to keep live during the asynchronous refresh because
+   * it contains no stale projection for those sources.
+   */
+  index: WorkspaceIndex;
+  invalidated: SourceInvalidationResult;
+}
+
+/**
+ * Invalidate before a potentially slow post-commit scan and reuse that
+ * stale-safe active index as the refresh baseline. Callers still build an
+ * isolated published index before exposing fresh semantics.
+ */
+export function preparePostCommitRefreshBaseline(
+  index: WorkspaceIndex,
+  requestedSources: readonly string[]
+): PostCommitRefreshBaseline {
+  const uniqueSources = [...new Set(requestedSources.filter((sourceUri) => sourceUri.trim().length > 0))];
+  const alreadyStale = new Set(index.getStaleSourceUris().map(normalizeSourceToken));
+  const sourcesToInvalidate = uniqueSources.filter((sourceUri) => !alreadyStale.has(normalizeSourceToken(sourceUri)));
+  const newlyInvalidated = index.invalidateChangedSources(sourcesToInvalidate);
+  // invalidateChangedSources rebuilds references when it actually removes
+  // semantics. Preserve the caller's full requested identity set while
+  // avoiding another whole-graph rebuild for sources already invalidated by
+  // an earlier stage of this same post-commit refresh.
+  const invalidated = sourcesToInvalidate.length === uniqueSources.length
+    ? newlyInvalidated
+    : { ...newlyInvalidated, sourceUris: uniqueSources };
+  return { index, invalidated };
 }
 
 export function summarizeKnowledgeRefresh(result: KnowledgeRefreshResult): KnowledgeRefreshSummary {
@@ -69,9 +107,8 @@ export async function refreshKnowledgeAfterCommit(
 ): Promise<RefreshKnowledgeAfterCommitOutput> {
   const changedSources = detectChangedSourceUris(input.beforeFiles, input.afterFiles, input.requestedSources ?? []);
   throwIfRefreshAborted(input.signal);
-  const invalidated = input.index.invalidateChangedSources(changedSources);
+  const invalidated = preparePostCommitRefreshBaseline(input.index, changedSources).invalidated;
   input.index.setFiles(input.afterFiles);
-  input.index.rebuildReferences();
 
   if (changedSources.length === 0) {
     await input.persist?.(input.index, changedSources, input.signal);
@@ -125,11 +162,26 @@ export async function refreshKnowledgeAfterCommit(
     }
     const semanticState = reanalyzed.semanticState;
     throwIfRefreshAborted(input.signal);
-    const publishedIndex = input.publish
-      ? await input.publish(reanalyzed.index, changedSources, input.signal)
-      : reanalyzed.index;
+    let publishedIndex = reanalyzed.index;
+    if (input.publish) {
+      notifyRefreshBoundary(input, 'publish', 'started');
+      try {
+        publishedIndex = await input.publish(reanalyzed.index, changedSources, input.signal);
+        notifyRefreshBoundary(input, 'publish', 'completed');
+      } catch (error) {
+        notifyRefreshBoundary(input, 'publish', 'failed');
+        throw error;
+      }
+    }
     throwIfRefreshAborted(input.signal);
-    publishedIndex.rebuildReferences();
+    notifyRefreshBoundary(input, 'referenceBuild', 'started');
+    try {
+      publishedIndex.rebuildReferences();
+      notifyRefreshBoundary(input, 'referenceBuild', 'completed');
+    } catch (error) {
+      notifyRefreshBoundary(input, 'referenceBuild', 'failed');
+      throw error;
+    }
     await input.persist?.(publishedIndex, changedSources, input.signal);
     return {
       index: publishedIndex,
@@ -171,6 +223,18 @@ export async function refreshKnowledgeAfterCommit(
         error: error instanceof Error ? error.message : String(error)
       }
     };
+  }
+}
+
+function notifyRefreshBoundary(
+  input: RefreshKnowledgeAfterCommitInput,
+  stage: 'publish' | 'referenceBuild',
+  phase: 'started' | 'completed' | 'failed'
+): void {
+  try {
+    input.onRefreshBoundary?.(stage, phase);
+  } catch {
+    // Diagnostic observers must not change commit refresh semantics.
   }
 }
 

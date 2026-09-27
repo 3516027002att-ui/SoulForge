@@ -45,24 +45,6 @@ const ROW_FMG_ASSOCIATIONS: Readonly<Record<string, readonly string[]>> = {
 
 const MAX_PARAM_TEXT_LINKS = 16;
 
-// Keep a weak identity index for the common immutable-snapshot path, but pair
-// it with a primitive semantic snapshot.  The public API accepts readonly
-// arrays only as a TypeScript constraint; callers can still mutate rows,
-// fields, MSG entries, or export arrays in place.  The token snapshot makes
-// those mutations invalidate the cache without rebuilding a large string key.
-type ParamTextSemanticToken = string | number | boolean | null | undefined;
-
-interface ParamTextReferenceEdgesCacheEntry {
-  paramTokens: ParamTextSemanticToken[];
-  msgTokens: ParamTextSemanticToken[];
-  edges: ReferenceEdge[];
-}
-
-const paramTextReferenceEdgesCache = new WeakMap<
-  readonly { rows: readonly ParamRowSymbol[] }[],
-  WeakMap<readonly MsgExport[], ParamTextReferenceEdgesCacheEntry>
->();
-
 export interface ParamTextFieldClassifier {
   isTextReferenceField(field: ParamFieldSymbol): boolean;
 }
@@ -262,90 +244,16 @@ export function paramTextLinkSearchText(links: readonly ParamTextLink[]): string
   ].filter(Boolean).join(' ')).join(' ');
 }
 
-const TOKEN_PARAM_EXPORT = 1;
-const TOKEN_PARAM_ROWS = 2;
-const TOKEN_ROW = 3;
-const TOKEN_ROW_FIELDS = 4;
-const TOKEN_FIELD = 5;
-const TOKEN_MSG_EXPORT = 6;
-const TOKEN_MSG_ENTRIES = 7;
-const TOKEN_MSG_ENTRY = 8;
-const TOKEN_VALUE = 9;
-
-function pushSemanticToken(
-  tokens: ParamTextSemanticToken[],
-  tag: number,
-  value: ParamTextSemanticToken = undefined
-): void {
-  tokens.push(tag, value);
-}
-
-function paramTextSemanticTokens(
-  params: readonly { rows: readonly ParamRowSymbol[] }[],
-  msgExports: readonly MsgExport[]
-): { paramTokens: ParamTextSemanticToken[]; msgTokens: ParamTextSemanticToken[] } {
-  const paramTokens: ParamTextSemanticToken[] = [];
-  for (const paramExport of params) {
-    pushSemanticToken(paramTokens, TOKEN_PARAM_EXPORT);
-    pushSemanticToken(paramTokens, TOKEN_PARAM_ROWS, paramExport.rows.length);
-    for (const row of paramExport.rows) {
-      pushSemanticToken(paramTokens, TOKEN_ROW);
-      pushSemanticToken(paramTokens, TOKEN_VALUE, row.uri);
-      pushSemanticToken(paramTokens, TOKEN_VALUE, row.sourceUri);
-      pushSemanticToken(paramTokens, TOKEN_VALUE, row.paramName);
-      pushSemanticToken(paramTokens, TOKEN_VALUE, row.rowId);
-      pushSemanticToken(paramTokens, TOKEN_ROW_FIELDS, row.fields?.length ?? 0);
-      for (const field of row.fields ?? []) {
-        pushSemanticToken(paramTokens, TOKEN_FIELD);
-        pushSemanticToken(paramTokens, TOKEN_VALUE, field.fieldId);
-        pushSemanticToken(paramTokens, TOKEN_VALUE, field.name);
-        pushSemanticToken(paramTokens, TOKEN_VALUE, field.type);
-        pushSemanticToken(paramTokens, TOKEN_VALUE, field.description);
-        pushSemanticToken(paramTokens, TOKEN_VALUE, field.refsProvenance);
-        pushSemanticToken(paramTokens, TOKEN_VALUE, field.value);
-      }
-    }
-  }
-
-  const msgTokens: ParamTextSemanticToken[] = [];
-  for (const msgExport of msgExports) {
-    pushSemanticToken(msgTokens, TOKEN_MSG_EXPORT);
-    pushSemanticToken(msgTokens, TOKEN_VALUE, msgExport.category);
-    pushSemanticToken(msgTokens, TOKEN_MSG_ENTRIES, msgExport.entries.length);
-    for (const entry of msgExport.entries) {
-      pushSemanticToken(msgTokens, TOKEN_MSG_ENTRY);
-      pushSemanticToken(msgTokens, TOKEN_VALUE, entry.uri);
-      pushSemanticToken(msgTokens, TOKEN_VALUE, entry.sourceUri);
-      pushSemanticToken(msgTokens, TOKEN_VALUE, entry.category);
-      pushSemanticToken(msgTokens, TOKEN_VALUE, entry.textId);
-      pushSemanticToken(msgTokens, TOKEN_VALUE, entry.text);
-    }
-  }
-  return { paramTokens, msgTokens };
-}
-
-function sameSemanticTokens(left: readonly ParamTextSemanticToken[], right: readonly ParamTextSemanticToken[]): boolean {
-  if (left.length !== right.length) return false;
-  for (let index = 0; index < left.length; index += 1) {
-    if (!Object.is(left[index], right[index])) return false;
-  }
-  return true;
-}
-
-/** Build graph edges for PARAM↔FMG links without numeric-fallback noise. */
+/**
+ * Build graph edges for PARAM↔FMG links without numeric-fallback noise.
+ * This intentionally avoids a module-level full-field token snapshot: the
+ * WorkspaceIndex caches the graph by projection generation, while a second
+ * snapshot cache retained O(all PARAM fields) and shared a mutable edge array.
+ */
 export function buildParamTextReferenceEdges(
   params: readonly { rows: readonly ParamRowSymbol[] }[],
   msgExports: readonly MsgExport[]
 ): ReferenceEdge[] {
-  const byMsgSnapshot = paramTextReferenceEdgesCache.get(params);
-  const cached = byMsgSnapshot?.get(msgExports);
-  const { paramTokens, msgTokens } = paramTextSemanticTokens(params, msgExports);
-  if (cached !== undefined
-    && sameSemanticTokens(cached.paramTokens, paramTokens)
-    && sameSemanticTokens(cached.msgTokens, msgTokens)) {
-    return cached.edges;
-  }
-
   const lookup = buildTextEntryLookup(msgExports);
   const edges: ReferenceEdge[] = [];
   const seen = new Set<string>();
@@ -375,10 +283,6 @@ export function buildParamTextReferenceEdges(
       }
     }
   }
-  const cacheForParams = byMsgSnapshot
-    ?? new WeakMap<readonly MsgExport[], ParamTextReferenceEdgesCacheEntry>();
-  cacheForParams.set(msgExports, { paramTokens, msgTokens, edges });
-  if (byMsgSnapshot === undefined) paramTextReferenceEdgesCache.set(params, cacheForParams);
   return edges;
 }
 

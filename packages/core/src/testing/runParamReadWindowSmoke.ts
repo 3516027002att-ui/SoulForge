@@ -1,6 +1,26 @@
 import assert from 'node:assert/strict';
 import { createOpaqueCursor, parseOpaqueCursor } from '@soulforge/shared';
-import { paramReadSourceHash, paramReadWindow } from '../param/paramReadWindow.js';
+import { expandParamFieldQuery } from '../param/containerParamEdit.js';
+import { paramContainerRecoveryUri, paramReadCoverage, paramReadSourceHash, paramReadWindow } from '../param/paramReadWindow.js';
+
+const overlayRoot = 'C:\\workspace\\mods';
+assert.equal(
+  paramContainerRecoveryUri(overlayRoot, 'C:\\workspace\\mods\\param\\gameparam\\gameparam.parambnd.dcx'),
+  'file://param/gameparam/gameparam.parambnd.dcx'
+);
+assert.equal(paramContainerRecoveryUri(overlayRoot, 'D:\\outside\\gameparam.parambnd.dcx'), undefined);
+assert.ok(expandParamFieldQuery('ninsatsuNum').includes('ninsatu'), 'near-name recovery must surface the trusted field ID spelling');
+
+assert.deepEqual(paramReadCoverage({ missingRows: 0, missingFields: 0, hasMore: false }), {
+  complete: true, status: 'complete'
+});
+for (const incomplete of [
+  { missingRows: 1, missingFields: 0, hasMore: false },
+  { missingRows: 0, missingFields: 1, hasMore: false },
+  { missingRows: 0, missingFields: 0, hasMore: true }
+]) {
+  assert.deepEqual(paramReadCoverage(incomplete), { complete: false, status: 'partial' });
+}
 
 const cells = Array.from({ length: 20 }, (_, index) => ({ table: 'SpEffectParam', fieldId: `field${index}` }));
 const versions = [{ table: 'A', entryIndex: 1, sourceHash: 'a' }, { table: 'B', entryIndex: 2, sourceHash: 'b' }];

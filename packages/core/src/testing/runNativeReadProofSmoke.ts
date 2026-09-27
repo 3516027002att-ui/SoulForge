@@ -606,7 +606,8 @@ export async function runNativeReadProofSmoke(): Promise<void> {
       data: {
         containerPath,
         table: 'Big',
-        entries: Array.from({ length: 300 }, (_, index) => ({ id: index, text: 'x'.repeat(100) }))
+        // Keep the projection above the current 64 KiB Agent envelope cap.
+        entries: Array.from({ length: 300 }, (_, index) => ({ id: index, text: 'x'.repeat(300) }))
       }
     })
   });

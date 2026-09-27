@@ -129,7 +129,10 @@ async function main(): Promise<void> {
       stagingRoot: staging,
       allowedRoots: [overlay],
       oodleRuntimeRoot: game,
-      timeoutMs: 180_000
+      timeoutMs: 180_000,
+      ...(process.env.SOULFORGE_NATIVE_PARAM_TRACE === '1'
+        ? { paramReadProgress: (progress) => console.info(`[SoulForge native-param-progress] ${JSON.stringify(progress)}`) }
+        : {})
     });
     if (initial.failedSources.length > 0) {
       throw new Error(`initial native semantic refresh failed: ${JSON.stringify(initial.diagnostics)}`);
@@ -799,16 +802,23 @@ async function refreshAfterCommit(state: NativeTestState, sourceUri: string): Pr
     beforeFiles,
     afterFiles: scan.files,
     requestedSources: [sourceUri],
+    ...(process.env.SOULFORGE_NATIVE_PARAM_TRACE === '1'
+      ? { onRefreshBoundary: (stage, phase) => console.info(`[SoulForge refresh-boundary] ${JSON.stringify({ stage, phase, at: new Date().toISOString(), heapUsedMb: Math.round(process.memoryUsage().heapUsed / (1024 * 1024)), rssMb: Math.round(process.memoryUsage().rss / (1024 * 1024)) })}`) }
+      : {}),
     reanalyze: async () => {
       const reanalyzed = new WorkspaceIndex(scan.workspaceId);
       reanalyzed.setFiles(scan.files);
       const native = await refreshNativeSemanticSources({
         index: reanalyzed,
+        indexOwnership: 'isolated-candidate',
         sourceFiles: scan.files.filter((file) => file.sourceUri === sourceUri),
         stagingRoot: state.staging,
         allowedRoots: [state.overlay],
         oodleRuntimeRoot: state.gameRoot,
-        timeoutMs: 180_000
+        timeoutMs: 180_000,
+        ...(process.env.SOULFORGE_NATIVE_PARAM_TRACE === '1'
+          ? { paramReadProgress: (progress) => console.info(`[SoulForge native-param-progress] ${JSON.stringify(progress)}`) }
+          : {})
       });
       if (native.failedSources.length > 0) {
         throw new Error(native.diagnostics.map((diagnostic) => diagnostic.message).join('；'));

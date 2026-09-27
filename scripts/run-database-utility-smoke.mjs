@@ -4,6 +4,18 @@ import { fileURLToPath } from 'node:url';
 import { ensureAgentProductionBuild } from './ensure-agent-production-build.mjs';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
+const gateTest = spawnSync(process.execPath, [
+  '--experimental-strip-types',
+  join(root, 'apps', 'desktop', 'src', 'main', 'workspaceDatabaseOpenGate.test.ts')
+], {
+  cwd: root,
+  stdio: 'inherit',
+  windowsHide: true,
+  env: process.env
+});
+if (gateTest.error) throw gateTest.error;
+if (gateTest.status !== 0) process.exit(gateTest.status ?? 1);
+
 await ensureAgentProductionBuild({ databaseSmoke: true });
 
 const electronPath = (await import('electron')).default;

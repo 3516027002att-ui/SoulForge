@@ -17,8 +17,6 @@ import {
   retrieveEvidence,
   retrieveEvidenceHybrid,
   resolveRagCorpus,
-  buildRagCorpus,
-  mergeCatalogAndPersisted,
   createRagCorpus,
   listRolloutSessions,
   loadRolloutSession,
@@ -64,6 +62,11 @@ import type { MemoryManager } from '../memoryManager.js';
 import type { ModelServiceCredentialVault } from '../modelServiceCredentials.js';
 import type { OperationLogUtilityClient, WorkspaceBoundUtilityStore } from '../operationLogUtilityClient.js';
 import { INTERNAL_RAG_EMBEDDING, InternalRagEmbeddingService } from '../ragEmbedding.js';
+import { prepareAgentRagSearchCorpus } from '../ragRefreshCorpus.js';
+import {
+  createAgentBridgeBaseContext,
+  wrapAgentToolContextRefreshCallbacks
+} from './agentBridgeContext.js';
 import { isAgentRagSearchIdentityCurrent } from './agentRagIdentity.js';
 
 export interface AiAgentRunRequest {
@@ -449,7 +452,8 @@ export function registerAgentIpcHandlers(deps: AgentIpcDeps): void {
         workspaceId: deps.getActiveIndex()!.workspaceId,
         builtAt: new Date().toISOString(),
         chunks: await scopedDatabase.loadRagChunks(),
-        references: await scopedDatabase.loadReferences()
+        references: await scopedDatabase.loadReferences(),
+        lookupIndex: 'deferred'
       });
       if (corpus.availability !== 'available') {
         return {
@@ -561,19 +565,20 @@ export function registerAgentIpcHandlers(deps: AgentIpcDeps): void {
         message: '内存 RAG 语料尚未就绪；查询不会启动数据库 recovery。'
       };
     }
-    const liveCorpus = activeRag ?? buildRagCorpus(initialIndex);
-    const persisted = createRagCorpus({
-      workspaceId: initialIndex.workspaceId,
-      builtAt: liveCorpus.builtAt,
-      chunks: database ? await database.loadRagChunks() : [],
-      references: database ? await database.loadReferences() : []
-    });
+    const persistedChunks = database ? await database.loadRagChunks() : [];
+    const persistedReferences = database ? await database.loadReferences() : [];
     // A freshly published in-memory semantic index is the current authority;
-    // persisted chunks only fill verified source/revision gaps. This keeps a
-    // clean workspace usable before the background RAG writer has finished.
-    const corpus = activeRag
-      ? mergeCatalogAndPersisted(liveCorpus, persisted)
-      : persisted;
+    // persisted chunks only fill verified source/revision gaps. Intermediate
+    // views stay deferred so each fallback query does not build two full RAG
+    // indexes on the Electron main-process heap.
+    const corpus = await prepareAgentRagSearchCorpus({
+      workspaceId: initialIndex.workspaceId,
+      builtAt: activeRag?.builtAt ?? new Date().toISOString(),
+      activeRag,
+      persistedChunks,
+      persistedReferences,
+      ...(options.signal ? { signal: options.signal } : {})
+    });
 
     // Database loading and local-vector checks may await long enough for a
     // remount or semantic publication.  Recheck before any retrieval branch,
@@ -806,15 +811,29 @@ export function registerAgentIpcHandlers(deps: AgentIpcDeps): void {
           modeCeiling: mode
         });
       }
-      const currentAgentContext = (): ToolContext => ({
-        ...deps.currentToolContext(),
-        ...(coreSession ? {
-          coreSession,
-          nativeReadProofs: coreSession.proofStore,
-          proofPrincipal: coreSession.principal,
-          ...(coreSession.editSession ? { editSession: coreSession.editSession } : {})
-        } : {})
-      });
+      const updateCoreSessionWorkspaceIndex = (): void => {
+        const activeSession = deps.getActiveSession();
+        if (coreSession && activeWorkspaceSession && activeSession === activeWorkspaceSession) {
+          const activeIndex = deps.getActiveIndex();
+          if (activeIndex) coreSession.updateWorkspaceIndex(activeIndex, activeSession);
+        }
+      };
+      const currentAgentContext = (): ToolContext => {
+        updateCoreSessionWorkspaceIndex();
+        const hostContext = deps.currentToolContext();
+        const refreshAwareContext = coreSession
+          ? wrapAgentToolContextRefreshCallbacks(hostContext, updateCoreSessionWorkspaceIndex)
+          : hostContext;
+        return {
+          ...refreshAwareContext,
+          ...(coreSession ? {
+            coreSession,
+            nativeReadProofs: coreSession.proofStore,
+            proofPrincipal: coreSession.principal,
+            ...(coreSession.editSession ? { editSession: coreSession.editSession } : {})
+          } : {})
+        };
+      };
       // 无工作区时 deps.getActiveIndex() 为 null：工具层按工具守卫（WORKSPACE_REQUIRED），
       // 需要工作区的工具干净失败，不整次拒绝（T6）。
       const bridge = createAgentToolBridge({
@@ -822,12 +841,7 @@ export function registerAgentIpcHandlers(deps: AgentIpcDeps): void {
         contextProvider: currentAgentContext,
         // Agent 可以读取记忆来恢复项目上下文，但不能把未经用户明确整理的
         // 运行时对话或测试内容写入长期记忆；记忆写入只保留给显式宿主流程。
-        context: {
-          ...currentAgentContext(),
-          mode,
-          modeCeiling: mode,
-          allowMemoryWrite: false
-        },
+        context: createAgentBridgeBaseContext(mode),
         // Discovery is non-blocking: the bridge returns candidate/evidence
         // metadata, while native readers and writers enforce real authority.
       });

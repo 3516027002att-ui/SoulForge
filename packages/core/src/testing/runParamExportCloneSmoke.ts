@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import type { ParamExport, ParamFieldSymbol, ParamRowSymbol } from '@soulforge/shared';
+import type { IndexedFile, ParamExport, ParamFieldSymbol, ParamRowSymbol } from '@soulforge/shared';
 import { cloneParamExports } from '../indexing/cloneParamExport.js';
 import { WorkspaceIndex } from '../indexing/workspaceIndex.js';
 
@@ -230,6 +230,96 @@ function testWorkspaceRefreshIntegration(): void {
   assert.equal(source.rows[0]!.rowName, 'one');
 }
 
+function testSharedProjectionRefreshFork(): void {
+  const stableSource = 'file://param/stable.parambnd.dcx#StableParam';
+  const changedSource = 'file://param/changed.parambnd.dcx#ChangedParam';
+  const stable: ParamExport = {
+    sourceUri: stableSource,
+    paramName: 'StableParam',
+    rows: [{ uri: `${stableSource}#1`, sourceUri: stableSource, paramName: 'StableParam', rowId: 1, rowName: 'keep', fields: [] }]
+  };
+  const changed: ParamExport = {
+    sourceUri: changedSource,
+    paramName: 'ChangedParam',
+    rows: [{ uri: `${changedSource}#2`, sourceUri: changedSource, paramName: 'ChangedParam', rowId: 2, rowName: 'old', fields: [] }]
+  };
+  const live = new WorkspaceIndex('param-shared-refresh-fork');
+  assert.equal(live.upsertParamExport(stable), true);
+  assert.equal(live.upsertParamExport(changed), true);
+  const liveStable = live.toSymbolBundle().params!.find((item) => item.sourceUri === stableSource)!;
+  const fork = live.cloneForRefreshShared();
+  const forkStable = fork.toSymbolBundle().params!.find((item) => item.sourceUri === stableSource)!;
+  assert.notEqual(fork.toSymbolBundle().params, live.toSymbolBundle().params, 'a fork owns its top-level projection arrays');
+  assert.equal(forkStable, liveStable, 'unchanged immutable export trees must be structurally shared rather than deep-cloned');
+
+  fork.invalidateChangedSources([changedSource]);
+  fork.rebuildReferences();
+  assert.equal(live.getStats().paramRows, 2, 'invalidating the fork must not mutate the live stale-safe baseline');
+  assert.equal(fork.getStats().paramRows, 1);
+  assert.equal(fork.upsertParamExport({ ...changed, rows: [{ ...changed.rows[0]!, rowName: 'fresh' }] }), true);
+  assert.equal(fork.toSymbolBundle().params!.find((item) => item.sourceUri === changedSource)!.rows[0]!.rowName, 'fresh');
+  assert.equal(live.toSymbolBundle().params!.find((item) => item.sourceUri === changedSource)!.rows[0]!.rowName, 'old');
+}
+
+function testSharedProjectionRefreshForkPreservesUntouchedCoverage(): void {
+  const eventSource = 'file:///event/common.emevd.dcx';
+  const paramSource = 'file:///param/gameparam.parambnd.dcx';
+  const indexedFile = (sourceUri: string, resourceKind: 'event' | 'param'): IndexedFile => ({
+    id: sourceUri,
+    workspaceId: 'param-shared-refresh-coverage',
+    sourceUri,
+    sourcePath: sourceUri,
+    game: 'sekiro',
+    resourceKind,
+    parseStatus: 'partial',
+    diagnostics: [],
+    absolutePath: `C:/workspace/${resourceKind}/${sourceUri.split('/').at(-1)}`,
+    relativePath: `${resourceKind}/${sourceUri.split('/').at(-1)}`,
+    extension: '.dcx',
+    compoundExtension: '.dcx',
+    formatKind: 'dcx',
+    formatLabel: 'DCX',
+    size: 1,
+    mtimeMs: 1
+  });
+  const paramExport = (rowName: string): ParamExport => ({
+    sourceUri: paramSource,
+    paramName: 'NpcParam',
+    sourceHash: rowName,
+    rows: [{
+      uri: `${paramSource}#NpcParam/1`,
+      sourceUri: paramSource,
+      paramName: 'NpcParam',
+      rowId: 1,
+      rowName,
+      fields: []
+    }]
+  });
+
+  const live = new WorkspaceIndex('param-shared-refresh-coverage');
+  live.setFiles([indexedFile(eventSource, 'event'), indexedFile(paramSource, 'param')]);
+  assert.equal(live.upsertEventExport({ events: [{
+    uri: `${eventSource}#event/1`,
+    sourceUri: eventSource,
+    eventId: 1,
+    instructions: []
+  }] }), true);
+  assert.equal(live.upsertParamExport(paramExport('old')), true);
+
+  live.invalidateChangedSources([paramSource]);
+  const baselineCoverage = live.getCoverageState('workspace', 'event');
+  assert.deepEqual(baselineCoverage.coveredResourceIds, [eventSource]);
+  const published = live.cloneForRefreshShared();
+  assert.equal(published.upsertParamExport(paramExport('fresh')), true);
+
+  const publishedCoverage = published.getCoverageState('workspace', 'event');
+  assert.deepEqual(
+    publishedCoverage.coveredResourceIds,
+    baselineCoverage.coveredResourceIds,
+    'refreshing PARAM on a shared clone must not erase the untouched EMEVD coverage projection'
+  );
+}
+
 function makeRepeatedDescriptionExport(rowCount: number): ParamExport {
   const description = 'repeated-long-description-'.repeat(128);
   return {
@@ -266,5 +356,7 @@ function reportLightweightComparison(): void {
 
 testCloneGranularity();
 testWorkspaceRefreshIntegration();
+testSharedProjectionRefreshFork();
+testSharedProjectionRefreshForkPreservesUntouchedCoverage();
 reportLightweightComparison();
 console.log('param export clone smoke: PASS');

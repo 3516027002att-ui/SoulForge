@@ -1,8 +1,72 @@
 /** Pure harness policy and injectable polling; never imports production internals. */
-import { isAbsolute, relative, resolve, sep } from 'node:path';
+import { basename, isAbsolute, relative, resolve, sep } from 'node:path';
 import { isObservationGoalTool, validateTaskContractGoals } from './real-agent-goal-contract.mjs';
 
 export const SEMANTIC_CORPUS_KINDS = Object.freeze(['param', 'msg', 'event', 'map', 'script', 'action', 'chr']);
+const MAX_ELECTRON_OLD_SPACE_MIB = 16_384;
+
+export function classifyStopTelemetry({
+  diagnostics,
+  stopFileRequested = false,
+  stopFileConfigured = false,
+  errorCode = null
+} = {}) {
+  const events = Array.isArray(diagnostics?.events) ? diagnostics.events : [];
+  const pageClose = events.find((event) => event.type === 'page-close') ?? null;
+  const rendererCrash = events.find((event) => event.type === 'renderer-crash') ?? null;
+  const processExit = events.find((event) => event.type === 'process-exit') ?? null;
+  const output = `${diagnostics?.stderrTail ?? ''}\n${diagnostics?.stdoutTail ?? ''}`;
+  const v8Oom = /(?:OOM error in V8|Allocation failed - JavaScript heap out of memory|FATAL ERROR:\s*Reached heap limit)/iu.test(output);
+  let classification = 'none';
+  let reason = null;
+  if (stopFileRequested) {
+    classification = 'operator';
+    reason = 'stop-file';
+  } else if (v8Oom) {
+    classification = 'internal';
+    reason = 'v8-oom';
+  } else if (rendererCrash) {
+    classification = 'internal';
+    reason = 'renderer-crash';
+  } else if (pageClose) {
+    // A page close alone does not identify an operator action. Preserve the
+    // observed fact, but leave the cause unknown unless stronger evidence exists.
+    classification = 'unknown';
+    reason = 'window-close';
+  } else if (processExit) {
+    classification = 'internal';
+    reason = 'process-exit';
+  } else if (errorCode) {
+    classification = 'internal';
+    reason = 'harness-error';
+  }
+  return {
+    classification,
+    reason,
+    stopFileConfigured: stopFileConfigured === true,
+    stopFileRequested: stopFileRequested === true,
+    pageClose: pageClose ? { at: pageClose.at } : null,
+    rendererCrash: rendererCrash ? { at: rendererCrash.at } : null,
+    processExit: processExit
+      ? { at: processExit.at, code: processExit.code, signal: processExit.signal }
+      : null,
+    v8Oom
+  };
+}
+
+export function createAgentElectronLaunchArgs({ runtime, productionMain, userDataDir, maxOldSpaceMb }) {
+  if (!Number.isSafeInteger(maxOldSpaceMb) || maxOldSpaceMb < 2048 || maxOldSpaceMb > MAX_ELECTRON_OLD_SPACE_MIB) {
+    throw new RangeError(`Electron old-space budget must be an integer from 2048 to ${MAX_ELECTRON_OLD_SPACE_MIB} MiB.`);
+  }
+  if (runtime !== 'unpacked' && runtime !== 'installed') {
+    throw new TypeError('Electron runtime must be unpacked or installed.');
+  }
+  return [
+    `--js-flags=--max-old-space-size=${maxOldSpaceMb}`,
+    ...(runtime === 'unpacked' ? [productionMain] : []),
+    `--user-data-dir=${userDataDir}`
+  ];
+}
 
 // A PARAM field is useful as a narrow native anchor, but it is not the same
 // thing as proving a natural-language task.  Keep the distinction explicit in
@@ -33,7 +97,7 @@ function nativeResultRecords(result) {
  * physical paths outside the supplied workspace root and unindexed relative
  * guesses are rejected rather than converted by suffix guessing.
  */
-export function resolveNativeSourceUri(result, { workspaceRoot, entries = [] } = {}) {
+export function resolveNativeSourceUri(result, { workspaceRoot, entries = [], sourceHint } = {}) {
   if (typeof workspaceRoot !== 'string' || workspaceRoot.trim() === '' || !Array.isArray(entries)) return null;
   const candidates = [];
   for (const record of nativeResultRecords(result)) {
@@ -62,23 +126,164 @@ export function resolveNativeSourceUri(result, { workspaceRoot, entries = [] } =
     if (!indexedPaths.has(relativePath.toLocaleLowerCase())) continue;
     return { sourceUri: `file://${relativePath}`, relativePath };
   }
+  // Some native PARAM readers return only the physical child basename even
+  // when the caller selected an explicit workspace-relative containerPath.
+  // Bind that result only if the hint itself is indexed and its basename is
+  // unique in the current snapshot; never suffix-guess an ambiguous source.
+  if (typeof sourceHint === 'string' && sourceHint.trim() !== '') {
+    const hinted = resolveNativeSourceUri({ data: { containerPath: sourceHint } }, { workspaceRoot, entries });
+    if (!hinted) return null;
+    const hintBasename = basename(hinted.relativePath).toLocaleLowerCase();
+    const hasBareName = candidates.some((candidate) => {
+      let value = candidate.replaceAll('\\', '/');
+      if (/^file:\/\//iu.test(value)) value = value.slice('file://'.length);
+      return value.split('/').length === 1 && value.toLocaleLowerCase() === hintBasename;
+    });
+    if (!hasBareName) return null;
+    const matchingPaths = [...indexedPaths].filter((path) => basename(path).toLocaleLowerCase() === hintBasename);
+    if (matchingPaths.length !== 1 || matchingPaths[0] !== hinted.relativePath.toLocaleLowerCase()) return null;
+    return hinted;
+  }
   return null;
 }
 
-export function planSemanticCorpus(directories) {
+/** Bind native provenance only through the current indexed overlay snapshot or an explicit unique source hint. */
+export function enrichNativeSourceFacts(result, facts, { workspaceRoot, entries = [], sourceHint } = {}) {
+  const resolved = resolveNativeSourceUri(result, { workspaceRoot, entries, sourceHint });
+  const uris = Array.isArray(facts?.uris) ? [...facts.uris] : [];
+  if (resolved && !uris.includes(resolved.sourceUri)) uris.push(resolved.sourceUri);
+  return { ...(facts && typeof facts === 'object' ? facts : {}), uris };
+}
+
+/** Safe, path-free diagnostics for why a native container could not be bound. */
+export function diagnoseNativeSourceUriResolution(result, { workspaceRoot, entries = [], requiredSources = [], sourceHint } = {}) {
+  const rootProvided = typeof workspaceRoot === 'string' && workspaceRoot.trim() !== '';
+  const root = rootProvided ? resolve(workspaceRoot) : '';
+  const indexedPaths = new Set(entries
+    .filter((entry) => entry?.type === 'file' && typeof entry.path === 'string')
+    .map((entry) => entry.path.replaceAll('\\', '/').replace(/^\.\//u, '').toLocaleLowerCase()));
+  const candidates = [];
+  const relativeCandidates = [];
+  for (const record of nativeResultRecords(result)) {
+    for (const key of ['containerPath', 'sourceUri', 'sourcePath']) {
+      const candidate = record[key];
+      if (typeof candidate !== 'string' || candidate.trim() === '') continue;
+      let value = candidate.trim().replaceAll('\\', '/');
+      if (/^file:\/\//iu.test(value)) value = value.slice('file://'.length);
+      const absolute = /^\/?[A-Za-z]:\//u.test(value) || isAbsolute(value);
+      let relativePath;
+      if (absolute) {
+        const resolved = resolve(value);
+        if (!rootProvided || (resolved !== root && !resolved.startsWith(root + sep))) {
+          candidates.push('absolute-outside-workspace');
+          continue;
+        }
+        relativePath = relative(root, resolved).replaceAll('\\', '/');
+      } else {
+        relativePath = value.replace(/^\.\//u, '').replace(/^\/+/, '');
+      }
+      relativePath = relativePath.replace(/^\/+/, '');
+      if (!relativePath || relativePath.includes('\0') || relativePath.includes(':')
+        || relativePath === '..' || relativePath.startsWith('../')) {
+        candidates.push('invalid-relative-path');
+      } else {
+        relativeCandidates.push(relativePath);
+        candidates.push(indexedPaths.has(relativePath.toLocaleLowerCase())
+          ? 'indexed-relative-path'
+          : 'unindexed-relative-path');
+      }
+    }
+  }
+  const normalizedRequiredSources = requiredSources.map((source) => (
+    String(source).replaceAll('\\', '/').replace(/^file:\/\//iu, '').replace(/^\/+/, '').toLocaleLowerCase()
+  ));
+  return {
+    bound: resolveNativeSourceUri(result, { workspaceRoot, entries, sourceHint }) !== null,
+    rootProvided,
+    indexedFileCount: indexedPaths.size,
+    candidateCount: candidates.length,
+    candidateStatuses: [...new Set(candidates)],
+    relativeCandidates: [...new Set(relativeCandidates)],
+    candidateMatchesRequiredSource: relativeCandidates.map((candidate) => (
+      normalizedRequiredSources.some((source) => source === candidate.toLocaleLowerCase())
+    )),
+    candidateComparisons: relativeCandidates.map((candidate) => {
+      const normalized = candidate.toLocaleLowerCase();
+      const basename = normalized.split('/').at(-1);
+      return {
+        segmentCount: normalized.split('/').length,
+        basenameMatchesRequired: normalizedRequiredSources.some((source) => source.split('/').at(-1) === basename),
+        suffixMatchesRequired: normalizedRequiredSources.some((source) => normalized === source || normalized.endsWith(`/${source}`))
+      };
+    }),
+    requiredSourcesIndexed: requiredSources.map((source) => indexedPaths.has(
+      String(source).replaceAll('\\', '/').replace(/^file:\/\//iu, '').replace(/^\/+/, '').toLocaleLowerCase()
+    ))
+  };
+}
+
+export function planSemanticCorpus(directories, requestedKinds = SEMANTIC_CORPUS_KINDS) {
+  if (!Array.isArray(requestedKinds)
+    || requestedKinds.some((kind) => !SEMANTIC_CORPUS_KINDS.includes(kind))) {
+    throw new TypeError('Requested semantic corpus kinds must be selected from the known resource directories.');
+  }
+  const requested = [...new Set(requestedKinds)];
+  const requestedSet = new Set(requested);
   const present = new Set(directories);
-  const missing = SEMANTIC_CORPUS_KINDS.filter((kind) => !present.has(kind));
+  const missing = requested.filter((kind) => !present.has(kind));
   return {
     scope: 'selected-resource-directories',
     fullCorpus: false,
-    requestedKinds: [...SEMANTIC_CORPUS_KINDS],
-    copiedKinds: SEMANTIC_CORPUS_KINDS.filter((kind) => present.has(kind)),
+    requestedKinds: requested,
+    copiedKinds: requested.filter((kind) => present.has(kind)),
     missingKinds: missing,
+    excludedKinds: [...present].filter((kind) => SEMANTIC_CORPUS_KINDS.includes(kind) && !requestedSet.has(kind)).sort(),
     omittedKinds: directories.filter((kind) => !SEMANTIC_CORPUS_KINDS.includes(kind)).sort(),
     diagnostics: missing.map((kind) => ({
       severity: 'warning', code: 'CORPUS_KIND_MISSING', kind,
       message: `源 Mod 缺少 ${kind} 目录；本次隔离工作区不含该类 Mod 语料。`
     }))
+  };
+}
+
+/**
+ * Required outcomes with no verifier must block ordinary write runs. A caller
+ * may explicitly opt into a candidate experiment, but that mode is never an
+ * acceptance result; observation remains available without a write gate.
+ */
+export function evaluateWriteAdmission(goals, { observationOnly = false, candidateWrite = false } = {}) {
+  const requiredUnsupported = (Array.isArray(goals) ? goals : []).filter((goal) => (
+    goal?.required === true
+      && (goal.kind === 'unsupported'
+        || goal.verificationStatus === 'unsupported'
+        || goal.status === 'unsupported')
+  ));
+  const unsupportedGoalIds = requiredUnsupported.map((goal) => goal.goalId ?? null);
+  if (observationOnly && candidateWrite) {
+    return {
+      allowed: false,
+      executionMode: 'invalid',
+      code: 'REAL_AGENT_MODE_INVALID',
+      unsupportedGoalIds,
+      message: '--observe 与 --candidate-write 不能同时使用。'
+    };
+  }
+  if (observationOnly) {
+    return { allowed: true, executionMode: 'observation-only', unsupportedGoalIds };
+  }
+  if (requiredUnsupported.length > 0 && !candidateWrite) {
+    return {
+      allowed: false,
+      executionMode: 'write-blocked',
+      code: 'REQUIRED_GOAL_UNSUPPORTED_WRITE_BLOCKED',
+      unsupportedGoalIds,
+      message: '必需目标没有可执行验证器；普通写入已阻止。如需仅做隔离候选实验，请显式传入 --candidate-write。'
+    };
+  }
+  return {
+    allowed: true,
+    executionMode: candidateWrite ? 'candidate-experiment' : 'write',
+    unsupportedGoalIds
   };
 }
 
@@ -124,17 +329,47 @@ export function evaluateGoalCoverage(goals, observationOnly, taskContract = unde
     }
     return output;
   };
+  const collectSourceHashes = (value, output = []) => {
+    if (value === null || value === undefined || typeof value !== 'object') return output;
+    if (Array.isArray(value)) {
+      value.slice(0, 128).forEach((item) => collectSourceHashes(item, output));
+      return output;
+    }
+    for (const [key, child] of Object.entries(value)) {
+      if (key === 'sourceHash' && typeof child === 'string') output.push(child);
+      else if (key === 'sourceHashes' && Array.isArray(child)) output.push(...child.filter((item) => typeof item === 'string'));
+      else collectSourceHashes(child, output);
+    }
+    return output;
+  };
   // Corpus provenance may come from optional read-only probes as well as
   // required outcome goals. Optional evidence cannot satisfy the outcome gate,
   // but it can prove that the selected native source was actually inspected.
-  const sourceUris = normalizedGoals.flatMap((goal) => collectSourceUris({
-    verificationEvidence: goal.verificationEvidence,
-    read: goal.read
-  }));
+  // Keep each evidence record intact so the source URI and its hash must come
+  // from the same native read instead of unrelated goals satisfying each other.
+  const sourceProofs = normalizedGoals.flatMap((goal) => {
+    const evidenceRecords = [
+      ...(Array.isArray(goal.verificationEvidence) ? goal.verificationEvidence : []),
+      goal.read
+    ].filter((value) => value && typeof value === 'object');
+    return evidenceRecords.flatMap((evidence) => {
+      const sourceHashes = collectSourceHashes(evidence).filter((hash) => hash.trim() !== '');
+      return collectSourceUris(evidence).map((sourceUri) => ({ sourceUri, hasNativeHash: sourceHashes.length > 0 }));
+    });
+  });
+  const normalizeSourcePath = (value) => {
+    let normalized = String(value ?? '').trim().replaceAll('\\', '/').toLocaleLowerCase();
+    if (normalized.startsWith('file://')) normalized = normalized.slice('file://'.length);
+    return normalized.split('#', 1)[0].replace(/^\.\/+/, '').replace(/^\/+/, '');
+  };
   const requiredSources = taskContract?.corpusFingerprint?.requiredSources ?? [];
+  const requireNativeSourceHash = taskContract?.corpusFingerprint?.requireNativeSourceHash !== false;
   const corpusMismatches = requiredSources.filter((source) => {
-    const token = String(source).replaceAll('\\', '/').toLocaleLowerCase();
-    return !sourceUris.some((uri) => String(uri).replaceAll('\\', '/').toLocaleLowerCase().includes(token));
+    const expectedPath = normalizeSourcePath(source);
+    return !sourceProofs.some((proof) => (
+      normalizeSourcePath(proof.sourceUri) === expectedPath
+      && (!requireNativeSourceHash || proof.hasNativeHash)
+    ));
   });
   const corpusMismatch = corpusMismatches.length > 0;
   const contractCheck = validateTaskContractGoals(normalizedGoals, taskContract);
@@ -238,7 +473,36 @@ export function evaluateGoalCoverage(goals, observationOnly, taskContract = unde
   };
 }
 
-export function semanticReadiness(snapshot, requiredFamilies = []) {
+/** Keep task-level unsupported obligations visible when execution aborts early. */
+export function classifyInterruptedGoalCoverage(goals, observationOnly, taskContract = undefined) {
+  const goalCoverage = evaluateGoalCoverage(goals, observationOnly, taskContract);
+  return {
+    goalCoverage,
+    status: goalCoverage.status,
+    verificationMode: goalCoverage.mode,
+    taskCompletionVerified: false,
+    unsupportedGoalIds: goalCoverage.unsupportedGoalIds,
+    unverifiedGoalIds: goalCoverage.unverifiedGoalIds
+  };
+}
+
+/** Preserve durable rollout completion evidence even if Electron closed before the IPC terminal reached the harness. */
+export function buildFailureSessionEvidence({
+  terminalEvidence,
+  durableRollout,
+  evidenceHasEntries = false
+} = {}) {
+  if (!terminalEvidence && !durableRollout && evidenceHasEntries !== true) return null;
+  return {
+    ...(terminalEvidence ?? {}),
+    terminal: terminalEvidence?.terminal ?? null,
+    terminalObserved: terminalEvidence?.terminal != null,
+    durableRollout: durableRollout ?? null,
+    evidenceHasEntries: evidenceHasEntries === true
+  };
+}
+
+export function semanticReadiness(snapshot, requiredFamilies = [], { requireAnalysisComplete = false } = {}) {
   const stats = snapshot?.stats;
   const data = stats?.ok === true ? stats.data : null;
   const families = data?.semanticIndex?.rag?.byFamily ?? {};
@@ -251,25 +515,32 @@ export function semanticReadiness(snapshot, requiredFamilies = []) {
     tae_event: Number(families.tae_event) || 0
   };
   const missingFamilies = requiredFamilies.filter((family) => !(counts[family] > 0));
+  const analysisComplete = snapshot?.analysis?.status === 'completed';
   const ready = stats?.ok === true && missingFamilies.length === 0
-    && Object.values(counts).some((count) => count > 0);
+    && Object.values(counts).some((count) => count > 0)
+    && (!requireAnalysisComplete || analysisComplete);
   return {
     status: snapshot?.analysis?.status === 'failed' ? 'failed' : ready ? 'ready' : 'warming_up',
     counts, requiredFamilies, missingFamilies,
     analysisStatus: snapshot?.analysis?.status ?? 'unknown',
     diagnostics: snapshot?.analysis?.status === 'failed'
       ? [snapshot.analysis.error ?? { code: 'WORKSPACE_ANALYSIS_FAILED', message: '工作区分析失败。' }]
-      : stats?.ok === false ? [stats.error] : []
+      : stats?.ok === false ? [stats.error]
+        : requireAnalysisComplete && !analysisComplete ? [{
+            severity: 'info', code: 'WORKSPACE_ANALYSIS_RUNNING',
+            message: '等待工作区全量语义分析完成，避免 Agent 查询与后台 RAG 构建竞争。'
+          }] : []
   };
 }
 
 export async function waitForSemanticReadiness({
   readSnapshot, requiredFamilies = [], timeoutMs = 60_000, intervalMs = 1_000,
+  requireAnalysisComplete = false,
   now = Date.now, delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms)), onProgress = () => {}
 }) {
   const started = now();
   let attempts = 0;
-  let last = semanticReadiness(null, requiredFamilies);
+  let last = semanticReadiness(null, requiredFamilies, { requireAnalysisComplete });
   do {
     const remaining = timeoutMs - (now() - started);
     if (remaining <= 0) break;
@@ -283,7 +554,7 @@ export async function waitForSemanticReadiness({
           })), remaining);
         })
       ]);
-      last = semanticReadiness(snapshot, requiredFamilies);
+      last = semanticReadiness(snapshot, requiredFamilies, { requireAnalysisComplete });
     } catch (error) {
       last = { ...last, diagnostics: [{ code: error?.code ?? 'SEMANTIC_PREFLIGHT_READ_FAILED', message: String(error?.message ?? error) }] };
     } finally {
@@ -301,7 +572,9 @@ export async function waitForSemanticReadiness({
     ...last, status: 'timeout', attempts, elapsedMs: now() - started,
     diagnostics: [...last.diagnostics, {
       code: 'SEMANTIC_PREFLIGHT_TIMEOUT',
-      message: '首批工作区语义索引未在有界等待内就绪；继续观察 Agent 时可能返回预热或 RAG_UNAVAILABLE。'
+      message: requireAnalysisComplete
+        ? '工作区全量语义分析未在有界等待内完成；Agent 未启动，以避免与后台 RAG 构建竞争。'
+        : '首批工作区语义索引未在有界等待内就绪；继续观察 Agent 时可能返回预热或 RAG_UNAVAILABLE。'
     }]
   };
 }
@@ -430,6 +703,86 @@ export async function rollbackCommittedOperations(operations, rollbackOperation)
     }
   }
   return results;
+}
+
+/** Discover commits that were durable even when the Electron window died before final bookkeeping. */
+export function selectNewCommittedOperations(operationsAfter, operationsBefore = []) {
+  const beforeIds = new Set((Array.isArray(operationsBefore) ? operationsBefore : [])
+    .map((operation) => operation?.opId)
+    .filter((opId) => typeof opId === 'string' && opId.trim() !== ''));
+  return (Array.isArray(operationsAfter) ? operationsAfter : []).filter((operation) => (
+    operation?.status === 'committed'
+      && typeof operation.opId === 'string'
+      && operation.opId.trim() !== ''
+      && !beforeIds.has(operation.opId)
+  ));
+}
+
+/**
+ * A failed renderer rollback may still have committed an inverse before the
+ * IPC reply was lost. Once the owned Electron tree has exited, retry through
+ * the isolated CLI whenever the write run has evidence that a mutation or
+ * rollback was in flight.
+ */
+export function shouldRecoverUnverifiedWriteRollback({
+  phase,
+  writeMode = false,
+  rollbackStatus,
+  electronStatus,
+  treeBefore,
+  treeAfterRun,
+  operationsAfterRun,
+  newCommittedOperations = [],
+  rollbackResults = []
+} = {}) {
+  const postAgentPhase = new Set([
+    'run-agent',
+    'agent-terminal',
+    'verify-native-goals',
+    'copy-durable-evidence',
+    'rollback'
+  ]).has(phase);
+  const electronExited = electronStatus === 'succeeded' || electronStatus === 'not-started';
+  if (!postAgentPhase || !writeMode || rollbackStatus !== 'unverified' || !electronExited || !treeBefore) return false;
+  const attemptedRollback = Array.isArray(rollbackResults)
+    && rollbackResults.some((result) => result?.attempted === true || result?.error != null);
+  const observedTreeMutation = treeAfterRun?.sha256 != null && treeAfterRun.sha256 !== treeBefore.sha256;
+  const interruptedBeforeOperationRead = operationsAfterRun == null && phase !== 'rollback';
+  return (Array.isArray(newCommittedOperations) && newCommittedOperations.length > 0)
+    || attemptedRollback
+    || observedTreeMutation
+    || interruptedBeforeOperationRead;
+}
+
+/** Return new operations in production history order, separating durable inverses from pending commits. */
+export function planRollbackRecoveryOperations(operationsAfter, operationsBefore = []) {
+  const beforeIds = new Set((Array.isArray(operationsBefore) ? operationsBefore : [])
+    .map((operation) => operation?.opId)
+    .filter((opId) => typeof opId === 'string' && opId.trim() !== ''));
+  const newOperations = (Array.isArray(operationsAfter) ? operationsAfter : []).filter((operation) => (
+    typeof operation?.opId === 'string'
+      && operation.opId.trim() !== ''
+      && !beforeIds.has(operation.opId)
+  ));
+  return {
+    newOperations,
+    pendingRollbackOperations: newOperations.filter((operation) => operation.status === 'committed'),
+    alreadyRolledBackOperations: newOperations.filter((operation) => operation.status === 'rolled_back'),
+    unresolvedOperations: newOperations.filter((operation) => !['committed', 'rolled_back'].includes(operation.status))
+  };
+}
+
+/** Mirror the desktop history projection: an inverse commit marks its source operation rolled back. */
+export function normalizeOperationHistoryForVerification(operations) {
+  const records = Array.isArray(operations) ? operations : [];
+  const reversedIds = new Set(records
+    .filter((operation) => operation?.status === 'committed' && typeof operation.inverseOfOpId === 'string')
+    .map((operation) => operation.inverseOfOpId));
+  return records
+    .filter((operation) => !operation?.inverseOfOpId && !operation?.rollbackScope)
+    .map((operation) => reversedIds.has(operation.opId)
+      ? { ...operation, status: 'rolled_back' }
+      : operation);
 }
 
 /**

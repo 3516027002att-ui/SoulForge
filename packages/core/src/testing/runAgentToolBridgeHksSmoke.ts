@@ -1,6 +1,10 @@
 import { strict as assert } from 'node:assert';
 import { ToolRegistry, type ToolContext } from '../ai/toolRegistry.js';
-import { MAX_BOUNDED_TOOL_RESULT_CHARS, createAgentToolBridge } from '../ai/agentToolBridge.js';
+import {
+  MAX_BOUNDED_TOOL_RESULT_BYTES,
+  MAX_BOUNDED_TOOL_RESULT_CHARS,
+  createAgentToolBridge
+} from '../ai/agentToolBridge.js';
 import type { NativeReadProofStore } from '../editing/nativeReadProofStore.js';
 
 function makeBridge(
@@ -86,24 +90,75 @@ const readOnlyBridge = await makeBridge('read_hks_script', {
 assert.equal(readOnlyBridge.ok, true, readOnlyBridge.content);
 assert.equal(acceptedReads.length, 0, 'HKS source hash must remain read-only and never mint a writer receipt');
 
-const tooLarge = await makeBridge('read_hks_script', {
+const withinBudgetSourceText = 'local source window = true\n'.repeat(800);
+const withinBudget = await makeBridge('read_hks_script', {
+  sourceUri: 'workspace://active/action/script/within-budget.hks',
+  sourceHash: 'within-budget-hks-hash',
+  sourceText: withinBudgetSourceText,
+  sourceTextComplete: true,
+  sourceOffset: 0,
+  sourceLimit: withinBudgetSourceText.length,
+  total: withinBudgetSourceText.length
+}).executeTool({
+  id: 'hks-read-within-budget',
+  name: 'read_hks_script',
+  argumentsJson: JSON.stringify({ file: 'action/script/within-budget.hks', sourceLimit: withinBudgetSourceText.length })
+});
+assert.equal(withinBudget.ok, true, withinBudget.content);
+const withinBudgetEnvelope = JSON.parse(withinBudget.content) as {
+  data?: { record?: { sourceText?: unknown } };
+};
+assert.equal(withinBudgetEnvelope.data?.record?.sourceText, withinBudgetSourceText);
+const PREVIOUS_TOOL_RESULT_BUDGET_BYTES = 8_192; // budget before the increase to MAX_BOUNDED_TOOL_RESULT_BYTES
+const withinBudgetBytes = Buffer.byteLength(withinBudget.content, 'utf8');
+assert.ok(withinBudgetBytes > PREVIOUS_TOOL_RESULT_BUDGET_BYTES, 'exercise HKS data admitted only by the raised budget');
+assert.ok(withinBudgetBytes <= MAX_BOUNDED_TOOL_RESULT_BYTES);
+assert.ok(withinBudget.content.length <= MAX_BOUNDED_TOOL_RESULT_CHARS);
+
+const oversizedSourceText = 'local huge source = true\n'.repeat(1_500);
+const oversizedSourceLimit = oversizedSourceText.length;
+const newlyAdmitted = await makeBridge('read_hks_script', {
   sourceUri: 'workspace://active/action/script/huge.hks',
   sourceHash: 'huge-hks-hash',
-  sourceText: 'local huge source = true\n'.repeat(1_500),
+  sourceText: oversizedSourceText,
+  sourceTextComplete: true,
+  sourceOffset: 0,
+  sourceLimit: oversizedSourceLimit,
+  total: oversizedSourceLimit
+}).executeTool({
+  id: 'hks-read-new-budget',
+  name: 'read_hks_script',
+  argumentsJson: JSON.stringify({ file: 'action/script/huge.hks', sourceLimit: oversizedSourceLimit })
+});
+assert.equal(newlyAdmitted.ok, true, newlyAdmitted.content);
+const newlyAdmittedEnvelope = JSON.parse(newlyAdmitted.content) as {
+  data?: { record?: { sourceText?: unknown } };
+};
+assert.equal(newlyAdmittedEnvelope.data?.record?.sourceText, oversizedSourceText);
+assert.ok(Buffer.byteLength(newlyAdmitted.content, 'utf8') > 32_768);
+assert.ok(Buffer.byteLength(newlyAdmitted.content, 'utf8') <= MAX_BOUNDED_TOOL_RESULT_BYTES);
+assert.ok(newlyAdmitted.content.length <= MAX_BOUNDED_TOOL_RESULT_CHARS);
+
+const beyondBudgetSourceText = 'local beyond budget = true\n'.repeat(3_000);
+const beyondBudgetSourceLimit = beyondBudgetSourceText.length;
+const tooLarge = await makeBridge('read_hks_script', {
+  sourceUri: 'workspace://active/action/script/beyond-budget.hks',
+  sourceHash: 'beyond-budget-hks-hash',
+  sourceText: beyondBudgetSourceText,
   sourceTextComplete: false,
   sourceOffset: 0,
-  sourceLimit: 24_000,
-  total: 24_000,
-  nextCursor: 'huge-next'
+  sourceLimit: beyondBudgetSourceLimit,
+  total: beyondBudgetSourceLimit,
+  nextCursor: 'beyond-budget-next'
 }).executeTool({
   id: 'hks-read-too-large',
   name: 'read_hks_script',
-  argumentsJson: JSON.stringify({ file: 'action/script/huge.hks', sourceLimit: 24_000 })
+  argumentsJson: JSON.stringify({ file: 'action/script/beyond-budget.hks', sourceLimit: beyondBudgetSourceLimit })
 });
 assert.equal(tooLarge.ok, false);
 assert.equal(tooLarge.code, 'RESULT_SCRIPT_WINDOW_TOO_LARGE');
 const tooLargeEnvelope = JSON.parse(tooLarge.content) as { error?: { details?: Record<string, unknown> } };
-assert.equal((tooLargeEnvelope.error?.details?.retry as Record<string, unknown>)?.sourceLimit, 12_000);
+assert.equal((tooLargeEnvelope.error?.details?.retry as Record<string, unknown>)?.sourceLimit, Math.floor(beyondBudgetSourceLimit / 2));
 
 const search = await makeBridge('search_hks_script', {
   sourceUri: 'workspace://active/action/script/c0000_transition.hks',

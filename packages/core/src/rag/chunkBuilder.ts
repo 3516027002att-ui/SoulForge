@@ -40,13 +40,18 @@ const MAX_FIELDS = 24;
 /**
  * Controls whether corpus construction also materializes the in-memory
  * inverted lookup maps.  The default stays eager for every existing caller;
- * only explicitly marked intermediate corpora may defer that work until
- * retrieval calls `ensureLookupIndex`.
+ * explicitly deferred corpora must be prepared at an asynchronous host
+ * boundary before retrieval, avoiding duplicate full indexes during refresh.
  */
 export type RagCorpusLookupIndexMode = 'eager' | 'deferred';
 
 export interface RagCorpusBuildOptions {
   lookupIndex?: RagCorpusLookupIndexMode;
+  /**
+   * Skip the full reference graph when assembling a source/symbol-scoped
+   * candidate whose caller will supply the authoritative final references.
+   */
+  includeReferences?: boolean;
   /**
    * Optional host-controlled projection.  File chunks remain included unless
    * the caller explicitly omits them; they carry the source identity needed
@@ -194,12 +199,14 @@ export function buildRagCorpus(
     // Keep the current graph, but derive PARAM↔FMG edges from the same source
     // mapping in this snapshot as well. This makes a freshly assembled corpus
     // correct even when the caller has not yet published a reference rebuild.
-    references: mergeReferenceEdges(
-      index.listReferences(),
-      includeFamily('param_row') && includeFamily('text_entry')
-        ? buildParamTextReferenceEdges(symbols.params ?? [], symbols.msgs ?? [])
-        : []
-    ),
+    references: options.includeReferences === false
+      ? []
+      : mergeReferenceEdges(
+          index.listReferences(),
+          includeFamily('param_row') && includeFamily('text_entry')
+            ? buildParamTextReferenceEdges(symbols.params ?? [], symbols.msgs ?? [])
+            : []
+        ),
     diagnostics,
     ...(options.lookupIndex ? { lookupIndex: options.lookupIndex } : {})
   });
@@ -211,7 +218,7 @@ export function createRagCorpus(input: {
   chunks: readonly RagChunk[];
   references?: readonly ReferenceEdge[];
   diagnostics?: readonly Diagnostic[];
-  /** Defaults to eager; use deferred only for an intermediate, non-retrieval corpus. */
+  /** Defaults to eager; deferred callers must attach the lookup at an async retrieval boundary. */
   lookupIndex?: RagCorpusLookupIndexMode;
 }): RagCorpus {
   const byFamily = emptyFamilyCounts();

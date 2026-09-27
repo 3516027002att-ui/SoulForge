@@ -359,7 +359,7 @@ node $Cli @CliArgs describe find_references
 ```
 
 - `--workspace` 必填；原生读取应提供正确的 `--base`。默认 CLI mode 是 `normal`，本节明确用 `plan` 进行只读/分析验证。
-- `list` / `describe` 默认只做元数据入口准备；显式 `--analyze` 可请求分析。**`call` 及搜索、读取快捷命令当前会自动请求分析**，不应再理解为“只有加 `--analyze` 才分析”。请求分析不等于全量索引已完成；应检查工具结果中的覆盖与诊断。
+- `list` / `describe` 默认只做元数据入口准备；显式 `--analyze` 可请求分析。**`call` 及搜索、读取快捷命令默认会自动请求分析**，不应再理解为“只有加 `--analyze` 才分析”；对 `list_operations`、`rollback_operation` 等不依赖语义索引的维护调用，可显式加 `--no-analyze`，避免恢复操作被无关全量分析拖慢。请求分析不等于全量索引已完成；应检查工具结果中的覆盖与诊断。
 - `--quiet` 隐藏进度，不隐藏缓存、审计降级等重要 stderr 警告；不要用 `2>$null` 丢掉它们。stdout 是工具 JSON，stderr 应单独保留。
 - `search-param` / `read-param` 是快捷入口；复杂参数、游标和机器调用优先用 `call --stdin`。`read_param_fields` 的 `pageSize` 在 native 读取结果层生效，不是把完整结果返回后再截断；返回的 `fieldDefinitions`、`pagination`、`execution`、`scan`、`page`、`evidence` 必须一起保留。续页时只传原请求条件和 opaque `cursor`；cursor 绑定工作区、来源版本、表、物理行集合和字段集合。
 

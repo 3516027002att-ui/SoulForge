@@ -268,7 +268,8 @@ export async function runAgentToolEnvelopeSmoke(): Promise<void> {
       registryFingerprint: 'registry-fixture', instructionCount: 2, total: 2,
       offset: 0, limit: 256, returned: 2, truncated: false, darkScriptComplete: true,
       readRange: { start: 0, end: 2 },
-      darkScript: '$Event(1000, {\n' + '  DisplayBossHealthBar(1001),\n'.repeat(1200) + '})',
+      // Keep this native DSL fixture above the current 64 KiB Agent cap.
+      darkScript: '$Event(1000, {\n' + '  DisplayBossHealthBar(1001),\n'.repeat(2600) + '})',
       instructions: [{ index: 0, bank: 2003, id: 5, unknown: false, emedfName: 'DisplayBossHealthBar', typedArgs: [], diagnostics: [] },
         { index: 1, bank: 2003, id: 6, unknown: false, emedfName: 'End', typedArgs: [], diagnostics: [] }], diagnostics: []
     } })

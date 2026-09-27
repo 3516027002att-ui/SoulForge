@@ -32,7 +32,10 @@ const contract = (input) => Object.freeze({
 
 const readFields = (table, rowIds, fieldIds) => ({
   tool: 'read_param_fields',
-  input: { table, rowIds, fieldIds },
+  // Bind verification probes to the same declared PARAM corpus as the task
+  // contract; default table discovery can return a native hash without a
+  // workspace-logical source identity for corpus provenance checks.
+  input: { containerPath: GAMEPARAM, table, rowIds, fieldIds },
   requireSourceHash: true
 });
 
@@ -73,12 +76,12 @@ export const FOUR_TASKS = Object.freeze([
   Object.freeze({
     id: 'four-1-gyoubu-elite-indigo',
     label: '鬼刑部精英、两条血、靛蓝星陨掉落',
+    corpusKinds: Object.freeze(['param', 'msg', 'event']),
     query: '把鬼刑部改为精英怪，血条改为2，死亡后掉落靛蓝星陨',
     contract: contract({
-      requiredSources: [GAMEPARAM, COMMON_EVENT],
+      requiredSources: [GAMEPARAM],
       targetIdentity: {
-        paramRows: [{ table: 'NpcParam', rowId: 50800000 }, { table: 'ItemLotParam', rowId: 90017000 }],
-        event: { file: COMMON_EVENT, eventId: 965104 }
+        paramRows: [{ table: 'NpcParam', rowId: 50800000 }, { table: 'ItemLotParam', rowId: 90017000 }]
       },
       preconditions: [{ table: 'NpcParam', rowId: 50800000, fieldId: 'ninsatuNum', expectedValue: 3, required: false }],
       postconditions: [
@@ -120,6 +123,7 @@ export const FOUR_TASKS = Object.freeze([
   Object.freeze({
     id: 'four-2-gyoubu-lightning-genichiro',
     label: '鬼刑部开场落雷、非狼目标、义父铃铛与弦一郎改招',
+    corpusKinds: Object.freeze(['param', 'msg', 'event', 'map', 'script', 'action', 'chr']),
     query: '鬼型部出场时地上随机落雷5秒，不攻击到狼，击杀后掉落义父的铃铛。修改弦一郎，删除其遇到玩家和葫芦就突刺的定式，改成飞天射箭和下段危随机',
     contract: contract({
       requiredSources: [GAMEPARAM, 'script/m11_00_00_00.luabnd.dcx', 'script/m11_01_00_00.luabnd.dcx'],
@@ -176,6 +180,7 @@ export const FOUR_TASKS = Object.freeze([
   Object.freeze({
     id: 'four-3-xiuwan-super-poison',
     label: '绣丸超猛毒一套连招作用于祟枭',
+    corpusKinds: Object.freeze(['param']),
     query: '修改绣丸打超猛毒，通过计算数值使其能在一套连招内为祟枭挂到效果',
     contract: contract({
       requiredSources: [GAMEPARAM],
@@ -218,6 +223,7 @@ export const FOUR_TASKS = Object.freeze([
   Object.freeze({
     id: 'four-4-xiuwan-final-tracking',
     label: '绣丸最后一刀切换斩追斩追踪距离 80',
+    corpusKinds: Object.freeze(['param']),
     query: '修改绣丸 最后一刀切换斩，使其拥有80的追斩追踪距离',
     contract: contract({
       requiredSources: [GAMEPARAM],

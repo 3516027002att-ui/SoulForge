@@ -174,6 +174,11 @@ export class BridgeDaemonClient {
     return this.closed;
   }
 
+  /** True only when no request or late cancellation receipt still owns this client. */
+  get isIdle(): boolean {
+    return this.inFlight === 0 && this.pending.size === 0 && this.cancellationTerminalObservers.size === 0;
+  }
+
   async request<TResult = unknown, TProgress = unknown>(
     options: BridgeDaemonRequestOptions<TProgress>
   ): Promise<BridgeDaemonResultPayload<TResult>> {

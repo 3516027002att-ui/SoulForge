@@ -38,6 +38,9 @@ export interface RagLookupIndex {
 const lookupByCorpus = new WeakMap<RagCorpus, RagLookupIndex>();
 const pendingLookupByCorpus = new WeakMap<RagCorpus, Promise<RagLookupIndex>>();
 
+/** Large native workspace corpora can need several minutes for the yielded lookup projection. */
+export const DEFAULT_RAG_LOOKUP_BUILD_TIMEOUT_MS = 600_000;
+
 export function attachLookupIndex(corpus: RagCorpus): RagLookupIndex {
   const index = buildLookupIndex(corpus.chunks, corpus.references);
   lookupByCorpus.set(corpus, index);
@@ -57,11 +60,21 @@ export interface RagLookupBuildOptions {
 /** Prepare before publication: a cancelled or timed-out partial index is never attached. */
 export async function attachLookupIndexAsync(corpus: RagCorpus, options: RagLookupBuildOptions = {}): Promise<RagLookupIndex> {
   const started = performance.now();
-  const timeoutMs = options.timeoutMs ?? 60_000;
+  const timeoutMs = options.timeoutMs ?? DEFAULT_RAG_LOOKUP_BUILD_TIMEOUT_MS;
   if (!Number.isFinite(timeoutMs) || timeoutMs < 0
     || !Number.isSafeInteger(options.batchSize ?? 128) || (options.batchSize ?? 128) < 1
     || !Number.isFinite(options.maxSliceMs ?? 8) || (options.maxSliceMs ?? 8) <= 0) {
     throw new RangeError('Invalid RAG index build budget.');
+  }
+  if (options.signal?.aborted) throw Object.assign(new Error('RAG index build cancelled.'), { name: 'AbortError' });
+  const existing = lookupByCorpus.get(corpus);
+  if (existing
+    && existing.chunkSignature === chunkSignature(corpus.chunks)
+    && existing.referenceSignature === referenceSignature(corpus.references)) {
+    const total = corpus.chunks.length + corpus.references.length;
+    options.onProgress?.({ completed: total, total });
+    if (options.signal?.aborted) throw Object.assign(new Error('RAG index build cancelled.'), { name: 'AbortError' });
+    return existing;
   }
   const pending = pendingLookupByCorpus.get(corpus);
   if (pending) {
@@ -106,7 +119,7 @@ function waitForLookupBuild(build: Promise<RagLookupIndex>, signal: AbortSignal 
 async function buildLookupIndexAsync(corpus: RagCorpus, options: RagLookupBuildOptions): Promise<RagLookupIndex> {
   const batchSize = options.batchSize ?? 128;
   const maxSliceMs = options.maxSliceMs ?? 8;
-  const timeoutMs = options.timeoutMs ?? 60_000;
+  const timeoutMs = options.timeoutMs ?? DEFAULT_RAG_LOOKUP_BUILD_TIMEOUT_MS;
   if (!Number.isSafeInteger(batchSize) || batchSize < 1 || !Number.isFinite(maxSliceMs) || maxSliceMs <= 0
     || !Number.isFinite(timeoutMs) || timeoutMs < 0) throw new RangeError('Invalid RAG index build budget.');
   const started = performance.now();

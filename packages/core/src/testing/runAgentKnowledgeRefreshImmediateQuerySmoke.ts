@@ -9,7 +9,7 @@ import type {
 } from '@soulforge/shared';
 import { buildRagCorpus } from '../rag/chunkBuilder.js';
 import { retrieveEvidence } from '../rag/retrieve.js';
-import { refreshKnowledgeAfterCommit } from '../indexing/knowledgeRefresh.js';
+import { preparePostCommitRefreshBaseline, refreshKnowledgeAfterCommit } from '../indexing/knowledgeRefresh.js';
 import { WorkspaceIndex } from '../indexing/workspaceIndex.js';
 
 const SOURCES = {
@@ -60,6 +60,12 @@ async function main(): Promise<void> {
 
   const oldIndex = makeIndex('v1', 'old-value');
   const newIndex = makeIndex('v2', 'new-value');
+  const preparedBaseline = preparePostCommitRefreshBaseline(oldIndex, [SOURCES.param]);
+  assert.equal(preparedBaseline.index, oldIndex, 'the already-invalidated live index is the stale-safe baseline; do not clone the full projection before refresh');
+  assert.equal(preparedBaseline.invalidated.removed.paramRows, 1);
+  const staleSafeCorpus = buildRagCorpus(preparedBaseline.index);
+  assert.equal(staleSafeCorpus.chunks.some((chunk) => chunk.family === 'param_row' && chunk.body.includes('old-value')), false,
+    'refresh may reuse the active index only after the changed source has been invalidated');
   // refreshKnowledgeAfterCommit updates the input index's catalog in place.
   // Keep immutable file snapshots for the rollback fixture; reusing
   // oldIndex.getFiles() after the commit would hand rollback the v2 catalog

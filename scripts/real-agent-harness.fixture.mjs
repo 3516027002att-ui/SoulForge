@@ -1,24 +1,65 @@
 import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
 import test from 'node:test';
+import { fileURLToPath } from 'node:url';
 import {
   evaluateGoalCoverage,
+  evaluateWriteAdmission,
+  classifyInterruptedGoalCoverage,
+  buildFailureSessionEvidence,
+  createAgentElectronLaunchArgs,
   evaluateRollbackVerification,
+  shouldRecoverUnverifiedWriteRollback,
+  planRollbackRecoveryOperations,
   evaluateSupervisorNormalCompletion,
   decideScratchCleanup,
   isCancelledAgentLifecycle,
   isRunStopRequested,
   rollbackCommittedOperations,
+  selectNewCommittedOperations,
+  normalizeOperationHistoryForVerification,
   isSuccessfulAgentTerminal,
   makeSupervisorGeneration,
   planSemanticCorpus,
+  enrichNativeSourceFacts,
+  diagnoseNativeSourceUriResolution,
   safeHarnessFileLabel,
   sameOwnedProcessIdentity,
   semanticReadiness,
   waitForSemanticReadiness,
-  resolveNativeSourceUri
+  resolveNativeSourceUri,
+  classifyStopTelemetry
 } from './real-agent-harness-lib.mjs';
 import { matchesAssertion, parseGoalContract, validateTaskContractGoals } from './real-agent-goal-contract.mjs';
 import { FOUR_TASKS } from './testing/real-agent-four-task-manifest.mjs';
+
+test('unknown harness options are rejected instead of turning their values into task text', () => {
+  const runnerPath = fileURLToPath(new URL('./run-real-agent-gyoubu.mjs', import.meta.url));
+  const result = spawnSync(process.execPath, [runnerPath, '--help', '--request-timeout-ms', '900000'], {
+    cwd: process.cwd(),
+    encoding: 'utf8'
+  });
+
+  assert.equal(result.error, undefined);
+  assert.notEqual(result.status, 0, 'an unsupported option must fail before any provider or workspace starts');
+  assert.match(result.stderr, /--request-timeout-ms/u);
+  assert.doesNotMatch(result.stdout, /真实生产 Agent 链路模拟/u,
+    'the parser must not silently accept the invalid option and print help as if invocation were valid');
+});
+
+test('failed harness report preserves a durable terminal when the Electron terminal event is missing', () => {
+  const durableRollout = {
+    terminal: { type: 'turn-complete', finishReason: 'stop', taskStatus: 'completed', steps: 19 },
+    terminalCount: 1,
+    parseErrors: 0
+  };
+  const evidence = buildFailureSessionEvidence({ durableRollout });
+  assert.equal(evidence.terminal, null, 'do not forge a renderer IPC session-done event');
+  assert.equal(evidence.terminalObserved, false);
+  assert.equal(evidence.durableRollout.terminal.finishReason, 'stop');
+  assert.equal(evidence.evidenceHasEntries, false);
+  assert.equal(buildFailureSessionEvidence(), null);
+});
 
 test('required unsupported behavior goals are terminal and cannot be masked by PARAM anchors', () => {
   const goals = [
@@ -45,6 +86,50 @@ test('required unsupported behavior goals are terminal and cannot be masked by P
   }], false);
   assert.equal(forged.goalsOk, false);
   assert.equal(forged.taskCompletionVerified, false);
+});
+
+test('required unsupported goals block ordinary writes but allow explicit candidate experiments without completion', () => {
+  const task = FOUR_TASKS.find((item) => item.id === 'four-3-xiuwan-super-poison');
+  assert.ok(task);
+  const blocked = evaluateWriteAdmission(task.goals, { observationOnly: false, candidateWrite: false });
+  assert.equal(blocked.allowed, false);
+  assert.equal(blocked.executionMode, 'write-blocked');
+  assert.equal(blocked.code, 'REQUIRED_GOAL_UNSUPPORTED_WRITE_BLOCKED');
+  assert.deepEqual(blocked.unsupportedGoalIds, ['xiuwan-combo-poison-accumulation', 'xiuwan-super-poison-effect']);
+
+  const observation = evaluateWriteAdmission(task.goals, { observationOnly: true, candidateWrite: false });
+  assert.equal(observation.allowed, true);
+  assert.equal(observation.executionMode, 'observation-only');
+
+  const candidate = evaluateWriteAdmission(task.goals, { observationOnly: false, candidateWrite: true });
+  assert.equal(candidate.allowed, true);
+  assert.equal(candidate.executionMode, 'candidate-experiment');
+  const coverage = evaluateGoalCoverage(task.goals.map((goal) => ({ ...goal, verified: true })), false, task.contract);
+  assert.equal(coverage.status, 'unsupported');
+  assert.equal(coverage.taskCompletionVerified, false);
+});
+
+test('interrupted reports retain unsupported goal classification instead of falling back to PARAM-only mode', () => {
+  const task = FOUR_TASKS.find((item) => item.id === 'four-3-xiuwan-super-poison');
+  assert.ok(task);
+  const interrupted = classifyInterruptedGoalCoverage(task.goals, false, task.contract);
+  assert.equal(interrupted.verificationMode, 'native-semantic');
+  assert.equal(interrupted.status, 'unsupported');
+  assert.deepEqual(interrupted.unsupportedGoalIds, ['xiuwan-combo-poison-accumulation', 'xiuwan-super-poison-effect']);
+  assert.equal(interrupted.taskCompletionVerified, false);
+});
+
+test('a fatal V8 OOM is not misclassified as an unexplained window close', () => {
+  const stop = classifyStopTelemetry({
+    diagnostics: {
+      events: [{ type: 'page-close', at: '2026-09-27T01:24:33.533Z' }],
+      stderrTail: '[175552] OOM error in V8: CALL_AND_RETRY_LAST Allocation failed - JavaScript heap out of memory'
+    }
+  });
+  assert.equal(stop.classification, 'internal');
+  assert.equal(stop.reason, 'v8-oom');
+  assert.equal(stop.pageClose.at, '2026-09-27T01:24:33.533Z');
+  assert.equal(stop.v8Oom, true);
 });
 
 test('a selected task cannot claim completion from only one executable subset', () => {
@@ -78,6 +163,39 @@ test('missing source evidence is a corpus mismatch rather than an implicit pass'
   assert.equal(verdict.corpusMismatch, true);
   assert.equal(verdict.status, 'corpus_mismatch');
   assert.equal(verdict.taskCompletionVerified, false);
+});
+
+test('real-agent Electron launch accepts an increased heap budget and preserves the app entry', () => {
+  assert.deepEqual(createAgentElectronLaunchArgs({
+    runtime: 'unpacked', productionMain: '/snapshot/production-main.mjs', userDataDir: '/tmp/agent-user-data', maxOldSpaceMb: 6144
+  }), [
+    '--js-flags=--max-old-space-size=6144', '/snapshot/production-main.mjs', '--user-data-dir=/tmp/agent-user-data'
+  ]);
+  assert.deepEqual(createAgentElectronLaunchArgs({
+    runtime: 'installed', productionMain: '/ignored/production-main.mjs', userDataDir: '/tmp/agent-user-data', maxOldSpaceMb: 4096
+  }), [
+    '--js-flags=--max-old-space-size=4096', '--user-data-dir=/tmp/agent-user-data'
+  ]);
+  assert.deepEqual(createAgentElectronLaunchArgs({
+    runtime: 'unpacked', productionMain: '/snapshot/production-main.mjs', userDataDir: '/tmp/agent-user-data', maxOldSpaceMb: 16384
+  }), [
+    '--js-flags=--max-old-space-size=16384', '/snapshot/production-main.mjs', '--user-data-dir=/tmp/agent-user-data'
+  ]);
+  assert.throws(() => createAgentElectronLaunchArgs({
+    runtime: 'unpacked', productionMain: '/snapshot/production-main.mjs', userDataDir: '/tmp/agent-user-data', maxOldSpaceMb: 16385
+  }), /2048 to 16384/u);
+});
+
+test('required corpus sources require exact logical identity and native hash evidence', () => {
+  const evaluate = (sourceUri, sourceHashes) => evaluateGoalCoverage([{
+    goalId: 'native', kind: 'native-tool', required: true, verified: true,
+    verificationEvidence: [{ tool: 'read_emevd_event', sourceUris: [sourceUri], sourceHashes }]
+  }], false, { corpusFingerprint: {
+    requiredSources: ['event/common.emevd.dcx'], requireNativeSourceHash: true
+  } });
+  assert.equal(evaluate('file://backup/event/common.emevd.dcx.old', ['sha']).corpusMismatch, true);
+  assert.equal(evaluate('file://event/common.emevd.dcx', []).corpusMismatch, true);
+  assert.equal(evaluate('file://event/common.emevd.dcx', ['sha']).corpusMismatch, false);
 });
 
 test('a required failed native goal has an explicit unverified terminal status', () => {
@@ -132,6 +250,77 @@ test('native PARAM containerPath becomes a workspace-bound logical source URI wi
   assert.equal(resolveNativeSourceUri({ ok: true, data: { containerPath: 'D:/outside/gameparam.parambnd.dcx' } }, {
     workspaceRoot: 'D:/overlay', entries: [{ type: 'file', path: 'param/gameparam/gameparam.parambnd.dcx' }]
   }), null);
+});
+
+test('native-tool evidence binds relative containerPath to its indexed logical source before corpus checking', () => {
+  const facts = enrichNativeSourceFacts({
+    ok: true,
+    data: { record: { containerPath: 'param/gameparam/gameparam.parambnd.dcx' } }
+  }, { hashes: ['native-hash'], revisions: [7], uris: [] }, {
+    workspaceRoot: 'D:/overlay',
+    entries: [{ type: 'file', path: 'param/gameparam/gameparam.parambnd.dcx' }]
+  });
+  assert.deepEqual(facts.uris, ['file://param/gameparam/gameparam.parambnd.dcx']);
+  const verdict = evaluateGoalCoverage([{
+    goalId: 'anchor', kind: 'native-tool', required: true, verified: true,
+    verificationEvidence: [{ tool: 'read_param_fields', sourceHashes: facts.hashes, sourceUris: facts.uris }]
+  }], false, { corpusFingerprint: {
+    requiredSources: ['param/gameparam/gameparam.parambnd.dcx'], requireNativeSourceHash: true
+  } });
+  assert.equal(verdict.corpusMismatch, false);
+});
+
+test('native tool basename-only readback binds only through a unique explicit indexed source hint', () => {
+  const result = { ok: true, data: { record: { containerPath: 'gameparam.parambnd.dcx' } } };
+  const entries = [
+    { type: 'file', path: 'param/gameparam/gameparam.parambnd.dcx' },
+    { type: 'file', path: 'param/drawparam/drawparam.parambnd.dcx' }
+  ];
+  assert.deepEqual(resolveNativeSourceUri(result, {
+    workspaceRoot: 'D:/overlay', entries, sourceHint: 'param/gameparam/gameparam.parambnd.dcx'
+  }), {
+    sourceUri: 'file://param/gameparam/gameparam.parambnd.dcx',
+    relativePath: 'param/gameparam/gameparam.parambnd.dcx'
+  });
+  const facts = enrichNativeSourceFacts(result, { hashes: ['native-hash'], revisions: [], uris: [] }, {
+    workspaceRoot: 'D:/overlay', entries, sourceHint: 'param/gameparam/gameparam.parambnd.dcx'
+  });
+  assert.deepEqual(facts.uris, ['file://param/gameparam/gameparam.parambnd.dcx']);
+  assert.equal(diagnoseNativeSourceUriResolution(result, {
+    workspaceRoot: 'D:/overlay', entries,
+    requiredSources: ['param/gameparam/gameparam.parambnd.dcx'],
+    sourceHint: 'param/gameparam/gameparam.parambnd.dcx'
+  }).bound, true);
+  assert.equal(resolveNativeSourceUri(result, {
+    workspaceRoot: 'D:/overlay',
+    entries: [
+      ...entries,
+      { type: 'file', path: 'backup/gameparam.parambnd.dcx' }
+    ],
+    sourceHint: 'param/gameparam/gameparam.parambnd.dcx'
+  }), null, 'a non-unique basename must not become a suffix guess');
+});
+
+test('source binding diagnostics explain unindexed native paths without exposing local paths', () => {
+  const diagnostic = diagnoseNativeSourceUriResolution({
+    ok: true,
+    data: { record: { containerPath: 'D:/outside/gameparam.parambnd.dcx' } }
+  }, {
+    workspaceRoot: 'D:/overlay',
+    entries: [{ type: 'file', path: 'param/gameparam/gameparam.parambnd.dcx' }],
+    requiredSources: ['param/gameparam/gameparam.parambnd.dcx']
+  });
+  assert.deepEqual(diagnostic, {
+    bound: false,
+    rootProvided: true,
+    indexedFileCount: 1,
+    candidateCount: 1,
+    candidateStatuses: ['absolute-outside-workspace'],
+    relativeCandidates: [],
+    candidateMatchesRequiredSource: [],
+    candidateComparisons: [],
+    requiredSourcesIndexed: [true]
+  });
 });
 
 test('contract postconditions must map to required executable goals', () => {
@@ -204,6 +393,9 @@ test('four-task manifest keeps unsupported runtime obligations required and does
   }
   const four1 = FOUR_TASKS.find((task) => task.id === 'four-1-gyoubu-elite-indigo');
   assert.ok(four1);
+  assert.deepEqual(four1.contract.corpusFingerprint.requiredSources, ['param/gameparam/gameparam.parambnd.dcx']);
+  assert.equal(four1.contract.targetIdentity.event, undefined,
+    'optional common#965104 unlock evidence must not stand in for Gyoubu death causality');
   assert.ok(!four1.goals.some((goal) => goal.required && goal.expectedValue === 9457));
   const lotLink = four1.goals.find((goal) => goal.goalId === 'gyoubu-indigo-lot-link');
   const unlockBaseline = four1.goals.find((goal) => goal.goalId === 'indigo-unlock-event');
@@ -213,6 +405,16 @@ test('four-task manifest keeps unsupported runtime obligations required and does
   assert.equal(unlockBaseline?.changedPath, undefined);
   const four2 = FOUR_TASKS.find((task) => task.id === 'four-2-gyoubu-lightning-genichiro');
   assert.ok(four2);
+  const four3 = FOUR_TASKS.find((task) => task.id === 'four-3-xiuwan-super-poison');
+  const four4 = FOUR_TASKS.find((task) => task.id === 'four-4-xiuwan-final-tracking');
+  assert.deepEqual(four3?.corpusKinds, ['param'], 'PARAM-only poison experiments should not index unrelated MSG/MAP/EVENT families');
+  assert.deepEqual(four4?.corpusKinds, ['param'], 'PARAM-only tracking experiments should not index unrelated MSG/MAP/EVENT families');
+  for (const task of [four3, four4]) {
+    for (const goal of task.goals.filter((item) => item.tool === 'read_param_fields')) {
+      assert.equal(goal.input.containerPath, task.contract.corpusFingerprint.requiredSources[0],
+        `${goal.goalId} must read from the exact declared corpus source`);
+    }
+  }
   for (const probe of four2.goals.filter((goal) => goal.goalId.endsWith('-script-structure'))) {
     assert.equal(probe.required, false);
     assert.equal(probe.changedPath, undefined);
@@ -226,6 +428,19 @@ test('selected corpus includes action/chr and reports all exclusions without cla
   assert.deepEqual(plan.copiedKinds, ['param', 'msg', 'event', 'map', 'script', 'action', 'chr']);
   assert.deepEqual(plan.missingKinds, []);
   assert.deepEqual(plan.omittedKinds, ['.soulforge', 'sfx']);
+  assert.equal(plan.fullCorpus, false);
+});
+
+test('a task-specific semantic corpus copies only requested resource kinds and reports excluded kinds', () => {
+  const plan = planSemanticCorpus(
+    ['param', 'msg', 'event', 'map', 'script', 'action', 'chr', 'sfx'],
+    ['param', 'msg', 'action']
+  );
+  assert.deepEqual(plan.requestedKinds, ['param', 'msg', 'action']);
+  assert.deepEqual(plan.copiedKinds, ['param', 'msg', 'action']);
+  assert.deepEqual(plan.missingKinds, []);
+  assert.deepEqual(plan.excludedKinds, ['chr', 'event', 'map', 'script']);
+  assert.deepEqual(plan.omittedKinds, ['sfx']);
   assert.equal(plan.fullCorpus, false);
 });
 
@@ -323,6 +538,26 @@ test('semantic preflight observes live transitions and returns at the first requ
   assert.equal(result.status, 'ready');
   assert.equal(result.attempts, 3);
   assert.equal(result.elapsedMs, 20);
+});
+
+test('full-corpus harness waits for completed analysis before starting a broad Agent workflow', async () => {
+  const snapshots = [
+    sample({ param_row: 50_302, text_entry: 54_930 }, 'running'),
+    sample({ param_row: 50_302, text_entry: 54_930, event: 14_051 }, 'completed')
+  ];
+  let elapsed = 0;
+  const result = await waitForSemanticReadiness({
+    readSnapshot: async () => snapshots.shift(),
+    requiredFamilies: ['param_row', 'text_entry'],
+    requireAnalysisComplete: true,
+    now: () => elapsed,
+    delay: async (ms) => { elapsed += ms; },
+    intervalMs: 10,
+    timeoutMs: 100
+  });
+  assert.equal(result.status, 'ready');
+  assert.equal(result.attempts, 2, 'first-family readiness must not race the remaining corpus analysis');
+  assert.equal(result.analysisStatus, 'completed');
 });
 
 test('preflight timeout preserves missing families and explicit diagnostic', async () => {
@@ -456,6 +691,72 @@ test('rollback preserves production newest-first order and strict hash guards re
   assert.deepEqual(results.slice(1).map((entry) => entry.result.ok), [true, true, true]);
   assert.ok(results.every((entry) => entry.result.ok === true));
   assert.deepEqual([...current.entries()], [...initial.entries()]);
+});
+
+test('interrupted-run recovery selects only newly committed operations, never historical commits', () => {
+  const before = [{ opId: 'old-commit', status: 'committed' }];
+  const after = [
+    { opId: 'old-commit', status: 'committed' },
+    { opId: 'new-commit', status: 'committed' },
+    { opId: 'new-inverse', status: 'rolled_back' },
+    { opId: 'in-flight', status: 'preparing' }
+  ];
+  assert.deepEqual(selectNewCommittedOperations(after, before).map((operation) => operation.opId), ['new-commit']);
+});
+
+test('CLI inverse commit normalizes the original operation to rolled_back for recovery verification', () => {
+  const normalized = normalizeOperationHistoryForVerification([
+    { opId: 'original', status: 'committed' },
+    { opId: 'inverse', status: 'committed', inverseOfOpId: 'original', rollbackScope: 'operation' }
+  ]);
+  assert.deepEqual(normalized, [{ opId: 'original', status: 'rolled_back' }]);
+});
+
+test('unverified UI rollback retries recovery through CLI after Electron exits', () => {
+  const base = {
+    phase: 'rollback',
+    writeMode: true,
+    rollbackStatus: 'unverified',
+    electronStatus: 'succeeded',
+    treeBefore: { sha256: 'before' },
+    treeAfterRun: { sha256: 'changed' },
+    operationsAfterRun: [{ opId: 'write-1', status: 'committed' }],
+    newCommittedOperations: [{ opId: 'write-1', status: 'committed' }],
+    rollbackResults: [{ opId: 'write-1', attempted: true, error: { code: 'WINDOW_CLOSED' } }]
+  };
+  assert.equal(shouldRecoverUnverifiedWriteRollback(base), true);
+  assert.equal(shouldRecoverUnverifiedWriteRollback({ ...base, electronStatus: 'running' }), false,
+    'recovery must wait until the owned Electron process tree has exited');
+  assert.equal(shouldRecoverUnverifiedWriteRollback({
+    ...base, treeAfterRun: { sha256: 'before' }, newCommittedOperations: [], rollbackResults: []
+  }), false, 'a verified no-mutation path does not need another CLI query');
+});
+
+test('CLI rollback recovery recognizes durable inverse commits and never retries them', () => {
+  const plan = planRollbackRecoveryOperations([
+    { opId: 'already-reversed', status: 'rolled_back' },
+    { opId: 'still-committed', status: 'committed' },
+    { opId: 'historical', status: 'committed' }
+  ], [{ opId: 'historical', status: 'committed' }]);
+  assert.deepEqual(plan.newOperations.map((operation) => operation.opId), ['already-reversed', 'still-committed']);
+  assert.deepEqual(plan.alreadyRolledBackOperations.map((operation) => operation.opId), ['already-reversed']);
+  assert.deepEqual(plan.pendingRollbackOperations.map((operation) => operation.opId), ['still-committed']);
+  assert.deepEqual(plan.unresolvedOperations, []);
+  const alreadyReversed = planRollbackRecoveryOperations([
+    { opId: 'already-reversed', status: 'rolled_back' }
+  ], []);
+  const durableInverseReceipt = [{
+    opId: 'already-reversed',
+    attempted: false,
+    result: { ok: true, source: 'durable-inverse-already-committed' }
+  }];
+  const verified = evaluateRollbackVerification({
+    operations: alreadyReversed.newOperations,
+    results: durableInverseReceipt,
+    statuses: new Map([['already-reversed', 'rolled_back']]),
+    treeRestoredExactly: true
+  });
+  assert.equal(verified.verified, true, 'a lost UI reply is verified from the durable inverse and exact overlay tree');
 });
 
 test('rollback records a first-operation throw and never reaches later operations', async () => {

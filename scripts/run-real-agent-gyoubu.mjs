@@ -31,14 +31,25 @@ import {
   assertAgentProductionBuildFresh
 } from './agent-production-build-lib.mjs';
 import {
+  createAgentElectronLaunchArgs,
+  classifyStopTelemetry,
+  classifyInterruptedGoalCoverage,
+  normalizeOperationHistoryForVerification,
   decideScratchCleanup,
+  shouldRecoverUnverifiedWriteRollback,
+  planRollbackRecoveryOperations,
   evaluateGoalCoverage,
+  buildFailureSessionEvidence,
+  evaluateWriteAdmission,
   evaluateRollbackVerification,
   planSemanticCorpus,
+  enrichNativeSourceFacts,
+  diagnoseNativeSourceUriResolution,
   rollbackCommittedOperations,
   resolveNativeSourceUri,
   safeHarnessFileLabel,
   SEMANTIC_CORPUS_KINDS,
+  selectNewCommittedOperations,
   waitForSemanticReadiness
 } from './real-agent-harness-lib.mjs';
 import { loadTestAgentProvider } from './testing/test-agent-provider.mjs';
@@ -87,6 +98,7 @@ const AGENT_TEST_CONFIG_PATH = CLI_OPTIONS.testConfig ?? process.env.SOULFORGE_A
 const AGENT_RUNTIME = CLI_OPTIONS.runtime ?? process.env.SOULFORGE_AGENT_RUNTIME?.trim() ?? 'unpacked';
 const AGENT_EXE_PATH = CLI_OPTIONS.exe ?? process.env.SOULFORGE_AGENT_EXE?.trim() ?? null;
 const WRITE_MODE = CLI_OPTIONS.write === true || CLI_OPTIONS.observationOnly !== true;
+const CANDIDATE_WRITE_MODE = CLI_OPTIONS.candidateWrite === true;
 const SELECTED_TEST_TASK = CLI_OPTIONS.testset ? getFourTask(CLI_OPTIONS.testset) : null;
 const TASK_QUERY = CLI_OPTIONS.query ?? SELECTED_TEST_TASK?.query ?? DEFAULT_TASK_QUERY;
 const SAFE_TIMESTAMP = new Date().toISOString().replace(/[:.]/gu, '-');
@@ -102,6 +114,10 @@ const REQUEST_TIMEOUT_MS = positiveInteger(
 const MAX_OUTPUT_TOKENS = positiveInteger(
   CLI_OPTIONS.maxOutputTokens ?? process.env.SOULFORGE_REAL_AGENT_MAX_OUTPUT_TOKENS,
   60_000
+);
+const ELECTRON_MAX_OLD_SPACE_MB = positiveInteger(
+  CLI_OPTIONS.electronMaxOldSpaceMb ?? process.env.SOULFORGE_REAL_AGENT_ELECTRON_MAX_OLD_SPACE_MB,
+  6_144
 );
 const SESSION_TIMEOUT_MS = positiveInteger(
   CLI_OPTIONS.sessionTimeoutMs ?? process.env.SOULFORGE_REAL_AGENT_SESSION_TIMEOUT_MS,
@@ -127,6 +143,10 @@ const CLEANUP_EVALUATE_TIMEOUT_MS = positiveInteger(process.env.SOULFORGE_REAL_A
 const ELECTRON_CLOSE_TIMEOUT_MS = positiveInteger(process.env.SOULFORGE_REAL_AGENT_ELECTRON_CLOSE_TIMEOUT_MS, 5_000);
 const PROCESS_QUERY_TIMEOUT_MS = positiveInteger(process.env.SOULFORGE_REAL_AGENT_PROCESS_QUERY_TIMEOUT_MS, 5_000);
 const PROCESS_TREE_KILL_GRACE_MS = positiveInteger(process.env.SOULFORGE_REAL_AGENT_PROCESS_TREE_KILL_GRACE_MS, 5_000);
+const ELECTRON_DIAGNOSTIC_TAIL_CHARS = positiveInteger(
+  process.env.SOULFORGE_REAL_AGENT_DIAGNOSTIC_TAIL_CHARS,
+  1_048_576
+);
 
 function positiveInteger(raw, fallback) {
   const value = Number(raw);
@@ -157,6 +177,10 @@ function parseCliOptions(args) {
     }
     if (arg === '--write' || arg === '--apply-overlay') {
       options.write = true;
+      continue;
+    }
+    if (arg === '--candidate-write') {
+      options.candidateWrite = true;
       continue;
     }
     const next = args[index + 1];
@@ -235,7 +259,15 @@ function parseCliOptions(args) {
       index += 1;
       continue;
     }
-    if (typeof arg === 'string' && !arg.startsWith('-')) positional.push(arg);
+    if (arg === '--electron-max-old-space-mb' && typeof next === 'string') {
+      options.electronMaxOldSpaceMb = next;
+      index += 1;
+      continue;
+    }
+    if (typeof arg === 'string' && arg.startsWith('-')) {
+      throw harnessError('REAL_AGENT_OPTION_UNKNOWN', `未知模拟 Agent 参数：${arg}。请用 --help 查看支持的选项。`);
+    }
+    if (typeof arg === 'string') positional.push(arg);
   }
   if (options.query === undefined && positional.length > 0) {
     options.query = positional.join(' ').trim();
@@ -274,6 +306,7 @@ function printHelp() {
     '  --goals <JSON>                冻结的机器可验证终态目标',
     '  --observe                     观察模式，可省略 goals；不作任务通过声明',
     '  --write                       显式启用隔离 overlay 写回闭环',
+    '  --candidate-write             仅当必需目标 unsupported 时显式运行隔离候选实验；结果永不算通过',
     '  --apply-overlay               --write 的兼容别名',
     '  --testset <名称>              使用机器可验证测试清单（four-1 到 four-4；four 由批处理入口展开）',
     '  --label <名称>                报告文件名前缀',
@@ -285,9 +318,10 @@ function printHelp() {
     '  --max-steps <整数>            默认 200',
     '  --timeout-ms <整数>           单次模型请求超时，默认 180000',
     '  --workspace-timeout-ms <整数> 工作区打开/轻量扫描超时，默认 300000',
-    '  --semantic-timeout-ms <整数>  首批 PARAM/MSG 语义预热等待，默认 300000',
+    '  --semantic-timeout-ms <整数>  Agent 启动前等待全量语义分析，默认 300000',
     '  --session-timeout-ms <整数>   整个会话超时，默认 2700000',
-    '  --max-output-tokens <整数>    总输出预算，默认 60000'
+    '  --max-output-tokens <整数>    总输出预算，默认 60000',
+    '  --electron-max-old-space-mb <MiB> 请求的 Electron V8 旧生代上限，2048-16384，默认 6144；报告会记录实际主进程堆上限'
   ].join('\n'));
 }
 
@@ -368,7 +402,7 @@ async function assertDirectory(directory, label) {
   if (!info.isDirectory()) throw harnessError('CORPUS_DIRECTORY_INVALID', `${label} 不是目录：${directory}`);
 }
 
-async function copySemanticWorkspace(overlayRoot) {
+async function copySemanticWorkspace(overlayRoot, requestedKinds = SEMANTIC_CORPUS_KINDS) {
   await assertDirectory(MOD_ROOT, '真实 Mod 根目录');
   await assertDirectory(GAME_ROOT, '真实游戏根目录');
   await mkdir(overlayRoot, { recursive: true });
@@ -378,10 +412,13 @@ async function copySemanticWorkspace(overlayRoot) {
       throw harnessError('CORPUS_DIRECTORY_INVALID', `${entry.name} 必须是实际目录，不能是文件或符号链接。`);
     }
   }
-  const manifest = planSemanticCorpus(entries.filter((entry) => entry.isDirectory()).map((entry) => entry.name));
-  // Existing baseline directories remain mandatory; missing optional action/chr
-  // are explicitly diagnosed and never represented as copied coverage.
-  for (const kind of ['param', 'msg', 'event', 'map', 'script']) {
+  const manifest = planSemanticCorpus(
+    entries.filter((entry) => entry.isDirectory()).map((entry) => entry.name),
+    requestedKinds
+  );
+  // A selected task owns its corpus profile. Do not require or silently copy
+  // large unrelated semantic families when a PARAM/MSG-only task is running.
+  for (const kind of requestedKinds) {
     await assertDirectory(join(MOD_ROOT, kind), `真实 ${kind} 语料`);
   }
   for (const kind of manifest.copiedKinds) {
@@ -389,6 +426,9 @@ async function copySemanticWorkspace(overlayRoot) {
     await assertDirectory(source, `真实 ${kind} 语料`);
     await cp(source, join(overlayRoot, kind), { recursive: true });
     log(`已复制真实 ${kind} 语料到隔离 overlay。`);
+  }
+  if (manifest.excludedKinds.length > 0) {
+    log(`按当前任务范围未复制语义目录：${manifest.excludedKinds.join(', ')}。`);
   }
   for (const diagnostic of manifest.diagnostics) log(`${diagnostic.code}: ${diagnostic.message}`);
   return manifest;
@@ -605,6 +645,63 @@ async function waitForAgentTerminal(window, sessionId) {
     }
     await sleep(AGENT_STOP_POLL_MS);
   }
+}
+
+function startElectronMemorySampler(app, diagnostics, getPhase) {
+  let inFlight = false;
+  const maxSamples = 512;
+  const timer = setInterval(() => {
+    if (inFlight) return;
+    inFlight = true;
+    void app.evaluate((_electronApp, phase) => {
+      const v8 = process.getBuiltinModule('node:v8');
+      const stats = v8.getHeapStatistics();
+      const memory = process.memoryUsage();
+      return {
+        at: new Date().toISOString(),
+        phase,
+        heapLimitMb: Number((stats.heap_size_limit / (1024 * 1024)).toFixed(1)),
+        heapUsedMb: Number((stats.used_heap_size / (1024 * 1024)).toFixed(1)),
+        heapTotalMb: Number((stats.total_heap_size / (1024 * 1024)).toFixed(1)),
+        rssMb: Number((memory.rss / (1024 * 1024)).toFixed(1)),
+        externalMb: Number((memory.external / (1024 * 1024)).toFixed(1)),
+        arrayBuffersMb: Number((memory.arrayBuffers / (1024 * 1024)).toFixed(1)),
+        heapSpaces: v8.getHeapSpaceStatistics()
+          .filter((space) => space.space_used_size > 0)
+          .map((space) => ({
+            name: space.space_name,
+            usedMb: Number((space.space_used_size / (1024 * 1024)).toFixed(1)),
+            sizeMb: Number((space.space_size / (1024 * 1024)).toFixed(1))
+          }))
+      };
+    }, getPhase()).then((sample) => {
+      diagnostics.memorySamples.push(sample);
+      if (diagnostics.memorySamples.length > maxSamples) diagnostics.memorySamples.shift();
+      const peak = diagnostics.memoryPeak ?? {
+        heapUsedMb: 0, heapUsedAt: null, heapUsedPhase: null,
+        rssMb: 0, rssAt: null, rssPhase: null
+      };
+      if (sample.heapUsedMb > peak.heapUsedMb) {
+        peak.heapUsedMb = sample.heapUsedMb;
+        peak.heapUsedAt = sample.at;
+        peak.heapUsedPhase = sample.phase;
+      }
+      if (sample.rssMb > peak.rssMb) {
+        peak.rssMb = sample.rssMb;
+        peak.rssAt = sample.at;
+        peak.rssPhase = sample.phase;
+      }
+      diagnostics.memoryPeak = peak;
+    }).catch((error) => {
+      const message = error instanceof Error ? error.message : String(error);
+      diagnostics.memorySampleErrors.push({ at: new Date().toISOString(), phase: getPhase(), message });
+      if (diagnostics.memorySampleErrors.length > 16) diagnostics.memorySampleErrors.shift();
+    }).finally(() => {
+      inFlight = false;
+    });
+  }, 30_000);
+  timer.unref?.();
+  return () => clearInterval(timer);
 }
 
 function eventSummary(events) {
@@ -836,7 +933,23 @@ async function verifyGoalThroughNativeTool(window, goal, paramReads = new Map(),
   }
   const execution = await runReadOnlyGoalTool(window, goal);
   const result = execution.result;
-  const facts = collectNativeSourceFacts(result);
+  const facts = enrichNativeSourceFacts(result, collectNativeSourceFacts(result), {
+    workspaceRoot: treeEvidence?.root,
+    entries: [
+      ...(treeEvidence?.before?.entries ?? []),
+      ...(treeEvidence?.after?.entries ?? [])
+    ],
+    ...(typeof goal.input?.containerPath === 'string' ? { sourceHint: goal.input.containerPath } : {})
+  });
+  const sourceIdentityDiagnostics = diagnoseNativeSourceUriResolution(result, {
+    workspaceRoot: treeEvidence?.root,
+    entries: [
+      ...(treeEvidence?.before?.entries ?? []),
+      ...(treeEvidence?.after?.entries ?? [])
+    ],
+    requiredSources: SELECTED_TEST_TASK?.contract?.corpusFingerprint?.requiredSources ?? [],
+    ...(typeof goal.input?.containerPath === 'string' ? { sourceHint: goal.input.containerPath } : {})
+  });
   const nativeReadOk = result?.ok === true;
   const sourceHashPresent = facts.hashes.length > 0;
   const assertionOk = nativeReadOk && matchesAssertion(result, goal.assertion);
@@ -856,6 +969,7 @@ async function verifyGoalThroughNativeTool(window, goal, paramReads = new Map(),
     observedValue: compactNativeToolResult(observed),
     sourceHashPresent,
     sourceRevisionPresent: facts.revisions.length > 0,
+    sourceIdentityDiagnostics,
     verified: nativeReadOk && assertionOk && proofOk && changed,
     status: nativeReadOk && assertionOk && proofOk && changed ? 'verified' : 'unverified',
     verificationEvidence: nativeReadOk && assertionOk && proofOk && changed
@@ -911,45 +1025,6 @@ function parseDurableTerminal(raw) {
     }
   }
   return { terminal: terminals.at(-1) ?? null, terminalCount: terminals.length, parseErrors };
-}
-
-function classifyStopTelemetry({ diagnostics, stopFileRequested = false, errorCode = null }) {
-  const events = Array.isArray(diagnostics?.events) ? diagnostics.events : [];
-  const pageClose = events.find((event) => event.type === 'page-close') ?? null;
-  const rendererCrash = events.find((event) => event.type === 'renderer-crash') ?? null;
-  const processExit = events.find((event) => event.type === 'process-exit') ?? null;
-  let classification = 'none';
-  let reason = null;
-  if (stopFileRequested) {
-    classification = 'operator';
-    reason = 'stop-file';
-  } else if (rendererCrash) {
-    classification = 'internal';
-    reason = 'renderer-crash';
-  } else if (pageClose) {
-    // A page close alone does not identify an operator action.  Preserve the
-    // observed window-close fact, but keep its cause unknown unless the
-    // run-specific stop file was actually observed.
-    classification = 'unknown';
-    reason = 'window-close';
-  } else if (processExit) {
-    classification = 'internal';
-    reason = 'process-exit';
-  } else if (errorCode) {
-    classification = 'internal';
-    reason = 'harness-error';
-  }
-  return {
-    classification,
-    reason,
-    stopFileConfigured: AGENT_STOP_FILE !== null,
-    stopFileRequested: stopFileRequested === true,
-    pageClose: pageClose ? { at: pageClose.at } : null,
-    rendererCrash: rendererCrash ? { at: rendererCrash.at } : null,
-    processExit: processExit
-      ? { at: processExit.at, code: processExit.code, signal: processExit.signal }
-      : null
-  };
 }
 
 function normalizeProcessEntry(value) {
@@ -1283,13 +1358,192 @@ async function closeElectron(app, { scratchRoot, startedAt, ownership = null, al
   };
 }
 
+async function runIsolatedRecoveryCliTool({ overlayRoot, userDataDir, tool, input, confirmRollbackOpId = null }) {
+  const cliPath = join(REPO_ROOT, 'tools', 'soulforge-cli', 'sfcli.mjs');
+  const args = [
+    cliPath,
+    '--workspace', overlayRoot,
+    '--base', GAME_ROOT,
+    '--mode', confirmRollbackOpId ? 'fullPermission' : 'plan',
+    '--no-analyze',
+    '--json',
+    '--quiet',
+    ...(confirmRollbackOpId ? ['--confirm-rollback', confirmRollbackOpId] : []),
+    'call',
+    tool,
+    JSON.stringify(input)
+  ];
+  const { stdout } = await EXEC_FILE(process.execPath, args, {
+    cwd: REPO_ROOT,
+    env: {
+      ...process.env,
+      // production-main redirects this variable to app.getPath('userData')/workspace-storage.
+      // Reuse that exact database root so recovery sees the committed operation.
+      SF_E2E_WORKSPACE_STORAGE_ROOT: join(userDataDir, 'workspace-storage')
+    },
+    windowsHide: true,
+    maxBuffer: 16 * 1024 * 1024
+  });
+  let envelope;
+  try { envelope = JSON.parse(stdout.trim()); }
+  catch (error) {
+    throw harnessError('ISOLATED_CLI_RESPONSE_INVALID', `隔离 CLI 返回不是合法 JSON：${error instanceof Error ? error.message : String(error)}`);
+  }
+  if (envelope?.ok !== true) {
+    throw harnessError(
+      envelope?.error?.code ?? 'ISOLATED_CLI_TOOL_FAILED',
+      envelope?.error?.message ?? `隔离 CLI 工具失败：${tool}`,
+      envelope?.error?.details
+    );
+  }
+  return envelope;
+}
+
+function operationListFromCli(envelope) {
+  const operations = envelope?.data?.record?.operations;
+  return normalizeOperationHistoryForVerification(operations);
+}
+
+async function recoverInterruptedCommittedOperations({
+  overlayRoot,
+  userDataDir,
+  operationsBefore,
+  treeBefore
+}) {
+  const afterEnvelope = await runIsolatedRecoveryCliTool({
+    overlayRoot, userDataDir, tool: 'list_operations', input: {}
+  });
+  const operationsAfterRun = operationListFromCli(afterEnvelope);
+  const recoveryPlan = planRollbackRecoveryOperations(operationsAfterRun, operationsBefore);
+  const newCommittedOperations = recoveryPlan.pendingRollbackOperations
+    .sort((left, right) => (
+      Date.parse(right.committedAt ?? right.createdAt ?? '') - Date.parse(left.committedAt ?? left.createdAt ?? '')
+    ));
+  const newRunOperations = recoveryPlan.newOperations;
+  const committedRunOperationCount = newRunOperations.filter((operation) => (
+    operation.status === 'committed' || operation.status === 'rolled_back'
+  )).length;
+  const treeAfterRun = await snapshotTree(overlayRoot);
+  const alreadyRolledBackResults = recoveryPlan.alreadyRolledBackOperations.map((operation) => ({
+    opId: operation.opId,
+    attempted: false,
+    result: { ok: true, source: 'durable-inverse-already-committed' }
+  }));
+  if (newCommittedOperations.length === 0) {
+    const treeRestoredExactly = treeBefore?.sha256 === treeAfterRun.sha256;
+    const alreadyRolledBackVerified = newRunOperations.length > 0
+      && recoveryPlan.unresolvedOperations.length === 0
+      && recoveryPlan.alreadyRolledBackOperations.length === newRunOperations.length
+      && treeRestoredExactly;
+    const noMutationVerified = newRunOperations.length === 0 && treeRestoredExactly;
+    const rollbackStatus = alreadyRolledBackVerified
+      ? 'verified'
+      : noMutationVerified
+        ? 'not_applicable'
+        : 'unverified';
+    return {
+      operationsAfterRun,
+      newCommittedOperations,
+      newRunOperations,
+      operationsAfterRollback: operationsAfterRun,
+      rollbackResults: alreadyRolledBackResults,
+      treeAfterRun,
+      treeAfterRollback: treeAfterRun,
+      rollback: {
+        status: rollbackStatus,
+        attempted: false,
+        committedOperationCount: committedRunOperationCount,
+        reason: alreadyRolledBackVerified
+          ? 'cli-confirmed-existing-inverse-and-overlay-restored'
+          : noMutationVerified
+            ? 'cli-confirmed-no-committed-operations-and-overlay-unchanged'
+            : 'cli-recovery-found-unresolved-operation-or-overlay-differs',
+        evidence: {
+          recoveryMethod: 'sfcli--no-analyze',
+          newOperationIds: newRunOperations.map((operation) => operation.opId),
+          alreadyRolledBackIds: recoveryPlan.alreadyRolledBackOperations.map((operation) => operation.opId),
+          unresolvedOperationIds: recoveryPlan.unresolvedOperations.map((operation) => operation.opId),
+          treeBeforeSha256: treeBefore?.sha256 ?? null,
+          treeAfterRunSha256: treeAfterRun.sha256,
+          treeAfterRollbackSha256: treeAfterRun.sha256,
+          treeRestoredExactly,
+          rollbackResults: alreadyRolledBackResults
+        }
+      }
+    };
+  }
+
+  const pendingRollbackResults = await rollbackCommittedOperations(newCommittedOperations, async (opId) => {
+    const envelope = await runIsolatedRecoveryCliTool({
+      overlayRoot,
+      userDataDir,
+      tool: 'rollback_operation',
+      input: { opId },
+      confirmRollbackOpId: opId
+    });
+    const result = envelope.data?.record;
+    if (result?.ok !== true || typeof result.inverseOpId !== 'string') {
+      throw harnessError('CLI_RECOVERY_ROLLBACK_UNVERIFIED', `Patch Engine 未确认回滚操作：${opId}`, result);
+    }
+    return { ok: true, inverseOpId: result.inverseOpId, lifecycle: result.lifecycle ?? null };
+  });
+  const pendingResultsById = new Map(pendingRollbackResults.map((result) => [result.opId, result]));
+  const alreadyRolledBackById = new Map(alreadyRolledBackResults.map((result) => [result.opId, result]));
+  const rollbackResults = newRunOperations
+    .map((operation) => alreadyRolledBackById.get(operation.opId) ?? pendingResultsById.get(operation.opId))
+    .filter(Boolean);
+  const afterRollbackEnvelope = await runIsolatedRecoveryCliTool({
+    overlayRoot, userDataDir, tool: 'list_operations', input: {}
+  });
+  const operationsAfterRollback = operationListFromCli(afterRollbackEnvelope);
+  const treeAfterRollback = await snapshotTree(overlayRoot);
+  const rollbackStatuses = new Map(operationsAfterRollback.map((operation) => [operation.opId, operation.status]));
+  const verification = evaluateRollbackVerification({
+    operations: newRunOperations,
+    results: rollbackResults,
+    statuses: rollbackStatuses,
+    treeRestoredExactly: treeAfterRollback.sha256 === treeBefore?.sha256
+  });
+  return {
+      operationsAfterRun,
+      newCommittedOperations,
+      newRunOperations,
+      operationsAfterRollback,
+    rollbackResults,
+    treeAfterRun,
+    treeAfterRollback,
+    rollback: {
+      status: verification.verified ? 'verified' : 'unverified',
+      attempted: rollbackResults.some((result) => result.attempted === true),
+      committedOperationCount: committedRunOperationCount,
+      reason: verification.verified ? 'cli-patch-engine-recovery-verified' : 'cli-patch-engine-recovery-check-failed',
+      evidence: {
+        recoveryMethod: 'sfcli--no-analyze',
+        newOperationIds: newRunOperations.map((operation) => operation.opId),
+        committedOperationIds: newCommittedOperations.map((operation) => operation.opId),
+        alreadyRolledBackIds: recoveryPlan.alreadyRolledBackOperations.map((operation) => operation.opId),
+        unresolvedOperationIds: recoveryPlan.unresolvedOperations.map((operation) => operation.opId),
+        attemptedOperationIds: rollbackResults.filter((result) => result.attempted).map((result) => result.opId),
+        rollbackStatuses: Object.fromEntries(newCommittedOperations.map((operation) => [
+          operation.opId, rollbackStatuses.get(operation.opId) ?? null
+        ])),
+        treeBeforeSha256: treeBefore?.sha256 ?? null,
+        treeAfterRunSha256: treeAfterRun.sha256,
+        treeAfterRollbackSha256: treeAfterRollback.sha256,
+        treeRestoredExactly: verification.treeRestoredExactly,
+        rollbackResults
+      }
+    }
+  };
+}
+
 async function run() {
   if (CLI_OPTIONS.help) {
     printHelp();
     return { ok: true, help: true };
   }
-  if (CLI_OPTIONS.observationOnly === true && CLI_OPTIONS.write === true) {
-    throw harnessError('REAL_AGENT_MODE_INVALID', '--observe 与 --write/--apply-overlay 不能同时使用。');
+  if (CLI_OPTIONS.observationOnly === true && (CLI_OPTIONS.write === true || CANDIDATE_WRITE_MODE)) {
+    throw harnessError('REAL_AGENT_MODE_INVALID', '--observe 与 --write/--apply-overlay/--candidate-write 不能同时使用。');
   }
   if (CLI_OPTIONS.testset && !SELECTED_TEST_TASK) {
     throw harnessError('REAL_AGENT_TESTSET_INVALID', `未知四题测试清单：${CLI_OPTIONS.testset}`);
@@ -1323,6 +1577,65 @@ async function run() {
     }
   }
   const goals = parseGoals(CLI_OPTIONS.goals);
+  const writeAdmission = evaluateWriteAdmission(goals, {
+    observationOnly: CLI_OPTIONS.observationOnly === true,
+    candidateWrite: CANDIDATE_WRITE_MODE
+  });
+  const executionMode = writeAdmission.executionMode;
+  if (!writeAdmission.allowed) {
+    const goalCoverage = evaluateGoalCoverage(
+      goals,
+      CLI_OPTIONS.observationOnly === true,
+      SELECTED_TEST_TASK?.contract
+    );
+    const reportDir = resolve(REPO_ROOT, 'output/agent-real');
+    const reportPath = join(reportDir, `${REPORT_LABEL}-${SAFE_TIMESTAMP}.json`);
+    const blocked = sanitizeForReport({
+      ok: false,
+      status: 'unsupported/write_blocked',
+      phase: 'write-admission',
+      startedAt: new Date().toISOString(),
+      finishedAt: new Date().toISOString(),
+      task: TASK_QUERY,
+      runtimeBudgets: {
+        electronRequestedMaxOldSpaceMb: ELECTRON_MAX_OLD_SPACE_MB,
+        maxSteps: MAX_STEPS,
+        requestTimeoutMs: REQUEST_TIMEOUT_MS,
+        maxTotalOutputTokens: MAX_OUTPUT_TOKENS,
+        electronDiagnosticTailChars: ELECTRON_DIAGNOSTIC_TAIL_CHARS,
+        workspaceTimeoutMs: WORKSPACE_PREP_TIMEOUT_MS,
+        semanticPreflightTimeoutMs: SEMANTIC_PREFLIGHT_TIMEOUT_MS,
+        sessionTimeoutMs: SESSION_TIMEOUT_MS
+      },
+      goals,
+      taskContract: SELECTED_TEST_TASK?.contract ?? null,
+      executionMode,
+      verificationMode: goalCoverage.mode,
+      writeMode: WRITE_MODE,
+      taskCompletionVerified: false,
+      goalCoverage,
+      unsupportedGoalIds: writeAdmission.unsupportedGoalIds,
+      provider: { status: 'not-started' },
+      session: null,
+      error: {
+        code: writeAdmission.code,
+        message: writeAdmission.message,
+        details: { unsupportedGoalIds: writeAdmission.unsupportedGoalIds }
+      },
+      verdict: {
+        writeAdmissionAllowed: false,
+        taskCompletionVerified: false,
+        unsupportedGoalIds: writeAdmission.unsupportedGoalIds
+      },
+      reportPath: portablePath(relative(REPO_ROOT, reportPath))
+    });
+    await mkdir(reportDir, { recursive: true });
+    await writeFile(reportPath, `${JSON.stringify(blocked, null, 2)}\n`, 'utf8');
+    console.log(JSON.stringify(blocked, null, 2));
+    process.exitCode = 1;
+    return blocked;
+  }
+  log(`executionMode=${executionMode}${writeAdmission.unsupportedGoalIds.length > 0 ? ` unsupported=${writeAdmission.unsupportedGoalIds.join(',')}` : ''}`);
   // A supplied immutable artifact is the complete production receipt for this
   // run.  Validate every snapshot byte, but do not compare it with the live
   // checkout: a later source/build update must not silently mix into a pinned
@@ -1439,6 +1752,7 @@ async function run() {
   let semanticPreflight = null;
   let phase = 'prepare';
   let electronOwnership = null;
+  let stopElectronMemorySampler = null;
   let cleanupResult = { status: 'pending', reason: 'cleanup-not-started' };
   let rollbackResult = { status: 'unverified', attempted: false, reason: 'run-did-not-reach-rollback' };
   let operationsBefore = null;
@@ -1459,6 +1773,10 @@ async function run() {
     stdoutTail: '',
     stderrTail: '',
     events: [],
+    heapAtLaunch: null,
+    memorySamples: [],
+    memoryPeak: null,
+    memorySampleErrors: [],
     ownedProcessTree: null,
     productionMain: {
       path: portablePath(AGENT_RUNTIME === 'installed' ? AGENT_EXE_PATH : PRODUCTION_MAIN),
@@ -1471,7 +1789,7 @@ async function run() {
 
   await mkdir(reportDir, { recursive: true });
   try {
-    corpusManifest = await copySemanticWorkspace(overlayRoot);
+    corpusManifest = await copySemanticWorkspace(overlayRoot, SELECTED_TEST_TASK?.corpusKinds ?? SEMANTIC_CORPUS_KINDS);
     treeBefore = await snapshotTree(overlayRoot);
     await mkdir(userDataDir, { recursive: true });
     await mkdir(taskRecordDir, { recursive: true });
@@ -1481,10 +1799,12 @@ async function run() {
       ...(AGENT_RUNTIME === 'installed'
         ? { executablePath: AGENT_EXE_PATH }
         : { cwd: configuredSnapshotRoot ? resolve(configuredSnapshotRoot) : REPO_ROOT }),
-      args: [
-        ...(AGENT_RUNTIME === 'unpacked' ? [PRODUCTION_MAIN] : []),
-        `--user-data-dir=${userDataDir}`
-      ],
+      args: createAgentElectronLaunchArgs({
+        runtime: AGENT_RUNTIME,
+        productionMain: PRODUCTION_MAIN,
+        userDataDir,
+        maxOldSpaceMb: ELECTRON_MAX_OLD_SPACE_MB
+      }),
       env: {
         ...process.env,
         NODE_ENV: 'production',
@@ -1503,10 +1823,10 @@ async function run() {
     const child = app.process();
     electronDiagnostics.pid = child.pid;
     child.stdout?.on('data', (chunk) => {
-      electronDiagnostics.stdoutTail = (electronDiagnostics.stdoutTail + redactString(String(chunk))).slice(-32_768);
+      electronDiagnostics.stdoutTail = (electronDiagnostics.stdoutTail + redactString(String(chunk))).slice(-ELECTRON_DIAGNOSTIC_TAIL_CHARS);
     });
     child.stderr?.on('data', (chunk) => {
-      electronDiagnostics.stderrTail = (electronDiagnostics.stderrTail + redactString(String(chunk))).slice(-32_768);
+      electronDiagnostics.stderrTail = (electronDiagnostics.stderrTail + redactString(String(chunk))).slice(-ELECTRON_DIAGNOSTIC_TAIL_CHARS);
     });
     child.on('exit', (code, signal) => {
       electronDiagnostics.exitCode = code;
@@ -1522,6 +1842,26 @@ async function run() {
     });
     await window.waitForLoadState('domcontentloaded');
     await window.waitForFunction(() => 'soulforge' in globalThis, undefined, { timeout: 30_000 });
+    electronDiagnostics.heapAtLaunch = await app.evaluate(() => {
+      const stats = process.getBuiltinModule('node:v8').getHeapStatistics();
+      const memory = process.memoryUsage();
+      return {
+        heapLimitMb: Number((stats.heap_size_limit / (1024 * 1024)).toFixed(1)),
+        heapUsedMb: Number((stats.used_heap_size / (1024 * 1024)).toFixed(1)),
+        rssMb: Number((memory.rss / (1024 * 1024)).toFixed(1))
+      };
+    });
+    log(`Electron main V8 heap: 实际上限=${electronDiagnostics.heapAtLaunch.heapLimitMb}MiB，申请=${ELECTRON_MAX_OLD_SPACE_MB}MiB。`);
+    electronDiagnostics.memorySamples.push({ at: new Date().toISOString(), phase, ...electronDiagnostics.heapAtLaunch });
+    electronDiagnostics.memoryPeak = {
+      heapUsedMb: electronDiagnostics.heapAtLaunch.heapUsedMb,
+      heapUsedAt: new Date().toISOString(),
+      heapUsedPhase: phase,
+      rssMb: electronDiagnostics.heapAtLaunch.rssMb,
+      rssAt: new Date().toISOString(),
+      rssPhase: phase
+    };
+    stopElectronMemorySampler = startElectronMemorySampler(app, electronDiagnostics, () => phase);
     electronOwnership = await captureOwnedElectronTree({
       rootPid: child.pid,
       scratchRoot,
@@ -1591,6 +1931,7 @@ async function run() {
         analysis: globalThis.__sfAgentHarnessAnalysis ?? null
       })),
       requiredFamilies,
+      requireAnalysisComplete: true,
       timeoutMs: SEMANTIC_PREFLIGHT_TIMEOUT_MS,
       onProgress: (state) => {
         if (state.attempts === 1 || state.elapsedMs - lastPreflightLogAt >= 10_000) {
@@ -1891,6 +2232,7 @@ async function run() {
       && waited.cancelledForTimeout === false;
     const taskSucceeded = lifecycleOk
       && WRITE_MODE
+      && executionMode !== 'candidate-experiment'
       && goalsOk
       && goalCoverage.taskCoverageOk
       && committedOperationOk
@@ -1905,18 +2247,32 @@ async function run() {
       startedAt,
       finishedAt: new Date().toISOString(),
       task: TASK_QUERY,
+      runtimeBudgets: {
+        electronRequestedMaxOldSpaceMb: ELECTRON_MAX_OLD_SPACE_MB,
+        maxSteps: MAX_STEPS,
+        requestTimeoutMs: REQUEST_TIMEOUT_MS,
+        maxTotalOutputTokens: MAX_OUTPUT_TOKENS,
+        electronDiagnosticTailChars: ELECTRON_DIAGNOSTIC_TAIL_CHARS,
+        workspaceTimeoutMs: WORKSPACE_PREP_TIMEOUT_MS,
+        semanticPreflightTimeoutMs: SEMANTIC_PREFLIGHT_TIMEOUT_MS,
+        sessionTimeoutMs: SESSION_TIMEOUT_MS
+      },
       policy: livePolicyIdentity(),
       goals: nativeGoals.evaluations,
       goalCoverage,
       taskContract: SELECTED_TEST_TASK?.contract ?? null,
+      executionMode,
       rollback: rollbackResult,
       cleanup: cleanupResult,
       stop: classifyStopTelemetry({
         diagnostics: electronDiagnostics,
-        stopFileRequested: waited.stopFileRequested
+        stopFileRequested: waited.stopFileRequested,
+        stopFileConfigured: AGENT_STOP_FILE !== null
       }),
       verdict: {
         writeMode: WRITE_MODE,
+        executionMode,
+        candidateExperiment: executionMode === 'candidate-experiment',
         lifecycleOk,
         goalsOk,
         goalCoverageStatus: goalCoverage.status,
@@ -2027,18 +2383,39 @@ async function run() {
     const stopFileRequested = Boolean(
       AGENT_STOP_FILE && await fileExists(AGENT_STOP_FILE)
     );
+    const failureClassification = classifyInterruptedGoalCoverage(
+      goals,
+      CLI_OPTIONS.observationOnly === true,
+      SELECTED_TEST_TASK?.contract
+    );
+    const failureCoverage = failureClassification.goalCoverage;
     const failure = sanitizeForReport({
       ok: false,
+      status: failureClassification.status,
       startedAt,
       finishedAt: new Date().toISOString(),
       phase,
       task: TASK_QUERY,
+      runtimeBudgets: {
+        electronRequestedMaxOldSpaceMb: ELECTRON_MAX_OLD_SPACE_MB,
+        maxSteps: MAX_STEPS,
+        requestTimeoutMs: REQUEST_TIMEOUT_MS,
+        maxTotalOutputTokens: MAX_OUTPUT_TOKENS,
+        electronDiagnosticTailChars: ELECTRON_DIAGNOSTIC_TAIL_CHARS,
+        workspaceTimeoutMs: WORKSPACE_PREP_TIMEOUT_MS,
+        semanticPreflightTimeoutMs: SEMANTIC_PREFLIGHT_TIMEOUT_MS,
+        sessionTimeoutMs: SESSION_TIMEOUT_MS
+      },
       policy: livePolicyIdentity(),
       goals,
       taskContract: SELECTED_TEST_TASK?.contract ?? null,
-      verificationMode: CLI_OPTIONS.observationOnly ? 'observation-only' : 'param-fields-only',
+      executionMode,
+      verificationMode: failureClassification.verificationMode,
       writeMode: WRITE_MODE,
-      taskCompletionVerified: false,
+      taskCompletionVerified: failureClassification.taskCompletionVerified,
+      goalCoverage: failureCoverage,
+      unsupportedGoalIds: failureClassification.unsupportedGoalIds,
+      unverifiedGoalIds: failureClassification.unverifiedGoalIds,
       rollback: rollbackResult,
       cleanup: cleanupResult,
       corpusManifest,
@@ -2047,16 +2424,15 @@ async function run() {
       productionReceipt,
       provider: providerEvidence,
       sessionId,
-      session: terminalEvidence
-        ? {
-            ...terminalEvidence,
-            durableRollout: interruptedDurableRollout,
-            evidenceHasEntries: interruptedEvidenceHasEntries
-          }
-        : null,
+      session: buildFailureSessionEvidence({
+        terminalEvidence,
+        durableRollout: interruptedDurableRollout,
+        evidenceHasEntries: interruptedEvidenceHasEntries
+      }),
       stop: classifyStopTelemetry({
         diagnostics: electronDiagnostics,
         stopFileRequested,
+        stopFileConfigured: AGENT_STOP_FILE !== null,
         errorCode: error?.code ?? 'REAL_AGENT_HARNESS_FAILED'
       }),
       interruptedEvidence,
@@ -2088,6 +2464,10 @@ async function run() {
         details: error?.details
       },
       verdict: {
+        executionMode,
+        goalCoverageStatus: failureCoverage.status,
+        unsupportedGoalIds: failureCoverage.unsupportedGoalIds,
+        taskCompletionVerified: false,
         rollbackStatus: rollbackResult.status,
         cleanupOk: null
       },
@@ -2098,13 +2478,14 @@ async function run() {
     process.exitCode = 1;
     throw Object.assign(error instanceof Error ? error : new Error(String(error)), { reportPath });
   } finally {
+    stopElectronMemorySampler?.();
     if (window) {
       await Promise.race([
         window.evaluate(() => globalThis.__sfAgentHarnessUnsubscribe?.()).catch(() => undefined),
         sleep(CLEANUP_EVALUATE_TIMEOUT_MS)
       ]).catch(() => undefined);
     }
-    const rollbackStatus = report?.rollback?.status ?? rollbackResult.status;
+    let rollbackStatus = report?.rollback?.status ?? rollbackResult.status;
     const allowOwnedTreeKill = ['verified', 'not_applicable'].includes(rollbackStatus);
     let electronCleanup;
     let scratchCleanup;
@@ -2115,6 +2496,93 @@ async function run() {
         ownership: electronOwnership,
         allowOwnedTreeKill
       });
+      // If Electron died before the normal post-run operation query, the
+      // database utility may still have durably finalized a Patch Engine
+      // commit. Only recover after the owned Electron tree is confirmed
+      // exited; use the isolated CLI against the same user-data workspace DB,
+      // with a fresh one-shot authorization per operation.
+      const shouldRecoverUnverifiedWrite = shouldRecoverUnverifiedWriteRollback({
+        phase,
+        writeMode: WRITE_MODE,
+        rollbackStatus,
+        electronStatus: electronCleanup.status,
+        treeBefore,
+        treeAfterRun,
+        operationsAfterRun,
+        newCommittedOperations,
+        rollbackResults
+      });
+      if (shouldRecoverUnverifiedWrite) {
+        try {
+          const operationsAfterRunSnapshot = operationsAfterRun;
+          const newCommittedOperationsSnapshot = newCommittedOperations;
+          const treeAfterRunSnapshot = treeAfterRun;
+          const recovered = await recoverInterruptedCommittedOperations({
+            overlayRoot,
+            userDataDir,
+            operationsBefore: operationsBefore ?? [],
+            treeBefore
+          });
+          operationsAfterRun = operationsAfterRunSnapshot ?? recovered.operationsAfterRun;
+          newCommittedOperations = operationsAfterRunSnapshot !== null
+            ? selectNewCommittedOperations(operationsAfterRunSnapshot, operationsBefore ?? [])
+            : recovered.newCommittedOperations;
+          operationsAfterRollback = recovered.operationsAfterRollback;
+          rollbackResults = recovered.rollbackResults;
+          treeAfterRun = treeAfterRunSnapshot ?? recovered.treeAfterRun;
+          treeAfterRollback = recovered.treeAfterRollback;
+          rollbackResult = sanitizeForReport(recovered.rollback);
+          rollbackStatus = rollbackResult.status;
+          if (report) {
+            report.rollback = rollbackResult;
+            report.operations = {
+              before: report.operations?.before ?? operationsBefore,
+              afterRun: sanitizeForReport(operationsAfterRun),
+              newCommitted: sanitizeForReport(newCommittedOperations),
+              rollbackResults: sanitizeForReport(rollbackResults),
+              afterRollback: sanitizeForReport(operationsAfterRollback)
+            };
+            if (report.isolatedWorkspace) {
+              report.isolatedWorkspace.afterRun = summarizeTree(treeAfterRun);
+              report.isolatedWorkspace.afterRollback = summarizeTree(treeAfterRollback);
+              report.isolatedWorkspace.changedAfterRun = diffTrees(treeBefore, treeAfterRun);
+              report.isolatedWorkspace.residualAfterRollback = diffTrees(treeBefore, treeAfterRollback);
+            }
+            report.verdict ??= {};
+            report.verdict.rollbackStatus = rollbackStatus;
+            const recoveredOperationIds = recovered.newRunOperations.map((operation) => operation.opId);
+            report.verdict.recoveredOperationIds = recoveredOperationIds;
+            report.verdict.committedOperationOk = newCommittedOperations.length > 0 || recoveredOperationIds.length > 0;
+            report.verdict.writeObserved = Boolean(
+              (treeAfterRun && treeAfterRun.sha256 !== treeBefore.sha256)
+              || recoveredOperationIds.length > 0
+            );
+            report.verdict.treeRestoredExactly = treeAfterRollback?.sha256 === treeBefore.sha256;
+            report.verdict.rollbackOk = rollbackStatus === 'verified';
+            report.verdict.recoveryMethod = 'sfcli--no-analyze';
+          }
+          log(`write rollback recovery via sfcli: operations=${recovered.newRunOperations.length} rollback=${rollbackStatus}`);
+        } catch (recoveryError) {
+          const details = {
+            code: recoveryError?.code ?? 'CLI_CRASH_RECOVERY_FAILED',
+            message: recoveryError instanceof Error ? recoveryError.message : String(recoveryError)
+          };
+          rollbackResult = {
+            ...rollbackResult,
+            status: 'unverified',
+            reason: 'crash-recovery-failed',
+            evidence: { ...(rollbackResult.evidence ?? {}), recoveryError: details }
+          };
+          rollbackStatus = 'unverified';
+          if (report) {
+            report.rollback = sanitizeForReport(rollbackResult);
+            report.verdict ??= {};
+            report.verdict.rollbackStatus = 'unverified';
+            report.verdict.recoveryMethod = 'sfcli--no-analyze';
+            report.verdict.recoveryError = details;
+          }
+        }
+      }
       const scratchDecision = decideScratchCleanup({
         electronStatus: electronCleanup.status,
         rollbackStatus

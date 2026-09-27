@@ -1,8 +1,8 @@
 import assert from 'node:assert/strict';
 import { setImmediate as yieldTurn } from 'node:timers/promises';
 import type { RagChunk, ReferenceEdge } from '@soulforge/shared';
-import { createRagCorpus } from '../rag/chunkBuilder.js';
-import { attachLookupIndexAsync, buildLookupIndex, ensureLookupIndex, getLookupIndex } from '../rag/lookupIndex.js';
+import { buildRagCorpus, createRagCorpus } from '../rag/chunkBuilder.js';
+import { attachLookupIndexAsync, buildLookupIndex, DEFAULT_RAG_LOOKUP_BUILD_TIMEOUT_MS, ensureLookupIndex, getLookupIndex } from '../rag/lookupIndex.js';
 import { retrieveEvidence } from '../rag/retrieve.js';
 import { compareCodePointText } from '../rag/topK.js';
 import { createDefaultToolRegistry } from '../ai/toolRegistry.js';
@@ -17,8 +17,33 @@ const references: ReferenceEdge[] = chunks.slice(1).map((chunk) => ({
   fromUri: chunks[0]!.symbolUri, toUri: chunk.symbolUri, kind: 'references_text', confidence: 'high',
   reason: 'synthetic relation', evidence: []
 }));
+const referencesOnlyIndex = {
+  workspaceId: 'reference-omission',
+  getFiles: () => [],
+  toSymbolBundle: () => ({}),
+  listReferences: () => [references[0]!]
+} as unknown as Parameters<typeof buildRagCorpus>[0];
+const deferredWithoutReferences = buildRagCorpus(
+  referencesOnlyIndex,
+  'reference-omission',
+  undefined,
+  [references[0]!.fromUri],
+  undefined,
+  { lookupIndex: 'deferred', includeReferences: false }
+);
+assert.equal(deferredWithoutReferences.references.length, 0, 'source-scoped RAG candidates can omit the full reference graph when the caller supplies final references separately');
+const defaultReferences = buildRagCorpus(
+  referencesOnlyIndex,
+  'reference-omission',
+  undefined,
+  [references[0]!.fromUri],
+  undefined,
+  { lookupIndex: 'deferred' }
+);
+assert.equal(defaultReferences.references.length, 1, 'reference omission remains opt-in');
 const make = () => createRagCorpus({ workspaceId: 'async-lookup', builtAt: 'test', chunks, references, lookupIndex: 'deferred' });
 const corpus = make();
+assert.equal(DEFAULT_RAG_LOOKUP_BUILD_TIMEOUT_MS, 600_000, 'large workspace lookup indexing must allow ten minutes before timing out');
 let yields = 0;
 const progress: number[] = [];
 const indexed = await attachLookupIndexAsync(corpus, {
@@ -30,6 +55,13 @@ assert.ok(yields > 1, 'construction must yield before completing, not defer the 
 assert.deepEqual(indexed, buildLookupIndex(chunks, references));
 assert.equal(ensureLookupIndex(corpus), indexed, 'first retrieval reuses the prepared index');
 assert.equal(getLookupIndex(corpus), indexed);
+const yieldsAfterInitialBuild = yields;
+const repeated = await attachLookupIndexAsync(corpus, {
+  batchSize: 32,
+  yieldControl: async () => { yields++; await yieldTurn(); }
+});
+assert.ok(repeated === indexed, 'repeated async preparation reuses an unchanged corpus index');
+assert.equal(yields, yieldsAfterInitialBuild, 'reusing a prepared lookup must not rebuild its full maps');
 assert.ok(progress.length > 1 && progress.every((n, i) => i === 0 || n >= progress[i - 1]!));
 assert.deepEqual(retrieveEvidence(corpus, '苇名城 c1050'), retrieveEvidence(createRagCorpus({
   workspaceId: 'async-lookup', builtAt: 'test', chunks, references
@@ -122,6 +154,52 @@ assert.equal(toolResult.ok, true);
 assert.equal(timerFired, true, 'tool fallback must yield before finishing first-query preparation');
 assert.ok(getLookupIndex(fallback));
 
+// An index attached before a mutable corpus changed is not a prepared lookup.
+// The production tool boundary must detect the stale signature and rebuild it
+// asynchronously instead of letting retrieveEvidence rebuild it synchronously.
+const staleLookup = createRagCorpus({
+  workspaceId: 'async-lookup-stale-index',
+  builtAt: 'stale-index',
+  chunks: chunks.slice(0, 256)
+});
+staleLookup.chunks.push({ ...chunks[256]!, chunkId: 'late-marker', symbolUri: 'map://late-marker', body: 'unique late marker' });
+let staleLookupYielded = false;
+const staleLookupTimer = setTimeout(() => { staleLookupYielded = true; }, 0);
+const staleLookupResult = await createDefaultToolRegistry().run('retrieve_evidence', { query: 'late marker' }, {
+  workspaceIndex: null,
+  mode: 'plan',
+  rag: staleLookup
+});
+clearTimeout(staleLookupTimer);
+assert.equal(staleLookupResult.ok, true);
+assert.equal(staleLookupYielded, true, 'a stale attached lookup must be rebuilt at the asynchronous preparation boundary');
+
+// A desktop workspace can be remounted while that asynchronous preparation is
+// yielding. The result must be discarded instead of escaping from the old RAG.
+const switchingWorkspace = createRagCorpus({
+  workspaceId: 'async-lookup-switching-workspace',
+  builtAt: 'switching-workspace',
+  chunks: Array.from({ length: 2048 }, (_, i) => ({
+    ...chunks[i]!,
+    workspaceId: 'async-lookup-switching-workspace',
+    chunkId: `switching-${i}`,
+    symbolUri: `map://switching#${i}`,
+    body: `workspace candidate ${i}`
+  })),
+  lookupIndex: 'deferred'
+});
+let workspaceStillCurrent = true;
+const switchTimer = setTimeout(() => { workspaceStillCurrent = false; }, 0);
+const switchedResult = await createDefaultToolRegistry().run('retrieve_evidence', { query: 'workspace candidate' }, {
+  workspaceIndex: null,
+  mode: 'plan',
+  rag: switchingWorkspace,
+  isWorkspaceContextCurrent: () => workspaceStillCurrent
+} as unknown as Parameters<ReturnType<typeof createDefaultToolRegistry>['run']>[2]);
+clearTimeout(switchTimer);
+assert.equal(switchedResult.ok, false, 'a RAG result from a workspace identity that changed during async preparation must be rejected');
+if (!switchedResult.ok) assert.equal(switchedResult.error?.code, 'RAG_CONTEXT_STALE');
+
 const words = ['', 'a', 'a😀', 'a\uE000', '𐀀', '\uFFFF', 'abc', 'ab', '苇名城', '苇名😀'];
 const oracle = (a: string, b: string): number => {
   const left = [...a], right = [...b];
@@ -132,7 +210,7 @@ const oracle = (a: string, b: string): number => {
   return left.length - right.length;
 };
 for (const a of words) for (const b of words) assert.equal(Math.sign(compareCodePointText(a, b)), Math.sign(oracle(a, b)));
-console.log(JSON.stringify({ ok: true, chunks: chunks.length, references: references.length, yields, tests: ['index equivalence', 'first search prepared', 'invalidation', 'abort', 'timeout', 'unicode order'] }));
+console.log(JSON.stringify({ ok: true, chunks: chunks.length, references: references.length, yields, tests: ['index equivalence', 'first search prepared', 'stale lookup async rebuild', 'workspace identity after await', 'repeated preparation reuse', 'scoped reference omission', 'invalidation', 'abort', 'timeout', 'unicode order'] }));
 
 function collectCandidateIds(target: ReturnType<typeof make>, lookup: ReturnType<typeof buildLookupIndex>, id: number): number[] {
   return lookup.byNumericId.get(id) ?? [];

@@ -63,6 +63,7 @@ const BRIDGE_PROJECT_RELATIVE_PATH = 'bridge/SoulForge.Bridge/SoulForge.Bridge.c
 type BridgeClientPool = Map<string, Promise<BridgeDaemonClient>>;
 
 const clients: BridgeClientPool = new Map();
+const activeClientUses = new WeakMap<BridgeDaemonClient, number>();
 
 function withCancellationTerminalPhase(
   observer: RunBridgeOptions['onCancellationTerminal'],
@@ -97,6 +98,35 @@ interface BridgeLaunch {
  */
 export async function runBridge<T = unknown>(options: RunBridgeOptions): Promise<BridgeResult<T>> {
   return runBridgeWithPool(options, clients);
+}
+
+/**
+ * Release idle process-wide native readers before a memory-heavy post-commit
+ * semantic refresh. Active requests are leased and never interrupted; a later
+ * request can recreate an evicted idle client with the same scoped identity.
+ */
+export async function disposeIdleBridgeDaemonPool(): Promise<{
+  disposedClientCount: number;
+  activeClientCount: number;
+}> {
+  const disposed: Promise<DisposableBridgeClient | undefined>[] = [];
+  let activeClientCount = 0;
+  for (const [key, promise] of clients) {
+    const client = await promise.catch(() => undefined);
+    if (!client) {
+      if (clients.get(key) === promise) clients.delete(key);
+      continue;
+    }
+    if (clients.get(key) !== promise) continue;
+    if ((activeClientUses.get(client) ?? 0) > 0 || !client.isIdle) {
+      activeClientCount += 1;
+      continue;
+    }
+    clients.delete(key);
+    disposed.push(Promise.resolve(client));
+  }
+  await disposeBridgeClientPromises(disposed);
+  return { disposedClientCount: disposed.length, activeClientCount };
 }
 
 /**
@@ -199,15 +229,18 @@ async function runBridgeWithPool<T = unknown>(
   }
   const writableRoots = uniqueResolvedRoots(options.writableRoots ?? []);
   const maxConcurrency = normalizeMaxConcurrency(options.maxConcurrency);
+  const maxFrameBytes = options.maxFrameBytes ?? 16 * 1024 * 1024;
   const poolKey = JSON.stringify({
     launch,
     workspaceSessionId,
     allowedRoots,
     writableRoots,
     oodleRuntimeRoot: options.oodleRuntimeRoot,
+    maxFrameBytes,
     maxConcurrency
   });
 
+  let leasedClient: BridgeDaemonClient | undefined;
   try {
     const poolScope = transportTiming?.begin('poolAcquireMs') ?? null;
     const client = await getOrCreateClient(poolKey, {
@@ -220,10 +253,11 @@ async function runBridgeWithPool<T = unknown>(
       ...(options.oodleRuntimeRoot ? { oodleRuntimeRoot: resolve(options.oodleRuntimeRoot) } : {}),
       // PARAM/MSB children and FMG tables can exceed 1 MiB when base64-framed.
       // PARAM 全量载荷（includeAllPayloads）可达数 MB~29 MB base64，按需提高。
-      maxFrameBytes: options.maxFrameBytes ?? 16 * 1024 * 1024,
+      maxFrameBytes,
       maxConcurrency,
       startupTimeoutMs: options.timeoutMs ?? DEFAULT_TIMEOUT_MS
     }, launch, clientPool);
+    leasedClient = client;
     transportTiming?.end(poolScope);
     const daemonScope = transportTiming?.begin('daemonRequestMs') ?? null;
     const commandCancellationTerminal = withCancellationTerminalPhase(
@@ -254,7 +288,9 @@ async function runBridgeWithPool<T = unknown>(
     // cancelled file-backed child request preserves the established caller
     // semantics. Materialization itself attaches the diagnostic on all
     // structured success/failure results.
-    return materializeFileBackedResult(client, payload.result, options, transportTiming);
+    const materialized = materializeFileBackedResult(client, payload.result, options, transportTiming);
+    leasedClient = undefined;
+    return materialized.finally(() => releaseBridgeClientUse(client));
   } catch (error) {
     const client = await clientPool.get(poolKey)?.catch(() => undefined);
     if (!client || client.isClosed) clientPool.delete(poolKey);
@@ -275,6 +311,8 @@ async function runBridgeWithPool<T = unknown>(
       transportTiming,
       bridgeError.code === 'BRIDGE_REQUEST_CANCELLED' ? 'cancelled' : 'failed'
     );
+  } finally {
+    if (leasedClient) releaseBridgeClientUse(leasedClient);
   }
 }
 
@@ -500,6 +538,16 @@ export async function disposeBridgeDaemonPool(): Promise<void> {
   }));
 }
 
+function retainBridgeClientUse(client: BridgeDaemonClient): void {
+  activeClientUses.set(client, (activeClientUses.get(client) ?? 0) + 1);
+}
+
+function releaseBridgeClientUse(client: BridgeDaemonClient): void {
+  const active = activeClientUses.get(client) ?? 0;
+  if (active <= 1) activeClientUses.delete(client);
+  else activeClientUses.set(client, active - 1);
+}
+
 async function findCoveringClient(
   clientPool: BridgeClientPool,
   launch: { executable: string; args: string[] },
@@ -515,6 +563,7 @@ async function findCoveringClient(
   for (const [key, promise] of clientPool.entries()) {
     try {
       const client = await promise;
+      if (clientPool.get(key) !== promise) continue;
       if (client.isClosed) {
         clientPool.delete(key);
         continue;
@@ -537,6 +586,7 @@ async function findCoveringClient(
       const allWritableCovered = normWritable.every((root) => isCoveredBy(root, clientWritable));
       if (!allWritableCovered) continue;
 
+      retainBridgeClientUse(client);
       return client;
     } catch {
       clientPool.delete(key);
@@ -574,14 +624,23 @@ async function getOrCreateClient(
   const existing = clientPool.get(key);
   if (existing) {
     const client = await existing;
-    if (!client.isClosed) return client;
+    if (!client.isClosed && clientPool.get(key) === existing) {
+      retainBridgeClientUse(client);
+      return client;
+    }
     clientPool.delete(key);
   }
 
   const created = BridgeDaemonClient.start(options);
   clientPool.set(key, created);
   try {
-    return await created;
+    const client = await created;
+    if (clientPool.get(key) !== created || client.isClosed) {
+      if (clientPool.get(key) === created) clientPool.delete(key);
+      return getOrCreateClient(key, options, launch, clientPool);
+    }
+    retainBridgeClientUse(client);
+    return client;
   } catch (error) {
     clientPool.delete(key);
     throw error;

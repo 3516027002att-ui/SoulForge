@@ -94,6 +94,26 @@ try {
   assert(diagnostics.every((event) => event.type === 'soulforge-cli-diagnostic'),
     'stderr contained non-diagnostic output in diagnostics mode');
 
+  const toolChild = spawn(process.execPath, [
+    cliPath,
+    '--workspace', workspace,
+    '--mode', 'fullPermission',
+    '--no-analyze',
+    '--json',
+    '--quiet',
+    '--diagnostics',
+    'call', 'list_operations', '{}'
+  ], { cwd: repoRoot, stdio: ['ignore', 'pipe', 'pipe'] });
+  const toolResult = await waitForExit(toolChild);
+  assert(toolResult.code === 0, `no-analyze list_operations exited with ${toolResult.code}; stderr=${toolResult.stderr}`);
+  const operationEnvelope = JSON.parse(toolResult.stdout.trim());
+  assert(operationEnvelope.ok === true, `list_operations failed: ${toolResult.stdout}`);
+  const toolDiagnostics = toolResult.stderr.trim().split(/\r?\n/u).filter(Boolean).map((line) => JSON.parse(line));
+  assert(toolDiagnostics.some((event) => event.phase === 'workspace.scan' && event.status === 'complete'),
+    'no-analyze call must still scan the requested workspace');
+  assert(!toolDiagnostics.some((event) => event.phase === 'workspace.analyze'),
+    'explicit --no-analyze must avoid expensive semantic analysis for operation-only recovery tools');
+
   console.log(JSON.stringify({
     ok: true,
     message: 'sfcli long-session smoke passed',

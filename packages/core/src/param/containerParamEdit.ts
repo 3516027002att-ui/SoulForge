@@ -12,7 +12,7 @@ import { mkdir, mkdtemp, readdir, readFile, rm, stat } from 'node:fs/promises';
 import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import type { Diagnostic, ParamDefDocument } from '@soulforge/shared';
-import { paramReadSourceHash, paramReadWindow } from './paramReadWindow.js';
+import { paramContainerRecoveryUri, paramReadCoverage, paramReadSourceHash, paramReadWindow } from './paramReadWindow.js';
 import { createBridgeDaemonScope, runBridge } from '../bridge/runBridge.js';
 import { applyNativeMutation } from '../editing/editorMutationService.js';
 import {
@@ -95,6 +95,8 @@ export type ParamReadResult =
       /** Definitions are returned once per page, never repeated per cell. */
       fieldDefinitions?: ParamFieldDefinitionSnapshot[];
       missingRows: Array<{ table: string; rowId: number }>;
+      missingFields?: Array<{ table: string; fieldId: string; rowIds: number[] }>;
+      nextActions?: Array<{ tool: 'search_param_fields'; args: { table: string; rowIds: number[]; query: string; containerPath: string }; reason: string }>;
       diagnostics: Diagnostic[];
       pagination?: {
         offset: number;
@@ -106,7 +108,7 @@ export type ParamReadResult =
         queryScope: string;
       };
       execution?: { status: 'completed' | 'partial' | 'failed'; native: 'completed' | 'partial' | 'failed' };
-      scan?: { status: 'complete' | 'partial'; requestedRows: number; matchedRows: number; missingRows: number };
+      scan?: { status: 'complete' | 'partial'; requestedRows: number; matchedRows: number; missingRows: number; missingFields?: number };
       page?: { status: 'complete' | 'partial'; source: 'native'; offset: number; remaining: number };
       evidence?: { status: 'complete' | 'partial' | 'stale'; sourceHash: string; sourceRevision?: number; complete: boolean };
     }
@@ -327,6 +329,7 @@ export async function readParamFields(input: {
   const matchedRowKeys = new Set<string>();
   const fieldDefinitions = new Map<string, ParamFieldDefinitionSnapshot>();
   const missingRows: Array<{ table: string; rowId: number }> = [];
+  const missingFieldRows = new Map<string, { table: string; fieldId: string; rowIds: Set<number> }>();
   let sourceRevision: number | undefined;
   try {
     sourceRevision = (await stat(container.path)).mtimeMs;
@@ -421,6 +424,13 @@ export async function readParamFields(input: {
           for (const fieldId of requestedFieldIds) {
             const field = loaded.definition.fields.find((item) => item.id === fieldId);
             if (!field) {
+              const key = `${loaded.tableName}\u0000${fieldId}`;
+              let missing = missingFieldRows.get(key);
+              if (!missing) {
+                missing = { table: loaded.tableName, fieldId, rowIds: new Set<number>() };
+                missingFieldRows.set(key, missing);
+              }
+              missing.rowIds.add(row.id);
               diagnostics.push({
                 severity: 'warning',
                 code: 'PARAM_FIELD_NOT_FOUND',
@@ -495,13 +505,32 @@ export async function readParamFields(input: {
   }
   const { offset, nextCursor, queryScope } = window;
   for (const cell of window.items) fields.push(snapshotParamReadCell(cell));
-  const complete = missingRows.length === 0 && !nextCursor;
+  const missingFields = [...missingFieldRows.values()].map((missing) => ({
+    table: missing.table,
+    fieldId: missing.fieldId,
+    rowIds: [...missing.rowIds].sort((left, right) => left - right)
+  }));
+  const coverage = paramReadCoverage({
+    missingRows: missingRows.length,
+    missingFields: missingFields.length,
+    hasMore: nextCursor !== null
+  });
+  const hasMissingFields = missingFields.length > 0;
+  const recoveryContainerPath = paramContainerRecoveryUri(input.edit.session.layers.overlayRoot, container.path);
   return {
     ok: true,
     containerPath: container.path,
     fields,
     fieldDefinitions: window.fieldDefinitions,
     missingRows,
+    ...(hasMissingFields ? {
+      missingFields,
+      nextActions: recoveryContainerPath ? missingFields.slice(0, 6).map((missing) => ({
+        tool: 'search_param_fields' as const,
+        args: { table: missing.table, rowIds: missing.rowIds, query: missing.fieldId, containerPath: recoveryContainerPath },
+        reason: '请求的 fieldId 不在当前授信定义中；先定位真实 fieldId，再用 read_param_fields 读取，当前结果不是完整字段读取。'
+      })) : []
+    } : {}),
     diagnostics,
     pagination: {
       offset,
@@ -512,10 +541,14 @@ export async function readParamFields(input: {
       pageSize,
       queryScope
     },
-    execution: { status: missingRows.length > 0 ? 'partial' : 'completed', native: 'completed' },
-    scan: { status: missingRows.length > 0 ? 'partial' : 'complete', requestedRows: requestedRowCount, matchedRows: matchedRowCount, missingRows: missingRows.length },
-    page: { status: nextCursor ? 'partial' : 'complete', source: 'native', offset, remaining: Math.max(0, cells.length - offset - fields.length) },
-    evidence: { status: missingRows.length > 0 ? 'partial' : 'complete', sourceHash, ...(sourceRevision !== undefined ? { sourceRevision } : {}), complete }
+    execution: { status: missingRows.length > 0 || hasMissingFields ? 'partial' : 'completed', native: 'completed' },
+    scan: {
+      status: missingRows.length > 0 || hasMissingFields ? 'partial' : 'complete',
+      requestedRows: requestedRowCount, matchedRows: matchedRowCount,
+      missingRows: missingRows.length, ...(hasMissingFields ? { missingFields: missingFields.length } : {})
+    },
+    page: { status: coverage.status, source: 'native', offset, remaining: Math.max(0, cells.length - offset - fields.length) },
+    evidence: { status: coverage.status, sourceHash, ...(sourceRevision !== undefined ? { sourceRevision } : {}), complete: coverage.complete }
   };
 }
 
@@ -648,10 +681,10 @@ function scoreParamFieldDefinition(
   }, 0);
 }
 
-function expandParamFieldQuery(query: string): string[] {
+export function expandParamFieldQuery(query: string): string[] {
   const terms = new Set(query.toLocaleLowerCase().split(/[\s,，、/]+/u).filter(Boolean));
   const aliases: ReadonlyArray<[RegExp, string]> = [
-    [/血条|生命|生命值|生命槽|忍杀|忍殺|血量|红点|hp|health|vitality|hitpoint|life/ui, 'hp health vitality hitpoint ninsatu ninsatsu 忍殺 忍杀 maxhp'],
+    [/血条|生命|生命值|生命槽|忍杀|忍殺|血量|红点|ninsatu|ninsatsu|hp|health|vitality|hitpoint|life/ui, 'hp health vitality hitpoint ninsatu ninsatsu 忍殺 忍杀 maxhp'],
     [/精英|首领|头目|boss|elite|miniboss/ui, 'elite boss miniboss difficulty rank'],
     [/攻击|敌对|阵营|队伍|目标|attack|hostile|team|target|faction/ui, 'attack hostile team target faction teamtype 所属 敵対'],
     [/落雷|雷|特效|效果|lightning|effect|sfx|spawn/ui, 'lightning effect sfx spawn 特効'],

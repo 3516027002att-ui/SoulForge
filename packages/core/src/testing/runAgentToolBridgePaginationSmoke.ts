@@ -1,6 +1,6 @@
 import { strict as assert } from 'node:assert';
 import { ToolRegistry } from '../ai/toolRegistry.js';
-import { MAX_BOUNDED_TOOL_RESULT_CHARS, createAgentToolBridge } from '../ai/agentToolBridge.js';
+import { MAX_BOUNDED_TOOL_RESULT_BYTES, MAX_BOUNDED_TOOL_RESULT_CHARS, createAgentToolBridge } from '../ai/agentToolBridge.js';
 
 function makeSearchBridge(data: Record<string, unknown>) {
   const registry = new ToolRegistry();
@@ -104,7 +104,7 @@ assert.equal(nestedEnvelope.data?.record?.matches?.length, 20, 'nested instructi
 assert.equal(nestedEnvelope.data?.record?.matches?.[19]?.item?.uri, 'file://event/common.emevd.dcx#event/970019');
 assert.ok((nestedEnvelope.data?.record?.matches?.[0]?.item?.instructions?.length ?? 0) <= 12);
 
-const oversizedDiscovery = await makeSearchBridge({
+const newlyAdmittedDiscovery = await makeSearchBridge({
   query: 'too-wide',
   matches: Array.from({ length: 20 }, (_, index) => ({
     item: {
@@ -123,18 +123,54 @@ const oversizedDiscovery = await makeSearchBridge({
   truncated: true,
   nextCursor: 'too-wide-next'
 }).executeTool({
-  id: 'events-too-wide',
+  id: 'events-new-budget',
   name: 'search_events',
   argumentsJson: JSON.stringify({ query: 'too-wide', limit: 20 })
 });
-assert.equal(oversizedDiscovery.ok, false);
-assert.equal(oversizedDiscovery.code, 'RESULT_DISCOVERY_WINDOW_TOO_LARGE');
-const oversizedEnvelope = JSON.parse(oversizedDiscovery.content) as {
+assert.equal(newlyAdmittedDiscovery.ok, true, newlyAdmittedDiscovery.content);
+assert.ok(Buffer.byteLength(newlyAdmittedDiscovery.content, 'utf8') > 32_768);
+assert.ok(Buffer.byteLength(newlyAdmittedDiscovery.content, 'utf8') <= MAX_BOUNDED_TOOL_RESULT_BYTES);
+assert.ok(newlyAdmittedDiscovery.content.length <= MAX_BOUNDED_TOOL_RESULT_CHARS);
+const newlyAdmittedEnvelope = JSON.parse(newlyAdmittedDiscovery.content) as {
+  data?: { record?: { matches?: Array<{ item?: { uri?: string } }> } };
+  pagination?: { cursors?: Record<string, string>; truncated?: boolean };
+};
+assert.equal(newlyAdmittedEnvelope.data?.record?.matches?.length, 20);
+assert.equal(newlyAdmittedEnvelope.data?.record?.matches?.[19]?.item?.uri, 'file://event/too-wide#19');
+assert.equal(newlyAdmittedEnvelope.pagination?.truncated, true);
+assert.ok(newlyAdmittedDiscovery.content.includes('too-wide-next'));
+
+const beyondBudgetDiscovery = await makeSearchBridge({
+  query: 'beyond-budget',
+  matches: Array.from({ length: 40 }, (_, index) => ({
+    item: {
+      uri: `file://event/beyond-budget#${index}`,
+      sourceUri: 'file://event/beyond-budget',
+      eventId: index,
+      body: 'candidate detail '.repeat(900)
+    }
+  })),
+  total: 80,
+  totalCount: 80,
+  offset: 0,
+  limit: 40,
+  returned: 40,
+  returnedCount: 40,
+  truncated: true,
+  nextCursor: 'beyond-budget-next'
+}).executeTool({
+  id: 'events-beyond-budget',
+  name: 'search_events',
+  argumentsJson: JSON.stringify({ query: 'beyond-budget', limit: 40 })
+});
+assert.equal(beyondBudgetDiscovery.ok, false);
+assert.equal(beyondBudgetDiscovery.code, 'RESULT_DISCOVERY_WINDOW_TOO_LARGE');
+const oversizedEnvelope = JSON.parse(beyondBudgetDiscovery.content) as {
   error?: { details?: Record<string, unknown> };
 };
 const oversizedDetails = oversizedEnvelope.error?.details ?? {};
-assert.equal((oversizedDetails.retry as Record<string, unknown>)?.limit, 10);
-assert.equal(oversizedDetails.nextPageCursor, 'too-wide-next');
+assert.equal((oversizedDetails.retry as Record<string, unknown>)?.limit, 20);
+assert.equal(oversizedDetails.nextPageCursor, 'beyond-budget-next');
 
 const referenceRegistry = new ToolRegistry();
 referenceRegistry.register({
@@ -149,7 +185,7 @@ referenceRegistry.register({
       query: 'AwardItemLot',
       relations: Array.from({ length: 40 }, (_, index) => ({
         relationId: `relation-${index}`,
-        content: { text: 'x'.repeat(900) }
+        content: { text: 'x'.repeat(2_000) }
       })),
       page: { returnedCount: 40, hasMore: true, nextCursor: 'page-next-cursor' },
       scan: {

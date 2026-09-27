@@ -1,5 +1,27 @@
 import { createHash } from 'node:crypto';
+import { isAbsolute, relative, resolve, sep } from 'node:path';
 import { createOpaqueCursor, parseOpaqueCursor } from '@soulforge/shared';
+
+/** Expose a container only as a workspace-relative URI, never a host path. */
+export function paramContainerRecoveryUri(overlayRoot: string, containerPath: string): string | undefined {
+  const root = resolve(overlayRoot);
+  const target = resolve(containerPath);
+  const relativePath = relative(root, target);
+  if (!relativePath || isAbsolute(relativePath) || relativePath === '..' || relativePath.startsWith(`..${sep}`)) {
+    return undefined;
+  }
+  return `file://${relativePath.split(sep).join('/')}`;
+}
+
+/** A page is complete only when rows, requested fields, and all result pages were delivered. */
+export function paramReadCoverage(input: {
+  missingRows: number;
+  missingFields: number;
+  hasMore: boolean;
+}): { complete: boolean; status: 'complete' | 'partial' } {
+  const complete = input.missingRows === 0 && input.missingFields === 0 && !input.hasMore;
+  return { complete, status: complete ? 'complete' : 'partial' };
+}
 
 /** Mixed documents bind hashes to their physical children, not an unordered hash set. */
 export function paramReadSourceHash(cells: readonly { table: string; entryIndex: number; sourceHash: string }[]): string {

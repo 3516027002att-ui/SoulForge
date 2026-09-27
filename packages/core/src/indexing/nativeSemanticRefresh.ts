@@ -28,7 +28,7 @@ import type {
 } from '@soulforge/shared';
 import { parseParamFieldRefs } from '@soulforge/shared';
 import { runBridge } from '../bridge/runBridge.js';
-import { readParamDocumentViaBridge } from '../editing/paramBridgeCommit.js';
+import { readParamDocumentRowsPagedViaBridge } from '../editing/paramBridgePagedRead.js';
 import { decodeRowFields } from '../param/paramdefLayout.js';
 import { matchParamMetadataPackage, resolveParamMetadataRowWidth } from '../param/paramMetadata.js';
 import { loadFirstPartyParamMetadata } from '../schema/sekiro/firstPartySchema.js';
@@ -42,6 +42,16 @@ type NativeSemanticBridgeRunner = typeof runBridge;
 
 export interface NativeSemanticRefreshOptions {
   index: WorkspaceIndex;
+  /** Bind any lazy native document session to the active workspace lifetime. */
+  workspaceSessionId?: string;
+  /**
+   * The default preserves the caller's projection until every native read
+   * succeeds. Use `isolated-candidate` only when the caller owns a disposable,
+   * source-scoped index that is later merged into the active workspace. The
+   * publish boundary rebuilds the complete reference graph, so the candidate
+   * must not build a duplicate source-only graph before that merge.
+   */
+  indexOwnership?: 'caller-owned' | 'isolated-candidate';
   sourceFiles: readonly IndexedFile[];
   stagingRoot: string;
   allowedRoots?: readonly string[];
@@ -50,13 +60,25 @@ export interface NativeSemanticRefreshOptions {
   signal?: AbortSignal;
   /** @internal Test-only seam; never supplied by production IPC. */
   bridgeRunner?: NativeSemanticBridgeRunner;
-  /** @internal Test-only seam for the PARAM document reader. */
-  paramDocumentReader?: typeof readParamDocumentViaBridge;
+  /** @internal Optional bounded per-table memory telemetry for investigating native refresh pressure. */
+  paramReadProgress?: (progress: NativeParamReadProgress) => void;
   /**
    * Reference-only projection used by on-demand find_references enrichment.
    * Normal post-write refreshes keep their historical complete field rows.
    */
   referenceFieldsOnly?: boolean;
+}
+
+export interface NativeParamReadProgress {
+  phase: 'read-start' | 'read-complete' | 'decode-start' | 'decode-complete' | 'upsert';
+  sourceUri: string;
+  entryName: string;
+  entryIndex: number;
+  entryCount: number;
+  rowCount?: number;
+  returnedRowCount?: number;
+  heapUsedMb: number;
+  rssMb: number;
 }
 
 export interface NativeSemanticRefreshResult {
@@ -125,6 +147,10 @@ interface NativeMapRegionInput {
 }
 
 const PARAM_DECODE_YIELD_BATCH_SIZE = 64;
+// PARAM children use a stateful Bridge index-page + row-selection protocol.
+// Keep each document session single-flight so page identities stay ordered and
+// transient native payload batches do not compete in the Electron main isolate.
+const PARAM_NATIVE_TABLE_READ_CONCURRENCY = 1;
 
 let paramMetadataCache: ParamMetadataCache | undefined;
 
@@ -149,10 +175,15 @@ export async function refreshNativeSemanticSources(
   await mkdir(input.stagingRoot, { recursive: true });
   const scratchRoot = await mkdtemp(join(resolve(input.stagingRoot), 'native-semantic-refresh-'));
   const diagnostics: Diagnostic[] = [];
-  // Native reads and entry fan-out happen on an isolated projection.  The
-  // live index is changed only after every requested source has reached a
-  // terminal non-cancelled state.
-  const refreshIndex = input.index.cloneForRefresh();
+  // Native reads and entry fan-out happen on an isolated projection. The
+  // changed source is immediately invalidated in this fork, so unchanged
+  // immutable projection trees can be structurally shared instead of deep
+  // cloning every PARAM/MSG row in a large workspace. The live index is
+  // changed only after every requested source has reached a terminal
+  // non-cancelled state.
+  const refreshIndex = input.indexOwnership === 'isolated-candidate'
+    ? input.index
+    : input.index.cloneForRefreshShared();
   // The clone must start with every requested source invalidated.  Otherwise
   // a failed/partial container read can leave an old export in the clone and
   // commitRefreshProjection will faithfully copy that stale export back into
@@ -269,13 +300,17 @@ export async function refreshNativeSemanticSources(
       }
     }
     throwIfAborted(refreshInput.signal);
-    refreshIndex.rebuildReferences();
-    commitRefreshProjection(
-      input.index,
-      refreshIndex,
-      sourceFiles.map((file) => file.sourceUri),
-      partialSources
-    );
+    if (refreshIndex !== input.index) refreshIndex.rebuildReferences();
+    if (refreshIndex !== input.index) {
+      commitRefreshProjection(
+        input.index,
+        refreshIndex,
+        sourceFiles.map((file) => file.sourceUri),
+        partialSources
+      );
+    } else if (partialSources.length > 0) {
+      refreshIndex.markCoveragePartial(partialSources);
+    }
     return { refreshedSources, partialSources, failedSources, staleSources, diagnostics };
   } finally {
     await rm(scratchRoot, { recursive: true, force: true });
@@ -704,68 +739,123 @@ async function readParamExports(
     errorDiagnostic?: Diagnostic;
   }> = new Array(entries.length);
 
-  await runWithConcurrencyPool(entries, 8, async (entry, idx) => {
+  const reportProgress = (
+    phase: NativeParamReadProgress['phase'],
+    entry: NativeContainerEntry,
+    rowCount?: number,
+    returnedRowCount?: number
+  ): void => {
+    if (!input.paramReadProgress) return;
+    try {
+      const memory = process.memoryUsage();
+      input.paramReadProgress({
+        phase,
+        sourceUri: file.sourceUri,
+        entryName: entry.name,
+        entryIndex: entry.index,
+        entryCount: entries.length,
+        ...(rowCount === undefined ? {} : { rowCount }),
+        ...(returnedRowCount === undefined ? {} : { returnedRowCount }),
+        heapUsedMb: Number((memory.heapUsed / (1024 * 1024)).toFixed(1)),
+        rssMb: Number((memory.rss / (1024 * 1024)).toFixed(1))
+      });
+    } catch {
+      // Optional diagnostics must never alter native refresh correctness.
+    }
+  };
+
+  await runWithConcurrencyPool(entries, PARAM_NATIVE_TABLE_READ_CONCURRENCY, async (entry, idx) => {
     throwIfAborted(input.signal);
     try {
       const childPath = await materializeNativeEntry(file, entry, allowedRoots, scratchRoot, input);
-      const readParamDocument = input.paramDocumentReader ?? readParamDocumentViaBridge;
-      const result = await readParamDocument({
+      reportProgress('read-start', entry);
+      const tableName = stripLeafExtension(entry.name, '.param');
+      const decodedRows: ParamRowSymbol[] = [];
+      let definition: ParamDefDocument | undefined;
+      let decodeStarted = false;
+      const pagedRead = await readParamDocumentRowsPagedViaBridge({
         sourcePath: childPath,
         allowedRoots: [...allowedRoots, scratchRoot],
+        ...(input.workspaceSessionId ? { workspaceSessionId: input.workspaceSessionId } : {}),
+        pathSourceGeneration: 0,
+        entryIdentity: `${expectedOuterFileHash}:${entry.index}:${entry.name}`,
         ...(input.timeoutMs ? { timeoutMs: input.timeoutMs } : {}),
         ...(input.signal ? { signal: input.signal } : {}),
         maxRows: 100_000,
-        includeAllPayloads: true,
-        maxFrameBytes: 32 * 1024 * 1024,
-        maxConcurrency: 8,
-        resolveRowDataSize: async (header) => resolveTrustedParamRowWidth(paramPackage, header)
-      });
-      if (!result.ok || !result.data) {
-        const first = result.diagnostics[0];
-        throw new Error(`PARAM ${entry.name} native reread failed: ${first?.code ?? 'PARAM_READ_FAILED'} ${first?.message ?? file.sourceUri}`);
+        maxFrameBytes: 16 * 1024 * 1024,
+        resolveRowDataSize: async (header) => resolveTrustedParamRowWidth(paramPackage, header),
+        validateIdentity: (identity) => {
+          definition = resolveTrustedParamDefinition(paramPackage, {
+            typeName: identity.typeName,
+            dataVersion: identity.dataVersion,
+            rowDataSize: identity.rowDataSize
+          });
+          return definition !== undefined;
+        }
+      }, async (identity, batch) => {
+        if (!definition) {
+          throw new Error(`PARAM ${entry.name} 缺少严格匹配的授信字段定义：${identity.typeName}/${identity.dataVersion}/${identity.rowDataSize}。`);
+        }
+        if (!decodeStarted) {
+          reportProgress('decode-start', entry, identity.rowCount, 0);
+          decodeStarted = true;
+        }
+        const decoded = await decodeNativeParamRows({
+          file,
+          sourceHash: identity.sourceHash,
+          outerFileHash: expectedOuterFileHash,
+          tableName,
+          entryName: entry.name,
+          entryIndex: entry.index,
+          typeName: identity.typeName,
+          definition,
+          rows: batch,
+          ...(input.referenceFieldsOnly ? { referenceFieldsOnly: true } : {}),
+          ...(input.signal ? { signal: input.signal } : {})
+        });
+        decodedRows.push(...decoded);
+      }, input.bridgeRunner ?? runBridge);
+      if (!pagedRead.ok || !pagedRead.data) {
+        const first = pagedRead.diagnostics[0];
+        throw new Error(`PARAM ${entry.name} native paged reread failed: ${first?.code ?? 'PARAM_READ_FAILED'} ${first?.message ?? file.sourceUri}`);
       }
-      const data = result.data;
-      if (data.rows.length < data.rowCount) {
-        throw new Error(`PARAM ${entry.name} 返回截断行表 ${data.rows.length}/${data.rowCount}，拒绝把不完整语义写入 RAG。`);
+      const data = pagedRead.data;
+      if (decodedRows.length !== data.rowCount) {
+        throw new Error(`PARAM ${entry.name} semantic rows coverage ${decodedRows.length}/${data.rowCount} 不完整，拒绝发布整表。`);
       }
-      const typeName = stringValue(data.typeName);
-      const rowDataSize = numberValue(data.rowDataSize);
-      const dataVersion = numberValue(data.dataVersion);
-      const definition = dataVersion !== undefined && Number.isSafeInteger(dataVersion) && rowDataSize !== undefined
-        ? resolveTrustedParamDefinition(paramPackage, {
-            typeName,
-            dataVersion,
-            rowDataSize
-          })
-        : undefined;
-      if (!definition) {
-        throw new Error(`PARAM ${entry.name} 缺少严格匹配的授信字段定义：${typeName}/${dataVersion ?? 'unknown-version'}/${rowDataSize ?? 'unknown-width'}。`);
-      }
-      const tableName = stripLeafExtension(entry.name, '.param');
-      const rows = await decodeNativeParamRows({
-        file,
-        sourceHash: data.sourceHash,
-        outerFileHash: expectedOuterFileHash,
-        tableName,
-        entryName: entry.name,
-        entryIndex: entry.index,
-        typeName,
-        definition,
-        rows: arrayValue(data.rows),
-        ...(input.referenceFieldsOnly ? { referenceFieldsOnly: true } : {}),
-        ...(input.signal ? { signal: input.signal } : {})
-      });
+      reportProgress('read-complete', entry, data.rowCount, data.rowCount);
+      reportProgress('decode-complete', entry, data.rowCount, decodedRows.length);
       const exported: ParamExport = {
         paramName: tableName,
         sourceUri: file.sourceUri,
         entryName: entry.name,
         entryIndex: entry.index,
-        ...(data.sourceHash ? { sourceHash: data.sourceHash } : {}),
+        sourceHash: data.sourceHash,
         outerFileHash: expectedOuterFileHash,
         ...(file.mtimeMs !== undefined ? { sourceRevision: file.mtimeMs } : {}),
-        rows
+        rows: decodedRows
       };
-      entryResults[idx] = { entry, exported };
+      if (input.indexOwnership === 'isolated-candidate') {
+        // Post-commit candidates are disposable and source-scoped. Publish the
+        // fully covered decoded table immediately so its page payloads and
+        // intermediate projections can be released before reading the next.
+        if (input.index.upsertParamExport(exported)) {
+          semanticCount += exported.rows.length;
+          reportProgress('upsert', entry, exported.rows.length, exported.rows.length);
+        } else {
+          stale = true;
+          diagnostics.push({
+            severity: 'warning',
+            code: 'NATIVE_PARAM_TABLE_STALE',
+            message: `PARAM ${entry.name} semantic projection was rejected because its source revision is stale.`,
+            sourceUri: file.sourceUri
+          });
+        }
+      } else {
+        // Caller-owned refreshes retain source-level publication deferral so a
+        // partially cancelled native read never mutates the caller's index.
+        entryResults[idx] = { entry, exported };
+      }
     } catch (error) {
       if (input.signal?.aborted || isAbortLike(error)) throw error;
       entryResults[idx] = {
@@ -790,6 +880,7 @@ async function readParamExports(
     if (item.exported) {
       if (input.index.upsertParamExport(item.exported)) {
         semanticCount += item.exported.rows.length;
+        reportProgress('upsert', item.entry, item.exported.rows.length, item.exported.rows.length);
       } else {
         stale = true;
         diagnostics.push({

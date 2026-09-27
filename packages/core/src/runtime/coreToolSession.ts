@@ -36,7 +36,6 @@ export class CoreToolSession {
   readonly principal: string;
   readonly workspaceId: string;
   readonly workspaceSession: WorkspaceSession | undefined;
-  readonly workspaceIndex: WorkspaceIndex;
   readonly editSession: NativeEditSession | undefined;
   readonly snapshotCache: NativeSnapshotCache;
   readonly proofStore: NativeReadProofStore;
@@ -47,17 +46,30 @@ export class CoreToolSession {
   private pages = new Map<string, SavedReferencePage>();
   private pageCounter = 0;
   private sourceWatcher: NativeSourceWatcher | null = null;
+  private currentWorkspaceIndex: WorkspaceIndex;
 
   constructor(options: CoreToolSessionOptions) {
     this.principal = options.principal;
     this.workspaceId = options.workspaceId;
     this.workspaceSession = options.workspaceSession;
-    this.workspaceIndex = options.workspaceIndex ?? new WorkspaceIndex(options.workspaceId);
+    this.currentWorkspaceIndex = options.workspaceIndex ?? new WorkspaceIndex(options.workspaceId);
     this.editSession = options.editSession;
     this.snapshotCache = new NativeSnapshotCache();
     this.proofStore = createNativeReadProofStore();
     this.operationLog = options.operationLog ?? new MemoryOperationLogStore();
     this.modeCeiling = options.modeCeiling ?? 'normal';
+  }
+
+  get workspaceIndex(): WorkspaceIndex {
+    return this.currentWorkspaceIndex;
+  }
+
+  /** Replace a superseded semantic snapshot without changing session authority. */
+  updateWorkspaceIndex(index: WorkspaceIndex, workspaceSession?: WorkspaceSession): boolean {
+    if (this.closed || index.workspaceId !== this.workspaceId) return false;
+    if (this.workspaceSession !== workspaceSession) return false;
+    this.currentWorkspaceIndex = index;
+    return true;
   }
 
   /** 同一主体的长期 edit session：不再为每个工具调用新建 handle Map。 */
@@ -143,6 +155,9 @@ export class CoreToolSession {
     this.closed = true;
     this.sourceWatcher?.close();
     this.sourceWatcher = null;
+    // CoreToolSession may remain reachable through an Agent bridge until its
+    // promise settles. Do not keep the last full workspace snapshot alive.
+    this.currentWorkspaceIndex = new WorkspaceIndex(this.workspaceId);
     this.snapshotCache.dispose();
     this.proofStore.invalidateAll('session-close');
     this.proofStore.dispose();

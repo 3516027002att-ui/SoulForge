@@ -13,6 +13,8 @@ import {
 import { registerAgentIpcHandlers, hasActiveAgentRuns, isAgentSessionActive, scheduleInternalRagEmbedding } from './ipc/agent.js';
 import { registerResourceIpcHandlers } from './ipc/resource.js';
 import { resolveWorkspaceStoragePaths, type WorkspaceStoragePaths } from './workspaceStorage.js';
+import { WorkspaceDatabaseOpenGate } from './workspaceDatabaseOpenGate.js';
+import { createPostCommitSemanticAnalysisOptions } from './postCommitSemanticAnalysis.js';
 import {
   analyzeWorkspace,
   buildAiSidebarDraft,
@@ -29,6 +31,7 @@ import {
   loadRolloutSession,
   runAgentSession,
   disposeBridgeDaemonPool,
+  disposeIdleBridgeDaemonPool,
   buildScriptContainerEvidence,
   analyzePlaintextLineEndings,
   classifyPlaintextBytes,
@@ -88,6 +91,7 @@ import {
   buildRagCorpus,
   createRagCorpus,
   mergeCatalogAndPersisted,
+  preparePostCommitRefreshBaseline,
   refreshKnowledgeAfterCommit,
   detectChangedSourceUris,
   refreshNativeSemanticSources,
@@ -205,6 +209,7 @@ import { executeRecoveryCleanup } from './recoveryCleanup.js';
 import { ModelServiceCredentialVault } from './modelServiceCredentials.js';
 import { MainMe3RuntimeGateway } from './me3RuntimeGateway.js';
 import { persistRagCorpusBySourceDelta } from './ragPersistence.js';
+import { createInvalidatedRagCorpus, createPostCommitRagCorpus } from './ragRefreshCorpus.js';
 import {
   createSemanticRefreshTelemetry,
   measureSemanticRefreshStage,
@@ -266,8 +271,7 @@ let activeKnowledgeLoadToken: symbol | null = null;
 let activeKnowledgeFailureWorkspaceId: string | null = null;
 let activeKnowledgeRetryAt = 0;
 const KNOWLEDGE_RETRY_COOLDOWN_MS = 1_000;
-let recoveryCleanupWorkspaceId: string | null = null;
-let recoveryCleanupInFlight: Promise<void> | null = null;
+const operationLogOpenGate = new WorkspaceDatabaseOpenGate();
 let semanticRefreshInFlight: Promise<void> | null = null;
 let semanticRefreshQueued = false;
 const semanticRefreshSources = new Set<string>();
@@ -826,38 +830,43 @@ function legacyOperationLogPathForWorkspace(workspaceId: string): string {
 }
 
 async function ensureActiveOperationLog(session: WorkspaceSession): Promise<OperationLogUtilityClient> {
-  if (getWorkspaceSession() !== session) {
-    throw Object.assign(new Error('工作区会话已切换，拒绝重新打开旧数据库。'), {
-      code: 'DATABASE_UTILITY_SESSION_STALE'
+  const workspaceId = session.meta.workspaceId;
+  const assertCurrentSession = (): void => {
+    if (getWorkspaceSession() !== session) {
+      throw Object.assign(new Error('工作区会话已切换，拒绝重新打开旧数据库。'), {
+        code: 'DATABASE_UTILITY_SESSION_STALE'
+      });
+    }
+  };
+  assertCurrentSession();
+  if (activeOperationLog === operationLogUtility && activeOperationLogWorkspaceId === workspaceId) {
+    await ensureActiveKnowledgeStore(session);
+    return operationLogUtility;
+  }
+
+  return operationLogOpenGate.run(workspaceId, async () => {
+    assertCurrentSession();
+    // A concurrent caller may have completed the open while this request was
+    // queued. Never reopen the process-global SQLite utility for the same key.
+    if (activeOperationLog === operationLogUtility && activeOperationLogWorkspaceId === workspaceId) {
+      await ensureActiveKnowledgeStore(session);
+      return operationLogUtility;
+    }
+
+    const storage = workspaceStoragePaths(workspaceId, session.layers.overlayRoot);
+    await operationLogUtility.openWorkspace({
+      appDatabasePath: join(app.getPath('userData'), 'app.db'),
+      databasePath: join(storage.root, 'workspace.db'),
+      workspaceId,
+      rootPath: session.layers.overlayRoot,
+      game: session.meta.game,
+      legacyOperationLogPath: legacyOperationLogPathForWorkspace(workspaceId),
+      legacyBackupDirectory: join(storage.root, 'legacy-operation-logs'),
+      legacySemanticSnapshotPath: join(session.layers.overlayRoot, 'semantic-snapshot.json'),
+      legacySemanticBackupDirectory: join(storage.root, 'legacy-semantic-snapshots')
     });
-  }
-  const storage = workspaceStoragePaths(session.meta.workspaceId, session.layers.overlayRoot);
-  await operationLogUtility.openWorkspace({
-    appDatabasePath: join(app.getPath('userData'), 'app.db'),
-    databasePath: join(storage.root, 'workspace.db'),
-    workspaceId: session.meta.workspaceId,
-    rootPath: session.layers.overlayRoot,
-    game: session.meta.game,
-    legacyOperationLogPath: legacyOperationLogPathForWorkspace(session.meta.workspaceId),
-    legacyBackupDirectory: join(storage.root, 'legacy-operation-logs'),
-    legacySemanticSnapshotPath: join(session.layers.overlayRoot, 'semantic-snapshot.json'),
-    legacySemanticBackupDirectory: join(storage.root, 'legacy-semantic-snapshots')
-  });
-  // Every native read used to repeat the global recovery scan.  With a large
-  // operation history this made one agent turn enqueue dozens of identical
-  // SQLite cleanup requests and starve the actual read/RAG requests.  Run it
-  // once per opened workspace and let concurrent callers share that promise.
-  if (activeOperationLog === operationLogUtility
-    && activeOperationLogWorkspaceId === session.meta.workspaceId) {
-    await ensureActiveKnowledgeStore(session);
-    return operationLogUtility;
-  }
-  if (recoveryCleanupInFlight && recoveryCleanupWorkspaceId === session.meta.workspaceId) {
-    await recoveryCleanupInFlight;
-    await ensureActiveKnowledgeStore(session);
-    return operationLogUtility;
-  }
-  const cleanupTask = (async () => {
+    assertCurrentSession();
+
     const cleanupPlan = await operationLogUtility.planRecoveryCleanup();
     const cleanup = await executeRecoveryCleanup({
       plan: cleanupPlan,
@@ -867,21 +876,12 @@ async function ensureActiveOperationLog(session: WorkspaceSession): Promise<Oper
     if (cleanup.rejected.length > 0) {
       process.stderr.write(`[SoulForge recovery cleanup] ${JSON.stringify(cleanup.rejected)}\n`);
     }
-  })();
-  recoveryCleanupWorkspaceId = session.meta.workspaceId;
-  recoveryCleanupInFlight = cleanupTask;
-  try {
-    await cleanupTask;
+    assertCurrentSession();
     activeOperationLog = operationLogUtility;
-    activeOperationLogWorkspaceId = session.meta.workspaceId;
+    activeOperationLogWorkspaceId = workspaceId;
     await ensureActiveKnowledgeStore(session);
-  } finally {
-    if (recoveryCleanupInFlight === cleanupTask) {
-      recoveryCleanupInFlight = null;
-      recoveryCleanupWorkspaceId = null;
-    }
-  }
-  return operationLogUtility;
+    return operationLogUtility;
+  }, session);
 }
 
 function currentToolContext(): ToolContext {
@@ -891,6 +891,7 @@ function currentToolContext(): ToolContext {
   const workspaceSessionId = getActiveWorkspaceSessionIdState();
   const workspaceSessionGeneration = getActiveWorkspaceSessionGenerationState();
   const indexedFilesRevision = getWorkspaceIndexedFilesRevisionState();
+  const nativeVersionEpoch = index?.getNativeVersionEpoch();
   const storage = session ? durableStoragePaths(session.meta.workspaceId) : undefined;
   const memoryStore = memoryManager.getStore(index?.workspaceId);
   const knowledgeStore = session && activeKnowledgeWorkspaceId === session.meta.workspaceId
@@ -919,7 +920,23 @@ function currentToolContext(): ToolContext {
     ...(knowledgeStore ? { knowledgeStore } : {}),
     ...(activeKnowledgeStoreError ? { knowledgeStoreDiagnostic: activeKnowledgeStoreError } : {}),
     onSemanticEvidenceUpdated: refreshActiveIndexAfterSemanticEvidence,
-    onNativeWriteCommitted: refreshActiveIndexAfterNativeWrite
+    onNativeWriteCommitted: refreshActiveIndexAfterNativeWrite,
+    isWorkspaceContextCurrent: () => {
+      const currentRagSnapshot = getWorkspaceRagSnapshotState();
+      const currentIndex = getWorkspaceActiveIndex();
+      return getWorkspaceSession() === session
+        && currentIndex === index
+        && currentIndex?.getNativeVersionEpoch() === nativeVersionEpoch
+        && getActiveWorkspaceSessionIdState() === workspaceSessionId
+        && getActiveWorkspaceSessionGenerationState() === workspaceSessionGeneration
+        && getWorkspaceIndexedFilesRevisionState() === indexedFilesRevision
+        && currentRagSnapshot.corpus === ragSnapshot.corpus
+        && currentRagSnapshot.epoch === ragSnapshot.epoch
+        && currentRagSnapshot.scope === ragSnapshot.scope
+        && currentRagSnapshot.sessionId === ragSnapshot.sessionId
+        && currentRagSnapshot.generation === ragSnapshot.generation
+        && currentRagSnapshot.indexedFilesRevision === ragSnapshot.indexedFilesRevision;
+    }
   };
 }
 
@@ -1041,6 +1058,18 @@ function throwIfRagRefreshAborted(signal?: AbortSignal): void {
   throw error;
 }
 
+/** Drop invalidated RAG rows before post-commit analysis can stall or fail. */
+function invalidateActiveRagForPostCommit(index: WorkspaceIndex, invalidatedSources: readonly string[]): void {
+  if (invalidatedSources.length === 0) return;
+  const current = getWorkspaceRag();
+  if (!current || current.workspaceId !== index.workspaceId) return;
+  applyWorkspaceRag(createInvalidatedRagCorpus({
+    current,
+    invalidatedSources,
+    builtAt: new Date().toISOString()
+  }));
+}
+
 async function refreshRagAfterScan(
   database: OperationLogUtilityClient,
   index: WorkspaceIndex,
@@ -1053,9 +1082,10 @@ async function refreshRagAfterScan(
     workspaceId: index.workspaceId,
     builtAt: catalog.builtAt,
     chunks: await scopedDatabase.loadRagChunks(),
-    references: await scopedDatabase.loadReferences()
+    references: await scopedDatabase.loadReferences(),
+    lookupIndex: 'deferred'
   });
-  await persistActiveRag(scopedDatabase, mergeCatalogAndPersisted(catalog, persisted), persisted, signal, telemetry);
+  await persistActiveRag(scopedDatabase, mergeCatalogAndPersisted(catalog, persisted, { lookupIndex: 'deferred' }), persisted, signal, telemetry);
 }
 
 async function refreshRagAfterAnalyze(
@@ -1070,23 +1100,6 @@ async function refreshRagAfterAnalyze(
   const builtAt = new Date().toISOString();
   const sourceFilter = new Set(changedSources.filter((sourceUri) => sourceUri.trim().length > 0));
   const symbolFilter = new Set(changedSymbols.filter((symbolUri) => symbolUri.trim().length > 0));
-
-  const mergeChangedChunks = (
-    base: RagCorpus,
-    changed: RagCorpus
-  ): RagCorpus['chunks'] => {
-    if (symbolFilter.size > 0) {
-      const changedIds = new Set(changed.chunks.map((chunk) => chunk.chunkId));
-      return [
-        ...base.chunks.filter((chunk) => !changedIds.has(chunk.chunkId)),
-        ...changed.chunks
-      ];
-    }
-    return [
-      ...base.chunks.filter((chunk) => !sourceFilter.has(chunk.sourceUri)),
-      ...changed.chunks
-    ];
-  };
 
   // Live native reads already enriched the active in-memory index.  Reusing
   // the last durable in-memory corpus here avoids loading every persisted
@@ -1104,12 +1117,13 @@ async function refreshRagAfterAnalyze(
       symbolFilter.size > 0 ? [...symbolFilter] : undefined,
       telemetry
     );
-    const next = createRagCorpus({
-      workspaceId: index.workspaceId,
-      builtAt,
-      chunks: mergeChangedChunks(current, changedCatalog),
+    const next = createPostCommitRagCorpus({
+      current,
+      changedCatalog,
+      changedSources,
+      changedSymbols,
       references: index.listReferences(),
-      diagnostics: changedCatalog.diagnostics
+      builtAt
     });
     await persistActiveRag(scopedDatabase, next, current, signal, telemetry);
     return;
@@ -1119,7 +1133,8 @@ async function refreshRagAfterAnalyze(
     workspaceId: index.workspaceId,
     builtAt,
     chunks: await scopedDatabase.loadRagChunks(),
-    references: await scopedDatabase.loadReferences()
+    references: await scopedDatabase.loadReferences(),
+    lookupIndex: 'deferred'
   });
   let catalog: RagCorpus;
   if (sourceFilter.size === 0 && symbolFilter.size === 0) {
@@ -1135,15 +1150,16 @@ async function refreshRagAfterAnalyze(
     );
     const current = getWorkspaceRag();
     const base = current?.workspaceId === index.workspaceId ? current : persisted;
-    catalog = createRagCorpus({
-      workspaceId: index.workspaceId,
-      builtAt,
-      chunks: mergeChangedChunks(base, changedCatalog),
+    catalog = createPostCommitRagCorpus({
+      current: base,
+      changedCatalog,
+      changedSources: [...sourceFilter],
+      changedSymbols: [...symbolFilter],
       references: index.listReferences(),
-      diagnostics: changedCatalog.diagnostics
+      builtAt
     });
   }
-  await persistActiveRag(scopedDatabase, mergeCatalogAndPersisted(catalog, persisted), persisted, signal, telemetry);
+  await persistActiveRag(scopedDatabase, mergeCatalogAndPersisted(catalog, persisted, { lookupIndex: 'deferred' }), persisted, signal, telemetry);
 }
 
 function buildRagCorpusForRefresh(
@@ -1154,7 +1170,10 @@ function buildRagCorpusForRefresh(
   symbolUris?: readonly string[],
   telemetry?: SemanticRefreshTelemetry
 ): RagCorpus {
-  const build = () => buildRagCorpus(index, builtAt, diagnostics, sourceUris, symbolUris);
+  const build = () => buildRagCorpus(index, builtAt, diagnostics, sourceUris, symbolUris, {
+    lookupIndex: 'deferred',
+    ...((sourceUris?.length ?? 0) > 0 || (symbolUris?.length ?? 0) > 0 ? { includeReferences: false } : {})
+  });
   if (!telemetry) return build();
   return measureSemanticRefreshStageSync(telemetry, 'ragBuild', build, (value) => ({
     chunkCount: value.chunks.length,
@@ -1335,13 +1354,28 @@ async function refreshActiveIndexAfterNativeWrite(
   // The write is already committed.  Invalidate the known requested sources
   // before the potentially slow catalog scan so a scan timeout cannot leave
   // the old semantic projection looking current.
-  let liveInvalidation = currentIndex.invalidateChangedSources(requestedSources);
-  currentIndex.rebuildReferences();
+  let liveInvalidation = preparePostCommitRefreshBaseline(currentIndex, requestedSources).invalidated;
+  invalidateActiveRagForPostCommit(currentIndex, liveInvalidation.sourceUris);
   applyWorkspaceIndexSnapshot(currentIndex);
 
-  // Keep the refresh candidate completely separate from the live index. The
-  // live snapshot above is stale-safe while this clone receives the new
-  // catalog and semantic bundle only after freshness checks pass.
+  // A long Agent session can retain many idle Bridge readers for earlier
+  // native query scopes. Their parsed-container caches compete with the
+  // post-commit PARAM/MSG readback; reclaim only idle clients after the write
+  // boundary, leaving concurrent native requests untouched. Future reads
+  // reopen a fresh client against the current source revision.
+  try {
+    const bridgeClients = await disposeIdleBridgeDaemonPool();
+    if (bridgeClients.disposedClientCount > 0) {
+      console.info(`[SoulForge native-refresh] released ${bridgeClients.disposedClientCount} idle Bridge client(s); active=${bridgeClients.activeClientCount}.`);
+    }
+  } catch (error) {
+    console.warn('[SoulForge native-refresh] idle Bridge client cleanup failed; continuing with committed write refresh.', error);
+  }
+
+  // The live index is now a stale-safe baseline: all requested semantics were
+  // removed before the scan. Reuse it while the scoped analyzer builds fresh
+  // source projections, then clone once at publish to keep fresh semantics
+  // isolated until freshness checks and RAG persistence pass.
   const workPromise = (async () => {
     assertCurrentGeneration();
     const result = await measureSemanticRefreshStage(
@@ -1360,37 +1394,40 @@ async function refreshActiveIndexAfterNativeWrite(
     assertCurrentGeneration();
 
     actualChangedSources = detectChangedSourceUris(beforeFiles, result.files, requestedSources);
-    const additionalInvalidation = currentIndex.invalidateChangedSources(actualChangedSources);
+    const additionalInvalidation = preparePostCommitRefreshBaseline(currentIndex, actualChangedSources).invalidated;
+    invalidateActiveRagForPostCommit(currentIndex, additionalInvalidation.sourceUris);
     liveInvalidation = mergeKnowledgeInvalidations(liveInvalidation, additionalInvalidation);
-    currentIndex.rebuildReferences();
     applyWorkspaceIndexSnapshot(currentIndex);
     assertCurrentGeneration();
 
     const database = activeOperationLog ?? await ensureActiveOperationLog(session);
     assertCurrentGeneration();
-    const refreshIndex = currentIndex.cloneForRefresh();
     return refreshKnowledgeAfterCommit({
-      index: refreshIndex,
+      index: currentIndex,
       beforeFiles,
       afterFiles: result.files,
       requestedSources,
       signal: refreshController.signal,
+      onRefreshBoundary: (stage, phase) => {
+        if (phase === 'started') telemetry.begin(stage);
+        else telemetry.complete(stage, phase);
+      },
       // A catalog scan cannot prove semantic truth. Re-run the production
       // analyzer only for the actual changed source set, including changes
       // discovered by the scan, while unchanged projections stay in the
-      // isolated full candidate.
+      // stale-safe live baseline.
       reanalyze: async (changedSourceUris, signal) => {
         assertCurrentGeneration();
         const changedFiles = result.files.filter((file) => changedSourceUris.includes(file.sourceUri));
         const analyzed = await measureSemanticRefreshStage(
           telemetry,
           'analyze',
-          () => analyzeWorkspace({
+          () => analyzeWorkspace(createPostCommitSemanticAnalysisOptions({
             workspaceRoot: session.layers.overlayRoot,
             files: changedFiles,
             ...(signal ? { signal } : {}),
             ...(session.layers.baseRoot ? { oodleRuntimeRoot: session.layers.baseRoot } : {})
-          }),
+          })),
           (value) => ({
             fileCount: changedFiles.length,
             parsedFiles: value.parsedFiles,
@@ -1402,6 +1439,12 @@ async function refreshActiveIndexAfterNativeWrite(
           'nativeDecode',
           () => refreshNativeSemanticSources({
             index: analyzed.index,
+            workspaceSessionId: sessionId,
+            // analyzeWorkspace produced a disposable source-scoped candidate;
+            // the active workspace already holds a separate stale-safe,
+            // invalidated baseline. Decode in place instead of duplicating
+            // a large PARAM/MSG projection during post-commit readback.
+            indexOwnership: 'isolated-candidate',
             sourceFiles: changedFiles,
             stagingRoot: durableStoragePaths(session.meta.workspaceId).stagingRoot,
             allowedRoots: [
@@ -1409,7 +1452,10 @@ async function refreshActiveIndexAfterNativeWrite(
               ...(session.layers.baseRoot ? [session.layers.baseRoot] : [])
             ],
             ...(signal ? { signal } : {}),
-            ...(session.layers.baseRoot ? { oodleRuntimeRoot: session.layers.baseRoot } : {})
+            ...(session.layers.baseRoot ? { oodleRuntimeRoot: session.layers.baseRoot } : {}),
+            ...(process.env.SOULFORGE_NATIVE_PARAM_TRACE === '1'
+              ? { paramReadProgress: (progress) => console.info(`[SoulForge native-param-progress] ${JSON.stringify(progress)}`) }
+              : {})
           }),
           (value) => ({
             sourceCount: changedFiles.length,
@@ -1435,13 +1481,14 @@ async function refreshActiveIndexAfterNativeWrite(
       },
       publish: async (candidate) => {
         assertCurrentGeneration();
-        // `analyzeWorkspace({ files })` returns a source-scoped index. Build
-        // another isolated full snapshot instead of touching the live object.
-        // On persistence failure the refresh boundary falls back to
-        // refreshIndex, which still contains only invalidated semantics.
-        const publishedIndex = refreshIndex.cloneForRefresh();
+        // `analyzeWorkspace({ files })` returns a source-scoped index. Merge
+        // it into one isolated full snapshot; the live baseline has already
+        // invalidated changed sources and remains safe if persistence fails.
+        const publishedIndex = currentIndex.cloneForRefreshShared();
         loadSymbolBundleIntoIndex(publishedIndex, candidate.toSymbolBundle());
-        publishedIndex.rebuildReferences();
+        // refreshKnowledgeAfterCommit rebuilds the graph exactly once after
+        // publish; doing it here as well needlessly keeps two full graphs live
+        // during the large PARAM post-commit path.
         publishedIndex.markActionBinderMembershipGlobalNotReady();
         return publishedIndex;
       },
@@ -1480,11 +1527,11 @@ async function refreshActiveIndexAfterNativeWrite(
   } catch (error) {
     const stillCurrent = getActiveWorkspaceSessionIdState() === sessionId
       && getActiveWorkspaceSessionGenerationState() === sessionGeneration;
+    const failureInvalidation = preparePostCommitRefreshBaseline(currentIndex, actualChangedSources).invalidated;
     const invalidated = mergeKnowledgeInvalidations(
       liveInvalidation,
-      currentIndex.invalidateChangedSources(actualChangedSources)
+      failureInvalidation
     );
-    currentIndex.rebuildReferences();
     if (stillCurrent) applyWorkspaceIndexSnapshot(currentIndex);
     const result: KnowledgeRefreshResult = {
       status: 'failed',
@@ -1654,8 +1701,6 @@ function rejectNonSekiroNativeWrite(sourceUri: string, file?: IndexedFile): Rend
 export async function disposeOperationLogUtility(): Promise<void> {
   activeOperationLog = null;
   activeOperationLogWorkspaceId = null;
-  recoveryCleanupWorkspaceId = null;
-  recoveryCleanupInFlight = null;
   await disposeActiveKnowledgeStore();
   await operationLogUtility.dispose();
 }
