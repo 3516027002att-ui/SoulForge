@@ -14,15 +14,13 @@ coverage/
 .DS_Store
 Thumbs.db
 
-# Per-assistant instruction files and local tool metadata. These are machine-local
-# operator config, not project scope: they differ per developer and per tool, so a
-# commit of one silently imposes one operator's setup on everyone else. Derived
-# copies (CLAUDE.md.bak-*, AGENTS.md.orig, ...) are covered too — a backup of an
-# ignored file is just as local as the original, and leaving it untracked also
+# Per-assistant instruction files and local tool metadata. AGENTS.md and CLAUDE.md
+# are tracked: they carry the project rules every agent must load, and worktrees
+# and fresh clones only see what the repository holds. The other tools' files stay
+# machine-local operator config. Derived copies (CLAUDE.md.bak-*, AGENTS.md.orig,
+# ...) remain ignored: a backup is local scratch, and leaving it untracked also
 # poisons the handoff fingerprint's untracked manifest.
-AGENTS.md
 AGENTS.md.*
-CLAUDE.md
 CLAUDE.md.*
 GEMINI.md
 GEMINI.md.*
