@@ -1,0 +1,778 @@
+{
+  "schemaVersion": 1,
+  "commands": [
+    {
+      "name": "inspect",
+      "effect": "read",
+      "advertised": true,
+      "requiresOutputPath": false,
+      "costClass": "interactive",
+      "cancelMode": "cooperative",
+      "handler": "service",
+      "requiredInputFields": [
+        "command",
+        "filePath"
+      ]
+    },
+    {
+      "name": "validate",
+      "effect": "read",
+      "advertised": true,
+      "requiresOutputPath": false,
+      "costClass": "interactive",
+      "cancelMode": "cooperative",
+      "handler": "service",
+      "requiredInputFields": [
+        "command",
+        "filePath"
+      ]
+    },
+    {
+      "name": "probe-oodle",
+      "effect": "read",
+      "advertised": true,
+      "requiresOutputPath": false,
+      "costClass": "interactive",
+      "cancelMode": "cooperative",
+      "handler": "service",
+      "requiredInputFields": [
+        "command",
+        "filePath"
+      ]
+    },
+    {
+      "name": "probe-document-locator",
+      "effect": "read",
+      "advertised": true,
+      "requiresOutputPath": false,
+      "costClass": "interactive",
+      "cancelMode": "cooperative",
+      "handler": "service",
+      "requiredInputFields": [
+        "command",
+        "filePath"
+      ]
+    },
+    {
+      "name": "read-dcx-document",
+      "effect": "read",
+      "advertised": true,
+      "requiresOutputPath": false,
+      "costClass": "foreground",
+      "cancelMode": "cooperative",
+      "handler": "service",
+      "requiredInputFields": [
+        "command",
+        "filePath"
+      ]
+    },
+    {
+      "name": "list-bnd4-entries",
+      "effect": "read",
+      "advertised": true,
+      "requiresOutputPath": false,
+      "costClass": "foreground",
+      "cancelMode": "cooperative",
+      "handler": "service",
+      "requiredInputFields": [
+        "command",
+        "filePath"
+      ]
+    },
+    {
+      "name": "snapshot-bnd4-child",
+      "effect": "read",
+      "advertised": true,
+      "requiresOutputPath": false,
+      "costClass": "foreground",
+      "cancelMode": "cooperative",
+      "handler": "service",
+      "requiredInputFields": [
+        "command",
+        "filePath"
+      ]
+    },
+    {
+      "name": "extract-bnd4-child",
+      "effect": "export",
+      "advertised": true,
+      "requiresOutputPath": true,
+      "costClass": "foreground",
+      "cancelMode": "cooperative",
+      "handler": "service",
+      "requiredInputFields": [
+        "command",
+        "filePath",
+        "options.outputPath"
+      ]
+    },
+    {
+      "name": "write-bnd4",
+      "effect": "write",
+      "advertised": true,
+      "requiresOutputPath": true,
+      "costClass": "foreground",
+      "cancelMode": "cooperative",
+      "handler": "service",
+      "requiredInputFields": [
+        "command",
+        "filePath",
+        "options.outputPath"
+      ]
+    },
+    {
+      "name": "inventory-asset-resources",
+      "effect": "read",
+      "advertised": true,
+      "requiresOutputPath": false,
+      "costClass": "background",
+      "cancelMode": "cooperative",
+      "handler": "service",
+      "requiredInputFields": [
+        "command",
+        "filePath"
+      ]
+    },
+    {
+      "name": "read-fmg-document",
+      "effect": "read",
+      "advertised": true,
+      "requiresOutputPath": false,
+      "costClass": "foreground",
+      "cancelMode": "cooperative",
+      "handler": "service",
+      "requiredInputFields": [
+        "command",
+        "filePath"
+      ]
+    },
+    {
+      "name": "write-fmg",
+      "effect": "write",
+      "advertised": true,
+      "requiresOutputPath": true,
+      "costClass": "foreground",
+      "cancelMode": "cooperative",
+      "handler": "service",
+      "requiredInputFields": [
+        "command",
+        "filePath",
+        "options.outputPath"
+      ]
+    },
+    {
+      "name": "read-param-document",
+      "effect": "read",
+      "advertised": true,
+      "requiresOutputPath": false,
+      "costClass": "background",
+      "cancelMode": "cooperative",
+      "handler": "service",
+      "requiredInputFields": [
+        "command",
+        "filePath"
+      ]
+    },
+    {
+      "name": "write-param",
+      "effect": "write",
+      "advertised": true,
+      "requiresOutputPath": true,
+      "costClass": "foreground",
+      "cancelMode": "cooperative",
+      "handler": "service",
+      "requiredInputFields": [
+        "command",
+        "filePath",
+        "options.outputPath"
+      ]
+    },
+    {
+      "name": "read-gparam-document",
+      "effect": "read",
+      "advertised": true,
+      "requiresOutputPath": false,
+      "costClass": "background",
+      "cancelMode": "cooperative",
+      "handler": "service",
+      "requiredInputFields": [
+        "command",
+        "filePath"
+      ]
+    },
+    {
+      "name": "write-gparam",
+      "effect": "write",
+      "advertised": true,
+      "requiresOutputPath": true,
+      "costClass": "foreground",
+      "cancelMode": "cooperative",
+      "handler": "service",
+      "requiredInputFields": [
+        "command",
+        "filePath",
+        "options.outputPath"
+      ]
+    },
+    {
+      "name": "read-text-catalog",
+      "effect": "read",
+      "advertised": true,
+      "requiresOutputPath": false,
+      "costClass": "foreground",
+      "cancelMode": "cooperative",
+      "handler": "service",
+      "requiredInputFields": [
+        "command",
+        "filePath"
+      ]
+    },
+    {
+      "name": "read-emevd-document",
+      "effect": "read",
+      "advertised": true,
+      "requiresOutputPath": false,
+      "costClass": "background",
+      "cancelMode": "cooperative",
+      "handler": "service",
+      "requiredInputFields": [
+        "command",
+        "filePath"
+      ]
+    },
+    {
+      "name": "write-emevd",
+      "effect": "write",
+      "advertised": true,
+      "requiresOutputPath": true,
+      "costClass": "foreground",
+      "cancelMode": "cooperative",
+      "handler": "service",
+      "requiredInputFields": [
+        "command",
+        "filePath",
+        "options.outputPath"
+      ]
+    },
+    {
+      "name": "read-msb-document",
+      "effect": "read",
+      "advertised": true,
+      "requiresOutputPath": false,
+      "costClass": "background",
+      "cancelMode": "cooperative",
+      "handler": "service",
+      "requiredInputFields": [
+        "command",
+        "filePath"
+      ]
+    },
+    {
+      "name": "write-msb",
+      "effect": "write",
+      "advertised": true,
+      "requiresOutputPath": true,
+      "costClass": "foreground",
+      "cancelMode": "cooperative",
+      "handler": "service",
+      "requiredInputFields": [
+        "command",
+        "filePath",
+        "options.outputPath"
+      ]
+    },
+    {
+      "name": "read-tpf-document",
+      "effect": "read",
+      "advertised": true,
+      "requiresOutputPath": false,
+      "costClass": "foreground",
+      "cancelMode": "cooperative",
+      "handler": "service",
+      "requiredInputFields": [
+        "command",
+        "filePath"
+      ]
+    },
+    {
+      "name": "export-tpf-texture",
+      "effect": "export",
+      "advertised": true,
+      "requiresOutputPath": true,
+      "costClass": "foreground",
+      "cancelMode": "cooperative",
+      "handler": "service",
+      "requiredInputFields": [
+        "command",
+        "filePath",
+        "options.outputPath"
+      ]
+    },
+    {
+      "name": "read-tpf-texture-preview",
+      "effect": "read",
+      "advertised": true,
+      "requiresOutputPath": false,
+      "costClass": "interactive",
+      "cancelMode": "cooperative",
+      "handler": "service",
+      "requiredInputFields": [
+        "command",
+        "filePath"
+      ]
+    },
+    {
+      "name": "write-tpf-texture-replace",
+      "effect": "write",
+      "advertised": true,
+      "requiresOutputPath": true,
+      "costClass": "foreground",
+      "cancelMode": "cooperative",
+      "handler": "service",
+      "requiredInputFields": [
+        "command",
+        "filePath",
+        "options.outputPath"
+      ]
+    },
+    {
+      "name": "read-tae-document",
+      "effect": "read",
+      "advertised": true,
+      "requiresOutputPath": false,
+      "costClass": "background",
+      "cancelMode": "cooperative",
+      "handler": "service",
+      "requiredInputFields": [
+        "command",
+        "filePath"
+      ]
+    },
+    {
+      "name": "read-tae-event-params",
+      "effect": "read",
+      "advertised": true,
+      "requiresOutputPath": false,
+      "costClass": "interactive",
+      "cancelMode": "cooperative",
+      "handler": "service",
+      "requiredInputFields": [
+        "command",
+        "filePath"
+      ]
+    },
+    {
+      "name": "read-tae-animation-clip",
+      "effect": "read",
+      "advertised": true,
+      "requiresOutputPath": false,
+      "costClass": "foreground",
+      "cancelMode": "cooperative",
+      "handler": "service",
+      "requiredInputFields": [
+        "command",
+        "filePath"
+      ]
+    },
+    {
+      "name": "sample-tae-animation-pose",
+      "effect": "read",
+      "advertised": true,
+      "requiresOutputPath": false,
+      "costClass": "interactive",
+      "cancelMode": "cooperative",
+      "handler": "service",
+      "requiredInputFields": [
+        "command",
+        "filePath"
+      ]
+    },
+    {
+      "name": "read-bridge-artifact",
+      "effect": "read",
+      "advertised": true,
+      "requiresOutputPath": false,
+      "costClass": "interactive",
+      "cancelMode": "cooperative",
+      "handler": "artifact",
+      "requiredInputFields": [
+        "command",
+        "filePath",
+        "options.artifactToken",
+        "options.offset",
+        "options.length"
+      ]
+    },
+    {
+      "name": "read-chrbnd-flver-preview",
+      "effect": "read",
+      "advertised": true,
+      "requiresOutputPath": false,
+      "costClass": "foreground",
+      "cancelMode": "cooperative",
+      "handler": "service",
+      "requiredInputFields": [
+        "command",
+        "filePath"
+      ]
+    },
+    {
+      "name": "read-map-part-flver-preview",
+      "effect": "read",
+      "advertised": true,
+      "requiresOutputPath": false,
+      "costClass": "foreground",
+      "cancelMode": "cooperative",
+      "handler": "service",
+      "requiredInputFields": [
+        "command",
+        "filePath"
+      ]
+    },
+    {
+      "name": "read-map-static-geometry",
+      "effect": "read",
+      "advertised": true,
+      "requiresOutputPath": false,
+      "costClass": "background",
+      "cancelMode": "cooperative",
+      "handler": "service",
+      "requiredInputFields": [
+        "command",
+        "filePath"
+      ]
+    },
+    {
+      "name": "read-flver-document",
+      "effect": "read",
+      "advertised": true,
+      "requiresOutputPath": false,
+      "costClass": "foreground",
+      "cancelMode": "cooperative",
+      "handler": "service",
+      "requiredInputFields": [
+        "command",
+        "filePath"
+      ]
+    },
+    {
+      "name": "write-flver",
+      "effect": "write",
+      "advertised": true,
+      "requiresOutputPath": true,
+      "costClass": "foreground",
+      "cancelMode": "cooperative",
+      "handler": "service",
+      "requiredInputFields": [
+        "command",
+        "filePath",
+        "options.outputPath"
+      ]
+    },
+    {
+      "name": "read-flver-mesh",
+      "effect": "read",
+      "advertised": true,
+      "requiresOutputPath": false,
+      "costClass": "foreground",
+      "cancelMode": "cooperative",
+      "handler": "service",
+      "requiredInputFields": [
+        "command",
+        "filePath"
+      ]
+    },
+    {
+      "name": "read-flver-skeleton",
+      "effect": "read",
+      "advertised": true,
+      "requiresOutputPath": false,
+      "costClass": "foreground",
+      "cancelMode": "cooperative",
+      "handler": "service",
+      "requiredInputFields": [
+        "command",
+        "filePath"
+      ]
+    },
+    {
+      "name": "read-flver-texture-slots",
+      "effect": "read",
+      "advertised": true,
+      "requiresOutputPath": false,
+      "costClass": "foreground",
+      "cancelMode": "cooperative",
+      "handler": "service",
+      "requiredInputFields": [
+        "command",
+        "filePath"
+      ]
+    },
+    {
+      "name": "read-flver-dummies",
+      "effect": "read",
+      "advertised": true,
+      "requiresOutputPath": false,
+      "costClass": "foreground",
+      "cancelMode": "cooperative",
+      "handler": "service",
+      "requiredInputFields": [
+        "command",
+        "filePath"
+      ]
+    },
+    {
+      "name": "read-esd-document",
+      "effect": "read",
+      "advertised": true,
+      "requiresOutputPath": false,
+      "costClass": "foreground",
+      "cancelMode": "cooperative",
+      "handler": "service",
+      "requiredInputFields": [
+        "command",
+        "filePath"
+      ]
+    },
+    {
+      "name": "write-esd-document",
+      "effect": "write",
+      "advertised": true,
+      "requiresOutputPath": true,
+      "costClass": "foreground",
+      "cancelMode": "cooperative",
+      "handler": "service",
+      "requiredInputFields": [
+        "command",
+        "filePath",
+        "options.outputPath"
+      ]
+    },
+    {
+      "name": "write-tae-document",
+      "effect": "write",
+      "advertised": true,
+      "requiresOutputPath": true,
+      "costClass": "foreground",
+      "cancelMode": "cooperative",
+      "handler": "service",
+      "requiredInputFields": [
+        "command",
+        "filePath",
+        "options.outputPath"
+      ]
+    },
+    {
+      "name": "write-fxr-document",
+      "effect": "write",
+      "advertised": true,
+      "requiresOutputPath": true,
+      "costClass": "foreground",
+      "cancelMode": "cooperative",
+      "handler": "service",
+      "requiredInputFields": [
+        "command",
+        "filePath",
+        "options.outputPath"
+      ]
+    },
+    {
+      "name": "read-mtd-document",
+      "effect": "read",
+      "advertised": true,
+      "requiresOutputPath": false,
+      "costClass": "foreground",
+      "cancelMode": "cooperative",
+      "handler": "service",
+      "requiredInputFields": [
+        "command",
+        "filePath"
+      ]
+    },
+    {
+      "name": "write-mtd-document",
+      "effect": "write",
+      "advertised": true,
+      "requiresOutputPath": true,
+      "costClass": "foreground",
+      "cancelMode": "cooperative",
+      "handler": "service",
+      "requiredInputFields": [
+        "command",
+        "filePath",
+        "options.outputPath"
+      ]
+    },
+    {
+      "name": "read-fxr-document",
+      "effect": "read",
+      "advertised": true,
+      "requiresOutputPath": false,
+      "costClass": "foreground",
+      "cancelMode": "cooperative",
+      "handler": "service",
+      "requiredInputFields": [
+        "command",
+        "filePath"
+      ]
+    },
+    {
+      "name": "list-ffxbnd-entries",
+      "effect": "read",
+      "advertised": true,
+      "requiresOutputPath": false,
+      "costClass": "foreground",
+      "cancelMode": "cooperative",
+      "handler": "service",
+      "requiredInputFields": [
+        "command",
+        "filePath"
+      ]
+    },
+    {
+      "name": "read-luabnd-document",
+      "effect": "read",
+      "advertised": true,
+      "requiresOutputPath": false,
+      "costClass": "foreground",
+      "cancelMode": "cooperative",
+      "handler": "service",
+      "requiredInputFields": [
+        "command",
+        "filePath"
+      ]
+    },
+    {
+      "name": "inspect-luabnd",
+      "effect": "read",
+      "advertised": true,
+      "requiresOutputPath": false,
+      "costClass": "interactive",
+      "cancelMode": "cooperative",
+      "handler": "service",
+      "requiredInputFields": [
+        "command",
+        "filePath"
+      ]
+    },
+    {
+      "name": "read-luabnd-script",
+      "effect": "read",
+      "advertised": true,
+      "requiresOutputPath": false,
+      "costClass": "foreground",
+      "cancelMode": "cooperative",
+      "handler": "service",
+      "requiredInputFields": [
+        "command",
+        "filePath"
+      ]
+    },
+    {
+      "name": "read-hks-source",
+      "effect": "read",
+      "advertised": true,
+      "requiresOutputPath": false,
+      "costClass": "foreground",
+      "cancelMode": "cooperative",
+      "handler": "service",
+      "requiredInputFields": [
+        "command",
+        "filePath"
+      ]
+    },
+    {
+      "name": "compile-hks-source",
+      "effect": "read",
+      "advertised": true,
+      "requiresOutputPath": false,
+      "costClass": "foreground",
+      "cancelMode": "cooperative",
+      "handler": "service",
+      "requiredInputFields": [
+        "command",
+        "filePath"
+      ]
+    },
+    {
+      "name": "write-luabnd-script",
+      "effect": "write",
+      "advertised": true,
+      "requiresOutputPath": true,
+      "costClass": "foreground",
+      "cancelMode": "cooperative",
+      "handler": "service",
+      "requiredInputFields": [
+        "command",
+        "filePath",
+        "options.outputPath"
+      ]
+    },
+    {
+      "name": "export-luabnd",
+      "effect": "export",
+      "advertised": true,
+      "requiresOutputPath": true,
+      "costClass": "background",
+      "cancelMode": "cooperative",
+      "handler": "service",
+      "requiredInputFields": [
+        "command",
+        "filePath",
+        "options.outputPath"
+      ]
+    },
+    {
+      "name": "export-event",
+      "effect": "export",
+      "advertised": true,
+      "requiresOutputPath": false,
+      "costClass": "background",
+      "cancelMode": "cooperative",
+      "handler": "service",
+      "requiredInputFields": [
+        "command",
+        "filePath"
+      ]
+    },
+    {
+      "name": "export-map",
+      "effect": "export",
+      "advertised": true,
+      "requiresOutputPath": false,
+      "costClass": "background",
+      "cancelMode": "cooperative",
+      "handler": "service",
+      "requiredInputFields": [
+        "command",
+        "filePath"
+      ]
+    },
+    {
+      "name": "export-param",
+      "effect": "export",
+      "advertised": true,
+      "requiresOutputPath": false,
+      "costClass": "background",
+      "cancelMode": "cooperative",
+      "handler": "service",
+      "requiredInputFields": [
+        "command",
+        "filePath"
+      ]
+    },
+    {
+      "name": "export-msg",
+      "effect": "export",
+      "advertised": true,
+      "requiresOutputPath": false,
+      "costClass": "background",
+      "cancelMode": "cooperative",
+      "handler": "service",
+      "requiredInputFields": [
+        "command",
+        "filePath"
+      ]
+    }
+  ]
+}

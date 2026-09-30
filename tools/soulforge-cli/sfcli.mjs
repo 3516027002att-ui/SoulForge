@@ -21,6 +21,7 @@
  *   --diagnostics        将阶段耗时与游标诊断以 JSON Lines 写入 stderr
  */
 
+import { runHeadlessAgentCommand } from './headless-agent.mjs';
 import { dirname, isAbsolute, join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { existsSync } from 'node:fs';
@@ -135,7 +136,9 @@ function parseArgs(argv) {
     options.command = rest.shift() ?? 'help';
   }
   if (options.analyze && options.noAnalyze) fail('--analyze 与 --no-analyze 不能同时使用');
-  if (options.command === 'call') {
+  if (options.command === 'agent') {
+    options.agentArgs = rest;
+  } else if (options.command === 'call') {
     if (rest[0] === '--stdin') {
       options.stdin = true;
       rest.shift();
@@ -160,6 +163,8 @@ function printUsage() {
   process.stdout.write(`SoulForge CLI — 外置调用生产 Agent 工具
 
 命令:
+  agent exec --task-file <UTF-8 file> --responses-file <fixture>  完整 Agent（JSON Lines）
+  agent exec --task-file <file> --provider-config <file> --max-cost <limit>  有预算的模型任务
   list                         列出全部工具
   describe <tool>              查看工具说明与输入 schema
   call <tool> ['{"k":v}']      调用任意工具
@@ -240,6 +245,12 @@ async function main() {
   const baseRoot = abs(options.base);
   if (!existsSync(workspaceRoot)) fail(`工作区不存在: ${workspaceRoot}`);
   if (baseRoot && !existsSync(baseRoot)) fail(`--base 路径不存在: ${baseRoot}`);
+
+  if (options.command === 'agent') {
+    const report = await runHeadlessAgentCommand(options, core, REPO_ROOT);
+    if (report.state === 'error') process.exitCode = 1;
+    return;
+  }
 
   const metadataOnly = options.command === 'list' || options.command === 'ls'
     || options.command === 'describe' || options.command === 'desc';

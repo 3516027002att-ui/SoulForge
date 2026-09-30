@@ -210,7 +210,7 @@ export function appendTaeAnimationPage(
 
 export interface TaeWorkbenchPanelProps {
   resourceUri: string;
-  data: TaeDocument | null;
+  data: TaeDocument | { format: 'TAE_READ_FAILED'; diagnostics: Diagnostic[] } | null;
   /** 可选初始选中（测试/深链用）；不传等价于只读初始态。 */
   initialSelection?: TaeSelection;
 }
@@ -706,6 +706,8 @@ export function TaeWorkbenchPanel(props: TaeWorkbenchPanelProps): ReactElement {
     error: string | null;
     bundle: CharacterPreviewBundle | null;
   }>({ loading: true, error: null, bundle: null });
+
+  const readFailure = props.data?.format === 'TAE_READ_FAILED' ? props.data : null;
 
   const document = useMemo(() => {
     const source = refreshedDocument ?? props.data;
@@ -1423,11 +1425,18 @@ export function TaeWorkbenchPanel(props: TaeWorkbenchPanelProps): ReactElement {
         {
           id: 'animations',
            title: '动画',
-           hint: `${pages?.animations.animationCount ?? 0} 个动画`,
+           hint: readFailure ? '读取失败' : pages ? `${pages.animations.animationCount} 个动画` : '等待数据',
           initialFlex: 0.22,
           minWidth: 220,
           children: (
-            mergedDocument === null ? (
+            readFailure ? (
+              <div className="wb-list" role="alert">
+                <strong>动作读取失败</strong>
+                {readFailure.diagnostics.map((diagnostic, index) => (
+                  <p key={`${diagnostic.code}:${index}`} style={{ overflowWrap: 'anywhere' }}>{diagnostic.code}: {diagnostic.message}</p>
+                ))}
+              </div>
+            ) : mergedDocument === null ? (
               <div className="wb-list">
                 <p className="wb-empty">选择 .tae / .anibnd.dcx 文件以查看动画事件数据。</p>
               </div>

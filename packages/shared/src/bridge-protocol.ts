@@ -1,3 +1,4 @@
+import type { BridgeFileCommandName } from './bridge-commands.generated.js';
 /**
  * SoulForge Bridge 1.0 NDJSON daemon protocol.
  * Binary authority still depends on each capability cell; protocol support is
@@ -109,67 +110,7 @@ export type BridgeFailureKind =
   | 'unsafe'
   | 'schemaMismatch';
 
-export type BridgeCommandName =
-  | 'inspect'
-  | 'export-event'
-  | 'export-map'
-  | 'export-param'
-  | 'export-msg'
-  | 'validate'
-  | 'probe-oodle'
-  | 'probe-document-locator'
-  | 'read-dcx-document'
-  | 'write-bnd4'
-  | 'snapshot-bnd4-child'
-  | 'extract-bnd4-child'
-  | 'list-bnd4-entries'
-  | 'inventory-asset-resources'
-  | 'read-fmg-document'
-  | 'write-fmg'
-  | 'read-param-document'
-  | 'write-param'
-  | 'read-gparam-document'
-  | 'write-gparam'
-  | 'read-text-catalog'
-  | 'read-emevd-document'
-  | 'write-emevd'
-  | 'read-msb-document'
-  | 'write-msb'
-  | 'read-tae-document'
-  | 'read-tae-event-params'
-  | 'read-tae-animation-clip'
-  | 'sample-tae-animation-pose'
-  | 'read-bridge-artifact'
-  | 'read-chrbnd-flver-preview'
-  | 'read-map-part-flver-preview'
-  | 'read-map-static-geometry'
-  | 'read-tpf-document'
-  | 'export-tpf-texture'
-  | 'read-tpf-texture-preview'
-  | 'write-tpf-texture-replace'
-  | 'read-flver-document'
-  | 'write-flver'
-  | 'read-flver-mesh'
-  | 'read-flver-skeleton'
-  | 'read-flver-texture-slots'
-  | 'read-flver-dummies'
-  | 'read-esd-document'
-  | 'write-esd-document'
-  | 'write-tae-document'
-  | 'write-fxr-document'
-  | 'read-mtd-document'
-  | 'write-mtd-document'
-  | 'read-fxr-document'
-  | 'list-ffxbnd-entries'
-  | 'read-luabnd-document'
-  | 'inspect-luabnd'
-  | 'read-luabnd-script'
-  | 'read-hks-source'
-  | 'compile-hks-source'
-  | 'write-luabnd-script'
-  | 'export-luabnd'
-  | 'capabilities'
-  | 'health';
+export type BridgeCommandName = BridgeFileCommandName | 'capabilities' | 'health';
 
 /**
  * 暂存区写入成功的诊断码：写入类命令的**唯一**成功判据。

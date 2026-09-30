@@ -3,7 +3,7 @@
  * Full permission cannot bypass Patch Engine — tools still go through executeTool policy.
  *
  * Kernel capabilities derived from openai/codex (Apache-2.0, Copyright 2025
- * OpenAI). See licenses/openai-codex.txt and the module docs of
+ * OpenAI). Design source: https://github.com/openai/codex; attribution: NOTICE and the module docs of
  * retryPolicy.ts / rolloutRecorder.ts / contextCompactor.ts:
  * - request/stream-level retry with exponential backoff + Retry-After
  * - concurrent execution of parallel-capable tools, results recorded in

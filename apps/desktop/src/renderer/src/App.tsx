@@ -2674,8 +2674,17 @@ export function App(): ReactElement {
     setMsgRows(extractMsgRows(nextPreview));
     const openPlan = planResourceOpen(file);
     if (openPlan.ipcMethods.includes('readTaeDocument') && typeof bridge.readTaeDocument === 'function') {
-      const result = await (bridge.readTaeDocument as (uri: string, opts?: { animationPage?: number; animationPageSize?: number }) => Promise<unknown>)(file.sourceUri) as { ok: boolean; data?: Record<string, unknown> };
-      if (result.ok && result.data) setTaeData(result.data);
+      try {
+        const result = await (bridge.readTaeDocument as (uri: string, opts?: { animationPage?: number; animationPageSize?: number }) => Promise<unknown>)(file.sourceUri) as { ok: boolean; data?: Record<string, unknown>; diagnostics?: Diagnostic[] };
+        setTaeData(result.ok && result.data ? result.data : {
+          format: 'TAE_READ_FAILED', diagnostics: result.diagnostics?.length ? result.diagnostics : [
+            { severity: 'error', code: 'TAE_READ_FAILED', message: '原生动作文档读取失败。' }
+          ]
+        });
+      } catch (error) {
+        setTaeData({ format: 'TAE_READ_FAILED', diagnostics: [{ severity: 'error', code: 'TAE_READ_FAILED',
+          message: error instanceof Error ? error.message : String(error) }] });
+      }
     }
     if (openPlan.ipcMethods.includes('readEsdDocument') && typeof bridge.readEsdDocument === 'function') {
       const result = await bridge.readEsdDocument(file.sourceUri) as { ok: boolean; data?: Record<string, unknown> };

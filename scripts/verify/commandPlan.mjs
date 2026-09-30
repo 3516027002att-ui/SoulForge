@@ -75,13 +75,13 @@ export function operationKey(operation) {
 
 function isDirectNodeScript(tokens) {
   if (tokens[0] !== 'node') return false;
-  const flags = new Set(['--experimental-strip-types', '--enable-source-maps', '--no-warnings']);
+  const flags = new Set(['--experimental-strip-types', '--enable-source-maps', '--no-warnings', '--test']);
   let index = 1;
   while (flags.has(tokens[index])) index += 1;
   return Boolean(tokens[index] && !tokens[index].startsWith('-') && /\.(?:mjs|cjs|js|ts)$/.test(tokens[index]));
 }
 
-export function planScript(repoRoot, workspaces, scriptName, { args = [], env = {} } = {}) {
+export function planScript(repoRoot, workspaces, scriptName, { args = [], env = {}, workspace = null } = {}) {
   const stack = new Set();
   const operation = (cwd, command, commandArgs, owner, kind) => {
     const value = { cwd: resolve(repoRoot, cwd), command, args: commandArgs, env, owner, kind };
@@ -122,6 +122,11 @@ export function planScript(repoRoot, workspaces, scriptName, { args = [], env = 
       return steps.length ? steps : opaque();
     } finally { stack.delete(id); }
   };
+  if (workspace !== null) {
+    const target = workspaces.byName.get(workspace);
+    if (!target) throw new Error(`Unknown workspace: ${workspace}`);
+    return walk(scriptName, target.dir, target.scripts, args);
+  }
   return walk(scriptName, '', workspaces.rootScripts, args);
 }
 

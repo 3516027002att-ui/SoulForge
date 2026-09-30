@@ -2,7 +2,7 @@
  * Context compaction: summarizes oversized history and atomically replaces it.
  * Design derived from openai/codex (Apache-2.0, Copyright 2025 OpenAI) —
  * core/compact.rs build_compacted_history + the pre-sampling/mid-turn trigger
- * points in session/turn.rs. See licenses/openai-codex.txt.
+ * points in session/turn.rs. Design source: https://github.com/openai/codex; attribution: NOTICE.
  *
  * Preserved Codex semantics:
  * - trigger on a token limit evaluated before each model call

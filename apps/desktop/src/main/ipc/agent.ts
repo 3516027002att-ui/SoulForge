@@ -1,3 +1,5 @@
+import { BoundedEventHistory } from '../../../../../packages/agent/src/eventHistory.mjs';
+import { runAgentUtilitySession } from '../agentUtilityClient.js';
 import { createHash, randomUUID } from 'node:crypto';
 import { existsSync, readdirSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
@@ -20,7 +22,7 @@ import {
   createRagCorpus,
   listRolloutSessions,
   loadRolloutSession,
-  runAgentSession,
+  createAgentRunAssembly,
   type AgentEvent,
   type ApprovalDecision,
   type ApprovalDiff,
@@ -102,7 +104,7 @@ export type AiAgentPermissionRequestResult =
 export type AiAgentCancelIpcResult =
   | { ok: true }
   | { ok: false; error: { code: string; message: string } };
-export type AiAgentEventReplayIpcResult = { ok: true; events: AiAgentEventEnvelope[] } | { ok: false; error: { code: string; message: string } };
+export type AiAgentEventReplayIpcResult = { ok: true; events: AiAgentEventEnvelope[]; truncated?: boolean; firstAvailableSeq?: number | null } | { ok: false; error: { code: string; message: string } };
 export interface AiAgentSessionSummaryIpc { sessionPath: string; fileName: string; sessionId: string | null; startedAt: string | null; messageCount: number; parseErrors: number; interrupted: boolean; compactedWindows: number; sizeBytes: number; modifiedAt: string; }
 export type AiAgentSessionListIpcResult = { ok: true; sessions: AiAgentSessionSummaryIpc[] } | { ok: false; error: { code: string; message: string } };
 export type AiAgentSessionLoadIpcResult = { ok: true; meta: RolloutSessionMeta | null; messageCount: number; parseErrors: number; interrupted: boolean; compactedWindows: number; messagesPage: ChatMessage[]; } | { ok: false; error: { code: string; message: string } };
@@ -132,7 +134,7 @@ const agentPermissionGrants = new Map<string, {
   mode: 'plan' | 'normal' | 'fullPermission';
   expiresAt: number;
 }>();
-const agentEventHistory = new Map<string, AiAgentEventEnvelope[]>();
+const agentEventHistory = new Map<string, BoundedEventHistory<AiAgentEventEnvelope>>();
 const agentEventHistoryCleanup = new Map<string, NodeJS.Timeout>();
 let boundWebContents: WebContents | null = null;
 
@@ -190,11 +192,8 @@ const sendAgentEvent = (sessionId: string, event: AgentEvent | AiAgentSessionLif
   const seq = (agentSessionSeqs.get(sessionId) ?? 0) + 1;
   agentSessionSeqs.set(sessionId, seq);
   const envelope = sanitizeRendererValue({ sessionId, seq, event }) as AiAgentEventEnvelope;
-  const history = agentEventHistory.get(sessionId) ?? [];
-  history.push(envelope);
-  if (history.length > AGENT_EVENT_HISTORY_LIMIT) {
-    history.splice(0, history.length - AGENT_EVENT_HISTORY_LIMIT);
-  }
+  const history = agentEventHistory.get(sessionId) ?? new BoundedEventHistory<AiAgentEventEnvelope>({maxEntries:AGENT_EVENT_HISTORY_LIMIT,maxBytes:2_097_152});
+  history.append(envelope);
   agentEventHistory.set(sessionId, history);
   if (event.type === 'session-done' || event.type === 'session-error') {
     const previous = agentEventHistoryCleanup.get(sessionId);
@@ -890,8 +889,7 @@ export function registerAgentIpcHandlers(deps: AgentIpcDeps): void {
             }
             return result;
           }
-          if (call.name === 'commit_patch' || call.name === 'mutate_param_fields'
-            || call.name === 'mutate_fmg_entries' || call.name === 'apply_emevd_dsl') {
+          if (deps.toolRegistry.list().some(tool => tool.name === call.name && tool.effect === 'write')) {
             if (!deps.getActiveSession() || !deps.operationLogUtility) return executeLiveTool(call, contextOverride);
             const storage = deps.durableStoragePaths(deps.getActiveSession()!.meta.workspaceId);
             const confirmation = createConfirmationReceipt({
@@ -1201,7 +1199,8 @@ export function registerAgentIpcHandlers(deps: AgentIpcDeps): void {
       };
       const ragSearchAvailable = request.useRagSearch === true ? await hasRagSearchCorpus() : false;
 
-      void runAgentSession({
+      const assembly = createAgentRunAssembly(bridge, {sessionRunner:runAgentUtilitySession,...(coreSession?{coreSession}:{})});
+      void assembly.run({
         sessionsDir: agentSessionsBaseDir,
         sessionId,
         adapter: adapterResult.adapter,
@@ -1210,8 +1209,6 @@ export function registerAgentIpcHandlers(deps: AgentIpcDeps): void {
         prompt: request.prompt,
         ...(systemPrompt.length > 0 ? { systemPrompt } : {}),
         permissionMode,
-        tools: bridge.tools,
-        executeTool: bridge.executeTool,
         recordProviderUsage: async (sample) => {
           await deps.operationLogUtility.recordProviderUsage({
             eventId: `${sessionId}:${sample.callIndex}`,
@@ -1336,7 +1333,8 @@ export function registerAgentIpcHandlers(deps: AgentIpcDeps): void {
           code: 'AGENT_SESSION_FAILED',
           message: error instanceof Error ? error.message : String(error)
         });
-      }).finally(() => {
+      }).finally(async () => {
+        await assembly.waitForHostOperations();
         coreSession?.close();
       });
   
@@ -1364,7 +1362,7 @@ export function registerAgentIpcHandlers(deps: AgentIpcDeps): void {
       }
       return {
         ok: true,
-        events: (agentEventHistory.get(sessionId) ?? []).filter((envelope) => envelope.seq > afterSeq)
+        ...(agentEventHistory.get(sessionId)?.replay(afterSeq) ?? {events:[],truncated:false,firstAvailableSeq:null})
       };
     }
   );

@@ -44,67 +44,16 @@ internal static class BridgeDaemonHost
     // both TypeScript command unions. BridgeCommandDescriptorCatalog provides
     // the descriptor projection, and the startup check below keeps both
     // runtime projections closed over the same names.
-    internal static readonly string[] AdvertisedCommands =
-    {
-        "inspect",
-        "validate",
-        "probe-oodle",
-        "probe-document-locator",
-        "read-dcx-document",
-        "list-bnd4-entries",
-        "snapshot-bnd4-child",
-        "extract-bnd4-child",
-        "write-bnd4",
-        "inventory-asset-resources",
-        "read-fmg-document",
-        "write-fmg",
-        "read-param-document",
-        "write-param",
-        "read-gparam-document",
-        "write-gparam",
-        "read-text-catalog",
-        "read-emevd-document",
-        "write-emevd",
-        "read-msb-document",
-        "write-msb",
-        "read-tpf-document",
-        "export-tpf-texture",
-        "read-tpf-texture-preview",
-        "write-tpf-texture-replace",
-        "read-tae-document",
-        "read-tae-event-params",
-        "read-tae-animation-clip",
-        "sample-tae-animation-pose",
-        "read-bridge-artifact",
-        "read-chrbnd-flver-preview",
-        "read-map-part-flver-preview",
-        "read-map-static-geometry",
-        "read-flver-document",
-        "write-flver",
-        "read-flver-mesh",
-        "read-flver-skeleton",
-        "read-flver-texture-slots",
-        "read-flver-dummies",
-        "read-esd-document",
-        "write-esd-document",
-        "write-tae-document",
-        "write-fxr-document",
-        "read-mtd-document",
-        "write-mtd-document",
-        "read-fxr-document",
-        "list-ffxbnd-entries",
-        "read-luabnd-document",
-        "inspect-luabnd",
-        "read-luabnd-script",
-        "read-hks-source",
-        "compile-hks-source",
-        "write-luabnd-script",
-        "export-luabnd",
-        "export-event",
-        "export-map",
-        "export-param",
-        "export-msg"
-    };
+    internal static readonly string[] AdvertisedCommands = BridgeCommandDescriptorCatalog.AdvertisedCommands;
+
+    private static Task<BridgeResult<object>> RouteCommandAsync(string command,
+        Func<Task<BridgeResult<object>>> service, Func<Task<BridgeResult<object>>> artifact) =>
+        string.Equals(command, "read-bridge-artifact", StringComparison.OrdinalIgnoreCase) ? artifact() : service();
+
+    internal static Task<BridgeResult<object>> ProbeArtifactDispatchAsync(string command) =>
+        RouteCommandAsync(command,
+            () => new BridgeCommandService().ProbeDispatchAsync(command),
+            () => ReadArtifactCommandAsync(null, null, "dispatch-probe", CancellationToken.None));
 
     public static async Task RunAsync(
         TextReader input,
@@ -113,7 +62,7 @@ internal static class BridgeDaemonHost
     {
         // 启动期自检：描述源必须覆盖能力、实际入口和所有输出路径。
         // 漂移时 fail-closed，不能在尚未确认写路径边界的状态下接收请求。
-        VerifyDiskWriteRegistry();
+        await VerifyDiskWriteRegistryAsync();
 
         using var reader = BoundedNdjsonReader.FromTextReader(
             input,
@@ -337,25 +286,7 @@ internal static class BridgeDaemonHost
     // Keep this declaration source-visible for the runtime write-boundary
     // gate. The descriptor catalog is checked against it during startup, so a
     // new output-path command cannot silently skip writable-root validation.
-    private static readonly HashSet<string> DiskWritingCommands = new(StringComparer.OrdinalIgnoreCase)
-    {
-        "extract-bnd4-child",
-        "write-bnd4",
-        "export-tpf-texture",
-        "write-fmg",
-        "write-param",
-        "write-emevd",
-        "write-msb",
-        "write-flver",
-        "write-gparam",
-        "write-tpf-texture-replace",
-        "write-mtd-document",
-        "write-esd-document",
-        "write-tae-document",
-        "write-fxr-document",
-        "write-luabnd-script",
-        "export-luabnd"
-    };
+    private static readonly IReadOnlySet<string> DiskWritingCommands = BridgeCommandDescriptorCatalog.DiskWritingCommands;
 
     /// <summary>
     /// 启动期自检：DiskWritingCommands 必须与能力声明保持一致。
@@ -386,7 +317,7 @@ internal static class BridgeDaemonHost
     /// 为什么不反射 dispatch 表：ExecuteAsync 是 if 链 + switch 混合形态，
     /// 不是可枚举结构，运行期读不到。真正的全集对账留给外部门禁做源码解析。
     /// </summary>
-    private static void VerifyDiskWriteRegistry()
+    private static async Task VerifyDiskWriteRegistryAsync()
     {
         BridgeCommandDescriptorCatalog.Verify();
 
@@ -405,13 +336,7 @@ internal static class BridgeDaemonHost
         if (!diskFromDescriptors.SetEquals(DiskWritingCommands))
             throw new InvalidOperationException("BRIDGE_DISK_WRITE_PROJECTION_DRIFT");
 
-        var unbound = BridgeCommandDescriptorCatalog.All
-            .Where(item => !BridgeCommandDescriptorCatalog.DispatchCommands.Contains(item.Name))
-            .Select(item => item.Name)
-            .ToArray();
-        if (unbound.Length > 0)
-            throw new InvalidOperationException(
-                $"BRIDGE_COMMAND_DISPATCH_REGISTRY_INCOMPLETE: {string.Join(", ", unbound)}");
+        await BridgeCommandDispatchVerification.VerifyAsync(BridgeCommandDescriptorCatalog.All);
     }
 
     private static async Task AcceptRequestAsync(BridgeInboundFrame frame, DaemonState state)
@@ -592,29 +517,12 @@ internal static class BridgeDaemonHost
             using var resourceScope = MapStaticGeometryService.EnterRequestScope(
                 work.CancellationSource.Token,
                 frame.WorkspaceSessionId ?? string.Empty);
-            BridgeResult<object> result;
-            if (string.Equals(payload.Command, "read-bridge-artifact", StringComparison.OrdinalIgnoreCase))
-            {
-                result = await state.ReadArtifactAsync(
-                    payload.Options,
-                    work.CanonicalFilePath,
-                    work.CancellationSource.Token);
-            }
-            else
-            {
-                var service = new BridgeCommandService();
-                result = await service.ExecuteAsync(
-                    payload.Command!,
-                    work.CanonicalFilePath,
-                    work.CancellationSource.Token,
-                    state.OodleRuntimeRoot,
-                    payload.Options ?? default,
-                    work.OutputPath,
-                    state.AllowedRoots,
-                    frame.WorkspaceSessionId,
-                    mapTiming,
-                    characterTiming);
-            }
+            var result = await RouteCommandAsync(payload.Command!,
+                () => new BridgeCommandService().ExecuteAsync(
+                    payload.Command!, work.CanonicalFilePath, work.CancellationSource.Token,
+                    state.OodleRuntimeRoot, payload.Options ?? default, work.OutputPath,
+                    state.AllowedRoots, frame.WorkspaceSessionId, mapTiming, characterTiming),
+                () => state.ReadArtifactAsync(payload.Options, work.CanonicalFilePath, work.CancellationSource.Token));
             work.CancellationSource.Token.ThrowIfCancellationRequested();
             if (string.Equals(payload.Command, "read-map-static-geometry", StringComparison.OrdinalIgnoreCase))
             {
@@ -800,6 +708,54 @@ internal static class BridgeDaemonHost
     /// 语义边界：广告表示「该命令会被受理」，**不表示**对应格式具备 native
     /// parser/writer authority——authority 由各能力格自行裁定。
     /// </summary>
+    internal static async Task<BridgeResult<object>> ReadArtifactCommandAsync(
+        BridgeArtifactStore? artifacts, JsonElement? options,
+        string sourcePath,
+        CancellationToken cancellationToken)
+    {
+        if (options is not { ValueKind: JsonValueKind.Object }
+            || !options.Value.TryGetProperty("artifactToken", out var tokenElement)
+            || tokenElement.ValueKind != JsonValueKind.String
+            || string.IsNullOrWhiteSpace(tokenElement.GetString())
+            || !options.Value.TryGetProperty("offset", out var offsetElement)
+            || !offsetElement.TryGetInt64(out var offset)
+            || !options.Value.TryGetProperty("length", out var lengthElement)
+            || !lengthElement.TryGetInt32(out var length))
+        {
+            return BridgeResult<object>.Failed(sourcePath, "unknown", "BRIDGE_ARTIFACT_REQUEST_INVALID", "artifactToken、offset 和 length 是必需的。");
+        }
+
+        try
+        {
+            var chunk = await artifacts!.ReadAsync(
+                tokenElement.GetString()!,
+                offset,
+                length,
+                cancellationToken).ConfigureAwait(false);
+            return BridgeResult<object>.Partial(sourcePath, "unknown", new[]
+            {
+                new Diagnostic("info", "BRIDGE_ARTIFACT_CHUNK_READ", "Bridge file-backed artifact chunk 已读取。", BridgeResult<object>.MakeSourceUri(sourcePath))
+            }, new
+            {
+                artifactToken = tokenElement.GetString()!,
+                offset,
+                length = chunk.Bytes.Length,
+                totalLength = chunk.TotalLength,
+                complete = offset + chunk.Bytes.Length >= chunk.TotalLength,
+                dataBase64 = Convert.ToBase64String(chunk.Bytes)
+            });
+        }
+        catch (Exception ex) when (ex is ArgumentException or InvalidDataException or IOException)
+        {
+            return BridgeResult<object>.Failed(sourcePath, "unknown", "BRIDGE_ARTIFACT_READ_FAILED", ex.Message, new
+            {
+                artifactToken = tokenElement.GetString(),
+                offset,
+                length
+            });
+        }
+    }
+
     private static object BuildCapabilities(string? oodleRuntimeRoot) => new
     {
         authority = "candidate",
@@ -1051,53 +1007,8 @@ internal static class BridgeDaemonHost
             return (int)Math.Max(1L, chunkBytes);
         }
 
-        public async Task<BridgeResult<object>> ReadArtifactAsync(
-            JsonElement? options,
-            string sourcePath,
-            CancellationToken cancellationToken)
-        {
-            if (options is not { ValueKind: JsonValueKind.Object }
-                || !options.Value.TryGetProperty("artifactToken", out var tokenElement)
-                || tokenElement.ValueKind != JsonValueKind.String
-                || string.IsNullOrWhiteSpace(tokenElement.GetString())
-                || !options.Value.TryGetProperty("offset", out var offsetElement)
-                || !offsetElement.TryGetInt64(out var offset)
-                || !options.Value.TryGetProperty("length", out var lengthElement)
-                || !lengthElement.TryGetInt32(out var length))
-            {
-                return BridgeResult<object>.Failed(sourcePath, "unknown", "BRIDGE_ARTIFACT_REQUEST_INVALID", "artifactToken、offset 和 length 是必需的。");
-            }
-
-            try
-            {
-                var chunk = await _artifacts.ReadAsync(
-                    tokenElement.GetString()!,
-                    offset,
-                    length,
-                    cancellationToken).ConfigureAwait(false);
-                return BridgeResult<object>.Partial(sourcePath, "unknown", new[]
-                {
-                    new Diagnostic("info", "BRIDGE_ARTIFACT_CHUNK_READ", "Bridge file-backed artifact chunk 已读取。", BridgeResult<object>.MakeSourceUri(sourcePath))
-                }, new
-                {
-                    artifactToken = tokenElement.GetString()!,
-                    offset,
-                    length = chunk.Bytes.Length,
-                    totalLength = chunk.TotalLength,
-                    complete = offset + chunk.Bytes.Length >= chunk.TotalLength,
-                    dataBase64 = Convert.ToBase64String(chunk.Bytes)
-                });
-            }
-            catch (Exception ex) when (ex is ArgumentException or InvalidDataException or IOException)
-            {
-                return BridgeResult<object>.Failed(sourcePath, "unknown", "BRIDGE_ARTIFACT_READ_FAILED", ex.Message, new
-                {
-                    artifactToken = tokenElement.GetString(),
-                    offset,
-                    length
-                });
-            }
-        }
+        public Task<BridgeResult<object>> ReadArtifactAsync(JsonElement? options, string sourcePath, CancellationToken cancellationToken) =>
+            ReadArtifactCommandAsync(_artifacts, options, sourcePath, cancellationToken);
 
         public async Task WriteAsync(
             string kind,

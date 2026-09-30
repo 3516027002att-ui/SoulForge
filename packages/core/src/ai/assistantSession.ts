@@ -188,6 +188,7 @@ function recommendTools(prompt: string, tools: ToolDescriptor[], mode: AiPermiss
     names.add('read_tae_events');
     names.add('mutate_tae_event_times');
     names.add('mutate_tae_event_fields');
+    names.add('insert_tae_events');
   }
 
   if (lower.includes('param') || lower.includes('参数') || lower.includes('speffect') || lower.includes('goods')
@@ -247,6 +248,7 @@ function reasonForTool(name: string): string {
     explain_event: '生成证据优先的事件解释输入。',
     search_map_entities: '查找地图实体、区域和可见命名候选。',
     search_tae_events: '按动作地址（cXXXX#AXXXX.eN）或 SoundID 查找 TAE 词条。',
+    insert_tae_events: '从可信原生模板新增 TAE 词条并设置字段，经 Patch Engine 返回审计与回滚。',
     read_tae_events: '按地址（c1050#A0200.e0）读 TAE 词条的帧/时间与已解码字段。',
     mutate_tae_event_times: '按地址改 TAE 词条起始/结束帧，经 Patch Engine 提交。',
     mutate_tae_event_fields: '按 first-party schema 字段改 TAE 参数，经 Patch Engine 提交。',

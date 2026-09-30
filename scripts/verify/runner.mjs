@@ -15,6 +15,7 @@
  */
 import { spawn, spawnSync } from 'node:child_process';
 import { delimiter, dirname, resolve } from 'node:path';
+import { existsSync, realpathSync } from 'node:fs';
 import { SILENT_ON_SUCCESS } from './tiers.mjs';
 
 /**
@@ -277,8 +278,18 @@ export function runSuite({ repoRoot, scriptName, timeoutMs, injectEnv = true, op
     const npmArgs = ['run', scriptName, '--silent', ...(extraArgs.length ? ['--', ...extraArgs] : [])];
     // 始终用 process.execPath 执行 JS 入口，不依赖 shell 解析 `npm`：
     // Windows 下 npm 是 .cmd，spawn 不带 shell 时无法直接执行。
-    const npmCli = process.env.npm_execpath?.trim()
-      || resolve(dirname(process.execPath), 'node_modules/npm/bin/npm-cli.js');
+    const nodeDir = dirname(process.execPath);
+    const npmCandidates = [process.env.npm_execpath?.trim(),
+      resolve(nodeDir,'node_modules/npm/bin/npm-cli.js'),
+      resolve(nodeDir,'../lib/node_modules/npm/bin/npm-cli.js')];
+    for (const directory of (process.env.PATH ?? '').split(delimiter)) {
+      const shim = resolve(directory,process.platform === 'win32' ? 'npm.cmd':'npm');
+      if (existsSync(shim) && process.platform !== 'win32') {
+        try {npmCandidates.push(realpathSync(shim));} catch {}
+      }
+    }
+    const npmCli = npmCandidates.find(path => path && existsSync(path))
+      ?? resolve(nodeDir,'node_modules/npm/bin/npm-cli.js');
     const directArgs = !operation ? [npmCli, ...npmArgs]
       : operation.command === 'npm' ? [npmCli, ...operation.args]
         : operation.command === 'tsc'

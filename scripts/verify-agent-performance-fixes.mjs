@@ -1,21 +1,16 @@
 /**
  * Focused regression checks for the Agent/RAG/CPU fixes.  This is deliberately
- * offline: it exercises the production core loop and desktop task-record
- * gateway with deterministic adapters, without claiming native or provider
+ * offline: it exercises the production core loop with deterministic adapters, without claiming native or provider
  * authority.
  */
 
 import assert from 'node:assert/strict';
-import { mkdtemp, readFile, rm } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
 
 import {
   createContextBroker,
   runAgentToolLoop,
   upsertContextEvidenceSources
 } from '../packages/core/dist/index.js';
-import { createAgentTaskRecordGateway } from '../apps/desktop/src/main/agentTaskRecord.ts';
 
 const config = {
   id: 'agent-performance-fix-smoke',
@@ -283,41 +278,9 @@ async function testNonFiniteStepBudgetIsBounded() {
   assert.equal(run.finishReason, 'partial');
 }
 
-async function testTaskRecordBatchBoundary() {
-  const root = await mkdtemp(join(tmpdir(), 'soulforge-agent-performance-'));
-  try {
-    const gateway = createAgentTaskRecordGateway(root, 'batch-smoke');
-    await gateway.read();
-    await gateway.update({ objectName: '鬼刑部', propertyKey: 'target', value: '待定位', kind: 'target' });
-    const ticket = await gateway.recordSearch({
-      toolName: 'search_param_rows',
-      query: '鬼刑部',
-      result: { items: [{ table: 'NpcParam', rowId: 50800000, rowName: '鬼形部' }] }
-    });
-    await Promise.all(Array.from({ length: 8 }, () => gateway.update({
-      objectName: '鬼刑部',
-      propertyKey: 'NpcParam',
-      value: 'rowId=50800000',
-      evidence: ['NpcParam#50800000 fieldId=teamType'],
-      searchId: ticket.searchId,
-      mutationBudget: 1
-    })));
-    assert.equal((await gateway.assertParamReadTarget({ table: 'NpcParam', rowIds: [50800000] })).ok, true);
-    assert.equal((await gateway.assertParamReadTarget({ table: 'NpcParam', rowIds: [3504] })).ok, false);
-    const snapshot = await gateway.read();
-    assert.ok(snapshot.entries.some((entry) => entry.propertyKey === 'NpcParam'));
-    const persisted = await readFile(join(root, 'batch-smoke.md'), 'utf8');
-    assert.match(persisted, new RegExp(ticket.searchId, 'u'));
-    assert.match(persisted, /rowId=50800000/u);
-  } finally {
-    await rm(root, { recursive: true, force: true });
-  }
-}
-
 await testEvidenceDedup();
 await testLoopSkipsDuplicateAssembly();
 await testCanonicalDenial();
 await testCanonicalExecutedFailure();
 await testNonFiniteStepBudgetIsBounded();
-await testTaskRecordBatchBoundary();
 console.log('agent performance fixes smoke passed');

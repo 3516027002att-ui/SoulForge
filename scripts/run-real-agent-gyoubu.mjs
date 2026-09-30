@@ -24,7 +24,6 @@ import { tmpdir } from 'node:os';
 import { dirname, join, relative, resolve, sep } from 'node:path';
 import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
-import { _electron as electron } from '@playwright/test';
 
 import {
   assertAgentProductionArtifactSnapshotFresh,
@@ -39,21 +38,21 @@ import {
   shouldRecoverUnverifiedWriteRollback,
   planRollbackRecoveryOperations,
   evaluateGoalCoverage,
+  evaluateTaskOutcome,
   buildFailureSessionEvidence,
   evaluateWriteAdmission,
   evaluateRollbackVerification,
   planSemanticCorpus,
-  enrichNativeSourceFacts,
-  diagnoseNativeSourceUriResolution,
   rollbackCommittedOperations,
-  resolveNativeSourceUri,
   safeHarnessFileLabel,
   SEMANTIC_CORPUS_KINDS,
   selectNewCommittedOperations,
   waitForSemanticReadiness
 } from './real-agent-harness-lib.mjs';
 import { loadTestAgentProvider } from './testing/test-agent-provider.mjs';
-import { isObservationGoalTool, parseGoalContract, matchesAssertion, readAssertionPath, validateTaskContractGoals } from './real-agent-goal-contract.mjs';
+import { parseGoalContract, validateTaskContractGoals } from './real-agent-goal-contract.mjs';
+import { captureAgentRunProvenance, decodeTaskInput, bindTestedArtifact, bindProviderConfiguration } from './testing/agent-run-provenance.mjs';
+import { spawn } from 'node:child_process';
 import { getFourTask } from './testing/real-agent-four-task-manifest.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -92,6 +91,12 @@ const DEFAULT_GOALS = Object.freeze([
 ]);
 
 const CLI_OPTIONS = parseCliOptions(process.argv.slice(2));
+for (const [fileOption,valueOption] of [['taskFile','query'],['goalsFile','goals']]) {
+  if (CLI_OPTIONS[fileOption]) {
+    if (CLI_OPTIONS[valueOption] !== undefined) throw harnessError('REAL_AGENT_INPUT_CONFLICT', `Use either ${fileOption} or ${valueOption}.`);
+    CLI_OPTIONS[valueOption] = decodeTaskInput(await readFile(CLI_OPTIONS[fileOption]));
+  }
+}
 const AGENT_PROVIDER = CLI_OPTIONS.provider ?? process.env.SOULFORGE_AGENT_PROVIDER?.trim() ?? null;
 const AGENT_CONFIG_ID = CLI_OPTIONS.configId ?? process.env.SOULFORGE_AGENT_CONFIG_ID?.trim() ?? null;
 const AGENT_TEST_CONFIG_PATH = CLI_OPTIONS.testConfig ?? process.env.SOULFORGE_AGENT_TEST_CONFIG_PATH?.trim() ?? null;
@@ -100,6 +105,11 @@ const AGENT_EXE_PATH = CLI_OPTIONS.exe ?? process.env.SOULFORGE_AGENT_EXE?.trim(
 const WRITE_MODE = CLI_OPTIONS.write === true || CLI_OPTIONS.observationOnly !== true;
 const CANDIDATE_WRITE_MODE = CLI_OPTIONS.candidateWrite === true;
 const SELECTED_TEST_TASK = CLI_OPTIONS.testset ? getFourTask(CLI_OPTIONS.testset) : null;
+const TASK_CONTRACT = CLI_OPTIONS.contractFile
+  ? JSON.parse(decodeTaskInput(await readFile(CLI_OPTIONS.contractFile))) : SELECTED_TEST_TASK?.contract;
+if (TASK_CONTRACT?.intent !== undefined && !['read','ensure','modify','restore'].includes(TASK_CONTRACT.intent)) {
+  throw harnessError('GOAL_CONTRACT_INVALID', 'Unknown task contract intent.');
+}
 const TASK_QUERY = CLI_OPTIONS.query ?? SELECTED_TEST_TASK?.query ?? DEFAULT_TASK_QUERY;
 const SAFE_TIMESTAMP = new Date().toISOString().replace(/[:.]/gu, '-');
 const REPORT_LABEL = safeFileLabel(CLI_OPTIONS.label ?? 'real-agent');
@@ -184,6 +194,11 @@ function parseCliOptions(args) {
       continue;
     }
     const next = args[index + 1];
+    if (['--task-file','--goals-file','--contract-file'].includes(arg) && typeof next === 'string' && !next.startsWith('--')) {
+      options[{'--task-file':'taskFile','--goals-file':'goalsFile','--contract-file':'contractFile'}[arg]] = next;
+      index += 1;
+      continue;
+    }
     if (arg === '--query' && typeof next === 'string' && next.trim() !== '') {
       options.query = next.trim();
       index += 1;
@@ -287,6 +302,7 @@ function printHelp() {
     'SoulForge 真实生产 Agent 链路模拟',
     '',
     '默认任务检查内置的两个 PARAM 字段；四题 --testset 使用清单中的可执行目标，并对无验证器的行为目标显式报告 unsupported。',
+    'UTF-8 输入：--task-file <path>、--goals-file <path>、--contract-file <path>（intent: read/ensure/modify/restore）。',
     '其它任务传 --goals JSON 检查指定字段，或 --observe 仅观察原文任务执行。',
     '四题只有在写回、Bridge 重读、语义证据和回滚均通过时才会报告 verified；字段命中本身不等于整题完成。',
     '',
@@ -349,12 +365,12 @@ function parseGoals(raw) {
       defaultTaskQuery: DEFAULT_TASK_QUERY,
       defaultGoals: SELECTED_TEST_TASK?.goals ?? DEFAULT_GOALS
     });
-    if (SELECTED_TEST_TASK && CLI_OPTIONS.observationOnly !== true) {
-      const contractCheck = validateTaskContractGoals(parsed, SELECTED_TEST_TASK.contract);
+    if (TASK_CONTRACT) {
+      const contractCheck = validateTaskContractGoals(parsed, TASK_CONTRACT);
       if (!contractCheck.ok) {
         throw harnessError(
           'CONTRACT_GOAL_MISSING',
-          `任务 ${SELECTED_TEST_TASK.id} 缺少 required postcondition goal：${contractCheck.missingGoalIds.join(', ')}。`
+          `任务 ${SELECTED_TEST_TASK?.id ?? 'custom'} 缺少 required postcondition goal：${contractCheck.missingGoalIds.join(', ')}。`
         );
       }
     }
@@ -736,281 +752,6 @@ function eventSummary(events) {
   };
 }
 
-function sameValue(observed, expected) {
-  if (typeof expected === 'number' && typeof observed === 'string' && observed.trim() !== '') {
-    return /^-?(?:0|[1-9]\d*)$/u.test(observed.trim())
-      && Number.isSafeInteger(Number(observed))
-      && Number(observed) === expected;
-  }
-  if (typeof expected === 'boolean' && typeof observed === 'number') return Boolean(observed) === expected;
-  return Object.is(observed, expected);
-}
-
-function collectNativeSourceFacts(value, facts = { hashes: [], revisions: [], uris: [] }, depth = 0) {
-  if (depth > 6 || value === null || value === undefined) return facts;
-  if (Array.isArray(value)) {
-    for (const item of value.slice(0, 64)) collectNativeSourceFacts(item, facts, depth + 1);
-    return facts;
-  }
-  if (typeof value !== 'object') return facts;
-  for (const [key, child] of Object.entries(value)) {
-    const lower = key.toLocaleLowerCase();
-    if (typeof child === 'string' && lower === 'sourcehash' && child.length > 0) facts.hashes.push(child);
-    if ((lower === 'sourcerevision' || lower === 'revision')
-      && (typeof child === 'number' || typeof child === 'string')) facts.revisions.push(child);
-    if (typeof child === 'string' && lower === 'sourceuri' && child.length > 0) facts.uris.push(child);
-    collectNativeSourceFacts(child, facts, depth + 1);
-  }
-  return facts;
-}
-
-function compactNativeToolResult(value, depth = 0) {
-  if (depth > 4) return '[depth-limited]';
-  if (typeof value === 'string') return value.length > 512 ? `${value.slice(0, 512)}…` : value;
-  if (value === null || typeof value === 'number' || typeof value === 'boolean') return value;
-  if (Array.isArray(value)) return value.slice(0, 16).map((item) => compactNativeToolResult(item, depth + 1));
-  if (typeof value !== 'object') return undefined;
-  const output = {};
-  for (const [key, child] of Object.entries(value)) {
-    // Complete Lua source and DarkScript are used for the in-process
-    // assertion, but must not be copied into a rollout/report.
-    if (key === 'sourceText' || key === 'darkScript' || key === 'argsBase64' || key === 'contentBase64') continue;
-    output[key] = compactNativeToolResult(child, depth + 1);
-  }
-  return output;
-}
-
-async function runReadOnlyGoalTool(window, goal) {
-  const result = await window.evaluate(
-    async ({ tool, input }) => globalThis.soulforge.runAiTool(tool, input),
-    { tool: goal.tool, input: goal.input }
-  );
-  return {
-    tool: goal.tool,
-    input: goal.input,
-    result,
-    compactResult: compactNativeToolResult(result)
-  };
-}
-
-function evaluateParamGoal(goal, result, treeEvidence = undefined) {
-  const resultData = result?.data && typeof result.data === 'object' && !Array.isArray(result.data)
-    ? result.data
-    : null;
-  const fields = result?.ok && Array.isArray(resultData?.fields)
-    ? resultData.fields
-    : result?.ok && Array.isArray(resultData?.record?.fields)
-      ? resultData.record.fields
-      : [];
-  const field = fields.find((candidate) => (
-    Number(candidate?.rowId) === goal.rowId
-    && String(candidate?.fieldId ?? '').toLocaleLowerCase() === goal.fieldId.toLocaleLowerCase()
-  ));
-  const sourceHashPresent = typeof field?.sourceHash === 'string' && field.sourceHash.length > 0;
-  const sourceIdentity = resolveNativeSourceUri(result, {
-    workspaceRoot: treeEvidence?.root,
-    entries: [
-      ...(treeEvidence?.before?.entries ?? []),
-      ...(treeEvidence?.after?.entries ?? [])
-    ]
-  });
-  const sourceUriPresent = sourceIdentity !== null;
-  const valueMatches = Boolean(result?.ok === true && field && sourceHashPresent && sameValue(field.value, goal.expectedValue));
-  return {
-    ...goal,
-    nativeReadOk: result?.ok === true,
-    observedValue: field?.value ?? null,
-    sourceHashPresent,
-    sourceRevisionPresent: field?.sourceRevision !== undefined && field?.sourceRevision !== null,
-    sourceUriPresent,
-    verified: Boolean(valueMatches && sourceUriPresent),
-    status: valueMatches && sourceUriPresent
-      ? 'verified'
-      : 'unverified',
-    verificationEvidence: result?.ok === true && sourceHashPresent
-      ? [{
-          tool: 'read_param_fields',
-          sourceHashes: [field.sourceHash],
-          sourceRevisions: field.sourceRevision === undefined ? [] : [field.sourceRevision],
-          sourceUris: sourceIdentity ? [sourceIdentity.sourceUri] : []
-        }]
-      : [],
-    diagnostics: result?.ok === false
-      ? result?.error ?? null
-      : sourceUriPresent ? null : [{
-          severity: 'error',
-          code: 'NATIVE_SOURCE_URI_UNBOUND',
-          message: `目标 ${goal.goalId} 的 native containerPath 未能绑定到当前 overlay 工作区，不能作为 corpus 证据。`
-        }],
-    read: compactNativeToolResult(result ?? null)
-  };
-}
-
-function goalChangedInOverlay(goal, treeEvidence) {
-  if (!goal.changedPath || !treeEvidence?.before || !treeEvidence?.after) return true;
-  const before = treeEvidence.before.entries.find((entry) => entry.path === goal.changedPath);
-  const after = treeEvidence.after.entries.find((entry) => entry.path === goal.changedPath);
-  return JSON.stringify(before ?? null) !== JSON.stringify(after ?? null);
-}
-
-async function verifyGoalThroughNativeTool(window, goal, paramReads = new Map(), treeEvidence = undefined) {
-  if (goal.verificationClass === 'observation' || isObservationGoalTool(goal.tool)) {
-    const execution = await runReadOnlyGoalTool(window, goal);
-    return {
-      ...goal,
-      nativeReadOk: execution.result?.ok === true,
-      verified: false,
-      status: 'observed',
-      verificationClass: 'observation',
-      verificationEvidence: [],
-      diagnostics: [{
-        severity: 'info',
-        code: 'GOAL_OBSERVATION_ONLY',
-        message: `目标 ${goal.goalId ?? 'unknown'} 只产生发现/静态观察，不参与 semantic completion。`
-      }],
-      read: execution.compactResult
-    };
-  }
-  if (goal.kind === 'unsupported'
-    || goal.verificationStatus === 'unsupported'
-    || goal.status === 'unsupported') {
-    return {
-      ...goal,
-      nativeReadOk: false,
-      verified: false,
-      status: 'unsupported',
-      verificationStatus: 'unsupported',
-      verificationEvidence: [],
-      diagnostics: [{
-        severity: 'error',
-        code: 'GOAL_VERIFICATION_UNSUPPORTED',
-        message: goal.unsupportedReason ?? `目标 ${goal.goalId ?? 'unknown'} 没有可执行验证器。`
-      }],
-      read: null
-    };
-  }
-  if (goal.kind === 'param-field') {
-    const key = `${goal.table}\0${goal.rowId}`;
-    let result = paramReads.get(key);
-    if (!result) {
-      result = await window.evaluate(
-        async (input) => globalThis.soulforge.runAiTool('read_param_fields', input),
-        { table: goal.table, rowIds: [goal.rowId], fieldIds: [goal.fieldId] }
-      );
-      paramReads.set(key, result);
-    }
-    const evaluation = evaluateParamGoal(goal, result, treeEvidence);
-    if (evaluation.verified && !goalChangedInOverlay(goal, treeEvidence)) {
-      evaluation.verified = false;
-      evaluation.status = 'unverified';
-      evaluation.diagnostics = [{ code: 'GOAL_RESOURCE_UNCHANGED', message: `目标 ${goal.goalId} 指定资源在 Agent 写回后没有变化。` }];
-      evaluation.verificationEvidence = [];
-    }
-    return evaluation;
-  }
-  if (goal.kind === 'composite' || goal.kind === 'semantic') {
-    const children = [];
-    for (const child of goal.checks) {
-      children.push(await verifyGoalThroughNativeTool(window, child, paramReads, treeEvidence));
-    }
-    const requiredChildren = children.filter((child) => child?.required !== false);
-    const verified = requiredChildren.length > 0 && requiredChildren.every((child) => child.verified === true);
-    const unsupported = requiredChildren.some((child) => child.status === 'unsupported');
-    const changed = goalChangedInOverlay(goal, treeEvidence);
-    return {
-      ...goal,
-      verified: verified && changed,
-      status: unsupported ? 'unsupported' : verified && changed ? 'verified' : 'unverified',
-      ...(unsupported ? { verificationStatus: 'unsupported' } : {}),
-      nativeReadOk: requiredChildren.every((child) => child.nativeReadOk === true),
-      observedValue: verified,
-      verificationEvidence: verified && changed ? children.flatMap((child) => child?.verificationEvidence ?? []) : [],
-      checks: children,
-      diagnostics: verified && changed
-        ? []
-        : [{ code: changed ? 'SEMANTIC_ASSERTION_FAILED' : 'GOAL_RESOURCE_UNCHANGED', message: changed ? `复合目标 ${goal.goalId} 的至少一个检查未通过。` : `目标 ${goal.goalId} 指定资源在 Agent 写回后没有变化。` }]
-    };
-  }
-  const execution = await runReadOnlyGoalTool(window, goal);
-  const result = execution.result;
-  const facts = enrichNativeSourceFacts(result, collectNativeSourceFacts(result), {
-    workspaceRoot: treeEvidence?.root,
-    entries: [
-      ...(treeEvidence?.before?.entries ?? []),
-      ...(treeEvidence?.after?.entries ?? [])
-    ],
-    ...(typeof goal.input?.containerPath === 'string' ? { sourceHint: goal.input.containerPath } : {})
-  });
-  const sourceIdentityDiagnostics = diagnoseNativeSourceUriResolution(result, {
-    workspaceRoot: treeEvidence?.root,
-    entries: [
-      ...(treeEvidence?.before?.entries ?? []),
-      ...(treeEvidence?.after?.entries ?? [])
-    ],
-    requiredSources: SELECTED_TEST_TASK?.contract?.corpusFingerprint?.requiredSources ?? [],
-    ...(typeof goal.input?.containerPath === 'string' ? { sourceHint: goal.input.containerPath } : {})
-  });
-  const nativeReadOk = result?.ok === true;
-  const sourceHashPresent = facts.hashes.length > 0;
-  const assertionOk = nativeReadOk && matchesAssertion(result, goal.assertion);
-  const proofOk = !goal.requireSourceHash || sourceHashPresent;
-  const observed = goal.assertion?.path === undefined
-    ? null
-    : readAssertionPath(result, goal.assertion.path).value ?? null;
-  const changed = goalChangedInOverlay(goal, treeEvidence);
-  const diagnostics = [];
-  if (!nativeReadOk) diagnostics.push(result?.error ?? { code: 'NATIVE_READ_FAILED', message: `${goal.tool} 读取失败。` });
-  if (nativeReadOk && !assertionOk) diagnostics.push({ code: 'SEMANTIC_ASSERTION_FAILED', message: `目标 ${goal.goalId} 的原生结果未满足断言。` });
-  if (nativeReadOk && !proofOk) diagnostics.push({ code: 'NATIVE_SOURCE_HASH_MISSING', message: `目标 ${goal.goalId} 缺少 sourceHash，不能作为原生验证证据。` });
-  if (nativeReadOk && !changed) diagnostics.push({ code: 'GOAL_RESOURCE_UNCHANGED', message: `目标 ${goal.goalId} 指定资源在 Agent 写回后没有变化。` });
-  return {
-    ...goal,
-    nativeReadOk,
-    observedValue: compactNativeToolResult(observed),
-    sourceHashPresent,
-    sourceRevisionPresent: facts.revisions.length > 0,
-    sourceIdentityDiagnostics,
-    verified: nativeReadOk && assertionOk && proofOk && changed,
-    status: nativeReadOk && assertionOk && proofOk && changed ? 'verified' : 'unverified',
-    verificationEvidence: nativeReadOk && assertionOk && proofOk && changed
-      ? [{ tool: goal.tool, sourceHashes: [...new Set(facts.hashes)].slice(0, 4), sourceRevisions: [...new Set(facts.revisions)].slice(0, 4), sourceUris: [...new Set(facts.uris)].slice(0, 4) }]
-      : [],
-    diagnostics,
-    read: execution.compactResult
-  };
-}
-
-async function verifyGoalsThroughNativeTool(window, goals, treeEvidence = undefined) {
-  const grouped = new Map();
-  for (const goal of goals) {
-    if (goal.kind !== 'param-field') continue;
-    const key = `${goal.table}\0${goal.rowId}`;
-    const current = grouped.get(key) ?? { table: goal.table, rowId: goal.rowId, fieldIds: [] };
-    if (!current.fieldIds.includes(goal.fieldId)) current.fieldIds.push(goal.fieldId);
-    grouped.set(key, current);
-  }
-  const reads = [];
-  for (const query of grouped.values()) {
-    const result = await window.evaluate(
-      async (input) => globalThis.soulforge.runAiTool('read_param_fields', input),
-      { table: query.table, rowIds: [query.rowId], fieldIds: query.fieldIds }
-    );
-    reads.push({ query, result });
-  }
-  const paramReads = new Map(reads.map((entry) => [`${entry.query.table}\0${entry.query.rowId}`, entry.result]));
-  const evaluations = goals
-    .filter((goal) => goal.kind === 'param-field')
-    .map((goal) => {
-      const read = reads.find((item) => item.query.table === goal.table && item.query.rowId === goal.rowId);
-      return evaluateParamGoal(goal, read?.result ?? null, treeEvidence);
-    });
-  const semanticEvaluations = [];
-  for (const goal of goals) {
-    if (goal.kind === 'param-field') continue;
-    semanticEvaluations.push(await verifyGoalThroughNativeTool(window, goal, paramReads, treeEvidence));
-  }
-  return { reads: reads.map((entry) => ({ ...entry, result: compactNativeToolResult(entry.result) })), evaluations: [...evaluations, ...semanticEvaluations] };
-}
 
 function parseDurableTerminal(raw) {
   const terminals = [];
@@ -1358,6 +1099,36 @@ async function closeElectron(app, { scratchRoot, startedAt, ownership = null, al
   };
 }
 
+async function verifyIsolatedNativeGoals(request) {
+  const child = spawn(process.execPath,[join(REPO_ROOT,'scripts/testing/verify-isolated-native-goals.mjs')],{
+    cwd:REPO_ROOT,env:{...process.env,SF_E2E_WORKSPACE_STORAGE_ROOT:join(request.userDataDir,'independent-verifier')},
+    stdio:['pipe','pipe','pipe'],windowsHide:true,detached:process.platform !== 'win32'});
+  const chunks = [];
+  let bytes = 0;
+  let stderr = '';
+  let limitError = null;
+  const kill = () => {
+    if (process.platform !== 'win32' && child.pid) {try {process.kill(-child.pid,'SIGKILL');} catch {}}
+    try {child.kill();} catch {}
+  };
+  const timer = setTimeout(() => {limitError = 'Independent verifier timed out.';kill();},SEMANTIC_PREFLIGHT_TIMEOUT_MS);
+  child.stdout.on('data',chunk => {
+    bytes += chunk.length;
+    if (bytes > 16*1024*1024) {limitError = 'Independent verifier report exceeded bounded output.';kill();}
+    else chunks.push(chunk);
+  });
+  child.stderr.on('data',chunk => {stderr = (stderr+String(chunk)).slice(-65536);});
+  child.stdin.on('error',() => {});
+  child.stdin.end(JSON.stringify(request));
+  try {
+    const code = await new Promise((resolve,reject) => {child.once('error',reject);child.once('close',resolve);});
+    if (code !== 0 || limitError) return {reads:[],evaluations:request.goals.map(goal => ({...goal,
+      verified:false,status:'unverified',reason:'independent-verification-unavailable',
+      diagnostics:[{code:'INDEPENDENT_VERIFICATION_UNAVAILABLE',message:limitError ?? stderr ?? `Verifier exit ${code}`}]}))};
+    return JSON.parse(decodeTaskInput(Buffer.concat(chunks)));
+  } finally {clearTimeout(timer);}
+}
+
 async function runIsolatedRecoveryCliTool({ overlayRoot, userDataDir, tool, input, confirmRollbackOpId = null }) {
   const cliPath = join(REPO_ROOT, 'tools', 'soulforge-cli', 'sfcli.mjs');
   const args = [
@@ -1577,6 +1348,7 @@ async function run() {
     }
   }
   const goals = parseGoals(CLI_OPTIONS.goals);
+  const provenance = await captureAgentRunProvenance(REPO_ROOT,{task:TASK_QUERY,goals,taskContract:TASK_CONTRACT});
   const writeAdmission = evaluateWriteAdmission(goals, {
     observationOnly: CLI_OPTIONS.observationOnly === true,
     candidateWrite: CANDIDATE_WRITE_MODE
@@ -1586,7 +1358,7 @@ async function run() {
     const goalCoverage = evaluateGoalCoverage(
       goals,
       CLI_OPTIONS.observationOnly === true,
-      SELECTED_TEST_TASK?.contract
+      TASK_CONTRACT
     );
     const reportDir = resolve(REPO_ROOT, 'output/agent-real');
     const reportPath = join(reportDir, `${REPORT_LABEL}-${SAFE_TIMESTAMP}.json`);
@@ -1597,6 +1369,7 @@ async function run() {
       startedAt: new Date().toISOString(),
       finishedAt: new Date().toISOString(),
       task: TASK_QUERY,
+      provenance,
       runtimeBudgets: {
         electronRequestedMaxOldSpaceMb: ELECTRON_MAX_OLD_SPACE_MB,
         maxSteps: MAX_STEPS,
@@ -1608,7 +1381,8 @@ async function run() {
         sessionTimeoutMs: SESSION_TIMEOUT_MS
       },
       goals,
-      taskContract: SELECTED_TEST_TASK?.contract ?? null,
+      taskContract: TASK_CONTRACT ?? null,
+      provenance,
       executionMode,
       verificationMode: goalCoverage.mode,
       writeMode: WRITE_MODE,
@@ -1795,6 +1569,7 @@ async function run() {
     await mkdir(taskRecordDir, { recursive: true });
 
     phase = 'launch-electron';
+    const { _electron: electron } = await import('@playwright/test');
     app = await electron.launch({
       ...(AGENT_RUNTIME === 'installed'
         ? { executablePath: AGENT_EXE_PATH }
@@ -1967,7 +1742,7 @@ async function run() {
         throw harnessError('REAL_AGENT_TEST_CONFIG_REJECTED', 'test provider 未能写入隔离模型 vault；未发起模型请求。');
       }
       providerId = 'test-service';
-      providerEvidence = { mode: 'test', id: providerId, source: 'simulation-test-config' };
+      providerEvidence = { mode: 'test', source: 'simulation-test-config', ...bindProviderConfiguration({ ...saved, id: providerId }) };
     } else {
       if (!providerId || providerId === 'test-service') {
         throw harnessError('REAL_AGENT_PROVIDER_CONFIG_REQUIRED', 'vault provider 必须指定非 test-service 的 --config-id；未发起模型请求。');
@@ -1977,7 +1752,7 @@ async function run() {
       if (!provider || provider.hasCredential !== true) {
         throw harnessError('REAL_AGENT_PROVIDER_CONFIG_REQUIRED', `隔离 vault 中没有带凭据的 provider：${providerId}；未发起模型请求。`);
       }
-      providerEvidence = { mode: 'vault', id: providerId, source: 'isolated-user-data' };
+      providerEvidence = { mode: 'vault', source: 'isolated-user-data', ...bindProviderConfiguration(provider) };
     }
 
     phase = 'baseline-operations';
@@ -2060,11 +1835,8 @@ async function run() {
       operation.status === 'committed' && !priorOperationIds.has(operation.opId)
     ));
     treeAfterRun = await snapshotTree(overlayRoot);
-    const nativeGoals = await verifyGoalsThroughNativeTool(window, goals, {
-      root: overlayRoot,
-      before: treeBefore,
-      after: treeAfterRun
-    });
+    const nativeGoals = await verifyIsolatedNativeGoals({overlayRoot,baseRoot:GAME_ROOT,userDataDir,goals,
+      treeEvidence:{root:overlayRoot,before:treeBefore,after:treeAfterRun},taskContract:TASK_CONTRACT});
 
     phase = 'copy-durable-evidence';
     const rolloutSource = resolveWithin(join(userDataDir, 'agent'), terminal.rolloutFileName, 'ROLLOUT_PATH_FORBIDDEN');
@@ -2168,7 +1940,7 @@ async function run() {
     const goalCoverage = evaluateGoalCoverage(
       nativeGoals.evaluations,
       CLI_OPTIONS.observationOnly === true,
-      SELECTED_TEST_TASK?.contract
+      TASK_CONTRACT
     );
     const goalsOk = goalCoverage.goalsOk;
     const committedOperationOk = newCommittedOperations.length > 0;
@@ -2230,23 +2002,19 @@ async function run() {
     const runtimeOk = eventsReport.seqGaps.length === 0
       && pageErrors.length === 0
       && waited.cancelledForTimeout === false;
-    const taskSucceeded = lifecycleOk
-      && WRITE_MODE
-      && executionMode !== 'candidate-experiment'
-      && goalsOk
-      && goalCoverage.taskCoverageOk
-      && committedOperationOk
-      && writeObserved
-      && (rollbackOk || rollbackResult.status === 'not_applicable')
-      && treeRestoredExactly
-      && durableEvidenceOk
-      && runtimeOk;
+    const taskOutcome = evaluateTaskOutcome({taskContract:TASK_CONTRACT,goalCoverage,lifecycleOk,
+      writeMode:WRITE_MODE,executionMode,committedOperationOk,writeObserved,
+      rollbackStatus:rollbackResult.status,treeRestoredExactly,durableEvidenceOk,runtimeOk});
+    const taskSucceeded = taskOutcome.passed;
 
     report = sanitizeForReport({
       ok: taskSucceeded,
+      status:taskOutcome.status,
+      outcome:taskOutcome,
       startedAt,
       finishedAt: new Date().toISOString(),
       task: TASK_QUERY,
+      provenance,
       runtimeBudgets: {
         electronRequestedMaxOldSpaceMb: ELECTRON_MAX_OLD_SPACE_MB,
         maxSteps: MAX_STEPS,
@@ -2260,7 +2028,7 @@ async function run() {
       policy: livePolicyIdentity(),
       goals: nativeGoals.evaluations,
       goalCoverage,
-      taskContract: SELECTED_TEST_TASK?.contract ?? null,
+      taskContract: TASK_CONTRACT ?? null,
       executionMode,
       rollback: rollbackResult,
       cleanup: cleanupResult,
@@ -2277,6 +2045,7 @@ async function run() {
         goalsOk,
         goalCoverageStatus: goalCoverage.status,
         unsupportedGoalIds: goalCoverage.unsupportedGoalIds,
+        failedGoalIds: goalCoverage.failedGoalIds,
         unverifiedGoalIds: goalCoverage.unverifiedGoalIds,
         taskCoverageOk: goalCoverage.taskCoverageOk,
         taskCompletionVerified: goalCoverage.taskCompletionVerified,
@@ -2288,7 +2057,8 @@ async function run() {
         runtimeOk,
         cleanupOk: null
       },
-      build: buildSummary,
+      provenance,
+      build: bindTestedArtifact(buildSummary,{mode:productionReceipt.mode,manifest:build?.manifest,liveSource:provenance.source}),
       productionReceipt,
       provider: providerEvidence,
       workspace: { ...workspace, semanticPreflight, analysis: workspaceAnalysis ?? workspace.analysis },
@@ -2320,6 +2090,7 @@ async function run() {
         evidenceHasEntries
       },
       nativeReads: nativeGoals.reads,
+      verifier: nativeGoals.verifier ?? {status:'unavailable',reason:'verifier-artifact-identity-unavailable'},
       operations: {
         before: operationsBefore,
         afterRun: operationsAfterRun,
@@ -2386,7 +2157,7 @@ async function run() {
     const failureClassification = classifyInterruptedGoalCoverage(
       goals,
       CLI_OPTIONS.observationOnly === true,
-      SELECTED_TEST_TASK?.contract
+      TASK_CONTRACT
     );
     const failureCoverage = failureClassification.goalCoverage;
     const failure = sanitizeForReport({
@@ -2396,6 +2167,7 @@ async function run() {
       finishedAt: new Date().toISOString(),
       phase,
       task: TASK_QUERY,
+      provenance,
       runtimeBudgets: {
         electronRequestedMaxOldSpaceMb: ELECTRON_MAX_OLD_SPACE_MB,
         maxSteps: MAX_STEPS,
@@ -2408,7 +2180,8 @@ async function run() {
       },
       policy: livePolicyIdentity(),
       goals,
-      taskContract: SELECTED_TEST_TASK?.contract ?? null,
+      taskContract: TASK_CONTRACT ?? null,
+      provenance,
       executionMode,
       verificationMode: failureClassification.verificationMode,
       writeMode: WRITE_MODE,
@@ -2420,7 +2193,8 @@ async function run() {
       cleanup: cleanupResult,
       corpusManifest,
       semanticPreflight,
-      build: buildSummary,
+      provenance,
+      build: bindTestedArtifact(buildSummary,{mode:productionReceipt.mode,manifest:build?.manifest,liveSource:provenance.source}),
       productionReceipt,
       provider: providerEvidence,
       sessionId,
@@ -2627,7 +2401,7 @@ async function run() {
       report.cleanup = cleanupResult;
       report.verdict ??= {};
       report.verdict.cleanupOk = cleanupResult.status === 'succeeded';
-      if (cleanupResult.status !== 'succeeded') report.ok = false;
+      if (cleanupResult.status !== 'succeeded') {report.ok = false; report.status = 'failed';}
       await writeFile(reportPath, `${JSON.stringify(report, null, 2)}\n`).catch(() => undefined);
     }
     if (completionSummary) {

@@ -56,7 +56,7 @@
  *   rejected by assertNoSecretLeak via the shared patterns
  *
  * Codex-derived kernel additions (42-53), design reference openai/codex
- * (Apache-2.0, see licenses/openai-codex.txt):
+ * (Apache-2.0 upstream; https://github.com/openai/codex; attribution in NOTICE):
  * - retry policy: exponential backoff math, jitter bounds, Retry-After
  *   precedence, delay cap, attempt cap, retryable whitelist, decideRetry
  * - loop retry: two 500s then success (3 hits, 2 audit retries, retry

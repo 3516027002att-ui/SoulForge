@@ -44,6 +44,7 @@ export default defineConfig({
           emevdDarkScriptWorker: resolve(here, 'src/main/emevdDarkScriptWorker.ts'),
           ragEmbeddingWorker: resolve(here, 'src/main/ragEmbeddingWorker.ts'),
           databaseUtility: resolve(here, 'src/main/databaseUtility.ts'),
+          agentUtility: resolve(here, 'src/main/agentUtility.ts'),
           ...(includeDatabaseUtilitySmoke
             ? { databaseUtilitySmoke: resolve(here, 'src/main/databaseUtilitySmoke.ts') }
             : {}),

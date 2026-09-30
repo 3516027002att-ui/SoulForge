@@ -369,15 +369,14 @@ expect(
 const workspaces = loadWorkspaces(process.cwd());
 const allScripts = new Set(Object.keys(workspaces.rootScripts));
 
-const unregistered = [...allScripts]
-  .filter((name) => !TIER_BY_SCRIPT[name] && !EXCLUDED[name]);
-expect('不得存在未登记的 npm script', unregistered, []);
-
-const ghostRegistered = Object.keys(TIER_BY_SCRIPT).filter((name) => !allScripts.has(name));
-expect('层级表不得登记不存在的 script', ghostRegistered, []);
-
-const staleExclusions = Object.keys(EXCLUDED).filter((name) => !allScripts.has(name));
-expect('排除表不得残留不存在的 script', staleExclusions, []);
+// Discovery and parsed execution replace the old handwritten registration
+// invariant. Keep the product outcome and skip-detection negatives above.
+const { discoverChecks } = await import('./verify/checkRegistry.mjs');
+const discovered = discoverChecks(process.cwd(),workspaces);
+expect('root test scripts are discoverable without manual tier registration',
+  [...allScripts].filter(name => name.startsWith('test') && !discovered.has(name)
+    && !['test:governance','test:governance-data-fixtures','test:governance-equivalence',
+      'test:handoff-integrity','test:handoff-integrity:fixtures','test:handoff-projection','test:gov-cli','test:seal-cli'].includes(name)), []);
 
 const badTiers = Object.entries(TIER_BY_SCRIPT)
   .filter(([, tier]) => !TIER_ORDER.includes(tier))

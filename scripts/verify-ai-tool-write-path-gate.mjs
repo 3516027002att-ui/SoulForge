@@ -29,6 +29,7 @@
  *
  * 不做的事：不做类型推断、不跨文件追踪调用链。宁可漏报也不误报。
  */
+import { extractToolDeclarations } from './testing/tool-source-analysis.mjs';
 import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -106,7 +107,10 @@ if (!existsSync(REGISTRY)) {
   }, 1);
 }
 
-const source = readFileSync(REGISTRY, 'utf8');
+const toolDirectory = join(root,'packages','core','src','ai','tools');
+const sourceFiles = [REGISTRY,join(root,'packages','core','src','ai','toolRegistrySupport.ts'),...(existsSync(toolDirectory)?readdirSync(toolDirectory).filter(file=>file.endsWith('.ts')).map(file=>join(toolDirectory,file)):[])];
+const sources = sourceFiles.filter(file=>existsSync(file)).map(file=>({file,source:readFileSync(file,'utf8')}));
+const source = sources.map(item=>item.source).join('\n');
 
 /** 剥掉注释与字符串，避免把说明文字里的词当调用。 */
 function stripCommentsAndStrings(text) {
@@ -173,23 +177,18 @@ for (const call of FORBIDDEN_WRITE_CALLS) {
 }
 
 // 判据②：写类工具必须引用受控入口。
-const toolBlocks = [...source.matchAll(/registry\.register\(\{([\s\S]*?)\n  \}\);/g)];
+const toolBlocks = sources.flatMap(item=>extractToolDeclarations(item.source,item.file));
 if (toolBlocks.length === 0) {
   report({
     ok: false, gate: LABEL, status: 'failed', code: 'AI_TOOL_BLOCKS_UNEXTRACTABLE',
-    message: '未能从注册表提取任何 registry.register 块；提取失败必须失败关闭，'
+    message: '未能从工具模块/注册表提取任何实际工具声明；提取失败必须失败关闭，'
       + '否则本门禁的判据会变成必然通过。'
   }, 1);
 }
 
 const writeLike = [];
 for (const block of toolBlocks) {
-  const body = block[1];
-  const nameMatch = /name:\s*'([a-z0-9_]+)'/.exec(body);
-  const permMatch = /permission:\s*'([a-z]+)'/.exec(body);
-  if (nameMatch === null) continue;
-  const name = nameMatch[1];
-  const permission = permMatch === null ? 'unknown' : permMatch[1];
+  const {body,name,permission} = block;
   // 判据以 **permission 为主**，名字只用于捕捉「permission 写得太宽松」的情况。
   //
   // 不能只看名字：build_patch_graph 名字含 patch 但 permission=analyze，
@@ -203,8 +202,8 @@ for (const block of toolBlocks) {
   const looksWriteLike = WRITE_PERMISSIONS.has(permission);
   if (!looksWriteLike) continue;
   writeLike.push({ name, permission });
-  const usesControlled = CONTROLLED_ENTRIES.some((entry) => new RegExp(`\\b${entry}\\s*\\(`).test(body))
-    || (name === 'write_memory' && CONTROLLED_NON_MOD_ENTRIES.some((entry) => new RegExp(`\\b${entry}\\s*\\(`).test(body)));
+  const usesControlled = CONTROLLED_ENTRIES.some(entry=>block.calls.includes(entry))
+    || (name === 'write_memory' && CONTROLLED_NON_MOD_ENTRIES.some(entry=>block.calls.includes(entry)));
   if (!usesControlled) {
     findings.push({
       code: 'AI_WRITE_TOOL_BYPASSES_PATCH_ENGINE',

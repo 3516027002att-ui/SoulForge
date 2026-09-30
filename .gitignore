@@ -14,13 +14,8 @@ coverage/
 .DS_Store
 Thumbs.db
 
-# Per-assistant instruction files and local tool metadata. These are machine-local
-# operator config, not project scope: they differ per developer and per tool, so a
-# commit of one silently imposes one operator's setup on everyone else. Derived
-# copies (CLAUDE.md.bak-*, AGENTS.md.orig, ...) are covered too — a backup of an
-# ignored file is just as local as the original, and leaving it untracked also
-# poisons the handoff fingerprint's untracked manifest.
-AGENTS.md
+# The repository AGENTS.md entry is versioned. Machine-specific operator
+# configuration and instruction backups remain local.
 AGENTS.md.*
 CLAUDE.md
 CLAUDE.md.*
@@ -136,3 +131,6 @@ obj/
 # Lua C build objects at repo root from native toolchain tests
 *.obj
 .superpowers/
+
+# Repo-local verification logs, SDK/package caches and recovery checkpoints
+.local-validation/

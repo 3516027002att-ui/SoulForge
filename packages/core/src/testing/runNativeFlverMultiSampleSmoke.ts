@@ -17,9 +17,10 @@
  * reports status "skipped" with exit 0 (honest skip for CI without local game).
  */
 import { runBridge, disposeBridgeDaemonPool } from '../bridge/runBridge.js';
-import { mkdirSync, readdirSync, existsSync, accessSync, constants } from 'node:fs';
+import { mkdtempSync, rmSync, readdirSync, existsSync, accessSync, constants } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname, basename, resolve } from 'node:path';
+import { summarizeFlverValidation } from './flverValidationReport.js';
 
 interface FlverEnvelope {
   authority: string;
@@ -274,8 +275,10 @@ async function verifySample(root: string, tmp: string, id: string): Promise<Samp
   // 读取；若资源异常，让生产 native reader 的结构化诊断直接失败关闭。
   const checkCount = e.meshCount;
   const decodeFailures: string[] = [];
+  let failedMeshes = 0;
   for (let m = 0; m < checkCount; m++) {
     const failures = await verifyMesh(out, m, e.boneCount);
+    if (failures.length) failedMeshes += 1;
     decodeFailures.push(...failures);
   }
 
@@ -286,7 +289,7 @@ async function verifySample(root: string, tmp: string, id: string): Promise<Samp
     vertexStrides: e.vertexStrides,
     authority: e.authority,
     meshesChecked: checkCount,
-    meshesOk: checkCount - decodeFailures.length,
+    meshesOk: checkCount - failedMeshes,
     decodeFailures,
     layoutWarnings: (e.layoutWarnings ?? []).length,
     unparsedGaps: e.unparsedGaps ?? []
@@ -317,25 +320,18 @@ async function main(): Promise<void> {
       .map((f) => basename(f, '.chrbnd.dcx'))
       .sort();
 
-  const tmp = join(tmpdir(), 'soulforge-flver-multi-smoke');
-  mkdirSync(tmp, { recursive: true });
+  const tmp = mkdtempSync(join(tmpdir(), 'soulforge-flver-multi-smoke-'));
 
   const reports: SampleReport[] = [];
-  for (const id of ids) {
-    reports.push(await verifySample(root, tmp, id));
-  }
-
-  const bad = reports.filter((r) => r.decodeFailures.length > 0);
-  console.log(JSON.stringify({
-    ok: bad.length === 0,
-    status: 'verified',
-    message: `FLVER 多样本原生验证通过（${reports.length} samples, ${reports.reduce((s, r) => s + r.meshCount, 0)} meshes）`,
-    samples: reports,
-    failures: bad
-  }, null, 2));
-
-  await disposeBridgeDaemonPool();
-  if (bad.length > 0) process.exitCode = 1;
+  try {
+    for (const id of ids) {
+      try { reports.push(await verifySample(root, tmp, id)); }
+      catch (error) { reports.push({ id, version: 'unknown', meshCount: 0, vertexStrides: [], authority: 'unverified', meshesChecked: 0, meshesOk: 0, decodeFailures: [error instanceof Error ? error.message : String(error)], layoutWarnings: 0, unparsedGaps: [] }); }
+    }
+    const report = summarizeFlverValidation(reports);
+    console.log(JSON.stringify(report, null, 2));
+    if (!report.ok) process.exitCode = report.status === 'failed' ? 1 : 2;
+  } finally { rmSync(tmp, { recursive: true, force: true }); await disposeBridgeDaemonPool(); }
 }
 
 main().catch(async (error) => {

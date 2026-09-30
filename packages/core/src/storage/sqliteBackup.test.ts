@@ -4,6 +4,7 @@ import { mkdtemp, readFile, readdir, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import BetterSqlite3 from 'better-sqlite3';
+import { spawnSync } from 'node:child_process';
 import * as sqlite from './sqliteDatabase.js';
 
 type Backup = (source: string, destination: string, options?: {
@@ -69,4 +70,33 @@ test('an established destination is never overwritten by migration', async () =>
     assert.equal((await backup()(source, destination)).status, 'existing');
     assert.deepEqual(await readFile(destination), original);
   } finally { writer.close(); await rm(root, { recursive: true, force: true }); }
+});
+
+
+test('migration owner is never published as an empty lock file', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'sf-backup-owner-'));
+  const source = join(root, 'source.db'), destination = join(root, 'destination.db');
+  const writer = fixture(source); writer.close();
+  try {
+    const code = `
+      import fsPromises from 'node:fs/promises';
+      import { syncBuiltinESMExports } from 'node:module';
+      const open = fsPromises.open;
+      fsPromises.open = async (...args) => {
+        const file = await open(...args);
+        if (String(args[0]).endsWith('.migration-lock') && args[1] === 'wx') {
+          await file.close();
+          process.exit(66);
+        }
+        return file;
+      };
+      syncBuiltinESMExports();
+      const { backupWorkspaceDatabase } = await import(${JSON.stringify(new URL('./sqliteDatabase.js', import.meta.url).href)});
+      await backupWorkspaceDatabase(${JSON.stringify(source)}, ${JSON.stringify(destination)});
+    `;
+    const result = spawnSync(process.execPath, ['--input-type=module', '-e', code], { encoding: 'utf8', timeout: 10_000 });
+    assert.equal(result.status, 0, 'publishing an empty ownership record leaves an unrecoverable crash window: ' + result.stderr);
+    assert.equal((await backup()(source, destination)).status, 'existing');
+    assert.deepEqual((await readdir(root)).filter(name => name.includes('migration-lock')), []);
+  } finally { await rm(root, { recursive: true, force: true }); }
 });

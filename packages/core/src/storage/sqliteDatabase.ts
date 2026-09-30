@@ -363,26 +363,35 @@ export async function backupWorkspaceDatabase(
   abort();
   await mkdir(dirname(destinationPath), { recursive: true });
   const lockPath = `${destinationPath}.migration-lock`;
-  let lock;
-  try { lock = await open(lockPath, 'wx'); }
-  catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
-    // Recover only a lock whose recorded process is demonstrably gone.
-    const owner = Number((await readFile(lockPath, 'utf8')).trim());
-    let dead = false;
-    if (Number.isSafeInteger(owner) && owner > 0) {
-      try { process.kill(owner, 0); }
-      catch (probe) { dead = (probe as NodeJS.ErrnoException).code === 'ESRCH'; }
+  const ownerPath = `${lockPath}.owner-${process.pid}-${randomUUID()}`;
+  const lock = await open(ownerPath, 'wx');
+  try {
+    // Publish an already populated ownership record. A crash between open and
+    // writing the PID cannot leave an empty authoritative migration lock.
+    await lock.writeFile(String(process.pid));
+    await lock.sync();
+    try { await link(ownerPath, lockPath); }
+    catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
+      // Recover only a lock whose recorded process is demonstrably gone.
+      const owner = Number((await readFile(lockPath, 'utf8')).trim());
+      let dead = false;
+      if (Number.isSafeInteger(owner) && owner > 0) {
+        try { process.kill(owner, 0); }
+        catch (probe) { dead = (probe as NodeJS.ErrnoException).code === 'ESRCH'; }
+      }
+      if (!dead) throw new SqliteMigrationError('SQLITE_BACKUP_BUSY', 'Another process owns workspace database migration.');
+      await rm(lockPath);
+      try { await link(ownerPath, lockPath); }
+      catch (cause) { throw new SqliteMigrationError('SQLITE_BACKUP_BUSY', 'Workspace database migration lock changed.', { cause }); }
     }
-    if (!dead) throw new SqliteMigrationError('SQLITE_BACKUP_BUSY', 'Another process owns workspace database migration.');
-    await rm(lockPath);
-    try { lock = await open(lockPath, 'wx'); }
-    catch (cause) { throw new SqliteMigrationError('SQLITE_BACKUP_BUSY', 'Workspace database migration lock changed.', { cause }); }
-  }
+  } catch (error) {
+    await lock.close();
+    throw error;
+  } finally { await rm(ownerPath, { force: true }); }
   let temporaryDirectory: string | undefined;
   let source: SqliteDatabase | undefined;
   try {
-    await lock.writeFile(String(process.pid));
     if (await exists(destinationPath)) { validate(destinationPath); return { status: 'existing' }; }
     abort();
     temporaryDirectory = await mkdtemp(`${destinationPath}.migration-`);

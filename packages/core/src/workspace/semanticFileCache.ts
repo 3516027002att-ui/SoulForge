@@ -10,6 +10,7 @@ import type {
   TaeExport
 } from '@soulforge/shared';
 import type { WorkspaceIndex } from '../indexing/workspaceIndex.js';
+import { TAE_IDENTITY_PROJECTION_VERSION } from '@soulforge/shared';
 
 export interface SemanticFileCacheEntry {
   relativePath: string;
@@ -35,6 +36,7 @@ export interface SemanticCacheProvider {
  * they are not native byte projections.
  */
 export function isNativeSemanticBundleCurrent(file: IndexedFile, bundle: SymbolBundle): boolean {
+  if (bundle.tae?.some((item) => item.readerSchemaRevision !== TAE_IDENTITY_PROJECTION_VERSION)) return false;
   if (!isNativeSemanticCacheCandidate(file)) return true;
   if (!file.sha256) return false;
 
@@ -121,6 +123,7 @@ export function rebaseSymbolBundleToFileRevision(
 
 function isNativeSemanticCacheCandidate(file: IndexedFile): boolean {
   const path = file.relativePath.toLowerCase();
+  if (path.endsWith('.tae') || path.endsWith('.tae.dcx') || path.includes('.anibnd')) return true;
   if (file.resourceKind === 'event') return path.includes('.emevd');
   if (file.resourceKind === 'map') return path.includes('.msb');
   if (file.resourceKind === 'param') return path.includes('.param');
@@ -222,7 +225,9 @@ export function loadSymbolBundleIntoIndex(index: WorkspaceIndex, bundle: SymbolB
     for (const item of bundle.msgs) index.upsertMsgExport(item);
   }
   if (bundle.tae) {
-    for (const item of bundle.tae) index.upsertTaeExport(item);
+    for (const item of bundle.tae) {
+      if (item.readerSchemaRevision === TAE_IDENTITY_PROJECTION_VERSION) index.upsertTaeExport(item);
+    }
   }
   if (bundle.scripts) {
     for (const item of bundle.scripts) index.upsertScriptExport(item);

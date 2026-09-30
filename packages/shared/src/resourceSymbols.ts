@@ -178,12 +178,16 @@ export interface TextEntrySymbol {
  * 投影而来，chrId 从文件路径提取（cXXXX）。词条 symbolUri 为
  * `action://<chr>/<AXXXX>/<eN>`。
  */
+/** Native TAE ID/entry pairing revision; independent of file hashes and event schemas. */
+export const TAE_IDENTITY_PROJECTION_VERSION = 2;
+
 export interface TaeExport {
   chrId: string;
   sourceUri: string;
   sourceHash?: string;
   outerFileHash?: string;
   sourceRevision?: number;
+  readerSchemaRevision?: number;
   /** ANIBND 内原生 TAE 子项目录；裸 .tae 时可缺省。 */
   taeEntryCount?: number;
   taeEntries?: Array<{
@@ -199,6 +203,9 @@ export interface TaeExport {
 }
 
 export interface TaeAnimSymbol {
+  /** Native total, retained when only a bounded event page is cached. */
+  eventCount?: number;
+  eventsComplete?: boolean;
   animId: number;
   /**
    * Bridge 解析出的实际动作引用 ID；缺省表示当前 wire 未能安全解析。

@@ -2,7 +2,7 @@
  * Append-only session rollout recorder (Codex rollout crate design, minimized).
  * Design derived from openai/codex (Apache-2.0, Copyright 2025 OpenAI) —
  * rollout/recorder.rs single-writer model, tolerant resume parsing and
- * marker-based rollback. See licenses/openai-codex.txt.
+ * marker-based rollback. Design source: https://github.com/openai/codex; attribution: NOTICE.
  *
  * Preserved Codex semantics:
  * - JSONL, first line is session meta
@@ -77,20 +77,30 @@ export class RolloutRecorder implements RolloutSink {
   private readonly storage: RolloutStorage;
   private readonly meta: RolloutSessionMeta;
   private queue: RolloutItem[] = [];
+  private queuedBytes = 0;
+  private inFlightBytes = 0;
+  private inFlightItems = 0;
   private drainChain: Promise<void> = Promise.resolve();
   private metaWritten = false;
   private closed = false;
   /** Last storage failure; retained items are retried on the next drain. */
   lastError: string | null = null;
 
-  constructor(storage: RolloutStorage, meta: RolloutSessionMeta) {
+  constructor(storage: RolloutStorage, meta: RolloutSessionMeta, private readonly limits: {maxQueuedBytes?:number;maxQueuedItems?:number} = {}) {
     this.storage = storage;
     this.meta = meta;
   }
 
   enqueue(item: RolloutItem): void {
     if (this.closed) return;
-    this.queue.push(redactItem(item));
+    const redacted = redactItem(item);
+    const bytes = Buffer.byteLength(JSON.stringify(redacted), 'utf8');
+    if (this.queuedBytes + this.inFlightBytes + bytes > (this.limits.maxQueuedBytes ?? 16 * 1024 * 1024)
+      || this.queue.length + this.inFlightItems >= (this.limits.maxQueuedItems ?? 4096)) {
+      throw Object.assign(new Error('Rollout storage cannot keep up with the bounded session queue.'), {code:'ROLLOUT_QUEUE_BUDGET_EXCEEDED'});
+    }
+    this.queue.push(redacted);
+    this.queuedBytes += bytes;
     this.drainChain = this.drainChain.then(() => this.drain());
   }
 
@@ -101,7 +111,11 @@ export class RolloutRecorder implements RolloutSink {
       lines.push(JSON.stringify(metaItem));
     }
     const pending = this.queue;
+    const pendingBytes = this.queuedBytes;
     this.queue = [];
+    this.queuedBytes = 0;
+    this.inFlightBytes += pendingBytes;
+    this.inFlightItems += pending.length;
     for (const item of pending) {
       lines.push(JSON.stringify(item));
     }
@@ -113,7 +127,11 @@ export class RolloutRecorder implements RolloutSink {
     } catch (error) {
       // Recovery mode: keep everything unwritten for the next barrier.
       this.queue = [...pending, ...this.queue];
+      this.queuedBytes += pendingBytes;
       this.lastError = error instanceof Error ? error.message : String(error);
+    } finally {
+      this.inFlightBytes -= pendingBytes;
+      this.inFlightItems -= pending.length;
     }
   }
 
@@ -244,6 +262,15 @@ export function parseRolloutLines(lines: string[]): ResumedRollout {
         providerUsage.totalInputTokens += item.inputTokens ?? 0;
         providerUsage.totalOutputTokens += item.outputTokens ?? 0;
         providerUsage.lastContextTokens = item.currentContextTokens;
+        break;
+      case 'protocol-event':
+        // Protocol observation is valid audit history, not a second provider
+        // message or terminal task-completion record.
+        if (item.envelope?.protocolVersion !== 1
+          || !Number.isSafeInteger(item.envelope.eventSeq) || item.envelope.eventSeq < 1
+          || typeof item.envelope.sessionId !== 'string'
+          || typeof item.envelope.runId !== 'string' || typeof item.envelope.requestId !== 'string'
+          || typeof item.envelope.event?.type !== 'string') parseErrors += 1;
         break;
       case 'rollback-marker':
         rollbackKeep = item.keepLastUserTurns;

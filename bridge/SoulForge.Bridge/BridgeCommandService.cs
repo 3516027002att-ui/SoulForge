@@ -27,7 +27,8 @@ internal sealed class BridgeCommandService
         IReadOnlyList<string>? allowedRoots = null,
         string? workspaceSessionId = null,
         MapTimingCollector? mapTiming = null,
-        CharacterTimingCollector? characterTiming = null)
+        CharacterTimingCollector? characterTiming = null,
+        bool dispatchProbe = false)
     {
         var command = rawCommand.Trim().ToLowerInvariant();
 
@@ -35,7 +36,7 @@ internal sealed class BridgeCommandService
         // production CLI must not expose a second command universe. The
         // descriptor catalog is the dispatch source for both entry points;
         // unknown names fail before any file probing or writer is reached.
-        if (!BridgeCommandDescriptorCatalog.TryGet(command, out _))
+        if (!dispatchProbe && !BridgeCommandDescriptorCatalog.TryGet(command, out _))
         {
             return BridgeResult<object>.Failed(
                 file,
@@ -211,29 +212,47 @@ internal sealed class BridgeCommandService
 
         if (command == "probe-oodle")
         {
+            if (dispatchProbe) return BoundDispatchResult(file, command);
             var probe = OodleRuntimeLocator.Probe(file, BridgeResult<object>.MakeSourceUri(file));
             return BridgeResult<object>.Partial(file, "unknown", probe.Diagnostics, probe);
         }
 
         if (command == "probe-document-locator")
         {
+            if (dispatchProbe) return BoundDispatchResult(file, command);
             return ProbeDocumentLocator(file, oodleRuntimeRoot, resourceKind);
         }
 
         if (command == "inventory-asset-resources")
         {
+            if (dispatchProbe) return BoundDispatchResult(file, command);
             return InventoryAssetResources(file, options, oodleRuntimeRoot, cancellationToken);
         }
 
-        if (!File.Exists(file))
+        if (!dispatchProbe && !File.Exists(file))
         {
             return BridgeResult<object>.Failed(file, resourceKind, "FILE_NOT_FOUND", "Input file does not exist.");
         }
 
         cancellationToken.ThrowIfCancellationRequested();
 
+        // Disk commands accept only the daemon/host's canonical staging field.
+        // Standalone JSON options cannot grant a second write path.
+        if (!dispatchProbe && BridgeCommandDescriptorCatalog.TryGet(command, out var diskDescriptor)
+            && diskDescriptor.RequiresOutputPath && string.IsNullOrWhiteSpace(outputPath))
+            return BridgeResult<object>.Failed(file, resourceKind, "BRIDGE_OUTPUT_PATH_REQUIRED", "Disk writer/export requires a host-controlled staging output validated against negotiated writable roots.");
+
+        if (!dispatchProbe && LargeResourceReadCache.RequiresCache(file))
+        {
+            if (BridgeCommandDescriptorCatalog.TryGet(command, out var largeDescriptor) && largeDescriptor.Effect == "write")
+                return BridgeResult<object>.Failed(file, resourceKind, "LARGE_RESOURCE_REPACK_UNSUPPORTED", "Oversized container support is read-only; repack and Patch Engine writeback require a separate verified workflow.");
+            if (LargeResourceBridgeReader.Supports(command))
+                return await LargeResourceBridgeReader.ReadAsync(command, file, options, allowedRoots, outputPath, oodleRuntimeRoot, cancellationToken);
+        }
+
         if (command == "read-hks-source")
         {
+            if (dispatchProbe) return BoundDispatchResult(file, command);
             try
             {
                 byte[] bytes;
@@ -298,6 +317,7 @@ internal sealed class BridgeCommandService
 
         if (command == "compile-hks-source")
         {
+            if (dispatchProbe) return BoundDispatchResult(file, command);
             try
             {
                 if (!optionsIsObject || !options.TryGetProperty("sourceText", out var sourceElement)
@@ -370,6 +390,7 @@ internal sealed class BridgeCommandService
 
         if (command is "inspect" or "validate")
         {
+            if (dispatchProbe) return BoundDispatchResult(file, command);
             var includeDcxDecompressionPreview = OptionBool("includeDcxDecompressionPreview", true);
             return await InspectEnvelopeAsync(
                 file,
@@ -381,6 +402,7 @@ internal sealed class BridgeCommandService
 
         if (command == "read-dcx-document")
         {
+            if (dispatchProbe) return BoundDispatchResult(file, command);
             try
             {
                 // PARAM/MAP 容器的 list → child snapshot/extract 链会连续访问同一
@@ -418,6 +440,7 @@ internal sealed class BridgeCommandService
 
         if (command == "list-bnd4-entries")
         {
+            if (dispatchProbe) return BoundDispatchResult(file, command);
             try
             {
                 var includeContentHashes = OptionBool("includeContentHashes", false);
@@ -475,6 +498,7 @@ internal sealed class BridgeCommandService
 
         if (command == "snapshot-bnd4-child")
         {
+            if (dispatchProbe) return BoundDispatchResult(file, command);
             try
             {
                 var snapshot = Bnd4NativeWriter.SnapshotChild(file, options, oodleRuntimeRoot);
@@ -491,12 +515,13 @@ internal sealed class BridgeCommandService
 
         if (command == "extract-bnd4-child")
         {
+            if (dispatchProbe) return BoundDispatchResult(file, command);
             // outputPath 必须用 daemon 已校验并规范化的那一个，不能让 writer 自己再从
             // options 里取原始字符串：daemon 侧对 writable-root 的判定是针对
             // BridgePathBoundary.Verify 的 CanonicalPath 做的，writer 若绕回原始值，
             // 「..」「符号链接」「大小写差异」这类等价路径就能落在校验之外——校验通过、
             // 落盘却在别处。CLI 直调模式没有 daemon 协商的 writableRoots，此时
-            // outputPath 为 null，仍回落到 options（与其他 writer 命令一致）。
+            // outputPath 为 null，准入层会拒绝该磁盘命令。
             if (string.IsNullOrWhiteSpace(outputPath))
             {
                 return BridgeResult<object>.Failed(file, resourceKind, "BND4_CHILD_OUTPUT_REQUIRED",
@@ -518,6 +543,7 @@ internal sealed class BridgeCommandService
 
         if (command == "read-fmg-document")
         {
+            if (dispatchProbe) return BoundDispatchResult(file, command);
             try
             {
                 var document = FmgNativeDocument.Read(NativeLeafPayload.Resolve(file, oodleRuntimeRoot, ".fmg"));
@@ -545,6 +571,7 @@ internal sealed class BridgeCommandService
 
         if (command == "write-fmg")
         {
+            if (dispatchProbe) return BoundDispatchResult(file, command);
             if (string.IsNullOrWhiteSpace(outputPath))
                 return BridgeResult<object>.Failed(file, "msg", "BRIDGE_OUTPUT_PATH_REQUIRED", "FMG writer requires a validated staging output path.");
             try
@@ -563,6 +590,7 @@ internal sealed class BridgeCommandService
 
         if (command == "read-text-catalog")
         {
+            if (dispatchProbe) return BoundDispatchResult(file, command);
             // TEXT-20A：容器级文本目录。tableEntryIndex 缺省只返回目录元数据；
             // 指定时额外返回该表完整条目（主进程缓存后分页，不经临时文件）。
             var tableEntryIndex = optionsIsObject
@@ -593,6 +621,7 @@ internal sealed class BridgeCommandService
 
         if (command == "read-param-document")
         {
+            if (dispatchProbe) return BoundDispatchResult(file, command);
             try
             {
                 if (OptionBool("headerOnly", false))
@@ -849,6 +878,7 @@ internal sealed class BridgeCommandService
 
         if (command == "read-gparam-document")
         {
+            if (dispatchProbe) return BoundDispatchResult(file, command);
             try
             {
                 // 支持 loose .gparam 与 .gparam.dcx：DCX 由 DcxNativeDocument 解压，
@@ -890,6 +920,7 @@ internal sealed class BridgeCommandService
 
         if (command == "write-gparam")
         {
+            if (dispatchProbe) return BoundDispatchResult(file, command);
             if (string.IsNullOrWhiteSpace(outputPath))
                 return BridgeResult<object>.Failed(file, "gparam", "BRIDGE_OUTPUT_PATH_REQUIRED", "GPARAM writer requires a validated staging output path.");
             try
@@ -908,6 +939,7 @@ internal sealed class BridgeCommandService
 
         if (command == "write-param")
         {
+            if (dispatchProbe) return BoundDispatchResult(file, command);
             if (string.IsNullOrWhiteSpace(outputPath))
                 return BridgeResult<object>.Failed(file, "param", "BRIDGE_OUTPUT_PATH_REQUIRED", "PARAM writer requires a validated staging output path.");
             try
@@ -926,6 +958,7 @@ internal sealed class BridgeCommandService
 
         if (command == "read-emevd-document")
         {
+            if (dispatchProbe) return BoundDispatchResult(file, command);
             try
             {
                 // EVENT-30A: production open accepts the outer source resource
@@ -1060,6 +1093,7 @@ internal sealed class BridgeCommandService
 
         if (command == "write-emevd")
         {
+            if (dispatchProbe) return BoundDispatchResult(file, command);
             if (string.IsNullOrWhiteSpace(outputPath))
                 return BridgeResult<object>.Failed(file, "event", "BRIDGE_OUTPUT_PATH_REQUIRED", "EMEVD writer requires a validated staging output path.");
             try
@@ -1087,6 +1121,7 @@ internal sealed class BridgeCommandService
 
         if (command == "read-msb-document")
         {
+            if (dispatchProbe) return BoundDispatchResult(file, command);
             try
             {
                 var document = MsbNativeDocument.Read(NativeLeafPayload.Resolve(file, oodleRuntimeRoot));
@@ -1122,6 +1157,7 @@ internal sealed class BridgeCommandService
 
         if (command == "read-tpf-document")
         {
+            if (dispatchProbe) return BoundDispatchResult(file, command);
             try
             {
                 var payload = NativeLeafPayload.Resolve(file, oodleRuntimeRoot, ".tpf");
@@ -1148,6 +1184,7 @@ internal sealed class BridgeCommandService
 
         if (command == "export-tpf-texture")
         {
+            if (dispatchProbe) return BoundDispatchResult(file, command);
             if (string.IsNullOrWhiteSpace(outputPath))
             {
                 return BridgeResult<object>.Failed(file, "texture", "TPF_EXPORT_OUTPUT_REQUIRED", "export-tpf-texture 需要 options.outputPath。");
@@ -1247,6 +1284,7 @@ internal sealed class BridgeCommandService
 
         if (command == "read-tpf-texture-preview")
         {
+            if (dispatchProbe) return BoundDispatchResult(file, command);
             int textureIndex = 0;
             if (options.ValueKind == JsonValueKind.Object
                 && options.TryGetProperty("textureIndex", out var indexElement)
@@ -1299,6 +1337,7 @@ internal sealed class BridgeCommandService
 
         if (command == "write-tpf-texture-replace")
         {
+            if (dispatchProbe) return BoundDispatchResult(file, command);
             // TEXTURE-52C：TPF 单纹理替换写回。只收 typed replace（textureIndex +
             // newTextureBase64），outputPath 必须是已校验的暂存区路径（越界之外的
             // 边界检查由 BridgeDaemonHost 的 DiskWritingCommands 门在分派前完成）。
@@ -1320,6 +1359,7 @@ internal sealed class BridgeCommandService
 
         if (command == "read-tae-document")
         {
+            if (dispatchProbe) return BoundDispatchResult(file, command);
             try
             {
                 // T3（2026-08-15）：`*.anibnd.dcx` 是 DCX(DFLT)→BND4 容器，内含多个
@@ -1367,6 +1407,23 @@ internal sealed class BridgeCommandService
                         && altParsedSize > 0)
                         animationPageSize = altParsedSize;
                 }
+                // Explicit action reads do not inherit the timeline preview cap.
+                if (optionsIsObject && options.TryGetProperty("animId", out var actionId)
+                    && actionId.TryGetInt64(out var requestedAnimId))
+                {
+                    var located = document.ResolveAnimation(requestedAnimId,
+                        OptionNullableInt("taeEntryIndex"), OptionNullableInt64("taeEntryId"),
+                        OptionNullableString("taeEntryName"), OptionNullableString("taeGroup"));
+                    return BridgeResult<object>.Partial(file, "action", diagnostics, new
+                    {
+                        format = "TAE", identityProjectionVersion = TaeNativeDocument.IdentityProjectionVersion,
+                        sourceHash = document.SourceHash, containerSourceHash = document.ContainerSourceHash,
+                        taeEntryCount = document.IsContainer ? document.Entries.Count : 0,
+                        animations = new[] { located.Entry.Document.ToAnimationEnvelope(located.Animation,
+                            null, null, int.MaxValue, int.MaxValue, located.Entry.TaeEntryIndex,
+                            located.Entry.TaeEntryId, located.Entry.TaeEntryName, located.Entry.TaeGroup) }
+                    });
+                }
                 // Production TAE decoding is always backed by the bundled
                 // first-party registry. Do not accept caller-supplied XML
                 // layouts or turn an external template into a runtime input.
@@ -1384,6 +1441,7 @@ internal sealed class BridgeCommandService
 
         if (command == "read-tae-event-params")
         {
+            if (dispatchProbe) return BoundDispatchResult(file, command);
             try
             {
                 // 按 native 事件边界读取参数体，并由 bundled first-party
@@ -1464,6 +1522,7 @@ internal sealed class BridgeCommandService
 
         if (command == "read-tae-animation-clip")
         {
+            if (dispatchProbe) return BoundDispatchResult(file, command);
             try
             {
                 var animId = OptionInt64("animId", 0);
@@ -1713,6 +1772,7 @@ internal sealed class BridgeCommandService
 
         if (command == "sample-tae-animation-pose")
         {
+            if (dispatchProbe) return BoundDispatchResult(file, command);
             try
             {
                 var animId = OptionInt64("animId", 0);
@@ -1924,6 +1984,7 @@ internal sealed class BridgeCommandService
 
         if (command == "read-chrbnd-flver-preview")
         {
+            if (dispatchProbe) return BoundDispatchResult(file, command);
             try
             {
                 // Character/parts containers are atomic preview resources. A partsbnd may
@@ -2238,6 +2299,7 @@ internal sealed class BridgeCommandService
 
         if (command == "read-map-part-flver-preview")
         {
+            if (dispatchProbe) return BoundDispatchResult(file, command);
             try
             {
                 // S23：地图 viewport 读 part 模型——mapbnd（DCX→BND4）内按条目名
@@ -2385,6 +2447,7 @@ internal sealed class BridgeCommandService
 
         if (command == "read-map-static-geometry")
         {
+            if (dispatchProbe) return BoundDispatchResult(file, command);
             try
             {
                 var modelName = OptionString("modelName", "");
@@ -2638,6 +2701,7 @@ internal sealed class BridgeCommandService
 
         if (command == "read-flver-document")
         {
+            if (dispatchProbe) return BoundDispatchResult(file, command);
             try
             {
                 var document = FlverNativeDocument.ReadFile(file);
@@ -2666,6 +2730,7 @@ internal sealed class BridgeCommandService
 
         if (command == "read-flver-mesh")
         {
+            if (dispatchProbe) return BoundDispatchResult(file, command);
             try
             {
                 var document = FlverNativeDocument.ReadFile(file);
@@ -2794,6 +2859,7 @@ internal sealed class BridgeCommandService
 
         if (command == "read-flver-skeleton")
         {
+            if (dispatchProbe) return BoundDispatchResult(file, command);
             try
             {
                 var document = FlverNativeDocument.ReadFile(file);
@@ -2827,6 +2893,7 @@ internal sealed class BridgeCommandService
 
         if (command == "read-flver-texture-slots")
         {
+            if (dispatchProbe) return BoundDispatchResult(file, command);
             try
             {
                 var document = FlverNativeDocument.ReadFile(file);
@@ -2857,6 +2924,7 @@ internal sealed class BridgeCommandService
 
         if (command == "read-flver-dummies")
         {
+            if (dispatchProbe) return BoundDispatchResult(file, command);
             try
             {
                 var document = FlverNativeDocument.ReadFile(file);
@@ -2888,6 +2956,7 @@ internal sealed class BridgeCommandService
 
         if (command == "write-flver")
         {
+            if (dispatchProbe) return BoundDispatchResult(file, command);
             // MODEL-51C：FLVER 材质槽写回。字节补丁 writer，outputPath 必须
             // 是已校验的暂存区路径（BRIDGE_OUTPUT_PATH_REQUIRED 之外的边界
             // 检查由 BridgeDaemonHost 的 DiskWritingCommands 门在分派前完成）。
@@ -2909,6 +2978,7 @@ internal sealed class BridgeCommandService
 
         if (command == "read-mtd-document")
         {
+            if (dispatchProbe) return BoundDispatchResult(file, command);
             // MATERIAL-53A：恢复 read-mtd-document。MTD 当前仍受 scope.json
             // 的 authorityAtRuling=unverified 约束，
             // 按 resumeRequires 走通用承接流程时恢复三处入口：本分支、
@@ -2956,6 +3026,7 @@ internal sealed class BridgeCommandService
 
         if (command == "write-mtd-document")
         {
+            if (dispatchProbe) return BoundDispatchResult(file, command);
             // MATERIAL-53C：MTD 材质属性写回。只收 typed property set（paramId +
             // newValue），outputPath 必须是已校验的暂存区路径（越界之外的边界检查由
             // BridgeDaemonHost 的 DiskWritingCommands 门在分派前完成）。
@@ -2985,6 +3056,7 @@ internal sealed class BridgeCommandService
 
         if (command == "read-fxr-document")
         {
+            if (dispatchProbe) return BoundDispatchResult(file, command);
             // VFX-54A：FXR3 只读。FXR 是 ffxbnd.dcx 容器内子项，支持三种输入形态：
             //   ① 裸 .fxr 文件 → 直接解析；
             //   ② .dcx 容器 → DcxNativeDocument 解压，再判定 BND4 容器定位 FXR 子项；
@@ -3097,6 +3169,7 @@ internal sealed class BridgeCommandService
 
         if (command == "list-ffxbnd-entries")
         {
+            if (dispatchProbe) return BoundDispatchResult(file, command);
             // S24：ffxbnd 效果库的 .fxr 子项清单（逻辑名，UI 左栏逐条列出）。
             // 只列条目名，不解析任何 effect——一条失败不应把整包判死。
             try
@@ -3135,6 +3208,7 @@ internal sealed class BridgeCommandService
 
         if (command == "read-esd-document")
         {
+            if (dispatchProbe) return BoundDispatchResult(file, command);
             try
             {
                 var payload = NativeLeafPayload.Resolve(file, oodleRuntimeRoot, ".esd");
@@ -3213,6 +3287,7 @@ internal sealed class BridgeCommandService
 
         if (command == "write-esd-document")
         {
+            if (dispatchProbe) return BoundDispatchResult(file, command);
             // BEHAVIOR-55C：ESD 状态转移写回（behavior-transition-upsert）。
             // 只收 typed transition mutation：set-transition-target（字节级外科替换
             // 条件记录的 targetStateOffset）/ insert-transition（entry 表内新增
@@ -3244,6 +3319,7 @@ internal sealed class BridgeCommandService
 
         if (command == "write-tae-document")
         {
+            if (dispatchProbe) return BoundDispatchResult(file, command);
             // ANIMATION-56C：TAE 事件写回（tae-event-upsert）。
             // 只收 typed event upsert mutation：update-event-times（字节级外科替换
             // 事件 startTime/endTime，时间槽被兄弟共享时 fail-closed）/ insert-event
@@ -3284,6 +3360,7 @@ internal sealed class BridgeCommandService
 
         if (command == "write-fxr-document")
         {
+            if (dispatchProbe) return BoundDispatchResult(file, command);
             // VFX-54C：FXR3 字段写回（vfx-field-set）。
             // 只收 typed mutation：vfx-field-set 字节级外科替换某个「已知布局」容器
             // （host/property/section8）里 Section11 的一个 Int32。未知 node type、
@@ -3315,6 +3392,7 @@ internal sealed class BridgeCommandService
 
         if (command == "write-msb")
         {
+            if (dispatchProbe) return BoundDispatchResult(file, command);
             if (string.IsNullOrWhiteSpace(outputPath))
                 return BridgeResult<object>.Failed(file, "map", "BRIDGE_OUTPUT_PATH_REQUIRED", "MSB writer requires a validated staging output path.");
             try
@@ -3349,6 +3427,7 @@ internal sealed class BridgeCommandService
 
         if (command == "write-bnd4")
         {
+            if (dispatchProbe) return BoundDispatchResult(file, command);
             if (string.IsNullOrWhiteSpace(outputPath))
                 return BridgeResult<object>.Failed(file, resourceKind, "BRIDGE_OUTPUT_PATH_REQUIRED", "BND4 writer requires a validated staging output path.");
             try
@@ -3367,6 +3446,7 @@ internal sealed class BridgeCommandService
 
         if (command == "read-luabnd-document" || command == "inspect-luabnd")
         {
+            if (dispatchProbe) return BoundDispatchResult(file, command);
             try
             {
                 var doc = LuabndNativeDocument.Read(file, oodleRuntimeRoot);
@@ -3388,6 +3468,7 @@ internal sealed class BridgeCommandService
 
         if (command == "read-luabnd-script")
         {
+            if (dispatchProbe) return BoundDispatchResult(file, command);
             try
             {
                 var childSelector = options.TryGetProperty("childPath", out var childPathEl) ? childPathEl.GetString() : null;
@@ -3434,7 +3515,8 @@ internal sealed class BridgeCommandService
 
         if (command == "write-luabnd-script")
         {
-            var targetOutPath = outputPath ?? (options.TryGetProperty("outputPath", out var outPathEl) ? outPathEl.GetString() : null);
+            if (dispatchProbe) return BoundDispatchResult(file, command);
+            var targetOutPath = outputPath;
             if (string.IsNullOrWhiteSpace(targetOutPath))
                 return BridgeResult<object>.Failed(file, "script", "BRIDGE_OUTPUT_PATH_REQUIRED", "write-luabnd-script 需要已校验的 options.outputPath。");
 
@@ -3462,7 +3544,8 @@ internal sealed class BridgeCommandService
 
         if (command == "export-luabnd")
         {
-            var exportDir = outputPath ?? (options.TryGetProperty("outputPath", out var outPathEl) ? outPathEl.GetString() : (options.TryGetProperty("outputDirectory", out var outDirEl) ? outDirEl.GetString() : null));
+            if (dispatchProbe) return BoundDispatchResult(file, command);
+            var exportDir = outputPath;
             if (string.IsNullOrWhiteSpace(exportDir))
             {
                 return BridgeResult<object>.Failed(file, "script", "BRIDGE_OUTPUT_PATH_REQUIRED", "export-luabnd 需要指定 outputPath 或 options.outputDirectory。");
@@ -3491,19 +3574,30 @@ internal sealed class BridgeCommandService
 
         if (command == "read-bridge-artifact")
         {
+            if (dispatchProbe) return BoundDispatchResult(file, command);
             return BridgeResult<object>.Failed(file, "unknown", "BRIDGE_ARTIFACT_DAEMON_ONLY", "read-bridge-artifact 仅由 BridgeDaemonHost 守护进程支持。");
         }
 
         cancellationToken.ThrowIfCancellationRequested();
         return command switch
         {
-            "export-event" => ExportSemanticCandidate(file, "event", "原生 EMEVD 语义导出不可用；请查看返回的结构化诊断。", oodleRuntimeRoot),
-            "export-map" => ExportSemanticCandidate(file, "map", "原生 MSB 语义导出不可用；请查看返回的结构化诊断。", oodleRuntimeRoot),
-            "export-param" => ExportSemanticCandidate(file, "param", "原生 PARAM 语义导出不可用；请查看返回的结构化诊断。", oodleRuntimeRoot),
-            "export-msg" => MsgTextExport.Export(file, oodleRuntimeRoot),
+            "export-event" => dispatchProbe ? BoundDispatchResult(file, command) : ExportSemanticCandidate(file, "event", "原生 EMEVD 语义导出不可用；请查看返回的结构化诊断。", oodleRuntimeRoot),
+            "export-map" => dispatchProbe ? BoundDispatchResult(file, command) : ExportSemanticCandidate(file, "map", "原生 MSB 语义导出不可用；请查看返回的结构化诊断。", oodleRuntimeRoot),
+            "export-param" => dispatchProbe ? BoundDispatchResult(file, command) : ExportSemanticCandidate(file, "param", "原生 PARAM 语义导出不可用；请查看返回的结构化诊断。", oodleRuntimeRoot),
+            "export-msg" => dispatchProbe ? BoundDispatchResult(file, command) : MsgTextExport.Export(file, oodleRuntimeRoot),
             _ => BridgeResult<object>.Failed(file, resourceKind, "UNKNOWN_COMMAND", $"Unknown bridge command: {command}")
         };
         }
+
+    // Internal-only probe: CLI options never control this flag. It reaches the
+    // same dispatch branch but stops before resource I/O, staging or export.
+    internal Task<BridgeResult<object>> ProbeDispatchAsync(string command) =>
+        ExecuteAsync(command, "dispatch-probe", CancellationToken.None, dispatchProbe: true);
+
+    private static BridgeResult<object> BoundDispatchResult(string file, string command) =>
+        BridgeResult<object>.Partial(file, "unknown", new[] {
+            new Diagnostic("info", "BRIDGE_COMMAND_DISPATCH_BOUND", $"Bound dispatch branch: {command}", BridgeResult<object>.MakeSourceUri(file))
+        }, new { command });
 
     private static IReadOnlyList<NativeLeafEntry> ResolveCharacterTextureLeaves(
         string file,

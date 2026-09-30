@@ -21,7 +21,9 @@ openai/codex (Apache License 2.0, Copyright 2025 OpenAI)
     packages/core/src/model-services/rolloutRecorder.ts
 
   openai/codex is itself Apache-2.0 licensed, so this derivation is
-  license-compatible with SoulForge's own Apache-2.0 terms.
+  license-compatible with SoulForge's own Apache-2.0 terms. The complete
+  Apache-2.0 license is retained at licenses/openai-codex.txt, including for
+  historical attribution links. Design source: https://github.com/openai/codex.
 
 --------------------------------------------------------------------------
 

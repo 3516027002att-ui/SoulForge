@@ -6,12 +6,16 @@
  * credential vault + workspace tool registry.
  */
 
+import { createProviderBudget, type ProviderBudgetStats } from '../../../agent/src/providerBudget.mjs';
+import { runFiniteAgentAdapter } from './finiteAgentAdapter.js';
+import type { AgentProtocolEvent, FiniteAgentResult, KernelLimits } from '../../../agent/src/index.mjs';
 import { randomUUID } from 'node:crypto';
 import { runAgentToolLoop, redactSecrets } from './agentLoop.js';
 import { FileRolloutStorage, newRolloutFilePath } from './fileRolloutStorage.js';
 import { RolloutRecorder } from './rolloutRecorder.js';
 import type { ResumedRollout } from './rolloutRecorder.js';
 import { estimateContextTokens } from './contextCompactor.js';
+import { CredentialStreamRedactor } from './credentialStreamRedactor.js';
 import type {
   AgentEvent,
   AgentPermissionMode,
@@ -34,6 +38,12 @@ import type {
 } from './types.js';
 
 export interface AgentSessionRunParams {
+  kernel?: 'legacy' | 'finite';
+  runId?: string;
+  requestId?: string;
+  kernelLimits?: KernelLimits;
+  pricing?: { inputPerMillion: number; outputPerMillion: number };
+  onProtocolEvent?: (event: AgentProtocolEvent) => void;
   /** Base directory for rollout files (desktop: userData/agent). */
   sessionsDir: string;
   /** Pre-generated session id; defaults to a fresh UUID. */
@@ -97,6 +107,8 @@ export interface AgentSessionRunResult {
   sessionId: string;
   rolloutPath: string;
   run: AgentRunResult;
+  kernel?: FiniteAgentResult;
+  providerBudget?: ProviderBudgetStats;
 }
 
 export async function runAgentSession(params: AgentSessionRunParams): Promise<AgentSessionRunResult> {
@@ -112,6 +124,13 @@ export async function runAgentSession(params: AgentSessionRunParams): Promise<Ag
     permissionMode: params.permissionMode,
     ...(params.config.model ? { model: params.config.model } : {})
   });
+  const redactActual = (text: string): string => redactSecrets(params.apiKey ? text.replaceAll(params.apiKey, '[REDACTED]') : text);
+  let protocolSeq = 0;
+  const emitProtocol = (envelope: AgentProtocolEvent): void => {
+    const safe = JSON.parse(JSON.stringify(envelope, (_key, value) => typeof value === 'string' ? redactActual(value) : value)) as AgentProtocolEvent;
+    recorder.enqueue({type:'protocol-event',envelope:safe});
+    params.onProtocolEvent?.(safe);
+  };
   let providerCallIndex = 0;
   const usagePersistenceErrors: string[] = [];
 
@@ -150,21 +169,37 @@ export async function runAgentSession(params: AgentSessionRunParams): Promise<Ag
       const estimated = estimateContextTokens(request.messages);
       const result = await params.adapter.complete({ ...request, sessionId: request.sessionId ?? sessionId });
       await persistUsage(callIndex, estimated, result.usage);
-      return result;
+      return {...result,message:{...result.message,content:redactActual(result.message.content),
+        ...(result.message.toolCalls ? {toolCalls:result.message.toolCalls.map(call=>({...call,argumentsJson:redactActual(call.argumentsJson)}))}: {})},
+        diagnostics:result.diagnostics.map(diagnostic=>({...diagnostic,message:redactActual(diagnostic.message)}))};
     },
     stream: async function* (request) {
       const callIndex = ++providerCallIndex;
       const estimated = estimateContextTokens(request.messages);
       let inputTokens: number | undefined;
       let outputTokens: number | undefined;
+      const redactors = {
+        'text-delta': new CredentialStreamRedactor(params.apiKey, redactActual),
+        'thinking-delta': new CredentialStreamRedactor(params.apiKey, redactActual)
+      };
       try {
         for await (const event of params.adapter.stream({ ...request, sessionId: request.sessionId ?? sessionId })) {
           if (event.type === 'usage') {
             if (event.inputTokens !== undefined) inputTokens = event.inputTokens;
             if (event.outputTokens !== undefined) outputTokens = event.outputTokens;
           }
-          yield event;
+          if (event.type === 'text-delta' || event.type === 'thinking-delta') {
+            for (const safe of redactors[event.type].push(event)) yield safe;
+          }
+          else if (event.type === 'message-stop') {
+            for (const redactor of Object.values(redactors)) for (const safe of redactor.flush()) yield safe;
+            yield event;
+          }
+          else if (event.type === 'tool-call') yield {...event,toolCall:{...event.toolCall,argumentsJson:redactActual(event.toolCall.argumentsJson)}};
+          else if (event.type === 'error') yield {...event,message:redactActual(event.message)};
+          else yield event;
         }
+        for (const redactor of Object.values(redactors)) for (const safe of redactor.flush()) yield safe;
       } finally {
         await persistUsage(callIndex, estimated, {
           ...(inputTokens !== undefined ? { inputTokens } : {}),
@@ -173,6 +208,14 @@ export async function runAgentSession(params: AgentSessionRunParams): Promise<Ag
       }
     }
   };
+
+  const providerBudget = params.kernel === 'finite' || params.maxTotalOutputTokens != null || params.kernelLimits?.maxCost != null
+    ? createProviderBudget(trackedAdapter, {
+      maxOutputTokens: params.maxTotalOutputTokens ?? params.kernelLimits?.maxOutputTokens ?? 100_000,
+      ...(params.kernelLimits?.maxCost != null ? {maxCost:params.kernelLimits.maxCost}:{}),
+      ...(params.pricing ? {pricing:params.pricing}:{})
+    }) : undefined;
+  const activeAdapter = providerBudget?.adapter ?? trackedAdapter;
 
   const messages: ChatMessage[] = [];
   const resumedMessages = (params.resumeFrom?.messages ?? [])
@@ -209,17 +252,15 @@ export async function runAgentSession(params: AgentSessionRunParams): Promise<Ag
   // Deltas are transient UI payloads but still cross a process boundary —
   // redact secret-shaped text before emission, matching the durable policy.
   const emit = (event: AgentEvent): void => {
-    if (!params.onEvent) return;
-    params.onEvent(
-      event.type === 'agent-message-delta' || event.type === 'agent-thinking-delta'
-        ? { ...event, text: redactSecrets(event.text) }
-        : event
-    );
+    const safe = JSON.parse(JSON.stringify(event, (_key, value) => typeof value === 'string' ? redactActual(value) : value)) as AgentEvent;
+    if (params.kernel !== 'finite') emitProtocol({protocolVersion:1,sessionId,
+      runId:params.runId ?? sessionId,requestId:params.requestId ?? sessionId,eventSeq:++protocolSeq,event:safe});
+    params.onEvent?.(safe);
   };
 
   let primaryError: unknown = null;
   try {
-    const run = await runAgentToolLoop(trackedAdapter, {
+    const runRequest = {
       config: params.config,
       apiKey: params.apiKey,
       messages,
@@ -249,7 +290,14 @@ export async function runAgentSession(params: AgentSessionRunParams): Promise<Ag
         : {}),
       onEvent: emit,
       rollout: recorder
-    });
+    };
+    const finite = params.kernel === 'finite' ? await runFiniteAgentAdapter(activeAdapter, runRequest, {
+      runId: params.runId ?? sessionId, requestId: params.requestId ?? sessionId,
+      onProtocolEvent: emitProtocol,
+      ...(params.kernelLimits ? { limits: params.kernelLimits } : {}),
+      ...(params.pricing ? { pricing: params.pricing } : {})
+    }) : undefined;
+    const run = finite?.run ?? await runAgentToolLoop(activeAdapter, runRequest);
 
     if (usagePersistenceErrors.length > 0) {
       run.diagnostics.push({
@@ -258,7 +306,7 @@ export async function runAgentSession(params: AgentSessionRunParams): Promise<Ag
         message: `provider usage 已写入会话 rollout，但 app.db 索引失败 ${usagePersistenceErrors.length} 次。`
       });
     }
-    return { sessionId, rolloutPath, run };
+    return { sessionId, rolloutPath, run, ...(finite ? { kernel: finite.kernel } : {}), ...(providerBudget ? {providerBudget:providerBudget.stats()}: {}) };
   } catch (error) {
     primaryError = error;
     recorder.enqueue({ type: 'interrupted', at: new Date().toISOString() });

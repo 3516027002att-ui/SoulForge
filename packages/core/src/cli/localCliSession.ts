@@ -364,19 +364,8 @@ export async function openLocalCliSession(options: LocalCliSessionOptions): Prom
       ...(!knowledgeStore ? { knowledgeStoreDiagnostic: 'CLI 持久知识数据库不可用。' } : {})
     }
   });
-  const mutatingTools = new Set([
-    'commit_patch',
-    'mutate_param_fields',
-    'mutate_fmg_entries',
-    'apply_emevd_dsl',
-    'mutate_tae_event_times',
-    'mutate_tae_event_fields',
-    'mutate_msb_part_transform',
-    'mutate_luabnd_script',
-    'batch_transform_map_objects',
-    'import_map_from_blender',
-    'rollback_operation'
-  ]);
+  const mutatingTools = new Set(registry.list().filter(tool => tool.effect === 'write' || tool.effect === 'rollback').map(tool => tool.name));
+
   const executeTool: AgentToolBridge['executeTool'] = async (call, contextOverride = {}) => {
     if (!durableLog && mutatingTools.has(call.name)) {
       return cliToolFailure('CLI_SQLITE_UNAVAILABLE', '本地审计数据库不可用，写入已失败关闭。');

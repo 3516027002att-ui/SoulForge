@@ -86,6 +86,7 @@ async function run(): Promise<void> {
   const fixtureGlobals = globalThis as typeof globalThis & { [key: symbol]: unknown };
   const previousCallback = fixtureGlobals[CALLBACK_KEY];
   let currentAnimId: unknown = null;
+  let malformedAnimation = false;
   fixtureGlobals[CALLBACK_KEY] = (async (input: BridgeMockInput) => {
     assert.equal(input.command, 'read-tae-document');
     return {
@@ -96,7 +97,7 @@ async function run(): Promise<void> {
       parseStatus: 'partial',
       diagnostics: [],
       data: {
-        animations: [{
+        animations: malformedAnimation ? [null] : [{
           animId: currentAnimId,
           events: [{ startTime: 0, endTime: 1, eventTypeId: 1 }]
         }]
@@ -132,6 +133,11 @@ async function run(): Promise<void> {
   try {
     const { readTaeEvents } = await import(taeEditUrl.href) as typeof import('../editing/taeEdit.js');
     const edit = makeEditSession(fixtureRoot);
+    malformedAnimation = true;
+    const malformed = await readTaeEvents({ edit, file: filePath });
+    assert.equal(malformed.ok, false);
+    if (!malformed.ok) assert.equal(malformed.error.code, 'TAE_ANIM_ID_INVALID');
+    malformedAnimation = false;
 
     for (const animId of [null, -1, Number.MAX_SAFE_INTEGER + 1]) {
       currentAnimId = animId;

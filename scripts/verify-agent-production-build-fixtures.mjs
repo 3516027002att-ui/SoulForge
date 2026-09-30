@@ -40,6 +40,9 @@ try {
     'packages/core/package.json',
     'packages/core/tsconfig.json',
     'packages/core/src/index.ts',
+    'packages/agent/package.json',
+    'packages/agent/src/index.mjs',
+    'packages/agent/src/index.d.mts',
     'apps/desktop/package.json',
     'apps/desktop/tsconfig.json',
     'apps/desktop/electron.vite.config.ts',
@@ -57,6 +60,9 @@ try {
   assert.equal(fresh.current.output.sha256, fresh.manifest.output.sha256);
 
   await expectStale('源码变化必须拒绝旧产物', () => seed('packages/core/src/index.ts', 'changed source'));
+  await expectStale('Agent kernel-only change must invalidate the bundled artifact', () => seed('packages/agent/src/index.mjs', 'changed kernel'));
+  await expectStale('Agent protocol declarations must remain source-bound', () => seed('packages/agent/src/index.d.mts', 'changed protocol'));
+  await expectStale('Agent package metadata changes must invalidate the artifact', () => seed('packages/agent/package.json', 'changed metadata'));
   await expectStale('Electron 产物变化必须拒绝旧清单', () => seed('apps/desktop/out/main/index.js', 'changed output'));
   await expectStale('根 TypeScript 配置变化必须拒绝旧产物', () => seed('tsconfig.base.json', 'changed config'));
   await expectStale('原生绑定构建输入变化必须拒绝旧产物', () => seed('scripts/prepare-electron-sqlite-binding.mjs', 'changed preparation'));

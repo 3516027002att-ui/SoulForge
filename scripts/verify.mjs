@@ -7,6 +7,7 @@
  */
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
+import { workspaceScriptReachability } from './verify/checkRegistry.mjs';
 import { classifyScript, loadWorkspaces } from './verify/scriptGraph.mjs';
 import { EXCLUDED, TIER_BY_SCRIPT, TIER_ORDER } from './verify/tiers.mjs';
 import { OUTCOME, runPlannedSuite } from './verify/runner.mjs';
@@ -30,7 +31,7 @@ function parseArgs(argv) {
     list: false,
     timeoutMs: DEFAULT_TIMEOUT_MS,
     jsonOut: null,
-    bail: true
+    bail: false
   };
   for (let index = 0; index < argv.length; index += 1) {
     const arg = argv[index];
@@ -109,48 +110,8 @@ function parseArgs(argv) {
 }
 
 /** 从一条 script 命令里抽出它执行的入口文件（dist/testing/xxx.js 之类）。 */
-function extractEntryFiles(command) {
-  if (typeof command !== 'string') return [];
-  return [...command.matchAll(/node\s+((?:\.\/)?[A-Za-z0-9./_-]+\.(?:js|mjs|cjs))/g)]
-    .map((match) => match[1].replace(/^\.\//, ''));
-}
-
-/**
- * workspace 侧 test* script 是否真的会被执行到。
- *
- * 判据不是「有没有同名根 script」，而是**它的入口文件有没有别的可达 script 也在跑**。
- * 理由：本仓库 packages/core 有一批 test:v05-* 是便利别名，它们指向的 smoke 文件
- * 早已串在 core 自己的 `test` 链里（根 `test` 用 --workspaces 聚合，因此可达）。
- * 按名字判会把这些别名全报成孤岛——那是噪声，会让门禁被无视。按入口文件判才能
- * 只留下真正没人跑的：实测唯一一条是 test:real-mod-readonly-preview（runRealModOpenSmoke.js
- * 既不在 core 的 test 链里，也没有任何根转发）。
- */
 function isReachableFromRoot(workspaces, workspaceName, workspace, scriptName) {
-  // 根 `test` 用 `--workspaces --if-present` 聚合：workspace 自己的 `test` 一定可达。
-  if (scriptName === 'test') return true;
-
-  const rootCommands = Object.values(workspaces.rootScripts);
-  const forwarded = rootCommands.some((command) => {
-    if (typeof command !== 'string') return false;
-    if (!command.includes(scriptName)) return false;
-    return command.includes(`-w ${workspaceName}`) || command.includes(`run ${scriptName}`);
-  });
-  if (forwarded) return true;
-
-  // 入口文件是否已被本 workspace 内某条可达 script 覆盖。
-  const ownEntries = extractEntryFiles(workspace.scripts?.[scriptName]);
-  if (ownEntries.length === 0) return false;
-  const coveredEntries = new Set();
-  for (const [otherName, otherCommand] of Object.entries(workspace.scripts ?? {})) {
-    if (otherName === scriptName) continue;
-    const reachable = otherName === 'test'
-      || rootCommands.some((command) => typeof command === 'string'
-        && command.includes(otherName)
-        && (command.includes(`-w ${workspaceName}`) || command.includes(`run ${otherName}`)));
-    if (!reachable) continue;
-    for (const entry of extractEntryFiles(otherCommand)) coveredEntries.add(entry);
-  }
-  return ownEntries.every((entry) => coveredEntries.has(entry));
+  return workspaceScriptReachability(process.cwd(),workspaces,workspace,scriptName) !== 'unreachable';
 }
 
 /** 登记审计：确保没有「存在但没人跑」的验证。 */
@@ -225,7 +186,7 @@ const repoRoot = process.cwd();
 const workspaces = loadWorkspaces(repoRoot);
 const auditFindings = auditRegistration(workspaces);
 for (const name of [...options.suites, ...options.exclude, ...options.requireSuites]) {
-  if (!TIER_BY_SCRIPT[name]) {
+  if (!TIER_BY_SCRIPT[name] && !workspaces.rootScripts[name]) {
     console.error(JSON.stringify({ ok: false, code: 'VERIFY_ARGUMENT_INVALID', message: `未登记套件：${name}` }));
     process.exit(2);
   }
@@ -247,16 +208,8 @@ if (options.audit) {
   process.exit(ok ? 0 : 1);
 }
 
-// 审计失败不允许继续执行：层级表漂移时「跑了哪些」本身不可信。
-if (auditFindings.length > 0) {
-  console.error(JSON.stringify({
-    ok: false,
-    code: 'VERIFY_REGISTRY_DRIFTED',
-    message: '层级登记表与 package.json 不一致，拒绝执行。运行 node scripts/verify.mjs --audit 查看详情。',
-    findings: auditFindings
-  }, null, 2));
-  process.exit(1);
-}
+// Registration findings are reported with the result; independent parsed
+// product checks still run even when ownership metadata has drifted.
 
 const plan = [];
 function addSuite(name, tier, invocation = {}) {
@@ -382,7 +335,7 @@ for (const outcome of Object.values(OUTCOME)) {
   counts[outcome] = results.filter((result) => result.outcome === outcome).length;
 }
 const failures = results.filter((result) => result.treatedAsFailure);
-const ok = failures.length === 0;
+const ok = failures.length === 0 && auditFindings.every(finding => finding.severity !== 'error');
 
 // bail 中断后未执行的条目。它们既不是通过也不是跳过，而是**根本没跑**。
 //
@@ -400,6 +353,7 @@ const bailNote = notAttempted.length > 0
 const summary = {
   ok,
   mode: 'run',
+  auditFindings,
   ...(options.slice ? { sliceId: options.slice, manualChecks: sliceValidation.manualChecks,
     sliceValidationStatus: sliceValidation.manualChecks.length ? 'manual-pending' : 'automated-results-only',
     notes: sliceValidation.notes } : {}),

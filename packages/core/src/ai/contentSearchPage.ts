@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 import { createOpaqueCursor, parseOpaqueCursor } from '@soulforge/shared';
 
-type SearchTool = 'search_param_rows' | 'search_text_entries';
+type SearchTool = 'search_param_rows' | 'search_text_entries' | 'search_tae_events';
 interface SearchScope {
   workspaceId: string;
   tool: SearchTool;
@@ -38,7 +38,7 @@ export function contentSearchPage<T>(options: {
   let offset = input.offset ?? 0;
   let expectedHash: string | undefined;
   let legacyScope: SearchScope | undefined;
-  const domain = options.tool === 'search_param_rows' ? 'param' : 'fmg';
+  const domain = options.tool === 'search_param_rows' ? 'param' : options.tool === 'search_tae_events' ? 'tae' : 'fmg';
   if (input.cursor !== undefined) {
     if (typeof input.cursor !== 'string' || input.offset !== undefined) invalid('续页只传 cursor，不同时传 offset。');
     const payload = parseOpaqueCursor(input.cursor);

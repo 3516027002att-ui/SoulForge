@@ -2,7 +2,6 @@
 import { openLocalCliSession } from './localCliSession.js';
 import { startSessionDaemon } from './sessionPipeDaemon.js';
 
-const MUTATING_PREFIXES = ['mutate_', 'apply_', 'commit_', 'import_', 'batch_'];
 
 function argValue(argv: string[], name: string): string | undefined {
   const index = argv.indexOf(`--${name}`);
@@ -72,9 +71,8 @@ async function main(): Promise<void> {
         };
       }
       if (!cliSession.durableLog
-        && (MUTATING_PREFIXES.some((prefix) => tool.startsWith(prefix))
-          || tool === 'commit_patch'
-          || tool === 'rollback_operation')) {
+        && cliSession.registry.list().some(descriptor => descriptor.name === tool
+          && (descriptor.effect === 'write' || descriptor.effect === 'rollback'))) {
         throw new Error('CLI_SQLITE_UNAVAILABLE: 本地审计数据库不可用，写入已失败关闭。');
       }
       inFlight += 1;

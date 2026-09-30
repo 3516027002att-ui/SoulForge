@@ -1263,6 +1263,7 @@ function makeTaeExport(): BridgeResult<unknown> {
     diagnostics: [],
     data: {
       format: 'TAE',
+      identityProjectionVersion: 2,
       version: '0x0001000D',
       sourceSize: 1234,
       sourceHash: 'tae-synthetic-hash',

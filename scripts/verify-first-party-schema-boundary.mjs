@@ -7,7 +7,7 @@
  * point may import them, scan their locations, or turn their environment
  * variables into runtime requirements.
  */
-import { existsSync, readFileSync } from 'node:fs';
+import { readdirSync, existsSync, readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
@@ -30,6 +30,8 @@ const productionFiles = [
   'apps/desktop/src/renderer/src/editors/ParamDefPanel.tsx',
   'apps/desktop/src/renderer/src/workbench/ParamWorkbench.tsx',
   'packages/core/src/ai/toolRegistry.ts',
+  'packages/core/src/ai/toolRegistrySupport.ts',
+  ...readdirSync(resolve(root,'packages/core/src/ai/tools')).filter(file=>file.endsWith('.ts')).map(file=>`packages/core/src/ai/tools/${file}`),
   'packages/core/src/editing/emevdEdit.ts',
   'packages/core/src/editing/nativeEditSession.ts',
   'packages/core/src/emevd/emedfRegistryResolver.ts',

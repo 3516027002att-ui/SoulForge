@@ -1,0 +1,115 @@
+import { existsSync, readdirSync, readFileSync } from 'node:fs';
+import { relative, resolve } from 'node:path';
+import { analyzeEntry } from './classify.mjs';
+import { resolveScriptEntries } from './scriptGraph.mjs';
+import { operationKey, planScript } from './commandPlan.mjs';
+import { EXCLUDED, TIER_BY_SCRIPT } from './tiers.mjs';
+
+// These checks protect only the retired claim/seal/projection workflow. Product
+// checks retain their old ownership until a narrower semantic migration exists.
+export const RETIRED_GOVERNANCE_SUITES = new Set([
+  'test:governance','test:governance-data-fixtures','test:governance-equivalence',
+  'test:handoff-integrity','test:handoff-integrity:fixtures','test:handoff-projection',
+  'test:gov-cli','test:seal-cli','handoff:fingerprint','verify:audit'
+]);
+
+export function workspaceScriptReachability(repoRoot, workspaces, workspace, name) {
+  const virtual = {...workspaces,rootScripts:{...workspaces.rootScripts}};
+  // Resolve with its real workspace directory, including node --test flags and
+  // transitive npm forwarding, rather than matching command text by substring.
+  const alias = '__workspace_target';
+  virtual.rootScripts[alias] = `npm run ${name} -w ${[...workspaces.byName].find(([,w]) => w === workspace)?.[0]}`;
+  const own = resolveScriptEntries(repoRoot,virtual,alias);
+  if (own.unresolved.length || own.cycles.length || own.entryFiles.length === 0) return 'unknown';
+  const reachable = new Set(Object.keys(workspaces.rootScripts).flatMap(root => resolveScriptEntries(repoRoot,workspaces,root).entryFiles));
+  return own.entryFiles.every(entry => reachable.has(entry)) ? 'reachable' : 'unreachable';
+}
+
+export function auditCheckRegistration(repoRoot, workspaces) {
+  const findings = [];
+  for (const name of Object.keys(workspaces.rootScripts)) {
+    if (TIER_BY_SCRIPT[name] || EXCLUDED[name] || ['check','check:list'].includes(name)) continue;
+    findings.push({severity:name.startsWith('test') ? 'warning':'error',code:'SUITE_UNREGISTERED',
+      scriptName:name,message:name.startsWith('test') ? 'Test discovered automatically; legacy tier ownership is absent.' : 'No check ownership or operational exclusion is known.'});
+  }
+  for (const [workspaceName,workspace] of workspaces.byName) {
+    for (const name of Object.keys(workspace.scripts).filter(n => n.startsWith('test'))) {
+      const status = workspaceScriptReachability(repoRoot,workspaces,workspace,name);
+      if (status === 'reachable') continue;
+      findings.push({severity:'warning',code:status === 'unknown' ? 'WORKSPACE_REACHABILITY_UNKNOWN':'WORKSPACE_SUITE_UNREACHABLE',
+        scriptName:`${workspaceName}:${name}`,message:status === 'unknown' ? 'Cannot statically determine execution.' : 'No root script covers this test entry; automatic discovery will include it.'});
+    }
+  }
+  return findings;
+}
+
+function testFiles(root) {
+  const files = [];
+  const walk = (directory) => {
+    if (!existsSync(directory)) return;
+    for (const item of readdirSync(directory,{withFileTypes:true})) {
+      if (['node_modules','dist','.git','output','bin','obj','.local-validation'].includes(item.name)) continue;
+      const path = resolve(directory,item.name);
+      if (item.isDirectory()) walk(path);
+      else if (/\.(?:fixture|test)\.(?:mjs|ts)$/u.test(item.name) || /^verify-.*fixtures\.mjs$/u.test(item.name)
+        || /^run.*Smoke\.ts$/u.test(item.name)) files.push(path);
+    }
+  };
+  for (const dir of ['scripts','packages','apps']) walk(resolve(root,dir));
+  return files.sort();
+}
+
+/** Keep explicit non-test operations; discover new convention-based tests. */
+export function discoverChecks(repoRoot, workspaces) {
+  const suites = new Map();
+  const analyze = file => {let result = workspaces.analysisCache.get(file); if (!result) {result = analyzeEntry(file);workspaces.analysisCache.set(file,result);} return result;};
+  const covered = new Set();
+  for (const [name,command] of Object.entries(workspaces.rootScripts)) {
+    if (!(name in TIER_BY_SCRIPT) && !name.startsWith('test')) continue;
+    if (RETIRED_GOVERNANCE_SUITES.has(name)) continue;
+    const entries = resolveScriptEntries(repoRoot,workspaces,name);
+    // Aggregate reachability is not execution evidence: a failing && prefix can
+    // leave every later check unexecuted. Only a single independently runnable
+    // test can suppress convention discovery.
+    const steps = planScript(repoRoot,workspaces,name);
+    if (entries.entryFiles.length === 1 && steps.filter(step => step.kind === 'test').length === 1) {
+      entries.entryFiles.forEach(file => covered.add(file));
+    }
+    const requirements = new Set(entries.entryFiles.flatMap(file => analyze(file).requirements));
+    suites.set(name,{scriptName:name,tier:TIER_BY_SCRIPT[name] ?? (requirements.has('native-env') ? 'native':'unit'),
+      requirements:[...requirements],steps,origin:'npm',command});
+  }
+  // Workspace aliases are independently selectable, even when a root
+  // aggregate statically reaches them. Operation-key caching prevents reruns
+  // only after that exact operation actually completed.
+  for (const [workspaceName, workspace] of workspaces.byName) {
+    for (const name of Object.keys(workspace.scripts).filter(name => name.startsWith('test'))) {
+      const scriptName = `workspace:${workspaceName}:${name}`;
+      const virtual = {...workspaces,rootScripts:{...workspaces.rootScripts,[scriptName]:`npm run ${name} -w ${workspaceName}`}};
+      const entries = resolveScriptEntries(repoRoot,virtual,scriptName);
+      const steps = planScript(repoRoot,workspaces,name,{workspace:workspaceName});
+      const requirements = new Set(entries.entryFiles.flatMap(file => analyze(file).requirements));
+      suites.set(scriptName,{scriptName,tier:TIER_BY_SCRIPT[name] ?? (requirements.has('native-env') ? 'native':'unit'),requirements:[...requirements],steps,origin:'workspace',command:workspace.scripts[name]});
+      if (entries.entryFiles.length === 1 && steps.filter(step => step.kind === 'test').length === 1) entries.entryFiles.forEach(file => covered.add(file));
+    }
+  }
+  // Do not rediscover retired workflow-specific tests by filename.
+  for (const name of RETIRED_GOVERNANCE_SUITES) {
+    resolveScriptEntries(repoRoot,workspaces,name).entryFiles.forEach(file => covered.add(file));
+  }
+  for (const file of testFiles(repoRoot)) {
+    if (covered.has(file)) continue;
+    const path = relative(repoRoot,file).replaceAll('\\','/');
+    const analysis = analyze(file);
+    const name = `file:${path}`;
+    const workspaceDir = file.endsWith('.ts') ? [...workspaces.byDir.keys()].find(dir => path.startsWith(`${dir}/src/`)) : undefined;
+    const executionPath = workspaceDir ? path.replace(`${workspaceDir}/src/`,`${workspaceDir}/dist/`).replace(/\.ts$/u,'.js') : path;
+    const isNodeTest = /\.(?:fixture|test)\./u.test(path);
+    const args = [...(file.endsWith('.ts') && !workspaceDir ? ['--experimental-strip-types']:[]),...(isNodeTest ? ['--test']:[]),executionPath];
+    const operation = {cwd:repoRoot,command:'node',args,kind:'test',env:{},owner:name};
+    suites.set(name,{scriptName:name,tier:analysis.requirements.includes('native-env') ? 'native':'unit',
+      requirements:analysis.requirements,steps:[{...operation,key:operationKey(operation)}],origin:'file',source:path,
+      ...(workspaceDir ? {buildInput:workspaceDir}: {})});
+  }
+  return suites;
+}

@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { createOpaqueCursor, parseOpaqueCursor } from '@soulforge/shared';
+import { createOpaqueCursor, parseOpaqueCursor, formatActionAddress } from '@soulforge/shared';
 import type {
   EventArg,
   EventExport,
@@ -924,6 +924,27 @@ export class WorkspaceIndex {
     return true;
   }
 
+  /** Merge bounded reads from the same snapshot without dropping unread siblings. */
+  mergeTaeEvents(value: TaeExport): boolean {
+    const previous = this.taeExports.find((item) => item.sourceUri === value.sourceUri);
+    if (!previous || previous.sourceHash !== value.sourceHash || previous.sourceRevision !== value.sourceRevision
+      || previous.readerSchemaRevision !== value.readerSchemaRevision)
+      return this.upsertTaeExport(value);
+    const key = (animation: TaeAnimSymbol) => JSON.stringify([animation.taeEntryIndex, animation.taeEntryId, animation.taeEntryName, animation.taeGroup, animation.animId]);
+    const animations = new Map(previous.animations.map((animation) => [key(animation), animation]));
+    for (const animation of value.animations) {
+      const old = animations.get(key(animation));
+      const events = new Map((old?.events ?? []).map((event) => [event.index, event]));
+      for (const event of animation.events) events.set(event.index, event);
+      const ordered = [...events.values()].sort((a, b) => a.index - b.index);
+      const eventCount = animation.eventCount ?? old?.eventCount;
+      const eventsComplete = eventCount !== undefined && ordered.length === eventCount
+        && ordered.every((event, index) => event.index === index);
+      animations.set(key(animation), { ...old, ...animation, ...(eventCount === undefined ? {} : { eventCount }), eventsComplete, events: ordered });
+    }
+    return this.upsertTaeExport({ ...previous, ...value, animations: [...animations.values()] });
+  }
+
   /**
    * Publish a bounded LUABND catalog or a native child read into the shared
    * semantic snapshot. A list operation may only provide catalog-only or
@@ -1287,6 +1308,29 @@ export class WorkspaceIndex {
       .filter((item) => this.isActiveSemanticSourceUri(item.sourceUri))
       .flatMap((item) => item.animations.flatMap((anim) => anim.events));
     return searchSymbols(events, query, limit, taeEventSearchText);
+  }
+
+  /** A hit expands to its whole native action; limits count actions. */
+  searchTaeActionGroups(query: string, limit = 100) {
+    const hits = this.searchTaeEvents(query, Number.MAX_SAFE_INTEGER);
+    const byUri = new Map(hits.map((hit) => [hit.item, hit]));
+    const groups = this.taeExports.filter((item) => this.isActiveSemanticSourceUri(item.sourceUri))
+      .flatMap((source) => source.animations.flatMap((animation) => {
+        const matches = animation.events.flatMap((event) => byUri.has(event) ? [byUri.get(event)!] : []);
+        if (matches.length === 0) return [];
+        const selector = animation.taeEntryIndex !== undefined ? { taeEntryIndex: animation.taeEntryIndex }
+          : animation.taeEntryId !== undefined ? { taeEntryId: animation.taeEntryId }
+          : animation.taeEntryName !== undefined ? { taeEntryName: animation.taeEntryName }
+          : animation.taeGroup !== undefined ? { taeGroup: animation.taeGroup } : {};
+        return [{ item: { sourceUri: source.sourceUri, chrId: source.chrId,
+          ...animation, eventsComplete: (animation.eventCount !== undefined
+            && animation.events.length === animation.eventCount && [...animation.events].sort((a, b) => a.index - b.index).every((e, i) => e.index === i)),
+          address: formatActionAddress({ chr: source.chrId, animId: animation.animId, ...selector }),
+          sourceHash: source.outerFileHash ?? source.sourceHash, sourceRevision: source.sourceRevision, readerSchemaRevision: source.readerSchemaRevision,
+          events: [...animation.events].sort((a, b) => a.index - b.index) },
+          score: Math.max(...matches.map((hit) => hit.score)), matchedEventIndices: matches.map((hit) => hit.item.index) }];
+      }));
+    return groups.sort((a, b) => b.score - a.score).slice(0, limit);
   }
 
   lookupTextEntries(textId: number, category?: string): TextEntrySymbol[] {

@@ -21,6 +21,7 @@ const execFileAsync = promisify(execFile);
 const SOURCE_DIRECTORIES = [
   'packages/shared/src',
   'packages/core/src',
+  'packages/agent/src',
   'apps/desktop/src'
 ];
 
@@ -34,6 +35,7 @@ const SOURCE_FILES = [
   'packages/shared/tsconfig.json',
   'packages/core/package.json',
   'packages/core/tsconfig.json',
+  'packages/agent/package.json',
   'apps/desktop/package.json',
   'apps/desktop/tsconfig.json',
   'apps/desktop/electron.vite.config.ts'
@@ -155,7 +157,10 @@ export async function computeAgentProductionBuildFingerprint(repoRoot) {
     expandInputs(repoRoot, OUTPUT_DIRECTORIES)
   ]);
   const [source, output] = await Promise.all([
-    fingerprintFiles(repoRoot, sourcePaths),
+    fingerprintFiles(repoRoot, sourcePaths.filter((file) => {
+      const path = portablePath(relative(repoRoot, file));
+      return !path.startsWith('packages/agent/src/') || !/\.(test|spec)\.mjs$/.test(path);
+    })),
     fingerprintFiles(repoRoot, outputPaths)
   ]);
   return { source, output };

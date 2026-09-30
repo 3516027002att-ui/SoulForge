@@ -320,6 +320,7 @@ internal sealed class TaeDocumentSet
         return new
         {
             format = "TAE",
+            identityProjectionVersion = TaeNativeDocument.IdentityProjectionVersion,
             version = versionValues.Length == 1
                 ? $"0x{versionValues[0]:X8}"
                 : "aggregate",

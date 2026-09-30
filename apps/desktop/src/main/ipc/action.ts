@@ -1375,7 +1375,8 @@ export function registerActionIpcHandlers(deps: ActionIpcDeps): void {
     if (roots.diagnostics.length > 0) return { ok: false, diagnostics: roots.diagnostics };
     // TAE 字段、事件名称和长度变体均由 Bridge 内置 first-party schema 处理。
     // 这里只传分页参数；生产链不读取编辑器安装目录或外部模板。
-    const paginationOptions: Record<string, unknown> = {};
+    // c0000 has thousands of actions; render one bounded native page initially.
+    const paginationOptions: Record<string, unknown> = { animationPage: 0, animationPageSize: 64 };
     if (typeof options?.animationPage === 'number' && Number.isFinite(options.animationPage) && options.animationPage >= 0) {
       paginationOptions.animationPage = Math.floor(options.animationPage);
     }

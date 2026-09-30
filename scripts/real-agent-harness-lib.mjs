@@ -287,6 +287,40 @@ export function evaluateWriteAdmission(goals, { observationOnly = false, candida
   };
 }
 
+/** Classify an independently observed native postcondition, not a model receipt. */
+export function evaluateNativeGoalOutcome({
+  nativeReadOk, assertionOk, proofOk, resourceChanged = false,
+  requireMutation = false, unavailable = false, mutationEvidenceAvailable = true
+}) {
+  if (unavailable) return { verified: false, status: 'unverified', reason: 'verification-unavailable' };
+  if (!nativeReadOk) return { verified: false, status: 'failed', reason: 'native-read-failed' };
+  if (!assertionOk) return { verified: false, status: 'failed', reason: 'postcondition-failed' };
+  if (requireMutation && !mutationEvidenceAvailable) return { verified: false, status: 'unverified', reason: 'mutation-evidence-unavailable' };
+  if (requireMutation && !resourceChanged) return { verified: false, status: 'failed', reason: 'required-mutation-missing' };
+  if (!proofOk) return { verified: false, status: 'unverified', reason: 'source-proof-missing' };
+  return { verified: true, status: 'verified', reason: 'postcondition-verified' };
+}
+
+/** Task outcome is independent of the model's terminal and of cleanup policy. */
+export function evaluateTaskOutcome({ taskContract, goalCoverage, lifecycleOk, durableEvidenceOk,
+  runtimeOk, writeMode, executionMode, committedOperationOk, writeObserved,
+  rollbackStatus, treeRestoredExactly }) {
+  const intent = taskContract?.intent ?? 'modify';
+  if (executionMode === 'candidate-experiment') return {passed:false,status:'unverified',reason:'candidate-experiment'};
+  if (intent === 'read' && (committedOperationOk || writeObserved)) return {passed:false,status:'failed',reason:'read-task-mutated'};
+  if (!lifecycleOk || !runtimeOk) return {passed:false,status:'failed',reason:'execution-failed'};
+  if (goalCoverage?.status === 'failed') return {passed:false,status:'failed',reason:'postcondition-failed'};
+  if (!goalCoverage?.taskCompletionVerified || !durableEvidenceOk) return {passed:false,status:'unverified',reason:'evidence-incomplete'};
+  if (intent === 'modify' && (!writeMode || !committedOperationOk || !writeObserved)) return {passed:false,status:'failed',reason:'required-mutation-missing'};
+  // Actual mutations must always be restored in the harness. Read/ensure runs
+  // with no mutations need only prove that the isolated tree is unchanged.
+  if (!treeRestoredExactly || (writeObserved && rollbackStatus !== 'verified')
+    || (intent === 'restore' && rollbackStatus !== 'verified')) {
+    return {passed:false,status:'failed',reason:'restoration-failed'};
+  }
+  return {passed:true,status:'passed',reason:'applicable-postconditions-verified'};
+}
+
 export function evaluateGoalCoverage(goals, observationOnly, taskContract = undefined) {
   const normalizedGoals = Array.isArray(goals) ? goals : [];
   const required = normalizedGoals.filter((goal) => goal?.required);
@@ -300,9 +334,13 @@ export function evaluateGoalCoverage(goals, observationOnly, taskContract = unde
       || goal.verificationStatus === 'unsupported'
       || goal.status === 'unsupported'
   ));
+  const failedGoals = required.filter((goal) => (
+    !unsupportedGoals.includes(goal) && !observationGoals.includes(goal) && goal.status === 'failed'
+  ));
   const unverifiedGoals = required.filter((goal) => (
     !unsupportedGoals.includes(goal)
       && !observationGoals.includes(goal)
+      && !failedGoals.includes(goal)
       && goal.verified !== true
   ));
   const allRequiredVerified = required.length > 0 && required.every((goal) => (
@@ -378,16 +416,20 @@ export function evaluateGoalCoverage(goals, observationOnly, taskContract = unde
     goal.verificationClass === 'runtime' || goal.runtimeVerified === true
   ));
   const runtimeEvidenceMissing = runtimeRequired && !runtimeGoals.some((goal) => goal.verified === true);
-  const taskCoverageOk = !observationOnly
+  // A declared read-only outcome can be verified while writes are disabled.
+  // Legacy observation experiments still cannot mint task completion.
+  const canVerifyTask = !observationOnly || taskContract?.intent === 'read';
+  const declaredOutcomes = Array.isArray(taskContract?.postconditions) && taskContract.postconditions.length > 0;
+  const taskCoverageOk = canVerifyTask
     && contractCheck.ok
     && !observationGoals.length
     && !corpusMismatch
     && unsupportedGoals.length === 0
     && !runtimeEvidenceMissing
-    && semanticGoals.length > 0
+    && (semanticGoals.length > 0 || declaredOutcomes)
     && allRequiredVerified
-    && semanticChecksOk;
-  const status = observationOnly
+    && (semanticGoals.length === 0 || semanticChecksOk);
+  const status = !canVerifyTask
     ? 'observation_only'
     : !contractCheck.ok
       ? 'contract_invalid'
@@ -395,6 +437,8 @@ export function evaluateGoalCoverage(goals, observationOnly, taskContract = unde
       ? 'unsupported'
       : observationGoals.length > 0
         ? 'observation_only'
+      : failedGoals.length > 0
+        ? 'failed'
       : unverifiedGoals.length > 0
         ? 'unverified'
         : runtimeEvidenceMissing
@@ -416,7 +460,7 @@ export function evaluateGoalCoverage(goals, observationOnly, taskContract = unde
     semanticChecksOk,
     // goalsOk remains the required-goal contract used by older PARAM-only
     // runs. Semantic task acceptance additionally requires taskCoverageOk.
-    goalsOk: !observationOnly && contractCheck.ok && observationGoals.length === 0
+    goalsOk: canVerifyTask && contractCheck.ok && observationGoals.length === 0
       && unsupportedGoals.length === 0 && !runtimeEvidenceMissing && allRequiredVerified,
     taskCoverageOk,
     taskCompletionVerified: taskCoverageOk,
@@ -424,12 +468,13 @@ export function evaluateGoalCoverage(goals, observationOnly, taskContract = unde
     contractGoalMissing: contractCheck.missingGoalIds,
     observationGoalIds: observationGoals.map((goal) => goal.goalId ?? null),
     unsupportedGoalIds: unsupportedGoals.map((goal) => goal.goalId ?? null),
+    failedGoalIds: failedGoals.map((goal) => goal.goalId ?? null),
     unverifiedGoalIds: unverifiedGoals.map((goal) => goal.goalId ?? null),
     runtimeEvidenceMissing,
     corpusMismatch,
     corpusMismatches,
     diagnostics: [
-      ...(observationOnly ? [{
+      ...(!canVerifyTask ? [{
         severity: 'warning', code: 'TASK_OBSERVATION_ONLY',
         message: '本次只观察原文任务执行和可选原生字段，不作任务通过声明。'
       }] : []),
@@ -453,9 +498,13 @@ export function evaluateGoalCoverage(goals, observationOnly, taskContract = unde
         severity: 'error', code: 'RUNTIME_EVIDENCE_REQUIRED',
         message: '当前任务契约要求运行时证据；native read/static evidence 不能自动代表游戏行为。'
       }] : []),
-      ...(!observationOnly && !corpusMismatch && unsupportedGoals.length === 0 && semanticGoals.length === 0 ? [{
+      ...(canVerifyTask && !declaredOutcomes && !corpusMismatch && unsupportedGoals.length === 0 && semanticGoals.length === 0 ? [{
         severity: 'warning', code: 'TASK_COVERAGE_UNVERIFIED',
         message: '当前验证器仅检查指定 PARAM 字段；原文任务的完整语义尚未验证。'
+      }] : []),
+      ...(canVerifyTask && failedGoals.length > 0 ? [{
+        severity: 'error', code: 'REQUIRED_GOAL_FAILED',
+        message: `必需目标实际断言失败：${failedGoals.map((goal) => goal.goalId ?? 'unknown').join(', ')}。`
       }] : []),
       ...(!observationOnly && !corpusMismatch && unsupportedGoals.length === 0 && semanticGoals.length > 0 && !taskCoverageOk ? [{
         severity: 'error', code: 'TASK_SEMANTIC_GOAL_FAILED',

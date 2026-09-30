@@ -85,7 +85,6 @@ export interface AgentToolBridge {
   ) => Promise<{ ok: boolean; content: string; code?: string }>;
 }
 
-const PARALLEL_SAFE_LEVELS = new Set(['read', 'analyze']);
 const DISCOVERY_TOOLS = new Set([
   'search_resources',
   'search_param_rows',
@@ -115,7 +114,7 @@ const NATIVE_READ_TOOLS = new Set([
   'query_map_objects',
   'inspect_map_object'
 ]);
-const PAGED_METADATA_TOOLS = new Set(['analyze_luabnd_script', 'analyze_tae_structure', 'search_param_fields']);
+const PAGED_METADATA_TOOLS = new Set(['analyze_luabnd_script', 'analyze_tae_structure', 'search_param_fields', 'search_tae_events', 'read_tae_events']);
 const DISCOVERY_QUERY_TOOLS = new Set([
   'search_resources',
   'search_param_rows',
@@ -143,6 +142,7 @@ const MUTATION_TOOLS = new Set([
   'apply_emevd_dsl',
   'mutate_tae_event_times',
   'mutate_tae_event_fields',
+  'insert_tae_events',
   'mutate_msb_part_transform',
   'mutate_luabnd_script',
   'batch_transform_map_objects',
@@ -3009,8 +3009,8 @@ function boundedToolContent(
     return boundedFailureContent({
       code: 'RESULT_METADATA_WINDOW_TOO_LARGE',
       message: '元数据窗口超过输出预算；用相同查询、相同 cursor 和更小 limit 重读当前页。',
-      details: { retry: { ...(input ?? {}), [name === 'analyze_tae_structure' ? 'pageSize' : 'limit']:
-        Math.max(1, Math.floor(Number(name === 'analyze_tae_structure' ? input?.pageSize ?? 32 : input?.limit ?? 6) / 2)) } }
+      details: { retry: { ...(input ?? {}), [name === 'analyze_tae_structure' || name === 'read_tae_events' ? 'pageSize' : 'limit']:
+        Math.max(1, Math.floor(Number(name === 'analyze_tae_structure' || name === 'read_tae_events' ? input?.pageSize ?? 32 : input?.limit ?? 6) / 2)) } }
     });
   }
   if (name === 'resolve_entity' && data && typeof data === 'object' && !Array.isArray(data)) {
@@ -3270,7 +3270,7 @@ export function createAgentToolBridge(options: AgentToolBridgeOptions): AgentToo
     // Carried through so the loop's approval gate can group by severity from
     // the registry's own declaration instead of guessing from the name.
     permissionLevel: descriptor.permissionLevel ?? 'read',
-    supportsParallel: PARALLEL_SAFE_LEVELS.has(descriptor.permissionLevel ?? 'read')
+    supportsParallel: descriptor.supportsParallel === true
   }));
 
   const executeTool = async (
@@ -3669,6 +3669,7 @@ function recordAutomaticNativeReadProof(input: {
             ? { taeEntryId: record.taeEntryId } : {}),
           ...(typeof record.taeEntryName === 'string' ? { taeEntryName: record.taeEntryName } : {}),
           ...(typeof record.taeGroup === 'string' ? { taeGroup: record.taeGroup } : {}),
+          ...(typeof record.eventTypeId === 'number' ? { eventTypeId: record.eventTypeId } : {}),
           ...(typeof record.startFrame === 'number' ? { startFrame: record.startFrame } : {}),
           ...(typeof record.endFrame === 'number' ? { endFrame: record.endFrame } : {}),
           ...(Array.isArray(record.fields)

@@ -1,0 +1,2 @@
+export interface AgentChildTransport {postMessage(value:unknown):void;on(event:string,listener:(value:any)=>void):unknown;removeListener(event:string,listener:(value:any)=>void):unknown;kill?():unknown}
+export function runAgentHostTransport<T>(child:AgentChildTransport,params:unknown,callbacks:Record<string,(...args:any[])=>Promise<unknown>>,options?:{signal?:AbortSignal;timeoutMs?:number;cancelGraceMs?:number;maxBytes?:number;maxPending?:number;onEvent?:(event:any)=>void;onProtocolEvent?:(event:any)=>void}):Promise<T>;

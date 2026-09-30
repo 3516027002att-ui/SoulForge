@@ -764,6 +764,12 @@ DROP TABLE IF EXISTS resource_edges;
 DROP TABLE IF EXISTS resource_nodes;
 DROP TABLE IF EXISTS resource_graph_snapshots;
 `
+  },
+  {
+    id: 17,
+    name: 'retain_native_rag_completeness',
+    sql: '',
+    addColumns: [{ table: 'rag_chunks', column: 'native_metadata_json', definition: 'TEXT' }]
   }
 ];
 

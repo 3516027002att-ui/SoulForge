@@ -142,12 +142,11 @@ function buildSyntheticTae(): Buffer {
   b.writeBigInt64LE(2n, 0x70);          // animCount
   b.writeBigInt64LE(0n, 0x78);
 
-  // ── 动画表 (0x80: 8 字节头 + 2×16 条目) ──
-  b.writeBigInt64LE(0n, 0x80);
+  // ── 动画表 (0x80: 2×16 的 ID、偏移配对，无额外表头) ──
+  b.writeBigInt64LE(10n, 0x80);         // anim0 id
   b.writeBigInt64LE(0xA8n, 0x88);       // anim0 entry offset
-  b.writeBigInt64LE(10n, 0x90);         // anim0 id
+  b.writeBigInt64LE(20n, 0x90);         // anim1 id
   b.writeBigInt64LE(0xE8n, 0x98);       // anim1 entry offset
-  b.writeBigInt64LE(20n, 0xA0);         // anim1 id
 
   // ── anim0 entry (0xA8, 0x30) ──
   b.writeBigInt64LE(0x128n, 0xA8);      // eventTableOffset
@@ -203,8 +202,9 @@ function buildSyntheticTae(): Buffer {
   b.writeBigInt64LE(0x1A0n, 0x188);
   b.writeBigInt64LE(0x1A8n, 0x190);
   b.writeBigInt64LE(0n, 0x198);
-  b.writeInt32LE(0x158, 0x1A0);
-  b.writeInt32LE(0x168, 0x1A4);
+  // Real a75 native groups point to event-table entries, not event-data headers.
+  b.writeInt32LE(0x128, 0x1A0);
+  b.writeInt32LE(0x140, 0x1A4);
   b.writeInt32LE(16, 0x1A8);
   b.writeInt32LE(0, 0x1AC);
   b.writeBigInt64LE(0n, 0x1B0);
@@ -382,7 +382,7 @@ async function syntheticLeg(): Promise<void> {
       throw new Error(`insertCount 应为 1：${JSON.stringify(writeB.data)}`);
     }
     const outBBytes = await readFile(outB);
-    const expectedSize = SYN.fileSize + 8 + 8 + 16 + (2 * 24 + 24);
+    const expectedSize = SYN.fileSize + 8 + 16 + 24 + 24 + 32 + 8 + 72;
     if (outBBytes.length !== expectedSize) {
       throw new Error(`insert 后 output 长度应为 0x${expectedSize.toString(16)}，实际 0x${outBBytes.length.toString(16)}`);
     }
@@ -390,12 +390,13 @@ async function syntheticLeg(): Promise<void> {
     if (outBBytes.readInt32LE(SYN.declaredSizeAbs) !== outBBytes.length) {
       throw new Error('insert 后文件头声明大小未同步');
     }
-    // 追加块顺序：新时间(8) → 新参数体(8) → 新事件数据头(16) → 新事件表(72)。
+    // Native order: times, relocated existing header/body pairs, new header/body, group table/references, event table.
     const newStartAbs = SYN.fileSize;
     const newEndAbs = SYN.fileSize + 4;
-    const newParamAbs = SYN.fileSize + 8;
-    const newHeaderAbs = SYN.fileSize + 16;
-    const newTableAbs = SYN.fileSize + 32;
+    const newParamAbs = SYN.fileSize + 8 + 16 + 24 + 16;
+    const newHeaderAbs = SYN.fileSize + 8 + 16 + 24;
+    const newGroupAbs = SYN.fileSize + 8 + 16 + 24 + 24;
+    const newTableAbs = newGroupAbs + 32 + 8;
     if (Math.abs(outBBytes.readFloatLE(newStartAbs) - 3.0) > 1e-6
       || Math.abs(outBBytes.readFloatLE(newEndAbs) - 3.5) > 1e-6) {
       throw new Error('追加时间槽应为 3.0/3.5');
@@ -423,11 +424,16 @@ async function syntheticLeg(): Promise<void> {
       || outBBytes.readInt32LE(SYN.anim0EventCountField) !== 3) {
       throw new Error('动画条目事件表指针/eventCount 未更新');
     }
+    if (outBBytes.readBigInt64LE(SYN.anim0EntryAbs + 8) !== BigInt(newGroupAbs)
+      || outBBytes.readBigInt64LE(newGroupAbs + 8) !== BigInt(newGroupAbs + 32)
+      || outBBytes.readInt32LE(newGroupAbs + 32) !== newTableAbs
+      || outBBytes.readInt32LE(newGroupAbs + 36) !== newTableAbs + 24)
+      throw new Error('原有事件组引用必须重定位到最终事件表。');
     // 字节级：除声明大小/动画条目/追加区外逐字节一致。
     const diffB = byteDiffRegions(srcBytes, outBBytes);
     const allowedB: Array<[number, number]> = [
       [SYN.declaredSizeAbs, 0x10],
-      [SYN.anim0EventTableOffsetField, SYN.anim0EventTableOffsetField + 8],
+      [SYN.anim0EventTableOffsetField, SYN.anim0EventTableOffsetField + 16],
       [SYN.anim0EventCountField, SYN.anim0EventCountField + 4],
       [SYN.fileSize, outBBytes.length]
     ];

@@ -415,6 +415,7 @@ export interface RolloutSessionMeta {
 
 export type RolloutItem =
   | { type: 'session-meta'; meta: RolloutSessionMeta }
+  | { type: 'protocol-event'; envelope: import('../../../agent/src/index.mjs').AgentProtocolEvent }
   | { type: 'message'; step: number; message: ChatMessage }
   | ({ type: 'provider-usage' } & ProviderUsageSample)
   | {
