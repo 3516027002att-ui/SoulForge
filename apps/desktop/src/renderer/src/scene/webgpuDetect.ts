@@ -5,13 +5,10 @@
 
 interface GPUAdapterLike {
   features: { has: (name: string) => boolean };
-  requestAdapterInfo: () => Promise<{
-    vendor: string;
-    architecture: string;
-    device: string;
-    description: string;
-  }>;
+  readonly info?: Partial<NonNullable<WebGpuCapability['adapterInfo']>>;
 }
+
+export type RendererBackend = 'webgpu' | 'webgl2';
 
 export interface WebGpuCapability {
   available: boolean;
@@ -55,11 +52,31 @@ export async function detectWebGpu(): Promise<WebGpuCapability> {
       return { available: false, diagnostics };
     }
 
-    const info = await adapter.requestAdapterInfo();
+    // GPUAdapter.info replaces requestAdapterInfo in current Chromium.
+    // https://developer.chrome.com/blog/new-in-webgpu-127#gpuadapter_info_attribute
+    let adapterInfo: WebGpuCapability['adapterInfo'];
+    try {
+      const info = adapter.info;
+      if (info) {
+        const text = (value: unknown) => typeof value === 'string' ? value : '';
+        adapterInfo = {
+          vendor: text(info.vendor), architecture: text(info.architecture),
+          device: text(info.device), description: text(info.description)
+        };
+      }
+    } catch (error) {
+      diagnostics.push({
+        severity: 'warning',
+        code: 'WEBGPU_ADAPTER_INFO_FAILED',
+        message: `WebGPU adapter 信息不可读：${error instanceof Error ? error.message : String(error)}`
+      });
+    }
     diagnostics.push({
       severity: 'info',
       code: 'WEBGPU_ADAPTER_FOUND',
-      message: `WebGPU adapter: ${info.vendor} ${info.architecture} ${info.device}`
+      message: adapterInfo
+        ? `WebGPU adapter: ${adapterInfo.vendor} ${adapterInfo.architecture} ${adapterInfo.device}`
+        : 'WebGPU adapter 可用。'
     });
 
     // Check for required features
@@ -74,12 +91,7 @@ export async function detectWebGpu(): Promise<WebGpuCapability> {
 
     return {
       available: true,
-      adapterInfo: {
-        vendor: info.vendor,
-        architecture: info.architecture,
-        device: info.device,
-        description: info.description
-      },
+      ...(adapterInfo ? { adapterInfo } : {}),
       diagnostics
     };
   } catch (error) {
@@ -93,9 +105,17 @@ export async function detectWebGpu(): Promise<WebGpuCapability> {
 }
 
 /**
- * Determine the preferred renderer backend based on WebGPU availability.
+ * Capability discovery does not select the active backend. WebGL2 remains
+ * the default until native diffuse-blend and image/performance parity pass.
  */
-export async function preferredRendererBackend(): Promise<'webgpu' | 'webgl2'> {
+export function resolveRendererBackend(
+  override: RendererBackend | undefined,
+  _gpuAvailable: boolean
+): RendererBackend {
+  return override ?? 'webgl2';
+}
+
+export async function preferredRendererBackend(): Promise<RendererBackend> {
   const capability = await detectWebGpu();
-  return capability.available ? 'webgpu' : 'webgl2';
+  return resolveRendererBackend(undefined, capability.available);
 }

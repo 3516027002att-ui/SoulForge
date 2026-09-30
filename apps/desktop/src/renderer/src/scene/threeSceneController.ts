@@ -7,12 +7,15 @@
  * constraint 18: THREE.Object3D / renderer objects / React state are never the
  * authority. The semantic scenes are plain typed data owned by the caller.
  *
- * Backends: WebGPU-first with WebGL2 fallback. `rendererBackend` may be injected
+ * Backends: WebGL2 default until WebGPU native-material parity is verified.
+ * `rendererBackend` may be injected
  * for deterministic verification; `rendererFactory` is a headless test seam that
  * replaces GPU-backed renderer construction entirely.
  */
 
 import type { SceneDrawList } from './sceneManifestBrowser.js';
+import { resolveRendererBackend, type RendererBackend } from './webgpuDetect.js';
+export { resolveRendererBackend, type RendererBackend } from './webgpuDetect.js';
 import {
   type AuthoritativeAnimationClip,
   sampleAuthoritativePose
@@ -36,8 +39,6 @@ import type {
 } from 'three';
 
 type ThreeModule = typeof import('three');
-
-export type RendererBackend = 'webgpu' | 'webgl2';
 
 export type TransformMode = 'translate' | 'rotate' | 'scale';
 
@@ -544,17 +545,6 @@ interface InstanceBatch {
 }
 
 const HIGHLIGHT_COLOR = 0x4fa8ff;
-
-/**
- * Deterministic backend resolution: explicit override wins; otherwise WebGPU
- * when the adapter is available, WebGL2 as the compatible fallback.
- */
-export function resolveRendererBackend(
-  override: RendererBackend | undefined,
-  gpuAvailable: boolean
-): RendererBackend {
-  return override ?? (gpuAvailable ? 'webgpu' : 'webgl2');
-}
 
 /**
  * Derive a useful initial camera frame without changing the authoritative draw

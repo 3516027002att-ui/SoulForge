@@ -47,6 +47,7 @@
     "test:agent-param-dependency-batch": "tsc -b ../shared . && node dist/testing/runAgentParamDependencyBatchSmoke.js",
     "test:asset-import": "tsc -b ../shared . && node dist/testing/runAssetImportSmoke.js",
     "test:asset-writeback": "tsc -b ../shared . && node dist/testing/runAssetWritebackSmoke.js",
+    "test:bridge-platform-launch": "tsc -b ../shared . && node --test dist/bridge/runBridgeLaunch.test.js",
     "test:bridge-daemon-client": "tsc -b ../shared . && node dist/testing/runBridgeDaemonClientSmoke.js",
     "test:bridge-daemon-crash": "tsc -b ../shared . && node dist/testing/runBridgeDaemonCrashSmoke.js",
     "test:bridge-recovery-harness": "tsc -b ../shared . && node dist/testing/runBridgeRecoveryHarnessSmoke.js",

@@ -222,7 +222,7 @@ async function runBridgeWithPool<T = unknown>(
     const missing = failedBridgeResult<T>(
       options,
       'BRIDGE_PACKAGED_EXECUTABLE_MISSING',
-      '打包运行时缺少 resources/bridge/SoulForge.Bridge.exe，拒绝回退到源码项目或 dotnet run。',
+      `打包运行时缺少 ${launch.executable}，拒绝回退到源码项目或 dotnet run。`,
       { executable: launch.executable }
     );
     return withTransportTiming(missing, transportTiming, 'failed');
@@ -654,6 +654,11 @@ function resolveBridgeLaunch(
   if (options.bridgeExecutablePath) {
     return { executable: resolve(options.bridgeExecutablePath), args: [] };
   }
+  // Linux x64 uses its native apphost in both packaged and source builds.
+  // Never select a neighboring Windows binary from a mixed build directory.
+  const linuxX64 = process.platform === 'linux' && process.arch === 'x64';
+  const runtimeIdentifier = linuxX64 ? 'linux-x64' : 'win-x64';
+  const executableName = linuxX64 ? 'SoulForge.Bridge' : 'SoulForge.Bridge.exe';
 
   // A packaged Electron build has no repository checkout or dotnet project.
   // electron-builder places the self-contained Bridge under resources/bridge;
@@ -665,7 +670,7 @@ function resolveBridgeLaunch(
   };
   const packagedResourceRoot = electronProcess.resourcesPath;
   if (packagedResourceRoot && electronProcess.defaultApp !== true) {
-    const packaged = resolve(packagedResourceRoot, 'bridge', 'SoulForge.Bridge.exe');
+    const packaged = resolve(packagedResourceRoot, 'bridge', executableName);
     return {
       executable: packaged,
       args: [],
@@ -676,16 +681,26 @@ function resolveBridgeLaunch(
 
   const projectDirectory = dirname(bridgeProjectPath);
   const builtCandidates = [
-    join(projectDirectory, 'bin', 'Release', 'net10.0', 'win-x64', 'publish', 'SoulForge.Bridge.exe'),
-    join(projectDirectory, 'bin', 'Release', 'net10.0', 'win-x64', 'SoulForge.Bridge.exe'),
-    join(projectDirectory, 'bin', 'Debug', 'net10.0', 'win-x64', 'SoulForge.Bridge.exe')
+    join(projectDirectory, 'bin', 'Release', 'net10.0', runtimeIdentifier, 'publish', executableName),
+    join(projectDirectory, 'bin', 'Release', 'net10.0', runtimeIdentifier, executableName),
+    join(projectDirectory, 'bin', 'Debug', 'net10.0', runtimeIdentifier, executableName)
   ];
   const built = builtCandidates.find(existsSync);
   if (built) return { executable: built, args: [] };
 
   return {
     executable: resolveDotnetPath(options.dotnetPath),
-    args: ['run', '--project', bridgeProjectPath, '--no-launch-profile', '--']
+    args: [
+      'run', '--project', bridgeProjectPath, '--no-launch-profile',
+      ...(linuxX64 ? [
+        // Build explicitly before daemon startup: compiler/restore logs are
+        // not NDJSON frames, so source fallback must never start a build.
+        '--no-build', '--no-restore',
+        '--runtime', runtimeIdentifier,
+        '-p:SelfContained=false', '-p:PublishSingleFile=false'
+      ] : []),
+      '--'
+    ]
   };
 }
 
