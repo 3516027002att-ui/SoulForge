@@ -3,12 +3,13 @@ import { lstat, mkdir, readFile, readdir, writeFile } from 'node:fs/promises';
 import { dirname, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-export const BRIDGE_PRODUCTION_BUILD_SCHEMA_VERSION = 1;
+export const BRIDGE_PRODUCTION_BUILD_SCHEMA_VERSION = 2;
 export const BRIDGE_PROJECT_RELATIVE_PATH = 'bridge/SoulForge.Bridge';
 export const BRIDGE_PUBLISH_RELATIVE_PATH = `${BRIDGE_PROJECT_RELATIVE_PATH}/bin/Release/net10.0/win-x64/publish`;
 export const BRIDGE_PUBLISH_EXECUTABLE_RELATIVE_PATH = `${BRIDGE_PUBLISH_RELATIVE_PATH}/SoulForge.Bridge.exe`;
 export const BRIDGE_PRODUCTION_BUILD_RECEIPT = `${BRIDGE_PUBLISH_RELATIVE_PATH}/bridge-production-build.json`;
-export const BRIDGE_EXTERNAL_BUILD_INPUTS = Object.freeze(['global.json', 'scripts/run-dotnet.mjs']);
+export const BRIDGE_EXTERNAL_BUILD_INPUTS = Object.freeze(['global.json', 'scripts/run-dotnet.mjs', 'scripts/build-first-party-hksc-native.mjs']);
+export const BRIDGE_NATIVE_SOURCE_RELATIVE_PATH = 'bridge/native/hksc';
 export const BRIDGE_PUBLISH_SCRIPT_INPUT = 'package.json#scripts.bridge:publish';
 
 /** Keep the legacy Windows API default; Linux callers select their target explicitly. */
@@ -22,6 +23,7 @@ export function bridgeBuildTarget({ runtimeIdentifier = 'win-x64' } = {}) {
   return {
     runtimeIdentifier, publish, script,
     executable: `${publish}/${linux ? 'SoulForge.Bridge' : 'SoulForge.Bridge.exe'}`,
+    nativeLibrary: `${publish}/${linux ? 'libSoulForge.Hksc.Native.so' : 'SoulForge.Hksc.Native.dll'}`,
     receipt: `${publish}/bridge-production-build.json`,
     scriptInput: `package.json#scripts.${script}`
   };
@@ -129,9 +131,11 @@ export async function computeBridgeSourceFingerprint(repoRoot, options) {
       sourceRoot: portablePath(relative(root, sourceRoot))
     });
   }
+  const nativeFiles = await walkSourceFiles(resolve(root, BRIDGE_NATIVE_SOURCE_RELATIVE_PATH));
+  if (nativeFiles.length === 0) throw staleError('HKS native compiler sources are empty.');
   const externalInputs = BRIDGE_EXTERNAL_BUILD_INPUTS.map((path) => resolve(root, path));
   const publishScript = await readBridgePublishScript(root, target);
-  return fingerprintFiles(root, [...files, ...externalInputs], [{
+  return fingerprintFiles(root, [...files, ...nativeFiles, ...externalInputs], [{
     path: target.scriptInput,
     content: publishScript
   }]);
@@ -146,9 +150,9 @@ async function computeHelperFingerprint() {
   };
 }
 
-async function fingerprintExecutable(repoRoot, target) {
+async function fingerprintExecutable(repoRoot, target, path = target.executable) {
   const root = resolve(repoRoot);
-  const executablePath = resolve(root, target.executable);
+  const executablePath = resolve(root, path);
   let metadata;
   try {
     metadata = await lstat(executablePath);
@@ -190,8 +194,8 @@ function comparableSource(source) {
   };
 }
 
-function comparableExecutable(executable, target) {
-  if (!isRecord(executable) || executable.path !== target.executable
+function comparableExecutable(executable, target, path = target.executable) {
+  if (!isRecord(executable) || executable.path !== path
     || !Number.isInteger(executable.bytes) || typeof executable.sha256 !== 'string') return null;
   return {
     path: executable.path,
@@ -215,6 +219,7 @@ function assertReceiptShape(receipt, manifestPath, target) {
   }
   if (!isRecord(receipt.source) || !Array.isArray(receipt.source.externalInputs)
     || !sameJson(receipt.source.externalInputs, [...BRIDGE_EXTERNAL_BUILD_INPUTS])
+    || receipt.source.nativeRoot !== BRIDGE_NATIVE_SOURCE_RELATIVE_PATH
     || receipt.source.publishScriptInput !== target.scriptInput) {
     throw staleError('Bridge production receipt 的外部构建输入无效，请重新发布 Bridge。', { manifestPath });
   }
@@ -226,10 +231,11 @@ function assertReceiptShape(receipt, manifestPath, target) {
   }
   const source = comparableSource(receipt.source);
   const executable = comparableExecutable(receipt.executable, target);
-  if (!source || !executable) {
+  const nativeLibrary = comparableExecutable(receipt.nativeLibrary, target, target.nativeLibrary);
+  if (!source || !executable || !nativeLibrary) {
     throw staleError('Bridge production receipt 字段无效，请重新发布 Bridge。', { manifestPath });
   }
-  return { source, executable };
+  return { source, executable, nativeLibrary };
 }
 
 function sameJson(left, right) {
@@ -242,6 +248,7 @@ export async function writeBridgeProductionBuildReceipt(repoRoot, options) {
   const root = resolve(repoRoot);
   const source = await computeBridgeSourceFingerprint(root, options);
   const executable = await fingerprintExecutable(root, target);
+  const nativeLibrary = await fingerprintExecutable(root, target, target.nativeLibrary);
   const helper = await computeHelperFingerprint();
   const manifestPath = receiptPath(root, target);
   const receipt = {
@@ -249,13 +256,15 @@ export async function writeBridgeProductionBuildReceipt(repoRoot, options) {
     generatedAt: new Date().toISOString(),
     source: {
       root: BRIDGE_PROJECT_RELATIVE_PATH,
+      nativeRoot: BRIDGE_NATIVE_SOURCE_RELATIVE_PATH,
       excludedDirectories: [...IGNORED_SOURCE_DIRECTORIES].sort(),
       externalInputs: [...BRIDGE_EXTERNAL_BUILD_INPUTS],
       publishScriptInput: target.scriptInput,
       ...source
     },
     helper,
-    executable
+    executable,
+    nativeLibrary
   };
   await mkdir(dirname(manifestPath), { recursive: true });
   await writeFile(manifestPath, `${JSON.stringify(receipt, null, 2)}\n`, 'utf8');
@@ -279,11 +288,13 @@ export async function assertBridgeProductionBuildFresh(repoRoot, options) {
   let currentSource;
   let currentExecutable;
   let currentHelper;
+  let currentNativeLibrary;
   try {
-    [currentSource, currentExecutable, currentHelper] = await Promise.all([
+    [currentSource, currentExecutable, currentHelper, currentNativeLibrary] = await Promise.all([
       computeBridgeSourceFingerprint(root, options),
       fingerprintExecutable(root, target),
-      computeHelperFingerprint()
+      computeHelperFingerprint(),
+      fingerprintExecutable(root, target, target.nativeLibrary)
     ]);
   } catch (error) {
     if (error?.code === 'BRIDGE_PRODUCTION_BUILD_STALE') throw error;
@@ -292,12 +303,14 @@ export async function assertBridgeProductionBuildFresh(repoRoot, options) {
   const sourceMatches = sameJson(expected.source, currentSource);
   const executableMatches = sameJson(expected.executable, currentExecutable);
   const helperMatches = sameJson(receipt.helper, currentHelper);
-  if (!sourceMatches || !executableMatches || !helperMatches) {
+  const nativeLibraryMatches = sameJson(expected.nativeLibrary, currentNativeLibrary);
+  if (!sourceMatches || !executableMatches || !helperMatches || !nativeLibraryMatches) {
     throw staleError('Bridge 构建输入、helper 规则或 Release publish 可执行文件已变化，拒绝复用旧构建。', {
       manifestPath,
       sourceMatches,
       executableMatches,
       helperMatches,
+      nativeLibraryMatches,
       receiptSourceHash: expected.source.sha256,
       currentSourceHash: currentSource.sha256,
       receiptExecutableHash: expected.executable.sha256,
@@ -309,7 +322,7 @@ export async function assertBridgeProductionBuildFresh(repoRoot, options) {
   return {
     manifestPath,
     receipt,
-    current: { source: currentSource, executable: currentExecutable, helper: currentHelper }
+    current: { source: currentSource, executable: currentExecutable, helper: currentHelper, nativeLibrary: currentNativeLibrary }
   };
 }
 

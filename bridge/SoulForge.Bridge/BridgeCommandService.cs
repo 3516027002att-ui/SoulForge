@@ -2739,8 +2739,34 @@ internal sealed class BridgeCommandService
                 var maxVertices = OptionInt("maxVertices", 10_000);
                 var maxIndices = OptionInt("maxIndices", 30_000);
                 var texturePackagePaths = OptionPaths("texturePackagePaths", 8);
+                if (meshIndex < 0 || meshIndex >= document.Meshes.Count)
+                    return BridgeResult<object>.Failed(file, "chr", "FLVER_MESH_INDEX_OUT_OF_RANGE", $"Mesh index {meshIndex} is outside [0,{document.Meshes.Count}).");
+                var sourceMesh = document.Meshes[meshIndex];
+                var selectedFaceSetIndex = document.GetDisplayFaceSetOrdinal(meshIndex);
+                var selectedFaceSet = document.GetFaceSet(selectedFaceSetIndex);
+                if (sourceMesh.VertexCount == 0 || sourceMesh.FaceSetIndices.Count == 0 || selectedFaceSet?.IndexCount == 0)
+                    return BridgeResult<object>.Partial(file, "chr", new[] {
+                        new Diagnostic("info", "FLVER_MESH_EMPTY_TOPOLOGY", "Native mesh has no drawable vertices or display triangles; it is not a missing mesh.", BridgeResult<object>.MakeSourceUri(file))
+                    }, new { meshIndex, vertexCount = sourceMesh.VertexCount, indexCount = selectedFaceSet?.IndexCount ?? 0, geometryEmpty = true });
+                if (selectedFaceSet is null)
+                    return BridgeResult<object>.Failed(file, "chr", "FLVER_MESH_TOPOLOGY_DECODE_UNAVAILABLE", "Mesh exists but its display FaceSet references or index encoding are unsupported.");
+                if (sourceMesh.VertexCount > maxVertices)
+                    return BridgeResult<object>.Failed(file, "chr", "FLVER_MESH_VERTEX_LIMIT_EXCEEDED", $"Mesh requires {sourceMesh.VertexCount} vertices; requested maximum is {maxVertices}.");
                 var positions = document.GetMeshPositionsBase64(meshIndex, maxVertices);
+                if (positions == null)
+                    return BridgeResult<object>.Failed(file, "chr", "FLVER_MESH_POSITION_DECODE_UNAVAILABLE", "Mesh exists but its complete position layout cannot be decoded within the requested bounds.", new { meshIndex, sourceMesh.VertexCount, document.LayoutWarnings, document.UnparsedGaps });
                 var indices = document.GetMeshIndicesBase64(meshIndex, maxIndices);
+                if (indices == null)
+                {
+                    var descriptor = document.GetMeshGeometryDescriptor(meshIndex);
+                    var requiredIndices = descriptor is null ? 0 : checked(document.CountDisplayTriangles(descriptor) * 3);
+                    if (descriptor is not null && requiredIndices == 0)
+                        return BridgeResult<object>.Partial(file, "chr", new[] {
+                            new Diagnostic("info", "FLVER_MESH_EMPTY_TOPOLOGY", "Native display FaceSet contains no nondegenerate triangles.", BridgeResult<object>.MakeSourceUri(file))
+                        }, new { meshIndex, vertexCount = sourceMesh.VertexCount, indexCount = selectedFaceSet.IndexCount, geometryEmpty = true });
+                    return BridgeResult<object>.Failed(file, "chr", requiredIndices > maxIndices ? "FLVER_MESH_INDEX_LIMIT_EXCEEDED" : "FLVER_MESH_INDEX_DECODE_UNAVAILABLE",
+                        $"Mesh exists but complete display indices are unavailable (required={requiredIndices}, maximum={maxIndices}).");
+                }
                 var uvSets = document.GetMeshUVSetsBase64(meshIndex, maxVertices);
                 var uvs = uvSets?.FirstOrDefault();
                 var normals = document.GetMeshNormalsBase64(meshIndex, maxVertices);
@@ -2748,8 +2774,7 @@ internal sealed class BridgeCommandService
                 var boneIndices = document.GetMeshBoneIndicesBase64(meshIndex, maxVertices);
                 var vertexColorRead = document.GetMeshVertexColorDiagnostics(meshIndex, maxVertices);
                 var vertexAlpha = vertexColorRead.FirstAlphaBase64;
-                if (positions == null)
-                    return BridgeResult<object>.Failed(file, "chr", "FLVER_MESH_NOT_FOUND", $"网格索引 {meshIndex} 超出范围或数据不可用。");
+
                 var mesh = document.Meshes[meshIndex];
                 var textureLeaves = ResolveCharacterTextureLeaves(
                     file,

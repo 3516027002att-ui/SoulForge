@@ -3,7 +3,7 @@
  * (threeSceneController.ts).
  *
  * Proves, without any real GPU / DOM / game assets:
- *   1. Backend selection — WebGPU-first with WebGL2 fallback (resolveRendererBackend).
+ *   1. Backend selection — WebGL2 default until verified WebGPU parity (resolveRendererBackend).
  *   2. Proxy scene natural fallback: in Node navigator has no `gpu`, so the mount
  *      must select WebGL2 on its own (rendererFactory only replaces the renderer
  *      implementation, never the backend decision).
@@ -446,7 +446,7 @@ function testSkinningBindPose(record: (name: string) => void): void {
 // ---------------------------------------------------------------------------
 async function testBackendResolution(record: (name: string) => void): Promise<void> {
   assertEqual(resolveRendererBackend(undefined, false), 'webgl2', 'WebGPU 不可用 → WebGL2 回退');
-  assertEqual(resolveRendererBackend(undefined, true), 'webgpu', 'WebGPU 可用 → WebGPU 优先');
+  assertEqual(resolveRendererBackend(undefined, true), 'webgl2', 'WebGPU 可用仍保留已验证 WebGL2 默认');
   assertEqual(resolveRendererBackend('webgl2', true), 'webgl2', '显式覆盖优先于能力探测');
   assertEqual(resolveRendererBackend('webgpu', false), 'webgpu', '显式 WebGPU 覆盖不受能力探测影响');
   record('backend-resolution');
@@ -601,14 +601,14 @@ async function testProxyScene(record: (name: string) => void): Promise<void> {
   assert(normalDistance > 0, 'W 连续漫游产生位移');
   assert(Math.abs(acceleratedDistance / normalDistance - 3.5) < 1e-6, 'Shift+W 位移严格为普通 W 的 3.5x');
 
-  // 全量释放：内容 + 高亮 overlay + 静态资源（grid/axes geometry）全部 dispose。
+  // 全量释放：内容 + 高亮 overlay + 静态资源（grid/axes geometry + material）全部 dispose。
   handle.dispose();
   assert(createdRenderer.disposed, 'renderer.dispose 被调用');
   for (const resource of audit) {
     assert(disposedSet.has(resource), `代理内容已释放：${resourceName(resource)}`);
   }
   // 内容(2) + 高亮 overlay(1) + 静态(2) = 5。
-  assertEqual(totalDisposeCalls - baselineDispose, 5, '释放计数=内容+overlay+静态资源，无泄漏');
+  assertEqual(totalDisposeCalls - baselineDispose, 7, '释放计数=内容+overlay+静态资源，无泄漏');
 
   record('proxy-natural-webgl2-fallback');
   record('proxy-picking-highlight');
@@ -1038,7 +1038,7 @@ async function main(): Promise<void> {
         ok: true,
         message: 'Three 场景投影层功能 smoke 通过（无 GPU / 无真实资产）',
         cases,
-        backendContract: 'WebGPU-first / WebGL2 fallback',
+        backendContract: 'WebGL2 default / explicit WebGPU preview',
         headless: true,
         filesystemAccess: false
       },

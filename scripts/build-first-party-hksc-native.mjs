@@ -49,6 +49,10 @@ function findVisualStudioDevCmd() {
   const explicit = process.env.SOULFORGE_VSDEVCMD;
   const candidates = [
     explicit,
+    process.env.VSINSTALLDIR ? join(process.env.VSINSTALLDIR, 'Common7/Tools/VsDevCmd.bat') : undefined,
+    'C:\\Program Files\\Microsoft Visual Studio\\2022\\Enterprise\\Common7\\Tools\\VsDevCmd.bat',
+    'C:\\Program Files\\Microsoft Visual Studio\\2022\\Professional\\Common7\\Tools\\VsDevCmd.bat',
+    'C:\\Program Files\\Microsoft Visual Studio\\2022\\Community\\Common7\\Tools\\VsDevCmd.bat',
     'C:\\Program Files\\Microsoft Visual Studio\\2022\\BuildTools\\Common7\\Tools\\VsDevCmd.bat',
     'C:\\Program Files (x86)\\Microsoft Visual Studio\\2022\\BuildTools\\Common7\\Tools\\VsDevCmd.bat'
   ].filter(Boolean);
@@ -60,8 +64,8 @@ function findVisualStudioDevCmd() {
 }
 
 async function main() {
-  if (process.platform !== 'win32') {
-    throw new Error('FIRST_PARTY_HKS_NATIVE_WINDOWS_ONLY: Sekiro HKS native compiler 只为 Windows Bridge 构建。');
+  if (!['win32', 'linux'].includes(process.platform) || process.arch !== 'x64') {
+    throw new Error('FIRST_PARTY_HKS_NATIVE_PLATFORM_UNSUPPORTED: HKS native build supports Windows/Linux x64.');
   }
   const outputDir = parseOutput();
   await mkdir(outputDir, { recursive: true });
@@ -73,6 +77,19 @@ async function main() {
 
   const temp = await mkdtemp(join(tmpdir(), 'soulforge-hksc-build-'));
   try {
+    if (process.platform === 'linux') {
+      const output = join(outputDir, 'libSoulForge.Hksc.Native.so');
+      const result = spawnSync(process.env.SOULFORGE_CC || 'cc', [
+        '-shared', '-fPIC', '-O2', '-fvisibility=hidden',
+        '-I', sourceRoot, '-o', output,
+        ...sourceFiles.map((file) => join(sourceRoot, file)), '-lm'
+      ], { cwd: temp, stdio: 'inherit' });
+      if (result.error) throw result.error;
+      if (result.status !== 0 || !existsSync(output)) {
+        throw new Error(`FIRST_PARTY_HKS_NATIVE_BUILD_FAILED: cc exit ${result.status ?? 'unknown'}`);
+      }
+      return;
+    }
     const responseFile = join(temp, 'cl.rsp');
     const commandFile = join(temp, 'build.cmd');
     const args = [
@@ -90,7 +107,7 @@ async function main() {
     const devCmd = findVisualStudioDevCmd();
     await writeFile(commandFile, `@echo off\r\ncall "${devCmd}" -arch=x64\r\nif errorlevel 1 exit /b %errorlevel%\r\ncl @"${responseFile}"\r\n`, 'ascii');
     const result = spawnSync('cmd.exe', ['/d', '/c', commandFile], {
-      cwd: root,
+      cwd: temp,
       stdio: 'inherit',
       windowsHide: true
     });

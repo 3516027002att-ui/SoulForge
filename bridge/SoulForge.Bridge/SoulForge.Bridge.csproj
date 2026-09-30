@@ -5,7 +5,8 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
-    <RuntimeIdentifier>win-x64</RuntimeIdentifier>
+    <RuntimeIdentifier Condition="'$(RuntimeIdentifier)' == '' And '$(OS)' == 'Windows_NT'">win-x64</RuntimeIdentifier>
+    <RuntimeIdentifier Condition="'$(RuntimeIdentifier)' == '' And '$(OS)' != 'Windows_NT'">linux-x64</RuntimeIdentifier>
     <SelfContained>true</SelfContained>
     <PublishSingleFile>true</PublishSingleFile>
     <PublishTrimmed>false</PublishTrimmed>
@@ -16,11 +17,16 @@
     <EmbeddedResource Include="FormatRules\sekiro-tae-schema.v1.json.gz.base64" />
   </ItemGroup>
 
-  <Target Name="BuildFirstPartyHksNative" BeforeTargets="Build" Condition="'$(OS)' == 'Windows_NT'">
-    <Exec Command="node &quot;$(MSBuildProjectDirectory)\..\..\scripts\build-first-party-hksc-native.mjs&quot; --output &quot;$(OutputPath)&quot;" />
+  <Target Name="ValidateFirstPartyHksNativeTarget">
+    <Error Condition="('$(OS)' == 'Windows_NT' And '$(RuntimeIdentifier)' != 'win-x64') Or ('$(OS)' != 'Windows_NT' And '$(RuntimeIdentifier)' != 'linux-x64')"
+           Text="FIRST_PARTY_HKS_NATIVE_CROSS_TARGET_UNSUPPORTED: Build the native compiler on its Windows/Linux x64 target host; cross-target publishing is unavailable." />
   </Target>
 
-  <Target Name="PublishFirstPartyHksNative" AfterTargets="Publish" Condition="'$(OS)' == 'Windows_NT'">
-    <Exec Command="node &quot;$(MSBuildProjectDirectory)\..\..\scripts\build-first-party-hksc-native.mjs&quot; --output &quot;$(PublishDir)&quot;" />
+  <Target Name="BuildFirstPartyHksNative" BeforeTargets="Build" DependsOnTargets="ValidateFirstPartyHksNativeTarget">
+    <Exec Command="node &quot;$(MSBuildProjectDirectory)/../../scripts/build-first-party-hksc-native.mjs&quot; --output &quot;$(OutputPath)&quot;" />
+  </Target>
+
+  <Target Name="PublishFirstPartyHksNative" AfterTargets="Publish" DependsOnTargets="ValidateFirstPartyHksNativeTarget">
+    <Exec Command="node &quot;$(MSBuildProjectDirectory)/../../scripts/build-first-party-hksc-native.mjs&quot; --output &quot;$(PublishDir)&quot;" />
   </Target>
 </Project>

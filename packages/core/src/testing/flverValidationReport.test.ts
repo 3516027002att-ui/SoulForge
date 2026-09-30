@@ -26,3 +26,16 @@ test('valid empty models are separate from passed and failed samples', () => {
   assert.equal(module.summarizeFlverValidation([empty]).status, 'unverified');
   assert.equal(module.summarizeFlverValidation([empty]).ok, false);
 });
+
+test('classified empty meshes complete structural coverage without becoming drawable passes', () => {
+  const sample = { id: 'mixed', meshCount: 3, meshesChecked: 3, meshesOk: 2, emptyMeshIndices: [1], decodeFailures: [] };
+  const result = module.summarizeFlverValidation([sample]);
+  assert.equal(result.ok, true);
+  assert.equal(result.samples[0].validationStatus, 'passed');
+  assert.equal(result.independentReferenceVerified, false);
+  const empty = { ...sample, meshesOk: 0, emptyMeshIndices: [0, 1, 2] };
+  assert.equal(module.summarizeFlverValidation([empty]).samples[0].validationStatus, 'empty');
+  assert.equal(module.summarizeFlverValidation([empty]).ok, false);
+  assert.equal(module.summarizeFlverValidation([{ ...sample, emptyMeshIndices: [1, 1] }]).ok, false);
+  assert.equal(module.summarizeFlverValidation([{ ...sample, emptyMeshIndices: [3] }]).ok, false);
+});

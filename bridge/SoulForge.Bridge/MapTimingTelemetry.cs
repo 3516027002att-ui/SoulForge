@@ -27,6 +27,7 @@ internal sealed class MapTimingCollector
     };
 
     private readonly Stopwatch _total = Stopwatch.StartNew();
+    private readonly double _startedAtUnixMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
     private readonly Dictionary<string, double> _durations = new(StringComparer.Ordinal);
     private readonly Dictionary<string, int> _phaseCounts = new(StringComparer.Ordinal);
 
@@ -74,6 +75,10 @@ internal sealed class MapTimingCollector
             schemaVersion = 1,
             unit = "ms",
             queueWaitMs = QueueWaitMs,
+            nativeEnqueuedAtUnixMs = _startedAtUnixMs - QueueWaitMs,
+            nativeStartedAtUnixMs = _startedAtUnixMs,
+            nativeCompletedAtUnixMs = _startedAtUnixMs + totalMs,
+            clockAlignmentToleranceMs = 5,
             fileReadMs = Get("fileReadMs"),
             sourceHashMs = Get("sourceHashMs"),
             sessionLookupMs = Get("sessionLookupMs"),

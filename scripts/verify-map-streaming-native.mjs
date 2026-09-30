@@ -12,6 +12,7 @@
  * 侧结构化 Bridge 终端回执判定，renderer cleanup 与 command/artifact 终态严格分开。
  * 传 --fixture 只运行本文件内的累计窗口/状态夹具，不启动 Electron 或读取资源。
  */
+import { summarizeMapRequestTimeline } from './map-request-timeline.mjs';
 import { existsSync, writeFileSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
@@ -73,7 +74,9 @@ const AGENT_SESSION = process.env.SF_MAP_AGENT_SESSION?.trim() || null;
 const ARTIFACT_LABEL = process.env.SF_MAP_ARTIFACT_LABEL?.trim() || null;
 const LIVE_PRODUCTION_MAIN = join(ROOT, 'apps/desktop/e2e/playwright/production-main.mjs');
 const MAP_RELATIVE_PATH = `map/mapstudio/${MAP_ID}.msb.dcx`;
-const DEFAULT_TIMEOUT_MS = 240_000;
+const DEFAULT_TIMEOUT_MS = 300_000;
+const MAP_UI_REGRESSION_LIMIT_MS = 260_000;
+const MAP_BLOCKING_REGRESSION_LIMIT_MS = 400;
 const DEFAULT_DIRECT_TIMEOUT_MS = 180_000;
 const DEFAULT_CANCEL_DELAY_MS = 1_000;
 const CANCEL_OBSERVATION_MIN_MS = 5_000;
@@ -1547,12 +1550,16 @@ async function snapshotTelemetryWithProgress(page, options = {}) {
     const progressElement = document.querySelector('progress[aria-label="地图模型加载进度"]');
     const progress = progressElement?.getAttribute('value') ?? null;
     const max = progressElement?.getAttribute('max') ?? null;
+    const modelCountsText = document.querySelector('.msb-viewport-status[data-map-model-counts]')?.getAttribute('data-map-model-counts');
+    let modelCounts = null;
+    try { modelCounts = modelCountsText ? JSON.parse(modelCountsText) : null; } catch { /* Remain unverified on malformed progress. */ }
     const pageCompletedAt = performance.now();
     const pageCompletedAtUTC = Date.now();
     return {
       telemetry,
       progress: progress === null ? null : Number(progress),
       max: max === null ? null : Number(max),
+      modelCounts,
       timing: {
         pageStartedAtUTC,
         pageCompletedAtUTC,
@@ -1697,9 +1704,9 @@ function diffMapTelemetry(start, end, boundaryName = null) {
 }
 
 /**
- * 只读包装 preload 暴露的 geometry API，记录每次 renderer -> IPC/native
- * 调用的墙钟时间。这个包装不改变参数、返回值或调用顺序；如果
- * contextBridge 将方法设为不可写，则报告 unavailable，而不是猜测 native
+ * 只读观测 renderer 所属 geometry 调用边界的事件，记录每次 IPC/native
+ * 调用的墙钟时间。不改写 contextBridge 冻结导出、参数或返回值；缺少
+ * 实际边界观测时不猜测 native
  * 等待时间。调用记录只保留有限的尾部样本，汇总保留全部计时所需的标量。
  */
 async function installMapApiTimingTelemetry(page) {
@@ -1716,6 +1723,9 @@ async function installMapApiTimingTelemetry(page) {
       globalThis.__sfMapApiTiming = { snapshot: () => unavailable };
       return unavailable;
     }
+    const sceneIds = new WeakMap();
+    let nextSceneId = 0;
+    const sceneId = (canvas) => { if (!canvas || typeof canvas !== 'object') return null; if (!sceneIds.has(canvas)) sceneIds.set(canvas, ++nextSceneId); return sceneIds.get(canvas); };
     const maxDiagnosticCount = 16;
     const stableCodePattern = /^[A-Z][A-Z0-9_]{0,95}$/;
     const projectResultDiagnostics = (result) => {
@@ -1744,23 +1754,20 @@ async function installMapApiTimingTelemetry(page) {
       maxMs: 0,
       durations: [],
       phaseStats: Object.create(null),
-      recent: []
+      recent: [],
+      timeline: [],
+      timelineOverflow: false,
+      modelReady: Object.create(null),
+      frames: []
     };
-    const wrapped = async function (...args) {
-      const started = performance.now();
+    const record = (observation) => {
+      const started = observation.startedAt;
+      const args = [null, observation.modelName, observation.cursorPresent, observation.sessionPresent];
+      const result = observation.result;
+      const thrown = observation.error;
       const phase = state.phase;
-      let result;
-      let thrown = null;
-      try {
-        // Preserve the contextBridge receiver. Calling the original function
-        // detached from api can fail with Chromium's Illegal invocation.
-        result = await original.apply(this, args);
-        return result;
-      } catch (error) {
-        thrown = error;
-        throw error;
-      } finally {
-        const elapsedMs = performance.now() - started;
+      {
+        const elapsedMs = observation.completedAt - started;
         const modelName = typeof args[1] === 'string' ? args[1] : null;
         const cursorPresent = Boolean(args[2]);
         const sessionPresent = Boolean(args[3]);
@@ -1799,6 +1806,9 @@ async function installMapApiTimingTelemetry(page) {
         stats.maxMs = Math.max(stats.maxMs, elapsedMs);
         stats.durations.push(elapsedMs);
         if (stats.durations.length > 10_000) stats.durations.shift();
+        const nativeTimeline = result?.diagnostics?.find((item) => item?.code === 'MAP_REQUEST_TIMELINE')?.details ?? null;
+        if (state.timeline.length < 10_000) state.timeline.push({ phase, modelName, requestId: observation.requestId, rendererStartedAtUnixMs: observation.timeOrigin + observation.startedAt, rendererCompletedAtUnixMs: observation.timeOrigin + observation.completedAt, nativeTimeline });
+        else state.timelineOverflow = true;
         state.recent.push({
           phase,
           modelName,
@@ -1816,27 +1826,19 @@ async function installMapApiTimingTelemetry(page) {
         if (state.recent.length > 200) state.recent.shift();
       }
     };
-    let assigned = false;
-    try {
-      api.readMapStaticGeometry = wrapped;
-      assigned = api.readMapStaticGeometry === wrapped;
-    } catch (error) {
-      state.reason = `ASSIGNMENT_FAILED: ${String(error?.message ?? error)}`;
-    }
-    if (!assigned) {
-      try {
-        Object.defineProperty(api, 'readMapStaticGeometry', {
-          configurable: true,
-          writable: true,
-          value: wrapped
-        });
-        assigned = api.readMapStaticGeometry === wrapped;
-      } catch (error) {
-        state.reason ??= `DEFINE_PROPERTY_FAILED: ${String(error?.message ?? error)}`;
-      }
-    }
-    state.installed = assigned;
-    state.reason ??= assigned ? null : 'CONTEXT_BRIDGE_METHOD_NOT_WRITABLE';
+    // contextBridge freezes exposed functions. Observe the call at its owning
+    // renderer facade instead of mutating the API or trying defineProperty.
+    window.addEventListener('sf-map-read-timing', (event) => {
+      const observation = event.detail;
+      if (observation && Number.isFinite(observation.startedAt) && Number.isFinite(observation.completedAt)) record(observation);
+    });
+    window.addEventListener('sf-map-model-ready', (event) => { state.modelReady[event.detail.modelName] = { readyAtUnixMs: event.detail.readyAtUnixMs, sceneId: sceneId(event.detail.canvas) }; });
+    window.addEventListener('sf-scene-frame-submitted', (event) => {
+      if (state.frames.length < 10_000) state.frames.push({ submittedAtUnixMs: event.detail.submittedAtUnixMs, sceneId: sceneId(event.detail.canvas) });
+      else state.timelineOverflow = true;
+    });
+    state.installed = true;
+    state.reason = null;
     const quantile = (values, percentile) => {
       if (values.length === 0) return null;
       const sorted = [...values].sort((left, right) => left - right);
@@ -1867,7 +1869,11 @@ async function installMapApiTimingTelemetry(page) {
       p95Ms: quantile(state.durations, 0.95),
       maxMs: state.calls > 0 ? state.maxMs : null,
       phaseStats: Object.fromEntries(Object.entries(state.phaseStats).map(([key, value]) => [key, cleanStats(value)])),
-      recent: state.recent.slice(-200)
+      recent: state.recent.slice(-200),
+      timeline: state.timeline.slice(),
+      timelineOverflow: state.timelineOverflow,
+      modelReady: { ...state.modelReady },
+      frames: state.frames.slice()
     });
     state.setPhase = (phase) => { state.phase = typeof phase === 'string' ? phase : 'unlabelled'; };
     globalThis.__sfMapApiTiming = state;
@@ -3414,12 +3420,26 @@ function formatTelemetrySamplingIncompleteReason(summary) {
   return `telemetry sampling incomplete (${parts.join(', ')})`;
 }
 
+function evaluateMapModelLoadCounts(value) {
+  if (!value || value.schemaVersion !== 1 || typeof value.complete !== 'boolean') return { valid: false, complete: false, acceptable: false, reason: 'MAP_MODEL_COUNTS_UNOBSERVED', counts: null };
+  const keys = ['modelsLoaded', 'modelsFailed', 'modelsUnavailable', 'modelsTotal', 'sceneErrors'];
+  if (keys.some((key) => !Number.isSafeInteger(value[key]) || value[key] < 0)) return { valid: false, complete: false, acceptable: false, reason: 'MAP_MODEL_COUNTS_INVALID', counts: null };
+  const counts = Object.fromEntries(keys.map((key) => [key, value[key]]));
+  const processed = counts.modelsLoaded + counts.modelsFailed + counts.modelsUnavailable;
+  if (!Number.isSafeInteger(processed) || processed > counts.modelsTotal || (value.complete && processed !== counts.modelsTotal)) return { valid: false, complete: false, acceptable: false, reason: 'MAP_MODEL_COUNTS_INCONSISTENT', counts };
+  const complete = value.complete && processed === counts.modelsTotal;
+  const acceptable = complete && counts.modelsFailed === 0 && counts.sceneErrors === 0;
+  return { valid: true, complete, acceptable, reason: counts.modelsFailed > 0 || counts.sceneErrors > 0 ? 'MAP_MODEL_LOAD_FAILED' : complete ? 'MAP_MODEL_LOAD_COMPLETE' : 'MAP_MODEL_LOAD_INCOMPLETE', counts };
+}
+
 function finalizeMapStatus(report, mode = MODE) {
+  const modelLoad = evaluateMapModelLoadCounts(report.uiLoad?.modelCounts);
   const functionalLoadOk = Boolean(
     report.msb?.ok
     && report.geometry?.ok
-    && (mode === 'cancel' ? report.cancellation?.cleanupEvents?.length > 0 : report.uiLoad?.complete)
+    && (mode === 'cancel' ? report.cancellation?.cleanupEvents?.length > 0 : report.uiLoad?.complete && modelLoad.acceptable)
   );
+  report.requestTimeline = summarizeMapRequestTimeline(report.nativeRequestTelemetry);
   const telemetry = report.renderer?.finalTelemetry ?? report.finalTelemetry ?? null;
   // Prefer the explicit MAP-open -> final delta.  This keeps an app-startup
   // long task from deciding the MAP result while still including the whole
@@ -3469,6 +3489,12 @@ function finalizeMapStatus(report, mode = MODE) {
   // A zero-long-frame snapshot from an early/error path is not a successful
   // responsiveness verification.  Require the same completed functional load
   // and an error-free normal path that produced the snapshot.
+  const uiLoadMs = report.uiLoad?.elapsedMs;
+  const mapElapsedMs = mapDelta ? mapDelta.endAt - mapDelta.startAt : uiLoadMs;
+  const regressionBudgetsPass = Number.isFinite(uiLoadMs) && uiLoadMs <= MAP_UI_REGRESSION_LIMIT_MS
+    && Number.isFinite(mapElapsedMs) && mapElapsedMs <= MAP_UI_REGRESSION_LIMIT_MS
+    && maxLongTaskMs <= MAP_BLOCKING_REGRESSION_LIMIT_MS
+    && raf?.maxGapMs <= MAP_BLOCKING_REGRESSION_LIMIT_MS;
   const responsivenessVerified = mode === 'normal'
     && functionalLoadOk
     && report.error === undefined
@@ -3476,11 +3502,12 @@ function finalizeMapStatus(report, mode = MODE) {
     && sampleErrors === 0
     && visibleStateKnown
     && foregroundConditions.valid === true
-    && foregroundLongGaps === 0
-    && maxLongTaskMs < 50;
+    && regressionBudgetsPass;
   let responsivenessReason = 'normal load not completed';
   if (mode === 'cancel') {
     responsivenessReason = 'cancel mode intentionally stops before full-load responsiveness verification';
+  } else if (!functionalLoadOk) {
+    responsivenessReason = modelLoad.reason;
   } else if (!metricsValid) {
     responsivenessReason = 'telemetry boundary metrics incomplete or RAF accounting fixture failed';
   } else if (sampleErrors > 0) {
@@ -3489,8 +3516,8 @@ function finalizeMapStatus(report, mode = MODE) {
     responsivenessReason = 'document visibility state unavailable';
   } else if (foregroundConditions.valid !== true) {
     responsivenessReason = foregroundConditions.reason;
-  } else if (foregroundLongGaps > 0 || maxLongTaskMs >= 50) {
-    responsivenessReason = `foreground responsiveness degraded (${foregroundLongGaps} RAF gap(s) >=50ms; maxLongTaskMs=${maxLongTaskMs})`;
+  } else if (!regressionBudgetsPass) {
+    responsivenessReason = `MAP regression budget exceeded or missing (UI=${uiLoadMs}ms; total=${mapElapsedMs}ms; longTask=${maxLongTaskMs}ms; RAF=${raf?.maxGapMs}ms)`;
   } else if (hiddenLongGaps > 0) {
     responsivenessReason = `only hidden-tab RAF gap(s) observed (${hiddenLongGaps})`;
   } else {
@@ -3498,9 +3525,12 @@ function finalizeMapStatus(report, mode = MODE) {
   }
   report.status = {
     functionalLoadOk,
+    modelLoad,
     metricsValid,
     responsivenessVerified,
     responsivenessPass: responsivenessVerified,
+    regressionBudgets: { uiLoadLimitMs: MAP_UI_REGRESSION_LIMIT_MS, blockingLimitMs: MAP_BLOCKING_REGRESSION_LIMIT_MS, uiLoadMs, mapElapsedMs, pass: regressionBudgetsPass },
+    smoothInteractionPass: responsivenessVerified && foregroundLongGaps === 0 && maxLongTaskMs < 50,
     responsivenessReason,
     documentVisibleLongGaps: foregroundLongGaps,
     foregroundConditionsValid: foregroundConditions.valid === true,
@@ -3509,9 +3539,9 @@ function finalizeMapStatus(report, mode = MODE) {
     telemetrySampling: telemetrySamplingSummary,
     nativeCancellation: report.cancellation?.nativeAbortObserved === true ? 'observed' : 'unverified'
   };
-  // Legacy process exit remains a functional-load result. Explicit status
-  // fields prevent that exit code from being read as a performance PASS.
-  report.ok = functionalLoadOk;
+  // A complete load with failed/missing responsiveness evidence must fail the
+  // normal probe. Cancel mode retains its separate functional cleanup verdict.
+  report.ok = functionalLoadOk && (mode === 'cancel' || responsivenessVerified);
 }
 
 /**
@@ -3708,7 +3738,7 @@ function runMapStatusFixture() {
   const makeReport = (overrides = {}) => ({
     msb: { ok: true },
     geometry: { ok: true },
-    uiLoad: { complete: true },
+    uiLoad: { complete: true, elapsedMs: 100, modelCounts: { schemaVersion: 1, complete: true, modelsLoaded: 8, modelsFailed: 0, modelsUnavailable: 0, modelsTotal: 8, sceneErrors: 0 } },
     renderer: {
       finalTelemetry: {
         raf: {
@@ -3931,10 +3961,37 @@ function runMapStatusFixture() {
     foregroundObservation: { observedWindow: null }
   });
   finalizeMapStatus(noObservationReport, 'normal');
+  const blockingReturnReport = makeReport({ mapTelemetry: { total: { ...completeMapDelta, maxLongTaskMs: 401 } } });
+  finalizeMapStatus(blockingReturnReport, 'normal');
+  const slowLoadReport = makeReport({ mapTelemetry: { total: completeMapDelta }, uiLoad: { complete: true, elapsedMs: 260_001 } });
+  finalizeMapStatus(slowLoadReport, 'normal');
+  const generousReport = makeReport({ mapTelemetry: { total: { ...completeMapDelta, maxLongTaskMs: 182, raf: { ...completeMapDelta.raf, maxGapMs: 182, visibleLongGapCount: 29 } } } });
+  finalizeMapStatus(generousReport, 'normal');
+  const modelReport = (counts) => {
+    const result = makeReport({ mapTelemetry: { total: completeMapDelta }, uiLoad: { complete: true, elapsedMs: 180_100, modelCounts: counts } });
+    finalizeMapStatus(result, 'normal');
+    return result;
+  };
+  const allFailedModels = modelReport({ schemaVersion: 1, complete: true, modelsLoaded: 0, modelsFailed: 8, modelsUnavailable: 0, modelsTotal: 8, sceneErrors: 0 });
+  const partiallyFailedModels = modelReport({ schemaVersion: 1, complete: true, modelsLoaded: 7, modelsFailed: 1, modelsUnavailable: 0, modelsTotal: 8, sceneErrors: 0 });
+  const classifiedUnavailableModels = modelReport({ schemaVersion: 1, complete: true, modelsLoaded: 7, modelsFailed: 0, modelsUnavailable: 1, modelsTotal: 8, sceneErrors: 0 });
+  const sceneFailed = modelReport({ schemaVersion: 1, complete: true, modelsLoaded: 8, modelsFailed: 0, modelsUnavailable: 0, modelsTotal: 8, sceneErrors: 1 });
+  const missingModelCounts = modelReport(null);
+  const malformedModelCounts = modelReport({ schemaVersion: 1, complete: true, modelsLoaded: 8, modelsFailed: 8, modelsUnavailable: 0, modelsTotal: 8, sceneErrors: 0 });
+  const modelOutcomesPass = allFailedModels.ok === false && partiallyFailedModels.ok === false && sceneFailed.ok === false && missingModelCounts.ok === false && malformedModelCounts.ok === false && classifiedUnavailableModels.ok === true;
   return {
+    modelOutcomes: { allFailedRejected: allFailedModels.ok === false, partialFailureRejected: partiallyFailedModels.ok === false, sceneFailureRejected: sceneFailed.ok === false, missingCountsRejected: missingModelCounts.ok === false, malformedCountsRejected: malformedModelCounts.ok === false, classifiedUnavailableAccepted: classifiedUnavailableModels.ok === true, pass: modelOutcomesPass },
     incompleteLoad: {
       responsivenessVerified: report.status.responsivenessVerified,
-      pass: report.status.responsivenessVerified === false
+      regressionBudgets: {
+      blockingReturnRejected: blockingReturnReport.ok === false,
+      slowLoadRejected: slowLoadReport.ok === false,
+      incompleteObservationRejected: noObservationReport.ok === false,
+      generousBudgetAccepted: generousReport.ok === true,
+      pass: blockingReturnReport.ok === false && slowLoadReport.ok === false && noObservationReport.ok === false && generousReport.ok === true
+    },
+    pass: modelOutcomesPass && blockingReturnReport.ok === false && slowLoadReport.ok === false && noObservationReport.ok === false && generousReport.ok === true
+      && report.status.responsivenessVerified === false
     },
     timeout: {
       responsivenessVerified: timeoutReport.status.responsivenessVerified,
@@ -4026,7 +4083,15 @@ function runMapStatusFixture() {
         && clockAnomalyReport.status.foregroundConditionsVerified === false
         && noObservationReport.status.foregroundConditionsVerified === false
     },
-    pass: report.status.responsivenessVerified === false
+    regressionBudgets: {
+      blockingReturnRejected: blockingReturnReport.ok === false,
+      slowLoadRejected: slowLoadReport.ok === false,
+      incompleteObservationRejected: noObservationReport.ok === false,
+      generousBudgetAccepted: generousReport.ok === true,
+      pass: blockingReturnReport.ok === false && slowLoadReport.ok === false && noObservationReport.ok === false && generousReport.ok === true
+    },
+    pass: modelOutcomesPass && blockingReturnReport.ok === false && slowLoadReport.ok === false && noObservationReport.ok === false && generousReport.ok === true
+      && report.status.responsivenessVerified === false
       && timeoutReport.status.responsivenessVerified === false
       && timeoutReport.status.responsivenessReason === 'telemetry sampling incomplete (2 timeout(s), 19 in-flight skip(s))'
       && legacySamplingReport.status.responsivenessReason.includes('legacy=LEGACY_SAMPLE_ERROR')
@@ -4697,7 +4762,52 @@ async function runMapTelemetrySingleFlightFixture() {
   };
 }
 
+
+async function runFrozenMapApiObserverFixture() {
+  const previousApi = globalThis.soulforge;
+  const previousObserver = globalThis.__sfMapApiTiming;
+  const previousWindow = globalThis.window;
+  const target = new EventTarget();
+  globalThis.window = target;
+  const method = async () => ({ ok: true });
+  globalThis.soulforge = Object.freeze({ readMapStaticGeometry: method });
+  delete globalThis.__sfMapApiTiming;
+  try {
+    const result = await installMapApiTimingTelemetry({ evaluate: (callback) => callback() });
+    target.dispatchEvent(new CustomEvent('sf-map-read-timing', { detail: { modelName: 'fixture', startedAt: 0, completedAt: 10, timeOrigin: 0, requestId: 'fixture', result: { ok: true } } }));
+    const recorded = globalThis.__sfMapApiTiming.snapshot();
+    return { installed: result.installed, unchanged: globalThis.soulforge.readMapStaticGeometry === method, calls: recorded.calls, pass: result.installed === true && recorded.calls === 1 && globalThis.soulforge.readMapStaticGeometry === method };
+  } finally {
+    globalThis.soulforge = previousApi;
+    globalThis.__sfMapApiTiming = previousObserver;
+    globalThis.window = previousWindow;
+  }
+}
+
+async function runMapProgressOutcomeFixture() {
+  const previousDocument = globalThis.document;
+  let countsText = JSON.stringify({ schemaVersion: 1, complete: true, modelsLoaded: 0, modelsFailed: 8, modelsUnavailable: 0, modelsTotal: 8, sceneErrors: 0 });
+  const page = { evaluate: (callback, options) => callback(options) };
+  globalThis.document = { querySelector: (selector) => selector.startsWith('progress') ? { getAttribute: () => '1' } : { getAttribute: () => countsText } };
+  try {
+    const failed = await snapshotTelemetryWithProgress(page);
+    const failedOutcome = evaluateMapModelLoadCounts(failed.modelCounts);
+    countsText = JSON.stringify({ schemaVersion: 1, complete: true, modelsLoaded: 7, modelsFailed: 0, modelsUnavailable: 1, modelsTotal: 8, sceneErrors: 0 });
+    const unavailable = await snapshotTelemetryWithProgress(page);
+    const unavailableOutcome = evaluateMapModelLoadCounts(unavailable.modelCounts);
+    countsText = JSON.stringify({ schemaVersion: 1, complete: false, modelsLoaded: 0, modelsFailed: 0, modelsUnavailable: 0, modelsTotal: 0, sceneErrors: 0 });
+    const pending = await snapshotTelemetryWithProgress(page);
+    const pendingOutcome = evaluateMapModelLoadCounts(pending.modelCounts);
+    countsText = 'not-json';
+    const malformed = await snapshotTelemetryWithProgress(page);
+    countsText = null;
+    const missing = await snapshotTelemetryWithProgress(page);
+    return { failedCounts: failed.modelCounts, unavailableCounts: unavailable.modelCounts, pendingCounts: pending.modelCounts, pass: failedOutcome.complete === true && failedOutcome.acceptable === false && failed.modelCounts.modelsFailed === 8 && unavailableOutcome.acceptable === true && unavailable.modelCounts.modelsUnavailable === 1 && pendingOutcome.complete === false && pendingOutcome.acceptable === false && malformed.modelCounts === null && missing.modelCounts === null };
+  } finally { globalThis.document = previousDocument; }
+}
+
 async function runMapTelemetryFixtures() {
+  const frozenApiObserver = await runFrozenMapApiObserverFixture();
   const raf = runRafAccountingFixture();
   const boundaries = runRafBoundaryFixture();
   const status = runMapStatusFixture();
@@ -4718,8 +4828,10 @@ async function runMapTelemetryFixtures() {
   const mapApiObserverProjection = runMapApiObserverProjectionFixture();
   const windowObserver = await runMapWindowObserverFixture();
   const singleFlight = await runMapTelemetrySingleFlightFixture();
+  const progressOutcomes = await runMapProgressOutcomeFixture();
   return {
     mode: 'fixture',
+    frozenApiObserver,
     raf,
     boundaries,
     status,
@@ -4734,7 +4846,8 @@ async function runMapTelemetryFixtures() {
     mapApiObserverProjection,
     windowObserver,
     singleFlight,
-    pass: raf.pass === true
+    progressOutcomes,
+    pass: frozenApiObserver.pass === true && raf.pass === true
       && boundaries.pass === true
       && status.pass === true
       && offlineCrashpadEntry.pass === true
@@ -4748,6 +4861,7 @@ async function runMapTelemetryFixtures() {
       && mapApiObserverProjection.pass === true
       && windowObserver.pass === true
       && singleFlight.pass === true
+      && progressOutcomes.pass === true
   };
 }
 
@@ -5321,6 +5435,7 @@ async function main() {
       startedAt,
       () => electron.launch({
         cwd: productionSnapshotRoot,
+        chromiumSandbox: true,
         args: [offlineCrashpadEntryPath, `--user-data-dir=${userDataDir}`],
         env: {
           ...process.env,
@@ -5337,6 +5452,7 @@ async function main() {
       })
     );
     const child = app.process();
+    if (child.spawnargs.some((argument) => argument === '--no-sandbox')) throw new Error('MAP_PROBE_SANDBOX_DISABLED');
     processDiagnostics.pid = child.pid;
     child.stdout?.on('data', (chunk) => {
       const text = String(chunk);
@@ -5627,6 +5743,7 @@ async function main() {
       });
       normalTelemetryPoll = telemetryPoll;
       let complete = false;
+      let modelCounts = null;
       const uiBudgetMs = Math.min(UI_TIMEOUT_MS, Math.max(0, deadlineAt - Date.now()));
       while (Date.now() - loadStarted < uiBudgetMs) {
         if (Date.now() >= deadlineAt) throw new Error('MAP_PROBE_DEADLINE_EXCEEDED: ui-map-load');
@@ -5643,6 +5760,7 @@ async function main() {
         const snapshot = sample.value?.telemetry ?? null;
         const progress = sample.value?.progress ?? null;
         const max = sample.value?.max ?? null;
+        if (sample.record.complete === true) modelCounts = sample.value?.modelCounts ?? null;
         if (sample.record.complete !== true) {
           // 大地图上传/解码会暂时占满 renderer 主线程；观察快照超时、
           // underlying evaluate 的晚到终态、失败和 single-flight 等待都
@@ -5665,6 +5783,7 @@ async function main() {
           elapsedMs: Date.now() - loadStarted,
           progress: progress === null ? null : Number(progress),
           max: max === null ? null : Number(max),
+          modelCounts,
           telemetry: snapshot,
           sampling: sample.record
         });
@@ -5680,8 +5799,10 @@ async function main() {
             max: max === null ? null : Number(max)
           }));
         }
-        complete = extractLoaderEvent(consoleEvents, 'MAP mesh loader complete').some((event) => !event.text.includes('cancelled: true'))
-          || (progress !== null && max !== null && Number(max) > 0 && Number(progress) >= Number(max));
+        // Terminal processing is distinct from successful loading. The
+        // structured UI counts cover loader, preparation and upload failures,
+        // while explicitly classified unavailable models remain separate.
+        complete = evaluateMapModelLoadCounts(modelCounts).complete;
         if (complete) break;
         await sleep(1_000);
       }
@@ -5727,6 +5848,7 @@ async function main() {
       }
       report.uiLoad = {
         complete,
+        modelCounts,
         elapsedMs: Date.now() - loadStarted,
         snapshots,
         telemetrySamplingSingleFlight: telemetryPoll.snapshot(),
@@ -5895,7 +6017,7 @@ async function main() {
       } : null,
       msb: report.msb ? { ok: report.msb.ok, elapsedMs: report.msb.elapsedMs, modelCount: report.msb.modelCount, partCount: report.msb.partCount } : null,
       geometry: report.geometry ? { ok: report.geometry.ok, pageCount: report.geometry.pageCount, chunkCount: report.geometry.chunkCount, vertexCount: report.geometry.vertexCount } : null,
-      uiLoad: report.uiLoad ? { complete: report.uiLoad.complete, elapsedMs: report.uiLoad.elapsedMs, loaderStartCount: report.uiLoad.loaderStartCount } : null,
+      uiLoad: report.uiLoad ? { complete: report.uiLoad.complete, modelCounts: report.uiLoad.modelCounts, elapsedMs: report.uiLoad.elapsedMs, loaderStartCount: report.uiLoad.loaderStartCount } : null,
       mapModelUnavailableTelemetry: report.mapModelUnavailableTelemetry
         ? {
             recordCount: report.mapModelUnavailableTelemetry.recordCount,

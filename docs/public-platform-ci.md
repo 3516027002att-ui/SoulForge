@@ -1,0 +1,13 @@
+# Public Windows and Linux CI
+
+`desktop-platform-ci.yml` runs on pushes and pull requests to `linux`, and through manual dispatch. Its independent `windows-2022` and `ubuntu-24.04` jobs build the same shared/core/desktop source with Node 22.22.0, .NET SDK 10.0.100, the locked Electron 43.0.0 dependency, and electron-builder 26.16.1. GitHub-maintained actions are pinned to their official release commits. The SDK installs into a job-owned temporary directory, and a version check rejects a different effective Node, .NET or Electron version.
+
+Each host runs the C# Bridge regression tests and deterministic Agent kernel/utility fixtures, publishes the matching self-contained Bridge, and executes synthetic TAE and write-boundary fixtures against that native executable. The database smoke launches the actual Electron SQLite utility flow and forced restart. Linux explicitly selects the headless Ozone backend. The harness keeps Electron's sandbox configuration; CI must fail if the host cannot launch it. There is no sandbox-disabling or security-setting fallback.
+
+`scripts/hks-native-platform.fixture.mjs` verifies the managed compiler ABI for HKS and Lua50, CP932 preservation/rejection and incompatible cross-target publication. Its native runtime checks execute on both hosts; the isolated ELF-library check is Linux-specific. It depends on the integrated Linux `.so`, CP932 and native build receipt portability batch, including Windows toolchain discovery. These are synthetic checks; private corpus coverage cannot be inferred from them.
+
+Successful jobs upload unsigned unpacked desktop directories as `SoulForge-linux-x64.tar.gz` or `SoulForge-win-x64.tar.gz`, with an archive SHA-256 and per-step report in `ci-public-<runtime>.json`. The archive preserves Linux executable modes. These are reviewable CI artifacts, not a published release or installer. The workflow has read-only repository permissions and never creates a GitHub Release.
+
+Public runners receive no private game corpus, mature-tool oracle artifacts, licensed KRAK unpacker/SDK, provider credentials or provider cost budget. Reports always mark those acceptance checks unavailable. Skipped, cancelled or absent public steps remain `not_run`; they never count as passed. Installed-app, clean-machine and installer acceptance are also outside this workflow.
+
+Workflow configuration and local fixture results do not prove hosted Windows or Linux execution. Only the actual matrix run and its attached reports establish those results.

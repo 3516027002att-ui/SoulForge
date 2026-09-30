@@ -112,6 +112,9 @@ const EXPECTED_WINDOWS_RESOURCES = EXPECTED_EXTRA_RESOURCES.filter((item) => ite
 const EXPECTED_LINUX_RESOURCES = [{
   from: '../../bridge/SoulForge.Bridge/bin/Release/net10.0/linux-x64/publish/SoulForge.Bridge',
   to: 'bridge/SoulForge.Bridge', filter: ['SoulForge.Bridge']
+}, {
+  from: '../../bridge/SoulForge.Bridge/bin/Release/net10.0/linux-x64/publish/libSoulForge.Hksc.Native.so',
+  to: 'bridge/libSoulForge.Hksc.Native.so', filter: ['libSoulForge.Hksc.Native.so']
 }];
 
 function runtimeResourcesMatch(config) {

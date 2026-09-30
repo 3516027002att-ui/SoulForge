@@ -1647,6 +1647,7 @@ export function registerMapIpcHandlers(deps: MapIpcDeps): void {
             : `pending:${randomUUID()}`
           : '';
         if (MAP_NATIVE_TIMING_ENABLED && !sessionToken && !cursor) beginMapNativeTimingSession(timingKey);
+        const bridgeStartedAtUnixMs = performance.timeOrigin + performance.now();
         const result = await runBridge({
           command: 'read-map-static-geometry',
           filePath: modelPath,
@@ -1671,6 +1672,7 @@ export function registerMapIpcHandlers(deps: MapIpcDeps): void {
           ...(requestSignal ? { signal: requestSignal } : {}),
           ...(onCancellationTerminal ? { onCancellationTerminal } : {})
         });
+        const bridgeReturnedAtUnixMs = performance.timeOrigin + performance.now();
         throwIfMapRequestCancelled();
         const nativeTimingSummary = MAP_NATIVE_TIMING_ENABLED
           ? recordMapNativeTiming(timingKey, result.diagnostics)
@@ -1690,6 +1692,16 @@ export function registerMapIpcHandlers(deps: MapIpcDeps): void {
           return failure.result;
         }
         const responseDiagnostics = result.diagnostics.filter((item) => item.code !== MAP_NATIVE_TIMING_CODE);
+        const nativeTiming = result.diagnostics.find((item) => item.code === MAP_NATIVE_TIMING_CODE)?.details;
+        if (MAP_NATIVE_TIMING_ENABLED && nativeTiming && typeof nativeTiming === 'object') {
+          const timing = nativeTiming as Record<string, unknown>;
+          responseDiagnostics.push({ severity: 'info', code: 'MAP_REQUEST_TIMELINE', message: 'Correlated native request timeline, not cumulative overlapping request cost.', sourceUri: result.sourceUri,
+            details: { schemaVersion: 1, unit: 'ms', bridgeStartedAtUnixMs, bridgeReturnedAtUnixMs,
+              nativeEnqueuedAtUnixMs: timing.nativeEnqueuedAtUnixMs,
+              nativeStartedAtUnixMs: timing.nativeStartedAtUnixMs,
+              nativeCompletedAtUnixMs: timing.nativeCompletedAtUnixMs,
+              clockAlignmentToleranceMs: timing.clockAlignmentToleranceMs } });
+        }
         const complete = Boolean((result.data as { complete?: unknown } | null)?.complete);
         if (nativeTimingSummary && complete) {
           responseDiagnostics.push({

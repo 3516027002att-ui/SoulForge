@@ -9,6 +9,15 @@ import { assertBridgeProductionBuildFresh, writeBridgeProductionBuildReceipt } f
 import * as artifacts from './agent-production-build-lib.mjs';
 import { validatePortableBuilderResourceSources } from './portable-packaging-config.mjs';
 
+test('Linux package explicitly ships the first-party compiler beside the Bridge apphost', async () => {
+  const config = JSON.parse(await readFile(new URL('../apps/desktop/electron-builder.json', import.meta.url), 'utf8'));
+  const compiler = config.linux.extraResources.find(item => item.to === 'bridge/libSoulForge.Hksc.Native.so');
+  assert.deepEqual(compiler, {
+    from: '../../bridge/SoulForge.Bridge/bin/Release/net10.0/linux-x64/publish/libSoulForge.Hksc.Native.so',
+    to: 'bridge/libSoulForge.Hksc.Native.so', filter: ['libSoulForge.Hksc.Native.so']
+  });
+});
+
 test('an empty Linux publish directory cannot pass apphost source preflight', async () => {
   const root = await mkdtemp(join(tmpdir(), 'sf-empty-publish-'));
   try {
@@ -63,16 +72,33 @@ test('Linux publish receipts bind native apphost and selected publish inputs', a
   try {
     await seed('global.json', '{}');
     await seed('scripts/run-dotnet.mjs', '// fixture');
+    await seed('scripts/build-first-party-hksc-native.mjs', '// native build');
+    await seed('bridge/native/hksc/compiler.c', '// native source');
     await seed('bridge/SoulForge.Bridge/Program.cs', '// source');
     await seed('package.json', JSON.stringify({ scripts: { 'bridge:publish': 'publish win-x64', 'bridge:publish:linux': 'publish linux-x64' } }));
     await seed(winExe, 'neighbor Windows executable');
     await seed(linuxExe, 'native Linux executable');
+    const nativeLibrary = 'bridge/SoulForge.Bridge/bin/Release/net10.0/linux-x64/publish/libSoulForge.Hksc.Native.so';
+    await seed(nativeLibrary, 'native compiler library');
     const written = await writeBridgeProductionBuildReceipt(root, linux);
     assert.equal(written.receipt.executable.path, linuxExe);
     assert.equal(written.receipt.source.publishScriptInput, 'package.json#scripts.bridge:publish:linux');
     await assertBridgeProductionBuildFresh(root, linux);
     await seed(winExe, 'unrelated Windows rebuild');
     await assertBridgeProductionBuildFresh(root, linux);
+    await seed('bridge/native/hksc/compiler.c', '// changed native source');
+    await assert.rejects(assertBridgeProductionBuildFresh(root, linux), { code: 'BRIDGE_PRODUCTION_BUILD_STALE' });
+    await writeBridgeProductionBuildReceipt(root, linux);
+    await seed('scripts/build-first-party-hksc-native.mjs', '// changed native build');
+    await assert.rejects(assertBridgeProductionBuildFresh(root, linux), { code: 'BRIDGE_PRODUCTION_BUILD_STALE' });
+    await writeBridgeProductionBuildReceipt(root, linux);
+    await seed(nativeLibrary, 'tampered native compiler library');
+    await assert.rejects(assertBridgeProductionBuildFresh(root, linux), { code: 'BRIDGE_PRODUCTION_BUILD_STALE' });
+    await writeBridgeProductionBuildReceipt(root, linux);
+    await rm(join(root, nativeLibrary));
+    await assert.rejects(writeBridgeProductionBuildReceipt(root, linux), { code: 'BRIDGE_PRODUCTION_BUILD_STALE' });
+    await seed(nativeLibrary, 'native compiler library');
+    await writeBridgeProductionBuildReceipt(root, linux);
     await seed(linuxExe, 'changed Linux executable');
     await assert.rejects(assertBridgeProductionBuildFresh(root, linux), { code: 'BRIDGE_PRODUCTION_BUILD_STALE' });
     await writeBridgeProductionBuildReceipt(root, linux);

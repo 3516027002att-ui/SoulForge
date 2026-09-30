@@ -362,7 +362,7 @@ const EMPTY_SCENE: FlverSemanticScene = {
 };
 
 /**
- * FLVER 3D 预览器：真实 FLVER mesh 渲染（WebGPU-first / WebGL2 fallback）。
+ * FLVER 3D 预览器：真实 FLVER mesh 渲染（WebGL2 默认 / 显式 WebGPU 预览）。
  *
  * 权威场景是渲染器无关的语义场景（typed buffer + 变换，由 IPC readFlverMesh
  * 读入的原始数据构建），投影层（threeSceneController）只消费它并持有全部

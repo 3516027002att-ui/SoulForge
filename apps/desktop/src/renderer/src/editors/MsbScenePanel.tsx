@@ -15,6 +15,8 @@ import {
   type SceneDrawList,
   type SceneManifest
 } from '../scene/sceneManifestBrowser.js';
+import { MapPageProgress } from '../scene/mapPageProgress.js';
+import { observeMapGeometryRead } from '../scene/mapReadObservation.js';
 import { mountThreeProxyScene, type ProxySceneHandle } from '../scene/threeSceneController.js';
 import {
   FrameTaskQueue,
@@ -582,6 +584,8 @@ export function MsbScenePanel(props: MsbScenePanelProps): ReactElement {
     modelsFailed: number;
     modelsUnavailable: number;
     modelsTotal: number;
+    sceneErrors: number;
+    processingComplete: boolean;
     collisionHidden: number;
     pending: number;
     firstDiagnostic?: string;
@@ -603,6 +607,8 @@ export function MsbScenePanel(props: MsbScenePanelProps): ReactElement {
     if (!host) return;
 
     let firstMeshDiagnostic: string | null = null;
+    let sceneErrorCount = 0;
+    setMeshStatus(null);
     let loaderStarted = 0;
     let loaderCompleted = 0;
     let uploadedPartCount = 0;
@@ -662,8 +668,13 @@ export function MsbScenePanel(props: MsbScenePanelProps): ReactElement {
       };
     };
     const reportMeshDiagnostic = (modelName: string, stage: string, detail: unknown): void => {
-      if (firstMeshDiagnostic) return;
+      if (cancelled) return;
       const { severity, code, message } = diagnosticFromDetail(detail);
+      if (modelName === '__scene__' && severity === 'error') {
+        sceneErrorCount += 1;
+        setMeshStatus((current) => current ? { ...current, sceneErrors: sceneErrorCount } : current);
+      }
+      if (firstMeshDiagnostic) return;
       const lowerCode = code.toLowerCase();
       const lowerMessage = message.toLowerCase();
       // Bridge/renderer 的完整诊断仍写入开发日志，但工作台只给用户可行动的
@@ -694,6 +705,8 @@ export function MsbScenePanel(props: MsbScenePanelProps): ReactElement {
         modelsFailed: current?.modelsFailed ?? 0,
         modelsUnavailable: current?.modelsUnavailable ?? 0,
         modelsTotal: current?.modelsTotal ?? 0,
+        sceneErrors: sceneErrorCount,
+        processingComplete: current?.processingComplete ?? false,
         collisionHidden: current?.collisionHidden ?? 0,
         pending: current?.pending ?? Math.max(0, (current?.total ?? meshPartTotalRef.current) - (current?.loaded ?? 0) - (current?.missing ?? 0)),
         ...(current?.firstDiagnostic
@@ -911,6 +924,7 @@ export function MsbScenePanel(props: MsbScenePanelProps): ReactElement {
           let cursor: string | null = null;
           let sessionToken: string | null = null;
           const chunks: MapStaticGeometryChunk[] = [];
+          const pageProgress = new MapPageProgress();
           const loaderDiagnostics: Array<{ severity?: string; code?: string; message?: string }> = [];
           let texturePreviewToken: string | undefined;
           let textureColorSpace: string | undefined;
@@ -934,12 +948,9 @@ export function MsbScenePanel(props: MsbScenePanelProps): ReactElement {
               });
               let chunkResult: MapStaticGeometryReadResult | null | undefined;
               try {
-                chunkResult = await readMapStaticGeometry(
-                  props.mapResourceUri,
-                  modelName,
-                  cursor,
-                  sessionToken,
-                  requestId
+                chunkResult = await observeMapGeometryRead(
+                  () => readMapStaticGeometry(props.mapResourceUri, modelName, cursor, sessionToken, requestId),
+                  { modelName, cursorPresent: Boolean(cursor), sessionPresent: Boolean(sessionToken), requestId }
                 ) as MapStaticGeometryReadResult | null | undefined;
               } finally {
                 activePageRequestIds.delete(requestId);
@@ -957,8 +968,9 @@ export function MsbScenePanel(props: MsbScenePanelProps): ReactElement {
                 if (!isMapMeshUnavailableResponse(raw)) reportMeshDiagnostic(modelName, 'ipc', chunkResult);
                 break;
               }
-              if (chunkResult.diagnostics) loaderDiagnostics.push(...chunkResult.diagnostics);
               const page = chunkResult.data;
+              pageProgress.accept(page, chunkResult);
+              if (chunkResult.diagnostics) loaderDiagnostics.push(...chunkResult.diagnostics);
               if (page?.chunks) chunks.push(...page.chunks);
               if (!texturePreviewToken && page?.texturePreviewToken) {
                 texturePreviewToken = page.texturePreviewToken;
@@ -968,7 +980,7 @@ export function MsbScenePanel(props: MsbScenePanelProps): ReactElement {
               }
               sessionToken = page?.sessionToken ?? sessionToken;
               cursor = page?.nextCursor ?? null;
-              if (page?.complete || !cursor) {
+              if (page?.complete) {
                 raw = {
                   ok: true,
                   data: {
@@ -1068,6 +1080,7 @@ export function MsbScenePanel(props: MsbScenePanelProps): ReactElement {
                   throw new Error(`MAP_RENDERER_MODEL_BATCH_NOT_FOUND: ${modelName} (expected batch key model:${normalizeMapModelKey(modelName)})`);
                 }
                 uploadedPartCount += replaced;
+                window.dispatchEvent(new CustomEvent('sf-map-model-ready', { detail: { modelName, canvas: handle.canvas, readyAtUnixMs: performance.timeOrigin + performance.now() } }));
                 return replaced > 0;
               } catch (error) {
                 reportMeshDiagnostic(modelName, 'renderer-upload', error);
@@ -1128,6 +1141,8 @@ export function MsbScenePanel(props: MsbScenePanelProps): ReactElement {
             modelsFailed: 0,
             modelsUnavailable: 0,
             modelsTotal: distinctModels.length,
+            sceneErrors: sceneErrorCount,
+            processingComplete: false,
             collisionHidden: hiddenCollisionCount,
             pending: Math.max(0, totalPartCount - missingFromNoModel),
             ...(firstMeshDiagnostic ? { firstDiagnostic: firstMeshDiagnostic } : {})
@@ -1192,6 +1207,8 @@ export function MsbScenePanel(props: MsbScenePanelProps): ReactElement {
                   modelsFailed,
                   modelsUnavailable,
                   modelsTotal: distinctModels.length,
+                  sceneErrors: sceneErrorCount,
+                  processingComplete: false,
                   collisionHidden: hiddenCollisionCount,
                   pending: Math.max(0, totalPartCount - loaded - missing),
                   ...(current?.firstDiagnostic || firstMeshDiagnostic
@@ -1201,6 +1218,7 @@ export function MsbScenePanel(props: MsbScenePanelProps): ReactElement {
               }
             };
             await Promise.all(Array.from({ length: WORKER_COUNT }, () => loadNextModel()));
+            if (!cancelled) setMeshStatus((current) => current ? { ...current, processingComplete: true } : current);
             console.debug('[MsbScenePanel] MAP mesh loader complete', {
               loaderStarted,
               loaderCompleted,
@@ -1466,7 +1484,19 @@ export function MsbScenePanel(props: MsbScenePanelProps): ReactElement {
           children: (
             <div className="msb-viewport" style={{ position: 'relative', display: 'flex', flexDirection: 'column', width: '100%', height: '100%' }}>
               <div ref={hostRef} className="scene-host" style={{ flex: 1, width: '100%', height: '100%', minHeight: 200, background: '#1a1d23' }} />
-              <div className="msb-viewport-status" aria-live="polite">
+              <div
+                className="msb-viewport-status"
+                aria-live="polite"
+                data-map-model-counts={meshStatus ? JSON.stringify({
+                  schemaVersion: 1,
+                  complete: meshStatus.processingComplete,
+                  modelsLoaded: meshStatus.modelsLoaded,
+                  modelsFailed: meshStatus.modelsFailed,
+                  modelsUnavailable: meshStatus.modelsUnavailable,
+                  modelsTotal: meshStatus.modelsTotal,
+                  sceneErrors: meshStatus.sceneErrors
+                }) : undefined}
+              >
                 <p className="msb-viewport-status__primary">
                   {props.openFailure
                     ? props.openFailure.message
