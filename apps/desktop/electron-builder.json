@@ -1,6 +1,7 @@
 {
   "appId": "com.soulforge.app",
   "productName": "SoulForge",
+  "npmRebuild": false,
   "copyright": "Copyright (c) SoulForge contributors",
   "directories": {
     "output": "release",

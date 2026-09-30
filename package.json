@@ -8,6 +8,7 @@
     "packages/*"
   ],
   "scripts": {
+    "test:commit-storage": "npm run build -w @soulforge/core && node --test packages/core/dist/cli/localSessionHost.test.js packages/core/dist/cli/sessionPipeClient.test.js packages/core/dist/storage/sqliteBackup.test.js packages/core/dist/storage/sqliteRetirement.test.js && node --test scripts/workspace-storage.test.mjs scripts/database-utility-concurrency.test.mjs scripts/desktop-test-build.test.mjs",
     "ai-logs:sync": "node scripts/sync-ai-logs.mjs",
     "sfcli": "node tools/soulforge-cli/sfcli.mjs",
     "dev": "npm run dev -w @soulforge/desktop",

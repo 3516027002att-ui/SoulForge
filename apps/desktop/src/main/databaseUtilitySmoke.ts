@@ -41,7 +41,7 @@ app.whenReady().then(async () => {
   const client = new OperationLogUtilityClient(
     join(here, 'databaseUtility.js'),
     30_000,
-    resolve(here, '../../.native/better_sqlite3.node')
+    process.env.SOULFORGE_SQLITE_NATIVE_BINDING || resolve(here, '../../.native/better_sqlite3.node')
   );
   try {
     const appDatabasePath = join(root, 'app.db');
@@ -50,7 +50,7 @@ app.whenReady().then(async () => {
     // database. The production path must then read it through the utility
     // connection, not open a second main-process SQLite handle.
     const seedDatabase = openWorkspaceDatabase(workspaceDatabasePath, {
-      nativeBinding: resolve(here, '../../.native/better_sqlite3.node')
+      nativeBinding: process.env.SOULFORGE_SQLITE_NATIVE_BINDING || resolve(here, '../../.native/better_sqlite3.node')
     });
     try {
       const seedStore = new KnowledgeStore({
@@ -130,7 +130,7 @@ app.whenReady().then(async () => {
     const metadataDatabase = openWorkspaceDatabase(workspaceDatabasePath, {
       readonly: true,
       fileMustExist: true,
-      nativeBinding: resolve(here, '../../.native/better_sqlite3.node')
+      nativeBinding: process.env.SOULFORGE_SQLITE_NATIVE_BINDING || resolve(here, '../../.native/better_sqlite3.node')
     });
     try {
       const metadata = metadataDatabase.prepare(

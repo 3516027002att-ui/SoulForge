@@ -857,6 +857,7 @@ async function ensureActiveOperationLog(session: WorkspaceSession): Promise<Oper
     await operationLogUtility.openWorkspace({
       appDatabasePath: join(app.getPath('userData'), 'app.db'),
       databasePath: join(storage.root, 'workspace.db'),
+      ...(storage.migrationSourceDatabasePath ? { migrationSourceDatabasePath: storage.migrationSourceDatabasePath } : {}),
       workspaceId,
       rootPath: session.layers.overlayRoot,
       game: session.meta.game,

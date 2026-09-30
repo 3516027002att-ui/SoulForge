@@ -197,3 +197,5 @@ export * from './script/plaintextScriptEntry.js';
 // 历史 `ai-tools/scaffoldToolRegistry` 已迁入 testing/harness，仅供 smoke 引用。
 export * from './workspace/fileFingerprint.js';
 export * from './workspace/workspaceFingerprintStore.js';
+
+export * from './runtime/operationOutcome.js';

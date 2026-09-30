@@ -408,6 +408,12 @@ async function main() {
         });
         return;
       }
+      if (tool === '__host_operation_status') {
+        const opId = typeof args.opId === 'string' ? args.opId : '';
+        writeFrame(opId ? { id: requestId, ok: true, result: await sessionHost.operationStatus(opId) }
+          : { id: requestId, ok: false, error: { code: 'CLI_OPERATION_ID_REQUIRED', message: '必须提供 opId。' } });
+        return;
+      }
       if (tool === '__host_cancel') {
         const targetId = typeof args.requestId === 'string' ? args.requestId : requestId;
         writeFrame({ id: requestId, ok: true, result: sessionHost.requestCancel(targetId) });
@@ -415,7 +421,7 @@ async function main() {
       }
       if (tool === '__host_request_status') {
         const targetId = typeof args.requestId === 'string' ? args.requestId : requestId;
-        const status = sessionHost.requestStatus(targetId);
+        const status = await sessionHost.resolveRequestStatus(targetId);
         writeFrame(status
           ? { id: requestId, ok: true, result: status }
           : { id: requestId, ok: false, error: { code: 'CLI_REQUEST_NOT_FOUND', message: `没有找到请求 ${targetId}。` } });
@@ -433,11 +439,16 @@ async function main() {
           (dispatchTool, dispatchArgs, signal) => executeToolCall(requestId, dispatchTool, dispatchArgs, signal)
         );
         if (!outcome.ok) {
-          writeFrame({ id: requestId, ok: false, error: outcome.error });
+          writeFrame({
+            id: requestId, ok: false, error: outcome.error,
+            requestState: outcome.requestState, transaction: outcome.transaction,
+            ...(outcome.result !== undefined ? { result: outcome.result?.content ? parseToolContent(outcome.result.content) : outcome.result } : {})
+          });
         } else {
           const result = outcome.result;
           writeFrame({
             id: requestId,
+            requestState: outcome.requestState, transaction: outcome.transaction,
             ok: Boolean(result?.ok),
             ...(result?.code ? { code: result.code } : {}),
             result: parseToolContent(result?.content)

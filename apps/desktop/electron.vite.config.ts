@@ -1,5 +1,5 @@
 import { fileURLToPath } from 'node:url';
-import { dirname, resolve } from 'node:path';
+import { dirname, resolve, relative, isAbsolute, sep } from 'node:path';
 import { defineConfig, externalizeDepsPlugin } from 'electron-vite';
 import react from '@vitejs/plugin-react';
 
@@ -7,6 +7,14 @@ const here = dirname(fileURLToPath(import.meta.url));
 const includeDatabaseUtilitySmoke = process.env.SOULFORGE_BUILD_DATABASE_UTILITY_SMOKE === '1';
 const includeMe3RuntimeGatewaySmoke = process.env.SOULFORGE_BUILD_ME3_GATEWAY_SMOKE === '1';
 const includeMe3SekiroSessionSmoke = process.env.SOULFORGE_BUILD_ME3_SEKIRO_SESSION_SMOKE === '1';
+const smokeBuild = includeDatabaseUtilitySmoke || includeMe3RuntimeGatewaySmoke || includeMe3SekiroSessionSmoke;
+const testBuildRoot = process.env.SOULFORGE_TEST_BUILD_ROOT;
+if (smokeBuild && !testBuildRoot) throw new Error('DESKTOP_TEST_BUILD_ROOT_REQUIRED: smoke entries require an isolated output root.');
+if (testBuildRoot) {
+  const path = relative(resolve(here, 'out'), resolve(testBuildRoot));
+  const outside = path === '..' || path.startsWith(`..${sep}`) || isAbsolute(path);
+  if (!outside) throw new Error('DESKTOP_TEST_BUILD_ROOT_REQUIRED: production out cannot be used for smoke builds.');
+}
 
 /**
  * workspace 包解析固定到本仓库的 packages（相对路径，git worktree 与主仓库
@@ -26,6 +34,7 @@ export default defineConfig({
     plugins: [externalizeDepsPlugin({ exclude: ['@soulforge/shared', '@soulforge/core'] })],
     resolve: { alias: workspacePackageAlias },
     build: {
+      ...(testBuildRoot ? { outDir: resolve(testBuildRoot, 'main') } : {}),
       // core 打进 bundle 后其 sqlite 绑定是运行期动态 require（.native 路径），
       // 让 commonjs 插件原样保留而不是试图解析目标。
       commonjsOptions: { ignoreDynamicRequires: true },
@@ -73,6 +82,7 @@ export default defineConfig({
     // 因此 .js 会被 Node/Electron 当作 ESM 解析，CJS 内容会报
     // "require is not defined in ES module scope"。.cjs 显式脱离该声明。
     build: {
+      ...(testBuildRoot ? { outDir: resolve(testBuildRoot, 'preload') } : {}),
       rollupOptions: {
         output: {
           format: 'cjs',
@@ -82,6 +92,7 @@ export default defineConfig({
     }
   },
   renderer: {
+    build: { ...(testBuildRoot ? { outDir: resolve(testBuildRoot, 'renderer') } : {}) },
     root: resolve(here, 'src/renderer'),
     resolve: {
       alias: {

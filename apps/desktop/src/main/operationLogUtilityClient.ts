@@ -25,6 +25,7 @@ import type {
 } from '@soulforge/core';
 import {
   OPERATION_LOG_UTILITY_PROTOCOL,
+  isDatabaseReadMethod,
   isOperationLogUtilityResponse,
   type OpenWorkspaceDatabasePayload,
   type OperationLogUtilityMethod,
@@ -44,6 +45,8 @@ interface PendingRequest {
   resolve(value: unknown): void;
   reject(error: Error): void;
   timer: NodeJS.Timeout;
+  request: OperationLogUtilityRequest;
+  dispatched: boolean;
 }
 
 interface LateRequest {
@@ -125,6 +128,7 @@ type WorkspaceScopedMethod =
 
 export class OperationLogUtilityClient implements OperationLogStore {
   private process: UtilityProcess | null = null;
+  private reader: OperationLogUtilityClient | null = null;
   private readonly pending = new Map<string, PendingRequest>();
   private readonly lateRequests = new Map<string, LateRequest>();
   /** The utility process is serial by design; keep a host-side queue so a
@@ -139,7 +143,8 @@ export class OperationLogUtilityClient implements OperationLogStore {
   constructor(
     private readonly modulePath: string,
     private readonly requestTimeoutMs = 60_000,
-    private readonly nativeBindingPath?: string
+    private readonly nativeBindingPath?: string,
+    private readonly role: 'writer' | 'reader' = 'writer'
   ) {}
 
   async openWorkspace(payload: OpenWorkspaceDatabasePayload): Promise<void> {
@@ -174,6 +179,14 @@ export class OperationLogUtilityClient implements OperationLogStore {
 
   async record(entry: OperationLogRecord): Promise<void> {
     await this.request('record', { entry });
+  }
+
+  getTransactionForOperation(opId: string): Promise<TransactionJournalRecord | undefined> {
+    return this.request('getTransactionForOperation', { opId });
+  }
+
+  findTransactionsForRequest(sessionName: string, requestId: string): Promise<TransactionJournalRecord[]> {
+    return this.request('findTransactionsForRequest', { sessionName, requestId });
   }
 
   get(opId: string): Promise<OperationLogRecord | undefined> {
@@ -434,14 +447,18 @@ export class OperationLogUtilityClient implements OperationLogStore {
     const payload = this.activeWorkspace;
     const appDatabasePath = this.activeAppDatabasePath;
     const child = this.process;
-    if ((!payload && !appDatabasePath) || !child) throw new Error('数据库后台进程没有可恢复的活动数据库。');
+    if (!payload && !appDatabasePath) throw new Error('数据库后台进程没有可恢复的活动数据库。');
     this.process = null;
     this.activeWorkspace = null;
     this.activeAppDatabasePath = null;
     this.rejectAll(new Error('数据库后台进程正在重启；未完成请求不会自动重放。'));
-    const exited = new Promise<void>((resolve) => child.once('exit', () => resolve()));
-    child.kill();
-    await exited;
+    await this.reader?.dispose();
+    this.reader = null;
+    if (child) {
+      const exited = new Promise<void>((resolve) => child.once('exit', () => resolve()));
+      child.kill();
+      await exited;
+    }
     if (payload) await this.openWorkspace(payload);
     else if (appDatabasePath) await this.openAppDatabase(appDatabasePath);
   }
@@ -449,6 +466,8 @@ export class OperationLogUtilityClient implements OperationLogStore {
   async dispose(): Promise<void> {
     const opening = this.opening;
     if (opening) await opening.catch(() => undefined);
+    await this.reader?.dispose();
+    this.reader = null;
     const child = this.process;
     this.activeWorkspace = null;
     this.activeAppDatabasePath = null;
@@ -469,7 +488,13 @@ export class OperationLogUtilityClient implements OperationLogStore {
       await this.request('openWorkspace', payload);
       this.activeWorkspace = { ...payload };
       this.activeAppDatabasePath = payload.appDatabasePath;
+      if (this.role === 'writer') {
+        this.reader ??= new OperationLogUtilityClient(this.modulePath, this.requestTimeoutMs, this.nativeBindingPath, 'reader');
+        await this.reader.openWorkspace(payload);
+      }
     } catch (error) {
+      await this.reader?.dispose();
+      this.reader = null;
       this.process?.kill();
       this.process = null;
       this.activeWorkspace = null;
@@ -483,7 +508,13 @@ export class OperationLogUtilityClient implements OperationLogStore {
     try {
       await this.request('openAppDatabase', { appDatabasePath });
       this.activeAppDatabasePath = appDatabasePath;
+      if (this.role === 'writer') {
+        this.reader ??= new OperationLogUtilityClient(this.modulePath, this.requestTimeoutMs, this.nativeBindingPath, 'reader');
+        await this.reader.openAppDatabase(appDatabasePath);
+      }
     } catch (error) {
+      await this.reader?.dispose();
+      this.reader = null;
       this.process?.kill();
       this.process = null;
       this.activeWorkspace = null;
@@ -496,21 +527,14 @@ export class OperationLogUtilityClient implements OperationLogStore {
     const child = utilityProcess.fork(this.modulePath, [], {
       serviceName: 'SoulForge 工作区数据库',
       stdio: 'pipe',
-      ...(this.nativeBindingPath
-        ? {
-            env: {
-              ...process.env,
-              SOULFORGE_SQLITE_NATIVE_BINDING: this.nativeBindingPath
-            }
-          }
-        : {})
+      env: { ...process.env, SOULFORGE_DATABASE_ROLE: this.role,
+        ...(this.nativeBindingPath ? { SOULFORGE_SQLITE_NATIVE_BINDING: this.nativeBindingPath } : {}) }
     });
     child.on('message', (message) => this.onMessage(message));
     child.on('exit', (code) => {
       if (this.process !== child) return;
       this.process = null;
-      this.activeWorkspace = null;
-      this.activeAppDatabasePath = null;
+      // Retain the binding for explicit restart and outcome query, never replay.
       this.rejectAll(
         new Error(`数据库后台进程意外退出（代码 ${code}）。`),
         code === 0 ? 'close' : 'workerfail'
@@ -534,6 +558,7 @@ export class OperationLogUtilityClient implements OperationLogStore {
     method: Method,
     payload: OperationLogUtilityPayloadMap[Method]
   ): Promise<OperationLogUtilityResultMap[Method]> {
+    if (this.role === 'writer' && this.reader && isDatabaseReadMethod(method)) return this.reader.request(method, payload);
     const child = this.process;
     if (!child) return Promise.reject(new Error('数据库后台进程不可用。'));
     return this.requestOn(child, method, payload);
@@ -544,6 +569,7 @@ export class OperationLogUtilityClient implements OperationLogStore {
     workspaceId: string,
     payload: Omit<OperationLogUtilityPayloadMap[Method], 'workspaceId'>
   ): Promise<OperationLogUtilityResultMap[Method]> {
+    if (this.opening) return this.opening.then(() => this.requestWorkspace(method, workspaceId, payload));
     if (this.activeWorkspace?.workspaceId !== workspaceId) {
       return Promise.reject(Object.assign(
         new Error(`数据库后台工作区不匹配：期望 ${workspaceId}。`),
@@ -566,19 +592,22 @@ export class OperationLogUtilityClient implements OperationLogStore {
   ): Promise<OperationLogUtilityResultMap[Method]> {
     const requestId = randomUUID();
     const enqueuedAt = performance.now();
+    const timeout = this.timeoutForMethod(method);
     const request = {
       protocolVersion: OPERATION_LOG_UTILITY_PROTOCOL,
       requestId,
       method,
-      payload
+      payload,
+      deadlineAt: Date.now() + timeout
     } as OperationLogUtilityRequest;
     return new Promise((resolve, reject) => {
-      const timeout = this.timeoutForMethod(method);
       const depth = this.pending.size + 1;
       let dispatchedAt = enqueuedAt;
       const timer = setTimeout(() => {
+        const pending = this.pending.get(requestId);
         this.pending.delete(requestId);
-        this.rememberLateRequest({
+        this.dispatchQueue = this.dispatchQueue.filter(item => item.requestId !== requestId);
+        if (pending?.dispatched) this.rememberLateRequest({
           requestId,
           method,
           enqueuedAt,
@@ -600,7 +629,7 @@ export class OperationLogUtilityClient implements OperationLogStore {
           timeoutMs: timeout,
           outcome: 'timeout'
         });
-        reject(new Error(`数据库后台请求超时：${method}`));
+        reject(uncertainRequestError(new Error(`数据库后台请求超时：${method}`), pending));
         this.drainDispatchQueue();
       }, timeout);
       this.pending.set(requestId, {
@@ -611,7 +640,9 @@ export class OperationLogUtilityClient implements OperationLogStore {
         depth,
         resolve: resolve as (value: unknown) => void,
         reject,
-        timer
+        timer,
+        request,
+        dispatched: false
       });
       writeUtilityTrace({
         side: 'client',
@@ -658,6 +689,7 @@ export class OperationLogUtilityClient implements OperationLogStore {
       }
       const dispatchedAt = performance.now();
       pending.dispatchedAt = dispatchedAt;
+      pending.dispatched = true;
       setDispatchedAt?.(dispatchedAt);
       this.dispatchingRequestId = queued.requestId;
       writeUtilityTrace({
@@ -696,7 +728,7 @@ export class OperationLogUtilityClient implements OperationLogStore {
           outcome: 'post-error',
           errorCode: 'UTILITY_POST_MESSAGE_FAILED'
         });
-        pending.reject(error instanceof Error ? error : new Error(String(error)));
+        pending.reject(uncertainRequestError(error instanceof Error ? error : new Error(String(error)), pending));
         continue;
       }
       return;
@@ -732,6 +764,7 @@ export class OperationLogUtilityClient implements OperationLogStore {
       case 'get':
       case 'list':
       case 'history':
+      case 'getTransactionForOperation':
       case 'listIncompleteTransactions':
       case 'listRecoveryPoints':
       case 'listAuditEvents':
@@ -802,7 +835,8 @@ export class OperationLogUtilityClient implements OperationLogStore {
       new Error(message.error?.message ?? '数据库后台请求失败。'),
       { code: message.error?.code ?? 'DATABASE_UTILITY_FAILED' }
     );
-    pending.reject(error);
+    pending.reject(error.code === 'DATABASE_UTILITY_REQUEST_NOT_EXECUTED' && !isDatabaseReadMethod(pending.method)
+      ? uncertainRequestError(error, { ...pending, dispatched: false }) : error);
     this.drainDispatchQueue();
   }
 
@@ -826,7 +860,7 @@ export class OperationLogUtilityClient implements OperationLogStore {
         outcome,
         errorCode: outcome === 'close' ? 'UTILITY_PROCESS_CLOSED' : 'UTILITY_PROCESS_FAILED'
       });
-      pending.reject(error);
+      pending.reject(uncertainRequestError(error, pending));
     }
     this.pending.clear();
   }
@@ -896,6 +930,21 @@ function utilityRequestPriority(method: OperationLogUtilityMethod): number {
     || method === 'upsertJob'
     || method === 'upsertSemanticFileCache') return 0;
   return 1;
+}
+
+function uncertainRequestError(cause: Error, pending?: PendingRequest): Error {
+  if (!pending) return cause;
+  const read = isDatabaseReadMethod(pending.method);
+  const unknown = pending.dispatched && !read;
+  const payload = pending.request.payload as Record<string, unknown>;
+  const entry = (payload.entry ?? payload.record ?? (payload.bundle as { operation?: unknown } | undefined)?.operation) as { opId?: unknown } | undefined;
+  const opId = typeof payload.opId === 'string' ? payload.opId : typeof entry?.opId === 'string' ? entry.opId : undefined;
+  return Object.assign(new Error(cause.message, { cause }), {
+    code: unknown ? 'DATABASE_UTILITY_OUTCOME_UNKNOWN' : read ? 'DATABASE_UTILITY_TIMEOUT' : 'DATABASE_UTILITY_REQUEST_NOT_EXECUTED',
+    requestId: pending.requestId,
+    retryable: !unknown,
+    ...(read ? {} : { transaction: { state: unknown ? 'unknown' : 'not_committed', ...(opId ? { opId } : {}) } })
+  });
 }
 
 function sameWorkspace(

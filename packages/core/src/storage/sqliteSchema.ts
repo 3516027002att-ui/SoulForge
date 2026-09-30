@@ -20,6 +20,8 @@ export interface SqlMigration {
    * 因为主 sql 跑在加列之前。
    */
   sqlAfterColumns?: string;
+  /** Preserve a consistent database snapshot before destructive upgrade. */
+  requiresBackup?: boolean;
 }
 
 /**
@@ -739,6 +741,29 @@ SELECT rowid, chunk_id, title, body FROM rag_chunks;
 DROP TABLE rag_chunks_fts_trigram;
 ALTER TABLE rag_chunks_fts_trigram_rowid_v15 RENAME TO rag_chunks_fts_trigram;
 `
+  },
+  {
+    id: 16,
+    name: 'retire_unused_workspace_tables',
+    requiresBackup: true,
+    sql: `
+DROP TABLE IF EXISTS event_instructions;
+DROP TABLE IF EXISTS event_text_fts;
+DROP TABLE IF EXISTS event_symbols;
+DROP TABLE IF EXISTS map_entities;
+DROP TABLE IF EXISTS map_regions;
+DROP TABLE IF EXISTS param_fields;
+DROP TABLE IF EXISTS param_rows_fts;
+DROP TABLE IF EXISTS param_rows;
+DROP TABLE IF EXISTS text_entries_fts;
+DROP TABLE IF EXISTS text_entries;
+DROP TABLE IF EXISTS operation_logs;
+DROP TABLE IF EXISTS workspace_layers;
+DROP TABLE IF EXISTS agent_runs;
+DROP TABLE IF EXISTS resource_edges;
+DROP TABLE IF EXISTS resource_nodes;
+DROP TABLE IF EXISTS resource_graph_snapshots;
+`
   }
 ];
 
@@ -993,6 +1018,24 @@ CREATE INDEX IF NOT EXISTS idx_provider_usage_service_created
   ON provider_usage_events(service_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_provider_usage_session_call
   ON provider_usage_events(session_id, call_index);
+`
+  },
+  {
+    id: 4,
+    name: 'retire_unused_app_tables',
+    requiresBackup: true,
+    sql: `
+DROP TABLE IF EXISTS tool_calls;
+DROP TABLE IF EXISTS outbound_context_items;
+DROP TABLE IF EXISTS agent_steps;
+DROP TABLE IF EXISTS app_agent_runs;
+DROP TABLE IF EXISTS ai_messages;
+DROP TABLE IF EXISTS ai_conversations;
+DROP TABLE IF EXISTS permission_grants;
+DROP TABLE IF EXISTS adaptation_packages;
+DROP TABLE IF EXISTS trusted_signers;
+DROP TABLE IF EXISTS model_services;
+DROP TABLE IF EXISTS app_settings;
 `
   }
 ];

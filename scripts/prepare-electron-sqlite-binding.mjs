@@ -11,7 +11,9 @@ const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const electronVersion = JSON.parse(
   await readFile(join(root, 'node_modules', 'electron', 'package.json'), 'utf8')
 ).version;
-const nativeRoot = join(root, 'apps', 'desktop', '.native');
+const nativeRoot = process.env.SOULFORGE_TEST_BUILD_ROOT
+  ? join(resolve(process.env.SOULFORGE_TEST_BUILD_ROOT), '.native')
+  : join(root, 'apps', 'desktop', '.native');
 const buildRoot = join(nativeRoot, 'electron-rebuild');
 const isolatedModules = join(buildRoot, 'node_modules');
 const sourceModule = join(root, 'node_modules', 'better-sqlite3');
