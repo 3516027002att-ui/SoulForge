@@ -376,7 +376,8 @@
     "test:bridge-artifact-chunking": "npm run bridge:build && node scripts/verify-bridge-artifact-chunking.mjs",
     "benchmark:rag-fts-delta": "npm run build -w @soulforge/core && node scripts/verify-rag-fts-delta-performance.mjs",
     "test:rag-refresh-queue": "node --experimental-strip-types apps/desktop/src/main/ragRefreshQueue.test.ts && node --experimental-strip-types apps/desktop/src/main/ragLookupBuild.test.ts && node --experimental-strip-types apps/desktop/src/main/ragRefreshCorpus.test.ts && node --experimental-strip-types apps/desktop/src/main/knowledgeStoreSnapshot.test.ts",
-    "test:param-read-fallback": "node --experimental-strip-types apps/desktop/src/main/ipc/paramReadFallback.test.ts"
+    "test:param-read-fallback": "node --experimental-strip-types apps/desktop/src/main/ipc/paramReadFallback.test.ts",
+    "bridge:publish:linux": "node scripts/run-dotnet.mjs publish bridge/SoulForge.Bridge/SoulForge.Bridge.csproj -c Release --nologo --self-contained true -r linux-x64 -p:PublishSingleFile=true && node scripts/bridge-production-build.mjs --runtime linux-x64"
   },
   "devDependencies": {
     "@types/node": "^22.13.1",

@@ -11,6 +11,22 @@ export const BRIDGE_PRODUCTION_BUILD_RECEIPT = `${BRIDGE_PUBLISH_RELATIVE_PATH}/
 export const BRIDGE_EXTERNAL_BUILD_INPUTS = Object.freeze(['global.json', 'scripts/run-dotnet.mjs']);
 export const BRIDGE_PUBLISH_SCRIPT_INPUT = 'package.json#scripts.bridge:publish';
 
+/** Keep the legacy Windows API default; Linux callers select their target explicitly. */
+export function bridgeBuildTarget({ runtimeIdentifier = 'win-x64' } = {}) {
+  if (!['win-x64', 'linux-x64'].includes(runtimeIdentifier)) {
+    throw new Error(`Unsupported Bridge runtime: ${runtimeIdentifier}`);
+  }
+  const linux = runtimeIdentifier === 'linux-x64';
+  const publish = `${BRIDGE_PROJECT_RELATIVE_PATH}/bin/Release/net10.0/${runtimeIdentifier}/publish`;
+  const script = linux ? 'bridge:publish:linux' : 'bridge:publish';
+  return {
+    runtimeIdentifier, publish, script,
+    executable: `${publish}/${linux ? 'SoulForge.Bridge' : 'SoulForge.Bridge.exe'}`,
+    receipt: `${publish}/bridge-production-build.json`,
+    scriptInput: `package.json#scripts.${script}`
+  };
+}
+
 const IGNORED_SOURCE_DIRECTORIES = new Set(['bin', 'obj', '.git']);
 const HELPER_RELATIVE_PATH = 'scripts/bridge-production-build.mjs';
 const HELPER_SOURCE_PATH = fileURLToPath(import.meta.url);
@@ -81,7 +97,7 @@ async function fingerprintFiles(repoRoot, files, inlineEntries = []) {
   };
 }
 
-async function readBridgePublishScript(repoRoot) {
+async function readBridgePublishScript(repoRoot, target) {
   const root = resolve(repoRoot);
   const packagePath = resolve(root, 'package.json');
   let packageJson;
@@ -92,18 +108,19 @@ async function readBridgePublishScript(repoRoot) {
       packagePath: portablePath(relative(root, packagePath))
     }, error);
   }
-  const publishScript = packageJson?.scripts?.['bridge:publish'];
+  const publishScript = packageJson?.scripts?.[target.script];
   if (typeof publishScript !== 'string' || publishScript.trim().length === 0) {
     throw staleError('根 package.json 缺少有效的 scripts["bridge:publish"]。', {
       packagePath: portablePath(relative(root, packagePath)),
-      input: BRIDGE_PUBLISH_SCRIPT_INPUT
+      input: target.scriptInput
     });
   }
   return publishScript;
 }
 
 /** Fingerprint Bridge project inputs, excluding generated output and VCS data. */
-export async function computeBridgeSourceFingerprint(repoRoot) {
+export async function computeBridgeSourceFingerprint(repoRoot, options) {
+  const target = bridgeBuildTarget(options);
   const root = resolve(repoRoot);
   const sourceRoot = resolve(root, BRIDGE_PROJECT_RELATIVE_PATH);
   const files = await walkSourceFiles(sourceRoot);
@@ -113,9 +130,9 @@ export async function computeBridgeSourceFingerprint(repoRoot) {
     });
   }
   const externalInputs = BRIDGE_EXTERNAL_BUILD_INPUTS.map((path) => resolve(root, path));
-  const publishScript = await readBridgePublishScript(root);
+  const publishScript = await readBridgePublishScript(root, target);
   return fingerprintFiles(root, [...files, ...externalInputs], [{
-    path: BRIDGE_PUBLISH_SCRIPT_INPUT,
+    path: target.scriptInput,
     content: publishScript
   }]);
 }
@@ -129,9 +146,9 @@ async function computeHelperFingerprint() {
   };
 }
 
-async function fingerprintExecutable(repoRoot) {
+async function fingerprintExecutable(repoRoot, target) {
   const root = resolve(repoRoot);
-  const executablePath = resolve(root, BRIDGE_PUBLISH_EXECUTABLE_RELATIVE_PATH);
+  const executablePath = resolve(root, target.executable);
   let metadata;
   try {
     metadata = await lstat(executablePath);
@@ -153,8 +170,8 @@ async function fingerprintExecutable(repoRoot) {
   };
 }
 
-function receiptPath(repoRoot) {
-  return resolve(repoRoot, BRIDGE_PRODUCTION_BUILD_RECEIPT);
+function receiptPath(repoRoot, target) {
+  return resolve(repoRoot, target.receipt);
 }
 
 function comparableSource(source) {
@@ -173,8 +190,8 @@ function comparableSource(source) {
   };
 }
 
-function comparableExecutable(executable) {
-  if (!isRecord(executable) || executable.path !== BRIDGE_PUBLISH_EXECUTABLE_RELATIVE_PATH
+function comparableExecutable(executable, target) {
+  if (!isRecord(executable) || executable.path !== target.executable
     || !Number.isInteger(executable.bytes) || typeof executable.sha256 !== 'string') return null;
   return {
     path: executable.path,
@@ -183,7 +200,7 @@ function comparableExecutable(executable) {
   };
 }
 
-function assertReceiptShape(receipt, manifestPath) {
+function assertReceiptShape(receipt, manifestPath, target) {
   if (!isRecord(receipt) || receipt.schemaVersion !== BRIDGE_PRODUCTION_BUILD_SCHEMA_VERSION) {
     throw staleError('Bridge production receipt schema 无效，请重新发布 Bridge。', { manifestPath });
   }
@@ -198,7 +215,7 @@ function assertReceiptShape(receipt, manifestPath) {
   }
   if (!isRecord(receipt.source) || !Array.isArray(receipt.source.externalInputs)
     || !sameJson(receipt.source.externalInputs, [...BRIDGE_EXTERNAL_BUILD_INPUTS])
-    || receipt.source.publishScriptInput !== BRIDGE_PUBLISH_SCRIPT_INPUT) {
+    || receipt.source.publishScriptInput !== target.scriptInput) {
     throw staleError('Bridge production receipt 的外部构建输入无效，请重新发布 Bridge。', { manifestPath });
   }
   if (!isRecord(receipt.helper)
@@ -208,7 +225,7 @@ function assertReceiptShape(receipt, manifestPath) {
     throw staleError('Bridge production receipt 的 helper 指纹无效，请重新发布 Bridge。', { manifestPath });
   }
   const source = comparableSource(receipt.source);
-  const executable = comparableExecutable(receipt.executable);
+  const executable = comparableExecutable(receipt.executable, target);
   if (!source || !executable) {
     throw staleError('Bridge production receipt 字段无效，请重新发布 Bridge。', { manifestPath });
   }
@@ -220,12 +237,13 @@ function sameJson(left, right) {
 }
 
 /** Write a receipt after a successful Release self-contained Bridge publish. */
-export async function writeBridgeProductionBuildReceipt(repoRoot) {
+export async function writeBridgeProductionBuildReceipt(repoRoot, options) {
+  const target = bridgeBuildTarget(options);
   const root = resolve(repoRoot);
-  const source = await computeBridgeSourceFingerprint(root);
-  const executable = await fingerprintExecutable(root);
+  const source = await computeBridgeSourceFingerprint(root, options);
+  const executable = await fingerprintExecutable(root, target);
   const helper = await computeHelperFingerprint();
-  const manifestPath = receiptPath(root);
+  const manifestPath = receiptPath(root, target);
   const receipt = {
     schemaVersion: BRIDGE_PRODUCTION_BUILD_SCHEMA_VERSION,
     generatedAt: new Date().toISOString(),
@@ -233,7 +251,7 @@ export async function writeBridgeProductionBuildReceipt(repoRoot) {
       root: BRIDGE_PROJECT_RELATIVE_PATH,
       excludedDirectories: [...IGNORED_SOURCE_DIRECTORIES].sort(),
       externalInputs: [...BRIDGE_EXTERNAL_BUILD_INPUTS],
-      publishScriptInput: BRIDGE_PUBLISH_SCRIPT_INPUT,
+      publishScriptInput: target.scriptInput,
       ...source
     },
     helper,
@@ -245,9 +263,10 @@ export async function writeBridgeProductionBuildReceipt(repoRoot) {
 }
 
 /** Verify that the Bridge build inputs, helper rules, and published executable still match the receipt. */
-export async function assertBridgeProductionBuildFresh(repoRoot) {
+export async function assertBridgeProductionBuildFresh(repoRoot, options) {
+  const target = bridgeBuildTarget(options);
   const root = resolve(repoRoot);
-  const manifestPath = receiptPath(root);
+  const manifestPath = receiptPath(root, target);
   let receipt;
   try {
     receipt = JSON.parse(await readFile(manifestPath, 'utf8'));
@@ -256,14 +275,14 @@ export async function assertBridgeProductionBuildFresh(repoRoot) {
       manifestPath
     }, error);
   }
-  const expected = assertReceiptShape(receipt, manifestPath);
+  const expected = assertReceiptShape(receipt, manifestPath, target);
   let currentSource;
   let currentExecutable;
   let currentHelper;
   try {
     [currentSource, currentExecutable, currentHelper] = await Promise.all([
-      computeBridgeSourceFingerprint(root),
-      fingerprintExecutable(root),
+      computeBridgeSourceFingerprint(root, options),
+      fingerprintExecutable(root, target),
       computeHelperFingerprint()
     ]);
   } catch (error) {
@@ -300,12 +319,16 @@ function repoRootFromScript() {
 
 async function runCli() {
   const args = process.argv.slice(2);
-  if (args.length > 1 || (args.length === 1 && args[0] !== '--assert-fresh')) {
-    throw new Error('用法：node scripts/bridge-production-build.mjs [--assert-fresh]');
+  const options = {};
+  let assertFresh = false;
+  for (let i = 0; i < args.length; i += 1) {
+    if (args[i] === '--assert-fresh') assertFresh = true;
+    else if (args[i] === '--runtime' && args[i + 1]) options.runtimeIdentifier = args[++i];
+    else throw new Error('用法：node scripts/bridge-production-build.mjs [--assert-fresh] [--runtime win-x64|linux-x64]');
   }
   const root = repoRootFromScript();
-  if (args[0] === '--assert-fresh') {
-    const result = await assertBridgeProductionBuildFresh(root);
+  if (assertFresh) {
+    const result = await assertBridgeProductionBuildFresh(root, options);
     console.log(JSON.stringify({
       ok: true,
       status: 'fresh',
@@ -316,7 +339,7 @@ async function runCli() {
     }));
     return;
   }
-  const result = await writeBridgeProductionBuildReceipt(root);
+  const result = await writeBridgeProductionBuildReceipt(root, options);
   console.log(JSON.stringify({
     ok: true,
     status: 'written',

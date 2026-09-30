@@ -3,6 +3,12 @@ import { execFile } from 'node:child_process';
 import { cp, lstat, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { promisify } from 'node:util';
 import { dirname, join, relative, resolve } from 'node:path';
+import { bridgeBuildTarget } from './bridge-production-build.mjs';
+
+export function agentArtifactBridgeTarget(options = {}) {
+  return bridgeBuildTarget({ runtimeIdentifier: options.runtimeIdentifier
+    ?? (process.platform === 'linux' && process.arch === 'x64' ? 'linux-x64' : 'win-x64') });
+}
 
 export const AGENT_PRODUCTION_BUILD_SCHEMA_VERSION = 1;
 export const AGENT_PRODUCTION_BUILD_MANIFEST = 'apps/desktop/out/agent-production-build.json';
@@ -52,8 +58,7 @@ const SNAPSHOT_DIRECTORY_PATHS = [
   'apps/desktop/.native',
   'apps/desktop/out/main',
   'apps/desktop/out/preload',
-  'apps/desktop/out/renderer',
-  'bridge/SoulForge.Bridge/bin/Release/net10.0/win-x64/publish'
+  'apps/desktop/out/renderer'
 ];
 
 const SNAPSHOT_FILE_PATHS = [
@@ -242,8 +247,8 @@ async function snapshotFileList(snapshotRoot) {
     .sort((left, right) => left.localeCompare(right, 'en'));
 }
 
-async function computeSnapshotRuntimeRaceFingerprint(root) {
-  const bridgePublish = 'bridge/SoulForge.Bridge/bin/Release/net10.0/win-x64/publish';
+async function computeSnapshotRuntimeRaceFingerprint(root, target) {
+  const bridgePublish = target.publish;
   const paths = await expandInputs(root, [bridgePublish, 'apps/desktop/.native'], [
     'apps/desktop/e2e/playwright/production-main.mjs',
     'scripts/map-native-timing-aggregate.mjs',
@@ -311,9 +316,11 @@ export async function assertAgentProductionBuildFresh(repoRoot) {
  */
 export async function createAgentProductionArtifactSnapshot(repoRoot, options = {}) {
   const root = resolve(repoRoot);
+  const target = agentArtifactBridgeTarget(options);
+  const snapshotDirectories = [...SNAPSHOT_DIRECTORY_PATHS, target.publish];
   const fresh = await assertAgentProductionBuildFresh(root);
   const requiredSources = [
-    ...SNAPSHOT_DIRECTORY_PATHS,
+    ...snapshotDirectories,
     ...SNAPSHOT_FILE_PATHS
   ];
   for (const path of requiredSources) {
@@ -321,7 +328,7 @@ export async function createAgentProductionArtifactSnapshot(repoRoot, options = 
     const metadata = await lstat(absolute);
     if (metadata.isSymbolicLink()) throw new Error(`production artifact source 是符号链接：${path}`);
   }
-  const runtimeBefore = await computeSnapshotRuntimeRaceFingerprint(root);
+  const runtimeBefore = await computeSnapshotRuntimeRaceFingerprint(root, target);
 
   const parent = resolve(root, options.parent ?? AGENT_PRODUCTION_ARTIFACT_SNAPSHOT_PARENT);
   await mkdir(parent, { recursive: true });
@@ -330,7 +337,7 @@ export async function createAgentProductionArtifactSnapshot(repoRoot, options = 
   const stagingRoot = await mkdtemp(join(parent, `${label}-${stamp}-`));
 
   try {
-    for (const source of SNAPSHOT_DIRECTORY_PATHS) {
+    for (const source of snapshotDirectories) {
       await copySnapshotPath(root, stagingRoot, { source, target: source });
     }
     for (const source of SNAPSHOT_FILE_PATHS) {
@@ -359,7 +366,7 @@ export async function createAgentProductionArtifactSnapshot(repoRoot, options = 
         }
       );
     }
-    const runtimeAfter = await computeSnapshotRuntimeRaceFingerprint(root);
+    const runtimeAfter = await computeSnapshotRuntimeRaceFingerprint(root, target);
     if (runtimeAfter.sha256 !== runtimeBefore.sha256) {
       throw staleBuildError(
         'production artifact snapshot 捕获期间 production harness 或 Bridge publish 发生变化；已拒绝混版快照。',
@@ -396,7 +403,8 @@ export async function createAgentProductionArtifactSnapshot(repoRoot, options = 
         outRoot: 'apps/desktop/out',
         productionMain: 'apps/desktop/e2e/playwright/production-main.mjs',
         bridgeProject: 'bridge/SoulForge.Bridge/SoulForge.Bridge.csproj',
-        bridgeExecutable: 'bridge/SoulForge.Bridge/bin/Release/net10.0/win-x64/publish/SoulForge.Bridge.exe',
+        bridgeExecutable: target.executable,
+        bridgeRuntimeIdentifier: target.runtimeIdentifier,
         systemPrompt: 'prompt/system.md',
         mutter: hasMutter ? OPTIONAL_SNAPSHOT_FILE_PATHS[0] : null
       },

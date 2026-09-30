@@ -31,9 +31,14 @@ export async function withDesktopTestBuild(kind, execute, options = {}) {
   } finally { cancellation.dispose(); await rm(outputRoot, { recursive: true, force: true }); }
 }
 
+export function desktopSmokeArgs(entry, headless = false) {
+  return [entry, ...(headless ? ['--ozone-platform=headless'] : [])];
+}
+
 export async function runDesktopSmoke(kind, entry, executable = process.execPath) {
   return withDesktopTestBuild(kind, async ({ outputRoot, env, signal }) => {
-    const result = await runProcess({ command: executable, args: [join(outputRoot, 'main', entry)], cwd: root, env, signal,
+    const result = await runProcess({ command: executable,
+      args: desktopSmokeArgs(join(outputRoot, 'main', entry), process.platform === 'linux' && env.SF_E2E_HEADLESS === '1'), cwd: root, env, signal,
       timeoutMs: readTimeoutMs('SOULFORGE_SMOKE_TIMEOUT_MS', 10 * 60 * 1000),
       onStdout: chunk => process.stdout.write(chunk), onStderr: chunk => process.stderr.write(chunk) });
     return processSucceeded(result) ? 0 : result.code || 1;

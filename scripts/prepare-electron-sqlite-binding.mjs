@@ -68,9 +68,19 @@ async function run() {
   ];
   const buildEnv = {
     ...process.env,
-    CL: appendFlag(process.env.CL, '/Brepro'),
-    LINK: appendFlag(process.env.LINK, '/Brepro')
+    // @electron/rebuild resolves its header cache from os.homedir(). Keep
+    // compiler/download caches local to this task, even on a restricted host.
+    ...(process.platform === 'win32'
+      ? { USERPROFILE: resolve(buildRoot, 'home') }
+      : { HOME: resolve(buildRoot, 'home') }),
+    npm_config_cache: resolve(buildRoot, 'cache/npm'),
+    electron_config_cache: resolve(buildRoot, 'cache/electron'),
+    ...(process.platform === 'win32' ? {
+      CL: appendFlag(process.env.CL, '/Brepro'),
+      LINK: appendFlag(process.env.LINK, '/Brepro')
+    } : {})
   };
+  await mkdir(resolve(buildRoot, 'home'), { recursive: true });
   const rebuildTimeoutMs = readTimeoutMs(
     'SOULFORGE_SQLITE_REBUILD_TIMEOUT_MS',
     15 * 60 * 1000

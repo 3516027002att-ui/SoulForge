@@ -10,6 +10,12 @@ const build = await import('./desktop-test-build.mjs').catch(error => {
   throw error;
 });
 
+test('headless Electron smoke selects a display backend without relaxing sandbox settings', () => {
+  assert.equal(typeof build.desktopSmokeArgs, 'function');
+  assert.deepEqual(build.desktopSmokeArgs('/isolated/main/smoke.js', false), ['/isolated/main/smoke.js']);
+  assert.deepEqual(build.desktopSmokeArgs('/isolated/main/smoke.js', true), ['/isolated/main/smoke.js', '--ozone-platform=headless']);
+});
+
 test('smoke output allocation is distinct, bounded, and cleaned without touching production', async () => {
   assert.equal(typeof build.withDesktopTestBuild, 'function', 'smoke builds require an isolated output owner');
   const root = await mkdtemp(join(tmpdir(), 'sf-build-test-'));
