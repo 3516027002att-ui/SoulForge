@@ -112,6 +112,7 @@ jobs:
           SOULFORGE_BRIDGE_EXE: ${{ github.workspace }}/bridge/SoulForge.Bridge/bin/Release/net10.0/${{ matrix.runtime }}/publish/${{ matrix.bridge-executable }}
         run: |
           node --test scripts/tae-identity.fixture.mjs scripts/hks-native-platform.fixture.mjs scripts/bridge-linux-production.fixture.mjs scripts/native-build-environment.fixture.mjs
+          node --test scripts/owned-temporary-directory.test.mjs scripts/owned-process.test.mjs scripts/bridge-build-output-ownership.test.mjs
           node scripts/verify-bridge-write-boundary-gate.mjs
       - name: Run sandbox-preserving Electron database utility smoke
         id: database
