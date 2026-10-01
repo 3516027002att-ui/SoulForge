@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { mkdtemp, mkdir, readFile, readdir, rm, symlink, writeFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, readFile, readdir, realpath, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { spawn, spawnSync } from 'node:child_process';
@@ -9,6 +9,7 @@ import { pathToFileURL } from 'node:url';
 import { randomUUID } from 'node:crypto';
 
 const helperPath = resolve('scripts/bridge-build-output-ownership.mjs');
+const runtimeIdentifier = process.platform === 'win32' ? 'win-x64' : 'linux-x64';
 const helperUrl = pathToFileURL(helperPath).href;
 const helper = await import(helperUrl).catch(error => {
   if (error.code === 'ERR_MODULE_NOT_FOUND') return {};
@@ -16,14 +17,14 @@ const helper = await import(helperUrl).catch(error => {
 });
 
 async function fixture(body) {
-  const root = await mkdtemp(join(tmpdir(), 'sf-bridge-output-test-'));
+  const root = await realpath(await mkdtemp(join(tmpdir(), 'sf-bridge-output-test-')));
   const project = join(root, 'Bridge.csproj');
   const bin = join(root, 'bin');
   const store = join(root, 'obj', '.soulforge-build-output-ownership');
-  const output = framework => join(bin, 'Debug', framework, 'linux-x64');
+  const output = framework => join(bin, 'Debug', framework, runtimeIdentifier);
   const declare = frameworks => writeFile(project, `<Project><PropertyGroup><TargetFrameworks>${frameworks}</TargetFrameworks></PropertyGroup></Project>`);
   const begin = framework => helper.beginBridgeBuild({ project, outputPath: output(framework), framework,
-    configuration: 'Debug', runtimeIdentifier: 'linux-x64' });
+    configuration: 'Debug', runtimeIdentifier: runtimeIdentifier });
   try {
     await declare('net8.0');
     await body({ root, project, bin, store, output, declare, begin });
@@ -82,9 +83,9 @@ test('multi-target outputs stay current and explicit non-default output paths ar
     const current = await f.begin('net10.0'); assert.equal(await exists(owned), true);
     await helper.completeBridgeBuild({ project: f.project, token: current.token, fileWrites: [] });
     await f.declare('net10.0');
-    for (const outputPath of [join(f.root, 'deliverables'), join(f.bin, 'custom', 'net10.0', 'linux-x64')]) {
+    for (const outputPath of [join(f.root, 'deliverables'), join(f.bin, 'custom', 'net10.0', runtimeIdentifier)]) {
       const external = await helper.beginBridgeBuild({ project: f.project, outputPath, framework: 'net10.0',
-        configuration: 'Debug', runtimeIdentifier: 'linux-x64' });
+        configuration: 'Debug', runtimeIdentifier: runtimeIdentifier });
       const sentinel = join(outputPath, 'sentinel.dll'); await put(sentinel);
       await helper.completeBridgeBuild({ project: f.project, token: external.token, fileWrites: [sentinel] });
       assert.equal(await exists(owned), true, 'non-default builds do not clean the default bin');
@@ -145,10 +146,10 @@ test('fresh isolated outputs promote actual writes while matching unknown canoni
   assert.equal(typeof helper.promoteBridgeBuild, 'function');
   await fixture(async f => {
     const token = randomUUID(), runRoot = join(f.root, 'obj', '.soulforge-build-runs', token);
-    const outputPath = join(runRoot, 'bin', 'Debug', 'net8.0', 'linux-x64');
+    const outputPath = join(runRoot, 'bin', 'Debug', 'net8.0', runtimeIdentifier);
     const matching = join(f.output('net8.0'), 'Matching.dll'); await put(matching, 'matching unknown');
     await helper.beginIsolatedBridgeBuild({ project: f.project, token, runRoot, outputPath,
-      canonicalOutputPath: f.output('net8.0'), framework: 'net8.0', configuration: 'Debug', runtimeIdentifier: 'linux-x64' });
+      canonicalOutputPath: f.output('net8.0'), framework: 'net8.0', configuration: 'Debug', runtimeIdentifier: runtimeIdentifier });
     assert.equal((JSON.parse(await readFile(join(runRoot, '.soulforge-temporary-owner.json'), 'utf8'))).owner, 'bridge-build');
     const produced = join(outputPath, 'Bridge.dll'), stagedMatching = join(outputPath, 'Matching.dll');
     await put(produced, 'fresh actual writer'); await put(stagedMatching, 'matching unknown');
@@ -173,7 +174,7 @@ test('traversal-like build properties and malformed lease baselines preserve unc
     await helper.completeBridgeBuild({ project: f.project, token: first.token, fileWrites: [owned] });
     await f.declare('net10.0');
     for (const properties of [{ configuration: '..' }, { runtimeIdentifier: '../outside' }, { framework: '..' }]) {
-      const input = { project: f.project, framework: 'net10.0', configuration: 'Debug', runtimeIdentifier: 'linux-x64', ...properties };
+      const input = { project: f.project, framework: 'net10.0', configuration: 'Debug', runtimeIdentifier: runtimeIdentifier, ...properties };
       input.outputPath = join(f.bin, input.configuration, input.framework, input.runtimeIdentifier);
       const lease = await helper.beginBridgeBuild(input);
       await helper.completeBridgeBuild({ project: f.project, token: lease.token, fileWrites: [owned] });
@@ -274,7 +275,7 @@ async function preparingBuild(f, ownerPid) {
   await f.declare('net10.0');
   const token = randomUUID();
   const input = { project: f.project, outputPath: f.output('net10.0'), framework: 'net10.0',
-    configuration: 'Debug', runtimeIdentifier: 'linux-x64', token, ...(ownerPid ? { ownerPid } : {}) };
+    configuration: 'Debug', runtimeIdentifier: runtimeIdentifier, token, ...(ownerPid ? { ownerPid } : {}) };
   const child = spawn(process.execPath, ['--input-type=module', '-e', `
     import { beginBridgeBuild } from ${JSON.stringify(helperUrl)};
     await beginBridgeBuild(${JSON.stringify(input)});
@@ -327,7 +328,7 @@ test('a real concurrent build lease protects marked outputs until its owner dies
     const child = spawn(process.execPath, ['--input-type=module', '-e', `
       import { beginBridgeBuild } from ${JSON.stringify(helperUrl)};
       import { writeFile } from 'node:fs/promises';
-      const lease = await beginBridgeBuild(${JSON.stringify({ project: f.project, outputPath: f.output('net8.0'), framework: 'net8.0', configuration: 'Debug', runtimeIdentifier: 'linux-x64' })});
+      const lease = await beginBridgeBuild(${JSON.stringify({ project: f.project, outputPath: f.output('net8.0'), framework: 'net8.0', configuration: 'Debug', runtimeIdentifier: runtimeIdentifier })});
       await writeFile(${JSON.stringify(partial)}, 'unfinished writer');
       process.send(lease.token);
       setInterval(() => {}, 1000);
@@ -418,7 +419,7 @@ test('SDK evaluation aligns isolated output paths and preserves explicit output 
     assert.ok(first.OutDir.includes(first._SoulForgeBuildOutputToken));
     assert.ok(first.TargetPath.includes(first._SoulForgeBuildOutputToken));
     assert.ok(first.IntermediateOutputPath.includes(first._SoulForgeBuildOutputToken));
-    assert.equal(resolve(first.PublishDir), join(f.root, 'bin', 'Debug', 'net10.0', 'linux-x64', 'publish'));
+    assert.equal(resolve(first.PublishDir), join(f.root, 'bin', 'Debug', 'net10.0', runtimeIdentifier, 'publish'));
     assert.equal(first.MSBuildProjectExtensionsPath.replace(/[\\/]+$/, ''), join(f.root, 'obj'));
     for (const option of ['-p:OutputPath=custom-output/', '-p:OutDir=custom-outdir/', '-p:BaseOutputPath=custom-base/', '-p:NoBuild=true']) {
       const explicit = f.properties([option]);
@@ -434,7 +435,7 @@ test('SDK evaluation aligns isolated output paths and preserves explicit output 
 
 test('direct SDK build promotes exact outputs, retains publish inputs, and supports no-build publish', { skip: sdkSkip }, async () => {
   await sdkFixture(async f => {
-    const canonical = join(f.root, 'bin', 'Debug', 'net10.0', 'linux-x64');
+    const canonical = join(f.root, 'bin', 'Debug', 'net10.0', runtimeIdentifier);
     await put(join(canonical, 'Matching.dll'), 'matching unknown\n');
     f.run(['-restore', '-t:Build']);
     assert.equal(await exists(join(canonical, 'Bridge.dll')), true);
@@ -442,7 +443,7 @@ test('direct SDK build promotes exact outputs, retains publish inputs, and suppo
     const runs = join(f.root, 'obj', '.soulforge-build-runs'), builtRuns = await readdir(runs);
     assert.equal(builtRuns.length, 1);
     const run = join(runs, builtRuns[0]);
-    assert.equal(await exists(join(run, 'bin', 'Debug', 'net10.0', 'linux-x64', 'Bridge.dll')), true);
+    assert.equal(await exists(join(run, 'bin', 'Debug', 'net10.0', runtimeIdentifier, 'Bridge.dll')), true);
     f.run(['-t:Publish', '-p:NoBuild=true']);
     assert.equal(await exists(join(canonical, 'publish', 'Bridge.dll')), true);
     assert.equal(await exists(join(canonical, 'publish', f.nativeName)), true);
@@ -496,7 +497,7 @@ test('real MSBuild interruption before output reclaims only its fresh marked run
     try {
       const run = await until(async () => await exists(join(f.root, 'ready.txt')) && (await readFile(join(f.root, 'ready.txt'), 'utf8')).trim(), build);
       assert.equal((await readdir(run)).includes('.soulforge-temporary-owner.json'), true);
-      assert.equal(await exists(join(run, 'bin', 'Debug', 'net10.0', 'linux-x64', 'Bridge.dll')), false);
+      assert.equal(await exists(join(run, 'bin', 'Debug', 'net10.0', runtimeIdentifier, 'Bridge.dll')), false);
       await stopBuild(build);
       f.run(['-t:PrepareForBuild']);
       assert.equal(await exists(join(run, '.soulforge-temporary-owner.json')), false);
@@ -528,7 +529,7 @@ test('a real inherited managed writer guards its run after only MSBuild is kille
 
 test('real MSBuild interruption after rename recovers identity-proven outputs without adopting planned matches', { skip: sdkSkip || (process.platform !== 'linux' && 'requires reliable Linux rename identity proof') }, async () => {
   await sdkFixture(async f => {
-    const canonical = join(f.root, 'bin', 'Debug', 'net10.0', 'linux-x64');
+    const canonical = join(f.root, 'bin', 'Debug', 'net10.0', runtimeIdentifier);
     const matching = join(canonical, 'Matching.dll'); await put(matching, 'matching unknown\n');
     const signal = join(f.root, 'renamed.json'), preload = join(f.root, 'pause-after-rename.mjs');
     // Instrument the real filesystem operation only to hold the interruption
@@ -590,7 +591,7 @@ test('SDK ProjectReference resolves the assembly built in the referenced fresh r
 
 test('SDK Clean removes unchanged promoted canonical files and preserves unknown binaries', { skip: sdkSkip }, async () => {
   await sdkFixture(async f => {
-    const canonical = join(f.root, 'bin', 'Debug', 'net10.0', 'linux-x64');
+    const canonical = join(f.root, 'bin', 'Debug', 'net10.0', runtimeIdentifier);
     await put(join(canonical, 'Matching.dll'), 'matching unknown\n');
     await put(join(canonical, 'User.dll'), 'unknown user');
     f.run(['-restore', '-t:Build']);
@@ -598,7 +599,7 @@ test('SDK Clean removes unchanged promoted canonical files and preserves unknown
     f.run(['-t:Clean']);
     assert.equal(await exists(join(canonical, 'Bridge.dll')), false);
     assert.equal(await exists(join(canonical, 'Bridge.pdb')), false);
-    assert.equal(await exists(join(f.root, 'obj', 'Debug', 'net10.0', 'linux-x64', 'Bridge.dll')), false);
+    assert.equal(await exists(join(f.root, 'obj', 'Debug', 'net10.0', runtimeIdentifier, 'Bridge.dll')), false);
     assert.equal(await readFile(join(canonical, 'Matching.dll'), 'utf8'), 'matching unknown\n');
     assert.equal(await readFile(join(canonical, 'User.dll'), 'utf8'), 'unknown user');
   });
@@ -606,7 +607,7 @@ test('SDK Clean removes unchanged promoted canonical files and preserves unknown
 
 test('Release PE, portable PDB and apphost omit private run paths while resources remain usable', { skip: sdkSkip }, async () => {
   await sdkFixture(async f => {
-    const canonical = join(f.root, 'bin', 'Release', 'net10.0', 'linux-x64');
+    const canonical = join(f.root, 'bin', 'Release', 'net10.0', runtimeIdentifier);
     const beforeMapping = f.source.replace(/<PropertyGroup Condition="'\$\(_SoulForgeIsolatedBuild\)' == 'true' And '\$\(Configuration\)' == 'Release'">[\s\S]*?<\/PropertyGroup>/, '');
     await writeFile(f.project, beforeMapping);
     f.run(['-restore', '-t:Build', '-p:Configuration=Release', '-p:UseAppHost=true']);

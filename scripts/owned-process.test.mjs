@@ -282,7 +282,7 @@ test('Windows owned job ends lingering descendants after successful and failed d
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 
-test('Windows owner interruption preserves an assigned job until its writer ends', { skip: process.platform !== 'win32' && 'Windows job API unavailable' }, async () => {
+test('Windows owner interruption preserves live writers and reclaims only a stopped owned job', { skip: process.platform !== 'win32' && 'Windows job API unavailable' }, async () => {
   const root = await mkdtemp(join(tmpdir(), 'sf-owned-windows-interruption-'));
   const writer = await fakeWriter(root);
   const wrapper = spawn(process.execPath, ['--input-type=module', '-e', `
@@ -294,9 +294,25 @@ test('Windows owner interruption preserves an assigned job until its writer ends
   let info, stderr = ''; wrapper.stderr.on('data', chunk => { stderr += chunk; });
   try {
     info = await waitFor(async () => JSON.parse(await readFile(writer.ready, 'utf8')), `Windows job assignment: ${stderr}`);
+    const marker = JSON.parse(await readFile(join(info.root, '.soulforge-temporary-owner.json'), 'utf8'));
+    assert.equal(marker.windowsJobs.length, 1);
+    const proof = JSON.parse(await readFile(join(info.root, `.soulforge-windows-job.${marker.windowsJobs[0].id}.json`), 'utf8'));
+    assert.equal(proof.state, 'assigned');
+    assert.equal(proof.killOnClose, true);
     await stop(wrapper);
     const next = await createOwnedTemporaryDirectory('windows-interruption', { parent: root }); await next.dispose();
-    assert.ok((await lstat(info.root)).isDirectory());
+    let retained;
+    try { retained = (await lstat(info.root)).isDirectory(); }
+    catch (error) { if (error.code !== 'ENOENT') throw error; retained = false; }
+    if (!retained) {
+      // The sole guardian can also stop on owner interruption. Its kill-on-close
+      // job makes reclamation safe only after both driver and writer have ended.
+      for (const pid of new Set([info.pid, proof.driverPid, proof.guardianPid])) {
+        assert.throws(() => process.kill(pid, 0), { code: 'ESRCH' }, `reclaimed root still has live job PID ${pid}`);
+      }
+    } else {
+      assert.ok((await lstat(info.root)).isDirectory(), 'an unfinished job keeps its owned root');
+    }
     await writeFile(writer.release, 'done');
     await waitFor(async () => {
       const resumed = await createOwnedTemporaryDirectory('windows-interruption', { parent: root }); await resumed.dispose();

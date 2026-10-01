@@ -183,8 +183,23 @@ export async function createOwnedTemporaryDirectory(owner, { parent = tmpdir() }
 export async function initializeOwnedTemporaryDirectory(owner, root, { ownerPid = process.pid, token = randomUUID() } = {}) {
   if (!/^[A-Za-z0-9._-]{1,100}$/.test(owner) || !Number.isSafeInteger(ownerPid) || ownerPid <= 0
     || typeof token !== 'string' || !token) throw new Error('OWNED_TEMP_OWNER_INVALID');
+  // resolve() erases link/.. before the ancestor walk; realpath() can select a
+  // different physical directory through that link. Writer roots never need ..
+  if (typeof root !== 'string' || root.split(process.platform === 'win32' ? /[\\/]/ : '/').includes('..')) {
+    throw new Error('OWNED_TEMP_PARENT_INVALID');
+  }
   const metadata = await lstat(root);
-  if (!metadata.isDirectory() || metadata.isSymbolicLink() || resolve(root) !== await realpath(root)) throw new Error('OWNED_TEMP_PARENT_INVALID');
+  if (!metadata.isDirectory() || metadata.isSymbolicLink()) throw new Error('OWNED_TEMP_PARENT_INVALID');
+  for (let current = resolve(root);;) {
+    const component = await lstat(current);
+    if (!component.isDirectory() || component.isSymbolicLink()) throw new Error('OWNED_TEMP_PARENT_INVALID');
+    const parent = dirname(current);
+    if (parent === current) break;
+    current = parent;
+  }
+  // Resolve the selected real directory before comparing/writing its ownership.
+  // Windows TEMP can use a DOS short name for the same physical directory.
+  root = await realpath(root);
   if ((await readdir(root)).length) throw new Error('OWNED_TEMP_ROOT_NOT_FRESH');
   root = resolve(root);
   const record = { schema, scope, owner, directory: basename(root), pid: ownerPid,

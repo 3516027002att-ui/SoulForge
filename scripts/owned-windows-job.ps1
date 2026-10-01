@@ -1,4 +1,5 @@
 $ErrorActionPreference = 'Stop'
+[Console]::InputEncoding = New-Object Text.UTF8Encoding($false)
 $payload = [Console]::In.ReadToEnd() | ConvertFrom-Json
 Add-Type -TypeDefinition @'
 using System;

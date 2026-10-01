@@ -58,6 +58,8 @@ export default defineConfig({
       }
     }
   },
+  // Utility smokes execute main entries only; production builds all targets.
+  ...(smokeBuild ? {} : {
   preload: {
     plugins: [externalizeDepsPlugin({ exclude: ['@soulforge/shared'] })],
     resolve: { alias: workspacePackageAlias },
@@ -105,4 +107,5 @@ export default defineConfig({
     },
     plugins: [react()]
   }
+  })
 });

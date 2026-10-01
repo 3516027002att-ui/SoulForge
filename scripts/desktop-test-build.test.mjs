@@ -6,9 +6,51 @@ import { resolve, join, relative, isAbsolute } from 'node:path';
 import { spawn, spawnSync } from 'node:child_process';
 import { once } from 'node:events';
 import { pathToFileURL } from 'node:url';
+import { runInNewContext } from 'node:vm';
 const build = await import('./desktop-test-build.mjs').catch(error => {
   if (error.code === 'ERR_MODULE_NOT_FOUND') return {};
   throw error;
+});
+
+// Evaluate actual target/output selection without loading build plugins.
+// The plugin constructors do not affect these branches; build/runtime checks
+// separately execute the real plugins, bundles and Electron utility process.
+async function desktopConfig(env) {
+  const configUrl = pathToFileURL(resolve('apps/desktop/electron.vite.config.ts'));
+  const source = (await readFile(configUrl, 'utf8'))
+    .replace(/^import .+;\r?\n/gm, '')
+    .replaceAll('import.meta.url', JSON.stringify(configUrl.href))
+    .replace('export default ', 'globalThis.config = ');
+  const path = await import('node:path');
+  const url = await import('node:url');
+  const context = { process: { env }, fileURLToPath: url.fileURLToPath,
+    dirname: path.dirname, resolve: path.resolve, relative: path.relative,
+    isAbsolute: path.isAbsolute, sep: path.sep,
+    defineConfig: value => value, externalizeDepsPlugin: () => ({}), react: () => ({}) };
+  runInNewContext(source, context, { timeout: 100 });
+  return context.config;
+}
+
+test('isolated utility smoke builds are main-only while production retains all three targets', async () => {
+  const production = await desktopConfig({});
+  assert.ok(production.main && production.preload && production.renderer);
+  const productionEntries = Object.keys(production.main.build.rollupOptions.input).sort();
+  assert.deepEqual(productionEntries, ['agentUtility', 'databaseUtility', 'emevdDarkScriptWorker', 'index', 'ragEmbeddingWorker']);
+  const root = resolve('output/config-fixture');
+  for (const [flag, entry] of [
+    ['SOULFORGE_BUILD_DATABASE_UTILITY_SMOKE', 'databaseUtilitySmoke'],
+    ['SOULFORGE_BUILD_ME3_GATEWAY_SMOKE', 'me3RuntimeGatewaySmoke'],
+    ['SOULFORGE_BUILD_ME3_SEKIRO_SESSION_SMOKE', 'me3SekiroSessionSmoke']
+  ]) {
+    const config = await desktopConfig({ [flag]: '1', SOULFORGE_TEST_BUILD_ROOT: root });
+    assert.equal(Object.hasOwn(config, 'preload'), false, `${entry} must omit the preload target key`);
+    assert.equal(Object.hasOwn(config, 'renderer'), false, `${entry} must omit the renderer target key`);
+    assert.equal(config.preload, undefined, `${entry} must not rebuild an unused preload`);
+    assert.equal(config.renderer, undefined, `${entry} must not rebuild an unused renderer`);
+    assert.equal(config.main.build.outDir, join(root, 'main'));
+    assert.deepEqual(Object.keys(config.main.build.rollupOptions.input).sort(), [...productionEntries, entry].sort());
+    assert.equal(config.main.build.rollupOptions.input[entry], resolve(`apps/desktop/src/main/${entry}.ts`));
+  }
 });
 
 test('headless Electron smoke selects a display backend without relaxing sandbox settings', () => {

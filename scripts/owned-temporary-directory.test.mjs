@@ -54,6 +54,36 @@ test('owned roots are distinct and dispose on successful and failed work', async
   });
 });
 
+test('exact directory initialization rejects a linked ancestor even when the selected leaf is a real empty directory', async () => {
+  await inParent(async parent => {
+    const target = join(parent, 'target');
+    const alias = join(parent, 'alias');
+    await mkdir(target);
+    await symlink(target, alias, process.platform === 'win32' ? 'junction' : 'dir');
+    const leaf = join(alias, 'fresh');
+    await mkdir(leaf);
+    await assert.rejects(helper.initializeOwnedTemporaryDirectory('linked-parent', leaf), /OWNED_TEMP_PARENT_INVALID/);
+    assert.deepEqual(await readdir(join(target, 'fresh')), []);
+  });
+});
+
+test('exact directory initialization rejects link traversal hidden by a dot-dot segment', async () => {
+  await inParent(async parent => {
+    const base = join(parent, 'base'), other = join(parent, 'other');
+    await mkdir(base); await mkdir(other); await mkdir(join(other, 'child'));
+    await mkdir(join(base, 'fresh')); await mkdir(join(other, 'fresh'));
+    await symlink(join(other, 'child'), join(base, 'link'), process.platform === 'win32' ? 'junction' : 'dir');
+    let admitted;
+    try {
+      await assert.rejects(async () => {
+        admitted = await helper.initializeOwnedTemporaryDirectory('linked-dot-dot', `${base}/link/../fresh`);
+      }, /OWNED_TEMP_PARENT_INVALID/);
+    } finally { if (admitted) await admitted.dispose(); }
+    assert.deepEqual(await readdir(join(base, 'fresh')), []);
+    assert.deepEqual(await readdir(join(other, 'fresh')), []);
+  });
+});
+
 test('ordinary process failure still cleans an allocation made before a test finally block', async () => {
   assert.equal(typeof helper.createOwnedTemporaryDirectory, 'function');
   await inParent(async parent => {
