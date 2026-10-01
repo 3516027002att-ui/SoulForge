@@ -289,7 +289,7 @@ test('bounded native read of seven out of 240 events never becomes a complete ca
   } finally { await disposeBridgeDaemonPool(); }
 }));
 
-test('nonempty native event groups retain their event-table references after insertion and reject unknown reference layouts', async () => withFixture(async ({ source, root, bytes, expected, session }) => {
+test('nonempty native event groups retain their event-table references after insertion and reject malformed members before writing', async () => withFixture(async ({ source, root, bytes, expected, session }) => {
   const target = expected[2]; const originalTable = Number(bytes.readBigInt64LE(target.entry));
   const group = target.eventData + 48; const refs = group + 32; const descriptor = refs + 8;
   const native = Buffer.from(bytes); native.writeInt32LE(1, target.entry + 36);
@@ -305,9 +305,17 @@ test('nonempty native event groups retain their event-table references after ins
   assert.equal(output.readBigInt64LE(rebuiltGroup + 16), BigInt(descriptor));
   assert.deepEqual(output.subarray(descriptor, descriptor + 16), native.subarray(descriptor, descriptor + 16));
   const unknown = Buffer.from(native); unknown.writeInt32LE(target.eventData, refs); await writeFile(source, unknown);
+  const badRead = await session.call('read-tae-document', source);
+  assert.equal(badRead.parseStatus, 'failed');
+  const readFailure = badRead.diagnostics.find(d => d.code === 'TAE_DOCUMENT_READ_FAILED');
+  assert.ok(readFailure, JSON.stringify(badRead));
+  assert.match(readFailure.message, new RegExp(`动画 ${target.animId} 事件组 0 成员 0 偏移 ${target.eventData}`));
   const badPath = join(root, 'unknown-group.tae');
   const bad = await session.call('write-tae-document', source, { ...options, outputPath: badPath, expectedDocumentHash: createHash('sha256').update(unknown).digest('hex') });
-  assert.equal(bad.parseStatus, 'failed'); assert.ok(bad.diagnostics.some(d => d.code === 'TAE_WRITE_BLOCKED_UNKNOWN_STRUCTURE'));
+  assert.equal(bad.parseStatus, 'failed');
+  const writeFailure = bad.diagnostics.find(d => d.code === 'TAE_STAGING_WRITE_FAILED');
+  assert.ok(writeFailure, JSON.stringify(bad));
+  assert.equal(writeFailure.message, readFailure.message, 'writer must retain the contextual native read rejection');
   await assert.rejects(readFile(badPath), { code: 'ENOENT' }); assert.deepEqual(await readFile(source), unknown);
 }));
 

@@ -51,12 +51,19 @@ test('production harness accepts a Linux snapshot and rejects an outside executa
     const manifest = { artifactId: 'a'.repeat(64), runtime: { bridgeExecutable: linuxExe, bridgeRuntimeIdentifier: 'linux-x64' } };
     await writeFile(manifestPath, JSON.stringify(manifest));
     const source = await readFile(new URL('../apps/desktop/e2e/playwright/production-main.mjs', import.meta.url), 'utf8');
-    const guard = source.slice(source.indexOf('if (snapshotRoot) {'), source.indexOf('/**\n * 生产 main 关闭链路'));
-    const context = { snapshotRoot: root, outRoot, existsSync, join, resolve: (await import('node:path')).resolve,
-      readFileSync: (await import('node:fs')).readFileSync, process: { env: {}, chdir() {} } };
-    assert.doesNotThrow(() => vm.runInNewContext(guard, context));
-    manifest.runtime.bridgeExecutable = '../outside'; await writeFile(manifestPath, JSON.stringify(manifest));
-    assert.throws(() => vm.runInNewContext(guard, context), /SNAPSHOT.*INVALID/);
+    for (const variant of [source.replaceAll('\r\n', '\n'), source.replaceAll('\r\n', '\n').replaceAll('\n', '\r\n')]) {
+      const normalized = variant.replaceAll('\r\n', '\n');
+      const start = normalized.indexOf('if (snapshotRoot) {');
+      const end = normalized.indexOf('/**\n * 生产 main 关闭链路');
+      assert.ok(start >= 0 && end > start, 'snapshot guard boundaries must be found');
+      const guard = normalized.slice(start, end);
+      const context = { snapshotRoot: root, outRoot, existsSync, join, resolve: (await import('node:path')).resolve,
+        readFileSync: (await import('node:fs')).readFileSync, process: { env: {}, chdir() {} } };
+      manifest.runtime.bridgeExecutable = linuxExe; await writeFile(manifestPath, JSON.stringify(manifest));
+      assert.doesNotThrow(() => vm.runInNewContext(guard, context));
+      manifest.runtime.bridgeExecutable = '../outside'; await writeFile(manifestPath, JSON.stringify(manifest));
+      assert.throws(() => vm.runInNewContext(guard, context), /SNAPSHOT.*INVALID/);
+    }
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 
@@ -73,6 +80,7 @@ test('Linux publish receipts bind native apphost and selected publish inputs', a
     await seed('global.json', '{}');
     await seed('scripts/run-dotnet.mjs', '// fixture');
     await seed('scripts/build-first-party-hksc-native.mjs', '// native build');
+    await seed('scripts/dotnet-runtime-notices.mjs', '// runtime notice preparation');
     await seed('bridge/native/hksc/compiler.c', '// native source');
     await seed('bridge/SoulForge.Bridge/Program.cs', '// source');
     await seed('package.json', JSON.stringify({ scripts: { 'bridge:publish': 'publish win-x64', 'bridge:publish:linux': 'publish linux-x64' } }));

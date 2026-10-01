@@ -2442,6 +2442,8 @@ internal sealed class BridgeCommandService
                 var normals = flver.GetMeshNormalsBase64(meshIndex, maxVertices);
                 var boneWeights = flver.GetMeshBoneWeightsBase64(meshIndex, maxVertices);
                 var boneIndices = flver.GetMeshBoneIndicesBase64(meshIndex, maxVertices);
+                var positionRead = flver.GetMeshVector3Diagnostics(meshIndex, maxVertices);
+                var normalRead = flver.GetMeshVector3Diagnostics(meshIndex, maxVertices, normal: true);
                 var vertexColorRead = flver.GetMeshVertexColorDiagnostics(meshIndex, maxVertices);
                 var tangentRead = flver.GetMeshTangentDiagnostics(meshIndex, maxVertices);
                 var bitangentRead = flver.GetMeshTangentDiagnostics(meshIndex, maxVertices, bitangent: true);
@@ -2465,6 +2467,12 @@ internal sealed class BridgeCommandService
                     uvsBase64 = uvs,
                     uvSetsBase64 = uvSets,
                     normalsBase64 = normals,
+                    positionStatus = positionRead.Status,
+                    positionFailure = positionRead.Failure,
+                    positionDiagnostics = BuildFlverVector3Diagnostics(positionRead),
+                    normalStatus = normalRead.Status,
+                    normalFailure = normalRead.Failure,
+                    normalDiagnostics = BuildFlverVector3Diagnostics(normalRead),
                     tangentStatus = tangentRead.Status,
                     tangentFailure = tangentRead.Failure,
                     tangentDiagnostics = BuildFlverVector4Diagnostics(tangentRead),
@@ -2824,6 +2832,8 @@ internal sealed class BridgeCommandService
                 var normals = document.GetMeshNormalsBase64(meshIndex, maxVertices);
                 var boneWeights = document.GetMeshBoneWeightsBase64(meshIndex, maxVertices);
                 var boneIndices = document.GetMeshBoneIndicesBase64(meshIndex, maxVertices);
+                var positionRead = document.GetMeshVector3Diagnostics(meshIndex, maxVertices);
+                var normalRead = document.GetMeshVector3Diagnostics(meshIndex, maxVertices, normal: true);
                 var vertexColorRead = document.GetMeshVertexColorDiagnostics(meshIndex, maxVertices);
                 var tangentRead = document.GetMeshTangentDiagnostics(meshIndex, maxVertices);
                 var bitangentRead = document.GetMeshTangentDiagnostics(meshIndex, maxVertices, bitangent: true);
@@ -2887,6 +2897,12 @@ internal sealed class BridgeCommandService
                     uvsBase64 = uvs,
                     uvSetsBase64 = uvSets,
                     normalsBase64 = normals,
+                    positionStatus = positionRead.Status,
+                    positionFailure = positionRead.Failure,
+                    positionDiagnostics = BuildFlverVector3Diagnostics(positionRead),
+                    normalStatus = normalRead.Status,
+                    normalFailure = normalRead.Failure,
+                    normalDiagnostics = BuildFlverVector3Diagnostics(normalRead),
                     tangentStatus = tangentRead.Status,
                     tangentFailure = tangentRead.Failure,
                     tangentDiagnostics = BuildFlverVector4Diagnostics(tangentRead),
@@ -2978,7 +2994,13 @@ internal sealed class BridgeCommandService
                     index = t.Index,
                     type = t.Type,
                     path = t.Path,
-                    materialIndex = t.MaterialIndex
+                    materialIndex = t.MaterialIndex,
+                    tilingScale = new[] { t.TilingScaleU, t.TilingScaleV },
+                    tilingTypeU = t.TilingTypeU,
+                    tilingTypeV = t.TilingTypeV,
+                    unk14 = t.Unk14,
+                    unk18 = t.Unk18,
+                    unk1C = t.Unk1C
                 }).ToArray();
                 return BridgeResult<object>.Partial(file, "chr", new[]
                 {
@@ -2987,6 +3009,9 @@ internal sealed class BridgeCommandService
                         BridgeResult<object>.MakeSourceUri(file))
                 }, new
                 {
+                    sourceHash = document.SourceHash,
+                    materialCount = document.MaterialCount,
+                    materials = document.GetMaterialMetadata(),
                     textureCount = slots.Count,
                     textures
                 });
@@ -3838,6 +3863,15 @@ internal sealed class BridgeCommandService
             : null;
     }
 
+    private static object[]? BuildFlverVector3Diagnostics(FlverVector3ReadResult result)
+        => result.Status != "decoded" ? null : result.Members.Select(member => (object)new
+        {
+            memberOrdinal = member.MemberOrdinal, memberIndex = member.MemberIndex,
+            layoutType = member.LayoutType, layoutTypeName = member.LayoutTypeName,
+            vertexBufferIndex = member.VertexBufferIndex, bufferLayoutIndex = member.BufferLayoutIndex,
+            structOffset = member.StructOffset, xyzBase64 = member.XyzBase64, normalWBase64 = member.NormalWBase64
+        }).ToArray();
+
     private static object[]? BuildFlverVector4Diagnostics(FlverVector4ReadResult result)
     {
         if (result.Status != "decoded") return null;
@@ -3935,6 +3969,8 @@ internal sealed class BridgeCommandService
                 $"FLVER_MESH_INDICES_UNAVAILABLE: 网格 {meshIndex} 的完整 triangle-list 无法在上限 {maxIndices} 内导出。");
         var skinning = flver.GetMeshSkinning(meshIndex, maxVertices);
         var uvSets = flver.GetMeshUVSetsBase64(meshIndex, maxVertices);
+        var positionRead = flver.GetMeshVector3Diagnostics(meshIndex, maxVertices);
+        var normalRead = flver.GetMeshVector3Diagnostics(meshIndex, maxVertices, normal: true);
         var vertexColorRead = flver.GetMeshVertexColorDiagnostics(meshIndex, maxVertices);
         var tangentRead = flver.GetMeshTangentDiagnostics(meshIndex, maxVertices);
         var bitangentRead = flver.GetMeshTangentDiagnostics(meshIndex, maxVertices, bitangent: true);
@@ -3953,6 +3989,12 @@ internal sealed class BridgeCommandService
             uvsBase64 = uvSets?.FirstOrDefault(),
             uvSetsBase64 = uvSets,
             normalsBase64 = flver.GetMeshNormalsBase64(meshIndex, maxVertices),
+            positionStatus = positionRead.Status,
+            positionFailure = positionRead.Failure,
+            positionDiagnostics = BuildFlverVector3Diagnostics(positionRead),
+            normalStatus = normalRead.Status,
+            normalFailure = normalRead.Failure,
+            normalDiagnostics = BuildFlverVector3Diagnostics(normalRead),
             tangentStatus = tangentRead.Status,
             tangentFailure = tangentRead.Failure,
             tangentDiagnostics = BuildFlverVector4Diagnostics(tangentRead),

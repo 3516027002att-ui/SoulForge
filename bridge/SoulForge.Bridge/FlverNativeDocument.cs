@@ -337,6 +337,8 @@ internal sealed class FlverNativeDocument
         public bool DiagnosticSourceInvalid;
         public VertexMemberAccess? Position;
         public VertexMemberAccess? Normal;
+        public readonly List<VertexColorMemberCandidate> Positions = new();
+        public readonly List<VertexColorMemberCandidate> Normals = new();
         /// <summary>
         /// FLVER 的一个 UV member 不一定只包含一组坐标：UVPair/Short4/Half4 和
         /// UByte4Norm 都会按成熟 SoulsFormats 读取器展开成两组。保留 layout
@@ -731,7 +733,7 @@ internal sealed class FlverNativeDocument
             foreach (var member in layout.Members)
             {
                 VertexColorMemberCandidate? vertexColorCandidate = null;
-                if (member.Semantic is SemVertexColor or SemTangent or SemBitangent)
+                if (member.Semantic is SemVertexColor or SemTangent or SemBitangent or SemPosition or SemNormal)
                 {
                     vertexColorCandidate = new VertexColorMemberCandidate
                     {
@@ -741,7 +743,8 @@ internal sealed class FlverNativeDocument
                         BufferLayoutIndex = vb.LayoutIndex,
                         StructOffset = member.StructOffset
                     };
-                    (member.Semantic == SemTangent ? plan.Tangents
+                    (member.Semantic == SemPosition ? plan.Positions : member.Semantic == SemNormal ? plan.Normals
+                        : member.Semantic == SemTangent ? plan.Tangents
                         : member.Semantic == SemBitangent ? plan.Bitangents : plan.VertexColors).Add(vertexColorCandidate);
                 }
                 // Register known diagnostic semantics before rejecting the
@@ -774,7 +777,7 @@ internal sealed class FlverNativeDocument
                     Offset = member.StructOffset,
                     Type = member.Type
                 };
-                // 语义分派。位置、法线、权重、骨骼索引保留首个原生 member；
+                // 语义分派。位置、法线保留全部诊断 member，primary 保持首个；权重、骨骼索引保留首个原生 member；
                 // VertexColor 保留全部 member，供只读诊断完整传递。
                 // UV 必须保留全部 member，因为一个 UV member 还可能展开为两组 UV。
                 //
@@ -784,8 +787,16 @@ internal sealed class FlverNativeDocument
                 //      —— 实测 Sekiro 样本中这些重复 UV 正是材质第二层所需的坐标。
                 switch (member.Semantic)
                 {
-                    case SemPosition when plan.Position == null: plan.Position = access; break;
-                    case SemNormal when plan.Normal == null: plan.Normal = access; break;
+                    case SemPosition:
+                        plan.Position ??= access;
+                        vertexColorCandidate!.Access = access;
+                        if (!IsSupportedVector3Type(member.Type, false)) AddUnparsedGap($"vertex-semantic:position unsupported type=0x{member.Type:X}");
+                        break;
+                    case SemNormal:
+                        plan.Normal ??= access;
+                        vertexColorCandidate!.Access = access;
+                        if (!IsSupportedVector3Type(member.Type, true)) AddUnparsedGap($"vertex-semantic:normal unsupported type=0x{member.Type:X}");
+                        break;
                     case SemUV: plan.UVs.Add(access); break;
                     case SemBoneWeights when plan.Weights == null: plan.Weights = access; break;
                     case SemBoneIndices when plan.BoneIndices == null: plan.BoneIndices = access; break;
@@ -809,8 +820,6 @@ internal sealed class FlverNativeDocument
                             AddUnparsedGap($"vertex-semantic:bitangent unsupported type=0x{member.Type:X}");
                         break;
                     // 被守卫挡掉的重复语义：数据完好，但本实现只取首个，其余未投影。
-                    case SemPosition:
-                    case SemNormal:
                     case SemBoneWeights:
                     case SemBoneIndices:
                         AddUnparsedGap($"vertex-semantic:0x{member.Semantic:X} 的第 2+ 个 member 未投影（index={member.Index} type=0x{member.Type:X}）");
@@ -851,9 +860,9 @@ internal sealed class FlverNativeDocument
             return false; // 边压缩顶点不支持直接解码
         if (a.Type == TypeByte4Norm)
         {
-            x = ReadSByte(_source, (int)off + 2) / 127f;
-            y = ReadSByte(_source, (int)off + 1) / 127f;
-            z = ReadSByte(_source, (int)off) / 127f;
+            x = ReadSByte(_source, (int)off + 3) / 127f;
+            y = ReadSByte(_source, (int)off + 2) / 127f;
+            z = ReadSByte(_source, (int)off + 1) / 127f;
             return true;
         }
         if (a.Type == TypeByte4A || a.Type == TypeByte4B || a.Type == TypeByte4C || a.Type == TypeByte4E)
@@ -1119,6 +1128,76 @@ internal sealed class FlverNativeDocument
     /// </summary>
     public string? GetMeshVertexAlphaBase64(int meshIndex, int maxVertices = 10_000, bool allowTruncation = false)
         => GetMeshVertexColorDiagnostics(meshIndex, maxVertices, allowTruncation).FirstAlphaBase64;
+
+    /// <summary>Complete native position/normal member evidence; primary shader inputs retain their existing selection.</summary>
+    public FlverVector3ReadResult GetMeshVector3Diagnostics(int meshIndex, int maxVertices = 10_000, bool normal = false)
+    {
+        var plan = BuildMeshPlan(meshIndex);
+        if (plan?.DiagnosticSourceInvalid == true)
+            return new("invalid", Array.Empty<FlverVector3Diagnostic>(), "FLVER_VECTOR3_SOURCE_BUFFER_INVALID");
+        var candidates = normal ? plan?.Normals : plan?.Positions;
+        if (candidates is null || candidates.Count == 0)
+            return new("absent", Array.Empty<FlverVector3Diagnostic>(), null);
+        if (plan!.VertexCount <= 0 || maxVertices <= 0 || plan.VertexCount > int.MaxValue / 3)
+            return new("invalid", Array.Empty<FlverVector3Diagnostic>(), "FLVER_VECTOR3_VERTEX_COUNT_INVALID");
+        if (plan.VertexCount > maxVertices)
+            return new("truncated", Array.Empty<FlverVector3Diagnostic>(), "FLVER_VECTOR3_VERTEX_LIMIT_EXCEEDED");
+        var members = new List<FlverVector3Diagnostic>(candidates.Count);
+        for (var ordinal = 0; ordinal < candidates.Count; ordinal++)
+        {
+            var candidate = candidates[ordinal];
+            var access = candidate.Access;
+            if (access is null || !IsSupportedVector3Type(candidate.Type, normal))
+                return new("unsupported", Array.Empty<FlverVector3Diagnostic>(), $"FLVER_VECTOR3_LAYOUT_UNSUPPORTED: member={ordinal} type=0x{candidate.Type:X}");
+            var values = new float[plan.VertexCount * 3];
+            var normalWs = normal && candidate.Type != TypeFloat3 ? new int[plan.VertexCount] : null;
+            for (var vertex = 0; vertex < plan.VertexCount; vertex++)
+            {
+                if (!TryReadVector3Diagnostic(access, vertex, normal, out var x, out var y, out var z, out var w, out var failure))
+                    return new("invalid", Array.Empty<FlverVector3Diagnostic>(), $"{failure}: member={ordinal} vertex={vertex}");
+                values[vertex * 3] = x; values[vertex * 3 + 1] = y; values[vertex * 3 + 2] = z;
+                if (normalWs is not null) normalWs[vertex] = w!.Value;
+            }
+            string? normalWBase64 = null;
+            if (normalWs is not null)
+            {
+                var bytes = new byte[normalWs.Length * sizeof(int)];
+                for (var i = 0; i < normalWs.Length; i++) BinaryPrimitives.WriteInt32LittleEndian(bytes.AsSpan(i * sizeof(int), sizeof(int)), normalWs[i]);
+                normalWBase64 = Convert.ToBase64String(bytes);
+            }
+            members.Add(new(ordinal, candidate.MemberIndex, candidate.Type, Vector3LayoutTypeName(candidate.Type), candidate.VertexBufferIndex,
+                candidate.BufferLayoutIndex, candidate.StructOffset, EncodeFloatArray(values), normalWBase64));
+        }
+        return new("decoded", members, null);
+    }
+
+    private bool TryReadVector3Diagnostic(VertexMemberAccess access, int vertex, bool normal,
+        out float x, out float y, out float z, out int? normalW, out string? failure)
+    {
+        x = y = z = 0; normalW = null; failure = "FLVER_VECTOR3_DATA_INVALID";
+        var offset = access.DataBase + (long)vertex * access.Stride + access.Offset;
+        var size = MemberTypeSize(access.Type);
+        if (vertex < 0 || vertex >= access.Count || size <= 0 || offset < access.DataBase || offset > access.DataEnd - size
+            || offset > _source.Length - size || !TryExtractFloat3(access, vertex, out x, out y, out z)) return false;
+        if (!normal && access.Type == TypeFloat4 && ReadFloat32(_source, (int)offset + 12) != 0)
+        {
+            failure = "FLVER_POSITION_W_NONZERO"; return false;
+        }
+        if (normal && access.Type != TypeFloat3)
+        {
+            if (!TryReadNormalW(access, vertex, out var w)) { failure = "FLVER_NORMAL_W_INVALID"; return false; }
+            normalW = w;
+        }
+        failure = null; return true;
+    }
+
+    private static bool IsSupportedVector3Type(uint type, bool normal)
+        => type is TypeFloat3 or TypeFloat4 || (normal && (type is TypeByte4A or TypeByte4B or TypeByte4C or TypeByte4Norm or TypeShort4toFloat4A or TypeShort4toFloat4B or TypeByte4E));
+
+    private static string Vector3LayoutTypeName(uint type) => type switch
+    {
+        TypeFloat3 => "Float3", TypeShort4toFloat4B => "Half4", _ => Vector4LayoutTypeName(type)
+    };
 
     /// <summary>Native four-component tangent evidence; not a generic shader tangent policy.</summary>
     public FlverVector4ReadResult GetMeshTangentDiagnostics(int meshIndex, int maxVertices = 10_000, bool bitangent = false)
@@ -1439,7 +1518,14 @@ internal sealed class FlverNativeDocument
         normalW = -1;
         if (access == null) return false;
         var offset = access.DataBase + (long)vertexIndex * access.Stride + access.Offset;
-        if (offset < 0) return false;
+        var size = MemberTypeSize(access.Type);
+        if (vertexIndex < 0 || vertexIndex >= access.Count || size <= 0 || offset < access.DataBase
+            || offset > access.DataEnd - size || offset > _source.Length - size) return false;
+        if (access.Type == TypeByte4Norm)
+        {
+            normalW = ReadByte(_source, (int)offset);
+            return true;
+        }
         if (access.Type is TypeByte4A or TypeByte4B or TypeByte4C or TypeByte4E)
         {
             if (offset + 4 > _source.Length) return false;
@@ -1449,15 +1535,15 @@ internal sealed class FlverNativeDocument
         if (access.Type is TypeShort4toFloat4A or TypeShort4toFloat4B)
         {
             if (offset + 8 > _source.Length) return false;
-            normalW = ReadUInt16(_source, (int)offset + 6);
+            normalW = ReadInt16(_source, (int)offset + 6);
             return true;
         }
         if (access.Type == TypeFloat4)
         {
             if (offset + 16 > _source.Length) return false;
             var value = ReadFloat32(_source, (int)offset + 12);
-            if (!float.IsFinite(value)) return false;
-            normalW = checked((int)MathF.Round(value));
+            if (!float.IsFinite(value) || value < int.MinValue || value >= 2147483648f || value != MathF.Truncate(value)) return false;
+            normalW = (int)value;
             return true;
         }
         return false;
@@ -2043,7 +2129,7 @@ internal sealed class FlverNativeDocument
         }
 
         // --- Materials（32B/条）---
-        // 全 32 字节都读：前 16 是名字/MTD/贴图索引，后 16 是 Flags / GxOffset / Unk18 /
+        // 全 32 字节都读：前 16 是名字/MTD/贴图索引，后 16 是 StringByteCount / GxOffset / NativeIndex /
         // 保留字段。后 16 字节此前整段未读（只登记为缺口），现按双源核对的规范解析。
         var materials = new List<FlverMaterialEntry>(materialCount);
         for (var i = 0; i < materialCount; i++, off += MaterialSize)
@@ -2052,9 +2138,9 @@ internal sealed class FlverNativeDocument
             int mtdOffset = ReadInt32(source, off + 0x04);
             int textureCountInMaterial = ReadInt32(source, off + 0x08);
             int firstTextureIndex = ReadInt32(source, off + 0x0C);
-            int flags = ReadInt32(source, off + 0x10);
+            int stringByteCount = ReadInt32(source, off + 0x10);
             int gxOffset = ReadInt32(source, off + 0x14);
-            int unk18 = ReadInt32(source, off + 0x18);
+            int nativeIndex = ReadInt32(source, off + 0x18);
             int reserved = ReadInt32(source, off + 0x1C);
             string name = ReadStringAtOffset(source, nameOffset, unicode);
             string mtdPath = ReadStringAtOffset(source, mtdOffset, unicode);
@@ -2077,7 +2163,7 @@ internal sealed class FlverNativeDocument
 
             materials.Add(new FlverMaterialEntry(
                 i, name, mtdPath, textureCountInMaterial, firstTextureIndex,
-                flags, gxOffset, unk18, gxList));
+                stringByteCount, gxOffset, nativeIndex, gxList));
         }
 
         // --- Bones（128B/条）---
@@ -2209,7 +2295,16 @@ internal sealed class FlverNativeDocument
                 int count = materials[m].TextureCount;
                 if (i >= first && i < first + count) { materialIndex = m; break; }
             }
-            textureSlots.Add(new FlverTextureSlotEntry(i, type, path, materialIndex));
+            // Preserve native texture metadata without applying shader/tiling behavior.
+            float tilingScaleU = ReadFloat32(source, off + 0x08);
+            float tilingScaleV = ReadFloat32(source, off + 0x0C);
+            byte tilingTypeU = source[off + 0x10];
+            byte tilingTypeV = source[off + 0x11];
+            if (source[off + 0x12] != 0 || source[off + 0x13] != 0)
+                warnings.Add($"texture[{i}]:+0x12/+0x13 保留字节应为 0。");
+            textureSlots.Add(new FlverTextureSlotEntry(i, type, path, materialIndex,
+                tilingScaleU, tilingScaleV, tilingTypeU, tilingTypeV,
+                ReadFloat32(source, off + 0x14), ReadFloat32(source, off + 0x18), ReadFloat32(source, off + 0x1C)));
         }
 
         // --- 回填 mesh 顶点信息（vertex buffer/layout 段已解析）---
@@ -2292,20 +2387,14 @@ internal sealed class FlverNativeDocument
     /// item 数分布 1×392 / 2×56 / 3×8 / 5×34 / 7×14 / 9×1；
     /// ID 为 4 字节 ASCII（GX00 505、GXMD 64、GX04 49、GX15 41、GX80/GX81 各 34…）。
     ///
-    /// ── 两处与本文件旧注释的分歧（旧注释已作废）──
-    /// ① 旧注释称 material +0x10 是 <c>gxIndex</c>。**不对**：+0x10 是 <c>Flags</c>，
-    ///    +0x14 才是 GX 列表的**字节偏移**。两份实现都是先 <c>Flags = ReadInt32()</c>
-    ///    再 <c>int gxOffset = ReadInt32()</c>；实测 505 条的 +0x14 逐条严格单调递增、
-    ///    相邻差值以 64 为主（384/504 条），且全部 &lt; dataOffset —— 偏移的形态，
-    ///    不是索引。SoulsFormats 的公开属性 <c>GXIndex</c> 是**去重后**的列表序号
-    ///    （由 gxOffset → 列表表的映射得来），不是文件里的字段。
-    /// ② SoulsFormatsNEXT 把 +0x18 命名为 <c>Index</c>，但实测它**不是 material 序号**：
-    ///    11 个样本无一满足 <c>+0x18 == i</c>（c1020 前五条是 0,1,2,2,0）。故此处保留
-    ///    中性名 <c>Unk18</c> 并如实标注，不按上游命名反推语义。
+    /// Pinned NEXT ee1dd619 Material.cs names +0x10 as stored string byte count
+    /// (calculated when writing), +0x14 as GX byte offset, and +0x18 as Index.
+    /// GXIndex is first-seen offset deduplication, not a native header field.
+    /// Native Index is preserved separately from the material table ordinal.
     ///
     /// payload 一律**不解释**：各 GX ID 的字段语义按材质着色参数分歧，
     /// 未经真实往返验证解码它就是在未验证前提下扩大 native 声明面。
-    /// 这里只导出 (id, unk04, length) 与长度，与 ESD 的 RPN 字节码同一口径。
+    /// 这里只导出 (id, unk04, length) 与不透明 payload SHA-256，与 ESD 的 RPN 字节码同一口径。
     /// </summary>
     private static FlverGxList? TryReadGxList(byte[] source, int gxOffset, out string error)
     {
@@ -2346,7 +2435,8 @@ internal sealed class FlverNativeDocument
                 return null;
             }
             var idAscii = System.Text.Encoding.ASCII.GetString(source, position, 4);
-            items.Add(new FlverGxItem(idAscii, id, unk04, itemLength, itemLength - 12));
+            items.Add(new FlverGxItem(idAscii, id, unk04, itemLength, itemLength - 12,
+                Convert.ToHexString(SHA256.HashData(source.AsSpan(position + 12, itemLength - 12))).ToLowerInvariant()));
             position += itemLength;
         }
 
@@ -2451,6 +2541,47 @@ internal sealed class FlverNativeDocument
             SkeletonTransformCount, MaterialCount, BoneCount, MeshCount);
     }
 
+    /// <summary>Full native material metadata; no sample truncation or shader interpretation.</summary>
+    public IEnumerable<object> GetMaterialMetadata()
+    {
+        var gxIndices = new Dictionary<int, int>();
+        foreach (var material in Materials)
+            if (material.GxOffset != 0 && !gxIndices.ContainsKey(material.GxOffset))
+                gxIndices.Add(material.GxOffset, gxIndices.Count);
+        return Materials.Select(m => (object)new
+        {
+            index = m.Index,
+            name = m.Name,
+            mtdPath = m.MtdPath,
+            textureCount = m.TextureCount,
+            firstTextureIndex = m.FirstTextureIndex,
+            stringByteCount = m.StringByteCount,
+            nativeIndex = m.NativeIndex,
+            // Legacy wire aliases retained for existing readers. +0x10 is not flags;
+            // +0x18 is the native Index, not the material ordinal.
+            flags = m.StringByteCount,
+            unk18 = m.NativeIndex,
+            gxOffset = m.GxOffset,
+            gxIndex = m.GxOffset == 0 ? -1 : gxIndices[m.GxOffset],
+            gxList = m.GxList is null ? null : new
+            {
+                itemCount = m.GxList.Items.Count,
+                byteLength = m.GxList.ByteLength,
+                terminatorId = m.GxList.TerminatorId,
+                terminatorLength = m.GxList.TerminatorLength,
+                terminatorPaddingAllZero = m.GxList.TerminatorPaddingAllZero,
+                items = m.GxList.Items.Select(x => new
+                {
+                    id = x.Id,
+                    unk04 = x.Unk04,
+                    itemLength = x.ItemLength,
+                    dataLength = x.DataLength,
+                    dataSha256 = x.DataSha256
+                }).ToArray()
+            }
+        });
+    }
+
     public object ToEnvelope(FlverRoundTripReport? report = null)
     {
         var rt = report ?? VerifyRoundTrip();
@@ -2508,33 +2639,7 @@ internal sealed class FlverNativeDocument
                 min = new[] { BoundingBoxMinX, BoundingBoxMinY, BoundingBoxMinZ },
                 max = new[] { BoundingBoxMaxX, BoundingBoxMaxY, BoundingBoxMaxZ }
             },
-            materials = Materials.Take(SampleLimit).Select(m => new
-            {
-                name = m.Name,
-                mtdPath = m.MtdPath,
-                textureCount = m.TextureCount,
-                // material 后 16 字节（此前整段未读）。gxOffset==0 表示该 material 无 GX 列表；
-                // gxList 为 null 且 gxOffset!=0 表示解析失败（另有 layoutWarning）。
-                flags = m.Flags,
-                gxOffset = m.GxOffset,
-                unk18 = m.Unk18,
-                gxList = m.GxList is null ? null : new
-                {
-                    itemCount = m.GxList.Items.Count,
-                    byteLength = m.GxList.ByteLength,
-                    terminatorId = m.GxList.TerminatorId,
-                    terminatorLength = m.GxList.TerminatorLength,
-                    terminatorPaddingAllZero = m.GxList.TerminatorPaddingAllZero,
-                    // payload 只报长度不报内容：语义未验证，见 TryReadGxList 注释。
-                    items = m.GxList.Items.Select(x => new
-                    {
-                        id = x.Id,
-                        unk04 = x.Unk04,
-                        itemLength = x.ItemLength,
-                        dataLength = x.DataLength
-                    }).ToArray()
-                }
-            }).ToArray(),
+            materials = GetMaterialMetadata().Take(SampleLimit).ToArray(),
             materialsTruncated = Materials.Count > SampleLimit,
             // 全量 GX 覆盖面（不受 SampleLimit 截断影响）：消费方要能判断
             // 「样本里没有 GX 列表」与「整个文件都没有」的区别。
@@ -2568,7 +2673,13 @@ internal sealed class FlverNativeDocument
                 index = t.Index,
                 type = t.Type,
                 path = t.Path,
-                materialIndex = t.MaterialIndex
+                materialIndex = t.MaterialIndex,
+                tilingScale = new[] { t.TilingScaleU, t.TilingScaleV },
+                tilingTypeU = t.TilingTypeU,
+                tilingTypeV = t.TilingTypeV,
+                unk14 = t.Unk14,
+                unk18 = t.Unk18,
+                unk1C = t.Unk1C
             }).ToArray(),
             texturesTruncated = _textureSlots.Count > SampleLimit,
             layoutWarnings = _layoutWarnings.ToArray(),
@@ -2601,9 +2712,9 @@ internal sealed class FlverNativeDocument
     /// material 后 16 字节的缺口登记。
     ///
     /// **历史**：本方法原先无条件登记「后 16/32 字节未解析（含 FLVER2 gxIndex →
-    /// GXList 引用）」。那条缺口现已消除——32 字节全部读出（Flags / GxOffset / Unk18 /
+    /// GXList 引用）」。那条缺口现已消除——32 字节全部读出（StringByteCount / GxOffset / NativeIndex /
     /// 保留字段），GX 列表按双源核对的规范解析，真实语料 505/505 成功。
-    /// 原注释还有两处事实错误（+0x10 不是 gxIndex 而是 Flags；+0x14 是字节偏移不是
+    /// 原注释还有两处事实错误（+0x10 不是 gxIndex，而是原样保存的 stringByteCount；+0x14 是字节偏移不是
     /// 索引），已在 <see cref="TryReadGxList"/> 的注释里逐条更正。
     ///
     /// **保留本方法的理由**：GX item 的 <b>payload 仍不解释</b>。各 ID（GX00/GXMD/GX04…）
@@ -2638,7 +2749,7 @@ internal sealed class FlverNativeDocument
         if (payloadBytes > 0)
         {
             AddUnparsedGap(
-                $"material:GX item payload 未解码（按 ID 分歧的材质着色参数，只按 (id, unk04, length) 上报）；"
+                $"material:GX item payload 未解码（按 ID 分歧的材质着色参数，只按 (id, unk04, length, opaque SHA-256) 上报）；"
                 + $"lists={listCount}, items={itemCount}, payloadBytes={payloadBytes}");
         }
         // 解析失败与「未解码」是两件事：前者是读不懂（数据可疑，已另记 layoutWarning），
@@ -2661,9 +2772,37 @@ internal sealed class FlverNativeDocument
     {
         if (_vertexSemanticGapsProbed) return;
         _vertexSemanticGapsProbed = true;
+        // Content validation allocates no per-vertex diagnostic arrays. Repeated
+        // buffer references share a document-wide work budget; exhaustion keeps
+        // authority partial instead of silently certifying unchecked members.
+        const long MaxProbeMemberVertices = 1_000_000;
+        var remaining = MaxProbeMemberVertices;
         for (var i = 0; i < Meshes.Count; i++)
         {
-            try { BuildMeshPlan(i); }
+            try
+            {
+                var plan = BuildMeshPlan(i);
+                if (plan is null) continue;
+                foreach (var normal in new[] { false, true })
+                {
+                    foreach (var candidate in normal ? plan.Normals : plan.Positions)
+                    {
+                        if (candidate.Access is null || !IsSupportedVector3Type(candidate.Type, normal)) continue;
+                        if (plan.VertexCount > remaining)
+                        {
+                            AddUnparsedGap($"vertex-semantic:position/normal content probe exceeds {MaxProbeMemberVertices} member-vertices; remaining contents unverified");
+                            remaining = 0; continue;
+                        }
+                        remaining -= Math.Max(0, plan.VertexCount);
+                        for (var vertex = 0; vertex < plan.VertexCount; vertex++)
+                        {
+                            if (TryReadVector3Diagnostic(candidate.Access, vertex, normal, out _, out _, out _, out _, out var failure)) continue;
+                            AddLayoutWarning($"mesh[{i}] {(normal ? "normal" : "position")}[{candidate.MemberIndex}] invalid native content: {failure}, vertex={vertex}");
+                            break;
+                        }
+                    }
+                }
+            }
             catch (Exception) { AddLayoutWarning($"mesh[{i}] 语义缺口探测抛出异常。"); }
         }
     }
@@ -2747,15 +2886,12 @@ internal sealed class FlverNativeDocument
 
 internal sealed record FlverMaterialEntry(
     int Index, string Name, string MtdPath, int TextureCount, int FirstTextureIndex,
-    // ── material 32 字节的后 16 字节（此前整段未读）──
-    // 字段语义经**双源核对**（JKAnderson/SoulsFormats 与 soulsmods/SoulsFormatsNEXT
-    // 的 FLVER2/Material.cs 逐字段一致）。注意与本文件旧注释的分歧：旧注释把 +0x10
-    // 说成 gxIndex，实测与两份实现都表明 **+0x10 是 Flags**、+0x14 才是 GX 列表的
-    // **字节偏移**（不是索引）。旧注释的说法已作废，理由见 ReadGxList 的注释。
-    int Flags,            // +0x10
-    int GxOffset,         // +0x14：GX 列表字节偏移；0 表示该 material 无 GX 列表
-    int Unk18,            // +0x18：SoulsFormatsNEXT 命名为 Index，但实测非序号（见注释）
-    FlverGxList? GxList); // 按 GxOffset 解析出的列表；null 表示 GxOffset==0 或解析失败
+    // +0x10 is the stored string-byte count. NEXT calculates it when writing;
+    // modded source strings can leave it stale, so keep its exact native value.
+    int StringByteCount,
+    int GxOffset,         // +0x14: byte offset, not the deduplicated GX list index
+    int NativeIndex,      // +0x18: NEXT Index; distinct from our material ordinal
+    FlverGxList? GxList);
 
 /// <summary>
 /// FLVER2 GX 列表：一串 <see cref="FlverGxItem"/> 后跟一个终止记录。
@@ -2778,7 +2914,7 @@ internal sealed record FlverGxList(
     int ByteLength);
 
 /// <summary>
-/// GX 列表里的一项。<c>Data</c> 按 <see cref="DataLength"/> 原样保留但**不解释**——
+/// GX 列表里的一项。payload 按 <see cref="DataLength"/> 与不透明 SHA-256 记录但**不解释**——
 /// 各 ID 的 payload 语义按材质着色参数分歧，未经真实往返验证不做解码
 /// （否则就是在未验证前提下扩大 native 声明面）。
 /// </summary>
@@ -2787,7 +2923,8 @@ internal sealed record FlverGxItem(
     int RawId,          // 同一 4 字节的 int32 视图，便于与规范里的 int 比较
     int Unk04,
     int ItemLength,     // 含 12 字节头
-    int DataLength);    // ItemLength - 12
+    int DataLength,     // ItemLength - 12
+    string DataSha256); // opaque payload identity; no shader interpretation
 
 internal sealed record FlverBoneEntry(
     int Index, string Name, short NextSiblingIndex, short ParentIndex, short ChildIndex,
@@ -2823,7 +2960,9 @@ internal sealed record FlverFaceSetEntry(
     uint Flags, bool TriangleStrip, bool CullBackfaces, int IndexCount, int IndicesOffset, int IndexSize);
 
 internal sealed record FlverTextureSlotEntry(
-    int Index, string Type, string Path, int MaterialIndex);
+    int Index, string Type, string Path, int MaterialIndex,
+    float TilingScaleU, float TilingScaleV, byte TilingTypeU, byte TilingTypeV,
+    float Unk14, float Unk18, float Unk1C);
 
 internal sealed record FlverDummyEntry(
     int Index, float PositionX, float PositionY, float PositionZ,
@@ -2867,3 +3006,6 @@ internal sealed record FlverRoundTripReport(
     bool ByteIdentical, bool SemanticIdentical,
     string SourceHash, string RebuiltHash,
     int SkeletonTransformCount, int MaterialCount, int BoneCount, int MeshCount);
+
+internal sealed record FlverVector3Diagnostic(int MemberOrdinal, int MemberIndex, uint LayoutType, string LayoutTypeName, int VertexBufferIndex, int BufferLayoutIndex, int StructOffset, string XyzBase64, string? NormalWBase64);
+internal sealed record FlverVector3ReadResult(string Status, IReadOnlyList<FlverVector3Diagnostic> Members, string? Failure);

@@ -61,6 +61,45 @@ describe('native FLVER vertex diagnostics on real Three geometry', () => {
     geometry.dispose();
   });
 
+  it('retains extra native positions, normals and raw NormalW without replacing shader inputs', () => {
+    const geometry = new three.BufferGeometry();
+    const primary = new three.BufferAttribute(new Float32Array([1, 2, 3, 4, 5, 6]), 3);
+    geometry.setAttribute('position', primary);
+    const wBytes = Buffer.alloc(8); wBytes.writeInt32LE(-2); wBytes.writeInt32LE(129, 4);
+    const evidence = decodeFlverNativeVertexDiagnostics({
+      positionStatus: 'decoded', positionDiagnostics: [
+        { ...metadata, layoutType: 2, layoutTypeName: 'Float3', xyzBase64: float32Base64([1, 2, 3, 4, 5, 6]) },
+        { ...metadata, memberOrdinal: 1, memberIndex: 9, layoutType: 2, layoutTypeName: 'Float3', xyzBase64: float32Base64([7, -2, 0, 1, 8, 3]) }
+      ],
+      normalStatus: 'decoded', normalDiagnostics: [{
+        ...metadata, layoutType: 17, layoutTypeName: 'UByte4', xyzBase64: float32Base64([-1, 0, 1, 1, 0, -1]), normalWBase64: wBytes.toString('base64')
+      }]
+    }, 2, 'mesh');
+    attachFlverNativeVertexDiagnostics(three, geometry, evidence, 2, 'mesh');
+    assert.equal(geometry.getAttribute('position'), primary);
+    assert.deepEqual([...geometry.getAttribute('soulforgePosition1').array], [7, -2, 0, 1, 8, 3]);
+    assert.deepEqual([...geometry.getAttribute('soulforgeNormalW0').array], [-2, 129]);
+    assert.equal(geometry.getAttribute('soulforgePosition1').itemSize, 3);
+    assert.equal(geometry.getAttribute('soulforgeNormalW0').itemSize, 1);
+    assert.equal(geometry.userData.normalDiagnostics[0].normalWAttributeName, 'soulforgeNormalW0');
+    assert.equal(Object.hasOwn(geometry.userData.positionDiagnostics[0], 'xyz'), false);
+    geometry.dispose();
+  });
+
+  it('rejects malformed extra native stream and NormalW payloads before attaching evidence', () => {
+    for (const xyz of [float32Base64([0, 1]), float32Base64([0, NaN, 1]), Buffer.from([1, 2, 3]).toString('base64')]) {
+      assert.throws(() => decodeFlverNativeVertexDiagnostics({ positionDiagnostics: [{ ...metadata, xyzBase64: xyz }] }, 1, 'mesh'), /FLVER_ATTRIBUTE_(LENGTH_MISMATCH|NONFINITE)/);
+    }
+    assert.throws(() => decodeFlverNativeVertexDiagnostics({ normalDiagnostics: [{ ...metadata, xyzBase64: float32Base64([0, 1, 2]), normalWBase64: Buffer.alloc(3).toString('base64') }] }, 1, 'mesh'), /FLVER_ATTRIBUTE_LENGTH_MISMATCH/);
+    const geometry = new three.BufferGeometry();
+    const evidence = decodeFlverNativeVertexDiagnostics({ positionDiagnostics: [{ ...metadata, xyzBase64: float32Base64([0, 1, 2]) }], normalDiagnostics: [{ ...metadata, xyzBase64: float32Base64([0, 1, 2]), normalWBase64: Buffer.alloc(4).toString('base64') }] }, 1, 'mesh');
+    evidence.normalDiagnostics![0]!.normalW = new Int32Array(2);
+    assert.throws(() => attachFlverNativeVertexDiagnostics(three, geometry, evidence, 1, 'mesh'), /FLVER_ATTRIBUTE_LENGTH_MISMATCH/);
+    assert.deepEqual(Object.keys(geometry.attributes), []);
+    assert.deepEqual(geometry.userData, {});
+    geometry.dispose();
+  });
+
   it('retains absent, unsupported and truncated statuses without inventing attributes', () => {
     const geometry = new three.BufferGeometry();
     const evidence = decodeFlverNativeVertexDiagnostics({

@@ -4,8 +4,8 @@
  * Defines MapRegionShape discriminated union, shape profiles, dimension validation,
  * and mathematical scaling constraints per F02 / T03 / T04:
  * - Region transform model is position and rotation only; scale is strictly forbidden.
- * - MapRegionShape: point (shapeType=0), sphere (shapeType=1), cylinder (shapeType=2),
- *   box (shapeType=3), unsupported (other shape types).
+ * - Native MSBS IDs: point=0, sphere=2, cylinder=3, box=5. Circle=1,
+ *   rectangle=4, and composite=6 remain outside dimension mutation support.
  * - Sphere requires uniform scale (r' = r * s); non-uniform scale is rejected with SHAPE_OPERATION_UNSUPPORTED.
  * - Cylinder requires uniform radial scale (scaleX === scaleZ); height scales independently.
  * - Box scales along respective axes without silent axis swapping.
@@ -21,20 +21,20 @@ export interface MapRegionPointShape {
 
 export interface MapRegionSphereShape {
   kind: 'sphere';
-  shapeType: 1;
+  shapeType: 2;
   radius: number;
 }
 
 export interface MapRegionCylinderShape {
   kind: 'cylinder';
-  shapeType: 2;
+  shapeType: 3;
   radius: number;
   height: number;
 }
 
 export interface MapRegionBoxShape {
   kind: 'box';
-  shapeType: 3;
+  shapeType: 5;
   length: number;
   width: number;
   height: number;
@@ -79,7 +79,7 @@ export const POINT_SHAPE_PROFILE: MsbShapeProfile = {
   kind: 'point',
   name: 'Point',
   writable: false,
-  shapeDataPointerRule: 'relative_int64_at_0x30_dummy_or_zero',
+  shapeDataPointerRule: 'relative_int64_at_0x48_zero_for_point',
   fields: [],
   untouchedByteRule: 'zero_write_no_dimensions',
   basisHash: 'sha256:point-profile-v1',
@@ -87,11 +87,11 @@ export const POINT_SHAPE_PROFILE: MsbShapeProfile = {
 };
 
 export const SPHERE_SHAPE_PROFILE: MsbShapeProfile = {
-  shapeType: 1,
+  shapeType: 2,
   kind: 'sphere',
   name: 'Sphere',
   writable: true,
-  shapeDataPointerRule: 'relative_int64_at_0x30',
+  shapeDataPointerRule: 'relative_int64_at_0x48',
   fields: [
     { name: 'radius', type: 'float32', offset: 0, unit: 'm', allowZero: false }
   ],
@@ -101,11 +101,11 @@ export const SPHERE_SHAPE_PROFILE: MsbShapeProfile = {
 };
 
 export const CYLINDER_SHAPE_PROFILE: MsbShapeProfile = {
-  shapeType: 2,
+  shapeType: 3,
   kind: 'cylinder',
   name: 'Cylinder',
   writable: true,
-  shapeDataPointerRule: 'relative_int64_at_0x30',
+  shapeDataPointerRule: 'relative_int64_at_0x48',
   fields: [
     { name: 'radius', type: 'float32', offset: 0, unit: 'm', allowZero: false },
     { name: 'height', type: 'float32', offset: 4, unit: 'm', allowZero: false }
@@ -116,11 +116,11 @@ export const CYLINDER_SHAPE_PROFILE: MsbShapeProfile = {
 };
 
 export const BOX_SHAPE_PROFILE: MsbShapeProfile = {
-  shapeType: 3,
+  shapeType: 5,
   kind: 'box',
   name: 'Box',
   writable: true,
-  shapeDataPointerRule: 'relative_int64_at_0x30',
+  shapeDataPointerRule: 'relative_int64_at_0x48',
   fields: [
     { name: 'length', type: 'float32', offset: 0, unit: 'm', allowZero: false },
     { name: 'width', type: 'float32', offset: 4, unit: 'm', allowZero: false },
@@ -133,9 +133,9 @@ export const BOX_SHAPE_PROFILE: MsbShapeProfile = {
 
 export const MSB_SHAPE_PROFILES: Readonly<Record<number, MsbShapeProfile>> = {
   0: POINT_SHAPE_PROFILE,
-  1: SPHERE_SHAPE_PROFILE,
-  2: CYLINDER_SHAPE_PROFILE,
-  3: BOX_SHAPE_PROFILE
+  2: SPHERE_SHAPE_PROFILE,
+  3: CYLINDER_SHAPE_PROFILE,
+  5: BOX_SHAPE_PROFILE
 };
 
 export function getShapeProfile(shapeType: number): MsbShapeProfile | undefined {
@@ -157,6 +157,11 @@ export function validateRegionShape(shape: MapRegionShape): {
 } {
   if (!shape || typeof shape !== 'object') {
     return { valid: false, code: 'SHAPE_OPERATION_UNSUPPORTED', error: 'Shape 必须是有效对象' };
+  }
+
+  const profile = getShapeProfile(shape.shapeType);
+  if (!profile || profile.kind !== shape.kind) {
+    return { valid: false, code: 'SHAPE_OPERATION_UNSUPPORTED', error: `Shape kind ${shape.kind} 与原生 shapeType ${shape.shapeType} 不匹配` };
   }
 
   switch (shape.kind) {
@@ -240,6 +245,12 @@ export function scaleRegionShape(
   current: MapRegionShape,
   scale: [number, number, number]
 ): MapRegionShape {
+  const validation = validateRegionShape(current);
+  if (!validation.valid) {
+    const err = new Error(validation.error);
+    (err as any).code = 'SHAPE_OPERATION_UNSUPPORTED';
+    throw err;
+  }
   const [sx, sy, sz] = scale;
   if (!Number.isFinite(sx) || !Number.isFinite(sy) || !Number.isFinite(sz) || sx <= 0 || sy <= 0 || sz <= 0) {
     const err = new Error(`Scale 因子必须是有限正数: [${sx}, ${sy}, ${sz}]`);
@@ -258,7 +269,7 @@ export function scaleRegionShape(
       }
       return {
         kind: 'sphere',
-        shapeType: 1,
+        shapeType: 2,
         radius: current.radius * sx
       };
     }
@@ -273,7 +284,7 @@ export function scaleRegionShape(
       }
       return {
         kind: 'cylinder',
-        shapeType: 2,
+        shapeType: 3,
         radius: current.radius * sx,
         height: current.height * sy
       };
@@ -282,7 +293,7 @@ export function scaleRegionShape(
     case 'box': {
       return {
         kind: 'box',
-        shapeType: 3,
+        shapeType: 5,
         length: current.length * sx,
         width: current.width * sz,
         height: current.height * sy

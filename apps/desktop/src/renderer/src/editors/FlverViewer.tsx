@@ -58,6 +58,12 @@ export interface FlverViewerProps {
     uvSetsBase64?: string[] | undefined;
     normalsBase64?: string | undefined;
     vertexAlphaBase64?: string | undefined;
+    positionStatus?: FlverPreviewMesh['positionStatus'];
+    positionFailure?: string | undefined;
+    positionDiagnostics?: FlverPreviewMesh['positionDiagnostics'];
+    normalStatus?: FlverPreviewMesh['normalStatus'];
+    normalFailure?: string | undefined;
+    normalDiagnostics?: FlverPreviewMesh['normalDiagnostics'];
     vertexColorStatus?: FlverPreviewMesh['vertexColorStatus'];
     vertexColorFailure?: string | undefined;
     vertexColorDiagnostics?: FlverPreviewMesh['vertexColorDiagnostics'];
@@ -103,6 +109,12 @@ export interface FlverViewerProps {
     uvSetsBase64?: string[] | undefined;
     normalsBase64?: string | undefined;
     vertexAlphaBase64?: string | undefined;
+    positionStatus?: FlverPreviewMesh['positionStatus'];
+    positionFailure?: string | undefined;
+    positionDiagnostics?: FlverPreviewMesh['positionDiagnostics'];
+    normalStatus?: FlverPreviewMesh['normalStatus'];
+    normalFailure?: string | undefined;
+    normalDiagnostics?: FlverPreviewMesh['normalDiagnostics'];
     vertexColorStatus?: FlverPreviewMesh['vertexColorStatus'];
     vertexColorFailure?: string | undefined;
     vertexColorDiagnostics?: FlverPreviewMesh['vertexColorDiagnostics'];
@@ -1107,6 +1119,12 @@ function toSceneMaterialTextures(texture: FlverPreviewTexture): FlverSceneMateri
 
 function nativeVertexDiagnosticSource(source: FlverNativeVertexDiagnosticSource): FlverNativeVertexDiagnosticSource {
   return {
+    positionStatus: source.positionStatus,
+    positionFailure: source.positionFailure,
+    positionDiagnostics: source.positionDiagnostics,
+    normalStatus: source.normalStatus,
+    normalFailure: source.normalFailure,
+    normalDiagnostics: source.normalDiagnostics,
     vertexColorStatus: source.vertexColorStatus,
     vertexColorFailure: source.vertexColorFailure,
     vertexColorDiagnostics: source.vertexColorDiagnostics,

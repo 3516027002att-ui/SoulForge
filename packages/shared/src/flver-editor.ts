@@ -24,12 +24,13 @@ export interface FlverRoundTripReport {
   meshCount: number;
 }
 
-/** GX 列表里的一项；payload 只报长度不报内容（材质着色参数未经往返验证不解码）。 */
+/** GX 列表里的一项；payload 只报长度与不透明 SHA-256（不解码材质着色参数）。 */
 export interface FlverGxItemWire {
   id: string;
   unk04: number;
   itemLength: number;
   dataLength: number;
+  dataSha256?: string;
 }
 
 /** FLVER2 GX 列表。 */
@@ -44,11 +45,22 @@ export interface FlverGxListWire {
 
 /** read-flver-document envelope 里的 material 行。 */
 export interface FlverMaterialWire {
+  /** Material table ordinal; distinct from nativeIndex. */
+  index?: number;
+  firstTextureIndex?: number;
+  /** Exact stored +0x10; NEXT calculates string bytes on write, but mods may leave it stale. */
+  stringByteCount?: number;
+  /** Native +0x18 / NEXT Index, preserved without ordinal interpretation. */
+  nativeIndex?: number;
+  /** First-seen GX offset dedup index; -1 means no GX list. */
+  gxIndex?: number;
   name: string;
   mtdPath: string;
   textureCount: number;
+  /** @deprecated Legacy alias of stringByteCount; this is not a flags bitfield. */
   flags: number;
   gxOffset: number;
+  /** @deprecated Legacy alias of nativeIndex. */
   unk18: number;
   gxList: FlverGxListWire | null;
 }
@@ -88,6 +100,13 @@ export interface FlverBufferLayoutWire {
 
 /** read-flver-texture-slots / envelope 里的 texture slot 行（material-slot page）。 */
 export interface FlverTextureSlotWire {
+  tilingScale?: [number, number];
+  /** Native byte values: None0, Repeat1, MirrorRepeat2, Clamp3, Border4, MirrorOnce5. */
+  tilingTypeU?: number;
+  tilingTypeV?: number;
+  unk14?: number;
+  unk18?: number;
+  unk1C?: number;
   index: number;
   type: string;
   path: string;
@@ -185,6 +204,10 @@ export interface FlverDummiesData {
 
 /** read-flver-texture-slots 的响应。 */
 export interface FlverTextureSlotsData {
+  sourceHash?: string;
+  materialCount?: number;
+  /** Full metadata, independent of read-flver-document sample truncation. */
+  materials?: FlverMaterialWire[];
   textureCount: number;
   textures: FlverTextureSlotWire[];
 }

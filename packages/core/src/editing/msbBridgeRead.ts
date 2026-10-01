@@ -33,6 +33,7 @@ export interface MsbBridgeRegion {
   name: string;
   nativeOffset?: number;
   typeId: number;
+  shapeType?: number;
   posX: number;
   posY: number;
   posZ: number;
@@ -167,6 +168,7 @@ export async function readMsbDocumentViaBridge(input: {
     name: String(r.name ?? ''),
     ...(r.offset === undefined ? {} : { nativeOffset: Number(r.offset) }),
     typeId: Number(r.typeId ?? 0),
+    ...(r.shapeType !== undefined ? { shapeType: Number(r.shapeType) } : {}),
     posX: Number(r.posX ?? 0),
     posY: Number(r.posY ?? 0),
     posZ: Number(r.posZ ?? 0),

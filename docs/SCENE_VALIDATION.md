@@ -118,8 +118,8 @@ is derived from the independent oracle before any projection exclusion.
 
 The report binds corpus files, oracle exports, Bridge observation receipts,
 producer DLL, compiled module hashes, selected source hashes and product commit.
-Shipped renderer/Three outputs and selected sources match the desktop build
-receipt. Core/shared compiled modules are individually hash-bound, but that
+Compiled production renderer/Three outputs and selected sources match the desktop
+build receipt; packaged/live rendering is not inferred from these helper checks. Core/shared compiled modules are individually hash-bound, but that
 desktop receipt does not independently attest their compilation. Every bound
 input and HEAD is rechecked before publishing the private report; changed
 inputs stop the run. The older MSB capture lacks the FLVER capture's producer
@@ -181,24 +181,98 @@ unit tests, 21 script contracts, 16 functional scenarios and strict TypeScript.
 Declared buffer-length/data-region failures cannot expose partial diagnostics
 or be mislabeled absent. Unsupported layouts remain explicit gaps.
 
+## Extended local field coverage
+
+The final `1e87eb5` evidence uses current compiled production renderer/core
+outputs and published native producer
+`352ae4f9d74d57ea8b5cd213490c990c57b7169430aec2a88b3ab099928fbed4`
+(native input `d7b7cebb`). Earlier `3188977` and `34c86bc` reports remain
+separately preserved. It executes unchanged renderer
+CPU functions with actual Three geometry, skeleton and instance objects. It does
+not attest the separately packaged application, a running window, GPU draw,
+browser image decoding, color management or game/mature-tool pictures.
+
+The expanded FLVER comparison preserves every observed native position and
+normal member through Bridge, core and renderer input: 17 position sets and
+17 normal sets, 504,576 components each, plus 168,192 raw integer NormalW values.
+Position error is at most 9.53e-7, normal error at most 2.95e-8, and NormalW is
+exact. Primary shader attributes retain their existing selection. The earlier
+RGBA/tangent/bitangent, reference FK, inverse-bind, follower, count, topology and
+MSB placement checks remain covered. A secondary-position mutation adds a ninth
+first-divergence negative without changing the primary positions.
+
+A separate material comparison covers all 19 materials, 166 texture records and
+67 opaque GX items. Names/MTD references, physical texture ranges, stored native
+indices/string-byte counts, tiling scale/modes, unknown floats and GX hashes
+match the independent export; 20 altered-field controls fail first at Bridge.
+Stored string-byte counts are preserved, even where modded strings no longer
+match the upstream writer's calculated count. Published evidence checks the
+complete native build scope before and after the run. Archival FDD receipts
+verify listed inputs and explicitly do not claim that complete build scope.
+
+For MSB, the compiled mapper now retains the native shape discriminant. The
+native IDs are point=0, sphere=2, cylinder=3, box=5 and composite=6; the primitive
+shape payload pointer is at +0x48. Raw dimension checks cover 208 existing
+regions. The m13 base-field report compares 43,755 Bridge values and 43,442 core
+values; m10 adds 133,486/132,622 values and 33 MufflingBoxLink routes. Its 66
+internally retained Unk08/Unk0C values match NEXT through a validation-only probe,
+while envelope/core DTOs omit those fields. MufflingPortalLink is unobserved.
+The subtype inventories remain partial (509/566 distinct omitted roots). The
+native authorityScope remains entries/types/transforms; those additional map
+feature payloads are outside #50's transformation comparison requirement.
+
+For the existing a232/a250 TAE leaves, 7 animations, 173 ordered events and
+2,952 parameter bytes match Bridge and the compiled core mapper. Bridge group
+counts total 151; group counts are not compared at core. Six bad event/type/time/parameter controls fail first at Bridge. A
+separate native reflection probe compares 676 decoded fields, including group
+types and memberships and motion identities. All seven complete miniheaders
+also match supplemental raw-layout checks. Loop/delay/unknown fields consumed
+then discarded by the narrow motion reader are not claimed as retained product
+fields. Twelve internal/raw controls and complete source-scope checks pass.
+
+The internal probe additionally found actual malformed group offsets accepted
+by native Read and rejected by NEXT. The focused guard rejects out-of-table,
+exclusive-end, unaligned and cross-animation references with contextual native
+read diagnostics; it does not invent uniqueness or group-type rules. Owned
+current-lead-plus-guard tests compare valid/empty and the two real altered copies
+against both readers, plus seven synthetic boundary cases.
+
+The preserved TPF sources exposed another real Bridge difference: Flag2 is at
+0x0D and Encoding is at 0x0E. The corrected read/rebuild fields preserve original
+bytes and names for the observed UTF16 Encoding=1 inputs. Full-resolution PNG
+export, bounded 512 box-average previews and unchanged compiled IPC/renderer
+input callbacks pass for both packages and all nine textures. Seven BC1 raw
+and preview images stay within one channel unit of bcdec; two BC7 images are
+byte-exact. All 40 controls pass (36 Bridge field/pixel mutations, two producer/
+source receipt controls and two renderer failure/cancellation controls).
+Standalone TPF display has no scene-ir hop: the actual intermediate layer is
+the compiled main IPC DTO adapter. Executing the shared page-projection API is
+supplemental coverage, since the editor consumes its DTO directly. Full PNG
+export uses the documented compiled core daemon scope with owned staging roots;
+standalone CLI admission rejection is preserved and was not bypassed. Final
+before/after bindings cover 140 records / 138 distinct files, 20 capture envelopes
+and nine full PNG outputs. Browser/GPU decoding and presentation remain outside
+this CPU/input comparison.
+
 ## Remaining acceptance work
 
 These checks are bounded implementation evidence. They do not complete #30,
 #31, #33, #34, #50 or #55 on their own.
 
 - #30/#33: 5–10 real asset images still need game/mature-tool confirmation,
-  per-backend image baselines and independent FK/bind-matrix expectations
+  per-backend image baselines and corresponding independent numeric coverage
+  for additional pictured assets (two fixed FLVERs already have FK/bind references)
 - #31: request phases add up with explicit clock tolerance and report native
   queue wait separately from pre-native IPC/main/transport cost. Shared-frame
   submission is measured, not display presentation. Cross-model scheduler
   dependencies and full MAP opening milestones remain an incomplete causal DAG
 - #34: WebGL2 remains the default. Actual two-backend image and performance
   parity must pass before changing the default
-- #50: integrated-build field reports cover diagnostic preservation, reference
-  FK, actual runtime inverse binds and controlled follower mechanisms. Full
-  material names/MTD metadata beyond the document preview, additional native
-  streams, game-confirmed equipment, MSB subtype/TAE/HKX and shader/image fields
-  remain outside this bounded report
+- #50: available local fields for the fixed FLVER/material/TPF/MSB/TAE samples
+  have bounded independent comparisons and first-divergence controls. Remaining
+  external acceptance is independent HKX/pose data, game/mature-tool pictures,
+  actual missing MTD/resource inputs and native engine/shader confirmation.
+  Additional MSB subtype feature support is outside the transformation check
 - #55: repeated cursors, incomplete terminal pages and stuck/cancelled loaders
   now terminate with diagnostics. The original large-map halfway stall still
   needs a matching asset/build reproduction before it can be called fixed

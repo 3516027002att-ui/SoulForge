@@ -371,11 +371,11 @@ try {
       note: 'Complete supported RGBA is decoded; unsupported UByte4 color layout remains a gap.'
     },
     {
-      label: 'duplicate-normal',
+      label: 'duplicate-weights',
       needle: '第 2+ 个 member',
-      members: [...CLEAN_MEMBERS, { semantic: SEM.NORMAL, type: TYPE.BYTE4B, structOffset: 28, index: 1 }],
+      members: [...CLEAN_MEMBERS, { semantic: SEM.BONE_WEIGHTS, type: TYPE.BYTE4C, structOffset: 28, index: 1 }],
       materialCount: 0,
-      note: 'All UV members now survive; extra normal members still have an explicit partial projection.'
+      note: 'Position/normal members now survive; duplicate bone weight members remain an explicit partial projection.'
     },
     {
       label: 'unknown-semantic',
@@ -454,7 +454,7 @@ report({
   assertions: checks.length,
   evidence: 'runtime-observed：经生产命令 read-flver-document 真实解析，断言 envelope 的 authority/unparsedGaps',
   fixture: 'synthetic FLVER（微小、合法构造、明确标记，非 native authority）',
-  message: 'Unsupported tangent/bitangent/color layouts, additional normal members and unknown semantics remain explicit partial gaps; supported baseline data remains distinguishable.',
+  message: 'Unsupported tangent/bitangent/color layouts, duplicate weight members and unknown semantics remain explicit partial gaps; supported baseline data remains distinguishable.',
   nonClaims: [
     'This synthetic gate covers explicit unsupported layouts and partial projections, not all unknown format gaps.',
     'Supported tangent/bitangent/RGBA fields now have separate native field and diagnostic-preservation tests; this gate does not certify rendering or native shader behavior.',

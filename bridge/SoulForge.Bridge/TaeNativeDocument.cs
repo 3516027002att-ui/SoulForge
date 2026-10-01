@@ -246,8 +246,19 @@ internal sealed class TaeNativeDocument
                             $"TAE 动画 {animId} 事件组 {g} 偏移数组越界。");
                     eventOffsets = new int[checked((int)groupEventCount)];
                     for (var ge = 0; ge < groupEventCount; ge++)
-                        eventOffsets[ge] = ReadInt32(
+                    {
+                        var eventHeaderOffset = ReadInt32(
                             source, checked((int)(groupEventArrayOffset + ge * 4)));
+                        // Members point to this animation's 24-byte event headers,
+                        // not arbitrary source bytes or another animation's table.
+                        var relativeOffset = (long)eventHeaderOffset - eventTableOffset;
+                        if (relativeOffset < 0
+                            || relativeOffset >= (long)eventCount * EventTableEntrySize
+                            || relativeOffset % EventTableEntrySize != 0)
+                            throw new InvalidDataException(
+                                $"TAE 动画 {animId} 事件组 {g} 成员 {ge} 偏移 {eventHeaderOffset} 不对应本动画事件表中的事件头。");
+                        eventOffsets[ge] = eventHeaderOffset;
+                    }
                 }
                 else
                 {

@@ -274,3 +274,16 @@ test('character preview guard rejects invalid tangent and bitangent status, fail
     }
   }
 });
+
+
+test('character preview guard preserves native extra stream types and rejects mislabeled identity', () => {
+  const diagnostic = { memberOrdinal: 0, memberIndex: 1, layoutType: 2, layoutTypeName: 'Float3', vertexBufferIndex: 2, bufferLayoutIndex: 4, structOffset: 0, xyzBase64: 'native-xyz' };
+  assert.equal(isCharacterPreviewBundle(makePreviewBundle({ positionStatus: 'decoded', positionDiagnostics: [diagnostic], normalStatus: 'decoded', normalDiagnostics: [{ ...diagnostic, layoutType: 17, layoutTypeName: 'UByte4', normalWBase64: 'native-int32' }] })), true);
+  for (const patch of [
+    { positionDiagnostics: [{ ...diagnostic, layoutType: 17, layoutTypeName: 'UByte4' }] },
+    { normalDiagnostics: [{ ...diagnostic, layoutTypeName: 'Float4' }] },
+    { normalDiagnostics: [{ ...diagnostic, normalWBase64: 4 }] },
+    { positionDiagnostics: [{ ...diagnostic, memberOrdinal: -1 }] },
+    { positionStatus: 'invented' }, { normalFailure: 7 }, { normalDiagnostics: {} }
+  ]) assert.equal(isCharacterPreviewBundle(makePreviewBundle(patch)), false);
+});

@@ -14,7 +14,7 @@ const decode = (base64, kind = 'f32') => {
   const bytes = Buffer.from(base64, 'base64');
   const width = kind === 'u16' ? 2 : 4;
   if (bytes.length % width) throw new Error('ATTRIBUTE_ALIGNMENT_INVALID');
-  return Array.from({ length: bytes.length / width }, (_, i) => kind === 'f32' ? bytes.readFloatLE(i * width) : kind === 'u16' ? bytes.readUInt16LE(i * width) : bytes.readUInt32LE(i * width));
+  return Array.from({ length: bytes.length / width }, (_, i) => kind === 'f32' ? bytes.readFloatLE(i * width) : kind === 'u16' ? bytes.readUInt16LE(i * width) : kind === 'i32' ? bytes.readInt32LE(i * width) : bytes.readUInt32LE(i * width));
 };
 const check = (expected, actual, tolerance = 1e-6) => compareNumericField(expected, actual == null ? null : Array.from(actual), tolerance);
 const equal = (expected, actual) => ({ status: expected === actual ? 'passed' : 'failed', expected, actual });
@@ -25,7 +25,7 @@ const strings = (expected, actual) => {
 const layer = (checks) => ({ status: Object.values(checks).every((value) => value.status === 'passed') ? 'passed' : 'failed', checks });
 const verdict = (layers) => ({ status: Object.values(layers).every((value) => value.status === 'passed') ? 'passed' : 'failed', firstDivergentLayer: ['bridge', 'core', 'renderer'].find((name) => layers[name]?.status === 'failed') ?? null, layers });
 
-/** Execute unchanged declarations from the shipped bundle, not a second implementation. */
+/** Execute unchanged declarations from the compiled production renderer bundle, not a second implementation. */
 function extractRenderer(ts, text) {
   const source = ts.createSourceFile('renderer.js', text, ts.ScriptTarget.Latest, true, ts.ScriptKind.JS);
   const functions = new Map(source.statements.filter((node) => ts.isFunctionDeclaration(node) || ts.isClassDeclaration(node)).map((node) => [node.name?.text, node]));
@@ -120,7 +120,7 @@ function nativeDiagnosticMetadata(bytes, meshIndex, layouts) {
   const meshStart = 128 + count(0x14) * 64 + count(0x18) * 32 + count(0x1c) * 128;
   const bufferStart = meshStart + count(0x20) * 48 + count(0x50) * 32;
   const layoutStart = bufferStart + count(0x24) * 32;
-  const groups = { colors: [], tangents: [], bitangents: [] }, semantics = { 10: 'colors', 6: 'tangents', 7: 'bitangents' };
+  const groups = { nativePositions: [], nativeNormals: [], colors: [], tangents: [], bitangents: [] }, semantics = { 0: 'nativePositions', 3: 'nativeNormals', 10: 'colors', 6: 'tangents', 7: 'bitangents' };
   const atMesh = meshStart + meshIndex * 48, bufferCount = count(atMesh + 40), bufferIndices = count(atMesh + 44);
   for (let bufferOrdinal = 0; bufferOrdinal < bufferCount; bufferOrdinal++) {
     const bufferIndex = count(bufferIndices + bufferOrdinal * 4);
@@ -255,6 +255,9 @@ export async function compareSceneProjectionFields(productRoot, oracleRoot, obse
         positions: native.Vertices.flatMap((v) => v.Position.slice(0, 3)), normals: native.Vertices.flatMap((v) => v.Normal.slice(0, 3)), indices: expectedIndices,
         uvs: Array.from({ length: native.Vertices[0].UVs.length }, (_, set) => native.Vertices.flatMap((v) => v.UVs[set].slice(0, 2))),
         alpha: native.Vertices.map((v) => v.Colors[0].A), weights: skin.weights, boneIndices: skin.indices,
+        nativePositions: Array.from({ length: native.Vertices[0].Positions.length }, (_, set) => native.Vertices.flatMap((v) => v.Positions[set])),
+        nativeNormals: Array.from({ length: native.Vertices[0].Normals.length }, (_, set) => native.Vertices.flatMap((v) => v.Normals[set])),
+        normalWs: Array.from({ length: native.Vertices[0].NormalWs.length }, (_, set) => native.Vertices.map((v) => v.NormalWs[set])),
         colors: Array.from({ length: native.Vertices[0].Colors.length }, (_, set) => native.Vertices.flatMap((v) => { const c = v.Colors[set]; return [c.R, c.G, c.B, c.A]; })),
         tangents: Array.from({ length: native.Vertices[0].Tangents.length }, (_, set) => native.Vertices.flatMap((v) => v.Tangents[set])),
         bitangents: native.VertexBuffers.some((vb) => fields.BufferLayouts[vb.LayoutIndex].some((m) => m.Semantic === 'Bitangent')) ? [native.Vertices.flatMap((v) => v.Bitangent)] : []
@@ -264,16 +267,18 @@ export async function compareSceneProjectionFields(productRoot, oracleRoot, obse
         const checks = { positions: check(expected.positions, data.positions), normals: check(expected.normals, data.normals), indices: check(expected.indices, data.indices, 0), alpha: check(expected.alpha, data.alpha), weights: check(weights, data.weights), boneIndices: check(expected.boneIndices, data.boneIndices, 0), uvSetCount: equal(expected.uvs.length, data.uvs?.length), vertexCount: equal(native.Vertices.length, data.vertexCount), cullBackfaces: equal(face.CullBackfaces, data.cullBackfaces) };
         const metadata = nativeDiagnosticMetadata(leafBytes, ordinal, fields.BufferLayouts);
         for (let set = 0; set < expected.uvs.length; set++) checks[`uv${set}`] = check(expected.uvs[set], data.uvs?.[set]);
-        for (const kind of ['colors', 'tangents', 'bitangents']) {
+        for (const kind of ['nativePositions', 'nativeNormals', 'colors', 'tangents', 'bitangents']) {
           checks[`${kind}Count`] = equal(expected[kind].length, data[kind]?.length ?? 0);
           checks[`${kind}Status`] = equal(expected[kind].length ? 'decoded' : 'absent', data[`${kind}Status`]);
           for (let set = 0; set < expected[kind].length; set++) checks[`${kind}${set}`] = check(expected[kind][set], data[kind]?.[set]);
           checks[`${kind}Metadata`] = strings(metadata[kind].map((value) => JSON.stringify(value)), (data[`${kind}Metadata`] ?? []).map((value) => JSON.stringify(Object.fromEntries(Object.keys(metadata[kind][0] ?? {}).map((key) => [key, value[key]])))));
         }
+        checks.normalWCount = equal(expected.normalWs.length, data.normalWs?.length ?? 0);
+        for (let set = 0; set < expected.normalWs.length; set++) checks[`normalW${set}`] = check(expected.normalWs[set], data.normalWs?.[set], 0);
         return layer(checks);
       };
-      const wireFields = (wire) => ({ positions: decode(wire.positionsBase64), normals: decode(wire.normalsBase64), indices: decode(wire.indicesBase64, wire.indexSize === 32 ? 'u32' : 'u16'), alpha: decode(wire.vertexAlphaBase64), weights: decode(wire.boneWeightsBase64), boneIndices: decode(wire.boneIndicesBase64, 'u16'), uvs: wire.uvSetsBase64.map((v) => decode(v)), vertexCount: wire.vertexCount, cullBackfaces: wire.cullBackfaces, colors: wire.vertexColorDiagnostics?.map((v) => decode(v.rgbaBase64)), tangents: wire.tangentDiagnostics?.map((v) => decode(v.xyzwBase64)), bitangents: wire.bitangentDiagnostics?.map((v) => decode(v.xyzwBase64)), colorsMetadata: wire.vertexColorDiagnostics, tangentsMetadata: wire.tangentDiagnostics, bitangentsMetadata: wire.bitangentDiagnostics });
-      const diagnosticStatuses = (data, source) => Object.assign(data, { colorsStatus: source.vertexColorStatus, tangentsStatus: source.tangentStatus, bitangentsStatus: source.bitangentStatus });
+      const wireFields = (wire) => ({ positions: decode(wire.positionsBase64), normals: decode(wire.normalsBase64), indices: decode(wire.indicesBase64, wire.indexSize === 32 ? 'u32' : 'u16'), alpha: decode(wire.vertexAlphaBase64), weights: decode(wire.boneWeightsBase64), boneIndices: decode(wire.boneIndicesBase64, 'u16'), uvs: wire.uvSetsBase64.map((v) => decode(v)), vertexCount: wire.vertexCount, cullBackfaces: wire.cullBackfaces, colors: wire.vertexColorDiagnostics?.map((v) => decode(v.rgbaBase64)), tangents: wire.tangentDiagnostics?.map((v) => decode(v.xyzwBase64)), bitangents: wire.bitangentDiagnostics?.map((v) => decode(v.xyzwBase64)), nativePositions: wire.positionDiagnostics?.map((v) => decode(v.xyzBase64)), nativeNormals: wire.normalDiagnostics?.map((v) => decode(v.xyzBase64)), normalWs: wire.normalDiagnostics?.filter((v) => v.normalWBase64 !== undefined).map((v) => decode(v.normalWBase64, 'i32')), nativePositionsMetadata: wire.positionDiagnostics, nativeNormalsMetadata: wire.normalDiagnostics, colorsMetadata: wire.vertexColorDiagnostics, tangentsMetadata: wire.tangentDiagnostics, bitangentsMetadata: wire.bitangentDiagnostics });
+      const diagnosticStatuses = (data, source) => Object.assign(data, { nativePositionsStatus: source.positionStatus, nativeNormalsStatus: source.normalStatus, colorsStatus: source.vertexColorStatus, tangentsStatus: source.tangentStatus, bitangentsStatus: source.bitangentStatus });
       const project = (wire) => {
         const classified = classification(wire);
         if (classified.status !== 'passed') return { status: 'failed', firstDivergentLayer: 'bridge', layers: { bridge: classified, core: { status: 'unverified', reason: 'WRONG_BRIDGE_CLASSIFICATION_BLOCKS_PROJECTION' }, renderer: { status: 'unverified', reason: 'WRONG_BRIDGE_CLASSIFICATION_BLOCKS_PROJECTION' } } };
@@ -285,7 +290,9 @@ export async function compareSceneProjectionFields(productRoot, oracleRoot, obse
         const tracked = [];
         const mesh = api.createFlverMesh(three, (value) => { tracked.push(value); return value; }, item, null, undefined, 'webgl2', true);
         const geometry = mesh.geometry;
-        const geometryFields = { positions: geometry.getAttribute('position')?.array, normals: geometry.getAttribute('normal')?.array, indices: geometry.index?.array, alpha: geometry.getAttribute('soulforgeVertexAlpha')?.array, weights: geometry.getAttribute('skinWeight')?.array, boneIndices: geometry.getAttribute('skinIndex')?.array, uvs: expected.uvs.map((_, i) => geometry.getAttribute(i === 0 ? 'uv' : `soulforgeUv${i}`)?.array), vertexCount: geometry.getAttribute('position').count, cullBackfaces: mesh.material.side === three.BackSide, colors: expected.colors.map((_, i) => geometry.getAttribute(`soulforgeVertexColor${i}`)?.array), tangents: expected.tangents.map((_, i) => geometry.getAttribute(`soulforgeTangent${i}`)?.array), bitangents: expected.bitangents.map((_, i) => geometry.getAttribute(`soulforgeBitangent${i}`)?.array) };
+        const geometryFields = { positions: geometry.getAttribute('position')?.array, normals: geometry.getAttribute('normal')?.array, indices: geometry.index?.array, alpha: geometry.getAttribute('soulforgeVertexAlpha')?.array, weights: geometry.getAttribute('skinWeight')?.array, boneIndices: geometry.getAttribute('skinIndex')?.array, uvs: expected.uvs.map((_, i) => geometry.getAttribute(i === 0 ? 'uv' : `soulforgeUv${i}`)?.array), vertexCount: geometry.getAttribute('position').count, cullBackfaces: mesh.material.side === three.BackSide, nativePositions: expected.nativePositions.map((_, i) => geometry.getAttribute(`soulforgePosition${i}`)?.array), nativeNormals: expected.nativeNormals.map((_, i) => geometry.getAttribute(`soulforgeNormal${i}`)?.array), normalWs: expected.normalWs.map((_, i) => geometry.getAttribute(`soulforgeNormalW${i}`)?.array), colors: expected.colors.map((_, i) => geometry.getAttribute(`soulforgeVertexColor${i}`)?.array), tangents: expected.tangents.map((_, i) => geometry.getAttribute(`soulforgeTangent${i}`)?.array), bitangents: expected.bitangents.map((_, i) => geometry.getAttribute(`soulforgeBitangent${i}`)?.array) };
+        geometryFields.nativePositionsMetadata = geometry.userData.positionDiagnostics;
+        geometryFields.nativeNormalsMetadata = geometry.userData.normalDiagnostics;
         geometryFields.colorsMetadata = geometry.userData.vertexColorDiagnostics;
         geometryFields.tangentsMetadata = geometry.userData.tangentDiagnostics;
         geometryFields.bitangentsMetadata = geometry.userData.bitangentDiagnostics;
@@ -309,12 +316,19 @@ export async function compareSceneProjectionFields(productRoot, oracleRoot, obse
         for (const name of ['bridge', 'core']) result.layers[name].status = Object.values(result.layers[name].checks).every((v) => v.status === 'passed') ? 'passed' : 'failed';
         result.status = Object.values(result.layers).every((v) => v.status === 'passed') ? 'passed' : 'failed';
         result.firstDivergentLayer = ['bridge', 'core', 'renderer'].find((name) => result.layers[name].status === 'failed') ?? null;
-        result.rendererInput = { semantic: 'production buildBundleSemanticScene', geometry: 'production createFlverMesh -> Three BufferGeometry', skinWeightPolicy: 'four influences normalized independently from oracle raw weights', skeletonCount: semantic.skeletons[0].bones.length, materialType: mesh.material.type, side: mesh.material.side, zMirror: 'caller root transform; native cull policy inspected, world/pose matrices unverified' };
+        result.rendererInput = { semantic: 'production buildBundleSemanticScene', geometry: 'production createFlverMesh -> Three BufferGeometry', skinWeightPolicy: 'four influences normalized independently from oracle raw weights', skeletonCount: semantic.skeletons[0].bones.length, materialType: mesh.material.type, side: mesh.material.side, zMirror: 'caller root transform; native cull policy inspected; reference world/bind matrices compared separately, sampled animation poses unverified' };
         for (const value of tracked) value.dispose();
         return result;
       };
       const result = project(raw);
       meshReports.push({ ordinal, classification: 'drawable', ...result });
+      if (expected.nativePositions.length > 1) {
+        const wrong = structuredClone(raw);
+        const bytes = Buffer.from(wrong.positionDiagnostics[1].xyzBase64, 'base64');
+        bytes.writeFloatLE(bytes.readFloatLE(0) + 0.25, 0); wrong.positionDiagnostics[1].xyzBase64 = bytes.toString('base64');
+        const bad = project(wrong);
+        negatives.push({ id: `${resource.id}:mesh${ordinal}:nativePosition1`, injection: 'Second native position member X +0.25 at Bridge, primary positions unchanged', expectedFirstDivergentLayer: 'bridge', ...bad, negativePassed: bad.firstDivergentLayer === 'bridge' && ['bridge', 'core', 'renderer'].every((name) => bad.layers[name].status === 'failed') });
+      }
       if (!negatives.some((value) => value.id === `${resource.id}:positions`)) {
         const bytes = Buffer.from(raw.positionsBase64, 'base64'); bytes.writeFloatLE(bytes.readFloatLE(0) + 0.25, 0);
         const bad = project({ ...raw, positionsBase64: bytes.toString('base64') });
@@ -530,13 +544,14 @@ export async function compareSceneProjectionFields(productRoot, oracleRoot, obse
     oracle: { provider: inventory.provider, revision: inventory.revision, license: inventory.license, independentOfSoulForge: true, lineageLimit: 'Independent pinned external execution, shared documented format lineage' },
     matrixOracle: matrixExpectations ? { source: resolve(matrixExpectationsPath), provider: matrixExpectations.oracle.provider, revision: matrixExpectations.oracle.revision, assemblySha256: matrixExpectations.oracle.assemblySha256, convention: matrixExpectations.matrixConvention } : { status: 'unverified', reason: 'MATRIX_EXPECTATIONS_NOT_SUPPLIED' },
     buildReceipt: { path: receiptPath, generatedAt: receipt.generatedAt, sourceHash: receipt.source.sha256, outputHash: receipt.output.sha256, verifiedReceiptEntries },
-    rendererExtraction: { ...extraction, policy: 'Unchanged shipped AST declarations including mountFlverScene. Headless mount core supplies real Three/root/resources and omits DOM/GPU/camera/spatial-index startup; no source recompilation.' },
+    rendererExecution: { input: 'Current compiled production renderer build output', execution: 'CPU execution of unchanged source declaration slices with actual Three geometry/runtime scene objects', packagedApp: 'Not bound by this comparison', gpu: 'No GPU execution or draw pixels' },
+    rendererExtraction: { ...extraction, policy: 'Unchanged compiled production renderer AST declarations including mountFlverScene. Headless mount core supplies real Three/root/resources and omits DOM/GPU/camera/spatial-index startup; no source recompilation.' },
     inputs: binding, resources, crossSourceFollower,
     msb: { sourceSha256: msbOracle.source.sha256, decodedSha256: msbOracle.decoded.sha256, observationSha256: hash(msbCaptureBytes), captureProducer: 'Same receipt-bound native producer as FLVER observations', parts: nativeParts.length, regions: nativeRegions.length, models: msbOracle.fields.models.length, events: msbOracle.fields.events.length, ...mapReport },
     negatives,
     tolerances: { decodedFloatAttributes: 1e-6, integerIndicesAndMetadata: 0, serializedNativeReferenceFK: 0, rendererReferenceWorldAndInverseBind: 1e-5, msbInstanceMatrix: 1e-5, matrixRationale: 'Official expectations use float32 local/FK/inversion; Three hierarchy/inversion uses doubles. Absolute 1e-5 bounds conversion/rounding differences and is reported per field.' },
     unverifiedFields: {
-      bridge: ['Full material names/MTD metadata beyond bounded document preview; complete texture slot refs are compared', 'Additional normal/position members outside the selected preview stream', 'Native MTD/TPF shader semantics beyond raw pixels and references'],
+      bridge: ['Full material names/MTD/tiling/GX metadata checked by the separate metadata report; this report compares complete texture slot refs', 'Native MTD/TPF shader semantics beyond raw pixels and references'],
       core: ['Game-confirmed equipment/attachment assembly; controlled follower mechanisms are compared', 'MSB subtype-specific event/region/route payloads outside scene-ir'],
       renderer: ['Sampled HKX/TAE-driven animation poses and full engine shader equivalence', 'Actual GPU upload/draw pixels and performance'],
       corpus: ['HKX independent format oracle unsupported', 'Game/mature-tool image confirmation']

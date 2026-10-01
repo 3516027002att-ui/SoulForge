@@ -70,6 +70,11 @@ describe('FLVER native vertex color evidence', () => {
     const bundle = vertexColorBundle([colorDiagnostic([-2, 3, 0.25, 1.5]), colorDiagnostic([4, -1, 0.5, -0.25], 1)]);
     const source = bundle.models[0]!.meshes[0]!;
     source.vertexAlphaBase64 = float32Base64([1.5]);
+    source.positionStatus = 'decoded';
+    source.positionDiagnostics = [{ memberOrdinal: 0, memberIndex: 1, layoutType: 2, layoutTypeName: 'Float3', vertexBufferIndex: 2, bufferLayoutIndex: 4, structOffset: 0, xyzBase64: float32Base64([4, -2, 7]) }];
+    source.normalStatus = 'unsupported';
+    source.normalFailure = 'unverified layout';
+    source.normalDiagnostics = [];
     source.tangentStatus = 'decoded';
     source.tangentDiagnostics = [{
       memberOrdinal: 0, memberIndex: 2, layoutType: 26, layoutTypeName: 'Short4Norm',
@@ -83,7 +88,7 @@ describe('FLVER native vertex color evidence', () => {
       meshes: [toMeshData(source)], skeleton: [], dummies: [], texture: null
     });
     const bundleScene = buildBundleSemanticScene(bundle);
-    for (const key of ['vertexColorStatus', 'vertexColorDiagnostics', 'vertexAlpha', 'tangentStatus', 'tangentDiagnostics', 'bitangentStatus', 'bitangentFailure', 'bitangentDiagnostics'] as const) {
+    for (const key of ['positionStatus', 'positionDiagnostics', 'normalStatus', 'normalFailure', 'normalDiagnostics', 'vertexColorStatus', 'vertexColorDiagnostics', 'vertexAlpha', 'tangentStatus', 'tangentDiagnostics', 'bitangentStatus', 'bitangentFailure', 'bitangentDiagnostics'] as const) {
       assert.deepEqual(wireScene.meshes[0]?.[key], bundleScene.meshes[0]?.[key]);
     }
     assert.deepEqual([...wireScene.meshes[0]!.vertexAlpha!], [1.5]);

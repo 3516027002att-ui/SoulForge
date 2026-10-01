@@ -79,7 +79,7 @@ try {
   const normal = await read('packed-normal-at-tail', [{ type: 17, semantic: 3, bytes: Buffer.from([0, 127, 254, 7]) }]);
   assert.deepEqual(decode(normal.data.normalsBase64), Array(3).fill([-1, 0, 1]).flat());
   const signedNormal = await read('signed-normal', [{ type: 20, semantic: 3, bytes: Buffer.from([129, 0, 127, 7]) }]);
-  assert.deepEqual(decode(signedNormal.data.normalsBase64), Array(3).fill([1, 0, -1]).flat());
+  assert.deepEqual(decode(signedNormal.data.normalsBase64), Array(3).fill([Math.fround(7 / 127), 1, 0]).flat());
   const second = await read('valid-second-buffer', secondDiagnosticBuffer()); assert.equal(second.data.tangentStatus, 'decoded');
   for (const [name, options] of [['short-buffer', { length: 8 }], ['negative-buffer', { length: -1 }], ['offset-outside-file', { offset: 999999 }], ['invalid-layout', { layout: 99 }]]) {
     const corrupt = await read(name, secondDiagnosticBuffer(options));
@@ -87,5 +87,5 @@ try {
   }
   const badColor = await read('invalid-second-color', secondDiagnosticBuffer({ semantic: 10, type: 19, offset: 999999 }));
   assert.equal(badColor.data.vertexColorStatus, 'invalid'); assert.equal(badColor.data.vertexColorDiagnostics, undefined);
-  console.log(JSON.stringify({ status: 'passed', cases: ['packed/f32 multi-member and bitangent', 'signed WZYX', 'signed short XYZW', 'unsupported all-or-nothing', 'nonfinite all-or-nothing', 'unsupported bitangent', 'absent', 'packed normal source-tail bound', 'signed normal ZYX', 'valid second buffer', 'short declared buffer', 'negative declared buffer', 'second offset out of file', 'invalid second layout', 'invalid RGBA second buffer'] }));
+  console.log(JSON.stringify({ status: 'passed', cases: ['packed/f32 multi-member and bitangent', 'signed WZYX', 'signed short XYZW', 'unsupported all-or-nothing', 'nonfinite all-or-nothing', 'unsupported bitangent', 'absent', 'packed normal source-tail bound', 'signed normal WZYX', 'valid second buffer', 'short declared buffer', 'negative declared buffer', 'second offset out of file', 'invalid second layout', 'invalid RGBA second buffer'] }));
 } finally { await rm(directory, { recursive: true, force: true }); }
