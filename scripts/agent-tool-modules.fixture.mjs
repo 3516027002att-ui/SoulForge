@@ -6,7 +6,7 @@ import test from 'node:test';
 import { createDefaultToolRegistry } from '../packages/core/dist/index.js';
 test('domain tool modules own unique complete declarations projected by the default registry',async()=>{
  const root='packages/core/src/ai/tools';assert.equal(existsSync(root),true);
- const expected=createDefaultToolRegistry().list().filter(tool=>!tool.name.includes('tae'));
+ const expected=createDefaultToolRegistry().list();
  const declarations=[];
  for(const name of readdirSync(root).filter(name=>name.endsWith('.ts'))){
   const module=await import(pathToFileURL(resolve('packages/core/dist/ai/tools',name.replace(/\.ts$/u,'.js'))).href);

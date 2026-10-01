@@ -2,9 +2,12 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+declare const __SOULFORGE_REPO_ROOT__: string;
 
 const workspaceIpcSource = readFileSync(
-  join(dirname(fileURLToPath(import.meta.url)), 'ipc', 'workspace.ts'),
+  typeof __SOULFORGE_REPO_ROOT__ !== 'undefined'
+    ? join(__SOULFORGE_REPO_ROOT__,'apps/desktop/src/main/ipc/workspace.ts')
+    : join(dirname(fileURLToPath(import.meta.url)), 'ipc', 'workspace.ts'),
   'utf8'
 );
 const scanStart = workspaceIpcSource.indexOf("handle('workspace.scan'");

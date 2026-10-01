@@ -56,16 +56,20 @@ jobs:
         with:
           dotnet-version: '10.0.x'
       - run: npm ci
-      # One build includes the database smoke entry. That smoke verifies source
-      # and output fingerprints before reusing this exact artifact.
+      # Production artifacts contain production entries only. Database checks
+      # build their own isolated smoke output through desktop-test-build.mjs.
       - name: Build shared production artifacts
         if: needs.changes.outputs.build == 'true'
-        run: node scripts/ensure-agent-production-build.mjs --database-smoke
+        run: node scripts/ensure-agent-production-build.mjs
       - name: Public checks (single execution plan)
         env:
           VERIFY_TIERS: ${{ needs.changes.outputs.tiers }}
+          REQUIRE_E2E: ${{ needs.changes.outputs.build }}
           SOULFORGE_CONTRACT_REQUIRE_BUNDLES: '1'
-        run: node scripts/check.mjs --tier $env:VERIFY_TIERS --require-tier governance,unit --require-suite test:renderer-e2e --json-out output/verify-ci-public.json --timeout-ms 1200000
+        run: |
+          $required = @()
+          if ($env:REQUIRE_E2E -eq 'true') { $required = @('--require-suite', 'test:renderer-e2e') }
+          node scripts/check.mjs --tier $env:VERIFY_TIERS --require-tier governance,unit @required --json-out output/verify-ci-public.json --timeout-ms 1200000
       # Public runners have no private corpus. Keep the honest skip reports.
       - name: Native honest-skip contracts
         if: needs.changes.outputs.build == 'true'

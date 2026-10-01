@@ -3,14 +3,14 @@ import { relative, resolve } from 'node:path';
 import { analyzeEntry } from './classify.mjs';
 import { resolveScriptEntries } from './scriptGraph.mjs';
 import { operationKey, planScript } from './commandPlan.mjs';
-import { EXCLUDED, TIER_BY_SCRIPT } from './tiers.mjs';
 
 // These checks protect only the retired claim/seal/projection workflow. Product
 // checks retain their old ownership until a narrower semantic migration exists.
 export const RETIRED_GOVERNANCE_SUITES = new Set([
   'test:governance','test:governance-data-fixtures','test:governance-equivalence',
   'test:handoff-integrity','test:handoff-integrity:fixtures','test:handoff-projection',
-  'test:gov-cli','test:seal-cli','handoff:fingerprint','verify:audit'
+  'test:gov-cli','test:seal-cli','handoff:fingerprint','verify:audit',
+  'test:orphan-smoke-gate'
 ]);
 
 export function workspaceScriptReachability(repoRoot, workspaces, workspace, name) {
@@ -27,11 +27,6 @@ export function workspaceScriptReachability(repoRoot, workspaces, workspace, nam
 
 export function auditCheckRegistration(repoRoot, workspaces) {
   const findings = [];
-  for (const name of Object.keys(workspaces.rootScripts)) {
-    if (TIER_BY_SCRIPT[name] || EXCLUDED[name] || ['check','check:list'].includes(name)) continue;
-    findings.push({severity:name.startsWith('test') ? 'warning':'error',code:'SUITE_UNREGISTERED',
-      scriptName:name,message:name.startsWith('test') ? 'Test discovered automatically; legacy tier ownership is absent.' : 'No check ownership or operational exclusion is known.'});
-  }
   for (const [workspaceName,workspace] of workspaces.byName) {
     for (const name of Object.keys(workspace.scripts).filter(n => n.startsWith('test'))) {
       const status = workspaceScriptReachability(repoRoot,workspaces,workspace,name);
@@ -41,6 +36,18 @@ export function auditCheckRegistration(repoRoot, workspaces) {
     }
   }
   return findings;
+}
+
+/** Labels describe actual execution inputs, never a required registration row. */
+export function selectCheckTier(name, sources, requirements) {
+  const paths = sources.map(path => path.replaceAll('\\','/'));
+  if (paths.some(path => path.includes('/e2e/')) || /(?:renderer-(?:e2e|playwright)|test:e2e|playwright)/u.test(name)) return 'e2e';
+  if (/^(?:test:)?(?:release|installer|portable-packaging|cross-machine)/u.test(name)
+    || paths.some(path => /\/(?:verify-(?:release|installer|portable-packaging|cross-machine)|run(?:Release|Installer))[^/]*\./u.test(path))) return 'release';
+  if (paths.some(path => /\/scripts\/(?:check\.fixture|verify-(?:verify-entrypoint|scheduling|ci-change-scope|required-validation)-fixtures)\.mjs$/u.test(path))) return 'governance';
+  if (requirements.includes('native-env')) return 'native';
+  if (requirements.includes('dotnet')) return 'synthetic';
+  return 'unit';
 }
 
 function testFiles(root) {
@@ -65,7 +72,7 @@ export function discoverChecks(repoRoot, workspaces) {
   const analyze = file => {let result = workspaces.analysisCache.get(file); if (!result) {result = analyzeEntry(file);workspaces.analysisCache.set(file,result);} return result;};
   const covered = new Set();
   for (const [name,command] of Object.entries(workspaces.rootScripts)) {
-    if (!(name in TIER_BY_SCRIPT) && !name.startsWith('test')) continue;
+    if (name !== 'typecheck' && !name.startsWith('test') && !name.startsWith('bridge:verify:')) continue;
     if (RETIRED_GOVERNANCE_SUITES.has(name)) continue;
     const entries = resolveScriptEntries(repoRoot,workspaces,name);
     // Aggregate reachability is not execution evidence: a failing && prefix can
@@ -76,7 +83,7 @@ export function discoverChecks(repoRoot, workspaces) {
       entries.entryFiles.forEach(file => covered.add(file));
     }
     const requirements = new Set(entries.entryFiles.flatMap(file => analyze(file).requirements));
-    suites.set(name,{scriptName:name,tier:TIER_BY_SCRIPT[name] ?? (requirements.has('native-env') ? 'native':'unit'),
+    suites.set(name,{scriptName:name,tier:selectCheckTier(name,entries.entryFiles,[...requirements]),
       requirements:[...requirements],steps,origin:'npm',command});
   }
   // Workspace aliases are independently selectable, even when a root
@@ -89,7 +96,7 @@ export function discoverChecks(repoRoot, workspaces) {
       const entries = resolveScriptEntries(repoRoot,virtual,scriptName);
       const steps = planScript(repoRoot,workspaces,name,{workspace:workspaceName});
       const requirements = new Set(entries.entryFiles.flatMap(file => analyze(file).requirements));
-      suites.set(scriptName,{scriptName,tier:TIER_BY_SCRIPT[name] ?? (requirements.has('native-env') ? 'native':'unit'),requirements:[...requirements],steps,origin:'workspace',command:workspace.scripts[name]});
+      suites.set(scriptName,{scriptName,tier:selectCheckTier(name,entries.entryFiles,[...requirements]),requirements:[...requirements],steps,origin:'workspace',command:workspace.scripts[name]});
       if (entries.entryFiles.length === 1 && steps.filter(step => step.kind === 'test').length === 1) entries.entryFiles.forEach(file => covered.add(file));
     }
   }
@@ -107,7 +114,7 @@ export function discoverChecks(repoRoot, workspaces) {
     const isNodeTest = /\.(?:fixture|test)\./u.test(path);
     const args = [...(file.endsWith('.ts') && !workspaceDir ? ['--experimental-strip-types']:[]),...(isNodeTest ? ['--test']:[]),executionPath];
     const operation = {cwd:repoRoot,command:'node',args,kind:'test',env:{},owner:name};
-    suites.set(name,{scriptName:name,tier:analysis.requirements.includes('native-env') ? 'native':'unit',
+    suites.set(name,{scriptName:name,tier:selectCheckTier(name,[file],analysis.requirements),
       requirements:analysis.requirements,steps:[{...operation,key:operationKey(operation)}],origin:'file',source:path,
       ...(workspaceDir ? {buildInput:workspaceDir}: {})});
   }

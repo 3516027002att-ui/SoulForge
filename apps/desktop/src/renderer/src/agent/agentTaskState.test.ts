@@ -11,6 +11,32 @@
  */
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
+import * as agentTaskModule from './agentTaskState.js';
+
+it('long multi-turn conversation views keep a bounded recent window without changing completion facts',()=>{
+ let state=agentTaskModule.INITIAL_AGENT_TASK_STATE;
+ for(let index=0;index<100;index++){
+  const sessionId=`retention-${index}`;state=agentTaskModule.startAgentTask(sessionId,index,state,'task');
+  state=agentTaskModule.reduceAgentTaskEvent(state,{sessionId,event:{type:'agent-thinking-delta',step:1,text:`${index}-`+'x'.repeat(100000)}});
+  state=agentTaskModule.reduceAgentTaskEvent(state,{sessionId,event:{type:'session-done',finishReason:'stop',steps:1,rolloutFileName:`${index}.jsonl`}});
+ }
+ assert.ok(new TextEncoder().encode(JSON.stringify(state.historyItems)).byteLength<=2_097_152);
+ assert.ok(state.thinkingText.length<=33000);assert.equal(state.viewTruncated,true);
+ assert.equal(state.phase,'done');assert.equal(state.finishReason,'stop');assert.equal(state.rolloutFileName,'99.jsonl');
+});
+
+it('bounded history owns immutable copies before caching mutable user or nested tool views',()=>{
+ const item:agentTaskModule.AgentConversationItem={kind:'user',text:'short'};
+ const call:agentTaskModule.AgentToolCallView={callId:'call',name:'tool',step:1,status:'ok',argumentsJson:'{}'};
+ const tools:agentTaskModule.AgentConversationItem={kind:'tools',step:1,calls:[call],groupId:'group',live:false,collapsed:true};
+ const first=agentTaskModule.startAgentTask('one',0,{...agentTaskModule.INITIAL_AGENT_TASK_STATE,historyItems:[item,tools]});
+ item.text='x'.repeat(3_000_000);call.argumentsJson='x'.repeat(3_000_000);
+ const second=agentTaskModule.startAgentTask('two',0,first);
+ assert.ok(new TextEncoder().encode(JSON.stringify(second.historyItems)).byteLength<=2_097_152);
+ const ownedTools=second.historyItems.find(entry=>entry.kind==='tools');
+ assert.ok(ownedTools?.kind==='tools');
+ assert.throws(()=>{(ownedTools.calls[0] as any).argumentsJson='x'.repeat(3_000_000);},TypeError);
+});
 import {
   INITIAL_AGENT_TASK_STATE,
   approvalSeverity,

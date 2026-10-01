@@ -73,6 +73,12 @@ export class EmevdOpenSlots {
     this.slots.delete(windowId);
   }
 
+  /** Workspace replacement invalidates every window's outstanding read. */
+  clear():void {
+    for(const slot of this.slots.values())slot.controller.abort();
+    this.slots.clear();
+  }
+
   /** 仅供测试与诊断：当前有槽的窗口数。用它断言 dispose 真的回收了。 */
   get size(): number {
     return this.slots.size;

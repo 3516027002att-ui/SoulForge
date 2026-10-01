@@ -65,3 +65,9 @@ test('dropWindow 后切片失败', () => {
   const gone = store.readSlice(put.token, 7, 0, 1);
   assert.equal(gone.ok, false);
 });
+
+test('workspace release expires every retained source token, including the same window',()=>{
+  const store=new EmevdSourceTokens();const first=store.put(1,'same-uri','old');const second=store.put(2,'other-uri','other');
+  store.clear();assert.equal(store.size,0);assert.equal(store.readSlice(first.token,1,0,1).ok,false);assert.equal(store.readSlice(second.token,2,0,1).ok,false);
+  const current=store.put(1,'same-uri','new');assert.equal(store.readSlice(first.token,1,0,1).ok,false);assert.equal(store.readSlice(current.token,1,0,1).ok,true);
+});

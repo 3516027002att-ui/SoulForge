@@ -1,7 +1,69 @@
 import { createHash } from 'node:crypto';
 import { createReadStream } from 'node:fs';
-import { readFile, realpath } from 'node:fs/promises';
-import { isAbsolute, relative, resolve } from 'node:path';
+import { mkdir, open, readFile, realpath, writeFile } from 'node:fs/promises';
+import { basename, isAbsolute, join, relative, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+export interface FixedNativeFixture {
+  role:string;
+  relativePath:string;
+  sha256:string;
+  byteLength:number;
+  expected:Record<string,unknown>;
+}
+export type FixedNativeFixtureResult =
+  | {status:'available';path:string;version:string;fixture:FixedNativeFixture}
+  | {status:'unavailable';code:string;message:string;version?:string};
+
+/** Correctness cases live in the existing versioned corpus manifest. Mutable
+ * input bytes are hash-checked before being copied into the test-owned root. */
+export async function materializeFixedNativeFixture(role:string,ownedRoot:string,explicitPath?:string,options:{manifestPath?:string;fixtureRoot?:string}={}):Promise<FixedNativeFixtureResult> {
+  if(!/^[a-z0-9_-]+$/iu.test(role))throw new Error('FIXED_CORPUS_ROLE_INVALID');
+  const manifestPath=options.manifestPath??fileURLToPath(new URL('../../../../testdata/corpus/sekiro-1.6.corpus-manifest.json',import.meta.url));
+  const manifest=JSON.parse(await readFile(manifestPath,'utf8')) as {correctnessFixtures?:{schemaVersion:string;version:string;fixtures:FixedNativeFixture[]}};
+  const contract=manifest.correctnessFixtures;
+  if(!contract||contract.schemaVersion!=='1.0.0'||!contract.version||!Array.isArray(contract.fixtures))throw new Error('FIXED_CORPUS_MANIFEST_INVALID');
+  const matches=contract.fixtures.filter(fixture=>fixture.role===role);
+  if(matches.length!==1)throw new Error(`FIXED_CORPUS_ROLE_INVALID: ${role}`);
+  const fixture=matches[0]!;
+  if(!/^[a-f0-9]{64}$/u.test(fixture.sha256)||!Number.isSafeInteger(fixture.byteLength)||fixture.byteLength<1||fixture.byteLength>64*1024*1024
+    || !fixture.relativePath||isAbsolute(fixture.relativePath)||fixture.relativePath.split(/[\\/]/u).includes('..')||!fixture.expected||typeof fixture.expected!=='object'||Array.isArray(fixture.expected))throw new Error('FIXED_CORPUS_MANIFEST_INVALID');
+  const fixtureRoot=options.fixtureRoot||process.env.SOULFORGE_NATIVE_FIXTURE_ROOT?.trim()||process.env.SOULFORGE_SEKIRO_GAME_ROOT?.trim();
+  if(!explicitPath&&!fixtureRoot)return {status:'unavailable',code:'FIXED_CORPUS_ROOT_MISSING',message:'The pinned local correctness corpus is not configured.',version:contract.version};
+  let source:string;
+  try{
+    const candidate=explicitPath?resolve(explicitPath):resolve(fixtureRoot!,fixture.relativePath);
+    source=await realpath(candidate);
+    if(!explicitPath){const root=await realpath(resolve(fixtureRoot!));const rel=relative(root,source);if(rel.startsWith('..')||isAbsolute(rel))return {status:'unavailable',code:'FIXED_CORPUS_OUTSIDE_ROOT',message:'Pinned corpus resource escaped its configured root.',version:contract.version};}
+  }catch(error){if(['ENOENT','ENOTDIR','EACCES','EPERM'].includes((error as NodeJS.ErrnoException).code??''))return {status:'unavailable',code:'FIXED_CORPUS_MISSING',message:`Pinned corpus input is missing or unreadable: ${fixture.relativePath}`,version:contract.version};throw error;}
+  // Verify the very bytes copied to the test, avoiding a hash/read TOCTOU.
+  let handle:Awaited<ReturnType<typeof open>>|undefined;let bytes:Buffer;
+  try{
+    handle=await open(source,'r');
+    if((await handle.stat()).size!==fixture.byteLength)return {status:'unavailable',code:'FIXED_CORPUS_HASH_MISMATCH',message:`Pinned corpus input size differs from version ${contract.version}: ${fixture.relativePath}`,version:contract.version};
+    const bounded=Buffer.alloc(fixture.byteLength+1);let read=0;
+    while(read<bounded.length){const result=await handle.read(bounded,read,bounded.length-read,read);if(!result.bytesRead)break;read+=result.bytesRead;}
+    bytes=bounded.subarray(0,read);
+  }catch(error){if(['ENOENT','ENOTDIR','EACCES','EPERM'].includes((error as NodeJS.ErrnoException).code??''))return {status:'unavailable',code:'FIXED_CORPUS_MISSING',message:`Pinned corpus input disappeared or became unreadable: ${fixture.relativePath}`,version:contract.version};throw error;
+  }finally{await handle?.close();}
+  if(bytes.length!==fixture.byteLength||createHash('sha256').update(bytes).digest('hex')!==fixture.sha256)return {status:'unavailable',code:'FIXED_CORPUS_HASH_MISMATCH',message:`Pinned corpus input differs from version ${contract.version}: ${fixture.relativePath}`,version:contract.version};
+  const directory=join(ownedRoot,'fixed-corpus',role);await mkdir(directory,{recursive:true});
+  const path=join(directory,basename(fixture.relativePath));await writeFile(path,bytes);
+  return {status:'available',path,version:contract.version,fixture};
+}
+
+export function fixedFixtureNumber(fixture:FixedNativeFixture,key:string):number {
+  const value=fixture.expected[key];if(typeof value!=='number'||!Number.isSafeInteger(value)||value<0)throw new Error(`FIXED_CORPUS_EXPECTATION_INVALID: ${key}`);return value;
+}
+
+/** Compare every kind/count with the pinned external oracle, not the reader's
+ * own aggregate total. This remains a test verifier over native DTOs. */
+export function assertFixedInstructionDistribution(fixture:FixedNativeFixture,observed:readonly {bank:number;id:number;count:number}[]):void {
+  const expected=fixture.expected.distribution;
+  if(!Array.isArray(expected)||expected.some(item=>!item||!['bank','id','count'].every(key=>Number.isSafeInteger(item[key])&&item[key]>=0)))throw new Error('FIXED_CORPUS_EXPECTATION_INVALID: distribution');
+  const normalize=(items:readonly {bank:number;id:number;count:number}[])=>items.map(({bank,id,count})=>({bank,id,count})).sort((a,b)=>a.bank-b.bank||a.id-b.id);
+  if(JSON.stringify(normalize(observed))!==JSON.stringify(normalize(expected)))throw new Error('FIXED_CORPUS_DISTRIBUTION_MISMATCH: native instruction kinds/counts differ from the external oracle.');
+}
 
 interface NativeFixtureEntry {
   fixtureId: string;

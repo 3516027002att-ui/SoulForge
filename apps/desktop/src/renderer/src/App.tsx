@@ -117,7 +117,7 @@ import type { DomainSummary, EditorDomainId } from '@soulforge/shared';
 import { buildDomainSummaries, domainLabel } from './navigation/domainNavigation.js';
 import { DomainNavigationBar } from './navigation/DomainNavigationBar.js';
 import { DomainLibraryList } from './navigation/DomainLibraryList.js';
-import { orderUnseenAgentEvents } from './agent/agentEventReplay.js';
+import { orderUnseenAgentEvents, BoundedAgentEventQueue, combineAgentReplayWindow } from './agent/agentEventReplay.js';
 import {
   behaviorLibraryGroups,
   filesForDomain,
@@ -569,8 +569,8 @@ export function App(): ReactElement {
   const agentEventExpectedSessionRef = useRef<string | null>(null);
   const agentEventReadySessionRef = useRef<string | null>(null);
   const agentEventReplaySessionRef = useRef<string | null>(null);
-  const agentEventSeenSeqsRef = useRef(new Map<string, Set<number>>());
-  const pendingAgentEventsRef = useRef(new Map<string, AiAgentEventEnvelope[]>());
+  const agentEventSeenSeqsRef = useRef(new Map<string, {seen:Set<number>;droppedThrough:number}>());
+  const pendingAgentEventsRef = useRef(new BoundedAgentEventQueue<AiAgentEventEnvelope>());
   const agentCancelRequestedRef = useRef<boolean>(false);
   const [agentServices, setAgentServices] = useState<ModelServiceChoice[]>([]);
   const [agentServiceId, setAgentServiceId] = useState<string | null>(null);
@@ -1024,10 +1024,7 @@ export function App(): ReactElement {
    * 上一次运行的迟到事件不会把新任务标成已结束。
    */
   function queueAgentEvent(envelope: AiAgentEventEnvelope): void {
-    const queued = pendingAgentEventsRef.current.get(envelope.sessionId) ?? [];
-    if (!queued.some((item) => item.seq === envelope.seq)) queued.push(envelope);
-    if (queued.length > 4096) queued.splice(0, queued.length - 4096);
-    pendingAgentEventsRef.current.set(envelope.sessionId, queued);
+    pendingAgentEventsRef.current.append(envelope);
   }
 
   function applyAgentEventEnvelopes(envelopes: readonly AiAgentEventEnvelope[]): void {
@@ -1039,9 +1036,12 @@ export function App(): ReactElement {
     const orderedResult = orderUnseenAgentEvents(
       envelopes,
       sessionId,
-      agentEventSeenSeqsRef.current.get(sessionId) ?? new Set<number>()
+      agentEventSeenSeqsRef.current.get(sessionId)?.seen ?? new Set<number>(),
+      4096,
+      agentEventSeenSeqsRef.current.get(sessionId)?.droppedThrough ?? 0
     );
-    agentEventSeenSeqsRef.current.set(sessionId, orderedResult.seen);
+    agentEventSeenSeqsRef.current.clear();
+    agentEventSeenSeqsRef.current.set(sessionId, {seen:orderedResult.seen,droppedThrough:orderedResult.droppedThrough});
     const ordered = orderedResult.events;
     if (ordered.length === 0) return;
     // 先推进已应用集合，再排入 React 状态队列；IPC 回放和实时推送交错时，
@@ -1088,25 +1088,22 @@ export function App(): ReactElement {
     if (agentEventReplaySessionRef.current === sessionId) return undefined;
     agentEventReplaySessionRef.current = sessionId;
     void bridge.getAiAgentEvents(sessionId, 0).then((result) => {
-      const queued = pendingAgentEventsRef.current.get(sessionId) ?? [];
-      pendingAgentEventsRef.current.delete(sessionId);
+      const queuedWindow = pendingAgentEventsRef.current.take(sessionId);
       if (agentEventExpectedSessionRef.current !== sessionId) return;
       agentEventReadySessionRef.current = sessionId;
-      if (result.ok) {
-        applyAgentEventEnvelopes([...result.events, ...queued]);
-      } else {
-        // 回放失败不阻断实时通道；已经排队的事件仍然要显示。
-        applyAgentEventEnvelopes(queued);
-      }
+      const window=combineAgentReplayWindow(result,queuedWindow);
+      if(window.truncated)setAgentIdleNotice('较早的运行信息已收起，可从会话记录查看');
+      applyAgentEventEnvelopes(window.events);
     }).catch(() => {
       // 旧版 preload、受限 fixture 或热更新期间可能没有回放 handler。
       // 回放是补偿通道，不应让实时事件永远停在“已受理”；打开实时门后
       // 仍按 seq 去重，生产主进程有回放时不进入此分支。
-      const queued = pendingAgentEventsRef.current.get(sessionId) ?? [];
-      pendingAgentEventsRef.current.delete(sessionId);
+      const queuedWindow = pendingAgentEventsRef.current.take(sessionId);
       if (agentEventExpectedSessionRef.current !== sessionId) return;
       agentEventReadySessionRef.current = sessionId;
-      applyAgentEventEnvelopes(queued);
+      const window=combineAgentReplayWindow(undefined,queuedWindow);
+      if(window.truncated)setAgentIdleNotice('较早的运行信息已收起，可从会话记录查看');
+      applyAgentEventEnvelopes(window.events);
     });
     return undefined;
   }, [agentTask.sessionId, bridge]);
@@ -3153,7 +3150,8 @@ export function App(): ReactElement {
     agentEventExpectedSessionRef.current = result.sessionId;
     agentEventReadySessionRef.current = null;
     agentEventReplaySessionRef.current = null;
-    agentEventSeenSeqsRef.current.delete(result.sessionId);
+    agentEventSeenSeqsRef.current.clear();
+    pendingAgentEventsRef.current.keepSession(result.sessionId);
 
     // 若在发起等待期间用户已点击取消，立即向主进程补发 cancel
     if (agentCancelRequestedRef.current) {

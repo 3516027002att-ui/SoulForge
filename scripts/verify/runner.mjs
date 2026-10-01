@@ -16,7 +16,9 @@
 import { spawn, spawnSync } from 'node:child_process';
 import { delimiter, dirname, resolve } from 'node:path';
 import { existsSync, realpathSync } from 'node:fs';
-import { SILENT_ON_SUCCESS } from './tiers.mjs';
+// TypeScript's successful checker is intentionally silent. Test entries must
+// still provide execution evidence; there is no per-suite registration table.
+const SILENT_ON_SUCCESS = Object.freeze({typecheck:true});
 
 /**
  * 超时时杀掉整棵进程树，而不只是直接子进程。
@@ -192,6 +194,27 @@ export function detectSkipSignals(stdout, stderr = '') {
   const skippedLegs = [];
   let wholeSkipped = false;
 
+  // Node's TAP and spec reporters use stable terminal counts rather than JSON.
+  // Require a complete summary block so ordinary prose mentioning a skip or
+  // a fixture's quoted '# tests' text cannot masquerade as execution evidence.
+  const nodeSummaries=[];
+  for(const source of [stdout,stderr]){
+    let summary=null;
+    for(const line of (source??'').replace(/\u001b\[[0-?]*[ -/]*[@-~]/gu,'').split(/\r?\n/u)){
+      const match=/^(?:#\s*|ℹ\s+)(tests|pass|fail|cancelled|skipped|todo)\s+(\d+)\s*$/u.exec(line);
+      if(!match)continue;
+      if(match[1]==='tests')summary={tests:Number(match[2])};
+      else if(summary)summary[match[1]]=Number(match[2]);
+      if(summary&&['tests','pass','fail','cancelled','skipped','todo'].every(key=>Number.isSafeInteger(summary[key]))){nodeSummaries.push(summary);summary=null;}
+    }
+  }
+  if(nodeSummaries.length){
+    const executed=nodeSummaries.reduce((sum,item)=>sum+item.pass+item.fail+item.cancelled,0);
+    const skipped=nodeSummaries.reduce((sum,item)=>sum+item.skipped+item.todo,0);
+    if(executed===0){wholeSkipped=true;skippedLegs.push('node-test:no-executed-tests');}
+    else if(skipped>0)skippedLegs.push(`node-test:${skipped}-unverified-tests`);
+  }
+
   for (const source of [stdout, stderr]) {
     if (typeof source !== 'string' || source.length === 0) continue;
     for (const candidate of extractTopLevelJsonValues(source)) {
@@ -300,6 +323,9 @@ export function runSuite({ repoRoot, scriptName, timeoutMs, injectEnv = true, op
       : directArgs;
     const cwd = operation?.cwd ?? repoRoot;
     const childEnv = { ...process.env, ...env, ...operation?.env };
+    // Independent checks must not inherit node:test's private child reporter
+    // channel; that would suppress the summary used as execution evidence.
+    delete childEnv.NODE_TEST_CONTEXT;
     // npm normally supplies local binaries on PATH. Expanded node commands may
     // invoke them too, so retain that workspace/root lookup without using a shell.
     const pathKey = Object.keys(childEnv).find((key) => key.toLowerCase() === 'path') ?? 'PATH';

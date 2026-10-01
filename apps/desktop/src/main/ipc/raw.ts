@@ -2,21 +2,21 @@ import { readFile, stat } from 'node:fs/promises';
 import { basename, dirname, join } from 'node:path';
 import {
   analyzePlaintextLineEndings,
-  buildScriptContainerEvidence,
+  buildScriptContainerEvidence as nativeBuildScriptContainerEvidence,
   classifyPlaintextBytes,
   classifyScriptEntry,
   decodePlaintext,
-  inspectContainerTree,
-  listContainerChildren,
+  inspectContainerTree as nativeInspectContainerTree,
+  listContainerChildren as nativeListContainerChildren,
   magicLabel,
   normalizePageWindow,
   probeContainerCapabilityOptions,
   readContainerChild,
-  readRawResourceMetadata,
-  readRawResourceRange,
+  readRawResourceMetadata as nativeReadRawResourceMetadata,
+  readRawResourceRange as nativeReadRawResourceRange,
   resolveResourceCapabilities,
   roundTripContainer,
-  runBridge,
+  runBridge as nativeRunBridge,
   sanitizeEntryName,
   validateContainer,
   type ScriptContainerEntryEvidence,
@@ -33,18 +33,28 @@ import {
   type StructuredDiagnostic
 } from '@soulforge/shared';
 import {
-  prepareBridgeRoots,
+  prepareBridgeRoots as nativePrepareBridgeRoots,
   type BridgeRootSession,
   type PrepareBridgeRootsResult
 } from '../bridgeRoots.js';
 import { sanitizeDiagnostics, sanitizeRendererValue } from '../rendererDto.js';
 import type { NativeDcxEnvelopeLike } from './bridgeEnvelopes.js';
 import type { TrustedIpcHandle } from './registration.js';
+import { WorkspaceReadLifetime } from './workspaceReadLifetime.js';
 
 type CachedContainerChildren = Awaited<
   ReturnType<typeof listContainerChildren>
 >['children'];
-const containerChildrenCache = new Map<string, CachedContainerChildren>();
+
+const readLifetime = new WorkspaceReadLifetime();
+const prepareBridgeRoots = readLifetime.guardCall(nativePrepareBridgeRoots);
+const runBridge = readLifetime.guardCall(nativeRunBridge);
+const readRawResourceRange = readLifetime.guardCall(nativeReadRawResourceRange);
+const readRawResourceMetadata = readLifetime.guardCall(nativeReadRawResourceMetadata);
+const inspectContainerTree = readLifetime.guardCall(nativeInspectContainerTree);
+const listContainerChildren = readLifetime.guardCall(nativeListContainerChildren);
+const buildScriptContainerEvidence = readLifetime.guardCall(nativeBuildScriptContainerEvidence);
+const containerChildrenCache = readLifetime.createCache<string, CachedContainerChildren>();
 
 /**
  * Classified script-container entry table keyed by sourceUri. Materialized
@@ -62,7 +72,7 @@ interface CachedScriptContainerEntries {
   entriesComplete: boolean;
   diagnostics: StructuredDiagnostic[];
 }
-const scriptContainerEntriesCache = new Map<string, CachedScriptContainerEntries>();
+const scriptContainerEntriesCache = readLifetime.createCache<string, CachedScriptContainerEntries>();
 
 function emptyScriptClassificationSummary(): Record<ScriptEntryClassification, number> {
   return {
@@ -387,6 +397,7 @@ async function readScriptContainerChildByIndex(input: {
 
 /** workspace 生命周期与容器写回后由组合根调用的 domain-owned reset。 */
 export function clearRawIpcCaches(): void {
+  readLifetime.invalidate();
   containerChildrenCache.clear();
   scriptContainerEntriesCache.clear();
 }
@@ -418,7 +429,9 @@ export interface RawIpcDeps {
 }
 
 export function registerRawIpcHandlers(deps: RawIpcDeps): void {
-  deps.handle(
+  const verifiedReadRoots = readLifetime.guardCall(deps.verifiedReadRoots);
+  const handle = readLifetime.register(deps.handle, () => deps.activeSession);
+  handle(
     'resource.readRawRange',
     async (_event, sourceUri: string, offset: number, length: number) => {
       const file = deps.indexedFiles.find((item) => item.sourceUri === sourceUri);
@@ -441,7 +454,7 @@ export function registerRawIpcHandlers(deps: RawIpcDeps): void {
     }
   );
 
-  deps.handle('resource.readRawMetadata', async (_event, sourceUri: string) => {
+  handle('resource.readRawMetadata', async (_event, sourceUri: string) => {
     const file = deps.indexedFiles.find((item) => item.sourceUri === sourceUri);
     if (!file) return null;
     const meta = await readRawResourceMetadata(file, { computeHash: file.size <= 32 * 1024 * 1024 });
@@ -453,7 +466,7 @@ export function registerRawIpcHandlers(deps: RawIpcDeps): void {
     return sanitizeRendererValue(meta);
   });
 
-  deps.handle('resource.inspectContainerTree', async (_event, sourceUri: string) => {
+  handle('resource.inspectContainerTree', async (_event, sourceUri: string) => {
     const file = deps.indexedFiles.find((item) => item.sourceUri === sourceUri);
     if (!file) {
       return {
@@ -469,7 +482,7 @@ export function registerRawIpcHandlers(deps: RawIpcDeps): void {
     return inspectContainerTree(file.absolutePath, { relativePath: file.relativePath });
   });
 
-  deps.handle(
+  handle(
     'resource.listContainerChildren',
     async (_event, sourceUri: string, recursive?: boolean) => {
       const file = deps.indexedFiles.find((item) => item.sourceUri === sourceUri);
@@ -499,7 +512,7 @@ export function registerRawIpcHandlers(deps: RawIpcDeps): void {
    * table. Children are projected to the renderer-safe DTO subset (no absolute
    * paths / diagnostics cross the bridge).
    */
-  deps.handle(
+  handle(
     'resource.listContainerChildrenPage',
     async (
       _event,
@@ -579,7 +592,7 @@ export function registerRawIpcHandlers(deps: RawIpcDeps): void {
     }
   );
 
-  deps.handle(
+  handle(
     'resource.readContainerChild',
     async (_event, childUri: string) => {
       const hash = childUri.indexOf('#');
@@ -601,7 +614,7 @@ export function registerRawIpcHandlers(deps: RawIpcDeps): void {
     }
   );
 
-  deps.handle('resource.roundTripContainer', async (_event, sourceUri: string) => {
+  handle('resource.roundTripContainer', async (_event, sourceUri: string) => {
     const file = deps.indexedFiles.find((item) => item.sourceUri === sourceUri);
     if (!file) {
       return {
@@ -622,7 +635,7 @@ export function registerRawIpcHandlers(deps: RawIpcDeps): void {
     return roundTripContainer(file.absolutePath);
   });
 
-  deps.handle('resource.validateContainer', async (_event, sourceUri: string) => {
+  handle('resource.validateContainer', async (_event, sourceUri: string) => {
     const file = deps.indexedFiles.find((item) => item.sourceUri === sourceUri);
     if (!file) {
       return {
@@ -639,7 +652,7 @@ export function registerRawIpcHandlers(deps: RawIpcDeps): void {
     return validateContainer(file.absolutePath);
   });
 
-  deps.handle('resource.probeContainerCapabilities', async (_event, sourceUri: string) => {
+  handle('resource.probeContainerCapabilities', async (_event, sourceUri: string) => {
     const file = deps.indexedFiles.find((item) => item.sourceUri === sourceUri);
     if (!file) return null;
     const probed = await probeContainerCapabilityOptions(file.absolutePath);
@@ -656,7 +669,7 @@ export function registerRawIpcHandlers(deps: RawIpcDeps): void {
     return sanitizeRendererValue(resolveResourceCapabilities(file, probed));
   });
 
-  deps.handle('resource.scriptContainerEvidence', async (_event, sourceUri: string) => {
+  handle('resource.scriptContainerEvidence', async (_event, sourceUri: string) => {
     const file = deps.indexedFiles.find((item) => item.sourceUri === sourceUri);
     if (!file) {
       return {
@@ -708,7 +721,7 @@ export function registerRawIpcHandlers(deps: RawIpcDeps): void {
    * inventory sample is served and `entriesComplete=false` keeps the report
    * honest. Classification per entry stays on the main side.
    */
-  deps.handle(
+  handle(
     'resource.listScriptContainerEntriesPage',
     async (_event, sourceUri: string, requestedPage: number, requestedPageSize: number) => {
       const file = deps.indexedFiles.find((item) => item.sourceUri === sourceUri);
@@ -738,7 +751,7 @@ export function registerRawIpcHandlers(deps: RawIpcDeps): void {
       let cached = scriptContainerEntriesCache.get(sourceUri);
       if (!cached) {
         // ROOT-07：只读枚举只传已存在并 verified 的 roots，不附加 staging。
-        const roots = await deps.verifiedReadRoots(deps.activeSession, dirname(file.absolutePath));
+        const roots = await verifiedReadRoots(deps.activeSession, dirname(file.absolutePath));
         if (roots.diagnostics.length > 0) {
           return failure('BRIDGE_ROOT_MISSING', '允许根目录不存在。', roots.diagnostics);
         }
@@ -831,7 +844,7 @@ export function registerRawIpcHandlers(deps: RawIpcDeps): void {
    * `containerUri#bnd/child/<entryName>` 构造（与 core readContainerChild
    * 的解析格式一致），渲染器不接触内层地址。
    */
-  deps.handle(
+  handle(
     'resource.readScriptEntryPlaintext',
     async (_event, sourceUri: string, entryName: string): Promise<ScriptEntryPlaintextView> => {
       const file = deps.indexedFiles.find((item) => item.sourceUri === sourceUri);
@@ -929,7 +942,7 @@ export function registerRawIpcHandlers(deps: RawIpcDeps): void {
    * readContainerChild → readSyntheticBnd——合成 SFBN 只认 TS 合成 BND，
    * 真 luabnd 必失败（英文 not authoritative），反编译器吃不到字节。
    */
-  deps.handle(
+  handle(
     'resource.readScriptSource',
     async (_event, sourceUri: string, entryName?: string, entryIndex?: number): Promise<ScriptSourceView> => {
       const file = deps.indexedFiles.find((item) => item.sourceUri === sourceUri);
@@ -953,7 +966,7 @@ export function registerRawIpcHandlers(deps: RawIpcDeps): void {
       let resolvedEntryIndex: number | undefined = entryIndex;
       if (entryIndex !== undefined) {
         // 容器子项：按 BND4 entryIndex 用 native 读链取真实字节（13-A）。
-        const roots = await deps.verifiedReadRoots(deps.activeSession, dirname(file.absolutePath));
+        const roots = await verifiedReadRoots(deps.activeSession, dirname(file.absolutePath));
         if (roots.diagnostics.length > 0) {
           return failure('SCRIPT_SOURCE_READ_FAILED', '读取脚本容器条目失败。', roots.diagnostics);
         }
@@ -1029,7 +1042,7 @@ export function registerRawIpcHandlers(deps: RawIpcDeps): void {
           }]);
       }
        // Lua 字节码：Bridge 内置 first-party HKS parser/IR，禁止外部 locator。
-       const roots = await deps.verifiedReadRoots(deps.activeSession, dirname(file.absolutePath));
+       const roots = await verifiedReadRoots(deps.activeSession, dirname(file.absolutePath));
        if (roots.diagnostics.length > 0) {
          return failure('SCRIPT_HKS_READ_FAILED', '读取 HKS 源码前的路径证明失败。', roots.diagnostics);
        }

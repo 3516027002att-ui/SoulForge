@@ -313,14 +313,12 @@ type KnowledgeRefreshCarrier = Pick<SaveTextResourceResult, 'knowledgeRefresh'>;
 
 // Container/script helpers moved to ipc/raw.ts (domain-owned). See that module for enumeration and BND4 helpers.
 
-function clearEditorPageCaches(): void {
+function releaseWorkspaceEditorCaches(): void {
   // Composition of domain-owned cache resets — composition root does not touch domain private maps directly.
   clearParamIpcCaches();
   clearTextIpcCaches();
   clearRawIpcCaches();
   clearEmevdIpcCaches();
-  clearWorkspaceIpcCaches();
-  clearAgentIpcState();
   resetEditorDocumentStore();
 }
 
@@ -773,7 +771,7 @@ export interface AiAgentEventEnvelope {
  * 为 renderer 建立 session 状态前的短竞态提供可靠补偿；调用方按 seq 去重。
  */
 export type AiAgentEventReplayIpcResult =
-  | { ok: true; events: AiAgentEventEnvelope[] }
+  | { ok: true; events: AiAgentEventEnvelope[]; truncated?:boolean; firstAvailableSeq?:number|null }
   | { ok: false; error: { code: string; message: string } };
 
 /** §12.11 资源引用 token 校验结果（agent 通道专用；不是 param/format 读取）。 */
@@ -2088,6 +2086,7 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
   registerWorkspaceIpcHandlers({
     handle: trustedHandle,
     ensureActiveOperationLog,
+    releaseEditorCaches: releaseWorkspaceEditorCaches,
     clearActiveOperationLog: async () => {
       activeOperationLog = null;
       activeOperationLogWorkspaceId = null;

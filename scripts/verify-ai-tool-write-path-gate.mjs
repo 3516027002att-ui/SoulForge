@@ -29,13 +29,14 @@
  *
  * 不做的事：不做类型推断、不跨文件追踪调用链。宁可漏报也不误报。
  */
-import { extractToolDeclarations } from './testing/tool-source-analysis.mjs';
+import { extractToolDeclarations, extractFunctionDeclarations } from './testing/tool-source-analysis.mjs';
 import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const LABEL = 'ai-tool-write-path';
-const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
+const rootIndex=process.argv.indexOf('--root');
+const root = rootIndex>=0 ? resolve(process.argv[rootIndex+1]) : resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const REGISTRY = join(root, 'packages', 'core', 'src', 'ai', 'toolRegistry.ts');
 
 /** 受控写入入口。每一个都必须在 patch/ 或 transactions/ 下有定义（判据③）。 */
@@ -66,6 +67,7 @@ const CONTROLLED_ENTRIES = Object.freeze([
   // Engine，定义在 editing/ 下，不直接写盘。
   'setTaeEventTimes',
   'setTaeEventFields',
+  'insertTaeEvents',
   'setMsbPartTransform',
   // Canonical MSB map operations: these lower into MapEditTransaction and
   // then through the Patch Engine/native reread boundary.
@@ -133,6 +135,15 @@ function stripCommentsAndStrings(text) {
 
 const code = stripCommentsAndStrings(source);
 const findings = [];
+
+// Newly integrated insertion must use the actual native transaction facade;
+// merely adding its name to the controlled-entry list is insufficient.
+const insertionPath=join(root,'packages','core','src','editing','taeEdit.ts');
+const insertion=existsSync(insertionPath)?extractFunctionDeclarations(readFileSync(insertionPath,'utf8'),insertionPath).filter(fn=>fn.name==='insertTaeEvents'):[];
+if(insertion.length!==1||!insertion[0].calls.includes('applyNativeMutation')
+  || insertion[0].calls.some(call=>FORBIDDEN_WRITE_CALLS.includes(call))){
+  findings.push({code:'CONTROLLED_INSERTION_PATH_INVALID',entry:'insertTaeEvents',message:'TAE insertion must enter applyNativeMutation and cannot directly write Mod resources.'});
+}
 
 // 判据③：受控入口必须真实存在。清单指向不存在的符号等于判据失效。
 for (const entry of CONTROLLED_ENTRIES) {

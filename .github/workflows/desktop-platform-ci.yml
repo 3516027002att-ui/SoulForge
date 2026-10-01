@@ -45,10 +45,7 @@ jobs:
       DOTNET_NOLOGO: 'true'
       DOTNET_CLI_TELEMETRY_OPTOUT: '1'
       DOTNET_GENERATE_ASPNET_CERTIFICATE: 'false'
-      # Isolate the exact SDK from newer preinstalled runner SDKs/global.json roll-forward.
-      DOTNET_INSTALL_DIR: ${{ runner.temp }}/soulforge-dotnet
       SF_E2E_HEADLESS: ${{ matrix.headless }}
-      SF_E2E_WORKSPACE_STORAGE_ROOT: ${{ runner.temp }}/soulforge-workspaces
       SOULFORGE_BUILD_TIMEOUT_MS: '900000'
       SOULFORGE_SMOKE_TIMEOUT_MS: '120000'
       CSC_IDENTITY_AUTO_DISCOVERY: 'false'
@@ -60,6 +57,11 @@ jobs:
         with:
           node-version: '22.22.0'
           cache: npm
+      # Runner paths exist after scheduling; GITHUB_ENV makes them available to later actions.
+      - name: Configure job-owned SDK and workspace directories
+        run: |
+          printf 'DOTNET_INSTALL_DIR=%s/soulforge-dotnet\n' "$RUNNER_TEMP" >> "$GITHUB_ENV"
+          printf 'SF_E2E_WORKSPACE_STORAGE_ROOT=%s/soulforge-workspaces\n' "$RUNNER_TEMP" >> "$GITHUB_ENV"
       - uses: actions/setup-dotnet@67a3573c9a986a3f9c594539f4ab511d57bb3ce9 # v4.3.1
         with:
           dotnet-version: '10.0.100'

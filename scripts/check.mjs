@@ -32,7 +32,11 @@ const repoRoot = process.cwd();
 const workspaces = loadWorkspaces(repoRoot);
 const registry = discoverChecks(repoRoot,workspaces);
 const auditFindings = auditCheckRegistration(repoRoot,workspaces);
-const names = options.suites.length ? options.suites : [...registry.keys()].filter(name => options.tiers.includes(registry.get(name).tier) && (!options.filter || name.includes(options.filter)));
+const selected = options.suites.length ? options.suites : [...registry.keys()].filter(name => options.tiers.includes(registry.get(name).tier) && (!options.filter || name.includes(options.filter)));
+// A required suite is an execution requirement, including when its phase is
+// outside the ordinary selection. Missing or explicitly excluded names remain
+// visible not_run results instead of silently disappearing from CI.
+const names = [...new Set([...selected,...options.requiredSuites])];
 const results = [];
 const cache = new Map();
 const plan = [];

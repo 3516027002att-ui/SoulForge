@@ -4,8 +4,8 @@ import {
   applyNativeMutation,
   commitFmgMutationViaBridge,
   normalizePageWindow,
-  readFmgDocumentViaBridge,
-  runBridge,
+  readFmgDocumentViaBridge as nativeReadFmgDocumentViaBridge,
+  runBridge as nativeRunBridge,
   type NativeMutationOutcome,
   type RawReplaceCommitPort,
   type WorkspaceSession
@@ -17,16 +17,22 @@ import {
   type FmgEntryPage,
   type IndexedFile
 } from '@soulforge/shared';
-import { prepareBridgeRoots, type BridgeRootSession, type PrepareBridgeRootsResult } from '../bridgeRoots.js';
+import { prepareBridgeRoots as nativePrepareBridgeRoots, type BridgeRootSession, type PrepareBridgeRootsResult } from '../bridgeRoots.js';
 import { sanitizeRendererValue, type RendererSaveResult } from '../rendererDto.js';
 import type { OperationLogUtilityClient } from '../operationLogUtilityClient.js';
 import type { TrustedIpcHandle } from './registration.js';
+import { WorkspaceReadLifetime } from './workspaceReadLifetime.js';
 import {
   appendPostCommitFailureDiagnostic,
   runCallerOwnedPostCommit,
   type KnowledgeRefreshOwner
 } from '../knowledgeRefreshOwnership.js';
 
+
+const readLifetime = new WorkspaceReadLifetime();
+const prepareBridgeRoots = readLifetime.guardCall(nativePrepareBridgeRoots);
+const runBridge = readLifetime.guardCall(nativeRunBridge);
+const readFmgDocumentViaBridge = readLifetime.guardCall(nativeReadFmgDocumentViaBridge);
 /* ------------------------------------------------------------------ */
 /*  Text/FMG domain caches (hard constraint 17)                        */
 /*  Main holds the complete document; the renderer only ever receives  */
@@ -41,7 +47,7 @@ interface CachedFmgDocument {
   entries: Array<{ id: number; text: string }>;
   authority?: string;
 }
-const fmgPageCache = new Map<string, CachedFmgDocument>();
+const fmgPageCache = readLifetime.createCache<string, CachedFmgDocument>();
 
 /**
  * TEXT-20A：文本目录的表引用与表分页缓存。
@@ -60,15 +66,16 @@ interface TextTableRef {
   entryIndex: number;
   entryName: string;
 }
-const textTableRefs = new Map<string, TextTableRef>();
+const textTableRefs = readLifetime.createCache<string, TextTableRef>();
 
 interface CachedFmgTableDocument extends CachedFmgDocument {
   tableId: string;
 }
-const fmgTableCache = new Map<string, CachedFmgTableDocument>();
+const fmgTableCache = readLifetime.createCache<string, CachedFmgTableDocument>();
 
 /** workspace 生命周期调用的 domain-owned reset（与拆分前根级清理范围一致）。 */
 export function clearTextIpcCaches(): void {
+  readLifetime.invalidate();
   fmgPageCache.clear();
   fmgTableCache.clear();
   textTableRefs.clear();
@@ -222,7 +229,12 @@ export interface TextIpcDeps {
 }
 
 export function registerTextIpcHandlers(deps: TextIpcDeps): void {
-  deps.handle('resource.readFmgDocument', async (_event, sourceUri: string) => {
+  const refreshActiveIndexAfterNativeWrite = readLifetime.guardProjection(deps.refreshActiveIndexAfterNativeWrite);
+  const verifiedReadRoots = readLifetime.guardCall(deps.verifiedReadRoots);
+  const currentSession = () => deps.activeSession;
+  const getSession = () => readLifetime.capturedSession(currentSession);
+  const handle = readLifetime.register(deps.handle, currentSession);
+  handle('resource.readFmgDocument', async (_event, sourceUri: string) => {
     const file = deps.indexedFiles.find((item) => item.sourceUri === sourceUri);
     if (!file) {
       return {
@@ -236,9 +248,9 @@ export function registerTextIpcHandlers(deps: TextIpcDeps): void {
       };
     }
     // ROOT-07：只读调用只传已存在并 verified 的 roots。
-    const readRoots = deps.activeSession
+    const readRoots = getSession()
       ? await prepareBridgeRoots(
-          deps.bridgeRootSession(deps.activeSession, deps.durableStoragePaths(deps.activeSession.meta.workspaceId)),
+          deps.bridgeRootSession(getSession()!, deps.durableStoragePaths(getSession()!.meta.workspaceId)),
           'read'
         )
       : null;
@@ -313,7 +325,7 @@ export function registerTextIpcHandlers(deps: TextIpcDeps): void {
    * receives the full document. `query` filters the complete list in main, so
    * search still covers every page.
    */
-  deps.handle(
+  handle(
     'resource.readFmgPage',
     async (
       _event,
@@ -345,7 +357,7 @@ export function registerTextIpcHandlers(deps: TextIpcDeps): void {
       }
       let cached = fmgPageCache.get(sourceUri);
       if (!cached) {
-        const roots = await deps.verifiedReadRoots(deps.activeSession, dirname(file.absolutePath));
+        const roots = await verifiedReadRoots(getSession(), dirname(file.absolutePath));
         if (roots.diagnostics.length > 0) {
           return {
             ok: false,
@@ -423,7 +435,7 @@ export function registerTextIpcHandlers(deps: TextIpcDeps): void {
    * 也不伪装成 0 个表（"失败不返回 0 entries"）。TPF/texbnd 等资源不在此过滤内，
    * 天然不进 Text 目录。
    */
-  deps.handle('resource.readTextCatalog', async (): Promise<TextCatalogResponse> => {
+  handle('resource.readTextCatalog', async (): Promise<TextCatalogResponse> => {
     const fail = (diagnostics: Diagnostic[]): TextCatalogResponse => ({
       ok: false,
       libraryId: 'game-text',
@@ -431,14 +443,14 @@ export function registerTextIpcHandlers(deps: TextIpcDeps): void {
       languages: [],
       diagnostics
     });
-    if (!deps.activeSession) {
+    if (!getSession()) {
       return fail([{
         severity: 'error',
         code: 'WORKSPACE_SESSION_REQUIRED',
         message: '请先打开工作区，再读取文本目录。'
       }]);
     }
-    const roots = await deps.verifiedReadRoots(deps.activeSession, deps.activeSession.layers.overlayRoot);
+    const roots = await verifiedReadRoots(getSession(), getSession()!.layers.overlayRoot);
     if (roots.diagnostics.length > 0) return fail(roots.diagnostics);
 
     // 按索引收集所有已发现的 MSG 容器；语言由路径提示与 Bridge 原生目录共同确认。
@@ -541,7 +553,7 @@ export function registerTextIpcHandlers(deps: TextIpcDeps): void {
    * 文件与 entryIndex，经 Bridge 读整表后缓存并分页；query 作用于完整表，覆盖
    * 所有页。失败返回结构化诊断，不返回 `0 entries` 伪空表。
    */
-  deps.handle(
+  handle(
     'resource.readFmgTablePage',
     async (
       _event,
@@ -577,7 +589,7 @@ export function registerTextIpcHandlers(deps: TextIpcDeps): void {
       }
       let cached = fmgTableCache.get(tableId);
       if (!cached) {
-        const roots = await deps.verifiedReadRoots(deps.activeSession, dirname(file.absolutePath));
+        const roots = await verifiedReadRoots(getSession(), dirname(file.absolutePath));
         if (roots.diagnostics.length > 0) {
           return failure('BRIDGE_ROOT_MISSING', '读取文本表所需 Bridge roots 不可用。', roots.diagnostics);
         }
@@ -627,7 +639,7 @@ export function registerTextIpcHandlers(deps: TextIpcDeps): void {
     }
   );
 
-  deps.handle(
+  handle(
     'resource.applyFmgMutation',
     async (
       event,
@@ -637,7 +649,7 @@ export function registerTextIpcHandlers(deps: TextIpcDeps): void {
       tableId?: string
     ): Promise<RendererSaveResult> => {
       const file = deps.indexedFiles.find((item) => item.sourceUri === sourceUri);
-      if (!file || !deps.activeSession) {
+      if (!file || !getSession()) {
         return {
           ok: false,
           changedFiles: [],
@@ -672,10 +684,10 @@ export function registerTextIpcHandlers(deps: TextIpcDeps): void {
         }
         entryIndex = ref.entryIndex;
       }
-      const storage = deps.durableStoragePaths(deps.activeSession.meta.workspaceId);
+      const storage = deps.durableStoragePaths(getSession()!.meta.workspaceId);
       // ROOT-07：stage 前 mkdir → realpath → boundary check；回调同步返回
       // 已验证集合（stageBridgeOutput 的 mkdir 幂等）。
-      const stage = await deps.verifiedStageRoots(deps.activeSession, storage, 'FMG_STAGING_PREPARE_FAILED');
+      const stage = await deps.verifiedStageRoots(getSession()!, storage, 'FMG_STAGING_PREPARE_FAILED');
       if (stage.diagnostics.length > 0) {
         return {
           ok: false,
@@ -689,7 +701,7 @@ export function registerTextIpcHandlers(deps: TextIpcDeps): void {
           : mutation.kind === 'add'
             ? { kind: 'add' as const, id: mutation.id, text: mutation.text ?? '' }
             : { kind: 'upsert' as const, id: mutation.id, text: mutation.text ?? '' };
-      const operationLog = await deps.ensureActiveOperationLog(deps.activeSession);
+      const operationLog = await deps.ensureActiveOperationLog(getSession()!);
       // S29：能打开就能写。renderer 可能没带回 hash（此前它有权据此拒写），
       // main 在写时现算兜底。现算值只用于并发保护凭据，head 真漂移（别人改过）
       // 仍会被写链的 hash 比较拒绝；「从来没算过」不是拒写理由。
@@ -715,7 +727,7 @@ export function registerTextIpcHandlers(deps: TextIpcDeps): void {
         confirmActionLabel: '提交 FMG 变更'
       }, {
         // S29：日常 FMG 写入不弹「高风险确认」；备份/回滚仍经 Patch Engine。
-        commit: deps.sessionCommitPort(deps.activeSession, operationLog, storage, { knowledgeRefreshOwner: 'caller' })
+        commit: deps.sessionCommitPort(getSession()!, operationLog, storage, { knowledgeRefreshOwner: 'caller' })
       });
       if (outcome.status === 'committed' && outcome.result.ok) {
         await runCallerOwnedPostCommit(outcome.result, {
@@ -727,7 +739,7 @@ export function registerTextIpcHandlers(deps: TextIpcDeps): void {
               if (ref.sourceUri === sourceUri) fmgTableCache.delete(cachedTableId);
             }
           },
-          refresh: (result) => deps.refreshActiveIndexAfterNativeWrite([sourceUri], result),
+          refresh: (result) => refreshActiveIndexAfterNativeWrite([sourceUri], result),
           onRefreshError: (result, error) => appendPostCommitFailureDiagnostic(
             result,
             'POSTCOMMIT_REFRESH_FAILED',

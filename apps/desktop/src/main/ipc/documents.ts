@@ -3,7 +3,7 @@ import type { IpcMainInvokeEvent } from 'electron';
 import {
   buildNativeDocumentLocator,
   EditorDocumentStore,
-  runBridge,
+  runBridge as nativeRunBridge,
   type EditorDocumentDataSource,
   type EditorMutationApplyPort,
   type WorkspaceSession
@@ -23,9 +23,10 @@ import {
   type IndexedFile,
   type OpenEditorDocumentValue
 } from '@soulforge/shared';
-import { prepareBridgeRoots, type BridgeRootSession } from '../bridgeRoots.js';
+import { prepareBridgeRoots as nativePrepareBridgeRoots, type BridgeRootSession } from '../bridgeRoots.js';
 import { toRendererEditorDocumentResult } from '../rendererDto.js';
 import type { TrustedIpcHandle } from './registration.js';
+import { WorkspaceReadLifetime } from './workspaceReadLifetime.js';
 
 /* ------------------------------------------------------------------ */
 /*  §14.4 DocumentStore IPC（DOCSTORE-04）                             */
@@ -33,6 +34,10 @@ import type { TrustedIpcHandle } from './registration.js';
 /*  workspace session 派生，renderer 永远不能传入；locator 由 main     */
 /*  probe 组装（含 outerSourceUri），永不出 main。                     */
 /* ------------------------------------------------------------------ */
+
+const readLifetime = new WorkspaceReadLifetime();
+const prepareBridgeRoots = readLifetime.guardCall(nativePrepareBridgeRoots);
+const runBridge = readLifetime.guardCall(nativeRunBridge);
 
 let editorDocumentStore: EditorDocumentStore | null = null;
 
@@ -42,6 +47,7 @@ let editorDocumentStore: EditorDocumentStore | null = null;
  * mutation-rejected，不假装成功。
  */
 function ensureEditorDocumentStore(): EditorDocumentStore {
+  readLifetime.assertCurrent();
   if (editorDocumentStore) return editorDocumentStore;
   const skeletonDataSource: EditorDocumentDataSource = {
     loadPage: async () => ({ items: null, nextCursor: null, totalKnown: null }),
@@ -60,6 +66,7 @@ function ensureEditorDocumentStore(): EditorDocumentStore {
 
 /** workspace 生命周期（打开/重挂载）调用的 domain-owned reset。 */
 export function resetEditorDocumentStore(): void {
+  readLifetime.invalidate();
   editorDocumentStore = null;
 }
 
@@ -102,6 +109,7 @@ export interface DocumentIpcDeps {
 }
 
 export function registerDocumentIpcHandlers(deps: DocumentIpcDeps): void {
+  const handle = readLifetime.register(deps.handle, () => deps.activeSession);
   /**
    * ownerKey 绑定「会话 + 窗口」：另一窗口（webContents）即使猜中 handle 也
    * 得到 owner-mismatch；重新扫描工作区（activeWorkspaceSessionId 更换）后
@@ -120,7 +128,7 @@ export function registerDocumentIpcHandlers(deps: DocumentIpcDeps): void {
    * apply 只认 opaque handle。「引用与活动 Catalog 精确匹配」在 CAT-05 落地
    * 前用索引(sourceUri + 域)近似，如实标注。
    */
-  deps.handle(
+  handle(
     EDITOR_DOCUMENT_IPC_CHANNELS.open,
     async (event, rawRequest: unknown): Promise<EditorDocumentResult<OpenEditorDocumentValue>> => {
       const request = decodeOpenEditorDocumentRequest(rawRequest);
@@ -162,7 +170,7 @@ export function registerDocumentIpcHandlers(deps: DocumentIpcDeps): void {
     }
   );
 
-  deps.handle(
+  handle(
     EDITOR_DOCUMENT_IPC_CHANNELS.get,
     async (event, documentHandle: string): Promise<EditorDocumentResult<OpenEditorDocumentValue>> => {
       if (typeof documentHandle !== 'string' || documentHandle.length === 0) {
@@ -174,7 +182,7 @@ export function registerDocumentIpcHandlers(deps: DocumentIpcDeps): void {
     }
   );
 
-  deps.handle(
+  handle(
     EDITOR_DOCUMENT_IPC_CHANNELS.page,
     async (event, rawRequest: unknown): Promise<EditorDocumentResult<EditorDocumentPageValue>> => {
       const request = decodePageEditorDocumentRequest(rawRequest);
@@ -184,7 +192,7 @@ export function registerDocumentIpcHandlers(deps: DocumentIpcDeps): void {
     }
   );
 
-  deps.handle(
+  handle(
     EDITOR_DOCUMENT_IPC_CHANNELS.readContent,
     async (event, rawRequest: unknown): Promise<EditorDocumentResult<EditorContentValue>> => {
       const request = decodeReadEditorContentRequest(rawRequest);
@@ -194,7 +202,7 @@ export function registerDocumentIpcHandlers(deps: DocumentIpcDeps): void {
     }
   );
 
-  deps.handle(
+  handle(
     EDITOR_DOCUMENT_IPC_CHANNELS.apply,
     async (event, rawRequest: unknown): Promise<EditorDocumentResult<ApplyEditorMutationValue>> => {
       const request = decodeApplyEditorMutationRequest(rawRequest);
@@ -204,7 +212,7 @@ export function registerDocumentIpcHandlers(deps: DocumentIpcDeps): void {
     }
   );
 
-  deps.handle(
+  handle(
     EDITOR_DOCUMENT_IPC_CHANNELS.close,
     async (event, documentHandle: string): Promise<EditorDocumentResult<{ closed: true }>> => {
       if (typeof documentHandle !== 'string' || documentHandle.length === 0) {

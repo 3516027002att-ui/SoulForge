@@ -11,10 +11,10 @@ import {
   toCsvText,
   parseCsvText,
   commitParamMutationViaBridge,
-  readParamDocumentViaBridge,
+  readParamDocumentViaBridge as nativeReadParamDocumentViaBridge,
   stageBridgeOutput,
   applyNativeMutation,
-  runBridge,
+  runBridge as nativeRunBridge,
   isParamBackupPath,
   sanitizeEntryName,
   normalizePageWindow,
@@ -41,10 +41,11 @@ import {
   type StructuredDiagnostic
 } from '@soulforge/shared';
 import { PARAM_SESSION_IPC_CHANNELS } from '@soulforge/shared';
-import { prepareBridgeRoots, type BridgeRootSession, type PrepareBridgeRootsResult } from '../bridgeRoots.js';
+import { prepareBridgeRoots as nativePrepareBridgeRoots, type BridgeRootSession, type PrepareBridgeRootsResult } from '../bridgeRoots.js';
 import type { NativeBnd4EntryLike, NativeDcxEnvelopeLike } from './bridgeEnvelopes.js';
 import { sanitizeDiagnostics, sanitizeRendererValue, type RendererSaveResult } from '../rendererDto.js';
 import type { TrustedIpcHandle } from './registration.js';
+import { WorkspaceReadLifetime } from './workspaceReadLifetime.js';
 import { readParamDocumentWithMetadataFallback } from './paramReadFallback.js';
 import {
   appendPostCommitFailureDiagnostic,
@@ -52,6 +53,11 @@ import {
   type KnowledgeRefreshOwner
 } from '../knowledgeRefreshOwnership.js';
 import type { OperationLogUtilityClient } from '../operationLogUtilityClient.js';
+
+const readLifetime = new WorkspaceReadLifetime();
+const prepareBridgeRoots = readLifetime.guardCall(nativePrepareBridgeRoots);
+const runBridge = readLifetime.guardCall(nativeRunBridge);
+const readParamDocumentViaBridge = readLifetime.guardCall(nativeReadParamDocumentViaBridge);
 // Forensics counters (V1, pure diagnostic — no business logic change).
 const _forensicsCounters = new Map<string, number>();
 function _forensicsInc(key: string, delta = 1): void { _forensicsCounters.set(key, (_forensicsCounters.get(key) ?? 0) + delta); }
@@ -77,9 +83,9 @@ function projectParamNativeTelemetry(value: unknown): ParamNativeTelemetry | nul
   return Object.values(telemetry).some((candidate) => candidate !== null) ? telemetry : null;
 }
 
-const sessionBindings = new Map<string, { sourceUri: string; workspaceSessionId: string; sourceHash: string; pathSourceGeneration: number; entryIdentity?: string }>();
+const sessionBindings = readLifetime.createCache<string, { sourceUri: string; workspaceSessionId: string; sourceHash: string; pathSourceGeneration: number; entryIdentity?: string }>();
 // Isolated dummy for pre-split shared cache — real invalidation now via composition root (raw domain owns its cache).
-const containerChildrenCache = new Map<string, unknown>();
+const containerChildrenCache = readLifetime.createCache<string, unknown>();
 interface CachedParamDocument {
   sourceHash: string;
   typeName: string;
@@ -88,33 +94,33 @@ interface CachedParamDocument {
   rows: Array<{ rowIndex: number; id: number; dataBase64?: string | null; dataHash: string; name?: string }>;
   authority?: string;
 }
-const paramPageCache = new Map<string, CachedParamDocument>();
+const paramPageCache = readLifetime.createCache<string, CachedParamDocument>();
 /**
  * Legacy renderer compatibility only. New PARAM session IPC must never read or populate this cache.
  * Isolated: only the legacy `resource.readParamPage` (loadAll) path may get/set this map;
  * slim handlers (`resource.openParamSession` / `readParamIndexPage` / `readParamRows`) close over
  * `sessionBindings` only and must never import or reference this symbol.
  */
-const paramAllCache = new Map<string, CachedParamDocument>();
+const paramAllCache = readLifetime.createCache<string, CachedParamDocument>();
 interface UnpackedParamChild { absolutePath: string; entryIndex: number; name: string; storedContentHash: string; }
-const unpackedParamCache = new Map<string, UnpackedParamChild>();
+const unpackedParamCache = readLifetime.createCache<string, UnpackedParamChild>();
 interface ParamUnpackExtractionResult {
   parseStatus: string;
   outputExists: boolean;
   diagnostics: Diagnostic[];
 }
-const unpackedParamInFlight = new Map<string, Promise<ParamUnpackExtractionResult>>();
+const unpackedParamInFlight = readLifetime.createCache<string, Promise<ParamUnpackExtractionResult>>();
 type MemoizedParamEntryTable = Array<{ index: number; name: string; storedContentHash: string }>;
-const paramEntryTableCache = new Map<string, MemoizedParamEntryTable>();
+const paramEntryTableCache = readLifetime.createCache<string, MemoizedParamEntryTable>();
 const CONTAINER_PARAM_ALL_CACHE_LIMIT = 4;
-const containerParamAllCache = new Map<string, CachedParamDocument>();
+const containerParamAllCache = readLifetime.createCache<string, CachedParamDocument>();
 interface CachedContainerParamSession {
   document: CachedParamDocument;
   sessionToken: string;
   workspaceSessionId: string;
   absolutePath: string;
 }
-const containerParamSessionCache = new Map<string, CachedContainerParamSession>();
+const containerParamSessionCache = readLifetime.createCache<string, CachedContainerParamSession>();
 const takeContainerParamSession = (
   key: string,
   workspaceSessionId: string,
@@ -175,6 +181,7 @@ export interface ParamIpcDeps {
 }
 
 export function clearParamIpcCaches(): void {
+  readLifetime.invalidate();
   sessionBindings.clear();
   paramPageCache.clear();
   paramAllCache.clear();
@@ -185,9 +192,12 @@ export function clearParamIpcCaches(): void {
   unpackedParamInFlight.clear();
 }
 export function registerParamIpcHandlers(deps: ParamIpcDeps): void {
-  const handle = deps.handle;
+  const refreshActiveIndexAfterNativeWrite = readLifetime.guardProjection(deps.refreshActiveIndexAfterNativeWrite);
+  const verifiedReadRoots = readLifetime.guardCall(deps.verifiedReadRoots);
+  const currentSession = () => deps.getActiveSession ? deps.getActiveSession() : deps.activeSession;
+  const handle = readLifetime.register(deps.handle, currentSession);
   const getFiles = (): readonly IndexedFile[] => (deps.getIndexedFiles ? deps.getIndexedFiles() : deps.indexedFiles);
-  const getSession = (): WorkspaceSession | null => (deps.getActiveSession ? deps.getActiveSession() : deps.activeSession);
+  const getSession = (): WorkspaceSession | null => readLifetime.capturedSession(currentSession);
   // Renderer cutover must preserve value-search semantics without reintroducing loadAll; implement native/session-side value search before removing the legacy path.
   // Slim PARAM session — Parse once → Project many (B6). C# ParamDocumentSessionCache is native authority;
   // Electron only keeps opaque token + lightweight binding. Never touches paramAllCache / includeAllPayloads.
@@ -215,7 +225,7 @@ export function registerParamIpcHandlers(deps: ParamIpcDeps): void {
         diagnostics: [{ severity: 'error' as const, code: 'PARAM_OPEN_NO_SESSION', message: '需要已打开的工作区才能打开 PARAM 会话。', sourceUri }]
       });
     }
-    const roots = await deps.verifiedReadRoots(session!, dirname(file.absolutePath));
+    const roots = await verifiedReadRoots(session!, dirname(file.absolutePath));
     if (roots.diagnostics.length > 0) {
       return sanitizeRendererValue({ ok: false, diagnostics: roots.diagnostics });
     }
@@ -297,7 +307,7 @@ export function registerParamIpcHandlers(deps: ParamIpcDeps): void {
     if (!session) {
       return sanitizeRendererValue({ ok: false, diagnostics: [{ severity: 'error' as const, code: 'PARAM_READ_NO_SESSION', message: '需要已打开的工作区。', sourceUri }] });
     }
-    const roots = await deps.verifiedReadRoots(session!, dirname(file.absolutePath));
+    const roots = await verifiedReadRoots(session!, dirname(file.absolutePath));
     if (roots.diagnostics.length > 0) return sanitizeRendererValue({ ok: false, diagnostics: roots.diagnostics });
     const oodle = session.layers?.baseRoot ? { oodleRuntimeRoot: session.layers.baseRoot } : {};
     const result = await runBridge<{
@@ -357,7 +367,7 @@ export function registerParamIpcHandlers(deps: ParamIpcDeps): void {
     if (!session) {
       return sanitizeRendererValue({ ok: false, diagnostics: [{ severity: 'error' as const, code: 'PARAM_READ_NO_SESSION', message: '需要已打开的工作区。', sourceUri }] });
     }
-    const roots = await deps.verifiedReadRoots(session!, dirname(file.absolutePath));
+    const roots = await verifiedReadRoots(session!, dirname(file.absolutePath));
     if (roots.diagnostics.length > 0) return sanitizeRendererValue({ ok: false, diagnostics: roots.diagnostics });
     const rowSelections = rowsIn.map((r) => ({ rowIndex: r.rowIndex, expectedId: r.id, expectedDataHash: r.dataHash }));
     const oodle2 = session.layers?.baseRoot ? { oodleRuntimeRoot: session.layers.baseRoot } : {};
@@ -1077,7 +1087,7 @@ let paramMetadataCache: {
         }]
       };
     }
-    const roots = await deps.verifiedReadRoots(getSession()!, dirname(file.absolutePath));
+    const roots = await verifiedReadRoots(getSession()!, dirname(file.absolutePath));
     if (roots.diagnostics.length > 0) {
       return sanitizeRendererValue({
         ok: false,
@@ -1260,7 +1270,7 @@ let paramMetadataCache: {
         // 全表必然超出载荷门限因而无字节，当前页的字节在下方单独取一次。
         // loadAll（用户裁定 2026-08-14）则相反：includeAllPayloads 跳过门控，
         // 一次拿回全表 + 全部行字节（帧上限提到 32 MiB 绝对上限）。
-        const roots = await deps.verifiedReadRoots(getSession()!, dirname(file.absolutePath));
+        const roots = await verifiedReadRoots(getSession()!, dirname(file.absolutePath));
         if (roots.diagnostics.length > 0) {
           return {
             ok: false,
@@ -1289,7 +1299,7 @@ let paramMetadataCache: {
           timeoutMs: 120_000,
           commandOptions: loadAll ? { includeAllPayloads: true } : {},
           ...(loadAll ? { maxFrameBytes: 32 * 1024 * 1024 } : {})
-        }, resolveTrustedParamRowWidth);
+        }, resolveTrustedParamRowWidth, runBridge);
         if (result.parseStatus === 'failed' || !result.data?.sourceHash) {
           return {
             ok: false,
@@ -1417,7 +1427,7 @@ let paramMetadataCache: {
         if (alignedOffset === window.offset) {
           // ROOT-07：只读分页字节读取同样只传已存在并 verified 的 roots；
           // 失败与读取失败同语义——字节缺失只让字段编辑不可用，不影响行表。
-          const pageRoots = await deps.verifiedReadRoots(getSession()!, dirname(file.absolutePath));
+          const pageRoots = await verifiedReadRoots(getSession()!, dirname(file.absolutePath));
           if (pageRoots.diagnostics.length > 0) {
             pageByteDiagnostics.push(...pageRoots.diagnostics);
           } else {
@@ -1592,7 +1602,7 @@ let paramMetadataCache: {
       if (outcome.status === 'committed' && outcome.result.ok) {
         await runCallerOwnedPostCommit(outcome.result, {
           prepare: () => { paramPageCache.delete(sourceUri); },
-          refresh: (result) => deps.refreshActiveIndexAfterNativeWrite([sourceUri], result),
+          refresh: (result) => refreshActiveIndexAfterNativeWrite([sourceUri], result),
           onRefreshError: (result, error) => appendPostCommitFailureDiagnostic(
             result,
             'POSTCOMMIT_REFRESH_FAILED',
@@ -1718,7 +1728,7 @@ let paramMetadataCache: {
       if (outcome.status === 'committed' && outcome.result.ok) {
         await runCallerOwnedPostCommit(outcome.result, {
           prepare: () => { paramPageCache.delete(sourceUri); },
-          refresh: (result) => deps.refreshActiveIndexAfterNativeWrite([sourceUri], result),
+          refresh: (result) => refreshActiveIndexAfterNativeWrite([sourceUri], result),
           onRefreshError: (result, error) => appendPostCommitFailureDiagnostic(
             result,
             'POSTCOMMIT_REFRESH_FAILED',
@@ -1982,7 +1992,7 @@ let paramMetadataCache: {
             containerParamAllCache.clear();
             unpackedParamCache.clear();
           },
-          refresh: (result) => deps.refreshActiveIndexAfterNativeWrite([containerUri], result),
+          refresh: (result) => refreshActiveIndexAfterNativeWrite([containerUri], result),
           onRefreshError: (result, error) => appendPostCommitFailureDiagnostic(
             result,
             'POSTCOMMIT_REFRESH_FAILED',
@@ -2211,7 +2221,7 @@ let paramMetadataCache: {
             containerParamAllCache.clear();
             unpackedParamCache.clear();
           },
-          refresh: (result) => deps.refreshActiveIndexAfterNativeWrite([containerUri], result),
+          refresh: (result) => refreshActiveIndexAfterNativeWrite([containerUri], result),
           onRefreshError: (result, error) => appendPostCommitFailureDiagnostic(
             result,
             'POSTCOMMIT_REFRESH_FAILED',
@@ -2440,7 +2450,7 @@ let paramMetadataCache: {
             containerChildrenCache.clear();
             unpackedParamCache.clear();
           },
-          refresh: (result) => deps.refreshActiveIndexAfterNativeWrite([containerUri], result),
+          refresh: (result) => refreshActiveIndexAfterNativeWrite([containerUri], result),
           onRefreshError: (result, error) => appendPostCommitFailureDiagnostic(
             result,
             'POSTCOMMIT_REFRESH_FAILED',
@@ -2682,7 +2692,7 @@ let paramMetadataCache: {
           containerParamAllCache.clear();
           unpackedParamCache.clear();
         },
-        refresh: (result) => deps.refreshActiveIndexAfterNativeWrite([input.containerUri], result),
+        refresh: (result) => refreshActiveIndexAfterNativeWrite([input.containerUri], result),
         onRefreshError: (result, error) => appendPostCommitFailureDiagnostic(
           result,
           'POSTCOMMIT_REFRESH_FAILED',
@@ -3315,7 +3325,7 @@ let paramMetadataCache: {
     void loadParamMetadata();
     // 内置 schema 校验在后台预热，不阻塞左侧条目列表。
     // ROOT-07：只读枚举只传已存在并 verified 的 roots，不附加 staging。
-    const roots = await deps.verifiedReadRoots(getSession()!, dirname(file.absolutePath));
+    const roots = await verifiedReadRoots(getSession()!, dirname(file.absolutePath));
     if (roots.diagnostics.length > 0) {
       return {
         ok: false,
@@ -3543,7 +3553,7 @@ let paramMetadataCache: {
           ...(loadAll ? { maxFrameBytes: 32 * 1024 * 1024 } : {}),
           ...bridgeSession,
           ...bridgeRuntime
-        }, resolveTrustedParamRowWidth);
+        }, resolveTrustedParamRowWidth, runBridge);
         if (full.parseStatus === 'failed' || !full.data?.sourceHash) {
           return failure(
             'PARAM_DOCUMENT_READ_FAILED',
@@ -3924,7 +3934,7 @@ let paramMetadataCache: {
         commandOptions: { includeRowPayloads: false, includeRowHashes: true, rowPage: 0, rowPageSize: 0 },
         ...bridgeSession,
         ...bridgeRuntime
-      }, resolveTrustedParamRowWidth);
+      }, resolveTrustedParamRowWidth, runBridge);
       if (full.parseStatus === 'failed' || !full.data?.sourceHash) {
         return failure(
           'PARAM_DOCUMENT_READ_FAILED',

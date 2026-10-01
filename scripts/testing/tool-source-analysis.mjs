@@ -14,3 +14,13 @@ export function extractToolDeclarations(text,file='tools.ts') {
   ts.forEachChild(node,visit);
  };visit(source);return output;
 }
+
+/** Named facade bodies can be checked without trusting comments or strings. */
+export function extractFunctionDeclarations(text,file='functions.ts') {
+ const source=ts.createSourceFile(file,text,ts.ScriptTarget.ESNext,true,ts.ScriptKind.TS);
+ return source.statements.filter(ts.isFunctionDeclaration).filter(node=>node.name&&node.body).map(node=>{
+  const calls=[];
+  const collect=child=>{if(ts.isCallExpression(child)){const expression=child.expression;calls.push(expression.getText(source));if(ts.isPropertyAccessExpression(expression))calls.push(expression.name.text);}ts.forEachChild(child,collect);};collect(node.body);
+  return {name:node.name.text,calls:[...new Set(calls)]};
+ });
+}

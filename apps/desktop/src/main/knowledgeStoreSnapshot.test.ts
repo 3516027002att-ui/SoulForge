@@ -1,6 +1,8 @@
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
+import { join } from 'node:path';
+declare const __SOULFORGE_REPO_ROOT__: string;
 // @ts-ignore The focused runner uses Node TypeScript stripping.
 import { createReadOnlyKnowledgeStore } from './knowledgeStoreSnapshot.ts';
 
@@ -43,7 +45,10 @@ assert.equal(emptyWrite.ok, false);
 if (!emptyWrite.ok) assert.equal(emptyWrite.code, 'PERSISTENCE_FAILED');
 assert.equal(empty.currentGeneration, emptyGeneration);
 
-const ipcSource = await readFile(fileURLToPath(new URL('./ipc.ts', import.meta.url)), 'utf8');
+const ipcSourcePath = typeof __SOULFORGE_REPO_ROOT__ !== 'undefined'
+  ? join(__SOULFORGE_REPO_ROOT__,'apps/desktop/src/main/ipc.ts')
+  : fileURLToPath(new URL('./ipc.ts', import.meta.url));
+const ipcSource = await readFile(ipcSourcePath, 'utf8');
 assert.equal(ipcSource.includes('openWorkspaceDatabase('), false, 'main currentToolContext must not open SQLite synchronously');
 assert.match(ipcSource, /loadKnowledgeSnapshot/);
 

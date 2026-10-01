@@ -6,9 +6,9 @@ import {
   fingerprintEmedfRegistry,
   listEmedfCompletionItems,
   openResourcePreview,
-  readFullEmevdDocumentViaBridge,
+  readFullEmevdDocumentViaBridge as nativeReadFullEmevdDocumentViaBridge,
   resolveEmevdRegistry,
-  runBridge,
+  runBridge as nativeRunBridge,
   submitEmevdDslPlanViaFourView,
   type EmedfCompletionItem,
   type NativeMutationOutcome,
@@ -21,14 +21,15 @@ import {
   type Diagnostic,
   type IndexedFile
 } from '@soulforge/shared';
-import { prepareBridgeRoots, type BridgeRootSession, type PrepareBridgeRootsResult } from '../bridgeRoots.js';
-import { commitEmevdFullDocument, EmevdAuthorityCache } from '../emevdAuthorityCache.js';
-import { renderEmevdDarkScriptAsync } from '../emevdDarkScriptWorkerHost.js';
+import { prepareBridgeRoots as nativePrepareBridgeRoots, type BridgeRootSession, type PrepareBridgeRootsResult } from '../bridgeRoots.js';
+import { commitEmevdFullDocument as nativeCommitEmevdFullDocument, EmevdAuthorityCache } from '../emevdAuthorityCache.js';
+import { renderEmevdDarkScriptAsync as nativeRenderEmevdDarkScriptAsync } from '../emevdDarkScriptWorkerHost.js';
 import { EmevdOpenSlots } from '../emevdOpenSlots.js';
 import { EmevdSourceTokens } from '../emevdSourceTokens.js';
 import { sanitizeDiagnostics, sanitizeRendererValue, type RendererSaveResult } from '../rendererDto.js';
 import type { OperationLogUtilityClient } from '../operationLogUtilityClient.js';
 import type { TrustedIpcHandle } from './registration.js';
+import { WorkspaceReadLifetime } from './workspaceReadLifetime.js';
 import {
   appendPostCommitFailureDiagnostic,
   runCallerOwnedPostCommit,
@@ -40,6 +41,13 @@ import {
  * main via paginated Bridge reads; the renderer only ever edits DSL text and
  * never holds these documents (hard constraint 18).
  */
+const readLifetime = new WorkspaceReadLifetime();
+const prepareBridgeRoots = readLifetime.guardCall(nativePrepareBridgeRoots);
+const runBridge = readLifetime.guardCall(nativeRunBridge);
+const readFullEmevdDocumentViaBridge = readLifetime.guardCall(nativeReadFullEmevdDocumentViaBridge);
+const renderEmevdDarkScriptAsync = readLifetime.guardCall(nativeRenderEmevdDarkScriptAsync);
+const commitEmevdFullDocument = readLifetime.guardSync(nativeCommitEmevdFullDocument);
+
 const emevdFullDocuments = new EmevdAuthorityCache<EmevdEditorDocument>();
 
 type EmevdFullReadInput = Parameters<typeof readFullEmevdDocumentViaBridge>[0] & {
@@ -113,7 +121,7 @@ function emevdOpenCancelled(sourceUri: string) {
 /** S18-F：反汇编文本缓存（sourceHash → 文本）。容量 4：common / common_func
  * 各一份加余量；写回后 hash 变自然落新 key，旧 key 按插入序淘汰。 */
 const EMEVD_DISASSEMBLY_CACHE_CAPACITY = 4;
-const emevdDisassemblyCache = new Map<string, {
+const emevdDisassemblyCache = readLifetime.createCache<string, {
   text: string;
   truncated: boolean;
   totalLines: number;
@@ -144,6 +152,9 @@ function getEmevdRegistry(): ReturnType<typeof resolveEmevdRegistry> {
 
 /** workspace 生命周期调用的 domain-owned reset（全清：文档 + 反汇编缓存）。 */
 export function clearEmevdIpcCaches(): void {
+  readLifetime.invalidate();
+  activeEmevdOpens.clear();
+  emevdSourceTokens.clear();
   emevdFullDocuments.clear();
   emevdDisassemblyCache.clear();
 }
@@ -193,8 +204,12 @@ export interface EventIpcDeps {
 }
 
 export function registerEventIpcHandlers(deps: EventIpcDeps): void {
+  const refreshActiveIndexAfterNativeWrite = readLifetime.guardProjection(deps.refreshActiveIndexAfterNativeWrite);
+  const currentSession = () => deps.activeSession;
+  const getSession = () => readLifetime.capturedSession(currentSession);
+  const handle = readLifetime.register(deps.handle, currentSession);
   /** Renderer-safe EMEVD envelope (no absolute paths). */
-  deps.handle('resource.readEmevdDocument', async (_event, sourceUri: string) => {
+  handle('resource.readEmevdDocument', async (_event, sourceUri: string) => {
     const file = deps.indexedFiles.find((item) => item.sourceUri === sourceUri);
     if (!file) {
       return {
@@ -209,9 +224,9 @@ export function registerEventIpcHandlers(deps: EventIpcDeps): void {
     }
     try {
       // ROOT-07：只读调用只传已存在并 verified 的 roots。
-      const readRoots = deps.activeSession
+      const readRoots = getSession()
         ? await prepareBridgeRoots(
-            deps.bridgeRootSession(deps.activeSession, deps.durableStoragePaths(deps.activeSession.meta.workspaceId)),
+            deps.bridgeRootSession(getSession()!, deps.durableStoragePaths(getSession()!.meta.workspaceId)),
             'read'
           )
         : null;
@@ -236,8 +251,8 @@ export function registerEventIpcHandlers(deps: EventIpcDeps): void {
         timeoutMs: 120_000,
         // S15：遗留通道补上与生产打开（readEmevdFullDocument）同一句 —— KRAK
         // 事件挂上原版后必须能解，不能再当「KRAK 打不开」的根因。
-        ...(deps.activeSession?.layers.baseRoot
-          ? { oodleRuntimeRoot: deps.activeSession.layers.baseRoot }
+        ...(getSession()?.layers.baseRoot
+          ? { oodleRuntimeRoot: getSession()!.layers.baseRoot }
           : {})
       });
       return sanitizeRendererValue({
@@ -275,7 +290,7 @@ export function registerEventIpcHandlers(deps: EventIpcDeps): void {
    * Stage EMEVD mutation via Bridge, then whole-file replace through Patch Engine.
    * Mutation object is Bridge-native (set_rest_behavior / set_instruction_args / add_event / …).
    */
-  deps.handle(
+  handle(
     'resource.applyEmevdMutation',
     async (
       event,
@@ -284,7 +299,7 @@ export function registerEventIpcHandlers(deps: EventIpcDeps): void {
       mutation: Record<string, unknown>
     ): Promise<RendererSaveResult> => {
       const file = deps.indexedFiles.find((item) => item.sourceUri === sourceUri);
-      if (!file || !deps.activeSession) {
+      if (!file || !getSession()) {
         return {
           ok: false,
           changedFiles: [],
@@ -298,10 +313,10 @@ export function registerEventIpcHandlers(deps: EventIpcDeps): void {
       }
       const gameBlocked = deps.rejectNonSekiroNativeWrite(sourceUri, file);
       if (gameBlocked) return gameBlocked;
-      const storage = deps.durableStoragePaths(deps.activeSession.meta.workspaceId);
+      const storage = deps.durableStoragePaths(getSession()!.meta.workspaceId);
       // ROOT-07：stage 前先 mkdir → realpath → boundary check 并注册 allowed
       // roots；回调同步返回已验证集合（stageBridgeOutput 的 mkdir 幂等）。
-      const roots = await prepareBridgeRoots(deps.bridgeRootSession(deps.activeSession, storage), 'stage');
+      const roots = await prepareBridgeRoots(deps.bridgeRootSession(getSession()!, storage), 'stage');
       if (!roots.ok) {
         return {
           ok: false,
@@ -313,7 +328,7 @@ export function registerEventIpcHandlers(deps: EventIpcDeps): void {
         kind: String(mutation.kind ?? mutation.mutation ?? ''),
         ...mutation
       } as Parameters<typeof commitEmevdMutationViaBridge>[0]['mutation'];
-      const operationLog = await deps.ensureActiveOperationLog(deps.activeSession);
+      const operationLog = await deps.ensureActiveOperationLog(getSession()!);
       const outcome = await applyNativeMutation({
         file,
         sourceUri,
@@ -338,7 +353,7 @@ export function registerEventIpcHandlers(deps: EventIpcDeps): void {
         confirmActionLabel: '提交 EMEVD 变更'
       }, {
         confirm: deps.electronConfirmationPort(event),
-        commit: deps.sessionCommitPort(deps.activeSession, operationLog, storage, { knowledgeRefreshOwner: 'caller' })
+        commit: deps.sessionCommitPort(getSession()!, operationLog, storage, { knowledgeRefreshOwner: 'caller' })
       });
       if (outcome.status === 'committed' && outcome.result.ok) {
         // The native replacement is already committed. Preview refresh is a
@@ -350,11 +365,11 @@ export function registerEventIpcHandlers(deps: EventIpcDeps): void {
               file,
               inspectNative: true,
               parseStructured: true,
-              ...(deps.activeSession!.layers.baseRoot ? { oodleRuntimeRoot: deps.activeSession!.layers.baseRoot } : {})
+              ...(getSession()!.layers.baseRoot ? { oodleRuntimeRoot: getSession()!.layers.baseRoot } : {})
             });
             deps.replaceIndexedFile(sourceUri, refreshed.file);
           },
-          refresh: (result) => deps.refreshActiveIndexAfterNativeWrite([sourceUri], result),
+          refresh: (result) => refreshActiveIndexAfterNativeWrite([sourceUri], result),
           onPrepareError: (result, error) => appendPostCommitFailureDiagnostic(
             result,
             'POSTCOMMIT_PREVIEW_FAILED',
@@ -382,13 +397,13 @@ export function registerEventIpcHandlers(deps: EventIpcDeps): void {
    * 当时确实有一份在飞的读被中止 —— 没有也不是错误（用户可能已经读完了），所以
    * `ok` 恒真，两者分开报。
    */
-  deps.handle('resource.cancelEmevdFullDocument', async (event) => {
+  handle('resource.cancelEmevdFullDocument', async (event) => {
     const cancelled = activeEmevdOpens.cancel(event.sender.id);
     emevdSourceTokens.dropWindow(event.sender.id);
     return { ok: true, cancelled };
   });
 
-  deps.handle(
+  handle(
     'resource.readEmevdSourceSlice',
     async (event, token: string, fromLine: number, lineCount: number) => {
       if (typeof token !== 'string' || token.length === 0) {
@@ -415,7 +430,7 @@ export function registerEventIpcHandlers(deps: EventIpcDeps): void {
    * renderer only ever receives a DSL template string, a documentInstanceId and
    * the bounded outline, never the full document.
    */
-  deps.handle(
+  handle(
     'resource.readEmevdFullDocument',
     async (event, sourceUri: string, documentInstanceId: string, loadFullDslTemplate?: boolean) => {
       // 建槽必须在任何 await 之前：见 EmevdOpenSlots.begin 的注释。放在这里意味着连
@@ -435,7 +450,7 @@ export function registerEventIpcHandlers(deps: EventIpcDeps): void {
           }]
         };
       }
-      if (!deps.activeSession) {
+      if (!getSession()) {
         return {
           ok: false,
           diagnostics: [{
@@ -446,10 +461,10 @@ export function registerEventIpcHandlers(deps: EventIpcDeps): void {
           }]
         };
       }
-      const storage = deps.durableStoragePaths(deps.activeSession.meta.workspaceId);
+      const storage = deps.durableStoragePaths(getSession()!.meta.workspaceId);
       // ROOT-07：完整文档读取不需要落盘（Bridge 原生解 DCX），但 staging root
       // 仍注册以便后续 submit 复用。
-      const roots = await prepareBridgeRoots(deps.bridgeRootSession(deps.activeSession, storage), 'stage');
+      const roots = await prepareBridgeRoots(deps.bridgeRootSession(getSession()!, storage), 'stage');
       if (!roots.ok) {
         return {
           ok: false,
@@ -468,7 +483,7 @@ export function registerEventIpcHandlers(deps: EventIpcDeps): void {
         signal: openController.signal,
         ...(documentInstanceId ? { documentInstanceId } : {}),
         // pageSize 不再显式指定：走 DEFAULT_PAGE_SIZE（8192，避免单页 33k 指令 JSON 长帧）。
-        ...(deps.activeSession.layers.baseRoot ? { oodleRuntimeRoot: deps.activeSession.layers.baseRoot } : {}),
+        ...(getSession()!.layers.baseRoot ? { oodleRuntimeRoot: getSession()!.layers.baseRoot } : {}),
         timeoutMs: 120_000
       });
       // 取消分支必须在失败分支之前：两者都是 ok:false，先判失败会把取消报成打开失败。
@@ -546,6 +561,7 @@ export function registerEventIpcHandlers(deps: EventIpcDeps): void {
           });
         }
         if (fullText !== null) {
+          readLifetime.assertCurrent();
           const stored = emevdSourceTokens.put(event.sender.id, sourceUri, fullText, {
             truncated: dslTemplateTruncated
           });
@@ -610,7 +626,7 @@ export function registerEventIpcHandlers(deps: EventIpcDeps): void {
    * 暴露 SoulForge 内置 EMEVD 指令名补全目录给 renderer（autocomplete/hover）。
    * 仅返回语义 schema 的 name/bank/id/args；未知覆盖继续通过结构化诊断显示。
    */
-  deps.handle('resource.readEmedfCompletionCatalog', async (): Promise<{
+  handle('resource.readEmedfCompletionCatalog', async (): Promise<{
     ok: boolean;
     origin: 'first-party' | 'imported' | 'fixture';
     items: EmedfCompletionItem[];
@@ -632,12 +648,12 @@ export function registerEventIpcHandlers(deps: EventIpcDeps): void {
    * WorkspaceTransaction. On success the authoritative document cache and the
    * resource preview are refreshed.
    */
-  deps.handle(
+  handle(
     'resource.submitEmevdDslPlan',
     // S14：mode 决定编译前端 —— 'dark-script'（$Event 源码）或 'patch'（旧 hash DSL）。
     async (event, sourceUri: string, sourceText: string, mode: 'patch' | 'dark-script' = 'patch'): Promise<RendererSaveResult> => {
       const file = deps.indexedFiles.find((item) => item.sourceUri === sourceUri);
-      if (!file || !deps.activeSession) {
+      if (!file || !getSession()) {
         return {
           ok: false,
           changedFiles: [],
@@ -667,9 +683,9 @@ export function registerEventIpcHandlers(deps: EventIpcDeps): void {
       // The outer source resource (file.absolutePath) is both the Bridge staging
       // read source and the PatchIR file_replace target — never a decompressed
       // temp path (negative architecture: 不以 prepared temp path 作为 Patch target)。
-      const storage = deps.durableStoragePaths(deps.activeSession.meta.workspaceId);
+      const storage = deps.durableStoragePaths(getSession()!.meta.workspaceId);
       // ROOT-07：DSL 提交链需要 staging（Bridge 暂存写）——先验证再注册。
-      const roots = await prepareBridgeRoots(deps.bridgeRootSession(deps.activeSession, storage), 'stage');
+      const roots = await prepareBridgeRoots(deps.bridgeRootSession(getSession()!, storage), 'stage');
       if (!roots.ok) {
         return {
           ok: false,
@@ -677,7 +693,7 @@ export function registerEventIpcHandlers(deps: EventIpcDeps): void {
           diagnostics: [deps.bridgeRootsDiagnostic('EMEVD_STAGING_PREPARE_FAILED', roots)]
         };
       }
-      const operationLog = await deps.ensureActiveOperationLog(deps.activeSession);
+      const operationLog = await deps.ensureActiveOperationLog(getSession()!);
       const registry = getEmevdRegistry().registry;
       const full = await readFullEmevdDocument({
         filePath: file.absolutePath,
@@ -692,7 +708,7 @@ export function registerEventIpcHandlers(deps: EventIpcDeps): void {
         cachePolicy: 'bypass' as const,
         timeoutMs: 120_000,
         attachIdentity: true,
-        ...(deps.activeSession?.layers?.baseRoot ? { oodleRuntimeRoot: deps.activeSession.layers.baseRoot } : {})
+        ...(getSession()?.layers?.baseRoot ? { oodleRuntimeRoot: getSession()!.layers.baseRoot } : {})
       });
       if (!full.ok || !full.document) {
         return {
@@ -726,11 +742,11 @@ export function registerEventIpcHandlers(deps: EventIpcDeps): void {
         // 修改目标始终是 outer source resource：.dcx 时 file_replace 前置按 outer 字节比对。
         ...(full.outerFileHash !== undefined ? { expectedOuterFileHash: full.outerFileHash } : {}),
         allowedRoots: [...roots.allowedRoots],
-        workspaceId: deps.activeSession.meta.workspaceId,
-        workspaceRoot: deps.activeSession.layers.overlayRoot,
+        workspaceId: getSession()!.meta.workspaceId,
+        workspaceRoot: getSession()!.layers.overlayRoot,
         stagingRoot: storage.stagingRoot,
-        ...(deps.activeSession?.layers?.baseRoot ? { oodleRuntimeRoot: deps.activeSession.layers.baseRoot } : {}),
-        ...(deps.activeSession ? { session: deps.activeSession } : {}),
+        ...(getSession()?.layers?.baseRoot ? { oodleRuntimeRoot: getSession()!.layers.baseRoot } : {}),
+        ...(getSession() ? { session: getSession()! } : {}),
         operationLog,
         backupBaseDir: storage.backupBaseDir,
         recoveryDir: storage.recoveryDir,
@@ -764,15 +780,15 @@ export function registerEventIpcHandlers(deps: EventIpcDeps): void {
         attachIdentity: true
       });
       if (refreshed.ok && refreshed.document) {
-        emevdFullDocuments.replace(sourceUri, refreshed.document, refreshed.sourceHash ?? null);
+        if(readLifetime.isCurrent())emevdFullDocuments.replace(sourceUri, refreshed.document, refreshed.sourceHash ?? null);
       }
       const preview = await openResourcePreview({
         file,
         inspectNative: true,
         parseStructured: true,
-        ...(deps.activeSession.layers.baseRoot ? { oodleRuntimeRoot: deps.activeSession.layers.baseRoot } : {})
+        ...(getSession()!.layers.baseRoot ? { oodleRuntimeRoot: getSession()!.layers.baseRoot } : {})
       });
-      deps.replaceIndexedFile(sourceUri, preview.file);
+      if(readLifetime.isCurrent())deps.replaceIndexedFile(sourceUri, preview.file);
       const response: RendererSaveResult = {
         ok: true,
         changedFiles: [sourceUri],
@@ -791,7 +807,7 @@ export function registerEventIpcHandlers(deps: EventIpcDeps): void {
           }
         ]
       };
-      await deps.refreshActiveIndexAfterNativeWrite([sourceUri], response);
+      await refreshActiveIndexAfterNativeWrite([sourceUri], response);
       return response;
     }
   );

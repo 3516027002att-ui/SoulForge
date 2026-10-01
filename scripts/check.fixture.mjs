@@ -28,9 +28,77 @@ test('registry drift never bans independently parsed checks, failures do not sto
     assert.deepEqual(report.results.map(r => r.status),['failed','passed','unavailable']);
     assert.equal(report.ok,false);
     assert.equal(result.status,1);
-    assert.ok(report.auditFindings.some(f => f.code === 'SUITE_UNREGISTERED'));
+    assert.ok(!report.auditFindings.some(f => f.code === 'SUITE_UNREGISTERED'));
     assert.ok(report.results.every(r => r.steps.length > 0));
   } finally {rmSync(root,{recursive:true,force:true});}
+});
+
+test('unrelated operational scripts need no registration before discovered tests execute', () => {
+  const root = mkdtempSync(join(tmpdir(),'sf-check-no-registration-'));
+  try {
+    mkdirSync(join(root,'scripts'),{recursive:true});
+    writeFileSync(join(root,'package.json'),JSON.stringify({scripts:{'prepare:custom':'node never.mjs','test:custom':'node scripts/custom.test.mjs'}}));
+    writeFileSync(join(root,'scripts/custom.test.mjs'),'console.log("CUSTOM_ASSERTION_EXECUTED")');
+    const result=spawnSync(process.execPath,[runner,'--tier','unit'],{cwd:root,encoding:'utf8'});
+    const report=JSON.parse(result.stdout);
+    assert.equal(result.status,0,JSON.stringify(report.auditFindings));
+    assert.equal(report.results[0].status,'passed');
+  } finally {rmSync(root,{recursive:true,force:true});}
+});
+
+test('semantic check selection discovers e2e and release sources without a manual tier row', () => {
+  const root = mkdtempSync(join(tmpdir(),'sf-check-semantic-tier-'));
+  try {
+    mkdirSync(join(root,'apps/desktop/e2e'),{recursive:true});mkdirSync(join(root,'scripts'),{recursive:true});
+    writeFileSync(join(root,'package.json'),JSON.stringify({scripts:{'test:arbitrary-ui':'node apps/desktop/e2e/new.test.mjs','test:release-new':'node scripts/release.fixture.mjs'}}));
+    writeFileSync(join(root,'apps/desktop/e2e/new.test.mjs'),'console.log("ui")');writeFileSync(join(root,'scripts/release.fixture.mjs'),'console.log("release")');
+    const registry=discoverChecks(root,loadWorkspaces(root));
+    assert.equal(registry.get('test:arbitrary-ui').tier,'e2e');assert.equal(registry.get('test:release-new').tier,'release');
+  } finally {rmSync(root,{recursive:true,force:true});}
+});
+
+test('public CI required e2e is executed even when outside its selected tiers',()=>{
+ const root=mkdtempSync(join(tmpdir(),'sf-check-ci-required-'));
+ try{
+  mkdirSync(join(root,'apps/desktop/e2e'),{recursive:true});
+  writeFileSync(join(root,'package.json'),JSON.stringify({scripts:{'test:unit':'node unit.mjs','test:renderer-e2e':'node apps/desktop/e2e/ui.test.mjs'}}));
+  writeFileSync(join(root,'unit.mjs'),'console.log("UNIT_EXECUTED")');writeFileSync(join(root,'apps/desktop/e2e/ui.test.mjs'),'console.log("E2E_EXECUTED")');
+  const result=spawnSync(process.execPath,[runner,'--tier','governance,unit,synthetic','--require-suite','test:renderer-e2e'],{cwd:root,encoding:'utf8'});
+  const report=JSON.parse(result.stdout);assert.equal(report.results.find(row=>row.scriptName==='test:renderer-e2e')?.status,'passed');
+ }finally{rmSync(root,{recursive:true,force:true});}
+});
+
+test('release CI phase retains the packaging gate and installer check despite native dependencies',()=>{
+ const root=mkdtempSync(join(tmpdir(),'sf-check-ci-release-'));
+ try{
+  mkdirSync(join(root,'scripts'),{recursive:true});
+  writeFileSync(join(root,'package.json'),JSON.stringify({scripts:{'test:portable-packaging-config-fixtures':'node scripts/config.fixture.mjs','test:portable-packaging-gate':'node scripts/packaging.mjs','test:installer-lifecycle':'node scripts/install.mjs'}}));
+  writeFileSync(join(root,'scripts/config.fixture.mjs'),'console.log("CONFIG_EXECUTED")');
+  writeFileSync(join(root,'scripts/packaging.mjs'),'console.log(process.env.SOULFORGE_NATIVE_FIXTURE_ROOT);process.exit(7)');
+  writeFileSync(join(root,'scripts/install.mjs'),'console.log(JSON.stringify({ok:true,source:process.env.SOULFORGE_NATIVE_FIXTURE_ROOT}))');
+  const packaging=spawnSync(process.execPath,[runner,'--tier','release','--filter','portable-packaging'],{cwd:root,encoding:'utf8'});
+  assert.equal(packaging.status,1,'actual packaging failure must not be hidden by a passing configuration fixture');
+  assert.equal(JSON.parse(packaging.stdout).results.find(row=>row.scriptName==='test:portable-packaging-gate')?.status,'failed');
+  const installer=spawnSync(process.execPath,[runner,'--tier','release','--filter','installer-lifecycle','--require-executed'],{cwd:root,encoding:'utf8'});
+  assert.equal(JSON.parse(installer.stdout).results[0]?.status,'passed');
+ }finally{rmSync(root,{recursive:true,force:true});}
+});
+
+test('Node test all-skipped mixed-skipped and zero-test runs never become complete execution proof',()=>{
+ const root=mkdtempSync(join(tmpdir(),'sf-check-node-skips-'));
+ try{
+  mkdirSync(join(root,'scripts'),{recursive:true});mkdirSync(join(root,'packages/empty'),{recursive:true});
+  writeFileSync(join(root,'package.json'),JSON.stringify({workspaces:['packages/*'],scripts:{'test:zero':'npm run test -w @test/empty'}}));
+  writeFileSync(join(root,'packages/empty/package.json'),JSON.stringify({name:'@test/empty',scripts:{test:'node --test'}}));
+  writeFileSync(join(root,'scripts/all-skipped.test.mjs'),"import test from 'node:test';test('native unavailable',{skip:'fixture missing'},()=>{});");
+  writeFileSync(join(root,'scripts/mixed.test.mjs'),"import test from 'node:test';test('executed',()=>{});test('native unavailable',{skip:'fixture missing'},()=>{});");
+  const env={...process.env};delete env.NODE_TEST_CONTEXT;
+  for(const name of ['all-skipped','mixed','empty']){
+   const suite=name==='empty'?'test:zero':`file:scripts/${name}.test.mjs`;
+   const result=spawnSync(process.execPath,[runner,'--suite',suite,'--require-executed'],{cwd:root,encoding:'utf8',env});
+   const report=JSON.parse(result.stdout);assert.equal(report.results[0].status,'unavailable',name);assert.equal(report.completionVerified,false);assert.equal(result.status,1);
+  }
+ }finally{rmSync(root,{recursive:true,force:true});}
 });
 
 test('explicit exclusion is not_run and never passed', () => {

@@ -415,6 +415,7 @@ export interface WorkspaceIpcDeps {
   handle: TrustedIpcHandle;
   ensureActiveOperationLog(session: WorkspaceSession): Promise<OperationLogUtilityClient>;
   clearActiveOperationLog(): Promise<void>;
+  releaseEditorCaches(): void;
   verifiedReadRoots(
     session: WorkspaceSession | null,
     fallback: string
@@ -729,6 +730,7 @@ export function registerWorkspaceIpcHandlers(deps: WorkspaceIpcDeps): void {
     activeSession = null;
     await deps.clearActiveOperationLog();
     if (previousSession) await disposeBridgeDaemonPool();
+    deps.releaseEditorCaches();
     // A corpus is valid only for its active WorkspaceIndex/session.  Clear it
     // before exposing the new session so an agent cannot query the previous
     // workspace during the open-to-analyze window.
@@ -953,6 +955,7 @@ export function registerWorkspaceIpcHandlers(deps: WorkspaceIpcDeps): void {
     activeSession = null;
     await deps.clearActiveOperationLog();
     if (previousSession) await disposeBridgeDaemonPool();
+    deps.releaseEditorCaches();
     clearWorkspaceRagSnapshot();
     activeIndex?.clearActionBinderMembership();
     activeIndex = null;
