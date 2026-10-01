@@ -113,11 +113,6 @@ jobs:
         run: |
           node --test scripts/tae-identity.fixture.mjs scripts/hks-native-platform.fixture.mjs scripts/bridge-linux-production.fixture.mjs scripts/native-build-environment.fixture.mjs
           node scripts/verify-bridge-write-boundary-gate.mjs
-      - name: Record Windows native bootstrap boundaries
-        if: runner.os == 'Windows'
-        run: |
-          node --test scripts/windows-bootstrap-diagnostic.test.mjs
-          node scripts/windows-bootstrap-diagnostic.mjs
       - name: Run sandbox-preserving Electron database utility smoke
         id: database
         run: |

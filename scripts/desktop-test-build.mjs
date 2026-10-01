@@ -1,7 +1,7 @@
 import { mkdtemp, mkdir, rm, open, writeFile, readFile } from 'node:fs/promises';
 import { createHash } from 'node:crypto';
 import { dirname, resolve, join } from 'node:path';
-import { fileURLToPath, pathToFileURL } from 'node:url';
+import { fileURLToPath } from 'node:url';
 import { createProcessCancellation, processSucceeded, readTimeoutMs, runProcess } from './subprocess-control.mjs';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
@@ -76,18 +76,6 @@ export function desktopSmokeArgs(entry, headless = false, logFile, userData) {
     ...(logFile ? ['--enable-logging=file', `--log-file=${logFile}`] : [])];
 }
 
-/** Use a native path only for the CJS launcher; the actual ESM entry is a URL. */
-export function desktopSmokeBootstrap(entry, marker) {
-  return `const fs=require('node:fs');
-const mark=value=>fs.appendFileSync(${JSON.stringify(marker)},value+'\\n');
-mark('bootstrap-entry');
-process.on('uncaughtExceptionMonitor',error=>mark('uncaught:'+error.message));
-import(${JSON.stringify(pathToFileURL(entry).href)}).then(()=>mark('module-loaded')).catch(error=>{
-  mark('import-failed:'+error.message);console.error(error);
-  const{app}=require('electron');app.exit(1);
-});\n`;
-}
-
 /** Windows Chromium child logs do not reach stderr; read only the owned tail. */
 export async function readDesktopSmokeLog(logFile, maxBytes = 64 * 1024) {
   let file;
@@ -103,38 +91,30 @@ export async function readDesktopSmokeLog(logFile, maxBytes = 64 * 1024) {
   } finally { await file?.close(); }
 }
 
-export async function runDesktopSmoke(kind, entry, executable = process.execPath, { useBootstrap = process.platform === 'win32', reuseProductionBinding = false } = {}) {
+export async function runDesktopSmoke(kind, entry, executable = process.execPath, { reuseProductionBinding = false } = {}) {
   return withDesktopTestBuild(kind, async ({ outputRoot, env, signal, nativeInput }) => {
     if (nativeInput) console.log(JSON.stringify({ desktopSmokeNativeInput: nativeInput }));
     const logFile = join(outputRoot, '.runtime', 'electron.log');
     const entryPath = join(outputRoot, 'main', entry);
-    const marker = join(outputRoot, '.runtime', 'bootstrap-stages.txt');
-    const databaseStageFile = join(outputRoot, '.runtime', 'database-stages.jsonl');
-    const bootstrap = join(outputRoot, '.runtime', 'bootstrap.cjs');
     // Select the profile before Chromium initializes; environment overrides
     // alone do not bind its actual DIR_USER_DATA to this output owner.
     const userData = join(outputRoot, '.runtime', 'electron-user-data');
     await mkdir(userData, { recursive: true });
-    if (useBootstrap) await writeFile(bootstrap, desktopSmokeBootstrap(entryPath, marker));
     const result = await runProcess({ command: executable,
-      args: desktopSmokeArgs(useBootstrap ? bootstrap : entryPath, process.platform === 'linux' && env.SF_E2E_HEADLESS === '1', logFile, userData), cwd: root,
-      env: { ...env, ELECTRON_ENABLE_LOGGING: '1', ELECTRON_LOG_FILE: logFile,
-        ...(kind === 'database' ? { SOULFORGE_DATABASE_SMOKE_STAGE_FILE: databaseStageFile } : {}) }, signal,
+      args: desktopSmokeArgs(entryPath, process.platform === 'linux' && env.SF_E2E_HEADLESS === '1', logFile, userData), cwd: root,
+      env: { ...env, ELECTRON_ENABLE_LOGGING: '1', ELECTRON_LOG_FILE: logFile }, signal,
       timeoutMs: readTimeoutMs('SOULFORGE_SMOKE_TIMEOUT_MS', 10 * 60 * 1000),
       onStdout: chunk => process.stdout.write(chunk), onStderr: chunk => process.stderr.write(chunk) });
     if (!processSucceeded(result)) {
       let nativeLog;
       try { nativeLog = await readDesktopSmokeLog(logFile); }
       catch (error) { nativeLog = { available: false, error: error.message }; }
-      let stages = { available: false }, nativeBindingSha256 = null;
-      try { stages = await readDesktopSmokeLog(marker); } catch (error) { stages.error = error.message; }
-      let databaseStages = { available: false };
-      try { databaseStages = await readDesktopSmokeLog(databaseStageFile); } catch (error) { databaseStages.error = error.message; }
+      let nativeBindingSha256 = null;
       try { nativeBindingSha256 = createHash('sha256').update(await readFile(env.SOULFORGE_SQLITE_NATIVE_BINDING)).digest('hex'); }
       catch { /* Failed builds/early exits do not imply a native binding exists. */ }
       console.error(JSON.stringify({ kind, status: 'failed', code: result.code,
         signal: result.signal, timedOut: result.timedOut, cancelled: result.cancelled,
-        terminationReason: result.terminationReason, nativeLog, stages, databaseStages, nativeBindingSha256 }, null, 2));
+        terminationReason: result.terminationReason, nativeLog, nativeBindingSha256 }, null, 2));
     }
     return processSucceeded(result) ? 0 : result.code || 1;
   }, { reuseProductionBinding });

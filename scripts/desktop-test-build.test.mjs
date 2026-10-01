@@ -62,18 +62,6 @@ test('runtime diagnostics retain a bounded native log tail and distinguish a mis
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 
-test('owned bootstrap loads an ESM entry by file URL and records its real import boundary', async () => {
-  const root = await mkdtemp(join(tmpdir(), 'sf-smoke-esm-'));
-  try {
-    const entry = join(root, 'entry with space.mjs'), marker = join(root, 'marker.txt'), bootstrap = join(root, 'bootstrap.cjs');
-    await writeFile(entry, `import {appendFileSync} from 'node:fs'; appendFileSync(${JSON.stringify(marker)}, 'esm-entry\\n');`);
-    await writeFile(bootstrap, build.desktopSmokeBootstrap(entry, marker));
-    const result = spawnSync(process.execPath, [bootstrap], { encoding: 'utf8', timeout: 5000 });
-    assert.equal(result.status, 0, result.stderr);
-    assert.deepEqual((await readFile(marker, 'utf8')).trim().split('\n'), ['bootstrap-entry', 'esm-entry', 'module-loaded']);
-  } finally { await rm(root, { recursive: true, force: true }); }
-});
-
 test('production binding snapshots stay immutable while each smoke owns its writable copy', async () => {
   const root = await mkdtemp(join(tmpdir(), 'sf-smoke-native-snapshot-'));
   try {

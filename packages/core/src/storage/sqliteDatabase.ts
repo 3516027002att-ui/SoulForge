@@ -1,19 +1,10 @@
 import { createHash, randomUUID } from 'node:crypto';
-import { appendFileSync, mkdirSync, renameSync, rmSync } from 'node:fs';
+import { mkdirSync, renameSync, rmSync } from 'node:fs';
 import { link, mkdir, mkdtemp, open, readFile, rm } from 'node:fs/promises';
 import { dirname } from 'node:path';
 import BetterSqlite3 from 'better-sqlite3';
 import type { SqlMigration } from './sqliteSchema.js';
 import { APP_DB_MIGRATIONS, SQLITE_MIGRATIONS } from './sqliteSchema.js';
-
-// Temporary opt-in CI startup trace; never records SQL, paths or request payloads.
-function startupStage(stage: string): void {
-  const path = process.env.SOULFORGE_DATABASE_SMOKE_STAGE_FILE;
-  if (!path) return;
-  try { appendFileSync(path, `${JSON.stringify({ pid: process.pid,
-    role: process.env.SOULFORGE_DATABASE_ROLE ?? 'main', stage })}\n`); }
-  catch { /* Diagnostic output must not alter migration outcomes. */ }
-}
 
 export type SqliteDatabase = BetterSqlite3.Database;
 
@@ -57,24 +48,19 @@ export function openMigratedDatabase(
   options: OpenSoulForgeDatabaseOptions = {}
 ): SqliteDatabase {
   if (!options.readonly) mkdirSync(dirname(databasePath), { recursive: true });
-  startupStage('sqlite-binding-and-open-start');
   const database = new BetterSqlite3(databasePath, {
     readonly: options.readonly === true,
     fileMustExist: options.fileMustExist === true,
     timeout: options.busyTimeoutMs ?? 5_000,
     ...(options.nativeBinding ? { nativeBinding: options.nativeBinding } : {})
   });
-  startupStage('sqlite-binding-and-opened');
 
   try {
     database.pragma('foreign_keys = ON');
     database.pragma(`busy_timeout = ${Math.max(0, options.busyTimeoutMs ?? 5_000)}`);
     if (!options.readonly) database.pragma('journal_mode = WAL');
-    startupStage('sqlite-pragmas-completed');
     assertDatabaseIntegrity(database);
-    startupStage('sqlite-integrity-completed');
     if (!options.readonly) applyMigrations(database, migrations);
-    startupStage('sqlite-migrations-completed');
     assertDatabaseIntegrity(database);
     return database;
   } catch (error) {
@@ -111,9 +97,7 @@ VALUES (@id, @name, @checksum, @appliedAt)
 `);
 
   for (const migration of migrations) {
-    startupStage(`sqlite-checksum-start:${migration.id}`);
     const checksum = migrationChecksum(migration);
-    startupStage(`sqlite-checksum-completed:${migration.id}`);
     const applied = appliedStatement.get(migration.id);
     if (applied) {
       if (!applied.checksum) {
@@ -169,9 +153,7 @@ VALUES (@id, @name, @checksum, @appliedAt)
     });
 
     try {
-      startupStage(`sqlite-migration-start:${migration.id}`);
       applyOne.immediate();
-      startupStage(`sqlite-migration-completed:${migration.id}`);
     } catch (error) {
       throw new SqliteMigrationError(
         'SQLITE_MIGRATION_FAILED',
