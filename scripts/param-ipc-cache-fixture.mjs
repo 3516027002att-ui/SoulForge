@@ -8,7 +8,7 @@ import { execFileSync } from 'node:child_process';
 /** The actual PARAM handlers; only native transport/settled commit/Electron are seams.
  * Footer exposes the real cache reference solely inside this owned test bundle.
  */
-export async function createParamCacheFixture({ fileCount = 1, rows = 1, bytesPerRow = 4 } = {}) {
+export async function createParamCacheFixture({ fileCount = 1, rows = 1, bytesPerRow = 4, container = false } = {}) {
   const runRoot = resolve(process.env.SF_PARAM_CACHE_RUN_ROOT ?? 'output/param-cache-fixtures');
   await mkdir(runRoot, { recursive: true });
   const root = await mkdtemp(join(runRoot, 'sf-param-cache-'));
@@ -43,7 +43,7 @@ export async function createParamCacheFixture({ fileCount = 1, rows = 1, bytesPe
     handlerSha256: createHash('sha256').update(handlerSource).digest('hex') };
   await build({ entryPoints: [resolve('apps/desktop/src/main/ipc/param.ts')], outfile: output,
     bundle: true, platform: 'node', format: 'esm', external: ['node:*'],
-    footer: { js: `globalThis[Symbol.for(${keySource})].caches={paramAllCache,paramPageCache,sessionBindings,containerParamAllCache,containerParamSessionCache};` },
+    footer: { js: `globalThis[Symbol.for(${keySource})].caches={paramAllCache,paramPageCache,sessionBindings,containerParamAllCache,containerParamSessionCache,paramEntryTableCache,unpackedParamCache};` },
     plugins: [{ name: 'param-cache-seams', setup(builder) {
       builder.onLoad({ filter: /\/ipc\/param\.ts$/ }, () => ({ contents: handlerSource, loader: 'ts', resolveDir: resolve('apps/desktop/src/main/ipc') }));
       builder.onResolve({ filter: /^\// }, (args) => args.path === core ? { path: core, external: true } : undefined);
@@ -59,13 +59,18 @@ export async function createParamCacheFixture({ fileCount = 1, rows = 1, bytesPe
     } }] });
   state.sourceBinding.bundleSha256 = createHash('sha256').update(await readFile(output)).digest('hex');
   const module = await import(pathToFileURL(output).href);
-  const session = { meta: { workspaceId: 'owned' }, layers: { overlayRoot: '/owned' } };
+  const ownedRoot = container ? root : '/owned';
+  const session = { meta: { workspaceId: 'owned' }, layers: { overlayRoot: ownedRoot } };
+  if (container) files[0].absolutePath = join(root, 'owned.parambnd.dcx');
   module.registerParamIpcHandlers({
     handle: (name, handler) => state.handlers.set(name, handler), activeSession: session,
     indexedFiles: files, activeWorkspaceSessionId: 'owned',
-    durableStoragePaths: () => ({ root: '/owned', stagingRoot: '/owned/staging' }),
-    verifiedReadRoots: async () => ({ allowedRoots: ['/owned'], diagnostics: [] }),
-    verifiedStageRoots: async () => ({ allowedRoots: ['/owned'], writableRoots: ['/owned/staging'], diagnostics: [] }),
+    durableStoragePaths: () => ({ root: ownedRoot, stagingRoot: join(ownedRoot, 'staging') }),
+    bridgeRootSession: () => ({ overlayRoot: ownedRoot, baseRoot: null, storageRoot: ownedRoot }),
+    bridgeRootsDiagnostic: (code, result) => ({ severity: 'error', code, message: result.message }),
+    sha256FileNow: async () => { throw new Error('unexpected full source hash'); },
+    verifiedReadRoots: async () => ({ allowedRoots: [ownedRoot], diagnostics: [] }),
+    verifiedStageRoots: async () => ({ allowedRoots: [ownedRoot], writableRoots: [join(ownedRoot, 'staging')], diagnostics: [] }),
     rejectNonSekiroNativeWrite: () => null, ensureActiveOperationLog: async () => ({}),
     electronConfirmationPort: () => ({}), sessionCommitPort: () => ({}),
     toSaveResultFromOutcome: (outcome) => outcome.result,
@@ -80,7 +85,8 @@ export async function createParamCacheFixture({ fileCount = 1, rows = 1, bytesPe
   const event = { sender: { id: 17 } };
   const { loadFirstPartyParamMetadata } = await import(pathToFileURL(core).href);
   const definition = loadFirstPartyParamMetadata().package.definitions.find(({ document }) => document.typeName === 'ACTION_GUIDE_PARAM_ST').document;
-  return { state, files, module,
+  return { state, files, module, root, definition,
+    invoke: (name, ...args) => state.handlers.get(name)(event, ...args),
     readAll: (file = files[0]) => state.handlers.get('resource.readParamPage')(event, file.sourceUri, 0, 100, undefined, true),
     write: (file = files[0]) => state.handlers.get('resource.applyParamMutation')(event, file.sourceUri, file.sha256,
       { kind: 'upsert', id: 0, dataBase64: 'AAAAAA==' }),

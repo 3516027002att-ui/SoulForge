@@ -34,6 +34,20 @@ test('unknown outcomes and unsupported runtimes fail closed', () => {
   assert.throws(() => buildPublicCiReport({ steps: success(), runtime: 'macos-arm64' }), /runtime/);
 });
 
+test('theme runtime failures and missing runs remain visible independently of a successful database smoke', () => {
+  for (const outcome of ['failure', 'skipped', undefined]) {
+    const steps = success();
+    steps.theme = outcome === undefined ? {} : { outcome };
+    const report = buildPublicCiReport({ steps, runtime: 'win-x64' });
+    const theme = report.publicChecks.find(check => check.id === 'theme');
+    assert.ok(theme, 'the real theme/frame runtime must have its own public outcome');
+    assert.equal(theme.status, outcome === 'failure' ? 'failed' : 'not_run');
+    assert.equal(report.publicChecks.find(check => check.id === 'database').status, 'passed');
+    assert.notEqual(report.publicStatus, 'passed');
+    assert.equal(report.acceptanceComplete, false);
+  }
+});
+
 test('the actual report entry writes archive evidence and the GitHub summary without claiming private acceptance', async () => {
   const root = await mkdtemp(join(tmpdir(), 'sf-ci-report-'));
   try {

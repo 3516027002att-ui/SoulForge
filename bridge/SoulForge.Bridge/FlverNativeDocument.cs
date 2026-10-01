@@ -383,6 +383,9 @@ internal sealed class FlverNativeDocument
             NativeBoundsMin = nativeBoundsMin;
             NativeBoundsMax = nativeBoundsMax;
             HasNativeBounds = hasNativeBounds;
+            // The completed layout plan is immutable. Chunk budget checks
+            // query this for every triangle; avoid enumerating it each time.
+            UvSetCount = dataPlan.UVs.Sum(access => UVSetCount(access.Type));
         }
 
         public int MeshIndex { get; }
@@ -397,7 +400,7 @@ internal sealed class FlverNativeDocument
         public float[] NativeBoundsMax { get; }
         public bool HasNativeBounds { get; }
         internal MeshDataPlan DataPlan { get; }
-        internal int UvSetCount => DataPlan.UVs.Sum(access => UVSetCount(access.Type));
+        internal int UvSetCount { get; }
     }
 
     internal readonly record struct FlverDisplayTriangle(

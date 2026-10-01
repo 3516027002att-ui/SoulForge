@@ -14,6 +14,7 @@ import {AGENT_EXPERIMENTS,BASELINE_LOOP_SHA256,experimentSourceTransform,experim
 import {previewAgentExperiment,executeAgentExperiment,validateExperimentInputs,evaluateExperimentLeg} from './testing/agent-provider-experiment.mjs';
 import {parseProviderExperimentArguments,runProviderExperimentCommand} from './run-agent-provider-experiment.mjs';
 const exec=promisify(execFile),repoRoot=process.cwd();
+const publicControl='public-main-c4',publicRevision='c4a8b158f935c35624f132850b068a8e02921f68',publicLoopSha='1475f0faeefc6eb8b67972691e3182fb7f0eed954dd7965c868688ed8f9fc4a4';
 const provider={protocol:'openai-compatible',baseUrl:'https://fixture.invalid',model:'owner-selected-model-fixture',pricing:{inputPerMillion:1,outputPerMillion:1},currency:'USD'};
 const budget={maxCost:1,maxLegCost:0.125,maxOutputTokens:65536,maxLegOutputTokens:8192,timeoutMs:1500000,maxLegTimeoutMs:180000,maxSteps:8};
 const base=()=>({repoRoot,experiment:'description-dedup',provider:structuredClone(provider),budget:{...budget},sampling:{temperature:0,topP:1,maxTokens:512}});
@@ -29,16 +30,17 @@ test('provider, currency/pricing and every explicit experiment/per-leg budget ar
  assert.throws(()=>parseProviderExperimentArguments(['--execute','--dry-run','--provider-config','fixture.json']),{code:'AGENT_EXPERIMENT_MODE_CONFLICT'});
 });
 
-test('all nine on/off conditions are bound to the actual old source, change only their exact condition and remain valid TypeScript',async()=>{
- const {stdout:source}=await exec('git',['show','217234bb97ee20e3a83048042c4a1e67e9a16d33:packages/core/src/model-services/agentLoop.ts'],{cwd:repoRoot,maxBuffer:8388608});
+test('all nine public-control conditions are uniquely source-bound, change only their exact condition and remain valid TypeScript',async()=>{
+ const {stdout:source}=await exec('git',['show',publicRevision+':packages/core/src/model-services/agentLoop.ts'],{cwd:repoRoot,maxBuffer:8388608});
  const ts=createRequire(import.meta.url)('typescript');let treatments=0;
  for(const [id,spec] of Object.entries(AGENT_EXPERIMENTS).filter(([,spec])=>spec.kind==='heuristic')){
-  const on=experimentSourceTransform(id,'on')('packages/core/src/model-services/agentLoop.ts',source),off=experimentSourceTransform(id,'off')('packages/core/src/model-services/agentLoop.ts',source);
-  assert.equal(on.source,source);assert.equal(on.treatment.originalSha256,BASELINE_LOOP_SHA256);assert.equal(off.treatment.changedConditions,1);
+  assert.equal(source.split(spec.needle).length,2);assert.throws(()=>experimentSourceTransform(id,'on')('packages/core/src/model-services/agentLoop.ts',source),{code:'AGENT_EXPERIMENT_BASELINE_DRIFT'});
+  const on=experimentSourceTransform(id,'on',publicControl)('packages/core/src/model-services/agentLoop.ts',source),off=experimentSourceTransform(id,'off',publicControl)('packages/core/src/model-services/agentLoop.ts',source);
+  assert.equal(on.source,source);assert.equal(on.treatment.originalSha256,publicLoopSha);assert.equal(on.treatment.controlId,publicControl);assert.equal(on.treatment.revision,publicRevision);assert.equal(off.treatment.changedConditions,1);
   const [before,after]=source.split(spec.needle);assert.equal(off.source.slice(0,before.length),before);assert.equal(off.source.slice(-after.length),after);
   assert.equal(ts.createSourceFile(`${id}.ts`,off.source,ts.ScriptTarget.Latest,true).parseDiagnostics.length,0);
-  assert.throws(()=>experimentSourceTransform(id,'off')('packages/core/src/model-services/agentLoop.ts',source+'\n'),{code:'AGENT_EXPERIMENT_BASELINE_DRIFT'});
-  assert.equal(experimentSourceTransform(id,'off')('other.ts',source),undefined);treatments++;
+  assert.throws(()=>experimentSourceTransform(id,'off',publicControl)('packages/core/src/model-services/agentLoop.ts',source+'\n'),{code:'AGENT_EXPERIMENT_BASELINE_DRIFT'});
+  assert.equal(experimentSourceTransform(id,'off',publicControl)('other.ts',source),undefined);treatments++;
  }
  assert.equal(treatments,9);
 });
@@ -58,6 +60,53 @@ test('dry-run binds source/build/tasks and reports missing/mismatched native inp
   const config=join(root,'provider.json');await writeFile(config,JSON.stringify(provider));
   await assert.rejects(()=>runProviderExperimentCommand(['--dry-run','--provider-config',config]),{code:'AGENT_EXPERIMENT_BUDGET_REQUIRED'});
  }finally{globalThis.fetch=originalFetch;await rm(root,{recursive:true,force:true});}
+});
+
+test('missing selected Git control returns explicit unavailable and retains current source identity for numeric exit codes',async()=>{
+ const root=await mkdtemp(join(tmpdir(),'sf-provider-missing-control-'));const originalFetch=globalThis.fetch;
+ globalThis.fetch=()=>{throw new Error('Network must not open during preparation.');};
+ try{
+  await mkdir(join(root,'testdata/corpus'),{recursive:true});
+  await writeFile(join(root,'testdata/corpus/sekiro-1.6.corpus-manifest.json'),await readFile(join(repoRoot,'testdata/corpus/sekiro-1.6.corpus-manifest.json')));
+  for(const path of ['scripts/run-agent-provider-experiment.mjs','scripts/testing/agent-provider-experiment.mjs','scripts/testing/agent-experiment-treatments.mjs','scripts/testing/owned-native-agent-comparison.mjs','scripts/testing/legacy-agent-baseline.mjs']){
+   await mkdir(join(root,...path.split('/').slice(0,-1)),{recursive:true});await writeFile(join(root,path),await readFile(join(repoRoot,path)));
+  }
+  await exec('git',['init','--quiet'],{cwd:root});await exec('git',['add','.'],{cwd:root});
+  await exec('git',['-c','user.name=Fixture','-c','user.email=fixture@example.invalid','commit','--quiet','-m','Owned missing-control fixture'],{cwd:root});
+  const {stdout:head}=await exec('git',['rev-parse','HEAD'],{cwd:root});
+  const plan=await previewAgentExperiment({...base(),repoRoot:root,corpusRoot:'',dotnet:'',oracleAssembly:''});
+  assert.equal(plan.status,'unavailable');assert.equal(plan.execution,'not_run');assert.equal(plan.networkCalls,0);assert.equal(plan.credentialAccess,false);
+  assert.equal(plan.bindings.source.commit,head.trim());assert.equal(plan.bindings.baseline,undefined);
+  const missing=plan.unavailable.find(item=>item.input==='legacy-baseline');
+  assert.equal(missing.reason,'exact-revision-unavailable');assert.equal(missing.exitCode,128);
+  assert.equal(missing.revision,'217234bb97ee20e3a83048042c4a1e67e9a16d33');
+ }finally{globalThis.fetch=originalFetch;await rm(root,{recursive:true,force:true});}
+});
+
+
+
+test('public pre-refactor control is explicit and never substitutes for the unavailable historical control',async()=>{
+ const originalFetch=globalThis.fetch;globalThis.fetch=()=>{throw new Error('No network in control selection.');};
+ try{
+  const selected=await previewAgentExperiment({...base(),control:publicControl,corpusRoot:'',dotnet:'',oracleAssembly:''});
+  assert.equal(selected.bindings.baseline.id,publicControl);assert.equal(selected.bindings.baseline.revision,publicRevision);assert.equal(selected.bindings.baseline.controlSourceSha256,publicLoopSha);assert.match(selected.bindings.baseline.modelServicesTree,/^[a-f0-9]{40}$/);
+  assert.equal(selected.bindings.controlHistory[0].id,'historical-217');assert.equal(selected.bindings.controlHistory[0].status,'unavailable');assert.equal(selected.bindings.controlHistory[0].revision,'217234bb97ee20e3a83048042c4a1e67e9a16d33');assert.equal(selected.bindings.controlHistory[0].loopSha256,BASELINE_LOOP_SHA256);
+  assert.equal(selected.unavailable.some(item=>item.input==='legacy-baseline'),false);assert.equal(selected.execution,'not_run');assert.equal(selected.networkCalls,0);assert.equal(selected.credentialAccess,false);
+  const defaults=await previewAgentExperiment({...base(),corpusRoot:'',dotnet:'',oracleAssembly:''});assert.equal(defaults.bindings.baseline,undefined);assert.equal(defaults.unavailable.find(item=>item.input==='legacy-baseline').revision,'217234bb97ee20e3a83048042c4a1e67e9a16d33');
+  assert.equal(parseProviderExperimentArguments(['--provider-config','fixture.json','--control',publicControl]).control,publicControl);
+  for(const control of ['HEAD','constructor','__proto__'])assert.throws(()=>validateExperimentInputs({...base(),control}),{code:'AGENT_EXPERIMENT_CONTROL_INVALID'});
+ }finally{globalThis.fetch=originalFetch;}
+});
+
+test('entire public session snapshot is pinned, loadable and cannot be relabeled as the historical control',async()=>{
+ const root=await mkdtemp(join(tmpdir(),'sf-public-control-snapshot-'));
+ try{
+  const loaded=await materializeLegacyAgentBaseline(repoRoot,join(root,'public'),publicRevision,{control:publicControl});
+  assert.equal(typeof loaded.runAgentSession,'function');assert.equal(loaded.manifest.control.id,publicControl);assert.equal(loaded.manifest.control.revision,publicRevision);assert.match(loaded.manifest.control.modelServicesTree,/^[a-f0-9]{40}$/);assert.equal(loaded.manifest.files.length,12);
+  for(const file of loaded.manifest.files){assert.match(file.sha256,/^[a-f0-9]{64}$/);assert.equal(file.materializedSha256,file.sha256);}
+  assert.equal(loaded.manifest.files.find(file=>file.path.endsWith('/agentLoop.ts')).sha256,publicLoopSha);
+  await assert.rejects(()=>materializeLegacyAgentBaseline(repoRoot,join(root,'wrong'),publicRevision,{control:'historical-217'}),{code:'AGENT_EXPERIMENT_CONTROL_REVISION_MISMATCH'});
+ }finally{await rm(root,{recursive:true,force:true});}
 });
 
 test('failed unmet goals are distinct from wrong writes and prose claims remain unverified',()=>{
@@ -115,12 +164,12 @@ test('reported usage survives a configured output-budget rejection before the se
 });
 
 test('explicit future execution orchestration uses only supplied fake ports, binds one treatment and keeps billing unverified',async()=>{
- const root=await mkdtemp(join(tmpdir(),'sf-provider-fake-ports-'));const input={...base(),execute:true,outputRoot:join(root,'fresh'),budget:{...budget,timeoutMs:20000,maxLegTimeoutMs:1000}};let credentials=0,providers=0,native=0;
- const plan={status:'ready',experiment:{id:'description-dedup',kind:'description',variants:['repeated','deduplicated']},bindings:{tasks:[{id:'read-only',permissionMode:'normal'}],identities:{bridge:{path:'fake-not-executed'}}}};
+ const root=await mkdtemp(join(tmpdir(),'sf-provider-fake-ports-'));const input={...base(),control:publicControl,execute:true,outputRoot:join(root,'fresh'),budget:{...budget,timeoutMs:20000,maxLegTimeoutMs:1000}};let credentials=0,providers=0,native=0;
+ const plan={status:'ready',experiment:{id:'description-dedup',kind:'description',variants:['repeated','deduplicated']},bindings:{baseline:{id:publicControl,revision:publicRevision,controlSourceSha256:publicLoopSha},tasks:[{id:'read-only',permissionMode:'normal'}],identities:{bridge:{path:'fake-not-executed'}}}};
  const core={createConfiguredModelServiceAdapter:()=>({ok:true,adapter:{protocol:'openai-compatible',complete:async()=>{providers++;return {message:{role:'assistant',content:'{"claimedStatus":"completed"}'},finishReason:'stop',diagnostics:[],usage:{inputTokens:1,outputTokens:1}};}}}),redactSecrets:text=>text};
  try{
   await assert.rejects(()=>executeAgentExperiment({...input,execute:false},plan,{credential:()=>{credentials++;}}),{code:'AGENT_EXPERIMENT_EXECUTION_NOT_AUTHORIZED'});assert.equal(credentials,0);
-   const output=await executeAgentExperiment(input,plan,{credential:()=>{credentials++;return 'fixture-only-not-a-real-credential';},core,installBridge:()=>{},preview:async()=>plan,runtimeFactory:()=>({LIMITS:{},prepare:async()=>({status:'ready'}),worker:async(kernel,scenario,leg)=>{native++;assert.equal(kernel,'legacy');assert.equal(leg.repeatedDescriptions,leg.label.endsWith('repeated'));assert.equal(leg.limits.timeoutMs,1000);await leg.adapter.complete({messages:[{role:'user',content:'fixture'}],maxTokens:10});return {scenario,goal:{status:'passed'},modelFinalText:'{"claimedStatus":"completed"}',byteHashes:{before:'same',after:'same'},allowedResourceDelta:true,preservation:{siblingBytes:true,originalBytes:true},operations:[],protocolTermination:{finishReason:'stop'},durationMs:1};}})});
+   const output=await executeAgentExperiment(input,plan,{credential:()=>{credentials++;return 'fixture-only-not-a-real-credential';},core,installBridge:()=>{},preview:async()=>plan,runtimeFactory:options=>{assert.equal(options.control,publicControl);return {LIMITS:{},prepare:async()=>({status:'ready'}),worker:async(kernel,scenario,leg)=>{native++;assert.equal(kernel,'legacy');assert.equal(leg.repeatedDescriptions,leg.label.endsWith('repeated'));assert.equal(leg.limits.timeoutMs,1000);await leg.adapter.complete({messages:[{role:'user',content:'fixture'}],maxTokens:10});return {scenario,goal:{status:'passed'},modelFinalText:'{"claimedStatus":"completed"}',byteHashes:{before:'same',after:'same'},allowedResourceDelta:true,preservation:{siblingBytes:true,originalBytes:true},operations:[],protocolTermination:{finishReason:'stop'},durationMs:1};}};}});
   assert.equal(output.status,'completed');assert.equal(credentials,1);assert.equal(providers,2);assert.equal(native,2);assert.equal(output.results.length,2);assert.ok(output.results.every(result=>result.actualCost.status==='unverified'));
   assert.ok(!JSON.stringify(output).includes('fixture-only-not-a-real-credential'));assert.equal(output.budget.requests,2);assert.equal(output.providerRequestAttempts,2);assert.equal(output.networkCalls.status,'unverified');assert.ok(output.results.every(result=>result.usage.inputTokens===1));
  }finally{await rm(root,{recursive:true,force:true});}
@@ -163,7 +212,7 @@ test('each old heuristic treatment actually activates on and remains absent off 
  };
  try{
   for(const [id,fixture] of Object.entries(cases))for(const variant of ['on','off']){
-   const baseline=await materializeLegacyAgentBaseline(repoRoot,join(root,id,variant),undefined,{sourceTransform:experimentSourceTransform(id,variant)});let turn=0;const modelRequests=[];
+   const baseline=await materializeLegacyAgentBaseline(repoRoot,join(root,id,variant),publicRevision,{control:publicControl,sourceTransform:experimentSourceTransform(id,variant,publicControl)});let turn=0;const modelRequests=[];
    const adapter={protocol:'openai-compatible',complete:async request=>{modelRequests.push({messages:structuredClone(request.messages)});const response=fixture.outputs?.[turn]??(request.tools.length===0?done:typeof fixture.repeat==='function'?fixture.repeat(turn):fixture.repeat)??done;turn++;return response;}};
    const tools=['inspect_fixture','read_param_fields','read_emevd_event','search_events'].map(name=>({name,description:'Fake read-only experiment port',permissionLevel:'read',parametersJsonSchema:{}}));
    const result=await baseline.runAgentSession({sessionsDir:join(root,id,variant,'sessions'),adapter,config:{...provider,id:'fixture',displayName:'fixture',hasCredential:false,createdAt:'',updatedAt:''},apiKey:'',kernel:'legacy',prompt:'检查资源并报告',permissionMode:'plan',maxSteps:fixture.maxSteps??8,tools,executeTool:async()=>fixture.toolFailure?{ok:false,code:'FIXTURE_FAILURE',content:'{"ok":false,"code":"FIXTURE_FAILURE"}'}:{ok:true,content:fixture.toolContent??'{"ok":true,"data":{"eventId":952787}}'},...(fixture.maxTotalOutputTokens?{maxTotalOutputTokens:fixture.maxTotalOutputTokens}:{})});
@@ -179,7 +228,7 @@ test('RAG treatment preserves once-per-run automatic retrieval and exposes the s
  const {createRagCorpus}=await import('../packages/core/dist/rag/chunkBuilder.js'),{retrieveEvidence}=await import('../packages/core/dist/rag/retrieve.js');
  const before={source:{sha256:'pinned-source'},events:[{id:952787,restBehavior:1,instructionCount:3,parameterCount:0,bodySha256:'pinned-body'}]};
  try{
-  const baseline=await materializeLegacyAgentBaseline(repoRoot,join(root,'baseline'));const runs=[];
+  const baseline=await materializeLegacyAgentBaseline(repoRoot,join(root,'baseline'),publicRevision,{control:publicControl});const runs=[];
   for(const mode of ['automatic','on-demand']){
    const calls=[],requests=[];let turn=0;
    const retrieval=createExperimentRetrieval({createRagCorpus,retrieveEvidence},{before,target:'/tmp/owned/event/common.emevd.dcx',workspaceId:'owned-test',onRetrieve:call=>calls.push(call)});
@@ -190,4 +239,27 @@ test('RAG treatment preserves once-per-run automatic retrieval and exposes the s
   }
   assert.deepEqual(runs[0].requests[0].tools,runs[1].requests[0].tools);assert.deepEqual(runs[0].calls.find(call=>call.channel==='tool').result,runs[1].calls.find(call=>call.channel==='tool').result);
  }finally{await rm(root,{recursive:true,force:true});}
+});
+
+
+test('description variants change only per-tool repetition through the public control with the shared policy fixed',{timeout:10000},async()=>{
+ const {createExperimentToolDescriptions}=await import('./testing/owned-native-agent-comparison.mjs');assert.equal(typeof createExperimentToolDescriptions,'function');
+ const root=await mkdtemp(join(tmpdir(),'sf-public-description-treatment-'));const originalFetch=globalThis.fetch;let networkCalls=0;
+ globalThis.fetch=()=>{networkCalls++;throw new Error('No provider network calls.');};
+ try{
+  const {AGENT_TOOL_RESULT_INSTRUCTIONS}=await import('../packages/core/dist/ai/agentToolBridge.js');
+  const baseline=await materializeLegacyAgentBaseline(repoRoot,join(root,'baseline'),publicRevision,{control:publicControl});
+  const tools=[{name:'inspect_fixture',description:'Read owned fixture metadata.',permissionLevel:'read',parametersJsonSchema:{type:'object'}}],runs=[];
+  for(const variant of ['repeated','deduplicated']){
+   const requests=[];let calls=0;
+   const adapter={protocol:'openai-compatible',complete:async request=>{requests.push(structuredClone(request));return calls++===0?{message:{role:'assistant',content:'',toolCalls:[{id:'read',name:'inspect_fixture',argumentsJson:'{}'}]},finishReason:'tool_use',diagnostics:[],usage:{inputTokens:1,outputTokens:1}}:{message:{role:'assistant',content:'The result is reported.'},finishReason:'stop',diagnostics:[],usage:{inputTokens:1,outputTokens:1}};}};
+   const result=await baseline.runAgentSession({sessionsDir:join(root,variant),adapter,config:{...provider,id:'fixture',displayName:'fixture',hasCredential:false,createdAt:'',updatedAt:''},apiKey:'',prompt:'Read the owned fixture.',systemPrompt:AGENT_TOOL_RESULT_INSTRUCTIONS,permissionMode:'plan',maxSteps:3,tools:createExperimentToolDescriptions(tools,AGENT_TOOL_RESULT_INSTRUCTIONS,variant==='repeated'),executeTool:async()=>({ok:true,content:'{"ok":true,"data":{"value":1}}'})});
+   assert.equal(result.run.finishReason,'stop');assert.equal(requests.length,2);runs.push(requests);
+  }
+  for(let turn=0;turn<2;turn++){
+   assert.deepEqual(runs[0][turn].messages,runs[1][turn].messages);
+   const repeated=runs[0][turn].tools[0],deduplicated=runs[1][turn].tools[0];assert.deepEqual({...repeated,description:deduplicated.description},deduplicated);assert.equal(repeated.description,`${deduplicated.description} ${AGENT_TOOL_RESULT_INSTRUCTIONS}`);
+  }
+  assert.equal(networkCalls,0);assert.equal(tools[0].description,'Read owned fixture metadata.');
+ }finally{globalThis.fetch=originalFetch;await rm(root,{recursive:true,force:true});}
 });

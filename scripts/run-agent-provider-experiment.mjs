@@ -5,7 +5,7 @@ import {fileURLToPath} from 'node:url';
 import {previewAgentExperiment,executeAgentExperiment,validateExperimentInputs} from './testing/agent-provider-experiment.mjs';
 export function parseProviderExperimentArguments(argv){
  const options={repoRoot:resolve(dirname(fileURLToPath(import.meta.url)),'..'),experiment:'description-dedup',execute:false,budget:{},sampling:{temperature:0,topP:1,maxTokens:512}};
- const fields={'--experiment':'experiment','--provider-config':'providerConfig','--corpus-root':'corpusRoot','--dotnet':'dotnet','--oracle-assembly':'oracleAssembly','--bridge':'bridge','--output-root':'outputRoot','--report':'report','--repo-root':'repoRoot'};
+ const fields={'--experiment':'experiment','--control':'control','--provider-config':'providerConfig','--corpus-root':'corpusRoot','--dotnet':'dotnet','--oracle-assembly':'oracleAssembly','--bridge':'bridge','--output-root':'outputRoot','--report':'report','--repo-root':'repoRoot'};
  const budgets={'--max-cost':'maxCost','--max-leg-cost':'maxLegCost','--max-output-tokens':'maxOutputTokens','--max-leg-output-tokens':'maxLegOutputTokens','--timeout-ms':'timeoutMs','--leg-timeout-ms':'maxLegTimeoutMs','--max-steps':'maxSteps'};
  const sampling={'--temperature':'temperature','--top-p':'topP','--max-tokens':'maxTokens'};
  let selectedMode;

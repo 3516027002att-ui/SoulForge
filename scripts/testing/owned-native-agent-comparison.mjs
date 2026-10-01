@@ -4,12 +4,17 @@ import { execFile } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import { mkdir, readFile, readdir, stat, utimes, writeFile, copyFile, rename } from 'node:fs/promises';
-import {materializeLegacyAgentBaseline} from './legacy-agent-baseline.mjs';
+import {materializeLegacyAgentBaseline,selectLegacyAgentControl} from './legacy-agent-baseline.mjs';
 import { dirname, join, relative, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { promisify } from 'node:util';
 
 const exec = promisify(execFile);
+
+/** One description-only treatment; the shared system policy stays fixed. */
+export function createExperimentToolDescriptions(tools,sharedInstruction,repeated){
+  return repeated?tools.map(tool=>({...tool,description:`${tool.description} ${sharedInstruction}`})):tools;
+}
 
 /** Same model-visible identities for separately owned legs; native arguments restore the owned locator. */
 export function createExperimentModelWire({directory,workspaceId}) {
@@ -57,7 +62,8 @@ export async function inspectOwnedNativeInputs(input,ports={}){
 export function createOwnedNativeComparisonRuntime(options={}) {
 const ROOT = resolve(options.repoRoot ?? resolve(dirname(fileURLToPath(import.meta.url)), '../..'));
 const OUT = resolve(options.outputRoot ?? join(ROOT, '.local-validation/native-comparison'));
-const LEGACY = '217234bb97ee20e3a83048042c4a1e67e9a16d33';
+const CONTROL=selectLegacyAgentControl(options.control);
+const LEGACY=CONTROL.revision;
 const ORACLE_SHA = '59b0367fd093fbff3a1cc661ee59a350f22a0480e4733ff47c28623a9b2a8228';
 const ORACLE_ASSEMBLY = options.oracleAssembly ?? process.env.SOULFORGE_COMPARISON_NEXT_ASSEMBLY
   ?? '';
@@ -137,9 +143,9 @@ async function treeInputs(directories) {
 // Model-services runtime dependencies are recursively snapshotted at LEGACY;
 // the production domain/assembly remain the same for both control kernels.
 async function snapshotLegacy(sourceTransform,label='unmodified') {
-  const loaded=await materializeLegacyAgentBaseline(ROOT,join(OUT,'legacy',label),LEGACY,{sourceTransform});
+  const loaded=await materializeLegacyAgentBaseline(ROOT,join(OUT,'legacy',label),LEGACY,{control:CONTROL.id,sourceTransform});
   const manifest={...loaded.manifest,entry:relative(ROOT,loaded.manifest.entry),
-    lineage:'Exact Git legacy control snapshot; same live production native domain ports and ToolRegistry for both kernels',
+    lineage:`${CONTROL.lineage} Same live production native domain ports and ToolRegistry for both kernels.`,
     files:loaded.manifest.files.map(file=>({...file,output:relative(ROOT,file.output)}))};
   await save(join(OUT,'legacy-snapshot.json'),manifest);
   return manifest;
@@ -204,7 +210,7 @@ async function worker(kernel, scenarioId, leg = {}) {
   } };
   assert.ok(session.registry instanceof core.ToolRegistry);
   assert.ok(bridge.tools.some(t => t.name === 'read_emevd_event'));
-  if(leg.repeatedDescriptions)bridge.tools=bridge.tools.map(tool=>({...tool,description:`${tool.description} ${AGENT_TOOL_RESULT_INSTRUCTIONS}`}));
+  bridge.tools=createExperimentToolDescriptions(bridge.tools,AGENT_TOOL_RESULT_INSTRUCTIONS,leg.repeatedDescriptions);
   const retrievalCalls=[];let retrieve;
   if(leg.ragMode){
     const retrieval=createExperimentRetrieval(core,{before,target,workspaceId:session.coreSession.workspaceId,onRetrieve:call=>retrievalCalls.push(call)});
@@ -334,5 +340,5 @@ async function worker(kernel, scenarioId, leg = {}) {
 }
 
 
-return {ROOT,OUT,LEGACY,ORACLE_SHA,ORACLE_SOURCE,ORACLE_ASSEMBLY,DOTNET,CORPUS_ROOT,BRIDGE,LOADER,MANIFEST,FILE,TARGET,SCENARIOS,CONFIG,SAMPLING,LIMITS,hash,fileHash,save,dotnetEnv,treeInputs,prepare,worker,snapshotLegacy,oracle};
+return {ROOT,OUT,LEGACY,CONTROL,ORACLE_SHA,ORACLE_SOURCE,ORACLE_ASSEMBLY,DOTNET,CORPUS_ROOT,BRIDGE,LOADER,MANIFEST,FILE,TARGET,SCENARIOS,CONFIG,SAMPLING,LIMITS,hash,fileHash,save,dotnetEnv,treeInputs,prepare,worker,snapshotLegacy,oracle};
 }

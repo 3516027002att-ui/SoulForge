@@ -8,7 +8,7 @@ import {join,resolve,dirname} from 'node:path';
 import {pathToFileURL} from 'node:url';
 import {createOwnedNativeComparisonRuntime} from './owned-native-agent-comparison.mjs';
 import {AGENT_EXPERIMENTS,experimentSourceTransform,experimentActivation} from './agent-experiment-treatments.mjs';
-import {LEGACY_AGENT_BASELINE} from './legacy-agent-baseline.mjs';
+import {LEGACY_AGENT_CONTROLS,selectLegacyAgentControl,inspectLegacyAgentControl} from './legacy-agent-baseline.mjs';
 const exec=promisify(execFile),sha=value=>createHash('sha256').update(value).digest('hex');
 const fail=(code,message)=>Object.assign(new Error(message),{code});
 const positive=(value,name)=>{if(!Number.isFinite(value)||value<=0)throw fail('AGENT_EXPERIMENT_BUDGET_REQUIRED',`Explicit positive ${name} is required.`);return value;};
@@ -16,6 +16,7 @@ const integer=(value,name)=>{positive(value,name);if(!Number.isSafeInteger(value
 export const REPORTING_INSTRUCTION='Return the final report as one JSON object with claimedStatus "completed", "blocked" or "partial" and observedRestBehavior. Provider termination is not independent task verification.';
 
 export function validateExperimentInputs(input){
+ const control=selectLegacyAgentControl(input.control);
  const spec=AGENT_EXPERIMENTS[input.experiment];
  if(!spec)throw fail('AGENT_EXPERIMENT_UNAVAILABLE','No source-bound isolated treatment exists for this experiment. The full cutover does not isolate one heuristic.');
  const provider=input.provider;
@@ -32,7 +33,7 @@ export function validateExperimentInputs(input){
  const sampling=input.sampling??{temperature:0,topP:1,maxTokens:512};
  if(!Number.isFinite(sampling.temperature)||sampling.temperature<0||sampling.temperature>2||!Number.isFinite(sampling.topP)||sampling.topP<=0||sampling.topP>1)throw fail('AGENT_EXPERIMENT_SAMPLING_INVALID','Explicit sampling values are outside the supported ranges.');
  integer(sampling.maxTokens,'sampling.maxTokens');
- return {spec,provider,budget,sampling};
+ return {spec,provider,budget,sampling,control};
 }
 
 export async function previewAgentExperiment(input){
@@ -50,18 +51,34 @@ export async function previewAgentExperiment(input){
  if(identities.corpus&&(identities.corpus.sha256!==fixture.sha256||identities.corpus.byteLength!==fixture.byteLength))unavailable.push({input:'corpus',reason:'pinned-input-mismatch'});
  if(identities.oracle&&identities.oracle.sha256!==runtime.ORACLE_SHA)unavailable.push({input:'oracle',reason:'pinned-input-mismatch'});
  let baseline,source;
+ const [controlRead,headRead,diffRead]=await Promise.allSettled([
+  inspectLegacyAgentControl(runtime.ROOT,checked.control.id),
+  exec('git',['rev-parse','HEAD'],{cwd:runtime.ROOT}),
+  exec('git',['diff','--binary','HEAD'],{cwd:runtime.ROOT,maxBuffer:8388608})
+ ]);
+ if(headRead.status==='fulfilled'&&diffRead.status==='fulfilled')source={commit:headRead.value.stdout.trim(),diffSha256:sha(diffRead.value.stdout)};
+ else unavailable.push({input:'current-source',reason:'git-identity-unavailable'});
  try{
-  const [{stdout:blob},{stdout:head},{stdout:diff}]=await Promise.all([exec('git',['show',`${LEGACY_AGENT_BASELINE}:packages/core/src/model-services/agentLoop.ts`],{cwd:runtime.ROOT,maxBuffer:8388608}),exec('git',['rev-parse','HEAD'],{cwd:runtime.ROOT}),exec('git',['diff','--binary','HEAD'],{cwd:runtime.ROOT,maxBuffer:8388608})]);
-  baseline={revision:LEGACY_AGENT_BASELINE,controlSourceSha256:sha(blob),treatments:checked.spec.variants.map(variant=>experimentSourceTransform(input.experiment,variant)?.('packages/core/src/model-services/agentLoop.ts',blob)?.treatment??{id:input.experiment,variant,controlSourceSha256:sha(blob),changedConditions:0})};
-  source={commit:head.trim(),diffSha256:sha(diff)};
- }catch(error){if(error.code?.startsWith('AGENT_EXPERIMENT_'))throw error;unavailable.push({input:'legacy-baseline',reason:'exact-revision-unavailable'});}
+  if(controlRead.status==='rejected')throw controlRead.reason;
+  const {source:blob,control}=controlRead.value;
+  baseline={...control,controlSourceSha256:sha(blob),treatments:checked.spec.variants.map(variant=>experimentSourceTransform(input.experiment,variant,control.id)?.('packages/core/src/model-services/agentLoop.ts',blob)?.treatment??{id:input.experiment,variant,controlId:control.id,revision:control.revision,controlSourceSha256:sha(blob),changedConditions:0})};
+ }catch(error){
+  if(typeof error?.code==='string'&&error.code.startsWith('AGENT_EXPERIMENT_'))throw error;
+  unavailable.push({input:'legacy-baseline',reason:'exact-revision-unavailable',controlId:checked.control.id,revision:checked.control.revision,...(Number.isInteger(error?.code)?{exitCode:error.code}:{})});
+ }
+ const controlHistory=[];
+ if(checked.control.id!=='historical-217'){
+  const original=LEGACY_AGENT_CONTROLS['historical-217'];
+  try{await inspectLegacyAgentControl(runtime.ROOT,original.id);controlHistory.push({...original,status:'available'});}
+  catch(error){controlHistory.push({...original,status:'unavailable',reason:typeof error?.code==='string'&&error.code.startsWith('AGENT_EXPERIMENT_')?'source-identity-mismatch':'exact-revision-unavailable'});}
+ }
  const build=await runtime.treeInputs(['packages/core/dist','packages/shared/dist','packages/agent/src','packages/agent/package.json']).catch(()=>undefined);
  const nativeBuild=identities.bridge?await runtime.treeInputs([dirname(resolve(required.bridge))]).catch(()=>undefined):undefined;
  const implementation=await runtime.treeInputs(['scripts/run-agent-provider-experiment.mjs','scripts/testing/agent-provider-experiment.mjs','scripts/testing/agent-experiment-treatments.mjs','scripts/testing/owned-native-agent-comparison.mjs','scripts/testing/legacy-agent-baseline.mjs']);
  if(!build)unavailable.push({input:'built-core',reason:'build-unavailable'});
  if(identities.bridge&&!nativeBuild)unavailable.push({input:'native-bridge-build',reason:'build-unavailable'});
  const tasks=runtime.SCENARIOS.map(task=>({...task,permissionMode:task.id==='false-model-success'?'plan':'normal',reportingInstruction:REPORTING_INSTRUCTION}));
- return {schema:'agent-provider-experiment-v1',status:unavailable.length?'unavailable':'ready',execution:'not_run',networkCalls:0,credentialAccess:false,experiment:{id:input.experiment,kind:checked.spec.kind,change:checked.spec.change,variants:checked.spec.variants},bindings:{source,implementationSha256:implementation.sha256,build:build?{sha256:build.sha256,fileCount:build.files.length}:undefined,nativeBuild:nativeBuild?{sha256:nativeBuild.sha256,fileCount:nativeBuild.files.length}:undefined,baseline,provider:{...checked.provider,configurationSha256:sha(JSON.stringify(checked.provider)),liveAvailability:'unverified'},sampling:checked.sampling,budget:checked.budget,resource:fixture,independentOracle:{commit:'ee1dd61958f60bdc51ce3da548e9a90a8ab39905',assemblySha256:runtime.ORACLE_SHA},identities,tasks,taskDefinitionsSha256:sha(JSON.stringify(tasks))},unavailable,results:[],acceptance:{status:'unverified',reason:'Real-model experiment has not run; the established native-task, wrong-write and false-success criteria remain unassessed'},limits:['One isolated treatment per command; this is not attribution of the full default cutover','One pinned EMEVD and independent native readback, not game-runtime or whole-corpus acceptance','Configured prices estimate reported-usage cost; actual billing remains unverified','Zero activation is unobserved effect, not proof of quality equivalence']};
+ return {schema:'agent-provider-experiment-v1',status:unavailable.length?'unavailable':'ready',execution:'not_run',networkCalls:0,credentialAccess:false,experiment:{id:input.experiment,kind:checked.spec.kind,change:checked.spec.change,variants:checked.spec.variants},bindings:{source,implementationSha256:implementation.sha256,build:build?{sha256:build.sha256,fileCount:build.files.length}:undefined,nativeBuild:nativeBuild?{sha256:nativeBuild.sha256,fileCount:nativeBuild.files.length}:undefined,baseline,controlHistory,provider:{...checked.provider,configurationSha256:sha(JSON.stringify(checked.provider)),liveAvailability:'unverified'},sampling:checked.sampling,budget:checked.budget,resource:fixture,independentOracle:{commit:'ee1dd61958f60bdc51ce3da548e9a90a8ab39905',assemblySha256:runtime.ORACLE_SHA},identities,tasks,taskDefinitionsSha256:sha(JSON.stringify(tasks))},unavailable,results:[],acceptance:{status:'unverified',reason:'Real-model experiment has not run; the established native-task, wrong-write and false-success criteria remain unassessed'},limits:['One isolated treatment per command; this is not attribution of the full default cutover','One pinned EMEVD and independent native readback, not game-runtime or whole-corpus acceptance','Configured prices estimate reported-usage cost; actual billing remains unverified','Zero activation is unobserved effect, not proof of quality equivalence']};
 }
 
 export function evaluateExperimentLeg(spec,report,usage){
@@ -119,7 +136,7 @@ export async function executeAgentExperiment(input,plan,ports={}){
    const legController=new AbortController(),legTimer=setTimeout(()=>legController.abort(),input.budget.maxLegTimeoutMs);
    const usage=[];legUsage=usage;const start=shared.stats();
    try{
-    const report=await runtime.worker('legacy',task.id,{label:`${input.experiment}-${variant}`,snapshotLabel:`${input.experiment}-${variant}`,sourceTransform:experimentSourceTransform(input.experiment,variant),adapter:shared.adapter,config:{...input.provider,id:'provider-experiment',displayName:'Explicit provider experiment',hasCredential:true,createdAt:'',updatedAt:''},apiKey:key,sampling:input.sampling,pricing:input.provider.pricing,limits:{...runtime.LIMITS,maxSteps:input.budget.maxSteps,maxOutputTokens:input.budget.maxLegOutputTokens,maxCost:input.budget.maxLegCost,timeoutMs:input.budget.maxLegTimeoutMs},signal:AbortSignal.any([controller.signal,legController.signal]),permissionMode:task.permissionMode,repeatedDescriptions:plan.experiment.kind==='description'&&variant==='repeated',ragMode:plan.experiment.kind==='rag'?variant:undefined,reportingInstruction:REPORTING_INSTRUCTION});
+    const report=await runtime.worker('legacy',task.id,{label:`${input.experiment}-${variant}`,snapshotLabel:`${input.experiment}-${variant}`,sourceTransform:experimentSourceTransform(input.experiment,variant,plan.bindings.baseline?.id),adapter:shared.adapter,config:{...input.provider,id:'provider-experiment',displayName:'Explicit provider experiment',hasCredential:true,createdAt:'',updatedAt:''},apiKey:key,sampling:input.sampling,pricing:input.provider.pricing,limits:{...runtime.LIMITS,maxSteps:input.budget.maxSteps,maxOutputTokens:input.budget.maxLegOutputTokens,maxCost:input.budget.maxLegCost,timeoutMs:input.budget.maxLegTimeoutMs},signal:AbortSignal.any([controller.signal,legController.signal]),permissionMode:task.permissionMode,repeatedDescriptions:plan.experiment.kind==='description'&&variant==='repeated',ragMode:plan.experiment.kind==='rag'?variant:undefined,reportingInstruction:REPORTING_INSTRUCTION});
     const evaluated=evaluateExperimentLeg(AGENT_EXPERIMENTS[input.experiment],report,usage),end=shared.stats();
     results.push({...evaluated,variant,status:report.executionError?'failed':'executed',budgetBefore:start,budgetAfter:end,configuredPriceCost: evaluated.usage.status==='provider-reported'?{status:'estimate-from-reported-usage',currency:input.provider.currency,value:(evaluated.usage.inputTokens*input.provider.pricing.inputPerMillion+evaluated.usage.outputTokens*input.provider.pricing.outputPerMillion)/1e6}:{status:'unverified'},report:join(outputRoot,`${task.id}-${input.experiment}-${variant}`,'result.json')});
    }catch(error){results.push({scenario:task.id,variant,status:'failed',taskVerdict:'unverified',reportedUsageSamples:usage,error:{code:error.code??'AGENT_EXPERIMENT_LEG_FAILED',message:core.redactSecrets(String(error.message??error).replaceAll(key,'[REDACTED]'))},budgetAfter:shared.stats()});}finally{legUsage=undefined;clearTimeout(legTimer);}

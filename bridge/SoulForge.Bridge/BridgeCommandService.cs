@@ -2515,15 +2515,49 @@ internal sealed class BridgeCommandService
                 var sessionToken = OptionString("sessionToken", "");
                 var cursor = OptionString("cursor", "");
                 // Resolve file hash for session validation
-                byte[] fileBytesForHash;
-                using (mapTiming?.Measure("fileReadMs"))
-                {
-                    fileBytesForHash = File.ReadAllBytes(file);
-                }
+                byte[]? fileBytesForHash = null;
                 string fileHash;
-                using (mapTiming?.Measure("sourceHashMs"))
+                if (string.IsNullOrWhiteSpace(sessionToken))
                 {
-                    fileHash = Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(fileBytesForHash)).ToLowerInvariant();
+                    using (mapTiming?.Measure("fileReadMs"))
+                        fileBytesForHash = File.ReadAllBytes(file);
+                    using (mapTiming?.Measure("sourceHashMs"))
+                        fileHash = Convert.ToHexString(SHA256.HashData(fileBytesForHash)).ToLowerInvariant();
+                }
+                else
+                {
+                    // A page still verifies every source byte. The retained FLVER
+                    // supplies geometry, so avoid another source-sized LOH array
+                    // on every warm page merely to hash it and discard it.
+                    FileStream source;
+                    using (mapTiming?.Measure("fileReadMs"))
+                        source = new FileStream(file, FileMode.Open, FileAccess.Read,
+                            FileShare.Read, bufferSize: 1,
+                            options: FileOptions.SequentialScan);
+                    using (source)
+                    {
+                        var buffer = System.Buffers.ArrayPool<byte>.Shared.Rent(64 * 1024);
+                        try
+                        {
+                            using var hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
+                            while (true)
+                            {
+                                cancellationToken.ThrowIfCancellationRequested();
+                                int read;
+                                using (mapTiming?.Measure("fileReadMs"))
+                                    read = source.Read(buffer, 0, 64 * 1024);
+                                if (read == 0) break;
+                                using (mapTiming?.Measure("sourceHashMs"))
+                                    hash.AppendData(buffer, 0, read);
+                            }
+                            using (mapTiming?.Measure("sourceHashMs"))
+                                fileHash = Convert.ToHexString(hash.GetHashAndReset()).ToLowerInvariant();
+                        }
+                        finally
+                        {
+                            System.Buffers.ArrayPool<byte>.Shared.Return(buffer);
+                        }
+                    }
                 }
 
                 MapStaticGeometryService.SessionEntry? session = null;
@@ -2560,6 +2594,17 @@ internal sealed class BridgeCommandService
 
                     string resolvedEntryName = modelName;
                     byte[]? flverBytes = null;
+                    // Unknown/expired session tokens keep the existing cold-read
+                    // fallback. Only a validated warm session needs no source array.
+                    if (fileBytesForHash is null)
+                    {
+                        using (mapTiming?.Measure("fileReadMs"))
+                            fileBytesForHash = File.ReadAllBytes(file);
+                        // Bind a cold fallback to the bytes it will parse even
+                        // if the file changed after the preceding streamed read.
+                        using (mapTiming?.Measure("sourceHashMs"))
+                            fileHash = Convert.ToHexString(SHA256.HashData(fileBytesForHash)).ToLowerInvariant();
+                    }
                     using (mapTiming?.Measure("bndResolveMs"))
                     {
                         // Resolve FLVER payload: BND4 container or direct FLVER
@@ -2569,13 +2614,13 @@ internal sealed class BridgeCommandService
                         bool isDcx = payload.Length >= 4 && payload.AsSpan(0, 4).SequenceEqual("DCX\0"u8);
                         if (isDcx && IsLikelyBnd4ContainerPath(file))
                         {
-                            var cached = Bnd4NativeWriter.GetCachedBinder(file, oodleRuntimeRoot);
+                            var cached = Bnd4NativeWriter.GetBinderFromCapturedBytes(file, sourceBytes, oodleRuntimeRoot);
                             payload = cached.Dcx.Payload;
                             cachedBinder = cached.Binder;
                         }
                         else if (isDcx)
                         {
-                            payload = DcxNativeDocument.Read(file, oodleRuntimeRoot).Payload;
+                            payload = DcxNativeDocument.Read(sourceBytes, oodleRuntimeRoot, file).Payload;
                         }
 
                         if (payload.Length >= 4 && payload.AsSpan(0, 4).SequenceEqual("BND4"u8))

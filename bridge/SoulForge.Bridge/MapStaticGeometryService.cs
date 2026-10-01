@@ -1159,7 +1159,7 @@ internal static class MapStaticGeometryService
         for (var triangleIndex = 0; triangleIndex < triangleCount; triangleIndex++)
         {
             var triangle = triangles[triangleIndex].Triangle;
-            DecodeChunkVertex(
+            var denseA = DecodeChunkVertex(
                 session,
                 mesh,
                 descriptor,
@@ -1171,7 +1171,7 @@ internal static class MapStaticGeometryService
                 uvScratch,
                 skinWeights,
                 skinIndices);
-            DecodeChunkVertex(
+            var denseB = DecodeChunkVertex(
                 session,
                 mesh,
                 descriptor,
@@ -1183,7 +1183,7 @@ internal static class MapStaticGeometryService
                 uvScratch,
                 skinWeights,
                 skinIndices);
-            DecodeChunkVertex(
+            var denseC = DecodeChunkVertex(
                 session,
                 mesh,
                 descriptor,
@@ -1196,11 +1196,6 @@ internal static class MapStaticGeometryService
                 skinWeights,
                 skinIndices);
 
-            if (!sourceToDense.TryGetValue(triangle.A, out var denseA)
-                || !sourceToDense.TryGetValue(triangle.B, out var denseB)
-                || !sourceToDense.TryGetValue(triangle.C, out var denseC))
-                throw new InvalidDataException(
-                    "MAP_STATIC_DENSE_INDEX_BUILD_FAILED: triangle source was not decoded");
             denseIndices.Add((uint)denseA);
             denseIndices.Add((uint)denseB);
             denseIndices.Add((uint)denseC);
@@ -1209,7 +1204,7 @@ internal static class MapStaticGeometryService
         return buffers;
     }
 
-    private static void DecodeChunkVertex(
+    private static int DecodeChunkVertex(
         SessionEntry session,
         MeshInfo mesh,
         FlverNativeDocument.FlverMeshGeometryDescriptor descriptor,
@@ -1222,12 +1217,14 @@ internal static class MapStaticGeometryService
         Span<float> skinWeights,
         Span<ushort> skinIndices)
     {
-        if (sourceToDense.ContainsKey(source)) return;
+        // The decode lookup already resolves the dense index. Returning it
+        // avoids a second dictionary lookup for every triangle corner.
+        if (sourceToDense.TryGetValue(source, out var dense)) return dense;
         if (source >= (uint)descriptor.SourceVertexCount)
             throw new InvalidDataException(
                 "MAP_STATIC_SOURCE_VERTEX_OUT_OF_BOUNDS: source vertex index exceeds descriptor");
 
-        var dense = buffers.SourceVertexIndices.Count;
+        dense = buffers.SourceVertexIndices.Count;
         sourceToDense.Add(source, dense);
         buffers.SourceVertexIndices.Add(source);
         if (!session.Flver.DecodePositionInto(
@@ -1335,6 +1332,7 @@ internal static class MapStaticGeometryService
             buffers.Uvs.Add(uvScratch[0]);
             buffers.Uvs.Add(uvScratch[1]);
         }
+        return dense;
     }
 
     private static object BuildChunkObject(

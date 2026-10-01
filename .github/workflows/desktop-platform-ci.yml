@@ -107,6 +107,10 @@ jobs:
           node --test scripts/agent-shared-entry.fixture.mjs scripts/agent-headless.fixture.mjs scripts/agent-utility.fixture.mjs scripts/agent-kernel-comparison.fixture.mjs scripts/real-agent-evaluator.fixture.mjs
           node --test scripts/agent-call-chain.fixture.mjs scripts/real-agent-harness.fixture.mjs
           node --test packages/core/dist/cli/localCliSession.storage.test.js packages/core/dist/storage/localApplicationData.test.js
+          node --test scripts/param-source-binding.fixture.mjs scripts/container-child-inverse-source.fixture.mjs
+          # Only this source-bound comparison needs its declared public control; no full history gate.
+          git fetch --no-tags --depth=1 origin c4a8b158f935c35624f132850b068a8e02921f68
+          node --test scripts/agent-provider-experiment.fixture.mjs
       - name: Run native runtime and synthetic Bridge fixtures
         id: native
         env:
@@ -116,11 +120,19 @@ jobs:
           node --test scripts/tae-identity.fixture.mjs scripts/hks-native-platform.fixture.mjs scripts/bridge-linux-production.fixture.mjs scripts/native-build-environment.fixture.mjs
           node --test scripts/owned-temporary-directory.test.mjs scripts/owned-process.test.mjs scripts/bridge-build-output-ownership.test.mjs
           node scripts/verify-bridge-write-boundary-gate.mjs
+          node scripts/check.mjs --suite file:scripts/scene/map-warm-source-hash.fixture.mjs,file:scripts/scene/map-captured-source.fixture.mjs,file:scripts/scene/bnd-path-freshness.fixture.mjs,file:scripts/scene/map-uv-count.fixture.mjs --require-executed
       - name: Run sandbox-preserving Electron database utility smoke
         id: database
         run: |
           node --test scripts/desktop-test-build.test.mjs
           node scripts/run-database-utility-smoke.mjs --production-binding
+      - name: Run renderer and sandbox-preserving native theme frame checks
+        id: theme
+        run: |
+          node --input-type=module -e 'import assert from "node:assert/strict"; import { statSync } from "node:fs"; for (const file of ["apps/desktop/out/main/index.js", "apps/desktop/out/preload/index.cjs", "apps/desktop/out/renderer/index.html"]) { const info = statSync(file); assert.ok(info.isFile() && info.size > 0, "Theme runtime artifact missing: " + file); }'
+          npm run test:renderer-unit
+          node --test scripts/spectral-themes.test.mjs scripts/spectral-field-runtime.test.mjs scripts/ci-public-report.test.mjs
+          node node_modules/@playwright/test/cli.js test -c apps/desktop/e2e/playwright/playwright.config.mjs native-frame-theme.spec.mjs
       - name: Build unsigned desktop package directory
         id: package
         if: ${{ !cancelled() && steps.commands.outcome == 'success' && steps.typecheck.outcome == 'success' && steps.build.outcome == 'success' && steps.publish.outcome == 'success' }}

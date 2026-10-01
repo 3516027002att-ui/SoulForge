@@ -13,8 +13,9 @@ export const PUBLIC_CI_CHECKS = Object.freeze([
   { id: 'csharp', name: 'C# Bridge synthetic regression tests' },
   { id: 'publish', name: 'Matching-host self-contained Bridge publish' },
   { id: 'agent', name: 'Deterministic Agent kernel and host fixtures' },
-  { id: 'native', name: 'Native HKS/Lua50/CP932 runtime and synthetic TAE fixtures' },
+  { id: 'native', name: 'Native HKS/Lua50/CP932 runtime and synthetic TAE/MAP source fixtures' },
   { id: 'database', name: 'Electron SQLite utility smoke and forced restart' },
+  { id: 'theme', name: 'Renderer regressions and sandboxed native theme/frame runtime' },
   { id: 'package', name: 'Unsigned unpacked desktop directory build' },
   { id: 'archive', name: 'Package directory archive' }
 ]);

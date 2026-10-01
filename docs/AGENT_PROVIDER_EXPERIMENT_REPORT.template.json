@@ -17,8 +17,12 @@
       "sha256": null
     },
     "baseline": {
-      "revision": "217234bb97ee20e3a83048042c4a1e67e9a16d33",
+      "id": null,
+      "revision": null,
+      "loopSha256": null,
       "controlSourceSha256": null,
+      "modelServicesTree": null,
+      "lineage": null,
       "treatments": []
     },
     "provider": {
@@ -38,7 +42,8 @@
     "nativeBuild": {
       "sha256": null,
       "fileCount": null
-    }
+    },
+    "controlHistory": []
   },
   "results": [],
   "resultFields": {

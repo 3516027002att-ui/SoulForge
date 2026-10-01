@@ -1,6 +1,7 @@
 /** Experiment-only treatments; no production settings or alternate production kernel. */
 import {createHash} from 'node:crypto';
-export const BASELINE_LOOP_SHA256='064fb0b01a017c55ba58a9081dd9cfbbab1d0685bf4bad21626bc77aff12515d';
+import {LEGACY_AGENT_CONTROLS,selectLegacyAgentControl} from './legacy-agent-baseline.mjs';
+export const BASELINE_LOOP_SHA256=LEGACY_AGENT_CONTROLS['historical-217'].loopSha256;
 const path='packages/core/src/model-services/agentLoop.ts';
 const rules={
  'empty-conclusion':{needle:"if (safeMessage.content.trim() === '' && steps > 1\n        && emptyConclusionRetries < MAX_EMPTY_CONCLUSION_RETRIES)",activationText:'请根据上述已执行的工具'},
@@ -19,18 +20,19 @@ export const AGENT_EXPERIMENTS=Object.freeze({
  ...Object.fromEntries(Object.entries(rules).map(([id,rule])=>[id,{kind:'heuristic',variants:['on','off'],change:'One source-hash-bound condition in the exact legacy control snapshot.',...rule}]))
 });
 const sha=value=>createHash('sha256').update(value).digest('hex');
-export function experimentSourceTransform(id,variant){
+export function experimentSourceTransform(id,variant,controlId){
+ const control=selectLegacyAgentControl(controlId);
  const spec=AGENT_EXPERIMENTS[id];
  if(!spec)throw Object.assign(new Error('Experiment is unavailable: no defined isolated treatment.'),{code:'AGENT_EXPERIMENT_UNAVAILABLE'});
  if(!spec.variants.includes(variant))throw Object.assign(new Error('Unknown experiment variant.'),{code:'AGENT_EXPERIMENT_VARIANT_INVALID'});
  if(spec.kind!=='heuristic')return undefined;
  return (sourcePath,source)=>{
   if(sourcePath!==path)return undefined;
-  if(sha(source)!==BASELINE_LOOP_SHA256)throw Object.assign(new Error('Pinned legacy control source does not match the treatment contract.'),{code:'AGENT_EXPERIMENT_BASELINE_DRIFT'});
+  if(sha(source)!==control.loopSha256)throw Object.assign(new Error('Pinned legacy control source does not match the treatment contract.'),{code:'AGENT_EXPERIMENT_BASELINE_DRIFT'});
   if(source.split(spec.needle).length!==2)throw Object.assign(new Error('Treatment condition must occur exactly once.'),{code:'AGENT_EXPERIMENT_CONDITION_DRIFT'});
   const replacement=id==='model-wording-partial'?spec.needle.replace('= completion','= false && completion'):spec.needle.replace('if (','if (false && (')+')';
   const materialized=variant==='off'?source.replace(spec.needle,replacement):source;
-  return {source:materialized,treatment:{id,variant,sourcePath,originalSha256:sha(source),materializedSha256:sha(materialized),conditionSha256:sha(spec.needle),changed:variant==='off',changedConditions:variant==='off'?1:0}};
+  return {source:materialized,treatment:{id,variant,controlId:control.id,revision:control.revision,sourcePath,originalSha256:sha(source),materializedSha256:sha(materialized),conditionSha256:sha(spec.needle),changed:variant==='off',changedConditions:variant==='off'?1:0}};
  };
 }
 export function experimentActivation(spec,report){

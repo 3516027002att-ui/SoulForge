@@ -4,7 +4,7 @@ using System.Security.Cryptography;
 
 internal sealed class DcxNativeDocument
 {
-    private const int MaxSourceBytes = 512 * 1024 * 1024;
+    internal const int MaxSourceBytes = 512 * 1024 * 1024;
     private const int MaxPayloadBytes = 512 * 1024 * 1024;
 
     private DcxNativeDocument(
@@ -50,6 +50,8 @@ internal sealed class DcxNativeDocument
     /// </summary>
     public static DcxNativeDocument Read(byte[] source, string? oodleRuntimeRoot = null, string? diagnosticPath = null)
     {
+        if (source.Length > MaxSourceBytes)
+            throw new InvalidDataException($"DCX 文件大小 {source.Length} 超出安全读取范围。");
         if (source.Length < 0x4C || !source.AsSpan(0, 4).SequenceEqual("DCX\0"u8))
             throw new InvalidDataException("输入不是受支持的 DCX 文档。");
         if (!source.AsSpan(0x18, 4).SequenceEqual("DCS\0"u8)

@@ -102,7 +102,7 @@ const paramPageCache = readLifetime.createCache<string, CachedParamDocument>();
  * `sessionBindings` only and must never import or reference this symbol.
  */
 const paramAllCache = readLifetime.createCache<string, CachedParamDocument>();
-interface UnpackedParamChild { absolutePath: string; entryIndex: number; name: string; storedContentHash: string; }
+interface UnpackedParamChild { absolutePath: string; entryIndex: number; name: string; storedContentHash: string; sourceHash: string; }
 const unpackedParamCache = readLifetime.createCache<string, UnpackedParamChild>();
 interface ParamUnpackExtractionResult {
   parseStatus: string;
@@ -110,8 +110,20 @@ interface ParamUnpackExtractionResult {
   diagnostics: Diagnostic[];
 }
 const unpackedParamInFlight = readLifetime.createCache<string, Promise<ParamUnpackExtractionResult>>();
-type MemoizedParamEntryTable = Array<{ index: number; name: string; storedContentHash: string }>;
+interface MemoizedParamEntryTable {
+  sourceHash: string;
+  entries: Array<{ index: number; name: string; storedContentHash: string }>;
+}
 const paramEntryTableCache = readLifetime.createCache<string, MemoizedParamEntryTable>();
+/** Native sourceHash is the physical DCX/BND file hash, never the decoded payload or cache namespace. */
+function paramContainerSourceDiagnostic(sourceHash: unknown, expectedSourceHash: string | undefined, sourceUri: string): Diagnostic | null {
+  if (typeof sourceHash === 'string' && /^[0-9a-f]{64}$/i.test(sourceHash)
+    && (expectedSourceHash === undefined || sourceHash === expectedSourceHash)) return null;
+  return {
+    severity: 'error', code: 'PARAM_CONTAINER_SOURCE_HASH_MISMATCH',
+    message: '容器源版本与预期不匹配，无法复用或解包 PARAM；请刷新资源索引后重试。', sourceUri
+  };
+}
 const CONTAINER_PARAM_ALL_CACHE_LIMIT = 4;
 const containerParamAllCache = readLifetime.createCache<string, CachedParamDocument>();
 interface CachedContainerParamSession {
@@ -402,7 +414,10 @@ export function registerParamIpcHandlers(deps: ParamIpcDeps): void {
 async function unpackContainerParamChild(input: {
   containerPath: string;
   containerUri: string;
+  /** Cache namespace only; missing indexed hashes use a path digest. */
   containerHash: string;
+  /** Authoritative physical source hash, when available. */
+  expectedSourceHash: string | undefined;
   /** 条目索引，或条目名（basename，如 `AtkParam_Npc.param`）。 */
   entry: { index: number } | { name: string };
 }): Promise<
@@ -445,9 +460,9 @@ async function unpackContainerParamChild(input: {
   // 先把整个 parambnd（game-side 是 KRAK，几十 MB）解压一遍，然后才发现
   // 解包缓存命中（问题 5-B）。失败路径不 set：一次瞬时失败不能被钉住。
   const entryTableKey = `${input.containerUri}#${input.containerHash}`;
-  let named = paramEntryTableCache.get(entryTableKey);
-  const entryTableReused = named !== undefined;
-  if (!named) {
+  let entryTable = paramEntryTableCache.get(entryTableKey);
+  const entryTableReused = entryTable !== undefined;
+  if (!entryTable) {
     const dcx = await runBridge<NativeDcxEnvelopeLike & { entries?: NativeBnd4EntryLike[] }>({
       command: 'list-bnd4-entries',
       filePath: input.containerPath,
@@ -461,6 +476,9 @@ async function unpackContainerParamChild(input: {
     if (dcx.parseStatus === 'failed') {
       return { ok: false, diagnostics: sanitizeDiagnostics(dcx.diagnostics) };
     }
+    const sourceHash = dcx.data?.sourceHash;
+    const sourceDiagnostic = paramContainerSourceDiagnostic(sourceHash, input.expectedSourceHash, input.containerUri);
+    if (sourceDiagnostic) return { ok: false, diagnostics: [sourceDiagnostic] };
     const entries = dcx.data?.entries ?? dcx.data?.nested?.entries ?? [];
     if (entries.length === 0) {
       return {
@@ -475,13 +493,16 @@ async function unpackContainerParamChild(input: {
     }
 
     const seen = new Set<string>();
-    named = entries.map((entry, position) => ({
+    entryTable = { sourceHash: sourceHash!, entries: entries.map((entry, position) => ({
       index: entry.index ?? position,
       name: sanitizeEntryName(entry.name ?? `entry_${position}`, entry.index ?? position, seen),
       storedContentHash: entry.contentHash ?? ''
-    }));
-    paramEntryTableCache.set(entryTableKey, named);
+    })) };
+    paramEntryTableCache.set(entryTableKey, entryTable);
   }
+  const sourceDiagnostic = paramContainerSourceDiagnostic(entryTable.sourceHash, input.expectedSourceHash, input.containerUri);
+  if (sourceDiagnostic) return { ok: false, diagnostics: [sourceDiagnostic] };
+  const named = entryTable.entries;
   // 先把联合类型解到局部常量再比较：直接在回调里访问 input.entry.index
   // 拿不到窄化后的类型（回调边界会丢失 `'index' in` 的判别结果）。
   const wanted = input.entry;
@@ -507,7 +528,9 @@ async function unpackContainerParamChild(input: {
   // 点击时同一 IndexedFile 已被后台补上真实容器哈希。不能因为缓存键变了
   // 就重新解包到另一条路径——调用方手里的 native document session token
   // 绑定的是旧路径。先按 sourceUri + entryIndex + native 条目内容哈希
-  // 找到旧缓存，再把它挂到新键；若条目内容真的变了，storedContentHash
+  // 找到旧缓存，再把它挂到新键；当新容器的 native 枚举已验证源哈希且
+  // 条目字节未变时，同样可保留原路径/session，只重新绑定容器来源。
+  // 若条目内容真的变了，storedContentHash
   // 不会相等，仍然走重新解包和新 session。
   const migratedCachedChild = directCachedChild === undefined
     ? [...unpackedParamCache.entries()].find(([key, candidate]) =>
@@ -521,12 +544,15 @@ async function unpackContainerParamChild(input: {
   // storedContentHash 会让 write-bnd4 的并发保护形同虚设（拿一个过期哈希去比对，
   // 要么误拒要么放过本该拒绝的覆盖）。哈希不符时重新解包。
   if (cachedChild
+    && target.storedContentHash.length > 0
     && cachedChild.storedContentHash === target.storedContentHash
     && existsSync(cachedChild.absolutePath)) {
-    if (migratedCachedChild !== undefined) unpackedParamCache.set(cacheKey, migratedCachedChild);
+    const boundChild = cachedChild.sourceHash === entryTable.sourceHash && cachedChild.name === target.name
+      ? cachedChild : { ...cachedChild, name: target.name, sourceHash: entryTable.sourceHash };
+    if (migratedCachedChild !== undefined || boundChild !== cachedChild) unpackedParamCache.set(cacheKey, boundChild);
     return {
       ok: true,
-      child: cachedChild,
+      child: boundChild,
       diagnostics: [{
         severity: 'info',
         code: 'PARAM_UNPACK_CACHE_HIT',
@@ -541,17 +567,18 @@ async function unpackContainerParamChild(input: {
   // ── 第二步：解包到会话暂存区 ──
   //
   // 不用 stageBridgeOutput：它用完即删，而解包产物要跨多次分页调用存活。
-  // 目录名含容器哈希前缀与条目索引，避免不同容器/条目互相覆盖。
+  // 目录名绑定已验证的物理源哈希与条目索引；路径摘要缓存命名空间
+  // 不随内容变化，不能用它覆盖仍被旧 document session 引用的暂存文件。
   const unpackDirectory = join(
     storage.stagingRoot,
     'param-unpack',
-    `${input.containerHash.slice(0, 16)}-${target.index}`
+    `${entryTable.sourceHash}-${target.index}`
   );
   const outputPath = join(unpackDirectory, target.name);
   // StrictMode/快速切换可能让同一个条目同时进入两次。解包是昂贵的 native
   // 写暂存操作，必须共享同一条 in-flight promise；键额外带 stagingRoot，避免
   // 两个工作区恰好打开同一 sourceUri/hash 时把一个工作区的路径交给另一个。
-  const extractionKey = `${cacheKey}#${resolve(storage.stagingRoot)}`;
+  const extractionKey = `${cacheKey}#${entryTable.sourceHash}#${target.storedContentHash}#${resolve(storage.stagingRoot)}`;
   let extraction = unpackedParamInFlight.get(extractionKey);
   if (!extraction) {
     extraction = (async (): Promise<ParamUnpackExtractionResult> => {
@@ -571,7 +598,7 @@ async function unpackContainerParamChild(input: {
       }
 
       try {
-        const extracted = await runBridge({
+        const extracted = await runBridge<{ sourceHash?: string; index?: number; contentHash?: string }>({
           command: 'extract-bnd4-child',
           filePath: input.containerPath,
           resourceUri: input.containerUri,
@@ -585,6 +612,18 @@ async function unpackContainerParamChild(input: {
           ...bridgeSession,
           ...oodle
         });
+        if (extracted.parseStatus !== 'failed') {
+          const sourceDiagnostic = paramContainerSourceDiagnostic(extracted.data?.sourceHash, entryTable.sourceHash, input.containerUri);
+          const childDiagnostic: Diagnostic | null = extracted.data?.index === target.index
+            && target.storedContentHash.length > 0 && extracted.data?.contentHash === target.storedContentHash
+            ? null : { severity: 'error', code: 'PARAM_UNPACK_CHILD_IDENTITY_MISMATCH',
+                message: '解包条目与已枚举的 PARAM 条目身份或内容哈希不匹配，请重新打开容器。', sourceUri: input.containerUri };
+          if (sourceDiagnostic || childDiagnostic) {
+            paramEntryTableCache.delete(entryTableKey);
+            return { parseStatus: 'failed', outputExists: false,
+              diagnostics: [...sanitizeDiagnostics(extracted.diagnostics), ...(sourceDiagnostic ? [sourceDiagnostic] : []), ...(childDiagnostic ? [childDiagnostic] : [])] };
+          }
+        }
         return {
           parseStatus: extracted.parseStatus,
           outputExists: existsSync(outputPath),
@@ -630,7 +669,8 @@ async function unpackContainerParamChild(input: {
     absolutePath: outputPath,
     entryIndex: target.index,
     name: target.name,
-    storedContentHash: target.storedContentHash
+    storedContentHash: target.storedContentHash,
+    sourceHash: entryTable.sourceHash
   };
   unpackedParamCache.set(cacheKey, child);
   return {
@@ -1857,6 +1897,7 @@ let paramMetadataCache: {
         containerPath: file.absolutePath,
         containerUri,
         containerHash: containerHashNow,
+        expectedSourceHash: containerHashNow,
         entry: { index: mutation.entryIndex }
       });
       if (!unpacked.ok) {
@@ -2093,6 +2134,7 @@ let paramMetadataCache: {
         containerPath: file.absolutePath,
         containerUri,
         containerHash: containerHashNow,
+        expectedSourceHash: containerHashNow,
         entry: { index: mutation.entryIndex }
       });
       if (!unpacked.ok) {
@@ -2327,6 +2369,7 @@ let paramMetadataCache: {
         containerPath: file.absolutePath,
         containerUri,
         containerHash: containerHashNow,
+        expectedSourceHash: containerHashNow,
         entry: { index: mutation.entryIndex }
       });
       if (!unpacked.ok) {
@@ -2496,10 +2539,12 @@ let paramMetadataCache: {
       }
     | { ok: false; diagnostics: Diagnostic[] }
   > => {
+    const expectedSourceHash = input.file.sha256 ?? (input.expectedContainerHash || undefined);
     const unpacked = await unpackContainerParamChild({
       containerPath: input.file.absolutePath,
       containerUri: input.containerUri,
-      containerHash: input.file.sha256 ?? input.expectedContainerHash,
+      containerHash: expectedSourceHash ?? createHash('sha256').update(input.file.absolutePath).digest('hex'),
+      expectedSourceHash,
       entry: { index: input.entryIndex }
     });
     if (!unpacked.ok) return { ok: false, diagnostics: sanitizeDiagnostics(unpacked.diagnostics) };
@@ -3343,6 +3388,9 @@ let paramMetadataCache: {
         diagnostics: roots.diagnostics
       };
     }
+    const expectedContainerHash = file.sha256;
+    const cacheContainerHash = expectedContainerHash
+      ?? createHash('sha256').update(file.absolutePath).digest('hex');
     const workspaceSessionId = deps.getActiveWorkspaceSessionId
       ? deps.getActiveWorkspaceSessionId()
       : deps.activeWorkspaceSessionId;
@@ -3368,24 +3416,25 @@ let paramMetadataCache: {
         diagnostics: sanitizeDiagnostics(dcx.diagnostics)
       };
     }
+    const sourceHash = dcx.data?.sourceHash;
+    const sourceDiagnostic = paramContainerSourceDiagnostic(sourceHash, expectedContainerHash, containerUri);
+    if (sourceDiagnostic) return { ok: false, containerUri, params: [], diagnostics: [sourceDiagnostic] };
     const entries = dcx.data?.entries ?? dcx.data?.nested?.entries ?? [];
     const seen = new Set<string>();
     const cachedEntryNames = new Set<string>();
-    const cacheContainerHash = file.sha256
-      ?? createHash('sha256').update(file.absolutePath).digest('hex');
     // listContainerParams 与后续 unpackContainerParamChild 共享同一份只读
     // 条目表；避免用户刚点开表时再次解压/枚举整个 parambnd。缓存键仍绑定
     // 容器哈希，后台补齐 sha256 或内容变化时不会把旧条目表当成新版本。
     paramEntryTableCache.set(
       `${containerUri}#${cacheContainerHash}`,
-      entries.map((entry, position) => {
+      { sourceHash: sourceHash!, entries: entries.map((entry, position) => {
         const index = entry.index ?? position;
         return {
           index,
           name: sanitizeEntryName(entry.name ?? `entry_${position}`, index, cachedEntryNames),
           storedContentHash: entry.contentHash ?? ''
         };
-      })
+      }) }
     );
     const params = entries
       .map((entry, position) => {
@@ -3468,12 +3517,14 @@ let paramMetadataCache: {
       // 缓存键用的容器哈希：file.sha256 缺失时退化为路径摘要（解包、条目表备忘、
       // 文档 LRU 共用同一份）。回给渲染器的 containerHash 仍是 file.sha256 ?? '' ——
       // 那一处故意在缺哈希时留空（要喂 write-bnd4 的并发保护），两套哈希不许合并。
+      const expectedContainerHash = file.sha256;
       const cacheContainerHash =
-        file.sha256 ?? createHash('sha256').update(file.absolutePath).digest('hex');
+        expectedContainerHash ?? createHash('sha256').update(file.absolutePath).digest('hex');
       const unpacked = await unpackContainerParamChild({
         containerPath: file.absolutePath,
         containerUri,
         containerHash: cacheContainerHash,
+        expectedSourceHash: expectedContainerHash,
         entry: { index: entryIndex }
       });
       if (!unpacked.ok) {
@@ -3520,7 +3571,8 @@ let paramMetadataCache: {
       //    只给 legacy 全量路径使用，分页路径禁止写入该缓存，避免把全量 payload
       //    与轻量索引混在一起。字段定义不随 doc 缓存，信任裁决按当次策略现算。
       const docCacheKey = `${containerUri}#${cacheContainerHash}#${entryIndex}`;
-      let doc = loadAll ? takeContainerParamAll(docCacheKey) : undefined;
+      const fullDocCacheKey = `${docCacheKey}#${unpacked.child.storedContentHash}`;
+      let doc = loadAll ? takeContainerParamAll(fullDocCacheKey) : undefined;
       const activeWorkspaceSessionId = workspaceSessionId ?? '';
       let documentSessionToken = !loadAll
         && typeof requestedDocumentSessionToken === 'string'
@@ -3592,7 +3644,7 @@ let paramMetadataCache: {
           rows: parsedRows,
           ...(full.data.authority ? { authority: full.data.authority } : {})
         };
-        if (loadAll) putContainerParamAll(docCacheKey, doc);
+        if (loadAll) putContainerParamAll(fullDocCacheKey, doc);
       }
 
       if (!loadAll && doc && documentSessionToken) {
@@ -3633,7 +3685,7 @@ let paramMetadataCache: {
           containerUri,
           entryIndex: unpacked.child.entryIndex,
           paramName: unpacked.child.name,
-          containerHash: file.sha256 ?? '',
+          containerHash: expectedContainerHash ?? '',
           childHash: unpacked.child.storedContentHash,
           sourceHash: doc.sourceHash,
           typeName: doc.typeName,
@@ -3772,7 +3824,7 @@ let paramMetadataCache: {
          * containerHash 防「容器在读与写之间被改过」，childHash 防「同一条目被
          * 并发改过」。渲染器不自己算：它拿不到容器字节，算出来的只能是猜的。
          */
-        containerHash: file.sha256 ?? '',
+        containerHash: expectedContainerHash ?? '',
         childHash: unpacked.child.storedContentHash,
         sessionToken: payloadSessionToken,
         sourceHash: doc.sourceHash,
@@ -3890,12 +3942,14 @@ let paramMetadataCache: {
         return failure('PARAM_ENTRY_INDEX_INVALID', '容器条目下标非法。');
       }
 
-      const cacheContainerHash = file.sha256
+      const expectedContainerHash = file.sha256;
+      const cacheContainerHash = expectedContainerHash
         ?? createHash('sha256').update(file.absolutePath).digest('hex');
       const unpacked = await unpackContainerParamChild({
         containerPath: file.absolutePath,
         containerUri,
         containerHash: cacheContainerHash,
+        expectedSourceHash: expectedContainerHash,
         entry: { index: entryIndex }
       });
       if (!unpacked.ok) {
@@ -4028,7 +4082,7 @@ let paramMetadataCache: {
         })),
         // 截断必须说出来：少给行而不声明，用户会以为这个 param 就这么大。
         rowsTruncated: declared > rows.length,
-        containerHash: file.sha256 ?? '',
+        containerHash: expectedContainerHash ?? '',
         childHash: unpacked.child.storedContentHash,
         ...(full.data.authority ? { authority: full.data.authority } : {}),
         diagnostics: [
