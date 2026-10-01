@@ -17,6 +17,9 @@ test('headless Electron smoke selects a display backend without relaxing sandbox
   assert.deepEqual(build.desktopSmokeArgs('D:\\owned\\main\\smoke.js', false, 'D:\\owned\\.runtime\\electron.log'), [
     'D:\\owned\\main\\smoke.js', '--enable-logging=file', '--log-file=D:\\owned\\.runtime\\electron.log'
   ]);
+  assert.deepEqual(build.desktopSmokeArgs('D:\\owned output\\main\\smoke.js', false, undefined, 'D:\\owned output\\.runtime\\profile'), [
+    'D:\\owned output\\main\\smoke.js', '--user-data-dir=D:\\owned output\\.runtime\\profile'
+  ]);
 });
 
 test('smoke output allocation is distinct, bounded, and cleaned without touching production', async () => {

@@ -70,8 +70,9 @@ export async function withDesktopTestBuild(kind, execute, options = {}) {
   } finally { cancellation.dispose(); await rm(outputRoot, { recursive: true, force: true }); }
 }
 
-export function desktopSmokeArgs(entry, headless = false, logFile) {
+export function desktopSmokeArgs(entry, headless = false, logFile, userData) {
   return [entry, ...(headless ? ['--ozone-platform=headless'] : []),
+    ...(userData ? [`--user-data-dir=${userData}`] : []),
     ...(logFile ? ['--enable-logging=file', `--log-file=${logFile}`] : [])];
 }
 
@@ -110,9 +111,13 @@ export async function runDesktopSmoke(kind, entry, executable = process.execPath
     const marker = join(outputRoot, '.runtime', 'bootstrap-stages.txt');
     const databaseStageFile = join(outputRoot, '.runtime', 'database-stages.jsonl');
     const bootstrap = join(outputRoot, '.runtime', 'bootstrap.cjs');
+    // Select the profile before Chromium initializes; environment overrides
+    // alone do not bind its actual DIR_USER_DATA to this output owner.
+    const userData = join(outputRoot, '.runtime', 'electron-user-data');
+    await mkdir(userData, { recursive: true });
     if (useBootstrap) await writeFile(bootstrap, desktopSmokeBootstrap(entryPath, marker));
     const result = await runProcess({ command: executable,
-      args: desktopSmokeArgs(useBootstrap ? bootstrap : entryPath, process.platform === 'linux' && env.SF_E2E_HEADLESS === '1', logFile), cwd: root,
+      args: desktopSmokeArgs(useBootstrap ? bootstrap : entryPath, process.platform === 'linux' && env.SF_E2E_HEADLESS === '1', logFile, userData), cwd: root,
       env: { ...env, ELECTRON_ENABLE_LOGGING: '1', ELECTRON_LOG_FILE: logFile,
         ...(kind === 'database' ? { SOULFORGE_DATABASE_SMOKE_STAGE_FILE: databaseStageFile } : {}) }, signal,
       timeoutMs: readTimeoutMs('SOULFORGE_SMOKE_TIMEOUT_MS', 10 * 60 * 1000),

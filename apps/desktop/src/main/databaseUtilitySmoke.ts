@@ -32,6 +32,13 @@ app.on('child-process-gone', (_event, details) => {
 
 app.whenReady().then(async () => {
   stage('app-ready');
+  const expectedProfile = join(process.env.SOULFORGE_TEST_BUILD_ROOT!, '.runtime', 'electron-user-data');
+  const normalizePath = (path: string) => process.platform === 'win32' ? resolve(path).toLowerCase() : resolve(path);
+  for (const name of ['userData', 'sessionData'] as const) {
+    const owned = normalizePath(app.getPath(name)) === normalizePath(expectedProfile);
+    stage(`resolved-${name}-owned:${owned}`);
+    if (!owned) throw new Error(`Database smoke ${name} is outside its owned profile.`);
+  }
   const root = await mkdtemp(join(tmpdir(), 'soulforge-electron-sqlite-'));
   stage('owned-root-created');
   const overlayRoot = join(root, 'mod');
