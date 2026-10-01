@@ -108,11 +108,13 @@ export async function runDesktopSmoke(kind, entry, executable = process.execPath
     const logFile = join(outputRoot, '.runtime', 'electron.log');
     const entryPath = join(outputRoot, 'main', entry);
     const marker = join(outputRoot, '.runtime', 'bootstrap-stages.txt');
+    const databaseStageFile = join(outputRoot, '.runtime', 'database-stages.jsonl');
     const bootstrap = join(outputRoot, '.runtime', 'bootstrap.cjs');
     if (useBootstrap) await writeFile(bootstrap, desktopSmokeBootstrap(entryPath, marker));
     const result = await runProcess({ command: executable,
       args: desktopSmokeArgs(useBootstrap ? bootstrap : entryPath, process.platform === 'linux' && env.SF_E2E_HEADLESS === '1', logFile), cwd: root,
-      env: { ...env, ELECTRON_ENABLE_LOGGING: '1', ELECTRON_LOG_FILE: logFile }, signal,
+      env: { ...env, ELECTRON_ENABLE_LOGGING: '1', ELECTRON_LOG_FILE: logFile,
+        ...(kind === 'database' ? { SOULFORGE_DATABASE_SMOKE_STAGE_FILE: databaseStageFile } : {}) }, signal,
       timeoutMs: readTimeoutMs('SOULFORGE_SMOKE_TIMEOUT_MS', 10 * 60 * 1000),
       onStdout: chunk => process.stdout.write(chunk), onStderr: chunk => process.stderr.write(chunk) });
     if (!processSucceeded(result)) {
@@ -121,11 +123,13 @@ export async function runDesktopSmoke(kind, entry, executable = process.execPath
       catch (error) { nativeLog = { available: false, error: error.message }; }
       let stages = { available: false }, nativeBindingSha256 = null;
       try { stages = await readDesktopSmokeLog(marker); } catch (error) { stages.error = error.message; }
+      let databaseStages = { available: false };
+      try { databaseStages = await readDesktopSmokeLog(databaseStageFile); } catch (error) { databaseStages.error = error.message; }
       try { nativeBindingSha256 = createHash('sha256').update(await readFile(env.SOULFORGE_SQLITE_NATIVE_BINDING)).digest('hex'); }
       catch { /* Failed builds/early exits do not imply a native binding exists. */ }
       console.error(JSON.stringify({ kind, status: 'failed', code: result.code,
         signal: result.signal, timedOut: result.timedOut, cancelled: result.cancelled,
-        terminationReason: result.terminationReason, nativeLog, stages, nativeBindingSha256 }, null, 2));
+        terminationReason: result.terminationReason, nativeLog, stages, databaseStages, nativeBindingSha256 }, null, 2));
     }
     return processSucceeded(result) ? 0 : result.code || 1;
   }, { reuseProductionBinding });

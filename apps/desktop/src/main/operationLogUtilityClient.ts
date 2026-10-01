@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { performance } from 'node:perf_hooks';
 import { utilityProcess, type UtilityProcess } from 'electron';
+import { traceDatabaseSmokeStartup as startupStage } from './databaseSmokeStartupTrace.js';
 import type {
   OperationLogRecord,
   OperationStatus,
@@ -524,14 +525,18 @@ export class OperationLogUtilityClient implements OperationLogStore {
   }
 
   private spawn(): void {
+    startupStage(`utility-fork-start:${this.role}`);
     const child = utilityProcess.fork(this.modulePath, [], {
       serviceName: 'SoulForge 工作区数据库',
       stdio: 'pipe',
       env: { ...process.env, SOULFORGE_DATABASE_ROLE: this.role,
         ...(this.nativeBindingPath ? { SOULFORGE_SQLITE_NATIVE_BINDING: this.nativeBindingPath } : {}) }
     });
+    startupStage(`utility-fork-returned:${this.role}`);
+    child.on('spawn', () => startupStage(`utility-spawn:${this.role}:${child.pid}`));
     child.on('message', (message) => this.onMessage(message));
     child.on('exit', (code) => {
+      startupStage(`utility-exit:${this.role}:${code}`);
       if (this.process !== child) return;
       this.process = null;
       // Retain the binding for explicit restart and outcome query, never replay.
@@ -541,6 +546,7 @@ export class OperationLogUtilityClient implements OperationLogStore {
       );
     });
     child.on('error', (_type, location) => {
+      startupStage(`utility-fatal:${this.role}`);
       if (this.process !== child) return;
       this.rejectAll(new Error(`数据库后台进程发生致命错误：${location}`), 'workerfail');
     });
@@ -780,6 +786,7 @@ export class OperationLogUtilityClient implements OperationLogStore {
 
   private onMessage(message: unknown): void {
     if (!isOperationLogUtilityResponse(message)) return;
+    startupStage(`utility-response:${this.role}:${message.ok ? 'ok' : 'failed'}`);
     this.pruneLateRequests();
     const isDispatchedRequest = this.dispatchingRequestId === message.requestId;
     if (isDispatchedRequest) this.dispatchingRequestId = null;

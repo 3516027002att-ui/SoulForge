@@ -26,6 +26,9 @@ import {
 } from './operationLogUtilityProtocol.js';
 import { performance } from 'node:perf_hooks';
 import { createQueueObservationWriter } from './databaseUtilityTelemetry.js';
+import { traceDatabaseSmokeStartup as startupStage } from './databaseSmokeStartupTrace.js';
+
+startupStage('utility-module-entry');
 
 let store: SqliteOperationLogStore | null = null;
 let appDatabase: SqliteDatabase | null = null;
@@ -107,6 +110,7 @@ utilityParentPort.on('message', (event) => {
 });
 
 async function handleRequest(value: unknown): Promise<'ok' | 'request-failed'> {
+  startupStage('utility-request-received');
   if (!isRequest(value)) {
     post({
       protocolVersion: OPERATION_LOG_UTILITY_PROTOCOL,
@@ -413,12 +417,14 @@ async function openWorkspace(payload: OpenWorkspaceDatabasePayload) {
 
 function openAppDatabaseOnly(databasePath: string): { appReady: true } {
   if (appDatabase && appDatabasePath === databasePath) return { appReady: true };
+  startupStage('utility-app-db-open-start');
   const next = openAppDatabase(databasePath, {
     ...(reader ? { readonly: true, fileMustExist: true } : {}),
     ...(process.env.SOULFORGE_SQLITE_NATIVE_BINDING
       ? { nativeBinding: process.env.SOULFORGE_SQLITE_NATIVE_BINDING }
       : {})
   });
+  startupStage('utility-app-db-opened');
   appDatabase?.close();
   appDatabase = next;
   appDatabasePath = databasePath;
@@ -596,7 +602,9 @@ function assertWorkspaceRequest(requestedWorkspaceId: string): void {
 }
 
 function post(response: OperationLogUtilityResponse): void {
+  startupStage('utility-response-post-start');
   utilityParentPort.postMessage(response);
+  startupStage('utility-response-posted');
 }
 
 function isRequest(value: unknown): value is OperationLogUtilityRequest {

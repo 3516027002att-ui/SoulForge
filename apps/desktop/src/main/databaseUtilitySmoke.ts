@@ -18,15 +18,22 @@ import {
   type RagChunkDeltaStats
 } from '@soulforge/core';
 import { persistRagCorpusBySourceDelta } from './ragPersistence.js';
+import { traceDatabaseSmokeStartup as stage } from './databaseSmokeStartupTrace.js';
 import {
   createSemanticRefreshTelemetry,
   type SemanticRefreshTelemetrySnapshot
 } from './semanticRefreshTelemetry.js';
 
 const here = dirname(fileURLToPath(import.meta.url));
+stage('smoke-module-entry');
+app.on('child-process-gone', (_event, details) => {
+  stage(`child-gone:${details.type}:${details.reason}:${details.exitCode}`);
+});
 
 app.whenReady().then(async () => {
+  stage('app-ready');
   const root = await mkdtemp(join(tmpdir(), 'soulforge-electron-sqlite-'));
+  stage('owned-root-created');
   const overlayRoot = join(root, 'mod');
   const workspaceId = 'electron-utility-smoke';
   await mkdir(overlayRoot, { recursive: true });
@@ -37,6 +44,7 @@ app.whenReady().then(async () => {
     `${JSON.stringify({ version: 1, entries: [legacyRecord] }, null, 2)}\n`,
     'utf8'
   );
+  stage('legacy-fixture-written');
 
   const client = new OperationLogUtilityClient(
     join(here, 'databaseUtility.js'),
@@ -49,15 +57,18 @@ app.whenReady().then(async () => {
     // Seed a durable curator generation before the utility owns the same
     // database. The production path must then read it through the utility
     // connection, not open a second main-process SQLite handle.
+    stage('seed-db-open-start');
     const seedDatabase = openWorkspaceDatabase(workspaceDatabasePath, {
       nativeBinding: process.env.SOULFORGE_SQLITE_NATIVE_BINDING || resolve(here, '../../.native/better_sqlite3.node')
     });
+    stage('seed-db-opened');
     try {
       const seedStore = new KnowledgeStore({
         persistence: new SqliteKnowledgeStorePersistence(seedDatabase, {
           workspaceId, rootPath: overlayRoot, game: 'sekiro'
         })
       });
+      stage('seed-store-created');
       const seeded = ingestKnowledgeSource(seedStore, {
         sourceId: 'knowledge:utility-smoke',
         body: 'utility knowledge source',
@@ -77,10 +88,15 @@ app.whenReady().then(async () => {
         }
       });
       if (!seeded.ok) throw new Error(`Knowledge seed failed: ${seeded.message}`);
+      stage('seed-persisted');
     } finally {
+      stage('seed-db-close-start');
       seedDatabase.close();
+      stage('seed-db-closed');
     }
+    stage('app-db-request-start');
     await client.openAppDatabase(appDatabasePath);
+    stage('app-db-response');
     const appOnlyHealth = await client.health();
     if (appOnlyHealth.ready || !appOnlyHealth.appReady) {
       throw new Error('Database utility app-only health handshake failed.');
@@ -110,6 +126,7 @@ app.whenReady().then(async () => {
       legacySemanticSnapshotPath: join(root, 'semantic-snapshot.json'),
       legacySemanticBackupDirectory: join(root, 'semantic-backups')
     });
+    stage('workspace-db-response');
     const health = await client.health();
     const knowledgeSnapshot = await client.loadKnowledgeSnapshot({ workspaceId, rootPath: overlayRoot, game: 'sekiro' });
     if (!knowledgeSnapshot
@@ -488,6 +505,7 @@ app.whenReady().then(async () => {
       throw new Error('Database utility file/diagnostic/job/rag repository round trip failed.');
     }
     await client.restart();
+    stage('forced-restart-completed');
     const restartedHealth = await client.health();
     if (!restartedHealth.ready
       || !(await client.listAuditEvents()).some((item) => item.transactionId === committed.operation?.transactionId)
@@ -506,13 +524,16 @@ app.whenReady().then(async () => {
       forcedRestart: true
     }, null, 2)}\n`);
     await client.dispose();
+    stage('suite-passed');
     app.exit(0);
   } catch (error) {
+    stage('suite-caught-error');
     await client.dispose();
     process.stderr.write(`${error instanceof Error ? error.stack ?? error.message : String(error)}\n`);
     app.exit(1);
   }
 }).catch((error) => {
+  stage('startup-caught-error');
   process.stderr.write(`${error instanceof Error ? error.stack ?? error.message : String(error)}\n`);
   app.exit(1);
 });
