@@ -1,4 +1,4 @@
-import { mkdtemp, mkdir, rm } from 'node:fs/promises';
+import { mkdtemp, mkdir, rm, open } from 'node:fs/promises';
 import { dirname, resolve, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createProcessCancellation, processSucceeded, readTimeoutMs, runProcess } from './subprocess-control.mjs';
@@ -43,16 +43,42 @@ export async function withDesktopTestBuild(kind, execute, options = {}) {
   } finally { cancellation.dispose(); await rm(outputRoot, { recursive: true, force: true }); }
 }
 
-export function desktopSmokeArgs(entry, headless = false) {
-  return [entry, ...(headless ? ['--ozone-platform=headless'] : [])];
+export function desktopSmokeArgs(entry, headless = false, logFile) {
+  return [entry, ...(headless ? ['--ozone-platform=headless'] : []),
+    ...(logFile ? ['--enable-logging=file', `--log-file=${logFile}`] : [])];
+}
+
+/** Windows Chromium child logs do not reach stderr; read only the owned tail. */
+export async function readDesktopSmokeLog(logFile, maxBytes = 64 * 1024) {
+  let file;
+  try {
+    file = await open(logFile, 'r');
+    const { size } = await file.stat();
+    const bytes = Buffer.alloc(Math.min(size, maxBytes));
+    const { bytesRead } = await file.read(bytes, 0, bytes.length, Math.max(0, size - bytes.length));
+    return { available: true, bytes: size, truncated: size > bytes.length, tail: bytes.subarray(0, bytesRead).toString('utf8') };
+  } catch (error) {
+    if (error.code === 'ENOENT') return { available: false };
+    throw error;
+  } finally { await file?.close(); }
 }
 
 export async function runDesktopSmoke(kind, entry, executable = process.execPath) {
   return withDesktopTestBuild(kind, async ({ outputRoot, env, signal }) => {
+    const logFile = join(outputRoot, '.runtime', 'electron.log');
     const result = await runProcess({ command: executable,
-      args: desktopSmokeArgs(join(outputRoot, 'main', entry), process.platform === 'linux' && env.SF_E2E_HEADLESS === '1'), cwd: root, env, signal,
+      args: desktopSmokeArgs(join(outputRoot, 'main', entry), process.platform === 'linux' && env.SF_E2E_HEADLESS === '1', logFile), cwd: root,
+      env: { ...env, ELECTRON_ENABLE_LOGGING: '1', ELECTRON_LOG_FILE: logFile }, signal,
       timeoutMs: readTimeoutMs('SOULFORGE_SMOKE_TIMEOUT_MS', 10 * 60 * 1000),
       onStdout: chunk => process.stdout.write(chunk), onStderr: chunk => process.stderr.write(chunk) });
+    if (!processSucceeded(result)) {
+      let nativeLog;
+      try { nativeLog = await readDesktopSmokeLog(logFile); }
+      catch (error) { nativeLog = { available: false, error: error.message }; }
+      console.error(JSON.stringify({ kind, status: 'failed', code: result.code,
+        signal: result.signal, timedOut: result.timedOut, cancelled: result.cancelled,
+        terminationReason: result.terminationReason, nativeLog }, null, 2));
+    }
     return processSucceeded(result) ? 0 : result.code || 1;
   });
 }

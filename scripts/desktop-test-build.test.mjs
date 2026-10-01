@@ -14,6 +14,9 @@ test('headless Electron smoke selects a display backend without relaxing sandbox
   assert.equal(typeof build.desktopSmokeArgs, 'function');
   assert.deepEqual(build.desktopSmokeArgs('/isolated/main/smoke.js', false), ['/isolated/main/smoke.js']);
   assert.deepEqual(build.desktopSmokeArgs('/isolated/main/smoke.js', true), ['/isolated/main/smoke.js', '--ozone-platform=headless']);
+  assert.deepEqual(build.desktopSmokeArgs('D:\\owned\\main\\smoke.js', false, 'D:\\owned\\.runtime\\electron.log'), [
+    'D:\\owned\\main\\smoke.js', '--enable-logging=file', '--log-file=D:\\owned\\.runtime\\electron.log'
+  ]);
 });
 
 test('smoke output allocation is distinct, bounded, and cleaned without touching production', async () => {
@@ -39,6 +42,20 @@ test('smoke output allocation is distinct, bounded, and cleaned without touching
     for (const path of roots) await assert.rejects(readFile(join(path, 'test-output')), { code: 'ENOENT' });
     assert.equal(await readFile(join(production, 'index.js'), 'utf8'), 'sentinel');
     await assert.rejects(build.withDesktopTestBuild('database', async () => { throw new Error('test-failure'); }, { repositoryRoot: root, build: false }), /test-failure/);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test('runtime diagnostics retain a bounded native log tail and distinguish a missing log', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'sf-smoke-log-'));
+  try {
+    const log = join(root, 'electron.log');
+    await writeFile(log, `${'old-line\n'.repeat(10000)}native failure\n`);
+    const result = await build.readDesktopSmokeLog(log, 128);
+    assert.equal(result.available, true);
+    assert.equal(result.truncated, true);
+    assert.ok(Buffer.byteLength(result.tail) <= 128);
+    assert.ok(result.tail.endsWith('native failure\n'));
+    assert.deepEqual(await build.readDesktopSmokeLog(join(root, 'absent.log')), { available: false });
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 
