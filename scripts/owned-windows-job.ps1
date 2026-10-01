@@ -112,7 +112,9 @@ $finished = [Action] {
     $proof = $proofs[$path]; $proof.state = 'finished'
     $pending = "$path.$([Guid]::NewGuid()).next"
     [IO.File]::WriteAllText($pending, ($proof | ConvertTo-Json -Compress), $utf8)
-    [IO.File]::Replace($pending, $path, $null)
+    # Plain $null binds to an empty string for this .NET string parameter.
+    # NullString preserves the required null backup path on Windows PowerShell.
+    [IO.File]::Replace($pending, $path, [System.Management.Automation.Language.NullString]::Value)
   }
 }
 try {

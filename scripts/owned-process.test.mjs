@@ -240,6 +240,25 @@ test('hksc forwards supported termination and cleans its compiler scratch', { sk
   }
 });
 
+test('Windows normal driver completion atomically records a finished proof in a Unicode path', { skip: process.platform !== 'win32' && 'Windows job API unavailable' }, async () => {
+  const root = await mkdtemp(join(tmpdir(), 'sf Windows 完成 proof '));
+  try {
+    const owner = await createOwnedTemporaryDirectory('windows-completion', { parent: root });
+    try {
+      const result = await runProcess({ command: process.execPath, args: ['-e', 'process.exit(0)'],
+        cwd: owner.root, env: process.env, owner, timeoutMs: 15000 });
+      assert.equal(result.code, 0, result.stderr);
+      const marker = JSON.parse(await readFile(join(owner.root, '.soulforge-temporary-owner.json'), 'utf8'));
+      assert.equal(marker.windowsJobs.length, 1);
+      const proof = JSON.parse(await readFile(join(owner.root, `.soulforge-windows-job.${marker.windowsJobs[0].id}.json`), 'utf8'));
+      assert.equal(proof.state, 'finished');
+      assert.equal(proof.killOnClose, true);
+      assert.ok(!(await readdir(owner.root)).some(name => name.endsWith('.next')));
+    } finally { await owner.dispose(); }
+    await assert.rejects(lstat(owner.root), { code: 'ENOENT' });
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
 test('Windows owned job ends lingering descendants after successful and failed drivers', { skip: process.platform !== 'win32' && 'Windows job API unavailable' }, async () => {
   const root = await mkdtemp(join(tmpdir(), 'sf-owned-windows-job-test-'));
   try {
