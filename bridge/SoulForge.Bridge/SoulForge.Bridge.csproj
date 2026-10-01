@@ -34,7 +34,7 @@
   </PropertyGroup>
   <PropertyGroup Condition="'$(_SoulForgeIsolatedBuild)' == 'true' And '$(Configuration)' == 'Release'">
     <_SoulForgeExistingPathMap>$(PathMap)</_SoulForgeExistingPathMap>
-    <PathMap>$(_SoulForgeBuildRunRoot)=/_/SoulForge.Bridge/obj,$(MSBuildProjectDirectory)=/_/SoulForge.Bridge</PathMap>
+    <PathMap>$([System.IO.Path]::GetFullPath('$(_SoulForgeBuildRunRoot)'))=/_/SoulForge.Bridge/obj,$([System.IO.Path]::GetFullPath('$(MSBuildProjectDirectory)'))=/_/SoulForge.Bridge</PathMap>
     <PathMap Condition="'$(_SoulForgeExistingPathMap)' != ''">$(PathMap),$(_SoulForgeExistingPathMap)</PathMap>
   </PropertyGroup>
   <UsingTask TaskName="SoulForgeBuildProcessId" TaskFactory="RoslynCodeTaskFactory" AssemblyFile="$(MSBuildToolsPath)/Microsoft.Build.Tasks.Core.dll">

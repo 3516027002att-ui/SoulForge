@@ -10,6 +10,7 @@ import { randomUUID } from 'node:crypto';
 
 const helperPath = resolve('scripts/bridge-build-output-ownership.mjs');
 const runtimeIdentifier = process.platform === 'win32' ? 'win-x64' : 'linux-x64';
+const matchingSdkText = `matching unknown${process.platform === 'win32' ? '\r\n' : '\n'}`;
 const helperUrl = pathToFileURL(helperPath).href;
 const helper = await import(helperUrl).catch(error => {
   if (error.code === 'ERR_MODULE_NOT_FOUND') return {};
@@ -436,7 +437,7 @@ test('SDK evaluation aligns isolated output paths and preserves explicit output 
 test('direct SDK build promotes exact outputs, retains publish inputs, and supports no-build publish', { skip: sdkSkip }, async () => {
   await sdkFixture(async f => {
     const canonical = join(f.root, 'bin', 'Debug', 'net10.0', runtimeIdentifier);
-    await put(join(canonical, 'Matching.dll'), 'matching unknown\n');
+    await put(join(canonical, 'Matching.dll'), matchingSdkText);
     f.run(['-restore', '-t:Build']);
     assert.equal(await exists(join(canonical, 'Bridge.dll')), true);
     assert.equal(await exists(join(canonical, f.nativeName)), true);
@@ -530,7 +531,7 @@ test('a real inherited managed writer guards its run after only MSBuild is kille
 test('real MSBuild interruption after rename recovers identity-proven outputs without adopting planned matches', { skip: sdkSkip || (process.platform !== 'linux' && 'requires reliable Linux rename identity proof') }, async () => {
   await sdkFixture(async f => {
     const canonical = join(f.root, 'bin', 'Debug', 'net10.0', runtimeIdentifier);
-    const matching = join(canonical, 'Matching.dll'); await put(matching, 'matching unknown\n');
+    const matching = join(canonical, 'Matching.dll'); await put(matching, matchingSdkText);
     const signal = join(f.root, 'renamed.json'), preload = join(f.root, 'pause-after-rename.mjs');
     // Instrument the real filesystem operation only to hold the interruption
     // window open after its successful rename and before the journal update.
@@ -566,7 +567,7 @@ test('real MSBuild interruption after rename recovers identity-proven outputs wi
       f.run(['-t:PrepareForBuild']);
       assert.equal(await exists(join(f.root, 'obj', '.soulforge-build-runs', stable.token, '.soulforge-temporary-owner.json')), false);
       assert.equal(await exists(renamed.destination), false, 'identity proof recovers and cleans the unjournaled canonical rename');
-      assert.equal(await readFile(matching, 'utf8'), 'matching unknown\n');
+      assert.equal(await readFile(matching, 'utf8'), matchingSdkText);
       for (const file of stable.files) assert.equal(await exists(join(f.root, file.area ?? 'bin', ...file.path.split('/'))), false);
     } finally { delete f.env.NODE_OPTIONS; await stopBuild(build); }
   });
@@ -592,15 +593,21 @@ test('SDK ProjectReference resolves the assembly built in the referenced fresh r
 test('SDK Clean removes unchanged promoted canonical files and preserves unknown binaries', { skip: sdkSkip }, async () => {
   await sdkFixture(async f => {
     const canonical = join(f.root, 'bin', 'Debug', 'net10.0', runtimeIdentifier);
-    await put(join(canonical, 'Matching.dll'), 'matching unknown\n');
+    await put(join(canonical, 'Matching.dll'), matchingSdkText);
     await put(join(canonical, 'User.dll'), 'unknown user');
     f.run(['-restore', '-t:Build']);
     assert.equal(await exists(join(canonical, 'Bridge.dll')), true);
+    const store = join(f.root, 'obj', '.soulforge-build-output-ownership');
+    for (const name of (await readdir(store)).filter(name => name.endsWith('.outputs.json'))) {
+      const record = JSON.parse(await readFile(join(store, name), 'utf8'));
+      assert.equal(record.files.some(file => file.path.endsWith('/Matching.dll')), false,
+        'the byte-identical unknown file must remain unowned before Clean');
+    }
     f.run(['-t:Clean']);
     assert.equal(await exists(join(canonical, 'Bridge.dll')), false);
     assert.equal(await exists(join(canonical, 'Bridge.pdb')), false);
     assert.equal(await exists(join(f.root, 'obj', 'Debug', 'net10.0', runtimeIdentifier, 'Bridge.dll')), false);
-    assert.equal(await readFile(join(canonical, 'Matching.dll'), 'utf8'), 'matching unknown\n');
+    assert.equal(await readFile(join(canonical, 'Matching.dll'), 'utf8'), matchingSdkText);
     assert.equal(await readFile(join(canonical, 'User.dll'), 'utf8'), 'unknown user');
   });
 });
@@ -614,7 +621,11 @@ test('Release PE, portable PDB and apphost omit private run paths while resource
     const baseline = await readFile(join(canonical, 'Bridge.dll'));
     assert.equal(baseline.includes(Buffer.from('.soulforge-build-runs')), true, 'the unmapped compiler embeds the private build path');
     await writeFile(f.project, f.source);
-    f.run(['-t:Publish', '-p:Configuration=Release', '-p:UseAppHost=true']);
+    const token = randomUUID();
+    // MSBuild composes this prefix with forward slashes on Windows. Repeated
+    // separators also reproduce a raw-vs-physical prefix mismatch on Linux.
+    f.run(['-t:Publish', '-p:Configuration=Release', '-p:UseAppHost=true',
+      `-p:_SoulForgeBuildOutputToken=${token}`, `-p:_SoulForgeBuildRunRoot=${f.root}/obj//.soulforge-build-runs/${token}`]);
     const tokens = await readdir(join(f.root, 'obj', '.soulforge-build-runs'));
     const executable = process.platform === 'win32' ? 'Bridge.exe' : 'Bridge';
     for (const directory of [canonical, join(canonical, 'publish')]) {
