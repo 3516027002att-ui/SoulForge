@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { mkdtemp, mkdir, readFile, readdir, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, readFile, readdir, realpath, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { cliWorkspaceRoot, openLocalCliSession } from './localCliSession.js';
@@ -76,9 +76,14 @@ test('an unusable XDG data path fails initialization without falling back into M
   assert.deepEqual((await readdir(root)).sort(), ['blocked', 'mod']);
 }));
 
-test('readonly audit fallback exposes the actual database failure without pretending writes are available', async () => profile(async root => {
-  const overlayRoot = join(root, 'mod'); await mkdir(overlayRoot);
-  const database = join(cliWorkspaceRoot(makeWorkspaceId(overlayRoot)), 'workspace.db');
+test('readonly audit fallback uses the physical workspace identity and exposes the actual database failure', async () => profile(async root => {
+  const physicalOverlayRoot = join(root, 'mod'); await mkdir(physicalOverlayRoot);
+  // The Windows runner's TEMP can use an 8.3 alias. Exercise another physical
+  // alias on Linux so seeding the wrong workspace database fails locally too.
+  const overlayRoot = process.platform === 'linux' ? join(root, 'mod-alias') : physicalOverlayRoot;
+  if (overlayRoot !== physicalOverlayRoot) await symlink(physicalOverlayRoot, overlayRoot, 'dir');
+  const workspaceId = makeWorkspaceId(await realpath(overlayRoot));
+  const database = join(cliWorkspaceRoot(workspaceId), 'workspace.db');
   await mkdir(dirname(database), {recursive: true});
   await writeFile(database, 'invalid-owned-database');
   const warnings: string[] = [];
@@ -86,6 +91,7 @@ test('readonly audit fallback exposes the actual database failure without preten
   const session = await openLocalCliSession({overlayRoot, mode:'plan', analyze:false, useCache:false,
     onFallbackWarning: value => warnings.push(value), onDiagnostic: value => diagnostics.push(value)});
   try {
+    assert.equal(session.coreSession.workspaceId, workspaceId);
     assert.equal(session.durableLog, false);
     assert.ok(warnings.some(value => value.includes('CLI_SQLITE_FALLBACK') && value.includes('file is not a database')));
     assert.ok(diagnostics.some(value => value.phase === 'storage.audit' && value.status === 'failed'
