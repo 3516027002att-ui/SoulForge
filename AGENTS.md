@@ -2,7 +2,7 @@
 
 ## Find the task and the boundary
 
-GitHub Issues describe work. `docs/DECISIONS.md` records owner choices. `ARCHITECTURE.md` describes authority and ownership. Format implementations and specifications remain alongside their domain code. Historical governance projections are compatibility material, not an instruction to claim work, seal evidence or refresh the whole repository before starting a scoped fix.
+GitHub [Issues](https://github.com/3516027002att-ui/SoulForge/issues) describe work. `docs/DECISIONS.md` records owner choices. `ARCHITECTURE.md` describes authority and ownership. Format implementations and specifications remain alongside their domain code. Historical governance projections are compatibility material, not an instruction to claim work, seal evidence or refresh the whole repository before starting a scoped fix.
 
 ## Execute checks
 

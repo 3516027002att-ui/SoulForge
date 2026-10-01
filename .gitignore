@@ -15,9 +15,9 @@ coverage/
 Thumbs.db
 
 # The repository AGENTS.md entry is versioned. Machine-specific operator
-# configuration and instruction backups remain local.
+# configuration and instruction backups remain local. Minimal shared context
+# entries are versioned; auth/model/extension settings stay local.
 AGENTS.md.*
-CLAUDE.md
 CLAUDE.md.*
 GEMINI.md
 GEMINI.md.*
@@ -28,8 +28,10 @@ QWEN.md.*
 .github/copilot-instructions.md
 .claude/
 .codex/
-.gemini/
-.qwen/
+.gemini/*
+!.gemini/settings.json
+.qwen/*
+!.qwen/settings.json
 .cursor/
 .gitattributes
 graphify-out/
