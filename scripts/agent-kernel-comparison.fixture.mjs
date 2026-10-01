@@ -11,10 +11,10 @@ for(const scenario of [
  {name:'already-satisfied',initial:80,expected:80,write:false},
  {name:'needs-change',initial:81,expected:80,write:true},
  {name:'false-model-success',initial:81,expected:80,write:false}
-])test(`controlled old/new kernels share the same independent oracle for ${scenario.name}`,async()=>{
+])test(`default and explicit finite sessions share the independent oracle for ${scenario.name}`,async()=>{
  const root=await mkdtemp(join(tmpdir(),'sf-kernel-comparison-'));
  try{const results=[];
-  for(const kernel of ['legacy','finite']){
+  for(const kernel of [undefined,'finite']){
    let value=scenario.initial,writes=0,turn=0;
    const registry=new ToolRegistry();
    registry.register({name:'inspect_fixture',description:'inspect controlled fixture',permission:'read',permissionLevel:'read',inputSchema:{},run:async()=>({ok:true,state:'completed',data:{value}})});

@@ -50,3 +50,39 @@ export function manyEventsFixture(bytes, expected, count = 240) {
   }
   return full;
 }
+
+export function manyAnimationsFixture(count = 2219) {
+  const fixture = distinctTaeFixture();
+  const table = (fixture.bytes.length + 7) & ~7;
+  const entries = table + count * 16;
+  const full = Buffer.alloc(entries + count * 48); fixture.bytes.copy(full);
+  full.writeInt32LE(full.length, 12);
+  full.writeInt32LE(count, 0x54); full.writeBigInt64LE(BigInt(table), 0x58);
+  full.writeBigInt64LE(BigInt(count), 0x70); full.writeBigInt64LE(BigInt(entries), 0x78);
+  for (let index = 0; index < count; index++) {
+    const entry = entries + index * 48;
+    full.writeBigInt64LE(BigInt(index), table + index * 16);
+    full.writeBigInt64LE(BigInt(entry), table + index * 16 + 8);
+    fixture.bytes.copy(full, entry, fixture.expected[0].entry, fixture.expected[0].entry + 48);
+  }
+  // Every unique TAE action references the same independently known native
+  // a000_400000.hkt; selecting action 2218 must return motion 400000.
+  return full;
+}
+
+export function taeBinderFixture(children) {
+  const names = children.map((_, index) => Buffer.from(`a${String(index).padStart(2, '0')}.tae\0`));
+  const namesOffset = 0x40 + children.length * 0x24;
+  const dataOffset = namesOffset + names.reduce((sum, bytes) => sum + bytes.length, 0);
+  const full = Buffer.alloc(dataOffset + children.reduce((sum, bytes) => sum + bytes.length, 0));
+  full.write('BND4'); full.writeInt32LE(children.length, 0x0c);
+  full.writeBigInt64LE(0x40n, 0x10); full.writeBigInt64LE(0x24n, 0x20); full.writeBigInt64LE(BigInt(dataOffset), 0x28);
+  let nameAt = namesOffset; let dataAt = dataOffset;
+  children.forEach((bytes, index) => {
+    const entry = 0x40 + index * 0x24;
+    full.writeBigInt64LE(BigInt(bytes.length), entry + 8); full.writeBigInt64LE(BigInt(bytes.length), entry + 16);
+    full.writeUInt32LE(dataAt, entry + 24); full.writeInt32LE(5000000 + index, entry + 28); full.writeUInt32LE(nameAt, entry + 32);
+    names[index].copy(full, nameAt); bytes.copy(full, dataAt); nameAt += names[index].length; dataAt += bytes.length;
+  });
+  return full;
+}

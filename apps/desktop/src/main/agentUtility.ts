@@ -1,6 +1,6 @@
 /** Utility process entry: no workspace, index, native document or renderer access. */
 import { BoundedEventSender } from '../../../../packages/agent/src/eventSender.mjs';
-import { createConfiguredModelServiceAdapter, createAgentRunAssembly,
+import { createConfiguredModelServiceAdapter, createAgentRunAssembly, toAgentSessionTerminalResult,
   type AgentSessionRunParams } from '@soulforge/core';
 const parent = process.parentPort;
 let started = false, nextId = 0, nextEventId = 0;
@@ -57,7 +57,7 @@ parent.on('message', async event => {
       onProtocolEvent: event => eventSender.enqueue({ type: 'protocol-event', event })
     });
     await eventSender.flush();
-    parent.postMessage({ type: 'result', result });
+    parent.postMessage({ type: 'result', result:toAgentSessionTerminalResult(result) });
   } catch (error) {
     const value = error as Error & {code?:string};
     const text = params.apiKey ? value.message.replaceAll(params.apiKey, '[REDACTED]') : value.message;

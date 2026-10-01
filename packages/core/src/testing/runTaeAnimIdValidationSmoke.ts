@@ -6,6 +6,7 @@
  * 该 smoke 不宣称真实 Sekiro native parser 或 Bridge binary 能力。
  */
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import { registerHooks } from 'node:module';
 import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -81,7 +82,9 @@ async function run(): Promise<void> {
   const fixtureRoot = await mkdtemp(join(tmpdir(), 'soulforge-tae-anim-id-validation-'));
   const filePath = join(fixtureRoot, 'chr', 'c0000.anibnd.dcx');
   await mkdir(join(fixtureRoot, 'chr'), { recursive: true });
-  await writeFile(filePath, Buffer.from('controlled-tae-read-fixture'));
+  const sourceBytes = Buffer.from('controlled-tae-read-fixture');
+  await writeFile(filePath, sourceBytes);
+  const outerFileHash = createHash('sha256').update(sourceBytes).digest('hex');
 
   const fixtureGlobals = globalThis as typeof globalThis & { [key: symbol]: unknown };
   const previousCallback = fixtureGlobals[CALLBACK_KEY];
@@ -97,6 +100,12 @@ async function run(): Promise<void> {
       parseStatus: 'partial',
       diagnostics: [],
       data: {
+        outerFileHash,
+        sourceHash: outerFileHash,
+        identityProjectionVersion: 2,
+        animationCount: 1,
+        totalEventCount: 1,
+        animationsTruncated: false,
         animations: malformedAnimation ? [null] : [{
           animId: currentAnimId,
           events: [{ startTime: 0, endTime: 1, eventTypeId: 1 }]

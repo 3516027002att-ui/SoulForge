@@ -20,7 +20,7 @@
  */
 
 import type { ChatMessage, RolloutItem, RolloutSessionMeta, RolloutSink } from './types.js';
-import { redactSecrets } from './agentLoop.js';
+import { redactSecrets } from './agentPolicy.js';
 
 export interface RolloutStorage {
   appendLines(lines: string[]): Promise<void>;

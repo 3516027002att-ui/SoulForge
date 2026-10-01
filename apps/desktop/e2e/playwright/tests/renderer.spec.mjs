@@ -22,31 +22,30 @@ const fixtureMain = path.resolve(here, '../fixture-main.mjs');
 const outRenderer = path.resolve(here, '../../../out/renderer/index.html');
 const hasBuild = fs.existsSync(outRenderer);
 
-/*
- * 全 spec 共用一个临时 userData（与 production-main.spec.mjs 的隔离同构）。
- *
- * 为什么必须隔离：默认 userData 与生产 dev 运行、其他 worktree 的 e2e 共用同一个
- * Chromium profile —— 并发 Electron 实例互抢 leveldb 锁，shell 状态（App.tsx 6-C
- * 经 localStorage 存上次工作域/选中资源）跨运行残留，「打开工作区 / 打开后停在哪」
- * 变成非确定性行为（实测同一套件两次运行挂在两个不同位置）。临时目录恢复 CI
- * 「干净 runner」语义。文件内各测试仍共用这一个目录：跨测试的持久化语义与 CI
- * 单次运行一致，不破坏任何依赖运行内状态的测试。
- */
-const sharedUserDataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'sf-e2e-renderer-'));
+// Each test owns a fresh Chromium profile. Relaunches within the same test
+// retain that profile, so persistence cases still test real localStorage.
+const userDataDirs = new Map();
+const launchedApps = new Map();
 
-test.afterAll(() => {
-  // Windows 上刚退出的 Electron 可能仍持有 profile 文件句柄：rmSync 会 EPERM。
-  // 清理失败不影响测试结果 —— 重试后吞掉，留给 tmp 自身的回收。
-  try {
-    fs.rmSync(sharedUserDataDir, {
-      recursive: true, force: true, maxRetries: 5, retryDelay: 200
-    });
-  } catch {
-    // 忽略：临时目录残留不构成本套件的失败。
+test.beforeEach(({ }, testInfo) => {
+  userDataDirs.set(testInfo.testId, fs.mkdtempSync(path.join(os.tmpdir(), 'sf-e2e-renderer-')));
+  launchedApps.set(testInfo.testId, new Set());
+});
+
+test.afterEach(async ({ }, testInfo) => {
+  // A failed assertion must not leave an Electron process holding the profile.
+  const apps = launchedApps.get(testInfo.testId) ?? [];
+  for (const app of apps) await app.close().catch(() => undefined);
+  launchedApps.delete(testInfo.testId);
+  const dir = userDataDirs.get(testInfo.testId);
+  userDataDirs.delete(testInfo.testId);
+  if (dir) {
+    try { fs.rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 }); }
+    catch { /* Windows may retain a just-closed profile handle; tmp can reclaim it. */ }
   }
 });
 
-test.describe.configure({ mode: 'serial' });
+// Default Playwright mode keeps failures independent: later tests still run.
 
 test.beforeEach(({ }, testInfo) => {
   test.skip(!hasBuild, 'renderer 未构建：先运行 npm run build -w @soulforge/desktop');
@@ -55,9 +54,10 @@ test.beforeEach(({ }, testInfo) => {
 
 async function launchApp(env = {}) {
   const app = await electron.launch({
-    args: [fixtureMain, `--user-data-dir=${sharedUserDataDir}`],
+    args: [fixtureMain, `--user-data-dir=${userDataDirs.get(test.info().testId)}`],
     env: { ...process.env, ...env }
   });
+  launchedApps.get(test.info().testId).add(app);
   const window = await app.firstWindow();
   const pageErrors = [];
   const consoleErrors = [];
@@ -106,7 +106,7 @@ async function openFixtureWorkspace(window) {
    *    打开后是 display:none，但 toContainText 读 textContent、不做可见性检查。
    */
   await expect(window.locator('.workspace-switcher__trigger')).toContainText('fixture-workspace', { timeout: 20_000 });
-  // 恢复上次领域是正确产品行为（问题 1）：e2e 共享真实 userDataDir，上一个测试可能
+  // 恢复上次领域是正确产品行为（问题 1）：同一测试可重新打开 app，上一次启动可能
   // 已把 activeDomain 留在 动作/文本/…，且 restoreLastShellState 会连同上次选中
   // 的 sourceUri 一起恢复（可能是一个非 PARAM 文件，如 other/notes.txt）。此时
   // activeDomain 已是 param，重复点 param 是 no-op，PARAM 工作台不会挂载。
@@ -214,7 +214,7 @@ test('顶部工作域栏：逻辑 IA、固定顺序、无物理计数（SHELL-09
   await expect(window.locator('.file-item')).toHaveCount(0);
   // EVENT-30B 起事件源码工作台常驻挂载，裸 .workbench 命中两个元素：收窄到 PARAM 工作台。
   await expect(window.getByLabel('PARAM 工作台')).toBeVisible();
-  await expect(window.getByLabel('PARAM 工作台')).toContainText('Params');
+  await expect(window.getByLabel('PARAM 工作台')).toContainText('参数文件');
   expect(await window.locator('.domain-tab__count').count()).toBe(0);
 
   // R1 修正（用户裁定）：参数域侧栏是两级——只有 PARAM 与 GPARAM 两个常驻项，
@@ -493,23 +493,23 @@ test('Material 工作台三栏：File list → Material list → Properties/Valu
   await app.close();
 });
 
-test('Behavior 工作台三栏：机器 → 状态 → 条件/转移选择链，partial 缺口可见', async () => {
+test('行为工作台三栏：机器 → 状态 → 条件/转移选择链，partial 缺口可见', async () => {
   const { app, window } = await launchApp();
   await openFixtureWorkspace(window);
 
   // BEHAVIOR-55B：ESD 状态机资源从开始侧栏资源树选择，进入三栏行为工作台。
   await selectFileItem(window, 'ai/m10.esd');
   // WorkbenchLayout 根是 div(.workbench)带 aria-label,不是 section/region。
-  await expect(window.getByLabel('Behavior 工作台')).toBeVisible();
+  await expect(window.getByLabel('行为工作台')).toBeVisible();
 
   // 三栏（§10.3，无 Tools 空栏）。
-  await expect(window.getByRole('region', { name: 'Files / Machines / States' })).toBeVisible();
-  await expect(window.getByRole('region', { name: 'Conditions / Commands' })).toBeVisible();
-  await expect(window.getByRole('region', { name: 'Inspector' })).toBeVisible();
+  await expect(window.getByRole('region', { name: '文件 / 状态机 / 状态' })).toBeVisible();
+  await expect(window.getByRole('region', { name: '条件与命令' })).toBeVisible();
+  await expect(window.getByRole('region', { name: '详细信息' })).toBeVisible();
   await expect(window.getByRole('region', { name: 'Tools' })).toHaveCount(0);
 
   // 机器列表由 fixture envelope 的 pages 投影派生（不按 action 目录分类）。
-  const left = window.getByRole('region', { name: 'Files / Machines / States' });
+  const left = window.getByRole('region', { name: '文件 / 状态机 / 状态' });
   await expect(left.getByText('状态组 0')).toBeVisible();
   await expect(left.getByText('状态组 1')).toBeVisible();
   await expect(left.getByText('全部语义状态')).toBeVisible();
@@ -517,13 +517,13 @@ test('Behavior 工作台三栏：机器 → 状态 → 条件/转移选择链，
   // machine → state：选中机器，States 组显示该机器状态摘要，中栏按机器过滤条件。
   await left.getByRole('row', { name: /状态组 0/ }).click();
   await expect(left.getByText('状态组 0 的状态')).toBeVisible();
-  const middle = window.getByRole('region', { name: 'Conditions / Commands' });
+  const middle = window.getByRole('region', { name: '条件与命令' });
   await expect(middle.getByText(/已按状态组 0 过滤/)).toBeVisible();
   await expect(middle.getByRole('row', { name: /条件 @0x10/ })).toBeVisible();
 
-  // 条件（转移载体）选中 → Inspector 显示转移明细。
+  // 条件（转移载体）选中 → 详细信息 显示转移明细。
   await middle.getByRole('row', { name: /条件 @0x10/ }).click();
-  const inspector = window.getByRole('region', { name: 'Inspector' });
+  const inspector = window.getByRole('region', { name: '详细信息' });
   await expect(inspector.getByText('条件偏移')).toBeVisible();
   await expect(inspector.getByText('目标状态偏移')).toBeVisible();
   await expect(inspector.getByText('0x28')).toBeVisible();
@@ -535,10 +535,10 @@ test('Behavior 工作台三栏：机器 → 状态 → 条件/转移选择链，
   await targetInput.fill('0x50');
   await window.getByRole('button', { name: '提交转移目标' }).click();
   await expect(window.getByTestId('esd-transition-submit-notice')).toContainText('已提交转移目标并重读验证');
-  // 提交后 Inspector 的目标状态偏移随 fixture stub 就地更新重读为 0x50。
+  // 提交后 详细信息 的目标状态偏移随 fixture stub 就地更新重读为 0x50。
   await expect(inspector.getByText('0x50')).toBeVisible();
 
-  // 命令选中 → Inspector 显示命令明细（transition 编辑入口随条件切换消失）。
+  // 命令选中 → 详细信息 显示命令明细（transition 编辑入口随条件切换消失）。
   await middle.getByRole('row', { name: /命令 10/ }).click();
   await expect(inspector.getByText('命令 ID')).toBeVisible();
   await expect(inspector.getByText('槽位')).toBeVisible();
@@ -560,8 +560,8 @@ test('动作工作台三栏（TAE）：动画 → 词条事件选择链，事件
   await expect(window.getByLabel('动作工作台')).toBeVisible();
 
   // 四栏（无 Inspector / Tools 空栏；动作视图保留真实只读画布与时间轴）。
-  await expect(window.getByRole('region', { name: 'Animations' })).toBeVisible();
-  await expect(window.getByRole('region', { name: 'Events / 词条' })).toBeVisible();
+  await expect(window.getByRole('region', { name: '动画' })).toBeVisible();
+  await expect(window.getByRole('region', { name: '事件 / 词条' })).toBeVisible();
   await expect(window.getByRole('region', { name: '动作视图' })).toBeVisible();
   await expect(window.getByRole('region', { name: 'Inspector' })).toHaveCount(0);
   await expect(window.getByRole('region', { name: 'Timeline / Events' })).toHaveCount(0);
@@ -569,7 +569,7 @@ test('动作工作台三栏（TAE）：动画 → 词条事件选择链，事件
 
   // 动画列表由 fixture envelope 的 pages 投影派生（不按 chr/action 目录分类），
   // hkxName 去扩展作主标签。
-  const left = window.getByRole('region', { name: 'Animations' });
+  const left = window.getByRole('region', { name: '动画' });
   await expandTaeAnimationGroup(window, 'a00');
   await expect(left.getByRole('row', { name: /a0000/ })).toBeVisible();
   // S17：无 hkxName 的动画行名改用干净数字 id（禁止「动画 N」）——第二动画行
@@ -577,7 +577,7 @@ test('动作工作台三栏（TAE）：动画 → 词条事件选择链，事件
   await expect(left.getByRole('row', { name: /1 事件/ })).toBeVisible();
 
   // 未选中动画时中栏提示先选动画，不出事件行。
-  const middle = window.getByRole('region', { name: 'Events / 词条' });
+  const middle = window.getByRole('region', { name: '事件 / 词条' });
   await expect(window.getByTestId('tae-events-pick-animation')).toBeVisible();
 
   // 选中动画 0 → 中栏词条事件列表。
@@ -635,7 +635,7 @@ test('问题4-D：动作工作台动画长列表全量渲染，栏内可滚到�
   await selectFileItem(window, 'action/c9999.tae');
   await expect(window.getByLabel('动作工作台')).toBeVisible();
 
-  const left = window.getByRole('region', { name: 'Animations' });
+  const left = window.getByRole('region', { name: '动画' });
   await expandTaeAnimationGroup(window, 'a999');
   // 栏头 hint 报真实总数（213 animations），不是被砍掉的 200。
   await expect(left.getByText('213 animations')).toBeVisible();
@@ -666,7 +666,7 @@ test('anibnd 容器打开走动作工作台：不落 BND4 容器页，动作视�
   await expect(window.getByLabel('BND4 容器工作台')).toHaveCount(0);
 
   // 动作视图就位 + 动画列表（hkxName 去扩展：a000_003013）。
-  const left = window.getByRole('region', { name: 'Animations' });
+  const left = window.getByRole('region', { name: '动画' });
   await expandTaeAnimationGroup(window, 'a00');
   await expect(left.getByRole('row', { name: /a000_003013/ })).toBeVisible();
   await expect(left.getByText(/anibnd/)).not.toBeVisible();
@@ -677,7 +677,7 @@ test('anibnd 容器打开走动作工作台：不落 BND4 容器页，动作视�
 
   // 选中动画 0 → 中栏词条事件列表可用（动作/词条/预览三栏联动）。
   await left.getByRole('row', { name: /a000_003013/ }).click();
-  const middle = window.getByRole('region', { name: 'Events / 词条' });
+  const middle = window.getByRole('region', { name: '事件 / 词条' });
   // S17：词条行名是「eventTypeId + 模板名」，fixture 无模板目录 → 「7 未命名」。
   await expect(middle.getByRole('row', { name: /7 未命名/ }).first()).toBeVisible();
 
@@ -801,7 +801,7 @@ test('命令面板：焦点被困在模态内，关闭后归还打开前的焦�
   // 归还目标用一个稳定可聚焦的元素：搜索框。
   //
   // 不用资源栏 tab：它走 roving tabindex，未选中时是 tabindex="-1"，而选中状态
-  // 会被同一 describe 内前序用例改动（serial 模式共享 app 生命周期之外的 UI 约定），
+  // 会随当前测试的领域切换改动，
   // 于是「点它 → 断言它被聚焦」在套件内跑与单独跑结果不同。搜索框永远 tabindex=0，
   // 不受选中态影响，是更稳的锚点。
   const searchInput = window.locator('.cmdk-trigger');
@@ -902,18 +902,15 @@ test('纯键盘可完成 FMG 编辑：行选择不再阻断编辑态', async () 
   await app.close();
 });
 
-test.skip('写入失败：FMG 直写通道保留诊断', async () => {
+test('写入失败：FMG 直写通道保留诊断', async () => {
   // S29 后文本改动走 fmg 直写门面（Patch Engine 直写），不再经 change-queue
   // 审查——该测试用 SF_TEST_APPLY_FAIL 扰动直写链路、验证失败时保留诊断码。
-  // 在当前 serial 共享 userDataDir 套件序列里（上游测试可在同一 profile 里
-  // 把上次打开的工作台/选中 resource 写进 localStorage），该用例与同位置的
-  // 其他 FMG 测试会随机命中「命令面板域残留」或“条目未就绪」——负向路径的
-  // 冒烟意义已被 fmgBridgeCommit 的直写链路验证承保。跳过以免假红阻塞套件。
+  // 本例独占 profile；失败注入与其他 FMG 用例互不污染。
   const { app, window } = await launchApp({ SF_TEST_APPLY_FAIL: '1' });
   await openFixtureWorkspace(window);
 
   await selectFileItem(window, 'msg/test.msgbnd.dcx');
-  await window.getByRole('row', { name: /伤药葫芦/ }).click();
+  await window.getByRole('row', { name: /返回骨片/ }).click();
   const editor = window.locator('label', { hasText: '编辑 ID 101' }).locator('textarea');
   await expect(editor).toBeVisible();
   await editor.fill('返回骨片·改');
@@ -937,11 +934,11 @@ test('TEXT-20B：§9.1 文本工作台（左 Categories + 中 Entries + 右 Text
   // §9.1 拓扑（S13）：左 Text Categories + 中 Text Entries + 右 Text 三栏竖排。
   const columns = fmgPanel.locator('.workbench__column');
   await expect(columns).toHaveCount(3);
-  await expect(columns.nth(0).locator('.workbench__column-title')).toContainText('Text Categories');
-  await expect(columns.nth(1).locator('.workbench__column-title')).toContainText('Text Entries');
-  await expect(columns.nth(2).locator('.workbench__column-title')).toHaveText('Text');
-  const entriesPane = fmgPanel.getByRole('region', { name: 'Text Entries' });
-  await expect(entriesPane.locator('h3')).toContainText('Text Entries');
+  await expect(columns.nth(0).locator('.workbench__column-title')).toContainText('文本分类');
+  await expect(columns.nth(1).locator('.workbench__column-title')).toContainText('文本条目');
+  await expect(columns.nth(2).locator('.workbench__column-title')).toHaveText('文本');
+  const entriesPane = fmgPanel.getByRole('region', { name: '文本条目' });
+  await expect(entriesPane.locator('h3')).toContainText('文本条目');
 
   // 3-B：点开 item 容器后 Categories 只列该容器的表 —— 不再有 ITEM/MENU 组头，
   // 不再出现 menu 容器里的表（menu.fmg / menu-long.fmg）。
@@ -952,7 +949,7 @@ test('TEXT-20B：§9.1 文本工作台（左 Categories + 中 Entries + 右 Text
   await expect(fmgPanel.getByRole('row', { name: /menu\.fmg/ })).toHaveCount(0);
 
   // 3-A：界面不再画「N 槽 · M 有字」「N 张表」这类目录元数据噪音。
-  const categoriesText = await fmgPanel.getByRole('region', { name: 'Text Categories' }).innerText();
+  const categoriesText = await fmgPanel.getByRole('region', { name: '文本分类' }).innerText();
   expect(categoriesText).not.toContain('槽');
   expect(categoriesText).not.toContain('有字');
   expect(categoriesText).not.toContain('张表');
@@ -971,7 +968,7 @@ test('TEXT-20B：§9.1 文本工作台（左 Categories + 中 Entries + 右 Text
   await expect(fmgPanel.getByRole('row', { name: /item\.fmg/ })).toHaveCount(0);
 
   // 真空表显示空态而非失败。
-  const entriesColumn = fmgPanel.getByRole('region', { name: 'Text Entries' });
+  const entriesColumn = fmgPanel.getByRole('region', { name: '文本条目' });
   await fmgPanel.getByRole('row', { name: /menu\.fmg/ }).click();
   await expect(entriesColumn).toContainText('当前页无条目');
   await expect(entriesColumn).not.toContainText('伤药葫芦');
@@ -1005,7 +1002,7 @@ test('3-C：文本长表一次给全 —— menu-long.fmg 130 条全量渲染，
 
   // 点开长表：130 条 > 100，应一次全量渲染。
   await fmgPanel.getByRole('row', { name: /menu-long\.fmg/ }).click();
-  const entriesColumn = fmgPanel.getByRole('region', { name: 'Text Entries' });
+  const entriesColumn = fmgPanel.getByRole('region', { name: '文本条目' });
 
   // 3-C：无分页条（无上一页 / 下一页 / N/M）。
   await expect(fmgPanel.getByRole('button', { name: '上一页' })).toHaveCount(0);
@@ -1052,7 +1049,7 @@ test('TEXT-20C：真空表新增直写落盘，写按 tableId 路由且 sibling 
   await expect(entriesTable).toContainText('当前页无条目');
 
   // 新增一条：面板生成 id=1 空条目并自动选中（进入编辑态）。
-  await fmgPanel.getByRole('region', { name: 'Text Entries' }).getByRole('button', { name: '新增' }).click();
+  await fmgPanel.getByRole('region', { name: '文本条目' }).getByRole('button', { name: '新增' }).click();
   const editor = window.locator('label', { hasText: '编辑 ID 1' }).locator('textarea');
   await expect(editor).toBeVisible();
   await editor.fill('菜单说明·新增');
@@ -2126,9 +2123,9 @@ test('PARAM 工作台三栏 + CSV 工具条：选择链、父选区清理、虚�
   // EVENT-30B 起事件源码工作台常驻挂载（hidden 不卸载），裸 .workbench 会命中
   // 两个元素：收窄到 PARAM 工作台（aria-label）。
   await expect(window.getByLabel('PARAM 工作台')).toBeVisible();
-  await expect(window.getByRole('region', { name: 'Params' })).toBeVisible();
-  await expect(window.getByRole('region', { name: 'Rows' })).toBeVisible();
-  await expect(window.getByRole('region', { name: 'Fields' })).toBeVisible();
+  await expect(window.getByRole('region', { name: '参数文件' })).toBeVisible();
+  await expect(window.getByRole('region', { name: '行' })).toBeVisible();
+  await expect(window.getByRole('region', { name: '字段' })).toBeVisible();
   await expect(window.getByRole('region', { name: 'Tools' })).toHaveCount(0);
 
   // §7.1 比例在运行期成立（computed flex-grow，未被拖拽覆盖时）；拖拽后转像素是允许路径。
@@ -2287,11 +2284,11 @@ test('GPARAM 工作台五区：bank→group→field→value 选择链、父选�
   // 五区同时存在（§18.15 11B：Files/Groups/Fields/Values/Toolbar；§8.1 禁止合并 Fields/Values）。
   // EVENT-30B 起事件源码工作台常驻挂载，裸 .workbench 命中两个元素：收窄到 GPARAM 工作台。
   await expect(window.getByLabel('GPARAM 工作台')).toBeVisible();
-  await expect(window.getByRole('region', { name: 'Files' })).toBeVisible();
-  await expect(window.getByRole('region', { name: 'Groups' })).toBeVisible();
-  await expect(window.getByRole('region', { name: 'Fields' })).toBeVisible();
-  await expect(window.getByRole('region', { name: 'Values' })).toBeVisible();
-  await expect(window.getByRole('region', { name: 'Toolbar' })).toBeVisible();
+  await expect(window.getByRole('region', { name: '文件' })).toBeVisible();
+  await expect(window.getByRole('region', { name: '组' })).toBeVisible();
+  await expect(window.getByRole('region', { name: '字段' })).toBeVisible();
+  await expect(window.getByRole('region', { name: '数值' })).toBeVisible();
+  await expect(window.getByRole('region', { name: '操作' })).toBeVisible();
   await expect(window.getByRole('region', { name: 'Fields/Values' })).toHaveCount(0);
 
   // §8.1 比例在运行期成立（computed flex-grow；§2.5 停靠折算 ≈ 0.27/0.13/0.17/0.24/0.19）。
@@ -2326,7 +2323,7 @@ test('GPARAM 工作台五区：bank→group→field→value 选择链、父选�
   expect(workbenchText).not.toContain('Fields/Values'); // §8.1 禁止合并单栏
 
   // Toolbar 栏只给诚实空态：只读说明存在，无假写入按钮。
-  const toolbarColumn = window.locator('.workbench__column[aria-label="Toolbar"]');
+  const toolbarColumn = window.locator('.workbench__column[aria-label="操作"]');
   await expect(toolbarColumn).toContainText('暂无已接通的工具');
   expect(await toolbarColumn.locator('button').count()).toBe(0);
 

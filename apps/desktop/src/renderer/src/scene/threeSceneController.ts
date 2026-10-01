@@ -13,6 +13,7 @@
  * replaces GPU-backed renderer construction entirely.
  */
 
+import { attachFlverNativeVertexDiagnostics, type FlverSceneNativeVertexDiagnostics } from './flverNativeVertexDiagnostics.js';
 import type { createWebGpuDiffuseMaterial } from './nativeDiffuseBlend.js';
 import { createSceneEnvironment } from './sceneEnvironment.js';
 import { SceneResourceRegistry } from './sceneResourceRegistry.js';
@@ -162,7 +163,7 @@ export interface FlverSceneDiffuseBlend {
   multiplyBlendMaskByAlbedo2Alpha: boolean;
 }
 
-export interface FlverSceneMesh {
+export interface FlverSceneMesh extends FlverSceneNativeVertexDiagnostics {
   id: string;
   label: string;
   position: [number, number, number];
@@ -2534,6 +2535,7 @@ function createFlverMesh(
 ): Object3D {
   const geometry = track(new three.BufferGeometry());
   geometry.setAttribute('position', new three.BufferAttribute(item.positions, 3));
+  attachFlverNativeVertexDiagnostics(three, geometry, item, item.vertexCount, item.label);
   const uvSets = item.uvSets ?? (item.uvs ? [item.uvs] : undefined);
   if (uvSets) {
     for (const [index, uvSet] of uvSets.entries()) {

@@ -115,11 +115,11 @@ for (const capability of CAPABILITIES) {
 }
 
 // 判据②:main 必须真的把字段传下去。截取 runAgentSession 调用块。
-const runCallMatch = /void runAgentSession\(\{([\s\S]*?)\n      \}\)/.exec(ipcAgentSource);
+const runCallMatch = /void assembly\.run\(\{([\s\S]*?)\n      \}\)/.exec(ipcAgentSource);
 if (runCallMatch === null) {
   report({
     ok: false, gate: LABEL, status: 'failed', code: 'RUN_CALL_UNPARSEABLE',
-    message: '未能从 ipc/agent.ts 提取 runAgentSession 调用块;失败关闭。'
+    message: '未能从 ipc/agent.ts 提取 shared assembly.run 调用块;失败关闭。'
   }, 1);
 }
 const runCallBody = runCallMatch[1];
@@ -131,7 +131,7 @@ for (const capability of CAPABILITIES) {
       code: 'MAIN_DOES_NOT_FORWARD',
       capability: capability.id,
       hostParam: capability.hostParam,
-      message: `main 的 runAgentSession 调用里没有 ${capability.hostParam};`
+      message: `main 的 shared assembly.run 调用里没有 ${capability.hostParam};`
         + ' 字段声明了但不传下去是最常见的半接线形态。'
     });
     continue;
@@ -199,7 +199,7 @@ const observed = {};
   const { tmpdir } = await import('node:os');
   const sessionsDir = await mkdtemp(join(tmpdir(), 'soulforge-wiring-gate-'));
   try {
-    // 记录 loop 收到的 request:host 内部会调 runAgentToolLoop,而那是模块内
+    // 记录 loop 收到的 request:host 内部会调共享 finite adapter,而那是模块内
     // 直接引用,拦不住。改为观测 adapter 侧能看到的效果 + host 传给 loop 的
     // 参数——后者通过一个会在第一次 complete 时抛出的 adapter 来提取。
     const captured = {};

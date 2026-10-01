@@ -832,17 +832,21 @@ deps.handle('resource.readFlverDocument', async (_event, sourceUri: string) => {
         containerEntryIndex = taeEntryIndexes.length === 1 ? taeEntryIndexes[0] : undefined;
         const current = await runBridge<{
           sourceHash?: string;
+          outerFileHash?: string;
           containerSourceHash?: string;
         }>({
           command: 'read-tae-document',
           filePath: file.absolutePath,
+          // Hash validation needs the native aggregate identity, not every
+          // animation's decoded event fields.
+          commandOptions: { animationPage: 0, animationPageSize: 1 },
           allowedRoots: [dirname(file.absolutePath)],
           ...(deps.activeSession.layers.baseRoot
             ? { oodleRuntimeRoot: deps.activeSession.layers.baseRoot }
             : {}),
           timeoutMs: 120_000
         });
-        if (current.parseStatus === 'failed' || !current.data?.containerSourceHash) {
+        if (current.parseStatus === 'failed' || !current.data?.outerFileHash) {
           return {
             ok: false,
             changedFiles: [],
@@ -869,7 +873,7 @@ deps.handle('resource.readFlverDocument', async (_event, sourceUri: string) => {
             }]
           };
         }
-        commitExpectedHash = current.data.containerSourceHash;
+        commitExpectedHash = current.data.outerFileHash;
       } else if (taeEntryIndexes.length > 0) {
         return {
           ok: false,

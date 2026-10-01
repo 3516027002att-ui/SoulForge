@@ -8,7 +8,7 @@
  * - 混合编码增删行拒绝、改非 ASCII 行拒绝、插入非 ASCII 字符拒绝
  * - Unicode 与 BOM 保全；Shift-JIS 不可映射字符拒绝且不静默变 UTF-8
  * - ScriptLoaderProfile 签名/登记源匹配、字节码未经 profile 拒绝、反编译写回门禁
- * - 语法验证器失败 / 缺工具阻止写回
+ * - 通用 HKS 编码必须走 Bridge；原生编译失败阻止写回
  * - Native 真实 Sekiro aicommon.luabnd.dcx 多条目读取、明文/字节码分类判别、受控写回与兄弟条目零篡改
  */
 import { mkdtemp, rm, writeFile, readFile, mkdir } from 'node:fs/promises';
@@ -37,6 +37,7 @@ import {
 import { openNativeEditSession } from '../editing/nativeEditSession.js';
 import { runBridge, disposeBridgeDaemonPool } from '../bridge/runBridge.js';
 import { resolveNativeFixture } from './nativeFixtureRegistry.js';
+import { assertSekiroBytecodeSnapshot } from './staleValidationAssertions.js';
 
 function fail(message: string): never {
   throw new Error(message);
@@ -323,22 +324,31 @@ async function runUnitLayer(): Promise<void> {
     if (pHks.supportsPlaintextSourceEdit) fail('sekiro-action-hks 不得支持明文编辑');
   }
 
-  // Case 9: 字节码反编译写回 Profile 守卫与语法校验拦截
+  // Case 9: 字节码 Profile 守卫与 HKS 必须由 Bridge 编码
   {
     const bytecode = new Uint8Array([0x1b, 0x4c, 0x75, 0x61, 0x51, 0x00, 0x01]);
 
-    // 未登记 Profile
+    // Profile authority belongs to the source-edit gate. The generic byte
+    // encoder always requires Bridge for bytecode, even with no profile.
+    const noProfile = canEditScriptAsSource(undefined, true);
+    if (noProfile.allowed || noProfile.code !== 'SCRIPT_PROFILE_NOT_REGISTERED') {
+      fail('未登记 profile 必须被源码编辑门禁拒绝');
+    }
     const rNoProfile = encodeScriptSourceForWriteback(bytecode, 'print("test")\n', { requireProfile: true });
-    if (rNoProfile.ok || rNoProfile.code !== 'SCRIPT_PROFILE_NOT_REGISTERED') {
-      fail('未登记 profile 必须拒绝字节码源码写回');
+    if (rNoProfile.ok || rNoProfile.code !== 'SCRIPT_HKS_BRIDGE_REQUIRED') {
+      fail('未登记 profile 的通用编码器也不得把源码冒充为 HKS');
     }
 
     // 登记 Profile 但未开放 bytecodeToSourceAllowed
     const pAi = resolveScriptLoaderProfile({ game: 'sekiro', containerPath: 'aicommon.luabnd.dcx' })!;
     const disallowedProfile: ScriptLoaderProfile = { ...pAi, bytecodeToSourceAllowed: false };
+    const disallowed = canEditScriptAsSource(disallowedProfile, true);
+    if (disallowed.allowed || disallowed.code !== 'SCRIPT_BYTECODE_SOURCE_EDIT_PROHIBITED') {
+      fail('未开放 bytecodeToSourceAllowed 必须被源码编辑门禁拒绝');
+    }
     const rDisallowed = encodeScriptSourceForWriteback(bytecode, 'print("test")\n', { profile: disallowedProfile });
-    if (rDisallowed.ok || rDisallowed.code !== 'SCRIPT_BYTECODE_SOURCE_EDIT_PROHIBITED') {
-      fail('未开放 bytecodeToSourceAllowed 必须拒绝写回');
+    if (rDisallowed.ok || rDisallowed.code !== 'SCRIPT_HKS_BRIDGE_REQUIRED') {
+      fail('被禁用 profile 的通用编码器也不得把源码冒充为 HKS');
     }
 
     // 通用字节编码器不得伪造 HKS；真实源码写回走 first-party Bridge。
@@ -377,7 +387,7 @@ async function runUnitLayer(): Promise<void> {
     layer: 'unit',
     suite: 'test:audit-sf-10-unit',
     executedCases: 10,
-    message: 'SF-10 unit tests passed: range patches, mixed-encoding byte-identical preservation, line ending preservation, profile resolution & guards, syntax validation, and safe integer ranges.'
+    message: 'SF-10 unit tests passed: range patches, mixed-encoding byte-identical preservation, line ending preservation, profile resolution & guards, Bridge-only HKS encoding, and safe integer ranges.'
   }, null, 2));
 }
 
@@ -446,30 +456,36 @@ async function runNativeLayer(): Promise<void> {
       childPath: bytecodeEntry.sanitizedName
     });
     if (!bcRead.ok) fail('读取字节码条目失败: ' + JSON.stringify(bcRead.diagnostics));
-    if (bcRead.script.representation !== 'bytecode') fail('字节码条目 representation 应为 bytecode');
-    if (bcRead.script.canWriteBack !== false) fail('未开放的字节码条目 canWriteBack 必须为 false');
+    // Reviewed contract: the Sekiro AI HKS profile has enabled source editing.
+    // A false canWriteBack or wrong profile must still fail this smoke.
+    assertSekiroBytecodeSnapshot(bcRead.script);
 
-    // Native Case 2: 字节码条目源码写入阻断
-    const bcSetBlocked = await setLuabndScript({
-      edit: session,
-      file: sourceLuabnd,
-      childPath: bytecodeEntry.sanitizedName,
-      text: 'print("attempting illegal bytecode overwrite")'
-    });
-    if (bcSetBlocked.ok || bcSetBlocked.error.code !== 'SCRIPT_BYTECODE_SOURCE_EDIT_PROHIBITED') {
-      fail('向原生字节码条目写入文本源码必须被前置拦截并返回 SCRIPT_BYTECODE_SOURCE_EDIT_PROHIBITED');
-    }
-
-    // Native Case 3: 明文条目受控修改、暂存写回与重读验证，同级条目零篡改
-    const originalGoalText = goalRead.script.textPreview ?? '';
-    // 添加一段受控无害注释
-    const modifiedGoalText = '-- SoulForge SF-10 Verified\n' + originalGoalText;
-
-    // 复制原容器到 staging 运行环境以备写回
+    // All native writes, including negative compiler input, target our copy.
     const stagedContainer = join(staging, 'aicommon.luabnd.dcx');
     await writeFile(stagedContainer, await readFile(sourceLuabnd));
     const preWriteBytes = await readFile(stagedContainer);
     const preContainerHash = sha256(preWriteBytes);
+
+    // Native Case 2: enabling source edit does not bypass the compiler gate.
+    // Empty source is a stable first-party HKS_SOURCE_EMPTY negative, unlike
+    // the obsolete assumption that every bytecode source edit is prohibited.
+    const bcSetBlocked = await setLuabndScript({
+      edit: session,
+      file: stagedContainer,
+      childPath: bytecodeEntry.sanitizedName,
+      text: '',
+      expectedContainerHash: preContainerHash
+    });
+    if (bcSetBlocked.ok || bcSetBlocked.error.code !== 'HKS_SOURCE_EMPTY') {
+      fail('空 HKS 源码必须由编译器拒绝并返回 HKS_SOURCE_EMPTY');
+    }
+    if (sha256(await readFile(stagedContainer)) !== preContainerHash) {
+      fail('被拒绝的 HKS 编译不得改动暂存容器');
+    }
+
+    // Native Case 3: controlled plaintext write/read and sibling zero-tamper.
+    const originalGoalText = goalRead.script.textPreview ?? '';
+    const modifiedGoalText = '-- SoulForge SF-10 Verified\n' + originalGoalText;
 
     const goalSetRes = await setLuabndScript({
       edit: session,
@@ -507,7 +523,7 @@ async function runNativeLayer(): Promise<void> {
       layer: 'native',
       suite: 'test:audit-sf-10-native',
       executedCases: 4,
-      message: 'SF-10 native smoke passed: aicommon.luabnd.dcx classification, bytecode write rejection, controlled plaintext staging write, and sibling zero-tamper.'
+      message: 'SF-10 native smoke passed: aicommon.luabnd.dcx classification, enabled bytecode profile with empty-source compiler rejection, controlled plaintext staging write, and sibling zero-tamper.'
     }, null, 2));
 
   } finally {

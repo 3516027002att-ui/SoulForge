@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { createInterface } from 'node:readline';
 import { test } from 'node:test';
-import { distinctTaeFixture, manyEventsFixture } from './tae-native-fixture-helpers.mjs';
+import { distinctTaeFixture, manyEventsFixture, manyAnimationsFixture, taeBinderFixture } from './tae-native-fixture-helpers.mjs';
 
 // The expected IDs, frames, fields and native byte positions are constructed
 // independently. Neither reader nor round-trip output supplies the oracle.
@@ -55,6 +55,36 @@ async function withFixture(run) {
     await run({ ...fixture, source, root, session });
   } finally { session.close(); await rm(root, { recursive: true, force: true }); }
 }
+
+test('native motion identity remains bounded for 2219 actions and returns the native HKX ID rather than the selected action ID', async () => withFixture(async ({ source, session }) => {
+  const bytes = manyAnimationsFixture(); await writeFile(source, bytes);
+  const result = await session.call('read-tae-motion-identity', source, { animId: 2218 });
+  assert.notEqual(result.parseStatus, 'failed', JSON.stringify(result));
+  assert.equal(result.data.format, 'TAE_MOTION_IDENTITY');
+  assert.equal(result.data.animId, 2218); assert.equal(result.data.motionAnimId, 400000);
+  assert.equal(result.data.sourceHash, createHash('sha256').update(bytes).digest('hex'));
+  assert.equal('animations' in result.data, false); assert.equal('events' in result.data, false);
+  assert.ok(JSON.stringify(result.data).length < 1024, 'identity output must not contain other animations, event fields or schema dictionaries');
+  assert.deepEqual(await readFile(source), bytes);
+}));
+
+test('native motion identity preserves duplicate-child ambiguity and exact child selectors', async () => withFixture(async ({ root, bytes, session }) => {
+  const source = join(root, 'c0000.anibnd'); const binder = taeBinderFixture([bytes, bytes]); await writeFile(source, binder);
+  const ambiguous = await session.call('read-tae-motion-identity', source, { animId: 400000 });
+  assert.equal(ambiguous.parseStatus, 'failed'); assert.match(ambiguous.diagnostics[0].message, /ACTION_TAE_ANIMATION_ID_AMBIGUOUS/);
+  const result = await session.call('read-tae-motion-identity', source, { animId: 400000, taeEntryIndex: 1, taeEntryId: 5000001, taeEntryName: 'a01.tae', taeGroup: 'a01' });
+  assert.notEqual(result.parseStatus, 'failed', JSON.stringify(result));
+  assert.equal(result.data.motionAnimId, 400000); assert.equal(result.data.taeEntryIndex, 1); assert.equal(result.data.taeEntryId, 5000001);
+  assert.equal(result.data.taeEntryName, 'a01.tae'); assert.equal(result.data.taeGroup, 'a01');
+  assert.equal(result.data.containerSourceHash, createHash('sha256').update(binder).digest('hex'));
+  const wrong = await session.call('read-tae-motion-identity', source, { animId: 400000, taeEntryIndex: 1, taeEntryId: 5000000 });
+  assert.equal(wrong.parseStatus, 'failed'); assert.match(wrong.diagnostics[0].message, /ACTION_TAE_ENTRY_SELECTOR_NOT_FOUND/);
+  const missing = await session.call('read-tae-motion-identity', source);
+  assert.equal(missing.parseStatus, 'failed'); assert.match(missing.diagnostics[0].message, /animId/);
+  const oversized = await session.call('read-tae-motion-identity', source, { animId: 400000, taeEntryIndex: 2147483648 });
+  assert.equal(oversized.parseStatus, 'failed'); assert.match(oversized.diagnostics[0].message, /BRIDGE_OPTIONS_INVALID.*taeEntryIndex/);
+  assert.deepEqual(await readFile(source), binder);
+}));
 
 test('native reader pairs first and last IDs with their own events and HKX', async () => withFixture(async ({ source, expected, session }) => {
   const result = await session.call('read-tae-document', source);

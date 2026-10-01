@@ -12,6 +12,8 @@ export function createSearchParamRowsTool(): RegisteredTool {
             + 'paramNames: ["NpcParam"] }.',
         permission: 'read',
         permissionLevel: 'read',
+        // Row discovery must settle before consumers from the same model turn.
+        supportsParallel: false,
         inputSchema: { query: 'string?', limit: 'safe-integer?', paramNames: 'array?', offset: 'safe-integer?', cursor: 'string?' },
         run: (input, context) => {
             const ws = context.workspaceIndex;

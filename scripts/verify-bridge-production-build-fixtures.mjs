@@ -43,6 +43,7 @@ try {
   }, null, 2)}\n`);
   await seed('scripts/run-dotnet.mjs', 'spawn dotnet with controlled arguments\n');
   await seed('scripts/build-first-party-hksc-native.mjs', '// native compiler build\n');
+  await seed('scripts/dotnet-runtime-notices.mjs', '// target runtime redistribution notices\n');
   await seed('bridge/native/hksc/compiler.c', '// native compiler source\n');
   await seed('bridge/SoulForge.Bridge/bin/Release/net10.0/win-x64/publish/SoulForge.Hksc.Native.dll', 'native compiler v1\n');
   await seed('bridge/SoulForge.Bridge/Program.cs', 'class Program { }\n');
@@ -65,7 +66,7 @@ try {
   const written = await writeBridgeProductionBuildReceipt(root);
   assert.equal(written.manifestPath, join(root, BRIDGE_PRODUCTION_BUILD_RECEIPT));
   const fresh = await assertBridgeProductionBuildFresh(root);
-  assert.equal(fresh.current.source.fileCount, 7);
+  assert.equal(fresh.current.source.fileCount, 8);
   assert.equal(fresh.current.executable.sha256, written.receipt.executable.sha256);
 
   await seed('bridge/SoulForge.Bridge/bin/ignored-source.cs', 'ignored changed\n');

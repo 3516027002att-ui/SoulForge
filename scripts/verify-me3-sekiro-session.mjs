@@ -14,12 +14,13 @@
 import { runDesktopSmoke } from './desktop-test-build.mjs';
 const gameRoot = process.env.SOULFORGE_SEKIRO_GAME_ROOT?.trim();
 
-if (!gameRoot) {
+if (!gameRoot || process.env.SOULFORGE_ME3_SEKIRO_SESSION_RUN !== '1' || process.platform !== 'win32') {
   console.log(JSON.stringify({
     ok: true,
     status: 'skipped',
     gate: 'me3-sekiro-session',
-    message: 'SOULFORGE_SEKIRO_GAME_ROOT 未设置：真实 Sekiro 会话未执行（本机验证不用于公共 CI）。'
+    code: process.platform !== 'win32' ? 'ME3_SEKIRO_PLATFORM_UNAVAILABLE' : !gameRoot ? 'ME3_SEKIRO_GAME_ROOT_UNAVAILABLE' : 'ME3_SEKIRO_RUN_NOT_REQUESTED',
+    message: '真实 Sekiro 会话未执行：需要 Windows、游戏根目录与 SOULFORGE_ME3_SEKIRO_SESSION_RUN=1。'
   }, null, 2));
   process.exit(0);
 }

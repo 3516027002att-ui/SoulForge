@@ -927,8 +927,15 @@ export class WorkspaceIndex {
   /** Merge bounded reads from the same snapshot without dropping unread siblings. */
   mergeTaeEvents(value: TaeExport): boolean {
     const previous = this.taeExports.find((item) => item.sourceUri === value.sourceUri);
-    if (!previous || previous.sourceHash !== value.sourceHash || previous.sourceRevision !== value.sourceRevision
-      || previous.readerSchemaRevision !== value.readerSchemaRevision)
+    // A physical snapshot can be ingested without a catalog mtime and later
+    // read through the public tool with one. Matching captured bytes, native
+    // logical identity and reader revision retain unread sibling projections.
+    const sameSnapshot = previous && previous.sourceHash === value.sourceHash
+      && previous.readerSchemaRevision === value.readerSchemaRevision
+      && (previous.outerFileHash && value.outerFileHash
+        ? previous.outerFileHash === value.outerFileHash
+        : previous.sourceRevision === value.sourceRevision);
+    if (!sameSnapshot)
       return this.upsertTaeExport(value);
     const key = (animation: TaeAnimSymbol) => JSON.stringify([animation.taeEntryIndex, animation.taeEntryId, animation.taeEntryName, animation.taeGroup, animation.animId]);
     const animations = new Map(previous.animations.map((animation) => [key(animation), animation]));

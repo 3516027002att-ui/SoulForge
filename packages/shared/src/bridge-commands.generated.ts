@@ -26,6 +26,7 @@ export const BRIDGE_FILE_COMMANDS = [
   "read-tpf-texture-preview",
   "write-tpf-texture-replace",
   "read-tae-document",
+  "read-tae-motion-identity",
   "read-tae-event-params",
   "read-tae-animation-clip",
   "sample-tae-animation-pose",

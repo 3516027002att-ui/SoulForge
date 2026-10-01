@@ -1003,13 +1003,14 @@ export function registerActionIpcHandlers(deps: ActionIpcDeps): void {
         if (indexed !== undefined) return { ok: true, motionAnimId: indexed };
 
         const result = await runBridge<Record<string, unknown>>({
-          command: 'read-tae-document',
+          command: 'read-tae-motion-identity',
           filePath: input.file.absolutePath,
           resourceUri: input.sourceUri,
           allowedRoots: input.allowedRoots,
           timeoutMs: 120_000,
           ...(input.effectiveBase ? { oodleRuntimeRoot: input.effectiveBase } : {}),
-          workspaceSessionId: input.sessionId
+          workspaceSessionId: input.sessionId,
+          commandOptions: { animId: input.animId, ...input.taeEntrySelector }
         });
         if (result.parseStatus === 'failed' || !result.data) {
           return {
@@ -1026,43 +1027,34 @@ export function registerActionIpcHandlers(deps: ActionIpcDeps): void {
           };
         }
         const data = asRecord(result.data);
-        if (!data || data.animationsTruncated === true || !Array.isArray(data.animations)) {
+        if (!data || data.format !== 'TAE_MOTION_IDENTITY'
+          || data.identityProjectionVersion !== 2
+          || data.animId !== input.animId
+          || typeof data.sourceHash !== 'string' || !data.sourceHash.trim()) {
           return {
             ok: false,
             diagnostics: [actionDiagnostic(
               'TAE_MOTION_IDENTITY_UNRESOLVED',
-              'TAE motion identity 数据缺失或被截断，已拒绝回退到 animId。',
+              'TAE motion identity 原生投影缺失或与选中动画不一致，已拒绝回退到 animId。',
               input.sourceUri,
-              { animId: input.animId, animationsTruncated: data?.animationsTruncated === true }
+              { animId: input.animId }
             )]
           };
         }
-        const matches = data.animations.filter((raw) => {
-          const animation = asRecord(raw);
-          if (asSafeInteger(animation?.animId) !== input.animId) return false;
-          if (input.taeEntrySelector) {
-            const { taeEntryIndex, taeEntryId, taeEntryName, taeGroup } = input.taeEntrySelector;
-            if (typeof taeEntryIndex === 'number' && animation?.taeEntryIndex !== taeEntryIndex) return false;
-            if (typeof taeEntryId === 'number' && animation?.taeEntryId !== taeEntryId) return false;
-            if (typeof taeEntryName === 'string' && animation?.taeEntryName !== taeEntryName) return false;
-            if (typeof taeGroup === 'string' && animation?.taeGroup !== taeGroup) return false;
-          }
-          return true;
-        });
-        if (matches.length > 1) {
+        if (input.taeEntrySelector && Object.entries(input.taeEntrySelector).some(
+          ([key, value]) => value !== undefined && data[key] !== value
+        )) {
           return {
             ok: false,
             diagnostics: [actionDiagnostic(
-              'TAE_MOTION_IDENTITY_AMBIGUOUS',
-              'TAE 返回多个相同 animId，motion identity 不唯一，已拒绝继续。',
+              'TAE_MOTION_IDENTITY_UNRESOLVED',
+              'TAE motion identity 与选中 child identity 不一致，已拒绝继续。',
               input.sourceUri,
-              { animId: input.animId, matchCount: matches.length }
+              { animId: input.animId }
             )]
           };
         }
-        const motionAnimId = matches.length === 1
-          ? asSafeInteger(asRecord(matches[0])?.motionAnimId)
-          : null;
+        const motionAnimId = asSafeInteger(data.motionAnimId);
         if (motionAnimId === null || motionAnimId < 0 || motionAnimId >= SEKIRO_ANIMATION_BINDER_ID_BASE) {
           return {
             ok: false,
@@ -1075,22 +1067,8 @@ export function registerActionIpcHandlers(deps: ActionIpcDeps): void {
           };
         }
 
-        // 只把当前 source revision 的 Bridge 读结果投影回既有 index；这不是
-        // 第二套 parser，下一次读取仍以 Bridge envelope 为源。注入 revision
-        // 只是 desktop 在 core 尚未提供 source-revision 参数时的最小适配。
-        if (deps.activeSession === input.session
-          && deps.activeWorkspaceSessionId === input.sessionId
-          && deps.activeIndex) {
-          ingestBridgeResult(deps.activeIndex, {
-            sourceUri: input.sourceUri,
-            sourcePath: input.file.relativePath,
-            game: input.file.game,
-            resourceKind: 'action',
-            parseStatus: 'parsed',
-            diagnostics: deps.asBasicDiagnostics(result.diagnostics),
-            data: { ...data, sourceRevision: input.sourceRevision.mtimeMs }
-          });
-        }
+        // This scalar identity is cached only for its source revision/selector.
+        // It is not a complete event document and must not populate that index.
         return { ok: true, motionAnimId };
       } catch (error) {
         return {

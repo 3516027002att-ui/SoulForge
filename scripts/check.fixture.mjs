@@ -11,6 +11,21 @@ import { loadWorkspaces } from './verify/scriptGraph.mjs';
 import { planScript } from './verify/commandPlan.mjs';
 
 const runner = fileURLToPath(new URL('./check.mjs', import.meta.url));
+const compatibilityRunner = fileURLToPath(new URL('./verify.mjs', import.meta.url));
+test('the verify compatibility entry discovers current checks without a tier table or legacy governance data',()=>{
+ const root=mkdtempSync(join(tmpdir(),'sf-verify-current-entry-'));
+ try{
+  mkdirSync(join(root,'scripts'),{recursive:true});mkdirSync(join(root,'docs/governance'),{recursive:true});
+  writeFileSync(join(root,'package.json'),JSON.stringify({scripts:{}}));
+  writeFileSync(join(root,'docs/governance/slices.json'),'retired metadata must never be read');
+  writeFileSync(join(root,'scripts/new.test.mjs'),'console.log("NEW_ASSERTION_EXECUTED")');
+  const result=spawnSync(process.execPath,[compatibilityRunner,'--suite','file:scripts/new.test.mjs','--require-executed'],{cwd:root,encoding:'utf8'});
+  assert.equal(result.status,0,result.stderr);const report=JSON.parse(result.stdout);
+  assert.equal(report.results[0].status,'passed');assert.equal(report.completionVerified,true);
+  const retired=spawnSync(process.execPath,[compatibilityRunner,'--slice','old-slice'],{cwd:root,encoding:'utf8'});
+  assert.equal(retired.status,2);assert.equal(JSON.parse(retired.stderr).code,'VERIFY_SLICE_PLAN_RETIRED');
+ }finally{rmSync(root,{recursive:true,force:true});}
+});
 test('registry drift never bans independently parsed checks, failures do not stop unrelated suites', () => {
   const root = mkdtempSync(join(tmpdir(),'sf-check-fixture-'));
   try {

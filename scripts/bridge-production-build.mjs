@@ -8,7 +8,7 @@ export const BRIDGE_PROJECT_RELATIVE_PATH = 'bridge/SoulForge.Bridge';
 export const BRIDGE_PUBLISH_RELATIVE_PATH = `${BRIDGE_PROJECT_RELATIVE_PATH}/bin/Release/net10.0/win-x64/publish`;
 export const BRIDGE_PUBLISH_EXECUTABLE_RELATIVE_PATH = `${BRIDGE_PUBLISH_RELATIVE_PATH}/SoulForge.Bridge.exe`;
 export const BRIDGE_PRODUCTION_BUILD_RECEIPT = `${BRIDGE_PUBLISH_RELATIVE_PATH}/bridge-production-build.json`;
-export const BRIDGE_EXTERNAL_BUILD_INPUTS = Object.freeze(['global.json', 'scripts/run-dotnet.mjs', 'scripts/build-first-party-hksc-native.mjs']);
+export const BRIDGE_EXTERNAL_BUILD_INPUTS = Object.freeze(['global.json', 'scripts/run-dotnet.mjs', 'scripts/build-first-party-hksc-native.mjs', 'scripts/dotnet-runtime-notices.mjs']);
 export const BRIDGE_NATIVE_SOURCE_RELATIVE_PATH = 'bridge/native/hksc';
 export const BRIDGE_PUBLISH_SCRIPT_INPUT = 'package.json#scripts.bridge:publish';
 

@@ -349,6 +349,19 @@
       ]
     },
     {
+      "name": "read-tae-motion-identity",
+      "effect": "read",
+      "advertised": true,
+      "requiresOutputPath": false,
+      "costClass": "interactive",
+      "cancelMode": "cooperative",
+      "handler": "service",
+      "requiredInputFields": [
+        "command",
+        "filePath"
+      ]
+    },
+    {
       "name": "read-tae-event-params",
       "effect": "read",
       "advertised": true,

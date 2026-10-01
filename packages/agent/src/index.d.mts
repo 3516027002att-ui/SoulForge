@@ -1,4 +1,7 @@
 export const AGENT_PROTOCOL_VERSION: 1;
+export const DEFAULT_APPROVAL_REQUIRED_LEVELS: readonly string[];
+export type KernelApprovalDecision = 'once'|'always'|'reject'|'never'|'timed_out'|'abort';
+export interface KernelApprovalAudit {name:string;permissionLevel:string;decision:KernelApprovalDecision;fromMemory:boolean;note?:string}
 export type KernelState = 'completed' | 'partial' | 'cancelled' | 'error' | 'waiting';
 export interface KernelCall { id: string; name: string; argumentsJson: string }
 export interface KernelMessage { role: 'system' | 'user' | 'assistant' | 'tool'; content: string; name?: string; toolCallId?: string; toolCalls?: KernelCall[]; images?: readonly {mediaType:string;dataBase64:string}[] }
@@ -16,12 +19,15 @@ export interface FiniteAgentOptions {
  executeTool(call:KernelCall,context:{signal:AbortSignal}):Promise<{ok:boolean;content:string;code?:string;transaction?:KernelTransaction}>;
  allowTool(call:KernelCall,tool:KernelTool):{ok:true}|{ok:false;code:string;message:string};
  retryDecision?(diagnostics:KernelDiagnostic[],attempt:number):{retry:boolean;delayMs:number;code?:string;maxAttempts:number};
+ approvalRequiredLevels?:readonly string[];
  requestApproval?(request:KernelApproval):Promise<{decision:string;note?:string}>;
  resolveApprovalDiff?(request:{toolName:string;argumentsJson:string}):Promise<KernelApprovalDiff|null>;
  prepareContext?(messages:KernelMessage[],signal:AbortSignal,emitEvent:(event:{type:string;[key:string]:unknown})=>void):Promise<void>;
  recordMessage?(message:KernelMessage,step:number):void;
  onEvent?(event:AgentProtocolEvent):void;redact?(text:string):string;signal?:AbortSignal;limits?:KernelLimits;maxTokens?:number;
+ /** False when the model port already emitted accepted text deltas. */
+ emitCompletedMessage?:boolean;
  pricing?:{inputPerMillion:number;outputPerMillion:number};strategy?:'automatic'|'on-demand';
 }
-export interface FiniteAgentResult { state:KernelState;reason:string;finishReason:string;steps:number;messages:KernelMessage[];diagnostics:KernelDiagnostic[];toolCalls:{name:string;ok:boolean;code?:string}[];transactions:KernelTransaction[];unresolvedCalls:{callId:string;toolName:string;state:'unknown';retryable:false}[];outputTokens:number;cost:number;evaluation:'unverified';pendingApproval?:{call:KernelCall;proposalHash:string;step:number} }
+export interface FiniteAgentResult { state:KernelState;reason:string;finishReason:string;steps:number;messages:KernelMessage[];diagnostics:KernelDiagnostic[];toolCalls:{name:string;ok:boolean;code?:string}[];transactions:KernelTransaction[];approvals:KernelApprovalAudit[];unresolvedCalls:{callId:string;toolName:string;state:'unknown';retryable:false}[];outputTokens:number;cost:number;evaluation:'unverified';pendingApproval?:{call:KernelCall;proposalHash:string;step:number} }
 export function runFiniteAgent(options:FiniteAgentOptions):Promise<FiniteAgentResult>;

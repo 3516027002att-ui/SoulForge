@@ -9,6 +9,7 @@
  * Since T09/T12 the ledgerless path is production: writes fail closed on the
  * automatic read-proof boundary, never on a manual ledger gate.
  */
+import { requireRollbackOpId } from './staleValidationAssertions.js';
 import { createHash } from 'node:crypto';
 import { copyFile, mkdir, readFile } from 'node:fs/promises';
 import { join } from 'node:path';
@@ -171,7 +172,7 @@ async function main(): Promise<void> {
       }, commitConfirmation);
       check('C/mutate-commits-after-delivered-read', mutate.out.ok === true && mutate.envelope.state === 'committed',
         `读取证明送达后写入应提交，实际 ${JSON.stringify({ ok: mutate.out.ok, state: mutate.envelope.state, error: mutate.envelope.error })}`);
-      const opId = ((mutate.envelope.data as Record<string, unknown> | undefined)?.record as Record<string, unknown> | undefined)?.opId;
+      const opId = requireRollbackOpId(mutate.envelope);
       check('C/commit-carries-opId', typeof opId === 'string' && opId.trim() !== '',
         '提交结果必须携带 opId（回滚与审计入口）');
 

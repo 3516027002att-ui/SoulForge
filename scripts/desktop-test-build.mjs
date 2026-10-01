@@ -15,10 +15,22 @@ export async function withDesktopTestBuild(kind, execute, options = {}) {
   const outputRoot = await mkdtemp(join(parent, `${kind}-`));
   const env = { ...process.env, SOULFORGE_TEST_BUILD_ROOT: outputRoot,
     SOULFORGE_SQLITE_NATIVE_BINDING: join(outputRoot, '.native', 'better_sqlite3.node') };
+  // Electron startup and utility processes must not reuse a developer's profile,
+  // runtime sockets or caches. Keep these with the existing per-run output owner.
+  const runtimeRoot = join(outputRoot, '.runtime');
+  const runtimeDirectories = {
+    HOME: join(runtimeRoot, 'home'), XDG_CONFIG_HOME: join(runtimeRoot, 'config'),
+    XDG_CACHE_HOME: join(runtimeRoot, 'cache'), XDG_DATA_HOME: join(runtimeRoot, 'data'),
+    XDG_STATE_HOME: join(runtimeRoot, 'state'), XDG_RUNTIME_DIR: join(runtimeRoot, 'runtime'),
+    ...(process.platform === 'win32' ? { USERPROFILE: join(runtimeRoot, 'home'),
+      APPDATA: join(runtimeRoot, 'app-data'), LOCALAPPDATA: join(runtimeRoot, 'local-app-data') } : {})
+  };
+  Object.assign(env, runtimeDirectories);
   for (const flag of Object.values(flags)) delete env[flag];
   env[flags[kind]] = '1';
   const cancellation = createProcessCancellation();
   try {
+    for (const directory of new Set(Object.values(runtimeDirectories))) await mkdir(directory, { recursive: true, mode: 0o700 });
     if (options.build !== false) {
       const command = process.platform === 'win32' ? (process.env.ComSpec || 'cmd.exe') : 'npm';
       const args = process.platform === 'win32' ? ['/d', '/s', '/c', 'npm run build -w @soulforge/desktop'] : ['run', 'build', '-w', '@soulforge/desktop'];

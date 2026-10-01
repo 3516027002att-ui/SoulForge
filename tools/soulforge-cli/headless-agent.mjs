@@ -18,8 +18,8 @@ export function parseAgentExecArguments(argv) {
             throw failure('AGENT_ARGUMENT_INVALID', 'Option requires a value.');
         options[key] = ['maxSteps', 'timeoutMs', 'maxOutputTokens', 'maxCost'].includes(key) ? Number(value) : value;
     }
-    if (!['finite', 'legacy'].includes(options.kernel))
-        throw failure('AGENT_ARGUMENT_INVALID', 'Kernel must be finite or legacy.');
+    if (options.kernel !== 'finite')
+        throw failure('AGENT_LEGACY_KERNEL_RETIRED', 'The production Agent uses the finite kernel; explicit experiments use the pinned Git baseline.');
     for (const key of ['maxSteps', 'timeoutMs', 'maxOutputTokens'])
         if (!Number.isSafeInteger(options[key]) || options[key] <= 0)
             throw failure('AGENT_ARGUMENT_INVALID', `Invalid ${key}.`);
@@ -101,12 +101,11 @@ export async function runHeadlessAgentCommand(options, core, repoRoot, io = {}) 
     const sessionsDir = resolve(args.sessionsDir ?? join(repoRoot, 'output', 'agent-headless'));
     await mkdir(sessionsDir, { recursive: true });
     const cliSession = await core.openLocalCliSession({ overlayRoot: resolve(options.workspace), ...(options.base ? { baseRoot: resolve(options.base) } : {}), game: options.game ?? 'sekiro', mode: options.mode ?? 'normal', principal: `agent:${sessionId}`, analyze: options.noAnalyze ? false : options.analyze ?? true, useCache: options.useCache ?? true, requireDurableLog: mode !== 'plan', ...(options.confirmRollback ? { confirmRollbackOpId: options.confirmRollback } : {}), onFallbackWarning: message => emit({ type: 'host-warning', message }) });
-    let pendingApproval;
     const assembly = core.createAgentRunAssembly(cliSession.bridge, {coreSession:cliSession.coreSession});
     try {
         const result = await assembly.run({ sessionsDir, sessionId, adapter, config, apiKey: args.responsesFile ? '' : process.env.SOULFORGE_AGENT_API_KEY, prompt: task, permissionMode: mode, kernel: args.kernel, maxSteps: args.maxSteps, timeoutMs: args.timeoutMs, maxTotalOutputTokens: args.maxOutputTokens, kernelLimits: { timeoutMs: args.timeoutMs, ...(args.maxCost !== undefined ? {maxCost:args.maxCost}:{}) },
             ...(providerPricing ? {pricing:providerPricing}:{}),
-            ...(args.kernel === 'legacy' && mode !== 'full' ? { requestApproval: async (request) => { pendingApproval = request; throw failure('AGENT_APPROVAL_CHANNEL_REQUIRED', 'Run is waiting for host approval.'); } } : {}),
+            ...(mode === 'full' ? {approvalRequiredLevels:[]} : {}),
             onEvent: event => { },
             onProtocolEvent: envelope => emit({ type: 'agent-event', ...envelope })
         });
@@ -114,15 +113,6 @@ export async function runHeadlessAgentCommand(options, core, repoRoot, io = {}) 
         await writeFile(join(sessionsDir, `${sessionId}.report.json`), `${JSON.stringify(report, null, 2)}\n`, 'utf8');
         emit(report);
         return report;
-    }
-    catch (error) {
-        if (error.code === 'AGENT_APPROVAL_CHANNEL_REQUIRED') {
-            const report = { type: 'agent-report', sessionId, source: provenance.source, input: provenance.input, build, provider, kernel: args.kernel, state: 'waiting', finishReason: 'waiting', evaluation: 'unverified', pendingApproval };
-            await writeFile(join(sessionsDir, `${sessionId}.report.json`), `${JSON.stringify(report, null, 2)}\n`);
-            emit(report);
-            return report;
-        }
-        throw error;
     }
     finally {
         await assembly.waitForHostOperations?.();

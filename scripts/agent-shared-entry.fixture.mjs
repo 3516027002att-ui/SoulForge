@@ -6,6 +6,28 @@ import test from 'node:test';
 import * as core from '../packages/core/dist/index.js';
 const config={id:'fixture',displayName:'fixture',protocol:'openai-compatible',baseUrl:'https://fixture.invalid',model:'deterministic',hasCredential:false,createdAt:'',updatedAt:''};
 const makeAdapter=()=>({protocol:'openai-compatible',listModels:async()=>({ok:true,models:[]}),complete:async()=>({message:{role:'assistant',content:'verified read'},finishReason:'stop',diagnostics:[]}),stream:async function*(){throw new Error('unused');}});
+test('nonstream provider text reaches the renderer and CLI event boundaries exactly once',async()=>{
+ const root=await mkdtemp(join(tmpdir(),'sf-agent-nonstream-text-'));const events=[],protocol=[];
+ try{
+  const text='The native task result is ready.';
+  const result=await core.runAgentSession({sessionsDir:root,adapter:{...makeAdapter(),complete:async()=>({message:{role:'assistant',content:text},finishReason:'stop',diagnostics:[],usage:{inputTokens:5,outputTokens:5}})},config,apiKey:'',prompt:'read',permissionMode:'plan',tools:[],executeTool:async()=>({ok:true,content:'{}'}),streaming:false,onEvent:event=>events.push(event),onProtocolEvent:event=>protocol.push(event)});
+  assert.equal(result.run.finishReason,'stop');
+  assert.deepEqual(events.filter(event=>event.type==='agent-message-delta').map(event=>event.text),[text]);
+  assert.deepEqual(protocol.filter(event=>event.event.type==='agent-message-delta').map(event=>event.event.text),[text]);
+  assert.equal(result.run.messages.filter(message=>message.role==='assistant'&&message.content===text).length,1);
+ }finally{await rm(root,{recursive:true,force:true});}
+});
+test('RAG trust policy survives an unrelated broker failure system message and is deduplicated by actual prefix',async()=>{
+ const root=await mkdtemp(join(tmpdir(),'sf-agent-rag-policy-'));
+ try{for(const available of [false,true]){
+  const requests=[];const adapter={...makeAdapter(),complete:async request=>{requests.push(request);return {message:{role:'assistant',content:'bounded'},finishReason:'stop',diagnostics:[],usage:{inputTokens:5,outputTokens:5}};}};
+  await core.runAgentSession({sessionsDir:root,adapter,config,apiKey:'',prompt:'fixed query',permissionMode:'plan',tools:[],executeTool:async()=>({ok:true,content:'{}'}),contextBroker:available?{assemble:async()=>({ok:true,context:'bounded broker data',sections:[],totalBytes:19,dynamic:true,systemPrefix:core.DYNAMIC_EVIDENCE_SYSTEM_PREFIX,diagnostics:[]})}:core.createContextBroker(),ragSearch:{retrieve:async()=>({ok:true,hits:[{score:1,chunk:{family:'PARAM',symbolUri:'fixture://one'},excerpt:'Untrusted evidence'}]})}});
+  const messages=requests[0].messages;
+  assert.equal(messages.filter(message=>message.role==='system'&&message.content===core.DYNAMIC_EVIDENCE_SYSTEM_PREFIX).length,1);
+  assert.equal(messages.filter(message=>message.role==='user'&&message.content.includes('UNTRUSTED_RAG_EVIDENCE_BEGIN')).length,1);
+  if(!available)assert.ok(messages.some(message=>message.role==='system'&&message.content.includes('insufficient_evidence')));
+ }}finally{await rm(root,{recursive:true,force:true});}
+});
 test('desktop and CLI assembly share deterministic session events and provenance-compatible results',async()=>{
  assert.equal(typeof core.createAgentRunAssembly,'function');
  const root=await mkdtemp(join(tmpdir(),'sf-agent-shared-'));
@@ -32,8 +54,16 @@ test('finite adapter preserves configured bounded context hook instead of silent
  assert.equal(result.kernel.state,'completed');assert.equal(assemblies,1);
  }finally{await rm(root,{recursive:true,force:true});}
 });
-test('legacy and finite sessions persist versioned protocol events without exposing actual credentials',async()=>{
- const root=await mkdtemp(join(tmpdir(),'sf-agent-protocol-'));try{for(const kernel of ['legacy','finite']){
+test('missing sampling uses existing transport/budget ceilings rather than the whole run output budget',async()=>{
+ const root=await mkdtemp(join(tmpdir(),'sf-agent-default-ceiling-'));
+ try{for(const [protocol,expected] of [['anthropic-compatible',1024],['openai-compatible',4096]]){
+  const requested=[];const adapter={...makeAdapter(),protocol,complete:async request=>{requested.push(request.maxTokens);return {message:{role:'assistant',content:'bounded'},finishReason:'stop',diagnostics:[],usage:{inputTokens:1,outputTokens:1}};}};
+  const result=await core.runAgentSession({sessionsDir:root,adapter,config:{...config,protocol},apiKey:'',prompt:'read',permissionMode:'plan',tools:[],executeTool:async()=>({ok:true,content:'{}'})});
+  assert.deepEqual(requested,[expected]);assert.equal(result.kernel.state,'completed');
+ }}finally{await rm(root,{recursive:true,force:true});}
+});
+test('default and explicit finite sessions persist versioned protocol events without exposing actual credentials',async()=>{
+ const root=await mkdtemp(join(tmpdir(),'sf-agent-protocol-'));try{for(const kernel of [undefined,'finite']){
   const events=[];const adapter={...makeAdapter(),complete:async()=>({message:{role:'assistant',content:'plain-secret-credential-value'},finishReason:'stop',diagnostics:[]})};
   const result=await core.createAgentRunAssembly({tools:[],executeTool:async()=>({ok:true,content:'{}'})}).run({sessionsDir:root,adapter,config,apiKey:'plain-secret-credential-value',prompt:'read',permissionMode:'plan',kernel,onProtocolEvent:event=>events.push(event)});
   assert.ok(events.length>0);assert.deepEqual(events.map(e=>e.eventSeq),events.map((_,i)=>i+1));
@@ -61,7 +91,7 @@ test('shared finite entry applies the configured total timeout to an unresponsiv
 });
 test('streamed credentials are redacted across every split before UI and protocol persistence',async()=>{
  const root=await mkdtemp(join(tmpdir(),'sf-stream-redaction-'));const secret='review-private-credential-value';
- try{for(const kernel of ['legacy','finite'])for(const type of ['text-delta','thinking-delta'])for(let split=1;split<secret.length;split++){
+ try{for(const kernel of [undefined,'finite'])for(const type of ['text-delta','thinking-delta'])for(let split=1;split<secret.length;split++){
   const ui=[],protocol=[];
   const adapter={...makeAdapter(),stream:async function*(){yield {type,text:`before ${secret.slice(0,split)}`};yield {type:type==='text-delta'?'thinking-delta':'text-delta',text:'public reply'};yield {type,text:`${secret.slice(split)} after`};yield {type:'message-stop',finishReason:'stop'};}};
   const result=await core.createAgentRunAssembly({tools:[],executeTool:async()=>({ok:true,content:'{}'})}).run({sessionsDir:root,adapter,config,apiKey:secret,prompt:'read',permissionMode:'plan',kernel,streaming:true,onEvent:event=>ui.push(event),onProtocolEvent:event=>protocol.push(event)});

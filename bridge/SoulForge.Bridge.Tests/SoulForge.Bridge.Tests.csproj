@@ -7,6 +7,8 @@
     <IsTestProject>true</IsTestProject>
   </PropertyGroup>
   <ItemGroup>
+    <Compile Include="../SoulForge.Doctor/OodleDoctor.cs" Link="Doctor/OodleDoctor.cs" />
+    <Compile Include="../SoulForge.Doctor/Models.cs" Link="Doctor/Models.cs" />
     <ProjectReference Include="../SoulForge.Bridge/SoulForge.Bridge.csproj" />
     <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.14.1" />
     <PackageReference Include="xunit" Version="2.9.3" />

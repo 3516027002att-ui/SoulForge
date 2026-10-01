@@ -1,5 +1,6 @@
 import { BoundedEventHistory } from '../../../../../packages/agent/src/eventHistory.mjs';
 import { runAgentUtilitySession } from '../agentUtilityClient.js';
+import { agentSessionOutcomeEvents } from '../agentSessionOutcome.js';
 import { createHash, randomUUID } from 'node:crypto';
 import { existsSync, readdirSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
@@ -1318,12 +1319,7 @@ export function registerAgentIpcHandlers(deps: AgentIpcDeps): void {
         activeAgentRuns.delete(sessionId);
         rejectSessionApprovals(sessionId, '会话已结束，未回答的审批按拒绝处理。');
         const relativeRolloutPath = relative(agentSessionsBaseDir, result.rolloutPath).replace(/\\/g, '/');
-        sendAgentEvent(sessionId, {
-          type: 'session-done',
-          finishReason: result.run.finishReason,
-          steps: result.run.steps,
-          rolloutFileName: relativeRolloutPath
-        });
+        for(const terminalEvent of agentSessionOutcomeEvents(result,relativeRolloutPath))sendAgentEvent(sessionId,terminalEvent);
       }).catch((error: unknown) => {
         activeAgentRuns.delete(sessionId);
         // Also on the failure path: a crashed run must not leave resolvers parked.

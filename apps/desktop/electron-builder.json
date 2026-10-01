@@ -129,6 +129,15 @@
         "filter": [
           "SoulForge.Hksc.Native.dll"
         ]
+      },
+      {
+        "from": "../../bridge/SoulForge.Bridge/bin/Release/net10.0/win-x64/publish/runtime-notices",
+        "to": "bridge/runtime-notices",
+        "filter": [
+          "LICENSE.txt",
+          "THIRD-PARTY-NOTICES.txt",
+          "runtime-notices.json"
+        ]
       }
     ]
   },
@@ -165,6 +174,15 @@
         "to": "bridge/libSoulForge.Hksc.Native.so",
         "filter": [
           "libSoulForge.Hksc.Native.so"
+        ]
+      },
+      {
+        "from": "../../bridge/SoulForge.Bridge/bin/Release/net10.0/linux-x64/publish/runtime-notices",
+        "to": "bridge/runtime-notices",
+        "filter": [
+          "LICENSE.txt",
+          "THIRD-PARTY-NOTICES.txt",
+          "runtime-notices.json"
         ]
       }
     ]

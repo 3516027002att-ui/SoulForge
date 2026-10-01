@@ -345,8 +345,8 @@ expect(
 
 expect(
   '同名 workspace 内转发（无 -w）必须识别为本 workspace',
-  parseScriptCommand('npm run test:governance-data-fixtures', ''),
-  { entries: [], forwards: [{ script: 'test:governance-data-fixtures', workspace: null }] }
+  parseScriptCommand('npm run test:new-fixture', ''),
+  { entries: [], forwards: [{ script: 'test:new-fixture', workspace: null }] }
 );
 
 /* ---- 5. 约定式发现覆盖 ----------------------------------------------- */

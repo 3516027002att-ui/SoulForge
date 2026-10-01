@@ -15,7 +15,7 @@
 
 import { createHash } from 'node:crypto';
 import { createRequestSignal } from './errorClassification.js';
-import { redactSecrets } from './agentLoop.js';
+import { redactSecrets } from './agentPolicy.js';
 import {
   evidenceKey,
   evidenceResourceKey,

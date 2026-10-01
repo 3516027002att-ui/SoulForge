@@ -552,6 +552,7 @@ internal sealed class TaeNativeDocument
             version = $"0x{Version:X8}",
             sourceSize = SourceBytes.Length,
             sourceHash = SourceHash,
+            outerFileHash = SourceHash,
             eventBank = EventBank,
             schemaBankId = SchemaBankId,
             animationCount = Animations.Count,

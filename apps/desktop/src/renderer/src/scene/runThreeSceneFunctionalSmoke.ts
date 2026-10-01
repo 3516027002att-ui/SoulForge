@@ -373,6 +373,21 @@ function buildFlverScene(): FlverSemanticScene {
         indices: new Uint16Array([0, 1, 2]),
         skinIndices: new Uint16Array([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]),
         skinWeights: new Float32Array([1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0]),
+        vertexColorStatus: 'decoded',
+        vertexColorDiagnostics: [0, 1].map((memberOrdinal) => ({
+          memberOrdinal, memberIndex: memberOrdinal + 2, layoutType: 3, layoutTypeName: 'Float4',
+          vertexBufferIndex: 1, bufferLayoutIndex: 4, structOffset: memberOrdinal * 16,
+          rgba: new Float32Array([-2, 3, 0.25, 1.5, 0, 1, 0.5, -0.25, 1, 0, 0, 1])
+        })),
+        tangentStatus: 'decoded',
+        tangentDiagnostics: [{
+          memberOrdinal: 0, memberIndex: 5, layoutType: 3, layoutTypeName: 'Float4',
+          vertexBufferIndex: 1, bufferLayoutIndex: 4, structOffset: 32,
+          xyzw: new Float32Array([1, 0, 0, -1, 0, 1, 0, 1, 0, 0, 1, -1])
+        }],
+        bitangentStatus: 'unsupported',
+        bitangentFailure: 'unsupported native bitangent layout',
+        bitangentDiagnostics: [],
         vertexCount: 3,
         cullBackfaces: true,
         wireframeOverlay: true,
@@ -752,6 +767,19 @@ async function testFlverScene(record: (name: string) => void): Promise<void> {
   const positionAttribute = geometry.attributes.position;
   assert(positionAttribute !== undefined, '位置缓冲已设置');
   assertEqual(positionAttribute.count, 3, '位置缓冲保留真实顶点数');
+  for (const name of ['soulforgeVertexColor0', 'soulforgeVertexColor1', 'soulforgeTangent0']) {
+    assertEqual(geometry.getAttribute(name)?.itemSize, 4, `${name} retains all native components`);
+    assertEqual(geometry.getAttribute(name)?.count, 3, `${name} retains every vertex`);
+  }
+  assertEqual(geometry.getAttribute('soulforgeVertexColor0')?.array[3], 1.5, 'native Float4 alpha is not clamped');
+  assertEqual(geometry.getAttribute('color'), undefined, 'native RGBA evidence does not activate generic colors');
+  assertEqual(geometry.getAttribute('tangent'), undefined, 'native tangent evidence does not activate generic tangents');
+  assertEqual(geometry.userData.vertexColorDiagnostics[1].memberIndex, 3, 'geometry preserves native member metadata');
+  assertEqual(geometry.userData.bitangentStatus, 'unsupported', 'geometry preserves unavailable native channel status');
+  const surfaceMaterial = audit1.find((r): r is three.MeshStandardMaterial => r instanceof three.MeshStandardMaterial);
+  assert(surfaceMaterial !== undefined, 'surface retains its standard material');
+  assertEqual(surfaceMaterial.vertexColors, false, 'native diagnostic sets do not enable material vertex colors');
+  assertEqual(surfaceMaterial.opacity, 1, 'native diagnostic alpha does not change material opacity');
   assert(geometry.index !== null, '索引缓冲已设置');
   const texture = audit1.find((r) => r instanceof three.DataTexture) as three.DataTexture | undefined;
   assert(texture !== undefined, 'RGBA 纹理投影为 DataTexture');
@@ -787,7 +815,13 @@ async function testFlverScene(record: (name: string) => void): Promise<void> {
   assert((createdRenderer.calls.filter((c) => c === 'render').length) >= 1, 'FLVER 场景请求并提交了有界渲染帧');
 
   // 内容替换：旧资源必须全部释放。
-  handle.setScene(buildFlverScene());
+  const replacement = buildFlverScene();
+  replacement.meshes[0]!.vertexColors = new Float32Array(9).fill(0.5);
+  handle.setScene(replacement);
+  const legacyGeometry = audit2.find((r): r is three.BufferGeometry => r instanceof three.BufferGeometry && r.hasAttribute('color'));
+  assertEqual(legacyGeometry?.getAttribute('color').itemSize, 3, 'legacy RGB shading attribute stays RGB');
+  const legacyMaterial = audit2.find((r): r is three.MeshStandardMaterial => r instanceof three.MeshStandardMaterial);
+  assertEqual(legacyMaterial?.vertexColors, true, 'explicit legacy RGB still enables material vertex colors');
   for (const resource of audit1) {
     assert(disposedSet.has(resource), `替换场景释放旧内容：${resourceName(resource)}`);
   }

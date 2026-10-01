@@ -23,6 +23,7 @@ internal sealed class TaeDocumentSet
         bool isContainer,
         string? containerSourceHash,
         int? containerSourceSize,
+        string outerFileHash,
         IReadOnlyList<TaeDocumentSetEntry> entries)
     {
         if (entries.Count == 0)
@@ -31,6 +32,7 @@ internal sealed class TaeDocumentSet
         IsContainer = isContainer;
         ContainerSourceHash = containerSourceHash;
         ContainerSourceSize = containerSourceSize;
+        OuterFileHash = outerFileHash;
         Entries = entries;
         _motionReferenceStates = entries.Select(ReadMotionReferences).ToArray();
         SourceHash = isContainer
@@ -43,6 +45,8 @@ internal sealed class TaeDocumentSet
     public int? ContainerSourceSize { get; }
     public IReadOnlyList<TaeDocumentSetEntry> Entries { get; }
     public string SourceHash { get; }
+    /// <summary>Physical source bytes of the same native read, including any DCX wrapper.</summary>
+    public string OuterFileHash { get; }
 
     public int AnimationCount => checked(Entries.Sum(entry => entry.Document.Animations.Count));
     public int TotalEventCount => checked(Entries.Sum(entry => entry.Document.TotalEventCount));
@@ -57,23 +61,27 @@ internal sealed class TaeDocumentSet
         false,
         null,
         null,
+        document.SourceHash,
         new[] { new TaeDocumentSetEntry(null, null, null, null, document) });
 
     public static TaeDocumentSet FromAnibnd(
         string containerSourceHash,
         int containerSourceSize,
+        string outerFileHash,
         IReadOnlyList<TaeDocumentSetEntry> entries)
     {
         if (string.IsNullOrWhiteSpace(containerSourceHash))
             throw new InvalidDataException("TAE 聚合缺少 BND4 source hash。");
         if (containerSourceSize < 0)
             throw new InvalidDataException("TAE 聚合的 BND4 source size 非法。");
+        if (string.IsNullOrWhiteSpace(outerFileHash))
+            throw new InvalidDataException("TAE 聚合缺少原生读取的 physical outer-file hash。");
         if (entries.Any(entry => !entry.TaeEntryIndex.HasValue
             || !entry.TaeEntryId.HasValue
             || string.IsNullOrWhiteSpace(entry.TaeEntryName)
             || string.IsNullOrWhiteSpace(entry.TaeGroup)))
             throw new InvalidDataException("TAE 聚合条目缺少 BND4 child identity。");
-        return new TaeDocumentSet(true, containerSourceHash, containerSourceSize, entries.ToArray());
+        return new TaeDocumentSet(true, containerSourceHash, containerSourceSize, outerFileHash, entries.ToArray());
     }
 
     /// <summary>
@@ -328,6 +336,7 @@ internal sealed class TaeDocumentSet
             sourceSize,
             sourceSizeSemantics = "独立 TAE child SourceBytes 的总和；未拼接或伪造 TAE 二进制。",
             sourceHash = SourceHash,
+            outerFileHash = OuterFileHash,
             aggregateIdentity = true,
             containerSourceSize = ContainerSourceSize,
             containerSourceHash = ContainerSourceHash,

@@ -14,7 +14,7 @@ import {
   isFlverDocument,
   type FlverDocument
 } from './flver-editor.js';
-import { isCharacterPreviewBundle } from './flver-preview.js';
+import { isCharacterPreviewBundle, type CharacterPreviewBundle } from './flver-preview.js';
 
 function makeEnvelope(overrides: Record<string, unknown> = {}): FlverDocument {
   return {
@@ -89,6 +89,32 @@ function makeEnvelope(overrides: Record<string, unknown> = {}): FlverDocument {
   } as FlverDocument;
 }
 
+function makePreviewBundle(meshOverrides: Record<string, unknown> = {}): CharacterPreviewBundle {
+  return {
+    meshCount: 1,
+    vertexCount: 2,
+    boneCount: 0,
+    leaderModelId: 'model:0',
+    models: [{
+      modelId: 'model:0',
+      entry: { index: 0, id: 0, name: 'sample.flver', duplicateOrdinal: 0, contentHash: 'hash' },
+      meshCount: 1,
+      boneCount: 0,
+      bones: [],
+      meshes: [{
+        meshIndex: 0,
+        vertexCount: 2,
+        indexSize: 16,
+        positionsBase64: 'positions',
+        indicesBase64: 'indices',
+        skinningMode: 'static',
+        boneIndexSpace: 'none',
+        ...meshOverrides
+      }]
+    }]
+  };
+}
+
 test('projectFlverDocumentPages 投影 bounds page（min/max/extent）', () => {
   const pages = projectFlverDocumentPages(makeEnvelope());
   assert.deepEqual(pages.bounds.min, [0, 0, 0]);
@@ -148,32 +174,12 @@ test('character preview 窄守卫保留多 VertexColor member 的 RGBA 诊断', 
     structOffset: 28,
     rgbaBase64: 'rgba-float4'
   };
-  const mesh = {
-    meshIndex: 0,
-    vertexCount: 2,
-    indexSize: 16 as const,
-    positionsBase64: 'positions',
-    indicesBase64: 'indices',
-    skinningMode: 'static' as const,
-    boneIndexSpace: 'none' as const,
-    vertexColorStatus: 'decoded' as const,
+  const bundle = makePreviewBundle({
+    vertexColorStatus: 'decoded',
     vertexColorDiagnostics: [diagnostic]
-  };
-  const model = {
-    modelId: 'model:0',
-    entry: { index: 0, id: 0, name: 'sample.flver', duplicateOrdinal: 0, contentHash: 'hash' },
-    meshCount: 1,
-    boneCount: 0,
-    meshes: [mesh],
-    bones: []
-  };
-  const bundle = {
-    meshCount: 1,
-    vertexCount: 2,
-    boneCount: 0,
-    leaderModelId: 'model:0',
-    models: [model]
-  };
+  });
+  const model = bundle.models[0]!;
+  const mesh = model.meshes[0]!;
 
   assert.equal(isCharacterPreviewBundle(bundle), true);
   assert.equal(isCharacterPreviewBundle({
@@ -190,4 +196,81 @@ test('character preview 窄守卫保留多 VertexColor member 的 RGBA 诊断', 
     ...bundle,
     models: [{ ...model, meshes: [{ ...mesh, vertexColorStatus: 'opaque' }] }]
   }), false);
+});
+
+const vector4Diagnostic = {
+  memberOrdinal: 0,
+  memberIndex: 2,
+  layoutType: 26,
+  layoutTypeName: 'Short4Norm',
+  vertexBufferIndex: 1,
+  bufferLayoutIndex: 4,
+  structOffset: 28,
+  xyzwBase64: 'xyzw-float4'
+};
+
+test('character preview guard accepts native tangent and bitangent layout metadata and gap statuses', () => {
+  const layouts = [
+    [3, 'Float4'], [16, 'Color'], [17, 'UByte4'], [19, 'UByte4Norm'],
+    [20, 'Byte4Norm'], [26, 'Short4Norm'], [47, 'Byte4E']
+  ] as const;
+  const diagnostics = layouts.map(([layoutType, layoutTypeName], memberOrdinal) => ({
+    ...vector4Diagnostic, memberOrdinal, layoutType, layoutTypeName
+  }));
+  assert.equal(isCharacterPreviewBundle(makePreviewBundle({
+    tangentStatus: 'decoded', tangentDiagnostics: diagnostics,
+    bitangentStatus: 'decoded', bitangentDiagnostics: diagnostics
+  })), true);
+  for (const status of ['absent', 'decoded', 'unsupported', 'truncated', 'invalid']) {
+    assert.equal(isCharacterPreviewBundle(makePreviewBundle({
+      tangentStatus: status, tangentFailure: 'native tangent status detail', tangentDiagnostics: [],
+      bitangentStatus: status, bitangentFailure: 'native bitangent status detail', bitangentDiagnostics: []
+    })), true, status);
+  }
+});
+
+test('character preview guard rejects mislabeled tangent and bitangent native layout codes', () => {
+  for (const channel of ['tangent', 'bitangent']) {
+    for (const invalidLayout of [
+      { layoutType: 26, layoutTypeName: 'Byte4A' },
+      { layoutType: 26, layoutTypeName: 'Float4' },
+      { layoutType: 3, layoutTypeName: 'Short4Norm' },
+      { layoutType: 99, layoutTypeName: 'Unknown' }
+    ]) {
+      assert.equal(isCharacterPreviewBundle(makePreviewBundle({
+        [`${channel}Status`]: 'decoded',
+        [`${channel}Diagnostics`]: [{ ...vector4Diagnostic, ...invalidLayout }]
+      })), false, `${channel}: ${JSON.stringify(invalidLayout)}`);
+    }
+  }
+});
+
+test('character preview guard rejects malformed tangent and bitangent member identities and payload fields', () => {
+  for (const channel of ['tangent', 'bitangent']) {
+    for (const key of ['memberOrdinal', 'memberIndex', 'layoutType', 'vertexBufferIndex', 'bufferLayoutIndex', 'structOffset']) {
+      for (const value of [-1, 0.5, NaN, Infinity, '1', undefined]) {
+        assert.equal(isCharacterPreviewBundle(makePreviewBundle({
+          [`${channel}Diagnostics`]: [{ ...vector4Diagnostic, [key]: value }]
+        })), false, `${channel}.${key}=${String(value)}`);
+      }
+    }
+    for (const invalidPayload of [{ xyzwBase64: null }, { xyzwBase64: 42 }, { xyzwBase64: undefined }, { layoutTypeName: null }]) {
+      assert.equal(isCharacterPreviewBundle(makePreviewBundle({
+        [`${channel}Diagnostics`]: [{ ...vector4Diagnostic, ...invalidPayload }]
+      })), false, channel);
+    }
+  }
+});
+
+test('character preview guard rejects invalid tangent and bitangent status, failure and diagnostic containers', () => {
+  for (const channel of ['tangent', 'bitangent']) {
+    for (const invalidFields of [
+      { [`${channel}Status`]: 'opaque' },
+      { [`${channel}Failure`]: 42 },
+      { [`${channel}Diagnostics`]: {} },
+      { [`${channel}Diagnostics`]: [null] }
+    ]) {
+      assert.equal(isCharacterPreviewBundle(makePreviewBundle(invalidFields)), false, channel);
+    }
+  }
 });

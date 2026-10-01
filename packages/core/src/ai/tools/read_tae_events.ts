@@ -17,8 +17,8 @@ import { resolveIndexedResourceFile } from '.././toolRegistrySupport.js';
 export function createReadTaeEventsTool():RegisteredTool {
  return {
     name: 'read_tae_events',
-    description: 'Read native TAE event times and decoded fields by exact action address. '
-      + 'Use an action-level cXXXX#AXXXX or section-qualified action URI to read every event. Event addresses select exact events. Follow cursor with the same addresses for remaining native events.',
+    description: 'Read a bounded native TAE animation preview when addresses are omitted; follow cursor for the next preview page. '
+      + 'Use an action-level cXXXX#AXXXX or section-qualified action URI to read every event of that action. Event addresses select exact events. Follow cursor with the same addresses, or an action nextRead, for remaining native events.',
     permission: 'read',
     permissionLevel: 'read',
     inputSchema: { file: 'string', addresses: 'array?', cursor: 'string?', offset: 'safe-integer?', pageSize: 'number?', expectedSourceHash: 'string?', expectedReaderSchemaRevision: 'safe-integer?' },
@@ -59,11 +59,9 @@ export function createReadTaeEventsTool():RegisteredTool {
           ? resolvedFile.sourceUri
           : pathToFileURL(result.filePath).href;
         const sourceFile = context.workspaceIndex.getFile(sourceUri);
-        // 原生读取的内容哈希与扫描期的文件字节哈希是两种体系，直接用前者
-        // 挂版本会被 freshness 门禁恒拒（read-hash ≠ scan-hash），导致
-        // search_tae_events 永远 RAG-fallback。导出版本只挂扫描一致的文件
-        // 身份（无扫描哈希时退为纯 mtime 版本）；事件明细仍保留读取哈希。
-        const exportSourceHash = sourceFile?.sha256;
+        // Keep native logical identity and the captured physical file version
+        // in separate domains, matching ordinary Bridge envelope ingestion.
+        const exportSourceHash = result.sourceHash;
         const readSourceHash = result.sourceHash;
         const sourceRevision = sourceFile?.mtimeMs;
         // 同一 TAE source 内不同 section 可以复用 animId；不能按裸数字合并，
@@ -109,7 +107,7 @@ export function createReadTaeEventsTool():RegisteredTool {
         context.workspaceIndex.mergeTaeEvents({
           chrId: result.chrId,
           readerSchemaRevision: result.readerSchemaRevision,
-          ...((result.containerSourceHash ?? result.sourceHash) ? { outerFileHash: result.containerSourceHash ?? result.sourceHash } : {}),
+          ...((result.outerFileHash ?? result.sourceHash) ? { outerFileHash: result.outerFileHash ?? result.sourceHash } : {}),
           sourceUri,
           ...(exportSourceHash ? { sourceHash: exportSourceHash } : {}),
           ...(sourceRevision !== undefined ? { sourceRevision } : {}),

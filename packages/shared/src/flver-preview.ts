@@ -27,6 +27,18 @@ export interface FlverPreviewVertexColorDiagnostic {
   rgbaBase64: string;
 }
 
+/** Native tangent/bitangent evidence. No generic material tangent policy is implied. */
+export interface FlverPreviewVector4Diagnostic {
+  memberOrdinal: number;
+  memberIndex: number;
+  layoutType: number;
+  layoutTypeName: string;
+  vertexBufferIndex: number;
+  bufferLayoutIndex: number;
+  structOffset: number;
+  xyzwBase64: string;
+}
+
 export interface FlverContainerEntryIdentity {
   index: number;
   id: number;
@@ -67,6 +79,12 @@ export interface FlverPreviewMesh {
   vertexColorStatus?: FlverPreviewVertexColorStatus | undefined;
   vertexColorFailure?: string | undefined;
   vertexColorDiagnostics?: FlverPreviewVertexColorDiagnostic[] | undefined;
+  tangentStatus?: FlverPreviewVertexColorStatus | undefined;
+  tangentFailure?: string | undefined;
+  tangentDiagnostics?: FlverPreviewVector4Diagnostic[] | undefined;
+  bitangentStatus?: FlverPreviewVertexColorStatus | undefined;
+  bitangentFailure?: string | undefined;
+  bitangentDiagnostics?: FlverPreviewVector4Diagnostic[] | undefined;
   /** 兼容字段：首个 VertexColor 的 alpha，绝不是全局透明度。 */
   vertexAlphaBase64?: string | undefined;
   /** Selected native FaceSet.CullBackfaces; undefined means no display FaceSet. */
@@ -254,6 +272,8 @@ function isPreviewMesh(value: unknown): boolean {
       && value.skinningTransformMode !== 'absolute'
       && value.skinningTransformMode !== 'delta')
     || (value.vertexColorStatus !== undefined && !isPreviewVertexColorStatus(value.vertexColorStatus))
+    || (value.tangentStatus !== undefined && !isPreviewVertexColorStatus(value.tangentStatus))
+    || (value.bitangentStatus !== undefined && !isPreviewVertexColorStatus(value.bitangentStatus))
     || (value.renderMode !== undefined
       && value.renderMode !== 'surface'
       && value.renderMode !== 'projected-decal'
@@ -262,6 +282,8 @@ function isPreviewMesh(value: unknown): boolean {
     'uvsBase64',
     'normalsBase64',
     'vertexColorFailure',
+    'tangentFailure',
+    'bitangentFailure',
     'vertexAlphaBase64',
     'boneWeightsBase64',
     'boneIndicesBase64',
@@ -275,6 +297,9 @@ function isPreviewMesh(value: unknown): boolean {
   if (value.vertexColorDiagnostics !== undefined
     && (!Array.isArray(value.vertexColorDiagnostics)
       || !value.vertexColorDiagnostics.every(isPreviewVertexColorDiagnostic))) return false;
+  for (const key of ['tangentDiagnostics', 'bitangentDiagnostics']) {
+    if (value[key] !== undefined && (!Array.isArray(value[key]) || !value[key].every(isPreviewVector4Diagnostic))) return false;
+  }
   return ['projectionTextureName', 'projectionTexturePreviewToken', 'projectionTextureColorSpace']
     .every((key) => value[key] === undefined || value[key] === null || typeof value[key] === 'string');
 }
@@ -299,6 +324,19 @@ function isPreviewVertexColorDiagnostic(value: unknown): value is FlverPreviewVe
   return (value.layoutTypeName === 'Float4' && value.layoutType === 3)
     || (value.layoutTypeName === 'Color' && value.layoutType === 16)
     || (value.layoutTypeName === 'UByte4Norm' && value.layoutType === 19);
+}
+
+function isPreviewVector4Diagnostic(value: unknown): value is FlverPreviewVector4Diagnostic {
+  return isRecord(value)
+    && ['memberOrdinal', 'memberIndex', 'layoutType', 'vertexBufferIndex', 'bufferLayoutIndex', 'structOffset'].every((key) => isNonNegativeInteger(value[key]))
+    && typeof value.xyzwBase64 === 'string'
+    && ((value.layoutTypeName === 'Float4' && value.layoutType === 3)
+      || (value.layoutTypeName === 'Color' && value.layoutType === 16)
+      || (value.layoutTypeName === 'UByte4' && value.layoutType === 17)
+      || (value.layoutTypeName === 'UByte4Norm' && value.layoutType === 19)
+      || (value.layoutTypeName === 'Byte4Norm' && value.layoutType === 20)
+      || (value.layoutTypeName === 'Short4Norm' && value.layoutType === 26)
+      || (value.layoutTypeName === 'Byte4E' && value.layoutType === 47));
 }
 
 function isPreviewTexture(value: unknown): boolean {

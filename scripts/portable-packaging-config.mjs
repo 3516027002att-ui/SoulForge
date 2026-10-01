@@ -103,6 +103,11 @@ const EXPECTED_EXTRA_RESOURCES = [
     to: 'bridge/SoulForge.Hksc.Native.dll',
     filter: ['SoulForge.Hksc.Native.dll']
   },
+  {
+    from: '../../bridge/SoulForge.Bridge/bin/Release/net10.0/win-x64/publish/runtime-notices',
+    to: 'bridge/runtime-notices',
+    filter: ['LICENSE.txt', 'THIRD-PARTY-NOTICES.txt', 'runtime-notices.json']
+  },
   { from: '../../LICENSE', to: 'LICENSE', filter: ['LICENSE'] },
   { from: '../../NOTICE', to: 'NOTICE', filter: ['NOTICE'] },
   { from: '../../licenses', to: 'licenses', filter: ['**/*'] }
@@ -115,6 +120,10 @@ const EXPECTED_LINUX_RESOURCES = [{
 }, {
   from: '../../bridge/SoulForge.Bridge/bin/Release/net10.0/linux-x64/publish/libSoulForge.Hksc.Native.so',
   to: 'bridge/libSoulForge.Hksc.Native.so', filter: ['libSoulForge.Hksc.Native.so']
+}, {
+  from: '../../bridge/SoulForge.Bridge/bin/Release/net10.0/linux-x64/publish/runtime-notices',
+  to: 'bridge/runtime-notices',
+  filter: ['LICENSE.txt', 'THIRD-PARTY-NOTICES.txt', 'runtime-notices.json']
 }];
 
 function runtimeResourcesMatch(config) {
@@ -315,7 +324,15 @@ export function validatePortableBuilderResourceSources(config, configDirectory, 
     let available = source !== null && existsSync(source);
     if (available && resource?.to?.startsWith('bridge/')) {
       const metadata = lstatSync(source);
-      available = metadata.isFile() && !metadata.isSymbolicLink();
+      if (resource.to === 'bridge/runtime-notices') {
+        available = metadata.isDirectory() && !metadata.isSymbolicLink()
+          && ['LICENSE.txt', 'THIRD-PARTY-NOTICES.txt', 'runtime-notices.json'].every(name => {
+            const file = resolve(source, name);
+            if (!existsSync(file)) return false;
+            const entry = lstatSync(file);
+            return entry.isFile() && !entry.isSymbolicLink();
+          });
+      } else available = metadata.isFile() && !metadata.isSymbolicLink();
     }
     return {
       name: `resource-source-${index + 1}`,

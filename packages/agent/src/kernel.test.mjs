@@ -8,6 +8,8 @@ const run = (overrides={}) => runFiniteAgent({sessionId:'session',runId:'run',re
 test('terminal model output has independent unverified evaluation and monotonic protocol events', async()=>{
  const events=[]; const result=await run({onEvent:e=>events.push(e)});
  assert.equal(result.state,'completed'); assert.equal(result.evaluation,'unverified');
+ assert.equal(events.filter(event=>event.event.type==='step-complete').length,1);
+ assert.equal(events.find(event=>event.event.type==='step-complete').event.finishReason,'stop');
  assert.deepEqual(events.map(e=>e.eventSeq),events.map((_,i)=>i+1));
  assert.ok(events.every(e=>e.protocolVersion===1 && e.runId==='run' && e.requestId==='request'));
 });
@@ -65,4 +67,75 @@ test('replayed provider call identities never execute a domain mutation twice',a
 test('a completion containing duplicate identities is rejected before any domain call',async()=>{
  let writes=0;const result=await run({model:async()=>response('',[call('duplicate'),call('duplicate')]),executeTool:async()=>{writes++;return {ok:true,content:'{}'};}});
  assert.equal(writes,0);assert.equal(result.reason,'tool_call_identity_invalid');
+});
+
+test('explicit full-mode approval requirements are honored and recorded before a write',async()=>{
+ let turns=0,asked=0,writes=0;const result=await run({permissionMode:'full',approvalRequiredLevels:['commit'],tools:[{name:'rename',permissionLevel:'commit'}],
+  model:async()=>++turns===1?response('',[call('first','rename')]):response('denied'),requestApproval:async request=>{asked++;assert.equal(request.toolName,'rename');assert.equal(request.argumentsJson,'{}');return {decision:'reject',note:'keep original'};},
+  executeTool:async()=>{writes++;return {ok:true,content:'{}'};}});
+ assert.equal(asked,1);assert.equal(writes,0);assert.equal(result.approvals[0].decision,'reject');assert.equal(result.approvals[0].note,'keep original');
+});
+
+for(const decision of ['always','never'])test(`approval ${decision} memory is per-run and records each distinct provider call`,async()=>{
+ let turns=0,asked=0,writes=0;const events=[];
+ const result=await run({tools:[{name:'rename',permissionLevel:'commit'}],onEvent:event=>events.push(event),model:async()=>++turns<=2?response('',[call(`call-${turns}`,'rename')]):response('reported'),
+  requestApproval:async()=>{asked++;return {decision};},executeTool:async()=>{writes++;return {ok:true,content:'{}'};}});
+ assert.equal(asked,1);assert.equal(writes,decision==='always'?2:0);assert.deepEqual(result.approvals.map(item=>item.fromMemory),[false,true]);
+ assert.deepEqual(events.filter(event=>event.event.type==='approval-resolved').map(event=>event.event.fromMemory),[false,true]);
+ let nextAsked=0;await run({tools:[{name:'rename',permissionLevel:'commit'}],limits:{maxSteps:1},model:async()=>response('',[call('next-run','rename')]),requestApproval:async()=>{nextAsked++;return {decision:'reject'};}});assert.equal(nextAsked,1);
+});
+
+test('write-level legacy declarations require approval while explicit empty requirements retain host authorization',async()=>{
+ let writes=0;const tools=[{name:'rename',permissionLevel:'write'}];
+ const waiting=await run({tools,model:async()=>response('',[call('pending','rename')]),executeTool:async()=>{writes++;return {ok:true,content:'{}'};}});
+ assert.equal(waiting.state,'waiting');assert.equal(writes,0);
+ const granted=await run({tools,approvalRequiredLevels:[],limits:{maxSteps:1},model:async()=>response('',[call('granted','rename')]),requestApproval:async()=>{throw new Error('must not ask');},executeTool:async()=>{writes++;return {ok:true,content:'{}'};}});
+ assert.equal(writes,1);assert.equal(granted.approvals.length,0);
+});
+
+test('approval abort stops every remaining call in the turn and invalid/failed decisions execute none',async()=>{
+ let writes=0;const tools=[{name:'rename',permissionLevel:'commit'}];
+ const aborted=await run({tools,model:async()=>response('',[call('first','rename'),call('second','rename')]),requestApproval:async()=>({decision:'abort'}),executeTool:async()=>{writes++;return {ok:true,content:'{}'};}});
+ assert.equal(aborted.state,'cancelled');assert.equal(writes,0);assert.equal(aborted.approvals.length,1);
+ const invalid=await run({tools,model:async()=>response('',[call('invalid','rename')]),requestApproval:async()=>({decision:'unexpected'}),executeTool:async()=>{writes++;return {ok:true,content:'{}'};}});
+ assert.equal(invalid.state,'error');assert.ok(invalid.diagnostics.some(item=>item.code==='AGENT_APPROVAL_RESPONSE_INVALID'));
+ const failed=await run({tools,model:async()=>response('',[call('failed','rename')]),requestApproval:async()=>{throw new Error('fixture failure');},executeTool:async()=>{writes++;return {ok:true,content:'{}'};}});
+ assert.equal(failed.state,'error');assert.ok(failed.diagnostics.some(item=>item.code==='AGENT_APPROVAL_REQUEST_FAILED'));assert.equal(writes,0);
+});
+
+test('an overflowing provider response cannot dispatch its proposed mutation',async()=>{
+ let writes=0;const result=await run({limits:{maxOutputTokens:2},model:async()=>response('',[call()],{outputTokens:5}),executeTool:async()=>{writes++;return {ok:true,content:'{}'};}});
+ assert.equal(writes,0);assert.equal(result.state,'partial');assert.equal(result.reason,'output_budget');assert.ok(result.diagnostics.some(item=>item.code==='MODEL_SERVICE_OUTPUT_BUDGET_EXCEEDED'));
+});
+
+test('tool_use without any calls stops partial after one provider request',async()=>{
+ let models=0;const result=await run({model:async()=>{models++;return {message:{role:'assistant',content:''},finishReason:'tool_use',diagnostics:[]};}});
+ assert.equal(models,1);assert.equal(result.state,'partial');assert.equal(result.reason,'tool_use_without_calls');assert.ok(result.diagnostics.some(item=>item.code==='AGENT_TOOL_USE_WITHOUT_CALLS'));
+});
+for(const level of ['read','commit'])test(`a truncated provider response cannot approve or dispatch a ${level} proposal`,async()=>{
+ let turns=0,executed=0,approvals=0;const events=[];
+ const result=await run({tools:[{name:'fixture',permissionLevel:level}],model:async()=>{turns++;return {message:{role:'assistant',content:'Partial provider report',toolCalls:[call('truncated','fixture')]},finishReason:'length',diagnostics:[],usage:{inputTokens:1,outputTokens:1}};},onEvent:event=>events.push(event),requestApproval:async()=>{approvals++;return {decision:'once'};},executeTool:async()=>{executed++;return {ok:true,content:'{}',transaction:{opId:'must-not-commit',state:'committed'}};}});
+ assert.equal(result.state,'partial');assert.equal(result.reason,'provider_length');
+ assert.equal(turns,1);assert.equal(executed,0);assert.equal(approvals,0);assert.equal(result.toolCalls.length,0);assert.equal(result.transactions.length,0);
+ assert.equal(result.messages.at(-1).content,'Partial provider report');
+ assert.deepEqual(events.filter(event=>event.event.type==='agent-message-delta').map(event=>event.event.text),['Partial provider report']);
+});
+
+test('declared parallel reads settle in emission order before an exclusive mutation',async()=>{
+ let release;const wait=new Promise(resolve=>{release=resolve;});const starts=[],ends=[];let models=0;
+ const result=await run({permissionMode:'full',approvalRequiredLevels:[],limits:{timeoutMs:150},tools:[{name:'first',permissionLevel:'read',supportsParallel:true},{name:'second',permissionLevel:'read',supportsParallel:true},{name:'mutate',permissionLevel:'commit',supportsParallel:true}],
+  model:async()=>++models===1?response('',[call('one','first'),call('two','second'),call('write','mutate')]):response('reported'),
+  onEvent:event=>{if(event.event.type==='tool-call-end')ends.push(event.event.name);},executeTool:async call=>{
+   starts.push(call.name);if(call.name==='first')await wait;else if(call.name==='second')release();
+   if(call.name==='mutate')assert.deepEqual(ends,['first','second']);return {ok:true,content:JSON.stringify({name:call.name})};}});
+ assert.equal(result.state,'completed');assert.deepEqual(starts,['first','second','mutate']);assert.deepEqual(ends,['first','second','mutate']);
+ assert.deepEqual(result.messages.filter(message=>message.role==='tool').map(message=>message.name),['first','second','mutate']);
+});
+
+test('a thrown read remains a redacted failure beside completed siblings; a thrown mutation remains unknown',async()=>{
+ let models=0;const result=await run({tools:[{name:'first',permissionLevel:'read',supportsParallel:true},{name:'second',permissionLevel:'read',supportsParallel:true}],redact:text=>text.replaceAll('fixture-secret','[REDACTED]'),
+  model:async()=>++models===1?response('',[call('one','first'),call('two','second')]):response('reported'),executeTool:async call=>{if(call.name==='second')throw new Error('fixture-secret');return {ok:true,content:'completed'};}});
+ assert.deepEqual(result.toolCalls.map(call=>call.ok),[true,false]);assert.equal(result.unresolvedCalls.length,0);assert.doesNotMatch(JSON.stringify(result),/fixture-secret/);
+ const unknown=await run({tools:[{name:'mutate',permissionLevel:'commit'}],approvalRequiredLevels:[],model:async()=>response('',[call('uncertain','mutate')]),executeTool:async()=>{throw new Error('transport lost');}});
+ assert.equal(unknown.state,'error');assert.equal(unknown.unresolvedCalls[0].retryable,false);
 });

@@ -1357,6 +1357,50 @@ internal sealed class BridgeCommandService
             }
         }
 
+        if (command == "read-tae-motion-identity")
+        {
+            if (dispatchProbe) return BoundDispatchResult(file, command);
+            try
+            {
+                if (!optionsIsObject || !options.TryGetProperty("animId", out var identityAnimId)
+                    || identityAnimId.ValueKind != JsonValueKind.Number
+                    || !identityAnimId.TryGetInt64(out var requestedAnimId)
+                    || requestedAnimId < 0 || requestedAnimId > 9_007_199_254_740_991L)
+                    throw new InvalidDataException("ACTION_ANIM_ID_INVALID: animId 必须为非负 safe integer。");
+                var (document, _) = OpenTaeDocument(file, oodleRuntimeRoot);
+                var located = document.ResolveAnimation(requestedAnimId,
+                    OptionNullableInt("taeEntryIndex"), OptionNullableInt64("taeEntryId"),
+                    OptionNullableString("taeEntryName"), OptionNullableString("taeGroup"));
+                var motionAnimId = document.ResolveMotionAnimationId(located);
+                if (motionAnimId < 0 || motionAnimId >= 1_000_000_000L)
+                    throw new InvalidDataException("ACTION_TAE_MOTION_IDENTITY_UNRESOLVED: motionAnimId 不在 Sekiro Binder identity 范围内。");
+                // Identity resolution must not construct schema/event projections
+                // for the thousands of other actions in a character container.
+                return BridgeResult<object>.Partial(file, "action", Array.Empty<Diagnostic>(), new
+                {
+                    format = "TAE_MOTION_IDENTITY",
+                    identityProjectionVersion = TaeNativeDocument.IdentityProjectionVersion,
+                    sourceHash = document.SourceHash,
+                    outerFileHash = document.OuterFileHash,
+                    containerSourceHash = document.ContainerSourceHash,
+                    animId = located.Animation.AnimId,
+                    motionAnimId,
+                    taeEntryIndex = located.Entry.TaeEntryIndex,
+                    taeEntryId = located.Entry.TaeEntryId,
+                    taeEntryName = located.Entry.TaeEntryName,
+                    taeGroup = located.Entry.TaeGroup
+                });
+            }
+            catch (TaeEntryMissingException)
+            {
+                return BridgeResult<object>.Failed(file, "action", "TAE_ANIBND_NO_TAE_ENTRY", "anibnd 容器内未找到 TAE 魔数条目。");
+            }
+            catch (Exception ex) when (ex is InvalidDataException or NotSupportedException or IOException or OverflowException)
+            {
+                return BridgeResult<object>.Failed(file, "action", "TAE_MOTION_IDENTITY_READ_FAILED", ex.Message);
+            }
+        }
+
         if (command == "read-tae-document")
         {
             if (dispatchProbe) return BoundDispatchResult(file, command);
@@ -1417,7 +1461,7 @@ internal sealed class BridgeCommandService
                     return BridgeResult<object>.Partial(file, "action", diagnostics, new
                     {
                         format = "TAE", identityProjectionVersion = TaeNativeDocument.IdentityProjectionVersion,
-                        sourceHash = document.SourceHash, containerSourceHash = document.ContainerSourceHash,
+                        sourceHash = document.SourceHash, outerFileHash = document.OuterFileHash, containerSourceHash = document.ContainerSourceHash,
                         taeEntryCount = document.IsContainer ? document.Entries.Count : 0,
                         animations = new[] { located.Entry.Document.ToAnimationEnvelope(located.Animation,
                             null, null, int.MaxValue, int.MaxValue, located.Entry.TaeEntryIndex,
@@ -2399,6 +2443,8 @@ internal sealed class BridgeCommandService
                 var boneWeights = flver.GetMeshBoneWeightsBase64(meshIndex, maxVertices);
                 var boneIndices = flver.GetMeshBoneIndicesBase64(meshIndex, maxVertices);
                 var vertexColorRead = flver.GetMeshVertexColorDiagnostics(meshIndex, maxVertices);
+                var tangentRead = flver.GetMeshTangentDiagnostics(meshIndex, maxVertices);
+                var bitangentRead = flver.GetMeshTangentDiagnostics(meshIndex, maxVertices, bitangent: true);
                 var vertexAlpha = vertexColorRead.FirstAlphaBase64;
                 var mesh = flver.Meshes[meshIndex];
                 var mapMeshDiagnostics = new List<Diagnostic>
@@ -2419,6 +2465,12 @@ internal sealed class BridgeCommandService
                     uvsBase64 = uvs,
                     uvSetsBase64 = uvSets,
                     normalsBase64 = normals,
+                    tangentStatus = tangentRead.Status,
+                    tangentFailure = tangentRead.Failure,
+                    tangentDiagnostics = BuildFlverVector4Diagnostics(tangentRead),
+                    bitangentStatus = bitangentRead.Status,
+                    bitangentFailure = bitangentRead.Failure,
+                    bitangentDiagnostics = BuildFlverVector4Diagnostics(bitangentRead),
                     vertexColorStatus = vertexColorRead.Status,
                     vertexColorFailure = vertexColorRead.Failure,
                     vertexColorDiagnostics = BuildFlverVertexColorDiagnostics(vertexColorRead),
@@ -2773,6 +2825,8 @@ internal sealed class BridgeCommandService
                 var boneWeights = document.GetMeshBoneWeightsBase64(meshIndex, maxVertices);
                 var boneIndices = document.GetMeshBoneIndicesBase64(meshIndex, maxVertices);
                 var vertexColorRead = document.GetMeshVertexColorDiagnostics(meshIndex, maxVertices);
+                var tangentRead = document.GetMeshTangentDiagnostics(meshIndex, maxVertices);
+                var bitangentRead = document.GetMeshTangentDiagnostics(meshIndex, maxVertices, bitangent: true);
                 var vertexAlpha = vertexColorRead.FirstAlphaBase64;
 
                 var mesh = document.Meshes[meshIndex];
@@ -2833,6 +2887,12 @@ internal sealed class BridgeCommandService
                     uvsBase64 = uvs,
                     uvSetsBase64 = uvSets,
                     normalsBase64 = normals,
+                    tangentStatus = tangentRead.Status,
+                    tangentFailure = tangentRead.Failure,
+                    tangentDiagnostics = BuildFlverVector4Diagnostics(tangentRead),
+                    bitangentStatus = bitangentRead.Status,
+                    bitangentFailure = bitangentRead.Failure,
+                    bitangentDiagnostics = BuildFlverVector4Diagnostics(bitangentRead),
                     vertexColorStatus = vertexColorRead.Status,
                     vertexColorFailure = vertexColorRead.Failure,
                     vertexColorDiagnostics = BuildFlverVertexColorDiagnostics(vertexColorRead),
@@ -2888,17 +2948,7 @@ internal sealed class BridgeCommandService
             try
             {
                 var document = FlverNativeDocument.ReadFile(file);
-                var bones = document.Bones.Select(b => new
-                {
-                    index = b.Index,
-                    name = b.Name,
-                    parentIndex = b.ParentIndex,
-                    nextSiblingIndex = b.NextSiblingIndex,
-                    translation = new[] { b.TranslationX, b.TranslationY, b.TranslationZ },
-                    rotation = new[] { b.RotationX, b.RotationY, b.RotationZ },
-                    scale = new[] { b.ScaleX, b.ScaleY, b.ScaleZ },
-                    rotationOrder = "XZY"
-                }).ToArray();
+                var bones = BuildFlverSkeleton(document);
                 return BridgeResult<object>.Partial(file, "chr", new[]
                 {
                     new Diagnostic("info", "FLVER_SKELETON_EXTRACTED",
@@ -3788,6 +3838,18 @@ internal sealed class BridgeCommandService
             : null;
     }
 
+    private static object[]? BuildFlverVector4Diagnostics(FlverVector4ReadResult result)
+    {
+        if (result.Status != "decoded") return null;
+        return result.Members.Select(member => (object)new
+        {
+            memberOrdinal = member.MemberOrdinal, memberIndex = member.MemberIndex,
+            layoutType = member.LayoutType, layoutTypeName = member.LayoutTypeName,
+            vertexBufferIndex = member.VertexBufferIndex, bufferLayoutIndex = member.BufferLayoutIndex,
+            structOffset = member.StructOffset, xyzwBase64 = member.XyzwBase64
+        }).ToArray();
+    }
+
     private static object[]? BuildFlverVertexColorDiagnostics(FlverVertexColorReadResult result)
     {
         if (result.Status != "decoded") return null;
@@ -3874,6 +3936,8 @@ internal sealed class BridgeCommandService
         var skinning = flver.GetMeshSkinning(meshIndex, maxVertices);
         var uvSets = flver.GetMeshUVSetsBase64(meshIndex, maxVertices);
         var vertexColorRead = flver.GetMeshVertexColorDiagnostics(meshIndex, maxVertices);
+        var tangentRead = flver.GetMeshTangentDiagnostics(meshIndex, maxVertices);
+        var bitangentRead = flver.GetMeshTangentDiagnostics(meshIndex, maxVertices, bitangent: true);
         var renderMode = useCompatibilityProjection
             ? "compatibility-projected"
             : nativeRenderMode;
@@ -3889,6 +3953,12 @@ internal sealed class BridgeCommandService
             uvsBase64 = uvSets?.FirstOrDefault(),
             uvSetsBase64 = uvSets,
             normalsBase64 = flver.GetMeshNormalsBase64(meshIndex, maxVertices),
+            tangentStatus = tangentRead.Status,
+            tangentFailure = tangentRead.Failure,
+            tangentDiagnostics = BuildFlverVector4Diagnostics(tangentRead),
+            bitangentStatus = bitangentRead.Status,
+            bitangentFailure = bitangentRead.Failure,
+            bitangentDiagnostics = BuildFlverVector4Diagnostics(bitangentRead),
             vertexColorStatus = vertexColorRead.Status,
             vertexColorFailure = vertexColorRead.Failure,
             vertexColorDiagnostics = BuildFlverVertexColorDiagnostics(vertexColorRead),
@@ -4367,7 +4437,7 @@ internal sealed class BridgeCommandService
         if (!IsAnibndPath(file))
             return (TaeDocumentSet.FromRaw(TaeNativeDocument.ReadFile(file)), Array.Empty<Diagnostic>());
 
-        var bnd4 = ReadBnd4Container(file, oodleRuntimeRoot);
+        var bnd4 = ReadBnd4Container(file, oodleRuntimeRoot, out var outerFileHash);
         var taeEntries = new List<TaeDocumentSetEntry>();
         for (var i = 0; i < bnd4.Entries.Count; i++)
         {
@@ -4406,6 +4476,7 @@ internal sealed class BridgeCommandService
         var documentSet = TaeDocumentSet.FromAnibnd(
             bnd4.SourceHash,
             bnd4.SourceBytes.Length,
+            outerFileHash,
             taeEntries);
         var legacyPrimary = taeEntries.FirstOrDefault(entry => entry.TaeEntryId == 5000000);
         var diagnostics = new[]
@@ -4437,16 +4508,22 @@ internal sealed class BridgeCommandService
         return (documentSet, diagnostics);
     }
 
-    private static Bnd4NativeDocument ReadBnd4Container(string path, string? oodleRuntimeRoot)
+    private static Bnd4NativeDocument ReadBnd4Container(string path, string? oodleRuntimeRoot) =>
+        ReadBnd4Container(path, oodleRuntimeRoot, out _);
+
+    private static Bnd4NativeDocument ReadBnd4Container(string path, string? oodleRuntimeRoot, out string outerFileHash)
     {
         byte[] payload;
         if (IsDcxFile(path))
         {
-            payload = DcxNativeDocument.Read(path, oodleRuntimeRoot).Payload;
+            var dcx = DcxNativeDocument.Read(path, oodleRuntimeRoot);
+            outerFileHash = dcx.SourceHash;
+            payload = dcx.Payload;
         }
         else
         {
             payload = File.ReadAllBytes(path);
+            outerFileHash = HashHex(payload);
             if (IsDcxBytes(payload))
                 payload = DcxNativeDocument.Read(payload, oodleRuntimeRoot, path).Payload;
         }

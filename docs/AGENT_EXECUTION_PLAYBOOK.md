@@ -1,11 +1,11 @@
 # SoulForge 执行手册
 
-> - 文档性质：**方法手册**，提供复杂切片的可选执行流程，不记录任何进度、状态或范围。
-> - 状态、切片、Evidence 的权威是 `docs/governance/*.json`；`docs/V0_5_IMPLEMENTATION_HANDOFF.md`（下称"交接书"）的对应章节是它们的投影，冲突时以 JSON 为准。读这些状态一律走 `node scripts/gov.mjs next` / `status`，不要手工读投影表格。
-> - 交接书仍是唯一完整实施规范与技术地图；需要背景、区域地图或格式细节时查它。
-> - 适用对象：**写代码稳定、但规划与自我编排较弱**的 Agent。
-> - 与交接书的关系：交接书是"地图 + 参考手册"，本文是"照着走的操作规程"。状态、范围和证据冲突时以治理 JSON 为准；其他实施边界先核对当前 AGENTS.md，再查交接书相关区域。
-> - 本文不新建 milestone / task / status / next-actions 口径；它把交接书 §0.3 的决策协议和 §13.2 的切片模板，翻译成可机械执行的流程。
+
+当前工程入口是 [AGENTS.md](../AGENTS.md)、[ARCHITECTURE.md](../ARCHITECTURE.md) 与 [DECISIONS.md](DECISIONS.md)。验证从 `node scripts/check.mjs --list` 选择实际存在的检查；新的约定测试自动发现，无需手动 tier 登记。
+
+本文第 0–9 节保留旧执行流程的历史说明。其 gov claim/seal、治理 JSON、冻结投影、全局 Evidence freshness 与切片登记流程已退役，不能用于认领任务、批准写入、限制开发或宣称完成。历史产品边界应以当前源码与上述工程入口核对。
+
+[第 10 节 CLI 与真实 Agent 验证](#agent-tool-validation) 保留实际工具调用、分页、隔离工作区、结果解读与排障说明；参数以当前 `--help` 和执行结果为准。Agent 的共享 assembly、有限控制内核与 headless 路径见 [AGENT_RUNTIME.md](AGENT_RUNTIME.md)。
 
 ---
 

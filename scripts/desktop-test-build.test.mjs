@@ -1,8 +1,8 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { readFile, mkdtemp, rm, writeFile, mkdir } from 'node:fs/promises';
+import { readFile, mkdtemp, rm, writeFile, mkdir, lstat } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { resolve, join } from 'node:path';
+import { resolve, join, relative, isAbsolute } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { pathToFileURL } from 'node:url';
 const build = await import('./desktop-test-build.mjs').catch(error => {
@@ -27,6 +27,13 @@ test('smoke output allocation is distinct, bounded, and cleaned without touching
       roots.push(allocation.outputRoot); await writeFile(join(allocation.outputRoot, 'test-output'), 'test');
       assert.equal(allocation.env.SOULFORGE_BUILD_DATABASE_UTILITY_SMOKE, '1');
       assert.equal(allocation.env.SOULFORGE_TEST_BUILD_ROOT, allocation.outputRoot);
+      for (const name of ['HOME', 'XDG_CONFIG_HOME', 'XDG_CACHE_HOME', 'XDG_DATA_HOME', 'XDG_STATE_HOME', 'XDG_RUNTIME_DIR']) {
+        const local = relative(allocation.outputRoot, allocation.env[name]);
+        assert.ok(local && !local.startsWith('..') && !isAbsolute(local), `${name} must belong to this test output`);
+        const metadata = await lstat(allocation.env[name]);
+        assert.ok(metadata.isDirectory() && !metadata.isSymbolicLink());
+        if (process.platform !== 'win32') assert.equal(metadata.mode & 0o777, 0o700);
+      }
     }, { repositoryRoot: root, build: false });
     assert.notEqual(roots[0], roots[1]);
     for (const path of roots) await assert.rejects(readFile(join(path, 'test-output')), { code: 'ENOENT' });

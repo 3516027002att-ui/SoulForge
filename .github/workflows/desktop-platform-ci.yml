@@ -112,11 +112,13 @@ jobs:
           node scripts/run-database-utility-smoke.mjs
       - name: Build unsigned desktop package directory
         id: package
+        if: ${{ !cancelled() && steps.commands.outcome == 'success' && steps.typecheck.outcome == 'success' && steps.build.outcome == 'success' && steps.publish.outcome == 'success' }}
         working-directory: apps/desktop
         run: npx --yes electron-builder@26.16.1 --${{ matrix.builder-platform }} --x64 --dir --publish never
       # tar preserves executable modes inside the Linux artifact.
       - name: Archive package directory
         id: archive
+        if: ${{ !cancelled() && steps.package.outcome == 'success' }}
         run: |
           mkdir -p output
           tar -czf output/SoulForge-${{ matrix.runtime }}.tar.gz -C apps/desktop/release ${{ matrix.package-directory }}

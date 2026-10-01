@@ -79,6 +79,7 @@ internal sealed class FlverNativeDocument
     private const uint TypeShort2toFloat2 = 0x12;
     private const uint TypeByte4C = 0x13;
     private const uint TypeUByte4Norm = TypeByte4C;  // LayoutType.UByte4Norm
+    private const uint TypeByte4Norm = 0x14;
     private const uint TypeUV = 0x15;
     private const uint TypeUVPair = 0x16;
     private const uint TypeShortBoneIndices = 0x18;
@@ -311,6 +312,7 @@ internal sealed class FlverNativeDocument
         public int VertexBufferIndex;
         public int BufferLayoutIndex;
         public int DataBase;   // 顶点 0 数据的绝对偏移
+        public int DataEnd;    // Declared vertex buffer end, exclusive.
         public int Stride;     // VertexBuffer.VertexSize
         public int Count;      // VertexBuffer.VertexCount
         public int Offset;     // LayoutMember.StructOffset
@@ -332,6 +334,7 @@ internal sealed class FlverNativeDocument
     internal sealed class MeshDataPlan
     {
         public int VertexCount;
+        public bool DiagnosticSourceInvalid;
         public VertexMemberAccess? Position;
         public VertexMemberAccess? Normal;
         /// <summary>
@@ -341,6 +344,8 @@ internal sealed class FlverNativeDocument
         /// </summary>
         public List<VertexMemberAccess> UVs { get; } = new();
         public List<VertexColorMemberCandidate> VertexColors { get; } = new();
+        public List<VertexColorMemberCandidate> Tangents { get; } = new();
+        public List<VertexColorMemberCandidate> Bitangents { get; } = new();
         public VertexMemberAccess? Weights;
         public VertexMemberAccess? BoneIndices;
     }
@@ -700,27 +705,33 @@ internal sealed class FlverNativeDocument
         {
             if (vbIndex < 0 || vbIndex >= _vertexBuffers.Count)
             {
+                plan.DiagnosticSourceInvalid = true;
                 AddLayoutWarning($"mesh[{meshIndex}] 引用越界 vertex buffer {vbIndex}。");
                 continue;
             }
             var vb = _vertexBuffers[vbIndex];
             if (vb.LayoutIndex < 0 || vb.LayoutIndex >= _bufferLayouts.Count)
             {
+                plan.DiagnosticSourceInvalid = true;
                 AddLayoutWarning($"vertex buffer[{vbIndex}] 引用越界 layout {vb.LayoutIndex}。");
                 continue;
             }
             var layout = _bufferLayouts[vb.LayoutIndex];
             var dataBase = (long)DataStart + vb.BufferOffset;
-            if (dataBase < 0 || dataBase + (long)vb.VertexSize > _source.Length)
+            var dataEnd = dataBase + vb.BufferLength;
+            var bufferValid = vb.VertexSize > 0 && vb.VertexCount >= 0 && vb.BufferLength >= 0 && vb.BufferOffset >= 0
+                && dataBase >= DataStart && dataEnd <= (long)DataStart + DataLength && dataEnd <= _source.Length
+                && (long)vb.VertexCount * vb.VertexSize <= vb.BufferLength;
+            if (!bufferValid)
             {
+                plan.DiagnosticSourceInvalid = true;
                 AddLayoutWarning($"vertex buffer[{vbIndex}] 数据越界 dataBase=0x{dataBase:X}。");
-                continue;
             }
             var count = Math.Min(plan.VertexCount, vb.VertexCount);
             foreach (var member in layout.Members)
             {
                 VertexColorMemberCandidate? vertexColorCandidate = null;
-                if (member.Semantic == SemVertexColor)
+                if (member.Semantic is SemVertexColor or SemTangent or SemBitangent)
                 {
                     vertexColorCandidate = new VertexColorMemberCandidate
                     {
@@ -730,8 +741,12 @@ internal sealed class FlverNativeDocument
                         BufferLayoutIndex = vb.LayoutIndex,
                         StructOffset = member.StructOffset
                     };
-                    plan.VertexColors.Add(vertexColorCandidate);
+                    (member.Semantic == SemTangent ? plan.Tangents
+                        : member.Semantic == SemBitangent ? plan.Bitangents : plan.VertexColors).Add(vertexColorCandidate);
                 }
+                // Register known diagnostic semantics before rejecting the
+                // buffer: corrupt source bytes are invalid, never absent.
+                if (!bufferValid) continue;
                 var memberSize = MemberTypeSize(member.Type);
                 if (memberSize <= 0)
                 {
@@ -753,6 +768,7 @@ internal sealed class FlverNativeDocument
                     VertexBufferIndex = vbIndex,
                     BufferLayoutIndex = vb.LayoutIndex,
                     DataBase = (int)dataBase,
+                    DataEnd = (int)dataEnd,
                     Stride = vb.VertexSize,
                     Count = count,
                     Offset = member.StructOffset,
@@ -783,10 +799,14 @@ internal sealed class FlverNativeDocument
                         break;
 
                     case SemTangent:
-                        AddUnparsedGap($"vertex-semantic:tangent(0x{SemTangent:X}) 已定义未解析（type=0x{member.Type:X}）");
+                        vertexColorCandidate!.Access = access;
+                        if (!IsSupportedVector4Type(member.Type, false))
+                            AddUnparsedGap($"vertex-semantic:tangent unsupported type=0x{member.Type:X}");
                         break;
                     case SemBitangent:
-                        AddUnparsedGap($"vertex-semantic:bitangent(0x{SemBitangent:X}) 已定义未解析（type=0x{member.Type:X}）");
+                        vertexColorCandidate!.Access = access;
+                        if (!IsSupportedVector4Type(member.Type, true))
+                            AddUnparsedGap($"vertex-semantic:bitangent unsupported type=0x{member.Type:X}");
                         break;
                     // 被守卫挡掉的重复语义：数据完好，但本实现只取首个，其余未投影。
                     case SemPosition:
@@ -808,8 +828,11 @@ internal sealed class FlverNativeDocument
     private bool TryExtractFloat3(VertexMemberAccess a, int vertexIndex, out float x, out float y, out float z)
     {
         x = y = z = 0f;
+        if (vertexIndex < 0 || vertexIndex >= a.Count) return false;
         var off = a.DataBase + (long)vertexIndex * a.Stride + a.Offset;
-        if (off < 0 || off + 12 > _source.Length) return false;
+        var byteCount = a.Type is TypeFloat3 or TypeFloat4 ? 12
+            : a.Type is TypeShort4toFloat4A or TypeShort4toFloat4B ? 6 : 4;
+        if (off < 0 || off > _source.Length - byteCount) return false;
         if (a.Type == TypeFloat3)
         {
             x = ReadFloat32(_source, (int)off);
@@ -826,6 +849,13 @@ internal sealed class FlverNativeDocument
         }
         if (a.Type == TypeEdgeCompressed)
             return false; // 边压缩顶点不支持直接解码
+        if (a.Type == TypeByte4Norm)
+        {
+            x = ReadSByte(_source, (int)off + 2) / 127f;
+            y = ReadSByte(_source, (int)off + 1) / 127f;
+            z = ReadSByte(_source, (int)off) / 127f;
+            return true;
+        }
         if (a.Type == TypeByte4A || a.Type == TypeByte4B || a.Type == TypeByte4C || a.Type == TypeByte4E)
         {
             x = (ReadByte(_source, (int)off) - 127) / 127f;
@@ -1002,6 +1032,8 @@ internal sealed class FlverNativeDocument
         int meshIndex, int maxVertices = 10_000, bool allowTruncation = false)
     {
         var plan = BuildMeshPlan(meshIndex);
+        if (plan?.DiagnosticSourceInvalid == true)
+            return new FlverVertexColorReadResult("invalid", Array.Empty<FlverVertexColorDiagnostic>(), "FLVER_VERTEX_COLOR_SOURCE_BUFFER_INVALID", null);
         if (plan is null || plan.VertexColors.Count == 0)
             return new FlverVertexColorReadResult("absent", Array.Empty<FlverVertexColorDiagnostic>(), null, null);
         if (plan.VertexCount <= 0)
@@ -1087,6 +1119,70 @@ internal sealed class FlverNativeDocument
     /// </summary>
     public string? GetMeshVertexAlphaBase64(int meshIndex, int maxVertices = 10_000, bool allowTruncation = false)
         => GetMeshVertexColorDiagnostics(meshIndex, maxVertices, allowTruncation).FirstAlphaBase64;
+
+    /// <summary>Native four-component tangent evidence; not a generic shader tangent policy.</summary>
+    public FlverVector4ReadResult GetMeshTangentDiagnostics(int meshIndex, int maxVertices = 10_000, bool bitangent = false)
+    {
+        var plan = BuildMeshPlan(meshIndex);
+        if (plan?.DiagnosticSourceInvalid == true)
+            return new("invalid", Array.Empty<FlverVector4Diagnostic>(), "FLVER_VECTOR4_SOURCE_BUFFER_INVALID");
+        var candidates = bitangent ? plan?.Bitangents : plan?.Tangents;
+        if (candidates is null || candidates.Count == 0)
+            return new("absent", Array.Empty<FlverVector4Diagnostic>(), null);
+        if (plan!.VertexCount <= 0 || maxVertices <= 0 || plan.VertexCount > int.MaxValue / 4)
+            return new("invalid", Array.Empty<FlverVector4Diagnostic>(), "FLVER_VECTOR4_VERTEX_COUNT_INVALID");
+        if (plan.VertexCount > maxVertices)
+            return new("truncated", Array.Empty<FlverVector4Diagnostic>(), "FLVER_VECTOR4_VERTEX_LIMIT_EXCEEDED");
+        var members = new List<FlverVector4Diagnostic>(candidates.Count);
+        Span<float> components = stackalloc float[4];
+        for (var ordinal = 0; ordinal < candidates.Count; ordinal++)
+        {
+            var candidate = candidates[ordinal];
+            if (candidate.Access is null || !IsSupportedVector4Type(candidate.Type, bitangent))
+                return new("unsupported", Array.Empty<FlverVector4Diagnostic>(), $"FLVER_VECTOR4_LAYOUT_UNSUPPORTED: member={ordinal} type=0x{candidate.Type:X}");
+            var values = new float[plan.VertexCount * 4];
+            for (var vertex = 0; vertex < plan.VertexCount; vertex++)
+            {
+                if (!TryReadVector4(candidate.Access, vertex, components))
+                    return new("invalid", Array.Empty<FlverVector4Diagnostic>(), $"FLVER_VECTOR4_DATA_INVALID: member={ordinal} vertex={vertex}");
+                for (var channel = 0; channel < 4; channel++) values[vertex * 4 + channel] = components[channel];
+            }
+            members.Add(new(ordinal, candidate.MemberIndex, candidate.Type, Vector4LayoutTypeName(candidate.Type), candidate.VertexBufferIndex, candidate.BufferLayoutIndex, candidate.StructOffset, EncodeFloatArray(values)));
+        }
+        return new("decoded", members, null);
+    }
+
+    private static bool IsSupportedVector4Type(uint type, bool bitangent)
+        => type is TypeByte4A or TypeByte4B or TypeByte4C or TypeByte4E
+            || (!bitangent && (type is TypeFloat4 or TypeByte4Norm or TypeShort4toFloat4A));
+
+    private static string Vector4LayoutTypeName(uint type) => type switch
+    {
+        TypeFloat4 => "Float4", TypeByte4A => "Color", TypeByte4B => "UByte4",
+        TypeByte4C => "UByte4Norm", TypeByte4E => "Byte4E", TypeByte4Norm => "Byte4Norm",
+        TypeShort4toFloat4A => "Short4Norm", _ => $"Unknown(0x{type:X})"
+    };
+
+    private bool TryReadVector4(VertexMemberAccess access, int vertex, Span<float> values)
+    {
+        if (vertex < 0 || vertex >= access.Count) return false;
+        var size = MemberTypeSize(access.Type);
+        var offset = access.DataBase + (long)vertex * access.Stride + access.Offset;
+        if (size <= 0 || offset < access.DataBase || offset > access.DataEnd - size || offset > _source.Length - size) return false;
+        for (var channel = 0; channel < 4; channel++)
+        {
+            values[channel] = access.Type switch
+            {
+                TypeFloat4 => ReadFloat32(_source, (int)offset + channel * 4),
+                TypeByte4Norm => ReadSByte(_source, (int)offset + 3 - channel) / 127f,
+                TypeShort4toFloat4A => ReadInt16(_source, (int)offset + channel * 2) / 32767f,
+                TypeByte4A or TypeByte4B or TypeByte4C or TypeByte4E => (ReadByte(_source, (int)offset + channel) - 127) / 127f,
+                _ => float.NaN
+            };
+            if (!float.IsFinite(values[channel])) return false;
+        }
+        return true;
+    }
 
     /// <summary>
     /// Extracts a complete GPU skin binding. Sekiro-era FLVER (> 0x2000D)
@@ -2580,7 +2676,7 @@ internal sealed class FlverNativeDocument
     private static int MemberTypeSize(uint type) => type switch
     {
         TypeEdgeCompressed => 1,
-        TypeFloat2 or TypeByte4A or TypeByte4B or TypeShort2toFloat2 or TypeByte4C or TypeUV or TypeByte4E => 4,
+        TypeFloat2 or TypeByte4A or TypeByte4B or TypeShort2toFloat2 or TypeByte4C or TypeByte4Norm or TypeUV or TypeByte4E => 4,
         TypeFloat3 => 12,
         TypeFloat4 => 16,
         TypeUVPair or TypeShortBoneIndices or TypeShort4toFloat4A or TypeShort4toFloat4B => 8,
@@ -2759,6 +2855,13 @@ internal sealed record FlverVertexColorReadResult(
     IReadOnlyList<FlverVertexColorDiagnostic> Members,
     string? Failure,
     string? FirstAlphaBase64);
+
+internal sealed record FlverVector4Diagnostic(
+    int MemberOrdinal, int MemberIndex, uint LayoutType, string LayoutTypeName,
+    int VertexBufferIndex, int BufferLayoutIndex, int StructOffset, string XyzwBase64);
+
+internal sealed record FlverVector4ReadResult(
+    string Status, IReadOnlyList<FlverVector4Diagnostic> Members, string? Failure);
 
 internal sealed record FlverRoundTripReport(
     bool ByteIdentical, bool SemanticIdentical,

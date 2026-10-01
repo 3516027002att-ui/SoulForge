@@ -5,7 +5,7 @@ const bytes = value => Buffer.byteLength(typeof value === 'string' ? value : JSO
 const positive = (value, fallback) => Number.isSafeInteger(value) && value > 0 ? value : fallback;
 const budgetDefaults = Object.freeze({ maxSteps: 200, timeoutMs: 1800000, maxOutputTokens: 100000, maxContextBytes: 2097152, maxResultBytes: 65536, maxResponseBytes: 131072, maxToolCallsPerTurn: 32 });
 const deniedDecisions = new Set(['reject', 'never', 'timed_out', 'abort']);
-const approvalLevels = new Set(['stage', 'commit', 'rollback']);
+export const DEFAULT_APPROVAL_REQUIRED_LEVELS = Object.freeze(['stage', 'commit', 'rollback', 'write']);
 function hashProposal(call) { return createHash('sha256').update(JSON.stringify([call.name, call.argumentsJson])).digest('hex'); }
 function boundedAwait(promise, signal) {
     if (!signal)
@@ -30,7 +30,9 @@ export async function runFiniteAgent(options) {
     const messages = options.messages.map(message => ({ ...message }));
     const tools = new Map(options.tools.map(tool => [tool.name, tool]));
     const seenCallIds = new Set();
-    const toolCalls = [], transactions = [], diagnostics = [], unresolvedCalls = [];
+    const toolCalls = [], transactions = [], diagnostics = [], unresolvedCalls = [], approvals = [];
+    const approvalLevels = new Set(options.approvalRequiredLevels ?? DEFAULT_APPROVAL_REQUIRED_LEVELS);
+    const approvalMemory = new Map();
     let eventSeq = 0, steps = 0, outputTokens = 0, cost = 0, state = 'running', reason = '';
     let pendingApproval;
     let modelAttempt = 0;
@@ -124,71 +126,130 @@ export async function runFiniteAgent(options) {
             }
             for (const id of turnCallIds) seenCallIds.add(id);
             append(message);
+            if(options.emitCompletedMessage!==false && message.content)emit({type:'agent-message-delta',step:steps,text:message.content});
+            if(completion.finishReason==='length'){
+                emit({type:'step-complete',step:steps,finishReason:completion.finishReason});
+                finish('partial','provider_length');break;
+            }
+            if(outputTokens>limits.maxOutputTokens||(calls.length>0&&outputTokens>=limits.maxOutputTokens)) {
+                diagnostics.push({severity:'warning',code:'MODEL_SERVICE_OUTPUT_BUDGET_EXCEEDED',message:'Provider output exhausted the run budget; no proposed tools from this response were dispatched.'});
+                finish('partial','output_budget');break;
+            }
             if (completion.finishReason === 'cancelled') {
+                emit({type:'step-complete',step:steps,finishReason:completion.finishReason});
                 finish('cancelled', 'provider_cancelled');
                 break;
             }
             if (completion.finishReason === 'error') {
+                emit({type:'step-complete',step:steps,finishReason:completion.finishReason});
                 finish('error', 'provider_error');
                 break;
             }
             if (calls.length === 0) {
+                emit({type:'step-complete',step:steps,finishReason:completion.finishReason});
+                if(completion.finishReason==='tool_use'){diagnostics.push({severity:'warning',code:'AGENT_TOOL_USE_WITHOUT_CALLS',message:'Provider requested tools without any executable calls.'});finish('partial','tool_use_without_calls');break;}
                 finish(completion.finishReason === 'length' ? 'partial' : 'completed', completion.finishReason === 'length' ? 'provider_length' : 'model_stopped');
                 break;
             }
+            // Settle permission/approval proposals for the turn before starting
+            // any domain calls. An abort or unanswered approval cannot dispatch
+            // an earlier queued mutation from the same provider response.
+            const planned = [];
             for (const call of calls) {
                 if (controller.signal.aborted) {
-                    finish('cancelled', timedOut ? 'time_budget' : 'cancelled');
-                    break;
+                    finish('cancelled', timedOut ? 'time_budget' : 'cancelled');break;
                 }
-                emit({ type: 'tool-call-begin', step: steps, callId: call.id, name: call.name, argumentsJson: redact(call.argumentsJson) });
                 const tool = tools.get(call.name);
                 const allowed = tool ? options.allowTool(call, tool) : { ok: false, code: 'AGENT_TOOL_NOT_REGISTERED', message: 'Tool is not registered.' };
                 if (!allowed.ok) {
-                    toolResult(call, { ok: false, code: allowed.code, content: JSON.stringify({ ok: false, code: allowed.code, message: allowed.message }) });
-                    continue;
+                    planned.push({call,result:{ok:false,code:allowed.code,content:JSON.stringify({ok:false,state:'failed',error:{code:allowed.code,message:allowed.message}})}});continue;
                 }
-                if (options.permissionMode !== 'full' && approvalLevels.has(tool.permissionLevel)) {
-                    const request = { step: steps, callId: call.id, toolName: call.name, permissionLevel: tool.permissionLevel, argumentsJson: redact(call.argumentsJson), proposalHash: hashProposal(call) };
-                    if (options.resolveApprovalDiff) {
-                        const diff = await boundedAwait(options.resolveApprovalDiff({ toolName: call.name, argumentsJson: call.argumentsJson }), controller.signal);
-                        if (diff)
-                            request.diff = diff;
+                if (approvalLevels.has(tool.permissionLevel)) {
+                    const remembered = approvalMemory.get(call.name);
+                    let decision = remembered;
+                    let note;
+                    if (remembered === undefined) {
+                        const request = { step: steps, callId: call.id, toolName: call.name, permissionLevel: tool.permissionLevel, argumentsJson: redact(call.argumentsJson), proposalHash: hashProposal(call) };
+                        if (options.resolveApprovalDiff) {
+                            try {
+                                const diff = await boundedAwait(options.resolveApprovalDiff({toolName:call.name,argumentsJson:call.argumentsJson}),controller.signal);
+                                if(diff)request.diff=diff;
+                            } catch(error) {
+                                if(controller.signal.aborted)throw error;
+                                diagnostics.push({severity:'warning',code:'APPROVAL_DIFF_UNAVAILABLE',message:'The host could not provide a diff; the concrete proposal still requires approval.'});
+                            }
+                        }
+                        emit({type:'approval-requested',...request});
+                        if(!options.requestApproval) {
+                            pendingApproval={call:{...call},proposalHash:request.proposalHash,step:steps};finish('waiting','approval_required');break;
+                        }
+                        try {
+                            const response=await boundedAwait(options.requestApproval(request),controller.signal);
+                            decision=response?.decision;note=typeof response?.note==='string'?redact(response.note):undefined;
+                        }catch(error){
+                            if(controller.signal.aborted)throw error;
+                            if(error.code==='AGENT_APPROVAL_PENDING') {
+                                pendingApproval={call:{...call},proposalHash:request.proposalHash,step:steps};finish('waiting','approval_required');break;
+                            }
+                            throw Object.assign(new Error('Host approval request failed; no proposed calls were executed.'),{code:'AGENT_APPROVAL_REQUEST_FAILED'});
+                        }
+                        if(!['once','always',...deniedDecisions].includes(decision)) {
+                            diagnostics.push({severity:'error',code:'AGENT_APPROVAL_RESPONSE_INVALID',message:'Host approval response was invalid; no proposed calls were executed.'});
+                            finish('error','approval_response_invalid');break;
+                        }
+                        if(decision==='always'||decision==='never')approvalMemory.set(call.name,decision);
                     }
-                    emit({ type: 'approval-requested', ...request });
-                    if (!options.requestApproval) {
-                        pendingApproval = { call: { ...call }, proposalHash: request.proposalHash, step: steps };
-                        finish('waiting', 'approval_required');
-                        break;
+                    const audit={name:call.name,permissionLevel:tool.permissionLevel,decision,fromMemory:remembered!==undefined,...(note!==undefined?{note}:{})};
+                    approvals.push(audit);
+                    emit({type:'approval-resolved',step:steps,callId:call.id,toolName:call.name,decision,fromMemory:audit.fromMemory,...(note!==undefined?{note}:{})});
+                    if(decision==='abort') {
+                        diagnostics.push({severity:'warning',code:'AGENT_ABORTED_BY_APPROVAL',message:'The user aborted the task at the approval boundary.'});
+                        finish('cancelled','approval_aborted');break;
                     }
-                    const decision = await boundedAwait(options.requestApproval(request), controller.signal);
-                    emit({ type: 'approval-resolved', step: steps, callId: call.id, toolName: call.name, decision: decision.decision, fromMemory: false });
-                    if (deniedDecisions.has(decision.decision)) {
-                        toolResult(call, { ok: false, code: 'AGENT_APPROVAL_DENIED', content: JSON.stringify({ ok: false, decision: decision.decision }) });
-                        if (decision.decision === 'abort')
-                            finish('cancelled', 'approval_aborted');
-                        continue;
-                    }
-                    if (decision.decision !== 'once' && decision.decision !== 'always') {
-                        finish('error', 'approval_response_invalid');
-                        break;
+                    if(deniedDecisions.has(decision)) {
+                        const code=decision==='timed_out'?'APPROVAL_TIMED_OUT':'APPROVAL_DENIED';
+                        planned.push({call,result:{ok:false,code,content:JSON.stringify({ok:false,code,decision})}});continue;
                     }
                 }
+                planned.push({call,tool});
+            }
+            if(state!=='running')break;
+            const execute = async entry => {
                 try {
-                    const result = await boundedAwait(options.executeTool(call, { signal: controller.signal }), controller.signal);
-                    toolResult(call, result);
+                    const result=await boundedAwait(options.executeTool(entry.call,{signal:controller.signal}),controller.signal);
+                    return {result};
+                }catch(error){return {error};}
+            };
+            const parallelRead = entry => !entry.result && entry.tool?.supportsParallel===true
+                && ['read','analyze'].includes(entry.tool.permissionLevel);
+            for(let index=0;index<planned.length;) {
+                if(controller.signal.aborted){finish('cancelled',timedOut?'time_budget':'cancelled');break;}
+                const first=planned[index];
+                if(first.result){emit({type:'tool-call-begin',step:steps,callId:first.call.id,name:first.call.name,argumentsJson:redact(first.call.argumentsJson)});toolResult(first.call,first.result);index++;continue;}
+                let end=index+1;
+                if(parallelRead(first))while(end<planned.length&&parallelRead(planned[end]))end++;
+                const batch=planned.slice(index,end);
+                for(const entry of batch)emit({type:'tool-call-begin',step:steps,callId:entry.call.id,name:entry.call.name,argumentsJson:redact(entry.call.argumentsJson)});
+                const settled=await Promise.all(batch.map(execute));
+                // Parallel reads may finish out of order; protocol/history drain
+                // in provider emission order before any exclusive call starts.
+                for(let offset=0;offset<batch.length;offset++) {
+                    const entry=batch[offset],call=entry.call,outcome=settled[offset];
+                    if(outcome.result){toolResult(call,outcome.result);continue;}
+                    const error=outcome.error;
+                    if(['read','analyze'].includes(entry.tool?.permissionLevel)) {
+                        const code=controller.signal.aborted?'AGENT_CANCELLED':'TOOL_EXECUTION_FAILED';
+                        toolResult(call,{ok:false,code,content:JSON.stringify({ok:false,code,message:redact(error.message??String(error))})});
+                    }else{
+                        unresolvedCalls.push({callId:call.id,toolName:call.name,state:'unknown',retryable:false});
+                        emit({type:'operation-unresolved',callId:call.id,toolName:call.name,state:'unknown',retryable:false});
+                        diagnostics.push({severity:'error',code:'AGENT_TOOL_OUTCOME_UNKNOWN',message:redact(error.message??String(error))});
+                        finish(controller.signal.aborted?'cancelled':'error','tool_outcome_unknown');
+                    }
                 }
-                catch (error) {
-                    unresolvedCalls.push({ callId: call.id, toolName: call.name, state: 'unknown', retryable: false });
-                    emit({ type: 'operation-unresolved', callId: call.id, toolName: call.name, state: 'unknown', retryable: false });
-                    diagnostics.push({ severity: 'error', code: 'AGENT_TOOL_OUTCOME_UNKNOWN', message: redact(error.message ?? String(error)) });
-                    finish(controller.signal.aborted ? 'cancelled' : 'error', 'tool_outcome_unknown');
-                    break;
-                }
-                if (controller.signal.aborted) {
-                    finish('cancelled', timedOut ? 'time_budget' : 'cancelled');
-                    break;
-                }
+                if(state!=='running')break;
+                if(controller.signal.aborted){finish('cancelled',timedOut?'time_budget':'cancelled');break;}
+                index=end;
             }
             emit({ type: 'step-complete', step: steps, finishReason: completion.finishReason });
         }
@@ -205,5 +266,5 @@ export async function runFiniteAgent(options) {
     }
     const finishReason = state === 'completed' ? 'stop' : state === 'waiting' ? 'waiting' : state;
     emit({ type: 'turn-complete', finishReason, steps });
-    return { state, reason, finishReason, steps, messages, diagnostics, toolCalls, transactions, unresolvedCalls, outputTokens, cost, evaluation: 'unverified', ...(pendingApproval ? { pendingApproval } : {}) };
+    return { state, reason, finishReason, steps, messages, diagnostics, toolCalls, transactions, unresolvedCalls, approvals, outputTokens, cost, evaluation: 'unverified', ...(pendingApproval ? { pendingApproval } : {}) };
 }

@@ -4,9 +4,8 @@
  * The fixture drives the production agent loop, bridge, and ToolRegistry
  * together. The manual ledger gate is gone: reads never require a search
  * ticket, while writes must satisfy the automatic native-read proof boundary
- * (T09) built from the ACTUAL delivered read result. The loop's PARAM
- * dependency barrier (a row-search must settle before dependent PARAM
- * consumers start) is a scheduler contract and stays observable here.
+ * (T09) built from the ACTUAL delivered read result. Row discovery declares
+ * an exclusive scheduler slot; the shared kernel needs no PARAM name rule.
  */
 import assert from 'node:assert/strict';
 import { join } from 'node:path';
@@ -136,6 +135,7 @@ function createFixture(options: FixtureOptions = {}): {
   } as unknown as NonNullable<ToolContext['session']>;
   registry.register({
     name: 'search_param_rows',
+    supportsParallel: false,
     description: 'fixture PARAM row search',
     permission: 'read',
     permissionLevel: 'read',
@@ -236,12 +236,14 @@ function adapterFor(toolCalls: ToolCall[]): ModelServiceAdapter {
         return {
           message: { role: 'assistant', content: '', toolCalls },
           finishReason: 'tool_use',
+          usage: {inputTokens:1,outputTokens:1},
           diagnostics: []
         };
       }
       return {
         message: { role: 'assistant', content: 'fixture complete' },
         finishReason: 'stop',
+        usage: {inputTokens:1,outputTokens:1},
         diagnostics: []
       };
     },
@@ -268,6 +270,7 @@ async function runFixture(
     tools: bridge.tools,
     permissionMode: 'normal',
     executeTool: bridge.executeTool,
+    requestApproval: async () => ({decision:'once'}),
     maxSteps: 4,
     ...(signal ? { signal } : {})
   });

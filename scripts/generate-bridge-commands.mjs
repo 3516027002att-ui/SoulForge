@@ -32,7 +32,9 @@ export async function checkOrWriteBridgeCommands({ check = false } = {}) {
   const outputs = generateBridgeCommands(JSON.parse(await readFile(resolve(root, 'bridge/commands.json'), 'utf8')));
   for (const [file, source] of outputs) {
     if (check) {
-      if (await readFile(resolve(root, file), 'utf8').catch(() => '') !== source) throw new Error(`BRIDGE_COMMAND_GENERATED_STALE: ${file}`);
+      const stored = await readFile(resolve(root, file), 'utf8').catch(() => '');
+      // Git's Windows checkout may use CRLF; generated content remains exact.
+      if (stored.replaceAll('\r\n', '\n') !== source) throw new Error(`BRIDGE_COMMAND_GENERATED_STALE: ${file}`);
     } else await writeFile(resolve(root, file), source);
   }
   return { ok: true, commands: JSON.parse(await readFile(resolve(root, 'bridge/commands.json'), 'utf8')).commands.length, evidence: 'generated-contract-consistency; actual dispatch is covered by C# tests' };

@@ -254,7 +254,8 @@ async function testNonFiniteStepBudgetIsBounded() {
         toolCalls: [{ id: `step-${modelCalls + 1}`, name: 'bounded_read', argumentsJson: '{}' }]
       },
       finishReason: 'tool_use',
-      diagnostics: []
+      diagnostics: [],
+      usage:{inputTokens:1,outputTokens:1}
     })
   };
   const run = await runAgentToolLoop(adapter, {

@@ -49,12 +49,12 @@ SoulForge 是给魂游（FromSoftware 的《只狼》《黑暗之魂》《艾尔
 优先使用统一入口组合本次所需验证；层级是选择工具，不表示每次修改都需要全跑。先用 `--list` 查看具体操作和环境需求：
 
 ```powershell
-node scripts/verify.mjs --tier governance --list
-node scripts/verify.mjs --suite typecheck,test:agent-tool-envelope
-node scripts/verify.mjs --slice W-REL-V09-PUBLIC-PREVIEW-01 --list
+node scripts/check.mjs --tier governance --list
+node scripts/check.mjs --suite typecheck,test:agent-tool-envelope
+node scripts/check.mjs --suite file:scripts/check.fixture.mjs --require-executed
 ```
 
-`--suite` 保留给定顺序；`--slice` 只执行结构化 `requiredValidation` 的自动步骤，人工检查单独显示为 `manual-pending`，历史自由文本不能自动执行。单项调试仍可直接用 `npm run <名称>`。
+`--suite` 保留给定顺序；测试文件按约定自动发现，无须登记。旧 `verify.mjs` 转发到同一条 `check` 执行路径，旧 `--slice` 计划已退役，任务以 GitHub Issues 为准。单项调试仍可直接用 `npm run <名称>`。
 
 同一计划按工作目录、命令参数和显式环境复用已通过的操作，共享重复的 TypeScript 编译；JSON 报告的 `steps.execution` 区分执行与复用。构建、npm 生命周期和无法安全展开的 shell 命令会清除复用结果。复用不跨运行保存，也不用于把 skip/partial 改成 passed。需要全部实际通过时用 `--require-executed`；混合层级可用 `--require-tier governance,unit` 或 `--require-suite test:renderer-e2e` 指定严格范围。
 
@@ -267,4 +267,3 @@ This is not just wishful thinking. In fact, you can already see from the source 
 To help improve the project, I will provide generous usage credits to active users. If you are willing to share your experience with me, please star the repository and then get in touch — you know how to reach me.
 
 会话记录：(https://github.com/3516027002att-ui/soulforge-output)
-

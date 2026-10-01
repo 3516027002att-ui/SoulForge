@@ -93,7 +93,7 @@ export function planScript(repoRoot, workspaces, scriptName, { args = [], env = 
     if (typeof scripts[name] !== 'string') throw new Error(`Missing npm script: ${id}`);
     // Builds, generators and lifecycle scripts may mutate the inputs of earlier
     // tests. Keep them as barriers; do not reuse test evidence across them.
-    const kind = name.startsWith('test') || name === 'verify:audit' || name === 'handoff:fingerprint'
+    const kind = name.startsWith('test')
       ? 'test' : name === 'typecheck' ? 'prepare' : 'barrier';
     const opaque = () => [operation(dir, 'npm', ['run', name, '--silent', ...(extraArgs.length ? ['--', ...extraArgs] : [])], id, 'barrier')];
     const segments = tokenizeCommands(scripts[name]);

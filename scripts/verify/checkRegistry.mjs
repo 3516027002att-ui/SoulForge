@@ -4,15 +4,6 @@ import { analyzeEntry } from './classify.mjs';
 import { resolveScriptEntries } from './scriptGraph.mjs';
 import { operationKey, planScript } from './commandPlan.mjs';
 
-// These checks protect only the retired claim/seal/projection workflow. Product
-// checks retain their old ownership until a narrower semantic migration exists.
-export const RETIRED_GOVERNANCE_SUITES = new Set([
-  'test:governance','test:governance-data-fixtures','test:governance-equivalence',
-  'test:handoff-integrity','test:handoff-integrity:fixtures','test:handoff-projection',
-  'test:gov-cli','test:seal-cli','handoff:fingerprint','verify:audit',
-  'test:orphan-smoke-gate'
-]);
-
 export function workspaceScriptReachability(repoRoot, workspaces, workspace, name) {
   const virtual = {...workspaces,rootScripts:{...workspaces.rootScripts}};
   // Resolve with its real workspace directory, including node --test flags and
@@ -44,7 +35,7 @@ export function selectCheckTier(name, sources, requirements) {
   if (paths.some(path => path.includes('/e2e/')) || /(?:renderer-(?:e2e|playwright)|test:e2e|playwright)/u.test(name)) return 'e2e';
   if (/^(?:test:)?(?:release|installer|portable-packaging|cross-machine)/u.test(name)
     || paths.some(path => /\/(?:verify-(?:release|installer|portable-packaging|cross-machine)|run(?:Release|Installer))[^/]*\./u.test(path))) return 'release';
-  if (paths.some(path => /\/scripts\/(?:check\.fixture|verify-(?:verify-entrypoint|scheduling|ci-change-scope|required-validation)-fixtures)\.mjs$/u.test(path))) return 'governance';
+  if (paths.some(path => /\/scripts\/(?:check\.fixture|verify-(?:verify-entrypoint|scheduling|ci-change-scope)-fixtures)\.mjs$/u.test(path))) return 'governance';
   if (requirements.includes('native-env')) return 'native';
   if (requirements.includes('dotnet')) return 'synthetic';
   return 'unit';
@@ -73,7 +64,6 @@ export function discoverChecks(repoRoot, workspaces) {
   const covered = new Set();
   for (const [name,command] of Object.entries(workspaces.rootScripts)) {
     if (name !== 'typecheck' && !name.startsWith('test') && !name.startsWith('bridge:verify:')) continue;
-    if (RETIRED_GOVERNANCE_SUITES.has(name)) continue;
     const entries = resolveScriptEntries(repoRoot,workspaces,name);
     // Aggregate reachability is not execution evidence: a failing && prefix can
     // leave every later check unexecuted. Only a single independently runnable
@@ -99,10 +89,6 @@ export function discoverChecks(repoRoot, workspaces) {
       suites.set(scriptName,{scriptName,tier:selectCheckTier(name,entries.entryFiles,[...requirements]),requirements:[...requirements],steps,origin:'workspace',command:workspace.scripts[name]});
       if (entries.entryFiles.length === 1 && steps.filter(step => step.kind === 'test').length === 1) entries.entryFiles.forEach(file => covered.add(file));
     }
-  }
-  // Do not rediscover retired workflow-specific tests by filename.
-  for (const name of RETIRED_GOVERNANCE_SUITES) {
-    resolveScriptEntries(repoRoot,workspaces,name).entryFiles.forEach(file => covered.add(file));
   }
   for (const file of testFiles(repoRoot)) {
     if (covered.has(file)) continue;
