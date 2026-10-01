@@ -292,16 +292,19 @@ export async function openLocalCliSession(options: LocalCliSessionOptions): Prom
     }
   });
   let operationLog: OperationLogStore;
+  let closeOwnedOperationLog: (() => void) | undefined;
   let durableLog = true;
   let knowledgeStore: KnowledgeStore | null = null;
   let knowledgeDatabase: ReturnType<typeof openWorkspaceDatabase> | null = semanticDatabase;
   try {
-    operationLog = openSqliteOperationLogStore({
+    const ownedOperationLog = openSqliteOperationLogStore({
       databasePath: join(root, 'workspace.db'),
       workspaceId,
       rootPath: options.overlayRoot,
       game: options.game ?? 'sekiro'
     });
+    operationLog = ownedOperationLog;
+    closeOwnedOperationLog = () => ownedOperationLog.close();
     emit({phase:'storage.audit',status:'complete',details:{durableLog:true}});
   } catch (error) {
     const cause = {code: typeof (error as {code?:unknown})?.code === 'string'
@@ -438,9 +441,13 @@ export async function openLocalCliSession(options: LocalCliSessionOptions): Prom
     durableLog,
     knowledgeStore,
     dispose: async () => {
-      coreSession.close();
-      try { knowledgeDatabase?.close(); } catch {}
-      await disposeBridgeDaemonPool();
+      try {
+        coreSession.close();
+        await disposeBridgeDaemonPool();
+      } finally {
+        try { knowledgeDatabase?.close(); } catch {}
+        closeOwnedOperationLog?.();
+      }
     }
   };
 }

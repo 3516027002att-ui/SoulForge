@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { cliWorkspaceRoot, openLocalCliSession } from './localCliSession.js';
 import { makeWorkspaceId } from '../workspace/resourceUri.js';
+import { SqliteOperationLogStore } from '../patch/sqliteOperationLogStore.js';
 
 async function profile<T>(execute: (root: string) => Promise<T>): Promise<T> {
   const root = await mkdtemp(join(tmpdir(), 'sf-cli-linux-storage-'));
@@ -18,6 +19,43 @@ async function profile<T>(execute: (root: string) => Promise<T>): Promise<T> {
     await rm(root, { recursive: true, force: true });
   }
 }
+
+test('disposing a CLI session releases its owned audit database and permits reopening the durable log', async () => profile(async root => {
+  const overlayRoot = join(root, 'mod'); await mkdir(overlayRoot);
+  const session = await openLocalCliSession({overlayRoot, analyze:false, useCache:false, mode:'plan', requireDurableLog:true});
+  const store = session.coreSession.operationLog;
+  assert.ok(store instanceof SqliteOperationLogStore);
+  try {
+    assert.equal(store.database.open, true);
+    await session.dispose();
+    assert.equal(store.database.open, false, 'session disposal must close the SQLite connection it created');
+    await assert.rejects(store.list(), /not open/);
+    const reopened = await openLocalCliSession({overlayRoot, analyze:false, useCache:false, mode:'plan', requireDurableLog:true});
+    try { assert.deepEqual(await reopened.coreSession.operationLog.list(), []); }
+    finally { await reopened.dispose(); }
+  } finally {
+    // Test cleanup must not hide the connection-open assertion on Windows.
+    store.close(); await session.dispose();
+  }
+}));
+
+test('a prior CLI teardown failure still releases owned audit handles and keeps the original error', async () => profile(async root => {
+  const overlayRoot = join(root, 'mod'); await mkdir(overlayRoot);
+  const session = await openLocalCliSession({overlayRoot, analyze:false, useCache:false, mode:'plan', requireDurableLog:true});
+  const store = session.coreSession.operationLog;
+  assert.ok(store instanceof SqliteOperationLogStore);
+  const originalClose = session.coreSession.close.bind(session.coreSession);
+  const failure = new Error('owned teardown failure fixture');
+  session.coreSession.close = () => { originalClose(); throw failure; };
+  try {
+    await assert.rejects(session.dispose(), error => error === failure);
+    assert.equal(store.database.open, false, 'earlier teardown failure must not leak the owned audit connection');
+    await assert.rejects(store.list(), /not open/);
+  } finally {
+    session.coreSession.close = originalClose;
+    store.close(); await session.dispose();
+  }
+}));
 
 test('production Linux CLI initializes only its XDG data tree without the test storage override', { skip: process.platform !== 'linux' }, async () => profile(async root => {
   const overlayRoot = join(root, 'mod'); await mkdir(overlayRoot);
