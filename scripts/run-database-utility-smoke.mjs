@@ -18,4 +18,8 @@ if (gateTest.status !== 0) process.exit(gateTest.status ?? 1);
 
 const electronPath = (await import('electron')).default;
 if (typeof electronPath !== 'string') throw new Error('Unable to resolve Electron executable.');
-process.exit(await runDesktopSmoke('database', 'databaseUtilitySmoke.js', electronPath));
+const args = process.argv.slice(2);
+if (args.some(arg => arg !== '--production-binding')) throw new Error('Unknown database smoke argument.');
+process.exit(await runDesktopSmoke('database', 'databaseUtilitySmoke.js', electronPath, {
+  reuseProductionBinding: args.includes('--production-binding')
+}));

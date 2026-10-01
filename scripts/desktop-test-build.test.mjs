@@ -71,6 +71,55 @@ test('owned bootstrap loads an ESM entry by file URL and records its real import
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 
+test('production binding snapshots stay immutable while each smoke owns its writable copy', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'sf-smoke-native-snapshot-'));
+  try {
+    const native = join(root, 'apps/desktop/.native');
+    await mkdir(native, { recursive: true });
+    for (const [name, version] of [['electron', '43.0.0'], ['better-sqlite3', '12.11.1']]) {
+      const dir = join(root, 'node_modules', name); await mkdir(dir, { recursive: true });
+      await writeFile(join(dir, 'package.json'), JSON.stringify({ version }));
+    }
+    await writeFile(join(native, 'better_sqlite3.node'), 'immutable-native-input');
+    await writeFile(join(native, 'better_sqlite3.json'), JSON.stringify({ electronVersion: '43.0.0', betterSqlite3Version: '12.11.1', platform: process.platform, arch: process.arch }));
+    const copies = [];
+    for (let i = 0; i < 2; i++) await build.withDesktopTestBuild('database', async ({ env }) => {
+      copies.push(env.SOULFORGE_SQLITE_NATIVE_BINDING);
+      assert.equal(await readFile(env.SOULFORGE_SQLITE_NATIVE_BINDING, 'utf8'), 'immutable-native-input');
+      await writeFile(env.SOULFORGE_SQLITE_NATIVE_BINDING, 'owned-change');
+      assert.equal(await readFile(join(native, 'better_sqlite3.node'), 'utf8'), 'immutable-native-input');
+    }, { repositoryRoot: root, build: false, reuseProductionBinding: true });
+    assert.notEqual(copies[0], copies[1]);
+    for (const copy of copies) await assert.rejects(readFile(copy), { code: 'ENOENT' });
+    await writeFile(join(native, 'better_sqlite3.json'), JSON.stringify({ electronVersion: '42.0.0', betterSqlite3Version: '12.11.1', platform: process.platform, arch: process.arch }));
+    await assert.rejects(build.withDesktopTestBuild('database', async () => { throw new Error('must not execute'); },
+      { repositoryRoot: root, build: false, reuseProductionBinding: true }), /PRODUCTION_NATIVE_BINDING_TARGET_MISMATCH/);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test('a real build replacing copied native bytes or metadata cannot execute as the selected snapshot', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'sf-smoke-native-build-'));
+  try {
+    const native = join(root, 'apps/desktop/.native'); await mkdir(native, { recursive: true });
+    await writeFile(join(root, 'package.json'), JSON.stringify({ private: true, workspaces: ['apps/desktop'] }));
+    await writeFile(join(root, 'apps/desktop/package.json'), JSON.stringify({ name: '@soulforge/desktop', scripts: { build: 'node ../../replace-binding.cjs' } }));
+    for (const [name, version] of [['electron', '43.0.0'], ['better-sqlite3', '12.11.1']]) {
+      const dir = join(root, 'node_modules', name); await mkdir(dir, { recursive: true });
+      await writeFile(join(dir, 'package.json'), JSON.stringify({ version }));
+    }
+    await writeFile(join(native, 'better_sqlite3.node'), 'immutable-native-input');
+    await writeFile(join(native, 'better_sqlite3.json'), JSON.stringify({ electronVersion: '43.0.0', betterSqlite3Version: '12.11.1', platform: process.platform, arch: process.arch }));
+    for (const target of ['node', 'json']) {
+      await writeFile(join(root, 'replace-binding.cjs'), `const fs=require('node:fs');fs.writeFileSync(process.env.SOULFORGE_SQLITE_NATIVE_BINDING.replace(/\\.node$/,'.${target}'),'changed-by-build');`);
+      let executed = false;
+      await assert.rejects(build.withDesktopTestBuild('database', async () => { executed = true; },
+        { repositoryRoot: root, reuseProductionBinding: true }), /PRODUCTION_NATIVE_SNAPSHOT_CHANGED/);
+      assert.equal(executed, false);
+      assert.equal(await readFile(join(native, 'better_sqlite3.node'), 'utf8'), 'immutable-native-input');
+    }
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
 test('packaging disables repository native rebuild and smoke config refuses production output', async () => {
   const builder = JSON.parse(await readFile(resolve('apps/desktop/electron-builder.json'), 'utf8'));
   assert.equal(builder.npmRebuild, false);

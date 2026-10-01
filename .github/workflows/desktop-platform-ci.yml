@@ -122,7 +122,7 @@ jobs:
         id: database
         run: |
           node --test scripts/desktop-test-build.test.mjs
-          node scripts/run-database-utility-smoke.mjs
+          node scripts/run-database-utility-smoke.mjs --production-binding
       - name: Build unsigned desktop package directory
         id: package
         if: ${{ !cancelled() && steps.commands.outcome == 'success' && steps.typecheck.outcome == 'success' && steps.build.outcome == 'success' && steps.publish.outcome == 'success' }}

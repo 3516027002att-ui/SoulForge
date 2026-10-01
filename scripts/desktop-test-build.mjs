@@ -32,6 +32,25 @@ export async function withDesktopTestBuild(kind, execute, options = {}) {
   const cancellation = createProcessCancellation();
   try {
     for (const directory of new Set(Object.values(runtimeDirectories))) await mkdir(directory, { recursive: true, mode: 0o700 });
+    let nativeInput = null;
+    if (options.reuseProductionBinding) {
+      const source = join(repositoryRoot, 'apps/desktop/.native');
+      const bytes = await readFile(join(source, 'better_sqlite3.node'));
+      const metadataBytes = await readFile(join(source, 'better_sqlite3.json'));
+      const metadata = JSON.parse(metadataBytes.toString('utf8'));
+      const electronVersion = JSON.parse(await readFile(join(repositoryRoot, 'node_modules/electron/package.json'), 'utf8')).version;
+      const sqliteVersion = JSON.parse(await readFile(join(repositoryRoot, 'node_modules/better-sqlite3/package.json'), 'utf8')).version;
+      if (metadata.electronVersion !== electronVersion || metadata.betterSqlite3Version !== sqliteVersion
+        || metadata.platform !== process.platform || metadata.arch !== process.arch) {
+        throw new Error('PRODUCTION_NATIVE_BINDING_TARGET_MISMATCH');
+      }
+      await mkdir(dirname(env.SOULFORGE_SQLITE_NATIVE_BINDING), { recursive: true });
+      await writeFile(env.SOULFORGE_SQLITE_NATIVE_BINDING, bytes);
+      await writeFile(join(dirname(env.SOULFORGE_SQLITE_NATIVE_BINDING), 'better_sqlite3.json'), metadataBytes);
+      nativeInput = { source: 'production-build', sha256: createHash('sha256').update(bytes).digest('hex'),
+        metadataSha256: createHash('sha256').update(metadataBytes).digest('hex'),
+        electronVersion, betterSqlite3Version: sqliteVersion, platform: process.platform, arch: process.arch };
+    }
     if (options.build !== false) {
       const command = process.platform === 'win32' ? (process.env.ComSpec || 'cmd.exe') : 'npm';
       const args = process.platform === 'win32' ? ['/d', '/s', '/c', 'npm run build -w @soulforge/desktop'] : ['run', 'build', '-w', '@soulforge/desktop'];
@@ -40,7 +59,14 @@ export async function withDesktopTestBuild(kind, execute, options = {}) {
         onStdout: chunk => process.stdout.write(chunk), onStderr: chunk => process.stderr.write(chunk) });
       if (!processSucceeded(result)) throw new Error(`Desktop smoke build failed: ${result.terminationReason ?? result.code}`);
     }
-    return await execute({ outputRoot, env, signal: cancellation.signal });
+    if (nativeInput) {
+      const testedHash = createHash('sha256').update(await readFile(env.SOULFORGE_SQLITE_NATIVE_BINDING)).digest('hex');
+      const testedMetadataHash = createHash('sha256').update(await readFile(join(dirname(env.SOULFORGE_SQLITE_NATIVE_BINDING), 'better_sqlite3.json'))).digest('hex');
+      if (testedHash !== nativeInput.sha256 || testedMetadataHash !== nativeInput.metadataSha256) {
+        throw new Error('PRODUCTION_NATIVE_SNAPSHOT_CHANGED');
+      }
+    }
+    return await execute({ outputRoot, env, signal: cancellation.signal, nativeInput });
   } finally { cancellation.dispose(); await rm(outputRoot, { recursive: true, force: true }); }
 }
 
@@ -76,8 +102,9 @@ export async function readDesktopSmokeLog(logFile, maxBytes = 64 * 1024) {
   } finally { await file?.close(); }
 }
 
-export async function runDesktopSmoke(kind, entry, executable = process.execPath, { useBootstrap = process.platform === 'win32' } = {}) {
-  return withDesktopTestBuild(kind, async ({ outputRoot, env, signal }) => {
+export async function runDesktopSmoke(kind, entry, executable = process.execPath, { useBootstrap = process.platform === 'win32', reuseProductionBinding = false } = {}) {
+  return withDesktopTestBuild(kind, async ({ outputRoot, env, signal, nativeInput }) => {
+    if (nativeInput) console.log(JSON.stringify({ desktopSmokeNativeInput: nativeInput }));
     const logFile = join(outputRoot, '.runtime', 'electron.log');
     const entryPath = join(outputRoot, 'main', entry);
     const marker = join(outputRoot, '.runtime', 'bootstrap-stages.txt');
@@ -101,5 +128,5 @@ export async function runDesktopSmoke(kind, entry, executable = process.execPath
         terminationReason: result.terminationReason, nativeLog, stages, nativeBindingSha256 }, null, 2));
     }
     return processSucceeded(result) ? 0 : result.code || 1;
-  });
+  }, { reuseProductionBinding });
 }
