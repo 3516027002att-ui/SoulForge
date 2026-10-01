@@ -5,6 +5,7 @@ import { app, BrowserWindow, dialog, ipcMain, type IpcMainInvokeEvent, type WebC
 import { basename, dirname, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import type { TrustedIpcHandle } from './ipc/registration.js';
+import { registerWindowThemeIpcHandlers } from './ipc/windowTheme.js';
 import {
   appendPostCommitFailureDiagnostic,
   commitWithKnowledgeRefresh,
@@ -1941,6 +1942,11 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
   });
   if (handlersRegistered) return;
   handlersRegistered = true;
+  registerWindowThemeIpcHandlers({
+    handle: trustedHandle,
+    windowForSender: (event) => BrowserWindow.fromWebContents(event.sender),
+    platform: process.platform
+  });
   // Spec A2-A13 registration order: documents -> operations -> modelServices -> raw -> text -> map -> action -> assets -> event -> param -> workspace -> agent
   registerDocumentIpcHandlers({
     handle: trustedHandle,

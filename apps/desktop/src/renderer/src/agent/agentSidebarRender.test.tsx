@@ -622,6 +622,31 @@ describe('AGENT-60D 消息流四态与 Change Review（§12.5/§12.9/§12.10）'
     assert.match(html, /data-testid="agent-approval-card-reject"/);
   });
 
+  it('Change Review 卡将文件头形状的 hunk 内容保留为红绿改动行', () => {
+    const fixture = approvalFixture();
+    const approval = fixture.pendingApprovals[0]!;
+    const html = approvalTask({
+      state: {
+        pendingApprovals: [{
+          ...approval,
+          diff: {
+            targetPath: 'mods/example.txt',
+            unifiedDiff: '--- mods/example.txt\n+++ mods/example.txt\n@@ -1,2 +1,2 @@\n---flag\n+++counter\n--- before.txt\n+++ after.txt',
+            addedLines: 2,
+            removedLines: 2,
+            newFile: false
+          }
+        }]
+      }
+    });
+    assert.match(html, /class="diff-line is-header">--- mods\/example\.txt/);
+    assert.match(html, /class="diff-line is-header">\+\+\+ mods\/example\.txt/);
+    assert.match(html, /class="diff-line is-remove">---flag/);
+    assert.match(html, /class="diff-line is-add">\+\+\+counter/);
+    assert.match(html, /class="diff-line is-remove">--- before\.txt/);
+    assert.match(html, /class="diff-line is-add">\+\+\+ after\.txt/);
+  });
+
   it('缺 diff 的审批如实显示不可用，不编造内容', () => {
     const html = approvalTask({
       state: {

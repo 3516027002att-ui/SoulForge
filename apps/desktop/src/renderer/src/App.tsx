@@ -127,6 +127,8 @@ import {
   pickPreferredParamContainer
 } from './navigation/domainLibraries.js';
 import { AmbientField } from './theme/AmbientField.js';
+import { ThemeSettings } from './theme/ThemeSettings.js';
+import { useSpectralTheme } from './theme/useSpectralTheme.js';
 import { shouldShowEditorWelcome } from './theme/editorWelcome.js';
 import { Me3RuntimePanel } from './runtime/Me3RuntimePanel.js';
 import { AgentSidebar } from './agent/AgentSidebar.js';
@@ -891,11 +893,7 @@ export function App(): ReactElement {
   const hasUncommittedChanges = editDirty
     || changeState.items.some((item) => item.status === 'draft' || item.status === 'staged');
 
-  useEffect(() => {
-    // 流光溢彩白是默认主题；显式落一次防止首帧残留未知主题态（§11.1）。
-    // dark 路径仍在，任何主题切换 UI 只要写入同一 dataset 即可覆盖此默认值。
-    document.documentElement.dataset.theme = 'light';
-  }, []);
+  const spectralTheme = useSpectralTheme();
 
   useEffect(() => {
     try {
@@ -3381,7 +3379,7 @@ export function App(): ReactElement {
 
   return (
     <>
-    <AmbientField />
+    <AmbientField manifest={spectralTheme.manifest} />
     <div className="app-root">
       {/* ══════════ 标题栏 ══════════ */}
       <header className="titlebar">
@@ -3782,13 +3780,8 @@ export function App(): ReactElement {
                 <div className="setting-name">回滚</div>
                 <span className="pill pill--ok">可用</span>
               </div>
-              <div className="setting-row">
-                <div>
-                  <div className="setting-name">界面主题</div>
-                  <div className="setting-desc">流光溢彩白（默认）</div>
-                </div>
-                <span className="pill pill--accent">流光溢彩白</span>
-              </div>
+              <ThemeSettings manifest={spectralTheme.manifest} onModeChange={spectralTheme.setMode}
+                onIntensityChange={spectralTheme.setIntensity} onReset={spectralTheme.reset} />
 
               <div className="setting-row setting-row--update" data-testid="update-settings">
                 <div className="setting-row__content">

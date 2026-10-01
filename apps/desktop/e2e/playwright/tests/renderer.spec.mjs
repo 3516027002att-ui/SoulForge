@@ -1600,6 +1600,7 @@ test('主题 ambient：流光层不拦截指针，reduced-motion 下不持续动
       beforePointer: before.pointerEvents,
       afterPointer: after.pointerEvents,
       beforeZ: before.zIndex,
+      fallbackBackground: before.backgroundImage,
       name: before.animationName,
       duration: before.animationDuration,
       iteration: before.animationIterationCount
@@ -1610,11 +1611,10 @@ test('主题 ambient：流光层不拦截指针，reduced-motion 下不持续动
     expect(Number(ambient.canvasZ)).toBe(0);
   } else {
     expect(ambient.beforePointer).toBe('none');
-    expect(ambient.afterPointer).toBe('none');
     expect(ambient.beforeZ).toBe('0');
-    expect(ambient.name).toBe('sf-ambient-a');
-    expect(ambient.duration).toBe('58s');
-    expect(ambient.iteration).toBe('infinite');
+    expect(ambient.fallbackBackground).toContain('linear-gradient');
+    expect(ambient.name).toBe('none');
+    expect(parseFloat(ambient.duration)).toBe(0);
   }
 
   await window.emulateMedia({ reducedMotion: 'reduce' });
@@ -1643,6 +1643,60 @@ test('主题 ambient：流光层不拦截指针，reduced-motion 下不持续动
 
   await window.screenshot({ path: 'test-results/12-ambient-reduced-motion.png' });
   await app.close();
+});
+
+test('主题设置：黑白切换、参数与恢复、Escape、复制降级和重启持久化', async () => {
+  let current = await launchApp();
+  await showWindow(current.app);
+  await closeAgentPanel(current.window);
+  await current.window.getByRole('button', { name: '设置', exact: true }).click();
+  const settings = current.window.getByTestId('theme-settings');
+  await settings.getByLabel('界面主题', { exact: true }).selectOption('obsidian');
+  await expect.poll(() => current.window.evaluate(() => document.documentElement.dataset.theme)).toBe('dark');
+  await expect.poll(() => current.window.evaluate(() => document.documentElement.dataset.spectralMode)).toBe('obsidian');
+  await settings.locator('summary').click();
+  await expect(settings.locator('input[type="range"]')).toHaveCount(7);
+  await settings.getByLabel('总体彩色强度', { exact: true }).press('ArrowLeft');
+  await expect(settings.locator('output').first()).toHaveText('0.99');
+  await settings.getByLabel('深潮青强度', { exact: true }).press('Home');
+  await expect(settings.locator('output').nth(1)).toHaveText('0.00');
+  await settings.getByRole('button', { name: '恢复预设', exact: true }).click();
+  await expect(settings.locator('output').first()).toHaveText('1.00');
+  await expect(settings.locator('output').nth(1)).toHaveText('0.72');
+  const exportedPath = path.join(testWorkspace().root, 'obsidian-theme.json');
+  // Electron owns downloads through its native session. Observe delivery to
+  // the test-owned path instead of relying on the browser Page event bridge.
+  await current.app.evaluate(({ BrowserWindow }, savePath) => {
+    global.__themeExport = { state: 'waiting' };
+    BrowserWindow.getAllWindows()[0].webContents.session.once('will-download', (_event, item) => {
+      item.setSavePath(savePath);
+      item.once('done', (_doneEvent, state) => {
+        global.__themeExport = { state, filename: item.getFilename() };
+      });
+    });
+  }, exportedPath);
+  await settings.getByRole('button', { name: '导出 JSON', exact: true }).click();
+  await expect.poll(() => current.app.evaluate(() => global.__themeExport?.state)).toBe('completed');
+  expect(await current.app.evaluate(() => global.__themeExport?.filename)).toBe('obsidian-theme.json');
+  const exported = JSON.parse(fs.readFileSync(exportedPath, 'utf8'));
+  expect(exported.mode).toBe('obsidian');
+  expect(exported.colors).toHaveLength(6);
+  expect(exported.field.luminanceCap).toBe(0.165);
+  await current.window.evaluate(() => Object.defineProperty(navigator, 'clipboard', { value: undefined, configurable: true }));
+  await settings.getByRole('button', { name: '复制参数', exact: true }).click();
+  await expect(settings.locator('p[role="status"]')).toContainText('复制不可用');
+  await expect(settings.getByLabel('可手动复制的主题参数')).toHaveValue(/"mode": "obsidian"/);
+  await settings.getByLabel('总体彩色强度', { exact: true }).press('Escape');
+  await expect(settings.locator('summary')).toBeFocused();
+  await expect(settings.locator('details')).not.toHaveAttribute('open', '');
+  await current.app.close();
+  current = await launchApp();
+  await expect.poll(() => current.window.evaluate(() => document.documentElement.dataset.theme)).toBe('dark');
+  await closeAgentPanel(current.window);
+  await current.window.getByRole('button', { name: '设置', exact: true }).click();
+  await current.window.getByTestId('theme-settings').getByLabel('界面主题', { exact: true }).selectOption('opal');
+  await expect.poll(() => current.window.evaluate(() => document.documentElement.dataset.theme)).toBe('light');
+  await current.app.close();
 });
 
 test('主题表面：普通 pane/数据行/主工作台去卡片化，无圆角浮块（§13.2）', async () => {

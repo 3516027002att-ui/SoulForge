@@ -131,16 +131,41 @@ export interface DiffLineView {
 /**
  * 逐行分类 unified diff。
  *
- * 顺序有讲究:`---` / `+++` 必须先判为 header,否则会被当成
- * remove / add —— 文件头会被染成一条删除行和一条新增行,而那是最容易
- * 被忽略的错色(它看起来"像是"改动的一部分)。
+ * 文件头只在 hunk 之外成对出现。hunk 内的 `---` / `+++` 可能是
+ * 原文的增删前缀，必须按 hunk 的两侧行数消费，不能仅凭文本形状染成文件头。
  */
 export function classifyDiffLines(unifiedDiff: string): DiffLineView[] {
-  return unifiedDiff.split('\n').map((text) => {
-    if (text.startsWith('---') || text.startsWith('+++')) return { kind: 'header' as const, text };
-    if (text.startsWith('@@')) return { kind: 'hunk' as const, text };
-    if (text.startsWith('+')) return { kind: 'add' as const, text };
-    if (text.startsWith('-')) return { kind: 'remove' as const, text };
+  const lines = unifiedDiff.split('\n');
+  let oldRemaining = 0;
+  let newRemaining = 0;
+  let afterHeaderIndex = -1;
+
+  return lines.map((text, index) => {
+    if (text.startsWith('@@')) {
+      const hunk = /^@@ -\d+(?:,(\d+))? \+\d+(?:,(\d+))? @@/.exec(text);
+      oldRemaining = hunk === null ? 0 : Number(hunk[1] ?? 1);
+      newRemaining = hunk === null ? 0 : Number(hunk[2] ?? 1);
+      return { kind: 'hunk' as const, text };
+    }
+    if (oldRemaining === 0 && newRemaining === 0) {
+      if (index === afterHeaderIndex) return { kind: 'header' as const, text };
+      if (text.startsWith('--- ') && lines[index + 1]?.startsWith('+++ ')) {
+        afterHeaderIndex = index + 1;
+        return { kind: 'header' as const, text };
+      }
+    }
+    if (text.startsWith('+')) {
+      newRemaining = Math.max(0, newRemaining - 1);
+      return { kind: 'add' as const, text };
+    }
+    if (text.startsWith('-')) {
+      oldRemaining = Math.max(0, oldRemaining - 1);
+      return { kind: 'remove' as const, text };
+    }
+    if (text.startsWith(' ')) {
+      oldRemaining = Math.max(0, oldRemaining - 1);
+      newRemaining = Math.max(0, newRemaining - 1);
+    }
     return { kind: 'context' as const, text };
   });
 }

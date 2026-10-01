@@ -494,6 +494,41 @@ describe('unified diff 逐行分类', () => {
     assert.equal(lines[0]?.text, '-old');
     assert.equal(lines[1]?.text, '+new');
   });
+
+  it('hunk 内以双重增删前缀开头的内容仍是改动行', () => {
+    const diff = '--- a.txt\n+++ a.txt\n@@ -1,2 +1,2 @@\n---flag\n+++counter\n---- before\n++++ after';
+    const lines = classifyDiffLines(diff);
+    assert.deepEqual(
+      lines.map((line) => line.kind),
+      ['header', 'header', 'hunk', 'remove', 'add', 'remove', 'add']
+    );
+    assert.equal(lines.map((line) => line.text).join('\n'), diff);
+  });
+
+  it('hunk 内看起来像完整文件头的相邻内容不能变成文件头', () => {
+    const lines = classifyDiffLines('--- a.txt\n+++ a.txt\n@@ -1 +1 @@\n--- before.txt\n+++ after.txt');
+    assert.deepEqual(lines.map((line) => line.kind), ['header', 'header', 'hunk', 'remove', 'add']);
+  });
+
+  it('多个文件的文件头在上一 hunk 结束后仍被识别', () => {
+    const lines = classifyDiffLines(
+      '--- a.txt\n+++ a.txt\n@@ -1 +1 @@\n--- before.txt\n+++ after.txt\n'
+      + '--- b.txt\n+++ b.txt\n@@ -0,0 +1,2 @@\n+++counter\n+tail\n'
+      + '--- c.txt\n+++ c.txt\n@@ -1,2 +0,0 @@\n---flag\n-tail'
+    );
+    assert.deepEqual(lines.map((line) => line.kind), [
+      'header', 'header', 'hunk', 'remove', 'add',
+      'header', 'header', 'hunk', 'add', 'add',
+      'header', 'header', 'hunk', 'remove', 'remove'
+    ]);
+  });
+
+  it('没有文件头或 hunk 的紧凑 diff 保留增删前缀语义', () => {
+    assert.deepEqual(
+      classifyDiffLines('---flag\n+++counter\n-old\n+new').map((line) => line.kind),
+      ['remove', 'add', 'remove', 'add']
+    );
+  });
 });
 
 describe('审批请求携带主进程算出的 diff', () => {

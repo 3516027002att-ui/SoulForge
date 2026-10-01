@@ -71,6 +71,7 @@ import {
   wrapAgentToolContextRefreshCallbacks
 } from './agentBridgeContext.js';
 import { isAgentRagSearchIdentityCurrent } from './agentRagIdentity.js';
+import { countGeneratedTextDiffLines } from './generatedTextDiffCounts.js';
 
 export interface AiAgentRunRequest {
   configId: string;
@@ -1154,8 +1155,7 @@ export function registerAgentIpcHandlers(deps: AgentIpcDeps): void {
           toFile: targetPath
         });
         const lines = unifiedDiff.split('\n');
-        const addedLines = lines.filter((line) => line.startsWith('+') && !line.startsWith('+++')).length;
-        const removedLines = lines.filter((line) => line.startsWith('-') && !line.startsWith('---')).length;
+        const { addedLines, removedLines } = countGeneratedTextDiffLines(lines);
   
         // 上限:几千行的 diff 会把审批卡片变成读不完的墙,而读不完的 diff 等于
         // 没有 diff。截断必须显式说明截了多少,否则用户会以为改动就这么点。

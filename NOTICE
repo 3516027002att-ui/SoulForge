@@ -30,6 +30,11 @@ openai/codex (Apache License 2.0, Copyright 2025 OpenAI)
 Runtime and build dependencies retain their own licenses. Copies of the
 licenses for redistributed binary dependencies are kept under licenses/.
 
+The shared spectral theme shader, palette math and theme presets are adapted
+from liuguang-banlan-ui in sickn33/agentic-awesome-skills, revision
+8117e465a734870cc755bb0a31deb6b2d863d1d6 (PR #1743), under the MIT License.
+The complete permission notice is retained in licenses/liuguang-banlan-ui-MIT.txt.
+
 FromSoftware file formats are interoperated with for modding purposes.
 SoulForge ships no game assets, no proprietary compression libraries, and
 no FromSoftware code. External FromSoftware community tools are consulted

@@ -1,4 +1,5 @@
 import { contextBridge, ipcRenderer } from 'electron';
+import type { NativeWindowThemeMode, NativeWindowThemeResult } from '../main/ipc/windowTheme.js';
 import type {
   AiAgentApprovalResponseRequest,
   AiAgentCancelIpcResult,
@@ -119,6 +120,8 @@ function stripPathFields<T>(value: T): T {
 }
 
 const api = {
+  setWindowThemeMode: (mode: NativeWindowThemeMode): Promise<NativeWindowThemeResult> =>
+    ipcRenderer.invoke('window.setThemeMode', mode),
   /**
    * §14.4 DocumentStore typed facade（DOCSTORE-04）。
    * 所有方法都是 named DTO 请求/响应，不保留 Promise<unknown> 旁路；
@@ -395,8 +398,6 @@ const api = {
     ipcRenderer.invoke('resource.applyFmgMutation', sourceUri, expectedHash, mutation, tableId),
   readMsbDocument: (sourceUri: string): Promise<unknown> =>
     ipcRenderer.invoke('resource.readMsbDocument', sourceUri),
-  readMapPartFlverPreview: (mapSourceUri: string, modelName: string, sibPath?: string): Promise<unknown> =>
-    ipcRenderer.invoke('resource.readMapPartFlverPreview', mapSourceUri, modelName, sibPath),
   readTaeDocument: (sourceUri: string, options?: { animationPage?: number; animationPageSize?: number }): Promise<unknown> =>
     ipcRenderer.invoke('resource.readTaeDocument', sourceUri, options),
   /** 词条名与字段目录（main 使用内置 SoulForge first-party TAE registry）。 */
