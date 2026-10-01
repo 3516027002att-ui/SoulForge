@@ -120,7 +120,7 @@ jobs:
           node --test scripts/tae-identity.fixture.mjs scripts/hks-native-platform.fixture.mjs scripts/bridge-linux-production.fixture.mjs scripts/native-build-environment.fixture.mjs
           node --test scripts/owned-temporary-directory.test.mjs scripts/owned-process.test.mjs scripts/bridge-build-output-ownership.test.mjs
           node scripts/verify-bridge-write-boundary-gate.mjs
-          node scripts/check.mjs --suite file:scripts/scene/map-warm-source-hash.fixture.mjs,file:scripts/scene/map-captured-source.fixture.mjs,file:scripts/scene/bnd-path-freshness.fixture.mjs,file:scripts/scene/map-uv-count.fixture.mjs --require-executed
+          node scripts/check.mjs --suite file:scripts/scene/map-warm-source-hash.fixture.mjs,file:scripts/scene/map-captured-source.fixture.mjs,file:scripts/scene/bnd-path-freshness.fixture.mjs,file:scripts/scene/map-uv-count.fixture.mjs,file:scripts/scene/map-json-byte-count.fixture.mjs --require-executed
       - name: Run sandbox-preserving Electron database utility smoke
         id: database
         run: |

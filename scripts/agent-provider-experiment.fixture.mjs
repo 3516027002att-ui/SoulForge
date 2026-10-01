@@ -5,7 +5,7 @@ import {execFile} from 'node:child_process';
 import {promisify} from 'node:util';
 import {mkdtemp,readFile,writeFile,mkdir,rm} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
-import {join} from 'node:path';
+import {join,posix,win32} from 'node:path';
 import {createRequire} from 'node:module';
 import {pathToFileURL} from 'node:url';
 import {createExperimentModelWire,createExperimentRetrieval,createOwnedNativeComparisonRuntime,experimentNativeReadObserved,inspectOwnedNativeInputs} from './testing/owned-native-agent-comparison.mjs';
@@ -262,4 +262,24 @@ test('description variants change only per-tool repetition through the public co
   }
   assert.equal(networkCalls,0);assert.equal(tools[0].description,'Read owned fixture metadata.');
  }finally{globalThis.fetch=originalFetch;await rm(root,{recursive:true,force:true});}
+});
+
+
+test('legacy snapshot classifies Windows and POSIX model-service imports with canonical Git paths',async()=>{
+ const {resolveLegacySnapshotImport}=await import('./testing/legacy-agent-baseline.mjs');assert.equal(typeof resolveLegacySnapshotImport,'function');
+ for(const [paths,repo] of [[win32,'C:\\ci folder\\SoulForge'],[win32,'\\\\server\\share\\SoulForge'],[posix,'/ci folder/SoulForge']]){
+  for(const source of ['packages/core/src/model-services/agentSessionHost.ts',paths.join('packages','core','src','model-services','agentSessionHost.ts')]){
+   const target=resolveLegacySnapshotImport(repo,source,'./agentLoop.js',paths);assert.equal(target.snapshotPath,'packages/core/src/model-services/agentLoop.ts');assert.equal(target.runtimePath,undefined);
+  }
+ }
+});
+
+test('legacy snapshot remaps only core source imports into platform-native build paths',async()=>{
+ const {resolveLegacySnapshotImport}=await import('./testing/legacy-agent-baseline.mjs');assert.equal(typeof resolveLegacySnapshotImport,'function');
+ for(const [paths,repo] of [[win32,'C:\\ci\\packages\\core\\src\\SoulForge'],[posix,'/ci/packages/core/src/SoulForge']]){
+  const source='packages/core/src/model-services/agentLoop.ts';
+  const domain=resolveLegacySnapshotImport(repo,source,'../rag/chunkBuilder.js',paths);assert.equal(domain.snapshotPath,undefined);assert.equal(domain.runtimePath,paths.join(repo,'packages','core','dist','rag','chunkBuilder.js'));
+  const shared=resolveLegacySnapshotImport(repo,source,'../../../shared/src/index.js',paths);assert.equal(shared.runtimePath,paths.join(repo,'packages','shared','src','index.js'));
+  const sibling=resolveLegacySnapshotImport(repo,source,'../../src-extra/fixture.js',paths);assert.equal(sibling.runtimePath,paths.join(repo,'packages','core','src-extra','fixture.js'));
+ }
 });

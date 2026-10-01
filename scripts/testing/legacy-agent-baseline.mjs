@@ -4,8 +4,9 @@ import {promisify} from 'node:util';
 import {createHash} from 'node:crypto';
 import {mkdir,writeFile} from 'node:fs/promises';
 import {createRequire} from 'node:module';
-import {dirname,join,relative,resolve} from 'node:path';
+import paths from 'node:path';
 import {pathToFileURL} from 'node:url';
+const {dirname,join}=paths;
 const exec=promisify(execFile);
 export const LEGACY_AGENT_BASELINE='217234bb97ee20e3a83048042c4a1e67e9a16d33';
 export const LEGACY_AGENT_CONTROLS=Object.freeze({
@@ -26,6 +27,15 @@ export async function inspectLegacyAgentControl(repoRoot,id){
  ]);
  if(sha(source)!==control.loopSha256||control.modelServicesTree&&tree.trim()!==control.modelServicesTree)throw Object.assign(new Error('Selected control source does not match its exact revision/hash contract.'),{code:'AGENT_EXPERIMENT_BASELINE_DRIFT'});
  return {control:{...control,modelServicesTree:tree.trim()},source};
+}
+/** Git identifiers use slashes; filesystem locators use the caller's platform. */
+export function resolveLegacySnapshotImport(repoRoot,sourcePath,specifier,pathOps=paths){
+ const sourceTarget=pathOps.resolve(repoRoot,pathOps.dirname(sourcePath),specifier);
+ const gitTarget=pathOps.relative(repoRoot,sourceTarget).split(pathOps.sep).join('/').replace(/\.js$/,'.ts');
+ if(gitTarget.startsWith('packages/core/src/model-services/')&&gitTarget.endsWith('.ts'))return {snapshotPath:gitTarget};
+ const coreRelative=pathOps.relative(pathOps.join(repoRoot,'packages','core','src'),sourceTarget);
+ const inCore=coreRelative!=='..'&&!coreRelative.startsWith(`..${pathOps.sep}`)&&!pathOps.isAbsolute(coreRelative);
+ return {runtimePath:inCore?pathOps.resolve(repoRoot,'packages','core','dist',coreRelative):sourceTarget};
 }
 export async function materializeLegacyAgentBaseline(repoRoot,outputRoot,revision=LEGACY_AGENT_BASELINE,options={}){
  const selected=selectLegacyAgentControl(options.control??Object.values(LEGACY_AGENT_CONTROLS).find(control=>control.revision===revision)?.id);
@@ -52,8 +62,8 @@ export async function materializeLegacyAgentBaseline(repoRoot,outputRoot,revisio
     if(!specifier.startsWith('node:'))js=js.replaceAll(`'${specifier}'`,JSON.stringify(pathToFileURL(require.resolve(specifier)).href)).replaceAll(`"${specifier}"`,JSON.stringify(pathToFileURL(require.resolve(specifier)).href));
     continue;
    }
-   const sourceTarget=resolve(repoRoot,dirname(path),specifier),targetPath=relative(repoRoot,sourceTarget).replace(/\.js$/,'.ts');
-   const target=targetPath.startsWith('packages/core/src/model-services/')&&targetPath.endsWith('.ts')?await materialize(targetPath):sourceTarget.replace('/packages/core/src/','/packages/core/dist/');
+   const imported=resolveLegacySnapshotImport(repoRoot,path,specifier);
+   const target=imported.snapshotPath?await materialize(imported.snapshotPath):imported.runtimePath;
    js=js.replaceAll(`'${specifier}'`,JSON.stringify(pathToFileURL(target).href)).replaceAll(`"${specifier}"`,JSON.stringify(pathToFileURL(target).href));
   }
   await mkdir(dirname(output),{recursive:true});await writeFile(output,js);return output;

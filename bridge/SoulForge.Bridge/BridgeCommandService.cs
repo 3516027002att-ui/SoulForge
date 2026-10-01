@@ -2757,12 +2757,12 @@ internal sealed class BridgeCommandService
                     telemetry = new { skin = MapStaticGeometryService.SkinCalls, skeleton = MapStaticGeometryService.SkeletonCalls, parse = MapStaticGeometryService.ParseCount }
                 };
                 // Quick size check: serialize and check byte count
-                string json;
+                long serializedBytes;
                 using (mapTiming?.Measure("serializeMs"))
                 {
-                    json = System.Text.Json.JsonSerializer.Serialize(payloadObj);
+                    serializedBytes = JsonByteCounter.Count(payloadObj);
                 }
-                if (System.Text.Encoding.UTF8.GetByteCount(json) >= 8 * 1024 * 1024)
+                if (serializedBytes >= 8 * 1024 * 1024)
                     return BridgeResult<object>.Failed(file, "map", "MAP_STATIC_CHUNK_TOO_LARGE", "单个静态几何响应超过 8 MiB 限制。");
 
                 var diagnostics = new List<Diagnostic>

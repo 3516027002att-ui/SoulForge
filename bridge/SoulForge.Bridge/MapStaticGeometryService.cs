@@ -1020,7 +1020,7 @@ internal static class MapStaticGeometryService
                 indexElementBytes,
                 texturePreviewToken,
                 textureColorSpace);
-            var serializedBytes = JsonSerializer.SerializeToUtf8Bytes(chunk).LongLength;
+            var serializedBytes = JsonByteCounter.Count(chunk);
             if (serializedBytes < SafeChunkFrameBytes) break;
             if (acceptedCount <= 1)
                 throw new InvalidDataException(

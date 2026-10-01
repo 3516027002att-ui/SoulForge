@@ -103,3 +103,28 @@ retains complete UV-grid geometry SHA `dd3fdd1e…`. Two warm profile orders gav
 124.10→101.58 ms and 143.84→112.24 ms native chunk time. SF14 and all four
 maintained synthetic native fixtures passed on that producer. Receipt:
 `.local-validation/uv-count-receipt.json`. These are synthetic CPU observations.
+
+The two discarded JSON preflight outputs now serialize to a counting stream.
+The same generic types, default STJ options, exact byte comparisons and chunk
+shrink loop remain in use; final daemon serialization/enforcement is unchanged.
+This avoids retaining a UTF-8 array and UTF-16 string solely to measure them.
+The serializer still uses pooled buffers, and large tokens may grow them.
+
+Candidate `579f27db…` passed both previous byte-count formulas, escaped Unicode
+and controls, declared generic contracts, failures after a 64 KiB prefix and
+successful recovery. Both thresholds are checked at −1/equal/+1 byte. Actual
+native BuildChunk controls execute a single prefix shrink, opaque continuation
+without skipping/replay, and rejection when one triangle exceeds the safe
+frame. These controls do not separately force the full command response's
+8 MiB rejection branch or assert final daemon envelope size. SF14 and all five
+maintained synthetic native fixtures passed with zero unavailable legs.
+
+Two longer alternating profile pairs of twenty UV-grid rounds gave warm model
+averages 224.55→214.42 ms and 182.88→168.51 ms; whole observation-process
+allocation was 1,416,231,224→1,116,526,464 and
+1,412,900,536→1,115,780,064 bytes. Geometry, page/count and lifecycle controls
+remained identical. Earlier short pairs were mixed, including a reverse pair
+of 192.45→203.13 ms, so these observations do not establish a universal latency
+improvement. Every capture is retained in
+`.local-validation/json-count-receipt.json`, bound to source `6dc4c217…` and the
+compiled producer. The measurements remain synthetic native CPU observations.
