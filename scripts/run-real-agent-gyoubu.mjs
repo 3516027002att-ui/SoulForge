@@ -102,7 +102,6 @@ const AGENT_CONFIG_ID = CLI_OPTIONS.configId ?? process.env.SOULFORGE_AGENT_CONF
 const AGENT_TEST_CONFIG_PATH = CLI_OPTIONS.testConfig ?? process.env.SOULFORGE_AGENT_TEST_CONFIG_PATH?.trim() ?? null;
 const AGENT_RUNTIME = CLI_OPTIONS.runtime ?? process.env.SOULFORGE_AGENT_RUNTIME?.trim() ?? 'unpacked';
 const AGENT_EXE_PATH = CLI_OPTIONS.exe ?? process.env.SOULFORGE_AGENT_EXE?.trim() ?? null;
-const WRITE_MODE = CLI_OPTIONS.write === true || CLI_OPTIONS.observationOnly !== true;
 const CANDIDATE_WRITE_MODE = CLI_OPTIONS.candidateWrite === true;
 const SELECTED_TEST_TASK = CLI_OPTIONS.testset ? getFourTask(CLI_OPTIONS.testset) : null;
 const TASK_CONTRACT = CLI_OPTIONS.contractFile
@@ -110,6 +109,8 @@ const TASK_CONTRACT = CLI_OPTIONS.contractFile
 if (TASK_CONTRACT?.intent !== undefined && !['read','ensure','modify','restore'].includes(TASK_CONTRACT.intent)) {
   throw harnessError('GOAL_CONTRACT_INVALID', 'Unknown task contract intent.');
 }
+const OBSERVATION_ONLY = CLI_OPTIONS.observationOnly === true || TASK_CONTRACT?.intent === 'read';
+const WRITE_MODE = !OBSERVATION_ONLY;
 const TASK_QUERY = CLI_OPTIONS.query ?? SELECTED_TEST_TASK?.query ?? DEFAULT_TASK_QUERY;
 const SAFE_TIMESTAMP = new Date().toISOString().replace(/[:.]/gu, '-');
 const REPORT_LABEL = safeFileLabel(CLI_OPTIONS.label ?? 'real-agent');
@@ -322,7 +323,7 @@ function printHelp() {
     '  --goals <JSON>                冻结的机器可验证终态目标',
     '  --observe                     观察模式，可省略 goals；不作任务通过声明',
     '  --write                       显式启用隔离 overlay 写回闭环',
-    '  --candidate-write             仅当必需目标 unsupported 时显式运行隔离候选实验；结果永不算通过',
+    '  --candidate-write             显式隔离候选实验；独立最终验证不充分时结果不会算通过',
     '  --apply-overlay               --write 的兼容别名',
     '  --testset <名称>              使用机器可验证测试清单（four-1 到 four-4；four 由批处理入口展开）',
     '  --label <名称>                报告文件名前缀',
@@ -360,7 +361,7 @@ function parseGoals(raw) {
       ? JSON.stringify(SELECTED_TEST_TASK.goals)
       : raw;
     const parsed = parseGoalContract(selectedGoals, {
-      observationOnly: CLI_OPTIONS.observationOnly === true,
+      observationOnly: OBSERVATION_ONLY,
       taskQuery: TASK_QUERY,
       defaultTaskQuery: DEFAULT_TASK_QUERY,
       defaultGoals: SELECTED_TEST_TASK?.goals ?? DEFAULT_GOALS
@@ -1350,64 +1351,13 @@ async function run() {
   const goals = parseGoals(CLI_OPTIONS.goals);
   const provenance = await captureAgentRunProvenance(REPO_ROOT,{task:TASK_QUERY,goals,taskContract:TASK_CONTRACT});
   const writeAdmission = evaluateWriteAdmission(goals, {
-    observationOnly: CLI_OPTIONS.observationOnly === true,
-    candidateWrite: CANDIDATE_WRITE_MODE
+    observationOnly: OBSERVATION_ONLY,
+    candidateWrite: CANDIDATE_WRITE_MODE,
+    taskContract: TASK_CONTRACT
   });
   const executionMode = writeAdmission.executionMode;
   if (!writeAdmission.allowed) {
-    const goalCoverage = evaluateGoalCoverage(
-      goals,
-      CLI_OPTIONS.observationOnly === true,
-      TASK_CONTRACT
-    );
-    const reportDir = resolve(REPO_ROOT, 'output/agent-real');
-    const reportPath = join(reportDir, `${REPORT_LABEL}-${SAFE_TIMESTAMP}.json`);
-    const blocked = sanitizeForReport({
-      ok: false,
-      status: 'unsupported/write_blocked',
-      phase: 'write-admission',
-      startedAt: new Date().toISOString(),
-      finishedAt: new Date().toISOString(),
-      task: TASK_QUERY,
-      provenance,
-      runtimeBudgets: {
-        electronRequestedMaxOldSpaceMb: ELECTRON_MAX_OLD_SPACE_MB,
-        maxSteps: MAX_STEPS,
-        requestTimeoutMs: REQUEST_TIMEOUT_MS,
-        maxTotalOutputTokens: MAX_OUTPUT_TOKENS,
-        electronDiagnosticTailChars: ELECTRON_DIAGNOSTIC_TAIL_CHARS,
-        workspaceTimeoutMs: WORKSPACE_PREP_TIMEOUT_MS,
-        semanticPreflightTimeoutMs: SEMANTIC_PREFLIGHT_TIMEOUT_MS,
-        sessionTimeoutMs: SESSION_TIMEOUT_MS
-      },
-      goals,
-      taskContract: TASK_CONTRACT ?? null,
-      provenance,
-      executionMode,
-      verificationMode: goalCoverage.mode,
-      writeMode: WRITE_MODE,
-      taskCompletionVerified: false,
-      goalCoverage,
-      unsupportedGoalIds: writeAdmission.unsupportedGoalIds,
-      provider: { status: 'not-started' },
-      session: null,
-      error: {
-        code: writeAdmission.code,
-        message: writeAdmission.message,
-        details: { unsupportedGoalIds: writeAdmission.unsupportedGoalIds }
-      },
-      verdict: {
-        writeAdmissionAllowed: false,
-        taskCompletionVerified: false,
-        unsupportedGoalIds: writeAdmission.unsupportedGoalIds
-      },
-      reportPath: portablePath(relative(REPO_ROOT, reportPath))
-    });
-    await mkdir(reportDir, { recursive: true });
-    await writeFile(reportPath, `${JSON.stringify(blocked, null, 2)}\n`, 'utf8');
-    console.log(JSON.stringify(blocked, null, 2));
-    process.exitCode = 1;
-    return blocked;
+    throw harnessError(writeAdmission.code, writeAdmission.message);
   }
   log(`executionMode=${executionMode}${writeAdmission.unsupportedGoalIds.length > 0 ? ` unsupported=${writeAdmission.unsupportedGoalIds.join(',')}` : ''}`);
   // A supplied immutable artifact is the complete production receipt for this
@@ -1775,7 +1725,7 @@ async function run() {
     });
 
     phase = 'run-agent';
-    const requestedAgentMode = CLI_OPTIONS.observationOnly === true ? 'plan' : 'normal';
+    const requestedAgentMode = OBSERVATION_ONLY ? 'plan' : 'normal';
     const permission = await window.evaluate(
       (mode) => globalThis.soulforge.requestAiAgentPermission(mode),
       requestedAgentMode
@@ -1939,7 +1889,7 @@ async function run() {
       && eventsReport.lifecycle.some((entry) => entry.event.type === 'turn-complete' && entry.event.finishReason === 'stop');
     const goalCoverage = evaluateGoalCoverage(
       nativeGoals.evaluations,
-      CLI_OPTIONS.observationOnly === true,
+      OBSERVATION_ONLY,
       TASK_CONTRACT
     );
     const goalsOk = goalCoverage.goalsOk;
@@ -2156,7 +2106,7 @@ async function run() {
     );
     const failureClassification = classifyInterruptedGoalCoverage(
       goals,
-      CLI_OPTIONS.observationOnly === true,
+      OBSERVATION_ONLY,
       TASK_CONTRACT
     );
     const failureCoverage = failureClassification.goalCoverage;

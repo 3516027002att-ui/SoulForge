@@ -10,7 +10,7 @@ The finite kernel lives in `@soulforge/agent` and has no dependency on core, Ele
 
 ## Headless CLI
 
-Use a UTF-8 task file or one argument value. JSON Lines events include protocolVersion, sessionId, runId, requestId and eventSeq. Reports bind the actual source checkout/difference, built code, input and provider configuration. Credentials are read from the trusted host environment and never written to events or reports.
+Use a UTF-8 task file or one argument value. JSON Lines events include protocolVersion, sessionId, runId, requestId and eventSeq. Reports bind the actual source checkout/difference, built code, input and provider configuration. Credentials come from the trusted host environment or the original encrypted `test` loader and remain in process memory. `--diagnostics` emits workspace and individual tool timing/error codes to stderr.
 
 ```sh
 node tools/soulforge-cli/sfcli.mjs --workspace <isolated-overlay> --mode plan --json agent exec \
@@ -22,6 +22,19 @@ SOULFORGE_AGENT_API_KEY=<host-secret> node tools/soulforge-cli/sfcli.mjs \
 ```
 
 Real-provider configuration must supply protocol, model, baseUrl and pricing.inputPerMillion/pricing.outputPerMillion in the same currency as max-cost. The CLI refuses to start without a cost limit and prices. Its accounting reserves the requested output ceiling and a conservative input bound before every provider request, including retry/compaction requests. This is an upper-bound reservation, not a claim that unreported usage was zero.
+
+The original encrypted test input needs no replacement provider JSON or vault save:
+
+```sh
+node tools/soulforge-cli/sfcli.mjs --workspace <owned-overlay> --mode plan --no-analyze --diagnostics agent exec \
+  --task-file <UTF-8-task> --provider test --test-config <existing-private-test> \
+  --max-cost <authorized-total> --input-price-per-million <current-input-price> \
+  --output-price-per-million <current-output-price>
+```
+
+`--test-config` is optional: the existing loader searches repository `test`, current-directory `test`, then the repository's parent `test`. It decrypts the original `ivHex:base64Cipher` format, and configuration identity is reported as a hash without printing that input's URL/model/key. Prices use the same currency as the authorized limit. An execution budget does not grant credential transmission authority; the operator must supply an approved credential route before a real request. Deterministic `--responses-file` requires no provider credentials or network calls.
+
+The existing desktop `agent:simulate` / `agent:simulate:four` consumer still uses the same loader in its isolated desktop host. Required task effects lacking an independent verifier no longer prevent model discovery or tool execution: every call retains production permission/native-read/staging/backup/journal checks, and final task outcomes remain passed, failed or unverified. A declared read-only contract runs in plan mode. The desktop test consumer's isolated vault setup and real requests need their own authorized credential route; the process-local CLI path avoids that persistent setup. Missing effect verification never turns a model stop into a passed task.
 
 Noninteractive finite runs park concrete approval proposals with their payload hash and return `waiting`; they never auto-approve. Writes still require the domain proof, staging, backup and commit boundaries. A waiting run needs a supported approval/resume host; this initial CLI does not infer approval from a previous run or automatically replay it.
 

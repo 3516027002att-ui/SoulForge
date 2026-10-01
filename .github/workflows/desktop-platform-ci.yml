@@ -105,6 +105,8 @@ jobs:
         run: |
           npm test -w @soulforge/agent
           node --test scripts/agent-shared-entry.fixture.mjs scripts/agent-headless.fixture.mjs scripts/agent-utility.fixture.mjs scripts/agent-kernel-comparison.fixture.mjs scripts/real-agent-evaluator.fixture.mjs
+          node --test scripts/agent-call-chain.fixture.mjs scripts/real-agent-harness.fixture.mjs
+          node --test packages/core/dist/cli/localCliSession.storage.test.js packages/core/dist/storage/localApplicationData.test.js
       - name: Run native runtime and synthetic Bridge fixtures
         id: native
         env:

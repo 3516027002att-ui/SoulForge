@@ -165,6 +165,7 @@ function printUsage() {
 命令:
   agent exec --task-file <UTF-8 file> --responses-file <fixture>  完整 Agent（JSON Lines）
   agent exec --task-file <file> --provider-config <file> --max-cost <limit>  有预算的模型任务
+  agent exec --task-file <file> --provider test --test-config <private-test>  原始加密配置（须显式预算及价格）
   list                         列出全部工具
   describe <tool>              查看工具说明与输入 schema
   call <tool> ['{"k":v}']      调用任意工具
@@ -247,7 +248,7 @@ async function main() {
   if (baseRoot && !existsSync(baseRoot)) fail(`--base 路径不存在: ${baseRoot}`);
 
   if (options.command === 'agent') {
-    const report = await runHeadlessAgentCommand(options, core, REPO_ROOT);
+    const report = await runHeadlessAgentCommand(options, core, REPO_ROOT, { emitDiagnostic });
     if (report.state === 'error') process.exitCode = 1;
     return;
   }

@@ -247,11 +247,11 @@ export function planSemanticCorpus(directories, requestedKinds = SEMANTIC_CORPUS
 }
 
 /**
- * Required outcomes with no verifier must block ordinary write runs. A caller
- * may explicitly opt into a candidate experiment, but that mode is never an
- * acceptance result; observation remains available without a write gate.
+ * Execution admission follows mode/contract intent. Independent effect
+ * verification is a final verdict; domain tools still own actual write guards.
  */
-export function evaluateWriteAdmission(goals, { observationOnly = false, candidateWrite = false } = {}) {
+export function evaluateWriteAdmission(goals, { observationOnly = false, candidateWrite = false, taskContract } = {}) {
+  observationOnly = observationOnly || taskContract?.intent === 'read';
   const requiredUnsupported = (Array.isArray(goals) ? goals : []).filter((goal) => (
     goal?.required === true
       && (goal.kind === 'unsupported'
@@ -270,15 +270,6 @@ export function evaluateWriteAdmission(goals, { observationOnly = false, candida
   }
   if (observationOnly) {
     return { allowed: true, executionMode: 'observation-only', unsupportedGoalIds };
-  }
-  if (requiredUnsupported.length > 0 && !candidateWrite) {
-    return {
-      allowed: false,
-      executionMode: 'write-blocked',
-      code: 'REQUIRED_GOAL_UNSUPPORTED_WRITE_BLOCKED',
-      unsupportedGoalIds,
-      message: '必需目标没有可执行验证器；普通写入已阻止。如需仅做隔离候选实验，请显式传入 --candidate-write。'
-    };
   }
   return {
     allowed: true,

@@ -135,14 +135,13 @@ test('required unsupported behavior goals are terminal and cannot be masked by P
   assert.equal(forged.taskCompletionVerified, false);
 });
 
-test('required unsupported goals block ordinary writes but allow explicit candidate experiments without completion', () => {
+test('required unsupported effect metadata does not prevent a run; final coverage remains unsupported', () => {
   const task = FOUR_TASKS.find((item) => item.id === 'four-3-xiuwan-super-poison');
   assert.ok(task);
-  const blocked = evaluateWriteAdmission(task.goals, { observationOnly: false, candidateWrite: false });
-  assert.equal(blocked.allowed, false);
-  assert.equal(blocked.executionMode, 'write-blocked');
-  assert.equal(blocked.code, 'REQUIRED_GOAL_UNSUPPORTED_WRITE_BLOCKED');
-  assert.deepEqual(blocked.unsupportedGoalIds, ['xiuwan-combo-poison-accumulation', 'xiuwan-super-poison-effect']);
+  const ordinary = evaluateWriteAdmission(task.goals, { observationOnly: false, candidateWrite: false });
+  assert.equal(ordinary.allowed, true);
+  assert.equal(ordinary.executionMode, 'write');
+  assert.deepEqual(ordinary.unsupportedGoalIds, ['xiuwan-combo-poison-accumulation', 'xiuwan-super-poison-effect']);
 
   const observation = evaluateWriteAdmission(task.goals, { observationOnly: true, candidateWrite: false });
   assert.equal(observation.allowed, true);
@@ -154,6 +153,14 @@ test('required unsupported goals block ordinary writes but allow explicit candid
   const coverage = evaluateGoalCoverage(task.goals.map((goal) => ({ ...goal, verified: true })), false, task.contract);
   assert.equal(coverage.status, 'unsupported');
   assert.equal(coverage.taskCompletionVerified, false);
+});
+
+test('read contracts force observation-only admission and contradictory candidate mode remains invalid', () => {
+  const contract = { intent: 'read' };
+  assert.equal(evaluateWriteAdmission([], { taskContract: contract }).executionMode, 'observation-only');
+  assert.equal(evaluateWriteAdmission([], { taskContract: contract, candidateWrite: true }).code, 'REAL_AGENT_MODE_INVALID');
+  assert.equal(evaluateWriteAdmission([], { observationOnly: true, candidateWrite: true }).allowed, false);
+  for (const task of FOUR_TASKS) assert.equal(evaluateWriteAdmission(task.goals).allowed, true);
 });
 
 test('interrupted reports retain unsupported goal classification instead of falling back to PARAM-only mode', () => {

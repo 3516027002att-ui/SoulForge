@@ -1,7 +1,6 @@
 /** T11 CLI 本地会话：同一进程复用 CoreToolSession；写入经统一注册表门禁。 */
 import { createHash } from 'node:crypto';
 import { mkdir } from 'node:fs/promises';
-import { homedir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { openWorkspaceSession } from '../workspace/workspaceSession.js';
 import { scanWorkspace } from '../workspace/scanWorkspace.js';
@@ -19,6 +18,7 @@ import { SqliteKnowledgeStorePersistence } from '../knowledge/sqliteKnowledgeSto
 import { createManagedReferenceCursorStore } from '../references/referenceCursorStore.js';
 import { openWorkspaceDatabase } from '../storage/sqliteDatabase.js';
 import { WorkspaceDataRepository } from '../storage/workspaceDataRepository.js';
+import { localApplicationDataDirectory } from '../storage/localApplicationData.js';
 import { createConfirmationReceipt } from '../patch/writerContract.js';
 import {
   extractFileSymbolBundle,
@@ -138,7 +138,7 @@ export function cliWorkspaceRoot(workspaceId: string): string {
   // process exits unexpectedly.
   const isolatedRoot = process.env.SF_E2E_WORKSPACE_STORAGE_ROOT?.trim();
   if (isolatedRoot) return join(resolve(isolatedRoot), key);
-  const local = process.env.LOCALAPPDATA ?? join(homedir(), 'AppData', 'Local');
+  const local = localApplicationDataDirectory();
   return join(local, 'SoulForge', 'cli-workspaces', key);
 }
 
@@ -257,6 +257,25 @@ export async function openLocalCliSession(options: LocalCliSessionOptions): Prom
       ...(options.onProgress ? { onProgress: options.onProgress } : {})
     }));
     workspaceIndex = analyzed.index;
+    const counts = workspaceIndex.getStats();
+    const paramUnavailable = scan.files.some(file => file.resourceKind === 'param') && counts.paramRows === 0;
+    const analysisDiagnostics = analyzed.diagnostics.slice(0, 32).map(diagnostic => ({
+      severity: diagnostic.severity,
+      code: diagnostic.code,
+      message: diagnostic.message.slice(0, 512),
+      ...(diagnostic.sourceUri ? {sourceUri: diagnostic.sourceUri.slice(0, 1024)} : {})
+    }));
+    emit({phase: 'workspace.analyze.summary', status: paramUnavailable ? 'failed' : 'complete', details: {
+      parsedFiles: analyzed.parsedFiles, inspectedFiles: analyzed.inspectedFiles, counts,
+      diagnostics: analysisDiagnostics, diagnosticCount: analyzed.diagnostics.length,
+      diagnosticsTruncated: analyzed.diagnostics.length > analysisDiagnostics.length
+    }});
+    if (paramUnavailable) {
+      const cause = analysisDiagnostics[0];
+      options.onFallbackWarning?.(`CLI_PARAM_SEMANTICS_UNAVAILABLE: 工作区分析未建立 PARAM 行索引；`
+        + (cause ? `${cause.code}: ${cause.message}` : '没有可用语义导出。')
+        + ' 此状态不能作为成功分析或任务完成证据；可用的独立原生读取仍保留。');
+    }
   } else {
     workspaceIndex.rebuildReferences();
     if (workspaceIndex.getStats().paramRows > 0) workspaceIndex.setParamSemanticState('ready');
@@ -283,13 +302,18 @@ export async function openLocalCliSession(options: LocalCliSessionOptions): Prom
       rootPath: options.overlayRoot,
       game: options.game ?? 'sekiro'
     });
+    emit({phase:'storage.audit',status:'complete',details:{durableLog:true}});
   } catch (error) {
+    const cause = {code: typeof (error as {code?:unknown})?.code === 'string'
+      ? (error as {code:string}).code : 'SQLITE_DATABASE_OPEN_FAILED',
+      message: (error instanceof Error ? error.message : String(error)).slice(0, 1024)};
+    emit({phase:'storage.audit',status:'failed',details:{...cause,durableLog:false}});
     if (options.requireDurableLog === true) {
       throw new Error(`CLI_SQLITE_UNAVAILABLE: 本地审计数据库打不开，写入已失败关闭：${error instanceof Error ? error.message : String(error)}`);
     }
     durableLog = false;
     (options.onFallbackWarning ?? (() => undefined))(
-      'CLI_SQLITE_FALLBACK: 本地审计数据库打不开，本次只读命令使用内存日志；写入命令将失败关闭。'
+      `CLI_SQLITE_FALLBACK: ${cause.code}: ${cause.message}；本次只读命令使用内存日志；写入命令将失败关闭。`
     );
     operationLog = new MemoryOperationLogStore();
   }
