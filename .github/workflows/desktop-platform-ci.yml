@@ -107,7 +107,7 @@ jobs:
           node --test scripts/agent-shared-entry.fixture.mjs scripts/agent-headless.fixture.mjs scripts/agent-utility.fixture.mjs scripts/agent-kernel-comparison.fixture.mjs scripts/real-agent-evaluator.fixture.mjs
           node --test scripts/agent-call-chain.fixture.mjs scripts/real-agent-harness.fixture.mjs
           node --test packages/core/dist/cli/localCliSession.storage.test.js packages/core/dist/storage/localApplicationData.test.js
-          node --test scripts/param-source-binding.fixture.mjs scripts/container-child-inverse-source.fixture.mjs
+          node --test scripts/param-fixture-module-resolution.fixture.mjs scripts/param-source-binding.fixture.mjs scripts/container-child-inverse-source.fixture.mjs
           # Only this source-bound comparison needs its declared public control; no full history gate.
           git fetch --no-tags --depth=1 origin c4a8b158f935c35624f132850b068a8e02921f68
           node --test scripts/agent-provider-experiment.fixture.mjs

@@ -13,8 +13,8 @@ export async function createParamCacheFixture({ fileCount = 1, rows = 1, bytesPe
   await mkdir(runRoot, { recursive: true });
   const root = await mkdtemp(join(runRoot, 'sf-param-cache-'));
   const key = Symbol.for(`sf.param-cache.${root}`);
-  const core = resolve('packages/core/dist/index.js');
-  const shared = resolve('packages/shared/dist/index.js');
+  const coreUrl = pathToFileURL(resolve('packages/core/dist/index.js')).href;
+  const sharedUrl = pathToFileURL(resolve('packages/shared/dist/index.js')).href;
   const state = { handlers: new Map(), refreshObservations: [], committed: true, reads: 0, revision: 0 };
   globalThis[key] = state;
   const keySource = JSON.stringify(Symbol.keyFor(key));
@@ -46,13 +46,13 @@ export async function createParamCacheFixture({ fileCount = 1, rows = 1, bytesPe
     footer: { js: `globalThis[Symbol.for(${keySource})].caches={paramAllCache,paramPageCache,sessionBindings,containerParamAllCache,containerParamSessionCache,paramEntryTableCache,unpackedParamCache};` },
     plugins: [{ name: 'param-cache-seams', setup(builder) {
       builder.onLoad({ filter: /\/ipc\/param\.ts$/ }, () => ({ contents: handlerSource, loader: 'ts', resolveDir: resolve('apps/desktop/src/main/ipc') }));
-      builder.onResolve({ filter: /^\// }, (args) => args.path === core ? { path: core, external: true } : undefined);
+      builder.onResolve({ filter: /^file:/ }, (args) => args.path === coreUrl ? { path: coreUrl, external: true } : undefined);
       builder.onResolve({ filter: /^@soulforge\/core$/ }, () => ({ path: 'fixture-core', namespace: 'fixture' }));
-      builder.onResolve({ filter: /^@soulforge\/shared$/ }, () => ({ path: shared, external: true }));
+      builder.onResolve({ filter: /^@soulforge\/shared$/ }, () => ({ path: sharedUrl, external: true }));
       builder.onResolve({ filter: /^electron$/ }, () => ({ path: 'fixture-electron', namespace: 'fixture' }));
       builder.onLoad({ filter: /.*/, namespace: 'fixture' }, ({ path }) => ({ loader: 'js', contents: path === 'fixture-electron'
         ? 'export const dialog={showSaveDialog:async()=>({canceled:true})};'
-        : `export * from ${JSON.stringify(core)};
+        : `export * from ${JSON.stringify(coreUrl)};
            const state=()=>globalThis[Symbol.for(${keySource})];
            export const runBridge=input=>state().native(input);
            export async function applyNativeMutation(){const s=state();if(!s.committed)return {status:'failed',result:{ok:false,diagnostics:[]}};s.revision++;return {status:'committed',result:{ok:true,operationId:'owned-op',diagnostics:[]}};}` }));
@@ -83,7 +83,7 @@ export async function createParamCacheFixture({ fileCount = 1, rows = 1, bytesPe
     }
   });
   const event = { sender: { id: 17 } };
-  const { loadFirstPartyParamMetadata } = await import(pathToFileURL(core).href);
+  const { loadFirstPartyParamMetadata } = await import(coreUrl);
   const definition = loadFirstPartyParamMetadata().package.definitions.find(({ document }) => document.typeName === 'ACTION_GUIDE_PARAM_ST').document;
   return { state, files, module, root, definition,
     invoke: (name, ...args) => state.handlers.get(name)(event, ...args),
