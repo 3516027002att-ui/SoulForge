@@ -81,6 +81,12 @@ jobs:
       - name: Typecheck shared/core/desktop
         id: typecheck
         run: npm run typecheck
+      - name: Select preinstalled Linux C++ toolchain for Electron headers
+        if: runner.os == 'Linux'
+        run: |
+          clang-15 --version
+          clang++-15 --version
+          printf 'CC=clang-15\nCXX=clang++-15\n' >> "$GITHUB_ENV"
       # Build only production bundles, avoiding legacy release/governance aggregates.
       - name: Build production bundles and Electron native binding
         id: build
