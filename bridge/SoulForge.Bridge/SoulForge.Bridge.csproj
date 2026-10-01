@@ -17,16 +17,70 @@
     <EmbeddedResource Include="FormatRules\sekiro-tae-schema.v1.json.gz.base64" />
   </ItemGroup>
 
+  <!-- Bridge build output ownership -->
+  <PropertyGroup>
+    <Configuration Condition="'$(Configuration)' == ''">Debug</Configuration>
+    <_SoulForgeIsolatedBuild Condition="'$(OutputPath)' == '' And '$(OutDir)' == '' And '$(BaseOutputPath)' == '' And '$(UseArtifactsOutput)' != 'true' And '$(DesignTimeBuild)' != 'true' And '$(NoBuild)' != 'true' And '$(TargetFramework)' != '' And '$(AppendTargetFrameworkToOutputPath)' != 'false' And '$(AppendRuntimeIdentifierToOutputPath)' != 'false' And ('$(Platform)' == '' Or '$(Platform)' == 'AnyCPU')">true</_SoulForgeIsolatedBuild>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(_SoulForgeIsolatedBuild)' == 'true'">
+    <_SoulForgeBuildOutputToken>$([System.Guid]::NewGuid())</_SoulForgeBuildOutputToken>
+    <_SoulForgeBuildRunRoot>$(MSBuildProjectDirectory)/obj/.soulforge-build-runs/$(_SoulForgeBuildOutputToken)</_SoulForgeBuildRunRoot>
+    <_SoulForgeCanonicalOutput>$(MSBuildProjectDirectory)/bin/$(Configuration)/$(TargetFramework)/$(RuntimeIdentifier)/</_SoulForgeCanonicalOutput>
+    <BaseOutputPath>obj/.soulforge-build-runs/$(_SoulForgeBuildOutputToken)/bin/</BaseOutputPath>
+    <IntermediateOutputPath>obj/.soulforge-build-runs/$(_SoulForgeBuildOutputToken)/intermediate/$(Configuration)/</IntermediateOutputPath>
+    <UseSharedCompilation>false</UseSharedCompilation>
+    <PublishDir Condition="'$(PublishDir)' == ''">$(_SoulForgeCanonicalOutput)publish/</PublishDir>
+    <_SoulForgeOwnedNativeArgument>--owned-output-root &quot;$(_SoulForgeBuildRunRoot)&quot;</_SoulForgeOwnedNativeArgument>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(_SoulForgeIsolatedBuild)' == 'true' And '$(Configuration)' == 'Release'">
+    <_SoulForgeExistingPathMap>$(PathMap)</_SoulForgeExistingPathMap>
+    <PathMap>$(_SoulForgeBuildRunRoot)=/_/SoulForge.Bridge/obj,$(MSBuildProjectDirectory)=/_/SoulForge.Bridge</PathMap>
+    <PathMap Condition="'$(_SoulForgeExistingPathMap)' != ''">$(PathMap),$(_SoulForgeExistingPathMap)</PathMap>
+  </PropertyGroup>
+  <UsingTask TaskName="SoulForgeBuildProcessId" TaskFactory="RoslynCodeTaskFactory" AssemblyFile="$(MSBuildToolsPath)/Microsoft.Build.Tasks.Core.dll">
+    <ParameterGroup><ProcessId ParameterType="System.Int32" Output="true" /></ParameterGroup>
+    <Task><Code Type="Fragment" Language="cs">using (var owner = System.Diagnostics.Process.GetCurrentProcess()) ProcessId = owner.Id;</Code></Task>
+  </UsingTask>
+  <Target Name="BeginBridgeBuildOutputOwnership" BeforeTargets="PrepareForBuild;CoreClean;_CleanRecordFileWrites" Condition="'$(_SoulForgeIsolatedBuild)' == 'true'">
+    <PropertyGroup>
+      <_SoulForgeBuildOutputFileList>$(_SoulForgeBuildRunRoot)/file-writes.txt</_SoulForgeBuildOutputFileList>
+    </PropertyGroup>
+    <SoulForgeBuildProcessId><Output TaskParameter="ProcessId" PropertyName="_SoulForgeBuildProcessId" /></SoulForgeBuildProcessId>
+    <Exec Command="node &quot;$(MSBuildProjectDirectory)/../../scripts/bridge-build-output-ownership.mjs&quot; begin-isolated --project &quot;$(MSBuildProjectFullPath)&quot; --run-root &quot;$(_SoulForgeBuildRunRoot)&quot; --canonical &quot;$(_SoulForgeCanonicalOutput).&quot; --output &quot;$(OutputPath).&quot; --framework &quot;$(TargetFramework)&quot; --configuration &quot;$(Configuration)&quot; --runtime &quot;$(RuntimeIdentifier)&quot; --owner &quot;$(_SoulForgeBuildProcessId)&quot; --token &quot;$(_SoulForgeBuildOutputToken)&quot;" />
+  </Target>
+  <Target Name="BeginBridgeManagedCompilation" BeforeTargets="CoreCompile" Condition="'$(_SoulForgeIsolatedBuild)' == 'true'">
+    <Exec Command="node &quot;$(MSBuildProjectDirectory)/../../scripts/bridge-build-output-ownership.mjs&quot; managed-start --project &quot;$(MSBuildProjectFullPath)&quot; --token &quot;$(_SoulForgeBuildOutputToken)&quot; --run-root &quot;$(_SoulForgeBuildRunRoot)&quot; --shared &quot;$(UseSharedCompilation)&quot;" />
+  </Target>
+  <Target Name="CompleteBridgeManagedCompilation" AfterTargets="CoreCompile" Condition="'$(_SoulForgeIsolatedBuild)' == 'true'">
+    <Exec Command="node &quot;$(MSBuildProjectDirectory)/../../scripts/bridge-build-output-ownership.mjs&quot; managed-finish --project &quot;$(MSBuildProjectFullPath)&quot; --token &quot;$(_SoulForgeBuildOutputToken)&quot; --run-root &quot;$(_SoulForgeBuildRunRoot)&quot;" />
+  </Target>
+  <Target Name="CleanBridgeCanonicalOutputs" AfterTargets="CoreClean" Condition="'$(_SoulForgeIsolatedBuild)' == 'true'">
+    <Exec Command="node &quot;$(MSBuildProjectDirectory)/../../scripts/bridge-build-output-ownership.mjs&quot; clean --project &quot;$(MSBuildProjectFullPath)&quot; --token &quot;$(_SoulForgeBuildOutputToken)&quot;" />
+  </Target>
+  <Target Name="RecordBridgeSdkHostWriterOutput" AfterTargets="_CreateAppHost" Condition="'$(_SoulForgeIsolatedBuild)' == 'true'">
+    <ItemGroup><FileWrites Include="$(AppHostIntermediatePath)" Condition="'$(AppHostIntermediatePath)' != '' And Exists('$(AppHostIntermediatePath)')" /></ItemGroup>
+  </Target>
+  <Target Name="CompleteBridgeBuildOutputOwnership" AfterTargets="Build" Condition="'$(_SoulForgeBuildOutputToken)' != ''">
+    <WriteLinesToFile File="$(_SoulForgeBuildOutputFileList)" Lines="@(FileWrites->'%(FullPath)')" Overwrite="true" />
+    <Exec Command="node &quot;$(MSBuildProjectDirectory)/../../scripts/bridge-build-output-ownership.mjs&quot; promote --project &quot;$(MSBuildProjectFullPath)&quot; --token &quot;$(_SoulForgeBuildOutputToken)&quot; --run-root &quot;$(_SoulForgeBuildRunRoot)&quot; --canonical &quot;$(_SoulForgeCanonicalOutput).&quot; --output &quot;$(OutputPath).&quot; --file-list &quot;$(_SoulForgeBuildOutputFileList)&quot;" />
+    <Delete Files="$(_SoulForgeBuildOutputFileList)" />
+  </Target>
+  <!-- End bridge build output ownership -->
+
   <Target Name="ValidateFirstPartyHksNativeTarget">
     <Error Condition="('$(OS)' == 'Windows_NT' And '$(RuntimeIdentifier)' != 'win-x64') Or ('$(OS)' != 'Windows_NT' And '$(RuntimeIdentifier)' != 'linux-x64')"
            Text="FIRST_PARTY_HKS_NATIVE_CROSS_TARGET_UNSUPPORTED: Build the native compiler on its Windows/Linux x64 target host; cross-target publishing is unavailable." />
   </Target>
 
   <Target Name="BuildFirstPartyHksNative" BeforeTargets="Build" DependsOnTargets="ValidateFirstPartyHksNativeTarget">
-    <Exec Command="node &quot;$(MSBuildProjectDirectory)/../../scripts/build-first-party-hksc-native.mjs&quot; --output &quot;$(OutputPath)&quot;" />
+    <Exec Command="node &quot;$(MSBuildProjectDirectory)/../../scripts/build-first-party-hksc-native.mjs&quot; --output &quot;$(OutputPath).&quot; $(_SoulForgeOwnedNativeArgument)" />
+    <ItemGroup>
+      <FileWrites Include="$(OutputPath)libSoulForge.Hksc.Native.so" Condition="'$(OS)' != 'Windows_NT'" />
+      <FileWrites Include="$(OutputPath)SoulForge.Hksc.Native.dll;$(OutputPath)SoulForge.Hksc.Native.lib;$(OutputPath)SoulForge.Hksc.Native.exp" Condition="'$(OS)' == 'Windows_NT'" />
+    </ItemGroup>
   </Target>
 
   <Target Name="PublishFirstPartyHksNative" AfterTargets="Publish" DependsOnTargets="ValidateFirstPartyHksNativeTarget">
-    <Exec Command="node &quot;$(MSBuildProjectDirectory)/../../scripts/build-first-party-hksc-native.mjs&quot; --output &quot;$(PublishDir)&quot;" />
+    <Exec Command="node &quot;$(MSBuildProjectDirectory)/../../scripts/build-first-party-hksc-native.mjs&quot; --output &quot;$(PublishDir).&quot;" />
   </Target>
 </Project>

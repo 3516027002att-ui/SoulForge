@@ -1,3 +1,4 @@
+import { createSmokeTemporaryDirectory as mkdtemp } from './harness/smokeWorkspace.js';
 /**
  * Production smoke: a DarkScript3-format EMEDF JSON imported through the
  * external adapter drives the full DSL typed-mutation write chain
@@ -29,7 +30,7 @@
  */
 
 import { createHash } from 'node:crypto';
-import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { decompressDfltDcx } from '../util/dcxDflt.js';

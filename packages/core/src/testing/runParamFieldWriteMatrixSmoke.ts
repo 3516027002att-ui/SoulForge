@@ -1,3 +1,4 @@
+import { createSmokeTemporaryDirectory as mkdtemp } from './harness/smokeWorkspace.js';
 /**
  * PARAM cross-layout field write matrix smoke.
  *
@@ -32,7 +33,7 @@
  *                   (PARAM_LAYOUT_UNSUPPORTED / PARAM_DOCUMENT_READ_FAILED).
  * Every probed layout must land in exactly one bucket; no silent skip.
  */
-import { access, mkdtemp, mkdir, rm, writeFile, readFile } from 'node:fs/promises';
+import { access, mkdir, rm, writeFile, readFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import type { ParamDefDocument, ParamFieldDef, ParamFieldScalarType } from '@soulforge/shared';

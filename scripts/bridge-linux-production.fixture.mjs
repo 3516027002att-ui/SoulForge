@@ -81,6 +81,11 @@ test('Linux publish receipts bind native apphost and selected publish inputs', a
     await seed('scripts/run-dotnet.mjs', '// fixture');
     await seed('scripts/build-first-party-hksc-native.mjs', '// native build');
     await seed('scripts/dotnet-runtime-notices.mjs', '// runtime notice preparation');
+    await seed('scripts/owned-temporary-directory.mjs', '// native build temporary ownership');
+    await seed('scripts/bridge-build-output-ownership.mjs', '// Bridge output ownership');
+    await seed('scripts/subprocess-control.mjs', '// controlled compiler lifecycle');
+    await seed('scripts/owned-process.mjs', '// gated owned process');
+    await seed('scripts/owned-windows-job.ps1', '# first-party Windows owned job');
     await seed('bridge/native/hksc/compiler.c', '// native source');
     await seed('bridge/SoulForge.Bridge/Program.cs', '// source');
     await seed('package.json', JSON.stringify({ scripts: { 'bridge:publish': 'publish win-x64', 'bridge:publish:linux': 'publish linux-x64' } }));

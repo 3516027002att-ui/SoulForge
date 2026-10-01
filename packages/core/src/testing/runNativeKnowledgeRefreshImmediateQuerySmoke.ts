@@ -1,3 +1,4 @@
+import { createSmokeTemporaryDirectory as mkdtemp } from './harness/smokeWorkspace.js';
 /**
  * Real Sekiro regression for native write -> Patch Engine -> knowledge refresh
  * -> immediate RAG query.  The source files are copied into a temporary
@@ -5,7 +6,7 @@
  */
 
 import { createHash } from 'node:crypto';
-import { copyFile, mkdir, mkdtemp, readFile, rm } from 'node:fs/promises';
+import { copyFile, mkdir, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { basename, dirname, join } from 'node:path';
 import type { IndexedFile, ParamDefDocument, ParamRowSymbol, RagChunkFamily } from '@soulforge/shared';

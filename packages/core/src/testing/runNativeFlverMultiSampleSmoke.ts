@@ -1,3 +1,4 @@
+import { createSmokeTemporaryDirectory } from './harness/smokeWorkspace.js';
 /**
  * Native FLVER multi-sample smoke: enumerate every Sekiro chrbnd container in the
  * registered corpus, extract the inner FLVER, and verify document + mesh decode
@@ -18,7 +19,7 @@
  * reports status "skipped" with exit 0 (honest skip for CI without local game).
  */
 import { runBridge, disposeBridgeDaemonPool } from '../bridge/runBridge.js';
-import { mkdtempSync, rmSync, readdirSync, existsSync, accessSync, constants } from 'node:fs';
+import { rmSync, readdirSync, existsSync, accessSync, constants } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname, basename, resolve } from 'node:path';
 import { summarizeFlverValidation } from './flverValidationReport.js';
@@ -340,7 +341,7 @@ async function main(): Promise<void> {
       .map((f) => basename(f, '.chrbnd.dcx'))
       .sort();
 
-  const tmp = mkdtempSync(join(tmpdir(), 'soulforge-flver-multi-smoke-'));
+  const tmp = await createSmokeTemporaryDirectory(join(tmpdir(), 'soulforge-flver-multi-smoke-'));
 
   const reports: SampleReport[] = [];
   try {

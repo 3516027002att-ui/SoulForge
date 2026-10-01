@@ -1,3 +1,4 @@
+import { createSmokeTemporaryDirectory as mkdtemp } from './harness/smokeWorkspace.js';
 /**
  * SF-10: Lua/LUABND 源码、字节码与混合编码 Smoke 测试套件
  *
@@ -11,7 +12,7 @@
  * - 通用 HKS 编码必须走 Bridge；原生编译失败阻止写回
  * - Native 真实 Sekiro aicommon.luabnd.dcx 多条目读取、明文/字节码分类判别、受控写回与兄弟条目零篡改
  */
-import { mkdtemp, rm, writeFile, readFile, mkdir } from 'node:fs/promises';
+import { rm, writeFile, readFile, mkdir } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { createHash } from 'node:crypto';

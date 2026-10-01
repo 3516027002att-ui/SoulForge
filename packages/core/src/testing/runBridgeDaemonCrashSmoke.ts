@@ -1,4 +1,5 @@
-import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises';
+import { createSmokeTemporaryDirectory as mkdtemp } from './harness/smokeWorkspace.js';
+import { mkdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { BridgeDaemonClient, BridgeDaemonError } from '../bridge/bridgeDaemonClient.js';

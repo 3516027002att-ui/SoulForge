@@ -1,3 +1,4 @@
+import { createSmokeTemporaryDirectory as mkdtemp } from './harness/smokeWorkspace.js';
 /**
  * Inbound frame reader smoke (BridgeDaemonClient.consumeStdout).
  *
@@ -17,7 +18,7 @@
  *   huge — a single frame past 2x the limit must still trip the guard, so
  *          under-counting cannot silently disable it.
  */
-import { mkdtemp, writeFile, rm } from 'node:fs/promises';
+import { writeFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { BridgeDaemonClient, BridgeDaemonError } from '../bridge/bridgeDaemonClient.js';

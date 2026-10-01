@@ -1,3 +1,4 @@
+import { createSmokeTemporaryDirectory as mkdtemp } from './harness/smokeWorkspace.js';
 /**
  * read_tae_events 的索引 URI 解析 smoke。
  *
@@ -11,7 +12,7 @@
  */
 import assert from 'node:assert/strict';
 import { requireIndexedSearchResult } from './staleValidationAssertions.js';
-import { copyFile, mkdir, mkdtemp, rm, stat } from 'node:fs/promises';
+import { copyFile, mkdir, rm, stat } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { basename, dirname, join, relative, resolve } from 'node:path';
 import type { IndexedFile, ResourceKind } from '@soulforge/shared';

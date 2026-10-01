@@ -1,6 +1,7 @@
+import { createSmokeTemporaryDirectory } from './harness/smokeWorkspace.js';
 // Native smoke: export real Sekiro FLVERs to GLB and verify container/JSON structure
 // across the multi-sample matrix (all parseable chrbnd inner FLVERs).
-import { mkdtempSync, readFileSync, rmSync, readdirSync, existsSync, accessSync, constants } from 'node:fs';
+import { readFileSync, rmSync, readdirSync, existsSync, accessSync, constants } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve, basename } from 'node:path';
 import { runBridge, disposeBridgeDaemonPool } from '../bridge/runBridge.js';
@@ -140,7 +141,7 @@ async function main(): Promise<void> {
       .map((f) => basename(f, '.chrbnd.dcx'))
       .sort();
 
-  const tmp = mkdtempSync(join(tmpdir(), 'soulforge-native-flver-glb-'));
+  const tmp = await createSmokeTemporaryDirectory(join(tmpdir(), 'soulforge-native-flver-glb-'));
   const reports: ExportReport[] = [];
   try {
     for (const id of ids) {

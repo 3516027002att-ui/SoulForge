@@ -1,6 +1,7 @@
+import { createSmokeTemporaryDirectory as mkdtemp } from './harness/smokeWorkspace.js';
 import assert from 'node:assert/strict';
 import { registerHooks } from 'node:module';
-import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises';
+import { mkdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { WorkspaceIndex } from '../indexing/workspaceIndex.js';

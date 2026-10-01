@@ -1,5 +1,6 @@
+import { createSmokeTemporaryDirectory } from './harness/smokeWorkspace.js';
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { EventExport, SymbolBundle } from '@soulforge/shared';
@@ -162,7 +163,7 @@ do {
 assert.deepEqual(deliveredIds.sort((a, b) => a - b), Array.from({ length: 30 }, (_, index) => 200 + index));
 
 // Managed stores survive a new store object and process boundary simulation.
-const dir = mkdtempSync(join(tmpdir(), 'soulforge-reference-cursor-'));
+const dir = await createSmokeTemporaryDirectory(join(tmpdir(), 'soulforge-reference-cursor-'));
 try {
   const managedA = createManagedReferenceCursorStore(dir);
   const token = managedA.issue({

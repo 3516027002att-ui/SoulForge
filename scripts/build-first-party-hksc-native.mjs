@@ -1,9 +1,9 @@
 import { existsSync } from 'node:fs';
-import { mkdtemp, rm, writeFile, mkdir } from 'node:fs/promises';
-import { join, resolve } from 'node:path';
+import { writeFile, mkdir } from 'node:fs/promises';
+import { isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { tmpdir } from 'node:os';
-import { spawnSync } from 'node:child_process';
+import { attachOwnedTemporaryDirectory, createOwnedTemporaryDirectory } from './owned-temporary-directory.mjs';
+import { createProcessCancellation, processSucceeded, runProcess } from './subprocess-control.mjs';
 
 const root = resolve(join(fileURLToPath(import.meta.url), '..', '..'));
 const sourceRoot = resolve(root, 'bridge/native/hksc');
@@ -75,18 +75,29 @@ async function main() {
     }
   }
 
-  const temp = await mkdtemp(join(tmpdir(), 'soulforge-hksc-build-'));
+  const workspace = await createOwnedTemporaryDirectory('hksc-build');
+  const cancellation = createProcessCancellation();
+  const temp = workspace.root;
   try {
+    const outputOwnerIndex = process.argv.indexOf('--owned-output-root');
+    const outputOwner = outputOwnerIndex < 0 ? null : await attachOwnedTemporaryDirectory(process.argv[outputOwnerIndex + 1]);
+    if (outputOwner) {
+      const path = relative(outputOwner.root, outputDir);
+      if (isAbsolute(path) || path === '..' || path.startsWith(`..${sep}`)) throw new Error('FIRST_PARTY_HKS_NATIVE_OUTPUT_OWNER_MISMATCH');
+    }
+    const processOwner = !outputOwner ? workspace : {
+      async trackProcess(pid, options) { return Promise.all([workspace.trackProcess(pid, options), outputOwner.trackProcess(pid, options)]); }
+    };
     if (process.platform === 'linux') {
       const output = join(outputDir, 'libSoulForge.Hksc.Native.so');
-      const result = spawnSync(process.env.SOULFORGE_CC || 'cc', [
+      const result = await runProcess({ command: process.env.SOULFORGE_CC || 'cc', args: [
         '-shared', '-fPIC', '-O2', '-fvisibility=hidden',
         '-I', sourceRoot, '-o', output,
         ...sourceFiles.map((file) => join(sourceRoot, file)), '-lm'
-      ], { cwd: temp, stdio: 'inherit' });
-      if (result.error) throw result.error;
-      if (result.status !== 0 || !existsSync(output)) {
-        throw new Error(`FIRST_PARTY_HKS_NATIVE_BUILD_FAILED: cc exit ${result.status ?? 'unknown'}`);
+      ], cwd: temp, owner: processOwner, signal: cancellation.signal,
+        onStdout: chunk => process.stdout.write(chunk), onStderr: chunk => process.stderr.write(chunk) });
+      if (!processSucceeded(result) || !existsSync(output)) {
+        throw new Error(`FIRST_PARTY_HKS_NATIVE_BUILD_FAILED: cc exit ${result.code} (${result.terminationReason ?? result.stderr})`);
       }
       return;
     }
@@ -101,24 +112,25 @@ async function main() {
       '/DLUA_CORE',
       `/I"${sourceRoot}"`,
       `/Fe:"${join(outputDir, 'SoulForge.Hksc.Native.dll')}"`,
+      `/Fo"${temp}\\\\"`,
       ...sourceFiles.map((file) => `"${join(sourceRoot, file)}"`)
     ];
     await writeFile(responseFile, `${args.join('\r\n')}\r\n`, 'ascii');
     const devCmd = findVisualStudioDevCmd();
     await writeFile(commandFile, `@echo off\r\ncall "${devCmd}" -arch=x64\r\nif errorlevel 1 exit /b %errorlevel%\r\ncl @"${responseFile}"\r\n`, 'ascii');
-    const result = spawnSync('cmd.exe', ['/d', '/c', commandFile], {
+    const result = await runProcess({ command: 'cmd.exe', args: ['/d', '/c', commandFile],
       cwd: temp,
-      stdio: 'inherit',
-      windowsHide: true
+      owner: processOwner, signal: cancellation.signal,
+      onStdout: chunk => process.stdout.write(chunk), onStderr: chunk => process.stderr.write(chunk)
     });
-    if (result.error) throw result.error;
-    if (result.status !== 0) {
-      throw new Error(`FIRST_PARTY_HKS_NATIVE_BUILD_FAILED: cl exit ${result.status ?? 'unknown'}${result.error ? ` (${result.error.message})` : ''}`);
+    if (!processSucceeded(result)) {
+      throw new Error(`FIRST_PARTY_HKS_NATIVE_BUILD_FAILED: cl exit ${result.code} (${result.terminationReason ?? result.stderr})`);
     }
     const output = join(outputDir, 'SoulForge.Hksc.Native.dll');
     if (!existsSync(output)) throw new Error(`FIRST_PARTY_HKS_NATIVE_OUTPUT_MISSING: ${output}`);
   } finally {
-    await rm(temp, { recursive: true, force: true });
+    cancellation.dispose();
+    await workspace.dispose();
   }
 }
 

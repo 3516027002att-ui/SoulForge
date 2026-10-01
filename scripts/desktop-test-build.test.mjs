@@ -1,9 +1,10 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { readFile, mkdtemp, rm, writeFile, mkdir, lstat } from 'node:fs/promises';
+import { readFile, mkdtemp, rm, writeFile, mkdir, lstat, readdir } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { resolve, join, relative, isAbsolute } from 'node:path';
-import { spawnSync } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
+import { once } from 'node:events';
 import { pathToFileURL } from 'node:url';
 const build = await import('./desktop-test-build.mjs').catch(error => {
   if (error.code === 'ERR_MODULE_NOT_FOUND') return {};
@@ -46,6 +47,31 @@ test('smoke output allocation is distinct, bounded, and cleaned without touching
     assert.equal(await readFile(join(production, 'index.js'), 'utf8'), 'sentinel');
     await assert.rejects(build.withDesktopTestBuild('database', async () => { throw new Error('test-failure'); }, { repositoryRoot: root, build: false }), /test-failure/);
   } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test('desktop smoke restart reclaims a killed output owner while preserving an unmarked neighbor', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'sf-desktop-interruption-test-'));
+  const moduleUrl = pathToFileURL(resolve('scripts/desktop-test-build.mjs')).href;
+  const child = spawn(process.execPath, ['--input-type=module', '-e', `
+    import { withDesktopTestBuild } from ${JSON.stringify(moduleUrl)};
+    await withDesktopTestBuild('database', async ({ outputRoot }) => {
+      process.send(outputRoot); await new Promise(() => { setInterval(() => {}, 1000); });
+    }, { repositoryRoot: ${JSON.stringify(root)}, build: false });
+  `], { stdio: ['ignore', 'ignore', 'inherit', 'ipc'] });
+  try {
+    const [predecessor] = await once(child, 'message');
+    const parent = join(root, 'output/desktop-smoke-builds');
+    const neighbor = join(parent, 'database-user-output'); await mkdir(neighbor); await writeFile(join(neighbor, 'sentinel'), 'preserved');
+    const exited = once(child, 'exit'); child.kill('SIGKILL'); await exited;
+    await build.withDesktopTestBuild('database', async () => {
+      await assert.rejects(lstat(predecessor), { code: 'ENOENT' });
+      assert.equal(await readFile(join(neighbor, 'sentinel'), 'utf8'), 'preserved');
+    }, { repositoryRoot: root, build: false });
+    assert.deepEqual(await readdir(parent), ['database-user-output']);
+  } finally {
+    if (child.exitCode === null && child.signalCode === null) { const exited = once(child, 'exit'); child.kill('SIGKILL'); await exited; }
+    await rm(root, { recursive: true, force: true });
+  }
 });
 
 test('runtime diagnostics retain a bounded native log tail and distinguish a missing log', async () => {

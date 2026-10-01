@@ -28,9 +28,8 @@
  * 不许写进 playwright.config.mjs 或 launchApp 默认值 —— 那会让默认套件左栏
  * 变成 138 项，现有 PARAM e2e 无故变慢或变脆。
  */
-import { test, expect, _electron as electron } from '@playwright/test';
+import { test, expect, electron, testWorkspace } from '../owned-test.mjs';
 import fs from 'node:fs';
-import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -50,11 +49,12 @@ async function launchApp(env = {}) {
   // App.tsx 6-C 经 localStorage 恢复）跨运行残留 —— 残留一旦命中 fixture-session，
   // 打开工作区后会被直接恢复进别的领域，开始页 h1 断言就挂。临时目录让每次
   // 运行都从全新 shell 状态开始。
-  const userDataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'sf-e2e-param-perf-'));
+  const userDataDir = path.join(testWorkspace().root, 'profile');
   const app = await electron.launch({
     args: [fixtureMain, `--user-data-dir=${userDataDir}`],
     env: { ...process.env, ...env }
   });
+  await testWorkspace().registerApp(app);
   const window = await app.firstWindow();
   window.on('dialog', (dialog) => {
     dialog.accept().catch(() => undefined);
@@ -69,7 +69,6 @@ async function launchApp(env = {}) {
   await window.setViewportSize({ width: VIEWPORT_WIDTH, height: VIEWPORT_HEIGHT });
   const cleanup = async () => {
     await app.close().catch(() => undefined);
-    fs.rmSync(userDataDir, { recursive: true, force: true });
   };
   return { app, window, cleanup };
 }

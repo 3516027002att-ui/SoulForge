@@ -44,6 +44,11 @@ try {
   await seed('scripts/run-dotnet.mjs', 'spawn dotnet with controlled arguments\n');
   await seed('scripts/build-first-party-hksc-native.mjs', '// native compiler build\n');
   await seed('scripts/dotnet-runtime-notices.mjs', '// target runtime redistribution notices\n');
+  await seed('scripts/owned-temporary-directory.mjs', '// native build temporary ownership\n');
+  await seed('scripts/bridge-build-output-ownership.mjs', '// Bridge output ownership\n');
+  await seed('scripts/subprocess-control.mjs', '// controlled compiler lifecycle\n');
+  await seed('scripts/owned-process.mjs', '// gated owned process\n');
+  await seed('scripts/owned-windows-job.ps1', '# first-party Windows owned job\n');
   await seed('bridge/native/hksc/compiler.c', '// native compiler source\n');
   await seed('bridge/SoulForge.Bridge/bin/Release/net10.0/win-x64/publish/SoulForge.Hksc.Native.dll', 'native compiler v1\n');
   await seed('bridge/SoulForge.Bridge/Program.cs', 'class Program { }\n');
@@ -66,7 +71,7 @@ try {
   const written = await writeBridgeProductionBuildReceipt(root);
   assert.equal(written.manifestPath, join(root, BRIDGE_PRODUCTION_BUILD_RECEIPT));
   const fresh = await assertBridgeProductionBuildFresh(root);
-  assert.equal(fresh.current.source.fileCount, 8);
+  assert.equal(fresh.current.source.fileCount, 13);
   assert.equal(fresh.current.executable.sha256, written.receipt.executable.sha256);
 
   await seed('bridge/SoulForge.Bridge/bin/ignored-source.cs', 'ignored changed\n');
@@ -81,6 +86,25 @@ try {
   await writeBridgeProductionBuildReceipt(root);
   await expectStale('run-dotnet helper 变更必须拒绝旧 receipt', async () => {
     await seed('scripts/run-dotnet.mjs', 'spawn dotnet with changed arguments\n');
+  });
+
+  await writeBridgeProductionBuildReceipt(root);
+  await expectStale('native temporary owner changes invalidate the writer inputs', async () => {
+    await seed('scripts/owned-temporary-directory.mjs', '// changed temporary ownership\n');
+  });
+  await writeBridgeProductionBuildReceipt(root);
+  await expectStale('Bridge output owner changes invalidate the writer inputs', async () => {
+    await seed('scripts/bridge-build-output-ownership.mjs', '// changed output ownership\n');
+  });
+  for (const helper of ['subprocess-control', 'owned-process']) {
+    await writeBridgeProductionBuildReceipt(root);
+    await expectStale(`${helper} changes invalidate compiler lifecycle inputs`, async () => {
+      await seed(`scripts/${helper}.mjs`, '// changed compiler lifecycle\n');
+    });
+  }
+  await writeBridgeProductionBuildReceipt(root);
+  await expectStale('Windows job helper changes invalidate compiler lifecycle inputs', async () => {
+    await seed('scripts/owned-windows-job.ps1', '# changed owned job\n');
   });
 
   await writeBridgeProductionBuildReceipt(root);
@@ -124,7 +148,7 @@ try {
 
   console.log(JSON.stringify({
     ok: true,
-    checks: 11,
+    checks: 16,
     message: 'Bridge production receipt fixtures passed'
   }));
 } finally {

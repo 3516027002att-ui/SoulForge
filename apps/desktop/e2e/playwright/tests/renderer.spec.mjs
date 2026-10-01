@@ -11,9 +11,8 @@
  * - 顶部资源栏与工具按钮四态（rest/hover/active/focus-visible）截图与阴影断言；
  * - 暗/亮主题代表性按钮 computed background/box-shadow/outline 防 token 串用。
  */
-import { test, expect, _electron as electron } from '@playwright/test';
+import { test, expect, electron, testWorkspace } from '../owned-test.mjs';
 import fs from 'node:fs';
-import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -22,28 +21,8 @@ const fixtureMain = path.resolve(here, '../fixture-main.mjs');
 const outRenderer = path.resolve(here, '../../../out/renderer/index.html');
 const hasBuild = fs.existsSync(outRenderer);
 
-// Each test owns a fresh Chromium profile. Relaunches within the same test
-// retain that profile, so persistence cases still test real localStorage.
-const userDataDirs = new Map();
-const launchedApps = new Map();
-
-test.beforeEach(({ }, testInfo) => {
-  userDataDirs.set(testInfo.testId, fs.mkdtempSync(path.join(os.tmpdir(), 'sf-e2e-renderer-')));
-  launchedApps.set(testInfo.testId, new Set());
-});
-
-test.afterEach(async ({ }, testInfo) => {
-  // A failed assertion must not leave an Electron process holding the profile.
-  const apps = launchedApps.get(testInfo.testId) ?? [];
-  for (const app of apps) await app.close().catch(() => undefined);
-  launchedApps.delete(testInfo.testId);
-  const dir = userDataDirs.get(testInfo.testId);
-  userDataDirs.delete(testInfo.testId);
-  if (dir) {
-    try { fs.rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 }); }
-    catch { /* Windows may retain a just-closed profile handle; tmp can reclaim it. */ }
-  }
-});
+// The automatic fixture owns the profile and every launched application.
+// Relaunches within one test retain localStorage for persistence coverage.
 
 // Default Playwright mode keeps failures independent: later tests still run.
 
@@ -54,10 +33,10 @@ test.beforeEach(({ }, testInfo) => {
 
 async function launchApp(env = {}) {
   const app = await electron.launch({
-    args: [fixtureMain, `--user-data-dir=${userDataDirs.get(test.info().testId)}`],
+    args: [fixtureMain, `--user-data-dir=${path.join(testWorkspace().root, 'profile')}`],
     env: { ...process.env, ...env }
   });
-  launchedApps.get(test.info().testId).add(app);
+  await testWorkspace().registerApp(app);
   const window = await app.firstWindow();
   const pageErrors = [];
   const consoleErrors = [];

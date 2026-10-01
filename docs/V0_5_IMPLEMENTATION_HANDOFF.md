@@ -1255,14 +1255,11 @@ npm run test:handoff-integrity
 npm run test:handoff-integrity:fixtures
 npm run test:handoff-projection
 npm run test:orphan-smoke-gate
-npm run test:probe-residual-gate
 npm run test:release-scope
 npm run test:release-scope-fixtures
 npm run test:release-scope-proposal
 npm run test:required-validation
 npm run test:seal-cli
-npm run test:smoke-temp-cleanup
-npm run test:stale-tfm-gate
 npm run test:v06-deferral-index
 npm run test:v06-deferral-index-fixtures
 npm run test:verify-entrypoint

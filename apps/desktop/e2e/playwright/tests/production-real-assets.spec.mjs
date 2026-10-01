@@ -1,6 +1,5 @@
-import { test, expect, _electron as electron } from '@playwright/test';
-import { existsSync, mkdirSync, mkdtempSync, rmSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { test, expect, electron, testWorkspace } from '../owned-test.mjs';
+import { existsSync, mkdirSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -28,7 +27,7 @@ test.describe('真实只狼资源：ACTION / MAP / 纹理渲染链', () => {
   test.setTimeout(240_000);
 
   async function launchProduction() {
-    const userDataDir = mkdtempSync(join(tmpdir(), 'sf-e2e-real-assets-'));
+    const userDataDir = join(testWorkspace().root, 'profile');
     const app = await electron.launch({
       args: [productionMain, `--user-data-dir=${userDataDir}`],
       env: {
@@ -38,6 +37,7 @@ test.describe('真实只狼资源：ACTION / MAP / 纹理渲染链', () => {
         SF_E2E_BASE_ROOT: gameRoot
       }
     });
+    await testWorkspace().registerApp(app);
     const window = await app.firstWindow();
     const pageErrors = [];
     const consoleErrors = [];
@@ -46,42 +46,7 @@ test.describe('真实只狼资源：ACTION / MAP / 纹理渲染链', () => {
       if (message.type() === 'error') consoleErrors.push(message.text());
     });
     await window.waitForLoadState('domcontentloaded');
-    const cleanup = async () => {
-      // Playwright disposes the ElectronApplication process handle during
-      // app.close(); capture it before closing so cleanup stays compatible
-      // with both the current and older Electron adapters.
-      let child;
-      try {
-        child = app.process();
-      } catch {
-        child = undefined;
-      }
-      await app.close().catch(() => undefined);
-      // Electron/Bridge 子进程在 app.close() 返回后可能还持有 Chromium
-      // user-data 文件句柄。先等待宿主进程退出，再对明确的临时目录做
-      // 有界重试；清理失败只能留下本次临时目录，不能把真实资源断言判成失败。
-      if (child && child.exitCode === null) {
-        const deadline = Date.now() + 5_000;
-        while (child.exitCode === null && Date.now() < deadline) {
-          await new Promise((resolve) => setTimeout(resolve, 100));
-        }
-      }
-      let cleanupError;
-      for (let attempt = 0; attempt < 20; attempt += 1) {
-        try {
-          rmSync(userDataDir, { recursive: true, force: true, maxRetries: 2, retryDelay: 250 });
-          cleanupError = undefined;
-          break;
-        } catch (error) {
-          cleanupError = error;
-          if (!['EBUSY', 'ENOTEMPTY', 'EPERM'].includes(error?.code) || attempt === 19) break;
-          await new Promise((resolve) => setTimeout(resolve, 250));
-        }
-      }
-      if (cleanupError) {
-        console.warn(`真实资源 E2E 临时目录清理延迟：${userDataDir} (${cleanupError.code ?? 'unknown'})`);
-      }
-    };
+    const cleanup = async () => { await app.close().catch(() => undefined); };
     return { app, window, pageErrors, consoleErrors, cleanup };
   }
 

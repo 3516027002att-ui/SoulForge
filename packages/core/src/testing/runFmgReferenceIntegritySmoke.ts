@@ -1,3 +1,4 @@
+import { createSmokeTemporaryDirectory as mkdtemp } from './harness/smokeWorkspace.js';
 /**
  * FMG reference-integrity smoke.
  *
@@ -27,7 +28,7 @@
  */
 import { createHash } from 'node:crypto';
 import { deflateSync } from 'node:zlib';
-import { mkdtemp, mkdir, writeFile, rm, access, readFile, stat } from 'node:fs/promises';
+import { mkdir, writeFile, rm, access, readFile, stat } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { runBridge, disposeBridgeDaemonPool } from '../bridge/runBridge.js';

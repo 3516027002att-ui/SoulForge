@@ -1,3 +1,4 @@
+import { createSmokeTemporaryDirectory as mkdtemp } from './harness/smokeWorkspace.js';
 /**
  * Smoke: AI dual-protocol error/cancel/timeout/limit conformance matrix
  * + W-AI-CONFORMANCE-03 real-workspace typed mutation write matrix.
@@ -95,7 +96,7 @@
  * service availability or native mutation authority.
  */
 
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { createServer, type Server } from 'node:http';
 import type { AddressInfo, Socket } from 'node:net';
 import { tmpdir } from 'node:os';

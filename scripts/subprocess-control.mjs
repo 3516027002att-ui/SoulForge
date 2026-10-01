@@ -33,7 +33,7 @@ export function processSucceeded(result) {
     && result?.cancelled !== true;
 }
 
-export function runProcess({
+export async function runProcess({
   command,
   args = [],
   cwd,
@@ -42,8 +42,17 @@ export function runProcess({
   signal,
   outputLimitBytes = DEFAULT_OUTPUT_LIMIT_BYTES,
   onStdout,
-  onStderr
+  onStderr,
+  owner,
+  onSpawn,
+  detached = process.platform !== 'win32',
+  terminationGroup,
+  stdinData
 }) {
+  if (owner) {
+    const { runOwnedProcess } = await import('./owned-process.mjs');
+    return runOwnedProcess({ command, args, cwd, env, timeoutMs, signal, outputLimitBytes, onStdout, onStderr, owner });
+  }
   return new Promise((resolvePromise) => {
     let child;
     try {
@@ -52,13 +61,22 @@ export function runProcess({
         env,
         shell: false,
         windowsHide: true,
-        detached: process.platform !== 'win32',
-        stdio: ['ignore', 'pipe', 'pipe']
+        detached,
+        stdio: [stdinData === undefined ? 'ignore' : 'pipe', 'pipe', 'pipe']
       });
     } catch (error) {
       resolvePromise(failedSpawn(error));
       return;
     }
+    try { if (child.pid) onSpawn?.(child); }
+    catch (error) {
+      let treeTerminated = false;
+      const cancelForce = terminateProcessTree(child, terminationGroup, () => { treeTerminated = true; });
+      child.stdout.resume(); child.stderr.resume();
+      child.once('close', () => { cancelForce(); resolvePromise({ ...failedSpawn(error), terminationReason: 'ownership-error', treeTerminated }); });
+      return;
+    }
+    if (stdinData !== undefined) { child.stdin.on('error', () => {}); child.stdin.end(stdinData); }
 
     let stdout = '';
     let stderr = '';
@@ -66,6 +84,7 @@ export function runProcess({
     let stderrTruncated = false;
     let terminationReason = null;
     let spawnError = null;
+    let treeTerminated = false;
     let settled = false;
     let cancelForcedTermination = () => {};
 
@@ -94,13 +113,13 @@ export function runProcess({
     const terminate = (reason) => {
       if (terminationReason !== null) return;
       terminationReason = reason;
-      cancelForcedTermination = terminateProcessTree(child);
+      cancelForcedTermination = terminateProcessTree(child, terminationGroup, () => { treeTerminated = true; });
     };
     const onAbort = () => terminate('cancelled');
     if (signal?.aborted) onAbort();
     else signal?.addEventListener('abort', onAbort, { once: true });
 
-    const timer = setTimeout(() => terminate('timeout'), timeoutMs);
+    const timer = timeoutMs ? setTimeout(() => terminate('timeout'), timeoutMs) : undefined;
     child.on('error', (error) => {
       spawnError = error instanceof Error ? error.message : String(error);
     });
@@ -119,6 +138,7 @@ export function runProcess({
         timedOut: terminationReason === 'timeout',
         cancelled: terminationReason === 'cancelled',
         terminationReason,
+        treeTerminated,
         signal: closeSignal ?? null,
         timeoutMs
       });
@@ -141,7 +161,7 @@ function failedSpawn(error) {
   };
 }
 
-function terminateProcessTree(child) {
+function terminateProcessTree(child, group = child.pid, confirmed = () => {}) {
   if (!child.pid) return () => {};
   if (process.platform === 'win32') {
     const killed = spawnSync('taskkill.exe', ['/pid', String(child.pid), '/T', '/F'], {
@@ -149,17 +169,18 @@ function terminateProcessTree(child) {
       stdio: 'ignore'
     });
     if (killed.status !== 0) child.kill('SIGKILL');
+    else confirmed();
     return () => {};
   }
 
   try {
-    process.kill(-child.pid, 'SIGTERM');
+    process.kill(-group, 'SIGTERM');
   } catch {
     child.kill('SIGTERM');
   }
   const force = setTimeout(() => {
     try {
-      process.kill(-child.pid, 'SIGKILL');
+      process.kill(-group, 'SIGKILL');
     } catch {
       child.kill('SIGKILL');
     }

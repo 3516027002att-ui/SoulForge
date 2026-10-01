@@ -1,8 +1,7 @@
-import { test, expect, _electron as electron } from '@playwright/test';
+import { test, expect, electron, testWorkspace } from '../owned-test.mjs';
 import { createHash } from 'node:crypto';
 import { existsSync } from 'node:fs';
-import { copyFile, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { copyFile, mkdir, readFile, writeFile } from 'node:fs/promises';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -16,7 +15,7 @@ test.skip(!source || !existsSync(source) || !Number.isSafeInteger(expectedCount)
 
 test('real native TAE total renders on a bounded initial page and read failures stay visible', async () => {
   test.setTimeout(180_000);
-  const root = await mkdtemp(join(tmpdir(), 'sf-tae-count-e2e-'));
+  const root = testWorkspace().root;
   const game = join(root, 'game'); const overlay = join(game, 'mods'); const home = join(root, 'home');
   await mkdir(join(overlay, 'chr'), { recursive: true }); await mkdir(home);
   const bytes = await readFile(source); const hash = createHash('sha256').update(bytes).digest('hex');
@@ -27,6 +26,7 @@ test('real native TAE total renders on a bounded initial page and read failures 
       ...(process.env.SF_E2E_HEADLESS === '1' ? ['--ozone-platform=headless'] : []), `--user-data-dir=${join(root, 'user-data')}`],
       env: { ...process.env, HOME: home, NODE_ENV: 'production', SF_E2E_OVERLAY_ROOT: overlay, SF_E2E_BASE_ROOT: game,
         SF_E2E_WORKSPACE_STORAGE_ROOT: join(root, 'storage') } });
+    await testWorkspace().registerApp(app);
     expect(app.process().spawnargs).not.toContain('--no-sandbox');
     const page = await app.firstWindow();
     const nativeWindow = await app.browserWindow(page);
@@ -49,5 +49,5 @@ test('real native TAE total renders on a bounded initial page and read failures 
     await page.screenshot({ path: test.info().outputPath('tae-native-failure.png') });
     expect(errors).toEqual([]);
     expect(createHash('sha256').update(await readFile(source)).digest('hex')).toBe(hash, 'input corpus remains byte-identical');
-  } finally { await app?.close().catch(() => undefined); await rm(root, { recursive: true, force: true }); }
+  } finally { await app?.close().catch(() => undefined);  }
 });

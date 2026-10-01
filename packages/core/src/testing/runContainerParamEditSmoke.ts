@@ -1,9 +1,10 @@
+import { createSmokeTemporaryDirectory as mkdtemp } from './harness/smokeWorkspace.js';
 /**
  * PARAM Agent 门面：分组、字段编码、权限、禁止文本补丁打原生容器。
  * 不落盘到用户 mods，不声明 native authority。
  */
 import { readFileSync } from 'node:fs';
-import { access, mkdtemp, mkdir, rm, stat } from 'node:fs/promises';
+import { access, mkdir, rm, stat } from 'node:fs/promises';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { tmpdir } from 'node:os';

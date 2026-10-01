@@ -1,8 +1,9 @@
-import { mkdtemp, mkdir, rm, open, writeFile, readFile } from 'node:fs/promises';
+import { mkdir, open, writeFile, readFile } from 'node:fs/promises';
 import { createHash } from 'node:crypto';
 import { dirname, resolve, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createProcessCancellation, processSucceeded, readTimeoutMs, runProcess } from './subprocess-control.mjs';
+import { createOwnedTemporaryDirectory } from './owned-temporary-directory.mjs';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const flags = { database: 'SOULFORGE_BUILD_DATABASE_UTILITY_SMOKE', gateway: 'SOULFORGE_BUILD_ME3_GATEWAY_SMOKE', sekiro: 'SOULFORGE_BUILD_ME3_SEKIRO_SESSION_SMOKE' };
@@ -13,7 +14,8 @@ export async function withDesktopTestBuild(kind, execute, options = {}) {
   const repositoryRoot = options.repositoryRoot ?? root;
   const parent = join(repositoryRoot, 'output', 'desktop-smoke-builds');
   await mkdir(parent, { recursive: true });
-  const outputRoot = await mkdtemp(join(parent, `${kind}-`));
+  const workspace = await createOwnedTemporaryDirectory(`desktop-${kind}`, { parent });
+  const outputRoot = workspace.root;
   const env = { ...process.env, SOULFORGE_TEST_BUILD_ROOT: outputRoot,
     SOULFORGE_SQLITE_NATIVE_BINDING: join(outputRoot, '.native', 'better_sqlite3.node') };
   // Electron startup and utility processes must not reuse a developer's profile,
@@ -54,7 +56,7 @@ export async function withDesktopTestBuild(kind, execute, options = {}) {
     if (options.build !== false) {
       const command = process.platform === 'win32' ? (process.env.ComSpec || 'cmd.exe') : 'npm';
       const args = process.platform === 'win32' ? ['/d', '/s', '/c', 'npm run build -w @soulforge/desktop'] : ['run', 'build', '-w', '@soulforge/desktop'];
-      const result = await runProcess({ command, args, cwd: repositoryRoot, env,
+      const result = await runProcess({ command, args, cwd: repositoryRoot, env, owner: workspace,
         timeoutMs: readTimeoutMs('SOULFORGE_BUILD_TIMEOUT_MS', 20 * 60 * 1000), signal: cancellation.signal,
         onStdout: chunk => process.stdout.write(chunk), onStderr: chunk => process.stderr.write(chunk) });
       if (!processSucceeded(result)) throw new Error(`Desktop smoke build failed: ${result.terminationReason ?? result.code}`);
@@ -66,8 +68,8 @@ export async function withDesktopTestBuild(kind, execute, options = {}) {
         throw new Error('PRODUCTION_NATIVE_SNAPSHOT_CHANGED');
       }
     }
-    return await execute({ outputRoot, env, signal: cancellation.signal, nativeInput });
-  } finally { cancellation.dispose(); await rm(outputRoot, { recursive: true, force: true }); }
+    return await execute({ outputRoot, env, signal: cancellation.signal, nativeInput, processOwner: workspace });
+  } finally { cancellation.dispose(); await workspace.dispose(); }
 }
 
 export function desktopSmokeArgs(entry, headless = false, logFile, userData) {
@@ -91,8 +93,8 @@ export async function readDesktopSmokeLog(logFile, maxBytes = 64 * 1024) {
   } finally { await file?.close(); }
 }
 
-export async function runDesktopSmoke(kind, entry, executable = process.execPath, { reuseProductionBinding = false } = {}) {
-  return withDesktopTestBuild(kind, async ({ outputRoot, env, signal, nativeInput }) => {
+export async function runDesktopSmoke(kind, entry, executable = process.execPath, { reuseProductionBinding = false, repositoryRoot = root } = {}) {
+  return withDesktopTestBuild(kind, async ({ outputRoot, env, signal, nativeInput, processOwner }) => {
     if (nativeInput) console.log(JSON.stringify({ desktopSmokeNativeInput: nativeInput }));
     const logFile = join(outputRoot, '.runtime', 'electron.log');
     const entryPath = join(outputRoot, 'main', entry);
@@ -101,8 +103,8 @@ export async function runDesktopSmoke(kind, entry, executable = process.execPath
     const userData = join(outputRoot, '.runtime', 'electron-user-data');
     await mkdir(userData, { recursive: true });
     const result = await runProcess({ command: executable,
-      args: desktopSmokeArgs(entryPath, process.platform === 'linux' && env.SF_E2E_HEADLESS === '1', logFile, userData), cwd: root,
-      env: { ...env, ELECTRON_ENABLE_LOGGING: '1', ELECTRON_LOG_FILE: logFile }, signal,
+      args: desktopSmokeArgs(entryPath, process.platform === 'linux' && env.SF_E2E_HEADLESS === '1', logFile, userData), cwd: repositoryRoot,
+      env: { ...env, ELECTRON_ENABLE_LOGGING: '1', ELECTRON_LOG_FILE: logFile }, signal, owner: processOwner,
       timeoutMs: readTimeoutMs('SOULFORGE_SMOKE_TIMEOUT_MS', 10 * 60 * 1000),
       onStdout: chunk => process.stdout.write(chunk), onStderr: chunk => process.stderr.write(chunk) });
     if (!processSucceeded(result)) {
@@ -117,5 +119,5 @@ export async function runDesktopSmoke(kind, entry, executable = process.execPath
         terminationReason: result.terminationReason, nativeLog, nativeBindingSha256 }, null, 2));
     }
     return processSucceeded(result) ? 0 : result.code || 1;
-  }, { reuseProductionBinding });
+  }, { reuseProductionBinding, repositoryRoot });
 }

@@ -1,3 +1,4 @@
+import { createSmokeTemporaryDirectory as mkdtemp } from './harness/smokeWorkspace.js';
 /**
  * Script container evidence smoke (W-BEHAVIOR-MAP-01 frozen inventory).
  * 1) Synthetic classification/magic assertions (always run, deterministic).
@@ -26,7 +27,7 @@ import {
 import { materializeFixedNativeFixture, fixedFixtureNumber } from './nativeFixtureRegistry.js';
 import { disposeBridgeDaemonPool } from '../bridge/runBridge.js';
 import { dirname, join } from 'node:path';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 
 function assert(condition: unknown, message: string): asserts condition {

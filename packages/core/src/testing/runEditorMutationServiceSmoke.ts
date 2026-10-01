@@ -1,3 +1,4 @@
+import { createSmokeTemporaryDirectory as mkdtemp } from './harness/smokeWorkspace.js';
 /**
  * 统一原生 mutation 写链的确定性 smoke。
  *
@@ -10,7 +11,7 @@
  * 本 smoke 不加载任何 native 资产，也不写 Mod 工作区：commit 端口是确定性桩，
  * staging 只写系统临时目录。
  */
-import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises';
+import { mkdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { createHash } from 'node:crypto';
