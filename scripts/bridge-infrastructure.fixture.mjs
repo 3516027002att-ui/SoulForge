@@ -14,13 +14,17 @@ test('Doctor targets the supported Bridge framework and keeps self-contained pub
 });
 
 test('Codex design references resolve to upstream and retain their attribution', async () => {
+  const license = await readFile('licenses/openai-codex.txt', 'utf8');
+  assert.match(license, /Copyright 2025 OpenAI/);
+  assert.match(license, /Apache License/);
+  assert.match(license, /Version 2\.0/);
+  assert.match(license, /END OF TERMS AND CONDITIONS/);
   for (const file of ['agentLoop', 'contextCompactor', 'retryPolicy', 'rolloutRecorder']) {
     const source = await readFile(`packages/core/src/model-services/${file}.ts`, 'utf8');
-    assert.ok(!source.includes('licenses/openai-codex.txt'), `${file} must not reference a nonexistent license`);
     assert.match(source, /https:\/\/github\.com\/openai\/codex/);
   }
   const smoke = await readFile('packages/core/src/testing/runAiConformanceSmoke.ts', 'utf8');
-  assert.ok(!smoke.includes('licenses/openai-codex.txt'));
+  assert.match(smoke, /https:\/\/github\.com\/openai\/codex/);
   const notice = await readFile('NOTICE', 'utf8');
   assert.match(notice, /Copyright 2025 OpenAI/);
   assert.match(notice, /design reference/);

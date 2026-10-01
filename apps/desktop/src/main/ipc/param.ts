@@ -1601,7 +1601,13 @@ let paramMetadataCache: {
       });
       if (outcome.status === 'committed' && outcome.result.ok) {
         await runCallerOwnedPostCommit(outcome.result, {
-          prepare: () => { paramPageCache.delete(sourceUri); },
+          prepare: () => {
+            paramPageCache.delete(sourceUri);
+            // Full-payload legacy reads own a separate projection. Release
+            // its old rows before refresh, and force the next read to use
+            // the newly committed native bytes.
+            paramAllCache.delete(sourceUri);
+          },
           refresh: (result) => refreshActiveIndexAfterNativeWrite([sourceUri], result),
           onRefreshError: (result, error) => appendPostCommitFailureDiagnostic(
             result,
@@ -1727,7 +1733,10 @@ let paramMetadataCache: {
       });
       if (outcome.status === 'committed' && outcome.result.ok) {
         await runCallerOwnedPostCommit(outcome.result, {
-          prepare: () => { paramPageCache.delete(sourceUri); },
+          prepare: () => {
+            paramPageCache.delete(sourceUri);
+            paramAllCache.delete(sourceUri);
+          },
           refresh: (result) => refreshActiveIndexAfterNativeWrite([sourceUri], result),
           onRefreshError: (result, error) => appendPostCommitFailureDiagnostic(
             result,
