@@ -131,6 +131,7 @@ jobs:
         run: |
           node --input-type=module -e 'import assert from "node:assert/strict"; import { statSync } from "node:fs"; for (const file of ["apps/desktop/out/main/index.js", "apps/desktop/out/preload/index.cjs", "apps/desktop/out/renderer/index.html"]) { const info = statSync(file); assert.ok(info.isFile() && info.size > 0, "Theme runtime artifact missing: " + file); }'
           npm run test:renderer-unit
+          node --test scripts/editor-loaded-comparison.fixture.mjs scripts/editor-diff-budget.fixture.mjs scripts/scene/map-read-observation.test.mjs scripts/scene/map-request-timeline.test.mjs
           node --test scripts/spectral-themes.test.mjs scripts/spectral-field-runtime.test.mjs scripts/ci-public-report.test.mjs
           node node_modules/@playwright/test/cli.js test -c apps/desktop/e2e/playwright/playwright.config.mjs native-frame-theme.spec.mjs
       - name: Build unsigned desktop package directory

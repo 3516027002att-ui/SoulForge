@@ -47,6 +47,13 @@ function render(containerLabel = 'gameparam.parambnd.dcx'): string {
 }
 
 describe('ParamWorkbench 初始结构（挂载即有的骨架）', () => {
+  it('字段比较入口默认收起，不在未选行时伪造前值', () => {
+    const html = render();
+    assert.match(html, /<summary[^>]*>与载入版本比较<\/summary>/);
+    assert.doesNotMatch(html, /<details[^>]*\bopen(?:=|\s|>)/);
+    assert.doesNotMatch(html, /class="loaded-comparison__line/);
+  });
+
   it('工作台有可访问名', () => {
     const html = render();
     assert.match(html, /aria-label="PARAM 工作台"/);

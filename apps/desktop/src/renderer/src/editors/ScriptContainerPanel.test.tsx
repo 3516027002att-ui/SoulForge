@@ -38,6 +38,13 @@ function render(): string {
 }
 
 describe('ScriptContainerPanel 初始结构（挂载未识别形态，单 Source 骨架）', () => {
+  it('源码比较入口默认收起，不在未载入时伪造前值', () => {
+    const html = render();
+    assert.match(html, /<summary[^>]*>与载入版本比较<\/summary>/);
+    assert.doesNotMatch(html, /<details[^>]*\bopen(?:=|\s|>)/);
+    assert.doesNotMatch(html, /class="loaded-comparison__line/);
+  });
+
   it('工作台区域已挂载', () => {
     assert.match(render(), /aria-label="脚本编辑"/);
   });

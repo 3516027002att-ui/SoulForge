@@ -1726,6 +1726,12 @@ async function installMapApiTimingTelemetry(page) {
     const sceneIds = new WeakMap();
     let nextSceneId = 0;
     const sceneId = (canvas) => { if (!canvas || typeof canvas !== 'object') return null; if (!sceneIds.has(canvas)) sceneIds.set(canvas, ++nextSceneId); return sceneIds.get(canvas); };
+    const observationLimit = 10_000;
+    const pendingRequests = new Map();
+    let pendingCount = 0;
+    let startOverflow = false;
+    let invalidStartCount = 0;
+    let unavailablePhaseCount = 0;
     const maxDiagnosticCount = 16;
     const stableCodePattern = /^[A-Z][A-Z0-9_]{0,95}$/;
     const projectResultDiagnostics = (result) => {
@@ -1760,12 +1766,64 @@ async function installMapApiTimingTelemetry(page) {
       modelReady: Object.create(null),
       frames: []
     };
+    const hasRequestId = (observation) => typeof observation?.requestId === 'string' && observation.requestId.length > 0;
+    const hasObservationId = (observation) => observation?.observationId !== null && typeof observation?.observationId === 'object';
+    const recordStart = (observation) => {
+      if (!hasRequestId(observation) || !hasObservationId(observation) || !Number.isFinite(observation.startedAt) || !Number.isFinite(observation.timeOrigin)) {
+        invalidStartCount++;
+        return;
+      }
+      if (startOverflow) return;
+      if (pendingCount >= observationLimit) {
+        // Once starts are dropped, future identity reuse cannot safely recover
+        // phase attribution in this capture. Clear retained state and report it.
+        startOverflow = true;
+        pendingRequests.clear();
+        pendingCount = 0;
+        return;
+      }
+      let pending = pendingRequests.get(observation.requestId);
+      if (!pending) {
+        pending = { phase: state.phase, duplicate: false, starts: [] };
+        pendingRequests.set(observation.requestId, pending);
+      } else pending.duplicate = true;
+      pending.starts.push({
+        observationId: observation.observationId,
+        startedAt: observation.startedAt,
+        timeOrigin: observation.timeOrigin,
+        modelName: observation.modelName,
+        cursorPresent: observation.cursorPresent,
+        sessionPresent: observation.sessionPresent
+      });
+      pendingCount++;
+    };
+    const consumePhase = (observation) => {
+      const unavailable = (reason) => {
+        unavailablePhaseCount++;
+        return { phase: 'unlabelled', phaseAttribution: reason };
+      };
+      if (!hasRequestId(observation)) return unavailable('REQUEST_ID_MISSING');
+      if (!hasObservationId(observation)) return unavailable('REQUEST_START_IDENTITY_MISSING');
+      if (startOverflow) return unavailable('REQUEST_START_OVERFLOW');
+      const pending = pendingRequests.get(observation.requestId);
+      if (!pending) return unavailable('REQUEST_START_UNOBSERVED');
+      const index = pending.starts.findIndex((start) =>
+        start.observationId === observation.observationId && start.startedAt === observation.startedAt && start.timeOrigin === observation.timeOrigin &&
+        start.modelName === observation.modelName && start.cursorPresent === observation.cursorPresent &&
+        start.sessionPresent === observation.sessionPresent);
+      if (index < 0) return unavailable('REQUEST_START_IDENTITY_MISMATCH');
+      pending.starts.splice(index, 1);
+      pendingCount--;
+      if (pending.starts.length === 0) pendingRequests.delete(observation.requestId);
+      if (pending.duplicate) return unavailable('REQUEST_ID_DUPLICATE');
+      return { phase: pending.phase, phaseAttribution: 'captured' };
+    };
     const record = (observation) => {
       const started = observation.startedAt;
       const args = [null, observation.modelName, observation.cursorPresent, observation.sessionPresent];
       const result = observation.result;
       const thrown = observation.error;
-      const phase = state.phase;
+      const { phase, phaseAttribution } = consumePhase(observation);
       {
         const elapsedMs = observation.completedAt - started;
         const modelName = typeof args[1] === 'string' ? args[1] : null;
@@ -1788,7 +1846,7 @@ async function installMapApiTimingTelemetry(page) {
         state.minMs = Math.min(state.minMs, elapsedMs);
         state.maxMs = Math.max(state.maxMs, elapsedMs);
         state.durations.push(elapsedMs);
-        if (state.durations.length > 10_000) state.durations.shift();
+        if (state.durations.length > observationLimit) state.durations.shift();
         const stats = state.phaseStats[phase] ?? (state.phaseStats[phase] = {
           calls: 0,
           okCount: 0,
@@ -1805,12 +1863,13 @@ async function installMapApiTimingTelemetry(page) {
         stats.minMs = Math.min(stats.minMs, elapsedMs);
         stats.maxMs = Math.max(stats.maxMs, elapsedMs);
         stats.durations.push(elapsedMs);
-        if (stats.durations.length > 10_000) stats.durations.shift();
+        if (stats.durations.length > observationLimit) stats.durations.shift();
         const nativeTimeline = result?.diagnostics?.find((item) => item?.code === 'MAP_REQUEST_TIMELINE')?.details ?? null;
-        if (state.timeline.length < 10_000) state.timeline.push({ phase, modelName, requestId: observation.requestId, rendererStartedAtUnixMs: observation.timeOrigin + observation.startedAt, rendererCompletedAtUnixMs: observation.timeOrigin + observation.completedAt, nativeTimeline });
+        if (state.timeline.length < observationLimit) state.timeline.push({ phase, phaseAttribution, modelName, requestId: observation.requestId, rendererStartedAtUnixMs: observation.timeOrigin + observation.startedAt, rendererCompletedAtUnixMs: observation.timeOrigin + observation.completedAt, nativeTimeline });
         else state.timelineOverflow = true;
         state.recent.push({
           phase,
+          phaseAttribution,
           modelName,
           cursorPresent,
           sessionPresent,
@@ -1828,15 +1887,27 @@ async function installMapApiTimingTelemetry(page) {
     };
     // contextBridge freezes exposed functions. Observe the call at its owning
     // renderer facade instead of mutating the API or trying defineProperty.
-    window.addEventListener('sf-map-read-timing', (event) => {
+    const onReadStart = (event) => { recordStart(event.detail); };
+    const onReadTiming = (event) => {
       const observation = event.detail;
       if (observation && Number.isFinite(observation.startedAt) && Number.isFinite(observation.completedAt)) record(observation);
-    });
-    window.addEventListener('sf-map-model-ready', (event) => { state.modelReady[event.detail.modelName] = { readyAtUnixMs: event.detail.readyAtUnixMs, sceneId: sceneId(event.detail.canvas) }; });
-    window.addEventListener('sf-scene-frame-submitted', (event) => {
-      if (state.frames.length < 10_000) state.frames.push({ submittedAtUnixMs: event.detail.submittedAtUnixMs, sceneId: sceneId(event.detail.canvas) });
+    };
+    const onModelReady = (event) => { state.modelReady[event.detail.modelName] = { readyAtUnixMs: event.detail.readyAtUnixMs, sceneId: sceneId(event.detail.canvas) }; };
+    const onFrameSubmitted = (event) => {
+      if (state.frames.length < observationLimit) state.frames.push({ submittedAtUnixMs: event.detail.submittedAtUnixMs, sceneId: sceneId(event.detail.canvas) });
       else state.timelineOverflow = true;
-    });
+    };
+    const listeners = [['sf-map-read-start', onReadStart], ['sf-map-read-timing', onReadTiming], ['sf-map-model-ready', onModelReady], ['sf-scene-frame-submitted', onFrameSubmitted]];
+    state.dispose = () => {
+      for (const [type, listener] of listeners) window.removeEventListener(type, listener);
+      window.removeEventListener('pagehide', state.dispose);
+      pendingRequests.clear();
+      pendingCount = 0;
+      state.installed = false;
+      state.reason = 'OBSERVATION_DISPOSED';
+    };
+    for (const [type, listener] of listeners) window.addEventListener(type, listener);
+    window.addEventListener('pagehide', state.dispose, { once: true });
     state.installed = true;
     state.reason = null;
     const quantile = (values, percentile) => {
@@ -1859,6 +1930,7 @@ async function installMapApiTimingTelemetry(page) {
       installed: state.installed,
       reason: state.reason,
       phase: state.phase,
+      phaseAttribution: { pendingLimit: observationLimit, pendingCount, overflow: startOverflow, invalidStartCount, unavailableCount: unavailablePhaseCount },
       calls: state.calls,
       okCount: state.okCount,
       failedCount: state.failedCount,

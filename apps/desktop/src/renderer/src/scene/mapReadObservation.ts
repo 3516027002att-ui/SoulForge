@@ -4,6 +4,17 @@ export async function observeMapGeometryRead<T>(
   metadata: { modelName: string; cursorPresent: boolean; sessionPresent: boolean; requestId: string }
 ): Promise<T> {
   const startedAt = performance.now();
+  // Event-only identity also survives equal clocks and a reused requestId.
+  const observationId = {};
+  let timeOrigin: number | undefined;
+  let requestMetadata: typeof metadata | undefined;
+  try {
+    requestMetadata = { ...metadata };
+    timeOrigin = performance.timeOrigin;
+    window.dispatchEvent(new CustomEvent('sf-map-read-start', {
+      detail: { ...requestMetadata, observationId, startedAt, timeOrigin }
+    }));
+  } catch { /* Observation cannot prevent invocation. */ }
   let result: T | undefined;
   let error: unknown;
   try {
@@ -16,7 +27,7 @@ export async function observeMapGeometryRead<T>(
     // Observation cannot change a successful read or a cancellation/failure.
     try {
       window.dispatchEvent(new CustomEvent('sf-map-read-timing', {
-        detail: { ...metadata, startedAt, completedAt: performance.now(), timeOrigin: performance.timeOrigin, result, error }
+        detail: { ...requestMetadata, observationId, startedAt, completedAt: performance.now(), timeOrigin, result, error }
       }));
     } catch { /* Browser-preview/headless may have no EventTarget. */ }
   }

@@ -167,3 +167,17 @@ speed or memory improvement. Current receipts are in
 `.local-validation/recovery-receipt.json` and
 `.local-validation/chunk-capacity/rejection-receipt.json`; these files are
 local validation artifacts and are not part of a published package.
+
+The renderer read observer now binds its phase at dispatch through a best-effort
+start event and an event-only invocation identity. Completion cannot borrow a
+later phase or another request's start when IDs repeat and clock samples match.
+Missing, duplicate, dropped or overflowed starts report unavailable attribution;
+pending observations use the existing 10,000-sample limit and clear on disposal.
+The maintained actual-helper/installer tests preserve exact result, error and
+cancellation identity, including clock-origin and dispatch observation failures.
+This fixes a latent measurement defect: the current normal renderer probe never
+sets its phase to `done`, so the reproduced transition does not demonstrate a
+normal-run request loss. Cross-model scheduler dependencies still do not form a
+verified full MAP causal DAG; the existing 260 s / 400 ms limits and submitted-frame
+semantics remain unchanged. No real MAP, Electron or GPU performance is established
+by these source-only tests.
